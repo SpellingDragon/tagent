@@ -5,12 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 func TestFileBackend_StoreAndGetEvent(t *testing.T) {
-	// Create temp directory
 	tempDir := t.TempDir()
 
 	backend, err := NewFileBackend(tempDir)
@@ -18,34 +15,27 @@ func TestFileBackend_StoreAndGetEvent(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
-	// Create test event
-	event := FullEvent{
-		EventType: EventTypeExternalInput,
-		Timestamp: 1710678000000,
-		Content:   "Test message",
-		Response: &model.Response{
-			Choices: []model.Choice{
-				{
-					Message: model.Message{
-						Role:    model.RoleUser,
-						Content: "Test message",
-					},
-				},
-			},
-		},
+	// Create test event with PartitionID
+	partitionID := PartitionIDFromName("test-agent")
+	eventKey := NewSnowflakeEventKey(partitionID, 1710678000000)
+
+	evt := FullEvent{
+		PartitionID: partitionID,
+		EventType:   EventTypeExternalInput,
+		Timestamp:   1710678000000,
+		Content:     "Test message",
 	}
 
 	// Store event
-	eventKey := "evt_1710678000000_001"
-	err = backend.StoreEvent(eventKey, event)
+	err = backend.StoreEvent(eventKey, evt)
 	if err != nil {
 		t.Fatalf("Failed to store event: %v", err)
 	}
 
-	// Verify file was created
-	path := filepath.Join(tempDir, eventKey+".json")
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Fatalf("Event file was not created: %s", path)
+	// Verify partition directory was created
+	partDir := filepath.Join(tempDir, fmt.Sprintf("%d", partitionID))
+	if _, err := os.Stat(partDir); os.IsNotExist(err) {
+		t.Fatalf("Partition directory was not created: %s", partDir)
 	}
 
 	// Get event
@@ -55,14 +45,14 @@ func TestFileBackend_StoreAndGetEvent(t *testing.T) {
 	}
 
 	// Verify event content
-	if retrieved.EventType != event.EventType {
-		t.Errorf("Expected event type %s, got %s", event.EventType, retrieved.EventType)
+	if retrieved.EventType != evt.EventType {
+		t.Errorf("Expected event type %s, got %s", evt.EventType, retrieved.EventType)
 	}
-	if retrieved.Content != event.Content {
-		t.Errorf("Expected content %s, got %s", event.Content, retrieved.Content)
+	if retrieved.Content != evt.Content {
+		t.Errorf("Expected content %s, got %s", evt.Content, retrieved.Content)
 	}
-	if retrieved.Timestamp != event.Timestamp {
-		t.Errorf("Expected timestamp %d, got %d", event.Timestamp, retrieved.Timestamp)
+	if retrieved.PartitionID != partitionID {
+		t.Errorf("Expected partitionID %d, got %d", partitionID, retrieved.PartitionID)
 	}
 }
 
@@ -73,22 +63,27 @@ func TestFileBackend_StoreEvents(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("batch-test")
+
 	// Create multiple events
-	events := map[string]FullEvent{
-		"evt_001": {
-			EventType: EventTypeExternalInput,
-			Content:   "Message 1",
-			Timestamp: 1710678000000,
+	events := map[int64]FullEvent{
+		NewSnowflakeEventKey(partitionID, 1710678000000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeExternalInput,
+			Content:     "Message 1",
+			Timestamp:   1710678000000,
 		},
-		"evt_002": {
-			EventType: EventTypeAgentOutput,
-			Content:   "Message 2",
-			Timestamp: 1710678001000,
+		NewSnowflakeEventKey(partitionID, 1710678001000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeAgentOutput,
+			Content:     "Message 2",
+			Timestamp:   1710678001000,
 		},
-		"evt_003": {
-			EventType: EventTypeActionCommand,
-			Content:   "Message 3",
-			Timestamp: 1710678002000,
+		NewSnowflakeEventKey(partitionID, 1710678002000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeActionCommand,
+			Content:     "Message 3",
+			Timestamp:   1710678002000,
 		},
 	}
 
@@ -99,7 +94,10 @@ func TestFileBackend_StoreEvents(t *testing.T) {
 	}
 
 	// Get all events
-	keys := []string{"evt_001", "evt_002", "evt_003"}
+	keys := make([]int64, 0, len(events))
+	for k := range events {
+		keys = append(keys, k)
+	}
 	retrieved, err := backend.GetEvents(keys)
 	if err != nil {
 		t.Fatalf("Failed to get events: %v", err)
@@ -117,11 +115,18 @@ func TestFileBackend_GetEvents_SkipMissing(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("skip-test")
+	key1 := NewSnowflakeEventKey(partitionID, 1710678000000)
+
 	// Store one event
-	backend.StoreEvent("evt_001", FullEvent{Content: "Test", Timestamp: 1710678000000})
+	backend.StoreEvent(key1, FullEvent{
+		PartitionID: partitionID,
+		Content:     "Test",
+		Timestamp:   1710678000000,
+	})
 
 	// Try to get multiple events (some missing)
-	keys := []string{"evt_001", "evt_002", "evt_003"}
+	keys := []int64{key1, 9999999999, 8888888888}
 	retrieved, err := backend.GetEvents(keys)
 	if err != nil {
 		t.Fatalf("GetEvents should not fail for missing keys: %v", err)
@@ -140,22 +145,27 @@ func TestFileBackend_QueryEvents(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("query-test")
+
 	// Store events with different types and timestamps
-	events := map[string]FullEvent{
-		"evt_001": {
-			EventType: EventTypeExternalInput,
-			Content:   "User message 1",
-			Timestamp: 1710678000000,
+	events := map[int64]FullEvent{
+		NewSnowflakeEventKey(partitionID, 1710678000000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeExternalInput,
+			Content:     "User message 1",
+			Timestamp:   1710678000000,
 		},
-		"evt_002": {
-			EventType: EventTypeAgentOutput,
-			Content:   "Agent response 1",
-			Timestamp: 1710678001000,
+		NewSnowflakeEventKey(partitionID, 1710678001000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeAgentOutput,
+			Content:     "Agent response 1",
+			Timestamp:   1710678001000,
 		},
-		"evt_003": {
-			EventType: EventTypeExternalInput,
-			Content:   "User message 2",
-			Timestamp: 1710678002000,
+		NewSnowflakeEventKey(partitionID, 1710678002000): {
+			PartitionID: partitionID,
+			EventType:   EventTypeExternalInput,
+			Content:     "User message 2",
+			Timestamp:   1710678002000,
 		},
 	}
 
@@ -185,6 +195,19 @@ func TestFileBackend_QueryEvents(t *testing.T) {
 	if len(refs) != 2 {
 		t.Errorf("Expected 2 external_input events, got %d", len(refs))
 	}
+
+	// Query by partition
+	refs, err = backend.QueryEvents(QueryOptions{
+		PartitionID: partitionID,
+		OrderBy:     "timestamp_asc",
+	})
+	if err != nil {
+		t.Fatalf("Failed to query events by partition: %v", err)
+	}
+
+	if len(refs) != 3 {
+		t.Errorf("Expected 3 events for partition %d, got %d", partitionID, len(refs))
+	}
 }
 
 func TestFileBackend_QueryEvents_TimeFilter(t *testing.T) {
@@ -194,11 +217,12 @@ func TestFileBackend_QueryEvents_TimeFilter(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
-	// Store events with different timestamps
-	events := map[string]FullEvent{
-		"evt_001": {Timestamp: 1710678000000},
-		"evt_002": {Timestamp: 1710678001000},
-		"evt_003": {Timestamp: 1710678002000},
+	partitionID := PartitionIDFromName("time-test")
+
+	events := map[int64]FullEvent{
+		NewSnowflakeEventKey(partitionID, 1710678000000): {PartitionID: partitionID, Timestamp: 1710678000000},
+		NewSnowflakeEventKey(partitionID, 1710678001000): {PartitionID: partitionID, Timestamp: 1710678001000},
+		NewSnowflakeEventKey(partitionID, 1710678002000): {PartitionID: partitionID, Timestamp: 1710678002000},
 	}
 
 	backend.StoreEvents(events)
@@ -225,11 +249,15 @@ func TestFileBackend_QueryEvents_Pagination(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("page-test")
+
 	// Store 5 events
 	for i := 1; i <= 5; i++ {
-		key := fmt.Sprintf("evt_%03d", i)
+		ts := int64(1710678000000 + i*1000)
+		key := NewSnowflakeEventKey(partitionID, ts)
 		backend.StoreEvent(key, FullEvent{
-			Timestamp: int64(1710678000000 + i*1000),
+			PartitionID: partitionID,
+			Timestamp:   ts,
 		})
 	}
 
@@ -268,17 +296,24 @@ func TestFileBackend_DeleteEvent(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("delete-test")
+	key := NewSnowflakeEventKey(partitionID, 1710678000000)
+
 	// Store event
-	backend.StoreEvent("evt_001", FullEvent{Content: "Test"})
+	backend.StoreEvent(key, FullEvent{
+		PartitionID: partitionID,
+		Content:     "Test",
+		Timestamp:   1710678000000,
+	})
 
 	// Delete event
-	err = backend.DeleteEvent("evt_001")
+	err = backend.DeleteEvent(key)
 	if err != nil {
 		t.Fatalf("Failed to delete event: %v", err)
 	}
 
 	// Verify event is deleted
-	_, err = backend.GetEvent("evt_001")
+	_, err = backend.GetEvent(key)
 	if err == nil {
 		t.Error("Expected error after deleting event, got nil")
 	}
@@ -291,10 +326,17 @@ func TestFileBackend_GetStats(t *testing.T) {
 		t.Fatalf("Failed to create FileBackend: %v", err)
 	}
 
+	partitionID := PartitionIDFromName("stats-test")
+
 	// Store some events
 	for i := 1; i <= 3; i++ {
-		key := fmt.Sprintf("evt_%03d", i)
-		backend.StoreEvent(key, FullEvent{Content: "Test"})
+		ts := int64(1710678000000 + i*1000)
+		key := NewSnowflakeEventKey(partitionID, ts)
+		backend.StoreEvent(key, FullEvent{
+			PartitionID: partitionID,
+			Content:     "Test",
+			Timestamp:   ts,
+		})
 	}
 
 	// Get stats
@@ -311,21 +353,61 @@ func TestFileBackend_GetStats(t *testing.T) {
 	}
 }
 
-func TestNewEventKey(t *testing.T) {
-	// Test key format
-	key1 := NewEventKey(1710678000000, 1)
-	if key1 != "evt_1710678000000_001" {
-		t.Errorf("Expected evt_1710678000000_001, got %s", key1)
+func TestSnowflakeEventKey(t *testing.T) {
+	partitionID := PartitionIDFromName("snowflake-test")
+
+	key := NewSnowflakeEventKey(partitionID, 1710678000000)
+
+	// Extract PartitionID from key
+	extractedPID := PartitionIDFromEventKey(key)
+	if extractedPID != partitionID {
+		t.Errorf("Expected partitionID %d, got %d", partitionID, extractedPID)
 	}
 
-	key2 := NewEventKey(1710678001000, 42)
-	if key2 != "evt_1710678001000_042" {
-		t.Errorf("Expected evt_1710678001000_042, got %s", key2)
+	// Extract timestamp
+	ts := TimestampFromEventKey(key)
+	if ts == 0 {
+		t.Error("Expected non-zero timestamp")
 	}
 
-	// Test that keys with different timestamps are different
-	key3 := NewEventKey(1710678002000, 1)
-	if key1 == key3 {
+	// Keys with different timestamps should be different
+	key2 := NewSnowflakeEventKey(partitionID, 1710678001000)
+	if key == key2 {
 		t.Error("Expected different keys for different timestamps")
+	}
+}
+
+func TestPartitionIDFromName(t *testing.T) {
+	// Same name → same PartitionID (deterministic)
+	pid1 := PartitionIDFromName("tagent")
+	pid2 := PartitionIDFromName("tagent")
+	if pid1 != pid2 {
+		t.Errorf("Expected same PartitionID for same name, got %d and %d", pid1, pid2)
+	}
+
+	// Different names → (likely) different PartitionIDs
+	pid3 := PartitionIDFromName("knowledge")
+	if pid1 == pid3 {
+		t.Log("Warning: FNV-1a collision for 'tagent' and 'knowledge' — acceptable but unlikely")
+	}
+
+	// PartitionID should be in valid range [0, 2047]
+	if pid1 < 0 || pid1 > 2047 {
+		t.Errorf("PartitionID %d out of valid range [0, 2047]", pid1)
+	}
+}
+
+func TestNewPartitionID(t *testing.T) {
+	pid1 := NewPartitionID()
+	pid2 := NewPartitionID()
+
+	// Should be unique
+	if pid1 == pid2 {
+		t.Errorf("Expected unique PartitionIDs, got same value %d", pid1)
+	}
+
+	// Should be in valid range
+	if pid1 < 0 || pid1 > 2047 {
+		t.Errorf("PartitionID %d out of valid range [0, 2047]", pid1)
 	}
 }

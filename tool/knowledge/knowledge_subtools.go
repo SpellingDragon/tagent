@@ -1,4 +1,4 @@
-package tool
+package knowledge
 
 import (
 	"context"
@@ -7,13 +7,61 @@ import (
 	"strings"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+	"trpc.group/trpc-go/trpc-agent-go/tool/duckduckgo"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
 	"github.com/SpellingDragon/tagent/memory"
+	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
 
+// KnowledgeResult represents a single piece of acquired knowledge.
+type KnowledgeResult struct {
+	Type          string         `json:"type"`                     // "skill", "skill_content", "web", "mcp_tool", "historical_memory"
+	Title         string         `json:"title"`                    // Human-readable title
+	Content       string         `json:"content"`                  // Knowledge content
+	Source        string         `json:"source,omitempty"`         // Source identifier
+	ExecutionPlan *ExecutionPlan `json:"execution_plan,omitempty"` // Translated executable plan
+}
+
+// ExecutionPlan describes a physical execution plan that CommandTool can directly run.
+type ExecutionPlan struct {
+	Function    string            `json:"function"`              // "exec", "tmux_exec", "mcp_call"
+	Command     string            `json:"command,omitempty"`     // Command for exec/tmux_exec
+	MCPTool     string            `json:"mcp_tool,omitempty"`    // MCP tool name for mcp_call
+	MCPArgs     map[string]any    `json:"mcp_args,omitempty"`    // MCP tool arguments for mcp_call
+	Env         map[string]string `json:"env,omitempty"`         // Environment variables
+	Dir         string            `json:"dir,omitempty"`         // Working directory
+	Timeout     int               `json:"timeout,omitempty"`     // Timeout in seconds
+	Description string            `json:"description,omitempty"` // Human-readable description
+}
+
+// BuildSubTools assembles the sub-tool set for the Knowledge Agent.
+func BuildSubTools(cfg Config) []tool.Tool {
+	var tools []tool.Tool
+
+	if cfg.SkillRepo != nil {
+		tools = append(tools, NewSkillSearchTool(cfg.SkillRepo))
+		tools = append(tools, NewSkillLoadTool(cfg.SkillRepo))
+	}
+
+	if len(cfg.MCPToolSets) > 0 {
+		tools = append(tools, NewMCPDiscoverTool(cfg.MCPToolSets))
+	}
+
+	// Web search: always available via duckduckgo
+	tools = append(tools, duckduckgo.NewTool())
+
+	if cfg.MemStore != nil {
+		tools = append(tools, NewMemoryQueryTool(cfg.MemStore))
+	}
+
+	return tools
+}
+
+// ==================== Sub-tool implementations ====================
+
 // NewSkillSearchTool creates a tool that searches the skill repository.
-func NewSkillSearchTool(repo SkillRepository) tool.Tool {
+func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args skillSearchArgs) (skillSearchResult, error) {
 			results := searchSkills(repo, args.Query)
@@ -28,7 +76,7 @@ func NewSkillSearchTool(repo SkillRepository) tool.Tool {
 }
 
 // NewSkillLoadTool creates a tool that loads full skill content by name.
-func NewSkillLoadTool(repo SkillRepository) tool.Tool {
+func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args skillLoadArgs) (skillLoadResult, error) {
 			s, err := repo.Get(args.SkillName)
@@ -92,7 +140,7 @@ func NewMCPDiscoverTool(toolSets []tool.ToolSet) tool.Tool {
 }
 
 // NewMemoryQueryTool creates a tool that queries historical knowledge from memory.
-func NewMemoryQueryTool(memStore MemoryStoreAccessor) tool.Tool {
+func NewMemoryQueryTool(memStore tagenttool.MemoryStoreAccessor) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args memoryQueryArgs) (memoryQueryResult, error) {
 			results := queryHistoricalKnowledge(memStore, args.Query)
@@ -109,7 +157,7 @@ func NewMemoryQueryTool(memStore MemoryStoreAccessor) tool.Tool {
 // ==================== Sub-tool argument/result types ====================
 
 type skillSearchArgs struct {
-	Query string `json:"query" description:"Search query for skills"`
+	Query string `json:"query"`
 }
 
 type skillSearchResult struct {
@@ -118,7 +166,7 @@ type skillSearchResult struct {
 }
 
 type skillLoadArgs struct {
-	SkillName string `json:"skill_name" description:"Name of the skill to load"`
+	SkillName string `json:"skill_name"`
 }
 
 type skillLoadResult struct {
@@ -129,7 +177,7 @@ type skillLoadResult struct {
 }
 
 type mcpDiscoverArgs struct {
-	Query string `json:"query" description:"Search query for MCP tools"`
+	Query string `json:"query"`
 }
 
 type mcpDiscoverResult struct {
@@ -144,7 +192,7 @@ type mcpToolInfo struct {
 }
 
 type memoryQueryArgs struct {
-	Query string `json:"query" description:"Query for historical knowledge"`
+	Query string `json:"query"`
 }
 
 type memoryQueryResult struct {
@@ -155,8 +203,7 @@ type memoryQueryResult struct {
 // ==================== Shared search implementations ====================
 
 // searchSkills searches for matching skills in the repository.
-// Uses bidirectional matching: skill name/description contains query, or query contains skill name.
-func searchSkills(repo SkillRepository, query string) []KnowledgeResult {
+func searchSkills(repo tagenttool.SkillRepository, query string) []KnowledgeResult {
 	summaries := repo.Summaries()
 	queryLower := strings.ToLower(query)
 
@@ -166,15 +213,12 @@ func searchSkills(repo SkillRepository, query string) []KnowledgeResult {
 		descLower := strings.ToLower(s.Description)
 
 		found := false
-		// Check 1: skill name/description contains query (short query scenario)
 		if strings.Contains(descLower, queryLower) || strings.Contains(nameLower, queryLower) {
 			found = true
 		}
-		// Check 2: query contains skill name (long query scenario)
 		if !found && strings.Contains(queryLower, nameLower) {
 			found = true
 		}
-		// Check 3: substring matching for CJK queries
 		if !found {
 			queryRunes := []rune(queryLower)
 			for i := 0; i < len(queryRunes); i++ {
@@ -248,7 +292,7 @@ func discoverMCPTools(ctx context.Context, toolSets []tool.ToolSet, query string
 }
 
 // queryHistoricalKnowledge queries historical knowledge events from memory.
-func queryHistoricalKnowledge(memStore MemoryStoreAccessor, query string) []KnowledgeResult {
+func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, query string) []KnowledgeResult {
 	opts := memory.QueryOptions{
 		Limit:   10,
 		OrderBy: "timestamp_desc",

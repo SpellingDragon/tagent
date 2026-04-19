@@ -13,11 +13,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
-	tagent "github.com/SpellingDragon/tagent"
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/testutil"
-	tagenttool "github.com/SpellingDragon/tagent/tool"
+	"github.com/SpellingDragon/tagent/tool/knowledge"
 )
 
 // mustMarshal marshals args to JSON bytes for CallableTool.Call().
@@ -315,226 +314,6 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 	return store
 }
 
-// TestIntegration_RecallTool_WithRealLLM_BasicRecall 测试 6.3-1: 基本回忆
-// recall(query="用户之前让我做什么") → 返回相关事件
-func TestIntegration_RecallTool_WithRealLLM_BasicRecall(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	cfg, err := testutil.LoadConfig()
-	if err != nil {
-		t.Skipf("Failed to load config: %v, skipping integration test", err)
-	}
-
-	_ = openai.New(
-		cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKey),
-		openai.WithBaseURL(cfg.Endpoint),
-	)
-
-	store := createRecallTestStore(t)
-
-	recallTool := tagenttool.NewRecallTool(
-		tagenttool.WithRecallMemoryStore(store),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"query": "用户之前让我做什么",
-		"limit": 5,
-	}))
-	if err != nil {
-		t.Fatalf("RecallTool.Call failed: %v", err)
-	}
-
-	resp, ok := result.(*tagenttool.RecallResponse)
-	if !ok {
-		t.Fatalf("Expected *RecallResponse, got %T", result)
-	}
-
-	// Simple mode: should return events matching query
-	t.Logf("BasicRecall: %d events, message=%q", len(resp.Events), resp.Message)
-	if len(resp.Events) == 0 {
-		t.Error("Expected events in basic recall")
-	}
-}
-
-// TestIntegration_RecallTool_WithRealLLM_MultiStep 测试 6.3-2: 多轮回忆
-func TestIntegration_RecallTool_WithRealLLM_MultiStep(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	cfg, err := testutil.LoadConfig()
-	if err != nil {
-		t.Skipf("Failed to load config: %v, skipping integration test", err)
-	}
-
-	_ = openai.New(
-		cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKey),
-		openai.WithBaseURL(cfg.Endpoint),
-	)
-
-	store := createRecallTestStore(t)
-
-	recallTool := tagenttool.NewRecallTool(
-		tagenttool.WithRecallMemoryStore(store),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"query": "上次执行命令的完整结果是什么",
-		"limit": 10,
-	}))
-	if err != nil {
-		t.Fatalf("RecallTool.Call failed: %v", err)
-	}
-
-	resp, ok := result.(*tagenttool.RecallResponse)
-	if !ok {
-		t.Fatalf("Expected *RecallResponse, got %T", result)
-	}
-
-	t.Logf("MultiStep: %d events, message=%q", len(resp.Events), resp.Message)
-}
-
-// TestIntegration_RecallTool_WithRealLLM_Summarize 测试 6.3-3: 回忆摘要
-func TestIntegration_RecallTool_WithRealLLM_Summarize(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	cfg, err := testutil.LoadConfig()
-	if err != nil {
-		t.Skipf("Failed to load config: %v, skipping integration test", err)
-	}
-
-	_ = openai.New(
-		cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKey),
-		openai.WithBaseURL(cfg.Endpoint),
-	)
-
-	store := createRecallTestStore(t)
-
-	recallTool := tagenttool.NewRecallTool(
-		tagenttool.WithRecallMemoryStore(store),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"query": "总结之前的工作内容",
-		"limit": 10,
-	}))
-	if err != nil {
-		t.Fatalf("RecallTool.Call failed: %v", err)
-	}
-
-	resp, ok := result.(*tagenttool.RecallResponse)
-	if !ok {
-		t.Fatalf("Expected *RecallResponse, got %T", result)
-	}
-
-	t.Logf("Summarize: %d events, message=%q", len(resp.Events), resp.Message)
-}
-
-// TestIntegration_RecallTool_WithRealLLM_NoResults 测试 6.3-4: 空结果处理
-func TestIntegration_RecallTool_WithRealLLM_NoResults(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	cfg, err := testutil.LoadConfig()
-	if err != nil {
-		t.Skipf("Failed to load config: %v, skipping integration test", err)
-	}
-
-	_ = openai.New(
-		cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKey),
-		openai.WithBaseURL(cfg.Endpoint),
-	)
-
-	// Empty memory store
-	tempDir := t.TempDir()
-	store, err := tagentmemory.NewFileBackend(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to create empty memory store: %v", err)
-	}
-
-	recallTool := tagenttool.NewRecallTool(
-		tagenttool.WithRecallMemoryStore(store),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"query": "不存在的事件xyz123",
-		"limit": 10,
-	}))
-	if err != nil {
-		t.Fatalf("RecallTool.Call should not error for no results: %v", err)
-	}
-
-	resp, ok := result.(*tagenttool.RecallResponse)
-	if !ok {
-		t.Fatalf("Expected *RecallResponse, got %T", result)
-	}
-
-	t.Logf("NoResults: %d events, message=%q", len(resp.Events), resp.Message)
-}
-
-// TestIntegration_RecallTool_WithRealLLM_NaturalLanguage 测试 6.3-5: 自然语言理解
-func TestIntegration_RecallTool_WithRealLLM_NaturalLanguage(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	cfg, err := testutil.LoadConfig()
-	if err != nil {
-		t.Skipf("Failed to load config: %v, skipping integration test", err)
-	}
-
-	_ = openai.New(
-		cfg.ModelName,
-		openai.WithAPIKey(cfg.APIKey),
-		openai.WithBaseURL(cfg.Endpoint),
-	)
-
-	store := createRecallTestStore(t)
-
-	recallTool := tagenttool.NewRecallTool(
-		tagenttool.WithRecallMemoryStore(store),
-	)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"query": "我之前让助手整理了什么文件，最后成功了吗",
-		"limit": 10,
-	}))
-	if err != nil {
-		t.Fatalf("RecallTool.Call failed: %v", err)
-	}
-
-	resp, ok := result.(*tagenttool.RecallResponse)
-	if !ok {
-		t.Fatalf("Expected *RecallResponse, got %T", result)
-	}
-
-	t.Logf("NaturalLanguage: %d events, message=%q", len(resp.Events), resp.Message)
-}
-
 // ==================== KnowledgeAgent Integration Tests (requires real LLM) ====================
 
 // TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery tests knowledge agent with real LLM.
@@ -555,8 +334,8 @@ func TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery(t *testing.T) {
 		openai.WithBaseURL(cfg.Endpoint),
 	)
 
-	// Create KnowledgeTool via agent.NewKnowledgeTool
-	knowledgeTool, err := tagent.NewKnowledgeTool(tagent.KnowledgeAgentConfig{
+	// Create KnowledgeTool via knowledge.NewTool
+	knowledgeTool, err := knowledge.NewTool(knowledge.Config{
 		Model:     zhipuModel,
 		PromptDir: "../resources/prompts",
 	})

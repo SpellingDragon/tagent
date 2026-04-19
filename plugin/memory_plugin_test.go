@@ -133,7 +133,8 @@ func TestMemoryPlugin_OnEvent_StoresFullEvent(t *testing.T) {
 	require.Len(t, allEvents, 1)
 	assert.Equal(t, memory.EventTypeExternalInput, allEvents[0].EventType)
 	assert.Equal(t, "test message", allEvents[0].EventSummary)
-	assert.NotEmpty(t, allEvents[0].EventKey)
+	assert.NotZero(t, allEvents[0].EventKey, "Snowflake EventKey should be non-zero")
+	assert.NotZero(t, allEvents[0].PartitionID, "PartitionID should be non-zero")
 }
 
 func TestMemoryPlugin_OnEvent_WritesStateDelta(t *testing.T) {
@@ -203,7 +204,7 @@ func TestMemoryPlugin_OnEvent_ParentChain(t *testing.T) {
 	require.Len(t, allEvents, 3)
 
 	// First event: no parent
-	assert.Empty(t, allEvents[0].ParentKey, "first event should have empty ParentKey")
+	assert.Zero(t, allEvents[0].ParentKey, "first event should have zero ParentKey")
 
 	// Second event: parent = first event's key
 	assert.Equal(t, allEvents[0].EventKey, allEvents[1].ParentKey,

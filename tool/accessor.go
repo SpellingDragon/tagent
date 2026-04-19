@@ -18,8 +18,8 @@ type MemoryStoreAccessor interface {
 	// Returns lightweight EventReference list (not full details).
 	QueryEvents(opts memory.QueryOptions) ([]memory.EventReference, error)
 
-	// GetEvent retrieves a single full event by its EventKey.
-	GetEvent(key string) (*memory.FullEvent, error)
+	// GetEvent retrieves a single full event by its EventKey (Snowflake int64).
+	GetEvent(key int64) (*memory.FullEvent, error)
 }
 
 // ==================== Knowledge Types ====================
@@ -54,7 +54,7 @@ type ExecutionPlan struct {
 // Agent uses natural language to describe what historical information it needs.
 type RecallQuery struct {
 	Query    string `json:"query"`               // Natural language description of what to recall
-	EventKey string `json:"event_key,omitempty"` // Get full details of a specific event by key
+	EventKey int64  `json:"event_key,omitempty"` // Get full details of a specific event by key
 	Limit    int    `json:"limit,omitempty"`     // Maximum number of results
 }
 
@@ -66,15 +66,15 @@ type RecallResponse struct {
 
 // RecallEvent represents a lightweight event reference from memory.
 type RecallEvent struct {
-	Key     string `json:"key"`
+	Key     int64  `json:"key"`
 	Type    string `json:"type"`
 	Summary string `json:"summary"`
 }
 
 // RecallEventDetail represents a full event with all details.
 type RecallEventDetail struct {
-	Key       string `json:"key"`
-	ParentKey string `json:"parent_key,omitempty"`
+	Key       int64  `json:"key"`
+	ParentKey int64  `json:"parent_key,omitempty"`
 	Type      string `json:"type"`
 	Summary   string `json:"summary"`
 	Content   string `json:"content"`

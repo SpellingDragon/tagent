@@ -9,6 +9,22 @@ import (
 	"strings"
 )
 
+// CompositeConfig describes how to load a prompt in bootstrap style.
+// Aligned with nanobot's BOOTSTRAP_FILES pattern (AGENTS.md, SOUL.md, USER.md, TOOLS.md).
+//
+// Prompt composition order: inline → files (in order) → directory scan.
+// All parts are joined with double newlines.
+type CompositeConfig struct {
+	Inline string   `json:"inline,omitempty" yaml:"inline,omitempty"` // Direct inline prompt text
+	Files  []string `json:"files,omitempty"  yaml:"files,omitempty"`  // Ordered file list (e.g., AGENTS.md, SOUL.md)
+	Dir    string   `json:"dir,omitempty"    yaml:"dir,omitempty"`    // Scan all .md files in directory
+}
+
+// IsEmpty returns true if no prompt source is configured.
+func (pc CompositeConfig) IsEmpty() bool {
+	return pc.Inline == "" && len(pc.Files) == 0 && pc.Dir == ""
+}
+
 // Loader loads prompt templates from files or directories.
 type Loader struct {
 	// BaseDir is the base directory for relative paths.

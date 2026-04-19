@@ -63,6 +63,7 @@ type TagentConfig struct {
 	MaxTokens         int                // Token budget for context (default: 8000)
 	CompressThreshold float64            // Compression trigger threshold (default: 0.8)
 	SummaryModel      model.Model        // Optional: for Stage 2 LLM summary
+	Temperature       float64            // Optional: LLM temperature (default: 0.7)
 
 	// Agent identity (for agent.Agent interface)
 	Name        string // Default: "tagent"

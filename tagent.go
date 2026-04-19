@@ -1,197 +1,234 @@
 // Package tagent provides the top-level composition root for tagent applications.
 //
-// The root package is responsible for application-level wiring that crosses
-// package boundaries — specifically, assembling agent.Tool instances from
-// agent + tool + prompt, and connecting tool callbacks back to agents.
+// The root package encapsulates the agent instantiation process, assembling
+// a TagentAgent with configured tools and wiring cross-boundary dependencies.
 //
 // Dependency direction (all one-way, no cycles):
 //
 //	tagent (root) → agent → plugin → memory
-//	tagent (root) → tool → memory
+//	tagent (root) → tool/command → memory
+//	tagent (root) → tool/recall → memory
+//	tagent (root) → tool/knowledge → memory
 //	tagent (root) → prompt
 //
-// The agent package focuses on the trpc-agent-go core mechanism coordination:
-// LLMAgent, Runner, MemoryPlugin, SmartCompressor, ContextIntervention.
-// The tool package focuses on pure CallableTool implementations.
-// This root package wires them together.
+// Usage:
+//
+//	ta, err := tagent.New(tagent.DefaultConfig(),
+//	    tagent.WithModel(modelInstance),
+//	)
 package tagent
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/tool"
+	"github.com/SpellingDragon/tagent/tool/command"
+
 	"trpc.group/trpc-go/trpc-agent-go/model"
-	tagenttool "trpc.group/trpc-go/trpc-agent-go/tool"
-	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
-	"trpc.group/trpc-go/trpc-agent-go/tool/duckduckgo"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// KnowledgeAgentConfig holds configuration for creating the Knowledge TagentAgent.
-//
-// Knowledge Agent is a TagentAgent instance configured for knowledge acquisition
-// and translation. It uses internal sub-tools (skill_search, skill_load,
-// mcp_discover, duckduckgo_search, memory_query) within an LLM React loop
-// to intelligently acquire knowledge and translate it into executable plans.
-//
-// Architecture: KnowledgeAgent → TagentAgent (agent.Agent) → agent.Tool (CallableTool)
-// This means Knowledge Agent gets all tagent core mechanisms automatically:
-// MemoryPlugin, SmartCompressor, ContextIntervention, Runner orchestration.
-type KnowledgeAgentConfig struct {
-	Model       model.Model              // Required: LLM model
-	MemStore    tool.MemoryStoreAccessor // Optional: shared memory access
-	SkillRepo   tool.SkillRepository     // Optional: skill source
-	MCPToolSets []tagenttool.ToolSet     // Optional: MCP tool sources
-	PromptDir   string                   // Optional: base directory for prompt files (default: "resources/prompts")
+// Option injects runtime-only dependencies that cannot be serialized.
+type Option func(*runtimeConfig)
 
-	// Optional overrides
-	MaxToolIterations int     // Default: 5 (knowledge acquisition needs few iterations)
-	MaxTokens         int     // Default: 4096
-	Temperature       float64 // Default: 0.3 (precision over creativity)
+// runtimeConfig holds runtime-only dependencies.
+type runtimeConfig struct {
+	model        model.Model
+	memStore     memory.MemoryStore       // Full MemoryStore for tool agents to query event context
+	memAccessor  tool.MemoryStoreAccessor // Narrow accessor for tool sub-packages
+	skillRepo    tool.SkillRepository
+	mcpToolSets  []trpctool.ToolSet
+	summaryModel model.Model
 }
 
-// NewKnowledgeAgent creates a TagentAgent configured for knowledge acquisition & translation.
-// The returned *TagentAgent implements agent.Agent and can be wrapped via agenttool.NewTool()
-// to become a CallableTool for the main TagentAgent.
+// WithModel sets the resolved model instance (required).
+func WithModel(m model.Model) Option {
+	return func(rc *runtimeConfig) { rc.model = m }
+}
+
+// WithMemStore sets the shared memory store.
+// The MemoryStore is passed to tool agents so they can query the parent
+// agent's event stream for full context (causal chain, event details, etc.).
+func WithMemStore(ms memory.MemoryStore) Option {
+	return func(rc *runtimeConfig) {
+		rc.memStore = ms
+		rc.memAccessor = ms // MemoryStore satisfies MemoryStoreAccessor
+	}
+}
+
+// WithSkillRepo sets the skill repository for knowledge agent.
+func WithSkillRepo(sr tool.SkillRepository) Option {
+	return func(rc *runtimeConfig) { rc.skillRepo = sr }
+}
+
+// WithMCPToolSets sets the MCP tool sources for knowledge agent.
+func WithMCPToolSets(ts []trpctool.ToolSet) Option {
+	return func(rc *runtimeConfig) { rc.mcpToolSets = ts }
+}
+
+// WithSummaryModel sets the model for Stage 2 LLM summary compression.
+func WithSummaryModel(m model.Model) Option {
+	return func(rc *runtimeConfig) { rc.summaryModel = m }
+}
+
+// New creates a fully-wired TagentAgent from declarative Config + runtime Options.
 //
-// Usage:
+// Config is declarative and serializable (loadable from YAML/JSON via LoadConfig).
+// Options inject runtime-only dependencies (model instances, memory stores, etc.).
 //
-//	knowledgeAgent, err := tagent.NewKnowledgeAgent(cfg)
-//	knowledgeTool := agenttool.NewTool(knowledgeAgent,
-//	    agenttool.WithDescription("Knowledge acquisition and translation tool..."),
-//	)
-//	mainAgent, _ := agent.NewTagentAgent(&agent.TagentConfig{
-//	    Tools: []tool.Tool{knowledgeTool, recallTool, commandTool},
-//	})
-func NewKnowledgeAgent(cfg KnowledgeAgentConfig) (*agent.TagentAgent, error) {
-	if cfg.Model == nil {
-		return nil, fmt.Errorf("knowledge agent: model is required")
+// New handles all cross-boundary wiring internally:
+//   - Resolves each ToolConfig by kind (agent vs tool) and id
+//   - Loads prompts and descriptions from configured files
+//   - Creates tool agents via registered factories (agent.GetToolAgentFactory)
+//   - Creates plain tools via registered factories (agent.GetPlainToolFactory)
+//   - Wires CommandTool's MessageInjector back to the agent
+func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 
-	// 1. Load system prompt from file
-	promptDir := cfg.PromptDir
-	if promptDir == "" {
-		promptDir = "resources/prompts"
+	rc := &runtimeConfig{}
+	for _, opt := range opts {
+		opt(rc)
 	}
-	loader := prompt.NewLoader(promptDir)
-	systemPrompt, err := loader.LoadFromFile("knowledge_agent.md")
+	if rc.model == nil {
+		return nil, fmt.Errorf("tagent: model is required (use WithModel)")
+	}
+
+	// Resolve main agent prompt
+	loader := prompt.NewLoader(cfg.PromptDir)
+	systemPrompt, err := loader.LoadComposite(cfg.SystemPrompt.Inline, cfg.SystemPrompt.Files, cfg.SystemPrompt.Dir)
 	if err != nil {
-		return nil, fmt.Errorf("knowledge agent: load prompt: %w", err)
+		return nil, fmt.Errorf("tagent: load system prompt: %w", err)
 	}
 
-	// 2. Assemble sub-tools
-	subTools := buildKnowledgeSubTools(cfg)
+	// Build tools from declarative config
+	var tools []trpctool.Tool
+	var cmdTool *command.CommandTool
 
-	// 3. Apply defaults
-	maxToolIter := cfg.MaxToolIterations
-	if maxToolIter <= 0 {
-		maxToolIter = 5
-	}
-	maxTokens := cfg.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 4096
+	for _, tc := range cfg.Tools {
+		t, isCmd, err := buildTool(tc, rc, loader)
+		if err != nil {
+			return nil, fmt.Errorf("tagent: build tool %q: %w", tc.ID, err)
+		}
+		if isCmd {
+			cmdTool = t.(*command.CommandTool)
+		}
+		tools = append(tools, t)
 	}
 
-	// 4. Create TagentAgent instance (inherits all tagent core mechanisms)
+	// Create main TagentAgent
 	agentCfg := &agent.TagentConfig{
-		Name:              "knowledge",
-		Description:       "Knowledge acquisition and translation agent. Discovers skills, MCP tools, and web resources; translates them into executable plans.",
-		Model:             cfg.Model,
+		Name:              cfg.Name,
+		Model:             rc.model,
 		SystemPrompt:      systemPrompt,
-		Tools:             subTools,
-		MaxToolIterations: maxToolIter,
-		MaxTokens:         maxTokens,
+		Tools:             tools,
+		MaxToolIterations: cfg.MaxToolIterations,
+		MaxTokens:         cfg.MaxTokens,
+		Temperature:       cfg.Temperature,
+		CompressThreshold: cfg.CompressThreshold,
+	}
+	if rc.summaryModel != nil {
+		agentCfg.SummaryModel = rc.summaryModel
 	}
 
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
-		return nil, fmt.Errorf("knowledge agent: create tagent agent: %w", err)
+		return nil, fmt.Errorf("tagent: create agent: %w", err)
+	}
+
+	// Wire CommandTool's tmux notifications back to the agent
+	if cmdTool != nil {
+		cmdTool.SetMessageInjector(ta)
 	}
 
 	return ta, nil
 }
 
-// NewKnowledgeTool is a convenience function that creates a KnowledgeAgent
-// and wraps it as a CallableTool ready for registration.
-func NewKnowledgeTool(cfg KnowledgeAgentConfig) (tagenttool.Tool, error) {
-	knowledgeAgent, err := NewKnowledgeAgent(cfg)
+// buildTool creates a tool from a ToolConfig entry.
+// Returns the tool, whether it's a CommandTool (for post-wiring), and any error.
+func buildTool(tc ToolConfig, rc *runtimeConfig, loader *prompt.Loader) (trpctool.Tool, bool, error) {
+	desc, err := resolveToolDescription(tc, loader)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return agenttool.NewTool(knowledgeAgent,
-		agenttool.WithDescription(`Knowledge acquisition and translation tool. Acquires knowledge needed to complete tasks and translates it into executable plans.
-
-Supports:
-1. Capability discovery: search local skills and MCP tools
-2. Factual knowledge: web search for facts, concepts, documentation
-3. Translation: convert skill content into executable commands (ExecutionPlan)
-4. Historical knowledge: query past knowledge events from memory
-
-When the result contains execution_plan, use the command tool to execute it:
-- execution_plan.function="exec" → command(mode="exec", command=execution_plan.command)
-- execution_plan.function="tmux_exec" → command(mode="tmux_exec", command=execution_plan.command)
-- execution_plan.function="mcp_call" → command(mode="exec", command=execution_plan.command)`),
-	), nil
+	switch tc.Kind {
+	case ToolKindAgent:
+		return buildToolAgent(tc, rc, desc, loader)
+	case ToolKindTool:
+		return buildPlainTool(tc, desc)
+	default:
+		return nil, false, fmt.Errorf("unknown tool kind %q", tc.Kind)
+	}
 }
 
-// buildKnowledgeSubTools assembles the sub-tool set for the Knowledge Agent.
-func buildKnowledgeSubTools(cfg KnowledgeAgentConfig) []tagenttool.Tool {
-	var tools []tagenttool.Tool
+// buildToolAgent creates a tool agent via the factory registry.
+func buildToolAgent(tc ToolConfig, rc *runtimeConfig, desc string, loader *prompt.Loader) (trpctool.Tool, bool, error) {
+	toolModel := rc.model // Default to parent model
 
-	if cfg.SkillRepo != nil {
-		tools = append(tools, tool.NewSkillSearchTool(cfg.SkillRepo))
-		tools = append(tools, tool.NewSkillLoadTool(cfg.SkillRepo))
+	systemPrompt, err := loader.LoadComposite(tc.Prompt.Inline, tc.Prompt.Files, tc.Prompt.Dir)
+	if err != nil {
+		return nil, false, fmt.Errorf("load prompt: %w", err)
 	}
 
-	if len(cfg.MCPToolSets) > 0 {
-		tools = append(tools, tool.NewMCPDiscoverTool(cfg.MCPToolSets))
+	factory, ok := agent.GetToolAgentFactory(tc.ID)
+	if !ok {
+		return nil, false, fmt.Errorf("no tool agent factory registered for id %q", tc.ID)
 	}
 
-	// Web search: always available via duckduckgo
-	tools = append(tools, duckduckgo.NewTool())
-
-	if cfg.MemStore != nil {
-		tools = append(tools, tool.NewMemoryQueryTool(cfg.MemStore))
-	}
-
-	return tools
-}
-
-// WireCommandTool connects a CommandTool's onStateChange callback to TagentAgent.
-// When a tmux session state changes (e.g., command completed), TagentAgent injects
-// a system_input event to trigger a new agent iteration.
-//
-// This wiring lives in the root package because it crosses the agent↔tool boundary:
-// agent doesn't depend on tool, and tool doesn't depend on agent.
-// The root package is the only place that can see both.
-func WireCommandTool(ta *agent.TagentAgent, cmdTool *tool.CommandTool) {
-	cmdTool.SetOnStateChange(func(sessionID, oldStatus, newStatus, output string) {
-		handleTmuxStateChange(ta, sessionID, oldStatus, newStatus, output)
+	tagentAgent, err := factory(agent.ToolAgentFactoryConfig{
+		ID:                tc.ID,
+		Model:             toolModel,
+		SystemPrompt:      systemPrompt,
+		Description:       desc,
+		MemStore:          rc.memStore,
+		MaxToolIterations: tc.MaxToolIterations,
+		MaxTokens:         tc.MaxTokens,
+		Temperature:       tc.Temperature,
 	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	return wrapToolAgent(tagentAgent, desc), false, nil
 }
 
-// handleTmuxStateChange injects a system_input message to trigger agent re-evaluation.
-func handleTmuxStateChange(ta *agent.TagentAgent, sessionID, oldStatus, newStatus, output string) {
-	log.Printf("[TagentAgent] tmux state change: session=%s %s -> %s", sessionID, oldStatus, newStatus)
+// buildPlainTool creates a plain tool via the factory registry.
+func buildPlainTool(tc ToolConfig, desc string) (trpctool.Tool, bool, error) {
+	factory, ok := agent.GetPlainToolFactory(tc.ID)
+	if !ok {
+		return nil, false, fmt.Errorf("no plain tool factory registered for id %q", tc.ID)
+	}
 
-	// Build system_input message describing the state change
-	content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", sessionID, oldStatus, newStatus)
-	if output != "" {
-		// Truncate long output for injection
-		if len(output) > 2000 {
-			output = output[:2000] + "...(truncated)"
+	callable, err := factory(agent.PlainToolFactoryConfig{
+		ID:          tc.ID,
+		Description: desc,
+		Config:      tc.Config,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	_, isCmd := callable.(*command.CommandTool)
+	return callable, isCmd, nil
+}
+
+// resolveToolDescription resolves the tool description from inline text or file.
+func resolveToolDescription(tc ToolConfig, loader *prompt.Loader) (string, error) {
+	if tc.Description != "" {
+		return tc.Description, nil
+	}
+	if tc.DescriptionFile != "" {
+		desc, err := loader.LoadFromFile(tc.DescriptionFile)
+		if err != nil {
+			return "", fmt.Errorf("load description file %q: %w", tc.DescriptionFile, err)
 		}
-		content += fmt.Sprintf("\nOutput:\n%s", output)
+		return desc, nil
 	}
-
-	msg := model.Message{
-		Role:    model.RoleSystem,
-		Content: content,
-	}
-
-	// Inject via TagentAgent.RunSimple()
-	ta.InjectMessage(msg)
+	return "", fmt.Errorf("tool %q: description or description_file is required", tc.ID)
 }

@@ -5,36 +5,93 @@
 `tagent/tool` 是 tagent 为 trpc-agent-go Runner 提供的一组 **CallableTool 工具实现**，也是 Agent 与外部世界交互的唯一通道。
 
 **核心职责**：
-- **RecallTool**：智能记忆召回 — 查询历史事件、获取事件详情，提供对内部知识的结构化访问
-- **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 agent.Agent + agenttool.NewTool() 包装（组装代码在根包 tagent.go）
+- **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 agent.Agent + agenttool.NewTool() 包装
+- **RecallAgent**：智能记忆召回 — 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答
 - **CommandTool**：命令执行（同步 exec / 异步 tmux_exec），纯执行器，不关心命令来源
 - **TmuxMonitor**：后台监控 tmux session 状态，状态变更时触发新的 Agent 迭代
 
 **设计原则**：
-- **职责分离**：理解层（KnowledgeAgent）和执行层（CommandTool）分离，Agent 负责决策
-- **架构统一**：KnowledgeAgent 是 TagentAgent 实例 + agenttool.NewTool() 包装，复用框架能力
-- **按需 React**：KnowledgeAgent 有内部 React 循环（多子工具协作 + 翻译）；RecallTool 和 CommandTool 不需要
-- **Prompt 文件化**：System prompt 通过 prompt.Loader 动态加载，消除硬编码常量
+- **职责分离**：理解层（KnowledgeAgent, RecallAgent）和执行层（CommandTool）分离，Agent 负责决策
+- **架构统一**：KnowledgeAgent 和 RecallAgent 都是 TagentAgent 实例 + agenttool.NewTool() 包装，复用框架能力
+- **按需 React**：KnowledgeAgent 和 RecallAgent 有内部 React 循环（多子工具协作 + 翻译）；CommandTool 不需要
+- **Prompt 文件化**：System prompt 通过 prompt.Loader 动态加载，支持 PromptConfig bootstrap 风格
+- **配置声明式**：所有 tool 通过 Config + ToolConfig 声明，kind 区分 agent/tool，description 支持文件加载
+- **事件上下文传递**：tool agent 通过父 agent 的 MemStore + EventKey 获取完整事件上下文；tool 参数声明中必须包含 `event_key`，由框架在运行时自动注入当前触发事件的 key
 - **后台异步**：TmuxMonitor 通过 callback 触发 Agent 迭代，不阻塞主循环
-- **包编排**：agent 包不依赖 tool 包，根包 tagent.go 负责跨包组装
+- **包编排**：agent 包不依赖 tool 包，根包 tagent.go 封装 agent 实例化过程
+- **CommandTool 闭环**：tmux 状态变更通知通过 MessageInjector 接口闭环在 command 包内，不暴露给外部
+- **注册扩展**：agent 包开放 ToolAgentFactory / PlainToolFactory 注册接口，支持自定义 tool 扩展；注册 API 需确保 tool 参数中包含 `event_key` 以支持上下文获取
 
 ---
 
 ## 二、文件清单
 
+### 2.1 包结构
+
+```
+# 根包 (tagent)
+├── tagent.go           # New() 工厂函数：声明式 Config + Option 创建 TagentAgent
+├── config.go           # Config / ToolConfig / PromptConfig 声明式配置 + LoadConfig
+├── builtin.go          # init() 注册内置 tool agent / plain tool factory
+
+# agent 包
+├── tagent_agent.go     # TagentAgent 组合根
+├── tool_agent.go       # ToolAgentFactory / PlainToolFactory 注册接口
+├── context_intervention.go
+├── smart_compress.go
+└── token_counter.go
+
+# tool 包
+tool/
+├── accessor.go          # 抽象接口定义
+├── command/            # command 子包
+│   ├── command_tool.go     # CommandTool 实现 (支持配置化 description)
+│   ├── command_executor.go  # 命令执行器
+│   ├── tmux_executor.go     # Tmux 执行器
+│   ├── tmux_monitor.go      # Tmux 监控器
+│   └── command_test.go      # CommandTool 测试
+├── recall/              # recall 子包
+│   ├── recall_agent.go      # RecallAgent 组装 (支持 PromptConfig + DescriptionFile)
+│   └── recall_subtools.go   # 子工具实现
+└── knowledge/          # knowledge 子包
+    ├── knowledge_agent.go   # KnowledgeAgent 组装 (支持 PromptConfig + DescriptionFile)
+    └── knowledge_subtools.go# 子工具实现
+
+# prompt 包
+prompt/
+├── loader.go            # Loader + CompositeConfig (bootstrap 风格 prompt 加载)
+
+# resources/prompts/
+├── knowledge_agent.md    # KnowledgeAgent system prompt
+├── knowledge_tool_desc.md  # Knowledge tool 描述
+├── recall_agent.md      # RecallAgent system prompt
+├── recall_tool_desc.md  # Recall tool 描述
+├── command_tool_desc.md # Command tool 描述
+└── bootstrap/           # 顶层 agent bootstrap prompt 目录
+```
+
+### 2.2 详细文件列表
+
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `recall_tool.go` | 192 | 记忆召回：查询历史事件、获取事件详情 |
-| `subtools.go` | ~200 | 独立子工具工厂函数：NewSkillSearchTool, NewSkillLoadTool, NewMCPDiscoverTool, NewMemoryQueryTool |
-| `command_tool.go` | 268 | 命令执行：exec / tmux_exec 双模式 |
-| `command_executor.go` | 248 | 命令执行器：安全隔离执行 |
-| `tmux_monitor.go` | 332 | Tmux 监控器：后台状态检测 + callback 触发 |
-| `tmux_executor.go` | 298 | Tmux 执行器：tmux session 管理 |
-| `tool_test.go` | 50.1KB | 单元测试 |
+| `tagent.go` (根) | ~230 | New() 工厂函数：声明式 Config + Option，按 ToolConfig 列表创建 tool |
+| `config.go` (根) | ~245 | Config / ToolConfig / PromptConfig + LoadConfig + DefaultConfig + ApplyDefaults + Validate |
+| `builtin.go` (根) | ~85 | init() 注册 knowledge/recall/command factory + wrapToolAgent |
+| `agent/tool_agent.go` | ~160 | ToolAgentFactory / PlainToolFactory 注册接口 + ToolAgentFactoryConfig |
+| `accessor.go` | 128 | 抽象接口定义（MemoryStoreAccessor, SkillRepository, RecallQuery 等） |
+| `recall/recall_agent.go` | ~190 | RecallAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
+| `recall/recall_subtools.go` | ~200 | RecallAgent 子工具：memory_query, memory_get, memory_recent |
+| `knowledge/knowledge_agent.go` | ~145 | KnowledgeAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
+| `knowledge/knowledge_subtools.go` | ~320 | KnowledgeAgent 子工具：skill_search, skill_load, mcp_discover, duckduckgo_search, memory_query |
+| `command/command_tool.go` | ~300 | CommandTool：exec / tmux_exec 双模式 + 配置化 description |
+| `command/command_executor.go` | ~250 | 命令执行器：安全隔离执行 |
+| `command/tmux_monitor.go` | ~330 | Tmux 监控器：后台状态检测 + callback 触发 |
+| `command/tmux_executor.go` | ~300 | Tmux 执行器：tmux session 管理 |
+| `prompt/loader.go` | ~290 | Loader + CompositeConfig：bootstrap 风格 prompt 加载 |
 
-> **注意**：KnowledgeAgent 的组装层代码在根包 `tagent.go`（~200 行），不在 tool 包中。
-> 这是因为组装代码需要同时 import agent 和 tool 包，放在任何子包都会导致循环依赖。
-> 根包是唯一能看到所有子包的位置。
+> **注意**：KnowledgeAgent 和 RecallAgent 的组装层代码在各子包中（tool/knowledge, tool/recall）。
+> 根包通过 `tagent.New(cfg, opts...)` 工厂函数封装完整的 agent 实例化过程，
+> 按 `Config.Tools` 声明式列表创建并注册所有 tool。
 
 ---
 
@@ -43,7 +100,7 @@
 ```mermaid
 graph TB
     subgraph "tagent (root)"
-        KA["tagent.go\nNewKnowledgeAgent()\nNewKnowledgeTool()\nWireCommandTool()"]
+        KA["tagent.go\ntagent.New() 工厂函数"]
     end
 
     subgraph "tagent/agent"
@@ -51,12 +108,19 @@ graph TB
     end
 
     subgraph "tagent/tool"
-        RT["RecallTool\nCallableTool"]
-        KT["KnowledgeAgent\nagent.Agent + agenttool.NewTool()\n(内部 React Agent)"]
-        CT["CommandTool\nCallableTool"]
-        CE["CommandExecutor"]
-        TE["TmuxExecutor"]
-        TM["TmuxMonitor"]
+        subgraph "recall/"
+            RA["RecallAgent\nagent.Agent + agenttool.NewTool()\n(内部 React Agent)\nmemory_query/get/recent"]
+        end
+        subgraph "knowledge/"
+            KT["KnowledgeAgent\nagent.Agent + agenttool.NewTool()\n(内部 React Agent)\nskill_search/load, mcp_discover"]
+        end
+        subgraph "command/"
+            CT["CommandTool\nCallableTool"]
+            CE["CommandExecutor"]
+            TE["TmuxExecutor"]
+            TM["TmuxMonitor"]
+        end
+        AC["accessor.go\n抽象接口"]
     end
 
     subgraph "tagent/memory"
@@ -67,23 +131,24 @@ graph TB
         LLMA["LLMAgent\n(React Loop)"]
     end
 
-    LLMA --> RT
+    LLMA --> RA
     LLMA --> KT
     LLMA --> CT
 
-    RT --> MS
-    KT -->|Skill/MCP/Web/Memory| SRC["知识源"]
+    RA --> MS
+    KT -->|Skill/MCP/Web| SRC["知识源"]
     KT -->|ExecutionPlan| CT
     CT --> CE
     CT -->|tmux_exec| TE
     CT -->|状态变化| TM
     TE -->|监控| TM
     TM -->|callback| LLMA
+    KA -->|assembles| RA
     KA -->|assembles| KT
     KA -->|wires| TA
     TA -->|InjectMessage| LLMA
 
-    style RT fill:#e1f5ff,stroke:#0277bd
+    style RA fill:#e1f5ff,stroke:#0277bd
     style KT fill:#fff3e0,stroke:#ef6c00
     style CT fill:#e8f5e9,stroke:#2e7d32
     style TM fill:#f3e5f5,stroke:#7b1fa2
@@ -91,21 +156,281 @@ graph TB
 
 ---
 
-## 四、工具的 trpc-agent-go 集成
+## 四、事件上下文传递机制（EventKey 注入 + 数据隔离）
 
-### 4.1 CallableTool 接口
+### 4.0 核心设计
+
+按照 tagent 的架构设计，顶层 agent 直接送 LLM 的 context 是一条**事件组成的记录流**（由 MemoryPlugin 追踪）。tool 与顶层 agent 交互时，需要依赖顶层 agent 传入的关键 `event_key` 从 MemStore 中获取完整上下文。
+
+**问题**：tool agent 被调用时，LLM 只能传递文本参数（如 `request`），但 tool agent 需要访问触发其调用的完整事件上下文（因果链、完整事件详情），这需要 `event_key`。
+
+**设计决策**：tool 的 Declaration InputSchema 中必须声明 `event_key` 参数，由框架在运行时自动注入，而非依赖 LLM 生成。
+
+### 4.1 EventKey Snowflake 设计
+
+#### 4.1.1 当前问题
+
+当前 `NewEventKey` 使用 `evt_{timestamp}_{sequence}` 格式：
+
+```go
+func NewEventKey(timestamp int64, sequence int) string {
+    return fmt.Sprintf("evt_%d_%03d", timestamp, sequence)
+}
+```
+
+问题：
+- 不包含分区信息，无法从 Key 反推数据归属
+- 单机时钟依赖，分布式场景可能冲突
+- 无法支持按分区查询
+- 不适合云原生场景（需要跨实例全局唯一）
+
+#### 4.1.2 Snowflake 风格 EventKey
+
+参考 Snowflake 算法，设计 64-bit 整数 EventKey，编码 PartitionID、时间戳和序列号：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 63       53 │ 52            22 │ 21       12 │ 11             0 │
+│  PartitionID│   Timestamp      │  Sequence   │   Reserved     │
+│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+| 字段 | 位数 | 说明 |
+|------|------|------|
+| PartitionID | 11 bits | 存储分区键（0-2047），由 FNV-1a(AgentName) 派生 |
+| Timestamp | 31 bits | 秒级时间戳偏移（相对 epoch），可用 ~68 年 |
+| Sequence | 10 bits | 同秒内序列号（0-1023），单分区每秒可产生 1024 个事件 |
+| Reserved | 12 bits | 预留位，未来可用于分布式 worker ID 或扩展 |
+
+**核心优势**：
+
+1. **Key 内含 PartitionID** → 直接从 EventKey 提取分区归属，无需额外索引
+2. **按分区有序** → 同一分区的事件在时间上连续，便于范围查询
+3. **全局唯一** → PartitionID + Timestamp + Sequence 组合保证
+4. **分布式友好** → Reserved 位可用于 worker ID，支持多实例部署
+5. **可排序** → int64 天然支持按时间排序
+6. **存储高效** → 8 字节整数 vs 24+ 字符串
+
+```go
+// NewSnowflakeEventKey generates a Snowflake-style EventKey.
+func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
+    ts := nowMs/1000 - snowflakeEpoch
+    // ... sequence counter per partitionID ...
+    return (int64(partitionID&partitionIDMask) << partitionIDShift) |
+           ((ts & timestampMask) << timestampShift) |
+           (int64(seq&sequenceMask) << sequenceShift)
+}
+
+// PartitionIDFromEventKey extracts the PartitionID from an EventKey.
+func PartitionIDFromEventKey(key int64) int {
+    return int((key >> partitionIDShift) & partitionIDMask)
+}
+
+// PartitionIDFromName computes a stable PartitionID from a name string.
+// AgentName (framework) → PartitionID (storage), deterministic FNV-1a.
+func PartitionIDFromName(name string) int {
+    h := fnv.New32a()
+    h.Write([]byte(name))
+    return int(h.Sum32() & 0x7FF)
+}
+```
+
+### 4.2 Memory 数据隔离设计
+
+#### 4.2.1 设计原则
+
+**核心原则：Memory 不感知 agent，但从存储角度实现数据隔离。**
+
+- FilterKey 是 trpc-agent-go 框架的概念，属于 LLM context 层面的隔离
+- Memory 从**存储分区**角度思考隔离，使用 **PartitionID** 作为分区键（纯整数，纯存储概念）
+- 框架已有的 **AgentName**（`agent.Info().Name`）是稳定的 agent 身份标识
+- **PartitionID = FNV-1a(AgentName) & 0x7FF**，由 MemoryPlugin 在 tagent 层计算，Memory 层完全不知道 AgentName 的存在
+- 三层分离：框架概念（AgentName/FilterKey）→ tagent 层映射 → 存储概念（PartitionID）
+
+```
+框架层 (AgentName/FilterKey)     tagent 层 (MemoryPlugin)          Memory 层 (PartitionID)
+┌──────────────────────┐      ┌───────────────────────┐      ┌─────────────────┐
+│ AgentName = "tagent" │──────→│ FNV-1a("tagent")=42  │──────→│ partition=42    │
+│ FilterKey = "tagent" │      │ FNV-1a("knowledge")=85│──────→│ partition=85    │
+├──────────────────────┤      │ FNV-1a("recall")=123 │──────→│ partition=123   │
+│ AgentName = "know"   │──────→│                       │      │                 │
+│ FilterKey = "tagent/ │      │ AgentName → PartitionID│      │ 纯整数分区键    │
+│              know-xx"│      │ Memory 不感知 agent   │      │ 无 agent 语义   │
+└──────────────────────┘      └───────────────────────┘      └─────────────────┘
+  框架身份 + LLM 隔离           身份 → 存储的桥梁             物理存储隔离
+```
+
+**关键统一**：不引入独立的 AgentID 概念。AgentName（框架已有）→ PartitionID（存储），
+语义一致，零映射表成本。FNV-1a hash 是确定性的，同名字永远映射到同分区。
+
+#### 4.2.2 PartitionID 作为存储分区键
+
+**FullEvent 使用 PartitionID 字段**：
+
+```go
+type FullEvent struct {
+    EventKey     int64  `json:"event_key"`            // Snowflake int64
+    PartitionID  int    `json:"partition_id"`         // 存储分区键
+    ParentKey    int64  `json:"parent_key,omitempty"`// 因果链
+    EventType    string `json:"event_type"`
+    EventSummary string `json:"event_summary"`
+    Timestamp    int64  `json:"timestamp"`
+    Content      string `json:"content"`
+    // ...
+}
+```
+
+**QueryOptions 使用 PartitionID 过滤**：
+
+```go
+type QueryOptions struct {
+    PartitionID  int      `json:"partition_id"`   // 按分区键过滤（0=所有）
+    PartitionIDs []int    `json:"partition_ids"`  // 多分区键过滤
+    EventTypes   []string `json:"event_types"`
+    StartTime    int64    `json:"start_time"`
+    EndTime      int64    `json:"end_time"`
+    Limit        int      `json:"limit"`
+    Offset       int      `json:"offset"`
+    OrderBy      string   `json:"order_by"`
+}
+```
+
+#### 4.2.3 存储实现
+
+**InMemoryStore** — 按 PartitionID 分区：
+
+```go
+type InMemoryStore struct {
+    mu      sync.RWMutex
+    events  map[int]map[int64]FullEvent  // PartitionID → EventKey → FullEvent
+}
+```
+
+**FileBackend** — 按 PartitionID 分目录：
+
+```
+data/
+├── 42/              ← PartitionID=42 (tagent: FNV-1a("tagent"))
+│   ├── 9223372036854775807.json
+│   └── 9223372036854775808.json
+├── 85/              ← PartitionID=85 (knowledge: FNV-1a("knowledge"))
+│   └── ...
+└── 123/             ← PartitionID=123 (recall: FNV-1a("recall"))
+    └── ...
+```
+
+**云原生扩展**：PartitionID 作为分区键天然支持：
+- 分布式存储：不同 PartitionID 分片到不同节点
+- 多租户隔离：不同用户/租户的 agent 使用不同 PartitionID 段
+- 水平扩展：按 PartitionID range 分片，无需跨分片查询
+
+#### 4.2.4 MemoryPlugin 按 PartitionID 维护独立因果链
+
+**当前问题**：`lastEventKey` 全局单例，子 agent 事件打断顶层因果链。
+
+**改进**：按 PartitionID 维护因果链：
+
+```go
+type MemoryPlugin struct {
+    memStore      memory.MemoryStore
+    mu            sync.Mutex
+    lastEventKeys map[int]int64  // PartitionID → lastEventKey (独立因果链)
+}
+```
+
+**因果链隔离效果**：
+
+```
+PartitionID=42 (tagent):     E0 → E1 → E2 ──────────────────→ E5
+                                                 ↑ 因果链跨越子 agent
+PartitionID=85 (knowledge):                     E3 → E4
+                                                 ↑ 独立因果链
+```
+
+- 顶层 agent 的因果链只包含自身事件（E0→E1→E2→E5）
+- 子 agent 有独立因果链（E3→E4）
+- tool agent 通过 `event_key` 获取触发事件 E2，通过 E2.ParentKey 追溯顶层因果链
+
+### 4.3 EventKey 注入流程
+
+```mermaid
+sequenceDiagram
+    participant LLM as LLM Model
+    participant Flow as Flow (框架)
+    participant MP as MemoryPlugin
+    participant Tool as Tool Agent
+    participant MS as MemStore
+
+    LLM->>Flow: tool_calls: knowledge({request: "..."})
+    Flow->>MP: OnEvent(assistant message + tool_calls)
+    MP->>MP: 生成 EventKey (Snowflake: PartitionID=42, ts, seq)
+    MP->>MP: 写入 StateDelta["event_key"]
+    MP->>MS: StoreEvent(key, FullEvent{PartitionID: 42})
+    MP-->>Flow: 返回带 StateDelta 的事件
+
+    Note over Flow: 框架拦截 tool 调用<br/>从 StateDelta 提取 event_key<br/>自动注入到 tool 参数中
+
+    Flow->>Tool: Call(ctx, {"request": "...", "event_key": 9223372036854775807})
+    Tool->>MS: GetEvent(eventKey)
+    MS-->>Tool: FullEvent (PartitionID=42 的完整上下文)
+    Tool->>MS: QueryEvents({PartitionID: 42, ...})
+    MS-->>Tool: 顶层 agent 的因果链事件
+    Tool-->>Flow: Tool Result
+```
+
+### 4.4 EventKey 注入机制
+
+**注入位置**：trpc-agent-go Flow 层的 `postprocess` 阶段（tool_call 执行前）。
+
+**注入方式**：
+1. MemoryPlugin.OnEvent 处理 assistant 的 tool_call 消息，生成 Snowflake EventKey 并写入 `StateDelta`
+2. Flow 在执行 tool_call 时，从当前事件的 `StateDelta` 中提取 `event_key`
+3. Flow 将 `event_key` 自动注入到 tool 的 JSON 参数中（如果 Declaration 中声明了该参数）
+4. Tool agent 收到完整的参数（含 `event_key`），可用于查询 MemStore
+
+**Tool Declaration 约束**：
+- 所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数（optional）
+- 参数描述应说明：由框架自动注入，tool agent 通过此 key 从 MemStore 获取触发上下文
+- 纯执行器 tool（如 CommandTool）可选择不声明此参数
+
+```go
+// Declaration 中的 event_key 声明示例
+"event_key": {
+    Type:        "string",
+    Description: "[auto-injected] Snowflake EventKey of the triggering event. Use this to retrieve full context from memory.",
+}
+```
+
+### 4.5 Tool Agent 使用 EventKey 获取上下文
+
+Tool agent 收到 `event_key` 后，可通过 `MemoryStoreAccessor` 执行以下操作：
+
+| 操作 | 方法 | 用途 |
+|------|------|------|
+| 获取触发事件详情 | `GetEvent(eventKey)` | 获取完整的 tool_call 事件内容 |
+| 提取分区归属 | `PartitionIDFromEventKey(eventKey)` | 从 EventKey 反推 PartitionID |
+| 按分区查询 | `QueryEvents({PartitionID: id})` | 查询同分区的事件流 |
+| 追溯因果链 | `GetEvent(event.ParentKey)` | 获取前驱事件，理解上下文脉络 |
+| 跨分区查询 | `QueryEvents({PartitionIDs: [42, 85]})` | 查询顶层+子 agent 事件 |
+
+---
+
+## 五、工具的 trpc-agent-go 集成
+
+### 5.1 CallableTool 接口
 
 所有 tagent 工具都实现了 `trpc-agent-go/tool.CallableTool` 接口（编译时断言）：
 
 ```go
-// recall_tool.go:15-16
+// recall/recall_agent.go
 var _ tool.CallableTool = (*RecallTool)(nil)
 
-// command_tool.go:13-14
+// command/command_tool.go
 var _ tool.CallableTool = (*CommandTool)(nil)
 ```
 
-KnowledgeAgent 不再是 CallableTool，而是通过 `agenttool.NewTool()` 包装（组装在根包 tagent.go）：
+KnowledgeAgent 不再是 CallableTool，而是通过 `agenttool.NewTool()` 包装（组装在 tool/knowledge 子包）：
 
 ```go
 // tagent.go
@@ -130,31 +455,20 @@ type CallableTool interface {
 }
 ```
 
-### 4.2 工具注册到 Runner
+### 5.2 工具注册到 Runner
 
-在 `NewTagentAgent` 中通过 `runner.WithTools()` 注册。注意 KnowledgeTool 的创建在根包完成：
+在 `tagent.New()` 中通过 `agent.TagentConfig.Tools` 注册。工厂函数封装了完整的实例化过程：
 
 ```go
-// tagent.go (root package)
-knowledgeTool, _ := tagent.NewKnowledgeTool(tagent.KnowledgeAgentConfig{
-    Model:     model,
-    SkillRepo: skillRepo,
-    MemStore:  memStore,
+// tagent.go (root package) — tagent.New() 工厂函数
+ta, err := tagent.New(tagent.Config{
+    Model:       model,
+    PromptDir:   "resources/prompts",
 })
-
-mainAgent, _ := agent.NewTagentAgent(&agent.TagentConfig{
-    Tools: []tool.Tool{
-        knowledgeTool,
-        tagenttool.NewRecallTool(...),
-        tagenttool.NewCommandTool(...),
-    },
-})
-
-// Wire tmux state change callback
-Tagent.WireCommandTool(mainAgent, commandTool)
+// 返回已绑定 knowledge/recall/command 三个 core tool 的 *agent.TagentAgent
 ```
 
-### 4.3 工具调用流程
+### 5.3 工具调用流程
 
 ```mermaid
 sequenceDiagram
@@ -173,9 +487,9 @@ sequenceDiagram
 
 ---
 
-## 五、RecallTool — 智能记忆召回
+## 六、RecallTool — 智能记忆召回
 
-### 5.1 抽象职责
+### 6.1 抽象职责
 
 **智能记忆召回** — RecallTool 是 Agent 查询内部知识的窗口。
 它提供对 MemoryStore 的结构化访问，但不对结果做智能解读。
@@ -184,10 +498,10 @@ sequenceDiagram
 **设计决策**（来自 trpcclaw 验证）：RecallTool 不需要内部 React 循环。
 理由：功能单一（查询/获取事件），无多工具协作需求，“理解”结果是顶层 Agent 的工作。
 
-### 5.2 Declaration
+### 6.2 Declaration
 
 ```go
-// recall_tool.go:47-77
+// recall/recall_agent.go:47-77
 func (rt *RecallTool) Declaration() *tool.Declaration {
     return &tool.Declaration{
         Name:        "recall",
@@ -218,10 +532,10 @@ func (rt *RecallTool) Declaration() *tool.Declaration {
 }
 ```
 
-### 5.3 Call — 双路径
+### 6.3 Call — 双路径
 
 ```go
-// recall_tool.go:79-97
+// recall/recall_agent.go:79-97
 func (rt *RecallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
     var args RecallArgs
     if err := json.Unmarshal(jsonArgs, &args); err != nil {
@@ -238,10 +552,10 @@ func (rt *RecallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 }
 ```
 
-### 5.4 queryEvents — 多层查询
+### 6.4 queryEvents — 多层查询
 
 ```go
-// recall_tool.go:121-159
+// recall/recall_agent.go:121-159
 func (rt *RecallTool) queryEvents(args RecallArgs) (any, error) {
     // Step 1: 按 event_types + limit 查询（使用 MemoryStore.QueryEvents）
     opts := memory.QueryOptions{
@@ -271,10 +585,10 @@ func (rt *RecallTool) queryEvents(args RecallArgs) (any, error) {
 
 **注意**：`SearchBySummary` 全文搜索仅在 `InMemoryStore`（实现了该接口）上生效。`FileBackend` 不实现该接口，会跳过全文搜索步骤。
 
-### 5.5 mergeEventReferences — 结果合并去重
+### 6.5 mergeEventReferences — 结果合并去重
 
 ```go
-// recall_tool.go:161-181
+// recall/recall_agent.go:161-181
 func mergeEventReferences(a, b []memory.EventReference, limit int) []memory.EventReference {
     seen := make(map[string]bool)
     var result []memory.EventReference
@@ -299,10 +613,10 @@ func mergeEventReferences(a, b []memory.EventReference, limit int) []memory.Even
 }
 ```
 
-### 5.6 停用词过滤
+### 6.6 停用词过滤
 
 ```go
-// recall_tool.go:196-224
+// accessor.go:extractKeywords
 func extractKeywords(query string) []string {
     var keywords []string
     for _, part := range strings.Fields(query) {
@@ -317,10 +631,10 @@ func extractKeywords(query string) []string {
 
 停用词包含中英文常见虚词（"的"、"了"、"the"、"is" 等），避免干扰搜索。
 
-### 5.7 返回数据结构
+### 6.7 返回数据结构
 
 ```go
-// recall_tool.go:249-258
+// recall/recall_agent.go:RecallEventDetail
 type RecallEventDetail struct {
     Key       string           // EventKey
     ParentKey string           // 因果链父 key
@@ -336,9 +650,9 @@ type RecallEventDetail struct {
 
 ---
 
-## 六、KnowledgeAgent — 知识获取与翻译
+## 七、KnowledgeAgent — 知识获取与翻译
 
-### 6.1 核心职责
+### 7.1 核心职责
 
 KnowledgeAgent 发现和加载外部技能文件（skills 目录中的 .md 等文件），并将能力描述翻译为 ExecutionPlan。
 
@@ -347,35 +661,26 @@ KnowledgeAgent 发现和加载外部技能文件（skills 目录中的 .md 等�
 - **架构统一**：TagentAgent 实例 + agenttool.NewTool() 包装，复用框架的 React 循环、事件收集、Session 管理
 - **Skill 和 MCP 统一为"capabilities"**：统一为 skills 文件系统管理
 - **Prompt 文件化**：通过 prompt.Loader 加载 resources/prompts/knowledge_agent.md
-- **组装在根包**：KnowledgeAgent 组装代码在 tagent.go，因为它需要同时 import agent 和 tool 包
+- **组装在子包**：KnowledgeAgent 和 RecallAgent 的组装代码在各自的子包中（tool/knowledge, tool/recall），根包 tagent.go 只负责工厂函数
 
-### 6.2 组装层（tagent.go — 根包）
+### 7.2 工厂函数（tagent.go — 根包）
+
+`tagent.New()` 封装了完整的 agent 实例化过程：
 
 ```go
 // tagent.go (root package)
-type KnowledgeAgentConfig struct {
-    Model       model.Model
-    MemStore    tool.MemoryStoreAccessor
-    SkillRepo   tool.SkillRepository
-    MCPToolSets []tagenttool.ToolSet
-    PromptDir   string
-    MaxToolIterations int
-    MaxTokens         int
-    Temperature       float64
-}
-
-func NewKnowledgeAgent(cfg KnowledgeAgentConfig) (*agent.TagentAgent, error) {
-    // 1. Load prompt, 2. Build sub-tools, 3. Create TagentAgent
-    ...
-}
-
-func NewKnowledgeTool(cfg KnowledgeAgentConfig) (tagenttool.Tool, error) {
-    knowledgeAgent, err := NewKnowledgeAgent(cfg)
-    return agenttool.NewTool(knowledgeAgent, ...), nil
+func New(cfg Config) (*agent.TagentAgent, error) {
+    // 1. Create KnowledgeTool
+    // 2. Create RecallTool
+    // 3. Create CommandTool
+    // 4. Create main TagentAgent with all three tools
+    // 5. Wire CommandTool's tmux notifications via MessageInjector
 }
 ```
 
-### 6.3 子工具（tool/subtools.go）
+使用者只需调用 `tagent.New()` 即可获得一个完整的 agent 实例，无需了解内部 tool 的组装细节。
+
+### 7.3 子工具（tool/knowledge/knowledge_subtools.go）
 
 | 子工具 | 工厂函数 | 说明 |
 |--------|---------|------|
@@ -385,7 +690,7 @@ func NewKnowledgeTool(cfg KnowledgeAgentConfig) (tagenttool.Tool, error) {
 | `duckduckgo_search` | `duckduckgo.NewTool()` | 搜索事实性知识 |
 | `memory_query` | `NewMemoryQueryTool(accessor)` | 查询历史知识记录 |
 
-### 6.4 Prompt 文件化
+### 7.4 Prompt 文件化
 
 System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 - 通过 `prompt.Loader` 动态加载
@@ -394,9 +699,9 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 
 ---
 
-## 七、CommandTool — 命令执行
+## 八、CommandTool — 命令执行
 
-### 7.1 双模式设计
+### 8.1 双模式设计
 
 CommandTool 支持两种执行模式：
 
@@ -405,10 +710,10 @@ CommandTool 支持两种执行模式：
 | `exec` | 同步，等待命令完成 | 命令结束 | 短期命令（< 60s） |
 | `tmux_exec` | 异步，立即返回 session ID | 立即返回 | 长期交互命令 |
 
-### 7.2 CommandTool 的组合结构
+### 8.2 CommandTool 的组合结构
 
 ```go
-// command_tool.go:25-36
+// command/command_tool.go:25-36
 type CommandTool struct {
     workspace    string
     runAsUser    string
@@ -423,10 +728,10 @@ type CommandTool struct {
 }
 ```
 
-### 7.3 exec 模式 — 同步执行
+### 8.3 exec 模式 — 同步执行
 
 ```go
-// command_tool.go:162-190
+// command/command_tool.go:162-190
 func (ct *CommandTool) executeSync(ctx context.Context, args CommandArgs) (any, error) {
     spec := CommandSpec{
         Command:    "sh",
@@ -448,10 +753,10 @@ func (ct *CommandTool) executeSync(ctx context.Context, args CommandArgs) (any, 
 }
 ```
 
-### 7.4 tmux_exec 模式 — 异步执行
+### 8.4 tmux_exec 模式 — 异步执行
 
 ```go
-// command_tool.go:192-229
+// command/command_tool.go:192-229
 func (ct *CommandTool) executeAsync(ctx context.Context, args CommandArgs) (any, error) {
     // Step 1: 创建 tmux session
     session, err := ct.tmuxExecutor.CreateSession(ctx, TmuxCreateOptions{
@@ -478,30 +783,47 @@ func (ct *CommandTool) executeAsync(ctx context.Context, args CommandArgs) (any,
 }
 ```
 
-### 7.5 TmuxMonitor 的 callback 机制
+### 8.5 CommandTool 的 MessageInjector 机制
+
+CommandTool 通过 `MessageInjector` 接口闭环处理 tmux 状态变更通知，
+不需要外部（如 tagent.go）参与格式化和注入逻辑：
 
 ```go
-// command_tool.go:231-237
+// command/command_tool.go
+
+// MessageInjector injects a system message to trigger agent re-evaluation.
+type MessageInjector interface {
+    InjectMessage(msg model.Message)
+}
+
 func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
-    if ct.onStateChange != nil {
-        // TagentAgent 设置为调用 Runner.Run()
-        // 在 tagent_agent.go 中：
-        // ct.commandTool.SetOnStateChange(ct.handleTmuxStateChange)
-        ct.onStateChange(sessionID, oldStatus, newStatus, output)
+    if ct.injector == nil {
+        return
     }
+    // Build and format the state change message internally
+    content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", ...)
+    if output != "" {
+        // Truncate long output - keep the tail (last 2000 chars)
+        if len(output) > 2000 {
+            output = "...(truncated)" + output[len(output)-2000:]
+        }
+        content += fmt.Sprintf("\nOutput:\n%s", output)
+    }
+    ct.injector.InjectMessage(model.Message{Role: model.RoleSystem, Content: content})
 }
 ```
 
-**关键**：`onStateChange` 由 `TagentAgent` 设置，指向 `handleTmuxStateChange`。当 tmux session 状态变为 stable / completed / error 时，触发新的 Agent 迭代，实现**异步命令完成后的自动通知**。
+`TagentAgent` 天然实现了 `MessageInjector` 接口（有 `InjectMessage(msg model.Message)` 方法），
+因此在 `tagent.New()` 中只需 `cmdTool.SetMessageInjector(ta)` 即可完成接线。
 
 ---
 
-## 八、CommandExecutor — 安全命令执行
+## 九、CommandExecutor — 安全命令执行
 
-### 8.1 Execute 流程
+### 9.1 Execute 流程
 
 ```go
-// command_executor.go:86-154
+// command/command_executor.go:86-154
 func (ce *CommandExecutor) Execute(ctx context.Context, spec CommandSpec) (CommandResult, error) {
     // Step 1: 通过 context 设置 timeout
     if timeout > 0 {
@@ -529,10 +851,10 @@ func (ce *CommandExecutor) Execute(ctx context.Context, spec CommandSpec) (Comma
 }
 ```
 
-### 8.2 buildCommand — 用户隔离
+### 9.2 buildCommand — 用户隔离
 
 ```go
-// command_executor.go:156-213
+// command/command_executor.go:156-213
 func (ce *CommandExecutor) buildCommand(spec CommandSpec) (*exec.Cmd, error) {
     if spec.RunAsUser != "" {
         // 使用 sudo -u runAsUser 执行
@@ -561,9 +883,9 @@ func (ce *CommandExecutor) buildCommand(spec CommandSpec) (*exec.Cmd, error) {
 
 ---
 
-## 九、TmuxMonitor — 状态监控
+## 十、TmuxMonitor — 状态监控
 
-### 9.1 监控状态机
+### 10.1 监控状态机
 
 ```mermaid
 stateDiagram-v2
@@ -580,10 +902,10 @@ stateDiagram-v2
     Error --> [*]
 ```
 
-### 9.2 状态常量
+### 10.2 状态常量
 
 ```go
-// tmux_executor.go:72-81
+// command/tmux_executor.go:72-81
 const (
     SessionRunning   SessionStatus = "running"    // 正在运行
     SessionStable    SessionStatus = "stable"     // 输出稳定（适合读取）
@@ -594,10 +916,10 @@ const (
 )
 ```
 
-### 9.3 detectSessionState — 状态检测逻辑
+### 10.3 detectSessionState — 状态检测逻辑
 
 ```go
-// tmux_monitor.go:227-292
+// command/tmux_monitor.go:227-292
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
     // Step 1: 检查进程和 pane 状态
     processExists := tm.executor.ProcessExists(session.ID)
@@ -627,7 +949,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 }
 ```
 
-### 9.4 FakeAlive / FakeDead 处理
+### 10.4 FakeAlive / FakeDead 处理
 
 | 状态 | 触发条件 | 处理方式 |
 |------|---------|---------|
@@ -636,10 +958,10 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 
 **场景**：长时间运行的构建命令，进程存在但不产生新输出——此时需要通过心跳检测判断是"真的还在运行"还是"假死了"。
 
-### 9.5 配置参数
+### 10.5 配置参数
 
 ```go
-// tmux_monitor.go:43-52
+// command/tmux_monitor.go:43-52
 func DefaultMonitorConfig() MonitorConfig {
     return MonitorConfig{
         Interval:             30 * time.Second,  // 检测间隔
@@ -654,9 +976,9 @@ func DefaultMonitorConfig() MonitorConfig {
 
 ---
 
-## 十、TmuxExecutor — Tmux Session 管理
+## 十一、TmuxExecutor — Tmux Session 管理
 
-### 10.1 核心操作
+### 11.1 核心操作
 
 | 方法 | 说明 |
 |------|------|
@@ -670,10 +992,10 @@ func DefaultMonitorConfig() MonitorConfig {
 | `RestartSession(id, opts)` | 重启 session |
 | `SendKeys(id, keys)` | 向 session 发送按键（交互） |
 
-### 10.2 Session 唯一命名
+### 11.2 Session 唯一命名
 
 ```go
-// tmux_executor.go:92-94
+// command/tmux_executor.go:92-94
 func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
     sessionName := fmt.Sprintf("%s-%d", te.prefix, time.Now().UnixNano())
     // prefix 默认值："tagent"
@@ -685,9 +1007,9 @@ func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
 
 ---
 
-## 十一、完整数据流
+## 十二、完整数据流
 
-### 11.1 RecallTool 完整数据流
+### 12.1 RecallTool 完整数据流
 
 ```mermaid
 sequenceDiagram
@@ -703,7 +1025,7 @@ sequenceDiagram
     RT-->>LLM: RecallResponse{events: [...]}
 ```
 
-### 11.2 CommandTool tmux_exec 完整数据流
+### 12.2 CommandTool tmux_exec 完整数据流
 
 ```mermaid
 sequenceDiagram
@@ -733,9 +1055,9 @@ sequenceDiagram
 
 ---
 
-## 十二、关键设计决策
+## 十三、关键设计决策
 
-### 12.1 为什么 RecallTool 不用内部 LLM 循环，而 KnowledgeAgent 需要？
+### 13.1 为什么 RecallTool 不用内部 LLM 循环，而 KnowledgeAgent 需要？
 
 **设计决策**：RecallTool 保持简单 CallableTool，KnowledgeAgent 用 TagentAgent + agenttool.NewTool() 包装。
 
@@ -749,27 +1071,54 @@ sequenceDiagram
 
 来源：trpcclaw 经过实践验证的分类决策。
 
-### 12.2 为什么 KnowledgeAgent 组装代码放在根包？
+### 13.2 为什么 KnowledgeAgent 和 RecallAgent 组装代码放在子包？
 
-**循环依赖问题**：KnowledgeAgent 需要同时 import `agent`（创建 TagentAgent）和 `tool`（获取子工具）。
-如果放在 `agent` 包中，则 agent→tool 形成 agent→tool 的依赖（agent 本身不需要 tool）。
-如果放在 `tool` 包中，则 tool→agent 形成循环依赖（agent 已经导入 tool）。
+**包结构清晰**：KnowledgeAgent 和 RecallAgent 的组装代码（`NewAgent`、`NewTool`）在各自的子包中
+（`tool/knowledge`、`tool/recall`），与子工具代码放在一起，内聚性强。
 
-**解决方案**：根包是唯一能同时看到所有子包的位置。
+根包 tagent.go 只负责 `tagent.New()` 工厂函数，将三个 core tool 绑定到 agent 实例上。
 
 ```
-tagent (根) → agent    ← 可以调用 NewTagentAgent()
-tagent (根) → tool      ← 可以调用 NewSkillSearchTool() 等
-tagent (根) → prompt    ← 可以调用 prompt.Loader
+tagent (根) → agent      ← tagent.New() 创建 TagentAgent
+tagent (根) → tool/command  ← 创建 CommandTool
+tagent (根) → tool/recall   ← 创建 RecallTool
+tagent (根) → tool/knowledge← 创建 KnowledgeTool
+tagent (根) → prompt       ← 子包各自加载 prompt
 
-agent → plugin → memory  ← agent 不依赖 tool
-tool → memory             ← tool 不依赖 agent
+agent → plugin → memory   ← agent 不依赖 tool
+tool/command → memory     ← command 不依赖 agent
+tool/recall → memory      ← recall 不依赖 agent（通过 accessor 接口）
+tool/knowledge → memory   ← knowledge 不依赖 agent
 ```
 
-同理，WireCommandTool 也放在根包：它需要同时看到 `TagentAgent`（注入消息）和 `CommandTool`（设置回调），
-跨越 agent↔tool 边界。
+CommandTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 command 包内，
+`TagentAgent` 天然实现该接口，在 `tagent.New()` 中通过 `SetMessageInjector(ta)` 完成接线。
 
-### 12.2 为什么 TmuxMonitor 用 callback 而不是 channel？
+### 13.3 为什么 TmuxMonitor 用 callback 而不是 channel？
+
+### 13.4 为什么 tool 参数必须包含 event_key？
+
+**设计决策**：所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数，由框架在运行时自动注入。
+
+| 对比项 | 无 event_key（当前） | 有 event_key（目标） |
+|--------|---------------------|---------------------|
+| **上下文获取** | 只能依赖 LLM 传的文本 | 可从 MemStore 获取完整事件上下文 |
+| **因果链追溯** | 无法追溯 | 通过 ParentKey 追溯事件脉络 |
+| **LLM 依赖** | 完全依赖 LLM 传参 | 框架自动注入，LLM 无需感知 |
+| **扩展性** | 新 tool 需自行设计上下文获取 | 统一机制，新 tool 自动获得上下文 |
+
+**选型理由**：
+- 顶层 agent 的 LLM context 是事件记录流，tool 被调用时需要知道在流中的位置
+- `event_key` 由 MemoryPlugin 生成，LLM 无法感知其值，必须框架注入
+- tool agent 通过 `event_key` 可获取：触发事件详情、因果链前驱事件、同时间段相关事件
+- 纯执行器 tool（如 CommandTool）可豁免，但 tool agent（如 KnowledgeAgent、RecallAgent）必须声明
+
+**注入时机**：
+1. LLM 生成 tool_call → 成为 assistant 事件
+2. MemoryPlugin.OnEvent 处理该事件，生成 `event_key` 并写入 StateDelta
+3. Flow 执行 tool_call 前，从 StateDelta 提取 `event_key`
+4. Flow 将 `event_key` 合并到 tool 的 JSON 参数中
+5. Tool agent 在 Call 方法中解析 `event_key`，用于查询 MemStore
 
 **决策**：callback 让 TagentAgent 完全控制如何触发新迭代（通过 `Runner.Run()`）。
 

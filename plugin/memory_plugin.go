@@ -1,10 +1,8 @@
-// Package plugin provides tagent-specific plugins for trpc-agent-go's Runner.
 package plugin
 
 import (
 	"context"
 	"sync"
-	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -19,21 +17,35 @@ import (
 // It implements plugin.Plugin and is registered on the Runner.
 //
 // Core responsibilities:
-//  1. Infer event type from Event role
-//  2. Generate EventKey
-//  3. Build FullEvent with ParentKey causal chain
+//  1. Derive PartitionID from Invocation.AgentName (using FNV-1a hash)
+//  2. Generate Snowflake EventKey (int64, encoding PartitionID)
+//  3. Build FullEvent with ParentKey (per-partition independent causal chain)
 //  4. Persist to MemoryStore
-//  5. Write back EventKey/EventType to Event.StateDelta
+//  5. Write back EventKey/PartitionID to Event.StateDelta
+//
+// Storage isolation: MemoryPlugin maps AgentName → PartitionID (storage concept).
+// Memory itself only sees PartitionID as an integer — it has no agent awareness.
+// The mapping is:
+//
+//	AgentName (framework) → PartitionIDFromName() → PartitionID (storage)
+//	"tagent"       → hash → 42
+//	"knowledge"    → hash → 85
+//	"recall"       → hash → 123
+//
+// Causal chain isolation: each PartitionID maintains an independent causal chain
+// (lastEventKeys map). This prevents sub-agent events from breaking the
+// parent agent's causal chain.
 type MemoryPlugin struct {
-	memStore     memory.MemoryStore
-	mu           sync.Mutex // Protects lastEventKey for concurrent safety
-	lastEventKey string     // Causal chain: key of the preceding event
+	memStore      memory.MemoryStore
+	mu            sync.Mutex
+	lastEventKeys map[int]int64 // PartitionID → lastEventKey (independent causal chain)
 }
 
 // NewMemoryPlugin creates a new MemoryPlugin.
 func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin {
 	return &MemoryPlugin{
-		memStore: store,
+		memStore:      store,
+		lastEventKeys: make(map[int]int64),
 	}
 }
 
@@ -57,24 +69,32 @@ func (p *MemoryPlugin) onEvent(
 		return nil, nil
 	}
 
-	// 1. Infer event type from Event role
+	// 1. Derive PartitionID from AgentName (framework concept → storage concept)
+	agentName := p.extractAgentName(inv)
+	partitionID := memory.PartitionIDFromName(agentName)
+
+	// 2. Generate Snowflake EventKey
+	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
+
+	// 3. Infer event type from Event role
 	eventType := inferEventType(evt)
 
-	// 2. Generate EventKey
-	timestamp := time.Now().UnixMilli()
-	eventKey := memory.NewEventKey(timestamp, 0)
-
-	// 3. Extract summary from event content
+	// 4. Extract summary from event content
 	eventSummary := extractSummary(evt)
 
-	// 4. Build FullEvent with ParentKey causal chain
+	// 5. Get parent key from independent causal chain
 	p.mu.Lock()
-	parentKey := p.lastEventKey
+	parentKey := p.lastEventKeys[partitionID]
 	p.mu.Unlock()
 
+	// 6. Extract timestamp
+	timestamp := extractTimestamp(evt)
+
+	// 7. Build FullEvent
 	fullEvent := memory.FullEvent{
 		EventKey:     eventKey,
-		ParentKey:    parentKey, // causal chain
+		PartitionID:  partitionID,
+		ParentKey:    parentKey,
 		EventType:    eventType,
 		EventSummary: eventSummary,
 		Timestamp:    timestamp,
@@ -87,29 +107,50 @@ func (p *MemoryPlugin) onEvent(
 		fullEvent.Response = evt.Response
 	}
 
-	// 5. Persist to MemoryStore
+	// 8. Persist to MemoryStore
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-			log.Errorf("MemoryPlugin: failed to store event %s: %v", eventKey, err)
+			log.Errorf("MemoryPlugin: failed to store event %d: %v", eventKey, err)
 		} else {
-			log.Debugf("MemoryPlugin: stored event %s (type=%s, parent=%s)",
-				eventKey, eventType, p.lastEventKey)
+			log.Debugf("MemoryPlugin: stored event %d (partition=%d, type=%s, parent=%d)",
+				eventKey, partitionID, eventType, parentKey)
 		}
 	}
 
-	// 6. Write back EventKey and EventType to StateDelta
+	// 9. Write back EventKey and PartitionID to StateDelta
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
-	evt.StateDelta["event_key"] = []byte(eventKey)
+	evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+	evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
 	evt.StateDelta["event_type"] = []byte(eventType)
 
-	// 7. Update causal chain (thread-safe)
+	// 10. Update independent causal chain (thread-safe)
 	p.mu.Lock()
-	p.lastEventKey = eventKey
+	p.lastEventKeys[partitionID] = eventKey
 	p.mu.Unlock()
 
 	return evt, nil
+}
+
+// extractAgentName extracts the agent name from Invocation.
+// Falls back to "unknown" if not available, which maps to a default PartitionID.
+func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
+	if inv == nil {
+		return "unknown"
+	}
+	if inv.AgentName != "" {
+		return inv.AgentName
+	}
+	return "unknown"
+}
+
+// extractTimestamp extracts the timestamp from an Event.
+func extractTimestamp(evt *event.Event) int64 {
+	if evt == nil {
+		return 0
+	}
+	return evt.Timestamp.UnixMilli()
 }
 
 // inferEventType infers the event type from an Event's role.
@@ -122,10 +163,6 @@ func inferEventType(evt *event.Event) string {
 }
 
 // inferEventTypeFromMessage infers event type from a model.Message's role.
-// Note: System prompt is NOT part of the event stream — it is injected by
-// InstructionProcessor at initialization and preserved through compression.
-// RoleSystem may appear in the event stream (e.g., TmuxMonitor state notifications)
-// and is classified as external_input.
 func inferEventTypeFromMessage(msg model.Message) string {
 	switch msg.Role {
 	case model.RoleUser:
@@ -138,33 +175,26 @@ func inferEventTypeFromMessage(msg model.Message) string {
 	case model.RoleTool:
 		return memory.EventTypeActionCommand
 	default:
-		// Fallback: includes RoleSystem from TmuxMonitor injections (classified as external_input).
 		return memory.EventTypeExternalInput
 	}
 }
 
 // extractSummary extracts a summary from the event content.
-// Special events (external_input, agent_output) use full original content.
-// Other events (action_command, thinking_plan) use a brief summary.
-// Core principle: no information loss outside of design intent.
 func extractSummary(evt *event.Event) string {
 	if evt.Response == nil || len(evt.Response.Choices) == 0 {
 		return ""
 	}
 	msg := evt.Response.Choices[0].Message
 
-	// Determine event type to decide summary strategy
 	eventType := inferEventTypeFromMessage(msg)
 
 	// Special events: use full original content (no truncation)
 	switch eventType {
 	case memory.EventTypeExternalInput, memory.EventTypeAgentOutput:
-		return msg.Content // Full content, no information loss
+		return msg.Content
 	}
 
 	// Normal events: generate a descriptive summary
-	// action_command: "调用工具: toolName(args)"
-	// thinking_plan: "思考: content..." (brief)
 	switch msg.Role {
 	case model.RoleAssistant:
 		if len(msg.ToolCalls) > 0 {
@@ -172,7 +202,6 @@ func extractSummary(evt *event.Event) string {
 		}
 		return msg.Content
 	case model.RoleTool:
-		// Tool results can be long; use full content per design principle
 		return msg.Content
 	default:
 		return msg.Content
@@ -190,7 +219,8 @@ func formatToolCallSummary(toolCalls []model.ToolCall) string {
 		args := string(tc.Function.Arguments)
 		parts = append(parts, toolName+"("+args+")")
 	}
-	return "调用工具: " + joinStrings(parts, ", ")
+	result := "调用工具: " + joinStrings(parts, ", ")
+	return result
 }
 
 func joinStrings(ss []string, sep string) string {
@@ -202,4 +232,57 @@ func joinStrings(ss []string, sep string) string {
 		result += sep + ss[i]
 	}
 	return result
+}
+
+// int64ToString converts int64 to string using fmt.Sprintf.
+func int64ToString(n int64) string {
+	return formatInt64(n)
+}
+
+// intToString converts int to string.
+func intToString(n int) string {
+	return formatInt(n)
+}
+
+// formatInt64 and formatInt are overridable for testing.
+var (
+	formatInt64 = func(n int64) string { return defaultFormatInt64(n) }
+	formatInt   = func(n int) string { return defaultFormatInt(n) }
+)
+
+func defaultFormatInt64(n int64) string {
+	return simpleItoa64(n)
+}
+
+func defaultFormatInt(n int) string {
+	return simpleItoa(int64(n))
+}
+
+// simpleItoa64 converts int64 to string without importing strconv.
+func simpleItoa64(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
+
+// simpleItoa converts int to string.
+func simpleItoa(n int64) string {
+	return simpleItoa64(n)
 }

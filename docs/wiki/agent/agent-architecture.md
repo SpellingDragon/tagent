@@ -2,7 +2,7 @@
 
 ## 一、模块定位
 
-`tagent/agent` 是 tagent 项目的**顶层组装层（Composition Root）**，也是 tagent 与 trpc-agent-go 框架的**集成粘合层**。
+`tagent/agent` 是 tagent 项目的**核心机制协调层**，负责将 trpc-agent-go 的通用能力（LLMAgent / Runner / Plugin）与 tagent 的差异化逻辑（SmartCompress / MemoryPlugin / ContextIntervention）组装为统一入口 `TagentAgent`。
 
 **核心职责**：将 trpc-agent-go 的通用能力（LLMAgent / Runner / Plugin）与 tagent 的差异化逻辑（SmartCompress / MemoryPlugin / TmuxMonitor 事件注入）组装为统一入口 `TagentAgent`。
 
@@ -10,6 +10,8 @@
 - **复用而非重写**：tagent 不重复实现 React Loop，改用 LLMAgent 作为骨架
 - **注入而非继承**：tagent 的能力通过 callback（BeforeModel）和 plugin（OnEvent）注入到框架
 - **视图转换原则**：压缩发生在 BeforeModel，仅修改发给 LLM 的 messages 视图，不修改 Session 原始数据
+- **职责分离**：应用层组装逻辑（tagent.New() 工厂函数）放在根包 tagent.go，agent 包专注核心机制
+- **事件上下文传递**：顶层 agent 送 LLM 的 context 是事件记录流，tool 通过框架注入的 event_key 从 MemStore 获取完整上下文
 
 ---
 
@@ -47,17 +49,24 @@ graph TB
     end
 
     subgraph "外部依赖"
-        LLM["model.Model\n(LLM: GLM-4 / OpenAI ...)"]
+        LLM["model.Model\n(LLM: GLM-4 / OpenAI ...)]"]
         Tools["[]tool.Tool\n(CallableTools)"]
     end
 
+    subgraph "tagent (root)"
+        KAH["tagent.go\ntagent.New() 工厂函数"]
+    end
+
     User --> TA
-    Tmux --> TA
+    Tmux --> KAH
 
     TA --> Runner
     TA --> LLMAgent
     TA --> CI
     TA --> MS
+
+    KAH -->|MessageInjector| TA
+    KAH -->|InjectMessage| LLMAgent
 
     Runner --> Session
     Runner --> PluginManager
@@ -81,6 +90,7 @@ graph TB
     style LLMAgent fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style CI fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
     style SC fill:#fff8e1,stroke:#f9a825,stroke-width:2px
+    style KAH fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray:5,5
 ```
 
 ---
@@ -89,10 +99,13 @@ graph TB
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `tagent_agent.go` | 205 | 组合根：初始化 + 对外 API |
-| `context_intervention.go` | 85 | BeforeModel 拦截器：token 预算检查 + 触发压缩 |
-| `smart_compress.go` | 226 | 两阶段压缩引擎：按任务边界切分 + LLM 摘要 |
-| `token_counter.go` | 42 | Token 估算器：启发式字符计数 |
+| `tagent_agent.go` | 257 | 组合根：初始化 + 对外 API + InjectMessage |
+| `context_intervention.go` | 84 | BeforeModel 拦截器：token 预算检查 + 触发压缩 |
+| `smart_compress.go` | 225 | 两阶段压缩引擎：按任务边界切分 + LLM 摘要 |
+| `token_counter.go` | 41 | Token 估算器：启发式字符计数 |
+
+> **注意**：`tagent.New()` 工厂函数在根包 `tagent.go`，不在 agent 包中。
+> 这是因为这些代码需要同时 import agent 和 tool 包，放在任何子包都会导致循环依赖。
 
 ---
 
@@ -101,12 +114,16 @@ graph TB
 ### 4.1 TagentAgent — 组合根
 
 ```go
-// tagent_agent.go:29-39
+// tagent_agent.go:41-54
 type TagentAgent struct {
     llmAgent   *llmagent.LLMAgent  // 框架 React Loop
     runner     runner.Runner        // 框架编排引擎
     memStore   memory.MemoryStore  // 记忆存储（内存 or 文件）
     config     *TagentConfig
+
+    // Agent identity (for agent.Agent interface)
+    name        string
+    description string
 
     // 异步事件注入的会话上下文（首次 Run 时缓存）
     lastUserID    string
@@ -116,7 +133,11 @@ type TagentAgent struct {
 
 **为什么需要 lastUserID / lastSessionID？**
 
-TmuxMonitor 在后台异步检测 tmux 会话状态变更，需要注入 `RoleSystem` 消息触发新一轮 Agent 迭代。但 `handleTmuxStateChange` 没有传入 userID/sessionID 参数，只能依赖缓存的最近一次调用上下文。
+`InjectMessage` 在后台异步检测 tmux 会话状态变更时，需要注入 `RoleSystem` 消息触发新一轮 Agent 迭代。由于回调没有传入 userID/sessionID 参数，只能依赖缓存的最近一次调用上下文。
+
+**为什么需要 InjectMessage？**
+
+`InjectMessage` 是 `tagent.New()` 工厂函数中 `MessageInjector` 接线的基础设施。当 TmuxMonitor 检测到 tmux session 状态变更时，CommandTool 内部通过 `MessageInjector.InjectMessage()` 注入系统消息，后者使用 `Runner.Run()` 触发新的 Agent 迭代。
 
 ### 4.2 TagentConfig — 配置参数
 
@@ -656,21 +677,26 @@ estimatedTokens = Σ( Content长度 / CharsPerToken + 10 + 20×ToolCalls数 )
 
 ```go
 func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
-    // 1. 推断事件类型
-    eventType := inferEventType(evt)  // 根据 Message.Role
+    // 1. 从框架 AgentName 派生 PartitionID（存储概念）
+    agentName := p.extractAgentName(inv)  // inv.AgentName
+    partitionID := memory.PartitionIDFromName(agentName)  // FNV-1a hash
 
-    // 2. 生成事件 Key（时间戳 + 计数器）
-    eventKey := memory.NewEventKey(time.Now().UnixMilli(), 0)
+    // 2. 生成 Snowflake EventKey（int64，编码 PartitionID）
+    eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-    // 3. 提取摘要
+    // 3. 推断事件类型
+    eventType := inferEventType(evt)
+
+    // 4. 提取摘要
     eventSummary := extractSummary(evt)
 
-    // 4. 获取前驱事件 Key（因果链）
-    parentKey := p.lastEventKey
+    // 5. 获取前驱事件 Key（按 PartitionID 独立因果链）
+    parentKey := p.lastEventKeys[partitionID]
 
-    // 5. 构建 FullEvent
+    // 6. 构建 FullEvent
     fullEvent := memory.FullEvent{
         EventKey:     eventKey,
+        PartitionID:  partitionID,
         ParentKey:    parentKey,
         EventType:    eventType,
         EventSummary: eventSummary,
@@ -680,15 +706,16 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
         Response:     ...,
     }
 
-    // 6. 持久化到 MemoryStore
+    // 7. 持久化到 MemoryStore
     p.memStore.StoreEvent(eventKey, fullEvent)
 
-    // 7. 写回 EventKey/EventType 到 StateDelta
-    evt.StateDelta["event_key"] = []byte(eventKey)
+    // 8. 写回 EventKey/PartitionID/EventType 到 StateDelta
+    evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+    evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
     evt.StateDelta["event_type"] = []byte(eventType)
 
-    // 8. 更新因果链（线程安全）
-    p.lastEventKey = eventKey
+    // 9. 更新独立因果链（按 PartitionID 隔离）
+    p.lastEventKeys[partitionID] = eventKey
 
     return evt, nil
 }
@@ -759,6 +786,170 @@ return curr
 
 这意味着 `MemoryPlugin` 持久化的事件可以进一步被其他 Plugin 修改。
 
+### 12.5 Memory 数据隔离与 EventKey Snowflake 设计
+
+#### 12.5.1 设计原则
+
+**Memory 不感知 agent，但从存储角度实现数据隔离。**
+
+核心思想：
+- FilterKey 是 trpc-agent-go 框架的概念，属于 LLM context 层面的隔离
+- Memory 从**存储分区**角度思考隔离，使用 **PartitionID** 作为分区键（纯整数，纯存储概念）
+- 框架已有的 **AgentName**（`agent.Info().Name`）是稳定的 agent 身份标识
+- **PartitionID = FNV-1a(AgentName) & 0x7FF**，由 MemoryPlugin 在 tagent 层计算，Memory 层完全不知道 AgentName 的存在
+- 三层分离：框架概念（AgentName/FilterKey）→ tagent 层映射 → 存储概念（PartitionID）
+
+```
+框架层 (AgentName/FilterKey)     tagent 层 (MemoryPlugin)          Memory 层 (PartitionID)
+┌──────────────────────┐      ┌───────────────────────┐      ┌─────────────────┐
+│ AgentName = "tagent" │──────→│ FNV-1a("tagent")=42  │──────→│ partition=42    │
+│ FilterKey = "tagent" │      │ FNV-1a("knowledge")=85│──────→│ partition=85    │
+├──────────────────────┤      │ FNV-1a("recall")=123 │──────→│ partition=123   │
+│ AgentName = "know"   │──────→│                       │      │                 │
+│ FilterKey = "tagent/ │      │ AgentName → PartitionID│      │ 纯整数分区键    │
+│              know-xx"│      │ Memory 不感知 agent   │      │ 无 agent 语义   │
+└──────────────────────┘      └───────────────────────┘      └─────────────────┘
+  框架身份 + LLM 隔离           身份 → 存储的桥梁             物理存储隔离
+```
+
+**关键统一**：不引入独立的 AgentID 概念。AgentName（框架已有）→ PartitionID（存储），
+语义一致，零映射表成本。FNV-1a hash 是确定性的，同名字永远映射到同分区。
+
+#### 12.5.2 FilterKey vs AgentName vs PartitionID
+
+| 维度 | FilterKey (框架) | AgentName (框架) | PartitionID (Memory) |
+|------|-----------------|------------------|---------------------|
+| **用途** | LLM context 过滤 | Agent 身份标识 | 存储分区键 |
+| **值域** | 层级字符串 | 字符串 | 整数 (0-2047) |
+| **示例** | "tagent/knowledge-uuid" | "knowledge" | 85 |
+| **唯一性** | 含 UUID，每次运行不同 | agent 类型级别，稳定 | 由 AgentName 派生，稳定 |
+| **管理方** | 框架 (agenttool) | 框架 (agent.Info().Name) | MemoryPlugin (FNV-1a) |
+| **Memory 可见** | 不可见 | 不可见 | 直接使用 |
+| **关系** | 含 AgentName + UUID | → hash → PartitionID | 纯存储概念 |
+
+**为什么 PartitionID 而非 AgentName 直接做分区键**：
+- int 比字符串更适合做 map key 和目录名，性能更好
+- Snowflake EventKey 需要将分区信息编码进 64-bit 整数，int 天然适配
+- Memory 完全不持有 agent 语义字符串，保持概念纯净
+
+#### 12.5.3 顶层 Agent 未设置名称时的默认生成
+
+框架中 `llmagent.New(name)` 的 name 参数如果为空，tagent 会使用 `DefaultAgentName = "tagent"`。
+
+在云原生场景下，如果需要全局唯一性（多实例部署），tagent 使用 `memory.NewPartitionID()` 
+通过原子计数器生成唯一 PartitionID，确保进程级唯一。
+
+```go
+// MemoryPlugin.extractAgentName 的回退逻辑
+func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
+    if inv == nil {
+        return "unknown"  // → FNV-1a("unknown") = 稳定默认分区
+    }
+    if inv.AgentName != "" {
+        return inv.AgentName  // 框架已有，复用
+    }
+    return "unknown"
+}
+```
+
+#### 12.5.4 EventKey Snowflake 设计
+
+当前 `NewEventKey` 使用 `evt_{timestamp}_{sequence}` 格式，不含分区信息，无法支持按分区查询和云原生场景。
+
+参考 Snowflake 算法，设计 64-bit 整数 EventKey：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 63       53 │ 52            22 │ 21       12 │ 11             0 │
+│  PartitionID│   Timestamp      │  Sequence   │   Reserved     │
+│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+核心优势：
+- **Key 内含 PartitionID** → 从 EventKey 可直接反推数据归属，无需额外索引
+- **全局唯一** → PartitionID + Timestamp + Sequence 组合保证，分布式友好
+- **可排序** → int64 天然支持按时间排序
+- **存储高效** → 8 字节整数 vs 24+ 字符串
+- **云原生** → Reserved 位可扩展为 worker ID，支持多实例部署
+
+工具函数：
+- `NewSnowflakeEventKey(partitionID, nowMs)` — 生成 EventKey
+- `PartitionIDFromEventKey(key)` — 从 EventKey 提取 PartitionID
+- `TimestampFromEventKey(key)` — 从 EventKey 提取时间戳
+- `PartitionIDFromName(name)` — AgentName → PartitionID (FNV-1a)
+
+#### 12.5.5 MemoryPlugin 按 PartitionID 维护独立因果链
+
+**当前问题**：`lastEventKey` 全局单例，子 agent 事件打断顶层因果链。
+
+**改进**：按 PartitionID 维护因果链：
+
+```go
+type MemoryPlugin struct {
+    memStore      memory.MemoryStore
+    mu            sync.Mutex
+    lastEventKeys map[int]int64  // PartitionID → lastEventKey (独立因果链)
+}
+```
+
+**因果链隔离效果**：
+
+```
+PartitionID=42 (tagent):     E0 → E1 → E2 ──────────────────→ E5
+                                                 ↑ 因果链跨越子 agent
+PartitionID=85 (knowledge):                     E3 → E4
+                                                 ↑ 独立因果链
+```
+
+- 顶层 agent 的因果链只包含自身事件（E0→E1→E2→E5），不被子 agent 事件打断
+- 子 agent 有独立因果链（E3→E4）
+- tool agent 通过 `event_key` 获取触发事件 E2，通过 E2.ParentKey 追溯顶层因果链
+
+#### 12.5.6 MemoryStore 按分区隔离存储
+
+**InMemoryStore**：`map[int]map[int64]FullEvent`（PartitionID → EventKey → FullEvent）
+
+**FileBackend** 目录结构：
+```
+data/
+├── 42/              ← PartitionID=42 (tagent)
+│   ├── 9223372036854775807.json
+│   └── 9223372036854775808.json
+├── 85/              ← PartitionID=85 (knowledge)
+│   └── ...
+└── 123/             ← PartitionID=123 (recall)
+    └── ...
+```
+
+#### 12.5.7 EventKey 运行时注入 — Tool 上下文获取机制
+
+**设计问题**：顶层 agent 直接送 LLM 的 context 是一条**事件组成的记录流**（由 MemoryPlugin 追踪）。当 LLM 发起 tool_call 时，tool agent 需要知道触发该调用的 `event_key`，才能从 MemStore 获取完整事件上下文。
+
+**设计决策**：
+
+1. **Tool Declaration 必须声明 `event_key` 参数**（optional）— 所有 tool agent 的 InputSchema 中声明，描述为 `[auto-injected]`
+2. **框架在 tool_call 执行前自动注入** — Flow 层从当前事件 `StateDelta` 提取 `event_key`，合并到 tool 的 JSON 参数中
+3. **Tool agent 通过 `event_key` 获取上下文** — `GetEvent(eventKey)` 获取触发事件详情，`PartitionIDFromEventKey(eventKey)` 提取分区键，`QueryEvents({PartitionID: id})` 查询同分区事件流
+
+**注入时序**：
+
+```
+LLM 生成 tool_call
+  → assistant message 成为事件
+  → MemoryPlugin.OnEvent 生成 Snowflake EventKey → StateDelta["event_key"]
+  → Flow 执行 tool_call
+    → 从 StateDelta 提取 event_key
+    → 合并到 tool 的 jsonArgs
+    → tool.Call(ctx, {"request": "...", "event_key": 9223372036854775807})
+```
+
+**与现有机制的关系**：
+- `MemStore` 在 `ToolAgentFactoryConfig` 创建时注入（不变）
+- `event_key` 在每次 tool 调用时由框架注入（新增）
+- `PartitionID` 作为存储分区键，由 MemoryPlugin 在 OnEvent 时从 AgentName 派生（新增）
+- 三者配合：`MemStore` 提供访问能力，`event_key` 提供访问入口，`PartitionID` 提供存储隔离
+
 ---
 
 ## 十三、TagentAgent API 参考
@@ -790,10 +981,17 @@ for evt := range eventCh {
 
 ### 13.3 TmuxMonitor 集成
 
+TmuxMonitor 集成通过 `tagent.New()` 工厂函数自动完成：
+
 ```go
-cmdTool := tagenttool.NewCommandTool(...)
-agent.WireCommandTool(cmdTool)  // 自动设置 onStateChange 回调
+// tagent.go — tagent.New() 内部
+// CommandTool 通过 MessageInjector 接口闭环处理 tmux 状态变更
+// TagentAgent 天然实现 MessageInjector 接口
+cmdTool.SetMessageInjector(ta)
 ```
+
+> **注意**：tmux 状态变更通知已闭环在 `tool/command` 包内，
+> 通过 `MessageInjector` 接口解耦，不暴露给外部。
 
 ### 13.4 直接访问 MemoryStore
 
@@ -801,3 +999,30 @@ agent.WireCommandTool(cmdTool)  // 自动设置 onStateChange 回调
 store := agent.MemStore()
 events, _ := store.RecallEvent("user-1", "session-1", query, 10)
 ```
+
+### 13.5 InjectMessage — 注入系统消息
+
+`InjectMessage` 用于在当前 session 中注入一个系统消息，触发新的 Agent 迭代：
+
+```go
+// 源码位置：tagent_agent.go:241-257
+func (ta *TagentAgent) InjectMessage(msg model.Message) {
+    if ta.lastUserID == "" || ta.lastSessionID == "" {
+        return  // 忽略（首次调用前）
+    }
+
+    ctx := context.Background()
+    eventCh, err := ta.runner.Run(ctx, ta.lastUserID, ta.lastSessionID, msg)
+    if err != nil {
+        return
+    }
+
+    // Drain events to prevent goroutine leak
+    go func() {
+        for range eventCh {
+        }
+    }()
+}
+```
+
+**使用场景**：TmuxMonitor 检测到后台命令完成后，通过此方法通知 Agent 读取输出并继续执行。

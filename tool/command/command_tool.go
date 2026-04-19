@@ -1,4 +1,4 @@
-package tool
+package command
 
 import (
 	"context"
@@ -7,11 +7,19 @@ import (
 	"log"
 	"time"
 
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // Verify CommandTool implements tool.CallableTool at compile time.
 var _ tool.CallableTool = (*CommandTool)(nil)
+
+// MessageInjector injects a system message to trigger agent re-evaluation.
+// This abstracts the agent-level message injection mechanism,
+// allowing CommandTool to remain decoupled from the agent package.
+type MessageInjector interface {
+	InjectMessage(msg model.Message)
+}
 
 // CommandTool is a pure execution tool for running commands.
 // It supports two modes: exec (sync) and tmux_exec (async).
@@ -20,19 +28,19 @@ var _ tool.CallableTool = (*CommandTool)(nil)
 // KnowledgeAgent is responsible for "understanding" (translating skills/MCP to commands).
 // CommandTool is responsible for "execution" only.
 //
-// TmuxMonitor state changes are reported via onStateChange callback,
-// which TagentAgent sets to call Runner.Run() for a new iteration.
+// When a tmux session state changes, CommandTool formats the state change
+// event and injects it via MessageInjector to trigger a new agent iteration.
 type CommandTool struct {
 	workspace    string
 	runAsUser    string
 	runAsGroup   string
+	description  string // Configurable tool description
 	executor     *CommandExecutor
 	tmuxExecutor *TmuxExecutor
 	tmuxMonitor  *TmuxMonitor
 
-	// onStateChange is called when TmuxMonitor detects a session state change.
-	// TagentAgent sets this to inject a new Runner.Run() iteration.
-	onStateChange func(sessionID, oldStatus, newStatus, output string)
+	// injector is used to inject system messages when tmux state changes.
+	injector MessageInjector
 }
 
 // CommandToolOption configures CommandTool.
@@ -59,23 +67,31 @@ func WithCommandRunAsGroup(group string) CommandToolOption {
 	}
 }
 
-// WithOnStateChange sets the callback for tmux session state changes.
-func WithOnStateChange(fn func(sessionID, oldStatus, newStatus, output string)) CommandToolOption {
+// WithMessageInjector sets the MessageInjector for tmux state change notifications.
+func WithMessageInjector(injector MessageInjector) CommandToolOption {
 	return func(ct *CommandTool) {
-		ct.onStateChange = fn
+		ct.injector = injector
 	}
 }
 
-// SetOnStateChange sets the callback for tmux session state changes.
-// Use this for post-creation wiring (e.g., tagent.WireCommandTool).
-func (ct *CommandTool) SetOnStateChange(fn func(sessionID, oldStatus, newStatus, output string)) {
-	ct.onStateChange = fn
+// WithDescription sets the tool description.
+func WithDescription(desc string) CommandToolOption {
+	return func(ct *CommandTool) {
+		ct.description = desc
+	}
+}
+
+// SetMessageInjector sets the MessageInjector for tmux state change notifications.
+// Use this for post-creation wiring.
+func (ct *CommandTool) SetMessageInjector(injector MessageInjector) {
+	ct.injector = injector
 }
 
 // NewCommandTool creates a new CommandTool.
 func NewCommandTool(opts ...CommandToolOption) *CommandTool {
 	ct := &CommandTool{
-		executor: NewCommandExecutor(),
+		description: "Execute shell commands. Supports sync (exec) and async (tmux_exec) modes. Skills and MCP tools are translated to commands by the knowledge tool and executed here.",
+		executor:    NewCommandExecutor(),
 	}
 
 	for _, opt := range opts {
@@ -101,7 +117,7 @@ func NewCommandTool(opts ...CommandToolOption) *CommandTool {
 func (ct *CommandTool) Declaration() *tool.Declaration {
 	return &tool.Declaration{
 		Name:        "command",
-		Description: "Execute shell commands. Supports sync (exec) and async (tmux_exec) modes. Skills and MCP tools are translated to commands by the knowledge tool and executed here.",
+		Description: ct.description,
 		InputSchema: &tool.Schema{
 			Type: "object",
 			Properties: map[string]*tool.Schema{
@@ -228,12 +244,30 @@ func (ct *CommandTool) executeAsync(ctx context.Context, args CommandArgs) (any,
 	}, nil
 }
 
-// handleStateChange is the callback for TmuxMonitor state changes.
+// handleStateChange processes tmux session state changes.
+// It formats the state change event and injects a system message
+// via MessageInjector to trigger agent re-evaluation.
 func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
 	log.Printf("[CommandTool] tmux session %s: %s -> %s", sessionID, oldStatus, newStatus)
-	if ct.onStateChange != nil {
-		ct.onStateChange(sessionID, oldStatus, newStatus, output)
+
+	if ct.injector == nil {
+		return
 	}
+
+	// Build system_input message describing the state change
+	content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", sessionID, oldStatus, newStatus)
+	if output != "" {
+		// Truncate long output - keep the tail (last 2000 chars)
+		if len(output) > 2000 {
+			output = "...(truncated)" + output[len(output)-2000:]
+		}
+		content += fmt.Sprintf("\nOutput:\n%s", output)
+	}
+
+	ct.injector.InjectMessage(model.Message{
+		Role:    model.RoleSystem,
+		Content: content,
+	})
 }
 
 // ==================== Data Structures ====================
