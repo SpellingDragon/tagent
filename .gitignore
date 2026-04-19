@@ -1,0 +1,44 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Memory data (test data)
+data/
+/memory/events/
+
+# Logs
+*.log
+
+# Hidden directories (except .git and .github)
+# Ignore all dot-directories
+.*/
+# But un-ignore .github (if exists for CI)
+!.github/
+# Also un-ignore .git itself (handled by git)
+!.git/

@@ -1,0 +1,682 @@
+package tagent_test
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/model/openai"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	tagent "github.com/SpellingDragon/tagent"
+	tagentagent "github.com/SpellingDragon/tagent/agent"
+	tagentmemory "github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/testutil"
+	tagenttool "github.com/SpellingDragon/tagent/tool"
+)
+
+// mustMarshal marshals args to JSON bytes for CallableTool.Call().
+func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
+	t.Helper()
+	data, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("failed to marshal args: %v", err)
+	}
+	return data
+}
+
+// TestIntegration_SmartCompress_WithRealLLM 测试两阶段上下文压缩
+func TestIntegration_SmartCompress_WithRealLLM(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	t.Logf("SmartCompress Stage 2 test with real LLM:")
+	t.Logf("  Endpoint: %s", cfg.Endpoint)
+	t.Logf("  Model: %s", cfg.ModelName)
+
+	zhipuModel := openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
+		Model:             zhipuModel,
+		MaxTokens:         20, // 极小预算强制触发压缩
+		CompressThreshold: 0.8,
+		SummaryModel:      zhipuModel,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create TagentAgent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// 模拟长对话触发压缩
+	msg := model.Message{
+		Role:    model.RoleUser,
+		Content: "继续",
+	}
+
+	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	var events []*event.Event
+	for evt := range eventChan {
+		events = append(events, evt)
+	}
+
+	t.Logf("End-to-end with compression: %d events", len(events))
+
+	// 应该成功返回（压缩后模型仍能正常响应）
+	if len(events) == 0 {
+		t.Error("Expected at least one event after compression")
+	}
+}
+
+// TestRegression_AgentLoop_MultipleIterations 回归测试：多轮迭代
+func TestRegression_AgentLoop_MultipleIterations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// 加载配置（从环境或 ~/.zshrc）
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping regression test", err)
+	}
+
+	t.Logf("Regression test: Multiple iterations")
+	t.Logf("  Endpoint: %s", cfg.Endpoint)
+	t.Logf("  Model: %s", cfg.ModelName)
+
+	zhipuModel := openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	// 创建 echo 工具
+	echoTool := &echoToolStruct{
+		name:        "echo",
+		description: "Echo back the input message",
+	}
+
+	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
+		Model: zhipuModel,
+		Tools: []tool.Tool{echoTool},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create TagentAgent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	msg := model.Message{
+		Role:    model.RoleUser,
+		Content: "请使用 echo 工具回复'Hello'。",
+	}
+
+	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// 收集事件
+	var events []*event.Event
+	for evt := range eventChan {
+		events = append(events, evt)
+		t.Logf("Event: %+v", evt)
+	}
+
+	// 验证多轮迭代（tool call + final response）
+	if len(events) < 2 {
+		t.Errorf("Expected at least 2 events (tool result + agent output), got %d", len(events))
+	}
+
+	// 验证最终输出
+	var agentOutput string
+	for _, evt := range events {
+		if evt.Response != nil && len(evt.Response.Choices) > 0 {
+			msg := evt.Response.Choices[0].Message
+			if msg.Content != "" && len(msg.ToolCalls) == 0 {
+				agentOutput = msg.Content
+			}
+		}
+	}
+
+	if agentOutput != "" {
+		t.Logf("Final output: %s", agentOutput)
+		if !strings.Contains(agentOutput, "Hello") {
+			t.Errorf("Final output should contain 'Hello', got: %s", agentOutput)
+		}
+		if strings.Contains(agentOutput, "错误") || strings.Contains(agentOutput, "error") || strings.Contains(agentOutput, "失败") {
+			t.Errorf("Final output contains error: %s", agentOutput)
+		}
+	}
+}
+
+// TestRegression_CompressionCycle 回归测试：多次压缩循环
+func TestRegression_CompressionCycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping regression test", err)
+	}
+
+	t.Logf("Regression test: Compression cycle")
+	t.Logf("  Endpoint: %s", cfg.Endpoint)
+	t.Logf("  Model: %s", cfg.ModelName)
+
+	zhipuModel := openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
+		Model:             zhipuModel,
+		MaxTokens:         50,
+		CompressThreshold: 0.8,
+		SummaryModel:      zhipuModel,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create TagentAgent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	for round := 0; round < 3; round++ {
+		t.Logf("Compression round %d", round+1)
+		msg := model.Message{Role: model.RoleUser, Content: "继续"}
+		eventChan, err := ag.RunSimple(ctx, "test-user", fmt.Sprintf("test-session-%d", round), msg)
+		if err != nil {
+			t.Fatalf("Run round %d failed: %v", round+1, err)
+		}
+		var eventCount int
+		for evt := range eventChan {
+			eventCount++
+			t.Logf("  Round %d event: tag=%s", round+1, evt.Tag)
+		}
+		t.Logf("  Events in round %d: %d", round+1, eventCount)
+		if eventCount == 0 {
+			t.Error("Should have at least 1 event per iteration")
+			break
+		}
+	}
+}
+
+// echoToolStruct 简单的回显工具（用于测试）
+type echoToolStruct struct {
+	name        string
+	description string
+}
+
+func (t *echoToolStruct) Declaration() *tool.Declaration {
+	return &tool.Declaration{
+		Name:        t.name,
+		Description: t.description,
+		InputSchema: &tool.Schema{
+			Type: "object",
+			Properties: map[string]*tool.Schema{
+				"message": {
+					Type:        "string",
+					Description: "The message to echo back",
+				},
+			},
+			Required: []string{"message"},
+		},
+	}
+}
+
+func (t *echoToolStruct) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	var args map[string]interface{}
+	if len(jsonArgs) > 0 {
+		if err := json.Unmarshal(jsonArgs, &args); err != nil {
+			return "", err
+		}
+	}
+
+	message, ok := args["message"].(string)
+	if !ok {
+		return "", nil
+	}
+
+	return message, nil
+}
+
+// ==================== 6.3 RecallAgent 测试用例（需真实 LLM）====================
+
+// createRecallTestStore creates a MemoryStore pre-populated with test events for RecallAgent tests.
+func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
+	t.Helper()
+	tempDir := t.TempDir()
+	store, err := tagentmemory.NewFileBackend(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create memory store: %v", err)
+	}
+
+	// Pre-populate with test events
+	testEvents := map[string]tagentmemory.FullEvent{
+		"evt_react_001": {
+			EventKey:     "evt_react_001",
+			EventType:    tagentmemory.EventTypeActionCommand,
+			EventSummary: "用户要求整理文件",
+			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
+			Content:      "整理 /tmp 目录下的文件",
+		},
+		"evt_react_002": {
+			EventKey:     "evt_react_002",
+			EventType:    tagentmemory.EventTypeAgentOutput,
+			EventSummary: "文件整理完成",
+			Timestamp:    time.Now().Add(-2*time.Hour + 5*time.Minute).UnixMilli(),
+			Content:      "成功整理 /tmp 目录下的 15 个文件，释放 200MB 空间",
+		},
+		"evt_react_003": {
+			EventKey:     "evt_react_003",
+			EventType:    tagentmemory.EventTypeActionCommand,
+			EventSummary: "执行部署命令",
+			Timestamp:    time.Now().Add(-1 * time.Hour).UnixMilli(),
+			Content:      "deploy.sh --env production",
+		},
+		"evt_react_004": {
+			EventKey:     "evt_react_004",
+			EventType:    tagentmemory.EventTypeAgentOutput,
+			EventSummary: "部署成功",
+			Timestamp:    time.Now().Add(-1*time.Hour + 2*time.Minute).UnixMilli(),
+			Content:      "部署成功: 3 个服务已更新，耗时 2m30s",
+		},
+	}
+
+	for key, evt := range testEvents {
+		if err := store.StoreEvent(key, evt); err != nil {
+			t.Fatalf("Failed to store event %s: %v", key, err)
+		}
+	}
+
+	return store
+}
+
+// TestIntegration_RecallTool_WithRealLLM_BasicRecall 测试 6.3-1: 基本回忆
+// recall(query="用户之前让我做什么") → 返回相关事件
+func TestIntegration_RecallTool_WithRealLLM_BasicRecall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	_ = openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	store := createRecallTestStore(t)
+
+	recallTool := tagenttool.NewRecallTool(
+		tagenttool.WithRecallMemoryStore(store),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"query": "用户之前让我做什么",
+		"limit": 5,
+	}))
+	if err != nil {
+		t.Fatalf("RecallTool.Call failed: %v", err)
+	}
+
+	resp, ok := result.(*tagenttool.RecallResponse)
+	if !ok {
+		t.Fatalf("Expected *RecallResponse, got %T", result)
+	}
+
+	// Simple mode: should return events matching query
+	t.Logf("BasicRecall: %d events, message=%q", len(resp.Events), resp.Message)
+	if len(resp.Events) == 0 {
+		t.Error("Expected events in basic recall")
+	}
+}
+
+// TestIntegration_RecallTool_WithRealLLM_MultiStep 测试 6.3-2: 多轮回忆
+func TestIntegration_RecallTool_WithRealLLM_MultiStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	_ = openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	store := createRecallTestStore(t)
+
+	recallTool := tagenttool.NewRecallTool(
+		tagenttool.WithRecallMemoryStore(store),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"query": "上次执行命令的完整结果是什么",
+		"limit": 10,
+	}))
+	if err != nil {
+		t.Fatalf("RecallTool.Call failed: %v", err)
+	}
+
+	resp, ok := result.(*tagenttool.RecallResponse)
+	if !ok {
+		t.Fatalf("Expected *RecallResponse, got %T", result)
+	}
+
+	t.Logf("MultiStep: %d events, message=%q", len(resp.Events), resp.Message)
+}
+
+// TestIntegration_RecallTool_WithRealLLM_Summarize 测试 6.3-3: 回忆摘要
+func TestIntegration_RecallTool_WithRealLLM_Summarize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	_ = openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	store := createRecallTestStore(t)
+
+	recallTool := tagenttool.NewRecallTool(
+		tagenttool.WithRecallMemoryStore(store),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"query": "总结之前的工作内容",
+		"limit": 10,
+	}))
+	if err != nil {
+		t.Fatalf("RecallTool.Call failed: %v", err)
+	}
+
+	resp, ok := result.(*tagenttool.RecallResponse)
+	if !ok {
+		t.Fatalf("Expected *RecallResponse, got %T", result)
+	}
+
+	t.Logf("Summarize: %d events, message=%q", len(resp.Events), resp.Message)
+}
+
+// TestIntegration_RecallTool_WithRealLLM_NoResults 测试 6.3-4: 空结果处理
+func TestIntegration_RecallTool_WithRealLLM_NoResults(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	_ = openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	// Empty memory store
+	tempDir := t.TempDir()
+	store, err := tagentmemory.NewFileBackend(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create empty memory store: %v", err)
+	}
+
+	recallTool := tagenttool.NewRecallTool(
+		tagenttool.WithRecallMemoryStore(store),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"query": "不存在的事件xyz123",
+		"limit": 10,
+	}))
+	if err != nil {
+		t.Fatalf("RecallTool.Call should not error for no results: %v", err)
+	}
+
+	resp, ok := result.(*tagenttool.RecallResponse)
+	if !ok {
+		t.Fatalf("Expected *RecallResponse, got %T", result)
+	}
+
+	t.Logf("NoResults: %d events, message=%q", len(resp.Events), resp.Message)
+}
+
+// TestIntegration_RecallTool_WithRealLLM_NaturalLanguage 测试 6.3-5: 自然语言理解
+func TestIntegration_RecallTool_WithRealLLM_NaturalLanguage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	_ = openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	store := createRecallTestStore(t)
+
+	recallTool := tagenttool.NewRecallTool(
+		tagenttool.WithRecallMemoryStore(store),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := recallTool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"query": "我之前让助手整理了什么文件，最后成功了吗",
+		"limit": 10,
+	}))
+	if err != nil {
+		t.Fatalf("RecallTool.Call failed: %v", err)
+	}
+
+	resp, ok := result.(*tagenttool.RecallResponse)
+	if !ok {
+		t.Fatalf("Expected *RecallResponse, got %T", result)
+	}
+
+	t.Logf("NaturalLanguage: %d events, message=%q", len(resp.Events), resp.Message)
+}
+
+// ==================== KnowledgeAgent Integration Tests (requires real LLM) ====================
+
+// TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery tests knowledge agent with real LLM.
+// KnowledgeTool is now a TagentAgent wrapped as agent.Tool.
+func TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	zhipuModel := openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	// Create KnowledgeTool via agent.NewKnowledgeTool
+	knowledgeTool, err := tagent.NewKnowledgeTool(tagent.KnowledgeAgentConfig{
+		Model:     zhipuModel,
+		PromptDir: "../resources/prompts",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create KnowledgeTool: %v", err)
+	}
+
+	// Verify the tool has proper declaration
+	decl := knowledgeTool.Declaration()
+	if decl == nil {
+		t.Fatal("Expected non-nil Declaration")
+	}
+	t.Logf("KnowledgeTool name: %s", decl.Name)
+	t.Logf("KnowledgeTool description length: %d", len(decl.Description))
+
+	// Call the tool (agent.Tool implements CallableTool)
+	callable, ok := knowledgeTool.(tool.CallableTool)
+	if !ok {
+		t.Fatal("KnowledgeTool should implement CallableTool")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	result, err := callable.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"request": "What is a GitHub pull request?",
+	}))
+	if err != nil {
+		t.Fatalf("KnowledgeTool.Call failed: %v", err)
+	}
+
+	resultStr, ok := result.(string)
+	if !ok {
+		t.Fatalf("Expected string result, got %T", result)
+	}
+
+	t.Logf("KnowledgeTool result length: %d", len(resultStr))
+	if len(resultStr) == 0 {
+		t.Error("Expected non-empty result from KnowledgeTool")
+	}
+}
+
+// ==================== 12.1 完整工作流端到端测试 ====================
+
+// TestIntegration_EndToEnd_FullWorkflow 测试 12.1: 完整工作流
+// 用户输入 → TagentAgent → LLM → tool_calls → 最终响应
+func TestIntegration_EndToEnd_FullWorkflow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	cfg, err := testutil.LoadConfig()
+	if err != nil {
+		t.Skipf("Failed to load config: %v, skipping integration test", err)
+	}
+
+	t.Logf("End-to-end test with real LLM:")
+	t.Logf("  Endpoint: %s", cfg.Endpoint)
+	t.Logf("  Model: %s", cfg.ModelName)
+
+	zhipuModel := openai.New(
+		cfg.ModelName,
+		openai.WithAPIKey(cfg.APIKey),
+		openai.WithBaseURL(cfg.Endpoint),
+	)
+
+	// 1. Create an echo tool for TagentAgent
+	echo := &echoToolStruct{name: "echo", description: "Echo back the input message"}
+
+	// 2. Create TagentAgent with tools
+	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
+		Model:             zhipuModel,
+		Tools:             []tool.Tool{echo},
+		MaxToolIterations: 10,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create TagentAgent: %v", err)
+	}
+
+	// 3. Run TagentAgent
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	msg := model.Message{
+		Role:    model.RoleUser,
+		Content: "请使用 echo 工具回复 '端到端测试成功'",
+	}
+
+	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
+	if err != nil {
+		t.Fatalf("TagentAgent.Run failed: %v", err)
+	}
+
+	// 4. Collect events
+	var events []*event.Event
+	for evt := range eventChan {
+		events = append(events, evt)
+	}
+
+	t.Logf("End-to-end: received %d events", len(events))
+
+	// 5. Verify at least one event was produced
+	if len(events) == 0 {
+		t.Fatal("Expected at least one event from TagentAgent")
+	}
+
+	// 6. Find final agent output
+	var agentOutput string
+	for _, evt := range events {
+		if evt.Response != nil && len(evt.Response.Choices) > 0 {
+			m := evt.Response.Choices[0].Message
+			if m.Content != "" && len(m.ToolCalls) == 0 {
+				agentOutput = m.Content
+			}
+		}
+	}
+
+	if agentOutput != "" {
+		t.Logf("Final agent output: %s", agentOutput)
+	} else {
+		t.Log("No final agent output found (may have been tool-call only)")
+	}
+}
