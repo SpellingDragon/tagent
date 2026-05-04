@@ -55,7 +55,7 @@ func ExtractEventType(msg model.Message) string {
 		return TypeExternalInput
 	case model.RoleAssistant:
 		if len(msg.ToolCalls) > 0 {
-			return TypeActionCommand
+			return TypeThinkingPlan
 		}
 		return TypeAgentOutput
 	case model.RoleTool:
@@ -70,11 +70,11 @@ func ExtractEventType(msg model.Message) string {
 }
 
 // IsSpecialEventType checks if an event type should use original content as summary.
-// Special events (external_input, agent_output) contain the full original content.
-// Most events (action_command, thinking_*, context_compress) only contain a summary.
+// Special events (external_input, agent_output, thinking_plan) contain the full original content.
+// Most events (action_command, context_compress) only contain a summary.
 func IsSpecialEventType(eventType string) bool {
 	switch eventType {
-	case TypeExternalInput, TypeAgentOutput:
+	case TypeExternalInput, TypeAgentOutput, TypeThinkingPlan:
 		return true
 	default:
 		return false

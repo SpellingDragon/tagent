@@ -5,9 +5,9 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	tagenttool "trpc.group/trpc-go/trpc-agent-go/tool"
-	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	tagentpkg "github.com/SpellingDragon/tagent/tool"
 )
@@ -18,11 +18,11 @@ type PromptConfig = prompt.CompositeConfig
 
 // Config holds configuration for creating the Knowledge Agent.
 type Config struct {
-	Model       model.Model                   // Required: LLM model
-	MemStore    tagentpkg.MemoryStoreAccessor // Optional: shared memory access
-	SkillRepo   tagentpkg.SkillRepository     // Optional: skill source
-	MCPToolSets []tagenttool.ToolSet          // Optional: MCP tool sources
-	PromptDir   string                        // Optional: base directory for prompt files (default: "resources/prompts")
+	Model       model.Model               // Required: LLM model
+	MemStore    memory.MemoryStore        // Optional: agent's own MemoryStore (if set, wired to MemoryPlugin + sub-tools)
+	SkillRepo   tagentpkg.SkillRepository // Optional: skill source
+	MCPToolSets []tagenttool.ToolSet      // Optional: MCP tool sources
+	PromptDir   string                    // Optional: base directory for prompt files (default: "resources/prompts")
 
 	// Prompt loading (bootstrap style)
 	Prompt PromptConfig // Optional: overrides PromptDir + "knowledge_agent.md" if set
@@ -87,6 +87,7 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		Name:              "knowledge",
 		Description:       "Knowledge acquisition and translation agent. Discovers skills, MCP tools, and web resources; translates them into executable plans.",
 		Model:             cfg.Model,
+		MemoryStore:       cfg.MemStore, // Wire store so MemoryPlugin and sub-tools share the same store
 		SystemPrompt:      systemPrompt,
 		Tools:             subTools,
 		MaxToolIterations: maxToolIter,
@@ -107,6 +108,9 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 // If cfg.Description is empty and cfg.DescriptionFile is set, the description
 // is loaded from the file (relative to cfg.PromptDir).
 // If both are empty, a hardcoded default is used for backward compatibility.
+//
+// Note: This wraps with a simple AgentToolWrapper without event_key resolution.
+// For full event_key support, use tagent.New() which builds agents from Config.
 func NewTool(cfg Config) (tagenttool.Tool, error) {
 	knowledgeAgent, err := NewAgent(cfg)
 	if err != nil {
@@ -119,9 +123,8 @@ func NewTool(cfg Config) (tagenttool.Tool, error) {
 		return nil, err
 	}
 
-	return agenttool.NewTool(knowledgeAgent,
-		agenttool.WithDescription(desc),
-	), nil
+	// Wrap as AgentToolWrapper (no event_key resolution in standalone mode)
+	return agent.NewAgentToolWrapper(knowledgeAgent, desc, nil, nil), nil
 }
 
 // resolveDescription resolves the tool description from inline text or file.

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 	"time"
+
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // CommandExecutor handles secure command execution with isolation.
@@ -150,6 +152,11 @@ func (ce *CommandExecutor) Execute(ctx context.Context, spec CommandSpec) (Comma
 		result.ExitCode = 0
 	}
 
+	// Return context error if context was cancelled (timeout)
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+
 	return result, nil
 }
 
@@ -176,6 +183,9 @@ func (ce *CommandExecutor) buildCommandWithContext(ctx context.Context, spec Com
 	// Build command with isolation
 	if runAsUser != "" {
 		// Use sudo for user isolation
+		// -n: non-interactive (no password prompt)
+		// -u <user>: run as specified user
+		// -g <group>: run as specified group
 		args := []string{"-n", "-u", runAsUser}
 		if runAsGroup != "" {
 			args = append(args, "-g", runAsGroup)
@@ -184,9 +194,11 @@ func (ce *CommandExecutor) buildCommandWithContext(ctx context.Context, spec Com
 		args = append(args, spec.Args...)
 
 		cmd = exec.Command("sudo", args...)
+		log.Infof("[CommandExecutor] running as user=%s group=%s", runAsUser, runAsGroup)
 	} else {
-		// Direct execution
+		// Direct execution (runs as current process user)
 		cmd = exec.Command(spec.Command, spec.Args...)
+		log.Debugf("[CommandExecutor] running as current user (no user isolation configured)")
 	}
 
 	// Set working directory
@@ -212,26 +224,16 @@ func (ce *CommandExecutor) buildCommandWithContext(ctx context.Context, spec Com
 	return cmd, nil
 }
 
-// buildEnv constructs the environment variables
+// buildEnv constructs the environment variables.
+// It inherits the current process environment and overlays custom vars.
 func (ce *CommandExecutor) buildEnv(customEnv map[string]string) []string {
-	// Start with current environment
-	env := make([]string, 0)
+	// Start with current process environment
+	env := make([]string, 0, len(os.Environ())+len(customEnv))
+	env = append(env, os.Environ()...)
 
-	// Add custom environment variables
+	// Overlay custom environment variables (override existing keys)
 	for k, v := range customEnv {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	// Ensure PATH is set
-	hasPath := false
-	for _, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			hasPath = true
-			break
-		}
-	}
-	if !hasPath {
-		env = append(env, "PATH=/usr/local/bin:/usr/bin:/bin")
 	}
 
 	return env

@@ -17,6 +17,15 @@ vendor/
 # Go workspace file
 go.work
 
+# OpenSpec
+openspec/
+
+# Node.js (example skills with npm dependencies)
+node_modules/
+
+# Log directories
+logs/
+
 # IDE
 .vscode/
 .idea/

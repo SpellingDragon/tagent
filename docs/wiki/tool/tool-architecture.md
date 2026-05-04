@@ -16,7 +16,7 @@
 - **按需 React**：KnowledgeAgent 和 RecallAgent 有内部 React 循环（多子工具协作 + 翻译）；CommandTool 不需要
 - **Prompt 文件化**：System prompt 通过 prompt.Loader 动态加载，支持 PromptConfig bootstrap 风格
 - **配置声明式**：所有 tool 通过 Config + ToolConfig 声明，kind 区分 agent/tool，description 支持文件加载
-- **事件上下文传递**：tool agent 通过父 agent 的 MemStore + EventKey 获取完整事件上下文；tool 参数声明中必须包含 `event_key`，由框架在运行时自动注入当前触发事件的 key
+- **事件上下文传递**：tool agent 通过父 agent 的 MemStore + EventKey 获取完整事件上下文；tool 参数声明中必须包含 `event_key`，由 AgentToolWrapper 从调用参数中解析，通过 parentStore.GetEvent 获取完整上下文
 - **后台异步**：TmuxMonitor 通过 callback 触发 Agent 迭代，不阻塞主循环
 - **包编排**：agent 包不依赖 tool 包，根包 tagent.go 封装 agent 实例化过程
 - **CommandTool 闭环**：tmux 状态变更通知通过 MessageInjector 接口闭环在 command 包内，不暴露给外部
@@ -140,13 +140,13 @@ graph TB
     KT -->|ExecutionPlan| CT
     CT --> CE
     CT -->|tmux_exec| TE
-    CT -->|状态变化| TM
-    TE -->|监控| TM
-    TM -->|callback| LLMA
+    TM -->|检查状态| TE
+    TM -->|状态变化回调| CT
+    CT -->|InjectMessage| TA
+    TA -->|runner.Run| LLMA
+    KA -->|创建| TA
     KA -->|assembles| RA
     KA -->|assembles| KT
-    KA -->|wires| TA
-    TA -->|InjectMessage| LLMA
 
     style RA fill:#e1f5ff,stroke:#0277bd
     style KT fill:#fff3e0,stroke:#ef6c00
@@ -164,27 +164,30 @@ graph TB
 
 **问题**：tool agent 被调用时，LLM 只能传递文本参数（如 `request`），但 tool agent 需要访问触发其调用的完整事件上下文（因果链、完整事件详情），这需要 `event_key`。
 
-**设计决策**：tool 的 Declaration InputSchema 中必须声明 `event_key` 参数，由框架在运行时自动注入，而非依赖 LLM 生成。
+**设计决策**：tool 的 Declaration InputSchema 中必须声明 `event_key` 参数，由 AgentToolWrapper 从调用参数中自解析（InputSchema 声明 `event_keys` 参数），通过父级的 MemoryStore 获取上下文。
 
-### 4.1 EventKey Snowflake 设计
+### 4.1 EventKey Snowflake 设计（已实现）
 
-#### 4.1.1 当前问题
+EventKey 已从字符串格式迁移到 Snowflake int64（详见 [memory-architecture.md](../memory/memory-architecture.md) §4.1）。以下记录迁移前的历史 API 作为参考。
 
-当前 `NewEventKey` 使用 `evt_{timestamp}_{sequence}` 格式：
+#### 4.1.1 旧版 EventKey（已废弃）
+
+旧版使用 `evt_{timestamp}_{sequence}` 字符串格式：
 
 ```go
+// 旧版 API（已废弃）
 func NewEventKey(timestamp int64, sequence int) string {
     return fmt.Sprintf("evt_%d_%03d", timestamp, sequence)
 }
 ```
 
-问题：
+存在以下问题（已通过 Snowflake int64 全面解决）：
 - 不包含分区信息，无法从 Key 反推数据归属
 - 单机时钟依赖，分布式场景可能冲突
 - 无法支持按分区查询
 - 不适合云原生场景（需要跨实例全局唯一）
 
-#### 4.1.2 Snowflake 风格 EventKey
+#### 4.1.2 Snowflake 风格 EventKey（当前实现）
 
 参考 Snowflake 算法，设计 64-bit 整数 EventKey，编码 PartitionID、时间戳和序列号：
 
@@ -369,7 +372,7 @@ sequenceDiagram
     MP->>MS: StoreEvent(key, FullEvent{PartitionID: 42})
     MP-->>Flow: 返回带 StateDelta 的事件
 
-    Note over Flow: 框架拦截 tool 调用<br/>从 StateDelta 提取 event_key<br/>自动注入到 tool 参数中
+    Note over Flow: AgentToolWrapper 拦截调用<br/>从 InputSchema 解析 event_keys<br/>通过 parentStore.GetEvent 获取上下文
 
     Flow->>Tool: Call(ctx, {"request": "...", "event_key": 9223372036854775807})
     Tool->>MS: GetEvent(eventKey)
@@ -386,12 +389,12 @@ sequenceDiagram
 **注入方式**：
 1. MemoryPlugin.OnEvent 处理 assistant 的 tool_call 消息，生成 Snowflake EventKey 并写入 `StateDelta`
 2. Flow 在执行 tool_call 时，从当前事件的 `StateDelta` 中提取 `event_key`
-3. Flow 将 `event_key` 自动注入到 tool 的 JSON 参数中（如果 Declaration 中声明了该参数）
+3. AgentToolWrapper 从 `event_keys` 参数中解析 EventKey，通过 `parentStore.GetEvent` 获取完整上下文注入到 tool 调用中
 4. Tool agent 收到完整的参数（含 `event_key`），可用于查询 MemStore
 
 **Tool Declaration 约束**：
 - 所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数（optional）
-- 参数描述应说明：由框架自动注入，tool agent 通过此 key 从 MemStore 获取触发上下文
+- 参数描述应说明：由 AgentToolWrapper 自解析，tool agent 通过此 key 从父级 MemStore 获取时间上下文
 - 纯执行器 tool（如 CommandTool）可选择不声明此参数
 
 ```go
@@ -487,166 +490,50 @@ sequenceDiagram
 
 ---
 
-## 六、RecallTool — 智能记忆召回
+## 六、RecallAgent — 智能记忆召回
 
-### 6.1 抽象职责
+### 6.1 核心职责
 
-**智能记忆召回** — RecallTool 是 Agent 查询内部知识的窗口。
-它提供对 MemoryStore 的结构化访问，但不对结果做智能解读。
-解读是顶层 Agent 的职责。
+**智能记忆召回** — RecallAgent 是 Agent 查询内部知识的窗口。它使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答。
 
-**设计决策**（来自 trpcclaw 验证）：RecallTool 不需要内部 React 循环。
-理由：功能单一（查询/获取事件），无多工具协作需求，“理解”结果是顶层 Agent 的工作。
+**设计决策**：RecallAgent 使用 TagentAgent + agenttool.NewTool() 包装架构（与 KnowledgeAgent 统一），而非简单的 CallableTool。理由：需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要。
 
-### 6.2 Declaration
+### 6.2 配置结构
 
 ```go
-// recall/recall_agent.go:47-77
-func (rt *RecallTool) Declaration() *tool.Declaration {
-    return &tool.Declaration{
-        Name:        "recall",
-        Description: "Search and retrieve relevant memories from past interactions.",
-        InputSchema: &tool.Schema{
-            Type: "object",
-            Properties: map[string]*tool.Schema{
-                "query": {
-                    Type:        "string",
-                    Description: "Search query (keywords or natural language)",
-                },
-                "event_types": {
-                    Type:        "array",
-                    Description: "Filter by event types",
-                },
-                "limit": {
-                    Type:        "integer",
-                    Description: "Maximum results (default: 10)",
-                },
-                "event_key": {
-                    Type:        "string",
-                    Description: "Get a specific event by key (returns full details)",
-                },
-            },
-            Required: []string{"query"},
-        },
-    }
+// recall/recall_agent.go:25-42
+type Config struct {
+    Model           model.Model                // 必填：内部 React 循环的 LLM 模型
+    MemStore        tagentpkg.MemoryStoreAccessor // 必填：记忆存储访问器
+    PromptDir       string                     // 可选：prompt 文件目录（默认 "resources/prompts"）
+    Prompt          PromptConfig               // 可选：覆盖默认 prompt 加载
+    Description     string                     // 可选：tool 描述（覆盖默认）
+    DescriptionFile string                     // 可选：从文件加载描述
+    MaxToolIterations int                      // 默认：5
+    MaxTokens         int                      // 默认：4096
 }
 ```
 
-### 6.3 Call — 双路径
+### 6.3 工厂函数
 
 ```go
-// recall/recall_agent.go:79-97
-func (rt *RecallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
-    var args RecallArgs
-    if err := json.Unmarshal(jsonArgs, &args); err != nil {
-        return nil, fmt.Errorf("recall: invalid args: %w", err)
-    }
-
-    // 路径 1: 指定 event_key → 获取完整事件详情
-    if args.EventKey != "" {
-        return rt.getEventDetails(args.EventKey)
-    }
-
-    // 路径 2: 关键词/过滤查询
-    return rt.queryEvents(args)
-}
+// recall/recall_agent.go:47-110
+func NewAgent(cfg Config) (*agent.TagentAgent, error)
 ```
 
-### 6.4 queryEvents — 多层查询
+创建 TagentAgent 实例，组装以下子工具：
+- `memory_query`：按查询条件检索事件列表
+- `memory_get`：根据 event_key 获取完整事件详情
+- `memory_recent`：快速获取最近的 N 条事件
+
+### 6.4 Tool 包装
 
 ```go
-// recall/recall_agent.go:121-159
-func (rt *RecallTool) queryEvents(args RecallArgs) (any, error) {
-    // Step 1: 按 event_types + limit 查询（使用 MemoryStore.QueryEvents）
-    opts := memory.QueryOptions{
-        EventTypes: args.EventTypes,
-        Limit:      limit,
-        OrderBy:    "timestamp_desc",  // 最新优先
-    }
-    events, err := rt.memStore.QueryEvents(opts)
-
-    // Step 2: 如果是无过滤的关键词查询，
-    // 尝试使用 SearchBySummary 做摘要全文搜索
-    if args.Query != "" && len(args.EventTypes) == 0 {
-        if searcher, ok := rt.memStore.(interface {
-            SearchBySummary(string) []memory.EventReference
-        }); ok {
-            searchResults := searcher.SearchBySummary(args.Query)
-            events = mergeEventReferences(events, searchResults, limit)
-        }
-    }
-
-    return &RecallResponse{
-        Events:  convertToRecallEvents(events),
-        Message: fmt.Sprintf("找到 %d 个相关事件", len(events)),
-    }, nil
-}
+// recall/recall_agent.go:121-135
+func NewTool(cfg Config) (tagenttool.Tool, error)
 ```
 
-**注意**：`SearchBySummary` 全文搜索仅在 `InMemoryStore`（实现了该接口）上生效。`FileBackend` 不实现该接口，会跳过全文搜索步骤。
-
-### 6.5 mergeEventReferences — 结果合并去重
-
-```go
-// recall/recall_agent.go:161-181
-func mergeEventReferences(a, b []memory.EventReference, limit int) []memory.EventReference {
-    seen := make(map[string]bool)
-    var result []memory.EventReference
-    // 先加入 QueryEvents 结果
-    for _, ref := range a {
-        if !seen[ref.EventKey] {
-            seen[ref.EventKey] = true
-            result = append(result, ref)
-        }
-    }
-    // 再加入 SearchBySummary 结果（去重）
-    for _, ref := range b {
-        if !seen[ref.EventKey] {
-            seen[ref.EventKey] = true
-            result = append(result, ref)
-        }
-    }
-    if limit > 0 && len(result) > limit {
-        result = result[:limit]
-    }
-    return result
-}
-```
-
-### 6.6 停用词过滤
-
-```go
-// accessor.go:extractKeywords
-func extractKeywords(query string) []string {
-    var keywords []string
-    for _, part := range strings.Fields(query) {
-        // 过滤长度 < 2 和停用词
-        if len(part) >= 2 && !stopWords[strings.ToLower(part)] {
-            keywords = append(keywords, strings.ToLower(part))
-        }
-    }
-    return keywords
-}
-```
-
-停用词包含中英文常见虚词（"的"、"了"、"the"、"is" 等），避免干扰搜索。
-
-### 6.7 返回数据结构
-
-```go
-// recall/recall_agent.go:RecallEventDetail
-type RecallEventDetail struct {
-    Key       string           // EventKey
-    ParentKey string           // 因果链父 key
-    Type      string           // EventType
-    Summary   string           // EventSummary
-    Content   string           // 原始内容
-    ToolCalls []model.ToolCall // 工具调用
-    Timestamp int64            // 时间戳
-}
-```
-
-`RecallEventDetail` 对应 `FullEvent`，`RecallEvent` 对应 `EventReference`。
+使用 `agent.NewAgentToolWrapper()` 包装 TagentAgent 为 CallableTool，注册到父 Agent。
 
 ---
 
@@ -1013,16 +900,30 @@ func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
 
 ```mermaid
 sequenceDiagram
-    participant LLM as LLM
-    participant RT as RecallTool
+    participant LLM as LLM (父 Agent)
+    participant ATW as AgentToolWrapper
+    participant RA as RecallAgent (内部 TagentAgent)
+    participant RL as Recall LLM (内部 LLM)
     participant MS as MemoryStore
 
-    LLM->>RT: recall({query: "部署", limit: 5})
-    RT->>MS: QueryEvents(event_types=[], limit=5)
-    MS-->>RT: []EventReference
-    RT->>RT: SearchBySummary("部署")
-    RT->>RT: mergeEventReferences(...)
-    RT-->>LLM: RecallResponse{events: [...]}
+    LLM->>ATW: tool_calls: recall({query: "部署", limit: 5})
+    ATW->>RA: Run(invocation) 启动内部 Agent
+    RA->>RL: BeforeModel → 注入 system prompt
+    RL->>RL: 理解查询意图
+
+    Note over RL: 内部 React Loop<br/>决定使用 memory_query
+    RL->>MS: memory_query({query, limit})
+    MS-->>RL: []EventReference
+
+    alt 需要更多细节
+        RL->>MS: memory_get(key)
+        MS-->>RL: FullEvent (含 Content)
+    end
+
+    RL->>RL: 综合检索结果为连贯回答
+    RL-->>RA: 最终回答
+    RA-->>ATW: event stream
+    ATW-->>LLM: Tool Result
 ```
 
 ### 12.2 CommandTool tmux_exec 完整数据流
@@ -1057,17 +958,24 @@ sequenceDiagram
 
 ## 十三、关键设计决策
 
-### 13.1 为什么 RecallTool 不用内部 LLM 循环，而 KnowledgeAgent 需要？
+### 13.1 为什么 RecallAgent 和 KnowledgeAgent 都需要内部 LLM React 循环？
 
-**设计决策**：RecallTool 保持简单 CallableTool，KnowledgeAgent 用 TagentAgent + agenttool.NewTool() 包装。
+**设计决策**：RecallAgent 和 KnowledgeAgent 都使用 TagentAgent + AgentToolWrapper 包装架构，而非简单的 CallableTool。
 
 | 工具 | 内部 React | 实现方式 | 理由 |
 |------|-----------|---------|------|
-| **RecallTool** | ❌ 不需要 | CallableTool | 功能单一（查询/获取），无多工具协作，"理解"是顶层 Agent 的职责 |
-| **KnowledgeAgent** | ✅ 需要 | agent.Agent + agenttool.NewTool() | 5 种子工具协作（skill_search/load, mcp_discover, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
-| **CommandTool** | ❌ 不需要 | CallableTool | 纯执行器，无决策需求 |
+| **RecallAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 3 种子工具协作（memory_query/get/recent），需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要 |
+| **KnowledgeAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 5 种子工具协作（skill_search/load, mcp_discover, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
+| **CommandTool** | ❌ 不需要 | CallableTool | 纯执行器，无决策需求；tmux 通知通过 MessageInjector 接口闭环 |
 
-判断标准：需要"思考-行动-观察"循环 → TagentAgent + agenttool.NewTool()；单一功能/执行器 → 简单 CallableTool。
+判断标准：需要"思考-行动-观察"循环（多子工具协作、语义理解、结果综合） → TagentAgent + AgentToolWrapper；单一功能/执行器 → 简单 CallableTool。
+
+**架构统一性**：RecallAgent 和 KnowledgeAgent 共享相同的三层结构：
+```
+Config → NewAgent() → TagentAgent (内部 LLM React) → 子工具集
+                           ↓
+                    AgentToolWrapper (对外表现为 CallableTool)
+```
 
 来源：trpcclaw 经过实践验证的分类决策。
 
@@ -1098,13 +1006,13 @@ CommandTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 command 包�
 
 ### 13.4 为什么 tool 参数必须包含 event_key？
 
-**设计决策**：所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数，由框架在运行时自动注入。
+**设计决策**：所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数，由 AgentToolWrapper 在调用时从参数中自动解析。
 
 | 对比项 | 无 event_key（当前） | 有 event_key（目标） |
 |--------|---------------------|---------------------|
 | **上下文获取** | 只能依赖 LLM 传的文本 | 可从 MemStore 获取完整事件上下文 |
 | **因果链追溯** | 无法追溯 | 通过 ParentKey 追溯事件脉络 |
-| **LLM 依赖** | 完全依赖 LLM 传参 | 框架自动注入，LLM 无需感知 |
+| **LLM 依赖** | 完全依赖 LLM 传参 | AgentToolWrapper 自动解析，LLM 无需感知 |
 | **扩展性** | 新 tool 需自行设计上下文获取 | 统一机制，新 tool 自动获得上下文 |
 
 **选型理由**：
@@ -1119,6 +1027,8 @@ CommandTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 command 包�
 3. Flow 执行 tool_call 前，从 StateDelta 提取 `event_key`
 4. Flow 将 `event_key` 合并到 tool 的 JSON 参数中
 5. Tool agent 在 Call 方法中解析 `event_key`，用于查询 MemStore
+
+### 13.3 为什么 TmuxMonitor 用 callback 而不是 channel？
 
 **决策**：callback 让 TagentAgent 完全控制如何触发新迭代（通过 `Runner.Run()`）。
 

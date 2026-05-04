@@ -273,31 +273,36 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		t.Fatalf("Failed to create memory store: %v", err)
 	}
 
-	// Pre-populate with test events
-	testEvents := map[string]tagentmemory.FullEvent{
-		"evt_react_001": {
-			EventKey:     "evt_react_001",
+	// Pre-populate with test events using Snowflake EventKeys
+	partitionID := tagentmemory.PartitionIDFromName("tagent")
+	testEvents := []tagentmemory.FullEvent{
+		{
+			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
+			PartitionID:  partitionID,
 			EventType:    tagentmemory.EventTypeActionCommand,
 			EventSummary: "用户要求整理文件",
 			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
 			Content:      "整理 /tmp 目录下的文件",
 		},
-		"evt_react_002": {
-			EventKey:     "evt_react_002",
+		{
+			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
+			PartitionID:  partitionID,
 			EventType:    tagentmemory.EventTypeAgentOutput,
 			EventSummary: "文件整理完成",
 			Timestamp:    time.Now().Add(-2*time.Hour + 5*time.Minute).UnixMilli(),
 			Content:      "成功整理 /tmp 目录下的 15 个文件，释放 200MB 空间",
 		},
-		"evt_react_003": {
-			EventKey:     "evt_react_003",
+		{
+			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
+			PartitionID:  partitionID,
 			EventType:    tagentmemory.EventTypeActionCommand,
 			EventSummary: "执行部署命令",
 			Timestamp:    time.Now().Add(-1 * time.Hour).UnixMilli(),
 			Content:      "deploy.sh --env production",
 		},
-		"evt_react_004": {
-			EventKey:     "evt_react_004",
+		{
+			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
+			PartitionID:  partitionID,
 			EventType:    tagentmemory.EventTypeAgentOutput,
 			EventSummary: "部署成功",
 			Timestamp:    time.Now().Add(-1*time.Hour + 2*time.Minute).UnixMilli(),
@@ -305,9 +310,9 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		},
 	}
 
-	for key, evt := range testEvents {
-		if err := store.StoreEvent(key, evt); err != nil {
-			t.Fatalf("Failed to store event %s: %v", key, err)
+	for _, evt := range testEvents {
+		if err := store.StoreEvent(evt.EventKey, evt); err != nil {
+			t.Fatalf("Failed to store event %d: %v", evt.EventKey, err)
 		}
 	}
 

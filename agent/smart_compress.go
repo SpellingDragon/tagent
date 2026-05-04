@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -18,13 +20,13 @@ import (
 // but does NOT modify the Session.
 type SmartCompressor struct {
 	summaryModel    model.Model // Optional: used for Stage 2 LLM summary
-	keepRecentTasks int         // Number of recent complete tasks to keep (default: 2)
+	KeepRecentTasks int         // Number of recent complete tasks to keep (default: 2)
 }
 
 // NewSmartCompressor creates a new SmartCompressor.
 func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 	sc := &SmartCompressor{
-		keepRecentTasks: 2,
+		KeepRecentTasks: 2,
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -45,13 +47,16 @@ func WithSummaryModel(m model.Model) SmartCompressorOption {
 // WithKeepRecentTasks sets how many recent tasks to keep.
 func WithKeepRecentTasks(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) {
-		sc.keepRecentTasks = n
+		sc.KeepRecentTasks = n
 	}
 }
 
 // Compress compresses the message list by dropping old task segments.
+// inv provides Session.Events access for extracting event_keys of compressed segments.
 func (sc *SmartCompressor) Compress(
-	ctx context.Context, messages []model.Message,
+	ctx context.Context,
+	messages []model.Message,
+	inv *agent.Invocation,
 ) []model.Message {
 	// 1. Separate system message
 	systemMsg, rest := splitSystemMessage(messages)
@@ -60,38 +65,123 @@ func (sc *SmartCompressor) Compress(
 	segments := splitByTaskBoundary(rest)
 
 	// 3. If within limit, no compression needed
-	if len(segments) <= sc.keepRecentTasks {
+	if len(segments) <= sc.KeepRecentTasks {
 		return messages
 	}
 
 	// 4. Split into old and recent segments
-	oldSegments := segments[:len(segments)-sc.keepRecentTasks]
-	recentSegments := segments[len(segments)-sc.keepRecentTasks:]
+	oldSegments := segments[:len(segments)-sc.KeepRecentTasks]
+	recentSegments := segments[len(segments)-sc.KeepRecentTasks:]
 
 	// 5. Stage 2: Generate LLM summary of old segments (if model available)
 	var summary string
+	var summaryHadError bool
 	if sc.summaryModel != nil {
-		summary = sc.generateSummary(ctx, oldSegments)
+		summary, summaryHadError = sc.generateSummary(ctx, oldSegments)
 	}
 
-	// 6. Reconstruct message list
+	// 6. Collect compressed event_keys from message prefix
+	compressedKeys := sc.collectCompressedKeys(oldSegments)
+
+	// 7. Reconstruct message list with context_compress event
 	var result []model.Message
 	if systemMsg != nil {
 		result = append(result, *systemMsg)
 	}
-	if summary != "" {
-		result = append(result, model.NewSystemMessage(summary))
-	} else if len(oldSegments) > 0 {
-		// Stage 1 only: add a brief notice about omitted messages
-		result = append(result, model.NewSystemMessage(
-			compressNotice(len(oldSegments)),
-		))
-	}
+
+	// Build context_compress event as a system message
+	compressEvent := sc.buildCompressEvent(summary, len(oldSegments), compressedKeys, summaryHadError)
+	result = append(result, compressEvent)
+
 	for _, seg := range recentSegments {
 		result = append(result, seg.Messages...)
 	}
 
+	log.Infof("[SmartCompress] old_segments=%d recent_segments=%d compressed_keys=%d summary_len=%d",
+		len(oldSegments), len(recentSegments), len(compressedKeys), len(summary))
+
 	return result
+}
+
+// buildCompressEvent creates a context_compress event message.
+// Format: [evt_xxx|context_compress] compressed N segments (keys: [k1, k2, ...]) summary
+func (sc *SmartCompressor) buildCompressEvent(
+	summary string,
+	segmentCount int,
+	keys []int64,
+	summaryHadError bool,
+) model.Message {
+	var content strings.Builder
+
+	if len(keys) > 0 {
+		// Generate a pseudo event_key for the compress event itself
+		// and list the compressed event keys so LLM can select them
+		content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段，被压缩的事件 key 列表: [", segmentCount))
+		for i, k := range keys {
+			if i > 0 {
+				content.WriteString(", ")
+			}
+			content.WriteString(fmt.Sprintf("%d", k))
+		}
+		content.WriteString("]")
+	} else {
+		content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段", segmentCount))
+	}
+
+	if summary != "" {
+		content.WriteString("\n\n对话历史摘要: ")
+		content.WriteString(summary)
+	} else if summaryHadError {
+		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted. Full context available via recall agent.]", segmentCount))
+	} else {
+		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted.]", segmentCount))
+	}
+
+	return model.NewSystemMessage(content.String())
+}
+
+// parseEventKeyFromPrefix extracts a Snowflake EventKey from a message content prefix.
+// Format: "[evt_123456789|task] original content..."
+// Returns 0 if no valid key is found (caller filters zero values).
+func parseEventKeyFromPrefix(content string) int64 {
+	const prefix = "[evt_"
+	if !strings.HasPrefix(content, prefix) {
+		return 0
+	}
+	barPos := strings.IndexByte(content[5:], '|')
+	if barPos < 0 {
+		return 0
+	}
+	keyStr := content[5 : 5+barPos]
+	key, err := strconv.ParseInt(keyStr, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return key
+}
+
+// collectCompressedKeys extracts event_keys from compressed message segments.
+// Parses the "[evt_<KEY>|<type>]" prefix added by Phase 1 event view transformation.
+// Unlike the previous implementation, this does NOT access Session.Events,
+// avoiding the prefix-mismatch bug where prefixed content fingerprints
+// never matched non-prefixed Session.Events.
+func (sc *SmartCompressor) collectCompressedKeys(
+	oldSegments []*TaskSegment,
+) []int64 {
+	seen := make(map[int64]bool)
+	var keys []int64
+
+	for _, seg := range oldSegments {
+		for _, msg := range seg.Messages {
+			key := parseEventKeyFromPrefix(msg.Content)
+			if key > 0 && !seen[key] {
+				seen[key] = true
+				keys = append(keys, key)
+			}
+		}
+	}
+
+	return keys
 }
 
 // TaskSegment is a group of messages delimited by task boundaries.
@@ -145,13 +235,13 @@ func splitByTaskBoundary(messages []model.Message) []*TaskSegment {
 }
 
 // generateSummary generates an LLM summary of old task segments.
-// Stage 2 of SmartCompress: uses the summaryModel to produce a concise
-// summary of the dropped segments, preserving key semantics.
+// Returns the summary string and whether an error occurred during LLM invocation.
+// If summaryModel is nil, returns ("", false) meaning summary not attempted.
 func (sc *SmartCompressor) generateSummary(
 	ctx context.Context, segments []*TaskSegment,
-) string {
+) (summary string, hadError bool) {
 	if sc.summaryModel == nil {
-		return compressNotice(len(segments))
+		return "", false
 	}
 
 	// Build summary prompt from old segments
@@ -187,7 +277,6 @@ func (sc *SmartCompressor) generateSummary(
 	}
 	sb.WriteString("\n--- 摘要 ---")
 
-	// Call LLM for summary
 	req := &model.Request{
 		Messages: []model.Message{
 			model.NewSystemMessage("你是一个对话摘要助手。请为历史对话生成简洁但完整的摘要。"),
@@ -197,29 +286,20 @@ func (sc *SmartCompressor) generateSummary(
 
 	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
 	if err != nil {
-		log.Errorf("SmartCompress: Stage 2 LLM call failed: %v", err)
-		return compressNotice(len(segments))
+		log.Errorf("[SmartCompress] stage2 LLM failed: %v", err)
+		return "", true
 	}
 
-	var summary string
+	var result string
 	for resp := range respCh {
 		if resp.Error != nil {
-			log.Errorf("SmartCompress: Stage 2 LLM response error: %v", resp.Error)
-			return compressNotice(len(segments))
+			log.Errorf("[SmartCompress] stage2 response error: %v", resp.Error)
+			return "", true
 		}
 		if len(resp.Choices) > 0 {
-			summary += resp.Choices[0].Message.Content
+			result += resp.Choices[0].Message.Content
 		}
 	}
 
-	if summary == "" {
-		return compressNotice(len(segments))
-	}
-
-	return "[对话历史摘要] " + summary
-}
-
-// compressNotice generates a notice about omitted messages.
-func compressNotice(count int) string {
-	return fmt.Sprintf("[Context Summary: %d earlier task segments omitted to save tokens]", count)
+	return result, false
 }

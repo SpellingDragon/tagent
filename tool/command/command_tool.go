@@ -123,11 +123,11 @@ func (ct *CommandTool) Declaration() *tool.Declaration {
 			Properties: map[string]*tool.Schema{
 				"command": {
 					Type:        "string",
-					Description: "Command to execute (shell command, skill script, or MCP RPC call)",
+					Description: "Shell command to execute. For skills, use the script path relative to project root (e.g., 'node ./skills/url-fetcher/url_fetcher.js --url ...'). The command runs via sh -c so pipes, redirects, and chaining are supported.",
 				},
 				"mode": {
 					Type:        "string",
-					Description: "Execution mode: 'exec' (sync, wait for result) or 'tmux_exec' (async, for long-running/interactive commands)",
+					Description: "Execution mode: 'exec' (sync, wait for result — default) or 'tmux_exec' (async, for long-running/interactive commands)",
 					Enum:        []any{"exec", "tmux_exec"},
 				},
 				"timeout": {
@@ -164,6 +164,8 @@ func (ct *CommandTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if args.Mode == "" {
 		args.Mode = "exec"
 	}
+
+	log.Printf("[CommandTool] executing mode=%s dir=%q cmd=%q", args.Mode, args.WorkDir, args.Command)
 
 	switch args.Mode {
 	case "exec":
@@ -271,6 +273,24 @@ func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output
 }
 
 // ==================== Data Structures ====================
+
+// CommandProperties defines the tool-specific configuration for CommandTool.
+// This is deserialized from the ToolRef.Properties map by the factory,
+// keeping ToolRef generic — no command-specific fields pollute the shared struct.
+//
+// Example YAML:
+//
+//   - kind: tool
+//     id: command
+//     properties:
+//     workspace: /tmp/tagent-workspace
+//     run_as_user: tagent-runner
+//     run_as_group: tagent-runner
+type CommandProperties struct {
+	Workspace  string `json:"workspace,omitempty"    yaml:"workspace,omitempty"`
+	RunAsUser  string `json:"run_as_user,omitempty"  yaml:"run_as_user,omitempty"`
+	RunAsGroup string `json:"run_as_group,omitempty" yaml:"run_as_group,omitempty"`
+}
 
 // CommandArgs represents a command execution request.
 type CommandArgs struct {

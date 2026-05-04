@@ -15,31 +15,179 @@ import (
 // Declarative and serializable — loadable from YAML or JSON.
 // Runtime-only dependencies (model instances, memory stores, etc.) are injected via Option functions.
 //
+// The configuration follows an agent-centric design: each agent describes its own
+// settings (model, memory, tools) and its communication intent (which agents it calls).
+// The top-level Config holds a map of agent configs, keyed by agent name.
+//
 // Example YAML:
 //
-//	name: tagent
-//	model: glm-4-flash
-//	prompt_dir: resources/prompts
-//	system_prompt:
-//	  files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
-//	tools:
-//	  - id: knowledge
-//	    kind: agent
-//	    description_file: knowledge_tool_desc.md
+//	agents:
+//	  tagent:
+//	    model: glm-4-flash
+//	    prompt_dir: resources/prompts
+//	    system_prompt:
+//	      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
+//	    memory:
+//	      type: file
+//	      path: /data/tagent/events
+//	    tools:
+//	      - agent: knowledge
+//	        description_file: knowledge_tool_desc.md
+//	        event_params: [event_key]
+//	      - agent: recall
+//	        description_file: recall_tool_desc.md
+//	        event_params: [event_key]
+//	      - kind: tool
+//	        id: command
+//	        description_file: command_tool_desc.md
+//	  knowledge:
+//	    model: glm-4-flash
+//	    prompt:
+//	      files: [knowledge_agent.md]
+//	    memory:
+//	      type: memory
+//	    max_tool_iterations: 5
+//	    max_tokens: 4096
+//	  recall:
+//	    model: glm-4-flash
+//	    prompt:
+//	      files: [recall_agent.md]
+//	    memory:
+//	      type: memory
+//	    max_tool_iterations: 5
 type Config struct {
-	Name      string `json:"name"       yaml:"name"`
-	Model     string `json:"model"      yaml:"model"`      // Model name string (resolved at runtime)
-	PromptDir string `json:"prompt_dir" yaml:"prompt_dir"` // Base directory for prompt file resolution
+	// Entry specifies which agent in the Agents map is the top-level agent.
+	// Defaults to "tagent" if empty.
+	Entry string `json:"entry" yaml:"entry"`
 
-	// Top-level agent settings
-	SystemPrompt      PromptConfig `json:"system_prompt"        yaml:"system_prompt"`
-	MaxToolIterations int          `json:"max_tool_iterations"  yaml:"max_tool_iterations"`
-	MaxTokens         int          `json:"max_tokens"           yaml:"max_tokens"`
-	Temperature       float64      `json:"temperature"          yaml:"temperature"`
-	CompressThreshold float64      `json:"compress_threshold"   yaml:"compress_threshold"`
+	// Agents maps agent name → AgentConfig. Each agent is independently configured.
+	Agents map[string]AgentConfig `json:"agents" yaml:"agents"`
 
-	// Declarative tool list
-	Tools []ToolConfig `json:"tools" yaml:"tools"`
+	// PromptDir is the global base directory for prompt file resolution.
+	// Individual agents can override this via their own PromptDir field.
+	PromptDir string `json:"prompt_dir" yaml:"prompt_dir"`
+
+	// Model is the global default model name (resolved at runtime).
+	// Individual agents can override this via their own Model field.
+	Model string `json:"model" yaml:"model"`
+
+	// ===== Runtime configuration (was in config.yaml) =====
+
+	// APIEndpoint is the LLM API base URL (e.g., "https://open.bigmodel.cn/api/paas/v4").
+	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty"`
+
+	// APIKeyEnv is the environment variable name holding the API key.
+	// Defaults to "ZAI_API_KEY" if empty.
+	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+
+	// LogLevel controls framework (trpc-agent-go/log) verbosity.
+	// One of: "debug", "info", "warn", "error".
+	// Can be overridden by the LOG_LEVEL environment variable.
+	LogLevel string `json:"log_level,omitempty" yaml:"log_level,omitempty"`
+
+	// RequestTimeoutSeconds is the per-request timeout in seconds (0 = default 3600).
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty" yaml:"request_timeout_seconds,omitempty"`
+
+	// App holds application-specific configuration (e.g., wechat bot settings).
+	// Each application deserializes this into its own typed struct.
+	// This keeps Config generic — no app-specific fields pollute the shared structure.
+	App map[string]any `json:"app,omitempty" yaml:"app,omitempty"`
+}
+
+// AgentConfig describes a single agent's configuration.
+// Each agent only cares about itself and who it communicates with.
+type AgentConfig struct {
+	// Model is the LLM model name (resolved at runtime). Falls back to Config.Model.
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// PromptDir is the base directory for this agent's prompt files.
+	// Falls back to Config.PromptDir.
+	PromptDir string `json:"prompt_dir,omitempty" yaml:"prompt_dir,omitempty"`
+
+	// SystemPrompt configures how to load this agent's system prompt.
+	SystemPrompt PromptConfig `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
+
+	// Memory configures this agent's own memory store.
+	// Each agent has its own isolated storage. Defaults to in-memory store.
+	Memory MemoryConfig `json:"memory,omitempty" yaml:"memory,omitempty"`
+
+	// Tools declares which tools this agent uses.
+	// Tools can reference other agents (agent kind) or plain tools (tool kind).
+	Tools []ToolRef `json:"tools" yaml:"tools"`
+
+	// Agent parameters
+	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
+	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
+	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
+	CompressThreshold float64 `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
+
+	// Description for agent.Agent interface (used when this agent is a sub-agent)
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// MemoryConfig configures an agent's memory store.
+// Each agent has its own isolated storage instance.
+type MemoryConfig struct {
+	// Type selects the memory store implementation:
+	//   "memory" — in-memory store (default, lost on process exit)
+	//   "file"   — file-backed persistent store
+	Type string `json:"type" yaml:"type"`
+
+	// Path is the storage directory for "file" type.
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+}
+
+// ToolRef declares a tool that an agent uses.
+// For agent-kind tools, the AgentID field references another AgentConfig in the Agents map.
+// For tool-kind tools, the ID field identifies the plain tool factory.
+type ToolRef struct {
+	// Kind distinguishes agent tools from plain tools. Defaults to "agent".
+	Kind ToolKind `json:"kind" yaml:"kind"`
+
+	// AgentID references another agent in the Agents map (kind=agent).
+	// The referenced agent becomes a CallableTool for this agent.
+	AgentID string `json:"agent,omitempty" yaml:"agent,omitempty"`
+
+	// ID is the tool identifier for plain tools (kind=tool).
+	ID string `json:"id,omitempty" yaml:"id,omitempty"`
+
+	// Model override for agent-kind tools (defaults to parent agent's model)
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// Prompt config for agent-kind tools
+	Prompt PromptConfig `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+
+	// Tool description: inline or from file (relative to prompt_dir)
+	Description     string `json:"description,omitempty"      yaml:"description,omitempty"`
+	DescriptionFile string `json:"description_file,omitempty" yaml:"description_file,omitempty"`
+
+	// EventParams declares which event-derived parameters this tool requires.
+	// When the parent agent's LLM outputs a tool call, it includes these parameter values
+	// (e.g., "event_key"). The tool wrapper then resolves them: for event_key, it fetches
+	// the complete event data from the parent agent's MemStore and passes it as external
+	// context to the tool agent. This prevents the LLM from breaking context isolation —
+	// the LLM only outputs a numeric key, but the actual event content is resolved server-side.
+	EventParams []string `json:"event_params,omitempty" yaml:"event_params,omitempty"`
+
+	// Agent parameters (kind=agent)
+	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
+	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
+	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
+
+	// Properties holds tool-specific configuration that each tool factory
+	// deserializes into its own typed struct. This keeps ToolRef generic
+	// — no tool-specific fields pollute the shared structure.
+	//
+	// Example (command tool):
+	//
+	//	properties:
+	//	  workspace: /tmp/tagent-workspace
+	//	  run_as_user: tagent-runner
+	//	  run_as_group: tagent-runner
+	Properties map[string]any `json:"properties,omitempty" yaml:"properties,omitempty"`
+
+	// Extension: custom factory path (for non-builtin tools/agents)
+	Factory string `json:"factory,omitempty" yaml:"factory,omitempty"`
 }
 
 // PromptConfig is an alias for prompt.CompositeConfig, providing bootstrap-style
@@ -52,7 +200,7 @@ type PromptConfig = prompt.CompositeConfig
 type ToolKind string
 
 const (
-	// ToolKindAgent: TagentAgent + agenttool.NewTool() wrapper.
+	// ToolKindAgent: TagentAgent wrapped as CallableTool.
 	// Has internal React loop, system prompt, and sub-tools.
 	ToolKindAgent ToolKind = "agent"
 
@@ -61,39 +209,9 @@ const (
 	ToolKindTool ToolKind = "tool"
 )
 
-// ToolConfig declares a tool to be created by New().
-type ToolConfig struct {
-	ID   string   `json:"id"   yaml:"id"`
-	Kind ToolKind `json:"kind" yaml:"kind"` // "agent" or "tool"
-
-	// Model override for tool agents (defaults to top-level model)
-	Model string `json:"model,omitempty" yaml:"model,omitempty"`
-
-	// Prompt config for tool agents
-	Prompt PromptConfig `json:"prompt,omitempty" yaml:"prompt,omitempty"`
-
-	// Tool description: inline or from file (relative to prompt_dir)
-	Description     string `json:"description,omitempty"      yaml:"description,omitempty"`
-	DescriptionFile string `json:"description_file,omitempty" yaml:"description_file,omitempty"`
-
-	// Agent parameters (kind=agent)
-	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
-	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
-	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
-
-	// Command-specific (id=command, kind=tool)
-	Workspace  string `json:"workspace,omitempty"    yaml:"workspace,omitempty"`
-	RunAsUser  string `json:"run_as_user,omitempty"  yaml:"run_as_user,omitempty"`
-	RunAsGroup string `json:"run_as_group,omitempty" yaml:"run_as_group,omitempty"`
-
-	// Extension: custom factory path (for non-builtin tools/agents)
-	Factory string         `json:"factory,omitempty" yaml:"factory,omitempty"`
-	Config  map[string]any `json:"config,omitempty"  yaml:"config,omitempty"`
-}
-
 // Default values
 const (
-	DefaultName           = "tagent"
+	DefaultEntry          = "tagent"
 	DefaultPromptDir      = "resources/prompts"
 	DefaultMaxToolIter    = 200
 	DefaultMaxTokens      = 8000
@@ -105,40 +223,58 @@ const (
 	DefaultAgentTemp        = 0.3
 )
 
-// DefaultConfig returns a Config with sensible defaults and the three core tools.
+// DefaultConfig returns a Config with sensible defaults and the three core agents.
 func DefaultConfig() Config {
 	return Config{
-		Name:              DefaultName,
-		PromptDir:         DefaultPromptDir,
-		MaxToolIterations: DefaultMaxToolIter,
-		MaxTokens:         DefaultMaxTokens,
-		Temperature:       DefaultTemperature,
-		CompressThreshold: DefaultCompressThresh,
-		SystemPrompt: PromptConfig{
-			Files: []string{"AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"},
-		},
-		Tools: []ToolConfig{
-			{
-				ID:                "knowledge",
-				Kind:              ToolKindAgent,
-				Prompt:            PromptConfig{Files: []string{"knowledge_agent.md"}},
-				DescriptionFile:   "knowledge_tool_desc.md",
+		Entry:     DefaultEntry,
+		PromptDir: DefaultPromptDir,
+		Agents: map[string]AgentConfig{
+			"tagent": {
+				PromptDir: DefaultPromptDir,
+				SystemPrompt: PromptConfig{
+					Files: []string{"AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "HEARTBEAT.md", "MEMORY.md"},
+				},
+				MaxToolIterations: DefaultMaxToolIter,
+				MaxTokens:         DefaultMaxTokens,
+				Temperature:       DefaultTemperature,
+				CompressThreshold: DefaultCompressThresh,
+				Tools: []ToolRef{
+					{
+						Kind:              ToolKindAgent,
+						AgentID:           "knowledge",
+						DescriptionFile:   "knowledge_tool_desc.md",
+						EventParams:       []string{"event_key"},
+						MaxToolIterations: DefaultAgentMaxToolIter,
+						MaxTokens:         DefaultAgentMaxTokens,
+						Temperature:       DefaultAgentTemp,
+					},
+					{
+						Kind:              ToolKindAgent,
+						AgentID:           "recall",
+						DescriptionFile:   "recall_tool_desc.md",
+						EventParams:       []string{"event_key"},
+						MaxToolIterations: DefaultAgentMaxToolIter,
+						MaxTokens:         DefaultAgentMaxTokens,
+					},
+					{
+						Kind:            ToolKindTool,
+						ID:              "command",
+						DescriptionFile: "command_tool_desc.md",
+					},
+				},
+			},
+			"knowledge": {
+				PromptDir:         DefaultPromptDir,
+				SystemPrompt:      PromptConfig{Files: []string{"knowledge_agent.md"}},
 				MaxToolIterations: DefaultAgentMaxToolIter,
 				MaxTokens:         DefaultAgentMaxTokens,
 				Temperature:       DefaultAgentTemp,
 			},
-			{
-				ID:                "recall",
-				Kind:              ToolKindAgent,
-				Prompt:            PromptConfig{Files: []string{"recall_agent.md"}},
-				DescriptionFile:   "recall_tool_desc.md",
+			"recall": {
+				PromptDir:         DefaultPromptDir,
+				SystemPrompt:      PromptConfig{Files: []string{"recall_agent.md"}},
 				MaxToolIterations: DefaultAgentMaxToolIter,
 				MaxTokens:         DefaultAgentMaxTokens,
-			},
-			{
-				ID:              "command",
-				Kind:            ToolKindTool,
-				DescriptionFile: "command_tool_desc.md",
 			},
 		},
 	}
@@ -146,39 +282,82 @@ func DefaultConfig() Config {
 
 // ApplyDefaults fills in zero/empty values with defaults.
 func (c *Config) ApplyDefaults() {
-	if c.Name == "" {
-		c.Name = DefaultName
+	if c.Entry == "" {
+		c.Entry = DefaultEntry
 	}
 	if c.PromptDir == "" {
 		c.PromptDir = DefaultPromptDir
 	}
-	if c.MaxToolIterations <= 0 {
-		c.MaxToolIterations = DefaultMaxToolIter
+	if c.APIKeyEnv == "" {
+		c.APIKeyEnv = "ZAI_API_KEY"
 	}
-	if c.MaxTokens <= 0 {
-		c.MaxTokens = DefaultMaxTokens
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
 	}
-	if c.Temperature <= 0 {
-		c.Temperature = DefaultTemperature
-	}
-	if c.CompressThreshold <= 0 {
-		c.CompressThreshold = DefaultCompressThresh
+	if c.RequestTimeoutSeconds <= 0 {
+		c.RequestTimeoutSeconds = 3600
 	}
 
-	for i := range c.Tools {
-		tc := &c.Tools[i]
-		if tc.Kind == "" {
-			tc.Kind = ToolKindAgent
+	// LOG_LEVEL env var overrides config file
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		c.LogLevel = v
+	}
+
+	for name := range c.Agents {
+		ac := c.Agents[name]
+		ac.applyDefaults(name, c)
+		c.Agents[name] = ac
+	}
+}
+
+// applyDefaults fills in zero/empty values for an AgentConfig.
+func (ac *AgentConfig) applyDefaults(name string, parent *Config) {
+	if ac.PromptDir == "" {
+		ac.PromptDir = parent.PromptDir
+	}
+	if ac.MaxToolIterations <= 0 {
+		// Entry agent uses larger defaults
+		if name == parent.Entry {
+			ac.MaxToolIterations = DefaultMaxToolIter
+		} else {
+			ac.MaxToolIterations = DefaultAgentMaxToolIter
 		}
-		if tc.Kind == ToolKindAgent {
-			if tc.MaxToolIterations <= 0 {
-				tc.MaxToolIterations = DefaultAgentMaxToolIter
+	}
+	if ac.MaxTokens <= 0 {
+		if name == parent.Entry {
+			ac.MaxTokens = DefaultMaxTokens
+		} else {
+			ac.MaxTokens = DefaultAgentMaxTokens
+		}
+	}
+	if ac.Temperature <= 0 {
+		if name == parent.Entry {
+			ac.Temperature = DefaultTemperature
+		} else {
+			ac.Temperature = DefaultAgentTemp
+		}
+	}
+	if ac.CompressThreshold <= 0 && name == parent.Entry {
+		ac.CompressThreshold = DefaultCompressThresh
+	}
+	if ac.Memory.Type == "" {
+		ac.Memory.Type = "memory" // Default to in-memory store
+	}
+
+	for i := range ac.Tools {
+		tr := &ac.Tools[i]
+		if tr.Kind == "" {
+			tr.Kind = ToolKindAgent
+		}
+		if tr.Kind == ToolKindAgent {
+			if tr.MaxToolIterations <= 0 {
+				tr.MaxToolIterations = DefaultAgentMaxToolIter
 			}
-			if tc.MaxTokens <= 0 {
-				tc.MaxTokens = DefaultAgentMaxTokens
+			if tr.MaxTokens <= 0 {
+				tr.MaxTokens = DefaultAgentMaxTokens
 			}
-			if tc.Temperature <= 0 && tc.Model == "" {
-				tc.Temperature = DefaultAgentTemp
+			if tr.Temperature <= 0 && tr.Model == "" {
+				tr.Temperature = DefaultAgentTemp
 			}
 		}
 	}
@@ -186,29 +365,63 @@ func (c *Config) ApplyDefaults() {
 
 // Validate checks the config for errors after defaults are applied.
 func (c *Config) Validate() error {
-	if c.Model == "" {
-		return fmt.Errorf("tagent config: model is required")
+	if len(c.Agents) == 0 {
+		return fmt.Errorf("tagent config: at least one agent is required")
 	}
 
-	seenIDs := make(map[string]bool, len(c.Tools))
-	for i, tc := range c.Tools {
-		if tc.ID == "" {
-			return fmt.Errorf("tagent config: tools[%d].id is required", i)
-		}
-		if tc.Kind != ToolKindAgent && tc.Kind != ToolKindTool {
-			return fmt.Errorf("tagent config: tools[%d].kind must be %q or %q, got %q",
-				i, ToolKindAgent, ToolKindTool, tc.Kind)
-		}
-		if seenIDs[tc.ID] {
-			return fmt.Errorf("tagent config: duplicate tool id %q", tc.ID)
-		}
-		seenIDs[tc.ID] = true
+	// Validate entry agent exists
+	if _, ok := c.Agents[c.Entry]; !ok {
+		return fmt.Errorf("tagent config: entry agent %q not found in agents map", c.Entry)
+	}
 
-		if tc.Kind == ToolKindAgent && tc.Description == "" && tc.DescriptionFile == "" {
-			return fmt.Errorf("tagent config: tool agent %q requires description or description_file", tc.ID)
+	// Validate each agent
+	for name, ac := range c.Agents {
+		if err := ac.validate(name); err != nil {
+			return err
 		}
 	}
 
+	// Validate tool agent references
+	for name, ac := range c.Agents {
+		for i, tr := range ac.Tools {
+			if tr.Kind == ToolKindAgent && tr.AgentID != "" {
+				if _, ok := c.Agents[tr.AgentID]; !ok {
+					return fmt.Errorf("tagent config: agent %q tool[%d] references unknown agent %q",
+						name, i, tr.AgentID)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// validate checks an AgentConfig for errors.
+func (ac *AgentConfig) validate(name string) error {
+	seenIDs := make(map[string]bool)
+	for i, tr := range ac.Tools {
+		if tr.Kind == ToolKindAgent {
+			if tr.AgentID == "" {
+				return fmt.Errorf("agent %q: tools[%d] agent kind requires agent id", name, i)
+			}
+			if tr.Description == "" && tr.DescriptionFile == "" {
+				return fmt.Errorf("agent %q: tool agent %q requires description or description_file", name, tr.AgentID)
+			}
+			if seenIDs[tr.AgentID] {
+				return fmt.Errorf("agent %q: duplicate tool agent %q", name, tr.AgentID)
+			}
+			seenIDs[tr.AgentID] = true
+		}
+		if tr.Kind == ToolKindTool {
+			if tr.ID == "" {
+				return fmt.Errorf("agent %q: tools[%d] tool kind requires id", name, i)
+			}
+			if seenIDs[tr.ID] {
+				return fmt.Errorf("agent %q: duplicate tool id %q", name, tr.ID)
+			}
+			seenIDs[tr.ID] = true
+		}
+	}
 	return nil
 }
 
@@ -241,4 +454,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// APIKey returns the API key from the environment variable specified by APIKeyEnv.
+func (c *Config) APIKey() string {
+	return os.Getenv(c.APIKeyEnv)
 }

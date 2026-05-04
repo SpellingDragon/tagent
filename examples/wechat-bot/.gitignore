@@ -1,0 +1,6 @@
+.wechat-config/
+.wechat-context-tokens/
+.weixin-token.json
+logs/
+*.log
+wechat-bot

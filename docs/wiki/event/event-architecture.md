@@ -94,11 +94,12 @@ graph LR
     role -->|"RoleUser"| ext["external_input"]
     role -->|"RoleSystem\n(TmuxMonitor)"| ext
     role -->|"RoleAssistant\n无 ToolCalls"| ao["agent_output"]
-    role -->|"RoleAssistant\n有 ToolCalls"| ac["action_command"]
-    role -->|"RoleTool"| ac
+    role -->|"RoleAssistant\n有 ToolCalls"| tp["thinking_plan"]
+    role -->|"RoleTool"| ac["action_command"]
 
     ext --> special["IsSpecialEventType = true"]
     ao --> special
+    tp --> special
     ac --> notspecial["IsSpecialEventType = false"]
 ```
 
@@ -129,7 +130,7 @@ func ExtractEventType(msg model.Message) string {
         return TypeExternalInput
     case model.RoleAssistant:
         if len(msg.ToolCalls) > 0 {
-            return TypeActionCommand
+            return TypeThinkingPlan
         }
         return TypeAgentOutput
     case model.RoleTool:
@@ -149,7 +150,7 @@ func ExtractEventType(msg model.Message) string {
 |----------|-----------|-----------|------|
 | `RoleUser` | — | `external_input` | 用户输入 |
 | `RoleSystem` | — | `external_input` | TmuxMonitor 注入 |
-| `RoleAssistant` | `len > 0` | `action_command` | Agent 调用工具 |
+| `RoleAssistant` | `len > 0` | `thinking_plan` | Agent 思考/计划（带工具调用） |
 | `RoleAssistant` | `len == 0` | `agent_output` | Agent 最终回复 |
 | `RoleTool` | — | `action_command` | 工具执行结果 |
 | 其他 | — | `external_input` | Fallback |
@@ -171,14 +172,14 @@ func IsSpecialEventType(eventType string) bool
 |---------|-------------------|---------|------|
 | `external_input` | **true** | 原文全文 | 用户意图需完整保留 |
 | `agent_output` | **true** | 原文全文 | Agent 回复需完整保留 |
+| `thinking_plan` | **true** | 原文全文 | Agent 思考过程含工具调用决策 |
 | `action_command` | false | 工具调用摘要 | 工具调用信息密度高 |
-| `thinking_plan` | false | 工具调用摘要 | 同上 |
 | `thinking_recall` | false | 原文全文 | 记忆召回内容需完整 |
 | `thinking_knowledge` | false | 原文全文 | 知识检索内容需完整 |
 | `context_compress` | false | 原文全文 | 压缩通知内容需完整 |
 | 其他 | false | 原文全文 | Fallback |
 
-**核心原则**：`action_command` 是唯一使用工具调用摘要的事件类型，所有其他类型都使用原文全文作为摘要。
+**核心原则**：`thinking_plan` 和 `external_input`/`agent_output` 一样使用原文全文摘要策略，`action_command` 使用工具调用摘要。
 
 ---
 

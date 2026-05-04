@@ -70,7 +70,7 @@ func (p *SummaryPlugin) onEvent(
 		evt.Tag = tag
 	}
 
-	log.Debugf("SummaryPlugin: enriched event (type=%s, summary_len=%d)", eventType, len(summary))
+	log.Debugf("[Summary] enriched type=%s summary_len=%d", eventType, len(summary))
 
 	return evt, nil
 }

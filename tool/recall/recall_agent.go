@@ -5,11 +5,10 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	tagenttool "trpc.group/trpc-go/trpc-agent-go/tool"
-	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
-	tagentpkg "github.com/SpellingDragon/tagent/tool"
 )
 
 // PromptConfig describes how to load a system prompt (bootstrap style).
@@ -26,7 +25,7 @@ type PromptConfig = prompt.CompositeConfig
 type Config struct {
 	Model model.Model // Required: LLM model for the internal React loop
 
-	MemStore tagentpkg.MemoryStoreAccessor // Required: memory storage accessor
+	MemStore memory.MemoryStore // Required: agent's own MemoryStore (writes via MemoryPlugin, reads via sub-tools)
 
 	PromptDir string // Optional: base directory for prompt files (default: "resources/prompts")
 
@@ -96,6 +95,7 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		Name:              "recall",
 		Description:       "Intelligent memory recall agent. Queries historical events and synthesizes memories into coherent responses.",
 		Model:             cfg.Model,
+		MemoryStore:       cfg.MemStore, // MUST be same store: MemoryPlugin writes here, sub-tools read here
 		SystemPrompt:      systemPrompt,
 		Tools:             subTools,
 		MaxToolIterations: maxToolIter,
@@ -116,6 +116,9 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 // If cfg.Description is empty and cfg.DescriptionFile is set, the description
 // is loaded from the file (relative to cfg.PromptDir).
 // If both are empty, a hardcoded default is used for backward compatibility.
+//
+// Note: This wraps with a simple AgentToolWrapper without event_key resolution.
+// For full event_key support, use tagent.New() which builds agents from Config.
 func NewTool(cfg Config) (tagenttool.Tool, error) {
 	recallAgent, err := NewAgent(cfg)
 	if err != nil {
@@ -128,9 +131,8 @@ func NewTool(cfg Config) (tagenttool.Tool, error) {
 		return nil, err
 	}
 
-	return agenttool.NewTool(recallAgent,
-		agenttool.WithDescription(desc),
-	), nil
+	// Wrap as AgentToolWrapper (no event_key resolution in standalone mode)
+	return agent.NewAgentToolWrapper(recallAgent, desc, nil, nil), nil
 }
 
 // resolveDescription resolves the tool description from inline text or file.

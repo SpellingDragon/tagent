@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,10 +98,12 @@ func TestCommandTool_WorkDir(t *testing.T) {
 	}
 
 	resp := result.(*CommandExecResult)
-	// pwd output should end with tempDir
-	expected := tempDir + "\n"
-	if resp.Stdout != expected {
-		t.Errorf("Expected stdout %q, got %q", expected, resp.Stdout)
+	// Normalize both paths to handle macOS /var -> /private/var symlink
+	expectedPath, _ := filepath.EvalSymlinks(tempDir)
+	actualPath := strings.TrimRight(resp.Stdout, "\n")
+	actualPath, _ = filepath.EvalSymlinks(actualPath)
+	if expectedPath != actualPath {
+		t.Errorf("Expected stdout %q, got %q", expectedPath+"\n", actualPath+"\n")
 	}
 }
 
@@ -276,6 +279,9 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 	)
 	defer tool.tmuxMonitor.Stop()
 
+	// 使用短轮询间隔加速测试状态检测
+	tool.tmuxMonitor.interval = 100 * time.Millisecond
+
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"mode":    "tmux_exec",
@@ -290,17 +296,28 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 
 	t.Logf("Created session %s", sessionID)
 
-	// 等待命令完成
-	time.Sleep(2 * time.Second)
-
-	// 验证: 会话状态应为 completed
-	session, exists := tool.tmuxMonitor.GetSession(sessionID)
-	if !exists {
-		t.Fatal("Session not found")
+	// 轮询等待会话完成（超时 10s）
+	deadline := time.Now().Add(10 * time.Second)
+	var session *TmuxSession
+	var exists bool
+	for {
+		session, exists = tool.tmuxMonitor.GetSession(sessionID)
+		if exists && session.Status == SessionCompleted {
+			t.Log("Session completed")
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
+	// 超时后做最终检查
+	if !exists {
+		t.Fatal("Session not found after timeout")
+	}
 	if session.Status != SessionCompleted {
-		t.Errorf("Expected status %q, got %q", SessionCompleted, session.Status)
+		t.Errorf("Expected status %q, got %q after timeout", SessionCompleted, session.Status)
 	}
 	t.Logf("Session status: %s", session.Status)
 }

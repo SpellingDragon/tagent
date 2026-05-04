@@ -55,20 +55,31 @@ func NewLoader(baseDir string) *Loader {
 ### 4.1 LoadFromFile — 单文件加载
 
 ```go
-// prompt/loader.go:27-54
+// prompt/loader.go:41-70
 func (l *Loader) LoadFromFile(path string) (string, error) {
-    // Step 1: 相对路径 → 绝对路径
+    // Step 1: 空路径检查
+    if path == "" {
+        return "", errors.New("prompt file path is empty")
+    }
+
+    // Step 2: 相对路径 → 绝对路径
     if !filepath.IsAbs(path) && l.BaseDir != "" {
         path = filepath.Join(l.BaseDir, path)
     }
 
-    // Step 2: 读取文件
-    data, err := os.ReadFile(path)
+    // Step 3: Trim空格
+    path = strings.TrimSpace(path)
 
-    // Step 3: Trim 并返回
+    // Step 4: 读取文件
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return "", fmt.Errorf("read prompt file %s: %w", path, err)
+    }
+
+    // Step 5: Trim 并返回（空文件返回空字符串，不报错）
     content := strings.TrimSpace(string(data))
     if content == "" {
-        return "", nil  // 空文件返回空字符串，不报错
+        return "", nil
     }
     return content, nil
 }
@@ -78,19 +89,29 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 - 支持绝对路径和相对路径（相对路径以 `BaseDir` 为基准）
 - 路径 trim 空格，避免意外空格导致的路径错误
 - 空文件返回空字符串（`nil` 错误），而非报错
+- 文件不存在时返回 `fmt.Errorf` 包装的错误，调用方可通过 `errors.Is` 解包
 
 ### 4.2 LoadFromDir — 目录加载
 
 ```go
-// prompt/loader.go:59-111
+// prompt/loader.go:75-127
 func (l *Loader) LoadFromDir(dir string) (string, error) {
     // Step 1: 路径解析（同 LoadFromFile）
     if !filepath.IsAbs(dir) && l.BaseDir != "" {
         dir = filepath.Join(l.BaseDir, dir)
     }
 
+    dir = strings.TrimSpace(dir)
+    if dir == "" {
+        return "", errors.New("prompt directory path is empty after trimming")
+    }
+
     // Step 2: 遍历目录，收集 .md 文件
-    entries, _ := os.ReadDir(dir)
+    entries, err := os.ReadDir(dir)
+    if err != nil {
+        return "", fmt.Errorf("read prompt directory %s: %w", dir, err)
+    }
+
     for _, entry := range entries {
         if entry.IsDir() {
             continue  // 跳过子目录
@@ -101,12 +122,19 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
         files = append(files, filepath.Join(dir, entry.Name()))
     }
 
+    if len(files) == 0 {
+        return "", fmt.Errorf("no .md prompt files in directory %s", dir)
+    }
+
     // Step 3: 按文件名排序（确定性顺序）
     sort.Strings(files)
 
-    // Step 4: 逐个加载并用 "\n\n" 连接
+    // Step 4: 逐个加载并用 "\n\n" 连接（遇到错误立即返回）
     for _, file := range files {
-        content, _ := l.LoadFromFile(file)
+        content, err := l.LoadFromFile(file)
+        if err != nil {
+            return "", err  // 不跳过错误，直接返回
+        }
         if content != "" {
             parts = append(parts, content)
         }
@@ -118,9 +146,9 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 
 **特点**：
 - **确定性顺序**：文件名排序保证每次加载顺序一致
-- **递归处理子目录**：不递归，仅处理当前目录文件
-- **多格式支持**：仅加载 `.md`（大小写不敏感）
-- **部分失败容忍**：某个文件加载失败不中断其他文件
+- **非递归**：不递归子目录，仅处理当前目录文件
+- **仅 .md**：加载 `.md` 文件（大小写不敏感）
+- **严格错误处理**：任何文件加载失败都会中断整个目录加载
 
 ### 4.3 LoadFiles — 多文件加载
 
@@ -152,12 +180,12 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 |------|-----------|---------------|
 | 来源 | 显式指定文件列表 | 目录遍历 |
 | 顺序 | 按 `paths` 参数顺序 | 按文件名排序 |
-| 失败行为 | 遇到错误中断 | 跳过失败文件继续 |
+| 失败行为 | 遇到错误中断 | 遇到错误中断（同样严格） |
 
 ### 4.4 LoadComposite — 组合加载
 
 ```go
-// prompt/loader.go:144-176
+// prompt/loader.go:154-192
 func (l *Loader) LoadComposite(inline string, files []string, dir string) (string, error) {
     parts := make([]string, 0, 1+len(files))
 
@@ -166,17 +194,24 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
         parts = append(parts, v)
     }
 
-    // 2. 多个文件（按顺序）
+    // 2. 多个文件（按顺序，遇错中断）
     if len(files) > 0 {
-        fileContent, _ := l.LoadFiles(files)
+        fileContent, err := l.LoadFiles(files)
+        if err != nil {
+            return "", err
+        }
         if fileContent != "" {
             parts = append(parts, fileContent)
         }
     }
 
-    // 3. 目录（最低优先级）
-    if dir = strings.TrimSpace(dir); dir != "" {
-        dirContent, _ := l.LoadFromDir(dir)
+    // 3. 目录（最低优先级，遇错中断）
+    dir = strings.TrimSpace(dir)
+    if dir != "" {
+        dirContent, err := l.LoadFromDir(dir)
+        if err != nil {
+            return "", err
+        }
         if dirContent != "" {
             parts = append(parts, dirContent)
         }
@@ -316,19 +351,28 @@ tagent/agent
 
 ### 7.2 在 Agent 初始化中的位置
 
+实际调用链：`tagent.New()` → `buildAgent()` → `loader.LoadComposite(inline, files, dir)`。
+`LoadComposite` 支持三种来源的灵活组装：内联文本、指定文件列表、整个目录。
+
 ```mermaid
 sequenceDiagram
-    participant TA as TagentAgent
+    participant Root as tagent.New() (根包)
     participant PL as PromptLoader
+    participant TA as TagentAgent
     participant IP as InstructionProcessor
 
-    TA->>PL: LoadBootstrap(agentDir)
-    PL->>PL: 按 BootstrapLoadOrder 加载 .md 文件
-    PL-->>TA: combinedPrompt 字符串
-    TA->>IP: 将 combinedPrompt 作为 system prompt 注入
+    Root->>PL: LoadComposite(inline, files, dir)
+    PL->>PL: 1. 内联文本<br/>2. 指定文件列表<br/>3. 加载目录中所有 .md
+    PL->>PL: 以 "\n\n" 连接各部分
+    PL-->>Root: combinedPrompt 字符串
+    Root->>TA: NewTagentAgent(cfg{SystemPrompt: combinedPrompt})
+    TA->>IP: 将 combinedPrompt 注册为 system instruction
     IP-->>TA: Request(system_prompt=combinedPrompt)
     Note over TA: Agent 初始化完成
 ```
+
+> **补充**：`LoadBootstrap()` 提供了按 `BootstrapLoadOrder` 顺序加载指定文件的备选路径，
+> 适合固定的 bootstrap 文件约定场景。当前主流程使用 `LoadComposite` 以获得更大灵活性。
 
 ### 7.3 BaseDir 的作用
 

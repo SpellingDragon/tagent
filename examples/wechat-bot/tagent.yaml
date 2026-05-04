@@ -1,0 +1,109 @@
+# ============================================================================
+# tagent WeChat Bot 配置文件 (Single Source of Truth)
+# ============================================================================
+#
+# 所有配置统一在此文件中管理，无需维护多份配置文件。
+#
+# 敏感信息:
+#   API Key 通过环境变量设置 (默认 ZAI_API_KEY)，不要写在此文件中
+# ============================================================================
+
+# ===== 运行时配置 =====
+
+# LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
+model: glm-5
+
+# LLM API 基础地址
+api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+
+# API Key 环境变量名 (默认 ZAI_API_KEY)
+# api_key_env: "ZAI_API_KEY"
+
+# 日志级别: "debug", "info", "warn", "error"
+# debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等
+# 可通过环境变量 LOG_LEVEL 覆盖
+log_level: "info"
+
+# 请求超时（秒），默认 3600 (60 分钟)
+request_timeout_seconds: 3600
+
+# ===== Agent 配置 =====
+
+entry: tagent
+prompt_dir: resources/prompts
+
+agents:
+  # ========================================================================
+  # 顶层 Agent: 微信助手的主 Agent
+  # ========================================================================
+  tagent:
+    system_prompt:
+      files:
+        - AGENTS.md
+        - SOUL.md
+        - USER.md
+        - TOOLS.md
+    memory:
+      type: file
+      path: .wechat-config/agent-events
+    max_tool_iterations: 200
+    max_tokens: 8000
+    temperature: 0.7
+    compress_threshold: 0.8
+    tools:
+      # Knowledge Agent: 知识获取与翻译
+      - agent: knowledge
+        description_file: knowledge_tool_desc.md
+        event_params: [event_keys]
+        max_tool_iterations: 5
+        max_tokens: 4096
+        temperature: 0.3
+
+      # Recall Agent: 记忆检索
+      - agent: recall
+        description_file: recall_tool_desc.md
+        event_params: [event_keys]
+        max_tool_iterations: 5
+        max_tokens: 4096
+
+      # Command Tool: 命令执行
+      # properties 下放 tool 专有配置，各 tool factory 自行反序列化
+      - kind: tool
+        id: command
+        description_file: command_tool_desc.md
+        # properties:                          # tool 专有配置
+        #   workspace: /tmp/tagent-workspace    # 可选: 命令执行工作目录
+        #   run_as_user: tagent-runner          # 可选: 以指定用户执行 (需要 sudoers 免密配置)
+        #   run_as_group: tagent-runner         # 可选: 以指定用户组执行
+
+  # ========================================================================
+  # Knowledge Agent: 知识获取 & 翻译子 Agent
+  # ========================================================================
+  knowledge:
+    system_prompt:
+      files:
+        - knowledge_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 4096
+    temperature: 0.3
+
+  # ========================================================================
+  # Recall Agent: 记忆检索子 Agent
+  # ========================================================================
+  recall:
+    system_prompt:
+      files:
+        - recall_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 4096
+
+# ===== 应用专属配置 (各应用自行反序列化) =====
+app:
+  wechat:
+    config_dir: ".wechat-config"
+    token_file: "token.json"
+    context_token_dir: ".wechat-context-tokens"

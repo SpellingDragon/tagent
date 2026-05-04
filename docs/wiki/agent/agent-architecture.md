@@ -21,7 +21,6 @@
 graph TB
     subgraph "调用方"
         User([用户 / API])
-        Tmux([TmuxMonitor 异步事件])
     end
 
     subgraph "tagent/agent"
@@ -48,6 +47,11 @@ graph TB
         MS["memory.MemoryStore\n(记忆存储)"]
     end
 
+    subgraph "内部工具 (tool/command)"
+        CmdTool["CommandTool\n(命令执行)"]
+        Tmux["TmuxMonitor\n(异步状态检测)"]
+    end
+
     subgraph "外部依赖"
         LLM["model.Model\n(LLM: GLM-4 / OpenAI ...)]"]
         Tools["[]tool.Tool\n(CallableTools)"]
@@ -57,16 +61,15 @@ graph TB
         KAH["tagent.go\ntagent.New() 工厂函数"]
     end
 
-    User --> TA
-    Tmux --> KAH
+    User -->|RunSimple| TA
 
     TA --> Runner
     TA --> LLMAgent
     TA --> CI
     TA --> MS
 
-    KAH -->|MessageInjector| TA
-    KAH -->|InjectMessage| LLMAgent
+    KAH -->|创建| TA
+    KAH -.->|SetMessageInjector| CmdTool
 
     Runner --> Session
     Runner --> PluginManager
@@ -85,6 +88,10 @@ graph TB
 
     MP --> MS
 
+    Tools --> CmdTool
+    Tmux -->|状态回调| CmdTool
+    CmdTool -->|InjectMessage| TA
+
     style TA fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
     style Runner fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
     style LLMAgent fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
@@ -99,9 +106,9 @@ graph TB
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `tagent_agent.go` | 257 | 组合根：初始化 + 对外 API + InjectMessage |
-| `context_intervention.go` | 84 | BeforeModel 拦截器：token 预算检查 + 触发压缩 |
-| `smart_compress.go` | 225 | 两阶段压缩引擎：按任务边界切分 + LLM 摘要 |
+| `tagent_agent.go` | 339 | 组合根：初始化 + 对外 API + IngestExternalEvents + InjectMessage |
+| `context_intervention.go` | 290 | BeforeModel 拦截器：Phase 1 事件视图转换 + Phase 2 token 预算/压缩 |
+| `smart_compress.go` | 298 | 两阶段压缩引擎：Stage 1 任务边界切分 + Stage 2 LLM 摘要 |
 | `token_counter.go` | 41 | Token 估算器：启发式字符计数 |
 
 > **注意**：`tagent.New()` 工厂函数在根包 `tagent.go`，不在 agent 包中。
@@ -114,7 +121,7 @@ graph TB
 ### 4.1 TagentAgent — 组合根
 
 ```go
-// tagent_agent.go:41-54
+// tagent_agent.go:41-60
 type TagentAgent struct {
     llmAgent   *llmagent.LLMAgent  // 框架 React Loop
     runner     runner.Runner        // 框架编排引擎
@@ -128,21 +135,38 @@ type TagentAgent struct {
     // 异步事件注入的会话上下文（首次 Run 时缓存）
     lastUserID    string
     lastSessionID string
+
+    // 待注入的外部事件上下文（IngestExternalEvents 队列）
+    pendingExternalEvents []memory.FullEvent
 }
 ```
 
 **为什么需要 lastUserID / lastSessionID？**
 
-`InjectMessage` 在后台异步检测 tmux 会话状态变更时，需要注入 `RoleSystem` 消息触发新一轮 Agent 迭代。由于回调没有传入 userID/sessionID 参数，只能依赖缓存的最近一次调用上下文。
+`InjectMessage` 在 TmuxMonitor 后台检测到 tmux 会话状态变更时，需要注入消息触发新一轮 Agent 迭代。由于回调签名没有 userID/sessionID 参数，只能缓存最近一次 `RunSimple` 调用传入的上下文。
 
-**为什么需要 InjectMessage？**
+**InjectMessage 和正常消息走同一条路径吗？**
 
-`InjectMessage` 是 `tagent.New()` 工厂函数中 `MessageInjector` 接线的基础设施。当 TmuxMonitor 检测到 tmux session 状态变更时，CommandTool 内部通过 `MessageInjector.InjectMessage()` 注入系统消息，后者使用 `Runner.Run()` 触发新的 Agent 迭代。
+是的。`InjectMessage` 和正常消息（`RunSimple`）调用的是**同一个** `ta.runner.Run()`，因此事件流经过完全相同的处理管道：
+
+```
+RunSimple → ta.runner.Run(ctx, userID, sessionID, msg)
+InjectMessage → ta.runner.Run(ctx, lastUserID, lastSessionID, msg)
+                              │
+                              ▼
+              LLMAgent → Event → MemoryPlugin → Session
+              → ContextIntervention → SmartCompress → ...
+```
+
+两者的唯一区别是**触发来源**：正常消息由外部用户调用触发，`InjectMessage` 由后台 TmuxMonitor 异步回调触发。
+`InjectMessage` 复用 `lastUserID`/`lastSessionID` 只是为了补全回调缺失的会话参数，消息本身不做任何特殊处理。
+
+`InjectMessage` 是 `tagent.New()` 工厂函数中 `MessageInjector` 接线的基础设施。当 TmuxMonitor 检测到 tmux session 状态变更时，CommandTool 内部通过 `MessageInjector.InjectMessage()` 注入系统消息。
 
 ### 4.2 TagentConfig — 配置参数
 
 ```go
-// tagent_agent.go:41-51
+// tagent_agent.go:63-77
 type TagentConfig struct {
     Model             model.Model        // ✅ 必填：LLM 模型
     MemoryStore       memory.MemoryStore // 可选：默认 InMemoryStore
@@ -152,6 +176,9 @@ type TagentConfig struct {
     MaxTokens         int                // Token 预算，默认 8000
     CompressThreshold float64            // 触发压缩阈值，默认 0.8
     SummaryModel      model.Model        // 可选：Stage 2 摘要模型
+    Temperature       float64            // 可选：LLM 温度，默认 0.7
+    Name              string             // Agent 名称，默认 "tagent"
+    Description       string             // Agent 描述
 }
 ```
 
@@ -365,7 +392,7 @@ func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *
 | Plugin | 钩子 | 作用 |
 |--------|------|------|
 | `MemoryPlugin` | `OnEvent` | 推断事件类型、生成 EventKey、构建因果链、持久化到 MemoryStore、写回 StateDelta |
-| `SummaryPlugin` | `OnEvent` | 给事件设置 Tag（`agent_output` / `action_command` 等） |
+| `SummaryPlugin` | `OnEvent` | 给事件设置 Tag（`thinking_plan` / `agent_output` / `action_command` 等） |
 
 ### 6.3 Runner 的编排职责
 
@@ -512,16 +539,15 @@ sequenceDiagram
     participant MS as MemoryStore
 
     Note over TM: tmux 会话状态变更
-    TM->>CT: onStateChange(session, old, new, output)
-    CT->>TA: handleTmuxStateChange()
-    TA->>TA: 构建 system 消息 (RoleSystem)<br/>截断 output 到 2000 字符
+    TM->>CT: StateChangeCallback(session, old, new, output)
+    CT->>CT: handleStateChange() 构建 system 消息<br/>截断 output 到 2000 字符
+    CT->>TA: injector.InjectMessage(msg)
 
     alt 首次调用（无缓存）
-        TA-->>CT: 忽略（lastUserID == ""）
+        TA->>TA: lastUserID == "" → return
     else 已有调用上下文
-        TA->>R: runner.Run(ctx, lastUserID, lastSessionID, system_msg)
-        R->>R: 复用已有 Session
-        R->>R: 追加 system 消息 (RoleSystem)
+        TA->>R: runner.Run(ctx, lastUserID, lastSessionID, msg)
+        R->>R: 复用已有 Session 追加消息
         R->>R: 触发新一轮 ReAct Loop
         R->>CI: BeforeModel（可能触发压缩）
         R->>LLM: model.GenerateContent()
@@ -535,7 +561,7 @@ sequenceDiagram
 
 ## 八、ContextIntervention.BeforeModel — 详解
 
-**源码位置**：`context_intervention.go:37-64`
+**源码位置**：`context_intervention.go:53-119`
 
 ```go
 func (ci *ContextIntervention) BeforeModel(
@@ -546,28 +572,64 @@ func (ci *ContextIntervention) BeforeModel(
         return nil, nil
     }
 
-    // Step 1: 估算当前 messages 的 token 数
-    usedTokens := ci.tokenCounter.Estimate(args.Request.Messages)
-
-    // Step 2: 计算触发阈值
-    threshold := int(float64(ci.maxTokens) * ci.thresholdPct)
-
-    // Step 3: 超过阈值则压缩
-    if usedTokens > threshold {
-        log.Infof("ContextIntervention: token %d > threshold %d, compressing", usedTokens, threshold)
-
-        // Stage 1 + 可选 Stage 2
-        compressed := ci.compressor.Compress(ctx, args.Request.Messages)
-        // 确保有 user prompt（防止 LLM 只看到 agent_output）
-        compressed = ensureUserPrompt(compressed)
-        // 替换发送给 LLM 的 messages（不修改 Session！）
-        args.Request.Messages = compressed
-
-        newTokens := ci.tokenCounter.Estimate(args.Request.Messages)
-        log.Infof("compressed from %d to %d tokens", usedTokens, newTokens)
+    // === Phase 1: Event View Transformation ===
+    // 将 Session.Events 中的旧 messages 替换为带 [evt_xxx|event_type] 前缀的事件视图
+    inv, _ := agent.InvocationFromContext(ctx)
+    if inv != nil && inv.Session != nil {
+        events := ci.getSessionEvents(inv.Session)
+        if len(events) > 0 {
+            args.Request.Messages = ci.applyEventView(args.Request.Messages, events)
+        }
     }
 
-    // Step 4: 返回 nil 表示不短路流程，LLM 正常调用
+    // === Phase 2: Token Budget Check & Loop Compression ===
+    // 每轮压缩后重新估算，最多 5 轮
+    usedTokens := ci.tokenCounter.Estimate(args.Request.Messages)
+    threshold := int(float64(ci.maxTokens) * ci.thresholdPct)
+
+    if usedTokens <= threshold {
+        ci.logPhaseComplete(ctx, inv, usedTokens, len(args.Request.Messages), false, 0)
+        return nil, nil
+    }
+
+    beforeCount := len(args.Request.Messages)
+    beforeTokens := usedTokens
+
+    maxRounds := 5
+    for round := 0; round < maxRounds; round++ {
+        compressed := ci.compressor.Compress(ctx, args.Request.Messages, inv)
+        compressed = ensureUserPrompt(compressed)
+
+        newTokens := ci.tokenCounter.Estimate(compressed)
+
+        if newTokens >= usedTokens {
+            log.Warnf("[CI] compress round %d stalled (%d->%d tokens), stopping",
+                round+1, usedTokens, newTokens)
+            break
+        }
+
+        args.Request.Messages = compressed
+        usedTokens = newTokens
+
+        if usedTokens <= threshold {
+            break
+        }
+
+        if ci.compressor.KeepRecentTasks > 1 {
+            ci.compressor.KeepRecentTasks--
+            log.Infof("[CI] still over budget (%d > %d), reducing keepRecentTasks=%d",
+                usedTokens, threshold, ci.compressor.KeepRecentTasks)
+        }
+    }
+
+    ci.logPhaseComplete(ctx, inv, usedTokens, len(args.Request.Messages), true,
+        beforeTokens, beforeCount)
+
+    if usedTokens > ci.maxTokens {
+        log.Warnf("[CI] still over max tokens after compress (%d > %d)",
+            usedTokens, ci.maxTokens)
+    }
+
     return nil, nil
 }
 ```
@@ -644,15 +706,18 @@ Stage 2 输出: system + [LLM摘要] + [task4全部] + [task5全部]
 
 ## 十、TokenCounter — 估算公式
 
-**源码位置**：`token_counter.go:26-41`
+**源码位置**：`token_counter.go:27-41`
 
 ```go
 func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
     total := 0
-    for _, msg := range messages {
-        total += len([]rune(msg.Content)) / int(c.CharsPerToken)
-        total += 10                                    // 每条消息 overhead
-        total += 20 * len(msg.ToolCalls)               // tool_calls overhead
+    for i := range messages {
+        msg := &messages[i]
+        total += int(float64(len([]rune(msg.Content))) / c.CharsPerToken)
+        total += 10                                       // 每条消息 overhead
+        if len(msg.ToolCalls) > 0 {
+            total += 20 * len(msg.ToolCalls)              // tool_calls overhead
+        }
     }
     if total < 1 {
         total = 1
@@ -664,7 +729,7 @@ func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
 **估算公式**：
 
 ```
-estimatedTokens = Σ( Content长度 / CharsPerToken + 10 + 20×ToolCalls数 )
+estimatedTokens = Σ( Content字符数 / CharsPerToken + 10 + (20×ToolCalls数 如果有) )
 ```
 
 中英混合场景：`CharsPerToken = 2.0`（2 中文字符 ≈ 1 token；4 英文字符 ≈ 1 token）
@@ -673,7 +738,7 @@ estimatedTokens = Σ( Content长度 / CharsPerToken + 10 + 20×ToolCalls数 )
 
 ## 十一、MemoryPlugin — OnEvent 钩子详解
 
-**源码位置**：`tagent/plugin/memory_plugin.go:50-113`
+**源码位置**：`tagent/plugin/memory_plugin.go:63-131`
 
 ```go
 func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
@@ -684,16 +749,16 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     // 2. 生成 Snowflake EventKey（int64，编码 PartitionID）
     eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-    // 3. 推断事件类型
-    eventType := inferEventType(evt)
+    // 3. 推断事件类型并生成摘要（统一使用 tagent/event 包）
+    eventType, eventSummary := p.inferEventInfo(evt)
 
-    // 4. 提取摘要
-    eventSummary := extractSummary(evt)
-
-    // 5. 获取前驱事件 Key（按 PartitionID 独立因果链）
+    // 4. 获取前驱事件 Key（按 PartitionID 独立因果链）
     parentKey := p.lastEventKeys[partitionID]
 
-    // 6. 构建 FullEvent
+    // 5. 提取时间戳
+    timestamp := extractTimestamp(evt)
+
+    // 6. 构建 FullEvent 基础字段
     fullEvent := memory.FullEvent{
         EventKey:     eventKey,
         PartitionID:  partitionID,
@@ -701,20 +766,25 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
         EventType:    eventType,
         EventSummary: eventSummary,
         Timestamp:    timestamp,
-        Content:      ...,
-        ToolCalls:    ...,
-        Response:     ...,
     }
 
-    // 7. 持久化到 MemoryStore
+    // 7. 条件性填充 Response 相关字段
+    if evt.Response != nil && len(evt.Response.Choices) > 0 {
+        msg := evt.Response.Choices[0].Message
+        fullEvent.Content = msg.Content
+        fullEvent.ToolCalls = msg.ToolCalls
+        fullEvent.Response = evt.Response
+    }
+
+    // 8. 持久化到 MemoryStore
     p.memStore.StoreEvent(eventKey, fullEvent)
 
-    // 8. 写回 EventKey/PartitionID/EventType 到 StateDelta
+    // 9. 写回 EventKey/PartitionID/EventType 到 StateDelta
     evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
     evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
     evt.StateDelta["event_type"] = []byte(eventType)
 
-    // 9. 更新独立因果链（按 PartitionID 隔离）
+    // 10. 更新独立因果链（按 PartitionID 隔离）
     p.lastEventKeys[partitionID] = eventKey
 
     return evt, nil
@@ -854,7 +924,7 @@ func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
 
 #### 12.5.4 EventKey Snowflake 设计
 
-当前 `NewEventKey` 使用 `evt_{timestamp}_{sequence}` 格式，不含分区信息，无法支持按分区查询和云原生场景。
+Snowflake EventKey 已全面实现（`memory/types.go:129-160`）。EventKey 为 64-bit int，编码 PartitionID(11) + Timestamp(31) + Sequence(10) + Reserved(12)。
 
 参考 Snowflake 算法，设计 64-bit 整数 EventKey：
 
@@ -973,7 +1043,9 @@ defer agent.Close()
 ### 13.2 运行
 
 ```go
-eventCh, err := agent.Run(ctx, "user-1", "session-1", userMessage)
+eventCh, err := agent.RunSimple(ctx, "user-1", "session-1", userMessage)
+// 或通过 agent.Agent 接口（用于 Tool Agent）
+// eventCh, err := agent.Run(ctx, invocation)
 for evt := range eventCh {
     // 处理事件
 }
@@ -997,31 +1069,31 @@ cmdTool.SetMessageInjector(ta)
 
 ```go
 store := agent.MemStore()
-events, _ := store.RecallEvent("user-1", "session-1", query, 10)
+refs, _ := store.QueryEvents(memory.QueryOptions{
+    EventTypes: []string{"external_input"},
+    Limit:      10,
+})
 ```
 
-### 13.5 InjectMessage — 注入系统消息
+### 13.5 InjectMessage — 异步触发 Agent 迭代
 
-`InjectMessage` 用于在当前 session 中注入一个系统消息，触发新的 Agent 迭代：
+`InjectMessage` 复用与正常消息相同的 `runner.Run()` 调用路径，因此事件流经过完全相同的 LLMAgent → MemoryPlugin → Session → ContextIntervention 处理管道。
+
+其特殊之处仅在于**触发方式**：由 TmuxMonitor 后台 goroutine 异步回调，而非外部用户调用。为此它缓存 `lastUserID`/`lastSessionID` 补全会话参数，并使用 5 分钟超时上下文防止 goroutine 泄漏：
 
 ```go
-// 源码位置：tagent_agent.go:241-257
+// 源码位置：agent/tagent_agent.go:270-302
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
     if ta.lastUserID == "" || ta.lastSessionID == "" {
-        return  // 忽略（首次调用前）
-    }
-
-    ctx := context.Background()
-    eventCh, err := ta.runner.Run(ctx, ta.lastUserID, ta.lastSessionID, msg)
-    if err != nil {
         return
     }
 
-    // Drain events to prevent goroutine leak
-    go func() {
-        for range eventCh {
-        }
-    }()
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+    defer cancel()
+
+    eventCh, err := ta.runner.Run(ctx, ta.lastUserID, ta.lastSessionID, msg)
+    // eventCh 在后台 goroutine 中 drain 掉，防止阻塞 runner 事件循环
+    // 带 panic recovery 保护
 }
 ```
 

@@ -36,27 +36,16 @@ type Option func(*runtimeConfig)
 
 // runtimeConfig holds runtime-only dependencies.
 type runtimeConfig struct {
-	model        model.Model
-	memStore     memory.MemoryStore       // Full MemoryStore for tool agents to query event context
-	memAccessor  tool.MemoryStoreAccessor // Narrow accessor for tool sub-packages
+	model        model.Model // Default model (can be overridden per-agent)
+	summaryModel model.Model // Optional: for Stage 2 LLM summary
 	skillRepo    tool.SkillRepository
 	mcpToolSets  []trpctool.ToolSet
-	summaryModel model.Model
 }
 
 // WithModel sets the resolved model instance (required).
+// This is the default model; individual agents can override via AgentConfig.Model.
 func WithModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.model = m }
-}
-
-// WithMemStore sets the shared memory store.
-// The MemoryStore is passed to tool agents so they can query the parent
-// agent's event stream for full context (causal chain, event details, etc.).
-func WithMemStore(ms memory.MemoryStore) Option {
-	return func(rc *runtimeConfig) {
-		rc.memStore = ms
-		rc.memAccessor = ms // MemoryStore satisfies MemoryStoreAccessor
-	}
 }
 
 // WithSkillRepo sets the skill repository for knowledge agent.
@@ -77,14 +66,15 @@ func WithSummaryModel(m model.Model) Option {
 // New creates a fully-wired TagentAgent from declarative Config + runtime Options.
 //
 // Config is declarative and serializable (loadable from YAML/JSON via LoadConfig).
-// Options inject runtime-only dependencies (model instances, memory stores, etc.).
+// Options inject runtime-only dependencies (model instances, etc.).
 //
 // New handles all cross-boundary wiring internally:
-//   - Resolves each ToolConfig by kind (agent vs tool) and id
-//   - Loads prompts and descriptions from configured files
-//   - Creates tool agents via registered factories (agent.GetToolAgentFactory)
-//   - Creates plain tools via registered factories (agent.GetPlainToolFactory)
-//   - Wires CommandTool's MessageInjector back to the agent
+//   - Resolves the entry agent from Config.Agents map
+//   - Creates a MemoryStore per agent (isolated, from MemoryConfig)
+//   - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
+//   - For agent-kind tools: creates the referenced agent and wraps it via AgentToolWrapper
+//     which handles event_key → external context resolution
+//   - For tool-kind tools: delegates to registered plain tool factories
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -99,21 +89,92 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("tagent: model is required (use WithModel)")
 	}
 
-	// Resolve main agent prompt
 	loader := prompt.NewLoader(cfg.PromptDir)
-	systemPrompt, err := loader.LoadComposite(cfg.SystemPrompt.Inline, cfg.SystemPrompt.Files, cfg.SystemPrompt.Dir)
+
+	// Pre-create all agents (topological order handled by agent refs)
+	// We use a cache to avoid creating the same agent twice.
+	agentCache := make(map[string]*agent.TagentAgent)
+
+	// Build entry agent (the top-level agent returned by New)
+	entryCfg := cfg.Agents[cfg.Entry]
+	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache)
 	if err != nil {
-		return nil, fmt.Errorf("tagent: load system prompt: %w", err)
+		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
 	}
 
-	// Build tools from declarative config
+	return entryAgent, nil
+}
+
+// buildAgent recursively creates a TagentAgent for the given agent name.
+// It resolves tools by looking up referenced agents in the Config.Agents map.
+func buildAgent(
+	name string,
+	acfg AgentConfig,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	cache map[string]*agent.TagentAgent,
+) (*agent.TagentAgent, error) {
+	// Check cache first
+	if ta, ok := cache[name]; ok {
+		return ta, nil
+	}
+
+	// 1. Create this agent's MemoryStore (isolated per-agent)
+	memStore, err := resolveMemoryStore(acfg.Memory)
+	if err != nil {
+		return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
+	}
+
+	// 2. Resolve system prompt
+	systemPrompt, err := loader.LoadComposite(
+		acfg.SystemPrompt.Inline,
+		acfg.SystemPrompt.Files,
+		acfg.SystemPrompt.Dir,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("agent %q: load system prompt: %w", name, err)
+	}
+
+	// 3. Resolve model
+	agentModel := rc.model // Default to parent model
+	if acfg.Model != "" {
+		agentModel = rc.model // TODO: support per-agent model resolution
+	}
+
+	// 3.5 Check for registered ToolAgentFactory — if the agent is well-known
+	// (e.g., "knowledge", "recall"), delegate to its factory for proper sub-tool wiring
+	// including skill repositories and MCP tool sets.
+	if factory, ok := agent.GetToolAgentFactory(name); ok {
+		factoryCfg := agent.ToolAgentFactoryConfig{
+			ID:                name,
+			Model:             agentModel,
+			SystemPrompt:      systemPrompt,
+			MemoryStore:       memStore,
+			MaxToolIterations: acfg.MaxToolIterations,
+			MaxTokens:         acfg.MaxTokens,
+			Temperature:       acfg.Temperature,
+			SkillRepo:         rc.skillRepo,
+			MCPToolSets:       rc.mcpToolSets,
+		}
+
+		ta, err := factory(factoryCfg)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: factory failed: %w", name, err)
+		}
+
+		cache[name] = ta
+		return ta, nil
+	}
+
+	// 4. Build tools from ToolRef list
 	var tools []trpctool.Tool
 	var cmdTool *command.CommandTool
 
-	for _, tc := range cfg.Tools {
-		t, isCmd, err := buildTool(tc, rc, loader)
+	for _, tr := range acfg.Tools {
+		t, isCmd, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore)
 		if err != nil {
-			return nil, fmt.Errorf("tagent: build tool %q: %w", tc.ID, err)
+			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
 		if isCmd {
 			cmdTool = t.(*command.CommandTool)
@@ -121,16 +182,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		tools = append(tools, t)
 	}
 
-	// Create main TagentAgent
+	// 5. Create TagentAgent
 	agentCfg := &agent.TagentConfig{
-		Name:              cfg.Name,
-		Model:             rc.model,
+		Name:              name,
+		Model:             agentModel,
+		MemoryStore:       memStore,
 		SystemPrompt:      systemPrompt,
 		Tools:             tools,
-		MaxToolIterations: cfg.MaxToolIterations,
-		MaxTokens:         cfg.MaxTokens,
-		Temperature:       cfg.Temperature,
-		CompressThreshold: cfg.CompressThreshold,
+		MaxToolIterations: acfg.MaxToolIterations,
+		MaxTokens:         acfg.MaxTokens,
+		Temperature:       acfg.Temperature,
+		CompressThreshold: acfg.CompressThreshold,
 	}
 	if rc.summaryModel != nil {
 		agentCfg.SummaryModel = rc.summaryModel
@@ -138,7 +200,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
-		return nil, fmt.Errorf("tagent: create agent: %w", err)
+		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
 	}
 
 	// Wire CommandTool's tmux notifications back to the agent
@@ -146,69 +208,78 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		cmdTool.SetMessageInjector(ta)
 	}
 
+	cache[name] = ta
 	return ta, nil
 }
 
-// buildTool creates a tool from a ToolConfig entry.
-// Returns the tool, whether it's a CommandTool (for post-wiring), and any error.
-func buildTool(tc ToolConfig, rc *runtimeConfig, loader *prompt.Loader) (trpctool.Tool, bool, error) {
-	desc, err := resolveToolDescription(tc, loader)
+// buildToolFromRef creates a tool from a ToolRef entry.
+func buildToolFromRef(
+	tr ToolRef,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	cache map[string]*agent.TagentAgent,
+	parentMemStore memory.MemoryStore,
+) (trpctool.Tool, bool, error) {
+	desc, err := resolveToolDescription(tr, loader)
 	if err != nil {
 		return nil, false, err
 	}
 
-	switch tc.Kind {
+	switch tr.Kind {
 	case ToolKindAgent:
-		return buildToolAgent(tc, rc, desc, loader)
+		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainTool(tc, desc)
+		return buildPlainToolRef(tr, desc)
 	default:
-		return nil, false, fmt.Errorf("unknown tool kind %q", tc.Kind)
+		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
 }
 
-// buildToolAgent creates a tool agent via the factory registry.
-func buildToolAgent(tc ToolConfig, rc *runtimeConfig, desc string, loader *prompt.Loader) (trpctool.Tool, bool, error) {
-	toolModel := rc.model // Default to parent model
-
-	systemPrompt, err := loader.LoadComposite(tc.Prompt.Inline, tc.Prompt.Files, tc.Prompt.Dir)
-	if err != nil {
-		return nil, false, fmt.Errorf("load prompt: %w", err)
-	}
-
-	factory, ok := agent.GetToolAgentFactory(tc.ID)
+// buildAgentToolRef creates a tool agent and wraps it as a CallableTool.
+// Unlike the previous agenttool.NewTool() approach, we use our own AgentToolWrapper
+// which handles event_key → external context resolution.
+func buildAgentToolRef(
+	tr ToolRef,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	cache map[string]*agent.TagentAgent,
+	parentMemStore memory.MemoryStore,
+	desc string,
+) (trpctool.Tool, bool, error) {
+	// Look up the referenced agent's config
+	refCfg, ok := cfg.Agents[tr.AgentID]
 	if !ok {
-		return nil, false, fmt.Errorf("no tool agent factory registered for id %q", tc.ID)
+		return nil, false, fmt.Errorf("referenced agent %q not found in config", tr.AgentID)
 	}
 
-	tagentAgent, err := factory(agent.ToolAgentFactoryConfig{
-		ID:                tc.ID,
-		Model:             toolModel,
-		SystemPrompt:      systemPrompt,
-		Description:       desc,
-		MemStore:          rc.memStore,
-		MaxToolIterations: tc.MaxToolIterations,
-		MaxTokens:         tc.MaxTokens,
-		Temperature:       tc.Temperature,
-	})
+	// Recursively build the referenced agent
+	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache)
 	if err != nil {
 		return nil, false, err
 	}
 
-	return wrapToolAgent(tagentAgent, desc), false, nil
+	// Wrap with AgentToolWrapper — this replaces agenttool.NewTool().
+	// The wrapper:
+	//   - Declares event_key parameter in InputSchema (if tr.EventParams includes it)
+	//   - On Call: resolves event_key → fetches full event from parentMemStore
+	//   - Passes the event data as external context to the sub-agent
+	wrapper := agent.NewAgentToolWrapper(subAgent, desc, tr.EventParams, parentMemStore)
+	return wrapper, false, nil
 }
 
-// buildPlainTool creates a plain tool via the factory registry.
-func buildPlainTool(tc ToolConfig, desc string) (trpctool.Tool, bool, error) {
-	factory, ok := agent.GetPlainToolFactory(tc.ID)
+// buildPlainToolRef creates a plain tool via the factory registry.
+func buildPlainToolRef(tr ToolRef, desc string) (trpctool.Tool, bool, error) {
+	factory, ok := agent.GetPlainToolFactory(tr.ID)
 	if !ok {
-		return nil, false, fmt.Errorf("no plain tool factory registered for id %q", tc.ID)
+		return nil, false, fmt.Errorf("no plain tool factory registered for id %q", tr.ID)
 	}
 
 	callable, err := factory(agent.PlainToolFactoryConfig{
-		ID:          tc.ID,
+		ID:          tr.ID,
 		Description: desc,
-		Config:      tc.Config,
+		Properties:  tr.Properties,
 	})
 	if err != nil {
 		return nil, false, err
@@ -218,17 +289,32 @@ func buildPlainTool(tc ToolConfig, desc string) (trpctool.Tool, bool, error) {
 	return callable, isCmd, nil
 }
 
-// resolveToolDescription resolves the tool description from inline text or file.
-func resolveToolDescription(tc ToolConfig, loader *prompt.Loader) (string, error) {
-	if tc.Description != "" {
-		return tc.Description, nil
+// resolveMemoryStore creates a MemoryStore from MemoryConfig.
+func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
+	switch mc.Type {
+	case "memory", "":
+		return memory.NewInMemoryStore(), nil
+	case "file":
+		if mc.Path == "" {
+			return nil, fmt.Errorf("file memory store requires path")
+		}
+		return memory.NewFileBackend(mc.Path)
+	default:
+		return nil, fmt.Errorf("unknown memory store type %q", mc.Type)
 	}
-	if tc.DescriptionFile != "" {
-		desc, err := loader.LoadFromFile(tc.DescriptionFile)
+}
+
+// resolveToolDescription resolves the tool description from inline text or file.
+func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
+	if tr.Description != "" {
+		return tr.Description, nil
+	}
+	if tr.DescriptionFile != "" {
+		desc, err := loader.LoadFromFile(tr.DescriptionFile)
 		if err != nil {
-			return "", fmt.Errorf("load description file %q: %w", tc.DescriptionFile, err)
+			return "", fmt.Errorf("load description file %q: %w", tr.DescriptionFile, err)
 		}
 		return desc, nil
 	}
-	return "", fmt.Errorf("tool %q: description or description_file is required", tc.ID)
+	return "", fmt.Errorf("tool %q: description or description_file is required", tr.AgentID)
 }

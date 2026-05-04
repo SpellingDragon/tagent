@@ -136,74 +136,81 @@ func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *
 ### 5.1 数据结构
 
 ```go
-// memory_plugin.go:27-31
+// memory_plugin.go:28-42
 type MemoryPlugin struct {
-    memStore     memory.MemoryStore  // 存储后端
-    mu           sync.Mutex          // 保护 lastEventKey 并发安全
-    lastEventKey string              // 前驱事件的 key（因果链）
+    memStore      memory.MemoryStore  // 存储后端
+    mu            sync.Mutex          // 保护 lastEventKeys 并发安全
+    lastEventKeys map[int]int64       // PartitionID → 前驱 EventKey（分区级因果链）
 }
 ```
 
-### 5.2 OnEvent 钩子 — 8 步详解
+### 5.2 OnEvent 钩子 — 10 步详解
 
-源码位置：`memory_plugin.go:50-113`
+源码位置：`memory_plugin.go:63-131`
 
 ```go
 func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
-    // Step 0: nil 检查
     if evt == nil {
         return nil, nil
     }
 
-    // Step 1: 推断事件类型
-    eventType := inferEventType(evt)
+    // Step 1: 从 AgentName 派生 PartitionID（框架概念 → 存储概念）
+    agentName := p.extractAgentName(inv)
+    partitionID := memory.PartitionIDFromName(agentName)
 
-    // Step 2: 生成 EventKey
-    timestamp := time.Now().UnixMilli()
-    eventKey := memory.NewEventKey(timestamp, 0)  // "evt_{timestamp}_{seq}"
+    // Step 2: 生成 Snowflake EventKey（int64，编码 PartitionID）
+    eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-    // Step 3: 提取摘要
-    eventSummary := extractSummary(evt)
+    // Step 3: 使用 tagent/event 包统一推断事件类型并生成摘要
+    eventType, eventSummary := p.inferEventInfo(evt)
 
-    // Step 4: 获取前驱 Key（线程安全）
+    // Step 4: 从分区级因果链获取前驱 Key
     p.mu.Lock()
-    parentKey := p.lastEventKey
+    parentKey := p.lastEventKeys[partitionID]
     p.mu.Unlock()
 
-    // Step 5: 构建 FullEvent（含因果链）
+    // Step 5: 提取时间戳
+    timestamp := extractTimestamp(evt)
+
+    // Step 6: 构建 FullEvent 基础字段
     fullEvent := memory.FullEvent{
         EventKey:     eventKey,
+        PartitionID:  partitionID,
         ParentKey:    parentKey,
         EventType:    eventType,
         EventSummary: eventSummary,
         Timestamp:    timestamp,
     }
 
-    // 填充 Message 内容
+    // Step 7: 条件性填充 Response 相关字段
     if evt.Response != nil && len(evt.Response.Choices) > 0 {
         msg := evt.Response.Choices[0].Message
-        fullEvent.Content   = msg.Content
+        fullEvent.Content = msg.Content
         fullEvent.ToolCalls = msg.ToolCalls
-        fullEvent.Response   = evt.Response
+        fullEvent.Response = evt.Response
     }
 
-    // Step 6: 持久化到 MemoryStore
+    // Step 8: 持久化到 MemoryStore
     if p.memStore != nil {
         if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-            log.Errorf("MemoryPlugin: failed to store event %s: %v", eventKey, err)
+            log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
+        } else {
+            log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
+                eventKey, partitionID, eventType, len(eventSummary))
         }
     }
 
-    // Step 7: 写回 StateDelta（确保 Runner 持久化到 Session）
+    // Step 9: 写回 StateDelta（event_key 转为字符串后写入，确保框架持久化）
     if evt.StateDelta == nil {
         evt.StateDelta = make(map[string][]byte)
     }
-    evt.StateDelta["event_key"] = []byte(eventKey)
+    evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+    evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
     evt.StateDelta["event_type"] = []byte(eventType)
 
-    // Step 8: 更新因果链（线程安全）
+    // Step 10: 更新分区级因果链
     p.mu.Lock()
-    p.lastEventKey = eventKey
+    p.lastEventKeys[partitionID] = eventKey
     p.mu.Unlock()
 
     return evt, nil
@@ -212,18 +219,17 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 
 ### 5.3 因果链机制
 
-每个事件通过 `ParentKey` 引用前驱事件，构成一条有向事件链：
+每个事件通过 `ParentKey`（int64）引用前驱事件，构成一条有向事件链：
 
 ```
-evt_1712000001000_000 (事件1)
-  ParentKey: "" (无前驱)
+1777198738547555000 (事件1)
+  ParentKey: 0  (无前驱)
 
-evt_1712000002000_000 (事件2)
-  ParentKey: "evt_1712000001000_000"
+1777198739574803000 (事件2)
+  ParentKey: 1777198738547555000  → 父 = 事件1
 
-evt_1712000003000_000 (事件3)
-  ParentKey: "evt_1712000002000_000"
-  ...
+1777198739760667000 (事件3)
+  ParentKey: 1777198739574803000  → 父 = 事件2
 ```
 
 **作用**：
@@ -231,7 +237,7 @@ evt_1712000003000_000 (事件3)
 - 为 RecallTool 提供结构化检索能力
 - 压缩通知中可引用被丢弃的因果链
 
-**并发安全**：`p.mu` 保护 `lastEventKey` 的读写。
+**并发安全**：`p.mu` 保护 `lastEventKeys map[int]int64` 的读写（按 PartitionID 独立跟踪，互不影响）。
 
 ### 5.4 StateDelta 写回
 
@@ -292,7 +298,7 @@ func (p *SummaryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt 
         evt.Tag = tag
     }
 
-    log.Debugf("SummaryPlugin: enriched event (type=%s, summary_len=%d)", eventType, len(summary))
+    log.Debugf("[Summary] enriched type=%s summary_len=%d", eventType, len(summary))
 
     return evt, nil
 }
@@ -322,16 +328,6 @@ func (p *SummaryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt 
 |------|-------------|-----------|------|
 | System Prompt | `RoleSystem` | **不参与** | 初始化时由 InstructionProcessor 注入 Request，与事件流隔离，不因压缩丢失 |
 | TmuxMonitor 注入 | `RoleSystem` | **参与** | 通过 `Runner.Run()` 进入事件流，分类为 `external_input` |
-
-**TmuxMonitor 注入代码**（`tagent_agent.go:185-188`）：
-
-```go
-msg := model.Message{
-    Role:    model.RoleSystem,
-    Content: content,
-}
-// 注入后进入事件流 → 分类为 external_input
-```
 
 ### 7.2 事件类型推断规则
 
@@ -369,8 +365,8 @@ msg := model.Message{
 |-----------|---------|------|
 | `external_input` | **原文全文** | 保留用户意图，不丢失信息 |
 | `agent_output` | **原文全文** | 保留 Agent 回复，不丢失信息 |
-| `thinking_plan` | 工具调用摘要 | 工具调用信息密度高，格式化为 `"调用工具: name(args)"` |
-| `action_command` | **原文全文** | 工具执行结果需完整保留 |
+| `thinking_plan` | **原文全文** | Agent 完整思考过程，含工具调用决策 |
+| `action_command` | 工具调用摘要 | 工具执行结果信息密度高，格式化为 `"调用工具: name(args)"` |
 | 其他 | **原文全文** | fallback 保安全 |
 
 ### 8.3 工具调用摘要格式
@@ -421,208 +417,98 @@ shouldPersistEvent(agentEvent) = len(agentEvent.StateDelta) > 0 ||
 
 ## 十、Event Schema
 
-### 10.1 EventKey — 事件唯一标识符
+> **说明**：`FullEvent`、`EventReference`、`EventKey`（Snowflake int64）等核心数据结构定义在 `memory` 模块。详细说明请参阅 [memory-architecture.md](../memory/memory-architecture.md)。本章仅列出插件直接使用的字段。
 
-**格式**（`memory/types.go:103-106`）：
+### 10.1 EventKey — Snowflake int64 唯一标识符
 
 ```go
-func NewEventKey(timestamp int64, sequence int) string {
-    return fmt.Sprintf("evt_%d_%03d", timestamp, sequence)
-}
-
-// 示例：evt_1712000001000_000
-expected format: evt_{Unix毫秒时间戳}_{3位序列号}
+// memory/types.go:164-186
+// Snowflake-like int64，编码 PartitionID + Timestamp + Sequence
+func NewSnowflakeEventKey(partitionID int, nowMs int64) int64
 ```
 
-**生成规则**：
+- 从 AgentName 通过 `PartitionIDFromName` 哈希映射得到分区 ID
+- 内部 mutex 保护的 per-partition 序列计数器保证同秒内唯一
+- 第二个参数 `nowMs` 为毫秒时间戳提示（0 = 使用当前时间）
 
-| 字段 | 来源 | 说明 |
-|------|------|------|
-| `timestamp` | `time.Now().UnixMilli()` | 事件发生时的毫秒时间戳 |
-| `sequence` | 当前固定为 `0` | 预留用于同毫秒去重（`memory_plugin.go:65` 中写死为 0） |
-
-**特点**：
-
-- **时间有序**：EventKey 隐含时间顺序，可直接用于排序
-- **单调递增**：毫秒级精度，同一毫秒内多个事件会用 sequence 区分（当前实现固定为 0，存在冲突风险，TODO）
-- **全局唯一**：时间戳 + 序列号组合保证全局唯一性
-
-### 10.2 FullEvent — 完整事件（MemoryStore 中的事实来源）
+### 10.2 FullEvent — 完整事件
 
 ```go
-// memory/types.go:24-38
+// FullEvent 在 plugin 中的构建（memory_plugin.go:91-105）
+// 基础字段始终填充，Content/ToolCalls/Response 仅在 evt.Response 非空时填充
 type FullEvent struct {
-    EventKey     string                 // 唯一标识符（如 "evt_1712000001000_000"）
-    ParentKey    string                 // 因果链：前驱事件的 EventKey（"" 表示首个事件）
-    EventType    string                 // 事件类型（external_input / agent_output / ...）
-    EventSummary string                 // 事件摘要（用于 LLM 推理）
-    Timestamp    int64                  // Unix 毫秒时间戳
-    Content      string                 // 原始文本内容
-    ToolCalls    []model.ToolCall       // 工具调用列表
-    ToolResults  map[string]interface{} // 工具执行结果
-    Metadata     map[string]string      // 额外元数据
-    Response     *model.Response        // 兼容 Phase 2（未来废弃）
+    EventKey     int64                // Snowflake int64
+    PartitionID  int                  // 存储分区
+    ParentKey    int64                // 前驱 EventKey（0 = 无前驱）
+    EventType    string
+    EventSummary string
+    Timestamp    int64                // Unix 毫秒
+    Content      string               // 条件性填充
+    ToolCalls    []model.ToolCall     // 条件性填充
+    ToolResults  map[string]interface{}
+    Metadata     map[string]string
+    Response     *model.Response
 }
 ```
 
-**用途**：
-
-- **MemoryStore 的唯一事实来源**（`InMemoryStore.events map[string]FullEvent` / `FileBackend/*.json`）
-- 持久化后永不修改（immutable）
-- 可通过 `EventKey` 精确检索
-
-### 10.3 EventReference — 轻量引用（Session 中的 LLM 上下文）
+### 10.3 EventReference — 轻量引用
 
 ```go
-// memory/types.go:15-20
+// memory/types.go:15-21
 type EventReference struct {
-    EventKey     string `json:"event_key"`     // 指向 MemoryStore 的 key
-    EventType    string `json:"event_type"`    // 事件类型
-    EventSummary string `json:"event_summary"` // 简短摘要（用于 LLM 推理）⭐
-    Timestamp    int64  `json:"timestamp"`     // 时间戳
+    EventKey     int64  `json:"event_key"`
+    PartitionID  int    `json:"partition_id,omitempty"`
+    EventType    string `json:"event_type"`
+    EventSummary string `json:"event_summary"`
+    Timestamp    int64  `json:"timestamp"`
 }
 ```
 
-**用途**：
+### 10.4 数据流
 
-- Session 侧仅保存轻量引用，不保存完整事件详情（**信息隔离设计 Phase 3**）
-- `EventSummary` 字段直接进入 LLM 消息上下文，供 LLM 理解历史
-- 通过 `EventKey` 可随时从 MemoryStore 拉取完整详情（RecallTool 机制）
-
-### 10.4 三种 Schema 的关系
-
-```mermaid
-graph LR
-    SessionEvents["Session.Events<br/>(EventReference[])"]
-    MemoryStore["MemoryStore<br/>(map[key]FullEvent)"]
-    LLMContext["LLM Request.Messages<br/>(model.Message[])"]
-    RecallTool["RecallTool<br/>(按需拉取 FullEvent)"]
-
-    SessionEvents -->|EventKey 引用| MemoryStore
-    SessionEvents -->|EventSummary 进入| LLMContext
-    RecallTool -->|GetEvent key| MemoryStore
-    MemoryStore -->|返回 FullEvent| RecallTool
-
-    style SessionEvents fill:#e3f2fd,stroke:#1565c0
-    style MemoryStore fill:#e8f5e9,stroke:#2e7d32
-    style LLMContext fill:#fff3e0,stroke:#ef6c00
-    style RecallTool fill:#f3e5f5,stroke:#7b1fa2
+```
+MemoryPlugin.OnEvent → 构建 FullEvent → StoreEvent(int64 Key)
+                    → StateDelta[key→string] → Session.State
 ```
 
-**数据流**：
-
-1. `MemoryPlugin.OnEvent` → 构建 `FullEvent` → 持久化到 MemoryStore
-2. 同时将 `EventKey + EventType + EventSummary` 写回 `Event.StateDelta`
-3. Runner 持久化 `StateDelta` 到 Session → Session 中保存 `EventReference`
-4. Session 的 `EventReference[]` 构成 LLM 消息列表的**摘要视图**
-5. `RecallTool` 通过 `EventKey` 从 MemoryStore 按需拉取 `FullEvent` 详情
+详细架构参见 [memory-architecture.md](../memory/memory-architecture.md) §四~§六。
 
 ---
 
 ## 十一、MemoryStore 存储方式
 
-### 11.1 接口定义
+> **说明**：MemoryStore 的完整接口定义、InMemoryStore 和 FileBackend 的实现细节、RAG 向量搜索支持等，请参阅 [memory-architecture.md](../memory/memory-architecture.md) §六~§十。
+
+### 11.1 当前实现要点
+
+| 存储 | Key 类型 | 结构 | 分区 |
+|------|---------|------|------|
+| InMemoryStore | `int64` | `map[int]map[int64]FullEvent` | 按 PartitionID 双层 map |
+| FileBackend | `int64` | `{dataDir}/{partitionID}/{eventKey}.json` | 按 PartitionID 子目录 |
+
+### 11.2 存储分区的隔离语义
+
+- MemoryStore 不感知 Agent（纯存储概念），仅通过 `PartitionID` 区分分区
+- `PartitionIDFromName(agentName)` 将 Agent 映射到稳定的分区 ID（FNV-1a 哈希）
+- 每个分区维护独立的因果链（`lastEventKeys[PartitionID]`），防止子 Agent 事件破坏父 Agent 因果链
+
+### 11.3 QueryOptions
 
 ```go
-// memory/types.go:42-73
-type MemoryStore interface {
-    // 写操作
-    StoreEvent(key string, event FullEvent) error
-    StoreEvents(events map[string]FullEvent) error
-
-    // 读操作
-    GetEvent(key string) (*FullEvent, error)
-    GetEvents(keys []string) ([]FullEvent, error)
-    QueryEvents(query QueryOptions) ([]EventReference, error)
-
-    // 管理操作
-    DeleteEvent(key string) error
-    GetStats() StoreStats
-}
-```
-
-### 11.2 InMemoryStore — 内存实现
-
-```go
-// memory/in_memory_store.go:11-14
-type InMemoryStore struct {
-    mu     sync.RWMutex
-    events map[string]FullEvent  // key: EventKey
-}
-```
-
-**特点**：
-
-| 特性 | 说明 |
-|------|------|
-| 数据结构 | Go map，全量保存在内存 |
-| 持久化 | 无（进程退出即丢失） |
-| 适用场景 | 测试、短期原型、单进程 |
-| 性能 | O(1) 读写，无 IO 开销 |
-| 并发安全 | `sync.RWMutex`（读多写少优化） |
-
-### 11.3 FileBackend — 文件系统实现
-
-```go
-// memory/file_backend.go:16-19
-type FileBackend struct {
-    dataDir string  // 如 "./data/tagent/events/"
-    mu      sync.RWMutex
-}
-// 每个事件一个 JSON 文件：{dataDir}/{EventKey}.json
-```
-
-**文件结构**：
-
-```
-./data/tagent/events/
-  evt_1712000001000_000.json   # FullEvent JSON
-  evt_1712000002000_000.json
-  evt_1712000003000_000.json
-  ...
-```
-
-**FullEvent JSON 示例**：
-
-```json
-{
-  "event_key": "evt_1712000001000_000",
-  "parent_key": "",
-  "event_type": "external_input",
-  "event_summary": "你好，我想了解今天的天气",
-  "timestamp": 1712000001000,
-  "content": "你好，我想了解今天的天气",
-  "tool_calls": [],
-  "tool_results": {},
-  "metadata": {}
-}
-```
-
-**特点**：
-
-| 特性 | 说明 |
-|------|------|
-| 数据结构 | 每个事件一个 JSON 文件 |
-| 持久化 | 进程重启后数据不丢失 |
-| 适用场景 | 生产环境、单机部署 |
-| 性能 | 有文件系统 IO 开销；可按 EventKey 直接定位文件 |
-| 并发安全 | `sync.RWMutex` 保护读写 |
-
-### 11.4 查询接口 QueryOptions
-
-```go
-// memory/types.go:76-83
+// memory/types.go:96-109
 type QueryOptions struct {
-    EventTypes []string  // 按事件类型过滤（空=全部）
-    StartTime  int64     // 时间范围起始（毫秒，0=无限制）
-    EndTime    int64     // 时间范围结束（毫秒，0=无限制）
-    Limit      int       // 最大返回数量（0=无限制）
-    Offset     int       // 分页偏移
-    OrderBy    string    // "timestamp_asc" 或 "timestamp_desc"
+    PartitionID  int
+    PartitionIDs []int
+    EventTypes   []string
+    StartTime    int64
+    EndTime      int64
+    Limit        int
+    Offset       int
+    OrderBy      string
 }
 ```
 
-**返回类型**：始终是 `[]EventReference`（轻量），不返回完整 `FullEvent`，避免大量 IO 开销。
+返回 `[]EventReference`（轻量），调用方按需通过 `GetEvent(key)` 获取完整 `FullEvent`。
 
 ---
 
@@ -635,7 +521,7 @@ type QueryOptions struct {
 ```mermaid
 graph LR
     Plugin["MemoryPlugin.OnEvent
-    extractSummary()"]
+    inferEventInfo()"]
     MS["MemoryStore
     (FullEvent.EventSummary)"]
     RT["RecallTool
@@ -661,7 +547,7 @@ graph LR
 
 ### 12.2 Summary 进入 LLM 上下文的完整路径
 
-**Step 1 — 生成**：`MemoryPlugin.extractSummary()` 根据事件类型生成摘要（见第八章摘要策略）
+**Step 1 — 生成**：`MemoryPlugin.inferEventInfo()` 根据事件类型生成摘要（见第八章摘要策略）
 
 **Step 2 — 持久化**：`FullEvent.EventSummary` 存入 MemoryStore；`EventReference.EventSummary` 通过 `StateDelta` 持久化到 Session
 
@@ -692,7 +578,7 @@ LLM 看到的就是 EventSummary
 
 | 层次 | 机制 | 处理对象 |
 |------|------|----------|
-| **事件层** | `extractSummary()` | 单个 Event → EventSummary |
+| **事件层** | `inferEventInfo()` | 单个 Event → EventSummary |
 | **消息层** | `SmartCompress` | model.Message[] → 按 task boundary 压缩 + LLM 生成摘要 |
 
 **SmartCompress 两阶段**：
@@ -759,7 +645,7 @@ sequenceDiagram
     U->>R: 发送消息
     R->>R: 生成 Event
     R->>MP: OnEvent(Event)
-    MP->>MP: extractSummary(Event) → EventSummary
+    MP->>MP: inferEventInfo(Event) → EventSummary
     MP->>MSS: StoreEvent(FullEvent) EventSummary 存入
     MP->>MP: 写回 StateDelta(event_key, event_type, EventSummary)
     R->>SS: 持久化 EventReference(EventSummary 在内)
@@ -799,17 +685,19 @@ type Event struct {
 ### 13.2 MemoryPlugin 写入 StateDelta 的目的
 
 ```go
-// memory_plugin.go:100-105
+// memory_plugin.go:118-123
 if evt.StateDelta == nil {
     evt.StateDelta = make(map[string][]byte)
 }
-evt.StateDelta["event_key"] = []byte(eventKey)
+evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
 evt.StateDelta["event_type"] = []byte(eventType)
 ```
 
 | StateDelta Key | Value | 用途 |
 |---------------|-------|------|
-| `event_key` | EventKey 字符串 | 关联 MemoryStore 中的 FullEvent |
+| `event_key` | EventKey int64 → 字符串 | 关联 MemoryStore 中的 FullEvent |
+| `partition_id` | PartitionID int → 字符串 | 存储分区标识 |
 | `event_type` | EventType 字符串 | 事件类型元数据 |
 
 **为什么需要写入 StateDelta**：`Session.State` 是跨事件的 key-value 累积存储。`event_key` 写入 StateDelta 后，Session.State 中就会保留每个事件的 EventKey，后续可通过 `Session.GetState("event_key")` 检索最近事件的 Key。
@@ -979,22 +867,26 @@ type Session struct {
 
 ```go
 // memory/types.go
-// 存储层：FullEvent（完整）
+// 存储层：FullEvent（完整，int64 Key）
 type FullEvent struct {
-    EventKey     string
-    ParentKey    string    // 因果链
+    EventKey     int64              // Snowflake int64 唯一标识符
+    PartitionID  int                // 存储分区
+    ParentKey    int64              // 因果链（0 = 无前驱）
     EventType    string
-    EventSummary string    // 用于 LLM 推理的摘要
-    Content      string    // 原始内容
+    EventSummary string             // 用于 LLM 推理的摘要
+    Content      string             // 原始内容
     ToolCalls    []model.ToolCall
+    ToolResults  map[string]interface{}
+    Metadata     map[string]string
     Response     *model.Response
 }
 
-// 引用层：EventReference（轻量）
+// 引用层：EventReference（轻量，int64 Key）
 type EventReference struct {
-    EventKey     string  // 关联 MemoryStore
+    EventKey     int64  // 关联 MemoryStore
+    PartitionID  int
     EventType    string
-    EventSummary string  // 直接进入 LLM 上下文
+    EventSummary string // 直接进入 LLM 上下文
     Timestamp    int64
 }
 ```
@@ -1008,20 +900,20 @@ graph TB
         (event.Event[])"]
         ST["Session.State
         (StateMap)"]
+        ER["通过 StateDelta 持久化
+        (EventReference[])"]
     end
 
     subgraph "tagent MemoryStore（应用层）"
         MS["MemoryStore
         (FullEvent map)"]
-        ER["Session.Events
-        (EventReference[])"]
     end
 
     S -->|框架转换| MSG["model.Message[]
         (LLM 请求上下文)"]
     ER -->|EventSummary| MSG
     S -->|append| ST
-    MS -->|因果链| ER
+    MS -->|提供 EventKey 索引| ER
 
     style S fill:#e3f2fd,stroke:#1565c0
     style ST fill:#e8f5e9,stroke:#2e7d32

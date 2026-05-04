@@ -1,0 +1,30 @@
+{
+  "name": "url-fetcher",
+  "version": "1.0.0",
+  "description": "基于Playwright的URL信息获取工具",
+  "main": "url_fetcher.js",
+  "scripts": {
+    "start": "node url_fetcher.js",
+    "install-browser": "npx playwright install chromium",
+    "test": "node url_fetcher.js --url https://example.com --metadata"
+  },
+  "keywords": [
+    "playwright",
+    "headless-browser",
+    "web-scraper",
+    "url-fetcher",
+    "screenshot"
+  ],
+  "author": "AI Assistant",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/example/url-fetcher-skill"
+  }
+}

@@ -7,9 +7,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 )
 
@@ -76,11 +76,8 @@ func (p *MemoryPlugin) onEvent(
 	// 2. Generate Snowflake EventKey
 	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-	// 3. Infer event type from Event role
-	eventType := inferEventType(evt)
-
-	// 4. Extract summary from event content
-	eventSummary := extractSummary(evt)
+	// 3. Infer event type and generate summary using unified tagent/event package
+	eventType, eventSummary := p.inferEventInfo(evt)
 
 	// 5. Get parent key from independent causal chain
 	p.mu.Lock()
@@ -110,10 +107,10 @@ func (p *MemoryPlugin) onEvent(
 	// 8. Persist to MemoryStore
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-			log.Errorf("MemoryPlugin: failed to store event %d: %v", eventKey, err)
+			log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
 		} else {
-			log.Debugf("MemoryPlugin: stored event %d (partition=%d, type=%s, parent=%d)",
-				eventKey, partitionID, eventType, parentKey)
+			log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
+				eventKey, partitionID, eventType, len(eventSummary))
 		}
 	}
 
@@ -153,85 +150,17 @@ func extractTimestamp(evt *event.Event) int64 {
 	return evt.Timestamp.UnixMilli()
 }
 
-// inferEventType infers the event type from an Event's role.
-func inferEventType(evt *event.Event) string {
+// inferEventInfo extracts event type and summary from an event using tagent/event package.
+// This uses the same unified classification as SummaryPlugin, ensuring consistency.
+func (p *MemoryPlugin) inferEventInfo(evt *event.Event) (string, string) {
 	if evt.Response == nil || len(evt.Response.Choices) == 0 {
-		return memory.EventTypeExternalInput
+		return tagentevent.TypeExternalInput, ""
 	}
 	msg := evt.Response.Choices[0].Message
-	return inferEventTypeFromMessage(msg)
-}
-
-// inferEventTypeFromMessage infers event type from a model.Message's role.
-func inferEventTypeFromMessage(msg model.Message) string {
-	switch msg.Role {
-	case model.RoleUser:
-		return memory.EventTypeExternalInput
-	case model.RoleAssistant:
-		if len(msg.ToolCalls) > 0 {
-			return memory.EventTypeThinkingPlan
-		}
-		return memory.EventTypeAgentOutput
-	case model.RoleTool:
-		return memory.EventTypeActionCommand
-	default:
-		return memory.EventTypeExternalInput
-	}
-}
-
-// extractSummary extracts a summary from the event content.
-func extractSummary(evt *event.Event) string {
-	if evt.Response == nil || len(evt.Response.Choices) == 0 {
-		return ""
-	}
-	msg := evt.Response.Choices[0].Message
-
-	eventType := inferEventTypeFromMessage(msg)
-
-	// Special events: use full original content (no truncation)
-	switch eventType {
-	case memory.EventTypeExternalInput, memory.EventTypeAgentOutput:
-		return msg.Content
-	}
-
-	// Normal events: generate a descriptive summary
-	switch msg.Role {
-	case model.RoleAssistant:
-		if len(msg.ToolCalls) > 0 {
-			return formatToolCallSummary(msg.ToolCalls)
-		}
-		return msg.Content
-	case model.RoleTool:
-		return msg.Content
-	default:
-		return msg.Content
-	}
-}
-
-// formatToolCallSummary generates a summary for tool call events.
-func formatToolCallSummary(toolCalls []model.ToolCall) string {
-	if len(toolCalls) == 0 {
-		return ""
-	}
-	var parts []string
-	for _, tc := range toolCalls {
-		toolName := tc.Function.Name
-		args := string(tc.Function.Arguments)
-		parts = append(parts, toolName+"("+args+")")
-	}
-	result := "调用工具: " + joinStrings(parts, ", ")
-	return result
-}
-
-func joinStrings(ss []string, sep string) string {
-	if len(ss) == 0 {
-		return ""
-	}
-	result := ss[0]
-	for i := 1; i < len(ss); i++ {
-		result += sep + ss[i]
-	}
-	return result
+	eventType := tagentevent.ExtractEventType(msg)
+	opts := tagentevent.DefaultOptionsForLLMContext()
+	summary := tagentevent.GenerateEventSummary(msg, eventType, opts)
+	return eventType, summary
 }
 
 // int64ToString converts int64 to string using fmt.Sprintf.

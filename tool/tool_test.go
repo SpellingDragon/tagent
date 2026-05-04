@@ -14,7 +14,7 @@ import (
 // ==================== Helpers ====================
 
 // newTestMemoryStore creates a MemoryStore pre-populated with test events.
-func newTestMemoryStore(t *testing.T, events map[string]memory.FullEvent) memory.MemoryStore {
+func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.MemoryStore {
 	t.Helper()
 	tempDir := t.TempDir()
 	store, err := memory.NewFileBackend(tempDir)
@@ -23,7 +23,7 @@ func newTestMemoryStore(t *testing.T, events map[string]memory.FullEvent) memory
 	}
 	for key, event := range events {
 		if err := store.StoreEvent(key, event); err != nil {
-			t.Fatalf("Failed to store event %s: %v", key, err)
+			t.Fatalf("Failed to store event %d: %v", key, err)
 		}
 	}
 	return store
@@ -34,16 +34,22 @@ func newTestMemoryStore(t *testing.T, events map[string]memory.FullEvent) memory
 
 // Test 1: memory_query 基本查询
 func TestRecallQueryTool_BasicQuery(t *testing.T) {
-	store := newTestMemoryStore(t, map[string]memory.FullEvent{
-		"evt_001": {
-			EventKey:     "evt_001",
+	partitionID := memory.PartitionIDFromName("test")
+	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
+	key2 := memory.NewSnowflakeEventKey(partitionID, 0)
+
+	store := newTestMemoryStore(t, map[int64]memory.FullEvent{
+		key1: {
+			EventKey:     key1,
+			PartitionID:  partitionID,
 			EventType:    memory.EventTypeActionCommand,
 			EventSummary: "用户要求整理文件",
 			Timestamp:    time.Now().UnixMilli(),
 			Content:      "整理 /tmp 目录下的文件",
 		},
-		"evt_002": {
-			EventKey:     "evt_002",
+		key2: {
+			EventKey:     key2,
+			PartitionID:  partitionID,
 			EventType:    memory.EventTypeAgentOutput,
 			EventSummary: "文件整理完成",
 			Timestamp:    time.Now().Add(1 * time.Minute).UnixMilli(),
@@ -79,9 +85,13 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 
 // Test 2: memory_get 获取完整事件
 func TestRecallGetTool_GetEvent(t *testing.T) {
-	store := newTestMemoryStore(t, map[string]memory.FullEvent{
-		"evt_cmd_001": {
-			EventKey:     "evt_cmd_001",
+	partitionID := memory.PartitionIDFromName("test")
+	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
+
+	store := newTestMemoryStore(t, map[int64]memory.FullEvent{
+		key1: {
+			EventKey:     key1,
+			PartitionID:  partitionID,
 			EventType:    memory.EventTypeActionCommand,
 			EventSummary: "执行部署命令",
 			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
@@ -90,20 +100,20 @@ func TestRecallGetTool_GetEvent(t *testing.T) {
 	})
 
 	// 直接测试 MemoryStore.GetEvent（子工具底层调用）
-	event, err := store.GetEvent("evt_cmd_001")
+	event, err := store.GetEvent(key1)
 	if err != nil {
 		t.Fatalf("GetEvent failed: %v", err)
 	}
 
 	// 验证: 返回完整事件
-	if event.EventKey != "evt_cmd_001" {
-		t.Errorf("Expected event key evt_cmd_001, got %s", event.EventKey)
+	if event.EventKey != key1 {
+		t.Errorf("Expected event key %d, got %d", key1, event.EventKey)
 	}
 	if event.Content != "deploy.sh --env production" {
 		t.Errorf("Expected content 'deploy.sh --env production', got %s", event.Content)
 	}
 
-	t.Logf("GetEvent: key=%s, content=%s", event.EventKey, event.Content)
+	t.Logf("GetEvent: key=%d, content=%s", event.EventKey, event.Content)
 }
 
 // Test: 关键词提取的详细验证
@@ -194,7 +204,7 @@ func TestMemoryStore_EmptyQuery(t *testing.T) {
 func TestMemoryStore_NoEventGet(t *testing.T) {
 	store := memory.NewInMemoryStore()
 
-	_, err := store.GetEvent("nonexistent")
+	_, err := store.GetEvent(0) // 0 is an invalid Snowflake key
 	if err == nil {
 		t.Error("Expected error for nonexistent event key, got nil")
 	}

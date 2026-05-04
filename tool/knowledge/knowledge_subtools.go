@@ -12,6 +12,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
+	"github.com/SpellingDragon/tagent/tool/websearch"
 )
 
 // KnowledgeResult represents a single piece of acquired knowledge.
@@ -48,8 +49,11 @@ func BuildSubTools(cfg Config) []tool.Tool {
 		tools = append(tools, NewMCPDiscoverTool(cfg.MCPToolSets))
 	}
 
-	// Web search: always available via duckduckgo
+	// Web search: always available via two complementary tools
+	// duckduckgo_search: Instant Answer API for factual/encyclopedic info (fast, structured)
 	tools = append(tools, duckduckgo.NewTool())
+	// web_search: HTML scraping for general web content (current events, tutorials, docs)
+	tools = append(tools, websearch.NewTool())
 
 	if cfg.MemStore != nil {
 		tools = append(tools, NewMemoryQueryTool(cfg.MemStore))
@@ -71,12 +75,22 @@ func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool {
 			}, nil
 		},
 		function.WithName("skill_search"),
-		function.WithDescription("Search local skill repository for matching skills"),
+		function.WithDescription("Search local skill repository for automation skills. Use task-domain keywords describing what you need to do (e.g., 'url', 'fetch', 'deploy', 'git') — the search matches against skill names and descriptions. Always call this first before falling back to web search."),
 	)
 }
 
-// NewSkillLoadTool creates a tool that loads full skill content by name.
+// NewSkillLoadTool creates a tool that loads skill content as a structured summary.
+//
+// Progressive disclosure design (following trpc-agent-go pattern):
+//   - Level 1 (skill_search): name + description from YAML front matter
+//   - Level 2 (skill_load): name + description + usage summary (up to ~2500 chars)
+//   - Level 3 (command): read full skill file when deeper detail is needed
+//
+// The tool returns a compact, structured output suitable for the knowledge agent
+// to read and synthesize, avoiding the context explosion of dumping the full body.
 func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
+	const maxBodyChars = 2500
+
 	return function.NewFunctionTool(
 		func(ctx context.Context, args skillLoadArgs) (skillLoadResult, error) {
 			s, err := repo.Get(args.SkillName)
@@ -84,33 +98,67 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 				return skillLoadResult{}, fmt.Errorf("skill not found: %s", args.SkillName)
 			}
 
-			var contentBuilder strings.Builder
-			contentBuilder.WriteString(s.Body)
-
-			if len(s.Docs) > 0 {
-				contentBuilder.WriteString("\n\n## Related Docs\n")
-				for _, doc := range s.Docs {
-					contentBuilder.WriteString(fmt.Sprintf("- [%s]\n", doc.Path))
-					if doc.Content != "" {
-						cap := 500
-						docContent := doc.Content
-						if len(docContent) > cap {
-							docContent = docContent[:cap] + "..."
-						}
-						contentBuilder.WriteString(fmt.Sprintf("  %s\n", docContent))
-					}
+			// Get fully-qualified path for truncation note
+			skillFilePath := "skills/" + args.SkillName + "/SKILL.md"
+			// Try to use Path() from the framework repo if available
+			if pathProvider, ok := interface{}(repo).(interface{ Path(string) (string, error) }); ok {
+				if dir, err := pathProvider.Path(args.SkillName); err == nil && dir != "" {
+					skillFilePath = dir + "/SKILL.md"
 				}
+			}
+
+			var b strings.Builder
+
+			// 1. Summary (Name + Description) always at top
+			b.WriteString("**[Skill]** ")
+			b.WriteString(s.Summary.Name)
+			b.WriteString("\n")
+			if s.Summary.Description != "" {
+				b.WriteString(s.Summary.Description)
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+
+			// 2. Body with section-aware truncation
+			body := s.Body
+			if len(body) > maxBodyChars {
+				// Find the last section heading (## ) within the limit to cut cleanly.
+				// Only consider headings in the second half of the limit to avoid
+				// cutting before the first real section.
+				cutoff := maxBodyChars
+				searchRange := body[:maxBodyChars]
+				if lastHeading := strings.LastIndex(searchRange, "\n## "); lastHeading > maxBodyChars/2 {
+					cutoff = lastHeading
+				}
+				body = body[:cutoff]
+				b.WriteString(body)
+				b.WriteString("\n\n---\n*(truncated at ")
+				b.WriteString(fmt.Sprintf("%d chars) — full file: %s, use command to read if deeper inspection needed)*\n", len(s.Body), skillFilePath))
+			} else {
+				b.WriteString(body)
+			}
+
+			// 3. Docs listed by path only (no content to keep output compact)
+			if len(s.Docs) > 0 {
+				b.WriteString("\n**Docs** (")
+				b.WriteString(fmt.Sprintf("%d", len(s.Docs)))
+				b.WriteString("): ")
+				var names []string
+				for _, doc := range s.Docs {
+					names = append(names, doc.Path)
+				}
+				b.WriteString(strings.Join(names, ", "))
 			}
 
 			return skillLoadResult{
 				Type:    "skill_content",
 				Title:   s.Summary.Name,
-				Content: contentBuilder.String(),
+				Content: b.String(),
 				Docs:    len(s.Docs),
 			}, nil
 		},
 		function.WithName("skill_load"),
-		function.WithDescription("Load full content of a skill by name. Must be called after skill_search finds a matching skill."),
+		function.WithDescription("Load a skill's usage summary and key parameters. Returns name, description, and upto first ~2500 chars of body with section-aware truncation. Use after skill_search finds a match. For full content, read the skill file via command."),
 	)
 }
 
