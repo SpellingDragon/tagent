@@ -59,6 +59,7 @@ func recallFactory(cfg agent.ToolAgentFactoryConfig) (*agent.TagentAgent, error)
 		MaxToolIterations: cfg.MaxToolIterations,
 		MaxTokens:         cfg.MaxTokens,
 		Description:       cfg.Description,
+		ReadPartitionIDs:  cfg.ReadPartitionIDs,
 	}
 
 	// Use the factory-provided MemoryStore if available

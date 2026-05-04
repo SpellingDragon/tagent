@@ -14,7 +14,8 @@ import (
 
 // NewRecallQueryTool creates a tool that queries historical events from memory.
 // This is a sub-tool used by RecallAgent for memory retrieval.
-func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
+// readPartitionIDs lists additional partition IDs to include in queries (injected from config).
+func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args recallQueryArgs) (recallQueryResult, error) {
 			limit := args.Limit
@@ -25,6 +26,10 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 			opts := memory.QueryOptions{
 				Limit:   limit,
 				OrderBy: "timestamp_desc", // Latest first
+			}
+
+			if len(readPartitionIDs) > 0 {
+				opts.PartitionIDs = readPartitionIDs
 			}
 
 			// If event types specified, filter by them
@@ -89,7 +94,8 @@ func NewRecallGetTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 
 // NewRecallRecentTool creates a tool that retrieves the most recent events.
 // This is a sub-tool used by RecallAgent for quick recent memory access.
-func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
+// readPartitionIDs lists additional partition IDs to include in queries (injected from config).
+func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args recallRecentArgs) (recallRecentResult, error) {
 			limit := args.Limit
@@ -103,6 +109,10 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 			opts := memory.QueryOptions{
 				Limit:   limit,
 				OrderBy: "timestamp_desc",
+			}
+
+			if len(readPartitionIDs) > 0 {
+				opts.PartitionIDs = readPartitionIDs
 			}
 
 			events, err := accessor.QueryEvents(opts)
@@ -191,12 +201,12 @@ func formatTimestamp(ts int64) string {
 }
 
 // buildRecallSubTools assembles the sub-tools for RecallAgent.
-func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor) []tool.Tool {
+func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int) []tool.Tool {
 	var tools []tool.Tool
 
-	tools = append(tools, NewRecallQueryTool(accessor))
+	tools = append(tools, NewRecallQueryTool(accessor, readPartitionIDs))
 	tools = append(tools, NewRecallGetTool(accessor))
-	tools = append(tools, NewRecallRecentTool(accessor))
+	tools = append(tools, NewRecallRecentTool(accessor, readPartitionIDs))
 
 	return tools
 }

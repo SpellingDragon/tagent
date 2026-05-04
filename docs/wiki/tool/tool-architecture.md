@@ -415,7 +415,9 @@ Tool agent 收到 `event_key` 后，可通过 `MemoryStoreAccessor` 执行以下
 | 提取分区归属 | `PartitionIDFromEventKey(eventKey)` | 从 EventKey 反推 PartitionID |
 | 按分区查询 | `QueryEvents({PartitionID: id})` | 查询同分区的事件流 |
 | 追溯因果链 | `GetEvent(event.ParentKey)` | 获取前驱事件，理解上下文脉络 |
-| 跨分区查询 | `QueryEvents({PartitionIDs: [42, 85]})` | 查询顶层+子 agent 事件 |
+| 跨分区查询 | `QueryEvents({PartitionIDs: [42, 85]})` | 查询顶层+子 agent 事件（PartitionIDs 由 ReadNamespaces 注入，LLM 无感知） |
+
+> **与 ReadPartitionIDs 的关系**：`event_key` 提供单事件上下文入口，`ReadPartitionIDs` 控制子工具（`memory_query`、`memory_recent`）的跨分区查询范围。两者互补：event_key 精准定位单个事件，ReadPartitionIDs 限定批量查询的分区范围。详见 §六 和 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
 
 ---
 
@@ -501,10 +503,11 @@ sequenceDiagram
 ### 6.2 配置结构
 
 ```go
-// recall/recall_agent.go:25-42
+// recall/recall_agent.go:25-46
 type Config struct {
     Model           model.Model                // 必填：内部 React 循环的 LLM 模型
     MemStore        tagentpkg.MemoryStoreAccessor // 必填：记忆存储访问器
+    ReadPartitionIDs []int                     // 可选：跨命名空间读权限，由 buildAgent() 从 ReadNamespaces 注入
     PromptDir       string                     // 可选：prompt 文件目录（默认 "resources/prompts"）
     Prompt          PromptConfig               // 可选：覆盖默认 prompt 加载
     Description     string                     // 可选：tool 描述（覆盖默认）
@@ -517,14 +520,16 @@ type Config struct {
 ### 6.3 工厂函数
 
 ```go
-// recall/recall_agent.go:47-110
+// recall/recall_agent.go:51-95
 func NewAgent(cfg Config) (*agent.TagentAgent, error)
 ```
 
-创建 TagentAgent 实例，组装以下子工具：
-- `memory_query`：按查询条件检索事件列表
-- `memory_get`：根据 event_key 获取完整事件详情
-- `memory_recent`：快速获取最近的 N 条事件
+创建 TagentAgent 实例，通过 `buildRecallSubTools(accessor, cfg.ReadPartitionIDs)` 组装以下子工具：
+- `memory_query`：按查询条件检索事件列表（自动注入 `ReadPartitionIDs`，限定查询分区范围）
+- `memory_get`：根据 event_key 获取完整事件详情（从 key 自身提取 PartitionID，不依赖 ReadPartitionIDs）
+- `memory_recent`：快速获取最近的 N 条事件（自动注入 `ReadPartitionIDs`）
+
+> **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadPartitionIDs` 注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。`ReadPartitionIDs` 由 `buildAgent()` 从 `MemoryConfig.ReadNamespaces` 解析而来，经 `ToolAgentFactoryConfig` → `recall.Config` → `buildRecallSubTools` 链路传递。详见 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
 
 ### 6.4 Tool 包装
 

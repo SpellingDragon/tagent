@@ -27,6 +27,10 @@ type Config struct {
 
 	MemStore memory.MemoryStore // Required: agent's own MemoryStore (writes via MemoryPlugin, reads via sub-tools)
 
+	// ReadPartitionIDs lists PartitionIDs this agent is allowed to read in addition
+	// to its own namespace. Injected from ToolAgentFactoryConfig.ReadPartitionIDs.
+	ReadPartitionIDs []int
+
 	PromptDir string // Optional: base directory for prompt files (default: "resources/prompts")
 
 	// Prompt loading (bootstrap style)
@@ -77,8 +81,8 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		}
 	}
 
-	// 3. Assemble sub-tools
-	subTools := buildRecallSubTools(cfg.MemStore)
+	// 3. Assemble sub-tools with ReadPartitionIDs for cross-namespace queries
+	subTools := buildRecallSubTools(cfg.MemStore, cfg.ReadPartitionIDs)
 
 	// 4. Apply defaults
 	maxToolIter := cfg.MaxToolIterations

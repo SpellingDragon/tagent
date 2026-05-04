@@ -20,6 +20,7 @@ package tagent
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
@@ -41,6 +42,15 @@ type runtimeConfig struct {
 	skillRepo    tool.SkillRepository
 	mcpToolSets  []trpctool.ToolSet
 }
+
+// namedMemStores provides shared InMemoryStore instances by path.
+// When two agents configure memory type: memory with the same path,
+// they share the same store — so recall can read tagent's partition even in-memory.
+// path empty = isolated store (default behavior).
+var (
+	namedMemMu     sync.Mutex
+	namedMemStores = map[string]*memory.InMemoryStore{}
+)
 
 // WithModel sets the resolved model instance (required).
 // This is the default model; individual agents can override via AgentConfig.Model.
@@ -142,6 +152,12 @@ func buildAgent(
 		agentModel = rc.model // TODO: support per-agent model resolution
 	}
 
+	// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
+	var readPartitionIDs []int
+	for _, ns := range acfg.Memory.ReadNamespaces {
+		readPartitionIDs = append(readPartitionIDs, memory.PartitionIDFromName(ns))
+	}
+
 	// 3.5 Check for registered ToolAgentFactory — if the agent is well-known
 	// (e.g., "knowledge", "recall"), delegate to its factory for proper sub-tool wiring
 	// including skill repositories and MCP tool sets.
@@ -151,6 +167,7 @@ func buildAgent(
 			Model:             agentModel,
 			SystemPrompt:      systemPrompt,
 			MemoryStore:       memStore,
+			ReadPartitionIDs:  readPartitionIDs,
 			MaxToolIterations: acfg.MaxToolIterations,
 			MaxTokens:         acfg.MaxTokens,
 			Temperature:       acfg.Temperature,
@@ -290,10 +307,31 @@ func buildPlainToolRef(tr ToolRef, desc string) (trpctool.Tool, bool, error) {
 }
 
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
+//
+// For type: file, each call creates a new FileBackend instance.
+// Multiple instances pointing to the same directory can safely read/write
+// different partitions (different subdirectories) without shared locking.
+//
+// For type: memory, when a non-empty path is provided, the same path
+// returns the same InMemoryStore instance (shared via registry).
+// An empty path creates an isolated store — suitable for agents that
+// don't need cross-agent memory access (e.g., knowledge agent).
 func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 	switch mc.Type {
 	case "memory", "":
-		return memory.NewInMemoryStore(), nil
+		if mc.Path == "" {
+			// Isolated store — no sharing needed
+			return memory.NewInMemoryStore(), nil
+		}
+		// Shared by path: same path → same InMemoryStore instance
+		namedMemMu.Lock()
+		defer namedMemMu.Unlock()
+		if s, ok := namedMemStores[mc.Path]; ok {
+			return s, nil
+		}
+		s := memory.NewInMemoryStore()
+		namedMemStores[mc.Path] = s
+		return s, nil
 	case "file":
 		if mc.Path == "" {
 			return nil, fmt.Errorf("file memory store requires path")

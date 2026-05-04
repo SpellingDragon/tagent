@@ -133,8 +133,19 @@ type MemoryConfig struct {
 	//   "file"   — file-backed persistent store
 	Type string `json:"type" yaml:"type"`
 
-	// Path is the storage directory for "file" type.
+	// Path is the storage location identifier:
+	//   - For "file" type: filesystem directory path
+	//   - For "memory" type: logical store identifier — agents with the same
+	//     type: memory and same path share a single InMemoryStore instance
+	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+
+	// ReadNamespaces lists agent names whose storage partitions this agent
+	// is allowed to read. Each name is converted to a PartitionID at build time.
+	// For example, recall can read tagent's events by declaring:
+	//   read_namespaces: [tagent]
+	// This enables cross-agent memory access across partitions.
+	ReadNamespaces []string `json:"read_namespaces,omitempty" yaml:"read_namespaces,omitempty"`
 }
 
 // ToolRef declares a tool that an agent uses.

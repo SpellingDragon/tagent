@@ -600,9 +600,11 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
 ```
 
 **RecallAgent 子工具**：
-- `memory_query`：按查询条件检索事件列表
-- `memory_get`：根据 event_key 获取完整事件详情
-- `memory_recent`：快速获取最近的 N 条事件
+- `memory_query`：按查询条件检索事件列表（自动注入 `ReadPartitionIDs`，限定查询分区范围）
+- `memory_get`：根据 event_key 获取完整事件详情（从 key 自身提取 PartitionID，不依赖 ReadNamespaces）
+- `memory_recent`：快速获取最近的 N 条事件（自动注入 `ReadPartitionIDs`）
+
+> **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadNamespaces`（转换为 PartitionID 列表）注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。详见 [tool-architecture.md](../tool/tool-architecture.md) §七。
 
 ### 11.4 完整数据流
 
@@ -676,9 +678,86 @@ func NewPartitionID() int
 
 ---
 
-## 十三、关键设计决策
+## 十三、跨命名空间读权限（ReadNamespaces）
 
-### 13.1 为什么不直接在 Session 中存储 FullEvent？
+### 13.0 设计背景
+
+RecallAgent 的子工具操作的是自身 MemoryStore，而历史事件由顶层 Agent（如 tagent）写入。当 RecallAgent 需要检索顶层 Agent 的历史事件时，需要跨命名空间的读权限。
+
+**设计方案**：`MemoryConfig.ReadNamespaces` 字段声明本 Agent 可读取的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过 `ToolAgentFactoryConfig` 注入到 recall factory，再由 factory 传给子工具构造函数。
+
+```yaml
+# 配置示例
+recall:
+  memory:
+    type: file
+    path: .wechat-config/agent-events
+    read_namespaces:
+      - tagent         # 可读 tagent 的分区
+```
+
+**转换链路**：
+
+```
+tagent.yaml → ReadNamespaces: ["tagent"]
+  → buildAgent() → memory.PartitionIDFromName("tagent") → [144]
+  → ToolAgentFactoryConfig.ReadPartitionIDs: [144]
+  → recallFactory() → recall.Config.ReadPartitionIDs: [144]
+  → buildRecallSubTools(accessor, [144])
+  → NewRecallQueryTool(accessor, [144]) — handler 内注入 opts.PartitionIDs
+  → LLM 调用 memory_query({query: "部署"}) → 实际查询分区 144
+```
+
+### 13.0.1 InMemoryStore 按 path 共享实例
+
+对于 `type: file`，文件系统天然提供跨实例数据共享（两个 FileBackend 指向同一目录即可读对方分区的文件）。但对于 `type: memory`，两个 `NewInMemoryStore()` 是独立 Go 对象，需要显式共享。
+
+**解决方案**：`resolveMemoryStore()` 中对 `type: memory` 按 `path` 做轻量级注册表去重：
+
+```go
+var (
+    namedMemMu     sync.Mutex
+    namedMemStores = map[string]*memory.InMemoryStore{}
+)
+
+func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
+    case "memory", "":
+        if mc.Path == "" {
+            return memory.NewInMemoryStore(), nil  // 无 path → 隔离
+        }
+        namedMemMu.Lock()
+        defer namedMemMu.Unlock()
+        if s, ok := namedMemStores[mc.Path]; ok {
+            return s, nil  // 同 path → 同实例
+        }
+        s := memory.NewInMemoryStore()
+        namedMemStores[mc.Path] = s
+        return s, nil
+}
+```
+
+**效果**：
+
+| 配置 | 实例策略 | 数据共享方式 |
+|------|---------|------------|
+| `type: memory`（无 path） | 每次新建 | 完全隔离 |
+| `type: memory, path: "X"` | 同 path → 同实例 | 同一 `map[PartitionID]map[EventKey]FullEvent` |
+| `type: file, path: "/X"` | 每次新建 | 文件系统天然共享 |
+
+### 13.0.2 path 字段的双重语义
+
+| 类型 | `path` 的含义 |
+|------|-------------|
+| `file` | 文件系统目录路径 |
+| `memory` | 逻辑存储标识符——同 type + 同 path → 单例 |
+
+> `path` 在两种类型下均表示"存储定位符"。FileBackend 通过文件系统天然保证同路径→同存储；InMemoryStore 通过注册表显式保证。
+
+---
+
+## 十四、关键设计决策
+
+### 14.1 为什么不直接在 Session 中存储 FullEvent？
 
 | 需求 | Session 能满足吗 | MemoryStore 的优势 |
 |------|----------------|------------------|
@@ -688,13 +767,13 @@ func NewPartitionID() int
 | 跨 Session 检索 | 单 Session 范围 | 可跨 Session 按 UserID 检索 |
 | 工具调用原始数据 | 有 | `ToolCalls` 不随 LLM 视图变化 |
 
-### 13.2 为什么 QueryEvents 返回 EventReference 而不是 FullEvent？
+### 14.2 为什么 QueryEvents 返回 EventReference 而不是 FullEvent？
 
 **性能考量**：MemoryStore 可能存储大量事件。若每次查询都返回完整 `FullEvent`（含 `Content`、`ToolCalls`、`Response`），会造成大量 IO 开销和内存占用。
 
 `EventReference` 仅包含 4 个字段（key、type、summary、timestamp），是 `FullEvent` 的轻量子集。调用方按需通过 `GetEvent(key)` 获取完整数据。
 
-### 13.3 为什么 FileBackend 每个事件一个文件？
+### 14.3 为什么 FileBackend 每个事件一个文件？
 
 **原子性**：写入时仅修改单个文件，不影响其他事件。进程崩溃最多丢失正在写入的文件，不会破坏整个存储。
 

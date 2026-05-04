@@ -260,6 +260,11 @@ type ToolAgentFactoryConfig struct {
 	// Context from the parent is delivered via AgentToolWrapper at call time, not via MemStore.
 	MemoryStore memory.MemoryStore
 
+	// ReadPartitionIDs lists PartitionIDs this agent is allowed to read in addition
+	// to its own namespace. Injected from MemoryConfig.ReadNamespaces at build time.
+	// Used by recall agent's sub-tools to query across agent partitions.
+	ReadPartitionIDs []int
+
 	// SkillRepo is the skill repository for knowledge agent (optional).
 	SkillRepo tagenttool.SkillRepository
 

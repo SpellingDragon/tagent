@@ -1020,6 +1020,61 @@ LLM 生成 tool_call
 - `PartitionID` 作为存储分区键，由 MemoryPlugin 在 OnEvent 时从 AgentName 派生（新增）
 - 三者配合：`MemStore` 提供访问能力，`event_key` 提供访问入口，`PartitionID` 提供存储隔离
 
+#### 12.5.8 跨命名空间读权限（ReadNamespaces → ReadPartitionIDs）
+
+**问题**：子 agent（如 recall）默认只能查询自身命名空间的记忆，无法访问顶层 agent 或其他子 agent 的事件流。
+
+**设计方案**：`MemoryConfig.ReadNamespaces` 声明可读的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过 `ToolAgentFactoryConfig` 注入到 recall factory，再由 factory 传给子工具构造函数。
+
+**转换链路**：
+
+```mermaid
+graph LR
+    A["tagent.yaml<br/>ReadNamespaces: ['tagent']"] --> B["buildAgent()<br/>PartitionIDFromName('tagent')=144"]
+    B --> C["recall factory<br/>ReadPartitionIDs: [144]"]
+    C --> D["buildRecallSubTools<br/>(accessor, [144])"]
+    D --> E["NewRecallQueryTool<br/>(accessor, [144])"]
+    D --> F["NewRecallRecentTool<br/>(accessor, [144])"]
+```
+
+**注入位置**（源码 `tagent.go:155-170`）：
+
+```go
+// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
+var readPartitionIDs []int
+for _, ns := range acfg.Memory.ReadNamespaces {
+    readPartitionIDs = append(readPartitionIDs, memory.PartitionIDFromName(ns))
+}
+
+factoryCfg := agent.ToolAgentFactoryConfig{
+    ...
+    ReadPartitionIDs: readPartitionIDs,
+}
+```
+
+**ToolAgentFactoryConfig.ReadPartitionIDs**（`agent/tool_agent.go:263-266`）：
+
+```go
+// ReadPartitionIDs lists PartitionIDs this agent is allowed to read in addition
+// to its own namespace. Injected from MemoryConfig.ReadNamespaces at build time.
+// Used by recall agent's sub-tools to query across agent partitions.
+ReadPartitionIDs []int
+```
+
+**子工具自动注入（不对 LLM 暴露）**：
+
+`memory_query` 和 `memory_recent` 的 handler 内部自动将 `ReadPartitionIDs` 注入到 `QueryOptions.PartitionIDs`，LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号：
+
+```go
+// recall_subtools.go — NewRecallQueryTool
+opts := memory.QueryOptions{Limit: limit, OrderBy: "timestamp_desc"}
+if len(readPartitionIDs) > 0 {
+    opts.PartitionIDs = readPartitionIDs  // ← 自动注入，非 LLM 传入
+}
+```
+
+**效果**：recall agent 的 LLM 无需知道分区概念，只需使用 `memory_query({query: "xxx"})`，子工具自动查询配置的跨分区范围。
+
 ---
 
 ## 十三、TagentAgent API 参考
