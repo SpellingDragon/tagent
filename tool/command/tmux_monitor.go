@@ -340,7 +340,12 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	return SessionRunning
 }
 
-// handleFakeAlive handles fake alive state (process stuck but responsive)
+// handleFakeAlive handles fake alive state (process stuck but responsive).
+// Attempts to restart the session under its ORIGINAL session ID so the monitor
+// continues tracking it. On success, resets stability metadata; the next
+// detectSessionState will see the fresh session and naturally transition
+// FakeAlive → Running. On failure, leaves Status untouched so the next cycle
+// re-evaluates — the session may complete naturally or reach fakeDead.
 func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
 	log.Printf("[TmuxMonitor] session %s is fake alive, attempting restart", session.ID)
 
@@ -354,9 +359,17 @@ func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
 	err := tm.executor.RestartSession(session.ID, opts)
 	if err != nil {
 		log.Printf("[TmuxMonitor] failed to restart session %s: %v", session.ID, err)
-		session.Status = SessionError
+		return
 	}
+
+	// Reset stability tracking so the next detectSessionState sees fresh state.
+	session.StableSince = time.Time{}
+	session.LastOutput = ""
+	session.LastOutputMD5 = ""
+	session.CreatedAt = time.Now()
+	log.Printf("[TmuxMonitor] session %s restarted successfully", session.ID)
 }
+
 
 // handleFakeDead handles fake dead state (process exists but unresponsive)
 func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) {

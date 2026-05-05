@@ -3,9 +3,12 @@ package command
 import (
 	"crypto/md5"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // ==================== Mock Inspector ====================
@@ -16,7 +19,10 @@ type mockInspector struct {
 
 	processExists bool
 	isPaneDead    bool
-	output        string
+	// paneDeadOnRecheck: if >= 0, on the Nth call to IsPaneDead, returns true instead of isPaneDead.
+	// Used to simulate "pane died between initial check and post-heartbeat re-check".
+	paneDeadOnRecheck int
+	output            string
 	outputErr     error
 	heartbeatResp string
 	killErr       error
@@ -42,6 +48,9 @@ func (m *mockInspector) IsPaneDead(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.isPaneDeadCalls++
+	if m.paneDeadOnRecheck > 0 && m.isPaneDeadCalls >= m.paneDeadOnRecheck {
+		return true
+	}
 	return m.isPaneDead
 }
 
@@ -941,5 +950,248 @@ func TestCallback_ReceiveExactOutput(t *testing.T) {
 	if receivedOutput != largeOutput {
 		t.Errorf("callback output mismatch: lengths: got=%d want=%d",
 			len(receivedOutput), len(largeOutput))
+	}
+}
+
+// ==================== FakeAlive Path Tests ====================
+
+func TestDetectSessionState_FakeAlive_HeartbeatOk(t *testing.T) {
+	// When heartbeat returns "ok", the session is FakeAlive (process stuck but responsive).
+	inspector := &mockInspector{
+		processExists: true,
+		heartbeatResp: "ok",
+	}
+	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond
+
+	session := newTestSession("fakealive", SessionRunning, "unchanged")
+	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("unchanged")))
+	session.StableSince = time.Now().Add(-1 * time.Hour) // simulate long stability
+
+	inspector.setOutput("unchanged", nil)
+
+	status := tm.detectSessionState(session)
+
+	if status != SessionFakeAlive {
+		t.Errorf("expected SessionFakeAlive, got %s", status)
+	}
+	if inspector.sendHeartbeatCalls != 1 {
+		t.Errorf("expected 1 heartbeat, got %d", inspector.sendHeartbeatCalls)
+	}
+}
+
+// ==================== FakeDead Re-check Test ====================
+
+func TestDetectSessionState_FakeDead_RecheckPaneDead(t *testing.T) {
+	// When heartbeat returns "no_response", a SECOND IsPaneDead check fires (line 321).
+	// If the pane died during the stable-accumulation period, it'''s Completed, not FakeDead.
+	inspector := &mockInspector{
+		processExists: true,
+		heartbeatResp: "no_response",
+	}
+	// First IsPaneDead call (line 252) → false (session appears alive)
+	// Second IsPaneDead call (line 321) → true (pane died during the check)
+	inspector.isPaneDead = false
+	inspector.paneDeadOnRecheck = 2
+
+	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond
+
+	session := newTestSession("recheck", SessionRunning, "stable_output")
+	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stable_output")))
+	session.StableSince = time.Now().Add(-1 * time.Hour)
+
+	inspector.setOutput("stable_output", nil)
+
+	status := tm.detectSessionState(session)
+
+	if status != SessionCompleted {
+		t.Errorf("expected SessionCompleted (pane died on re-check), got %s", status)
+	}
+	if session.LastOutput != "stable_output" {
+		t.Errorf("LastOutput not captured! got %q", session.LastOutput)
+	}
+	if inspector.sendHeartbeatCalls != 1 {
+		t.Errorf("expected 1 heartbeat, got %d", inspector.sendHeartbeatCalls)
+	}
+}
+
+// ==================== handleFakeAlive Full Flow Tests ====================
+
+func TestHandleFakeAlive_RestartSuccess_ContinuesTracking(t *testing.T) {
+	// Full flow: Running→FakeAlive→restart succeeds→state resets→next check→FakeAlive→Running.
+	inspector := &mockInspector{
+		processExists: true,
+		heartbeatResp: "ok",
+	}
+	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond
+
+	session := newTestSession("restart_ok", SessionRunning, "stuck")
+	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
+	session.StableSince = time.Now().Add(-1 * time.Hour)
+	tm.sessions["restart_ok"] = session
+
+	inspector.setOutput("stuck", nil)
+
+	var transitions []string
+	tm.StateChangeCallback = func(sid string, oldS, newS SessionStatus, output string) {
+		transitions = append(transitions, fmt.Sprintf("%s→%s", oldS, newS))
+	}
+
+	// Step 1: detectSessionState → FakeAlive → handleFakeAlive (restart succeeds)
+	tm.checkSession(session)
+
+	if inspector.restartSessionCalls != 1 {
+		t.Errorf("expected 1 restart call, got %d", inspector.restartSessionCalls)
+	}
+	if !session.StableSince.IsZero() {
+		t.Error("StableSince should be reset after successful restart")
+	}
+	if session.LastOutput != "" {
+		t.Errorf("LastOutput should be empty after restart, got %q", session.LastOutput)
+	}
+	// Status should still be FakeAlive (set by checkSession, NOT changed by handleFakeAlive)
+	if session.Status != SessionFakeAlive {
+		t.Errorf("expected Status=FakeAlive (set by checkSession), got %s", session.Status)
+	}
+	if _, exists := tm.GetSession("restart_ok"); !exists {
+		t.Fatal("session should still be tracked after FakeAlive restart")
+	}
+
+	// Step 2: Next check — restarted session produces new output.
+	inspector.setOutput("fresh_output", nil)
+	oldStatus := session.Status // FakeAlive
+	tm.checkSession(session)
+
+	if session.Status != SessionRunning {
+		t.Errorf("after restart, expected Running, got %s (was %s)", session.Status, oldStatus)
+	}
+
+	// Verify FakeAlive→Running transition fired
+	hasFakeAliveToRunning := false
+	for _, tr := range transitions {
+		if tr == "fake_alive→running" {
+			hasFakeAliveToRunning = true
+		}
+	}
+	if !hasFakeAliveToRunning {
+		t.Errorf("missing fake_alive→running transition, got: %v", transitions)
+	}
+
+	// Verify expected transition count: running→fake_alive + fake_alive→running = 2
+	if len(transitions) < 2 {
+		t.Errorf("expected at least 2 transitions, got %d: %v", len(transitions), transitions)
+	}
+}
+
+func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
+	// When restart fails, handleFakeAlive leaves Status untouched.
+	// The session stays in the map; the next cycle re-evaluates naturally.
+	inspector := &mockInspector{
+		processExists: true,
+		heartbeatResp: "ok",
+		restartErr:    fmt.Errorf("tmux unavailable"),
+	}
+	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond
+
+	session := newTestSession("restart_fail", SessionRunning, "stuck")
+	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
+	session.StableSince = time.Now().Add(-1 * time.Hour)
+	tm.sessions["restart_fail"] = session
+
+	inspector.setOutput("stuck", nil)
+
+	var callbackFired bool
+	tm.StateChangeCallback = func(sid string, oldS, newS SessionStatus, output string) {
+		callbackFired = true
+	}
+
+	tm.checkSession(session)
+
+	if !callbackFired {
+		t.Error("callback should fire on running→fake_alive transition")
+	}
+	if inspector.restartSessionCalls != 1 {
+		t.Errorf("expected 1 restart attempt, got %d", inspector.restartSessionCalls)
+	}
+	// Status stays FakeAlive (NOT changed to Error — let next cycle re-evaluate)
+	if session.Status != SessionFakeAlive {
+		t.Errorf("expected Status=FakeAlive (untouched on failure), got %s", session.Status)
+	}
+	// Session remains tracked
+	if _, exists := tm.GetSession("restart_fail"); !exists {
+		t.Error("session should remain tracked after failed restart")
+	}
+}
+
+// ==================== handleStateChange Output Truncation Test ====================
+
+// mockInjector records injected messages for testing handleStateChange.
+type mockInjector struct {
+	mu       sync.Mutex
+	messages []model.Message
+}
+
+func (m *mockInjector) InjectMessage(msg model.Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, msg)
+}
+
+func (m *mockInjector) lastContent() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.messages) == 0 {
+		return ""
+	}
+	return m.messages[len(m.messages)-1].Content
+}
+
+func TestHandleStateChange_OutputTruncation(t *testing.T) {
+	injector := &mockInjector{}
+	ct := &CommandTool{
+		injector:    injector,
+		tmuxMonitor: NewTmuxMonitor(WithMonitorExecutor(&mockInspector{processExists: true})),
+	}
+
+	// Add a session with known state
+	session := &TmuxSession{
+		ID:          "trunc_test",
+		Status:      SessionRunning,
+		StableSince: time.Now().Add(-30 * time.Second),
+	}
+	ct.tmuxMonitor.AddSession(session)
+
+	// Sub-test 1: output <= 2000 chars — no truncation
+	shortOutput := "short output line\n"
+	ct.handleStateChange("trunc_test", string(SessionRunning), string(SessionStable), shortOutput)
+
+	content := injector.lastContent()
+	if content == "" {
+		t.Fatal("expected injected message")
+	}
+	if strings.Contains(content, "...(truncated)") {
+		t.Error("short output should NOT have truncation marker")
+	}
+
+	// Sub-test 2: output > 2000 chars — truncated
+	largeLine := "line of output data that will eventually be truncated because too long\n"
+	largeOutput := strings.Repeat(largeLine, 100) // >2000 chars
+
+	ct.handleStateChange("trunc_test", string(SessionStable), string(SessionRunning), largeOutput)
+
+	content = injector.lastContent()
+	if !strings.Contains(content, "...(truncated)") {
+		t.Error("large output should have truncation marker")
+	}
+	// After truncation, the message should NOT contain the full output
+	if strings.Contains(content, largeOutput) {
+		t.Error("full large output should NOT appear in message")
+	}
+	// But the tail should be present
+	if !strings.Contains(content, largeLine) {
+		t.Error("truncated tail of output should appear in message")
 	}
 }

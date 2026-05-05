@@ -289,12 +289,26 @@ func (te *TmuxExecutor) getSessionPID(sessionID string) (int, error) {
 	return pid, nil
 }
 
-// RestartSession attempts to restart a tmux session
+// RestartSession attempts to restart a tmux session under the SAME session name.
+// This ensures the restarted session continues to be tracked by TmuxMonitor
+// under its original ID — no state chain breakage.
 func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions) error {
-	// Kill existing session
+	// Kill existing session (best-effort: the session may already be dead)
 	te.KillSession(sessionID)
 
-	// Create new session
-	_, err := te.CreateSession(context.Background(), opts)
-	return err
+	// Re-create under the SAME session name so the monitor keeps tracking it.
+	args := []string{"new-session", "-d", "-s", sessionID}
+
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = te.workspace
+	}
+	if workDir != "" {
+		args = append(args, "-c", workDir)
+	}
+
+	args = append(args, opts.Command)
+
+	cmd := exec.Command("tmux", args...)
+	return cmd.Run()
 }
