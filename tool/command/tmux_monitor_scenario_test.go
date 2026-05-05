@@ -84,7 +84,7 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
 			Interval:                  300 * time.Millisecond,
-			StableDuration:           0,
+			StableDuration:            0,
 			InteractiveStableDuration: 900 * time.Millisecond,
 			FakeDeadDuration:          1500 * time.Millisecond,
 		}),
@@ -183,9 +183,9 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	monitor := NewTmuxMonitor(
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
-			Interval:           300 * time.Millisecond,
-			StableDuration:     0,
-			FakeDeadDuration:   1200 * time.Millisecond, // Low to trigger quickly
+			Interval:         300 * time.Millisecond,
+			StableDuration:   0,
+			FakeDeadDuration: 1200 * time.Millisecond, // Low to trigger quickly
 		}),
 	)
 	rec := newRecorder(t, monitor)

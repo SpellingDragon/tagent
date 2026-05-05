@@ -605,9 +605,9 @@ func TestTUI_FullLifecycle_RunningToCompleted(t *testing.T) {
 
 	// Phase 1: TUI output stabilizes (same frame, then time passes)
 	inspector.setOutput("frame1", nil)
-	tm.checkSession(session) // StableSince set → running (duration < threshold)
+	tm.checkSession(session)          // StableSince set → running (duration < threshold)
 	time.Sleep(15 * time.Millisecond) // advance past stableDuration
-	tm.checkSession(session) // duration ≥ threshold → Stable
+	tm.checkSession(session)          // duration ≥ threshold → Stable
 
 	if session.Status != SessionStable {
 		t.Errorf("phase 1: TUI should reach Stable when idle, got %s", session.Status)

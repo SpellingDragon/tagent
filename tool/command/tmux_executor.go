@@ -64,8 +64,8 @@ type TmuxSession struct {
 	LastOutput    string
 	LastOutputMD5 string
 	StableSince   time.Time // When output first became unchanged (zero if output changed in last check).
-	                        // Used as the sole stability indicator: elapsed duration determines
-	                        // Stable / fakeDead thresholds, replacing count-based detection.
+	// Used as the sole stability indicator: elapsed duration determines
+	// Stable / fakeDead thresholds, replacing count-based detection.
 	IsInteractive bool
 	IsTUI         bool // TUI apps skip heartbeat (send-keys injection) at fakeDead threshold
 	PID           int
