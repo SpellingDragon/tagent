@@ -10,13 +10,13 @@ import (
 
 // TmuxMonitor monitors tmux sessions and detects state changes.
 type TmuxMonitor struct {
-	executor             sessionInspector
-	interval             time.Duration
-	stableThreshold      int
-	interactiveThreshold int
-	fakeDeadThreshold    int
-	heartbeatCommand     string
-	heartbeatTimeout     time.Duration
+	executor                  sessionInspector
+	interval                  time.Duration
+	stableDuration            time.Duration
+	interactiveStableDuration time.Duration
+	fakeDeadDuration          time.Duration
+	heartbeatCommand          string
+	heartbeatTimeout          time.Duration
 
 	sessions map[string]*TmuxSession
 	mu       sync.RWMutex
@@ -44,23 +44,23 @@ var _ sessionInspector = (*TmuxExecutor)(nil)
 
 // MonitorConfig holds configuration for TmuxMonitor
 type MonitorConfig struct {
-	Interval             time.Duration
-	StableThreshold      int
-	InteractiveThreshold int
-	FakeDeadThreshold    int
-	HeartbeatCommand     string
-	HeartbeatTimeout     time.Duration
+	Interval                  time.Duration
+	StableDuration            time.Duration
+	InteractiveStableDuration time.Duration
+	FakeDeadDuration          time.Duration
+	HeartbeatCommand          string
+	HeartbeatTimeout          time.Duration
 }
 
 // DefaultMonitorConfig returns default monitor configuration
 func DefaultMonitorConfig() MonitorConfig {
 	return MonitorConfig{
-		Interval:             30 * time.Second,
-		StableThreshold:      2,
-		InteractiveThreshold: 3,
-		FakeDeadThreshold:    5,
-		HeartbeatCommand:     "echo ping",
-		HeartbeatTimeout:     5 * time.Second,
+		Interval:                  30 * time.Second,
+		StableDuration:            60 * time.Second,
+		InteractiveStableDuration: 90 * time.Second,
+		FakeDeadDuration:          150 * time.Second,
+		HeartbeatCommand:          "echo ping",
+		HeartbeatTimeout:          5 * time.Second,
 	}
 }
 
@@ -71,9 +71,9 @@ type TmuxMonitorOption func(*TmuxMonitor)
 func WithMonitorConfig(cfg MonitorConfig) TmuxMonitorOption {
 	return func(tm *TmuxMonitor) {
 		tm.interval = cfg.Interval
-		tm.stableThreshold = cfg.StableThreshold
-		tm.interactiveThreshold = cfg.InteractiveThreshold
-		tm.fakeDeadThreshold = cfg.FakeDeadThreshold
+		tm.stableDuration = cfg.StableDuration
+		tm.interactiveStableDuration = cfg.InteractiveStableDuration
+		tm.fakeDeadDuration = cfg.FakeDeadDuration
 		tm.heartbeatCommand = cfg.HeartbeatCommand
 		tm.heartbeatTimeout = cfg.HeartbeatTimeout
 	}
@@ -98,14 +98,14 @@ func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor {
 	defaultCfg := DefaultMonitorConfig()
 
 	tm := &TmuxMonitor{
-		interval:             defaultCfg.Interval,
-		stableThreshold:      defaultCfg.StableThreshold,
-		interactiveThreshold: defaultCfg.InteractiveThreshold,
-		fakeDeadThreshold:    defaultCfg.FakeDeadThreshold,
-		heartbeatCommand:     defaultCfg.HeartbeatCommand,
-		heartbeatTimeout:     defaultCfg.HeartbeatTimeout,
-		sessions:             make(map[string]*TmuxSession),
-		stopCh:               make(chan struct{}),
+		interval:                  defaultCfg.Interval,
+		stableDuration:            defaultCfg.StableDuration,
+		interactiveStableDuration: defaultCfg.InteractiveStableDuration,
+		fakeDeadDuration:          defaultCfg.FakeDeadDuration,
+		heartbeatCommand:          defaultCfg.HeartbeatCommand,
+		heartbeatTimeout:          defaultCfg.HeartbeatTimeout,
+		sessions:                  make(map[string]*TmuxSession),
+		stopCh:                    make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -238,7 +238,10 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	}
 }
 
-// detectSessionState detects the current state of a session
+// detectSessionState detects the current state of a session.
+// All state detection is time-based, using StableSince as the sole indicator.
+// No stableCount — the elapsed duration since output first became unchanged
+// determines whether the session is Stable or fakeDead.
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	if tm.executor == nil {
 		return SessionError
@@ -260,70 +263,77 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	// Calculate MD5 of output
 	currentMD5 := fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
 
-	// Check for fake alive (process exists but no output change)
+	// Track output stability using StableSince as the sole time-based indicator.
+	// StableSince records when output FIRST became unchanged (not when Stable was declared).
+	// This makes the time window accurately reflect "how long since last output change".
 	if processExists && !isPaneDead {
 		if currentMD5 == session.LastOutputMD5 {
-			session.StableCount++
-
-			// Fake dead detection: exceeded threshold but process still running
-			if session.StableCount > tm.fakeDeadThreshold {
-				// TUI sessions: skip heartbeat to avoid injecting text via send-keys.
-				// The agent has already received the Stable event (with StableSince),
-				// and can make its own timeout/cleanup decision based on the output.
-				if session.IsTUI {
-					session.LastOutput = currentOutput
-					session.LastOutputMD5 = currentMD5
-					session.StableCount = tm.fakeDeadThreshold // cap to avoid unbounded growth
-					return SessionRunning
-				}
-
-				heartbeatResult := tm.executor.SendHeartbeat(session.ID)
-				if heartbeatResult == "ok" {
-					// Process responds to heartbeat, it's fake alive (process is stuck)
-					return SessionFakeAlive
-				}
-				// Heartbeat got no response.
-				// Re-check pane dead status: the pane may have died during our
-				// stable-count accumulation, in which case this is a normal
-				// completion, not a fake dead.
-				if tm.executor.IsPaneDead(session.ID) {
-					session.LastOutput = currentOutput
-					session.LastOutputMD5 = currentMD5
-					return SessionCompleted
-				}
-				return SessionFakeDead
+			// Output unchanged: record stable-since time if this is the first unchanged check
+			if session.StableSince.IsZero() {
+				session.StableSince = time.Now()
 			}
 		} else {
-			// Output changed, reset stable count
-			session.StableCount = 0
-			session.StableSince = time.Time{} // new output cycle
+			// Output changed: reset stable timer (new output cycle)
+			session.StableSince = time.Time{}
 		}
 	}
 
-	// Check for fake dead (process doesn't exist but pane not marked dead)
+	// Completion: process doesn't exist but pane not marked dead
 	if !processExists && !isPaneDead {
 		session.LastOutput = currentOutput
 		session.LastOutputMD5 = currentMD5
 		return SessionCompleted
 	}
 
-	// Normal state detection
+	// Completion: pane dead or process gone
 	if isPaneDead || !processExists {
 		session.LastOutput = currentOutput
 		session.LastOutputMD5 = currentMD5
 		return SessionCompleted
 	}
 
-	// Output stability detection
-	threshold := tm.getThreshold(session.IsInteractive)
-	if session.StableCount >= threshold {
-		if session.StableSince.IsZero() {
-			session.StableSince = time.Now()
+	// At this point: processExists && !isPaneDead (session is alive)
+	// Check fakeDead and Stable using elapsed time since output first became unchanged
+	if !session.StableSince.IsZero() {
+		stableDuration := time.Since(session.StableSince)
+
+		// Fake dead: stable for too long without output change
+		// Use strict greater-than so Stable fires BEFORE fakeDead on the same check
+		if stableDuration > tm.fakeDeadDuration {
+			// TUI sessions: skip heartbeat to avoid injecting text via send-keys.
+			// Return Running with StableSince preserved — the agent has already
+			// received the Stable event and can make its own timeout/cleanup decision.
+			if session.IsTUI {
+				session.LastOutput = currentOutput
+				session.LastOutputMD5 = currentMD5
+				return SessionRunning
+			}
+
+			heartbeatResult := tm.executor.SendHeartbeat(session.ID)
+			if heartbeatResult == "ok" {
+				// Process responds to heartbeat, it's fake alive (process is stuck)
+				return SessionFakeAlive
+			}
+			// Heartbeat got no response.
+			// Re-check pane dead status: the pane may have died during our
+			// stable-period accumulation, in which case this is a normal
+			// completion, not a fake dead.
+			if tm.executor.IsPaneDead(session.ID) {
+				session.LastOutput = currentOutput
+				session.LastOutputMD5 = currentMD5
+				return SessionCompleted
+			}
+			return SessionFakeDead
 		}
-		return SessionStable
+
+		// Stable: output has been unchanged for sufficient time
+		threshold := tm.getStableDuration(session.IsInteractive)
+		if stableDuration >= threshold {
+			return SessionStable
+		}
 	}
 
-	// Update session state
+	// Default: still running
 	session.LastOutput = currentOutput
 	session.LastOutputMD5 = currentMD5
 
@@ -361,10 +371,10 @@ func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) {
 	session.Status = SessionCompleted
 }
 
-// getThreshold returns the stability threshold based on session type
-func (tm *TmuxMonitor) getThreshold(isInteractive bool) int {
+// getStableDuration returns the time-based stability threshold based on session type.
+func (tm *TmuxMonitor) getStableDuration(isInteractive bool) time.Duration {
 	if isInteractive {
-		return tm.interactiveThreshold
+		return tm.interactiveStableDuration
 	}
-	return tm.stableThreshold
+	return tm.stableDuration
 }

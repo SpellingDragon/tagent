@@ -281,10 +281,9 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 
 	// 使用短轮询间隔加速测试状态检测
 	tool.tmuxMonitor.interval = 100 * time.Millisecond
-	// 将 fakeDeadThreshold 提高，确保在命令完成前不会触发假死检测。
-	// 命令 "sleep 1 && echo done" 约需 1s，threshold=20 意味着
-	// 需要 2s 稳定输出才会心跳检测，此时 pane 已正常结束。
-	tool.tmuxMonitor.fakeDeadThreshold = 20
+	// 将 fakeDeadDuration 设置足够长，确保在命令完成前不会触发假死检测。
+	// 命令 "sleep 1 && echo done" 约需 1s，Duration=3s 保证 pane 正常结束后才超时。
+	tool.tmuxMonitor.fakeDeadDuration = 3 * time.Second
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{

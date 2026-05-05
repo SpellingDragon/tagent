@@ -111,15 +111,16 @@ func (m *mockInspector) resetCallCounters() {
 // ==================== Test Helpers ====================
 
 // newTestMonitor creates a TmuxMonitor with a mock inspector for testing.
+// Uses very short durations so tests can verify state transitions with minimal time manipulation.
 func newTestMonitor(inspector *mockInspector) *TmuxMonitor {
 	return &TmuxMonitor{
-		executor:             inspector,
-		interval:             30 * time.Second,
-		stableThreshold:      2,
-		interactiveThreshold: 3,
-		fakeDeadThreshold:    5,
-		heartbeatCommand:     "echo ping",
-		sessions:             make(map[string]*TmuxSession),
+		executor:                  inspector,
+		interval:                  30 * time.Second,
+		stableDuration:            10 * time.Millisecond,
+		interactiveStableDuration: 10 * time.Millisecond,
+		fakeDeadDuration:          1 * time.Hour, // effectively disabled for most tests
+		heartbeatCommand:          "echo ping",
+		sessions:                  make(map[string]*TmuxSession),
 	}
 }
 
@@ -134,7 +135,6 @@ func newTestSession(id string, status SessionStatus, lastOutput string) *TmuxSes
 		Status:        status,
 		LastOutput:    lastOutput,
 		LastOutputMD5: lastMD5,
-		StableCount:   0,
 	}
 }
 
@@ -191,16 +191,19 @@ func TestDetectSessionState_OutputStable_TransitionToStable(t *testing.T) {
 	session := newTestSession("test", SessionRunning, "A")
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("A")))
 
-	// Check 1: output unchanged "A" (same MD5)
+	// Check 1: output unchanged "A" (same MD5) — StableSince set, but duration < threshold
 	inspector.setOutput("A", nil)
 	status := tm.detectSessionState(session)
 
 	if status != SessionRunning {
 		t.Errorf("check 1: expected SessionRunning, got %s", status)
 	}
-	if session.StableCount != 1 {
-		t.Errorf("check 1: expected StableCount=1, got %d", session.StableCount)
+	if session.StableSince.IsZero() {
+		t.Error("check 1: StableSince should be set when output first becomes unchanged")
 	}
+
+	// Advance time past stableDuration (10ms)
+	time.Sleep(15 * time.Millisecond)
 
 	// Check 2: output still "A" → should transition to Stable
 	status = tm.detectSessionState(session)
@@ -208,11 +211,8 @@ func TestDetectSessionState_OutputStable_TransitionToStable(t *testing.T) {
 	if status != SessionStable {
 		t.Errorf("check 2: expected SessionStable, got %s", status)
 	}
-	if session.StableCount != 2 {
-		t.Errorf("check 2: expected StableCount=2, got %d", session.StableCount)
-	}
 	if session.StableSince.IsZero() {
-		t.Error("check 2: StableSince should be set when reaching Stable")
+		t.Error("check 2: StableSince should still be set when at Stable")
 	}
 	if session.LastOutput != "A" {
 		t.Errorf("expected LastOutput='A', got %q", session.LastOutput)
@@ -222,6 +222,7 @@ func TestDetectSessionState_OutputStable_TransitionToStable(t *testing.T) {
 func TestDetectSessionState_OutputStable_InteractiveThreshold(t *testing.T) {
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
+	// interactive sessions use same stableDuration in test setup (10ms)
 
 	session := newTestSession("test", SessionRunning, "A")
 	session.IsInteractive = true
@@ -229,40 +230,36 @@ func TestDetectSessionState_OutputStable_InteractiveThreshold(t *testing.T) {
 
 	inspector.setOutput("A", nil)
 
-	// interactive threshold = 3
-	// Check 1: stableCount=1 → running
+	// Check 1: StableSince set, but duration < threshold → Running
 	tm.detectSessionState(session)
-	if session.StableCount != 1 {
-		t.Errorf("check 1: expected StableCount=1, got %d", session.StableCount)
+	if session.StableSince.IsZero() {
+		t.Error("StableSince should be set on first unchanged output")
 	}
 
-	// Check 2: stableCount=2 → running
+	// Advance time past stableDuration
+	time.Sleep(15 * time.Millisecond)
+
+	// Check 2: duration ≥ threshold → Stable (interactive uses interactiveStableDuration)
 	status := tm.detectSessionState(session)
-	if status != SessionRunning {
-		t.Errorf("check 2: expected SessionRunning, got %s", status)
-	}
-
-	// Check 3: stableCount=3 → stable (reached interactive threshold)
-	status = tm.detectSessionState(session)
 	if status != SessionStable {
-		t.Errorf("check 3: expected SessionStable, got %s", status)
+		t.Errorf("check 2: expected SessionStable (interactive), got %s", status)
 	}
 }
 
 func TestDetectSessionState_HeartbeatNoResponse_PaneDead_ReturnsCompleted(t *testing.T) {
-	// 🔴 Bug3 fix verification: when heartbeat gets no_response but the pane
+	// Bug3 fix verification: when heartbeat gets no_response but the pane
 	// is actually dead, the session should be classified as Completed, not FakeDead.
-	// This happens when the process dies during the stable-count accumulation window.
 	inspector := &mockInspector{
 		processExists: true,
-		isPaneDead:    true, // pane died while we were counting
+		isPaneDead:    true, // pane died while we were monitoring
 		heartbeatResp: "no_response",
 	}
 	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond // short duration to trigger fakeDead check
 
 	session := newTestSession("test", SessionRunning, "final")
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("final")))
-	session.StableCount = 5 // At fake dead threshold
+	session.StableSince = time.Now().Add(-1 * time.Hour) // simulate being stable for a long time
 
 	inspector.setOutput("final", nil)
 
@@ -326,6 +323,13 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 		if i < 3 && status != SessionRunning {
 			t.Errorf("step %d: expected running, got %s", i, status)
 		}
+
+		// Stable detection needs time to pass (time-based, not count-based)
+		if i == 3 {
+			time.Sleep(15 * time.Millisecond)
+			status = tm.detectSessionState(session)
+		}
+
 		if i == 4 && status != SessionStable {
 			t.Errorf("step %d: expected stable, got %s", i, status)
 		}
@@ -351,13 +355,16 @@ func TestOutputConsistency_OutputMD5_EmptyOutput(t *testing.T) {
 
 	inspector.setOutput("", nil)
 
-	// Check 1: empty output unchanged → stableCount=1
+	// Check 1: empty output unchanged → StableSince set
 	tm.detectSessionState(session)
-	if session.StableCount != 1 {
-		t.Errorf("expected StableCount=1 for unchanged empty output, got %d", session.StableCount)
+	if session.StableSince.IsZero() {
+		t.Error("StableSince should be set for unchanged empty output")
 	}
 
-	// Check 2: empty → stableCount=2 → stable
+	// Advance time past stableDuration
+	time.Sleep(15 * time.Millisecond)
+
+	// Check 2: empty → stable (duration ≥ threshold)
 	status := tm.detectSessionState(session)
 	if status != SessionStable {
 		t.Errorf("expected SessionStable for consistent empty output, got %s", status)
@@ -430,9 +437,9 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 		// Phase 1: running with changing output
 		{output: "step2", processExists: true, isPaneDead: false, expectedState: SessionRunning},
 		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionRunning},
-		// Phase 2: output stabilizes
-		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionRunning}, // stableCount=1
-		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionStable},  // stableCount=2
+		// Phase 2: output stabilizes (needs time to pass for Stable detection)
+		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionRunning},
+		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionStable},
 		// Phase 3: process completes
 		{output: "step3\nfinal", processExists: false, isPaneDead: true, expectedState: SessionCompleted},
 	}
@@ -445,6 +452,14 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 	for i, step := range lifecycle {
 		inspector.setProcess(step.processExists, step.isPaneDead)
 		inspector.setOutput(step.output, nil)
+
+		// For time-based stability detection, allow time to pass between stabilizing checks
+		if i == 2 {
+			// Step 2 sets StableSince; wait for duration to pass before step 3
+			tm.checkSession(session)
+			time.Sleep(15 * time.Millisecond)
+			continue
+		}
 
 		oldStatus := session.Status
 		tm.checkSession(session)
@@ -463,8 +478,8 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 		}
 
 		if session.Status != step.expectedState {
-			t.Errorf("step %d: expected %s, got %s (stableCount=%d)",
-				i, step.expectedState, session.Status, session.StableCount)
+			t.Errorf("step %d: expected %s, got %s (StableSince=%v)",
+				i, step.expectedState, session.Status, session.StableSince)
 		}
 	}
 }
@@ -476,6 +491,7 @@ func TestStateMachine_FakeDeadLifecycle(t *testing.T) {
 		heartbeatResp: "no_response",
 	}
 	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond // short to trigger fakeDead
 
 	session := newTestSession("fake", SessionRunning, "X")
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("X")))
@@ -483,14 +499,17 @@ func TestStateMachine_FakeDeadLifecycle(t *testing.T) {
 
 	inspector.setOutput("X", nil)
 
-	// Build up stableCount to fakeDeadThreshold
-	// Threshold is 5, so we need stableCount to reach 6
-	for i := 0; i < 6; i++ {
-		if _, exists := tm.GetSession("fake"); !exists {
-			t.Fatalf("session removed prematurely at iteration %d", i)
-		}
-		tm.checkSession(session)
+	// First check: sets StableSince
+	tm.checkSession(session)
+	if _, exists := tm.GetSession("fake"); !exists {
+		t.Fatal("session should not be removed after first check")
 	}
+
+	// Set StableSince far in the past to simulate long stability
+	session.StableSince = time.Now().Add(-1 * time.Hour)
+
+	// Second check: fakeDead triggers because stableDuration > fakeDeadDuration
+	tm.checkSession(session)
 
 	// After fake_dead, session should be removed
 	_, exists := tm.GetSession("fake")
@@ -524,8 +543,8 @@ func TestTUI_OutputAlwaysChanging_StaysRunning(t *testing.T) {
 		if status != SessionRunning {
 			t.Errorf("check %d: TUI should stay Running, got %s", i, status)
 		}
-		if session.StableCount != 0 {
-			t.Errorf("check %d: TUI StableCount should stay 0 (output changed), got %d", i, session.StableCount)
+		if !session.StableSince.IsZero() {
+			t.Errorf("check %d: TUI StableSince should remain zero (output changed), got %v", i, session.StableSince)
 		}
 	}
 
@@ -536,7 +555,7 @@ func TestTUI_OutputAlwaysChanging_StaysRunning(t *testing.T) {
 }
 
 func TestTUI_FakeDeadTimeout_ReturnsRunning_NoHeartbeat(t *testing.T) {
-	// When a TUI session stays stable beyond fakeDeadThreshold,
+	// When a TUI session stays stable beyond fakeDeadDuration,
 	// return Running instead of triggering heartbeat/send-keys.
 	// The agent has already received the Stable event and can decide.
 	inspector := &mockInspector{
@@ -544,15 +563,15 @@ func TestTUI_FakeDeadTimeout_ReturnsRunning_NoHeartbeat(t *testing.T) {
 		heartbeatResp: "no_response",
 	}
 	tm := newTestMonitor(inspector)
+	tm.fakeDeadDuration = 10 * time.Millisecond // short to trigger fakeDead
 
 	session := newTUISession("tui", SessionRunning, "A")
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("A")))
-	session.StableCount = 5                                 // At fake dead threshold (5, need > 5 to trigger)
-	session.StableSince = time.Now().Add(-30 * time.Second) // Was stable for 30s
+	session.StableSince = time.Now().Add(-1 * time.Hour) // simulate being stable for a long time
 
 	inspector.setOutput("A", nil)
 
-	// stableCount=6 > fakeDeadThreshold(5) → TUI skip heartbeat → Running
+	// stableDuration > fakeDeadDuration → TUI skip heartbeat → Running
 	status := tm.detectSessionState(session)
 
 	if status != SessionRunning {
@@ -561,10 +580,6 @@ func TestTUI_FakeDeadTimeout_ReturnsRunning_NoHeartbeat(t *testing.T) {
 	// Heartbeat must NOT be sent for TUI
 	if inspector.sendHeartbeatCalls != 0 {
 		t.Errorf("TUI triggered heartbeat %d times — should be 0!", inspector.sendHeartbeatCalls)
-	}
-	// StableCount should be capped at fakeDeadThreshold to avoid unbounded growth
-	if session.StableCount != 5 {
-		t.Errorf("expected StableCount=5 (capped at fakeDeadThreshold), got %d", session.StableCount)
 	}
 	// StableSince should persist — agent can compute duration from Stable event to now
 	if session.StableSince.IsZero() {
@@ -588,10 +603,11 @@ func TestTUI_FullLifecycle_RunningToCompleted(t *testing.T) {
 		transitions = append(transitions, fmt.Sprintf("%s→%s", oldS, newS))
 	}
 
-	// Phase 1: TUI output stabilizes (same frame for 2 checks)
+	// Phase 1: TUI output stabilizes (same frame, then time passes)
 	inspector.setOutput("frame1", nil)
-	tm.checkSession(session) // stableCount=1 → Running
-	tm.checkSession(session) // stableCount=2 → Stable
+	tm.checkSession(session) // StableSince set → running (duration < threshold)
+	time.Sleep(15 * time.Millisecond) // advance past stableDuration
+	tm.checkSession(session) // duration ≥ threshold → Stable
 
 	if session.Status != SessionStable {
 		t.Errorf("phase 1: TUI should reach Stable when idle, got %s", session.Status)
@@ -632,7 +648,7 @@ func TestMultiTurn_RepeatedStableRunningCycles(t *testing.T) {
 	// Each transition should fire exactly one callback.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
-	tm.fakeDeadThreshold = 100 // Disable fake-dead to focus on multi-turn
+	tm.fakeDeadDuration = 100 * time.Hour // Disable fake-dead to focus on multi-turn
 
 	session := newTestSession("multiturn", SessionRunning, "init")
 	tm.sessions["multiturn"] = session
@@ -652,13 +668,11 @@ func TestMultiTurn_RepeatedStableRunningCycles(t *testing.T) {
 	inspector.setOutput("Turn1: line1\nTurn1: line2", nil)
 	tm.checkSession(session) // changed → Running
 
-	// Same output twice → reach Stable
+	// Same output twice → reach Stable (time-based: need sleep between checks)
 	inspector.setOutput("Turn1: line1\nTurn1: line2", nil)
-	tm.checkSession(session) // stableCount=1
-	if session.Status != SessionRunning {
-		t.Errorf("turn1 check3: expected Running (stableCount=1), got %s", session.Status)
-	}
-	tm.checkSession(session) // stableCount=2 → Stable
+	tm.checkSession(session) // StableSince set
+	time.Sleep(15 * time.Millisecond)
+	tm.checkSession(session) // duration ≥ threshold → Stable
 	if session.Status != SessionStable {
 		t.Errorf("turn1: expected Stable, got %s", session.Status)
 	}
@@ -669,15 +683,16 @@ func TestMultiTurn_RepeatedStableRunningCycles(t *testing.T) {
 	if session.Status != SessionRunning {
 		t.Errorf("turn2: expected Running (output changed), got %s", session.Status)
 	}
-	if session.StableCount != 0 {
-		t.Errorf("turn2: StableCount should reset to 0, got %d", session.StableCount)
+	if !session.StableSince.IsZero() {
+		t.Errorf("turn2: StableSince should reset to zero on output change, got %v", session.StableSince)
 	}
 
-	// Turn 2 stabilizes
+	// Turn 2 stabilizes (time-based: 1st registers new output, 2nd confirms same, sleep, 3rd→Stable)
 	inspector.setOutput("Turn1: line1\nTurn1: line2\nTurn2: processing...\nTurn2: done", nil)
-	tm.checkSession(session) // changed
-	tm.checkSession(session) // stableCount=1
-	tm.checkSession(session) // stableCount=2 → Stable
+	tm.checkSession(session) // new output → StableSince reset
+	tm.checkSession(session) // same → StableSince set, duration < threshold
+	time.Sleep(15 * time.Millisecond)
+	tm.checkSession(session) // same → duration ≥ threshold → Stable
 	if session.Status != SessionStable {
 		t.Errorf("turn2: expected Stable, got %s", session.Status)
 	}
@@ -731,7 +746,7 @@ func TestMultiTurn_LongSession_FiftyChecks(t *testing.T) {
 	// 50+ monitor checks. Output changes every ~5th check, no spurious events.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
-	tm.fakeDeadThreshold = 100 // Disable fake-dead for this test
+	tm.fakeDeadDuration = 100 * time.Hour // Disable fake-dead for this test
 
 	session := newTestSession("longrun", SessionRunning, "")
 	tm.sessions["longrun"] = session
@@ -786,8 +801,10 @@ func TestMultiTurn_LongSession_FiftyChecks(t *testing.T) {
 	if callbacks > 100 {
 		t.Errorf("too many callbacks (%d) — possible instability", callbacks)
 	}
-	if session.StableCount > 10 {
-		t.Errorf("StableCount too high (%d) — should reset on each change", session.StableCount)
+	// Verify StableSince resets correctly on output changes (not stuck accumulating)
+	// After final stable period, StableSince should reflect recent stability, not ancient history
+	if !session.StableSince.IsZero() && time.Since(session.StableSince) > 30*time.Second {
+		t.Errorf("StableSince too old (%v) — should reset on each output change", time.Since(session.StableSince))
 	}
 }
 
@@ -796,7 +813,7 @@ func TestMultiTurn_OutputAccumulation(t *testing.T) {
 	// interaction turns, and the agent always sees the full history.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
-	tm.fakeDeadThreshold = 100
+	tm.fakeDeadDuration = 100 * time.Hour
 
 	session := newTestSession("accum", SessionRunning, "")
 
@@ -845,10 +862,11 @@ func TestMultiTurn_TUI_AgentGetsStableEvent(t *testing.T) {
 		events = append(events, fmt.Sprintf("%s→%s output_len=%d", oldS, newS, len(output)))
 	}
 
-	// Round 1: TUI stabilizes
+	// Round 1: TUI stabilizes (time-based: need sleep between checks)
 	inspector.setOutput("screen1", nil)
-	tm.checkSession(session) // stableCount=1 → Running
-	tm.checkSession(session) // stableCount=2 → Stable
+	tm.checkSession(session) // StableSince set → Running
+	time.Sleep(15 * time.Millisecond)
+	tm.checkSession(session) // duration ≥ threshold → Stable
 
 	if session.Status != SessionStable {
 		t.Fatalf("round 1: expected Stable, got %s", session.Status)
@@ -861,18 +879,19 @@ func TestMultiTurn_TUI_AgentGetsStableEvent(t *testing.T) {
 		t.Fatalf("round 2: expected Running after change, got %s", session.Status)
 	}
 
-	// Round 2 output stabilizes
-	tm.checkSession(session) // stableCount=1
-	tm.checkSession(session) // stableCount=2 → Stable
+	// Round 2 output stabilizes (need time to pass)
+	tm.checkSession(session) // StableSince set
+	time.Sleep(15 * time.Millisecond)
+	tm.checkSession(session) // duration ≥ threshold → Stable
 	if session.Status != SessionStable {
 		t.Errorf("round 2: expected Stable, got %s", session.Status)
 	}
 
-	// Round 3: FakeDead timeout — stays stable too long
-	// Simulate staying stable past fakeDeadThreshold
-	session.StableCount = 5 // at threshold
+	// Round 3: FakeDead timeout — stays stable too long.
+	// Simulate staying stable past fakeDeadDuration by setting StableSince far in the past.
+	session.StableSince = time.Now().Add(-2 * time.Hour)
 	inspector.setOutput("screen1\nscreen2: processing your request...", nil)
-	tm.checkSession(session) // stableCount=6 > 5 → TUI skip heartbeat → Running
+	tm.checkSession(session) // duration > fakeDeadDuration → TUI skip heartbeat → Running
 
 	// Agent should have received: stable→running (fake-dead timeout)
 	// Agent can now decide to kill or wait

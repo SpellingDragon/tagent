@@ -37,11 +37,11 @@ func newRecorder(t *testing.T, monitor *TmuxMonitor) *testSessionRecorder {
 			stableDur := time.Since(session.StableSince).Round(time.Second)
 			extra = fmt.Sprintf(" [stableSince=%v ago]", stableDur)
 		}
-		event := fmt.Sprintf("[%s] %s %s→%s stableCount=%d%s",
+		event := fmt.Sprintf("[%s] %s %s→%s stableDuration=%v%s",
 			ts, sessionID[:12], oldS, newS,
-			func() int {
-				if ok {
-					return session.StableCount
+			func() time.Duration {
+				if ok && !session.StableSince.IsZero() {
+					return time.Since(session.StableSince).Round(time.Second)
 				}
 				return -1
 			}(), extra)
@@ -83,10 +83,10 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 	monitor := NewTmuxMonitor(
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
-			Interval:             300 * time.Millisecond, // Fast for testing
-			StableThreshold:      2,
-			InteractiveThreshold: 3,
-			FakeDeadThreshold:    5,
+			Interval:                  300 * time.Millisecond,
+			StableDuration:           0,
+			InteractiveStableDuration: 900 * time.Millisecond,
+			FakeDeadDuration:          1500 * time.Millisecond,
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -183,9 +183,9 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	monitor := NewTmuxMonitor(
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
-			Interval:          300 * time.Millisecond,
-			StableThreshold:   2,
-			FakeDeadThreshold: 4, // Low to trigger quickly
+			Interval:           300 * time.Millisecond,
+			StableDuration:     0,
+			FakeDeadDuration:   1200 * time.Millisecond, // Low to trigger quickly
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -273,9 +273,9 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 	monitor := NewTmuxMonitor(
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
-			Interval:          300 * time.Millisecond,
-			StableThreshold:   2,
-			FakeDeadThreshold: 100, // Disable fakeDead for this test
+			Interval:         300 * time.Millisecond,
+			StableDuration:   0,
+			FakeDeadDuration: 30 * time.Second, // Disable fakeDead for this test
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -352,9 +352,9 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 	monitor := NewTmuxMonitor(
 		WithMonitorExecutor(executor),
 		WithMonitorConfig(MonitorConfig{
-			Interval:          300 * time.Millisecond,
-			StableThreshold:   2,
-			FakeDeadThreshold: 4,
+			Interval:         300 * time.Millisecond,
+			StableDuration:   0,
+			FakeDeadDuration: 1200 * time.Millisecond,
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -434,8 +434,8 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 
 	rec.dumpSummary()
 
-	t.Logf("TUI final status: %s, stableCount=%d, stableSince=%v ago",
-		tuiMon.Status, tuiMon.StableCount,
+	t.Logf("TUI final status: %s, stableSince=%v ago",
+		tuiMon.Status,
 		func() string {
 			if tuiMon.StableSince.IsZero() {
 				return "never"

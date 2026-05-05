@@ -274,6 +274,17 @@ func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output
 				stableDuration := time.Since(session.StableSince).Round(time.Second)
 				content += fmt.Sprintf("\n[note] Session has been stable for %v", stableDuration)
 			}
+
+			// Distinguish fakeDead timeout from output change for stable→running transitions.
+			// - StableSince non-zero → fakeDead timeout: output hasn't changed, TUI was awakened.
+			// - StableSince zero → output actually changed, session naturally became active again.
+			if oldStatus == string(SessionStable) && newStatus == string(SessionRunning) {
+				if !session.StableSince.IsZero() {
+					content += "\n[note] This is a fakeDead timeout — output did NOT change, the session was already stable"
+				} else {
+					content += "\n[note] Output changed — session is actively producing new content"
+				}
+			}
 		}
 	}
 
