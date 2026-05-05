@@ -281,6 +281,10 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 
 	// 使用短轮询间隔加速测试状态检测
 	tool.tmuxMonitor.interval = 100 * time.Millisecond
+	// 将 fakeDeadThreshold 提高，确保在命令完成前不会触发假死检测。
+	// 命令 "sleep 1 && echo done" 约需 1s，threshold=20 意味着
+	// 需要 2s 稳定输出才会心跳检测，此时 pane 已正常结束。
+	tool.tmuxMonitor.fakeDeadThreshold = 20
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
@@ -300,10 +304,19 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	var session *TmuxSession
 	var exists bool
+	seenRunning := false // ensure session was alive before disappearing
 	for {
 		session, exists = tool.tmuxMonitor.GetSession(sessionID)
-		if exists && session.Status == SessionCompleted {
-			t.Log("Session completed")
+		if exists {
+			seenRunning = true
+			if session.Status == SessionCompleted {
+				t.Log("Session completed")
+				return
+			}
+		} else if seenRunning {
+			// Session was removed by monitor after completion.
+			// This is expected: completed sessions are cleaned up.
+			t.Log("Session completed (removed by monitor)")
 			return
 		}
 		if time.Now().After(deadline) {

@@ -143,6 +143,10 @@ func (ct *CommandTool) Declaration() *tool.Declaration {
 					Description:          "Environment variables as key-value pairs",
 					AdditionalProperties: true,
 				},
+				"is_tui": {
+					Type:        "boolean",
+					Description: "Set to true if the command is a TUI application (e.g., vim, htop, qodercli). TUI apps use a different monitoring strategy that skips output-stability detection.",
+				},
 			},
 			Required: []string{"command"},
 		},
@@ -234,6 +238,7 @@ func (ct *CommandTool) executeAsync(ctx context.Context, args CommandArgs) (any,
 			WorkDir:   args.WorkDir,
 			Status:    SessionRunning,
 			CreatedAt: time.Now(),
+			IsTUI:     args.IsTUI,
 		})
 		if !ct.tmuxMonitor.running {
 			ct.tmuxMonitor.Start()
@@ -247,8 +252,8 @@ func (ct *CommandTool) executeAsync(ctx context.Context, args CommandArgs) (any,
 }
 
 // handleStateChange processes tmux session state changes.
-// It formats the state change event and injects a system message
-// via MessageInjector to trigger agent re-evaluation.
+// It formats the state change event with rich context (StableSince, IsTUI, etc.)
+// and injects a system message via MessageInjector to trigger agent re-evaluation.
 func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
 	log.Printf("[CommandTool] tmux session %s: %s -> %s", sessionID, oldStatus, newStatus)
 
@@ -258,6 +263,20 @@ func (ct *CommandTool) handleStateChange(sessionID, oldStatus, newStatus, output
 
 	// Build system_input message describing the state change
 	content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", sessionID, oldStatus, newStatus)
+
+	// Enrich with session context if available
+	if ct.tmuxMonitor != nil {
+		if session, ok := ct.tmuxMonitor.GetSession(sessionID); ok {
+			if session.IsTUI {
+				content += "\n[note] This is a TUI session (screen-based, no heartbeat)"
+			}
+			if !session.StableSince.IsZero() {
+				stableDuration := time.Since(session.StableSince).Round(time.Second)
+				content += fmt.Sprintf("\n[note] Session has been stable for %v", stableDuration)
+			}
+		}
+	}
+
 	if output != "" {
 		// Truncate long output - keep the tail (last 2000 chars)
 		if len(output) > 2000 {
@@ -299,6 +318,7 @@ type CommandArgs struct {
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	IsTUI   bool              `json:"is_tui,omitempty"` // Hint that this is a TUI application (different monitor strategy)
 }
 
 // CommandExecResult represents the result of a sync command execution.

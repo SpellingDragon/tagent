@@ -64,7 +64,9 @@ type TmuxSession struct {
 	LastOutput    string
 	LastOutputMD5 string
 	StableCount   int
+	StableSince   time.Time // When the session first reached Stable (zero if not currently/never stable)
 	IsInteractive bool
+	IsTUI         bool // TUI apps skip heartbeat (send-keys injection) at fakeDead threshold
 	PID           int
 }
 

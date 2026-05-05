@@ -10,7 +10,7 @@ import (
 
 // TmuxMonitor monitors tmux sessions and detects state changes.
 type TmuxMonitor struct {
-	executor             *TmuxExecutor
+	executor             sessionInspector
 	interval             time.Duration
 	stableThreshold      int
 	interactiveThreshold int
@@ -28,6 +28,19 @@ type TmuxMonitor struct {
 	// It's the caller's responsibility to store events to MemoryStore.
 	StateChangeCallback func(sessionID string, oldStatus, newStatus SessionStatus, output string)
 }
+
+// sessionInspector abstracts tmux operations for testability.
+type sessionInspector interface {
+	ProcessExists(sessionID string) bool
+	IsPaneDead(sessionID string) bool
+	GetSessionOutput(sessionID string) (string, error)
+	SendHeartbeat(sessionID string) string
+	KillSession(sessionID string) error
+	RestartSession(sessionID string, opts TmuxCreateOptions) error
+}
+
+// compile-time check: TmuxExecutor implements sessionInspector.
+var _ sessionInspector = (*TmuxExecutor)(nil)
 
 // MonitorConfig holds configuration for TmuxMonitor
 type MonitorConfig struct {
@@ -67,7 +80,7 @@ func WithMonitorConfig(cfg MonitorConfig) TmuxMonitorOption {
 }
 
 // WithMonitorExecutor sets the tmux executor
-func WithMonitorExecutor(exec *TmuxExecutor) TmuxMonitorOption {
+func WithMonitorExecutor(exec sessionInspector) TmuxMonitorOption {
 	return func(tm *TmuxMonitor) {
 		tm.executor = exec
 	}
@@ -218,6 +231,7 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 			tm.handleFakeAlive(session)
 		case SessionFakeDead:
 			tm.handleFakeDead(session)
+			tm.RemoveSession(session.ID)
 		case SessionCompleted, SessionError:
 			tm.RemoveSession(session.ID)
 		}
@@ -253,34 +267,59 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 
 			// Fake dead detection: exceeded threshold but process still running
 			if session.StableCount > tm.fakeDeadThreshold {
+				// TUI sessions: skip heartbeat to avoid injecting text via send-keys.
+				// The agent has already received the Stable event (with StableSince),
+				// and can make its own timeout/cleanup decision based on the output.
+				if session.IsTUI {
+					session.LastOutput = currentOutput
+					session.LastOutputMD5 = currentMD5
+					session.StableCount = tm.fakeDeadThreshold // cap to avoid unbounded growth
+					return SessionRunning
+				}
+
 				heartbeatResult := tm.executor.SendHeartbeat(session.ID)
 				if heartbeatResult == "ok" {
 					// Process responds to heartbeat, it's fake alive (process is stuck)
 					return SessionFakeAlive
-				} else {
-					// Process doesn't respond to heartbeat, it's fake dead
-					return SessionFakeDead
 				}
+				// Heartbeat got no response.
+				// Re-check pane dead status: the pane may have died during our
+				// stable-count accumulation, in which case this is a normal
+				// completion, not a fake dead.
+				if tm.executor.IsPaneDead(session.ID) {
+					session.LastOutput = currentOutput
+					session.LastOutputMD5 = currentMD5
+					return SessionCompleted
+				}
+				return SessionFakeDead
 			}
 		} else {
 			// Output changed, reset stable count
 			session.StableCount = 0
+			session.StableSince = time.Time{} // new output cycle
 		}
 	}
 
 	// Check for fake dead (process doesn't exist but pane not marked dead)
 	if !processExists && !isPaneDead {
+		session.LastOutput = currentOutput
+		session.LastOutputMD5 = currentMD5
 		return SessionCompleted
 	}
 
 	// Normal state detection
 	if isPaneDead || !processExists {
+		session.LastOutput = currentOutput
+		session.LastOutputMD5 = currentMD5
 		return SessionCompleted
 	}
 
 	// Output stability detection
 	threshold := tm.getThreshold(session.IsInteractive)
 	if session.StableCount >= threshold {
+		if session.StableSince.IsZero() {
+			session.StableSince = time.Now()
+		}
 		return SessionStable
 	}
 
