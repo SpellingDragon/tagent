@@ -1,8 +1,8 @@
-// Package websearch provides a multi-engine HTML web search tool for the knowledge agent.
+// Package knowledge provides tools for the Knowledge Agent (skill search + web search + MCP discovery).
 //
-// This is a simplified, adapted version of trpc-claw's SearchTool.
-// It scrapes search engine result pages and parses HTML to extract
-// structured results — no API key required.
+// websearch.go contains the multi-engine HTML web search implementation,
+// formerly in tool/websearch/. Moved here as it is exclusively used as a
+// Knowledge Agent subtool.
 //
 // Supported engines:
 //   - DuckDuckGo HTML (global, privacy-focused)
@@ -12,7 +12,7 @@
 //
 // Region auto-detection: queries containing CJK characters default to CN engines,
 // otherwise global engines are used.
-package websearch
+package knowledge
 
 import (
 	"context"
@@ -71,8 +71,8 @@ type webSearchTool struct {
 	httpClient *http.Client
 }
 
-// NewTool creates a new web_search tool with built-in engine configurations.
-func NewTool() tool.CallableTool {
+// NewWebSearchTool creates a new web_search tool with built-in engine configurations.
+func NewWebSearchTool() tool.CallableTool {
 	t := &webSearchTool{
 		engines: defaultEngines,
 		httpClient: &http.Client{

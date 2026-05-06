@@ -12,7 +12,6 @@ import (
 
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
-	"github.com/SpellingDragon/tagent/tool/websearch"
 )
 
 // KnowledgeResult represents a single piece of acquired knowledge.
@@ -53,7 +52,7 @@ func BuildSubTools(cfg Config) []tool.Tool {
 	// duckduckgo_search: Instant Answer API for factual/encyclopedic info (fast, structured)
 	tools = append(tools, duckduckgo.NewTool())
 	// web_search: HTML scraping for general web content (current events, tutorials, docs)
-	tools = append(tools, websearch.NewTool())
+	tools = append(tools, NewWebSearchTool())
 
 	if cfg.MemStore != nil {
 		tools = append(tools, NewMemoryQueryTool(cfg.MemStore))

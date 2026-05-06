@@ -1,4 +1,4 @@
-package websearch
+package knowledge
 
 import (
 	"testing"
@@ -9,14 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestNewTool_Declaration verifies the web_search tool's Declaration.
-func TestNewTool_Declaration(t *testing.T) {
-	searchTool := NewTool()
+// TestNewWebSearchTool_Declaration verifies the web_search tool's Declaration.
+func TestNewWebSearchTool_Declaration(t *testing.T) {
+	searchTool := NewWebSearchTool()
 	require.NotNil(t, searchTool)
 
 	// Verify it satisfies tool.CallableTool interface
 	callable, ok := searchTool.(tool.CallableTool)
-	require.True(t, ok, "NewTool should return a tool.CallableTool")
+	require.True(t, ok, "NewWebSearchTool should return a tool.CallableTool")
 
 	decl := callable.Declaration()
 	require.NotNil(t, decl, "Declaration should not be nil")
@@ -28,10 +28,10 @@ func TestNewTool_Declaration(t *testing.T) {
 	assert.Equal(t, "object", decl.InputSchema.Type)
 }
 
-// TestNewTool_InputSchema_QueryParameter verifies the input schema
+// TestNewWebSearchTool_InputSchema_QueryParameter verifies the input schema
 // includes the required "query" parameter.
-func TestNewTool_InputSchema_QueryParameter(t *testing.T) {
-	searchTool := NewTool().(tool.CallableTool)
+func TestNewWebSearchTool_InputSchema_QueryParameter(t *testing.T) {
+	searchTool := NewWebSearchTool().(tool.CallableTool)
 	decl := searchTool.Declaration()
 
 	// Check that InputSchema has "query" property
@@ -46,10 +46,10 @@ func TestNewTool_InputSchema_QueryParameter(t *testing.T) {
 		"query should be a required parameter")
 }
 
-// TestNewTool_InputSchema_NoExtraParams verifies the input schema
+// TestNewWebSearchTool_InputSchema_NoExtraParams verifies the input schema
 // only contains expected parameters (query only).
-func TestNewTool_InputSchema_NoExtraParams(t *testing.T) {
-	searchTool := NewTool().(tool.CallableTool)
+func TestNewWebSearchTool_InputSchema_NoExtraParams(t *testing.T) {
+	searchTool := NewWebSearchTool().(tool.CallableTool)
 	decl := searchTool.Declaration()
 
 	// Only "query" should be in properties
