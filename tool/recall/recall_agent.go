@@ -167,9 +167,10 @@ Your role is to help users retrieve and synthesize relevant information from his
 
 ## Your Tools
 
-1. **memory_query** - Query historical events with natural language
-2. **memory_get** - Get full event details by key
-3. **memory_recent** - Get the most recent events
+1. **memory_query** - Query historical events with time range filtering (since/until, Unix ms timestamps)
+2. **memory_get** - Get full event details by key, optionally include parent event (include_parent=true)
+3. **memory_recent** - Get the most recent events with optional time range filtering
+4. **memory_trace** - Trace the causal chain backward from an event by following ParentKey links
 
 ## Response Format
 
