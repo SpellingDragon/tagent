@@ -55,7 +55,8 @@ tool/
 │   └── recall_subtools.go   # 子工具实现
 └── knowledge/          # knowledge 子包
     ├── knowledge_agent.go   # KnowledgeAgent 组装 (支持 PromptConfig + DescriptionFile)
-    └── knowledge_subtools.go# 子工具实现
+    ├── knowledge_subtools.go# 子工具实现
+    └── websearch.go         # Web 搜索工具 (HTML scraping)
 
 # prompt 包
 prompt/
@@ -78,11 +79,12 @@ prompt/
 | `config.go` (根) | ~245 | Config / ToolConfig / PromptConfig + LoadConfig + DefaultConfig + ApplyDefaults + Validate |
 | `builtin.go` (根) | ~85 | init() 注册 knowledge/recall/command factory + wrapToolAgent |
 | `agent/tool_agent.go` | ~160 | ToolAgentFactory / PlainToolFactory 注册接口 + ToolAgentFactoryConfig |
-| `accessor.go` | 128 | 抽象接口定义（MemoryStoreAccessor, SkillRepository, RecallQuery 等） |
+| `accessor.go` | 33 | 抽象接口定义（MemoryStoreAccessor, SkillRepository） |
 | `recall/recall_agent.go` | ~190 | RecallAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
-| `recall/recall_subtools.go` | ~200 | RecallAgent 子工具：memory_query, memory_get, memory_recent |
+| `recall/recall_subtools.go` | ~340 | RecallAgent 子工具：memory_query, memory_get, memory_recent, memory_trace |
 | `knowledge/knowledge_agent.go` | ~145 | KnowledgeAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
-| `knowledge/knowledge_subtools.go` | ~320 | KnowledgeAgent 子工具：skill_search, skill_load, mcp_discover, duckduckgo_search, memory_query |
+| `knowledge/knowledge_subtools.go` | ~368 | KnowledgeAgent 子工具：skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query |
+| `knowledge/websearch.go` | ~560 | Web 搜索工具实现（HTML scraping 方式获取网页内容） |
 | `command/command_tool.go` | ~300 | CommandTool：exec / tmux_exec 双模式 + 配置化 description |
 | `command/command_executor.go` | ~250 | 命令执行器：安全隔离执行 |
 | `command/tmux_monitor.go` | ~330 | Tmux 监控器：后台状态检测 + callback 触发 |
@@ -525,9 +527,10 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error)
 ```
 
 创建 TagentAgent 实例，通过 `buildRecallSubTools(accessor, cfg.ReadPartitionIDs)` 组装以下子工具：
-- `memory_query`：按查询条件检索事件列表（自动注入 `ReadPartitionIDs`，限定查询分区范围）
-- `memory_get`：根据 event_key 获取完整事件详情（从 key 自身提取 PartitionID，不依赖 ReadPartitionIDs）
-- `memory_recent`：快速获取最近的 N 条事件（自动注入 `ReadPartitionIDs`）
+- `memory_query`：按查询条件检索事件列表，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
+- `memory_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
+- `memory_recent`：快速获取最近的 N 条事件，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
+- `memory_trace`：沿 ParentKey 因果链回溯，从指定事件追溯最多 20 步历史
 
 > **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadPartitionIDs` 注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。`ReadPartitionIDs` 由 `buildAgent()` 从 `MemoryConfig.ReadNamespaces` 解析而来，经 `ToolAgentFactoryConfig` → `recall.Config` → `buildRecallSubTools` 链路传递。详见 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
 
@@ -579,7 +582,8 @@ func New(cfg Config) (*agent.TagentAgent, error) {
 | `skill_search` | `NewSkillSearchTool(repo)` | 搜索本地技能库 |
 | `skill_load` | `NewSkillLoadTool(repo)` | 加载技能完整内容（含执行指令） |
 | `mcp_discover` | `NewMCPDiscoverTool(toolSets)` | 发现 MCP 工具 |
-| `duckduckgo_search` | `duckduckgo.NewTool()` | 搜索事实性知识 |
+| `duckduckgo_search` | `duckduckgo.NewTool()` | 搜索事实性知识（Instant Answer API） |
+| `web_search` | `NewWebSearchTool()` | 搜索通用网页内容（HTML scraping） |
 | `memory_query` | `NewMemoryQueryTool(accessor)` | 查询历史知识记录 |
 
 ### 7.4 Prompt 文件化
@@ -969,8 +973,8 @@ sequenceDiagram
 
 | 工具 | 内部 React | 实现方式 | 理由 |
 |------|-----------|---------|------|
-| **RecallAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 3 种子工具协作（memory_query/get/recent），需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要 |
-| **KnowledgeAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 5 种子工具协作（skill_search/load, mcp_discover, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
+| **RecallAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 4 种子工具协作（memory_query, memory_get, memory_recent, memory_trace），需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要 |
+| **KnowledgeAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 6 种子工具协作（skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
 | **CommandTool** | ❌ 不需要 | CallableTool | 纯执行器，无决策需求；tmux 通知通过 MessageInjector 接口闭环 |
 
 判断标准：需要"思考-行动-观察"循环（多子工具协作、语义理解、结果综合） → TagentAgent + AgentToolWrapper；单一功能/执行器 → 简单 CallableTool。
@@ -1007,9 +1011,7 @@ tool/knowledge → memory   ← knowledge 不依赖 agent
 CommandTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 command 包内，
 `TagentAgent` 天然实现该接口，在 `tagent.New()` 中通过 `SetMessageInjector(ta)` 完成接线。
 
-### 13.3 为什么 TmuxMonitor 用 callback 而不是 channel？
-
-### 13.4 为什么 tool 参数必须包含 event_key？
+### 13.3 为什么 tool 参数必须包含 event_key？
 
 **设计决策**：所有 tool agent 的 Declaration InputSchema 必须声明 `event_key` 参数，由 AgentToolWrapper 在调用时从参数中自动解析。
 
@@ -1033,7 +1035,7 @@ CommandTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 command 包�
 4. Flow 将 `event_key` 合并到 tool 的 JSON 参数中
 5. Tool agent 在 Call 方法中解析 `event_key`，用于查询 MemStore
 
-### 13.3 为什么 TmuxMonitor 用 callback 而不是 channel？
+### 13.4 为什么 TmuxMonitor 用 callback 而不是 channel？
 
 **决策**：callback 让 TagentAgent 完全控制如何触发新迭代（通过 `Runner.Run()`）。
 

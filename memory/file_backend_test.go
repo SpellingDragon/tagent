@@ -411,3 +411,91 @@ func TestNewPartitionID(t *testing.T) {
 		t.Errorf("PartitionID %d out of valid range [0, 2047]", pid1)
 	}
 }
+
+func TestFileBackend_QueryEvents_KeywordFilter(t *testing.T) {
+	tempDir := t.TempDir()
+	backend, err := NewFileBackend(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create FileBackend: %v", err)
+	}
+
+	partitionID := PartitionIDFromName("keyword-test")
+
+	events := map[int64]FullEvent{
+		NewSnowflakeEventKey(partitionID, 1710678000000): {
+			PartitionID:  partitionID,
+			EventType:    EventTypeExternalInput,
+			EventSummary: "部署 nginx 到生产环境",
+			Content:      "用户请求部署 nginx 到生产环境",
+			Timestamp:    1710678000000,
+		},
+		NewSnowflakeEventKey(partitionID, 1710678001000): {
+			PartitionID:  partitionID,
+			EventType:    EventTypeAgentOutput,
+			EventSummary: "数据库迁移完成",
+			Content:      "数据库从 MySQL 5.7 迁移到 8.0 已完成",
+			Timestamp:    1710678001000,
+		},
+		NewSnowflakeEventKey(partitionID, 1710678002000): {
+			PartitionID:  partitionID,
+			EventType:    EventTypeExternalInput,
+			EventSummary: "重新部署 nginx",
+			Content:      "nginx 配置需要修改后重新部署",
+			Timestamp:    1710678002000,
+		},
+	}
+
+	backend.StoreEvents(events)
+
+	// Query with keyword matching "部署" in EventSummary or Content
+	refs, err := backend.QueryEvents(QueryOptions{
+		Keyword: "部署",
+		OrderBy: "timestamp_asc",
+	})
+	if err != nil {
+		t.Fatalf("Failed to query events by keyword: %v", err)
+	}
+
+	if len(refs) != 2 {
+		t.Errorf("Expected 2 events matching '部署', got %d", len(refs))
+	}
+
+	// Query with keyword matching only content
+	refs, err = backend.QueryEvents(QueryOptions{
+		Keyword: "MySQL",
+		OrderBy: "timestamp_asc",
+	})
+	if err != nil {
+		t.Fatalf("Failed to query events by keyword: %v", err)
+	}
+
+	if len(refs) != 1 {
+		t.Errorf("Expected 1 event matching 'MySQL', got %d", len(refs))
+	}
+
+	// Query with keyword that matches nothing
+	refs, err = backend.QueryEvents(QueryOptions{
+		Keyword: "Kubernetes",
+		OrderBy: "timestamp_asc",
+	})
+	if err != nil {
+		t.Fatalf("Failed to query events by keyword: %v", err)
+	}
+
+	if len(refs) != 0 {
+		t.Errorf("Expected 0 events matching 'Kubernetes', got %d", len(refs))
+	}
+
+	// Case-insensitive test
+	refs, err = backend.QueryEvents(QueryOptions{
+		Keyword: "mysql",
+		OrderBy: "timestamp_asc",
+	})
+	if err != nil {
+		t.Fatalf("Failed to query events by keyword: %v", err)
+	}
+
+	if len(refs) != 1 {
+		t.Errorf("Expected 1 event matching 'mysql' (case-insensitive), got %d", len(refs))
+	}
+}

@@ -543,7 +543,7 @@ graph LR
 | 消费者 | 用途 | 数据来源 |
 |--------|------|----------|
 | **LLM** | 理解历史事件的语义（进入 Request.Messages） | `EventReference.EventSummary` |
-| **RecallTool** | 返回给 Agent 进行详细检索（`RecallEventDetail.Summary`） | `FullEvent.EventSummary` |
+| **RecallTool** | 返回给 Agent 进行详细检索 | `FullEvent.EventSummary` |
 
 ### 12.2 Summary 进入 LLM 上下文的完整路径
 

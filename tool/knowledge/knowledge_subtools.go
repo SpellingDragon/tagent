@@ -343,6 +343,7 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, query str
 	opts := memory.QueryOptions{
 		Limit:   10,
 		OrderBy: "timestamp_desc",
+		Keyword: query, // Delegate filtering to MemoryStore (case-insensitive match on EventSummary/Content)
 	}
 
 	events, err := memStore.QueryEvents(opts)
@@ -350,17 +351,14 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, query str
 		return nil
 	}
 
-	queryLower := strings.ToLower(query)
 	var results []KnowledgeResult
 	for _, evt := range events {
-		if strings.Contains(strings.ToLower(evt.EventSummary), queryLower) {
-			results = append(results, KnowledgeResult{
-				Type:    "historical_memory",
-				Title:   evt.EventType,
-				Content: evt.EventSummary,
-				Source:  "memory",
-			})
-		}
+		results = append(results, KnowledgeResult{
+			Type:    "historical_memory",
+			Title:   evt.EventType,
+			Content: evt.EventSummary,
+			Source:  "memory",
+		})
 	}
 
 	return results

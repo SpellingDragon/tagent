@@ -194,6 +194,13 @@ func (s *InMemoryStore) matchesQuery(event FullEvent, query QueryOptions) bool {
 	if query.EndTime > 0 && event.Timestamp > query.EndTime {
 		return false
 	}
+	// Filter by keyword (case-insensitive match against EventSummary or Content)
+	if query.Keyword != "" {
+		if !containsIgnoreCase(event.EventSummary, query.Keyword) &&
+			!containsIgnoreCase(event.Content, query.Keyword) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -229,6 +236,7 @@ func (s *InMemoryStore) GetStats() StoreStats {
 
 // SearchBySummary searches events by matching against EventSummary.
 // Returns events whose summary contains the query string (case-insensitive).
+// Deprecated: Use QueryEvents with QueryOptions.Keyword instead.
 func (s *InMemoryStore) SearchBySummary(query string) []EventReference {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

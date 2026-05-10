@@ -565,17 +565,17 @@ sequenceDiagram
 顶层 LLM 的 context 已包含当前 Session 的 `EventReference[]` 流。当需要的信息**超出当前 context 窗口**或**跨越多个历史 Session** 时，LLM 调用 RecallAgent。RecallAgent 的内部 LLM React 循环负责：
 
 1. **理解查询意图** — 将自然语言转为结构化检索条件
-2. **多工具协作** — `memory_query` 检索 → `memory_get` 按需取详情 → `memory_recent` 补充最新事件
+2. **多工具协作** — `memory_query` 检索 → `memory_get` 按需取详情（含父事件） → `memory_recent` 补充最新事件 → `memory_trace` 因果链回溯
 3. **跨事件综合** — 将零散历史事件综合为连贯的记忆摘要
 
 其子工具 `memory_get` 通过 `EventKey` 从 MemoryStore 拉取完整事件详情：
 
 ```go
-// tool/recall_subtools.go:62-87
+// tool/recall_subtools.go — NewRecallGetTool
 func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
     return function.NewFunctionTool(
         func(ctx context.Context, args recallGetArgs) (recallGetResult, error) {
-            if args.Key == "" {
+            if args.Key == 0 {
                 return recallGetResult{}, fmt.Errorf("event key is required")
             }
 
@@ -584,25 +584,35 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
                 return recallGetResult{}, fmt.Errorf("event not found: %w", err)
             }
 
-            return recallGetResult{
+            result := recallGetResult{
                 Key:       evt.EventKey,
                 ParentKey: evt.ParentKey,
                 Type:      evt.EventType,
                 Summary:   evt.EventSummary,
                 Content:   evt.Content,
                 Time:      formatTimestamp(evt.Timestamp),
-            }, nil
+            }
+
+            // Optionally include parent event summary
+            if args.IncludeParent && evt.ParentKey != 0 {
+                if parent, err := accessor.GetEvent(evt.ParentKey); err == nil && parent != nil {
+                    result.Parent = &parentEventInfo{...}
+                }
+            }
+
+            return result, nil
         },
         function.WithName("memory_get"),
-        function.WithDescription("Get full details of a specific event by its key."),
+        function.WithDescription("Get full details of a specific event by its key. Set include_parent=true to also include the parent event summary."),
     )
 }
 ```
 
 **RecallAgent 子工具**：
-- `memory_query`：按查询条件检索事件列表（自动注入 `ReadPartitionIDs`，限定查询分区范围）
-- `memory_get`：根据 event_key 获取完整事件详情（从 key 自身提取 PartitionID，不依赖 ReadNamespaces）
-- `memory_recent`：快速获取最近的 N 条事件（自动注入 `ReadPartitionIDs`）
+- `memory_query`：按查询条件检索事件列表，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
+- `memory_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
+- `memory_recent`：快速获取最近的 N 条事件，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
+- `memory_trace`：沿 ParentKey 因果链回溯，从指定事件追溯最多 20 步历史
 
 > **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadNamespaces`（转换为 PartitionID 列表）注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。详见 [tool-architecture.md](../tool/tool-architecture.md) §七。
 

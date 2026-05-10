@@ -36,6 +36,11 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 				opts.EventTypes = args.EventTypes
 			}
 
+			// Keyword filter: search EventSummary and Content (case-insensitive)
+			if args.Keyword != "" {
+				opts.Keyword = args.Keyword
+			}
+
 			// Time range filtering
 			if args.Since > 0 {
 				opts.StartTime = args.Since
@@ -69,7 +74,7 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 			}, nil
 		},
 		function.WithName("memory_query"),
-		function.WithDescription("Query historical events from memory storage. Supports time range filtering via since/until (Unix ms timestamps). Returns event list sorted by time (newest first)."),
+		function.WithDescription("Query historical events from memory storage. Supports time range filtering via since/until (Unix ms timestamps), keyword search via keyword (case-insensitive match on EventSummary/Content), and event type filtering. Returns event list sorted by time (newest first)."),
 	)
 }
 
@@ -149,6 +154,11 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 				return recallRecentResult{}, fmt.Errorf("invalid time range: since (%d) > until (%d)", args.Since, args.Until)
 			}
 
+			// Keyword filter
+			if args.Keyword != "" {
+				opts.Keyword = args.Keyword
+			}
+
 			events, err := accessor.QueryEvents(opts)
 			if err != nil {
 				return recallRecentResult{}, fmt.Errorf("failed to get recent events: %w", err)
@@ -170,7 +180,7 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 			}, nil
 		},
 		function.WithName("memory_recent"),
-		function.WithDescription("Get the most recent events from memory. Supports time range filtering via since/until (Unix ms timestamps)."),
+		function.WithDescription("Get the most recent events from memory. Supports time range filtering via since/until (Unix ms timestamps) and keyword search via keyword (case-insensitive match on EventSummary/Content)."),
 	)
 }
 
@@ -186,6 +196,8 @@ type recallQueryArgs struct {
 	Since int64 `json:"since,omitempty"`
 	// Filter end time (Unix ms timestamp, optional)
 	Until int64 `json:"until,omitempty"`
+	// Keyword filter: case-insensitive match on EventSummary and Content (optional)
+	Keyword string `json:"keyword,omitempty"`
 	// Maximum number of results (default: 10)
 	Limit int `json:"limit,omitempty"`
 }
@@ -221,6 +233,8 @@ type recallRecentArgs struct {
 	Since int64 `json:"since,omitempty"`
 	// Filter end time (Unix ms timestamp, optional)
 	Until int64 `json:"until,omitempty"`
+	// Keyword filter: case-insensitive match on EventSummary and Content (optional)
+	Keyword string `json:"keyword,omitempty"`
 }
 
 type recallRecentResult struct {

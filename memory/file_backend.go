@@ -210,6 +210,7 @@ func (b *FileBackend) QueryEvents(query QueryOptions) ([]EventReference, error) 
 				EventType    string `json:"event_type"`
 				EventSummary string `json:"event_summary"`
 				Timestamp    int64  `json:"timestamp"`
+				Content      string `json:"content"`
 			}
 			if err := json.Unmarshal(data, &meta); err != nil {
 				continue
@@ -267,6 +268,7 @@ func (b *FileBackend) matchesQuery(meta struct {
 	EventType    string `json:"event_type"`
 	EventSummary string `json:"event_summary"`
 	Timestamp    int64  `json:"timestamp"`
+	Content      string `json:"content"`
 }, query QueryOptions) bool {
 	if len(query.EventTypes) > 0 {
 		found := false
@@ -285,6 +287,14 @@ func (b *FileBackend) matchesQuery(meta struct {
 	}
 	if query.EndTime > 0 && meta.Timestamp > query.EndTime {
 		return false
+	}
+	// Filter by keyword (case-insensitive match against EventSummary or Content)
+	if query.Keyword != "" {
+		kw := strings.ToLower(query.Keyword)
+		if !strings.Contains(strings.ToLower(meta.EventSummary), kw) &&
+			!strings.Contains(strings.ToLower(meta.Content), kw) {
+			return false
+		}
 	}
 	return true
 }

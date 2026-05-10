@@ -106,6 +106,9 @@ type QueryOptions struct {
 	Limit        int      `json:"limit"`
 	Offset       int      `json:"offset"`
 	OrderBy      string   `json:"order_by"`
+	// Keyword filters events whose EventSummary or Content contains the keyword (case-insensitive).
+	// Empty string = no keyword filter.
+	Keyword string `json:"keyword,omitempty"`
 }
 
 // StoreStats contains storage statistics.
