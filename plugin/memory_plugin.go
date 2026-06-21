@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -19,33 +20,24 @@ import (
 // Core responsibilities:
 //  1. Derive PartitionID from Invocation.AgentName (using FNV-1a hash)
 //  2. Generate Snowflake EventKey (int64, encoding PartitionID)
-//  3. Build FullEvent with ParentKey (per-partition independent causal chain)
+//  3. Build FullEvent (parent relationship set via RelationStore.SetParent)
 //  4. Persist to MemoryStore
 //  5. Write back EventKey/PartitionID to Event.StateDelta
 //
-// Storage isolation: MemoryPlugin maps AgentName → PartitionID (storage concept).
-// Memory itself only sees PartitionID as an integer — it has no agent awareness.
-// The mapping is:
-//
-//	AgentName (framework) → PartitionIDFromName() → PartitionID (storage)
-//	"tagent"       → hash → 42
-//	"knowledge"    → hash → 85
-//	"recall"       → hash → 123
-//
-// Causal chain isolation: each PartitionID maintains an independent causal chain
-// (lastEventKeys map). This prevents sub-agent events from breaking the
-// parent agent's causal chain.
+// Causal chain isolation: each (PartitionID, SessionID) pair maintains an independent
+// causal chain (lastEventKeys map). This prevents sub-agent events and cross-session
+// events from breaking each other's causal chains.
 type MemoryPlugin struct {
 	memStore      memory.MemoryStore
 	mu            sync.Mutex
-	lastEventKeys map[int]int64 // PartitionID → lastEventKey (independent causal chain)
+	lastEventKeys map[string]int64 // "partitionID:sessionID" → lastEventKey
 }
 
 // NewMemoryPlugin creates a new MemoryPlugin.
 func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin {
 	return &MemoryPlugin{
 		memStore:      store,
-		lastEventKeys: make(map[int]int64),
+		lastEventKeys: make(map[string]int64),
 	}
 }
 
@@ -69,29 +61,34 @@ func (p *MemoryPlugin) onEvent(
 		return nil, nil
 	}
 
-	// 1. Derive PartitionID from AgentName (framework concept → storage concept)
+	// 1. Derive PartitionID from AgentName
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)
 
 	// 2. Generate Snowflake EventKey
 	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-	// 3. Infer event type and generate summary using unified tagent/event package
+	// 3. Infer event type and generate summary
 	eventType, eventSummary := p.inferEventInfo(evt)
 
-	// 5. Get parent key from independent causal chain
+	// 4. Get parent key from independent causal chain (partitionID:sessionID)
+	sessionID := ""
+	if inv != nil && inv.Session != nil {
+		sessionID = inv.Session.ID
+	}
+	causalKey := fmt.Sprintf("%d:%s", partitionID, sessionID)
+
 	p.mu.Lock()
-	parentKey := p.lastEventKeys[partitionID]
+	parentKey := p.lastEventKeys[causalKey]
 	p.mu.Unlock()
 
-	// 6. Extract timestamp
+	// 5. Extract timestamp
 	timestamp := extractTimestamp(evt)
 
-	// 7. Build FullEvent
+	// 6. Build FullEvent (no ParentKey field — relationships via RelationStore)
 	fullEvent := memory.FullEvent{
 		EventKey:     eventKey,
 		PartitionID:  partitionID,
-		ParentKey:    parentKey,
 		EventType:    eventType,
 		EventSummary: eventSummary,
 		Timestamp:    timestamp,
@@ -104,17 +101,25 @@ func (p *MemoryPlugin) onEvent(
 		fullEvent.Response = evt.Response
 	}
 
-	// 8. Persist to MemoryStore
+	// 7. Persist to MemoryStore
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
 			log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
 		} else {
+			// Set parent relationship via RelationStoreProvider (content-relation separation)
+			if parentKey != 0 {
+				if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
+					if err := rsp.RelationStore().SetParent(eventKey, parentKey); err != nil {
+						log.Errorf("[Memory] set parent failed key=%d parent=%d: %v", eventKey, parentKey, err)
+					}
+				}
+			}
 			log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
 				eventKey, partitionID, eventType, len(eventSummary))
 		}
 	}
 
-	// 9. Write back EventKey and PartitionID to StateDelta
+	// 8. Write back EventKey and PartitionID to StateDelta
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
@@ -122,9 +127,9 @@ func (p *MemoryPlugin) onEvent(
 	evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
 	evt.StateDelta["event_type"] = []byte(eventType)
 
-	// 10. Update independent causal chain (thread-safe)
+	// 9. Update independent causal chain (thread-safe)
 	p.mu.Lock()
-	p.lastEventKeys[partitionID] = eventKey
+	p.lastEventKeys[causalKey] = eventKey
 	p.mu.Unlock()
 
 	return evt, nil

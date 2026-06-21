@@ -3,7 +3,6 @@ package tagent_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +13,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
 	tagentagent "github.com/SpellingDragon/tagent/agent"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/testutil"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
+	"github.com/stretchr/testify/require"
 )
 
 // mustMarshal marshals args to JSON bytes for CallableTool.Call().
@@ -27,6 +28,36 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 		t.Fatalf("failed to marshal args: %v", err)
 	}
 	return data
+}
+
+// runWithLoop starts a persistent event loop, injects a message, collects events,
+// and stops the loop. This is the only way to run a top-level TagentAgent.
+func runWithLoop(ctx context.Context, t *testing.T, ag *tagentagent.TagentAgent, userID, sessionID string, msg model.Message) []*event.Event {
+	t.Helper()
+	outputCh, err := ag.StartLoop(userID, sessionID)
+	require.NoError(t, err)
+
+	ag.InjectMessage(msg)
+
+	var events []*event.Event
+loop:
+	for {
+		select {
+		case evt, ok := <-outputCh:
+			if !ok {
+				break loop
+			}
+			events = append(events, evt)
+			if evt.IsFinalResponse() {
+				break loop
+			}
+		case <-ctx.Done():
+			break loop
+		}
+	}
+
+	ag.StopLoop()
+	return events
 }
 
 // TestIntegration_SmartCompress_WithRealLLM 测试两阶段上下文压缩
@@ -69,15 +100,7 @@ func TestIntegration_SmartCompress_WithRealLLM(t *testing.T) {
 		Content: "继续",
 	}
 
-	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-
-	var events []*event.Event
-	for evt := range eventChan {
-		events = append(events, evt)
-	}
+	events := runWithLoop(ctx, t, ag, "test-user", "test-session", msg)
 
 	t.Logf("End-to-end with compression: %d events", len(events))
 
@@ -131,17 +154,7 @@ func TestRegression_AgentLoop_MultipleIterations(t *testing.T) {
 		Content: "请使用 echo 工具回复'Hello'。",
 	}
 
-	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
-	if err != nil {
-		t.Fatalf("Run failed: %v", err)
-	}
-
-	// 收集事件
-	var events []*event.Event
-	for evt := range eventChan {
-		events = append(events, evt)
-		t.Logf("Event: %+v", evt)
-	}
+	events := runWithLoop(ctx, t, ag, "test-user", "test-session", msg)
 
 	// 验证多轮迭代（tool call + final response）
 	if len(events) < 2 {
@@ -203,17 +216,32 @@ func TestRegression_CompressionCycle(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
+
+	// Persistent event loop: same session across all rounds
+	outputCh, err := ag.StartLoop("test-user", "test-session")
+	require.NoError(t, err)
+
 	for round := 0; round < 3; round++ {
 		t.Logf("Compression round %d", round+1)
 		msg := model.Message{Role: model.RoleUser, Content: "继续"}
-		eventChan, err := ag.RunSimple(ctx, "test-user", fmt.Sprintf("test-session-%d", round), msg)
-		if err != nil {
-			t.Fatalf("Run round %d failed: %v", round+1, err)
-		}
+		ag.InjectMessage(msg)
+
 		var eventCount int
-		for evt := range eventChan {
-			eventCount++
-			t.Logf("  Round %d event: tag=%s", round+1, evt.Tag)
+	loop:
+		for {
+			select {
+			case evt, ok := <-outputCh:
+				if !ok {
+					break loop
+				}
+				eventCount++
+				t.Logf("  Round %d event: tag=%s", round+1, evt.Tag)
+				if evt.IsFinalResponse() {
+					break loop
+				}
+			case <-ctx.Done():
+				break loop
+			}
 		}
 		t.Logf("  Events in round %d: %d", round+1, eventCount)
 		if eventCount == 0 {
@@ -221,6 +249,8 @@ func TestRegression_CompressionCycle(t *testing.T) {
 			break
 		}
 	}
+
+	ag.StopLoop()
 }
 
 // echoToolStruct 简单的回显工具（用于测试）
@@ -267,8 +297,7 @@ func (t *echoToolStruct) Call(ctx context.Context, jsonArgs []byte) (any, error)
 // createRecallTestStore creates a MemoryStore pre-populated with test events for RecallAgent tests.
 func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 	t.Helper()
-	tempDir := t.TempDir()
-	store, err := tagentmemory.NewFileBackend(tempDir)
+	store, err := tagentmemory.NewFileSegmentStore(tagentmemory.NewMockRustVikingClient(), nil, ":memory:", 100)
 	if err != nil {
 		t.Fatalf("Failed to create memory store: %v", err)
 	}
@@ -279,7 +308,7 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		{
 			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
 			PartitionID:  partitionID,
-			EventType:    tagentmemory.EventTypeActionCommand,
+			EventType:    tagentevent.TypeActionCommand,
 			EventSummary: "用户要求整理文件",
 			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
 			Content:      "整理 /tmp 目录下的文件",
@@ -287,7 +316,7 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		{
 			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
 			PartitionID:  partitionID,
-			EventType:    tagentmemory.EventTypeAgentOutput,
+			EventType:    tagentevent.TypeAgentOutput,
 			EventSummary: "文件整理完成",
 			Timestamp:    time.Now().Add(-2*time.Hour + 5*time.Minute).UnixMilli(),
 			Content:      "成功整理 /tmp 目录下的 15 个文件，释放 200MB 空间",
@@ -295,7 +324,7 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		{
 			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
 			PartitionID:  partitionID,
-			EventType:    tagentmemory.EventTypeActionCommand,
+			EventType:    tagentevent.TypeActionCommand,
 			EventSummary: "执行部署命令",
 			Timestamp:    time.Now().Add(-1 * time.Hour).UnixMilli(),
 			Content:      "deploy.sh --env production",
@@ -303,7 +332,7 @@ func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 		{
 			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
 			PartitionID:  partitionID,
-			EventType:    tagentmemory.EventTypeAgentOutput,
+			EventType:    tagentevent.TypeAgentOutput,
 			EventSummary: "部署成功",
 			Timestamp:    time.Now().Add(-1*time.Hour + 2*time.Minute).UnixMilli(),
 			Content:      "部署成功: 3 个服务已更新，耗时 2m30s",
@@ -429,16 +458,7 @@ func TestIntegration_EndToEnd_FullWorkflow(t *testing.T) {
 		Content: "请使用 echo 工具回复 '端到端测试成功'",
 	}
 
-	eventChan, err := ag.RunSimple(ctx, "test-user", "test-session", msg)
-	if err != nil {
-		t.Fatalf("TagentAgent.Run failed: %v", err)
-	}
-
-	// 4. Collect events
-	var events []*event.Event
-	for evt := range eventChan {
-		events = append(events, evt)
-	}
+	events := runWithLoop(ctx, t, ag, "test-user", "test-session", msg)
 
 	t.Logf("End-to-end: received %d events", len(events))
 

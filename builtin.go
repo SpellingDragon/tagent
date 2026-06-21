@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/tool/command"
+	"github.com/SpellingDragon/tagent/tool/action"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/SpellingDragon/tagent/tool/recall"
 
@@ -15,7 +15,7 @@ import (
 func init() {
 	agent.RegisterToolAgent("knowledge", knowledgeFactory)
 	agent.RegisterToolAgent("recall", recallFactory)
-	agent.RegisterPlainTool("command", commandFactory)
+	agent.RegisterPlainTool("action", actionFactory)
 }
 
 // knowledgeFactory creates a KnowledgeAgent via knowledge.NewAgent.
@@ -74,32 +74,32 @@ func recallFactory(cfg agent.ToolAgentFactoryConfig) (*agent.TagentAgent, error)
 	return ta, nil
 }
 
-// commandFactory creates a CommandTool via command.NewCommandTool.
-// It deserializes the tool-specific Properties into CommandProperties.
-func commandFactory(cfg agent.PlainToolFactoryConfig) (tagenttool.CallableTool, error) {
-	opts := []command.CommandToolOption{}
+// actionFactory creates an ActionTool (registered as "action") via action.NewActionTool.
+// It deserializes the tool-specific Properties into ActionProperties.
+func actionFactory(cfg agent.PlainToolFactoryConfig) (tagenttool.CallableTool, error) {
+	opts := []action.ActionToolOption{}
 
 	if cfg.Description != "" {
-		opts = append(opts, command.WithDescription(cfg.Description))
+		opts = append(opts, action.WithDescription(cfg.Description))
 	}
 
 	// Deserialize tool-specific properties
-	var props command.CommandProperties
+	var props action.ActionProperties
 	if err := decodeProperties(cfg.Properties, &props); err != nil {
-		return nil, fmt.Errorf("command factory: invalid properties: %w", err)
+		return nil, fmt.Errorf("action factory: invalid properties: %w", err)
 	}
 
 	if props.Workspace != "" {
-		opts = append(opts, command.WithCommandWorkspace(props.Workspace))
+		opts = append(opts, action.WithActionWorkspace(props.Workspace))
 	}
 	if props.RunAsUser != "" {
-		opts = append(opts, command.WithCommandRunAsUser(props.RunAsUser))
+		opts = append(opts, action.WithActionRunAsUser(props.RunAsUser))
 	}
 	if props.RunAsGroup != "" {
-		opts = append(opts, command.WithCommandRunAsGroup(props.RunAsGroup))
+		opts = append(opts, action.WithActionRunAsGroup(props.RunAsGroup))
 	}
 
-	return command.NewCommandTool(opts...), nil
+	return action.NewActionTool(opts...), nil
 }
 
 // decodeProperties deserializes a map[string]any into a typed struct

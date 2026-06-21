@@ -8,6 +8,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 )
 
@@ -16,8 +17,7 @@ import (
 // newTestMemoryStore creates a MemoryStore pre-populated with test events.
 func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.MemoryStore {
 	t.Helper()
-	tempDir := t.TempDir()
-	store, err := memory.NewFileBackend(tempDir)
+	store, err := memory.NewFileSegmentStore(memory.NewMockRustVikingClient(), nil, ":memory:", 100)
 	if err != nil {
 		t.Fatalf("Failed to create memory store: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 		key1: {
 			EventKey:     key1,
 			PartitionID:  partitionID,
-			EventType:    memory.EventTypeActionCommand,
+			EventType:    tagentevent.TypeActionCommand,
 			EventSummary: "用户要求整理文件",
 			Timestamp:    time.Now().UnixMilli(),
 			Content:      "整理 /tmp 目录下的文件",
@@ -50,7 +50,7 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 		key2: {
 			EventKey:     key2,
 			PartitionID:  partitionID,
-			EventType:    memory.EventTypeAgentOutput,
+			EventType:    tagentevent.TypeAgentOutput,
 			EventSummary: "文件整理完成",
 			Timestamp:    time.Now().Add(1 * time.Minute).UnixMilli(),
 			Content:      "成功整理 15 个文件",
@@ -58,7 +58,7 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 	})
 
 	// 直接测试 MemoryStore.QueryEvents（子工具底层调用）
-	events, err := store.QueryEvents(memory.QueryOptions{Limit: 10, OrderBy: "timestamp_desc"})
+	events, err := store.QueryEvents(memory.QueryOptions{Limit: 10, OrderBy: "timestamp_desc", PartitionIDs: []int{partitionID}})
 	if err != nil {
 		t.Fatalf("QueryEvents failed: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestRecallGetTool_GetEvent(t *testing.T) {
 		key1: {
 			EventKey:     key1,
 			PartitionID:  partitionID,
-			EventType:    memory.EventTypeActionCommand,
+			EventType:    tagentevent.TypeActionCommand,
 			EventSummary: "执行部署命令",
 			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
 			Content:      "deploy.sh --env production",

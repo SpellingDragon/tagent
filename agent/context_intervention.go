@@ -38,8 +38,9 @@ func NewContextIntervention(
 }
 
 // BeforeModel is the BeforeModel callback.
-// Phase 1: Token budget check & compression.
-// Phase 2: Consolidated audit log (one line per LLM call).
+// 1. Inject event_key prefixes (activates event_key visibility chain).
+// 2. Token budget check & SmartCompress.
+// 3. Consolidated audit log (one line per LLM call).
 func (ci *ContextIntervention) BeforeModel(
 	ctx context.Context,
 	args *model.BeforeModelArgs,
@@ -49,6 +50,15 @@ func (ci *ContextIntervention) BeforeModel(
 	}
 
 	inv, _ := agent.InvocationFromContext(ctx)
+
+	// Inject event_key prefixes so LLM can see and select keys for sub-agents.
+	// Must happen before compression so collectCompressedKeys can extract keys.
+	injectEventKeyPrefixes(args, inv)
+
+	// KeepRecentTasks stateless: restore original value after this call
+	// to prevent cross-request state leakage.
+	originalKeepRecent := ci.compressor.KeepRecentTasks
+	defer func() { ci.compressor.KeepRecentTasks = originalKeepRecent }()
 
 	usedTokens := ci.tokenCounter.Estimate(args.Request.Messages)
 	threshold := int(float64(ci.maxTokens) * ci.thresholdPct)
@@ -133,7 +143,8 @@ func (ci *ContextIntervention) logAccess(
 }
 
 // ensureUserPrompt checks that the compressed messages contain at least one user prompt.
-// If not, it appends a "继续" user message so the LLM knows to continue.
+// If not, it appends a guidance message so the LLM knows the context was compressed
+// and can ask for new tasks.
 // This is critical: the LLM must never see only agent_output messages without a user prompt.
 func ensureUserPrompt(messages []model.Message) []model.Message {
 	hasUser := false
@@ -146,8 +157,59 @@ func ensureUserPrompt(messages []model.Message) []model.Message {
 	if !hasUser {
 		messages = append(messages, model.Message{
 			Role:    model.RoleUser,
-			Content: "继续",
+			Content: "（以上是对话历史摘要。如果有新任务，请告诉我。）",
 		})
 	}
 	return messages
+}
+
+// injectEventKeyPrefixes adds [evt_<KEY>|<type>] prefix to user/assistant messages
+// by positionally matching them to Session.Events. This is the activation point for
+// the entire event_key visibility chain: LLM sees keys → can pass to sub-agents via
+// event_keys parameter → collectCompressedKeys can extract keys from compressed segments.
+//
+// Positional matching: skip system messages (not event sources) and tool messages
+// (belong to previous assistant event). Match remaining user/assistant messages to
+// events by index. Safe degradation when inv/Session is nil or events are exhausted.
+func injectEventKeyPrefixes(args *model.BeforeModelArgs, inv *agent.Invocation) {
+	if inv == nil || inv.Session == nil {
+		return
+	}
+
+	inv.Session.EventMu.RLock()
+	events := inv.Session.Events
+	inv.Session.EventMu.RUnlock()
+
+	if len(events) == 0 {
+		return
+	}
+
+	eventIdx := 0
+	for i := range args.Request.Messages {
+		msg := &args.Request.Messages[i]
+
+		// Skip system (not event source) and tool messages (belong to previous assistant event)
+		if msg.Role == model.RoleSystem || msg.Role == model.RoleTool {
+			continue
+		}
+
+		if eventIdx >= len(events) {
+			break
+		}
+
+		evt := &events[eventIdx]
+		eventIdx++
+
+		keyBytes, ok := evt.StateDelta["event_key"]
+		if !ok || len(keyBytes) == 0 {
+			continue
+		}
+
+		eventType := "unknown"
+		if typeBytes, ok := evt.StateDelta["event_type"]; ok && len(typeBytes) > 0 {
+			eventType = string(typeBytes)
+		}
+
+		msg.Content = fmt.Sprintf("[evt_%s|%s] %s", string(keyBytes), eventType, msg.Content)
+	}
 }

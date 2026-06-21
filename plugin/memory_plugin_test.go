@@ -114,9 +114,16 @@ func TestMemoryPlugin_OnEvent_ParentChain(t *testing.T) {
 
 	allEvents := store.AllEvents()
 	require.Len(t, allEvents, 3)
-	assert.Zero(t, allEvents[0].ParentKey, "first event should have zero ParentKey")
-	assert.Equal(t, allEvents[0].EventKey, allEvents[1].ParentKey)
-	assert.Equal(t, allEvents[1].EventKey, allEvents[2].ParentKey)
+
+	// Use GetParent instead of direct field access (content-relation separation)
+	parent0, _ := store.GetParent(allEvents[0].EventKey)
+	assert.Zero(t, parent0, "first event should have zero ParentKey")
+
+	parent1, _ := store.GetParent(allEvents[1].EventKey)
+	assert.Equal(t, allEvents[0].EventKey, parent1)
+
+	parent2, _ := store.GetParent(allEvents[2].EventKey)
+	assert.Equal(t, allEvents[1].EventKey, parent2)
 }
 
 func TestMemoryPlugin_OnEvent_NilEvent(t *testing.T) {
@@ -126,4 +133,33 @@ func TestMemoryPlugin_OnEvent_NilEvent(t *testing.T) {
 	result, err := p.onEvent(context.Background(), &agent.Invocation{}, nil)
 	require.NoError(t, err)
 	assert.Nil(t, result, "nil event should return nil")
+}
+
+// minimalStore wraps InMemoryStore but does NOT implement RelationStoreProvider.
+// Used to test graceful fallback in onEvent when store lacks relation support.
+type minimalStore struct {
+	memory.MemoryStore
+}
+
+func TestMemoryPlugin_OnEvent_NoRelationStoreProvider(t *testing.T) {
+	inner := memory.NewInMemoryStore()
+	store := &minimalStore{MemoryStore: inner}
+	p := NewMemoryPlugin(store)
+
+	evt := &event.Event{
+		InvocationID: "inv-1",
+		Response: &model.Response{
+			Choices: []model.Choice{
+				{Message: model.Message{Role: model.RoleUser, Content: "test"}},
+			},
+		},
+	}
+
+	// Should succeed even though store doesn't implement RelationStoreProvider
+	result, err := p.onEvent(context.Background(), &agent.Invocation{}, evt)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	stats := inner.GetStats()
+	assert.Equal(t, 1, stats.TotalEvents, "event should still be stored")
 }

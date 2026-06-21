@@ -21,6 +21,7 @@ import (
 type SmartCompressor struct {
 	summaryModel    model.Model // Optional: used for Stage 2 LLM summary
 	KeepRecentTasks int         // Number of recent complete tasks to keep (default: 2)
+	maxTokens       int         // Token budget for calculating batch size (default: DefaultMaxTokens)
 }
 
 // NewSmartCompressor creates a new SmartCompressor.
@@ -51,6 +52,13 @@ func WithKeepRecentTasks(n int) SmartCompressorOption {
 	}
 }
 
+// WithMaxTokens sets the token budget used for batch size calculation.
+func WithMaxTokens(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) {
+		sc.maxTokens = n
+	}
+}
+
 // Compress compresses the message list by dropping old task segments.
 // inv provides Session.Events access for extracting event_keys of compressed segments.
 func (sc *SmartCompressor) Compress(
@@ -64,8 +72,20 @@ func (sc *SmartCompressor) Compress(
 	// 2. Split by task boundary
 	segments := splitByTaskBoundary(rest)
 
+	// Log segment details for diagnostics
+	completeCount := 0
+	for _, seg := range segments {
+		if seg.IsComplete {
+			completeCount++
+		}
+	}
+	log.Debugf("[SmartCompress] split: segments=%d (complete=%d incomplete=%d) keepRecent=%d msgs=%d",
+		len(segments), completeCount, len(segments)-completeCount, sc.KeepRecentTasks, len(messages))
+
 	// 3. If within limit, no compression needed
 	if len(segments) <= sc.KeepRecentTasks {
+		log.Debugf("[SmartCompress] skip: segments=%d <= keepRecentTasks=%d — not enough task boundaries to compress",
+			len(segments), sc.KeepRecentTasks)
 		return messages
 	}
 
@@ -73,11 +93,18 @@ func (sc *SmartCompressor) Compress(
 	oldSegments := segments[:len(segments)-sc.KeepRecentTasks]
 	recentSegments := segments[len(segments)-sc.KeepRecentTasks:]
 
-	// 5. Stage 2: Generate LLM summary of old segments (if model available)
-	var summary string
+	// 5. Stage 2: Generate batched LLM summaries of old segments (if model available)
+	var summaryMsgs []model.Message
 	var summaryHadError bool
+	batchCount := 0
 	if sc.summaryModel != nil {
-		summary, summaryHadError = sc.generateSummary(ctx, oldSegments)
+		batches := sc.batchSegmentsByTokenBudget(oldSegments, sc.maxTokens)
+		batchCount = len(batches)
+		log.Debugf("[SmartCompress] stage2: old_segments=%d batches=%d maxInputTokens=%d",
+			len(oldSegments), batchCount, sc.maxTokens/2)
+		summaryMsgs, summaryHadError = sc.summarizeBatches(ctx, batches)
+	} else {
+		log.Debugf("[SmartCompress] stage2: skipped (no summaryModel configured)")
 	}
 
 	// 6. Collect compressed event_keys from message prefix
@@ -90,25 +117,82 @@ func (sc *SmartCompressor) Compress(
 	}
 
 	// Build context_compress event as a system message
-	compressEvent := sc.buildCompressEvent(summary, len(oldSegments), compressedKeys, summaryHadError)
+	compressEvent := sc.buildCompressEvent(len(oldSegments), compressedKeys, batchCount, len(summaryMsgs), summaryHadError)
 	result = append(result, compressEvent)
+
+	// Append batch summary messages (each is a System message with batch number)
+	result = append(result, summaryMsgs...)
 
 	for _, seg := range recentSegments {
 		result = append(result, seg.Messages...)
 	}
 
-	log.Infof("[SmartCompress] old_segments=%d recent_segments=%d compressed_keys=%d summary_len=%d",
-		len(oldSegments), len(recentSegments), len(compressedKeys), len(summary))
+	// Check for pending user message in recent segments.
+	// If found, append it to the end so the LLM addresses it.
+	// If not found, append a guidance message so the LLM knows context was compressed.
+	if pendingUser := findPendingUserMessage(recentSegments); pendingUser != nil {
+		result = append(result, *pendingUser)
+	} else {
+		result = append(result, model.Message{
+			Role:    model.RoleUser,
+			Content: "（以上是对话历史摘要。如果有新任务，请告诉我。）",
+		})
+	}
+
+	// Token reduction summary for diagnostics
+	beforeTokens := NewDefaultTokenCounter().Estimate(messages)
+	afterTokens := NewDefaultTokenCounter().Estimate(result)
+	log.Infof("[SmartCompress] old_segments=%d recent_segments=%d compressed_keys=%d batches=%d summary_msgs=%d tokens=%d->%d (-%d)",
+		len(oldSegments), len(recentSegments), len(compressedKeys), batchCount, len(summaryMsgs),
+		beforeTokens, afterTokens, beforeTokens-afterTokens)
 
 	return result
 }
 
+// findPendingUserMessage searches for a pending user message in the recent segments.
+// It finds the last IsComplete=true segment, then looks for the first user message
+// in any segment after it. Returns nil if no pending user message is found.
+// This ensures that a user message that hasn't been responded to yet is preserved
+// and surfaced after compression.
+func findPendingUserMessage(segments []*TaskSegment) *model.Message {
+	if len(segments) == 0 {
+		return nil
+	}
+
+	// Find the last complete segment (closed by agent_output)
+	lastCompleteIdx := -1
+	for i := len(segments) - 1; i >= 0; i-- {
+		if segments[i].IsComplete {
+			lastCompleteIdx = i
+			break
+		}
+	}
+
+	// If no complete segment exists, there is no task boundary to search after
+	if lastCompleteIdx == -1 {
+		return nil
+	}
+
+	// Look for the first user message in segments after the last complete one
+	for i := lastCompleteIdx + 1; i < len(segments); i++ {
+		for j := range segments[i].Messages {
+			if segments[i].Messages[j].Role == model.RoleUser {
+				return &segments[i].Messages[j]
+			}
+		}
+	}
+
+	return nil
+}
+
 // buildCompressEvent creates a context_compress event message.
-// Format: [evt_xxx|context_compress] compressed N segments (keys: [k1, k2, ...]) summary
+// When batch summaries are generated, they are appended as separate System messages
+// after the compress event. This message contains metadata only.
 func (sc *SmartCompressor) buildCompressEvent(
-	summary string,
 	segmentCount int,
 	keys []int64,
+	batchCount int,
+	successCount int,
 	summaryHadError bool,
 ) model.Message {
 	var content strings.Builder
@@ -128,12 +212,15 @@ func (sc *SmartCompressor) buildCompressEvent(
 		content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段", segmentCount))
 	}
 
-	if summary != "" {
-		content.WriteString("\n\n对话历史摘要: ")
-		content.WriteString(summary)
-	} else if summaryHadError {
-		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted. Full context available via recall agent.]", segmentCount))
-	} else {
+	switch {
+	case batchCount > 0 && successCount > 0:
+		content.WriteString(fmt.Sprintf("\n\n已生成 %d/%d 批摘要（见下方摘要消息）。", successCount, batchCount))
+		if successCount < batchCount {
+			content.WriteString("部分批次摘要生成失败。")
+		}
+	case batchCount > 0 && summaryHadError:
+		content.WriteString("\n\n摘要生成失败。完整上下文可通过 recall agent 获取。")
+	default:
 		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted.]", segmentCount))
 	}
 
@@ -161,10 +248,8 @@ func parseEventKeyFromPrefix(content string) int64 {
 }
 
 // collectCompressedKeys extracts event_keys from compressed message segments.
-// Parses the "[evt_<KEY>|<type>]" prefix added by Phase 1 event view transformation.
-// Unlike the previous implementation, this does NOT access Session.Events,
-// avoiding the prefix-mismatch bug where prefixed content fingerprints
-// never matched non-prefixed Session.Events.
+// Parses the "[evt_<KEY>|<type>]" prefix added by injectEventKeyPrefixes in BeforeModel.
+// This does NOT access Session.Events — it reads keys directly from message content.
 func (sc *SmartCompressor) collectCompressedKeys(
 	oldSegments []*TaskSegment,
 ) []int64 {
@@ -299,6 +384,81 @@ func (sc *SmartCompressor) generateSummary(
 		if len(resp.Choices) > 0 {
 			result += resp.Choices[0].Message.Content
 		}
+	}
+
+	return result, false
+}
+
+// batchSegmentsByTokenBudget divides segments into batches where each batch's
+// estimated token count stays within maxTokens/2 (leaving room for summary output).
+// Segments that individually exceed the budget form their own batch.
+func (sc *SmartCompressor) batchSegmentsByTokenBudget(
+	segments []*TaskSegment, maxTokens int,
+) [][]*TaskSegment {
+	if len(segments) == 0 {
+		return nil
+	}
+
+	// Use half the token budget for input; reserve half for summary output
+	maxInputTokens := maxTokens / 2
+	if maxInputTokens < 100 {
+		maxInputTokens = 100
+	}
+
+	counter := NewDefaultTokenCounter()
+	var batches [][]*TaskSegment
+	var currentBatch []*TaskSegment
+	currentTokens := 0
+
+	for _, seg := range segments {
+		segTokens := counter.Estimate(seg.Messages)
+
+		// Start a new batch if adding this segment would exceed the budget
+		// and the current batch is non-empty
+		if currentTokens+segTokens > maxInputTokens && len(currentBatch) > 0 {
+			batches = append(batches, currentBatch)
+			currentBatch = nil
+			currentTokens = 0
+		}
+
+		currentBatch = append(currentBatch, seg)
+		currentTokens += segTokens
+	}
+
+	if len(currentBatch) > 0 {
+		batches = append(batches, currentBatch)
+	}
+
+	return batches
+}
+
+// summarizeBatches generates LLM summaries for each batch of segments.
+// Each successful summary is wrapped as a System message with batch numbering.
+// Failed batches are skipped (log warning). Returns (nil, true) if all batches fail.
+func (sc *SmartCompressor) summarizeBatches(
+	ctx context.Context, batches [][]*TaskSegment,
+) ([]model.Message, bool) {
+	if sc.summaryModel == nil || len(batches) == 0 {
+		return nil, false
+	}
+
+	var result []model.Message
+	successCount := 0
+
+	for i, batch := range batches {
+		summary, hadError := sc.generateSummary(ctx, batch)
+		if hadError || summary == "" {
+			log.Warnf("[SmartCompress] batch %d/%d summary failed, skipping", i+1, len(batches))
+			continue
+		}
+		successCount++
+		content := fmt.Sprintf("[摘要批次 %d/%d]\n%s", i+1, len(batches), summary)
+		result = append(result, model.NewSystemMessage(content))
+	}
+
+	if successCount == 0 {
+		log.Warnf("[SmartCompress] all %d batch summaries failed", len(batches))
+		return nil, true
 	}
 
 	return result, false

@@ -1,0 +1,117 @@
+# ============================================================================
+# tagent WeChat Bot RL 模式配置文件
+# ============================================================================
+#
+# 此配置用于与 AReaL 联合训练场景。与 tagent.yaml 的区别：
+#   - api_endpoint 指向 AReaL 的 OpenAI 兼容 proxy（捕获 logprobs + completion_ids）
+#   - api_key_env 使用 AREAL_API_KEY（AReaL proxy 的认证 key）
+#   - request_timeout_seconds 更长（RL rollout 需要更多时间）
+#
+# 启动方式:
+#   TAGENT_CONFIG=tagent.rl.yaml AREAL_API_KEY=your-key ./run.sh
+#
+# ============================================================================
+
+# ===== 运行时配置 =====
+
+# LLM 模型 — 需与 AReaL 训练的模型一致
+model: glm-5
+
+# LLM API 基础地址 — 初始值仅为占位符。
+# AReaL adapter 会通过 POST /task llm_base_url 字段动态传入实际 proxy URL
+# （AReaL proxy 端口是动态分配的，见 proxy_rollout_server.py find_free_ports）。
+# tagent 的 SwappableModel 会在收到 llm_base_url 后自动切换 LLM 端点。
+api_endpoint: "http://localhost:8000/v1"
+
+# API Key 环境变量名 — AReaL proxy 的认证 key
+api_key_env: "ZAI_API_KEY"
+
+# 日志级别
+log_level: "info"
+
+# 请求超时（秒）— RL rollout 可能需要更长时间
+request_timeout_seconds: 7200
+
+# 轨迹记录 — RL 模式也启用，记录所有经过 AReaL proxy 的 LLM 调用
+trajectory_dump: true
+trajectory_dir: "data/trajectories"
+
+# ===== Agent 配置 =====
+
+entry: tagent
+prompt_dir: resources/prompts
+
+agents:
+  # ========================================================================
+  # 顶层 Agent
+  # ========================================================================
+  tagent:
+    system_prompt:
+      files:
+        - AGENTS.md
+        - SOUL.md
+        - USER.md
+        - TOOLS.md
+    memory:
+      type: localfile
+      path: .wechat-config/data
+    max_tool_iterations: 200
+    max_tokens: 8000
+    temperature: 0.7
+    compress_threshold: 0.8
+    tools:
+      - agent: knowledge
+        description_file: knowledge_tool_desc.md
+        event_params: [event_keys]
+        max_tool_iterations: 5
+        max_tokens: 4096
+        temperature: 0.3
+
+      - agent: recall
+        description_file: recall_tool_desc.md
+        event_params: [event_keys]
+        max_tool_iterations: 5
+        max_tokens: 4096
+
+      - kind: tool
+        id: action
+        description_file: action_tool_desc.md
+
+  # ========================================================================
+  # Knowledge Agent
+  # ========================================================================
+  knowledge:
+    system_prompt:
+      files:
+        - knowledge_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 4096
+    temperature: 0.3
+
+  # ========================================================================
+  # Recall Agent
+  # ========================================================================
+  recall:
+    system_prompt:
+      files:
+        - recall_agent.md
+    memory:
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces:
+        - tagent
+    max_tool_iterations: 5
+    max_tokens: 4096
+
+# ===== 应用专属配置 =====
+app:
+  wechat:
+    config_dir: ".wechat-config"
+    token_file: "token.json"
+    context_token_dir: ".wechat-context-tokens"
+  wechat:
+    config_dir: ".wechat-config"
+    token_file: "token.json"
+    context_token_dir: ".wechat-context-tokens"

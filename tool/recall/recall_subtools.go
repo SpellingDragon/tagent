@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
@@ -93,17 +94,27 @@ func NewRecallGetTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 			}
 
 			result := recallGetResult{
-				Key:       evt.EventKey,
-				ParentKey: evt.ParentKey,
-				Type:      evt.EventType,
-				Summary:   evt.EventSummary,
-				Content:   evt.Content,
-				Time:      formatTimestamp(evt.Timestamp),
+				Key:     evt.EventKey,
+				Type:    evt.EventType,
+				Summary: evt.EventSummary,
+				Content: evt.Content,
+				Time:    formatTimestamp(evt.Timestamp),
 			}
 
+			// Get parent key from RelationStore (content-relation separation)
+			var parentKey int64
+			if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
+				pk, err := rsp.RelationStore().GetParent(args.Key)
+				if err != nil {
+					log.Errorf("[Recall] GetParent failed key=%d: %v", args.Key, err)
+				}
+				parentKey = pk
+			}
+			result.ParentKey = parentKey
+
 			// Optionally include parent event summary
-			if args.IncludeParent && evt.ParentKey != 0 {
-				if parent, err := accessor.GetEvent(evt.ParentKey); err == nil && parent != nil {
+			if args.IncludeParent && parentKey != 0 {
+				if parent, err := accessor.GetEvent(parentKey); err == nil && parent != nil {
 					result.Parent = &parentEventInfo{
 						EventKey:  parent.EventKey,
 						EventType: parent.EventType,
@@ -320,14 +331,24 @@ func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 					// Chain breaks at missing link
 					break
 				}
+
+				// Get parent from RelationStore (content-relation separation)
+				var parentKey int64
+				if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
+					pk, err := rsp.RelationStore().GetParent(evt.EventKey)
+					if err != nil {
+						log.Errorf("[Recall] GetParent failed key=%d: %v", evt.EventKey, err)
+					}
+					parentKey = pk
+				}
 				chain = append(chain, recallTraceItem{
 					Key:       evt.EventKey,
-					ParentKey: evt.ParentKey,
+					ParentKey: parentKey,
 					Type:      evt.EventType,
 					Summary:   evt.EventSummary,
 					Time:      formatTimestamp(evt.Timestamp),
 				})
-				currentKey = evt.ParentKey
+				currentKey = parentKey
 			}
 
 			return recallTraceResult{

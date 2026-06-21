@@ -20,7 +20,7 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `loader.go` | 273 | Prompt 加载器：单文件、目录、组合加载、bootstrap 加载 |
+| `loader.go` | 288 | Prompt 加载器：单文件、目录、组合加载、bootstrap 加载 |
 | `loader_test.go` | 10.1KB | 单元测试 |
 
 ---

@@ -20,7 +20,7 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `types.go` | 172 | 事件类型常量、类型推断、摘要生成、Token 估算 |
+| `types.go` | 171 | 事件类型常量、类型推断、摘要生成、Token 估算 |
 
 ---
 
@@ -356,6 +356,8 @@ tagent/agent
 
 ### 10.2 数据流
 
+**Persistent Event Loop 模式**：多条消息先入 mailbox，Loop goroutine 批量 drain 后 `mergeBatch()` 合并为一条，再触发一次 `runner.Run()`。事件类型推断和摘要生成流程不变，但 mergeBatch 后的合并消息 Content 以 `"\n\n---\n\n"` 连接多条原始内容。
+
 ```mermaid
 sequenceDiagram
     participant MP as MemoryPlugin.OnEvent
@@ -381,6 +383,8 @@ sequenceDiagram
     GS-->>SP: summary
     Note over SP: Tag = eventType + ":" + summary
 ```
+
+> **注意**：Loop 模式下 mergeBatch 产生的合并消息 Role 为 `RoleUser`，即使原始消息包含 `RoleSystem`（Tmux 注入）。MemoryPlugin 的 `ExtractEventType` 仍会正确分类为 `external_input`，因为推断基于 Content 内容而非 Role。
 
 ### 10.3 信息隔离
 

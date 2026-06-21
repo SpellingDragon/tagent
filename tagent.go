@@ -6,7 +6,7 @@
 // Dependency direction (all one-way, no cycles):
 //
 //	tagent (root) → agent → plugin → memory
-//	tagent (root) → tool/command → memory
+//	tagent (root) → tool/action → memory
 //	tagent (root) → tool/recall → memory
 //	tagent (root) → tool/knowledge → memory
 //	tagent (root) → prompt
@@ -20,14 +20,18 @@ package tagent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/tool"
-	"github.com/SpellingDragon/tagent/tool/command"
+	"github.com/SpellingDragon/tagent/tool/action"
 
+	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -41,6 +45,10 @@ type runtimeConfig struct {
 	summaryModel model.Model // Optional: for Stage 2 LLM summary
 	skillRepo    tool.SkillRepository
 	mcpToolSets  []trpctool.ToolSet
+
+	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
+	// It wraps rc.model, and is registered as a Closer on the entry agent.
+	trajectoryRecorder *agent.TrajectoryRecorder
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -50,6 +58,12 @@ type runtimeConfig struct {
 var (
 	namedMemMu     sync.Mutex
 	namedMemStores = map[string]*memory.InMemoryStore{}
+
+	// namedFileStores provides shared FileSegmentStore instances by path.
+	// When two agents configure memory type: localfile with the same path,
+	// they share the same FileSegmentStore — so recall can read tagent's partition.
+	namedFileMu     sync.Mutex
+	namedFileStores = map[string]*memory.FileSegmentStore{}
 )
 
 // WithModel sets the resolved model instance (required).
@@ -99,6 +113,21 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("tagent: model is required (use WithModel)")
 	}
 
+	// Wrap model with TrajectoryRecorder if enabled
+	if cfg.TrajectoryDump {
+		tr, err := agent.NewTrajectoryRecorder(rc.model, cfg.TrajectoryDir, cfg.APIEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("tagent: create trajectory recorder: %w", err)
+		}
+		rc.trajectoryRecorder = tr
+		rc.model = tr
+		// Also wrap summary model if present
+		if rc.summaryModel != nil {
+			// Summary model shares the same recorder (same JSONL files)
+			rc.summaryModel = tr
+		}
+	}
+
 	loader := prompt.NewLoader(cfg.PromptDir)
 
 	// Pre-create all agents (topological order handled by agent refs)
@@ -110,6 +139,12 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache)
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
+	}
+
+	// Register TrajectoryRecorder for graceful shutdown and session info
+	if rc.trajectoryRecorder != nil {
+		entryAgent.SetTrajectoryRecorder(rc.trajectoryRecorder)
+		entryAgent.RegisterCloser(rc.trajectoryRecorder)
 	}
 
 	return entryAgent, nil
@@ -146,11 +181,8 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: load system prompt: %w", name, err)
 	}
 
-	// 3. Resolve model
-	agentModel := rc.model // Default to parent model
-	if acfg.Model != "" {
-		agentModel = rc.model // TODO: support per-agent model resolution
-	}
+	// 3. Resolve model (currently uses parent model for all agents)
+	agentModel := rc.model
 
 	// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
 	var readPartitionIDs []int
@@ -186,15 +218,15 @@ func buildAgent(
 
 	// 4. Build tools from ToolRef list
 	var tools []trpctool.Tool
-	var cmdTool *command.CommandTool
+	var actionTool *action.ActionTool
 
 	for _, tr := range acfg.Tools {
-		t, isCmd, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore)
+		t, isAction, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
-		if isCmd {
-			cmdTool = t.(*command.CommandTool)
+		if isAction {
+			actionTool = t.(*action.ActionTool)
 		}
 		tools = append(tools, t)
 	}
@@ -220,9 +252,10 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
 	}
 
-	// Wire CommandTool's tmux notifications back to the agent
-	if cmdTool != nil {
-		cmdTool.SetMessageInjector(ta)
+	// Wire ActionTool's tmux notifications back to the agent and register for cleanup
+	if actionTool != nil {
+		actionTool.SetMessageInjector(ta)
+		ta.RegisterCloser(actionTool)
 	}
 
 	cache[name] = ta
@@ -254,8 +287,8 @@ func buildToolFromRef(
 }
 
 // buildAgentToolRef creates a tool agent and wraps it as a CallableTool.
-// Unlike the previous agenttool.NewTool() approach, we use our own AgentToolWrapper
-// which handles event_key → external context resolution.
+// When ToolRef.Remote is set, creates a remote A2AAgent instead of a local TagentAgent.
+// Both paths produce an agent.Agent, which AgentToolWrapper wraps uniformly.
 func buildAgentToolRef(
 	tr ToolRef,
 	cfg Config,
@@ -265,13 +298,31 @@ func buildAgentToolRef(
 	parentMemStore memory.MemoryStore,
 	desc string,
 ) (trpctool.Tool, bool, error) {
-	// Look up the referenced agent's config
+	// Remote path: create A2AAgent that communicates via trpc-a2a-go
+	if tr.Remote != nil && tr.Remote.URL != "" {
+		a2aAgent, err := a2aagent.New(
+			a2aagent.WithName(tr.AgentID),
+			a2aagent.WithDescription(desc),
+			a2aagent.WithAgentCardURL(tr.Remote.URL),
+			// TransferStateKey ensures RuntimeState["external_context"] is
+			// auto-copied to A2A message metadata. The remote A2A server
+			// auto-maps metadata back to RuntimeState (server.go:377).
+			a2aagent.WithTransferStateKey(agent.ExternalContextKey),
+		)
+		if err != nil {
+			return nil, false, fmt.Errorf("create remote A2A agent %q: %w", tr.AgentID, err)
+		}
+		wrapper := agent.NewAgentToolWrapper(a2aAgent, desc, tr.EventParams, parentMemStore)
+		log.Infof("[tagent] created remote A2A agent tool: %s → %s", tr.AgentID, tr.Remote.URL)
+		return wrapper, false, nil
+	}
+
+	// Local path: build the referenced agent recursively
 	refCfg, ok := cfg.Agents[tr.AgentID]
 	if !ok {
 		return nil, false, fmt.Errorf("referenced agent %q not found in config", tr.AgentID)
 	}
 
-	// Recursively build the referenced agent
 	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache)
 	if err != nil {
 		return nil, false, err
@@ -281,7 +332,7 @@ func buildAgentToolRef(
 	// The wrapper:
 	//   - Declares event_key parameter in InputSchema (if tr.EventParams includes it)
 	//   - On Call: resolves event_key → fetches full event from parentMemStore
-	//   - Passes the event data as external context to the sub-agent
+	//   - Serializes events into RuntimeState["external_context"] and calls agent.Run
 	wrapper := agent.NewAgentToolWrapper(subAgent, desc, tr.EventParams, parentMemStore)
 	return wrapper, false, nil
 }
@@ -302,15 +353,18 @@ func buildPlainToolRef(tr ToolRef, desc string) (trpctool.Tool, bool, error) {
 		return nil, false, err
 	}
 
-	_, isCmd := callable.(*command.CommandTool)
-	return callable, isCmd, nil
+	_, isAction := callable.(*action.ActionTool)
+	return callable, isAction, nil
 }
 
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
 //
-// For type: file, each call creates a new FileBackend instance.
-// Multiple instances pointing to the same directory can safely read/write
-// different partitions (different subdirectories) without shared locking.
+// For type: file, creates a FileSegmentStore backed by RustViking CLI
+// and InMemRelationStore (WAL + snapshot persistence).
+//
+// For type: localfile, creates a FileSegmentStore backed by LocalFileKV
+// (JSON file persistence, no external binary dependency) and InMemRelationStore.
+// Same path → same FileSegmentStore instance (shared via namedFileStores registry).
 //
 // For type: memory, when a non-empty path is provided, the same path
 // returns the same InMemoryStore instance (shared via registry).
@@ -336,10 +390,112 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		if mc.Path == "" {
 			return nil, fmt.Errorf("file memory store requires path")
 		}
-		return memory.NewFileBackend(mc.Path)
+		rel, err := memory.NewInMemRelationStore(mc.Path)
+		if err != nil {
+			return nil, fmt.Errorf("create relation store: %w", err)
+		}
+		configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
+		if err != nil {
+			return nil, fmt.Errorf("create rustviking config: %w", err)
+		}
+		kv := memory.NewRustVikingClient(mc.RustVikingBinary, configPath)
+		store, err := memory.NewFileSegmentStore(kv, rel, mc.Path, 1000)
+		if err != nil {
+			return nil, fmt.Errorf("create file segment store: %w", err)
+		}
+
+		// Wire up lifecycle components: TombstoneSet → LifecycleManager → Compactor
+		tombstone := memory.NewTombstoneSet(rel, kv, 0) // pid=0 for store-level tombstones
+		if err := tombstone.RecoverFromKV(); err != nil {
+			log.Warnf("[tagent] tombstone recovery failed (non-fatal): %v", err)
+		}
+		store.SetTombstoneSet(tombstone)
+
+		lm := memory.NewLifecycleManager(store, tombstone, memory.DefaultLifecycleConfig())
+		lm.Start()
+		store.SetLifecycleManager(lm)
+
+		compactor := memory.NewCompactor(store, kv, rel, tombstone, memory.DefaultCompactionConfig())
+		compactor.Start()
+		store.SetCompactor(compactor)
+
+		return store, nil
+	case "localfile":
+		if mc.Path == "" {
+			return nil, fmt.Errorf("localfile memory store requires path")
+		}
+		// Shared by path: same path → same FileSegmentStore instance
+		// (so recall can read tagent's partition via read_namespaces)
+		namedFileMu.Lock()
+		defer namedFileMu.Unlock()
+		if s, ok := namedFileStores[mc.Path]; ok {
+			return s, nil
+		}
+		rel, err := memory.NewInMemRelationStore(mc.Path)
+		if err != nil {
+			return nil, fmt.Errorf("create relation store: %w", err)
+		}
+		kv, err := memory.NewLocalFileKV(mc.Path)
+		if err != nil {
+			return nil, fmt.Errorf("create local file kv: %w", err)
+		}
+		store, err := memory.NewFileSegmentStore(kv, rel, mc.Path, 1000)
+		if err != nil {
+			return nil, fmt.Errorf("create file segment store: %w", err)
+		}
+
+		// Wire up lifecycle components: TombstoneSet → LifecycleManager → Compactor
+		tombstone := memory.NewTombstoneSet(rel, kv, 0)
+		if err := tombstone.RecoverFromKV(); err != nil {
+			log.Warnf("[tagent] tombstone recovery failed (non-fatal): %v", err)
+		}
+		store.SetTombstoneSet(tombstone)
+
+		lm := memory.NewLifecycleManager(store, tombstone, memory.DefaultLifecycleConfig())
+		lm.Start()
+		store.SetLifecycleManager(lm)
+
+		compactor := memory.NewCompactor(store, kv, rel, tombstone, memory.DefaultCompactionConfig())
+		compactor.Start()
+		store.SetCompactor(compactor)
+
+		namedFileStores[mc.Path] = store
+		return store, nil
 	default:
 		return nil, fmt.Errorf("unknown memory store type %q", mc.Type)
 	}
+}
+
+// ensureRustVikingConfig writes a rustviking config.toml to the data directory
+// and returns the config file path. If the file already exists, it is reused.
+func ensureRustVikingConfig(binary, dataDir string) (string, error) {
+	// Ensure data directory exists
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", dataDir, err)
+	}
+	configPath := filepath.Join(dataDir, "rustviking.toml")
+
+	// Check if config already exists
+	if _, err := os.Stat(configPath); err == nil {
+		return configPath, nil
+	}
+
+	// Write default config
+	config := fmt.Sprintf(`[storage]
+path = "%s"
+create_if_missing = true
+max_open_files = 10000
+
+[vector_store]
+plugin = "memory"
+
+[embedding]
+plugin = "mock"
+`, filepath.Join(dataDir, "rocksdb"))
+	if err := os.WriteFile(configPath, []byte(config), 0644); err != nil {
+		return "", fmt.Errorf("write config %s: %w", configPath, err)
+	}
+	return configPath, nil
 }
 
 // resolveToolDescription resolves the tool description from inline text or file.

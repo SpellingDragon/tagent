@@ -4,6 +4,11 @@
 #
 # 所有配置统一在此文件中管理，无需维护多份配置文件。
 #
+# 配置分层说明:
+#   - tagent YAML: agent 定义（模型、超参、prompt、event_params）
+#   - ToolRef.Remote: 连接信息（remote.url = "这个 agent 在哪里"）
+#   - trpc Go options: 通信细节（A2A 协议、TransferStateKey）— tagent.go 内部自动生成
+#
 # 敏感信息:
 #   API Key 通过环境变量设置 (默认 ZAI_API_KEY)，不要写在此文件中
 # ============================================================================
@@ -27,6 +32,10 @@ log_level: "info"
 # 请求超时（秒），默认 3600 (60 分钟)
 request_timeout_seconds: 3600
 
+# 轨迹记录 — 启用后将每次 LLM 调用记录为 JSONL 文件，可用于后续 SFT/RL 训练
+trajectory_dump: true
+trajectory_dir: "data/trajectories"
+
 # ===== Agent 配置 =====
 
 entry: tagent
@@ -44,14 +53,17 @@ agents:
         - USER.md
         - TOOLS.md
     memory:
-      type: memory
-      path: shared
+      type: localfile
+      path: .wechat-config/data
     max_tool_iterations: 200
     max_tokens: 8000
     temperature: 0.7
     compress_threshold: 0.8
     tools:
       # Knowledge Agent: 知识获取与翻译
+      # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
+      # AgentToolWrapper 自动从父 agent 的 MemStore 还原完整事件并序列化到
+      # RuntimeState["external_context"]，子 agent 通过 Run 读取。
       - agent: knowledge
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
@@ -66,15 +78,26 @@ agents:
         max_tool_iterations: 5
         max_tokens: 4096
 
-      # Command Tool: 命令执行
+      # Action Tool: 行为动作执行
       # properties 下放 tool 专有配置，各 tool factory 自行反序列化
       - kind: tool
-        id: command
-        description_file: command_tool_desc.md
+        id: action
+        description_file: action_tool_desc.md
         # properties:                          # tool 专有配置
-        #   workspace: /tmp/tagent-workspace    # 可选: 命令执行工作目录
+        #   workspace: /tmp/tagent-workspace    # 可选: 动作执行工作目录
         #   run_as_user: tagent-runner          # 可选: 以指定用户执行 (需要 sudoers 免密配置)
         #   run_as_group: tagent-runner         # 可选: 以指定用户组执行
+
+      # 远程 Agent 示例 (A2A 通信):
+      # 当子 agent 部署在独立进程时，只需声明 remote.url。
+      # tagent.go 自动创建 A2AAgent 并配置 TransferStateKey，
+      # 上下文通过 RuntimeState → A2A metadata → RuntimeState 自动传递。
+      #
+      # - agent: remote-knowledge
+      #   description_file: knowledge_tool_desc.md
+      #   event_params: [event_keys]
+      #   remote:
+      #     url: "http://knowledge-service:8088"
 
   # ========================================================================
   # Knowledge Agent: 知识获取 & 翻译子 Agent
@@ -97,8 +120,8 @@ agents:
       files:
         - recall_agent.md
     memory:
-      type: memory
-      path: shared
+      type: localfile
+      path: .wechat-config/data
       read_namespaces:
         - tagent
     max_tool_iterations: 5

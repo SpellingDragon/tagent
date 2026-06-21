@@ -26,44 +26,105 @@ import (
 
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// ==================== External Context Serialization ====================
+//
+// ExternalContextEntry is the wire format for passing external event context
+// across process boundaries (local → RuntimeState → A2A metadata → RuntimeState → remote).
+//
+// Only EventKey, EventType, and EventSummary are serialized — NOT the full Content.
+// This keeps the payload compact (suitable for A2A metadata size limits) while
+// preserving the information that injectExternalContext actually uses.
+// Remote sub-agents that need full event content can query their own MemoryStore
+// using the EventKey.
+
+// ExternalContextEntry is the serializable representation of an external event
+// for cross-process context passing via RuntimeState.
+type ExternalContextEntry struct {
+	EventKey     int64  `json:"event_key"`
+	EventType    string `json:"event_type"`
+	EventSummary string `json:"event_summary"`
+}
+
+// ExternalContextKey is the RuntimeState key used to pass external context
+// through the Invocation → A2A metadata → Invocation chain.
+// Exported so that tagent.go can use it with a2aagent.WithTransferStateKey.
+const ExternalContextKey = "external_context"
+
+// serializeExternalContext converts FullEvents into compact JSON entries
+// suitable for RuntimeState transport. Only EventKey/EventType/EventSummary
+// are included — Content is intentionally excluded to keep the payload small.
+func serializeExternalContext(events []memory.FullEvent) ([]byte, error) {
+	entries := make([]ExternalContextEntry, len(events))
+	for i, evt := range events {
+		entries[i] = ExternalContextEntry{
+			EventKey:     evt.EventKey,
+			EventType:    evt.EventType,
+			EventSummary: evt.EventSummary,
+		}
+	}
+	return json.Marshal(entries)
+}
+
+// deserializeExternalContext converts JSON bytes back into FullEvents.
+// Content is left empty — the remote sub-agent only needs EventSummary
+// for context injection (injectExternalContext uses EventSummary only).
+func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
+	var entries []ExternalContextEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("deserialize external context: %w", err)
+	}
+	events := make([]memory.FullEvent, len(entries))
+	for i, e := range entries {
+		events[i] = memory.FullEvent{
+			EventKey:     e.EventKey,
+			EventType:    e.EventType,
+			EventSummary: e.EventSummary,
+		}
+	}
+	return events, nil
+}
+
 // ==================== AgentToolWrapper ====================
 //
-// AgentToolWrapper wraps a TagentAgent as a plain CallableTool.
-// It replaces agenttool.NewTool() with tagent-specific logic:
+// AgentToolWrapper wraps an agent.Agent (local TagentAgent or remote A2AAgent)
+// as a plain CallableTool. It handles:
 //
 //   - InputSchema declares event_keys parameter (list of Snowflake EventKeys)
 //   - On Call: extracts event_keys from args, fetches full events from parent MemStore,
-//     and passes the event data as external context to the sub-agent
+//     serializes them into RuntimeState["external_context"], and calls agent.Run
 //   - The LLM selects relevant event_keys from its context and passes them to the tool,
 //     enabling the tool to retrieve full event details that were compressed away
 //   - This prevents the LLM from breaking context isolation — the LLM only outputs
 //     numeric keys, but the actual event content is resolved server-side
+//   - Context delivery is unified: RuntimeState works for both local (direct Run)
+//     and remote (A2A metadata auto-mapping) sub-agents
 
 type AgentToolWrapper struct {
-	agent       *TagentAgent
+	agent       agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
 	desc        string
 	eventParams []string           // Which event-derived params to declare (e.g., "event_key")
 	parentStore memory.MemoryStore // Parent agent's MemStore for resolving event_key
 }
 
 // NewAgentToolWrapper creates a new AgentToolWrapper.
-//   - agent: the sub-agent to wrap
+//   - ag: the sub-agent to wrap (must implement agent.Agent — local TagentAgent or remote A2AAgent)
 //   - desc: tool description shown to parent agent's LLM
 //   - eventParams: which event-derived parameters to declare and resolve
 //   - parentStore: parent agent's MemStore for resolving event_key to full event data
 func NewAgentToolWrapper(
-	agent *TagentAgent,
+	ag agent.Agent,
 	desc string,
 	eventParams []string,
 	parentStore memory.MemoryStore,
 ) *AgentToolWrapper {
 	return &AgentToolWrapper{
-		agent:       agent,
+		agent:       ag,
 		desc:        desc,
 		eventParams: eventParams,
 		parentStore: parentStore,
@@ -73,7 +134,7 @@ func NewAgentToolWrapper(
 // Declaration implements trpctool.Tool.
 func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	decl := &trpctool.Declaration{
-		Name:        w.agent.name,
+		Name:        w.agent.Info().Name,
 		Description: w.desc,
 		InputSchema: &trpctool.Schema{
 			Type:       "object",
@@ -112,14 +173,17 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 // It:
 //  1. Parses JSON args to extract event_keys
 //  2. If event_keys are present and parentStore is available, fetches full event data
-//  3. Passes the event data as external context to the sub-agent via IngestExternalEvents
-//  4. Runs the sub-agent and returns its final output
+//  3. Serializes the events into RuntimeState["external_context"] (compact JSON)
+//  4. Constructs an Invocation and calls agent.Run — unified for local and remote
+//  5. Collects the sub-agent's final output from the event stream
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	agentName := w.agent.Info().Name
+
 	// Parse args
 	var args map[string]interface{}
 	if len(jsonArgs) > 0 {
 		if err := json.Unmarshal(jsonArgs, &args); err != nil {
-			return nil, fmt.Errorf("agent tool %q: parse args: %w", w.agent.name, err)
+			return nil, fmt.Errorf("agent tool %q: parse args: %w", agentName, err)
 		}
 	}
 
@@ -163,31 +227,53 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 
 	// === Boundary log: tool INPUT ===
 	log.Infof("[TRACE] tool_enter agent=%s request_len=%d event_keys=%d external_events=%d",
-		w.agent.name, len(request), len(keys), len(externalEvents))
+		agentName, len(request), len(keys), len(externalEvents))
 
-	// Build the user message
-	msg := model.NewUserMessage(request)
-
-	// Inject external events as context before running
+	// Build the Invocation with RuntimeState carrying external context.
+	// This unified path works for both local TagentAgent (Run reads RuntimeState
+	// directly) and remote A2AAgent (WithTransferStateKey copies RuntimeState
+	// to A2A metadata, server auto-maps back to RuntimeState).
+	runOpts := agent.RunOptions{}
 	if len(externalEvents) > 0 {
-		w.agent.IngestExternalEvents(externalEvents)
+		serialized, err := serializeExternalContext(externalEvents)
+		if err != nil {
+			return nil, fmt.Errorf("agent tool %q: serialize external context: %w", agentName, err)
+		}
+		if runOpts.RuntimeState == nil {
+			runOpts.RuntimeState = map[string]any{}
+		}
+		runOpts.RuntimeState[ExternalContextKey] = json.RawMessage(serialized)
 	}
+
+	inv := agent.NewInvocation(
+		agent.WithInvocationMessage(model.NewUserMessage(request)),
+		agent.WithInvocationRunOptions(runOpts),
+	)
 
 	// === Boundary log: run sub-agent with timing ===
 	startTime := time.Now()
 
-	// Run the sub-agent
-	eventCh, err := w.agent.RunSimple(ctx, "tool-agent-user", fmt.Sprintf("tool-agent-session-%s", w.agent.name), msg)
+	// Run the sub-agent via unified agent.Run interface
+	eventCh, err := w.agent.Run(ctx, inv)
 	if err != nil {
-		return nil, fmt.Errorf("agent tool %q: run failed: %w", w.agent.name, err)
+		return nil, fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
 	}
 
 	// Collect the final output from the sub-agent
 	var finalOutput string
 	var toolCallCount int
 	for evt := range eventCh {
-		if evt.Response != nil && len(evt.Response.Choices) > 0 {
-			choice := evt.Response.Choices[len(evt.Response.Choices)-1]
+		// Deep-copy Response to prevent data race with framework background
+		// goroutines (e.g., ContentRequestProcessor) that may modify the
+		// shared *model.Response in subsequent iterations. The session hook
+		// in NewTagentAgent already provides isolation, but we clone again
+		// here for defense-in-depth.
+		var resp *model.Response
+		if evt.Response != nil {
+			resp = evt.Response.Clone()
+		}
+		if resp != nil && len(resp.Choices) > 0 {
+			choice := resp.Choices[len(resp.Choices)-1]
 			// Log internal tool calls for audit visibility
 			if len(choice.Message.ToolCalls) > 0 {
 				toolCallCount++
@@ -195,11 +281,11 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				for _, tc := range choice.Message.ToolCalls {
 					names = append(names, fmt.Sprintf("%s(%s)", tc.Function.Name, truncate(string(tc.Function.Arguments), 80)))
 				}
-				log.Infof("[ToolAgent:%s] round %d tool call: %s", w.agent.name, toolCallCount, strings.Join(names, ", "))
+				log.Infof("[ToolAgent:%s] round %d tool call: %s", agentName, toolCallCount, strings.Join(names, ", "))
 			}
 			// Track tool responses
 			if choice.Message.Role == model.RoleTool && choice.Message.Content != "" {
-				log.Debugf("[ToolAgent:%s] round %d tool response: %s", w.agent.name, toolCallCount, truncate(choice.Message.Content, 120))
+				log.Debugf("[ToolAgent:%s] round %d tool response: %s", agentName, toolCallCount, truncate(choice.Message.Content, 120))
 			}
 			// Final output: assistant message without tool calls
 			if choice.Message.Content != "" && len(choice.Message.ToolCalls) == 0 {
@@ -210,7 +296,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 
 	elapsed := time.Since(startTime).Round(time.Millisecond)
 	log.Infof("[TRACE] tool_exit agent=%s output_len=%d tool_calls=%d elapsed=%v",
-		w.agent.name, len(finalOutput), toolCallCount, elapsed)
+		agentName, len(finalOutput), toolCallCount, elapsed)
 
 	if finalOutput == "" {
 		finalOutput = "tool agent completed without output"

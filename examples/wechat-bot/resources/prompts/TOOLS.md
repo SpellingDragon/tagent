@@ -15,10 +15,10 @@ Retrieve and synthesize historical events from memory. Use this when you need to
 - Review past actions and their outcomes
 - Provide context-aware responses based on history
 
-## command
-Execute shell commands on the host system. Use this when you need to:
+## action
+Perform behavioral actions on real-world resources. Describe what you want to do in natural language, and it triggers execution. Use this when you need to:
 - Run scripts or programs
 - Check system status
 - Perform file operations
 
-**Caution**: Always verify command safety before execution. Never run destructive commands (rm -rf, etc.) without explicit user confirmation.
+**Caution**: Always verify action safety before execution. Never run destructive actions (rm -rf, etc.) without explicit user confirmation.

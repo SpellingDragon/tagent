@@ -22,19 +22,23 @@ type EventReference struct {
 
 // FullEvent represents a complete event with all details stored in MemoryStore.
 // This is the single source of truth for event data.
+//
+// Note: ParentKey has been removed from this struct.
+// Event causal relationships are now maintained by RelationStore,
+// accessible via MemoryStore.RelationStore() method (if the store implements RelationStoreProvider).
+// This separates immutable event content from mutable relationships.
 type FullEvent struct {
-	EventKey     int64                  `json:"event_key"`            // Snowflake int64 unique identifier
-	PartitionID  int                    `json:"partition_id"`         // Storage partition key
-	ParentKey    int64                  `json:"parent_key,omitempty"` // Causal chain: preceding event key
-	EventType    string                 `json:"event_type"`           // Event type
-	EventSummary string                 `json:"event_summary"`        // Brief summary (for LLM context)
-	Timestamp    int64                  `json:"timestamp"`            // Unix timestamp (ms)
-	Content      string                 `json:"content"`              // Event content/text
-	ToolCalls    []model.ToolCall       `json:"tool_calls"`           // Tool calls (if any)
-	ToolResults  map[string]interface{} `json:"tool_results"`         // Tool execution results
-	Metadata     map[string]string      `json:"metadata"`             // Additional metadata
+	EventKey     int64                  `json:"event_key"`     // Snowflake int64 unique identifier
+	PartitionID  int                    `json:"partition_id"`  // Storage partition key
+	EventType    string                 `json:"event_type"`    // Event type
+	EventSummary string                 `json:"event_summary"` // Brief summary (for LLM context)
+	Timestamp    int64                  `json:"timestamp"`     // Unix timestamp (ms)
+	Content      string                 `json:"content"`       // Event content/text
+	ToolCalls    []model.ToolCall       `json:"tool_calls"`    // Tool calls (if any)
+	ToolResults  map[string]interface{} `json:"tool_results"`  // Tool execution results
+	Metadata     map[string]string      `json:"metadata"`      // Additional metadata
 
-	// Response field for compatibility with Phase 2
+	// Response field stores the LLM response snapshot (optional)
 	Response *model.Response `json:"response,omitempty"`
 }
 
@@ -67,8 +71,6 @@ type MemoryStore interface {
 	// Returns EventReference list (lightweight).
 	QueryEvents(query QueryOptions) ([]EventReference, error)
 
-	// === RAG Vector Search (Optional) ===
-
 	// SearchByEmbedding performs semantic search using a query embedding.
 	SearchByEmbedding(query []float32, topK int) ([]EventReference, error)
 
@@ -90,6 +92,20 @@ type MemoryStore interface {
 // Vector search errors.
 var (
 	ErrVectorSearchNotSupported = fmt.Errorf("vector search not supported")
+)
+
+// RelationStoreProvider is an optional interface for MemoryStore implementations
+// that support causal relationship management via RelationStore.
+// Callers should type-assert MemoryStore to RelationStoreProvider before accessing
+// parent/child relationships, as not all implementations expose relation operations.
+type RelationStoreProvider interface {
+	RelationStore() RelationStore
+}
+
+// Compile-time interface satisfaction checks.
+var (
+	_ RelationStoreProvider = (*InMemoryStore)(nil)
+	_ RelationStoreProvider = (*FileSegmentStore)(nil)
 )
 
 // QueryOptions specifies filters for querying events.
@@ -118,14 +134,9 @@ type StoreStats struct {
 	DataDir     string `json:"data_dir"`
 }
 
-// Event type constants for event classification.
-const (
-	EventTypeExternalInput   = "external_input"
-	EventTypeAgentOutput     = "agent_output"
-	EventTypeActionCommand   = "action_command"
-	EventTypeThinkingPlan    = "thinking_plan"
-	EventTypeContextCompress = "context_compress"
-)
+// Event type constants are defined in the event package (event.Type*).
+// This is the single source of truth for event classification.
+// See: github.com/SpellingDragon/tagent/event/types.go
 
 // ==================== Snowflake EventKey ====================
 //

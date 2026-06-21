@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
@@ -185,14 +186,21 @@ func TestTagentAgent_SimpleLLMCall(t *testing.T) {
 	require.NoError(t, err)
 	defer ta.Close()
 
-	ctx := context.Background()
-	eventCh, err := ta.RunSimple(ctx, "user-1", "session-1", model.NewUserMessage("Hello"))
+	// Persistent event loop: StartLoop → InjectMessage → consume outputCh
+	outputCh, err := ta.StartLoop("user-1", "session-1")
 	require.NoError(t, err)
-	require.NotNil(t, eventCh)
 
-	// Consume events
-	for range eventCh {
+	ta.InjectMessage(model.NewUserMessage("Hello"))
+
+	// Consume events until final response
+	select {
+	case evt := <-outputCh:
+		require.NotNil(t, evt)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for event")
 	}
+
+	ta.StopLoop()
 }
 
 func TestTagentAgent_BeforeModelModifiesRequest(t *testing.T) {
@@ -214,14 +222,26 @@ func TestTagentAgent_BeforeModelModifiesRequest(t *testing.T) {
 	require.NoError(t, err)
 	defer ta.Close()
 
-	ctx := context.Background()
-	eventCh, err := ta.RunSimple(ctx, "user-1", "session-1",
-		model.NewUserMessage("This is a somewhat long message that should exceed our tiny token budget"))
+	// Persistent event loop: StartLoop → InjectMessage → consume outputCh
+	outputCh, err := ta.StartLoop("user-1", "session-1")
 	require.NoError(t, err)
 
-	// Drain events
-	for range eventCh {
+	ta.InjectMessage(model.NewUserMessage("This is a somewhat long message that should exceed our tiny token budget"))
+
+	// Drain events until final response
+loop:
+	for {
+		select {
+		case _, ok := <-outputCh:
+			if !ok {
+				break loop
+			}
+		case <-time.After(10 * time.Second):
+			break loop
+		}
 	}
+
+	ta.StopLoop()
 
 	// Verify the mock model received compressed messages
 	lastReq := mockModel.GetLastRequest()

@@ -23,7 +23,7 @@ type KnowledgeResult struct {
 	ExecutionPlan *ExecutionPlan `json:"execution_plan,omitempty"` // Translated executable plan
 }
 
-// ExecutionPlan describes a physical execution plan that CommandTool can directly run.
+// ExecutionPlan describes a physical execution plan that ActionTool can directly run.
 type ExecutionPlan struct {
 	Function    string            `json:"function"`              // "exec", "tmux_exec", "mcp_call"
 	Command     string            `json:"command,omitempty"`     // Command for exec/tmux_exec

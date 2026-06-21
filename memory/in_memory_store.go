@@ -9,15 +9,29 @@ import (
 // InMemoryStore implements MemoryStore using an in-memory map.
 // Events are partitioned by PartitionID for storage isolation.
 // Suitable for testing and prototyping.
+//
+// Note: InMemoryStore embeds RelationStore to provide O(1)
+// parent/child relationship queries via GetParent/GetChildren.
 type InMemoryStore struct {
 	mu     sync.RWMutex
 	events map[int]map[int64]FullEvent // PartitionID → EventKey → FullEvent
+	rel    RelationStore               // Causal relationship graph
 }
 
 // NewInMemoryStore creates a new InMemoryStore.
 func NewInMemoryStore() *InMemoryStore {
+	return NewInMemoryStoreWithRelation(nil)
+}
+
+// NewInMemoryStoreWithRelation creates a new InMemoryStore with a RelationStore.
+// If rel is nil, creates a default simpleInMemRelationStore that stores relationships in memory.
+func NewInMemoryStoreWithRelation(rel RelationStore) *InMemoryStore {
+	if rel == nil {
+		rel = newSimpleInMemRelationStore()
+	}
 	return &InMemoryStore{
 		events: make(map[int]map[int64]FullEvent),
+		rel:    rel,
 	}
 }
 
@@ -61,6 +75,7 @@ func (s *InMemoryStore) StoreEvents(events map[int64]FullEvent) error {
 		}
 		s.events[pid][key] = event
 	}
+
 	return nil
 }
 
@@ -234,28 +249,26 @@ func (s *InMemoryStore) GetStats() StoreStats {
 	}
 }
 
-// SearchBySummary searches events by matching against EventSummary.
-// Returns events whose summary contains the query string (case-insensitive).
-// Deprecated: Use QueryEvents with QueryOptions.Keyword instead.
-func (s *InMemoryStore) SearchBySummary(query string) []EventReference {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// GetParent returns the parent EventKey for the given event key.
+func (s *InMemoryStore) GetParent(key int64) (int64, error) {
+	return s.rel.GetParent(key)
+}
 
-	var results []EventReference
-	for _, partition := range s.events {
-		for _, event := range partition {
-			if containsIgnoreCase(event.EventSummary, query) || containsIgnoreCase(event.Content, query) {
-				results = append(results, EventReference{
-					EventKey:     event.EventKey,
-					PartitionID:  event.PartitionID,
-					EventType:    event.EventType,
-					EventSummary: event.EventSummary,
-					Timestamp:    event.Timestamp,
-				})
-			}
-		}
-	}
-	return results
+// GetChildren returns all direct child EventKeys for the given event key.
+func (s *InMemoryStore) GetChildren(key int64) ([]int64, error) {
+	return s.rel.GetChildren(key)
+}
+
+// SetParent sets the parent EventKey for the given event key.
+func (s *InMemoryStore) SetParent(key int64, parentKey int64) error {
+	return s.rel.SetParent(key, parentKey)
+}
+
+// RelationStore returns the underlying RelationStore for relationship operations.
+// This is used by higher-level components (e.g., plugin) to manage
+// parent-child relationships independently of CRUD operations.
+func (s *InMemoryStore) RelationStore() RelationStore {
+	return s.rel
 }
 
 // AllEvents returns all stored events (for testing/debugging).
@@ -332,4 +345,131 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ==================== simpleInMemRelationStore（内存关系存储，无持久化） ====================
+
+// simpleInMemRelationStore 是一个内存关系存储实现，用于 InMemoryStore 默认场景。
+// 相比 InMemRelationStore，它不提供 WAL journal、快照和崩溃恢复，仅用于测试和原型开发。
+type simpleInMemRelationStore struct {
+	mu               sync.RWMutex
+	childToParent    map[int64]int64
+	parentToChildren map[int64][]int64
+}
+
+func newSimpleInMemRelationStore() *simpleInMemRelationStore {
+	return &simpleInMemRelationStore{
+		childToParent:    make(map[int64]int64),
+		parentToChildren: make(map[int64][]int64),
+	}
+}
+
+func (s *simpleInMemRelationStore) SetParent(childKey, parentKey int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oldParent, hadOld := s.childToParent[childKey]
+	if hadOld && oldParent == parentKey {
+		return nil
+	}
+	if hadOld {
+		s.removeFromChildren(oldParent, childKey)
+	}
+	s.childToParent[childKey] = parentKey
+	s.parentToChildren[parentKey] = append(s.parentToChildren[parentKey], childKey)
+	return nil
+}
+
+func (s *simpleInMemRelationStore) GetParent(childKey int64) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	parentKey, ok := s.childToParent[childKey]
+	if !ok {
+		return 0, nil
+	}
+	return parentKey, nil
+}
+
+func (s *simpleInMemRelationStore) GetChildren(parentKey int64) ([]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	children, ok := s.parentToChildren[parentKey]
+	if !ok || len(children) == 0 {
+		return []int64{}, nil
+	}
+	result := make([]int64, len(children))
+	copy(result, children)
+	return result, nil
+}
+
+func (s *simpleInMemRelationStore) GetParents(keys []int64) (map[int64]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[int64]int64, len(keys))
+	for _, key := range keys {
+		if parentKey, ok := s.childToParent[key]; ok {
+			result[key] = parentKey
+		} else {
+			result[key] = 0
+		}
+	}
+	return result, nil
+}
+
+func (s *simpleInMemRelationStore) RemoveRelations(key int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if parentKey, ok := s.childToParent[key]; ok {
+		s.removeFromChildren(parentKey, key)
+	}
+	delete(s.childToParent, key)
+	delete(s.parentToChildren, key)
+	return nil
+}
+
+func (s *simpleInMemRelationStore) Snapshot() (map[int64]int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot := make(map[int64]int64, len(s.childToParent))
+	for k, v := range s.childToParent {
+		snapshot[k] = v
+	}
+	return snapshot, nil
+}
+
+func (s *simpleInMemRelationStore) LoadSnapshot(data map[int64]int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.childToParent = make(map[int64]int64, len(data))
+	s.parentToChildren = make(map[int64][]int64)
+	for child, parent := range data {
+		s.childToParent[child] = parent
+		s.parentToChildren[parent] = append(s.parentToChildren[parent], child)
+	}
+	return nil
+}
+
+func (s *simpleInMemRelationStore) ReplayJournal(entries []JournalEntry) error {
+	return nil
+}
+
+func (s *simpleInMemRelationStore) EventsCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.childToParent)
+}
+
+func (s *simpleInMemRelationStore) removeFromChildren(parentKey, childKey int64) {
+	children, ok := s.parentToChildren[parentKey]
+	if !ok {
+		return
+	}
+	for i, c := range children {
+		if c == childKey {
+			s.parentToChildren[parentKey] = append(children[:i], children[i+1:]...)
+			break
+		}
+	}
+	if len(s.parentToChildren[parentKey]) == 0 {
+		delete(s.parentToChildren, parentKey)
+	}
 }

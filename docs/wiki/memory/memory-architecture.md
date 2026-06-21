@@ -7,15 +7,15 @@
 **核心职责**：
 - 定义 `FullEvent`（完整事件）和 `EventReference`（轻量引用）的数据结构
 - 定义 `MemoryStore` 接口规范
-- 提供 `InMemoryStore`（内存实现）和 `FileBackend`（文件系统实现）
-- 通过 `EventKey` 和 `ParentKey` 构建有向因果事件链
-- 支持 **RAG 向量搜索**（可选接口，为未来接入向量数据库预留）
+- 提供 `InMemoryStore`（内存实现）和 `FileSegmentStore`（基于 KV store 的分层存储实现）
+- 通过 `EventKey` 和 `RelationStore.SetParent` 构建有向因果事件链
+- 支持 **RAG 向量搜索**（可选接口，当前为空实现，可扩展接入向量数据库）
 
 **设计原则**：
 - **信息隔离**：Session 只保存轻量引用（`EventReference`），完整数据在 MemoryStore
-- **因果优先**：每个事件通过 `ParentKey` 指向其前驱事件，支持因果回溯
+- **因果优先**：每个事件通过 `RelationStore.SetParent` 指向其前驱事件，支持因果回溯
 - **视图独立**：压缩只修改 LLM 消息视图，不修改 MemoryStore 中的数据
-- **RAG 扩展**：向量搜索接口可选实现，当前为空实现（stub）
+- **RAG 扩展**：向量搜索接口可选实现，当前为空实现（stub），可扩展接入向量数据库
 
 ---
 
@@ -23,9 +23,13 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `types.go` | 235 | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ RAG 向量搜索接口 |
-| `in_memory_store.go` | 327 | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
-| `file_backend.go` | 386 | 文件系统存储实现（生产环境）+ 向量搜索空实现 |
+| `types.go` | 249 | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ RAG 向量搜索接口 |
+| `in_memory_store.go` | 499 | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
+| `segment_store.go` | 735 | 基于 KV store 的分层存储实现（L0/L1/L2/L3） |
+| `relation_store.go` | 485 | 因果链关系存储（SetParent/GetParent/GetChildren） |
+| `compaction.go` | 519 | 分层压实调度（L1→L2→L3 自动压实） |
+| `lifecycle.go` | 311 | TTL 生命周期管理（过期事件墓碑标记） |
+| `tombstone.go` | 254 | 墓碑集管理（标记已删除事件） |
 
 ---
 
@@ -38,7 +42,7 @@ graph TB
         FE["FullEvent\n(完整数据)"]
         ER["EventReference\n(轻量引用)"]
         EK["EventKey\n(Snowflake int64)"]
-        PK["ParentKey\n(因果链 int64)"]
+        RS["RelationStore\n(因果链管理)"]
         PID["PartitionID\n(存储分区)"]
         QO["QueryOptions\n(过滤/分页)"]
         RAG["RAG Vector Search\n(SearchByEmbedding)"]
@@ -46,13 +50,13 @@ graph TB
 
     subgraph "实现"
         IM["InMemoryStore\n(map[int]map[int64]FullEvent)\n+ Vector Stub"]
-        FB["FileBackend\n(dataDir/{partition}/*.json)\n+ Vector Stub"]
+        FB["FileSegmentStore\n(dataDir/{partition}/*.json)\n+ Vector Stub"]
     end
 
     MS --> FE
     MS --> ER
     MS --> EK
-    MS --> PK
+    MS --> RS
     MS --> PID
     MS --> QO
     MS --> RAG
@@ -129,7 +133,7 @@ func SequenceFromEventKey(key int64) int       // 提取序列号
 - **内含分区信息**：从 EventKey 可直接反推 PartitionID，无需额外索引
 - **时间有序**：高位为时间戳，按 time.Unix 单调递增
 - **全局唯一**：内部 mutex 保护的 per-partition Sequence 计数器保证同秒内唯一
-- **零值语义**：`0` 表示无前驱（ParentKey 的零值）
+- **零值语义**：`0` 表示无前驱（RelationStore 中 parent=0 表示根事件）
 - **第二个参数是时间提示**：`nowMs`（毫秒时间戳），传 0 使用当前时间，非零用于测试确定性生成
 
 ### 4.2 FullEvent — 完整事件（MemoryStore 的唯一事实来源）
@@ -139,7 +143,6 @@ func SequenceFromEventKey(key int64) int       // 提取序列号
 type FullEvent struct {
     EventKey     int64                  // Snowflake int64 唯一标识符
     PartitionID  int                    // 存储分区 key（从 AgentName 派生）
-    ParentKey    int64                  // 因果链：前驱事件的 EventKey（0 = 首个事件）
     EventType    string                 // 事件类型（external_input / agent_output / ...）
     EventSummary string                 // 事件摘要（用于 LLM 推理）
     Timestamp    int64                  // Unix 毫秒时间戳
@@ -147,11 +150,11 @@ type FullEvent struct {
     ToolCalls    []model.ToolCall       // 工具调用列表
     ToolResults  map[string]interface{} // 工具执行结果
     Metadata     map[string]string      // 额外元数据
-    Response     *model.Response        // Phase 2 兼容字段
+    Response     *model.Response        // LLM 响应快照（可选）
 }
 ```
 
-**用途**：MemoryStore 中存储的完整事件数据，永不修改（immutable）。可通过 `EventKey` 精确检索。`Response` 字段为 Phase 2 兼容保留。
+**用途**：MemoryStore 中存储的完整事件数据，永不修改（immutable）。可通过 `EventKey` 精确检索。`Response` 字段保存 LLM 响应快照，供 Trajectory 采集等下游模块使用。
 
 ### 4.3 EventReference — 轻量引用（Session 中的 LLM 上下文）
 
@@ -167,7 +170,7 @@ type EventReference struct {
 ```
 
 **用途**：
-- Session 侧仅保存轻量引用，不保存完整事件详情（**信息隔离设计 Phase 3**）
+- Session 侧仅保存轻量引用，不保存完整事件详情（**信息隔离设计**）
 - `EventSummary` 字段直接进入 LLM 消息上下文，供 LLM 理解历史
 - 通过 `EventKey` 可随时从 MemoryStore 拉取完整详情（AgentToolWrapper / RecallAgent 机制）
 
@@ -197,7 +200,7 @@ graph LR
 |------|-----------|---------------|
 | `EventKey` | ✅ int64 | ✅ int64 |
 | `PartitionID` | ✅ int | ✅ int |
-| `ParentKey` | ✅ int64（因果链） | ❌（不在引用中） |
+| _(ParentKey 已移除)_ | 因果关系由 `RelationStore` 维护 | — |
 | `EventType` | ✅ | ✅ |
 | `EventSummary` | ✅ | ✅ |
 | `Content` | ✅（原文） | ❌ |
@@ -210,30 +213,42 @@ graph LR
 
 ## 五、因果链机制
 
-### 5.1 ParentKey 的语义
+### 5.1 RelationStore 因果链语义
 
-每个 `FullEvent` 都有一个 `ParentKey` 字段，指向其前驱事件的 `EventKey`：
+ParentKey 已从 FullEvent 结构体中移除。因果关系由独立的 `RelationStore` 维护，通过 `RelationStoreProvider` 接口访问：
+
+```go
+// 设置因果关系（MemoryPlugin.OnEvent 中）
+if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
+    rsp.RelationStore().SetParent(eventKey, parentKey)
+}
+
+// 查询因果关系
+if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
+    parent := rsp.RelationStore().GetParent(eventKey)
+    children := rsp.RelationStore().GetChildren(eventKey)
+}
+```
+
+因果链效果（通过独立的 RelationStore 管理 Parent-Child 关系）：
 
 ```
 1777198738547555000 (Event 1)
-  ParentKey: 0  (无前驱，首个事件)
+  RelationStore: parent=0  (无前驱)
 
 1777198739574803000 (Event 2)
-  ParentKey: 1777198738547555000  → 父 = Event 1
+  RelationStore: parent=1777198738547555000  → 父 = Event 1
 
 1777198739760667000 (Event 3)
-  ParentKey: 1777198739574803000  → 父 = Event 2
-
-1777198739760667001 (Event 4)
-  ParentKey: 1777198739760667000  → 父 = Event 3
+  RelationStore: parent=1777198739574803000  → 父 = Event 2
 ```
 
 ### 5.2 因果链的作用
 
 | 能力 | 说明 |
 |------|------|
-| **因果回溯** | 从当前事件沿 `ParentKey` 回溯历史事件 |
-| **分支追踪** | 支持多分支因果（通过不同的 ParentKey） |
+| **因果回溯** | 从当前事件沿 `RelationStore.GetParent()` 回溯历史事件 |
+| **分支追踪** | 支持多分支因果（通过 `RelationStore.GetChildren()`） |
 | **压缩通知** | 压缩通知中可引用被丢弃的因果链 |
 | **RecallAgent** | 按因果顺序展示检索结果 |
 
@@ -247,7 +262,7 @@ FullEvent 存储因果链 → Session.EventReference 不含因果链
 RecallAgent 可沿因果链回溯原始事件
 ```
 
-**关键**：压缩只修改发给 LLM 的消息视图，不修改 MemoryStore。`FullEvent.ParentKey` 在整个生命周期中保持不变。
+**关键**：压缩只修改发给 LLM 的消息视图，不修改 MemoryStore 和 RelationStore。因果关系在整个生命周期中保持不变。
 
 ---
 
@@ -282,6 +297,38 @@ type MemoryStore interface {
 var ErrVectorSearchNotSupported = fmt.Errorf("vector search not supported")
 ```
 
+### 6.1.1 RelationStoreProvider — 因果关系接口
+
+```go
+// memory/types.go:97-103
+type RelationStoreProvider interface {
+    RelationStore() RelationStore
+}
+
+// 编译时接口实现检查
+var (
+    _ RelationStoreProvider = (*InMemoryStore)(nil)
+    _ RelationStoreProvider = (*FileSegmentStore)(nil)
+)
+```
+
+**使用方式**（type assertion）：
+
+```go
+// 写入因果关系（MemoryPlugin.OnEvent 中）
+if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
+    rsp.RelationStore().SetParent(childEventKey, parentEventKey)
+}
+
+// 查询因果关系
+if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
+    parent := rsp.RelationStore().GetParent(eventKey)
+    children := rsp.RelationStore().GetChildren(eventKey)
+}
+```
+
+**设计原则**：内容与关系分离。`FullEvent` 存储不可变的事件内容，`RelationStore` 维护可变的因果关系。不是所有 MemoryStore 实现都支持因果关系，因此通过可选接口暴露。
+
 ### 6.2 QueryOptions — 查询过滤
 
 ```go
@@ -295,6 +342,7 @@ type QueryOptions struct {
     Limit        int      // 最大返回数量（0 = 无限制）
     Offset       int      // 分页偏移
     OrderBy      string   // "timestamp_asc" 或 "timestamp_desc"
+    Keyword      string   // 按关键词过滤 EventSummary 或 Content（大小写不敏感，空 = 不过滤）
 }
 ```
 
@@ -363,13 +411,13 @@ InMemoryStore
 
 ---
 
-## 八、FileBackend 实现
+## 八、FileSegmentStore 实现
 
 ### 8.1 数据结构
 
 ```go
-// memory/file_backend.go:16-19
-type FileBackend struct {
+// memory/segment_store.go:128-135
+type FileSegmentStore struct {
     dataDir string  // 如 "./data/tagent/events/" → 内部追加 {dataDir}/{partitionID}/{eventKey}.json
     mu      sync.RWMutex
 }
@@ -392,7 +440,6 @@ type FileBackend struct {
 ```json
 {
   "event_key": 1777198738547555000,
-  "parent_key": 0,
   "event_type": "external_input",
   "event_summary": "你好，我想了解今天的天气",
   "timestamp": 1712000001000,
@@ -419,7 +466,7 @@ type FileBackend struct {
 
 ## 九、两种实现的对比
 
-| 维度 | InMemoryStore | FileBackend |
+| 维度 | InMemoryStore | FileSegmentStore |
 |------|--------------|-------------|
 | **数据结构** | Go map | 每个事件一个 JSON 文件 |
 | **持久化** | 无 | 有 |
@@ -450,7 +497,7 @@ MemoryStore 接口通过可选方法支持向量语义搜索，为未来接入�
 ### 10.3 向量搜索空实现
 
 ```go
-// InMemoryStore 和 FileBackend 的向量搜索均为空实现
+// InMemoryStore 和 FileSegmentStore 的向量搜索均为空实现
 
 // SearchByEmbedding 总是返回错误
 func (s *InMemoryStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
@@ -468,16 +515,9 @@ func (s *InMemoryStore) SupportsVectorSearch() bool {
 }
 ```
 
-### 10.4 未来扩展方向
+### 10.4 扩展方向
 
-| 向量数据库 | 特点 | 适用场景 |
-|-----------|------|----------|
-| **Milvus** | 分布式、高可用 | 大规模生产环境 |
-| **Qdrant** | 轻量、易部署 | 中小规模 |
-| **pgvector** | PostgreSQL 扩展 | 已使用 PG 的项目 |
-| **Chroma** | 轻量、开发友好 | 原型、快速验证 |
-
-扩展时只需实现 `SearchByEmbedding` 和 `StoreEventWithEmbedding` 方法，同时将 `SupportsVectorSearch()` 改为返回 `true`。
+接入向量数据库时，实现 `SearchByEmbedding` 和 `StoreEventWithEmbedding` 方法，同时将 `SupportsVectorSearch()` 改为返回 `true`。
 
 ---
 
@@ -586,7 +626,7 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
 
             result := recallGetResult{
                 Key:       evt.EventKey,
-                ParentKey: evt.ParentKey,
+
                 Type:      evt.EventType,
                 Summary:   evt.EventSummary,
                 Content:   evt.Content,
@@ -594,8 +634,14 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
             }
 
             // Optionally include parent event summary
-            if args.IncludeParent && evt.ParentKey != 0 {
-                if parent, err := accessor.GetEvent(evt.ParentKey); err == nil && parent != nil {
+            // 通过 RelationStore 获取父事件
+            if args.IncludeParent {
+                var parentKey int64
+                if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
+                    parentKey = rsp.RelationStore().GetParent(evt.EventKey)
+                }
+                if parentKey != 0 {
+                    if parent, err := accessor.GetEvent(parentKey); err == nil && parent != nil {
                     result.Parent = &parentEventInfo{...}
                 }
             }
@@ -612,7 +658,7 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
 - `memory_query`：按查询条件检索事件列表，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
 - `memory_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
 - `memory_recent`：快速获取最近的 N 条事件，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
-- `memory_trace`：沿 ParentKey 因果链回溯，从指定事件追溯最多 20 步历史
+- `memory_trace`：沿 RelationStore 因果链回溯，从指定事件追溯最多 20 步历史
 
 > **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadNamespaces`（转换为 PartitionID 列表）注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。详见 [tool-architecture.md](../tool/tool-architecture.md) §七。
 
@@ -653,7 +699,7 @@ sequenceDiagram
     participant LLM as LLM
 
     MP->>MS: StoreEvent(eventKey, FullEvent)
-    Note over MS: FullEvent 持久化<br/>ParentKey 建立因果链
+    Note over MS: FullEvent 持久化<br/>RelationStore.SetParent 建立因果链
 
     RA->>MS: memory_query → QueryEvents(query)
     MS-->>RA: []EventReference
@@ -720,7 +766,7 @@ tagent.yaml → ReadNamespaces: ["tagent"]
 
 ### 13.0.1 InMemoryStore 按 path 共享实例
 
-对于 `type: file`，文件系统天然提供跨实例数据共享（两个 FileBackend 指向同一目录即可读对方分区的文件）。但对于 `type: memory`，两个 `NewInMemoryStore()` 是独立 Go 对象，需要显式共享。
+对于 `type: file`，文件系统天然提供跨实例数据共享（两个 FileSegmentStore 指向同一目录即可读对方分区的文件）。但对于 `type: memory`，两个 `NewInMemoryStore()` 是独立 Go 对象，需要显式共享。
 
 **解决方案**：`resolveMemoryStore()` 中对 `type: memory` 按 `path` 做轻量级注册表去重：
 
@@ -761,7 +807,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 | `file` | 文件系统目录路径 |
 | `memory` | 逻辑存储标识符——同 type + 同 path → 单例 |
 
-> `path` 在两种类型下均表示"存储定位符"。FileBackend 通过文件系统天然保证同路径→同存储；InMemoryStore 通过注册表显式保证。
+> `path` 在两种类型下均表示"存储定位符"。FileSegmentStore 通过文件系统天然保证同路径→同存储；InMemoryStore 通过注册表显式保证。
 
 ---
 
@@ -771,7 +817,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 
 | 需求 | Session 能满足吗 | MemoryStore 的优势 |
 |------|----------------|------------------|
-| 因果链 | Session.Events 是线性列表 | `ParentKey` 构建有向因果图 |
+| 因果链 | Session.Events 是线性列表 | `RelationStore.SetParent` 构建有向因果图 |
 | 精确 FullEvent 检索 | 需遍历所有事件 | `GetEvent(key)` O(1) |
 | 按类型/时间查询 | 框架支持有限 | `QueryEvents` 多维度过滤 |
 | 跨 Session 检索 | 单 Session 范围 | 可跨 Session 按 UserID 检索 |
@@ -783,7 +829,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 
 `EventReference` 仅包含 4 个字段（key、type、summary、timestamp），是 `FullEvent` 的轻量子集。调用方按需通过 `GetEvent(key)` 获取完整数据。
 
-### 14.3 为什么 FileBackend 每个事件一个文件？
+### 14.3 为什么 FileSegmentStore 每个事件一个文件？
 
 **原子性**：写入时仅修改单个文件，不影响其他事件。进程崩溃最多丢失正在写入的文件，不会破坏整个存储。
 

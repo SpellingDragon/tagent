@@ -38,8 +38,8 @@ import (
 //	        description_file: recall_tool_desc.md
 //	        event_params: [event_key]
 //	      - kind: tool
-//	        id: command
-//	        description_file: command_tool_desc.md
+//	        id: action
+//	        description_file: action_tool_desc.md
 //	  knowledge:
 //	    model: glm-4-flash
 //	    prompt:
@@ -92,6 +92,14 @@ type Config struct {
 	// Each application deserializes this into its own typed struct.
 	// This keeps Config generic — no app-specific fields pollute the shared structure.
 	App map[string]any `json:"app,omitempty" yaml:"app,omitempty"`
+
+	// TrajectoryDump enables recording every LLM call to JSONL files on disk.
+	// Default: false. When true, a TrajectoryRecorder wraps the model.
+	TrajectoryDump bool `json:"trajectory_dump,omitempty" yaml:"trajectory_dump,omitempty"`
+
+	// TrajectoryDir is the directory for trajectory JSONL files.
+	// Default: "data/trajectories". Each session gets its own file: {dir}/{session_id}.jsonl
+	TrajectoryDir string `json:"trajectory_dir,omitempty" yaml:"trajectory_dir,omitempty"`
 }
 
 // AgentConfig describes a single agent's configuration.
@@ -129,12 +137,13 @@ type AgentConfig struct {
 // Each agent has its own isolated storage instance.
 type MemoryConfig struct {
 	// Type selects the memory store implementation:
-	//   "memory" — in-memory store (default, lost on process exit)
-	//   "file"   — file-backed persistent store
+	//   "memory"    — in-memory store (default, lost on process exit)
+	//   "file"      — file-backed persistent store (requires rustviking CLI)
+	//   "localfile" — file-backed persistent store (JSON file KV, no external deps)
 	Type string `json:"type" yaml:"type"`
 
 	// Path is the storage location identifier:
-	//   - For "file" type: filesystem directory path
+	//   - For "file"/"localfile" type: filesystem directory path
 	//   - For "memory" type: logical store identifier — agents with the same
 	//     type: memory and same path share a single InMemoryStore instance
 	//   Empty value means an isolated store (no sharing).
@@ -146,6 +155,10 @@ type MemoryConfig struct {
 	//   read_namespaces: [tagent]
 	// This enables cross-agent memory access across partitions.
 	ReadNamespaces []string `json:"read_namespaces,omitempty" yaml:"read_namespaces,omitempty"`
+
+	// RustVikingBinary sets the rustviking CLI binary path for "file" type stores.
+	// Empty value uses "rustviking" (looked up via PATH).
+	RustVikingBinary string `json:"rustviking_binary,omitempty" yaml:"rustviking_binary,omitempty"`
 }
 
 // ToolRef declares a tool that an agent uses.
@@ -189,7 +202,7 @@ type ToolRef struct {
 	// deserializes into its own typed struct. This keeps ToolRef generic
 	// — no tool-specific fields pollute the shared structure.
 	//
-	// Example (command tool):
+	// Example (action tool):
 	//
 	//	properties:
 	//	  workspace: /tmp/tagent-workspace
@@ -197,8 +210,28 @@ type ToolRef struct {
 	//	  run_as_group: tagent-runner
 	Properties map[string]any `json:"properties,omitempty" yaml:"properties,omitempty"`
 
+	// Remote declares that this agent tool is a remote A2A agent.
+	// When set, tagent creates an a2aagent.A2AAgent instead of a local TagentAgent.
+	// The URL is the agent card endpoint (e.g., "http://knowledge-service:8088").
+	// Context is passed via RuntimeState → A2A metadata (auto-mapped by trpc framework).
+	//
+	// This field embodies the configuration layer separation:
+	//   - tagent YAML: agent definition (model, prompt, etc.) — here
+	//   - ToolRef.Remote.URL: connection info ("where is this agent?") — here
+	//   - trpc Go options: communication details (A2A protocol, TransferStateKey) — internal
+	Remote *RemoteConfig `json:"remote,omitempty" yaml:"remote,omitempty"`
+
 	// Extension: custom factory path (for non-builtin tools/agents)
 	Factory string `json:"factory,omitempty" yaml:"factory,omitempty"`
+}
+
+// RemoteConfig declares A2A connection info for a remote sub-agent.
+// tagent YAML only declares the URL; trpc communication options
+// (TransferStateKey, streaming, etc.) are derived internally by tagent.go.
+type RemoteConfig struct {
+	// URL is the A2A agent card endpoint (e.g., "http://knowledge-service:8088").
+	// The remote agent must expose an A2A server with agent card at /.well-known/agent.json.
+	URL string `json:"url" yaml:"url"`
 }
 
 // PromptConfig is an alias for prompt.CompositeConfig, providing bootstrap-style
@@ -269,8 +302,8 @@ func DefaultConfig() Config {
 					},
 					{
 						Kind:            ToolKindTool,
-						ID:              "command",
-						DescriptionFile: "command_tool_desc.md",
+						ID:              "action",
+						DescriptionFile: "action_tool_desc.md",
 					},
 				},
 			},
@@ -307,6 +340,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.RequestTimeoutSeconds <= 0 {
 		c.RequestTimeoutSeconds = 3600
+	}
+	if c.TrajectoryDir == "" {
+		c.TrajectoryDir = "data/trajectories"
 	}
 
 	// LOG_LEVEL env var overrides config file

@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,7 +20,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
+	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
+
+// msgMu ensures sequential message processing — only one InjectMessage +
+// outputCh consumption cycle runs at a time.
+var msgMu sync.Mutex
 
 func main() {
 	// 1. Load single config file (tagent.yaml)
@@ -73,11 +79,22 @@ func main() {
 	if apiEndpoint == "" {
 		apiEndpoint = "https://open.bigmodel.cn/api/paas/v4"
 	}
+	// TAGENT_API_ENDPOINT overrides config (e.g. AReaL proxy for RL training)
+	if envEndpoint := os.Getenv("TAGENT_API_ENDPOINT"); envEndpoint != "" {
+		apiEndpoint = envEndpoint
+	}
 	llmModel := openai.New(
 		effectiveModel,
 		openai.WithAPIKey(apiKey),
 		openai.WithBaseURL(apiEndpoint),
 	)
+
+	// Wrap in SwappableModel for runtime LLM endpoint updates.
+	// When AReaL adapter sends POST /task with llm_base_url, the HTTPAPI
+	// callback swaps the inner model to use AReaL's proxy URL (dynamically
+	// allocated port). This ensures all LLM requests are captured by AReaL's
+	// proxy for RL training (logprobs + completion_ids).
+	swappableModel := agent.NewSwappableModel(llmModel)
 
 	// 3. Load skills repository (optional)
 	var skillRepo *skill.FSRepository
@@ -90,31 +107,94 @@ func main() {
 		}
 	}
 
-	// Use the same model for summary generation (Stage 2 compression)
-	// Without this, SmartCompress drops old segments with only a notice string,
-	// causing context breakage. With SummaryModel, it generates LLM summaries.
-	ta, err := tagent.New(*tagentCfg,
-		tagent.WithModel(llmModel),
-		tagent.WithSummaryModel(llmModel),
+	// 4. Configure tagent options.
+	// Use swappableModel so HTTPAPI can redirect LLM requests to AReaL proxy.
+	opts := []tagent.Option{
+		tagent.WithModel(swappableModel),
+		tagent.WithSummaryModel(swappableModel),
 		tagent.WithSkillRepo(skillRepo),
-	)
+	}
+
+	ta, err := tagent.New(*tagentCfg, opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Create tagent agent failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer ta.Close()
 
-	// 3. Setup signal handling
+	// 5. Start persistent event loop (the only execution mode for top-level tagent)
+	//    User/Session ID 可通过环境变量覆盖（AReaL adapter 通过 HTTPAPI /task 提交任务时使用）
+	loopUser := os.Getenv("TAGENT_USER_ID")
+	if loopUser == "" {
+		loopUser = "wechat-user"
+	}
+	loopSession := os.Getenv("TAGENT_SESSION_ID")
+	if loopSession == "" {
+		loopSession = "wechat-session"
+	}
+	outputCh, err := ta.StartLoop(loopUser, loopSession)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Start loop failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 5b. Start HTTPAPI for local observability and RL task submission.
+	//     Endpoints: GET /healthz, POST /task
+	httpPort := os.Getenv("TAGENT_HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8089"
+	}
+	httpAPI := agent.NewHTTPAPI(ta)
+	// Set model update callback: when AReaL adapter sends llm_base_url,
+	// create a new openai model with that URL and swap it in.
+	httpAPI.SetModelUpdateFn(func(baseURL string) {
+		newModel := openai.New(
+			effectiveModel,
+			openai.WithAPIKey(apiKey),
+			openai.WithBaseURL(baseURL),
+		)
+		swappableModel.Swap(newModel)
+		// Update TrajectoryRecorder's endpoint to reflect the swap
+		if tr := ta.TrajectoryRecorder(); tr != nil {
+			tr.SetModelEndpoint(baseURL)
+		}
+		log.Infof("[HTTPAPI] LLM base URL updated to %s", baseURL)
+	})
+	go func() {
+		fmt.Printf("  HTTPAPI:     http://localhost:%s\n", httpPort)
+		if err := http.ListenAndServe(":"+httpPort, httpAPI); err != nil {
+			log.Warnf("HTTPAPI stopped: %v", err)
+		}
+	}()
+
+	// 6. Setup signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// 4. Create WeChat bot
+	// 7. OTLP telemetry — distributed tracing export (optional).
+	//    Set OTEL_EXPORTER_OTLP_ENDPOINT to enable (e.g., "localhost:4317" for Jaeger/Tempo).
+	//    Without this, the tracer is noop (zero overhead).
+	if otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); otlpEndpoint != "" {
+		otelCleanup, err := telemetrytrace.Start(ctx,
+			telemetrytrace.WithEndpoint(otlpEndpoint),
+			telemetrytrace.WithServiceName("tagent-wechat-bot"),
+		)
+		if err != nil {
+			log.Warnf("Failed to start OTLP tracing (non-fatal): %v", err)
+		} else {
+			defer otelCleanup()
+			fmt.Printf("  OTLP:        %s\n", otlpEndpoint)
+		}
+	}
+	fmt.Println("===========================================")
+
+	// 8. Create WeChat bot
 	slogLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	bot := wechat.NewBot(wechat.WithLogger(slogLogger))
 
-	// 5. Login
+	// 9. Login
 	fmt.Println("Logging in to WeChat...")
 	err = bot.Login(ctx, func(qrCode string) {
 		fmt.Println("\nPlease scan the QR code with WeChat:")
@@ -132,7 +212,7 @@ func main() {
 	}
 	fmt.Println("Login successful!")
 
-	// 6. Register message handler
+	// 10. Register message handler
 	requestTimeout := time.Duration(tagentCfg.RequestTimeoutSeconds) * time.Second
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
@@ -163,8 +243,14 @@ func main() {
 			}
 		}()
 
-		// Run tagent agent
-		response, err := generateResponse(reqCtx, ta, text)
+		// Run tagent agent via persistent event loop (sequential processing).
+		// tagent's built-in loop logging provides full observability:
+		//   [Loop.Batch#N] TOOL_CALL / TOOL_RESULT / FINAL_RESPONSE
+		//   [Loop.Batch#N] completed duration=... events=... tokens=...
+		// OTLP spans are exported when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+		msgMu.Lock()
+		response, err := generateResponse(reqCtx, ta, outputCh, text)
+		msgMu.Unlock()
 		close(done)
 
 		if err != nil {
@@ -194,7 +280,7 @@ func main() {
 		return bot.Reply(ctx, msg, response)
 	})
 
-	// 7. Run
+	// 11. Run
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)
@@ -203,49 +289,29 @@ func main() {
 	fmt.Println("Bot stopped gracefully.")
 }
 
-// generateResponse runs the tagent agent and returns the final output.
-// It logs audit information for each event received from the agent,
-// with heartbeat monitoring to detect stuck/deadlocked event loops.
-func generateResponse(ctx context.Context, ta *agent.TagentAgent, userMessage string) (string, error) {
-	startTime := time.Now()
-	log.Infof("[AUDIT] >>> user message: %s", truncate(userMessage, 200))
+// generateResponse injects the user message into tagent's persistent event loop
+// and collects the final output from the output channel.
+//
+// Logging and OTLP tracing are handled by tagent's built-in loop() —
+// this function only reads events to extract the final text response.
+func generateResponse(ctx context.Context, ta *agent.TagentAgent, outputCh <-chan *event.Event, userMessage string) (string, error) {
+	// Inject message into the persistent event loop
+	ta.InjectMessage(model.Message{
+		Role:    model.RoleUser,
+		Content: userMessage,
+	})
 
-	msg := model.NewUserMessage(userMessage)
-
-	eventCh, err := ta.RunSimple(ctx, "wechat-user", "wechat-session", msg)
-	if err != nil {
-		return "", fmt.Errorf("agent run failed: %w", err)
-	}
-
-	// Collect the final output with audit trail and heartbeat monitoring
-	var (
-		finalOutput   string
-		eventCount    int
-		lastEventTime = time.Now()
-		stats         sessionStats
-
-		// Tool call tracking (per tool name → call count)
-		toolCallCounts = make(map[string]int)
-	)
-
-	// Heartbeat: log a warning if no event received for 30s
-	heartbeatTicker := time.NewTicker(30 * time.Second)
-	defer heartbeatTicker.Stop()
-
-	// Use select-based event consumption instead of range,
-	// so we can detect context cancellation and heartbeat gaps.
+	// Consume events until final response (tagent logs all details internally)
+	var finalOutput string
 loop:
 	for {
 		select {
-		case evt, ok := <-eventCh:
+		case evt, ok := <-outputCh:
 			if !ok {
 				break loop // channel closed
 			}
-			eventCount++
-			lastEventTime = time.Now()
-			logAuditEvent(eventCount, evt, &stats)
-			trackToolCalls(evt, toolCallCounts)
 
+			// Extract final text response (no tool calls = final answer)
 			if evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 				if choice.Message.Content != "" && len(choice.Message.ToolCalls) == 0 {
@@ -253,25 +319,15 @@ loop:
 				}
 			}
 
-		case <-heartbeatTicker.C:
-			gap := time.Since(lastEventTime)
-			if gap > 60*time.Second {
-				log.Errorf("[AUDIT] ⚠️ NO EVENT for %v — agent may be stuck (total_events=%d, elapsed=%v)",
-					gap, eventCount, time.Since(startTime).Round(time.Second))
-			} else if gap > 30*time.Second {
-				log.Warnf("[AUDIT] no event for %v (total_events=%d, elapsed=%v)",
-					gap, eventCount, time.Since(startTime).Round(time.Second))
+			// Final response for this batch — stop consuming
+			if evt.IsFinalResponse() {
+				break loop
 			}
 
 		case <-ctx.Done():
-			log.Warnf("[AUDIT] context cancelled after %v (events=%d): %v",
-				time.Since(startTime).Round(time.Second), eventCount, ctx.Err())
 			break loop
 		}
 	}
-
-	// Session summary (aligned with trpcclaw's observability)
-	logSessionSummary(startTime, eventCount, &stats, toolCallCounts)
 
 	if finalOutput == "" {
 		finalOutput = "No response generated"
@@ -280,196 +336,44 @@ loop:
 	return finalOutput, nil
 }
 
-// sessionStats tracks observability data aligned with trpcclaw's model.
-type sessionStats struct {
-	llmCalls       int
-	toolCalls      int
-	errors         int
-	compressions   int
-	totalTokensIn  int
-	totalTokensOut int
-	maxTokenUsage  int // peak prompt_tokens seen
-}
+// ---------------------------------------------------------------------------
+// WeChat config (minimal — extracted from tagent.yaml's app.wechat section)
+// ---------------------------------------------------------------------------
 
-// logAuditEvent logs audit information for a single agent event.
-func logAuditEvent(idx int, evt *event.Event, stats *sessionStats) {
-	if evt == nil {
-		log.Debugf("[AUDIT] event #%d: nil event", idx)
-		return
-	}
-
-	if evt.Response == nil {
-		log.Debugf("[AUDIT] event #%d: nil response tag=%s author=%s", idx, evt.Tag, evt.Author)
-		return
-	}
-
-	rsp := evt.Response
-
-	// Error event
-	if rsp.Error != nil {
-		stats.errors++
-		log.Errorf("[AUDIT] event #%d: ERROR type=%s message=%s",
-			idx, rsp.Error.Type, rsp.Error.Message)
-		return
-	}
-
-	// Runner completion
-	if evt.IsRunnerCompletion() {
-		log.Infof("[AUDIT] event #%d: RUNNER_COMPLETE", idx)
-		return
-	}
-
-	// Tool response
-	if rsp.Object == model.ObjectTypeToolResponse {
-		stats.toolCalls++
-		// Log tool response with result snippet for observability
-		snippet := ""
-		if len(rsp.Choices) > 0 {
-			content := rsp.Choices[len(rsp.Choices)-1].Message.Content
-			snippet = truncate(content, 200)
-		}
-		log.Infof("[AUDIT] event #%d: TOOL_RESPONSE tag=%s author=%s result=%s",
-			idx, evt.Tag, evt.Author, snippet)
-		return
-	}
-
-	// LLM response with tool calls
-	if len(rsp.Choices) > 0 {
-		choice := rsp.Choices[len(rsp.Choices)-1]
-		if len(choice.Message.ToolCalls) > 0 {
-			stats.llmCalls++
-			var toolNames []string
-			for _, tc := range choice.Message.ToolCalls {
-				toolNames = append(toolNames, tc.Function.Name)
-			}
-			log.Infof("[AUDIT] event #%d: LLM_TOOL_CALL tools=%v tag=%s author=%s",
-				idx, toolNames, evt.Tag, evt.Author)
-			for _, tc := range choice.Message.ToolCalls {
-				log.Debugf("[AUDIT] event #%d:   tool=%s args=%s",
-					idx, tc.Function.Name, truncate(string(tc.Function.Arguments), 500))
-			}
-		} else if choice.Message.Content != "" {
-			// LLM text response
-			stats.llmCalls++
-			log.Infof("[AUDIT] event #%d: LLM_RESPONSE content_len=%d tag=%s author=%s",
-				idx, len(choice.Message.Content), evt.Tag, evt.Author)
-			log.Debugf("[AUDIT] event #%d: LLM response content: %s",
-				idx, truncate(choice.Message.Content, 500))
-		}
-	}
-
-	// Usage info (always log at Info for token budget visibility)
-	if rsp.Usage != nil {
-		stats.totalTokensIn += int(rsp.Usage.PromptTokens)
-		stats.totalTokensOut += int(rsp.Usage.CompletionTokens)
-		if int(rsp.Usage.PromptTokens) > stats.maxTokenUsage {
-			stats.maxTokenUsage = int(rsp.Usage.PromptTokens)
-		}
-		log.Infof("[AUDIT] event #%d: TOKEN_BUDGET prompt=%d completion=%d total=%d",
-			idx, rsp.Usage.PromptTokens, rsp.Usage.CompletionTokens, rsp.Usage.TotalTokens)
-	}
-}
-
-// trackToolCalls extracts tool call names from an event for session statistics.
-func trackToolCalls(evt *event.Event, counts map[string]int) {
-	if evt == nil || evt.Response == nil {
-		return
-	}
-	for _, choice := range evt.Response.Choices {
-		for _, tc := range choice.Message.ToolCalls {
-			counts[tc.Function.Name]++
-		}
-	}
-}
-
-// logSessionSummary logs a session summary aligned with trpcclaw's observability model:
-// token budget, compressions, tool call distribution, errors.
-func logSessionSummary(startTime time.Time, eventCount int, stats *sessionStats, toolCallCounts map[string]int) {
-	elapsed := time.Since(startTime).Round(time.Millisecond)
-
-	log.Infof("[SESSION] ========== Summary ==========")
-	log.Infof("[SESSION] elapsed=%v events=%d llm_calls=%d tool_responses=%d errors=%d",
-		elapsed, eventCount, stats.llmCalls, stats.toolCalls, stats.errors)
-	log.Infof("[SESSION] tokens: in=%d out=%d peak_prompt=%d",
-		stats.totalTokensIn, stats.totalTokensOut, stats.maxTokenUsage)
-
-	if len(toolCallCounts) > 0 {
-		log.Infof("[SESSION] tool_calls: %v", toolCallCounts)
-	}
-
-	// Health warnings (aligned with trpcclaw's CheckExpectations)
-	if stats.errors > 0 {
-		log.Warnf("[SESSION] ⚠️ %d errors occurred during session", stats.errors)
-	}
-	if eventCount > 100 {
-		log.Warnf("[SESSION] ⚠️ high event count (%d), possible runaway loop", eventCount)
-	}
-	if stats.maxTokenUsage > 7000 {
-		log.Warnf("[SESSION] ⚠️ peak prompt tokens %d near context limit", stats.maxTokenUsage)
-	}
-
-	log.Infof("[SESSION] ==============================")
-}
-
-// truncate truncates a string to maxLen characters with ellipsis.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// marshalJSON is a helper to safely marshal a value for debug logging.
-func marshalJSON(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf("<marshal error: %v>", err)
-	}
-	return string(b)
-}
-
-// WechatAppConfig holds WeChat-specific configuration extracted from tagent.yaml's app.wechat section.
+// WechatAppConfig holds WeChat-specific configuration.
 type WechatAppConfig struct {
-	ConfigDir       string `yaml:"config_dir"`
-	TokenFile       string `yaml:"token_file"`
-	ContextTokenDir string `yaml:"context_token_dir"`
-}
-
-// DefaultWechatAppConfig returns default WeChat configuration.
-func DefaultWechatAppConfig() WechatAppConfig {
-	return WechatAppConfig{
-		ConfigDir:       ".wechat-config",
-		TokenFile:       "token.json",
-		ContextTokenDir: ".wechat-context-tokens",
-	}
+	ConfigDir       string `json:"config_dir"`
+	TokenFile       string `json:"token_file"`
+	ContextTokenDir string `json:"context_token_dir"`
 }
 
 // loadWechatConfig extracts WeChat config from tagent.yaml's app.wechat section.
 func loadWechatConfig(app map[string]any) WechatAppConfig {
-	cfg := DefaultWechatAppConfig()
+	cfg := WechatAppConfig{
+		ConfigDir:       ".wechat-config",
+		TokenFile:       "token.json",
+		ContextTokenDir: ".wechat-context-tokens",
+	}
 	if app == nil {
 		return cfg
 	}
-	raw, ok := app["wechat"]
-	if !ok {
-		return cfg
+	if raw, ok := app["wechat"].(map[string]any); ok {
+		if v, ok := raw["config_dir"].(string); ok {
+			cfg.ConfigDir = v
+		}
+		if v, ok := raw["token_file"].(string); ok {
+			cfg.TokenFile = v
+		}
+		if v, ok := raw["context_token_dir"].(string); ok {
+			cfg.ContextTokenDir = v
+		}
 	}
-	// Re-marshal/unmarshal to get typed struct from map[string]any
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return cfg
-	}
-	_ = json.Unmarshal(data, &cfg)
 	return cfg
 }
 
 // EnsureDirs creates necessary WeChat directories.
 func (c *WechatAppConfig) EnsureDirs() error {
-	dirs := []string{
-		c.ConfigDir,
-		c.ContextTokenDir,
-	}
-	for _, dir := range dirs {
+	for _, dir := range []string{c.ConfigDir, c.ContextTokenDir} {
 		if dir == "" {
 			continue
 		}
@@ -478,9 +382,4 @@ func (c *WechatAppConfig) EnsureDirs() error {
 		}
 	}
 	return nil
-}
-
-// GetWechatTokenFile returns the full path to the WeChat token file.
-func (c *WechatAppConfig) GetWechatTokenFile() string {
-	return c.ConfigDir + "/" + c.TokenFile
 }

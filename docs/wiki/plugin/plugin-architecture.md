@@ -17,9 +17,9 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `memory_plugin.go` | 206 | 事件持久化：推断类型、生成 EventKey、构建因果链、写入 StateDelta |
-| `summary_plugin.go` | 77 | 事件摘要：生成 Tag 并追加到事件 |
-| `memory_plugin_test.go` | 261 | 单元测试：覆盖类型推断、因果链、摘要策略 |
+| `memory_plugin.go` | 222 | 事件持久化：推断类型、生成 EventKey、构建因果链、写入 StateDelta |
+| `summary_plugin.go` | 76 | 事件摘要：生成 Tag 并追加到事件 |
+| `memory_plugin_test.go` | 165 | 单元测试：覆盖类型推断、因果链、摘要策略 |
 
 ---
 
@@ -38,7 +38,7 @@ graph TB
     end
 
     subgraph "tagent/memory"
-        MS["MemoryStore\n(InMemory / FileBackend)"]
+        MS["MemoryStore\n(InMemory)"]
     end
 
     subgraph "tagent/event"
@@ -140,7 +140,7 @@ func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *
 type MemoryPlugin struct {
     memStore      memory.MemoryStore  // 存储后端
     mu            sync.Mutex          // 保护 lastEventKeys 并发安全
-    lastEventKeys map[int]int64       // PartitionID → 前驱 EventKey（分区级因果链）
+    lastEventKeys map[string]int64   // "partitionID:sessionID" → 前驱 EventKey（分区+会话级因果链）
 }
 ```
 
@@ -164,9 +164,14 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     // Step 3: 使用 tagent/event 包统一推断事件类型并生成摘要
     eventType, eventSummary := p.inferEventInfo(evt)
 
-    // Step 4: 从分区级因果链获取前驱 Key
+    // Step 4: 从分区+会话级因果链获取前驱 Key
+    sessionID := ""
+    if inv != nil && inv.Session != nil {
+        sessionID = inv.Session.ID
+    }
+    causalKey := fmt.Sprintf("%d:%s", partitionID, sessionID)
     p.mu.Lock()
-    parentKey := p.lastEventKeys[partitionID]
+    parentKey := p.lastEventKeys[causalKey]
     p.mu.Unlock()
 
     // Step 5: 提取时间戳
@@ -176,7 +181,6 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     fullEvent := memory.FullEvent{
         EventKey:     eventKey,
         PartitionID:  partitionID,
-        ParentKey:    parentKey,
         EventType:    eventType,
         EventSummary: eventSummary,
         Timestamp:    timestamp,
@@ -208,10 +212,16 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
     evt.StateDelta["event_type"] = []byte(eventType)
 
-    // Step 10: 更新分区级因果链
+    // Step 10: 更新分区+会话级因果链，并通过 RelationStore 维护因果关系
     p.mu.Lock()
-    p.lastEventKeys[partitionID] = eventKey
+    p.lastEventKeys[causalKey] = eventKey
     p.mu.Unlock()
+    if parentKey > 0 {
+        // 通过 RelationStoreProvider type assertion 访问因果关系
+        if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
+            rsp.RelationStore().SetParent(eventKey, parentKey)
+        }
+    }
 
     return evt, nil
 }
@@ -219,17 +229,17 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 
 ### 5.3 因果链机制
 
-每个事件通过 `ParentKey`（int64）引用前驱事件，构成一条有向事件链：
+每个事件通过 `RelationStore.SetParent(childKey, parentKey)` 维护因果关系，构成一条有向事件链：
 
 ```
 1777198738547555000 (事件1)
-  ParentKey: 0  (无前驱)
+  RelationStore: parent=0  (无前驱)
 
 1777198739574803000 (事件2)
-  ParentKey: 1777198738547555000  → 父 = 事件1
+  RelationStore: parent=1777198738547555000  → 父 = 事件1
 
 1777198739760667000 (事件3)
-  ParentKey: 1777198739574803000  → 父 = 事件2
+  RelationStore: parent=1777198739574803000  → 父 = 事件2
 ```
 
 **作用**：
@@ -439,7 +449,7 @@ func NewSnowflakeEventKey(partitionID int, nowMs int64) int64
 type FullEvent struct {
     EventKey     int64                // Snowflake int64
     PartitionID  int                  // 存储分区
-    ParentKey    int64                // 前驱 EventKey（0 = 无前驱）
+    // ParentKey 已移除：因果关系由 RelationStore 维护
     EventType    string
     EventSummary string
     Timestamp    int64                // Unix 毫秒
@@ -477,14 +487,14 @@ MemoryPlugin.OnEvent → 构建 FullEvent → StoreEvent(int64 Key)
 
 ## 十一、MemoryStore 存储方式
 
-> **说明**：MemoryStore 的完整接口定义、InMemoryStore 和 FileBackend 的实现细节、RAG 向量搜索支持等，请参阅 [memory-architecture.md](../memory/memory-architecture.md) §六~§十。
+> **说明**：MemoryStore 的完整接口定义、InMemoryStore 和 FileSegmentStore 的实现细节、RAG 向量搜索支持等，请参阅 [memory-architecture.md](../memory/memory-architecture.md) §六~§十。
 
 ### 11.1 当前实现要点
 
 | 存储 | Key 类型 | 结构 | 分区 |
 |------|---------|------|------|
 | InMemoryStore | `int64` | `map[int]map[int64]FullEvent` | 按 PartitionID 双层 map |
-| FileBackend | `int64` | `{dataDir}/{partitionID}/{eventKey}.json` | 按 PartitionID 子目录 |
+| FileSegmentStore | `int64` | `{dataDir}/{partitionID}/{eventKey}.json` | 按 PartitionID 子目录 |
 
 ### 11.2 存储分区的隔离语义
 
@@ -839,7 +849,7 @@ sequenceDiagram
 | **存储粒度** | 整个 `event.Event` 对象（包含完整 Response） | `FullEvent`（完整细节）+ `EventReference`（轻量引用） |
 | **用途** | LLM 请求上下文构建、事件回放 | 因果链追踪、按需检索、精确查找 |
 | **是否跨 Session** | 单 Session 内（按 AppName:UserID:SessionID） | 可跨 Session 检索（按 UserID 等维度） |
-| **持久化方式** | 框架 SessionService（MySQL/Redis/PostgreSQL 等） | tagent 自定义后端（InMemory / FileBackend） |
+| **持久化方式** | 框架 SessionService（MySQL/Redis/PostgreSQL 等） | tagent 自定义后端（InMemoryStore / FileSegmentStore） |
 | **数据是否压缩** | Session.Events 保留原始事件（Summaries 机制做摘要） | MemoryStore 中 FullEvent 不压缩（压缩在 LLM 视图层处理） |
 
 ### 14.2 Session 数据结构
@@ -871,7 +881,7 @@ type Session struct {
 type FullEvent struct {
     EventKey     int64              // Snowflake int64 唯一标识符
     PartitionID  int                // 存储分区
-    ParentKey    int64              // 因果链（0 = 无前驱）
+    // ParentKey 已移除：因果关系由 RelationStore 维护
     EventType    string
     EventSummary string             // 用于 LLM 推理的摘要
     Content      string             // 原始内容
@@ -946,11 +956,11 @@ Session 已有的 `Session.Events`（完整 event.Event）和框架的 Summaries
 
 | 需求 | Session 能满足吗 | MemoryStore 提供的能力 |
 |------|----------------|----------------------|
-| **因果链** | Session.Events 是线性列表，无因果链 | FullEvent.ParentKey 构建有向因果图 |
+| **因果链** | Session.Events 是线性列表，无因果链 | RelationStore 构建有向因果图 |
 | **精确 FullEvent 检索** | Session.Events 需遍历所有事件 | GetEvent(key) O(1) 直接定位 |
 | **按类型/时间范围检索** | 框架 Summaries 支持有限 | QueryEvents 支持多维度过滤 |
 | **跨 Session 检索** | 单 Session 范围 | 可按 UserID 跨 Session 检索 |
 | **tool_calls 原始数据** | Session.Events.Response 有 | FullEvent.ToolCalls 有，且不随 LLM 视图变化 |
-| **因果回溯** | 无 | ParentKey 支持按因果链回溯历史 |
+| **因果回溯** | 无 | RelationStore.GetParent() 支持按因果链回溯历史 |
 
 **结论**：Session 是框架提供的通用会话管理，MemoryStore 是 tagent 的差异化能力（结构化因果记忆 + 按需精确检索）。两者互补而非替代。

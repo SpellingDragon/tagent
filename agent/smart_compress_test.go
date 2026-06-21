@@ -129,9 +129,11 @@ func TestSmartCompress_Stage1Only(t *testing.T) {
 	// Should keep: system + compress notice + 1 recent task
 	assert.Less(t, len(result), len(messages), "compressed messages should be fewer")
 	assert.Equal(t, model.RoleSystem, result[0].Role, "first message should be system")
-	// The last messages should be from the most recent task
-	assert.Equal(t, "task 3", result[len(result)-2].Content)
-	assert.Equal(t, "result 3", result[len(result)-1].Content)
+	// The last messages should be from the most recent task, followed by guidance
+	assert.Equal(t, "task 3", result[len(result)-3].Content)
+	assert.Equal(t, "result 3", result[len(result)-2].Content)
+	// Last message is guidance (no pending user since all segments are complete)
+	assert.Equal(t, model.RoleUser, result[len(result)-1].Role)
 }
 
 func TestSmartCompress_PreservesSystem(t *testing.T) {
@@ -206,9 +208,10 @@ func TestSmartCompress_NoSystem(t *testing.T) {
 	}
 
 	result := sc.Compress(context.Background(), messages, nil)
-	assert.Less(t, len(result), len(messages), "should compress even without system message")
-	// First message should be the compress notice
-	assert.Equal(t, model.RoleSystem, result[0].Role)
+	// Without system message, compress still happens. Message count may stay same
+	// (compress notice replaces old segment, guidance message appended).
+	// The key check is that the first message is the compress notice.
+	assert.Equal(t, model.RoleSystem, result[0].Role, "first message should be compress notice")
 }
 
 // ============================================================================
@@ -230,7 +233,7 @@ func TestSmartCompress_Fallback_NoModel(t *testing.T) {
 	result := sc.Compress(context.Background(), messages, nil)
 
 	// The compress notice should be the second message (after system)
-	require.Len(t, result, 4) // system + compress + 1 recent task (2 msgs)
+	require.Len(t, result, 5) // system + compress + 1 recent task (2 msgs) + guidance
 	compressMsg := result[1]
 	assert.Equal(t, model.RoleSystem, compressMsg.Role)
 	// Should contain the [Compressed: ...] format
