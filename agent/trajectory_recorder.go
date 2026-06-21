@@ -98,6 +98,8 @@ func NewTrajectoryRecorder(inner model.Model, trajectoryDir, modelEndpoint strin
 		recordCh: make(chan *TrajectoryRecord, channelBufferSize),
 	}
 
+	log.Infof("[TrajectoryRecorder] initialized: dir=%s endpoint=%s", trajectoryDir, modelEndpoint)
+
 	tr.wg.Add(1)
 	go tr.writeLoop()
 
@@ -277,6 +279,7 @@ func (tr *TrajectoryRecorder) writeLoop() {
 			return nil, err
 		}
 		openFiles[sessionID] = f
+		log.Infof("[TrajectoryRecorder] writing to %s", path)
 		return f, nil
 	}
 

@@ -121,6 +121,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		rc.trajectoryRecorder = tr
 		rc.model = tr
+		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s", cfg.TrajectoryDir)
 		// Also wrap summary model if present
 		if rc.summaryModel != nil {
 			// Summary model shares the same recorder (same JSONL files)
