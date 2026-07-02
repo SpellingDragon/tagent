@@ -20,22 +20,8 @@ import (
 // AgentToolWrapper Declaration tests
 // ============================================================================
 
-// mockRunner is a minimal Runner implementation for testing AgentToolWrapper.Call.
-// It returns an immediately-closed channel so Call completes without events.
-type mockRunner struct{}
-
-func (m *mockRunner) Run(
-	ctx context.Context,
-	userID, sessionID string,
-	message model.Message,
-	_ ...agent.RunOption,
-) (<-chan *event.Event, error) {
-	ch := make(chan *event.Event)
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockRunner) Close() error { return nil }
+// mockRunner has been removed. All tests now use the AgentLoop path
+// directly with a proper config + model.
 
 // TestAgentToolWrapper_Declaration_WithEventKeys verifies that Declaration
 // includes event_keys parameter when eventParams contains "event_key".
@@ -135,7 +121,6 @@ func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
 	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
 	subAgent := &TagentAgent{
 		name:         "test-tool",
-		runner:       &mockRunner{},
 		preprocessor: preproc,
 		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
 	}
@@ -170,7 +155,10 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 		EventSummary: "test", Content: "test",
 	}))
 
-	subAgent := &TagentAgent{name: "test-tool", runner: &mockRunner{}}
+	subAgent := &TagentAgent{
+		name:   "test-tool",
+		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
 	// Call with both valid and invalid event_keys
@@ -178,7 +166,7 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 	jsonArgs := fmt.Sprintf(`{"request":"test","event_keys":[%d,%d]}`, key, nonexistentKey)
 	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
-	assert.Contains(t, result, "tool agent completed without output")
+	assert.Contains(t, result, "mock response")
 	// Only the valid key should be injected; the non-existent key should be skipped
 	require.Nil(t, subAgent.pendingExternalEvents, "external events should be consumed")
 }
@@ -189,14 +177,17 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 
-	subAgent := &TagentAgent{name: "test-tool", runner: &mockRunner{}}
+	subAgent := &TagentAgent{
+		name:   "test-tool",
+		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
 	// Call without event_keys
 	jsonArgs := []byte(`{"request":"do something"}`)
 	result, err := wrapper.Call(context.Background(), jsonArgs)
 	require.NoError(t, err)
-	assert.Contains(t, result, "tool agent completed without output")
+	assert.Contains(t, result, "mock response")
 
 	// No external events should have been injected
 	require.Nil(t, subAgent.pendingExternalEvents)
@@ -204,13 +195,16 @@ func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 
 // TestAgentToolWrapper_Call_EmptyArgs verifies that Call works with empty args.
 func TestAgentToolWrapper_Call_EmptyArgs(t *testing.T) {
-	subAgent := &TagentAgent{name: "test-tool", runner: &mockRunner{}}
+	subAgent := &TagentAgent{
+		name:   "test-tool",
+		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", nil, nil)
 
 	// Call with empty args
 	result, err := wrapper.Call(context.Background(), []byte(`{}`))
 	require.NoError(t, err)
-	assert.Contains(t, result, "tool agent completed without output")
+	assert.Contains(t, result, "mock response")
 }
 
 // TestAgentToolWrapper_Call_InvalidJSON verifies that Call returns an error
@@ -394,10 +388,10 @@ func TestSerializeDeserialize_Empty(t *testing.T) {
 // TestTagentAgent_Run_RuntimeStateContext verifies that Run reads
 // external_context from RuntimeState and injects it into the message.
 func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
-	// Create a TagentAgent with mock runner
+	// Create a TagentAgent with config (no runner needed for Run path)
 	ta := &TagentAgent{
 		name:   "test-agent",
-		runner: &mockRunner{},
+		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
 	}
 
 	// Serialize external context
@@ -440,7 +434,7 @@ func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 func TestTagentAgent_Run_NoRuntimeState(t *testing.T) {
 	ta := &TagentAgent{
 		name:   "test-agent",
-		runner: &mockRunner{},
+		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
 	}
 
 	inv := agent.NewInvocation(

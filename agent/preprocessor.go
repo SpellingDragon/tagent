@@ -35,11 +35,6 @@ type Preprocessor struct {
 	tokenCounter TokenCounter
 	maxTokens    int
 	thresholdPct float64
-
-	// session is the current agent's session. It is set by the AgentLoop
-	// when the session becomes available, and cleared on session close.
-	// Used by injectEventKeyPrefixes for positional event_key matching.
-	session *session.Session
 }
 
 // NewPreprocessor creates a Preprocessor with the given dependencies.
@@ -58,11 +53,6 @@ func NewPreprocessor(
 	}
 }
 
-// SetSession sets the session reference used for event_key prefix injection.
-// Pass nil to clear (e.g., on session close).
-func (p *Preprocessor) SetSession(sess *session.Session) {
-	p.session = sess
-}
 
 // ProcessResult is the output of Preprocessor.Process.
 type ProcessResult struct {

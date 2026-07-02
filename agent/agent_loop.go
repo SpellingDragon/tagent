@@ -22,15 +22,19 @@ import (
 //
 // Per iteration, the AgentLoop:
 //  1. Pulls a batch of events from the EventBus (blocks until available).
-//  2. Calls Preprocessor.Process to get messages + shouldCallModel.
-//  3. If shouldCallModel is false → dispatches tool_use events asynchronously
-//     and returns to step 1.
-//  4. If shouldCallModel is true → calls model.GenerateContent.
-//  5. Parses the response:
-//     - tool_calls present → publishes tool_use events to bus + dispatches them.
+//  2. Dispatches any tool_use events in the batch asynchronously (goroutines).
+//     Tool dispatch happens on consumption, not production — handleResponse
+//     only publishes tool_use to bus, the main loop dispatches on next Pull.
+//  3. Persists any external_input events via onEvent callback (session + MemoryStore).
+//  4. Calls Preprocessor.Process to get messages + shouldCallModel.
+//  5. If shouldCallModel is false → returns to step 1.
+//  6. If shouldCallModel is true → calls model.GenerateContent.
+//  7. Parses the response:
+//     - tool_calls present → publishes tool_use events to bus + onEvent
+//       (NOT dispatched here — dispatched on next Pull iteration).
 //     - no tool_calls (final response) → emits agent_output to outputCh
-//     (NOT to bus — avoids self-triggering).
-//  6. Loops back to step 1.
+//       (NOT to bus — avoids self-triggering).
+//  8. Loops back to step 1.
 //
 // The AgentLoop is NOT safe to run concurrently from multiple goroutines —
 // it is expected to run in a single dedicated goroutine (started by StartLoop).
@@ -42,7 +46,6 @@ type AgentLoop struct {
 	toolMap      map[string]trpctool.Tool
 	outputCh     chan *event.Event
 	session      *session.Session
-	sessionSvc   session.Service
 	name         string
 	maxToolIters int
 	systemPrompt string
@@ -66,8 +69,6 @@ type AgentLoopConfig struct {
 	Model        model.Model
 	Tools        []trpctool.Tool
 	OutputCh     chan *event.Event
-	Session      *session.Session
-	SessionSvc   session.Service
 	Name         string
 	MaxToolIters int
 	SystemPrompt string
@@ -98,8 +99,6 @@ func NewAgentLoop(cfg AgentLoopConfig) *AgentLoop {
 		tools:        cfg.Tools,
 		toolMap:      toolMap,
 		outputCh:     cfg.OutputCh,
-		session:      cfg.Session,
-		sessionSvc:   cfg.SessionSvc,
 		name:         cfg.Name,
 		maxToolIters: maxIters,
 		systemPrompt: cfg.SystemPrompt,
@@ -154,7 +153,17 @@ func (al *AgentLoop) Run(ctx context.Context) {
 			continue
 		}
 
-		// Step 1: Persist external_input events to session + MemoryStore
+		// Step 1: Dispatch tool_use events (consumed from bus, not produced in handleResponse).
+		// Tool dispatch happens here rather than in handleResponse so that tool_use
+		// events are dispatched when the AgentLoop pulls them from the bus, not when
+		// they are produced. This decouples production from execution.
+		for _, evt := range events {
+			if evt != nil && evt.Type == TypeToolUse && evt.ToolCall != nil {
+				al.dispatchToolUse(ctx, *evt.ToolCall)
+			}
+		}
+
+		// Step 2: Persist external_input events to session + MemoryStore
 		// BEFORE Preprocessor.Process reads session.Events.
 		if al.onEvent != nil {
 			for _, evt := range events {
@@ -165,6 +174,7 @@ func (al *AgentLoop) Run(ctx context.Context) {
 			}
 		}
 
+		// Step 3: Build messages and decide whether to call model.
 		result := al.preprocessor.Process(ctx, events, al.session)
 
 		if !result.ShouldCallModel {
@@ -255,8 +265,11 @@ func (al *AgentLoop) callModel(ctx context.Context, messages []model.Message) (*
 }
 
 // handleResponse inspects the model's response and takes action:
-//   - tool_calls → publish tool_use events to bus + dispatch, returns true
+//   - tool_calls → publish tool_use events to bus + onEvent, returns true
 //   - no tool_calls → emit agent_output to outputCh (NOT to bus), returns false
+//
+// Tool dispatch is NOT done here; it happens in the main Run() loop when
+// tool_use events are consumed from the bus on the next Pull iteration.
 func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) bool {
 	if resp == nil || len(resp.Choices) == 0 {
 		log.Warnf("[AgentLoop:%s] empty response", al.name)
@@ -289,9 +302,6 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 		toolCallEvt := event.NewResponseEvent("", al.name, resp)
 		al.emitEvent(toolCallEvt)
 
-		for _, tc := range toolCalls {
-			al.dispatchToolUse(ctx, tc)
-		}
 		return true
 	}
 
@@ -486,9 +496,6 @@ func (al *AgentLoop) dispatchSubAgent(
 // attached to the agent (e.g., by TagentAgent.Run or StartLoop).
 func (al *AgentLoop) SetSession(sess *session.Session) {
 	al.session = sess
-	if al.preprocessor != nil {
-		al.preprocessor.SetSession(sess)
-	}
 }
 
 // SetOnEvent sets the onEvent callback. Called after TagentAgent is created

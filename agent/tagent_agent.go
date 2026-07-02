@@ -135,6 +135,30 @@ const (
 	DefaultAgentDescription  = "TagentAgent - AI assistant powered by tagent"
 )
 
+// buildCompressorOpts builds SmartCompressor options from TagentConfig.
+// Shared by NewTagentAgent and Run() to avoid duplicating option-building logic.
+func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
+	opts := []SmartCompressorOption{
+		WithMaxTokens(cfg.MaxTokens),
+	}
+	if cfg.KeepRecentTasks > 0 {
+		opts = append(opts, WithKeepRecentTasks(cfg.KeepRecentTasks))
+	}
+	if cfg.SummaryModel != nil {
+		opts = append(opts, WithSummaryModel(cfg.SummaryModel))
+	}
+	return opts
+}
+
+// newPreprocessorFromConfig creates a Preprocessor from TagentConfig.
+// Shared by NewTagentAgent and Run() so that Run() does not need to access
+// the parent Preprocessor's private fields (maxTokens, tokenCounter, thresholdPct).
+func newPreprocessorFromConfig(cfg *TagentConfig) *Preprocessor {
+	compressor := NewSmartCompressor(buildCompressorOpts(cfg)...)
+	counter := NewDefaultTokenCounter()
+	return NewPreprocessor(compressor, counter, cfg.MaxTokens, cfg.CompressThreshold)
+}
+
 // NewTagentAgent creates a new TagentAgent with the given configuration.
 //
 // In the event-driven architecture, NewTagentAgent:
@@ -176,19 +200,8 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 2. Create MemoryPlugin (OnEvent: event persistence + causal chain + StateDelta)
 	memPlugin := plugin.NewMemoryPlugin(memStore)
 
-	// 3. Create SmartCompressor + Preprocessor (replacing ContextIntervention)
-	compressorOpts := []SmartCompressorOption{
-		WithMaxTokens(cfg.MaxTokens),
-	}
-	if cfg.KeepRecentTasks > 0 {
-		compressorOpts = append(compressorOpts, WithKeepRecentTasks(cfg.KeepRecentTasks))
-	}
-	if cfg.SummaryModel != nil {
-		compressorOpts = append(compressorOpts, WithSummaryModel(cfg.SummaryModel))
-	}
-	compressor := NewSmartCompressor(compressorOpts...)
-	tokenCounter := NewDefaultTokenCounter()
-	preprocessor := NewPreprocessor(compressor, tokenCounter, cfg.MaxTokens, cfg.CompressThreshold)
+	// 3. Create Preprocessor (replacing ContextIntervention)
+	preprocessor := newPreprocessorFromConfig(cfg)
 
 	// Apply identity defaults
 	name := cfg.Name
@@ -352,13 +365,9 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		message = ta.injectExternalContext(message)
 	}
 
-	// If preprocessor is nil (e.g., in tests with mock runner), fall back
-	// to the legacy runner.Run path.
-	if ta.preprocessor == nil || ta.config == nil || ta.config.Model == nil {
-		if ta.runner == nil {
-			return nil, fmt.Errorf("agent %q: preprocessor and runner both nil", ta.name)
-		}
-		return ta.runner.Run(ctx, userID, sessionID, message)
+	// Validate required fields before creating sub-agent AgentLoop.
+	if ta.config == nil || ta.config.Model == nil {
+		return nil, fmt.Errorf("agent %q: config or model is nil", ta.name)
 	}
 
 	// Create a fresh EventBus + AgentLoop for this invocation.
@@ -367,22 +376,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// concurrent goroutines).
 	invBus := NewEventBus()
 	invOutputCh := make(chan *event.Event, 100)
-	invCompressorOpts := []SmartCompressorOption{
-		WithMaxTokens(ta.preprocessor.maxTokens),
-	}
-	if ta.config.KeepRecentTasks > 0 {
-		invCompressorOpts = append(invCompressorOpts, WithKeepRecentTasks(ta.config.KeepRecentTasks))
-	}
-	if ta.config.SummaryModel != nil {
-		invCompressorOpts = append(invCompressorOpts, WithSummaryModel(ta.config.SummaryModel))
-	}
-	invCompressor := NewSmartCompressor(invCompressorOpts...)
-	invPreprocessor := NewPreprocessor(
-		invCompressor,
-		ta.preprocessor.tokenCounter,
-		ta.preprocessor.maxTokens,
-		ta.preprocessor.thresholdPct,
-	)
+	invPreprocessor := newPreprocessorFromConfig(ta.config)
 	invLoop := NewAgentLoop(AgentLoopConfig{
 		Bus:          invBus,
 		Preprocessor: invPreprocessor,
