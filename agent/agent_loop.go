@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -51,12 +52,6 @@ type AgentLoop struct {
 	// "conversation turn". Reset when the model returns a final response
 	// (no tool_calls). Used to enforce maxToolIters limit.
 	toolIterations int
-
-	// history accumulates the conversation context across rounds within
-	// a single turn (user → tool_calls → tool_results → ...). Reset when
-	// the model produces a final response (no tool_calls).
-	// Protected by maxHistoryMessages to prevent unbounded growth.
-	history []model.Message
 
 	// onEvent is an optional callback invoked for every event emitted
 	// to outputCh. Used for plugin integration (e.g., MemoryPlugin).
@@ -113,6 +108,24 @@ func NewAgentLoop(cfg AgentLoopConfig) *AgentLoop {
 	}
 }
 
+// wrapAsFrameworkEvent converts an AgentEvent (bus type) to a framework
+// event.Event suitable for MemoryPlugin.OnEvent and sessionSvc.AppendEvent.
+func (al *AgentLoop) wrapAsFrameworkEvent(evt *AgentEvent) *event.Event {
+	if evt == nil {
+		return nil
+	}
+	frameworkEvt := event.New("", al.name)
+	frameworkEvt.Timestamp = evt.Timestamp
+	if evt.Message != nil {
+		frameworkEvt.Response = &model.Response{
+			Choices: []model.Choice{{
+				Message: *evt.Message,
+			}},
+		}
+	}
+	return frameworkEvt
+}
+
 // Run executes the agent loop until ctx is cancelled.
 // It recovers from panics to avoid crashing the host process.
 func (al *AgentLoop) Run(ctx context.Context) {
@@ -141,19 +154,27 @@ func (al *AgentLoop) Run(ctx context.Context) {
 			continue
 		}
 
-		result := al.preprocessor.Process(ctx, events)
+		// Step 1: Persist external_input events to session + MemoryStore
+		// BEFORE Preprocessor.Process reads session.Events.
+		if al.onEvent != nil {
+			for _, evt := range events {
+				if evt != nil && evt.Type == tagentevent.TypeExternalInput && evt.Message != nil {
+					frameworkEvt := al.wrapAsFrameworkEvent(evt)
+					al.onEvent(frameworkEvt)
+				}
+			}
+		}
+
+		result := al.preprocessor.Process(ctx, events, al.session)
 
 		if !result.ShouldCallModel {
 			continue
 		}
 
-		// Build full message list: history + new messages from this round.
-		fullMessages := make([]model.Message, 0, len(al.history)+len(result.Messages))
-		fullMessages = append(fullMessages, al.history...)
-		fullMessages = append(fullMessages, result.Messages...)
-
-		// Call the model with full context.
-		resp, err := al.callModel(ctx, fullMessages)
+		// Call the model with the complete messages from Preprocessor.
+		// Preprocessor builds messages from session.Events (the single source
+		// of conversation history), so AgentLoop does not maintain its own.
+		resp, err := al.callModel(ctx, result.Messages)
 		if err != nil {
 			log.Errorf("[AgentLoop:%s] callModel failed: %v", al.name, err)
 			errEvt := event.NewErrorEvent("", al.name, "agent_error", err.Error())
@@ -165,21 +186,11 @@ func (al *AgentLoop) Run(ctx context.Context) {
 			continue
 		}
 
-		// Update history ONLY after successful model call.
-		// This prevents duplicate messages when callModel fails and the
-		// loop retries with the same or new events.
-		al.history = append(al.history, result.Messages...)
-		if len(resp.Choices) > 0 {
-			al.history = append(al.history, resp.Choices[0].Message)
-		}
-		al.history = trimHistory(al.history)
-
 		// Parse and act on the response.
 		hasToolCalls := al.handleResponse(ctx, resp)
 
-		// If no tool calls (final response), reset history for next turn.
+		// If no tool calls (final response), reset tool iteration counter.
 		if !hasToolCalls {
-			al.history = nil
 			al.toolIterations = 0
 		}
 	}
@@ -428,7 +439,8 @@ func (al *AgentLoop) dispatchCallable(
 }
 
 // dispatchSubAgent runs an AgentToolWrapper in a goroutine and publishes
-// the result to the bus.
+// the result to the bus. A 10-minute timeout protects against sub-agent
+// goroutine leaks if the sub-agent never terminates.
 func (al *AgentLoop) dispatchSubAgent(
 	ctx context.Context,
 	wrapper *AgentToolWrapper,
@@ -438,7 +450,10 @@ func (al *AgentLoop) dispatchSubAgent(
 		name := wrapper.agent.Info().Name
 		startTime := time.Now()
 
-		result, err := wrapper.Call(ctx, toolCall.Function.Arguments)
+		subCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+
+		result, err := wrapper.Call(subCtx, toolCall.Function.Arguments)
 		elapsed := time.Since(startTime)
 
 		var content string
@@ -446,6 +461,8 @@ func (al *AgentLoop) dispatchSubAgent(
 			content = fmt.Sprintf("[agent error] %s: %v", name, err)
 		} else if result == nil {
 			content = fmt.Sprintf("[agent %s] completed (no output)", name)
+		} else if b, marshalErr := json.Marshal(result); marshalErr == nil {
+			content = string(b)
 		} else {
 			content = fmt.Sprintf("[agent %s] %v", name, result)
 		}
@@ -465,19 +482,6 @@ func (al *AgentLoop) dispatchSubAgent(
 // Utilities
 // ---------------------------------------------------------------------------
 
-// trimHistory trims the history to at most max messages, keeping the most recent.
-// This prevents unbounded growth during long tool-call chains.
-const maxHistoryMessages = 100
-
-func trimHistory(h []model.Message) []model.Message {
-	if len(h) <= maxHistoryMessages {
-		return h
-	}
-	// Keep the most recent messages. The earliest messages in a long
-	// tool-call chain are least likely to be relevant.
-	return h[len(h)-maxHistoryMessages:]
-}
-
 // SetSession updates the session reference. Called when a session is
 // attached to the agent (e.g., by TagentAgent.Run or StartLoop).
 func (al *AgentLoop) SetSession(sess *session.Session) {
@@ -485,6 +489,12 @@ func (al *AgentLoop) SetSession(sess *session.Session) {
 	if al.preprocessor != nil {
 		al.preprocessor.SetSession(sess)
 	}
+}
+
+// SetOnEvent sets the onEvent callback. Called after TagentAgent is created
+// so the callback can close over the agent instance.
+func (al *AgentLoop) SetOnEvent(cb func(evt *event.Event)) {
+	al.onEvent = cb
 }
 
 // truncateString truncates s to at most n characters, appending "..." if truncated.

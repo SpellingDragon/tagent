@@ -37,33 +37,43 @@ The result is a persistent, event-driven agent that can run as:
 
 tagent's central design philosophy is **memory-driven, event-decoupled execution**:
 
-- The **Agent** coordinates tools and generates responses, but does not hold the complete execution history
-- **Tools** (sub-agents) receive `event_key` to fetch context from MemoryStore on demand — they are autonomous, not passive
-- **MemoryStore** is the only component that maintains the complete event chain (causal relationships, full content, timestamps)
+Three layers of data representation, each with a distinct purpose:
+
+| Layer | Location | Responsibility | Lifetime |
+|-------|----------|---------------|----------|
+| **EventBus AgentEvent** | Agent memory | Temporary trigger, distinguishes external_input / tool_use | Publish → Pull, then discarded |
+| **Session.Events** | session.Session | Working memory, sole history source for Preprocessor | During session lifetime |
+| **MemoryStore FullEvent** | File/DB | Long-term memory, recall tool queries | Permanent |
 
 ```mermaid
 graph TB
-    subgraph MS["MemoryStore (single source of truth)"]
-        EC["Event Chain<br/>(causal)"]
-        FE["FullEvent<br/>(complete)"]
-        EK["EventKey<br/>(Snowflake)"]
+    subgraph "Layer 1: EventBus (temporary)"
+        EB["AgentEvent<br/>(external_input/tool_use)"]
     end
 
-    AGT["Agent<br/>(coordinator)"]
-    TOOL["Tool<br/>(autonomous)"]
-    SESS["Session<br/>(lightweight refs)"]
+    subgraph "Layer 2: Session.Events (working memory)"
+        SESS["session.Events[]<br/>(complete, uncompressed)"]
+    end
 
-    AGT -->|"event_key"| MS
-    TOOL -->|"GetEvent(key)"| MS
-    MS -->|"EventReference[]"| SESS
+    subgraph "Layer 3: MemoryStore (persistent)"
+        MS["FullEvent<br/>(causal chain + full content)"]
+    end
 
-    style MS fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
-    style AGT fill:#fff3e0,stroke:#ef6c00
-    style TOOL fill:#e8f5e9,stroke:#2e7d32
+    EB -->|"onEvent callback"| SESS
+    EB -->|"onEvent callback"| MS
+    SESS -->|"Preprocessor reads"| LLM["[]model.Message<br/>(LLM Context, compressible)"]
+    MS -->|"recall tool query"| TOOL["Tool"]
+
+    style EB fill:#e3f2fd,stroke:#1565c0
     style SESS fill:#f3e5f5,stroke:#7b1fa2
+    style MS fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
+    style LLM fill:#fff3e0,stroke:#ef6c00
 ```
 
-**Key constraint**: Agent and Tool each see only what they need. Only MemoryStore knows the full picture.
+**Key constraints**:
+- **Session.Events is the sole history source** — AgentLoop does not maintain its own history
+- **onEvent callback is the write entry point** — all events are written to both Session and MemoryStore via onEvent
+- **Preprocessor builds LLM Context from Session.Events** — compression applies to full history, not just new batch
 
 ### Event Classification
 

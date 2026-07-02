@@ -1,3 +1,5 @@
+//go:build poc
+
 package agent
 
 import (

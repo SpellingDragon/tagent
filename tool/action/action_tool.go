@@ -340,7 +340,6 @@ type ActionProperties struct {
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
 	Command string            `json:"command"`
-	Mode    string            `json:"mode,omitempty"`
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`

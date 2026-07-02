@@ -51,6 +51,17 @@ func (p *MemoryPlugin) Register(r *plugin.Registry) {
 	r.OnEvent(p.onEvent)
 }
 
+// OnEvent is the exported entry point for direct invocation by the
+// event-driven AgentLoop. It delegates to the internal onEvent handler
+// and performs the same persistence + causal chain + StateDelta work.
+func (p *MemoryPlugin) OnEvent(
+	ctx context.Context,
+	inv *agent.Invocation,
+	evt *event.Event,
+) (*event.Event, error) {
+	return p.onEvent(ctx, inv, evt)
+}
+
 // onEvent is the EventHook that syncs events to MemoryStore.
 func (p *MemoryPlugin) onEvent(
 	ctx context.Context,

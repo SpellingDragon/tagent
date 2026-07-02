@@ -30,35 +30,45 @@ tagent 不是从零开始的 Agent 框架。它构建于 [trpc-agent-go](https:/
 
 ### 记忆即大脑
 
-tagent 的核心设计哲学是**记忆驱动、事件解耦的执行模式**：
+tagent 的核心设计哲学是**记忆驱动、事件解耦的执行模式**。
 
-- **Agent** 协调工具并生成响应，但不持有完整的执行历史
-- **工具**（子 Agent）接收 `event_key` 按需从 MemoryStore 获取上下文——它们是自主的，而非被动的
-- **MemoryStore** 是唯一维护完整事件链的组件（因果关系、完整内容、时间戳）
+三层数据表示各司其职：
+
+| 层 | 位置 | 职责 | 生命周期 |
+|-----|------|------|----------|
+| **EventBus AgentEvent** | Agent 内存 | 临时触发器，区分 external_input / tool_use | Publish → Pull 后丢弃 |
+| **Session.Events** | session.Session | 工作内存，Preprocessor 的唯一历史来源 | session 存活期间 |
+| **MemoryStore FullEvent** | 文件/DB | 长期记忆，recall 工具查询 | 永久 |
 
 ```mermaid
 graph TB
-    subgraph MS["MemoryStore (唯一真相源)"]
-        EC["事件链<br/>(因果)"]
-        FE["FullEvent<br/>(完整)"]
-        EK["EventKey<br/>(Snowflake)"]
+    subgraph "层1: EventBus (临时)"
+        EB["AgentEvent<br/>(external_input/tool_use)"]
     end
 
-    AGT["Agent<br/>(协调者)"]
-    TOOL["Tool<br/>(自主)"]
-    SESS["Session<br/>(轻量引用)"]
+    subgraph "层2: Session.Events (工作内存)"
+        SESS["session.Events[]<br/>(完整未压缩)"]
+    end
 
-    AGT -->|"event_key"| MS
-    TOOL -->|"GetEvent(key)"| MS
-    MS -->|"EventReference[]"| SESS
+    subgraph "层3: MemoryStore (持久化)"
+        MS["FullEvent<br/>(因果链 + 完整内容)"]
+    end
 
-    style MS fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
-    style AGT fill:#fff3e0,stroke:#ef6c00
-    style TOOL fill:#e8f5e9,stroke:#2e7d32
+    EB -->|"onEvent callback"| SESS
+    EB -->|"onEvent callback"| MS
+    SESS -->|"Preprocessor 读取"| LLM["[]model.Message<br/>(LLM Context, 可压缩)"]
+    MS -->|"recall 工具查询"| TOOL["Tool"]
+
+    style EB fill:#e3f2fd,stroke:#1565c0
     style SESS fill:#f3e5f5,stroke:#7b1fa2
+    style MS fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
+    style LLM fill:#fff3e0,stroke:#ef6c00
 ```
 
-**关键约束**：Agent 和 Tool 各自只看到自己需要的信息。只有 MemoryStore 知道全貌。
+**关键约束**：
+- **Session.Events 是唯一的历史来源** — AgentLoop 不维护自己的 history
+- **onEvent 回调是写入入口** — 所有事件通过 onEvent 同时写入 Session 和 MemoryStore
+- **Preprocessor 从 Session.Events 构建 LLM Context** — 压缩作用于完整历史，不是只处理新 batch
 
 ### 事件分类
 
@@ -87,7 +97,7 @@ graph TB
 | 工具视角 | 被动执行者，依赖 Agent 提供上下文 | 通过 `event_key` 自主访问 MemoryStore |
 | 记忆角色 | 可选组件 | 核心中枢（唯一真相源） |
 | 事件粒度 | 粗粒度（请求/响应） | 细粒度（每个动作/思考） |
-| 上下文溢出 | 硬限制或简单截断 | 两阶段压缩（任务边界 + LLM 摘要） |
+| 上下文溢出 | 硬限制或简单截断 | 两阶段压缩（任务边界 + LLM 摘要，作用于完整历史） |
 | 外部输入 | 必须等待当前轮次结束 | 随时发布到 EventBus，下一轮 Pull 即可处理 |
 
 > 详情：[event-architecture.md](docs/wiki/event/event-architecture.md), [memory-architecture.md](docs/wiki/memory/memory-architecture.md)

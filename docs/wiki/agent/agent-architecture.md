@@ -95,9 +95,94 @@ graph TB
 
 ---
 
-## 四、核心数据结构
+## 四、三层数据表示模型
 
-### 4.1 TagentAgent — 组合根
+事件驱动架构中存在三层数据表示，必须明确区分并正确流转：
+
+### 层 1: EventBus AgentEvent（触发器，临时）
+
+```go
+// agent/event_bus.go
+type AgentEvent struct {
+    ID        string           // UUID
+    Type      string           // "external_input" | "tool_use"
+    Source    string           // "user" | "tmux" | "meditation" | "subagent"
+    Timestamp time.Time
+    Message   *model.Message   // external_input 载荷
+    ToolCall  *model.ToolCall  // tool_use 载荷
+    Metadata  map[string]any   // 扩展数据
+}
+```
+
+- **生命周期**: 从 Publish 到 AgentLoop.Pull 消费，然后丢弃
+- **用途**: 触发 AgentLoop 执行，区分事件类型
+- **关键**: tool_use 事件只触发 dispatch，不进 LLM context
+
+### 层 2: Session Events（工作内存，完整未压缩）
+
+```go
+// trpc-agent-go/session/session.go
+type Session struct {
+    Events []event.Event  // 由 onEvent 回调追加
+    State  StateMap       // ApplyEventStateDelta 写入
+    // ...
+}
+
+// event.Event 包含:
+type Event struct {
+    *model.Response                    // 包含 Choices[0].Message
+    StateDelta map[string][]byte        // {"event_key":"12345", "event_type":"external_input"}
+    Timestamp  time.Time
+}
+```
+
+- **生命周期**: session 存活期间（StartLoop 到 StopLoop）
+- **用途**: Preprocessor 的唯一历史来源 — 从这里构建 LLM Context
+- **写入方式**: AgentLoop 通过 onEvent callback → sessionSvc.AppendEvent
+- **关键**: 这是唯一完整未压缩的对话历史，AgentLoop 不维护自己的 history
+
+### 层 3: MemoryStore FullEvent（长期记忆，持久化）
+
+```go
+// memory/store.go
+type FullEvent struct {
+    EventKey     int64           // Snowflake ID (编码 PartitionID)
+    PartitionID  int             // 从 AgentName FNV-1a hash
+    EventType    string          // "external_input" | "agent_output" | ...
+    EventSummary string          // 摘要
+    Content      string          // 完整内容
+    Response     *model.Response // 原始 LLM 响应
+}
+// 因果链通过 RelationStore.SetParent(key, parentKey) 维护
+```
+
+- **生命周期**: 永久（文件/DB 存储）
+- **用途**: recall 工具跨 session/agent 查询
+- **写入方式**: MemoryPlugin.OnEvent 同步写入（与 Session Events 在同一个 onEvent 调用中）
+
+### 层间数据流
+
+```
+EventBus AgentEvent (临时)
+    │
+    ├──▶ onEvent callback (AgentLoop 调用)
+    │       ├──▶ MemoryPlugin.OnEvent
+    │       │       ├──▶ MemoryStore.StoreEvent (层3: FullEvent + 因果链)
+    │       │       └── evt.StateDelta["event_key"] = "K1"
+    │       └──▶ sessionSvc.AppendEvent (层2: Session.Events)
+    │
+    └──▶ Preprocessor.Process
+            └── 读 session.Events → 构建 []model.Message (层1: LLM Context)
+                    ├── event_key 前缀注入 ([evt_K1|external_input] 内容)
+                    ├── token 预算检查 (完整 messages)
+                    └── SmartCompress (完整 messages，含历史)
+```
+
+---
+
+## 五、核心数据结构
+
+### 5.1 TagentAgent — 组合根
 
 ```go
 // tagent_agent.go (event-driven architecture)
@@ -110,8 +195,8 @@ type TagentAgent struct {
     // Framework integration (retained for session/plugin/trace)
     memStore   memory.MemoryStore
     config     *TagentConfig
-    runner     runner.Runner        // retained as shell for session+plugin management
-    sessionSvc session.Service
+    runner     runner.Runner        // shell for plugin lifecycle + sessionSvc
+    sessionSvc session.Service     // session.Events 管理
 
     // Persistent Event Loop
     outputCh   chan *event.Event    // 持久输出 channel
@@ -125,53 +210,27 @@ type TagentAgent struct {
     // Meditation manager
     meditationMgr *MeditationManager
 }
-
-// Closer is implemented by components that hold resources requiring cleanup
-// on agent shutdown (e.g., ActionTool stops its TmuxMonitor).
-type Closer interface {
-    Close() error
-}
 ```
 
 **Persistent Event Loop 字段说明：**
 
-- `mailbox`：`chan model.Message`（cap=256），Loop 模式下所有事件（用户输入、Tmux 通知）写入此 channel
-- `outputCh`：`chan *event.Event`（cap=100），Loop 转发 Runner 事件到此 channel，调用方通过 `IsFinalResponse()` 判断单次响应完成
+- `bus`：`*EventBus`（cap=256），所有事件（用户输入、Tmux 通知、工具结果）通过 Publish 写入
+- `outputCh`：`chan *event.Event`（cap=100），AgentLoop emit 事件到此 channel，调用方通过 `IsFinalResponse()` 判断单次响应完成
 - `loopCtx`/`loopCancel`：Loop 的 context，StopLoop 取消
-- `loopActive`：原子标志，InjectMessage 据此判断走 mailbox 还是走旧路径
+- `loopActive`：原子标志，InjectMessage 据此判断是否 publish 到 bus
 
-**外部上下文传递（两条路径）：**
+**InjectMessage 机制：**
 
-TagentAgent.Run 支持两条外部上下文注入路径，统一通过 `pendingExternalEvents` + `injectExternalContext` 消费：
-
-1. **RuntimeState 路径（远程/wrapper）**：`inv.RunOptions.RuntimeState["external_context"]` 包含序列化的 `ExternalContextEntry` JSON。Run 方法从中反序列化并调用 `IngestExternalEvents`。这是 A2A 兼容路径——A2AAgent 通过 `WithTransferStateKey` 自动将 RuntimeState 复制到 A2A metadata，A2A Server 自动将 metadata 映射回 RuntimeState，远程调用透明工作。
-2. **struct 字段路径（直接 API）**：通过 `IngestExternalEvents(events)` 直接设置 `pendingExternalEvents`。用于直接调用者（测试、嵌入式使用）。
-
-两条路径最终都通过 `injectExternalContext` 将事件摘要拼接到 user message 前面。
-
-**为什么需要 lastUserID / lastSessionID？**
-
-`InjectMessage` 在 TmuxMonitor 后台检测到 tmux 会话状态变更时，需要注入消息触发新一轮 Agent 迭代。由于回调签名没有 userID/sessionID 参数，只能缓存最近一次 `RunSimple` 调用传入的上下文。
-
-**InjectMessage 和正常消息走同一条路径吗？**
-
-是的。`InjectMessage` 和正常消息（`RunSimple`）调用的是**同一个** `ta.runner.Run()`，因此事件流经过完全相同的处理管道：
+`InjectMessage` 将消息包装为 `AgentEvent{type:external_input}` 发布到 EventBus。这是所有外部输入的统一入口：用户消息、TmuxMonitor 回调、Meditation 事件都通过此路径进入事件管线。
 
 ```
-RunSimple → ta.runner.Run(ctx, userID, sessionID, msg)
-InjectMessage → ta.runner.Run(ctx, lastUserID, lastSessionID, msg)
-                              │
-                              ▼
-              LLMAgent → Event → MemoryPlugin → Session
-              → ContextIntervention → SmartCompress → ...
+InjectMessage(msg) → bus.Publish(NewExternalInputEvent("inject", msg))
+                                    │
+                                    ▼
+                    AgentLoop.Pull → Preprocessor → Model
 ```
 
-两者的唯一区别是**触发来源**：正常消息由外部用户调用触发，`InjectMessage` 由后台 TmuxMonitor 异步回调触发。
-`InjectMessage` 复用 `lastUserID`/`lastSessionID` 只是为了补全回调缺失的会话参数，消息本身不做任何特殊处理。
-
-`InjectMessage` 是 `tagent.New()` 工厂函数中 `MessageInjector` 接线的基础设施。当 TmuxMonitor 检测到 tmux session 状态变更时，ActionTool 内部通过 `MessageInjector.InjectMessage()` 注入系统消息。
-
-### 4.2 TagentConfig — 配置参数
+### 5.2 TagentConfig — 配置参数
 
 ```go
 // tagent_agent.go:63-77
@@ -190,7 +249,30 @@ type TagentConfig struct {
 }
 ```
 
-### 4.3 ContextIntervention — 调用前拦截器
+### 5.3 Preprocessor — 显式预处理阶段
+
+Preprocessor 取代了已废弃的 ContextIntervention.BeforeModel。它的核心职责是从 session.Events 构建完整的 LLM Context（而非只处理新 batch 事件），并执行 token 预算检查和压缩。
+
+```go
+// preprocessor.go
+type Preprocessor struct {
+    compressor   *SmartCompressor   // 两阶段压缩引擎
+    tokenCounter TokenCounter       // Token 估算器
+    maxTokens    int                // Token 预算
+    thresholdPct float64           // 压缩触发阈值
+    session      *session.Session   // 用于 event_key 前缀注入
+}
+
+// Process 从 session.Events 构建完整 messages，而非只处理新 batch。
+// 这确保压缩作用于完整历史（与原 ContextIntervention 行为一致）。
+func (p *Preprocessor) Process(
+    ctx context.Context,
+    batch []*AgentEvent,
+    sess *session.Session,
+) ProcessResult
+```
+
+### 5.4 ContextIntervention [Deprecated]
 
 ```go
 // context_intervention.go:10-20

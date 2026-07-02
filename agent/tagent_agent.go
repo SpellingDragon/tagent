@@ -1,13 +1,13 @@
 // Package agent provides tagent's core agent mechanism coordination.
 //
 // TagentAgent wires together:
-//   - LLMAgent (framework-native React loop)
-//   - Runner (framework orchestration with plugins)
+//   - EventBus + AgentLoop (event-driven execution engine)
+//   - Runner (framework orchestration with plugins, retained for session/plugin lifecycle)
 //   - MemoryPlugin (OnEvent: event persistence + causal chain)
-//   - ContextIntervention (BeforeModel: token budget + SmartCompress)
+//   - Preprocessor (event filtering, token budget, SmartCompress)
 //
-// Core principle: LLMAgent is the React loop skeleton,
-// tagent's differential logic is injected via callback/plugin.
+// Core principle: AgentLoop is a pure event-driven engine with no business semantics.
+// All domain decisions (event filtering, shouldCallModel, compression) live in Preprocessor.
 //
 // TagentAgent implements agent.Agent, so it can be wrapped as agent.Tool
 // for tool-agent composition.
@@ -67,6 +67,7 @@ type TagentAgent struct {
 
 	// Framework integration (retained for session/plugin/trace)
 	memStore   memory.MemoryStore
+	memPlugin  *plugin.MemoryPlugin // direct reference for onEvent callback
 	config     *TagentConfig
 	runner     runner.Runner // retained as shell for session+plugin management
 	sessionSvc session.Service
@@ -257,6 +258,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		agentLoop:    agentLoop,
 		preprocessor: preprocessor,
 		memStore:     memStore,
+		memPlugin:    memPlugin,
 		config:       cfg,
 		runner:       r,
 		sessionSvc:   sessionSvc,
@@ -265,6 +267,11 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		outputCh:     outputCh,
 		closers:      []Closer{sessionSvc},
 	}
+
+	// Wire onEvent callback after ta is created.
+	// This connects AgentLoop events to MemoryPlugin (persistence + causal chain)
+	// and SessionService (session.Events append).
+	agentLoop.SetOnEvent(ta.makeOnEventCallback())
 
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
@@ -284,9 +291,9 @@ type identityOnlyAgent struct {
 func (a *identityOnlyAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
 	return nil, fmt.Errorf("identityOnlyAgent: Run should not be called directly")
 }
-func (a *identityOnlyAgent) Tools() []tool.Tool          { return nil }
-func (a *identityOnlyAgent) Info() agent.Info             { return a.info }
-func (a *identityOnlyAgent) SubAgents() []agent.Agent     { return nil }
+func (a *identityOnlyAgent) Tools() []tool.Tool              { return nil }
+func (a *identityOnlyAgent) Info() agent.Info                { return a.info }
+func (a *identityOnlyAgent) SubAgents() []agent.Agent        { return nil }
 func (a *identityOnlyAgent) FindSubAgent(string) agent.Agent { return nil }
 
 // Run implements agent.Agent interface.
@@ -387,6 +394,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		SystemPrompt: ta.config.SystemPrompt,
 		Temperature:  ta.config.Temperature,
 	})
+	invLoop.SetOnEvent(ta.makeSubAgentOnEventCallback(sessionID))
 
 	// Publish the initial message as external_input.
 	invBus.Publish(NewExternalInputEvent("user", message))
@@ -541,6 +549,104 @@ func (ta *TagentAgent) setSessionContext(userID, sessionID string) {
 	ta.lastSessionID = sessionID
 }
 
+// getOrCreateSession returns the session for the current lastUserID/lastSessionID.
+// Creates the session if it does not exist.
+func (ta *TagentAgent) getOrCreateSession() *session.Session {
+	if ta.sessionSvc == nil {
+		return nil
+	}
+	key := session.Key{
+		AppName:   ta.name,
+		UserID:    ta.lastUserID,
+		SessionID: ta.lastSessionID,
+	}
+	ctx := context.Background()
+	sess, err := ta.sessionSvc.GetSession(ctx, key)
+	if err != nil || sess == nil {
+		sess, err = ta.sessionSvc.CreateSession(ctx, key, nil)
+		if err != nil {
+			log.Errorf("[getOrCreateSession] CreateSession failed: %v", err)
+			return nil
+		}
+	}
+	return sess
+}
+
+// makeOnEventCallback creates the callback that wires AgentLoop events to
+// MemoryPlugin (event persistence + causal chain) and SessionService
+// (session.Events append).
+func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
+	return func(evt *event.Event) {
+		if evt == nil {
+			return
+		}
+		ctx := context.Background()
+
+		// Build a lightweight invocation for the plugin. MemoryPlugin only
+		// needs AgentName and Session for partition/causal chain.
+		inv := &agent.Invocation{
+			AgentName: ta.name,
+		}
+		if ta.sessionSvc != nil && ta.lastSessionID != "" {
+			sess := ta.getOrCreateSession()
+			if sess != nil {
+				inv.Session = sess
+				// 1. MemoryPlugin: persist + causal chain + StateDelta.
+				if ta.memPlugin != nil {
+					if _, err := ta.memPlugin.OnEvent(ctx, inv, evt); err != nil {
+						log.Errorf("[onEvent] MemoryPlugin.OnEvent failed: %v", err)
+					}
+				}
+				// 2. SessionService: append to session.Events.
+				if err := ta.sessionSvc.AppendEvent(ctx, sess, evt); err != nil {
+					log.Errorf("[onEvent] AppendEvent failed: %v", err)
+				}
+			}
+		}
+	}
+}
+
+// makeSubAgentOnEventCallback creates the onEvent callback for sub-agent
+// invocations. Sub-agents have their own isolated session.
+func (ta *TagentAgent) makeSubAgentOnEventCallback(sessionID string) func(evt *event.Event) {
+	return func(evt *event.Event) {
+		if evt == nil {
+			return
+		}
+		if ta.sessionSvc == nil {
+			return
+		}
+		ctx := context.Background()
+
+		key := session.Key{
+			AppName:   ta.name,
+			UserID:    ta.lastUserID,
+			SessionID: sessionID,
+		}
+		sess, err := ta.sessionSvc.GetSession(ctx, key)
+		if err != nil || sess == nil {
+			sess, err = ta.sessionSvc.CreateSession(ctx, key, nil)
+			if err != nil {
+				log.Errorf("[subAgentOnEvent] CreateSession failed: %v", err)
+				return
+			}
+		}
+
+		inv := &agent.Invocation{
+			AgentName: ta.name,
+			Session:   sess,
+		}
+		if ta.memPlugin != nil {
+			if _, err := ta.memPlugin.OnEvent(ctx, inv, evt); err != nil {
+				log.Errorf("[subAgentOnEvent] MemoryPlugin.OnEvent failed: %v", err)
+			}
+		}
+		if err := ta.sessionSvc.AppendEvent(ctx, sess, evt); err != nil {
+			log.Errorf("[subAgentOnEvent] AppendEvent failed: %v", err)
+		}
+	}
+}
+
 // IngestExternalEvents queues external events to be injected as context
 // into the next Run call. This is the mechanism for passing
 // context from a parent agent to a tool agent via AgentToolWrapper.
@@ -615,6 +721,10 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 
 	// Cache session context for event injection.
 	ta.setSessionContext(userID, sessionID)
+
+	// Create or attach session for the persistent loop.
+	sess := ta.getOrCreateSession()
+	ta.agentLoop.SetSession(sess)
 
 	// Set TrajectoryRecorder session info (if enabled).
 	if ta.trajectoryRecorder != nil {

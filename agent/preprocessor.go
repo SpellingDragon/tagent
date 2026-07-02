@@ -80,49 +80,46 @@ type ProcessResult struct {
 //
 // It is safe to call Process concurrently — it holds no mutable state beyond
 // the session reference (which is set once and read-only during processing).
-func (p *Preprocessor) Process(ctx context.Context, events []*AgentEvent) ProcessResult {
-	if len(events) == 0 {
-		return ProcessResult{ShouldCallModel: false}
-	}
-
-	// Step 1: Filter events and collect messages.
-	// external_input → include; tool_use → skip (dispatched separately).
-	var messages []model.Message
+func (p *Preprocessor) Process(ctx context.Context, batch []*AgentEvent, sess *session.Session) ProcessResult {
+	// Step 1: shouldCallModel judgement — based ONLY on the bus batch.
+	// external_input triggers model call; tool_use alone does not.
 	hasExternalInput := false
-	for _, evt := range events {
-		switch evt.Type {
-		case tagentevent.TypeExternalInput:
-			if evt.Message == nil {
-				continue
-			}
-			// Copy the message to avoid mutating bus payloads.
-			msg := *evt.Message
-			messages = append(messages, msg)
+	for _, evt := range batch {
+		if evt != nil && evt.Type == tagentevent.TypeExternalInput {
 			hasExternalInput = true
-		case TypeToolUse:
-			// Tool use events are dispatched by AgentLoop asynchronously.
-			// The Preprocessor does not include them in the LLM context.
-		default:
-			// Unknown event types: log and skip.
-			log.Debugf("[Preprocessor] skipping unknown event type %q", evt.Type)
+			break
 		}
 	}
-
-	// Step 2: shouldCallModel judgement.
 	if !hasExternalInput {
 		return ProcessResult{ShouldCallModel: false}
+	}
+
+	// Step 2: Build messages from session.Events (complete conversation history).
+	// The session has already been updated by onEvent callbacks before Process
+	// is called, so it contains the latest external_input + prior history.
+	var messages []model.Message
+	if sess != nil {
+		sess.EventMu.RLock()
+		for i := range sess.Events {
+			evt := &sess.Events[i]
+			if evt.Response != nil && len(evt.Response.Choices) > 0 {
+				msg := evt.Response.Choices[0].Message
+				messages = append(messages, msg)
+			}
+		}
+		sess.EventMu.RUnlock()
 	}
 
 	// Step 3: inject event_key prefixes (requires session).
 	// This activates the event_key visibility chain: LLM sees keys →
 	// passes to sub-agents via event_keys parameter.
-	if p.session != nil {
-		injectEventKeyPrefixesFromSession(&messages, p.session)
+	if sess != nil {
+		injectEventKeyPrefixesFromSession(&messages, sess)
 	}
 
 	// Step 4: token budget check + SmartCompress.
 	// KeepRecentTasks is stateless: restore original value after this call
-	// to prevent cross-request state leakage (same as ContextIntervention).
+	// to prevent cross-request state leakage.
 	originalKeepRecent := p.compressor.KeepRecentTasks
 	defer func() { p.compressor.KeepRecentTasks = originalKeepRecent }()
 
@@ -181,9 +178,9 @@ func (p *Preprocessor) Process(ctx context.Context, events []*AgentEvent) Proces
 
 // injectEventKeyPrefixesFromSession adds [evt_<KEY>|<type>] prefix to
 // user/assistant messages by positionally matching them to Session.Events.
-// This is the new-architecture equivalent of injectEventKeyPrefixes in
-// context_intervention.go. The logic is identical; only the session source
-// differs (Preprocessor.session instead of Invocation.Session).
+// This replaces the previous injectEventKeyPrefixes implementation. The
+// logic is identical; only the session source differs (Preprocessor.session
+// instead of Invocation.Session).
 func injectEventKeyPrefixesFromSession(messages *[]model.Message, sess *session.Session) {
 	if sess == nil {
 		return
@@ -226,6 +223,27 @@ func injectEventKeyPrefixesFromSession(messages *[]model.Message, sess *session.
 
 		msg.Content = fmt.Sprintf("[evt_%s|%s] %s", string(keyBytes), eventType, msg.Content)
 	}
+}
+
+// ensureUserPrompt checks that the compressed messages contain at least one user prompt.
+// If not, it appends a guidance message so the LLM knows the context was compressed
+// and can ask for new tasks.
+// This is critical: the LLM must never see only agent_output messages without a user prompt.
+func ensureUserPrompt(messages []model.Message) []model.Message {
+	hasUser := false
+	for _, msg := range messages {
+		if msg.Role == model.RoleUser {
+			hasUser = true
+			break
+		}
+	}
+	if !hasUser {
+		messages = append(messages, model.Message{
+			Role:    model.RoleUser,
+			Content: "（以上是对话历史摘要。如果有新任务，请告诉我。）",
+		})
+	}
+	return messages
 }
 
 // logAccess outputs a single audit line per LLM invocation.

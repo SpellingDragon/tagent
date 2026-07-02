@@ -434,7 +434,44 @@ AgentLoop ──────┘
 | `action_command` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
 | `thinking_plan` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
 
-### 11.4 与 tagent/event 的关系
+### 11.4 onEvent 回调：事件写入 Session 和 MemoryStore
+
+AgentLoop 在以下时机调用 `onEvent` 回调，将事件写入 session.Events 和 MemoryStore：
+
+1. **bus 事件消费前**：每个 `external_input` 事件 → 包装为 `event.Event` → onEvent
+2. **model response 解析后**：assistant response（含 tool_calls 或 final）→ 包装为 `event.Event` → onEvent
+
+onEvent 回调执行两个操作（在同一调用中）：
+
+```
+AgentLoop.onEvent(frameworkEvt)
+    │
+    ├── MemoryPlugin.OnEvent
+    │     ├── MemoryStore.StoreEvent(K, FullEvent{...})  ← 层3: 持久化
+    │     ├── RelationStore.SetParent(K, parentK)        ← 因果链
+    │     └── evt.StateDelta["event_key"] = "K"          ← 回写 key
+    │
+    └── sessionSvc.AppendEvent
+          └── sess.Events = append(sess.Events, *evt)    ← 层2: 工作内存
+```
+
+**关键**：onEvent 必须在 Preprocessor.Process 之前调用，确保 session.Events 已包含最新事件供 Preprocessor 读取。
+
+### 11.5 三层数据表示与流转
+
+```
+层1: EventBus AgentEvent (临时触发器)
+    │
+    ├── onEvent callback ──→ 层2: Session.Events (工作内存)
+    │                     ──→ 层3: MemoryStore FullEvent (持久化)
+    │
+    └── Preprocessor.Process ──→ 读 session.Events ──→ []model.Message (LLM Context)
+                                   ├── event_key 前缀注入
+                                   ├── token 预算检查 (完整 messages)
+                                   └── SmartCompress (完整 messages)
+```
+
+### 11.6 与 tagent/event 的关系
 
 - `tagent/event` 包提供**事件类型常量**和**摘要生成**工具（纯函数，无状态）
 - `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）

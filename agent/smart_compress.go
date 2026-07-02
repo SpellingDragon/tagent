@@ -11,7 +11,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// SmartCompressor performs two-stage context compression in BeforeModel.
+// SmartCompressor performs two-stage context compression in Preprocessor.
 //
 // Stage 1: Drop old task segments based on task boundaries (agent_output markers)
 // Stage 2: Generate LLM summary of dropped segments (if summaryModel is available)
@@ -264,7 +264,7 @@ func parseEventKeyFromPrefix(content string) int64 {
 }
 
 // collectCompressedKeys extracts event_keys from compressed message segments.
-// Parses the "[evt_<KEY>|<type>]" prefix added by injectEventKeyPrefixes in BeforeModel.
+// Parses the "[evt_<KEY>|<type>]" prefix added by injectEventKeyPrefixesFromSession in Preprocessor.
 // This does NOT access Session.Events — it reads keys directly from message content.
 func (sc *SmartCompressor) collectCompressedKeys(
 	oldSegments []*TaskSegment,
