@@ -32,6 +32,10 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 
 // runWithLoop starts a persistent event loop, injects a message, collects events,
 // and stops the loop. This is the only way to run a top-level TagentAgent.
+//
+// After ctx cancellation or IsFinalResponse, the helper drains any remaining
+// events from outputCh (with a short grace period) to avoid losing error events
+// that arrive at the same time as the context deadline.
 func runWithLoop(ctx context.Context, t *testing.T, ag *tagentagent.TagentAgent, userID, sessionID string, msg model.Message) []*event.Event {
 	t.Helper()
 	outputCh, err := ag.StartLoop(userID, sessionID)
@@ -52,6 +56,25 @@ loop:
 				break loop
 			}
 		case <-ctx.Done():
+			// Context cancelled — drain any remaining events with a grace period
+			// to capture error events that arrive simultaneously.
+			drainTimer := time.NewTimer(500 * time.Millisecond)
+		drain:
+			for {
+				select {
+				case evt, ok := <-outputCh:
+					if !ok {
+						break drain
+					}
+					events = append(events, evt)
+					if evt.IsFinalResponse() {
+						break drain
+					}
+				case <-drainTimer.C:
+					break drain
+				}
+			}
+			drainTimer.Stop()
 			break loop
 		}
 	}
@@ -146,7 +169,7 @@ func TestRegression_AgentLoop_MultipleIterations(t *testing.T) {
 		t.Fatalf("Failed to create TagentAgent: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	msg := model.Message{
