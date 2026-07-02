@@ -15,10 +15,10 @@
 
 启动方式:
     # 前台运行（调试用）
-    python train_tagent.py --config areal_config.yaml scheduler.type=local
+    python train_tagent.py --config train_rl_config.yaml scheduler.type=local
 
     # 分布式训练
-    torchrun --nproc_per_node=8 train_tagent.py --config areal_config.yaml
+    torchrun --nproc_per_node=8 train_tagent.py --config train_rl_config.yaml
 
 环境变量:
     TAGENT_URL          tagent HTTPAPI 地址 (默认: http://localhost:8089)
@@ -30,17 +30,17 @@ import os
 import pathlib
 import sys
 
-# 将 tagent 的 areal 目录加入 Python 路径，使 tagent_adapter 可被导入
-_TAGENT_AREAL_DIR = str(pathlib.Path(__file__).resolve().parent.parent.parent / "areal")
-if _TAGENT_AREAL_DIR not in sys.path:
-    sys.path.insert(0, _TAGENT_AREAL_DIR)
+# 将 tagent 的 train/rl 目录加入 Python 路径，使 tagent_adapter 可被导入
+_TAGENT_TRAIN_RL_DIR = str(pathlib.Path(__file__).resolve().parent.parent.parent / "train.rl")
+if _TAGENT_TRAIN_RL_DIR not in sys.path:
+    sys.path.insert(0, _TAGENT_TRAIN_RL_DIR)
 
 from dataclasses import dataclass, field
 
-from areal import PPOTrainer
-from areal.api.cli_args import PPOConfig, load_expr_config
-from areal.dataset import get_custom_dataset
-from areal.utils.hf_utils import load_hf_tokenizer
+from train.rl import PPOTrainer
+from train.rl.api.cli_args import PPOConfig, load_expr_config
+from train.rl.dataset import get_custom_dataset
+from train.rl.utils.hf_utils import load_hf_tokenizer
 
 
 @dataclass
@@ -51,11 +51,11 @@ class TagentRLConfig(PPOConfig):
     """
 
     workflow: str = field(
-        default="areal.tagent_adapter.TagentARealAdapter",
+        default="train.rl.tagent_adapter.TagentARealAdapter",
         metadata={"help": "tagent adapter workflow 路径。"},
     )
     eval_workflow: str = field(
-        default="areal.tagent_adapter.TagentARealAdapter",
+        default="train.rl.tagent_adapter.TagentARealAdapter",
         metadata={"help": "评估时使用的 workflow 路径。"},
     )
 

@@ -5,24 +5,51 @@
 # 所有配置统一在此文件中管理，无需维护多份配置文件。
 #
 # 配置分层说明:
-#   - tagent YAML: agent 定义（模型、超参、prompt、event_params）
+#   - tagent YAML: agent 定义（模型、供应商、超参、prompt、event_params）
+#   - providers: 供应商连接信息注册表（endpoint, api_key_env）
 #   - ToolRef.Remote: 连接信息（remote.url = "这个 agent 在哪里"）
 #   - trpc Go options: 通信细节（A2A 协议、TransferStateKey）— tagent.go 内部自动生成
 #
+# 多供应商支持:
+#   每个 agent 可通过 provider 字段引用不同的模型供应商（openai/anthropic/gemini/ollama/hunyuan）
+#   示例: knowledge agent 使用 Anthropic Claude，其他 agent 使用智谱 GLM
+#
 # 敏感信息:
-#   API Key 通过环境变量设置 (默认 ZAI_API_KEY)，不要写在此文件中
+#   API Key 通过环境变量设置，不要写在此文件中
 # ============================================================================
 
 # ===== 运行时配置 =====
 
+# 全局默认 provider (不填则默认 "openai")
+# 支持: openai, anthropic, gemini, ollama, hunyuan
+provider: openai
+
 # LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
 model: glm-5
 
-# LLM API 基础地址
+# LLM API 基础地址 (全局默认，兼容旧配置；推荐使用 providers 注册表)
 api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
 
-# API Key 环境变量名 (默认 ZAI_API_KEY)
-# api_key_env: "ZAI_API_KEY"
+# Provider 连接信息注册表
+# 每个 agent 可通过 provider 字段引用不同的供应商
+# 示例：
+#   agents:
+#     tagent:
+#       provider: openai       # 使用 openai 兼容 API
+#       model: glm-5
+#     knowledge:
+#       provider: anthropic    # 使用 Anthropic Claude
+#       model: claude-3-5-sonnet-20241022
+providers:
+  openai:
+    api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    api_key_env: "ZAI_API_KEY"
+  # anthropic:
+  #   api_endpoint: "https://api.anthropic.com"
+  #   api_key_env: "ANTHROPIC_API_KEY"
+  # gemini:
+  #   api_endpoint: "https://generativelanguage.googleapis.com"
+  #   api_key_env: "GOOGLE_API_KEY"
 
 # 日志级别: "debug", "info", "warn", "error"
 # debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等
@@ -46,6 +73,7 @@ agents:
   # 顶层 Agent: 微信助手的主 Agent
   # ========================================================================
   tagent:
+    model: glm-5
     system_prompt:
       files:
         - AGENTS.md
@@ -56,9 +84,10 @@ agents:
       type: localfile
       path: .wechat-config/data
     max_tool_iterations: 200
-    max_tokens: 8000
+    max_tokens: 16000
     temperature: 0.7
     compress_threshold: 0.8
+    keep_recent_tasks: 8
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
@@ -68,7 +97,7 @@ agents:
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
         max_tool_iterations: 5
-        max_tokens: 4096
+        max_tokens: 8000
         temperature: 0.3
 
       # Recall Agent: 记忆检索
@@ -76,17 +105,15 @@ agents:
         description_file: recall_tool_desc.md
         event_params: [event_keys]
         max_tool_iterations: 5
-        max_tokens: 4096
+        max_tokens: 8000
 
-      # Action Tool: 行为动作执行
-      # properties 下放 tool 专有配置，各 tool factory 自行反序列化
-      - kind: tool
-        id: action
+      # Action Agent: 执行中枢
+      # tagent 做规划，action 负责调度 file/speak/draw 工具和 exec 直接执行
+      - agent: action
         description_file: action_tool_desc.md
-        # properties:                          # tool 专有配置
-        #   workspace: /tmp/tagent-workspace    # 可选: 动作执行工作目录
-        #   run_as_user: tagent-runner          # 可选: 以指定用户执行 (需要 sudoers 免密配置)
-        #   run_as_group: tagent-runner         # 可选: 以指定用户组执行
+        max_tool_iterations: 5
+        max_tokens: 8000
+        temperature: 0.3
 
       # 远程 Agent 示例 (A2A 通信):
       # 当子 agent 部署在独立进程时，只需声明 remote.url。
@@ -99,23 +126,46 @@ agents:
       #   remote:
       #     url: "http://knowledge-service:8088"
 
+    # Meditation (定时心跳): 空闲时触发上下文清理、深度分析和 skill 积累
+    # 仅在 entry agent 上生效
+    meditation:
+      enabled: true
+      interval: "30m"     # 检查间隔
+      min_gap: "2h"       # 距上次事件不足此值则跳过
+      prompt_file: "meditation.md"
+
   # ========================================================================
   # Knowledge Agent: 知识获取 & 翻译子 Agent
   # ========================================================================
   knowledge:
+    model: glm-4.7
     system_prompt:
       files:
         - knowledge_agent.md
     memory:
       type: memory
     max_tool_iterations: 5
-    max_tokens: 4096
+    max_tokens: 8000
     temperature: 0.3
+    tools:
+      - kind: tool
+        id: skill_search
+      - kind: tool
+        id: skill_load
+      - kind: tool
+        id: mcp_discover
+      - kind: tool
+        id: web_search
+      - kind: tool
+        id: duckduckgo_search
+      - kind: tool
+        id: memory_query
 
   # ========================================================================
   # Recall Agent: 记忆检索子 Agent
   # ========================================================================
   recall:
+    model: glm-4.7
     system_prompt:
       files:
         - recall_agent.md
@@ -125,7 +175,99 @@ agents:
       read_namespaces:
         - tagent
     max_tool_iterations: 5
-    max_tokens: 4096
+    max_tokens: 8000
+    tools:
+      - kind: tool
+        id: recall_query
+      - kind: tool
+        id: recall_get
+      - kind: tool
+        id: recall_recent
+      - kind: tool
+        id: recall_trace
+
+  # ========================================================================
+  # Action Agent: 执行中枢
+  # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
+  # ========================================================================
+  action:
+    model: glm-4.7
+    system_prompt:
+      files:
+        - action_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 8000
+    temperature: 0.3
+    tools:
+      # File Tools: 直接文件读写 (使用 trpc-agent-go 内置文件操作)
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: save_file
+      - kind: tool
+        id: list_file
+      - kind: tool
+        id: search_file
+      - kind: tool
+        id: search_content
+      - kind: tool
+        id: read_multiple_files
+      - kind: tool
+        id: replace_content
+
+      # Speak Agent: 语音输出 (桩)
+      - agent: speak
+        description_file: speak_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      # Draw Agent: 图像生成 (桩)
+      - agent: draw
+        description_file: draw_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      # Exec Tool: 直接 shell 命令执行 (简单命令)
+      - kind: tool
+        id: exec
+        description_file: exec_tool_desc.md
+        # properties:
+        #   workspace: /tmp/tagent-workspace
+        #   run_as_user: tagent-runner
+        #   run_as_group: tagent-runner
+
+  # ========================================================================
+  # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
+  # ========================================================================
+  speak:
+    model: glm-4.7
+    system_prompt:
+      files:
+        - speak_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 3
+    max_tokens: 1024
+    temperature: 0.3
+
+  # ========================================================================
+  # Draw Agent: 图像生成子 Agent (桩, 暂未启用)
+  # 待接入图像生成模型后激活
+  # ========================================================================
+  draw:
+    model: glm-4.7
+    system_prompt:
+      files:
+        - draw_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 3
+    max_tokens: 1024
+    temperature: 0.3
 
 # ===== 应用专属配置 (各应用自行反序列化) =====
 app:

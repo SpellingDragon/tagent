@@ -4,5 +4,5 @@
 logs/
 *.log
 wechat-bot
-skills/*/node_modules/
+skills/
 data/

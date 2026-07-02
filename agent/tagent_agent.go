@@ -24,23 +24,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-
 	"trpc.group/trpc-go/trpc-agent-go/agent"
-	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
-	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory"
@@ -60,11 +54,22 @@ var _ agent.Agent = (*TagentAgent)(nil)
 // TagentAgent is tagent's top-level Agent assembly.
 // It implements agent.Agent so it can be used both as a standalone agent
 // and as a tool-agent (wrapped via AgentToolWrapper).
+//
+// In the event-driven architecture, TagentAgent owns an EventBus and
+// AgentLoop. External inputs (user messages, tmux callbacks, meditation)
+// are published to the bus; the AgentLoop consumes them, calls the model
+// via Preprocessor, and dispatches tool_use events asynchronously.
 type TagentAgent struct {
-	llmAgent *llmagent.LLMAgent
-	runner   runner.Runner
-	memStore memory.MemoryStore
-	config   *TagentConfig
+	// Event-driven core (replaces llmAgent + runner for execution)
+	bus          *EventBus
+	agentLoop    *AgentLoop
+	preprocessor *Preprocessor
+
+	// Framework integration (retained for session/plugin/trace)
+	memStore   memory.MemoryStore
+	config     *TagentConfig
+	runner     runner.Runner // retained as shell for session+plugin management
+	sessionSvc session.Service
 
 	// Agent identity (for agent.Agent interface)
 	name        string
@@ -88,12 +93,14 @@ type TagentAgent struct {
 	trajectoryRecorder *TrajectoryRecorder
 
 	// Persistent Event Loop — 持久事件循环（StartLoop 模式）
-	mailbox    chan model.Message // 事件邮箱（并发写入，单 goroutine 消费）
 	outputCh   chan *event.Event  // 持久输出 channel（Loop 模式下不关闭）
 	loopCtx    context.Context    // Loop context（StopLoop 取消）
 	loopCancel context.CancelFunc // Loop cancel
 	loopActive atomic.Bool        // Loop 是否运行中
 	loopWg     sync.WaitGroup     // 等待 Loop goroutine 退出
+
+	// Meditation manager — started/stopped with the persistent event loop.
+	meditationMgr *MeditationManager
 }
 
 // TagentConfig holds configuration for creating a TagentAgent.
@@ -107,10 +114,15 @@ type TagentConfig struct {
 	CompressThreshold float64            // Compression trigger threshold (default: 0.8)
 	SummaryModel      model.Model        // Optional: for Stage 2 LLM summary
 	Temperature       float64            // Optional: LLM temperature (default: 0.7)
+	KeepRecentTasks   int                // Min task segments to keep during compression (default: 2)
 
 	// Agent identity (for agent.Agent interface)
 	Name        string // Default: "tagent"
 	Description string // Default: "TagentAgent - AI assistant powered by tagent"
+
+	// Meditation configures the meditation/heartbeat mechanism.
+	// Only effective when the agent is started via StartLoop.
+	Meditation MeditationConfig
 }
 
 // Default configuration values
@@ -123,6 +135,16 @@ const (
 )
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
+//
+// In the event-driven architecture, NewTagentAgent:
+//   - Creates MemoryStore + MemoryPlugin + SmartCompressor
+//   - Creates Preprocessor (replacing ContextIntervention.BeforeModel)
+//   - Creates EventBus + AgentLoop
+//   - Creates SessionService + Runner (as shell for session/plugin management)
+//
+// The Runner is retained for session management and plugin lifecycle
+// (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
+// AgentLoop, not the Runner.
 func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -153,22 +175,19 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 2. Create MemoryPlugin (OnEvent: event persistence + causal chain + StateDelta)
 	memPlugin := plugin.NewMemoryPlugin(memStore)
 
-	// 3. Create SmartCompressor
+	// 3. Create SmartCompressor + Preprocessor (replacing ContextIntervention)
 	compressorOpts := []SmartCompressorOption{
 		WithMaxTokens(cfg.MaxTokens),
+	}
+	if cfg.KeepRecentTasks > 0 {
+		compressorOpts = append(compressorOpts, WithKeepRecentTasks(cfg.KeepRecentTasks))
 	}
 	if cfg.SummaryModel != nil {
 		compressorOpts = append(compressorOpts, WithSummaryModel(cfg.SummaryModel))
 	}
 	compressor := NewSmartCompressor(compressorOpts...)
-
-	// 4. Create ContextIntervention (BeforeModel: token budget + compress)
 	tokenCounter := NewDefaultTokenCounter()
-	ci := NewContextIntervention(compressor, tokenCounter, cfg.MaxTokens, cfg.CompressThreshold)
-
-	// 5. Create ModelCallbacks
-	modelCB := model.NewCallbacks()
-	modelCB.RegisterBeforeModel(ci.BeforeModel)
+	preprocessor := NewPreprocessor(compressor, tokenCounter, cfg.MaxTokens, cfg.CompressThreshold)
 
 	// Apply identity defaults
 	name := cfg.Name
@@ -180,9 +199,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		description = DefaultAgentDescription
 	}
 
-	// 5.5 Wrap all tools with OutputLimitTool to prevent oversized tool outputs
-	// from consuming the agent's context window. The limit is MaxTokens/2 * 4
-	// characters (approx 2x the half-token budget, since 1 token ≈ 4 chars).
+	// 4. Wrap all tools with OutputLimitTool
 	maxOutputChars := cfg.MaxTokens / 2 * 4
 	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
 		wrapped := make([]tool.Tool, len(cfg.Tools))
@@ -192,35 +209,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		cfg.Tools = wrapped
 	}
 
-	// 6. Create LLMAgent
-	llmAgentOpts := []llmagent.Option{
-		llmagent.WithModel(cfg.Model),
-		llmagent.WithInstruction(cfg.SystemPrompt),
-		llmagent.WithMaxToolIterations(cfg.MaxToolIterations),
-		llmagent.WithModelCallbacks(modelCB),
-	}
-	if len(cfg.Tools) > 0 {
-		llmAgentOpts = append(llmAgentOpts, llmagent.WithTools(cfg.Tools))
-	}
-	llmAgent := llmagent.New(name, llmAgentOpts...)
-
-	// 7. Create SessionService with an AppendEventHook that clones Response
-	// before storage. Without this hook, session events and channel events
-	// share the same *model.Response pointer. The framework's
-	// ContentRequestProcessor may modify session events' Response.Choices in
-	// subsequent iterations (e.g., mergeFunctionResponseEvents), racing with
-	// AgentToolWrapper.Call() which reads the same Response from the channel.
-	// The hook gives the session its own clone so framework modifications to
-	// session events don't affect channel events.
+	// 5. Create SessionService
 	sessionSvc := sessioninmemory.NewSessionService(
 		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
-			// Create a shallow copy of the event with a cloned Response for
-			// session storage. We must NOT mutate the original event's
-			// Response field because other goroutines (e.g.,
-			// wrapEventChannelWithTelemetry) may concurrently read it.
-			// By pointing ctx.Event to a copy, next() stores the copy
-			// (with cloned Response) while the original event remains
-			// untouched for channel consumers.
 			original := ctx.Event
 			if original.Response != nil {
 				evtCopy := *original
@@ -233,42 +224,95 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		}),
 	)
 
-	// 8. Create Runner with MemoryPlugin, SummaryPlugin, and session service
-	r := runner.NewRunner(name, llmAgent, runner.WithPlugins(
+	// 6. Create outputCh
+	outputCh := make(chan *event.Event, 100)
+
+	// 7. Create EventBus + AgentLoop
+	bus := NewEventBus()
+	agentLoop := NewAgentLoop(AgentLoopConfig{
+		Bus:          bus,
+		Preprocessor: preprocessor,
+		Model:        cfg.Model,
+		Tools:        cfg.Tools,
+		OutputCh:     outputCh,
+		Name:         name,
+		MaxToolIters: cfg.MaxToolIterations,
+		SystemPrompt: cfg.SystemPrompt,
+		Temperature:  cfg.Temperature,
+	})
+
+	// 8. Create Runner (retained as shell for session/plugin management).
+	// We pass a lightweight "identity agent" to the runner — it only uses
+	// it for Info() (name). Actual execution goes through AgentLoop.
+	identityAgent := &identityOnlyAgent{
+		info: agent.Info{Name: name, Description: description},
+	}
+	r := runner.NewRunner(name, identityAgent, runner.WithPlugins(
 		plugin.NewSummaryPlugin(),
 		memPlugin,
 	), runner.WithSessionService(sessionSvc))
 
-	return &TagentAgent{
-		llmAgent:    llmAgent,
-		runner:      r,
-		memStore:    memStore,
-		config:      cfg,
-		name:        name,
-		description: description,
-		closers:     []Closer{sessionSvc},
-	}, nil
+	ta := &TagentAgent{
+		bus:          bus,
+		agentLoop:    agentLoop,
+		preprocessor: preprocessor,
+		memStore:     memStore,
+		config:       cfg,
+		runner:       r,
+		sessionSvc:   sessionSvc,
+		name:         name,
+		description:  description,
+		outputCh:     outputCh,
+		closers:      []Closer{sessionSvc},
+	}
+
+	// Initialize meditation manager if enabled.
+	if cfg.Meditation.Enabled {
+		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
+	}
+
+	return ta, nil
 }
 
+// identityOnlyAgent is a minimal agent.Agent implementation used only to
+// satisfy runner.NewRunner's agent parameter. The runner uses it for
+// Info() (name). Actual execution goes through TagentAgent.AgentLoop.
+type identityOnlyAgent struct {
+	info agent.Info
+}
+
+func (a *identityOnlyAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
+	return nil, fmt.Errorf("identityOnlyAgent: Run should not be called directly")
+}
+func (a *identityOnlyAgent) Tools() []tool.Tool          { return nil }
+func (a *identityOnlyAgent) Info() agent.Info             { return a.info }
+func (a *identityOnlyAgent) SubAgents() []agent.Agent     { return nil }
+func (a *identityOnlyAgent) FindSubAgent(string) agent.Agent { return nil }
+
 // Run implements agent.Agent interface.
-// It is called by AgentToolWrapper.Call() for sub-agent invocation (local or remote via A2A).
+//
+// In the event-driven architecture, Run is the sub-agent invocation path
+// (used by AgentToolWrapper for local sub-agent calls and A2A for remote calls).
 // Top-level usage must use StartLoop/InjectMessage/StopLoop instead.
+//
+// Run creates a fresh EventBus + AgentLoop for this invocation, publishes
+// the initial message as external_input, and returns the AgentLoop's
+// outputCh. The caller reads events until the channel closes (context
+// cancelled or agent_output produced).
 //
 // Context can arrive via two paths:
 //  1. RuntimeState path (remote/wrapper): inv.RunOptions.RuntimeState["external_context"]
-//     contains serialized ExternalContextEntry JSON. This is the A2A-compatible path —
-//     A2AAgent auto-maps metadata → RuntimeState, so remote calls work transparently.
+//     contains serialized ExternalContextEntry JSON. This is the A2A-compatible path.
 //  2. Struct field path (direct API): pendingExternalEvents set via IngestExternalEvents.
-//     Used by direct callers (tests, embedded usage).
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
-	// Extract or generate userID and sessionID from Invocation
+	// Extract or generate userID and sessionID from Invocation.
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)
 
-	// Store session context for event injection
+	// Store session context for event injection.
 	ta.setSessionContext(userID, sessionID)
 
-	// Path 1: Read external context from RuntimeState (remote/wrapper path)
+	// Path 1: Read external context from RuntimeState (remote/wrapper path).
 	if inv.RunOptions.RuntimeState != nil {
 		if raw, ok := inv.RunOptions.RuntimeState[ExternalContextKey]; ok {
 			var data []byte
@@ -296,13 +340,85 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		message = model.NewUserMessage("")
 	}
 
-	// Path 2: Prepend external event context if pending (works for both paths —
-	// RuntimeState path above calls IngestExternalEvents which sets pendingExternalEvents)
+	// Path 2: Prepend external event context if pending.
 	if len(ta.pendingExternalEvents) > 0 {
 		message = ta.injectExternalContext(message)
 	}
 
-	return ta.runner.Run(ctx, userID, sessionID, message)
+	// If preprocessor is nil (e.g., in tests with mock runner), fall back
+	// to the legacy runner.Run path.
+	if ta.preprocessor == nil || ta.config == nil || ta.config.Model == nil {
+		if ta.runner == nil {
+			return nil, fmt.Errorf("agent %q: preprocessor and runner both nil", ta.name)
+		}
+		return ta.runner.Run(ctx, userID, sessionID, message)
+	}
+
+	// Create a fresh EventBus + AgentLoop for this invocation.
+	// Each sub-agent invocation gets its own isolated bus and compressor
+	// (SmartCompressor has mutable state and must not be shared across
+	// concurrent goroutines).
+	invBus := NewEventBus()
+	invOutputCh := make(chan *event.Event, 100)
+	invCompressorOpts := []SmartCompressorOption{
+		WithMaxTokens(ta.preprocessor.maxTokens),
+	}
+	if ta.config.KeepRecentTasks > 0 {
+		invCompressorOpts = append(invCompressorOpts, WithKeepRecentTasks(ta.config.KeepRecentTasks))
+	}
+	if ta.config.SummaryModel != nil {
+		invCompressorOpts = append(invCompressorOpts, WithSummaryModel(ta.config.SummaryModel))
+	}
+	invCompressor := NewSmartCompressor(invCompressorOpts...)
+	invPreprocessor := NewPreprocessor(
+		invCompressor,
+		ta.preprocessor.tokenCounter,
+		ta.preprocessor.maxTokens,
+		ta.preprocessor.thresholdPct,
+	)
+	invLoop := NewAgentLoop(AgentLoopConfig{
+		Bus:          invBus,
+		Preprocessor: invPreprocessor,
+		Model:        ta.config.Model,
+		Tools:        ta.config.Tools,
+		OutputCh:     invOutputCh,
+		Name:         ta.name,
+		MaxToolIters: ta.config.MaxToolIterations,
+		SystemPrompt: ta.config.SystemPrompt,
+		Temperature:  ta.config.Temperature,
+	})
+
+	// Publish the initial message as external_input.
+	invBus.Publish(NewExternalInputEvent("user", message))
+
+	// Run the AgentLoop in a goroutine. It will exit when ctx is cancelled.
+	runCtx, runCancel := context.WithCancel(ctx)
+	go func() {
+		defer close(invOutputCh)
+		invLoop.Run(runCtx)
+	}()
+
+	// Wrap the outputCh: forward events and cancel the loop when the
+	// caller stops reading OR when the first agent_output is emitted
+	// (sub-agent single-turn semantics).
+	wrappedCh := make(chan *event.Event, cap(invOutputCh))
+	go func() {
+		defer close(wrappedCh)
+		defer runCancel()
+		for evt := range invOutputCh {
+			wrappedCh <- evt
+			// Sub-agent semantics: stop after the first agent_output
+			// (final response without tool_calls).
+			if evt != nil && evt.Response != nil && len(evt.Response.Choices) > 0 {
+				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
+				if len(choice.Message.ToolCalls) == 0 && choice.Message.Content != "" {
+					return
+				}
+			}
+		}
+	}()
+
+	return wrappedCh, nil
 }
 
 // RunSimple is removed. Top-level usage must use StartLoop/InjectMessage/StopLoop.
@@ -310,7 +426,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 
 // Tools implements agent.Agent interface.
 func (ta *TagentAgent) Tools() []tool.Tool {
-	return ta.llmAgent.Tools()
+	if ta.config != nil {
+		return ta.config.Tools
+	}
+	return nil
 }
 
 // Info implements agent.Agent interface.
@@ -322,13 +441,15 @@ func (ta *TagentAgent) Info() agent.Info {
 }
 
 // SubAgents implements agent.Agent interface.
+// In the event-driven architecture, sub-agents are managed via AgentToolWrapper,
+// not via the framework's sub-agent mechanism.
 func (ta *TagentAgent) SubAgents() []agent.Agent {
-	return ta.llmAgent.SubAgents()
+	return nil
 }
 
 // FindSubAgent implements agent.Agent interface.
 func (ta *TagentAgent) FindSubAgent(name string) agent.Agent {
-	return ta.llmAgent.FindSubAgent(name)
+	return nil
 }
 
 // RegisterCloser registers a component to be closed on agent shutdown.
@@ -395,19 +516,21 @@ func (ta *TagentAgent) Runner() runner.Runner {
 	return ta.runner
 }
 
-// InjectMessage injects a system message into the persistent event loop's
-// mailbox. This is used by tools (e.g., TmuxMonitor) to inject asynchronous
-// system messages while the Loop goroutine is processing.
+// InjectMessage injects a message into the agent's EventBus as an
+// external_input event. This is used by tools (e.g., TmuxMonitor) and
+// external callers (HTTPAPI, A2A) to inject asynchronous messages.
 //
-// Requires StartLoop to be called first — the persistent Loop is the only
-// execution mode. If the Loop is not active, the message is dropped with a
-// warning.
+// Requires the agent to be running (loopActive=true). If not running,
+// the message is dropped with a warning.
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
 	if !ta.loopActive.Load() {
-		log.Warnf("[InjectMessage] persistent loop not started, message dropped")
+		log.Warnf("[InjectMessage] agent loop not started, message dropped")
 		return
 	}
-	ta.mailbox <- msg
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.UpdateLastEventTime(time.Now())
+	}
+	ta.bus.Publish(NewExternalInputEvent("inject", msg))
 }
 
 // setSessionContext sets the userID and sessionID (thread-safe).
@@ -461,282 +584,76 @@ func (ta *TagentAgent) injectExternalContext(msg model.Message) model.Message {
 // ---------------------------------------------------------------------------
 // Persistent Event Loop — 持久事件循环
 //
-// Loop goroutine 循环调用 runner.Run()。每次 Run 的 break 表示“这批事件处理完了”，
-// Loop 回到 drain mailbox 等待下一批。相同 userID/sessionID 确保跨 Run 的 Session 连续性。
-// 调用方通过 InjectMessage 提交消息到 mailbox，Loop goroutine 批量 drain 后合并触发 runner.Run()。
+// In the event-driven architecture, StartLoop launches an AgentLoop goroutine
+// that pulls events from the EventBus and drives the model via Preprocessor.
+// External inputs (user, tmux, meditation) are published to the bus via
+// InjectMessage. Tool results are also published to the bus by the
+// ToolDispatch layer.
 //
-// 可观测性：每个 batch 创建独立的 OTLP span（tagent.loop.batch），框架内部的
-// TraceChat/TraceToolCall 会自动在此 span 下创建子 span，形成 trace 层级。
-// 通过 telemetry/trace.Start() 初始化 OTLP exporter 后，所有 span 将通过
-// OTLP 协议导出到可观测后端（如 Jaeger/Tempo/loongcollector）。
+// The AgentLoop is the sole consumer of the bus; outputCh receives final
+// agent_output events for callers.
 // ---------------------------------------------------------------------------
 
-// StartLoop 启动持久事件循环，返回持久 outputCh 供调用方接收事件。
-// 调用方通过 InjectMessage 提交事件到 mailbox，Loop goroutine 批量 drain 后合并触发 runner.Run()。
-// 通过 evt.GetResponse().IsFinalResponse() 判断单次响应完成。
-// outputCh 在 StopLoop 后关闭。
+// StartLoop starts the persistent event loop.
+// It creates an EventBus, launches an AgentLoop goroutine, and returns
+// the outputCh for callers to receive agent_output events.
+//
+// Subsequent calls with the same agent return the existing outputCh.
+// The outputCh is closed when StopLoop is called.
 func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event, error) {
 	if ta.loopActive.Load() {
 		return ta.outputCh, nil
 	}
 
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
 	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
 	ta.loopActive.Store(true)
 
-	// 缓存 session 上下文供 Loop 使用
+	// Cache session context for event injection.
 	ta.setSessionContext(userID, sessionID)
 
-	// 设置 TrajectoryRecorder 的 session 信息
+	// Set TrajectoryRecorder session info (if enabled).
 	if ta.trajectoryRecorder != nil {
 		ta.trajectoryRecorder.SetSessionInfo(userID, sessionID)
 	}
 
+	// Launch AgentLoop in a dedicated goroutine.
 	ta.loopWg.Add(1)
-	go ta.loop(userID, sessionID)
+	go func() {
+		defer ta.loopWg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("[StartLoop] AgentLoop panic recovered: %v", r)
+			}
+			close(ta.outputCh)
+		}()
+		ta.agentLoop.Run(ta.loopCtx)
+	}()
+
+	// Start meditation manager (if configured).
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.Start()
+	}
 
 	log.Infof("[StartLoop] persistent event loop started user=%s session=%s", userID, sessionID)
 	return ta.outputCh, nil
 }
 
-// StopLoop 停止持久事件循环。
-// 取消 Loop context，等待 Loop goroutine 退出，关闭 outputCh。
+// StopLoop stops the persistent event loop.
+// Cancels the loop context, waits for the AgentLoop goroutine to exit.
 func (ta *TagentAgent) StopLoop() {
 	if !ta.loopActive.Load() {
 		return
 	}
 	ta.loopActive.Store(false)
+
+	// Stop meditation manager first (stop injecting new meditation events).
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.Stop()
+	}
+
 	ta.loopCancel()
 	ta.loopWg.Wait()
 	log.Infof("[StopLoop] persistent event loop stopped")
-}
-
-// loop 是 Persistent Event Loop 的主 goroutine。
-// 循环：drain mailbox -> mergeBatch -> per-batch span -> runner.Run -> 转发事件到 outputCh。
-// 当 loopCtx 被取消时退出并关闭 outputCh。
-func (ta *TagentAgent) loop(userID, sessionID string) {
-	defer ta.loopWg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			log.Errorf("[Loop] panic recovered: %v", r)
-		}
-		close(ta.outputCh)
-	}()
-
-	batchIndex := 0
-	for {
-		// 1. 批量 drain mailbox
-		batch := ta.drainMailbox()
-		if batch == nil {
-			// loopCtx 被取消
-			return
-		}
-		batchIndex++
-
-		// 2. 合并为一条消息
-		msg := mergeBatch(batch)
-
-		// 3. 创建 per-batch context + span（OTLP 可观测）
-		//    框架内部的 TraceChat/TraceToolCall 会自动在此 span 下创建子 span
-		batchCtx, span := telemetrytrace.Tracer.Start(ta.loopCtx, "tagent.loop.batch")
-		batchStart := time.Now()
-
-		span.SetAttributes(
-			attribute.Int("tagent.batch.index", batchIndex),
-			attribute.Int("tagent.batch.message_count", len(batch)),
-			attribute.Int("tagent.batch.merged_content_len", len(msg.Content)),
-			attribute.String("tagent.batch.user_id", userID),
-			attribute.String("tagent.batch.session_id", sessionID),
-		)
-
-		// 记录每条输入事件内容
-		for i, m := range batch {
-			log.Infof("[Loop.Batch#%d] input event#%d role=%s content_len=%d content_preview=%s",
-				batchIndex, i+1, m.Role, len(m.Content), truncateString(m.Content, 200))
-			span.SetAttributes(attribute.String(
-				fmt.Sprintf("tagent.batch.input.%d.role", i+1), string(m.Role)))
-			span.SetAttributes(attribute.String(
-				fmt.Sprintf("tagent.batch.input.%d.content", i+1), truncateString(m.Content, 1000)))
-		}
-
-		log.Infof("[Loop.Batch#%d] start batch_size=%d merged_content_len=%d",
-			batchIndex, len(batch), len(msg.Content))
-
-		// 4. 调用 runner.Run（复用完整框架管道，使用 per-batch traced context）
-		eventCh, err := ta.runner.Run(batchCtx, userID, sessionID, msg)
-		if err != nil {
-			log.Errorf("[Loop.Batch#%d] runner.Run failed: %v", batchIndex, err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(
-				attribute.String("tagent.batch.status", "error"),
-				attribute.Float64("tagent.batch.duration_seconds", time.Since(batchStart).Seconds()),
-			)
-			span.End()
-			if ta.loopCtx.Err() != nil {
-				return
-			}
-			continue
-		}
-
-		// 5. 转发事件到持久 outputCh + 可观测记录
-		var (
-			eventCount    int
-			toolCallCount int
-			inputTokens   int
-			outputTokens  int
-			hasFinal      bool
-			ttft          time.Duration
-			lastContent   string
-			lastReasoning string
-		)
-
-		for evt := range eventCh {
-			eventCount++
-
-			// 检查事件内容用于可观测性
-			if evt != nil && evt.Response != nil {
-				rsp := evt.Response
-
-				// 工具调用
-				if rsp.IsToolCallResponse() {
-					toolCallCount += len(rsp.GetToolCallIDs())
-					for _, choice := range rsp.Choices {
-						for _, tc := range choice.Message.ToolCalls {
-							log.Infof("[Loop.Batch#%d] event#%d TOOL_CALL id=%s func=%s args_len=%d args_preview=%s",
-								batchIndex, eventCount, tc.ID, tc.Function.Name,
-								len(tc.Function.Arguments), truncateString(string(tc.Function.Arguments), 200))
-						}
-					}
-				}
-
-				// 工具结果
-				if rsp.IsToolResultResponse() && len(rsp.Choices) > 0 {
-					log.Infof("[Loop.Batch#%d] event#%d TOOL_RESULT tool_id=%s content_len=%d",
-						batchIndex, eventCount, rsp.Choices[0].Message.ToolID,
-						len(rsp.Choices[0].Message.Content))
-				}
-
-				// Token 使用量 + TTFT
-				if rsp.Usage != nil {
-					inputTokens += rsp.Usage.PromptTokens
-					outputTokens += rsp.Usage.CompletionTokens
-					if rsp.Usage.TimingInfo != nil && rsp.Usage.TimingInfo.FirstTokenDuration > 0 {
-						ttft = rsp.Usage.TimingInfo.FirstTokenDuration
-					}
-				}
-
-				// 最终响应（包含 think + response）
-				if rsp.IsFinalResponse() && len(rsp.Choices) > 0 {
-					hasFinal = true
-					lastContent = rsp.Choices[0].Message.Content
-					lastReasoning = rsp.Choices[0].Message.ReasoningContent
-					log.Infof("[Loop.Batch#%d] event#%d FINAL_RESPONSE model=%s content_len=%d reasoning_len=%d input_tokens=%d output_tokens=%d ttft=%s",
-						batchIndex, eventCount, rsp.Model,
-						len(lastContent), len(lastReasoning),
-						inputTokens, outputTokens, ttft)
-					if lastReasoning != "" {
-						log.Infof("[Loop.Batch#%d] think_preview=%s", batchIndex, truncateString(lastReasoning, 200))
-					}
-					log.Infof("[Loop.Batch#%d] response_preview=%s", batchIndex, truncateString(lastContent, 200))
-				}
-
-				// 错误事件
-				if evt.IsError() {
-					log.Errorf("[Loop.Batch#%d] event#%d ERROR type=%s msg=%s",
-						batchIndex, eventCount, rsp.Error.Type, rsp.Error.Message)
-				}
-			}
-
-			select {
-			case ta.outputCh <- evt:
-			case <-ta.loopCtx.Done():
-				// drain 剩余事件避免阻塞 runner
-				for range eventCh {
-				}
-				span.SetAttributes(
-					attribute.Int("tagent.batch.event_count", eventCount),
-					attribute.String("tagent.batch.status", "cancelled"),
-					attribute.Float64("tagent.batch.duration_seconds", time.Since(batchStart).Seconds()),
-				)
-				span.End()
-				log.Infof("[Loop.Batch#%d] cancelled duration=%s events=%d",
-					batchIndex, time.Since(batchStart), eventCount)
-				return
-			}
-		}
-
-		// 6. 设置 batch span 结束属性
-		batchDuration := time.Since(batchStart)
-		span.SetAttributes(
-			attribute.Int("tagent.batch.event_count", eventCount),
-			attribute.Int("tagent.batch.tool_call_count", toolCallCount),
-			attribute.Int("tagent.batch.input_tokens", inputTokens),
-			attribute.Int("tagent.batch.output_tokens", outputTokens),
-			attribute.Float64("tagent.batch.ttft_seconds", ttft.Seconds()),
-			attribute.Bool("tagent.batch.has_final_response", hasFinal),
-			attribute.String("tagent.batch.status", "completed"),
-			attribute.Float64("tagent.batch.duration_seconds", batchDuration.Seconds()),
-		)
-		if lastContent != "" {
-			span.SetAttributes(attribute.String("tagent.batch.final_response", truncateString(lastContent, 1000)))
-		}
-		if lastReasoning != "" {
-			span.SetAttributes(attribute.String("tagent.batch.final_reasoning", truncateString(lastReasoning, 1000)))
-		}
-		span.End()
-
-		// 7. Batch 摘要日志
-		log.Infof("[Loop.Batch#%d] completed duration=%s events=%d tool_calls=%d input_tokens=%d output_tokens=%d ttft=%s has_final=%v",
-			batchIndex, batchDuration, eventCount, toolCallCount,
-			inputTokens, outputTokens, ttft, hasFinal)
-
-		// 8. 检查是否应该退出
-		if ta.loopCtx.Err() != nil {
-			return
-		}
-	}
-}
-
-// drainMailbox 阻塞等待第一个消息，然后非阻塞地取出所有剩余消息。
-// 返回 nil 表示 loopCtx 被取消。
-func (ta *TagentAgent) drainMailbox() []model.Message {
-	// 阻塞等待第一个消息或取消
-	select {
-	case msg := <-ta.mailbox:
-		batch := []model.Message{msg}
-		// 非阻塞地取出剩余消息
-		for {
-			select {
-			case msg := <-ta.mailbox:
-				batch = append(batch, msg)
-			default:
-				return batch
-			}
-		}
-	case <-ta.loopCtx.Done():
-		return nil
-	}
-}
-
-// mergeBatch 将多条消息合并为一条。
-// 单消息直接返回；多消息提取 Content 用 "\n\n---\n\n" 连接，Role 设为 RoleUser。
-// System 消息（Tmux 通知）和 User 消息混合时，简单拼接为一条 user 消息。
-func mergeBatch(msgs []model.Message) model.Message {
-	if len(msgs) == 1 {
-		return msgs[0]
-	}
-	var parts []string
-	for _, m := range msgs {
-		if m.Content != "" {
-			parts = append(parts, m.Content)
-		}
-	}
-	return model.Message{
-		Role:    model.RoleUser,
-		Content: strings.Join(parts, "\n\n---\n\n"),
-	}
 }
 
 // truncateString truncates s to at most n characters, appending "..." if truncated.

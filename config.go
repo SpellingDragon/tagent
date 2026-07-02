@@ -71,6 +71,22 @@ type Config struct {
 	// Individual agents can override this via their own Model field.
 	Model string `json:"model" yaml:"model"`
 
+	// Provider is the global default model provider name (e.g., "openai", "anthropic").
+	// Defaults to "openai" if empty. Agents can override via AgentConfig.Provider.
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+
+	// Providers maps provider name → connection info (endpoint, api_key_env).
+	// Each agent references a provider by name to resolve its model instance.
+	// Example:
+	//   providers:
+	//     openai:
+	//       api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+	//       api_key_env: "ZAI_API_KEY"
+	//     anthropic:
+	//       api_endpoint: "https://api.anthropic.com"
+	//       api_key_env: "ANTHROPIC_API_KEY"
+	Providers map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
+
 	// ===== Runtime configuration (was in config.yaml) =====
 
 	// APIEndpoint is the LLM API base URL (e.g., "https://open.bigmodel.cn/api/paas/v4").
@@ -102,11 +118,28 @@ type Config struct {
 	TrajectoryDir string `json:"trajectory_dir,omitempty" yaml:"trajectory_dir,omitempty"`
 }
 
+// ProviderConfig holds connection info for a model provider.
+// Used in Config.Providers to declare provider endpoints and credentials.
+type ProviderConfig struct {
+	// APIEndpoint is the base URL for the provider's API.
+	// e.g., "https://open.bigmodel.cn/api/paas/v4" for ZhiPu,
+	//       "https://api.anthropic.com" for Anthropic.
+	APIEndpoint string `json:"api_endpoint" yaml:"api_endpoint"`
+
+	// APIKeyEnv is the environment variable name holding the API key for this provider.
+	// e.g., "ZAI_API_KEY", "ANTHROPIC_API_KEY".
+	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+}
+
 // AgentConfig describes a single agent's configuration.
 // Each agent only cares about itself and who it communicates with.
 type AgentConfig struct {
 	// Model is the LLM model name (resolved at runtime). Falls back to Config.Model.
 	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// Provider overrides the global default provider for this agent.
+	// References a key in Config.Providers. Falls back to Config.Provider if empty.
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
 
 	// PromptDir is the base directory for this agent's prompt files.
 	// Falls back to Config.PromptDir.
@@ -128,6 +161,11 @@ type AgentConfig struct {
 	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
 	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
 	CompressThreshold float64 `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
+	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
+
+	// Meditation configures the periodic meditation/heartbeat mechanism.
+	// Only effective when the agent is started via StartLoop.
+	Meditation MeditationConfig `json:"meditation,omitempty" yaml:"meditation,omitempty"`
 
 	// Description for agent.Agent interface (used when this agent is a sub-agent)
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
@@ -159,6 +197,23 @@ type MemoryConfig struct {
 	// RustVikingBinary sets the rustviking CLI binary path for "file" type stores.
 	// Empty value uses "rustviking" (looked up via PATH).
 	RustVikingBinary string `json:"rustviking_binary,omitempty" yaml:"rustviking_binary,omitempty"`
+}
+
+// MeditationConfig configures the periodic meditation/heartbeat mechanism.
+// Uses string durations (e.g., "30m", "2h") for YAML/JSON serialization.
+// tagent.go converts these to time.Duration for agent.MeditationConfig.
+type MeditationConfig struct {
+	// Enabled activates the meditation ticker.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// Interval is the check interval (e.g., "30m"). Default: "30m".
+	Interval string `json:"interval,omitempty" yaml:"interval,omitempty"`
+
+	// MinGap is the minimum idle duration before meditation fires (e.g., "2h"). Default: "2h".
+	MinGap string `json:"min_gap,omitempty" yaml:"min_gap,omitempty"`
+
+	// PromptFile is the meditation prompt file (relative to prompt_dir). Default: "meditation.md".
+	PromptFile string `json:"prompt_file,omitempty" yaml:"prompt_file,omitempty"`
 }
 
 // ToolRef declares a tool that an agent uses.
@@ -313,12 +368,26 @@ func DefaultConfig() Config {
 				MaxToolIterations: DefaultAgentMaxToolIter,
 				MaxTokens:         DefaultAgentMaxTokens,
 				Temperature:       DefaultAgentTemp,
+				Tools: []ToolRef{
+					{Kind: ToolKindTool, ID: "skill_search"},
+					{Kind: ToolKindTool, ID: "skill_load"},
+					{Kind: ToolKindTool, ID: "mcp_discover"},
+					{Kind: ToolKindTool, ID: "web_search"},
+					{Kind: ToolKindTool, ID: "duckduckgo_search"},
+					{Kind: ToolKindTool, ID: "memory_query"},
+				},
 			},
 			"recall": {
 				PromptDir:         DefaultPromptDir,
 				SystemPrompt:      PromptConfig{Files: []string{"recall_agent.md"}},
 				MaxToolIterations: DefaultAgentMaxToolIter,
 				MaxTokens:         DefaultAgentMaxTokens,
+				Tools: []ToolRef{
+					{Kind: ToolKindTool, ID: "recall_query"},
+					{Kind: ToolKindTool, ID: "recall_get"},
+					{Kind: ToolKindTool, ID: "recall_recent"},
+					{Kind: ToolKindTool, ID: "recall_trace"},
+				},
 			},
 		},
 	}
@@ -343,6 +412,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.TrajectoryDir == "" {
 		c.TrajectoryDir = "data/trajectories"
+	}
+	if c.Provider == "" {
+		c.Provider = "openai"
 	}
 
 	// LOG_LEVEL env var overrides config file

@@ -56,28 +56,32 @@ func main() {
 	// Set framework log level
 	log.SetLevel(tagentCfg.LogLevel)
 
-	// Resolve effective model name
-	effectiveModel := tagentCfg.Model
+	// Resolve entry agent's effective model name
 	entryCfg := tagentCfg.Agents[tagentCfg.Entry]
-	if entryCfg.Model == "" {
-		entryCfg.Model = effectiveModel
+	effectiveModel := entryCfg.Model
+	if effectiveModel == "" {
+		effectiveModel = tagentCfg.Model
 	}
-	tagentCfg.Agents[tagentCfg.Entry] = entryCfg
 
 	fmt.Println("===========================================")
 	fmt.Println("  tagent WeChat Bot")
 	fmt.Println("===========================================")
 	fmt.Printf("  Agent Name:  %s\n", tagentCfg.Entry)
 	fmt.Printf("  Model:       %s\n", effectiveModel)
+	fmt.Printf("  Provider:    %s\n", tagentCfg.Provider)
 	fmt.Printf("  Max Tokens:  %d\n", entryCfg.MaxTokens)
 	fmt.Printf("  Log Level:   %s\n", tagentCfg.LogLevel)
 	fmt.Printf("  Config:      %s\n", configPath)
 	fmt.Println("===========================================")
 
-	// 2. Create LLM model
+	// 2. Create LLM model for the entry agent
+	// Resolve the provider's connection info from config (providers map).
+	providerName := tagentCfg.Provider
 	apiEndpoint := tagentCfg.APIEndpoint
-	if apiEndpoint == "" {
-		apiEndpoint = "https://open.bigmodel.cn/api/paas/v4"
+	if pcfg, ok := tagentCfg.Providers[providerName]; ok {
+		if pcfg.APIEndpoint != "" {
+			apiEndpoint = pcfg.APIEndpoint
+		}
 	}
 	// TAGENT_API_ENDPOINT overrides config (e.g. AReaL proxy for RL training)
 	if envEndpoint := os.Getenv("TAGENT_API_ENDPOINT"); envEndpoint != "" {
@@ -108,10 +112,16 @@ func main() {
 	}
 
 	// 4. Configure tagent options.
-	// Use swappableModel so HTTPAPI can redirect LLM requests to AReaL proxy.
+	// - WithModel: global fallback for agents without their own model declaration.
+	// - WithModelOverrides: entry agent uses SwappableModel (for AReaL proxy support).
+	//   Other agents with model/provider fields are resolved internally by tagent.New()
+	//   via the provider.Model() factory (supports multi-vendor: openai/anthropic/gemini/etc).
 	opts := []tagent.Option{
 		tagent.WithModel(swappableModel),
 		tagent.WithSummaryModel(swappableModel),
+		tagent.WithModelOverrides(map[string]model.Model{
+			tagentCfg.Entry: swappableModel,
+		}),
 		tagent.WithSkillRepo(skillRepo),
 	}
 

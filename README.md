@@ -6,7 +6,7 @@
 
 ## 概览
 
-tagent 不是从零开始的 Agent 框架。它**复用** trpc-agent-go 的 React Loop（LLMAgent / Runner / Flow）作为骨架，通过框架的扩展点（BeforeModel 回调和 OnEvent 插件）**注入**差异化能力——上下文压缩、事件持久化、因果记忆。
+tagent 不是从零开始的 Agent 框架。它构建于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go) 之上，用**事件驱动执行引擎**（EventBus + AgentLoop + Preprocessor）替代了原框架的同步 React Loop，通过框架的扩展点（OnEvent 插件）**注入**差异化能力——上下文压缩、事件持久化、因果记忆。
 
 最终产物是一个持久化、事件驱动的 Agent，可以以下述模式运行：
 - **持久事件循环**（持续接收事件，批量处理，等待下一批）
@@ -17,12 +17,12 @@ tagent 不是从零开始的 Agent 框架。它**复用** trpc-agent-go 的 Reac
 
 | 原则 | 含义 |
 |------|------|
-| **复用而非重写** | tagent 不重新实现 React Loop，而是以 LLMAgent 为骨架，通过回调和插件添加能力。 |
-| **注入而非继承** | tagent 的能力通过 `BeforeModel` 回调（压缩）和 `OnEvent` 插件（持久化）注入，而非通过继承或修改框架。 |
-| **视图转换原则** | 上下文压缩仅修改发送给 LLM 的消息列表——绝不触碰 Session 或 MemoryStore 的原始数据。 |
-| **职责分离** | 应用装配（`tagent.New()` 工厂）位于根包 `tagent.go`；`agent/` 包仅专注于核心机制。 |
-| **事件上下文传递** | 顶层 Agent 的 LLM 上下文是事件记录流。子 Agent 接收 `event_key` 从 MemoryStore 获取完整上下文。 |
-| **信息隔离** | Session 存储轻量级 `EventReference`；完整事件数据存储在 `MemoryStore`。压缩和 LLM 视图与存储数据相互独立。 |
+| **事件驱动** | 所有输入统一为 EventBus 上的事件，工具结果以 external_input 回写，消除同步阻塞。 |
+| **纯引擎无业务** | AgentLoop 不包含业务语义，所有领域决策在 Preprocessor 中完成。 |
+| **复用框架原语** | 保留 trpc-agent-go 的 model/tool/event/session/plugin 基础设施，仅替换执行模型。 |
+| **子 agent 隔离** | 每个子 agent 拥有独立的 EventBus 和 SmartCompressor，不共享可变状态。 |
+| **异步工具分发** | 工具执行在独立 goroutine 中完成，结果以事件回写 bus。 |
+| **记忆即大脑** | MemoryStore 是唯一完整事件链的组件，Agent 和 Tool 通过 EventKey 按需访问。 |
 
 > 详细设计理念：[agent-architecture.md §1](docs/wiki/agent/agent-architecture.md)
 
@@ -66,7 +66,7 @@ graph TB
 
 | 类别 | 事件类型 | 触发条件 | 存入 Session? |
 |------|---------|---------|--------------|
-| **外部** | `external_input` | 用户消息、API 调用、TmuxMonitor 注入 | 是（作为 EventReference） |
+| **外部** | `external_input` | 用户消息、API 调用、TmuxMonitor 注入、**冥想事件** | 是（作为 EventReference） |
 | **外部** | `agent_output` | Agent 的最终响应（无 tool_calls） | 是 |
 | **动作** | `action_command` | 工具/命令执行结果 | 是 |
 | **思考** | `thinking_plan` | Agent 规划（带 tool_calls 的 assistant 消息） | 是 |
@@ -80,12 +80,15 @@ graph TB
 
 | 维度 | 传统 Agent | tagent |
 |------|-----------|--------|
+| 执行模型 | 同步 React Loop（LLM→工具→LLM 阻塞循环） | 事件驱动（EventBus + AgentLoop 异步循环） |
+| 工具调用 | 同步 inline 执行，阻塞主循环 | 异步 goroutine 分发，结果以事件回写 |
 | 上下文传递 | 通过函数参数逐层传递 | 通过 MemoryStore + EventKey 共享 |
-| Agent 视角 | 知道完整的执行流程 | 只知道当前任务 + 事件 key |
+| Agent 视角 | 知道完整的执行流程 | 只知道当前事件 + 历史对话 |
 | 工具视角 | 被动执行者，依赖 Agent 提供上下文 | 通过 `event_key` 自主访问 MemoryStore |
 | 记忆角色 | 可选组件 | 核心中枢（唯一真相源） |
 | 事件粒度 | 粗粒度（请求/响应） | 细粒度（每个动作/思考） |
 | 上下文溢出 | 硬限制或简单截断 | 两阶段压缩（任务边界 + LLM 摘要） |
+| 外部输入 | 必须等待当前轮次结束 | 随时发布到 EventBus，下一轮 Pull 即可处理 |
 
 > 详情：[event-architecture.md](docs/wiki/event/event-architecture.md), [memory-architecture.md](docs/wiki/memory/memory-architecture.md)
 
@@ -96,23 +99,26 @@ graph TB
 ```mermaid
 graph TB
     subgraph "tagent (root)"
-        NEW["tagent.New()<br/>组合根"]
+        NEW["tagent.New() 组合根"]
     end
 
-    subgraph "tagent/agent"
-        TA["TagentAgent<br/>(持久事件循环)"]
-        CI["ContextIntervention<br/>(BeforeModel 拦截器)"]
-        SC["SmartCompressor<br/>(两阶段压缩)"]
+    subgraph "tagent/agent (事件驱动引擎)"
+        TA["TagentAgent (组合根)"]
+        EB["EventBus (事件队列)"]
+        AL["AgentLoop (Pull-Process-Model-Dispatch)"]
+        PP["Preprocessor (过滤+构建+压缩)"]
+        SC["SmartCompressor (两阶段压缩)"]
+        MM["MeditationManager (冥想)"]
     end
 
     subgraph "tagent/plugin"
-        MP["MemoryPlugin<br/>(持久化 + 因果链)"]
-        SP["SummaryPlugin<br/>(事件标签注入)"]
+        MP["MemoryPlugin (持久化+因果链)"]
+        SP["SummaryPlugin (事件标签)"]
     end
 
     subgraph "tagent/memory"
-        MS["MemoryStore<br/>(InMemory / FileSegmentStore)"]
-        RS["RelationStore<br/>(因果链)"]
+        MS["MemoryStore"]
+        RS["RelationStore (因果链)"]
     end
 
     subgraph "tagent/tool"
@@ -121,48 +127,32 @@ graph TB
         CT["ActionTool + TmuxMonitor"]
     end
 
-    subgraph "tagent/event"
-        ET["事件类型 + 摘要"]
-    end
-
-    subgraph "tagent/prompt"
-        PL["Prompt 加载器"]
-    end
-
-    subgraph "trpc-agent-go (框架)"
-        RUN["Runner"]
-        LLMA["LLMAgent<br/>(React Loop Flow)"]
+    subgraph "trpc-agent-go (复用层)"
         SESS["Session"]
+        MODEL["model.Model"]
     end
 
     subgraph "External"
-        LLM["model.Model"]
+        LLM["LLM API"]
         A2A["A2A 远程 Agent"]
     end
 
     NEW --> TA
-    NEW --> KA
-    NEW --> RA
-    NEW --> CT
-
-    TA --> RUN
-    RUN --> LLMA
-    RUN --> SESS
-    RUN --> MP
-    RUN --> SP
-
-    LLMA --> CI
-    CI --> SC
-    LLMA --> LLM
+    TA --> EB
+    EB -->|Pull| AL
+    AL -->|Process| PP
+    PP --> SC
+    AL -->|GenerateContent| MODEL
+    MODEL --> LLM
 
     MP --> MS
-    MP --> ET
-    SP --> ET
+    MP --> MS
     MS --> RS
 
     KA --> MS
     RA --> MS
-    CT -->|InjectMessage| TA
+    CT -->|external_input| EB
+    MM -->|external_input| EB
 
     TA -.->|A2A Server| A2A
 ```
@@ -171,20 +161,21 @@ graph TB
 
 | 模块 | 职责 | Wiki |
 |------|------|------|
-| `agent/` | 核心协调：`TagentAgent`（持久循环）、`ContextIntervention`（BeforeModel 拦截器）、`SmartCompressor`（两阶段 LLM 压缩）、`ToolAgent`（子 Agent 包装器） | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
+| `agent/` | 核心协调：`TagentAgent`（持久循环）、`ContextIntervention`（BeforeModel 拦截器）、`SmartCompressor`（两阶段 LLM 压缩）、`ToolAgent`（子 Agent 包装器）、`MeditationManager`（冥想心跳） | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
 | `memory/` | 结构化事件存储：`InMemoryStore`、`FileSegmentStore`（L0-L3 分层）、`RelationStore`（因果链）、`Compactor`、`Tombstone`、`Lifecycle`（TTL） | [memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
 | `plugin/` | 框架插件：`MemoryPlugin`（事件持久化 + 因果链）、`SummaryPlugin`（事件标签注入） | [plugin-architecture.md](docs/wiki/plugin/plugin-architecture.md) |
-| `tool/` | 可调用工具：`KnowledgeAgent`（RAG）、`RecallAgent`（记忆回溯）、`ActionTool`（shell/tmux 执行 + TmuxMonitor） | [tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
+| `tool/` | 可调用工具：`KnowledgeAgent`（RAG）、`RecallAgent`（记忆回溯）、`ActionTool`（shell/tmux 执行 + TmuxMonitor）、`file`（trpc-agent-go 内置文件操作工具封装）、`SpeakAgent`/`DrawAgent`（stub，未启用） | [tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
 | `event/` | 事件类型系统：类型推断（`ExtractEventType`）、摘要生成（`GenerateEventSummary`）、严格不截断策略 | [event-architecture.md](docs/wiki/event/event-architecture.md) |
 | `prompt/` | Prompt 模板加载器：单文件、目录、组合、bootstrap 风格加载 | [prompt-architecture.md](docs/wiki/prompt/prompt-architecture.md) |
 | `config.go` | 声明式配置：YAML/JSON 可序列化的 `Config` → `AgentConfig` → `MemoryConfig` / `ToolRef` | — |
+| `registry.go` | ToolRegistry：统一工具注册/查询/校验门面。`RegisterBuiltinTools()` 注册 exec + knowledge/recall 子工具为 plain tool | — |
 | `tagent.go` | 组合根：`tagent.New(cfg, opts...)` 将 Config + 运行时选项组装为完整 Agent | — |
 
 ### 模块依赖关系
 
 ```mermaid
 graph TD
-    ROOT["tagent (root)<br/>config.go + tagent.go + builtin.go"]
+    ROOT["tagent (root)<br/>config.go + tagent.go + registry.go + builtin.go"]
     AGENT["agent/"]
     PLUGIN["plugin/"]
     MEMORY["memory/"]
@@ -285,6 +276,34 @@ graph TD
 | trpc Go options | 通信细节（A2A 协议、TransferStateKey） | 由 `tagent.go` 自动生成 |
 
 > 详情：[agent-architecture.md §13-14](docs/wiki/agent/agent-architecture.md), [tool-architecture.md §4](docs/wiki/tool/tool-architecture.md)
+
+### 5. 冥想心跳机制
+
+`MeditationManager` 在 Agent 空闲时定期注入"冥想"事件（`external_input`），触发上下文清理、深度分析和 skill 积累。
+
+**有效性规则**：如果最后一次事件（用户输入、Agent 输出、工具调用等）距今不足 `MinGap`（默认 2h），本次冥想跳过。这确保冥想不干扰活跃对话。
+
+```mermaid
+graph LR
+    TICK["定时器触发<br/>(每 Interval)"] --> CHECK{"距上次事件<br/>>= MinGap?"}
+    CHECK -->|"是"| INJECT["InjectMessage<br/>(冥想 external_input)"]
+    CHECK -->|"否"| SKIP["跳过本次冥想"]
+    INJECT --> LOOP["进入事件循环<br/>SmartCompressor 自动清理"]
+    LOOP --> LLM["LLM 执行冥想 prompt:<br/>recall 回顾 → 分析 → skill 积累"]
+```
+
+冥想事件走完整事件管道：MemoryPlugin 持久化 → SmartCompressor 自动检查 token 预算 → LLM 处理冥想 prompt。冥想 prompt 引导 LLM 使用 recall 回顾近期事件、分析模式、通过 action 创建/更新 skill 文件。
+
+**配置**：
+```yaml
+agents:
+  tagent:
+    meditation:
+      enabled: true
+      interval: "30m"    # 检查间隔
+      min_gap: "2h"      # 最小空闲间隔
+      prompt_file: "meditation.md"
+```
 
 ## 关键场景
 
@@ -536,10 +555,10 @@ RL 模式：   tagent → TrajectoryRecorder → SwappableModel → AReaL proxy 
 
 ```bash
 # SFT：转为 {input_ids, loss_mask} 格式
-python3 areal/convert_trajectories.py --input data/trajectories/ --output data/sft/ --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft
+python3 train/rl/convert_trajectories.py --input data/trajectories/ --output data/sft/ --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft
 
 # RL：转为 {messages} 格式（仅 prompt）
-python3 areal/convert_trajectories.py --input data/trajectories/ --output data/rl/ --mode rl
+python3 train/rl/convert_trajectories.py --input data/trajectories/ --output data/rl/ --mode rl
 ```
 
 > 详情：[agent-architecture.md §7.6](docs/wiki/agent/agent-architecture.md)
@@ -567,8 +586,66 @@ python3 areal/convert_trajectories.py --input data/trajectories/ --output data/r
 | `max_tokens` | `8000` | 上下文压缩的 token 预算 |
 | `compress_threshold` | `0.8` | 压缩触发比例（`max_tokens * threshold`） |
 | `temperature` | `0.7` | LLM 温度参数 |
+| `meditation.enabled` | `true` | 启用冥想心跳（仅 entry agent 生效） |
+| `meditation.interval` | `30m` | 冥想检查间隔 |
+| `meditation.min_gap` | `2h` | 最小空闲间隔（不足则跳过冥想） |
+| `meditation.prompt_file` | `meditation.md` | 冥想 prompt 文件 |
 | `trajectory_dump` | `false` | 启用轨迹记录（记录 LLM 调用到 JSONL） |
 | `trajectory_dir` | `data/trajectories` | 轨迹文件目录 |
+
+### 多 Agent 配置结构
+
+tagent 采用声明式多 Agent 配置。每个 Agent 独立配置模型、prompt、工具和记忆，通过 `tools` 列表声明调用关系。
+
+```yaml
+agents:
+  tagent:                    # 入口 Agent（StartLoop 运行）
+    model: glm-4-flash
+    system_prompt:
+      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
+    meditation:              # 冥想心跳（仅 entry agent）
+      enabled: true
+      interval: "30m"
+      min_gap: "2h"
+    tools:
+      - agent: knowledge     # 知识检索 Agent
+        description_file: knowledge_tool_desc.md
+        event_params: [event_key]
+      - agent: recall        # 记忆回溯 Agent
+        description_file: recall_tool_desc.md
+        event_params: [event_key]
+      - kind: tool           # 直接执行工具
+        id: action
+        description_file: action_tool_desc.md
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: save_file
+
+  knowledge:                 # 子 Agent（通过 Run() 调用）
+    model: glm-4-flash
+    system_prompt:
+      files: [knowledge_agent.md]
+    memory:
+      type: memory
+  recall:
+    model: glm-4-flash
+    system_prompt:
+      files: [recall_agent.md]
+  # speak/draw 已注册工厂但默认不启用，需要时加入 tools 列表即可
+  speak:
+    model: glm-4-flash
+    system_prompt:
+      files: [speak_agent.md]
+  draw:
+    model: glm-4-flash
+    system_prompt:
+      files: [draw_agent.md]
+```
+
+**文件操作工具**：tagent 直接复用 trpc-agent-go 内置的 file toolset，提供 `read_file`、`save_file`、`list_file`、`search_file`、`search_content`、`read_multiple_files`、`replace_content` 等工具。这些工具直接操作文件，无需再经过 read/write 子 Agent 转发。
+
+**speak/draw Agent**：已注册工厂但默认不在 tools 列表中。未来接入语音合成/图像生成模型时，将 prompt 替换为实际功能即可启用。
 
 ### 工具引用选项
 
@@ -580,14 +657,36 @@ python3 areal/convert_trajectories.py --input data/trajectories/ --output data/r
 | `description_file` | 工具描述 prompt 文件 |
 | `event_params` | 接受事件 key 的参数（如 `[event_keys]`） |
 | `remote.url` | 远程 Agent URL（启用 A2A 通信） |
+| `properties` | 工具专属配置（key-value map，由 factory 解析） |
+
+### Action Tool Properties
+
+`exec`（ActionTool）支持以下 `properties` 字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `work_dir` | string | 命令执行的默认工作目录 |
+| `run_as_user` | string | 通过 `sudo -u` 执行命令时使用的用户 |
+| `run_as_group` | string | 通过 `sudo -g` 执行命令时使用的用户组 |
+
+```yaml
+tools:
+  - kind: tool
+    id: exec
+    properties:
+      work_dir: /tmp/tagent-workspace
+      run_as_user: tagent-runner
+      run_as_group: tagent-runner
+```
 
 ## 项目结构
 
 ```
 tagent/
-├── agent/          # 核心：TagentAgent, ContextIntervention, SmartCompressor, ToolAgent
-├── builtin.go      # init()：注册内置工具工厂
-├── config.go       # 声明式配置：Config, AgentConfig, ToolRef, PromptConfig
+├── agent/          # 核心：TagentAgent, ContextIntervention, SmartCompressor, ToolAgent, MeditationManager
+├── builtin.go      # 内置 plain tool 工厂函数（actionFactory）
+├── config.go       # 声明式配置：Config, AgentConfig, ToolRef, MeditationConfig, PromptConfig
+├── registry.go     # ToolRegistry：统一工具注册/查询/校验（RegisterBuiltinTools）
 ├── docs/wiki/      # 架构文档（按模块）
 ├── event/          # 事件类型：ExtractEventType, GenerateEventSummary
 ├── examples/       # 示例（wechat-bot: 微信助手 + RL 训练）
@@ -595,10 +694,10 @@ tagent/
 ├── openspec/       # 设计规格和变更记录
 ├── plugin/         # 插件：MemoryPlugin, SummaryPlugin
 ├── prompt/         # Prompt 加载器：文件、目录、bootstrap
-├── resources/      # Prompt 文件、资源
+├── resources/      # Prompt 文件（含 meditation.md, action_agent.md 等）
 ├── tagent.go       # 组合根：tagent.New(cfg, opts...)
 ├── testutil/       # 测试工具
-├── tool/           # 工具：command, recall, knowledge
+├── tool/           # 工具：action, recall, knowledge, file, speak, draw
 └── go.mod
 ```
 

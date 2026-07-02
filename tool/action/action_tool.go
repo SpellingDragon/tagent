@@ -96,7 +96,7 @@ func (ct *ActionTool) SetMessageInjector(injector MessageInjector) {
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
-		description: "Execute actions on real-world resources. Describe the behavior you want to perform in natural language, and it triggers execution. Supports sync (exec) and async (tmux_exec) modes. Skills and MCP tools are translated to actions by the knowledge tool and executed here.",
+		description: "Execute actions on real-world resources via tmux. Commands run asynchronously — you will receive a session_id immediately, and the execution result (stdout/stderr/exit_code) will arrive as a subsequent event. Describe the behavior you want in natural language or as a shell command.",
 		executor:    NewActionExecutor(),
 	}
 
@@ -144,16 +144,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 			Properties: map[string]*tool.Schema{
 				"command": {
 					Type:        "string",
-					Description: "The action to execute, described as a shell command. For skills, use the script path relative to project root (e.g., 'node ./skills/url-fetcher/url_fetcher.js --url ...'). The command runs via sh -c so pipes, redirects, and chaining are supported.",
-				},
-				"mode": {
-					Type:        "string",
-					Description: "Execution mode: 'exec' (sync, wait for result — default) or 'tmux_exec' (async, for long-running/interactive commands)",
-					Enum:        []any{"exec", "tmux_exec"},
-				},
-				"timeout": {
-					Type:        "integer",
-					Description: "Timeout in seconds (exec mode only, default: 60)",
+					Description: "The action to execute, described as a shell command. Runs via sh -c so pipes, redirects, and chaining are supported.",
 				},
 				"work_dir": {
 					Type:        "string",
@@ -175,6 +166,14 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 }
 
 // Call implements tool.CallableTool.
+//
+// All invocations are routed through tmux async (executeAsync). If tmux is
+// not available, falls back to synchronous execution (executeSync) which
+// blocks until the command completes — this is a degraded mode.
+//
+// The async path returns a TmuxExecResponse (session_id + status:running).
+// The actual command output will arrive later via TmuxMonitor callback,
+// which publishes an external_input event to the EventBus.
 func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var args ActionArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
@@ -185,21 +184,16 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: command is required")
 	}
 
-	// Default mode is exec
-	if args.Mode == "" {
-		args.Mode = "exec"
-	}
+	log.Infof("[ActionTool] executing cmd=%q", args.Command)
 
-	log.Infof("[ActionTool] executing mode=%s dir=%q cmd=%q", args.Mode, args.WorkDir, args.Command)
-
-	switch args.Mode {
-	case "exec":
-		return ct.executeSync(ctx, args)
-	case "tmux_exec":
+	// Primary path: tmux async.
+	if ct.tmuxExecutor != nil {
 		return ct.executeAsync(ctx, args)
-	default:
-		return nil, fmt.Errorf("action: unknown mode %q, must be 'exec' or 'tmux_exec'", args.Mode)
 	}
+
+	// Fallback: synchronous exec (tmux not available).
+	log.Warnf("[ActionTool] tmux not available, falling back to sync exec")
+	return ct.executeSync(ctx, args)
 }
 
 // executeSync runs a command synchronously and waits for the result.
@@ -361,10 +355,20 @@ type ActionExecResult struct {
 }
 
 // TmuxExecResponse represents the response of an async tmux command execution.
+//
+// IsTmuxAsync() returns true, which signals to the AgentLoop's tool dispatch
+// layer that the actual command result will arrive later via TmuxMonitor
+// callback (as an external_input event). The dispatch layer should NOT publish
+// this response back to the bus.
 type TmuxExecResponse struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
 }
+
+// IsTmuxAsync marks this response as an async tmux result.
+// The AgentLoop uses this to distinguish synchronous tool results (publish
+// immediately) from tmux-async results (wait for TmuxMonitor callback).
+func (TmuxExecResponse) IsTmuxAsync() bool { return true }
 
 // IsTmuxAvailable checks if tmux is available on the system.
 func IsTmuxAvailable() bool {

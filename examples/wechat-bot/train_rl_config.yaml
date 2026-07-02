@@ -7,8 +7,8 @@
 #
 # 启动方式:
 #   cd examples/wechat-bot
-#   ./run.sh areal                    # 前台启动
-#   ./run.sh areal-start              # 后台启动
+#   ./run.sh train-rl                    # 前台启动
+#   ./run.sh train-rl-start              # 后台启动
 #
 # 环境变量:
 #   TAGENT_URL          tagent HTTPAPI 地址 (默认: http://localhost:8089)
@@ -26,7 +26,7 @@ tokenizer_path: ${actor.path}
 
 # tagent adapter 作为 rollout workflow
 # AReaL 会自动检测这不是 RolloutWorkflow，包装为 OpenAIProxyWorkflow
-workflow: areal.tagent_adapter.TagentARealAdapter
+workflow: train.rl.tagent_adapter.TagentARealAdapter
 eval_workflow: ${workflow}
 
 # tagent adapter 参数（作为 workflow_kwargs 传递给 __init__）
@@ -38,10 +38,10 @@ tagent_wait_time: 60.0
 cluster:
   n_nodes: 1
   n_gpus_per_node: 8
-  fileroot: /tmp/areal/experiments
+  fileroot: /tmp/train_rl/experiments
   name_resolve:
     type: nfs
-    nfs_record_root: /tmp/areal/name_resolve
+    nfs_record_root: /tmp/train_rl/name_resolve
 
 scheduler:
   type: null
@@ -116,7 +116,7 @@ actor:
     - task_type: worker
       port_count: 2
       gpu: 1
-      cmd: python3 -m areal.infra.rpc.rpc_server
+      cmd: python3 -m train.rl.infra.rpc.rpc_server
       env_vars:
         NCCL_DEBUG: "WARN"
 

@@ -82,16 +82,32 @@ func (sc *SmartCompressor) Compress(
 	log.Debugf("[SmartCompress] split: segments=%d (complete=%d incomplete=%d) keepRecent=%d msgs=%d",
 		len(segments), completeCount, len(segments)-completeCount, sc.KeepRecentTasks, len(messages))
 
-	// 3. If within limit, no compression needed
-	if len(segments) <= sc.KeepRecentTasks {
-		log.Debugf("[SmartCompress] skip: segments=%d <= keepRecentTasks=%d — not enough task boundaries to compress",
-			len(segments), sc.KeepRecentTasks)
-		return messages
+	// 3. Determine how many segments to keep (must leave room for summarization)
+	keepCount := sc.KeepRecentTasks
+	if keepCount >= len(segments) {
+		// Not enough segments to satisfy KeepRecentTasks while still having
+		// old segments to summarize. Reduce keepCount to make room.
+		keepCount = len(segments) - 1
+		log.Debugf("[SmartCompress] segments=%d <= keepRecentTasks=%d, reducing keepCount=%d for summarization",
+			len(segments), sc.KeepRecentTasks, keepCount)
+	}
+	if keepCount < 1 {
+		// Only 0 or 1 segment. Truncation is STRICTLY PROHIBITED (see event/types.go).
+		if sc.summaryModel != nil {
+			// Have summary model: summarize everything (keepCount=0).
+			keepCount = 0
+			log.Debugf("[SmartCompress] only %d segment(s), summarizing all (keepCount=0)", len(segments))
+		} else {
+			// No summary model and cannot split — return original to avoid
+			// destructive information loss.
+			log.Debugf("[SmartCompress] only %d segment(s) and no summaryModel — returning original", len(segments))
+			return messages
+		}
 	}
 
 	// 4. Split into old and recent segments
-	oldSegments := segments[:len(segments)-sc.KeepRecentTasks]
-	recentSegments := segments[len(segments)-sc.KeepRecentTasks:]
+	oldSegments := segments[:len(segments)-keepCount]
+	recentSegments := segments[len(segments)-keepCount:]
 
 	// 5. Stage 2: Generate batched LLM summaries of old segments (if model available)
 	var summaryMsgs []model.Message
@@ -320,20 +336,20 @@ func splitByTaskBoundary(messages []model.Message) []*TaskSegment {
 }
 
 // generateSummary generates an LLM summary of old task segments.
+// batchIndex and totalBatches provide context for dynamic target sizing.
 // Returns the summary string and whether an error occurred during LLM invocation.
 // If summaryModel is nil, returns ("", false) meaning summary not attempted.
 func (sc *SmartCompressor) generateSummary(
-	ctx context.Context, segments []*TaskSegment,
+	ctx context.Context, segments []*TaskSegment, batchIndex, totalBatches int,
 ) (summary string, hadError bool) {
 	if sc.summaryModel == nil {
 		return "", false
 	}
 
-	// Build summary prompt from old segments
-	var sb strings.Builder
-	sb.WriteString("请对以下历史对话片段生成简洁的摘要，保留关键语义、决策和结果。不要遗漏重要信息。\n\n")
+	// Build conversation content from old segments
+	var contentBuilder strings.Builder
 	for i, seg := range segments {
-		sb.WriteString(fmt.Sprintf("--- 片段 %d ---\n", i+1))
+		contentBuilder.WriteString(fmt.Sprintf("--- 片段 %d ---\n", i+1))
 		for _, msg := range seg.Messages {
 			roleLabel := "unknown"
 			switch msg.Role {
@@ -357,17 +373,50 @@ func (sc *SmartCompressor) generateSummary(
 					content = msg.Content + "\n" + content
 				}
 			}
-			sb.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, content))
+			contentBuilder.WriteString(fmt.Sprintf("%s: %s\n", roleLabel, content))
 		}
 	}
-	sb.WriteString("\n--- 摘要 ---")
+
+	// Dynamic target calculation based on actual input and token budget
+	inputChars := contentBuilder.Len()
+	// Default compression ratio: 5x (target = 20% of input)
+	targetChars := inputChars / 5
+	// Cap: ensure all batch summaries fit within token budget.
+	// Reserve space for system prompt + recent segments by dividing budget
+	// across (totalBatches + 2) slots.
+	maxCharsPerBatch := sc.maxTokens * 4 / (totalBatches + 2)
+	if targetChars > maxCharsPerBatch {
+		targetChars = maxCharsPerBatch
+	}
+	if targetChars < 200 {
+		targetChars = 200 // minimum viable summary
+	}
+
+	// Build prompt with explicit engineering target
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString(fmt.Sprintf(
+		"请对以下 %d 个历史对话片段生成摘要。这是第 %d/%d 批。\n\n"+
+			"工程要求：\n"+
+			"1. 只保留关键语义、用户意图、执行操作和最终结果\n"+
+			"2. 省略工具调用的原始输出和中间过程细节\n"+
+			"3. 摘要目标长度：约 %d 字符（原始内容 %d 字符，压缩比 %.1fx）\n"+
+			"4. 超出目标长度的部分必须省略，不可溢出\n"+
+			"5. 使用简洁的要点式表达\n\n",
+		len(segments), batchIndex, totalBatches,
+		targetChars, inputChars, float64(inputChars)/float64(targetChars),
+	))
+	promptBuilder.WriteString(contentBuilder.String())
+	promptBuilder.WriteString("\n--- 摘要 ---")
 
 	req := &model.Request{
 		Messages: []model.Message{
-			model.NewSystemMessage("你是一个对话摘要助手。请为历史对话生成简洁但完整的摘要。"),
-			model.NewUserMessage(sb.String()),
+			model.NewSystemMessage("你是一个对话摘要助手。严格按照用户指定的目标长度生成摘要。"),
+			model.NewUserMessage(promptBuilder.String()),
 		},
 	}
+
+	log.Debugf("[SmartCompress] batch %d/%d: inputChars=%d targetChars=%d ratio=%.1f",
+		batchIndex, totalBatches, inputChars, targetChars, float64(inputChars)/float64(targetChars))
 
 	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
 	if err != nil {
@@ -385,6 +434,9 @@ func (sc *SmartCompressor) generateSummary(
 			result += resp.Choices[0].Message.Content
 		}
 	}
+
+	log.Debugf("[SmartCompress] batch %d/%d: summary generated %d chars (target %d)",
+		batchIndex, totalBatches, len(result), targetChars)
 
 	return result, false
 }
@@ -444,20 +496,21 @@ func (sc *SmartCompressor) summarizeBatches(
 
 	var result []model.Message
 	successCount := 0
+	totalBatches := len(batches)
 
 	for i, batch := range batches {
-		summary, hadError := sc.generateSummary(ctx, batch)
+		summary, hadError := sc.generateSummary(ctx, batch, i+1, totalBatches)
 		if hadError || summary == "" {
-			log.Warnf("[SmartCompress] batch %d/%d summary failed, skipping", i+1, len(batches))
+			log.Warnf("[SmartCompress] batch %d/%d summary failed, skipping", i+1, totalBatches)
 			continue
 		}
 		successCount++
-		content := fmt.Sprintf("[摘要批次 %d/%d]\n%s", i+1, len(batches), summary)
+		content := fmt.Sprintf("[摘要批次 %d/%d]\n%s", i+1, totalBatches, summary)
 		result = append(result, model.NewSystemMessage(content))
 	}
 
 	if successCount == 0 {
-		log.Warnf("[SmartCompress] all %d batch summaries failed", len(batches))
+		log.Warnf("[SmartCompress] all %d batch summaries failed", totalBatches)
 		return nil, true
 	}
 

@@ -538,7 +538,7 @@ tagent/agent
     └── SmartCompress（不直接依赖，但因果链信息来自 MemoryStore）
 
 tagent/tool
-    ├── RecallAgent → memory_query / memory_get / memory_recent（跨 Session）
+    ├── RecallAgent → recall_query / recall_get / recall_recent / recall_trace（跨 Session）
     └── KnowledgeAgent → memory_query（上下文感知搜索）
 
 tagent (root)
@@ -565,7 +565,7 @@ MemoryStore 的读取方按频率和场景分层：
 | 读取方 | 频率 | 场景 |
 |--------|------|------|
 | **AgentToolWrapper** | 🔥 最高频 | 顶层 LLM 筛选 `event_keys` → 传给子 tool → Wrapper 从 `parentStore` 取完整 `FullEvent` → 注入子 Agent 作为上下文 |
-| **RecallAgent** 子工具 | 中频 | 跨 Session 深层检索：`memory_query`（语义查询）、`memory_get`（按 key 取详情）、`memory_recent`（最近 N 条） |
+| **RecallAgent** 子工具 | 中频 | 跨 Session 深层检索：`recall_query`（语义查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
 | **KnowledgeAgent** | 低~中频 | 通过 `memory_query` 从父级 MemoryStore 查历史，辅助技能/MCP 搜索 |
 | **直接访问** (`agent.MemStore()`) | 调试/测试 | 开发阶段手工查事件 |
 
@@ -605,10 +605,10 @@ sequenceDiagram
 顶层 LLM 的 context 已包含当前 Session 的 `EventReference[]` 流。当需要的信息**超出当前 context 窗口**或**跨越多个历史 Session** 时，LLM 调用 RecallAgent。RecallAgent 的内部 LLM React 循环负责：
 
 1. **理解查询意图** — 将自然语言转为结构化检索条件
-2. **多工具协作** — `memory_query` 检索 → `memory_get` 按需取详情（含父事件） → `memory_recent` 补充最新事件 → `memory_trace` 因果链回溯
+2. **多工具协作** — `recall_query` 检索 → `recall_get` 按需取详情（含父事件） → `recall_recent` 补充最新事件 → `recall_trace` 因果链回溯
 3. **跨事件综合** — 将零散历史事件综合为连贯的记忆摘要
 
-其子工具 `memory_get` 通过 `EventKey` 从 MemoryStore 拉取完整事件详情：
+其子工具 `recall_get` 通过 `EventKey` 从 MemoryStore 拉取完整事件详情：
 
 ```go
 // tool/recall_subtools.go — NewRecallGetTool
@@ -648,19 +648,19 @@ func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
 
             return result, nil
         },
-        function.WithName("memory_get"),
+        function.WithName("recall_get"),
         function.WithDescription("Get full details of a specific event by its key. Set include_parent=true to also include the parent event summary."),
     )
 }
 ```
 
-**RecallAgent 子工具**：
-- `memory_query`：按查询条件检索事件列表，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
-- `memory_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
-- `memory_recent`：快速获取最近的 N 条事件，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
-- `memory_trace`：沿 RelationStore 因果链回溯，从指定事件追溯最多 20 步历史
+**RecallAgent 子工具**（通过 `RegisterSubTools()` 注册为 plain tool）：
+- `recall_query`：按查询条件检索事件列表，支持时间范围过滤，自动注入 `ReadPartitionIDs`
+- `recall_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
+- `recall_recent`：快速获取最近的 N 条事件，支持时间范围过滤，自动注入 `ReadPartitionIDs`
+- `recall_trace`：沿 RelationStore 因果链回溯，从指定事件追溯最多 20 步历史
 
-> **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadNamespaces`（转换为 PartitionID 列表）注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。详见 [tool-architecture.md](../tool/tool-architecture.md) §七。
+> **自动注入机制**：`recall_query` 和 `recall_recent` 的 factory 从 `PlainToolFactoryConfig.ReadPartitionIDs` 获取分区列表，handler 内部自动注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数，无需感知分区号。详见 [tool-architecture.md](../tool/tool-architecture.md) §六。
 
 ### 11.4 完整数据流
 
@@ -701,11 +701,11 @@ sequenceDiagram
     MP->>MS: StoreEvent(eventKey, FullEvent)
     Note over MS: FullEvent 持久化<br/>RelationStore.SetParent 建立因果链
 
-    RA->>MS: memory_query → QueryEvents(query)
+    RA->>MS: recall_query → QueryEvents(query)
     MS-->>RA: []EventReference
     Note over RA: 内部 LLM React 循环<br/>综合检索结果
 
-    RA->>MS: memory_get(eventKey) → GetEvent(key)
+    RA->>MS: recall_get(eventKey) → GetEvent(key)
     MS-->>RA: FullEvent（含 Content, ToolCalls）
     RA-->>LLM: 展示综合后的记忆摘要
 ```
@@ -740,7 +740,7 @@ func NewPartitionID() int
 
 RecallAgent 的子工具操作的是自身 MemoryStore，而历史事件由顶层 Agent（如 tagent）写入。当 RecallAgent 需要检索顶层 Agent 的历史事件时，需要跨命名空间的读权限。
 
-**设计方案**：`MemoryConfig.ReadNamespaces` 字段声明本 Agent 可读取的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过 `ToolAgentFactoryConfig` 注入到 recall factory，再由 factory 传给子工具构造函数。
+**设计方案**：`MemoryConfig.ReadNamespaces` 字段声明本 Agent 可读取的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过 `buildPlainToolRef` → `PlainToolFactoryConfig.ReadPartitionIDs` 注入到每个 plain tool factory。
 
 ```yaml
 # 配置示例
@@ -757,11 +757,10 @@ recall:
 ```
 tagent.yaml → ReadNamespaces: ["tagent"]
   → buildAgent() → memory.PartitionIDFromName("tagent") → [144]
-  → ToolAgentFactoryConfig.ReadPartitionIDs: [144]
-  → recallFactory() → recall.Config.ReadPartitionIDs: [144]
-  → buildRecallSubTools(accessor, [144])
-  → NewRecallQueryTool(accessor, [144]) — handler 内注入 opts.PartitionIDs
-  → LLM 调用 memory_query({query: "部署"}) → 实际查询分区 144
+  → buildPlainToolRef() → PlainToolFactoryConfig.ReadPartitionIDs: [144]
+  → recallQueryFactory(cfg) → handler 内注入 opts.PartitionIDs
+  → recallRecentFactory(cfg) → handler 内注入 opts.PartitionIDs
+  → LLM 调用 recall_query({query: "部署"}) → 实际查询分区 144
 ```
 
 ### 13.0.1 InMemoryStore 按 path 共享实例

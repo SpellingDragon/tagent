@@ -41,6 +41,10 @@ func NewContextIntervention(
 // 1. Inject event_key prefixes (activates event_key visibility chain).
 // 2. Token budget check & SmartCompress.
 // 3. Consolidated audit log (one line per LLM call).
+//
+// Deprecated: Use Preprocessor.Process instead. This method is retained
+// only for the transition period and will be removed when the AgentLoop
+// migration (event-driven-agent-loop change) is complete.
 func (ci *ContextIntervention) BeforeModel(
 	ctx context.Context,
 	args *model.BeforeModelArgs,

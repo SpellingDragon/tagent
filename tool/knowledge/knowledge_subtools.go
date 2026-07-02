@@ -10,6 +10,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool/duckduckgo"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
+	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
@@ -362,4 +363,62 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, query str
 	}
 
 	return results
+}
+
+// ==================== Plain Tool Factory Registration ====================
+
+// RegisterSubTools registers all knowledge sub-tools as plain tools in the
+// global tool registry. Called by tagent.RegisterBuiltinTools().
+//
+// Registered tools:
+//   - skill_search: search local skill repository
+//   - skill_load: load skill content with section-aware truncation
+//   - mcp_discover: discover available MCP tools
+//   - web_search: HTML scraping for general web content
+//   - duckduckgo_search: Instant Answer API for factual info
+//   - memory_query: query historical knowledge from memory
+func RegisterSubTools() {
+	agent.RegisterPlainTool("skill_search", skillSearchFactory)
+	agent.RegisterPlainTool("skill_load", skillLoadFactory)
+	agent.RegisterPlainTool("mcp_discover", mcpDiscoverFactory)
+	agent.RegisterPlainTool("web_search", webSearchFactory)
+	agent.RegisterPlainTool("duckduckgo_search", duckDuckGoSearchFactory)
+	agent.RegisterPlainTool("memory_query", memoryQueryFactory)
+}
+
+func skillSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.SkillRepo == nil {
+		return nil, fmt.Errorf("skill_search requires SkillRepo (use WithSkillRepo option)")
+	}
+	return NewSkillSearchTool(cfg.SkillRepo).(tool.CallableTool), nil
+}
+
+func skillLoadFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.SkillRepo == nil {
+		return nil, fmt.Errorf("skill_load requires SkillRepo (use WithSkillRepo option)")
+	}
+	return NewSkillLoadTool(cfg.SkillRepo).(tool.CallableTool), nil
+}
+
+func mcpDiscoverFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if len(cfg.MCPToolSets) == 0 {
+		// Return a stub tool that returns empty results when MCPToolSets is not configured.
+		return NewMCPDiscoverTool(nil).(tool.CallableTool), nil
+	}
+	return NewMCPDiscoverTool(cfg.MCPToolSets).(tool.CallableTool), nil
+}
+
+func webSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	return NewWebSearchTool().(tool.CallableTool), nil
+}
+
+func duckDuckGoSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	return duckduckgo.NewTool().(tool.CallableTool), nil
+}
+
+func memoryQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.MemStore == nil {
+		return nil, fmt.Errorf("memory_query requires MemStore")
+	}
+	return NewMemoryQueryTool(cfg.MemStore).(tool.CallableTool), nil
 }

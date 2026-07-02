@@ -2,16 +2,20 @@
 
 ## 一、模块定位
 
-`tagent/agent` 是 tagent 项目的**核心机制协调层**，负责将 trpc-agent-go 的通用能力（LLMAgent / Runner / Plugin）与 tagent 的差异化逻辑（SmartCompress / MemoryPlugin / ContextIntervention）组装为统一入口 `TagentAgent`。
+`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**，实现了基于 EventBus + AgentLoop + Preprocessor 的异步事件循环架构，替代了原 trpc-agent-go 的 LLMAgent/Runner/Flow 同步执行模型。
 
-**核心职责**：将 trpc-agent-go 的通用能力（LLMAgent / Runner / Plugin）与 tagent 的差异化逻辑（SmartCompress / MemoryPlugin / TmuxMonitor 事件注入）组装为统一入口 `TagentAgent`。
+**核心职责**：
+- **EventBus**：per-agent 有序事件队列，接收外部输入（用户消息、TmuxMonitor 回调、Meditation 事件）和工具结果
+- **AgentLoop**：纯执行引擎，从 EventBus Pull 事件 → Preprocessor 处理 → 调用 model → 异步分发工具
+- **Preprocessor**：事件过滤、消息构建、token 预算检查、SmartCompress 压缩
+- **Tool Dispatch**：异步工具执行，区分 shell 工具（CallableTool）和子 agent（AgentToolWrapper）
 
 **设计原则**：
-- **复用而非重写**：tagent 不重复实现 React Loop，改用 LLMAgent 作为骨架
-- **注入而非继承**：tagent 的能力通过 callback（BeforeModel）和 plugin（OnEvent）注入到框架
-- **视图转换原则**：压缩发生在 BeforeModel，仅修改发给 LLM 的 messages 视图，不修改 Session 原始数据
-- **职责分离**：应用层组装逻辑（tagent.New() 工厂函数）放在根包 tagent.go，agent 包专注核心机制
-- **事件上下文传递**：顶层 agent 送 LLM 的 context 是事件记录流，tool 通过 LLM 选择的 event_key 从 MemStore 获取完整上下文
+- **事件驱动**：所有输入统一为 EventBus 上的事件，消除同步阻塞
+- **纯引擎无业务**：AgentLoop 不包含任何业务语义，所有领域决策在 Preprocessor 中完成
+- **异步工具分发**：工具执行在独立 goroutine 中完成，结果以 external_input 事件回写 bus
+- **子 agent 隔离**：每个子 agent 拥有独立的 EventBus 和 SmartCompressor，不共享可变状态
+- **框架复用**：保留 trpc-agent-go 的 model/tool/event/session/plugin 基础设施，仅替换执行模型
 
 ---
 
@@ -20,87 +24,51 @@
 ```mermaid
 graph TB
     subgraph "调用方"
-        User([用户 / API])
+        User([用户 / HTTPAPI / A2A])
     end
 
     subgraph "tagent/agent"
-        TA["TagentAgent\n(组合根)"]
-        MB["mailbox\n(chan model.Message)\n(事件邮箱)"]
-        LP["Loop goroutine\n(drain+merge+Run)"]
-        CI["ContextIntervention\n(BeforeModel 拦截器)"]
-        SC["SmartCompressor\n(两阶段压缩)"]
-        TC["TokenCounter\n(Token 估算)"]
+        TA["TagentAgent (组合根)"]
+        EB["EventBus (chan AgentEvent)"]
+        AL["AgentLoop (Pull-Process-Model-Dispatch)"]
+        PP["Preprocessor (事件过滤+消息构建+压缩)"]
+        TD["Tool Dispatch (异步 goroutine)"]
+        SC["SmartCompressor (两阶段压缩)"]
+        MM["MeditationManager (定时冥想)"]
     end
 
-    subgraph "trpc-agent-go 框架"
-        Runner["Runner\n(编排引擎)"]
-        LLMAgent["LLMAgent\n(React Loop Flow)"]
-        ModelCallbacks["model.Callbacks\n(BeforeModel/AfterModel 回调链)"]
-        PluginManager["plugin.Manager\n(事件钩子链)"]
-        Session["session.Session\n(会话状态)"]
+    subgraph "trpc-agent-go 框架 (复用)"
+        Model["model.Model (GLM-4/OpenAI)"]
+        Session["session.Session"]
+        Plugin["plugin.Manager (MemoryPlugin/SummaryPlugin)"]
     end
 
-    subgraph "tagent/plugin"
-        MP["MemoryPlugin\n(OnEvent: 持久化+因果链)"]
-        SP["SummaryPlugin\n(OnEvent: Tag 注入)"]
+    subgraph "工具执行"
+        Shell["CallableTool (shell/普通工具)"]
+        SubAgent["AgentToolWrapper (子 agent)"]
+        Tmux["TmuxMonitor (异步状态检测)"]
     end
 
-    subgraph "tagent/memory"
-        MS["memory.MemoryStore\n(记忆存储)"]
-    end
+    User -->|InjectMessage| EB
+    MM -->|external_input| EB
+    Tmux -->|external_input| EB
+    Shell -->|tool_result| EB
+    SubAgent -->|subagent_result| EB
 
-    subgraph "内部工具 (tool/action)"
-        ActionTool["ActionTool\n(命令执行)"]
-        Tmux["TmuxMonitor\n(异步状态检测)"]
-    end
+    EB -->|Pull| AL
+    AL -->|Process| PP
+    PP -->|compress| SC
+    AL -->|GenerateContent| Model
+    AL -->|dispatchToolUse| TD
+    TD --> Shell
+    TD --> SubAgent
 
-    subgraph "外部依赖"
-        LLM["model.Model\n(LLM: GLM-4 / OpenAI ...)]"]
-        Tools["[]tool.Tool\n(CallableTools)"]
-    end
+    TA --> EB
+    TA --> AL
 
-    subgraph "tagent (root)"
-        KAH["tagent.go\ntagent.New() 工厂函数"]
-    end
-
-    User -->|RunSimple / InjectMessage| TA
-
-    TA --> MB
-    MB --> LP
-    LP --> Runner
-    TA --> CI
-    TA --> MS
-
-    KAH -->|创建| TA
-    KAH -.->|SetMessageInjector| ActionTool
-
-    Runner --> Session
-    Runner --> PluginManager
-    Runner --> LLMAgent
-
-    LLMAgent --> ModelCallbacks
-    LLMAgent --> LLM
-    LLMAgent --> Tools
-
-    ModelCallbacks --> CI
-    CI --> SC
-    CI --> TC
-
-    PluginManager --> MP
-    PluginManager --> SP
-
-    MP --> MS
-
-    Tools --> ActionTool
-    Tmux -->|状态回调| ActionTool
-    ActionTool -->|InjectMessage| TA
-
-    style TA fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
-    style Runner fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
-    style LLMAgent fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style CI fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
-    style SC fill:#fff8e1,stroke:#f9a825,stroke-width:2px
-    style KAH fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray:5,5
+    style AL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style EB fill:#e3f2fd,stroke:#1565c0,stroke-width:2px
+    style PP fill:#fff3e0,stroke:#ef6c00,stroke-width:2px
 ```
 
 ---
@@ -109,10 +77,18 @@ graph TB
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `tagent_agent.go` | 433 | 组合根：初始化 + 对外 API + IngestExternalEvents + InjectMessage + Closer 资源管理 |
-| `context_intervention.go` | 215 | BeforeModel 拦截器：event_key 前缀注入 + token 预算检查 + 多轮压缩 |
+| `tagent_agent.go` | 701 | 组合根：初始化 + 对外 API + EventBus/AgentLoop 创建 + InjectMessage + 子 agent Run + SwappableModel |
+| `event_bus.go` | 143 | EventBus + AgentEvent：per-agent 有序事件队列，统一事件类型 |
+| `agent_loop.go` | 471 | AgentLoop：事件驱动执行引擎（Pull→Process→Model→Dispatch），异步工具分发 |
+| `preprocessor.go` | 252 | Preprocessor：事件过滤、消息构建、event_key 注入、token 预算 + 压缩 |
+| `context_intervention.go` | 220 | [Deprecated] BeforeModel 拦截器，已被 Preprocessor 替代 |
 | `smart_compress.go` | 445 | 两阶段压缩引擎：Stage 1 任务边界切分 + Stage 2 LLM 摘要 + 批量分批 |
 | `token_counter.go` | 41 | Token 估算器：启发式字符计数 |
+| `meditation.go` | 143 | MeditationManager：定时冥想机制，通过 EventBus 注入事件 |
+| `tool_agent.go` | 459 | AgentToolWrapper：子 agent 工具包装 + ToolAgentFactory 注册 |
+| `output_limit_tool.go` | 74 | OutputLimitTool：工具输出大小拦截 |
+| `trajectory_recorder.go` | 309 | TrajectoryRecorder：LLM 调用记录（JSONL），用于 RL 训练数据 |
+| `testing.go` | 38 | 测试辅助：TestingBuildAgent 导出内部构建管线供集成测试使用 |
 
 > **注意**：`tagent.New()` 工厂函数在根包 `tagent.go`，不在 agent 包中。
 > 这是因为这些代码需要同时 import agent 和 tool 包，放在任何子包都会导致循环依赖。
@@ -124,35 +100,30 @@ graph TB
 ### 4.1 TagentAgent — 组合根
 
 ```go
-// tagent_agent.go:53-80
+// tagent_agent.go (event-driven architecture)
 type TagentAgent struct {
-    llmAgent   *llmagent.LLMAgent  // 框架 React Loop
-    runner     runner.Runner        // 框架编排引擎
-    memStore   memory.MemoryStore  // 记忆存储（内存 or 文件）
+    // Event-driven core (replaces llmAgent + runner for execution)
+    bus          *EventBus          // per-agent 有序事件队列
+    agentLoop    *AgentLoop         // 事件驱动执行引擎
+    preprocessor *Preprocessor      // 事件过滤 + 消息构建 + 压缩
+
+    // Framework integration (retained for session/plugin/trace)
+    memStore   memory.MemoryStore
     config     *TagentConfig
+    runner     runner.Runner        // retained as shell for session+plugin management
+    sessionSvc session.Service
 
-    // Agent identity (for agent.Agent interface)
-    name        string
-    description string
+    // Persistent Event Loop
+    outputCh   chan *event.Event    // 持久输出 channel
+    loopCtx    context.Context
+    loopCancel context.CancelFunc
+    loopActive atomic.Bool
 
-    // Session context for event injection (set on first Run)
-    sessionMu     sync.Mutex        // 保护 lastUserID/lastSessionID 并发安全
-    lastUserID    string
-    lastSessionID string
-
-    // External events pending ingestion (set before Run)
-    pendingExternalEvents []memory.FullEvent
-
-    // Persistent Event Loop — 持久事件循环（StartLoop 模式）
-    mailbox    chan model.Message      // 事件邮箱（并发写入，单 goroutine 消费）
-    outputCh   chan *event.Event       // 持久输出 channel（Loop 模式下不关闭）
-    loopCtx    context.Context         // Loop context（StopLoop 取消）
-    loopCancel context.CancelFunc      // Loop cancel
-    loopActive atomic.Bool             // Loop 是否运行中
-
-    // Resource closers — components like ActionTool that need cleanup.
-    // Closed in Close() before the runner is stopped.
+    // Resource closers
     closers []Closer
+
+    // Meditation manager
+    meditationMgr *MeditationManager
 }
 
 // Closer is implemented by components that hold resources requiring cleanup
@@ -1438,35 +1409,36 @@ MemoryPlugin.OnEvent 生成 Snowflake EventKey → StateDelta["event_key"]
 
 **问题**：子 agent（如 recall）默认只能查询自身命名空间的记忆，无法访问顶层 agent 或其他子 agent 的事件流。
 
-**设计方案**：`MemoryConfig.ReadNamespaces` 声明可读的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过 `ToolAgentFactoryConfig` 注入到 recall factory，再由 factory 传给子工具构造函数。
+**设计方案**：`MemoryConfig.ReadNamespaces` 声明可读的其他 Agent 命名空间。`buildAgent()` 在初始化时将其转换为 `ReadPartitionIDs []int`，通过两条路径注入：
+- **ToolAgentFactory 路径**：通过 `ToolAgentFactoryConfig.ReadPartitionIDs` 注入到已注册的 factory
+- **Config-driven 路径**：通过 `buildPlainToolRef` → `PlainToolFactoryConfig.ReadPartitionIDs` 注入到每个 plain tool
+
+当前 knowledge/recall 走 config-driven 路径。
 
 **转换链路**：
 
 ```mermaid
 graph LR
     A["tagent.yaml<br/>ReadNamespaces: ['tagent']"] --> B["buildAgent()<br/>PartitionIDFromName('tagent')=144"]
-    B --> C["recall factory<br/>ReadPartitionIDs: [144]"]
-    C --> D["buildRecallSubTools<br/>(accessor, [144])"]
-    D --> E["NewRecallQueryTool<br/>(accessor, [144])"]
-    D --> F["NewRecallRecentTool<br/>(accessor, [144])"]
+    B --> C["buildPlainToolRef<br/>PlainToolFactoryConfig<br/>ReadPartitionIDs: [144]"]
+    C --> D["recallQueryFactory<br/>(cfg.ReadPartitionIDs)"]
+    C --> E["recallRecentFactory<br/>(cfg.ReadPartitionIDs)"]
 ```
 
-**注入位置**（源码 `tagent.go:155-170`）：
+**注入位置**（源码 `tagent.go:buildPlainToolRef`）：
 
 ```go
-// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
-var readPartitionIDs []int
-for _, ns := range acfg.Memory.ReadNamespaces {
-    readPartitionIDs = append(readPartitionIDs, memory.PartitionIDFromName(ns))
-}
-
-factoryCfg := agent.ToolAgentFactoryConfig{
-    ...
-    ReadPartitionIDs: readPartitionIDs,
-}
+// buildPlainToolRef injects runtime deps into PlainToolFactoryConfig
+callable, err := factory(agent.PlainToolFactoryConfig{
+    ID:               tr.ID,
+    MemStore:         memStore,
+    ReadPartitionIDs: readPartitionIDs,  // ← 注入跨分区读权限
+    SkillRepo:        rc.skillRepo,
+    MCPToolSets:      rc.mcpToolSets,
+})
 ```
 
-**ToolAgentFactoryConfig.ReadPartitionIDs**（`agent/tool_agent.go:263-266`）：
+**PlainToolFactoryConfig.ReadPartitionIDs**（`agent/tool_agent.go`）：
 
 ```go
 // ReadPartitionIDs lists PartitionIDs this agent is allowed to read in addition
@@ -1477,7 +1449,7 @@ ReadPartitionIDs []int
 
 **子工具自动注入（不对 LLM 暴露）**：
 
-`memory_query` 和 `memory_recent` 的 handler 内部自动将 `ReadPartitionIDs` 注入到 `QueryOptions.PartitionIDs`，LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号：
+`recall_query` 和 `recall_recent` 的 factory 从 `PlainToolFactoryConfig.ReadPartitionIDs` 获取分区列表，handler 内部自动注入到 `QueryOptions.PartitionIDs`，LLM 调用时只需传语义参数，无需感知分区号：
 
 ```go
 // recall_subtools.go — NewRecallQueryTool
@@ -1487,7 +1459,7 @@ if len(readPartitionIDs) > 0 {
 }
 ```
 
-**效果**：recall agent 的 LLM 无需知道分区概念，只需使用 `memory_query({query: "xxx"})`，子工具自动查询配置的跨分区范围。
+**效果**：recall agent 的 LLM 无需知道分区概念，只需使用 `recall_query({query: "xxx"})`，子工具自动查询配置的跨分区范围。
 
 ---
 
@@ -1636,7 +1608,7 @@ RL 数据分三层存储，全部在 AReaL 侧：
 
 #### 1. InteractionCache（内存，proxy 进程内）
 
-**关键文件**：`areal/experimental/openai/cache.py`
+**关键文件**：`train/rl/experimental/openai/cache.py`
 
 AReaL proxy 的每个 session 持有一个 `InteractionCache`（扩展 `OrderedDict[str, InteractionWithTokenLogpReward]`）。每次 tagent 的 LLM 请求经过 proxy 时，proxy 会：
 
@@ -1653,16 +1625,16 @@ AReaL proxy 的每个 session 持有一个 `InteractionCache`（扩展 `OrderedD
 
 #### 2. Trajectory Dump（磁盘，可选）
 
-当 `areal_config.yaml` 中 `rollout.dump_to_file: true` 时，trajectory 自动保存到磁盘：
+当 `train_rl_config.yaml` 中 `rollout.dump_to_file: true` 时，trajectory 自动保存到磁盘：
 
 ```
 {fileroot}/{experiment_name}/{trial_name}/[rollout|eval-rollout]/{version}/{task_id}.jsonl
 ```
 
-对于默认配置（`fileroot: /tmp/areal/experiments`，`experiment_name: tagent-grpo`，`trial_name: trial0`）：
+对于默认配置（`fileroot: /tmp/train_rl/experiments`，`experiment_name: tagent-grpo`，`trial_name: trial0`）：
 
 ```
-/tmp/areal/experiments/tagent-grpo/trial0/rollout/v0/{task_id}.jsonl
+/tmp/train_rl/experiments/tagent-grpo/trial0/rollout/v0/{task_id}.jsonl
 ```
 
 用于调试和分析，不影响训练流程。
@@ -1860,14 +1832,14 @@ trajectory_dir: "data/trajectories" # JSONL 文件目录（默认 data/trajector
 
 ```bash
 # SFT 模式：转为 {input_ids, loss_mask} 格式
-python3 areal/convert_trajectories.py \
+python3 train/rl/convert_trajectories.py \
     --input data/trajectories/ \
     --output data/sft/ \
     --tokenizer Qwen/Qwen2.5-1.5B-Instruct \
     --mode sft
 
 # RL 模式：转为 {messages} 格式（仅 prompt）
-python3 areal/convert_trajectories.py \
+python3 train/rl/convert_trajectories.py \
     --input data/trajectories/ \
     --output data/rl/ \
     --mode rl

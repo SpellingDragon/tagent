@@ -8,32 +8,51 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // LocalFileKV is a file-backed KVStore that persists all key-value pairs
 // to a single JSON file (kv.json) in the given data directory.
 //
-// It loads all data into memory on startup and flushes to disk on every
-// write operation. This is suitable for low-concurrency, single-process
-// scenarios such as example applications. It has no external binary
-// dependencies (unlike RustVikingClient which requires the rustviking CLI).
+// It loads all data into memory on startup and uses a deferred flush strategy:
+// writes update the in-memory map immediately (reads are always consistent) but
+// disk persistence is batched — flushed every flushInterval or every flushThreshold
+// writes, whichever comes first. This avoids serializing the entire map on every
+// single KVPut call, which becomes O(n) expensive as the store grows.
+//
+// It has no external binary dependencies (unlike RustVikingClient which requires
+// the rustviking CLI).
 type LocalFileKV struct {
 	mu       sync.Mutex
 	data     map[string]string
 	filePath string
+
+	// Deferred flush state
+	dirty     bool
+	writeCnt  int
+	flushDone chan struct{}
 }
+
+const (
+	// flushInterval is the maximum delay between a write and its disk persistence.
+	flushInterval = 2 * time.Second
+	// flushThreshold forces a flush after this many unflushed writes.
+	flushThreshold = 50
+)
 
 // NewLocalFileKV creates a LocalFileKV backed by kv.json in the given dataDir.
 // If kv.json already exists, its contents are loaded into memory.
 // The dataDir is created if it does not exist.
+// A background goroutine is started to periodically flush dirty data to disk.
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
 	}
 
 	kv := &LocalFileKV{
-		data:     make(map[string]string),
-		filePath: filepath.Join(dataDir, "kv.json"),
+		data:      make(map[string]string),
+		filePath:  filepath.Join(dataDir, "kv.json"),
+		flushDone: make(chan struct{}),
 	}
 
 	// Load existing data if the file exists
@@ -43,7 +62,26 @@ func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 		}
 	}
 
+	// Start background flush goroutine
+	go kv.flushLoop()
+
 	return kv, nil
+}
+
+// flushLoop periodically flushes dirty data to disk.
+func (k *LocalFileKV) flushLoop() {
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			_ = k.Sync() // best-effort periodic flush
+		case <-k.flushDone:
+			// Final flush on close
+			_ = k.flushLocked()
+			return
+		}
+	}
 }
 
 // load reads the JSON file into the in-memory map.
@@ -77,12 +115,55 @@ func (k *LocalFileKV) flush() error {
 	return nil
 }
 
-// KVPut stores a key-value pair and persists to disk.
+// flushLocked flushes if dirty, clearing the dirty flag.
+// Caller must hold the mutex.
+func (k *LocalFileKV) flushLocked() error {
+	if !k.dirty {
+		return nil
+	}
+	if err := k.flush(); err != nil {
+		return err
+	}
+	k.dirty = false
+	k.writeCnt = 0
+	return nil
+}
+
+// Sync forces an immediate flush of any pending writes to disk.
+// Safe to call concurrently.
+func (k *LocalFileKV) Sync() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.flushLocked()
+}
+
+// Close flushes pending writes and stops the background flush goroutine.
+// After Close, the KV is no longer usable.
+func (k *LocalFileKV) Close() error {
+	close(k.flushDone)
+	return nil
+}
+
+// markDirty marks the store as needing a flush and triggers an immediate
+// flush if the write threshold has been reached.
+// Caller must hold the mutex.
+func (k *LocalFileKV) markDirty() {
+	k.dirty = true
+	k.writeCnt++
+	if k.writeCnt >= flushThreshold {
+		_ = k.flushLocked()
+	}
+}
+
+// KVPut stores a key-value pair. The write is persisted to disk
+// asynchronously (within flushInterval) or immediately if the write
+// threshold is reached.
 func (k *LocalFileKV) KVPut(key, value string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.data[key] = value
-	return k.flush()
+	k.markDirty()
+	return nil
 }
 
 // KVGet retrieves the value for a key.
@@ -97,12 +178,13 @@ func (k *LocalFileKV) KVGet(key string) (string, error) {
 	return value, nil
 }
 
-// KVDelete removes a key and persists the change to disk.
+// KVDelete removes a key. The change is persisted to disk asynchronously.
 func (k *LocalFileKV) KVDelete(key string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	delete(k.data, key)
-	return k.flush()
+	k.markDirty()
+	return nil
 }
 
 // KVScan returns all key-value pairs whose keys start with the given prefix,
@@ -152,7 +234,8 @@ func (k *LocalFileKV) KVRange(start, end string, limit int) ([]KVPair, error) {
 	return results, nil
 }
 
-// KVBatch applies a batch of put/delete operations atomically and persists to disk.
+// KVBatch applies a batch of put/delete operations atomically and persists
+// to disk asynchronously.
 func (k *LocalFileKV) KVBatch(ops []KVOp) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -167,5 +250,6 @@ func (k *LocalFileKV) KVBatch(ops []KVOp) error {
 			return fmt.Errorf("unknown batch op type: %s", op.Type)
 		}
 	}
-	return k.flush()
+	k.markDirty()
+	return nil
 }

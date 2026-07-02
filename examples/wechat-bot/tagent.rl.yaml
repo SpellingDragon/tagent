@@ -73,9 +73,19 @@ agents:
         max_tool_iterations: 5
         max_tokens: 4096
 
-      - kind: tool
-        id: action
+      # Action Agent: 执行中枢
+      - agent: action
         description_file: action_tool_desc.md
+        max_tool_iterations: 5
+        max_tokens: 4096
+        temperature: 0.3
+
+    # Meditation (定时心跳)
+    meditation:
+      enabled: true
+      interval: "30m"
+      min_gap: "2h"
+      prompt_file: "meditation.md"
 
   # ========================================================================
   # Knowledge Agent
@@ -89,6 +99,19 @@ agents:
     max_tool_iterations: 5
     max_tokens: 4096
     temperature: 0.3
+    tools:
+      - kind: tool
+        id: skill_search
+      - kind: tool
+        id: skill_load
+      - kind: tool
+        id: mcp_discover
+      - kind: tool
+        id: web_search
+      - kind: tool
+        id: duckduckgo_search
+      - kind: tool
+        id: memory_query
 
   # ========================================================================
   # Recall Agent
@@ -104,13 +127,90 @@ agents:
         - tagent
     max_tool_iterations: 5
     max_tokens: 4096
+    tools:
+      - kind: tool
+        id: recall_query
+      - kind: tool
+        id: recall_get
+      - kind: tool
+        id: recall_recent
+      - kind: tool
+        id: recall_trace
+
+  # ========================================================================
+  # Action Agent: 执行中枢
+  # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
+  # ========================================================================
+  action:
+    system_prompt:
+      files:
+        - action_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 4096
+    temperature: 0.3
+    tools:
+      # File Tools: 直接文件读写 (使用 trpc-agent-go 内置文件操作)
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: save_file
+      - kind: tool
+        id: list_file
+      - kind: tool
+        id: search_file
+      - kind: tool
+        id: search_content
+      - kind: tool
+        id: read_multiple_files
+      - kind: tool
+        id: replace_content
+
+      - agent: speak
+        description_file: speak_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      - agent: draw
+        description_file: draw_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      - kind: tool
+        id: exec
+        description_file: exec_tool_desc.md
+
+  # ========================================================================
+  # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
+  # ========================================================================
+  speak:
+    system_prompt:
+      files:
+        - speak_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 3
+    max_tokens: 1024
+    temperature: 0.3
+
+  # ========================================================================
+  # Draw Agent: 图像生成子 Agent (桩, 暂未启用)
+  # ========================================================================
+  draw:
+    system_prompt:
+      files:
+        - draw_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 3
+    max_tokens: 1024
+    temperature: 0.3
 
 # ===== 应用专属配置 =====
 app:
-  wechat:
-    config_dir: ".wechat-config"
-    token_file: "token.json"
-    context_token_dir: ".wechat-context-tokens"
   wechat:
     config_dir: ".wechat-config"
     token_file: "token.json"

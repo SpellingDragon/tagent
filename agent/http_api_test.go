@@ -59,11 +59,45 @@ func (m *mockHTTPRunner) Close() error { return nil }
 
 func createTestAgent(t *testing.T) *TagentAgent {
 	t.Helper()
+	bus := NewEventBus()
+	compressor := NewSmartCompressor(WithMaxTokens(8000))
+	counter := NewDefaultTokenCounter()
+	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
+	outputCh := make(chan *event.Event, 100)
+	agentLoop := NewAgentLoop(AgentLoopConfig{
+		Bus:          bus,
+		Preprocessor: preproc,
+		Model:        &mockModel{},
+		OutputCh:     outputCh,
+		Name:         "test",
+		MaxToolIters: 10,
+	})
 	return &TagentAgent{
-		runner:      &mockHTTPRunner{},
-		config:      &TagentConfig{},
-		name:        "test",
-		description: "test",
+		bus:          bus,
+		agentLoop:    agentLoop,
+		preprocessor: preproc,
+		runner:       &mockHTTPRunner{},
+		config:       &TagentConfig{},
+		outputCh:     outputCh,
+		name:         "test",
+		description:  "test",
+	}
+}
+
+// startTestLoop sets up loop state and starts the AgentLoop goroutine
+// for tests that need an active loop. Returns a cleanup function.
+func startTestLoop(ta *TagentAgent) func() {
+	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
+	ta.loopActive.Store(true)
+	ta.loopWg.Add(1)
+	go func() {
+		defer ta.loopWg.Done()
+		ta.agentLoop.Run(ta.loopCtx)
+	}()
+	return func() {
+		ta.loopActive.Store(false)
+		ta.loopCancel()
+		ta.loopWg.Wait()
 	}
 }
 
@@ -88,11 +122,8 @@ func TestHTTPAPI_Healthz_LoopInactive(t *testing.T) {
 
 func TestHTTPAPI_Healthz_LoopActive(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	srv := httptest.NewServer(api)
@@ -120,14 +151,8 @@ func TestHTTPAPI_PostTask_LoopInactive(t *testing.T) {
 
 func TestHTTPAPI_PostTask_Success(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
-
-	ta.loopWg.Add(1)
-	go ta.loop("rl-user", "rl-session")
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	srv := httptest.NewServer(api)
@@ -141,11 +166,8 @@ func TestHTTPAPI_PostTask_Success(t *testing.T) {
 
 func TestHTTPAPI_PostTask_NoMessages(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	srv := httptest.NewServer(api)
@@ -159,14 +181,8 @@ func TestHTTPAPI_PostTask_NoMessages(t *testing.T) {
 
 func TestHTTPAPI_PostTask_WithLLMBaseURL(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
-
-	ta.loopWg.Add(1)
-	go ta.loop("rl-user", "rl-session")
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	var updatedURL string
@@ -187,14 +203,8 @@ func TestHTTPAPI_PostTask_WithLLMBaseURL(t *testing.T) {
 
 func TestHTTPAPI_PostTask_NoCallback_NoError(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
-
-	ta.loopWg.Add(1)
-	go ta.loop("rl-user", "rl-session")
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	srv := httptest.NewServer(api)
@@ -209,11 +219,8 @@ func TestHTTPAPI_PostTask_NoCallback_NoError(t *testing.T) {
 
 func TestHTTPAPI_PostTask_InvalidJSON(t *testing.T) {
 	ta := createTestAgent(t)
-	ta.mailbox = make(chan model.Message, 256)
-	ta.outputCh = make(chan *event.Event, 100)
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
-	defer ta.StopLoop()
+	cleanup := startTestLoop(ta)
+	defer cleanup()
 
 	api := NewHTTPAPI(ta)
 	srv := httptest.NewServer(api)
@@ -256,7 +263,14 @@ type mockModel struct {
 
 func (m *mockModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
 	ch := make(chan *model.Response, 1)
-	ch <- &model.Response{ID: "test", Model: m.info.Name}
+	ch <- &model.Response{
+		ID:    "test",
+		Model: m.info.Name,
+		Done:  true,
+		Choices: []model.Choice{{
+			Message: model.Message{Role: model.RoleAssistant, Content: "mock response"},
+		}},
+	}
 	close(ch)
 	return ch, nil
 }

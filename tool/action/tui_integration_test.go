@@ -1,3 +1,5 @@
+//go:build integration
+
 package action
 
 import (
@@ -166,21 +168,26 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 		t.Logf("Phase 2: qodercli did not reach Running after input (may not echo single chars)")
 	}
 
-	// Phase 3: Wait for TimedOut (after fakeDeadDuration = 3s)
-	// TUI sessions should get SessionTimedOut, not FakeDead
-	if !waitForStatus(t, monitor, session.ID, SessionTimedOut, 15*time.Second) {
-		// Session might have been removed directly after TimedOut
-		if _, ok := monitor.GetSession(session.ID); ok {
-			mu.Lock()
-			tr := append([]string{}, transitions...)
-			mu.Unlock()
-			t.Fatalf("qodercli TUI did not reach TimedOut within 15s. Transitions: %v", tr)
-		}
+	// Phase 3: Wait for session removal (TUI sessions are removed right after TimedOut)
+	if !waitForSessionRemoved(t, monitor, session.ID, 15*time.Second) {
+		mu.Lock()
+		tr := append([]string{}, transitions...)
+		mu.Unlock()
+		t.Fatalf("qodercli TUI session was not removed within 15s. Transitions: %v", tr)
 	}
-	t.Logf("Phase 3: qodercli reached TimedOut")
+	t.Logf("Phase 3: qodercli TUI session removed after TimedOut")
+
+	// Verify TimedOut is in transitions
+	mu.Lock()
+	if !sessionHasTimedOut(transitions) {
+		mu.Unlock()
+		t.Errorf("expected TimedOut in transitions, got: %v", transitions)
+	} else {
+		mu.Unlock()
+	}
 
 	// Verify session is removed from monitor
-	if !waitForSessionRemoved(t, monitor, session.ID, 5*time.Second) {
+	if _, ok := monitor.GetSession(session.ID); ok {
 		t.Errorf("qodercli TUI session was not removed from monitor after TimedOut")
 	}
 

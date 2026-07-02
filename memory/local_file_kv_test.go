@@ -144,6 +144,10 @@ func TestLocalFileKV_Persistence(t *testing.T) {
 	require.NoError(t, kv1.KVPut("persist:key1", "value1"))
 	require.NoError(t, kv1.KVPut("persist:key2", "value2"))
 
+	// Force flush to disk (deferred flush is async)
+	require.NoError(t, kv1.Sync())
+	require.NoError(t, kv1.Close())
+
 	// Verify kv.json exists
 	kvPath := filepath.Join(dir, "kv.json")
 	_, err = os.Stat(kvPath)
@@ -152,6 +156,7 @@ func TestLocalFileKV_Persistence(t *testing.T) {
 	// Second instance: should load existing data
 	kv2, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
+	defer kv2.Close()
 
 	val, err := kv2.KVGet("persist:key1")
 	require.NoError(t, err)

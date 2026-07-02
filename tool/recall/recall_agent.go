@@ -31,6 +31,11 @@ type Config struct {
 	// to its own namespace. Injected from ToolAgentFactoryConfig.ReadPartitionIDs.
 	ReadPartitionIDs []int
 
+	// Tools are the sub-tools available to this agent (e.g., recall_query, recall_get).
+	// In the config-driven path, these are injected by buildAgent from the agent's
+	// config tools list. If empty, buildRecallSubTools is called for backward compatibility.
+	Tools []tagenttool.Tool
+
 	PromptDir string // Optional: base directory for prompt files (default: "resources/prompts")
 
 	// Prompt loading (bootstrap style)
@@ -81,8 +86,13 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		}
 	}
 
-	// 3. Assemble sub-tools with ReadPartitionIDs for cross-namespace queries
-	subTools := buildRecallSubTools(cfg.MemStore, cfg.ReadPartitionIDs)
+	// 3. Assemble sub-tools
+	// Config-driven path: tools are injected by buildAgent.
+	// Backward compat: if Tools is empty, build sub-tools internally.
+	subTools := cfg.Tools
+	if len(subTools) == 0 {
+		subTools = buildRecallSubTools(cfg.MemStore, cfg.ReadPartitionIDs)
+	}
 
 	// 4. Apply defaults
 	maxToolIter := cfg.MaxToolIterations

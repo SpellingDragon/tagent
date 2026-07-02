@@ -11,6 +11,13 @@
 //	tagent (root) → tool/knowledge → memory
 //	tagent (root) → prompt
 //
+// Tool Registration:
+//
+// tagent uses a ToolRegistry to manage available tools. Built-in tools are
+// registered via RegisterBuiltinTools(). External tools can be registered via
+// RegisterPlainTool() and RegisterToolAgent(). Only tools that are both
+// registered and configured for an agent can be used by that agent.
+//
 // Usage:
 //
 //	ta, err := tagent.New(tagent.DefaultConfig(),
@@ -23,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
@@ -33,6 +41,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/model/provider"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -45,6 +54,14 @@ type runtimeConfig struct {
 	summaryModel model.Model // Optional: for Stage 2 LLM summary
 	skillRepo    tool.SkillRepository
 	mcpToolSets  []trpctool.ToolSet
+
+	// resolvedModels caches model.Model instances keyed by "provider:model" string.
+	// Agents sharing the same provider+model reuse the same instance.
+	resolvedModels map[string]model.Model
+
+	// modelOverrides injects pre-resolved model instances for specific agents.
+	// This supports scenarios like SwappableModel for entry agent (AReaL proxy).
+	modelOverrides map[string]model.Model
 
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
@@ -87,12 +104,21 @@ func WithSummaryModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.summaryModel = m }
 }
 
+// WithModelOverrides injects pre-resolved model instances for specific agents.
+// This supports scenarios like SwappableModel for entry agent (AReaL proxy).
+// The map key is the agent name, the value is the model instance to use.
+func WithModelOverrides(overrides map[string]model.Model) Option {
+	return func(rc *runtimeConfig) { rc.modelOverrides = overrides }
+}
+
 // New creates a fully-wired TagentAgent from declarative Config + runtime Options.
 //
 // Config is declarative and serializable (loadable from YAML/JSON via LoadConfig).
 // Options inject runtime-only dependencies (model instances, etc.).
 //
 // New handles all cross-boundary wiring internally:
+//   - Registers built-in tools (knowledge, recall, exec)
+//   - Validates that all configured tools are registered
 //   - Resolves the entry agent from Config.Agents map
 //   - Creates a MemoryStore per agent (isolated, from MemoryConfig)
 //   - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
@@ -100,9 +126,20 @@ func WithSummaryModel(m model.Model) Option {
 //     which handles event_key → external context resolution
 //   - For tool-kind tools: delegates to registered plain tool factories
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
+	// Register built-in tools
+	if err := RegisterBuiltinTools(); err != nil {
+		return nil, fmt.Errorf("tagent: register builtin tools: %w", err)
+	}
+
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+
+	// Validate that all configured tools are registered
+	registry := GetRegistry()
+	if err := registry.ValidateToolAccess(&cfg); err != nil {
+		return nil, fmt.Errorf("tagent: tool access validation: %w", err)
 	}
 
 	rc := &runtimeConfig{}
@@ -151,6 +188,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	return entryAgent, nil
 }
 
+// builtinAgentNames are agent names that must always be built via the
+// config-driven path. This protects knowledge/recall/action/speak/draw
+// from being silently overridden by a registered ToolAgentFactory.
+var builtinAgentNames = map[string]bool{
+	"knowledge": true,
+	"recall":    true,
+	"action":    true,
+	"speak":     true,
+	"draw":      true,
+}
+
 // buildAgent recursively creates a TagentAgent for the given agent name.
 // It resolves tools by looking up referenced agents in the Config.Agents map.
 func buildAgent(
@@ -182,39 +230,44 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: load system prompt: %w", name, err)
 	}
 
-	// 3. Resolve model (currently uses parent model for all agents)
-	agentModel := rc.model
+	// 3. Resolve model — per-agent override supported
+	agentModel := rc.resolveAgentModel(name, acfg, cfg)
 
 	// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
+	// (computed once, used by both factory path and config-driven path)
 	var readPartitionIDs []int
 	for _, ns := range acfg.Memory.ReadNamespaces {
 		readPartitionIDs = append(readPartitionIDs, memory.PartitionIDFromName(ns))
 	}
 
-	// 3.5 Check for registered ToolAgentFactory — if the agent is well-known
-	// (e.g., "knowledge", "recall"), delegate to its factory for proper sub-tool wiring
-	// including skill repositories and MCP tool sets.
-	if factory, ok := agent.GetToolAgentFactory(name); ok {
-		factoryCfg := agent.ToolAgentFactoryConfig{
-			ID:                name,
-			Model:             agentModel,
-			SystemPrompt:      systemPrompt,
-			MemoryStore:       memStore,
-			ReadPartitionIDs:  readPartitionIDs,
-			MaxToolIterations: acfg.MaxToolIterations,
-			MaxTokens:         acfg.MaxTokens,
-			Temperature:       acfg.Temperature,
-			SkillRepo:         rc.skillRepo,
-			MCPToolSets:       rc.mcpToolSets,
-		}
+	// 3.5 Check for registered ToolAgentFactory — for custom agents only.
+	// Built-in agent names (knowledge/recall/action/read/write/speak/draw) are
+	// protected and always built via the config-driven path. This prevents a
+	// registered factory from silently overriding the declared AgentConfig.Tools.
+	registry := GetRegistry()
+	if !builtinAgentNames[name] {
+		if factory, ok := registry.GetToolAgentFactory(name); ok {
+			factoryCfg := agent.ToolAgentFactoryConfig{
+				ID:                name,
+				Model:             agentModel,
+				SystemPrompt:      systemPrompt,
+				MemoryStore:       memStore,
+				ReadPartitionIDs:  readPartitionIDs,
+				MaxToolIterations: acfg.MaxToolIterations,
+				MaxTokens:         acfg.MaxTokens,
+				Temperature:       acfg.Temperature,
+				SkillRepo:         rc.skillRepo,
+				MCPToolSets:       rc.mcpToolSets,
+			}
 
-		ta, err := factory(factoryCfg)
-		if err != nil {
-			return nil, fmt.Errorf("agent %q: factory failed: %w", name, err)
-		}
+			ta, err := factory(factoryCfg)
+			if err != nil {
+				return nil, fmt.Errorf("agent %q: factory failed: %w", name, err)
+			}
 
-		cache[name] = ta
-		return ta, nil
+			cache[name] = ta
+			return ta, nil
+		}
 	}
 
 	// 4. Build tools from ToolRef list
@@ -222,7 +275,7 @@ func buildAgent(
 	var actionTool *action.ActionTool
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore)
+		t, isAction, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore, readPartitionIDs)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -243,9 +296,36 @@ func buildAgent(
 		MaxTokens:         acfg.MaxTokens,
 		Temperature:       acfg.Temperature,
 		CompressThreshold: acfg.CompressThreshold,
+		KeepRecentTasks:   acfg.KeepRecentTasks,
 	}
 	if rc.summaryModel != nil {
 		agentCfg.SummaryModel = rc.summaryModel
+	}
+
+	// Parse meditation config (string durations → time.Duration)
+	if acfg.Meditation.Enabled {
+		interval, _ := time.ParseDuration(acfg.Meditation.Interval)
+		if interval <= 0 {
+			interval = 30 * time.Minute
+		}
+		minGap, _ := time.ParseDuration(acfg.Meditation.MinGap)
+		if minGap <= 0 {
+			minGap = 2 * time.Hour
+		}
+		promptFile := acfg.Meditation.PromptFile
+		if promptFile == "" {
+			promptFile = "meditation.md"
+		}
+		promptText, err := loader.LoadFromFile(promptFile)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: load meditation prompt: %w", name, err)
+		}
+		agentCfg.Meditation = agent.MeditationConfig{
+			Enabled:    true,
+			Interval:   interval,
+			MinGap:     minGap,
+			PromptText: promptText,
+		}
 	}
 
 	ta, err := agent.NewTagentAgent(agentCfg)
@@ -271,6 +351,7 @@ func buildToolFromRef(
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
 	parentMemStore memory.MemoryStore,
+	readPartitionIDs []int,
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
 	if err != nil {
@@ -281,7 +362,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, desc)
+		return buildPlainToolRef(tr, rc, parentMemStore, readPartitionIDs, desc)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -339,16 +420,30 @@ func buildAgentToolRef(
 }
 
 // buildPlainToolRef creates a plain tool via the factory registry.
-func buildPlainToolRef(tr ToolRef, desc string) (trpctool.Tool, bool, error) {
-	factory, ok := agent.GetPlainToolFactory(tr.ID)
+// Runtime dependencies (rc, memStore, readPartitionIDs) are injected into
+// PlainToolFactoryConfig so that sub-tools like skill_search, memory_query,
+// recall_query etc. can access them during factory creation.
+func buildPlainToolRef(
+	tr ToolRef,
+	rc *runtimeConfig,
+	memStore memory.MemoryStore,
+	readPartitionIDs []int,
+	desc string,
+) (trpctool.Tool, bool, error) {
+	registry := GetRegistry()
+	factory, ok := registry.GetPlainToolFactory(tr.ID)
 	if !ok {
 		return nil, false, fmt.Errorf("no plain tool factory registered for id %q", tr.ID)
 	}
 
 	callable, err := factory(agent.PlainToolFactoryConfig{
-		ID:          tr.ID,
-		Description: desc,
-		Properties:  tr.Properties,
+		ID:               tr.ID,
+		Description:      desc,
+		Properties:       tr.Properties,
+		MemStore:         memStore,
+		SkillRepo:        rc.skillRepo,
+		MCPToolSets:      rc.mcpToolSets,
+		ReadPartitionIDs: readPartitionIDs,
 	})
 	if err != nil {
 		return nil, false, err
@@ -356,6 +451,63 @@ func buildPlainToolRef(tr ToolRef, desc string) (trpctool.Tool, bool, error) {
 
 	_, isAction := callable.(*action.ActionTool)
 	return callable, isAction, nil
+}
+
+// resolveAgentModel resolves the model for a specific agent.
+// Resolution order:
+//  1. modelOverrides (pre-resolved instances, e.g., SwappableModel for entry agent)
+//  2. If agent has no Model field → use parent model (rc.model)
+//  3. Resolve via provider.Model() using the agent's provider+model from config
+//  4. On error, fall back to parent model with a warning
+func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Config) model.Model {
+	// 1. Check overrides (SwappableModel for entry agent, etc.)
+	if rc.modelOverrides != nil {
+		if m, ok := rc.modelOverrides[name]; ok {
+			return m
+		}
+	}
+
+	// 2. If agent has no model override, use parent model
+	if acfg.Model == "" {
+		return rc.model
+	}
+
+	// 3. Resolve provider+model from config
+	providerName := acfg.Provider
+	if providerName == "" {
+		providerName = cfg.Provider
+	}
+	cacheKey := providerName + ":" + acfg.Model
+	if m, ok := rc.resolvedModels[cacheKey]; ok {
+		return m
+	}
+
+	// 4. Look up provider connection info
+	var opts []provider.Option
+	if pcfg, ok := cfg.Providers[providerName]; ok {
+		if pcfg.APIEndpoint != "" {
+			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
+		}
+		if pcfg.APIKeyEnv != "" {
+			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
+				opts = append(opts, provider.WithAPIKey(key))
+			}
+		}
+	}
+
+	m, err := provider.Model(providerName, acfg.Model, opts...)
+	if err != nil {
+		log.Warnf("agent %q: resolve model %q via provider %q failed: %v, falling back to parent model",
+			name, acfg.Model, providerName, err)
+		return rc.model
+	}
+
+	if rc.resolvedModels == nil {
+		rc.resolvedModels = make(map[string]model.Model)
+	}
+	rc.resolvedModels[cacheKey] = m
+	log.Infof("[tagent] agent %q: resolved model %q via provider %q", name, acfg.Model, providerName)
+	return m
 }
 
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
@@ -511,5 +663,7 @@ func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
 		}
 		return desc, nil
 	}
-	return "", fmt.Errorf("tool %q: description or description_file is required", tr.AgentID)
+	// For tool-kind tools, description is optional — the tool's built-in
+	// description from trpc-agent-go will be used if not provided.
+	return "", nil
 }

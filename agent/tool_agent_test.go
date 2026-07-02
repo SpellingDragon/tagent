@@ -129,16 +129,26 @@ func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
 	require.NoError(t, parentStore.StoreEvent(key1, evt1))
 	require.NoError(t, parentStore.StoreEvent(key2, evt2))
 
-	// Create sub-agent with mock runner
-	subAgent := &TagentAgent{name: "test-tool", runner: &mockRunner{}}
+	// Create sub-agent with mock runner and required fields.
+	compressor := NewSmartCompressor(WithMaxTokens(8000))
+	counter := NewDefaultTokenCounter()
+	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
+	subAgent := &TagentAgent{
+		name:         "test-tool",
+		runner:       &mockRunner{},
+		preprocessor: preproc,
+		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
 	// Call with event_keys
 	jsonArgs := fmt.Sprintf(`{"request":"do something","event_keys":[%d,%d]}`, key1, key2)
 	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
-	assert.Contains(t, result, "tool agent completed without output",
-		"should return fallback output since mock runner produces no events")
+	// In the event-driven architecture, the sub-agent returns the mock
+	// model's response via the EventBus.
+	assert.Contains(t, result, "mock response",
+		"should return the model's response from the event-driven loop")
 
 	// Verify that events were resolved - IngestExternalEvents was called,
 	// and Run consumed them via injectExternalContext

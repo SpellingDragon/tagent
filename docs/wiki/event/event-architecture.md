@@ -389,3 +389,56 @@ sequenceDiagram
 ### 10.3 信息隔离
 
 `tagent/event` 是纯工具层，**不持有任何状态**。所有函数都是纯函数（给定相同输入，总是产生相同输出），可并发安全调用。
+
+---
+
+## 十一、EventBus 与 AgentEvent（事件驱动架构新增）
+
+在事件驱动架构重构中，`tagent/agent` 包新增了 `EventBus` 和 `AgentEvent` 类型（定义在 `agent/event_bus.go`），与 `tagent/event` 包的事件类型常量配合使用。
+
+### 11.1 AgentEvent 结构
+
+```go
+type AgentEvent struct {
+    ID        string           // UUID 唯一标识
+    Type      string           // "external_input" | "tool_use"
+    Source    string           // "user" | "tmux" | "meditation" | "subagent" | "inject"
+    Timestamp time.Time
+    Message   *model.Message   // external_input 载荷
+    ToolCall  *model.ToolCall  // tool_use 载荷
+    Metadata  map[string]any   // 扩展数据
+}
+```
+
+### 11.2 事件流全貌
+
+```
+Producers                        EventBus                     Consumer
+───────────                     ────────                     ────────
+InjectMessage ──┐
+TmuxMonitor ────┤
+MeditationMgr ──┼──→ Publish ──→ [chan *AgentEvent] ──→ Pull ──→ AgentLoop
+SubAgent result ┤    (cap=256)   (有序队列)              (batch drain)
+Tool result ────┤
+AgentLoop ──────┘
+(tool_use)
+```
+
+### 11.3 事件类型与 Bus 触发器
+
+| 事件类型 | 是否进入 Bus | 触发行为 |
+|---------|------------|---------|
+| `external_input` | ✅ 进入 | AgentLoop.Pull 后由 Preprocessor 处理，shouldCallModel=true |
+| `tool_use` | ✅ 进入 | AgentLoop 异步 dispatch 工具，Preprocessor 跳过（shouldCallModel=false） |
+| `agent_output` | ❌ 不进入 | 直接 emit 到 outputCh，避免自触发死循环 |
+| `action_command` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
+| `thinking_plan` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
+
+### 11.4 与 tagent/event 的关系
+
+- `tagent/event` 包提供**事件类型常量**和**摘要生成**工具（纯函数，无状态）
+- `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）
+- `agent/preprocessor.go` 使用 `tagent/event` 的类型常量进行事件过滤
+- `agent/agent_loop.go` 使用 `NewToolUseEvent` / `NewExternalInputEvent` 构造事件
+
+> **注意**：`TypeToolUse = "tool_use"` 常量定义在 `agent/event_bus.go` 而非 `tagent/event` 包中，因为它是 Bus 内部的触发器类型，不属于持久化事件类型体系。

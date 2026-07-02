@@ -22,14 +22,15 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 
 // ==================== ActionTool Tests ====================
 
-// Test 1: 同步命令执行
+// Test 1: 同步命令执行（tmux 不可用时 fallback 路径）
 func TestActionTool_SyncExec(t *testing.T) {
 	tool := NewActionTool()
+	// Force sync path by clearing tmuxExecutor.
+	tool.tmuxExecutor = nil
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "echo hello",
 	}))
 	if err != nil {
@@ -77,20 +78,19 @@ func quickAsyncTest(t *testing.T) (any, error) {
 
 	ctx := context.Background()
 	return tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "tmux_exec",
 		"command": "echo async_test",
 	}))
 }
 
-// Test 3: 工作目录
+// Test 3: 工作目录（sync fallback 路径）
 func TestActionTool_WorkDir(t *testing.T) {
 	tempDir := t.TempDir()
 	tool := NewActionTool(WithActionWorkspace(tempDir))
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "pwd",
 	}))
 	if err != nil {
@@ -107,14 +107,14 @@ func TestActionTool_WorkDir(t *testing.T) {
 	}
 }
 
-// Test 4: 超时
+// Test 4: 超时（sync fallback 路径）
 func TestActionTool_Timeout(t *testing.T) {
 	tool := NewActionTool()
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "sleep 5",
 		"timeout": 1,
 	}))
@@ -126,18 +126,23 @@ func TestActionTool_Timeout(t *testing.T) {
 	}
 }
 
-// Test 5: 未知 mode
-func TestActionTool_UnknownMode(t *testing.T) {
+// Test 5: mode 字段已废弃，任何值都被忽略（tmux 可用时走 async）
+func TestActionTool_ModeIgnored(t *testing.T) {
 	tool := NewActionTool()
+	tool.tmuxExecutor = nil // Force sync for predictable test.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
-	_, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "unknown",
+	// Even with an unknown mode, the call should succeed (mode is ignored).
+	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"mode":    "unknown_mode",
 		"command": "echo test",
 	}))
-	if err == nil {
-		t.Error("Expected error for unknown mode")
+	if err != nil {
+		t.Fatalf("Expected no error (mode ignored), got: %v", err)
+	}
+	if _, ok := result.(*ActionExecResult); !ok {
+		t.Fatalf("Expected *ActionExecResult, got %T", result)
 	}
 }
 
@@ -148,7 +153,6 @@ func TestTmuxMonitor_GetSession(t *testing.T) {
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "tmux_exec",
 		"command": "echo monitor_test",
 	}))
 	if err != nil {
@@ -164,15 +168,15 @@ func TestTmuxMonitor_GetSession(t *testing.T) {
 	}
 }
 
-// Test 7: 命令执行与工作目录
+// Test 7: 命令执行与工作目录（sync fallback 路径）
 func TestActionTool_ExecInWorkDir(t *testing.T) {
 	tempDir := t.TempDir()
 	tool := NewActionTool(WithActionWorkspace(tempDir))
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "ls",
 	}))
 	if err != nil {
@@ -192,7 +196,6 @@ func TestActionTool_EmptyCommand(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "",
 	}))
 	if err == nil {
@@ -200,14 +203,14 @@ func TestActionTool_EmptyCommand(t *testing.T) {
 	}
 }
 
-// Test 9: 命令退出码
+// Test 9: 命令退出码（sync fallback 路径）
 func TestActionTool_ExitCode(t *testing.T) {
 	tool := NewActionTool()
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "exit 42",
 	}))
 	if err != nil {
@@ -220,14 +223,14 @@ func TestActionTool_ExitCode(t *testing.T) {
 	}
 }
 
-// Test 10: 同步执行带环境变量
+// Test 10: 同步执行带环境变量（sync fallback 路径）
 func TestActionTool_SyncExecWithEnv(t *testing.T) {
 	tool := NewActionTool()
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": "echo $TEST_VAR",
 		"env":     map[string]string{"TEST_VAR": "hello_world"},
 	}))
@@ -245,7 +248,7 @@ func TestActionTool_SyncExecWithEnv(t *testing.T) {
 	}
 }
 
-// Test 11: 带工作目录的脚本执行
+// Test 11: 带工作目录的脚本执行（sync fallback 路径）
 func TestActionTool_ScriptExecution(t *testing.T) {
 	tempDir := t.TempDir()
 	scriptPath := filepath.Join(tempDir, "test_script.sh")
@@ -254,11 +257,11 @@ func TestActionTool_ScriptExecution(t *testing.T) {
 	}
 
 	tool := NewActionTool()
+	tool.tmuxExecutor = nil // Force sync path.
 	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "exec",
 		"command": scriptPath,
 	}))
 	if err != nil {
@@ -287,7 +290,6 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "tmux_exec",
 		"command": "sleep 1 && echo done",
 	}))
 	if err != nil {
@@ -342,7 +344,6 @@ func TestTmuxMonitor_KillSession(t *testing.T) {
 
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"mode":    "tmux_exec",
 		"command": "sleep 60",
 	}))
 	if err != nil {
@@ -379,11 +380,11 @@ func TestCommandParsing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tool := NewActionTool()
+			tool.tmuxExecutor = nil // Force sync path.
 			defer tool.tmuxMonitor.Stop()
 
 			ctx := context.Background()
 			_, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-				"mode":    "exec",
 				"command": tt.command,
 			}))
 

@@ -6,7 +6,7 @@ A Go-based agent framework embracing event-driven, memory-centric design, built 
 
 ## Overview
 
-tagent is not a from-scratch agent framework. It **reuses** trpc-agent-go's React Loop (LLMAgent / Runner / Flow) as its skeleton, and **injects** its differentiated capabilities — context compression, event persistence, causal memory — through the framework's extension points (BeforeModel callbacks and OnEvent plugins).
+tagent is not a from-scratch agent framework. Built on top of [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go), it replaces the framework's synchronous React Loop with an **event-driven execution engine** (EventBus + AgentLoop + Preprocessor), and **injects** differentiated capabilities — context compression, event persistence, causal memory — through the framework's extension points (OnEvent plugins).
 
 The result is a persistent, event-driven agent that can run as:
 - A **persistent event loop** (continuously receives events, processes in batches, waits for next)
@@ -18,8 +18,12 @@ The result is a persistent, event-driven agent that can run as:
 
 | Principle | Meaning |
 |-----------|---------|
-| **Reuse, Not Rewrite** | tagent does not re-implement the React Loop. It uses LLMAgent as the skeleton and adds capabilities via callbacks and plugins. |
-| **Injection, Not Inheritance** | tagent's abilities are injected through `BeforeModel` callbacks (compression) and `OnEvent` plugins (persistence), not through inheritance or framework modification. |
+| **Event-Driven** | All inputs are unified as events on the EventBus; tool results are published back as external_input events, eliminating synchronous blocking. |
+| **Pure Engine, No Business Logic** | AgentLoop contains no domain semantics; all decisions are made in the Preprocessor. |
+| **Reuse Framework Primitives** | Retains trpc-agent-go's model/tool/event/session/plugin infrastructure, only replacing the execution model. |
+| **Sub-Agent Isolation** | Each sub-agent has its own EventBus and SmartCompressor; no shared mutable state. |
+| **Async Tool Dispatch** | Tool execution runs in independent goroutines; results are published back to the bus as events. |
+| **Memory as the Brain** | MemoryStore is the sole component maintaining the complete event chain; Agent and Tool access it on-demand via EventKeys. |
 | **View Transformation** | Context compression modifies only the messages sent to the LLM — it never touches Session or MemoryStore original data. |
 | **Separation of Concerns** | Application wiring (`tagent.New()` factory) lives in root package `tagent.go`; the `agent/` package focuses on core mechanisms only. |
 | **Event Context Propagation** | The top-level agent's LLM context is an event record stream. Sub-agents receive `event_key` to fetch full context from MemoryStore. |

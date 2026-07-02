@@ -398,6 +398,15 @@ type PlainToolFactoryConfig struct {
 	ID          string
 	Description string
 	Properties  map[string]any // Tool-specific config, deserialized by each factory
+
+	// Runtime dependencies (optional, injected by buildAgent).
+	// Most plain tools (e.g., exec) ignore these fields.
+	// Sub-tools that need runtime objects (e.g., skill_search needs SkillRepo,
+	// memory_query needs MemStore) extract them from here.
+	MemStore         memory.MemoryStore         // For memory-dependent tools
+	SkillRepo        tagenttool.SkillRepository // For skill-dependent tools
+	MCPToolSets      []trpctool.ToolSet         // For MCP-dependent tools
+	ReadPartitionIDs []int                      // For recall tools that query cross-namespace
 }
 
 var (

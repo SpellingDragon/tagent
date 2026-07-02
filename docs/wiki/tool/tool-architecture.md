@@ -5,14 +5,14 @@
 `tagent/tool` 是 tagent 为 trpc-agent-go Runner 提供的一组 **CallableTool 工具实现**，也是 Agent 与外部世界交互的唯一通道。
 
 **核心职责**：
-- **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 agent.Agent + agenttool.NewTool() 包装
+- **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 config-driven TagentAgent + AgentToolWrapper 包装
 - **RecallAgent**：智能记忆召回 — 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答
 - **ActionTool**：命令执行（同步 exec / 异步 tmux_exec），纯执行器，不关心命令来源
 - **TmuxMonitor**：后台监控 tmux session 状态，状态变更时触发新的 Agent 迭代
 
 **设计原则**：
 - **职责分离**：理解层（KnowledgeAgent, RecallAgent）和执行层（ActionTool）分离，Agent 负责决策
-- **架构统一**：KnowledgeAgent 和 RecallAgent 都是 TagentAgent 实例 + agenttool.NewTool() 包装，复用框架能力
+- **架构统一**：KnowledgeAgent 和 RecallAgent 都是 config-driven TagentAgent 实例 + AgentToolWrapper 包装，复用框架能力
 - **按需 React**：KnowledgeAgent 和 RecallAgent 有内部 React 循环（多子工具协作 + 翻译）；ActionTool 不需要
 - **Prompt 文件化**：System prompt 通过 prompt.Loader 动态加载，支持 PromptConfig bootstrap 风格
 - **配置声明式**：所有 tool 通过 Config + ToolConfig 声明，kind 区分 agent/tool，description 支持文件加载
@@ -21,6 +21,7 @@
 - **包编排**：agent 包不依赖 tool 包，根包 tagent.go 封装 agent 实例化过程
 - **ActionTool 闭环**：tmux 状态变更通知通过 MessageInjector 接口闭环在 action 包内，不暴露给外部
 - **注册扩展**：agent 包开放 ToolAgentFactory / PlainToolFactory 注册接口，支持自定义 tool 扩展；注册 API 需确保 tool 参数中包含 `event_key` 以支持上下文获取
+- **统一注册路径**：所有内置工具（exec + knowledge/recall sub-tools）通过 `RegisterBuiltinTools()` 统一注册为 plain tool。knowledge/recall 本身是 config-driven agent，与其他 agent 一致走 `AgentConfig.Tools` 路径
 
 ---
 
@@ -32,11 +33,12 @@
 # 根包 (tagent)
 ├── tagent.go           # New() 工厂函数：声明式 Config + Option 创建 TagentAgent
 ├── config.go           # Config / ToolConfig / PromptConfig 声明式配置 + LoadConfig
-├── builtin.go          # init() 注册内置 tool agent / plain tool factory
+├── registry.go         # ToolRegistry：统一工具注册/查询/校验（RegisterBuiltinTools）
+├── builtin.go          # 内置 plain tool 工厂函数（actionFactory）
 
 # agent 包
 ├── tagent_agent.go     # TagentAgent 组合根
-├── tool_agent.go       # ToolAgentFactory / PlainToolFactory 注册接口
+├── tool_agent.go       # ToolAgentFactory / PlainToolFactory 注册接口 + AgentToolWrapper
 ├── context_intervention.go
 ├── smart_compress.go
 └── token_counter.go
@@ -44,19 +46,25 @@
 # tool 包
 tool/
 ├── accessor.go          # 抽象接口定义
-├── command/            # command 子包
-│   ├── action_tool.go     # ActionTool 实现 (支持配置化 description)
-│   ├── command_executor.go  # 命令执行器
+├── action/              # action 子包
+│   ├── action_tool.go     # ActionTool 实现 (exec / tmux_exec 双模式)
+│   ├── action_executor.go   # 命令执行器
 │   ├── tmux_executor.go     # Tmux 执行器
 │   ├── tmux_monitor.go      # Tmux 监控器
 │   └── action_test.go      # ActionTool 测试
 ├── recall/              # recall 子包
-│   ├── recall_agent.go      # RecallAgent 组装 (支持 PromptConfig + DescriptionFile)
-│   └── recall_subtools.go   # 子工具实现
-└── knowledge/          # knowledge 子包
-    ├── knowledge_agent.go   # KnowledgeAgent 组装 (支持 PromptConfig + DescriptionFile)
-    ├── knowledge_subtools.go# 子工具实现
-    └── websearch.go         # Web 搜索工具 (HTML scraping)
+│   ├── recall_agent.go      # RecallAgent 组装 (config-driven + PromptConfig)
+│   └── recall_subtools.go   # 子工具实现 + RegisterSubTools()
+├── knowledge/           # knowledge 子包
+│   ├── knowledge_agent.go   # KnowledgeAgent 组装 (config-driven + PromptConfig)
+│   ├── knowledge_subtools.go# 子工具实现 + RegisterSubTools()
+│   └── websearch.go         # Web 搜索工具 (HTML scraping)
+├── file/                # file 子包
+│   └── file.go              # 封装 trpc-agent-go 内置文件操作工具
+├── speak/               # speak 子包 (stub)
+│   └── speak_agent.go
+└── draw/                # draw 子包 (stub)
+    └── draw_agent.go
 
 # prompt 包
 prompt/
@@ -75,25 +83,26 @@ prompt/
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `tagent.go` (根) | 422 | New() 工厂函数：声明式 Config + Option，按 ToolConfig 列表创建 tool |
-| `config.go` (根) | 477 | Config / ToolConfig / PromptConfig + LoadConfig + DefaultConfig + ApplyDefaults + Validate |
-| `builtin.go` (根) | 120 | init() 注册 knowledge/recall/command factory + wrapToolAgent |
-| `agent/tool_agent.go` | 372 | ToolAgentFactory / PlainToolFactory 注册接口 + ToolAgentFactoryConfig + AgentToolWrapper 实现 |
+| `tagent.go` (根) | 581 | New() 工厂函数：声明式 Config + Option，按 ToolRef 列表创建 tool |
+| `config.go` (根) | 546 | Config / AgentConfig / ToolRef / PromptConfig + LoadConfig + DefaultConfig + ApplyDefaults + Validate |
+| `registry.go` (根) | 94 | ToolRegistry：统一工具注册/查询/校验门面 + RegisterBuiltinTools |
+| `builtin.go` (根) | 45 | 内置 plain tool 工厂函数：actionFactory（ActionTool）|
+| `agent/tool_agent.go` | 458 | ToolAgentFactory / PlainToolFactory 注册接口 + PlainToolFactoryConfig + AgentToolWrapper 实现 |
 | `accessor.go` | 33 | 抽象接口定义（MemoryStoreAccessor, SkillRepository） |
 | `recall/recall_agent.go` | ~190 | RecallAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
-| `recall/recall_subtools.go` | 375 | RecallAgent 子工具：memory_query, memory_get, memory_recent, memory_trace |
-| `knowledge/knowledge_agent.go` | ~145 | KnowledgeAgent 组装：TagentAgent + 子工具 + PromptConfig + DescriptionFile |
-| `knowledge/knowledge_subtools.go` | ~368 | KnowledgeAgent 子工具：skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query |
+| `recall/recall_subtools.go` | 421 | RecallAgent 子工具 + RegisterSubTools：recall_query, recall_get, recall_recent, recall_trace |
+| `knowledge/knowledge_agent.go` | ~145 | KnowledgeAgent 组装：config-driven TagentAgent + PromptConfig |
+| `knowledge/knowledge_subtools.go` | 423 | KnowledgeAgent 子工具 + RegisterSubTools：skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query |
 | `knowledge/websearch.go` | ~560 | Web 搜索工具实现（HTML scraping 方式获取网页内容） |
-| `action/action_tool.go` | 370 | ActionTool：exec / tmux_exec 双模式 + 配置化 description |
-| `command/command_executor.go` | ~250 | 命令执行器：安全隔离执行 |
-| `command/tmux_monitor.go` | 439 | Tmux 监控器：后台状态检测 + callback 触发 |
-| `command/tmux_executor.go` | 383 | Tmux 执行器：tmux session 管理 |
-| `prompt/loader.go` | ~290 | Loader + CompositeConfig：bootstrap 风格 prompt 加载 |
+| `action/action_tool.go` | 373 | ActionTool：exec / tmux_exec 双模式 + option pattern |
+| `action/action_executor.go` | ~250 | 命令执行器：安全隔离执行 |
+| `action/tmux_monitor.go` | ~440 | Tmux 监控器：后台状态检测 + callback 触发 |
+| `action/tmux_executor.go` | ~383 | Tmux 执行器：tmux session 管理 |
+| `prompt/loader.go` | 288 | Loader + CompositeConfig：bootstrap 风格 prompt 加载 |
 
 > **注意**：KnowledgeAgent 和 RecallAgent 的组装层代码在各子包中（tool/knowledge, tool/recall）。
 > 根包通过 `tagent.New(cfg, opts...)` 工厂函数封装完整的 agent 实例化过程，
-> 按 `Config.Tools` 声明式列表创建并注册所有 tool。
+> 按 `Config.Tools` 声明式列表构建所有 tool。内置子工具通过 `RegisterBuiltinTools()` 注册为 plain tool。
 
 ---
 
@@ -102,7 +111,7 @@ prompt/
 ```mermaid
 graph TB
     subgraph "tagent (root)"
-        KA["tagent.go\ntagent.New() 工厂函数"]
+        KA["tagent.go\nbuildAgent() + RegisterBuiltinTools()"]
     end
 
     subgraph "tagent/agent"
@@ -111,12 +120,12 @@ graph TB
 
     subgraph "tagent/tool"
         subgraph "recall/"
-            RA["RecallAgent\nagent.Agent + agenttool.NewTool()\n(内部 React Agent)\nmemory_query/get/recent"]
+            RA["RecallAgent\nconfig-driven + AgentToolWrapper\n(内部 React Agent)\nrecall_query/get/recent/trace"]
         end
         subgraph "knowledge/"
-            KT["KnowledgeAgent\nagent.Agent + agenttool.NewTool()\n(内部 React Agent)\nskill_search/load, mcp_discover"]
+            KT["KnowledgeAgent\nconfig-driven + AgentToolWrapper\n(内部 React Agent)\nskill_search/load, mcp_discover"]
         end
-        subgraph "command/"
+        subgraph "action/"
             CT["ActionTool\nCallableTool"]
             CE["ActionExecutor"]
             TE["TmuxExecutor"]
@@ -401,7 +410,7 @@ Tool agent 收到 `event_key` 后，可通过 `MemoryStoreAccessor` 执行以下
 | 追溯因果链 | `RelationStore.GetParent(event.EventKey)` | 获取前驱事件，理解上下文脉络 |
 | 跨分区查询 | `QueryEvents({PartitionIDs: [42, 85]})` | 查询顶层+子 agent 事件（PartitionIDs 由 ReadNamespaces 注入，LLM 无感知） |
 
-> **与 ReadPartitionIDs 的关系**：`event_key` 提供单事件上下文入口，`ReadPartitionIDs` 控制子工具（`memory_query`、`memory_recent`）的跨分区查询范围。两者互补：event_key 精准定位单个事件，ReadPartitionIDs 限定批量查询的分区范围。详见 §六 和 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
+> **与 ReadPartitionIDs 的关系**：`event_key` 提供单事件上下文入口，`ReadPartitionIDs` 控制子工具（`recall_query`、`recall_recent`）的跨分区查询范围。两者互补：event_key 精准定位单个事件，ReadPartitionIDs 限定批量查询的分区范围。详见 §六 和 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
 
 ### 4.6 远程上下文传递路径
 
@@ -440,30 +449,19 @@ AgentToolWrapper.Call
 
 ### 5.1 CallableTool 接口
 
-所有 tagent 工具都实现了 `trpc-agent-go/tool.CallableTool` 接口（编译时断言）：
+所有 tagent 工具都实现了 `trpc-agent-go/tool.CallableTool` 接口：
 
 ```go
-// recall/recall_agent.go
-var _ tool.CallableTool = (*RecallTool)(nil)
-
 // action/action_tool.go
 var _ tool.CallableTool = (*ActionTool)(nil)
 ```
 
-KnowledgeAgent 不再是 CallableTool，而是通过 `agenttool.NewTool()` 包装（组装在 tool/knowledge 子包）：
+KnowledgeAgent 和 RecallAgent 不是直接的 CallableTool，而是通过 `AgentToolWrapper` 包装（由 `buildAgentToolRef` 创建）：
 
 ```go
-// tagent.go
-func NewKnowledgeTool(cfg KnowledgeAgentConfig) (tagenttool.Tool, error) {
-    knowledgeAgent, err := NewKnowledgeAgent(cfg)
-    if err != nil {
-        return nil, err
-    }
-
-    return agenttool.NewTool(knowledgeAgent,
-        agenttool.WithDescription("Knowledge acquisition and translation tool..."),
-    ), nil
-}
+// agent/tool_agent.go
+wrapper := agent.NewAgentToolWrapper(subAgent, desc, tr.EventParams, parentMemStore)
+// wrapper 实现 CallableTool 接口
 ```
 
 接口定义（`trpc-agent-go/tool`）：
@@ -475,9 +473,99 @@ type CallableTool interface {
 }
 ```
 
-### 5.2 工具注册到 Runner
+### 5.2 工具注册机制（三阶段生命周期）
 
-在 `tagent.New()` 中通过 `agent.TagentConfig.Tools` 注册。工厂函数封装了完整的实例化过程：
+tagent 采用**三阶段工具生命周期**：实现层指定 → 注册层注册 → 配置层组织。
+
+**阶段一：实现层**（各子包内）
+
+每个工具包导出工厂函数，实现 `PlainToolFactory` 接口：
+
+```go
+// tool/knowledge/knowledge_subtools.go
+func skillSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+    return NewSkillSearchTool(cfg.SkillRepo), nil
+}
+
+// tool/recall/recall_subtools.go
+func recallQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+    return NewRecallQueryTool(accessor, cfg.ReadPartitionIDs), nil
+}
+```
+
+**阶段二：注册层**（registry.go + builtin.go）
+
+`RegisterBuiltinTools()` 统一注册所有内置 plain tool：
+
+```go
+// registry.go
+func RegisterBuiltinTools() error {
+    registerOnce.Do(func() {
+        agent.RegisterPlainTool("exec", actionFactory)       // builtin.go
+        knowledge.RegisterSubTools()                          // 6 sub-tools
+        recall.RegisterSubTools()                             // 4 sub-tools
+    })
+    return nil
+}
+```
+
+注册后 ToolRegistry 中可查询的 plain tool：
+
+| Tool ID | 工厂位置 | 说明 |
+|---------|---------|------|
+| `exec` | builtin.go | ActionTool（shell/tmux 执行） |
+| `skill_search` | knowledge/knowledge_subtools.go | 搜索技能库 |
+| `skill_load` | knowledge/knowledge_subtools.go | 加载技能内容 |
+| `mcp_discover` | knowledge/knowledge_subtools.go | 发现 MCP 工具 |
+| `web_search` | knowledge/knowledge_subtools.go | 搜索通用网页 |
+| `duckduckgo_search` | knowledge/knowledge_subtools.go | DuckDuckGo 事实搜索 |
+| `memory_query` | knowledge/knowledge_subtools.go | 查询历史知识记录 |
+| `recall_query` | recall/recall_subtools.go | 按条件检索事件 |
+| `recall_get` | recall/recall_subtools.go | 获取完整事件详情 |
+| `recall_recent` | recall/recall_subtools.go | 快速获取最近事件 |
+| `recall_trace` | recall/recall_subtools.go | 因果链回溯 |
+
+**阶段三：配置层**（YAML AgentConfig.Tools）
+
+每个 agent 通过 `Tools []ToolRef` 声明使用哪些工具：
+
+```yaml
+agents:
+  tagent:
+    tools:
+      - agent: knowledge        # kind: agent → buildAgentToolRef
+        description_file: knowledge_tool_desc.md
+      - agent: recall           # kind: agent → buildAgentToolRef
+        description_file: recall_tool_desc.md
+      - kind: tool              # kind: tool → buildPlainToolRef
+        id: exec
+  knowledge:
+    tools:
+      - kind: tool
+        id: skill_search        # → buildPlainToolRef → ToolRegistry
+      - kind: tool
+        id: skill_load
+      - kind: tool
+        id: mcp_discover
+      # ... 共 6 个 plain tools
+  recall:
+    tools:
+      - kind: tool
+        id: recall_query        # → buildPlainToolRef → ToolRegistry
+      # ... 共 4 个 plain tools
+```
+
+**构建路径**（`tagent.go:buildToolFromRef`）：
+
+```
+ToolRef (kind=agent) → buildAgentToolRef → buildAgent() 递归创建子 Agent → AgentToolWrapper 包装
+ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(id) → factory(PlainToolFactoryConfig) → CallableTool
+```
+
+`PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPToolSets、ReadPartitionIDs），
+由 `buildPlainToolRef` 从当前 agent 的上下文注入。
+
+**使用者视角**：
 
 ```go
 // tagent.go (root package) — tagent.New() 工厂函数
@@ -485,7 +573,9 @@ ta, err := tagent.New(tagent.Config{
     Model:       model,
     PromptDir:   "resources/prompts",
 })
-// 返回已绑定 knowledge/recall/command 三个 core tool 的 *agent.TagentAgent
+// RegisterBuiltinTools() 自动调用
+// 按 Config.Agents[entry].Tools 构建所有 tool
+// 返回完整的 *agent.TagentAgent
 ```
 
 ### 5.3 工具调用流程
@@ -513,7 +603,7 @@ sequenceDiagram
 
 **智能记忆召回** — RecallAgent 是 Agent 查询内部知识的窗口。它使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答。
 
-**设计决策**：RecallAgent 使用 TagentAgent + agenttool.NewTool() 包装架构（与 KnowledgeAgent 统一），而非简单的 CallableTool。理由：需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要。
+**设计决策**：RecallAgent 使用 config-driven TagentAgent + AgentToolWrapper 包装架构（与 KnowledgeAgent 统一），而非简单的 CallableTool。理由：需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要。
 
 ### 6.2 配置结构
 
@@ -532,29 +622,31 @@ type Config struct {
 }
 ```
 
-### 6.3 工厂函数
+### 6.3 子工具注册
 
-```go
-// recall/recall_agent.go:51-95
-func NewAgent(cfg Config) (*agent.TagentAgent, error)
+子工具通过 `RegisterSubTools()` 统一注册为 plain tool（由 `RegisterBuiltinTools()` 调用）：
+
+| 子工具 | 工厂函数 | 说明 |
+|--------|---------|------|
+| `recall_query` | `recallQueryFactory(cfg)` | 按查询条件检索事件列表，支持时间范围过滤，自动注入 `ReadPartitionIDs` |
+| `recall_get` | `recallGetFactory(cfg)` | 根据 event_key 获取完整事件详情，支持 `include_parent` |
+| `recall_recent` | `recallRecentFactory(cfg)` | 快速获取最近的 N 条事件，自动注入 `ReadPartitionIDs` |
+| `recall_trace` | `recallTraceFactory(cfg)` | 沿 RelationStore 因果链回溯，最多 20 步 |
+
+> **自动注入机制**：`recall_query` 和 `recall_recent` 的 factory 从 `PlainToolFactoryConfig.ReadPartitionIDs` 获取分区列表，handler 内部自动注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数，无需感知分区号。`ReadPartitionIDs` 由 `buildAgent()` 从 `MemoryConfig.ReadNamespaces` 解析，通过 `buildPlainToolRef` → `PlainToolFactoryConfig` 链路传递。
+
+### 6.4 构建路径
+
+RecallAgent 与 KnowledgeAgent 一致走 config-driven 路径：
+
 ```
-
-创建 TagentAgent 实例，通过 `buildRecallSubTools(accessor, cfg.ReadPartitionIDs)` 组装以下子工具：
-- `memory_query`：按查询条件检索事件列表，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
-- `memory_get`：根据 event_key 获取完整事件详情，支持 `include_parent` 参数自动包含父事件摘要
-- `memory_recent`：快速获取最近的 N 条事件，支持时间范围过滤（`since`/`until`），自动注入 `ReadPartitionIDs`
-- `memory_trace`：沿 RelationStore 因果链回溯，从指定事件追溯最多 20 步历史
-
-> **自动注入机制**：`memory_query` 和 `memory_recent` 的 handler 内部自动将配置的 `ReadPartitionIDs` 注入到 `QueryOptions.PartitionIDs`。LLM 调用时只需传语义参数（如 `{query: "部署"}`），无需感知分区号。`ReadPartitionIDs` 由 `buildAgent()` 从 `MemoryConfig.ReadNamespaces` 解析而来，经 `ToolAgentFactoryConfig` → `recall.Config` → `buildRecallSubTools` 链路传递。详见 [agent-architecture.md](../agent/agent-architecture.md) §12.5.8。
-
-### 6.4 Tool 包装
-
-```go
-// recall/recall_agent.go:121-135
-func NewTool(cfg Config) (tagenttool.Tool, error)
+tagent.New()
+  → buildAgent("recall", recallCfg, ...)
+    → 从 recallCfg.Tools 构建 4 个 plain tool
+    → 每个 plain tool 从 ToolRegistry.GetPlainToolFactory(id) 创建
+    → PlainToolFactoryConfig 携带 MemStore + ReadPartitionIDs
+  → buildAgentToolRef() 用 AgentToolWrapper 包装为 CallableTool
 ```
-
-使用 `agent.NewAgentToolWrapper()` 包装 TagentAgent 为 CallableTool，注册到父 Agent。
 
 ---
 
@@ -571,40 +663,56 @@ KnowledgeAgent 发现和加载外部技能文件（skills 目录中的 .md 等�
 **AgentToolWrapper.Call() 实现要点**：
 1. 从 `args` 中解析 `event_keys` 参数（`[]int64`）
 2. 通过 `parentStore.GetEvent(key)` 逐个获取完整 `FullEvent`
-3. 将事件转换为 `pendingExternalEvents`，通过 `IngestExternalEvents()` 注入子 Agent
+3. 序列化为 `RuntimeState["external_context"]`，通过 `agent.Run(ctx, inv)` 传递给子 Agent
 4. `Response.Clone()` 防御层：确保子 Agent 读取的 Response 与 Session 存储的 Response 不共享指针
 5. 提取 `finalOutput`（子 Agent 最后一个 `agent_output` 事件的内容）作为 tool result 返回给顶层 LLM
 - **Skill 和 MCP 统一为"capabilities"**：统一为 skills 文件系统管理
 - **Prompt 文件化**：通过 prompt.Loader 加载 resources/prompts/knowledge_agent.md
-- **组装在子包**：KnowledgeAgent 和 RecallAgent 的组装代码在各自的子包中（tool/knowledge, tool/recall），根包 tagent.go 只负责工厂函数
+- **Config-driven 组装**：KnowledgeAgent 和 RecallAgent 是 config-driven agent，通过 `AgentConfig.Tools` 声明子工具列表，`buildAgent()` 统一构建
 
-### 7.2 工厂函数（tagent.go — 根包）
+### 7.2 构建路径（config-driven）
 
-`tagent.New()` 封装了完整的 agent 实例化过程：
+KnowledgeAgent 不再通过专门的工厂函数创建，而是走与其他 agent 一致的 config-driven 路径：
+
+```
+tagent.New()
+  → buildAgent("knowledge", knowledgeCfg, ...)
+    → 无 ToolAgentFactory 注册（GetToolAgentFactory("knowledge") 返回 false）
+    → 从 knowledgeCfg.Tools 列表构建 6 个 plain tool
+    → 每个 plain tool 从 ToolRegistry.GetPlainToolFactory(id) 创建
+    → 创建 TagentAgent + 6 个 plain tool
+  → buildAgentToolRef() 用 AgentToolWrapper 包装为 CallableTool
+```
+
+**子工具声明**（`DefaultConfig()` 中 knowledge agent 的 Tools）：
 
 ```go
-// tagent.go (root package)
-func New(cfg Config) (*agent.TagentAgent, error) {
-    // 1. Create KnowledgeTool
-    // 2. Create RecallTool
-    // 3. Create ActionTool
-    // 4. Create main TagentAgent with all three tools
-    // 5. Wire ActionTool's tmux notifications via MessageInjector
+"knowledge": {
+    Tools: []ToolRef{
+        {Kind: ToolKindTool, ID: "skill_search"},
+        {Kind: ToolKindTool, ID: "skill_load"},
+        {Kind: ToolKindTool, ID: "mcp_discover"},
+        {Kind: ToolKindTool, ID: "web_search"},
+        {Kind: ToolKindTool, ID: "duckduckgo_search"},
+        {Kind: ToolKindTool, ID: "memory_query"},
+    },
 }
 ```
 
 使用者只需调用 `tagent.New()` 即可获得一个完整的 agent 实例，无需了解内部 tool 的组装细节。
 
-### 7.3 子工具（tool/knowledge/knowledge_subtools.go）
+### 7.3 子工具注册（tool/knowledge/knowledge_subtools.go）
+
+子工具通过 `RegisterSubTools()` 统一注册为 plain tool（由 `RegisterBuiltinTools()` 调用）：
 
 | 子工具 | 工厂函数 | 说明 |
 |--------|---------|------|
-| `skill_search` | `NewSkillSearchTool(repo)` | 搜索本地技能库 |
-| `skill_load` | `NewSkillLoadTool(repo)` | 加载技能完整内容（含执行指令） |
-| `mcp_discover` | `NewMCPDiscoverTool(toolSets)` | 发现 MCP 工具 |
-| `duckduckgo_search` | `duckduckgo.NewTool()` | 搜索事实性知识（Instant Answer API） |
-| `web_search` | `NewWebSearchTool()` | 搜索通用网页内容（HTML scraping） |
-| `memory_query` | `NewMemoryQueryTool(accessor)` | 查询历史知识记录 |
+| `skill_search` | `skillSearchFactory(cfg)` | 搜索本地技能库 |
+| `skill_load` | `skillLoadFactory(cfg)` | 加载技能完整内容（含执行指令） |
+| `mcp_discover` | `mcpDiscoverFactory(cfg)` | 发现 MCP 工具 |
+| `duckduckgo_search` | `duckDuckGoSearchFactory(cfg)` | 搜索事实性知识（Instant Answer API） |
+| `web_search` | `webSearchFactory(cfg)` | 搜索通用网页内容（HTML scraping） |
+| `memory_query` | `memoryQueryFactory(cfg)` | 查询历史知识记录 |
 
 ### 7.4 Prompt 文件化
 
@@ -625,6 +733,28 @@ ActionTool 支持两种执行模式：
 |------|---------|---------|---------|
 | `exec` | 同步，等待命令完成 | 命令结束 | 短期命令（< 60s） |
 | `tmux_exec` | 异步，立即返回 session ID | 立即返回 | 长期交互命令 |
+
+### 8.1.1 Properties 配置
+
+`exec`（ActionTool）通过 `ToolRef.Properties` 接收以下配置（由 `actionFactory` 解析）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `work_dir` | string | 命令执行的默认工作目录（覆盖 ActionTool 默认 workspace） |
+| `run_as_user` | string | 通过 `sudo -u` 执行命令时使用的用户 |
+| `run_as_group` | string | 通过 `sudo -g` 执行命令时使用的用户组 |
+
+```yaml
+# tagent.yaml 示例
+tools:
+  - kind: tool
+    id: exec
+    description_file: exec_tool_desc.md
+    properties:
+      work_dir: /tmp/tagent-workspace
+      run_as_user: tagent-runner
+      run_as_group: tagent-runner
+```
 
 ### 8.2 ActionTool 的组合结构
 
@@ -743,7 +873,7 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 ### 9.1 Execute 流程
 
 ```go
-// command/command_executor.go:86-154
+// action/action_executor.go:86-154
 func (ce *ActionExecutor) Execute(ctx context.Context, spec ActionSpec) (ActionResult, error) {
     // Step 1: 通过 context 设置 timeout
     if timeout > 0 {
@@ -774,7 +904,7 @@ func (ce *ActionExecutor) Execute(ctx context.Context, spec ActionSpec) (ActionR
 ### 9.2 buildCommand — 用户隔离
 
 ```go
-// command/command_executor.go:156-213
+// action/action_executor.go:156-213
 func (ce *ActionExecutor) buildCommand(spec ActionSpec) (*exec.Cmd, error) {
     if spec.RunAsUser != "" {
         // 使用 sudo -u runAsUser 执行
@@ -825,7 +955,7 @@ stateDiagram-v2
 ### 10.2 状态常量
 
 ```go
-// command/tmux_executor.go:72-81
+// action/tmux_executor.go:72-81
 const (
     SessionRunning   SessionStatus = "running"    // 正在运行
     SessionStable    SessionStatus = "stable"     // 输出稳定（适合读取）
@@ -839,7 +969,7 @@ const (
 ### 10.3 detectSessionState — 状态检测逻辑
 
 ```go
-// command/tmux_monitor.go:227-292
+// action/tmux_monitor.go:227-292
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
     // Step 1: 检查进程和 pane 状态
     processExists := tm.executor.ProcessExists(session.ID)
@@ -881,7 +1011,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 ### 10.5 配置参数
 
 ```go
-// command/tmux_monitor.go:43-52
+// action/tmux_monitor.go:43-52
 func DefaultMonitorConfig() MonitorConfig {
     return MonitorConfig{
         Interval:             30 * time.Second,  // 检测间隔
@@ -915,7 +1045,7 @@ func DefaultMonitorConfig() MonitorConfig {
 ### 11.2 Session 唯一命名
 
 ```go
-// command/tmux_executor.go:92-94
+// action/tmux_executor.go:92-94
 func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
     sessionName := fmt.Sprintf("%s-%d", te.prefix, time.Now().UnixNano())
     // prefix 默认值："tagent"
@@ -944,12 +1074,12 @@ sequenceDiagram
     RA->>RL: BeforeModel → 注入 system prompt
     RL->>RL: 理解查询意图
 
-    Note over RL: 内部 React Loop<br/>决定使用 memory_query
-    RL->>MS: memory_query({query, limit})
+    Note over RL: 内部 React Loop<br/>决定使用 recall_query
+    RL->>MS: recall_query({query, limit})
     MS-->>RL: []EventReference
 
     alt 需要更多细节
-        RL->>MS: memory_get(key)
+        RL->>MS: recall_get(key)
         MS-->>RL: FullEvent (含 Content)
     end
 
@@ -997,43 +1127,51 @@ sequenceDiagram
 
 | 工具 | 内部 React | 实现方式 | 理由 |
 |------|-----------|---------|------|
-| **RecallAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 4 种子工具协作（memory_query, memory_get, memory_recent, memory_trace），需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要 |
-| **KnowledgeAgent** | ✅ 需要 | agent.Agent + AgentToolWrapper | 6 种子工具协作（skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
-| **ActionTool** | ❌ 不需要 | CallableTool | 纯执行器，无决策需求；tmux 通知通过 MessageInjector 接口闭环 |
+| **RecallAgent** | ✅ 需要 | config-driven TagentAgent + AgentToolWrapper | 4 种 plain tool 协作（recall_query, recall_get, recall_recent, recall_trace），需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要 |
+| **KnowledgeAgent** | ✅ 需要 | config-driven TagentAgent + AgentToolWrapper | 6 种 plain tool 协作（skill_search, skill_load, mcp_discover, duckduckgo_search, web_search, memory_query），LLM 翻译能力为 ExecutionPlan |
+| **ActionTool** | ❌ 不需要 | CallableTool (PlainToolFactory) | 纯执行器，无决策需求；tmux 通知通过 MessageInjector 接口闭环 |
 
 判断标准：需要"思考-行动-观察"循环（多子工具协作、语义理解、结果综合） → TagentAgent + AgentToolWrapper；单一功能/执行器 → 简单 CallableTool。
 
-**架构统一性**：RecallAgent 和 KnowledgeAgent 共享相同的三层结构：
+**架构统一性**：RecallAgent 和 KnowledgeAgent 共享相同的 config-driven 结构：
 ```
-Config → NewAgent() → TagentAgent (内部 LLM React) → 子工具集
-                           ↓
-                    AgentToolWrapper (对外表现为 CallableTool)
+AgentConfig.Tools → buildAgent() → TagentAgent (内部 LLM React) → plain tool 集
+                                          ↓
+                                   AgentToolWrapper (对外表现为 CallableTool)
 ```
 
-来源：trpcclaw 经过实践验证的分类决策。
+**统一注册路径**：所有子工具（RecallAgent 的 4 个 + KnowledgeAgent 的 6 个 + exec）通过 `RegisterBuiltinTools()` 统一注册为 plain tool，存储在 ToolRegistry 中。
 
-### 13.2 为什么 KnowledgeAgent 和 RecallAgent 组装代码放在子包？
+### 13.2 为什么 KnowledgeAgent 和 RecallAgent 是 config-driven？
 
-**包结构清晰**：KnowledgeAgent 和 RecallAgent 的组装代码（`NewAgent`、`NewTool`）在各自的子包中
-（`tool/knowledge`、`tool/recall`），与子工具代码放在一起，内聚性强。
+**设计决策**：KnowledgeAgent 和 RecallAgent 不再通过专门的工厂函数创建，而是与其他 agent（action、speak、draw）一致走 config-driven 路径。子工具通过 `RegisterBuiltinTools()` 注册为 plain tool，通过 `AgentConfig.Tools` 声明使用。
 
-根包 tagent.go 只负责 `tagent.New()` 工厂函数，将三个 core tool 绑定到 agent 实例上。
+**与旧架构的对比**：
+
+| 维度 | 旧架构（ToolAgentFactory） | 新架构（config-driven） |
+|------|---------------------------|------------------------|
+| knowledge/recall 创建 | 注册 `RegisterToolAgent("knowledge", factory)` | `buildAgent()` 通用路径 |
+| 子工具注册 | 在 factory 内部硬编码组装 | `RegisterSubTools()` 注册为 plain tool |
+| 子工具配置 | 不可配置（factory 内部控制） | YAML 声明式（`Tools []ToolRef`） |
+| 扩展性 | 需修改 factory 代码 | 只需在 YAML 中添加 tool ref |
+
+**包结构清晰**：KnowledgeAgent 和 RecallAgent 的子工具代码（`RegisterSubTools()` + 工厂函数）在各自的子包中（`tool/knowledge`、`tool/recall`），与 agent 组装代码（`NewAgent`）放在一起，内聚性强。
 
 ```
-tagent (根) → agent      ← tagent.New() 创建 TagentAgent
-tagent (根) → tool/action  ← 创建 ActionTool
-tagent (根) → tool/recall   ← 创建 RecallTool
-tagent (根) → tool/knowledge← 创建 KnowledgeTool
-tagent (根) → prompt       ← 子包各自加载 prompt
+tagent (根) → agent           ← buildAgent() 创建 TagentAgent
+tagent (根) → tool/action     ← RegisterBuiltinTools() 注册 exec
+tagent (根) → tool/recall     ← RegisterSubTools() 注册 4 个 plain tool
+tagent (根) → tool/knowledge  ← RegisterSubTools() 注册 6 个 plain tool
+tagent (根) → prompt          ← 子包各自加载 prompt
 
-agent → plugin → memory   ← agent 不依赖 tool
-tool/action → memory     ← command 不依赖 agent
-tool/recall → memory      ← recall 不依赖 agent（通过 accessor 接口）
-tool/knowledge → memory   ← knowledge 不依赖 agent
+agent → plugin → memory       ← agent 不依赖 tool
+tool/action → memory          ← action 不依赖 agent
+tool/recall → memory          ← recall 不依赖 agent（通过 accessor 接口）
+tool/knowledge → memory       ← knowledge 不依赖 agent
 ```
 
 ActionTool 的 tmux 通知通过 `MessageInjector` 接口闭环在 action 包内，
-`TagentAgent` 天然实现该接口，在 `tagent.New()` 中通过 `SetMessageInjector(ta)` 完成接线。
+`TagentAgent` 天然实现该接口，在 `buildAgent()` 中通过 `SetMessageInjector(ta)` 完成接线。
 
 ### 13.3 为什么 tool 参数必须包含 event_key？
 

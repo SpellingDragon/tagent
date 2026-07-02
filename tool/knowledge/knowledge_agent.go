@@ -24,6 +24,11 @@ type Config struct {
 	MCPToolSets []tagenttool.ToolSet      // Optional: MCP tool sources
 	PromptDir   string                    // Optional: base directory for prompt files (default: "resources/prompts")
 
+	// Tools are the sub-tools available to this agent (e.g., skill_search, memory_query).
+	// In the config-driven path, these are injected by buildAgent from the agent's
+	// config tools list. If empty, BuildSubTools is called for backward compatibility.
+	Tools []tagenttool.Tool
+
 	// Prompt loading (bootstrap style)
 	Prompt PromptConfig // Optional: overrides PromptDir + "knowledge_agent.md" if set
 
@@ -70,7 +75,12 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 	}
 
 	// 3. Assemble sub-tools
-	subTools := BuildSubTools(cfg)
+	// Config-driven path: tools are injected by buildAgent.
+	// Backward compat: if Tools is empty, build sub-tools internally.
+	subTools := cfg.Tools
+	if len(subTools) == 0 {
+		subTools = BuildSubTools(cfg)
+	}
 
 	// 4. Apply defaults
 	maxToolIter := cfg.MaxToolIterations

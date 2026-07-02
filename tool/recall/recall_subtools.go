@@ -9,6 +9,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
+	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
@@ -372,4 +373,49 @@ func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	tools = append(tools, NewRecallTraceTool(accessor))
 
 	return tools
+}
+
+// ==================== Plain Tool Factory Registration ====================
+
+// RegisterSubTools registers all recall sub-tools as plain tools in the
+// global tool registry. Called by tagent.RegisterBuiltinTools().
+//
+// Registered tools:
+//   - recall_query: query historical events with time range and keyword filtering
+//   - recall_get: get full event details by key, optionally include parent event
+//   - recall_recent: get the most recent events with optional time range filtering
+//   - recall_trace: trace the causal chain backward from an event by following ParentKey links
+func RegisterSubTools() {
+	agent.RegisterPlainTool("recall_query", recallQueryFactory)
+	agent.RegisterPlainTool("recall_get", recallGetFactory)
+	agent.RegisterPlainTool("recall_recent", recallRecentFactory)
+	agent.RegisterPlainTool("recall_trace", recallTraceFactory)
+}
+
+func recallQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.MemStore == nil {
+		return nil, fmt.Errorf("recall_query requires MemStore")
+	}
+	return NewRecallQueryTool(cfg.MemStore, cfg.ReadPartitionIDs).(tool.CallableTool), nil
+}
+
+func recallGetFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.MemStore == nil {
+		return nil, fmt.Errorf("recall_get requires MemStore")
+	}
+	return NewRecallGetTool(cfg.MemStore).(tool.CallableTool), nil
+}
+
+func recallRecentFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.MemStore == nil {
+		return nil, fmt.Errorf("recall_recent requires MemStore")
+	}
+	return NewRecallRecentTool(cfg.MemStore, cfg.ReadPartitionIDs).(tool.CallableTool), nil
+}
+
+func recallTraceFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	if cfg.MemStore == nil {
+		return nil, fmt.Errorf("recall_trace requires MemStore")
+	}
+	return NewRecallTraceTool(cfg.MemStore).(tool.CallableTool), nil
 }
