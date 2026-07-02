@@ -171,7 +171,7 @@ func (p *Preprocessor) Process(ctx context.Context, events []*AgentEvent) Proces
 	}
 
 	// Step 5: consolidated audit line (one per LLM call).
-	logAccess(nil, usedTokens, len(messages), compressed, beforeTokens, beforeCount)
+	logAccess(usedTokens, len(messages), compressed, beforeTokens, beforeCount)
 
 	return ProcessResult{
 		Messages:        messages,
@@ -229,9 +229,7 @@ func injectEventKeyPrefixesFromSession(messages *[]model.Message, sess *session.
 }
 
 // logAccess outputs a single audit line per LLM invocation.
-// Kept as a package-level function for reuse by ContextIntervention (deprecated).
 func logAccess(
-	_ interface{}, // unused; kept for backward-compatible signature
 	tokens int,
 	msgCount int,
 	compressed bool,

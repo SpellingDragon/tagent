@@ -55,6 +55,7 @@ type AgentLoop struct {
 	// history accumulates the conversation context across rounds within
 	// a single turn (user → tool_calls → tool_results → ...). Reset when
 	// the model produces a final response (no tool_calls).
+	// Protected by maxHistoryMessages to prevent unbounded growth.
 	history []model.Message
 
 	// onEvent is an optional callback invoked for every event emitted
@@ -171,6 +172,7 @@ func (al *AgentLoop) Run(ctx context.Context) {
 		if len(resp.Choices) > 0 {
 			al.history = append(al.history, resp.Choices[0].Message)
 		}
+		al.history = trimHistory(al.history)
 
 		// Parse and act on the response.
 		hasToolCalls := al.handleResponse(ctx, resp)
@@ -462,6 +464,19 @@ func (al *AgentLoop) dispatchSubAgent(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+// trimHistory trims the history to at most max messages, keeping the most recent.
+// This prevents unbounded growth during long tool-call chains.
+const maxHistoryMessages = 100
+
+func trimHistory(h []model.Message) []model.Message {
+	if len(h) <= maxHistoryMessages {
+		return h
+	}
+	// Keep the most recent messages. The earliest messages in a long
+	// tool-call chain are least likely to be relevant.
+	return h[len(h)-maxHistoryMessages:]
+}
 
 // SetSession updates the session reference. Called when a session is
 // attached to the agent (e.g., by TagentAgent.Run or StartLoop).

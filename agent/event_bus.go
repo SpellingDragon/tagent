@@ -108,14 +108,25 @@ func NewEventBus() *EventBus {
 	}
 }
 
-// Publish enqueues an event. Blocks if the channel is full (backpressure).
+// publishTimeout is the maximum time Publish will wait before dropping
+// an event when the channel is full. This prevents permanent blocking
+// if the AgentLoop goroutine has exited unexpectedly.
+const publishTimeout = 5 * time.Second
+
+// Publish enqueues an event. If the channel is full, waits up to
+// publishTimeout before dropping the event with a warning.
 // Logs a warning on nil events.
 func (b *EventBus) Publish(event *AgentEvent) {
 	if event == nil {
 		log.Warnf("[EventBus] Publish nil event, skipped")
 		return
 	}
-	b.ch <- event
+	select {
+	case b.ch <- event:
+	case <-time.After(publishTimeout):
+		log.Warnf("[EventBus] Publish timeout (channel full), event dropped: type=%s source=%s",
+			event.Type, event.Source)
+	}
 }
 
 // Pull blocks until at least one event arrives or ctx is cancelled.

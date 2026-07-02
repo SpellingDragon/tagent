@@ -601,12 +601,17 @@ func (ta *TagentAgent) injectExternalContext(msg model.Message) model.Message {
 // Subsequent calls with the same agent return the existing outputCh.
 // The outputCh is closed when StopLoop is called.
 func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event, error) {
+	// Use sessionMu to prevent concurrent StartLoop calls from racing
+	// on the loopActive check + initialization sequence.
+	ta.sessionMu.Lock()
 	if ta.loopActive.Load() {
+		ta.sessionMu.Unlock()
 		return ta.outputCh, nil
 	}
 
 	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
 	ta.loopActive.Store(true)
+	ta.sessionMu.Unlock()
 
 	// Cache session context for event injection.
 	ta.setSessionContext(userID, sessionID)
