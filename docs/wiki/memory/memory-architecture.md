@@ -589,7 +589,7 @@ sequenceDiagram
     ATW->>MS: parentStore.GetEvent(E5)
     MS-->>ATW: FullEvent (含 Content, ToolCalls)
     ATW->>SA: IngestExternalEvents([E1,E3,E5])
-    Note over SA: RunSimple() 子 Agent 看到完整上下文
+    Note over SA: agent.Run() 子 Agent 看到完整上下文
     SA-->>ATW: event stream
     ATW-->>LLM: Tool Result
 ```
@@ -684,7 +684,7 @@ sequenceDiagram
     MS-->>ATW: FullEvent (含 Content, ToolCalls)
     ATW->>SA: IngestExternalEvents([E1,E3,E5])
     Note over SA: 子 Agent 的 context<br/>包含完整事件上下文
-    SA->>SA: RunSimple() 内部 React
+    SA->>SA: agent.Run() 内部 React
     SA-->>ATW: event stream
     ATW-->>LLM: Tool Result
 ```

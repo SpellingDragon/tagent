@@ -110,4 +110,3 @@ func TestOnEvent_MemoryStorePopulated(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(events), 2, "MemoryStore should have at least 2 FullEvents")
 }
-

@@ -153,8 +153,8 @@ graph TB
     CT -->|tmux_exec| TE
     TM -->|检查状态| TE
     TM -->|状态变化回调| CT
-    CT -->|InjectMessage<br/>→ mailbox| TA
-    TA -->|runner.Run| LLMA
+    CT -->|InjectMessage<br/>→ EventBus| TA
+    TA -->|AgentLoop.Run| LLMA
     KA -->|创建| TA
     KA -->|assembles| RA
     KA -->|assembles| KT
@@ -862,8 +862,8 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 `TagentAgent` 天然实现了 `MessageInjector` 接口（有 `InjectMessage(msg model.Message)` 方法），
 因此在 `tagent.New()` 中只需 `cmdTool.SetMessageInjector(ta)` 即可完成接线。
 
-> **InjectMessage 行为**：ActionTool 调用 `InjectMessage` 时将消息写入 `mailbox` channel，
-> Loop goroutine 批量 drain 后合并触发一次 `runner.Run()`。
+> **InjectMessage 行为**：ActionTool 调用 `InjectMessage` 时将消息包装为 `AgentEvent{type:external_input}` 发布到 EventBus，
+> AgentLoop 在下一轮 Pull 中消费。
 > ActionTool 的代码无需感知 Agent 的 Loop 状态——行为切换由 `TagentAgent` 内部处理。
 
 ---

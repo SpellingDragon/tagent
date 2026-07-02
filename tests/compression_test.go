@@ -21,9 +21,9 @@ import (
 
 // compressMockModel returns the configured response and records every request.
 type compressMockModel struct {
-	mu          sync.Mutex
-	response    *model.Response
-	requests    []*model.Request
+	mu       sync.Mutex
+	response *model.Response
+	requests []*model.Request
 }
 
 func newCompressMockModel(response *model.Response) *compressMockModel {
@@ -75,8 +75,8 @@ func TestCompression_FullHistory(t *testing.T) {
 		Model:             mockModel,
 		MemoryStore:       store,
 		SystemPrompt:      "You are a test assistant.",
-		MaxTokens:         100,   // Low budget to force compression
-		CompressThreshold: 0.5,   // Trigger at 50%
+		MaxTokens:         100, // Low budget to force compression
+		CompressThreshold: 0.5, // Trigger at 50%
 	})
 	require.NoError(t, err)
 	defer ag.Close()

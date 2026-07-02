@@ -291,7 +291,7 @@ type EventSummaryOptions struct {
 ```
 内容超限
     ↓
-ContextIntervention.BeforeModel 检测到 Token 超阈值
+Preprocessor.Process 检测到 Token 超阈值
     ↓
 SmartCompress.Compress 触发压缩
     ↓
@@ -356,7 +356,7 @@ tagent/agent
 
 ### 10.2 数据流
 
-**Persistent Event Loop 模式**：多条消息先入 mailbox，Loop goroutine 批量 drain 后 `mergeBatch()` 合并为一条，再触发一次 `runner.Run()`。事件类型推断和摘要生成流程不变，但 mergeBatch 后的合并消息 Content 以 `"\n\n---\n\n"` 连接多条原始内容。
+**Persistent Event Loop 模式**：所有外部输入通过 `InjectMessage` 发布为 `AgentEvent{type:external_input}` 到 EventBus。AgentLoop 在 `Pull` 中批量取出，通过 `onEvent` 持久化到 Session + MemoryStore，再由 `Preprocessor.Process` 从 `session.Events` 构建完整 messages。
 
 ```mermaid
 sequenceDiagram
@@ -384,7 +384,7 @@ sequenceDiagram
     Note over SP: Tag = eventType + ":" + summary
 ```
 
-> **注意**：Loop 模式下 mergeBatch 产生的合并消息 Role 为 `RoleUser`，即使原始消息包含 `RoleSystem`（Tmux 注入）。MemoryPlugin 的 `ExtractEventType` 仍会正确分类为 `external_input`，因为推断基于 Content 内容而非 Role。
+> **注意**：在事件驱动架构中，所有外部输入统一为 `AgentEvent{type:external_input}` 发布到 EventBus。MemoryPlugin 的 `ExtractEventType` 基于 `model.Message` 内容推断类型，`RoleSystem`（Tmux 注入）仍正确分类为 `external_input`。
 
 ### 10.3 信息隔离
 

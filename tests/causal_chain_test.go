@@ -183,7 +183,9 @@ loop:
 }
 
 // TestCausalChain_WithToolCall verifies a 4-event tool-call chain:
-//   user -> assistant(tool_calls) -> tool_result -> assistant(final)
+//
+//	user -> assistant(tool_calls) -> tool_result -> assistant(final)
+//
 // and checks that each persisted event has the expected causal parent.
 func TestCausalChain_WithToolCall(t *testing.T) {
 	mockModel := newSequenceModel([]*model.Response{
@@ -265,7 +267,6 @@ loop:
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].EventKey < events[j].EventKey
 	})
-
 
 	// Causal chain: each event's parent should be the previous event.
 	for i := 1; i < len(events); i++ {

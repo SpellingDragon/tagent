@@ -171,7 +171,7 @@ graph TB
 
 | 模块 | 职责 | Wiki |
 |------|------|------|
-| `agent/` | 核心协调：`TagentAgent`（持久循环）、`ContextIntervention`（BeforeModel 拦截器）、`SmartCompressor`（两阶段 LLM 压缩）、`ToolAgent`（子 Agent 包装器）、`MeditationManager`（冥想心跳） | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
+| `agent/` | 事件驱动引擎：`EventBus`（per-agent 事件队列）、`AgentLoop`（Pull-Process-Model-Dispatch 纯引擎）、`Preprocessor`（事件过滤+消息构建+压缩）、`SmartCompressor`（两阶段压缩）、`AgentToolWrapper`（子 Agent 包装器）、`MeditationManager`（冥想心跳） | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
 | `memory/` | 结构化事件存储：`InMemoryStore`、`FileSegmentStore`（L0-L3 分层）、`RelationStore`（因果链）、`Compactor`、`Tombstone`、`Lifecycle`（TTL） | [memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
 | `plugin/` | 框架插件：`MemoryPlugin`（事件持久化 + 因果链）、`SummaryPlugin`（事件标签注入） | [plugin-architecture.md](docs/wiki/plugin/plugin-architecture.md) |
 | `tool/` | 可调用工具：`KnowledgeAgent`（RAG）、`RecallAgent`（记忆回溯）、`ActionTool`（shell/tmux 执行 + TmuxMonitor）、`file`（trpc-agent-go 内置文件操作工具封装）、`SpeakAgent`/`DrawAgent`（stub，未启用） | [tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
@@ -218,42 +218,48 @@ tagent 的核心运行时模型。Agent 作为一个持久化、类似操作系�
 
 ```mermaid
 graph LR
-    START["StartLoop<br/>(userID, sessionID)"] --> DRAIN["drainMailbox()<br/>批量取出所有待处理"]
-    DRAIN --> MERGE["mergeBatch()<br/>合并为一条消息"]
-    MERGE --> RUN["runner.Run()<br/>复用框架管道"]
-    RUN --> FWD["转发事件<br/>→ outputCh"]
-    FWD --> CHECK{"Flow 中断?<br/>(IsFinalResponse)"}
-    CHECK -->|"是"| DRAIN
+    START["StartLoop<br/>(userID, sessionID)"] --> PULL["EventBus.Pull<br/>批量取出待处理事件"]
+    PULL --> ONEVT["onEvent callback<br/>写入 Session + MemoryStore"]
+    ONEVT --> PROC["Preprocessor.Process<br/>构建 messages + 压缩"]
+    PROC --> MODEL{"shouldCallModel?"}
+    MODEL -->|"是"| CALL["model.GenerateContent"]
+    MODEL -->|"否"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
+    CALL --> RESP["handleResponse"]
+    RESP -->|"tool_calls"| ONEVT2["onEvent + dispatch"]
+    RESP -->|"final"| EMIT["emit → outputCh"]
+    ONEVT2 --> PULL
+    EMIT --> PULL
+    DISPATCH --> PULL
 
-    style RUN fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style CALL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
 ```
 
-关键设计：`runner.Run()` 完整复用框架管道（Session、Plugin、BeforeModel、MemoryPlugin）。Flow 在 `IsFinalResponse()` 时中断不是问题——这正是"本批处理完成，准备下一批"的正确信号。
+关键设计：AgentLoop 是纯引擎，所有业务判断（事件筛选、shouldCallModel、压缩）在 Preprocessor 中完成。onEvent 回调在 Preprocessor 前调用，确保 Session.Events 包含最新事件。
 
-> 详情：[agent-architecture.md §7.3](docs/wiki/agent/agent-architecture.md)
+> 详情：[agent-architecture.md §7](docs/wiki/agent/agent-architecture.md)
 
 ### 2. 两阶段上下文压缩
 
-当 token 使用量超过阈值（`MaxTokens * CompressThreshold`）时，`SmartCompressor` 在 `BeforeModel` 中激活：
+当 token 使用量超过阈值（`MaxTokens * CompressThreshold`）时，`SmartCompressor` 在 `Preprocessor.Process` 中激活：
 
 - **阶段一——任务边界丢弃**：按任务边界（无 tool_calls 的 assistant 消息 = 任务完成）将消息切分为 `TaskSegment`。丢弃旧段，保留最近 N 段（`KeepRecentTasks`，默认 2）。
 - **阶段二——LLM 摘要**（可选）：对丢弃的段生成批量 LLM 摘要。摘要作为系统消息注入，替换原始对话历史。
 
 多轮压缩：如果一轮不够，`KeepRecentTasks` 递减后再次压缩（最多 5 轮）。
 
-**视图转换原则**：压缩仅修改 `args.Request.Messages`——Session 和 MemoryStore 数据绝不被触碰。
+**视图转换原则**：压缩仅修改 Preprocessor 构建的 `[]model.Message`——Session.Events 和 MemoryStore 数据绝不被触碰。
 
-> 详情：[agent-architecture.md §4.4, §8-9](docs/wiki/agent/agent-architecture.md)
+> 详情：[agent-architecture.md §9](docs/wiki/agent/agent-architecture.md)
 
 ### 3. 事件驱动记忆（因果链 + EventKey）
 
-流经 Runner 的每个事件都会被 `MemoryPlugin.OnEvent` 拦截：
+AgentLoop 通过 onEvent 回调将每个事件写入 Session 和 MemoryStore：
 
 1. **推断事件类型**（`external_input`、`agent_output`、`action_command` 等）
 2. **生成 Snowflake EventKey**（64 位：PartitionID + Timestamp + Sequence）
 3. **构建因果链**：通过 `RelationStore.SetParent`——每个事件指向其前驱
 4. **持久化 FullEvent** 到 MemoryStore（不可变）
-5. **写入 EventReference** 到 Session（轻量级：key + type + summary）
+5. **追加 event.Event** 到 Session.Events（含 StateDelta: event_key/type）
 
 LLM 在消息前缀中看到事件 key（`[evt_123456|agent_output]`），使其能够将相关 key 传递给子 Agent 用于上下文获取。
 
@@ -269,7 +275,7 @@ graph TD
     PARSE --> GET["2. parentStore.GetEvent(key)<br/>→ FullEvents"]
     GET --> SER["3. 序列化 → RuntimeState<br/>['external_context']"]
     SER --> RUN["4. agent.Run(ctx, invocation)"]
-    RUN --> LOCAL["本地: TagentAgent.Run<br/>→ runner.Run (进程内)"]
+    RUN --> LOCAL["本地: TagentAgent.Run<br/>→ EventBus + AgentLoop (进程内)"]
     RUN --> REMOTE["远程: A2AAgent.Run<br/>→ A2A HTTP → 远程 TagentAgent"]
 
     style RUN fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
@@ -324,33 +330,29 @@ sequenceDiagram
     participant U as 用户
     participant TM as TmuxMonitor
     participant TA as TagentAgent
-    participant MB as mailbox (chan)
-    participant L as Loop goroutine
-    participant R as Runner
+    participant EB as EventBus
+    participant AL as AgentLoop
+    participant PP as Preprocessor
     participant OC as outputCh
 
-    TA->>L: StartLoop(userID, sessionID)
+    TA->>AL: StartLoop(userID, sessionID)
 
-    par 并发写入 mailbox
+    par 并发写入 EventBus
         U->>TA: InjectMessage(msg)
-        TA->>MB: mailbox <- msg
+        TA->>EB: Publish(external_input)
     and
         TM->>TA: InjectMessage(system_msg)
-        TA->>MB: mailbox <- msg
+        TA->>EB: Publish(external_input)
     end
 
-    L->>L: drainMailbox (批量取出)
-    L->>L: mergeBatch(batch)
-    L->>R: runner.Run(mergedMsg)
-
-    Note over R: 完整框架管道:<br/>BeforeModel → LLM → Plugin → 持久化
-
-    loop 事件流
-        R-->>L: event
-        L->>OC: outputCh <- event
-    end
-
-    Note over L: Flow 中断 (IsFinalResponse)<br/>→ 回到 drainMailbox
+    AL->>AL: Pull (批量取出)
+    AL->>AL: onEvent (写入 Session + MemoryStore)
+    AL->>PP: Process(batch, session)
+    PP-->>AL: messages + shouldCallModel
+    AL->>AL: model.GenerateContent
+    AL->>AL: onEvent (写入 assistant response)
+    AL->>OC: emit → outputCh
+    AL->>AL: 回到 Pull
 ```
 
 ### 场景二：子 Agent 与 A2A 远程通信
@@ -377,7 +379,7 @@ sequenceDiagram
     SRV->>SRV: metadata → RuntimeState
     SRV->>RTA: TagentAgent.Run(invocation)
     RTA->>RTA: 反序列化外部上下文
-    RTA->>RTA: injectExternalContext → runner.Run
+    RTA->>RTA: injectExternalContext → EventBus.Publish
 
     loop 远程 ReAct 循环
         RTA->>RMS: 持久化事件
@@ -402,19 +404,19 @@ sequenceDiagram
 | 步骤 | 模块 | 动作 | 事件类型 | MemoryStore 操作 |
 |------|------|------|---------|-----------------|
 | 1 | **用户** → `TagentAgent` | `InjectMessage("查看最近的 Git 提交...")` | — | — |
-| 2 | **Loop goroutine** | `drainMailbox()` → `mergeBatch()` → `runner.Run()` | — | — |
-| 3 | **Runner** → **MemoryPlugin** | 追加用户消息到 Session → `OnEvent` 钩子：推断类型、生成 EventKey、持久化 FullEvent、构建因果链 | `external_input` | 存储 FullEvent（不可变），写入 EventReference 到 Session |
-| 4 | **LLMAgent** → `ContextIntervention` | `BeforeModel`：注入 `[evt_KEY\|external_input]` 前缀，检查 token 预算 | — | — |
-| 5 | **LLMAgent** → LLM | LLM 决定先调用 `command` 工具 | `thinking_plan` | 通过 `OnEvent` 持久化带 tool_calls 的 assistant 消息 |
-| 6 | **ActionTool** | 执行 `git log --oneline -10`，返回结果 | `action_command` | 持久化工具结果，EventKey → 因果父节点 = 步骤 5 |
-| 7 | **LLMAgent** → LLM | LLM 看到 git log，决定调用 `recall` 子 Agent | `thinking_plan` | 持久化新的带 tool_calls 的 assistant 消息 |
+| 2 | **AgentLoop** | `EventBus.Pull` → `onEvent` (写入 Session + MemoryStore) | — | — |
+| 3 | **onEvent** → **MemoryPlugin** | 包装 external_input 为 event.Event → `OnEvent`：推断类型、生成 EventKey、持久化 FullEvent、构建因果链 → `sessionSvc.AppendEvent` | `external_input` | 存储 FullEvent（不可变），追加到 Session.Events |
+| 4 | **Preprocessor** | 从 `session.Events` 构建 messages，注入 `[evt_KEY\|external_input]` 前缀，检查 token 预算 | — | — |
+| 5 | **AgentLoop** → LLM | LLM 决定先调用 `action` 工具 | `thinking_plan` | `onEvent` 持久化带 tool_calls 的 assistant 消息 |
+| 6 | **ActionTool** | goroutine 执行 `git log --oneline -10`，结果 publish 为 external_input 回写 bus | `action_command` | 下轮 onEvent 持久化工具结果，EventKey → 因果父节点 = 步骤 5 |
+| 7 | **AgentLoop** → LLM | LLM 看到 git log，决定调用 `recall` 子 Agent | `thinking_plan` | `onEvent` 持久化新的带 tool_calls 的 assistant 消息 |
 | 8 | **AgentToolWrapper** | 从 LLM 参数解析 `event_keys` → `parentStore.GetEvent(key)` → 序列化上下文 → `RuntimeState["external_context"]` | — | 从 MemoryStore 读取 FullEvents（无写入） |
-| 9 | **RecallAgent**（子 Agent） | `agent.Run()` 注入外部上下文 → 内部 React 循环 → 返回相关历史事件摘要 | `thinking_recall` | 子 Agent 持久化自己的事件；父 Agent 只看到工具结果 |
-| 10 | **LLMAgent** → `ContextIntervention` | Token 预算超限 → `SmartCompressor.Compress()`：将用户消息 + git log 命令/结果（一个 TaskSegment）作为旧段丢弃，生成 LLM 摘要 | `context_compress` *(仅视图)* | **MemoryStore 无变化**。`collectCompressedKeys` 从丢弃的消息中提取 EventKeys 用于 `[context_compress]` 事件 |
-| 11 | **LLMAgent** → LLM | LLM 看到：`[compress_event]` + `[summary]` + `[recent: recall result]` + `[pending user msg]`。决定调用 `knowledge` 子 Agent | `thinking_plan` | 以 `[evt_KEY\|thinking_plan]` 前缀持久化 |
-| 12 | **KnowledgeAgent**（子 Agent） | `AgentToolWrapper` → `agent.Run()` → 搜索设计文档 → 返回相关文档 | `thinking_knowledge` | 子 Agent 持久化自己的事件 |
-| 13 | **LLMAgent** → LLM | LLM 综合压缩历史摘要 + recall 结果 + knowledge 文档 → 生成最终响应（无 tool_calls） | `agent_output` | 持久化最终响应，EventKey → 因果父节点 = 步骤 12 |
-| 14 | **Loop goroutine** | Flow 在 `IsFinalResponse()` 时中断 → 转发事件到 `outputCh` → 回到 `drainMailbox()` | — | — |
+| 9 | **RecallAgent**（子 Agent） | `agent.Run()` → 独立 EventBus + AgentLoop → 返回相关历史事件摘要 | `thinking_recall` | 子 Agent 持久化自己的事件；父 Agent 只看到工具结果 |
+| 10 | **Preprocessor** | Token 预算超限 → `SmartCompressor.Compress()`：将用户消息 + git log 命令/结果（一个 TaskSegment）作为旧段丢弃，生成 LLM 摘要 | `context_compress` *(仅视图)* | **MemoryStore 无变化**。`collectCompressedKeys` 从丢弃的消息中提取 EventKeys |
+| 11 | **AgentLoop** → LLM | LLM 看到：`[compress_event]` + `[summary]` + `[recent: recall result]`。决定调用 `knowledge` 子 Agent | `thinking_plan` | `onEvent` 以 `[evt_KEY\|thinking_plan]` 前缀持久化 |
+| 12 | **KnowledgeAgent**（子 Agent） | `AgentToolWrapper` → `agent.Run()` → 独立 AgentLoop → 返回文档 | `thinking_knowledge` | 子 Agent 持久化自己的事件 |
+| 13 | **AgentLoop** → LLM | LLM 综合压缩历史摘要 + recall 结果 + knowledge 文档 → 生成最终响应（无 tool_calls） | `agent_output` | `onEvent` 持久化最终响应，EventKey → 因果父节点 = 步骤 12 |
+| 14 | **AgentLoop** | emit → outputCh → 回到 `EventBus.Pull` | — | — |
 
 ### 事件链（因果关系）
 
@@ -452,7 +454,7 @@ graph LR
 
 3. **因果链完整性**：每个事件的 `EventKey` 编码了其因果父节点。即使经过压缩，MemoryStore 中的链 `evt_1 → evt_2 → ... → evt_8` 仍然完整可追溯。
 
-4. **批处理**：如果 TmuxMonitor 在步骤 7 期间注入消息，它会进入 mailbox。Loop 不会处理它，直到当前 `runner.Run()` 完成（Flow 在 `IsFinalResponse` 时中断）。
+4. **异步事件**：如果 TmuxMonitor 在步骤 7 期间注入消息，它会进入 EventBus。AgentLoop 在当前 tool dispatch goroutine 运行时不会处理它，直到下一轮 `Pull` 批量取出。
 
 ## 快速开始
 
@@ -693,7 +695,7 @@ tools:
 
 ```
 tagent/
-├── agent/          # 核心：TagentAgent, ContextIntervention, SmartCompressor, ToolAgent, MeditationManager
+├── agent/          # 核心：EventBus, AgentLoop, Preprocessor, SmartCompressor, AgentToolWrapper, MeditationManager
 ├── builtin.go      # 内置 plain tool 工厂函数（actionFactory）
 ├── config.go       # 声明式配置：Config, AgentConfig, ToolRef, MeditationConfig, PromptConfig
 ├── registry.go     # ToolRegistry：统一工具注册/查询/校验（RegisterBuiltinTools）
