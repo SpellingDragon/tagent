@@ -197,7 +197,7 @@ agents:
         - action_agent.md
     memory:
       type: memory
-    max_tool_iterations: 5
+    max_tool_iterations: 50
     max_tokens: 8000
     temperature: 0.3
     tools:

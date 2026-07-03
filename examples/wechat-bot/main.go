@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -22,10 +21,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
-
-// msgMu ensures sequential message processing — only one InjectMessage +
-// outputCh consumption cycle runs at a time.
-var msgMu sync.Mutex
 
 func main() {
 	// 1. Load single config file (tagent.yaml)
@@ -253,14 +248,25 @@ func main() {
 			}
 		}()
 
-		// Run tagent agent via persistent event loop (sequential processing).
-		// tagent's built-in loop logging provides full observability:
-		//   [Loop.Batch#N] TOOL_CALL / TOOL_RESULT / FINAL_RESPONSE
-		//   [Loop.Batch#N] completed duration=... events=... tokens=...
-		// OTLP spans are exported when OTEL_EXPORTER_OTLP_ENDPOINT is set.
-		msgMu.Lock()
-		response, err := generateResponse(reqCtx, ta, outputCh, text)
-		msgMu.Unlock()
+		// Inject message into the persistent event loop immediately.
+		// This is non-blocking — the message goes to the EventBus and
+		// will be processed on the next Pull. If the AgentLoop is busy
+		// (e.g. executing a tool from a previous message), this message
+		// queues up and gets processed after the current iteration.
+		//
+		// We do NOT hold a lock here — InjectMessage is thread-safe
+		// (publishes to a buffered channel). The previous design used
+		// msgMu to serialize InjectMessage + outputCh consumption, but
+		// that blocked new messages while waiting for tool execution.
+		ta.InjectMessage(model.Message{
+			Role:    model.RoleUser,
+			Content: text,
+		})
+
+		// Consume outputCh until the final response for this message.
+		// In the persistent event loop, each InjectMessage triggers
+		// an AgentLoop iteration that produces exactly one final response.
+		response, err := consumeUntilFinal(reqCtx, outputCh)
 		close(done)
 
 		if err != nil {
@@ -299,19 +305,10 @@ func main() {
 	fmt.Println("Bot stopped gracefully.")
 }
 
-// generateResponse injects the user message into tagent's persistent event loop
-// and collects the final output from the output channel.
-//
-// Logging and OTLP tracing are handled by tagent's built-in loop() —
-// this function only reads events to extract the final text response.
-func generateResponse(ctx context.Context, ta *agent.TagentAgent, outputCh <-chan *event.Event, userMessage string) (string, error) {
-	// Inject message into the persistent event loop
-	ta.InjectMessage(model.Message{
-		Role:    model.RoleUser,
-		Content: userMessage,
-	})
-
-	// Consume events until final response (tagent logs all details internally)
+// consumeUntilFinal reads events from outputCh until a final response
+// (no tool_calls, Done=true) is received or ctx is cancelled.
+// This does NOT call InjectMessage — the caller is responsible for that.
+func consumeUntilFinal(ctx context.Context, outputCh <-chan *event.Event) (string, error) {
 	var finalOutput string
 loop:
 	for {
@@ -321,15 +318,13 @@ loop:
 				break loop // channel closed
 			}
 
-			// Extract final text response (no tool calls = final answer)
 			if evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-				if choice.Message.Content != "" && len(choice.Message.ToolCalls) == 0 {
+				if len(choice.Message.ToolCalls) == 0 && choice.Message.Content != "" {
 					finalOutput = choice.Message.Content
 				}
 			}
 
-			// Final response for this batch — stop consuming
 			if evt.IsFinalResponse() {
 				break loop
 			}
