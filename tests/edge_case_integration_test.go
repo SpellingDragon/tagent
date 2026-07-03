@@ -129,7 +129,7 @@ func TestRealLLM_SubAgentRun_CompletesWithSummary(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	// Run as sub-agent (uses Run() path, not StartLoop).

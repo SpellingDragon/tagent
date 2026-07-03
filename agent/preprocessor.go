@@ -112,14 +112,8 @@ func (p *Preprocessor) Process(ctx context.Context, batch []*AgentEvent, sess *s
 			return len(sess.Events)
 		}())
 
-	// Step 3: inject event_key prefixes (requires session).
-	// This activates the event_key visibility chain: LLM sees keys →
-	// passes to sub-agents via event_keys parameter.
 	if sess != nil {
 		injectEventKeyPrefixesFromSession(&messages, sess)
-		log.Debugf("[Preprocessor] injected event_key prefixes from session")
-	} else {
-		log.Debugf("[Preprocessor] no session, skip event_key prefix injection")
 	}
 
 	// Step 4: token budget check + SmartCompress.

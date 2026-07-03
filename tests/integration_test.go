@@ -114,7 +114,7 @@ func TestIntegration_SmartCompress_WithRealLLM(t *testing.T) {
 		t.Fatalf("Failed to create TagentAgent: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	// 模拟长对话触发压缩
@@ -169,7 +169,7 @@ func TestRegression_AgentLoop_MultipleIterations(t *testing.T) {
 		t.Fatalf("Failed to create TagentAgent: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	msg := model.Message{

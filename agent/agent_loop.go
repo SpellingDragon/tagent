@@ -330,59 +330,36 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 
 	// No tool_calls → final response.
 	al.toolIterations = 0
-	content := ""
+	msg := choice.Message
+	content := msg.Content
 	finishReason := ""
-	reasoningContent := ""
-	if len(resp.Choices) > 0 {
-		content = resp.Choices[0].Message.Content
-		if resp.Choices[0].FinishReason != nil {
-			finishReason = *resp.Choices[0].FinishReason
-		}
-		reasoningContent = resp.Choices[0].Message.ReasoningContent
+	if choice.FinishReason != nil {
+		finishReason = *choice.FinishReason
 	}
+	reasoningContent := msg.ReasoningContent
 
-	// Log raw response fields at INFO level for diagnosis — don't guess
-	// why content is empty, print all fields so the root cause is visible.
-	log.Infof("[AgentLoop:%s] raw response: content_len=%d reasoning_len=%d finish_reason=%q tool_calls=%d",
-		al.name, len(content), len(reasoningContent), finishReason, func() int {
-			if len(resp.Choices) > 0 {
-				return len(resp.Choices[0].Message.ToolCalls)
-			}
-			return 0
-		}())
-	if len(content) > 0 {
-		log.Infof("[AgentLoop:%s] content preview: %s", al.name, truncateString(content, 300))
-	}
-	if len(reasoningContent) > 0 {
-		log.Infof("[AgentLoop:%s] reasoning_content preview: %s", al.name, truncateString(reasoningContent, 300))
-	}
-
-	// Fallback: some models (e.g., GLM-4.7) put all output in reasoning_content
-	// and leave content empty. Use reasoning_content as the final output so
-	// the caller gets a meaningful response instead of an empty string.
+	// Fallback: sometimes puts all output in reasoning_content with
+	// empty content. Use reasoning_content as the final output.
 	if content == "" && reasoningContent != "" {
-		log.Warnf("[AgentLoop:%s] empty content but reasoning_content has %d chars, using as fallback output",
+		log.Warnf("[AgentLoop:%s] empty content, using reasoning_content (%d chars) as fallback",
 			al.name, len(reasoningContent))
-		// Clone the response and inject reasoning_content as the message content
-		// so downstream consumers (AgentToolWrapper, outputCh) see actual text.
 		resp = resp.Clone()
-		if len(resp.Choices) > 0 {
-			resp.Choices[0].Message.Content = reasoningContent
-			resp.Choices[0].Message.ReasoningContent = "" // avoid duplication
-		}
+		resp.Choices[0].Message.Content = reasoningContent
+		resp.Choices[0].Message.ReasoningContent = ""
 		content = reasoningContent
 	}
 
-	// Build a detailed log line for the final response.
 	var usageStr string
 	if resp.Usage != nil {
-		usageStr = fmt.Sprintf(" prompt_tokens=%d completion_tokens=%d total=%d",
+		usageStr = fmt.Sprintf(" prompt=%d completion=%d total=%d",
 			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
 	}
-	log.Infof("[AgentLoop:%s] final response: content_len=%d finish_reason=%q%s",
-		al.name, len(content), finishReason, usageStr)
+	log.Infof("[AgentLoop:%s] final response: content_len=%d reasoning_len=%d finish_reason=%q%s",
+		al.name, len(content), len(reasoningContent), finishReason, usageStr)
+	log.Debugf("[AgentLoop:%s] content preview: %s", al.name, truncateString(content, 300))
+
 	if len(content) == 0 {
-		log.Warnf("[AgentLoop:%s] empty final response! finish_reason=%q, check model behavior or content filtering", al.name, finishReason)
+		log.Warnf("[AgentLoop:%s] empty final response! finish_reason=%q", al.name, finishReason)
 	}
 	al.emitAgentOutput(resp)
 	return false
@@ -431,35 +408,12 @@ func (al *AgentLoop) emitEvent(evt *event.Event) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool Dispatch — asynchronous
+// Tool Dispatch — asynchronous, unified
 // ---------------------------------------------------------------------------
-//
-// AgentLoop publishes tool_use events to the bus AND dispatches them
-// asynchronously via goroutines. The AgentLoop does NOT block on tool
-// execution.
-//
-// Two dispatch paths:
-//
-//   1. Shell / normal tool (*CallableTool but NOT *AgentToolWrapper):
-//      goroutine calls tool.Call(). If the result is a tmux-async marker
-//      (implements tmuxAsyncResult), do NOT publish — TmuxMonitor will
-//      publish the real result later. Otherwise publish the result as
-//      external_input immediately.
-//
-//   2. Sub-agent (*AgentToolWrapper):
-//      goroutine calls wrapper.Call() (which runs the sub-agent to
-//      completion and returns the final output). Publishes the output
-//      as external_input.
-//
-// Both paths publish to the same EventBus, so the AgentLoop sees the
-// result in its next Pull batch.
 
-// toolResultMarker is used by dispatchToolUse to distinguish tmux-async
-// results (which return TmuxExecResponse-like structs) from synchronous
-// results (which should be published immediately).
-//
-// This is a temporary heuristic. Group 5 (full tmux) will remove the
-// synchronous code path entirely, making this distinction unnecessary.
+// tmuxAsyncResult is implemented by tool results that represent an async
+// tmux session (the real result arrives later via TmuxMonitor → InjectMessage).
+// When detected, the result is NOT published to the bus.
 type tmuxAsyncResult interface {
 	IsTmuxAsync() bool
 }
@@ -467,133 +421,56 @@ type tmuxAsyncResult interface {
 // dispatchToolUse starts a goroutine that executes the tool and publishes
 // the result back to the bus as an external_input event.
 //
-// This method returns immediately — the AgentLoop is not blocked.
+// All tools — CallableTool (file, speak, draw) and AgentToolWrapper
+// (knowledge, recall, action) — go through this single path. The goroutine
+// has a 10-minute timeout and a recover so panics never silently lose
+// the tool_use event.
 func (al *AgentLoop) dispatchToolUse(ctx context.Context, toolCall model.ToolCall) {
 	name := toolCall.Function.Name
-	t, ok := al.toolMap[name]
+	callable, ok := al.toolMap[name].(trpctool.CallableTool)
 	if !ok {
-		log.Errorf("[AgentLoop:%s] tool %q not found", al.name, name)
+		log.Errorf("[AgentLoop:%s] tool %q not found or not callable", al.name, name)
 		return
 	}
 
-	// Detect sub-agent vs shell tool.
-	if wrapper, isSubAgent := t.(*AgentToolWrapper); isSubAgent {
-		al.dispatchSubAgent(ctx, wrapper, toolCall)
-		return
-	}
-
-	// Shell / normal tool path.
-	callable, ok := t.(trpctool.CallableTool)
-	if !ok {
-		log.Errorf("[AgentLoop:%s] tool %q is not CallableTool", al.name, name)
-		return
-	}
-
-	go al.dispatchCallable(ctx, callable, toolCall)
-}
-
-// dispatchCallable executes a CallableTool in a goroutine and publishes
-// the result to the bus. Handles tmux-async detection.
-// Recover from panic to ensure the parent AgentLoop always receives a result
-// (error message) — without this, a tool panic would silently lose the
-// tool_use event and the parent agent would wait forever.
-func (al *AgentLoop) dispatchCallable(
-	ctx context.Context,
-	callable trpctool.CallableTool,
-	toolCall model.ToolCall,
-) {
-	name := toolCall.Function.Name
-	startTime := time.Now()
-
-	var content string
-	func() {
+	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				content = fmt.Sprintf("Error: tool %q panicked: %v", name, r)
 				log.Errorf("[AgentLoop:%s] tool %q panicked: %v", al.name, name, r)
+				al.bus.Publish(NewExternalInputEvent("tool_result", model.Message{
+					Role:    model.RoleTool,
+					Content: fmt.Sprintf("Error: tool %q panicked: %v", name, r),
+					ToolID:  toolCall.ID,
+				}))
 			}
 		}()
-
-		result, err := callable.Call(ctx, toolCall.Function.Arguments)
-		elapsed := time.Since(startTime)
-
-		if err != nil {
-			content = fmt.Sprintf("Error: %v", err)
-		} else if result == nil {
-			content = "(no output)"
-		} else {
-			// Check if this is a tmux-async result.
-			if asyncMarker, ok := result.(tmuxAsyncResult); ok && asyncMarker.IsTmuxAsync() {
-				log.Infof("[AgentLoop:%s] tool %s returned async marker, waiting for TmuxMonitor callback",
-					al.name, name)
-				return
-			}
-			// JSON-serialize the result for LLM-friendly format.
-			// Falls back to %v for types that don't marshal cleanly.
-			if b, marshalErr := json.Marshal(result); marshalErr == nil {
-				content = string(b)
-			} else {
-				content = fmt.Sprintf("%v", result)
-			}
-		}
-
-		log.Infof("[AgentLoop:%s] tool %s completed in %v, content_len=%d",
-			al.name, name, elapsed, len(content))
-	}()
-
-	// If content is empty, the tmux-async path returned early — don't publish.
-	if content == "" {
-		return
-	}
-
-	al.bus.Publish(NewExternalInputEvent("tool_result", model.Message{
-		Role:    model.RoleTool,
-		Content: content,
-		ToolID:  toolCall.ID,
-	}))
-}
-
-// dispatchSubAgent runs an AgentToolWrapper in a goroutine and publishes
-// the result to the bus. A 10-minute timeout protects against sub-agent
-// goroutine leaks if the sub-agent never terminates.
-func (al *AgentLoop) dispatchSubAgent(
-	ctx context.Context,
-	wrapper *AgentToolWrapper,
-	toolCall model.ToolCall,
-) {
-	go func() {
-		name := wrapper.agent.Info().Name
-		startTime := time.Now()
 
 		subCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 
-		var content string
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					content = fmt.Sprintf("[agent error] %s panicked: %v", name, r)
-					log.Errorf("[AgentLoop:%s] sub-agent %s panicked: %v", al.name, name, r)
-				}
-			}()
-
-			result, err := wrapper.Call(subCtx, toolCall.Function.Arguments)
-			if err != nil {
-				content = fmt.Sprintf("[agent error] %s: %v", name, err)
-			} else if result == nil {
-				content = fmt.Sprintf("[agent %s] completed (no output)", name)
-			} else if b, marshalErr := json.Marshal(result); marshalErr == nil {
-				content = string(b)
-			} else {
-				content = fmt.Sprintf("[agent %s] %v", name, result)
-			}
-		}()
-
+		startTime := time.Now()
+		result, err := callable.Call(subCtx, toolCall.Function.Arguments)
 		elapsed := time.Since(startTime)
-		log.Infof("[AgentLoop:%s] sub-agent %s completed in %v, content_len=%d",
+
+		var content string
+		if err != nil {
+			content = fmt.Sprintf("Error: %v", err)
+		} else if result == nil {
+			content = "(no output)"
+		} else if asyncMarker, ok := result.(tmuxAsyncResult); ok && asyncMarker.IsTmuxAsync() {
+			log.Infof("[AgentLoop:%s] tool %s returned async marker, waiting for TmuxMonitor callback",
+				al.name, name)
+			return
+		} else if b, marshalErr := json.Marshal(result); marshalErr == nil {
+			content = string(b)
+		} else {
+			content = fmt.Sprintf("%v", result)
+		}
+
+		log.Infof("[AgentLoop:%s] tool %s completed in %v, content_len=%d",
 			al.name, name, elapsed, len(content))
 
-		al.bus.Publish(NewExternalInputEvent("subagent_result", model.Message{
+		al.bus.Publish(NewExternalInputEvent("tool_result", model.Message{
 			Role:    model.RoleTool,
 			Content: content,
 			ToolID:  toolCall.ID,

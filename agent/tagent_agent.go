@@ -294,7 +294,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// Wire onEvent callback after ta is created.
 	// This connects AgentLoop events to MemoryPlugin (persistence + causal chain)
 	// and SessionService (session.Events append).
-	agentLoop.SetOnEvent(ta.makeOnEventCallback())
+	agentLoop.SetOnEvent(ta.makeOnEventCallback(""))
 
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
@@ -402,10 +402,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		Temperature:  ta.config.Temperature,
 	})
 	// Attach session so Preprocessor can build messages from session.Events.
-	if sess := ta.getOrCreateSession(); sess != nil {
+	if sess := ta.getOrCreateSession(sessionID); sess != nil {
 		invLoop.SetSession(sess)
 	}
-	invLoop.SetOnEvent(ta.makeSubAgentOnEventCallback(sessionID))
+	invLoop.SetOnEvent(ta.makeOnEventCallback(sessionID))
 
 	// Publish the initial message as external_input.
 	invBus.Publish(NewExternalInputEvent("user", message))
@@ -587,16 +587,20 @@ func (ta *TagentAgent) setSessionContext(userID, sessionID string) {
 	ta.lastSessionID = sessionID
 }
 
-// getOrCreateSession returns the session for the current lastUserID/lastSessionID.
-// Creates the session if it does not exist.
-func (ta *TagentAgent) getOrCreateSession() *session.Session {
+// getOrCreateSession returns the session for the given sessionID (or the
+// last-known sessionID if empty). Creates the session if it does not exist.
+func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session {
 	if ta.sessionSvc == nil {
 		return nil
+	}
+	sid := ta.lastSessionID
+	if len(sessionID) > 0 && sessionID[0] != "" {
+		sid = sessionID[0]
 	}
 	key := session.Key{
 		AppName:   ta.name,
 		UserID:    ta.lastUserID,
-		SessionID: ta.lastSessionID,
+		SessionID: sid,
 	}
 	ctx := context.Background()
 	sess, err := ta.sessionSvc.GetSession(ctx, key)
@@ -610,77 +614,30 @@ func (ta *TagentAgent) getOrCreateSession() *session.Session {
 	return sess
 }
 
-// makeOnEventCallback creates the callback that wires AgentLoop events to
-// MemoryPlugin (event persistence + causal chain) and SessionService
-// (session.Events append).
-func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
+// makeOnEventCallback creates the unified onEvent callback for both
+// StartLoop (persistent) and Run() (sub-agent) modes. When sessionID is
+// empty, the callback uses ta.lastSessionID (set by StartLoop/Run).
+func (ta *TagentAgent) makeOnEventCallback(sessionID string) func(evt *event.Event) {
 	return func(evt *event.Event) {
-		if evt == nil {
+		if evt == nil || ta.sessionSvc == nil {
+			return
+		}
+		sess := ta.getOrCreateSession(sessionID)
+		if sess == nil {
 			return
 		}
 		ctx := context.Background()
-
-		// Build a lightweight invocation for the plugin. MemoryPlugin only
-		// needs AgentName and Session for partition/causal chain.
-		inv := &agent.Invocation{
-			AgentName: ta.name,
-		}
-		if ta.sessionSvc != nil && ta.lastSessionID != "" {
-			sess := ta.getOrCreateSession()
-			if sess != nil {
-				inv.Session = sess
-				// 1. MemoryPlugin: persist + causal chain + StateDelta.
-				if ta.memPlugin != nil {
-					if _, err := ta.memPlugin.OnEvent(ctx, inv, evt); err != nil {
-						log.Errorf("[onEvent] MemoryPlugin.OnEvent failed: %v", err)
-					}
-				}
-				// 2. SessionService: append to session.Events.
-				if err := ta.sessionSvc.AppendEvent(ctx, sess, evt); err != nil {
-					log.Errorf("[onEvent] AppendEvent failed: %v", err)
-				}
-			}
-		}
-	}
-}
-
-// makeSubAgentOnEventCallback creates the onEvent callback for sub-agent
-// invocations. Sub-agents have their own isolated session.
-func (ta *TagentAgent) makeSubAgentOnEventCallback(sessionID string) func(evt *event.Event) {
-	return func(evt *event.Event) {
-		if evt == nil {
-			return
-		}
-		if ta.sessionSvc == nil {
-			return
-		}
-		ctx := context.Background()
-
-		key := session.Key{
-			AppName:   ta.name,
-			UserID:    ta.lastUserID,
-			SessionID: sessionID,
-		}
-		sess, err := ta.sessionSvc.GetSession(ctx, key)
-		if err != nil || sess == nil {
-			sess, err = ta.sessionSvc.CreateSession(ctx, key, nil)
-			if err != nil {
-				log.Errorf("[subAgentOnEvent] CreateSession failed: %v", err)
-				return
-			}
-		}
-
 		inv := &agent.Invocation{
 			AgentName: ta.name,
 			Session:   sess,
 		}
 		if ta.memPlugin != nil {
 			if _, err := ta.memPlugin.OnEvent(ctx, inv, evt); err != nil {
-				log.Errorf("[subAgentOnEvent] MemoryPlugin.OnEvent failed: %v", err)
+				log.Errorf("[onEvent] MemoryPlugin.OnEvent failed: %v", err)
 			}
 		}
 		if err := ta.sessionSvc.AppendEvent(ctx, sess, evt); err != nil {
-			log.Errorf("[subAgentOnEvent] AppendEvent failed: %v", err)
+			log.Errorf("[onEvent] AppendEvent failed: %v", err)
 		}
 	}
 }
@@ -761,7 +718,7 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 	ta.setSessionContext(userID, sessionID)
 
 	// Create or attach session for the persistent loop.
-	sess := ta.getOrCreateSession()
+	sess := ta.getOrCreateSession(sessionID)
 	ta.agentLoop.SetSession(sess)
 
 	// Set TrajectoryRecorder session info (if enabled).
