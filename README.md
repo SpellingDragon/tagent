@@ -67,7 +67,9 @@ graph TB
 
 **关键约束**：
 - **Session.Events 是唯一的历史来源** — AgentLoop 不维护自己的 history
-- **onEvent 回调是写入入口** — 所有事件通过 onEvent 同时写入 Session 和 MemoryStore
+- **AgentLoop 直接维护 Session.Events** — 因为 `SessionService` 返回的是 session clone，AgentLoop 在 `onEvent` 回调之外额外将事件追加到自己持有的 session copy，确保 `Preprocessor` 能读到完整历史
+- **onEvent 回调负责 MemoryStore 持久化** — `MemoryPlugin.OnEvent` 写入长期记忆（FullEvent + 因果链）
+- **sessionSvc.AppendEvent 仍被调用** — 用于将事件持久化到框架 `SessionService`，但 AgentLoop 读取的是自己维护的 session copy
 - **Preprocessor 从 Session.Events 构建 LLM Context** — 压缩作用于完整历史，不是只处理新 batch
 
 ### 事件分类
@@ -219,8 +221,8 @@ tagent 的核心运行时模型。Agent 作为一个持久化、类似操作系�
 ```mermaid
 graph LR
     START["StartLoop<br/>(userID, sessionID)"] --> PULL["EventBus.Pull<br/>批量取出待处理事件"]
-    PULL --> ONEVT["onEvent callback<br/>写入 Session + MemoryStore"]
-    ONEVT --> PROC["Preprocessor.Process<br/>构建 messages + 压缩"]
+    PULL --> ONEVT["追加到 al.session.Events + onEvent callback<br/>MemoryStore + SessionService 持久化"]
+    ONEVT --> PROC["Preprocessor.Process<br/>读取 al.session.Events 构建 messages + 压缩"]
     PROC --> MODEL{"shouldCallModel?"}
     MODEL -->|"是"| CALL["model.GenerateContent"]
     MODEL -->|"否"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
@@ -234,7 +236,7 @@ graph LR
     style CALL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
 ```
 
-关键设计：AgentLoop 是纯引擎，所有业务判断（事件筛选、shouldCallModel、压缩）在 Preprocessor 中完成。onEvent 回调在 Preprocessor 前调用，确保 Session.Events 包含最新事件。
+关键设计：AgentLoop 是纯引擎，所有业务判断（事件筛选、shouldCallModel、压缩）在 Preprocessor 中完成。AgentLoop 先调用 `onEvent` 让 MemoryPlugin 填充 `StateDelta`（含 `event_key` / `event_type`）并完成持久化，再将事件追加到 `al.session.Events`，确保 `Preprocessor` 读取的 Session.Events 包含最新且完整的事件。
 
 > 详情：[agent-architecture.md §7](docs/wiki/agent/agent-architecture.md)
 
@@ -253,13 +255,14 @@ graph LR
 
 ### 3. 事件驱动记忆（因果链 + EventKey）
 
-AgentLoop 通过 onEvent 回调将每个事件写入 Session 和 MemoryStore：
+AgentLoop 对每个事件执行两个步骤（`onEvent` 先填充 `StateDelta`，再追加到 session copy）：
 
-1. **推断事件类型**（`external_input`、`agent_output`、`action_command` 等）
+1. **`onEvent` 回调推断事件类型**（`external_input`、`agent_output`、`action_command` 等）
 2. **生成 Snowflake EventKey**（64 位：PartitionID + Timestamp + Sequence）
 3. **构建因果链**：通过 `RelationStore.SetParent`——每个事件指向其前驱
 4. **持久化 FullEvent** 到 MemoryStore（不可变）
-5. **追加 event.Event** 到 Session.Events（含 StateDelta: event_key/type）
+5. **`sessionSvc.AppendEvent`**：持久化到 framework SessionService
+6. **AgentLoop 追加到 `al.session.Events`**：因为 `SessionService` 返回 session clone，AgentLoop 在 `onEvent` 完成持久化并填充 `StateDelta` 后，将完整事件追加到自己持有的 session copy，供 `Preprocessor` 读取
 
 LLM 在消息前缀中看到事件 key（`[evt_123456|agent_output]`），使其能够将相关 key 传递给子 Agent 用于上下文获取。
 
@@ -346,11 +349,11 @@ sequenceDiagram
     end
 
     AL->>AL: Pull (批量取出)
-    AL->>AL: onEvent (写入 Session + MemoryStore)
-    AL->>PP: Process(batch, session)
+    AL->>AL: 追加到 al.session.Events + onEvent (MemoryStore + SessionService)
+    AL->>PP: Process(batch, al.session)
     PP-->>AL: messages + shouldCallModel
     AL->>AL: model.GenerateContent
-    AL->>AL: onEvent (写入 assistant response)
+    AL->>AL: 追加 assistant response 到 al.session.Events + onEvent
     AL->>OC: emit → outputCh
     AL->>AL: 回到 Pull
 ```
@@ -404,9 +407,9 @@ sequenceDiagram
 | 步骤 | 模块 | 动作 | 事件类型 | MemoryStore 操作 |
 |------|------|------|---------|-----------------|
 | 1 | **用户** → `TagentAgent` | `InjectMessage("查看最近的 Git 提交...")` | — | — |
-| 2 | **AgentLoop** | `EventBus.Pull` → `onEvent` (写入 Session + MemoryStore) | — | — |
-| 3 | **onEvent** → **MemoryPlugin** | 包装 external_input 为 event.Event → `OnEvent`：推断类型、生成 EventKey、持久化 FullEvent、构建因果链 → `sessionSvc.AppendEvent` | `external_input` | 存储 FullEvent（不可变），追加到 Session.Events |
-| 4 | **Preprocessor** | 从 `session.Events` 构建 messages，注入 `[evt_KEY\|external_input]` 前缀，检查 token 预算 | — | — |
+| 2 | **AgentLoop** | `EventBus.Pull` → 追加到 `al.session.Events` + `onEvent` (MemoryStore + SessionService) | — | — |
+| 3 | **onEvent** → **MemoryPlugin** | 包装 external_input 为 event.Event → `OnEvent`：推断类型、生成 EventKey、持久化 FullEvent、构建因果链 → `sessionSvc.AppendEvent` (framework SessionService) | `external_input` | 存储 FullEvent（不可变）；AgentLoop 同步追加到 `al.session.Events` |
+| 4 | **Preprocessor** | 从 `al.session.Events` 构建 messages，注入 `[evt_KEY\|external_input]` 前缀，检查 token 预算 | — | — |
 | 5 | **AgentLoop** → LLM | LLM 决定先调用 `action` 工具 | `thinking_plan` | `onEvent` 持久化带 tool_calls 的 assistant 消息 |
 | 6 | **ActionTool** | goroutine 执行 `git log --oneline -10`，结果 publish 为 external_input 回写 bus | `action_command` | 下轮 onEvent 持久化工具结果，EventKey → 因果父节点 = 步骤 5 |
 | 7 | **AgentLoop** → LLM | LLM 看到 git log，决定调用 `recall` 子 Agent | `thinking_plan` | `onEvent` 持久化新的带 tool_calls 的 assistant 消息 |

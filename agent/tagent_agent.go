@@ -388,6 +388,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		SystemPrompt: ta.config.SystemPrompt,
 		Temperature:  ta.config.Temperature,
 	})
+	// Attach session so Preprocessor can build messages from session.Events.
+	if sess := ta.getOrCreateSession(); sess != nil {
+		invLoop.SetSession(sess)
+	}
 	invLoop.SetOnEvent(ta.makeSubAgentOnEventCallback(sessionID))
 
 	// Publish the initial message as external_input.

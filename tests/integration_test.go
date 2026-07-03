@@ -229,7 +229,7 @@ func TestRegression_CompressionCycle(t *testing.T) {
 
 	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
 		Model:             zhipuModel,
-		MaxTokens:         50,
+		MaxTokens:         300,
 		CompressThreshold: 0.8,
 		SummaryModel:      zhipuModel,
 	})

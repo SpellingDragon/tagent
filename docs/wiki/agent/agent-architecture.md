@@ -138,8 +138,8 @@ type Event struct {
 
 - **生命周期**: session 存活期间（StartLoop 到 StopLoop）
 - **用途**: Preprocessor 的唯一历史来源 — 从这里构建 LLM Context
-- **写入方式**: AgentLoop 通过 onEvent callback → sessionSvc.AppendEvent
-- **关键**: 这是唯一完整未压缩的对话历史，AgentLoop 不维护自己的 history
+- **写入方式**: AgentLoop 直接将事件追加到其持有的 `session.Events`（因为 `SessionService` 返回 clone，onEvent 回调持久化的是 service 内部对象）
+- **关键**: 这是唯一完整未压缩的对话历史，AgentLoop 不维护自己的 history，但会同步维护自己持有的 session copy
 
 ### 层 3: MemoryStore FullEvent（长期记忆，持久化）
 
@@ -165,14 +165,19 @@ type FullEvent struct {
 ```
 EventBus AgentEvent (临时)
     │
+    ├──▶ AgentLoop.Run Step 2 / emitEvent
+    │       ├──▶ wrapAsFrameworkEvent(evt)
+    │       ├──▶ 追加到 al.session.Events (层2: AgentLoop 自己维护的 session copy)
+    │       └──▶ onEvent callback (MemoryStore 持久化 + StateDelta)
+    │
     ├──▶ onEvent callback (AgentLoop 调用)
     │       ├──▶ MemoryPlugin.OnEvent
     │       │       ├──▶ MemoryStore.StoreEvent (层3: FullEvent + 因果链)
     │       │       └── evt.StateDelta["event_key"] = "K1"
-    │       └──▶ sessionSvc.AppendEvent (层2: Session.Events)
+    │       └──▶ sessionSvc.AppendEvent (持久化到 framework SessionService)
     │
     └──▶ Preprocessor.Process
-            └── 读 session.Events → 构建 []model.Message (层1: LLM Context)
+            └── 读 al.session.Events → 构建 []model.Message (层1: LLM Context)
                     ├── event_key 前缀注入 ([evt_K1|external_input] 内容)
                     ├── token 预算检查 (完整 messages)
                     └── SmartCompress (完整 messages，含历史)
@@ -373,28 +378,35 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 ## 六、trpc-agent-go 关键集成机制
 
-### 6.1 onEvent 回调链（取代 BeforeModel）
+### 6.1 onEvent 回调链与 Session 维护（取代 BeforeModel）
 
 在事件驱动架构中，tagent 不再使用框架的 `BeforeModel` 回调。取而代之的是 `AgentLoop.onEvent` 回调，由 `TagentAgent.makeOnEventCallback()` 创建。
+
+由于 `inmemory.SessionService.GetSession/CreateSession` 返回的是 session clone，如果仅依赖 `sessionSvc.AppendEvent` 写入 Session.Events，AgentLoop 持有的 session copy 将与持久化对象 diverge，导致 `Preprocessor` 读不到历史。因此 AgentLoop 在调用 `onEvent` 完成持久化后，再将事件追加到自己持有的 `al.session.Events`。
 
 **调用路径**：
 
 ```
 AgentLoop.Run (主循环)
   ├── external_input 事件到达
-  │   └── wrapAsFrameworkEvent(evt) → onEvent callback
-  │       ├── MemoryPlugin.OnEvent → StoreEvent + SetParent + StateDelta
-  │       └── sessionSvc.AppendEvent → sess.Events = append(...)
+  │   └── wrapAsFrameworkEvent(evt)
+  │       ├── onEvent callback
+  │       │   ├── MemoryPlugin.OnEvent → StoreEvent + SetParent + StateDelta
+  │       │   └── sessionSvc.AppendEvent → 持久化到 framework SessionService
+  │       └── 追加到 al.session.Events (AgentLoop 自己维护的 session copy，含 StateDelta)
   │
   └── model response 返回
-      └── event.NewResponseEvent(resp) → onEvent callback
-          ├── MemoryPlugin.OnEvent → StoreEvent + SetParent + StateDelta
-          └── sessionSvc.AppendEvent → sess.Events = append(...)
+      └── event.NewResponseEvent(resp)
+          ├── onEvent callback
+          │   ├── MemoryPlugin.OnEvent → StoreEvent + SetParent + StateDelta
+          │   └── sessionSvc.AppendEvent → 持久化到 framework SessionService
+          └── 追加到 al.session.Events (AgentLoop 自己维护的 session copy，含 StateDelta)
 ```
 
 **关键特性**：
-- onEvent 在 `Preprocessor.Process` 之前调用，确保 Session.Events 包含最新事件
-- onEvent 同时写入 Session.Events（层2）和 MemoryStore（层3），保证一致性
+- AgentLoop 先调用 `onEvent`：MemoryPlugin 填充 `StateDelta["event_key"]` / `event_type` 并持久化到 MemoryStore + framework SessionService
+- 再将带有完整 `StateDelta` 的事件追加到 `al.session.Events`，供 `Preprocessor` 在下一步读取完整历史
+- AgentLoop 自己维护的 session copy 避免 session clone 导致的历史不一致
 - MemoryPlugin.OnEvent 是直接调用（不再通过框架 Plugin Manager 链）
 
 ### 6.2 Plugin OnEvent 钩子链
@@ -454,16 +466,20 @@ sequenceDiagram
     TA->>EB: Publish(external_input)
 
     AL->>EB: Pull (批量取出)
-    AL->>OE: wrapAsFrameworkEvent(evt) → onEvent
+    AL->>AL: wrapAsFrameworkEvent(evt)
+    AL->>OE: onEvent(frameworkEvt)
+    Note over OE: MemoryStore + SessionService 持久化，填充 StateDelta
+    AL->>AL: al.session.Events = append(...) (含 StateDelta)
+    Note over AL: AgentLoop 维护自己持有的 session copy
     OE->>MP: OnEvent(ctx, inv, frameworkEvt)
     MP->>MS: StoreEvent(K1, FullEvent)
     MP->>MP: SetParent(K1, 0)
     MP->>MP: StateDelta["event_key"] = "K1"
     OE->>SS: AppendEvent(ctx, sess, evt)
-    Note over SS: sess.Events = [evt_K1]
+    Note over SS: 持久化到 framework SessionService
 
-    AL->>PP: Process(batch, sess)
-    PP->>PP: 读 sess.Events → messages
+    AL->>PP: Process(batch, al.session)
+    PP->>PP: 读 al.session.Events → messages
     PP->>PP: injectEventKeyPrefixes [evt_K1|external_input]
 
     alt Token 超限
@@ -480,12 +496,14 @@ sequenceDiagram
     AL->>LLM: model.GenerateContent(messages)
     LLM-->>AL: response (no tool_calls)
 
-    AL->>OE: event.NewResponseEvent(resp) → onEvent
+    AL->>AL: event.NewResponseEvent(resp)
+    AL->>AL: al.session.Events = append(...)
+    AL->>OE: onEvent(responseEvt)
     OE->>MP: OnEvent(ctx, inv, frameworkEvt)
     MP->>MS: StoreEvent(K2, FullEvent)
     MP->>MP: SetParent(K2, K1)
     OE->>SS: AppendEvent(ctx, sess, evt)
-    Note over SS: sess.Events = [evt_K1, evt_K2]
+    Note over SS: 持久化到 framework SessionService
 
     AL->>OC: emit → outputCh
 ```
@@ -527,12 +545,15 @@ AgentLoop.Run goroutine:
   for {
     events = bus.Pull(ctx)          // 阻塞直到有事件
     
-    // Step 1: onEvent — 持久化 external_input 到 Session + MemoryStore
+    // Step 1: 处理 external_input — onEvent 持久化 + 写入 Session copy
     for evt in events where type == external_input:
-      onEvent(wrapAsFrameworkEvent(evt))
+      frameworkEvt = wrapAsFrameworkEvent(evt)
+      onEvent(frameworkEvt)         // MemoryStore + framework SessionService 持久化（填充 StateDelta）
+      if al.session != nil:
+        al.session.Events = append(al.session.Events, *frameworkEvt)  // 追加含 StateDelta 的事件
     
-    // Step 2: Preprocessor — 从 session.Events 构建 messages
-    result = preprocessor.Process(ctx, events, session)
+    // Step 2: Preprocessor — 从 al.session.Events 构建 messages
+    result = preprocessor.Process(ctx, events, al.session)
     
     // Step 3: if !shouldCallModel → continue (等下一批)
     if !result.ShouldCallModel:
@@ -543,12 +564,12 @@ AgentLoop.Run goroutine:
     
     // Step 5: Handle response
     if resp has tool_calls:
-      onEvent(wrap(resp))           // 持久化 assistant response
+      emitEvent(wrap(resp))         // 写入 al.session.Events + onEvent 持久化
       bus.Publish(tool_use events)  // 发布到 bus
       dispatch tool_use (async)     // goroutine 执行
     else:
-      onEvent(wrap(resp))           // 持久化 final response
-      emit to outputCh             // 供调用方接收
+      emitEvent(wrap(resp))         // 写入 al.session.Events + onEvent 持久化
+      // 同时 emit 到 outputCh 供调用方接收
   }
 ```
 
@@ -574,10 +595,13 @@ sequenceDiagram
     end
 
     Note over AL: Pull — 批量取出所有事件
-    AL->>AL: onEvent (写入 Session + MemoryStore)
-    AL->>AL: Preprocessor.Process (构建 messages + 压缩)
+    AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
+    AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
+    AL->>AL: 追加 external_input 到 al.session.Events (含 StateDelta) (含 StateDelta)
+    AL->>AL: Preprocessor.Process (读取 al.session.Events)
     AL->>AL: model.GenerateContent
-    AL->>AL: onEvent (写入 assistant response)
+    AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
+    AL->>AL: 追加 assistant response 到 al.session.Events (含 StateDelta)
     AL->>OC: emit → outputCh
     AL->>AL: 回到 Pull
 ```
@@ -1001,11 +1025,18 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 
 ### 12.4 onEvent 回调的写入原子性
 
-onEvent 回调同时执行两个写入操作：
-1. `MemoryPlugin.OnEvent` → MemoryStore + StateDelta + RelationStore
-2. `sessionSvc.AppendEvent` → Session.Events
+AgentLoop 对事件的写入分为两条路径：
 
-两个操作在同一个 onEvent 调用中顺序执行，保证一致性。如果 MemoryPlugin 失败，Session 仍然会被追加（best-effort），但日志会记录错误。
+1. **AgentLoop 直接追加到 `al.session.Events`**：
+   - 在 `Run()` Step 2 处理 `external_input` 时，调用 `onEvent` 之前追加
+   - 在 `emitEvent()` 中输出事件（agent_output、tool_call 等）时追加
+   - 目的：因为 `SessionService` 返回的是 session clone，AgentLoop 必须维护自己持有的 session copy，供 `Preprocessor` 读取
+
+2. **`onEvent` 回调负责持久化**：
+   - `MemoryPlugin.OnEvent` → MemoryStore + StateDelta + RelationStore（层3）
+   - `sessionSvc.AppendEvent` → 持久化到 framework `SessionService`
+
+`onEvent` 中的两个写入操作顺序执行，保证 MemoryStore 与 framework SessionService 的一致性。AgentLoop 自己维护的 session copy 与 onEvent 持久化是并行的；如果 `MemoryPlugin.OnEvent` 失败，framework SessionService 仍可能已追加，但日志会记录错误。
 
 ### 12.5 Memory 数据隔离与 EventKey Snowflake 设计
 

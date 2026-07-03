@@ -356,7 +356,7 @@ tagent/agent
 
 ### 10.2 数据流
 
-**Persistent Event Loop 模式**：所有外部输入通过 `InjectMessage` 发布为 `AgentEvent{type:external_input}` 到 EventBus。AgentLoop 在 `Pull` 中批量取出，通过 `onEvent` 持久化到 Session + MemoryStore，再由 `Preprocessor.Process` 从 `session.Events` 构建完整 messages。
+**Persistent Event Loop 模式**：所有外部输入通过 `InjectMessage` 发布为 `AgentEvent{type:external_input}` 到 EventBus。AgentLoop 在 `Pull` 中批量取出，先追加到 `al.session.Events`，再通过 `onEvent` 持久化到 MemoryStore + framework SessionService，最后由 `Preprocessor.Process` 从 `al.session.Events` 构建完整 messages。
 
 ```mermaid
 sequenceDiagram
@@ -434,38 +434,43 @@ AgentLoop ──────┘
 | `action_command` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
 | `thinking_plan` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
 
-### 11.4 onEvent 回调：事件写入 Session 和 MemoryStore
+### 11.4 onEvent 回调与 AgentLoop 的 Session 维护
 
-AgentLoop 在以下时机调用 `onEvent` 回调，将事件写入 session.Events 和 MemoryStore：
+AgentLoop 在以下时机处理事件：
 
-1. **bus 事件消费前**：每个 `external_input` 事件 → 包装为 `event.Event` → onEvent
-2. **model response 解析后**：assistant response（含 tool_calls 或 final）→ 包装为 `event.Event` → onEvent
+1. **bus 事件消费前**：每个 `external_input` 事件 → 包装为 `event.Event` → 调用 `onEvent` → 追加到 `al.session.Events`
+2. **model response 解析后**：assistant response（含 tool_calls 或 final）→ 包装为 `event.Event` → 调用 `onEvent` → 追加到 `al.session.Events`
 
-onEvent 回调执行两个操作（在同一调用中）：
+由于 `SessionService` 返回的是 session clone，AgentLoop 必须自己维护一个 session copy，供 `Preprocessor` 读取完整历史。`onEvent` 回调先负责持久化并填充 `StateDelta`，AgentLoop 再将完整事件追加到 session copy：
 
 ```
-AgentLoop.onEvent(frameworkEvt)
+AgentLoop.Run / emitEvent:
     │
-    ├── MemoryPlugin.OnEvent
-    │     ├── MemoryStore.StoreEvent(K, FullEvent{...})  ← 层3: 持久化
-    │     ├── RelationStore.SetParent(K, parentK)        ← 因果链
-    │     └── evt.StateDelta["event_key"] = "K"          ← 回写 key
+    ├── onEvent(frameworkEvt)
+    │     │
+    │     ├── MemoryPlugin.OnEvent
+    │     │     ├── MemoryStore.StoreEvent(K, FullEvent{...})  ← 层3: 持久化
+    │     │     ├── RelationStore.SetParent(K, parentK)        ← 因果链
+    │     │     └── evt.StateDelta["event_key"] = "K"          ← 回写 key
+    │     │
+    │     └── sessionSvc.AppendEvent                           ← 持久化到 framework SessionService
     │
-    └── sessionSvc.AppendEvent
-          └── sess.Events = append(sess.Events, *evt)    ← 层2: 工作内存
+    └── 追加 frameworkEvt 到 al.session.Events                ← 层2: AgentLoop 维护的 session copy（含 StateDelta）
 ```
 
-**关键**：onEvent 必须在 Preprocessor.Process 之前调用，确保 session.Events 已包含最新事件供 Preprocessor 读取。
+**关键**：AgentLoop 先调用 `onEvent` 完成持久化并填充 `StateDelta`，再将完整事件追加到 `al.session.Events`，确保 `Preprocessor` 在下一步读到完整历史。
 
 ### 11.5 三层数据表示与流转
 
 ```
 层1: EventBus AgentEvent (临时触发器)
     │
-    ├── onEvent callback ──→ 层2: Session.Events (工作内存)
-    │                     ──→ 层3: MemoryStore FullEvent (持久化)
+    ├── AgentLoop.Run / emitEvent
+    │       ├── 追加到 al.session.Events ──→ 层2: Session.Events (工作内存，AgentLoop 维护的 copy)
+    │       └── onEvent callback ───────────→ 层3: MemoryStore FullEvent (持久化)
+    │                                         ──→ framework SessionService (持久化)
     │
-    └── Preprocessor.Process ──→ 读 session.Events ──→ []model.Message (LLM Context)
+    └── Preprocessor.Process ──→ 读 al.session.Events ──→ []model.Message (LLM Context)
                                    ├── event_key 前缀注入
                                    ├── token 预算检查 (完整 messages)
                                    └── SmartCompress (完整 messages)

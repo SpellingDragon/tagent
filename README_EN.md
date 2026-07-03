@@ -72,7 +72,9 @@ graph TB
 
 **Key constraints**:
 - **Session.Events is the sole history source** — AgentLoop does not maintain its own history
-- **onEvent callback is the write entry point** — all events are written to both Session and MemoryStore via onEvent
+- **AgentLoop maintains Session.Events directly** — because `SessionService` returns a session clone, AgentLoop additionally appends events to its own session copy alongside the `onEvent` callback, ensuring `Preprocessor` reads the complete history
+- **onEvent callback handles MemoryStore persistence** — `MemoryPlugin.OnEvent` writes long-term memory (FullEvent + causal chain)
+- **sessionSvc.AppendEvent is still invoked** — to persist events to the framework `SessionService`, but AgentLoop reads from its own maintained session copy
 - **Preprocessor builds LLM Context from Session.Events** — compression applies to full history, not just new batch
 
 ### Event Classification
@@ -235,8 +237,8 @@ tagent's core runtime model. The agent acts as a persistent, OS-like process: co
 ```mermaid
 graph LR
     START["StartLoop<br/>(userID, sessionID)"] --> PULL["EventBus.Pull<br/>batch all pending events"]
-    PULL --> ONEVT["onEvent callback<br/>write to Session + MemoryStore"]
-    ONEVT --> PROC["Preprocessor.Process<br/>build messages + compress"]
+    PULL --> ONEVT["Append to al.session.Events + onEvent callback<br/>MemoryStore + SessionService persistence"]
+    ONEVT --> PROC["Preprocessor.Process<br/>read al.session.Events to build messages + compress"]
     PROC --> MODEL{"shouldCallModel?"}
     MODEL -->|"Yes"| CALL["model.GenerateContent"]
     MODEL -->|"No"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
@@ -250,7 +252,7 @@ graph LR
     style CALL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
 ```
 
-Key design: AgentLoop is a pure engine. All business decisions (event filtering, shouldCallModel, compression) live in Preprocessor. onEvent callback is invoked before Preprocessor to ensure Session.Events contains the latest events.
+Key design: AgentLoop is a pure engine. All business decisions (event filtering, shouldCallModel, compression) live in Preprocessor. AgentLoop invokes `onEvent` first so MemoryPlugin can populate `StateDelta` and persist the event, then appends it to `al.session.Events`, ensuring `Preprocessor` reads a Session.Events containing the latest events.
 
 > Details: [agent-architecture.md §7](docs/wiki/agent/agent-architecture.md)
 
@@ -269,13 +271,14 @@ Multi-round compression: if one round isn't enough, `KeepRecentTasks` is decreme
 
 ### 3. Event-Driven Memory (Causal Chain + EventKey)
 
-AgentLoop writes every event to Session and MemoryStore via the onEvent callback:
+AgentLoop processes each event in two steps (`onEvent` persists and fills `StateDelta`, then appends to session copy):
 
 1. **Infer event type** (`external_input`, `agent_output`, `action_command`, etc.)
 2. **Generate Snowflake EventKey** (64-bit: PartitionID + Timestamp + Sequence)
 3. **Build causal chain** via `RelationStore.SetParent` — each event points to its predecessor
 4. **Persist FullEvent** to MemoryStore (immutable)
-5. **Append event.Event** to Session.Events (with StateDelta: event_key/type)
+5. **Persist to framework SessionService** via `sessionSvc.AppendEvent`
+6. **Append to `al.session.Events`** (with `StateDelta: event_key/type`) — because `SessionService` returns a session clone, AgentLoop maintains its own session copy for `Preprocessor`
 
 The LLM sees event keys in message prefixes (`[evt_123456|agent_output]`), enabling it to pass relevant keys to sub-agents for context retrieval.
 
@@ -334,11 +337,11 @@ sequenceDiagram
     end
 
     AL->>AL: Pull (batch all)
-    AL->>AL: onEvent (write to Session + MemoryStore)
-    AL->>PP: Process(batch, session)
+    AL->>AL: onEvent (MemoryStore + SessionService) then append to al.session.Events
+    AL->>PP: Process(batch, al.session)
     PP-->>AL: messages + shouldCallModel
     AL->>AL: model.GenerateContent
-    AL->>AL: onEvent (write assistant response)
+    AL->>AL: Append assistant response to al.session.Events + onEvent
     AL->>OC: emit → outputCh
     AL->>AL: back to Pull
 ```
@@ -392,9 +395,9 @@ User sends this request in **Persistent Event Loop mode**. The agent needs multi
 | Step | Module | Action | Event Type | MemoryStore Operation |
 |------|--------|--------|-----------|----------------------|
 | 1 | **User** → `TagentAgent` | `InjectMessage("Review recent Git commits...")` | — | — |
-| 2 | **AgentLoop** | `EventBus.Pull` → `onEvent` (write to Session + MemoryStore) | — | — |
-| 3 | **onEvent** → **MemoryPlugin** | Wrap external_input as event.Event → `OnEvent`: infer type, generate EventKey, persist FullEvent, build causal chain → `sessionSvc.AppendEvent` | `external_input` | Store FullEvent (immutable), append to Session.Events |
-| 4 | **Preprocessor** | Build messages from `session.Events`, inject `[evt_KEY\|external_input]` prefix, check token budget | — | — |
+| 2 | **AgentLoop** | `EventBus.Pull` → onEvent (MemoryStore + SessionService) then append to `al.session.Events` | — | — |
+| 3 | **onEvent** → **MemoryPlugin** | Wrap external_input as event.Event → `OnEvent`: infer type, generate EventKey, persist FullEvent, build causal chain → `sessionSvc.AppendEvent` | `external_input` | Store FullEvent (immutable); AgentLoop appends to `al.session.Events` |
+| 4 | **Preprocessor** | Build messages from `al.session.Events`, inject `[evt_KEY\|external_input]` prefix, check token budget | — | — |
 | 5 | **AgentLoop** → LLM | LLM decides to call `action` tool | `thinking_plan` | `onEvent` persists assistant message with tool_calls |
 | 6 | **ActionTool** | goroutine executes `git log --oneline -10`, result published as external_input back to bus | `action_command` | Next round onEvent persists tool result, EventKey → causal parent = step 5 |
 | 7 | **AgentLoop** → LLM | LLM sees git log, decides to call `recall` sub-agent | `thinking_plan` | `onEvent` persists new assistant message with tool_calls |

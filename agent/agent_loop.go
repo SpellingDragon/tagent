@@ -31,9 +31,9 @@ import (
 //  6. If shouldCallModel is true → calls model.GenerateContent.
 //  7. Parses the response:
 //     - tool_calls present → publishes tool_use events to bus + onEvent
-//       (NOT dispatched here — dispatched on next Pull iteration).
+//     (NOT dispatched here — dispatched on next Pull iteration).
 //     - no tool_calls (final response) → emits agent_output to outputCh
-//       (NOT to bus — avoids self-triggering).
+//     (NOT to bus — avoids self-triggering).
 //  8. Loops back to step 1.
 //
 // The AgentLoop is NOT safe to run concurrently from multiple goroutines —
@@ -165,12 +165,23 @@ func (al *AgentLoop) Run(ctx context.Context) {
 
 		// Step 2: Persist external_input events to session + MemoryStore
 		// BEFORE Preprocessor.Process reads session.Events.
-		if al.onEvent != nil {
-			for _, evt := range events {
-				if evt != nil && evt.Type == tagentevent.TypeExternalInput && evt.Message != nil {
-					frameworkEvt := al.wrapAsFrameworkEvent(evt)
-					al.onEvent(frameworkEvt)
-				}
+		for _, evt := range events {
+			if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
+				continue
+			}
+			frameworkEvt := al.wrapAsFrameworkEvent(evt)
+			if frameworkEvt == nil {
+				continue
+			}
+			if al.onEvent != nil {
+				al.onEvent(frameworkEvt)
+			}
+			// Also append to the AgentLoop's own session copy so Preprocessor
+			// can read the conversation history. See emitEvent for details.
+			if al.session != nil && frameworkEvt.Response != nil && !frameworkEvt.IsPartial && frameworkEvt.IsValidContent() {
+				al.session.EventMu.Lock()
+				al.session.Events = append(al.session.Events, *frameworkEvt)
+				al.session.EventMu.Unlock()
 			}
 		}
 
@@ -331,6 +342,15 @@ func (al *AgentLoop) emitEvent(evt *event.Event) {
 	// Invoke onEvent callback for plugin integration (e.g., MemoryPlugin).
 	if al.onEvent != nil {
 		al.onEvent(evt)
+	}
+	// Append to the AgentLoop's own session copy so Preprocessor can read
+	// the full conversation history on the next iteration. The session
+	// service returns clones, so the session held by AgentLoop would
+	// otherwise diverge from the persisted one.
+	if al.session != nil && evt.Response != nil && !evt.IsPartial && evt.IsValidContent() {
+		al.session.EventMu.Lock()
+		al.session.Events = append(al.session.Events, *evt)
+		al.session.EventMu.Unlock()
 	}
 	if al.outputCh == nil {
 		return
