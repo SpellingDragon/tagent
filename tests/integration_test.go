@@ -229,7 +229,7 @@ func TestRegression_CompressionCycle(t *testing.T) {
 
 	ag, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
 		Model:             zhipuModel,
-		MaxTokens:         300,
+		MaxTokens:         2000, // GLM-4.7 reasoning_content is large; 300 is too aggressive
 		CompressThreshold: 0.8,
 		SummaryModel:      zhipuModel,
 	})
