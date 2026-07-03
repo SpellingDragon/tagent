@@ -533,6 +533,104 @@ sequenceDiagram
 
 EventBus 是 AgentLoop 的唯一输入。所有事件（用户输入、TmuxMonitor 回调、Meditation 事件、tool 结果）统一为 `AgentEvent`，由 AgentLoop 顺序消费。这确保 Session 内的事件追加顺序确定，无并发竞争。
 
+### 7.2.1 Tool Agent（子 Agent）的触发、状态感知与事件回写
+
+knowledge、action 等 tool agent 通过 `AgentToolWrapper` 包装为 `CallableTool`。当父 AgentLoop Pull 到 `tool_use` 事件时，`dispatchToolUse` 检测到 `*AgentToolWrapper` 类型，走 `dispatchSubAgent` 路径（异步 goroutine）。
+
+子 agent 有自己独立的 `invBus` + `invAgentLoop`，形成一个完整的事件管线。`Run()` 通过 `setActiveBus(invBus)` 将子 agent 的 `activeBus` 切换到 `invBus`，确保子 agent 内部的 `InjectMessage`（如 TmuxMonitor 回调）路由到子 agent 的 bus 而非父 agent 的 bus。
+
+#### 三种工具的 dispatch 路径对比
+
+```
+dispatchToolUse(ctx, toolCall)
+  │
+  ├─ AgentToolWrapper (knowledge / recall / action)
+  │    → dispatchSubAgent: goroutine 调用 wrapper.Call()
+  │    → wrapper.Call() 调用 agent.Run() → 创建 invBus + invAgentLoop
+  │    → setActiveBus(invBus)
+  │    → 子 agent 内部有完整的触发→状态感知→事件回写管线
+  │    → 完成后 bus.Publish(external_input, "subagent_result") 回写父 bus
+  │
+  ├─ CallableTool + tmuxAsyncResult (ActionTool 的 action 工具调用)
+  │    → dispatchCallable: goroutine 调用 tool.Call()
+  │    → 返回 TmuxExecResponse{running} → 不回写 bus
+  │    → 等 TmuxMonitor 回调 → InjectMessage → activeBus → 下一轮 Pull
+  │
+  └─ CallableTool 同步 (file / speak / draw)
+       → dispatchCallable: goroutine 调用 tool.Call()
+       → 返回结果 → bus.Publish(external_input, "tool_result") 立即回写
+```
+
+#### knowledge 子 agent 的执行管线
+
+knowledge agent 内部调用 `skill_search` / `skill_load` 等同步工具，不涉及 tmux 异步：
+
+```
+父 AgentLoop Pull → tool_use(knowledge)
+  → dispatchSubAgent → goroutine
+    → AgentToolWrapper.Call()
+      → 解析 event_keys → parentStore.GetEvent → RuntimeState["external_context"]
+      → agent.Run(ctx, inv)
+        → 创建 invBus + invAgentLoop
+        → setActiveBus(invBus)
+        → invBus.Publish(external_input, user_message)
+        → invAgentLoop.Run():
+            Pull → onEvent → session append → Preprocessor → LLM
+            ↓ LLM 返回 tool_calls(skill_search)
+            ↓ emitEvent + invBus.Publish(tool_use) → dispatch skill_search (同步)
+            ↓ skill_search 返回 → invBus.Publish(external_input, tool_result)
+            ↓ Pull → Preprocessor → LLM
+            ↓ LLM 返回 tool_calls(skill_load) → ... 同上 ...
+            ↓ Pull → Preprocessor → LLM
+            ↓ LLM 返回 final response (无 tool_calls, 可能 content 为空)
+            ↓ reasoning_content fallback (GLM-4.7 可能将输出放在 reasoning_content)
+            ↓ emitAgentOutput → invOutputCh
+        → wrappedCh 收到 agent_output → 停止子 agent
+        → restorePersistentBus()
+      → 返回 finalOutput
+  → 父 bus.Publish(external_input, "subagent_result")
+```
+
+#### action 子 agent 的执行管线（含 tmux 异步）
+
+action agent 内部调用 ActionTool 执行 shell 命令，涉及 tmux 异步状态感知：
+
+```
+父 AgentLoop Pull → tool_use(action)
+  → dispatchSubAgent → goroutine
+    → AgentToolWrapper.Call()
+      → agent.Run(ctx, inv)
+        → 创建 invBus + invAgentLoop
+        → setActiveBus(invBus)  ← 关键：子 agent 期间 activeBus = invBus
+        → invAgentLoop.Run():
+            Pull → Preprocessor → LLM
+            ↓ LLM 返回 tool_calls(action, {command: "curl ..."})
+            ↓ invBus.Publish(tool_use) → dispatchToolUse
+            ↓   → dispatchCallable: action.Call() → executeAsync → tmux session
+            ↓   → 返回 tmuxAsyncResult → 不回写 bus，等 TmuxMonitor
+            ↓ invAgentLoop 继续 Pull（阻塞等待 tmux 结果）
+
+            ─── TmuxMonitor (独立 goroutine, 30s 轮询) ───
+            detectSessionState → running → completed
+            → StateChangeCallback
+            → ActionTool.handleStateChange()
+            → ct.injector.InjectMessage(msg)
+            → TagentAgent.InjectMessage(msg)
+            →   activeBus.Publish(external_input)  ← activeBus = invBus!
+            └──────────────────────────────────────
+
+            ↓ invAgentLoop Pull 到 tmux 结果
+            ↓ onEvent → session append → Preprocessor → LLM
+            ↓ LLM 看到 curl 输出 → 返回 final response
+            ↓ emitAgentOutput → invOutputCh
+        → wrappedCh 收到 agent_output → 停止子 agent
+        → restorePersistentBus()  ← 恢复 activeBus 为 persistentBus
+      → 返回 finalOutput
+  → 父 bus.Publish(external_input, "subagent_result")
+```
+
+**关键设计**：`activeBus` 在 `Run()` 时切换到 `invBus`，在子 agent 结束时通过 `restorePersistentBus()` 恢复。这确保 action 子 agent 内部的 TmuxMonitor 回调正确路由到子 agent 的 `invBus`，而非父 agent 的 `persistentBus`。子 agent 结束后，父 agent 的 `InjectMessage` 恢复正常路由。
+
 ### 7.3 Persistent Event Loop — 持久事件循环
 
 Persistent Event Loop 是 tagent 的核心运行模式，使 Agent 成为类似操作系统的**持久运行进程**：持续接收事件、处理、等待下一批，直到显式关闭。
