@@ -415,9 +415,15 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			wrappedCh <- evt
 			// Sub-agent semantics: stop after the first agent_output
 			// (final response without tool_calls).
+			// Note: Content may be empty — an empty final response is still
+			// a final response. The previous check (Content != "") caused the
+			// sub-agent to hang forever when the model returned an empty body.
 			if evt != nil && evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-				if len(choice.Message.ToolCalls) == 0 && choice.Message.Content != "" {
+				if len(choice.Message.ToolCalls) == 0 {
+					if choice.Message.Content == "" {
+						log.Warnf("[Run] sub-agent %q returned empty final response, treating as complete", ta.name)
+					}
 					return
 				}
 			}

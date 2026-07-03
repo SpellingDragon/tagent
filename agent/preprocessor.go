@@ -53,7 +53,6 @@ func NewPreprocessor(
 	}
 }
 
-
 // ProcessResult is the output of Preprocessor.Process.
 type ProcessResult struct {
 	// Messages is the constructed model.Message slice for model.Request.
