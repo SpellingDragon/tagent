@@ -62,12 +62,13 @@ func newLoopTestAgent(t *testing.T) *TagentAgent {
 		MaxToolIters: 10,
 	})
 	return &TagentAgent{
-		bus:          bus,
-		agentLoop:    agentLoop,
-		preprocessor: preproc,
-		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000},
-		outputCh:     outputCh,
-		name:         "test-loop",
+		persistentBus: bus,
+		activeBus:     bus,
+		agentLoop:     agentLoop,
+		preprocessor:  preproc,
+		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000},
+		outputCh:      outputCh,
+		name:          "test-loop",
 	}
 }
 

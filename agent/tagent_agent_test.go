@@ -69,7 +69,7 @@ func TestNewTagentAgent(t *testing.T) {
 	require.NotNil(t, ta)
 	defer ta.Close()
 
-	assert.NotNil(t, ta.bus, "EventBus should be initialized")
+	assert.NotNil(t, ta.persistentBus, "EventBus should be initialized")
 	assert.NotNil(t, ta.agentLoop, "AgentLoop should be initialized")
 	assert.NotNil(t, ta.runner, "Runner should be initialized")
 	assert.NotNil(t, ta.memStore, "MemoryStore should be initialized")

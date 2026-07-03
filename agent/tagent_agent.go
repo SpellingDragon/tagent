@@ -60,10 +60,19 @@ var _ agent.Agent = (*TagentAgent)(nil)
 // are published to the bus; the AgentLoop consumes them, calls the model
 // via Preprocessor, and dispatches tool_use events asynchronously.
 type TagentAgent struct {
-	// Event-driven core (replaces llmAgent + runner for execution)
-	bus          *EventBus
-	agentLoop    *AgentLoop
-	preprocessor *Preprocessor
+	// activeBus is the single event bus for this agent, regardless of
+	// whether it is running in persistent loop mode (StartLoop) or
+	// sub-agent invocation mode (Run). Tools (e.g., ActionTool via
+	// TmuxMonitor callbacks) publish to this bus via InjectMessage.
+	// StartLoop sets it to ta.persistentBus; Run() sets it to invBus.
+	activeBus   *EventBus
+	activeBusMu sync.Mutex
+
+	// persistentBus is the bus created at construction time, used by
+	// the persistent AgentLoop started via StartLoop.
+	persistentBus *EventBus
+	agentLoop      *AgentLoop
+	preprocessor   *Preprocessor
 
 	// Framework integration (retained for session/plugin/trace)
 	memStore   memory.MemoryStore
@@ -99,13 +108,6 @@ type TagentAgent struct {
 	loopCancel context.CancelFunc // Loop cancel
 	loopActive atomic.Bool        // Loop 是否运行中
 	loopWg     sync.WaitGroup     // 等待 Loop goroutine 退出
-
-	// Sub-agent invocation bus — set by Run() for each sub-agent call.
-	// When loopActive is false (not in persistent loop mode), InjectMessage
-	// falls back to publishing on this bus so TmuxMonitor callbacks can
-	// reach the sub-agent's AgentLoop.
-	subAgentBus   *EventBus
-	subAgentBusMu sync.Mutex
 
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
@@ -274,9 +276,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	), runner.WithSessionService(sessionSvc))
 
 	ta := &TagentAgent{
-		bus:          bus,
-		agentLoop:    agentLoop,
-		preprocessor: preprocessor,
+		persistentBus: bus,
+		activeBus:     bus, // initially the persistent bus is active
+		agentLoop:     agentLoop,
+		preprocessor:  preprocessor,
 		memStore:     memStore,
 		memPlugin:    memPlugin,
 		config:       cfg,
@@ -382,10 +385,9 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// (SmartCompressor has mutable state and must not be shared across
 	// concurrent goroutines).
 	invBus := NewEventBus()
-	// Register the sub-agent bus so InjectMessage can reach it when
-	// TmuxMonitor callbacks arrive during this Run (action agent executes
-	// async tmux commands whose results come back via InjectMessage).
-	ta.setSubAgentBus(invBus)
+	// Switch active bus to invBus so InjectMessage (e.g., TmuxMonitor
+	// callbacks) routes to this invocation's AgentLoop, not the parent's.
+	ta.setActiveBus(invBus)
 	invOutputCh := make(chan *event.Event, 100)
 	invPreprocessor := newPreprocessorFromConfig(ta.config)
 	invLoop := NewAgentLoop(AgentLoopConfig{
@@ -422,7 +424,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	go func() {
 		defer close(wrappedCh)
 		defer runCancel()
-		defer ta.clearSubAgentBus() // clean up so InjectMessage won't route to a dead bus
+		defer ta.restorePersistentBus() // restore so InjectMessage routes to persistent bus
 		for evt := range invOutputCh {
 			wrappedCh <- evt
 			// Sub-agent semantics: stop after the first agent_output
@@ -540,47 +542,41 @@ func (ta *TagentAgent) Runner() runner.Runner {
 	return ta.runner
 }
 
-// InjectMessage injects a message into the agent's EventBus as an
-// external_input event. This is used by tools (e.g., TmuxMonitor) and
-// external callers (HTTPAPI, A2A) to inject asynchronous messages.
+// InjectMessage injects a message into the agent's active EventBus as an
+// external_input event. This is the unified entry point for all asynchronous
+// message injection — tools (TmuxMonitor), external callers (HTTPAPI, A2A),
+// and meditation all use this method.
 //
-// When the persistent loop is active (StartLoop), messages go to the
-// persistent bus. When in sub-agent mode (Run), messages fall back to
-// the sub-agent's invocation bus so TmuxMonitor callbacks can reach the
-// sub-agent's AgentLoop.
+// The active bus is set by StartLoop (persistent bus) or Run() (invocation
+// bus). InjectMessage does not know or care which mode the agent is in —
+// it simply publishes to whatever bus is currently active.
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.UpdateLastEventTime(time.Now())
 	}
-	// Primary path: persistent event loop.
-	if ta.loopActive.Load() {
-		ta.bus.Publish(NewExternalInputEvent("inject", msg))
-		return
-	}
-	// Fallback: sub-agent invocation bus (set by Run()).
-	ta.subAgentBusMu.Lock()
-	bus := ta.subAgentBus
-	ta.subAgentBusMu.Unlock()
+	ta.activeBusMu.Lock()
+	bus := ta.activeBus
+	ta.activeBusMu.Unlock()
 	if bus != nil {
-		log.Debugf("[InjectMessage] agent %q not in persistent loop, routing to sub-agent bus", ta.name)
 		bus.Publish(NewExternalInputEvent("inject", msg))
 		return
 	}
-	log.Warnf("[InjectMessage] agent %q has no active bus (not in StartLoop or Run), message dropped", ta.name)
+	log.Warnf("[InjectMessage] agent %q has no active bus, message dropped", ta.name)
 }
 
-// setSubAgentBus sets the bus used for InjectMessage fallback during Run().
-func (ta *TagentAgent) setSubAgentBus(bus *EventBus) {
-	ta.subAgentBusMu.Lock()
-	ta.subAgentBus = bus
-	ta.subAgentBusMu.Unlock()
+// setActiveBus sets the current active bus for event injection.
+// Called by StartLoop (sets persistentBus) and Run() (sets invBus).
+func (ta *TagentAgent) setActiveBus(bus *EventBus) {
+	ta.activeBusMu.Lock()
+	ta.activeBus = bus
+	ta.activeBusMu.Unlock()
 }
 
-// clearSubAgentBus clears the sub-agent bus (called when Run() completes).
-func (ta *TagentAgent) clearSubAgentBus() {
-	ta.subAgentBusMu.Lock()
-	ta.subAgentBus = nil
-	ta.subAgentBusMu.Unlock()
+// restorePersistentBus switches the active bus back to the persistent bus.
+// Called when a sub-agent Run() completes so InjectMessage resumes routing
+// to the persistent AgentLoop (if active).
+func (ta *TagentAgent) restorePersistentBus() {
+	ta.setActiveBus(ta.persistentBus)
 }
 
 // setSessionContext sets the userID and sessionID (thread-safe).

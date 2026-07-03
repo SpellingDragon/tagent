@@ -73,14 +73,15 @@ func createTestAgent(t *testing.T) *TagentAgent {
 		MaxToolIters: 10,
 	})
 	return &TagentAgent{
-		bus:          bus,
-		agentLoop:    agentLoop,
-		preprocessor: preproc,
-		runner:       &mockHTTPRunner{},
-		config:       &TagentConfig{},
-		outputCh:     outputCh,
-		name:         "test",
-		description:  "test",
+		persistentBus: bus,
+		activeBus:     bus,
+		agentLoop:     agentLoop,
+		preprocessor:  preproc,
+		runner:        &mockHTTPRunner{},
+		config:        &TagentConfig{},
+		outputCh:      outputCh,
+		name:          "test",
+		description:   "test",
 	}
 }
 

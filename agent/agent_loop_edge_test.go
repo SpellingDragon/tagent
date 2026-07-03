@@ -161,10 +161,13 @@ func TestTagentAgent_Run_InjectMessageRoutesToSubAgentBus(t *testing.T) {
 	counter := &mockTokenCounter{tokens: 100}
 	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
 
+	persistentBus := NewEventBus()
 	ta := &TagentAgent{
-		name:         "test-inject",
-		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel, Tools: []trpctool.Tool{noopTool}},
-		preprocessor: preproc,
+		name:          "test-inject",
+		persistentBus: persistentBus,
+		activeBus:     persistentBus, // initially active = persistent
+		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel, Tools: []trpctool.Tool{noopTool}},
+		preprocessor:  preproc,
 	}
 
 	// Before Run: InjectMessage should warn and drop (no bus available).
@@ -187,13 +190,13 @@ func TestTagentAgent_Run_InjectMessageRoutesToSubAgentBus(t *testing.T) {
 		return noopTool.getCallCount() >= 1
 	}, 2*time.Second, 20*time.Millisecond, "tool should be called")
 
-	// Verify subAgentBus is set while Run is active.
-	ta.subAgentBusMu.Lock()
-	bus := ta.subAgentBus
-	ta.subAgentBusMu.Unlock()
-	assert.NotNil(t, bus, "subAgentBus should be set during Run()")
+	// Verify activeBus is set while Run is active.
+	ta.activeBusMu.Lock()
+	bus := ta.activeBus
+	ta.activeBusMu.Unlock()
+	assert.NotNil(t, bus, "activeBus should be set during Run()")
 
-	// InjectMessage should route to the sub-agent bus (not drop).
+	// InjectMessage should route to the active bus (not drop).
 	ta.InjectMessage(model.Message{
 		Role:    model.RoleSystem,
 		Content: "tmux completed: exit_code=0",
@@ -208,11 +211,11 @@ func TestTagentAgent_Run_InjectMessageRoutesToSubAgentBus(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, drainedCount, 1, "should have received at least one event")
 
-	// After Run completes, subAgentBus should be cleared.
-	ta.subAgentBusMu.Lock()
-	busAfter := ta.subAgentBus
-	ta.subAgentBusMu.Unlock()
-	assert.Nil(t, busAfter, "subAgentBus should be cleared after Run completes")
+	// After Run completes, activeBus should be restored to persistentBus.
+	ta.activeBusMu.Lock()
+	busAfter := ta.activeBus
+	ta.activeBusMu.Unlock()
+	assert.Equal(t, ta.persistentBus, busAfter, "activeBus should be restored to persistentBus after Run completes")
 }
 
 // ============================================================================
@@ -236,10 +239,13 @@ func TestTagentAgent_Run_EmptyFinalResponseCompletes(t *testing.T) {
 	counter := &mockTokenCounter{tokens: 100}
 	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
 
+	persistentBus2 := NewEventBus()
 	ta := &TagentAgent{
-		name:         "test-empty-run",
-		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel},
-		preprocessor: preproc,
+		name:          "test-empty-run",
+		persistentBus: persistentBus2,
+		activeBus:     persistentBus2,
+		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel},
+		preprocessor:  preproc,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
