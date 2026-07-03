@@ -341,6 +341,22 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 		reasoningContent = resp.Choices[0].Message.ReasoningContent
 	}
 
+	// Log raw response fields at INFO level for diagnosis — don't guess
+	// why content is empty, print all fields so the root cause is visible.
+	log.Infof("[AgentLoop:%s] raw response: content_len=%d reasoning_len=%d finish_reason=%q tool_calls=%d",
+		al.name, len(content), len(reasoningContent), finishReason, func() int {
+			if len(resp.Choices) > 0 {
+				return len(resp.Choices[0].Message.ToolCalls)
+			}
+			return 0
+		}())
+	if len(content) > 0 {
+		log.Infof("[AgentLoop:%s] content preview: %s", al.name, truncateString(content, 300))
+	}
+	if len(reasoningContent) > 0 {
+		log.Infof("[AgentLoop:%s] reasoning_content preview: %s", al.name, truncateString(reasoningContent, 300))
+	}
+
 	// Fallback: some models (e.g., GLM-4.7) put all output in reasoning_content
 	// and leave content empty. Use reasoning_content as the final output so
 	// the caller gets a meaningful response instead of an empty string.
@@ -365,10 +381,6 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 	}
 	log.Infof("[AgentLoop:%s] final response: content_len=%d finish_reason=%q%s",
 		al.name, len(content), finishReason, usageStr)
-	if reasoningContent != "" {
-		log.Debugf("[AgentLoop:%s] reasoning_content (len=%d): %s",
-			al.name, len(reasoningContent), truncateString(reasoningContent, 500))
-	}
 	if len(content) == 0 {
 		log.Warnf("[AgentLoop:%s] empty final response! finish_reason=%q, check model behavior or content filtering", al.name, finishReason)
 	}
