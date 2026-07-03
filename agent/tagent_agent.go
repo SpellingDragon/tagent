@@ -71,8 +71,8 @@ type TagentAgent struct {
 	// persistentBus is the bus created at construction time, used by
 	// the persistent AgentLoop started via StartLoop.
 	persistentBus *EventBus
-	agentLoop      *AgentLoop
-	preprocessor   *Preprocessor
+	agentLoop     *AgentLoop
+	preprocessor  *Preprocessor
 
 	// Framework integration (retained for session/plugin/trace)
 	memStore   memory.MemoryStore
@@ -280,15 +280,15 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		activeBus:     bus, // initially the persistent bus is active
 		agentLoop:     agentLoop,
 		preprocessor:  preprocessor,
-		memStore:     memStore,
-		memPlugin:    memPlugin,
-		config:       cfg,
-		runner:       r,
-		sessionSvc:   sessionSvc,
-		name:         name,
-		description:  description,
-		outputCh:     outputCh,
-		closers:      []Closer{sessionSvc},
+		memStore:      memStore,
+		memPlugin:     memPlugin,
+		config:        cfg,
+		runner:        r,
+		sessionSvc:    sessionSvc,
+		name:          name,
+		description:   description,
+		outputCh:      outputCh,
+		closers:       []Closer{sessionSvc},
 	}
 
 	// Wire onEvent callback after ta is created.
