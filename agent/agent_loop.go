@@ -331,10 +331,31 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 	// No tool_calls → final response.
 	al.toolIterations = 0
 	content := ""
+	finishReason := ""
+	reasoningContent := ""
 	if len(resp.Choices) > 0 {
 		content = resp.Choices[0].Message.Content
+		if resp.Choices[0].FinishReason != nil {
+			finishReason = *resp.Choices[0].FinishReason
+		}
+		reasoningContent = resp.Choices[0].Message.ReasoningContent
 	}
-	log.Infof("[AgentLoop:%s] final response: content_len=%d", al.name, len(content))
+
+	// Build a detailed log line for the final response.
+	var usageStr string
+	if resp.Usage != nil {
+		usageStr = fmt.Sprintf(" prompt_tokens=%d completion_tokens=%d total=%d",
+			resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens)
+	}
+	log.Infof("[AgentLoop:%s] final response: content_len=%d finish_reason=%q%s",
+		al.name, len(content), finishReason, usageStr)
+	if reasoningContent != "" {
+		log.Debugf("[AgentLoop:%s] reasoning_content (len=%d): %s",
+			al.name, len(reasoningContent), truncateString(reasoningContent, 500))
+	}
+	if len(content) == 0 {
+		log.Warnf("[AgentLoop:%s] empty final response! finish_reason=%q, check model behavior or content filtering", al.name, finishReason)
+	}
 	al.emitAgentOutput(resp)
 	return false
 }
@@ -550,18 +571,30 @@ func formatResponse(resp *model.Response) string {
 	}
 	choice := resp.Choices[0]
 	msg := choice.Message
+	finishReason := ""
+	if choice.FinishReason != nil {
+		finishReason = *choice.FinishReason
+	}
 	content := msg.Content
 	if len(content) > 200 {
 		content = content[:200] + "..."
+	}
+	reasoning := ""
+	if msg.ReasoningContent != "" {
+		r := msg.ReasoningContent
+		if len(r) > 100 {
+			r = r[:100] + "..."
+		}
+		reasoning = fmt.Sprintf(" reasoning=%q", r)
 	}
 	if len(msg.ToolCalls) > 0 {
 		names := make([]string, 0, len(msg.ToolCalls))
 		for _, tc := range msg.ToolCalls {
 			names = append(names, tc.Function.Name)
 		}
-		return fmt.Sprintf("role=%s tool_calls=%v", msg.Role, names)
+		return fmt.Sprintf("role=%s finish=%q tool_calls=%v%s", msg.Role, finishReason, names, reasoning)
 	}
-	return fmt.Sprintf("role=%s content=%q", msg.Role, content)
+	return fmt.Sprintf("role=%s finish=%q content=%q%s", msg.Role, finishReason, content, reasoning)
 }
 
 // summarizeEvents returns a compact summary of event types in a batch.
