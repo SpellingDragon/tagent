@@ -494,6 +494,9 @@ func (al *AgentLoop) dispatchToolUse(ctx context.Context, toolCall model.ToolCal
 
 // dispatchCallable executes a CallableTool in a goroutine and publishes
 // the result to the bus. Handles tmux-async detection.
+// Recover from panic to ensure the parent AgentLoop always receives a result
+// (error message) — without this, a tool panic would silently lose the
+// tool_use event and the parent agent would wait forever.
 func (al *AgentLoop) dispatchCallable(
 	ctx context.Context,
 	callable trpctool.CallableTool,
@@ -502,32 +505,46 @@ func (al *AgentLoop) dispatchCallable(
 	name := toolCall.Function.Name
 	startTime := time.Now()
 
-	result, err := callable.Call(ctx, toolCall.Function.Arguments)
-	elapsed := time.Since(startTime)
-
 	var content string
-	if err != nil {
-		content = fmt.Sprintf("Error: %v", err)
-	} else if result == nil {
-		content = "(no output)"
-	} else {
-		// Check if this is a tmux-async result.
-		if asyncMarker, ok := result.(tmuxAsyncResult); ok && asyncMarker.IsTmuxAsync() {
-			log.Infof("[AgentLoop:%s] tool %s returned async marker, waiting for TmuxMonitor callback",
-				al.name, name)
-			return
-		}
-		// JSON-serialize the result for LLM-friendly format.
-		// Falls back to %v for types that don't marshal cleanly.
-		if b, marshalErr := json.Marshal(result); marshalErr == nil {
-			content = string(b)
-		} else {
-			content = fmt.Sprintf("%v", result)
-		}
-	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				content = fmt.Sprintf("Error: tool %q panicked: %v", name, r)
+				log.Errorf("[AgentLoop:%s] tool %q panicked: %v", al.name, name, r)
+			}
+		}()
 
-	log.Infof("[AgentLoop:%s] tool %s completed in %v, content_len=%d",
-		al.name, name, elapsed, len(content))
+		result, err := callable.Call(ctx, toolCall.Function.Arguments)
+		elapsed := time.Since(startTime)
+
+		if err != nil {
+			content = fmt.Sprintf("Error: %v", err)
+		} else if result == nil {
+			content = "(no output)"
+		} else {
+			// Check if this is a tmux-async result.
+			if asyncMarker, ok := result.(tmuxAsyncResult); ok && asyncMarker.IsTmuxAsync() {
+				log.Infof("[AgentLoop:%s] tool %s returned async marker, waiting for TmuxMonitor callback",
+					al.name, name)
+				return
+			}
+			// JSON-serialize the result for LLM-friendly format.
+			// Falls back to %v for types that don't marshal cleanly.
+			if b, marshalErr := json.Marshal(result); marshalErr == nil {
+				content = string(b)
+			} else {
+				content = fmt.Sprintf("%v", result)
+			}
+		}
+
+		log.Infof("[AgentLoop:%s] tool %s completed in %v, content_len=%d",
+			al.name, name, elapsed, len(content))
+	}()
+
+	// If content is empty, the tmux-async path returned early — don't publish.
+	if content == "" {
+		return
+	}
 
 	al.bus.Publish(NewExternalInputEvent("tool_result", model.Message{
 		Role:    model.RoleTool,
@@ -551,20 +568,28 @@ func (al *AgentLoop) dispatchSubAgent(
 		subCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 
-		result, err := wrapper.Call(subCtx, toolCall.Function.Arguments)
-		elapsed := time.Since(startTime)
-
 		var content string
-		if err != nil {
-			content = fmt.Sprintf("[agent error] %s: %v", name, err)
-		} else if result == nil {
-			content = fmt.Sprintf("[agent %s] completed (no output)", name)
-		} else if b, marshalErr := json.Marshal(result); marshalErr == nil {
-			content = string(b)
-		} else {
-			content = fmt.Sprintf("[agent %s] %v", name, result)
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					content = fmt.Sprintf("[agent error] %s panicked: %v", name, r)
+					log.Errorf("[AgentLoop:%s] sub-agent %s panicked: %v", al.name, name, r)
+				}
+			}()
 
+			result, err := wrapper.Call(subCtx, toolCall.Function.Arguments)
+			if err != nil {
+				content = fmt.Sprintf("[agent error] %s: %v", name, err)
+			} else if result == nil {
+				content = fmt.Sprintf("[agent %s] completed (no output)", name)
+			} else if b, marshalErr := json.Marshal(result); marshalErr == nil {
+				content = string(b)
+			} else {
+				content = fmt.Sprintf("[agent %s] %v", name, result)
+			}
+		}()
+
+		elapsed := time.Since(startTime)
 		log.Infof("[AgentLoop:%s] sub-agent %s completed in %v, content_len=%d",
 			al.name, name, elapsed, len(content))
 

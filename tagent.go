@@ -502,6 +502,13 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		return rc.model
 	}
 
+	// Wrap with TrajectoryRecorder if enabled, so sub-agent LLM calls
+	// are also recorded for RL training data.
+	if rc.trajectoryRecorder != nil {
+		m = agent.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+		log.Debugf("[tagent] agent %q: wrapped model %q with TrajectoryRecorder", name, acfg.Model)
+	}
+
 	if rc.resolvedModels == nil {
 		rc.resolvedModels = make(map[string]model.Model)
 	}

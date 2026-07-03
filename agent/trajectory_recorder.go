@@ -307,3 +307,114 @@ func (tr *TrajectoryRecorder) writeLoop() {
 	}
 	fileMu.Unlock()
 }
+
+// TrajectoryRecorderModelWrapper wraps a model.Model and forwards records
+// to a shared TrajectoryRecorder's recordCh + writeLoop. This allows
+// sub-agents with different model instances to share the same JSONL
+// writer and session context.
+type TrajectoryRecorderModelWrapper struct {
+	inner model.Model
+	tr    *TrajectoryRecorder // shared recorder for recordCh + writeLoop
+}
+
+// NewTrajectoryRecorderModelWrapper wraps the given model and shares
+// the recorder's write infrastructure. The wrapper uses the recorder's
+// current session/user context for trajectory records.
+func NewTrajectoryRecorderModelWrapper(inner model.Model, tr *TrajectoryRecorder) *TrajectoryRecorderModelWrapper {
+	return &TrajectoryRecorderModelWrapper{inner: inner, tr: tr}
+}
+
+// GenerateContent implements model.Model. It forwards to the inner model
+// and records the interaction via the shared recorder's record channel.
+func (w *TrajectoryRecorderModelWrapper) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
+	start := time.Now()
+
+	// Capture session context from shared recorder.
+	w.tr.mu.Lock()
+	userID := w.tr.userID
+	sessionID := w.tr.sessionID
+	batchIdx := w.tr.batchIndex
+	w.tr.batchIndex++
+	endpoint := w.tr.endpoint
+	w.tr.mu.Unlock()
+
+	respCh, err := w.inner.GenerateContent(ctx, request)
+	if err != nil {
+		w.tr.record(&TrajectoryRecord{
+			Timestamp:  time.Now().Format(time.RFC3339Nano),
+			SessionID:  sessionID,
+			UserID:     userID,
+			BatchIndex: batchIdx,
+			LLMCall: LLMCallRecord{
+				Request: LLMRequestRecord{
+					Messages:         request.Messages,
+					Model:            w.inner.Info().Name,
+					GenerationConfig: request.GenerationConfig,
+				},
+				Response: LLMResponseRecord{
+					Error: err.Error(),
+				},
+			},
+			Metadata: TrajectoryMetadata{
+				DurationMs:    time.Since(start).Milliseconds(),
+				ModelEndpoint: endpoint,
+			},
+		})
+		return nil, err
+	}
+
+	wrappedCh := make(chan *model.Response, 64)
+	w.tr.gcWg.Add(1)
+	go func() {
+		defer w.tr.gcWg.Done()
+		defer close(wrappedCh)
+		var lastResp *model.Response
+		for resp := range respCh {
+			wrappedCh <- resp
+			if resp != nil {
+				lastResp = resp
+			}
+		}
+
+		record := &TrajectoryRecord{
+			Timestamp:  time.Now().Format(time.RFC3339Nano),
+			SessionID:  sessionID,
+			UserID:     userID,
+			BatchIndex: batchIdx,
+			LLMCall: LLMCallRecord{
+				Request: LLMRequestRecord{
+					Messages:         request.Messages,
+					Model:            w.inner.Info().Name,
+					GenerationConfig: request.GenerationConfig,
+				},
+			},
+			Metadata: TrajectoryMetadata{
+				DurationMs:    time.Since(start).Milliseconds(),
+				ModelEndpoint: endpoint,
+			},
+		}
+
+		if lastResp != nil {
+			record.LLMCall.Response = LLMResponseRecord{
+				Choices: lastResp.Choices,
+				Usage:   lastResp.Usage,
+			}
+			if len(lastResp.Choices) > 0 && lastResp.Choices[0].FinishReason != nil {
+				record.LLMCall.Response.FinishReason = *lastResp.Choices[0].FinishReason
+			}
+			if lastResp.Error != nil {
+				record.LLMCall.Response.Error = lastResp.Error.Message
+			}
+		}
+
+		record.Metadata.DurationMs = time.Since(start).Milliseconds()
+		w.tr.record(record)
+	}()
+
+	return wrappedCh, nil
+}
+
+// Info implements model.Model.
+func (w *TrajectoryRecorderModelWrapper) Info() model.Info {
+	return w.inner.Info()
+}
