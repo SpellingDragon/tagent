@@ -341,6 +341,22 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 		reasoningContent = resp.Choices[0].Message.ReasoningContent
 	}
 
+	// Fallback: some models (e.g., GLM-4.7) put all output in reasoning_content
+	// and leave content empty. Use reasoning_content as the final output so
+	// the caller gets a meaningful response instead of an empty string.
+	if content == "" && reasoningContent != "" {
+		log.Warnf("[AgentLoop:%s] empty content but reasoning_content has %d chars, using as fallback output",
+			al.name, len(reasoningContent))
+		// Clone the response and inject reasoning_content as the message content
+		// so downstream consumers (AgentToolWrapper, outputCh) see actual text.
+		resp = resp.Clone()
+		if len(resp.Choices) > 0 {
+			resp.Choices[0].Message.Content = reasoningContent
+			resp.Choices[0].Message.ReasoningContent = "" // avoid duplication
+		}
+		content = reasoningContent
+	}
+
 	// Build a detailed log line for the final response.
 	var usageStr string
 	if resp.Usage != nil {

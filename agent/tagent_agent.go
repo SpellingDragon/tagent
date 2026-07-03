@@ -100,6 +100,13 @@ type TagentAgent struct {
 	loopActive atomic.Bool        // Loop 是否运行中
 	loopWg     sync.WaitGroup     // 等待 Loop goroutine 退出
 
+	// Sub-agent invocation bus — set by Run() for each sub-agent call.
+	// When loopActive is false (not in persistent loop mode), InjectMessage
+	// falls back to publishing on this bus so TmuxMonitor callbacks can
+	// reach the sub-agent's AgentLoop.
+	subAgentBus   *EventBus
+	subAgentBusMu sync.Mutex
+
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 }
@@ -375,6 +382,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// (SmartCompressor has mutable state and must not be shared across
 	// concurrent goroutines).
 	invBus := NewEventBus()
+	// Register the sub-agent bus so InjectMessage can reach it when
+	// TmuxMonitor callbacks arrive during this Run (action agent executes
+	// async tmux commands whose results come back via InjectMessage).
+	ta.setSubAgentBus(invBus)
 	invOutputCh := make(chan *event.Event, 100)
 	invPreprocessor := newPreprocessorFromConfig(ta.config)
 	invLoop := NewAgentLoop(AgentLoopConfig{
@@ -411,6 +422,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	go func() {
 		defer close(wrappedCh)
 		defer runCancel()
+		defer ta.clearSubAgentBus() // clean up so InjectMessage won't route to a dead bus
 		for evt := range invOutputCh {
 			wrappedCh <- evt
 			// Sub-agent semantics: stop after the first agent_output
@@ -532,17 +544,43 @@ func (ta *TagentAgent) Runner() runner.Runner {
 // external_input event. This is used by tools (e.g., TmuxMonitor) and
 // external callers (HTTPAPI, A2A) to inject asynchronous messages.
 //
-// Requires the agent to be running (loopActive=true). If not running,
-// the message is dropped with a warning.
+// When the persistent loop is active (StartLoop), messages go to the
+// persistent bus. When in sub-agent mode (Run), messages fall back to
+// the sub-agent's invocation bus so TmuxMonitor callbacks can reach the
+// sub-agent's AgentLoop.
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
-	if !ta.loopActive.Load() {
-		log.Warnf("[InjectMessage] agent loop not started, message dropped")
-		return
-	}
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.UpdateLastEventTime(time.Now())
 	}
-	ta.bus.Publish(NewExternalInputEvent("inject", msg))
+	// Primary path: persistent event loop.
+	if ta.loopActive.Load() {
+		ta.bus.Publish(NewExternalInputEvent("inject", msg))
+		return
+	}
+	// Fallback: sub-agent invocation bus (set by Run()).
+	ta.subAgentBusMu.Lock()
+	bus := ta.subAgentBus
+	ta.subAgentBusMu.Unlock()
+	if bus != nil {
+		log.Debugf("[InjectMessage] agent %q not in persistent loop, routing to sub-agent bus", ta.name)
+		bus.Publish(NewExternalInputEvent("inject", msg))
+		return
+	}
+	log.Warnf("[InjectMessage] agent %q has no active bus (not in StartLoop or Run), message dropped", ta.name)
+}
+
+// setSubAgentBus sets the bus used for InjectMessage fallback during Run().
+func (ta *TagentAgent) setSubAgentBus(bus *EventBus) {
+	ta.subAgentBusMu.Lock()
+	ta.subAgentBus = bus
+	ta.subAgentBusMu.Unlock()
+}
+
+// clearSubAgentBus clears the sub-agent bus (called when Run() completes).
+func (ta *TagentAgent) clearSubAgentBus() {
+	ta.subAgentBusMu.Lock()
+	ta.subAgentBus = nil
+	ta.subAgentBusMu.Unlock()
 }
 
 // setSessionContext sets the userID and sessionID (thread-safe).
