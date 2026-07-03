@@ -227,7 +227,7 @@ graph LR
     MODEL -->|"是"| CALL["model.GenerateContent"]
     MODEL -->|"否"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
     CALL --> RESP["handleResponse"]
-    RESP -->|"tool_calls"| ONEVT2["onEvent + dispatch"]
+    RESP -->|"tool_calls"| ONEVT2["emitEvent (onEvent + session append)<br/>+ bus.Publish(tool_use) + dispatch (async)"]
     RESP -->|"final"| EMIT["emit → outputCh"]
     ONEVT2 --> PULL
     EMIT --> PULL
@@ -457,7 +457,7 @@ graph LR
 
 3. **因果链完整性**：每个事件的 `EventKey` 编码了其因果父节点。即使经过压缩，MemoryStore 中的链 `evt_1 → evt_2 → ... → evt_8` 仍然完整可追溯。
 
-4. **异步事件**：如果 TmuxMonitor 在步骤 7 期间注入消息，它会进入 EventBus。AgentLoop 在当前 tool dispatch goroutine 运行时不会处理它，直到下一轮 `Pull` 批量取出。
+4. **异步事件**：如果 TmuxMonitor 在步骤 7 期间注入消息，它会通过 `InjectMessage` → `activeBus` 进入 EventBus。AgentLoop 在当前 tool dispatch goroutine 运行时不会处理它，直到下一轮 `Pull` 批量取出。`activeBus` 在 StartLoop 模式下指向 `persistentBus`，在 Run() 子 agent 模式下指向 `invBus`，确保 TmuxMonitor 回调无论在哪种模式下都能正确路由。
 
 ## 快速开始
 

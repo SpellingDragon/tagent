@@ -243,7 +243,7 @@ graph LR
     MODEL -->|"Yes"| CALL["model.GenerateContent"]
     MODEL -->|"No"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
     CALL --> RESP["handleResponse"]
-    RESP -->|"tool_calls"| ONEVT2["onEvent + dispatch"]
+    RESP -->|"tool_calls"| ONEVT2["emitEvent (onEvent + session append)<br/>+ bus.Publish(tool_use) + dispatch (async)"]
     RESP -->|"final"| EMIT["emit → outputCh"]
     ONEVT2 --> PULL
     EMIT --> PULL

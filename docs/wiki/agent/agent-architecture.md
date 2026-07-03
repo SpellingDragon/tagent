@@ -219,14 +219,15 @@ type TagentAgent struct {
 
 **Persistent Event Loop 字段说明：**
 
-- `bus`：`*EventBus`（cap=256），所有事件（用户输入、Tmux 通知、工具结果）通过 Publish 写入
+- `activeBus`：当前活跃的 `*EventBus`（cap=256），所有事件（用户输入、tmux 通知、工具结果）通过 Publish 写入。StartLoop 设为 `persistentBus`，Run() 设为 `invBus`
+- `persistentBus`：构造时创建的持久 bus，StartLoop 模式下 `activeBus` 指向它
 - `outputCh`：`chan *event.Event`（cap=100），AgentLoop emit 事件到此 channel，调用方通过 `IsFinalResponse()` 判断单次响应完成
 - `loopCtx`/`loopCancel`：Loop 的 context，StopLoop 取消
-- `loopActive`：原子标志，InjectMessage 据此判断是否 publish 到 bus
+- `loopActive`：原子标志，标记是否处于 StartLoop 持久模式
 
 **InjectMessage 机制：**
 
-`InjectMessage` 将消息包装为 `AgentEvent{type:external_input}` 发布到 EventBus。这是所有外部输入的统一入口：用户消息、TmuxMonitor 回调、Meditation 事件都通过此路径进入事件管线。
+`InjectMessage` 将消息包装为 `AgentEvent{type:external_input}` 发布到 `activeBus`。这是所有外部输入的统一入口：用户消息、TmuxMonitor 回调、Meditation 事件都通过此路径进入事件管线。`InjectMessage` 不感知当前是 StartLoop 还是 Run() 模式——它只管往 `activeBus` 发事件。
 
 ```
 InjectMessage(msg) → bus.Publish(NewExternalInputEvent("inject", msg))
@@ -596,8 +597,7 @@ sequenceDiagram
 
     Note over AL: Pull — 批量取出所有事件
     AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
-    AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
-    AL->>AL: 追加 external_input 到 al.session.Events (含 StateDelta) (含 StateDelta)
+    AL->>AL: 追加 external_input 到 al.session.Events (含 StateDelta)
     AL->>AL: Preprocessor.Process (读取 al.session.Events)
     AL->>AL: model.GenerateContent
     AL->>AL: onEvent (MemoryStore + SessionService 持久化，填充 StateDelta)
@@ -608,17 +608,23 @@ sequenceDiagram
 
 #### 7.3.3 InjectMessage
 
-`InjectMessage` 将消息包装为 `AgentEvent{type:external_input}` 发布到 EventBus。这是所有外部输入的统一入口：
+`InjectMessage` 将消息包装为 `AgentEvent{type:external_input}` 发布到 `activeBus`。这是所有外部输入的统一入口：
 
 ```go
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
-    if !ta.loopActive.Load() {
-        log.Warnf("[InjectMessage] agent loop not started, message dropped")
+    // Publish to activeBus — doesn't care if it's persistentBus or invBus.
+    ta.activeBusMu.Lock()
+    bus := ta.activeBus
+    ta.activeBusMu.Unlock()
+    if bus != nil {
+        bus.Publish(NewExternalInputEvent("inject", msg))
         return
     }
-    ta.bus.Publish(NewExternalInputEvent("inject", msg))
+    log.Warnf("[InjectMessage] agent %q has no active bus, message dropped", ta.name)
 }
 ```
+
+**关键设计**：`InjectMessage` 不检查 `loopActive`，也不区分 StartLoop/Run() 模式。`activeBus` 的生命周期由 `StartLoop`（设为 `persistentBus`）和 `Run()`（设为 `invBus`，完成后 `restorePersistentBus()`）管理。这确保 TmuxMonitor 回调无论在持久循环还是子 agent 调用中都能正确路由。
 
 #### 7.3.4 outputCh 与事件接收
 
@@ -1028,8 +1034,8 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 AgentLoop 对事件的写入分为两条路径：
 
 1. **AgentLoop 直接追加到 `al.session.Events`**：
-   - 在 `Run()` Step 2 处理 `external_input` 时，调用 `onEvent` 之前追加
-   - 在 `emitEvent()` 中输出事件（agent_output、tool_call 等）时追加
+   - 在 `Run()` Step 2 处理 `external_input` 时，调用 `onEvent` **之后**追加（先让 MemoryPlugin 填充 `StateDelta`，再追加含 `StateDelta` 的完整事件）
+   - 在 `emitEvent()` 中输出事件（agent_output、tool_call 等）时，调用 `onEvent` **之后**追加
    - 目的：因为 `SessionService` 返回的是 session clone，AgentLoop 必须维护自己持有的 session copy，供 `Preprocessor` 读取
 
 2. **`onEvent` 回调负责持久化**：
