@@ -535,39 +535,37 @@ EventBus 是 AgentLoop 的唯一输入。所有事件（用户输入、TmuxMonit
 
 ### 7.2.1 Tool Agent（子 Agent）的触发、状态感知与事件回写
 
-knowledge、action 等 tool agent 通过 `AgentToolWrapper` 包装为 `CallableTool`。当父 AgentLoop Pull 到 `tool_use` 事件时，`dispatchToolUse` 检测到 `*AgentToolWrapper` 类型，走 `dispatchSubAgent` 路径（异步 goroutine）。
+knowledge、action 等 tool agent 通过 `AgentToolWrapper` 包装为 `CallableTool`。所有工具——无论普通工具（file、speak）还是子 agent（knowledge、recall、action）——都通过统一的 `dispatchToolUse` 函数分发：一个 goroutine、一个 recover、一个 10 分钟超时、一个结果序列化路径。`AgentToolWrapper` 实现了 `CallableTool` 接口，不需要类型判断分支。
 
 子 agent 有自己独立的 `invBus` + `invAgentLoop`，形成一个完整的事件管线。`Run()` 通过 `setActiveBus(invBus)` 将子 agent 的 `activeBus` 切换到 `invBus`，确保子 agent 内部的 `InjectMessage`（如 TmuxMonitor 回调）路由到子 agent 的 bus 而非父 agent 的 bus。
 
-#### 三种工具的 dispatch 路径对比
+#### 统一 dispatch 路径
 
 ```
 dispatchToolUse(ctx, toolCall)
-  │
-  ├─ AgentToolWrapper (knowledge / recall / action)
-  │    → dispatchSubAgent: goroutine 调用 wrapper.Call()
-  │    → wrapper.Call() 调用 agent.Run() → 创建 invBus + invAgentLoop
-  │    → setActiveBus(invBus)
-  │    → 子 agent 内部有完整的触发→状态感知→事件回写管线
-  │    → 完成后 bus.Publish(external_input, "subagent_result") 回写父 bus
-  │
-  ├─ CallableTool + tmuxAsyncResult (ActionTool 的 action 工具调用)
-  │    → dispatchCallable: goroutine 调用 tool.Call()
-  │    → 返回 TmuxExecResponse{running} → 不回写 bus
-  │    → 等 TmuxMonitor 回调 → InjectMessage → activeBus → 下一轮 Pull
-  │
-  └─ CallableTool 同步 (file / speak / draw)
-       → dispatchCallable: goroutine 调用 tool.Call()
-       → 返回结果 → bus.Publish(external_input, "tool_result") 立即回写
+  → goroutine: defer recover() — panic → 回写错误消息
+  → subCtx = WithTimeout(ctx, 10min)
+  → callable.Call(subCtx, args)
+  → 结果序列化:
+      tmuxAsyncResult → 不回写 bus，等 TmuxMonitor 回调
+      其他 → JSON 序列化 → bus.Publish(external_input, "tool_result")
 ```
+
+**设计原则**：不区分 callable/subagent 两条路径。`AgentToolWrapper` 实现了 `CallableTool`，所以类型判断分支是多余的。统一路径减少代码重复，确保所有工具调用都有 recover 和超时保护。
+
+#### 子 agent 停止条件
+
+子 agent 在 `Run()` 中通过 `wrappedCh` 实现单轮语义：收到第一个无 `tool_calls` 的响应即停止。停止条件只检查 `len(choice.Message.ToolCalls) == 0`，**不检查 Content 是否为空**——空内容的 final response 仍然是 final response。
+
+#### reasoning_content fallback
+
+GLM-4.7 等模型有时将全部输出放在 `reasoning_content` 字段中，`content` 为空。`handleResponse` 在检测到 `content == "" && reasoningContent != ""` 时，clone response 并将 `reasoning_content` 注入为 `content`，确保下游消费者（`AgentToolWrapper`、`outputCh`）收到有效文本。
 
 #### knowledge 子 agent 的执行管线
 
-knowledge agent 内部调用 `skill_search` / `skill_load` 等同步工具，不涉及 tmux 异步：
-
 ```
 父 AgentLoop Pull → tool_use(knowledge)
-  → dispatchSubAgent → goroutine
+  → dispatchToolUse → goroutine
     → AgentToolWrapper.Call()
       → 解析 event_keys → parentStore.GetEvent → RuntimeState["external_context"]
       → agent.Run(ctx, inv)
@@ -577,36 +575,34 @@ knowledge agent 内部调用 `skill_search` / `skill_load` 等同步工具，不
         → invAgentLoop.Run():
             Pull → onEvent → session append → Preprocessor → LLM
             ↓ LLM 返回 tool_calls(skill_search)
-            ↓ emitEvent + invBus.Publish(tool_use) → dispatch skill_search (同步)
+            ↓ emitEvent + invBus.Publish(tool_use) → dispatchToolUse → skill_search (同步)
             ↓ skill_search 返回 → invBus.Publish(external_input, tool_result)
             ↓ Pull → Preprocessor → LLM
             ↓ LLM 返回 tool_calls(skill_load) → ... 同上 ...
             ↓ Pull → Preprocessor → LLM
-            ↓ LLM 返回 final response (无 tool_calls, 可能 content 为空)
-            ↓ reasoning_content fallback (GLM-4.7 可能将输出放在 reasoning_content)
+            ↓ LLM 返回 final response (无 tool_calls)
+            ↓ reasoning_content fallback (如需要)
             ↓ emitAgentOutput → invOutputCh
         → wrappedCh 收到 agent_output → 停止子 agent
         → restorePersistentBus()
       → 返回 finalOutput
-  → 父 bus.Publish(external_input, "subagent_result")
+  → 父 bus.Publish(external_input, "tool_result")
 ```
 
 #### action 子 agent 的执行管线（含 tmux 异步）
 
-action agent 内部调用 ActionTool 执行 shell 命令，涉及 tmux 异步状态感知：
-
 ```
 父 AgentLoop Pull → tool_use(action)
-  → dispatchSubAgent → goroutine
+  → dispatchToolUse → goroutine
     → AgentToolWrapper.Call()
       → agent.Run(ctx, inv)
         → 创建 invBus + invAgentLoop
-        → setActiveBus(invBus)  ← 关键：子 agent 期间 activeBus = invBus
+        → setActiveBus(invBus)
         → invAgentLoop.Run():
             Pull → Preprocessor → LLM
             ↓ LLM 返回 tool_calls(action, {command: "curl ..."})
             ↓ invBus.Publish(tool_use) → dispatchToolUse
-            ↓   → dispatchCallable: action.Call() → executeAsync → tmux session
+            ↓   → action.Call() → executeAsync → tmux session
             ↓   → 返回 tmuxAsyncResult → 不回写 bus，等 TmuxMonitor
             ↓ invAgentLoop 继续 Pull（阻塞等待 tmux 结果）
 
@@ -624,9 +620,9 @@ action agent 内部调用 ActionTool 执行 shell 命令，涉及 tmux 异步状
             ↓ LLM 看到 curl 输出 → 返回 final response
             ↓ emitAgentOutput → invOutputCh
         → wrappedCh 收到 agent_output → 停止子 agent
-        → restorePersistentBus()  ← 恢复 activeBus 为 persistentBus
+        → restorePersistentBus()
       → 返回 finalOutput
-  → 父 bus.Publish(external_input, "subagent_result")
+  → 父 bus.Publish(external_input, "tool_result")
 ```
 
 **关键设计**：`activeBus` 在 `Run()` 时切换到 `invBus`，在子 agent 结束时通过 `restorePersistentBus()` 恢复。这确保 action 子 agent 内部的 TmuxMonitor 回调正确路由到子 agent 的 `invBus`，而非父 agent 的 `persistentBus`。子 agent 结束后，父 agent 的 `InjectMessage` 恢复正常路由。
@@ -1516,11 +1512,11 @@ agent.StopLoop()
 
 ### 设计原则
 
-tagent **不记录任何 RL 数据**。所有 RL 数据记录由 AReaL 在 proxy 层完成。
+tagent 的 `TrajectoryRecorder` 以 `model.Model` 包装器的形式，异步将每次 LLM 调用的 request/response 记录为 JSONL 文件。当 `trajectory_dump: true` 时，`tagent.New()` 用 `TrajectoryRecorder` 包装入口 agent 的 model。
 
-**变更前**：tagent 的 `TrajectoryCollector` 在事件循环中采集全保真 trajectory（含 completion_ids），通过 `TrajectoryStore` 存储，通过 `RewardFunc` 计算 reward。存在数据冗余——AReaL proxy 和 tagent 各自独立记录。
+**子 agent 覆盖**：子 agent（如 knowledge）可能使用不同的 model 实例（通过 `provider.Model()` 解析）。`resolveAgentModel` 在创建新 model 后，用 `TrajectoryRecorderModelWrapper` 包装它，共享同一个 `TrajectoryRecorder` 的 `recordCh` 和 `writeLoop`，确保子 agent 的 LLM 调用也被记录到同一个 JSONL 文件中。
 
-**变更后**：tagent 专注 agent 执行逻辑，AReaL 专注 RL 数据记录。completion_ids、logprobs、token_ids 等训练数据全部由 AReaL proxy 的 InteractionCache 在 LLM 调用级别记录。
+**与 AReaL 的关系**：当与 AReaL 集成时，AReaL proxy 的 InteractionCache 在 LLM 调用级别记录 token 级数据（completion_ids、logprobs）。tagent 的 TrajectoryRecorder 记录的是消息级别的 request/response，两者互补——AReaL 用于 PPO 训练，TrajectoryRecorder 用于 SFT 和调试。
 
 ### RL 数据记录位置
 
