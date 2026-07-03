@@ -74,13 +74,16 @@ func (p *Preprocessor) Process(ctx context.Context, batch []*AgentEvent, sess *s
 	// Step 1: shouldCallModel judgement — based ONLY on the bus batch.
 	// external_input triggers model call; tool_use alone does not.
 	hasExternalInput := false
+	externalCount := 0
 	for _, evt := range batch {
 		if evt != nil && evt.Type == tagentevent.TypeExternalInput {
 			hasExternalInput = true
-			break
+			externalCount++
 		}
 	}
+	log.Debugf("[Preprocessor] batch size=%d external_input=%d", len(batch), externalCount)
 	if !hasExternalInput {
+		log.Debugf("[Preprocessor] no external_input, skip model call")
 		return ProcessResult{ShouldCallModel: false}
 	}
 
@@ -100,11 +103,24 @@ func (p *Preprocessor) Process(ctx context.Context, batch []*AgentEvent, sess *s
 		sess.EventMu.RUnlock()
 	}
 
+	log.Debugf("[Preprocessor] built %d messages from session (events=%d)",
+		len(messages), func() int {
+			if sess == nil {
+				return 0
+			}
+			sess.EventMu.RLock()
+			defer sess.EventMu.RUnlock()
+			return len(sess.Events)
+		}())
+
 	// Step 3: inject event_key prefixes (requires session).
 	// This activates the event_key visibility chain: LLM sees keys →
 	// passes to sub-agents via event_keys parameter.
 	if sess != nil {
 		injectEventKeyPrefixesFromSession(&messages, sess)
+		log.Debugf("[Preprocessor] injected event_key prefixes from session")
+	} else {
+		log.Debugf("[Preprocessor] no session, skip event_key prefix injection")
 	}
 
 	// Step 4: token budget check + SmartCompress.
@@ -158,7 +174,10 @@ func (p *Preprocessor) Process(ctx context.Context, batch []*AgentEvent, sess *s
 	}
 
 	// Step 5: consolidated audit line (one per LLM call).
-	logAccess(usedTokens, len(messages), compressed, beforeTokens, beforeCount)
+	p.logAccess(usedTokens, len(messages), compressed, beforeTokens, beforeCount)
+
+	// Step 6: debug-level context dump for deep inspection.
+	log.Debugf("[Preprocessor] final context messages:\n%s", formatMessages(messages))
 
 	return ProcessResult{
 		Messages:        messages,
@@ -212,7 +231,16 @@ func injectEventKeyPrefixesFromSession(messages *[]model.Message, sess *session.
 		}
 
 		msg.Content = fmt.Sprintf("[evt_%s|%s] %s", string(keyBytes), eventType, msg.Content)
+		log.Debugf("[Preprocessor] prefix injected: msg[%d] -> %s", i, msg.Content[:minInt(len(msg.Content), 120)])
 	}
+}
+
+// minInt returns the smaller of a and b.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ensureUserPrompt checks that the compressed messages contain at least one user prompt.
@@ -237,16 +265,17 @@ func ensureUserPrompt(messages []model.Message) []model.Message {
 }
 
 // logAccess outputs a single audit line per LLM invocation.
-func logAccess(
+func (p *Preprocessor) logAccess(
 	tokens int,
 	msgCount int,
 	compressed bool,
 	beforeTokens int,
 	beforeCount int,
 ) {
+	threshold := int(float64(p.maxTokens) * p.thresholdPct)
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[Preprocessor] tokens=%d/%d msgs=%d",
-		tokens, 0 /* maxTokens unknown here */, msgCount))
+	sb.WriteString(fmt.Sprintf("[Preprocessor] tokens=%d/%d(threshold=%d) msgs=%d",
+		tokens, p.maxTokens, threshold, msgCount))
 
 	if compressed {
 		sb.WriteString(fmt.Sprintf(" compressed(%d->%d tokens %d->%d msgs)",
@@ -254,4 +283,32 @@ func logAccess(
 	}
 
 	log.Infof(sb.String())
+}
+
+// formatMessages returns a human-readable summary of messages for debug logs.
+func formatMessages(messages []model.Message) string {
+	var sb strings.Builder
+	for i, msg := range messages {
+		role := msg.Role
+		if role == "" {
+			role = "unknown"
+		}
+		content := msg.Content
+		if len(content) > 200 {
+			content = content[:200] + "..."
+		}
+		toolInfo := ""
+		if len(msg.ToolCalls) > 0 {
+			names := make([]string, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				names = append(names, tc.Function.Name)
+			}
+			toolInfo = fmt.Sprintf(" tool_calls=%v", names)
+		}
+		if msg.ToolID != "" {
+			toolInfo += fmt.Sprintf(" tool_id=%s", msg.ToolID)
+		}
+		sb.WriteString(fmt.Sprintf("  [%d] %s: %q%s\n", i, role, content, toolInfo))
+	}
+	return sb.String()
 }

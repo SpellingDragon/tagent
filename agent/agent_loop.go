@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -152,6 +153,8 @@ func (al *AgentLoop) Run(ctx context.Context) {
 		if len(events) == 0 {
 			continue
 		}
+		log.Infof("[AgentLoop:%s] iteration start: pulled %d events (%s)",
+			al.name, len(events), summarizeEvents(events))
 
 		// Step 1: Dispatch tool_use events (consumed from bus, not produced in handleResponse).
 		// Tool dispatch happens here rather than in handleResponse so that tool_use
@@ -189,8 +192,12 @@ func (al *AgentLoop) Run(ctx context.Context) {
 		result := al.preprocessor.Process(ctx, events, al.session)
 
 		if !result.ShouldCallModel {
+			log.Infof("[AgentLoop:%s] shouldCallModel=false, skip model call", al.name)
 			continue
 		}
+
+		log.Infof("[AgentLoop:%s] shouldCallModel=true, calling model with %d messages", al.name, len(result.Messages))
+		log.Debugf("[AgentLoop:%s] model request messages:\n%s", al.name, formatMessages(result.Messages))
 
 		// Call the model with the complete messages from Preprocessor.
 		// Preprocessor builds messages from session.Events (the single source
@@ -206,6 +213,8 @@ func (al *AgentLoop) Run(ctx context.Context) {
 			log.Warnf("[AgentLoop:%s] callModel returned nil response", al.name)
 			continue
 		}
+
+		log.Debugf("[AgentLoop:%s] model response: %s", al.name, formatResponse(resp))
 
 		// Parse and act on the response.
 		hasToolCalls := al.handleResponse(ctx, resp)
@@ -248,6 +257,9 @@ func (al *AgentLoop) callModel(ctx context.Context, messages []model.Message) (*
 		temp := al.temperature
 		req.Temperature = &temp
 	}
+
+	log.Infof("[AgentLoop:%s] model.GenerateContent: msgs=%d tools=%d system_prompt=%v temp=%.2f",
+		al.name, len(req.Messages), len(toolsForReq), al.systemPrompt != "", al.temperature)
 
 	ch, err := al.m.GenerateContent(ctx, req)
 	if err != nil {
@@ -318,6 +330,11 @@ func (al *AgentLoop) handleResponse(ctx context.Context, resp *model.Response) b
 
 	// No tool_calls → final response.
 	al.toolIterations = 0
+	content := ""
+	if len(resp.Choices) > 0 {
+		content = resp.Choices[0].Message.Content
+	}
+	log.Infof("[AgentLoop:%s] final response: content_len=%d", al.name, len(content))
 	al.emitAgentOutput(resp)
 	return false
 }
@@ -339,6 +356,8 @@ func (al *AgentLoop) emitEvent(evt *event.Event) {
 	if evt == nil {
 		return
 	}
+	log.Debugf("[AgentLoop:%s] emitEvent: tag=%s partial=%v valid=%v",
+		al.name, evt.Tag, evt.IsPartial, evt.IsValidContent())
 	// Invoke onEvent callback for plugin integration (e.g., MemoryPlugin).
 	if al.onEvent != nil {
 		al.onEvent(evt)
@@ -522,6 +541,44 @@ func (al *AgentLoop) SetSession(sess *session.Session) {
 // so the callback can close over the agent instance.
 func (al *AgentLoop) SetOnEvent(cb func(evt *event.Event)) {
 	al.onEvent = cb
+}
+
+// formatResponse returns a compact, debug-friendly summary of a model response.
+func formatResponse(resp *model.Response) string {
+	if resp == nil || len(resp.Choices) == 0 {
+		return "(empty response)"
+	}
+	choice := resp.Choices[0]
+	msg := choice.Message
+	content := msg.Content
+	if len(content) > 200 {
+		content = content[:200] + "..."
+	}
+	if len(msg.ToolCalls) > 0 {
+		names := make([]string, 0, len(msg.ToolCalls))
+		for _, tc := range msg.ToolCalls {
+			names = append(names, tc.Function.Name)
+		}
+		return fmt.Sprintf("role=%s tool_calls=%v", msg.Role, names)
+	}
+	return fmt.Sprintf("role=%s content=%q", msg.Role, content)
+}
+
+// summarizeEvents returns a compact summary of event types in a batch.
+func summarizeEvents(events []*AgentEvent) string {
+	counts := make(map[string]int)
+	for _, evt := range events {
+		if evt == nil {
+			counts["nil"]++
+			continue
+		}
+		counts[evt.Type]++
+	}
+	var parts []string
+	for typ, n := range counts {
+		parts = append(parts, fmt.Sprintf("%s:%d", typ, n))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // truncateString truncates s to at most n characters, appending "..." if truncated.
