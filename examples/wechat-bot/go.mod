@@ -4,11 +4,9 @@ go 1.24.1
 
 replace github.com/SpellingDragon/tagent => ../..
 
-replace github.com/SpellingDragon/wechat-robot-go => /Users/pengweiye/Documents/codes/wechat-robot-go
-
 require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
-	github.com/SpellingDragon/wechat-robot-go v0.0.0-00010101000000-000000000000
+	github.com/SpellingDragon/wechat-robot-go v1.4.0
 	trpc.group/trpc-go/trpc-agent-go v1.10.0
 )
 
