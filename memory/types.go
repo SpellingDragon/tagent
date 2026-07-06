@@ -18,6 +18,7 @@ type EventReference struct {
 	EventType    string `json:"event_type"`             // Event type
 	EventSummary string `json:"event_summary"`          // Brief summary of event result
 	Timestamp    int64  `json:"timestamp"`              // Unix timestamp in milliseconds
+	Role         string `json:"role,omitempty"`         // Original message role (user/assistant/tool/system)
 }
 
 // FullEvent represents a complete event with all details stored in MemoryStore.

@@ -402,3 +402,78 @@ func (m *pocMultiCallModel) GenerateContent(
 func (m *pocMultiCallModel) Info() model.Info {
 	return model.Info{Name: "poc-multi-call-model"}
 }
+
+// ============================================================================
+// PoC 0.4: Multiple BeforeModel callbacks execute in registration order
+// ============================================================================
+
+func TestPoC_MultipleBeforeModel_OrderPreserved(t *testing.T) {
+	// Setup: mock model that returns a simple final response.
+	mockModel := newPocMockModel(&model.Response{
+		ID:   "resp-order",
+		Done: true,
+		Choices: []model.Choice{
+			{Message: model.Message{Role: model.RoleAssistant, Content: "ordered response"}},
+		},
+	})
+
+	// Track execution order.
+	var order []int
+	var orderMu sync.Mutex
+
+	cb := model.NewCallbacks()
+	// Register callback 1: appends "[1]" to each message content.
+	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+		orderMu.Lock()
+		order = append(order, 1)
+		orderMu.Unlock()
+		for i := range args.Request.Messages {
+			args.Request.Messages[i].Content = args.Request.Messages[i].Content + "[1]"
+		}
+		return nil, nil
+	})
+	// Register callback 2: appends "[2]" to each message content.
+	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+		orderMu.Lock()
+		order = append(order, 2)
+		orderMu.Unlock()
+		for i := range args.Request.Messages {
+			args.Request.Messages[i].Content = args.Request.Messages[i].Content + "[2]"
+		}
+		return nil, nil
+	})
+
+	agt := llmagent.New(
+		"poc-multi-before-model",
+		llmagent.WithModel(mockModel),
+		llmagent.WithModelCallbacks(cb),
+		llmagent.WithInstruction("You are a test assistant."),
+	)
+
+	r := runner.NewRunner("poc-app", agt)
+	defer r.Close()
+
+	ctx := context.Background()
+	msg := model.NewUserMessage("hello")
+
+	eventCh, err := r.Run(ctx, "user-1", "session-order", msg)
+	require.NoError(t, err)
+	for range eventCh {
+	}
+
+	// Verify callbacks executed in registration order: [1, 2]
+	require.Len(t, order, 2, "both BeforeModel callbacks should have been called")
+	assert.Equal(t, 1, order[0], "first callback should execute first")
+	assert.Equal(t, 2, order[1], "second callback should execute second")
+
+	// Verify the message content was modified by both callbacks in order.
+	lastReq := mockModel.GetLastRequest()
+	require.NotNil(t, lastReq)
+	// The instruction is prepended, so messages = [instruction, user].
+	// The user message should end with "[1][2]" (callback 1 first, then callback 2).
+	userMsg := lastReq.Messages[len(lastReq.Messages)-1]
+	assert.Contains(t, userMsg.Content, "[1][2]",
+		"callbacks should have appended in order: [1] then [2]")
+
+	t.Logf("PoC 0.4 PASSED: Multiple BeforeModel callbacks executed in order (user msg: %q)", userMsg.Content)
+}

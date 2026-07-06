@@ -45,7 +45,7 @@ func TestSplitSystemMessage_Empty(t *testing.T) {
 }
 
 // ============================================================================
-// splitByTaskBoundary tests
+// SegmentMessages tests
 // ============================================================================
 
 func TestSplitByTaskBoundary_SingleTask(t *testing.T) {
@@ -54,7 +54,7 @@ func TestSplitByTaskBoundary_SingleTask(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "hi"},
 	}
 
-	segments := splitByTaskBoundary(messages)
+	segments := SegmentMessages(messages)
 	require.Len(t, segments, 1)
 	assert.True(t, segments[0].IsComplete)
 	assert.Len(t, segments[0].Messages, 2)
@@ -68,7 +68,7 @@ func TestSplitByTaskBoundary_MultipleTasks(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "result 2"},
 	}
 
-	segments := splitByTaskBoundary(messages)
+	segments := SegmentMessages(messages)
 	require.Len(t, segments, 2)
 	assert.True(t, segments[0].IsComplete)
 	assert.True(t, segments[1].IsComplete)
@@ -81,7 +81,7 @@ func TestSplitByTaskBoundary_IncompleteTask(t *testing.T) {
 		{Role: model.RoleUser, Content: "task 2 (incomplete)"},
 	}
 
-	segments := splitByTaskBoundary(messages)
+	segments := SegmentMessages(messages)
 	require.Len(t, segments, 2)
 	assert.True(t, segments[0].IsComplete)
 	assert.False(t, segments[1].IsComplete, "last segment without agent_output should be incomplete")
@@ -96,13 +96,13 @@ func TestSplitByTaskBoundary_ToolCallNotBoundary(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "final answer"},
 	}
 
-	segments := splitByTaskBoundary(messages)
+	segments := SegmentMessages(messages)
 	require.Len(t, segments, 1, "tool call cycle should be part of one task")
 	assert.True(t, segments[0].IsComplete)
 }
 
 func TestSplitByTaskBoundary_Empty(t *testing.T) {
-	segments := splitByTaskBoundary(nil)
+	segments := SegmentMessages(nil)
 	assert.Nil(t, segments)
 }
 

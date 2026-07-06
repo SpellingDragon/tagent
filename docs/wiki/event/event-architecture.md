@@ -2,7 +2,7 @@
 
 ## 一、模块定位
 
-`tagent/event` 是 tagent 的**事件类型与摘要工具**包，为 MemoryPlugin 和 SummaryPlugin 提供统一的事件分类和摘要生成能力。
+`tagent/event` 是 tagent 的**事件类型与摘要工具**包，为 `MemoryPlugin` 和 `SummaryPlugin` 提供统一的事件分类和摘要生成能力。
 
 **核心职责**：
 - 定义 tagent 专属的事件类型常量（`external_input`、`agent_output` 等）
@@ -11,7 +11,7 @@
 
 **设计原则**：
 - **严格拒绝非设计折损**：摘要是设计内的信息折损，截断是设计外的双重折损，会破坏压缩质量
-- **统一 event type 分类**：所有非 agent_output / action_command 的角色统一归为 `external_input`
+- **统一 event type 分类**：所有非 `agent_output` / `action_command` 的角色统一归为 `external_input`
 - **零外部依赖**：仅依赖 `trpc-agent-go/model`，不依赖框架其他模块
 
 ---
@@ -46,11 +46,6 @@ graph TB
     SP --> GS
 
     GS --> TC
-
-    style ET fill:#e1f5ff,stroke:#0277bd
-    style IS fill:#fff3e0,stroke:#ef6c00
-    style GS fill:#e8f5e9,stroke:#2e7d32
-    style TC fill:#f3e5f5,stroke:#7b1fa2
 ```
 
 ---
@@ -108,7 +103,7 @@ graph LR
 | 场景 | Message.Role | 是否参与事件流 | EventType | 说明 |
 |------|-------------|-------------|-----------|------|
 | System Prompt | `RoleSystem` | **不参与** | — | 初始化时由 InstructionProcessor 注入，与事件流隔离 |
-| TmuxMonitor 注入 | `RoleSystem` | **参与** | `external_input` | 通过 `Runner.Run()` 进入事件流 |
+| TmuxMonitor 注入 | `RoleSystem` | **参与** | `external_input` | 通过 `TagentAgent.InjectMessage` 进入 EventBus，分类为 `external_input` |
 
 ---
 
@@ -291,7 +286,7 @@ type EventSummaryOptions struct {
 ```
 内容超限
     ↓
-Preprocessor.Process 检测到 Token 超阈值
+ContextManager BeforeModel 检测到 Token 超阈值
     ↓
 SmartCompress.Compress 触发压缩
     ↓
@@ -333,7 +328,7 @@ func EstimateTokens(text string) int {
 }
 ```
 
-**注意**：这是估算，不是精确计算（中英文混合场景约每 2.5~4 个字符 1 个 token）。`agent/token_counter.go` 中有更精确的实现。
+**注意**：这是估算，不是精确计算（中英文混合场景约每 2.5~4 个字符 1 个 token）。`agent/context_manager.go` 中的 `DefaultTokenCounter` 使用 `CharsPerToken = 2.0`，是更保守的估算。
 
 ---
 
@@ -355,8 +350,6 @@ tagent/agent
 ```
 
 ### 10.2 数据流
-
-**Persistent Event Loop 模式**：所有外部输入通过 `InjectMessage` 发布为 `AgentEvent{type:external_input}` 到 EventBus。AgentLoop 在 `Pull` 中批量取出，先追加到 `al.session.Events`，再通过 `onEvent` 持久化到 MemoryStore + framework SessionService，最后由 `Preprocessor.Process` 从 `al.session.Events` 构建完整 messages。
 
 ```mermaid
 sequenceDiagram
@@ -384,17 +377,15 @@ sequenceDiagram
     Note over SP: Tag = eventType + ":" + summary
 ```
 
-> **注意**：在事件驱动架构中，所有外部输入统一为 `AgentEvent{type:external_input}` 发布到 EventBus。MemoryPlugin 的 `ExtractEventType` 基于 `model.Message` 内容推断类型，`RoleSystem`（Tmux 注入）仍正确分类为 `external_input`。
-
 ### 10.3 信息隔离
 
 `tagent/event` 是纯工具层，**不持有任何状态**。所有函数都是纯函数（给定相同输入，总是产生相同输出），可并发安全调用。
 
 ---
 
-## 十一、EventBus 与 AgentEvent（事件驱动架构新增）
+## 十一、EventBus 与 AgentEvent（事件驱动架构）
 
-在事件驱动架构重构中，`tagent/agent` 包新增了 `EventBus` 和 `AgentEvent` 类型（定义在 `agent/event_bus.go`），与 `tagent/event` 包的事件类型常量配合使用。
+在事件驱动架构中，`tagent/agent` 包新增了 `EventBus` 和 `AgentEvent` 类型（定义在 `agent/event_bus.go`），与 `tagent/event` 包的事件类型常量配合使用。
 
 ### 11.1 AgentEvent 结构
 
@@ -402,7 +393,7 @@ sequenceDiagram
 type AgentEvent struct {
     ID        string           // UUID 唯一标识
     Type      string           // "external_input" | "tool_use"
-    Source    string           // "user" | "tmux" | "meditation" | "subagent" | "inject"
+    Source    string           // "user" | "tmux" | "meditation" | "subagent" | "agent_loop" | "inject"
     Timestamp time.Time
     Message   *model.Message   // external_input 载荷
     ToolCall  *model.ToolCall  // tool_use 载荷
@@ -417,70 +408,70 @@ Producers                        EventBus                     Consumer
 ───────────                     ────────                     ────────
 InjectMessage ──┐
 TmuxMonitor ────┤
-MeditationMgr ──┼──→ Publish ──→ [chan *AgentEvent] ──→ Pull ──→ AgentLoop
+MeditationMgr ──┼──→ Publish ──→ [chan *AgentEvent] ──→ Pull ──→ runEventLoop
 SubAgent result ┤    (cap=256)   (有序队列)              (batch drain)
 Tool result ────┤
-AgentLoop ──────┘
-(tool_use)
 ```
+
+`runEventLoop` 是 EventBus 的**唯一消费者**。它批量拉取事件，调用 `ContextManager.BuildInvocation` 合并，再调用 `ContextManager.RunFlow` 执行框架 Flow。
 
 ### 11.3 事件类型与 Bus 触发器
 
-| 事件类型 | 是否进入 Bus | 触发行为 |
+| Bus 事件类型 | 进入 Bus 的生产者 | 在 runEventLoop 中的处理 |
 |---------|------------|---------|
-| `external_input` | ✅ 进入 | AgentLoop.Pull 后由 Preprocessor 处理，shouldCallModel=true |
-| `tool_use` | ✅ 进入 | AgentLoop 异步 dispatch 工具，Preprocessor 跳过（shouldCallModel=false） |
-| `agent_output` | ❌ 不进入 | 直接 emit 到 outputCh，避免自触发死循环 |
-| `action_command` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
-| `thinking_plan` | ❌ 不进入 | 由 MemoryPlugin.OnEvent 持久化 |
+| `external_input` | InjectMessage、TmuxMonitor、MeditationManager、A2A Server、HTTPAPI | `BuildInvocation` 合并为一条 user message，触发 `RunFlow` |
+| `agent_output`（echo） | `RunFlow` 在最终响应时 echo 回 bus | `BuildInvocation` 识别 `Source == agent_output` 并跳过，避免自触发 |
+| `tool_use` | 当前实现中**不实际产生**到 Bus | `BuildInvocation` 只处理 `TypeExternalInput`，tool_use 会被忽略 |
 
-### 11.4 onEvent 回调与 AgentLoop 的 Session 维护
+> **注意**：`TypeToolUse = "tool_use"` 常量定义在 `agent/event_bus.go` 而非 `tagent/event` 包中，因为它是 Bus 内部的潜在触发器类型，不属于持久化事件类型体系。当前 `runEventLoop` 不消费 `tool_use` 事件——工具执行由框架 Runner 在 `RunFlow` 内部完成。
 
-AgentLoop 在以下时机处理事件：
+### 11.4 onEvent 回调与 Session 投影维护
 
-1. **bus 事件消费前**：每个 `external_input` 事件 → 包装为 `event.Event` → 调用 `onEvent` → 追加到 `al.session.Events`
-2. **model response 解析后**：assistant response（含 tool_calls 或 final）→ 包装为 `event.Event` → 调用 `onEvent` → 追加到 `al.session.Events`
-
-由于 `SessionService` 返回的是 session clone，AgentLoop 必须自己维护一个 session copy，供 `Preprocessor` 读取完整历史。`onEvent` 回调先负责持久化并填充 `StateDelta`，AgentLoop 再将完整事件追加到 session copy：
+框架 Runner 在 `RunFlow` 执行期间产生事件流，通过 `onEvent` 回调追加到 `SessionProjection`：
 
 ```
-AgentLoop.Run / emitEvent:
-    │
-    ├── onEvent(frameworkEvt)
-    │     │
-    │     ├── MemoryPlugin.OnEvent
-    │     │     ├── MemoryStore.StoreEvent(K, FullEvent{...})  ← 层3: 持久化
-    │     │     ├── RelationStore.SetParent(K, parentK)        ← 因果链
-    │     │     └── evt.StateDelta["event_key"] = "K"          ← 回写 key
-    │     │
-    │     └── sessionSvc.AppendEvent                           ← 持久化到 framework SessionService
-    │
-    └── 追加 frameworkEvt 到 al.session.Events                ← 层2: AgentLoop 维护的 session copy（含 StateDelta）
+RunFlow:
+  eventCh := runner.Run(...)
+  for fwEvt := range eventCh:
+      onEvent(fwEvt)      → projection.Append(EventReference)
+      outputCh <- fwEvt   → 对外输出
 ```
 
-**关键**：AgentLoop 先调用 `onEvent` 完成持久化并填充 `StateDelta`，再将完整事件追加到 `al.session.Events`，确保 `Preprocessor` 在下一步读到完整历史。
+`TagentAgent.makeOnEventCallback` 仅做一件事：从 `event.Event.StateDelta` 读取 `MemoryPlugin` 写入的 `event_key`、`partition_id`、`event_type`，构建 `EventReference` 并追加到 `SessionProjection`。
+
+框架 Runner 已完成 `sessionService.AppendEvent` 和 `MemoryPlugin.OnEvent`。tagent 的 `onEvent` 不重复持久化。
 
 ### 11.5 三层数据表示与流转
 
 ```
-层1: EventBus AgentEvent (临时触发器)
+层1: EventBus AgentEvent (事件流, 临时)
     │
-    ├── AgentLoop.Run / emitEvent
-    │       ├── 追加到 al.session.Events ──→ 层2: Session.Events (工作内存，AgentLoop 维护的 copy)
-    │       └── onEvent callback ───────────→ 层3: MemoryStore FullEvent (持久化)
-    │                                         ──→ framework SessionService (持久化)
+    ├── runEventLoop.Pull → BuildInvocation → RunFlow
     │
-    └── Preprocessor.Process ──→ 读 al.session.Events ──→ []model.Message (LLM Context)
-                                   ├── event_key 前缀注入
-                                   ├── token 预算检查 (完整 messages)
-                                   └── SmartCompress (完整 messages)
+    └── RunFlow 内部：runner.Run 产生 event.Event 流
+            │
+            ├── onEvent → 追加 EventReference 到 SessionProjection ──→ 层2: SessionProjection (投影, 有界)
+            │
+            └── MemoryPlugin.OnEvent → StoreEvent ───────────────────→ 层3: MemoryStore FullEvent (永久存储, 不可变)
+
+层2 (SessionProjection) → BuildMessages → 按需从 MemoryStore 拉取完整 Content
+                       → InjectEventKeys → [evt_KEY|type] 前缀注入
+                       → 发给 LLM 的 []model.Message
+
+层3 (MemoryStore) → recall/memory_query 工具查询 → 跨 Session 检索
+                  → RelationStore → 因果链回溯
 ```
+
+**关键约束**：
+- `SessionProjection` 只保存轻量 `EventReference`（key + type + summary），不保存完整内容
+- 完整事件内容由 `MemoryPlugin.OnEvent` 持久化到 `MemoryStore`
+- `SmartCompressor` 只修改发往 LLM 的 `[]model.Message`，不修改 `SessionProjection`
+- `Compactor` 只清理 `SessionProjection` 中的旧引用，不删除 `MemoryStore`
+- `MemoryStore` 是唯一完整事件链，Agent 和 Tool 通过 `EventKey` 按需访问
 
 ### 11.6 与 tagent/event 的关系
 
 - `tagent/event` 包提供**事件类型常量**和**摘要生成**工具（纯函数，无状态）
 - `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）
-- `agent/preprocessor.go` 使用 `tagent/event` 的类型常量进行事件过滤
-- `agent/agent_loop.go` 使用 `NewToolUseEvent` / `NewExternalInputEvent` 构造事件
-
-> **注意**：`TypeToolUse = "tool_use"` 常量定义在 `agent/event_bus.go` 而非 `tagent/event` 包中，因为它是 Bus 内部的触发器类型，不属于持久化事件类型体系。
+- `agent/context_manager.go` 使用 `tagent/event` 的类型常量进行事件过滤（`ShouldCallModel`、`BuildInvocation`）
+- `agent/event_bus.go` 使用 `NewExternalInputEvent` / `NewToolUseEvent` 构造事件

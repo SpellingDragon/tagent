@@ -43,10 +43,17 @@ const (
 // NewLocalFileKV creates a LocalFileKV backed by kv.json in the given dataDir.
 // If kv.json already exists, its contents are loaded into memory.
 // The dataDir is created if it does not exist.
+// Any leftover .tmp files from a crashed flush are cleaned up on startup.
 // A background goroutine is started to periodically flush dirty data to disk.
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
+	}
+
+	// Clean up leftover .tmp files from a crashed flush
+	tmpPath := filepath.Join(dataDir, "kv.json.tmp")
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cleanup kv tmp file %s: %w", tmpPath, err)
 	}
 
 	kv := &LocalFileKV{

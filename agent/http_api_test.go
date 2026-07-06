@@ -60,32 +60,20 @@ func (m *mockHTTPRunner) Close() error { return nil }
 func createTestAgent(t *testing.T) *TagentAgent {
 	t.Helper()
 	bus := NewEventBus()
-	compressor := NewSmartCompressor(WithMaxTokens(8000))
-	counter := NewDefaultTokenCounter()
-	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
 	outputCh := make(chan *event.Event, 100)
-	agentLoop := NewAgentLoop(AgentLoopConfig{
-		Bus:          bus,
-		Preprocessor: preproc,
-		Model:        &mockModel{},
-		OutputCh:     outputCh,
-		Name:         "test",
-		MaxToolIters: 10,
-	})
+	cm := newTestContextManager("test", &mockModel{}, nil, outputCh, bus)
 	return &TagentAgent{
-		persistentBus: bus,
-		activeBus:     bus,
-		agentLoop:     agentLoop,
-		preprocessor:  preproc,
-		runner:        &mockHTTPRunner{},
-		config:        &TagentConfig{},
-		outputCh:      outputCh,
-		name:          "test",
-		description:   "test",
+		persistentBus:  bus,
+		activeBus:      bus,
+		contextManager: cm,
+		config:         &TagentConfig{},
+		outputCh:       outputCh,
+		name:           "test",
+		description:    "test",
 	}
 }
 
-// startTestLoop sets up loop state and starts the AgentLoop goroutine
+// startTestLoop sets up loop state and starts the runEventLoop goroutine
 // for tests that need an active loop. Returns a cleanup function.
 func startTestLoop(ta *TagentAgent) func() {
 	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
@@ -93,7 +81,7 @@ func startTestLoop(ta *TagentAgent) func() {
 	ta.loopWg.Add(1)
 	go func() {
 		defer ta.loopWg.Done()
-		ta.agentLoop.Run(ta.loopCtx)
+		ta.runEventLoop(ta.loopCtx, ta.persistentBus, ta.contextManager)
 	}()
 	return func() {
 		ta.loopActive.Store(false)

@@ -135,6 +135,8 @@ func (tr *TrajectoryRecorder) Info() model.Info {
 }
 
 // Close flushes pending records and shuts down the writer goroutine.
+// Close sends a flush sentinel before closing the channel, ensuring
+// the writeLoop syncs all pending data to disk before exiting.
 func (tr *TrajectoryRecorder) Close() error {
 	tr.gcWg.Wait()
 	tr.closeMu.Lock()
@@ -143,10 +145,38 @@ func (tr *TrajectoryRecorder) Close() error {
 		return nil
 	}
 	tr.closed = true
+	// Send flush sentinel before closing channel so writeLoop syncs files.
+	// Non-blocking: if channel is full, writeLoop will drain + sync on close.
+	select {
+	case tr.recordCh <- nil:
+	default:
+	}
 	close(tr.recordCh)
 	tr.closeMu.Unlock()
-	tr.wg.Wait()
+	tr.wg.Wait() // writeLoop drains all records, syncs, and closes files
 	return nil
+}
+
+// Flush forces all buffered records to be written to disk.
+// This is idempotent — calling multiple times has no side effects.
+// Flush sends a sentinel nil record through the channel; the writeLoop
+// processes all pending records before the sentinel, then syncs the file.
+//
+// Thread-safety: Flush holds closeMu for the entire operation, consistent
+// with the record() method, preventing races with Close().
+func (tr *TrajectoryRecorder) Flush() {
+	tr.closeMu.Lock()
+	defer tr.closeMu.Unlock()
+	if tr.closed {
+		return
+	}
+
+	// Send a flush sentinel (nil record). writeLoop handles nil as a flush signal.
+	// Use non-blocking send; if channel is full, records are already being processed.
+	select {
+	case tr.recordCh <- nil:
+	default:
+	}
 }
 
 // record pushes a record to the async channel. Non-blocking; drops on full or closed.
@@ -280,6 +310,17 @@ func (tr *TrajectoryRecorder) writeLoop() {
 	}
 
 	for r := range tr.recordCh {
+		// nil record is a flush sentinel — sync all open files
+		if r == nil {
+			fileMu.Lock()
+			for _, f := range openFiles {
+				if err := f.Sync(); err != nil {
+					log.Warnf("[TrajectoryRecorder] flush sync failed: %v", err)
+				}
+			}
+			fileMu.Unlock()
+			continue
+		}
 		f, err := getFile(r.SessionID)
 		if err != nil {
 			log.Warnf("[TrajectoryRecorder] failed to open file for session %s: %v", r.SessionID, err)

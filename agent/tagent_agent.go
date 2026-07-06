@@ -23,20 +23,26 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	a2ago "trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
 )
@@ -70,15 +76,13 @@ type TagentAgent struct {
 
 	// persistentBus is the bus created at construction time, used by
 	// the persistent AgentLoop started via StartLoop.
-	persistentBus *EventBus
-	agentLoop     *AgentLoop
-	preprocessor  *Preprocessor
+	persistentBus  *EventBus
+	contextManager *ContextManager
 
-	// Framework integration (retained for session/plugin/trace)
+	// Framework integration
 	memStore   memory.MemoryStore
-	memPlugin  *plugin.MemoryPlugin // direct reference for onEvent callback
+	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
 	config     *TagentConfig
-	runner     runner.Runner // retained as shell for session+plugin management
 	sessionSvc session.Service
 
 	// Agent identity (for agent.Agent interface)
@@ -111,6 +115,11 @@ type TagentAgent struct {
 
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
+
+	// projection is the lightweight, bounded Session projection (EventReference[])
+	// shared by onEvent and Preprocessor. It is created per TagentAgent and
+	// passed to each invocation's AgentLoop.
+	projection *SessionProjection
 }
 
 // TagentConfig holds configuration for creating a TagentAgent.
@@ -131,17 +140,17 @@ type TagentConfig struct {
 	Description string // Default: "TagentAgent - AI assistant powered by tagent"
 
 	// Meditation configures the meditation/heartbeat mechanism.
-	// Only effective when the agent is started via StartLoop.
 	Meditation MeditationConfig
 }
 
 // Default configuration values
 const (
-	DefaultMaxToolIterations = 200
-	DefaultMaxTokens         = 8000
-	DefaultCompressThreshold = 0.8
-	DefaultAgentName         = "tagent"
-	DefaultAgentDescription  = "TagentAgent - AI assistant powered by tagent"
+	DefaultMaxToolIterations         = 50
+	DefaultSubAgentMaxToolIterations = 10
+	DefaultMaxTokens                 = 8000
+	DefaultCompressThreshold         = 0.8
+	DefaultAgentName                 = "tagent"
+	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
 )
 
 // buildCompressorOpts builds SmartCompressor options from TagentConfig.
@@ -159,13 +168,36 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	return opts
 }
 
-// newPreprocessorFromConfig creates a Preprocessor from TagentConfig.
-// Shared by NewTagentAgent and Run() so that Run() does not need to access
-// the parent Preprocessor's private fields (maxTokens, tokenCounter, thresholdPct).
-func newPreprocessorFromConfig(cfg *TagentConfig) *Preprocessor {
-	compressor := NewSmartCompressor(buildCompressorOpts(cfg)...)
-	counter := NewDefaultTokenCounter()
-	return NewPreprocessor(compressor, counter, cfg.MaxTokens, cfg.CompressThreshold)
+// newCompressorFromConfig creates a SmartCompressor from TagentConfig.
+func newCompressorFromConfig(cfg *TagentConfig) *SmartCompressor {
+	return NewSmartCompressor(buildCompressorOpts(cfg)...)
+}
+
+// newContextManagerFromConfig creates a ContextManager from TagentConfig.
+// Shared by NewTagentAgent and Run().
+func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
+	compressor := newCompressorFromConfig(cfg)
+	compressor.tokenCounter = NewDefaultTokenCounter()
+	return NewContextManager(ContextManagerConfig{
+		Name:         cfg.Name,
+		Model:        cfg.Model,
+		Tools:        cfg.Tools,
+		SystemPrompt: cfg.SystemPrompt,
+		Temperature:  cfg.Temperature,
+		MaxToolIters: cfg.MaxToolIterations,
+		Compressor:   compressor,
+		Compactor:    NewCompactor(cfg.KeepRecentTasks),
+		TokenCounter: NewDefaultTokenCounter(),
+		MaxTokens:    cfg.MaxTokens,
+		ThresholdPct: cfg.CompressThreshold,
+		MemStore:     cfg.MemoryStore,
+		MemPlugin:    memPlugin,
+		SessionSvc:   sessionSvc,
+		OutputCh:     outputCh,
+		Bus:          bus,
+		Projection:   projection,
+		OnEvent:      onEvent,
+	})
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
@@ -197,6 +229,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg.CompressThreshold <= 0 || cfg.CompressThreshold > 1 {
 		cfg.CompressThreshold = DefaultCompressThreshold
 	}
+	if cfg.KeepRecentTasks <= 0 {
+		cfg.KeepRecentTasks = DefaultCompactKeepRecentTasks
+	}
 
 	// 1. Create MemoryStore (use provided or default to InMemoryStore)
 	var memStore memory.MemoryStore
@@ -206,21 +241,18 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		memStore = memory.NewInMemoryStore()
 	}
 
-	// 2. Create MemoryPlugin (OnEvent: event persistence + causal chain + StateDelta)
+	// 3. Create MemoryPlugin
 	memPlugin := plugin.NewMemoryPlugin(memStore)
 
-	// 3. Create Preprocessor (replacing ContextIntervention)
-	preprocessor := newPreprocessorFromConfig(cfg)
-
 	// Apply identity defaults
+	if cfg.Name == "" {
+		cfg.Name = DefaultAgentName
+	}
 	name := cfg.Name
-	if name == "" {
-		name = DefaultAgentName
+	if cfg.Description == "" {
+		cfg.Description = DefaultAgentDescription
 	}
 	description := cfg.Description
-	if description == "" {
-		description = DefaultAgentDescription
-	}
 
 	// 4. Wrap all tools with OutputLimitTool
 	maxOutputChars := cfg.MaxTokens / 2 * 4
@@ -247,54 +279,30 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		}),
 	)
 
-	// 6. Create outputCh
+	// 6. Create outputCh + EventBus + projection
 	outputCh := make(chan *event.Event, 100)
-
-	// 7. Create EventBus + AgentLoop
 	bus := NewEventBus()
-	agentLoop := NewAgentLoop(AgentLoopConfig{
-		Bus:          bus,
-		Preprocessor: preprocessor,
-		Model:        cfg.Model,
-		Tools:        cfg.Tools,
-		OutputCh:     outputCh,
-		Name:         name,
-		MaxToolIters: cfg.MaxToolIterations,
-		SystemPrompt: cfg.SystemPrompt,
-		Temperature:  cfg.Temperature,
-	})
+	projection := NewSessionProjection()
 
-	// 8. Create Runner (retained as shell for session/plugin management).
-	// We pass a lightweight "identity agent" to the runner — it only uses
-	// it for Info() (name). Actual execution goes through AgentLoop.
-	identityAgent := &identityOnlyAgent{
-		info: agent.Info{Name: name, Description: description},
-	}
-	r := runner.NewRunner(name, identityAgent, runner.WithPlugins(
-		plugin.NewSummaryPlugin(),
-		memPlugin,
-	), runner.WithSessionService(sessionSvc))
-
+	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
 	ta := &TagentAgent{
 		persistentBus: bus,
-		activeBus:     bus, // initially the persistent bus is active
-		agentLoop:     agentLoop,
-		preprocessor:  preprocessor,
+		activeBus:     bus,
 		memStore:      memStore,
 		memPlugin:     memPlugin,
 		config:        cfg,
-		runner:        r,
 		sessionSvc:    sessionSvc,
 		name:          name,
 		description:   description,
 		outputCh:      outputCh,
-		closers:       []Closer{sessionSvc},
+		closers:       []Closer{},
+		projection:    projection,
 	}
 
-	// Wire onEvent callback after ta is created.
-	// This connects AgentLoop events to MemoryPlugin (persistence + causal chain)
-	// and SessionService (session.Events append).
-	agentLoop.SetOnEvent(ta.makeOnEventCallback(""))
+	// 8. Create onEvent callback and ContextManager.
+	onEvent := ta.makeOnEventCallback("", projection)
+	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
+	ta.contextManager = cm
 
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
@@ -303,21 +311,6 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 	return ta, nil
 }
-
-// identityOnlyAgent is a minimal agent.Agent implementation used only to
-// satisfy runner.NewRunner's agent parameter. The runner uses it for
-// Info() (name). Actual execution goes through TagentAgent.AgentLoop.
-type identityOnlyAgent struct {
-	info agent.Info
-}
-
-func (a *identityOnlyAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
-	return nil, fmt.Errorf("identityOnlyAgent: Run should not be called directly")
-}
-func (a *identityOnlyAgent) Tools() []tool.Tool              { return nil }
-func (a *identityOnlyAgent) Info() agent.Info                { return a.info }
-func (a *identityOnlyAgent) SubAgents() []agent.Agent        { return nil }
-func (a *identityOnlyAgent) FindSubAgent(string) agent.Agent { return nil }
 
 // Run implements agent.Agent interface.
 //
@@ -385,36 +378,30 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// (SmartCompressor has mutable state and must not be shared across
 	// concurrent goroutines).
 	invBus := NewEventBus()
-	// Switch active bus to invBus so InjectMessage (e.g., TmuxMonitor
-	// callbacks) routes to this invocation's AgentLoop, not the parent's.
 	ta.setActiveBus(invBus)
 	invOutputCh := make(chan *event.Event, 100)
-	invPreprocessor := newPreprocessorFromConfig(ta.config)
-	invLoop := NewAgentLoop(AgentLoopConfig{
-		Bus:          invBus,
-		Preprocessor: invPreprocessor,
-		Model:        ta.config.Model,
-		Tools:        ta.config.Tools,
-		OutputCh:     invOutputCh,
-		Name:         ta.name,
-		MaxToolIters: ta.config.MaxToolIterations,
-		SystemPrompt: ta.config.SystemPrompt,
-		Temperature:  ta.config.Temperature,
-	})
-	// Attach session so Preprocessor can build messages from session.Events.
-	if sess := ta.getOrCreateSession(sessionID); sess != nil {
-		invLoop.SetSession(sess)
+	invProjection := NewSessionProjection()
+	invOnEvent := ta.makeOnEventCallback(sessionID, invProjection)
+	maxToolIters := DefaultSubAgentMaxToolIterations
+	if ta.config.MaxToolIterations > 0 && ta.config.MaxToolIterations < maxToolIters {
+		maxToolIters = ta.config.MaxToolIterations
 	}
-	invLoop.SetOnEvent(ta.makeOnEventCallback(sessionID))
+	invCfg := *ta.config
+	invCfg.MaxToolIterations = maxToolIters
+	if invCfg.Name == "" {
+		invCfg.Name = ta.name
+	}
+	invCM := newContextManagerFromConfig(&invCfg, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
+	invCM.SetUserIDSessionID(ta.lastUserID, sessionID)
 
 	// Publish the initial message as external_input.
 	invBus.Publish(NewExternalInputEvent("user", message))
 
-	// Run the AgentLoop in a goroutine. It will exit when ctx is cancelled.
+	// Run the event loop in a goroutine. It will exit when ctx is cancelled.
 	runCtx, runCancel := context.WithCancel(ctx)
 	go func() {
 		defer close(invOutputCh)
-		invLoop.Run(runCtx)
+		ta.runEventLoop(runCtx, invBus, invCM)
 	}()
 
 	// Wrap the outputCh: forward events and cancel the loop when the
@@ -521,9 +508,11 @@ func (ta *TagentAgent) Close() error {
 		}
 	}
 
-	// Close runner
-	if err := ta.runner.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("close runner: %w", err))
+	// Close ContextManager (closes unified Runner)
+	if ta.contextManager != nil {
+		if err := ta.contextManager.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close context manager: %w", err))
+		}
 	}
 
 	if len(errs) > 0 {
@@ -537,9 +526,12 @@ func (ta *TagentAgent) MemStore() memory.MemoryStore {
 	return ta.memStore
 }
 
-// Runner returns the underlying Runner (for TmuxMonitor event injection).
+// Runner returns the underlying Runner from ContextManager.
 func (ta *TagentAgent) Runner() runner.Runner {
-	return ta.runner
+	if ta.contextManager != nil {
+		return ta.contextManager.runner
+	}
+	return nil
 }
 
 // InjectMessage injects a message into the agent's active EventBus as an
@@ -614,30 +606,16 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 	return sess
 }
 
-// makeOnEventCallback creates the unified onEvent callback for both
-// StartLoop (persistent) and Run() (sub-agent) modes. When sessionID is
-// empty, the callback uses ta.lastSessionID (set by StartLoop/Run).
-func (ta *TagentAgent) makeOnEventCallback(sessionID string) func(evt *event.Event) {
+// makeOnEventCallback creates the onEvent callback for StartLoop and Run().
+// It only performs projection.Append — sessionSvc.AppendEvent and
+// MemoryPlugin.OnEvent are handled by the framework Runner internally.
+func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *SessionProjection) func(evt *event.Event) {
 	return func(evt *event.Event) {
-		if evt == nil || ta.sessionSvc == nil {
+		if evt == nil || projection == nil {
 			return
 		}
-		sess := ta.getOrCreateSession(sessionID)
-		if sess == nil {
-			return
-		}
-		ctx := context.Background()
-		inv := &agent.Invocation{
-			AgentName: ta.name,
-			Session:   sess,
-		}
-		if ta.memPlugin != nil {
-			if _, err := ta.memPlugin.OnEvent(ctx, inv, evt); err != nil {
-				log.Errorf("[onEvent] MemoryPlugin.OnEvent failed: %v", err)
-			}
-		}
-		if err := ta.sessionSvc.AppendEvent(ctx, sess, evt); err != nil {
-			log.Errorf("[onEvent] AppendEvent failed: %v", err)
+		if ref, ok := BuildEventReference(evt); ok {
+			projection.Append(ref)
 		}
 	}
 }
@@ -685,15 +663,123 @@ func (ta *TagentAgent) injectExternalContext(msg model.Message) model.Message {
 // ---------------------------------------------------------------------------
 // Persistent Event Loop — 持久事件循环
 //
-// In the event-driven architecture, StartLoop launches an AgentLoop goroutine
-// that pulls events from the EventBus and drives the model via Preprocessor.
-// External inputs (user, tmux, meditation) are published to the bus via
-// InjectMessage. Tool results are also published to the bus by the
-// ToolDispatch layer.
-//
-// The AgentLoop is the sole consumer of the bus; outputCh receives final
-// agent_output events for callers.
+// runEventLoop is the core event loop, mirroring the prototype's DefaultRun.
+// It pulls events from EventBus, merges them via ContextManager.BuildInvocation,
+// and executes the framework Flow via ContextManager.RunFlow.
 // ---------------------------------------------------------------------------
+
+// runEventLoop is the core event loop (prototype's DefaultRun equivalent).
+// It blocks until ctx is cancelled.
+// On RunFlow failure, uses exponential backoff retry (100ms→200ms→400ms, max 3).
+// After exhausting retries, publishes an error event to EventBus and continues.
+func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *ContextManager) {
+	const maxRetries = 3
+	retryDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			log.Infof("[runEventLoop:%s] ctx cancelled, exiting: %v", ta.name, err)
+			return
+		}
+
+		events, err := bus.Pull(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				log.Infof("[runEventLoop:%s] Pull returned: %v, exiting", ta.name, err)
+				return
+			}
+			log.Errorf("[runEventLoop:%s] Pull error: %v", ta.name, err)
+			return
+		}
+		if len(events) == 0 {
+			continue
+		}
+		log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
+			ta.name, len(events), summarizeEvents(events))
+
+		msg := cm.BuildInvocation(events)
+		if msg.Content == "" {
+			log.Debugf("[runEventLoop:%s] empty message after merge, skipping", ta.name)
+			continue
+		}
+
+		// RunFlow with exponential backoff retry
+		var lastErr error
+		retried := false
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			if attempt > 0 {
+				// Check ctx before retrying
+				if err := ctx.Err(); err != nil {
+					log.Infof("[runEventLoop:%s] ctx cancelled during retry, exiting: %v", ta.name, err)
+					return
+				}
+				delay := retryDelays[attempt-1]
+				log.Warnf("[runEventLoop:%s] RunFlow retry %d/%d after %v", ta.name, attempt, maxRetries, delay)
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					log.Infof("[runEventLoop:%s] ctx cancelled during retry wait, exiting", ta.name)
+					return
+				}
+			}
+
+			if err := cm.RunFlow(ctx, msg); err != nil {
+				lastErr = err
+				log.Errorf("[runEventLoop:%s] RunFlow failed (attempt %d/%d): %v", ta.name, attempt+1, maxRetries+1, err)
+				if attempt < maxRetries {
+					retried = true
+					continue
+				}
+				// Retries exhausted — publish error event to EventBus
+				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries, publishing error event", ta.name, maxRetries)
+				ta.publishErrorEvent(bus, lastErr)
+			} else {
+				lastErr = nil
+				break
+			}
+		}
+
+		if lastErr != nil && !retried {
+			// Single failure without retry (shouldn't happen with current logic, but defensive)
+			log.Errorf("[runEventLoop:%s] RunFlow failed: %v", ta.name, lastErr)
+		}
+	}
+}
+
+// publishErrorEvent publishes an error event to EventBus so external
+// listeners can be aware of RunFlow failures.
+func (ta *TagentAgent) publishErrorEvent(bus *EventBus, runErr error) {
+	if bus == nil || runErr == nil {
+		return
+	}
+	errMsg := fmt.Sprintf("[error] RunFlow failed after retries: %v", runErr)
+	busEvt := &AgentEvent{
+		ID:        uuid.NewString(),
+		Type:      tagentevent.TypeExternalInput,
+		Source:    "error",
+		Timestamp: time.Now(),
+		Message:   &model.Message{Role: model.RoleSystem, Content: errMsg},
+		Metadata:  make(map[string]any),
+	}
+	bus.Publish(busEvt)
+}
+
+// summarizeEvents returns a compact summary of event types in a batch.
+func summarizeEvents(events []*AgentEvent) string {
+	counts := make(map[string]int)
+	for _, evt := range events {
+		if evt == nil {
+			counts["nil"]++
+			continue
+		}
+		counts[evt.Type]++
+	}
+	var parts []string
+	for typ, n := range counts {
+		parts = append(parts, fmt.Sprintf("%s:%d", typ, n))
+	}
+	return strings.Join(parts, ", ")
+}
 
 // StartLoop starts the persistent event loop.
 // It creates an EventBus, launches an AgentLoop goroutine, and returns
@@ -719,24 +805,27 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 
 	// Create or attach session for the persistent loop.
 	sess := ta.getOrCreateSession(sessionID)
-	ta.agentLoop.SetSession(sess)
+	_ = sess // session managed by ContextManager's Runner
+
+	// Update ContextManager with session context.
+	ta.contextManager.SetUserIDSessionID(userID, sessionID)
 
 	// Set TrajectoryRecorder session info (if enabled).
 	if ta.trajectoryRecorder != nil {
 		ta.trajectoryRecorder.SetSessionInfo(userID, sessionID)
 	}
 
-	// Launch AgentLoop in a dedicated goroutine.
+	// Launch runEventLoop in a dedicated goroutine.
 	ta.loopWg.Add(1)
 	go func() {
 		defer ta.loopWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				log.Errorf("[StartLoop] AgentLoop panic recovered: %v", r)
+				log.Errorf("[StartLoop] runEventLoop panic recovered: %v", r)
 			}
 			close(ta.outputCh)
 		}()
-		ta.agentLoop.Run(ta.loopCtx)
+		ta.runEventLoop(ta.loopCtx, ta.persistentBus, ta.contextManager)
 	}()
 
 	// Start meditation manager (if configured).
@@ -819,4 +908,22 @@ func (m *SwappableModel) Info() model.Info {
 	inner := m.inner
 	m.mu.RUnlock()
 	return inner.Info()
+}
+
+// NewA2AServer creates an A2A server that exposes the given TagentAgent.
+func NewA2AServer(ta *TagentAgent, host string) (*a2ago.A2AServer, error) {
+	if ta == nil {
+		return nil, fmt.Errorf("tagent agent is required")
+	}
+	if host == "" {
+		return nil, fmt.Errorf("host is required")
+	}
+	srv, err := a2aserver.New(
+		a2aserver.WithAgent(ta, true),
+		a2aserver.WithHost(host),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create A2A server: %w", err)
+	}
+	return srv, nil
 }

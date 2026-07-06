@@ -16,18 +16,25 @@ The result is a persistent, event-driven agent that can run as:
 
 ## Design Philosophy
 
-| Principle | Meaning |
-|-----------|---------|
-| **Event-Driven** | All inputs are unified as events on the EventBus; tool results are published back as external_input events, eliminating synchronous blocking. |
-| **Pure Engine, No Business Logic** | AgentLoop contains no domain semantics; all decisions are made in the Preprocessor. |
-| **Reuse Framework Primitives** | Retains trpc-agent-go's model/tool/event/session/plugin infrastructure, only replacing the execution model. |
-| **Sub-Agent Isolation** | Each sub-agent has its own EventBus and SmartCompressor; no shared mutable state. |
-| **Async Tool Dispatch** | Tool execution runs in independent goroutines; results are published back to the bus as events. |
-| **Memory as the Brain** | MemoryStore is the sole component maintaining the complete event chain; Agent and Tool access it on-demand via EventKeys. |
-| **View Transformation** | Context compression modifies only the messages sent to the LLM — it never touches Session or MemoryStore original data. |
-| **Separation of Concerns** | Application wiring (`tagent.New()` factory) lives in root package `tagent.go`; the `agent/` package focuses on core mechanisms only. |
-| **Event Context Propagation** | The top-level agent's LLM context is an event record stream. Sub-agents receive `event_key` to fetch full context from MemoryStore. |
-| **Information Isolation** | Session stores lightweight `EventReference`; full event data lives in `MemoryStore`. Compression and LLM views are independent of stored data. |
+tagent's core design philosophy originates from [prototype/agent.go](prototype/agent.go) (126-line abstract implementation). The prototype defines an extensible framework skeleton using replaceable function fields (`OnEvents`, `Compact`, `Run`), with the core philosophy: **inputs is a projection of the event flow, the event bus carries the event flow, when inputs is full it triggers Compact and memory persistence**.
+
+### Three Invariants
+
+| Invariant | Meaning | Prototype |
+|-----------|---------|-----------|
+| **① inputs is projection** | Bounded working memory, read and write the same data | OnEvents append, ModelCompletion read, Compact clear — all operate on same inputs |
+| **② Compact modifies projection** | Does not modify event flow (bus) or permanent storage | `inputs = inputs[:0]` — clear projection, events already flowed through bus |
+| **③ Tool results write back to bus** | Does not directly manipulate inputs | goroutine executes tool → result goes to bus → next OnEvents appends |
+
+### Implicit Design Points
+
+- **All outputs write back to bus**: OnEvents return value is also written to eventBus, same path as tool results
+- **model as tool**: Prototype registers `tools["model"] = ModelCompletion`, model and other tools share the same call path (in production, model is independent as `model.Model.GenerateContent` due to framework interface differences)
+- **Batch processing**: After Pull gets the first event, non-blocking drain all remaining events into a batch
+
+### Relationship with trpc-agent-go
+
+tagent reuses the framework's interface primitives (Agent, Model, Tool, Plugin, Session, Event, Invocation), extending at the persistent loop and async injection layer. tagent's unique components are only EventBus + StartLoop + MemoryStore + Compact + MeditationManager + TrajectoryRecorder; the ReAct loop itself should reuse the framework's Flow.
 
 > Detailed design rationale: [agent-architecture.md §1](docs/wiki/agent/agent-architecture.md)
 
@@ -41,27 +48,29 @@ Three layers of data representation, each with a distinct purpose:
 
 | Layer | Location | Responsibility | Lifetime |
 |-------|----------|---------------|----------|
-| **EventBus AgentEvent** | Agent memory | Temporary trigger, distinguishes external_input / tool_use | Publish → Pull, then discarded |
-| **Session.Events** | session.Session | Working memory, sole history source for Preprocessor | During session lifetime |
-| **MemoryStore FullEvent** | File/DB | Long-term memory, recall tool queries | Permanent |
+| **EventBus AgentEvent** | Agent memory | Event flow (source of truth), distinguishes external_input / tool_use | Publish → Pull, then discarded |
+| **Session.Events EventReference[]** | session.Session | Projection (bounded working memory), sole history source for Preprocessor | During session lifetime, Compactable |
+| **MemoryStore FullEvent** | File/DB | Permanent storage (immutable), recall tool queries | Permanent |
+
+> **Known implementation deviation**: Current production code stores `[]event.Event` (full events with `*model.Response`) in Session.Events, not EventReference. Design goal is EventReference[] (lightweight reference: key + type + summary), with full data in MemoryStore.
 
 ```mermaid
 graph TB
-    subgraph "Layer 1: EventBus (temporary)"
+    subgraph "Layer 1: EventBus (event flow, temporary)"
         EB["AgentEvent<br/>(external_input/tool_use)"]
     end
 
-    subgraph "Layer 2: Session.Events (working memory)"
-        SESS["session.Events[]<br/>(complete, uncompressed)"]
+    subgraph "Layer 2: Session.Events (projection, bounded)"
+        SESS["EventReference[]<br/>(key + type + summary)"]
     end
 
-    subgraph "Layer 3: MemoryStore (persistent)"
+    subgraph "Layer 3: MemoryStore (permanent, immutable)"
         MS["FullEvent<br/>(causal chain + full content)"]
     end
 
-    EB -->|"onEvent callback"| SESS
-    EB -->|"onEvent callback"| MS
-    SESS -->|"Preprocessor reads"| LLM["[]model.Message<br/>(LLM Context, compressible)"]
+    EB -->|"onEvent 5-step pipeline"| SESS
+    EB -->|"onEvent 5-step pipeline"| MS
+    SESS -->|"Preprocessor fetches on demand"| LLM["[]model.Message<br/>(LLM Context)"]
     MS -->|"recall tool query"| TOOL["Tool"]
 
     style EB fill:#e3f2fd,stroke:#1565c0
@@ -71,11 +80,11 @@ graph TB
 ```
 
 **Key constraints**:
-- **Session.Events is the sole history source** — AgentLoop does not maintain its own history
-- **AgentLoop maintains Session.Events directly** — because `SessionService` returns a session clone, AgentLoop additionally appends events to its own session copy alongside the `onEvent` callback, ensuring `Preprocessor` reads the complete history
-- **onEvent callback handles MemoryStore persistence** — `MemoryPlugin.OnEvent` writes long-term memory (FullEvent + causal chain)
-- **sessionSvc.AppendEvent is still invoked** — to persist events to the framework `SessionService`, but AgentLoop reads from its own maintained session copy
-- **Preprocessor builds LLM Context from Session.Events** — compression applies to full history, not just new batch
+- **Session.Events is a projection** — Bounded working memory, not full event storage. onEvent appends EventReference (lightweight reference), Preprocessor reads from the same Session.Events. Read and write the same data, no copy maintained
+- **onEvent 5-step pipeline** — On each event: ①ExtractEventType (infer type) → ②MemoryStore.StoreEvent (persist FullEvent) → ③RelationStore.SetParent (causal chain) → ④StateDelta fill (event_key/event_type) → ⑤Session.Events.append (EventReference)
+- **Compact cleans projection** — When Session.Events exceeds limit, clean old references replacing with summary reference, MemoryStore untouched (already persisted by onEvent)
+- **Preprocessor fetches on demand** — When building messages from EventReference, recent references fetch full Content from MemoryStore, old references use EventSummary directly
+- **MemoryStore is the sole complete event chain** — Agent and Tool access on-demand via EventKey
 
 ### Event Classification
 
@@ -237,8 +246,8 @@ tagent's core runtime model. The agent acts as a persistent, OS-like process: co
 ```mermaid
 graph LR
     START["StartLoop<br/>(userID, sessionID)"] --> PULL["EventBus.Pull<br/>batch all pending events"]
-    PULL --> ONEVT["Append to al.session.Events + onEvent callback<br/>MemoryStore + SessionService persistence"]
-    ONEVT --> PROC["Preprocessor.Process<br/>read al.session.Events to build messages + compress"]
+    PULL --> ONEVT["onEvent 5-step pipeline<br/>(persist + causal + StateDelta + append EventReference)"]
+    ONEVT --> PROC["Preprocessor.Process<br/>read Session.Events (projection) + compress"]
     PROC --> MODEL{"shouldCallModel?"}
     MODEL -->|"Yes"| CALL["model.GenerateContent"]
     MODEL -->|"No"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
@@ -252,33 +261,42 @@ graph LR
     style CALL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
 ```
 
-Key design: AgentLoop is a pure engine. All business decisions (event filtering, shouldCallModel, compression) live in Preprocessor. AgentLoop invokes `onEvent` first so MemoryPlugin can populate `StateDelta` and persist the event, then appends it to `al.session.Events`, ensuring `Preprocessor` reads a Session.Events containing the latest events.
+Key design: onEvent executes the 5-step pipeline (event extraction → memory write → causal chain → StateDelta → projection append) on each event, then Preprocessor reads from the same Session.Events. Read and write the same data, no copy maintained.
 
 > Details: [agent-architecture.md §7](docs/wiki/agent/agent-architecture.md)
 
-### 2. Two-Stage Context Compression
+### 2. Context Compression and Projection Cleanup
 
-When token usage exceeds the threshold (`MaxTokens * CompressThreshold`), `SmartCompressor` activates in `Preprocessor.Process`:
+tagent has two independent context management operations:
 
-- **Stage 1 — Task boundary drop**: Split messages into `TaskSegment`s by task boundaries (assistant messages without tool_calls = task complete). Drop old segments, keep recent N (`KeepRecentTasks`, default 2).
-- **Stage 2 — LLM summary** (optional): Generate batched LLM summaries of dropped segments. Summaries are injected as system messages, replacing raw conversation history.
+**SmartCompressor (compress LLM view)**: Activates when token usage exceeds threshold (`MaxTokens * CompressThreshold`):
+- **Stage 1 — Task boundary drop**: Split messages into `TaskSegment`s. Drop old segments, keep recent N (`KeepRecentTasks`, default 2)
+- **Stage 2 — LLM summary** (optional): Generate batched LLM summaries of dropped segments
+- **Target**: `[]model.Message` (LLM view), does not modify Session.Events or MemoryStore
 
-Multi-round compression: if one round isn't enough, `KeepRecentTasks` is decremented and compression runs again (up to 5 rounds).
+**Compact (clean Session projection)**: Triggered when SmartCompressor still exceeds limit after compression:
+- **Strategy**: Split Session.Events by task boundaries, keep recent N complete tasks' EventReference, replace old references with summary reference (includes compressed EventKey list)
+- **Target**: Session.Events (projection), does not modify MemoryStore (already persisted by onEvent)
+- **Temporal relationship**: onEvent persists FullEvent to MemoryStore in real-time on each event; Compact cleans projection when it's full — different timing, Compact doesn't lose data
 
-**View transformation principle**: compression modifies only the `[]model.Message` built by Preprocessor — Session.Events and MemoryStore data are never touched.
+| Operation | Target | Trigger | Effect |
+|-----------|--------|---------|--------|
+| SmartCompressor | messages (LLM view) | token exceeds threshold | Compress message list LLM sees |
+| Compact | Session.Events (projection) | Still over limit after SmartCompress | Clean old references, replace with summary |
+
+**Three-tier mutability**: messages (SmartCompressor can modify), Session.Events (Compact can clean), MemoryStore (never mutable).
 
 > Details: [agent-architecture.md §9](docs/wiki/agent/agent-architecture.md)
 
-### 3. Event-Driven Memory (Causal Chain + EventKey)
+### 3. Event-Driven Memory (onEvent 5-Step Pipeline + Causal Chain)
 
-AgentLoop processes each event in two steps (`onEvent` persists and fills `StateDelta`, then appends to session copy):
+On each event arrival, the `onEvent` callback executes a 5-step pipeline:
 
-1. **Infer event type** (`external_input`, `agent_output`, `action_command`, etc.)
-2. **Generate Snowflake EventKey** (64-bit: PartitionID + Timestamp + Sequence)
-3. **Build causal chain** via `RelationStore.SetParent` — each event points to its predecessor
-4. **Persist FullEvent** to MemoryStore (immutable)
-5. **Persist to framework SessionService** via `sessionSvc.AppendEvent`
-6. **Append to `al.session.Events`** (with `StateDelta: event_key/type`) — because `SessionService` returns a session clone, AgentLoop maintains its own session copy for `Preprocessor`
+1. **Event extraction**: `ExtractEventType` infers type from Message.Role (`external_input`, `agent_output`, `action_command`, etc.)
+2. **Memory write**: Persist FullEvent to MemoryStore (permanent storage, immutable)
+3. **Causal chain**: `RelationStore.SetParent` — each event points to its predecessor
+4. **StateDelta fill**: `event_key`, `event_type` written to `evt.StateDelta`
+5. **Projection append**: Session.Events appends EventReference (lightweight reference: key + type + summary)
 
 The LLM sees event keys in message prefixes (`[evt_123456|agent_output]`), enabling it to pass relevant keys to sub-agents for context retrieval.
 
@@ -337,11 +355,11 @@ sequenceDiagram
     end
 
     AL->>AL: Pull (batch all)
-    AL->>AL: onEvent (MemoryStore + SessionService) then append to al.session.Events
-    AL->>PP: Process(batch, al.session)
+    AL->>AL: onEvent 5-step pipeline (persist + causal + StateDelta + append EventReference)
+    AL->>PP: Process(batch, session)
     PP-->>AL: messages + shouldCallModel
     AL->>AL: model.GenerateContent
-    AL->>AL: Append assistant response to al.session.Events + onEvent
+    AL->>AL: onEvent 5-step pipeline (persist response + append EventReference)
     AL->>OC: emit → outputCh
     AL->>AL: back to Pull
 ```
@@ -395,18 +413,18 @@ User sends this request in **Persistent Event Loop mode**. The agent needs multi
 | Step | Module | Action | Event Type | MemoryStore Operation |
 |------|--------|--------|-----------|----------------------|
 | 1 | **User** → `TagentAgent` | `InjectMessage("Review recent Git commits...")` | — | — |
-| 2 | **AgentLoop** | `EventBus.Pull` → onEvent (MemoryStore + SessionService) then append to `al.session.Events` | — | — |
-| 3 | **onEvent** → **MemoryPlugin** | Wrap external_input as event.Event → `OnEvent`: infer type, generate EventKey, persist FullEvent, build causal chain → `sessionSvc.AppendEvent` | `external_input` | Store FullEvent (immutable); AgentLoop appends to `al.session.Events` |
-| 4 | **Preprocessor** | Build messages from `al.session.Events`, inject `[evt_KEY\|external_input]` prefix, check token budget | — | — |
-| 5 | **AgentLoop** → LLM | LLM decides to call `action` tool | `thinking_plan` | `onEvent` persists assistant message with tool_calls |
-| 6 | **ActionTool** | goroutine executes `git log --oneline -10`, result published as external_input back to bus | `action_command` | Next round onEvent persists tool result, EventKey → causal parent = step 5 |
+| 2 | **AgentLoop** | `EventBus.Pull` → `onEvent` 5-step pipeline (event extraction → memory write → causal chain → StateDelta → append EventReference) | — | — |
+| 3 | **onEvent** → **MemoryPlugin** | 5-step pipeline: infer type, generate EventKey, persist FullEvent, build causal chain, fill StateDelta, append EventReference to Session.Events (projection) | `external_input` | Store FullEvent (immutable) |
+| 4 | **Preprocessor** | Build messages from `Session.Events` (projection), fetch full Content from MemoryStore on demand, inject `[evt_KEY\|external_input]` prefix, check token budget | — | — |
+| 5 | **AgentLoop** → LLM | LLM decides to call `action` tool | `thinking_plan` | `onEvent` 5-step pipeline persists assistant message with tool_calls |
+| 6 | **ActionTool** | goroutine executes `git log --oneline -10`, result published as external_input back to bus | `action_command` | Next round onEvent 5-step pipeline persists tool result, EventKey → causal parent = step 5 |
 | 7 | **AgentLoop** → LLM | LLM sees git log, decides to call `recall` sub-agent | `thinking_plan` | `onEvent` persists new assistant message with tool_calls |
 | 8 | **AgentToolWrapper** | Parse `event_keys` from LLM args → `parentStore.GetEvent(key)` → serialize context → `RuntimeState["external_context"]` | — | Read FullEvents from MemoryStore (no write) |
 | 9 | **RecallAgent** (sub-agent) | `agent.Run()` → independent EventBus + AgentLoop → returns summary | `thinking_recall` | Sub-agent persists its own events; parent sees only tool result |
-| 10 | **Preprocessor** | Token budget exceeded → `SmartCompressor.Compress()`: drop old TaskSegment, generate LLM summary | `context_compress` *(view-only)* | **No MemoryStore change**. `collectCompressedKeys` extracts EventKeys |
+| 10 | **Preprocessor** | Token budget exceeded → `SmartCompressor.Compress()` (compress messages view) → still over limit then `Compact` (clean Session.Events projection, replace old references with summary) | `context_compress` *(view-only)* | **No MemoryStore change** (Compact doesn't touch permanent storage) |
 | 11 | **AgentLoop** → LLM | LLM sees: `[compress_event]` + `[summary]` + `[recent: recall result]`. Decides to call `knowledge` sub-agent | `thinking_plan` | `onEvent` persists with `[evt_KEY\|thinking_plan]` prefix |
 | 12 | **KnowledgeAgent** (sub-agent) | `AgentToolWrapper` → `agent.Run()` → independent AgentLoop → returns docs | `thinking_knowledge` | Sub-agent persists its own events |
-| 13 | **AgentLoop** → LLM | LLM synthesizes compressed history + recall + knowledge → generates final response (no tool_calls) | `agent_output` | `onEvent` persists final response, EventKey → causal parent = step 12 |
+| 13 | **AgentLoop** → LLM | LLM synthesizes compressed history + recall + knowledge → generates final response (no tool_calls) | `agent_output` | `onEvent` 5-step pipeline persists final response, EventKey → causal parent = step 12 |
 | 14 | **AgentLoop** | emit → outputCh → back to `EventBus.Pull` | — | — |
 
 ### Event Chain (Causal)

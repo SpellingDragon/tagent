@@ -19,7 +19,7 @@ go.work
 go.work.sum
 
 # OpenSpec
-openspec/
+# openspec/
 
 # Node.js (example skills with npm dependencies)
 node_modules/

@@ -312,12 +312,12 @@ const (
 const (
 	DefaultEntry          = "tagent"
 	DefaultPromptDir      = "resources/prompts"
-	DefaultMaxToolIter    = 200
+	DefaultMaxToolIter    = 50
 	DefaultMaxTokens      = 8000
 	DefaultTemperature    = 0.7
 	DefaultCompressThresh = 0.8
 
-	DefaultAgentMaxToolIter = 5
+	DefaultAgentMaxToolIter = 10
 	DefaultAgentMaxTokens   = 4096
 	DefaultAgentTemp        = 0.3
 )

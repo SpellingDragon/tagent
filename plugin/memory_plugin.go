@@ -130,13 +130,14 @@ func (p *MemoryPlugin) onEvent(
 		}
 	}
 
-	// 8. Write back EventKey and PartitionID to StateDelta
+	// 8. Write back EventKey, PartitionID, EventType, and EventSummary to StateDelta
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
 	evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
 	evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
 	evt.StateDelta["event_type"] = []byte(eventType)
+	evt.StateDelta["event_summary"] = []byte(eventSummary)
 
 	// 9. Update independent causal chain (thread-safe)
 	p.mu.Lock()

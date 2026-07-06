@@ -9,13 +9,13 @@
 - 定义 `MemoryStore` 接口规范
 - 提供 `InMemoryStore`（内存实现）和 `FileSegmentStore`（基于 KV store 的分层存储实现）
 - 通过 `EventKey` 和 `RelationStore.SetParent` 构建有向因果事件链
-- 支持 **RAG 向量搜索**（可选接口，当前为空实现，可扩展接入向量数据库）
+- 提供向量搜索接口（`SearchByEmbedding`），当前实现返回 `ErrVectorSearchNotSupported`，可扩展接入向量数据库
 
 **设计原则**：
 - **信息隔离**：Session 只保存轻量引用（`EventReference`），完整数据在 MemoryStore
 - **因果优先**：每个事件通过 `RelationStore.SetParent` 指向其前驱事件，支持因果回溯
 - **视图独立**：压缩只修改 LLM 消息视图，不修改 MemoryStore 中的数据
-- **RAG 扩展**：向量搜索接口可选实现，当前为空实现（stub），可扩展接入向量数据库
+- **向量搜索扩展**：`MemoryStore` 接口包含 `SearchByEmbedding`/`StoreEventWithEmbedding`/`SupportsVectorSearch`，当前实现返回 `ErrVectorSearchNotSupported`，可扩展接入向量数据库
 
 ---
 
@@ -23,7 +23,7 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `types.go` | 249 | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ RAG 向量搜索接口 |
+| `types.go` | 251 | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ 向量搜索接口 |
 | `in_memory_store.go` | 499 | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
 | `segment_store.go` | 735 | 基于 KV store 的分层存储实现（L0/L1/L2/L3） |
 | `relation_store.go` | 485 | 因果链关系存储（SetParent/GetParent/GetChildren） |
@@ -45,7 +45,7 @@ graph TB
         RS["RelationStore\n(因果链管理)"]
         PID["PartitionID\n(存储分区)"]
         QO["QueryOptions\n(过滤/分页)"]
-        RAG["RAG Vector Search\n(SearchByEmbedding)"]
+        RAG["Vector Search\n(SearchByEmbedding)"]
     end
 
     subgraph "实现"
@@ -215,16 +215,19 @@ graph LR
 
 ### 5.1 RelationStore 因果链语义
 
-ParentKey 已从 FullEvent 结构体中移除。因果关系由独立的 `RelationStore` 维护，通过 `RelationStoreProvider` 接口访问：
+ParentKey 已从 FullEvent 结构体中移除。因果关系由独立的 `RelationStore` 维护。
+
+`InMemoryStore` 和 `FileSegmentStore` 都直接嵌入 `RelationStore`，同时实现 `RelationStoreProvider` 接口。调用方式有两种：
 
 ```go
-// 设置因果关系（MemoryPlugin.OnEvent 中）
+// 方式一：直接调用（InMemoryStore/FileSegmentStore 直接实现这些方法）
+memStore.SetParent(eventKey, parentKey)
+parent := memStore.GetParent(eventKey)
+children := memStore.GetChildren(eventKey)
+
+// 方式二：通过 RelationStoreProvider 接口（兼容其他实现）
 if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
     rsp.RelationStore().SetParent(eventKey, parentKey)
-}
-
-// 查询因果关系
-if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
     parent := rsp.RelationStore().GetParent(eventKey)
     children := rsp.RelationStore().GetChildren(eventKey)
 }
@@ -282,8 +285,8 @@ type MemoryStore interface {
     GetEvents(keys []int64) ([]FullEvent, error)
     QueryEvents(query QueryOptions) ([]EventReference, error)
 
-    // === RAG 向量搜索（可选实现）===
-    // 这些方法是可选的。如果存储不支持向量搜索，返回 ErrVectorSearchNotSupported
+    // === 向量搜索 ===
+    // 当前实现返回 ErrVectorSearchNotSupported；可扩展接入向量数据库
     SearchByEmbedding(query []float32, topK int) ([]EventReference, error)
     StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error
     SupportsVectorSearch() bool
@@ -312,22 +315,22 @@ var (
 )
 ```
 
-**使用方式**（type assertion）：
+**使用方式**：
 
 ```go
 // 写入因果关系（MemoryPlugin.OnEvent 中）
-if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
-    rsp.RelationStore().SetParent(childEventKey, parentEventKey)
+if parentKey != 0 {
+    memStore.SetParent(eventKey, parentKey)
 }
 
 // 查询因果关系
-if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
-    parent := rsp.RelationStore().GetParent(eventKey)
-    children := rsp.RelationStore().GetChildren(eventKey)
-}
+parent := memStore.GetParent(eventKey)
+children := memStore.GetChildren(eventKey)
 ```
 
-**设计原则**：内容与关系分离。`FullEvent` 存储不可变的事件内容，`RelationStore` 维护可变的因果关系。不是所有 MemoryStore 实现都支持因果关系，因此通过可选接口暴露。
+`MemoryPlugin.OnEvent` 实际使用 `SetParent`（通过 `RelationStoreProvider` 接口做类型断言后调用）。
+
+**设计原则**：内容与关系分离。`FullEvent` 存储不可变的事件内容，`RelationStore` 维护可变的因果关系。`InMemoryStore` 和 `FileSegmentStore` 直接嵌入 `RelationStore`；第三方实现可通过 `RelationStoreProvider` 接口暴露因果能力。
 
 ### 6.2 QueryOptions — 查询过滤
 
@@ -366,10 +369,11 @@ type StoreStats struct {
 ### 7.1 数据结构
 
 ```go
-// memory/in_memory_store.go:11-16
+// memory/in_memory_store.go:15-19
 type InMemoryStore struct {
     mu     sync.RWMutex
     events map[int]map[int64]FullEvent  // [partitionID][eventKey]
+    rel    RelationStore                // 嵌入的因果链存储
 }
 ```
 
@@ -403,10 +407,12 @@ InMemoryStore
 
 | 方法 | 说明 |
 |------|------|
-| `SearchBySummary(query)` | 按摘要内容模糊搜索（大小写不敏感） |
 | `AllEvents()` | 返回所有事件（按时间排序），用于测试和调试 |
-| `SearchByEmbedding()` | **RAG 向量搜索（空实现）**：返回 `ErrVectorSearchNotSupported` |
-| `StoreEventWithEmbedding()` | **RAG 向量存储（空实现）**：忽略 embedding，仅存储事件 |
+| `AllEventsByPartition(partitionID)` | 返回指定分区的所有事件 |
+| `GetParent(key)` / `GetChildren(key)` / `SetParent(key, parentKey)` | 直接操作嵌入的因果链 |
+| `RelationStore()` | 返回内部 RelationStore |
+| `SearchByEmbedding()` | **向量搜索（空实现）**：返回 `ErrVectorSearchNotSupported` |
+| `StoreEventWithEmbedding()` | **向量存储（空实现）**：忽略 embedding，仅存储事件 |
 | `SupportsVectorSearch()` | 返回 `false` |
 
 ---
@@ -480,13 +486,13 @@ type FileSegmentStore struct {
 
 ---
 
-## 十、RAG 向量搜索支持
+## 十、向量搜索支持
 
 ### 10.1 设计背景
 
-MemoryStore 接口通过可选方法支持向量语义搜索，为未来接入专业向量数据库（Milvus、Qdrant、pgvector 等）预留接口。当前实现提供空实现（stub），返回 `ErrVectorSearchNotSupported`。
+`MemoryStore` 接口包含向量搜索方法，为未来接入专业向量数据库（Milvus、Qdrant、pgvector 等）预留接口。当前 `InMemoryStore` 和 `FileSegmentStore` 实现返回 `ErrVectorSearchNotSupported`。
 
-### 10.2 RAG 方法说明
+### 10.2 向量搜索方法说明
 
 | 方法 | 说明 | 默认实现 |
 |------|------|----------|
@@ -550,10 +556,20 @@ tagent (root)
 `MemoryPlugin.OnEvent` 每次事件都会调用 `memStore.StoreEvent`：
 
 ```go
-// plugin/memory_plugin.go:91-98
+// plugin/memory_plugin.go:115-131
 if p.memStore != nil {
     if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-        log.Errorf("MemoryPlugin: failed to store event %s: %v", eventKey, err)
+        log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
+    } else {
+        if parentKey != 0 {
+            if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
+                if err := rsp.RelationStore().SetParent(eventKey, parentKey); err != nil {
+                    log.Errorf("[Memory] set parent failed key=%d parent=%d: %v", eventKey, parentKey, err)
+                }
+            }
+        }
+        log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
+            eventKey, partitionID, eventType, len(eventSummary))
     }
 }
 ```
@@ -565,15 +581,15 @@ MemoryStore 的读取方按频率和场景分层：
 | 读取方 | 频率 | 场景 |
 |--------|------|------|
 | **AgentToolWrapper** | 🔥 最高频 | 顶层 LLM 筛选 `event_keys` → 传给子 tool → Wrapper 从 `parentStore` 取完整 `FullEvent` → 注入子 Agent 作为上下文 |
-| **RecallAgent** 子工具 | 中频 | 跨 Session 深层检索：`recall_query`（语义查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
-| **KnowledgeAgent** | 低~中频 | 通过 `memory_query` 从父级 MemoryStore 查历史，辅助技能/MCP 搜索 |
-| **直接访问** (`agent.MemStore()`) | 调试/测试 | 开发阶段手工查事件 |
+| **RecallAgent** 子工具 | 中频 | 跨 Session 深层检索：`recall_query`（条件查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
+| **KnowledgeAgent** 子工具 | 低~中频 | 通过 `memory_query` 从父级 MemoryStore 查历史，辅助技能/MCP 搜索 |
+| **直接访问** (`TagentAgent.MemStore()`) | 调试/测试 | 开发阶段手工查事件 |
 
 ---
 
 #### AgentToolWrapper — 核心读取路径
 
-**为什么是核心**：顶层 LLM 的上下文只有 `EventReference[]`（轻量摘要），不包含 `Content` 和 `ToolCalls`。当 LLM 需要子 Agent 处理某段历史时，它筛选出相关 `event_keys` 作为工具参数传递。`AgentToolWrapper.Call()` 拦截调用，通过 `parentStore.GetEvent(key)` 逐个取出完整 `FullEvent`，再通过 `IngestExternalEvents()` 注入到子 Agent 的 context 中。
+**为什么是核心**：顶层 LLM 的上下文只有 `EventReference[]`（轻量摘要），不包含 `Content` 和 `ToolCalls`。当 LLM 需要子 Agent 处理某段历史时，它筛选出相关 `event_keys` 作为工具参数传递。`AgentToolWrapper.Call()` 拦截调用，通过 `parentStore.GetEvent(key)` 逐个取出完整 `FullEvent`，序列化为 `RuntimeState["external_context"]` 后通过 `agent.Run()` 传递给子 Agent。
 
 ```mermaid
 sequenceDiagram
@@ -588,8 +604,9 @@ sequenceDiagram
     ATW->>MS: parentStore.GetEvent(E3)
     ATW->>MS: parentStore.GetEvent(E5)
     MS-->>ATW: FullEvent (含 Content, ToolCalls)
-    ATW->>SA: IngestExternalEvents([E1,E3,E5])
-    Note over SA: agent.Run() 子 Agent 看到完整上下文
+    ATW->>ATW: 序列化为 RuntimeState["external_context"]
+    ATW->>SA: agent.Run(invocation with RuntimeState)
+    Note over SA: TagentAgent.Run 反序列化后注入 external context
     SA-->>ATW: event stream
     ATW-->>LLM: Tool Result
 ```
@@ -682,9 +699,10 @@ sequenceDiagram
     ATW->>MS: parentStore.GetEvent(E3)
     ATW->>MS: parentStore.GetEvent(E5)
     MS-->>ATW: FullEvent (含 Content, ToolCalls)
-    ATW->>SA: IngestExternalEvents([E1,E3,E5])
+    ATW->>ATW: 序列化为 RuntimeState["external_context"]
+    ATW->>SA: agent.Run(invocation with RuntimeState)
     Note over SA: 子 Agent 的 context<br/>包含完整事件上下文
-    SA->>SA: agent.Run() 内部 React
+    SA->>SA: runEventLoop + runner.Run
     SA-->>ATW: event stream
     ATW-->>LLM: Tool Result
 ```
@@ -763,32 +781,34 @@ tagent.yaml → ReadNamespaces: ["tagent"]
   → LLM 调用 recall_query({query: "部署"}) → 实际查询分区 144
 ```
 
-### 13.0.1 InMemoryStore 按 path 共享实例
+### 13.0.1 MemoryStore 实例共享策略
 
-对于 `type: file`，文件系统天然提供跨实例数据共享（两个 FileSegmentStore 指向同一目录即可读对方分区的文件）。但对于 `type: memory`，两个 `NewInMemoryStore()` 是独立 Go 对象，需要显式共享。
+`resolveMemoryStore()`（定义在 `tagent.go`）根据 `MemoryConfig.Type` 选择存储实现：
 
-**解决方案**：`resolveMemoryStore()` 中对 `type: memory` 按 `path` 做轻量级注册表去重：
+- `type: memory` / 空：创建 `InMemoryStore`。非空 `path` 按 path 做注册表去重，同 path → 同实例；空 path 每次新建隔离实例。
+- `type: file`：创建 `FileSegmentStore`，底层使用 RustViking CLI 作为 KV 存储，并启动生命周期管理（tombstone、lifecycle、compactor）。同 path 会复用已注册的实例。
+- `type: localfile`：创建 `FileSegmentStore`，底层使用本地 JSON 文件作为 KV 存储（无外部二进制依赖），并启动生命周期管理。同 path 会复用已注册的实例。
 
 ```go
-var (
-    namedMemMu     sync.Mutex
-    namedMemStores = map[string]*memory.InMemoryStore{}
-)
-
-func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
-    case "memory", "":
-        if mc.Path == "" {
-            return memory.NewInMemoryStore(), nil  // 无 path → 隔离
-        }
-        namedMemMu.Lock()
-        defer namedMemMu.Unlock()
-        if s, ok := namedMemStores[mc.Path]; ok {
-            return s, nil  // 同 path → 同实例
-        }
-        s := memory.NewInMemoryStore()
-        namedMemStores[mc.Path] = s
-        return s, nil
-}
+// tagent.go:533-580 resolveMemoryStore 节选
+case "memory", "":
+    if mc.Path == "" {
+        return memory.NewInMemoryStore(), nil  // 无 path → 隔离
+    }
+    namedMemMu.Lock()
+    defer namedMemMu.Unlock()
+    if s, ok := namedMemStores[mc.Path]; ok {
+        return s, nil  // 同 path → 同实例
+    }
+    s := memory.NewInMemoryStore()
+    namedMemStores[mc.Path] = s
+    return s, nil
+case "file":
+    // FileSegmentStore + RustViking + lifecycle components
+    // ...
+case "localfile":
+    // FileSegmentStore + LocalFileKV + lifecycle components
+    // ...
 ```
 
 **效果**：
@@ -797,16 +817,18 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 |------|---------|------------|
 | `type: memory`（无 path） | 每次新建 | 完全隔离 |
 | `type: memory, path: "X"` | 同 path → 同实例 | 同一 `map[PartitionID]map[EventKey]FullEvent` |
-| `type: file, path: "/X"` | 每次新建 | 文件系统天然共享 |
+| `type: file, path: "/X"` | 同 path → 同实例 | RustViking KV + 文件系统 |
+| `type: localfile, path: "/X"` | 同 path → 同实例 | 本地 JSON 文件 |
 
-### 13.0.2 path 字段的双重语义
+### 13.0.2 path 字段的语义
 
 | 类型 | `path` 的含义 |
 |------|-------------|
-| `file` | 文件系统目录路径 |
+| `file` | 文件系统目录路径（RustViking 数据目录） |
+| `localfile` | 文件系统目录路径（本地 JSON 文件目录） |
 | `memory` | 逻辑存储标识符——同 type + 同 path → 单例 |
 
-> `path` 在两种类型下均表示"存储定位符"。FileSegmentStore 通过文件系统天然保证同路径→同存储；InMemoryStore 通过注册表显式保证。
+> `path` 在三种类型下均表示"存储定位符"。`file`/`localfile` 通过文件系统 + 注册表保证同路径→同存储；`memory` 通过注册表显式保证。
 
 ---
 

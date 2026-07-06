@@ -8,6 +8,828 @@
 
 **设计原则**：
 - **每个 Plugin 职责单一**：MemoryPlugin 专注持久化 + 因果链，SummaryPlugin 专注 Tag 注入
+- **严格拒绝非设计折损**：摘要中完全禁止任何形式的截断，内容超限由 SmartCompressor 处理
+- **通过 OnEvent 而非 Before/After Model**：在事件层面处理，不侵入 LLM 调用流程
+
+---
+
+## 二、文件清单
+
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `memory_plugin.go` | 234 | 事件持久化：推断类型、生成 EventKey、构建因果链、写入 StateDelta |
+| `summary_plugin.go` | 77 | 事件摘要：生成 Tag 并追加到事件 |
+| `memory_plugin_test.go` | 165 | 单元测试：覆盖类型推断、因果链、摘要策略 |
+
+---
+
+## 三、组件关系总览图
+
+```mermaid
+graph TB
+    subgraph "trpc-agent-go 框架"
+        Runner["Runner\nprocessSingleAgentEvent()"]
+        PM["plugin.Manager\n(钩子编排)"]
+    end
+
+    subgraph "tagent/plugin"
+        MP["MemoryPlugin\nOnEvent"]
+        SP["SummaryPlugin\nOnEvent"]
+    end
+
+    subgraph "tagent/memory"
+        MS["MemoryStore\n(InMemory)"]
+    end
+
+    subgraph "tagent/event"
+        ET["ExtractEventType()\n事件类型推断"]
+        ES["GenerateEventSummary()\n摘要生成（无截断）"]
+    end
+
+    Runner --> PM
+    PM --> MP
+    PM --> SP
+
+    MP --> MS
+    MP --> ET
+    MP --> ES
+
+    SP --> ET
+    SP --> ES
+```
+
+---
+
+## 四、Plugin 注册机制
+
+### 4.1 tagent 与框架的集成点
+
+`plugin.Plugin` 接口（`trpc-agent-go/plugin/manager.go:33-39`）：
+
+```go
+type Plugin interface {
+    Name() string
+    Register(r *Registry)
+}
+```
+
+tagent 在 `NewContextManager` 中注册两个 Plugin：
+
+```go
+// agent/context_manager.go:207-210
+runnerOpts = append(runnerOpts, runner.WithPlugins(
+    plugin.NewSummaryPlugin(),  // 先注册：Tag 注入
+    cfg.MemPlugin,              // 后注册：持久化
+))
+```
+
+**注册顺序有意义**：`SummaryPlugin` 先注册先执行，先注入 Tag；`MemoryPlugin` 后注册后执行，持久化时事件已包含 Tag。
+
+### 4.2 OnEvent 的调用时机
+
+`Runner.processSingleAgentEvent` 在处理每个事件时调用 OnEvent（`trpc-agent-go/runner/runner.go:756-794`）：
+
+```go
+func (r *runner) processSingleAgentEvent(ctx context.Context, loop *eventLoopContext, agentEvent *event.Event) error {
+    // Step 1: 通过所有 Plugin 的 OnEvent 钩子
+    agentEvent = r.applyEventPlugins(ctx, loop.invocation, agentEvent)
+
+    // Step 2: 持久化到 Session
+    r.handleEventPersistence(ctx, loop.invocation, loop.sess, agentEvent)
+
+    // Step 3: 发送到输出 channel
+    event.EmitEvent(ctx, loop.processedEventCh, agentEvent)
+}
+```
+
+**关键**：OnEvent 在持久化 Session **之前**被调用。`MemoryPlugin` 持久化时，事件已经包含 `SummaryPlugin` 注入的 Tag。
+
+### 4.3 链式传递机制
+
+`Manager.OnEvent` 按注册顺序依次执行钩子，链式传递事件对象（`trpc-agent-go/plugin/manager.go:275-295`）：
+
+```go
+func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *event.Event) (*event.Event, error) {
+    curr := e
+    for _, h := range m.eventHooks {
+        next, err := h.hook(ctx, invocation, curr)
+        if err != nil {
+            return nil, fmt.Errorf("plugin %q: %w", h.name, err)
+        }
+        if next != nil {
+            curr = next  // 链式传递
+        }
+    }
+    return curr, nil
+}
+```
+
+---
+
+## 五、MemoryPlugin — 事件持久化
+
+### 5.1 数据结构
+
+```go
+// memory_plugin.go:30-34
+type MemoryPlugin struct {
+    memStore      memory.MemoryStore  // 存储后端
+    mu            sync.Mutex          // 保护 lastEventKeys 并发安全
+    lastEventKeys map[string]int64   // "partitionID:sessionID" → 前驱 EventKey（分区+会话级因果链）
+}
+```
+
+### 5.2 OnEvent 钩子 — 9 步详解
+
+源码位置：`memory_plugin.go:65-147`
+
+```go
+func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
+    if evt == nil {
+        return nil, nil
+    }
+
+    // Step 1: 从 AgentName 派生 PartitionID（框架概念 → 存储概念）
+    agentName := p.extractAgentName(inv)
+    partitionID := memory.PartitionIDFromName(agentName)
+
+    // Step 2: 生成 Snowflake EventKey（int64，编码 PartitionID）
+    eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
+
+    // Step 3: 使用 tagent/event 包统一推断事件类型并生成摘要
+    eventType, eventSummary := p.inferEventInfo(evt)
+
+    // Step 4: 从分区+会话级因果链获取前驱 Key
+    sessionID := ""
+    if inv != nil && inv.Session != nil {
+        sessionID = inv.Session.ID
+    }
+    causalKey := fmt.Sprintf("%d:%s", partitionID, sessionID)
+    p.mu.Lock()
+    parentKey := p.lastEventKeys[causalKey]
+    p.mu.Unlock()
+
+    // Step 5: 提取时间戳
+    timestamp := extractTimestamp(evt)
+
+    // Step 6: 构建 FullEvent 基础字段
+    fullEvent := memory.FullEvent{
+        EventKey:     eventKey,
+        PartitionID:  partitionID,
+        EventType:    eventType,
+        EventSummary: eventSummary,
+        Timestamp:    timestamp,
+    }
+
+    // Step 7: 条件性填充 Response 相关字段
+    if evt.Response != nil && len(evt.Response.Choices) > 0 {
+        msg := evt.Response.Choices[0].Message
+        fullEvent.Content = msg.Content
+        fullEvent.ToolCalls = msg.ToolCalls
+        fullEvent.Response = evt.Response
+    }
+
+    // Step 8: 持久化到 MemoryStore，并维护因果链
+    if p.memStore != nil {
+        if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+            log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
+        } else {
+            if parentKey != 0 {
+                if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
+                    if err := rsp.RelationStore().SetParent(eventKey, parentKey); err != nil {
+                        log.Errorf("[Memory] set parent failed key=%d parent=%d: %v", eventKey, parentKey, err)
+                    }
+                }
+            }
+            log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
+                eventKey, partitionID, eventType, len(eventSummary))
+        }
+    }
+
+    // Step 9: 写回 StateDelta（event_key 转为字符串后写入，确保框架持久化）
+    if evt.StateDelta == nil {
+        evt.StateDelta = make(map[string][]byte)
+    }
+    evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+    evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
+    evt.StateDelta["event_type"] = []byte(eventType)
+
+    // Step 10: 更新分区+会话级因果链
+    p.mu.Lock()
+    p.lastEventKeys[causalKey] = eventKey
+    p.mu.Unlock()
+
+    return evt, nil
+}
+```
+
+### 5.3 因果链机制
+
+每个事件通过 `RelationStore.SetParent(childKey, parentKey)` 维护因果关系，构成一条有向事件链：
+
+```
+1777198738547555000 (事件1)
+  RelationStore: parent=0  (无前驱)
+
+1777198739574803000 (事件2)
+  RelationStore: parent=1777198738547555000  → 父 = 事件1
+
+1777198739760667000 (事件3)
+  RelationStore: parent=1777198739574803000  → 父 = 事件2
+```
+
+**作用**：
+- 支持按因果顺序回溯事件历史
+- 为 RecallTool 提供结构化检索能力
+- 压缩通知中可引用被丢弃的因果链
+
+**并发安全**：`p.mu` 保护 `lastEventKeys map[string]int64` 的读写（按 `partitionID:sessionID` 独立跟踪，互不影响）。
+
+### 5.4 StateDelta 写回
+
+`MemoryPlugin` 写入 `StateDelta` 是为了**确保 Runner 持久化事件**。Runner 的 `shouldPersistEvent` 规则（`trpc-agent-go/runner/runner.go:997-1003`）：
+
+```go
+func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
+    return len(agentEvent.StateDelta) > 0 ||
+        (agentEvent.Response != nil && !agentEvent.IsPartial && agentEvent.IsValidContent())
+}
+```
+
+只要 `StateDelta` 非空，即使 `Response` 为空或 partial，事件也会被持久化到 Session。
+
+`MemoryPlugin` 写入 `StateDelta` 的键：
+
+| StateDelta Key | Value | 用途 |
+|---------------|-------|------|
+| `event_key` | EventKey int64 → 字符串 | 关联 MemoryStore 中的 FullEvent |
+| `partition_id` | PartitionID int → 字符串 | 存储分区标识 |
+| `event_type` | EventType 字符串 | 事件类型元数据 |
+
+> 注意：`event_summary` **不写入** StateDelta。`BuildEventReference` 在 onEvent 回调中从 `event.Response.Choices[0].Message.Content` 提取摘要。
+
+---
+
+## 六、SummaryPlugin — Tag 注入
+
+### 6.1 职责定位
+
+SummaryPlugin 在 `MemoryPlugin` 之前执行，负责给事件附加**可读的 Tag**，供下游消费者（如日志、调试、UI）理解事件语义。
+
+### 6.2 OnEvent 钩子详解
+
+源码位置：`summary_plugin.go:38-76`
+
+```go
+func (p *SummaryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
+    if evt == nil {
+        return nil, nil
+    }
+
+    // 无 Response 的事件不生成 Tag
+    if evt.Response == nil || len(evt.Response.Choices) == 0 {
+        return evt, nil
+    }
+
+    msg := evt.Response.Choices[0].Message
+
+    // 推断事件类型
+    eventType := tagentevent.ExtractEventType(msg)
+
+    // 生成摘要（无截断）
+    opts := tagentevent.DefaultOptionsForLLMContext()
+    summary := tagentevent.GenerateEventSummary(msg, eventType, opts)
+
+    // 构造 Tag: "event_type:summary"
+    tag := eventType
+    if summary != "" {
+        tag = eventType + ":" + summary
+    }
+
+    // 追加到事件 Tag 字段（支持多个 Plugin 追加）
+    if evt.Tag != "" {
+        evt.Tag += ";" + tag
+    } else {
+        evt.Tag = tag
+    }
+
+    log.Debugf("[Summary] enriched type=%s summary_len=%d", eventType, len(summary))
+
+    return evt, nil
+}
+```
+
+### 6.3 Tag 格式
+
+```
+{event_type}:{summary}
+
+示例：
+  external_input:你好，我想了解...
+  thinking_plan:调用工具: echo(hello)
+  agent_output:好的，这里是...
+  action_command:echo 执行完成
+```
+
+**追加语义**：`evt.Tag += ";" + tag` 支持多个 Plugin 追加 Tag。`MemoryPlugin` 在此之后执行，不会覆盖 Tag。
+
+---
+
+## 七、事件类型推断
+
+### 7.1 RoleSystem 的特殊处理
+
+| 来源 | Message.Role | 参与事件流 | 说明 |
+|------|-------------|-----------|------|
+| System Prompt | `RoleSystem` | **不参与** | 初始化时由 InstructionProcessor 注入 Request，与事件流隔离 |
+| TmuxMonitor 注入 | `RoleSystem` | **参与** | 通过 `TagentAgent.InjectMessage` 进入 EventBus，分类为 `external_input` |
+
+### 7.2 事件类型推断规则
+
+| Message.Role | EventType | 说明 |
+|-------------|-----------|------|
+| `RoleUser` | `external_input` | 用户输入 |
+| `RoleSystem` | `external_input` | TmuxMonitor 注入 |
+| `RoleAssistant` + `ToolCalls` | `thinking_plan` | Agent 思考/计划（带工具调用） |
+| `RoleAssistant` | `agent_output` | Agent 最终输出 |
+| `RoleTool` | `action_command` | 工具执行结果 |
+| 无 Response 或无 Choices | `external_input` | 默认 fallback |
+
+---
+
+## 八、摘要策略
+
+### 8.1 严格拒绝非设计折损
+
+`event/types.go` 中完全移除了截断逻辑：
+
+```go
+// 截断已移除。以下常量已被删除：
+// - DefaultMaxContentLength = 500
+// - DefaultMaxArgsLength = 200
+// - MaxContentLength int
+// - MaxArgsLength int
+// - formatContent() 函数
+```
+
+**设计原则**：摘要本身已是设计内的信息折损（从原始文本到摘要文本），截断是设计外的双重折损，会破坏 SmartCompressor 的压缩质量。内容超限通过**SmartCompressor 两阶段压缩**处理。
+
+### 8.2 摘要策略表
+
+| EventType | 摘要策略 | 原因 |
+|-----------|---------|------|
+| `external_input` | **原文全文** | 保留用户意图，不丢失信息 |
+| `agent_output` | **原文全文** | 保留 Agent 回复，不丢失信息 |
+| `thinking_plan` | **原文全文** | Agent 完整思考过程，含工具调用决策 |
+| `action_command` | 工具调用摘要 | 工具执行结果信息密度高，格式化为 `"调用工具: name(args)"` |
+| 其他 | **原文全文** | fallback 保安全 |
+
+### 8.3 工具调用摘要格式
+
+```go
+// formatToolCallSummary() 输出示例
+"调用工具: echo(hello world)"
+"调用工具: search(query=\"golang\"), read_file(path=\"/a/b.go\")"
+```
+
+多个工具调用时逗号分隔，单行格式节省 token。
+
+---
+
+## 九、关键设计决策
+
+### 9.1 为什么拆成两个 Plugin 而不是合并？
+
+| 对比 | 合并方案 | 拆分方案 |
+|------|----------|----------|
+| **关注点分离** | 持久化 + Tag 注入混在一起 | 各司其职 |
+| **可测试性** | 需要 mock MemoryStore + Tag 双重逻辑 | 独立测试 |
+| **可复用性** | 无法单独使用 Tag 注入 | SummaryPlugin 可独立使用 |
+| **扩展性** | 新增功能需修改同一个插件 | 新增 Plugin 只需实现接口 |
+
+### 9.2 为什么用 OnEvent 而不是 BeforeModel/AfterModel？
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| **OnEvent（tagent 选型）** | 事件层面处理，不侵入 LLM 调用流程；Session 和 MemoryStore 同步 | 需要处理 nil / partial 事件 |
+| BeforeModel | 可修改 LLM 请求 | 只能处理请求，不能处理响应 |
+| AfterModel | 可修改 LLM 响应 | 只能处理响应，不能处理事件流 |
+
+tagent 的差异化能力（持久化、因果链、Tag）都是**事件层面的需求**，OnEvent 是最自然的注入点。
+
+### 9.3 StateDelta 写回的目的
+
+`MemoryPlugin` 写入 `StateDelta` 是为了**触发 Runner 的 Session 持久化**。Runner 只在以下条件满足时持久化事件：
+
+```go
+shouldPersistEvent(agentEvent) = len(agentEvent.StateDelta) > 0 ||
+    (agentEvent.Response != nil && !agentEvent.IsPartial && agentEvent.IsValidContent())
+```
+
+对于 `Response` 为空的事件（如 tool_call 开始事件），只有 `StateDelta` 非空才能保证持久化。
+
+---
+
+## 十、Event Schema
+
+> **说明**：`FullEvent`、`EventReference`、`EventKey`（Snowflake int64）等核心数据结构定义在 `memory` 模块。详细说明请参阅 [memory-architecture.md](../memory/memory-architecture.md)。本章仅列出插件直接使用的字段。
+
+### 10.1 EventKey — Snowflake int64 唯一标识符
+
+```go
+// memory/types.go:179-201
+// Snowflake-like int64，编码 PartitionID + Timestamp + Sequence
+func NewSnowflakeEventKey(partitionID int, nowMs int64) int64
+```
+
+- 从 AgentName 通过 `PartitionIDFromName` 哈希映射得到分区 ID
+- 内部 mutex 保护的 per-partition 序列计数器保证同秒内唯一
+- 第二个参数 `nowMs` 为毫秒时间戳提示（0 = 使用当前时间）
+
+### 10.2 FullEvent — 完整事件
+
+```go
+// FullEvent 在 plugin 中的构建（memory_plugin.go:100-113）
+// 基础字段始终填充，Content/ToolCalls/Response 仅在 evt.Response 非空时填充
+type FullEvent struct {
+    EventKey     int64                // Snowflake int64
+    PartitionID  int                  // 存储分区
+    // ParentKey 已移除：因果关系由 RelationStore 维护
+    EventType    string
+    EventSummary string
+    Timestamp    int64                // Unix 毫秒
+    Content      string               // 条件性填充
+    ToolCalls    []model.ToolCall     // 条件性填充
+    ToolResults  map[string]interface{}
+    Metadata     map[string]string
+    Response     *model.Response
+}
+```
+
+### 10.3 EventReference — 轻量引用
+
+```go
+// memory/types.go:15-22
+type EventReference struct {
+    EventKey     int64  `json:"event_key"`
+    PartitionID  int    `json:"partition_id,omitempty"`
+    EventType    string `json:"event_type"`
+    EventSummary string `json:"event_summary"`
+    Timestamp    int64  `json:"timestamp"`
+    Role         string `json:"role,omitempty"`
+}
+```
+
+### 10.4 数据流
+
+```
+MemoryPlugin.OnEvent → 构建 FullEvent → StoreEvent(int64 Key)
+                    → StateDelta[event_key|partition_id|event_type] → 框架 Session 持久化
+```
+
+详细架构参见 [memory-architecture.md](../memory/memory-architecture.md) §四~§六。
+
+---
+
+## 十一、MemoryStore 存储方式
+
+> **说明**：MemoryStore 的完整接口定义、InMemoryStore 和 FileSegmentStore 的实现细节、向量搜索支持等，请参阅 [memory-architecture.md](../memory/memory-architecture.md) §六~§十。
+
+### 11.1 当前实现要点
+
+| 存储 | Key 类型 | 结构 | 分区 |
+|------|---------|------|------|
+| InMemoryStore | `int64` | `map[int]map[int64]FullEvent` + 嵌入 `RelationStore` | 按 PartitionID 双层 map |
+| FileSegmentStore | `int64` | `{dataDir}/{partitionID}/{eventKey}.json` | 按 PartitionID 子目录 |
+
+### 11.2 存储分区的隔离语义
+
+- MemoryStore 不感知 Agent（纯存储概念），仅通过 `PartitionID` 区分分区
+- `PartitionIDFromName(agentName)` 将 Agent 映射到稳定的分区 ID（FNV-1a 哈希）
+- 每个 `(PartitionID, SessionID)` 维护独立的因果链（`lastEventKeys[partitionID:sessionID]`），防止子 Agent 事件破坏父 Agent 因果链
+
+### 11.3 QueryOptions
+
+```go
+// memory/types.go:113-129
+type QueryOptions struct {
+    PartitionID  int
+    PartitionIDs []int
+    EventTypes   []string
+    StartTime    int64
+    EndTime      int64
+    Limit        int
+    Offset       int
+    OrderBy      string
+    Keyword      string  // 按关键词过滤 EventSummary 或 Content
+}
+```
+
+返回 `[]EventReference`（轻量），调用方按需通过 `GetEvent(key)` 获取完整 `FullEvent`。
+
+---
+
+## 十二、EventSummary 对 LLM 上下文的影响
+
+### 12.1 摘要的双重用途
+
+`EventSummary` 字段同时服务于两个不同的消费者：
+
+```mermaid
+graph LR
+    Plugin["MemoryPlugin.OnEvent\ninferEventInfo()"]
+    MS["MemoryStore\n(FullEvent.EventSummary)"]
+    RT["RecallTool\n返回给 Agent"]
+    LLM["LLM\n消息上下文"]
+
+    Plugin -->|提取摘要| MS
+    MS -->|EventSummary| RT
+    MS -->|SessionProjection.EventReference.EventSummary| LLM
+```
+
+| 消费者 | 用途 | 数据来源 |
+|--------|------|----------|
+| **LLM** | 理解历史事件的语义（进入 Request.Messages） | `EventReference.EventSummary` |
+| **RecallTool** | 返回给 Agent 进行详细检索 | `FullEvent.EventSummary` |
+
+### 12.2 Summary 进入 LLM 上下文的完整路径
+
+**Step 1 — 生成**：`MemoryPlugin.inferEventInfo()` 根据事件类型生成摘要（见第八章摘要策略）
+
+**Step 2 — 持久化**：`FullEvent.EventSummary` 存入 MemoryStore
+
+**Step 3 — 投影追加**：框架 Runner 产生的事件经 `onEvent` 回调，由 `BuildEventReference` 构建 `EventReference` 并追加到 `SessionProjection`：
+
+```go
+// agent/projection.go:75-79
+if evt.Response != nil && len(evt.Response.Choices) > 0 {
+    msg := evt.Response.Choices[0].Message
+    ref.Role = string(msg.Role)
+    ref.EventSummary = msg.Content  // 注意：这里直接用 msg.Content，而非 StateDelta
+}
+```
+
+**Step 4 — 构建 LLM 上下文**：`ContextManager.BuildMessages` 将 `SessionProjection` 中的 `EventReference[]` 转换为 `model.Message[]`：
+
+- 最近 `recentFullCount`（默认 4）条引用：通过 `memStore.GetEvent(key)` 拉取完整 `Response`，使用原始 `model.Message`
+- 更早的引用：使用 `EventReference.EventSummary` 构建轻量消息
+
+```go
+// agent/context_manager.go:222-240
+func (cm *ContextManager) BuildMessages(ctx context.Context, refs []memory.EventReference) []model.Message {
+    startFull := 0
+    if len(refs) > cm.recentFullCount {
+        startFull = len(refs) - cm.recentFullCount
+    }
+    for i, ref := range refs {
+        if i >= startFull {
+            msg = cm.resolveReferenceToMessage(ctx, ref)  // 拉取完整 Response
+        } else {
+            msg = model.Message{Role: model.Role(ref.Role), Content: ref.EventSummary}
+        }
+    }
+}
+```
+
+**关键点**：
+
+- LLM **主要看到摘要**，但最近 N 条事件会还原为完整原始消息
+- 这是设计内的信息折损：压缩质量由 `SmartCompressor` 两阶段机制保证
+
+### 12.3 SmartCompress 与 EventSummary 的关系
+
+**两者作用于不同层次**：
+
+| 层次 | 机制 | 处理对象 |
+|------|------|----------|
+| **事件层** | `inferEventInfo()` | 单个 Event → EventSummary |
+| **消息层** | `SmartCompressor` | `model.Message[]` → 按 task boundary 压缩 + LLM 生成摘要 |
+
+**SmartCompress 两阶段**：
+
+```
+Stage 1: 按 task boundary 切分
+  model.Message[] → TaskSegment[]
+  保留最近的 N 个 segment（默认 2 个）
+  丢弃旧的 segment
+
+Stage 2: 丢弃的 segment 生成摘要
+  oldSegments → LLM → "[对话历史摘要] ..."
+  摘要作为 system message 插入
+```
+
+**SmartCompress 在 BeforeModel 执行**（`agent/context_manager.go:141-155`）：
+
+```go
+func (cm *ContextManager) BeforeModel(ctx, args) {
+    usedTokens := cm.tokenCounter.Estimate(args.Request.Messages)
+    threshold := int(float64(cm.maxTokens) * cm.thresholdPct)
+
+    if usedTokens > threshold {
+        result := cm.compressor.Compress(ctx, args.Request.Messages, nil)
+        args.Request.Messages = result  // 修改发给 LLM 的消息
+    }
+}
+```
+
+**视图转换原则**：SmartCompress **只修改发给 LLM 的 messages 视图**，不修改 SessionProjection 原始数据。`SessionProjection`（EventReference[]）保持不变，MemoryStore 中的 FullEvent 也保持不变。
+
+### 12.4 Token 估算公式
+
+```go
+// agent/context_manager.go:38-52
+func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
+    total := 0
+    for _, msg := range messages {
+        total += int(float64(len([]rune(msg.Content))) / c.CharsPerToken)
+        total += 10  // per-message overhead
+        if len(msg.ToolCalls) > 0 {
+            total += 20 * len(msg.ToolCalls)
+        }
+    }
+    if total < 1 {
+        total = 1
+    }
+    return total
+}
+```
+
+**`CharsPerToken`**：默认 `2.0`。TokenCounter 是估算，不是精确计算，误差在 10-20%。
+
+### 12.5 完整数据流总览
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant R as Runner
+    participant MP as MemoryPlugin
+    participant MSS as MemoryStore
+    participant SP as SessionProjection
+    participant CM as ContextManager
+    participant LLM as LLM Model
+
+    U->>R: 发送消息
+    R->>R: 生成 Event
+    R->>MP: OnEvent(Event)
+    MP->>MP: inferEventInfo(Event) → EventSummary
+    MP->>MSS: StoreEvent(FullEvent) EventSummary 存入
+    MP->>MP: 写回 StateDelta(event_key, partition_id, event_type)
+
+    R->>SP: onEvent → BuildEventReference → Append
+
+    R->>CM: 下一次 LLM 调用 BeforeModel
+    CM->>CM: TokenCounter.Estimate(SessionProjection → Messages)
+    alt 超过阈值
+        CM->>CM: SmartCompress.Compress Stage 1+2 压缩 修改 Messages 视图
+    end
+    CM->>LLM: Request.Messages(含 EventSummary 的视图)
+    LLM-->>R: LLM 响应
+```
+
+---
+
+## 十三、StateDelta 机制与 Session 持久化
+
+### 13.1 StateDelta 的定位
+
+`Event.StateDelta`（`trpc-agent-go/event/event.go:95`）是框架提供的事件级状态传递机制：
+
+```go
+type Event struct {
+    StateDelta map[string][]byte `json:"stateDelta,omitempty"`
+    // ...
+}
+```
+
+**核心语义**：Plugin 或 Agent 在处理事件时，向 `Event.StateDelta` 写入 key-value 对，框架在持久化事件时自动将其合并到 `Session.State`。
+
+**设计意图**：
+- **解耦 Plugin 与 Session**：Plugin 不需要持有 Session 引用，只需向 Event 写入 StateDelta，框架负责合并
+- **原子性保证**：StateDelta 和 Event 的持久化在同一个原子操作中完成
+- **跨事件累积**：`Session.State` 是累积的，所有事件的 StateDelta 都会被 merge 进去（相同 key 后者覆盖前者）
+
+### 13.2 MemoryPlugin 写入 StateDelta 的目的
+
+```go
+// memory_plugin.go:133-139
+if evt.StateDelta == nil {
+    evt.StateDelta = make(map[string][]byte)
+}
+evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
+evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
+evt.StateDelta["event_type"] = []byte(eventType)
+```
+
+| StateDelta Key | Value | 用途 |
+|---------------|-------|------|
+| `event_key` | EventKey int64 → 字符串 | 关联 MemoryStore 中的 FullEvent |
+| `partition_id` | PartitionID int → 字符串 | 存储分区标识 |
+| `event_type` | EventType 字符串 | 事件类型元数据 |
+
+**为什么需要写入 StateDelta**：`Session.State` 是跨事件的 key-value 累积存储。`event_key` 写入 StateDelta 后，框架保证事件被持久化，并且 `Session.State` 中保留最近一个事件的 key。但 tagent 真正使用 EventKey 的地方不是 `Session.State`，而是 `onEvent` 回调从 `event.StateDelta` 直接读取并构建 `EventReference`。
+
+### 13.3 Session 持久化完整流程
+
+**源码路径**：`trpc-agent-go/runner/runner.go:756-794`
+
+```go
+func (r *runner) processSingleAgentEvent(ctx, loop, agentEvent) error {
+    // Step 1: 通过所有 Plugin 的 OnEvent 钩子（MemoryPlugin 在此写入 StateDelta）
+    agentEvent = r.applyEventPlugins(ctx, loop.invocation, agentEvent)
+
+    // Step 2: 持久化到 Session（包含 StateDelta 的 merge）
+    r.handleEventPersistence(ctx, loop.invocation, loop.sess, agentEvent)
+
+    // Step 3: 发送到输出 channel
+    event.EmitEvent(ctx, loop.processedEventCh, agentEvent)
+}
+```
+
+**handleEventPersistence** 内部（`runner.go:920-995`）：
+
+```go
+func (r *runner) handleEventPersistence(ctx, invocation, sess, agentEvent) {
+    if !r.shouldPersistEvent(agentEvent) {
+        return
+    }
+    r.sessionService.AppendEvent(ctx, sess, persistEvent)
+}
+```
+
+### 13.4 shouldPersistEvent — 持久化条件
+
+**源码**（`runner.go:997-1003`）：
+
+```go
+func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
+    return len(agentEvent.StateDelta) > 0 ||
+        (agentEvent.Response != nil && !agentEvent.IsPartial && agentEvent.IsValidContent())
+}
+```
+
+**结论**：
+- **条件 1**：`StateDelta` 非空 → 持久化（即使 Response 为 nil/partial）
+- **条件 2**：Response 有效且非 partial → 持久化
+- **MemoryPlugin 的作用**：对于 Response 为 nil/partial 的事件，写入 `StateDelta` 是确保持久化的唯一手段
+
+### 13.5 Session 与 MemoryStore 的差异
+
+| 维度 | trpc-agent-go Session | tagent MemoryStore |
+|------|----------------------|-------------------|
+| **所属层级** | 框架层（trpc-agent-go） | 应用层（tagent） |
+| **存储粒度** | 整个 `event.Event` 对象（包含完整 Response） | `FullEvent`（完整细节）+ `EventReference`（轻量引用） |
+| **用途** | LLM 请求上下文构建、事件回放 | 因果链追踪、按需检索、精确查找 |
+| **是否跨 Session** | 单 Session 内（按 AppName:UserID:SessionID） | 可跨 Session 检索（按 PartitionID） |
+| **持久化方式** | 框架 SessionService（InMemory 等） | tagent 自定义后端（InMemoryStore / FileSegmentStore） |
+| **数据是否压缩** | Session.Events 保留原始事件 | MemoryStore 中 FullEvent 不压缩（压缩在 LLM 视图层处理） |
+
+### 13.6 数据流向对比
+
+```mermaid
+graph TB
+    subgraph "trpc-agent-go Session（框架层）"
+        S["Session.Events\n(event.Event[])"]
+        ST["Session.State\n(StateMap)"]
+    end
+
+    subgraph "tagent SessionProjection"
+        SP["SessionProjection\n(EventReference[])"]
+    end
+
+    subgraph "tagent MemoryStore（应用层）"
+        MS["MemoryStore\n(FullEvent map)"]
+    end
+
+    S -->|框架转换| MSG["model.Message[]\n(LLM 请求上下文)"]
+    SP -->|BuildMessages| MSG
+    MS -->|GetEvent(key)| SP
+    MS -->|提供 EventKey 索引| SP
+```
+
+### 13.7 核心设计决策：为什么需要 MemoryStore？
+
+Session 已有的 `Session.Events`（完整 event.Event）和框架的 Summaries 机制，为什么 tagent 还需要独立的 MemoryStore？
+
+| 需求 | Session 能满足吗 | MemoryStore 提供的能力 |
+|------|----------------|----------------------|
+| **因果链** | Session.Events 是线性列表，无因果链 | RelationStore 构建有向因果图 |
+| **精确 FullEvent 检索** | Session.Events 需遍历所有事件 | GetEvent(key) O(1) 直接定位 |
+| **按类型/时间范围检索** | 框架 Summaries 支持有限 | QueryEvents 支持多维度过滤 |
+| **跨 Session 检索** | 单 Session 范围 | 可按 PartitionID 跨 Session 检索 |
+| **tool_calls 原始数据** | Session.Events.Response 有 | FullEvent.ToolCalls 有，且不随 LLM 视图变化 |
+| **因果回溯** | 无 | RelationStore.GetParent() 支持按因果链回溯历史 |
+
+**结论**：Session 是框架提供的通用会话管理，MemoryStore 是 tagent 的差异化能力（结构化因果记忆 + 按需精确检索）。两者互补而非替代。
+# tagent/plugin 模块架构文档
+
+## 一、模块定位
+
+`tagent/plugin` 是 tagent 为 trpc-agent-go Runner 提供的一组**事件钩子插件**。
+
+**核心职责**：通过 `plugin.Plugin` 接口将 tagent 的差异化能力（持久化、摘要）注入到框架的事件流中。
+
+**设计原则**：
+- **每个 Plugin 职责单一**：MemoryPlugin 专注持久化 + 因果链，SummaryPlugin 专注 Tag 注入
 - **严格拒绝非设计折损**：摘要中完全禁止任何形式的截断，内容超限由 SmartCompress 处理
 - **通过 OnEvent 而非 Before/After Model**：在事件层面处理，不侵入 LLM 调用流程
 

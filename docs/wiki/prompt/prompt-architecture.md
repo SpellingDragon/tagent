@@ -20,7 +20,7 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `loader.go` | 288 | Prompt 加载器：单文件、目录、组合加载、bootstrap 加载 |
+| `loader.go` | 289 | Prompt 加载器：单文件、目录、组合加载、bootstrap 加载 |
 | `loader_test.go` | 10.1KB | 单元测试 |
 
 ---
@@ -55,28 +55,26 @@ func NewLoader(baseDir string) *Loader {
 ### 4.1 LoadFromFile — 单文件加载
 
 ```go
-// prompt/loader.go:41-70
+// prompt/loader.go:43-69
 func (l *Loader) LoadFromFile(path string) (string, error) {
-    // Step 1: 空路径检查
     if path == "" {
         return "", errors.New("prompt file path is empty")
     }
 
-    // Step 2: 相对路径 → 绝对路径
     if !filepath.IsAbs(path) && l.BaseDir != "" {
         path = filepath.Join(l.BaseDir, path)
     }
 
-    // Step 3: Trim空格
     path = strings.TrimSpace(path)
+    if path == "" {
+        return "", errors.New("prompt file path is empty after trimming")
+    }
 
-    // Step 4: 读取文件
     data, err := os.ReadFile(path)
     if err != nil {
         return "", fmt.Errorf("read prompt file %s: %w", path, err)
     }
 
-    // Step 5: Trim 并返回（空文件返回空字符串，不报错）
     content := strings.TrimSpace(string(data))
     if content == "" {
         return "", nil
@@ -96,7 +94,10 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 ```go
 // prompt/loader.go:75-127
 func (l *Loader) LoadFromDir(dir string) (string, error) {
-    // Step 1: 路径解析（同 LoadFromFile）
+    if dir == "" {
+        return "", errors.New("prompt directory path is empty")
+    }
+
     if !filepath.IsAbs(dir) && l.BaseDir != "" {
         dir = filepath.Join(l.BaseDir, dir)
     }
@@ -106,18 +107,18 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
         return "", errors.New("prompt directory path is empty after trimming")
     }
 
-    // Step 2: 遍历目录，收集 .md 文件
     entries, err := os.ReadDir(dir)
     if err != nil {
         return "", fmt.Errorf("read prompt directory %s: %w", dir, err)
     }
 
+    files := make([]string, 0, len(entries))
     for _, entry := range entries {
         if entry.IsDir() {
-            continue  // 跳过子目录
+            continue
         }
         if strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
-            continue  // 跳过非 .md 文件
+            continue
         }
         files = append(files, filepath.Join(dir, entry.Name()))
     }
@@ -126,14 +127,13 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
         return "", fmt.Errorf("no .md prompt files in directory %s", dir)
     }
 
-    // Step 3: 按文件名排序（确定性顺序）
     sort.Strings(files)
 
-    // Step 4: 逐个加载并用 "\n\n" 连接（遇到错误立即返回）
+    parts := make([]string, 0, len(files))
     for _, file := range files {
         content, err := l.LoadFromFile(file)
         if err != nil {
-            return "", err  // 不跳过错误，直接返回
+            return "", err
         }
         if content != "" {
             parts = append(parts, content)
@@ -153,19 +153,21 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 ### 4.3 LoadFiles — 多文件加载
 
 ```go
-// prompt/loader.go:116-136
+// prompt/loader.go:132-152
 func (l *Loader) LoadFiles(paths []string) (string, error) {
     parts := make([]string, 0, len(paths))
 
     for _, path := range paths {
         path = strings.TrimSpace(path)
         if path == "" {
-            continue  // 跳过空路径
+            continue
         }
+
         content, err := l.LoadFromFile(path)
         if err != nil {
-            return "", err  // 这里会中断
+            return "", err
         }
+
         if content != "" {
             parts = append(parts, content)
         }
@@ -185,16 +187,14 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 ### 4.4 LoadComposite — 组合加载
 
 ```go
-// prompt/loader.go:154-192
+// prompt/loader.go:160-192
 func (l *Loader) LoadComposite(inline string, files []string, dir string) (string, error) {
     parts := make([]string, 0, 1+len(files))
 
-    // 1. Inline prompt（最高优先级）
     if v := strings.TrimSpace(inline); v != "" {
         parts = append(parts, v)
     }
 
-    // 2. 多个文件（按顺序，遇错中断）
     if len(files) > 0 {
         fileContent, err := l.LoadFiles(files)
         if err != nil {
@@ -205,7 +205,6 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
         }
     }
 
-    // 3. 目录（最低优先级，遇错中断）
     dir = strings.TrimSpace(dir)
     if dir != "" {
         dirContent, err := l.LoadFromDir(dir)
@@ -251,32 +250,58 @@ var BootstrapLoadOrder = []string{
 ### 5.2 LoadBootstrap — Bootstrap 加载逻辑
 
 ```go
-// prompt/loader.go:199-262
+// prompt/loader.go:215-278
 func (l *Loader) LoadBootstrap(dir string) (string, error) {
+    if dir == "" {
+        return "", errors.New("bootstrap directory is empty")
+    }
+
+    if !filepath.IsAbs(dir) && l.BaseDir != "" {
+        dir = filepath.Join(l.BaseDir, dir)
+    }
+
+    if _, err := os.Stat(dir); os.IsNotExist(err) {
+        return "", fmt.Errorf("bootstrap directory %s does not exist", dir)
+    }
+
     var results []string
 
-    // Step 1: 按 BootstrapLoadOrder 顺序加载
     for _, filename := range BootstrapLoadOrder {
         path := filepath.Join(dir, filename)
         content, err := l.LoadFromFile(path)
-        if errors.Is(err, os.ErrNotExist) {
-            continue  // 文件不存在 → 跳过
+        if err != nil {
+            if errors.Is(errors.Unwrap(err), os.ErrNotExist) ||
+                strings.Contains(err.Error(), "no such file") ||
+                strings.Contains(err.Error(), "file does not exist") {
+                continue
+            }
+            return "", err
         }
         if content != "" {
             results = append(results, content)
         }
     }
 
-    // Step 2: 加载剩余的 .md 文件（不在 BootstrapLoadOrder 中的）
-    entries, _ := os.ReadDir(dir)
-    for _, entry := range entries {
-        if entry.IsDir() { continue }
-        if !strings.HasSuffix(entry.Name(), ".md") { continue }
-        if alreadyLoaded(entry.Name()) { continue }  // 跳过已加载的
+    entries, err := os.ReadDir(dir)
+    if err == nil {
+        loaded := make(map[string]bool)
+        for _, name := range BootstrapLoadOrder {
+            loaded[name] = true
+        }
 
-        content, _ := l.LoadFromFile(entry.Name())
-        if content != "" {
-            results = append(results, content)
+        for _, entry := range entries {
+            if entry.IsDir() || strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
+                continue
+            }
+            if loaded[entry.Name()] {
+                continue
+            }
+
+            path := filepath.Join(dir, entry.Name())
+            content, err := l.LoadFromFile(path)
+            if err == nil && content != "" {
+                results = append(results, content)
+            }
         }
     }
 
@@ -318,9 +343,14 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 ### 6.1 SplitCSV — CSV 解析
 
 ```go
-// prompt/loader.go:180-194
+// prompt/loader.go:196-210
 func SplitCSV(s string) []string {
+    if s == "" {
+        return nil
+    }
+
     parts := strings.Split(s, ",")
+    result := make([]string, 0, len(parts))
     for _, part := range parts {
         part = strings.TrimSpace(part)
         if part != "" {
@@ -345,8 +375,8 @@ tagent/prompt（加载层）
     │  提供组装后的 prompt 字符串
     │
 tagent/agent
-    └── TagentAgent
-        └── InstructionProcessor（将 prompt 注入 system message）
+    └── ContextManager
+        └── llmagent.WithInstruction（将 prompt 注入 system message）
 ```
 
 ### 7.2 在 Agent 初始化中的位置
@@ -359,15 +389,15 @@ sequenceDiagram
     participant Root as tagent.New() (根包)
     participant PL as PromptLoader
     participant TA as TagentAgent
-    participant IP as InstructionProcessor
+    participant CM as ContextManager
 
     Root->>PL: LoadComposite(inline, files, dir)
     PL->>PL: 1. 内联文本<br/>2. 指定文件列表<br/>3. 加载目录中所有 .md
     PL->>PL: 以 "\n\n" 连接各部分
     PL-->>Root: combinedPrompt 字符串
     Root->>TA: NewTagentAgent(cfg{SystemPrompt: combinedPrompt})
-    TA->>IP: 将 combinedPrompt 注册为 system instruction
-    IP-->>TA: Request(system_prompt=combinedPrompt)
+    TA->>CM: NewContextManager(cfg)
+    CM->>CM: llmagent.WithInstruction(combinedPrompt)
     Note over TA: Agent 初始化完成
 ```
 

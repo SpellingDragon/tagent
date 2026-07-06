@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -19,15 +21,17 @@ import (
 // This is a "view transformation" — it modifies the messages sent to the LLM,
 // but does NOT modify the Session.
 type SmartCompressor struct {
-	summaryModel    model.Model // Optional: used for Stage 2 LLM summary
-	KeepRecentTasks int         // Number of recent complete tasks to keep (default: 2)
-	maxTokens       int         // Token budget for calculating batch size (default: DefaultMaxTokens)
+	summaryModel    model.Model  // Optional: used for Stage 2 LLM summary
+	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
+	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
+	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
 }
 
 // NewSmartCompressor creates a new SmartCompressor.
 func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 	sc := &SmartCompressor{
 		KeepRecentTasks: 2,
+		tokenCounter:    NewDefaultTokenCounter(),
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -54,9 +58,11 @@ func WithKeepRecentTasks(n int) SmartCompressorOption {
 
 // WithMaxTokens sets the token budget used for batch size calculation.
 func WithMaxTokens(n int) SmartCompressorOption {
-	return func(sc *SmartCompressor) {
-		sc.maxTokens = n
-	}
+	return func(sc *SmartCompressor) { sc.maxTokens = n }
+}
+
+func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.tokenCounter = tc }
 }
 
 // Compress compresses the message list by dropping old task segments.
@@ -66,11 +72,12 @@ func (sc *SmartCompressor) Compress(
 	messages []model.Message,
 	inv *agent.Invocation,
 ) []model.Message {
+	startTime := time.Now()
 	// 1. Separate system message
 	systemMsg, rest := splitSystemMessage(messages)
 
 	// 2. Split by task boundary
-	segments := splitByTaskBoundary(rest)
+	segments := SegmentMessages(rest)
 
 	// Log segment details for diagnostics
 	completeCount := 0
@@ -156,11 +163,24 @@ func (sc *SmartCompressor) Compress(
 	}
 
 	// Token reduction summary for diagnostics
-	beforeTokens := NewDefaultTokenCounter().Estimate(messages)
-	afterTokens := NewDefaultTokenCounter().Estimate(result)
-	log.Infof("[SmartCompress] old_segments=%d recent_segments=%d compressed_keys=%d batches=%d summary_msgs=%d tokens=%d->%d (-%d)",
-		len(oldSegments), len(recentSegments), len(compressedKeys), batchCount, len(summaryMsgs),
-		beforeTokens, afterTokens, beforeTokens-afterTokens)
+	beforeTokens := sc.tokenCounter.Estimate(messages)
+	afterTokens := sc.tokenCounter.Estimate(result)
+
+	// Structured JSON metrics
+	metrics := map[string]interface{}{
+		"event":              "smart_compress",
+		"before_tokens":      beforeTokens,
+		"after_tokens":       afterTokens,
+		"discarded_segments": len(oldSegments),
+		"kept_segments":      len(recentSegments),
+		"summary_generated":  sc.summaryModel != nil && len(summaryMsgs) > 0,
+		"duration_ms":        time.Since(startTime).Milliseconds(),
+	}
+	if metricsJSON, err := json.Marshal(metrics); err == nil {
+		log.Infof("[SmartCompress] %s old=%d recent=%d keys=%d batches=%d summary_msgs=%d tokens=%d->%d (-%d)",
+			string(metricsJSON), len(oldSegments), len(recentSegments), len(compressedKeys),
+			batchCount, len(summaryMsgs), beforeTokens, afterTokens, beforeTokens-afterTokens)
+	}
 
 	return result
 }
@@ -285,12 +305,6 @@ func (sc *SmartCompressor) collectCompressedKeys(
 	return keys
 }
 
-// TaskSegment is a group of messages delimited by task boundaries.
-type TaskSegment struct {
-	Messages   []model.Message
-	IsComplete bool // true if closed by an agent_output (assistant without tool calls)
-}
-
 // splitSystemMessage separates the system message from the rest.
 func splitSystemMessage(messages []model.Message) (*model.Message, []model.Message) {
 	if len(messages) == 0 {
@@ -300,39 +314,6 @@ func splitSystemMessage(messages []model.Message) (*model.Message, []model.Messa
 		return &messages[0], messages[1:]
 	}
 	return nil, messages
-}
-
-// splitByTaskBoundary splits messages into segments at task boundaries.
-// A task boundary is defined by an assistant message without tool calls (agent_output).
-func splitByTaskBoundary(messages []model.Message) []*TaskSegment {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	var segments []*TaskSegment
-	var current *TaskSegment
-
-	for i := range messages {
-		msg := &messages[i]
-		if current == nil {
-			current = &TaskSegment{}
-		}
-		current.Messages = append(current.Messages, *msg)
-
-		// Check for task boundary: assistant message without tool calls
-		if msg.Role == model.RoleAssistant && len(msg.ToolCalls) == 0 {
-			current.IsComplete = true
-			segments = append(segments, current)
-			current = nil
-		}
-	}
-
-	// If there's an incomplete segment, add it
-	if current != nil {
-		segments = append(segments, current)
-	}
-
-	return segments
 }
 
 // generateSummary generates an LLM summary of old task segments.
@@ -457,7 +438,7 @@ func (sc *SmartCompressor) batchSegmentsByTokenBudget(
 		maxInputTokens = 100
 	}
 
-	counter := NewDefaultTokenCounter()
+	counter := sc.tokenCounter
 	var batches [][]*TaskSegment
 	var currentBatch []*TaskSegment
 	currentTokens := 0

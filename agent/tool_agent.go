@@ -27,6 +27,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -169,13 +170,22 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	return decl
 }
 
+// defaultSubAgentTimeout is the default timeout for sub-agent calls.
+const defaultSubAgentTimeout = 120 * time.Second
+
+// isRemoteAgent checks if the wrapped agent is a remote A2AAgent.
+func isRemoteAgent(ag agent.Agent) bool {
+	return fmt.Sprintf("%T", ag) == "*a2aagent.A2AAgent"
+}
+
 // Call implements trpctool.CallableTool.
 // It:
 //  1. Parses JSON args to extract event_keys
 //  2. If event_keys are present and parentStore is available, fetches full event data
 //  3. Serializes the events into RuntimeState["external_context"] (compact JSON)
-//  4. Constructs an Invocation and calls agent.Run — unified for local and remote
-//  5. Collects the sub-agent's final output from the event stream
+//  4. Constructs an Invocation and calls agent.Run with timeout — unified for local and remote
+//  5. For remote A2A agents, retries once on failure with 500ms backoff
+//  6. Collects the sub-agent's final output from the event stream
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
@@ -230,9 +240,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		agentName, len(request), len(keys), len(externalEvents))
 
 	// Build the Invocation with RuntimeState carrying external context.
-	// This unified path works for both local TagentAgent (Run reads RuntimeState
-	// directly) and remote A2AAgent (WithTransferStateKey copies RuntimeState
-	// to A2A metadata, server auto-maps back to RuntimeState).
 	runOpts := agent.RunOptions{}
 	if len(externalEvents) > 0 {
 		serialized, err := serializeExternalContext(externalEvents)
@@ -250,11 +257,10 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		agent.WithInvocationRunOptions(runOpts),
 	)
 
-	// === Boundary log: run sub-agent with timing ===
+	// === Run sub-agent with timeout + retry ===
 	startTime := time.Now()
 
-	// Run the sub-agent via unified agent.Run interface
-	eventCh, err := w.agent.Run(ctx, inv)
+	eventCh, err := w.runWithTimeoutAndRetry(ctx, inv, agentName)
 	if err != nil {
 		return nil, fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
 	}
@@ -263,18 +269,12 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	var finalOutput string
 	var toolCallCount int
 	for evt := range eventCh {
-		// Deep-copy Response to prevent data race with framework background
-		// goroutines (e.g., ContentRequestProcessor) that may modify the
-		// shared *model.Response in subsequent iterations. The session hook
-		// in NewTagentAgent already provides isolation, but we clone again
-		// here for defense-in-depth.
 		var resp *model.Response
 		if evt.Response != nil {
 			resp = evt.Response.Clone()
 		}
 		if resp != nil && len(resp.Choices) > 0 {
 			choice := resp.Choices[len(resp.Choices)-1]
-			// Log internal tool calls for audit visibility
 			if len(choice.Message.ToolCalls) > 0 {
 				toolCallCount++
 				var names []string
@@ -283,11 +283,9 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				}
 				log.Infof("[ToolAgent:%s] round %d tool call: %s", agentName, toolCallCount, strings.Join(names, ", "))
 			}
-			// Track tool responses
 			if choice.Message.Role == model.RoleTool && choice.Message.Content != "" {
 				log.Debugf("[ToolAgent:%s] round %d tool response: %s", agentName, toolCallCount, truncate(choice.Message.Content, 120))
 			}
-			// Final output: assistant message without tool calls
 			if choice.Message.Content != "" && len(choice.Message.ToolCalls) == 0 {
 				finalOutput = choice.Message.Content
 			}
@@ -303,6 +301,66 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	}
 
 	return finalOutput, nil
+}
+
+// runWithTimeoutAndRetry wraps agent.Run with a context timeout and,
+// for remote A2A agents, retries once on failure with 500ms backoff.
+//
+// IMPORTANT: agent.Run is async — it returns an event channel immediately and
+// the sub-agent produces events in a background goroutine. The cancel function
+// must NOT be deferred here, because that would cancel the context as soon as
+// this function returns (before the caller finishes consuming the channel).
+// Instead, we wrap the returned channel in a goroutine that calls cancel after
+// the channel is closed.
+func (w *AgentToolWrapper) runWithTimeoutAndRetry(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
+	remote := isRemoteAgent(w.agent)
+
+	runCtx, cancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
+
+	eventCh, err := w.agent.Run(runCtx, inv)
+	if err != nil {
+		cancel()
+		if !remote {
+			// Local failure — no retry
+			return nil, err
+		}
+
+		// Remote A2A failure — retry once after 500ms
+		log.Warnf("[AgentToolWrapper] remote agent %q failed (%v), retrying in 500ms", agentName, err)
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		retryCtx, retryCancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
+		retryCh, retryErr := w.agent.Run(retryCtx, inv)
+		if retryErr != nil {
+			retryCancel()
+			return nil, retryErr
+		}
+		// Wrap retry channel: cancel context after consumption
+		wrapped := make(chan *event.Event, cap(retryCh))
+		go func() {
+			defer retryCancel()
+			defer close(wrapped)
+			for evt := range retryCh {
+				wrapped <- evt
+			}
+		}()
+		return wrapped, nil
+	}
+
+	// Wrap channel: cancel context after consumption to enforce timeout
+	wrapped := make(chan *event.Event, cap(eventCh))
+	go func() {
+		defer cancel()
+		defer close(wrapped)
+		for evt := range eventCh {
+			wrapped <- evt
+		}
+	}()
+	return wrapped, nil
 }
 
 // ==================== Tool Agent Factory Registry ====================

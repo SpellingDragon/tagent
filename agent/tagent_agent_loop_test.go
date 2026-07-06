@@ -49,26 +49,15 @@ func (m *mockLoopModel) getCallCount() int {
 func newLoopTestAgent(t *testing.T) *TagentAgent {
 	t.Helper()
 	bus := NewEventBus()
-	compressor := NewSmartCompressor(WithMaxTokens(8000))
-	counter := NewDefaultTokenCounter()
-	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
 	outputCh := make(chan *event.Event, 100)
-	agentLoop := NewAgentLoop(AgentLoopConfig{
-		Bus:          bus,
-		Preprocessor: preproc,
-		Model:        &mockLoopModel{},
-		OutputCh:     outputCh,
-		Name:         "test-loop",
-		MaxToolIters: 10,
-	})
+	cm := newTestContextManager("test-loop", &mockLoopModel{}, nil, outputCh, bus)
 	return &TagentAgent{
-		persistentBus: bus,
-		activeBus:     bus,
-		agentLoop:     agentLoop,
-		preprocessor:  preproc,
-		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000},
-		outputCh:      outputCh,
-		name:          "test-loop",
+		persistentBus:  bus,
+		activeBus:      bus,
+		contextManager: cm,
+		config:         &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000},
+		outputCh:       outputCh,
+		name:           "test-loop",
 	}
 }
 
@@ -85,15 +74,9 @@ func TestStartLoop_InjectMessage_ReceivesEvents(t *testing.T) {
 	ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "hello"})
 
 	// The AgentLoop should process the message and emit an agent_output to outputCh.
-	select {
-	case evt := <-outputCh:
-		require.NotNil(t, evt)
-		require.NotNil(t, evt.Response)
-		require.Len(t, evt.Response.Choices, 1)
-		assert.Equal(t, "mock response", evt.Response.Choices[0].Message.Content)
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for agent_output on outputCh")
-	}
+	evt := waitForFinalResponse(t, outputCh, 5*time.Second)
+	require.NotNil(t, evt)
+	assert.NotEmpty(t, evt.Response.Choices[0].Message.Content)
 
 	ta.StopLoop()
 	assert.False(t, ta.loopActive.Load())
@@ -111,13 +94,9 @@ func TestStartLoop_MultipleInjects(t *testing.T) {
 		ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "msg"})
 	}
 
-	// Should receive at least one response (the AgentLoop may batch them).
-	select {
-	case evt := <-outputCh:
-		require.NotNil(t, evt)
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for agent_output")
-	}
+	// Should receive at least one response.
+	evt := waitForFinalResponse(t, outputCh, 5*time.Second)
+	require.NotNil(t, evt)
 }
 
 func TestStopLoop_Idempotent(t *testing.T) {

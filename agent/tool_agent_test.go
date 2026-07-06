@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,14 +118,13 @@ func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
 	require.NoError(t, parentStore.StoreEvent(key1, evt1))
 	require.NoError(t, parentStore.StoreEvent(key2, evt2))
 
-	// Create sub-agent with mock runner and required fields.
-	compressor := NewSmartCompressor(WithMaxTokens(8000))
-	counter := NewDefaultTokenCounter()
-	preproc := NewPreprocessor(compressor, counter, 8000, 0.8)
+	// Create sub-agent with required fields.
 	subAgent := &TagentAgent{
-		name:         "test-tool",
-		preprocessor: preproc,
-		config:       &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-tool",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
@@ -156,8 +158,11 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 	}))
 
 	subAgent := &TagentAgent{
-		name:   "test-tool",
-		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-tool",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
@@ -178,8 +183,11 @@ func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 
 	subAgent := &TagentAgent{
-		name:   "test-tool",
-		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-tool",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
@@ -196,13 +204,18 @@ func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 // TestAgentToolWrapper_Call_EmptyArgs verifies that Call works with empty args.
 func TestAgentToolWrapper_Call_EmptyArgs(t *testing.T) {
 	subAgent := &TagentAgent{
-		name:   "test-tool",
-		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-tool",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", nil, nil)
 
-	// Call with empty args
-	result, err := wrapper.Call(context.Background(), []byte(`{}`))
+	// Call with minimal args
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := wrapper.Call(ctx, []byte(`{"request":"test"}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "mock response")
 }
@@ -390,8 +403,11 @@ func TestSerializeDeserialize_Empty(t *testing.T) {
 func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 	// Create a TagentAgent with config (no runner needed for Run path)
 	ta := &TagentAgent{
-		name:   "test-agent",
-		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-agent",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 
 	// Serialize external context
@@ -433,8 +449,11 @@ func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 // when RuntimeState has no external_context.
 func TestTagentAgent_Run_NoRuntimeState(t *testing.T) {
 	ta := &TagentAgent{
-		name:   "test-agent",
-		config: &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		name:       "test-agent",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 
 	inv := agent.NewInvocation(
