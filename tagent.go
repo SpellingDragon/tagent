@@ -339,6 +339,10 @@ func buildAgent(
 		ta.RegisterCloser(actionTool)
 	}
 
+	// Wire parentProjection to AgentToolWrapper instances for auto-inject fallback.
+	// This must happen after TagentAgent creation (projection is created inside NewTagentAgent).
+	ta.SetToolParentProjection()
+
 	cache[name] = ta
 	return ta, nil
 }

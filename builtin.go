@@ -29,7 +29,7 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 	var opts []action.ActionToolOption
 
-	if wd, ok := properties["work_dir"].(string); ok && wd != "" {
+	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))
 	}
 	if ru, ok := properties["run_as_user"].(string); ok && ru != "" {

@@ -297,6 +297,8 @@ agents:
 
 ### 场景一：持久事件循环（长时运行）
 
+应用侧通过**持续消费** outputCh 接收 Agent 的所有事件，按事件类型分发处理：
+
 ```mermaid
 sequenceDiagram
     participant U as 用户/TmuxMonitor
@@ -305,19 +307,25 @@ sequenceDiagram
     participant CM as ContextManager
     participant RUN as 框架 Runner
     participant OC as outputCh
+    participant C as 持续消费者
 
     U->>TA: InjectMessage(msg)
     TA->>EB: Publish(external_input)
     TA->>TA: runEventLoop Pull 批量事件
     TA->>CM: BuildInvocation
     CM->>RUN: RunFlow → runner.Run
-    RUN->>RUN: BeforeModel: SmartCompressor/Compactor
+    RUN->>RUN: BeforeModel: InjectEventKeys/SmartCompressor
     RUN->>RUN: ReAct 循环
     RUN-->>CM: 事件流
     CM->>CM: onEvent 追加 EventReference
-    CM->>OC: 最终响应
+    CM->>OC: 所有事件（阻塞写入）
+    OC->>C: 持续消费
+    C->>C: agent_output → 回复用户
+    C->>C: thinking_plan → 日志/打字指示
     CM->>EB: Publish(agent_output echo)
 ```
+
+**消费模式**：应用侧在 `StartLoop` 后启动持续消费 goroutine，持续读取 outputCh 直到 `StopLoop` 关闭。消费者按事件类型分发：`agent_output` 回复用户（如有等待中的用户消息），中间事件（`thinking_plan`、`action_command`）记录日志或更新 UI。
 
 ### 场景二：子 Agent 与 A2A 远程通信
 
@@ -388,6 +396,7 @@ graph LR
 | RecallAgent | 外部上下文摘要；自己的 ReAct 循环 | 父 Agent 的完整 Session |
 | MemoryStore | 一切：所有 FullEvent、因果链 | — |
 | SessionProjection | 轻量 `EventReference[]` | FullEvent 内容 |
+| outputCh 消费者 | 所有事件（thinking_plan、action_command、agent_output）；按类型分发处理 | MemoryStore 内部结构 |
 
 ## 快速开始
 

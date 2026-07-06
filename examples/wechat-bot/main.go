@@ -8,13 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
-	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -217,7 +217,124 @@ func main() {
 	}
 	fmt.Println("Login successful!")
 
-	// 10. Register message handler
+	// 10. Start continuous event consumer goroutine.
+	//     The consumer reads all events from outputCh continuously,
+	//     dispatching by event type. This ensures outputCh never fills up
+	//     (runEventLoop blocks on writes until consumer reads).
+	//
+	//     Event dispatch (mirrors prototype's OnEvents switch on EventType):
+	//     - agent_output (final response): deliver to waiting user via responseCh
+	//     - thinking_plan (assistant + tool_calls): reply interim to user
+	//     - action_command (tool result): reply interim to user
+	//     - other events: log for visibility
+	//
+	//     The consumer holds a reference to the current reply target (fromUserID),
+	//     set by the message handler when a user message is being processed.
+	//     When no user is waiting, interim messages go to log only.
+	responseCh := make(chan string, 1) // buffered: at most one pending response
+	typingActive := atomic.Bool{}
+	// replyTarget tracks the current user to reply to. nil when no user is waiting.
+	var replyTarget atomic.Pointer[string]
+	go func() {
+		for evt := range outputCh {
+			if evt == nil {
+				continue
+			}
+
+			// Debug: print full event content
+			deltaStr := ""
+			if evt.StateDelta != nil {
+				for k, v := range evt.StateDelta {
+					deltaStr += fmt.Sprintf("%s=%s ", k, string(v))
+				}
+			}
+			respStr := "(nil)"
+			if evt.Response != nil && len(evt.Response.Choices) > 0 {
+				msg := evt.Response.Choices[len(evt.Response.Choices)-1].Message
+				respStr = fmt.Sprintf("role=%s content_len=%d tool_calls=%d", msg.Role, len(msg.Content), len(msg.ToolCalls))
+			}
+			log.Debugf("[Event] ID=%s Author=%s Tag=%s RequiresCompletion=%v StateDelta[%s] Response{%s}",
+				evt.ID, evt.Author, evt.Tag, evt.RequiresCompletion, deltaStr, respStr)
+
+			// Extract event type from StateDelta (written by MemoryPlugin)
+			eventType := ""
+			if evt.StateDelta != nil {
+				if typeBytes, ok := evt.StateDelta["event_type"]; ok && len(typeBytes) > 0 {
+					eventType = string(typeBytes)
+				}
+			}
+
+			// Check for final response (agent_output — no tool calls)
+			if evt.IsFinalResponse() && evt.Response != nil && len(evt.Response.Choices) > 0 {
+				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
+				content := choice.Message.Content
+				if content == "" {
+					content = "(empty response)"
+				}
+
+				// Try to deliver to a waiting user
+				select {
+				case responseCh <- content:
+					// Delivered to user message handler
+				default:
+					// No one waiting — meditation or internal output
+					log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+				}
+				// Clear reply target — user interaction complete
+				replyTarget.Store(nil)
+				continue
+			}
+
+			// Non-final events: dispatch by message role (mirrors prototype switch)
+			if evt.Response != nil && len(evt.Response.Choices) > 0 {
+				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
+				msg := choice.Message
+				evtLabel := eventType
+				if evtLabel == "" {
+					evtLabel = "unknown"
+				}
+
+				switch msg.Role {
+				case "assistant":
+					if len(msg.ToolCalls) > 0 {
+						// thinking_plan: LLM decided to call tools
+						if msg.Content != "" {
+							log.Infof("[Agent][%s] 思考: %s", evtLabel, msg.Content)
+							// replyInterim(&replyTarget, bot, fmt.Sprintf("💭 %s", msg.Content))
+						}
+						for _, tc := range msg.ToolCalls {
+							log.Infof("[Agent][%s] 调用工具: %s(%s)", evtLabel, tc.Function.Name, string(tc.Function.Arguments))
+							// replyInterim(&replyTarget, bot, fmt.Sprintf("🔧 %s(%s)", tc.Function.Name, string(tc.Function.Arguments)))
+						}
+					} else if msg.Content != "" {
+						log.Infof("[Agent][%s] 回复: %s", evtLabel, msg.Content)
+					}
+				case "tool":
+					// action_command: tool execution result
+					if msg.Content != "" {
+						log.Infof("[Agent][%s] 工具结果: %s", evtLabel, msg.Content)
+						// replyInterim(&replyTarget, bot, fmt.Sprintf("📋 %s", msg.Content))
+					}
+				case "user":
+					if msg.Content != "" {
+						log.Infof("[Agent][%s] 用户消息: %s", evtLabel, msg.Content)
+					}
+				case "system":
+					if msg.Content != "" {
+						log.Infof("[Agent][%s] 系统消息: %s", evtLabel, msg.Content)
+					}
+				}
+			}
+		}
+		log.Info("[Consumer] outputCh closed, consumer exiting")
+	}()
+
+	// 11. Register message handler
+	//     WeChat Poller processes messages serially — if handler A blocks
+	//     waiting for agent response, handler B won't execute until A returns.
+	//     To allow concurrent message processing (so user B's InjectMessage
+	//     reaches persistentBus while Agent is still processing A), we wrap
+	//     the handler to run in a goroutine.
 	requestTimeout := time.Duration(tagentCfg.RequestTimeoutSeconds) * time.Second
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
@@ -226,77 +343,88 @@ func main() {
 			return nil
 		}
 
-		// Show typing indicator
-		_ = bot.SendTyping(ctx, msg.FromUserID)
-
-		// Create request context with timeout
-		reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-		defer cancel()
-
-		// Keep sending typing indicator while processing
-		done := make(chan struct{})
+		// Run handler in goroutine to avoid blocking Poller's serial loop.
+		// This allows subsequent user messages to be injected into persistentBus
+		// while the agent is still processing the current message.
 		go func() {
-			ticker := time.NewTicker(10 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-done:
-					return
-				case <-ticker.C:
-					_ = bot.SendTyping(reqCtx, msg.FromUserID)
+			// Show typing indicator
+			_ = bot.SendTyping(ctx, msg.FromUserID)
+			typingActive.Store(true)
+
+			// Create request context with timeout
+			reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+			defer cancel()
+
+			// Keep sending typing indicator while processing
+			done := make(chan struct{})
+			go func() {
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case <-ticker.C:
+						if typingActive.Load() {
+							_ = bot.SendTyping(reqCtx, msg.FromUserID)
+						}
+					}
 				}
+			}()
+
+			// Set reply target so the consumer can send interim messages to this user
+			replyTarget.Store(&msg.FromUserID)
+
+			// Inject message into the persistent event loop.
+			ta.InjectMessage(model.Message{
+				Role:    model.RoleUser,
+				Content: text,
+			})
+
+			// Wait for the continuous consumer to deliver the agent's final response
+			var response string
+			select {
+			case response = <-responseCh:
+			case <-reqCtx.Done():
+				if reqCtx.Err() == context.DeadlineExceeded {
+					response = fmt.Sprintf("Processing timed out (exceeded %v). Please try again.", requestTimeout)
+				} else {
+					response = "Sorry, I encountered an error. Please try again."
+				}
+			}
+			close(done)
+			typingActive.Store(false)
+
+			// Stop typing
+			_ = bot.StopTyping(ctx, msg.FromUserID)
+
+			// Brief delay to avoid WeChat API rate limiting after interim messages
+			time.Sleep(500 * time.Millisecond)
+
+			// Send reply — use SendTextToUser to get the latest context token
+			// (interim messages may have refreshed the token)
+			if len(response) > 2000 {
+				// For long text, try SendLongText first
+				token, _ := bot.GetContextToken(msg.FromUserID)
+				if token != "" {
+					_, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), msg.FromUserID, response, token)
+					if err == nil {
+						return
+					}
+					// Fall through to SendTextToUser with truncated text
+					response = response[:2000] + "\n\n[Message truncated]"
+				}
+			}
+			if err := bot.SendTextToUser(ctx, msg.FromUserID, response); err != nil {
+				log.Errorf("SendTextToUser failed: %v, falling back to Reply", err)
+				_ = bot.Reply(ctx, msg, response)
 			}
 		}()
 
-		// Inject message into the persistent event loop immediately.
-		// This is non-blocking — the message goes to the EventBus and
-		// will be processed on the next Pull. If the AgentLoop is busy
-		// (e.g. executing a tool from a previous message), this message
-		// queues up and gets processed after the current iteration.
-		//
-		// We do NOT hold a lock here — InjectMessage is thread-safe
-		// (publishes to a buffered channel). The previous design used
-		// msgMu to serialize InjectMessage + outputCh consumption, but
-		// that blocked new messages while waiting for tool execution.
-		ta.InjectMessage(model.Message{
-			Role:    model.RoleUser,
-			Content: text,
-		})
-
-		// Consume outputCh until the final response for this message.
-		// In the persistent event loop, each InjectMessage triggers
-		// an AgentLoop iteration that produces exactly one final response.
-		response, err := consumeUntilFinal(reqCtx, outputCh)
-		close(done)
-
-		if err != nil {
-			if reqCtx.Err() == context.DeadlineExceeded {
-				response = fmt.Sprintf("Processing timed out (exceeded %v). Please try again.", requestTimeout)
-			} else {
-				slog.Error("Agent response failed", "error", err)
-				response = "Sorry, I encountered an error. Please try again."
-			}
-		}
-
-		// Stop typing
-		_ = bot.StopTyping(ctx, msg.FromUserID)
-
-		// Send reply (handle long text)
-		if len(response) > 2000 {
-			token, _ := bot.GetContextToken(msg.FromUserID)
-			if token != "" {
-				_, err = wechat.SendLongText(ctx, bot.Client(), bot.Media(), msg.FromUserID, response, token)
-				if err != nil {
-					return bot.Reply(ctx, msg, response[:2000]+"\n\n[Message truncated]")
-				}
-				return nil
-			}
-		}
-
-		return bot.Reply(ctx, msg, response)
+		return nil // Return immediately so Poller can process next message
 	})
 
-	// 11. Run
+	// 12. Run
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)
@@ -305,40 +433,36 @@ func main() {
 	fmt.Println("Bot stopped gracefully.")
 }
 
-// consumeUntilFinal reads events from outputCh until a final response
-// (no tool_calls, Done=true) is received or ctx is cancelled.
-// This does NOT call InjectMessage — the caller is responsible for that.
-func consumeUntilFinal(ctx context.Context, outputCh <-chan *event.Event) (string, error) {
-	var finalOutput string
-loop:
-	for {
-		select {
-		case evt, ok := <-outputCh:
-			if !ok {
-				break loop // channel closed
-			}
+// truncateLog truncates a string for log output (max 120 chars).
+func truncateLog(s string) string {
+	return truncateLogN(s, 120)
+}
 
-			if evt.Response != nil && len(evt.Response.Choices) > 0 {
-				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-				if len(choice.Message.ToolCalls) == 0 && choice.Message.Content != "" {
-					finalOutput = choice.Message.Content
-				}
-			}
-
-			if evt.IsFinalResponse() {
-				break loop
-			}
-
-		case <-ctx.Done():
-			break loop
-		}
+func truncateLogN(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
+	return s[:n] + "..."
+}
 
-	if finalOutput == "" {
-		finalOutput = "No response generated"
+// sendInterim non-blocking sends an interim message to the user.
+func sendInterim(ch chan string, msg string) {
+	select {
+	case ch <- msg:
+	default:
+		// Channel full, skip — don't block the consumer
 	}
+}
 
-	return finalOutput, nil
+// replyInterim sends an interim message to the user if a reply target is set.
+// This is called from the continuous consumer goroutine for thinking_plan and
+// action_command events, allowing the user to see the agent's progress in real-time.
+func replyInterim(target *atomic.Pointer[string], bot *wechat.Bot, content string) {
+	userID := target.Load()
+	if userID == nil {
+		return // No user waiting
+	}
+	_ = bot.SendTextToUser(context.Background(), *userID, content)
 }
 
 // ---------------------------------------------------------------------------

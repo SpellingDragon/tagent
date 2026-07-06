@@ -107,11 +107,16 @@ func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
 //     and remote (A2A metadata auto-mapping) sub-agents
 
 type AgentToolWrapper struct {
-	agent       agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
-	desc        string
-	eventParams []string           // Which event-derived params to declare (e.g., "event_key")
-	parentStore memory.MemoryStore // Parent agent's MemStore for resolving event_key
+	agent            agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
+	desc             string
+	eventParams      []string           // Which event-derived params to declare (e.g., "event_key")
+	parentStore      memory.MemoryStore // Parent agent's MemStore for resolving event_key
+	parentProjection *SessionProjection // Parent agent's projection for auto-inject fallback
 }
+
+// autoInjectMaxEvents is the maximum number of recent events to auto-inject
+// when LLM does not pass event_keys.
+const autoInjectMaxEvents = 5
 
 // NewAgentToolWrapper creates a new AgentToolWrapper.
 //   - ag: the sub-agent to wrap (must implement agent.Agent — local TagentAgent or remote A2AAgent)
@@ -130,6 +135,13 @@ func NewAgentToolWrapper(
 		eventParams: eventParams,
 		parentStore: parentStore,
 	}
+}
+
+// SetParentProjection sets the parent agent's SessionProjection for auto-inject fallback.
+// When LLM does not pass event_keys, the wrapper auto-injects the most recent
+// autoInjectMaxEvents EventKeys from the parent projection.
+func (w *AgentToolWrapper) SetParentProjection(p *SessionProjection) {
+	w.parentProjection = p
 }
 
 // Declaration implements trpctool.Tool.
@@ -224,6 +236,15 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		if eventKeyFloat, ok := args["event_key"]; ok {
 			if key := toInt64Key(eventKeyFloat); key > 0 {
 				keys = append(keys, key)
+			}
+		}
+
+		// Auto-inject: if LLM did not pass event_keys and we have a parentProjection,
+		// automatically inject the most recent N event keys as fallback context.
+		if len(keys) == 0 && w.parentProjection != nil && w.hasEventKeysParam() {
+			keys = w.autoInjectEventKeys()
+			if len(keys) > 0 {
+				log.Infof("[AgentToolWrapper] auto-injected %d event_keys for agent %q", len(keys), agentName)
 			}
 		}
 
@@ -361,6 +382,40 @@ func (w *AgentToolWrapper) runWithTimeoutAndRetry(ctx context.Context, inv *agen
 		}
 	}()
 	return wrapped, nil
+}
+
+// hasEventKeysParam checks if eventParams includes "event_keys" or "event_key".
+func (w *AgentToolWrapper) hasEventKeysParam() bool {
+	for _, p := range w.eventParams {
+		if p == "event_key" || p == "event_keys" {
+			return true
+		}
+	}
+	return false
+}
+
+// autoInjectEventKeys returns the most recent N EventKeys from parentProjection.
+// Skips EventKey == 0. Returns nil if projection is empty or nil.
+func (w *AgentToolWrapper) autoInjectEventKeys() []int64 {
+	if w.parentProjection == nil {
+		return nil
+	}
+	refs := w.parentProjection.GetAll()
+	if len(refs) == 0 {
+		return nil
+	}
+	// Take the most recent N events
+	start := 0
+	if len(refs) > autoInjectMaxEvents {
+		start = len(refs) - autoInjectMaxEvents
+	}
+	var keys []int64
+	for _, ref := range refs[start:] {
+		if ref.EventKey > 0 {
+			keys = append(keys, ref.EventKey)
+		}
+	}
+	return keys
 }
 
 // ==================== Tool Agent Factory Registry ====================

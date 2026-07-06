@@ -138,6 +138,34 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
 
+	// Callback -1: InjectBusInputs — inject new user messages from EventBus
+	// during ReAct iterations. This enables the "user → think → tool → think →
+	// user → tool → think → output" event flow where new user messages are
+	// inserted between ReAct iterations without waiting for RunFlow to complete.
+	if cfg.Bus != nil {
+		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			events := cm.bus.TryPull()
+			if len(events) > 0 {
+				log.Infof("[InjectBusInputs] TryPull returned %d events", len(events))
+			}
+			for _, evt := range events {
+				if evt == nil || evt.Type != tagentevent.TypeExternalInput {
+					continue
+				}
+				if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" || evt.Source == "tool_result" {
+					continue
+				}
+				if evt.Message == nil {
+					continue
+				}
+				// Append new user message to the current LLM request
+				args.Request.Messages = append(args.Request.Messages, *evt.Message)
+				log.Infof("[InjectBusInputs] injected user message during ReAct: %s", truncateString(evt.Message.Content, 120))
+			}
+			return nil, nil
+		})
+	}
+
 	// Callback 0: InjectEventKeys — inject [evt_KEY|type] prefix into messages.
 	// This runs BEFORE SmartCompressor so that compression can parse and preserve
 	// event keys from the prefix. The prefix is injected on every LLM call, not
@@ -326,8 +354,8 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		if cm.outputCh != nil {
 			select {
 			case cm.outputCh <- fwEvt:
-			default:
-				log.Warnf("[ContextManager:%s] outputCh full, dropping event", cm.name)
+			case <-ctx.Done():
+				return nil
 			}
 		}
 		// Bridge action_command events to EventBus as tool_result

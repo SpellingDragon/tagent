@@ -174,6 +174,18 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 	// Set environment variables on the session
 	te.setSessionEnv(ctx, sessionName, opts.Env)
 
+	// Enable remain-on-exit so the pane persists after the command exits.
+	// This is critical: TmuxMonitor checks every 30s, but short commands may finish
+	// in <1s. Without remain-on-exit, tmux destroys the pane on exit, and
+	// capture-pane fails — causing the agent to receive empty output and
+	// potentially loop trying to re-execute the command.
+	remainArgs := []string{"set-option", "-t", sessionName, "remain-on-exit", "on"}
+	remainCmdName, remainCmdArgs := te.buildTmuxCommand(remainArgs)
+	remainCmd := exec.CommandContext(ctx, remainCmdName, remainCmdArgs...)
+	if remainErr := remainCmd.Run(); remainErr != nil {
+		log.Warnf("[TmuxExecutor] failed to set remain-on-exit for session %s: %v", sessionName, remainErr)
+	}
+
 	// Get session PID
 	pid, err := te.getSessionPID(sessionName)
 	if err != nil {

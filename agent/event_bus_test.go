@@ -154,3 +154,47 @@ func TestNewToolUseEvent(t *testing.T) {
 	assert.Equal(t, "action", evt.ToolCall.Function.Name)
 	assert.NotNil(t, evt.Metadata)
 }
+
+func TestEventBus_TryPull_Empty(t *testing.T) {
+	bus := NewEventBus()
+	events := bus.TryPull()
+	assert.NotNil(t, events)
+	assert.Empty(t, events)
+}
+
+func TestEventBus_TryPull_Batch(t *testing.T) {
+	bus := NewEventBus()
+
+	// Publish 3 events
+	bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "msg1"}))
+	bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "msg2"}))
+	bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "msg3"}))
+
+	events := bus.TryPull()
+	assert.Len(t, events, 3)
+	assert.Equal(t, "msg1", events[0].Message.Content)
+	assert.Equal(t, "msg2", events[1].Message.Content)
+	assert.Equal(t, "msg3", events[2].Message.Content)
+
+	// Channel should be empty now
+	events2 := bus.TryPull()
+	assert.Empty(t, events2)
+}
+
+func TestEventBus_TryPull_NonBlocking(t *testing.T) {
+	bus := NewEventBus()
+
+	// TryPull should return immediately (not block) when empty
+	done := make(chan struct{})
+	go func() {
+		bus.TryPull()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — returned immediately
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("TryPull blocked on empty channel")
+	}
+}

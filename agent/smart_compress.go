@@ -146,6 +146,12 @@ func (sc *SmartCompressor) Compress(
 	// Append batch summary messages (each is a System message with batch number)
 	result = append(result, summaryMsgs...)
 
+	// Append structured execution state (pure code extraction, no LLM call)
+	execState := extractExecutionState(oldSegments)
+	if execState != "" {
+		result = append(result, model.NewSystemMessage(execState))
+	}
+
 	for _, seg := range recentSegments {
 		result = append(result, seg.Messages...)
 	}
@@ -305,6 +311,71 @@ func (sc *SmartCompressor) collectCompressedKeys(
 	return keys
 }
 
+// extractExecutionState extracts a structured summary of tool calls and their
+// results from the given segments. This is pure code extraction (no LLM call),
+// ensuring that critical execution state (success/failure, key return values)
+// is never lost during compression.
+//
+// Output format:
+//
+//	[执行状态]
+//	- 调用: search_file({"path":"/tmp",...})
+//	  → 结果: Error: invalid path...
+//	- 调用: action({"command":"curl ..."})
+//	  → 结果: {"session_id":"...","status":"running"}
+//
+// Total length is capped at maxExecStateChars (500). Each tool result is
+// truncated to maxToolResultChars (100). If total exceeds the cap, the
+// most recent entries are kept (earlier ones are dropped).
+const (
+	maxExecStateChars  = 500
+	maxToolResultChars = 100
+	maxToolArgsChars   = 80
+)
+
+func extractExecutionState(segments []*TaskSegment) string {
+	var lines []string
+
+	for _, seg := range segments {
+		for i := range seg.Messages {
+			msg := &seg.Messages[i]
+			// Tool calls from assistant
+			if msg.Role == model.RoleAssistant && len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					args := truncate(string(tc.Function.Arguments), maxToolArgsChars)
+					lines = append(lines, fmt.Sprintf("- 调用: %s(%s)", tc.Function.Name, args))
+				}
+			}
+			// Tool results
+			if msg.Role == model.RoleTool && msg.Content != "" {
+				result := truncate(msg.Content, maxToolResultChars)
+				lines = append(lines, fmt.Sprintf("  → 结果: %s", result))
+			}
+		}
+	}
+
+	if len(lines) == 0 {
+		return ""
+	}
+
+	result := "[执行状态]\n" + strings.Join(lines, "\n")
+
+	// Truncate to maxExecStateChars, keeping the most recent entries
+	if len(result) > maxExecStateChars {
+		// Find a clean cut point (start of a line) within the last maxExecStateChars chars
+		cutStart := len(result) - maxExecStateChars
+		// Find the first newline after cutStart to avoid cutting mid-line
+		for cutStart < len(result) && result[cutStart] != '\n' {
+			cutStart++
+		}
+		if cutStart < len(result) {
+			result = "[执行状态]\n" + result[cutStart+1:]
+		}
+	}
+
+	return result
+}
+
 // splitSystemMessage separates the system message from the rest.
 func splitSystemMessage(messages []model.Message) (*model.Message, []model.Message) {
 	if len(messages) == 0 {
@@ -378,8 +449,8 @@ func (sc *SmartCompressor) generateSummary(
 	promptBuilder.WriteString(fmt.Sprintf(
 		"请对以下 %d 个历史对话片段生成摘要。这是第 %d/%d 批。\n\n"+
 			"工程要求：\n"+
-			"1. 只保留关键语义、用户意图、执行操作和最终结果\n"+
-			"2. 省略工具调用的原始输出和中间过程细节\n"+
+			"1. 保留关键语义、用户意图、执行操作和最终结果\n"+
+			"2. 保留工具调用的成功/失败状态和关键返回值（如文件路径、命令输出摘要）\n"+
 			"3. 摘要目标长度：约 %d 字符（原始内容 %d 字符，压缩比 %.1fx）\n"+
 			"4. 超出目标长度的部分必须省略，不可溢出\n"+
 			"5. 使用简洁的要点式表达\n\n",

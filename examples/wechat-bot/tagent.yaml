@@ -54,7 +54,7 @@ providers:
 # 日志级别: "debug", "info", "warn", "error"
 # debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等
 # 可通过环境变量 LOG_LEVEL 覆盖
-log_level: "info"
+log_level: "debug"
 
 # 请求超时（秒），默认 3600 (60 分钟)
 request_timeout_seconds: 3600
@@ -235,10 +235,8 @@ agents:
       - kind: tool
         id: exec
         description_file: exec_tool_desc.md
-        # properties:
-        #   workspace: /tmp/tagent-workspace
-        #   run_as_user: tagent-runner
-        #   run_as_group: tagent-runner
+        properties:
+          workspace: ./workspace
 
   # ========================================================================
   # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)

@@ -401,6 +401,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	runCtx, runCancel := context.WithCancel(ctx)
 	go func() {
 		defer close(invOutputCh)
+		defer invCM.Close() // Release temporary Runner resources after runEventLoop exits
 		ta.runEventLoop(runCtx, invBus, invCM)
 	}()
 
@@ -416,16 +417,28 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			wrappedCh <- evt
 			// Sub-agent semantics: stop after the first agent_output
 			// (final response without tool_calls).
-			// Note: Content may be empty — an empty final response is still
-			// a final response. The previous check (Content != "") caused the
-			// sub-agent to hang forever when the model returned an empty body.
 			if evt != nil && evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 				if len(choice.Message.ToolCalls) == 0 {
 					if choice.Message.Content == "" {
 						log.Warnf("[Run] sub-agent %q returned empty final response, treating as complete", ta.name)
 					}
-					return
+					// Drain mode: forward remaining tail events (e.g., MemoryPlugin
+					// persistence, RequiresCompletion) for up to 500ms before exiting.
+					// This prevents context cancellation from dropping tail events.
+					drainTimer := time.NewTimer(500 * time.Millisecond)
+					defer drainTimer.Stop()
+					for {
+						select {
+						case tailEvt, ok := <-invOutputCh:
+							if !ok {
+								return // invOutputCh closed
+							}
+							wrappedCh <- tailEvt
+						case <-drainTimer.C:
+							return // drain timeout
+						}
+					}
 				}
 			}
 		}
@@ -515,6 +528,14 @@ func (ta *TagentAgent) Close() error {
 		}
 	}
 
+	// Close TrajectoryRecorder (flush writeLoop + close files)
+	// Must be after contextManager.Close() so no new LLM calls are made.
+	if ta.trajectoryRecorder != nil {
+		if err := ta.trajectoryRecorder.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close trajectory recorder: %w", err))
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("close errors: %v", errs)
 	}
@@ -534,18 +555,41 @@ func (ta *TagentAgent) Runner() runner.Runner {
 	return nil
 }
 
-// InjectMessage injects a message into the agent's active EventBus as an
-// external_input event. This is the unified entry point for all asynchronous
-// message injection — tools (TmuxMonitor), external callers (HTTPAPI, A2A),
-// and meditation all use this method.
+// SetToolParentProjection wires the agent's SessionProjection to all
+// AgentToolWrapper instances in the tool list. This enables auto-inject
+// of event_keys when LLM does not pass them.
+// Must be called after NewTagentAgent (which creates the projection).
+func (ta *TagentAgent) SetToolParentProjection() {
+	if ta.projection == nil || ta.config == nil {
+		return
+	}
+	for _, t := range ta.config.Tools {
+		if wrapper, ok := t.(*AgentToolWrapper); ok {
+			wrapper.SetParentProjection(ta.projection)
+		}
+	}
+}
+
+// InjectMessage injects a message into the agent's persistent EventBus.
 //
-// The active bus is set by StartLoop (persistent bus) or Run() (invocation
-// bus). InjectMessage does not know or care which mode the agent is in —
-// it simply publishes to whatever bus is currently active.
+// Messages ALWAYS go to persistentBus — never to invBus. This ensures that
+// user messages sent during sub-agent execution are not lost when the
+// sub-agent's invBus is discarded. The BeforeModel InjectBusInputs callback
+// on the persistent ContextManager will TryPull these messages and inject them
+// into the next ReAct iteration.
 func (ta *TagentAgent) InjectMessage(msg model.Message) {
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.UpdateLastEventTime(time.Now())
 	}
+	// Always use persistentBus, not activeBus.
+	// activeBus may be invBus during sub-agent execution, but user messages
+	// should go to the persistent bus so the main runEventLoop's BeforeModel
+	// callback can pick them up.
+	if ta.persistentBus != nil {
+		ta.persistentBus.Publish(NewExternalInputEvent("inject", msg))
+		return
+	}
+	// Fallback: if persistentBus is nil (shouldn't happen), use activeBus.
 	ta.activeBusMu.Lock()
 	bus := ta.activeBus
 	ta.activeBusMu.Unlock()
@@ -553,7 +597,7 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 		bus.Publish(NewExternalInputEvent("inject", msg))
 		return
 	}
-	log.Warnf("[InjectMessage] agent %q has no active bus, message dropped", ta.name)
+	log.Warnf("[InjectMessage] agent %q has no bus, message dropped", ta.name)
 }
 
 // setActiveBus sets the current active bus for event injection.

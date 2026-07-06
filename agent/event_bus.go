@@ -151,3 +151,20 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 		return nil, ctx.Err()
 	}
 }
+
+// TryPull non-blocking reads all pending events without waiting.
+// Returns an empty (non-nil) slice if no events are pending.
+// Unlike Pull, this does not block — it immediately returns if the channel is empty.
+func (b *EventBus) TryPull() []*AgentEvent {
+	batch := []*AgentEvent{}
+	for {
+		select {
+		case evt := <-b.ch:
+			if evt != nil {
+				batch = append(batch, evt)
+			}
+		default:
+			return batch
+		}
+	}
+}

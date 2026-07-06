@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -304,11 +306,26 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 	}
 
 	if output != "" {
-		// Truncate long output - keep the tail (last 2000 chars)
 		if len(output) > 2000 {
-			output = "...(truncated)" + output[len(output)-2000:]
+			// Save full output to a file in the workspace
+			outputFile := ""
+			if ct.workspace != "" {
+				outputFile = filepath.Join(ct.workspace, fmt.Sprintf("output_%s.txt", sessionID))
+			} else {
+				outputFile = filepath.Join(os.TempDir(), fmt.Sprintf("tagent_output_%s.txt", sessionID))
+			}
+			if writeErr := os.WriteFile(outputFile, []byte(output), 0644); writeErr != nil {
+				log.Warnf("[ActionTool] failed to save output to %s: %v", outputFile, writeErr)
+			} else {
+				content += fmt.Sprintf("\nOutput (full saved to %s, showing last 2000 chars):\n...(truncated) %s",
+					outputFile, output[len(output)-2000:])
+				log.Infof("[ActionTool] full output saved to %s (%d chars)", outputFile, len(output))
+				output = "" // already appended
+			}
 		}
-		content += fmt.Sprintf("\nOutput:\n%s", output)
+		if output != "" {
+			content += fmt.Sprintf("\nOutput:\n%s", output)
+		}
 	}
 
 	ct.injector.InjectMessage(model.Message{

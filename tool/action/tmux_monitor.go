@@ -239,7 +239,10 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 		return
 	}
 
-	oldOutput := session.LastOutput
+	// detectSessionState updates session.LastOutput with current output on
+	// state transitions (e.g. SessionCompleted). Use the updated value for
+	// the callback so consumers receive the final output.
+	newOutput := session.LastOutput
 	session.Status = newStatus
 
 	log.Infof("[TmuxMonitor] session %s: %s -> %s",
@@ -264,7 +267,7 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	tm.mu.Unlock()
 
 	if tm.StateChangeCallback != nil {
-		tm.StateChangeCallback(sessionID, oldStatus, newStatus, oldOutput)
+		tm.StateChangeCallback(sessionID, oldStatus, newStatus, newOutput)
 	}
 }
 
@@ -284,10 +287,9 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	// Get current output
 	currentOutput, err := tm.executor.GetSessionOutput(session.ID)
 	if err != nil {
-		if !processExists {
-			return SessionCompleted
-		}
-		return SessionError
+		// GetSessionOutput failed — try to capture output anyway
+		// (pane may be dead but output still in buffer)
+		currentOutput = ""
 	}
 
 	// Calculate MD5 of output
@@ -308,15 +310,9 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 	}
 
-	// Completion: process doesn't exist but pane not marked dead
-	if !processExists && !isPaneDead {
-		session.LastOutput = currentOutput
-		session.LastOutputMD5 = currentMD5
-		return SessionCompleted
-	}
-
-	// Completion: pane dead or process gone
-	if isPaneDead || !processExists {
+	// Completion: process doesn't exist or pane dead
+	// Save output before returning so callback receives it
+	if !processExists || isPaneDead {
 		session.LastOutput = currentOutput
 		session.LastOutputMD5 = currentMD5
 		return SessionCompleted
