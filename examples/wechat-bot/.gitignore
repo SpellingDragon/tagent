@@ -1,3 +1,43 @@
+# Whitelist mode: ignore everything by default, explicitly allow tracked files.
+# This prevents accidental commit of runtime files, secrets, and generated data.
+
+# Ignore everything
+*
+
+# Allow directories (must end with / to match directories only)
+!.gitignore
+!go.mod
+!go.sum
+!main.go
+!run.sh
+!tagent.yaml
+!tagent.rl.yaml
+!exec_tool_desc.md
+
+# Allow prompt resources
+!resources/
+!resources/prompts/
+!resources/prompts/*.md
+
+# Allow skills (only README and source, not node_modules)
+!skills/
+!skills/README.md
+
+# Re-ignore everything under skills that's runtime
+skills/*/
+!skills/url-fetcher/
+skills/url-fetcher/node_modules/
+
+# Re-ignore all dotfiles and dot-directories (runtime data)
+.wechat-config/
+.wechat-context-tokens/
+.weixin-token.json
+.tagent-output/
+workspace/
+data/
+logs/
+*.log
+wechat-bot
 .wechat-config/
 .wechat-context-tokens/
 .weixin-token.json

@@ -120,6 +120,19 @@ type TagentAgent struct {
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
 	projection *SessionProjection
+
+	// asyncTaskCheckers are checked by Run() before returning.
+	// If any checker reports pending async tasks, Run() continues waiting
+	// instead of returning immediately (call stack semantics: don't pop
+	// until all async tasks complete).
+	asyncTaskCheckers []AsyncTaskChecker
+}
+
+// AsyncTaskChecker is implemented by tools that have pending async operations.
+// Run() calls HasPendingAsyncTasks() before returning a final response;
+// if true, it continues waiting for async results to arrive via InjectMessage.
+type AsyncTaskChecker interface {
+	HasPendingAsyncTasks() bool
 }
 
 // TagentConfig holds configuration for creating a TagentAgent.
@@ -134,6 +147,8 @@ type TagentConfig struct {
 	SummaryModel      model.Model        // Optional: for Stage 2 LLM summary
 	Temperature       float64            // Optional: LLM temperature (default: 0.7)
 	KeepRecentTasks   int                // Min task segments to keep during compression (default: 2)
+	Compress          CompressConfig     // SmartCompressor parameters
+	OpenSpecDir       string             // Root directory for openspec operations (default: ".")
 
 	// Agent identity (for agent.Agent interface)
 	Name        string // Default: "tagent"
@@ -151,7 +166,55 @@ const (
 	DefaultCompressThreshold         = 0.8
 	DefaultAgentName                 = "tagent"
 	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
+
+	// Default compress parameters
+	DefaultMaxExecStateChars = 2000
+
+	// FrameworkPrompt is the tagent runtime description prepended to every
+	// agent's system prompt. It explains the event-driven mechanisms so the
+	// LLM can correctly handle async tool results, event identifiers, and
+	// context compression.
+	FrameworkPrompt = `# tagent 运行时说明
+
+你运行在 tagent 事件驱动框架中。以下机制影响你的工具调用和上下文管理:
+
+## 异步工具
+
+某些工具异步执行命令。调用后返回 session_id 和状态标识，
+不代表执行完成。命令完成时，框架会发送 [action_tool_result] 事件
+到你的上下文中，包含完整输出。收到结果前，不要重复调用同一命令。
+
+## 事件标识
+
+每条消息前的 [evt_KEY|type] 标记是事件追踪标识。
+压缩后被丢弃的事件可通过其 key 检索完整内容。
+具体检索方式取决于你配置的工具集——查看可用工具列表选择合适的方式。
+
+## 上下文压缩
+
+当上下文接近 token 上限时，框架自动压缩旧对话段。
+压缩后的摘要以 system 消息形式呈现，被压缩的事件 key 列表在摘要中列出。
+你应基于摘要中的 key 和 type 判断哪些事件需要检索完整内容。
+
+## 框架注入的上下文
+
+框架会在每次思考前自动注入以下上下文（如有）:
+- [active_plan]: 当前活跃工作计划的进度摘要（如果存在）
+这些注入的上下文帮助你恢复被压缩丢失的执行状态。`
+
+	DefaultMaxToolResultChars = 500
+	DefaultMaxToolArgsChars   = 80
+	DefaultChunkSize          = 1000
+	DefaultChunkSummaryLen    = 150
 )
+
+// CompressConfig holds SmartCompressor parameters.
+type CompressConfig struct {
+	MaxToolResultChars int
+	MaxExecStateChars  int
+	ChunkSize          int
+	ChunkSummaryLen    int
+}
 
 // buildCompressorOpts builds SmartCompressor options from TagentConfig.
 // Shared by NewTagentAgent and Run() to avoid duplicating option-building logic.
@@ -164,6 +227,19 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	}
 	if cfg.SummaryModel != nil {
 		opts = append(opts, WithSummaryModel(cfg.SummaryModel))
+	}
+	// Compress config
+	if cfg.Compress.MaxToolResultChars > 0 {
+		opts = append(opts, WithMaxToolResultChars(cfg.Compress.MaxToolResultChars))
+	}
+	if cfg.Compress.MaxExecStateChars > 0 {
+		opts = append(opts, WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
+	}
+	if cfg.Compress.ChunkSize > 0 {
+		opts = append(opts, WithChunkSize(cfg.Compress.ChunkSize))
+	}
+	if cfg.Compress.ChunkSummaryLen > 0 {
+		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
 	}
 	return opts
 }
@@ -178,11 +254,26 @@ func newCompressorFromConfig(cfg *TagentConfig) *SmartCompressor {
 func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
 	compressor := newCompressorFromConfig(cfg)
 	compressor.tokenCounter = NewDefaultTokenCounter()
+	// Inject MemStore and Projection into SmartCompressor for chunk persistence
+	if cfg.MemoryStore != nil {
+		compressor.memStore = cfg.MemoryStore
+	}
+	if projection != nil {
+		compressor.projection = projection
+	}
+	// Prepend framework prompt to system prompt
+	systemPrompt := cfg.SystemPrompt
+	if systemPrompt != "" {
+		systemPrompt = FrameworkPrompt + "\n\n" + systemPrompt
+	} else {
+		systemPrompt = FrameworkPrompt
+	}
+
 	return NewContextManager(ContextManagerConfig{
 		Name:         cfg.Name,
 		Model:        cfg.Model,
 		Tools:        cfg.Tools,
-		SystemPrompt: cfg.SystemPrompt,
+		SystemPrompt: systemPrompt,
 		Temperature:  cfg.Temperature,
 		MaxToolIters: cfg.MaxToolIterations,
 		Compressor:   compressor,
@@ -197,6 +288,7 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		Bus:          bus,
 		Projection:   projection,
 		OnEvent:      onEvent,
+		OpenSpecDir:  cfg.OpenSpecDir,
 	})
 }
 
@@ -256,10 +348,13 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 	// 4. Wrap all tools with OutputLimitTool
 	maxOutputChars := cfg.MaxTokens / 2 * 4
+	outputWorkspace := ".tagent-output"
 	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
 		wrapped := make([]tool.Tool, len(cfg.Tools))
 		for i, t := range cfg.Tools {
-			wrapped[i] = NewOutputLimitTool(t, maxOutputChars)
+			olt := NewOutputLimitTool(t, maxOutputChars)
+			olt.SetWorkspace(outputWorkspace)
+			wrapped[i] = olt
 		}
 		cfg.Tools = wrapped
 	}
@@ -379,6 +474,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// concurrent goroutines).
 	invBus := NewEventBus()
 	ta.setActiveBus(invBus)
+
 	invOutputCh := make(chan *event.Event, 100)
 	invProjection := NewSessionProjection()
 	invOnEvent := ta.makeOnEventCallback(sessionID, invProjection)
@@ -408,11 +504,13 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// Wrap the outputCh: forward events and cancel the loop when the
 	// caller stops reading OR when the first agent_output is emitted
 	// (sub-agent single-turn semantics).
+	// EXCEPTION: if asyncTaskCheckers report pending tasks, continue waiting
+	// for async results instead of returning immediately (call stack semantics).
 	wrappedCh := make(chan *event.Event, cap(invOutputCh))
 	go func() {
 		defer close(wrappedCh)
 		defer runCancel()
-		defer ta.restorePersistentBus() // restore so InjectMessage routes to persistent bus
+		defer ta.restorePersistentBus() // restore activeBus to persistentBus
 		for evt := range invOutputCh {
 			wrappedCh <- evt
 			// Sub-agent semantics: stop after the first agent_output
@@ -423,6 +521,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 					if choice.Message.Content == "" {
 						log.Warnf("[Run] sub-agent %q returned empty final response, treating as complete", ta.name)
 					}
+
 					// Drain mode: forward remaining tail events (e.g., MemoryPlugin
 					// persistence, RequiresCompletion) for up to 500ms before exiting.
 					// This prevents context cancellation from dropping tail events.

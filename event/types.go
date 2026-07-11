@@ -4,6 +4,7 @@
 package event
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -156,7 +157,7 @@ func EstimateTokens(text string) int {
 func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
 	if len(msg.ToolCalls) == 0 {
 		if msg.Role == model.RoleTool {
-			return msg.Content
+			return summarizeToolResult(msg.Content)
 		}
 		return "命令执行"
 	}
@@ -168,4 +169,81 @@ func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
 		return fmt.Sprintf("调用工具: %s\n  参数: %s", toolName, args)
 	}
 	return fmt.Sprintf("调用工具: %s(%s)", toolName, args)
+}
+
+// summarizeToolResult generates a readable text summary from a tool result.
+// If the content is valid JSON, it extracts key fields (type, title, status,
+// session_id, count, results) to produce a concise human-readable summary.
+// If the content is not JSON, it returns the original text.
+//
+// This prevents large JSON tool results from being stored verbatim as
+// EventSummary, which causes nested JSON escaping when recall serializes
+// summaries into its response.
+func summarizeToolResult(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+
+	// Try to parse as JSON
+	var raw any
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		// Not JSON — return as-is (plain text result)
+		return content
+	}
+
+	// Extract key fields for a readable summary
+	var summaryParts []string
+
+	if m, ok := raw.(map[string]any); ok {
+		// Common fields in tool results
+		if v, ok := m["status"].(string); ok {
+			summaryParts = append(summaryParts, fmt.Sprintf("status=%s", v))
+		}
+		if v, ok := m["session_id"].(string); ok {
+			summaryParts = append(summaryParts, fmt.Sprintf("session=%s", v))
+		}
+		if v, ok := m["count"].(float64); ok {
+			summaryParts = append(summaryParts, fmt.Sprintf("count=%d", int(v)))
+		}
+		if v, ok := m["message"].(string); ok && v != "" {
+			summaryParts = append(summaryParts, v)
+		}
+		if v, ok := m["error"].(string); ok && v != "" {
+			summaryParts = append(summaryParts, fmt.Sprintf("error=%s", v))
+		}
+
+		// Extract titles from results array (knowledge/recall tools)
+		if results, ok := m["results"].([]any); ok && len(results) > 0 {
+			var titles []string
+			for i, r := range results {
+				if i >= 5 {
+					titles = append(titles, fmt.Sprintf("...(%d more)", len(results)-5))
+					break
+				}
+				if rm, ok := r.(map[string]any); ok {
+					if title, ok := rm["title"].(string); ok {
+						titles = append(titles, title)
+					} else if typ, ok := rm["type"].(string); ok {
+						titles = append(titles, typ)
+					}
+				}
+			}
+			if len(titles) > 0 {
+				summaryParts = append(summaryParts, "items: "+strings.Join(titles, ", "))
+			}
+		}
+
+		// Extract event count from recall results
+		if events, ok := m["events"].([]any); ok && len(events) > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("events=%d", len(events)))
+		}
+	}
+
+	if len(summaryParts) > 0 {
+		return strings.Join(summaryParts, "; ")
+	}
+
+	// JSON but no known fields — return type info
+	return fmt.Sprintf("[JSON object, %d chars]", len(content))
 }

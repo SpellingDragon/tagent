@@ -264,129 +264,126 @@ func TestSmartCompress_Fallback_CompressNoticeFormat(t *testing.T) {
 }
 
 // ============================================================================
-// parseEventKeyFromPrefix tests
+// parseEventKeyAndType tests
 // ============================================================================
 
-func TestParseEventKeyFromPrefix_Valid(t *testing.T) {
-	key := parseEventKeyFromPrefix("[evt_123456789|task] user request content")
+func TestParseEventKeyAndType_Valid(t *testing.T) {
+	key, evtType, remainder := parseEventKeyAndType("[evt_123456789|task] user request content")
 	assert.Equal(t, int64(123456789), key)
+	assert.Equal(t, "task", evtType)
+	assert.Equal(t, "user request content", remainder)
 }
 
-func TestParseEventKeyFromPrefix_NoPrefix(t *testing.T) {
-	key := parseEventKeyFromPrefix("user request content")
+func TestParseEventKeyAndType_NoPrefix(t *testing.T) {
+	key, evtType, _ := parseEventKeyAndType("user request content")
+	assert.Equal(t, int64(0), key)
+	assert.Equal(t, "unknown", evtType)
+}
+
+func TestParseEventKeyAndType_Malformed(t *testing.T) {
+	key, _, _ := parseEventKeyAndType("[evt_invalid_key|task] content")
 	assert.Equal(t, int64(0), key)
 }
 
-func TestParseEventKeyFromPrefix_Malformed(t *testing.T) {
-	key := parseEventKeyFromPrefix("[evt_invalid_key|task] content")
+func TestParseEventKeyAndType_NoBar(t *testing.T) {
+	key, _, _ := parseEventKeyAndType("[evt_12345task] content")
 	assert.Equal(t, int64(0), key)
 }
 
-func TestParseEventKeyFromPrefix_NoBar(t *testing.T) {
-	key := parseEventKeyFromPrefix("[evt_12345task] content")
-	assert.Equal(t, int64(0), key)
-}
-
-func TestParseEventKeyFromPrefix_LargeKey(t *testing.T) {
-	key := parseEventKeyFromPrefix("[evt_9223372036854775807|memory] large snowflake key")
+func TestParseEventKeyAndType_LargeKey(t *testing.T) {
+	key, evtType, _ := parseEventKeyAndType("[evt_9223372036854775807|memory] large snowflake key")
 	assert.Equal(t, int64(9223372036854775807), key)
+	assert.Equal(t, "memory", evtType)
 }
 
-func TestParseEventKeyFromPrefix_EmptyContent(t *testing.T) {
-	key := parseEventKeyFromPrefix("")
+func TestParseEventKeyAndType_EmptyContent(t *testing.T) {
+	key, _, _ := parseEventKeyAndType("")
 	assert.Equal(t, int64(0), key)
 }
 
-func TestParseEventKeyFromPrefix_OnlyPrefix(t *testing.T) {
-	key := parseEventKeyFromPrefix("[evt_42|")
+func TestParseEventKeyAndType_OnlyPrefix(t *testing.T) {
+	key, evtType, remainder := parseEventKeyAndType("[evt_42|task]")
 	assert.Equal(t, int64(42), key)
+	assert.Equal(t, "task", evtType)
+	assert.Equal(t, "", remainder)
 }
 
 // ============================================================================
-// collectCompressedKeys tests
+// collectCompressedEventInfo tests
 // ============================================================================
 
-func TestCollectCompressedKeys_SingleKey(t *testing.T) {
-	sc := &SmartCompressor{}
+func TestCollectCompressedEventInfo_SingleKey(t *testing.T) {
+	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_100|user_input] hello"},
-			{Role: model.RoleAssistant, Content: "[evt_101|task] world"},
+			{Role: model.RoleUser, Content: "[evt_100|external_input] hello"},
+			{Role: model.RoleAssistant, Content: "[evt_101|thinking_plan] world"},
 		}},
 	}
 
-	keys := sc.collectCompressedKeys(segments)
-	assert.Equal(t, []int64{100, 101}, keys)
+	infos := sc.collectCompressedEventInfo(segments)
+	assert.Len(t, infos, 2)
+	assert.Equal(t, int64(100), infos[0].Key)
+	assert.Equal(t, "external_input", infos[0].Type)
+	assert.Equal(t, "hello", infos[0].Summary)
+	assert.Equal(t, int64(101), infos[1].Key)
+	assert.Equal(t, "thinking_plan", infos[1].Type)
 }
 
-func TestCollectCompressedKeys_DuplicateKeys(t *testing.T) {
-	sc := &SmartCompressor{}
+func TestCollectCompressedEventInfo_DuplicateKeys(t *testing.T) {
+	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_100|user_input] task 1"},
+			{Role: model.RoleUser, Content: "[evt_100|external_input] task 1"},
 			{Role: model.RoleAssistant, Content: "[evt_100|task] result 1"},
 		}},
-		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_100|user_input] task 2"},
-		}},
 	}
 
-	keys := sc.collectCompressedKeys(segments)
-	assert.Equal(t, []int64{100}, keys, "duplicate keys should be deduplicated")
+	infos := sc.collectCompressedEventInfo(segments)
+	assert.Len(t, infos, 1, "duplicate keys should be deduplicated")
 }
 
-func TestCollectCompressedKeys_MessagesWithoutPrefix(t *testing.T) {
-	sc := &SmartCompressor{}
+func TestCollectCompressedEventInfo_MessagesWithoutPrefix(t *testing.T) {
+	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
 			{Role: model.RoleSystem, Content: "system prompt"},
-			{Role: model.RoleUser, Content: "[evt_200|user_input] hello"},
+			{Role: model.RoleUser, Content: "[evt_200|external_input] hello"},
 		}},
 	}
 
-	keys := sc.collectCompressedKeys(segments)
-	assert.Equal(t, []int64{200}, keys, "system message without prefix should be skipped")
+	infos := sc.collectCompressedEventInfo(segments)
+	assert.Len(t, infos, 1)
+	assert.Equal(t, int64(200), infos[0].Key)
 }
 
-func TestCollectCompressedKeys_MixedValidInvalid(t *testing.T) {
-	sc := &SmartCompressor{}
+func TestCollectCompressedEventInfo_EmptySegments(t *testing.T) {
+	sc := NewSmartCompressor()
+
+	infos := sc.collectCompressedEventInfo(nil)
+	assert.Empty(t, infos)
+
+	infos = sc.collectCompressedEventInfo([]*TaskSegment{})
+	assert.Empty(t, infos)
+}
+
+func TestCollectCompressedEventInfo_DistinctEventKeys(t *testing.T) {
+	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_300|user_input] valid"},
-			{Role: model.RoleAssistant, Content: "no prefix here"},
-			{Role: model.RoleTool, Content: "[evt_invalid_key|tool] malformed"},
-			{Role: model.RoleAssistant, Content: "[evt_301|task] final"},
+			{Role: model.RoleUser, Content: "[evt_111|external_input] task 1"},
+		}},
+		{Messages: []model.Message{
+			{Role: model.RoleAssistant, Content: "[evt_222|thinking_plan] result 1"},
+		}},
+		{Messages: []model.Message{
+			{Role: model.RoleTool, Content: "[evt_333|action_command] tool result"},
 		}},
 	}
 
-	keys := sc.collectCompressedKeys(segments)
-	assert.Equal(t, []int64{300, 301}, keys, "only valid prefixed keys should be extracted")
-}
-
-func TestCollectCompressedKeys_EmptySegments(t *testing.T) {
-	sc := &SmartCompressor{}
-
-	keys := sc.collectCompressedKeys(nil)
-	assert.Empty(t, keys)
-
-	keys = sc.collectCompressedKeys([]*TaskSegment{})
-	assert.Empty(t, keys)
-}
-
-func TestCollectCompressedKeys_DistinctEventKeys(t *testing.T) {
-	sc := &SmartCompressor{}
-	segments := []*TaskSegment{
-		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_111|user_input] task 1"},
-		}},
-		{Messages: []model.Message{
-			{Role: model.RoleAssistant, Content: "[evt_222|task] result 1"},
-		}},
-		{Messages: []model.Message{
-			{Role: model.RoleTool, Content: "[evt_333|tool_call] tool result"},
-		}},
-	}
-
-	keys := sc.collectCompressedKeys(segments)
-	assert.ElementsMatch(t, []int64{111, 222, 333}, keys, "all distinct keys across segments should be collected")
+	infos := sc.collectCompressedEventInfo(segments)
+	assert.Len(t, infos, 3)
+	assert.Equal(t, int64(111), infos[0].Key)
+	assert.Equal(t, int64(222), infos[1].Key)
+	assert.Equal(t, int64(333), infos[2].Key)
 }

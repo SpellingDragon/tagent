@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +38,14 @@ type MessageInjector interface {
 // Tool name is "action" — it represents performing behavioral actions on
 // real-world resources triggered by natural language descriptions.
 type ActionTool struct {
-	workspace    string
-	runAsUser    string
-	runAsGroup   string
-	description  string // Configurable tool description
-	executor     *ActionExecutor
-	tmuxExecutor *TmuxExecutor
-	tmuxMonitor  *TmuxMonitor
+	workspace     string
+	runAsUser     string
+	runAsGroup    string
+	description   string // Configurable tool description
+	executor      *ActionExecutor
+	tmuxExecutor  *TmuxExecutor
+	tmuxMonitor   *TmuxMonitor
+	monitorConfig *MonitorConfig // Optional: override default monitor config
 
 	// injector is used to inject system messages when tmux state changes.
 	injector MessageInjector
@@ -89,6 +91,13 @@ func WithDescription(desc string) ActionToolOption {
 	}
 }
 
+// WithActionMonitorConfig sets a custom TmuxMonitor configuration.
+func WithActionMonitorConfig(cfg MonitorConfig) ActionToolOption {
+	return func(ct *ActionTool) {
+		ct.monitorConfig = &cfg
+	}
+}
+
 // SetMessageInjector sets the MessageInjector for tmux state change notifications.
 // Use this for post-creation wiring.
 func (ct *ActionTool) SetMessageInjector(injector MessageInjector) {
@@ -98,7 +107,7 @@ func (ct *ActionTool) SetMessageInjector(injector MessageInjector) {
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
-		description: "Execute actions on real-world resources via tmux. Commands run asynchronously — you will receive a session_id immediately, and the execution result (stdout/stderr/exit_code) will arrive as a subsequent event. Describe the behavior you want in natural language or as a shell command.",
+		description: "Execute actions on real-world resources via tmux. Commands run asynchronously — you will receive a session_id with status 'waiting_async_response' immediately. DO NOT retry or call this tool again for the same command. Wait for the [action_tool_result] event which will contain the execution output. Describe the behavior you want in natural language or as a shell command.",
 		executor:    NewActionExecutor(),
 	}
 
@@ -113,9 +122,13 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 			WithTmuxRunAsUser(ct.runAsUser),
 			WithTmuxRunAsGroup(ct.runAsGroup),
 		)
+		monCfg := DefaultMonitorConfig()
+		if ct.monitorConfig != nil {
+			monCfg = *ct.monitorConfig
+		}
 		ct.tmuxMonitor = NewTmuxMonitor(
 			WithMonitorExecutor(ct.tmuxExecutor),
-			WithMonitorConfig(DefaultMonitorConfig()),
+			WithMonitorConfig(monCfg),
 			WithMonitorStateChangeCallback(func(sessionID string, oldStatus, newStatus SessionStatus, output string) {
 				ct.handleStateChange(sessionID, string(oldStatus), string(newStatus), output)
 			}),
@@ -264,13 +277,14 @@ func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, e
 
 	return &TmuxExecResponse{
 		SessionID: session.ID,
-		Status:    "running",
+		Status:    "waiting_async_response",
 	}, nil
 }
 
 // handleStateChange processes tmux session state changes.
-// It formats the state change event with rich context (StableSince, IsTUI, etc.)
-// and injects a system message via MessageInjector to trigger agent re-evaluation.
+// It formats the state change as an external_input event with clear
+// command and status context, then injects via MessageInjector to
+// trigger the next runEventLoop iteration.
 func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
 	log.Infof("[ActionTool] tmux session %s: %s -> %s", sessionID, oldStatus, newStatus)
 
@@ -278,28 +292,38 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 		return
 	}
 
-	// Build system_input message describing the state change
-	content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", sessionID, oldStatus, newStatus)
-
-	// Enrich with session context if available
+	// Look up session to get the original command
+	cmd := ""
+	isTUI := false
 	if ct.tmuxMonitor != nil {
 		if session, ok := ct.tmuxMonitor.GetSession(sessionID); ok {
-			if session.IsTUI {
-				content += "\n[note] This is a TUI session (screen-based, no heartbeat)"
-			}
+			cmd = session.Command
+			isTUI = session.IsTUI
+		}
+	}
+
+	// Build external_input message with clear command + status context.
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("[action_tool_result] 命令执行状态变更\n"))
+	content.WriteString(fmt.Sprintf("命令: %s\n", cmd))
+	content.WriteString(fmt.Sprintf("session: %s\n", sessionID))
+	content.WriteString(fmt.Sprintf("状态: %s → %s", oldStatus, newStatus))
+
+	// Enrich with session context
+	if isTUI {
+		content.WriteString("\n[note] TUI 会话 (基于屏幕，无心跳检测)")
+	}
+	if ct.tmuxMonitor != nil {
+		if session, ok := ct.tmuxMonitor.GetSession(sessionID); ok {
 			if !session.StableSince.IsZero() {
 				stableDuration := time.Since(session.StableSince).Round(time.Second)
-				content += fmt.Sprintf("\n[note] Session has been stable for %v", stableDuration)
+				content.WriteString(fmt.Sprintf("\n[note] 会话已稳定 %v", stableDuration))
 			}
-
-			// Distinguish fakeDead timeout from output change for stable→running transitions.
-			// - StableSince non-zero → fakeDead timeout: output hasn't changed, TUI was awakened.
-			// - StableSince zero → output actually changed, session naturally became active again.
 			if oldStatus == string(SessionStable) && newStatus == string(SessionRunning) {
 				if !session.StableSince.IsZero() {
-					content += "\n[note] This is a fakeDead timeout — output did NOT change, the session was already stable"
+					content.WriteString("\n[note] 假死超时 — 输出未变化，会话已稳定")
 				} else {
-					content += "\n[note] Output changed — session is actively producing new content"
+					content.WriteString("\n[note] 输出变化 — 会话正在产生新内容")
 				}
 			}
 		}
@@ -317,20 +341,20 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 			if writeErr := os.WriteFile(outputFile, []byte(output), 0644); writeErr != nil {
 				log.Warnf("[ActionTool] failed to save output to %s: %v", outputFile, writeErr)
 			} else {
-				content += fmt.Sprintf("\nOutput (full saved to %s, showing last 2000 chars):\n...(truncated) %s",
-					outputFile, output[len(output)-2000:])
+				content.WriteString(fmt.Sprintf("\n输出 (完整内容已保存到 %s，显示最后 2000 字符):\n...%s",
+					outputFile, output[len(output)-2000:]))
 				log.Infof("[ActionTool] full output saved to %s (%d chars)", outputFile, len(output))
-				output = "" // already appended
+				output = ""
 			}
 		}
 		if output != "" {
-			content += fmt.Sprintf("\nOutput:\n%s", output)
+			content.WriteString(fmt.Sprintf("\n输出:\n%s", output))
 		}
 	}
 
 	ct.injector.InjectMessage(model.Message{
 		Role:    model.RoleSystem,
-		Content: content,
+		Content: content.String(),
 	})
 }
 
@@ -348,10 +372,14 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 //     workspace: /tmp/tagent-workspace
 //     run_as_user: tagent-runner
 //     run_as_group: tagent-runner
+//     monitor:
+//     interval: 10s
+//     stable_duration: 30s
 type ActionProperties struct {
-	Workspace  string `json:"workspace,omitempty"    yaml:"workspace,omitempty"`
-	RunAsUser  string `json:"run_as_user,omitempty"  yaml:"run_as_user,omitempty"`
-	RunAsGroup string `json:"run_as_group,omitempty" yaml:"run_as_group,omitempty"`
+	Workspace  string         `json:"workspace,omitempty"    yaml:"workspace,omitempty"`
+	RunAsUser  string         `json:"run_as_user,omitempty"  yaml:"run_as_user,omitempty"`
+	RunAsGroup string         `json:"run_as_group,omitempty" yaml:"run_as_group,omitempty"`
+	Monitor    *MonitorConfig `json:"monitor,omitempty"      yaml:"monitor,omitempty"`
 }
 
 // ActionArgs represents a command execution request.
@@ -379,6 +407,7 @@ type ActionExecResult struct {
 type TmuxExecResponse struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
+
 }
 
 // IsTmuxAsync marks this response as an async tmux result.

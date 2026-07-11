@@ -83,11 +83,12 @@ agents:
     memory:
       type: localfile
       path: .wechat-config/data
-    max_tool_iterations: 200
+    max_tool_iterations: 50
     max_tokens: 16000
     temperature: 0.7
     compress_threshold: 0.8
-    keep_recent_tasks: 8
+    keep_recent_tasks: 2
+    openspec_dir: "."
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
@@ -107,13 +108,59 @@ agents:
         max_tool_iterations: 5
         max_tokens: 8000
 
-      # Action Agent: 执行中枢
-      # tagent 做规划，action 负责调度 file/speak/draw 工具和 exec 直接执行
-      - agent: action
-        description_file: action_tool_desc.md
+      # Plan Agent: 工作计划管理
+      # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划
+      - agent: plan
+        description_file: plan_tool_desc.md
         max_tool_iterations: 5
         max_tokens: 8000
         temperature: 0.3
+
+      # File Tools: 直接文件读写 (从 action agent 平铺到顶层)
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: save_file
+      - kind: tool
+        id: list_file
+      - kind: tool
+        id: search_file
+      - kind: tool
+        id: search_content
+      - kind: tool
+        id: read_multiple_files
+      - kind: tool
+        id: replace_content
+
+      # Speak Agent: 语音输出 (桩)
+      - agent: speak
+        description_file: speak_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      # Draw Agent: 图像生成 (桩)
+      - agent: draw
+        description_file: draw_tool_desc.md
+        max_tool_iterations: 3
+        max_tokens: 1024
+        temperature: 0.3
+
+      # Exec Tool: shell 命令执行 (异步, 通过 tmux)
+      # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
+      #   interval: 轮询检测间隔 (默认 30s)
+      #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
+      #   interactive_stable_duration: 交互式命令稳定判定时间 (默认 90s)
+      #   fake_dead_duration: 假死判定时间 (默认 150s)
+      - kind: tool
+        id: exec
+        description_file: exec_tool_desc.md
+        properties:
+          workspace: ./workspace
+          monitor:
+            interval: 3s
+            stable_duration: 30s
+            fake_dead_duration: 180s
 
       # 远程 Agent 示例 (A2A 通信):
       # 当子 agent 部署在独立进程时，只需声明 remote.url。
@@ -232,11 +279,52 @@ agents:
         temperature: 0.3
 
       # Exec Tool: 直接 shell 命令执行 (简单命令)
+      # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
+      #   interval: 轮询检测间隔 (默认 30s)
+      #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
+      #   interactive_stable_duration: 交互式命令稳定判定时间 (默认 90s)
+      #   fake_dead_duration: 假死判定时间 (默认 150s)
       - kind: tool
         id: exec
         description_file: exec_tool_desc.md
         properties:
           workspace: ./workspace
+          monitor:
+            interval: 3s
+            stable_duration: 30s
+            fake_dead_duration: 180s
+
+  # ========================================================================
+  # Plan Agent: 工作计划管理子 Agent
+  # 通过 openspec CLI 创建/更新/归档结构化工作计划
+  # ========================================================================
+  plan:
+    model: glm-4.7
+    system_prompt:
+      files:
+        - plan_agent.md
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 8000
+    temperature: 0.3
+    tools:
+      # Exec Tool: 调用 openspec CLI
+      - kind: tool
+        id: exec
+        properties:
+          workspace: ./workspace
+          monitor:
+            interval: 3s
+            stable_duration: 15s
+            fake_dead_duration: 60s
+      # File Tools: 读写 openspec change 文件
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: save_file
+      - kind: tool
+        id: list_file
 
   # ========================================================================
   # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)

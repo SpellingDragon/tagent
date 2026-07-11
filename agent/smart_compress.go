@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -25,13 +26,30 @@ type SmartCompressor struct {
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
 	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
+
+	// Configurable truncation parameters (Task Group 3: migrated from package-level constants)
+	maxExecStateChars  int // Total execution state truncation (default: 2000)
+	maxToolResultChars int // Per-tool-result truncation (default: 500)
+	maxToolArgsChars   int // Per-tool-args truncation (default: 80)
+
+	// Chunk splitting parameters (Task Group 2)
+	chunkSize       int                // Max chars per chunk (default: 1000)
+	chunkSummaryLen int                // Summary length per chunk (default: 150)
+	memStore        memory.MemoryStore // Optional: for chunk persistence
+	projection      *SessionProjection // Optional: for chunk EventReference append
+	chunkSplitter   *ChunkSplitter     // Lazily initialized
 }
 
 // NewSmartCompressor creates a new SmartCompressor.
 func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 	sc := &SmartCompressor{
-		KeepRecentTasks: 2,
-		tokenCounter:    NewDefaultTokenCounter(),
+		KeepRecentTasks:    2,
+		tokenCounter:       NewDefaultTokenCounter(),
+		maxExecStateChars:  2000,
+		maxToolResultChars: 500,
+		maxToolArgsChars:   80,
+		chunkSize:          1000,
+		chunkSummaryLen:    150,
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -59,6 +77,41 @@ func WithKeepRecentTasks(n int) SmartCompressorOption {
 // WithMaxTokens sets the token budget used for batch size calculation.
 func WithMaxTokens(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.maxTokens = n }
+}
+
+// WithMaxExecStateChars sets the total execution state truncation limit.
+func WithMaxExecStateChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.maxExecStateChars = n }
+}
+
+// WithMaxToolResultChars sets the per-tool-result truncation limit.
+func WithMaxToolResultChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.maxToolResultChars = n }
+}
+
+// WithMaxToolArgsChars sets the per-tool-args truncation limit.
+func WithMaxToolArgsChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.maxToolArgsChars = n }
+}
+
+// WithChunkSize sets the maximum chunk size for semantic chunking.
+func WithChunkSize(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.chunkSize = n }
+}
+
+// WithChunkSummaryLen sets the summary length per chunk.
+func WithChunkSummaryLen(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
+}
+
+// WithMemStore injects a MemoryStore for chunk persistence.
+func WithMemStore(ms memory.MemoryStore) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.memStore = ms }
+}
+
+// WithProjection injects a SessionProjection for chunk EventReference append.
+func WithProjection(p *SessionProjection) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.projection = p }
 }
 
 func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
@@ -116,6 +169,13 @@ func (sc *SmartCompressor) Compress(
 	oldSegments := segments[:len(segments)-keepCount]
 	recentSegments := segments[len(segments)-keepCount:]
 
+	// 4a. If no old segments to compress, return original messages.
+	// This prevents adding empty [context_compress] messages that waste tokens.
+	if len(oldSegments) == 0 {
+		log.Debugf("[SmartCompress] no old segments to compress, returning original")
+		return messages
+	}
+
 	// 5. Stage 2: Generate batched LLM summaries of old segments (if model available)
 	var summaryMsgs []model.Message
 	var summaryHadError bool
@@ -130,8 +190,8 @@ func (sc *SmartCompressor) Compress(
 		log.Debugf("[SmartCompress] stage2: skipped (no summaryModel configured)")
 	}
 
-	// 6. Collect compressed event_keys from message prefix
-	compressedKeys := sc.collectCompressedKeys(oldSegments)
+	// 6. Collect compressed event info (key + type + summary) from message prefix
+	compressedInfos := sc.collectCompressedEventInfo(oldSegments)
 
 	// 7. Reconstruct message list with context_compress event
 	var result []model.Message
@@ -140,14 +200,14 @@ func (sc *SmartCompressor) Compress(
 	}
 
 	// Build context_compress event as a system message
-	compressEvent := sc.buildCompressEvent(len(oldSegments), compressedKeys, batchCount, len(summaryMsgs), summaryHadError)
+	compressEvent := sc.buildCompressEvent(len(oldSegments), compressedInfos, batchCount, len(summaryMsgs), summaryHadError)
 	result = append(result, compressEvent)
 
 	// Append batch summary messages (each is a System message with batch number)
 	result = append(result, summaryMsgs...)
 
 	// Append structured execution state (pure code extraction, no LLM call)
-	execState := extractExecutionState(oldSegments)
+	execState := sc.extractExecutionState(oldSegments)
 	if execState != "" {
 		result = append(result, model.NewSystemMessage(execState))
 	}
@@ -184,7 +244,7 @@ func (sc *SmartCompressor) Compress(
 	}
 	if metricsJSON, err := json.Marshal(metrics); err == nil {
 		log.Infof("[SmartCompress] %s old=%d recent=%d keys=%d batches=%d summary_msgs=%d tokens=%d->%d (-%d)",
-			string(metricsJSON), len(oldSegments), len(recentSegments), len(compressedKeys),
+			string(metricsJSON), len(oldSegments), len(recentSegments), len(compressedInfos),
 			batchCount, len(summaryMsgs), beforeTokens, afterTokens, beforeTokens-afterTokens)
 	}
 
@@ -227,31 +287,96 @@ func findPendingUserMessage(segments []*TaskSegment) *model.Message {
 	return nil
 }
 
+// EventInfo holds extracted metadata from a compressed message's [evt_KEY|type] prefix.
+type EventInfo struct {
+	Key     int64
+	Type    string
+	Summary string
+}
+
+// collectCompressedEventInfo extracts EventKey, EventType, and a content summary
+// from each message in oldSegments. It parses the "[evt_<KEY>|<type>]" prefix
+// injected by InjectEventKeys, then truncates the remaining content as summary.
+// For messages without a prefix, it falls back to [unknown] type.
+func (sc *SmartCompressor) collectCompressedEventInfo(
+	oldSegments []*TaskSegment,
+) []EventInfo {
+	seen := make(map[int64]bool)
+	var infos []EventInfo
+
+	for _, seg := range oldSegments {
+		for _, msg := range seg.Messages {
+			key, evtType, remainder := parseEventKeyAndType(msg.Content)
+			if key > 0 && !seen[key] {
+				seen[key] = true
+				summary := truncate(remainder, sc.chunkSummaryLen)
+				if summary == "" {
+					summary = truncate(msg.Content, sc.chunkSummaryLen)
+				}
+				infos = append(infos, EventInfo{
+					Key:     key,
+					Type:    evtType,
+					Summary: summary,
+				})
+			}
+		}
+	}
+
+	return infos
+}
+
+// parseEventKeyAndType extracts EventKey and EventType from a message content
+// with "[evt_<KEY>|<type>] <remainder>" prefix.
+// Returns (0, "unknown", content) if no valid prefix is found.
+func parseEventKeyAndType(content string) (key int64, eventType string, remainder string) {
+	const prefix = "[evt_"
+	if !strings.HasPrefix(content, prefix) {
+		return 0, "unknown", content
+	}
+	// Find the closing bracket
+	closePos := strings.IndexByte(content, ']')
+	if closePos < 0 {
+		return 0, "unknown", content
+	}
+	// Content between "[evt_" and "]" is "KEY|type"
+	inner := content[len(prefix):closePos]
+	barPos := strings.IndexByte(inner, '|')
+	if barPos < 0 {
+		return 0, "unknown", content
+	}
+	keyStr := inner[:barPos]
+	eventType = inner[barPos+1:]
+	k, err := strconv.ParseInt(keyStr, 10, 64)
+	if err != nil {
+		return 0, "unknown", content
+	}
+	// Remainder is everything after "] "
+	remainder = strings.TrimSpace(content[closePos+1:])
+	return k, eventType, remainder
+}
+
 // buildCompressEvent creates a context_compress event message.
-// When batch summaries are generated, they are appended as separate System messages
-// after the compress event. This message contains metadata only.
+// Lists each compressed event with its key, type, and summary so the LLM
+// can selectively recall specific events by key.
 func (sc *SmartCompressor) buildCompressEvent(
 	segmentCount int,
-	keys []int64,
+	infos []EventInfo,
 	batchCount int,
 	successCount int,
 	summaryHadError bool,
 ) model.Message {
 	var content strings.Builder
 
-	if len(keys) > 0 {
-		// Generate a pseudo event_key for the compress event itself
-		// and list the compressed event keys so LLM can select them
-		content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段，被压缩的事件 key 列表: [", segmentCount))
-		for i, k := range keys {
-			if i > 0 {
-				content.WriteString(", ")
-			}
-			content.WriteString(fmt.Sprintf("%d", k))
+	content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段:", segmentCount))
+
+	if len(infos) > 0 {
+		content.WriteString("\n")
+		for _, info := range infos {
+			content.WriteString(fmt.Sprintf("\n- evt_%d [%s]: %s", info.Key, info.Type, info.Summary))
 		}
-		content.WriteString("]")
+		content.WriteString("\n\n使用 recall 工具检索对应 key 获取完整内容。")
 	} else {
-		content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段", segmentCount))
+		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted.]", segmentCount))
 	}
 
 	switch {
@@ -261,54 +386,10 @@ func (sc *SmartCompressor) buildCompressEvent(
 			content.WriteString("部分批次摘要生成失败。")
 		}
 	case batchCount > 0 && summaryHadError:
-		content.WriteString("\n\n摘要生成失败。完整上下文可通过 recall agent 获取。")
-	default:
-		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted.]", segmentCount))
+		content.WriteString("\n\n摘要生成失败。完整上下文可通过 recall 工具获取。")
 	}
 
 	return model.NewSystemMessage(content.String())
-}
-
-// parseEventKeyFromPrefix extracts a Snowflake EventKey from a message content prefix.
-// Format: "[evt_123456789|task] original content..."
-// Returns 0 if no valid key is found (caller filters zero values).
-func parseEventKeyFromPrefix(content string) int64 {
-	const prefix = "[evt_"
-	if !strings.HasPrefix(content, prefix) {
-		return 0
-	}
-	barPos := strings.IndexByte(content[5:], '|')
-	if barPos < 0 {
-		return 0
-	}
-	keyStr := content[5 : 5+barPos]
-	key, err := strconv.ParseInt(keyStr, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return key
-}
-
-// collectCompressedKeys extracts event_keys from compressed message segments.
-// Parses the "[evt_<KEY>|<type>]" prefix added by injectEventKeyPrefixesFromSession in Preprocessor.
-// This does NOT access Session.Events — it reads keys directly from message content.
-func (sc *SmartCompressor) collectCompressedKeys(
-	oldSegments []*TaskSegment,
-) []int64 {
-	seen := make(map[int64]bool)
-	var keys []int64
-
-	for _, seg := range oldSegments {
-		for _, msg := range seg.Messages {
-			key := parseEventKeyFromPrefix(msg.Content)
-			if key > 0 && !seen[key] {
-				seen[key] = true
-				keys = append(keys, key)
-			}
-		}
-	}
-
-	return keys
 }
 
 // extractExecutionState extracts a structured summary of tool calls and their
@@ -324,16 +405,10 @@ func (sc *SmartCompressor) collectCompressedKeys(
 //	- 调用: action({"command":"curl ..."})
 //	  → 结果: {"session_id":"...","status":"running"}
 //
-// Total length is capped at maxExecStateChars (500). Each tool result is
-// truncated to maxToolResultChars (100). If total exceeds the cap, the
+// Total length is capped at sc.maxExecStateChars (default: 2000). Each tool result is
+// truncated to sc.maxToolResultChars (default: 500). If total exceeds the cap, the
 // most recent entries are kept (earlier ones are dropped).
-const (
-	maxExecStateChars  = 500
-	maxToolResultChars = 100
-	maxToolArgsChars   = 80
-)
-
-func extractExecutionState(segments []*TaskSegment) string {
+func (sc *SmartCompressor) extractExecutionState(segments []*TaskSegment) string {
 	var lines []string
 
 	for _, seg := range segments {
@@ -342,14 +417,22 @@ func extractExecutionState(segments []*TaskSegment) string {
 			// Tool calls from assistant
 			if msg.Role == model.RoleAssistant && len(msg.ToolCalls) > 0 {
 				for _, tc := range msg.ToolCalls {
-					args := truncate(string(tc.Function.Arguments), maxToolArgsChars)
+					args := truncate(string(tc.Function.Arguments), sc.maxToolArgsChars)
 					lines = append(lines, fmt.Sprintf("- 调用: %s(%s)", tc.Function.Name, args))
 				}
 			}
 			// Tool results
 			if msg.Role == model.RoleTool && msg.Content != "" {
-				result := truncate(msg.Content, maxToolResultChars)
+				result := truncate(msg.Content, sc.maxToolResultChars)
 				lines = append(lines, fmt.Sprintf("  → 结果: %s", result))
+			}
+			// Async tool results injected as system messages (e.g., ActionTool tmux completion)
+			// These contain "[action_tool_result]" prefix from handleStateChange.
+			if msg.Role == model.RoleSystem && msg.Content != "" {
+				if strings.Contains(msg.Content, "[action_tool_result]") {
+					result := truncate(msg.Content, sc.maxToolResultChars)
+					lines = append(lines, fmt.Sprintf("  → 异步结果: %s", result))
+				}
 			}
 		}
 	}
@@ -360,10 +443,10 @@ func extractExecutionState(segments []*TaskSegment) string {
 
 	result := "[执行状态]\n" + strings.Join(lines, "\n")
 
-	// Truncate to maxExecStateChars, keeping the most recent entries
-	if len(result) > maxExecStateChars {
-		// Find a clean cut point (start of a line) within the last maxExecStateChars chars
-		cutStart := len(result) - maxExecStateChars
+	// Truncate to sc.maxExecStateChars, keeping the most recent entries
+	if len(result) > sc.maxExecStateChars {
+		// Find a clean cut point (start of a line) within the last sc.maxExecStateChars chars
+		cutStart := len(result) - sc.maxExecStateChars
 		// Find the first newline after cutStart to avoid cutting mid-line
 		for cutStart < len(result) && result[cutStart] != '\n' {
 			cutStart++

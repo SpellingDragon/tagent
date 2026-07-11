@@ -202,9 +202,11 @@ graph LR
 tagent 有两个独立的上下文管理操作：
 
 **SmartCompressor（压缩 LLM 视图）**：当 token 估算超过 `MaxTokens * CompressThreshold` 时触发：
-- **阶段一**：按任务边界（agent_output）切分为 `TaskSegment`，丢弃旧段，保留最近 N 段（`KeepRecentTasks`，默认 2）
+- **阶段一**：按任务边界（agent_output）切分为 `TaskSegment`，丢弃旧段，保留最近 N 段（`KeepRecentTasks`，默认 2）；`protectPendingAsyncSegments` 保护含 `{status:running}` 的未完成异步工具结果不被丢弃
 - **阶段二**：如配置了 `SummaryModel`，对丢弃的段生成批量 LLM 摘要
-- **作用对象**：`[]model.Message`，不修改 `SessionProjection` 和 `MemoryStore`
+- **压缩事件清单**：`buildCompressEvent` 从被丢弃消息的 `[evt_KEY|type]` 前缀提取每个事件的 key + type + summary，LLM 据此按需 recall 检索完整内容
+- **执行状态提取**：`extractExecutionState` 提取工具调用/结果精简行（截断参数可配置，支持 `[system] tmux` 异步结果）
+- **作用对象**：`[]model.Message`，不修改 `SessionProjection` 和 `MemoryStore`（纯视图变换）
 
 **Compactor（清理 Session 投影）**：当 SmartCompressor 压缩后 token 仍超过 `MaxTokens` 时触发：
 - **清理策略**：按任务边界切分 `SessionProjection`，保留最近 N 个完整任务的 `EventReference`，旧引用替换为一条 `context_compress` summary reference

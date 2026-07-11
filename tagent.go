@@ -66,6 +66,11 @@ type runtimeConfig struct {
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *agent.TrajectoryRecorder
+
+	// actionTools collects all ActionTool instances across all agents.
+	// Their MessageInjector is set to the entry agent after construction,
+	// so tmux completion notifications reach the entry agent's persistentBus.
+	actionTools []*action.ActionTool
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -177,6 +182,13 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache)
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
+	}
+
+	// Rewire all ActionTool injectors to the entry agent.
+	// tmux completion events must reach the entry agent's persistentBus,
+	// not the sub-agent's temporary invBus (which is discarded after Run()).
+	for _, at := range rc.actionTools {
+		at.SetMessageInjector(entryAgent)
 	}
 
 	// Register TrajectoryRecorder for graceful shutdown and session info
@@ -297,6 +309,13 @@ func buildAgent(
 		Temperature:       acfg.Temperature,
 		CompressThreshold: acfg.CompressThreshold,
 		KeepRecentTasks:   acfg.KeepRecentTasks,
+		Compress: agent.CompressConfig{
+			MaxToolResultChars: acfg.Compress.MaxToolResultChars,
+			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,
+			ChunkSize:          acfg.Compress.ChunkSize,
+			ChunkSummaryLen:    acfg.Compress.ChunkSummaryLen,
+		},
+		OpenSpecDir: acfg.OpenSpecDir,
 	}
 	if rc.summaryModel != nil {
 		agentCfg.SummaryModel = rc.summaryModel
@@ -335,8 +354,13 @@ func buildAgent(
 
 	// Wire ActionTool's tmux notifications back to the agent and register for cleanup
 	if actionTool != nil {
-		actionTool.SetMessageInjector(ta)
+		// Register for cleanup (will be stopped on agent shutdown)
 		ta.RegisterCloser(actionTool)
+		// Collect for injector rewiring after entry agent is built.
+		// ActionTool's injector is initially set to the sub-agent that owns it,
+		// but tmux completion events should be injected to the entry agent's
+		// persistentBus (the sub-agent's invBus is discarded after Run() exits).
+		rc.actionTools = append(rc.actionTools, actionTool)
 	}
 
 	// Wire parentProjection to AgentToolWrapper instances for auto-inject fallback.

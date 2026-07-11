@@ -157,11 +157,17 @@ type AgentConfig struct {
 	Tools []ToolRef `json:"tools" yaml:"tools"`
 
 	// Agent parameters
-	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
-	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
-	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
-	CompressThreshold float64 `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
-	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
+	MaxToolIterations int            `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
+	MaxTokens         int            `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
+	Temperature       float64        `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
+	CompressThreshold float64        `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
+	KeepRecentTasks   int            `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
+	Compress          CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
+
+	// OpenSpecDir is the root directory for openspec operations.
+	// PlanProgressTracker scans <openspec_dir>/openspec/changes/ for active changes.
+	// Defaults to "." (current working directory) when empty.
+	OpenSpecDir string `json:"openspec_dir,omitempty" yaml:"openspec_dir,omitempty"`
 
 	// Meditation configures the periodic meditation/heartbeat mechanism.
 	// Only effective when the agent is started via StartLoop.
@@ -169,6 +175,14 @@ type AgentConfig struct {
 
 	// Description for agent.Agent interface (used when this agent is a sub-agent)
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
+// CompressConfig configures SmartCompressor parameters.
+type CompressConfig struct {
+	MaxToolResultChars int `json:"max_tool_result_chars,omitempty" yaml:"max_tool_result_chars,omitempty"`
+	MaxExecStateChars  int `json:"max_exec_state_chars,omitempty"  yaml:"max_exec_state_chars,omitempty"`
+	ChunkSize          int `json:"chunk_size,omitempty"            yaml:"chunk_size,omitempty"`
+	ChunkSummaryLen    int `json:"chunk_summary_len,omitempty"      yaml:"chunk_summary_len,omitempty"`
 }
 
 // MemoryConfig configures an agent's memory store.

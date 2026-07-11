@@ -13,6 +13,8 @@
 package tagent
 
 import (
+	"time"
+
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/tool/action"
 
@@ -39,6 +41,48 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 		opts = append(opts, action.WithActionRunAsGroup(rg))
 	}
 
+	// Parse monitor config if provided
+	if monRaw, ok := properties["monitor"]; ok && monRaw != nil {
+		if monCfg := parseMonitorConfig(monRaw); monCfg != nil {
+			opts = append(opts, action.WithActionMonitorConfig(*monCfg))
+		}
+	}
+
 	t := action.NewActionTool(opts...)
 	return t, nil
+}
+
+// parseMonitorConfig parses a monitor config from properties map.
+// Supports duration strings (e.g., "10s", "30s") via time.ParseDuration.
+func parseMonitorConfig(raw any) *action.MonitorConfig {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	cfg := &action.MonitorConfig{}
+	if v, ok := m["interval"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.Interval = d
+		}
+	}
+	if v, ok := m["stable_duration"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.StableDuration = d
+		}
+	}
+	if v, ok := m["interactive_stable_duration"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.InteractiveStableDuration = d
+		}
+	}
+	if v, ok := m["fake_dead_duration"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.FakeDeadDuration = d
+		}
+	}
+	// If no fields set, return nil to use defaults
+	if cfg.Interval == 0 && cfg.StableDuration == 0 && cfg.FakeDeadDuration == 0 {
+		return nil
+	}
+	return cfg
 }

@@ -272,16 +272,34 @@ func main() {
 					content = "(empty response)"
 				}
 
-				// Try to deliver to a waiting user
-				select {
-				case responseCh <- content:
-					// Delivered to user message handler
-				default:
-					// No one waiting — meditation or internal output
-					log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+				// Check if this is a meditation/internal response (no user waiting)
+				isMeditation := false
+				// Meditation responses originate from [meditation] messages.
+				// The LLM may or may not include the marker in its output.
+				// Primary check: no user is waiting (replyTarget nil).
+				// Secondary check: response content contains [meditation] marker.
+				if replyTarget.Load() == nil {
+					isMeditation = true
+				} else if strings.Contains(content, "[meditation]") {
+					isMeditation = true
 				}
-				// Clear reply target — user interaction complete
-				replyTarget.Store(nil)
+
+				if isMeditation {
+					log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+					// Don't clear replyTarget — no user interaction to complete
+					// Don't send to responseCh — no user handler is waiting
+				} else {
+					// Try to deliver to a waiting user
+					select {
+					case responseCh <- content:
+						// Delivered to user message handler
+					default:
+						// No one waiting — meditation or internal output
+						log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+					}
+					// Clear reply target — user interaction complete
+					replyTarget.Store(nil)
+				}
 				continue
 			}
 

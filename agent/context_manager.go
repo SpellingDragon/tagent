@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -103,6 +101,7 @@ type ContextManagerConfig struct {
 	MaxTokens    int
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
+	OpenSpecDir  string // Root directory for openspec (PlanProgressTracker)
 
 	// Unified Runner: plugins + session service registered on the same Runner
 	MemPlugin  *plugin.MemoryPlugin
@@ -152,7 +151,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 				if evt == nil || evt.Type != tagentevent.TypeExternalInput {
 					continue
 				}
-				if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" || evt.Source == "tool_result" {
+				if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
 					continue
 				}
 				if evt.Message == nil {
@@ -200,6 +199,12 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		})
 	}
 
+	// Callback 1.5: BeforeLLM diagnostic log — print messages after compression.
+	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+		log.Debugf("[BeforeLLM] messages:\n%s", formatMessages(args.Request.Messages))
+		return nil, nil
+	})
+
 	// Callback 2: Compactor — modifies SessionProjection if still over budget.
 	if cfg.Compactor != nil && cfg.Projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
@@ -218,9 +223,16 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			messages = ensureUserPrompt(messages)
 			cm.InjectEventKeys(&messages, compacted)
 			args.Request.Messages = messages
+			log.Debugf("[AfterCompactor] messages:\n%s", formatMessages(args.Request.Messages))
 			return nil, nil
 		})
 	}
+
+	// Callback 2.5: PlanProgressTracker — inject active openspec change progress.
+	// Reads tasks.md from file system, appends progress summary to messages.
+	// Placed after Compactor so progress summary is the last message (survives compression).
+	tracker := NewPlanProgressTracker(cfg.OpenSpecDir)
+	tracker.RegisterCallback(cb)
 
 	// Build LLMAgent.
 	maxIters := cfg.MaxToolIters
@@ -292,8 +304,8 @@ func (cm *ContextManager) InjectEventKeys(messages *[]model.Message, refs []memo
 }
 
 // ShouldCallModel checks if the batch contains external_input events
-// that should trigger a model call (filtering agent_output echoes,
-// error events, and tool_result bridge events).
+// that should trigger a model call (filtering agent_output echoes
+// and error events).
 func (cm *ContextManager) ShouldCallModel(batch []*AgentEvent) bool {
 	for _, evt := range batch {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
@@ -302,7 +314,7 @@ func (cm *ContextManager) ShouldCallModel(batch []*AgentEvent) bool {
 		if evt.Source == tagentevent.TypeAgentOutput {
 			continue
 		}
-		if evt.Source == "error" || evt.Source == "tool_result" {
+		if evt.Source == "error" {
 			continue
 		}
 		return true
@@ -312,7 +324,7 @@ func (cm *ContextManager) ShouldCallModel(batch []*AgentEvent) bool {
 
 // BuildInvocation merges a batch of AgentEvents into a single model.Message.
 // Skips: agent_output echoes (Source == "agent_output"),
-// error events (Source == "error"), tool_result bridge events (Source == "tool_result").
+// error events (Source == "error").
 func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 	var contents []string
 	for _, evt := range batch {
@@ -322,7 +334,7 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 		if evt.Source == tagentevent.TypeAgentOutput {
 			continue
 		}
-		if evt.Source == "error" || evt.Source == "tool_result" {
+		if evt.Source == "error" {
 			continue
 		}
 		if evt.Message == nil {
@@ -340,7 +352,8 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 }
 
 // RunFlow calls runner.Run and forwards events to outputCh + bus.
-// For action_command events, also publishes a tool_result bridge event to EventBus.
+// Final responses are echoed back to the EventBus as agent_output events
+// (filtered by BuildInvocation to prevent self-triggering).
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
 	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
@@ -358,10 +371,6 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 				return nil
 			}
 		}
-		// Bridge action_command events to EventBus as tool_result
-		if fwEvt != nil && isActionCommand(fwEvt) {
-			cm.bridgeToolResultToBus(fwEvt)
-		}
 		if isFinalResponse(fwEvt) {
 			outMsg := extractMessageFromEvent(fwEvt)
 			if outMsg.Content != "" || outMsg.Role != "" {
@@ -373,42 +382,6 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		}
 	}
 	return nil
-}
-
-// isActionCommand checks if a framework event is an action_command (tool execution result).
-func isActionCommand(evt *event.Event) bool {
-	if evt == nil || evt.StateDelta == nil {
-		return false
-	}
-	if typeBytes, ok := evt.StateDelta["event_type"]; ok && len(typeBytes) > 0 {
-		return string(typeBytes) == tagentevent.TypeActionCommand
-	}
-	// Fallback: check Response message role
-	if evt.Response != nil && len(evt.Response.Choices) > 0 {
-		return evt.Response.Choices[0].Message.Role == model.RoleTool
-	}
-	return false
-}
-
-// bridgeToolResultToBus publishes a tool_result AgentEvent to EventBus.
-// This implements invariant ③: tool results flow back through the event bus.
-func (cm *ContextManager) bridgeToolResultToBus(evt *event.Event) {
-	if cm.bus == nil {
-		return
-	}
-	msg := extractMessageFromEvent(evt)
-	if msg.Content == "" {
-		return
-	}
-	busEvt := &AgentEvent{
-		ID:        uuid.NewString(),
-		Type:      tagentevent.TypeExternalInput,
-		Source:    "tool_result",
-		Timestamp: time.Now(),
-		Message:   &msg,
-		Metadata:  make(map[string]any),
-	}
-	cm.bus.Publish(busEvt)
 }
 
 // SetUserIDSessionID updates the user/session context for runner.Run.
@@ -451,6 +424,12 @@ func injectEventKeyPrefixes(messages *[]model.Message, refs []memory.EventRefere
 	for i := range *messages {
 		msg := &(*messages)[i]
 		if msg.Role == model.RoleSystem || msg.Role == model.RoleTool {
+			continue
+		}
+		// Idempotent: skip messages that already have an [evt_ prefix.
+		// This prevents duplicate prefixes when LLM outputs imitate the
+		// prefix format and those outputs are read back from session.Events.
+		if strings.HasPrefix(msg.Content, "[evt_") {
 			continue
 		}
 		if refIdx >= len(refs) {

@@ -226,9 +226,13 @@ TagentAgent.runEventLoop:
 ### 6.1 压缩（SmartCompressor）
 
 SmartCompressor 作为 BeforeModel 回调，在框架构建 messages 后、调用 model 前执行：
-- Stage 1：按任务边界（`agent_output`）丢弃旧任务段
+- Stage 1：按任务边界（`agent_output`）丢弃旧任务段；`protectPendingAsyncSegments` 保护含 `{status:running}` 的未完成异步工具结果
 - Stage 2：对丢弃的段生成 LLM 摘要（如果配置了 `summaryModel`）
-- **仅修改 `args.Request.Messages`，不修改 SessionProjection**
+- `buildCompressEvent`：从 oldSegments 消息的 `[evt_KEY|type]` 前缀提取每个被压缩事件的 key + type + summary，生成可读清单供 LLM 按需 recall
+- `extractExecutionState`：提取工具调用/结果精简行（截断参数可配置，扩展支持 `[system] tmux` 异步结果）
+- **仅修改 `args.Request.Messages`，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2）
+
+截断参数通过 `SmartCompressorOption` 配置（`WithMaxExecStateChars`、`WithMaxToolResultChars`、`WithMaxToolArgsChars`、`WithChunkSize`、`WithChunkSummaryLen`），也可通过 YAML `compress` 段配置。
 
 ### 6.2 Compact（Compactor）
 
@@ -244,6 +248,30 @@ Compactor 作为第二个 BeforeModel 回调，当 SmartCompressor 不足以压�
 - 子 agent：`DefaultSubAgentMaxToolIterations = 10`（如父配置更低则取父配置）
 
 通过 `llmagent.WithMaxToolIterations` 注册到框架 LLMAgent。
+
+### 6.4 配置化
+
+压缩参数通过 YAML `compress` 段配置：
+```yaml
+agents:
+  - name: tagent
+    compress:
+      max_tool_result_chars: 500
+      max_exec_state_chars: 2000
+      chunk_size: 1000
+      chunk_summary_len: 150
+```
+
+TmuxMonitor 参数通过 ActionProperties `monitor` 段配置：
+```yaml
+tools:
+  - kind: tool
+    id: action
+    properties:
+      monitor:
+        interval: 10s
+        stable_duration: 30s
+```
 
 ## 七、子 Agent 调用
 

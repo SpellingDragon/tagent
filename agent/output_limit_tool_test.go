@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -66,15 +67,17 @@ func TestOutputLimitTool_Call_OverLimit(t *testing.T) {
 		t.Fatalf("expected string result, got %T", got)
 	}
 
-	if !strings.Contains(resultStr, "[ERROR: Tool output exceeded 100 characters, truncated.") {
-		t.Fatalf("expected truncation error message, got: %s", resultStr[:200])
+	if !strings.Contains(resultStr, "[output_too_large]") {
+		t.Fatalf("expected [output_too_large] marker, got: %s", resultStr[:min(200, len(resultStr))])
 	}
-	if !strings.Contains(resultStr, "Total: 502 characters") {
-		t.Fatalf("expected total character count in error message, got: %s", resultStr[:200])
+	if !strings.Contains(resultStr, "超过上限 100") {
+		t.Fatalf("expected limit info, got: %s", resultStr[:min(200, len(resultStr))])
 	}
-	// Should contain truncated content (first 100 chars of JSON: " + 99 a's)
-	if !strings.HasPrefix(resultStr, `"`+strings.Repeat("a", 99)) {
-		t.Fatalf("expected truncated content at start")
+	if !strings.Contains(resultStr, "完整内容已保存到") {
+		t.Fatalf("expected file save info, got: %s", resultStr[:min(200, len(resultStr))])
+	}
+	if !strings.Contains(resultStr, "使用 read_file 工具读取该文件") {
+		t.Fatalf("expected read_file hint, got: %s", resultStr[:min(200, len(resultStr))])
 	}
 }
 
@@ -103,7 +106,6 @@ func TestOutputLimitTool_Call_StructResult(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Should return original result (under limit)
 	data, _ := json.Marshal(got)
 	if len(data) > 1000 {
 		t.Fatalf("result should be under limit, got %d bytes", len(data))
@@ -124,9 +126,36 @@ func TestOutputLimitTool_Call_StructResult_OverLimit(t *testing.T) {
 
 	resultStr, ok := got.(string)
 	if !ok {
-		t.Fatalf("expected string result after truncation, got %T", got)
+		t.Fatalf("expected string result after save-to-file, got %T", got)
 	}
-	if !strings.Contains(resultStr, "[ERROR: Tool output exceeded 50 characters, truncated.") {
-		t.Fatalf("expected truncation error message")
+	if !strings.Contains(resultStr, "[output_too_large]") {
+		t.Fatalf("expected [output_too_large] marker")
 	}
+}
+
+func TestOutputLimitTool_SaveToFile(t *testing.T) {
+	wrapper := NewOutputLimitTool(&mockCallableTool{result: "test"}, 1000)
+	tmpDir := t.TempDir()
+	wrapper.SetWorkspace(tmpDir)
+
+	data := []byte("test content")
+	path := wrapper.saveToFile(data)
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file should exist at %s: %v", path, err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read saved file: %v", err)
+	}
+	if string(saved) != "test content" {
+		t.Fatalf("file content = %q, want %q", string(saved), "test content")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
