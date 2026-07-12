@@ -21,12 +21,18 @@
 # ===== 运行时配置 =====
 
 # 全局默认 provider (不填则默认 "openai")
-# 支持: openai, anthropic, gemini, ollama, hunyuan
+# 支持 5 种 provider 实现:
+#   openai    — OpenAI 兼容协议（OpenAI / 智谱 GLM / DeepSeek / Moonshot / Baichuan / 通义千问等）
+#   anthropic — Anthropic Claude 原生协议
+#   gemini    — Google Gemini 原生协议
+#   ollama    — Ollama 本地模型
+#   hunyuan   — 腾讯混元原生协议
+# 注意: 大多数国内模型（GLM、DeepSeek、Kimi 等）都使用 OpenAI 兼容 API，
+#       因此 provider 应填 "openai"，通过 api_endpoint 区分具体供应商。
 provider: openai
 
 # LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
 model: glm-5
-
 # LLM API 基础地址 (全局默认，兼容旧配置；推荐使用 providers 注册表)
 api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
 
@@ -35,20 +41,42 @@ api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
 # 示例：
 #   agents:
 #     tagent:
-#       provider: openai       # 使用 openai 兼容 API
+#       provider: zhipu        # 智谱 GLM（OpenAI 兼容协议）
 #       model: glm-5
 #     knowledge:
-#       provider: anthropic    # 使用 Anthropic Claude
+#       provider: deepseek     # DeepSeek（OpenAI 兼容协议）
+#       model: deepseek-chat
+#     action:
+#       provider: anthropic    # Anthropic Claude（原生协议）
 #       model: claude-3-5-sonnet-20241022
 providers:
-  openai:
+  # ===== OpenAI 兼容协议的供应商 =====
+  # 以下供应商都使用 OpenAI 兼容 API，provider 字段统一填 "openai"，
+  # 通过不同的 api_endpoint 区分。
+  zhipu:
+    provider: openai           # 关键: 指明使用 OpenAI 兼容协议
     api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
     api_key_env: "ZAI_API_KEY"
+  deepseek:
+    provider: openai
+    api_endpoint: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+  moonshot:
+    provider: openai
+    api_endpoint: "https://api.moonshot.cn/v1"
+    api_key_env: "MOONSHOT_API_KEY"
+  tencent:
+    provider: openai
+    api_endpoint: "https://tokenhub.tencentmaas.com/v1"
+    api_key_env: "TENCENT_API_KEY"
+  # ===== 非 OpenAI 兼容协议的供应商 =====
+  # 以下供应商使用各自的私有协议，provider 字段填对应的协议名称。
   # anthropic:
+  #   provider: anthropic
   #   api_endpoint: "https://api.anthropic.com"
   #   api_key_env: "ANTHROPIC_API_KEY"
   # gemini:
-  #   api_endpoint: "https://generativelanguage.googleapis.com"
+  #   provider: gemini
   #   api_key_env: "GOOGLE_API_KEY"
 
 # 日志级别: "debug", "info", "warn", "error"
@@ -73,7 +101,8 @@ agents:
   # 顶层 Agent: 微信助手的主 Agent
   # ========================================================================
   tagent:
-    model: glm-5
+    provider: tencent            # 引用 providers 注册表中的 "tencent" 配置
+    model: hy3
     system_prompt:
       files:
         - AGENTS.md
@@ -84,11 +113,26 @@ agents:
       type: localfile
       path: .wechat-config/data
     max_tool_iterations: 50
-    max_tokens: 16000
+    max_tokens: 128000
     temperature: 0.7
     compress_threshold: 0.8
     keep_recent_tasks: 2
-    openspec_dir: "."
+    # Value-driven compression configuration
+    compress:
+      # summary_model: LLM model for context compression summaries.
+      # Falls back to the agent's main model if not set.
+      summary_model: deepseek-v4-flash-202605
+      # summary_provider: optional, defaults to same provider as this agent.
+      # Use a different provider for cost optimization (e.g., cheaper model for compression).
+      summary_provider: tencent
+      # value_floors: minimum value_score per event type (0.0-1.0).
+      # The LLM valuator's output is clamped to at least the floor for each type.
+      value_floors:
+        external_input: 0.5
+        agent_output: 0.4
+      # valuation_timeout_ms: maximum wall-clock time for the entire valuation phase.
+      # Default: 10000 (10s). Set to 0 to disable (not recommended).
+      valuation_timeout_ms: 300000
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
@@ -98,7 +142,7 @@ agents:
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
         max_tool_iterations: 5
-        max_tokens: 8000
+        max_tokens: 32000
         temperature: 0.3
 
       # Recall Agent: 记忆检索
@@ -106,21 +150,19 @@ agents:
         description_file: recall_tool_desc.md
         event_params: [event_keys]
         max_tool_iterations: 5
-        max_tokens: 8000
+        max_tokens: 32000
 
       # Plan Agent: 工作计划管理
       # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划
       - agent: plan
         description_file: plan_tool_desc.md
         max_tool_iterations: 5
-        max_tokens: 8000
+        max_tokens: 32000
         temperature: 0.3
 
-      # File Tools: 直接文件读写 (从 action agent 平铺到顶层)
+      # File Tools: 读统一 ./，写统一 ./workspace
       - kind: tool
         id: read_file
-      - kind: tool
-        id: save_file
       - kind: tool
         id: list_file
       - kind: tool
@@ -130,7 +172,13 @@ agents:
       - kind: tool
         id: read_multiple_files
       - kind: tool
+        id: save_file
+        # properties:
+        #   base_dir: "./workspace"
+      - kind: tool
         id: replace_content
+        # properties:
+        #   base_dir: "./workspace"
 
       # Speak Agent: 语音输出 (桩)
       - agent: speak
@@ -156,7 +204,7 @@ agents:
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          workspace: ./workspace
+          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 30s
@@ -185,14 +233,15 @@ agents:
   # Knowledge Agent: 知识获取 & 翻译子 Agent
   # ========================================================================
   knowledge:
-    model: glm-4.7
+    provider: tencent            # 可与父 agent 使用不同供应商
+    model: hy3
     system_prompt:
       files:
         - knowledge_agent.md
     memory:
       type: memory
     max_tool_iterations: 5
-    max_tokens: 8000
+    max_tokens: 32000
     temperature: 0.3
     tools:
       - kind: tool
@@ -212,7 +261,8 @@ agents:
   # Recall Agent: 记忆检索子 Agent
   # ========================================================================
   recall:
-    model: glm-4.7
+    provider: tencent
+    model: deepseek-v4-flash-202605
     system_prompt:
       files:
         - recall_agent.md
@@ -222,7 +272,7 @@ agents:
       read_namespaces:
         - tagent
     max_tool_iterations: 5
-    max_tokens: 8000
+    max_tokens: 32000
     tools:
       - kind: tool
         id: recall_query
@@ -238,21 +288,20 @@ agents:
   # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
   # ========================================================================
   action:
-    model: glm-4.7
+    provider: tencent
+    model: hy3
     system_prompt:
       files:
         - action_agent.md
     memory:
       type: memory
     max_tool_iterations: 50
-    max_tokens: 8000
+    max_tokens: 32000
     temperature: 0.3
     tools:
-      # File Tools: 直接文件读写 (使用 trpc-agent-go 内置文件操作)
+      # File Tools: 读统一 ./，写统一 ./workspace
       - kind: tool
         id: read_file
-      - kind: tool
-        id: save_file
       - kind: tool
         id: list_file
       - kind: tool
@@ -262,7 +311,13 @@ agents:
       - kind: tool
         id: read_multiple_files
       - kind: tool
+        id: save_file
+        # properties:
+        #   base_dir: "./workspace"
+      - kind: tool
         id: replace_content
+        # properties:
+        #   base_dir: "./workspace"
 
       # Speak Agent: 语音输出 (桩)
       - agent: speak
@@ -288,7 +343,7 @@ agents:
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          workspace: ./workspace
+          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 30s
@@ -299,37 +354,51 @@ agents:
   # 通过 openspec CLI 创建/更新/归档结构化工作计划
   # ========================================================================
   plan:
-    model: glm-4.7
+    model: glm-5.2
+    provider: zhipu
     system_prompt:
       files:
         - plan_agent.md
     memory:
       type: memory
     max_tool_iterations: 5
-    max_tokens: 8000
+    max_tokens: 64000
     temperature: 0.3
     tools:
       # Exec Tool: 调用 openspec CLI
       - kind: tool
         id: exec
         properties:
-          workspace: ./workspace
+          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 15s
             fake_dead_duration: 60s
-      # File Tools: 读写 openspec change 文件
+      # File Tools: 读统一 ./，写统一 ./workspace
       - kind: tool
         id: read_file
       - kind: tool
-        id: save_file
-      - kind: tool
         id: list_file
+      - kind: tool
+        id: search_file
+      - kind: tool
+        id: search_content
+      - kind: tool
+        id: read_multiple_files
+      - kind: tool
+        id: save_file
+        properties:
+          # base_dir: "./workspace"
+      - kind: tool
+        id: replace_content
+        properties:
+          # base_dir: "./workspace"
 
   # ========================================================================
   # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
   # ========================================================================
   speak:
+    provider: zhipu
     model: glm-4.7
     system_prompt:
       files:
@@ -345,6 +414,7 @@ agents:
   # 待接入图像生成模型后激活
   # ========================================================================
   draw:
+    provider: zhipu
     model: glm-4.7
     system_prompt:
       files:

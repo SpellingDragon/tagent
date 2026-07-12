@@ -37,8 +37,8 @@ func TestActionTool_TmuxComplexOutput(t *testing.T) {
 	if resp.SessionID == "" {
 		t.Error("Expected non-empty session_id")
 	}
-	if resp.Status != "running" {
-		t.Errorf("Expected status 'running', got %q", resp.Status)
+	if resp.Status != "waiting_async_response" {
+		t.Errorf("Expected status 'waiting_async_response', got %q", resp.Status)
 	}
 	t.Logf("AsyncExec: session_id=%s, status=%q", resp.SessionID, resp.Status)
 

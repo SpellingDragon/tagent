@@ -72,19 +72,12 @@ func (t *OutputLimitTool) Call(ctx context.Context, jsonArgs []byte) (any, error
 
 	// Output exceeds limit: save full output to file, return summary.
 	outputFile := t.saveToFile(data)
-	previewLen := 500
-	if len(data) < previewLen {
-		previewLen = len(data)
-	}
 
 	log.Infof("[OutputLimit] output %d chars > %d limit, saved to %s",
 		len(data), t.maxChars, outputFile)
 
-	return fmt.Sprintf("[output_too_large] 工具输出 %d 字符超过上限 %d。\n"+
-		"完整内容已保存到: %s\n"+
-		"前 %d 字符预览:\n%s\n\n"+
-		"使用 read_file 工具读取该文件获取完整内容。",
-		len(data), t.maxChars, outputFile, previewLen, string(data[:previewLen])), nil
+	return fmt.Sprintf("[output_too_large] 工具输出 %d 字符超过上限 %d。完整内容已保存到: %s",
+		len(data), t.maxChars, outputFile), nil
 }
 
 // saveToFile writes data to a file in the workspace or temp directory.

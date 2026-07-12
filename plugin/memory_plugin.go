@@ -72,6 +72,15 @@ func (p *MemoryPlugin) onEvent(
 		return nil, nil
 	}
 
+	// Skip events that carry no actual message payload. The runner/flow may
+	// emit synchronization events (start/wait/barrier) with a nil Response or
+	// no Choices. Without this guard, MemoryPlugin infers them as
+	// "external_input" with empty content, and they end up in the projection
+	// as misleading user-role placeholders that crowd out real context.
+	if evt.Response == nil || len(evt.Response.Choices) == 0 {
+		return evt, nil
+	}
+
 	// 1. Derive PartitionID from AgentName
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)

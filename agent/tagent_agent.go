@@ -148,7 +148,6 @@ type TagentConfig struct {
 	Temperature       float64            // Optional: LLM temperature (default: 0.7)
 	KeepRecentTasks   int                // Min task segments to keep during compression (default: 2)
 	Compress          CompressConfig     // SmartCompressor parameters
-	OpenSpecDir       string             // Root directory for openspec operations (default: ".")
 
 	// Agent identity (for agent.Agent interface)
 	Name        string // Default: "tagent"
@@ -170,38 +169,6 @@ const (
 	// Default compress parameters
 	DefaultMaxExecStateChars = 2000
 
-	// FrameworkPrompt is the tagent runtime description prepended to every
-	// agent's system prompt. It explains the event-driven mechanisms so the
-	// LLM can correctly handle async tool results, event identifiers, and
-	// context compression.
-	FrameworkPrompt = `# tagent 运行时说明
-
-你运行在 tagent 事件驱动框架中。以下机制影响你的工具调用和上下文管理:
-
-## 异步工具
-
-某些工具异步执行命令。调用后返回 session_id 和状态标识，
-不代表执行完成。命令完成时，框架会发送 [action_tool_result] 事件
-到你的上下文中，包含完整输出。收到结果前，不要重复调用同一命令。
-
-## 事件标识
-
-每条消息前的 [evt_KEY|type] 标记是事件追踪标识。
-压缩后被丢弃的事件可通过其 key 检索完整内容。
-具体检索方式取决于你配置的工具集——查看可用工具列表选择合适的方式。
-
-## 上下文压缩
-
-当上下文接近 token 上限时，框架自动压缩旧对话段。
-压缩后的摘要以 system 消息形式呈现，被压缩的事件 key 列表在摘要中列出。
-你应基于摘要中的 key 和 type 判断哪些事件需要检索完整内容。
-
-## 框架注入的上下文
-
-框架会在每次思考前自动注入以下上下文（如有）:
-- [active_plan]: 当前活跃工作计划的进度摘要（如果存在）
-这些注入的上下文帮助你恢复被压缩丢失的执行状态。`
-
 	DefaultMaxToolResultChars = 500
 	DefaultMaxToolArgsChars   = 80
 	DefaultChunkSize          = 1000
@@ -214,6 +181,15 @@ type CompressConfig struct {
 	MaxExecStateChars  int
 	ChunkSize          int
 	ChunkSummaryLen    int
+
+	// Value-driven compression (ideal path — no compatibility toggle)
+	//
+	// ValueFloors maps event type strings to minimum value_score (0.0-1.0).
+	// The LLM valuator's output is clamped to at least the floor for each type.
+	ValueFloors map[string]float64
+	// ValuationTimeoutMs caps the wall-clock time for the entire valuation phase.
+	// 0 = no timeout.
+	ValuationTimeoutMs int
 }
 
 // buildCompressorOpts builds SmartCompressor options from TagentConfig.
@@ -241,6 +217,23 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	if cfg.Compress.ChunkSummaryLen > 0 {
 		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
 	}
+	// Valuation config
+	valCfg := ValuationConfig{
+		ValueFloors: cfg.Compress.ValueFloors,
+	}
+	if valCfg.ValueFloors == nil {
+		valCfg.ValueFloors = DefaultValuationFloors()
+	}
+	if cfg.Compress.ValuationTimeoutMs > 0 {
+		valCfg.Timeout = time.Duration(cfg.Compress.ValuationTimeoutMs) * time.Millisecond
+	}
+	opts = append(opts, WithValuationConfig(valCfg))
+	// Build EventValuator from summary model if available
+	if cfg.SummaryModel != nil {
+		opts = append(opts, WithEventValuator(NewLLMEventValuator(cfg.SummaryModel, valCfg)))
+	} else {
+		opts = append(opts, WithEventValuator(NewNoopValuator()))
+	}
 	return opts
 }
 
@@ -261,13 +254,8 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 	if projection != nil {
 		compressor.projection = projection
 	}
-	// Prepend framework prompt to system prompt
+	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt
-	if systemPrompt != "" {
-		systemPrompt = FrameworkPrompt + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = FrameworkPrompt
-	}
 
 	return NewContextManager(ContextManagerConfig{
 		Name:         cfg.Name,
@@ -277,7 +265,6 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		Temperature:  cfg.Temperature,
 		MaxToolIters: cfg.MaxToolIterations,
 		Compressor:   compressor,
-		Compactor:    NewCompactor(cfg.KeepRecentTasks),
 		TokenCounter: NewDefaultTokenCounter(),
 		MaxTokens:    cfg.MaxTokens,
 		ThresholdPct: cfg.CompressThreshold,
@@ -288,7 +275,6 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		Bus:          bus,
 		Projection:   projection,
 		OnEvent:      onEvent,
-		OpenSpecDir:  cfg.OpenSpecDir,
 	})
 }
 
@@ -322,7 +308,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		cfg.CompressThreshold = DefaultCompressThreshold
 	}
 	if cfg.KeepRecentTasks <= 0 {
-		cfg.KeepRecentTasks = DefaultCompactKeepRecentTasks
+		cfg.KeepRecentTasks = 2
 	}
 
 	// 1. Create MemoryStore (use provided or default to InMemoryStore)
@@ -360,7 +346,13 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	}
 
 	// 5. Create SessionService
+	// Limit session events to 2: only the current invocation's user message
+	// and the latest tool result are needed for ContentRequestProcessor's
+	// TimelineFilterCurrentRequest. Historical context is managed entirely
+	// by SessionProjection + ContextCompressor, so the runner session does
+	// not need to retain full event history.
 	sessionSvc := sessioninmemory.NewSessionService(
+		sessioninmemory.WithSessionEventLimit(2),
 		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
 			original := ctx.Event
 			if original.Response != nil {

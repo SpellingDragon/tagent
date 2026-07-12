@@ -299,7 +299,11 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 		if session, ok := ct.tmuxMonitor.GetSession(sessionID); ok {
 			cmd = session.Command
 			isTUI = session.IsTUI
+		} else {
+			log.Warnf("[ActionTool] tmux session %s not found in monitor, command info will be empty", sessionID)
 		}
+	} else {
+		log.Warnf("[ActionTool] tmuxMonitor is nil, cannot look up session %s", sessionID)
 	}
 
 	// Build external_input message with clear command + status context.
@@ -330,14 +334,23 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 	}
 
 	if output != "" {
+		// Clean up tmux output: strip trailing blank lines to reduce token waste.
+		// The capture-pane -S -1000 option captures full scrollback which often
+		// includes many blank lines after short commands.
+		output = cleanTmuxOutput(output)
 		if len(output) > 2000 {
 			// Save full output to a file in the workspace
-			outputFile := ""
-			if ct.workspace != "" {
-				outputFile = filepath.Join(ct.workspace, fmt.Sprintf("output_%s.txt", sessionID))
-			} else {
-				outputFile = filepath.Join(os.TempDir(), fmt.Sprintf("tagent_output_%s.txt", sessionID))
+			outputDir := ct.workspace
+			if outputDir == "" {
+				// Default to current working directory instead of os.TempDir()
+				// to keep outputs in the project directory
+				if wd, err := os.Getwd(); err == nil {
+					outputDir = wd
+				} else {
+					outputDir = "."
+				}
 			}
+			outputFile := filepath.Join(outputDir, fmt.Sprintf("output_%s.txt", sessionID))
 			if writeErr := os.WriteFile(outputFile, []byte(output), 0644); writeErr != nil {
 				log.Warnf("[ActionTool] failed to save output to %s: %v", outputFile, writeErr)
 			} else {
@@ -407,7 +420,6 @@ type ActionExecResult struct {
 type TmuxExecResponse struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
-
 }
 
 // IsTmuxAsync marks this response as an async tmux result.
@@ -419,4 +431,32 @@ func (TmuxExecResponse) IsTmuxAsync() bool { return true }
 func IsTmuxAvailable() bool {
 	// Simple check: try to find tmux binary
 	return NewTmuxExecutor() != nil
+}
+
+// cleanTmuxOutput strips trailing blank lines from tmux capture-pane output.
+// The -S -1000 option captures full scrollback which often includes many blank
+// lines after short commands, wasting token budget. We keep leading/trailing
+// content (including "Pane is dead" messages) but collapse consecutive blank
+// lines in the middle and strip trailing blanks.
+func cleanTmuxOutput(output string) string {
+	lines := strings.Split(output, "\n")
+
+	// Strip trailing blank lines
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	// Collapse consecutive blank lines in the middle (keep at most 1)
+	var result []string
+	prevBlank := false
+	for _, line := range lines {
+		isBlank := strings.TrimSpace(line) == ""
+		if isBlank && prevBlank {
+			continue // skip consecutive blank lines beyond the first
+		}
+		result = append(result, line)
+		prevBlank = isBlank
+	}
+
+	return strings.Join(result, "\n")
 }

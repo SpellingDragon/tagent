@@ -92,6 +92,11 @@ func BuildEventReference(evt *event.Event) (memory.EventReference, bool) {
 		if ref.EventSummary == "" {
 			ref.EventSummary = msg.Content
 		}
+	} else {
+		// No Response — infer Role from EventType to prevent empty Role.
+		// This ensures Compactor's resolveReferenceToMessage always has
+		// a valid Role to work with.
+		ref.Role = string(eventTypeToRole(ref.EventType))
 	}
 	return ref, true
 }

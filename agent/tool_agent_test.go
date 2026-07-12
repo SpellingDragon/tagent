@@ -176,6 +176,41 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 	require.Nil(t, subAgent.pendingExternalEvents, "external events should be consumed")
 }
 
+// TestAgentToolWrapper_Call_StringEventKeys verifies that Call correctly
+// parses event_keys passed as strings. LLMs often quote large Snowflake
+// keys (e.g., 1297371431025250304 > 2^53) to avoid JSON float64 precision
+// loss. Default json.Unmarshal would corrupt these keys.
+func TestAgentToolWrapper_Call_StringEventKeys(t *testing.T) {
+	parentStore := memory.NewInMemoryStore()
+	partitionID := memory.PartitionIDFromName("test-agent")
+	// Generate a Snowflake key > 2^53 (non-zero partition guarantees high bit set).
+	largeKey := memory.NewSnowflakeEventKey(partitionID, 0)
+	require.Greater(t, largeKey, int64(1)<<53, "test key must exceed float64 precision")
+
+	require.NoError(t, parentStore.StoreEvent(largeKey, memory.FullEvent{
+		EventKey:     largeKey,
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: "large key event",
+		Content:      "content",
+	}))
+
+	subAgent := &TagentAgent{
+		name:       "test-tool",
+		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
+		memStore:   memory.NewInMemoryStore(),
+		memPlugin:  plugin.NewMemoryPlugin(memory.NewInMemoryStore()),
+		sessionSvc: sessioninmemory.NewSessionService(),
+	}
+	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
+
+	// Pass the large key as a quoted string in the JSON array
+	jsonArgs := fmt.Sprintf(`{"request":"test","event_keys":["%d"]}`, largeKey)
+	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
+	require.NoError(t, err)
+	assert.Contains(t, result, "mock response")
+	require.Nil(t, subAgent.pendingExternalEvents, "external events should be consumed")
+}
+
 // TestAgentToolWrapper_Call_NoEventKeys verifies that Call works correctly
 // when no event_keys are provided.
 // This covers Task 2.6.

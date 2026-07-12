@@ -1,20 +1,29 @@
 ## ADDED Requirements
 
-### Requirement: KeepRecentTasks is restored after BeforeModel
+### Requirement: SmartCompressor returns original messages when no segments to compress
 
-ContextIntervention.BeforeModel SHALL save the original KeepRecentTasks value before the compression loop and restore it after. The compression loop MAY temporarily decrement KeepRecentTasks, but the value SHALL be restored to the original before returning.
+When `oldSegments` is empty (all segments moved to recentSegments or total segment count is too small), SmartCompressor SHALL return the original messages without adding any `[context_compress]` system message. This prevents token waste from empty compress notifications that confuse the LLM.
 
-#### Scenario: Multiple compression rounds
+#### Scenario: oldSegments empty after split
 
-- **WHEN** BeforeModel runs 3 compression rounds, decrementing KeepRecentTasks from 2 to 1
-- **THEN** after BeforeModel returns, KeepRecentTasks is restored to 2
+- **WHEN** SmartCompressor splits messages into oldSegments and recentSegments
+- **AND** oldSegments is empty (length 0)
+- **THEN** SmartCompressor SHALL return the original messages unchanged
+- **AND** no `[context_compress]` system message SHALL be added
 
-#### Scenario: Next request uses original value
+### Requirement: protectPendingAsyncSegments removed from Compress
 
-- **WHEN** the next BeforeModel call occurs
-- **THEN** KeepRecentTasks starts at the original configured value (2), not the decremented value (1)
+The `protectPendingAsyncSegments` function SHALL be removed from the Compress method. This function was based on the incorrect assumption that `{status:running}` in tool results indicates a pending async operation. In reality, ActionTool's TmuxExecResponse always returns `status:running`, causing nearly all segments with tool results to be "protected" and preventing SmartCompressor from discarding any old segments.
 
-#### Scenario: Panic during compression
+#### Scenario: Segments with running status are not protected
 
-- **WHEN** the compression loop panics
-- **THEN** defer restoration still executes, KeepRecentTasks is restored to original value
+- **WHEN** oldSegments contains a segment with a RoleTool message containing `{"status":"running"}`
+- **THEN** the segment SHALL NOT be moved to recentSegments
+- **AND** the segment SHALL be discarded as part of normal compression
+
+#### Scenario: SmartCompressor discards old segments normally
+
+- **WHEN** token count exceeds threshold and oldSegments is non-empty
+- **THEN** oldSegments SHALL be discarded
+- **AND** recentSegments SHALL be retained
+- **AND** a `[context_compress]` message with key+type+summary list SHALL be generated

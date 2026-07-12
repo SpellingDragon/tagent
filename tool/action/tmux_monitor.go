@@ -312,9 +312,13 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 
 	// Completion: process doesn't exist or pane dead
 	// Save output before returning so callback receives it
+	// Only update LastOutput if we successfully got current output
 	if !processExists || isPaneDead {
-		session.LastOutput = currentOutput
-		session.LastOutputMD5 = currentMD5
+		if err == nil {
+			session.LastOutput = currentOutput
+			session.LastOutputMD5 = currentMD5
+		}
+		// If GetSessionOutput failed, preserve the old LastOutput
 		return SessionCompleted
 	}
 
@@ -326,6 +330,14 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		// Fake dead: stable for too long without output change
 		// Use strict greater-than so Stable fires BEFORE fakeDead on the same check
 		if stableDuration > tm.fakeDeadDuration {
+			// Log diagnostic info for fake_alive/fake_dead detection
+			outputPreview := currentOutput
+			if len(outputPreview) > 200 {
+				outputPreview = outputPreview[:200] + "..."
+			}
+			log.Infof("[TmuxMonitor] session %s entering fake check: stableDuration=%s fakeDeadDuration=%s command=%q isInteractive=%v isTUI=%v output(len=%d): %q",
+				session.ID, stableDuration, tm.fakeDeadDuration, session.Command, session.IsInteractive, session.IsTUI, len(currentOutput), outputPreview)
+
 			// TUI sessions: skip heartbeat to avoid injecting text via send-keys.
 			// Return TimedOut so the session is removed from monitoring —
 			// the agent has already received the Stable event and can decide
@@ -337,6 +349,14 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			}
 
 			heartbeatResult := tm.executor.SendHeartbeat(session.ID)
+			// Re-read output after heartbeat to see if heartbeat response is present
+			afterOutput, _ := tm.executor.GetSessionOutput(session.ID)
+			afterPreview := afterOutput
+			if len(afterPreview) > 200 {
+				afterPreview = afterPreview[:200] + "..."
+			}
+			log.Infof("[TmuxMonitor] session %s heartbeat result=%q (output before len=%d, after len=%d, after preview): %q",
+				session.ID, heartbeatResult, len(currentOutput), len(afterOutput), afterPreview)
 			if heartbeatResult == "ok" {
 				// Process responds to heartbeat, it's fake alive (process is stuck)
 				return SessionFakeAlive
@@ -356,6 +376,17 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		// Stable: output has been unchanged for sufficient time
 		threshold := tm.getStableDuration(session.IsInteractive)
 		if stableDuration >= threshold {
+			// Non-interactive commands: stable means completed.
+			// The command has finished executing and produced its final output.
+			// Don't enter fake_dead detection — heartbeat only proves shell is alive,
+			// not that the command is still running.
+			if !session.IsInteractive && !session.IsTUI {
+				session.LastOutput = currentOutput
+				session.LastOutputMD5 = currentMD5
+				log.Infof("[TmuxMonitor] session %s non-interactive command completed after stable duration %s",
+					session.ID, stableDuration)
+				return SessionCompleted
+			}
 			return SessionStable
 		}
 	}
@@ -374,7 +405,8 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 // FakeAlive → Running. On failure, leaves Status untouched so the next cycle
 // re-evaluates — the session may complete naturally or reach fakeDead.
 func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
-	log.Infof("[TmuxMonitor] session %s is fake alive, attempting restart", session.ID)
+	log.Infof("[TmuxMonitor] session %s is fake alive (command=%q, isInteractive=%v, isTUI=%v), attempting restart",
+		session.ID, session.Command, session.IsInteractive, session.IsTUI)
 
 	// Try to restart
 	opts := TmuxCreateOptions{

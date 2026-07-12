@@ -145,7 +145,12 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 	// Generate unique session name
 	sessionName := fmt.Sprintf("%s-%d", te.prefix, time.Now().UnixNano())
 
-	// Build tmux command
+	// Build tmux command.
+	// Use tmux's ';' separator to set remain-on-exit inline during session
+	// creation. This is critical: if the command exits quickly (e.g., `exit 42`),
+	// a separate `set-option` call after new-session would fail because the
+	// session/pane is already gone. Setting it inline ensures the pane persists
+	// regardless of how fast the command completes.
 	args := []string{
 		"new-session",
 		"-d", // detached
@@ -164,6 +169,11 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 	// Add command
 	args = append(args, opts.Command)
 
+	// Inline remain-on-exit: set immediately after the command starts so the
+	// pane persists after the command exits. Using ";" (tmux command separator)
+	// ensures this runs atomically with session creation.
+	args = append(args, ";", "set-option", "remain-on-exit", "on")
+
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
 	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
 	err := cmd.Run()
@@ -173,18 +183,6 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 
 	// Set environment variables on the session
 	te.setSessionEnv(ctx, sessionName, opts.Env)
-
-	// Enable remain-on-exit so the pane persists after the command exits.
-	// This is critical: TmuxMonitor checks every 30s, but short commands may finish
-	// in <1s. Without remain-on-exit, tmux destroys the pane on exit, and
-	// capture-pane fails — causing the agent to receive empty output and
-	// potentially loop trying to re-execute the command.
-	remainArgs := []string{"set-option", "-t", sessionName, "remain-on-exit", "on"}
-	remainCmdName, remainCmdArgs := te.buildTmuxCommand(remainArgs)
-	remainCmd := exec.CommandContext(ctx, remainCmdName, remainCmdArgs...)
-	if remainErr := remainCmd.Run(); remainErr != nil {
-		log.Warnf("[TmuxExecutor] failed to set remain-on-exit for session %s: %v", sessionName, remainErr)
-	}
 
 	// Get session PID
 	pid, err := te.getSessionPID(sessionName)
@@ -222,7 +220,11 @@ func (te *TmuxExecutor) SessionExists(sessionID string) bool {
 
 // GetSessionOutput gets the current output of a tmux session
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"capture-pane", "-p", "-t", sessionID})
+	// Use -S -1000 to capture full scrollback history, not just visible pane.
+	// This ensures we get output from commands that finished quickly and
+	// whose output may have scrolled past the visible area (especially when
+	// tmux appends "Pane is dead" messages after remain-on-exit).
+	cmdName, cmdArgs := te.buildTmuxCommand([]string{"capture-pane", "-p", "-S", "-1000", "-t", sessionID})
 	cmd := exec.Command(cmdName, cmdArgs...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -381,6 +383,10 @@ func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions)
 	}
 
 	args = append(args, opts.Command)
+
+	// Inline remain-on-exit so a quickly exiting command does not destroy the
+	// pane before TmuxMonitor can capture its output. This mirrors CreateSession.
+	args = append(args, ";", "set-option", "remain-on-exit", "on")
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
 	cmd := exec.Command(cmdName, cmdArgs...)

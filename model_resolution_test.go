@@ -211,3 +211,113 @@ entry: tagent
 	assert.Equal(t, "anthropic", cfg.Agents["tagent"].Provider)
 	assert.Equal(t, "", cfg.Agents["knowledge"].Provider) // falls back to global
 }
+
+// TestTencentProvider_Hy3Model verifies that the tencent provider (OpenAI-compatible)
+// can successfully call the hy3 model. This test requires TENCENT_API_KEY env var.
+func TestTencentProvider_Hy3Model(t *testing.T) {
+	apiKey := os.Getenv("TENCENT_API_KEY")
+	if apiKey == "" {
+		t.Skip("TENCENT_API_KEY not set, skipping integration test")
+	}
+
+	cfg := Config{
+		Provider: "tencent",
+		Providers: map[string]ProviderConfig{
+			"tencent": {
+				Provider:    "openai", // tencent uses OpenAI-compatible protocol
+				APIEndpoint: "https://tokenhub.tencentmaas.com/v1",
+				APIKeyEnv:   "TENCENT_API_KEY",
+			},
+		},
+		Agents: map[string]AgentConfig{
+			"test": {
+				Provider: "tencent",
+				Model:    "hy3",
+			},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	rc := &runtimeConfig{}
+	resolvedModel := rc.resolveAgentModel("test", cfg.Agents["test"], cfg)
+	require.NotNil(t, resolvedModel, "model should be resolved")
+
+	// Test actual model call
+	ctx := context.Background()
+	req := &model.Request{
+		Messages: []model.Message{
+			{Role: model.RoleUser, Content: "你好，请用一句话介绍自己"},
+		},
+	}
+
+	respCh, err := resolvedModel.GenerateContent(ctx, req)
+	require.NoError(t, err, "GenerateContent should not error")
+
+	var fullContent string
+	for resp := range respCh {
+		if resp != nil && len(resp.Choices) > 0 {
+			fullContent += resp.Choices[0].Message.Content
+		}
+	}
+
+	assert.NotEmpty(t, fullContent, "response content should not be empty")
+	t.Logf("hy3 model response: %s", fullContent)
+}
+
+func TestConfig_ProviderConfigWithProtocolField(t *testing.T) {
+	yamlData := `
+provider: zhipu
+providers:
+  zhipu:
+    provider: openai           # 智谱 GLM 使用 OpenAI 兼容协议
+    api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    api_key_env: "ZAI_API_KEY"
+  deepseek:
+    provider: openai           # DeepSeek 也使用 OpenAI 兼容协议
+    api_endpoint: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+  anthropic:
+    provider: anthropic        # Anthropic 使用原生协议
+    api_endpoint: "https://api.anthropic.com"
+    api_key_env: "ANTHROPIC_API_KEY"
+agents:
+  tagent:
+    provider: zhipu
+    model: glm-5
+  knowledge:
+    provider: deepseek
+    model: deepseek-chat
+  action:
+    provider: anthropic
+    model: claude-3
+entry: tagent
+`
+	var cfg Config
+	err := yaml.Unmarshal([]byte(yamlData), &cfg)
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+
+	// Verify provider field parsing
+	assert.Equal(t, "zhipu", cfg.Provider)
+	assert.Len(t, cfg.Providers, 3)
+
+	// Verify zhipu provider (OpenAI-compatible)
+	assert.Equal(t, "openai", cfg.Providers["zhipu"].Provider)
+	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", cfg.Providers["zhipu"].APIEndpoint)
+	assert.Equal(t, "ZAI_API_KEY", cfg.Providers["zhipu"].APIKeyEnv)
+
+	// Verify deepseek provider (OpenAI-compatible)
+	assert.Equal(t, "openai", cfg.Providers["deepseek"].Provider)
+	assert.Equal(t, "https://api.deepseek.com/v1", cfg.Providers["deepseek"].APIEndpoint)
+	assert.Equal(t, "DEEPSEEK_API_KEY", cfg.Providers["deepseek"].APIKeyEnv)
+
+	// Verify anthropic provider (native protocol)
+	assert.Equal(t, "anthropic", cfg.Providers["anthropic"].Provider)
+	assert.Equal(t, "https://api.anthropic.com", cfg.Providers["anthropic"].APIEndpoint)
+	assert.Equal(t, "ANTHROPIC_API_KEY", cfg.Providers["anthropic"].APIKeyEnv)
+
+	// Verify agent provider references
+	assert.Equal(t, "zhipu", cfg.Agents["tagent"].Provider)
+	assert.Equal(t, "deepseek", cfg.Agents["knowledge"].Provider)
+	assert.Equal(t, "anthropic", cfg.Agents["action"].Provider)
+}

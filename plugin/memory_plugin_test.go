@@ -135,6 +135,27 @@ func TestMemoryPlugin_OnEvent_NilEvent(t *testing.T) {
 	assert.Nil(t, result, "nil event should return nil")
 }
 
+func TestMemoryPlugin_OnEvent_SkipsEventsWithoutChoices(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	p := NewMemoryPlugin(store)
+
+	cases := []*event.Event{
+		{InvocationID: "inv-1", Response: nil},
+		{InvocationID: "inv-1", Response: &model.Response{Done: true, Choices: nil}},
+		{InvocationID: "inv-1", Response: &model.Response{Done: true, Choices: []model.Choice{}}},
+	}
+
+	for _, evt := range cases {
+		result, err := p.onEvent(context.Background(), &agent.Invocation{}, evt)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.Nil(t, result.StateDelta, "sync events must not get StateDelta")
+	}
+
+	stats := store.GetStats()
+	assert.Zero(t, stats.TotalEvents, "sync events should not be persisted")
+}
+
 // minimalStore wraps InMemoryStore but does NOT implement RelationStoreProvider.
 // Used to test graceful fallback in onEvent when store lacks relation support.
 type minimalStore struct {

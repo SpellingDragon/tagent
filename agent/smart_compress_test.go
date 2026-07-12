@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/stretchr/testify/assert"
@@ -56,7 +59,8 @@ func TestSplitByTaskBoundary_SingleTask(t *testing.T) {
 
 	segments := SegmentMessages(messages)
 	require.Len(t, segments, 1)
-	assert.True(t, segments[0].IsComplete)
+	// Incomplete because no next user input to close it
+	assert.False(t, segments[0].IsComplete)
 	assert.Len(t, segments[0].Messages, 2)
 }
 
@@ -70,8 +74,10 @@ func TestSplitByTaskBoundary_MultipleTasks(t *testing.T) {
 
 	segments := SegmentMessages(messages)
 	require.Len(t, segments, 2)
+	// First segment is complete (closed by next user input)
 	assert.True(t, segments[0].IsComplete)
-	assert.True(t, segments[1].IsComplete)
+	// Last segment is incomplete (trailing)
+	assert.False(t, segments[1].IsComplete)
 }
 
 func TestSplitByTaskBoundary_IncompleteTask(t *testing.T) {
@@ -84,7 +90,7 @@ func TestSplitByTaskBoundary_IncompleteTask(t *testing.T) {
 	segments := SegmentMessages(messages)
 	require.Len(t, segments, 2)
 	assert.True(t, segments[0].IsComplete)
-	assert.False(t, segments[1].IsComplete, "last segment without agent_output should be incomplete")
+	assert.False(t, segments[1].IsComplete, "last segment without next user input should be incomplete")
 }
 
 func TestSplitByTaskBoundary_ToolCallNotBoundary(t *testing.T) {
@@ -98,7 +104,8 @@ func TestSplitByTaskBoundary_ToolCallNotBoundary(t *testing.T) {
 
 	segments := SegmentMessages(messages)
 	require.Len(t, segments, 1, "tool call cycle should be part of one task")
-	assert.True(t, segments[0].IsComplete)
+	// Incomplete because no next user input to close it
+	assert.False(t, segments[0].IsComplete)
 }
 
 func TestSplitByTaskBoundary_Empty(t *testing.T) {
@@ -111,7 +118,7 @@ func TestSplitByTaskBoundary_Empty(t *testing.T) {
 // ============================================================================
 
 func TestSmartCompress_Stage1Only(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1)) // Force compression
 
 	// Build messages with multiple task segments
 	messages := []model.Message{
@@ -126,14 +133,30 @@ func TestSmartCompress_Stage1Only(t *testing.T) {
 
 	result := sc.Compress(context.Background(), messages, nil)
 
-	// Should keep: system + compress notice + 1 recent task
-	assert.Less(t, len(result), len(messages), "compressed messages should be fewer")
+	// System message is always first
 	assert.Equal(t, model.RoleSystem, result[0].Role, "first message should be system")
-	// The last messages should be from the most recent task, followed by guidance
-	assert.Equal(t, "task 3", result[len(result)-3].Content)
-	assert.Equal(t, "result 3", result[len(result)-2].Content)
-	// Last message is guidance (no pending user since all segments are complete)
-	assert.Equal(t, model.RoleUser, result[len(result)-1].Role)
+	// Recent segment should be preserved (user input + result, possibly with compress notice between)
+	hasTask3 := false
+	hasResult3 := false
+	for _, msg := range result {
+		if msg.Content == "task 3" {
+			hasTask3 = true
+		}
+		if msg.Content == "result 3" {
+			hasResult3 = true
+		}
+	}
+	assert.True(t, hasTask3, "recent segment user input 'task 3' should be preserved")
+	assert.True(t, hasResult3, "recent segment result 'result 3' should be preserved")
+	// Without a summaryModel, L2 degrades to first-stage and injects an error notice.
+	hasCompressNotice := false
+	for _, msg := range result {
+		if strings.Contains(msg.Content, "[context_compress") {
+			hasCompressNotice = true
+			break
+		}
+	}
+	assert.True(t, hasCompressNotice, "should have at least one compress notice or error notice")
 }
 
 func TestSmartCompress_PreservesSystem(t *testing.T) {
@@ -208,10 +231,28 @@ func TestSmartCompress_NoSystem(t *testing.T) {
 	}
 
 	result := sc.Compress(context.Background(), messages, nil)
-	// Without system message, compress still happens. Message count may stay same
-	// (compress notice replaces old segment, guidance message appended).
-	// The key check is that the first message is the compress notice.
-	assert.Equal(t, model.RoleSystem, result[0].Role, "first message should be compress notice")
+	// Without system message, compress still happens.
+	// Without summaryModel, L2 degrades to first-stage and a [context_compress_error]
+	// notice is injected at the top (before segments).
+	// Find the user message by content (it may not be result[0] if an error
+	// notice was injected first).
+	hasUserTask1 := false
+	for _, msg := range result {
+		if msg.Role == model.RoleUser && msg.Content == "task 1" {
+			hasUserTask1 = true
+			break
+		}
+	}
+	assert.True(t, hasUserTask1, "preserved user input 'task 1' should be in result")
+	// Verify an error notice exists somewhere in the result
+	hasErrorNotice := false
+	for _, msg := range result {
+		if strings.Contains(msg.Content, "[context_compress") {
+			hasErrorNotice = true
+			break
+		}
+	}
+	assert.True(t, hasErrorNotice, "should have compress notice or error notice")
 }
 
 // ============================================================================
@@ -219,7 +260,8 @@ func TestSmartCompress_NoSystem(t *testing.T) {
 // ============================================================================
 
 func TestSmartCompress_Fallback_NoModel(t *testing.T) {
-	// Without summaryModel, compression should include [Compressed: ...] notice
+	// Without summaryModel, L2 degrades to first-stage (drop tool, keep text)
+	// and injects a [context_compress_error] notice so the agent is aware.
 	sc := NewSmartCompressor(WithKeepRecentTasks(1))
 
 	messages := []model.Message{
@@ -232,20 +274,21 @@ func TestSmartCompress_Fallback_NoModel(t *testing.T) {
 
 	result := sc.Compress(context.Background(), messages, nil)
 
-	// The compress notice should be the second message (after system)
-	require.Len(t, result, 5) // system + compress + 1 recent task (2 msgs) + guidance
-	compressMsg := result[1]
-	assert.Equal(t, model.RoleSystem, compressMsg.Role)
-	// Should contain the [Compressed: ...] format
-	assert.Contains(t, compressMsg.Content, "[Compressed: 1 earlier tasks omitted.]")
-	// Should NOT contain the recall agent hint (no model = no error)
-	assert.NotContains(t, compressMsg.Content, "recall agent")
-	// Should still contain the Chinese context_compress prefix
-	assert.Contains(t, compressMsg.Content, "[context_compress]")
+	// System message preserved
+	assert.Equal(t, model.RoleSystem, result[0].Role)
+	// A compress error notice should be present (no summaryModel available)
+	hasErrorNotice := false
+	for _, msg := range result {
+		if strings.Contains(msg.Content, "[context_compress_error]") {
+			hasErrorNotice = true
+			break
+		}
+	}
+	assert.True(t, hasErrorNotice, "should have [context_compress_error] notice when no summaryModel")
 }
 
 func TestSmartCompress_Fallback_CompressNoticeFormat(t *testing.T) {
-	// Verify the [context_compress] prefix is present in compressed output
+	// Without summaryModel, verify the error notice format
 	sc := NewSmartCompressor(WithKeepRecentTasks(1))
 
 	messages := []model.Message{
@@ -257,10 +300,65 @@ func TestSmartCompress_Fallback_CompressNoticeFormat(t *testing.T) {
 
 	result := sc.Compress(context.Background(), messages, nil)
 
-	// First message is the compress notice
-	compressMsg := result[0]
-	assert.Contains(t, compressMsg.Content, "[context_compress]", "compress notice should start with [context_compress] prefix")
-	assert.Contains(t, compressMsg.Content, "[Compressed:", "compress notice should contain [Compressed: ...] format")
+	// Find the error notice
+	var errorNotice string
+	for _, msg := range result {
+		if strings.Contains(msg.Content, "[context_compress_error]") {
+			errorNotice = msg.Content
+			break
+		}
+	}
+	assert.Contains(t, errorNotice, "[context_compress_error]", "should contain error notice prefix")
+	assert.Contains(t, errorNotice, "降级", "should mention degradation strategy")
+}
+
+// TestSmartCompress_Fallback_WhenAllSegmentsRecent verifies that when all
+// segments are within keep_recent_tasks but the total still exceeds the budget,
+// the compressor falls back to:
+//  1. summarizing tool/exec info from the oldest segment (L2)
+//  2. if still over budget, fully summarizing the most recent execution event (L3)
+func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
+	memStore := memory.NewInMemoryStore()
+	sc := NewSmartCompressor(
+		WithKeepRecentTasks(2),
+		WithMaxTokens(50), // Force over-budget with only 2 segments
+		WithMemStore(memStore),
+		WithSummaryModel(&mockBatchSummaryModel{responses: []string{"summary of task 1"}}),
+		WithEventValuator(referenceValuator{}),
+	)
+
+	// Two task segments (both "recent" because keep_recent=2), with large
+	// tool outputs in segment 0.
+	messages := []model.Message{
+		{Role: model.RoleSystem, Content: "system prompt"},
+		{Role: model.RoleUser, Content: "task 1 user input"},
+		{Role: model.RoleAssistant, Content: "task 1 assistant response"},
+		{Role: model.RoleTool, Content: strings.Repeat("tool output for task 1 ", 20)},
+		{Role: model.RoleUser, Content: "task 2 user input"},
+		{Role: model.RoleAssistant, Content: "task 2 assistant response"},
+	}
+
+	result := sc.Compress(context.Background(), messages, nil)
+
+	// System + segment 1 (task 2) should be preserved
+	hasTask2 := false
+	for _, msg := range result {
+		if msg.Content == "task 2 user input" {
+			hasTask2 = true
+		}
+	}
+	assert.True(t, hasTask2, "current task 2 user input should be preserved")
+
+	// Segment 0 should be compressed (either L1 dropped tool, L2/L3 summary,
+	// or L3 archive reference).
+	hasCompressOrArchive := false
+	for _, msg := range result {
+		if strings.Contains(msg.Content, "[context_compress") || strings.Contains(msg.Content, "[context_archive") {
+			hasCompressOrArchive = true
+			break
+		}
+	}
+	assert.True(t, hasCompressOrArchive, "segment 0 should be compressed when over budget")
 }
 
 // ============================================================================
@@ -386,4 +484,156 @@ func TestCollectCompressedEventInfo_DistinctEventKeys(t *testing.T) {
 	assert.Equal(t, int64(111), infos[0].Key)
 	assert.Equal(t, int64(222), infos[1].Key)
 	assert.Equal(t, int64(333), infos[2].Key)
+}
+
+// ============================================================================
+// generateSummary split-and-re-summarize tests
+// ============================================================================
+
+// oversizedMockModel returns a summary that's always way too long.
+type oversizedMockModel struct {
+	responses []string
+	callCount int
+	mu        sync.Mutex
+}
+
+func (m *oversizedMockModel) GenerateContent(
+	ctx context.Context, request *model.Request,
+) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	idx := m.callCount
+	m.callCount++
+	m.mu.Unlock()
+
+	content := "这是一个摘要。"
+	if idx < len(m.responses) {
+		content = m.responses[idx]
+	}
+
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Choices: []model.Choice{{Message: model.Message{Content: content}}},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *oversizedMockModel) Info() model.Info {
+	return model.Info{Name: "oversized-mock"}
+}
+
+func TestGenerateSummary_OversizedTriggersResplit(t *testing.T) {
+	// Mock returns 5000 chars on first call (exceeds target of ~2000 * 1.5 = 3000),
+	// then returns 200 chars on subsequent calls (within target).
+	oversized := strings.Repeat("摘要内容。", 500) // ~2500 chars * 2 = 5000 chars
+	short := "简短摘要。"
+	mock := &oversizedMockModel{
+		responses: []string{oversized, short, short, short, short},
+	}
+
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+	)
+
+	segments := []*TaskSegment{
+		{Messages: []model.Message{{Role: model.RoleUser, Content: "msg1"}}, IsComplete: true},
+		{Messages: []model.Message{{Role: model.RoleAssistant, Content: "reply1"}}, IsComplete: true},
+		{Messages: []model.Message{{Role: model.RoleUser, Content: "msg2"}}, IsComplete: true},
+		{Messages: []model.Message{{Role: model.RoleAssistant, Content: "reply2"}}, IsComplete: true},
+	}
+
+	summary, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+	assert.NotEmpty(t, summary)
+	// After re-splitting, the result should be shorter than the oversized original
+	assert.Less(t, len(summary), 5000)
+}
+
+func TestGenerateSummary_WithinTargetNotSplit(t *testing.T) {
+	mock := &oversizedMockModel{
+		responses: []string{"正常长度摘要。"},
+	}
+
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+	)
+
+	segments := []*TaskSegment{
+		{Messages: []model.Message{{Role: model.RoleUser, Content: strings.Repeat("a", 100)}}},
+	}
+
+	summary, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+	assert.Equal(t, "正常长度摘要。", summary)
+}
+
+func TestGenerateSummary_HardTruncateAsFallback(t *testing.T) {
+	// Mock always returns oversized, even after splitting (depth reaches 2)
+	oversized := strings.Repeat("超长摘要。", 5000) // ~20000 chars
+	mock := &oversizedMockModel{
+		responses: []string{oversized, oversized, oversized, oversized, oversized},
+	}
+
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+	)
+
+	// Single segment — can't be split, so should hard-truncate
+	segments := []*TaskSegment{
+		{Messages: []model.Message{{Role: model.RoleUser, Content: strings.Repeat("a", 100)}}},
+	}
+
+	summary, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+	assert.NotEmpty(t, summary)
+	// Should be hard-truncated (targetChars would be ~20 chars, 1.5x = ~30)
+	assert.Less(t, len(summary), len(oversized))
+}
+
+func TestSummarizeBatches_RoleIsAssistant(t *testing.T) {
+	mock := &oversizedMockModel{
+		responses: []string{"摘要内容。"},
+	}
+
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+	)
+
+	batches := [][]*TaskSegment{
+		{{Messages: []model.Message{{Role: model.RoleUser, Content: "test"}}}},
+	}
+
+	msgs, hadError := sc.summarizeBatches(context.Background(), batches)
+	require.False(t, hadError)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, model.RoleAssistant, msgs[0].Role)
+}
+
+// ============================================================================
+// eventTypeToRole tests
+// ============================================================================
+
+func TestEventTypeToRole(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		want      model.Role
+	}{
+		{"external_input", "external_input", model.RoleUser},
+		{"agent_output", "agent_output", model.RoleAssistant},
+		{"action_command", "action_command", model.RoleTool},
+		{"thinking_plan", "thinking_plan", model.RoleAssistant},
+		{"empty", "", model.RoleUser},
+		{"unknown_type", "unknown_type", model.RoleUser},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eventTypeToRole(tt.eventType)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

@@ -121,6 +121,15 @@ type Config struct {
 // ProviderConfig holds connection info for a model provider.
 // Used in Config.Providers to declare provider endpoints and credentials.
 type ProviderConfig struct {
+	// Provider is the protocol implementation to use (e.g., "openai", "anthropic", "gemini").
+	// Most domestic models (GLM, DeepSeek, Moonshot, etc.) use OpenAI-compatible protocol,
+	// so this field should be "openai" with different api_endpoint to distinguish providers.
+	// Defaults to the provider registry key name if not specified.
+	// e.g., "openai" for OpenAI-compatible APIs (OpenAI/ZhiPu/DeepSeek/Moonshot/Baichuan/Qwen),
+	//       "anthropic" for Anthropic Claude,
+	//       "gemini" for Google Gemini.
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+
 	// APIEndpoint is the base URL for the provider's API.
 	// e.g., "https://open.bigmodel.cn/api/paas/v4" for ZhiPu,
 	//       "https://api.anthropic.com" for Anthropic.
@@ -164,11 +173,6 @@ type AgentConfig struct {
 	KeepRecentTasks   int            `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
 	Compress          CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
-	// OpenSpecDir is the root directory for openspec operations.
-	// PlanProgressTracker scans <openspec_dir>/openspec/changes/ for active changes.
-	// Defaults to "." (current working directory) when empty.
-	OpenSpecDir string `json:"openspec_dir,omitempty" yaml:"openspec_dir,omitempty"`
-
 	// Meditation configures the periodic meditation/heartbeat mechanism.
 	// Only effective when the agent is started via StartLoop.
 	Meditation MeditationConfig `json:"meditation,omitempty" yaml:"meditation,omitempty"`
@@ -183,6 +187,21 @@ type CompressConfig struct {
 	MaxExecStateChars  int `json:"max_exec_state_chars,omitempty"  yaml:"max_exec_state_chars,omitempty"`
 	ChunkSize          int `json:"chunk_size,omitempty"            yaml:"chunk_size,omitempty"`
 	ChunkSummaryLen    int `json:"chunk_summary_len,omitempty"      yaml:"chunk_summary_len,omitempty"`
+
+	// Value-driven compression configuration
+	//
+	// ValueFloors maps event type strings to minimum value_score (0.0-1.0).
+	ValueFloors map[string]float64 `json:"value_floors,omitempty" yaml:"value_floors,omitempty"`
+	// ValuationTimeoutMs caps the wall-clock time for the entire valuation phase.
+	// Default: 10000 (10s). Set to 0 to disable (not recommended).
+	ValuationTimeoutMs int `json:"valuation_timeout_ms,omitempty" yaml:"valuation_timeout_ms,omitempty"`
+
+	// SummaryModel is the model name for LLM summary compression.
+	// Falls back to the agent's main model if empty.
+	SummaryModel string `json:"summary_model,omitempty" yaml:"summary_model,omitempty"`
+	// SummaryProvider is the provider name for the summary model.
+	// Falls back to the agent's provider if empty.
+	SummaryProvider string `json:"summary_provider,omitempty" yaml:"summary_provider,omitempty"`
 }
 
 // MemoryConfig configures an agent's memory store.

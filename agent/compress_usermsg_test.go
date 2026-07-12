@@ -12,37 +12,6 @@ import (
 
 // ==================== Task 6.6: 有 pending user 时保留原始 user message ====================
 
-func TestFindPendingUserMessage_WithPendingUser(t *testing.T) {
-	// Segments: [complete] [complete] [incomplete with user message]
-	segments := []*TaskSegment{
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "task 1"},
-				{Role: model.RoleAssistant, Content: "result 1"},
-			},
-			IsComplete: true,
-		},
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "task 2"},
-				{Role: model.RoleAssistant, Content: "result 2"},
-			},
-			IsComplete: true,
-		},
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "new task pending"},
-			},
-			IsComplete: false,
-		},
-	}
-
-	msg := findPendingUserMessage(segments)
-	require.NotNil(t, msg)
-	assert.Equal(t, "new task pending", msg.Content)
-	assert.Equal(t, model.RoleUser, msg.Role)
-}
-
 func TestCompress_PreservesPendingUserMessage(t *testing.T) {
 	// Create enough segments to trigger compression (KeepRecentTasks=2 by default)
 	// The last segment has a pending user message
@@ -74,31 +43,11 @@ func TestCompress_PreservesPendingUserMessage(t *testing.T) {
 
 // ==================== Task 6.7: 无 pending user 时添加引导消息 ====================
 
-func TestFindPendingUserMessage_NoPendingUser(t *testing.T) {
-	// All segments are complete - no pending user message
-	segments := []*TaskSegment{
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "task 1"},
-				{Role: model.RoleAssistant, Content: "result 1"},
-			},
-			IsComplete: true,
-		},
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "task 2"},
-				{Role: model.RoleAssistant, Content: "result 2"},
-			},
-			IsComplete: true,
-		},
-	}
-
-	msg := findPendingUserMessage(segments)
-	assert.Nil(t, msg, "should return nil when no pending user message")
-}
-
 func TestCompress_AddsGuidanceMessageWhenNoPendingUser(t *testing.T) {
-	// All segments are complete - no pending user message after compression
+	// With "user input as anchor" compression:
+	// - Old segments are fully compressed
+	// - Recent segments: user input preserved, execution compressed (if long enough)
+	// - Last incomplete segment: preserved fully (current context)
 	messages := []model.Message{
 		// Old segment 1 (will be compressed)
 		{Role: model.RoleUser, Content: "old task 1"},
@@ -106,10 +55,10 @@ func TestCompress_AddsGuidanceMessageWhenNoPendingUser(t *testing.T) {
 		// Old segment 2 (will be compressed)
 		{Role: model.RoleUser, Content: "old task 2"},
 		{Role: model.RoleAssistant, Content: "old result 2"},
-		// Recent segment 1 (complete)
+		// Recent segment 1 (complete - closed by next user input)
 		{Role: model.RoleUser, Content: "recent task 1"},
 		{Role: model.RoleAssistant, Content: "recent result 1"},
-		// Recent segment 2 (complete)
+		// Recent segment 2 (incomplete - no next user input to close it)
 		{Role: model.RoleUser, Content: "recent task 2"},
 		{Role: model.RoleAssistant, Content: "recent result 2"},
 	}
@@ -119,31 +68,16 @@ func TestCompress_AddsGuidanceMessageWhenNoPendingUser(t *testing.T) {
 
 	require.NotEmpty(t, result)
 
-	// The last message should be the guidance message
+	// Last incomplete segment is preserved fully — last message is "recent result 2"
 	lastMsg := result[len(result)-1]
-	assert.Equal(t, model.RoleUser, lastMsg.Role)
-	assert.Equal(t, "（以上是对话历史摘要。如果有新任务，请告诉我。）", lastMsg.Content,
-		"last message should be the guidance message when no pending user")
-}
+	assert.Equal(t, "recent result 2", lastMsg.Content,
+		"last message should be from the fully preserved last incomplete segment")
 
-func TestFindPendingUserMessage_EmptySegments(t *testing.T) {
-	msg := findPendingUserMessage(nil)
-	assert.Nil(t, msg)
-}
-
-func TestFindPendingUserMessage_AllIncomplete(t *testing.T) {
-	// No complete segments - should return nil (no boundary to search after)
-	segments := []*TaskSegment{
-		{
-			Messages: []model.Message{
-				{Role: model.RoleUser, Content: "task 1"},
-			},
-			IsComplete: false,
-		},
+	// No guidance message ("以上是对话历史摘要") should be present
+	for _, msg := range result {
+		assert.NotContains(t, msg.Content, "以上是对话历史摘要",
+			"guidance message should not be appended")
 	}
-
-	msg := findPendingUserMessage(segments)
-	assert.Nil(t, msg, "should return nil when no complete segments exist")
 }
 
 // ==================== Task 6.8: ensureUserPrompt 不再添加 "继续" ====================
@@ -159,7 +93,7 @@ func TestEnsureUserPrompt_AddsGuidanceNotContinue(t *testing.T) {
 
 	require.Len(t, result, 3) // original 2 + 1 appended
 	assert.Equal(t, model.RoleUser, result[2].Role)
-	assert.Equal(t, "（以上是对话历史摘要。如果有新任务，请告诉我。）", result[2].Content,
+	assert.Equal(t, "请基于以上上下文继续处理。", result[2].Content,
 		"should append guidance message, not '继续'")
 	assert.NotEqual(t, "继续", result[2].Content,
 		"should NOT append '继续'")
@@ -182,5 +116,5 @@ func TestEnsureUserPrompt_EmptyMessages(t *testing.T) {
 
 	require.Len(t, result, 1)
 	assert.Equal(t, model.RoleUser, result[0].Role)
-	assert.Equal(t, "（以上是对话历史摘要。如果有新任务，请告诉我。）", result[0].Content)
+	assert.Equal(t, "请基于以上上下文继续处理。", result[0].Content)
 }

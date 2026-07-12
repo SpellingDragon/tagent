@@ -167,9 +167,11 @@ func TestDetectSessionState_OutputError_ProcessExists(t *testing.T) {
 	tm := newTestMonitor(inspector)
 	session := newTestSession("test", SessionRunning, "")
 
+	// When GetSessionOutput fails, the code uses empty output and continues
+	// (pane may be dead but output still in buffer)
 	status := tm.detectSessionState(session)
-	if status != SessionError {
-		t.Errorf("expected SessionError, got %s", status)
+	if status != SessionRunning {
+		t.Errorf("expected SessionRunning (output error is non-fatal), got %s", status)
 	}
 }
 
@@ -214,14 +216,11 @@ func TestDetectSessionState_OutputStable_TransitionToStable(t *testing.T) {
 	// Advance time past stableDuration (10ms)
 	time.Sleep(15 * time.Millisecond)
 
-	// Check 2: output still "A" → should transition to Stable
+	// Check 2: output still "A" → non-interactive command should transition to Completed
 	status = tm.detectSessionState(session)
 
-	if status != SessionStable {
-		t.Errorf("check 2: expected SessionStable, got %s", status)
-	}
-	if session.StableSince.IsZero() {
-		t.Error("check 2: StableSince should still be set when at Stable")
+	if status != SessionCompleted {
+		t.Errorf("check 2: expected SessionCompleted for non-interactive command, got %s", status)
 	}
 	if session.LastOutput != "A" {
 		t.Errorf("expected LastOutput='A', got %q", session.LastOutput)
@@ -312,6 +311,7 @@ func TestCheckSession_NoStateChange_NoCallback(t *testing.T) {
 func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 	// Simulate a realistic scenario: command produces output in chunks,
 	// then stabilizes. Verify LastOutput tracks correctly through each step.
+	// With new behavior: non-interactive commands go directly to completed after stable.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 
@@ -322,7 +322,7 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 		"line1\nline2\n",
 		"line1\nline2\nline3\n",
 		"line1\nline2\nline3\n", // stable
-		"line1\nline2\nline3\n", // stable
+		"line1\nline2\nline3\n", // stable → completed (non-interactive)
 	}
 
 	for i, output := range steps {
@@ -339,8 +339,9 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 			status = tm.detectSessionState(session)
 		}
 
-		if i == 4 && status != SessionStable {
-			t.Errorf("step %d: expected stable, got %s", i, status)
+		// Non-interactive command: stable → completed
+		if i == 4 && status != SessionCompleted {
+			t.Errorf("step %d: expected completed (non-interactive after stable), got %s", i, status)
 		}
 	}
 
@@ -348,14 +349,15 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 	if session.LastOutput != "line1\nline2\nline3\n" && session.LastOutput != steps[2] {
 		// After step 2 (index 2), the output for "line1\nline2\nline3\n" was set.
 		// At step 3 (index 3), StableCount=1, detected as running (no state transition) but LastOutput updated.
-		// At step 4 (index 4), StableCount=2 → stable, NO LastOutput update.
-		// So LastOutput should be from step 3 (index 3): "line1\nline2\nline3\n"
+		// At step 4 (index 4), StableCount=2 → stable → completed, LastOutput updated.
+		// So LastOutput should be from step 4 (index 4): "line1\nline2\nline3\n"
 		t.Errorf("LastOutput not consistent: got %q", session.LastOutput)
 	}
 }
 
 func TestOutputConsistency_OutputMD5_EmptyOutput(t *testing.T) {
 	// Edge case: empty output should also work for MD5 comparison
+	// With new behavior: non-interactive commands go directly to completed after stable.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 
@@ -373,10 +375,10 @@ func TestOutputConsistency_OutputMD5_EmptyOutput(t *testing.T) {
 	// Advance time past stableDuration
 	time.Sleep(15 * time.Millisecond)
 
-	// Check 2: empty → stable (duration ≥ threshold)
+	// Check 2: empty → completed (non-interactive after stable)
 	status := tm.detectSessionState(session)
-	if status != SessionStable {
-		t.Errorf("expected SessionStable for consistent empty output, got %s", status)
+	if status != SessionCompleted {
+		t.Errorf("expected SessionCompleted for consistent empty output (non-interactive), got %s", status)
 	}
 }
 
@@ -427,6 +429,7 @@ func TestMonitor_ConcurrentSessionAccess(t *testing.T) {
 
 func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 	// Full lifecycle: running → stable → completed
+	// With new behavior: non-interactive commands go directly from running → completed after stable
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 
@@ -448,9 +451,8 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionRunning},
 		// Phase 2: output stabilizes (needs time to pass for Stable detection)
 		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionRunning},
-		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionStable},
-		// Phase 3: process completes
-		{output: "step3\nfinal", processExists: false, isPaneDead: true, expectedState: SessionCompleted},
+		// Phase 3: non-interactive command completes after stable (running → completed)
+		{output: "step3", processExists: true, isPaneDead: false, expectedState: SessionCompleted},
 	}
 
 	var lastTransition string
@@ -475,12 +477,13 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 
 		if step.expectedState == SessionCompleted {
 			// After completion, session is removed → get the transition result
-			if oldStatus != SessionStable || lastTransition == "" {
-				t.Errorf("step %d: expected stable→completed transition, got %s→? transition=%q",
+			// With new behavior: running → completed (not stable → completed)
+			if oldStatus != SessionRunning || lastTransition == "" {
+				t.Errorf("step %d: expected running→completed transition, got %s→? transition=%q",
 					i, oldStatus, lastTransition)
 			}
 			// Verify output captured
-			if session.LastOutput != "step3\nfinal" {
+			if session.LastOutput != "step3" {
 				t.Errorf("step %d: final output not captured! got %q", i, session.LastOutput)
 			}
 			break
@@ -647,16 +650,19 @@ func TestTUI_FullLifecycle_RunningToCompleted(t *testing.T) {
 // ==================== Multi-Turn Conversation Tests ====================
 
 func TestMultiTurn_RepeatedStableRunningCycles(t *testing.T) {
-	// Simulates agent repeatedly sending input to a session:
+	// Simulates agent repeatedly sending input to an interactive session:
 	// turn1: output changes → running → stable
 	// turn2: output changes → running → stable
 	// turn3: output changes → running → stable → completed
 	// Each transition should fire exactly one callback.
+	// Note: This test uses an interactive session (IsInteractive=true) to allow
+	// multiple stable→running cycles. Non-interactive commands complete after stable.
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 	tm.fakeDeadDuration = 100 * time.Hour // Disable fake-dead to focus on multi-turn
 
 	session := newTestSession("multiturn", SessionRunning, "init")
+	session.IsInteractive = true // Allow multiple stable→running cycles
 	tm.sessions["multiturn"] = session
 
 	var transitions []string
@@ -1174,15 +1180,20 @@ func TestHandleStateChange_OutputTruncation(t *testing.T) {
 		t.Error("short output should NOT have truncation marker")
 	}
 
-	// Sub-test 2: output > 2000 chars — truncated
+	// Sub-test 2: output > 2000 chars — saved to file with tail shown
 	largeLine := "line of output data that will eventually be truncated because too long\n"
 	largeOutput := strings.Repeat(largeLine, 100) // >2000 chars
 
 	ct.handleStateChange("trunc_test", string(SessionStable), string(SessionRunning), largeOutput)
 
 	content = injector.lastContent()
-	if !strings.Contains(content, "...(truncated)") {
-		t.Error("large output should have truncation marker")
+	// Should indicate full output was saved to file
+	if !strings.Contains(content, "完整内容已保存到") {
+		t.Error("large output should indicate full content saved to file")
+	}
+	// Should show last 2000 characters
+	if !strings.Contains(content, "显示最后 2000 字符") {
+		t.Error("large output should indicate showing last 2000 characters")
 	}
 	// After truncation, the message should NOT contain the full output
 	if strings.Contains(content, largeOutput) {

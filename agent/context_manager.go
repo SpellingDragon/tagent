@@ -61,15 +61,14 @@ func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
 //
 // Prototype mapping:
 //   - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
-//   - Compact (clean projection) → Compactor in BeforeModel callback
+//   - Compact (clean projection) → ContextCompressor in BeforeModel callback
 type ContextManager struct {
-	compressor      *SmartCompressor
-	compactor       *Compactor
-	tokenCounter    TokenCounter
-	memStore        memory.MemoryStore
-	maxTokens       int
-	thresholdPct    float64
-	recentFullCount int
+	contextCompressor *ContextCompressor
+	tokenCounter      TokenCounter
+	memStore          memory.MemoryStore
+	maxTokens         int
+	thresholdPct      float64
+	recentFullCount   int
 
 	// Framework integration
 	runner    runner.Runner
@@ -96,12 +95,10 @@ type ContextManagerConfig struct {
 	MaxToolIters int
 
 	Compressor   *SmartCompressor
-	Compactor    *Compactor
 	TokenCounter TokenCounter
 	MaxTokens    int
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
-	OpenSpecDir  string // Root directory for openspec (PlanProgressTracker)
 
 	// Unified Runner: plugins + session service registered on the same Runner
 	MemPlugin  *plugin.MemoryPlugin
@@ -114,11 +111,9 @@ type ContextManagerConfig struct {
 }
 
 // NewContextManager creates a ContextManager that wraps a framework LLMAgent
-// with SmartCompressor + Compactor as BeforeModel callbacks.
+// with ContextCompressor as the sole BeforeModel compression callback.
 func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	cm := &ContextManager{
-		compressor:      cfg.Compressor,
-		compactor:       cfg.Compactor,
 		tokenCounter:    cfg.TokenCounter,
 		memStore:        cfg.MemStore,
 		maxTokens:       cfg.MaxTokens,
@@ -132,6 +127,19 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		bus:             cfg.Bus,
 		projection:      cfg.Projection,
 		onEvent:         cfg.OnEvent,
+	}
+
+	// Build ContextCompressor from SmartCompressor.
+	if cfg.Compressor != nil {
+		keepRecent := cfg.Compressor.KeepRecentTasks
+		cm.contextCompressor = NewContextCompressor(
+			cfg.Compressor,
+			cfg.MemStore,
+			cfg.TokenCounter,
+			cfg.MaxTokens,
+			cfg.ThresholdPct,
+			keepRecent,
+		)
 	}
 
 	// Build BeforeModel callback chain.
@@ -157,82 +165,49 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 				if evt.Message == nil {
 					continue
 				}
+				// Create a copy to avoid mutating the original event.
+				// Convert RoleSystem → RoleUser: system-injected messages (e.g., [action_tool_result])
+				// should be treated as external input by the LLM, not as system instructions.
+				msg := *evt.Message
+				if msg.Role == model.RoleSystem {
+					msg.Role = model.RoleUser
+				}
 				// Append new user message to the current LLM request
-				args.Request.Messages = append(args.Request.Messages, *evt.Message)
-				log.Infof("[InjectBusInputs] injected user message during ReAct: %s", truncateString(evt.Message.Content, 120))
+				args.Request.Messages = append(args.Request.Messages, msg)
+				log.Infof("[InjectBusInputs] injected message during ReAct: role=%s content=%s", msg.Role, msg.Content)
 			}
 			return nil, nil
 		})
 	}
 
-	// Callback 0: InjectEventKeys — inject [evt_KEY|type] prefix into messages.
-	// This runs BEFORE SmartCompressor so that compression can parse and preserve
-	// event keys from the prefix. The prefix is injected on every LLM call, not
-	// just when Compactor triggers, ensuring LLM always sees event keys and can
-	// pass them to sub-agent tools.
-	if cfg.Projection != nil {
+	// Callback 0: ContextCompressor — unified compression + projection cleanup.
+	// This is the ONLY BeforeModel callback that touches messages (besides
+	// the diagnostic log). The old InjectEventKeys callback was removed because
+	// its positional matching (message N → ref N) breaks after compression:
+	// the projection no longer matches session messages 1:1, causing summary
+	// ref keys to be mis-assigned to user messages and tool messages to be
+	// skipped (no prefix → can't deduplicate → duplicates).
+	//
+	// Instead, ContextCompressor.Compress resolves ALL refs from the projection
+	// (each correctly prefixed with [evt_KEY|type]) and uses content-based
+	// deduplication to find new messages from ContentRequestProcessor that
+	// aren't yet in the projection.
+	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 			refs := cm.projection.GetAll()
-			if len(refs) == 0 {
-				return nil, nil
-			}
-			injectEventKeyPrefixes(&args.Request.Messages, refs)
+
+			result := cm.contextCompressor.Compress(ctx, refs, args.Request.Messages)
+			args.Request.Messages = result.Messages
+			cm.projection.Replace(result.RetainedRefs)
 			return nil, nil
 		})
 	}
 
-	// Callback 1: SmartCompressor — modifies args.Request.Messages only.
-	if cfg.Compressor != nil {
-		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			usedTokens := cm.tokenCounter.Estimate(args.Request.Messages)
-			threshold := int(float64(cm.maxTokens) * cm.thresholdPct)
-			if usedTokens <= threshold {
-				return nil, nil
-			}
-			originalKeepRecent := cm.compressor.KeepRecentTasks
-			defer func() { cm.compressor.KeepRecentTasks = originalKeepRecent }()
-			result := cm.compressor.Compress(ctx, args.Request.Messages, nil)
-			args.Request.Messages = result
-			newTokens := cm.tokenCounter.Estimate(result)
-			log.Infof("[ContextManager] SmartCompress: %d -> %d tokens", usedTokens, newTokens)
-			return nil, nil
-		})
-	}
-
-	// Callback 1.5: BeforeLLM diagnostic log — print messages after compression.
+	// Callback 0.5: BeforeLLM diagnostic log — print messages after compression.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		log.Debugf("[BeforeLLM] messages:\n%s", formatMessages(args.Request.Messages))
 		return nil, nil
 	})
-
-	// Callback 2: Compactor — modifies SessionProjection if still over budget.
-	if cfg.Compactor != nil && cfg.Projection != nil {
-		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			usedTokens := cm.tokenCounter.Estimate(args.Request.Messages)
-			if usedTokens <= cm.maxTokens {
-				return nil, nil
-			}
-			refs := cm.projection.GetAll()
-			compacted := cm.compactor.Compact(refs)
-			if len(compacted) >= len(refs) {
-				return nil, nil
-			}
-			log.Warnf("[ContextManager] Compactor: refs %d -> %d", len(refs), len(compacted))
-			cm.projection.Replace(compacted)
-			messages := cm.BuildMessages(ctx, compacted)
-			messages = ensureUserPrompt(messages)
-			cm.InjectEventKeys(&messages, compacted)
-			args.Request.Messages = messages
-			log.Debugf("[AfterCompactor] messages:\n%s", formatMessages(args.Request.Messages))
-			return nil, nil
-		})
-	}
-
-	// Callback 2.5: PlanProgressTracker — inject active openspec change progress.
-	// Reads tasks.md from file system, appends progress summary to messages.
-	// Placed after Compactor so progress summary is the last message (survives compression).
-	tracker := NewPlanProgressTracker(cfg.OpenSpecDir)
-	tracker.RegisterCallback(cb)
 
 	// Build LLMAgent.
 	maxIters := cfg.MaxToolIters
@@ -273,34 +248,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	cm.runner = runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
 
 	return cm
-}
-
-// BuildMessages converts EventReferences to model.Messages.
-// Recent references are resolved via MemoryStore; older ones use EventSummary.
-func (cm *ContextManager) BuildMessages(ctx context.Context, refs []memory.EventReference) []model.Message {
-	startFull := 0
-	if len(refs) > cm.recentFullCount {
-		startFull = len(refs) - cm.recentFullCount
-	}
-	messages := make([]model.Message, 0, len(refs))
-	for i, ref := range refs {
-		var msg model.Message
-		if i >= startFull {
-			msg = cm.resolveReferenceToMessage(ctx, ref)
-		} else {
-			msg = model.Message{
-				Role:    model.Role(ref.Role),
-				Content: ref.EventSummary,
-			}
-		}
-		messages = append(messages, msg)
-	}
-	return messages
-}
-
-// InjectEventKeys adds [evt_KEY|type] prefix to messages.
-func (cm *ContextManager) InjectEventKeys(messages *[]model.Message, refs []memory.EventReference) {
-	injectEventKeyPrefixes(messages, refs)
 }
 
 // ShouldCallModel checks if the batch contains external_input events
@@ -399,20 +346,32 @@ func (cm *ContextManager) Close() error {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers (migrated from preprocessor.go)
+// Internal helpers
 // ---------------------------------------------------------------------------
 
-func (cm *ContextManager) resolveReferenceToMessage(ctx context.Context, ref memory.EventReference) model.Message {
-	if cm.memStore != nil {
-		full, err := cm.memStore.GetEvent(ref.EventKey)
-		if err == nil && full != nil && full.Response != nil && len(full.Response.Choices) > 0 {
-			return full.Response.Choices[0].Message
-		}
-		log.Warnf("[ContextManager] failed to resolve event key=%d: %v", ref.EventKey, err)
-	}
-	return model.Message{
-		Role:    model.Role(ref.Role),
-		Content: ref.EventSummary,
+// eventTypeToRole infers a model.Role from an event type string using a
+// deterministic mapping. This is used when a FullEvent's Response is nil
+// (e.g., events injected via InjectBusInputs that have no LLM response).
+//
+// Mapping:
+//
+//	external_input → user
+//	agent_output   → assistant
+//	action_command → tool
+//	thinking_plan   → assistant
+//	(default)       → user (safe degradation)
+func eventTypeToRole(eventType string) model.Role {
+	switch eventType {
+	case "external_input":
+		return model.RoleUser
+	case "agent_output":
+		return model.RoleAssistant
+	case "action_command":
+		return model.RoleTool
+	case "thinking_plan":
+		return model.RoleAssistant
+	default:
+		return model.RoleUser
 	}
 }
 
@@ -454,9 +413,11 @@ func ensureUserPrompt(messages []model.Message) []model.Message {
 			return messages
 		}
 	}
+	// No user message found — add a neutral prompt to trigger model response.
+	// Don't say "如果有新任务" which misleads the LLM into thinking previous tasks are done.
 	return append(messages, model.Message{
 		Role:    model.RoleUser,
-		Content: "（以上是对话历史摘要。如果有新任务，请告诉我。）",
+		Content: "请基于以上上下文继续处理。",
 	})
 }
 

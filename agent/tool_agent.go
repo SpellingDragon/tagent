@@ -17,9 +17,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -201,10 +203,14 @@ func isRemoteAgent(ag agent.Agent) bool {
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
-	// Parse args
+	// Parse args using json.Number to preserve int64 precision for Snowflake
+	// event keys. Default json.Unmarshal parses numbers as float64, which
+	// loses precision for keys larger than 2^53 (e.g., 1297371431025250304).
 	var args map[string]interface{}
 	if len(jsonArgs) > 0 {
-		if err := json.Unmarshal(jsonArgs, &args); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(jsonArgs))
+		dec.UseNumber()
+		if err := dec.Decode(&args); err != nil {
 			return nil, fmt.Errorf("agent tool %q: parse args: %w", agentName, err)
 		}
 	}
@@ -548,16 +554,24 @@ func GetPlainToolFactory(id string) (PlainToolFactory, bool) {
 }
 
 // toInt64Key converts a JSON-parsed value to an int64 event key.
-// JSON numbers from json.Unmarshal parse as float64 by default.
+// Handles:
+//   - json.Number (from decoder with UseNumber())
+//   - string (LLM may quote large snowflake keys to avoid precision loss)
+//   - float64 (fallback for unconfigured decoders)
 func toInt64Key(v interface{}) int64 {
 	switch val := v.(type) {
-	case float64:
-		return int64(val)
 	case json.Number:
 		i, err := val.Int64()
 		if err == nil {
 			return i
 		}
+	case string:
+		i, err := strconv.ParseInt(val, 10, 64)
+		if err == nil {
+			return i
+		}
+	case float64:
+		return int64(val)
 	}
 	return 0
 }

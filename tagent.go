@@ -37,7 +37,9 @@ import (
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/tool"
 	"github.com/SpellingDragon/tagent/tool/action"
+	"github.com/SpellingDragon/tagent/tool/plan"
 
+	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -314,11 +316,12 @@ func buildAgent(
 			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,
 			ChunkSize:          acfg.Compress.ChunkSize,
 			ChunkSummaryLen:    acfg.Compress.ChunkSummaryLen,
+			ValueFloors:        acfg.Compress.ValueFloors,
+			ValuationTimeoutMs: acfg.Compress.ValuationTimeoutMs,
 		},
-		OpenSpecDir: acfg.OpenSpecDir,
 	}
-	if rc.summaryModel != nil {
-		agentCfg.SummaryModel = rc.summaryModel
+	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {
+		agentCfg.SummaryModel = summaryModel
 	}
 
 	// Parse meditation config (string durations → time.Duration)
@@ -438,12 +441,15 @@ func buildAgentToolRef(
 		return nil, false, err
 	}
 
+	// Wrap with PlanAgent if this is the plan agent — enables dual-mode Run
+	// (progress queries bypass LLM via direct file I/O).
+	var agentImpl trpcagent.Agent = subAgent
+	if tr.AgentID == "plan" {
+		agentImpl = plan.NewPlanAgent(subAgent, ".")
+	}
+
 	// Wrap with AgentToolWrapper — this replaces agenttool.NewTool().
-	// The wrapper:
-	//   - Declares event_key parameter in InputSchema (if tr.EventParams includes it)
-	//   - On Call: resolves event_key → fetches full event from parentMemStore
-	//   - Serializes events into RuntimeState["external_context"] and calls agent.Run
-	wrapper := agent.NewAgentToolWrapper(subAgent, desc, tr.EventParams, parentMemStore)
+	wrapper := agent.NewAgentToolWrapper(agentImpl, desc, tr.EventParams, parentMemStore)
 	return wrapper, false, nil
 }
 
@@ -510,9 +516,14 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		return m
 	}
 
-	// 4. Look up provider connection info
+	// 4. Look up provider connection info and determine protocol implementation
 	var opts []provider.Option
+	protocolName := providerName // default to registry key name
 	if pcfg, ok := cfg.Providers[providerName]; ok {
+		// If ProviderConfig specifies a protocol, use it (e.g., "zhipu" -> "openai")
+		if pcfg.Provider != "" {
+			protocolName = pcfg.Provider
+		}
 		if pcfg.APIEndpoint != "" {
 			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
 		}
@@ -523,10 +534,10 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		}
 	}
 
-	m, err := provider.Model(providerName, acfg.Model, opts...)
+	m, err := provider.Model(protocolName, acfg.Model, opts...)
 	if err != nil {
-		log.Warnf("agent %q: resolve model %q via provider %q failed: %v, falling back to parent model",
-			name, acfg.Model, providerName, err)
+		log.Warnf("agent %q: resolve model %q via provider %q (protocol %q) failed: %v, falling back to parent model",
+			name, acfg.Model, providerName, protocolName, err)
 		return rc.model
 	}
 
@@ -543,6 +554,73 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 	rc.resolvedModels[cacheKey] = m
 	log.Infof("[tagent] agent %q: resolved model %q via provider %q", name, acfg.Model, providerName)
 	return m
+}
+
+// resolveSummaryModel resolves the summary model for a specific agent.
+// Resolution order:
+//  1. If agent has SummaryModel field in YAML → resolve via provider (SummaryProvider or agent's Provider)
+//  2. If rc.summaryModel is set via Go option → use that
+//  3. Otherwise → nil (no summary model)
+func (rc *runtimeConfig) resolveSummaryModel(name string, acfg AgentConfig, cfg Config) model.Model {
+	// Resolve model and provider from compress config.
+	// Falls back to agent's main model/provider if compress.summary_model is empty.
+	summaryModel := acfg.Compress.SummaryModel
+	summaryProvider := acfg.Compress.SummaryProvider
+
+	// 1. If resolved summary_model, resolve it
+	if summaryModel != "" {
+		// Use summaryProvider if specified, otherwise fall back to agent's Provider or global Provider
+		providerName := summaryProvider
+		if providerName == "" {
+			providerName = acfg.Provider
+		}
+		if providerName == "" {
+			providerName = cfg.Provider
+		}
+		cacheKey := "summary:" + providerName + ":" + summaryModel
+		if m, ok := rc.resolvedModels[cacheKey]; ok {
+			return m
+		}
+
+		var opts []provider.Option
+		protocolName := providerName // default to registry key name
+		if pcfg, ok := cfg.Providers[providerName]; ok {
+			// If ProviderConfig specifies a protocol, use it (e.g., "zhipu" -> "openai")
+			if pcfg.Provider != "" {
+				protocolName = pcfg.Provider
+			}
+			if pcfg.APIEndpoint != "" {
+				opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
+			}
+			if pcfg.APIKeyEnv != "" {
+				if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
+					opts = append(opts, provider.WithAPIKey(key))
+				}
+			}
+		}
+
+		m, err := provider.Model(protocolName, summaryModel, opts...)
+		if err != nil {
+			log.Warnf("agent %q: resolve summary model %q via provider %q (protocol %q) failed: %v, falling back to rc.summaryModel",
+				name, summaryModel, providerName, protocolName, err)
+			return rc.summaryModel
+		}
+
+		if rc.trajectoryRecorder != nil {
+			m = agent.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+			log.Debugf("[tagent] agent %q: wrapped summary model %q with TrajectoryRecorder", name, summaryModel)
+		}
+
+		if rc.resolvedModels == nil {
+			rc.resolvedModels = make(map[string]model.Model)
+		}
+		rc.resolvedModels[cacheKey] = m
+		log.Infof("[tagent] agent %q: resolved summary model %q via provider %q", name, summaryModel, providerName)
+		return m
+	}
+
+	// 2. Fall back to Go option
+	return rc.summaryModel
 }
 
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.

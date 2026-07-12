@@ -31,7 +31,6 @@ func newTestContextManager(name string, m model.Model, tools []trpctool.Tool, ou
 		Tools:        tools,
 		MaxToolIters: 10,
 		Compressor:   compressor,
-		Compactor:    NewCompactor(2),
 		TokenCounter: &mockTokenCounter{tokens: 100},
 		MaxTokens:    8000,
 		ThresholdPct: 0.8,

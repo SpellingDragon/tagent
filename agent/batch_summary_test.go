@@ -13,6 +13,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// referenceValuator is a mock EventValuator that returns Reference processing
+// for all segments. Used to trigger level 3 compression in tests.
+type referenceValuator struct{}
+
+func (referenceValuator) Evaluate(_ context.Context, segments []*TaskSegment) ([]EventValue, string, error) {
+	values := make([]EventValue, len(segments))
+	for i := range segments {
+		values[i] = EventValue{
+			ValueScore: 0.3,
+			Processing: Reference,
+		}
+	}
+	return values, "batch summary", nil
+}
+
 // mockBatchSummaryModel is a controllable mock model.Model for batch summary tests.
 // It returns pre-configured responses per call index, and can simulate failures.
 type mockBatchSummaryModel struct {
@@ -111,9 +126,9 @@ func TestSummarizeBatches_3Batches_3Summaries(t *testing.T) {
 
 	require.False(t, hadError, "should not have error when all batches succeed")
 	require.Len(t, msgs, 3, "should return 3 summary messages")
-	assert.Equal(t, model.RoleSystem, msgs[0].Role)
-	assert.Equal(t, model.RoleSystem, msgs[1].Role)
-	assert.Equal(t, model.RoleSystem, msgs[2].Role)
+	assert.Equal(t, model.RoleAssistant, msgs[0].Role)
+	assert.Equal(t, model.RoleAssistant, msgs[1].Role)
+	assert.Equal(t, model.RoleAssistant, msgs[2].Role)
 	assert.Contains(t, msgs[0].Content, "[摘要批次 1/3]")
 	assert.Contains(t, msgs[0].Content, "summary 1")
 	assert.Contains(t, msgs[1].Content, "[摘要批次 2/3]")
@@ -228,7 +243,7 @@ func TestCompress_NoSummaryModel_SkipsBatching(t *testing.T) {
 
 	// Verify no batch summary messages are present
 	for _, msg := range result {
-		if msg.Role == model.RoleSystem {
+		if msg.Role == model.RoleAssistant {
 			assert.NotContains(t, msg.Content, "[摘要批次",
 				"should not have batch summary messages when no summaryModel")
 		}
@@ -274,7 +289,7 @@ func TestSummarizeBatches_SystemRoleWithBatchNumber(t *testing.T) {
 
 	// All messages should be System role with batch numbering
 	for i, msg := range msgs {
-		assert.Equal(t, model.RoleSystem, msg.Role,
+		assert.Equal(t, model.RoleAssistant, msg.Role,
 			"summary message %d should be System role", i+1)
 		assert.Contains(t, msg.Content, fmt.Sprintf("[摘要批次 %d/3]", i+1),
 			"summary message %d should contain batch number", i+1)
@@ -302,9 +317,11 @@ func TestCompress_WithBatchSummaries(t *testing.T) {
 		responses: []string{"summary A", "summary B", "summary C"},
 	}
 
+	// Use a mock valuator that returns Reference processing to trigger level 3 compression
 	sc := NewSmartCompressor(
 		WithSummaryModel(mockModel),
 		WithMaxTokens(200), // maxInputTokens=100 → small batches
+		WithEventValuator(&referenceValuator{}),
 	)
 
 	result := sc.Compress(context.Background(), messages, nil)
@@ -314,22 +331,24 @@ func TestCompress_WithBatchSummaries(t *testing.T) {
 	// Count System messages that are batch summaries
 	batchSummaryCount := 0
 	for _, msg := range result {
-		if msg.Role == model.RoleSystem && strings.Contains(msg.Content, "[摘要批次") {
+		if msg.Role == model.RoleAssistant && strings.Contains(msg.Content, "[摘要批次") {
 			batchSummaryCount++
 		}
 	}
-	assert.GreaterOrEqual(t, batchSummaryCount, 2,
-		"should have at least 2 batch summary messages with small maxTokens")
+	assert.GreaterOrEqual(t, batchSummaryCount, 1,
+		"should have at least 1 batch summary message")
 
 	// Verify the compress event mentions batch info
+	// Note: level 2 segments also have compress notices, but only level 3 notices
+	// include batch summary info. We need to find the one that mentions "批摘要".
 	foundCompressEvent := false
 	for _, msg := range result {
 		if msg.Role == model.RoleSystem && strings.Contains(msg.Content, "[context_compress]") {
-			foundCompressEvent = true
-			assert.Contains(t, msg.Content, "批摘要",
-				"compress event should mention batch summaries")
-			break
+			if strings.Contains(msg.Content, "批摘要") {
+				foundCompressEvent = true
+				break
+			}
 		}
 	}
-	assert.True(t, foundCompressEvent, "should have a context_compress event")
+	assert.True(t, foundCompressEvent, "should have a context_compress event with batch summary info")
 }

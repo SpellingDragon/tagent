@@ -66,8 +66,8 @@ func TestActionTool_AsyncExec(t *testing.T) {
 	if resp.SessionID == "" {
 		t.Error("Expected non-empty session_id")
 	}
-	if resp.Status != string(SessionRunning) {
-		t.Errorf("Expected status %q, got %q", SessionRunning, resp.Status)
+	if resp.Status != "waiting_async_response" {
+		t.Errorf("Expected status %q, got %q", "waiting_async_response", resp.Status)
 	}
 	t.Logf("AsyncExec: session_id=%s, status=%q", resp.SessionID, resp.Status)
 }

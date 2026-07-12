@@ -1,32 +1,16 @@
-## ADDED Requirements
-
-### Requirement: StartLoop 启动持久事件循环
-
-TagentAgent SHALL 提供 StartLoop(userID, sessionID) 方法，创建 mailbox（chan model.Message, cap=256）、outputCh（chan *event.Event）、loopCtx，并启动后台 loop goroutine。StartLoop SHALL 返回 outputCh 供调用方接收 agent 响应。outputCh 在 StopLoop 后关闭。StartLoop SHALL 设置 loopActive 标志为 true。
-
-#### Scenario: StartLoop 返回持久 output channel
-
-- **WHEN** 调用 StartLoop("user-1", "session-1")
-- **THEN** 后台 loop goroutine 启动
-- **THEN** 返回 `<-chan *event.Event`（outputCh）
-- **AND** loopActive 为 true
-- **AND** mailbox 已创建（cap=256）
-
-#### Scenario: 重复调用 StartLoop
-
-- **WHEN** loopActive 已为 true 时调用 StartLoop
-- **THEN** 返回已存在的 outputCh
-- **AND** 不创建新的 loop goroutine
+## MODIFIED Requirements
 
 ### Requirement: Loop goroutine 持续运行不退出
 
-Loop goroutine SHALL 循环执行：drain mailbox（阻塞等第一个事件 + non-blocking drain 剩余）→ mergeBatch 合并为一条 model.Message → runner.Run() → 转发事件到 outputCh → 回到 drain。Loop SHALL NOT 在 Run 结束（Flow break）时退出。Loop SHALL 仅在 loopCtx 被取消（StopLoop）时退出。
+Loop goroutine SHALL 循环执行：drain mailbox（阻塞等第一个事件 + non-blocking drain 剩余）→ mergeBatch 合并为一条 model.Message → 调用 `FrameworkFlowAdapter.RunFlow` → 转发事件到 outputCh → 回到 drain。Loop SHALL NOT 在 Flow.Run 返回（单轮 ReAct 结束）时退出。Loop SHALL 仅在 loopCtx 被取消（StopLoop）时退出。
+
+Flow.Run 内部 SHALL 由 `trpc-agent-go` 框架处理 ReAct 循环、工具执行和迭代控制。`AgentLoop` 不再自建 `callModel`、`handleResponse` 或 `dispatchToolUse`。
 
 Loop SHALL NOT 执行任何 trajectory 采集、reward 计算或 trajectory 存储逻辑。Loop 仅负责事件转发、日志记录和 OTLP span 属性设置。
 
 #### Scenario: Run 结束后继续 drain
 
-- **WHEN** runner.Run() 返回的 event channel 关闭（Flow 在 IsFinalResponse 时 break）
+- **WHEN** `FrameworkFlowAdapter.RunFlow` 返回的 event channel 关闭（Flow 在 final response 时结束）
 - **THEN** Loop 不退出
 - **AND** Loop 回到 drain mailbox 等待下一批事件
 
@@ -88,11 +72,11 @@ InjectMessage SHALL 检查 loopActive 标志。Loop 运行时（loopActive=true�
 
 - **WHEN** loopActive=true，调用 InjectMessage(system_msg)
 - **THEN** system_msg 写入 mailbox
-- **AND** 不调用 runner.Run()
+- **AND** 不直接调用 Flow.Run
 - **AND** Loop 在下次 drain 时收到此消息
 
 #### Scenario: One-shot 模式保持现有行为
 
 - **WHEN** loopActive=false，调用 InjectMessage(system_msg)
-- **THEN** 执行现有逻辑（runner.Run + drain goroutine）
+- **THEN** 执行现有逻辑（Run + drain goroutine）
 - **AND** 行为与变更前完全一致

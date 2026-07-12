@@ -76,9 +76,6 @@ func TestOutputLimitTool_Call_OverLimit(t *testing.T) {
 	if !strings.Contains(resultStr, "完整内容已保存到") {
 		t.Fatalf("expected file save info, got: %s", resultStr[:min(200, len(resultStr))])
 	}
-	if !strings.Contains(resultStr, "使用 read_file 工具读取该文件") {
-		t.Fatalf("expected read_file hint, got: %s", resultStr[:min(200, len(resultStr))])
-	}
 }
 
 func TestOutputLimitTool_Call_NilResult(t *testing.T) {
