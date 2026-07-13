@@ -26,8 +26,11 @@ func TestContextCompressor_PassThroughUnderBudget(t *testing.T) {
 
 	result := cc.Compress(context.Background(), refs, msgs)
 
-	if len(result.Messages) != len(msgs) {
-		t.Fatalf("expected %d messages (pass-through), got %d", len(msgs), len(result.Messages))
+	// Under budget: unresolved historical refs are injected before current messages.
+	// 2 unresolved refs (not in currentMessages) + system + user = 4 messages.
+	expectedMsgs := 1 + len(refs) + 1 // system + 2 historical + user
+	if len(result.Messages) != expectedMsgs {
+		t.Fatalf("expected %d messages (with injected history), got %d", expectedMsgs, len(result.Messages))
 	}
 	if len(result.RetainedRefs) != len(refs) {
 		t.Fatalf("expected %d retained refs, got %d", len(refs), len(result.RetainedRefs))
@@ -167,9 +170,10 @@ func TestContextCompressor_ResolvesFullContentFromMemoryStore(t *testing.T) {
 
 	result := cc.Compress(context.Background(), refs, msgs)
 
-	// Should pass through (under budget) with original messages
-	if len(result.Messages) != len(msgs) {
-		t.Fatalf("expected %d messages, got %d", len(msgs), len(result.Messages))
+	// Under budget: the unresolved historical ref (not in currentMessages) is
+	// injected before the current message. So we get 1 historical + 1 current = 2.
+	if len(result.Messages) != len(msgs)+len(refs) {
+		t.Fatalf("expected %d messages (with injected history), got %d", len(msgs)+len(refs), len(result.Messages))
 	}
 }
 

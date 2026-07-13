@@ -118,27 +118,11 @@ func (cc *ContextCompressor) Compress(
 ) CompressResult {
 	startTime := time.Now()
 
-	// Check if compression is needed based on current messages alone.
-	// If under threshold, we still add [evt_KEY|type] prefixes by matching
-	// currentMessages to projection refs. This ensures the LLM can see event
-	// keys for sub-agent tool calls (recall, knowledge, etc.) even when no
-	// compression is needed.
-	usedTokens := cc.tokenCounter.Estimate(currentMessages)
-	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
-
-	if usedTokens <= threshold {
-		prefixed := cc.prefixMessagesByContentMatch(ctx, currentMessages, refs)
-		log.Infof("[ContextCompressor] under budget (%d <= %d), prefixed %d/%d messages",
-			usedTokens, threshold, countPrefixed(prefixed), len(prefixed))
-		return CompressResult{
-			Messages:     prefixed,
-			RetainedRefs: refs,
-		}
-	}
-
-	// Over threshold — resolve ALL refs and rebuild messages.
-	// 1. Resolve every ref from the projection → build a lookup map and ordered list.
-	//    Each resolved message is correctly prefixed with [evt_KEY|type].
+	// Resolve ALL refs from the projection first. This is needed in both
+	// under-budget and over-budget paths: the framework's ContentRequestProcessor
+	// may not include all historical events (e.g., after compression updated the
+	// session, or after restart). The projection is the source of truth for
+	// what historical context the LLM should see.
 	resolvedByContent := make(map[string]model.Message)
 	resolvedOrdered := make([]model.Message, 0, len(refs))
 	resolvedKeysOrdered := make([]string, 0, len(refs))
@@ -152,8 +136,8 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// 2. Process currentMessages: replace with resolved versions when matched,
-	//    and track which resolved refs were matched.
+	// Process currentMessages: replace with resolved versions when matched,
+	// and track which resolved refs were matched.
 	systemMsg, currentBody := splitSystemMessage(currentMessages)
 	matchedKeys := make(map[string]bool)
 	processedBody := make([]model.Message, 0, len(currentBody))
@@ -161,21 +145,16 @@ func (cc *ContextCompressor) Compress(
 		key := dedupKey(msg)
 		if key != "" {
 			if resolved, ok := resolvedByContent[key]; ok {
-				// Use the resolved version (has [evt_KEY|type] prefix)
 				processedBody = append(processedBody, resolved)
 				matchedKeys[key] = true
 				continue
 			}
 		}
-		// Message not in projection (e.g., current user message, compressed
-		// historical event) — keep as-is
 		processedBody = append(processedBody, msg)
 	}
 
-	// 3. Find unresolved refs (in projection but not in currentMessages).
-	//    These are historical events that ContentRequestProcessor didn't
-	//    include (e.g., from previous invocations).
-	//    IMPORTANT: preserve projection order (iterate over resolvedOrdered, not map).
+	// Find unresolved refs (in projection but not in currentMessages).
+	// These are historical events that ContentRequestProcessor didn't include.
 	var unresolved []model.Message
 	for i, key := range resolvedKeysOrdered {
 		if !matchedKeys[key] {
@@ -183,9 +162,7 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// 4. Merge: [system] + [unresolved historical] + [processed current].
-	//    Unresolved refs are historical events not in currentMessages,
-	//    so they come first (chronologically before current invocation).
+	// Merge: [system] + [unresolved historical] + [processed current].
 	merged := make([]model.Message, 0, 1+len(unresolved)+len(processedBody))
 	if systemMsg != nil {
 		merged = append(merged, *systemMsg)
@@ -193,7 +170,22 @@ func (cc *ContextCompressor) Compress(
 	merged = append(merged, unresolved...)
 	merged = append(merged, processedBody...)
 
-	// 5. Compress via SmartCompressor.
+	usedTokens := cc.tokenCounter.Estimate(merged)
+	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
+
+	if usedTokens <= threshold {
+		log.Infof("[ContextCompressor] under budget (%d <= %d), injected %d historical refs, %d current messages",
+			usedTokens, threshold, len(unresolved), len(processedBody))
+		return CompressResult{
+			Messages:     merged,
+			RetainedRefs: refs,
+		}
+	}
+
+	// Over threshold — compress via SmartCompressor.
+	log.Infof("[ContextCompressor] over budget (%d > %d), injected %d historical refs, compressing %d messages",
+		usedTokens, threshold, len(unresolved), len(merged))
+
 	originalKeepRecent := cc.compressor.KeepRecentTasks
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
 	cc.compressor.KeepRecentTasks = cc.keepRecent
@@ -203,10 +195,10 @@ func (cc *ContextCompressor) Compress(
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)
 
-	// 6. Build retained refs.
+	// Build retained refs.
 	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs)
 
-	// 7. Collect error notices.
+	// Collect error notices.
 	var notices []model.Message
 	for _, msg := range compressedMsgs {
 		if strings.Contains(msg.Content, "[context_compress_error]") {
