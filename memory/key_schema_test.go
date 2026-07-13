@@ -187,3 +187,40 @@ func TestWindowTimestampFromEventKey(t *testing.T) {
 		t.Errorf("WindowTimestampFromEventKey = %d, want %d", windowTS, expected)
 	}
 }
+
+func TestNewSnowflakeEventKey_Uniqueness(t *testing.T) {
+	pid := PartitionIDFromName("test-uniqueness")
+	nowMs := int64(1710678000000)
+	seen := make(map[int64]struct{})
+	// 22-bit sequence supports ~4M keys per second; test well beyond old 10-bit limit.
+	for i := 0; i < 5000; i++ {
+		key := NewSnowflakeEventKey(pid, nowMs)
+		if _, ok := seen[key]; ok {
+			t.Fatalf("duplicate event key generated at index %d: %d", i, key)
+		}
+		seen[key] = struct{}{}
+	}
+}
+
+func TestNewSnowflakeEventKey_SequenceExhaustion_WaitsForNextSecond(t *testing.T) {
+	pid := PartitionIDFromName("test-exhaustion")
+	nowMs := int64(1710678000000)
+	// Reset internal counters so we start at sequence 0 for this partition.
+	snowflakeSeqMu.Lock()
+	delete(snowflakeSeqCnt, pid)
+	delete(snowflakeSeqLast, pid)
+	snowflakeSeqMu.Unlock()
+
+	// Fill sequence to just below max, then force next key to exhaust.
+	snowflakeSeqMu.Lock()
+	snowflakeSeqCnt[pid] = sequenceMax - 1
+	snowflakeSeqLast[pid] = nowMs/1000 - snowflakeEpoch
+	snowflakeSeqMu.Unlock()
+
+	// Next key should succeed without collision (it may wait for next second).
+	key1 := NewSnowflakeEventKey(pid, nowMs)
+	key2 := NewSnowflakeEventKey(pid, nowMs)
+	if key1 == key2 {
+		t.Fatalf("expected different keys after sequence exhaustion, got %d", key1)
+	}
+}

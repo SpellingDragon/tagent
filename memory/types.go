@@ -144,24 +144,24 @@ type StoreStats struct {
 // EventKey is a 64-bit integer following a Snowflake-like layout:
 //
 //	┌──────────────────────────────────────────────────────────────────┐
-//	│ 63       53 │ 52            22 │ 21       12 │ 11             0 │
-//	│  PartitionID│   Timestamp      │  Sequence   │   Reserved     │
-//	│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
+//	│ 63       53 │ 52            22 │ 21                         0 │
+//	│  PartitionID│   Timestamp      │  Sequence                    │
+//	│  (11 bits)  │   (31 bits)      │  (22 bits)                   │
 //	└──────────────────────────────────────────────────────────────────┘
 //
 // PartitionID: storage partition (0-2047). Caller-derived, Memory does not interpret.
 // Timestamp: seconds since snowflakeEpoch (~68 year range).
-// Sequence: per-second counter (0-1023), sub-second uniqueness.
-// Reserved: for future use (e.g., distributed worker ID).
+// Sequence: per-second counter (0-4194303), sub-second uniqueness.
 
 const (
 	partitionIDShift = 53
 	timestampShift   = 22
-	sequenceShift    = 12
+	sequenceShift    = 0
 
-	partitionIDMask = 0x7FF      // 11 bits
-	timestampMask   = 0x7FFFFFFF // 31 bits
-	sequenceMask    = 0x3FF      // 10 bits
+	partitionIDMask = 0x7FF       // 11 bits
+	timestampMask   = 0x7FFFFFFF  // 31 bits
+	sequenceMask    = 0x3FFFFF    // 22 bits
+	sequenceMax     = sequenceMask
 
 	// snowflakeEpoch: 2024-01-01 00:00:00 UTC
 	snowflakeEpoch = 1704067200
@@ -179,6 +179,10 @@ var snowflakeSeqCnt = make(map[int]int)
 // NewSnowflakeEventKey generates a Snowflake-style int64 EventKey.
 // partitionID: storage partition (0-2047), provided by caller.
 // nowMs: current time in milliseconds (0 = use time.Now).
+//
+// The key is guaranteed to be unique for a given partition as long as the
+// system clock monotonically increases. If sequence overflows within a
+// second, the function busy-waits until the next second to avoid collisions.
 func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
 	if nowMs <= 0 {
 		nowMs = time.Now().UnixMilli()
@@ -186,14 +190,26 @@ func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
 	ts := nowMs/1000 - snowflakeEpoch
 
 	snowflakeSeqMu.Lock()
+	defer snowflakeSeqMu.Unlock()
+
 	if ts == snowflakeSeqLast[partitionID] {
 		snowflakeSeqCnt[partitionID]++
+		if snowflakeSeqCnt[partitionID] > sequenceMax {
+			// Sequence exhausted within this second. Wait for the next second
+			// to guarantee uniqueness.
+			snowflakeSeqMu.Unlock()
+			time.Sleep(time.Millisecond * 100)
+			snowflakeSeqMu.Lock()
+			nowMs = time.Now().UnixMilli()
+			ts = nowMs/1000 - snowflakeEpoch
+			snowflakeSeqCnt[partitionID] = 0
+			snowflakeSeqLast[partitionID] = ts
+		}
 	} else {
 		snowflakeSeqCnt[partitionID] = 0
 		snowflakeSeqLast[partitionID] = ts
 	}
 	seq := snowflakeSeqCnt[partitionID]
-	snowflakeSeqMu.Unlock()
 
 	return (int64(partitionID&partitionIDMask) << partitionIDShift) |
 		((ts & timestampMask) << timestampShift) |
