@@ -480,6 +480,12 @@ type ToolAgentFactoryConfig struct {
 	MaxToolIterations int
 	MaxTokens         int
 	Temperature       float64
+
+	// Thinking/reasoning controls
+	ThinkingEnabled      *bool
+	ThinkingTokens       *int
+	ReasoningEffort      *string
+	ReasoningContentMode string
 }
 
 var (

@@ -92,6 +92,15 @@ trajectory_dump: true
 trajectory_dir: "data/trajectories"
 
 # ===== Agent 配置 =====
+#
+# Thinking/Reasoning 模式控制 (每个 agent 可独立配置):
+#   thinking_enabled: true/false    — 开启 thinking 模式 (hy3/GLM/Claude/Gemini)
+#   thinking_tokens: 4096           — thinking token 预算 (Claude/Gemini 需要)
+#   reasoning_effort: "high"        — OpenAI o-series 推理强度 (low/medium/high)
+#   reasoning_content_mode: "discard_previous" — 历史推理内容处理策略:
+#     keep_all           — 保留所有 reasoning_content
+#     discard_previous   — 丢弃历史轮次 (默认, 推荐 DeepSeek)
+#     discard_all        — 丢弃所有
 
 entry: tagent
 prompt_dir: resources/prompts
@@ -115,6 +124,7 @@ agents:
     max_tool_iterations: 50
     max_tokens: 128000
     temperature: 0.7
+    thinking_enabled: true       # 开启 hy3 thinking 模式
     compress_threshold: 0.8
     keep_recent_tasks: 2
     # Value-driven compression configuration
@@ -243,6 +253,7 @@ agents:
     max_tool_iterations: 5
     max_tokens: 32000
     temperature: 0.3
+    thinking_enabled: true
     tools:
       - kind: tool
         id: skill_search
@@ -298,6 +309,7 @@ agents:
     max_tool_iterations: 50
     max_tokens: 32000
     temperature: 0.3
+    thinking_enabled: true
     tools:
       # File Tools: 读统一 ./，写统一 ./workspace
       - kind: tool

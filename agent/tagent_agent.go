@@ -149,6 +149,12 @@ type TagentConfig struct {
 	KeepRecentTasks   int                // Min task segments to keep during compression (default: 2)
 	Compress          CompressConfig     // SmartCompressor parameters
 
+	// Thinking/reasoning controls (merged into model.GenerationConfig)
+	ThinkingEnabled     *bool
+	ThinkingTokens      *int
+	ReasoningEffort     *string
+	ReasoningContentMode string
+
 	// Agent identity (for agent.Agent interface)
 	Name        string // Default: "tagent"
 	Description string // Default: "TagentAgent - AI assistant powered by tagent"
@@ -258,20 +264,24 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 	systemPrompt := cfg.SystemPrompt
 
 	return NewContextManager(ContextManagerConfig{
-		Name:         cfg.Name,
-		Model:        cfg.Model,
-		Tools:        cfg.Tools,
-		SystemPrompt: systemPrompt,
-		Temperature:  cfg.Temperature,
-		MaxToolIters: cfg.MaxToolIterations,
-		Compressor:   compressor,
-		TokenCounter: NewDefaultTokenCounter(),
-		MaxTokens:    cfg.MaxTokens,
-		ThresholdPct: cfg.CompressThreshold,
-		MemStore:     cfg.MemoryStore,
-		MemPlugin:    memPlugin,
-		SessionSvc:   sessionSvc,
-		OutputCh:     outputCh,
+		Name:                 cfg.Name,
+		Model:                cfg.Model,
+		Tools:                cfg.Tools,
+		SystemPrompt:         systemPrompt,
+		Temperature:          cfg.Temperature,
+		MaxToolIters:         cfg.MaxToolIterations,
+		ThinkingEnabled:      cfg.ThinkingEnabled,
+		ThinkingTokens:       cfg.ThinkingTokens,
+		ReasoningEffort:      cfg.ReasoningEffort,
+		ReasoningContentMode: cfg.ReasoningContentMode,
+		Compressor:           compressor,
+		TokenCounter:         NewDefaultTokenCounter(),
+		MaxTokens:            cfg.MaxTokens,
+		ThresholdPct:         cfg.CompressThreshold,
+		MemStore:             cfg.MemoryStore,
+		MemPlugin:            memPlugin,
+		SessionSvc:           sessionSvc,
+		OutputCh:             outputCh,
 		Bus:          bus,
 		Projection:   projection,
 		OnEvent:      onEvent,

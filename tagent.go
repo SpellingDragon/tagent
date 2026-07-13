@@ -262,16 +262,20 @@ func buildAgent(
 	if !builtinAgentNames[name] {
 		if factory, ok := registry.GetToolAgentFactory(name); ok {
 			factoryCfg := agent.ToolAgentFactoryConfig{
-				ID:                name,
-				Model:             agentModel,
-				SystemPrompt:      systemPrompt,
-				MemoryStore:       memStore,
-				ReadPartitionIDs:  readPartitionIDs,
-				MaxToolIterations: acfg.MaxToolIterations,
-				MaxTokens:         acfg.MaxTokens,
-				Temperature:       acfg.Temperature,
-				SkillRepo:         rc.skillRepo,
-				MCPToolSets:       rc.mcpToolSets,
+				ID:                   name,
+				Model:                agentModel,
+				SystemPrompt:         systemPrompt,
+				MemoryStore:          memStore,
+				ReadPartitionIDs:     readPartitionIDs,
+				MaxToolIterations:    acfg.MaxToolIterations,
+				MaxTokens:            acfg.MaxTokens,
+				Temperature:          acfg.Temperature,
+				SkillRepo:            rc.skillRepo,
+				MCPToolSets:          rc.mcpToolSets,
+				ThinkingEnabled:      acfg.ThinkingEnabled,
+				ThinkingTokens:       acfg.ThinkingTokens,
+				ReasoningEffort:      acfg.ReasoningEffort,
+				ReasoningContentMode: acfg.ReasoningContentMode,
 			}
 
 			ta, err := factory(factoryCfg)
@@ -301,16 +305,20 @@ func buildAgent(
 
 	// 5. Create TagentAgent
 	agentCfg := &agent.TagentConfig{
-		Name:              name,
-		Model:             agentModel,
-		MemoryStore:       memStore,
-		SystemPrompt:      systemPrompt,
-		Tools:             tools,
-		MaxToolIterations: acfg.MaxToolIterations,
-		MaxTokens:         acfg.MaxTokens,
-		Temperature:       acfg.Temperature,
-		CompressThreshold: acfg.CompressThreshold,
-		KeepRecentTasks:   acfg.KeepRecentTasks,
+		Name:                 name,
+		Model:                agentModel,
+		MemoryStore:          memStore,
+		SystemPrompt:         systemPrompt,
+		Tools:                tools,
+		MaxToolIterations:    acfg.MaxToolIterations,
+		MaxTokens:            acfg.MaxTokens,
+		Temperature:          acfg.Temperature,
+		CompressThreshold:    acfg.CompressThreshold,
+		KeepRecentTasks:      acfg.KeepRecentTasks,
+		ThinkingEnabled:      acfg.ThinkingEnabled,
+		ThinkingTokens:       acfg.ThinkingTokens,
+		ReasoningEffort:      acfg.ReasoningEffort,
+		ReasoningContentMode: acfg.ReasoningContentMode,
 		Compress: agent.CompressConfig{
 			MaxToolResultChars: acfg.Compress.MaxToolResultChars,
 			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,

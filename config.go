@@ -173,6 +173,16 @@ type AgentConfig struct {
 	KeepRecentTasks   int            `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
 	Compress          CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
+	// Generation controls thinking/reasoning mode for the LLM.
+	// When set, these fields are merged into model.GenerationConfig.
+	ThinkingEnabled  *bool   `json:"thinking_enabled,omitempty"  yaml:"thinking_enabled,omitempty"`
+	ThinkingTokens    *int    `json:"thinking_tokens,omitempty"   yaml:"thinking_tokens,omitempty"`
+	ReasoningEffort   *string `json:"reasoning_effort,omitempty"  yaml:"reasoning_effort,omitempty"`
+	// ReasoningContentMode controls how reasoning_content from history is handled.
+	// "keep_all" (keep everything), "discard_previous" (default, keep current turn only),
+	// "discard_all" (strip all reasoning_content).
+	ReasoningContentMode string `json:"reasoning_content_mode,omitempty" yaml:"reasoning_content_mode,omitempty"`
+
 	// Meditation configures the periodic meditation/heartbeat mechanism.
 	// Only effective when the agent is started via StartLoop.
 	Meditation MeditationConfig `json:"meditation,omitempty" yaml:"meditation,omitempty"`

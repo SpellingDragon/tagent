@@ -94,6 +94,12 @@ type ContextManagerConfig struct {
 	Temperature  float64
 	MaxToolIters int
 
+	// Thinking/reasoning controls
+	ThinkingEnabled      *bool
+	ThinkingTokens       *int
+	ReasoningEffort      *string
+	ReasoningContentMode string
+
 	Compressor   *SmartCompressor
 	TokenCounter TokenCounter
 	MaxTokens    int
@@ -225,11 +231,29 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	if len(cfg.Tools) > 0 {
 		agentOpts = append(agentOpts, llmagent.WithTools(cfg.Tools))
 	}
+
+	// Build GenerationConfig from config fields
+	genConfig := model.GenerationConfig{}
 	if cfg.Temperature > 0 {
 		temp := cfg.Temperature
-		agentOpts = append(agentOpts, llmagent.WithGenerationConfig(model.GenerationConfig{
-			Temperature: &temp,
-		}))
+		genConfig.Temperature = &temp
+	}
+	if cfg.ThinkingEnabled != nil {
+		genConfig.ThinkingEnabled = cfg.ThinkingEnabled
+	}
+	if cfg.ThinkingTokens != nil {
+		genConfig.ThinkingTokens = cfg.ThinkingTokens
+	}
+	if cfg.ReasoningEffort != nil {
+		genConfig.ReasoningEffort = cfg.ReasoningEffort
+	}
+	if genConfig.Temperature != nil || genConfig.ThinkingEnabled != nil ||
+		genConfig.ThinkingTokens != nil || genConfig.ReasoningEffort != nil {
+		agentOpts = append(agentOpts, llmagent.WithGenerationConfig(genConfig))
+	}
+	// ReasoningContentMode controls how reasoning_content is handled in history
+	if cfg.ReasoningContentMode != "" {
+		agentOpts = append(agentOpts, llmagent.WithReasoningContentMode(cfg.ReasoningContentMode))
 	}
 
 	fwAgent := llmagent.New(cfg.Name, agentOpts...)
