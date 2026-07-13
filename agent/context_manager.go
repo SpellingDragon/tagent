@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -326,6 +327,39 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 // Final responses are echoed back to the EventBus as agent_output events
 // (filtered by BuildInvocation to prevent self-triggering).
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
+	// Add user message to projection so it survives across invocations.
+	// The framework's ContentRequestProcessor excludes events without a Response
+	// from session history, so user messages from previous invocations are lost.
+	// By adding them to the projection here, ContextCompressor can inject them
+	// as historical context in future invocations.
+	if msg.Content != "" && cm.projection != nil {
+		partitionID := memory.PartitionIDFromName(cm.name)
+		eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
+		summary := msg.Content
+		if len(summary) > 200 {
+			summary = summary[:200]
+		}
+		ref := memory.EventReference{
+			EventKey:     eventKey,
+			PartitionID:  partitionID,
+			EventType:    tagentevent.TypeExternalInput,
+			EventSummary: summary,
+			Timestamp:    time.Now().UnixMilli(),
+		}
+		cm.projection.Append(ref)
+		// Also store in MemoryStore so resolveRef can retrieve full content.
+		if cm.memStore != nil {
+			cm.memStore.StoreEvent(eventKey, memory.FullEvent{
+				EventKey:     eventKey,
+				PartitionID:  partitionID,
+				EventType:    tagentevent.TypeExternalInput,
+				Content:      msg.Content,
+				EventSummary: summary,
+				Timestamp:    time.Now().UnixMilli(),
+			})
+		}
+	}
+
 	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		return fmt.Errorf("runner.Run: %w", err)
