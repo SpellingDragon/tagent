@@ -321,3 +321,52 @@ entry: tagent
 	assert.Equal(t, "deepseek", cfg.Agents["knowledge"].Provider)
 	assert.Equal(t, "anthropic", cfg.Agents["action"].Provider)
 }
+func TestConfig_ResolveAgentProvider(t *testing.T) {
+	yamlData := `
+provider: zhipu
+api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+api_key_env: "ZAI_API_KEY"
+providers:
+  zhipu:
+    provider: openai
+    api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    api_key_env: "ZAI_API_KEY"
+  tencent:
+    provider: openai
+    api_endpoint: "https://tokenhub.tencentmaas.com/v1"
+    api_key_env: "TENCENT_API_KEY"
+agents:
+  tagent:
+    provider: tencent
+    model: hy3
+  knowledge:
+    model: glm-5
+entry: tagent
+`
+	var cfg Config
+	err := yaml.Unmarshal([]byte(yamlData), &cfg)
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+
+	// Entry agent has explicit provider: tencent
+	endpoint, apiKeyEnv, err := cfg.ResolveAgentProvider("tagent")
+	require.NoError(t, err)
+	assert.Equal(t, "https://tokenhub.tencentmaas.com/v1", endpoint)
+	assert.Equal(t, "TENCENT_API_KEY", apiKeyEnv)
+
+	// Agent without explicit provider falls back to global (zhipu)
+	endpoint, apiKeyEnv, err = cfg.ResolveAgentProvider("knowledge")
+	require.NoError(t, err)
+	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", endpoint)
+	assert.Equal(t, "ZAI_API_KEY", apiKeyEnv)
+
+	// Empty agentName resolves the global provider (zhipu)
+	endpoint, apiKeyEnv, err = cfg.ResolveAgentProvider("")
+	require.NoError(t, err)
+	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", endpoint)
+	assert.Equal(t, "ZAI_API_KEY", apiKeyEnv)
+
+	// Unknown agent returns error
+	_, _, err = cfg.ResolveAgentProvider("nonexistent")
+	require.Error(t, err)
+}

@@ -42,12 +42,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiKey := tagentCfg.APIKey()
-	if apiKey == "" {
-		fmt.Fprintf(os.Stderr, "API key not set. Set %s environment variable.\n", tagentCfg.APIKeyEnv)
-		os.Exit(1)
-	}
-
 	// Set framework log level
 	log.SetLevel(tagentCfg.LogLevel)
 
@@ -58,42 +52,64 @@ func main() {
 		effectiveModel = tagentCfg.Model
 	}
 
+	entryProviderName := entryCfg.Provider
+	if entryProviderName == "" {
+		entryProviderName = tagentCfg.Provider
+	}
+
 	fmt.Println("===========================================")
 	fmt.Println("  tagent WeChat Bot")
 	fmt.Println("===========================================")
 	fmt.Printf("  Agent Name:  %s\n", tagentCfg.Entry)
 	fmt.Printf("  Model:       %s\n", effectiveModel)
-	fmt.Printf("  Provider:    %s\n", tagentCfg.Provider)
+	fmt.Printf("  Provider:    %s\n", entryProviderName)
 	fmt.Printf("  Max Tokens:  %d\n", entryCfg.MaxTokens)
 	fmt.Printf("  Log Level:   %s\n", tagentCfg.LogLevel)
 	fmt.Printf("  Config:      %s\n", configPath)
 	fmt.Println("===========================================")
 
-	// 2. Create LLM model for the entry agent
-	// Resolve the provider's connection info from config (providers map).
-	providerName := tagentCfg.Provider
-	apiEndpoint := tagentCfg.APIEndpoint
-	if pcfg, ok := tagentCfg.Providers[providerName]; ok {
-		if pcfg.APIEndpoint != "" {
-			apiEndpoint = pcfg.APIEndpoint
-		}
+	// 2. Create LLM models
+	// tagent resolves provider endpoints/API keys from Config. The application only
+	// wires them into model instances and the SwappableModel used by AReaL/HTTPAPI.
+
+	// 2a. Global fallback model (for sub-agents without explicit model/provider).
+	globalEndpoint, globalKeyEnv, err := tagentCfg.ResolveAgentProvider("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Resolve global provider failed: %v\n", err)
+		os.Exit(1)
+	}
+	globalAPIKey := os.Getenv(globalKeyEnv)
+	if globalAPIKey == "" {
+		fmt.Fprintf(os.Stderr, "API key not set. Set %s environment variable.\n", globalKeyEnv)
+		os.Exit(1)
+	}
+	globalModel := openai.New(
+		tagentCfg.Model,
+		openai.WithAPIKey(globalAPIKey),
+		openai.WithBaseURL(globalEndpoint),
+	)
+
+	// 2b. Entry agent model (SwappableModel for AReaL proxy support).
+	entryEndpoint, entryKeyEnv, err := tagentCfg.ResolveAgentProvider(tagentCfg.Entry)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Resolve entry agent provider failed: %v\n", err)
+		os.Exit(1)
 	}
 	// TAGENT_API_ENDPOINT overrides config (e.g. AReaL proxy for RL training)
 	if envEndpoint := os.Getenv("TAGENT_API_ENDPOINT"); envEndpoint != "" {
-		apiEndpoint = envEndpoint
+		entryEndpoint = envEndpoint
 	}
-	llmModel := openai.New(
+	entryAPIKey := os.Getenv(entryKeyEnv)
+	if entryAPIKey == "" {
+		fmt.Fprintf(os.Stderr, "API key not set. Set %s environment variable.\n", entryKeyEnv)
+		os.Exit(1)
+	}
+	entryModel := openai.New(
 		effectiveModel,
-		openai.WithAPIKey(apiKey),
-		openai.WithBaseURL(apiEndpoint),
+		openai.WithAPIKey(entryAPIKey),
+		openai.WithBaseURL(entryEndpoint),
 	)
-
-	// Wrap in SwappableModel for runtime LLM endpoint updates.
-	// When AReaL adapter sends POST /task with llm_base_url, the HTTPAPI
-	// callback swaps the inner model to use AReaL's proxy URL (dynamically
-	// allocated port). This ensures all LLM requests are captured by AReaL's
-	// proxy for RL training (logprobs + completion_ids).
-	swappableModel := agent.NewSwappableModel(llmModel)
+	swappableModel := agent.NewSwappableModel(entryModel)
 
 	// 3. Load skills repository (optional)
 	var skillRepo *skill.FSRepository
@@ -108,12 +124,14 @@ func main() {
 
 	// 4. Configure tagent options.
 	// - WithModel: global fallback for agents without their own model declaration.
-	// - WithModelOverrides: entry agent uses SwappableModel (for AReaL proxy support).
-	//   Other agents with model/provider fields are resolved internally by tagent.New()
-	//   via the provider.Model() factory (supports multi-vendor: openai/anthropic/gemini/etc).
+	// - WithSummaryModel: fallback when an agent does not declare compress.summary_model.
+	// - WithModelOverrides: entry agent uses SwappableModel so AReaL/HTTPAPI can
+	//   swap the LLM endpoint at runtime.
+	// Other agents with model/provider fields are resolved internally by tagent.New()
+	// via the provider.Model() factory (supports multi-vendor: openai/anthropic/gemini/etc).
 	opts := []tagent.Option{
-		tagent.WithModel(swappableModel),
-		tagent.WithSummaryModel(swappableModel),
+		tagent.WithModel(globalModel),
+		tagent.WithSummaryModel(globalModel),
 		tagent.WithModelOverrides(map[string]model.Model{
 			tagentCfg.Entry: swappableModel,
 		}),
@@ -155,7 +173,7 @@ func main() {
 	httpAPI.SetModelUpdateFn(func(baseURL string) {
 		newModel := openai.New(
 			effectiveModel,
-			openai.WithAPIKey(apiKey),
+			openai.WithAPIKey(entryAPIKey),
 			openai.WithBaseURL(baseURL),
 		)
 		swappableModel.Swap(newModel)

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/stretchr/testify/assert"
@@ -226,7 +227,7 @@ func TestSummarizeBatches_AllFail(t *testing.T) {
 
 // ==================== Task 7.11: 无 summaryModel 时跳过分批（不调用 LLM） ====================
 
-func TestCompress_NoSummaryModel_SkipsBatching(t *testing.T) {
+func TestCompress_NoSummaryModel_SkipsInlineSummaries(t *testing.T) {
 	// Create enough segments to trigger compression (KeepRecentTasks=2)
 	messages := []model.Message{}
 	for i := 0; i < 6; i++ {
@@ -241,11 +242,11 @@ func TestCompress_NoSummaryModel_SkipsBatching(t *testing.T) {
 
 	require.NotEmpty(t, result)
 
-	// Verify no batch summary messages are present
+	// Without a summaryModel, L3 segments degrade to L1 and no inline summaries are produced
 	for _, msg := range result {
 		if msg.Role == model.RoleAssistant {
-			assert.NotContains(t, msg.Content, "[摘要批次",
-				"should not have batch summary messages when no summaryModel")
+			assert.NotContains(t, msg.Content, "[历史摘要]",
+				"should not have inline history summaries when no summaryModel")
 		}
 	}
 }
@@ -302,9 +303,10 @@ func TestSummarizeBatches_SystemRoleWithBatchNumber(t *testing.T) {
 
 // ==================== Integration: Compress with batch summaries ====================
 
-func TestCompress_WithBatchSummaries(t *testing.T) {
-	// Create 8 segments (6 old + 2 recent with KeepRecentTasks=2)
-	// Use small maxTokens to force multiple batches
+func TestCompress_WithInlineSummaries(t *testing.T) {
+	// Create 8 segments (6 old + 2 recent with KeepRecentTasks=2).
+	// Old segments are compressed to level 3 and replaced with per-segment
+	// inline summaries instead of opaque archived references.
 	messages := []model.Message{}
 	for i := 0; i < 8; i++ {
 		messages = append(messages,
@@ -314,41 +316,35 @@ func TestCompress_WithBatchSummaries(t *testing.T) {
 	}
 
 	mockModel := &mockBatchSummaryModel{
-		responses: []string{"summary A", "summary B", "summary C"},
+		responses: []string{"summary A", "summary B", "summary C", "summary D", "summary E", "summary F"},
 	}
 
 	// Use a mock valuator that returns Reference processing to trigger level 3 compression
 	sc := NewSmartCompressor(
 		WithSummaryModel(mockModel),
-		WithMaxTokens(200), // maxInputTokens=100 → small batches
+		WithMaxTokens(200),
 		WithEventValuator(&referenceValuator{}),
+		WithMemStore(memory.NewInMemoryStore()),
 	)
 
 	result := sc.Compress(context.Background(), messages, nil)
 
 	require.NotEmpty(t, result)
 
-	// Count System messages that are batch summaries
-	batchSummaryCount := 0
+	// Count inline history summaries and archive notices
+	inlineSummaryCount := 0
+	archiveNoticeCount := 0
 	for _, msg := range result {
-		if msg.Role == model.RoleAssistant && strings.Contains(msg.Content, "[摘要批次") {
-			batchSummaryCount++
+		if msg.Role == model.RoleAssistant && strings.Contains(msg.Content, "[历史摘要]") {
+			inlineSummaryCount++
+		}
+		if msg.Role == model.RoleSystem && strings.Contains(msg.Content, "[context_archive]") {
+			archiveNoticeCount++
 		}
 	}
-	assert.GreaterOrEqual(t, batchSummaryCount, 1,
-		"should have at least 1 batch summary message")
 
-	// Verify the compress event mentions batch info
-	// Note: level 2 segments also have compress notices, but only level 3 notices
-	// include batch summary info. We need to find the one that mentions "批摘要".
-	foundCompressEvent := false
-	for _, msg := range result {
-		if msg.Role == model.RoleSystem && strings.Contains(msg.Content, "[context_compress]") {
-			if strings.Contains(msg.Content, "批摘要") {
-				foundCompressEvent = true
-				break
-			}
-		}
-	}
-	assert.True(t, foundCompressEvent, "should have a context_compress event with batch summary info")
+	// Every L3 segment should produce both an inline summary and an archive notice.
+	assert.GreaterOrEqual(t, inlineSummaryCount, 1, "should have at least 1 inline history summary")
+	assert.Equal(t, inlineSummaryCount, archiveNoticeCount,
+		"each inline summary should have a matching archive notice")
 }

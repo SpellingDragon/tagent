@@ -437,26 +437,30 @@ func (sc *SmartCompressor) Compress(
 	// 6. Execute LLM summarization (no silent timeout/skip — errors degrade to
 	// first-stage and are reported via compress_error notices).
 	//
-	// Level 3: batch segments → summarizeBatches (merge intervals)
-	var level3Summaries []model.Message
-	batchCount := 0
-	l3HadError := false
-	if len(level3Segs) > 0 {
+	// Level 3: per-segment full summary. Older segments (beyond keep_recent_tasks)
+	// are summarized inline so the conversation gist stays in context, instead of
+	// being archived as opaque references that the LLM cannot see unless it calls
+	// recall.
+	level3Failed := make(map[int]bool)
+	level3Summaries := make(map[int]string)
+	for i, p := range plans {
+		if p.level != 3 {
+			continue
+		}
 		if sc.summaryModel != nil {
-			batches := sc.batchSegmentsByTokenBudget(level3Segs, sc.maxTokens)
-			batchCount = len(batches)
-			level3Summaries, l3HadError = sc.summarizeBatches(ctx, batches)
+			summary, hadErr := sc.summarizeMsgs(ctx, p.seg.Messages, i, len(plans))
+			if hadErr || summary == "" {
+				level3Failed[i] = true
+			} else {
+				level3Summaries[i] = summary
+			}
 		} else {
-			l3HadError = true
+			level3Failed[i] = true
 		}
 	}
-	if l3HadError && len(level3Segs) > 0 {
-		// L3 LLM failed — degrade all L3 segments to L1 first-stage
-		for i := range plans {
-			if plans[i].level == 3 {
-				plans[i].level = 1
-			}
-		}
+	// L3 LLM failed → degrade to L1 first-stage (drop tool, keep text)
+	for i := range level3Failed {
+		plans[i].level = 1
 	}
 
 	// Level 2 & 1: per-segment LLM summarization.
@@ -511,14 +515,6 @@ func (sc *SmartCompressor) Compress(
 		result = append(result, buildCompressErrorNotice("LLM 摘要生成失败", degradedCount))
 	}
 
-	// Find the last level-3 index for batch summary placement
-	lastLevel3Idx := -1
-	for i, p := range plans {
-		if p.level == 3 {
-			lastLevel3Idx = i
-		}
-	}
-
 	// Chronological assembly
 	for i, p := range plans {
 		switch p.level {
@@ -548,33 +544,24 @@ func (sc *SmartCompressor) Compress(
 				result = append(result, sc.firstStageCompress(p.execMsgs)...)
 			}
 		case 3:
-			result = append(result, p.userMsgs...)
+			// Level 3: replace the entire old segment with an inline summary.
+			// The segment is also archived so recall can retrieve full details.
+			summary := level3Summaries[i]
 			if sc.memStore != nil {
-				summaryText := ""
-				if state := sc.extractExecutionState([]*TaskSegment{p.seg}); state != "" {
-					summaryText = state
-				}
-				summaryKey, archiveErr := sc.archiveSegment(p.seg, summaryText, p.value)
+				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary, p.value)
 				if archiveErr == nil {
-					result = append(result, buildReferenceMessage(p.value.EventKey, summaryKey, p.value))
+					result = append(result, model.NewSystemMessage(
+						fmt.Sprintf("[context_archive] evt_%d 已摘要归档，摘要 key=%d", p.value.EventKey, summaryKey),
+					))
 				} else {
 					log.Warnf("[SmartCompress] archive failed for segment %d: %v", p.origIndex, archiveErr)
-					result = append(result, sc.buildSegmentCompressNotice(p.execMsgs, "full"))
 				}
-			} else {
-				notice := sc.buildSegmentCompressNotice(p.execMsgs, "full")
-				if i == lastLevel3Idx && batchCount > 0 && len(level3Summaries) > 0 {
-					notice.Content += fmt.Sprintf("\n\n已生成 %d/%d 批摘要（见下方摘要消息）。", len(level3Summaries), batchCount)
-					if len(level3Summaries) < batchCount {
-						notice.Content += "部分批次摘要生成失败。"
-					}
-				}
-				result = append(result, notice)
 			}
-			if i == lastLevel3Idx {
-				if len(level3Summaries) > 0 {
-					result = append(result, level3Summaries...)
-				}
+			if summary != "" {
+				result = append(result, model.Message{
+					Role:    model.RoleAssistant,
+					Content: fmt.Sprintf("[历史摘要] %s", summary),
+				})
 			}
 		}
 	}
@@ -595,7 +582,7 @@ func (sc *SmartCompressor) Compress(
 		"l2_partial":        levelCounts[2],
 		"l3_full":           levelCounts[3],
 		"summary_generated": sc.summaryModel != nil && len(level3Summaries) > 0,
-		"batch_count":       batchCount,
+		"batch_count":       0,
 		"valuation_failed":  valuationFailed,
 		"degraded_count":    degradedCount,
 		"duration_ms":       time.Since(startTime).Milliseconds(),

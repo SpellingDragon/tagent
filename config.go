@@ -612,3 +612,32 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) APIKey() string {
 	return os.Getenv(c.APIKeyEnv)
 }
+
+// ResolveAgentProvider returns the resolved API endpoint and API key environment
+// variable name for the given agent. It honors the agent's provider override
+// (AgentConfig.Provider) and falls back to the global provider settings.
+// Pass an empty agentName to resolve the global provider.
+func (c *Config) ResolveAgentProvider(agentName string) (endpoint, apiKeyEnv string, err error) {
+	providerName := c.Provider
+	if agentName != "" {
+		acfg, ok := c.Agents[agentName]
+		if !ok {
+			return "", "", fmt.Errorf("agent %q not found in config", agentName)
+		}
+		if acfg.Provider != "" {
+			providerName = acfg.Provider
+		}
+	}
+
+	endpoint = c.APIEndpoint
+	apiKeyEnv = c.APIKeyEnv
+	if pcfg, ok := c.Providers[providerName]; ok {
+		if pcfg.APIEndpoint != "" {
+			endpoint = pcfg.APIEndpoint
+		}
+		if pcfg.APIKeyEnv != "" {
+			apiKeyEnv = pcfg.APIKeyEnv
+		}
+	}
+	return endpoint, apiKeyEnv, nil
+}
