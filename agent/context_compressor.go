@@ -136,54 +136,59 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// Process currentMessages: replace with resolved versions when matched,
-	// and track which resolved refs were matched.
+	// Process currentMessages: build a dedupKey → message map for quick
+	// lookup. This lets us check which currentMessages are already in the
+	// projection (and thus should use the resolved/prefixed version).
 	systemMsg, currentBody := splitSystemMessage(currentMessages)
-	matchedKeys := make(map[string]bool)
-	processedBody := make([]model.Message, 0, len(currentBody))
+	currentByKey := make(map[string]model.Message)
 	for _, msg := range currentBody {
 		key := dedupKey(msg)
 		if key != "" {
-			if resolved, ok := resolvedByContent[key]; ok {
-				// User messages that are in projection should NOT be
-				// placed in processedBody. They would appear AFTER all
-				// unresolved refs (which are older), breaking chronological
-				// order. Instead, skip them here — they'll be injected
-				// from projection as unresolved refs in correct order.
-				if msg.Role == model.RoleUser {
-					continue
-				}
-				processedBody = append(processedBody, resolved)
-				matchedKeys[key] = true
-				continue
-			}
-		}
-		processedBody = append(processedBody, msg)
-	}
-
-	// Find unresolved refs (in projection but not in currentMessages).
-	// These are historical events that ContentRequestProcessor didn't include.
-	var unresolved []model.Message
-	for i, key := range resolvedKeysOrdered {
-		if !matchedKeys[key] {
-			unresolved = append(unresolved, resolvedOrdered[i])
+			currentByKey[key] = msg
 		}
 	}
 
-	// Merge: [system] + [unresolved historical] + [processed current].
-	merged := make([]model.Message, 0, 1+len(unresolved)+len(processedBody))
+	// Merge: iterate through projection refs in timeline order (they are
+	// already ordered by event key). For each ref, use the resolved version
+	// (with [evt_KEY|type] prefix). This is the source of truth for
+	// chronological order — the projection tracks all events in order.
+	//
+	// After all projection refs, append any currentMessages that were NOT
+	// matched to a projection ref. These are truly new messages (e.g.,
+	// InjectBusInputs messages, current LLM response) not yet in the
+	// projection.
+	matchedKeys := make(map[string]bool)
+	merged := make([]model.Message, 0, 1+len(resolvedOrdered)+len(currentBody))
 	if systemMsg != nil {
 		merged = append(merged, *systemMsg)
 	}
-	merged = append(merged, unresolved...)
-	merged = append(merged, processedBody...)
+	for i, key := range resolvedKeysOrdered {
+		if key == "" {
+			continue
+		}
+		if _, ok := currentByKey[key]; ok {
+			matchedKeys[key] = true
+		}
+		merged = append(merged, resolvedOrdered[i])
+	}
+	// Append unmatched currentMessages (new, not yet in projection).
+	for _, msg := range currentBody {
+		key := dedupKey(msg)
+		if key != "" && matchedKeys[key] {
+			continue
+		}
+		merged = append(merged, msg)
+	}
+
+	// Count unresolved (projection refs not in currentMessages) for logging.
+	unresolvedCount := len(resolvedOrdered) - len(matchedKeys)
 
 	usedTokens := cc.tokenCounter.Estimate(merged)
 	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
 
 	if usedTokens <= threshold {
-		log.Infof("[ContextCompressor] under budget (%d <= %d), injected %d historical refs, %d current messages",
-			usedTokens, threshold, len(unresolved), len(processedBody))
+		log.Infof("[ContextCompressor] under budget (%d <= %d), %d historical refs, %d total messages",
+			usedTokens, threshold, unresolvedCount, len(merged))
 		return CompressResult{
 			Messages:     merged,
 			RetainedRefs: refs,
@@ -191,8 +196,8 @@ func (cc *ContextCompressor) Compress(
 	}
 
 	// Over threshold — compress via SmartCompressor.
-	log.Infof("[ContextCompressor] over budget (%d > %d), injected %d historical refs, compressing %d messages",
-		usedTokens, threshold, len(unresolved), len(merged))
+	log.Infof("[ContextCompressor] over budget (%d > %d), %d historical refs, compressing %d messages",
+		usedTokens, threshold, unresolvedCount, len(merged))
 
 	originalKeepRecent := cc.compressor.KeepRecentTasks
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()

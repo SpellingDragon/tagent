@@ -270,8 +270,13 @@ func TestContextCompressor_DeduplicatesToolMessages(t *testing.T) {
 func TestContextCompressor_PreservesChronologicalOrder(t *testing.T) {
 	memStore := memory.NewInMemoryStore()
 
-	// Store events: assistant1, tool1, assistant2 (user1 is NOT stored —
-	// simulating a compressed historical user message)
+	// Store events: user1, assistant1, tool1, assistant2 (all in projection)
+	memStore.StoreEvent(1, memory.FullEvent{
+		EventKey:     1,
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: "user message 1",
+		Content:      "user message 1",
+	})
 	memStore.StoreEvent(2, memory.FullEvent{
 		EventKey:     2,
 		EventType:    tagentevent.TypeAgentOutput,
@@ -294,28 +299,26 @@ func TestContextCompressor_PreservesChronologicalOrder(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1))
 	cc := NewContextCompressor(sc, memStore, NewDefaultTokenCounter(), 1, 0.8, 2)
 
-	// Projection has assistant1, tool1, assistant2 (user1 was compressed)
+	// Projection has all events in order: user1, assistant1, tool1, assistant2
 	refs := []memory.EventReference{
+		{EventKey: 1, EventType: tagentevent.TypeExternalInput, EventSummary: "user message 1"},
 		{EventKey: 2, EventType: tagentevent.TypeAgentOutput, EventSummary: "assistant response 1"},
 		{EventKey: 3, EventType: tagentevent.TypeActionCommand, EventSummary: "tool result 1"},
 		{EventKey: 4, EventType: tagentevent.TypeAgentOutput, EventSummary: "assistant response 2"},
 	}
 
-	// currentMessages from ContentRequestProcessor are in session order:
-	// [user1 (historical, not in projection), assistant1, tool1, user2 (current)]
+	// currentMessages from ContentRequestProcessor (session has only 2 events):
+	// [user2 (current, not in projection), assistant2 (in projection)]
 	msgs := []model.Message{
 		model.NewSystemMessage("system"),
-		model.NewUserMessage("user message 1"), // historical, not in projection
-		{Role: model.RoleAssistant, Content: "assistant response 1"},
-		model.NewToolMessage("call_1", "tool", "tool result 1"),
-		model.NewUserMessage("current user message"), // current, not in projection
-		{Role: model.RoleAssistant, Content: "assistant response 2"},
+		model.NewUserMessage("current user message"),                 // current, not in projection
+		{Role: model.RoleAssistant, Content: "assistant response 2"}, // in projection
 	}
 
 	result := cc.Compress(context.Background(), refs, msgs)
 
 	// Verify chronological order: user1 should appear BEFORE assistant1
-	// and assistant2, not at the end.
+	// and assistant2, not at the end. Projection is the timeline source.
 	var order []string
 	for _, m := range result.Messages {
 		if m.Role == model.RoleSystem {
