@@ -14,7 +14,9 @@ import (
 
 // CompressResult is the output of ContextCompressor.Compress.
 type CompressResult struct {
-	// Messages is the compressed message list to send to the LLM.
+	// Messages is the resolved (and possibly compressed) message list from the projection.
+	// Does NOT include system prompt or current-turn messages — those are
+	// prepended/appended by the BeforeModel callback.
 	Messages []model.Message
 	// RetainedRefs is the updated list of EventReferences to replace
 	// the projection with after compression.
@@ -23,21 +25,20 @@ type CompressResult struct {
 	Notices []model.Message
 }
 
-// ContextCompressor is the unified compression engine.
+// ContextCompressor is the projection-only compression engine.
 //
-// It replaces both SmartCompressor (message-level compression) and Compactor
-// (projection-level ref cleanup). It reads EventReferences from the
-// SessionProjection, resolves them to messages via MemoryStore, applies
-// value-driven L0-L3 compression, and returns:
-//   - Compressed messages for the LLM
-//   - Retained refs to update the projection (dropping compressed refs,
-//     keeping recent ones)
+// It reads EventReferences from the SessionProjection, resolves them to
+// messages via MemoryStore, checks token budget, and applies value-driven
+// L0-L3 compression when over budget. Returns:
+//   - Resolved/compressed messages (the historical timeline)
+//   - Retained refs to update the projection
 //   - Error notices for engineering awareness
 //
-// The key difference from the old two-stage approach (SmartCompress + Compactor)
-// is that compression and projection cleanup are now a single atomic operation:
-// there is no window where the projection has stale refs or the messages are
-// out of sync with the projection.
+// Design principle: Projection is the SINGLE source of truth for the
+// historical timeline. ContextCompressor does NOT reconcile against
+// framework ContentRequestProcessor output — there is no content-based
+// deduplication. The BeforeModel callback handles merging the compressed
+// history with current-turn messages.
 type ContextCompressor struct {
 	compressor   *SmartCompressor // Reuses L0-L3 / value-driven strategy
 	memStore     memory.MemoryStore
@@ -85,125 +86,64 @@ func NewContextCompressor(
 	}
 }
 
-// Compress is the single entry point for context compression.
+// Compress resolves all projection refs into messages, checks token budget,
+// and compresses if over threshold.
 //
 // Input:
-//   - ctx: context for LLM calls
-//   - refs: EventReferences from SessionProjection (historical context)
-//   - currentMessages: messages already prepared by ContentRequestProcessor
-//     (system prompt + current invocation tool results + user message)
+//   - ctx: context for LLM calls (used by SmartCompressor)
+//   - refs: EventReferences from SessionProjection (the historical timeline)
 //
 // Output:
-//   - Messages: compressed message list (replaces args.Request.Messages)
+//   - Messages: resolved (and possibly compressed) message list
 //   - RetainedRefs: updated refs (replaces projection)
 //   - Notices: error/degradation notices
 //
-// Deduplication strategy:
-//
-// Previously, InjectEventKeys added [evt_KEY|type] prefixes to currentMessages
-// positionally, and Compress used those prefixes to skip refs already present.
-// This broke after compression because the projection no longer matches
-// session messages 1:1 — the summary ref's key was mis-assigned to user
-// messages, and tool messages (skipped by InjectEventKeys) couldn't be
-// deduplicated, creating duplicates.
-//
-// Now, Compress resolves ALL refs from the projection (each correctly
-// prefixed via resolveRef), then uses content-based deduplication to find
-// new messages from ContentRequestProcessor that aren't yet in the
-// projection. This eliminates positional matching entirely.
+// The returned Messages do NOT include a system prompt — the caller
+// (BeforeModel callback) prepends system prompt and appends current-turn
+// messages after calling Compress.
 func (cc *ContextCompressor) Compress(
 	ctx context.Context,
 	refs []memory.EventReference,
-	currentMessages []model.Message,
 ) CompressResult {
 	startTime := time.Now()
 
-	// Resolve ALL refs from the projection first. This is needed in both
-	// under-budget and over-budget paths: the framework's ContentRequestProcessor
-	// may not include all historical events (e.g., after compression updated the
-	// session, or after restart). The projection is the source of truth for
-	// what historical context the LLM should see.
-	resolvedByContent := make(map[string]model.Message)
-	resolvedOrdered := make([]model.Message, 0, len(refs))
-	resolvedKeysOrdered := make([]string, 0, len(refs))
-	for i, ref := range refs {
-		resolved := cc.resolveRef(ctx, ref, i, len(refs))
-		key := dedupKey(resolved)
-		if key != "" {
-			resolvedByContent[key] = resolved
-			resolvedOrdered = append(resolvedOrdered, resolved)
-			resolvedKeysOrdered = append(resolvedKeysOrdered, key)
+	if len(refs) == 0 {
+		return CompressResult{
+			Messages:     nil,
+			RetainedRefs: nil,
 		}
 	}
 
-	// Process currentMessages: build a dedupKey → message map for quick
-	// lookup. This lets us check which currentMessages are already in the
-	// projection (and thus should use the resolved/prefixed version).
-	systemMsg, currentBody := splitSystemMessage(currentMessages)
-	currentByKey := make(map[string]model.Message)
-	for _, msg := range currentBody {
-		key := dedupKey(msg)
-		if key != "" {
-			currentByKey[key] = msg
-		}
+	// Resolve ALL refs from the projection into messages.
+	// Each resolved message is tagged with [evt_KEY|type] prefix for
+	// buildRetainedRefs tracking after compression.
+	resolved := make([]model.Message, 0, len(refs))
+	for _, ref := range refs {
+		msg := cc.resolveRef(ctx, ref)
+		resolved = append(resolved, msg)
 	}
 
-	// Merge: iterate through projection refs in timeline order (they are
-	// already ordered by event key). For each ref, use the resolved version
-	// (with [evt_KEY|type] prefix). This is the source of truth for
-	// chronological order — the projection tracks all events in order.
-	//
-	// After all projection refs, append any currentMessages that were NOT
-	// matched to a projection ref. These are truly new messages (e.g.,
-	// InjectBusInputs messages, current LLM response) not yet in the
-	// projection.
-	matchedKeys := make(map[string]bool)
-	merged := make([]model.Message, 0, 1+len(resolvedOrdered)+len(currentBody))
-	if systemMsg != nil {
-		merged = append(merged, *systemMsg)
-	}
-	for i, key := range resolvedKeysOrdered {
-		if key == "" {
-			continue
-		}
-		if _, ok := currentByKey[key]; ok {
-			matchedKeys[key] = true
-		}
-		merged = append(merged, resolvedOrdered[i])
-	}
-	// Append unmatched currentMessages (new, not yet in projection).
-	for _, msg := range currentBody {
-		key := dedupKey(msg)
-		if key != "" && matchedKeys[key] {
-			continue
-		}
-		merged = append(merged, msg)
-	}
-
-	// Count unresolved (projection refs not in currentMessages) for logging.
-	unresolvedCount := len(resolvedOrdered) - len(matchedKeys)
-
-	usedTokens := cc.tokenCounter.Estimate(merged)
+	usedTokens := cc.tokenCounter.Estimate(resolved)
 	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
 
 	if usedTokens <= threshold {
-		log.Infof("[ContextCompressor] under budget (%d <= %d), %d historical refs, %d total messages",
-			usedTokens, threshold, unresolvedCount, len(merged))
+		log.Infof("[ContextCompressor] under budget (%d <= %d), %d refs, %d messages",
+			usedTokens, threshold, len(refs), len(resolved))
 		return CompressResult{
-			Messages:     merged,
+			Messages:     resolved,
 			RetainedRefs: refs,
 		}
 	}
 
 	// Over threshold — compress via SmartCompressor.
-	log.Infof("[ContextCompressor] over budget (%d > %d), %d historical refs, compressing %d messages",
-		usedTokens, threshold, unresolvedCount, len(merged))
+	log.Infof("[ContextCompressor] over budget (%d > %d), compressing %d messages from %d refs",
+		usedTokens, threshold, len(resolved), len(refs))
 
 	originalKeepRecent := cc.compressor.KeepRecentTasks
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
 	cc.compressor.KeepRecentTasks = cc.keepRecent
 
-	compressedMsgs := cc.compressor.Compress(ctx, merged, nil)
+	compressedMsgs := cc.compressor.Compress(ctx, resolved, nil)
 	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)
@@ -237,11 +177,8 @@ func (cc *ContextCompressor) Compress(
 func (cc *ContextCompressor) resolveRef(
 	ctx context.Context,
 	ref memory.EventReference,
-	idx, total int,
 ) model.Message {
 	// context_compress refs are summary references — use EventSummary directly.
-	// Prefix with [evt_KEY|type] so buildRetainedRefs can track whether the
-	// summary ref survived compression (prevents perpetual re-compression).
 	if ref.EventType == tagentevent.TypeContextCompress {
 		return model.Message{
 			Role:    model.RoleSystem,
@@ -249,7 +186,7 @@ func (cc *ContextCompressor) resolveRef(
 		}
 	}
 
-	// Always try MemoryStore for full content, regardless of position.
+	// Always try MemoryStore for full content.
 	if cc.memStore != nil && ref.EventKey > 0 {
 		full, err := cc.memStore.GetEvent(ref.EventKey)
 		if err == nil && full != nil {
@@ -279,15 +216,10 @@ func (cc *ContextCompressor) resolveRef(
 }
 
 // resolveSummaryRef builds a message from EventReference's summary fields.
-// Unlike the old resolveReferenceToMessage, this NEVER returns
-// "(用户消息，内容已压缩)" placeholder — instead it returns the EventSummary
-// (even if empty) so the LLM can decide to recall if needed.
 func (cc *ContextCompressor) resolveSummaryRef(ref memory.EventReference) model.Message {
 	role := eventTypeToRole(ref.EventType)
 	content := ref.EventSummary
 	if content == "" {
-		// Use a descriptive but non-misleading placeholder.
-		// This tells the LLM the content exists but was summarized.
 		content = fmt.Sprintf("(历史事件摘要为空，可用 recall 检索)")
 	}
 	return model.Message{
@@ -318,87 +250,14 @@ func stripEventKeyPrefix(content string) string {
 	return remainder
 }
 
-// dedupKey returns a normalized key for content-based deduplication.
-// It strips any [evt_KEY|type] prefix and combines the message role with
-// the first 200 characters of content. This allows matching messages from
-// the projection (prefixed via resolveRef) with messages from
-// ContentRequestProcessor (unprefixed) without relying on InjectEventKeys.
-func dedupKey(msg model.Message) string {
-	content := stripEventKeyPrefix(msg.Content)
-	if content == "" {
-		return ""
-	}
-	// Use first 200 chars to handle minor truncation differences between
-	// MemoryStore full content and session event content.
-	if len(content) > 200 {
-		content = content[:200]
-	}
-	return string(msg.Role) + ":" + content
-}
-
-// prefixMessagesByContentMatch adds [evt_KEY|type] prefixes to currentMessages
-// by matching each message against resolved projection refs. This runs when
-// the context is under budget so the LLM still sees event keys for sub-agent
-// tool calls (recall, knowledge, etc.). Message order and content are
-// preserved; only the prefix is added.
-func (cc *ContextCompressor) prefixMessagesByContentMatch(
-	ctx context.Context,
-	messages []model.Message,
-	refs []memory.EventReference,
-) []model.Message {
-	if len(refs) == 0 || len(messages) == 0 {
-		return messages
-	}
-
-	// Resolve refs to messages (with prefixes) and build a content → ref map.
-	refByContent := make(map[string]memory.EventReference)
-	for i, ref := range refs {
-		resolved := cc.resolveRef(ctx, ref, i, len(refs))
-		key := dedupKey(resolved)
-		if key != "" {
-			refByContent[key] = ref
-		}
-	}
-
-	result := make([]model.Message, len(messages))
-	copy(result, messages)
-	for i := range result {
-		msg := &result[i]
-		if msg.Role == model.RoleSystem {
-			continue
-		}
-		if strings.HasPrefix(msg.Content, "[evt_") {
-			continue
-		}
-		dk := dedupKey(*msg)
-		if ref, ok := refByContent[dk]; ok && ref.EventKey != 0 {
-			msg.Content = prefixEventKey(msg.Content, ref)
-		}
-	}
-	return result
-}
-
-// countPrefixed returns how many messages already have an [evt_ prefix.
-func countPrefixed(messages []model.Message) int {
-	count := 0
-	for _, msg := range messages {
-		if strings.HasPrefix(msg.Content, "[evt_") {
-			count++
-		}
-	}
-	return count
-}
-
 // buildRetainedRefs determines which EventReferences should be kept in the
 // projection after compression.
 //
 // Strategy:
-//   - Refs whose event keys appear in the compressed messages → retained (L0).
+//   - Refs whose event keys appear in the compressed messages → retained.
 //   - Refs whose event keys are NOT in the compressed messages → were compressed.
-//     These are replaced with a single summary ref (like Compactor did).
-//   - Summary refs (negative keys) that are not retained are silently dropped
-//     rather than added to compressedKeys. They represent previously compressed
-//     events and will be replaced by the new summary ref.
+//     These are replaced with a single summary ref.
+//   - Summary refs (negative keys) that are not retained are silently dropped.
 func (cc *ContextCompressor) buildRetainedRefs(
 	originalRefs []memory.EventReference,
 	compressedMsgs []model.Message,
@@ -410,7 +269,6 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	// Collect all event keys present in compressed messages.
 	retainedKeys := make(map[int64]bool)
 	for _, msg := range compressedMsgs {
-		// Parse [evt_KEY|type] prefixes
 		content := msg.Content
 		for {
 			key, _, remainder := parseEventKeyAndType(content)
@@ -433,18 +291,13 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			continue
 		}
 		if retainedKeys[ref.EventKey] {
-			// This ref was retained (appeared in compressed messages)
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
-			// Real event key that was compressed — add to the summary list.
 			compressedKeys = append(compressedKeys, fmt.Sprintf("%d", ref.EventKey))
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp
 			}
 		}
-		// Negative keys (summary refs from previous compression) that are
-		// not retained are silently dropped. They will be replaced by the
-		// new summary ref below.
 	}
 
 	// If we have compressed refs, add a single summary reference.
@@ -453,15 +306,82 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			minTs = time.Now().UnixMilli()
 		}
 		summaryRef := memory.EventReference{
-			EventKey:     -minTs, // Negative timestamp-based key (no collision with snowflake)
+			EventKey:     -minTs,
 			EventType:    tagentevent.TypeContextCompress,
 			EventSummary: fmt.Sprintf("[Compacted %d historical events: keys=%s]", len(compressedKeys), strings.Join(compressedKeys, ",")),
 			Timestamp:    minTs,
 			Role:         "system",
 		}
-		// Insert summary ref at the beginning, then retained refs
 		retained = append([]memory.EventReference{summaryRef}, retained...)
 	}
 
 	return retained
+}
+
+// extractCurrentTurnMessages identifies messages from the current ReAct
+// iteration that have NOT been persisted to the projection yet.
+//
+// args.Request.Messages has this structure (from framework ContentRequestProcessor + ReAct loop):
+//
+//	[system] [ContentRequestProcessor msgs (no prefix)] [ReAct iteration msgs (no prefix)]
+//
+// ContentRequestProcessor provides user messages from session history — these
+// are ALREADY in the projection (added via AppendEventHook). ReAct iteration
+// produces assistant (with tool_calls) and tool (result) messages — these are
+// NOT yet in the projection.
+//
+// Strategy:
+//  1. Scan from tail backwards to find the boundary between projection-resolved
+//     messages (with [evt_ prefix) and framework-provided messages (no prefix).
+//  2. From the unprefixed tail, filter out user messages (from ContentRequestProcessor,
+//     already in projection). Keep only assistant and tool messages (current ReAct turn).
+func extractCurrentTurnMessages(messages []model.Message) []model.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	// Find the last message that has an [evt_ prefix or is a system message.
+	// Everything after that is "current turn" (from framework, no prefix).
+	lastPrefixedIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role == model.RoleSystem {
+			lastPrefixedIdx = i
+			break
+		}
+		if strings.HasPrefix(msg.Content, "[evt_") {
+			lastPrefixedIdx = i
+			break
+		}
+	}
+
+	var tail []model.Message
+	if lastPrefixedIdx < 0 {
+		// No prefixed messages found — all non-system messages are from framework.
+		for _, msg := range messages {
+			if msg.Role != model.RoleSystem {
+				tail = append(tail, msg)
+			}
+		}
+	} else {
+		tail = messages[lastPrefixedIdx+1:]
+	}
+
+	if len(tail) == 0 {
+		return nil
+	}
+
+	// Filter: ContentRequestProcessor provides user messages that are already
+	// in the projection (via AppendEventHook). Only keep assistant and tool
+	// messages — these are from the current ReAct iteration and are NOT yet
+	// in the projection.
+	var result []model.Message
+	for _, msg := range tail {
+		if msg.Role == model.RoleUser && !strings.HasPrefix(msg.Content, "[evt_") {
+			// User message from ContentRequestProcessor — already in projection.
+			continue
+		}
+		result = append(result, msg)
+	}
+	return result
 }

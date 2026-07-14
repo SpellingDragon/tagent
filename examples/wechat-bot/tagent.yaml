@@ -127,7 +127,7 @@ agents:
     thinking_enabled: true       # 开启 hy3 thinking 模式
     compress_threshold: 0.8
     keep_recent_tasks: 2
-    # Value-driven compression configuration
+    # Compression configuration
     compress:
       # summary_model: LLM model for context compression summaries.
       # Falls back to the agent's main model if not set.
@@ -135,14 +135,6 @@ agents:
       # summary_provider: optional, defaults to same provider as this agent.
       # Use a different provider for cost optimization (e.g., cheaper model for compression).
       summary_provider: tencent
-      # value_floors: minimum value_score per event type (0.0-1.0).
-      # The LLM valuator's output is clamped to at least the floor for each type.
-      value_floors:
-        external_input: 0.5
-        agent_output: 0.4
-      # valuation_timeout_ms: maximum wall-clock time for the entire valuation phase.
-      # Default: 10000 (10s). Set to 0 to disable (not recommended).
-      valuation_timeout_ms: 300000
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，

@@ -29,11 +29,12 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 1. 创建/获取 session
 2. 追加用户消息到 session（`sessionService.AppendEvent`）
 3. 触发 Plugin.OnEvent（SummaryPlugin 先注入 Tag；MemoryPlugin 后写 MemoryStore + StateDelta，含 `event_summary`）
-4. 构建 messages（ContentRequestProcessor 从 session.Events 提取 Response.Choices[0].Message）
-5. BeforeModel 回调链（按注册顺序）：
-   - **Callback 0: InjectEventKeys** — 从 SessionProjection 读取 refs，为非 system/tool 的 message 注入 `[evt_KEY|type]` 前缀（每次 LLM 调用都执行）
-   - **Callback 1: SmartCompressor** — 如 token 超限，按任务边界压缩 messages（仅修改 `[]model.Message`，不修改 projection）
-   - **Callback 2: Compactor** — 如压缩后仍超限，从 projection 重建 messages（旧引用用 EventSummary，最近 N 条从 MemoryStore 还原）
+4. 构建 messages（ContentRequestProcessor 从 session.Events 提取，session limit=2）
+5. **BeforeModel 统一回调**（Projection-first 设计）：
+   - Step 1: **TryPull + 即时持久化** — 从 EventBus 非阻塞拉取新事件，立即 StoreEvent + Projection.Append
+   - Step 2: **ContextCompressor** — 从 Projection 解析全部 refs 为带 `[evt_KEY|type]` 前缀的消息，超预算时触发 SmartCompressor
+   - Step 3: **提取当前轮次** — 从 args.Request.Messages 中提取无前缀的 assistant/tool 消息（当前 ReAct 迭代产物）
+   - Step 4: **消息重建** — `[system] + 历史(from Projection) + 当前轮次`
 6. 调用 model.GenerateContent
 7. 工具执行（FunctionCallResponseProcessor）
 8. 追加 response event 到 session（appender → `sessionService.AppendEvent`）
@@ -183,10 +184,12 @@ TagentAgent.runEventLoop:
        │    ├─ 创建/获取 session
        │    ├─ 追加用户消息到 session (sessionService.AppendEvent)
        │    ├─ Plugin.OnEvent (SummaryPlugin 先注入 Tag，MemoryPlugin 后持久化 + StateDelta + event_summary)
-       │    ├─ ContentRequestProcessor 从 session.Events 构建 messages
-       │    ├─ BeforeModel 回调 0: InjectEventKeys（从 projection 读取 refs，注入 [evt_KEY|type] 前缀）
-       │    ├─ BeforeModel 回调 1: SmartCompressor.Compress（如超限，修改 Request.Messages）
-       │    ├─ BeforeModel 回调 2: Compactor.Compact（如仍超限则清理 SessionProjection 并重建 messages）
+       │    ├─ ContentRequestProcessor 从 session.Events 构建 messages (session limit=2)
+       │    ├─ BeforeModel 统一回调 (Projection-first):
+       │    │    ├─ TryPull + persistBusEvent（新事件即时入 Projection）
+       │    │    ├─ ContextCompressor.Compress(refs)（解析 + 压缩）
+       │    │    ├─ extractCurrentTurnMessages（提取当前 ReAct 轮次）
+       │    │    └─ 消息重建: [system] + history + currentTurn
        │    ├─ model.GenerateContent
        │    ├─ FunctionCallResponseProcessor (工具执行 + 迭代控制)
        │    ├─ handleEventPersistence (sessionService.AppendEvent)

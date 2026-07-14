@@ -97,6 +97,12 @@ func (m *MeditationManager) UpdateLastEventTime(t time.Time) {
 	m.lastEventTime.Store(t.UnixMilli())
 }
 
+// LastEventTime returns the most recent event timestamp in Unix milliseconds.
+// Shared with ProjectionOrganizer for idle detection.
+func (m *MeditationManager) LastEventTime() int64 {
+	return m.lastEventTime.Load()
+}
+
 // checkAndMeditate evaluates whether a meditation should fire.
 // A meditation is valid only if the gap since the last event >= MinGap.
 func (m *MeditationManager) checkAndMeditate() {

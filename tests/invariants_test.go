@@ -177,7 +177,7 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 		sc, memStore, tagentagent.NewDefaultTokenCounter(),
 		1, 0.8, 2,
 	)
-	result := cc.Compress(context.Background(), refs, nil)
+	result := cc.Compress(context.Background(), refs)
 
 	// With no current messages the request is already under budget, so
 	// ContextCompressor pass-through is legitimate. The invariant here is

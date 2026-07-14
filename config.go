@@ -195,16 +195,7 @@ type AgentConfig struct {
 type CompressConfig struct {
 	MaxToolResultChars int `json:"max_tool_result_chars,omitempty" yaml:"max_tool_result_chars,omitempty"`
 	MaxExecStateChars  int `json:"max_exec_state_chars,omitempty"  yaml:"max_exec_state_chars,omitempty"`
-	ChunkSize          int `json:"chunk_size,omitempty"            yaml:"chunk_size,omitempty"`
 	ChunkSummaryLen    int `json:"chunk_summary_len,omitempty"      yaml:"chunk_summary_len,omitempty"`
-
-	// Value-driven compression configuration
-	//
-	// ValueFloors maps event type strings to minimum value_score (0.0-1.0).
-	ValueFloors map[string]float64 `json:"value_floors,omitempty" yaml:"value_floors,omitempty"`
-	// ValuationTimeoutMs caps the wall-clock time for the entire valuation phase.
-	// Default: 10000 (10s). Set to 0 to disable (not recommended).
-	ValuationTimeoutMs int `json:"valuation_timeout_ms,omitempty" yaml:"valuation_timeout_ms,omitempty"`
 
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.

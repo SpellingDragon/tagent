@@ -116,6 +116,10 @@ type TagentAgent struct {
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 
+	// Projection organizer — proactively refines old ref summaries during idle.
+	// Started/stopped with the persistent event loop. nil if SummaryModel not configured.
+	organizer *ProjectionOrganizer
+
 	// projection is the lightweight, bounded Session projection (EventReference[])
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
@@ -185,17 +189,7 @@ const (
 type CompressConfig struct {
 	MaxToolResultChars int
 	MaxExecStateChars  int
-	ChunkSize          int
 	ChunkSummaryLen    int
-
-	// Value-driven compression (ideal path — no compatibility toggle)
-	//
-	// ValueFloors maps event type strings to minimum value_score (0.0-1.0).
-	// The LLM valuator's output is clamped to at least the floor for each type.
-	ValueFloors map[string]float64
-	// ValuationTimeoutMs caps the wall-clock time for the entire valuation phase.
-	// 0 = no timeout.
-	ValuationTimeoutMs int
 }
 
 // buildCompressorOpts builds SmartCompressor options from TagentConfig.
@@ -217,28 +211,8 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	if cfg.Compress.MaxExecStateChars > 0 {
 		opts = append(opts, WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
 	}
-	if cfg.Compress.ChunkSize > 0 {
-		opts = append(opts, WithChunkSize(cfg.Compress.ChunkSize))
-	}
 	if cfg.Compress.ChunkSummaryLen > 0 {
 		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
-	}
-	// Valuation config
-	valCfg := ValuationConfig{
-		ValueFloors: cfg.Compress.ValueFloors,
-	}
-	if valCfg.ValueFloors == nil {
-		valCfg.ValueFloors = DefaultValuationFloors()
-	}
-	if cfg.Compress.ValuationTimeoutMs > 0 {
-		valCfg.Timeout = time.Duration(cfg.Compress.ValuationTimeoutMs) * time.Millisecond
-	}
-	opts = append(opts, WithValuationConfig(valCfg))
-	// Build EventValuator from summary model if available
-	if cfg.SummaryModel != nil {
-		opts = append(opts, WithEventValuator(NewLLMEventValuator(cfg.SummaryModel, valCfg)))
-	} else {
-		opts = append(opts, WithEventValuator(NewNoopValuator()))
 	}
 	return opts
 }
@@ -435,6 +409,26 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
+	}
+
+	// Initialize projection organizer if SummaryModel is configured.
+	// The organizer shares idle time tracking with the meditation manager.
+	if cfg.SummaryModel != nil {
+		lastEventTimeFn := func() int64 {
+			if ta.meditationMgr != nil {
+				return ta.meditationMgr.LastEventTime()
+			}
+			return 0 // No idle tracking available
+		}
+		ta.organizer = NewProjectionOrganizer(
+			ProjectionOrganizerConfig{
+				SummaryModel: cfg.SummaryModel,
+				OrganizeAge:  cfg.KeepRecentTasks * 2,
+			},
+			projection,
+			memStore,
+			lastEventTimeFn,
+		)
 	}
 
 	return ta, nil
@@ -1043,6 +1037,11 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 		ta.meditationMgr.Start()
 	}
 
+	// Start projection organizer (if configured).
+	if ta.organizer != nil {
+		ta.organizer.Start()
+	}
+
 	log.Infof("[StartLoop] persistent event loop started user=%s session=%s", userID, sessionID)
 	return ta.outputCh, nil
 }
@@ -1058,6 +1057,11 @@ func (ta *TagentAgent) StopLoop() {
 	// Stop meditation manager first (stop injecting new meditation events).
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.Stop()
+	}
+
+	// Stop projection organizer (stop background summary refinement).
+	if ta.organizer != nil {
+		ta.organizer.Stop()
 	}
 
 	ta.loopCancel()

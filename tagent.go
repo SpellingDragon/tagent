@@ -322,10 +322,7 @@ func buildAgent(
 		Compress: agent.CompressConfig{
 			MaxToolResultChars: acfg.Compress.MaxToolResultChars,
 			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,
-			ChunkSize:          acfg.Compress.ChunkSize,
 			ChunkSummaryLen:    acfg.Compress.ChunkSummaryLen,
-			ValueFloors:        acfg.Compress.ValueFloors,
-			ValuationTimeoutMs: acfg.Compress.ValuationTimeoutMs,
 		},
 	}
 	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {

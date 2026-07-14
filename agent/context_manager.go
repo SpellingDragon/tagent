@@ -87,6 +87,10 @@ type ContextManager struct {
 	// before calling RunFlow. Attached to outputCh events via
 	// StateDelta["trigger_source"] for deterministic consumer dispatch.
 	triggerSource string
+
+	// partitionID is used for Snowflake EventKey generation when persisting
+	// bus events directly (bypassing MemoryPlugin's OnEvent hook).
+	partitionID int
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
@@ -144,6 +148,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		bus:             cfg.Bus,
 		projection:      cfg.Projection,
 		onEvent:         cfg.OnEvent,
+		partitionID:     memory.PartitionIDFromName(cfg.Name),
 	}
 
 	// Build ContextCompressor from SmartCompressor.
@@ -162,16 +167,68 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
 
-	// Callback -1: InjectBusInputs — inject new user messages from EventBus
-	// during ReAct iterations. This enables the "user → think → tool → think →
-	// user → tool → think → output" event flow where new user messages are
-	// inserted between ReAct iterations without waiting for RunFlow to complete.
-	if cfg.Bus != nil {
+	// Unified BeforeModel callback: InjectBusInputs + ContextCompressor.
+	//
+	// Design: Projection is the SINGLE source of truth for the historical
+	// timeline. This callback:
+	//  1. TryPulls new events from EventBus and immediately persists them
+	//     (MemoryStore + Projection.Append) — no "visible but not projected" state.
+	//  2. Resolves all projection refs via ContextCompressor (compress if over budget).
+	//  3. Extracts current-turn messages from args.Request.Messages (tool_calls/
+	//     results from the current ReAct iteration that haven't been emitted yet).
+	//  4. Rebuilds args.Request.Messages = [system] + history + currentTurn.
+	//
+	// This eliminates content-based deduplication entirely: projection refs are
+	// identified by EventKey, and current-turn messages are identified by the
+	// absence of [evt_KEY|type] prefixes.
+	if cm.contextCompressor != nil && cm.projection != nil {
+		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			// Step 1: Persist new bus events into Projection immediately.
+			if cm.bus != nil {
+				events := cm.bus.TryPull()
+				if len(events) > 0 {
+					log.Infof("[BeforeModel] TryPull returned %d events, persisting to projection", len(events))
+				}
+				for _, evt := range events {
+					if evt == nil || evt.Type != tagentevent.TypeExternalInput {
+						continue
+					}
+					if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
+						continue
+					}
+					if evt.Message == nil {
+						continue
+					}
+					cm.persistBusEvent(evt)
+				}
+			}
+
+			// Step 2: Resolve projection → compressed historical messages.
+			refs := cm.projection.GetAll()
+			result := cm.contextCompressor.Compress(ctx, refs)
+			cm.projection.Replace(result.RetainedRefs)
+
+			// Step 3: Extract current-turn messages (unprefixed tail of
+			// args.Request.Messages — tool_calls/results from this ReAct iteration).
+			currentTurn := extractCurrentTurnMessages(args.Request.Messages)
+
+			// Step 4: Rebuild messages = [system] + history + currentTurn.
+			systemMsg, _ := splitSystemMessage(args.Request.Messages)
+			var rebuilt []model.Message
+			if systemMsg != nil {
+				rebuilt = append(rebuilt, *systemMsg)
+			}
+			rebuilt = append(rebuilt, result.Messages...)
+			rebuilt = append(rebuilt, currentTurn...)
+
+			args.Request.Messages = rebuilt
+			return nil, nil
+		})
+	} else if cm.bus != nil {
+		// Fallback: if no compressor configured, still inject bus events
+		// (append directly to messages, legacy behavior for tests without projection).
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 			events := cm.bus.TryPull()
-			if len(events) > 0 {
-				log.Infof("[InjectBusInputs] TryPull returned %d events", len(events))
-			}
 			for _, evt := range events {
 				if evt == nil || evt.Type != tagentevent.TypeExternalInput {
 					continue
@@ -182,40 +239,13 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 				if evt.Message == nil {
 					continue
 				}
-				// Create a copy to avoid mutating the original event.
-				// Convert RoleSystem → RoleUser: system-injected messages (e.g., [action_tool_result])
-				// should be treated as external input by the LLM, not as system instructions.
 				msg := *evt.Message
 				if msg.Role == model.RoleSystem {
 					msg.Role = model.RoleUser
 				}
-				// Append new user message to the current LLM request
 				args.Request.Messages = append(args.Request.Messages, msg)
 				log.Infof("[InjectBusInputs] injected message during ReAct: role=%s content=%s", msg.Role, msg.Content)
 			}
-			return nil, nil
-		})
-	}
-
-	// Callback 0: ContextCompressor — unified compression + projection cleanup.
-	// This is the ONLY BeforeModel callback that touches messages (besides
-	// the diagnostic log). The old InjectEventKeys callback was removed because
-	// its positional matching (message N → ref N) breaks after compression:
-	// the projection no longer matches session messages 1:1, causing summary
-	// ref keys to be mis-assigned to user messages and tool messages to be
-	// skipped (no prefix → can't deduplicate → duplicates).
-	//
-	// Instead, ContextCompressor.Compress resolves ALL refs from the projection
-	// (each correctly prefixed with [evt_KEY|type]) and uses content-based
-	// deduplication to find new messages from ContentRequestProcessor that
-	// aren't yet in the projection.
-	if cm.contextCompressor != nil && cm.projection != nil {
-		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			refs := cm.projection.GetAll()
-
-			result := cm.contextCompressor.Compress(ctx, refs, args.Request.Messages)
-			args.Request.Messages = result.Messages
-			cm.projection.Replace(result.RetainedRefs)
 			return nil, nil
 		})
 	}
@@ -333,6 +363,68 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 	return model.Message{Role: model.RoleUser, Content: strings.Join(contents, "\n\n---\n\n")}
 }
 
+// persistBusEvent persists an EventBus event to MemoryStore and appends it
+// to the SessionProjection immediately. This ensures that all messages
+// visible to the LLM are also tracked in the projection — eliminating the
+// "visible but not projected" state that caused ordering bugs.
+//
+// The event is stored as a FullEvent with:
+//   - EventKey: Snowflake-generated (using ContextManager's partitionID)
+//   - EventType: inferred from message role
+//   - Content/EventSummary: from the AgentEvent's Message payload
+func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
+	if evt == nil || evt.Message == nil {
+		return
+	}
+
+	msg := *evt.Message
+	// Convert RoleSystem → RoleUser: system-injected messages (e.g.,
+	// [action_tool_result]) should be treated as external input by the LLM.
+	if msg.Role == model.RoleSystem {
+		msg.Role = model.RoleUser
+	}
+
+	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	eventType := tagentevent.ExtractEventType(msg)
+	eventSummary := tagentevent.GenerateEventSummary(msg, eventType, tagentevent.DefaultOptionsForLLMContext())
+
+	fullEvent := memory.FullEvent{
+		EventKey:     eventKey,
+		PartitionID:  cm.partitionID,
+		EventType:    eventType,
+		EventSummary: eventSummary,
+		Timestamp:    evt.Timestamp.UnixMilli(),
+		Content:      msg.Content,
+	}
+
+	if cm.memStore != nil {
+		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+			log.Errorf("[persistBusEvent] StoreEvent failed key=%d: %v", eventKey, err)
+		}
+	}
+
+	ref := memory.EventReference{
+		EventKey:     eventKey,
+		PartitionID:  cm.partitionID,
+		EventType:    eventType,
+		EventSummary: eventSummary,
+		Timestamp:    evt.Timestamp.UnixMilli(),
+		Role:         string(msg.Role),
+	}
+	cm.projection.Append(ref)
+
+	log.Infof("[persistBusEvent] persisted bus event key=%d type=%s source=%s content=%s",
+		eventKey, eventType, evt.Source, truncateForLog(msg.Content, 80))
+}
+
+// truncateForLog truncates a string for logging purposes.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // RunFlow calls runner.Run and forwards events to outputCh + bus.
 // Final responses are echoed back to the EventBus as agent_output events
 // (filtered by BuildInvocation to prevent self-triggering).
@@ -415,38 +507,6 @@ func eventTypeToRole(eventType string) model.Role {
 		return model.RoleAssistant
 	default:
 		return model.RoleUser
-	}
-}
-
-func injectEventKeyPrefixes(messages *[]model.Message, refs []memory.EventReference) {
-	if len(refs) == 0 || len(*messages) == 0 {
-		return
-	}
-	refIdx := 0
-	for i := range *messages {
-		msg := &(*messages)[i]
-		if msg.Role == model.RoleSystem || msg.Role == model.RoleTool {
-			continue
-		}
-		// Idempotent: skip messages that already have an [evt_ prefix.
-		// This prevents duplicate prefixes when LLM outputs imitate the
-		// prefix format and those outputs are read back from session.Events.
-		if strings.HasPrefix(msg.Content, "[evt_") {
-			continue
-		}
-		if refIdx >= len(refs) {
-			break
-		}
-		ref := refs[refIdx]
-		refIdx++
-		if ref.EventKey == 0 {
-			continue
-		}
-		eventType := ref.EventType
-		if eventType == "" {
-			eventType = "unknown"
-		}
-		msg.Content = fmt.Sprintf("[evt_%d|%s] %s", ref.EventKey, eventType, msg.Content)
 	}
 }
 

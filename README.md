@@ -179,9 +179,8 @@ graph LR
     START["StartLoop(userID, sessionID)"] --> PULL["EventBus.Pull<br/>批量取出待处理事件"]
     PULL --> BUILD["ContextManager.BuildInvocation<br/>合并为一条 user message"]
     BUILD --> RUN["ContextManager.RunFlow<br/>调用框架 runner.Run"]
-    RUN --> CB1["BeforeModel 回调 1<br/>SmartCompressor"]
-    CB1 --> CB2["BeforeModel 回调 2<br/>Compactor"]
-    CB2 --> LLM["LLM 推理"]
+    RUN --> BM["BeforeModel 统一回调<br/>TryPull+持久化 → Compress → 重建消息"]
+    BM --> LLM["LLM 推理"]
     LLM --> LOOP["框架 ReAct 循环"]
     LOOP --> ONEVT["runner 事件流 → onEvent 追加 EventReference"]
     ONEVT --> OUT["最终响应 → outputCh + bus.Publish(agent_output echo)"]
@@ -191,10 +190,10 @@ graph LR
 关键设计：
 - `runEventLoop` 是单一消费者，批量拉取事件后合并为一条消息
 - 实际 ReAct 循环由框架 `runner.Run` 执行，tagent 通过 `ContextManager` 编排
+- BeforeModel 统一回调：TryPull 新事件 → 即时持久化到 MemoryStore + Projection → Compress → 提取当前轮次 → 重建消息列表
 - `RunFlow` 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次），重试耗尽后发布 `Source="error"` 事件到 EventBus
 - `BuildInvocation` 跳过 `Source="error"` 和 `Source="tool_result"` 事件，不触发模型调用
 - 框架产生的事件经 `onEvent` 回调追加到 `SessionProjection`
-- `action_command` 事件额外桥接到 EventBus（`Source="tool_result"`），实现不变量 ③
 - 最终响应会 echo 回 EventBus（source=`agent_output`），避免重复触发模型调用
 
 ### 2. 上下文压缩与投影清理
@@ -241,12 +240,14 @@ tagent 有两个独立的上下文管理操作：
 
 ### Event 与 Message 的统一关系
 
-tagent 通过 BeforeModel 回调链统一了 event 和 message 的关系：
+tagent 通过单一 BeforeModel 回调统一了 event 和 message 的关系（Projection-first 设计）：
 
-1. 框架 Runner 的 `ContentRequestProcessor` 从 `session.Events` 构建 `[]model.Message`（完整内容）
-2. **BeforeModel Callback 0（InjectEventKeys）**：从 `SessionProjection` 读取 `EventReference[]`，为每条非 system/tool 的 message 注入 `[evt_KEY|type]` 前缀
-3. **BeforeModel Callback 1（SmartCompressor）**：如 token 超限，压缩 messages（按任务边界丢弃旧段）
-4. **BeforeModel Callback 2（Compactor）**：如压缩后仍超限，从 `SessionProjection` 重建 messages（旧引用用 `EventSummary`，最近 N 条从 MemoryStore 还原完整内容）
+1. **TryPull + 即时持久化**：从 EventBus 非阻塞拉取新事件（如 ReAct 迭代间到达的用户消息、异步工具结果），立即持久化到 MemoryStore 并追加到 Projection
+2. **Projection 解析**：从 `SessionProjection` 读取全部 `EventReference[]`，经 `ContextCompressor` 解析为带 `[evt_KEY|type]` 前缀的历史消息（超预算时触发 SmartCompressor 压缩）
+3. **当前轮次提取**：从框架 `args.Request.Messages` 中提取当前 ReAct 迭代产生的 assistant/tool 消息（尚未 emit 到 Projection）
+4. **消息重建**：`args.Request.Messages = [system] + 历史(from Projection) + 当前轮次`
+
+**设计关键**：Projection 是唯一时间线权威。不存在 content-based 对账——历史消息通过 EventKey 精确标识，当前轮次消息通过 `[evt_]` 前缀有无区分。
 
 LLM 在每次调用时都看到带 `[evt_KEY|type]` 前缀的 messages，可将其传递给子 Agent 用于上下文获取。
 

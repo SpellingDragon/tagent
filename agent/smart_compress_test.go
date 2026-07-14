@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,44 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mockBatchSummaryModel is a mock model that returns pre-configured summaries.
+// Used by tests in both smart_compress_test.go and context_compressor_test.go.
+type mockBatchSummaryModel struct {
+	mu         sync.Mutex
+	callCount  int
+	responses  []string
+	failOnCall map[int]bool
+}
+
+func (m *mockBatchSummaryModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	callIdx := m.callCount
+	m.callCount++
+	m.mu.Unlock()
+
+	if m.failOnCall[callIdx] {
+		return nil, fmt.Errorf("mock error on call %d", callIdx)
+	}
+
+	summary := ""
+	if callIdx < len(m.responses) {
+		summary = m.responses[callIdx]
+	}
+
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Choices: []model.Choice{
+			{Message: model.Message{Role: model.RoleAssistant, Content: summary}},
+		},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockBatchSummaryModel) Info() model.Info {
+	return model.Info{Name: "mock-batch-summary"}
+}
 
 // ============================================================================
 // splitSystemMessage tests
@@ -324,7 +363,6 @@ func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
 		WithMaxTokens(50), // Force over-budget with only 2 segments
 		WithMemStore(memStore),
 		WithSummaryModel(&mockBatchSummaryModel{responses: []string{"summary of task 1"}}),
-		WithEventValuator(referenceValuator{}),
 	)
 
 	// Two task segments (both "recent" because keep_recent=2), with large

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,45 +15,32 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// SmartCompressor performs value-driven context compression.
+// SmartCompressor performs deterministic context compression with optional
+// LLM summary generation.
 //
 // Pipeline:
 //  1. Segment messages by user-input boundaries.
-//  2. Evaluate segments via EventValuator (LLM-based or noop).
-//  3. Plan compression: sort by value density, assign levels.
-//  4. Archive summaries to MemoryStore; replace with reference messages.
-//  5. Assemble compressed context with inline notices.
+//  2. Deterministic level assignment based on segment age and content type.
+//  3. Per-segment compression: L0 (keep) / L1 (selective) / L2 (partial) / L3 (archive).
+//  4. Assemble compressed context with inline notices.
 //
 // This is a "view transformation" — it modifies the messages sent to the LLM,
-// but does NOT modify the Session.
+// but does NOT modify the Session or Projection.
 type SmartCompressor struct {
 	summaryModel    model.Model  // Optional: used for LLM summary generation
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
 	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
 
-	// Value-driven compression
-	eventValuator   EventValuator                // Evaluates per-segment value and processing strategy
-	valuationConfig ValuationConfig              // Valuation parameters (floors, prompt version, timeout)
-	archiveCache    map[string]archiveCacheEntry // Content-hash → summary key dedup cache
-
 	// Configurable truncation parameters
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
 	maxToolResultChars int // Per-tool-result truncation (default: 500)
 	maxToolArgsChars   int // Per-tool-args truncation (default: 80)
 
-	// Chunk splitting parameters
-	chunkSize       int                // Max chars per chunk (default: 1000)
-	chunkSummaryLen int                // Summary length per chunk (default: 150)
-	memStore        memory.MemoryStore // Optional: for chunk persistence + summary archive
-	projection      *SessionProjection // Optional: for chunk EventReference append
-	chunkSplitter   *ChunkSplitter     // Lazily initialized
-}
-
-// archiveCacheEntry is the cached result of archiving a segment.
-type archiveCacheEntry struct {
-	summaryKey int64  // The EventKey of the archived summary in MemoryStore
-	summary    string // The generated summary text
+	// Summary parameters
+	chunkSummaryLen int                // Summary length per segment (default: 150)
+	memStore        memory.MemoryStore // Optional: for summary archive
+	projection      *SessionProjection // Optional: for archive EventReference append
 }
 
 // NewSmartCompressor creates a new SmartCompressor.
@@ -66,12 +52,7 @@ func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 		maxExecStateChars:  2000,
 		maxToolResultChars: 500,
 		maxToolArgsChars:   80,
-		chunkSize:          1000,
 		chunkSummaryLen:    150,
-		archiveCache:       make(map[string]archiveCacheEntry),
-		valuationConfig: ValuationConfig{
-			ValueFloors: DefaultValuationFloors(),
-		},
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -116,22 +97,17 @@ func WithMaxToolArgsChars(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.maxToolArgsChars = n }
 }
 
-// WithChunkSize sets the maximum chunk size for semantic chunking.
-func WithChunkSize(n int) SmartCompressorOption {
-	return func(sc *SmartCompressor) { sc.chunkSize = n }
-}
-
-// WithChunkSummaryLen sets the summary length per chunk.
+// WithChunkSummaryLen sets the summary length per segment.
 func WithChunkSummaryLen(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
 }
 
-// WithMemStore injects a MemoryStore for chunk persistence.
+// WithMemStore injects a MemoryStore for summary archive persistence.
 func WithMemStore(ms memory.MemoryStore) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.memStore = ms }
 }
 
-// WithProjection injects a SessionProjection for chunk EventReference append.
+// WithProjection injects a SessionProjection for archive EventReference append.
 func WithProjection(p *SessionProjection) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.projection = p }
 }
@@ -140,31 +116,19 @@ func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.tokenCounter = tc }
 }
 
-// WithEventValuator injects an EventValuator for value-driven compression planning.
-func WithEventValuator(ev EventValuator) SmartCompressorOption {
-	return func(sc *SmartCompressor) { sc.eventValuator = ev }
-}
-
-// WithValuationConfig sets the ValuationConfig used for per-event-type value floors,
-// prompt version tracking, and valuation timeout.
-func WithValuationConfig(cfg ValuationConfig) SmartCompressorOption {
-	return func(sc *SmartCompressor) { sc.valuationConfig = cfg }
-}
-
-// Compress implements budget-aware greedy compression with selective preservation.
+// Compress implements budget-aware greedy compression with deterministic level assignment.
 //
 // Algorithm:
 // 1. Segment messages by user input boundary
 // 2. Compute excess = current_tokens - max_tokens (how much to cut)
-// 3. Greedy: from oldest to newest, assign compression level per segment:
-//   - Level 0: no compression (budget met or last incomplete segment)
-//   - Level 1: selective (preserve key msgs, compress non-key exec)
+// 3. Deterministic level assignment per segment (age + content type):
+//   - Level 0: no compression (recent segments or last incomplete segment)
+//   - Level 1: selective (preserve user input + key tools, compress non-key exec)
 //   - Level 2: partial (preserve user input, compress all exec)
-//   - Level 3: full (compress everything including user input)
+//   - Level 3: full (archive to MemoryStore + inline summary)
 //
-// 4. Batch level-3 segments for LLM summarization (merge intervals)
-// 5. Per-segment LLM call for level 2 exec and level 1 non-key
-// 6. Assemble: [system][compressEvent][level3 summaries][chronological: level2/1/0 segments]
+// 4. Per-segment LLM call for level 2 exec and level 1 non-key (degrade to first-stage on failure)
+// 5. Assemble: chronological order with level-specific handling
 func (sc *SmartCompressor) Compress(
 	ctx context.Context,
 	messages []model.Message,
@@ -209,7 +173,6 @@ func (sc *SmartCompressor) Compress(
 	type segPlan struct {
 		seg        *TaskSegment
 		level      int // 0=none, 1=selective, 2=partial, 3=full
-		value      EventValue
 		userMsgs   []model.Message
 		keyMsgs    []model.Message
 		nonKeyMsgs []model.Message
@@ -232,181 +195,60 @@ func (sc *SmartCompressor) Compress(
 		}
 	}
 
-	// 5. Value-driven compression planning
-	// Identify compressible segments, evaluate them, sort by value density, assign levels.
+	// 5. Deterministic level assignment based on segment age and content features.
+	// This replaces the LLM-based valuation with a pure, instant function.
+	//
+	// Level assignment rules:
+	//   - Last segment or recent (within KeepRecentTasks): L0 (no compression)
+	//   - Has user input AND age < keepRecent*2: L1 (selective: keep user + key tools)
+	//   - Has user input OR age < keepRecent*3: L2 (partial: keep user, compress exec)
+	//   - Old tool-only segments: L3 (full: archive to MemoryStore + inline summary)
 
-	// 5a. Identify compressible candidates
-	type compressCandidate struct {
-		planIdx int
-		density float64 // value_score / tokens (lower = compress first)
-	}
-
-	var candidates []compressCandidate
 	for i := range plans {
 		isLast := i == len(plans)-1
 		isLastIncomplete := isLast && !plans[i].seg.IsComplete
 		isRecent := i >= len(plans)-minPreserve
-		canCompress := !isRecent && !isLastIncomplete && len(plans[i].execMsgs) > 0
-		if canCompress {
-			candidates = append(candidates, compressCandidate{planIdx: i})
-		}
-	}
+		hasUserInput := len(plans[i].userMsgs) > 0
 
-	// 5b. Evaluate compressible segments via EventValuator.
-	// If valuation fails, we do NOT silently use defaults — instead we record
-	// the error and degrade all compressible segments to L1 (first-stage:
-	// drop tool events, keep assistant/user text), plus inject an error notice
-	// so the agent is aware of the information loss and can react.
-	valuationFailed := false
-	var valuationErrStr string
-	if len(candidates) > 0 && sc.eventValuator != nil {
-		evalSegments := make([]*TaskSegment, len(candidates))
-		for i, c := range candidates {
-			evalSegments[i] = plans[c.planIdx].seg
+		if isRecent || isLastIncomplete {
+			plans[i].level = 0 // L0: keep
+			continue
 		}
-		values, _, evalErr := sc.eventValuator.Evaluate(ctx, evalSegments)
-		if evalErr != nil {
-			valuationFailed = true
-			valuationErrStr = evalErr.Error()
-			log.Warnf("[SmartCompress] valuation failed, will degrade to L1 first-stage: %v", evalErr)
+
+		age := len(plans) - 1 - i // 0=newest, larger=older
+
+		if hasUserInput && age < minPreserve*2 {
+			plans[i].level = 1 // L1: selective
+		} else if hasUserInput || age < minPreserve*3 {
+			plans[i].level = 2 // L2: partial
 		} else {
-			for i, c := range candidates {
-				if i < len(values) {
-					plans[c.planIdx].value = values[i]
-				}
-			}
-		}
-	}
-
-	// Apply default values for plans without valuation
-	for i := range plans {
-		if plans[i].value.Processing == "" {
-			key := int64(0)
-			if len(plans[i].seg.Messages) > 0 {
-				k, _, _ := parseEventKeyAndType(plans[i].seg.Messages[0].Content)
-				key = k
-			}
-			plans[i].value = EventValue{
-				EventKey:   key,
-				ValueScore: 0.5,
-				Processing: DefaultProcessing,
-			}
+			plans[i].level = 3 // L3: full archive
 		}
 	}
 
 	// Fallback: if we're over budget but all segments are considered "recent"
 	// (e.g., only 2 segments with keep_recent=2), force compression of the
-	// oldest non-last segments until we can make progress. Otherwise a single
-	// huge task with many tool outputs can never be compressed.
-	fallbackTriggered := false
-	if len(candidates) == 0 && excess > 0 && len(plans) > 1 {
-		// Stage 1: summarize tool/exec information from the oldest non-last segment.
-		// We prefer L2 (partial) over L1 (selective drop) to preserve more
-		// execution context. If the LLM summary fails, the existing L2 failure
-		// path degrades to first-stage (drop non-key tools) automatically.
-		for i := 0; i < len(plans)-1; i++ {
-			if len(plans[i].execMsgs) > 0 {
-				plans[i].value.Processing = Summary // L2: summarize exec/tool messages, keep user input
-				candidates = append(candidates, compressCandidate{planIdx: i})
-				fallbackTriggered = true
-				break // one segment at a time for conservative fallback
-			}
-		}
-		if fallbackTriggered {
-			log.Debugf("[SmartCompress] over budget but no candidates; stage-1 summarizing tool info from oldest segment")
-		}
-	}
-
-	// 5c. Compute value density and sort candidates by density ascending
-	for i := range candidates {
-		tokens := sc.tokenCounter.Estimate(plans[candidates[i].planIdx].seg.Messages)
-		if tokens <= 1 {
-			tokens = 1
-		}
-		candidates[i].density = plans[candidates[i].planIdx].value.ValueScore / float64(tokens)
-	}
-	sort.Slice(candidates, func(a, b int) bool {
-		return candidates[a].density < candidates[b].density
-	})
-
-	// 5d. Assign compression levels based on processing strategy and budget
-	remainingExcess := excess
-	for _, c := range candidates {
-		if remainingExcess <= 0 {
-			break
-		}
-		p := &plans[c.planIdx]
-		nonKeyTokens := sc.tokenCounter.Estimate(p.nonKeyMsgs)
-		execTokens := sc.tokenCounter.Estimate(p.execMsgs)
-		segTokens := sc.tokenCounter.Estimate(p.seg.Messages)
-		l1Savings := nonKeyTokens * 4 / 5
-		l2Savings := execTokens * 4 / 5
-		l3Savings := segTokens * 4 / 5
-
-		switch p.value.Processing {
-		case Keep:
-			p.level = 0
-		case Truncate, KeyFacts:
-			if l1Savings > 0 {
-				p.level = 1
-				remainingExcess -= l1Savings
-			}
-		case Summary:
-			if l2Savings >= remainingExcess {
-				p.level = 2
-				remainingExcess = 0
-			} else {
-				p.level = 2
-				remainingExcess -= l2Savings
-			}
-		case Reference, Drop:
-			if l3Savings >= remainingExcess {
-				p.level = 3
-				remainingExcess = 0
-			} else {
-				p.level = 3
-				remainingExcess -= l3Savings
-			}
-		default:
-			// Unknown strategy: treat as Summary
-			if l2Savings >= remainingExcess {
-				p.level = 2
-				remainingExcess = 0
-			} else {
-				p.level = 2
-				remainingExcess -= l2Savings
-			}
-		}
-		if remainingExcess < 0 {
-			remainingExcess = 0
-		}
-	}
-
-	// Fallback stage 2: if summarizing tool info from the oldest segment was not
-	// enough to bring us under budget, fully summarize the most recent execution
-	// event (the most recent non-last segment with exec messages).
-	if fallbackTriggered && remainingExcess > 0 {
-		for i := len(plans) - 2; i >= 0; i-- {
-			if plans[i].level == 0 && len(plans[i].execMsgs) > 0 {
-				plans[i].level = 3
-				log.Debugf("[SmartCompress] stage-2 summarizing most recent execution event (segment %d)", i)
+	// oldest non-last segments until we can make progress.
+	if excess > 0 && len(plans) > 1 {
+		allRecent := true
+		for i := range plans {
+			if plans[i].level > 0 {
+				allRecent = false
 				break
 			}
 		}
-	}
-
-	// Fallback stage 3: if we're still over budget, the current incomplete
-	// segment itself is too large. Summarize its exec/tool messages while
-	// preserving the user's current input (first user message of the segment).
-	if fallbackTriggered && remainingExcess > 0 && len(plans) > 0 {
-		lastIdx := len(plans) - 1
-		if plans[lastIdx].level == 0 && len(plans[lastIdx].execMsgs) > 0 {
-			plans[lastIdx].level = 2
-			log.Debugf("[SmartCompress] stage-3 summarizing current incomplete segment exec messages")
+		if allRecent {
+			for i := 0; i < len(plans)-1; i++ {
+				if len(plans[i].execMsgs) > 0 {
+					plans[i].level = 2 // L2: summarize exec, keep user input
+					log.Debugf("[SmartCompress] over budget but no candidates; force-compressing oldest segment")
+					break
+				}
+			}
 		}
 	}
 
-	// 5. Collect compressed segments for event info
+	// 6. Collect compressed segments for event info
 	var compressedSegs []*TaskSegment
 	var level3Segs []*TaskSegment
 	for _, p := range plans {
@@ -423,15 +265,6 @@ func (sc *SmartCompressor) Compress(
 	if len(compressedSegs) == 0 {
 		log.Debugf("[SmartCompress] no segments compressed — returning original")
 		return messages
-	}
-
-	// If valuation failed, degrade ALL candidates to L1 (first-stage) so they
-	// drop tool events instead of attempting L2/L3 LLM calls that will likely
-	// also fail. We inject an error notice so the agent knows.
-	if valuationFailed {
-		for _, c := range candidates {
-			plans[c.planIdx].level = 1
-		}
 	}
 
 	// 6. Execute LLM summarization (no silent timeout/skip — errors degrade to
@@ -494,14 +327,6 @@ func (sc *SmartCompressor) Compress(
 		result = append(result, *systemMsg)
 	}
 
-	// Inject valuation error notice at the top if valuation failed
-	if valuationFailed {
-		result = append(result, buildCompressErrorNotice(
-			fmt.Sprintf("事件评估失败: %s", valuationErrStr),
-			len(candidates),
-		))
-	}
-
 	// Track degraded segments for a combined error notice, injected at top
 	// (before segments) so the agent sees it immediately and the pending user
 	// message remains the last message in the result.
@@ -547,11 +372,17 @@ func (sc *SmartCompressor) Compress(
 			// Level 3: replace the entire old segment with an inline summary.
 			// The segment is also archived so recall can retrieve full details.
 			summary := level3Summaries[i]
+			// Extract event key from first message of the segment
+			segEventKey := int64(0)
+			if len(p.seg.Messages) > 0 {
+				k, _, _ := parseEventKeyAndType(p.seg.Messages[0].Content)
+				segEventKey = k
+			}
 			if sc.memStore != nil {
-				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary, p.value)
+				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary)
 				if archiveErr == nil {
 					result = append(result, model.NewSystemMessage(
-						fmt.Sprintf("[context_archive] evt_%d 已摘要归档，摘要 key=%d", p.value.EventKey, summaryKey),
+						fmt.Sprintf("[context_archive] evt_%d 已摘要归档，摘要 key=%d", segEventKey, summaryKey),
 					))
 				} else {
 					log.Warnf("[SmartCompress] archive failed for segment %d: %v", p.origIndex, archiveErr)
@@ -583,7 +414,6 @@ func (sc *SmartCompressor) Compress(
 		"l3_full":           levelCounts[3],
 		"summary_generated": sc.summaryModel != nil && len(level3Summaries) > 0,
 		"batch_count":       0,
-		"valuation_failed":  valuationFailed,
 		"degraded_count":    degradedCount,
 		"duration_ms":       time.Since(startTime).Milliseconds(),
 	}
@@ -975,21 +805,10 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 // ============================================================================
 
 // archiveSegment writes a summary of the given segment to MemoryStore and
-// returns the summary EventKey. Results are cached by content hash so identical
-// segments are not re-archived.
-func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string, value EventValue) (int64, error) {
+// returns the summary EventKey. Each call creates a new archive (no dedup cache).
+func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int64, error) {
 	if sc.memStore == nil {
 		return 0, fmt.Errorf("archiveSegment: memStore is nil")
-	}
-
-	// Compute content hash for deduplication
-	contentHash := sc.segmentContentHash(seg)
-	cacheKey := contentHash
-
-	// Check cache
-	if entry, ok := sc.archiveCache[cacheKey]; ok {
-		log.Debugf("[SmartCompress] archive cache hit for hash=%s, summaryKey=%d", contentHash, entry.summaryKey)
-		return entry.summaryKey, nil
 	}
 
 	// Determine partition ID from segment's first event key
@@ -1010,12 +829,10 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string, valu
 		PartitionID:  partitionID,
 		EventType:    "context_compress_summary",
 		EventSummary: summary,
-		Content:      value.KeyFacts,
+		Content:      summary,
 		Timestamp:    time.Now().UnixMilli(),
 		Metadata: map[string]string{
-			"original_key": fmt.Sprintf("%d", value.EventKey),
-			"processing":   string(value.Processing),
-			"content_hash": contentHash,
+			"content_hash": sc.segmentContentHash(seg),
 		},
 	}
 
@@ -1023,13 +840,7 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string, valu
 		return 0, fmt.Errorf("archiveSegment: StoreEvent failed: %w", err)
 	}
 
-	// Cache the result
-	sc.archiveCache[cacheKey] = archiveCacheEntry{
-		summaryKey: summaryKey,
-		summary:    summary,
-	}
-
-	log.Infof("[SmartCompress] archived segment to summaryKey=%d (hash=%s, processing=%s)", summaryKey, contentHash, value.Processing)
+	log.Infof("[SmartCompress] archived segment to summaryKey=%d", summaryKey)
 	return summaryKey, nil
 }
 
@@ -1041,21 +852,6 @@ func (sc *SmartCompressor) segmentContentHash(seg *TaskSegment) string {
 		h.Write([]byte{0}) // separator
 	}
 	return fmt.Sprintf("%x", h.Sum64())
-}
-
-// buildReferenceMessage creates a lightweight system message that replaces the
-// original compressed messages with a reference to the archived summary.
-func buildReferenceMessage(originalKey int64, summaryKey int64, value EventValue) model.Message {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[context_archive] evt_%d 已归档\n", originalKey))
-	sb.WriteString(fmt.Sprintf("处理方式: %s\n", value.Processing))
-	sb.WriteString(fmt.Sprintf("价值分: %.2f\n", value.ValueScore))
-	sb.WriteString(fmt.Sprintf("摘要 key: %d\n", summaryKey))
-	if value.KeyFacts != "" {
-		sb.WriteString(fmt.Sprintf("关键事实: %s\n", value.KeyFacts))
-	}
-	sb.WriteString(fmt.Sprintf("如需完整信息: recall({\"event_keys\": [%d]})", summaryKey))
-	return model.NewSystemMessage(sb.String())
 }
 
 // extractExecutionState extracts a structured summary of tool calls and their
@@ -1130,6 +926,22 @@ func (sc *SmartCompressor) extractExecutionState(segments []*TaskSegment) string
 	}
 
 	return result
+}
+
+// roleLabel returns a human-readable label for a model.Role.
+func roleLabel(role model.Role) string {
+	switch role {
+	case model.RoleSystem:
+		return "system"
+	case model.RoleUser:
+		return "user"
+	case model.RoleAssistant:
+		return "assistant"
+	case model.RoleTool:
+		return "tool"
+	default:
+		return "unknown"
+	}
 }
 
 // splitSystemMessage separates the system message from the rest.

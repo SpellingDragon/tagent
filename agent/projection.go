@@ -46,6 +46,17 @@ func (p *SessionProjection) Len() int {
 	return len(p.refs)
 }
 
+// UpdateSummary updates the EventSummary of the ref at the given index.
+// Used by ProjectionOrganizer to replace verbose summaries with refined ones.
+// Silently returns if idx is out of bounds.
+func (p *SessionProjection) UpdateSummary(idx int, summary string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if idx >= 0 && idx < len(p.refs) {
+		p.refs[idx].EventSummary = summary
+	}
+}
+
 // BuildEventReference converts a framework event.Event into a lightweight
 // memory.EventReference using the StateDelta fields written by MemoryPlugin.
 //
