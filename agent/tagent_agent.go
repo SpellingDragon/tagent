@@ -150,9 +150,9 @@ type TagentConfig struct {
 	Compress          CompressConfig     // SmartCompressor parameters
 
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
-	ThinkingEnabled     *bool
-	ThinkingTokens      *int
-	ReasoningEffort     *string
+	ThinkingEnabled      *bool
+	ThinkingTokens       *int
+	ReasoningEffort      *string
 	ReasoningContentMode string
 
 	// Agent identity (for agent.Agent interface)
@@ -282,9 +282,9 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		MemPlugin:            memPlugin,
 		SessionSvc:           sessionSvc,
 		OutputCh:             outputCh,
-		Bus:          bus,
-		Projection:   projection,
-		OnEvent:      onEvent,
+		Bus:                  bus,
+		Projection:           projection,
+		OnEvent:              onEvent,
 	})
 }
 
@@ -355,31 +355,61 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		cfg.Tools = wrapped
 	}
 
-	// 5. Create SessionService
+	// 5. Create outputCh + EventBus + projection EARLY so the
+	// AppendEventHook (created next) can capture them.
+	outputCh := make(chan *event.Event, 100)
+	bus := NewEventBus()
+	projection := NewSessionProjection()
+
+	// onEventRef is set after TagentAgent creation. The AppendEventHook
+	// uses it to forward user message events into the projection + outputCh.
+	var onEventRef func(evt *event.Event)
+
+	// 6. Create SessionService
 	// Limit session events to 2: only the current invocation's user message
 	// and the latest tool result are needed for ContentRequestProcessor's
 	// TimelineFilterCurrentRequest. Historical context is managed entirely
 	// by SessionProjection + ContextCompressor, so the runner session does
 	// not need to retain full event history.
+	//
+	// AppendEventHook also forwards user message events to outputCh +
+	// projection. The framework runner appends user messages to session
+	// (after MemoryPlugin processes them) but does NOT emit them through
+	// the agent event channel. Without this hook, user messages never
+	// enter the projection and are lost as historical context.
 	sessionSvc := sessioninmemory.NewSessionService(
 		sessioninmemory.WithSessionEventLimit(2),
 		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
 			original := ctx.Event
+			var evtCopy event.Event
 			if original.Response != nil {
-				evtCopy := *original
+				evtCopy = *original
 				evtCopy.Response = original.Response.Clone()
 				ctx.Event = &evtCopy
 			}
 			err := next()
 			ctx.Event = original
+
+			// Forward user message events to outputCh + projection.
+			// LLM/tool events are emitted via eventCh in RunFlow, not here.
+			// MemoryPlugin has already written event_key to StateDelta,
+			// so BuildEventReference will succeed.
+			if onEventRef != nil && original.IsUserMessage() {
+				emitEvt := original
+				if original.Response != nil {
+					emitEvt = &evtCopy
+				}
+				onEventRef(emitEvt)
+				select {
+				case outputCh <- emitEvt:
+				default:
+					log.Warnf("[SessionHook] outputCh full, user message event dropped")
+				}
+			}
+
 			return err
 		}),
 	)
-
-	// 6. Create outputCh + EventBus + projection
-	outputCh := make(chan *event.Event, 100)
-	bus := NewEventBus()
-	projection := NewSessionProjection()
 
 	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
 	ta := &TagentAgent{
@@ -398,6 +428,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 	// 8. Create onEvent callback and ContextManager.
 	onEvent := ta.makeOnEventCallback("", projection)
+	onEventRef = onEvent // Wire the hook's callback.
 	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	ta.contextManager = cm
 
@@ -671,14 +702,23 @@ func (ta *TagentAgent) SetToolParentProjection() {
 	}
 }
 
-// InjectMessage injects a message into the agent's persistent EventBus.
+// InjectMessage injects a user message into the agent's persistent EventBus.
+// It is a convenience wrapper around InjectMessageWithSource with source="user".
+func (ta *TagentAgent) InjectMessage(msg model.Message) {
+	ta.InjectMessageWithSource("user", msg)
+}
+
+// InjectMessageWithSource injects a message with a source label that
+// identifies the origin (e.g., "user", "meditation", "async_result").
+// The source is propagated to outputCh events via StateDelta["trigger_source"]
+// so consumers can deterministically dispatch responses without inferring.
 //
 // Messages ALWAYS go to persistentBus — never to invBus. This ensures that
 // user messages sent during sub-agent execution are not lost when the
 // sub-agent's invBus is discarded. The BeforeModel InjectBusInputs callback
 // on the persistent ContextManager will TryPull these messages and inject them
 // into the next ReAct iteration.
-func (ta *TagentAgent) InjectMessage(msg model.Message) {
+func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message) {
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.UpdateLastEventTime(time.Now())
 	}
@@ -687,7 +727,7 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 	// should go to the persistent bus so the main runEventLoop's BeforeModel
 	// callback can pick them up.
 	if ta.persistentBus != nil {
-		ta.persistentBus.Publish(NewExternalInputEvent("inject", msg))
+		ta.persistentBus.Publish(NewExternalInputEvent(source, msg))
 		return
 	}
 	// Fallback: if persistentBus is nil (shouldn't happen), use activeBus.
@@ -695,10 +735,10 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 	bus := ta.activeBus
 	ta.activeBusMu.Unlock()
 	if bus != nil {
-		bus.Publish(NewExternalInputEvent("inject", msg))
+		bus.Publish(NewExternalInputEvent(source, msg))
 		return
 	}
-	log.Warnf("[InjectMessage] agent %q has no bus, message dropped", ta.name)
+	log.Warnf("[InjectMessageWithSource] agent %q has no bus, message dropped", ta.name)
 }
 
 // setActiveBus sets the current active bus for event injection.
@@ -848,6 +888,11 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			continue
 		}
 
+		// Determine trigger source from batch events for deterministic
+		// consumer-side dispatch. The source is attached to outputCh
+		// events via StateDelta["trigger_source"] in RunFlow.
+		cm.SetTriggerSource(extractTriggerSource(events))
+
 		// RunFlow with exponential backoff retry
 		var lastErr error
 		retried := false
@@ -889,6 +934,26 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			log.Errorf("[runEventLoop:%s] RunFlow failed: %v", ta.name, lastErr)
 		}
 	}
+}
+
+// extractTriggerSource determines the trigger source from a batch of
+// AgentEvents. Uses the first non-agent_output, non-error external_input
+// event's Source field. This provides deterministic source identification
+// for consumer dispatch (meditation vs async_result vs user) without
+// content-based inference.
+func extractTriggerSource(events []*AgentEvent) string {
+	for _, evt := range events {
+		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
+			continue
+		}
+		if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
+			continue
+		}
+		if evt.Source != "" {
+			return evt.Source
+		}
+	}
+	return "user"
 }
 
 // publishErrorEvent publishes an error event to EventBus so external

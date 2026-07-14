@@ -22,7 +22,7 @@ var _ tool.CallableTool = (*ActionTool)(nil)
 // This abstracts the agent-level message injection mechanism,
 // allowing ActionTool to remain decoupled from the agent package.
 type MessageInjector interface {
-	InjectMessage(msg model.Message)
+	InjectMessageWithSource(source string, msg model.Message)
 }
 
 // ActionTool is a pure execution tool for running actions on real resources.
@@ -365,7 +365,7 @@ func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output 
 		}
 	}
 
-	ct.injector.InjectMessage(model.Message{
+	ct.injector.InjectMessageWithSource("async_result", model.Message{
 		Role:    model.RoleSystem,
 		Content: content.String(),
 	})

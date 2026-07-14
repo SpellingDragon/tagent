@@ -145,6 +145,14 @@ func (cc *ContextCompressor) Compress(
 		key := dedupKey(msg)
 		if key != "" {
 			if resolved, ok := resolvedByContent[key]; ok {
+				// User messages that are in projection should NOT be
+				// placed in processedBody. They would appear AFTER all
+				// unresolved refs (which are older), breaking chronological
+				// order. Instead, skip them here — they'll be injected
+				// from projection as unresolved refs in correct order.
+				if msg.Role == model.RoleUser {
+					continue
+				}
 				processedBody = append(processedBody, resolved)
 				matchedKeys[key] = true
 				continue

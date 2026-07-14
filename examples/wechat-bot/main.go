@@ -253,6 +253,10 @@ func main() {
 	typingActive := atomic.Bool{}
 	// replyTarget tracks the current user to reply to. nil when no user is waiting.
 	var replyTarget atomic.Pointer[string]
+	// lastUser tracks the most recent user who sent a message.
+	// Used to deliver async_result responses when replyTarget has been
+	// cleared after the initial response.
+	var lastUser atomic.Pointer[string]
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -282,6 +286,16 @@ func main() {
 				}
 			}
 
+			// Extract deterministic trigger source (written by RunFlow).
+			// Values: "user", "meditation", "async_result".
+			// Eliminates the need for content-based inference.
+			triggerSource := "user"
+			if evt.StateDelta != nil {
+				if ts, ok := evt.StateDelta["trigger_source"]; ok && len(ts) > 0 {
+					triggerSource = string(ts)
+				}
+			}
+
 			// Check for final response (agent_output — no tool calls)
 			if evt.IsFinalResponse() && evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
@@ -290,33 +304,43 @@ func main() {
 					content = "(empty response)"
 				}
 
-				// Check if this is a meditation/internal response (no user waiting)
-				isMeditation := false
-				// Meditation responses originate from [meditation] messages.
-				// The LLM may or may not include the marker in its output.
-				// Primary check: no user is waiting (replyTarget nil).
-				// Secondary check: response content contains [meditation] marker.
-				if replyTarget.Load() == nil {
-					isMeditation = true
-				} else if strings.Contains(content, "[meditation]") {
-					isMeditation = true
-				}
-
-				if isMeditation {
-					log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
-					// Don't clear replyTarget — no user interaction to complete
-					// Don't send to responseCh — no user handler is waiting
-				} else {
-					// Try to deliver to a waiting user
-					select {
-					case responseCh <- content:
-						// Delivered to user message handler
-					default:
-						// No one waiting — meditation or internal output
-						log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+				switch triggerSource {
+				case "meditation":
+					// Meditation: internal output, don't send to user.
+					log.Infof("[Agent][meditation] 冥想输出: %s", truncateLog(content))
+				case "async_result":
+					// Async command result — deliver to the user who initiated
+					// the command. Use replyTarget if set, otherwise lastUser.
+					targetUser := replyTarget.Load()
+					if targetUser == nil {
+						targetUser = lastUser.Load()
 					}
-					// Clear reply target — user interaction complete
-					replyTarget.Store(nil)
+					if targetUser != nil {
+						log.Infof("[Agent][async_result] 异步结果回复: %s", truncateLog(content))
+						select {
+						case responseCh <- content:
+						default:
+							_ = bot.SendTextToUser(ctx, *targetUser, content)
+						}
+					} else {
+						log.Infof("[Agent][async_result] 无目标用户，输出: %s", truncateLog(content))
+					}
+				default:
+					// User-triggered response — deliver to waiting user.
+					targetUser := replyTarget.Load()
+					if targetUser == nil {
+						targetUser = lastUser.Load()
+					}
+					if targetUser != nil {
+						select {
+						case responseCh <- content:
+						default:
+							_ = bot.SendTextToUser(ctx, *targetUser, content)
+						}
+						replyTarget.Store(nil)
+					} else {
+						log.Infof("[Agent][user] 无目标用户，输出: %s", truncateLog(content))
+					}
 				}
 				continue
 			}
@@ -336,11 +360,9 @@ func main() {
 						// thinking_plan: LLM decided to call tools
 						if msg.Content != "" {
 							log.Infof("[Agent][%s] 思考: %s", evtLabel, msg.Content)
-							// replyInterim(&replyTarget, bot, fmt.Sprintf("💭 %s", msg.Content))
 						}
 						for _, tc := range msg.ToolCalls {
 							log.Infof("[Agent][%s] 调用工具: %s(%s)", evtLabel, tc.Function.Name, string(tc.Function.Arguments))
-							// replyInterim(&replyTarget, bot, fmt.Sprintf("🔧 %s(%s)", tc.Function.Name, string(tc.Function.Arguments)))
 						}
 					} else if msg.Content != "" {
 						log.Infof("[Agent][%s] 回复: %s", evtLabel, msg.Content)
@@ -349,7 +371,6 @@ func main() {
 					// action_command: tool execution result
 					if msg.Content != "" {
 						log.Infof("[Agent][%s] 工具结果: %s", evtLabel, msg.Content)
-						// replyInterim(&replyTarget, bot, fmt.Sprintf("📋 %s", msg.Content))
 					}
 				case "user":
 					if msg.Content != "" {
@@ -410,6 +431,7 @@ func main() {
 
 			// Set reply target so the consumer can send interim messages to this user
 			replyTarget.Store(&msg.FromUserID)
+			lastUser.Store(&msg.FromUserID)
 
 			// Inject message into the persistent event loop.
 			ta.InjectMessage(model.Message{

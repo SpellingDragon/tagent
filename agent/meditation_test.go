@@ -15,7 +15,7 @@ type mockMessageInjector struct {
 	messages []model.Message
 }
 
-func (m *mockMessageInjector) InjectMessage(msg model.Message) {
+func (m *mockMessageInjector) InjectMessageWithSource(source string, msg model.Message) {
 	m.messages = append(m.messages, msg)
 }
 

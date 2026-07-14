@@ -81,6 +81,17 @@ type ContextManager struct {
 	bus        *EventBus
 	projection *SessionProjection
 	onEvent    func(evt *event.Event)
+
+	// triggerSource identifies what triggered the current RunFlow
+	// (e.g., "user", "meditation", "async_result"). Set by runEventLoop
+	// before calling RunFlow. Attached to outputCh events via
+	// StateDelta["trigger_source"] for deterministic consumer dispatch.
+	triggerSource string
+}
+
+// SetTriggerSource sets the trigger source for the next RunFlow call.
+func (cm *ContextManager) SetTriggerSource(source string) {
+	cm.triggerSource = source
 }
 
 // ContextManagerConfig holds everything needed to create a ContextManager.
@@ -332,6 +343,14 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	}
 
 	for fwEvt := range eventCh {
+		if fwEvt != nil && cm.triggerSource != "" {
+			// Attach trigger source to the event for deterministic
+			// consumer-side dispatch (meditation vs async_result vs user).
+			if fwEvt.StateDelta == nil {
+				fwEvt.StateDelta = make(map[string][]byte)
+			}
+			fwEvt.StateDelta["trigger_source"] = []byte(cm.triggerSource)
+		}
 		if cm.onEvent != nil && fwEvt != nil {
 			cm.onEvent(fwEvt)
 		}

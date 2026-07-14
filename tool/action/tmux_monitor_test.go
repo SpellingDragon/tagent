@@ -1138,7 +1138,7 @@ type mockInjector struct {
 	messages []model.Message
 }
 
-func (m *mockInjector) InjectMessage(msg model.Message) {
+func (m *mockInjector) InjectMessageWithSource(source string, msg model.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, msg)

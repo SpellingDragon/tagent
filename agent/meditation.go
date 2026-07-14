@@ -23,7 +23,7 @@ type MeditationConfig struct {
 // messageInjector is the interface for injecting messages into the event loop.
 // *TagentAgent satisfies this interface.
 type messageInjector interface {
-	InjectMessage(msg model.Message)
+	InjectMessageWithSource(source string, msg model.Message)
 }
 
 // MeditationManager periodically injects "meditation" external_input events
@@ -116,7 +116,7 @@ func (m *MeditationManager) checkAndMeditate() {
 
 	// Conditions met — inject meditation message.
 	msg := m.buildMeditationMessage(now)
-	m.injector.InjectMessage(msg)
+	m.injector.InjectMessageWithSource("meditation", msg)
 	m.lastMeditation.Store(now.UnixMilli())
 
 	log.Infof("[Meditation] triggered: gap=%s since last event", gap)
