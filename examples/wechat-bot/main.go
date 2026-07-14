@@ -253,10 +253,6 @@ func main() {
 	typingActive := atomic.Bool{}
 	// replyTarget tracks the current user to reply to. nil when no user is waiting.
 	var replyTarget atomic.Pointer[string]
-	// lastUser tracks the most recent user who sent a message.
-	// Used to deliver async results (e.g., [action_tool_result] responses)
-	// when replyTarget has been cleared after the initial response.
-	var lastUser atomic.Pointer[string]
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -294,39 +290,30 @@ func main() {
 					content = "(empty response)"
 				}
 
-				// Determine the target user for this response.
-				// Priority: replyTarget (user actively waiting) > lastUser (for async results)
-				targetUser := replyTarget.Load()
-				if targetUser == nil {
-					targetUser = lastUser.Load()
-				}
-
-				// Check if this is a meditation/internal response
+				// Check if this is a meditation/internal response (no user waiting)
 				isMeditation := false
 				// Meditation responses originate from [meditation] messages.
-				if strings.Contains(content, "[meditation]") {
+				// The LLM may or may not include the marker in its output.
+				// Primary check: no user is waiting (replyTarget nil).
+				// Secondary check: response content contains [meditation] marker.
+				if replyTarget.Load() == nil {
 					isMeditation = true
-				}
-				// Only treat as meditation if no user at all (not even lastUser)
-				if targetUser == nil {
+				} else if strings.Contains(content, "[meditation]") {
 					isMeditation = true
 				}
 
 				if isMeditation {
 					log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
+					// Don't clear replyTarget — no user interaction to complete
+					// Don't send to responseCh — no user handler is waiting
 				} else {
 					// Try to deliver to a waiting user
 					select {
 					case responseCh <- content:
 						// Delivered to user message handler
 					default:
-						// No one waiting — send directly via bot if we have a target
-						if targetUser != nil {
-							log.Infof("[Agent] 异步结果发送给用户 %s: %s", *targetUser, truncateLog(content))
-							_ = bot.SendTextToUser(ctx, *targetUser, content)
-						} else {
-							log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
-						}
+						// No one waiting — meditation or internal output
+						log.Infof("[Agent] 冥想/内部输出: %s", truncateLog(content))
 					}
 					// Clear reply target — user interaction complete
 					replyTarget.Store(nil)
@@ -423,7 +410,6 @@ func main() {
 
 			// Set reply target so the consumer can send interim messages to this user
 			replyTarget.Store(&msg.FromUserID)
-			lastUser.Store(&msg.FromUserID)
 
 			// Inject message into the persistent event loop.
 			ta.InjectMessage(model.Message{
