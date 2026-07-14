@@ -243,6 +243,11 @@ func buildAgent(
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: load system prompt: %w", name, err)
 	}
+	// Create hot-reloadable source for system prompt
+	var systemPromptSource *prompt.Source
+	if !acfg.SystemPrompt.IsEmpty() {
+		systemPromptSource = prompt.NewSource(loader, acfg.SystemPrompt)
+	}
 
 	// 3. Resolve model — per-agent override supported
 	agentModel := rc.resolveAgentModel(name, acfg, cfg)
@@ -309,6 +314,7 @@ func buildAgent(
 		Model:                agentModel,
 		MemoryStore:          memStore,
 		SystemPrompt:         systemPrompt,
+		SystemPromptSource:   systemPromptSource,
 		Tools:                tools,
 		MaxToolIterations:    acfg.MaxToolIterations,
 		MaxTokens:            acfg.MaxTokens,
@@ -347,11 +353,16 @@ func buildAgent(
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: load meditation prompt: %w", name, err)
 		}
+		// Create hot-reloadable source for meditation prompt
+		meditationPromptSource := prompt.NewSource(loader, prompt.CompositeConfig{
+			Files: []string{promptFile},
+		})
 		agentCfg.Meditation = agent.MeditationConfig{
-			Enabled:    true,
-			Interval:   interval,
-			MinGap:     minGap,
-			PromptText: promptText,
+			Enabled:      true,
+			Interval:     interval,
+			MinGap:       minGap,
+			PromptText:   promptText,
+			PromptSource: meditationPromptSource,
 		}
 	}
 
@@ -431,6 +442,12 @@ func buildAgentToolRef(
 			return nil, false, fmt.Errorf("create remote A2A agent %q: %w", tr.AgentID, err)
 		}
 		wrapper := agent.NewAgentToolWrapper(a2aAgent, desc, tr.EventParams, parentMemStore)
+		// Enable hot-reload for tool description if loaded from a file
+		if tr.DescriptionFile != "" {
+			wrapper.SetDescriptionSource(prompt.NewSource(loader, prompt.CompositeConfig{
+				Files: []string{tr.DescriptionFile},
+			}))
+		}
 		log.Infof("[tagent] created remote A2A agent tool: %s → %s", tr.AgentID, tr.Remote.URL)
 		return wrapper, false, nil
 	}
@@ -455,6 +472,12 @@ func buildAgentToolRef(
 
 	// Wrap with AgentToolWrapper — this replaces agenttool.NewTool().
 	wrapper := agent.NewAgentToolWrapper(agentImpl, desc, tr.EventParams, parentMemStore)
+	// Enable hot-reload for tool description if loaded from a file
+	if tr.DescriptionFile != "" {
+		wrapper.SetDescriptionSource(prompt.NewSource(loader, prompt.CompositeConfig{
+			Files: []string{tr.DescriptionFile},
+		}))
+	}
 	return wrapper, false, nil
 }
 

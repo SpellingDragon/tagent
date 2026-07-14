@@ -45,6 +45,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/prompt"
 )
 
 // Closer is implemented by components that hold resources requiring cleanup
@@ -141,17 +142,18 @@ type AsyncTaskChecker interface {
 
 // TagentConfig holds configuration for creating a TagentAgent.
 type TagentConfig struct {
-	Model             model.Model        // Required: LLM model
-	MemoryStore       memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
-	SystemPrompt      string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
-	Tools             []tool.Tool        // CallableTools to register
-	MaxToolIterations int                // Default: 200
-	MaxTokens         int                // Token budget for context (default: 8000)
-	CompressThreshold float64            // Compression trigger threshold (default: 0.8)
-	SummaryModel      model.Model        // Optional: for Stage 2 LLM summary
-	Temperature       float64            // Optional: LLM temperature (default: 0.7)
-	KeepRecentTasks   int                // Min task segments to keep during compression (default: 2)
-	Compress          CompressConfig     // SmartCompressor parameters
+	Model              model.Model        // Required: LLM model
+	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
+	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
+	SystemPromptSource *prompt.Source     // Hot-reloadable system prompt (optional, overrides SystemPrompt)
+	Tools              []tool.Tool        // CallableTools to register
+	MaxToolIterations  int                // Default: 200
+	MaxTokens          int                // Token budget for context (default: 8000)
+	CompressThreshold  float64            // Compression trigger threshold (default: 0.8)
+	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
+	Temperature        float64            // Optional: LLM temperature (default: 0.7)
+	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
+	Compress           CompressConfig     // SmartCompressor parameters
 
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
 	ThinkingEnabled      *bool
@@ -242,6 +244,7 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		Model:                cfg.Model,
 		Tools:                cfg.Tools,
 		SystemPrompt:         systemPrompt,
+		SystemPromptSource:   cfg.SystemPromptSource,
 		Temperature:          cfg.Temperature,
 		MaxToolIters:         cfg.MaxToolIterations,
 		ThinkingEnabled:      cfg.ThinkingEnabled,

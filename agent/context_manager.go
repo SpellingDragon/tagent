@@ -8,6 +8,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/prompt"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -91,6 +92,10 @@ type ContextManager struct {
 	// partitionID is used for Snowflake EventKey generation when persisting
 	// bus events directly (bypassing MemoryPlugin's OnEvent hook).
 	partitionID int
+
+	// systemPromptSource enables hot-reload of the system prompt.
+	// When set, the system message is re-read from files before each LLM call.
+	systemPromptSource *prompt.Source
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
@@ -108,6 +113,10 @@ type ContextManagerConfig struct {
 	SystemPrompt string
 	Temperature  float64
 	MaxToolIters int
+
+	// SystemPromptSource enables hot-reload of system prompt from files.
+	// When set, the system message is re-read from disk before each LLM call.
+	SystemPromptSource *prompt.Source
 
 	// Thinking/reasoning controls
 	ThinkingEnabled      *bool
@@ -135,20 +144,21 @@ type ContextManagerConfig struct {
 // with ContextCompressor as the sole BeforeModel compression callback.
 func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	cm := &ContextManager{
-		tokenCounter:    cfg.TokenCounter,
-		memStore:        cfg.MemStore,
-		maxTokens:       cfg.MaxTokens,
-		thresholdPct:    cfg.ThresholdPct,
-		recentFullCount: 4,
-		runner:          nil,
-		name:            cfg.Name,
-		userID:          cfg.UserID,
-		sessionID:       cfg.SessionID,
-		outputCh:        cfg.OutputCh,
-		bus:             cfg.Bus,
-		projection:      cfg.Projection,
-		onEvent:         cfg.OnEvent,
-		partitionID:     memory.PartitionIDFromName(cfg.Name),
+		tokenCounter:       cfg.TokenCounter,
+		memStore:           cfg.MemStore,
+		maxTokens:          cfg.MaxTokens,
+		thresholdPct:       cfg.ThresholdPct,
+		recentFullCount:    4,
+		runner:             nil,
+		name:               cfg.Name,
+		userID:             cfg.UserID,
+		sessionID:          cfg.SessionID,
+		outputCh:           cfg.OutputCh,
+		bus:                cfg.Bus,
+		projection:         cfg.Projection,
+		onEvent:            cfg.OnEvent,
+		partitionID:        memory.PartitionIDFromName(cfg.Name),
+		systemPromptSource: cfg.SystemPromptSource,
 	}
 
 	// Build ContextCompressor from SmartCompressor.
@@ -166,6 +176,30 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
+
+	// Callback -1: System prompt hot-reload.
+	// When SystemPromptSource is configured, re-reads system prompt files
+	// before each LLM call and replaces the system message.
+	// This enables prompt tuning without restarting the agent process.
+	if cm.systemPromptSource != nil {
+		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			freshPrompt, err := cm.systemPromptSource.Get()
+			if err != nil || freshPrompt == "" {
+				return nil, nil // Graceful: keep existing system prompt
+			}
+			// Replace or insert system message at position 0
+			if len(args.Request.Messages) > 0 && args.Request.Messages[0].Role == model.RoleSystem {
+				args.Request.Messages[0].Content = freshPrompt
+			} else {
+				// Prepend system message
+				args.Request.Messages = append(
+					[]model.Message{model.NewSystemMessage(freshPrompt)},
+					args.Request.Messages...,
+				)
+			}
+			return nil, nil
+		})
+	}
 
 	// Unified BeforeModel callback: InjectBusInputs + ContextCompressor.
 	//

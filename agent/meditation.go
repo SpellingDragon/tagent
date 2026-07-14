@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SpellingDragon/tagent/prompt"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -14,10 +15,11 @@ import (
 // MeditationConfig is the runtime configuration for the meditation manager.
 // Converted from config.MeditationConfig (string durations) by tagent.go.
 type MeditationConfig struct {
-	Enabled    bool
-	Interval   time.Duration // Check interval (default: 30m)
-	MinGap     time.Duration // Minimum idle gap for valid meditation (default: 2h)
-	PromptText string        // Meditation prompt text (loaded from file)
+	Enabled      bool
+	Interval     time.Duration  // Check interval (default: 30m)
+	MinGap       time.Duration  // Minimum idle gap for valid meditation (default: 2h)
+	PromptText   string         // Meditation prompt text (static, loaded once at init)
+	PromptSource *prompt.Source // Hot-reloadable meditation prompt (optional, overrides PromptText)
 }
 
 // messageInjector is the interface for injecting messages into the event loop.
@@ -130,6 +132,7 @@ func (m *MeditationManager) checkAndMeditate() {
 
 // buildMeditationMessage constructs the meditation external_input message.
 // The message includes a [meditation] marker, timestamps, and the prompt text.
+// If PromptSource is configured, the prompt is re-read from disk (hot-reload).
 func (m *MeditationManager) buildMeditationMessage(now time.Time) model.Message {
 	var lastMed string
 	if lm := m.lastMeditation.Load(); lm > 0 {
@@ -138,9 +141,17 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time) model.Message 
 		lastMed = "首次冥想"
 	}
 
+	// Hot-reload: prefer PromptSource over static PromptText
+	promptText := m.cfg.PromptText
+	if m.cfg.PromptSource != nil {
+		if loaded, err := m.cfg.PromptSource.Get(); err == nil && loaded != "" {
+			promptText = loaded
+		}
+	}
+
 	content := fmt.Sprintf("[meditation] 这是一次定时冥想事件。\n\n"+
 		"上次有效冥想时间：%s\n当前时间：%s\n\n%s",
-		lastMed, now.UTC().Format("2006-01-02 15:04:05"), m.cfg.PromptText)
+		lastMed, now.UTC().Format("2006-01-02 15:04:05"), promptText)
 
 	return model.Message{
 		Role:    model.RoleUser,

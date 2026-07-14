@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/prompt"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -111,6 +112,7 @@ func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
 type AgentToolWrapper struct {
 	agent            agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
 	desc             string
+	descSource       *prompt.Source     // Hot-reloadable description source (optional)
 	eventParams      []string           // Which event-derived params to declare (e.g., "event_key")
 	parentStore      memory.MemoryStore // Parent agent's MemStore for resolving event_key
 	parentProjection *SessionProjection // Parent agent's projection for auto-inject fallback
@@ -146,11 +148,26 @@ func (w *AgentToolWrapper) SetParentProjection(p *SessionProjection) {
 	w.parentProjection = p
 }
 
+// SetDescriptionSource sets a hot-reloadable prompt source for the tool description.
+// When set, Declaration() re-reads the description from disk on each call,
+// detecting file changes via mtime. Falls back to static desc if source is nil or read fails.
+func (w *AgentToolWrapper) SetDescriptionSource(src *prompt.Source) {
+	w.descSource = src
+}
+
 // Declaration implements trpctool.Tool.
 func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
+	desc := w.desc
+	// Hot-reload: if descSource is set, re-read from disk
+	if w.descSource != nil {
+		if loaded, err := w.descSource.Get(); err == nil && loaded != "" {
+			desc = loaded
+		}
+	}
+
 	decl := &trpctool.Declaration{
 		Name:        w.agent.Info().Name,
-		Description: w.desc,
+		Description: desc,
 		InputSchema: &trpctool.Schema{
 			Type:       "object",
 			Properties: map[string]*trpctool.Schema{},
