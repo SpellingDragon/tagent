@@ -409,7 +409,7 @@ type ActionProperties struct {
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
 	Command string            `json:"command"`
-	Async   bool              `json:"async,omitempty"`  // If true, run asynchronously via tmux. If false (default), run synchronously and block until completion.
+	Async   bool              `json:"async,omitempty"` // If true, run asynchronously via tmux. If false (default), run synchronously and block until completion.
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`

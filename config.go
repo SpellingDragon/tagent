@@ -175,9 +175,9 @@ type AgentConfig struct {
 
 	// Generation controls thinking/reasoning mode for the LLM.
 	// When set, these fields are merged into model.GenerationConfig.
-	ThinkingEnabled  *bool   `json:"thinking_enabled,omitempty"  yaml:"thinking_enabled,omitempty"`
-	ThinkingTokens    *int    `json:"thinking_tokens,omitempty"   yaml:"thinking_tokens,omitempty"`
-	ReasoningEffort   *string `json:"reasoning_effort,omitempty"  yaml:"reasoning_effort,omitempty"`
+	ThinkingEnabled *bool   `json:"thinking_enabled,omitempty"  yaml:"thinking_enabled,omitempty"`
+	ThinkingTokens  *int    `json:"thinking_tokens,omitempty"   yaml:"thinking_tokens,omitempty"`
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"  yaml:"reasoning_effort,omitempty"`
 	// ReasoningContentMode controls how reasoning_content from history is handled.
 	// "keep_all" (keep everything), "discard_previous" (default, keep current turn only),
 	// "discard_all" (strip all reasoning_content).
