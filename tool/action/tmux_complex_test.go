@@ -24,6 +24,7 @@ func TestActionTool_TmuxComplexOutput(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": `echo '{"name":"test","value":42,"items":["a","b","c"]}' && echo "---SEPARATOR---" && for i in 1 2 3; do echo "line $i: $(date)"; done && echo "COMPLEX_END"`,
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)
@@ -135,6 +136,7 @@ func TestActionTool_TmuxLongOutput(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": `for i in $(seq 1 100); do echo "line $i: this is a long line of text to fill output buffer with meaningful content"; done && echo "END_MARKER"`,
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)
@@ -201,6 +203,7 @@ func TestActionTool_TmuxExitCode(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": "echo 'before_error' && exit 42 && echo 'after_error'",
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Call failed: %v", err)

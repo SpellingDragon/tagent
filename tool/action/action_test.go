@@ -79,6 +79,7 @@ func quickAsyncTest(t *testing.T) (any, error) {
 	ctx := context.Background()
 	return tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": "echo async_test",
+		"async":   true,
 	}))
 }
 
@@ -126,7 +127,7 @@ func TestActionTool_Timeout(t *testing.T) {
 	}
 }
 
-// Test 5: mode 字段已废弃，任何值都被忽略（tmux 可用时走 async）
+// Test 5: mode 字段已废弃，任何值都被忽略（默认走 sync）
 func TestActionTool_ModeIgnored(t *testing.T) {
 	tool := NewActionTool()
 	tool.tmuxExecutor = nil // Force sync for predictable test.
@@ -154,6 +155,7 @@ func TestTmuxMonitor_GetSession(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": "echo monitor_test",
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Async exec failed: %v", err)
@@ -291,6 +293,7 @@ func TestTmuxMonitor_StateDetection(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": "sleep 1 && echo done",
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Tmux exec failed: %v", err)
@@ -345,6 +348,7 @@ func TestTmuxMonitor_KillSession(t *testing.T) {
 	ctx := context.Background()
 	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
 		"command": "sleep 60",
+		"async":   true,
 	}))
 	if err != nil {
 		t.Fatalf("Tmux exec failed: %v", err)

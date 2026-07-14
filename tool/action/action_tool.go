@@ -25,15 +25,17 @@ type MessageInjector interface {
 	InjectMessageWithSource(source string, msg model.Message)
 }
 
-// ActionTool is a pure execution tool for running actions on real resources.
-// It supports two modes: exec (sync) and tmux_exec (async).
+// ActionTool is a pure execution tool for running shell commands.
+// It supports two modes controlled by the "async" parameter:
+//   - Sync mode (default, async=false): runs via exec.Command, blocks until
+//     completion (max 60s), returns ActionExecResult with stdout/stderr.
+//   - Async mode (async=true): runs in a tmux session, returns immediately
+//     with TmuxExecResponse. TmuxMonitor detects completion and injects
+//     [action_tool_result] events via MessageInjector.
 //
 // Design principle: ActionTool only executes actions.
 // KnowledgeAgent is responsible for "understanding" (translating skills/MCP to actions).
 // ActionTool is responsible for "execution" only.
-//
-// When a tmux session state changes, ActionTool formats the state change
-// event and injects it via MessageInjector to trigger a new agent iteration.
 //
 // Tool name is "action" — it represents performing behavioral actions on
 // real-world resources triggered by natural language descriptions.
@@ -107,7 +109,7 @@ func (ct *ActionTool) SetMessageInjector(injector MessageInjector) {
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
-		description: "Execute actions on real-world resources via tmux. Commands run asynchronously — you will receive a session_id with status 'waiting_async_response' immediately. DO NOT retry or call this tool again for the same command. Wait for the [action_tool_result] event which will contain the execution output. Describe the behavior you want in natural language or as a shell command.",
+		description: "Execute shell commands on the system. Commands run synchronously by default (async=false) and return stdout/stderr directly. Set async=true for long-running commands (builds, training, servers, watchers) — these return a session_id immediately and the output arrives later via [action_tool_result] event. When in doubt, use sync first; if it times out, retry with async=true.",
 		executor:    NewActionExecutor(),
 	}
 
@@ -161,6 +163,10 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 					Type:        "string",
 					Description: "The action to execute, described as a shell command. Runs via sh -c so pipes, redirects, and chaining are supported.",
 				},
+				"async": {
+					Type:        "boolean",
+					Description: "If true, run the command asynchronously via tmux. Use for long-running commands (builds, training, servers, watchers like tail -f) that may exceed 60 seconds. You will receive a session_id with status 'waiting_async_response' — DO NOT retry the same command. Wait for the [action_tool_result] event. If false or omitted (default), the command runs synchronously and blocks until completion (max 60s timeout). You receive stdout/stderr directly. When in doubt, use sync first; if it times out, retry with async=true.",
+				},
 				"work_dir": {
 					Type:        "string",
 					Description: "Working directory for command execution",
@@ -172,7 +178,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 				},
 				"is_tui": {
 					Type:        "boolean",
-					Description: "Set to true if the command is a TUI application (e.g., vim, htop, qodercli). TUI apps use a different monitoring strategy that skips output-stability detection.",
+					Description: "Set to true if the command is a TUI application (e.g., vim, htop, qodercli). TUI apps require async=true and use a different monitoring strategy that skips output-stability detection.",
 				},
 			},
 			Required: []string{"command"},
@@ -182,13 +188,15 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 
 // Call implements tool.CallableTool.
 //
-// All invocations are routed through tmux async (executeAsync). If tmux is
-// not available, falls back to synchronous execution (executeSync) which
-// blocks until the command completes — this is a degraded mode.
+// By default (async=false), commands run synchronously via exec.Command and
+// block until completion (max 60s). The LLM receives stdout/stderr directly
+// as the tool result and can proceed immediately.
 //
-// The async path returns a TmuxExecResponse (session_id + status:running).
-// The actual command output will arrive later via TmuxMonitor callback,
-// which publishes an external_input event to the EventBus.
+// When async=true, commands run in a tmux session and return immediately with
+// a TmuxExecResponse (session_id + status:"waiting_async_response"). The actual
+// output arrives later via TmuxMonitor callback as an [action_tool_result] event.
+//
+// If tmux is not available, async requests fall back to synchronous execution.
 func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var args ActionArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
@@ -199,15 +207,18 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: command is required")
 	}
 
-	log.Infof("[ActionTool] executing cmd=%q", args.Command)
+	log.Infof("[ActionTool] executing cmd=%q async=%v", args.Command, args.Async)
 
-	// Primary path: tmux async.
-	if ct.tmuxExecutor != nil {
-		return ct.executeAsync(ctx, args)
+	if args.Async {
+		// Async path: tmux + TmuxMonitor.
+		if ct.tmuxExecutor != nil {
+			return ct.executeAsync(ctx, args)
+		}
+		log.Warnf("[ActionTool] async requested but tmux unavailable, falling back to sync exec")
+		return ct.executeSync(ctx, args)
 	}
 
-	// Fallback: synchronous exec (tmux not available).
-	log.Warnf("[ActionTool] tmux not available, falling back to sync exec")
+	// Default path: synchronous exec.
 	return ct.executeSync(ctx, args)
 }
 
@@ -398,6 +409,7 @@ type ActionProperties struct {
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
 	Command string            `json:"command"`
+	Async   bool              `json:"async,omitempty"`  // If true, run asynchronously via tmux. If false (default), run synchronously and block until completion.
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
