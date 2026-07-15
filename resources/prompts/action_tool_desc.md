@@ -1,5 +1,24 @@
 Action executor — perform behavioral actions on real-world resources.
 
+Through natural language, describe the behavior you want to perform on real resources, and this tool triggers execution. It translates your intent into concrete shell commands and runs them asynchronously.
+
+**Execution model: All commands run asynchronously via tmux.**
+- When you call this tool, it returns immediately with a session_id
+- The actual command result arrives later via `[action_tool_result]` event when the command stabilizes or completes
+- You will receive the result automatically — do NOT retry the same command while waiting
+- For quick commands (e.g., `ls /tmp`), results typically arrive in 3-5 seconds
+- For long-running commands (e.g., `tail -f`, `make build`), results arrive when the command's output stabilizes
+
+**When to use this tool:**
+- After knowledge has found the right approach
+- When you need to run shell commands, build projects, start services, or perform any system operation
+- Skills live in `./skills/<name>/` directory — run them via shell
+
+**Command chaining:** You can chain commands with `&&` or pipe with `|` as needed.
+
+Knowledge discovers how; action executes.
+Action executor — perform behavioral actions on real-world resources.
+
 Action is an execution hub agent. It receives behavioral instructions from you (the planner) and orchestrates execution through specialized sub-agents:
 
 - **read**: Read and analyze files, fetch web resources, search code

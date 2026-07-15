@@ -738,6 +738,43 @@ func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message)
 	log.Warnf("[InjectMessageWithSource] agent %q has no bus, message dropped", ta.name)
 }
 
+// InjectMessageWithMetadata injects a message with a source label and
+// arbitrary metadata. The metadata is propagated to all events derived
+// from this message via event.StateDelta with "meta_" prefix.
+//
+// Common metadata keys:
+//   - "chat_id": target user/session identifier for response routing
+//   - "user_name": human-readable user identifier for logs
+//   - "channel": communication channel (wechat, discord, etc.)
+func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Message, metadata map[string]string) {
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.UpdateLastEventTime(time.Now())
+	}
+	evt := NewExternalInputEvent(source, msg)
+	// 将 metadata 复制到 AgentEvent.Metadata
+	if evt.Metadata == nil {
+		evt.Metadata = make(map[string]any)
+	}
+	for k, v := range metadata {
+		if k == "" || v == "" {
+			continue
+		}
+		evt.Metadata[k] = v
+	}
+	if ta.persistentBus != nil {
+		ta.persistentBus.Publish(evt)
+		return
+	}
+	ta.activeBusMu.Lock()
+	bus := ta.activeBus
+	ta.activeBusMu.Unlock()
+	if bus != nil {
+		bus.Publish(evt)
+		return
+	}
+	log.Warnf("[InjectMessageWithMetadata] agent %q has no bus, message dropped", ta.name)
+}
+
 // setActiveBus sets the current active bus for event injection.
 // Called by StartLoop (sets persistentBus) and Run() (sets invBus).
 func (ta *TagentAgent) setActiveBus(bus *EventBus) {
@@ -789,15 +826,35 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 }
 
 // makeOnEventCallback creates the onEvent callback for StartLoop and Run().
-// It only performs projection.Append — sessionSvc.AppendEvent and
-// MemoryPlugin.OnEvent are handled by the framework Runner internally.
+// It performs two tasks:
+// 1. Append EventReference to the projection
+// 2. Propagate currentMetadata from ContextManager to event.StateDelta with "meta_" prefix
 func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *SessionProjection) func(evt *event.Event) {
 	return func(evt *event.Event) {
-		if evt == nil || projection == nil {
+		if evt == nil {
 			return
 		}
-		if ref, ok := BuildEventReference(evt); ok {
-			projection.Append(ref)
+		// Propagate metadata from ContextManager to event.StateDelta
+		if ta.contextManager != nil {
+			md := ta.contextManager.GetInvocationMetadata()
+			if len(md) > 0 {
+				if evt.StateDelta == nil {
+					evt.StateDelta = make(map[string][]byte)
+				}
+				for k, v := range md {
+					key := k
+					if !strings.HasPrefix(key, "meta_") {
+						key = "meta_" + key
+					}
+					evt.StateDelta[key] = []byte(v)
+				}
+			}
+		}
+		// Append to projection
+		if projection != nil {
+			if ref, ok := BuildEventReference(evt); ok {
+				projection.Append(ref)
+			}
 		}
 	}
 }
@@ -890,6 +947,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// events via StateDelta["trigger_source"] in RunFlow.
 		cm.SetTriggerSource(extractTriggerSource(events))
 
+		// Extract and propagate metadata (chat_id, user_name, etc.) from
+		// the source event to all derived events via StateDelta["meta_*"].
+		cm.SetInvocationMetadata(extractRootMetadata(events))
+
 		// RunFlow with exponential backoff retry
 		var lastErr error
 		retried := false
@@ -951,6 +1012,31 @@ func extractTriggerSource(events []*AgentEvent) string {
 		}
 	}
 	return "user"
+}
+
+// extractRootMetadata extracts metadata from a batch of AgentEvents.
+// Collects metadata from external_input events (non-agent_output, non-error)
+// and merges them into a single map. Later events override earlier ones.
+// Empty keys or values are ignored.
+func extractRootMetadata(events []*AgentEvent) map[string]string {
+	md := make(map[string]string)
+	for _, evt := range events {
+		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
+			continue
+		}
+		if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
+			continue
+		}
+		for k, v := range evt.Metadata {
+			if k == "" {
+				continue
+			}
+			if s, ok := v.(string); ok && s != "" {
+				md[k] = s
+			}
+		}
+	}
+	return md
 }
 
 // publishErrorEvent publishes an error event to EventBus so external

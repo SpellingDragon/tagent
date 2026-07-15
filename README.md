@@ -15,7 +15,7 @@ tagent 构建于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go) �
 
 ## 设计哲学
 
-tagent 的核心设计思想源于 [prototype/agent.go](prototype/agent.go)（126 行抽象实现）。原型用可替换的函数字段（`OnEvents`、`Compact`、`Run`）定义了一个可扩展的框架骨架，核心哲学是：**inputs 是 event flow 的投影，event bus 承载 event flow，inputs 满则触发 Compact 和 memory 持久化**。
+tagent 采用**事件驱动、记忆中心**的设计理念，核心哲学是：**inputs 是 event flow 的投影，event bus 承载 event flow，inputs 满则触发 Compact 和 memory 持久化**。
 
 ### 三个不变量
 
@@ -25,19 +25,9 @@ tagent 的核心设计思想源于 [prototype/agent.go](prototype/agent.go)（12
 | **② Compact 修改投影** | 不修改事件流（bus）也不修改永久存储 | `Compactor.Compact` 替换 `SessionProjection` 中的旧引用为 summary reference |
 | **③ 工具结果回写 bus** | 不直接操作 inputs | 框架 Runner 执行工具后产生的事件经 `RunFlow` 回调回到 `SessionProjection` |
 
-### 原型到实现的映射
-
-| 原型字段 | 当前实现 | 说明 |
-|---------|---------|------|
-| `eventBus` | `agent.EventBus` | 带缓冲 channel 的 per-agent 事件队列 |
-| `DefaultRun` | `TagentAgent.runEventLoop` | 拉取事件 → 合并 → 调用 `ContextManager.RunFlow` |
-| `OnEvents` | `ContextManager.BuildInvocation` + `onEvent` 回调 | 合并事件并追加投影引用 |
-| `Compact` | `SmartCompressor` + `Compactor` | 分别压缩 LLM 视图和清理投影 |
-| `ModelCompletion` | 框架 `runner.Run` | ReAct 循环由 trpc-agent-go 的 LLMAgent/Runner 执行 |
-
 ### 与 trpc-agent-go 的关系
 
-tagent 复用框架的接口原语（Agent、Model、Tool、Plugin、Session、Event、Invocation）和 ReAct 执行能力。tagent 独有的扩展层包括：EventBus、`runEventLoop`、SessionProjection、MemoryPlugin、SummaryPlugin、ContextManager（含 SmartCompressor/Compactor）、AgentToolWrapper、MeditationManager 和 TrajectoryRecorder。
+tagent 构建于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go) 之上，复用框架的接口原语（Agent、Model、Tool、Plugin、Session、Event、Invocation）和 ReAct 执行能力。tagent 的扩展层包括：EventBus、`runEventLoop`、SessionProjection、MemoryPlugin、SummaryPlugin、ContextManager（含 SmartCompressor/Compactor）、AgentToolWrapper、MeditationManager 和 TrajectoryRecorder。
 
 ## 核心概念
 
@@ -87,17 +77,6 @@ graph TB
 | **思考** | `thinking_recall` | RecallAgent 输出 | 是 |
 | **思考** | `thinking_knowledge` | KnowledgeAgent 输出 | 是 |
 | **内部** | `context_compress` | SmartCompressor/Compactor 压缩后的摘要标记 | 否（仅 LLM 视图/投影摘要） |
-
-### 传统 Agent vs tagent
-
-| 维度 | 传统 Agent | tagent |
-|------|-----------|--------|
-| 执行模型 | 同步 React Loop | 事件驱动 EventBus + `runEventLoop` |
-| 工具调用 | 由框架 Runner 内部同步/异步执行 | 由框架 Runner 执行，事件经回调追加到投影 |
-| 上下文传递 | 函数参数传递 | MemoryStore + EventKey |
-| 记忆角色 | 可选组件 | 核心中枢 |
-| 上下文溢出 | 硬截断 | SmartCompressor 按任务边界压缩 + Compactor 清理投影 |
-| 外部输入 | 必须等待当前轮次 | 随时 `InjectMessage` 到 EventBus |
 
 ## 架构
 
@@ -328,7 +307,12 @@ sequenceDiagram
     CM->>EB: Publish(agent_output echo)
 ```
 
-**消费模式**：应用侧在 `StartLoop` 后启动持续消费 goroutine，持续读取 outputCh 直到 `StopLoop` 关闭。消费者按事件类型分发：`agent_output` 回复用户（如有等待中的用户消息），中间事件（`thinking_plan`、`action_command`）记录日志或更新 UI。
+**消费模式**：应用侧在 `StartLoop` 后启动持续消费 goroutine，持续读取 outputCh 直到 `StopLoop` 关闭。消费者作为**单一决策点**，从事件 `StateDelta` 中提取 `trigger_source` 和 `meta_chat_id`，按触发源路由响应：
+- `trigger_source=user` 或 `async_result`：提取 `meta_chat_id`，调用 `bot.SendTextToUser(chatID, content)` 发送响应
+- `trigger_source=meditation` 或 `error`：仅记录日志，不发送给用户
+- 长文本（>2000 字符）使用 `SendLongText` 或截断后发送
+
+这种设计确保多用户并发消息不会串线，异步命令结果能正确路由到原始用户。
 
 ### 场景二：子 Agent 与 A2A 远程通信
 

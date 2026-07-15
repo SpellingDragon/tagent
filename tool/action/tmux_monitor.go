@@ -25,6 +25,11 @@ type TmuxMonitor struct {
 	stopCh   chan struct{}
 	running  atomic.Bool
 
+	// lastNotifiedStatus tracks the last state for which we triggered a callback
+	// for each session. This prevents duplicate callbacks for the same stable state
+	// (e.g., Stable -> Stable should not trigger twice).
+	lastNotifiedStatus map[string]SessionStatus
+
 	// StateChangeCallback is called when session state changes.
 	// The callback receives session ID, old status, new status, and output snapshot.
 	// It's the caller's responsibility to store events to MemoryStore.
@@ -108,6 +113,7 @@ func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor {
 		heartbeatTimeout:          defaultCfg.HeartbeatTimeout,
 		sessions:                  make(map[string]*TmuxSession),
 		stopCh:                    make(chan struct{}),
+		lastNotifiedStatus:        make(map[string]SessionStatus),
 	}
 
 	for _, opt := range opts {
@@ -264,10 +270,38 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	}
 
 	sessionID := session.ID
+
+	// Check if we should trigger a callback:
+	// 1. Callback must be registered
+	// 2. Both old and new states must be meaningful (not FakeDead/FakeAlive)
+	// 3. New state must be different from the last notified state (prevent duplicates)
+	shouldCallback := false
+	if tm.StateChangeCallback != nil && isMeaningfulState(oldStatus) && isMeaningfulState(newStatus) {
+		lastNotified := tm.lastNotifiedStatus[sessionID]
+		if lastNotified != newStatus {
+			tm.lastNotifiedStatus[sessionID] = newStatus
+			shouldCallback = true
+		}
+	}
+
 	tm.mu.Unlock()
 
-	if tm.StateChangeCallback != nil {
+	// Trigger callback outside the lock to avoid holding the lock during
+	// potentially slow callback execution.
+	if shouldCallback {
 		tm.StateChangeCallback(sessionID, oldStatus, newStatus, newOutput)
+	}
+}
+
+// isMeaningfulState returns true for states that warrant event injection.
+// Meaningful states are: Running, Stable, Completed, Error, TimedOut.
+// Intermediate states (FakeDead, FakeAlive) are suppressed to avoid event noise.
+func isMeaningfulState(s SessionStatus) bool {
+	switch s {
+	case SessionRunning, SessionStable, SessionCompleted, SessionError, SessionTimedOut:
+		return true
+	default:
+		return false
 	}
 }
 

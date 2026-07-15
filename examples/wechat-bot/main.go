@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -246,17 +247,10 @@ func main() {
 	//     - action_command (tool result): reply interim to user
 	//     - other events: log for visibility
 	//
-	//     The consumer holds a reference to the current reply target (fromUserID),
-	//     set by the message handler when a user message is being processed.
-	//     When no user is waiting, interim messages go to log only.
-	responseCh := make(chan string, 1) // buffered: at most one pending response
-	typingActive := atomic.Bool{}
-	// replyTarget tracks the current user to reply to. nil when no user is waiting.
-	var replyTarget atomic.Pointer[string]
-	// lastUser tracks the most recent user who sent a message.
-	// Used to deliver async_result responses when replyTarget has been
-	// cleared after the initial response.
-	var lastUser atomic.Pointer[string]
+	//     Consumer uses metadata (chat_id, user_name) from StateDelta to route
+	//     responses to the correct user. This eliminates the need for replyTarget
+	//     and lastUser tracking, and fixes the responseCh deadlock bug.
+	typingActive := sync.Map{} // chat_id -> time.Time
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -287,12 +281,23 @@ func main() {
 			}
 
 			// Extract deterministic trigger source (written by RunFlow).
-			// Values: "user", "meditation", "async_result".
-			// Eliminates the need for content-based inference.
+			// Values: "user", "meditation", "async_result", "error".
 			triggerSource := "user"
 			if evt.StateDelta != nil {
 				if ts, ok := evt.StateDelta["trigger_source"]; ok && len(ts) > 0 {
 					triggerSource = string(ts)
+				}
+			}
+
+			// Extract chat_id and user_name from metadata (written by onEvent callback)
+			chatID := ""
+			userName := ""
+			if evt.StateDelta != nil {
+				if cid, ok := evt.StateDelta["meta_chat_id"]; ok && len(cid) > 0 {
+					chatID = string(cid)
+				}
+				if un, ok := evt.StateDelta["meta_user_name"]; ok && len(un) > 0 {
+					userName = string(un)
 				}
 			}
 
@@ -304,43 +309,56 @@ func main() {
 					content = "(empty response)"
 				}
 
+				// Single decision point: route based on trigger_source and chat_id
 				switch triggerSource {
 				case "meditation":
 					// Meditation: internal output, don't send to user.
 					log.Infof("[Agent][meditation] 冥想输出: %s", truncateLog(content))
-				case "async_result":
-					// Async command result — deliver to the user who initiated
-					// the command. Use replyTarget if set, otherwise lastUser.
-					targetUser := replyTarget.Load()
-					if targetUser == nil {
-						targetUser = lastUser.Load()
+				case "error":
+					// Error: log only, don't send to user.
+					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
+				case "user", "async_result":
+					// User or async_result: deliver to user if chat_id exists
+					if chatID == "" {
+						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
+						continue
 					}
-					if targetUser != nil {
-						log.Infof("[Agent][async_result] 异步结果回复: %s", truncateLog(content))
-						select {
-						case responseCh <- content:
-						default:
-							_ = bot.SendTextToUser(ctx, *targetUser, content)
+
+					// Stop typing indicator for this user
+					if startTime, ok := typingActive.Load(chatID); ok {
+						if t, ok := startTime.(time.Time); ok && time.Since(t) < 60*time.Second {
+							_ = bot.StopTyping(ctx, chatID)
 						}
-					} else {
-						log.Infof("[Agent][async_result] 无目标用户，输出: %s", truncateLog(content))
+						typingActive.Delete(chatID)
+					}
+
+					// Log the response
+					userLabel := chatID
+					if userName != "" {
+						userLabel = fmt.Sprintf("%s(%s)", userName, chatID)
+					}
+					log.Infof("[Agent][%s->%s] %s", triggerSource, userLabel, truncateLog(content))
+
+					// Send reply — use SendTextToUser to get the latest context token
+					// (interim messages may have refreshed the token)
+					if len(content) > 2000 {
+						// For long text, try SendLongText first
+						token, _ := bot.GetContextToken(chatID)
+						if token != "" {
+							_, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token)
+							if err == nil {
+								continue
+							}
+							// Fall through to SendTextToUser with truncated text
+							content = content[:2000] + "\n\n[Message truncated]"
+						}
+					}
+					if err := bot.SendTextToUser(ctx, chatID, content); err != nil {
+						log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
 					}
 				default:
-					// User-triggered response — deliver to waiting user.
-					targetUser := replyTarget.Load()
-					if targetUser == nil {
-						targetUser = lastUser.Load()
-					}
-					if targetUser != nil {
-						select {
-						case responseCh <- content:
-						default:
-							_ = bot.SendTextToUser(ctx, *targetUser, content)
-						}
-						replyTarget.Store(nil)
-					} else {
-						log.Infof("[Agent][user] 无目标用户，输出: %s", truncateLog(content))
-					}
+					// Unknown trigger source: log only
+					log.Warnf("[Agent][%s] 未知触发源，输出: %s", triggerSource, truncateLog(content))
 				}
 				continue
 			}
@@ -392,7 +410,6 @@ func main() {
 	//     To allow concurrent message processing (so user B's InjectMessage
 	//     reaches persistentBus while Agent is still processing A), we wrap
 	//     the handler to run in a goroutine.
-	requestTimeout := time.Duration(tagentCfg.RequestTimeoutSeconds) * time.Second
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
 		text := msg.Text()
@@ -404,82 +421,26 @@ func main() {
 		// This allows subsequent user messages to be injected into persistentBus
 		// while the agent is still processing the current message.
 		go func() {
-			// Show typing indicator
+			// Show typing indicator and track it by chat_id
 			_ = bot.SendTyping(ctx, msg.FromUserID)
-			typingActive.Store(true)
+			typingActive.Store(msg.FromUserID, time.Now())
 
-			// Create request context with timeout
-			reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-			defer cancel()
-
-			// Keep sending typing indicator while processing
-			done := make(chan struct{})
-			go func() {
-				ticker := time.NewTicker(10 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-done:
-						return
-					case <-ticker.C:
-						if typingActive.Load() {
-							_ = bot.SendTyping(reqCtx, msg.FromUserID)
-						}
-					}
-				}
-			}()
-
-			// Set reply target so the consumer can send interim messages to this user
-			replyTarget.Store(&msg.FromUserID)
-			lastUser.Store(&msg.FromUserID)
-
-			// Inject message into the persistent event loop.
-			ta.InjectMessage(model.Message{
+			// Inject message with metadata into the persistent event loop.
+			// Metadata (chat_id, user_name) will be propagated through StateDelta
+			// and used by the consumer to route responses to the correct user.
+			ta.InjectMessageWithMetadata("user", model.Message{
 				Role:    model.RoleUser,
 				Content: text,
+			}, map[string]string{
+				"chat_id":   msg.FromUserID,
+				"user_name": msg.FromUserID, // Use FromUserID as user_name (no FromUserName field available)
 			})
 
-			// Wait for the continuous consumer to deliver the agent's final response
-			var response string
-			select {
-			case response = <-responseCh:
-			case <-reqCtx.Done():
-				if reqCtx.Err() == context.DeadlineExceeded {
-					response = fmt.Sprintf("Processing timed out (exceeded %v). Please try again.", requestTimeout)
-				} else {
-					response = "Sorry, I encountered an error. Please try again."
-				}
-			}
-			close(done)
-			typingActive.Store(false)
-
-			// Stop typing
-			_ = bot.StopTyping(ctx, msg.FromUserID)
-
-			// Brief delay to avoid WeChat API rate limiting after interim messages
-			time.Sleep(500 * time.Millisecond)
-
-			// Send reply — use SendTextToUser to get the latest context token
-			// (interim messages may have refreshed the token)
-			if len(response) > 2000 {
-				// For long text, try SendLongText first
-				token, _ := bot.GetContextToken(msg.FromUserID)
-				if token != "" {
-					_, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), msg.FromUserID, response, token)
-					if err == nil {
-						return
-					}
-					// Fall through to SendTextToUser with truncated text
-					response = response[:2000] + "\n\n[Message truncated]"
-				}
-			}
-			if err := bot.SendTextToUser(ctx, msg.FromUserID, response); err != nil {
-				log.Errorf("SendTextToUser failed: %v, falling back to Reply", err)
-				_ = bot.Reply(ctx, msg, response)
-			}
+			// Handler returns immediately — consumer will send response when ready.
+			// No need to wait for responseCh or manage typing indicator here.
 		}()
 
-		return nil // Return immediately so Poller can process next message
+		return nil
 	})
 
 	// 12. Run

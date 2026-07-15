@@ -108,15 +108,21 @@ func TestNonTUI_Session_GoesThroughFakeDead_NotTimedOut(t *testing.T) {
 
 	var callbackStatus SessionStatus
 	tm.StateChangeCallback = func(sessionID string, oldStatus, newStatus SessionStatus, output string) {
+		// FakeDead is an intermediate state, callbacks should NOT fire for it
 		callbackStatus = newStatus
 	}
 
 	// checkSession should detect FakeDead (not TimedOut) for non-TUI session
 	tm.checkSession(session)
 
-	// Callback should have received SessionFakeDead, NOT SessionTimedOut
-	if callbackStatus != SessionFakeDead {
-		t.Errorf("expected callback status SessionFakeDead for non-TUI, got %s", callbackStatus)
+	// Verify callback did NOT fire (FakeDead is an intermediate state)
+	if callbackStatus != "" {
+		t.Errorf("callback should NOT fire for FakeDead state (intermediate state), got %s", callbackStatus)
+	}
+
+	// Verify state transition: FakeDead detected, then kill succeeded → status set to Completed
+	if session.Status != SessionCompleted {
+		t.Errorf("expected session status SessionCompleted after successful kill, got %s", session.Status)
 	}
 
 	// KillSession should have been called (non-TUI goes through heartbeat→kill path)

@@ -130,6 +130,7 @@ func newTestMonitor(inspector *mockInspector) *TmuxMonitor {
 		fakeDeadDuration:          1 * time.Hour, // effectively disabled for most tests
 		heartbeatCommand:          "echo ping",
 		sessions:                  make(map[string]*TmuxSession),
+		lastNotifiedStatus:        make(map[string]SessionStatus),
 	}
 }
 
@@ -1072,20 +1073,16 @@ func TestHandleFakeAlive_RestartSuccess_ContinuesTracking(t *testing.T) {
 		t.Errorf("after restart, expected Running, got %s (was %s)", session.Status, oldStatus)
 	}
 
-	// Verify FakeAlive→Running transition fired
-	hasFakeAliveToRunning := false
-	for _, tr := range transitions {
-		if tr == "fake_alive→running" {
-			hasFakeAliveToRunning = true
-		}
-	}
-	if !hasFakeAliveToRunning {
-		t.Errorf("missing fake_alive→running transition, got: %v", transitions)
+	// Verify state transition happened (by checking session.Status, not callbacks)
+	// FakeAlive and FakeDead are intermediate states that do NOT fire callbacks
+	// to avoid event noise. We verify the state transition by checking session.Status directly.
+	if session.Status != SessionRunning {
+		t.Errorf("expected state to transition to Running after restart, got %s", session.Status)
 	}
 
-	// Verify expected transition count: running→fake_alive + fake_alive→running = 2
-	if len(transitions) < 2 {
-		t.Errorf("expected at least 2 transitions, got %d: %v", len(transitions), transitions)
+	// Verify the session is still tracked
+	if _, exists := tm.GetSession("restart_ok"); !exists {
+		t.Fatal("session should still be tracked after FakeAlive restart")
 	}
 }
 
@@ -1109,13 +1106,15 @@ func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
 
 	var callbackFired bool
 	tm.StateChangeCallback = func(sid string, oldS, newS SessionStatus, output string) {
+		// FakeAlive is an intermediate state, callbacks should NOT fire for it
 		callbackFired = true
 	}
 
 	tm.checkSession(session)
 
-	if !callbackFired {
-		t.Error("callback should fire on running→fake_alive transition")
+	// Verify callback did NOT fire (FakeAlive is an intermediate state)
+	if callbackFired {
+		t.Error("callback should NOT fire on running→fake_alive transition (FakeAlive is intermediate state)")
 	}
 	if inspector.restartSessionCalls != 1 {
 		t.Errorf("expected 1 restart attempt, got %d", inspector.restartSessionCalls)

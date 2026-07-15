@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -53,6 +54,32 @@ func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
 }
 
 // ---------------------------------------------------------------------------
+// Event Filtering Helpers
+// ---------------------------------------------------------------------------
+
+// tmuxAsyncPlaceholder is the well-known status string that identifies
+// tmux async placeholder events. These events are suppressed from outputCh
+// and Projection to avoid LLM generating redundant "I have started the command" responses.
+const tmuxAsyncPlaceholder = "waiting_async_response"
+
+// isTmuxAsyncPlaceholder checks if an event is a tmux async placeholder.
+// Returns true if the event is a tool result containing the placeholder status.
+func isTmuxAsyncPlaceholder(evt *event.Event) bool {
+	if evt == nil || evt.Response == nil || len(evt.Response.Choices) == 0 {
+		return false
+	}
+	for _, choice := range evt.Response.Choices {
+		if choice.Message.Role != model.RoleTool {
+			continue
+		}
+		if strings.Contains(choice.Message.Content, tmuxAsyncPlaceholder) {
+			return true
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // ContextManager
 // ---------------------------------------------------------------------------
 
@@ -89,6 +116,12 @@ type ContextManager struct {
 	// StateDelta["trigger_source"] for deterministic consumer dispatch.
 	triggerSource string
 
+	// currentMetadata holds arbitrary metadata from the source event of the
+	// current RunFlow. Set by runEventLoop before calling RunFlow.
+	// Propagated to derived events via StateDelta["meta_*"] in onEvent.
+	currentMetadata map[string]string
+	metadataMu      sync.RWMutex
+
 	// partitionID is used for Snowflake EventKey generation when persisting
 	// bus events directly (bypassing MemoryPlugin's OnEvent hook).
 	partitionID int
@@ -101,6 +134,29 @@ type ContextManager struct {
 // SetTriggerSource sets the trigger source for the next RunFlow call.
 func (cm *ContextManager) SetTriggerSource(source string) {
 	cm.triggerSource = source
+}
+
+// SetInvocationMetadata sets the metadata for the current RunFlow.
+// These metadata are propagated to all events derived from the source event
+// via event.StateDelta with "meta_" prefix in the onEvent callback.
+func (cm *ContextManager) SetInvocationMetadata(md map[string]string) {
+	cm.metadataMu.Lock()
+	defer cm.metadataMu.Unlock()
+	cm.currentMetadata = md
+}
+
+// GetInvocationMetadata returns the current RunFlow's metadata (thread-safe copy).
+func (cm *ContextManager) GetInvocationMetadata() map[string]string {
+	cm.metadataMu.RLock()
+	defer cm.metadataMu.RUnlock()
+	if cm.currentMetadata == nil {
+		return nil
+	}
+	out := make(map[string]string, len(cm.currentMetadata))
+	for k, v := range cm.currentMetadata {
+		out[k] = v
+	}
+	return out
 }
 
 // ContextManagerConfig holds everything needed to create a ContextManager.
@@ -469,6 +525,16 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	}
 
 	for fwEvt := range eventCh {
+		// Suppress tmux async placeholder events.
+		// These events are generated when ActionTool starts a tmux session,
+		// returning a placeholder status "waiting_async_response".
+		// We skip them entirely to avoid LLM generating redundant responses
+		// like "I have started the command, waiting for results...".
+		if isTmuxAsyncPlaceholder(fwEvt) {
+			log.Debugf("[RunFlow] suppressing tmux async placeholder event")
+			continue
+		}
+
 		if fwEvt != nil && cm.triggerSource != "" {
 			// Attach trigger source to the event for deterministic
 			// consumer-side dispatch (meditation vs async_result vs user).

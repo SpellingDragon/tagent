@@ -15,6 +15,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// TmuxAsyncPlaceholderStatus is the well-known status string returned by
+// Call() when a tmux session is started. tagent framework identifies this
+// pattern and suppresses the event from outputCh and Projection to avoid
+// LLM generating redundant "I have started the command" responses.
+const TmuxAsyncPlaceholderStatus = "waiting_async_response"
+
 // Verify ActionTool implements tool.CallableTool at compile time.
 var _ tool.CallableTool = (*ActionTool)(nil)
 
@@ -25,13 +31,9 @@ type MessageInjector interface {
 	InjectMessageWithSource(source string, msg model.Message)
 }
 
-// ActionTool is a pure execution tool for running shell commands.
-// It supports two modes controlled by the "async" parameter:
-//   - Sync mode (default, async=false): runs via exec.Command, blocks until
-//     completion (max 60s), returns ActionExecResult with stdout/stderr.
-//   - Async mode (async=true): runs in a tmux session, returns immediately
-//     with TmuxExecResponse. TmuxMonitor detects completion and injects
-//     [action_tool_result] events via MessageInjector.
+// ActionTool is a pure asynchronous execution tool for running shell commands.
+// All commands run in a tmux session and return immediately with TmuxExecResponse.
+// TmuxMonitor detects completion and injects [action_tool_result] events via MessageInjector.
 //
 // Design principle: ActionTool only executes actions.
 // KnowledgeAgent is responsible for "understanding" (translating skills/MCP to actions).
@@ -44,7 +46,6 @@ type ActionTool struct {
 	runAsUser     string
 	runAsGroup    string
 	description   string // Configurable tool description
-	executor      *ActionExecutor
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig // Optional: override default monitor config
@@ -109,8 +110,7 @@ func (ct *ActionTool) SetMessageInjector(injector MessageInjector) {
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
-		description: "Execute shell commands on the system. Commands run synchronously by default (async=false) and return stdout/stderr directly. Set async=true for long-running commands (builds, training, servers, watchers) — these return a session_id immediately and the output arrives later via [action_tool_result] event. When in doubt, use sync first; if it times out, retry with async=true.",
-		executor:    NewActionExecutor(),
+		description: "Execute shell commands asynchronously via tmux. Returns immediately with a session_id; results arrive later via [action_tool_result] event when the command stabilizes or completes.",
 	}
 
 	for _, opt := range opts {
@@ -207,58 +207,19 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: command is required")
 	}
 
-	log.Infof("[ActionTool] executing cmd=%q async=%v", args.Command, args.Async)
-
-	if args.Async {
-		// Async path: tmux + TmuxMonitor.
-		if ct.tmuxExecutor != nil {
-			return ct.executeAsync(ctx, args)
-		}
-		log.Warnf("[ActionTool] async requested but tmux unavailable, falling back to sync exec")
-		return ct.executeSync(ctx, args)
+	if ct.tmuxExecutor == nil {
+		return nil, fmt.Errorf("action: tmux not available (install: brew install tmux)")
 	}
 
-	// Default path: synchronous exec.
-	return ct.executeSync(ctx, args)
-}
-
-// executeSync runs a command synchronously and waits for the result.
-func (ct *ActionTool) executeSync(ctx context.Context, args ActionArgs) (any, error) {
-	timeout := args.Timeout
-	if timeout <= 0 {
-		timeout = 60
-	}
-
-	spec := ActionSpec{
-		Command:    "sh",
-		Args:       []string{"-c", args.Command},
-		Env:        args.Env,
-		Dir:        args.WorkDir,
-		Workspace:  ct.workspace,
-		Timeout:    time.Duration(timeout) * time.Second,
-		RunAsUser:  ct.runAsUser,
-		RunAsGroup: ct.runAsGroup,
-	}
-
-	result, err := ct.executor.Execute(ctx, spec)
-	if err != nil {
-		return nil, fmt.Errorf("action: execution failed: %w", err)
-	}
-
-	return &ActionExecResult{
-		ExitCode: result.ExitCode,
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-	}, nil
+	log.Infof("[ActionTool] executing cmd=%q", args.Command)
+	return ct.executeAsync(ctx, args)
 }
 
 // executeAsync runs a command in a tmux session and returns immediately.
 // TmuxMonitor monitors the session and calls onStateChange when status changes.
 func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, error) {
 	if ct.tmuxExecutor == nil {
-		// Fallback to sync exec if tmux is not available
-		log.Infof("[ActionTool] tmux not available, falling back to sync exec")
-		return ct.executeSync(ctx, args)
+		return nil, fmt.Errorf("action: tmux not available (install: brew install tmux)")
 	}
 
 	session, err := ct.tmuxExecutor.CreateSession(ctx, TmuxCreateOptions{
@@ -288,7 +249,7 @@ func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, e
 
 	return &TmuxExecResponse{
 		SessionID: session.ID,
-		Status:    "waiting_async_response",
+		Status:    TmuxAsyncPlaceholderStatus,
 	}, nil
 }
 
@@ -409,21 +370,13 @@ type ActionProperties struct {
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
 	Command string            `json:"command"`
-	Async   bool              `json:"async,omitempty"` // If true, run asynchronously via tmux. If false (default), run synchronously and block until completion.
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	IsTUI   bool              `json:"is_tui,omitempty"` // Hint that this is a TUI application (different monitor strategy)
 }
 
-// ActionExecResult represents the result of a sync command execution.
-type ActionExecResult struct {
-	ExitCode int    `json:"exit_code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-}
-
-// TmuxExecResponse represents the response of an async tmux command execution.
+// TmuxExecResponse represents the response of a tmux command execution.
 //
 // IsTmuxAsync() returns true, which signals to the AgentLoop's tool dispatch
 // layer that the actual command result will arrive later via TmuxMonitor
@@ -435,8 +388,9 @@ type TmuxExecResponse struct {
 }
 
 // IsTmuxAsync marks this response as an async tmux result.
-// The AgentLoop uses this to distinguish synchronous tool results (publish
-// immediately) from tmux-async results (wait for TmuxMonitor callback).
+// The AgentLoop uses this to identify tmux async placeholder events and
+// suppress them from outputCh and Projection (to avoid LLM generating
+// redundant "I have started the command" responses).
 func (TmuxExecResponse) IsTmuxAsync() bool { return true }
 
 // IsTmuxAvailable checks if tmux is available on the system.
