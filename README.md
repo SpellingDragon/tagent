@@ -117,7 +117,8 @@ graph TB
 
 | 模块 | 职责 |
 |------|------|
-| `agent/` | 事件驱动引擎：`EventBus`、`runEventLoop`、`ContextManager`、`SmartCompressor`、`Compactor`、`AgentToolWrapper`、`MeditationManager`、`TrajectoryRecorder`、`SwappableModel`、`HTTPAPI` |
+| `agent/` | 事件驱动引擎：`EventBus`、`runEventLoop`、`ContextManager`、`SmartCompressor`、`Compactor`、`AgentToolWrapper`、`MeditationManager`（已拆分为7个文件） |
+| `rl/` | RL 集成：`TrajectoryRecorder`、`SwappableModel`、`HTTPAPI`（`AgentLoop` 接口解耦） |
 | `memory/` | 结构化事件存储：`InMemoryStore`、`FileSegmentStore`（L0-L3 分层）、`RelationStore`、内存级 `Compactor`、生命周期管理 |
 | `plugin/` | 框架插件：`MemoryPlugin`（事件持久化 + 因果链 + StateDelta）、`SummaryPlugin`（事件 Tag 注入） |
 | `tool/` | 可调用工具：`ActionTool`（shell/tmux 执行 + TmuxMonitor）、`RecallAgent` 子工具、`KnowledgeAgent` 子工具、文件操作工具封装 |
@@ -583,7 +584,8 @@ tools:
 
 ```
 tagent/
-├── agent/          # 核心：EventBus, runEventLoop, ContextManager, SmartCompressor, Compactor, AgentToolWrapper, MeditationManager
+├── agent/          # 核心：EventBus, runEventLoop, ContextManager, SmartCompressor, Compactor, AgentToolWrapper, MeditationManager（已拆分为7个文件）
+├── rl/             # RL 集成：TrajectoryRecorder, SwappableModel, HTTPAPI（AgentLoop 接口）
 ├── builtin.go      # 内置 plain tool 工厂
 ├── config.go       # 声明式配置
 ├── registry.go     # ToolRegistry
