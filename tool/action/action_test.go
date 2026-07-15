@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 // mustMarshal marshals args to JSON bytes for CallableTool.Call().
@@ -20,43 +19,49 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 
 // ==================== ActionTool Tests ====================
 
-// Test 1: 同步命令执行（tmux 不可用时 fallback 路径）
-// Test 1: 异步 tmux 执行
-func TestActionTool_AsyncExec(t *testing.T) {
-	result, err := quickAsyncTest(t)
-	if err != nil {
-		t.Fatalf("Async exec failed: %v", err)
+// TestActionTool_TmuxExec verifies that a simple tmux command runs to completion
+// and returns a properly-shaped ActionToolResult with the captured output.
+func TestActionTool_TmuxExec(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux not available, skipping tmux test")
 	}
 
-	resp, ok := result.(*TmuxExecResponse)
+	tool := NewActionTool()
+	defer tool.Close()
+
+	ctx := context.Background()
+	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
+		"command": "echo async_test",
+	}))
+	if err != nil {
+		t.Fatalf("Call failed: %v", err)
+	}
+
+	resp, ok := result.(*ActionToolResult)
 	if !ok {
-		t.Fatalf("Expected *TmuxExecResponse, got %T", result)
+		t.Fatalf("Expected *ActionToolResult, got %T", result)
 	}
 
 	if resp.SessionID == "" {
 		t.Error("Expected non-empty session_id")
 	}
-	if resp.Status != "waiting_async_response" {
-		t.Errorf("Expected status %q, got %q", "waiting_async_response", resp.Status)
+	if resp.Status == "" {
+		t.Error("Expected non-empty final status")
 	}
-	t.Logf("AsyncExec: session_id=%s, status=%q", resp.SessionID, resp.Status)
+	if !strings.Contains(resp.Output, "async_test") {
+		t.Errorf("Expected output to contain 'async_test', got: %q", resp.Output)
+	}
+	t.Logf("Exec: session_id=%s, status=%q, output=%q", resp.SessionID, resp.Status, resp.Output)
 }
 
-func quickAsyncTest(t *testing.T) (any, error) {
-	tool := NewActionTool()
-	defer tool.tmuxMonitor.Stop()
-
-	ctx := context.Background()
-	return tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"command": "echo async_test",
-	}))
-}
-
-// Test 3: tmux 不可用时返回错误
+// TestActionTool_TmuxUnavailable verifies that Call() returns a clear error
+// when tmux is unavailable.
 func TestActionTool_TmuxUnavailable(t *testing.T) {
 	tool := NewActionTool()
+	if tool.tmuxMonitor != nil {
+		defer tool.tmuxMonitor.Stop()
+	}
 	tool.tmuxExecutor = nil // Simulate tmux not installed
-	defer tool.tmuxMonitor.Stop()
 
 	ctx := context.Background()
 	_, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
@@ -70,32 +75,11 @@ func TestActionTool_TmuxUnavailable(t *testing.T) {
 	}
 }
 
-// Test 4: TmuxMonitor 状态获取
-func TestTmuxMonitor_GetSession(t *testing.T) {
-	tool := NewActionTool()
-	defer tool.tmuxMonitor.Stop()
-
-	ctx := context.Background()
-	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"command": "echo monitor_test",
-	}))
-	if err != nil {
-		t.Fatalf("Async exec failed: %v", err)
-	}
-
-	resp := result.(*TmuxExecResponse)
-
-	// 验证: TmuxMonitor 开始监控此会话
-	_, exists := tool.tmuxMonitor.GetSession(resp.SessionID)
-	if !exists {
-		t.Error("Expected session to be monitored by TmuxMonitor")
-	}
-}
-
-// Test 8: 空命令
+// TestActionTool_EmptyCommand verifies that an empty command is rejected
+// before any tmux session is created.
 func TestActionTool_EmptyCommand(t *testing.T) {
 	tool := NewActionTool()
-	defer tool.tmuxMonitor.Stop()
+	defer tool.Close()
 
 	ctx := context.Background()
 	_, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
@@ -106,97 +90,8 @@ func TestActionTool_EmptyCommand(t *testing.T) {
 	}
 }
 
-// Test 12: TmuxMonitor 状态变化检测
-func TestTmuxMonitor_StateDetection(t *testing.T) {
-	tool := NewActionTool(
-		WithActionWorkspace(t.TempDir()),
-	)
-	defer tool.tmuxMonitor.Stop()
-
-	// 使用短轮询间隔加速测试状态检测
-	tool.tmuxMonitor.interval = 100 * time.Millisecond
-	// 将 fakeDeadDuration 设置足够长，确保在命令完成前不会触发假死检测。
-	// 命令 "sleep 1 && echo done" 约需 1s，Duration=3s 保证 pane 正常结束后才超时。
-	tool.tmuxMonitor.fakeDeadDuration = 3 * time.Second
-
-	ctx := context.Background()
-	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"command": "sleep 1 && echo done",
-	}))
-	if err != nil {
-		t.Fatalf("Tmux exec failed: %v", err)
-	}
-
-	resp := result.(*TmuxExecResponse)
-	sessionID := resp.SessionID
-
-	t.Logf("Created session %s", sessionID)
-
-	// 轮询等待会话完成（超时 10s）
-	deadline := time.Now().Add(10 * time.Second)
-	var exists bool
-	seenRunning := false // ensure session was alive before disappearing
-	for {
-		status, ok := tool.tmuxMonitor.GetSessionStatus(sessionID)
-		if ok {
-			exists = true
-			seenRunning = true
-			if status == SessionCompleted {
-				t.Log("Session completed")
-				return
-			}
-		} else if seenRunning {
-			// Session was removed by monitor after completion.
-			// This is expected: completed sessions are cleaned up.
-			t.Log("Session completed (removed by monitor)")
-			return
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// 超时后做最终检查
-	if !exists {
-		t.Fatal("Session not found after timeout")
-	}
-	finalStatus, _ := tool.tmuxMonitor.GetSessionStatus(sessionID)
-	if finalStatus != SessionCompleted {
-		t.Errorf("Expected status %q, got %q after timeout", SessionCompleted, finalStatus)
-	}
-	t.Logf("Session status: %s", finalStatus)
-}
-
-// Test 13: TmuxMonitor KillSession
-func TestTmuxMonitor_KillSession(t *testing.T) {
-	tool := NewActionTool()
-	defer tool.tmuxMonitor.Stop()
-
-	ctx := context.Background()
-	result, err := tool.Call(ctx, mustMarshal(t, map[string]interface{}{
-		"command": "sleep 60",
-	}))
-	if err != nil {
-		t.Fatalf("Tmux exec failed: %v", err)
-	}
-
-	resp := result.(*TmuxExecResponse)
-	sessionID := resp.SessionID
-
-	// 验证: 杀死会话后状态应为 error
-	tool.tmuxExecutor.KillSession(sessionID)
-	time.Sleep(500 * time.Millisecond)
-
-	session, exists := tool.tmuxMonitor.GetSession(sessionID)
-	if !exists {
-		t.Fatal("Session not found after kill")
-	}
-
-	t.Logf("After kill: status=%s", session.Status)
-}
-
-// Test 14: 命令解析（需要 tmux 可用）
+// TestCommandParsing exercises Call() with a range of command strings and
+// verifies success/failure aligns with the input.
 func TestCommandParsing(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping command parsing test")

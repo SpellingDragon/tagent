@@ -281,7 +281,9 @@ func main() {
 			}
 
 			// Extract deterministic trigger source (written by RunFlow).
-			// Values: "user", "meditation", "async_result", "error".
+			// Values: "user", "meditation", "error".
+			// (async_result is no longer used: ActionTool blocks in Call() until
+			// the tmux session stabilizes and returns a normal role=tool result.)
 			triggerSource := "user"
 			if evt.StateDelta != nil {
 				if ts, ok := evt.StateDelta["trigger_source"]; ok && len(ts) > 0 {
@@ -317,8 +319,8 @@ func main() {
 				case "error":
 					// Error: log only, don't send to user.
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
-				case "user", "async_result":
-					// User or async_result: deliver to user if chat_id exists
+				case "user":
+					// User: deliver to user if chat_id exists
 					if chatID == "" {
 						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
 						continue

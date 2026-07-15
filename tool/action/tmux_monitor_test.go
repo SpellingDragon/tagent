@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // ==================== Mock Inspector ====================
@@ -1131,32 +1129,15 @@ func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
 
 // ==================== handleStateChange Output Truncation Test ====================
 
-// mockInjector records injected messages for testing handleStateChange.
-type mockInjector struct {
-	mu       sync.Mutex
-	messages []model.Message
-}
-
-func (m *mockInjector) InjectMessageWithSource(source string, msg model.Message) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.messages = append(m.messages, msg)
-}
-
-func (m *mockInjector) lastContent() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.messages) == 0 {
-		return ""
-	}
-	return m.messages[len(m.messages)-1].Content
-}
-
-func TestHandleStateChange_OutputTruncation(t *testing.T) {
-	injector := &mockInjector{}
+// TestHandleStateChange_WaiterDelivery verifies that handleStateChange
+// delivers the stable-state observation to the waiter registered by Call(),
+// and that buildActionResult truncates large outputs while preserving the
+// tail so LLM context stays bounded.
+func TestHandleStateChange_WaiterDelivery(t *testing.T) {
 	ct := &ActionTool{
-		injector:    injector,
+		waiters:     make(map[string]chan *stableStateResult),
 		tmuxMonitor: NewTmuxMonitor(WithMonitorExecutor(&mockInspector{processExists: true})),
+		workspace:   t.TempDir(),
 	}
 
 	// Add a session with known state
@@ -1167,39 +1148,47 @@ func TestHandleStateChange_OutputTruncation(t *testing.T) {
 	}
 	ct.tmuxMonitor.AddSession(session)
 
-	// Sub-test 1: output <= 2000 chars — no truncation
+	// Sub-test 1: output <= 2000 chars — no truncation, no output file.
 	shortOutput := "short output line\n"
+	ch := make(chan *stableStateResult, 1)
+	ct.waiters["trunc_test"] = ch
 	ct.handleStateChange("trunc_test", string(SessionRunning), string(SessionStable), shortOutput)
 
-	content := injector.lastContent()
-	if content == "" {
-		t.Fatal("expected injected message")
+	select {
+	case res := <-ch:
+		out := ct.buildActionResult("trunc_test", "echo short", false, res)
+		if !strings.Contains(out.Output, "short output line") {
+			t.Errorf("short output should be delivered intact, got %q", out.Output)
+		}
+		if out.OutputFile != "" {
+			t.Errorf("short output should not spill to a file, got %q", out.OutputFile)
+		}
+	default:
+		t.Fatal("expected stable-state result delivered to waiter")
 	}
-	if strings.Contains(content, "...(truncated)") {
-		t.Error("short output should NOT have truncation marker")
-	}
+	delete(ct.waiters, "trunc_test")
 
-	// Sub-test 2: output > 2000 chars — saved to file with tail shown
+	// Sub-test 2: output > 2000 chars — persisted to file, tail returned inline.
 	largeLine := "line of output data that will eventually be truncated because too long\n"
 	largeOutput := strings.Repeat(largeLine, 100) // >2000 chars
 
+	ch2 := make(chan *stableStateResult, 1)
+	ct.waiters["trunc_test"] = ch2
 	ct.handleStateChange("trunc_test", string(SessionStable), string(SessionRunning), largeOutput)
 
-	content = injector.lastContent()
-	// Should indicate full output was saved to file
-	if !strings.Contains(content, "完整内容已保存到") {
-		t.Error("large output should indicate full content saved to file")
-	}
-	// Should show last 2000 characters
-	if !strings.Contains(content, "显示最后 2000 字符") {
-		t.Error("large output should indicate showing last 2000 characters")
-	}
-	// After truncation, the message should NOT contain the full output
-	if strings.Contains(content, largeOutput) {
-		t.Error("full large output should NOT appear in message")
-	}
-	// But the tail should be present
-	if !strings.Contains(content, largeLine) {
-		t.Error("truncated tail of output should appear in message")
+	select {
+	case res := <-ch2:
+		out := ct.buildActionResult("trunc_test", "echo large", false, res)
+		if out.OutputFile == "" {
+			t.Error("large output should be spilled to OutputFile")
+		}
+		if strings.Contains(out.Output, largeOutput) {
+			t.Error("full large output should NOT appear inline")
+		}
+		if !strings.Contains(out.Output, largeLine) {
+			t.Error("truncated tail of output should appear inline")
+		}
+	default:
+		t.Fatal("expected second stable-state result delivered to waiter")
 	}
 }

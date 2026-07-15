@@ -54,32 +54,6 @@ func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
 }
 
 // ---------------------------------------------------------------------------
-// Event Filtering Helpers
-// ---------------------------------------------------------------------------
-
-// tmuxAsyncPlaceholder is the well-known status string that identifies
-// tmux async placeholder events. These events are suppressed from outputCh
-// and Projection to avoid LLM generating redundant "I have started the command" responses.
-const tmuxAsyncPlaceholder = "waiting_async_response"
-
-// isTmuxAsyncPlaceholder checks if an event is a tmux async placeholder.
-// Returns true if the event is a tool result containing the placeholder status.
-func isTmuxAsyncPlaceholder(evt *event.Event) bool {
-	if evt == nil || evt.Response == nil || len(evt.Response.Choices) == 0 {
-		return false
-	}
-	for _, choice := range evt.Response.Choices {
-		if choice.Message.Role != model.RoleTool {
-			continue
-		}
-		if strings.Contains(choice.Message.Content, tmuxAsyncPlaceholder) {
-			return true
-		}
-	}
-	return false
-}
-
-// ---------------------------------------------------------------------------
 // ContextManager
 // ---------------------------------------------------------------------------
 
@@ -525,16 +499,6 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	}
 
 	for fwEvt := range eventCh {
-		// Suppress tmux async placeholder events.
-		// These events are generated when ActionTool starts a tmux session,
-		// returning a placeholder status "waiting_async_response".
-		// We skip them entirely to avoid LLM generating redundant responses
-		// like "I have started the command, waiting for results...".
-		if isTmuxAsyncPlaceholder(fwEvt) {
-			log.Debugf("[RunFlow] suppressing tmux async placeholder event")
-			continue
-		}
-
 		if fwEvt != nil && cm.triggerSource != "" {
 			// Attach trigger source to the event for deterministic
 			// consumer-side dispatch (meditation vs async_result vs user).
