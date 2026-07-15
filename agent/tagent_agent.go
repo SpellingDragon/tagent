@@ -2,13 +2,10 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
-	a2ago "trpc.group/trpc-go/trpc-a2a-go/server"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
-	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
 
 	"github.com/SpellingDragon/tagent/memory"
 )
@@ -202,19 +199,3 @@ func (m *SwappableModel) Info() model.Info {
 }
 
 // NewA2AServer creates an A2A server that exposes the given TagentAgent.
-func NewA2AServer(ta *TagentAgent, host string) (*a2ago.A2AServer, error) {
-	if ta == nil {
-		return nil, fmt.Errorf("tagent agent is required")
-	}
-	if host == "" {
-		return nil, fmt.Errorf("host is required")
-	}
-	srv, err := a2aserver.New(
-		a2aserver.WithAgent(ta, true),
-		a2aserver.WithHost(host),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create A2A server: %w", err)
-	}
-	return srv, nil
-}
