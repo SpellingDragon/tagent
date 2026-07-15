@@ -371,17 +371,39 @@ func extractCurrentTurnMessages(messages []model.Message) []model.Message {
 		return nil
 	}
 
-	// Filter: ContentRequestProcessor provides user messages that are already
-	// in the projection (via AppendEventHook). Only keep assistant and tool
-	// messages — these are from the current ReAct iteration and are NOT yet
-	// in the projection.
+	// Filter: ContentRequestProcessor pulls messages from the runner session
+	// (see SessionService's WithSessionEventLimit(2) — typically retains the
+	// most recent user_input and agent_output). These messages appear here as
+	// unprefixed user/assistant/tool entries, but they are ALREADY in the
+	// projection (via AppendEventHook + persistBusEvent + onEvent). Keep only
+	// ReAct-internal messages, which we recognise as:
+	//   - assistant with tool_calls (LLM invoking a tool this iteration)
+	//   - tool result messages (framework appending the tool response)
+	// Everything else (unprefixed user, unprefixed final assistant, etc.) is
+	// a session echo that would otherwise duplicate history and confuse the
+	// LLM into producing empty follow-ups.
 	var result []model.Message
 	for _, msg := range tail {
-		if msg.Role == model.RoleUser && !strings.HasPrefix(msg.Content, "[evt_") {
-			// User message from ContentRequestProcessor — already in projection.
+		if strings.HasPrefix(msg.Content, "[evt_") {
+			// Projection-sourced message (shouldn't happen after
+			// lastPrefixedIdx cut, defensive).
+			result = append(result, msg)
 			continue
 		}
-		result = append(result, msg)
+		switch msg.Role {
+		case model.RoleAssistant:
+			if len(msg.ToolCalls) == 0 {
+				// Prior agent_output surfaced by ContentRequestProcessor.
+				continue
+			}
+			result = append(result, msg)
+		case model.RoleTool:
+			// Current-turn tool result (paired with the assistant tool_calls above).
+			result = append(result, msg)
+		default:
+			// Drop unprefixed user/system: they duplicate projection content.
+			continue
+		}
 	}
 	return result
 }

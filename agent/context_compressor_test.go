@@ -363,18 +363,48 @@ func TestExtractCurrentTurnMessages_AllPrefixed(t *testing.T) {
 func TestExtractCurrentTurnMessages_NoPrefixes(t *testing.T) {
 	messages := []model.Message{
 		model.NewSystemMessage("system"),
-		{Role: model.RoleUser, Content: "user message"},            // from ContentRequestProcessor
-		{Role: model.RoleAssistant, Content: "assistant response"}, // from ReAct
+		{Role: model.RoleUser, Content: "user message"},               // from ContentRequestProcessor
+		{Role: model.RoleAssistant, Content: "assistant final answer"}, // prior agent_output echoed by session
 	}
 
 	currentTurn := extractCurrentTurnMessages(messages)
 
-	// User message from ContentRequestProcessor is filtered out.
-	// Only assistant message from ReAct is kept.
-	if len(currentTurn) != 1 {
-		t.Fatalf("expected 1 current-turn message (user filtered), got %d", len(currentTurn))
+	// Both unprefixed messages come from the runner session (already in
+	// projection). A ReAct-internal assistant would carry tool_calls; without
+	// them, this is a stale echo that must be dropped to avoid duplicating
+	// history and confusing the LLM into an empty follow-up.
+	if len(currentTurn) != 0 {
+		t.Fatalf("expected 0 current-turn messages (session echoes filtered), got %d: %+v", len(currentTurn), currentTurn)
 	}
-	if currentTurn[0].Role != model.RoleAssistant {
-		t.Fatalf("expected assistant message, got %s", currentTurn[0].Role)
+}
+
+// TestExtractCurrentTurnMessages_ReActInternal verifies that ReAct-internal
+// messages (assistant with tool_calls + subsequent tool result) are kept,
+// even when they sit alongside a session-echoed prior agent_output.
+func TestExtractCurrentTurnMessages_ReActInternal(t *testing.T) {
+	messages := []model.Message{
+		model.NewSystemMessage("system"),
+		{Role: model.RoleUser, Content: "[evt_1|external_input] user asks"},
+		// Prior agent_output echoed by ContentRequestProcessor (unprefixed).
+		{Role: model.RoleAssistant, Content: "prior final response"},
+		// Current ReAct iteration: LLM invokes a tool.
+		{
+			Role:      model.RoleAssistant,
+			Content:   "let me call a tool",
+			ToolCalls: []model.ToolCall{{ID: "1", Function: model.FunctionDefinitionParam{Name: "action"}}},
+		},
+		{Role: model.RoleTool, Content: "tool result", ToolID: "1"},
+	}
+
+	currentTurn := extractCurrentTurnMessages(messages)
+
+	if len(currentTurn) != 2 {
+		t.Fatalf("expected 2 current-turn messages (assistant+tool_calls and tool result), got %d", len(currentTurn))
+	}
+	if currentTurn[0].Role != model.RoleAssistant || len(currentTurn[0].ToolCalls) == 0 {
+		t.Fatalf("expected first current-turn message to be assistant with tool_calls, got %+v", currentTurn[0])
+	}
+	if currentTurn[1].Role != model.RoleTool {
+		t.Fatalf("expected second current-turn message to be tool, got %s", currentTurn[1].Role)
 	}
 }
