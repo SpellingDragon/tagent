@@ -93,7 +93,8 @@ func BuildEventReference(evt *event.Event) (memory.EventReference, bool) {
 		ref.EventType = string(typeBytes)
 	}
 	// Prefer event_summary from StateDelta (MemoryPlugin-generated).
-	// Fall back to msg.Content for backward compatibility.
+	// If absent (e.g., events constructed outside the plugin pipeline),
+	// derive from msg.Content below.
 	if sumBytes, ok := evt.StateDelta["event_summary"]; ok && len(sumBytes) > 0 {
 		ref.EventSummary = string(sumBytes)
 	}

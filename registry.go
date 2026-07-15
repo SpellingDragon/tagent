@@ -19,8 +19,8 @@ import (
 // It provides a unified entry point for tool registration, lookup, and validation.
 //
 // The actual factory maps live in agent/tool_agent.go as package-level variables.
-// ToolRegistry delegates to those maps, keeping backward compatibility with
-// existing code that calls agent.RegisterPlainTool / agent.RegisterToolAgent directly.
+// ToolRegistry delegates to those maps so callers can register tools via either
+// the ToolRegistry API or agent.RegisterPlainTool / agent.RegisterToolAgent directly.
 type ToolRegistry struct{}
 
 var globalRegistry = &ToolRegistry{}

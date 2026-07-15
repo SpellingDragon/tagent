@@ -239,8 +239,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	var keys []int64
 	var externalEvents []memory.FullEvent
 	if w.parentStore != nil {
-		// Collect all event keys from event_keys array
-		// Support both: event_keys (array) and event_key (single int, backward compat)
+		// Collect all event keys from event_keys array (LLM-provided).
 		if eventKeysRaw, ok := args["event_keys"]; ok {
 			switch v := eventKeysRaw.(type) {
 			case []interface{}:
@@ -253,12 +252,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				if key := toInt64Key(v); key > 0 {
 					keys = append(keys, key)
 				}
-			}
-		}
-		// Backward compat: also check event_key (single)
-		if eventKeyFloat, ok := args["event_key"]; ok {
-			if key := toInt64Key(eventKeyFloat); key > 0 {
-				keys = append(keys, key)
 			}
 		}
 
@@ -443,13 +436,13 @@ func (w *AgentToolWrapper) autoInjectEventKeys() []int64 {
 
 // ==================== Tool Agent Factory Registry ====================
 //
-// The factory registry is retained for backward compatibility with existing
-// tool agent factories (knowledge, recall). These factories create TagentAgent
-// instances that are then wrapped by AgentToolWrapper in tagent.New().
+// The factory registry provides ID-based lookup for tool agent factories
+// (knowledge, recall). These factories create TagentAgent instances that
+// are then wrapped by AgentToolWrapper in tagent.New().
 //
-// NOTE: In the new agent-centric config model, the primary path for creating
-// tool agents is via the Agents map in Config. The factory registry is still
-// useful for programmatic registration of custom tool agents.
+// In the agent-centric config model, the primary path for creating tool
+// agents is via the Agents map in Config. The factory registry supports
+// programmatic registration of custom tool agents by ID.
 
 // ToolAgentFactory creates a tool agent (TagentAgent) from the given config.
 // The returned TagentAgent will be wrapped via AgentToolWrapper by the caller
