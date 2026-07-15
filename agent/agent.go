@@ -356,7 +356,6 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	return ta, nil
 }
 
-
 // buildCompressorOpts builds SmartCompressor options from TagentConfig.
 // Shared by NewTagentAgent and Run() to avoid duplicating option-building logic.
 func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
