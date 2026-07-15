@@ -96,6 +96,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invCfg.Name = ta.name
 	}
 	invCM := newContextManagerFromConfig(&invCfg, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
+	invCM.SetSubAgentMode(true)
 	invCM.SetUserIDSessionID(ta.lastUserID, sessionID)
 
 	// Publish the initial message as external_input.

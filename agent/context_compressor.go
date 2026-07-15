@@ -335,7 +335,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 //     messages (with [evt_ prefix) and framework-provided messages (no prefix).
 //  2. From the unprefixed tail, filter out user messages (from ContentRequestProcessor,
 //     already in projection). Keep only assistant and tool messages (current ReAct turn).
-func extractCurrentTurnMessages(messages []model.Message) []model.Message {
+func extractCurrentTurnMessages(messages []model.Message, filterUnprefixedUser bool) []model.Message {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -371,17 +371,14 @@ func extractCurrentTurnMessages(messages []model.Message) []model.Message {
 		return nil
 	}
 
-	// Filter: ContentRequestProcessor pulls messages from the runner session
-	// (see SessionService's WithSessionEventLimit(2) — typically retains the
-	// most recent user_input and agent_output). These messages appear here as
-	// unprefixed user/assistant/tool entries, but they are ALREADY in the
-	// projection (via AppendEventHook + persistBusEvent + onEvent). Keep only
-	// ReAct-internal messages, which we recognise as:
-	//   - assistant with tool_calls (LLM invoking a tool this iteration)
-	//   - tool result messages (framework appending the tool response)
-	// Everything else (unprefixed user, unprefixed final assistant, etc.) is
-	// a session echo that would otherwise duplicate history and confuse the
-	// LLM into producing empty follow-ups.
+	// Filter out session echoes while preserving ReAct-internal messages.
+	//
+	// filterUnprefixedUser is determined by the caller (BeforeModel callback):
+	//   - false: sub-agent mode OR projection has no user yet — keep user messages
+	//   - true:  persistent loop where projection already has the user — drop echoes
+	//
+	// ReAct-internal messages (assistant with tool_calls + tool results) are
+	// always kept unconditionally.
 	var result []model.Message
 	for _, msg := range tail {
 		if strings.HasPrefix(msg.Content, "[evt_") {
@@ -391,6 +388,10 @@ func extractCurrentTurnMessages(messages []model.Message) []model.Message {
 			continue
 		}
 		switch msg.Role {
+		case model.RoleUser:
+			if !filterUnprefixedUser {
+				result = append(result, msg)
+			}
 		case model.RoleAssistant:
 			if len(msg.ToolCalls) == 0 {
 				// Prior agent_output surfaced by ContentRequestProcessor.
@@ -401,7 +402,8 @@ func extractCurrentTurnMessages(messages []model.Message) []model.Message {
 			// Current-turn tool result (paired with the assistant tool_calls above).
 			result = append(result, msg)
 		default:
-			// Drop unprefixed user/system: they duplicate projection content.
+			// Drop unprefixed system messages — they duplicate the
+			// projection/system prompt already present in args.
 			continue
 		}
 	}

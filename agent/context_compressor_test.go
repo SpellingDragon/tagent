@@ -333,7 +333,7 @@ func TestExtractCurrentTurnMessages(t *testing.T) {
 		{Role: model.RoleTool, Content: "tool result", ToolID: "1"},
 	}
 
-	currentTurn := extractCurrentTurnMessages(messages)
+	currentTurn := extractCurrentTurnMessages(messages, true)
 
 	if len(currentTurn) != 2 {
 		t.Fatalf("expected 2 current-turn messages, got %d", len(currentTurn))
@@ -353,28 +353,57 @@ func TestExtractCurrentTurnMessages_AllPrefixed(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "[evt_2|agent_output] historical assistant"},
 	}
 
-	currentTurn := extractCurrentTurnMessages(messages)
+	currentTurn := extractCurrentTurnMessages(messages, true)
 
 	if len(currentTurn) != 0 {
 		t.Fatalf("expected 0 current-turn messages when all are prefixed, got %d", len(currentTurn))
 	}
 }
 
-func TestExtractCurrentTurnMessages_NoPrefixes(t *testing.T) {
+// TestExtractCurrentTurnMessages_NoPrefixes_FirstCall verifies that on the
+// very first call of a sub-agent, the unprefixed user message seeded by
+// the framework's insertInvocationMessage is preserved (not filtered as
+// a session echo). Dropping it would leave the LLM without user input,
+// causing API errors like zhipu's "messages 参数非法" (code 1214).
+func TestExtractCurrentTurnMessages_NoPrefixes_FirstCall(t *testing.T) {
 	messages := []model.Message{
 		model.NewSystemMessage("system"),
-		{Role: model.RoleUser, Content: "user message"},               // from ContentRequestProcessor
-		{Role: model.RoleAssistant, Content: "assistant final answer"}, // prior agent_output echoed by session
+		// Unprefixed user from ContentRequestProcessor.insertInvocationMessage.
+		// Since projection has no [evt_-prefixed user, this is the current
+		// invocation's input and MUST be kept.
+		{Role: model.RoleUser, Content: "user message"},
 	}
 
-	currentTurn := extractCurrentTurnMessages(messages)
+	currentTurn := extractCurrentTurnMessages(messages, false)
 
-	// Both unprefixed messages come from the runner session (already in
-	// projection). A ReAct-internal assistant would carry tool_calls; without
-	// them, this is a stale echo that must be dropped to avoid duplicating
-	// history and confusing the LLM into an empty follow-up.
+	if len(currentTurn) != 1 {
+		t.Fatalf("expected 1 current-turn message (unprefixed user preserved on first call), got %d: %+v", len(currentTurn), currentTurn)
+	}
+	if currentTurn[0].Role != model.RoleUser || currentTurn[0].Content != "user message" {
+		t.Fatalf("expected user message preserved, got %+v", currentTurn[0])
+	}
+}
+
+// TestExtractCurrentTurnMessages_ProjectedUserFiltersSessionEcho verifies
+// that on subsequent calls (projection already has [evt_-prefixed user),
+// unprefixed user messages from SessionService's WithSessionEventLimit(2)
+// echo are filtered out to avoid history duplication.
+func TestExtractCurrentTurnMessages_ProjectedUserFiltersSessionEcho(t *testing.T) {
+	messages := []model.Message{
+		model.NewSystemMessage("system"),
+		// Projection has a prior user event — proves we are not on first call.
+		{Role: model.RoleUser, Content: "[evt_1|external_input] prior user"},
+		// Session echo (unprefixed user from SessionService limit=2 retention).
+		{Role: model.RoleUser, Content: "prior user (session echo)"},
+		// Prior agent_output echoed by session.
+		{Role: model.RoleAssistant, Content: "prior final response"},
+	}
+
+	currentTurn := extractCurrentTurnMessages(messages, true)
+
+	// Both unprefixed messages are session echoes and must be filtered.
 	if len(currentTurn) != 0 {
-		t.Fatalf("expected 0 current-turn messages (session echoes filtered), got %d: %+v", len(currentTurn), currentTurn)
+		t.Fatalf("expected 0 current-turn messages (session echoes filtered when projection has user), got %d: %+v", len(currentTurn), currentTurn)
 	}
 }
 
@@ -396,7 +425,7 @@ func TestExtractCurrentTurnMessages_ReActInternal(t *testing.T) {
 		{Role: model.RoleTool, Content: "tool result", ToolID: "1"},
 	}
 
-	currentTurn := extractCurrentTurnMessages(messages)
+	currentTurn := extractCurrentTurnMessages(messages, true)
 
 	if len(currentTurn) != 2 {
 		t.Fatalf("expected 2 current-turn messages (assistant+tool_calls and tool result), got %d", len(currentTurn))

@@ -103,7 +103,16 @@ type ContextManager struct {
 	// systemPromptSource enables hot-reload of the system prompt.
 	// When set, the system message is re-read from files before each LLM call.
 	systemPromptSource *prompt.Source
+
+	// isSubAgent marks this ContextManager as serving a sub-agent Run()
+	// invocation. In sub-agent mode, extractCurrentTurnMessages does NOT
+	// filter unprefixed user messages (because projection is empty and
+	// the only user message comes from insertInvocationMessage).
+	isSubAgent bool
 }
+
+// SetSubAgentMode marks this ContextManager as serving a sub-agent invocation.
+func (cm *ContextManager) SetSubAgentMode(v bool) { cm.isSubAgent = v }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
 func (cm *ContextManager) SetTriggerSource(source string) {
@@ -272,9 +281,22 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			result := cm.contextCompressor.Compress(ctx, refs)
 			cm.projection.Replace(result.RetainedRefs)
 
-			// Step 3: Extract current-turn messages (unprefixed tail of
-			// args.Request.Messages — tool_calls/results from this ReAct iteration).
-			currentTurn := extractCurrentTurnMessages(args.Request.Messages)
+			// Step 3: Extract current-turn messages.
+			// In sub-agent mode, projection is empty and there are no session
+			// echoes — keep all unprefixed messages (user from insertInvocationMessage
+			// + assistant/tool from ReAct iterations).
+			// In persistent-loop mode, check whether projection already produced
+			// a user message; if so, unprefixed user is a session echo to drop.
+			var filterUser bool
+			if !cm.isSubAgent {
+				for _, m := range result.Messages {
+					if m.Role == model.RoleUser {
+						filterUser = true
+						break
+					}
+				}
+			}
+			currentTurn := extractCurrentTurnMessages(args.Request.Messages, filterUser)
 
 			// Step 4: Rebuild messages = [system] + history + currentTurn.
 			systemMsg, _ := splitSystemMessage(args.Request.Messages)
