@@ -163,3 +163,11 @@ node <skill-name>.js --help
 - 主库目录结构、抓取→归档→关联→评估 SOP
 - 历史分裂合并流程（wechat-bot 旧库 3 篇稿并入主库，需用户确认后执行）
 - 详见 `knowledge-base-manager/README.md`
+
+---
+
+### 8. Meditation Checklist (meditation-checklist)
+冥想文件系统核查清单。修复"冥想只回顾记忆不取证物理状态"的缺陷：
+- 强制核查项：文件系统事实核查、承诺-落地追踪、重复/分裂检测、空窗口策略
+- 发现问题后调用 path-map / knowledge-base-manager 处置
+- 详见 `meditation-checklist/README.md`
