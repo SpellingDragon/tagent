@@ -146,3 +146,20 @@ node <skill-name>.js --help
 
 **最后更新**: 2026-04-21  
 **维护者**: AI Assistant
+
+---
+
+## 📂 新增技能（2026-07-15 增补）
+
+### 6. Path Map (path-map)
+项目路径拓扑与访问规范。消除路径混乱：
+- 主知识库唯一位置：`/Users/pengweiye/knowledge_base/`
+- skill 真实位置：`examples/wechat-bot/skills/`（**非 repo 根**）
+- 含致命易错点（read_file 绝对路径 bug、微信抓取 title 为空、相对路径落错位置）
+- 详见 `path-map/README.md`
+
+### 7. Knowledge Base Manager (knowledge-base-manager)
+知识库管理规范（SSoT = `~/knowledge_base/`）：
+- 主库目录结构、抓取→归档→关联→评估 SOP
+- 历史分裂合并流程（wechat-bot 旧库 3 篇稿并入主库，需用户确认后执行）
+- 详见 `knowledge-base-manager/README.md`
