@@ -123,8 +123,8 @@
 
 ### Task 2.1: 创建 rl/ 包骨架
 
-- [ ] 创建 `rl/` 目录
-- [ ] 创建 `rl/agent_loop.go`：定义 AgentLoop 接口
+- [x] 创建 `rl/` 目录
+- [x] 创建 `rl/agent_loop.go`：定义 AgentLoop 接口
   ```go
   package rl
   
@@ -141,14 +141,14 @@
       StopLoop()
   }
   ```
-- [ ] `go build ./rl/` 通过
+- [x] `go build ./rl/` 通过
 
 ### Task 2.2: 移动 TrajectoryRecorder
 
-- [ ] 将 `agent/trajectory_recorder.go` 复制到 `rl/trajectory_recorder.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 修改 import 路径（如有引用 agent 包内部类型，改为从 rl 包外导入或通过参数传入）
-- [ ] 在 `agent/` 中保留一个 type alias 或重导出（暂时，避免外部 break）：
+- [x] 将 `agent/trajectory_recorder.go` 复制到 `rl/trajectory_recorder.go`
+- [x] 修改包名为 `package rl`
+- [x] 修改 import 路径（如有引用 agent 包内部类型，改为从 rl 包外导入或通过参数传入）
+- [x] 在 `agent/` 中保留一个 type alias 或重导出（暂时，避免外部 break）：
   ```go
   // agent/trajectory_compat.go
   // Deprecated: Use rl.TrajectoryRecorder directly.
@@ -161,54 +161,54 @@
 
 ### Task 2.3: 移动 SwappableModel
 
-- [ ] 将 SwappableModel 相关代码从 `agent/helpers.go` 提取到 `rl/swappable_model.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 在 `agent/` 中保留 type alias（暂时）：
+- [x] 将 SwappableModel 相关代码从 `agent/helpers.go` 提取到 `rl/swappable_model.go`
+- [x] 修改包名为 `package rl`
+- [x] 在 `agent/` 中保留 type alias（暂时）：
   ```go
   // agent/swappable_compat.go
   type SwappableModel = rl.SwappableModel
   var NewSwappableModel = rl.NewSwappableModel
   ```
-- [ ] `go build ./...` 通过
+- [x] `go build ./...` 通过
 
 ### Task 2.4: 移动 HTTPAPI
 
-- [ ] 将 `agent/http_api.go` 复制到 `rl/http_api.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 将 `HTTPAPI` 结构体中对 `*TagentAgent` 的引用改为 `AgentLoop` 接口
-- [ ] 修改 `NewHTTPAPI` 签名：`func NewHTTPAPI(agent AgentLoop) *HTTPAPI`
-- [ ] 在 `agent/` 中保留 type alias（暂时）：
+- [x] 将 `agent/http_api.go` 复制到 `rl/http_api.go`
+- [x] 修改包名为 `package rl`
+- [x] 将 `HTTPAPI` 结构体中对 `*TagentAgent` 的引用改为 `AgentLoop` 接口
+- [x] 修改 `NewHTTPAPI` 签名：`func NewHTTPAPI(agent AgentLoop) *HTTPAPI`
+- [x] 在 `agent/` 中保留 type alias（暂时）：
   ```go
   // agent/http_api_compat.go
   type HTTPAPI = rl.HTTPAPI
   var NewHTTPAPI = rl.NewHTTPAPI
   ```
-- [ ] 删除 `agent/http_api.go`
-- [ ] `go build ./...` 通过
-- [ ] 将 `agent/http_api_test.go` 移到 `rl/http_api_test.go`，修改包名
-- [ ] `go test ./rl/ -v` 通过
+- [x] 删除 `agent/http_api.go`
+- [x] `go build ./...` 通过
+- [x] 将 `agent/http_api_test.go` 移到 `rl/http_api_test.go`，修改包名
+- [x] `go test ./rl/ -v` 通过
 
 ### Task 2.5: 更新外部引用（移除 compat alias）
 
-- [ ] 更新 `tagent.go`：
+- [x] 更新 `tagent.go`：
   - import `"github.com/SpellingDragon/tagent/rl"` 替代 `agent.TrajectoryRecorder` 等
   - 替换 `agent.NewTrajectoryRecorder` → `rl.NewTrajectoryRecorder`
   - 替换 `agent.TrajectoryRecorder` → `rl.TrajectoryRecorder`
-- [ ] 更新 `examples/wechat-bot/main.go`：
+- [x] 更新 `examples/wechat-bot/main.go`：
   - import `"github.com/SpellingDragon/tagent/rl"`
   - 替换 `agent.NewSwappableModel` → `rl.NewSwappableModel`
   - 替换 `agent.NewHTTPAPI` → `rl.NewHTTPAPI`
-- [ ] 删除 `agent/trajectory_compat.go`、`agent/swappable_compat.go`、`agent/http_api_compat.go`
-- [ ] `go build ./...` 通过
-- [ ] `go test ./... -short -count=1` 全部通过
+- [x] 删除 `agent/trajectory_compat.go`、`agent/swappable_compat.go`、`agent/http_api_compat.go`
+- [x] `go build ./...` 通过
+- [x] `go test ./... -short -count=1` 全部通过
 
 ### Task 2.6: 验证阶段 2
 
-- [ ] `go build ./...` 通过
-- [ ] `go vet ./...` 无警告
-- [ ] `go test ./... -short -count=1 -timeout 180s` 全部通过
-- [ ] `ls rl/` 确认有 4 个 .go 文件：`agent_loop.go`, `trajectory_recorder.go`, `swappable_model.go`, `http_api.go`
-- [ ] `grep -r "agent.TrajectoryRecorder\|agent.HTTPAPI\|agent.SwappableModel\|agent.NewHTTPAPI\|agent.NewSwappableModel" --include="*.go" | grep -v "_test.go"` 无结果（所有引用已更新）
+- [x] `go build ./...` 通过
+- [x] `go vet ./...` 无警告
+- [x] `go test ./... -short -count=1 -timeout 180s` 全部通过
+- [x] `ls rl/` 确认有 4 个 .go 文件：`agent_loop.go`, `trajectory_recorder.go`, `swappable_model.go`, `http_api.go`
+- [x] `grep -r "agent.TrajectoryRecorder\|agent.HTTPAPI\|agent.SwappableModel\|agent.NewHTTPAPI\|agent.NewSwappableModel" --include="*.go" | grep -v "_test.go"` 无结果（所有引用已更新）
 
 ---
 
@@ -218,28 +218,28 @@
 
 ### Task 3.1: 检查 agent 包 unused import
 
-- [ ] 运行 `goimports -w agent/` 或手动检查每个新文件的 import 是否有未使用项
-- [ ] `go build ./...` 通过
+- [x] 运行 `goimports -w agent/` 或手动检查每个新文件的 import 是否有未使用项
+- [x] `go build ./...` 通过
 
 ### Task 3.2: 检查文件行数
 
-- [ ] `wc -l agent/agent.go agent/lifecycle.go agent/event_loop.go agent/inject.go agent/session.go agent/a2a.go agent/helpers.go`
-- [ ] 每个文件 ≤ 350 行（如超过，考虑是否有可进一步拆分的函数）
+- [x] `wc -l agent/agent.go agent/lifecycle.go agent/event_loop.go agent/inject.go agent/session.go agent/a2a.go agent/helpers.go`
+- [x] 每个文件 ≤ 350 行（如超过，考虑是否有可进一步拆分的函数）
 
 ### Task 3.3: 更新 README 项目结构
 
-- [ ] 在 `README.md` 的"项目结构"章节中新增 `rl/` 条目
-- [ ] 更新 `agent/` 的描述（注明文件拆分）
+- [x] 在 `README.md` 的"项目结构"章节中新增 `rl/` 条目
+- [x] 更新 `agent/` 的描述（注明文件拆分）
 
 ### Task 3.4: 最终验证
 
-- [ ] `go build ./...` 通过
-- [ ] `go vet ./...` 无警告
-- [ ] `go test ./... -short -count=1 -timeout 180s` 全部通过
-- [ ] `cd examples/wechat-bot && go build .` 通过
-- [ ] `go test -run TestInvariant ./tests/ -v` 三个不变量测试通过
-- [ ] `find agent/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 agent 包有 ~15 个源文件（原13 + 新增7 - 删除tagent_agent.go - 移出3 = ~16）
-- [ ] `find rl/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 rl 包有 4 个源文件
+- [x] `go build ./...` 通过
+- [x] `go vet ./...` 无警告
+- [x] `go test ./... -short -count=1 -timeout 180s` 全部通过
+- [x] `cd examples/wechat-bot && go build .` 通过
+- [x] `go test -run TestInvariant ./tests/ -v` 三个不变量测试通过
+- [x] `find agent/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 agent 包有 ~15 个源文件（原13 + 新增7 - 删除tagent_agent.go - 移出3 = ~16）
+- [x] `find rl/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 rl 包有 4 个源文件
 
 ---
 
@@ -380,8 +380,8 @@
 
 ### Task 2.1: 创建 rl/ 包骨架
 
-- [ ] 创建 `rl/` 目录
-- [ ] 创建 `rl/agent_loop.go`：定义 AgentLoop 接口
+- [x] 创建 `rl/` 目录
+- [x] 创建 `rl/agent_loop.go`：定义 AgentLoop 接口
   ```go
   package rl
   
@@ -398,14 +398,14 @@
       StopLoop()
   }
   ```
-- [ ] `go build ./rl/` 通过
+- [x] `go build ./rl/` 通过
 
 ### Task 2.2: 移动 TrajectoryRecorder
 
-- [ ] 将 `agent/trajectory_recorder.go` 复制到 `rl/trajectory_recorder.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 修改 import 路径（如有引用 agent 包内部类型，改为从 rl 包外导入或通过参数传入）
-- [ ] 在 `agent/` 中保留一个 type alias 或重导出（暂时，避免外部 break）：
+- [x] 将 `agent/trajectory_recorder.go` 复制到 `rl/trajectory_recorder.go`
+- [x] 修改包名为 `package rl`
+- [x] 修改 import 路径（如有引用 agent 包内部类型，改为从 rl 包外导入或通过参数传入）
+- [x] 在 `agent/` 中保留一个 type alias 或重导出（暂时，避免外部 break）：
   ```go
   // agent/trajectory_compat.go
   // Deprecated: Use rl.TrajectoryRecorder directly.
@@ -418,54 +418,54 @@
 
 ### Task 2.3: 移动 SwappableModel
 
-- [ ] 将 SwappableModel 相关代码从 `agent/helpers.go` 提取到 `rl/swappable_model.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 在 `agent/` 中保留 type alias（暂时）：
+- [x] 将 SwappableModel 相关代码从 `agent/helpers.go` 提取到 `rl/swappable_model.go`
+- [x] 修改包名为 `package rl`
+- [x] 在 `agent/` 中保留 type alias（暂时）：
   ```go
   // agent/swappable_compat.go
   type SwappableModel = rl.SwappableModel
   var NewSwappableModel = rl.NewSwappableModel
   ```
-- [ ] `go build ./...` 通过
+- [x] `go build ./...` 通过
 
 ### Task 2.4: 移动 HTTPAPI
 
-- [ ] 将 `agent/http_api.go` 复制到 `rl/http_api.go`
-- [ ] 修改包名为 `package rl`
-- [ ] 将 `HTTPAPI` 结构体中对 `*TagentAgent` 的引用改为 `AgentLoop` 接口
-- [ ] 修改 `NewHTTPAPI` 签名：`func NewHTTPAPI(agent AgentLoop) *HTTPAPI`
-- [ ] 在 `agent/` 中保留 type alias（暂时）：
+- [x] 将 `agent/http_api.go` 复制到 `rl/http_api.go`
+- [x] 修改包名为 `package rl`
+- [x] 将 `HTTPAPI` 结构体中对 `*TagentAgent` 的引用改为 `AgentLoop` 接口
+- [x] 修改 `NewHTTPAPI` 签名：`func NewHTTPAPI(agent AgentLoop) *HTTPAPI`
+- [x] 在 `agent/` 中保留 type alias（暂时）：
   ```go
   // agent/http_api_compat.go
   type HTTPAPI = rl.HTTPAPI
   var NewHTTPAPI = rl.NewHTTPAPI
   ```
-- [ ] 删除 `agent/http_api.go`
-- [ ] `go build ./...` 通过
-- [ ] 将 `agent/http_api_test.go` 移到 `rl/http_api_test.go`，修改包名
-- [ ] `go test ./rl/ -v` 通过
+- [x] 删除 `agent/http_api.go`
+- [x] `go build ./...` 通过
+- [x] 将 `agent/http_api_test.go` 移到 `rl/http_api_test.go`，修改包名
+- [x] `go test ./rl/ -v` 通过
 
 ### Task 2.5: 更新外部引用（移除 compat alias）
 
-- [ ] 更新 `tagent.go`：
+- [x] 更新 `tagent.go`：
   - import `"github.com/SpellingDragon/tagent/rl"` 替代 `agent.TrajectoryRecorder` 等
   - 替换 `agent.NewTrajectoryRecorder` → `rl.NewTrajectoryRecorder`
   - 替换 `agent.TrajectoryRecorder` → `rl.TrajectoryRecorder`
-- [ ] 更新 `examples/wechat-bot/main.go`：
+- [x] 更新 `examples/wechat-bot/main.go`：
   - import `"github.com/SpellingDragon/tagent/rl"`
   - 替换 `agent.NewSwappableModel` → `rl.NewSwappableModel`
   - 替换 `agent.NewHTTPAPI` → `rl.NewHTTPAPI`
-- [ ] 删除 `agent/trajectory_compat.go`、`agent/swappable_compat.go`、`agent/http_api_compat.go`
-- [ ] `go build ./...` 通过
-- [ ] `go test ./... -short -count=1` 全部通过
+- [x] 删除 `agent/trajectory_compat.go`、`agent/swappable_compat.go`、`agent/http_api_compat.go`
+- [x] `go build ./...` 通过
+- [x] `go test ./... -short -count=1` 全部通过
 
 ### Task 2.6: 验证阶段 2
 
-- [ ] `go build ./...` 通过
-- [ ] `go vet ./...` 无警告
-- [ ] `go test ./... -short -count=1 -timeout 180s` 全部通过
-- [ ] `ls rl/` 确认有 4 个 .go 文件：`agent_loop.go`, `trajectory_recorder.go`, `swappable_model.go`, `http_api.go`
-- [ ] `grep -r "agent.TrajectoryRecorder\|agent.HTTPAPI\|agent.SwappableModel\|agent.NewHTTPAPI\|agent.NewSwappableModel" --include="*.go" | grep -v "_test.go"` 无结果（所有引用已更新）
+- [x] `go build ./...` 通过
+- [x] `go vet ./...` 无警告
+- [x] `go test ./... -short -count=1 -timeout 180s` 全部通过
+- [x] `ls rl/` 确认有 4 个 .go 文件：`agent_loop.go`, `trajectory_recorder.go`, `swappable_model.go`, `http_api.go`
+- [x] `grep -r "agent.TrajectoryRecorder\|agent.HTTPAPI\|agent.SwappableModel\|agent.NewHTTPAPI\|agent.NewSwappableModel" --include="*.go" | grep -v "_test.go"` 无结果（所有引用已更新）
 
 ---
 
@@ -475,28 +475,28 @@
 
 ### Task 3.1: 检查 agent 包 unused import
 
-- [ ] 运行 `goimports -w agent/` 或手动检查每个新文件的 import 是否有未使用项
-- [ ] `go build ./...` 通过
+- [x] 运行 `goimports -w agent/` 或手动检查每个新文件的 import 是否有未使用项
+- [x] `go build ./...` 通过
 
 ### Task 3.2: 检查文件行数
 
-- [ ] `wc -l agent/agent.go agent/lifecycle.go agent/event_loop.go agent/inject.go agent/session.go agent/a2a.go agent/helpers.go`
-- [ ] 每个文件 ≤ 350 行（如超过，考虑是否有可进一步拆分的函数）
+- [x] `wc -l agent/agent.go agent/lifecycle.go agent/event_loop.go agent/inject.go agent/session.go agent/a2a.go agent/helpers.go`
+- [x] 每个文件 ≤ 350 行（如超过，考虑是否有可进一步拆分的函数）
 
 ### Task 3.3: 更新 README 项目结构
 
-- [ ] 在 `README.md` 的"项目结构"章节中新增 `rl/` 条目
-- [ ] 更新 `agent/` 的描述（注明文件拆分）
+- [x] 在 `README.md` 的"项目结构"章节中新增 `rl/` 条目
+- [x] 更新 `agent/` 的描述（注明文件拆分）
 
 ### Task 3.4: 最终验证
 
-- [ ] `go build ./...` 通过
-- [ ] `go vet ./...` 无警告
-- [ ] `go test ./... -short -count=1 -timeout 180s` 全部通过
-- [ ] `cd examples/wechat-bot && go build .` 通过
-- [ ] `go test -run TestInvariant ./tests/ -v` 三个不变量测试通过
-- [ ] `find agent/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 agent 包有 ~15 个源文件（原13 + 新增7 - 删除tagent_agent.go - 移出3 = ~16）
-- [ ] `find rl/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 rl 包有 4 个源文件
+- [x] `go build ./...` 通过
+- [x] `go vet ./...` 无警告
+- [x] `go test ./... -short -count=1 -timeout 180s` 全部通过
+- [x] `cd examples/wechat-bot && go build .` 通过
+- [x] `go test -run TestInvariant ./tests/ -v` 三个不变量测试通过
+- [x] `find agent/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 agent 包有 ~15 个源文件（原13 + 新增7 - 删除tagent_agent.go - 移出3 = ~16）
+- [x] `find rl/ -name "*.go" ! -name "*_test.go" | wc -l` 确认 rl 包有 4 个源文件
 
 ---
 
