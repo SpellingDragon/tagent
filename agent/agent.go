@@ -1,0 +1,429 @@
+// Package agent provides tagent's core agent mechanism coordination.
+//
+// TagentAgent wires together:
+//   - EventBus + AgentLoop (event-driven execution engine)
+//   - Runner (framework orchestration with plugins, retained for session/plugin lifecycle)
+//   - MemoryPlugin (OnEvent: event persistence + causal chain)
+//   - Preprocessor (event filtering, token budget, SmartCompress)
+//
+// Core principle: AgentLoop is a pure event-driven engine with no business semantics.
+// All domain decisions (event filtering, shouldCallModel, compression) live in Preprocessor.
+//
+// TagentAgent implements agent.Agent, so it can be wrapped as agent.Tool
+// for tool-agent composition.
+//
+// Top-level usage: StartLoop / InjectMessage / StopLoop (persistent event loop only).
+// Sub-agent usage: agent.Run() via AgentToolWrapper.Call() (invoked by parent LLM).
+//
+// NOTE: This package does NOT depend on tagent/tool.
+// Application-level wiring (KnowledgeAgent assembly, WireActionTool, etc.)
+// lives in the root tagent package.
+package agent
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
+
+	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/log"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/session"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/prompt"
+)
+
+// Closer is implemented by components that hold resources requiring cleanup
+// on agent shutdown (e.g., ActionTool stops its TmuxMonitor).
+// Using an interface avoids a direct dependency on tagent/tool.
+type Closer interface {
+	Close() error
+}
+
+// Verify TagentAgent implements agent.Agent at compile time.
+var _ agent.Agent = (*TagentAgent)(nil)
+
+// TagentAgent is tagent's top-level Agent assembly.
+// It implements agent.Agent so it can be used both as a standalone agent
+// and as a tool-agent (wrapped via AgentToolWrapper).
+//
+// In the event-driven architecture, TagentAgent owns an EventBus and
+// AgentLoop. External inputs (user messages, tmux callbacks, meditation)
+// are published to the bus; the AgentLoop consumes them, calls the model
+// via Preprocessor, and dispatches tool_use events asynchronously.
+type TagentAgent struct {
+	// activeBus is the single event bus for this agent, regardless of
+	// whether it is running in persistent loop mode (StartLoop) or
+	// sub-agent invocation mode (Run). Tools (e.g., ActionTool via
+	// TmuxMonitor callbacks) publish to this bus via InjectMessage.
+	// StartLoop sets it to ta.persistentBus; Run() sets it to invBus.
+	activeBus   *EventBus
+	activeBusMu sync.Mutex
+
+	// persistentBus is the bus created at construction time, used by
+	// the persistent AgentLoop started via StartLoop.
+	persistentBus  *EventBus
+	contextManager *ContextManager
+
+	// Framework integration
+	memStore   memory.MemoryStore
+	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
+	config     *TagentConfig
+	sessionSvc session.Service
+
+	// Agent identity (for agent.Agent interface)
+	name        string
+	description string
+
+	// Session context for event injection (set on first Run)
+	sessionMu     sync.Mutex
+	lastUserID    string
+	lastSessionID string
+
+	// External events pending ingestion (set before Run)
+	// These are converted to internal context messages at the start of the next run.
+	pendingExternalEvents []memory.FullEvent
+
+	// Resource closers — components like ActionTool that need cleanup on shutdown.
+	// Closed in Close() before the runner is stopped.
+	closers []Closer
+
+	// TrajectoryRecorder (optional) — records LLM calls to JSONL when enabled.
+	// Set via SetTrajectoryRecorder. StartLoop calls SetSessionInfo on it.
+	trajectoryRecorder *TrajectoryRecorder
+
+	// Persistent Event Loop — 持久事件循环（StartLoop 模式）
+	outputCh   chan *event.Event  // 持久输出 channel（Loop 模式下不关闭）
+	loopCtx    context.Context    // Loop context（StopLoop 取消）
+	loopCancel context.CancelFunc // Loop cancel
+	loopActive atomic.Bool        // Loop 是否运行中
+	loopWg     sync.WaitGroup     // 等待 Loop goroutine 退出
+
+	// Meditation manager — started/stopped with the persistent event loop.
+	meditationMgr *MeditationManager
+
+	// Projection organizer — proactively refines old ref summaries during idle.
+	// Started/stopped with the persistent event loop. nil if SummaryModel not configured.
+	organizer *ProjectionOrganizer
+
+	// projection is the lightweight, bounded Session projection (EventReference[])
+	// shared by onEvent and Preprocessor. It is created per TagentAgent and
+	// passed to each invocation's AgentLoop.
+	projection *SessionProjection
+
+	// asyncTaskCheckers are checked by Run() before returning.
+	// If any checker reports pending async tasks, Run() continues waiting
+	// instead of returning immediately (call stack semantics: don't pop
+	// until all async tasks complete).
+	asyncTaskCheckers []AsyncTaskChecker
+}
+
+// AsyncTaskChecker is implemented by tools that have pending async operations.
+// Run() calls HasPendingAsyncTasks() before returning a final response;
+// if true, it continues waiting for async results to arrive via InjectMessage.
+type AsyncTaskChecker interface {
+	HasPendingAsyncTasks() bool
+}
+
+// TagentConfig holds configuration for creating a TagentAgent.
+type TagentConfig struct {
+	Model              model.Model        // Required: LLM model
+	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
+	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
+	SystemPromptSource *prompt.Source     // Hot-reloadable system prompt (optional, overrides SystemPrompt)
+	Tools              []tool.Tool        // CallableTools to register
+	MaxToolIterations  int                // Default: 200
+	MaxTokens          int                // Token budget for context (default: 8000)
+	CompressThreshold  float64            // Compression trigger threshold (default: 0.8)
+	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
+	Temperature        float64            // Optional: LLM temperature (default: 0.7)
+	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
+	Compress           CompressConfig     // SmartCompressor parameters
+
+	// Thinking/reasoning controls (merged into model.GenerationConfig)
+	ThinkingEnabled      *bool
+	ThinkingTokens       *int
+	ReasoningEffort      *string
+	ReasoningContentMode string
+
+	// Agent identity (for agent.Agent interface)
+	Name        string // Default: "tagent"
+	Description string // Default: "TagentAgent - AI assistant powered by tagent"
+
+	// Meditation configures the meditation/heartbeat mechanism.
+	Meditation MeditationConfig
+}
+
+// Default configuration values
+const (
+	DefaultMaxToolIterations         = 50
+	DefaultSubAgentMaxToolIterations = 10
+	DefaultMaxTokens                 = 8000
+	DefaultCompressThreshold         = 0.8
+	DefaultAgentName                 = "tagent"
+	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
+
+	// Default compress parameters
+	DefaultMaxExecStateChars  = 2000
+	DefaultMaxToolResultChars = 500
+	DefaultMaxToolArgsChars   = 80
+	DefaultChunkSize          = 1000
+	DefaultChunkSummaryLen    = 150
+)
+
+// CompressConfig holds SmartCompressor parameters.
+type CompressConfig struct {
+	MaxToolResultChars int
+	MaxExecStateChars  int
+	ChunkSummaryLen    int
+}
+
+// NewTagentAgent creates a new TagentAgent with the given configuration.
+//
+// In the event-driven architecture, NewTagentAgent:
+//   - Creates MemoryStore + MemoryPlugin + SmartCompressor
+//   - Creates Preprocessor (replacing ContextIntervention.BeforeModel)
+//   - Creates EventBus + AgentLoop
+//   - Creates SessionService + Runner (as shell for session/plugin management)
+//
+// The Runner is retained for session management and plugin lifecycle
+// (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
+// AgentLoop, not the Runner.
+func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+	if cfg.Model == nil {
+		return nil, fmt.Errorf("model is required")
+	}
+
+	// Apply defaults
+	if cfg.MaxToolIterations <= 0 {
+		cfg.MaxToolIterations = DefaultMaxToolIterations
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = DefaultMaxTokens
+	}
+	if cfg.CompressThreshold <= 0 || cfg.CompressThreshold > 1 {
+		cfg.CompressThreshold = DefaultCompressThreshold
+	}
+	if cfg.KeepRecentTasks <= 0 {
+		cfg.KeepRecentTasks = 2
+	}
+
+	// 1. Create MemoryStore (use provided or default to InMemoryStore)
+	var memStore memory.MemoryStore
+	if cfg.MemoryStore != nil {
+		memStore = cfg.MemoryStore
+	} else {
+		memStore = memory.NewInMemoryStore()
+	}
+
+	// 3. Create MemoryPlugin
+	memPlugin := plugin.NewMemoryPlugin(memStore)
+
+	// Apply identity defaults
+	if cfg.Name == "" {
+		cfg.Name = DefaultAgentName
+	}
+	name := cfg.Name
+	if cfg.Description == "" {
+		cfg.Description = DefaultAgentDescription
+	}
+	description := cfg.Description
+
+	// 4. Wrap all tools with OutputLimitTool
+	maxOutputChars := cfg.MaxTokens / 2 * 4
+	outputWorkspace := ".tagent-output"
+	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
+		wrapped := make([]tool.Tool, len(cfg.Tools))
+		for i, t := range cfg.Tools {
+			olt := NewOutputLimitTool(t, maxOutputChars)
+			olt.SetWorkspace(outputWorkspace)
+			wrapped[i] = olt
+		}
+		cfg.Tools = wrapped
+	}
+
+	// 5. Create outputCh + EventBus + projection EARLY so the
+	// AppendEventHook (created next) can capture them.
+	outputCh := make(chan *event.Event, 100)
+	bus := NewEventBus()
+	projection := NewSessionProjection()
+
+	// onEventRef is set after TagentAgent creation. The AppendEventHook
+	// uses it to forward user message events into the projection + outputCh.
+	var onEventRef func(evt *event.Event)
+
+	// 6. Create SessionService
+	// Limit session events to 2: only the current invocation's user message
+	// and the latest tool result are needed for ContentRequestProcessor's
+	// TimelineFilterCurrentRequest. Historical context is managed entirely
+	// by SessionProjection + ContextCompressor, so the runner session does
+	// not need to retain full event history.
+	//
+	// AppendEventHook also forwards user message events to outputCh +
+	// projection. The framework runner appends user messages to session
+	// (after MemoryPlugin processes them) but does NOT emit them through
+	// the agent event channel. Without this hook, user messages never
+	// enter the projection and are lost as historical context.
+	sessionSvc := sessioninmemory.NewSessionService(
+		sessioninmemory.WithSessionEventLimit(2),
+		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
+			original := ctx.Event
+			var evtCopy event.Event
+			if original.Response != nil {
+				evtCopy = *original
+				evtCopy.Response = original.Response.Clone()
+				ctx.Event = &evtCopy
+			}
+			err := next()
+			ctx.Event = original
+
+			// Forward user message events to outputCh + projection.
+			// LLM/tool events are emitted via eventCh in RunFlow, not here.
+			// MemoryPlugin has already written event_key to StateDelta,
+			// so BuildEventReference will succeed.
+			if onEventRef != nil && original.IsUserMessage() {
+				emitEvt := original
+				if original.Response != nil {
+					emitEvt = &evtCopy
+				}
+				onEventRef(emitEvt)
+				select {
+				case outputCh <- emitEvt:
+				default:
+					log.Warnf("[SessionHook] outputCh full, user message event dropped")
+				}
+			}
+
+			return err
+		}),
+	)
+
+	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
+	ta := &TagentAgent{
+		persistentBus: bus,
+		activeBus:     bus,
+		memStore:      memStore,
+		memPlugin:     memPlugin,
+		config:        cfg,
+		sessionSvc:    sessionSvc,
+		name:          name,
+		description:   description,
+		outputCh:      outputCh,
+		closers:       []Closer{},
+		projection:    projection,
+	}
+
+	// 8. Create onEvent callback and ContextManager.
+	onEvent := ta.makeOnEventCallback("", projection)
+	onEventRef = onEvent // Wire the hook's callback.
+	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
+	ta.contextManager = cm
+
+	// Initialize meditation manager if enabled.
+	if cfg.Meditation.Enabled {
+		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
+	}
+
+	// Initialize projection organizer if SummaryModel is configured.
+	// The organizer shares idle time tracking with the meditation manager.
+	if cfg.SummaryModel != nil {
+		lastEventTimeFn := func() int64 {
+			if ta.meditationMgr != nil {
+				return ta.meditationMgr.LastEventTime()
+			}
+			return 0 // No idle tracking available
+		}
+		ta.organizer = NewProjectionOrganizer(
+			ProjectionOrganizerConfig{
+				SummaryModel: cfg.SummaryModel,
+				OrganizeAge:  cfg.KeepRecentTasks * 2,
+			},
+			projection,
+			memStore,
+			lastEventTimeFn,
+		)
+	}
+
+	return ta, nil
+}
+
+
+// buildCompressorOpts builds SmartCompressor options from TagentConfig.
+// Shared by NewTagentAgent and Run() to avoid duplicating option-building logic.
+func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
+	opts := []SmartCompressorOption{
+		WithMaxTokens(cfg.MaxTokens),
+	}
+	if cfg.KeepRecentTasks > 0 {
+		opts = append(opts, WithKeepRecentTasks(cfg.KeepRecentTasks))
+	}
+	if cfg.SummaryModel != nil {
+		opts = append(opts, WithSummaryModel(cfg.SummaryModel))
+	}
+	// Compress config
+	if cfg.Compress.MaxToolResultChars > 0 {
+		opts = append(opts, WithMaxToolResultChars(cfg.Compress.MaxToolResultChars))
+	}
+	if cfg.Compress.MaxExecStateChars > 0 {
+		opts = append(opts, WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
+	}
+	if cfg.Compress.ChunkSummaryLen > 0 {
+		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
+	}
+	return opts
+}
+
+// newCompressorFromConfig creates a SmartCompressor from TagentConfig.
+func newCompressorFromConfig(cfg *TagentConfig) *SmartCompressor {
+	return NewSmartCompressor(buildCompressorOpts(cfg)...)
+}
+
+// newContextManagerFromConfig creates a ContextManager from TagentConfig.
+// Shared by NewTagentAgent and Run().
+func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
+	compressor := newCompressorFromConfig(cfg)
+	compressor.tokenCounter = NewDefaultTokenCounter()
+	// Inject MemStore and Projection into SmartCompressor for chunk persistence
+	if cfg.MemoryStore != nil {
+		compressor.memStore = cfg.MemoryStore
+	}
+	if projection != nil {
+		compressor.projection = projection
+	}
+	// Use system prompt from config (framework details are in AGENTS.md)
+	systemPrompt := cfg.SystemPrompt
+
+	return NewContextManager(ContextManagerConfig{
+		Name:                 cfg.Name,
+		Model:                cfg.Model,
+		Tools:                cfg.Tools,
+		SystemPrompt:         systemPrompt,
+		SystemPromptSource:   cfg.SystemPromptSource,
+		Temperature:          cfg.Temperature,
+		MaxToolIters:         cfg.MaxToolIterations,
+		ThinkingEnabled:      cfg.ThinkingEnabled,
+		ThinkingTokens:       cfg.ThinkingTokens,
+		ReasoningEffort:      cfg.ReasoningEffort,
+		ReasoningContentMode: cfg.ReasoningContentMode,
+		Compressor:           compressor,
+		TokenCounter:         NewDefaultTokenCounter(),
+		MaxTokens:            cfg.MaxTokens,
+		ThresholdPct:         cfg.CompressThreshold,
+		MemStore:             cfg.MemoryStore,
+		MemPlugin:            memPlugin,
+		SessionSvc:           sessionSvc,
+		OutputCh:             outputCh,
+		Bus:                  bus,
+		Projection:           projection,
+		OnEvent:              onEvent,
+	})
+}
