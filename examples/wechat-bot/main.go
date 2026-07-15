@@ -15,6 +15,7 @@ import (
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -110,7 +111,7 @@ func main() {
 		openai.WithAPIKey(entryAPIKey),
 		openai.WithBaseURL(entryEndpoint),
 	)
-	swappableModel := agent.NewSwappableModel(entryModel)
+	swappableModel := rl.NewSwappableModel(entryModel)
 
 	// 3. Load skills repository (optional)
 	var skillRepo *skill.FSRepository
@@ -168,7 +169,7 @@ func main() {
 	if httpPort == "" {
 		httpPort = "8089"
 	}
-	httpAPI := agent.NewHTTPAPI(ta)
+	httpAPI := rl.NewHTTPAPI(ta)
 	// Set model update callback: when AReaL adapter sends llm_base_url,
 	// create a new openai model with that URL and swap it in.
 	httpAPI.SetModelUpdateFn(func(baseURL string) {

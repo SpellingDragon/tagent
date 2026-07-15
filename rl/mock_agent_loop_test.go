@@ -9,12 +9,12 @@ import (
 
 // mockAgentLoop is a mock implementation of AgentLoop for testing.
 type mockAgentLoop struct {
-	mu           sync.Mutex
-	messages     []model.Message
-	loopActive   bool
-	sources      []string
-	startCalled  int
-	stopCalled   int
+	mu          sync.Mutex
+	messages    []model.Message
+	loopActive  bool
+	sources     []string
+	startCalled int
+	stopCalled  int
 }
 
 func (m *mockAgentLoop) InjectMessage(msg model.Message) {

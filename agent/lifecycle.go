@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"github.com/SpellingDragon/tagent/rl"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -16,12 +17,12 @@ func (ta *TagentAgent) RegisterCloser(c Closer) {
 // SetTrajectoryRecorder sets the trajectory recorder for this agent.
 // When set, StartLoop will automatically call SetSessionInfo on it.
 // The recorder should also be registered via RegisterCloser for graceful shutdown.
-func (ta *TagentAgent) SetTrajectoryRecorder(tr *TrajectoryRecorder) {
+func (ta *TagentAgent) SetTrajectoryRecorder(tr *rl.TrajectoryRecorder) {
 	ta.trajectoryRecorder = tr
 }
 
 // TrajectoryRecorder returns the trajectory recorder if one is set, or nil.
-func (ta *TagentAgent) TrajectoryRecorder() *TrajectoryRecorder {
+func (ta *TagentAgent) TrajectoryRecorder() *rl.TrajectoryRecorder {
 	return ta.trajectoryRecorder
 }
 

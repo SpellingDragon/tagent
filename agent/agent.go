@@ -35,6 +35,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/prompt"
 )
@@ -96,7 +97,7 @@ type TagentAgent struct {
 
 	// TrajectoryRecorder (optional) — records LLM calls to JSONL when enabled.
 	// Set via SetTrajectoryRecorder. StartLoop calls SetSessionInfo on it.
-	trajectoryRecorder *TrajectoryRecorder
+	trajectoryRecorder *rl.TrajectoryRecorder
 
 	// Persistent Event Loop — 持久事件循环（StartLoop 模式）
 	outputCh   chan *event.Event  // 持久输出 channel（Loop 模式下不关闭）

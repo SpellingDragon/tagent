@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/tool"
@@ -67,7 +68,7 @@ type runtimeConfig struct {
 
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
-	trajectoryRecorder *agent.TrajectoryRecorder
+	trajectoryRecorder *rl.TrajectoryRecorder
 
 	// actionTools collects all ActionTool instances across all agents.
 	// Their MessageInjector is set to the entry agent after construction,
@@ -159,7 +160,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 
 	// Wrap model with TrajectoryRecorder if enabled
 	if cfg.TrajectoryDump {
-		tr, err := agent.NewTrajectoryRecorder(rc.model, cfg.TrajectoryDir, cfg.APIEndpoint)
+		tr, err := rl.NewTrajectoryRecorder(rc.model, cfg.TrajectoryDir, cfg.APIEndpoint)
 		if err != nil {
 			return nil, fmt.Errorf("tagent: create trajectory recorder: %w", err)
 		}
@@ -572,7 +573,7 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 	// Wrap with TrajectoryRecorder if enabled, so sub-agent LLM calls
 	// are also recorded for RL training data.
 	if rc.trajectoryRecorder != nil {
-		m = agent.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+		m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
 		log.Debugf("[tagent] agent %q: wrapped model %q with TrajectoryRecorder", name, acfg.Model)
 	}
 
@@ -635,7 +636,7 @@ func (rc *runtimeConfig) resolveSummaryModel(name string, acfg AgentConfig, cfg 
 		}
 
 		if rc.trajectoryRecorder != nil {
-			m = agent.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+			m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
 			log.Debugf("[tagent] agent %q: wrapped summary model %q with TrajectoryRecorder", name, summaryModel)
 		}
 
