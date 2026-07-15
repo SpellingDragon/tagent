@@ -154,10 +154,10 @@
   // Deprecated: Use rl.TrajectoryRecorder directly.
   type TrajectoryRecorder = rl.TrajectoryRecorder
   ```
-- [ ] 删除 `agent/trajectory_recorder.go`
-- [ ] `go build ./...` 通过
-- [ ] 将 `agent/trajectory_recorder_test.go` 移到 `rl/trajectory_recorder_test.go`，修改包名
-- [ ] `go test ./rl/ -v` 通过
+- [x] 删除 `agent/trajectory_recorder.go`
+- [x] `go build ./...` 通过
+- [x] 将 `agent/trajectory_recorder_test.go` 移到 `rl/trajectory_recorder_test.go`，修改包名
+- [x] `go test ./rl/ -v` 通过
 
 ### Task 2.3: 移动 SwappableModel
 
