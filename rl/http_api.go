@@ -3,7 +3,7 @@
 // The HTTP API exposes tagent's persistent event loop to external callers
 // (e.g., AReaL's Python adapter). It is optional — only needed when tagent
 // is used as an RL rollout agent.
-package agent
+package rl
 
 import (
 	"encoding/json"
@@ -25,12 +25,12 @@ type ModelUpdateFn func(baseURL string)
 // HTTPAPI exposes tagent's persistent loop via HTTP.
 // It enables external callers (e.g., AReaL Python adapter) to submit tasks.
 type HTTPAPI struct {
-	agent         *TagentAgent
+	agent         AgentLoop
 	modelUpdateFn ModelUpdateFn // optional: set by main.go for AReaL proxy support
 }
 
 // NewHTTPAPI creates a new HTTPAPI for the given agent.
-func NewHTTPAPI(agent *TagentAgent) *HTTPAPI {
+func NewHTTPAPI(agent AgentLoop) *HTTPAPI {
 	return &HTTPAPI{agent: agent}
 }
 
@@ -82,7 +82,7 @@ type taskResponse struct {
 // injecting messages. This redirects LLM requests to AReaL's proxy, which
 // captures logprobs + completion_ids for RL training.
 func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
-	if !h.agent.loopActive.Load() {
+	if !h.agent.IsLoopActive() {
 		writeJSONError(w, http.StatusServiceUnavailable, "loop_not_active",
 			"persistent event loop is not running; call StartLoop first")
 		return
@@ -132,7 +132,7 @@ func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPAPI) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"status":      "ok",
-		"loop_active": h.agent.loopActive.Load(),
+		"loop_active": h.agent.IsLoopActive(),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

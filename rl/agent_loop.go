@@ -22,4 +22,5 @@ type AgentLoop interface {
 	InjectMessageWithSource(source string, msg model.Message)
 	StartLoop(userID, sessionID string) (<-chan *event.Event, error)
 	StopLoop()
+	IsLoopActive() bool
 }

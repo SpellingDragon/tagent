@@ -151,3 +151,8 @@ func (ta *TagentAgent) StopLoop() {
 	ta.loopWg.Wait()
 	log.Infof("[StopLoop] persistent event loop stopped")
 }
+
+// IsLoopActive returns true if the persistent event loop is currently running.
+func (ta *TagentAgent) IsLoopActive() bool {
+	return ta.loopActive.Load()
+}
