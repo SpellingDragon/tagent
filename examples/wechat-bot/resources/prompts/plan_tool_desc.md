@@ -19,7 +19,7 @@
 | 参数 | 说明 |
 |------|------|
 | action | `create` / `update` / `archive` / `progress` |
-| request | 自然语言描述 |
+| request | **必填**。自然语言描述你要做什么（即使是 progress/archive 也要写） |
 
 ## 使用示例
 
@@ -31,11 +31,13 @@ plan({action: "create", request: "完善 OI 题库，基于 oi-wiki.org 补充 1
 plan({action: "update", request: "基础算法部分的 3 道题目已完成"})
 
 // 查看进度（用户询问或自己检查时）
-plan({action: "progress"})
+plan({action: "progress", request: "查看当前计划的完成进度"})
 
 // 归档（所有步骤完成后）
 plan({action: "archive", request: "所有知识点题目已完成，归档"})
 ```
+
+> **注意**：`request` 字段必须始终填写，不能省略。即使只是查看进度，也要写清楚意图。
 
 ## 工作流程
 
