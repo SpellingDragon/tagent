@@ -615,7 +615,11 @@ func isFinalResponse(evt *event.Event) bool {
 		return false
 	}
 	choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-	return len(choice.Message.ToolCalls) == 0
+	// Only an assistant message without tool_calls is a final response.
+	// A tool RESULT (Role=tool) also has no tool_calls but must NOT be
+	// treated as final — that would cause a spurious agent_output echo and
+	// (in the sub-agent path) premature turn termination.
+	return choice.Message.Role == model.RoleAssistant && len(choice.Message.ToolCalls) == 0
 }
 
 func extractMessageFromEvent(evt *event.Event) model.Message {

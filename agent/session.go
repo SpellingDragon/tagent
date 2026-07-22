@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -99,60 +98,27 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	invCM.SetSubAgentMode(true)
 	invCM.SetUserIDSessionID(ta.lastUserID, sessionID)
 
-	// Publish the initial message as external_input.
-	invBus.Publish(NewExternalInputEvent("user", message))
-
-	// Run the event loop in a goroutine. It will exit when ctx is cancelled.
-	runCtx, runCancel := context.WithCancel(ctx)
+	// Sub-agent invocation semantics: a tool call is request-response — one
+	// input, one turn, one result. RunFlow runs exactly one complete turn
+	// (input → full ReAct tool loop → final response) and returns when the
+	// turn is done. The turn boundary is RunFlow's natural return, NOT
+	// event-stream inspection. Events flow to invOutputCh via RunFlow's
+	// forwarding; the caller reads until invOutputCh closes.
+	//
+	// This shares the same turn primitive (RunFlow) as the persistent loop
+	// (runEventLoop); the only difference is the persistent loop wraps it in
+	// `for { Pull; RunFlow }` while a sub-agent calls it exactly once.
+	invCM.SetTriggerSource("user")
 	go func() {
-		defer close(invOutputCh)
-		defer invCM.Close() // Release temporary Runner resources after runEventLoop exits
-		ta.runEventLoop(runCtx, invBus, invCM)
-	}()
-
-	// Wrap the outputCh: forward events and cancel the loop when the
-	// caller stops reading OR when the first agent_output is emitted
-	// (sub-agent single-turn semantics).
-	// EXCEPTION: if asyncTaskCheckers report pending tasks, continue waiting
-	// for async results instead of returning immediately (call stack semantics).
-	wrappedCh := make(chan *event.Event, cap(invOutputCh))
-	go func() {
-		defer close(wrappedCh)
-		defer runCancel()
+		defer close(invOutputCh)        // signals turn end to the caller
+		defer invCM.Close()             // release temporary Runner resources
 		defer ta.restorePersistentBus() // restore activeBus to persistentBus
-		for evt := range invOutputCh {
-			wrappedCh <- evt
-			// Sub-agent semantics: stop after the first agent_output
-			// (final response without tool_calls).
-			if evt != nil && evt.Response != nil && len(evt.Response.Choices) > 0 {
-				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-				if len(choice.Message.ToolCalls) == 0 {
-					if choice.Message.Content == "" {
-						log.Warnf("[Run] sub-agent %q returned empty final response, treating as complete", ta.name)
-					}
-
-					// Drain mode: forward remaining tail events (e.g., MemoryPlugin
-					// persistence, RequiresCompletion) for up to 500ms before exiting.
-					// This prevents context cancellation from dropping tail events.
-					drainTimer := time.NewTimer(500 * time.Millisecond)
-					defer drainTimer.Stop()
-					for {
-						select {
-						case tailEvt, ok := <-invOutputCh:
-							if !ok {
-								return // invOutputCh closed
-							}
-							wrappedCh <- tailEvt
-						case <-drainTimer.C:
-							return // drain timeout
-						}
-					}
-				}
-			}
+		if err := invCM.RunFlow(ctx, message); err != nil {
+			log.Errorf("[Run] sub-agent %q RunFlow failed: %v", ta.name, err)
 		}
 	}()
 
-	return wrappedCh, nil
+	return invOutputCh, nil
 }
 
 // RunSimple is removed. Top-level usage must use StartLoop/InjectMessage/StopLoop.
