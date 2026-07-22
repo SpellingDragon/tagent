@@ -7,7 +7,7 @@
 ```
 skills/
 ├── url-fetcher/          # URL信息获取技能
-│   ├── skill.md          # 技能描述文件
+│   ├── SKILL.md          # 技能描述文件
 │   ├── package.json      # Node.js依赖配置
 │   ├── url_fetcher.js    # 主执行脚本
 │   ├── README.md         # 使用说明
@@ -58,7 +58,7 @@ node skills/url-fetcher/url_fetcher.js --help
 
 每个技能应包含以下文件：
 
-1. **skill.md** - 技能描述文件
+1. **SKILL.md** - 技能描述文件
    - 技能概述
    - 功能说明
    - 使用方法
@@ -86,7 +86,7 @@ node skills/url-fetcher/url_fetcher.js --help
 
 ```
 <skill-name>/
-├── skill.md              # 必需: 技能描述
+├── SKILL.md              # 必需: 技能描述
 ├── package.json          # Node.js项目必需
 ├── <skill_name>.js       # 必需: 主执行脚本
 ├── README.md             # 必需: 使用说明
@@ -122,7 +122,7 @@ mkdir -p skills/<skill-name>
 cd skills/<skill-name>
 
 # 2. 创建必要文件
-touch skill.md package.json <skill-name>.js README.md
+touch SKILL.md package.json <skill-name>.js README.md
 
 # 3. 编写代码
 # ...
