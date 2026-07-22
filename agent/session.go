@@ -86,9 +86,9 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	invOutputCh := make(chan *event.Event, 100)
 	invProjection := NewSessionProjection()
 	invOnEvent := ta.makeOnEventCallback(sessionID, invProjection)
-	maxToolIters := DefaultSubAgentMaxToolIterations
-	if ta.config.MaxToolIterations > 0 && ta.config.MaxToolIterations < maxToolIters {
-		maxToolIters = ta.config.MaxToolIterations
+	maxToolIters := ta.config.MaxToolIterations
+	if maxToolIters <= 0 {
+		maxToolIters = DefaultSubAgentMaxToolIterations
 	}
 	invCfg := *ta.config
 	invCfg.MaxToolIterations = maxToolIters

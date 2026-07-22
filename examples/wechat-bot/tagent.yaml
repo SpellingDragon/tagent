@@ -360,12 +360,13 @@ agents:
   plan:
     model: glm-5.2
     provider: zhipu
+    thinking_enabled: true
     system_prompt:
       files:
         - plan_agent.md
     memory:
       type: memory
-    max_tool_iterations: 5
+    max_tool_iterations: 15
     max_tokens: 64000
     temperature: 0.3
     tools:

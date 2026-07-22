@@ -17,23 +17,47 @@
 
 ## 工作流程
 
-所有操作通过 openspec 命令完成。先运行 `openspec --help` 了解可用命令，再按指引执行。
+所有操作通过 openspec 命令完成。
+
+### 前置：确保 OpenSpec 已初始化（每次操作前必做）
+
+在创建 / 更新 / 查看 / 归档任何计划之前，**必须先确认当前工作区已完成 OpenSpec 初始化**：
+
+1. 检查当前目录是否已存在 `openspec/` 目录，或运行 `openspec list` 看是否报错。
+2. 若尚未初始化（目录不存在或命令报 `not initialized` 之类错误），**必须先执行初始化**，再继续后续操作：
+
+   ```bash
+   # openspec 1.2.0+ 要求 init 必须带 --tools 参数，否则报错。
+   # 使用 --tools none 仅初始化核心目录结构，不集成外部 AI 工具（tagent 不在支持列表）。
+   openspec init --tools none
+   ```
+
+3. 初始化成功后，再执行对应的 create / update / progress / archive 流程。
+
+> **关键**：不要跳过 init 直接跑 `openspec new/status/list`，未初始化会导致命令失败或返回空。init 是幂等的前置保障——已初始化时再跑一次也安全（如报 "already initialized" 可忽略）。
+
+> **工作目录约束**：执行 openspec 命令时，**必须在 OpenSpec 实际所在的工作目录**（即包含 `openspec/` 目录的那个目录）下运行，**严禁 `cd /home/user` 等硬编码路径**——该路径在多数环境不存在会导致命令失败。若不确定当前目录，先 `pwd` 确认，必要时用绝对路径执行 `openspec`（如 `<工作区绝对路径>/openspec` 或在该目录下直接 `openspec ...`）。
 
 ### 创建计划
 
+收到 create 请求后，**直接按顺序执行以下命令，不要先跑 --help 或 ls 探索环境**：
+
 ```bash
-# 0. 初始化openspec（如果还没有openspec路径）
-openspec init
+# 步骤 1: 幂等初始化（已初始化时忽略错误）
+openspec init --tools none 2>&1 || true
 
-# 1. 创建新计划
-openspec new change "<plan-name>"
+# 步骤 2: 创建 change（plan-name 从 request 推导，kebab-case）
+openspec new change "<plan-name>" 2>&1
 
-# 2. 获取创建指引（含规范和模板）
-openspec instructions proposal --change "<plan-name>"
-
-# 3. 编写 proposal.md（描述任务目标和动机）
-# 4. 编写 tasks.md（列出所有步骤，每步一行 "- [ ] 描述"）
+# 步骤 3: 用 save_file 写 tasks.md
+# 路径: openspec/changes/<plan-name>/tasks.md
+# 格式: 每步一行 "- [ ] 描述"
 ```
+
+每步是一个 tool call。**禁止**：
+- 不要跑 `openspec --help`（你已知命令格式）
+- 不要 `cd /home/user`（不存在）
+- 不要 `list_file` 检查工作区（浪费迭代）
 
 **好的计划应该：**
 - 每步是一个可独立验证的执行单元
