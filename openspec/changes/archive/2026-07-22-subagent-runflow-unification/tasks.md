@@ -27,5 +27,5 @@
 
 ## 5. 收尾
 
-- [ ] 5.1 `openspec validate subagent-runflow-unification --strict` 通过
-- [ ] 5.2 按 commit 规范提交(scope: agent),说明根因与统一方案
+- [x] 5.1 `openspec validate subagent-runflow-unification --strict` 通过
+- [x] 5.2 按 commit 规范提交(scope: agent),说明根因与统一方案
