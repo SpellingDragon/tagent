@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -246,32 +247,63 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	t.Logf("========== plan 返回 (len=%d) ==========", len(resultStr))
 	t.Logf("%s", truncateCmd(resultStr, 400))
 
-	// 核心断言：检查是否真的执行了 openspec new change
+	// 核心断言：create 必须产出合规 openspec change（proposal.md + tasks.md），
+	// tasks.md 遵循官方模板，且以 openspec validate 收尾。
 	ranNewChange := false
+	ranValidate := false
 	for _, c := range commands {
 		if strings.Contains(c, "openspec new change") {
 			ranNewChange = true
-			break
+		}
+		if strings.Contains(c, "openspec validate") {
+			ranValidate = true
 		}
 	}
+	wroteProposal := false
 	wroteTasks := false
-	for p := range savedFiles {
+	var tasksContent string
+	var savedPaths []string
+	for p, content := range savedFiles {
+		savedPaths = append(savedPaths, p)
+		if strings.Contains(p, "proposal.md") {
+			wroteProposal = true
+		}
 		if strings.Contains(p, "tasks.md") {
 			wroteTasks = true
-			break
+			tasksContent = content
 		}
 	}
+	// tasks.md 官方模板：`## N.` 分组标题 + `- [ ] N.M` 复选框
+	groupHeadingRe := regexp.MustCompile(`(?m)^## \d+\.`)
+	checkboxRe := regexp.MustCompile(`(?m)^- \[ \] \d+\.\d+`)
+	tasksFollowsTemplate := groupHeadingRe.MatchString(tasksContent) && checkboxRe.MatchString(tasksContent)
 
-	// 诊断输出：明确 create 是否真正落地
+	// 诊断输出：明确 create 是否产出合规 change
 	if !ranNewChange {
-		t.Errorf("❌ 问题复现: plan create 未执行 `openspec new change`（只做了探索）。执行的命令: %v", commands)
+		t.Errorf("❌ plan create 未执行 `openspec new change`。执行的命令: %v", commands)
 	} else {
 		t.Logf("✅ plan create 执行了 `openspec new change`")
 	}
+	// 关键：proposal.md 必须创建（不再是裸 tasks.md 目录）
+	if !wroteProposal {
+		t.Errorf("❌ plan create 未创建 proposal.md（仍是裸 tasks.md 目录）。写入的文件: %v", savedPaths)
+	} else {
+		t.Logf("✅ plan create 创建了 proposal.md")
+	}
 	if !wroteTasks {
-		t.Logf("⚠️  plan create 未用 save_file 写 tasks.md")
+		t.Errorf("❌ plan create 未写 tasks.md。写入的文件: %v", savedPaths)
 	} else {
 		t.Logf("✅ plan create 写入了 tasks.md")
+	}
+	if wroteTasks && !tasksFollowsTemplate {
+		t.Errorf("❌ tasks.md 不符合官方模板（需 `## N.` 分组 + `- [ ] N.M` 复选框）。内容:\n%s", truncateCmd(tasksContent, 300))
+	} else if tasksFollowsTemplate {
+		t.Logf("✅ tasks.md 符合官方模板（## N. 分组 + - [ ] N.M 复选框）")
+	}
+	if !ranValidate {
+		t.Errorf("❌ plan create 未以 `openspec validate` 收尾。执行的命令: %v", commands)
+	} else {
+		t.Logf("✅ plan create 执行了 `openspec validate`")
 	}
 }
 

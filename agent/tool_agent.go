@@ -202,7 +202,13 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 }
 
 // defaultSubAgentTimeout is the default timeout for sub-agent calls.
-const defaultSubAgentTimeout = 120 * time.Second
+//
+// This is intentionally generous: a sub-agent's real work bound is its own
+// max_tool_iterations (e.g. plan create runs self-check → init → new change →
+// write proposal.md + tasks.md → validate over many rounds; a slow LLM like
+// glm-5.2 takes ~15-25s/round). The timeout must NOT sever normal multi-round
+// work — it is only a backstop against a truly runaway/stuck invocation.
+const defaultSubAgentTimeout = 600 * time.Second
 
 // isRemoteAgent checks if the wrapped agent is a remote A2AAgent.
 func isRemoteAgent(ag agent.Agent) bool {
