@@ -101,7 +101,6 @@ func (m *MeditationManager) UpdateLastEventTime(t time.Time) {
 }
 
 // LastEventTime returns the most recent event timestamp in Unix milliseconds.
-// Shared with ProjectionOrganizer for idle detection.
 func (m *MeditationManager) LastEventTime() int64 {
 	return m.lastEventTime.Load()
 }

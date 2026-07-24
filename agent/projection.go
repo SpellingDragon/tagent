@@ -47,7 +47,6 @@ func (p *SessionProjection) Len() int {
 }
 
 // UpdateSummary updates the EventSummary of the ref at the given index.
-// Used by ProjectionOrganizer to replace verbose summaries with refined ones.
 // Silently returns if idx is out of bounds.
 func (p *SessionProjection) UpdateSummary(idx int, summary string) {
 	p.mu.Lock()

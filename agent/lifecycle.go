@@ -121,11 +121,6 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 		ta.meditationMgr.Start()
 	}
 
-	// Start projection organizer (if configured).
-	if ta.organizer != nil {
-		ta.organizer.Start()
-	}
-
 	log.Infof("[StartLoop] persistent event loop started user=%s session=%s", userID, sessionID)
 	return ta.outputCh, nil
 }
@@ -141,11 +136,6 @@ func (ta *TagentAgent) StopLoop() {
 	// Stop meditation manager first (stop injecting new meditation events).
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.Stop()
-	}
-
-	// Stop projection organizer (stop background summary refinement).
-	if ta.organizer != nil {
-		ta.organizer.Stop()
 	}
 
 	ta.loopCancel()

@@ -114,10 +114,6 @@ type TagentAgent struct {
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 
-	// Projection organizer — proactively refines old ref summaries during idle.
-	// Started/stopped with the persistent event loop. nil if SummaryModel not configured.
-	organizer *ProjectionOrganizer
-
 	// projection is the lightweight, bounded Session projection (EventReference[])
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
@@ -350,26 +346,6 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
-	}
-
-	// Initialize projection organizer if SummaryModel is configured.
-	// The organizer shares idle time tracking with the meditation manager.
-	if cfg.SummaryModel != nil {
-		lastEventTimeFn := func() int64 {
-			if ta.meditationMgr != nil {
-				return ta.meditationMgr.LastEventTime()
-			}
-			return 0 // No idle tracking available
-		}
-		ta.organizer = NewProjectionOrganizer(
-			ProjectionOrganizerConfig{
-				SummaryModel: cfg.SummaryModel,
-				OrganizeAge:  cfg.KeepRecentTasks * 2,
-			},
-			projection,
-			memStore,
-			lastEventTimeFn,
-		)
 	}
 
 	return ta, nil
