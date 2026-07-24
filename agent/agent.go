@@ -346,6 +346,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
+		// Feed the read-only task controller so meditation carries a self-state
+		// digest (task-layer health). taskManager is always non-nil here.
+		ta.meditationMgr.SetTaskController(taskManager)
 	}
 
 	return ta, nil

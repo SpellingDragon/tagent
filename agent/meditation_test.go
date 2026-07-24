@@ -121,7 +121,7 @@ func TestMeditationManager_buildMeditationMessage(t *testing.T) {
 	mgr := NewMeditationManager(cfg, inj)
 
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	msg := mgr.buildMeditationMessage(now)
+	msg := mgr.buildMeditationMessage(now, time.Hour)
 
 	assert.Equal(t, model.RoleUser, msg.Role)
 	assert.Contains(t, msg.Content, "[meditation]")
@@ -139,7 +139,7 @@ func TestMeditationManager_buildMeditationMessage_WithLastMeditation(t *testing.
 	mgr.lastMeditation.Store(lastMed.UnixMilli())
 
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	msg := mgr.buildMeditationMessage(now)
+	msg := mgr.buildMeditationMessage(now, time.Hour)
 
 	assert.Contains(t, msg.Content, lastMed.Format("2006-01-02 15:04:05"))
 	assert.NotContains(t, msg.Content, "首次冥想")

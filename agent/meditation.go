@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,11 @@ type MeditationManager struct {
 	cfg      MeditationConfig
 	injector messageInjector
 
+	// taskController, when set, provides a read-only task-layer snapshot for the
+	// self-state digest prepended to the meditation prompt. nil → digest omitted
+	// (graceful degradation when no task layer is wired).
+	taskController TaskController
+
 	// lastEventTime tracks the most recent event timestamp (Unix milliseconds).
 	// Updated by TagentAgent on every InjectMessage and event forwarding.
 	lastEventTime atomic.Int64
@@ -61,6 +67,13 @@ func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *Medit
 		cfg:      cfg,
 		injector: injector,
 	}
+}
+
+// SetTaskController wires an optional read-only task controller used to render
+// the self-state digest prepended to the meditation prompt. Safe to leave unset
+// (digest is omitted — meditation behavior unchanged).
+func (m *MeditationManager) SetTaskController(tc TaskController) {
+	m.taskController = tc
 }
 
 // Start launches the meditation ticker goroutine.
@@ -123,7 +136,7 @@ func (m *MeditationManager) checkAndMeditate() {
 	}
 
 	// Conditions met — inject meditation message.
-	msg := m.buildMeditationMessage(now)
+	msg := m.buildMeditationMessage(now, gap)
 	m.injector.InjectMessageWithSource("meditation", msg)
 	m.lastMeditation.Store(now.UnixMilli())
 	// Reset the idle clock on firing so we don't re-meditate every check
@@ -136,7 +149,7 @@ func (m *MeditationManager) checkAndMeditate() {
 // buildMeditationMessage constructs the meditation external_input message.
 // The message includes a [meditation] marker, timestamps, and the prompt text.
 // If PromptSource is configured, the prompt is re-read from disk (hot-reload).
-func (m *MeditationManager) buildMeditationMessage(now time.Time) model.Message {
+func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Duration) model.Message {
 	var lastMed string
 	if lm := m.lastMeditation.Load(); lm > 0 {
 		lastMed = time.UnixMilli(lm).UTC().Format("2006-01-02 15:04:05")
@@ -152,12 +165,25 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time) model.Message 
 		}
 	}
 
-	content := fmt.Sprintf("[meditation] 这是一次定时冥想事件。\n\n"+
-		"上次有效冥想时间：%s\n当前时间：%s\n\n%s",
-		lastMed, now.UTC().Format("2006-01-02 15:04:05"), promptText)
+	// Self-state digest (task-layer health + idle) — prepended BEFORE the prompt
+	// so the LLM reflects on real runtime state first. Omitted (empty) when no
+	// task controller is wired, keeping behavior identical to before.
+	var digest string
+	if m.taskController != nil {
+		digest = renderSelfStateDigest(m.taskController.List(), idle)
+	}
+
+	header := fmt.Sprintf("[meditation] 这是一次定时冥想事件。\n\n"+
+		"上次有效冥想时间：%s\n当前时间：%s",
+		lastMed, now.UTC().Format("2006-01-02 15:04:05"))
+	parts := []string{header}
+	if digest != "" {
+		parts = append(parts, digest)
+	}
+	parts = append(parts, promptText)
 
 	return model.Message{
 		Role:    model.RoleUser,
-		Content: content,
+		Content: strings.Join(parts, "\n\n"),
 	}
 }
