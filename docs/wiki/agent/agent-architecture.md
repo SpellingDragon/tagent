@@ -163,6 +163,33 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **看板 + 工具**：`BeforeModel` 每 turn 从 registry 重渲染 live 看板（不参与压缩，置于 recency 锚点）；`list_tasks` / `get_task_result` / `cancel` / `relaunch` 为即时同步工具。
 - **会话回收**：进程真死（completed/error）时回收 tmux 会话，避免长程运行累积死会话。
 
+**一个 tmux 命令的一生**（把上面的零件串成一条线）：
+
+```mermaid
+sequenceDiagram
+    participant LLM
+    participant Tool as ActionTool
+    participant TM as TaskManager
+    participant Mon as TmuxMonitor(自适应轮询)
+    participant Bus as EventBus/持久循环
+
+    LLM->>Tool: Call(command)
+    Tool->>TM: Spawn(spec, TmuxSettleDetector)
+    TM->>Mon: 启动会话 + 按年龄调度(dense→backoff)
+    alt dense 阶段内结算
+        Mon-->>TM: settle(completed/stable)
+        TM-->>Tool: 内联结果
+        Tool-->>LLM: 最终结果(体验如常)
+    else 越过 dense(detach)
+        TM-->>Tool: ack(task_id, running)
+        Tool-->>LLM: "已在后台运行"
+        Note over Mon: 稀疏轮询直至结算
+        Mon-->>TM: settle(后台)
+        TM->>Bus: task_settled 自包含事件
+        Bus->>LLM: 触发回收 turn(空闲唤醒/进行中排队)
+    end
+```
+
 对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
 
 ## 三、文件结构

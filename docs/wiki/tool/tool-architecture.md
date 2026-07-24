@@ -18,8 +18,7 @@
 - **Prompt 文件化**：System prompt 通过 `prompt.Loader` 动态加载
 - **配置声明式**：所有 tool 通过 Config + ToolRef 声明，`kind` 区分 agent/tool
 - **事件上下文传递**：tool agent 通过父 agent 的 MemStore + `event_keys` 获取完整事件上下文
-- **后台异步**：TmuxMonitor 通过 callback 调用 `InjectMessage`，不阻塞主循环
-- **ActionTool 闭环**：tmux 状态变更通知通过 `MessageInjector` 接口闭环在 action 包内
+- **异步任务层（当前）**：`action`（tmux）等长耗时工具经调用上下文注入的 `TaskSpawner` 接入**异步任务层**——settle-or-detach + `task_settled` 回收 turn，ActionTool 本身无状态。详见 `agent-architecture.md` §2.10。（旧的 `MessageInjector` 闭环已废弃，见 §8.6）
 - **统一注册路径**：所有内置工具通过 `RegisterBuiltinTools()` 统一注册为 plain tool
 
 ---
@@ -553,6 +552,8 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 ## 八、ActionTool — 命令执行
 
 ### 8.1 双模式设计
+
+> ℹ️ **当前架构**：ActionTool 已**无状态重写**并接入异步任务层——`Call` 经 `TaskSpawnerFromContext` 取 spawner，以 `TmuxSettleDetector` spawn 一个 Task（dense 内 settle → 内联；越界 detach → ack + `task_settled` 回收 turn）。本节部分代码块（`injector`/`MessageInjector`/`handleStateChange`，见 §8.6）为**重写前的历史留存**，当前不再持有 injector/waiter。端到端模型见 `agent-architecture.md` §2.10。
 
 ActionTool 支持两种执行模式：
 
