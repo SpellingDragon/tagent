@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"trpc.group/trpc-go/trpc-agent-go/event"
 	"github.com/SpellingDragon/tagent/rl"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 

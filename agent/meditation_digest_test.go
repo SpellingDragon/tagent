@@ -19,10 +19,10 @@ func mkDigestTask(id, desc string, st TaskStatus, age time.Duration) *Task {
 type fakeTaskController struct{ tasks []*Task }
 
 func (f *fakeTaskController) Spawn(TaskSpec, SettleDetector) SpawnResult { return SpawnResult{} }
-func (f *fakeTaskController) List() []*Task                             { return f.tasks }
-func (f *fakeTaskController) Get(string) (*Task, bool)                  { return nil, false }
-func (f *fakeTaskController) Cancel(string) bool                        { return false }
-func (f *fakeTaskController) Relaunch(string) (SpawnResult, error)      { return SpawnResult{}, nil }
+func (f *fakeTaskController) List() []*Task                              { return f.tasks }
+func (f *fakeTaskController) Get(string) (*Task, bool)                   { return nil, false }
+func (f *fakeTaskController) Cancel(string) bool                         { return false }
+func (f *fakeTaskController) Relaunch(string) (SpawnResult, error)       { return SpawnResult{}, nil }
 
 func TestRenderSelfStateDigest_EmptyDegrades(t *testing.T) {
 	if got := renderSelfStateDigest(nil, time.Hour); got != "" {
