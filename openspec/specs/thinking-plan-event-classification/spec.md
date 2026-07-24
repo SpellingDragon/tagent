@@ -1,4 +1,10 @@
-## ADDED Requirements
+# thinking-plan-event-classification Specification
+
+## Purpose
+
+本规范定义 thinking-plan-event-classification 能力。The system SHALL classify `RoleAssistant` messages that contain `ToolCalls` as `thinking_plan` event type, distinguishing them from the actual tool execution re
+
+## Requirements
 
 ### Requirement: thinking_plan event type classification
 

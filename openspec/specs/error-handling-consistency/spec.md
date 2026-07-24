@@ -1,4 +1,10 @@
-## ADDED Requirements
+# error-handling-consistency Specification
+
+## Purpose
+
+本规范定义 error-handling-consistency 能力。All Go source files in tagent SHALL use `trpc-agent-go/log` for logging. The standard library `log` package SHALL NOT be used.
+
+## Requirements
 
 ### Requirement: Log package is unified
 

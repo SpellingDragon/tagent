@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# rustviking-client Specification
+
+## Purpose
+
+本规范定义 rustviking-client 能力。The system SHALL support range-based scanning via `KVRange(start, end, limit)`.
+
+## Requirements
 
 ### Requirement: KV range scan for time-based queries
 
@@ -23,7 +29,6 @@ The system SHALL support atomic batch write operations via `KVBatch(ops)`. The R
 - **WHEN** `KVBatch(ops)` is called with 500 put operations (new segment + index) and 24 delete operations (old segments)
 - **THEN** either all operations SHALL succeed atomically via RocksDB WriteBatch, or the batch SHALL fail and no partial changes SHALL be applied
 
-## ADDED Requirements
 
 ### Requirement: RustViking CLI exposes kv range subcommand
 

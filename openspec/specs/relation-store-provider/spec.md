@@ -1,4 +1,10 @@
-## ADDED Requirements
+# relation-store-provider Specification
+
+## Purpose
+
+本规范定义 relation-store-provider 能力。The `memory` package SHALL define a `RelationStoreProvider` interface with a single method `RelationStore() RelationStore`, providing a named, discoverable way
+
+## Requirements
 
 ### Requirement: RelationStoreProvider interface defined
 

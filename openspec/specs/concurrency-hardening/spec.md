@@ -1,4 +1,10 @@
-## ADDED Requirements
+# concurrency-hardening Specification
+
+## Purpose
+
+本规范定义 concurrency-hardening 能力。TagentAgent SHALL protect lastUserID and lastSessionID fields with a mutex.
+
+## Requirements
 
 ### Requirement: TagentAgent session context is thread-safe
 

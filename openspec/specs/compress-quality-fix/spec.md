@@ -1,4 +1,10 @@
-## ADDED Requirements
+# compress-quality-fix Specification
+
+## Purpose
+
+本规范定义 compress-quality-fix 能力。When the LLM-generated summary exceeds `targetChars * 1.5`, `generateSummary` SHALL split the original segments into two sub-batches and independently summarize
+
+## Requirements
 
 ### Requirement: generateSummary splits and re-summarizes when result exceeds target
 
@@ -90,7 +96,6 @@ The warn log in `resolveReferenceToMessage` SHALL distinguish between "GetEvent 
 
 - **WHEN** GetEvent returns (full, nil) but full.Response is nil
 - **THEN** log SHALL say "event key=N has no Response, falling back to EventType inference"
-## ADDED Requirements
 
 ### Requirement: summarizeBatch truncates oversized LLM summary
 

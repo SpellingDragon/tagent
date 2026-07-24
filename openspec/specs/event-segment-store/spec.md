@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# event-segment-store Specification
+
+## Purpose
+
+本规范定义 event-segment-store 能力。The system SHALL persist events in the RustViking KV store organized by time-windowed segments.
+
+## Requirements
 
 ### Requirement: Store event as JSON Lines segment by time window
 
@@ -19,7 +25,6 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 - **WHEN** an active segment is sealed
 - **THEN** the segment meta KV entry (`{pid}:meta:{window_ts}`) SHALL be updated with `event_count`, `sealed: true`, and `layer: 1`
 
-## ADDED Requirements
 
 ### Requirement: seqCounter recovered from active-partition bitmap + cursor
 

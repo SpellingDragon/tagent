@@ -1,4 +1,10 @@
-## ADDED Requirements
+# tool-lifecycle-management Specification
+
+## Purpose
+
+本规范定义 tool-lifecycle-management 能力。tagent SHALL 在 `tagent.New()` 中调用 `RegisterBuiltinTools()`，将所有内置工具（exec + knowledge/recall sub-tools）注册到 ToolRegistry。注册通过 `RegisterPlainTool(id, factory)` 完成。
+
+## Requirements
 
 ### Requirement: 内置工具通过 RegisterBuiltinTools 统一注册
 

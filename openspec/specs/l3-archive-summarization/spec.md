@@ -1,4 +1,10 @@
-## ADDED Requirements
+# l3-archive-summarization Specification
+
+## Purpose
+
+本规范定义 l3-archive-summarization 能力。`PartitionDefaults` SHALL expose `archive_summary_types` as a map from event type to summarization strategy. The valid strategies SHALL be:
+
+## Requirements
 
 ### Requirement: L3 archive applies per-type summarization policy
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# relation-store-lru-rocks Specification
+
+## Purpose
+
+本规范定义 relation-store-lru-rocks 能力。`RelationStore` SHALL maintain an in-memory LRU cache (default 1M entries) for parent lookups, with RocksDB as the authoritative persistent store.
+
+## Requirements
 
 ### Requirement: RelationStore uses LRU hot cache backed by RocksDB
 

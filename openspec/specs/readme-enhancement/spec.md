@@ -1,7 +1,8 @@
 # readme-enhancement Specification
 
 ## Purpose
-README.md 项目文档增强：架构概览、数据流描述、快速启动指引。
+
+规范 README.md 项目文档的增强要求：提供模块架构概览、端到端数据流描述、快速启动指引与关键设计决策说明，使新读者能快速理解 tagent 的结构与运行方式。
 
 ## Requirements
 ### Requirement: README 包含项目架构概览

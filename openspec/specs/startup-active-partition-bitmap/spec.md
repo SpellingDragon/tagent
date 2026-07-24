@@ -1,4 +1,10 @@
-## ADDED Requirements
+# startup-active-partition-bitmap Specification
+
+## Purpose
+
+本规范定义 startup-active-partition-bitmap 能力。The system SHALL maintain a `global:active_partitions` KV entry as a fixed-size 2048-bit bitmap (256 bytes), with bit `N` set iff partition `N` has at least one
+
+## Requirements
 
 ### Requirement: Active partition bitmap drives Init discovery
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# storage-lifecycle-completion Specification
+
+## Purpose
+
+本规范定义 storage-lifecycle-completion 能力。Compactor.checkAndCompact SHALL check L1 segment count per partition and trigger CompactL1ToL2 when the count reaches L1Threshold.
+
+## Requirements
 
 ### Requirement: L1 to L2 compaction is automatically scheduled
 

@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# event-lifecycle Specification
+
+## Purpose
+
+本规范定义 event-lifecycle 能力。The system SHALL support a time-to-live (TTL) policy that marks events as tombstoned when their age exceeds a configurable threshold.
+
+## Requirements
 
 ### Requirement: Time-based TTL expiration
 
@@ -48,7 +54,6 @@ The system SHALL support a maximum event count or maximum disk size per partitio
 - **WHEN** the eviction scanner processes events to find the oldest ones
 - **THEN** the scanner SHALL extract `event_key` from each event's JSON value and use it for `IsTombstone()` check and `MarkTombstone()` call
 
-## ADDED Requirements
 
 ### Requirement: TTL scan progresses via per-partition cursor
 

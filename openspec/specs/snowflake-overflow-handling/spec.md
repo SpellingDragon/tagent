@@ -1,4 +1,10 @@
-## ADDED Requirements
+# snowflake-overflow-handling Specification
+
+## Purpose
+
+本规范定义 snowflake-overflow-handling 能力。The Snowflake ID generator SHALL detect sequence exhaustion (12-bit sequence = 4096 IDs per millisecond) and block until the next millisecond before returning a
+
+## Requirements
 
 ### Requirement: Snowflake blocks on same-millisecond sequence exhaustion
 

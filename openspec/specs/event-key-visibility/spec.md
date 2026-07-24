@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# event-key-visibility Specification
+
+## Purpose
+
+本规范定义 event-key-visibility 能力。ContextIntervention.BeforeModel SHALL inject event_key prefixes into message content by positionally matching args.Request.Messages to Session.Events.
+
+## Requirements
 
 ### Requirement: Event key injection in BeforeModel
 

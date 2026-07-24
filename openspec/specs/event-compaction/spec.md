@@ -1,4 +1,10 @@
-## ADDED Requirements
+# event-compaction Specification
+
+## Purpose
+
+本规范定义 event-compaction 能力。The system SHALL provide a `TaskSegmenter` utility in `agent/task_segmenter.go` that exposes two functions: `SegmentMessages(messages []model.Message) []*TaskSe
+
+## Requirements
 
 ### Requirement: TaskSegmenter provides unified task boundary segmentation
 

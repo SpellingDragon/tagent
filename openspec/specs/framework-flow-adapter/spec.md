@@ -1,4 +1,10 @@
-## ADDED Requirements
+# framework-flow-adapter Specification
+
+## Purpose
+
+本规范定义 framework-flow-adapter 能力。`FrameworkFlowAdapter` SHALL accept a `[]*AgentEvent` batch, a `*session.Session`, and a `*SessionProjection`.
+
+## Requirements
 
 ### Requirement: Adapter converts a batch of AgentEvents into a framework Invocation
 
@@ -111,7 +117,6 @@ For `TagentAgent.Run`, `FrameworkFlowAdapter` SHALL use a fresh `EventBus`, fres
 - **THEN** the adapter creates a temporary bus and projection
 - **AND** invokes Flow.Run once
 - **AND** closes the output channel after the first final response
-## ADDED Requirements
 
 ### Requirement: Adapter converts a batch of AgentEvents into a framework Invocation
 

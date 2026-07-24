@@ -1,4 +1,10 @@
-## ADDED Requirements
+# event-relation-store Specification
+
+## Purpose
+
+本规范定义 event-relation-store 能力。The system SHALL maintain a mutable directed graph of event causal relationships, independent of event content storage.
+
+## Requirements
 
 ### Requirement: Set and retrieve parent-child event relationships
 

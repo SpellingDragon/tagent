@@ -1,4 +1,10 @@
-## ADDED Requirements
+# production-wiring Specification
+
+## Purpose
+
+本规范定义 production-wiring 能力。`resolveMemoryStore("file")` in `tagent.go` SHALL create and start the complete lifecycle management stack in addition to the base FileSegmentStore.
+
+## Requirements
 
 ### Requirement: Production wiring creates and starts all lifecycle subsystems
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# value-driven-compression Specification
+
+## Purpose
+
+本规范定义 value-driven-compression 能力。`SmartCompressor` SHALL compute a `value_density` for each compressible segment as `total_value_score / total_tokens`.
+
+## Requirements
 
 ### Requirement: Segment value density drives compression order
 

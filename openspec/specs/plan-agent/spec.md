@@ -1,4 +1,10 @@
-## ADDED Requirements
+# plan-agent Specification
+
+## Purpose
+
+本规范定义 plan-agent 能力。The plan agent SHALL wrap `TagentAgent` with a custom `Run` method that inspects the `action` field from the invocation.
+
+## Requirements
 
 ### Requirement: plan agent implements dual-mode Run via custom Run method
 
@@ -34,6 +40,10 @@ The plan tool description SHALL declare an `action` parameter (enum: `create`, `
 
 ### Requirement: tagent does not directly operate openspec files
 
+tagent SHALL NOT have direct access to openspec-specific file operations; all openspec operations SHALL be routed through the plan tool.
+
+#### Scenario: openspec operations routed through plan tool
+
 - **WHEN** tagent's tool list is configured
 - **THEN** tagent SHALL NOT have direct access to openspec-specific file operations
 - **AND** all openspec operations SHALL go through the plan tool
@@ -56,7 +66,6 @@ The FrameworkPrompt SHALL NOT mention the plan tool by name. Plan tool usage gui
 
 - **WHEN** FrameworkPrompt is prepended to an agent's system prompt
 - **THEN** it SHALL NOT contain the string "plan" as a tool name reference
-## ADDED Requirements
 
 ### Requirement: plan sub-agent manages openspec work plans via dual-mode operation
 

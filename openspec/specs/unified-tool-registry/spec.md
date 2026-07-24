@@ -1,4 +1,10 @@
-## ADDED Requirements
+# unified-tool-registry Specification
+
+## Purpose
+
+本规范定义 unified-tool-registry 能力。tagent SHALL 维护一个 `ToolRegistry` 实例，作为所有内置工具（plain tool 和 tool agent factory）的统一注册中心。`GetRegistry()` SHALL 返回全局单例。
+
+## Requirements
 
 ### Requirement: ToolRegistry 统一工具注册中心
 

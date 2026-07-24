@@ -1,4 +1,10 @@
-## ADDED Requirements
+# llm-summary-generator Specification
+
+## Purpose
+
+本规范定义 llm-summary-generator 能力。`LLMSummarizer` SHALL implement the `SummaryGenerator` interface defined by the upstream `l3-archive-summarization` capability.
+
+## Requirements
 
 ### Requirement: LLMSummarizer implements SummaryGenerator interface
 

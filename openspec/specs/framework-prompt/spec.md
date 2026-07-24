@@ -1,4 +1,10 @@
-## ADDED Requirements
+# framework-prompt Specification
+
+## Purpose
+
+本规范定义 framework-prompt 能力。ContextManager SHALL prepend a framework runtime description before the user-configured system prompt (from AGENTS.md/SOUL.md/etc).
+
+## Requirements
 
 ### Requirement: tagent framework prompt injected before user system prompt
 

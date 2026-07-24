@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# batched-summarization Specification
+
+## Purpose
+
+本规范定义 batched-summarization 能力。SmartCompressor 的 Stage 2 LLM 摘要 SHALL 按 token 预算分批处理 oldSegments。每批的 token 估算值 SHALL 不超过 maxInputTokens（maxTokens / 2，最小 1000）。每个事件 SHALL 完整保留在批次中（不截断）。
+
+## Requirements
 
 ### Requirement: 按 token 预算分批摘要且无预设批次上限
 
@@ -30,7 +36,6 @@ SmartCompressor 的 Stage 2 LLM 摘要 SHALL 按 token 预算分批处理 oldSeg
 - **AND** SHALL NOT 因为固定上限丢弃后续批次
 - **AND** 总处理时间 SHALL 受配置超时约束
 
-## ADDED Requirements
 
 ### Requirement: 批量评估与摘要合并为单次 LLM 调用
 

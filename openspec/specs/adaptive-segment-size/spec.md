@@ -1,4 +1,10 @@
-## ADDED Requirements
+# adaptive-segment-size Specification
+
+## Purpose
+
+本规范定义 adaptive-segment-size 能力。`PartitionDefaults` SHALL expose `max_events_per_segment` (default `10000`).
+
+## Requirements
 
 ### Requirement: Segment seals early when event count reaches threshold
 

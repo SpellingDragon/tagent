@@ -1,4 +1,10 @@
-## ADDED Requirements
+# trajectory-recording Specification
+
+## Purpose
+
+本规范定义 trajectory-recording 能力。The system SHALL provide a `TrajectoryRecorder` type that implements the `model.Model` interface and wraps an inner `model.Model`.
+
+## Requirements
 
 ### Requirement: TrajectoryRecorder wraps model.Model
 

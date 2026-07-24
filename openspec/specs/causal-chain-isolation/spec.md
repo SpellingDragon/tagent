@@ -1,4 +1,10 @@
-## ADDED Requirements
+# causal-chain-isolation Specification
+
+## Purpose
+
+本规范定义 causal-chain-isolation 能力。MemoryPlugin.lastEventKeys SHALL be keyed by a composite of PartitionID and SessionID.
+
+## Requirements
 
 ### Requirement: Causal chain is isolated by session
 

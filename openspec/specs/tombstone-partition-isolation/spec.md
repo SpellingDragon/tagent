@@ -1,4 +1,10 @@
-## ADDED Requirements
+# tombstone-partition-isolation Specification
+
+## Purpose
+
+本规范定义 tombstone-partition-isolation 能力。`FileSegmentStore` SHALL maintain a separate `TombstoneSet` instance for each partition, ensuring tombstone keys are persisted under the correct partition prefi
+
+## Requirements
 
 ### Requirement: TombstoneSet is per-partition
 

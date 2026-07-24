@@ -1,4 +1,10 @@
-## ADDED Requirements
+# summary-memory-rag Specification
+
+## Purpose
+
+本规范定义 summary-memory-rag 能力。When `SmartCompressor` compresses a segment using `summary` or `reference` processing, it SHALL write a lightweight summary event to `MemoryStore`.
+
+## Requirements
 
 ### Requirement: Compressed summaries are persisted to MemoryStore
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# action-tool-config Specification
+
+## Purpose
+
+本规范定义 action-tool-config 能力。ActionProperties SHALL accept a `monitor` configuration map that overrides DefaultMonitorConfig values.
+
+## Requirements
 
 ### Requirement: TmuxMonitor configuration is exposed via ActionProperties
 

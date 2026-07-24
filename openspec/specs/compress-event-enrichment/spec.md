@@ -1,4 +1,10 @@
-## MODIFIED Requirements
+# compress-event-enrichment Specification
+
+## Purpose
+
+本规范定义 compress-event-enrichment 能力。When `SmartCompressor` discards old task segments, `buildCompressEvent` SHALL extract each compressed event's EventKey, EventType, a short content summary, `val
+
+## Requirements
 
 ### Requirement: buildCompressEvent outputs key, type, summary, value score, and processing strategy
 
@@ -30,7 +36,6 @@ When `SmartCompressor` discards old task segments, `buildCompressEvent` SHALL ex
 - **AND** only `args.Request.Messages` (the view) is modified
 - **AND** any explicit `summary`/`reference` archive step SHALL be performed separately from notice construction
 
-## ADDED Requirements
 
 ### Requirement: Compress notice warns against repeating archived operations
 

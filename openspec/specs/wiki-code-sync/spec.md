@@ -1,7 +1,8 @@
 # wiki-code-sync Specification
 
 ## Purpose
-wiki 架构文档与 Go 源码的交叉校验规则：行数引用、字段名称、代码示例一致性。
+
+规范 wiki 架构文档与 Go 源码之间的交叉校验规则：行数引用、字段/方法名称、代码示例须与源码保持一致，避免文档随代码演进而失真，作为文档质量门禁的依据。
 
 ## Requirements
 ### Requirement: agent-architecture.md 行数与结构体字段同步

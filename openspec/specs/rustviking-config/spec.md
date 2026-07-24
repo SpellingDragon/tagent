@@ -1,4 +1,10 @@
-## ADDED Requirements
+# rustviking-config Specification
+
+## Purpose
+
+本规范定义 rustviking-config 能力。The `MemoryConfig` struct SHALL include an optional `RustVikingBinary` field to specify the path to the rustviking CLI binary.
+
+## Requirements
 
 ### Requirement: MemoryConfig supports RustViking binary path
 

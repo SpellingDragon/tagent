@@ -1,4 +1,10 @@
-## ADDED Requirements
+# async-tool-event-fix Specification
+
+## Purpose
+
+本规范定义 async-tool-event-fix 能力。When `InjectBusInputs` appends an event message to `args.Request.Messages`, if `evt.Message.Role == model.RoleSystem`, it SHALL create a copy of the message wit
+
+## Requirements
 
 ### Requirement: InjectBusInputs converts RoleSystem to RoleUser
 
@@ -70,7 +76,6 @@ In `detectSessionState`, when `!session.IsInteractive && !session.IsTUI` and `st
 - **WHEN** a TUI session's output is stable for >= stable_duration
 - **THEN** detectSessionState SHALL return SessionStable
 - **AND** the existing TUI timeout logic SHALL apply
-## ADDED Requirements
 
 ### Requirement: InjectBusInputs converts RoleSystem to RoleUser
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# ttl-cursor-scan Specification
+
+## Purpose
+
+本规范定义 ttl-cursor-scan 能力。Each partition SHALL maintain `{pid}:ttl_cursor` → JSON `{next_scan_window, last_scan_time}`.
+
+## Requirements
 
 ### Requirement: TTL scan uses per-partition time cursor
 

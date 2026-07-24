@@ -1,4 +1,10 @@
-## ADDED Requirements
+# rustviking-range-scan Specification
+
+## Purpose
+
+本规范定义 rustviking-range-scan 能力。RustViking CLI SHALL expose a `kv range` subcommand that performs a native RocksDB range scan using byte-ordered key iteration.
+
+## Requirements
 
 ### Requirement: RustViking CLI exposes native range scan
 

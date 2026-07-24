@@ -1,4 +1,10 @@
-## ADDED Requirements
+# compaction-scheduler Specification
+
+## Purpose
+
+本规范定义 compaction-scheduler 能力。The `Compactor.checkAndCompact()` method SHALL automatically detect when a partition's L1 segment count reaches the configured threshold (default: 24) and trigg
+
+## Requirements
 
 ### Requirement: Compaction scheduler triggers L1→L2 compaction automatically
 

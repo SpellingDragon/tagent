@@ -1,4 +1,10 @@
-## ADDED Requirements
+# llm-event-valuation Specification
+
+## Purpose
+
+本规范定义 llm-event-valuation 能力。The `agent` package SHALL define an `EventValuator` interface.
+
+## Requirements
 
 ### Requirement: EventValuator interface evaluates events in batch
 

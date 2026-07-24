@@ -1,4 +1,10 @@
-## ADDED Requirements
+# remote-agent-communication Specification
+
+## Purpose
+
+本规范定义 remote-agent-communication 能力。AgentToolWrapper SHALL hold an `agent.Agent` interface (not `*TagentAgent`), enabling both local TagentAgent and remote A2AAgent to be wrapped uniformly.
+
+## Requirements
 
 ### Requirement: AgentToolWrapper accepts agent.Agent interface
 

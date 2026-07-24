@@ -1,4 +1,10 @@
-## ADDED Requirements
+# architecture-review-standards Specification
+
+## Purpose
+
+本规范定义 architecture-review-standards 能力。审查者 SHALL 检查每个模块的事件处理逻辑是否符合事件驱动设计目标。检查项包括：事件类型分类（ExtractEventType）与消息 Role 映射是否正确；特殊事件（external_input/agent_output/thinking_plan）是否使用原文全文不被截断；
+
+## Requirements
 
 ### Requirement: 审查 SHALL 验证事件驱动一致性
 

@@ -1,4 +1,10 @@
-## ADDED Requirements
+# view-transform-stateless Specification
+
+## Purpose
+
+本规范定义 view-transform-stateless 能力。When `oldSegments` is empty (all segments moved to recentSegments or total segment count is too small), SmartCompressor SHALL return the original messages witho
+
+## Requirements
 
 ### Requirement: SmartCompressor returns original messages when no segments to compress
 
