@@ -345,6 +345,20 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		})
 	}
 
+	// Callback 0.45: conversation-self-heal L2 — validate + conservatively
+	// repair tool_call/tool-result pairing on the FINAL assembled message list,
+	// immediately before it goes to the model. This must run AFTER compression
+	// (which rebuilds history from the projection, where duplicate/orphan tool
+	// results can appear). It operates on args.Request.Messages only; the
+	// persistent projection is untouched (L1 idempotency governs persistence).
+	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+		if repaired, n := repairToolPairing(args.Request.Messages); n > 0 {
+			log.Warnf("[msgvalidate] repaired %d tool-pairing issue(s) before send", n)
+			args.Request.Messages = repaired
+		}
+		return nil, nil
+	})
+
 	// Callback 0.5: BeforeLLM diagnostic log — print messages after compression.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		log.Debugf("[BeforeLLM] messages:\n%s", formatMessages(args.Request.Messages))

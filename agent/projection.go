@@ -6,6 +6,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // SessionProjection is the bounded, lightweight projection of the event flow.
@@ -14,15 +15,36 @@ import (
 type SessionProjection struct {
 	mu   sync.RWMutex
 	refs []memory.EventReference
+	// seen tracks EventKeys (>0) already present, so Append is idempotent —
+	// the same event (same key) is never projected twice (conversation-self-heal
+	// L1). Rebuilt on Replace. EventKey==0 (unkeyed) never participates.
+	seen map[int64]struct{}
 }
 
 func NewSessionProjection() *SessionProjection {
-	return &SessionProjection{refs: make([]memory.EventReference, 0)}
+	return &SessionProjection{
+		refs: make([]memory.EventReference, 0),
+		seen: make(map[int64]struct{}),
+	}
 }
 
 func (p *SessionProjection) Append(ref memory.EventReference) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if ref.EventKey > 0 {
+		if p.seen == nil {
+			p.seen = make(map[int64]struct{})
+		}
+		if _, dup := p.seen[ref.EventKey]; dup {
+			// Idempotent: same event already projected. Skipping prevents the
+			// duplicate role=tool messages that cause model-API 4xx. The warn
+			// surfaces the duplicate source for diagnosis.
+			log.Warnf("[projection] skip duplicate append: key=%d role=%s type=%s",
+				ref.EventKey, ref.Role, ref.EventType)
+			return
+		}
+		p.seen[ref.EventKey] = struct{}{}
+	}
 	p.refs = append(p.refs, ref)
 }
 

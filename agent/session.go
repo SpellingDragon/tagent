@@ -240,6 +240,14 @@ func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *Session
 		// Append to projection
 		if projection != nil {
 			if ref, ok := BuildEventReference(evt); ok {
+				// Source-tracing (conversation-self-heal Phase 0.2): log the
+				// framework event ID alongside the event_key at the persistence
+				// boundary. If a duplicate event_key ever recurs, correlating
+				// evt.ID discriminates the root cause: same evt.ID = framework
+				// re-delivered one event on eventCh; different evt.ID + same key
+				// = MemoryPlugin assigned a colliding key to two distinct events.
+				log.Debugf("[onEvent] persist: evt_id=%s key=%d role=%s type=%s",
+					evt.ID, ref.EventKey, ref.Role, ref.EventType)
 				projection.Append(ref)
 			}
 		}
