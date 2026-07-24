@@ -307,6 +307,14 @@ func main() {
 			if evt.IsFinalResponse() && evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 				content := choice.Message.Content
+				// Surface the real execution error instead of the framework's
+				// generic fallback ("An error occurred during execution. Please
+				// contact the service provider."), which Runner substitutes when
+				// an event carries Response.Error but empty content. The
+				// structured Response.Error is left intact and holds the reason.
+				if evt.Response.Error != nil && evt.Response.Error.Message != "" {
+					content = fmt.Sprintf("执行出错：%s", evt.Response.Error.Message)
+				}
 				if content == "" {
 					content = "(empty response)"
 				}
