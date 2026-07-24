@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# pre-commit hook — enforce OpenSpec main-spec hygiene.
+#
+# Opt-in (not auto-installed; hooks under .git/ are not version-controlled):
+#   git config core.hooksPath scripts/hooks
+#
+# Only runs when the commit touches openspec/specs/ or openspec/changes/,
+# so it stays out of the way for unrelated commits.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+staged="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+
+if printf '%s\n' "$staged" | grep -qE '^openspec/(specs|changes)/'; then
+  echo "[pre-commit] openspec change detected — running spec-hygiene gate..."
+  "$repo_root/scripts/check-openspec.sh"
+fi
