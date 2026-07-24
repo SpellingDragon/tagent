@@ -8,9 +8,7 @@ import (
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
-	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/log"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // runEventLoop runs the persistent event loop for this agent.
@@ -83,9 +81,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 					retried = true
 					continue
 				}
-				// Retries exhausted — publish error event to EventBus
-				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries, publishing error event", ta.name, maxRetries)
-				ta.publishErrorEvent(bus, lastErr)
+				// Retries exhausted. Note: RunFlow only returns transport-level
+				// errors (model-API errors flow through outputCh as events), so
+				// there is no meaningful error event to publish — just log.
+				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries: %v", ta.name, maxRetries, lastErr)
 			} else {
 				lastErr = nil
 				break
@@ -142,24 +141,6 @@ func extractRootMetadata(events []*AgentEvent) map[string]string {
 		}
 	}
 	return md
-}
-
-// publishErrorEvent publishes an error event to EventBus so external
-// listeners can be aware of RunFlow failures.
-func (ta *TagentAgent) publishErrorEvent(bus *EventBus, runErr error) {
-	if bus == nil || runErr == nil {
-		return
-	}
-	errMsg := fmt.Sprintf("[error] RunFlow failed after retries: %v", runErr)
-	busEvt := &AgentEvent{
-		ID:        uuid.NewString(),
-		Type:      tagentevent.TypeExternalInput,
-		Source:    "error",
-		Timestamp: time.Now(),
-		Message:   &model.Message{Role: model.RoleSystem, Content: errMsg},
-		Metadata:  make(map[string]any),
-	}
-	bus.Publish(busEvt)
 }
 
 // summarizeEvents returns a compact summary of event types in a batch.
