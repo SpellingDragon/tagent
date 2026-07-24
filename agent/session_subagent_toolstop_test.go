@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -281,4 +282,155 @@ func TestSubAgentRun_SlowLLM_ToolResultStops(t *testing.T) {
 	if finalOutput != "Plan created." {
 		t.Errorf("❌ finalOutput = %q, want \"Plan created.\"", finalOutput)
 	}
+}
+
+// recordingSequenceModel returns responses in sequence and records the
+// request.Messages passed on each GenerateContent call (i.e. AFTER the
+// BeforeModel rebuild), so tests can assert message ordering.
+type recordingSequenceModel struct {
+	responses []*model.Response
+	mu        sync.Mutex
+	idx       int
+	requests  [][]model.Message
+}
+
+func (m *recordingSequenceModel) GenerateContent(
+	ctx context.Context,
+	request *model.Request,
+) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	snapshot := make([]model.Message, len(request.Messages))
+	copy(snapshot, request.Messages)
+	m.requests = append(m.requests, snapshot)
+	idx := m.idx
+	m.idx++
+	m.mu.Unlock()
+
+	ch := make(chan *model.Response, 1)
+	if idx < len(m.responses) {
+		ch <- m.responses[idx]
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *recordingSequenceModel) Info() model.Info { return model.Info{Name: "recording-seq-model"} }
+
+func (m *recordingSequenceModel) lastRequest() []model.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.requests) == 0 {
+		return nil
+	}
+	return m.requests[len(m.requests)-1]
+}
+
+// TestSubAgentRun_RequestOrdering_UserAfterSystem verifies that a sub-agent's
+// driving request stays at the FRONT of the timeline (right after system)
+// across multiple ReAct iterations — instead of being buried at the end after
+// the accumulated assistant/tool history.
+//
+// Reproduces the wechat-bot plan-agent ordering bug: the request was the
+// framework's unprefixed invocation seed, treated as current-turn, and
+// appended AFTER the projection history that accumulated during the turn.
+// The fix persists the request into the projection at turn start.
+func TestSubAgentRun_RequestOrdering_UserAfterSystem(t *testing.T) {
+	seqModel := &recordingSequenceModel{
+		responses: []*model.Response{
+			toolCallResponse("call-1", "openspec init --tools none"),
+			toolCallResponse("call-2", "openspec new change demo"),
+			finalTextResponse("call-3", "Plan created."),
+		},
+	}
+	recTool := &mockRecordingTool{}
+
+	ta, err := NewTagentAgent(&TagentConfig{
+		Model:             seqModel,
+		SystemPrompt:      "You are a plan agent.",
+		Name:              "plan",
+		Description:       "Plan agent",
+		MaxToolIterations: 15,
+		Tools:             []trpctool.Tool{recTool},
+	})
+	if err != nil {
+		t.Fatalf("NewTagentAgent: %v", err)
+	}
+	defer ta.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const request = "Create a plan for demo."
+	inv := trpcagent.NewInvocation(trpcagent.WithInvocationMessage(model.NewUserMessage(request)))
+	eventCh, err := ta.Run(ctx, inv)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for range eventCh { // drain until turn completes
+	}
+
+	// Inspect the LAST request (final iteration — most accumulated history).
+	last := seqModel.lastRequest()
+	if len(last) < 3 {
+		t.Fatalf("expected accumulated messages in final request, got %d: %+v", len(last), last)
+	}
+
+	// 1. First message is system.
+	if last[0].Role != model.RoleSystem {
+		t.Errorf("expected messages[0] to be system, got %s", last[0].Role)
+	}
+
+	// 2. Exactly one user message, and it carries the request content.
+	userIdx, userCount := -1, 0
+	for i, m := range last {
+		if m.Role == model.RoleUser {
+			userCount++
+			if userIdx < 0 {
+				userIdx = i
+			}
+		}
+	}
+	if userCount != 1 {
+		t.Fatalf("❌ expected exactly 1 user message, got %d (duplication or drop): %s",
+			userCount, dumpRoles(last))
+	}
+	if !strings.Contains(last[userIdx].Content, request) {
+		t.Errorf("user message content = %q, want to contain %q", last[userIdx].Content, request)
+	}
+
+	// 3. The user (request) is at the FRONT: right after system, and BEFORE
+	//    the assistant/tool ReAct history. This is the core regression guard —
+	//    the old bug placed the user at the END.
+	if userIdx != 1 {
+		t.Errorf("❌ BUG: user request at index %d, want 1 (right after system). Order: %s",
+			userIdx, dumpRoles(last))
+	}
+	if userIdx == len(last)-1 {
+		t.Errorf("❌ BUG: user request is the LAST message (buried after ReAct history). Order: %s",
+			dumpRoles(last))
+	}
+	// There must be assistant/tool messages AFTER the user.
+	hasReActAfterUser := false
+	for _, m := range last[userIdx+1:] {
+		if m.Role == model.RoleAssistant || m.Role == model.RoleTool {
+			hasReActAfterUser = true
+			break
+		}
+	}
+	if !hasReActAfterUser {
+		t.Errorf("expected assistant/tool ReAct messages after the user request. Order: %s", dumpRoles(last))
+	}
+
+	t.Logf("✅ final request order: %s", dumpRoles(last))
+}
+
+func dumpRoles(msgs []model.Message) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(string(m.Role))
+	}
+	return b.String()
 }

@@ -56,7 +56,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 
 - `NewTagentAgent(cfg)` — 构造，创建 ContextManager（含统一 Runner）
 - `StartLoop(userID, sessionID)` — 启动持久事件循环，返回 outputCh
-- `Run(ctx, inv)` — 子 agent 单轮调用，创建临时 ContextManager + 临时 EventBus
+- `Run(ctx, inv)` — 子 agent 单轮调用，创建临时 ContextManager + 临时 EventBus，直调一次 `RunFlow`
 - `InjectMessage(msg)` — 向 activeBus 发布 external_input
 - `StopLoop()` — 停止持久循环
 - `Close()` — 关闭 ContextManager（释放 Runner）
@@ -92,8 +92,9 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 **错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次）。重试耗尽后发布 `AgentEvent{Type: "external_input", Source: "error"}` 到 EventBus。`BuildInvocation` 跳过 `Source="error"` 事件，不触发模型调用，但外部监听器可感知。
 
-`StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager）。
-`Run()`（子 Agent 调用路径）创建临时 EventBus + ContextManager 后，同样在 goroutine 中调用 `runEventLoop`，并在第一个 `agent_output` 到达后关闭 channel。
+`StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`。
+
+`Run()`（子 Agent 调用路径）**不使用 `runEventLoop`**：它创建临时 EventBus + ContextManager 后，先将驱动请求 `persistBusEvent` 写入临时 `SessionProjection`（保证请求位于时间线首条），再在 goroutine 中**直接调用一次 `RunFlow`**。Turn 边界即 `RunFlow` 的自然返回——`RunFlow` 内部由框架跑完完整 ReAct 工具循环（多轮）直到最终 assistant 响应才返回，随后 `close(invOutputCh)` 通知调用方结束。子 Agent 与持久循环**共享同一个 turn 原语 `RunFlow`**，区别仅在于是否包裹 `for { Pull }` 守护循环；不再依赖「事件流探测 + drain 定时器 + 强制 cancel」判断 turn 结束。
 
 ### 2.3 ContextManager（消息构建 + Flow 执行）
 
@@ -147,7 +148,22 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 **文件**：`tool_agent.go`（458 行）
 **原型对应**：`tools map` + `RegisterTool`
 
-将子 agent 包装为 `CallableTool`，处理 event_key 参数解析和外部上下文注入。
+将子 agent 包装为 `CallableTool`，处理 event_key 参数解析和外部上下文注入。子 agent 调用**默认异步**：经上下文注入的 `TaskSpawner` 纳入任务层执行，dense 阶段内返回则内联、越窗则 ack（`asyncDisabled` 可回退为同步）。每次子 agent Task 仍持有独立 EventBus / SessionProjection / ContextManager 的并发隔离契约。
+
+### 2.10 TaskManager（异步任务层）
+
+**文件**：`task_manager.go`、`task_board.go`、`event_bus.go`；探测器 `tool/action/settle.go`、`poll_schedule.go`；任务工具 `tool/task/`
+
+确定性（非 LLM）的任务注册表 + 调度器，让 `action`（tmux）等长耗时工具与子 agent 不阻塞事件循环：
+
+- **spawn + settle-or-detach**：`Spawn` 在 `select{settle, detach}` 上等待——探测器在自适应轮询的 **dense→sparse 边界**发出 `Detached()`，即"同步→异步"的 ack 点（已退役独立 `sync_wait` 旋钮）。dense 内 settle → 内联；detach 先到 → ack + 后台跟踪；越界后到的 settle 走 `OnSettle`（不丢失）。
+- **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
+- **settle 三档**：`completed` / `stable` / `suspect`，探测器只做确定性分类，语义判断交给 LLM。
+- **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
+- **看板 + 工具**：`BeforeModel` 每 turn 从 registry 重渲染 live 看板（不参与压缩，置于 recency 锚点）；`list_tasks` / `get_task_result` / `cancel` / `relaunch` 为即时同步工具。
+- **会话回收**：进程真死（completed/error）时回收 tmux 会话，避免长程运行累积死会话。
+
+对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
 
 ## 三、文件结构
 

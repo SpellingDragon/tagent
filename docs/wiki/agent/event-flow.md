@@ -40,16 +40,22 @@ graph TD
 
 ## 三、BeforeModel 回调链
 
+当前实现将上下文重建收敛为**一个统一的 BeforeModel 回调**（外加一个诊断日志回调），按 4 步执行：
+
 ```mermaid
 graph TD
-    M[messages from ContentRequestProcessor] --> C0
-
-    C0["Callback -1: InjectBusInputs<br/>从 EventBus.TryPull 新外部输入"]
-    C0 --> C1["Callback 0: InjectEventKeys<br/>从 projection 注入 [evt_KEY|type] 前缀"]
-    C1 --> C2["Callback 1: ContextCompressor<br/>统一压缩 + 投影清理"]
-    C2 --> C3["Callback 1.5: BeforeLLM 诊断日志"]
-    C3 --> OUT[最终 Request.Messages → LLM]
+    M[messages from ContentRequestProcessor] --> S1
+    S1["Step 1: 持久化新 bus 事件<br/>EventBus.TryPull → persistBusEvent → projection"]
+    S1 --> S2["Step 2: 解析投影<br/>ContextCompressor.Compress(refs)<br/>→ 压缩历史消息(带 [evt_KEY|type] 前缀)"]
+    S2 --> S3["Step 3: 提取当前轮消息<br/>extractCurrentTurnMessages(filterUser)<br/>丢弃重复/回显的未前缀 user"]
+    S3 --> S4["Step 4: 重建 = [system] + 历史 + 当前轮"]
+    S4 --> DIAG["诊断回调: BeforeLLM 日志"]
+    DIAG --> OUT[最终 Request.Messages → LLM]
 ```
+
+**重建顺序即消息顺序**：`[system] + 压缩历史 + 当前轮`。因此**驱动请求必须先进入 projection**（顶层由框架 emit + SessionHook 转发；子 Agent 由 `Run()` 的 `persistBusEvent` 显式写入），才能作为「历史」的首条紧跟 system；否则它会停留为框架未前缀的 invocation seed，被 `extractCurrentTurnMessages` 当作「当前轮」拼到末尾，随 ReAct 累积被挤到最后。
+
+**filterUser 语义**：当压缩历史中已含 user（即请求已入 projection）时，`extractCurrentTurnMessages` 丢弃框架重复插入的未前缀 user（session echo / invocation seed），避免重复；ReAct 内部消息（带 tool_calls 的 assistant + tool 结果）始终保留。
 
 ## 四、MemoryPlugin 持久化（含 nil-Response 过滤）
 
