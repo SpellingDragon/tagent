@@ -28,15 +28,23 @@ func TestProjection_ZeroKeyNotDeduped(t *testing.T) {
 	}
 }
 
-// L1: Replace rebuilds the seen set consistently with the new refs.
+// L1: Replace rebuilds the seen set consistently with the new refs — a
+// compacted-out key becomes appendable again, a key present in the new refs is
+// still deduped. (Asserts actual keys: the buggy version produced [2 2].)
 func TestProjection_ReplaceRebuildsSeen(t *testing.T) {
 	p := NewSessionProjection()
 	p.Append(memory.EventReference{EventKey: 1})
 	p.Replace([]memory.EventReference{{EventKey: 2}})
-	p.Append(memory.EventReference{EventKey: 1}) // 1 no longer present → accepted
-	p.Append(memory.EventReference{EventKey: 2}) // 2 present → skipped
-	if got := p.Len(); got != 2 {
-		t.Errorf("after replace: len=%d, want 2 ({2,1})", got)
+	p.Append(memory.EventReference{EventKey: 1}) // 1 compacted out → re-append accepted
+	p.Append(memory.EventReference{EventKey: 2}) // 2 present in new refs → skipped as dup
+
+	got := p.GetAll()
+	var keys []int64
+	for _, r := range got {
+		keys = append(keys, r.EventKey)
+	}
+	if len(keys) != 2 || keys[0] != 2 || keys[1] != 1 {
+		t.Errorf("after Replace, seen must mirror refs; got keys=%v, want [2 1]", keys)
 	}
 }
 

@@ -60,6 +60,16 @@ func (p *SessionProjection) Replace(refs []memory.EventReference) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refs = refs
+	// Rebuild the seen set so idempotency stays consistent with the new refs:
+	// without this, compacted-out keys would linger forever (unbounded growth
+	// for a long-running agent) and the compaction summary's new key would be
+	// untracked. seen must mirror exactly the keys currently in refs.
+	p.seen = make(map[int64]struct{}, len(refs))
+	for _, r := range refs {
+		if r.EventKey > 0 {
+			p.seen[r.EventKey] = struct{}{}
+		}
+	}
 }
 
 func (p *SessionProjection) Len() int {
