@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -27,9 +26,9 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 // on the persistent ContextManager will TryPull these messages and inject them
 // into the next ReAct iteration.
 func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message) {
-	if ta.meditationMgr != nil {
-		ta.meditationMgr.UpdateLastEventTime(time.Now())
-	}
+	// NOTE: meditation idle-detection is anchored on agent OUTPUT (see
+	// makeOnEventCallback), not on injected inputs — injections do not reset the
+	// idle clock here.
 	// Always use persistentBus, not activeBus.
 	// activeBus may be invBus during sub-agent execution, but user messages
 	// should go to the persistent bus so the main runEventLoop's BeforeModel
@@ -58,9 +57,6 @@ func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message)
 //   - "user_name": human-readable user identifier for logs
 //   - "channel": communication channel (wechat, discord, etc.)
 func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Message, metadata map[string]string) {
-	if ta.meditationMgr != nil {
-		ta.meditationMgr.UpdateLastEventTime(time.Now())
-	}
 	evt := NewExternalInputEvent(source, msg)
 	// 将 metadata 复制到 AgentEvent.Metadata
 	if evt.Metadata == nil {

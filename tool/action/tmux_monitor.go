@@ -30,6 +30,21 @@ type TmuxMonitor struct {
 	// (e.g., Stable -> Stable should not trigger twice).
 	lastNotifiedStatus map[string]SessionStatus
 
+	// sessionCallbacks holds optional per-session state-change callbacks,
+	// registered via AddSessionWithCallback. They fire alongside (in addition
+	// to) StateChangeCallback, under the same meaningful-state + dedup gate.
+	// This lets a caller route a specific session's transitions to a dedicated
+	// consumer (e.g. a per-call settle detector) without global-callback demux.
+	sessionCallbacks map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string)
+
+	// schedule is the adaptive poll schedule (dense→backoff). Its DenseInterval
+	// is the loop tick; nextPoll tracks each session's next due time so the loop
+	// polls only due sessions and reschedules each by its age (D1/D4). A zero
+	// schedule (e.g. tests that build TmuxMonitor directly) disables adaptivity
+	// (every session is always due).
+	schedule PollSchedule
+	nextPoll map[string]time.Time
+
 	// StateChangeCallback is called when session state changes.
 	// The callback receives session ID, old status, new status, and output snapshot.
 	// It's the caller's responsibility to store events to MemoryStore.
@@ -57,12 +72,23 @@ type MonitorConfig struct {
 	FakeDeadDuration          time.Duration
 	HeartbeatCommand          string
 	HeartbeatTimeout          time.Duration
+
+	// Adaptive poll schedule (optional; unset fields fall back to defaults, with
+	// DenseInterval derived from Interval). See PollSchedule.
+	DenseInterval time.Duration
+	DenseDuration time.Duration
+	BackoffFactor float64
+	MaxInterval   time.Duration
 }
 
 // DefaultMonitorConfig returns default monitor configuration
 func DefaultMonitorConfig() MonitorConfig {
 	return MonitorConfig{
-		Interval:                  30 * time.Second,
+		// Interval is the poll cadence. Kept low so a finished command's
+		// completion is detected within a few seconds — this lets short
+		// commands settle INLINE within the task layer's sync-wait window,
+		// while genuinely long-running work exceeds the window and goes async.
+		Interval:                  3 * time.Second,
 		StableDuration:            60 * time.Second,
 		InteractiveStableDuration: 90 * time.Second,
 		FakeDeadDuration:          150 * time.Second,
@@ -83,6 +109,22 @@ func WithMonitorConfig(cfg MonitorConfig) TmuxMonitorOption {
 		tm.fakeDeadDuration = cfg.FakeDeadDuration
 		tm.heartbeatCommand = cfg.HeartbeatCommand
 		tm.heartbeatTimeout = cfg.HeartbeatTimeout
+		if cfg.Interval > 0 {
+			tm.schedule.DenseInterval = cfg.Interval // dense cadence = configured interval
+		}
+		// Explicit schedule overrides (optional).
+		if cfg.DenseInterval > 0 {
+			tm.schedule.DenseInterval = cfg.DenseInterval
+		}
+		if cfg.DenseDuration > 0 {
+			tm.schedule.DenseDuration = cfg.DenseDuration
+		}
+		if cfg.BackoffFactor >= 1 {
+			tm.schedule.BackoffFactor = cfg.BackoffFactor
+		}
+		if cfg.MaxInterval > 0 {
+			tm.schedule.MaxInterval = cfg.MaxInterval
+		}
 	}
 }
 
@@ -104,6 +146,9 @@ func WithMonitorStateChangeCallback(cb func(sessionID string, oldStatus, newStat
 func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor {
 	defaultCfg := DefaultMonitorConfig()
 
+	sched := DefaultPollSchedule()
+	sched.DenseInterval = defaultCfg.Interval // preserve the tuned base cadence
+
 	tm := &TmuxMonitor{
 		interval:                  defaultCfg.Interval,
 		stableDuration:            defaultCfg.StableDuration,
@@ -114,6 +159,9 @@ func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor {
 		sessions:                  make(map[string]*TmuxSession),
 		stopCh:                    make(chan struct{}),
 		lastNotifiedStatus:        make(map[string]SessionStatus),
+		sessionCallbacks:          make(map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string)),
+		schedule:                  sched,
+		nextPoll:                  make(map[string]time.Time),
 	}
 
 	for _, opt := range opts {
@@ -155,7 +203,41 @@ func (tm *TmuxMonitor) AddSession(session *TmuxSession) {
 	defer tm.mu.Unlock()
 
 	tm.sessions[session.ID] = session
+	tm.markDueLocked(session)
 	log.Infof("[TmuxMonitor] added session %s", session.ID)
+}
+
+// markDueLocked marks a freshly-added session as due on the next tick and sets
+// its CreatedAt (for age-based scheduling) if unset. Caller holds tm.mu.
+// No-op when the schedule map is absent (non-adaptive test monitors).
+func (tm *TmuxMonitor) markDueLocked(session *TmuxSession) {
+	if tm.nextPoll == nil {
+		return
+	}
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now()
+	}
+	tm.nextPoll[session.ID] = time.Now()
+}
+
+// AddSessionWithCallback adds a session to monitoring and registers a callback
+// that fires for THIS session's meaningful state changes, in addition to any
+// global StateChangeCallback and under the same meaningful-state + dedup gate.
+// Used by callers that want per-session routing (e.g. a per-call settle
+// detector) without demultiplexing the global callback.
+func (tm *TmuxMonitor) AddSessionWithCallback(session *TmuxSession, cb func(sessionID string, oldStatus, newStatus SessionStatus, output string)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	tm.sessions[session.ID] = session
+	if cb != nil {
+		if tm.sessionCallbacks == nil {
+			tm.sessionCallbacks = make(map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string))
+		}
+		tm.sessionCallbacks[session.ID] = cb
+	}
+	tm.markDueLocked(session)
+	log.Infof("[TmuxMonitor] added session %s (per-session callback)", session.ID)
 }
 
 // RemoveSession removes a session from monitoring
@@ -164,6 +246,8 @@ func (tm *TmuxMonitor) RemoveSession(sessionID string) {
 	defer tm.mu.Unlock()
 
 	delete(tm.sessions, sessionID)
+	delete(tm.sessionCallbacks, sessionID)
+	delete(tm.nextPoll, sessionID)
 	log.Infof("[TmuxMonitor] removed session %s", sessionID)
 }
 
@@ -203,7 +287,11 @@ func (tm *TmuxMonitor) ListSessions() []*TmuxSession {
 
 // monitorLoop is the main monitoring loop
 func (tm *TmuxMonitor) monitorLoop() {
-	ticker := time.NewTicker(tm.interval)
+	tick := tm.schedule.DenseInterval
+	if tick <= 0 {
+		tick = tm.interval
+	}
+	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 
 	for {
@@ -220,16 +308,47 @@ func (tm *TmuxMonitor) monitorLoop() {
 // list and calling checkSession for each. This avoids holding the lock across
 // callbacks (which may call GetSession and deadlock).
 func (tm *TmuxMonitor) checkAllSessions() {
+	now := time.Now()
 	tm.mu.RLock()
+	adaptive := tm.nextPoll != nil
 	sessions := make([]*TmuxSession, 0, len(tm.sessions))
-	for _, s := range tm.sessions {
+	for id, s := range tm.sessions {
+		if adaptive {
+			if np, ok := tm.nextPoll[id]; ok && np.After(now) {
+				continue // not due yet (backoff)
+			}
+		}
 		sessions = append(sessions, s)
 	}
 	tm.mu.RUnlock()
 
 	for _, session := range sessions {
 		tm.checkSession(session)
+		if adaptive {
+			tm.rescheduleSession(session, now)
+		}
 	}
+}
+
+// rescheduleSession sets a session's next poll time by its age-derived interval
+// (dense→backoff). A stable (service-ready) session polls at the sparsest
+// cadence (D6). A removed (terminal) session drops its schedule.
+func (tm *TmuxMonitor) rescheduleSession(s *TmuxSession, now time.Time) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if _, ok := tm.sessions[s.ID]; !ok {
+		delete(tm.nextPoll, s.ID)
+		return
+	}
+	age := now.Sub(s.CreatedAt)
+	if s.CreatedAt.IsZero() {
+		age = 0
+	}
+	interval := tm.schedule.intervalForAge(age)
+	if s.Status == SessionStable && tm.schedule.MaxInterval > 0 {
+		interval = tm.schedule.MaxInterval
+	}
+	tm.nextPoll[s.ID] = now.Add(interval)
 }
 
 // checkSession checks a single session: detects state, updates fields under
@@ -266,17 +385,22 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 
 	if shouldRemove {
 		delete(tm.sessions, session.ID)
+		delete(tm.nextPoll, session.ID)
 		log.Infof("[TmuxMonitor] removed session %s", session.ID)
 	}
 
 	sessionID := session.ID
 
+	globalCb := tm.StateChangeCallback
+	sessCb := tm.sessionCallbacks[sessionID]
+
 	// Check if we should trigger a callback:
-	// 1. Callback must be registered
+	// 1. A callback (global or per-session) must be registered
 	// 2. Both old and new states must be meaningful (not FakeDead/FakeAlive)
-	// 3. New state must be different from the last notified state (prevent duplicates)
+	// 3. New state must differ from the last notified state (prevent duplicates)
 	shouldCallback := false
-	if tm.StateChangeCallback != nil && isMeaningfulState(oldStatus) && isMeaningfulState(newStatus) {
+	if (globalCb != nil || sessCb != nil) &&
+		isMeaningfulState(oldStatus) && isMeaningfulState(newStatus) {
 		lastNotified := tm.lastNotifiedStatus[sessionID]
 		if lastNotified != newStatus {
 			tm.lastNotifiedStatus[sessionID] = newStatus
@@ -284,12 +408,26 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 		}
 	}
 
+	// If the session was removed above (terminal state), also drop its
+	// per-session callback and dedup state. sessCb is already captured for the
+	// final callback below, so the terminal transition still notifies.
+	if shouldRemove {
+		delete(tm.sessionCallbacks, sessionID)
+		delete(tm.lastNotifiedStatus, sessionID)
+	}
+
 	tm.mu.Unlock()
 
-	// Trigger callback outside the lock to avoid holding the lock during
-	// potentially slow callback execution.
+	// Trigger callbacks outside the lock to avoid holding the lock during
+	// potentially slow callback execution. The global and per-session callbacks
+	// (if present) fire under the same meaningful-state + dedup gate.
 	if shouldCallback {
-		tm.StateChangeCallback(sessionID, oldStatus, newStatus, newOutput)
+		if globalCb != nil {
+			globalCb(sessionID, oldStatus, newStatus, newOutput)
+		}
+		if sessCb != nil {
+			sessCb(sessionID, oldStatus, newStatus, newOutput)
+		}
 	}
 }
 

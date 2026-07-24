@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -79,6 +81,44 @@ func NewToolUseEvent(toolCall model.ToolCall) *AgentEvent {
 		ToolCall:  &toolCall,
 		Metadata:  make(map[string]any),
 	}
+}
+
+// SourceTask identifies task_settled events on the bus (a settled background
+// task reclaimed into a new turn).
+const SourceTask = "task"
+
+// newTaskSettledEvent builds a self-contained external_input event describing a
+// background task that has settled, so the persistent loop reclaims it into a
+// new turn. It carries the task description, status, and a (truncated) result
+// inline so the LLM needs no extra lookup for small results; large results are
+// tail-truncated with a hint to use get_task_result.
+func newTaskSettledEvent(task *Task, sig SettleSignal) *AgentEvent {
+	status := "completed"
+	switch {
+	case sig.Err != nil:
+		status = "failed"
+	case sig.Kind == SettleStable:
+		status = "就绪/存活 (alive-detached：后续不再重复通知，除非结束或你主动查询)"
+	case sig.Kind == SettleSuspect:
+		status = "suspect (长时间无输出，可能假死，需确认)"
+	}
+
+	result := sig.Output
+	const maxInline = 2000
+	if len(result) > maxInline {
+		result = "...(已截断，完整结果用 get_task_result 拉取)\n" + result[len(result)-maxInline:]
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[task settled] 后台任务已结算\n任务: %s\n状态: %s\n(task id: %s)",
+		task.Spec.Desc, status, task.ID)
+	if sig.Err != nil {
+		fmt.Fprintf(&b, "\n错误: %v", sig.Err)
+	}
+	if result != "" {
+		fmt.Fprintf(&b, "\n结果:\n%s", result)
+	}
+	return NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
 }
 
 // ---------------------------------------------------------------------------

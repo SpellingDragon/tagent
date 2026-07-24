@@ -22,6 +22,9 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 // TestActionTool_TmuxExec verifies that a simple tmux command runs to completion
 // and returns a properly-shaped ActionToolResult with the captured output.
 func TestActionTool_TmuxExec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")
+	}
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping tmux test")
 	}
@@ -93,6 +96,9 @@ func TestActionTool_EmptyCommand(t *testing.T) {
 // TestCommandParsing exercises Call() with a range of command strings and
 // verifies success/failure aligns with the input.
 func TestCommandParsing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")
+	}
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping command parsing test")
 	}

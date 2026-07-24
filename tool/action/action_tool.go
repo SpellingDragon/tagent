@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -36,21 +37,7 @@ type ActionTool struct {
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig // Optional: override default monitor config
 
-	// waiters maps sessionID → result channel. Call() registers a waiter
-	// when it starts a tmux session; handleStateChange delivers the first
-	// stable state to the waiter. Access guarded by waitersMu.
-	waitersMu sync.Mutex
-	waiters   map[string]chan *stableStateResult
-
 	closeOnce sync.Once
-}
-
-// stableStateResult carries the tmux session's final observation delivered
-// to a blocked Call() when the session reaches a stable state.
-type stableStateResult struct {
-	oldStatus string
-	newStatus string
-	output    string
 }
 
 // ActionToolOption configures ActionTool.
@@ -95,7 +82,6 @@ func WithActionMonitorConfig(cfg MonitorConfig) ActionToolOption {
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
 		description: "Execute a shell command via tmux and wait for it to stabilize. Returns the final status and captured output.",
-		waiters:     make(map[string]chan *stableStateResult),
 	}
 
 	for _, opt := range opts {
@@ -116,9 +102,6 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		ct.tmuxMonitor = NewTmuxMonitor(
 			WithMonitorExecutor(ct.tmuxExecutor),
 			WithMonitorConfig(monCfg),
-			WithMonitorStateChangeCallback(func(sessionID string, oldStatus, newStatus SessionStatus, output string) {
-				ct.handleStateChange(sessionID, string(oldStatus), string(newStatus), output)
-			}),
 		)
 	}
 
@@ -190,79 +173,136 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 
 	log.Infof("[ActionTool] executing cmd=%q", args.Command)
 
+	sessionID, detector, err := ct.startSession(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	// Async path: hand the detector to the injected task spawner, which applies
+	// the sync-wait window — inline settle if it stabilizes within the window,
+	// otherwise an ack while it is tracked in the background. Absent a spawner
+	// (standalone use / no task layer) fall back to a synchronous wait that
+	// preserves the original blocking semantics.
+	if spawner, ok := agent.TaskSpawnerFromContext(ctx); ok {
+		res := spawner.Spawn(agent.TaskSpec{
+			Kind:     "command",
+			Desc:     args.Command,
+			Key:      args.Command,
+			Relaunch: ct.relaunchClosure(spawner, args),
+		}, detector)
+		if res.Settled {
+			return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal), nil
+		}
+		return ct.buildAckResult(sessionID, args.Command, res.Task), nil
+	}
+
+	// Synchronous fallback: block until the first settle or ctx cancellation.
+	// On cancellation the session keeps running under monitor control.
+	select {
+	case sig, ok := <-detector.Settled():
+		if !ok {
+			return nil, fmt.Errorf("action: session %s ended without settling", sessionID)
+		}
+		return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, sig), nil
+	case <-ctx.Done():
+		log.Warnf("[ActionTool] ctx cancelled while waiting for session %s: %v", sessionID, ctx.Err())
+		return nil, ctx.Err()
+	}
+}
+
+// startSession creates a tmux session for args, wires a per-session settle
+// detector (whose Cancel kills the session), registers it with the monitor via
+// a per-session callback, and ensures the monitor is running. Shared by Call
+// and the relaunch closure.
+func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string, *TmuxSettleDetector, error) {
 	session, err := ct.tmuxExecutor.CreateSession(ctx, TmuxCreateOptions{
 		Command: args.Command,
 		WorkDir: args.WorkDir,
 		Env:     args.Env,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("action: failed to create tmux session: %w", err)
+		return "", nil, fmt.Errorf("action: failed to create tmux session: %w", err)
 	}
-
-	// Register a waiter before adding the session to the monitor so we do
-	// not miss the first meaningful state transition.
-	ch := make(chan *stableStateResult, 1)
-	ct.waitersMu.Lock()
-	ct.waiters[session.ID] = ch
-	ct.waitersMu.Unlock()
-	defer func() {
-		ct.waitersMu.Lock()
-		delete(ct.waiters, session.ID)
-		ct.waitersMu.Unlock()
-	}()
-
-	ct.tmuxMonitor.AddSession(&TmuxSession{
-		ID:        session.ID,
+	sessionID := session.ID
+	detector := NewTmuxSettleDetector(sessionID, func() {
+		if err := ct.tmuxExecutor.KillSession(sessionID); err != nil {
+			log.Warnf("[ActionTool] kill session %s: %v", sessionID, err)
+		}
+		ct.tmuxMonitor.RemoveSession(sessionID)
+	})
+	ct.tmuxMonitor.AddSessionWithCallback(&TmuxSession{
+		ID:        sessionID,
 		Name:      session.Name,
 		Command:   args.Command,
 		WorkDir:   args.WorkDir,
 		Status:    SessionRunning,
 		CreatedAt: time.Now(),
 		IsTUI:     args.IsTUI,
+	}, func(_ string, _, newStatus SessionStatus, output string) {
+		detector.OnStateChange(newStatus, output)
 	})
 	if !ct.tmuxMonitor.IsRunning() {
 		ct.tmuxMonitor.Start()
 	}
+	return sessionID, detector, nil
+}
 
-	// Block until the session reaches a stable state or ctx is cancelled.
-	select {
-	case result := <-ch:
-		return ct.buildActionResult(session.ID, args.Command, args.IsTUI, result), nil
-	case <-ctx.Done():
-		log.Warnf("[ActionTool] ctx cancelled while waiting for session %s: %v", session.ID, ctx.Err())
-		return nil, ctx.Err()
+// relaunchClosure returns a closure that re-runs args as a fresh command task
+// (used by relaunch(id)). It starts a new session in a background context (the
+// original turn ctx may be gone) and re-spawns via the same task spawner; the
+// re-spawned task is itself relaunchable.
+func (ct *ActionTool) relaunchClosure(spawner agent.TaskSpawner, args ActionArgs) func() (agent.SpawnResult, error) {
+	return func() (agent.SpawnResult, error) {
+		_, detector, err := ct.startSession(context.Background(), args)
+		if err != nil {
+			return agent.SpawnResult{}, err
+		}
+		return spawner.Spawn(agent.TaskSpec{
+			Kind:     "command",
+			Desc:     args.Command,
+			Key:      args.Command,
+			Relaunch: ct.relaunchClosure(spawner, args),
+		}, detector), nil
 	}
 }
 
-// handleStateChange delivers the first stable state observation to the
-// waiting Call() for the given session. The first meaningful state
-// transition (Stable/Completed/Error/TimedOut) unblocks Call().
-func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
-	log.Infof("[ActionTool] tmux session %s: %s -> %s", sessionID, oldStatus, newStatus)
-
-	ct.waitersMu.Lock()
-	ch, ok := ct.waiters[sessionID]
-	ct.waitersMu.Unlock()
-	if !ok {
-		// No waiter — Call() already returned (ctx cancelled or duplicate
-		// callback). The session continues running under monitor control.
-		return
+// settleToStatus maps a task settle signal to the tmux-style status string
+// surfaced to the LLM in ActionToolResult.
+func settleToStatus(sig agent.SettleSignal) string {
+	if sig.Err != nil {
+		return "error"
 	}
-
-	select {
-	case ch <- &stableStateResult{
-		oldStatus: oldStatus,
-		newStatus: newStatus,
-		output:    output,
-	}:
+	switch sig.Kind {
+	case agent.SettleCompleted:
+		return "completed"
+	case agent.SettleStable:
+		return "stable"
+	case agent.SettleSuspect:
+		return "timed_out"
 	default:
-		// Waiter already received a result; drop subsequent transitions.
+		return string(sig.Kind)
 	}
 }
 
-// buildActionResult composes the tool result payload the framework will
-// forward to the LLM as a role=tool message.
-func (ct *ActionTool) buildActionResult(sessionID, command string, isTUI bool, result *stableStateResult) *ActionToolResult {
+// buildAckResult composes the tool result for an asynchronously-tracked command
+// that did not settle within the sync-wait window. The session keeps running;
+// its settle is written back later through the task layer.
+func (ct *ActionTool) buildAckResult(sessionID, command string, task *agent.Task) *ActionToolResult {
+	note := "命令已在后台运行，稳定或完成后将回写结果；可用任务工具查询状态/结果。"
+	if task != nil {
+		note = fmt.Sprintf("命令已在后台运行 (task %s)，稳定或完成后将回写结果；可用任务工具查询状态/结果。", task.ID)
+	}
+	return &ActionToolResult{
+		SessionID: sessionID,
+		Command:   command,
+		Status:    "running",
+		Note:      note,
+	}
+}
+
+// buildResultFromSignal composes the tool result payload the framework will
+// forward to the LLM as a role=tool message, from a task settle signal.
+func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI bool, sig agent.SettleSignal) *ActionToolResult {
 	// Enrich with any per-session context still available in the monitor
 	// (e.g. how long the session has been stable).
 	var extraNote string
@@ -281,7 +321,7 @@ func (ct *ActionTool) buildActionResult(sessionID, command string, isTUI bool, r
 		}
 	}
 
-	output := result.output
+	output := sig.Output
 	var outputFile string
 	if output != "" {
 		output = cleanTmuxOutput(output)
@@ -309,8 +349,7 @@ func (ct *ActionTool) buildActionResult(sessionID, command string, isTUI bool, r
 	return &ActionToolResult{
 		SessionID:  sessionID,
 		Command:    command,
-		OldStatus:  result.oldStatus,
-		Status:     result.newStatus,
+		Status:     settleToStatus(sig),
 		Output:     output,
 		OutputFile: outputFile,
 		Note:       extraNote,

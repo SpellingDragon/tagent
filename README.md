@@ -62,6 +62,33 @@ graph TB
 - `Compactor` 只清理 `SessionProjection` 中的旧引用，不删除 `MemoryStore`
 - `MemoryStore` 是唯一完整事件链，Agent 和 Tool 通过 `EventKey` 按需访问
 
+### 记忆分区与跨 Agent 编排
+
+`MemoryStore` 内部按 **PartitionID** 分区，PartitionID 由 **Agent 名**派生（`PartitionIDFromName(agentName)`）。每个 Agent（主 Agent 与各子 Agent）的事件写入各自分区，实现 **Agent 间记忆隔离**。
+
+记忆层提供**两条语义不同的读路径**：
+
+| 读路径 | 入口 | 作用域 | 用途 |
+|--------|------|--------|------|
+| **按条件查询** | RecallAgent 子工具（`recall_query`/`recall_recent`） | 受 `read_namespaces` 限定的分区集合 | 语义检索、最近事件、因果链回溯 |
+| **按 Key 直读** | `parentStore.GetEvent(key)` | **全库、跨分区**（Key 内含 PartitionID） | 顶层已持有 event_key 时还原完整事件 |
+
+基于这两条路径，子 Agent 的记忆遵循「**子写、顶读、顶编排**」模式：
+
+```mermaid
+graph LR
+    SUB["子 Agent<br/>事件写入自身分区"] -.隔离.- OTHER["其他 Agent 分区"]
+    TOP["顶层 Agent"] -->|recall(read_namespaces 限定)| Q["检索得到 event_keys"]
+    Q -->|"tool(event_keys=[...])"| ATW["AgentToolWrapper"]
+    ATW -->|"parentStore.GetEvent 跨分区还原"| EC["external_context (EventSummary)"]
+    EC -->|注入| SUB
+```
+
+**关键约束**：
+- 子 Agent **无跨调用记忆**：每次 `Run()` 用全新 `SessionProjection`，turn 结束即弃。历史由**顶层召回并工程化还原**为 `external_context` 显式喂入，而非子 Agent 自行累积。
+- **隔离是 opt-in**：`resolvePartitions` 在查询未指定分区时回退为**全部分区**。因此 RecallAgent 必须显式配置 `read_namespaces` 才形成隔离边界；未配置则查全库。
+- 顶层通过 `GetEvent(key)` 的跨分区读**不受 `read_namespaces` 限制**——它是按 Key 精确还原，与「按条件查询」的作用域是两套机制。
+
 ### 事件分类
 
 每次交互——包括工具调用和内部规划——都会被框架 Runner 产生为一个 `event.Event`，经插件处理后转为持久化事件：
@@ -243,13 +270,15 @@ graph TD
     PARSE --> GET["parentStore.GetEvent(key)<br/>→ FullEvents"]
     GET --> SER["序列化为 RuntimeState[external_context]"]
     SER --> RUN["agent.Run(ctx, inv)"]
-    RUN --> LOCAL["本地：TagentAgent.Run<br/>创建独立 EventBus + ContextManager"]
+    RUN --> LOCAL["本地：TagentAgent.Run<br/>创建独立 EventBus + ContextManager<br/>直调 RunFlow 一次"]
     RUN --> REMOTE["远程：A2AAgent.Run<br/>A2A HTTP → 远程 TagentAgent"]
 ```
 
 - 远程路径通过 `WithTransferStateKey("external_context")` 自动将 `RuntimeState` 映射为 A2A 消息元数据
 - 子 Agent 只接收 `EventSummary` 构成的紧凑外部上下文；如需完整内容，可通过自身的 memory 工具查询
-- 子 Agent `Run()` 创建独立的 EventBus 和 `SessionProjection`，运行单轮后返回
+- 子 Agent `Run()` 创建独立的 EventBus + `SessionProjection` + ContextManager（并发隔离），**直接调用一次 `RunFlow`** 执行一个完整 turn
+- **Turn 边界即 `RunFlow` 的自然返回**：`RunFlow` 内部跑完完整 ReAct 工具循环（多轮）直到最终 assistant 响应才返回，随后关闭输出 channel。子 Agent 与顶层持久循环共享同一个 turn 原语 `RunFlow`，区别仅在于顶层是 `for { Pull; RunFlow }` 反应式守护，子 Agent 是单次直调
+- 调用前先将驱动请求 `persistBusEvent` 写入 `SessionProjection`，使其成为时间线首条（紧跟 system），避免被后续累积的 ReAct 历史挤到末尾
 
 ### 5. 冥想心跳机制
 
@@ -275,6 +304,20 @@ agents:
       min_gap: "2h"
       prompt_file: "meditation.md"
 ```
+
+### 6. 异步任务层（长命令 / 服务）
+
+`action`（tmux）等长耗时工具接入统一的**任务层**，让长命令不再阻塞事件循环：
+
+- **自适应轮询 + 同步/异步自然统一**：monitor 按任务年龄自适应轮询——**dense 阶段**（默认 1s，覆盖前 ~10s）密集探测让短命令快速被检测，之后**几何退避**（×2 至上限 60s）稀疏轮询长运行/服务型任务。探测器在 dense→sparse 边界发出 **detach** 信号,这一边界即"同步→异步"的 ack 点：dense 阶段内结算 → **内联返回**（短命令体验如常）；越过 dense → 返回"已在后台运行"的 **ack**。无独立 `sync_wait` 旋钮——一套调度同时决定探测节奏与同步/异步边界。阻塞时长 = `min(dense 阶段, 真实响应)`；并行多任务各等各的窗口（取最慢者,不累加）。调度可经 `MonitorConfig`（`dense_interval`/`dense_duration`/`backoff_factor`/`max_interval`）配置。
+- **settle 三档**：探测器只做确定性分类 `completed`（进程退出）/ `stable`（输出稳定仍存活）/ `suspect`（长时间无输出，疑似假死），"是否真完成"的语义判断交给 LLM。
+- **task_settled 回收 turn**：后台任务结算后发一条自包含事件到事件总线；持久循环空闲则唤醒、进行中则排队（不打断），把结果作为新 turn 交给 LLM。
+- **服务型 alive-detached**：首次 `stable` 发一次"就绪"通知后转常驻存活态，后续输出变化不再刷屏，仅 `cancel`/进程死亡结束。
+- **实时任务看板**：每轮 `BeforeModel` 从注册表重渲染当前进行中任务，置于当前输入前；不入历史、不参与压缩；终态任务自动 age-out。
+- **LLM 任务工具**：`list_tasks` / `get_task_result(id)` / `cancel_task(id)` / `relaunch_task(id)`（即时同步返回；大结果在通知里截断、按需拉全量）。
+- **会话回收**：命令进程真正结束（completed/error）后自动 kill 其 tmux 会话，避免长程运行累积死会话。
+
+任务工具为内建可选工具，需在 agent 的 `tools` 中显式引用方可挂载。
 
 ## 关键场景
 

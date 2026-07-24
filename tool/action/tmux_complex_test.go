@@ -10,6 +10,9 @@ import (
 // complex multi-line output correctly. Call() blocks until the tmux session
 // stabilizes and returns the final output as the tool result.
 func TestActionTool_TmuxComplexOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")
+	}
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping tmux test")
 	}
@@ -59,6 +62,9 @@ func TestActionTool_TmuxComplexOutput(t *testing.T) {
 // approximately 2000 chars with the tail preserved (and the full output
 // saved to a file whose path is reported via OutputFile).
 func TestActionTool_TmuxLongOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")
+	}
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping tmux test")
 	}
@@ -93,6 +99,9 @@ func TestActionTool_TmuxLongOutput(t *testing.T) {
 // TestActionTool_TmuxExitCode verifies that a non-zero exit code produces
 // a proper stable-state result (Pane is dead) containing the pre-exit output.
 func TestActionTool_TmuxExitCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")
+	}
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available, skipping tmux test")
 	}

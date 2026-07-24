@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent"
 )
 
 // ==================== Mock Inspector ====================
@@ -1127,68 +1129,46 @@ func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
 	}
 }
 
-// ==================== handleStateChange Output Truncation Test ====================
+// ==================== buildResultFromSignal Output Truncation Test ====================
 
-// TestHandleStateChange_WaiterDelivery verifies that handleStateChange
-// delivers the stable-state observation to the waiter registered by Call(),
-// and that buildActionResult truncates large outputs while preserving the
-// tail so LLM context stays bounded.
-func TestHandleStateChange_WaiterDelivery(t *testing.T) {
+// TestBuildResultFromSignal_OutputTruncation verifies that buildResultFromSignal
+// returns small outputs intact and spills large outputs to a file while keeping
+// a truncated tail inline so LLM context stays bounded.
+func TestBuildResultFromSignal_OutputTruncation(t *testing.T) {
 	ct := &ActionTool{
-		waiters:     make(map[string]chan *stableStateResult),
 		tmuxMonitor: NewTmuxMonitor(WithMonitorExecutor(&mockInspector{processExists: true})),
 		workspace:   t.TempDir(),
 	}
 
-	// Add a session with known state
 	session := &TmuxSession{
 		ID:          "trunc_test",
-		Status:      SessionRunning,
+		Status:      SessionStable,
 		StableSince: time.Now().Add(-30 * time.Second),
 	}
 	ct.tmuxMonitor.AddSession(session)
 
 	// Sub-test 1: output <= 2000 chars — no truncation, no output file.
-	shortOutput := "short output line\n"
-	ch := make(chan *stableStateResult, 1)
-	ct.waiters["trunc_test"] = ch
-	ct.handleStateChange("trunc_test", string(SessionRunning), string(SessionStable), shortOutput)
-
-	select {
-	case res := <-ch:
-		out := ct.buildActionResult("trunc_test", "echo short", false, res)
-		if !strings.Contains(out.Output, "short output line") {
-			t.Errorf("short output should be delivered intact, got %q", out.Output)
-		}
-		if out.OutputFile != "" {
-			t.Errorf("short output should not spill to a file, got %q", out.OutputFile)
-		}
-	default:
-		t.Fatal("expected stable-state result delivered to waiter")
+	short := ct.buildResultFromSignal("trunc_test", "echo short", false,
+		agent.SettleSignal{Kind: agent.SettleStable, Output: "short output line\n"})
+	if !strings.Contains(short.Output, "short output line") {
+		t.Errorf("short output should be delivered intact, got %q", short.Output)
 	}
-	delete(ct.waiters, "trunc_test")
+	if short.OutputFile != "" {
+		t.Errorf("short output should not spill to a file, got %q", short.OutputFile)
+	}
 
 	// Sub-test 2: output > 2000 chars — persisted to file, tail returned inline.
 	largeLine := "line of output data that will eventually be truncated because too long\n"
 	largeOutput := strings.Repeat(largeLine, 100) // >2000 chars
-
-	ch2 := make(chan *stableStateResult, 1)
-	ct.waiters["trunc_test"] = ch2
-	ct.handleStateChange("trunc_test", string(SessionStable), string(SessionRunning), largeOutput)
-
-	select {
-	case res := <-ch2:
-		out := ct.buildActionResult("trunc_test", "echo large", false, res)
-		if out.OutputFile == "" {
-			t.Error("large output should be spilled to OutputFile")
-		}
-		if strings.Contains(out.Output, largeOutput) {
-			t.Error("full large output should NOT appear inline")
-		}
-		if !strings.Contains(out.Output, largeLine) {
-			t.Error("truncated tail of output should appear inline")
-		}
-	default:
-		t.Fatal("expected second stable-state result delivered to waiter")
+	large := ct.buildResultFromSignal("trunc_test", "echo large", false,
+		agent.SettleSignal{Kind: agent.SettleStable, Output: largeOutput})
+	if large.OutputFile == "" {
+		t.Error("large output should be spilled to OutputFile")
+	}
+	if strings.Contains(large.Output, largeOutput) {
+		t.Error("full large output should NOT appear inline")
+	}
+	if !strings.Contains(large.Output, largeLine) {
+		t.Error("truncated tail of output should appear inline")
 	}
 }

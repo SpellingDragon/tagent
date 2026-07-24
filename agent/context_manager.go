@@ -84,6 +84,12 @@ type ContextManager struct {
 	projection *SessionProjection
 	onEvent    func(evt *event.Event)
 
+	// taskController, when set, is injected into the RunFlow ctx (as a
+	// TaskSpawner) so tools can hand long-running work to the task layer, and
+	// is used to render the live task board at BeforeModel. nil → tools fall
+	// back to synchronous execution and no board is rendered.
+	taskController TaskController
+
 	// triggerSource identifies what triggered the current RunFlow
 	// (e.g., "user", "meditation", "async_result"). Set by runEventLoop
 	// before calling RunFlow. Attached to outputCh events via
@@ -103,16 +109,7 @@ type ContextManager struct {
 	// systemPromptSource enables hot-reload of the system prompt.
 	// When set, the system message is re-read from files before each LLM call.
 	systemPromptSource *prompt.Source
-
-	// isSubAgent marks this ContextManager as serving a sub-agent Run()
-	// invocation. In sub-agent mode, extractCurrentTurnMessages does NOT
-	// filter unprefixed user messages (because projection is empty and
-	// the only user message comes from insertInvocationMessage).
-	isSubAgent bool
 }
-
-// SetSubAgentMode marks this ContextManager as serving a sub-agent invocation.
-func (cm *ContextManager) SetSubAgentMode(v bool) { cm.isSubAgent = v }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
 func (cm *ContextManager) SetTriggerSource(source string) {
@@ -282,18 +279,17 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			cm.projection.Replace(result.RetainedRefs)
 
 			// Step 3: Extract current-turn messages.
-			// In sub-agent mode, projection is empty and there are no session
-			// echoes — keep all unprefixed messages (user from insertInvocationMessage
-			// + assistant/tool from ReAct iterations).
-			// In persistent-loop mode, check whether projection already produced
-			// a user message; if so, unprefixed user is a session echo to drop.
+			// The driving request (user) is persisted into the projection at
+			// turn start (persistent loop via framework emission; sub-agent via
+			// session.go persistBusEvent). So whenever the projection already
+			// contains a user message, the framework's re-inserted unprefixed
+			// user is a duplicate/echo and must be dropped. ReAct-internal
+			// messages (assistant tool_calls + tool results) are always kept.
 			var filterUser bool
-			if !cm.isSubAgent {
-				for _, m := range result.Messages {
-					if m.Role == model.RoleUser {
-						filterUser = true
-						break
-					}
+			for _, m := range result.Messages {
+				if m.Role == model.RoleUser {
+					filterUser = true
+					break
 				}
 			}
 			currentTurn := extractCurrentTurnMessages(args.Request.Messages, filterUser)
@@ -336,6 +332,19 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		})
 	}
 
+	// Callback 0.4: live task board (D6). Renders currently-active async tasks
+	// fresh from the registry and injects them just before the current input —
+	// a recency anchor of async state that never enters projection/history, so
+	// it does NOT participate in compression. Skipped when no tasks are active.
+	if cm.taskController != nil {
+		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			if board := renderTaskBoard(cm.taskController.List()); board != "" {
+				args.Request.Messages = injectTaskBoard(args.Request.Messages, board)
+			}
+			return nil, nil
+		})
+	}
+
 	// Callback 0.5: BeforeLLM diagnostic log — print messages after compression.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		log.Debugf("[BeforeLLM] messages:\n%s", formatMessages(args.Request.Messages))
@@ -351,6 +360,11 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		llmagent.WithModel(cfg.Model),
 		llmagent.WithModelCallbacks(cb),
 		llmagent.WithMaxToolIterations(maxIters),
+		// Parallel tool execution: a single turn's multiple tool_calls run
+		// concurrently. Required by the async task model so parallel command
+		// spawns each wait their own sync-wait window (blocking ≈ max, not sum;
+		// D2). Safe here because tagent's tools are stateless / mutex-guarded.
+		llmagent.WithEnableParallelTools(true),
 	}
 	if cfg.SystemPrompt != "" {
 		agentOpts = append(agentOpts, llmagent.WithInstruction(cfg.SystemPrompt))
@@ -515,6 +529,11 @@ func truncateForLog(s string, maxLen int) string {
 // Final responses are echoed back to the EventBus as agent_output events
 // (filtered by BuildInvocation to prevent self-triggering).
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
+	// Inject the task spawner so tools can delegate long-running work to the
+	// task layer (sync-wait window → inline or ack). Absent → synchronous.
+	if cm.taskController != nil {
+		ctx = WithTaskSpawner(ctx, cm.taskController)
+	}
 	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		return fmt.Errorf("runner.Run: %w", err)

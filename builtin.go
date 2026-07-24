@@ -80,8 +80,28 @@ func parseMonitorConfig(raw any) *action.MonitorConfig {
 			cfg.FakeDeadDuration = d
 		}
 	}
+	// Adaptive poll schedule (optional).
+	if v, ok := m["dense_interval"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.DenseInterval = d
+		}
+	}
+	if v, ok := m["dense_duration"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.DenseDuration = d
+		}
+	}
+	if v, ok := m["max_interval"].(string); ok && v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.MaxInterval = d
+		}
+	}
+	if v, ok := m["backoff_factor"].(float64); ok && v >= 1 {
+		cfg.BackoffFactor = v
+	}
 	// If no fields set, return nil to use defaults
-	if cfg.Interval == 0 && cfg.StableDuration == 0 && cfg.FakeDeadDuration == 0 {
+	if cfg.Interval == 0 && cfg.StableDuration == 0 && cfg.FakeDeadDuration == 0 &&
+		cfg.DenseInterval == 0 && cfg.DenseDuration == 0 && cfg.MaxInterval == 0 && cfg.BackoffFactor == 0 {
 		return nil
 	}
 	return cfg

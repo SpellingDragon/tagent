@@ -35,9 +35,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/prompt"
+	"github.com/SpellingDragon/tagent/rl"
 )
 
 // Closer is implemented by components that hold resources requiring cleanup
@@ -71,6 +71,11 @@ type TagentAgent struct {
 	// the persistent AgentLoop started via StartLoop.
 	persistentBus  *EventBus
 	contextManager *ContextManager
+
+	// taskManager owns async task lifecycle. Tools spawn via the injected
+	// TaskSpawner; background settles are published back to persistentBus as
+	// task_settled events by its OnSettle hook.
+	taskManager *TaskManager
 
 	// Framework integration
 	memStore   memory.MemoryStore
@@ -258,6 +263,17 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	bus := NewEventBus()
 	projection := NewSessionProjection()
 
+	// Task layer: tools spawn long-running work via the injected TaskSpawner;
+	// when a task settles in the background (after its sync-wait window), the
+	// OnSettle hook publishes a task_settled event onto the bus, which the
+	// persistent loop reclaims into a new turn (idle → wakes Pull; mid-turn →
+	// buffered until the current turn finishes — single-consumer queueing).
+	taskManager := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(task *Task, sig SettleSignal) {
+			bus.Publish(newTaskSettledEvent(task, sig))
+		},
+	})
+
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
 	// uses it to forward user message events into the projection + outputCh.
 	var onEventRef func(evt *event.Event)
@@ -328,6 +344,8 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	onEventRef = onEvent // Wire the hook's callback.
 	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	ta.contextManager = cm
+	ta.taskManager = taskManager
+	cm.taskController = taskManager
 
 	// Initialize meditation manager if enabled.
 	if cfg.Meditation.Enabled {

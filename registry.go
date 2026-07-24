@@ -13,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/SpellingDragon/tagent/tool/recall"
+	"github.com/SpellingDragon/tagent/tool/task"
 )
 
 // ToolRegistry is a facade over the agent package's global tool registration maps.
@@ -74,6 +75,10 @@ func RegisterBuiltinTools() error {
 
 		// recall sub-tools (4 plain tools)
 		recall.RegisterSubTools()
+
+		// task sub-tools (4 plain tools): list_tasks, get_task_result,
+		// cancel_task, relaunch_task
+		task.RegisterSubTools()
 	})
 	return nil
 }

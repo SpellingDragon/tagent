@@ -93,8 +93,9 @@ func (m *MeditationManager) Stop() {
 	log.Info("[Meditation] manager stopped")
 }
 
-// UpdateLastEventTime records the timestamp of the most recent event.
-// Called by TagentAgent on InjectMessage and on event forwarding in loop().
+// UpdateLastEventTime records the timestamp of the most recent agent OUTPUT
+// (final response). Idle-detection is anchored on agent output — not injected
+// inputs — so meditation fires only after MinGap with no agent activity.
 func (m *MeditationManager) UpdateLastEventTime(t time.Time) {
 	m.lastEventTime.Store(t.UnixMilli())
 }
@@ -126,8 +127,11 @@ func (m *MeditationManager) checkAndMeditate() {
 	msg := m.buildMeditationMessage(now)
 	m.injector.InjectMessageWithSource("meditation", msg)
 	m.lastMeditation.Store(now.UnixMilli())
+	// Reset the idle clock on firing so we don't re-meditate every check
+	// interval before the resulting turn produces output (which also resets it).
+	m.lastEventTime.Store(now.UnixMilli())
 
-	log.Infof("[Meditation] triggered: gap=%s since last event", gap)
+	log.Infof("[Meditation] triggered: gap=%s since last agent output", gap)
 }
 
 // buildMeditationMessage constructs the meditation external_input message.

@@ -116,6 +116,17 @@ type AgentToolWrapper struct {
 	eventParams      []string           // Which event-derived params to declare (e.g., "event_key")
 	parentStore      memory.MemoryStore // Parent agent's MemStore for resolving event_key
 	parentProjection *SessionProjection // Parent agent's projection for auto-inject fallback
+
+	// asyncDisabled forces synchronous execution even when a task spawner is
+	// available in the invocation context. Default (false) = async-by-default:
+	// long sub-agent runs that exceed the sync-wait window return an ack and
+	// settle later via task_settled. The fallback switch is retained per spec.
+	asyncDisabled bool
+
+	// asyncDenseDuration overrides the dense phase for the sub-agent task's
+	// detector (0 → detector default ≈ 10s). The dense→sparse boundary is the
+	// sync→async ack point; mainly used by tests to control inline vs ack.
+	asyncDenseDuration time.Duration
 }
 
 // autoInjectMaxEvents is the maximum number of recent events to auto-inject
@@ -146,6 +157,19 @@ func NewAgentToolWrapper(
 // autoInjectMaxEvents EventKeys from the parent projection.
 func (w *AgentToolWrapper) SetParentProjection(p *SessionProjection) {
 	w.parentProjection = p
+}
+
+// SetAsyncDisabled forces this sub-agent to always run synchronously (the
+// fallback switch). By default sub-agent calls are async when a task spawner is
+// present in the invocation context.
+func (w *AgentToolWrapper) SetAsyncDisabled(disabled bool) {
+	w.asyncDisabled = disabled
+}
+
+// SetAsyncDenseDuration overrides the dense phase for sub-agent async spawning
+// (0 → detector default). Runs shorter than this settle inline; longer ones ack.
+func (w *AgentToolWrapper) SetAsyncDenseDuration(d time.Duration) {
+	w.asyncDenseDuration = d
 }
 
 // SetDescriptionSource sets a hot-reloadable prompt source for the tool description.
@@ -300,12 +324,50 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		agent.WithInvocationRunOptions(runOpts),
 	)
 
-	// === Run sub-agent with timeout + retry ===
+	// Async path: when a task spawner is present (parent's RunFlow injected it)
+	// and async is not disabled, run the sub-agent as a task. Its settle = the
+	// run's final output. Short runs settle within the sync-wait window and
+	// return inline (equivalent to the prior synchronous behavior); long runs
+	// return an ack and emit task_settled when the run returns. The run uses a
+	// detached context so it can outlive the parent turn (cancel via the task).
+	if spawner, ok := TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
+		detector := NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+			return w.runAndCollect(runCtx, inv, agentName)
+		}, w.asyncDenseDuration)
+		res := spawner.Spawn(TaskSpec{
+			Kind:     "subagent",
+			Desc:     agentName + ": " + truncate(request, 60),
+			Key:      agentName + ":" + request,
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
+		}, detector)
+		if res.Settled {
+			if res.Signal.Err != nil {
+				return nil, fmt.Errorf("agent tool %q: run failed: %w", agentName, res.Signal.Err)
+			}
+			return res.Signal.Output, nil
+		}
+		return fmt.Sprintf("子 agent %q 已在后台运行 (task %s)；完成后其结果会作为 task_settled 回写，你也可用 get_task_result 查询。",
+			agentName, res.Task.ID), nil
+	}
+
+	// Synchronous fallback (no spawner / async disabled): current behavior.
+	out, err := w.runAndCollect(ctx, inv, agentName)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// runAndCollect runs the sub-agent for the given invocation and collects its
+// final output from the event stream. Shared by the synchronous path and the
+// async task detector. Isolation is preserved by Run (fresh bus/CM/projection
+// per invocation), so this is safe to run concurrently / in a background task.
+func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	startTime := time.Now()
 
 	eventCh, err := w.runWithTimeoutAndRetry(ctx, inv, agentName)
 	if err != nil {
-		return nil, fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
+		return "", fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
 	}
 
 	// Collect the final output from the sub-agent
@@ -344,6 +406,22 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	}
 
 	return finalOutput, nil
+}
+
+// subagentRelaunch returns a closure that re-runs the sub-agent with the same
+// invocation (used by relaunch_task). The re-spawned task is itself relaunchable.
+func (w *AgentToolWrapper) subagentRelaunch(spawner TaskSpawner, inv *agent.Invocation, agentName, request string) func() (SpawnResult, error) {
+	return func() (SpawnResult, error) {
+		detector := NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+			return w.runAndCollect(runCtx, inv, agentName)
+		}, w.asyncDenseDuration)
+		return spawner.Spawn(TaskSpec{
+			Kind:     "subagent",
+			Desc:     agentName + ": " + truncate(request, 60),
+			Key:      agentName + ":" + request,
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
+		}, detector), nil
+	}
 }
 
 // runWithTimeoutAndRetry wraps agent.Run with a context timeout and,

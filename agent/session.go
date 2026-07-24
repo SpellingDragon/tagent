@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -95,7 +96,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invCfg.Name = ta.name
 	}
 	invCM := newContextManagerFromConfig(&invCfg, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
-	invCM.SetSubAgentMode(true)
 	invCM.SetUserIDSessionID(ta.lastUserID, sessionID)
 
 	// Sub-agent invocation semantics: a tool call is request-response — one
@@ -109,6 +109,16 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// (runEventLoop); the only difference is the persistent loop wraps it in
 	// `for { Pull; RunFlow }` while a sub-agent calls it exactly once.
 	invCM.SetTriggerSource("user")
+
+	// Persist the driving request into the projection BEFORE RunFlow so it
+	// becomes the first entry in the timeline (right after system), matching
+	// the persistent-loop ordering. Without this the request stays as the
+	// framework's unprefixed invocation seed and extractCurrentTurnMessages
+	// appends it AFTER the accumulating ReAct history — burying it at the end.
+	// filterUser then drops the framework's re-inserted unprefixed duplicate.
+	if message.Content != "" {
+		invCM.persistBusEvent(NewExternalInputEvent("user", message))
+	}
 	go func() {
 		defer close(invOutputCh)        // signals turn end to the caller
 		defer invCM.Close()             // release temporary Runner resources
@@ -232,6 +242,15 @@ func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *Session
 			if ref, ok := BuildEventReference(evt); ok {
 				projection.Append(ref)
 			}
+		}
+
+		// Anchor meditation idle-detection on actual agent OUTPUT: only a final
+		// agent response counts as activity. "Idle" then means "no agent output
+		// for MinGap", so meditation never fires while the agent is actively
+		// producing turns (e.g. reclaiming background task_settled events), and
+		// is not spuriously reset by injected inputs.
+		if ta.meditationMgr != nil && isFinalResponse(evt) {
+			ta.meditationMgr.UpdateLastEventTime(time.Now())
 		}
 	}
 }
