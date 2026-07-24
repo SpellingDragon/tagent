@@ -695,7 +695,9 @@ func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, e
 }
 ```
 
-### 8.6 ActionTool 的 MessageInjector 机制
+### 8.6 ActionTool 的 MessageInjector 机制（已废弃）
+
+> ⚠️ **已过时**：此 `MessageInjector`/`handleStateChange` 机制已随 ActionTool 的**无状态重写**移除。当前 ActionTool 不再持有 injector/waiter，而是经调用上下文的 `TaskSpawner`（`TaskSpawnerFromContext`）接入**异步任务层**：状态变更由 `TmuxMonitor` 的按会话回调驱动 `TmuxSettleDetector`，dense 阶段内 settle → 内联返回、越界 → ack 并经 `task_settled` 事件回收 turn。详见 `agent-architecture.md` §2.10 任务层。以下代码块仅为历史留存。
 
 ActionTool 通过 `MessageInjector` 接口闭环处理 tmux 状态变更通知：
 
@@ -1915,7 +1917,9 @@ func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, e
 }
 ```
 
-### 8.5 ActionTool 的 MessageInjector 机制
+### 8.5 ActionTool 的 MessageInjector 机制（已废弃）
+
+> ⚠️ **已过时**：此 `MessageInjector`/`handleStateChange` 机制已随 ActionTool 的**无状态重写**移除。当前 ActionTool 经调用上下文的 `TaskSpawner` 接入**异步任务层**（settle-or-detach + task_settled 回收 turn），不再自行注入状态变更消息。详见 `agent-architecture.md` §2.10 任务层。以下代码块仅为历史留存。
 
 ActionTool 通过 `MessageInjector` 接口闭环处理 tmux 状态变更通知，
 不需要外部（如 tagent.go）参与格式化和注入逻辑：

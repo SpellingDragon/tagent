@@ -9,6 +9,7 @@ graph TD
     User["用户 / 外部输入"] -->|InjectMessage| Bus[EventBus<br/>persistentBus]
     Tool["工具回调"] -->|Publish| Bus
     SubAgent["子 Agent 结果"] -->|Publish| Bus
+    Task["后台任务 settle<br/>(TaskManager)"] -->|task_settled Publish| Bus
 
     Bus -->|Pull 批量拉取| EL[runEventLoop]
     EL -->|① BuildInvocation| Msg[model.Message 合并]
@@ -20,6 +21,8 @@ graph TD
 
     OutCh -.->|isFinalResponse| Bus
 ```
+
+> **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。详见 `agent-architecture.md` §2.10 任务层。
 
 ## 二、Runner 内部流转
 

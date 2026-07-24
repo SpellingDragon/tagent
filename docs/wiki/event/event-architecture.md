@@ -57,7 +57,7 @@ graph TB
 ```go
 // event/types.go:18-44
 const (
-    // 所有外部输入（用户消息、API 调用、系统注入消息）
+    // 所有外部输入（用户消息、API 调用、系统注入消息、后台任务结算 task_settled）
     TypeExternalInput   = "external_input"
 
     // Agent 最终回复
