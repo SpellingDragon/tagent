@@ -169,7 +169,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 	}
 
-	loader := prompt.NewLoader(cfg.PromptDir)
+	// Loader reads prompts from cfg.PromptDir on disk, falling back to the
+	// framework's embedded default prompts for anything not overridden there.
+	loader := prompt.NewLoader(cfg.PromptDir, prompt.WithFallback(defaultPromptsFS, DefaultPromptsPrefix))
 
 	// Pre-create all agents (topological order handled by agent refs)
 	// We use a cache to avoid creating the same agent twice.

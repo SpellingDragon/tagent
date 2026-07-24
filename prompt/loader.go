@@ -3,10 +3,13 @@ package prompt
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // CompositeConfig describes how to load a prompt in bootstrap style.
@@ -29,13 +32,39 @@ func (pc CompositeConfig) IsEmpty() bool {
 type Loader struct {
 	// BaseDir is the base directory for relative paths.
 	BaseDir string
+
+	// fallbackFS, when set, supplies embedded default prompts resolved when a
+	// file/dir is absent under BaseDir on disk. Disk always takes precedence.
+	fallbackFS fs.FS
+	// fallbackPrefix is the path prefix under which prompts live in fallbackFS
+	// (e.g. "resources/prompts"), forward-slash separated.
+	fallbackPrefix string
 }
 
-// NewLoader creates a new prompt loader.
-func NewLoader(baseDir string) *Loader {
-	return &Loader{
+// LoaderOption configures a Loader.
+type LoaderOption func(*Loader)
+
+// WithFallback sets an embedded prompt FS used when a prompt file/dir is not
+// found on disk under BaseDir. prefix is the path under which prompts live in
+// fsys (e.g. "resources/prompts"). Disk entries always override the fallback.
+func WithFallback(fsys fs.FS, prefix string) LoaderOption {
+	return func(l *Loader) {
+		l.fallbackFS = fsys
+		l.fallbackPrefix = strings.Trim(prefix, "/")
+	}
+}
+
+// NewLoader creates a new prompt loader. Pass WithFallback to enable resolving
+// missing prompts from an embedded default FS; with no options the loader reads
+// only from BaseDir on disk (unchanged behavior).
+func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
+	l := &Loader{
 		BaseDir: baseDir,
 	}
+	for _, opt := range opts {
+		opt(l)
+	}
+	return l
 }
 
 // LoadFromFile loads a single prompt file.
@@ -44,6 +73,8 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("prompt file path is empty")
 	}
+
+	orig := path // preserve original for embedded fallback lookup by base name
 
 	// If path is relative, resolve against BaseDir
 	if !filepath.IsAbs(path) && l.BaseDir != "" {
@@ -57,6 +88,11 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// Fall back to the embedded framework defaults when the disk file is
+		// absent and a fallback FS is configured (disk always takes precedence).
+		if content, ok := l.fallbackFile(orig, err); ok {
+			return content, nil
+		}
 		// Return original error (os.ErrNotExist etc.)
 		return "", fmt.Errorf("read prompt file %s: %w", path, err)
 	}
@@ -69,6 +105,62 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 	return content, nil
 }
 
+// fallbackFile resolves a prompt by base name from the embedded fallback FS when
+// the disk read failed with not-exist and a fallback is configured. Absolute
+// paths never fall back. Returns (content, true) on a hit.
+func (l *Loader) fallbackFile(orig string, diskErr error) (string, bool) {
+	if l.fallbackFS == nil || filepath.IsAbs(orig) || !errors.Is(diskErr, os.ErrNotExist) {
+		return "", false
+	}
+	full := l.fallbackPrefix + "/" + filepath.Base(orig)
+	data, ferr := fs.ReadFile(l.fallbackFS, full)
+	if ferr != nil {
+		return "", false
+	}
+	log.Debugf("[prompt] %q absent on disk; using embedded default %q", orig, full)
+	return strings.TrimSpace(string(data)), true
+}
+
+// fallbackDir scans the embedded fallback dir of the same base name when the
+// disk dir is absent and a fallback is configured. Returns concatenated .md
+// contents (sorted) and true on a hit. No per-file merge with disk.
+func (l *Loader) fallbackDir(orig string, diskErr error) (string, bool) {
+	if l.fallbackFS == nil || filepath.IsAbs(orig) || !errors.Is(diskErr, os.ErrNotExist) {
+		return "", false
+	}
+	sub := l.fallbackPrefix + "/" + filepath.Base(orig)
+	entries, ferr := fs.ReadDir(l.fallbackFS, sub)
+	if ferr != nil {
+		return "", false
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || strings.ToLower(filepath.Ext(e.Name())) != ".md" {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		data, e := fs.ReadFile(l.fallbackFS, sub+"/"+n)
+		if e != nil {
+			continue
+		}
+		if c := strings.TrimSpace(string(data)); c != "" {
+			parts = append(parts, c)
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	log.Debugf("[prompt] dir %q absent on disk; using embedded %q", orig, sub)
+	return strings.Join(parts, "\n\n"), true
+}
+
 // LoadFromDir loads all .md prompt files from a directory.
 // Files are sorted alphabetically for deterministic order.
 // Subdirectories are skipped.
@@ -76,6 +168,8 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 	if dir == "" {
 		return "", errors.New("prompt directory path is empty")
 	}
+
+	orig := dir // preserve original for embedded fallback lookup by base name
 
 	// If path is relative, resolve against BaseDir
 	if !filepath.IsAbs(dir) && l.BaseDir != "" {
@@ -89,6 +183,11 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// Whole-directory fallback: if the disk dir is absent, scan the embedded
+		// default dir of the same base name (no per-file merge).
+		if content, ok := l.fallbackDir(orig, err); ok {
+			return content, nil
+		}
 		return "", fmt.Errorf("read prompt directory %s: %w", dir, err)
 	}
 
