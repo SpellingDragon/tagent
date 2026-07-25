@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"strconv"
 	"strings"
 	"time"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -382,7 +382,7 @@ func (sc *SmartCompressor) Compress(
 				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary)
 				if archiveErr == nil {
 					result = append(result, model.NewSystemMessage(
-						fmt.Sprintf("[context_archive] evt_%d 已摘要归档，摘要 key=%d", segEventKey, summaryKey),
+						fmt.Sprintf("[context_archive] evt_%s 已摘要归档，摘要 key=%s", tagentevent.FormatEventKey(segEventKey), tagentevent.FormatEventKey(summaryKey)),
 					))
 				} else {
 					log.Warnf("[SmartCompress] archive failed for segment %d: %v", p.origIndex, archiveErr)
@@ -681,7 +681,7 @@ func parseEventKeyAndType(content string) (key int64, eventType string, remainde
 	}
 	keyStr := inner[:barPos]
 	eventType = inner[barPos+1:]
-	k, err := strconv.ParseInt(keyStr, 10, 64)
+	k, err := tagentevent.ParseEventKey(keyStr)
 	if err != nil {
 		return 0, "unknown", content
 	}
@@ -707,7 +707,7 @@ func (sc *SmartCompressor) buildCompressEvent(
 	if len(infos) > 0 {
 		content.WriteString("\n")
 		for _, info := range infos {
-			content.WriteString(fmt.Sprintf("\n- evt_%d [%s]: %s", info.Key, info.Type, info.Summary))
+			content.WriteString(fmt.Sprintf("\n- evt_%s [%s]: %s", tagentevent.FormatEventKey(info.Key), info.Type, info.Summary))
 		}
 		content.WriteString("\n\n使用 recall 工具检索对应 key 获取完整内容。")
 	} else {
@@ -778,7 +778,7 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 	if len(infos) > 0 {
 		content.WriteString("\n")
 		for _, info := range infos {
-			content.WriteString(fmt.Sprintf("\n- evt_%d [%s]: %s", info.Key, info.Type, info.Summary))
+			content.WriteString(fmt.Sprintf("\n- evt_%s [%s]: %s", tagentevent.FormatEventKey(info.Key), info.Type, info.Summary))
 		}
 		if len(execMsgs) > len(infos) {
 			content.WriteString(fmt.Sprintf("\n... 还有 %d 条执行消息被压缩", len(execMsgs)-len(infos)))
@@ -944,6 +944,26 @@ func roleLabel(role model.Role) string {
 	}
 }
 
+// buildBatchSummaryPrompt builds the engineering-requirements header for one
+// LLM summarization batch. Requirement 3 (keep correlation identifiers: task
+// id / tool_id / tool name) preserves the content-level linkage between later
+// notifications/results and their originating calls after compression
+// (unified-event-projection D7).
+func buildBatchSummaryPrompt(segmentCount, batchIndex, totalBatches, targetChars, inputChars int) string {
+	return fmt.Sprintf(
+		"请对以下 %d 个历史对话片段生成摘要。这是第 %d/%d 批。\n\n"+
+			"工程要求：\n"+
+			"1. 保留关键语义、用户意图、执行操作和最终结果\n"+
+			"2. 保留工具调用的成功/失败状态和关键返回值（如文件路径、命令输出摘要）\n"+
+			"3. 保留关联标识文本：task id、tool_id、工具名——后续通知/结果需要靠它们与历史调用建立内容关联\n"+
+			"4. 摘要目标长度：约 %d 字符（原始内容 %d 字符，压缩比 %.1fx）\n"+
+			"5. 超出目标长度的部分必须省略，不可溢出\n"+
+			"6. 使用简洁的要点式表达\n\n",
+		segmentCount, batchIndex, totalBatches,
+		targetChars, inputChars, float64(inputChars)/float64(targetChars),
+	)
+}
+
 // splitSystemMessage separates the system message from the rest.
 func splitSystemMessage(messages []model.Message) (*model.Message, []model.Message) {
 	if len(messages) == 0 {
@@ -1026,17 +1046,7 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 
 	// Build prompt with explicit engineering target
 	var promptBuilder strings.Builder
-	promptBuilder.WriteString(fmt.Sprintf(
-		"请对以下 %d 个历史对话片段生成摘要。这是第 %d/%d 批。\n\n"+
-			"工程要求：\n"+
-			"1. 保留关键语义、用户意图、执行操作和最终结果\n"+
-			"2. 保留工具调用的成功/失败状态和关键返回值（如文件路径、命令输出摘要）\n"+
-			"3. 摘要目标长度：约 %d 字符（原始内容 %d 字符，压缩比 %.1fx）\n"+
-			"4. 超出目标长度的部分必须省略，不可溢出\n"+
-			"5. 使用简洁的要点式表达\n\n",
-		len(segments), batchIndex, totalBatches,
-		targetChars, inputChars, float64(inputChars)/float64(targetChars),
-	))
+	promptBuilder.WriteString(buildBatchSummaryPrompt(len(segments), batchIndex, totalBatches, targetChars, inputChars))
 	promptBuilder.WriteString(contentBuilder.String())
 	promptBuilder.WriteString("\n--- 摘要 ---")
 

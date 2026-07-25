@@ -111,35 +111,6 @@ func TestExtractRootMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "skip agent_output and error sources",
-			events: []*AgentEvent{
-				{
-					Type:   "external_input",
-					Source: "user",
-					Metadata: map[string]any{
-						"chat_id": "user-123",
-					},
-				},
-				{
-					Type:   "external_input",
-					Source: "agent_output",
-					Metadata: map[string]any{
-						"chat_id": "should-be-ignored",
-					},
-				},
-				{
-					Type:   "external_input",
-					Source: "error",
-					Metadata: map[string]any{
-						"chat_id": "also-ignored",
-					},
-				},
-			},
-			expected: map[string]string{
-				"chat_id": "user-123",
-			},
-		},
-		{
 			name: "skip non-external_input events",
 			events: []*AgentEvent{
 				{
@@ -197,9 +168,6 @@ func TestOnEventCallback_PropagatesMetadata(t *testing.T) {
 		},
 	}
 
-	// Create projection
-	projection := NewSessionProjection()
-
 	// Create a TagentAgent with the ContextManager
 	ta := &TagentAgent{
 		name:           "test-agent",
@@ -207,7 +175,7 @@ func TestOnEventCallback_PropagatesMetadata(t *testing.T) {
 	}
 
 	// Create the callback
-	callback := ta.makeOnEventCallback("session-1", projection)
+	callback := ta.makeOnEventCallback()
 
 	// Create an event (simulating what the framework would produce)
 	evt := &event.Event{
@@ -233,13 +201,12 @@ func TestOnEventCallback_NoMetadata(t *testing.T) {
 		currentMetadata: nil,
 	}
 
-	projection := NewSessionProjection()
 	ta := &TagentAgent{
 		name:           "test-agent",
 		contextManager: cm,
 	}
 
-	callback := ta.makeOnEventCallback("session-1", projection)
+	callback := ta.makeOnEventCallback()
 
 	evt := &event.Event{
 		Author:     "test-agent",
@@ -262,13 +229,12 @@ func TestOnEventCallback_AlreadyPrefixedMetadata(t *testing.T) {
 		},
 	}
 
-	projection := NewSessionProjection()
 	ta := &TagentAgent{
 		name:           "test-agent",
 		contextManager: cm,
 	}
 
-	callback := ta.makeOnEventCallback("session-1", projection)
+	callback := ta.makeOnEventCallback()
 
 	evt := &event.Event{}
 	callback(evt)

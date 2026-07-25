@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -85,7 +86,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 
 	invOutputCh := make(chan *event.Event, 100)
 	invProjection := NewSessionProjection()
-	invOnEvent := ta.makeOnEventCallback(sessionID, invProjection)
+	invOnEvent := ta.makeOnEventCallback()
 	maxToolIters := ta.config.MaxToolIterations
 	if maxToolIters <= 0 {
 		maxToolIters = DefaultSubAgentMaxToolIterations
@@ -110,15 +111,9 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	// `for { Pull; RunFlow }` while a sub-agent calls it exactly once.
 	invCM.SetTriggerSource("user")
 
-	// Persist the driving request into the projection BEFORE RunFlow so it
-	// becomes the first entry in the timeline (right after system), matching
-	// the persistent-loop ordering. Without this the request stays as the
-	// framework's unprefixed invocation seed and extractCurrentTurnMessages
-	// appends it AFTER the accumulating ReAct history — burying it at the end.
-	// filterUser then drops the framework's re-inserted unprefixed duplicate.
-	if message.Content != "" {
-		invCM.persistBusEvent(NewExternalInputEvent("user", message))
-	}
+	// The driving request enters the projection via the event-plugin pipeline
+	// (runner appendIncomingMessage → MemoryPlugin → ProjectionSink bound by
+	// RunFlow), synchronously before the flow starts — first in the timeline.
 	go func() {
 		defer close(invOutputCh)        // signals turn end to the caller
 		defer invCM.Close()             // release temporary Runner resources
@@ -213,10 +208,12 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 }
 
 // makeOnEventCallback creates the onEvent callback for StartLoop and Run().
-// It performs two tasks:
-// 1. Append EventReference to the projection
-// 2. Propagate currentMetadata from ContextManager to event.StateDelta with "meta_" prefix
-func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *SessionProjection) func(evt *event.Event) {
+// It is a pure DELIVERY-side callback (unified-event-projection D1): projection
+// writes happen in the event-plugin pipeline (MemoryPlugin → ProjectionSink),
+// not here. This callback only:
+// 1. Propagates currentMetadata from ContextManager to event.StateDelta ("meta_" prefix)
+// 2. Anchors meditation idle-detection on final agent output
+func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 	return func(evt *event.Event) {
 		if evt == nil {
 			return
@@ -230,25 +227,11 @@ func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *Session
 				}
 				for k, v := range md {
 					key := k
-					if !strings.HasPrefix(key, "meta_") {
-						key = "meta_" + key
+					if !strings.HasPrefix(key, tagentevent.MetaPrefix) {
+						key = tagentevent.MetaPrefix + key
 					}
 					evt.StateDelta[key] = []byte(v)
 				}
-			}
-		}
-		// Append to projection
-		if projection != nil {
-			if ref, ok := BuildEventReference(evt); ok {
-				// Source-tracing (conversation-self-heal Phase 0.2): log the
-				// framework event ID alongside the event_key at the persistence
-				// boundary. If a duplicate event_key ever recurs, correlating
-				// evt.ID discriminates the root cause: same evt.ID = framework
-				// re-delivered one event on eventCh; different evt.ID + same key
-				// = MemoryPlugin assigned a colliding key to two distinct events.
-				log.Debugf("[onEvent] persist: evt_id=%s key=%d role=%s type=%s",
-					evt.ID, ref.EventKey, ref.Role, ref.EventType)
-				projection.Append(ref)
 			}
 		}
 
@@ -256,9 +239,13 @@ func (ta *TagentAgent) makeOnEventCallback(sessionID string, projection *Session
 		// agent response counts as activity. "Idle" then means "no agent output
 		// for MinGap", so meditation never fires while the agent is actively
 		// producing turns (e.g. reclaiming background task_settled events), and
-		// is not spuriously reset by injected inputs.
+		// is not spuriously reset by injected inputs. A meditation's OWN final
+		// output is excluded — counting it would re-arm the idle gate and keep
+		// meditation firing forever during silence (self-feeding loop).
 		if ta.meditationMgr != nil && isFinalResponse(evt) {
-			ta.meditationMgr.UpdateLastEventTime(time.Now())
+			if string(evt.StateDelta[tagentevent.MetaKeyTriggerSource]) != "meditation" {
+				ta.meditationMgr.UpdateLastEventTime(time.Now())
+			}
 		}
 	}
 }

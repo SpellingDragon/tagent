@@ -234,3 +234,155 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatalf("condition not met within %s", timeout)
 }
+
+// ============================================================================
+// Exited-task pruning + resource reclaim (async-result-delivery)
+// ============================================================================
+
+// terminalTask builds a task already in a terminal state with the given
+// settledAt, wired to a spy detector so prune-time resource reclaim is testable.
+func terminalTask(id string, status TaskStatus, settledAt time.Time, d *manualDetector) *Task {
+	return &Task{ID: id, Spec: TaskSpec{Desc: id}, status: status, settledAt: settledAt, detector: d}
+}
+
+// TestPruneTerminal_RemovesExitedAndReclaims: an exited task past its grace TTL
+// is removed AND its detector.Cancel() is invoked (resource reclaim), while a
+// live task is kept and never cancelled.
+func TestPruneTerminal_RemovesExitedAndReclaims(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
+	base := time.Now()
+	dc := newManualDetector() // completed victim
+	dl := newManualDetector() // live, keep
+	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, dc)
+	tm.tasks["r1"] = &Task{ID: "r1", Spec: TaskSpec{Desc: "r1"}, status: TaskRunning, detector: dl}
+
+	tm.now = func() time.Time { return base.Add(2 * time.Minute) } // past grace
+	tm.pruneTerminal()
+
+	if _, ok := tm.Get("c1"); ok {
+		t.Error("exited task past grace must be pruned")
+	}
+	if !dc.cancelled() {
+		t.Error("pruned task's detector.Cancel() must be called (session resource reclaim)")
+	}
+	if _, ok := tm.Get("r1"); !ok {
+		t.Error("live task must be kept")
+	}
+	if dl.cancelled() {
+		t.Error("live task must NOT be cancelled")
+	}
+}
+
+// TestPruneTerminal_KeepsAliveDetached: alive_detached (a living service) is
+// never pruned by TTL regardless of elapsed time — only cancel/death ends it.
+func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
+	base := time.Now()
+	d := newManualDetector()
+	tm.tasks["s1"] = terminalTask("s1", TaskAliveDetached, base, d)
+
+	tm.now = func() time.Time { return base.Add(time.Hour) }
+	tm.pruneTerminal()
+
+	if _, ok := tm.Get("s1"); !ok {
+		t.Error("alive_detached (live service) must be kept")
+	}
+	if d.cancelled() {
+		t.Error("alive_detached must NOT be cancelled by prune")
+	}
+}
+
+// TestPruneTerminal_KeepsWithinGrace: an exited task still within its grace TTL
+// is retained so the reclaim turn's get_task_result works.
+func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
+	base := time.Now()
+	d := newManualDetector()
+	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+
+	tm.now = func() time.Time { return base.Add(10 * time.Second) } // within grace
+	tm.pruneTerminal()
+
+	if _, ok := tm.Get("c1"); !ok {
+		t.Error("exited task within grace must be retained (get_task_result window)")
+	}
+	if d.cancelled() {
+		t.Error("within-grace task must not be cancelled yet")
+	}
+}
+
+// TestList_PrunesExited: List() is a prune trigger and reclaims resources.
+func TestList_PrunesExited(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
+	base := time.Now()
+	d := newManualDetector()
+	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+
+	tm.now = func() time.Time { return base.Add(2 * time.Minute) }
+	if got := tm.List(); len(got) != 0 {
+		t.Errorf("List should prune exited tasks, got %d", len(got))
+	}
+	if !d.cancelled() {
+		t.Error("List-triggered prune must reclaim resources")
+	}
+}
+
+// TestPruneTerminal_Idempotent: pruning twice is safe (victim already gone; the
+// detector Cancel is idempotent).
+func TestPruneTerminal_Idempotent(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
+	base := time.Now()
+	d := newManualDetector()
+	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+
+	tm.now = func() time.Time { return base.Add(time.Hour) }
+	tm.pruneTerminal()
+	tm.pruneTerminal() // must not panic
+	if _, ok := tm.Get("c1"); ok {
+		t.Error("task should remain pruned")
+	}
+}
+
+// ============================================================================
+// spawn-time origin baggage capture (async-result-delivery)
+// ============================================================================
+
+// TestOriginSpawner_StampsBaggage: the wrapper stamps its origin baggage onto a
+// spawned task whose spec had no Origin — tools stay oblivious (裸调 Spawn).
+func TestOriginSpawner_StampsBaggage(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{})
+	sp := &originSpawner{TaskController: tm, origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}
+	d := newManualDetectorDetach(10 * time.Millisecond)
+	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x"}, d)
+	if res.Task == nil {
+		t.Fatal("no task returned")
+	}
+	if res.Task.Spec.Origin["chat_id"] != "u1" {
+		t.Errorf("origin chat_id not stamped: %v", res.Task.Spec.Origin)
+	}
+}
+
+// TestOriginSpawner_DoesNotOverrideExplicit: an explicit spec.Origin is kept.
+func TestOriginSpawner_DoesNotOverrideExplicit(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{})
+	sp := &originSpawner{TaskController: tm, origin: map[string]string{"chat_id": "wrapper"}}
+	d := newManualDetectorDetach(10 * time.Millisecond)
+	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x", Origin: map[string]string{"chat_id": "explicit"}}, d)
+	if res.Task.Spec.Origin["chat_id"] != "explicit" {
+		t.Errorf("explicit Origin must not be overridden, got %v", res.Task.Spec.Origin)
+	}
+}
+
+// TestOriginSpawner_CopyIsolation: the stamped Origin is a copy — mutating it
+// does not affect the wrapper's source snapshot (baggage is decoupled).
+func TestOriginSpawner_CopyIsolation(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{})
+	src := map[string]string{"chat_id": "u1"}
+	sp := &originSpawner{TaskController: tm, origin: src}
+	d := newManualDetectorDetach(10 * time.Millisecond)
+	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x"}, d)
+	res.Task.Spec.Origin["chat_id"] = "mutated"
+	if src["chat_id"] != "u1" {
+		t.Error("stamped Origin must be a copy, not the source map")
+	}
+}

@@ -57,6 +57,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// RunFlow with exponential backoff retry
 		var lastErr error
 		retried := false
+		retriedDegenerate := false
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			if attempt > 0 {
 				// Check ctx before retrying
@@ -87,6 +88,14 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries: %v", ta.name, maxRetries, lastErr)
 			} else {
 				lastErr = nil
+				// A degenerate turn (no tool call, empty final) is an occasional
+				// model hiccup that would otherwise stall the conversation until
+				// the next external event — retry it exactly once.
+				if cm.LastTurnDegenerate() && !retriedDegenerate && attempt < maxRetries {
+					retriedDegenerate = true
+					log.Warnf("[runEventLoop:%s] degenerate turn (no tool call, empty final) — retrying once", ta.name)
+					continue
+				}
 				break
 			}
 		}
@@ -99,16 +108,12 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 }
 
 // extractTriggerSource determines the trigger source from a batch of
-// AgentEvents. Uses the first non-agent_output, non-error external_input
-// event's Source field. This provides deterministic source identification
-// for consumer dispatch (meditation vs async_result vs user) without
-// content-based inference.
+// AgentEvents. Uses the first external_input event's Source field. This
+// provides deterministic source identification for consumer dispatch
+// (meditation vs task vs user) without content-based inference.
 func extractTriggerSource(events []*AgentEvent) string {
 	for _, evt := range events {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-			continue
-		}
-		if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
 			continue
 		}
 		if evt.Source != "" {
@@ -119,16 +124,12 @@ func extractTriggerSource(events []*AgentEvent) string {
 }
 
 // extractRootMetadata extracts metadata from a batch of AgentEvents.
-// Collects metadata from external_input events (non-agent_output, non-error)
-// and merges them into a single map. Later events override earlier ones.
-// Empty keys or values are ignored.
+// Collects metadata from external_input events and merges them into a single
+// map. Later events override earlier ones. Empty keys or values are ignored.
 func extractRootMetadata(events []*AgentEvent) map[string]string {
 	md := make(map[string]string)
 	for _, evt := range events {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-			continue
-		}
-		if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
 			continue
 		}
 		for k, v := range evt.Metadata {

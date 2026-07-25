@@ -119,13 +119,27 @@ func (m *MeditationManager) LastEventTime() int64 {
 }
 
 // checkAndMeditate evaluates whether a meditation should fire.
-// A meditation is valid only if the gap since the last event >= MinGap.
+// Two gates must both pass:
+//  1. idle gate: gap since the last REAL agent output >= MinGap;
+//  2. novelty gate: there has been real activity SINCE the last meditation.
+//     Without it, silence becomes a perpetual-motion machine: each meditation's
+//     own output would eventually satisfy the idle gate again, producing an
+//     endless chain of "nothing happened" summaries that pollute the projection
+//     and burn LLM calls (meditation output does not update the idle anchor —
+//     see makeOnEventCallback — so lastEventTime only moves on real activity).
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
 	lastEventMs := m.lastEventTime.Load()
 
 	if lastEventMs == 0 {
 		// No events received yet — skip meditation.
+		return
+	}
+
+	// Novelty gate: no real agent output since the previous meditation ⇒
+	// nothing new to reflect on.
+	if lm := m.lastMeditation.Load(); lm > 0 && lastEventMs <= lm {
+		log.Debugf("[Meditation] skipping: no new activity since last meditation")
 		return
 	}
 

@@ -7,7 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+
+	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
 // mockMessageInjector records injected messages for test verification.
@@ -92,6 +95,51 @@ func TestMeditationManager_checkAndMeditate_UpdatesLastMeditation(t *testing.T) 
 	mgr.checkAndMeditate()
 
 	assert.Greater(t, mgr.lastMeditation.Load(), int64(0))
+}
+
+// Novelty gate: during sustained silence a second meditation must NOT fire —
+// there has been no real activity since the previous one. Without this gate,
+// silence becomes a self-feeding loop of "nothing happened" summaries.
+func TestMeditationManager_checkAndMeditate_SkipsWithoutNewActivity(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
+
+	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	require.Len(t, inj.messages, 1, "first meditation fires")
+
+	// No UpdateLastEventTime in between (silence) — second check must skip.
+	mgr.checkAndMeditate()
+	assert.Len(t, inj.messages, 1, "no second meditation without new activity")
+
+	// Real activity arrives AFTER the last meditation → gate re-arms.
+	time.Sleep(2 * time.Millisecond)
+	mgr.UpdateLastEventTime(time.Now())
+	time.Sleep(2 * time.Millisecond) // let the idle gate (MinGap=1ms) pass
+	mgr.checkAndMeditate()
+	assert.Len(t, inj.messages, 2, "meditation fires again after real activity")
+}
+
+// Anchor exclusion: a meditation-triggered final output must not update the
+// idle anchor — only real agent activity moves lastEventTime.
+func TestOnEventCallback_MeditationFinalDoesNotResetIdleAnchor(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Hour}, inj)
+	ta := &TagentAgent{name: "t", meditationMgr: mgr}
+	callback := ta.makeOnEventCallback()
+
+	final := func(source string) *event.Event {
+		evt := event.New("inv", "t")
+		evt.Response = &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "out"}}}}
+		evt.StateDelta = map[string][]byte{tagentevent.MetaKeyTriggerSource: []byte(source)}
+		return evt
+	}
+
+	callback(final("meditation"))
+	assert.Zero(t, mgr.LastEventTime(), "meditation output must not move the idle anchor")
+
+	callback(final("user"))
+	assert.Greater(t, mgr.LastEventTime(), int64(0), "real output moves the idle anchor")
 }
 
 func TestMeditationManager_StartStop(t *testing.T) {

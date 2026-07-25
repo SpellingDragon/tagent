@@ -42,7 +42,12 @@ func renderTaskBoard(tasks []*Task) string {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "## 后台任务看板 (%d 个进行中)\n", len(active))
+	// Virtual-event framing: the board is a SYSTEM-generated observation
+	// snapshot delivered as a standalone user-level input — the same category
+	// as any external observation. The explicit “系统注入的观察快照” marker
+	// tells the model this is something it RECEIVES, never a format it should
+	// produce or imitate in its own output.
+	fmt.Fprintf(&b, "[后台任务看板] 系统注入的观察快照（非用户发言，不入历史，勿在回复中模仿此格式）：当前 %d 个进行中\n", len(active))
 	for _, t := range active {
 		age := time.Since(t.StartedAt).Round(time.Second)
 		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v)", t.Status(), t.Spec.Desc, shortID(t.ID), age)

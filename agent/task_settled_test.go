@@ -105,3 +105,28 @@ func TestBuildInvocation_IncludesTaskSettled(t *testing.T) {
 		t.Errorf("task_settled content should be included in invocation, got: %q", msg.Content)
 	}
 }
+
+// TestNewTaskSettledEvent_CarriesOrigin: the settle event carries the task's
+// opaque origin baggage (chat_id, ...), and the existing extractRootMetadata
+// pipeline surfaces it — so a reclaimed turn's output routes to the origin.
+func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
+	task := &Task{ID: "t1", Spec: TaskSpec{Desc: "x", Origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}}
+	evt := newTaskSettledEvent(task, SettleSignal{Kind: SettleCompleted, Output: "done"})
+	if evt.Metadata["chat_id"] != "u1" {
+		t.Errorf("settle event missing origin chat_id: %v", evt.Metadata)
+	}
+	md := extractRootMetadata([]*AgentEvent{evt})
+	if md["chat_id"] != "u1" || md["user_name"] != "alice" {
+		t.Errorf("extractRootMetadata should surface origin baggage, got %v", md)
+	}
+}
+
+// TestNewTaskSettledEvent_NoOriginSafe: a task with no Origin yields an event
+// with no routing metadata (regression guard).
+func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
+	task := &Task{ID: "t2", Spec: TaskSpec{Desc: "x"}}
+	evt := newTaskSettledEvent(task, SettleSignal{Kind: SettleCompleted})
+	if len(evt.Metadata) != 0 {
+		t.Errorf("no-origin task should yield empty metadata, got %v", evt.Metadata)
+	}
+}

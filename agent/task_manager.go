@@ -93,6 +93,12 @@ type TaskSpec struct {
 	// relaunch(id)). For command tasks it re-runs the original command in a
 	// fresh session. Nil → the task is not relaunchable.
 	Relaunch func() (SpawnResult, error)
+	// Origin is opaque baggage: a snapshot of the spawning turn's invocation
+	// metadata (e.g. chat_id), stamped by the framework at spawn time and
+	// carried verbatim to the task_settled event so a background result can be
+	// routed back to the originating session. The task layer NEVER reads or
+	// interprets it (courier, not router). Nil for tasks with no origin.
+	Origin map[string]string
 }
 
 // Task is a unit of async work tracked by the TaskManager.
@@ -132,6 +138,23 @@ func (t *Task) isActive() bool {
 	}
 }
 
+// isTerminalExpired reports whether the task has exited (terminal state) and
+// its grace period has elapsed, making it eligible for pruning + resource
+// reclamation. Live tasks are never expired. A terminal task without a recorded
+// settledAt is not pruned until the timestamp is set (defensive).
+func (t *Task) isTerminalExpired(now time.Time, ttl time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch t.status {
+	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
+		return false
+	}
+	if t.settledAt.IsZero() {
+		return false
+	}
+	return now.Sub(t.settledAt) > ttl
+}
+
 // SpawnResult is returned by Spawn.
 type SpawnResult struct {
 	Task    *Task
@@ -164,7 +187,27 @@ type TaskController interface {
 
 var _ TaskController = (*TaskManager)(nil)
 
-// taskSpawnerCtxKey is the private context key for the injected TaskSpawner.
+// originSpawner wraps a TaskController to stamp opaque origin baggage (the
+// spawning turn's invocation metadata) onto each spawned task's spec — without
+// the task layer needing to know about routing. It embeds TaskController so the
+// full management surface (List/Get/Cancel/Relaunch) stays available to task
+// tools; only Spawn is augmented. (async-result-delivery.)
+type originSpawner struct {
+	TaskController
+	origin map[string]string
+}
+
+func (o *originSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
+	if spec.Origin == nil && len(o.origin) > 0 {
+		cp := make(map[string]string, len(o.origin))
+		for k, v := range o.origin {
+			cp[k] = v
+		}
+		spec.Origin = cp
+	}
+	return o.TaskController.Spawn(spec, detector)
+}
+
 type taskSpawnerCtxKey struct{}
 
 // WithTaskSpawner returns a context carrying the given TaskSpawner. tagent sets
@@ -197,24 +240,42 @@ type TaskManagerConfig struct {
 	// i.e. a background settle that must be written back as a task_settled event.
 	// May be nil.
 	OnSettle func(task *Task, sig SettleSignal)
+	// TerminalTTL is the grace period an exited task (completed/failed/
+	// cancelled/dead) is retained after settling before being pruned and its
+	// resources reclaimed. It only needs to cover the reclaim turn's
+	// get_task_result. Zero → defaultTerminalTTL.
+	TerminalTTL time.Duration
 }
 
 // TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
 // The sync→async boundary is owned by each detector's detach signal (adaptive
 // poll schedule); TaskManager holds no sync_wait knob.
+// defaultTerminalTTL is the default grace period for retaining an exited task
+// before pruning + resource reclamation (only needs to cover the reclaim
+// turn's get_task_result).
+const defaultTerminalTTL = 2 * time.Minute
+
 type TaskManager struct {
-	mu       sync.Mutex
-	tasks    map[string]*Task // id → task
-	byKey    map[string]string
-	onSettle func(task *Task, sig SettleSignal)
+	mu          sync.Mutex
+	tasks       map[string]*Task // id → task
+	byKey       map[string]string
+	onSettle    func(task *Task, sig SettleSignal)
+	terminalTTL time.Duration
+	now         func() time.Time // injectable clock (tests); defaults to time.Now
 }
 
 // NewTaskManager creates a TaskManager.
 func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
+	ttl := cfg.TerminalTTL
+	if ttl <= 0 {
+		ttl = defaultTerminalTTL
+	}
 	return &TaskManager{
-		tasks:    make(map[string]*Task),
-		byKey:    make(map[string]string),
-		onSettle: cfg.OnSettle,
+		tasks:       make(map[string]*Task),
+		byKey:       make(map[string]string),
+		onSettle:    cfg.OnSettle,
+		terminalTTL: ttl,
+		now:         time.Now,
 	}
 }
 
@@ -226,6 +287,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 // Multiple concurrent Spawn calls each wait their own detector's window in
 // parallel (blocking ≈ the slowest, not the sum).
 func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
+	tm.pruneTerminal()
 	// Idempotent dedup: an active task with the same Key short-circuits.
 	tm.mu.Lock()
 	if spec.Key != "" {
@@ -380,8 +442,34 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 	return t, ok
 }
 
+// pruneTerminal removes exited tasks (completed/failed/cancelled/dead) whose
+// grace period has elapsed, reclaiming each victim's detector resources
+// (goroutine/context/tmux session). It is lazy — invoked from List and Spawn —
+// and never touches live tasks. detector.Cancel() is called OUTSIDE the
+// registry lock so releasing a resource (e.g. killing a tmux session) never
+// blocks other task operations; Cancel() is idempotent for already-exited work.
+func (tm *TaskManager) pruneTerminal() {
+	now := tm.now()
+	tm.mu.Lock()
+	var victims []*Task
+	for id, t := range tm.tasks {
+		if t.isTerminalExpired(now, tm.terminalTTL) {
+			victims = append(victims, t)
+			delete(tm.tasks, id)
+			if t.Spec.Key != "" && tm.byKey[t.Spec.Key] == id {
+				delete(tm.byKey, t.Spec.Key)
+			}
+		}
+	}
+	tm.mu.Unlock()
+	for _, t := range victims {
+		t.detector.Cancel()
+	}
+}
+
 // List returns a snapshot of all tracked tasks.
 func (tm *TaskManager) List() []*Task {
+	tm.pruneTerminal()
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	out := make([]*Task, 0, len(tm.tasks))
@@ -402,6 +490,9 @@ func (tm *TaskManager) Cancel(id string) bool {
 	t.detector.Cancel()
 	t.mu.Lock()
 	t.status = TaskCancelled
+	if t.settledAt.IsZero() {
+		t.settledAt = tm.now()
+	}
 	t.mu.Unlock()
 	return true
 }

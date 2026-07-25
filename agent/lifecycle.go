@@ -37,6 +37,11 @@ func (ta *TagentAgent) Close() error {
 		ta.StopLoop()
 	}
 
+	// Stop the workspace cleaner goroutine.
+	if ta.cleanupCancel != nil {
+		ta.cleanupCancel()
+	}
+
 	// Close registered closers first (e.g., ActionTool stops TmuxMonitor)
 	for _, c := range ta.closers {
 		if err := c.Close(); err != nil {

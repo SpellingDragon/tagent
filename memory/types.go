@@ -29,15 +29,16 @@ type EventReference struct {
 // accessible via MemoryStore.RelationStore() method (if the store implements RelationStoreProvider).
 // This separates immutable event content from mutable relationships.
 type FullEvent struct {
-	EventKey     int64                  `json:"event_key"`     // Snowflake int64 unique identifier
-	PartitionID  int                    `json:"partition_id"`  // Storage partition key
-	EventType    string                 `json:"event_type"`    // Event type
-	EventSummary string                 `json:"event_summary"` // Brief summary (for LLM context)
-	Timestamp    int64                  `json:"timestamp"`     // Unix timestamp (ms)
-	Content      string                 `json:"content"`       // Event content/text
-	ToolCalls    []model.ToolCall       `json:"tool_calls"`    // Tool calls (if any)
-	ToolResults  map[string]interface{} `json:"tool_results"`  // Tool execution results
-	Metadata     map[string]string      `json:"metadata"`      // Additional metadata
+	EventKey     int64                  `json:"event_key"`         // Snowflake int64 unique identifier
+	PartitionID  int                    `json:"partition_id"`      // Storage partition key
+	EventType    string                 `json:"event_type"`        // Event type
+	EventSummary string                 `json:"event_summary"`     // Brief summary (for LLM context)
+	Timestamp    int64                  `json:"timestamp"`         // Unix timestamp (ms)
+	Content      string                 `json:"content"`           // Event content/text
+	ToolCalls    []model.ToolCall       `json:"tool_calls"`        // Tool calls (if any)
+	ToolID       string                 `json:"tool_id,omitempty"` // For a tool-result event: the tool_call id it answers (preserves pairing across store→resolve)
+	ToolResults  map[string]interface{} `json:"tool_results"`      // Tool execution results
+	Metadata     map[string]string      `json:"metadata"`          // Additional metadata
 
 	// Response field stores the LLM response snapshot (optional)
 	Response *model.Response `json:"response,omitempty"`
@@ -149,7 +150,14 @@ type StoreStats struct {
 //	│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
 //	└──────────────────────────────────────────────────────────────────┘
 //
-// PartitionID: storage partition (0-2047). Caller-derived, Memory does not interpret.
+// PartitionID: storage partition (0-1023), bits 53-62. Caller-derived, Memory
+// does not interpret. Bit 63 (sign) is ALWAYS 0: positive keys are real
+// events; NEGATIVE keys are reserved for synthetic summary references
+// (compaction). An 11-bit partition field would reach the sign bit and flip
+// keys negative for partitions ≥ 1024 (e.g. FNV("plan")=1810), silently
+// breaking every `EventKey > 0` guard — store resolution, projection
+// idempotency and retained-ref tracking would all treat those agents' events
+// as unresolvable, leaving the model only summaries/placeholders.
 // Timestamp: seconds since snowflakeEpoch (~68 year range).
 // Sequence: per-second counter (0-1023), sub-second uniqueness.
 // Reserved: for future use (e.g., distributed worker ID).
@@ -159,7 +167,7 @@ const (
 	timestampShift   = 22
 	sequenceShift    = 12
 
-	partitionIDMask = 0x7FF      // 11 bits
+	partitionIDMask = 0x3FF      // 10 bits — keeps bit 63 (sign) clear
 	timestampMask   = 0x7FFFFFFF // 31 bits
 	sequenceMask    = 0x3FF      // 10 bits
 
@@ -217,7 +225,7 @@ func SequenceFromEventKey(key int64) int {
 
 // ==================== PartitionID from Name ====================
 //
-// PartitionIDFromName computes a stable PartitionID (0-2047) from a name string
+// PartitionIDFromName computes a stable PartitionID (0-1023) from a name string
 // using FNV-1a hash. Deterministic: same name always yields same PartitionID.
 // Collision is acceptable — partitioning is for causal chain isolation, not uniqueness.
 

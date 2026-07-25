@@ -96,6 +96,11 @@ type ContextManager struct {
 	// StateDelta["trigger_source"] for deterministic consumer dispatch.
 	triggerSource string
 
+	// turnProductive records whether the current/most-recent RunFlow turn
+	// produced anything (a tool call or a non-empty final). Written and read
+	// only on the loop goroutine that drives RunFlow.
+	turnProductive bool
+
 	// currentMetadata holds arbitrary metadata from the source event of the
 	// current RunFlow. Set by runEventLoop before calling RunFlow.
 	// Propagated to derived events via StateDelta["meta_*"] in onEvent.
@@ -237,73 +242,15 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		})
 	}
 
-	// Unified BeforeModel callback: InjectBusInputs + ContextCompressor.
-	//
-	// Design: Projection is the SINGLE source of truth for the historical
-	// timeline. This callback:
-	//  1. TryPulls new events from EventBus and immediately persists them
-	//     (MemoryStore + Projection.Append) — no "visible but not projected" state.
-	//  2. Resolves all projection refs via ContextCompressor (compress if over budget).
-	//  3. Extracts current-turn messages from args.Request.Messages (tool_calls/
-	//     results from the current ReAct iteration that haven't been emitted yet).
-	//  4. Rebuilds args.Request.Messages = [system] + history + currentTurn.
-	//
-	// This eliminates content-based deduplication entirely: projection refs are
-	// identified by EventKey, and current-turn messages are identified by the
-	// absence of [evt_KEY|type] prefixes.
+	// Unified BeforeModel callback: projection-sole-source assembly
+	// (unified-event-projection D2). See assembleRequest: drains mid-turn bus
+	// events into the projection, compresses, and rebuilds the request as
+	// [system] + render(projection). Nothing is read back from the framework's
+	// message tail — every event reaches the projection via the event-plugin
+	// pipeline or persistBusEvent, so the boundary is strictly one-way.
 	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			// Step 1: Persist new bus events into Projection immediately.
-			if cm.bus != nil {
-				events := cm.bus.TryPull()
-				if len(events) > 0 {
-					log.Infof("[BeforeModel] TryPull returned %d events, persisting to projection", len(events))
-				}
-				for _, evt := range events {
-					if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-						continue
-					}
-					if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
-						continue
-					}
-					if evt.Message == nil {
-						continue
-					}
-					cm.persistBusEvent(evt)
-				}
-			}
-
-			// Step 2: Resolve projection → compressed historical messages.
-			refs := cm.projection.GetAll()
-			result := cm.contextCompressor.Compress(ctx, refs)
-			cm.projection.Replace(result.RetainedRefs)
-
-			// Step 3: Extract current-turn messages.
-			// The driving request (user) is persisted into the projection at
-			// turn start (persistent loop via framework emission; sub-agent via
-			// session.go persistBusEvent). So whenever the projection already
-			// contains a user message, the framework's re-inserted unprefixed
-			// user is a duplicate/echo and must be dropped. ReAct-internal
-			// messages (assistant tool_calls + tool results) are always kept.
-			var filterUser bool
-			for _, m := range result.Messages {
-				if m.Role == model.RoleUser {
-					filterUser = true
-					break
-				}
-			}
-			currentTurn := extractCurrentTurnMessages(args.Request.Messages, filterUser)
-
-			// Step 4: Rebuild messages = [system] + history + currentTurn.
-			systemMsg, _ := splitSystemMessage(args.Request.Messages)
-			var rebuilt []model.Message
-			if systemMsg != nil {
-				rebuilt = append(rebuilt, *systemMsg)
-			}
-			rebuilt = append(rebuilt, result.Messages...)
-			rebuilt = append(rebuilt, currentTurn...)
-
-			args.Request.Messages = rebuilt
+			cm.assembleRequest(ctx, args)
 			return nil, nil
 		})
 	} else if cm.bus != nil {
@@ -312,13 +259,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 			events := cm.bus.TryPull()
 			for _, evt := range events {
-				if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-					continue
-				}
-				if evt.Source == tagentevent.TypeAgentOutput || evt.Source == "error" {
-					continue
-				}
-				if evt.Message == nil {
+				if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
 					continue
 				}
 				msg := *evt.Message
@@ -336,28 +277,14 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	// fresh from the registry and injects them just before the current input —
 	// a recency anchor of async state that never enters projection/history, so
 	// it does NOT participate in compression. Skipped when no tasks are active.
-	if cm.taskController != nil {
-		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			if board := renderTaskBoard(cm.taskController.List()); board != "" {
-				args.Request.Messages = injectTaskBoard(args.Request.Messages, board)
-			}
-			return nil, nil
-		})
-	}
-
-	// Callback 0.45: conversation-self-heal L2 — validate + conservatively
-	// repair tool_call/tool-result pairing on the FINAL assembled message list,
-	// immediately before it goes to the model. This must run AFTER compression
-	// (which rebuilds history from the projection, where duplicate/orphan tool
-	// results can appear). It operates on args.Request.Messages only; the
-	// persistent projection is untouched (L1 idempotency governs persistence).
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-		if repaired, n := repairToolPairing(args.Request.Messages); n > 0 {
-			log.Warnf("[msgvalidate] repaired %d tool-pairing issue(s) before send", n)
-			args.Request.Messages = repaired
-		}
+		cm.injectLiveTaskBoard(args)
 		return nil, nil
 	})
+
+	// Callback 0.45 removed (unified-event-projection D6): tool-pairing repair
+	// is unnecessary under pairing-free rendering — rendered history contains
+	// no role=tool messages, so no pairing constraint can be violated.
 
 	// Callback 0.5: BeforeLLM diagnostic log — print messages after compression.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
@@ -429,41 +356,11 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	return cm
 }
 
-// ShouldCallModel checks if the batch contains external_input events
-// that should trigger a model call (filtering agent_output echoes
-// and error events).
-func (cm *ContextManager) ShouldCallModel(batch []*AgentEvent) bool {
-	for _, evt := range batch {
-		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-			continue
-		}
-		if evt.Source == tagentevent.TypeAgentOutput {
-			continue
-		}
-		if evt.Source == "error" {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 // BuildInvocation merges a batch of AgentEvents into a single model.Message.
-// Skips: agent_output echoes (Source == "agent_output"),
-// error events (Source == "error").
 func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 	var contents []string
 	for _, evt := range batch {
-		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
-			continue
-		}
-		if evt.Source == tagentevent.TypeAgentOutput {
-			continue
-		}
-		if evt.Source == "error" {
-			continue
-		}
-		if evt.Message == nil {
+		if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
 			continue
 		}
 		contents = append(contents, evt.Message.Content)
@@ -475,6 +372,48 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 		return model.Message{Role: model.RoleUser, Content: contents[0]}
 	}
 	return model.Message{Role: model.RoleUser, Content: strings.Join(contents, "\n\n---\n\n")}
+}
+
+// assembleRequest builds the final message list sent to the model:
+//
+//	[system] + render(projection) (+ live task board, injected by a later callback)
+//
+// The projection is the SOLE assembly source (unified-event-projection D2).
+// Nothing is read back from the framework's message tail — every event
+// (user input, tool calls, tool results, finals, bus injections) reaches the
+// projection through the event-plugin pipeline or persistBusEvent, so the
+// data flow across the framework boundary is strictly one-way.
+func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.BeforeModelArgs) {
+	// Drain pending bus events (task_settled, monitor, meditation … arriving
+	// mid-turn) into the projection so this iteration can see them.
+	if cm.bus != nil {
+		events := cm.bus.TryPull()
+		if len(events) > 0 {
+			log.Infof("[BeforeModel] TryPull returned %d events, persisting to projection", len(events))
+		}
+		for _, evt := range events {
+			if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
+				continue
+			}
+			cm.persistBusEvent(evt)
+		}
+	}
+
+	// Resolve projection → (possibly compressed) historical messages.
+	refs := cm.projection.GetAll()
+	result := cm.contextCompressor.Compress(ctx, refs)
+	cm.projection.Replace(result.RetainedRefs)
+
+	// Rebuild: [system] + render(projection). The system message is the only
+	// part of args.Request.Messages that is read.
+	systemMsg, _ := splitSystemMessage(args.Request.Messages)
+	rebuilt := make([]model.Message, 0, len(result.Messages)+1)
+	if systemMsg != nil {
+		rebuilt = append(rebuilt, *systemMsg)
+	}
+	rebuilt = append(rebuilt, result.Messages...)
+
+	args.Request.Messages = rebuilt
 }
 
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
@@ -539,50 +478,111 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// RunFlow calls runner.Run and forwards events to outputCh + bus.
-// Final responses are echoed back to the EventBus as agent_output events
-// (filtered by BuildInvocation to prevent self-triggering).
+// RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
+// projection writes happen in the event-plugin pipeline (ProjectionSink), and
+// the loop waits for the next turn via bus.Pull — there is no bus echo.
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
+	// Bind this invocation's projection as the pipeline projection sink:
+	// MemoryPlugin projects each stored event at the same synchronous point
+	// (write unification, unified-event-projection D1).
+	if cm.projection != nil {
+		ctx = plugin.WithProjectionSink(ctx, cm.projection)
+	}
 	// Inject the task spawner so tools can delegate long-running work to the
 	// task layer (sync-wait window → inline or ack). Absent → synchronous.
 	if cm.taskController != nil {
-		ctx = WithTaskSpawner(ctx, cm.taskController)
+		// Wrap the spawner to snapshot the originating turn's invocation
+		// metadata (chat_id, ...) as opaque origin baggage on each spawned
+		// task, so a background settle can be routed back to the originating
+		// session. The task layer never interprets it. (async-result-delivery.)
+		var spawner TaskSpawner = cm.taskController
+		if md := cm.GetInvocationMetadata(); len(md) > 0 {
+			cp := make(map[string]string, len(md))
+			for k, v := range md {
+				cp[k] = v
+			}
+			spawner = &originSpawner{TaskController: cm.taskController, origin: cp}
+		}
+		ctx = WithTaskSpawner(ctx, spawner)
 	}
 	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		return fmt.Errorf("runner.Run: %w", err)
 	}
 
+	cm.turnProductive = false
 	for fwEvt := range eventCh {
-		if fwEvt != nil && cm.triggerSource != "" {
-			// Attach trigger source to the event for deterministic
-			// consumer-side dispatch (meditation vs async_result vs user).
-			if fwEvt.StateDelta == nil {
-				fwEvt.StateDelta = make(map[string][]byte)
-			}
-			fwEvt.StateDelta["trigger_source"] = []byte(cm.triggerSource)
+		if fwEvt == nil {
+			continue
 		}
-		if cm.onEvent != nil && fwEvt != nil {
-			cm.onEvent(fwEvt)
+		// Clone before any tagent-side mutation: the framework retains the
+		// original event for its own post-processing reads (e.g. content
+		// snapshot cloning on the runner goroutine), so writing StateDelta on
+		// the shared object would be a data race. All tagent-side metadata
+		// (trigger_source, meta_*) goes onto this private copy, which is what
+		// onEvent and outputCh consumers observe.
+		evt := cloneEventForDelivery(fwEvt)
+		if cm.triggerSource != "" {
+			// Attach trigger source to the event for deterministic
+			// consumer-side dispatch (meditation vs task vs user).
+			evt.StateDelta[tagentevent.MetaKeyTriggerSource] = []byte(cm.triggerSource)
+		}
+		// Track turn productivity: a turn that never calls a tool and ends in
+		// an empty final produced nothing (occasional model hiccup) — the
+		// persistent loop retries such a turn once (see runEventLoop).
+		if evt.Response != nil && len(evt.Response.Choices) > 0 {
+			m := evt.Response.Choices[len(evt.Response.Choices)-1].Message
+			if len(m.ToolCalls) > 0 || (isFinalResponse(evt) && strings.TrimSpace(m.Content) != "") {
+				cm.turnProductive = true
+			}
+		}
+		if cm.onEvent != nil {
+			cm.onEvent(evt)
 		}
 		if cm.outputCh != nil {
 			select {
-			case cm.outputCh <- fwEvt:
+			case cm.outputCh <- evt:
 			case <-ctx.Done():
 				return nil
 			}
 		}
-		if isFinalResponse(fwEvt) {
-			outMsg := extractMessageFromEvent(fwEvt)
-			if outMsg.Content != "" || outMsg.Role != "" {
-				busEvt := NewExternalInputEvent(tagentevent.TypeAgentOutput, outMsg)
-				if cm.bus != nil {
-					cm.bus.Publish(busEvt)
-				}
-			}
-		}
 	}
 	return nil
+}
+
+// LastTurnDegenerate reports whether the most recent RunFlow turn produced
+// nothing: no tool call and no non-empty final. The persistent loop uses it
+// to retry such a turn once (an occasional model hiccup would otherwise
+// stall the conversation until the next external event).
+func (cm *ContextManager) LastTurnDegenerate() bool {
+	return !cm.turnProductive
+}
+
+// cloneEventForDelivery makes a shallow copy of the event with its own
+// StateDelta map, so tagent-side metadata writes never touch the framework's
+// shared event object. Response and other pointers are shared read-only.
+func cloneEventForDelivery(evt *event.Event) *event.Event {
+	cp := *evt
+	cp.StateDelta = make(map[string][]byte, len(evt.StateDelta)+4)
+	for k, v := range evt.StateDelta {
+		cp.StateDelta[k] = v
+	}
+	return &cp
+}
+
+// injectLiveTaskBoard renders the current active-task board and injects it near
+// the last user input. The taskController nil-check is at CALL time, not
+// registration time: taskController is wired AFTER ContextManager construction
+// (agent.go), so a registration-time guard would permanently skip the board.
+// The board is ephemeral (request-only, never projected/compressed).
+// (async-result-delivery: task-board-injection-order fix.)
+func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
+	if cm.taskController == nil {
+		return
+	}
+	if board := renderTaskBoard(cm.taskController.List()); board != "" {
+		args.Request.Messages = injectTaskBoard(args.Request.Messages, board)
+	}
 }
 
 // SetUserIDSessionID updates the user/session context for runner.Run.
@@ -603,17 +603,14 @@ func (cm *ContextManager) Close() error {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// eventTypeToRole infers a model.Role from an event type string using a
-// deterministic mapping. This is used when a FullEvent's Response is nil
-// (e.g., events injected via InjectBusInputs that have no LLM response).
-//
-// Mapping:
+// eventTypeToRole maps an event type to its pairing-free timeline role
+// (unified-event-projection D3):
 //
 //	external_input → user
 //	agent_output   → assistant
-//	action_command → tool
-//	thinking_plan   → assistant
-//	(default)       → user (safe degradation)
+//	action_command → user (tool results are input events, never role=tool)
+//	thinking_plan  → assistant
+//	(default)      → user (safe degradation)
 func eventTypeToRole(eventType string) model.Role {
 	switch eventType {
 	case "external_input":
@@ -621,7 +618,7 @@ func eventTypeToRole(eventType string) model.Role {
 	case "agent_output":
 		return model.RoleAssistant
 	case "action_command":
-		return model.RoleTool
+		return model.RoleUser
 	case "thinking_plan":
 		return model.RoleAssistant
 	default:
@@ -650,16 +647,9 @@ func isFinalResponse(evt *event.Event) bool {
 	choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 	// Only an assistant message without tool_calls is a final response.
 	// A tool RESULT (Role=tool) also has no tool_calls but must NOT be
-	// treated as final — that would cause a spurious agent_output echo and
-	// (in the sub-agent path) premature turn termination.
+	// treated as final — that would cause premature turn termination in
+	// the sub-agent path.
 	return choice.Message.Role == model.RoleAssistant && len(choice.Message.ToolCalls) == 0
-}
-
-func extractMessageFromEvent(evt *event.Event) model.Message {
-	if evt == nil || evt.Response == nil || len(evt.Response.Choices) == 0 {
-		return model.Message{}
-	}
-	return evt.Response.Choices[len(evt.Response.Choices)-1].Message
 }
 
 // formatMessages returns a human-readable summary of messages for debug logs.

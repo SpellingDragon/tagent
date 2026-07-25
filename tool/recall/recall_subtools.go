@@ -10,6 +10,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
 	"github.com/SpellingDragon/tagent/agent"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
@@ -62,7 +63,7 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 			var results []recallEventItem
 			for _, evt := range events {
 				results = append(results, recallEventItem{
-					Key:     evt.EventKey,
+					Key:     tagentevent.FormatEventKey(evt.EventKey),
 					Type:    evt.EventType,
 					Summary: evt.EventSummary,
 					Time:    formatTimestamp(evt.Timestamp),
@@ -85,17 +86,18 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 func NewRecallGetTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args recallGetArgs) (recallGetResult, error) {
-			if args.Key == 0 {
-				return recallGetResult{}, fmt.Errorf("event key is required")
+			key, err := tagentevent.ParseEventKey(args.Key)
+			if args.Key == "" || err != nil {
+				return recallGetResult{}, fmt.Errorf("event key is required (hex string, e.g. 1201a3f4b5c6d7e8)")
 			}
 
-			evt, err := accessor.GetEvent(args.Key)
+			evt, err := accessor.GetEvent(key)
 			if err != nil {
 				return recallGetResult{}, fmt.Errorf("event not found: %w", err)
 			}
 
 			result := recallGetResult{
-				Key:     evt.EventKey,
+				Key:     tagentevent.FormatEventKey(evt.EventKey),
 				Type:    evt.EventType,
 				Summary: evt.EventSummary,
 				Content: evt.Content,
@@ -105,19 +107,21 @@ func NewRecallGetTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 			// Get parent key from RelationStore (content-relation separation)
 			var parentKey int64
 			if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
-				pk, err := rsp.RelationStore().GetParent(args.Key)
+				pk, err := rsp.RelationStore().GetParent(key)
 				if err != nil {
-					log.Errorf("[Recall] GetParent failed key=%d: %v", args.Key, err)
+					log.Errorf("[Recall] GetParent failed key=%d: %v", key, err)
 				}
 				parentKey = pk
 			}
-			result.ParentKey = parentKey
+			if parentKey != 0 {
+				result.ParentKey = tagentevent.FormatEventKey(parentKey)
+			}
 
 			// Optionally include parent event summary
 			if args.IncludeParent && parentKey != 0 {
 				if parent, err := accessor.GetEvent(parentKey); err == nil && parent != nil {
 					result.Parent = &parentEventInfo{
-						EventKey:  parent.EventKey,
+						EventKey:  tagentevent.FormatEventKey(parent.EventKey),
 						EventType: parent.EventType,
 						Summary:   parent.EventSummary,
 						Time:      formatTimestamp(parent.Timestamp),
@@ -179,7 +183,7 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 			var results []recallEventItem
 			for _, evt := range events {
 				results = append(results, recallEventItem{
-					Key:     evt.EventKey,
+					Key:     tagentevent.FormatEventKey(evt.EventKey),
 					Type:    evt.EventType,
 					Summary: evt.EventSummary,
 					Time:    formatTimestamp(evt.Timestamp),
@@ -222,15 +226,15 @@ type recallQueryResult struct {
 }
 
 type recallGetArgs struct {
-	// Event key to retrieve (Snowflake int64)
-	Key int64 `json:"key"`
+	// Event key to retrieve (canonical hex string, as shown in [evt_...] prefixes)
+	Key string `json:"key"`
 	// If true, include parent event summary in result (optional)
 	IncludeParent bool `json:"include_parent,omitempty"`
 }
 
 type recallGetResult struct {
-	Key       int64            `json:"key"`
-	ParentKey int64            `json:"parent_key,omitempty"`
+	Key       string           `json:"key"`
+	ParentKey string           `json:"parent_key,omitempty"`
 	Type      string           `json:"type"`
 	Summary   string           `json:"summary"`
 	Content   string           `json:"content"`
@@ -255,8 +259,9 @@ type recallRecentResult struct {
 }
 
 // recallEventItem is a shared event item format for sub-tool results.
+// Key is the canonical hex string form (see tagentevent.FormatEventKey).
 type recallEventItem struct {
-	Key     int64  `json:"key"`
+	Key     string `json:"key"`
 	Type    string `json:"type"`
 	Summary string `json:"summary"`
 	Time    string `json:"time"`
@@ -264,7 +269,7 @@ type recallEventItem struct {
 
 // parentEventInfo is a lightweight parent event reference included on request.
 type parentEventInfo struct {
-	EventKey  int64  `json:"event_key"`
+	EventKey  string `json:"event_key"`
 	EventType string `json:"event_type"`
 	Summary   string `json:"summary"`
 	Time      string `json:"time"`
@@ -272,8 +277,8 @@ type parentEventInfo struct {
 
 // recallTraceArgs represents a causal chain trace request.
 type recallTraceArgs struct {
-	// Event key to start tracing from
-	Key int64 `json:"key"`
+	// Event key to start tracing from (canonical hex string)
+	Key string `json:"key"`
 	// Maximum steps to trace backward (default: 10, max: 20)
 	MaxSteps int `json:"max_steps,omitempty"`
 }
@@ -287,8 +292,8 @@ type recallTraceResult struct {
 
 // recallTraceItem is a single event in a causal chain trace.
 type recallTraceItem struct {
-	Key       int64  `json:"key"`
-	ParentKey int64  `json:"parent_key,omitempty"`
+	Key       string `json:"key"`
+	ParentKey string `json:"parent_key,omitempty"`
 	Type      string `json:"type"`
 	Summary   string `json:"summary"`
 	Time      string `json:"time"`
@@ -308,10 +313,6 @@ func formatTimestamp(ts int64) string {
 func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args recallTraceArgs) (recallTraceResult, error) {
-			if args.Key == 0 {
-				return recallTraceResult{}, fmt.Errorf("event key is required")
-			}
-
 			maxSteps := args.MaxSteps
 			if maxSteps <= 0 {
 				maxSteps = 10
@@ -321,13 +322,16 @@ func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 			}
 
 			var chain []recallTraceItem
-			currentKey := args.Key
+			currentKey, err := tagentevent.ParseEventKey(args.Key)
+			if args.Key == "" || err != nil {
+				return recallTraceResult{}, fmt.Errorf("event key is required (hex string)")
+			}
 
 			for step := 0; step < maxSteps && currentKey != 0; step++ {
 				evt, err := accessor.GetEvent(currentKey)
 				if err != nil {
 					if step == 0 {
-						return recallTraceResult{}, fmt.Errorf("event not found: %d", currentKey)
+						return recallTraceResult{}, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
 					}
 					// Chain breaks at missing link
 					break
@@ -342,13 +346,16 @@ func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 					}
 					parentKey = pk
 				}
-				chain = append(chain, recallTraceItem{
-					Key:       evt.EventKey,
-					ParentKey: parentKey,
-					Type:      evt.EventType,
-					Summary:   evt.EventSummary,
-					Time:      formatTimestamp(evt.Timestamp),
-				})
+				item := recallTraceItem{
+					Key:     tagentevent.FormatEventKey(evt.EventKey),
+					Type:    evt.EventType,
+					Summary: evt.EventSummary,
+					Time:    formatTimestamp(evt.Timestamp),
+				}
+				if parentKey != 0 {
+					item.ParentKey = tagentevent.FormatEventKey(parentKey)
+				}
+				chain = append(chain, item)
 				currentKey = parentKey
 			}
 

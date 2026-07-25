@@ -187,6 +187,12 @@ type AgentConfig struct {
 	// Only effective when the agent is started via StartLoop.
 	Meditation MeditationConfig `json:"meditation,omitempty" yaml:"meditation,omitempty"`
 
+	// WorkspaceRoot is the unified on-disk scratch root for this agent
+	// (default: .tagent-workspace). Oversized tool outputs go to <root>/tool-output;
+	// the tmux command working directory is <root>/exec. A periodic cleaner bounds
+	// the accumulated files.
+	WorkspaceRoot string `json:"workspace_root,omitempty" yaml:"workspace_root,omitempty"`
+
 	// Description for agent.Agent interface (used when this agent is a sub-agent)
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
 }
@@ -281,6 +287,13 @@ type ToolRef struct {
 	// context to the tool agent. This prevents the LLM from breaking context isolation —
 	// the LLM only outputs a numeric key, but the actual event content is resolved server-side.
 	EventParams []string `json:"event_params,omitempty" yaml:"event_params,omitempty"`
+
+	// Async controls whether an agent-kind tool may run through the async task
+	// layer (sync-wait window → inline result or background ack + task_settled).
+	// nil/true = async allowed (default); false = always run synchronously —
+	// an operator knob to reduce cognitive load on weaker models that struggle
+	// with ack/notification semantics.
+	Async *bool `json:"async,omitempty" yaml:"async,omitempty"`
 
 	// Agent parameters (kind=agent)
 	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`

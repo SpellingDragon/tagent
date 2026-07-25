@@ -380,45 +380,44 @@ func TestSubAgentRun_RequestOrdering_UserAfterSystem(t *testing.T) {
 		t.Errorf("expected messages[0] to be system, got %s", last[0].Role)
 	}
 
-	// 2. Exactly one user message, and it carries the request content.
-	userIdx, userCount := -1, 0
+	// 2. The REQUEST appears exactly once (no duplication/drop). Under
+	// pairing-free rendering (unified-event-projection D3) tool results are
+	// ALSO role=user input events, so uniqueness is asserted on content.
+	requestIdx, requestCount := -1, 0
 	for i, m := range last {
-		if m.Role == model.RoleUser {
-			userCount++
-			if userIdx < 0 {
-				userIdx = i
+		if m.Role == model.RoleUser && strings.Contains(m.Content, request) {
+			requestCount++
+			if requestIdx < 0 {
+				requestIdx = i
 			}
 		}
 	}
-	if userCount != 1 {
-		t.Fatalf("❌ expected exactly 1 user message, got %d (duplication or drop): %s",
-			userCount, dumpRoles(last))
-	}
-	if !strings.Contains(last[userIdx].Content, request) {
-		t.Errorf("user message content = %q, want to contain %q", last[userIdx].Content, request)
+	if requestCount != 1 {
+		t.Fatalf("❌ expected the request exactly once, got %d (duplication or drop): %s",
+			requestCount, dumpRoles(last))
 	}
 
 	// 3. The user (request) is at the FRONT: right after system, and BEFORE
 	//    the assistant/tool ReAct history. This is the core regression guard —
 	//    the old bug placed the user at the END.
-	if userIdx != 1 {
+	if requestIdx != 1 {
 		t.Errorf("❌ BUG: user request at index %d, want 1 (right after system). Order: %s",
-			userIdx, dumpRoles(last))
+			requestIdx, dumpRoles(last))
 	}
-	if userIdx == len(last)-1 {
+	if requestIdx == len(last)-1 {
 		t.Errorf("❌ BUG: user request is the LAST message (buried after ReAct history). Order: %s",
 			dumpRoles(last))
 	}
-	// There must be assistant/tool messages AFTER the user.
+	// There must be ReAct history (assistant steps) AFTER the request.
 	hasReActAfterUser := false
-	for _, m := range last[userIdx+1:] {
-		if m.Role == model.RoleAssistant || m.Role == model.RoleTool {
+	for _, m := range last[requestIdx+1:] {
+		if m.Role == model.RoleAssistant {
 			hasReActAfterUser = true
 			break
 		}
 	}
 	if !hasReActAfterUser {
-		t.Errorf("expected assistant/tool ReAct messages after the user request. Order: %s", dumpRoles(last))
+		t.Errorf("expected assistant ReAct messages after the user request. Order: %s", dumpRoles(last))
 	}
 
 	t.Logf("✅ final request order: %s", dumpRoles(last))

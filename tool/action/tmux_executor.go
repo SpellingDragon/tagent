@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -163,6 +164,12 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 		workDir = te.workspace
 	}
 	if workDir != "" {
+		// Ensure the working directory exists — tmux new-session with `-c` to a
+		// non-existent directory fails with a bare "exit status 1". Creating it
+		// (best-effort) removes a common, hard-to-diagnose failure mode.
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			log.Warnf("[tmux] workDir %q ensure failed (continuing): %v", workDir, err)
+		}
 		args = append(args, "-c", workDir)
 	}
 
@@ -176,9 +183,22 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
 	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create tmux session: %w", err)
+		// The combined "new-session ; set-option" invocation returns the exit
+		// code of the LAST command, so a trailing set-option that fails on some
+		// tmux versions (e.g. remain-on-exit option scope) surfaces as a generic
+		// failure even though the session was created. Only treat it as fatal
+		// when the session does not actually exist; otherwise proceed and log
+		// the captured stderr so the real cause is never hidden as "exit status 1".
+		detail := strings.TrimSpace(stderr.String())
+		if !te.SessionExists(sessionName) {
+			return nil, fmt.Errorf("failed to create tmux session: %w: %s", err, detail)
+		}
+		log.Warnf("[tmux] session %s created, but a post-create option failed (non-fatal): %v: %s",
+			sessionName, err, detail)
 	}
 
 	// Set environment variables on the session

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -38,6 +39,7 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/workspace"
 )
 
 // Closer is implemented by components that hold resources requiring cleanup
@@ -114,6 +116,9 @@ type TagentAgent struct {
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 
+	// cleanupCancel stops the workspace cleaner goroutine (started in NewTagentAgent).
+	cleanupCancel context.CancelFunc
+
 	// projection is the lightweight, bounded Session projection (EventReference[])
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
@@ -160,6 +165,17 @@ type TagentConfig struct {
 
 	// Meditation configures the meditation/heartbeat mechanism.
 	Meditation MeditationConfig
+
+	// WorkspaceRoot is the unified on-disk scratch root (default: .tagent-workspace).
+	// Oversized tool outputs go to <root>/tool-output; the tmux command working
+	// directory is <root>/exec. A periodic cleaner bounds tool-output files.
+	WorkspaceRoot string
+
+	// Workspace cleanup (periodic, tool-output dir only). Non-positive values
+	// fall back to the defaults below (there is no disable switch).
+	WorkspaceCleanupInterval time.Duration // default: 1h
+	WorkspaceCleanupMaxAge   time.Duration // default: 24h
+	WorkspaceCleanupMaxFiles int           // default: 200
 }
 
 // Default configuration values
@@ -177,6 +193,11 @@ const (
 	DefaultMaxToolArgsChars   = 80
 	DefaultChunkSize          = 1000
 	DefaultChunkSummaryLen    = 150
+
+	// Workspace cleanup defaults (periodic bounding of on-disk scratch files).
+	DefaultWorkspaceCleanupInterval = time.Hour
+	DefaultWorkspaceCleanupMaxAge   = 24 * time.Hour
+	DefaultWorkspaceCleanupMaxFiles = 200
 )
 
 // CompressConfig holds SmartCompressor parameters.
@@ -218,6 +239,16 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg.KeepRecentTasks <= 0 {
 		cfg.KeepRecentTasks = 2
 	}
+	cfg.WorkspaceRoot = workspace.Root(cfg.WorkspaceRoot)
+	if cfg.WorkspaceCleanupInterval <= 0 {
+		cfg.WorkspaceCleanupInterval = DefaultWorkspaceCleanupInterval
+	}
+	if cfg.WorkspaceCleanupMaxAge <= 0 {
+		cfg.WorkspaceCleanupMaxAge = DefaultWorkspaceCleanupMaxAge
+	}
+	if cfg.WorkspaceCleanupMaxFiles <= 0 {
+		cfg.WorkspaceCleanupMaxFiles = DefaultWorkspaceCleanupMaxFiles
+	}
 
 	// 1. Create MemoryStore (use provided or default to InMemoryStore)
 	var memStore memory.MemoryStore
@@ -242,7 +273,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 	// 4. Wrap all tools with OutputLimitTool
 	maxOutputChars := cfg.MaxTokens / 2 * 4
-	outputWorkspace := ".tagent-output"
+	outputWorkspace := workspace.ToolOutputPath(cfg.WorkspaceRoot)
 	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
 		wrapped := make([]tool.Tool, len(cfg.Tools))
 		for i, t := range cfg.Tools {
@@ -271,7 +302,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
-	// uses it to forward user message events into the projection + outputCh.
+	// uses it to propagate meta_* onto user message events before forwarding
+	// them to outputCh (delivery only — projection writes happen in the
+	// event-plugin pipeline via ProjectionSink, unified-event-projection D1).
 	var onEventRef func(evt *event.Event)
 
 	// 6. Create SessionService
@@ -281,11 +314,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// by SessionProjection + ContextCompressor, so the runner session does
 	// not need to retain full event history.
 	//
-	// AppendEventHook also forwards user message events to outputCh +
-	// projection. The framework runner appends user messages to session
-	// (after MemoryPlugin processes them) but does NOT emit them through
-	// the agent event channel. Without this hook, user messages never
-	// enter the projection and are lost as historical context.
+	// AppendEventHook forwards user message events to outputCh (the runner
+	// appends user messages to session but does NOT emit them through the
+	// agent event channel — without this hook the consumer would never see
+	// them).
 	sessionSvc := sessioninmemory.NewSessionService(
 		sessioninmemory.WithSessionEventLimit(2),
 		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
@@ -299,15 +331,14 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 			err := next()
 			ctx.Event = original
 
-			// Forward user message events to outputCh + projection.
-			// LLM/tool events are emitted via eventCh in RunFlow, not here.
-			// MemoryPlugin has already written event_key to StateDelta,
-			// so BuildEventReference will succeed.
+			// Forward user message events to outputCh (delivery). LLM/tool
+			// events are emitted via eventCh in RunFlow, not here. Projection
+			// writes happen in the event-plugin pipeline (MemoryPlugin →
+			// ProjectionSink), which has already run for this event. Deliver a
+			// clone with its own StateDelta map: onEventRef writes meta_* and
+			// must never mutate the framework's shared event object.
 			if onEventRef != nil && original.IsUserMessage() {
-				emitEvt := original
-				if original.Response != nil {
-					emitEvt = &evtCopy
-				}
+				emitEvt := cloneEventForDelivery(original)
 				onEventRef(emitEvt)
 				select {
 				case outputCh <- emitEvt:
@@ -336,7 +367,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	}
 
 	// 8. Create onEvent callback and ContextManager.
-	onEvent := ta.makeOnEventCallback("", projection)
+	onEvent := ta.makeOnEventCallback()
 	onEventRef = onEvent // Wire the hook's callback.
 	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	ta.contextManager = cm
@@ -350,6 +381,14 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// digest (task-layer health). taskManager is always non-nil here.
 		ta.meditationMgr.SetTaskController(taskManager)
 	}
+
+	// Start the workspace cleaner. Scope: tool-output only. The exec/ dir is a
+	// tmux working directory whose lifecycle belongs to the task layer (tasks
+	// may run for days and write artifacts there) — cleaning it by file age or
+	// count would delete live-task outputs.
+	cleanCtx, cleanCancel := context.WithCancel(context.Background())
+	ta.cleanupCancel = cleanCancel
+	workspace.NewCleaner(workspace.ToolOutputPath(cfg.WorkspaceRoot), cfg.WorkspaceCleanupInterval, cfg.WorkspaceCleanupMaxAge, cfg.WorkspaceCleanupMaxFiles).Start(cleanCtx)
 
 	return ta, nil
 }

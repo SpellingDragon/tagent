@@ -17,6 +17,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/tool/action"
+	"github.com/SpellingDragon/tagent/workspace"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -31,8 +32,12 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 	var opts []action.ActionToolOption
 
+	// Working directory for tmux commands: explicit `workspace` property wins;
+	// otherwise default to the unified workspace's exec subdir (<root>/exec).
 	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))
+	} else {
+		opts = append(opts, action.WithActionWorkspace(workspace.ExecPath(cfg.WorkspaceRoot)))
 	}
 	if ru, ok := properties["run_as_user"].(string); ok && ru != "" {
 		opts = append(opts, action.WithActionRunAsUser(ru))

@@ -79,3 +79,46 @@ func TestInjectTaskBoard_NoUserAppends(t *testing.T) {
 		t.Errorf("board should append when there is no user message")
 	}
 }
+
+// ============================================================================
+// Board injection wiring (async-result-delivery: task-board-injection-order fix)
+// ============================================================================
+
+// TestInjectLiveTaskBoard_WiredAfterConstruction is the regression guard for the
+// task-board-injection-order bug: taskController is wired AFTER ContextManager
+// construction (agent.go), so the board callback must nil-check at CALL time,
+// not registration time. With a live task present, the board must inject.
+func TestInjectLiveTaskBoard_WiredAfterConstruction(t *testing.T) {
+	cm := &ContextManager{} // taskController nil at construction (mirrors real order)
+	tm := NewTaskManager(TaskManagerConfig{})
+	tm.tasks["t1"] = mkBoardTask("t1", "npm build", TaskRunning)
+	cm.taskController = tm // post-construction wiring
+
+	args := &model.BeforeModelArgs{Request: &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
+	}}
+	cm.injectLiveTaskBoard(args)
+
+	var found bool
+	for _, m := range args.Request.Messages {
+		if strings.Contains(m.Content, "后台任务看板") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("board must inject even when taskController is wired after construction")
+	}
+}
+
+// TestInjectLiveTaskBoard_NilControllerSafe: a nil taskController at call time is
+// a safe no-op (no panic, nothing injected).
+func TestInjectLiveTaskBoard_NilControllerSafe(t *testing.T) {
+	cm := &ContextManager{}
+	args := &model.BeforeModelArgs{Request: &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
+	}}
+	cm.injectLiveTaskBoard(args)
+	if len(args.Request.Messages) != 1 {
+		t.Errorf("nil taskController should inject nothing, got %d msgs", len(args.Request.Messages))
+	}
+}

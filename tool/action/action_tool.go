@@ -175,6 +175,13 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 
 	sessionID, detector, err := ct.startSession(ctx, args)
 	if err != nil {
+		// tmux-LEVEL exception: the session itself could not be created (e.g. no
+		// PTY in this runtime — "fork failed: Device not configured"), as opposed
+		// to a tmux-TASK error (a command that runs but exits non-zero, which is
+		// captured via the settle signal as a normal tool result). A tmux-level
+		// failure is a FRAMEWORK/environment exception — log it in full so it is
+		// diagnosable in the bot log, not silently returned as a plain tool error.
+		log.Errorf("[ActionTool] tmux-level exception (framework/environment), cmd=%q: %v", args.Command, err)
 		return nil, err
 	}
 
@@ -221,7 +228,9 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 		Env:     args.Env,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("action: failed to create tmux session: %w", err)
+		// Do not re-wrap the "failed to create tmux session" prefix (CreateSession
+		// already carries it plus the captured stderr); just scope it to action.
+		return "", nil, fmt.Errorf("action: %w", err)
 	}
 	sessionID := session.ID
 	detector := NewTmuxSettleDetector(sessionID, func() {

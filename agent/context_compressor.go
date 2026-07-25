@@ -114,12 +114,33 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// Resolve ALL refs from the projection into messages.
-	// Each resolved message is tagged with [evt_KEY|type] prefix for
-	// buildRetainedRefs tracking after compression.
+	// Resolve ALL refs from the projection into NATIVE timeline messages
+	// (D3 v2): assistant tool_calls and role=tool results keep protocol form —
+	// the model sees exactly its training distribution, leaving no textual
+	// call syntax to imitate. Pairing legality is enforced HERE at render time
+	// (single place): a result whose call is not in the rendered sequence
+	// (compacted away, or id lost) is demoted to a user-side input note —
+	// content preserved, so ANY compression window cut stays legal without
+	// the compressor being pairing-aware.
+	declared := make(map[string]bool)
+	consumed := make(map[string]bool)
 	resolved := make([]model.Message, 0, len(refs))
 	for _, ref := range refs {
 		msg := cc.resolveRef(ctx, ref)
+		switch msg.Role {
+		case model.RoleAssistant:
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" {
+					declared[tc.ID] = true
+				}
+			}
+		case model.RoleTool:
+			if msg.ToolID == "" || !declared[msg.ToolID] || consumed[msg.ToolID] {
+				msg = demoteToInputNote(msg)
+			} else {
+				consumed[msg.ToolID] = true
+			}
+		}
 		resolved = append(resolved, msg)
 	}
 
@@ -169,11 +190,10 @@ func (cc *ContextCompressor) Compress(
 	}
 }
 
-// resolveRef resolves a single EventReference to a model.Message.
-// Always tries MemoryStore first for full content; falls back to EventSummary.
-// The returned message is tagged with [evt_KEY|type] so that downstream
-// SmartCompressor and buildRetainedRefs can track which projection refs are
-// retained after compression.
+// resolveRef resolves a single EventReference to a native timeline message.
+// Full content comes from MemoryStore when available, falling back to the
+// reference's EventSummary. The result is tagged with [evt_KEY|type] so
+// SmartCompressor and buildRetainedRefs can track retained refs.
 func (cc *ContextCompressor) resolveRef(
 	ctx context.Context,
 	ref memory.EventReference,
@@ -186,45 +206,95 @@ func (cc *ContextCompressor) resolveRef(
 		}
 	}
 
-	// Always try MemoryStore for full content.
+	content := ""
+	var toolCalls []model.ToolCall
+	toolID := ""
+	resolved := false
 	if cc.memStore != nil && ref.EventKey > 0 {
 		full, err := cc.memStore.GetEvent(ref.EventKey)
 		if err == nil && full != nil {
-			if full.Response != nil && len(full.Response.Choices) > 0 {
-				msg := full.Response.Choices[0].Message
-				msg.Content = prefixEventKey(msg.Content, ref)
-				return msg
-			}
-			if full.Content != "" || len(full.ToolCalls) > 0 {
-				return model.Message{
-					Role:      eventTypeToRole(ref.EventType),
-					Content:   prefixEventKey(full.Content, ref),
-					ToolCalls: full.ToolCalls,
+			toolCalls = full.ToolCalls
+			toolID = full.ToolID
+			switch {
+			// FullEvent.Content is the authoritative (sanitized-at-storage) text;
+			// prefer it over the raw Response message.
+			case full.Content != "" || len(full.ToolCalls) > 0:
+				content = full.Content
+				resolved = true
+			case full.Response != nil && len(full.Response.Choices) > 0:
+				m := full.Response.Choices[0].Message
+				content = m.Content
+				if len(m.ToolCalls) > 0 {
+					toolCalls = m.ToolCalls
 				}
-			}
-			if full.EventSummary != "" {
-				return model.Message{
-					Role:    eventTypeToRole(ref.EventType),
-					Content: prefixEventKey(full.EventSummary, ref),
+				if toolID == "" {
+					toolID = m.ToolID
 				}
+				resolved = true
+			case full.EventSummary != "":
+				content = full.EventSummary
+				resolved = true
 			}
 		}
 	}
-
-	// Fallback: use EventSummary from the reference.
-	return cc.resolveSummaryRef(ref)
+	if !resolved {
+		content = ref.EventSummary
+		if content == "" {
+			content = "(历史事件摘要为空，可用 recall 检索)"
+		}
+	}
+	return renderTimelineMessage(ref, content, toolCalls, toolID)
 }
 
-// resolveSummaryRef builds a message from EventReference's summary fields.
-func (cc *ContextCompressor) resolveSummaryRef(ref memory.EventReference) model.Message {
-	role := eventTypeToRole(ref.EventType)
-	content := ref.EventSummary
-	if content == "" {
-		content = fmt.Sprintf("(历史事件摘要为空，可用 recall 检索)")
+// renderTimelineMessage renders one event in NATIVE protocol form (D3 v2):
+//   - thinking_plan → role=assistant with native ToolCalls restored from the
+//     stored event; content is prose only — the system NEVER generates textual
+//     call syntax into assistant history (any such syntax is imitable and
+//     leads models to fabricate tool calls in plain text)
+//   - action_command → role=tool with its ToolID (pairing legality against
+//     the rendered sequence is enforced by the caller, which demotes orphans
+//     via demoteToInputNote)
+//   - notifications and everything else → eventTypeToRole text
+func renderTimelineMessage(
+	ref memory.EventReference,
+	content string,
+	toolCalls []model.ToolCall,
+	toolID string,
+) model.Message {
+	switch ref.EventType {
+	case tagentevent.TypeThinkingPlan:
+		return model.Message{
+			Role:      model.RoleAssistant,
+			Content:   prefixEventKey(content, ref),
+			ToolCalls: toolCalls,
+		}
+	case tagentevent.TypeActionCommand:
+		return model.Message{
+			Role:    model.RoleTool,
+			ToolID:  toolID,
+			Content: prefixEventKey(content, ref),
+		}
+	default:
+		return model.Message{
+			Role:    eventTypeToRole(ref.EventType),
+			Content: prefixEventKey(content, ref),
+		}
+	}
+}
+
+// demoteToInputNote converts a tool-result message that cannot legally pair
+// (id lost, call compacted away, or duplicate answer) into a user-side input
+// note. Content and the correlation id are preserved; the sequence stays a
+// legal native conversation. This is a narrow render-time edge rule, not a
+// load-bearing repair layer.
+func demoteToInputNote(msg model.Message) model.Message {
+	note := msg.Content
+	if msg.ToolID != "" {
+		note = fmt.Sprintf("〔工具结果 tool_id=%s（其调用已被压缩）〕%s", msg.ToolID, msg.Content)
 	}
 	return model.Message{
-		Role:    role,
-		Content: prefixEventKey(content, ref),
+		Role:    model.RoleUser,
+		Content: note,
 	}
 }
 
@@ -240,7 +310,7 @@ func prefixEventKey(content string, ref memory.EventReference) string {
 	if eventType == "" {
 		eventType = "unknown"
 	}
-	return fmt.Sprintf("[evt_%d|%s] %s", ref.EventKey, eventType, content)
+	return fmt.Sprintf("[evt_%s|%s] %s", tagentevent.FormatEventKey(ref.EventKey), eventType, content)
 }
 
 // stripEventKeyPrefix removes a leading [evt_KEY|type] prefix from content.
@@ -293,7 +363,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		if retainedKeys[ref.EventKey] {
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
-			compressedKeys = append(compressedKeys, fmt.Sprintf("%d", ref.EventKey))
+			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp
 			}
@@ -316,96 +386,4 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	}
 
 	return retained
-}
-
-// extractCurrentTurnMessages identifies messages from the current ReAct
-// iteration that have NOT been persisted to the projection yet.
-//
-// args.Request.Messages has this structure (from framework ContentRequestProcessor + ReAct loop):
-//
-//	[system] [ContentRequestProcessor msgs (no prefix)] [ReAct iteration msgs (no prefix)]
-//
-// ContentRequestProcessor provides user messages from session history — these
-// are ALREADY in the projection (added via AppendEventHook). ReAct iteration
-// produces assistant (with tool_calls) and tool (result) messages — these are
-// NOT yet in the projection.
-//
-// Strategy:
-//  1. Scan from tail backwards to find the boundary between projection-resolved
-//     messages (with [evt_ prefix) and framework-provided messages (no prefix).
-//  2. From the unprefixed tail, filter out user messages (from ContentRequestProcessor,
-//     already in projection). Keep only assistant and tool messages (current ReAct turn).
-func extractCurrentTurnMessages(messages []model.Message, filterUnprefixedUser bool) []model.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-
-	// Find the last message that has an [evt_ prefix or is a system message.
-	// Everything after that is "current turn" (from framework, no prefix).
-	lastPrefixedIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
-		if msg.Role == model.RoleSystem {
-			lastPrefixedIdx = i
-			break
-		}
-		if strings.HasPrefix(msg.Content, "[evt_") {
-			lastPrefixedIdx = i
-			break
-		}
-	}
-
-	var tail []model.Message
-	if lastPrefixedIdx < 0 {
-		// No prefixed messages found — all non-system messages are from framework.
-		for _, msg := range messages {
-			if msg.Role != model.RoleSystem {
-				tail = append(tail, msg)
-			}
-		}
-	} else {
-		tail = messages[lastPrefixedIdx+1:]
-	}
-
-	if len(tail) == 0 {
-		return nil
-	}
-
-	// Filter out session echoes while preserving ReAct-internal messages.
-	//
-	// filterUnprefixedUser is determined by the caller (BeforeModel callback):
-	//   - false: sub-agent mode OR projection has no user yet — keep user messages
-	//   - true:  persistent loop where projection already has the user — drop echoes
-	//
-	// ReAct-internal messages (assistant with tool_calls + tool results) are
-	// always kept unconditionally.
-	var result []model.Message
-	for _, msg := range tail {
-		if strings.HasPrefix(msg.Content, "[evt_") {
-			// Projection-sourced message (shouldn't happen after
-			// lastPrefixedIdx cut, defensive).
-			result = append(result, msg)
-			continue
-		}
-		switch msg.Role {
-		case model.RoleUser:
-			if !filterUnprefixedUser {
-				result = append(result, msg)
-			}
-		case model.RoleAssistant:
-			if len(msg.ToolCalls) == 0 {
-				// Prior agent_output surfaced by ContentRequestProcessor.
-				continue
-			}
-			result = append(result, msg)
-		case model.RoleTool:
-			// Current-turn tool result (paired with the assistant tool_calls above).
-			result = append(result, msg)
-		default:
-			// Drop unprefixed system messages — they duplicate the
-			// projection/system prompt already present in args.
-			continue
-		}
-	}
-	return result
 }

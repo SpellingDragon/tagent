@@ -187,3 +187,28 @@ func TestWindowTimestampFromEventKey(t *testing.T) {
 		t.Errorf("WindowTimestampFromEventKey = %d, want %d", windowTS, expected)
 	}
 }
+
+// TestSnowflakeEventKey_AlwaysPositive locks the sign-bit invariant: real
+// event keys are ALWAYS positive (bit 63 clear) for every representable
+// partition — negative keys are reserved for synthetic summary references.
+// Regression guard for the 11-bit partition layout bug where partitions ≥
+// 1024 (e.g. FNV("plan")=1810 pre-mask) flipped the sign bit and broke every
+// EventKey > 0 guard (store resolution, idempotency, retained tracking).
+func TestSnowflakeEventKey_AlwaysPositive(t *testing.T) {
+	// Boundary partitions plus the historical offender ("plan").
+	partitions := []int{0, 1, 143, 786, partitionIDMask}
+	for _, pid := range partitions {
+		key := NewSnowflakeEventKey(pid, 0)
+		if key <= 0 {
+			t.Errorf("partition %d produced non-positive key %d (sign bit must stay clear)", pid, key)
+		}
+		if got := PartitionIDFromEventKey(key); got != pid {
+			t.Errorf("partition round-trip: got %d, want %d", got, pid)
+		}
+	}
+	if pid := PartitionIDFromName("plan"); pid > partitionIDMask {
+		t.Errorf("PartitionIDFromName must stay within mask, got %d", pid)
+	} else if key := NewSnowflakeEventKey(pid, 0); key <= 0 {
+		t.Errorf("FNV(plan) partition %d produced non-positive key %d", pid, key)
+	}
+}

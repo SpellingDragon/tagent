@@ -618,6 +618,11 @@ type PlainToolFactoryConfig struct {
 	Description string
 	Properties  map[string]any // Tool-specific config, deserialized by each factory
 
+	// WorkspaceRoot is the unified on-disk scratch root (default: .tagent-workspace).
+	// Tools that need a working/output directory derive it from here (e.g. the
+	// action/exec tool uses <root>/exec as its tmux command working directory).
+	WorkspaceRoot string
+
 	// Runtime dependencies (optional, injected by buildAgent).
 	// Most plain tools (e.g., exec) ignore these fields.
 	// Sub-tools that need runtime objects (e.g., skill_search needs SkillRepo,

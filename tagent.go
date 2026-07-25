@@ -289,7 +289,7 @@ func buildAgent(
 	var actionTool *action.ActionTool
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, rc, loader, cache, memStore, readPartitionIDs)
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -321,6 +321,7 @@ func buildAgent(
 			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,
 			ChunkSummaryLen:    acfg.Compress.ChunkSummaryLen,
 		},
+		WorkspaceRoot: acfg.WorkspaceRoot,
 	}
 	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {
 		agentCfg.SummaryModel = summaryModel
@@ -379,6 +380,7 @@ func buildAgent(
 func buildToolFromRef(
 	tr ToolRef,
 	cfg Config,
+	workspaceRoot string,
 	rc *runtimeConfig,
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
@@ -394,7 +396,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, rc, parentMemStore, readPartitionIDs, desc)
+		return buildPlainToolRef(tr, workspaceRoot, rc, parentMemStore, readPartitionIDs, desc)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -427,6 +429,9 @@ func buildAgentToolRef(
 			return nil, false, fmt.Errorf("create remote A2A agent %q: %w", tr.AgentID, err)
 		}
 		wrapper := agent.NewAgentToolWrapper(a2aAgent, desc, tr.EventParams, parentMemStore)
+		if tr.Async != nil && !*tr.Async {
+			wrapper.SetAsyncDisabled(true)
+		}
 		// Enable hot-reload for tool description if loaded from a file
 		if tr.DescriptionFile != "" {
 			wrapper.SetDescriptionSource(prompt.NewSource(loader, prompt.CompositeConfig{
@@ -457,6 +462,9 @@ func buildAgentToolRef(
 
 	// Wrap with AgentToolWrapper — this replaces agenttool.NewTool().
 	wrapper := agent.NewAgentToolWrapper(agentImpl, desc, tr.EventParams, parentMemStore)
+	if tr.Async != nil && !*tr.Async {
+		wrapper.SetAsyncDisabled(true)
+	}
 	// Enable hot-reload for tool description if loaded from a file
 	if tr.DescriptionFile != "" {
 		wrapper.SetDescriptionSource(prompt.NewSource(loader, prompt.CompositeConfig{
@@ -472,6 +480,7 @@ func buildAgentToolRef(
 // recall_query etc. can access them during factory creation.
 func buildPlainToolRef(
 	tr ToolRef,
+	workspaceRoot string,
 	rc *runtimeConfig,
 	memStore memory.MemoryStore,
 	readPartitionIDs []int,
@@ -487,6 +496,7 @@ func buildPlainToolRef(
 		ID:               tr.ID,
 		Description:      desc,
 		Properties:       tr.Properties,
+		WorkspaceRoot:    workspaceRoot,
 		MemStore:         memStore,
 		SkillRepo:        rc.skillRepo,
 		MCPToolSets:      rc.mcpToolSets,

@@ -404,7 +404,7 @@ func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
 // ============================================================================
 
 func TestParseEventKeyAndType_Valid(t *testing.T) {
-	key, evtType, remainder := parseEventKeyAndType("[evt_123456789|task] user request content")
+	key, evtType, remainder := parseEventKeyAndType("[evt_75bcd15|task] user request content")
 	assert.Equal(t, int64(123456789), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "user request content", remainder)
@@ -427,7 +427,7 @@ func TestParseEventKeyAndType_NoBar(t *testing.T) {
 }
 
 func TestParseEventKeyAndType_LargeKey(t *testing.T) {
-	key, evtType, _ := parseEventKeyAndType("[evt_9223372036854775807|memory] large snowflake key")
+	key, evtType, _ := parseEventKeyAndType("[evt_7fffffffffffffff|memory] large snowflake key")
 	assert.Equal(t, int64(9223372036854775807), key)
 	assert.Equal(t, "memory", evtType)
 }
@@ -438,7 +438,7 @@ func TestParseEventKeyAndType_EmptyContent(t *testing.T) {
 }
 
 func TestParseEventKeyAndType_OnlyPrefix(t *testing.T) {
-	key, evtType, remainder := parseEventKeyAndType("[evt_42|task]")
+	key, evtType, remainder := parseEventKeyAndType("[evt_2a|task]")
 	assert.Equal(t, int64(42), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "", remainder)
@@ -452,8 +452,8 @@ func TestCollectCompressedEventInfo_SingleKey(t *testing.T) {
 	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_100|external_input] hello"},
-			{Role: model.RoleAssistant, Content: "[evt_101|thinking_plan] world"},
+			{Role: model.RoleUser, Content: "[evt_64|external_input] hello"},
+			{Role: model.RoleAssistant, Content: "[evt_65|thinking_plan] world"},
 		}},
 	}
 
@@ -470,8 +470,8 @@ func TestCollectCompressedEventInfo_DuplicateKeys(t *testing.T) {
 	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_100|external_input] task 1"},
-			{Role: model.RoleAssistant, Content: "[evt_100|task] result 1"},
+			{Role: model.RoleUser, Content: "[evt_64|external_input] task 1"},
+			{Role: model.RoleAssistant, Content: "[evt_64|task] result 1"},
 		}},
 	}
 
@@ -484,7 +484,7 @@ func TestCollectCompressedEventInfo_MessagesWithoutPrefix(t *testing.T) {
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
 			{Role: model.RoleSystem, Content: "system prompt"},
-			{Role: model.RoleUser, Content: "[evt_200|external_input] hello"},
+			{Role: model.RoleUser, Content: "[evt_c8|external_input] hello"},
 		}},
 	}
 
@@ -507,13 +507,13 @@ func TestCollectCompressedEventInfo_DistinctEventKeys(t *testing.T) {
 	sc := NewSmartCompressor()
 	segments := []*TaskSegment{
 		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_111|external_input] task 1"},
+			{Role: model.RoleUser, Content: "[evt_6f|external_input] task 1"},
 		}},
 		{Messages: []model.Message{
-			{Role: model.RoleAssistant, Content: "[evt_222|thinking_plan] result 1"},
+			{Role: model.RoleAssistant, Content: "[evt_de|thinking_plan] result 1"},
 		}},
 		{Messages: []model.Message{
-			{Role: model.RoleTool, Content: "[evt_333|action_command] tool result"},
+			{Role: model.RoleTool, Content: "[evt_14d|action_command] tool result"},
 		}},
 	}
 
@@ -655,6 +655,19 @@ func TestSummarizeBatches_RoleIsAssistant(t *testing.T) {
 // eventTypeToRole tests
 // ============================================================================
 
+// TestBuildBatchSummaryPrompt_KeepsCorrelationIdentifiers locks the D7
+// compression constraint: the summarization prompt must instruct the model to
+// preserve correlation identifiers (task id / tool_id / tool name) so
+// notifications and results stay content-linkable after compression.
+func TestBuildBatchSummaryPrompt_KeepsCorrelationIdentifiers(t *testing.T) {
+	prompt := buildBatchSummaryPrompt(3, 1, 2, 500, 2000)
+	for _, want := range []string{"关联标识", "task id", "tool_id", "工具名"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("summary prompt must require keeping %q, got:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestEventTypeToRole(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -663,7 +676,7 @@ func TestEventTypeToRole(t *testing.T) {
 	}{
 		{"external_input", "external_input", model.RoleUser},
 		{"agent_output", "agent_output", model.RoleAssistant},
-		{"action_command", "action_command", model.RoleTool},
+		{"action_command", "action_command", model.RoleUser},
 		{"thinking_plan", "thinking_plan", model.RoleAssistant},
 		{"empty", "", model.RoleUser},
 		{"unknown_type", "unknown_type", model.RoleUser},

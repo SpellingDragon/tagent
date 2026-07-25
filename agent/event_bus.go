@@ -118,7 +118,15 @@ func newTaskSettledEvent(task *Task, sig SettleSignal) *AgentEvent {
 	if result != "" {
 		fmt.Fprintf(&b, "\n结果:\n%s", result)
 	}
-	return NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
+	evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
+	// Carry the originating turn's opaque routing baggage (chat_id, ...) captured
+	// at spawn time, so the reclaim turn's output can be delivered back to the
+	// originating session. Reuses the existing extractRootMetadata → meta_*
+	// pipeline. (async-result-delivery.)
+	for k, v := range task.Spec.Origin {
+		evt.Metadata[k] = v
+	}
+	return evt
 }
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,14 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -51,9 +54,9 @@ func (p *MemoryPlugin) Register(r *plugin.Registry) {
 	r.OnEvent(p.onEvent)
 }
 
-// OnEvent is the exported entry point for direct invocation by the
-// event-driven AgentLoop. It delegates to the internal onEvent handler
-// and performs the same persistence + causal chain + StateDelta work.
+// OnEvent is the exported wrapper around the internal onEvent hook. Production
+// invocation happens through the framework's plugin pipeline (Register →
+// r.OnEvent); the exported form exists for direct use in tests and tools.
 func (p *MemoryPlugin) OnEvent(
 	ctx context.Context,
 	inv *agent.Invocation,
@@ -78,6 +81,26 @@ func (p *MemoryPlugin) onEvent(
 	// "external_input" with empty content, and they end up in the projection
 	// as misleading user-role placeholders that crowd out real context.
 	if evt.Response == nil || len(evt.Response.Choices) == 0 {
+		return evt, nil
+	}
+
+	// Skip streaming PARTIAL (delta) events: only aggregated events are stored
+	// and projected (unified-event-projection D8 invariant). A no-op for
+	// non-streaming deployments; for streaming, this keeps intermediate deltas
+	// (empty content, unaggregated tool_calls) out of the store and projection.
+	if evt.Response.IsPartial {
+		return evt, nil
+	}
+
+	// Skip degenerate empty final responses: an agent_output (assistant, no
+	// tool_calls) with empty content carries no information. Persisting it would
+	// pollute the projection/history with an empty assistant message and store a
+	// summary_len=0 record. This mirrors RunFlow's echo suppression and the
+	// consumer's drop, making "empty final = non-event" consistent at the storage
+	// layer too (async-result-delivery H1). Tool-call turns (empty content WITH
+	// tool_calls → thinking_plan) and non-empty finals are unaffected.
+	if m := evt.Response.Choices[0].Message; m.Content == "" && tagentevent.ExtractEventType(m) == tagentevent.TypeAgentOutput {
+		log.Debugf("[Memory] skip degenerate empty final (agent_output, no content/tool_calls)")
 		return evt, nil
 	}
 
@@ -116,16 +139,23 @@ func (p *MemoryPlugin) onEvent(
 
 	if evt.Response != nil && len(evt.Response.Choices) > 0 {
 		msg := evt.Response.Choices[0].Message
-		fullEvent.Content = msg.Content
+		fullEvent.Content = sanitizeAssistantContent(msg)
 		fullEvent.ToolCalls = msg.ToolCalls
+		fullEvent.ToolID = msg.ToolID
 		fullEvent.Response = evt.Response
 	}
 
-	// 7. Persist to MemoryStore
+	// 7. Persist to MemoryStore, then project at the same synchronous point
+	// (write unification, unified-event-projection D1): the pipeline is the
+	// single place where a stored event also enters the invocation's
+	// projection. The projection's own EventKey idempotency (L1) makes
+	// re-delivery harmless.
+	stored := false
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
 			log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
 		} else {
+			stored = true
 			// Set parent relationship via RelationStoreProvider (content-relation separation)
 			if parentKey != 0 {
 				if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
@@ -138,15 +168,28 @@ func (p *MemoryPlugin) onEvent(
 				eventKey, partitionID, eventType, len(eventSummary))
 		}
 	}
+	if stored {
+		if sink, ok := ProjectionSinkFrom(ctx); ok {
+			sink.Append(memory.EventReference{
+				EventKey:     eventKey,
+				PartitionID:  partitionID,
+				EventType:    eventType,
+				EventSummary: eventSummary,
+				Timestamp:    timestamp,
+				Role:         string(evt.Response.Choices[0].Message.Role),
+			})
+		}
+	}
 
-	// 8. Write back EventKey, PartitionID, EventType, and EventSummary to StateDelta
+	// 8. Write back the storage identifiers to StateDelta (metadata contract:
+	// keys defined once in tagentevent, unified-event-projection D4)
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
-	evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
-	evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
-	evt.StateDelta["event_type"] = []byte(eventType)
-	evt.StateDelta["event_summary"] = []byte(eventSummary)
+	evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey))
+	evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
+	evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
+	evt.StateDelta[tagentevent.MetaKeyEventSummary] = []byte(eventSummary)
 
 	// 9. Update independent causal chain (thread-safe)
 	p.mu.Lock()
@@ -154,6 +197,26 @@ func (p *MemoryPlugin) onEvent(
 	p.mu.Unlock()
 
 	return evt, nil
+}
+
+// fakeEvtPrefixRe matches model-fabricated timeline prefixes at the start of
+// assistant output. The [evt_KEY|type] prefix is a SYSTEM-generated rendering
+// artifact; when a model imitates it, the fake key would poison prefixEventKey
+// (which skips already-prefixed content) and buildRetainedRefs' retained-key
+// scan. Strip it at the storage boundary.
+var fakeEvtPrefixRe = regexp.MustCompile(`^(\[evt_-?(0[xX])?[0-9a-fA-F]+\|[a-z_]+\]\s*)+`)
+
+// sanitizeAssistantContent strips fabricated [evt_...] prefixes from assistant
+// output before storage. Non-assistant content is stored verbatim.
+func sanitizeAssistantContent(msg model.Message) string {
+	if msg.Role != model.RoleAssistant || msg.Content == "" {
+		return msg.Content
+	}
+	cleaned := fakeEvtPrefixRe.ReplaceAllString(msg.Content, "")
+	if cleaned != msg.Content {
+		log.Warnf("[Memory] stripped model-fabricated [evt_...] prefix from assistant output")
+	}
+	return cleaned
 }
 
 // extractAgentName extracts the agent name from Invocation.
@@ -187,57 +250,4 @@ func (p *MemoryPlugin) inferEventInfo(evt *event.Event) (string, string) {
 	opts := tagentevent.DefaultOptionsForLLMContext()
 	summary := tagentevent.GenerateEventSummary(msg, eventType, opts)
 	return eventType, summary
-}
-
-// int64ToString converts int64 to string using fmt.Sprintf.
-func int64ToString(n int64) string {
-	return formatInt64(n)
-}
-
-// intToString converts int to string.
-func intToString(n int) string {
-	return formatInt(n)
-}
-
-// formatInt64 and formatInt are overridable for testing.
-var (
-	formatInt64 = func(n int64) string { return defaultFormatInt64(n) }
-	formatInt   = func(n int) string { return defaultFormatInt(n) }
-)
-
-func defaultFormatInt64(n int64) string {
-	return simpleItoa64(n)
-}
-
-func defaultFormatInt(n int) string {
-	return simpleItoa(int64(n))
-}
-
-// simpleItoa64 converts int64 to string without importing strconv.
-func simpleItoa64(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
-}
-
-// simpleItoa converts int to string.
-func simpleItoa(n int64) string {
-	return simpleItoa64(n)
 }

@@ -19,13 +19,12 @@ import (
 // wechat-bot 日志中失败的场景是主 agent 调 tool "plan"，
 // 而 AgentToolWrapper.Call() 内部用 agent.Run() 触发 plan agent。
 //
-// 假设根因：
+// 假设根因（历史，已由 unified-event-projection 根除）：
 //
 //	AgentToolWrapper.Run() 创建临时 invBus + 新 ContextManager + 新 session，
-//	user message 作为 external_input 发到 invBus，被 runEventLoop 消费后
-//	调 runFlow；框架 ContentRequestProcessor 把 session 事件加入 request，
-//	但新 session 中可能没有 user message event，或 extractCurrentTurnMessages
-//	把 unprefixed user message 过滤掉了。
+//	user message 作为 external_input 发到 invBus；旧实现中当前轮抽取启发式
+//	可能把 unprefixed user message 过滤掉。现在 user 消息经插件管线同步
+//	投影，装配仅从投影渲染，该类丢失不再可能。
 //
 // 运行方式：
 //
