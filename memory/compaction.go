@@ -263,7 +263,7 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	}
 
 	// 2. Filter: remove tombstoned events
-	events = c.filterTombstoned(events)
+	events, dead := c.filterTombstoned(events)
 
 	// 3. Repair: fix dangling parent references
 	events, err = c.repairDanglingRefs(events)
@@ -307,6 +307,9 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
+	// 7. Finalize tombstones: the dead events are physically gone now.
+	c.finalizeTombstones(pid, dead)
+
 	return nil
 }
 
@@ -337,18 +340,49 @@ func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error)
 	return events, nil
 }
 
-// filterTombstoned removes tombstoned events from the list.
-func (c *Compactor) filterTombstoned(events []FullEvent) []FullEvent {
+// filterTombstoned removes tombstoned events from the list, returning the
+// surviving events and the keys of the dead ones. The dead keys let the
+// compaction finalize the tombstones: once the rewritten segment (without
+// the dead events) is durably in place and the source segments are deleted,
+// the tombstone has nothing left to guard — keeping it would leak an entry
+// in the in-memory set, a {pid}:tomb:{key} KV key, and a dangling
+// {pid}:idx:{key} forever.
+func (c *Compactor) filterTombstoned(events []FullEvent) ([]FullEvent, []int64) {
 	if c.tombstone == nil {
-		return events
+		return events, nil
 	}
 	var result []FullEvent
+	var dead []int64
 	for _, evt := range events {
 		if !c.tombstone.IsTombstone(evt.EventKey) {
 			result = append(result, evt)
+		} else {
+			dead = append(dead, evt.EventKey)
 		}
 	}
-	return result
+	return result, dead
+}
+
+// finalizeTombstones removes fully-compacted-away events' remaining traces:
+// their dangling index keys and their tombstone entries (memory + KV).
+// Crash between segment cleanup and this step is benign — stale tombstones
+// are harmless and this finalization is idempotent.
+func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
+	if len(dead) == 0 {
+		return
+	}
+	batchOps := make([]KVOp, 0, len(dead))
+	for _, key := range dead {
+		batchOps = append(batchOps, KVOp{Type: "delete", Key: IndexKeyStr(pid, key)})
+	}
+	if err := c.kv.KVBatch(batchOps); err != nil {
+		log.Errorf("[Compaction] delete dangling idx failed pid=%d: %v", pid, err)
+	}
+	if c.tombstone != nil {
+		if err := c.tombstone.RemoveTombstones(dead); err != nil {
+			log.Errorf("[Compaction] remove tombstones failed pid=%d: %v", pid, err)
+		}
+	}
 }
 
 // repairDanglingRefs fixes parent references that point to tombstoned events.
@@ -455,7 +489,7 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 		return nil
 	}
 
-	events = c.filterTombstoned(events)
+	events, dead := c.filterTombstoned(events)
 	events, err = c.repairDanglingRefs(events)
 	if err != nil {
 		return fmt.Errorf("repair failed: %w", err)
@@ -500,6 +534,9 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	if err := c.deleteSegments(pid, windowTSs); err != nil {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
+
+	// Finalize tombstones: dead events are physically gone from L3 too.
+	c.finalizeTombstones(pid, dead)
 
 	return nil
 }

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -238,4 +239,54 @@ func TestCompactor_ZeroConfig(t *testing.T) {
 	assert.Equal(t, 24, compactor.config.L1Threshold)
 	assert.Equal(t, 7, compactor.config.L2Threshold)
 	assert.Equal(t, 5*time.Minute, compactor.config.CheckInterval)
+}
+
+// TestCompaction_FinalizesTombstones: after compaction physically removes a
+// tombstoned event, its tombstone entry (memory+KV) and dangling idx key are
+// finalized — otherwise every deleted event leaks three traces forever.
+func TestCompaction_FinalizesTombstones(t *testing.T) {
+	dir := t.TempDir()
+	kv, err := NewLocalFileKV(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kv.Close()
+
+	rel := newSimpleInMemRelationStore()
+	ts := NewTombstoneSet(rel, kv, 7)
+	c := NewCompactor(nil, kv, rel, ts, DefaultCompactionConfig())
+
+	// Two L1 events in one hourly window; tombstone the second.
+	window := WindowTimestamp(1704067200, DefaultWindowSize)
+	keyAlive := NewSnowflakeEventKey(7, 1704067200*1000)
+	keyDead := NewSnowflakeEventKey(7, 1704067201*1000)
+	for seq, k := range []int64{keyAlive, keyDead} {
+		evt := FullEvent{EventKey: k, PartitionID: 7, EventType: "external_input", Timestamp: 1704067200000}
+		raw, _ := json.Marshal(evt)
+		_ = kv.KVPut(EventKeyStr(7, window, seq), string(raw))
+		_ = kv.KVPut(IndexKeyStr(7, k), "x")
+	}
+	meta := SegmentMeta{PartitionID: 7, WindowTS: window, Layer: 1, EventCount: 2, Sealed: true}
+	mraw, _ := json.Marshal(meta)
+	_ = kv.KVPut(MetaKeyStr(7, window), string(mraw))
+
+	if err := ts.MarkTombstone(keyDead); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CompactL1ToL2(7, []int64{window}); err != nil {
+		t.Fatalf("CompactL1ToL2: %v", err)
+	}
+
+	if ts.IsTombstone(keyDead) {
+		t.Errorf("tombstone must be finalized after compaction removed the event")
+	}
+	if _, err := kv.KVGet(TombstoneKeyStr(7, keyDead)); err == nil {
+		t.Errorf("tombstone KV key must be deleted")
+	}
+	if _, err := kv.KVGet(IndexKeyStr(7, keyDead)); err == nil {
+		t.Errorf("dangling idx key must be deleted")
+	}
+	if _, err := kv.KVGet(IndexKeyStr(7, keyAlive)); err != nil {
+		t.Errorf("alive event's idx must survive: %v", err)
+	}
 }
