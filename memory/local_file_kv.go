@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,71 +12,102 @@ import (
 	"time"
 )
 
-// LocalFileKV is a file-backed KVStore that persists all key-value pairs
-// to a single JSON file (kv.json) in the given data directory.
+// LocalFileKV is a file-backed KVStore with a snapshot + WAL layout:
 //
-// It loads all data into memory on startup and uses a deferred flush strategy:
-// writes update the in-memory map immediately (reads are always consistent) but
-// disk persistence is batched — flushed every flushInterval or every flushThreshold
-// writes, whichever comes first. This avoids serializing the entire map on every
-// single KVPut call, which becomes O(n) expensive as the store grows.
+//	kv.json      — full-map snapshot (rewritten only at compaction)
+//	kv.wal.jsonl — append-only op log, one JSON op per line
 //
-// It has no external binary dependencies (unlike RustVikingClient which requires
-// the rustviking CLI).
+// Writes update the in-memory map immediately (reads are always consistent)
+// and enqueue an op; the op buffer is appended to the WAL every flushInterval
+// or every flushThreshold writes. Appending is O(pending ops) — the full map
+// is NOT reserialized per flush (the old single-file layout rewrote the
+// entire store every flush, which grew O(n) with history: 33MB per 2s on a
+// long-lived deployment).
+//
+// Compaction (snapshot rewrite + WAL truncate) triggers only when the WAL
+// exceeds compactWALBytes, amortizing the O(n) cost over megabytes of
+// appends. Startup loads the snapshot then replays the WAL; a torn final
+// line from a crash is tolerated (ignored).
+//
+// The physical layout thus aligns with the store's logical model: hot
+// increments append (like L0 window writes), full rewrites happen only at
+// compaction points (like segment sealing) — not on every flush.
+//
+// It has no external binary dependencies (unlike RustVikingClient which
+// requires the rustviking CLI).
 type LocalFileKV struct {
 	mu       sync.Mutex
 	data     map[string]string
-	filePath string
+	snapPath string
+	walPath  string
 
 	// Deferred flush state
-	dirty     bool
-	writeCnt  int
+	pending  []walOp // ops not yet appended to the WAL file
+	walSize  int64   // current WAL file size in bytes
+	writeCnt int
+	closed   bool
+
 	flushDone chan struct{}
 }
 
+// walOp is a single WAL record. Op is "p" (put) or "d" (delete).
+type walOp struct {
+	Op string `json:"o"`
+	K  string `json:"k"`
+	V  string `json:"v,omitempty"`
+}
+
 const (
-	// flushInterval is the maximum delay between a write and its disk persistence.
+	// flushInterval is the maximum delay between a write and its WAL persistence.
 	flushInterval = 2 * time.Second
-	// flushThreshold forces a flush after this many unflushed writes.
+	// flushThreshold forces a WAL append after this many unflushed writes.
 	flushThreshold = 50
+	// compactWALBytes triggers snapshot compaction once the WAL grows past it.
+	compactWALBytes = 4 << 20 // 4 MiB
 )
 
-// NewLocalFileKV creates a LocalFileKV backed by kv.json in the given dataDir.
-// If kv.json already exists, its contents are loaded into memory.
-// The dataDir is created if it does not exist.
-// Any leftover .tmp files from a crashed flush are cleaned up on startup.
-// A background goroutine is started to periodically flush dirty data to disk.
+// NewLocalFileKV creates a LocalFileKV backed by kv.json (snapshot) and
+// kv.wal.jsonl (op log) in the given dataDir. Existing data is loaded on
+// startup: snapshot first, then WAL replay (torn tail lines from a crash are
+// ignored). Directories and leftover .tmp files are handled. A background
+// goroutine periodically flushes pending ops.
+//
+// Backward compatible with the previous single-file layout: an old kv.json
+// simply loads as the snapshot (no WAL present).
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
 	}
 
-	// Clean up leftover .tmp files from a crashed flush
-	tmpPath := filepath.Join(dataDir, "kv.json.tmp")
-	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("cleanup kv tmp file %s: %w", tmpPath, err)
-	}
-
 	kv := &LocalFileKV{
 		data:      make(map[string]string),
-		filePath:  filepath.Join(dataDir, "kv.json"),
+		snapPath:  filepath.Join(dataDir, "kv.json"),
+		walPath:   filepath.Join(dataDir, "kv.wal.jsonl"),
 		flushDone: make(chan struct{}),
 	}
 
-	// Load existing data if the file exists
-	if _, err := os.Stat(kv.filePath); err == nil {
-		if err := kv.load(); err != nil {
-			return nil, fmt.Errorf("load kv file %s: %w", kv.filePath, err)
+	// Clean up leftover snapshot tmp from a crashed compaction.
+	if err := os.Remove(kv.snapPath + ".tmp"); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cleanup kv tmp file: %w", err)
+	}
+
+	if _, err := os.Stat(kv.snapPath); err == nil {
+		if err := kv.loadSnapshot(); err != nil {
+			return nil, fmt.Errorf("load kv snapshot %s: %w", kv.snapPath, err)
+		}
+	}
+	if st, err := os.Stat(kv.walPath); err == nil {
+		kv.walSize = st.Size()
+		if err := kv.replayWAL(); err != nil {
+			return nil, fmt.Errorf("replay kv wal %s: %w", kv.walPath, err)
 		}
 	}
 
-	// Start background flush goroutine
 	go kv.flushLoop()
-
 	return kv, nil
 }
 
-// flushLoop periodically flushes dirty data to disk.
+// flushLoop periodically appends pending ops to the WAL.
 func (k *LocalFileKV) flushLoop() {
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
@@ -84,19 +116,15 @@ func (k *LocalFileKV) flushLoop() {
 		case <-ticker.C:
 			_ = k.Sync() // best-effort periodic flush
 		case <-k.flushDone:
-			// Final flush on close — must take the lock like every other
-			// flush path (flushLocked requires it; calling it bare races
-			// with concurrent writers on the data map).
-			_ = k.Sync()
+			// Final flush is handled synchronously by Close; nothing to do.
 			return
 		}
 	}
 }
 
-// load reads the JSON file into the in-memory map.
-// Caller must hold the mutex.
-func (k *LocalFileKV) load() error {
-	raw, err := os.ReadFile(k.filePath)
+// loadSnapshot reads the snapshot file into the in-memory map.
+func (k *LocalFileKV) loadSnapshot() error {
+	raw, err := os.ReadFile(k.snapPath)
 	if err != nil {
 		return err
 	}
@@ -106,75 +134,158 @@ func (k *LocalFileKV) load() error {
 	return json.Unmarshal(raw, &k.data)
 }
 
-// flush writes the in-memory map to the JSON file atomically.
-// Caller must hold the mutex.
-func (k *LocalFileKV) flush() error {
-	raw, err := json.Marshal(k.data)
+// replayWAL applies WAL ops on top of the snapshot. A torn (unparseable)
+// final line — the signature of a crash mid-append — stops replay silently;
+// any unparseable line before the end is a real corruption and is reported.
+func (k *LocalFileKV) replayWAL() error {
+	f, err := os.Open(k.walPath)
 	if err != nil {
-		return fmt.Errorf("marshal kv data: %w", err)
-	}
-	// Write to temp file then rename for atomicity
-	tmpPath := k.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, raw, 0644); err != nil {
-		return fmt.Errorf("write kv tmp file %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, k.filePath); err != nil {
-		return fmt.Errorf("rename kv file %s: %w", k.filePath, err)
-	}
-	return nil
-}
-
-// flushLocked flushes if dirty, clearing the dirty flag.
-// Caller must hold the mutex.
-func (k *LocalFileKV) flushLocked() error {
-	if !k.dirty {
-		return nil
-	}
-	if err := k.flush(); err != nil {
 		return err
 	}
-	k.dirty = false
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 64<<20) // allow large values
+	var pendingErr error
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		if pendingErr != nil {
+			return fmt.Errorf("wal corruption (bad line not at tail): %w", pendingErr)
+		}
+		var op walOp
+		if err := json.Unmarshal(line, &op); err != nil {
+			pendingErr = err // tolerated iff it is the final line
+			continue
+		}
+		switch op.Op {
+		case "p":
+			k.data[op.K] = op.V
+		case "d":
+			delete(k.data, op.K)
+		}
+	}
+	return sc.Err()
+}
+
+// appendWALLocked appends pending ops to the WAL file and triggers
+// compaction when the WAL exceeds compactWALBytes.
+// Caller must hold the mutex.
+func (k *LocalFileKV) appendWALLocked() error {
+	if len(k.pending) == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(k.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open kv wal: %w", err)
+	}
+	w := bufio.NewWriter(f)
+	var written int64
+	for _, op := range k.pending {
+		raw, err := json.Marshal(op)
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("marshal wal op: %w", err)
+		}
+		n1, _ := w.Write(raw)
+		n2, _ := w.WriteString("\n")
+		written += int64(n1 + n2)
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		return fmt.Errorf("flush kv wal: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close kv wal: %w", err)
+	}
+	k.pending = k.pending[:0]
 	k.writeCnt = 0
+	k.walSize += written
+
+	if k.walSize >= compactWALBytes {
+		return k.compactLocked()
+	}
 	return nil
 }
 
-// Sync forces an immediate flush of any pending writes to disk.
+// compactLocked rewrites the snapshot from the in-memory map and truncates
+// the WAL. Atomic via tmp+rename; the WAL is removed only after the new
+// snapshot is durably in place (crash between the two steps merely replays
+// ops that are already in the snapshot — replay is idempotent).
+// Caller must hold the mutex.
+func (k *LocalFileKV) compactLocked() error {
+	raw, err := json.Marshal(k.data)
+	if err != nil {
+		return fmt.Errorf("marshal kv snapshot: %w", err)
+	}
+	tmp := k.snapPath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0644); err != nil {
+		return fmt.Errorf("write kv snapshot tmp: %w", err)
+	}
+	if err := os.Rename(tmp, k.snapPath); err != nil {
+		return fmt.Errorf("rename kv snapshot: %w", err)
+	}
+	if err := os.Remove(k.walPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("truncate kv wal: %w", err)
+	}
+	k.walSize = 0
+	return nil
+}
+
+// Sync forces an immediate append of pending ops to the WAL.
 // Safe to call concurrently.
 func (k *LocalFileKV) Sync() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.flushLocked()
+	return k.appendWALLocked()
 }
 
-// Close flushes pending writes and stops the background flush goroutine.
-// The final flush is performed synchronously here (not delegated to the
-// flush goroutine) so that callers get a durability guarantee: when Close
-// returns, all acknowledged writes are on disk. After Close, the KV is no
-// longer usable.
+// Compact forces a snapshot rewrite + WAL truncation regardless of WAL size.
+func (k *LocalFileKV) Compact() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.appendWALLocked(); err != nil {
+		return err
+	}
+	return k.compactLocked()
+}
+
+// Close flushes pending ops and stops the background flush goroutine.
+// The final flush is performed synchronously so callers get a durability
+// guarantee: when Close returns, all acknowledged writes are on disk.
+// After Close, the KV is no longer usable.
 func (k *LocalFileKV) Close() error {
+	k.mu.Lock()
+	if k.closed {
+		k.mu.Unlock()
+		return nil
+	}
+	k.closed = true
+	k.mu.Unlock()
 	close(k.flushDone)
 	return k.Sync()
 }
 
-// markDirty marks the store as needing a flush and triggers an immediate
-// flush if the write threshold has been reached.
-// Caller must hold the mutex.
-func (k *LocalFileKV) markDirty() {
-	k.dirty = true
+// enqueueLocked records an op and appends to the WAL early when the write
+// threshold is reached. Caller must hold the mutex.
+func (k *LocalFileKV) enqueueLocked(op walOp) {
+	k.pending = append(k.pending, op)
 	k.writeCnt++
 	if k.writeCnt >= flushThreshold {
-		_ = k.flushLocked()
+		_ = k.appendWALLocked()
 	}
 }
 
-// KVPut stores a key-value pair. The write is persisted to disk
-// asynchronously (within flushInterval) or immediately if the write
+// KVPut stores a key-value pair. The write is persisted to the WAL
+// asynchronously (within flushInterval) or immediately when the write
 // threshold is reached.
 func (k *LocalFileKV) KVPut(key, value string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.data[key] = value
-	k.markDirty()
+	k.enqueueLocked(walOp{Op: "p", K: key, V: value})
 	return nil
 }
 
@@ -190,12 +301,12 @@ func (k *LocalFileKV) KVGet(key string) (string, error) {
 	return value, nil
 }
 
-// KVDelete removes a key. The change is persisted to disk asynchronously.
+// KVDelete removes a key. The change is persisted asynchronously.
 func (k *LocalFileKV) KVDelete(key string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	delete(k.data, key)
-	k.markDirty()
+	k.enqueueLocked(walOp{Op: "d", K: key})
 	return nil
 }
 
@@ -247,7 +358,7 @@ func (k *LocalFileKV) KVRange(start, end string, limit int) ([]KVPair, error) {
 }
 
 // KVBatch applies a batch of put/delete operations atomically and persists
-// to disk asynchronously.
+// them asynchronously.
 func (k *LocalFileKV) KVBatch(ops []KVOp) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -256,12 +367,13 @@ func (k *LocalFileKV) KVBatch(ops []KVOp) error {
 		switch op.Type {
 		case "put":
 			k.data[op.Key] = op.Value
+			k.enqueueLocked(walOp{Op: "p", K: op.Key, V: op.Value})
 		case "delete":
 			delete(k.data, op.Key)
+			k.enqueueLocked(walOp{Op: "d", K: op.Key})
 		default:
 			return fmt.Errorf("unknown batch op type: %s", op.Type)
 		}
 	}
-	k.markDirty()
 	return nil
 }
