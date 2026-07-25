@@ -544,7 +544,8 @@ tagent/agent
     └── SmartCompress（不直接依赖，但因果链信息来自 MemoryStore）
 
 tagent/tool
-    ├── RecallAgent → recall_query / recall_get / recall_recent / recall_trace（跨 Session）
+    ├── memory_recall（主 agent 直持纯函数：items 票据精确回补 / query 关键词检索）
+    ├── RecallAgent → recall_query / recall_get / recall_recent / recall_trace（复杂检索/多跳编排）
     └── KnowledgeAgent → memory_query（上下文感知搜索）
 
 tagent (root)
@@ -581,7 +582,8 @@ MemoryStore 的读取方按频率和场景分层：
 | 读取方 | 频率 | 场景 |
 |--------|------|------|
 | **AgentToolWrapper** | 🔥 最高频 | 顶层 LLM 筛选 `event_keys` → 传给子 tool → Wrapper 从 `parentStore` 取完整 `FullEvent` → 注入子 Agent 作为上下文 |
-| **RecallAgent** 子工具 | 中频 | 跨 Session 深层检索：`recall_query`（条件查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
+| **memory_recall** 纯函数工具 | 高频 | 召回标准协议：`items=[{key,hint?}]` 票据精确回补（未命中显式 miss）/ `query` 关键词检索——确定性路径无 LLM 中间层 |
+| **RecallAgent** 子工具 | 中频 | 复杂检索/多跳编排：`recall_query`（条件查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
 | **KnowledgeAgent** 子工具 | 低~中频 | 通过 `memory_query` 从父级 MemoryStore 查历史，辅助技能/MCP 搜索 |
 | **直接访问** (`TagentAgent.MemStore()`) | 调试/测试 | 开发阶段手工查事件 |
 

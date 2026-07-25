@@ -2,25 +2,27 @@
 
 ## 一、模块定位
 
-`tagent/event` 是 tagent 的**事件类型与摘要工具**包，为 `MemoryPlugin` 和 `SummaryPlugin` 提供统一的事件分类和摘要生成能力。
+`tagent/event` 是 tagent 的**事件类型与元数据契约**包，为 `MemoryPlugin` 和 `SummaryPlugin` 提供统一的事件分类、`event_summary` 视图生成与事件元数据单点保障。
 
 **核心职责**：
 - 定义 tagent 专属的事件类型常量（`external_input`、`agent_output` 等）
 - 提供事件类型推断函数（`ExtractEventType`）
-- 提供摘要生成函数（`GenerateEventSummary`），**严格禁止任何形式的截断**
+- 提供 `event_summary` 元数据视图生成（`GenerateEventSummary`，**原文视图非内容总结**），**严格禁止任何形式的截断**
+- **元数据契约单点保障**（`metadata.go`）：`MetaKey*` 常量唯一定义、`ParseEventMeta` 统一解析、EventKey 的 16 进制字符串形态（`FormatEventKey/ParseEventKey`）
 
 **设计原则**：
-- **严格拒绝非设计折损**：摘要是设计内的信息折损，截断是设计外的双重折损，会破坏压缩质量
+- **严格拒绝非设计折损**：内容级总结收归压缩固化时刻（素材律）；截断是设计外双重折损，会破坏压缩质量
 - **统一 event type 分类**：所有非 `agent_output` / `action_command` 的角色统一归为 `external_input`
-- **零外部依赖**：仅依赖 `trpc-agent-go/model`，不依赖框架其他模块
+- **零外部依赖**：仅依赖 `trpc-agent-go`，不依赖框架其他模块
 
 ---
 
 ## 二、文件清单
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `types.go` | 171 | 事件类型常量、类型推断、摘要生成、Token 估算 |
+| 文件 | 职责 |
+|------|------|
+| `types.go` | 事件类型常量、类型推断、event_summary 视图、Token 估算 |
+| `metadata.go` | 元数据契约：`MetaKey*` 常量、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀 |
 
 ---
 
@@ -178,7 +180,9 @@ func IsSpecialEventType(eventType string) bool
 
 ---
 
-## 七、GenerateEventSummary — 摘要生成
+## 七、GenerateEventSummary — event_summary 元数据视图
+
+> **退位语义（unified-memory-curation）**：尽管函数名含 "Summary"，它**不是内容总结**——多数事件类型下它就是原文，action_command 下是机械化的工具调用行。它用于展示与 recall 列表；内容级总结只在压缩固化时刻发生（SmartCompressor L3 → 段摘要 → 卡片行，素材律）。
 
 ### 7.1 函数签名
 

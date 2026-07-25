@@ -435,11 +435,22 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
-## 六、RecallAgent — 智能记忆召回
+## 六、召回体系：memory_recall（协议入口）+ RecallAgent（多跳编排）
 
-### 6.1 核心职责
+### 6.0 memory_recall — 召回标准协议（纯函数，主 agent 直持）
 
-**智能记忆召回** — RecallAgent 是 Agent 查询内部知识的窗口。它使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答。
+**文件**：`tool/recall/memory_recall.go`。索引卡即召回票据，按输入形态分流：
+
+| 输入形态 | 路径 | 特性 |
+|---|---|---|
+| `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补（原序） | 零幻觉；未命中显式 `miss`；hint 回显对账；items 优先 |
+| `query`(+since/until/event_types) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
+
+确定性路径上无 LLM 中间层；滚动压缩摘要卡片行里的 `[hex]` key 可直接抠出构造 items。
+
+### 6.1 RecallAgent — 复杂检索与多跳编排（定位收窄）
+
+RecallAgent 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答——适用于多跳因果追溯（trace）、跨轮收窄等复杂场景；简单精确/关键词召回请走 memory_recall。
 
 **设计决策**：RecallAgent 使用 config-driven TagentAgent + AgentToolWrapper 包装架构（与 KnowledgeAgent 统一），而非简单的 CallableTool。理由：需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要。
 
@@ -570,7 +581,7 @@ ActionTool 支持两种执行模式：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `work_dir` | string | 命令执行的默认工作目录 |
+| `workspace` | string | 命令工作目录；**默认继承进程运行目录**（与 file tools 的相对路径基准一致，避免路径分裂诱发模型幻觉） |
 | `run_as_user` | string | 通过 `sudo -u` 执行命令时使用的用户 |
 | `run_as_group` | string | 通过 `sudo -g` 执行命令时使用的用户组 |
 
@@ -580,10 +591,11 @@ tools:
     id: exec
     description_file: action_tool_desc.md
     properties:
-      work_dir: /tmp/tagent-workspace
       run_as_user: tagent-runner
       run_as_group: tagent-runner
 ```
+
+> 另：大输出经 `WithActionOutputDir` 落盘 `tool-output/`；启动时 `CleanupOrphanSessions` 按前缀清扫上代孤儿会话（可经 `WithOrphanCleanupDisabled` 关闭，多实例共用 tmux server 时用独立前缀）。
 
 ### 8.2 ActionTool 的组合结构
 

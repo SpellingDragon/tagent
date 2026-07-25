@@ -31,7 +31,7 @@ graph TD
     A[runner.Run] --> B[创建 / 复用 session]
     B --> C[追加用户消息到 session<br/>ResponseEvent RoleUser]
     C --> D[Plugin.OnEvent 链]
-    D --> D1[SummaryPlugin<br/>注入 Tag + summary]
+    D --> D1[SummaryPlugin<br/>注入 Tag + event_summary 元数据<br/>（原文视图,非内容总结）]
     D1 --> D2[MemoryPlugin<br/>持久化 + 写 StateDelta]
     D2 --> E[ContentRequestProcessor<br/>从 session.Events 构建 messages]
     E --> F[BeforeModel 回调链]
@@ -152,6 +152,6 @@ sequenceDiagram
 |------|----------------------|
 | 压缩前 | `[ref1(user), ref2(asst), ref3(tool), ref4(user), ref5(asst), ref6(tool), ref7(user), ref8(asst)]` |
 | KeepRecent=2，L3 压缩旧段 | `[summaryRef(context_compress), ref5(asst), ref6(tool), ref7(user), ref8(asst)]` |
-| 注入前缀后 LLM 看到 | `[evt_summary|context_compress]...`、`[evt_5|agent_output]`、`[evt_6|action_command]`、`[evt_7|external_input]`、`[evt_8|agent_output]` |
+| 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_5\|agent_output]`、`[evt_6\|action_command]`、`[evt_7\|external_input]`、`[evt_8\|agent_output]` |
 
-> 旧事件被压缩为一个 summary ref（含所有被压缩 event key 清单），近期事件保留，LLM 可通过 `recall(event_keys=[KEY])` 按需检索完整内容。
+> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `memory_recall(items=[{key}])` 精确回补原文，或 `recall` 子 agent 做多跳检索。

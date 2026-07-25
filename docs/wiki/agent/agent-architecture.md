@@ -16,11 +16,12 @@
 | `OnEvents func([]Event) Event` | `ContextManager.BuildInvocation` + `RunFlow` | 合并消息 + 执行 Flow |
 | `Compact func()` | `Compactor.Compact` (BeforeModel 回调) | 投影有界化 |
 
-### 三个不变量
+### 四个不变量
 
-- **不变量 1**：inputs 是投影（有界，读写同一份数据）→ SessionProjection = EventReference[]，框架 Runner 的 Plugin.OnEvent 填充 StateDelta，onEvent 从 StateDelta 构建 EventReference 追加到 SessionProjection
-- **不变量 2**：Compact 修改投影不修改事件流 → Compactor 清理 SessionProjection，不碰 MemoryStore
-- **不变量 3**：工具结果回写 bus 不直接操作 inputs → 框架 Runner 内部执行工具，结果自动追加到 session
+- **不变量 1**：inputs 是投影（有界，LLM 输入的唯一装配源）→ SessionProjection = EventReference[]（现居 `agent/compress` 包），`assembleRequest = [system] + render(投影)`，永不读回框架消息尾部
+- **不变量 2**：写入统一——事件被存储 ⇔ 被投影，恰好一次，同点原子（MemoryPlugin.OnEvent 存储后经 ProjectionSink 同点追加）
+- **不变量 3**：时序是构造保证——BeforeModel 时投影必完整，非时序碰巧
+- **不变量 4**：Compact 只修改投影，不修改事件流也不修改永久存储
 
 ### 框架 Runner 内部行为
 
@@ -28,7 +29,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 
 1. 创建/获取 session
 2. 追加用户消息到 session（`sessionService.AppendEvent`）
-3. 触发 Plugin.OnEvent（SummaryPlugin 先注入 Tag；MemoryPlugin 后写 MemoryStore + StateDelta，含 `event_summary`）
+3. 触发 Plugin.OnEvent（SummaryPlugin 先注入 Tag 与 `event_summary` 元数据——**非内容总结，原文视图**，内容级总结收归压缩固化时刻；MemoryPlugin 后写 MemoryStore + StateDelta）
 4. 构建 messages（ContentRequestProcessor 从 session.Events 提取，session limit=2）
 5. **BeforeModel 统一回调**（Projection-first 设计）：
    - Step 1: **TryPull + 即时持久化** — 从 EventBus 非阻塞拉取新事件，立即 StoreEvent + Projection.Append
@@ -49,7 +50,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 
 ### 2.1 TagentAgent（组合根）
 
-**文件**：`tagent_agent.go`（866 行）
+**文件**：`agent.go`
 **原型对应**：`BaseTAgent.New()` + `Run`
 
 `TagentAgent` 是 tagent 的顶层装配点。它创建 EventBus、ContextManager、SessionProjection，并提供对外 API：
@@ -96,9 +97,9 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 `Run()`（子 Agent 调用路径）**不使用 `runEventLoop`**：它创建临时 EventBus + ContextManager 后，先将驱动请求 `persistBusEvent` 写入临时 `SessionProjection`（保证请求位于时间线首条），再在 goroutine 中**直接调用一次 `RunFlow`**。Turn 边界即 `RunFlow` 的自然返回——`RunFlow` 内部由框架跑完完整 ReAct 工具循环（多轮）直到最终 assistant 响应才返回，随后 `close(invOutputCh)` 通知调用方结束。子 Agent 与持久循环**共享同一个 turn 原语 `RunFlow`**，区别仅在于是否包裹 `for { Pull }` 守护循环；不再依赖「事件流探测 + drain 定时器 + 强制 cancel」判断 turn 结束。
 
-### 2.3 ContextManager（消息构建 + Flow 执行）
+### 2.3 ContextManager（粘合层：消息构建 + Flow 执行）
 
-**文件**：`context_manager.go`（425 行）
+**文件**：`context_manager.go`（引擎侧唯一与压缩域双向衔接的文件）
 **原型对应**：`OnEvents` + `ModelCompletion`
 
 `ContextManager` 创建唯一的 Runner（LLMAgent + MemoryPlugin + SummaryPlugin + SessionService），注册 BeforeModel 回调（SmartCompressor + Compactor），并提供：
@@ -115,23 +116,21 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 ### 2.5 SmartCompressor
 
-**文件**：`smart_compress.go`（483 行）
+**文件**：`compress/smart_compress.go`（agent/compress 子包）
 
-两阶段压缩，注册为 BeforeModel 回调：
-- Stage 1：按任务边界（agent_output）丢弃旧任务段
-- Stage 2：对丢弃的段生成 LLM 摘要（可选）
+确定性定级（L0-L3 纯函数）+ 可选 LLM 摘要，注册为 BeforeModel 回调：
+- L0 保留 / L1 选择性 / L2 部分 / L3 全量归档（挂 RelationStore 因果链+来源 keys，同段跨轮不重摘）
+- 使用注入的 `TokenCounter`，不自行创建
 
-使用注入的 `TokenCounter`，不自行创建。
+### 2.6 Compactor（滚动卡片序列）
 
-### 2.6 Compactor
+**文件**：`compress/context_compressor.go` + `compress/task_segmenter.go`
 
-**文件**：`task_segmenter.go`（141 行，与 TaskSegmenter 合并）
-
-投影有界化，注册为第二个 BeforeModel 回调。当 SmartCompressor 不足以压缩时，从 SessionProjection 层面清理旧引用替换为 summary reference。
+投影有界化：旧引用替换为**滚动** summary reference（携带卡片序列，跨轮吸收——计数累计/卡片继承/时间下界继承）。详见 [memory 架构文档「记忆策展」章](../memory/memory-architecture.md)。
 
 ### 2.7 SessionProjection + ProjectionSink
 
-**文件**：`projection.go`（agent 包）+ `projection_sink.go`（plugin 包）
+**文件**：`compress/projection.go`（随压缩域——"Compact 只修改投影"，投影即压缩域对象）+ `projection_sink.go`（plugin 包）
 **原型对应**：`inputs []string`
 
 `SessionProjection` 是有界的 `EventReference[]`，线程安全、EventKey 幂等去重。写入统一在事件插件管线：RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，MemoryPlugin 在 store 成功后同点 `Append`（unified-event-projection D1）。
@@ -145,14 +144,14 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 
 ### 2.9 AgentToolWrapper
 
-**文件**：`tool_agent.go`（458 行）
+**文件**：`tool_agent.go`
 **原型对应**：`tools map` + `RegisterTool`
 
 将子 agent 包装为 `CallableTool`，处理 event_key 参数解析和外部上下文注入。子 agent 调用**默认异步**：经上下文注入的 `TaskSpawner` 纳入任务层执行，dense 阶段内返回则内联、越窗则 ack（`asyncDisabled` 可回退为同步）。每次子 agent Task 仍持有独立 EventBus / SessionProjection / ContextManager 的并发隔离契约。
 
 ### 2.10 TaskManager（异步任务层）
 
-**文件**：`task_manager.go`、`task_board.go`、`event_bus.go`；探测器 `tool/action/settle.go`、`poll_schedule.go`；任务工具 `tool/task/`
+**文件**：`task/task_manager.go`、`task/task_board.go`（agent/task 子包，零引擎依赖的叶子包）、`event_bus.go`；探测器 `tool/action/settle.go`、`poll_schedule.go`；任务工具 `tool/task/`
 
 确定性（非 LLM）的任务注册表 + 调度器，让 `action`（tmux）等长耗时工具与子 agent 不阻塞事件循环：
 
@@ -160,8 +159,9 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
 - **settle 三档**：`completed` / `stable` / `suspect`，探测器只做确定性分类，语义判断交给 LLM。
 - **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
-- **看板 + 工具**：`BeforeModel` 每 turn 从 registry 重渲染 live 看板（不参与压缩，置于 recency 锚点）；`list_tasks` / `get_task_result` / `cancel` / `relaunch` 为即时同步工具。
-- **会话回收**：进程真死（completed/error）时回收 tmux 会话，避免长程运行累积死会话。
+- **看板 + 工具**：`BeforeModel` 每 turn 从 registry 重渲染 live 看板（不参与压缩，置于 recency 锚点）；`list_tasks` / `get_task_result` / `cancel` / `relaunch` / `resume_task` 为即时同步工具。
+- **resume_task 重入**：合法源状态 {alive-detached, stable, completed, failed}；tmux 经 detector `Rearm`（绑会话非轮次，零换绑），subagent 经新 Run + 任务链还原器。详见 [tool 架构文档「任务重入」章](../tool/tool-architecture.md)。
+- **会话回收闭环**：运行时 completed/error 即回收；优雅退出 `Close()` 收编存活会话；启动时按前缀清扫孤儿会话（防 pty 泄漏累积）。
 
 **一个 tmux 命令的一生**（把上面的零件串成一条线）：
 
@@ -192,22 +192,46 @@ sequenceDiagram
 
 对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
 
-## 三、文件结构
+## 三、包与文件结构（分包后）
 
-| 文件 | 行数 | 职责 | 原型对应 |
-|------|------|------|---------|
-| `tagent_agent.go` | 866 | 顶层装配 + runEventLoop + A2A + makeOnEventCallback | `BaseTAgent.New()` + `Run` |
-| `context_manager.go` | 425 | 消息构建 + 压缩编排 + Compact + Flow 执行 + TokenCounter + 统一 Runner | `OnEvents` + `ModelCompletion` |
-| `smart_compress.go` | 483 | 两阶段压缩 | 无（生产扩展） |
-| `tool_agent.go` | 458 | AgentToolWrapper + PlainToolFactory/ToolAgentFactory 注册接口 | `tools map` + `RegisterTool` |
-| `trajectory_recorder.go` | 325 | LLM 调用轨迹记录 | 无（生产扩展） |
-| `event_bus.go` | 154 | EventBus | `eventBus chan Event` |
-| `http_api.go` | 153 | HTTP API（RL/AReaL 集成） | 无（生产扩展） |
-| `meditation.go` | 143 | 冥想心跳 | 无（生产扩展） |
-| `task_segmenter.go` | 141 | 任务分段 + Compactor | `Compact` |
-| `projection.go` | 82 | SessionProjection（写入经 ProjectionSink 由插件管线驱动） | `inputs []string` |
-| `output_limit_tool.go` | 73 | 工具输出截断 | 无（生产扩展） |
-| **总计** | **~7600** | **10 个文件** | |
+```mermaid
+graph TB
+    subgraph agent["agent/ 引擎本体"]
+        AG["agent.go 组合根"]
+        EL["event_loop.go + event_bus.go"]
+        CM["context_manager.go 粘合层"]
+        SE["session.go + inject.go + lifecycle.go"]
+        TW["tool_agent.go 子Agent封装"]
+        MD["meditation*.go 冥想"]
+        AL["task_alias.go + compress_alias.go 兼容桥"]
+    end
+    subgraph compress["agent/compress 压缩域"]
+        SC["smart_compress.go L0-L3"]
+        CC["context_compressor.go 卡片序列"]
+        PJ["projection.go + task_segmenter.go"]
+        TK["token_counter.go + defaults.go"]
+    end
+    subgraph task["agent/task 任务域（叶子包）"]
+        TM["task_manager.go 生命周期+resume"]
+        TB["task_board.go 看板"]
+    end
+    agent --> compress
+    agent --> task
+```
+
+| 包/文件 | 职责 | 原型对应 |
+|------|------|---------|
+| `agent.go` | 顶层装配 + TagentConfig | `BaseTAgent.New()` |
+| `event_loop.go` / `event_bus.go` | 持久循环 + 事件队列 | `DefaultRun` / `eventBus chan` |
+| `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner | `OnEvents` + `ModelCompletion` |
+| `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
+| `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest | 无（生产扩展） |
+| `task_alias.go` / `compress_alias.go` | 子包符号零破坏兼容桥 | — |
+| `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
+| `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go） | 无（生产扩展） |
+| `rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI + SwappableModel | 无（生产扩展） |
+
+依赖方向由编译器执法：`agent → compress`、`agent → task`，子包零反向依赖；旧路径符号经别名桥永久兼容，新代码应直接 import 子包。
 
 ## 四、数据流
 
@@ -299,34 +323,36 @@ Compactor 作为第二个 BeforeModel 回调，当 SmartCompressor 不足以压�
 压缩参数通过 YAML `compress` 段配置：
 ```yaml
 agents:
-  - name: tagent
+  tagent:
     compress:
+      summary_model: deepseek-v4-flash    # 压缩专用模型(可用廉价模型)
+      card_max_chars: 6000                # 卡片序列上限
+      compact_keys_listed: 32             # 滚动摘要 recent keys 上限
       max_tool_result_chars: 500
       max_exec_state_chars: 2000
-      chunk_size: 1000
-      chunk_summary_len: 150
+      archive_cache_cap: 256
 ```
 
 TmuxMonitor 参数通过 ActionProperties `monitor` 段配置：
 ```yaml
 tools:
   - kind: tool
-    id: action
+    id: exec
     properties:
       monitor:
-        interval: 10s
-        stable_duration: 30s
+        dense_interval: 1s      # dense 阶段探测间隔
+        dense_duration: 10s     # dense 阶段时长(=同步→异步 ack 点)
+        backoff_factor: 2       # 几何退避因子
+        max_interval: 60s       # 稀疏轮询上限
 ```
 
 ## 七、子 Agent 调用
 
-`TagentAgent.Run(ctx, inv)` 是子 agent 单轮调用路径：
-1. 从 `inv.RunOptions.RuntimeState["external_context"]` 读取父 Agent 传入的上下文（A2A 兼容路径）
-2. 创建临时 EventBus + SessionProjection + ContextManager（含临时 Runner）
-3. 将外部上下文注入到首条用户消息
-4. 发布初始消息到临时 bus
-5. goroutine 中调用 `runEventLoop`
-6. 消费 outputCh 直到第一个 final response（无 tool_calls），关闭 channel
-7. 恢复 activeBus 到 persistentBus
+`TagentAgent.Run(ctx, inv)` 是子 agent 单轮调用路径（与 2.2 节一致：**不使用 runEventLoop**）：
+1. 从 `inv.RunOptions.RuntimeState["external_context"]` 读取父 Agent 传入的上下文（A2A 兼容路径；resume 时由任务链还原器自动注入本任务前序轮次）
+2. 创建临时 EventBus + SessionProjection + ContextManager（含临时 Runner）——并发隔离契约
+3. 将驱动请求 `persistBusEvent` 写入临时投影（保证请求位于时间线首条）
+4. goroutine 中直调一次 `RunFlow`，turn 边界即其自然返回
+5. 消费 outputCh 直到 final response，`close(invOutputCh)` 通知结束
 
-子 agent 的 MaxToolIterations 取 `min(父配置, 10)`，默认不超过 10。
+子 agent 的 MaxToolIterations 取 `min(父配置, 10)`，默认不超过 10；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
