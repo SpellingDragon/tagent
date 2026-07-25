@@ -22,7 +22,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// TokenCounter
+// compress.TokenCounter
 // ---------------------------------------------------------------------------
 
 // ContextManager
@@ -34,10 +34,10 @@ import (
 //
 // Prototype mapping:
 //   - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
-//   - Compact (clean projection) → ContextCompressor in BeforeModel callback
+//   - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
 type ContextManager struct {
-	contextCompressor *ContextCompressor
-	tokenCounter      TokenCounter
+	contextCompressor *compress.ContextCompressor
+	tokenCounter      compress.TokenCounter
 	memStore          memory.MemoryStore
 	maxTokens         int
 	thresholdPct      float64
@@ -52,14 +52,14 @@ type ContextManager struct {
 	// Event routing
 	outputCh   chan *event.Event
 	bus        *EventBus
-	projection *SessionProjection
+	projection *compress.SessionProjection
 	onEvent    func(evt *event.Event)
 
 	// taskController, when set, is injected into the RunFlow ctx (as a
-	// TaskSpawner) so tools can hand long-running work to the task layer, and
+	// task.TaskSpawner) so tools can hand long-running work to the task layer, and
 	// is used to render the live task board at BeforeModel. nil → tools fall
 	// back to synchronous execution and no board is rendered.
-	taskController TaskController
+	taskController task.TaskController
 
 	// triggerSource identifies what triggered the current RunFlow
 	// (e.g., "user", "meditation", "async_result"). Set by runEventLoop
@@ -136,13 +136,13 @@ type ContextManagerConfig struct {
 	ReasoningEffort      *string
 	ReasoningContentMode string
 
-	Compressor   *SmartCompressor
-	TokenCounter TokenCounter
+	Compressor   *compress.SmartCompressor
+	TokenCounter compress.TokenCounter
 	MaxTokens    int
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
 
-	// CompactKeysListed / RecentFullCount configure ContextCompressor
+	// CompactKeysListed / RecentFullCount configure compress.ContextCompressor
 	// constraints (0 = package defaults).
 	CompactKeysListed int
 	RecentFullCount   int
@@ -154,12 +154,12 @@ type ContextManagerConfig struct {
 
 	OutputCh   chan *event.Event
 	Bus        *EventBus
-	Projection *SessionProjection
+	Projection *compress.SessionProjection
 	OnEvent    func(evt *event.Event)
 }
 
 // NewContextManager creates a ContextManager that wraps a framework LLMAgent
-// with ContextCompressor as the sole BeforeModel compression callback.
+// with compress.ContextCompressor as the sole BeforeModel compression callback.
 func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	cm := &ContextManager{
 		tokenCounter:       cfg.TokenCounter,
@@ -179,19 +179,19 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		systemPromptSource: cfg.SystemPromptSource,
 	}
 
-	// Build ContextCompressor from SmartCompressor.
+	// Build compress.ContextCompressor from compress.SmartCompressor.
 	if cfg.Compressor != nil {
 		keepRecent := cfg.Compressor.KeepRecentTasks
-		cm.contextCompressor = NewContextCompressor(
+		cm.contextCompressor = compress.NewContextCompressor(
 			cfg.Compressor,
 			cfg.MemStore,
 			cfg.TokenCounter,
 			cfg.MaxTokens,
 			cfg.ThresholdPct,
 			keepRecent,
-			WithCompactKeysListed(cfg.CompactKeysListed),
-			WithRecentFullCount(cfg.RecentFullCount),
-			WithCardMaxChars(cfg.CardMaxChars),
+			compress.WithCompactKeysListed(cfg.CompactKeysListed),
+			compress.WithRecentFullCount(cfg.RecentFullCount),
+			compress.WithCardMaxChars(cfg.CardMaxChars),
 		)
 	}
 
@@ -397,7 +397,7 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 }
 
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
-// to the SessionProjection immediately. This ensures that all messages
+// to the compress.SessionProjection immediately. This ensures that all messages
 // visible to the LLM are also tracked in the projection — eliminating the
 // "visible but not projected" state that caused ordering bugs.
 //
@@ -475,7 +475,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// metadata (chat_id, ...) as opaque origin baggage on each spawned
 		// task, so a background settle can be routed back to the originating
 		// session. The task layer never interprets it. (async-result-delivery.)
-		var spawner TaskSpawner = cm.taskController
+		var spawner task.TaskSpawner = cm.taskController
 		if md := cm.GetInvocationMetadata(); len(md) > 0 {
 			cp := make(map[string]string, len(md))
 			for k, v := range md {
@@ -483,7 +483,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 			}
 			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
 		}
-		ctx = WithTaskSpawner(ctx, spawner)
+		ctx = task.WithTaskSpawner(ctx, spawner)
 	}
 	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {

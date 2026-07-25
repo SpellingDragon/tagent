@@ -17,10 +17,10 @@ const digestMaxAttentionDetail = 8
 const digestDescMax = 60
 
 // digestStatusOrder is the deterministic display order for status counts.
-var digestStatusOrder = []TaskStatus{
-	TaskRunning, TaskStable, TaskAliveDetached,
-	TaskSuspect, TaskDead, TaskFailed,
-	TaskCompleted, TaskCancelled,
+var digestStatusOrder = []task.TaskStatus{
+	task.TaskRunning, task.TaskStable, task.TaskAliveDetached,
+	task.TaskSuspect, task.TaskDead, task.TaskFailed,
+	task.TaskCompleted, task.TaskCancelled,
 }
 
 // renderSelfStateDigest renders a deterministic self-state snapshot for the
@@ -28,16 +28,16 @@ var digestStatusOrder = []TaskStatus{
 // are suspect/dead/failed) and idle duration. It is a pure function over the
 // given snapshot — no LLM, no I/O. Returns "" when there are no tasks so the
 // meditation message degrades gracefully (task 1.2 / spec: graceful degradation).
-func renderSelfStateDigest(tasks []*Task, idle time.Duration) string {
-	counts := make(map[TaskStatus]int)
-	var attention []*Task
+func renderSelfStateDigest(tasks []*task.Task, idle time.Duration) string {
+	counts := make(map[task.TaskStatus]int)
+	var attention []*task.Task
 	for _, t := range tasks {
 		if t == nil {
 			continue
 		}
 		st := t.Status()
 		counts[st]++
-		if st == TaskSuspect || st == TaskDead || st == TaskFailed {
+		if st == task.TaskSuspect || st == task.TaskDead || st == task.TaskFailed {
 			attention = append(attention, t)
 		}
 	}
@@ -75,7 +75,7 @@ func renderSelfStateDigest(tasks []*Task, idle time.Duration) string {
 }
 
 // formatStatusCounts renders non-zero status counts in a deterministic order.
-func formatStatusCounts(counts map[TaskStatus]int) string {
+func formatStatusCounts(counts map[task.TaskStatus]int) string {
 	parts := make([]string, 0, len(counts))
 	for _, st := range digestStatusOrder {
 		if n := counts[st]; n > 0 {

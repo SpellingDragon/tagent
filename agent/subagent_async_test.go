@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"testing"
 	"time"
@@ -53,8 +54,8 @@ func subagentCallArgs(t *testing.T) []byte {
 func TestSubagentAsync_FastInline(t *testing.T) {
 	w := NewAgentToolWrapper(&progAgent{name: "knowledge", delay: 20 * time.Millisecond, output: "FAST_RESULT"}, "t", nil, nil)
 	w.SetAsyncDenseDuration(500 * time.Millisecond)
-	tm := NewTaskManager(TaskManagerConfig{})
-	ctx := WithTaskSpawner(context.Background(), tm)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
 
 	out, err := w.Call(ctx, subagentCallArgs(t))
 	if err != nil {
@@ -70,8 +71,8 @@ func TestSubagentAsync_FastInline(t *testing.T) {
 func TestSubagentAsync_SlowAck(t *testing.T) {
 	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 300 * time.Millisecond, output: "LATE"}, "t", nil, nil)
 	w.SetAsyncDenseDuration(40 * time.Millisecond)
-	tm := NewTaskManager(TaskManagerConfig{})
-	ctx := WithTaskSpawner(context.Background(), tm)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
 
 	out, err := w.Call(ctx, subagentCallArgs(t))
 	if err != nil {
@@ -101,8 +102,8 @@ func TestSubagentAsync_NoSpawnerSync(t *testing.T) {
 func TestSubagentAsync_DisabledSync(t *testing.T) {
 	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 20 * time.Millisecond, output: "DISABLED_SYNC"}, "t", nil, nil)
 	w.SetAsyncDisabled(true)
-	tm := NewTaskManager(TaskManagerConfig{})
-	ctx := WithTaskSpawner(context.Background(), tm)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
 
 	out, err := w.Call(ctx, subagentCallArgs(t))
 	if err != nil {

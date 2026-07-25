@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"time"
 
@@ -92,14 +93,14 @@ const SourceTask = "task"
 // new turn. It carries the task description, status, and a (truncated) result
 // inline so the LLM needs no extra lookup for small results; large results are
 // tail-truncated with a hint to use get_task_result.
-func newTaskSettledEvent(task *Task, sig SettleSignal, maxInline int) *AgentEvent {
+func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxInline int) *AgentEvent {
 	status := "completed"
 	switch {
 	case sig.Err != nil:
 		status = "failed"
-	case sig.Kind == SettleStable:
+	case sig.Kind == task.SettleStable:
 		status = "就绪/存活 (alive-detached：后续不再重复通知，除非结束或你主动查询)"
-	case sig.Kind == SettleSuspect:
+	case sig.Kind == task.SettleSuspect:
 		status = "suspect (长时间无输出，可能假死，需确认)"
 	}
 
@@ -113,7 +114,7 @@ func newTaskSettledEvent(task *Task, sig SettleSignal, maxInline int) *AgentEven
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[task settled] 后台任务已结算\n任务: %s\n状态: %s\n(task id: %s)",
-		task.Spec.Desc, status, task.ID)
+		tk.Spec.Desc, status, tk.ID)
 	if sig.Err != nil {
 		fmt.Fprintf(&b, "\n错误: %v", sig.Err)
 	}
@@ -125,7 +126,7 @@ func newTaskSettledEvent(task *Task, sig SettleSignal, maxInline int) *AgentEven
 	// at spawn time, so the reclaim turn's output can be delivered back to the
 	// originating session. Reuses the existing extractRootMetadata → meta_*
 	// pipeline. (async-result-delivery.)
-	for k, v := range task.Spec.Origin {
+	for k, v := range tk.Spec.Origin {
 		evt.Metadata[k] = v
 	}
 	return evt

@@ -118,8 +118,8 @@ func newAssistantEvt(content string) *event.Event {
 func TestProjectionSink_PerInvocationIsolation(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	p := plugin.NewMemoryPlugin(store)
-	mainProj := NewSessionProjection()
-	subProj := NewSessionProjection()
+	mainProj := compress.NewSessionProjection()
+	subProj := compress.NewSessionProjection()
 	ctxMain := plugin.WithProjectionSink(context.Background(), mainProj)
 	ctxSub := plugin.WithProjectionSink(context.Background(), subProj)
 

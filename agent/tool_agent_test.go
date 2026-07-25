@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"testing"
 	"time"
 
@@ -614,7 +615,7 @@ func TestAgentToolWrapper_RuntimeStatePassThrough(t *testing.T) {
 // parentProjection.
 func TestAgentToolWrapper_AutoInjectEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
-	projection := NewSessionProjection()
+	projection := compress.NewSessionProjection()
 	partitionID := memory.PartitionIDFromName("test-auto")
 
 	// Store 8 events and add to projection
@@ -675,7 +676,7 @@ func TestAgentToolWrapper_AutoInjectEventKeys(t *testing.T) {
 // auto-inject is NOT triggered when LLM passes event_keys.
 func TestAgentToolWrapper_AutoInjectSkippedWhenLLMPassesKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
-	projection := NewSessionProjection()
+	projection := compress.NewSessionProjection()
 
 	// Store 3 events
 	partitionID := memory.PartitionIDFromName("test-skip")

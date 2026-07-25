@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,10 +114,10 @@ func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
 type AgentToolWrapper struct {
 	agent            agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
 	desc             string
-	descSource       *prompt.Source     // Hot-reloadable description source (optional)
-	eventParams      []string           // Which event-derived params to declare (e.g., "event_key")
-	parentStore      memory.MemoryStore // Parent agent's MemStore for resolving event_key
-	parentProjection *SessionProjection // Parent agent's projection for auto-inject fallback
+	descSource       *prompt.Source              // Hot-reloadable description source (optional)
+	eventParams      []string                    // Which event-derived params to declare (e.g., "event_key")
+	parentStore      memory.MemoryStore          // Parent agent's MemStore for resolving event_key
+	parentProjection *compress.SessionProjection // Parent agent's projection for auto-inject fallback
 
 	// asyncDisabled forces synchronous execution even when a task spawner is
 	// available in the invocation context. Default (false) = async-by-default:
@@ -155,10 +157,10 @@ func NewAgentToolWrapper(
 	}
 }
 
-// SetParentProjection sets the parent agent's SessionProjection for auto-inject fallback.
+// SetParentProjection sets the parent agent's compress.SessionProjection for auto-inject fallback.
 // When LLM does not pass event_keys, the wrapper auto-injects the most recent
 // autoInjectMaxEvents EventKeys from the parent projection.
-func (w *AgentToolWrapper) SetParentProjection(p *SessionProjection) {
+func (w *AgentToolWrapper) SetParentProjection(p *compress.SessionProjection) {
 	w.parentProjection = p
 }
 
@@ -346,20 +348,20 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	// return inline (equivalent to the prior synchronous behavior); long runs
 	// return an ack and emit task_settled when the run returns. The run uses a
 	// detached context so it can outlive the parent turn (cancel via the task).
-	if spawner, ok := TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
-		// Task-local round chain: each settled round's {input, output} is
+	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
+		// task.Task-local round chain: each settled round's {input, output} is
 		// recorded so a later resume can restore THIS task's context (and only
 		// this task's — context-scoping). Shared across relaunch/resume rounds
 		// via the closure.
 		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
-		detector := NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			out, err := w.runAndCollect(runCtx, inv, agentName)
 			if err == nil {
 				rounds.add(request, out)
 			}
 			return out, err
 		}, w.asyncDenseDuration)
-		res := spawner.Spawn(TaskSpec{
+		res := spawner.Spawn(task.TaskSpec{
 			Kind:     "subagent",
 			Desc:     agentName + ": " + truncate(request, 60),
 			Key:      agentName + ":" + request,
@@ -453,12 +455,12 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 
 // subagentRelaunch returns a closure that re-runs the sub-agent with the same
 // invocation (used by relaunch_task). The re-spawned task is itself relaunchable.
-func (w *AgentToolWrapper) subagentRelaunch(spawner TaskSpawner, inv *agent.Invocation, agentName, request string) func() (SpawnResult, error) {
-	return func() (SpawnResult, error) {
-		detector := NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request string) func() (task.SpawnResult, error) {
+	return func() (task.SpawnResult, error) {
+		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			return w.runAndCollect(runCtx, inv, agentName)
 		}, w.asyncDenseDuration)
-		return spawner.Spawn(TaskSpec{
+		return spawner.Spawn(task.TaskSpec{
 			Kind:     "subagent",
 			Desc:     agentName + ": " + truncate(request, 60),
 			Key:      agentName + ":" + request,
@@ -517,8 +519,8 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 // (task.resultRef bridge), the restorer can additionally walk RelationStore
 // for curated artifacts on this task's causal chain; the injection slot is
 // already here.
-func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRounds) func(string) (SettleDetector, error) {
-	return func(input string) (SettleDetector, error) {
+func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRounds) func(string) (task.SettleDetector, error) {
+	return func(input string) (task.SettleDetector, error) {
 		prior := rounds.recent(w.effectiveResumeRounds())
 		if len(prior) == 0 {
 			return nil, fmt.Errorf("subagent task has no settled round to resume from — use relaunch_task or a fresh call")
@@ -546,7 +548,7 @@ func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRoun
 			agent.WithInvocationMessage(model.NewUserMessage(input)),
 			agent.WithInvocationRunOptions(runOpts),
 		)
-		return NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+		return task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			out, err := w.runAndCollect(runCtx, inv, agentName)
 			if err == nil {
 				rounds.add(input, out)

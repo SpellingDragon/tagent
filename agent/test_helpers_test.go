@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
@@ -19,7 +20,7 @@ func (m *mockTokenCounter) Estimate(messages []model.Message) int { return m.tok
 
 // newTestContextManager creates a ContextManager for test use.
 func newTestContextManager(name string, m model.Model, tools []trpctool.Tool, outputCh chan *event.Event, bus *EventBus) *ContextManager {
-	compressor := NewSmartCompressor(WithMaxTokens(8000), WithTokenCounter(&mockTokenCounter{tokens: 100}))
+	compressor := compress.NewSmartCompressor(compress.WithMaxTokens(8000), compress.WithTokenCounter(&mockTokenCounter{tokens: 100}))
 	memStore := memory.NewInMemoryStore()
 	memPlugin := plugin.NewMemoryPlugin(memStore)
 	sessionSvc := sessioninmemory.NewSessionService()
@@ -39,7 +40,7 @@ func newTestContextManager(name string, m model.Model, tools []trpctool.Tool, ou
 		SessionSvc:   sessionSvc,
 		OutputCh:     outputCh,
 		Bus:          bus,
-		Projection:   NewSessionProjection(),
+		Projection:   compress.NewSessionProjection(),
 		OnEvent:      func(evt *event.Event) {},
 	})
 	return cm

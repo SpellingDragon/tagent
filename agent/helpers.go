@@ -18,7 +18,7 @@ func (ta *TagentAgent) Runner() runner.Runner {
 	return nil
 }
 
-// SetToolParentProjection wires the agent's SessionProjection to all
+// SetToolParentProjection wires the agent's compress.SessionProjection to all
 // AgentToolWrapper instances in the tool list. This enables auto-inject
 // of event_keys when LLM does not pass them.
 // Must be called after NewTagentAgent (which creates the projection).

@@ -15,8 +15,8 @@ import (
 // not registration time. With a live task present, the board must inject.
 func TestInjectLiveTaskBoard_WiredAfterConstruction(t *testing.T) {
 	cm := &ContextManager{} // taskController nil at construction (mirrors real order)
-	cm.taskController = &fakeTaskController{tasks: []*Task{
-		task.NewTaskFixture("t1", "npm build", TaskRunning, time.Now()),
+	cm.taskController = &fakeTaskController{tasks: []*task.Task{
+		task.NewTaskFixture("t1", "npm build", task.TaskRunning, time.Now()),
 	}} // post-construction wiring
 
 	args := &model.BeforeModelArgs{Request: &model.Request{

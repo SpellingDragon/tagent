@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,7 +47,7 @@ type MeditationManager struct {
 	// taskController, when set, provides a read-only task-layer snapshot for the
 	// self-state digest prepended to the meditation prompt. nil → digest omitted
 	// (graceful degradation when no task layer is wired).
-	taskController TaskController
+	taskController task.TaskController
 
 	// lastEventTime tracks the most recent event timestamp (Unix milliseconds).
 	// Updated by TagentAgent on every InjectMessage and event forwarding.
@@ -72,7 +73,7 @@ func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *Medit
 // SetTaskController wires an optional read-only task controller used to render
 // the self-state digest prepended to the meditation prompt. Safe to leave unset
 // (digest is omitted — meditation behavior unchanged).
-func (m *MeditationManager) SetTaskController(tc TaskController) {
+func (m *MeditationManager) SetTaskController(tc task.TaskController) {
 	m.taskController = tc
 }
 

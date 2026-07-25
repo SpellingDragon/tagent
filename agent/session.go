@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"strings"
 	"time"
 
@@ -79,13 +80,13 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 
 	// Create a fresh EventBus + AgentLoop for this invocation.
 	// Each sub-agent invocation gets its own isolated bus and compressor
-	// (SmartCompressor has mutable state and must not be shared across
+	// (compress.SmartCompressor has mutable state and must not be shared across
 	// concurrent goroutines).
 	invBus := NewEventBus()
 	ta.setActiveBus(invBus)
 
 	invOutputCh := make(chan *event.Event, 100)
-	invProjection := NewSessionProjection()
+	invProjection := compress.NewSessionProjection()
 	invOnEvent := ta.makeOnEventCallback()
 	maxToolIters := ta.config.MaxToolIterations
 	if maxToolIters <= 0 {

@@ -8,37 +8,43 @@ import (
 	"time"
 )
 
-// mkDigestTask builds a Task in a specific status for digest tests (white-box:
+// mkDigestTask builds a task.Task in a specific status for digest tests (white-box:
 // status is package-private).
-func mkDigestTask(id, desc string, st TaskStatus, age time.Duration) *Task {
+func mkDigestTask(id, desc string, st task.TaskStatus, age time.Duration) *task.Task {
 	return task.NewTaskFixture(id, desc, st, time.Now().Add(-age))
 }
 
-// fakeTaskController implements TaskController; only List returns data.
-type fakeTaskController struct{ tasks []*Task }
+// fakeTaskController implements task.TaskController; only List returns data.
+type fakeTaskController struct{ tasks []*task.Task }
 
-func (f *fakeTaskController) Spawn(TaskSpec, SettleDetector) SpawnResult { return SpawnResult{} }
-func (f *fakeTaskController) List() []*Task                              { return f.tasks }
-func (f *fakeTaskController) Get(string) (*Task, bool)                   { return nil, false }
-func (f *fakeTaskController) Cancel(string) bool                         { return false }
-func (f *fakeTaskController) Relaunch(string) (SpawnResult, error)       { return SpawnResult{}, nil }
-func (f *fakeTaskController) Resume(string, string) (SpawnResult, error) { return SpawnResult{}, nil }
+func (f *fakeTaskController) Spawn(task.TaskSpec, task.SettleDetector) task.SpawnResult {
+	return task.SpawnResult{}
+}
+func (f *fakeTaskController) List() []*task.Task            { return f.tasks }
+func (f *fakeTaskController) Get(string) (*task.Task, bool) { return nil, false }
+func (f *fakeTaskController) Cancel(string) bool            { return false }
+func (f *fakeTaskController) Relaunch(string) (task.SpawnResult, error) {
+	return task.SpawnResult{}, nil
+}
+func (f *fakeTaskController) Resume(string, string) (task.SpawnResult, error) {
+	return task.SpawnResult{}, nil
+}
 
 func TestRenderSelfStateDigest_EmptyDegrades(t *testing.T) {
 	if got := renderSelfStateDigest(nil, time.Hour); got != "" {
 		t.Errorf("nil tasks → empty digest, got %q", got)
 	}
-	if got := renderSelfStateDigest([]*Task{}, time.Hour); got != "" {
+	if got := renderSelfStateDigest([]*task.Task{}, time.Hour); got != "" {
 		t.Errorf("empty slice → empty digest, got %q", got)
 	}
 }
 
 func TestRenderSelfStateDigest_CountsAndAttention(t *testing.T) {
-	tasks := []*Task{
-		mkDigestTask("aaaaaaaa11", "run a", TaskRunning, time.Minute),
-		mkDigestTask("bbbbbbbb11", "svc b", TaskAliveDetached, time.Hour),
-		mkDigestTask("cccccccc11", "stuck c", TaskSuspect, 2*time.Minute),
-		mkDigestTask("dddddddd11", "dead d", TaskDead, 5*time.Minute),
+	tasks := []*task.Task{
+		mkDigestTask("aaaaaaaa11", "run a", task.TaskRunning, time.Minute),
+		mkDigestTask("bbbbbbbb11", "svc b", task.TaskAliveDetached, time.Hour),
+		mkDigestTask("cccccccc11", "stuck c", task.TaskSuspect, 2*time.Minute),
+		mkDigestTask("dddddddd11", "dead d", task.TaskDead, 5*time.Minute),
 	}
 	got := renderSelfStateDigest(tasks, 90*time.Minute)
 
@@ -54,10 +60,10 @@ func TestRenderSelfStateDigest_CountsAndAttention(t *testing.T) {
 }
 
 func TestRenderSelfStateDigest_BoundedAttention(t *testing.T) {
-	var tasks []*Task
+	var tasks []*task.Task
 	overflow := 5
 	for i := 0; i < digestMaxAttentionDetail+overflow; i++ {
-		tasks = append(tasks, mkDigestTask(fmt.Sprintf("id%03d", i), fmt.Sprintf("t%d", i), TaskSuspect, time.Duration(i)*time.Minute))
+		tasks = append(tasks, mkDigestTask(fmt.Sprintf("id%03d", i), fmt.Sprintf("t%d", i), task.TaskSuspect, time.Duration(i)*time.Minute))
 	}
 	got := renderSelfStateDigest(tasks, time.Minute)
 
@@ -71,7 +77,7 @@ func TestRenderSelfStateDigest_BoundedAttention(t *testing.T) {
 
 func TestRenderSelfStateDigest_TruncatesLongDesc(t *testing.T) {
 	long := strings.Repeat("字", 100)
-	got := renderSelfStateDigest([]*Task{mkDigestTask("x", long, TaskSuspect, time.Minute)}, time.Minute)
+	got := renderSelfStateDigest([]*task.Task{mkDigestTask("x", long, task.TaskSuspect, time.Minute)}, time.Minute)
 	if !strings.Contains(got, "…") {
 		t.Errorf("long desc should be rune-truncated with ellipsis:\n%s", got)
 	}
@@ -81,8 +87,8 @@ func TestRenderSelfStateDigest_TruncatesLongDesc(t *testing.T) {
 // meditation message carries the digest before the prompt (task 4.1).
 func TestMeditation_DigestPresentBeforePrompt(t *testing.T) {
 	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
-	mgr.SetTaskController(&fakeTaskController{tasks: []*Task{
-		mkDigestTask("id1", "stuck task", TaskSuspect, time.Minute),
+	mgr.SetTaskController(&fakeTaskController{tasks: []*task.Task{
+		mkDigestTask("id1", "stuck task", task.TaskSuspect, time.Minute),
 	}})
 
 	msg := mgr.buildMeditationMessage(time.Now(), time.Hour)

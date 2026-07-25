@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"testing"
 	"time"
 
@@ -11,11 +12,11 @@ import (
 )
 
 // ============================================================================
-// TokenCounter tests
+// compress.TokenCounter tests
 // ============================================================================
 
 func TestDefaultTokenCounter_Estimate(t *testing.T) {
-	counter := NewDefaultTokenCounter()
+	counter := compress.NewDefaultTokenCounter()
 
 	// Single message
 	msgs := []model.Message{
@@ -94,8 +95,8 @@ func TestTagentConfig_Defaults(t *testing.T) {
 	defer ta.Close()
 
 	assert.Equal(t, DefaultMaxToolIterations, cfg.MaxToolIterations, "default MaxToolIterations should be 50")
-	assert.Equal(t, DefaultMaxTokens, cfg.MaxTokens, "default MaxTokens should be 8000")
-	assert.Equal(t, DefaultCompressThreshold, cfg.CompressThreshold, "default CompressThreshold should be 0.8")
+	assert.Equal(t, compress.DefaultMaxTokens, cfg.MaxTokens, "default MaxTokens should be 8000")
+	assert.Equal(t, compress.DefaultCompressThreshold, cfg.CompressThreshold, "default CompressThreshold should be 0.8")
 }
 
 func TestNewTagentAgent_NilConfig(t *testing.T) {

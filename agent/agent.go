@@ -23,6 +23,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,9 +77,9 @@ type TagentAgent struct {
 	contextManager *ContextManager
 
 	// taskManager owns async task lifecycle. Tools spawn via the injected
-	// TaskSpawner; background settles are published back to persistentBus as
+	// task.TaskSpawner; background settles are published back to persistentBus as
 	// task_settled events by its OnSettle hook.
-	taskManager *TaskManager
+	taskManager *task.TaskManager
 
 	// Framework integration
 	memStore   memory.MemoryStore
@@ -122,7 +124,7 @@ type TagentAgent struct {
 	// projection is the lightweight, bounded Session projection (EventReference[])
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
-	projection *SessionProjection
+	projection *compress.SessionProjection
 
 	// asyncTaskCheckers are checked by Run() before returning.
 	// If any checker reports pending async tasks, Run() continues waiting
@@ -151,7 +153,7 @@ type TagentConfig struct {
 	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
 	Temperature        float64            // Optional: LLM temperature (default: 0.7)
 	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
-	Compress           CompressConfig     // SmartCompressor parameters
+	Compress           CompressConfig     // compress.SmartCompressor parameters
 
 	// TaskSettledMaxInline caps the inline result length in a task_settled
 	// notification (default: DefaultTaskSettledMaxInline); the full result
@@ -203,7 +205,7 @@ const (
 	DefaultWorkspaceCleanupMaxFiles = 200
 )
 
-// CompressConfig holds SmartCompressor parameters.
+// CompressConfig holds compress.SmartCompressor parameters.
 type CompressConfig struct {
 	MaxToolResultChars int
 	MaxExecStateChars  int
@@ -217,18 +219,18 @@ type CompressConfig struct {
 	// content from MemoryStore (default 4).
 	RecentFullCount int
 	// CardMaxChars caps the index-card section of the rolling compaction
-	// summary (default DefaultCardMaxChars); beyond it old card lines are
+	// summary (default compress.DefaultCardMaxChars); beyond it old card lines are
 	// LLM-condensed (or sink, without a summary model).
 	CardMaxChars int
 	// ArchiveCacheCap bounds the per-process L3 archive cache entries
-	// (default DefaultArchiveCacheCap).
+	// (default compress.DefaultArchiveCacheCap).
 	ArchiveCacheCap int
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
 //
 // In the event-driven architecture, NewTagentAgent:
-//   - Creates MemoryStore + MemoryPlugin + SmartCompressor
+//   - Creates MemoryStore + MemoryPlugin + compress.SmartCompressor
 //   - Creates Preprocessor (replacing ContextIntervention.BeforeModel)
 //   - Creates EventBus + AgentLoop
 //   - Creates SessionService + Runner (as shell for session/plugin management)
@@ -249,10 +251,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		cfg.MaxToolIterations = DefaultMaxToolIterations
 	}
 	if cfg.MaxTokens <= 0 {
-		cfg.MaxTokens = DefaultMaxTokens
+		cfg.MaxTokens = compress.DefaultMaxTokens
 	}
 	if cfg.CompressThreshold <= 0 || cfg.CompressThreshold > 1 {
-		cfg.CompressThreshold = DefaultCompressThreshold
+		cfg.CompressThreshold = compress.DefaultCompressThreshold
 	}
 	if cfg.KeepRecentTasks <= 0 {
 		cfg.KeepRecentTasks = 2
@@ -306,16 +308,16 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// AppendEventHook (created next) can capture them.
 	outputCh := make(chan *event.Event, 100)
 	bus := NewEventBus()
-	projection := NewSessionProjection()
+	projection := compress.NewSessionProjection()
 
-	// Task layer: tools spawn long-running work via the injected TaskSpawner;
+	// Task layer: tools spawn long-running work via the injected task.TaskSpawner;
 	// when a task settles in the background (after its sync-wait window), the
 	// OnSettle hook publishes a task_settled event onto the bus, which the
 	// persistent loop reclaims into a new turn (idle → wakes Pull; mid-turn →
 	// buffered until the current turn finishes — single-consumer queueing).
-	taskManager := NewTaskManager(TaskManagerConfig{
-		OnSettle: func(task *Task, sig SettleSignal) {
-			bus.Publish(newTaskSettledEvent(task, sig, cfg.TaskSettledMaxInline))
+	taskManager := task.NewTaskManager(task.TaskManagerConfig{
+		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
+			bus.Publish(newTaskSettledEvent(tk, sig, cfg.TaskSettledMaxInline))
 		},
 	})
 
@@ -329,7 +331,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// Limit session events to 2: only the current invocation's user message
 	// and the latest tool result are needed for ContentRequestProcessor's
 	// TimelineFilterCurrentRequest. Historical context is managed entirely
-	// by SessionProjection + ContextCompressor, so the runner session does
+	// by compress.SessionProjection + compress.ContextCompressor, so the runner session does
 	// not need to retain full event history.
 	//
 	// AppendEventHook forwards user message events to outputCh (the runner
@@ -411,55 +413,55 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	return ta, nil
 }
 
-// buildCompressorOpts builds SmartCompressor options from TagentConfig.
+// buildCompressorOpts builds compress.SmartCompressor options from TagentConfig.
 // Shared by NewTagentAgent and Run() to avoid duplicating option-building logic.
-func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
-	opts := []SmartCompressorOption{
-		WithMaxTokens(cfg.MaxTokens),
+func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
+	opts := []compress.SmartCompressorOption{
+		compress.WithMaxTokens(cfg.MaxTokens),
 	}
 	if cfg.KeepRecentTasks > 0 {
-		opts = append(opts, WithKeepRecentTasks(cfg.KeepRecentTasks))
+		opts = append(opts, compress.WithKeepRecentTasks(cfg.KeepRecentTasks))
 	}
 	if cfg.SummaryModel != nil {
-		opts = append(opts, WithSummaryModel(cfg.SummaryModel))
+		opts = append(opts, compress.WithSummaryModel(cfg.SummaryModel))
 	}
 	// Compress config
 	if cfg.Compress.MaxToolResultChars > 0 {
-		opts = append(opts, WithMaxToolResultChars(cfg.Compress.MaxToolResultChars))
+		opts = append(opts, compress.WithMaxToolResultChars(cfg.Compress.MaxToolResultChars))
 	}
 	if cfg.Compress.MaxExecStateChars > 0 {
-		opts = append(opts, WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
+		opts = append(opts, compress.WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
 	}
 	if cfg.Compress.ChunkSummaryLen > 0 {
-		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
+		opts = append(opts, compress.WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
 	}
 	if cfg.Compress.MaxNoticeChars > 0 {
-		opts = append(opts, WithMaxNoticeChars(cfg.Compress.MaxNoticeChars))
+		opts = append(opts, compress.WithMaxNoticeChars(cfg.Compress.MaxNoticeChars))
 	}
 	if cfg.Compress.ArchiveCacheCap > 0 {
-		opts = append(opts, WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
+		opts = append(opts, compress.WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
 	}
 	return opts
 }
 
-// newCompressorFromConfig creates a SmartCompressor from TagentConfig.
-func newCompressorFromConfig(cfg *TagentConfig) *SmartCompressor {
-	return NewSmartCompressor(buildCompressorOpts(cfg)...)
+// newCompressorFromConfig creates a compress.SmartCompressor from TagentConfig.
+func newCompressorFromConfig(cfg *TagentConfig) *compress.SmartCompressor {
+	return compress.NewSmartCompressor(buildCompressorOpts(cfg)...)
 }
 
 // newContextManagerFromConfig creates a ContextManager from TagentConfig.
 // Shared by NewTagentAgent and Run().
-func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
+func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *compress.SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
 	copts := buildCompressorOpts(cfg)
-	copts = append(copts, WithTokenCounter(NewDefaultTokenCounter()))
-	// Inject MemStore and Projection into SmartCompressor for chunk persistence
+	copts = append(copts, compress.WithTokenCounter(compress.NewDefaultTokenCounter()))
+	// Inject MemStore and Projection into compress.SmartCompressor for chunk persistence
 	if cfg.MemoryStore != nil {
-		copts = append(copts, WithMemStore(cfg.MemoryStore))
+		copts = append(copts, compress.WithMemStore(cfg.MemoryStore))
 	}
 	if projection != nil {
-		copts = append(copts, WithProjection(projection))
+		copts = append(copts, compress.WithProjection(projection))
 	}
-	compressor := NewSmartCompressor(copts...)
+	compressor := compress.NewSmartCompressor(copts...)
 	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt
 
@@ -476,7 +478,7 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		ReasoningEffort:      cfg.ReasoningEffort,
 		ReasoningContentMode: cfg.ReasoningContentMode,
 		Compressor:           compressor,
-		TokenCounter:         NewDefaultTokenCounter(),
+		TokenCounter:         compress.NewDefaultTokenCounter(),
 		MaxTokens:            cfg.MaxTokens,
 		ThresholdPct:         cfg.CompressThreshold,
 		CompactKeysListed:    cfg.Compress.CompactKeysListed,
