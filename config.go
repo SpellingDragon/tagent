@@ -270,12 +270,6 @@ type ToolRef struct {
 	// ID is the tool identifier for plain tools (kind=tool).
 	ID string `json:"id,omitempty" yaml:"id,omitempty"`
 
-	// Model override for agent-kind tools (defaults to parent agent's model)
-	Model string `json:"model,omitempty" yaml:"model,omitempty"`
-
-	// Prompt config for agent-kind tools
-	Prompt PromptConfig `json:"prompt,omitempty" yaml:"prompt,omitempty"`
-
 	// Tool description: inline or from file (relative to prompt_dir)
 	Description     string `json:"description,omitempty"      yaml:"description,omitempty"`
 	DescriptionFile string `json:"description_file,omitempty" yaml:"description_file,omitempty"`
@@ -295,10 +289,13 @@ type ToolRef struct {
 	// with ack/notification semantics.
 	Async *bool `json:"async,omitempty" yaml:"async,omitempty"`
 
-	// Agent parameters (kind=agent)
-	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
-	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
-	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
+	// NOTE: agent runtime parameters (max_tool_iterations, max_tokens,
+	// temperature) are configured ONLY on the referenced agent's own
+	// AgentConfig entry — a ToolRef declares the reference relationship, not
+	// the agent's behavior. Earlier versions declared those fields here too,
+	// but they were never wired into assembly (silently dead config that
+	// contradicted the AgentConfig values); they have been removed to keep a
+	// single configuration point per semantic.
 
 	// Properties holds tool-specific configuration that each tool factory
 	// deserializes into its own typed struct. This keeps ToolRef generic
@@ -386,21 +383,16 @@ func DefaultConfig() Config {
 				CompressThreshold: DefaultCompressThresh,
 				Tools: []ToolRef{
 					{
-						Kind:              ToolKindAgent,
-						AgentID:           "knowledge",
-						DescriptionFile:   "knowledge_tool_desc.md",
-						EventParams:       []string{"event_key"},
-						MaxToolIterations: DefaultAgentMaxToolIter,
-						MaxTokens:         DefaultAgentMaxTokens,
-						Temperature:       DefaultAgentTemp,
+						Kind:            ToolKindAgent,
+						AgentID:         "knowledge",
+						DescriptionFile: "knowledge_tool_desc.md",
+						EventParams:     []string{"event_key"},
 					},
 					{
-						Kind:              ToolKindAgent,
-						AgentID:           "recall",
-						DescriptionFile:   "recall_tool_desc.md",
-						EventParams:       []string{"event_key"},
-						MaxToolIterations: DefaultAgentMaxToolIter,
-						MaxTokens:         DefaultAgentMaxTokens,
+						Kind:            ToolKindAgent,
+						AgentID:         "recall",
+						DescriptionFile: "recall_tool_desc.md",
+						EventParams:     []string{"event_key"},
 					},
 					{
 						Kind:            ToolKindTool,
@@ -514,17 +506,6 @@ func (ac *AgentConfig) applyDefaults(name string, parent *Config) {
 		tr := &ac.Tools[i]
 		if tr.Kind == "" {
 			tr.Kind = ToolKindAgent
-		}
-		if tr.Kind == ToolKindAgent {
-			if tr.MaxToolIterations <= 0 {
-				tr.MaxToolIterations = DefaultAgentMaxToolIter
-			}
-			if tr.MaxTokens <= 0 {
-				tr.MaxTokens = DefaultAgentMaxTokens
-			}
-			if tr.Temperature <= 0 && tr.Model == "" {
-				tr.Temperature = DefaultAgentTemp
-			}
 		}
 	}
 }

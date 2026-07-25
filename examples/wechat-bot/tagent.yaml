@@ -141,29 +141,24 @@ agents:
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
       # AgentToolWrapper 自动从父 agent 的 MemStore 还原完整事件并序列化到
       # RuntimeState["external_context"]，子 agent 通过 Run 读取。
+      # 子 agent 的运行参数（max_tool_iterations/max_tokens/temperature）在其自身
+      # 的 agents.<name> 定义处配置；ToolRef 只声明引用关系。
       - agent: knowledge
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
-        max_tool_iterations: 30
-        max_tokens: 32000
-        temperature: 0.3
 
       # Recall Agent: 记忆检索
       - agent: recall
         description_file: recall_tool_desc.md
         event_params: [event_keys]
-        max_tool_iterations: 5
-        max_tokens: 32000
 
       # Plan Agent: 工作计划管理
       # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划
       - agent: plan
         description_file: plan_tool_desc.md
-        max_tool_iterations: 30
-        max_tokens: 32000
-        temperature: 0.3
 
-      # File Tools: 读统一 ./，写统一 ./workspace
+      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致，
+      # 模型看到单一文件系统视图）
       - kind: tool
         id: read_file
       - kind: tool
@@ -176,28 +171,19 @@ agents:
         id: read_multiple_files
       - kind: tool
         id: save_file
-        # properties:
-        #   base_dir: "./workspace"
       - kind: tool
         id: replace_content
-        # properties:
-        #   base_dir: "./workspace"
 
       # Speak Agent: 语音输出 (桩)
       - agent: speak
         description_file: speak_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
       # Draw Agent: 图像生成 (桩)
       - agent: draw
         description_file: draw_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
       # Exec Tool: shell 命令执行 (异步, 通过 tmux)
+      # cwd 默认 = 进程运行目录（与 file tools 一致），可用 properties.workspace 覆盖
       # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
       #   interval: 轮询检测间隔 (默认 30s)
       #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
@@ -207,7 +193,6 @@ agents:
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 30s
@@ -306,7 +291,7 @@ agents:
     thinking_enabled: true
     reasoning_effort: "high"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
     tools:
-      # File Tools: 读统一 ./，写统一 ./workspace
+      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致）
       - kind: tool
         id: read_file
       - kind: tool
@@ -319,28 +304,18 @@ agents:
         id: read_multiple_files
       - kind: tool
         id: save_file
-        # properties:
-        #   base_dir: "./workspace"
       - kind: tool
         id: replace_content
-        # properties:
-        #   base_dir: "./workspace"
 
       # Speak Agent: 语音输出 (桩)
       - agent: speak
         description_file: speak_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
       # Draw Agent: 图像生成 (桩)
       - agent: draw
         description_file: draw_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
-      # Exec Tool: 直接 shell 命令执行 (简单命令)
+      # Exec Tool: 直接 shell 命令执行 (简单命令)；cwd 默认 = 进程运行目录
       # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
       #   interval: 轮询检测间隔 (默认 30s)
       #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
@@ -350,7 +325,6 @@ agents:
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 30s
@@ -373,16 +347,15 @@ agents:
     max_tokens: 64000
     temperature: 0.3
     tools:
-      # Exec Tool: 调用 openspec CLI
+      # Exec Tool: 调用 openspec CLI；cwd 默认 = 进程运行目录
       - kind: tool
         id: exec
         properties:
-          # workspace: ./workspace
           monitor:
             interval: 3s
             stable_duration: 15s
             fake_dead_duration: 60s
-      # File Tools: 读统一 ./，写统一 ./workspace
+      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致）
       - kind: tool
         id: read_file
       - kind: tool
@@ -395,12 +368,8 @@ agents:
         id: read_multiple_files
       - kind: tool
         id: save_file
-        properties:
-          # base_dir: "./workspace"
       - kind: tool
         id: replace_content
-        properties:
-          # base_dir: "./workspace"
 
   # ========================================================================
   # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)

@@ -145,7 +145,7 @@ type TagentConfig struct {
 	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
 	SystemPromptSource *prompt.Source     // Hot-reloadable system prompt (optional, overrides SystemPrompt)
 	Tools              []tool.Tool        // CallableTools to register
-	MaxToolIterations  int                // Default: 200
+	MaxToolIterations  int                // Default: DefaultMaxToolIterations (50)
 	MaxTokens          int                // Token budget for context (default: 8000)
 	CompressThreshold  float64            // Compression trigger threshold (default: 0.8)
 	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
