@@ -84,8 +84,10 @@ func (k *LocalFileKV) flushLoop() {
 		case <-ticker.C:
 			_ = k.Sync() // best-effort periodic flush
 		case <-k.flushDone:
-			// Final flush on close
-			_ = k.flushLocked()
+			// Final flush on close — must take the lock like every other
+			// flush path (flushLocked requires it; calling it bare races
+			// with concurrent writers on the data map).
+			_ = k.Sync()
 			return
 		}
 	}
@@ -145,10 +147,13 @@ func (k *LocalFileKV) Sync() error {
 }
 
 // Close flushes pending writes and stops the background flush goroutine.
-// After Close, the KV is no longer usable.
+// The final flush is performed synchronously here (not delegated to the
+// flush goroutine) so that callers get a durability guarantee: when Close
+// returns, all acknowledged writes are on disk. After Close, the KV is no
+// longer usable.
 func (k *LocalFileKV) Close() error {
 	close(k.flushDone)
-	return nil
+	return k.Sync()
 }
 
 // markDirty marks the store as needing a flush and triggers an immediate

@@ -730,6 +730,14 @@ func (s *FileSegmentStore) Close() error {
 				err = e
 			}
 		}
+		// Close the KV last — it performs the final durability flush.
+		// Without this, LocalFileKV's deferred-flush window (up to
+		// flushInterval / flushThreshold-1 writes) is lost on graceful exit.
+		if c, ok := s.kv.(closer); ok {
+			if e := c.Close(); e != nil {
+				err = e
+			}
+		}
 	})
 	return err
 }

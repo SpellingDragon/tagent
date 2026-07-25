@@ -379,6 +379,14 @@ func buildAgent(
 		ta.RegisterCloser(actionTool)
 	}
 
+	// Register the memory store for graceful shutdown — file-backed stores
+	// (FileSegmentStore over LocalFileKV/RustViking) perform their final
+	// durability flush in Close. Same-path shared instances are safe: Close
+	// is idempotent (closeOnce) and only invoked at process exit.
+	if c, ok := memStore.(agent.Closer); ok {
+		ta.RegisterCloser(c)
+	}
+
 	// Wire parentProjection to AgentToolWrapper instances for auto-inject fallback.
 	// This must happen after TagentAgent creation (projection is created inside NewTagentAgent).
 	ta.SetToolParentProjection()
