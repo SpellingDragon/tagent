@@ -2,11 +2,26 @@ package action
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
 )
+
+// trimToLineOffset returns the lines of s after the first n lines (the
+// current round's increment view); if s has fewer lines than n (scrollback
+// shifted), s is returned unchanged rather than losing output.
+func trimToLineOffset(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[n:], "\n")
+}
 
 // StatusToSettle maps a tmux SessionStatus to a task-layer settle kind.
 //
@@ -48,14 +63,24 @@ func isTerminalStatus(s SessionStatus) bool {
 // agent.SettleDetector. It is fed monitor transitions via OnStateChange (wired
 // to the monitor callback for this session in the ActionTool integration) and
 // emits agent.SettleSignal on its channel, closing it on a terminal status.
+//
+// LIFETIME: the detector is bound to the SESSION, not to a round. A resume
+// round does not replace it — Rearm resets the round state (output baseline +
+// a fresh dense→detach timer) on the SAME detector, so the monitor callback
+// wiring and the task-layer watch never change hands (no rebinding, no
+// ordering discipline, no stale-signal cross-round risk).
 type TmuxSettleDetector struct {
 	sessionID string
 	ch        chan agent.SettleSignal
 	cancelFn  func()
 	closeOnce sync.Once
 	reapOnce  sync.Once
-	stop      chan struct{}   // closed on close(): stops the detach timer
-	detach    <-chan struct{} // fires at the dense→sparse boundary (sync→async)
+	stop      chan struct{} // closed on close(): stops the detach timer
+	denseDur  time.Duration // dense phase per round (spawn and each resume)
+
+	mu       sync.Mutex      // guards detach + baseline (round state)
+	detach   <-chan struct{} // fires at the dense→sparse boundary (sync→async)
+	baseline int             // output lines before the current round's input
 }
 
 // NewTmuxSettleDetector creates a detector for the given session. cancelFn, when
@@ -70,16 +95,31 @@ func NewTmuxSettleDetector(sessionID string, cancelFn func(), denseDuration ...t
 		cancelFn:  cancelFn,
 		stop:      make(chan struct{}),
 	}
-	dd := DefaultPollSchedule().DenseDuration
+	d.denseDur = DefaultPollSchedule().DenseDuration
 	if len(denseDuration) > 0 && denseDuration[0] > 0 {
-		dd = denseDuration[0]
+		d.denseDur = denseDuration[0]
 	}
-	d.detach = agent.DetachAfter(dd, d.stop)
+	d.detach = agent.DetachAfter(d.denseDur, d.stop)
 	return d
 }
 
-// Detached implements agent.SettleDetector: fires at the dense→sparse boundary.
-func (d *TmuxSettleDetector) Detached() <-chan struct{} { return d.detach }
+// Rearm resets the detector for a resume round on the SAME session: a new
+// output baseline (settle outputs become this round's increment) and a fresh
+// dense→detach timer (the resumed round gets its own sync-wait window).
+func (d *TmuxSettleDetector) Rearm(baseline int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.baseline = baseline
+	d.detach = agent.DetachAfter(d.denseDur, d.stop)
+}
+
+// Detached implements agent.SettleDetector: fires at the dense→sparse boundary
+// of the CURRENT round (Rearm re-creates it).
+func (d *TmuxSettleDetector) Detached() <-chan struct{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.detach
+}
 
 // Settled implements agent.SettleDetector.
 func (d *TmuxSettleDetector) Settled() <-chan agent.SettleSignal { return d.ch }
@@ -101,12 +141,18 @@ func (d *TmuxSettleDetector) reap() {
 
 // OnStateChange feeds a monitor state transition for this session. It emits a
 // settle signal when newStatus is a settle point, and closes the stream on a
-// terminal status. Non-settle transitions (e.g. → Running) are ignored.
+// terminal status. Non-settle transitions (e.g. → Running) are ignored. The
+// output is trimmed to the current round's baseline (Rearm), so resumed
+// rounds settle with their own increment, not the whole scrollback.
 func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output string) {
 	kind, ok := StatusToSettle(newStatus)
 	if !ok {
 		return
 	}
+	d.mu.Lock()
+	baseline := d.baseline
+	d.mu.Unlock()
+	output = trimToLineOffset(output, baseline)
 	var err error
 	if newStatus == SessionError {
 		err = fmt.Errorf("tmux session %s entered error state", d.sessionID)

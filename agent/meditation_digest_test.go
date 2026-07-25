@@ -23,6 +23,7 @@ func (f *fakeTaskController) List() []*Task                              { retur
 func (f *fakeTaskController) Get(string) (*Task, bool)                   { return nil, false }
 func (f *fakeTaskController) Cancel(string) bool                         { return false }
 func (f *fakeTaskController) Relaunch(string) (SpawnResult, error)       { return SpawnResult{}, nil }
+func (f *fakeTaskController) Resume(string, string) (SpawnResult, error) { return SpawnResult{}, nil }
 
 func TestRenderSelfStateDigest_EmptyDegrades(t *testing.T) {
 	if got := renderSelfStateDigest(nil, time.Hour); got != "" {

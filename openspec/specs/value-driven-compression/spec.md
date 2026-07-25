@@ -72,3 +72,12 @@ When `value_driven` is disabled OR `EventValuator` returns an error OR the valua
 - **WHEN** 压缩规划选择压缩窗口
 - **THEN** 窗口边界 SHALL 仅由值密度/预算/保留窗口决定
 - **AND** SHALL NOT 因"保持 tool_call 与 result 相邻"而调整边界
+
+### Requirement: 价值评估素材遵循素材律
+
+批量价值评估与摘要合并调用时,其输入 SHALL 与总结引擎同源（段级素材=段内事件原文,第 0→1 层）;价值密度排序与压缩顺序规则不变（定级为纯函数,零 LLM）。已归档段（存在缓存摘要）SHALL 直接以固化物参与后续层级,不再进入 LLM 摘要批次。
+
+#### Scenario: 已归档段不重复摘要
+
+- **WHEN** 压缩规划覆盖一个已有缓存摘要的段
+- **THEN** 该段 SHALL NOT 进入本轮 LLM 摘要批次（定级仍正常参与——其为纯函数零成本）

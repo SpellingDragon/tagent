@@ -397,6 +397,8 @@ func RegisterSubTools() {
 	agent.RegisterPlainTool("recall_get", recallGetFactory)
 	agent.RegisterPlainTool("recall_recent", recallRecentFactory)
 	agent.RegisterPlainTool("recall_trace", recallTraceFactory)
+	// memory_recall: the protocol recall tool (top-level agent, pure function).
+	agent.RegisterPlainTool("memory_recall", memoryRecallFactory)
 }
 
 func recallQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {

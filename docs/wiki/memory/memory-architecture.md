@@ -883,3 +883,32 @@ func resolvePartitions(query QueryOptions) []int {
 **可管理性**：可单独查看、备份、删除单个事件。`GetStats()` 可直接统计文件数和大小。
 
 **扩展性**：文件数量可随事件增长无限扩展，不受内存限制。
+
+## 十三、记忆策展（unified-memory-curation）
+
+### 三原语与固化级联
+
+记忆只有三个原语：**store**（事件入库，不可变）、**compress**（总结+自然遗忘，同一动作两面）、**recall**（回忆）。没有独立"总结引擎"——内容级总结只在压缩固化时刻发生。
+
+```mermaid
+graph LR
+    A["事件原文<br/>(第0层,唯一全文接触点)"] -->|L3 归档,同段跨轮不重摘| B["段摘要<br/>context_compress_summary"]
+    B -->|工程化提取,零 LLM| C["卡片行<br/>(边界事件骨架)"]
+    C -->|超 card_max_chars,LLM 整理| D["浓缩卡片<br/>(保任务骨架+key引用)"]
+    B -.SetParent 挂 RelationStore.-> A
+```
+
+素材律：第 N 层摘要只消费第 N-1 层固化物，成本 O(新增段) 与历史总量无关。固化物豁免 TTL 与容量淘汰（`getEffectiveTTL` 负值语义 + evict 跳过）：原文可忘、固化物长存。
+
+### 卡片序列（压缩历史的唯一表示）
+
+被压缩历史住在滚动 summaryRef（负 key `context_compress` 引用）里：`[Compacted N] + 卡片行序列 + recent keys`。卡片行由 `extractCardLine` 从边界事件（external_input/agent_output）工程化提取，冥想产出带 ★ 高亮；跨轮由 `buildRetainedRefs` 吸收合并（计数累计/卡片继承/时间下界继承）；超限由 `curateCards` LLM 整理（输出单行化防解析丢行），无模型则最旧行沉底为 `(earlier n items)` 计数。解析正则行锚定（卡片行含用户可控文本，防注入）。
+
+### recall 协议（索引卡=召回票据）
+
+| 输入形态 | 路径 | 特性 |
+|---|---|---|
+| `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补 | 纯函数零幻觉；未命中显式 `miss`；hint 回显对账 |
+| `query`(+filters) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
+
+`memory_recall` 为主 agent 直持纯函数工具（确定性路径无 LLM 中间层）；RecallAgent 保留给多跳编排（trace 等）。

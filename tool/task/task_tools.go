@@ -229,3 +229,68 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	}
 	return fmt.Sprintf("已重跑任务 %s：%s", tk.ID, tk.Spec.Desc), nil
 }
+
+// ---------------------------------------------------------------------------
+// resume_task
+// ---------------------------------------------------------------------------
+
+// ResumeTaskTool feeds new input into an alive-detached task's live session
+// (the state machine's alive-detached → running edge). The resumed round
+// reuses the standard dense→ACK→settle lifecycle under the SAME task id.
+type ResumeTaskTool struct{}
+
+var _ tool.CallableTool = (*ResumeTaskTool)(nil)
+
+// NewResumeTaskTool creates a resume_task tool.
+func NewResumeTaskTool() *ResumeTaskTool { return &ResumeTaskTool{} }
+
+// Declaration implements tool.CallableTool.
+func (t *ResumeTaskTool) Declaration() *tool.Declaration {
+	return &tool.Declaration{
+		Name:        "resume_task",
+		Description: "向一个存活的后台任务（alive 状态，如服务/REPL 会话）继续输入命令或指令。快命令内联返回本轮增量输出；慢响应返回 ACK，结算后以 task_settled 通知回写（同一 task id）。终态任务请用 relaunch_task。",
+		InputSchema: &tool.Schema{
+			Type: "object",
+			Properties: map[string]*tool.Schema{
+				"task_id": {Type: "string", Description: "目标任务 id（支持前缀）"},
+				"input":   {Type: "string", Description: "继续输入的命令/指令文本"},
+			},
+			Required: []string{"task_id", "input"},
+		},
+	}
+}
+
+type resumeArgs struct {
+	TaskID string `json:"task_id"`
+	Input  string `json:"input"`
+}
+
+// Call implements tool.CallableTool.
+func (t *ResumeTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	var args resumeArgs
+	if err := json.Unmarshal(jsonArgs, &args); err != nil {
+		return nil, fmt.Errorf("resume_task: invalid args: %w", err)
+	}
+	if args.Input == "" {
+		return "resume_task 需要非空 input。", nil
+	}
+	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	if !ok {
+		return noControllerMsg, nil
+	}
+	tk, ok := resolveTask(ctrl, args.TaskID)
+	if !ok {
+		return fmt.Sprintf("未找到任务 %q。", args.TaskID), nil
+	}
+	res, err := ctrl.Resume(tk.ID, args.Input)
+	if err != nil {
+		return fmt.Sprintf("重入任务 %s 失败：%v", tk.ID, err), nil
+	}
+	if res.Settled {
+		if res.Signal.Err != nil {
+			return fmt.Sprintf("重入任务 %s 本轮执行出错：%v", tk.ID, res.Signal.Err), nil
+		}
+		return fmt.Sprintf("重入任务 %s 完成，本轮输出：\n%s", tk.ID, res.Signal.Output), nil
+	}
+	return fmt.Sprintf("已向任务 %s 继续输入，正在后台执行；结算后将以 task_settled 通知回写（同一 task id）。", tk.ID), nil
+}

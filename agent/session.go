@@ -247,5 +247,15 @@ func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 				ta.meditationMgr.UpdateLastEventTime(time.Now())
 			}
 		}
+
+		// Meditation outputs become ★-highlighted index cards when their
+		// events are later compacted (reflection anchors in long-term memory).
+		if ta.contextManager != nil && isFinalResponse(evt) &&
+			string(evt.StateDelta[tagentevent.MetaKeyTriggerSource]) == "meditation" {
+			meta := tagentevent.ParseEventMeta(evt)
+			if meta.EventKey != 0 && ta.contextManager.contextCompressor != nil {
+				ta.contextManager.contextCompressor.MarkMeditationKey(meta.EventKey)
+			}
+		}
 	}
 }

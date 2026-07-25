@@ -107,9 +107,11 @@ func DefaultOptionsForCompression() EventSummaryOptions {
 	}
 }
 
-// GenerateEventSummary generates a summary for an event.
-// Special events (external_input, agent_output) use original content as summary.
-// Most events use an abstract/summary format.
+// GenerateEventSummary generates the `event_summary` metadata view for an
+// event. NOTE: despite the historical name, this is NOT content
+// summarization — it is a verbatim-content view (original content for most
+// types, a mechanical tool-call line for action_command). Content-level
+// summarization lives in the compression/curation pipeline.
 // IMPORTANT: No truncation - content exceeding context is handled by SmartCompress.
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string {
 	// Special events: Summary = Original content (no truncation, no prefix)

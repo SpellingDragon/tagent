@@ -195,6 +195,12 @@ const (
 	// DefaultTaskSettledMaxInline caps the inline result in task_settled
 	// notifications; the full result stays available via get_task_result.
 	DefaultTaskSettledMaxInline = 2000
+	// DefaultResumeContextRounds caps the rounds restored by the subagent
+	// task-chain restorer on resume.
+	DefaultResumeContextRounds = 3
+	// DefaultArchiveCacheCap bounds the per-process L3 archive cache (the
+	// archives themselves persist in MemoryStore).
+	DefaultArchiveCacheCap = 256
 	// DefaultCompactKeysListed caps the keys listed in the rolling
 	// compaction summary; older events stay retrievable via recall.
 	DefaultCompactKeysListed = 32
@@ -203,6 +209,9 @@ const (
 	DefaultRecentFullCount = 4
 	// DefaultMaxNoticeChars caps the compress-notice text length.
 	DefaultMaxNoticeChars = 800
+	// DefaultCardMaxChars caps the index-card section of the rolling summary;
+	// beyond it old card lines are LLM-condensed (or sink, without a model).
+	DefaultCardMaxChars = 6000
 
 	// Default compress parameters
 	DefaultMaxExecStateChars  = 2000
@@ -230,6 +239,13 @@ type CompressConfig struct {
 	// RecentFullCount is the number of most recent refs resolved with full
 	// content from MemoryStore (default 4).
 	RecentFullCount int
+	// CardMaxChars caps the index-card section of the rolling compaction
+	// summary (default DefaultCardMaxChars); beyond it old card lines are
+	// LLM-condensed (or sink, without a summary model).
+	CardMaxChars int
+	// ArchiveCacheCap bounds the per-process L3 archive cache entries
+	// (default DefaultArchiveCacheCap).
+	ArchiveCacheCap int
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
@@ -443,6 +459,9 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	if cfg.Compress.MaxNoticeChars > 0 {
 		opts = append(opts, WithMaxNoticeChars(cfg.Compress.MaxNoticeChars))
 	}
+	if cfg.Compress.ArchiveCacheCap > 0 {
+		opts = append(opts, WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
+	}
 	return opts
 }
 
@@ -484,6 +503,7 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		ThresholdPct:         cfg.CompressThreshold,
 		CompactKeysListed:    cfg.Compress.CompactKeysListed,
 		RecentFullCount:      cfg.Compress.RecentFullCount,
+		CardMaxChars:         cfg.Compress.CardMaxChars,
 		MemStore:             cfg.MemoryStore,
 		MemPlugin:            memPlugin,
 		SessionSvc:           sessionSvc,

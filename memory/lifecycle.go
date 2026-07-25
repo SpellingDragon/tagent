@@ -39,6 +39,11 @@ func DefaultLifecycleConfig() LifecycleConfig {
 			event.TypeExternalInput:   30, // High-value: 30 days
 			event.TypeAgentOutput:     14, // Standard: 14 days
 			event.TypeActionCommand:   14, // Standard: 14 days
+			// Curated artifacts (segment summaries) are LONG-TERM MEMORY:
+			// raw events may be forgotten by TTL, artifacts persist. The index
+			// cards in the rolling summary point at these keys — expiring them
+			// would leave dangling tickets. Negative = exempt from TTL.
+			"context_compress_summary": -1,
 		},
 	}
 }
@@ -240,6 +245,12 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 			if lm.tombstone.IsTombstone(eventPK.EventKey) {
 				continue
 			}
+			// Curated artifacts are exempt from capacity eviction too (same rule
+			// as TTL): raw events may be forgotten, artifacts persist — index
+			// cards point at these keys.
+			if extractEventTypeFromJSON(pair.Value) == "context_compress_summary" {
+				continue
+			}
 
 			if err := lm.tombstone.MarkTombstone(eventPK.EventKey); err != nil {
 				log.Errorf("[Lifecycle] evict MarkTombstone failed key=%d: %v", eventPK.EventKey, err)
@@ -251,10 +262,18 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 }
 
 // getEffectiveTTL returns the effective TTL in days for a given event type.
+// A NEGATIVE type-specific TTL means the type is exempt from expiration
+// (curated artifacts — "raw events may be forgotten, artifacts persist");
+// the caller skips types whose effective TTL is <= 0.
 func (lm *LifecycleManager) getEffectiveTTL(eventType string) (int, error) {
-	// Type-specific TTL takes precedence
-	if ttl, ok := lm.config.TypeTTL[eventType]; ok && ttl > 0 {
-		return ttl, nil
+	// Type-specific TTL takes precedence; negative = exempt.
+	if ttl, ok := lm.config.TypeTTL[eventType]; ok {
+		if ttl < 0 {
+			return 0, nil
+		}
+		if ttl > 0 {
+			return ttl, nil
+		}
 	}
 	// Fall back to global TTL
 	return lm.config.GlobalTTLDays, nil

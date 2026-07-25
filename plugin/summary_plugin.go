@@ -11,13 +11,16 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
-// SummaryPlugin enriches events with type and summary information.
+// SummaryPlugin enriches events with type and metadata annotation.
 // It implements plugin.Plugin and is registered on the Runner.
 //
-// This is the "调用后" (post-call) responsibility:
-// - Attaches event type to the event Tag
-// - Generates and attaches event summary
-// - Enables downstream consumers to understand event semantics
+// ROLE (unified-memory-curation): metadata annotation ONLY — this plugin does
+// NOT perform content summarization. The `event_summary` it attaches is a
+// VERBATIM-CONTENT VIEW (original text for most event types, a mechanical
+// tool-call line for action_command), used for display and recall listings.
+// All content-level summarization happens at compression/curation time
+// (SmartCompressor L3 → segment summaries → index cards), following the
+// material law: layer-N summaries consume layer-(N-1) artifacts.
 type SummaryPlugin struct{}
 
 // NewSummaryPlugin creates a new SummaryPlugin.

@@ -150,6 +150,24 @@ func TestLifecycleConfig_Defaults(t *testing.T) {
 	assert.Equal(t, time.Hour, cfg.CheckInterval)
 	assert.Equal(t, 3, cfg.TypeTTL[event.TypeContextCompress])
 	assert.Equal(t, 30, cfg.TypeTTL[event.TypeExternalInput])
+	// Curated artifacts are exempt from TTL (raw events may be forgotten,
+	// artifacts persist — index cards point at these keys).
+	assert.Equal(t, -1, cfg.TypeTTL["context_compress_summary"])
+}
+
+// TestGetEffectiveTTL_ArtifactExemption: a negative type TTL means exempt —
+// getEffectiveTTL returns 0 and the expiry scan skips the type entirely
+// (must NOT fall back to the global TTL).
+func TestGetEffectiveTTL_ArtifactExemption(t *testing.T) {
+	lm := &LifecycleManager{config: DefaultLifecycleConfig()}
+	ttl, err := lm.getEffectiveTTL("context_compress_summary")
+	assert.NoError(t, err)
+	assert.Equal(t, 0, ttl, "negative TypeTTL must yield 0 (exempt), not global fallback")
+
+	// Unknown types still fall back to the global TTL.
+	ttl, err = lm.getEffectiveTTL("some_unknown_type")
+	assert.NoError(t, err)
+	assert.Equal(t, 7, ttl)
 }
 
 func TestLifecycleManager_StartStop(t *testing.T) {

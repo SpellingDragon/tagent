@@ -175,6 +175,7 @@ type ContextManagerConfig struct {
 	// constraints (0 = package defaults).
 	CompactKeysListed int
 	RecentFullCount   int
+	CardMaxChars      int
 
 	// Unified Runner: plugins + session service registered on the same Runner
 	MemPlugin  *plugin.MemoryPlugin
@@ -219,6 +220,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			keepRecent,
 			WithCompactKeysListed(cfg.CompactKeysListed),
 			WithRecentFullCount(cfg.RecentFullCount),
+			WithCardMaxChars(cfg.CardMaxChars),
 		)
 	}
 

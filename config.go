@@ -175,8 +175,11 @@ type AgentConfig struct {
 	// TaskSettledMaxInline caps the inline result length in a task_settled
 	// notification (default 2000); full results stay retrievable via
 	// get_task_result.
-	TaskSettledMaxInline int            `json:"task_settled_max_inline,omitempty" yaml:"task_settled_max_inline,omitempty"`
-	Compress             CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
+	TaskSettledMaxInline int `json:"task_settled_max_inline,omitempty" yaml:"task_settled_max_inline,omitempty"`
+	// ResumeContextRounds caps how many prior rounds the subagent task-chain
+	// restorer injects on resume (default 3).
+	ResumeContextRounds int            `json:"resume_context_rounds,omitempty" yaml:"resume_context_rounds,omitempty"`
+	Compress            CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
 	// Generation controls thinking/reasoning mode for the LLM.
 	// When set, these fields are merged into model.GenerationConfig.
@@ -216,6 +219,13 @@ type CompressConfig struct {
 	// RecentFullCount is how many most-recent refs resolve with full content
 	// from MemoryStore (default 4).
 	RecentFullCount int `json:"recent_full_count,omitempty" yaml:"recent_full_count,omitempty"`
+	// CardMaxChars caps the index-card section of the rolling compaction
+	// summary (default 6000); beyond it old card lines are LLM-condensed
+	// (with summary_model) or sink into an "earlier n items" counter.
+	CardMaxChars int `json:"card_max_chars,omitempty" yaml:"card_max_chars,omitempty"`
+	// ArchiveCacheCap bounds the per-process L3 archive cache entries
+	// (default 256; the archives themselves persist in MemoryStore).
+	ArchiveCacheCap int `json:"archive_cache_cap,omitempty" yaml:"archive_cache_cap,omitempty"`
 
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.

@@ -240,6 +240,38 @@ func (tm *TmuxMonitor) AddSessionWithCallback(session *TmuxSession, cb func(sess
 	log.Infof("[TmuxMonitor] added session %s (per-session callback)", session.ID)
 }
 
+// SessionIDs returns a snapshot of the currently monitored session IDs
+// (used by ActionTool.Close to reap live sessions on graceful shutdown).
+func (tm *TmuxMonitor) SessionIDs() []string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	ids := make([]string, 0, len(tm.sessions))
+	for id := range tm.sessions {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TouchSession re-enters dense polling for a LIVE session (resume path: a
+// resumed round wants quick settle detection, exactly like a fresh spawn) by
+// resetting the session's age and marking it due. Returns false if the
+// session is no longer monitored (reaped) so the caller can surface the
+// error. The per-session callback is NOT touched — the detector is bound to
+// the session for its whole lifetime (see TmuxSettleDetector.Rearm).
+func (tm *TmuxMonitor) TouchSession(sessionID string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	session, ok := tm.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	session.CreatedAt = time.Now() // re-enter dense polling for the resumed round
+	session.Status = SessionRunning
+	tm.markDueLocked(session)
+	log.Infof("[TmuxMonitor] touched session %s (resume round)", sessionID)
+	return true
+}
+
 // RemoveSession removes a session from monitoring
 func (tm *TmuxMonitor) RemoveSession(sessionID string) {
 	tm.mu.Lock()

@@ -127,6 +127,9 @@ type AgentToolWrapper struct {
 	// detector (0 → detector default ≈ 10s). The dense→sparse boundary is the
 	// sync→async ack point; mainly used by tests to control inline vs ack.
 	asyncDenseDuration time.Duration
+	// resumeContextRounds caps the prior rounds restored on resume
+	// (0 → DefaultResumeContextRounds).
+	resumeContextRounds int
 }
 
 // autoInjectMaxEvents is the maximum number of recent events to auto-inject
@@ -170,6 +173,19 @@ func (w *AgentToolWrapper) SetAsyncDisabled(disabled bool) {
 // (0 → detector default). Runs shorter than this settle inline; longer ones ack.
 func (w *AgentToolWrapper) SetAsyncDenseDuration(d time.Duration) {
 	w.asyncDenseDuration = d
+}
+
+// SetResumeContextRounds caps how many prior rounds the task-chain restorer
+// injects on resume (0 → DefaultResumeContextRounds).
+func (w *AgentToolWrapper) SetResumeContextRounds(n int) {
+	w.resumeContextRounds = n
+}
+
+func (w *AgentToolWrapper) effectiveResumeRounds() int {
+	if w.resumeContextRounds > 0 {
+		return w.resumeContextRounds
+	}
+	return DefaultResumeContextRounds
 }
 
 // SetDescriptionSource sets a hot-reloadable prompt source for the tool description.
@@ -331,14 +347,24 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	// return an ack and emit task_settled when the run returns. The run uses a
 	// detached context so it can outlive the parent turn (cancel via the task).
 	if spawner, ok := TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
+		// Task-local round chain: each settled round's {input, output} is
+		// recorded so a later resume can restore THIS task's context (and only
+		// this task's — context-scoping). Shared across relaunch/resume rounds
+		// via the closure.
+		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
 		detector := NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			return w.runAndCollect(runCtx, inv, agentName)
+			out, err := w.runAndCollect(runCtx, inv, agentName)
+			if err == nil {
+				rounds.add(request, out)
+			}
+			return out, err
 		}, w.asyncDenseDuration)
 		res := spawner.Spawn(TaskSpec{
 			Kind:     "subagent",
 			Desc:     agentName + ": " + truncate(request, 60),
 			Key:      agentName + ":" + request,
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
+			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
 		if res.Settled {
 			if res.Signal.Err != nil {
@@ -438,6 +464,95 @@ func (w *AgentToolWrapper) subagentRelaunch(spawner TaskSpawner, inv *agent.Invo
 			Key:      agentName + ":" + request,
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
 		}, detector), nil
+	}
+}
+
+// subagentRounds is the task-local round chain: the {input, output} pairs of
+// this task's settled rounds, shared across resume rounds via closure. cap
+// bounds how many rounds are restored (and, with headroom, retained).
+type subagentRounds struct {
+	mu     sync.Mutex
+	cap    int
+	rounds []subagentRound
+}
+
+type subagentRound struct {
+	input  string
+	output string
+	at     time.Time
+}
+
+func (r *subagentRounds) add(input, output string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rounds = append(r.rounds, subagentRound{input: input, output: output, at: time.Now()})
+	// Bound the chain: only the newest cap rounds are ever restored, so older
+	// entries are dead weight on a long-lived resumable task.
+	limit := r.cap
+	if limit <= 0 {
+		limit = DefaultResumeContextRounds
+	}
+	if len(r.rounds) > limit*4 {
+		r.rounds = append([]subagentRound(nil), r.rounds[len(r.rounds)-limit*2:]...)
+	}
+}
+
+func (r *subagentRounds) recent(n int) []subagentRound {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.rounds) <= n {
+		return append([]subagentRound(nil), r.rounds...)
+	}
+	return append([]subagentRound(nil), r.rounds[len(r.rounds)-n:]...)
+}
+
+// subagentResume returns the subagent-specific resume implementation (task-
+// chain restorer): a NEW single-turn Run whose external_context carries this
+// task's prior rounds — the last settle result foremost — and nothing from
+// unrelated tasks (context-scoping). No process resurrection: the sub agent
+// stays a single-turn primitive; restoration is the framework's engineering
+// feed, not sub-agent statefulness.
+//
+// NOTE(curation): once settle results carry their archived event key
+// (task.resultRef bridge), the restorer can additionally walk RelationStore
+// for curated artifacts on this task's causal chain; the injection slot is
+// already here.
+func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRounds) func(string) (SettleDetector, error) {
+	return func(input string) (SettleDetector, error) {
+		prior := rounds.recent(w.effectiveResumeRounds())
+		if len(prior) == 0 {
+			return nil, fmt.Errorf("subagent task has no settled round to resume from — use relaunch_task or a fresh call")
+		}
+
+		// Restore the task chain as external context events (newest last; the
+		// last settle result is what the resumed run references first).
+		restored := make([]memory.FullEvent, 0, len(prior))
+		for _, rd := range prior {
+			restored = append(restored, memory.FullEvent{
+				EventType: "task_round",
+				EventSummary: fmt.Sprintf("〔本任务上一轮〕指令: %s\n结果: %s",
+					truncate(rd.input, 200), rd.output),
+				Timestamp: rd.at.UnixMilli(),
+			})
+		}
+		serialized, err := serializeExternalContext(restored)
+		if err != nil {
+			return nil, fmt.Errorf("serialize task-chain context: %w", err)
+		}
+		runOpts := agent.RunOptions{RuntimeState: map[string]any{
+			ExternalContextKey: json.RawMessage(serialized),
+		}}
+		inv := agent.NewInvocation(
+			agent.WithInvocationMessage(model.NewUserMessage(input)),
+			agent.WithInvocationRunOptions(runOpts),
+		)
+		return NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
+			out, err := w.runAndCollect(runCtx, inv, agentName)
+			if err == nil {
+				rounds.add(input, out)
+			}
+			return out, err
+		}, w.asyncDenseDuration), nil
 	}
 }
 

@@ -93,6 +93,13 @@ type TaskSpec struct {
 	// relaunch(id)). For command tasks it re-runs the original command in a
 	// fresh session. Nil → the task is not relaunchable.
 	Relaunch func() (SpawnResult, error)
+	// ResumeFn, when non-nil, feeds new input into the task's LIVE session
+	// (resume_task): tmux tasks SendKeys into the existing session, subagent
+	// tasks start a new Run with framework-restored task-chain context. It
+	// returns a fresh SettleDetector for the resumed round; the task then
+	// re-enters the standard dense→ACK→settle lifecycle under the SAME task id.
+	// Nil → the task is not resumable.
+	ResumeFn func(input string) (SettleDetector, error)
 	// Origin is opaque baggage: a snapshot of the spawning turn's invocation
 	// metadata (e.g. chat_id), stamped by the framework at spawn time and
 	// carried verbatim to the task_settled event so a background result can be
@@ -118,6 +125,7 @@ type Task struct {
 	firstSettle   chan SettleSignal // cap 1: carries the first settle into the sync-wait window
 	windowClosed  bool              // true once the sync-wait window ended (inline settle OR timeout)
 	aliveDetached bool              // true once a service task's first stable "ready" was emitted (D4)
+	watchDone     chan struct{}     // closed to retire the current watch goroutine (resume re-arms it)
 }
 
 // Status returns the task's current status (thread-safe snapshot).
@@ -183,6 +191,7 @@ type TaskController interface {
 	Get(id string) (*Task, bool)
 	Cancel(id string) bool
 	Relaunch(id string) (SpawnResult, error)
+	Resume(id string, input string) (SpawnResult, error)
 }
 
 var _ TaskController = (*TaskManager)(nil)
@@ -306,6 +315,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		status:      TaskRunning,
 		detector:    detector,
 		firstSettle: make(chan SettleSignal, 1),
+		watchDone:   make(chan struct{}),
 	}
 	tm.tasks[task.ID] = task
 	if spec.Key != "" {
@@ -313,7 +323,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	}
 	tm.mu.Unlock()
 
-	go tm.watch(task)
+	go tm.watch(task, detector, task.watchDone)
 
 	// Wait for the first of {settle, detach}. The detach signal (dense→sparse
 	// boundary, owned by the detector) is the sync→async ack point — there is no
@@ -332,22 +342,31 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 // watch consumes the detector's settle signals, updates task state, and routes
 // each signal either into the sync-wait window (before it closes) or to OnSettle
 // (after). The routing decision is made under task.mu together with the buffered
-// send, so no settle is lost at the window boundary.
-func (tm *TaskManager) watch(task *Task) {
-	for sig := range task.detector.Settled() {
-		tm.applyStatus(task, sig)
-
-		task.mu.Lock()
-		if task.windowClosed {
-			task.mu.Unlock()
-			tm.emitBackground(task, sig)
-		} else {
-			// Still inside the window: hand the first settle to Spawn.
-			select {
-			case task.firstSettle <- sig:
-			default: // buffer already holds one — ignore extras within window
+// send, so no settle is lost at the window boundary. It exits when the detector's
+// channel closes OR when the watch is retired (resume re-arms a fresh detector).
+func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan struct{}) {
+	for {
+		select {
+		case <-done:
+			return
+		case sig, ok := <-detector.Settled():
+			if !ok {
+				return
 			}
-			task.mu.Unlock()
+			tm.applyStatus(task, sig)
+
+			task.mu.Lock()
+			if task.windowClosed {
+				task.mu.Unlock()
+				tm.emitBackground(task, sig)
+			} else {
+				// Still inside the window: hand the first settle to Spawn.
+				select {
+				case task.firstSettle <- sig:
+				default: // buffer already holds one — ignore extras within window
+				}
+				task.mu.Unlock()
+			}
 		}
 	}
 }
@@ -487,7 +506,12 @@ func (tm *TaskManager) Cancel(id string) bool {
 	if !ok {
 		return false
 	}
-	t.detector.Cancel()
+	t.mu.Lock()
+	detector := t.detector
+	t.mu.Unlock()
+	if detector != nil {
+		detector.Cancel()
+	}
 	t.mu.Lock()
 	t.status = TaskCancelled
 	if t.settledAt.IsZero() {
@@ -512,6 +536,95 @@ func (tm *TaskManager) Relaunch(id string) (SpawnResult, error) {
 		return SpawnResult{}, fmt.Errorf("task %s is not relaunchable", id)
 	}
 	return t.Spec.Relaunch()
+}
+
+// Resume feeds new input into a task and re-enters the standard
+// dense→ACK→settle lifecycle under the SAME task id.
+//
+// Legal source states:
+//   - alive_detached / stable — the session is alive; tmux resume feeds
+//     SendKeys into it (service/repl reentry).
+//   - completed / failed — the previous round ended; for executor kinds that
+//     are round-based (subagent: new Run + task-chain restorer), resume is the
+//     natural continuation. tmux resume on a dead session fails cleanly at
+//     SendKeys with an actionable error.
+//
+// Illegal source states: running / suspect (a round is in flight — wait and
+// retry) and cancelled (session killed — relaunch or start fresh). Concurrency:
+// the claim transitions to running under task.mu BEFORE ResumeFn runs, so
+// parallel resumes (parallel tool execution is enabled) single-win; the loser
+// is told the task is running.
+func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
+	tm.mu.Lock()
+	task, ok := tm.tasks[id]
+	tm.mu.Unlock()
+	if !ok {
+		return SpawnResult{}, fmt.Errorf("task %s not found", id)
+	}
+
+	task.mu.Lock()
+	prevStatus := task.status
+	switch prevStatus {
+	case TaskAliveDetached, TaskStable, TaskCompleted, TaskFailed:
+		// legal source states (see doc comment)
+	case TaskRunning, TaskSuspect:
+		task.mu.Unlock()
+		return SpawnResult{}, fmt.Errorf("task %s is %s — a round is in flight (or a concurrent resume); wait for it to settle and retry", id, prevStatus)
+	case TaskCancelled:
+		task.mu.Unlock()
+		return SpawnResult{}, fmt.Errorf("task %s is cancelled (session killed) — use relaunch_task for a fresh run, or start a new call", id)
+	default:
+		task.mu.Unlock()
+		return SpawnResult{}, fmt.Errorf("task %s is %s (not resumable) — use relaunch_task for a fresh run, or start a new call", id, prevStatus)
+	}
+	if task.Spec.ResumeFn == nil {
+		task.mu.Unlock()
+		return SpawnResult{}, fmt.Errorf("task %s does not support resume", id)
+	}
+	// Claim the task: running under lock so a concurrent resume loses the race.
+	task.status = TaskRunning
+	task.mu.Unlock()
+
+	detector, err := task.Spec.ResumeFn(input)
+	if err != nil {
+		// Roll back the claim; the session was not touched by us.
+		task.mu.Lock()
+		task.status = prevStatus
+		task.mu.Unlock()
+		return SpawnResult{}, fmt.Errorf("task %s resume: %w", id, err)
+	}
+
+	// Re-arm the task for a fresh round. Two shapes:
+	//   - SAME detector returned (tmux Rearm: session-bound detector, round
+	//     state reset internally) → the running watch keeps consuming the same
+	//     Settled channel; only the sync-wait window is reopened.
+	//   - NEW detector (subagent: each round is a new Run) → retire the old
+	//     watch via watchDone and start a fresh one.
+	task.mu.Lock()
+	newWatch := detector != task.detector
+	if newWatch {
+		close(task.watchDone)
+		task.watchDone = make(chan struct{})
+		task.detector = detector
+	}
+	task.firstSettle = make(chan SettleSignal, 1)
+	task.windowClosed = false
+	task.aliveDetached = false
+	done := task.watchDone
+	task.mu.Unlock()
+
+	if newWatch {
+		go tm.watch(task, detector, done)
+	}
+
+	select {
+	case sig := <-task.firstSettle:
+		tm.closeWindow(task, false)
+		return SpawnResult{Task: task, Settled: true, Signal: sig}, nil
+	case <-detector.Detached():
+		tm.closeWindow(task, true)
+		return SpawnResult{Task: task, Settled: false}, nil
+	}
 }
 
 // funcSettleDetector is a generic detector that runs fn in a goroutine and emits

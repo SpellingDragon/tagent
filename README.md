@@ -79,6 +79,16 @@ graph TB
 - `Compactor` 只清理 `SessionProjection` 中的旧引用，不删除 `MemoryStore`
 - `MemoryStore` 是唯一完整事件链，Agent 和 Tool 通过 `EventKey` 按需访问
 
+### 记忆三原语与固化级联
+
+记忆只有三个原语：**store**（事件入库，不可变）、**compress**（总结 + 自然遗忘，同一动作的两面）、**recall**（回忆）。没有独立的"总结引擎"：内容级总结只在压缩固化时刻发生。
+
+**固化级联（素材律）**：第 N 层摘要只消费第 N-1 层固化物——事件原文 → 段摘要（L3 归档，挂 RelationStore 因果链 + 来源 key 集合，同段跨轮不重摘）→ 卡片行 → 浓缩卡片。固化物（`context_compress_summary`）豁免 TTL：原文可忘、固化物长存。
+
+**卡片序列（历史表示的唯一对象）**：被压缩历史住在滚动 summary reference 里，形态为 `[Compacted N] + 卡片行序列 + recent keys`。卡片行由任务边界事件（external_input / agent_output）工程化提取（零 LLM、零漂移），冥想产出带 ★ 高亮；超 `card_max_chars` 时旧卡片由 LLM 整理为浓缩卡片（保留任务骨架与 key 引用），无模型/失败则最旧行沉底为计数——每一层降级都不塌。无 pinned、无投影特例规则。
+
+**recall 协议（索引卡=召回票据）**：卡片行里的 `[hex]` key 即票据。`memory_recall` 是主 agent 直持的纯函数工具，按输入形态分流：`items=[{key,hint?}]` → 工程化精确召回（批量 GetEvent，未命中明确报 miss）；`query` → 语义召回（检索层可独立演进，入口协议不变）。确定性路径上无 LLM 中间层；RecallAgent（子 agent）保留给复杂检索/多跳编排。
+
 ### 记忆分区与跨 Agent 编排
 
 `MemoryStore` 内部按 **PartitionID** 分区，PartitionID 由 **Agent 名**派生（`PartitionIDFromName(agentName)`）。每个 Agent（主 Agent 与各子 Agent）的事件写入各自分区，实现 **Agent 间记忆隔离**。
@@ -230,7 +240,7 @@ tagent 有两个独立的上下文管理操作：
 - **作用对象**：`[]model.Message`，不修改 `SessionProjection` 和 `MemoryStore`（纯视图变换）
 
 **Compactor（清理 Session 投影）**：当 SmartCompressor 压缩后 token 仍超过 `MaxTokens` 时触发：
-- **清理策略**：按任务边界切分 `SessionProjection`，保留最近 N 个完整任务的 `EventReference`，旧引用替换为一条 `context_compress` summary reference
+- **清理策略**：按任务边界切分 `SessionProjection`，保留最近 N 个完整任务的 `EventReference`，旧引用替换为一条**滚动** `context_compress` summary reference（携带卡片序列；跨轮吸收旧 summary——计数累计、卡片行继承、时间下界继承，永不静默丢历史）
 - **作用对象**：`SessionProjection`，不修改 `MemoryStore`
 
 | 操作 | 作用对象 | 触发条件 |
@@ -328,8 +338,9 @@ agents:
 - **task_settled 回收 turn**：后台任务结算后发一条自包含事件到事件总线；持久循环空闲则唤醒、进行中则排队（不打断），把结果作为新 turn 交给 LLM。
 - **服务型 alive-detached**：首次 `stable` 发一次"就绪"通知后转常驻存活态，后续输出变化不再刷屏，仅 `cancel`/进程死亡结束。
 - **实时任务看板**：每轮 `BeforeModel` 从注册表重渲染当前进行中任务，置于当前输入前；不入历史、不参与压缩；终态任务自动 age-out。
-- **LLM 任务工具**：`list_tasks` / `get_task_result(id)` / `cancel_task(id)` / `relaunch_task(id)`（即时同步返回；大结果在通知里截断、按需拉全量）。
-- **会话回收**：命令进程真正结束（completed/error）后自动 kill 其 tmux 会话，避免长程运行累积死会话。
+- **LLM 任务工具**：`list_tasks` / `get_task_result(id)` / `cancel_task(id)` / `relaunch_task(id)`（即时同步返回；大结果在通知里截断、按需拉全量）/ `resume_task(id, input)`。
+- **resume_task 重入原语**：对存活/完成态任务继续输入，生命周期完全复用 spawn 的 dense→内联/ACK→settle，同一 task id 贯穿；并发 resume 占坑单胜。特异出入口：tmux 的 detector 绑会话而非轮次——resume 仅 `Rearm`（新输出基线+新 dense 窗口）并 `SendKeys`，监控回调与任务 watch 永不换手（TUI 拒绝）；subagent 为新 Run + 任务链还原器（本任务前序轮次与上次结果注入 external_context，`resume_context_rounds` 封顶，只含本任务内容；子 agent 保持单 turn 原语）。非法状态 resume 返回明确错误并引导。
+- **会话回收闭环**：运行时——命令进程真正结束（completed/error）后自动 kill 其 tmux 会话；优雅退出——`Close()` 收编全部存活会话；崩溃/强杀后——下次启动按前缀清扫孤儿会话（每个孤儿占一个 pty，可逐步耗尽系统 pty 池；多实例场景用独立前缀或 `WithOrphanCleanupDisabled`）。
 
 任务工具为内建可选工具，需在 agent 的 `tools` 中显式引用方可挂载。
 

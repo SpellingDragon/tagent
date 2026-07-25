@@ -13,7 +13,7 @@ const { chromium } = require('playwright');
   const page = await context.newPage();
   
   console.log('正在打开页面...');
-  await page.goto('https://mp.weixin.qq.com/s/-oVGdaNcQXKuN2nQQ6BkzA', {
+  await page.goto('https://mp.weixin.qq.com/s/fNBFiRr5RYsxywq_sB3XlQ', {
     waitUntil: 'networkidle',
     timeout: 30000
   });

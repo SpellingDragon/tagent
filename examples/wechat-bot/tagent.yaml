@@ -136,6 +136,11 @@ agents:
       # summary_provider: optional, defaults to same provider as this agent.
       # Use a different provider for cost optimization (e.g., cheaper model for compression).
       summary_provider: tencent
+      # card_max_chars: 滚动压缩摘要中卡片序列的长度上限（默认 6000）。
+      # 超限时旧卡片由 summary_model 整理为浓缩卡片；无模型则最旧行沉底为计数。
+      # card_max_chars: 6000
+      # archive_cache_cap: 归档缓存条数上限（默认 256,固化物本体永在 MemoryStore）
+      # archive_cache_cap: 256
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
@@ -147,10 +152,14 @@ agents:
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
 
-      # Recall Agent: 记忆检索
+      # Recall Agent: 记忆检索（复杂检索/多跳编排）
       - agent: recall
         description_file: recall_tool_desc.md
         event_params: [event_keys]
+
+      # Memory Recall: 统一召回协议（纯函数,票据在手直达;无需经子 agent）
+      - kind: tool
+        id: memory_recall
 
       # Plan Agent: 工作计划管理
       # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划

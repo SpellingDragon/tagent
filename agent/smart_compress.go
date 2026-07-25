@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -31,6 +32,13 @@ type SmartCompressor struct {
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
 	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
+
+	// archiveCache maps segment content hash → archived artifact, so the same
+	// segment is NEVER re-summarized or re-stored across rounds (material law:
+	// cost stays O(new segments), independent of history size).
+	archiveCacheMu  sync.Mutex
+	archiveCache    map[string]archivedSegment
+	archiveCacheCap int // bound on cached entries (0 → DefaultArchiveCacheCap)
 
 	// Configurable truncation parameters
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
@@ -109,6 +117,16 @@ func WithMaxNoticeChars(n int) SmartCompressorOption {
 // WithChunkSummaryLen sets the summary length per segment.
 func WithChunkSummaryLen(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
+}
+
+// WithArchiveCacheCap bounds the per-process archive cache entries
+// (0 → DefaultArchiveCacheCap; the archives themselves persist in MemoryStore).
+func WithArchiveCacheCap(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) {
+		if n > 0 {
+			sc.archiveCacheCap = n
+		}
+	}
 }
 
 // WithMemStore injects a MemoryStore for summary archive persistence.
@@ -285,8 +303,16 @@ func (sc *SmartCompressor) Compress(
 	// recall.
 	level3Failed := make(map[int]bool)
 	level3Summaries := make(map[int]string)
+	// cachedArchives: segments whose hash hit the archive cache — summary and
+	// summaryKey are reused verbatim; no LLM call, no re-store.
+	cachedArchives := make(map[int]archivedSegment)
 	for i, p := range plans {
 		if p.level != 3 {
+			continue
+		}
+		if hit, ok := sc.lookupArchive(sc.segmentContentHash(p.seg)); ok {
+			cachedArchives[i] = hit
+			level3Summaries[i] = hit.summary
 			continue
 		}
 		if sc.summaryModel != nil {
@@ -387,9 +413,15 @@ func (sc *SmartCompressor) Compress(
 				k, _, _ := parseEventKeyAndType(p.seg.Messages[0].Content)
 				segEventKey = k
 			}
-			if sc.memStore != nil {
+			if hit, ok := cachedArchives[i]; ok {
+				// Cache hit: reuse the archived artifact — no LLM, no re-store.
+				result = append(result, model.NewUserMessage(
+					fmt.Sprintf("〔历史归档〕[context_archive] evt_%s 已摘要归档，摘要 key=%s", tagentevent.FormatEventKey(segEventKey), tagentevent.FormatEventKey(hit.summaryKey)),
+				))
+			} else if sc.memStore != nil {
 				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary)
 				if archiveErr == nil {
+					sc.storeArchive(sc.segmentContentHash(p.seg), archivedSegment{summaryKey: summaryKey, summary: summary})
 					// Archival note: user-side observation, never system (see
 					// buildCompressEvent rationale).
 					result = append(result, model.NewUserMessage(
@@ -570,6 +602,35 @@ func (sc *SmartCompressor) summarizeMsgs(ctx context.Context, msgs []model.Messa
 		return "", true // empty summary is treated as failure
 	}
 	return summary, false
+}
+
+// generatePlainSummary runs a single plain-prompt completion on the summary
+// model (used by index-card condensation). Returns an error when no model is
+// configured or the call fails — callers degrade engineering-side.
+func (sc *SmartCompressor) generatePlainSummary(ctx context.Context, prompt string) (string, error) {
+	if sc.summaryModel == nil {
+		return "", fmt.Errorf("no summary model configured")
+	}
+	req := &model.Request{
+		Messages: []model.Message{
+			model.NewSystemMessage("你是一个历史记录浓缩助手。严格遵循用户的硬性要求。"),
+			model.NewUserMessage(prompt),
+		},
+	}
+	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	var result string
+	for resp := range respCh {
+		if resp.Error != nil {
+			return "", fmt.Errorf("summary model error: %s", resp.Error.Message)
+		}
+		if len(resp.Choices) > 0 {
+			result += resp.Choices[0].Message.Content
+		}
+	}
+	return strings.TrimSpace(result), nil
 }
 
 // firstStageCompress drops all tool-related messages from execMsgs, keeping only
@@ -830,13 +891,23 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 		return 0, fmt.Errorf("archiveSegment: memStore is nil")
 	}
 
-	// Determine partition ID from segment's first event key
+	// Collect source event keys from the segment (provenance, I7) and derive
+	// the partition from the first keyed message. The LAST keyed event is the
+	// causal parent of the summary: recall_trace can walk from the curated
+	// artifact back into the raw events it condenses.
 	partitionID := memory.NewPartitionID()
-	if len(seg.Messages) > 0 {
-		k, _, _ := parseEventKeyAndType(seg.Messages[0].Content)
-		if k > 0 {
+	var sourceKeys []string
+	var tailKey int64
+	for _, msg := range seg.Messages {
+		k, _, _ := parseEventKeyAndType(msg.Content)
+		if k <= 0 {
+			continue
+		}
+		if len(sourceKeys) == 0 {
 			partitionID = memory.PartitionIDFromEventKey(k)
 		}
+		sourceKeys = append(sourceKeys, tagentevent.FormatEventKey(k))
+		tailKey = k
 	}
 
 	// Generate new Snowflake key for the summary event
@@ -852,6 +923,7 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 		Timestamp:    time.Now().UnixMilli(),
 		Metadata: map[string]string{
 			"content_hash": sc.segmentContentHash(seg),
+			"source_keys":  strings.Join(sourceKeys, ","),
 		},
 	}
 
@@ -859,8 +931,55 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 		return 0, fmt.Errorf("archiveSegment: StoreEvent failed: %w", err)
 	}
 
-	log.Infof("[SmartCompress] archived segment to summaryKey=%d", summaryKey)
+	// Causal-chain mount (I7): parent = the segment's tail event. Best-effort:
+	// a missing relation store degrades recall_trace reach, not archiving.
+	if tailKey != 0 {
+		if rsp, ok := sc.memStore.(memory.RelationStoreProvider); ok {
+			if err := rsp.RelationStore().SetParent(summaryKey, tailKey); err != nil {
+				log.Warnf("[SmartCompress] archive SetParent failed summaryKey=%d parent=%d: %v", summaryKey, tailKey, err)
+			}
+		}
+	}
+
+	log.Infof("[SmartCompress] archived segment to summaryKey=%d (sources=%d)", summaryKey, len(sourceKeys))
 	return summaryKey, nil
+}
+
+// archivedSegment is a cached L3 archive artifact (per content hash).
+type archivedSegment struct {
+	summaryKey int64
+	summary    string
+}
+
+// lookupArchive returns the cached artifact for a segment content hash.
+func (sc *SmartCompressor) lookupArchive(hash string) (archivedSegment, bool) {
+	sc.archiveCacheMu.Lock()
+	defer sc.archiveCacheMu.Unlock()
+	hit, ok := sc.archiveCache[hash]
+	return hit, ok
+}
+
+// storeArchive records an archived artifact under its segment content hash.
+// Beyond the cap a random victim is evicted (map iteration order is
+// randomized — a cheap LRU approximation; the archive itself persists in
+// MemoryStore).
+func (sc *SmartCompressor) storeArchive(hash string, entry archivedSegment) {
+	sc.archiveCacheMu.Lock()
+	defer sc.archiveCacheMu.Unlock()
+	if sc.archiveCache == nil {
+		sc.archiveCache = make(map[string]archivedSegment)
+	}
+	limit := sc.archiveCacheCap
+	if limit <= 0 {
+		limit = DefaultArchiveCacheCap
+	}
+	if len(sc.archiveCache) >= limit {
+		for victim := range sc.archiveCache { // random victim via map order
+			delete(sc.archiveCache, victim)
+			break
+		}
+	}
+	sc.archiveCache[hash] = entry
 }
 
 // segmentContentHash computes a stable hash of the segment's message contents.

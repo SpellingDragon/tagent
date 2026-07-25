@@ -37,6 +37,9 @@ type ActionTool struct {
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig // Optional: override default monitor config
+	// orphanCleanupDisabled skips the startup reaping of prefix-matched
+	// leftover sessions (see WithOrphanCleanupDisabled).
+	orphanCleanupDisabled bool
 
 	closeOnce sync.Once
 }
@@ -53,6 +56,16 @@ type ActionToolOption func(*ActionTool)
 func WithActionWorkspace(dir string) ActionToolOption {
 	return func(ct *ActionTool) {
 		ct.workspace = dir
+	}
+}
+
+// WithOrphanCleanupDisabled skips the startup orphan-session cleanup. Use it
+// when multiple instances share one tmux server AND one session prefix (the
+// cleanup would reap the other instance's live sessions); prefer distinct
+// prefixes instead.
+func WithOrphanCleanupDisabled() ActionToolOption {
+	return func(ct *ActionTool) {
+		ct.orphanCleanupDisabled = true
 	}
 }
 
@@ -119,17 +132,34 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 			WithMonitorExecutor(ct.tmuxExecutor),
 			WithMonitorConfig(monCfg),
 		)
+		// Reap orphan sessions left by a previous instance (crash or stop
+		// while commands were running): nobody monitors them, they would
+		// never be killed, and each holds a pty. Disable via
+		// WithOrphanCleanupDisabled when running multiple instances that
+		// share a tmux server (use distinct prefixes instead).
+		if !ct.orphanCleanupDisabled {
+			ct.tmuxExecutor.CleanupOrphanSessions()
+		}
 	}
 
 	return ct
 }
 
-// Close stops the TmuxMonitor and releases resources.
-// Uses sync.Once to ensure idempotent closure.
+// Close stops the TmuxMonitor and reaps all sessions this instance still
+// tracks: on graceful shutdown nothing keeps monitoring them, so leaving them
+// alive would leak orphan sessions (and their ptys) until the next startup's
+// orphan cleanup. Uses sync.Once to ensure idempotent closure.
 func (ct *ActionTool) Close() error {
 	ct.closeOnce.Do(func() {
 		if ct.tmuxMonitor != nil && ct.tmuxMonitor.IsRunning() {
 			ct.tmuxMonitor.Stop()
+		}
+		if ct.tmuxMonitor != nil && ct.tmuxExecutor != nil {
+			for _, id := range ct.tmuxMonitor.SessionIDs() {
+				if err := ct.tmuxExecutor.KillSession(id); err != nil {
+					log.Warnf("[ActionTool] close: kill session %s failed: %v", id, err)
+				}
+			}
 		}
 	})
 	return nil
@@ -212,6 +242,7 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			Desc:     args.Command,
 			Key:      args.Command,
 			Relaunch: ct.relaunchClosure(spawner, args),
+			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
 		}, detector)
 		if res.Settled {
 			return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal), nil
@@ -278,7 +309,7 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 // re-spawned task is itself relaunchable.
 func (ct *ActionTool) relaunchClosure(spawner agent.TaskSpawner, args ActionArgs) func() (agent.SpawnResult, error) {
 	return func() (agent.SpawnResult, error) {
-		_, detector, err := ct.startSession(context.Background(), args)
+		sessionID, detector, err := ct.startSession(context.Background(), args)
 		if err != nil {
 			return agent.SpawnResult{}, err
 		}
@@ -287,7 +318,40 @@ func (ct *ActionTool) relaunchClosure(spawner agent.TaskSpawner, args ActionArgs
 			Desc:     args.Command,
 			Key:      args.Command,
 			Relaunch: ct.relaunchClosure(spawner, args),
+			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
 		}, detector), nil
+	}
+}
+
+// resumeClosure returns the tmux-specific resume implementation: feed input
+// into the LIVE session via SendKeys. The detector is bound to the session
+// (not the round) — resume just Rearms it (new output baseline + fresh dense
+// window) and returns the SAME detector; the monitor callback and the task
+// watch never change hands, so there is no rebinding, no ordering discipline,
+// and no stale-signal risk. TUI sessions refuse resume (send-keys would
+// corrupt the screen). Returned to the task layer as TaskSpec.ResumeFn.
+func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(string) (agent.SettleDetector, error) {
+	return func(input string) (agent.SettleDetector, error) {
+		if isTUI {
+			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
+		}
+		// Re-enter dense polling for the resumed round; also verifies the
+		// session is still monitored (a dead session was reaped → relaunch).
+		if !ct.tmuxMonitor.TouchSession(sessionID) {
+			return nil, fmt.Errorf("session %s is no longer monitored — use relaunch_task instead", sessionID)
+		}
+		// Baseline before send: this round's settle output = capture minus
+		// the baseline line count (a shifted scrollback degrades to the full
+		// capture rather than losing output — see trimToLineOffset).
+		baseline := 0
+		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
+			baseline = strings.Count(out, "\n")
+		}
+		detector.Rearm(baseline)
+		if err := ct.tmuxExecutor.SendKeys(sessionID, input+"\n"); err != nil {
+			return nil, fmt.Errorf("send to session %s failed (session may be gone): %w", sessionID, err)
+		}
+		return detector, nil
 	}
 }
 

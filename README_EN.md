@@ -83,6 +83,16 @@ graph TB
 - `SmartCompressor` only modifies the `[]model.Message` sent to the LLM; `Compactor` only cleans old references in `SessionProjection`; neither deletes from `MemoryStore`
 - `MemoryStore` is the sole complete event chain; Agents and Tools access it on demand via `EventKey`
 
+### Memory Primitives and the Curation Cascade
+
+Memory has exactly three primitives: **store** (immutable event ingestion), **compress** (summarize + natural forgetting — two faces of one act), and **recall**. There is no standalone "summary engine": content-level summarization happens only at compression/curation time.
+
+**Curation cascade (material law)**: a layer-N summary consumes only layer-(N-1) artifacts — raw events → segment summaries (L3 archive, mounted on the RelationStore causal chain with the source-key set; the same segment is never re-summarized across rounds) → index-card lines → condensed cards. Curated artifacts (`context_compress_summary`) are exempt from TTL: raw events may be forgotten, artifacts persist.
+
+**Card sequence (the single representation of compacted history)**: compacted history lives inside the rolling summary reference as `[Compacted N] + card lines + recent keys`. Card lines are engineering-extracted from task-boundary events (external_input / agent_output) — zero LLM, zero drift; meditation outputs are ★-highlighted. Past `card_max_chars`, old cards are LLM-condensed (task skeleton and key references preserved); without a model, the oldest lines sink into a counter — every degradation level holds. No pinned entries, no projection special cases.
+
+**Recall protocol (index cards are recall tickets)**: the `[hex]` keys in card lines are tickets. `memory_recall` is a pure-function tool held directly by the top agent, dispatching on input shape: `items=[{key,hint?}]` → engineering-precise recall (batch GetEvent, misses reported explicitly); `query` → semantic recall (the retrieval layer may evolve independently; the entry protocol stays). No LLM middle layer on the deterministic path; the RecallAgent (sub agent) remains for complex retrieval / multi-hop orchestration.
+
 ### Event Classification
 
 Every interaction — including tool calls and internal planning — becomes an `event.Event` produced by the framework Runner and turned into a persistent event by the plugin pipeline:
@@ -270,7 +280,7 @@ tagent has two independent context management operations:
 - **Target**: `[]model.Message` (LLM view); touches neither the projection nor MemoryStore
 
 **Compactor (clean the projection)**: triggered when the compressed view still exceeds `MaxTokens`:
-- **Strategy**: split the projection by task boundaries, keep recent N complete tasks' references, replace old ones with a single summary reference
+- **Strategy**: split the projection by task boundaries, keep recent N complete tasks' references, replace old ones with a single **rolling** summary reference (carrying the card sequence; prior summaries are absorbed across rounds — counts accumulate, card lines carry over, the time lower bound is inherited — history is never silently dropped)
 - **Target**: `SessionProjection`; does not modify MemoryStore
 
 | Operation | Target | Trigger |
@@ -550,6 +560,9 @@ go srv.Start("0.0.0.0:8088")
 | `max_tool_iterations` | entry 50 / sub 10 | Max ReAct loop iterations |
 | `max_tokens` | `8000` | Token budget for context compression |
 | `compress_threshold` | `0.8` | Compression trigger ratio (`max_tokens * threshold`) |
+| `compress.card_max_chars` | `6000` | Cap of the index-card section in the rolling compaction summary; beyond it old cards are LLM-condensed (with `summary_model`) or sink into a counter |
+| `compress.archive_cache_cap` | `256` | Bound on the per-process L3 archive cache entries (archives persist in MemoryStore) |
+| `resume_context_rounds` | `3` | Prior rounds the subagent task-chain restorer injects on resume |
 | `temperature` | `0.7` | LLM temperature |
 
 ### Tool Reference Options

@@ -62,29 +62,32 @@ func TestContextCompressor_PrefixesUnderBudget(t *testing.T) {
 }
 
 // TestBuildRetainedRefs_RollingSummary: a prior summary ref (negative key) is
-// absorbed into the new one — count accumulates, time lower bound carries
-// over — and the listed keys are capped at DefaultCompactKeysListed. Regression
-// guard for the unbounded-keys-list / silent-history-drop pair.
+// absorbed into the new one — count accumulates, card lines carry over, time
+// lower bound carries over — and the listed keys are capped. Regression guard
+// for the unbounded-keys-list / silent-history-drop pair.
 func TestBuildRetainedRefs_RollingSummary(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000))
 	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1)
 
-	// Prior rolling summary: 105 events already compacted, oldest ts=1000.
+	// Prior rolling summary: 105 events already compacted, one card line,
+	// oldest ts=1000.
 	refs := []memory.EventReference{{
 		EventKey:     -1000,
 		EventType:    tagentevent.TypeContextCompress,
-		EventSummary: "[Compacted 105 historical events; recent keys=aa,bb]",
+		EventSummary: "[Compacted 105 historical events]\n- 07-20 10:00 [aa] 早期任务完成\nrecent keys=aa,bb",
 		Timestamp:    1000,
 		Role:         "user",
 	}}
 	// 40 fresh refs, all compressed away (none appear in compressedMsgs).
+	// Boundary events (external_input) produce new card lines.
 	for i := 1; i <= 40; i++ {
 		refs = append(refs, memory.EventReference{
-			EventKey: int64(i), EventType: tagentevent.TypeExternalInput, Timestamp: int64(2000 + i),
+			EventKey: int64(i), EventType: tagentevent.TypeExternalInput,
+			EventSummary: fmt.Sprintf("请求 %d", i), Timestamp: int64(2000 + i),
 		})
 	}
 
-	retained := cc.buildRetainedRefs(refs, nil)
+	retained := cc.buildRetainedRefs(refs, nil, context.Background())
 	if len(retained) != 1 {
 		t.Fatalf("expected single rolling summary ref, got %d: %+v", len(retained), retained)
 	}
@@ -92,20 +95,74 @@ func TestBuildRetainedRefs_RollingSummary(t *testing.T) {
 	if s.EventKey != -1000 || s.Timestamp != 1000 {
 		t.Errorf("time lower bound must carry over from prior summary, got key=%d ts=%d", s.EventKey, s.Timestamp)
 	}
-	if !strings.Contains(s.EventSummary, "[Compacted 145 historical events") {
+	if !strings.Contains(s.EventSummary, "[Compacted 145 historical events]") {
 		t.Errorf("rolling count must accumulate (105+40=145), got: %q", s.EventSummary)
 	}
-	if n := strings.Count(s.EventSummary, ",") + 1; n > DefaultCompactKeysListed {
-		t.Errorf("listed keys must be capped at %d, got %d: %q", DefaultCompactKeysListed, n, s.EventSummary)
+	// Prior card line carried over verbatim (zero-drift accumulation).
+	if !strings.Contains(s.EventSummary, "[aa] 早期任务完成") {
+		t.Errorf("prior card line must carry over, got: %q", s.EventSummary)
 	}
-	if !strings.Contains(s.EventSummary, "retrievable via recall") {
-		t.Errorf("summary must point to recall for unlisted events, got: %q", s.EventSummary)
+	// New boundary events produced card lines with recall tickets.
+	if !strings.Contains(s.EventSummary, "["+tagentevent.FormatEventKey(1)+"] 请求 1") {
+		t.Errorf("new card lines must be extracted, got: %q", s.EventSummary)
+	}
+	// recent keys list capped.
+	lastLine := s.EventSummary[strings.LastIndex(s.EventSummary, "recent keys="):]
+	if n := strings.Count(lastLine, ",") + 1; n > DefaultCompactKeysListed {
+		t.Errorf("listed keys must be capped at %d, got %d", DefaultCompactKeysListed, n)
 	}
 
-	// A further round with NO new compression still preserves the entry point.
-	retained2 := cc.buildRetainedRefs(retained, nil)
-	if len(retained2) != 1 || !strings.Contains(retained2[0].EventSummary, "[Compacted 145 historical events") {
-		t.Errorf("summary must survive rounds without new compression: %+v", retained2)
+	// A further round with NO new compression still preserves the entry point
+	// AND the card lines.
+	retained2 := cc.buildRetainedRefs(retained, nil, context.Background())
+	if len(retained2) != 1 ||
+		!strings.Contains(retained2[0].EventSummary, "[Compacted 145 historical events]") ||
+		!strings.Contains(retained2[0].EventSummary, "[aa] 早期任务完成") {
+		t.Errorf("summary and cards must survive rounds without new compression: %+v", retained2)
+	}
+}
+
+// TestCurateCards_SinkWithoutModel: without a summary model, an over-cap card
+// sequence sinks its oldest lines into the earlier-items counter — the
+// engineering fallback never breaks.
+func TestCurateCards_SinkWithoutModel(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1,
+		WithCardMaxChars(120))
+
+	var cards []string
+	for i := 0; i < 10; i++ {
+		cards = append(cards, fmt.Sprintf("- 07-2%d 10:00 [k%d] 任务 %d 完成了一些工作", i%10, i, i))
+	}
+	out, earlier := cc.curateCards(context.Background(), cards, 3)
+	if len(strings.Join(out, "\n")) > 120 {
+		t.Errorf("curated cards must fit the cap, got %d chars", len(strings.Join(out, "\n")))
+	}
+	if earlier != 3+(len(cards)-len(out)) {
+		t.Errorf("sunk lines must be counted: earlier=%d dropped=%d", earlier, len(cards)-len(out))
+	}
+	// Newest lines survive (sink from the oldest side).
+	if !strings.Contains(out[len(out)-1], "[k9]") {
+		t.Errorf("newest card must survive sinking, got: %v", out)
+	}
+}
+
+// TestExtractCardLine_MeditationHighlight: meditation outputs get ★.
+func TestExtractCardLine_MeditationHighlight(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1)
+	cc.MarkMeditationKey(42)
+
+	line := cc.extractCardLine(memory.EventReference{
+		EventKey: 42, EventType: tagentevent.TypeAgentOutput,
+		EventSummary: "冥想回顾: 近期专注知识库整理", Timestamp: 1710000000000,
+	})
+	if !strings.HasPrefix(line, "- ★ ") || !strings.Contains(line, "["+tagentevent.FormatEventKey(42)+"]") {
+		t.Errorf("meditation card must be ★-highlighted with ticket, got: %q", line)
+	}
+	// Tool steps produce no card.
+	if l := cc.extractCardLine(memory.EventReference{EventKey: 7, EventType: tagentevent.TypeActionCommand, EventSummary: "x"}); l != "" {
+		t.Errorf("non-boundary events must not produce cards, got %q", l)
 	}
 }
 
@@ -406,6 +463,32 @@ func TestContextCompressor_SummaryRefRetainedAcrossCompressions(t *testing.T) {
 			if strings.Contains(ref.EventSummary, "keys=-") {
 				t.Fatalf("summary ref should not be re-compressed; got: %s", ref.EventSummary)
 			}
+		}
+	}
+}
+
+// TestCurateCards_MultiLineCondensation: LLM condensation output is scrubbed
+// to a single line — the card section is parsed by "- "-prefixed lines, and a
+// multi-line output would silently drop continuation lines next round.
+func TestCurateCards_MultiLineCondensation(t *testing.T) {
+	sm := &countingSummaryModel{}
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000), WithSummaryModel(sm))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1,
+		WithCardMaxChars(100))
+
+	var cards []string
+	for i := 0; i < 8; i++ {
+		cards = append(cards, fmt.Sprintf("- 07-2%d 10:00 [k%d] 任务 %d 完成了一些工作", i%10, i, i))
+	}
+	out, _ := cc.curateCards(context.Background(), cards, 0)
+	joined := strings.Join(out, "\n")
+	if len(joined) > 100 {
+		t.Errorf("curated cards must fit the cap, got %d chars", len(joined))
+	}
+	// Every line is a well-formed card line (no continuation leakage).
+	for _, line := range out {
+		if !strings.HasPrefix(line, "- ") {
+			t.Errorf("condensation must not leak non-card lines, got %q", line)
 		}
 	}
 }

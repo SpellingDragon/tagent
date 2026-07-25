@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -56,6 +57,18 @@ type ContextCompressor struct {
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
 	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
 	listedKeysCap int
+
+	// cardMaxChars bounds the index-card section of the rolling summary
+	// (default DefaultCardMaxChars; see WithCardMaxChars). When exceeded and a
+	// summary model is available, old card lines are LLM-condensed; otherwise
+	// the oldest lines sink into an "earlier n items" counter (never breaks).
+	cardMaxChars int
+
+	// meditationKeys marks agent_output events produced by meditation turns so
+	// their card lines get the ★ highlight (long-term reflection anchors).
+	// Written from the consumer goroutine, read at BeforeModel — mutex guarded.
+	meditationMu   sync.Mutex
+	meditationKeys map[int64]bool
 }
 
 // ContextCompressorOption configures optional ContextCompressor constraints.
@@ -79,6 +92,36 @@ func WithRecentFullCount(n int) ContextCompressorOption {
 			cc.recentFullCount = n
 		}
 	}
+}
+
+// WithCardMaxChars caps the index-card section length in the rolling summary
+// (default DefaultCardMaxChars).
+func WithCardMaxChars(n int) ContextCompressorOption {
+	return func(cc *ContextCompressor) {
+		if n > 0 {
+			cc.cardMaxChars = n
+		}
+	}
+}
+
+// MarkMeditationKey records that the given event key is a meditation-turn
+// output; its index card line will carry the ★ highlight.
+func (cc *ContextCompressor) MarkMeditationKey(key int64) {
+	if cc == nil || key == 0 {
+		return
+	}
+	cc.meditationMu.Lock()
+	defer cc.meditationMu.Unlock()
+	if cc.meditationKeys == nil {
+		cc.meditationKeys = make(map[int64]bool)
+	}
+	cc.meditationKeys[key] = true
+}
+
+func (cc *ContextCompressor) isMeditationKey(key int64) bool {
+	cc.meditationMu.Lock()
+	defer cc.meditationMu.Unlock()
+	return cc.meditationKeys[key]
 }
 
 // NewContextCompressor creates a ContextCompressor from a SmartCompressor.
@@ -114,6 +157,7 @@ func NewContextCompressor(
 		keepRecent:      keepRecent,
 		recentFullCount: DefaultRecentFullCount,
 		listedKeysCap:   DefaultCompactKeysListed,
+		cardMaxChars:    DefaultCardMaxChars,
 	}
 	for _, opt := range opts {
 		opt(cc)
@@ -205,7 +249,7 @@ func (cc *ContextCompressor) Compress(
 		usedTokens, newTokens, threshold)
 
 	// Build retained refs.
-	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs)
+	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx)
 
 	// Collect error notices.
 	var notices []model.Message
@@ -383,12 +427,121 @@ func stripEventKeyPrefix(content string) string {
 // count honest.
 
 // compactedCountRe extracts the rolling total from a prior summary reference
-// (single-point format: written and parsed only here).
-var compactedCountRe = regexp.MustCompile(`\[Compacted (\d+) historical events`)
+// (single-point format: written and parsed only here). LINE-ANCHORED: card
+// lines carry user-controlled text (external_input summaries) — an unanchored
+// match would let crafted input inflate the rolling count (injection surface).
+// Card lines always start with "- ", so the anchor is sufficient.
+var compactedCountRe = regexp.MustCompile(`(?m)^\[Compacted (\d+) historical events`)
+
+// earlierItemsRe extracts the sunk-items counter from a prior summary.
+// Line-anchored for the same injection-hardening reason as compactedCountRe.
+var earlierItemsRe = regexp.MustCompile(`(?m)^\(earlier (\d+) items retrievable via memory_recall\)$`)
+
+// cardTimeLayout renders card-line timestamps compactly.
+const cardTimeLayout = "01-02 15:04"
+
+// extractCardLine builds ONE index-card line for a compressed ref, or "" if
+// the event is not a task-skeleton node. Engineering extraction, zero LLM:
+// only boundary events (external_input / agent_output) become cards — tool
+// steps are represented by their task's card. Meditation outputs get the ★
+// highlight (long-term reflection anchors).
+func (cc *ContextCompressor) extractCardLine(ref memory.EventReference) string {
+	if ref.EventType != tagentevent.TypeExternalInput && ref.EventType != tagentevent.TypeAgentOutput {
+		return ""
+	}
+	summary := ref.EventSummary
+	if cc.memStore != nil && summary == "" {
+		if full, err := cc.memStore.GetEvent(ref.EventKey); err == nil && full != nil {
+			summary = full.EventSummary
+			if summary == "" {
+				summary = full.Content
+			}
+		}
+	}
+	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
+		summary = summary[:idx]
+	}
+	summary = strings.TrimSpace(stripEventKeyPrefix(summary))
+	if len(summary) > 80 {
+		summary = truncateString(summary, 80)
+	}
+	if summary == "" {
+		return ""
+	}
+	star := ""
+	if cc.isMeditationKey(ref.EventKey) {
+		star = "★ "
+	}
+	ts := ""
+	if ref.Timestamp > 0 {
+		ts = time.UnixMilli(ref.Timestamp).Format(cardTimeLayout) + " "
+	}
+	return fmt.Sprintf("- %s%s[%s] %s", star, ts, tagentevent.FormatEventKey(ref.EventKey), summary)
+}
+
+// parseCardSection splits a prior rolling summary into its card lines and
+// sunk-items counter (single-point format, self-produced self-consumed).
+func parseCardSection(summary string) (cards []string, earlier int) {
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			cards = append(cards, line)
+		}
+	}
+	if m := earlierItemsRe.FindStringSubmatch(summary); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			earlier = n
+		}
+	}
+	return cards, earlier
+}
+
+// curateCards enforces the card-section bound: when the joined lines exceed
+// cardMaxChars, OLD lines are LLM-condensed (material law: input = card
+// lines, layer-2 artifacts); without a model or on failure the oldest lines
+// SINK into the earlier-items counter (engineering fallback, never breaks).
+func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, earlier int) ([]string, int) {
+	joined := strings.Join(cards, "\n")
+	if cc.cardMaxChars <= 0 || len(joined) <= cc.cardMaxChars {
+		return cards, earlier
+	}
+	// Try LLM condensation of the OLDER half (keep the newest lines verbatim).
+	half := len(cards) / 2
+	if half > 0 && cc.compressor != nil && cc.compressor.summaryModel != nil {
+		condensed, err := cc.condenseCardLines(ctx, cards[:half])
+		// Single-line scrub: the card section is parsed by "- "-prefixed
+		// lines; a multi-line LLM output would have its continuation lines
+		// silently dropped next round (or split into phantom cards).
+		condensed = strings.Join(strings.Fields(condensed), " ")
+		if err == nil && condensed != "" {
+			newCards := append([]string{"- " + condensed}, cards[half:]...)
+			if len(strings.Join(newCards, "\n")) <= cc.cardMaxChars {
+				return newCards, earlier
+			}
+			cards = newCards // condensed but still over — fall through to sinking
+		} else if err != nil {
+			log.Warnf("[ContextCompressor] card condensation failed (sinking instead): %v", err)
+		}
+	}
+	// Engineering fallback: sink oldest lines until under the cap.
+	for len(cards) > 1 && len(strings.Join(cards, "\n")) > cc.cardMaxChars {
+		cards = cards[1:]
+		earlier++
+	}
+	return cards, earlier
+}
+
+// condenseCardLines asks the summary model to condense old card lines into a
+// single compact card, preserving the task skeleton and key references so
+// memory_recall tickets stay valid.
+func (cc *ContextCompressor) condenseCardLines(ctx context.Context, lines []string) (string, error) {
+	prompt := "将以下历史任务卡片浓缩为一行紧凑概述。硬性要求：保留任务骨架与时间跨度，保留方括号内的关键 key（至少保留首尾与重要节点的 [key]），★ 开头的高亮行为长期反思结论——其要点与 [key] 必须保留，不添加任何未出现的事实，不确定处省略。只输出浓缩后的一行，不要前缀。\n\n" + strings.Join(lines, "\n")
+	return cc.compressor.generatePlainSummary(ctx, prompt)
+}
 
 func (cc *ContextCompressor) buildRetainedRefs(
 	originalRefs []memory.EventReference,
 	compressedMsgs []model.Message,
+	ctx context.Context,
 ) []memory.EventReference {
 	if len(originalRefs) == 0 {
 		return nil
@@ -415,8 +568,10 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	// would sever the timeline's entry point to earlier compacted history).
 	var retained []memory.EventReference
 	var compressedKeys []string
+	var newCards, oldCards []string
 	var minTs int64
 	priorCount := 0
+	earlier := 0
 
 	for _, ref := range originalRefs {
 		if ref.EventKey == 0 {
@@ -428,6 +583,9 @@ func (cc *ContextCompressor) buildRetainedRefs(
 					priorCount += n
 				}
 			}
+			cards, e := parseCardSection(ref.EventSummary)
+			oldCards = append(oldCards, cards...)
+			earlier += e
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp
 			}
@@ -437,6 +595,9 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
+			if card := cc.extractCardLine(ref); card != "" {
+				newCards = append(newCards, card)
+			}
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp
 			}
@@ -444,24 +605,35 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	}
 
 	// Emit the rolling summary whenever there is anything compacted — this
-	// round or carried over from prior rounds.
+	// round or carried over from prior rounds. The summary carries the
+	// INDEX-CARD SEQUENCE: engineering-extracted task skeleton lines whose
+	// [hex] keys are recall tickets (memory_recall items).
 	if total := priorCount + len(compressedKeys); total > 0 {
 		if minTs == 0 {
 			minTs = time.Now().UnixMilli()
+		}
+		cards, earlierOut := cc.curateCards(ctx, append(oldCards, newCards...), earlier)
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "[Compacted %d historical events]", total)
+		if len(cards) > 0 {
+			b.WriteString("\n")
+			b.WriteString(strings.Join(cards, "\n"))
+		}
+		if earlierOut > 0 {
+			fmt.Fprintf(&b, "\n(earlier %d items retrievable via memory_recall)", earlierOut)
 		}
 		listed := compressedKeys
 		if cap := cc.listedKeysCap; cap > 0 && len(listed) > cap {
 			listed = listed[len(listed)-cap:]
 		}
-		summary := fmt.Sprintf("[Compacted %d historical events; recent keys=%s", total, strings.Join(listed, ","))
-		if total > len(listed) {
-			summary += fmt.Sprintf("; %d earlier events retrievable via recall", total-len(listed))
+		if len(listed) > 0 {
+			fmt.Fprintf(&b, "\nrecent keys=%s", strings.Join(listed, ","))
 		}
-		summary += "]"
 		summaryRef := memory.EventReference{
 			EventKey:     -minTs,
 			EventType:    tagentevent.TypeContextCompress,
-			EventSummary: summary,
+			EventSummary: b.String(),
 			Timestamp:    minTs,
 			Role:         "user",
 		}

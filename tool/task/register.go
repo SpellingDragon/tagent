@@ -27,4 +27,7 @@ func RegisterSubTools() {
 	agent.RegisterPlainTool("relaunch_task", func(agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
 		return NewRelaunchTaskTool(), nil
 	})
+	agent.RegisterPlainTool("resume_task", func(agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
+		return NewResumeTaskTool(), nil
+	})
 }

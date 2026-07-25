@@ -293,6 +293,11 @@ func buildAgent(
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
+		// Agent-level task knobs flow to sub-agent wrappers at assembly time
+		// (ToolRef stays a pure reference declaration).
+		if w, ok := t.(*agent.AgentToolWrapper); ok && acfg.ResumeContextRounds > 0 {
+			w.SetResumeContextRounds(acfg.ResumeContextRounds)
+		}
 		if isAction {
 			actionTool = t.(*action.ActionTool)
 		}
@@ -323,6 +328,8 @@ func buildAgent(
 			MaxNoticeChars:     acfg.Compress.MaxNoticeChars,
 			CompactKeysListed:  acfg.Compress.CompactKeysListed,
 			RecentFullCount:    acfg.Compress.RecentFullCount,
+			CardMaxChars:       acfg.Compress.CardMaxChars,
+			ArchiveCacheCap:    acfg.Compress.ArchiveCacheCap,
 		},
 		TaskSettledMaxInline: acfg.TaskSettledMaxInline,
 		WorkspaceRoot:        acfg.WorkspaceRoot,

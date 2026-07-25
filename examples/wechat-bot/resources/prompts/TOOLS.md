@@ -9,11 +9,13 @@ Acquire knowledge from web search, skills, and historical memory. Use this when 
 - Retrieve previously learned knowledge from memory
 - Translate knowledge into executable plans
 
+## memory_recall
+统一记忆召回（纯函数，毫秒级）。**票据在手就用它**：历史归档卡片行与 `[evt_…]` 前缀里的 hex key 都是召回票据，直接构造 `items=[{key, hint?}]` 批量精确回补原文（未命中会明确标注 miss）。只有模糊线索时用 `query`（可加 since/until/event_types）做关键词检索。
+
 ## recall
-Retrieve and synthesize historical events from memory. Use this when you need to:
-- Remember what happened in previous conversations
-- Review past actions and their outcomes
-- Provide context-aware responses based on history
+Retrieve and synthesize historical events from memory (sub agent, for COMPLEX retrieval: multi-hop causal tracing, cross-round synthesis). For simple precise or keyword recall, prefer memory_recall. Use this when you need to:
+- Trace causal chains or synthesize across many events
+- Review past actions and their outcomes with reasoning
 
 ## action
 Perform behavioral actions on real-world resources. Describe what you want to do in natural language, and it triggers execution. Use this when you need to:
@@ -47,11 +49,13 @@ Acquire knowledge from web search, skills, and historical memory. Use this when 
 - Retrieve previously learned knowledge from memory
 - Translate knowledge into executable plans
 
+## memory_recall
+统一记忆召回（纯函数，毫秒级）。**票据在手就用它**：历史归档卡片行与 `[evt_…]` 前缀里的 hex key 都是召回票据，直接构造 `items=[{key, hint?}]` 批量精确回补原文（未命中会明确标注 miss）。只有模糊线索时用 `query`（可加 since/until/event_types）做关键词检索。
+
 ## recall
-Retrieve and synthesize historical events from memory. Use this when you need to:
-- Remember what happened in previous conversations
-- Review past actions and their outcomes
-- Provide context-aware responses based on history
+Retrieve and synthesize historical events from memory (sub agent, for COMPLEX retrieval: multi-hop causal tracing, cross-round synthesis). For simple precise or keyword recall, prefer memory_recall. Use this when you need to:
+- Trace causal chains or synthesize across many events
+- Review past actions and their outcomes with reasoning
 
 ## action
 Perform behavioral actions on real-world resources. Describe what you want to do in natural language, and it triggers execution. Use this when you need to:

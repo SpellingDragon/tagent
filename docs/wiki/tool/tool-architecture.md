@@ -1087,3 +1087,40 @@ LLM 调用时使用 `action` 作为 tool name：
 ```json
 {"name": "action", "arguments": {"command": "ls -la"}}
 ```
+
+## 十五、任务重入（resume_task）与会话回收
+
+### resume 状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> running: spawn
+    running --> stable: SettleStable(窗口内)
+    running --> alive_detached: 后台 stable
+    running --> completed: SettleCompleted
+    running --> failed: SettleCompleted+Err
+    stable --> running: resume(input)
+    alive_detached --> running: resume(input)
+    completed --> running: resume(input,round 型)
+    failed --> running: resume(input,round 型)
+    running --> cancelled: cancel
+```
+
+合法源状态按**轮次边界**定义（存活类=会话重入；完成态=round 型执行器自然续行点），running/suspect/cancelled 拒绝并引导。并发 resume 占坑单胜（task.mu 内置 running 再调 ResumeFn，失败回滚）。
+
+### 特异出入口
+
+| 执行器 | resume 实现 | 关键机制 |
+|---|---|---|
+| tmux | 同一 detector `Rearm(baseline)` + `SendKeys` | detector 绑会话而非轮次——回调/watch 永不换手，零换绑零竞态；输出=基线后增量；TouchSession 重回 dense 轮询；TUI 拒绝 |
+| subagent | 新 Run + 任务链还原器 | 本任务前序轮次链（上次 settle 结果为首，`resume_context_rounds` 封顶）注入 external_context；只含本任务内容；无进程复活 |
+
+任务层 `detector != task.detector` 一行区分两形态：同 detector 不退役 watch；新 detector 走 watchDone 退役（防泄漏与陈旧信号串轮）。
+
+### 会话回收闭环
+
+| 时机 | 机制 |
+|---|---|
+| 运行时 | completed/error → 自动 kill session |
+| 优雅退出 | `ActionTool.Close()` 收编 monitor 内全部存活 session |
+| 崩溃/强杀后 | 下次启动 `CleanupOrphanSessions()` 按前缀清扫孤儿（每个孤儿占一个 pty，实机曾因此耗尽系统 pty 池）；多实例场景 `WithOrphanCleanupDisabled` 或独立前缀 |

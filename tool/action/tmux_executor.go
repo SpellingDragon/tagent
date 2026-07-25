@@ -363,6 +363,30 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 	return sessions, nil
 }
 
+// CleanupOrphanSessions kills all prefix-matched tmux sessions. Called at
+// startup: sessions from a previous (crashed or stopped) instance have no
+// monitor watching them — they would never be reaped and each holds a pty
+// (system-wide pty exhaustion was observed in the field). Best effort: a
+// missing tmux server means nothing to clean. Returns the number killed.
+func (te *TmuxExecutor) CleanupOrphanSessions() int {
+	sessions, err := te.ListSessions()
+	if err != nil {
+		return 0 // no server / no sessions — nothing to clean
+	}
+	killed := 0
+	for _, s := range sessions {
+		if err := te.KillSession(s.ID); err != nil {
+			log.Warnf("[TmuxExecutor] orphan cleanup: kill %s failed: %v", s.ID, err)
+			continue
+		}
+		killed++
+	}
+	if killed > 0 {
+		log.Infof("[TmuxExecutor] orphan cleanup: killed %d leftover session(s) with prefix %q", killed, te.prefix)
+	}
+	return killed
+}
+
 // getSessionPID gets the PID of the tmux session's main process
 func (te *TmuxExecutor) getSessionPID(sessionID string) (int, error) {
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_pid}"})
