@@ -187,8 +187,6 @@ type TagentConfig struct {
 const (
 	DefaultMaxToolIterations         = 50
 	DefaultSubAgentMaxToolIterations = 10
-	DefaultMaxTokens                 = 8000
-	DefaultCompressThreshold         = 0.8
 	DefaultAgentName                 = "tagent"
 	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
 
@@ -198,27 +196,6 @@ const (
 	// DefaultResumeContextRounds caps the rounds restored by the subagent
 	// task-chain restorer on resume.
 	DefaultResumeContextRounds = 3
-	// DefaultArchiveCacheCap bounds the per-process L3 archive cache (the
-	// archives themselves persist in MemoryStore).
-	DefaultArchiveCacheCap = 256
-	// DefaultCompactKeysListed caps the keys listed in the rolling
-	// compaction summary; older events stay retrievable via recall.
-	DefaultCompactKeysListed = 32
-	// DefaultRecentFullCount is how many most-recent refs resolve with full
-	// content from MemoryStore.
-	DefaultRecentFullCount = 4
-	// DefaultMaxNoticeChars caps the compress-notice text length.
-	DefaultMaxNoticeChars = 800
-	// DefaultCardMaxChars caps the index-card section of the rolling summary;
-	// beyond it old card lines are LLM-condensed (or sink, without a model).
-	DefaultCardMaxChars = 6000
-
-	// Default compress parameters
-	DefaultMaxExecStateChars  = 2000
-	DefaultMaxToolResultChars = 500
-	DefaultMaxToolArgsChars   = 80
-	DefaultChunkSize          = 1000
-	DefaultChunkSummaryLen    = 150
 
 	// Workspace cleanup defaults (periodic bounding of on-disk scratch files).
 	DefaultWorkspaceCleanupInterval = time.Hour
@@ -473,15 +450,16 @@ func newCompressorFromConfig(cfg *TagentConfig) *SmartCompressor {
 // newContextManagerFromConfig creates a ContextManager from TagentConfig.
 // Shared by NewTagentAgent and Run().
 func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
-	compressor := newCompressorFromConfig(cfg)
-	compressor.tokenCounter = NewDefaultTokenCounter()
+	copts := buildCompressorOpts(cfg)
+	copts = append(copts, WithTokenCounter(NewDefaultTokenCounter()))
 	// Inject MemStore and Projection into SmartCompressor for chunk persistence
 	if cfg.MemoryStore != nil {
-		compressor.memStore = cfg.MemoryStore
+		copts = append(copts, WithMemStore(cfg.MemoryStore))
 	}
 	if projection != nil {
-		compressor.projection = projection
+		copts = append(copts, WithProjection(projection))
 	}
+	compressor := NewSmartCompressor(copts...)
 	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt
 

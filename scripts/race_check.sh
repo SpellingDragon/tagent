@@ -8,12 +8,12 @@
 # steer.Queue.Close, event emit) are reported as WAIVED — they cannot be
 # fixed from tagent and are tracked for upstream.
 #
-# Usage: ./scripts/race_check.sh [packages...]   (default: ./agent/ ./plugin/ ./event/)
+# Usage: ./scripts/race_check.sh [packages...]   (default: ./agent/... ./plugin/ ./event/)
 set -uo pipefail
 
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(./agent/ ./plugin/ ./event/)
+	pkgs=(./agent/... ./plugin/ ./event/)
 fi
 
 out=$(go test -race -count=1 "${pkgs[@]}" 2>&1)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -24,37 +25,6 @@ import (
 // TokenCounter
 // ---------------------------------------------------------------------------
 
-// TokenCounter estimates token count for message lists.
-type TokenCounter interface {
-	Estimate(messages []model.Message) int
-}
-
-// DefaultTokenCounter estimates tokens using a character-based heuristic.
-type DefaultTokenCounter struct {
-	CharsPerToken float64
-}
-
-func NewDefaultTokenCounter() *DefaultTokenCounter {
-	return &DefaultTokenCounter{CharsPerToken: 2.0}
-}
-
-func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
-	total := 0
-	for i := range messages {
-		msg := &messages[i]
-		total += int(float64(len([]rune(msg.Content))) / c.CharsPerToken)
-		total += 10
-		if len(msg.ToolCalls) > 0 {
-			total += 20 * len(msg.ToolCalls)
-		}
-	}
-	if total < 1 {
-		total = 1
-	}
-	return total
-}
-
-// ---------------------------------------------------------------------------
 // ContextManager
 // ---------------------------------------------------------------------------
 
@@ -416,7 +386,7 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 
 	// Rebuild: [system] + render(projection). The system message is the only
 	// part of args.Request.Messages that is read.
-	systemMsg, _ := splitSystemMessage(args.Request.Messages)
+	systemMsg, _ := compress.SplitSystemMessage(args.Request.Messages)
 	rebuilt := make([]model.Message, 0, len(result.Messages)+1)
 	if systemMsg != nil {
 		rebuilt = append(rebuilt, *systemMsg)
@@ -612,29 +582,6 @@ func (cm *ContextManager) Close() error {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-// eventTypeToRole maps an event type to its pairing-free timeline role
-// (unified-event-projection D3):
-//
-//	external_input → user
-//	agent_output   → assistant
-//	action_command → user (tool results are input events, never role=tool)
-//	thinking_plan  → assistant
-//	(default)      → user (safe degradation)
-func eventTypeToRole(eventType string) model.Role {
-	switch eventType {
-	case "external_input":
-		return model.RoleUser
-	case "agent_output":
-		return model.RoleAssistant
-	case "action_command":
-		return model.RoleUser
-	case "thinking_plan":
-		return model.RoleAssistant
-	default:
-		return model.RoleUser
-	}
-}
 
 func ensureUserPrompt(messages []model.Message) []model.Message {
 	for _, msg := range messages {

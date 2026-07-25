@@ -1,4 +1,4 @@
-package agent
+package compress
 
 import (
 	"context"
@@ -164,7 +164,7 @@ func (sc *SmartCompressor) Compress(
 	startTime := time.Now()
 
 	// 1. Separate system message
-	systemMsg, rest := splitSystemMessage(messages)
+	systemMsg, rest := SplitSystemMessage(messages)
 
 	// 2. Segment by user input boundary
 	segments := SegmentMessages(rest)
@@ -410,7 +410,7 @@ func (sc *SmartCompressor) Compress(
 			// Extract event key from first message of the segment
 			segEventKey := int64(0)
 			if len(p.seg.Messages) > 0 {
-				k, _, _ := parseEventKeyAndType(p.seg.Messages[0].Content)
+				k, _, _ := ParseEventKeyAndType(p.seg.Messages[0].Content)
 				segEventKey = k
 			}
 			if hit, ok := cachedArchives[i]; ok {
@@ -714,7 +714,7 @@ func (sc *SmartCompressor) collectCompressedEventInfo(
 
 	for _, seg := range oldSegments {
 		for _, msg := range seg.Messages {
-			key, evtType, remainder := parseEventKeyAndType(msg.Content)
+			key, evtType, remainder := ParseEventKeyAndType(msg.Content)
 			if key > 0 && !seen[key] {
 				seen[key] = true
 				summary := truncate(remainder, sc.chunkSummaryLen)
@@ -736,7 +736,7 @@ func (sc *SmartCompressor) collectCompressedEventInfo(
 // parseEventKeyAndType extracts EventKey and EventType from a message content
 // with "[evt_<KEY>|<type>] <remainder>" prefix.
 // Returns (0, "unknown", content) if no valid prefix is found.
-func parseEventKeyAndType(content string) (key int64, eventType string, remainder string) {
+func ParseEventKeyAndType(content string) (key int64, eventType string, remainder string) {
 	const prefix = "[evt_"
 	if !strings.HasPrefix(content, prefix) {
 		return 0, "unknown", content
@@ -838,7 +838,7 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 	var infos []EventInfo
 
 	for _, msg := range execMsgs {
-		key, evtType, remainder := parseEventKeyAndType(msg.Content)
+		key, evtType, remainder := ParseEventKeyAndType(msg.Content)
 		if key > 0 && !seen[key] {
 			seen[key] = true
 			summary := truncate(remainder, sc.chunkSummaryLen)
@@ -899,7 +899,7 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 	var sourceKeys []string
 	var tailKey int64
 	for _, msg := range seg.Messages {
-		k, _, _ := parseEventKeyAndType(msg.Content)
+		k, _, _ := ParseEventKeyAndType(msg.Content)
 		if k <= 0 {
 			continue
 		}
@@ -1103,7 +1103,7 @@ func buildBatchSummaryPrompt(segmentCount, batchIndex, totalBatches, targetChars
 }
 
 // splitSystemMessage separates the system message from the rest.
-func splitSystemMessage(messages []model.Message) (*model.Message, []model.Message) {
+func SplitSystemMessage(messages []model.Message) (*model.Message, []model.Message) {
 	if len(messages) == 0 {
 		return nil, nil
 	}

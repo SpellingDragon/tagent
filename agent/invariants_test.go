@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +42,7 @@ func assertRenderLegality(t *testing.T, msgs []model.Message) {
 					declared[tc.ID] = true
 				}
 			}
-			if len(m.ToolCalls) == 0 && strings.TrimSpace(stripEventKeyPrefix(m.Content)) == "" {
+			if len(m.ToolCalls) == 0 && strings.TrimSpace(compress.StripEventKeyPrefix(m.Content)) == "" {
 				t.Errorf("render legality: msg[%d] is an empty assistant output", i)
 			}
 		case model.RoleTool:
@@ -53,7 +54,7 @@ func assertRenderLegality(t *testing.T, msgs []model.Message) {
 			}
 			consumed[m.ToolID] = true
 		}
-		key, _, _ := parseEventKeyAndType(m.Content)
+		key, _, _ := compress.ParseEventKeyAndType(m.Content)
 		if key > 0 {
 			if seenKeys[key] {
 				t.Errorf("render legality: duplicate event key %d at msg[%d]", key, i)

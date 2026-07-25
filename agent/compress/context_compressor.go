@@ -1,4 +1,4 @@
-package agent
+package compress
 
 import (
 	"context"
@@ -365,7 +365,7 @@ func renderTimelineMessage(
 		}
 	default:
 		return model.Message{
-			Role:    eventTypeToRole(ref.EventType),
+			Role:    EventTypeToRole(ref.EventType),
 			Content: prefixEventKey(content, ref),
 		}
 	}
@@ -404,8 +404,8 @@ func prefixEventKey(content string, ref memory.EventReference) string {
 
 // stripEventKeyPrefix removes a leading [evt_KEY|type] prefix from content.
 // Returns the original content if no prefix is found.
-func stripEventKeyPrefix(content string) string {
-	_, _, remainder := parseEventKeyAndType(content)
+func StripEventKeyPrefix(content string) string {
+	_, _, remainder := ParseEventKeyAndType(content)
 	return remainder
 }
 
@@ -461,7 +461,7 @@ func (cc *ContextCompressor) extractCardLine(ref memory.EventReference) string {
 	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
 		summary = summary[:idx]
 	}
-	summary = strings.TrimSpace(stripEventKeyPrefix(summary))
+	summary = strings.TrimSpace(StripEventKeyPrefix(summary))
 	if len(summary) > 80 {
 		summary = truncateString(summary, 80)
 	}
@@ -552,7 +552,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	for _, msg := range compressedMsgs {
 		content := msg.Content
 		for {
-			key, _, remainder := parseEventKeyAndType(content)
+			key, _, remainder := ParseEventKeyAndType(content)
 			if key <= 0 {
 				break
 			}

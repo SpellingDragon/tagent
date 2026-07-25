@@ -1,4 +1,4 @@
-package agent
+package compress
 
 import (
 	"context"
@@ -53,7 +53,7 @@ func (m *mockBatchSummaryModel) Info() model.Info {
 }
 
 // ============================================================================
-// splitSystemMessage tests
+// SplitSystemMessage tests
 // ============================================================================
 
 func TestSplitSystemMessage_WithSystem(t *testing.T) {
@@ -63,7 +63,7 @@ func TestSplitSystemMessage_WithSystem(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "hi"},
 	}
 
-	sys, rest := splitSystemMessage(messages)
+	sys, rest := SplitSystemMessage(messages)
 	require.NotNil(t, sys)
 	assert.Equal(t, "system prompt", sys.Content)
 	assert.Len(t, rest, 2)
@@ -75,13 +75,13 @@ func TestSplitSystemMessage_NoSystem(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "hi"},
 	}
 
-	sys, rest := splitSystemMessage(messages)
+	sys, rest := SplitSystemMessage(messages)
 	assert.Nil(t, sys)
 	assert.Len(t, rest, 2)
 }
 
 func TestSplitSystemMessage_Empty(t *testing.T) {
-	sys, rest := splitSystemMessage(nil)
+	sys, rest := SplitSystemMessage(nil)
 	assert.Nil(t, sys)
 	assert.Nil(t, rest)
 }
@@ -404,41 +404,41 @@ func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
 // ============================================================================
 
 func TestParseEventKeyAndType_Valid(t *testing.T) {
-	key, evtType, remainder := parseEventKeyAndType("[evt_75bcd15|task] user request content")
+	key, evtType, remainder := ParseEventKeyAndType("[evt_75bcd15|task] user request content")
 	assert.Equal(t, int64(123456789), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "user request content", remainder)
 }
 
 func TestParseEventKeyAndType_NoPrefix(t *testing.T) {
-	key, evtType, _ := parseEventKeyAndType("user request content")
+	key, evtType, _ := ParseEventKeyAndType("user request content")
 	assert.Equal(t, int64(0), key)
 	assert.Equal(t, "unknown", evtType)
 }
 
 func TestParseEventKeyAndType_Malformed(t *testing.T) {
-	key, _, _ := parseEventKeyAndType("[evt_invalid_key|task] content")
+	key, _, _ := ParseEventKeyAndType("[evt_invalid_key|task] content")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_NoBar(t *testing.T) {
-	key, _, _ := parseEventKeyAndType("[evt_12345task] content")
+	key, _, _ := ParseEventKeyAndType("[evt_12345task] content")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_LargeKey(t *testing.T) {
-	key, evtType, _ := parseEventKeyAndType("[evt_7fffffffffffffff|memory] large snowflake key")
+	key, evtType, _ := ParseEventKeyAndType("[evt_7fffffffffffffff|memory] large snowflake key")
 	assert.Equal(t, int64(9223372036854775807), key)
 	assert.Equal(t, "memory", evtType)
 }
 
 func TestParseEventKeyAndType_EmptyContent(t *testing.T) {
-	key, _, _ := parseEventKeyAndType("")
+	key, _, _ := ParseEventKeyAndType("")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_OnlyPrefix(t *testing.T) {
-	key, evtType, remainder := parseEventKeyAndType("[evt_2a|task]")
+	key, evtType, remainder := ParseEventKeyAndType("[evt_2a|task]")
 	assert.Equal(t, int64(42), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "", remainder)
@@ -683,7 +683,7 @@ func TestEventTypeToRole(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := eventTypeToRole(tt.eventType)
+			got := EventTypeToRole(tt.eventType)
 			assert.Equal(t, tt.want, got)
 		})
 	}

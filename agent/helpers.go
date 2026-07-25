@@ -32,13 +32,3 @@ func (ta *TagentAgent) SetToolParentProjection() {
 		}
 	}
 }
-
-// truncateString truncates s to at most n characters, appending "..." if truncated.
-func truncateString(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
-
-// ---------------------------------------------------------------------------

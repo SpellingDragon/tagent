@@ -200,7 +200,9 @@ graph TB
 
 | Module | Responsibility |
 |--------|---------------|
-| `agent/` | event-driven engine: EventBus, runEventLoop, ContextManager, compression, task layer, meditation |
+| `agent/` | event-driven engine: EventBus, runEventLoop, ContextManager (glue), meditation, sub-agent wrapper |
+| `agent/task/` | task lifecycle: TaskManager, settle detection, board, resume (leaf package, zero engine deps) |
+| `agent/compress/` | compression domain: SmartCompressor (L0-L3), card-sequence compactor, SessionProjection, TokenCounter |
 | `memory/` | structured event storage: InMemoryStore, FileSegmentStore, RelationStore, lifecycle |
 | `plugin/` | framework plugins: MemoryPlugin (persistence + causal chain), SummaryPlugin (metadata annotation) |
 | `tool/` | tools: ActionTool (tmux), recall/knowledge sub-tools, task tool family, file tools |

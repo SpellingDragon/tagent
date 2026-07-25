@@ -200,7 +200,9 @@ graph TB
 
 | 模块 | 职责 |
 |------|------|
-| `agent/` | 事件驱动引擎：EventBus、runEventLoop、ContextManager、压缩、任务层、冥想 |
+| `agent/` | 事件驱动引擎：EventBus、runEventLoop、ContextManager（粘合层）、冥想、子 Agent 封装 |
+| `agent/task/` | 任务生命周期：TaskManager、settle 探测、看板、resume（零引擎依赖的叶子包） |
+| `agent/compress/` | 压缩域：SmartCompressor（L0-L3）、卡片序列 Compactor、SessionProjection、TokenCounter |
 | `memory/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期 |
 | `plugin/` | 框架插件：MemoryPlugin（持久化+因果链）、SummaryPlugin（元数据标注） |
 | `tool/` | 工具：ActionTool（tmux）、recall/knowledge 子工具、任务工具族、文件工具 |

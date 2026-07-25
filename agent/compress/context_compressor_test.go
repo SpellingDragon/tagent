@@ -1,4 +1,4 @@
-package agent
+package compress
 
 import (
 	"context"
@@ -378,7 +378,7 @@ func TestContextCompressor_PreservesChronologicalOrder(t *testing.T) {
 	// Verify chronological order: user1 should appear BEFORE assistant1.
 	var order []string
 	for _, m := range result.Messages {
-		content := stripEventKeyPrefix(m.Content)
+		content := StripEventKeyPrefix(m.Content)
 		if len(content) > 30 {
 			content = content[:30]
 		}
@@ -489,6 +489,44 @@ func TestCurateCards_MultiLineCondensation(t *testing.T) {
 	for _, line := range out {
 		if !strings.HasPrefix(line, "- ") {
 			t.Errorf("condensation must not leak non-card lines, got %q", line)
+		}
+	}
+}
+
+// assertRenderLegality mirrors the invariant assertion in the agent package
+// (agent/invariants_test.go) — the render-legality law is identical on both
+// sides of the package boundary.
+func assertRenderLegality(t *testing.T, msgs []model.Message) {
+	t.Helper()
+	seenKeys := map[int64]bool{}
+	declared := map[string]bool{}
+	consumed := map[string]bool{}
+	for i, m := range msgs {
+		switch m.Role {
+		case model.RoleAssistant:
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					declared[tc.ID] = true
+				}
+			}
+			if len(m.ToolCalls) == 0 && strings.TrimSpace(StripEventKeyPrefix(m.Content)) == "" {
+				t.Errorf("render legality: msg[%d] is an empty assistant output", i)
+			}
+		case model.RoleTool:
+			if m.ToolID == "" || !declared[m.ToolID] {
+				t.Errorf("render legality: msg[%d] is an orphan tool result (tool_id=%q has no prior declaring call)", i, m.ToolID)
+			}
+			if consumed[m.ToolID] {
+				t.Errorf("render legality: msg[%d] duplicates an already-answered tool_id=%q", i, m.ToolID)
+			}
+			consumed[m.ToolID] = true
+		}
+		key, _, _ := ParseEventKeyAndType(m.Content)
+		if key > 0 {
+			if seenKeys[key] {
+				t.Errorf("render legality: duplicate event key %d at msg[%d]", key, i)
+			}
+			seenKeys[key] = true
 		}
 	}
 }
