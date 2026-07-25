@@ -16,25 +16,35 @@ The result is a persistent, event-driven agent that can run as:
 
 ## Design Philosophy
 
-tagent's core design philosophy originates from [prototype/agent.go](prototype/agent.go) (126-line abstract implementation). The prototype defines an extensible framework skeleton using replaceable function fields (`OnEvents`, `Compact`, `Run`), with the core philosophy: **inputs is a projection of the event flow, the event bus carries the event flow, when inputs is full it triggers Compact and memory persistence**.
+tagent follows an **event-driven, memory-centric** design. The core philosophy: **inputs is a projection of the event flow, the event bus carries the event flow, and when inputs is full it triggers Compact and memory persistence**.
 
-### Three Invariants
+### Four Invariants
 
-| Invariant | Meaning | Prototype |
-|-----------|---------|-----------|
-| **① inputs is projection** | Bounded working memory, read and write the same data | OnEvents append, ModelCompletion read, Compact clear — all operate on same inputs |
-| **② Compact modifies projection** | Does not modify event flow (bus) or permanent storage | `inputs = inputs[:0]` — clear projection, events already flowed through bus |
-| **③ Tool results write back to bus** | Does not directly manipulate inputs | goroutine executes tool → result goes to bus → next OnEvents appends |
+| Invariant | Meaning | Code |
+|-----------|---------|------|
+| **① inputs is a projection** | Bounded working memory and the **sole assembly source** of LLM input | `assembleRequest = [system] + render(projection)`; never reads back the framework message tail |
+| **② Unified writes** | An event is stored ⇔ projected, exactly once, atomically at the same point | `MemoryPlugin.OnEvent` stores, then appends the reference via the ctx-carried `ProjectionSink` |
+| **③ Ordering is a construction guarantee** | The projection is complete at BeforeModel time by construction, not by lucky timing | The framework's completion-wait on tool-result events: the runner releases the next round only after plugins + session processing finish |
+| **④ Compact only modifies the projection** | Touches neither the event flow nor permanent storage | `Compactor.Compact` replaces old references with a summary reference |
 
-### Implicit Design Points
+### Reply vs. Notification: Two Orthogonal Tool-Result Semantics
 
-- **All outputs write back to bus**: OnEvents return value is also written to eventBus, same path as tool results
-- **model as tool**: Prototype registers `tools["model"] = ModelCompletion`, model and other tools share the same call path (in production, model is independent as `model.Model.GenerateContent` due to framework interface differences)
-- **Batch processing**: After Pull gets the first event, non-blocking drain all remaining events into a batch
+This is the core dividing line of tagent's async design:
+
+- **In-turn = protocol reply**: synchronous tool exchanges use the native tool-call protocol (assistant ToolCalls ↔ role=tool results, paired by ToolID). A long task that exceeds the sync window also returns an **ACK (with task id)** as this call's protocol reply, closing the pairing immediately.
+- **Cross-turn = notification event**: an async result (`task_settled`) is not a reply to some pending call — it is a **self-contained notification input event**, correlated with the earlier ACK by task id at the content level. Results carry no protocol constraint with tools, so compression/loss/reordering can never create orphans.
+
+Correspondingly, timeline rendering obeys one iron rule: **the system never generates textual call syntax into assistant history** — any textual call notation (arrows, brackets, any format) gets imitated by models under comprehension pressure, producing fabricated call text that executes nothing (established after two live-run failures). In-turn history is rendered in native protocol form (inside the training distribution); un-pairable residual results are demoted at render time to user-side input notes (content and correlation id preserved), so any compression cut still yields a legal native sequence.
+
+The complete role-attribution rule: **instructions → system (always a single message, always first); observations (task board / history archive / notifications) → user-side input events; assistant always equals tokens the LLM actually produced**. A compression summary is produced by the agent runtime but was never said by the LLM (placing it in assistant history would make it an imitation template), nor may it be promoted to instruction authority (paraphrased external content in system role is a prompt-injection amplifier) — hence it renders as a user-level "〔历史归档〕" archival note. Anti-forgery does not rely on roles but on **forgery having no semantics**: real references travel the metadata channel inside the projection (EventKey/StateDelta); imitated text parses into nothing.
+
+### Event Metadata Contract: A First-Class Framework Duty
+
+Event metadata injection and parsing are guaranteed at a single point by the framework (`event/metadata.go`): unique `MetaKey*` constants, unified `ParseEventMeta`, and the `meta_*` prefix carrying business-defined metadata (e.g. chat_id routing). The canonical string form of an EventKey is **hexadecimal** (`FormatEventKey/ParseEventKey`), used consistently across the `[evt_KEY|type]` timeline prefix, compaction key lists, StateDelta, and recall tool I/O.
 
 ### Relationship with trpc-agent-go
 
-tagent reuses the framework's interface primitives (Agent, Model, Tool, Plugin, Session, Event, Invocation), extending at the persistent loop and async injection layer. tagent's unique components are only EventBus + StartLoop + MemoryStore + Compact + MeditationManager + TrajectoryRecorder; the ReAct loop itself should reuse the framework's Flow.
+tagent builds on [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go), reusing the framework's interface primitives (Agent, Model, Tool, Plugin, Session, Event, Invocation) and its ReAct execution. tagent's extension layer consists of: EventBus, `runEventLoop`, SessionProjection, MemoryPlugin, SummaryPlugin, ContextManager (with SmartCompressor/Compactor), AgentToolWrapper, MeditationManager, and TrajectoryRecorder.
 
 > Detailed design rationale: [agent-architecture.md §1](docs/wiki/agent/agent-architecture.md)
 
@@ -48,59 +58,44 @@ Three layers of data representation, each with a distinct purpose:
 
 | Layer | Location | Responsibility | Lifetime |
 |-------|----------|---------------|----------|
-| **EventBus AgentEvent** | Agent memory | Event flow (source of truth), distinguishes external_input / tool_use | Publish → Pull, then discarded |
-| **Session.Events EventReference[]** | session.Session | Projection (bounded working memory), sole history source for Preprocessor | During session lifetime, Compactable |
-| **MemoryStore FullEvent** | File/DB | Permanent storage (immutable), recall tool queries | Permanent |
-
-> **Known implementation deviation**: Current production code stores `[]event.Event` (full events with `*model.Response`) in Session.Events, not EventReference. Design goal is EventReference[] (lightweight reference: key + type + summary), with full data in MemoryStore.
+| **EventBus AgentEvent** | Agent memory | Event trigger queue | Publish → Pull, then discarded |
+| **SessionProjection EventReference[]** | Agent memory | Projection (bounded working memory) | Agent lifetime, Compactable |
+| **MemoryStore FullEvent** | Memory/File/DB | Permanent storage (immutable) | Permanent |
 
 ```mermaid
 graph TB
-    subgraph "Layer 1: EventBus (event flow, temporary)"
-        EB["AgentEvent<br/>(external_input/tool_use)"]
-    end
+    EB["EventBus: AgentEvent"]
+    SP["SessionProjection: EventReference[]"]
+    MS["MemoryStore: FullEvent"]
+    LLM["[]model.Message<br/>LLM context"]
+    TOOL["Tool"]
 
-    subgraph "Layer 2: Session.Events (projection, bounded)"
-        SESS["EventReference[]<br/>(key + type + summary)"]
-    end
-
-    subgraph "Layer 3: MemoryStore (permanent, immutable)"
-        MS["FullEvent<br/>(causal chain + full content)"]
-    end
-
-    EB -->|"onEvent 5-step pipeline"| SESS
-    EB -->|"onEvent 5-step pipeline"| MS
-    SESS -->|"Preprocessor fetches on demand"| LLM["[]model.Message<br/>(LLM Context)"]
-    MS -->|"recall tool query"| TOOL["Tool"]
-
-    style EB fill:#e3f2fd,stroke:#1565c0
-    style SESS fill:#f3e5f5,stroke:#7b1fa2
-    style MS fill:#e1f5ff,stroke:#0277bd,stroke-width:3px
-    style LLM fill:#fff3e0,stroke:#ef6c00
+    EB -->|drives turns: Pull → RunFlow| SP
+    EB -->|event plugin pipeline: store + same-point projection| MS
+    MS -.ProjectionSink appends reference at the same point.-> SP
+    SP -->|assembleRequest native rendering| LLM
+    MS -->|recall/memory_query tools| TOOL
 ```
 
 **Key constraints**:
-- **Session.Events is a projection** — Bounded working memory, not full event storage. onEvent appends EventReference (lightweight reference), Preprocessor reads from the same Session.Events. Read and write the same data, no copy maintained
-- **onEvent 5-step pipeline** — On each event: ①ExtractEventType (infer type) → ②MemoryStore.StoreEvent (persist FullEvent) → ③RelationStore.SetParent (causal chain) → ④StateDelta fill (event_key/event_type) → ⑤Session.Events.append (EventReference)
-- **Compact cleans projection** — When Session.Events exceeds limit, clean old references replacing with summary reference, MemoryStore untouched (already persisted by onEvent)
-- **Preprocessor fetches on demand** — When building messages from EventReference, recent references fetch full Content from MemoryStore, old references use EventSummary directly
-- **MemoryStore is the sole complete event chain** — Agent and Tool access on-demand via EventKey
+- `SessionProjection` keeps only lightweight `EventReference`s (key + type + summary), never full content
+- Storage and projection both happen inside the event plugin pipeline, at the same point, exactly once; degenerate events (nil-Response, streaming partials, empty finals) are guarded out at the pipeline entrance — neither stored nor projected
+- `SmartCompressor` only modifies the `[]model.Message` sent to the LLM; `Compactor` only cleans old references in `SessionProjection`; neither deletes from `MemoryStore`
+- `MemoryStore` is the sole complete event chain; Agents and Tools access it on demand via `EventKey`
 
 ### Event Classification
 
-Every interaction — including internal operations like compression and tool calls — is an event:
+Every interaction — including tool calls and internal planning — becomes an `event.Event` produced by the framework Runner and turned into a persistent event by the plugin pipeline:
 
-| Category | Event Type | Trigger | Stored in Session? |
-|----------|-----------|---------|-------------------|
-| **External** | `external_input` | User message, API call, TmuxMonitor injection | Yes (as EventReference) |
+| Category | Event Type | Trigger | Projected? |
+|----------|-----------|---------|-----------|
+| **External** | `external_input` | User message, API call, task_settled notification, meditation | Yes |
 | **External** | `agent_output` | Agent's final response (no tool_calls) | Yes |
 | **Action** | `action_command` | Tool/command execution result | Yes |
-| **Thinking** | `thinking_plan` | Agent planning (assistant with tool_calls) | Yes |
-| **Thinking** | `thinking_recall` | Memory recall via RecallAgent | Yes |
-| **Thinking** | `thinking_knowledge` | Knowledge retrieval via KnowledgeAgent | Yes |
-| **Internal** | `context_compress` | SmartCompressor drops old segments | No (view-only) |
-
-> `context_compress` is a view transformation — it modifies the LLM message list but does not create a Session event.
+| **Thinking** | `thinking_plan` | Assistant message with tool_calls | Yes |
+| **Thinking** | `thinking_recall` | RecallAgent output | Yes |
+| **Thinking** | `thinking_knowledge` | KnowledgeAgent output | Yes |
+| **Internal** | `context_compress` | Summary marker after SmartCompressor/Compactor | Yes (summary reference inside the projection) |
 
 ### Traditional vs tagent
 
@@ -199,7 +194,7 @@ graph TB
 
 | Module | Responsibility | Wiki |
 |--------|---------------|------|
-| `agent/` | Event-driven engine: `EventBus` (per-agent event queue), `AgentLoop` (Pull-Process-Model-Dispatch pure engine), `Preprocessor` (event filtering+message building+compression), `SmartCompressor` (2-stage compression), `AgentToolWrapper` (sub-agent wrapper), `MeditationManager` (meditation heartbeat) | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
+| `agent/` | Event-driven engine: `EventBus` (per-agent event queue), `runEventLoop` (persistent loop), `ContextManager` (turn orchestration + BeforeModel assembly), `SmartCompressor`/`Compactor` (2-stage compression), `AgentToolWrapper` (sub-agent wrapper), `MeditationManager` (dual-gated meditation heartbeat: idle + novelty) | [agent-architecture.md](docs/wiki/agent/agent-architecture.md) |
 | `memory/` | Structured event storage: `InMemoryStore`, `FileSegmentStore` (L0-L3 layered), `RelationStore` (causal chain), `Compactor`, `Tombstone`, `Lifecycle` (TTL) | [memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
 | `plugin/` | Framework plugins: `MemoryPlugin` (event persistence + causal chain), `SummaryPlugin` (event tag injection) | [plugin-architecture.md](docs/wiki/plugin/plugin-architecture.md) |
 | `tool/` | Callable tools: `KnowledgeAgent` (RAG), `RecallAgent` (memory recall), `ActionTool` (shell/tmux execution + TmuxMonitor) | [tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
@@ -241,27 +236,27 @@ All dependencies are one-way, no cycles.
 
 ### 1. Persistent Event Loop
 
-tagent's core runtime model. The agent acts as a persistent, OS-like process: continuously receiving events (user input, TmuxMonitor callbacks), processing them in batches, and waiting for the next batch.
+tagent's core runtime model. The agent is a persistent entity that continuously receives events, processes them in batches, then waits for the next batch.
 
 ```mermaid
 graph LR
-    START["StartLoop<br/>(userID, sessionID)"] --> PULL["EventBus.Pull<br/>batch all pending events"]
-    PULL --> ONEVT["onEvent 5-step pipeline<br/>(persist + causal + StateDelta + append EventReference)"]
-    ONEVT --> PROC["Preprocessor.Process<br/>read Session.Events (projection) + compress"]
-    PROC --> MODEL{"shouldCallModel?"}
-    MODEL -->|"Yes"| CALL["model.GenerateContent"]
-    MODEL -->|"No"| DISPATCH["dispatch tool_use<br/>(async goroutine)"]
-    CALL --> RESP["handleResponse"]
-    RESP -->|"tool_calls"| ONEVT2["emitEvent (onEvent + session append)<br/>+ bus.Publish(tool_use) + dispatch (async)"]
-    RESP -->|"final"| EMIT["emit → outputCh"]
-    ONEVT2 --> PULL
-    EMIT --> PULL
-    DISPATCH --> PULL
-
-    style CALL fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    START["StartLoop(userID, sessionID)"] --> PULL["EventBus.Pull<br/>batch pending events"]
+    PULL --> BUILD["BuildInvocation<br/>merge into one user message"]
+    BUILD --> RUN["RunFlow → runner.Run"]
+    RUN --> BM["BeforeModel: TryPull+persist → Compress → [system]+render(projection)"]
+    BM --> LLM["LLM inference"]
+    LLM --> LOOP["framework ReAct loop"]
+    LOOP --> PIPE["event plugin pipeline: store + ProjectionSink same-point projection"]
+    PIPE --> OUT["final response → outputCh"]
+    OUT --> PULL
 ```
 
-Key design: onEvent executes the 5-step pipeline (event extraction → memory write → causal chain → StateDelta → projection append) on each event, then Preprocessor reads from the same Session.Events. Read and write the same data, no copy maintained.
+Key design:
+- `runEventLoop` is the sole consumer; it batches pulled events into one message. Every pulled event drives a turn — the loop does not rely on a bus echo to self-trigger
+- The actual ReAct loop runs inside the framework `runner.Run`; tagent orchestrates via `ContextManager`
+- BeforeModel unified callback: TryPull new events → persist into store+projection → Compress → rebuild messages as `[system] + render(projection)` (single-line, no current-turn extraction heuristic)
+- `RunFlow` retries with exponential backoff on failure (100ms → 200ms → 400ms, up to 3 times); a degenerate empty turn (no tool call + empty final, an occasional model hiccup) is retried once, with forensics logging (reasoning/finish_reason/error)
+- The active async task board is injected as a **user-level virtual event** (declared a system observation snapshot, do-not-imitate); it never enters history or compression
 
 > Details: [agent-architecture.md §7](docs/wiki/agent/agent-architecture.md)
 
@@ -269,36 +264,37 @@ Key design: onEvent executes the 5-step pipeline (event extraction → memory wr
 
 tagent has two independent context management operations:
 
-**SmartCompressor (compress LLM view)**: Activates when token usage exceeds threshold (`MaxTokens * CompressThreshold`):
-- **Stage 1 — Task boundary drop**: Split messages into `TaskSegment`s. Drop old segments, keep recent N (`KeepRecentTasks`, default 2)
-- **Stage 2 — LLM summary** (optional): Generate batched LLM summaries of dropped segments
-- **Target**: `[]model.Message` (LLM view), does not modify Session.Events or MemoryStore
+**SmartCompressor (compress the LLM view)**: activates when token usage exceeds `MaxTokens * CompressThreshold`:
+- **Stage 1 — task-boundary drop**: split into `TaskSegment`s, drop old ones, keep recent N (`KeepRecentTasks`, default 2)
+- **Stage 2 — LLM summary** (optional): batched LLM summaries of dropped segments (summaries retain correlation ids: task id/tool_id/tool name)
+- **Target**: `[]model.Message` (LLM view); touches neither the projection nor MemoryStore
 
-**Compact (clean Session projection)**: Triggered when SmartCompressor still exceeds limit after compression:
-- **Strategy**: Split Session.Events by task boundaries, keep recent N complete tasks' EventReference, replace old references with summary reference (includes compressed EventKey list)
-- **Target**: Session.Events (projection), does not modify MemoryStore (already persisted by onEvent)
-- **Temporal relationship**: onEvent persists FullEvent to MemoryStore in real-time on each event; Compact cleans projection when it's full — different timing, Compact doesn't lose data
+**Compactor (clean the projection)**: triggered when the compressed view still exceeds `MaxTokens`:
+- **Strategy**: split the projection by task boundaries, keep recent N complete tasks' references, replace old ones with a single summary reference
+- **Target**: `SessionProjection`; does not modify MemoryStore
 
-| Operation | Target | Trigger | Effect |
-|-----------|--------|---------|--------|
-| SmartCompressor | messages (LLM view) | token exceeds threshold | Compress message list LLM sees |
-| Compact | Session.Events (projection) | Still over limit after SmartCompress | Clean old references, replace with summary |
+| Operation | Target | Trigger |
+|-----------|--------|---------|
+| SmartCompressor | `[]model.Message` (LLM view) | token > threshold |
+| Compactor | `SessionProjection` | still over limit after SmartCompress |
 
-**Three-tier mutability**: messages (SmartCompressor can modify), Session.Events (Compact can clean), MemoryStore (never mutable).
+**Three-tier mutability**: messages (SmartCompressor may modify), SessionProjection (Compactor may clean), MemoryStore (never mutable).
 
 > Details: [agent-architecture.md §9](docs/wiki/agent/agent-architecture.md)
 
-### 3. Event-Driven Memory (onEvent 5-Step Pipeline + Causal Chain)
+### 3. Event-Driven Memory
 
-On each event arrival, the `onEvent` callback executes a 5-step pipeline:
+The framework Runner invokes registered plugins on each produced event:
 
-1. **Event extraction**: `ExtractEventType` infers type from Message.Role (`external_input`, `agent_output`, `action_command`, etc.)
-2. **Memory write**: Persist FullEvent to MemoryStore (permanent storage, immutable)
-3. **Causal chain**: `RelationStore.SetParent` — each event points to its predecessor
-4. **StateDelta fill**: `event_key`, `event_type` written to `evt.StateDelta`
-5. **Projection append**: Session.Events appends EventReference (lightweight reference: key + type + summary)
+1. **MemoryPlugin**:
+   - Entrance guards: nil-Response, streaming partials, and degenerate empty finals are skipped (neither stored nor projected); model-fabricated `[evt_…]` prefixes in assistant output are stripped before storage
+   - Derives `PartitionID` from `Invocation.AgentName` (the snowflake key's sign bit is always 0: positive keys are real events, negative keys are reserved for compression summary references)
+   - Generates the Snowflake `EventKey`, persists the `FullEvent` to `MemoryStore`, maintains the causal chain via `RelationStore.SetParent`
+   - **Same-point projection**: appends the `EventReference` via the ctx-carried `ProjectionSink` (store and project exactly once, atomically)
+   - Writes `event_key` (hex), `partition_id`, `event_type`, `event_summary` into `Event.StateDelta`
+2. **SummaryPlugin**: extracts the event type from the message and writes a summary into `Event.Tag`
 
-The LLM sees event keys in message prefixes (`[evt_123456|agent_output]`), enabling it to pass relevant keys to sub-agents for context retrieval.
+The consumer (outputCh) only reads event metadata (`ParseEventMeta`) for display and routing; it no longer participates in projection building.
 
 > Details: [memory-architecture.md](docs/wiki/memory/memory-architecture.md), [plugin-architecture.md](docs/wiki/plugin/plugin-architecture.md)
 
@@ -355,12 +351,10 @@ sequenceDiagram
     end
 
     AL->>AL: Pull (batch all)
-    AL->>AL: onEvent 5-step pipeline (persist + causal + StateDelta + append EventReference)
-    AL->>PP: Process(batch, session)
-    PP-->>AL: messages + shouldCallModel
-    AL->>AL: model.GenerateContent
-    AL->>AL: onEvent 5-step pipeline (persist response + append EventReference)
-    AL->>OC: emit → outputCh
+    AL->>AL: BuildInvocation → RunFlow → runner.Run
+    AL->>PP: BeforeModel: [system]+render(projection)
+    AL->>AL: framework ReAct loop (plugin pipeline stores + projects each event)
+    AL->>OC: all events → outputCh
     AL->>AL: back to Pull
 ```
 
@@ -413,19 +407,19 @@ User sends this request in **Persistent Event Loop mode**. The agent needs multi
 | Step | Module | Action | Event Type | MemoryStore Operation |
 |------|--------|--------|-----------|----------------------|
 | 1 | **User** → `TagentAgent` | `InjectMessage("Review recent Git commits...")` | — | — |
-| 2 | **AgentLoop** | `EventBus.Pull` → `onEvent` 5-step pipeline (event extraction → memory write → causal chain → StateDelta → append EventReference) | — | — |
-| 3 | **onEvent** → **MemoryPlugin** | 5-step pipeline: infer type, generate EventKey, persist FullEvent, build causal chain, fill StateDelta, append EventReference to Session.Events (projection) | `external_input` | Store FullEvent (immutable) |
-| 4 | **Preprocessor** | Build messages from `Session.Events` (projection), fetch full Content from MemoryStore on demand, inject `[evt_KEY\|external_input]` prefix, check token budget | — | — |
-| 5 | **AgentLoop** → LLM | LLM decides to call `action` tool | `thinking_plan` | `onEvent` 5-step pipeline persists assistant message with tool_calls |
-| 6 | **ActionTool** | goroutine executes `git log --oneline -10`, result published as external_input back to bus | `action_command` | Next round onEvent 5-step pipeline persists tool result, EventKey → causal parent = step 5 |
-| 7 | **AgentLoop** → LLM | LLM sees git log, decides to call `recall` sub-agent | `thinking_plan` | `onEvent` persists new assistant message with tool_calls |
-| 8 | **AgentToolWrapper** | Parse `event_keys` from LLM args → `parentStore.GetEvent(key)` → serialize context → `RuntimeState["external_context"]` | — | Read FullEvents from MemoryStore (no write) |
-| 9 | **RecallAgent** (sub-agent) | `agent.Run()` → independent EventBus + AgentLoop → returns summary | `thinking_recall` | Sub-agent persists its own events; parent sees only tool result |
-| 10 | **Preprocessor** | Token budget exceeded → `SmartCompressor.Compress()` (compress messages view) → still over limit then `Compact` (clean Session.Events projection, replace old references with summary) | `context_compress` *(view-only)* | **No MemoryStore change** (Compact doesn't touch permanent storage) |
-| 11 | **AgentLoop** → LLM | LLM sees: `[compress_event]` + `[summary]` + `[recent: recall result]`. Decides to call `knowledge` sub-agent | `thinking_plan` | `onEvent` persists with `[evt_KEY\|thinking_plan]` prefix |
-| 12 | **KnowledgeAgent** (sub-agent) | `AgentToolWrapper` → `agent.Run()` → independent AgentLoop → returns docs | `thinking_knowledge` | Sub-agent persists its own events |
-| 13 | **AgentLoop** → LLM | LLM synthesizes compressed history + recall + knowledge → generates final response (no tool_calls) | `agent_output` | `onEvent` 5-step pipeline persists final response, EventKey → causal parent = step 12 |
-| 14 | **AgentLoop** | emit → outputCh → back to `EventBus.Pull` | — | — |
+| 2 | **runEventLoop** | `EventBus.Pull` → `BuildInvocation` → `RunFlow` | — | — |
+| 3 | **Plugin pipeline** | Store FullEvent + same-point projection via ProjectionSink | `external_input` | Store FullEvent (immutable) |
+| 4 | **BeforeModel** | `[system] + render(projection)` with `[evt_KEY\|type]` hex prefixes; token budget check | — | — |
+| 5 | **Runner** → LLM | LLM calls `action` tool (native tool_calls) | `thinking_plan` | Stored + projected by pipeline |
+| 6 | **ActionTool** | Executes `git log --oneline -10`; result returns through the native tool protocol | `action_command` | Stored + projected; causal parent = step 5 |
+| 7 | **Runner** → LLM | LLM calls `recall` sub-agent | `thinking_plan` | Stored + projected |
+| 8 | **AgentToolWrapper** | Parse `event_keys` → `parentStore.GetEvent(key)` → `RuntimeState["external_context"]` | — | Read only |
+| 9 | **RecallAgent** (sub-agent) | `agent.Run()` → independent bus/projection → returns summary | `thinking_recall` | Sub-agent persists to its own partition |
+| 10 | **BeforeModel** | Budget exceeded → `SmartCompressor` (view) → still over → `Compactor` (projection) | `context_compress` | **No MemoryStore change** |
+| 11 | **Runner** → LLM | LLM sees archival note + retained recents; calls `knowledge` | `thinking_plan` | Stored + projected |
+| 12 | **KnowledgeAgent** (sub-agent) | Independent run → returns docs | `thinking_knowledge` | Sub-agent's own partition |
+| 13 | **Runner** → LLM | Final response (no tool_calls) | `agent_output` | Stored + projected; causal parent = step 12 |
+| 14 | **runEventLoop** | final → outputCh → back to `EventBus.Pull` | — | — |
 
 ### Event Chain (Causal)
 
@@ -553,7 +547,7 @@ go srv.Start("0.0.0.0:8088")
 | `system_prompt.files` | `[]` | Prompt files to load (supports bootstrap ordering) |
 | `memory.type` | `memory` | `memory` (in-memory) or `file` (persistent) |
 | `memory.path` | `""` | File path (required when `type: file`) |
-| `max_tool_iterations` | `200` | Max ReAct loop iterations |
+| `max_tool_iterations` | entry 50 / sub 10 | Max ReAct loop iterations |
 | `max_tokens` | `8000` | Token budget for context compression |
 | `compress_threshold` | `0.8` | Compression trigger ratio (`max_tokens * threshold`) |
 | `temperature` | `0.7` | LLM temperature |
@@ -567,13 +561,16 @@ go srv.Start("0.0.0.0:8088")
 | `id` | Tool ID (for `kind: tool`) |
 | `description_file` | Tool description prompt file |
 | `event_params` | Parameters that accept event keys (e.g., `[event_keys]`) |
+| `async` | Whether an agent-kind tool may use the async task layer (default true; `false` forces synchronous execution) |
 | `remote.url` | Remote agent URL (enables A2A communication) |
+
+Agent runtime parameters (`max_tool_iterations`, `max_tokens`, `temperature`) are configured ONLY on the referenced agent's own `agents.<name>` entry — a ToolRef declares the reference relationship, not the agent's behavior.
 
 ## Project Structure
 
 ```
 tagent/
-├── agent/          # Core: EventBus, AgentLoop, Preprocessor, SmartCompressor, AgentToolWrapper, MeditationManager
+├── agent/          # Core: EventBus, runEventLoop, ContextManager, SmartCompressor, Compactor, AgentToolWrapper, MeditationManager
 ├── builtin.go      # init(): register built-in tool factories
 ├── config.go       # Declarative config: Config, AgentConfig, ToolRef, PromptConfig
 ├── docs/wiki/      # Architecture documents (per-module)

@@ -35,6 +35,8 @@ tagent 采用**事件驱动、记忆中心**的设计理念，核心哲学是：
 
 对应地，时间线渲染遵循一条铁律：**系统永不在 assistant 历史中生成文本化调用语法**——任何文本调用语法（箭头、括号、任意格式）都会被模型在理解压力下模仿，产生执行不了任何工具的伪调用文本（实机验证两次踩坑后确立）。回合内历史以原生协议形态呈现（训练分布内）；无法配对的残余结果在渲染期降级为 user 侧输入注记（内容与关联 id 保留），保证任意压缩切窗仍是合法原生序列。
 
+Role 归属的完整规则：**指令类→system（恒单条恒首位）；观察类（看板/历史归档/通知）→user 侧输入事件；assistant 恒等于 LLM 真实产出的 token**。压缩摘要虽由 agent 执行产生，但不是 LLM 说过的话（放进 assistant 会成为模仿模板），也不得升权为指令（转述的外部内容进 system 是注入放大器），故以 user 级「〔历史归档〕」注记呈现；防伪造不靠 role，靠**伪造无语义**——真引用走投影内的元数据通道（EventKey/StateDelta），模仿文本解析不出任何东西。
+
 ### 事件元数据契约：框架一等职责
 
 事件元数据的注入与解析由框架单点保障（`event/metadata.go`）：`MetaKey*` 常量唯一定义、`ParseEventMeta` 统一解析、`meta_*` 前缀承载业务自定义元数据（如 chat_id 路由）。EventKey 的字符串形态统一为 **16 进制**（`FormatEventKey/ParseEventKey`），贯穿 `[evt_KEY|type]` 时间线前缀、压缩产物 key 清单、StateDelta 与 recall 工具出入参。
@@ -615,13 +617,15 @@ python3 train/rl/convert_trajectories.py --input data/trajectories/ --output dat
 | `remote.url` | 远程 A2A Agent URL |
 | `properties` | 工具专属配置 |
 
+agent 运行参数（`max_tool_iterations`/`max_tokens`/`temperature`）**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系，不承载 agent 行为参数（历史上 ToolRef 上的同名字段从未生效，已删除）。
+
 ### exec (ActionTool) Properties
 
 `exec`（ActionTool，对外暴露名称为 `action`）支持以下 `properties`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `work_dir` | string | 默认工作目录 |
+| `workspace` | string | 命令工作目录；**默认继承进程运行目录**（与 file tools 的相对路径基准一致，模型看到单一文件系统视图） |
 | `run_as_user` | string | `sudo -u` 执行用户 |
 | `run_as_group` | string | `sudo -g` 执行用户组 |
 
