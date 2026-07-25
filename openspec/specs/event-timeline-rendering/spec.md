@@ -58,7 +58,7 @@
 - `action_command`（有 ToolID 且其 tool_call 在渲染序列中）→ role=tool + ToolID（原生配对）
 - `action_command`（无 ToolID，或其 tool_call 已被压缩/缺失）→ 降级为 role=user 输入注记，内容 SHALL 保留（含关联标识）
 - `external_input`（含 task/monitor/meditation 通知）→ role=user 文本，通知携带文本级关联标识（如 task id）
-- `agent_output` → role=assistant 文本；`context_compress` → role=system 文本
+- `agent_output` → role=assistant 文本；`context_compress` → role=user 归档注记（带“〔历史归档〕系统生成…勿模仿”声明；不用 system——转述内容不得升权为指令；不用 assistant——非 LLM 产出，避免成为模仿模板）；真正的 role=system SHALL 恒为单条且恒在序列首位
 
 #### Scenario: 工具交互历史以原生协议呈现
 

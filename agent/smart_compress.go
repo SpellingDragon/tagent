@@ -381,8 +381,10 @@ func (sc *SmartCompressor) Compress(
 			if sc.memStore != nil {
 				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary)
 				if archiveErr == nil {
-					result = append(result, model.NewSystemMessage(
-						fmt.Sprintf("[context_archive] evt_%s 已摘要归档，摘要 key=%s", tagentevent.FormatEventKey(segEventKey), tagentevent.FormatEventKey(summaryKey)),
+					// Archival note: user-side observation, never system (see
+					// buildCompressEvent rationale).
+					result = append(result, model.NewUserMessage(
+						fmt.Sprintf("〔历史归档〕[context_archive] evt_%s 已摘要归档，摘要 key=%s", tagentevent.FormatEventKey(segEventKey), tagentevent.FormatEventKey(summaryKey)),
 					))
 				} else {
 					log.Warnf("[SmartCompress] archive failed for segment %d: %v", p.origIndex, archiveErr)
@@ -619,7 +621,8 @@ func buildCompressErrorNotice(reason string, degradedCount int) model.Message {
 			"如需历史工具调用结果，请使用 recall 工具按 event_key 检索。",
 		reason, degradedCount,
 	)
-	return model.NewSystemMessage(content)
+	// Degradation notice: user-side observation, never system.
+	return model.NewUserMessage("〔历史归档〕" + content)
 }
 
 // EventInfo holds extracted metadata from a compressed message's [evt_KEY|type] prefix.
@@ -724,7 +727,10 @@ func (sc *SmartCompressor) buildCompressEvent(
 		content.WriteString("\n\n摘要生成失败。完整上下文可通过 recall 工具获取。")
 	}
 
-	return model.NewSystemMessage(content.String())
+	// USER-side archival note (observation input) — not system (authority
+	// amplification for paraphrased content) and not assistant (imitation
+	// template). See resolveRef's context_compress rationale.
+	return model.NewUserMessage("〔历史归档〕系统生成的压缩摘要（非用户发言，勿模仿此格式）：" + content.String())
 }
 
 // buildSegmentCompressNotice creates an inline compress notice for a single segment.
@@ -797,7 +803,8 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 	if len(notice) > maxNoticeChars {
 		notice = notice[:maxNoticeChars] + "...(通知已截断)"
 	}
-	return model.NewSystemMessage(notice)
+	// Compress notice: user-side observation, never system.
+	return model.NewUserMessage("〔历史归档〕" + notice)
 }
 
 // ============================================================================

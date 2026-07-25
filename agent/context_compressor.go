@@ -198,11 +198,21 @@ func (cc *ContextCompressor) resolveRef(
 	ctx context.Context,
 	ref memory.EventReference,
 ) model.Message {
-	// context_compress refs are summary references — use EventSummary directly.
+	// context_compress refs are summary references — rendered as a USER-side
+	// archival note (observation input), never role=system/assistant:
+	//   - not system: the summary paraphrases user/tool content; system role
+	//     would elevate paraphrased external text to instruction authority
+	//     (prompt-injection amplifier) and sits outside training distribution
+	//     (mid-conversation system messages behave inconsistently across models)
+	//   - not assistant: the LLM never said this; any system-generated format
+	//     placed in assistant history becomes an imitation template
+	// Forgery is harmless by construction: real archive refs live in the
+	// projection (negative EventKey, metadata channel) — imitated text parses
+	// into nothing.
 	if ref.EventType == tagentevent.TypeContextCompress {
 		return model.Message{
-			Role:    model.RoleSystem,
-			Content: prefixEventKey(ref.EventSummary, ref),
+			Role:    model.RoleUser,
+			Content: prefixEventKey("〔历史归档〕系统生成的压缩摘要（非用户发言，勿模仿此格式）："+ref.EventSummary, ref),
 		}
 	}
 
@@ -380,7 +390,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			EventType:    tagentevent.TypeContextCompress,
 			EventSummary: fmt.Sprintf("[Compacted %d historical events: keys=%s]", len(compressedKeys), strings.Join(compressedKeys, ",")),
 			Timestamp:    minTs,
-			Role:         "system",
+			Role:         "user",
 		}
 		retained = append([]memory.EventReference{summaryRef}, retained...)
 	}
