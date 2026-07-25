@@ -225,6 +225,8 @@ type CompressConfig struct {
 	// ArchiveCacheCap bounds the per-process L3 archive cache entries
 	// (default compress.DefaultArchiveCacheCap).
 	ArchiveCacheCap int
+	// MaxSummaryInputChars caps one summary call's input (0 → pkg default).
+	MaxSummaryInputChars int
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
@@ -440,6 +442,9 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	}
 	if cfg.Compress.ArchiveCacheCap > 0 {
 		opts = append(opts, compress.WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
+	}
+	if cfg.Compress.MaxSummaryInputChars > 0 {
+		opts = append(opts, compress.WithMaxSummaryInputChars(cfg.Compress.MaxSummaryInputChars))
 	}
 	return opts
 }

@@ -227,6 +227,11 @@ type CompressConfig struct {
 	// (default 256; the archives themselves persist in MemoryStore).
 	ArchiveCacheCap int `json:"archive_cache_cap,omitempty" yaml:"archive_cache_cap,omitempty"`
 
+	// MaxSummaryInputChars caps a single summary LLM call's input characters;
+	// oversized task segments are split recursively before summarization
+	// (0 = package default 40000).
+	MaxSummaryInputChars int `json:"max_summary_input_chars,omitempty" yaml:"max_summary_input_chars,omitempty"`
+
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
 	SummaryModel string `json:"summary_model,omitempty" yaml:"summary_model,omitempty"`

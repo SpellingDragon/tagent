@@ -36,9 +36,10 @@ type SmartCompressor struct {
 	// archiveCache maps segment content hash → archived artifact, so the same
 	// segment is NEVER re-summarized or re-stored across rounds (material law:
 	// cost stays O(new segments), independent of history size).
-	archiveCacheMu  sync.Mutex
-	archiveCache    map[string]archivedSegment
-	archiveCacheCap int // bound on cached entries (0 → DefaultArchiveCacheCap)
+	archiveCacheMu       sync.Mutex
+	archiveCache         map[string]archivedSegment
+	archiveCacheCap      int // bound on cached entries (0 → DefaultArchiveCacheCap)
+	maxSummaryInputChars int // per-call summary input cap (0 → DefaultMaxSummaryInputChars)
 
 	// Configurable truncation parameters
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
@@ -117,6 +118,17 @@ func WithMaxNoticeChars(n int) SmartCompressorOption {
 // WithChunkSummaryLen sets the summary length per segment.
 func WithChunkSummaryLen(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
+}
+
+// WithMaxSummaryInputChars caps the input characters of a single summary
+// LLM call (0 → DefaultMaxSummaryInputChars). Oversized inputs are split
+// recursively before calling the model.
+func WithMaxSummaryInputChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) {
+		if n > 0 {
+			sc.maxSummaryInputChars = n
+		}
+	}
 }
 
 // WithArchiveCacheCap bounds the per-process archive cache entries
@@ -306,54 +318,85 @@ func (sc *SmartCompressor) Compress(
 	// cachedArchives: segments whose hash hit the archive cache — summary and
 	// summaryKey are reused verbatim; no LLM call, no re-store.
 	cachedArchives := make(map[int]archivedSegment)
-	for i, p := range plans {
-		if p.level != 3 {
-			continue
-		}
-		if hit, ok := sc.lookupArchive(sc.segmentContentHash(p.seg)); ok {
-			cachedArchives[i] = hit
-			level3Summaries[i] = hit.summary
-			continue
-		}
-		if sc.summaryModel != nil {
-			summary, hadErr := sc.summarizeMsgs(ctx, p.seg.Messages, i, len(plans))
-			if hadErr || summary == "" {
-				level3Failed[i] = true
-			} else {
-				level3Summaries[i] = summary
-			}
-		} else {
-			level3Failed[i] = true
-		}
+
+	// Collect all per-segment summary jobs (L3 cache misses + L2 + L1), then
+	// run them concurrently. Segments are independent; serial calls made the
+	// whole compression block the turn for the sum of call latencies
+	// (observed live: 10 segments × 3-30s = 74s inside BeforeModel).
+	type summaryJob struct {
+		idx   int
+		level int
+		msgs  []model.Message
 	}
-	// L3 LLM failed → degrade to L1 first-stage (drop tool, keep text)
-	for i := range level3Failed {
-		plans[i].level = 1
+	var jobs []summaryJob
+	for i, p := range plans {
+		switch p.level {
+		case 3:
+			if hit, ok := sc.lookupArchive(sc.segmentContentHash(p.seg)); ok {
+				cachedArchives[i] = hit
+				level3Summaries[i] = hit.summary
+				continue
+			}
+			if sc.summaryModel == nil {
+				level3Failed[i] = true
+				continue
+			}
+			jobs = append(jobs, summaryJob{idx: i, level: 3, msgs: p.seg.Messages})
+		case 2:
+			jobs = append(jobs, summaryJob{idx: i, level: 2, msgs: p.execMsgs})
+		case 1:
+			jobs = append(jobs, summaryJob{idx: i, level: 1, msgs: p.nonKeyMsgs})
+		}
 	}
 
-	// Level 2 & 1: per-segment LLM summarization.
-	// On failure, degrade to firstStageCompress (drop tool, keep text).
 	level2Failed := make(map[int]bool)
 	level1Failed := make(map[int]bool)
 	level2Summaries := make(map[int]string)
 	level1Summaries := make(map[int]string)
-	for i, p := range plans {
-		switch p.level {
-		case 2:
-			summary, hadErr := sc.summarizeMsgs(ctx, p.execMsgs, i, len(plans))
-			if hadErr || summary == "" {
-				level2Failed[i] = true
-			} else {
-				level2Summaries[i] = summary
+
+	// summaryConcurrency bounds parallel summary-model calls — a scheduling
+	// knob (provider QPS courtesy), not a behavioral limit.
+	const summaryConcurrency = 3
+	sem := make(chan struct{}, summaryConcurrency)
+	var jobWG sync.WaitGroup
+	var jobMu sync.Mutex
+	for _, j := range jobs {
+		jobWG.Add(1)
+		go func(j summaryJob) {
+			defer jobWG.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			summary, hadErr := sc.summarizeMsgs(ctx, j.msgs, j.idx, len(plans))
+			jobMu.Lock()
+			defer jobMu.Unlock()
+			failed := hadErr || summary == ""
+			switch j.level {
+			case 3:
+				if failed {
+					level3Failed[j.idx] = true
+				} else {
+					level3Summaries[j.idx] = summary
+				}
+			case 2:
+				if failed {
+					level2Failed[j.idx] = true
+				} else {
+					level2Summaries[j.idx] = summary
+				}
+			case 1:
+				if failed {
+					level1Failed[j.idx] = true
+				} else {
+					level1Summaries[j.idx] = summary
+				}
 			}
-		case 1:
-			summary, hadErr := sc.summarizeMsgs(ctx, p.nonKeyMsgs, i, len(plans))
-			if hadErr || summary == "" {
-				level1Failed[i] = true
-			} else {
-				level1Summaries[i] = summary
-			}
-		}
+		}(j)
+	}
+	jobWG.Wait()
+
+	// L3 LLM failed → degrade to L1 first-stage (drop tool, keep text)
+	for i := range level3Failed {
+		plans[i].level = 1
 	}
 
 	// 7. Assemble result (maintain chronological order)
@@ -1098,12 +1141,67 @@ func (sc *SmartCompressor) generateSummary(
 	return sc.generateSummaryRecursive(ctx, segments, batchIndex, totalBatches, 0)
 }
 
+// effectiveMaxSummaryInputChars returns the per-call summary input cap.
+func (sc *SmartCompressor) effectiveMaxSummaryInputChars() int {
+	if sc.maxSummaryInputChars > 0 {
+		return sc.maxSummaryInputChars
+	}
+	return DefaultMaxSummaryInputChars
+}
+
 // generateSummaryRecursive is the recursive implementation with depth tracking.
 func (sc *SmartCompressor) generateSummaryRecursive(
 	ctx context.Context, segments []*TaskSegment, batchIndex, totalBatches, depth int,
 ) (summary string, hadError bool) {
 	if sc.summaryModel == nil {
 		return "", false
+	}
+
+	// Input-side split guard: one oversized LLM call is slow, failure-prone
+	// and can blow the summary model's context window (observed live: a
+	// single 128K-char task segment from a 16-round sub-agent run — 32s per
+	// call, degraded on failure). The output-side split below can never fire
+	// for single-segment calls, so oversized INPUT must be split before
+	// calling the model. Sub-summaries are then joined.
+	if depth < 2 {
+		totalChars := 0
+		for _, seg := range segments {
+			for _, msg := range seg.Messages {
+				totalChars += len(msg.Content)
+			}
+		}
+		if totalChars > sc.effectiveMaxSummaryInputChars() {
+			var left, right []*TaskSegment
+			if len(segments) > 1 {
+				mid := len(segments) / 2
+				left, right = segments[:mid], segments[mid:]
+			} else if len(segments[0].Messages) > 1 {
+				// Single oversized segment: bisect its messages into two
+				// temporary half-segments.
+				msgs := segments[0].Messages
+				mid := len(msgs) / 2
+				left = []*TaskSegment{{Messages: msgs[:mid]}}
+				right = []*TaskSegment{{Messages: msgs[mid:]}}
+			}
+			if left != nil {
+				log.Warnf("[SmartCompress] batch %d/%d input %d chars exceeds cap %d, splitting input (depth=%d)",
+					batchIndex, totalBatches, totalChars, sc.effectiveMaxSummaryInputChars(), depth)
+				leftSummary, leftErr := sc.generateSummaryRecursive(ctx, left, batchIndex, totalBatches, depth+1)
+				rightSummary, rightErr := sc.generateSummaryRecursive(ctx, right, batchIndex, totalBatches, depth+1)
+				switch {
+				case leftErr && rightErr:
+					return "", true
+				case !leftErr && !rightErr:
+					return leftSummary + "\n" + rightSummary, false
+				case !leftErr:
+					return leftSummary, false
+				default:
+					return rightSummary, false
+				}
+			}
+			// Single oversized message: fall through — the builder below
+			// truncates the input hard to the cap as a last resort.
+		}
 	}
 
 	// Build conversation content from old segments
@@ -1139,6 +1237,13 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 
 	// Dynamic target calculation based on actual input and token budget
 	inputChars := contentBuilder.Len()
+	// Last-resort input truncation (single un-splittable giant message).
+	if cap := sc.effectiveMaxSummaryInputChars(); inputChars > cap*2 {
+		truncated := contentBuilder.String()[:cap*2] + "\n...(输入过长已截断)"
+		contentBuilder.Reset()
+		contentBuilder.WriteString(truncated)
+		inputChars = contentBuilder.Len()
+	}
 	// Default compression ratio: 5x (target = 20% of input)
 	targetChars := inputChars / 5
 	// Cap: ensure all batch summaries fit within token budget.

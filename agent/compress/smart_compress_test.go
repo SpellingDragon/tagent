@@ -689,3 +689,53 @@ func TestEventTypeToRole(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateSummary_SplitsOversizedInput: a single giant task segment must
+// be split into sub-calls before hitting the summary model — one oversized
+// call is slow/failure-prone/can blow the model window (observed live:
+// 128K-char segment from a long sub-agent run). Each sub-call's input must
+// stay within ~cap bounds.
+func TestGenerateSummary_SplitsOversizedInput(t *testing.T) {
+	m := &inputRecordingModel{}
+	sc := NewSmartCompressor(WithSummaryModel(m), WithMaxTokens(102400), WithMaxSummaryInputChars(40000))
+
+	// One segment, 32 messages × 4000 chars = 128K chars.
+	seg := &TaskSegment{}
+	for i := 0; i < 32; i++ {
+		seg.Messages = append(seg.Messages, model.NewUserMessage(strings.Repeat("长", 4000)))
+	}
+	summary, hadErr := sc.generateSummary(context.Background(), []*TaskSegment{seg}, 1, 1)
+	if hadErr || summary == "" {
+		t.Fatalf("summary failed: hadErr=%v", hadErr)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.inputs) < 2 {
+		t.Fatalf("oversized input must be split into multiple calls, got %d call(s)", len(m.inputs))
+	}
+	// Prompt adds overhead; allow input cap ×2 (last-resort truncation bound).
+	for i, n := range m.inputs {
+		if n > 40000*2+4096 {
+			t.Errorf("call %d input %d chars exceeds split bound", i, n)
+		}
+	}
+}
+
+// inputRecordingModel records the char size of each summary call's user
+// message and returns a fixed short summary.
+type inputRecordingModel struct {
+	mu     sync.Mutex
+	inputs []int
+}
+
+func (m *inputRecordingModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.inputs = append(m.inputs, len(req.Messages[len(req.Messages)-1].Content))
+	m.mu.Unlock()
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "子摘要"}}}}
+	close(ch)
+	return ch, nil
+}
+
+func (m *inputRecordingModel) Info() model.Info { return model.Info{Name: "input-recorder"} }
