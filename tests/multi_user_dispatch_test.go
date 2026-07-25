@@ -1,4 +1,4 @@
-package tagent
+package tagent_test
 
 import (
 	"context"
