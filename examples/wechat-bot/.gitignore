@@ -13,6 +13,13 @@
 !tagent.yaml
 !tagent.rl.yaml
 !exec_tool_desc.md
+!train_tagent.py
+!train_rl_config.yaml
+
+# Container assets (env-injected secrets only, no hardcoded credentials)
+!Dockerfile
+!docker-compose.yml
+!entrypoint.sh
 
 # Allow prompt resources
 !resources/

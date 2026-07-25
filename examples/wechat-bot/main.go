@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -272,36 +273,19 @@ func main() {
 			log.Debugf("[Event] ID=%s Author=%s Tag=%s RequiresCompletion=%v StateDelta[%s] Response{%s}",
 				evt.ID, evt.Author, evt.Tag, evt.RequiresCompletion, deltaStr, respStr)
 
-			// Extract event type from StateDelta (written by MemoryPlugin)
-			eventType := ""
-			if evt.StateDelta != nil {
-				if typeBytes, ok := evt.StateDelta["event_type"]; ok && len(typeBytes) > 0 {
-					eventType = string(typeBytes)
-				}
+			// Parse the event metadata contract (storage identifiers, trigger
+			// source, passthrough routing metadata) via the framework API —
+			// consumers never read raw StateDelta keys. (unified-event-projection D4)
+			meta := tagentevent.ParseEventMeta(evt)
+			eventType := meta.EventType
+			// Trigger source values: "user", "task" (delivered to originating
+			// session), "meditation" (internal, not delivered).
+			triggerSource := meta.TriggerSource
+			if triggerSource == "" {
+				triggerSource = "user"
 			}
-
-			// Extract deterministic trigger source (written by RunFlow).
-			// Values: "user", "meditation", "error".
-			// (async_result is no longer used: ActionTool blocks in Call() until
-			// the tmux session stabilizes and returns a normal role=tool result.)
-			triggerSource := "user"
-			if evt.StateDelta != nil {
-				if ts, ok := evt.StateDelta["trigger_source"]; ok && len(ts) > 0 {
-					triggerSource = string(ts)
-				}
-			}
-
-			// Extract chat_id and user_name from metadata (written by onEvent callback)
-			chatID := ""
-			userName := ""
-			if evt.StateDelta != nil {
-				if cid, ok := evt.StateDelta["meta_chat_id"]; ok && len(cid) > 0 {
-					chatID = string(cid)
-				}
-				if un, ok := evt.StateDelta["meta_user_name"]; ok && len(un) > 0 {
-					userName = string(un)
-				}
-			}
+			chatID := meta.Meta["chat_id"]
+			userName := meta.Meta["user_name"]
 
 			// Check for final response (agent_output — no tool calls)
 			if evt.IsFinalResponse() && evt.Response != nil && len(evt.Response.Choices) > 0 {
@@ -316,7 +300,12 @@ func main() {
 					content = fmt.Sprintf("执行出错：%s", evt.Response.Error.Message)
 				}
 				if content == "" {
-					content = "(empty response)"
+					// Degenerate empty final: nothing to deliver. Drop instead of
+					// fabricating "(empty response)". The framework already
+					// suppresses the empty agent_output echo; this is the
+					// consumer-side half. (async-result-delivery.)
+					log.Debugf("[Agent] 丢弃空 final 响应 (trigger=%s)", triggerSource)
+					continue
 				}
 
 				// Single decision point: route based on trigger_source and chat_id
@@ -327,8 +316,11 @@ func main() {
 				case "error":
 					// Error: log only, don't send to user.
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
-				case "user":
-					// User: deliver to user if chat_id exists
+				case "user", "task":
+					// User input, or a background task result reclaimed into a
+					// turn: both deliver to the originating session (meta_chat_id).
+					// A settled task fulfilling the user's async request is a
+					// first-class user-visible reply. (async-result-delivery.)
 					if chatID == "" {
 						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
 						continue

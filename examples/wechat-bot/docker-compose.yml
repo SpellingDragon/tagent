@@ -1,0 +1,44 @@
+services:
+  tagent:
+    build: .
+    image: tagent:latest
+    container_name: tagent
+    restart: unless-stopped          # 长期运行自愈
+    user: "1000:1000"                # 显式非 root 常规用户
+    read_only: true                  # 只读根文件系统
+    tmpfs:
+      - /app/logs:size=64m,mode=1777 # 日志写入内存盘
+    volumes:
+      - ./workspace:/app/workspace:rw   # agent 唯一可写工作根
+      - ./data:/app/data:ro             # 只读知识/配置（含 tagent.yaml）
+    environment:
+      - ZAI_API_KEY=${ZAI_API_KEY}      # 从宿主 env / .env 注入，绝不走 ~/.zshrc
+      - TAGENT_CONFIG=/app/data/tagent.yaml
+      - TAGENT_HTTP_PORT=8089
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "127.0.0.1:8089:8089"       # 仅绑本地，经反代/网络策略暴露
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          pids: 256                  # 防 fork 炸弹
+        reservations:
+          memory: 256m
+    cap_drop:
+      - ALL                         # 丢弃全部 Linux capabilities
+    security_opt:
+      - no-new-privileges:true      # 禁止 setuid 提权
+    healthcheck:
+      test: ["CMD", "/app/wechat-bot", "-healthz", "http://127.0.0.1:8089/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - tagent-net
+
+networks:
+  tagent-net:
+    driver: bridge
+    # 配合 Cilium/Calico 或宿主 nftables 做 egress 白名单（见文档分论四）

@@ -121,7 +121,7 @@ agents:
     memory:
       type: localfile
       path: .wechat-config/data
-    max_tool_iterations: 50
+    max_tool_iterations: 300
     max_tokens: 128000
     temperature: 0.7
     thinking_enabled: true       # 保留：对 honor thinking_enabled 的模型有效
@@ -144,7 +144,7 @@ agents:
       - agent: knowledge
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
-        max_tool_iterations: 5
+        max_tool_iterations: 30
         max_tokens: 32000
         temperature: 0.3
 
@@ -159,7 +159,7 @@ agents:
       # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划
       - agent: plan
         description_file: plan_tool_desc.md
-        max_tool_iterations: 5
+        max_tool_iterations: 30
         max_tokens: 32000
         temperature: 0.3
 
@@ -243,7 +243,7 @@ agents:
         - knowledge_agent.md
     memory:
       type: memory
-    max_tool_iterations: 5
+    max_tool_iterations: 30
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
