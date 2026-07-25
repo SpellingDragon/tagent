@@ -21,12 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/compress"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -232,9 +234,9 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 			// as a list, enabling the tool to retrieve full event details.
 			decl.InputSchema.Properties["event_keys"] = &trpctool.Schema{
 				Type:        "array",
-				Description: "[LLM-selected] Array of Snowflake EventKeys for related events from the conversation context. Pass the event_keys mentioned in the context summary so the tool can retrieve full event details.",
+				Description: "[LLM-selected] Array of event keys (canonical hex strings, exactly as shown in [evt_...] prefixes and archive cards) for related events from the conversation context. Pass them so the tool can retrieve full event details.",
 				Items: &trpctool.Schema{
-					Type: "integer",
+					Type: "string",
 				},
 			}
 		}
@@ -794,9 +796,10 @@ func GetPlainToolFactory(id string) (PlainToolFactory, bool) {
 
 // toInt64Key converts a JSON-parsed value to an int64 event key.
 // Handles:
-//   - json.Number (from decoder with UseNumber())
-//   - string (LLM may quote large snowflake keys to avoid precision loss)
-//   - float64 (fallback for unconfigured decoders)
+// toInt64Key converts an event-key argument to int64. Keys are canonically
+// HEX strings (the [evt_...] timeline form, unified-event-projection hex
+// contract) — parsed via event.ParseEventKey. Numeric forms are kept for
+// backward compatibility with models that echo keys as numbers.
 func toInt64Key(v interface{}) int64 {
 	switch val := v.(type) {
 	case json.Number:
@@ -805,8 +808,13 @@ func toInt64Key(v interface{}) int64 {
 			return i
 		}
 	case string:
-		i, err := strconv.ParseInt(val, 10, 64)
-		if err == nil {
+		// Canonical: hex (possibly with evt_ prefix echoed by the model).
+		s := strings.TrimPrefix(strings.TrimSpace(val), "evt_")
+		if k, err := tagentevent.ParseEventKey(s); err == nil && k != 0 {
+			return k
+		}
+		// Legacy fallback: decimal strings from older transcripts.
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return i
 		}
 	case float64:

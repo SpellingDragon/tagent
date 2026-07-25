@@ -20,7 +20,8 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `loader.go` | 289 | Prompt 加载器：单文件、目录、组合加载、bootstrap 加载 |
+| `loader.go` | Prompt 加载器：单文件/目录/组合/bootstrap 加载 + 内嵌 FS 回退（`WithFallback`） |
+| `source.go` | `Source`：mtime 感知的热重载 prompt 源（工具描述热更新用） |
 | `loader_test.go` | 10.1KB | 单元测试 |
 
 ---
@@ -43,7 +44,7 @@ type Loader struct {
 
 ```go
 // prompt/loader.go:18-23
-func NewLoader(baseDir string) *Loader {
+func NewLoader(baseDir string, opts ...LoaderOption) *Loader { // 支持 WithFallback 等选项
     return &Loader{BaseDir: baseDir}
 }
 ```
@@ -448,3 +449,21 @@ if content == "" {
 - 保持 `BootstrapLoadOrder` 的可控性
 
 如需加载子目录，显式使用 `LoadFiles` 指定完整路径。
+
+---
+
+## 九、内嵌 FS 回退（prompt-loader-fallback）
+
+`NewLoader(baseDir, WithFallback(fsys, prefix))` 注入内嵌 prompt FS：磁盘 `BaseDir` 下找不到文件/目录时回退到 embed FS（`prefix` 为 FS 内 prompt 根路径，如 `resources/prompts`）。**磁盘永远优先**——用户可覆盖任意内置 prompt，二进制单文件分发时又不缺省。`fallbackFile/fallbackDir` 在 `LoadFromFile/LoadFromDir` 的 miss 路径内生效，调用方无感知。
+
+## 十、Source — 热重载 prompt 源
+
+```go
+// prompt/source.go
+src := prompt.NewSource(loader, prompt.CompositeConfig{Files: []string{"recall_tool_desc.md"}})
+content, _ := src.Get() // 读盘并缓存
+// 文件被修改后：
+content, _ = src.Get() // mtime 变化 → 自动重读
+```
+
+用途：`AgentToolWrapper.SetDescriptionSource` 使工具描述**热更新**——`Declaration()` 每次经 Source 取描述，改 prompt 文件立即生效，无需重启进程。inline-only（无 files）配置只加载一次并缓存。

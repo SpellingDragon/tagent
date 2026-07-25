@@ -194,13 +194,16 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
         fullEvent.Response = evt.Response
     }
 
-    // Step 8: 持久化到 MemoryStore
+    // Step 8: 持久化到 MemoryStore，并在存储成功后**同点投影**（D1：
+    // 存储 ⇔ 投影恰好一次）——ctx 携带当前 invocation 的 ProjectionSink，
+    // Append(EventReference) 与 StoreEvent 在同一点完成
     if p.memStore != nil {
         if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
             log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
         } else {
-            log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
-                eventKey, partitionID, eventType, len(eventSummary))
+            if sink, ok := ProjectionSinkFrom(ctx); ok {
+                sink.Append(ref) // 同点投影（unified-event-projection D1）
+            }
         }
     }
 
@@ -208,9 +211,9 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     if evt.StateDelta == nil {
         evt.StateDelta = make(map[string][]byte)
     }
-    evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
-    evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
-    evt.StateDelta["event_type"] = []byte(eventType)
+    evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey)) // hex 契约
+    evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
+    evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 
     // Step 10: 更新分区+会话级因果链，并通过 RelationStore 维护因果关系
     p.mu.Lock()
@@ -699,14 +702,14 @@ type Event struct {
 if evt.StateDelta == nil {
     evt.StateDelta = make(map[string][]byte)
 }
-evt.StateDelta["event_key"] = []byte(int64ToString(eventKey))
-evt.StateDelta["partition_id"] = []byte(intToString(partitionID))
-evt.StateDelta["event_type"] = []byte(eventType)
+evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey)) // hex 契约
+evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
+evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 ```
 
 | StateDelta Key | Value | 用途 |
 |---------------|-------|------|
-| `event_key` | EventKey int64 → 字符串 | 关联 MemoryStore 中的 FullEvent |
+| `event_key` | EventKey int64 → **hex 字符串**（`FormatEventKey`） | 关联 MemoryStore 中的 FullEvent |
 | `partition_id` | PartitionID int → 字符串 | 存储分区标识 |
 | `event_type` | EventType 字符串 | 事件类型元数据 |
 

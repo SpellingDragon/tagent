@@ -7,9 +7,11 @@
 **核心职责**：
 - **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 config-driven TagentAgent + AgentToolWrapper 包装
 - **RecallAgent**：智能记忆召回 — 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答
-- **ActionTool**：命令执行（同步 exec / 异步 tmux_exec），纯执行器，不关心命令来源
-- **TmuxMonitor**：后台监控 tmux session 状态，状态变更时通过 `InjectMessage` 触发新的 Agent 迭代
+- **ActionTool**：命令执行（注册 ID `exec`，声明名 `action`，统一走 tmux + 任务层；tmux 不可用时同步降级），纯执行器，不关心命令来源
+- **TmuxMonitor**：自适应轮询 tmux session（dense→几何退避），状态变更经按会话回调驱动 `TmuxSettleDetector` → 任务层 settle
 - **File Tools**：封装 trpc-agent-go 内置文件操作工具（read_file、save_file 等）
+- **memory_recall**：召回标准协议纯函数工具（见 §六）；**任务工具族**（tool/task/）：list/get/cancel/relaunch/resume
+- **PlanAgent**（tool/plan/）：openspec 计划管理的双模式子 agent
 
 **设计原则**：
 - **职责分离**：理解层（KnowledgeAgent, RecallAgent）和执行层（ActionTool）分离，Agent 负责决策
@@ -18,86 +20,49 @@
 - **Prompt 文件化**：System prompt 通过 `prompt.Loader` 动态加载
 - **配置声明式**：所有 tool 通过 Config + ToolRef 声明，`kind` 区分 agent/tool
 - **事件上下文传递**：tool agent 通过父 agent 的 MemStore + `event_keys` 获取完整事件上下文
-- **异步任务层（当前）**：`action`（tmux）等长耗时工具经调用上下文注入的 `TaskSpawner` 接入**异步任务层**——settle-or-detach + `task_settled` 回收 turn，ActionTool 本身无状态。详见 `agent-architecture.md` §2.10。（旧的 `MessageInjector` 闭环已废弃，见 §8.6）
+- **异步任务层（当前）**：`action`（tmux）等长耗时工具经调用上下文注入的 `TaskSpawner` 接入**异步任务层**——settle-or-detach + `task_settled` 回收 turn，ActionTool 本身无状态。详见 `agent-architecture.md` §2.10。（旧的 `MessageInjector` 闭环已移除，见 §8.4 历史注记）
 - **统一注册路径**：所有内置工具通过 `RegisterBuiltinTools()` 统一注册为 plain tool
 
 ---
 
 ## 二、文件清单
 
-### 2.1 包结构
+### 2.1 包结构（分包后现状）
 
 ```
 # 根包 (tagent)
-├── tagent.go           # New() 工厂函数：声明式 Config + Option 创建 TagentAgent
-├── config.go           # Config / ToolConfig / PromptConfig 声明式配置 + LoadConfig
-├── registry.go         # ToolRegistry：统一工具注册/查询/校验（RegisterBuiltinTools）
-├── builtin.go          # 内置 plain tool 工厂函数（actionFactory）
+├── tagent.go           # New() 工厂：声明式 Config + Option 装配
+├── config.go           # Config / AgentConfig / ToolRef / MemoryConfig / CompressConfig
+├── registry.go         # ToolRegistry + RegisterBuiltinTools()
+├── builtin.go          # 内置 plain tool 工厂（actionFactory + monitor 配置解析）
 
-# agent 包
-├── tagent_agent.go     # TagentAgent 组合根 + runEventLoop
-├── tool_agent.go       # ToolAgentFactory / PlainToolFactory 注册接口 + AgentToolWrapper
-├── context_manager.go  # ContextManager + TokenCounter + BeforeModel 回调链
-├── smart_compress.go   # SmartCompressor
-├── task_segmenter.go   # TaskSegmenter + Compactor
-├── event_bus.go        # EventBus + AgentEvent
-├── projection.go       # SessionProjection（投影存储，写入经 ProjectionSink 由插件管线驱动）
-├── meditation.go       # MeditationManager
-├── trajectory_recorder.go # LLM 调用轨迹记录
-├── http_api.go         # HTTP API（RL/AReaL 集成）
-└── output_limit_tool.go # 工具输出截断
+# agent 包（引擎）+ 子包
+agent/
+├── tool_agent.go       # AgentToolWrapper + 任务链还原器 + Plain/ToolAgentFactory 注册接口
+├── task/               # 任务域（叶子包）：TaskManager/看板/settle 契约/resume/fixture
+└── compress/           # 压缩域：SmartCompressor/卡片序列/SessionProjection/TokenCounter
 
 # tool 包
 tool/
-├── accessor.go          # 抽象接口定义
-├── action/              # action 子包
-│   ├── action_tool.go     # ActionTool 实现 (exec / tmux_exec 双模式)
-│   ├── action_executor.go # 命令执行器
-│   ├── tmux_executor.go   # Tmux 执行器
-│   ├── tmux_monitor.go    # Tmux 监控器
-│   └── action_test.go     # ActionTool 测试
-├── recall/              # recall 子包
-│   ├── recall_agent.go    # RecallAgent 组装
-│   └── recall_subtools.go # 子工具实现 + RegisterSubTools()
-├── knowledge/           # knowledge 子包
-│   ├── knowledge_agent.go   # KnowledgeAgent 组装
-│   ├── knowledge_subtools.go# 子工具实现 + RegisterSubTools()
-│   └── websearch.go         # Web 搜索工具
-├── file/                # file 子包
-│   └── file.go              # 封装 trpc-agent-go 内置文件操作工具
-├── speak/               # speak 子包 (stub)
-│   └── speak_agent.go
-└── draw/                # draw 子包 (stub)
-    └── draw_agent.go
-
-# prompt 包
-prompt/
-├── loader.go            # Loader + CompositeConfig
+├── accessor.go          # 抽象接口（MemoryStoreAccessor, SkillRepository）
+├── action/              # 命令执行
+│   ├── action_tool.go     # ActionTool（tmux + 任务层；resume closure）
+│   ├── tmux_executor.go   # tmux 会话管理（创建/SendKeys/capture/孤儿清扫）
+│   ├── tmux_monitor.go    # 自适应轮询监控（按会话回调/TouchSession）
+│   ├── settle.go          # TmuxSettleDetector（会话绑定,Rearm）+ 三档分类
+│   └── poll_schedule.go   # dense→几何退避调度参数
+├── recall/              # 召回
+│   ├── memory_recall.go   # 召回标准协议（纯函数,items/query 分流）
+│   ├── recall_agent.go    # RecallAgent 组装（多跳编排）
+│   └── recall_subtools.go # recall_query/get/recent/trace + RegisterSubTools()
+├── knowledge/           # 知识获取（knowledge_agent/subtools/websearch）
+├── task/                # 任务工具族：list_tasks/get_task_result/cancel/relaunch/resume_task
+├── plan/                # PlanAgent（openspec 计划,双模式 Run）
+├── file/                # trpc-agent-go 内置文件工具封装
+├── speak/ draw/         # stub
 ```
 
-### 2.2 详细文件列表
-
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `tagent.go` (根) | 677 | New() 工厂函数：声明式 Config + Option，按 ToolRef 列表创建 tool |
-| `config.go` (根) | 546 | Config / AgentConfig / ToolRef / PromptConfig + LoadConfig + DefaultConfig |
-| `registry.go` (根) | 99 | ToolRegistry：统一工具注册/查询/校验门面 + RegisterBuiltinTools |
-| `builtin.go` (根) | 45 | 内置 plain tool 工厂函数：actionFactory（ActionTool） |
-| `agent/tool_agent.go` | 459 | ToolAgentFactory / PlainToolFactory 注册接口 + AgentToolWrapper 实现 |
-| `accessor.go` | 33 | 抽象接口定义（MemoryStoreAccessor, SkillRepository） |
-| `recall/recall_agent.go` | ~190 | RecallAgent 组装 |
-| `recall/recall_subtools.go` | 421 | RecallAgent 子工具 + RegisterSubTools |
-| `knowledge/knowledge_agent.go` | ~145 | KnowledgeAgent 组装 |
-| `knowledge/knowledge_subtools.go` | 423 | KnowledgeAgent 子工具 + RegisterSubTools |
-| `knowledge/websearch.go` | ~560 | Web 搜索工具实现 |
-| `action/action_tool.go` | 377 | ActionTool：exec / tmux_exec 双模式 |
-| `action/action_executor.go` | ~250 | 命令执行器 |
-| `action/tmux_monitor.go` | ~440 | Tmux 监控器 |
-| `action/tmux_executor.go` | ~383 | Tmux 执行器 |
-| `file/file.go` | 116 | 封装 trpc-agent-go 内置 8 个文件操作工具 |
-| `prompt/loader.go` | 289 | Loader + CompositeConfig |
-
----
+> 行数不列入文档（必然腐化）；以 `wc -l` 实测为准。
 
 ## 三、组件关系总览图
 
@@ -120,7 +85,6 @@ graph TB
         end
         subgraph "action/"
             CT["ActionTool\nCallableTool"]
-            CE["ActionExecutor"]
             TE["TmuxExecutor"]
             TM["TmuxMonitor"]
         end
@@ -146,11 +110,11 @@ graph TB
     RA --> MS
     KT -->|Skill/MCP/Web| SRC["知识源"]
     KT -->|ExecutionPlan| CT
-    CT --> CE
-    CT -->|tmux_exec| TE
+    CT --> TE
     TM -->|检查状态| TE
-    TM -->|状态变化回调| CT
-    CT -->|InjectMessage\n→ EventBus| TA
+    TM -->|按会话回调| SD["TmuxSettleDetector\n(会话绑定,Rearm)"]
+    SD -->|settle/detach| TL["任务层 TaskManager\n(agent/task)"]
+    TL -->|task_settled 事件| TA
     TA -->|runEventLoop| LLMA
     KA -->|创建| TA
     KA -->|assembles| RA
@@ -174,19 +138,22 @@ graph TB
 EventKey 为 Snowflake int64（详见 [memory-architecture.md](../memory/memory-architecture.md) §4.1）。
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│ 63       53 │ 52            22 │ 21       12 │ 11             0 │
-│  PartitionID│   Timestamp      │  Sequence   │   Reserved     │
-│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
-└──────────────────────────────────────────────────────────────────┘
+┌────┬─────────────┬──────────────────┬─────────────┬────────────────┐
+│ 63 │ 62       53 │ 52            22 │ 21       12 │ 11           0 │
+│sign│ PartitionID │   Timestamp      │  Sequence   │   Reserved     │
+│ =0 │ (10 bits)   │   (31 bits)      │  (10 bits)  │   (12 bits)    │
+└────┴─────────────┴──────────────────┴─────────────┴────────────────┘
 ```
 
 | 字段 | 位数 | 说明 |
 |------|------|------|
-| PartitionID | 11 bits | 存储分区键（0-2047），由 FNV-1a(AgentName) 派生 |
+| sign | 1 bit | 恒 0（正 key=真实事件；负 key 保留给投影内摘要引用） |
+| PartitionID | 10 bits | 存储分区键（0-1023），由 FNV-1a(AgentName) 派生 |
 | Timestamp | 31 bits | 秒级时间戳偏移（相对 epoch），可用 ~68 年 |
-| Sequence | 10 bits | 同秒内序列号（0-1023），单分区每秒可产生 1024 个事件 |
+| Sequence | 10 bits | 同秒内序列号（0-1023） |
 | Reserved | 12 bits | 预留位 |
+
+对 LLM/工具的字符串形态统一为 **16 进制**（`event.FormatEventKey/ParseEventKey`）。
 
 ### 4.2 Memory 数据隔离设计
 
@@ -195,7 +162,7 @@ EventKey 为 Snowflake int64（详见 [memory-architecture.md](../memory/memory-
 - FilterKey 是 trpc-agent-go 框架的概念，属于 LLM context 层面的隔离
 - Memory 从**存储分区**角度思考隔离，使用 **PartitionID** 作为分区键
 - 框架已有的 **AgentName** 是稳定的 agent 身份标识
-- **PartitionID = FNV-1a(AgentName) & 0x7FF**，由 MemoryPlugin 在 tagent 层计算
+- **PartitionID = FNV-1a(AgentName) & 0x3FF**（0-1023），由 MemoryPlugin 在 tagent 层计算
 
 ```
 框架层 (AgentName/FilterKey)     tagent 层 (MemoryPlugin)          Memory 层 (PartitionID)
@@ -252,13 +219,15 @@ sequenceDiagram
 - 纯执行器 tool（如 ActionTool、File Tools）不声明此参数
 
 ```go
-// AgentToolWrapper.Declaration 中 event_keys 的声明
+// AgentToolWrapper.Declaration 中 event_keys 的声明（hex 契约）
 "event_keys": {
     Type:        "array",
-    Description: "[LLM-selected] Array of Snowflake EventKeys for related events ...",
-    Items: &tool.Schema{Type: "integer"},
+    Description: "[LLM-selected] Array of event keys (canonical hex strings, exactly as shown in [evt_...] prefixes and archive cards) ...",
+    Items: &tool.Schema{Type: "string"},
 }
 ```
+
+> 解析侧 `toInt64Key` 以 hex 为第一优先（容忍 `evt_` 前缀回显），十进制仅作老转写兼容——见 `TestToInt64Key_HexContract` 回归。
 
 ### 4.5 Tool Agent 使用 EventKeys 获取上下文
 
@@ -562,18 +531,16 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 
 ## 八、ActionTool — 命令执行
 
-### 8.1 双模式设计
+### 8.1 执行模型（tmux + 任务层）
 
-> ℹ️ **当前架构**：ActionTool 已**无状态重写**并接入异步任务层——`Call` 经 `TaskSpawnerFromContext` 取 spawner，以 `TmuxSettleDetector` spawn 一个 Task（dense 内 settle → 内联；越界 detach → ack + `task_settled` 回收 turn）。本节部分代码块（`injector`/`MessageInjector`/`handleStateChange`，见 §8.6）为**重写前的历史留存**，当前不再持有 injector/waiter。端到端模型见 `agent-architecture.md` §2.10。
+ActionTool 是**无状态执行器**：`Call` 创建 tmux 会话与会话绑定的 `TmuxSettleDetector`，经调用上下文注入的 `TaskSpawner` spawn 为任务——dense 窗口内结算则内联返回，越窗返回 ACK（含 task id），后台结算经 `task_settled` 事件回收 turn。
 
-ActionTool 支持两种执行模式：
+| 路径 | 条件 | 行为 |
+|------|------|------|
+| 任务层（主路径） | ctx 内有 TaskSpawner | spawn + settle-or-detach（见 `agent-architecture.md` §2.10） |
+| 同步兜底 | 无 spawner（独立使用/无任务层） | 阻塞等待首个 settle 或 ctx 取消 |
 
-| 模式 | 执行方式 | 返回时机 | 适用场景 |
-|------|---------|---------|---------|
-| `exec` | 优先 tmux 异步；tmux 不可用时同步回退 | 立即返回 session ID（tmux）或命令结束（sync） | 所有命令 |
-| `tmux_exec` | 同 exec（当前实现统一走 tmux 异步） | 立即返回 session ID | 长期交互命令 |
-
-> **当前实现**：所有 ActionTool 调用优先走 tmux 异步路径。若 tmux 不可用，才回退到同步 exec。
+注册 ID 为 `exec`、Declaration Name 为 `action`（见 §13.7）；不存在独立的 `tmux_exec` 工具。resume 走同一 detector 的 `Rearm`（见 §十四）。
 
 ### 8.1.1 Properties 配置
 
@@ -600,17 +567,18 @@ tools:
 ### 8.2 ActionTool 的组合结构
 
 ```go
-// action/action_tool.go:37-50
+// action/action_tool.go
 type ActionTool struct {
-    workspace    string
-    runAsUser    string
-    runAsGroup   string
-    description  string
-    executor     *ActionExecutor
-    tmuxExecutor *TmuxExecutor
-    tmuxMonitor  *TmuxMonitor
-    injector     MessageInjector
-    closeOnce    sync.Once
+    workspace     string
+    runAsUser     string
+    runAsGroup    string
+    description   string
+    outputDir     string         // 大输出落盘目录（tool-output/）
+    tmuxExecutor  *TmuxExecutor
+    tmuxMonitor   *TmuxMonitor
+    monitorConfig *MonitorConfig // 可选覆盖
+    orphanCleanupDisabled bool   // 跳过启动孤儿清扫（多实例场景）
+    closeOnce     sync.Once
 }
 ```
 
@@ -638,169 +606,17 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 
 > **注意**：工具在注册表中 ID 为 `exec`，但 LLM 看到的工具名是 `action`。
 
-### 8.4 exec 模式 — 同步执行（tmux 不可用时的回退）
+### 8.4 生命周期钩子
 
-```go
-// action/action_tool.go:199-227
-func (ct *ActionTool) executeSync(ctx context.Context, args ActionArgs) (any, error) {
-    timeout := args.Timeout
-    if timeout <= 0 {
-        timeout = 60
-    }
+- **启动**：`NewActionTool` 若 tmux 可用则创建 executor/monitor，并执行**孤儿会话清扫**（`CleanupOrphanSessions`，上代实例残留按前缀回收——每个孤儿占一个 pty）。
+- **关闭**：`Close()` 停止 monitor 并**收编全部存活会话**（优雅退出不留孤儿）。
+- **会话回收**：completed/error 即 kill 会话；服务型 alive-detached 会话由 cancel/进程死亡结束。
 
-    spec := ActionSpec{
-        Command:    "sh",
-        Args:       []string{"-c", args.Command},
-        Env:        args.Env,
-        Dir:        args.WorkDir,
-        Workspace:  ct.workspace,
-        Timeout:    time.Duration(timeout) * time.Second,
-        RunAsUser:  ct.runAsUser,
-        RunAsGroup: ct.runAsGroup,
-    }
+> 历史注记：早期的 `MessageInjector` 闭环（ActionTool 直接向 EventBus 注入消息）与同步 `ActionExecutor`（`sh -c` 直接执行）已在任务层重构中移除，相应代码已删除；本文档不再保留其代码留存。
 
-    result, err := ct.executor.Execute(ctx, spec)
-    if err != nil {
-        return nil, fmt.Errorf("action: execution failed: %w", err)
-    }
+## 九、TmuxMonitor — 状态监控
 
-    return &ActionExecResult{
-        ExitCode: result.ExitCode,
-        Stdout:   result.Stdout,
-        Stderr:   result.Stderr,
-    }, nil
-}
-```
-
-### 8.5 tmux_exec 模式 — 异步执行
-
-```go
-// action/action_tool.go:229-267
-func (ct *ActionTool) executeAsync(ctx context.Context, args ActionArgs) (any, error) {
-    session, err := ct.tmuxExecutor.CreateSession(ctx, TmuxCreateOptions{
-        Command: args.Command,
-        WorkDir: args.WorkDir,
-        Env:     args.Env,
-    })
-    if err != nil {
-        return nil, fmt.Errorf("action: failed to create tmux session: %w", err)
-    }
-
-    if ct.tmuxMonitor != nil {
-        ct.tmuxMonitor.AddSession(&TmuxSession{
-            ID:        session.ID,
-            Name:      session.Name,
-            Command:   args.Command,
-            WorkDir:   args.WorkDir,
-            Status:    SessionRunning,
-            CreatedAt: time.Now(),
-            IsTUI:     args.IsTUI,
-        })
-        if !ct.tmuxMonitor.IsRunning() {
-            ct.tmuxMonitor.Start()
-        }
-    }
-
-    return &TmuxExecResponse{
-        SessionID: session.ID,
-        Status:    "running",
-    }, nil
-}
-```
-
-### 8.6 ActionTool 的 MessageInjector 机制（已废弃）
-
-> ⚠️ **已过时**：此 `MessageInjector`/`handleStateChange` 机制已随 ActionTool 的**无状态重写**移除。当前 ActionTool 不再持有 injector/waiter，而是经调用上下文的 `TaskSpawner`（`TaskSpawnerFromContext`）接入**异步任务层**：状态变更由 `TmuxMonitor` 的按会话回调驱动 `TmuxSettleDetector`，dense 阶段内 settle → 内联返回、越界 → ack 并经 `task_settled` 事件回收 turn。详见 `agent-architecture.md` §2.10 任务层。以下代码块仅为历史留存。
-
-ActionTool 通过 `MessageInjector` 接口闭环处理 tmux 状态变更通知：
-
-```go
-// action/action_tool.go:18-23
-type MessageInjector interface {
-    InjectMessage(msg model.Message)
-}
-```
-
-```go
-// action/action_tool.go:269-
-func (ct *ActionTool) handleStateChange(sessionID, oldStatus, newStatus, output string) {
-    if ct.injector == nil {
-        return
-    }
-    content := fmt.Sprintf("[system] tmux session %s state changed: %s -> %s", ...)
-    if output != "" {
-        if len(output) > 2000 {
-            output = "...(truncated)" + output[len(output)-2000:]
-        }
-        content += fmt.Sprintf("\nOutput:\n%s", output)
-    }
-    ct.injector.InjectMessage(model.Message{Role: model.RoleSystem, Content: content})
-}
-```
-
-`TagentAgent` 实现了 `MessageInjector` 接口，`buildAgent()` 中通过 `cmdTool.SetMessageInjector(ta)` 完成接线。`InjectMessage` 将消息发布到 active EventBus，由 `runEventLoop` 下一轮消费。
-
----
-
-## 九、ActionExecutor — 安全命令执行
-
-### 9.1 Execute 流程
-
-```go
-// action/action_executor.go
-func (ce *ActionExecutor) Execute(ctx context.Context, spec ActionSpec) (ActionResult, error) {
-    if timeout > 0 {
-        ctx, cancel = context.WithTimeout(ctx, timeout)
-        defer cancel()
-    }
-
-    cmd := ce.buildCommand(spec)
-    cmd.Start()
-    doneCh := make(chan error, 1)
-    go func() { doneCh <- cmd.Wait() }()
-
-    select {
-    case err = <-doneCh:
-        // 正常结束
-    case <-ctx.Done():
-        syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-    }
-
-    return ActionResult{ExitCode, Stdout, Stderr, Duration}, nil
-}
-```
-
-### 9.2 buildCommand — 用户隔离
-
-```go
-// action/action_executor.go
-func (ce *ActionExecutor) buildCommand(spec ActionSpec) (*exec.Cmd, error) {
-    if spec.RunAsUser != "" {
-        args := []string{"-n", "-u", spec.RunAsUser}
-        if spec.RunAsGroup != "" {
-            args = append(args, "-g", spec.RunAsGroup)
-        }
-        args = append(args, spec.Command)
-        args = append(args, spec.Args...)
-        cmd = exec.Command("sudo", args...)
-    } else {
-        cmd = exec.Command(spec.Command, spec.Args...)
-    }
-
-    cmd.Dir = spec.Dir || spec.Workspace || ce.workspace
-    cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-    return cmd, nil
-}
-```
-
-**安全隔离**：通过 `sudo -u` 实现用户隔离，通过 `Setpgid` 实现进程组管理（超时清理）。
-
----
-
-## 十、TmuxMonitor — 状态监控
-
-### 10.1 监控状态机
+### 9.1 监控状态机
 
 ```mermaid
 stateDiagram-v2
@@ -817,7 +633,7 @@ stateDiagram-v2
     Error --> [*]
 ```
 
-### 10.2 状态常量
+### 9.2 状态常量
 
 ```go
 // action/tmux_executor.go
@@ -831,7 +647,7 @@ const (
 )
 ```
 
-### 10.3 detectSessionState — 状态检测逻辑
+### 9.3 detectSessionState — 状态检测逻辑
 
 ```go
 // action/tmux_monitor.go
@@ -858,34 +674,37 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 }
 ```
 
-### 10.4 FakeAlive / FakeDead 处理
+### 9.4 FakeAlive / FakeDead 处理
 
 | 状态 | 触发条件 | 处理方式 |
 |------|---------|---------|
 | `fake_alive` | 进程存在、pane 存活、输出稳定超过阈值，但心跳有响应 | 重启 session |
 | `fake_dead` | 进程存在、pane 存活、输出稳定超过阈值，心跳也无响应 | 强制 kill session |
 
-### 10.5 配置参数
+### 9.5 配置参数
 
 ```go
 // action/tmux_monitor.go
 func DefaultMonitorConfig() MonitorConfig {
     return MonitorConfig{
-        Interval:             30 * time.Second,
-        StableThreshold:      2,
-        InteractiveThreshold: 3,
-        FakeDeadThreshold:    5,
-        HeartbeatCommand:    "echo ping",
-        HeartbeatTimeout:     5 * time.Second,
+        Interval:                  3 * time.Second,   // 基础轮询节奏（自适应调度基础上限见 poll_schedule）
+        StableDuration:            60 * time.Second,  // 输出稳定判定
+        InteractiveStableDuration: 90 * time.Second,  // TUI 会话稳定判定
+        FakeDeadDuration:          150 * time.Second, // 假死判定
+        HeartbeatCommand:          "echo ping",
+        HeartbeatTimeout:          5 * time.Second,
     }
 }
+
+// 自适应轮询叠加参数（poll_schedule.go）：DenseInterval 1s / DenseDuration 10s /
+// BackoffFactor 2 / MaxInterval 60s——dense→sparse 边界即同步→异步 ack 点。
 ```
 
 ---
 
-## 十一、TmuxExecutor — Tmux Session 管理
+## 十、TmuxExecutor — Tmux Session 管理
 
-### 11.1 核心操作
+### 10.1 核心操作
 
 | 方法 | 说明 |
 |------|------|
@@ -899,7 +718,7 @@ func DefaultMonitorConfig() MonitorConfig {
 | `RestartSession(id, opts)` | 重启 session |
 | `SendKeys(id, keys)` | 向 session 发送按键 |
 
-### 11.2 Session 唯一命名
+### 10.2 Session 唯一命名
 
 ```go
 // action/tmux_executor.go
@@ -911,13 +730,13 @@ func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
 
 ---
 
-## 十二、File Tools — 文件操作工具
+## 十一、File Tools — 文件操作工具
 
-### 12.1 定位
+### 11.1 定位
 
 `tool/file` 封装 trpc-agent-go 内置文件操作工具，作为 plain tool 注册到 ToolRegistry，可直接在 YAML 中引用。
 
-### 12.2 注册的 8 个工具
+### 11.2 注册的 8 个工具
 
 | Tool ID | 说明 |
 |---------|------|
@@ -929,7 +748,7 @@ func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
 | `read_multiple_files` | 批量读取文件 |
 | `replace_content` | 替换文件内容 |
 
-### 12.3 Properties 配置
+### 11.3 Properties 配置
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -944,15 +763,15 @@ tools:
       base_dir: "./workspace"
 ```
 
-### 12.4 实现方式
+### 11.4 实现方式
 
 `file.NewToolSet(baseDir)` 创建 trpc-agent-go 内置 file toolset，`makeFileToolFactory` 根据工具名从 toolset 中取出对应的 `CallableTool`。
 
 ---
 
-## 十三、完整数据流
+## 十二、完整数据流
 
-### 13.1 RecallTool 完整数据流
+### 12.1 RecallTool 完整数据流
 
 ```mermaid
 sequenceDiagram
@@ -984,7 +803,7 @@ sequenceDiagram
     ATW-->>LLM: Tool Result
 ```
 
-### 13.2 ActionTool tmux_exec 完整数据流
+### 12.2 ActionTool（tmux + 任务层）完整数据流
 
 ```mermaid
 sequenceDiagram
@@ -992,31 +811,34 @@ sequenceDiagram
     participant CT as ActionTool
     participant TE as TmuxExecutor
     participant TM as TmuxMonitor
+    participant SD as TmuxSettleDetector
+    participant TL as TaskManager(任务层)
     participant TA as TagentAgent
 
-    LLM->>CT: command({command: "make build"})
+    LLM->>CT: action({command: "make build"})
     CT->>TE: CreateSession(command="make build")
     TE-->>CT: session{id: "tagent-xxx"}
     CT->>TM: AddSession(session)
     CT->>TM: Start()（后台 goroutine）
     CT-->>LLM: TmuxExecResponse{session_id: "tagent-xxx", status: "running"}
 
-    loop 每 30 秒
+    loop 自适应轮询(dense 1s → 几何退避至 60s)
         TM->>TM: checkSession()
-        alt 输出稳定
-            TM->>CT: StateChangeCallback(sid, running→stable, output)
-            CT->>TA: InjectMessage(RoleSystem, tmux state change)
-            TA->>TA: runEventLoop Pull 新事件
-            Note over TA: LLM 读取 tmux 输出
+        alt settle 点(completed/stable/suspect)
+            TM->>SD: 按会话回调 → TmuxSettleDetector
+            SD->>TL: settle 信号(任务层 TaskManager)
+            TL->>TA: task_settled 自包含事件 → EventBus
+            TA->>TA: runEventLoop Pull(空闲唤醒/进行中排队)
+            Note over TA: LLM 以通知形式读取结果
         end
     end
 ```
 
 ---
 
-## 十四、关键设计决策
+## 十三、关键设计决策
 
-### 14.1 为什么 RecallAgent 和 KnowledgeAgent 都需要内部 LLM React 循环？
+### 13.1 为什么 RecallAgent 和 KnowledgeAgent 都需要内部 LLM React 循环？
 
 | 工具 | 内部 React | 实现方式 | 理由 |
 |------|-----------|---------|------|
@@ -1027,7 +849,7 @@ sequenceDiagram
 
 判断标准：需要"思考-行动-观察"循环 → TagentAgent + AgentToolWrapper；单一功能/执行器 → 简单 CallableTool。
 
-### 14.2 为什么 KnowledgeAgent 和 RecallAgent 是 config-driven？
+### 13.2 为什么 KnowledgeAgent 和 RecallAgent 是 config-driven？
 
 | 维度 | 旧架构（ToolAgentFactory） | 新架构（config-driven） |
 |------|---------------------------|------------------------|
@@ -1036,7 +858,7 @@ sequenceDiagram
 | 子工具配置 | 不可配置 | YAML 声明式 |
 | 扩展性 | 需修改 factory 代码 | 只需在 YAML 中添加 tool ref |
 
-### 14.3 为什么 tool 参数必须包含 event_keys？
+### 13.3 为什么 tool 参数必须包含 event_keys？
 
 | 对比项 | 无 event_keys | 有 event_keys |
 |--------|--------------|---------------|
@@ -1050,7 +872,7 @@ sequenceDiagram
 3. LLM 选择相关 `event_keys` 作为 tool 参数传递
 4. AgentToolWrapper.Call 解析 `event_keys`，通过 `parentStore.GetEvent` 获取完整事件数据
 
-### 14.4 为什么 TmuxMonitor 用 callback 而不是 channel？
+### 13.4 为什么 TmuxMonitor 用 callback 而不是 channel？
 
 **决策**：callback 让 TagentAgent 完全控制如何触发新迭代（通过 `InjectMessage`）。
 
@@ -1061,7 +883,7 @@ sequenceDiagram
 
 TagentAgent 需要在 callback 中注入 `RoleSystem` 消息到 EventBus，使用 callback 比 channel 更直接。
 
-### 14.5 为什么用 RuntimeState 而非 struct 字段传递上下文？
+### 13.5 为什么用 RuntimeState 而非 struct 字段传递上下文？
 
 **设计决策**：AgentToolWrapper 通过 `Invocation.RunOptions.RuntimeState["external_context"]` 传递外部事件上下文。
 
@@ -1071,7 +893,7 @@ TagentAgent 需要在 callback 中注入 `RoleSystem` 消息到 EventBus，使�
 | **远程调用** | 无法跨越 A2A 边界 | 自动映射到 A2A metadata |
 | **额外代码** | 需要 ProcessMessageHook | 零额外代码 |
 
-### 14.6 为什么 AgentToolWrapper 持有 agent.Agent 接口而非 *TagentAgent？
+### 13.6 为什么 AgentToolWrapper 持有 agent.Agent 接口而非 *TagentAgent？
 
 **设计决策**：`AgentToolWrapper.agent` 字段类型为 `agent.Agent`（接口）。
 
@@ -1081,7 +903,7 @@ TagentAgent 需要在 callback 中注入 `RoleSystem` 消息到 EventBus，使�
 3. Wrapper 只需调用 `agent.Run(ctx, inv)`，不关心是本地还是远程
 4. 统一接口消除了本地/远程的代码分支
 
-### 14.7 为什么 exec 工具注册 ID 是 exec，但 Declaration Name 是 action？
+### 13.7 为什么 exec 工具注册 ID 是 exec，但 Declaration Name 是 action？
 
 **设计决策**：
 - 注册表 ID `exec`：标识这是一个执行器工具，在 YAML 配置中使用 `id: exec`
@@ -1100,7 +922,7 @@ LLM 调用时使用 `action` 作为 tool name：
 {"name": "action", "arguments": {"command": "ls -la"}}
 ```
 
-## 十五、任务重入（resume_task）与会话回收
+## 十四、任务重入（resume_task）与会话回收
 
 ### resume 状态机
 
