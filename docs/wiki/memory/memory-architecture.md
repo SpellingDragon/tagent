@@ -21,15 +21,15 @@
 
 ## 二、文件清单
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `types.go` | 251 | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ 向量搜索接口 |
-| `in_memory_store.go` | 499 | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
-| `segment_store.go` | 735 | 基于 KV store 的分层存储实现（L0/L1/L2/L3） |
-| `relation_store.go` | 485 | 因果链关系存储（SetParent/GetParent/GetChildren） |
-| `compaction.go` | 519 | 分层压实调度（L1→L2→L3 自动压实） |
-| `lifecycle.go` | 311 | TTL 生命周期管理（过期事件墓碑标记） |
-| `tombstone.go` | 254 | 墓碑集管理（标记已删除事件） |
+| 文件 | 职责 |
+|------|------|
+| `types.go` | 数据结构定义（FullEvent、EventReference、MemoryStore、QueryOptions、Snowflake EventKey）+ 向量搜索接口 |
+| `in_memory_store.go` | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
+| `segment_store.go` | 基于 KV store 的分层存储实现（L0/L1/L2/L3 时间窗分段） |
+| `relation_store.go` | 因果链关系存储（SetParent/GetParent/GetChildren，LRU+可选 KV 持久化） |
+| `compaction.go` | 分层压实调度（L1→L2→L3 自动压实） |
+| `lifecycle.go` | TTL 生命周期管理（过期墓碑标记；`context_compress_summary` 固化物豁免 TTL 与容量淘汰） |
+| `tombstone.go` | 墓碑集管理（标记已删除事件） |
 
 ---
 
@@ -50,7 +50,7 @@ graph TB
 
     subgraph "实现"
         IM["InMemoryStore\n(map[int]map[int64]FullEvent)\n+ Vector Stub"]
-        FB["FileSegmentStore\n(dataDir/{partition}/*.json)\n+ Vector Stub"]
+        FB["FileSegmentStore\n(KVStore + L0-L3 时间窗分段\n+ LRU/墓碑/压实 + Vector Stub)"]
     end
 
     MS --> FE
@@ -78,24 +78,30 @@ graph TB
 
 ### 4.1 EventKey — Snowflake 64-bit 事件唯一标识符
 
-**格式**（`memory/types.go:128-153`）：
+**格式**（`memory/types.go`，snowflake-overflow-handling 修复后）：
 
 ```go
 // EventKey is a 64-bit integer following a Snowflake-like layout:
 //
-//	┌──────────────────────────────────────────────────────────────────┐
-//	│ 63       53 │ 52            22 │ 21       12 │ 11             0 │
-//	│  PartitionID│   Timestamp      │  Sequence   │   Reserved     │
-//	│  (11 bits)  │   (31 bits)      │  (10 bits)  │   (12 bits)    │
-//	└──────────────────────────────────────────────────────────────────┘
+//	┌────┬─────────────┬──────────────────┬─────────────┬────────────────┐
+//	│ 63 │ 62       53 │ 52            22 │ 21       12 │ 11           0 │
+//	│sign│ PartitionID │   Timestamp      │  Sequence   │   Reserved     │
+//	│ =0 │ (10 bits)   │   (31 bits)      │  (10 bits)  │   (12 bits)    │
+//	└────┴─────────────┴──────────────────┴─────────────┴────────────────┘
 //
-// PartitionID: storage partition (0-2047).
+// bit 63 恒为 0（符号位保护）：正 key = 真实事件，负 key 保留给投影内的
+// 压缩摘要引用（rolling summaryRef）。partitionIDMask=0x3FF（10 位，0-1023）。
 // Timestamp: seconds since snowflakeEpoch (~68 year range).
 // Sequence: per-second counter (0-1023), sub-second uniqueness.
-// Reserved: for future use (e.g., distributed worker ID).
 ```
 
-**生成函数**（`memory/types.go:164-186`）：
+> **历史教训**：早期 mask 为 11 位（0x7FF）时 partition≥1024 会触及符号位产生负 key，
+> 导致全部 `EventKey>0` 守卫失效（plan 全链路失明）。现 10 位 mask + 回归测试
+> `TestSnowflakeEventKey_AlwaysPositive` 锁定。
+
+**字符串形态**：EventKey 对 LLM/工具的展示与入参统一为 **16 进制**（`event.FormatEventKey/ParseEventKey`，负号保留给摘要引用），存储层仍为 int64。
+
+**生成函数**（`memory/types.go`）：
 
 ```go
 func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
@@ -139,17 +145,18 @@ func SequenceFromEventKey(key int64) int       // 提取序列号
 ### 4.2 FullEvent — 完整事件（MemoryStore 的唯一事实来源）
 
 ```go
-// memory/types.go:25-39
+// memory/types.go
 type FullEvent struct {
     EventKey     int64                  // Snowflake int64 唯一标识符
     PartitionID  int                    // 存储分区 key（从 AgentName 派生）
     EventType    string                 // 事件类型（external_input / agent_output / ...）
-    EventSummary string                 // 事件摘要（用于 LLM 推理）
+    EventSummary string                 // event_summary 元数据视图（原文视图，非内容总结）
     Timestamp    int64                  // Unix 毫秒时间戳
     Content      string                 // 原始文本内容
     ToolCalls    []model.ToolCall       // 工具调用列表
+    ToolID       string                 // 工具结果事件所应答的 tool_call id（D3 原生配对契约，跨存储→解析保持配对）
     ToolResults  map[string]interface{} // 工具执行结果
-    Metadata     map[string]string      // 额外元数据
+    Metadata     map[string]string      // 额外元数据（如 source_keys/content_hash 固化物溯源）
     Response     *model.Response        // LLM 响应快照（可选）
 }
 ```
@@ -159,13 +166,14 @@ type FullEvent struct {
 ### 4.3 EventReference — 轻量引用（Session 中的 LLM 上下文）
 
 ```go
-// memory/types.go:14-21
+// memory/types.go
 type EventReference struct {
     EventKey     int64  `json:"event_key"`              // Snowflake int64 指向 MemoryStore 的 key
     PartitionID  int    `json:"partition_id,omitempty"` // 存储分区 key
     EventType    string `json:"event_type"`             // 事件类型
-    EventSummary string `json:"event_summary"`           // 简短摘要（用于 LLM 推理）⭐
+    EventSummary string `json:"event_summary"`          // event_summary 视图（渲染素材）⭐
     Timestamp    int64  `json:"timestamp"`              // 时间戳
+    Role         string `json:"role,omitempty"`         // 原始消息 role（时间线渲染的 role 归属依据）
 }
 ```
 
@@ -203,8 +211,9 @@ graph LR
 | _(ParentKey 已移除)_ | 因果关系由 `RelationStore` 维护 | — |
 | `EventType` | ✅ | ✅ |
 | `EventSummary` | ✅ | ✅ |
+| `Role` | —（经 Response 推断） | ✅（渲染 role 归属） |
 | `Content` | ✅（原文） | ❌ |
-| `ToolCalls` | ✅ | ❌ |
+| `ToolCalls` / `ToolID` | ✅（原生配对契约） | ❌ |
 | `Response` | ✅ | ❌ |
 
 **关键区别**：Session 中的 `EventReference` 不包含 `Content`、`ToolCalls` 和 `Response`，LLM 看到的只是 `EventSummary`。完整数据通过 AgentToolWrapper（event_key 解析）或 RecallAgent（跨 Session 检索）按需从 MemoryStore 拉取。
@@ -233,7 +242,7 @@ if rsp, ok := memStore.(memory.RelationStoreProvider); ok {
 }
 ```
 
-因果链效果（通过独立的 RelationStore 管理 Parent-Child 关系）：
+因果链效果（通过独立的 RelationStore 管理 Parent-Child 关系；示例为 int64 存储形态，对 LLM 展示时统一 hex）：
 
 ```
 1777198738547555000 (Event 1)
@@ -274,7 +283,7 @@ RecallAgent 可沿因果链回溯原始事件
 ### 6.1 接口定义
 
 ```go
-// memory/types.go:46-95
+// memory/types.go
 type MemoryStore interface {
     // === 写操作 ===
     StoreEvent(key int64, event FullEvent) error
@@ -296,14 +305,14 @@ type MemoryStore interface {
     GetStats() StoreStats
 }
 
-// ErrVectorSearchNotSupported — 向量搜索不支持时返回此错误（memory/types.go:91-93）
+// ErrVectorSearchNotSupported — 向量搜索不支持时返回此错误（memory/types.go）
 var ErrVectorSearchNotSupported = fmt.Errorf("vector search not supported")
 ```
 
 ### 6.1.1 RelationStoreProvider — 因果关系接口
 
 ```go
-// memory/types.go:97-103
+// memory/types.go
 type RelationStoreProvider interface {
     RelationStore() RelationStore
 }
@@ -335,7 +344,7 @@ children := memStore.GetChildren(eventKey)
 ### 6.2 QueryOptions — 查询过滤
 
 ```go
-// memory/types.go:96-109
+// memory/types.go
 type QueryOptions struct {
     PartitionID  int      // 单个分区过滤（0 = 不过滤）
     PartitionIDs []int    // 多分区过滤（优先级高于 PartitionID）
@@ -354,7 +363,7 @@ type QueryOptions struct {
 ### 6.3 StoreStats — 存储统计
 
 ```go
-// memory/types.go:86-90
+// memory/types.go
 type StoreStats struct {
     TotalEvents int   // 事件总数
     StorageSize int64 // 存储大小（字节）
@@ -369,7 +378,7 @@ type StoreStats struct {
 ### 7.1 数据结构
 
 ```go
-// memory/in_memory_store.go:15-19
+// memory/in_memory_store.go
 type InMemoryStore struct {
     mu     sync.RWMutex
     events map[int]map[int64]FullEvent  // [partitionID][eventKey]
@@ -419,69 +428,71 @@ InMemoryStore
 
 ## 八、FileSegmentStore 实现
 
-### 8.1 数据结构
+### 8.1 数据结构（KV + 分段模型）
 
 ```go
-// memory/segment_store.go:128-135
+// memory/segment_store.go
 type FileSegmentStore struct {
-    dataDir string  // 如 "./data/tagent/events/" → 内部追加 {dataDir}/{partitionID}/{eventKey}.json
-    mu      sync.RWMutex
+    kv         KVStore       // RustViking KV 客户端 / 本地 JSON KV（localfile）/ mock
+    rel        RelationStore // 因果关系图
+    tombstones *TombstoneSet // 墓碑集（死事件过滤）
+    cache      *simpleLRU    // FullEvent LRU 缓存（默认 1000 条）
+    dataDir    string
+    partitions sync.Map      // map[int]*PartitionState（每分区窗口/序列状态）
+
+    // 生命周期组件（可选，Set* 注入）
+    lifecycle *LifecycleManager // TTL 墓碑标记（固化物豁免）
+    compactor *Compactor        // L1→L2→L3 分层压实
 }
 ```
 
-### 8.2 文件结构
+### 8.2 分层分段模型
 
-```
-{dataDir}/
-  0/  (PartitionID 0)
-    1777198738547555000.json  ← FullEvent JSON
-    1777198739574803000.json
-  1/  (PartitionID 1)
-    1777198739760667000.json
-  ...
-```
+**segment 是按时间窗（window_ts）的逻辑分组，不是物理文件**：
 
-### 8.3 FullEvent JSON 示例
+| 层 | 语义 | 写入方式 |
+|----|------|---------|
+| L0（热） | 当前时间窗事件 | 直写 KV |
+| L1（温） | 已过窗封存段（sealed） | 封存时更新 SegmentMeta |
+| L2/L3（冷） | Compactor 自动压实的更冷段 | `compaction.go` 调度 |
 
-```json
-{
-  "event_key": 1777198738547555000,
-  "event_type": "external_input",
-  "event_summary": "你好，我想了解今天的天气",
-  "timestamp": 1712000001000,
-  "content": "你好，我想了解今天的天气",
-  "tool_calls": [],
-  "tool_results": {},
-  "metadata": {}
+```go
+type SegmentMeta struct {
+    PartitionID int   // 分区
+    WindowTS    int64 // 时间窗起点
+    Layer       int   // 1=L1(sealed), 2=L2, 3=L3
+    EventCount  int
+    MinTime     int64
+    MaxTime     int64
+    Sealed      bool
 }
 ```
 
-### 8.4 特性总结
+KV key 由 `SegmentEventPrefix(pid, windowTS)` 派生，按分区+时间窗前缀扫描；读路径先走 LRU 缓存，miss 后按 EventKey 内含的 PartitionID+Timestamp 定位窗口。
+
+### 8.3 特性总结
 
 | 特性 | 说明 |
 |------|------|
-| 数据结构 | 每个事件一个 JSON 文件 |
+| 存储模型 | KVStore（RustViking / 本地 JSON KV）+ 时间窗分段 + SegmentMeta |
 | 持久化 | **有**（进程重启后数据不丢失） |
-| 适用场景 | 生产环境、单机部署 |
-| 读写性能 | 有文件系统 IO 开销；可按 EventKey 直接定位文件 |
-| 并发安全 | `sync.RWMutex` 保护读写 |
-| `GetStats()` | 遍历目录统计事件数和文件大小 |
+| 适用场景 | 生产环境（`type: file` 走 RustViking；`type: localfile` 零外部依赖） |
+| 读性能 | LRU 缓存 + EventKey 直接定位（分区/窗口内查找） |
+| 生命周期 | TombstoneSet + LifecycleManager（TTL，固化物豁免）+ Compactor（分层压实） |
+| 并发安全 | 每分区 PartitionState 独立锁 + store 级同步 |
 | 向量搜索 | **空实现**：返回 `ErrVectorSearchNotSupported` |
-
----
 
 ## 九、两种实现的对比
 
 | 维度 | InMemoryStore | FileSegmentStore |
 |------|--------------|-------------|
-| **数据结构** | Go map | 每个事件一个 JSON 文件 |
-| **持久化** | 无 | 有 |
+| **数据结构** | Go map | KVStore + 时间窗分段（L0-L3）+ SegmentMeta |
+| **持久化** | 无 | 有（RustViking KV 或本地 JSON KV） |
 | **进程重启** | 数据丢失 | 数据保留 |
 | **适用场景** | 测试、原型 | 生产环境 |
-| **查询性能** | O(1) | O(N) 遍历目录 |
-| **扩展性** | 受内存限制 | 受磁盘限制 |
-| **并发安全** | sync.RWMutex | sync.RWMutex |
-| **存储开销** | 全量在内存 | 每个文件约 ~1KB overhead |
+| **读性能** | O(1) | LRU 缓存 + EventKey 定位（分区/窗口） |
+| **生命周期** | 无 | Tombstone + TTL（固化物豁免）+ 分层压实 |
+| **扩展性** | 受内存限制 | 受磁盘限制；冷段压实控制放大 |
 | **向量搜索** | 空实现 | 空实现 |
 
 ---
@@ -557,7 +568,7 @@ tagent (root)
 `MemoryPlugin.OnEvent` 每次事件都会调用 `memStore.StoreEvent`：
 
 ```go
-// plugin/memory_plugin.go:115-131
+// plugin/memory_plugin.go
 if p.memStore != nil {
     if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
         log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
@@ -634,11 +645,13 @@ sequenceDiagram
 func NewRecallGetTool(accessor MemoryStoreAccessor) tool.Tool {
     return function.NewFunctionTool(
         func(ctx context.Context, args recallGetArgs) (recallGetResult, error) {
-            if args.Key == 0 {
-                return recallGetResult{}, fmt.Errorf("event key is required")
+            // args.Key 为 canonical hex 字符串（与 [evt_...] 前缀一致）
+            key, err := event.ParseEventKey(args.Key)
+            if err != nil || key == 0 {
+                return recallGetResult{}, fmt.Errorf("event key is required (hex string)")
             }
 
-            evt, err := accessor.GetEvent(args.Key)
+            evt, err := accessor.GetEvent(key)
             if err != nil {
                 return recallGetResult{}, fmt.Errorf("event not found: %w", err)
             }
@@ -737,16 +750,16 @@ sequenceDiagram
 ### 12.1 PartitionIDFromName — 从名称派生稳定分区 ID
 
 ```go
-// memory/types.go:212-221
+// memory/types.go
 func PartitionIDFromName(name string) int
 ```
 
-使用 FNV-1a 哈希将名称（如 AgentName）映射为 0-2047 之间的稳定 PartitionID。相同名称总是产生相同 PartitionID，使用 `sync.Map` 缓存。
+使用 FNV-1a 哈希将名称（如 AgentName）映射为 **0-1023** 之间的稳定 PartitionID（与雪花键 10 位分区域一致，bit63 恒 0）。相同名称总是产生相同 PartitionID，使用 `sync.Map` 缓存。
 
 ### 12.2 NewPartitionID — 无名称时的唯一分区 ID
 
 ```go
-// memory/types.go:232-235
+// memory/types.go
 func NewPartitionID() int
 ```
 
@@ -792,7 +805,7 @@ tagent.yaml → ReadNamespaces: ["tagent"]
 - `type: localfile`：创建 `FileSegmentStore`，底层使用本地 JSON 文件作为 KV 存储（无外部二进制依赖），并启动生命周期管理。同 path 会复用已注册的实例。
 
 ```go
-// tagent.go:533-580 resolveMemoryStore 节选
+// tagent.go resolveMemoryStore 节选
 case "memory", "":
     if mc.Path == "" {
         return memory.NewInMemoryStore(), nil  // 无 path → 隔离
@@ -878,15 +891,15 @@ func resolvePartitions(query QueryOptions) []int {
 
 `EventReference` 仅包含 4 个字段（key、type、summary、timestamp），是 `FullEvent` 的轻量子集。调用方按需通过 `GetEvent(key)` 获取完整数据。
 
-### 14.3 为什么 FileSegmentStore 每个事件一个文件？
+### 14.3 为什么 FileSegmentStore 采用 KV + 时间窗分段（而非每事件一个文件）？
 
-**原子性**：写入时仅修改单个文件，不影响其他事件。进程崩溃最多丢失正在写入的文件，不会破坏整个存储。
+**写放大与文件数控制**：长期运行 Agent 事件量大，每事件一文件会产生海量小文件（inode 压力、目录遍历 O(N)）；KV + 分段把同窗事件聚在前缀区间内，按前缀扫描。
 
-**可管理性**：可单独查看、备份、删除单个事件。`GetStats()` 可直接统计文件数和大小。
+**分层生命周期**：热（L0 直写）/温（L1 封存）/冷（L2/L3 压实）配合 TTL 墓碑与固化物豁免，"原文可忘、固化物长存"在存储层有对应机制。
 
-**扩展性**：文件数量可随事件增长无限扩展，不受内存限制。
+**EventKey 自寻址**：雪花键内含 PartitionID+Timestamp，可直接定位分区与时间窗，无需全局索引。
 
-## 十三、记忆策展（unified-memory-curation）
+## 十五、记忆策展（unified-memory-curation）
 
 ### 三原语与固化级联
 
