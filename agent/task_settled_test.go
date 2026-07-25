@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"testing"
 	"time"
@@ -66,15 +67,15 @@ func TestTaskManager_BackgroundSettle_PublishesTaskSettled(t *testing.T) {
 		},
 	})
 
-	d := newManualDetectorDetach(40 * time.Millisecond) // defined in task_manager_test.go
+	d := task.NewManualDetectorDetach(40 * time.Millisecond) // defined in task_manager_test.go
 	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "long task"}, d)
 	if res.Settled {
 		t.Fatalf("expected ack (background), got inline settle")
 	}
 
 	// Background settle after the window closes.
-	d.emit(SettleSignal{Kind: SettleCompleted, Output: "done later"})
-	d.done()
+	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done later"})
+	d.Done()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

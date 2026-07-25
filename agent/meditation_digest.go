@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // digestMaxAttentionDetail bounds how many attention tasks are listed per line;
@@ -62,7 +64,7 @@ func renderSelfStateDigest(tasks []*Task, idle time.Duration) string {
 		for _, t := range shown {
 			age := now.Sub(t.StartedAt).Round(time.Second)
 			b.WriteString(fmt.Sprintf("  - [%s] %s（id=%s，已 %s）\n",
-				t.Status(), truncateRunes(t.Spec.Desc, digestDescMax), shortID(t.ID), age))
+				t.Status(), truncateRunes(t.Spec.Desc, digestDescMax), task.ShortID(t.ID), age))
 		}
 		if rest := len(attention) - len(shown); rest > 0 {
 			b.WriteString(fmt.Sprintf("  - …另有 %d 条需关注任务\n", rest))

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
@@ -510,7 +511,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 			for k, v := range md {
 				cp[k] = v
 			}
-			spawner = &originSpawner{TaskController: cm.taskController, origin: cp}
+			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
 		}
 		ctx = WithTaskSpawner(ctx, spawner)
 	}
@@ -589,8 +590,8 @@ func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	if cm.taskController == nil {
 		return
 	}
-	if board := renderTaskBoard(cm.taskController.List()); board != "" {
-		args.Request.Messages = injectTaskBoard(args.Request.Messages, board)
+	if board := task.RenderBoard(cm.taskController.List()); board != "" {
+		args.Request.Messages = task.InjectBoard(args.Request.Messages, board)
 	}
 }
 

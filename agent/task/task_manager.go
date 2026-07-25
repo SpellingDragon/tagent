@@ -1,4 +1,4 @@
-package agent
+package task
 
 import (
 	"context"
@@ -201,15 +201,15 @@ var _ TaskController = (*TaskManager)(nil)
 // the task layer needing to know about routing. It embeds TaskController so the
 // full management surface (List/Get/Cancel/Relaunch) stays available to task
 // tools; only Spawn is augmented. (async-result-delivery.)
-type originSpawner struct {
+type OriginSpawner struct {
 	TaskController
-	origin map[string]string
+	Origin map[string]string
 }
 
-func (o *originSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
-	if spec.Origin == nil && len(o.origin) > 0 {
-		cp := make(map[string]string, len(o.origin))
-		for k, v := range o.origin {
+func (o *OriginSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
+	if spec.Origin == nil && len(o.Origin) > 0 {
+		cp := make(map[string]string, len(o.Origin))
+		for k, v := range o.Origin {
 			cp[k] = v
 		}
 		spec.Origin = cp

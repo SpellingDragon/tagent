@@ -1,4 +1,4 @@
-package agent
+package task
 
 import (
 	"context"
@@ -7,52 +7,15 @@ import (
 	"time"
 )
 
-// manualDetector is a test SettleDetector whose signals are driven by the test.
-type manualDetector struct {
-	ch         chan SettleSignal
-	mu         sync.Mutex
-	can        bool
-	det        chan struct{}
-	detachOnce sync.Once
-}
-
-func newManualDetector() *manualDetector {
-	return &manualDetector{ch: make(chan SettleSignal, 4), det: make(chan struct{})}
-}
-
-// newManualDetectorDetach returns a detector that auto-detaches after `after`,
-// mirroring the retired sync_wait window (detach ≈ old timeout) so migrated
-// tests keep their emit-timing semantics.
-func newManualDetectorDetach(after time.Duration) *manualDetector {
-	m := newManualDetector()
-	go func() {
-		time.Sleep(after)
-		m.fireDetach()
-	}()
-	return m
-}
-func (m *manualDetector) Settled() <-chan SettleSignal { return m.ch }
-func (m *manualDetector) Detached() <-chan struct{}    { return m.det }
-func (m *manualDetector) Cancel() {
-	m.mu.Lock()
-	m.can = true
-	m.mu.Unlock()
-}
-func (m *manualDetector) cancelled() bool       { m.mu.Lock(); defer m.mu.Unlock(); return m.can }
-func (m *manualDetector) emit(sig SettleSignal) { m.ch <- sig }
-func (m *manualDetector) done()                 { close(m.ch) }
-func (m *manualDetector) fireDetach()           { m.detachOnce.Do(func() { close(m.det) }) }
-func (m *manualDetector) triggerDetach()        { m.fireDetach() }
-
 // TestTaskManager_SettleWithinWindow_Inline: settle before the sync-wait window
 // elapses → Spawn returns inline with the signal, task Completed.
 func TestTaskManager_SettleWithinWindow_Inline(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
-	d := newManualDetectorDetach(500 * time.Millisecond)
+	d := NewManualDetectorDetach(500 * time.Millisecond)
 	go func() {
 		time.Sleep(30 * time.Millisecond)
-		d.emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
-		d.done()
+		d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
+		d.Done()
 	}()
 
 	res := tm.Spawn(TaskSpec{Kind: "generic", Desc: "quick"}, d)
@@ -80,7 +43,7 @@ func TestTaskManager_SettleAfterWindow_BackgroundAck(t *testing.T) {
 			mu.Unlock()
 		},
 	})
-	d := newManualDetectorDetach(80 * time.Millisecond)
+	d := NewManualDetectorDetach(80 * time.Millisecond)
 
 	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "long build"}, d)
 	if res.Settled {
@@ -91,8 +54,8 @@ func TestTaskManager_SettleAfterWindow_BackgroundAck(t *testing.T) {
 	}
 
 	// Background settle arrives after the window.
-	d.emit(SettleSignal{Kind: SettleCompleted, Output: "late"})
-	d.done()
+	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "late"})
+	d.Done()
 
 	waitUntil(t, 2*time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(bg) == 1 })
 	mu.Lock()
@@ -109,7 +72,7 @@ func TestTaskManager_SettleAfterWindow_BackgroundAck(t *testing.T) {
 // the first is active returns Deduped and cancels the duplicate detector.
 func TestTaskManager_IdempotentSpawn_Dedup(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
-	d1 := newManualDetectorDetach(300 * time.Millisecond) // detaches (acks) after the window
+	d1 := NewManualDetectorDetach(300 * time.Millisecond) // detaches (acks) after the window
 	key := "same-key"
 
 	var res1 SpawnResult
@@ -120,12 +83,12 @@ func TestTaskManager_IdempotentSpawn_Dedup(t *testing.T) {
 	}()
 	time.Sleep(50 * time.Millisecond) // ensure task1 registered
 
-	d2 := newManualDetector()
+	d2 := NewManualDetector()
 	res2 := tm.Spawn(TaskSpec{Kind: "command", Desc: "a-dup", Key: key}, d2)
 	if !res2.Deduped {
 		t.Fatalf("expected dedup for identical active key")
 	}
-	if !d2.cancelled() {
+	if !d2.Cancelled() {
 		t.Errorf("duplicate detector should be cancelled")
 	}
 
@@ -152,11 +115,11 @@ func TestTaskManager_WindowBoundary_NoLostSettle(t *testing.T) {
 	inline := 0
 	tasks := make([]*Task, 0, n)
 	for i := 0; i < n; i++ {
-		d := newManualDetectorDetach(2 * time.Millisecond)
+		d := NewManualDetectorDetach(2 * time.Millisecond)
 		go func() {
 			time.Sleep(2 * time.Millisecond) // right around the window boundary
-			d.emit(SettleSignal{Kind: SettleCompleted, Output: "x"})
-			d.done()
+			d.Emit(SettleSignal{Kind: SettleCompleted, Output: "x"})
+			d.Done()
 		}()
 		res := tm.Spawn(TaskSpec{Kind: "generic", Desc: "boundary"}, d)
 		tasks = append(tasks, res.Task)
@@ -194,7 +157,7 @@ func TestTaskManager_WindowBoundary_NoLostSettle(t *testing.T) {
 // TestTaskManager_Cancel marks a task cancelled and cancels its detector.
 func TestTaskManager_Cancel(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
-	d := newManualDetectorDetach(40 * time.Millisecond) // detaches (acks) after the window
+	d := NewManualDetectorDetach(40 * time.Millisecond) // detaches (acks) after the window
 	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc"}, d)
 	if res.Settled {
 		t.Fatalf("expected ack")
@@ -202,7 +165,7 @@ func TestTaskManager_Cancel(t *testing.T) {
 	if !tm.Cancel(res.Task.ID) {
 		t.Fatalf("cancel returned false")
 	}
-	if !d.cancelled() {
+	if !d.Cancelled() {
 		t.Errorf("detector not cancelled")
 	}
 	if got := res.Task.Status(); got != TaskCancelled {
@@ -241,7 +204,7 @@ func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) {
 
 // terminalTask builds a task already in a terminal state with the given
 // settledAt, wired to a spy detector so prune-time resource reclaim is testable.
-func terminalTask(id string, status TaskStatus, settledAt time.Time, d *manualDetector) *Task {
+func terminalTask(id string, status TaskStatus, settledAt time.Time, d *ManualDetector) *Task {
 	return &Task{ID: id, Spec: TaskSpec{Desc: id}, status: status, settledAt: settledAt, detector: d}
 }
 
@@ -251,8 +214,8 @@ func terminalTask(id string, status TaskStatus, settledAt time.Time, d *manualDe
 func TestPruneTerminal_RemovesExitedAndReclaims(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()
-	dc := newManualDetector() // completed victim
-	dl := newManualDetector() // live, keep
+	dc := NewManualDetector() // completed victim
+	dl := NewManualDetector() // live, keep
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, dc)
 	tm.tasks["r1"] = &Task{ID: "r1", Spec: TaskSpec{Desc: "r1"}, status: TaskRunning, detector: dl}
 
@@ -262,13 +225,13 @@ func TestPruneTerminal_RemovesExitedAndReclaims(t *testing.T) {
 	if _, ok := tm.Get("c1"); ok {
 		t.Error("exited task past grace must be pruned")
 	}
-	if !dc.cancelled() {
+	if !dc.Cancelled() {
 		t.Error("pruned task's detector.Cancel() must be called (session resource reclaim)")
 	}
 	if _, ok := tm.Get("r1"); !ok {
 		t.Error("live task must be kept")
 	}
-	if dl.cancelled() {
+	if dl.Cancelled() {
 		t.Error("live task must NOT be cancelled")
 	}
 }
@@ -278,7 +241,7 @@ func TestPruneTerminal_RemovesExitedAndReclaims(t *testing.T) {
 func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
 	base := time.Now()
-	d := newManualDetector()
+	d := NewManualDetector()
 	tm.tasks["s1"] = terminalTask("s1", TaskAliveDetached, base, d)
 
 	tm.now = func() time.Time { return base.Add(time.Hour) }
@@ -287,7 +250,7 @@ func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
 	if _, ok := tm.Get("s1"); !ok {
 		t.Error("alive_detached (live service) must be kept")
 	}
-	if d.cancelled() {
+	if d.Cancelled() {
 		t.Error("alive_detached must NOT be cancelled by prune")
 	}
 }
@@ -297,7 +260,7 @@ func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
 func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()
-	d := newManualDetector()
+	d := NewManualDetector()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
 
 	tm.now = func() time.Time { return base.Add(10 * time.Second) } // within grace
@@ -306,7 +269,7 @@ func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 	if _, ok := tm.Get("c1"); !ok {
 		t.Error("exited task within grace must be retained (get_task_result window)")
 	}
-	if d.cancelled() {
+	if d.Cancelled() {
 		t.Error("within-grace task must not be cancelled yet")
 	}
 }
@@ -315,14 +278,14 @@ func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 func TestList_PrunesExited(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()
-	d := newManualDetector()
+	d := NewManualDetector()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
 
 	tm.now = func() time.Time { return base.Add(2 * time.Minute) }
 	if got := tm.List(); len(got) != 0 {
 		t.Errorf("List should prune exited tasks, got %d", len(got))
 	}
-	if !d.cancelled() {
+	if !d.Cancelled() {
 		t.Error("List-triggered prune must reclaim resources")
 	}
 }
@@ -332,7 +295,7 @@ func TestList_PrunesExited(t *testing.T) {
 func TestPruneTerminal_Idempotent(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
 	base := time.Now()
-	d := newManualDetector()
+	d := NewManualDetector()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
 
 	tm.now = func() time.Time { return base.Add(time.Hour) }
@@ -351,8 +314,8 @@ func TestPruneTerminal_Idempotent(t *testing.T) {
 // spawned task whose spec had no Origin — tools stay oblivious (裸调 Spawn).
 func TestOriginSpawner_StampsBaggage(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
-	sp := &originSpawner{TaskController: tm, origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}
-	d := newManualDetectorDetach(10 * time.Millisecond)
+	sp := &OriginSpawner{TaskController: tm, Origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}
+	d := NewManualDetectorDetach(10 * time.Millisecond)
 	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x"}, d)
 	if res.Task == nil {
 		t.Fatal("no task returned")
@@ -365,8 +328,8 @@ func TestOriginSpawner_StampsBaggage(t *testing.T) {
 // TestOriginSpawner_DoesNotOverrideExplicit: an explicit spec.Origin is kept.
 func TestOriginSpawner_DoesNotOverrideExplicit(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
-	sp := &originSpawner{TaskController: tm, origin: map[string]string{"chat_id": "wrapper"}}
-	d := newManualDetectorDetach(10 * time.Millisecond)
+	sp := &OriginSpawner{TaskController: tm, Origin: map[string]string{"chat_id": "wrapper"}}
+	d := NewManualDetectorDetach(10 * time.Millisecond)
 	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x", Origin: map[string]string{"chat_id": "explicit"}}, d)
 	if res.Task.Spec.Origin["chat_id"] != "explicit" {
 		t.Errorf("explicit Origin must not be overridden, got %v", res.Task.Spec.Origin)
@@ -378,8 +341,8 @@ func TestOriginSpawner_DoesNotOverrideExplicit(t *testing.T) {
 func TestOriginSpawner_CopyIsolation(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
 	src := map[string]string{"chat_id": "u1"}
-	sp := &originSpawner{TaskController: tm, origin: src}
-	d := newManualDetectorDetach(10 * time.Millisecond)
+	sp := &OriginSpawner{TaskController: tm, Origin: src}
+	d := NewManualDetectorDetach(10 * time.Millisecond)
 	res := sp.Spawn(TaskSpec{Kind: "generic", Desc: "x"}, d)
 	res.Task.Spec.Origin["chat_id"] = "mutated"
 	if src["chat_id"] != "u1" {

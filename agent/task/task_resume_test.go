@@ -1,4 +1,4 @@
-package agent
+package task
 
 import (
 	"strings"
@@ -9,16 +9,16 @@ import (
 
 // spawnAliveDetachedTask spawns a manual task and drives it to alive-detached
 // (detach → background stable "ready").
-func spawnAliveDetachedTask(t *testing.T, tm *TaskManager, resumeFn func(string) (SettleDetector, error)) (*Task, *manualDetector) {
+func spawnAliveDetachedTask(t *testing.T, tm *TaskManager, resumeFn func(string) (SettleDetector, error)) (*Task, *ManualDetector) {
 	t.Helper()
 	// Auto-detach quickly so Spawn returns an ack instead of blocking.
-	det := newManualDetectorDetach(10 * time.Millisecond)
+	det := NewManualDetectorDetach(10 * time.Millisecond)
 	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc", ResumeFn: resumeFn}, det)
 	if res.Settled {
 		t.Fatalf("expected ack (not settled) before detach")
 	}
 	// Background stable → alive-detached.
-	det.emit(SettleSignal{Kind: SettleStable, Output: "ready"})
+	det.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitStatus(t, res.Task, TaskAliveDetached)
 	return res.Task, det
 }
@@ -41,14 +41,14 @@ func waitStatus(t *testing.T, task *Task, want TaskStatus) {
 func TestResume_AliveToRunningAndSettle(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
 
-	resumeDet := newManualDetector()
+	resumeDet := NewManualDetector()
 	var gotInput string
 	task, _ := spawnAliveDetachedTask(t, tm, func(input string) (SettleDetector, error) {
 		gotInput = input
 		// Settle promptly so Resume returns inline (settle wins the window).
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			resumeDet.emit(SettleSignal{Kind: SettleCompleted, Output: "round-2 output"})
+			resumeDet.Emit(SettleSignal{Kind: SettleCompleted, Output: "round-2 output"})
 		}()
 		return resumeDet, nil
 	})
@@ -77,7 +77,7 @@ func TestResume_IllegalStates(t *testing.T) {
 	// Running task: resume with a never-settling detector that DOES detach,
 	// so the first Resume returns an ack and leaves the task running.
 	task, _ := spawnAliveDetachedTask(t, tm, func(string) (SettleDetector, error) {
-		return newManualDetectorDetach(10 * time.Millisecond), nil
+		return NewManualDetectorDetach(10 * time.Millisecond), nil
 	})
 	if _, err := tm.Resume(task.ID, "first"); err != nil {
 		t.Fatalf("first resume: %v", err)
@@ -91,17 +91,17 @@ func TestResume_IllegalStates(t *testing.T) {
 	// Terminal task: completed/failed ARE legal source states for resume
 	// (round-based executors like subagent continue with a new run). A
 	// cancelled task is NOT — its session was killed.
-	det2 := newManualDetectorDetach(10 * time.Millisecond)
+	det2 := NewManualDetectorDetach(10 * time.Millisecond)
 	res2 := tm.Spawn(TaskSpec{Kind: "subagent", Desc: "quick", ResumeFn: func(string) (SettleDetector, error) {
-		d := newManualDetector()
+		d := NewManualDetector()
 		go func() {
 			time.Sleep(10 * time.Millisecond)
-			d.emit(SettleSignal{Kind: SettleCompleted, Output: "round-2"})
+			d.Emit(SettleSignal{Kind: SettleCompleted, Output: "round-2"})
 		}()
 		return d, nil
 	}}, det2)
 	_ = res2
-	det2.emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
+	det2.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
 	waitStatus(t, res2.Task, TaskCompleted)
 	if _, err := tm.Resume(res2.Task.ID, "continue"); err != nil {
 		t.Errorf("completed task must be resumable (new run), got %v", err)
@@ -115,9 +115,9 @@ func TestResume_IllegalStates(t *testing.T) {
 	}
 
 	// Non-resumable (no ResumeFn).
-	det3 := newManualDetectorDetach(10 * time.Millisecond)
+	det3 := NewManualDetectorDetach(10 * time.Millisecond)
 	res3 := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc2"}, det3)
-	det3.emit(SettleSignal{Kind: SettleStable, Output: "ready"})
+	det3.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitStatus(t, res3.Task, TaskAliveDetached)
 	if _, err := tm.Resume(res3.Task.ID, "x"); err == nil || !strings.Contains(err.Error(), "does not support resume") {
 		t.Errorf("non-resumable task must be rejected, got %v", err)
@@ -138,7 +138,7 @@ func TestResume_BackgroundSettleGoesToOnSettle(t *testing.T) {
 		},
 	})
 
-	resumeDet := newManualDetectorDetach(20 * time.Millisecond)
+	resumeDet := NewManualDetectorDetach(20 * time.Millisecond)
 	task, _ := spawnAliveDetachedTask(t, tm, func(string) (SettleDetector, error) {
 		return resumeDet, nil
 	})
@@ -151,7 +151,7 @@ func TestResume_BackgroundSettleGoesToOnSettle(t *testing.T) {
 		t.Fatalf("expected ack for slow resumed round")
 	}
 	// Background completion → OnSettle with the SAME task.
-	resumeDet.emit(SettleSignal{Kind: SettleCompleted, Output: "late result"})
+	resumeDet.Emit(SettleSignal{Kind: SettleCompleted, Output: "late result"})
 	select {
 	case got := <-settled:
 		if got.ID != task.ID {
@@ -172,18 +172,18 @@ func TestResume_CompletedSubagentTask(t *testing.T) {
 		Kind: "subagent",
 		Desc: "plan: analyze",
 		ResumeFn: func(input string) (SettleDetector, error) {
-			d := newManualDetector()
+			d := NewManualDetector()
 			go func() {
 				time.Sleep(10 * time.Millisecond)
-				d.emit(SettleSignal{Kind: SettleCompleted, Output: "continued: " + input})
+				d.Emit(SettleSignal{Kind: SettleCompleted, Output: "continued: " + input})
 			}()
 			return d, nil
 		},
 	}
-	det := newManualDetector()
+	det := NewManualDetector()
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		det.emit(SettleSignal{Kind: SettleCompleted, Output: "first done"})
+		det.Emit(SettleSignal{Kind: SettleCompleted, Output: "first done"})
 	}()
 	res := tm.Spawn(spec, det)
 	if !res.Settled {
@@ -216,10 +216,10 @@ func TestResume_ConcurrentSingleWinner(t *testing.T) {
 		fnCalls++
 		fnMu.Unlock()
 		time.Sleep(30 * time.Millisecond) // widen the race window
-		d := newManualDetector()
+		d := NewManualDetector()
 		go func() {
 			time.Sleep(5 * time.Millisecond)
-			d.emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
+			d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
 		}()
 		return d, nil
 	})
@@ -260,7 +260,7 @@ func TestResume_ConcurrentSingleWinner(t *testing.T) {
 func TestResume_RetiresOldWatch(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
 
-	newDet := newManualDetector()
+	newDet := NewManualDetector()
 	task, oldDet := spawnAliveDetachedTask(t, tm, func(string) (SettleDetector, error) {
 		return newDet, nil // no detach → Resume blocks until a settle arrives
 	})
@@ -277,7 +277,7 @@ func TestResume_RetiresOldWatch(t *testing.T) {
 	waitStatus(t, task, TaskRunning)
 
 	// A stale signal on the OLD detector must NOT settle the new round.
-	oldDet.emit(SettleSignal{Kind: SettleCompleted, Output: "STALE"})
+	oldDet.Emit(SettleSignal{Kind: SettleCompleted, Output: "STALE"})
 	select {
 	case res := <-resumed:
 		t.Fatalf("stale old-detector signal settled the new round: %+v", res)
@@ -285,7 +285,7 @@ func TestResume_RetiresOldWatch(t *testing.T) {
 	}
 
 	// A signal on the NEW detector settles correctly.
-	newDet.emit(SettleSignal{Kind: SettleCompleted, Output: "fresh"})
+	newDet.Emit(SettleSignal{Kind: SettleCompleted, Output: "fresh"})
 	select {
 	case res := <-resumed:
 		if res.Signal.Output != "fresh" {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"testing"
 	"time"
@@ -10,9 +11,7 @@ import (
 // mkDigestTask builds a Task in a specific status for digest tests (white-box:
 // status is package-private).
 func mkDigestTask(id, desc string, st TaskStatus, age time.Duration) *Task {
-	t := &Task{ID: id, Spec: TaskSpec{Desc: desc}, StartedAt: time.Now().Add(-age)}
-	t.status = st
-	return t
+	return task.NewTaskFixture(id, desc, st, time.Now().Add(-age))
 }
 
 // fakeTaskController implements TaskController; only List returns data.
