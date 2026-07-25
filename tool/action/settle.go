@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // trimToLineOffset returns the lines of s after the first n lines (the
@@ -34,14 +34,14 @@ func trimToLineOffset(s string, n int) string {
 //	error     → SettleCompleted   (settled with failure; caller attaches Err)
 //	stable    → SettleStable      (output stable, process alive — usable/waiting)
 //	timed_out → SettleSuspect     (quiet beyond fake-dead threshold — likely hung)
-func StatusToSettle(s SessionStatus) (agent.SettleKind, bool) {
+func StatusToSettle(s SessionStatus) (task.SettleKind, bool) {
 	switch s {
 	case SessionCompleted, SessionError:
-		return agent.SettleCompleted, true
+		return task.SettleCompleted, true
 	case SessionStable:
-		return agent.SettleStable, true
+		return task.SettleStable, true
 	case SessionTimedOut:
-		return agent.SettleSuspect, true
+		return task.SettleSuspect, true
 	default: // SessionRunning, SessionFakeDead, SessionFakeAlive
 		return "", false
 	}
@@ -60,9 +60,9 @@ func isTerminalStatus(s SessionStatus) bool {
 }
 
 // TmuxSettleDetector adapts a single tmux session's state-change stream into an
-// agent.SettleDetector. It is fed monitor transitions via OnStateChange (wired
+// task.SettleDetector. It is fed monitor transitions via OnStateChange (wired
 // to the monitor callback for this session in the ActionTool integration) and
-// emits agent.SettleSignal on its channel, closing it on a terminal status.
+// emits task.SettleSignal on its channel, closing it on a terminal status.
 //
 // LIFETIME: the detector is bound to the SESSION, not to a round. A resume
 // round does not replace it — Rearm resets the round state (output baseline +
@@ -71,7 +71,7 @@ func isTerminalStatus(s SessionStatus) bool {
 // ordering discipline, no stale-signal cross-round risk).
 type TmuxSettleDetector struct {
 	sessionID string
-	ch        chan agent.SettleSignal
+	ch        chan task.SettleSignal
 	cancelFn  func()
 	closeOnce sync.Once
 	reapOnce  sync.Once
@@ -91,7 +91,7 @@ type TmuxSettleDetector struct {
 func NewTmuxSettleDetector(sessionID string, cancelFn func(), denseDuration ...time.Duration) *TmuxSettleDetector {
 	d := &TmuxSettleDetector{
 		sessionID: sessionID,
-		ch:        make(chan agent.SettleSignal, 8),
+		ch:        make(chan task.SettleSignal, 8),
 		cancelFn:  cancelFn,
 		stop:      make(chan struct{}),
 	}
@@ -99,7 +99,7 @@ func NewTmuxSettleDetector(sessionID string, cancelFn func(), denseDuration ...t
 	if len(denseDuration) > 0 && denseDuration[0] > 0 {
 		d.denseDur = denseDuration[0]
 	}
-	d.detach = agent.DetachAfter(d.denseDur, d.stop)
+	d.detach = task.DetachAfter(d.denseDur, d.stop)
 	return d
 }
 
@@ -110,10 +110,10 @@ func (d *TmuxSettleDetector) Rearm(baseline int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.baseline = baseline
-	d.detach = agent.DetachAfter(d.denseDur, d.stop)
+	d.detach = task.DetachAfter(d.denseDur, d.stop)
 }
 
-// Detached implements agent.SettleDetector: fires at the dense→sparse boundary
+// Detached implements task.SettleDetector: fires at the dense→sparse boundary
 // of the CURRENT round (Rearm re-creates it).
 func (d *TmuxSettleDetector) Detached() <-chan struct{} {
 	d.mu.Lock()
@@ -121,10 +121,10 @@ func (d *TmuxSettleDetector) Detached() <-chan struct{} {
 	return d.detach
 }
 
-// Settled implements agent.SettleDetector.
-func (d *TmuxSettleDetector) Settled() <-chan agent.SettleSignal { return d.ch }
+// Settled implements task.SettleDetector.
+func (d *TmuxSettleDetector) Settled() <-chan task.SettleSignal { return d.ch }
 
-// Cancel implements agent.SettleDetector: reaps the session and closes the
+// Cancel implements task.SettleDetector: reaps the session and closes the
 // settle stream.
 func (d *TmuxSettleDetector) Cancel() {
 	d.reap()
@@ -158,7 +158,7 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 		err = fmt.Errorf("tmux session %s entered error state", d.sessionID)
 	}
 	select {
-	case d.ch <- agent.SettleSignal{Kind: kind, Output: output, Err: err}:
+	case d.ch <- task.SettleSignal{Kind: kind, Output: output, Err: err}:
 	default: // stream buffer full — drop extra (LLM already has recent signal)
 	}
 	if isTerminalStatus(newStatus) {

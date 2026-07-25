@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // ==================== Mock Inspector ====================
@@ -1149,7 +1149,7 @@ func TestBuildResultFromSignal_OutputTruncation(t *testing.T) {
 
 	// Sub-test 1: output <= 2000 chars — no truncation, no output file.
 	short := ct.buildResultFromSignal("trunc_test", "echo short", false,
-		agent.SettleSignal{Kind: agent.SettleStable, Output: "short output line\n"})
+		task.SettleSignal{Kind: task.SettleStable, Output: "short output line\n"})
 	if !strings.Contains(short.Output, "short output line") {
 		t.Errorf("short output should be delivered intact, got %q", short.Output)
 	}
@@ -1161,7 +1161,7 @@ func TestBuildResultFromSignal_OutputTruncation(t *testing.T) {
 	largeLine := "line of output data that will eventually be truncated because too long\n"
 	largeOutput := strings.Repeat(largeLine, 100) // >2000 chars
 	large := ct.buildResultFromSignal("trunc_test", "echo large", false,
-		agent.SettleSignal{Kind: agent.SettleStable, Output: largeOutput})
+		task.SettleSignal{Kind: task.SettleStable, Output: largeOutput})
 	if large.OutputFile == "" {
 		t.Error("large output should be spilled to OutputFile")
 	}

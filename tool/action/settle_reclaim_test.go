@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // These are REAL-tmux tests for the async-result-delivery resource-reclaim path.
@@ -77,8 +77,8 @@ func TestTaskManager_PruneReclaimsTmuxTask(t *testing.T) {
 
 	// Short dense phase so Spawn detaches (ack) quickly instead of blocking.
 	detector := NewTmuxSettleDetector(id, func() { _ = exec.KillSession(id) }, 150*time.Millisecond)
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{TerminalTTL: 100 * time.Millisecond})
-	res := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "sleep 30", Key: "reclaim-k1"}, detector)
+	tm := task.NewTaskManager(task.TaskManagerConfig{TerminalTTL: 100 * time.Millisecond})
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "sleep 30", Key: "reclaim-k1"}, detector)
 	if res.Task == nil {
 		t.Fatal("no task returned from Spawn")
 	}
@@ -89,12 +89,12 @@ func TestTaskManager_PruneReclaimsTmuxTask(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if tk, ok := tm.Get(taskID); ok && tk.Status() == agent.TaskCompleted {
+		if tk, ok := tm.Get(taskID); ok && tk.Status() == task.TaskCompleted {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if tk, ok := tm.Get(taskID); !ok || tk.Status() != agent.TaskCompleted {
+	if tk, ok := tm.Get(taskID); !ok || tk.Status() != task.TaskCompleted {
 		t.Fatalf("task did not reach completed state")
 	}
 	if exec.SessionExists(id) {

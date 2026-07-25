@@ -9,6 +9,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
 	tagentagent "github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/compress"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,13 +169,13 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 
 	// Use ContextCompressor instead of the deleted Compactor.
 	// Set maxTokens=1 to force compression (threshold=0, any content exceeds it).
-	sc := tagentagent.NewSmartCompressor(
-		tagentagent.WithKeepRecentTasks(2),
-		tagentagent.WithMaxTokens(1),
-		tagentagent.WithMemStore(memStore),
+	sc := compress.NewSmartCompressor(
+		compress.WithKeepRecentTasks(2),
+		compress.WithMaxTokens(1),
+		compress.WithMemStore(memStore),
 	)
-	cc := tagentagent.NewContextCompressor(
-		sc, memStore, tagentagent.NewDefaultTokenCounter(),
+	cc := compress.NewContextCompressor(
+		sc, memStore, compress.NewDefaultTokenCounter(),
 		1, 0.8, 2,
 	)
 	result := cc.Compress(context.Background(), refs)

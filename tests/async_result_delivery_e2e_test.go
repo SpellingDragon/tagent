@@ -12,6 +12,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
 	tagentagent "github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"github.com/SpellingDragon/tagent/testutil"
 	tasktool "github.com/SpellingDragon/tagent/tool/task"
 )
@@ -38,11 +39,11 @@ type slowOpResult struct {
 func newSlowBackgroundTool(marker string) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args slowOpArgs) (slowOpResult, error) {
-			spawner, ok := tagentagent.TaskSpawnerFromContext(ctx)
+			spawner, ok := task.TaskSpawnerFromContext(ctx)
 			if !ok {
 				return slowOpResult{Status: "SLOW RESULT: " + marker}, nil // sync fallback
 			}
-			detector := tagentagent.NewFuncSettleDetector(context.Background(),
+			detector := task.NewFuncSettleDetector(context.Background(),
 				func(runCtx context.Context) (string, error) {
 					select {
 					case <-time.After(6 * time.Second):
@@ -53,7 +54,7 @@ func newSlowBackgroundTool(marker string) tool.Tool {
 				},
 				2*time.Second, // dense phase: detach at 2s → background
 			)
-			res := spawner.Spawn(tagentagent.TaskSpec{Kind: "generic", Desc: "slow op " + args.Label}, detector)
+			res := spawner.Spawn(task.TaskSpec{Kind: "generic", Desc: "slow op " + args.Label}, detector)
 			if res.Settled {
 				return slowOpResult{Status: res.Signal.Output}, nil
 			}

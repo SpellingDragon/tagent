@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -236,8 +236,8 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	// otherwise an ack while it is tracked in the background. Absent a spawner
 	// (standalone use / no task layer) fall back to a synchronous wait that
 	// preserves the original blocking semantics.
-	if spawner, ok := agent.TaskSpawnerFromContext(ctx); ok {
-		res := spawner.Spawn(agent.TaskSpec{
+	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok {
+		res := spawner.Spawn(task.TaskSpec{
 			Kind:     "command",
 			Desc:     args.Command,
 			Key:      args.Command,
@@ -307,13 +307,13 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 // (used by relaunch(id)). It starts a new session in a background context (the
 // original turn ctx may be gone) and re-spawns via the same task spawner; the
 // re-spawned task is itself relaunchable.
-func (ct *ActionTool) relaunchClosure(spawner agent.TaskSpawner, args ActionArgs) func() (agent.SpawnResult, error) {
-	return func() (agent.SpawnResult, error) {
+func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func() (task.SpawnResult, error) {
+	return func() (task.SpawnResult, error) {
 		sessionID, detector, err := ct.startSession(context.Background(), args)
 		if err != nil {
-			return agent.SpawnResult{}, err
+			return task.SpawnResult{}, err
 		}
-		return spawner.Spawn(agent.TaskSpec{
+		return spawner.Spawn(task.TaskSpec{
 			Kind:     "command",
 			Desc:     args.Command,
 			Key:      args.Command,
@@ -330,8 +330,8 @@ func (ct *ActionTool) relaunchClosure(spawner agent.TaskSpawner, args ActionArgs
 // watch never change hands, so there is no rebinding, no ordering discipline,
 // and no stale-signal risk. TUI sessions refuse resume (send-keys would
 // corrupt the screen). Returned to the task layer as TaskSpec.ResumeFn.
-func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(string) (agent.SettleDetector, error) {
-	return func(input string) (agent.SettleDetector, error) {
+func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(string) (task.SettleDetector, error) {
+	return func(input string) (task.SettleDetector, error) {
 		if isTUI {
 			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
 		}
@@ -357,16 +357,16 @@ func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *Tmux
 
 // settleToStatus maps a task settle signal to the tmux-style status string
 // surfaced to the LLM in ActionToolResult.
-func settleToStatus(sig agent.SettleSignal) string {
+func settleToStatus(sig task.SettleSignal) string {
 	if sig.Err != nil {
 		return "error"
 	}
 	switch sig.Kind {
-	case agent.SettleCompleted:
+	case task.SettleCompleted:
 		return "completed"
-	case agent.SettleStable:
+	case task.SettleStable:
 		return "stable"
-	case agent.SettleSuspect:
+	case task.SettleSuspect:
 		return "timed_out"
 	default:
 		return string(sig.Kind)
@@ -376,7 +376,7 @@ func settleToStatus(sig agent.SettleSignal) string {
 // buildAckResult composes the tool result for an asynchronously-tracked command
 // that did not settle within the sync-wait window. The session keeps running;
 // its settle is written back later through the task layer.
-func (ct *ActionTool) buildAckResult(sessionID, command string, task *agent.Task) *ActionToolResult {
+func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task) *ActionToolResult {
 	note := "命令已在后台运行，稳定或完成后将回写结果；可用任务工具查询状态/结果。"
 	if task != nil {
 		note = fmt.Sprintf("命令已在后台运行 (task %s)，稳定或完成后将回写结果；可用任务工具查询状态/结果。", task.ID)
@@ -391,7 +391,7 @@ func (ct *ActionTool) buildAckResult(sessionID, command string, task *agent.Task
 
 // buildResultFromSignal composes the tool result payload the framework will
 // forward to the LLM as a role=tool message, from a task settle signal.
-func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI bool, sig agent.SettleSignal) *ActionToolResult {
+func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI bool, sig task.SettleSignal) *ActionToolResult {
 	// Enrich with any per-session context still available in the monitor
 	// (e.g. how long the session has been stable).
 	var extraNote string

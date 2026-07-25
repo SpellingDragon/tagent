@@ -4,22 +4,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
-// compile-time assertion: TmuxSettleDetector implements agent.SettleDetector.
-var _ agent.SettleDetector = (*TmuxSettleDetector)(nil)
+// compile-time assertion: TmuxSettleDetector implements task.SettleDetector.
+var _ task.SettleDetector = (*TmuxSettleDetector)(nil)
 
 func TestStatusToSettle_Mapping(t *testing.T) {
 	cases := []struct {
 		status   SessionStatus
-		wantKind agent.SettleKind
+		wantKind task.SettleKind
 		wantOK   bool
 	}{
-		{SessionCompleted, agent.SettleCompleted, true},
-		{SessionError, agent.SettleCompleted, true},
-		{SessionStable, agent.SettleStable, true},
-		{SessionTimedOut, agent.SettleSuspect, true},
+		{SessionCompleted, task.SettleCompleted, true},
+		{SessionError, task.SettleCompleted, true},
+		{SessionStable, task.SettleStable, true},
+		{SessionTimedOut, task.SettleSuspect, true},
 		{SessionRunning, "", false},
 		{SessionFakeDead, "", false},
 		{SessionFakeAlive, "", false},
@@ -43,7 +43,7 @@ func TestTmuxSettleDetector_CompletedClosesStream(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a signal")
 	}
-	if sig.Kind != agent.SettleCompleted || sig.Output != "done output" || sig.Err != nil {
+	if sig.Kind != task.SettleCompleted || sig.Output != "done output" || sig.Err != nil {
 		t.Errorf("unexpected signal: %+v", sig)
 	}
 	if _, ok := <-d.Settled(); ok {
@@ -59,11 +59,11 @@ func TestTmuxSettleDetector_StableThenCompleted(t *testing.T) {
 	d.OnStateChange(SessionCompleted, "exited")
 
 	first := <-d.Settled()
-	if first.Kind != agent.SettleStable || first.Output != "listening on :8080" {
+	if first.Kind != task.SettleStable || first.Output != "listening on :8080" {
 		t.Errorf("first signal = %+v, want stable", first)
 	}
 	second := <-d.Settled()
-	if second.Kind != agent.SettleCompleted {
+	if second.Kind != task.SettleCompleted {
 		t.Errorf("second signal = %+v, want completed", second)
 	}
 	if _, ok := <-d.Settled(); ok {
@@ -76,7 +76,7 @@ func TestTmuxSettleDetector_ErrorCarriesErr(t *testing.T) {
 	d := NewTmuxSettleDetector("s3", nil)
 	d.OnStateChange(SessionError, "boom")
 	sig := <-d.Settled()
-	if sig.Kind != agent.SettleCompleted || sig.Err == nil {
+	if sig.Kind != task.SettleCompleted || sig.Err == nil {
 		t.Errorf("error signal = %+v, want completed+err", sig)
 	}
 }
@@ -86,7 +86,7 @@ func TestTmuxSettleDetector_TimedOutSuspect(t *testing.T) {
 	d := NewTmuxSettleDetector("s4", nil)
 	d.OnStateChange(SessionTimedOut, "no output")
 	sig := <-d.Settled()
-	if sig.Kind != agent.SettleSuspect {
+	if sig.Kind != task.SettleSuspect {
 		t.Errorf("signal = %+v, want suspect", sig)
 	}
 	if _, ok := <-d.Settled(); ok {
@@ -110,16 +110,16 @@ func TestTmuxSettleDetector_CancelClosesAndKills(t *testing.T) {
 // TestTmuxSettleDetector_DrivesTaskManager: the detector composes with the
 // TaskManager sync-wait primitive (stable settle within window → inline).
 func TestTmuxSettleDetector_DrivesTaskManager(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{})
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	d := NewTmuxSettleDetector("s6", nil, 500*time.Millisecond) // dense window 500ms
 	go func() {
 		d.OnStateChange(SessionStable, "ready")
 	}()
-	res := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "svc"}, d)
-	if !res.Settled || res.Signal.Kind != agent.SettleStable {
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, d)
+	if !res.Settled || res.Signal.Kind != task.SettleStable {
 		t.Errorf("expected inline stable settle, got %+v", res)
 	}
-	if res.Task.Status() != agent.TaskStable {
+	if res.Task.Status() != task.TaskStable {
 		t.Errorf("task status = %s, want stable", res.Task.Status())
 	}
 	// Stable is non-terminal (service-type); cancel to close the stream so the

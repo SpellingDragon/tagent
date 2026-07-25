@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // TestTmuxSettleDetector_Rearm: the detector is session-bound; Rearm resets
@@ -32,7 +32,7 @@ func TestTmuxSettleDetector_Rearm(t *testing.T) {
 	d.OnStateChange(SessionStable, "old1\nold2\nnew1\nnew2")
 	select {
 	case sig := <-d.Settled():
-		if sig.Kind != agent.SettleStable || sig.Output != "new1\nnew2" {
+		if sig.Kind != task.SettleStable || sig.Output != "new1\nnew2" {
 			t.Errorf("round-2 settle must carry the post-baseline increment, got %+v", sig)
 		}
 	case <-time.After(time.Second):

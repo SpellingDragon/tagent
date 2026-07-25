@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -24,14 +24,14 @@ type taskIDArgs struct {
 
 // resolveTask looks up a task by exact id, falling back to a unique id-prefix
 // match (the board/list show short ids). Ambiguous prefixes resolve to nothing.
-func resolveTask(ctrl agent.TaskController, id string) (*agent.Task, bool) {
+func resolveTask(ctrl task.TaskController, id string) (*task.Task, bool) {
 	if id == "" {
 		return nil, false
 	}
 	if tk, ok := ctrl.Get(id); ok {
 		return tk, true
 	}
-	var match *agent.Task
+	var match *task.Task
 	n := 0
 	for _, tk := range ctrl.List() {
 		if strings.HasPrefix(tk.ID, id) {
@@ -68,7 +68,7 @@ func (t *ListTasksTool) Declaration() *tool.Declaration {
 
 // Call implements tool.CallableTool.
 func (t *ListTasksTool) Call(ctx context.Context, _ []byte) (any, error) {
-	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	ctrl, ok := task.TaskControllerFromContext(ctx)
 	if !ok {
 		return noControllerMsg, nil
 	}
@@ -117,7 +117,7 @@ func (t *GetTaskResultTool) Call(ctx context.Context, jsonArgs []byte) (any, err
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("get_task_result: invalid args: %w", err)
 	}
-	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	ctrl, ok := task.TaskControllerFromContext(ctx)
 	if !ok {
 		return noControllerMsg, nil
 	}
@@ -165,7 +165,7 @@ func (t *CancelTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("cancel_task: invalid args: %w", err)
 	}
-	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	ctrl, ok := task.TaskControllerFromContext(ctx)
 	if !ok {
 		return noControllerMsg, nil
 	}
@@ -212,7 +212,7 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("relaunch_task: invalid args: %w", err)
 	}
-	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	ctrl, ok := task.TaskControllerFromContext(ctx)
 	if !ok {
 		return noControllerMsg, nil
 	}
@@ -274,7 +274,7 @@ func (t *ResumeTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	if args.Input == "" {
 		return "resume_task 需要非空 input。", nil
 	}
-	ctrl, ok := agent.TaskControllerFromContext(ctx)
+	ctrl, ok := task.TaskControllerFromContext(ctx)
 	if !ok {
 		return noControllerMsg, nil
 	}

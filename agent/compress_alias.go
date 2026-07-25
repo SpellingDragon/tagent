@@ -3,9 +3,9 @@ package agent
 // Compression symbols moved to the agent/compress sub-package (the pure
 // view-transform domain: SmartCompressor L0-L3 levels, the rolling
 // card-sequence compactor, the session projection they operate on, and the
-// token estimator). These aliases keep every existing consumer source-
-// compatible; new code should import
-// "github.com/SpellingDragon/tagent/agent/compress" directly.
+// token estimator). All in-repo consumers now import the sub-package
+// directly; these aliases remain ONLY as an external-facing compatibility
+// facade and for intra-package use.
 // ContextManager stays in this package — it is the engine-side glue.
 
 import (

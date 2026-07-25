@@ -7,17 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
-func ctxWithTM(tm *agent.TaskManager) context.Context {
-	return agent.WithTaskSpawner(context.Background(), tm)
+func ctxWithTM(tm *task.TaskManager) context.Context {
+	return task.WithTaskSpawner(context.Background(), tm)
 }
 
 // blockingDetector never settles until cancelled — keeps a task active. Its
 // short dense window makes Spawn ack promptly (task stays running in background).
-func blockingDetector() agent.SettleDetector {
-	return agent.NewFuncSettleDetector(context.Background(), func(ctx context.Context) (string, error) {
+func blockingDetector() task.SettleDetector {
+	return task.NewFuncSettleDetector(context.Background(), func(ctx context.Context) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}, 20*time.Millisecond)
@@ -34,9 +34,9 @@ func mustJSON(t *testing.T, v any) []byte {
 
 // TestListTasksTool lists all tracked tasks.
 func TestListTasksTool(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{}) // detach window via blockingDetector
-	r1 := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "cmd A"}, blockingDetector())
-	r2 := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "cmd B"}, blockingDetector())
+	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	r1 := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd A"}, blockingDetector())
+	r2 := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd B"}, blockingDetector())
 	defer tm.Cancel(r1.Task.ID)
 	defer tm.Cancel(r2.Task.ID)
 
@@ -52,11 +52,11 @@ func TestListTasksTool(t *testing.T) {
 
 // TestGetTaskResultTool returns a settled task's full result.
 func TestGetTaskResultTool(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{})
-	det := agent.NewFuncSettleDetector(context.Background(), func(context.Context) (string, error) {
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	det := task.NewFuncSettleDetector(context.Background(), func(context.Context) (string, error) {
 		return "the full result", nil
 	})
-	res := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "cmd X"}, det)
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd X"}, det)
 	if !res.Settled {
 		t.Fatalf("expected inline settle")
 	}
@@ -72,7 +72,7 @@ func TestGetTaskResultTool(t *testing.T) {
 
 // TestGetTaskResultTool_NotFound reports a missing task.
 func TestGetTaskResultTool_NotFound(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{})
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	out, err := NewGetTaskResultTool().Call(ctxWithTM(tm), mustJSON(t, map[string]string{"task_id": "nope"}))
 	if err != nil {
 		t.Fatal(err)
@@ -84,8 +84,8 @@ func TestGetTaskResultTool_NotFound(t *testing.T) {
 
 // TestCancelTaskTool cancels a running task.
 func TestCancelTaskTool(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{}) // detach window via blockingDetector
-	res := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
+	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
 
 	out, err := NewCancelTaskTool().Call(ctxWithTM(tm), mustJSON(t, map[string]string{"task_id": res.Task.ID}))
 	if err != nil {
@@ -94,19 +94,19 @@ func TestCancelTaskTool(t *testing.T) {
 	if !strings.Contains(out.(string), "已取消") {
 		t.Errorf("expected cancel confirmation, got: %s", out)
 	}
-	if res.Task.Status() != agent.TaskCancelled {
+	if res.Task.Status() != task.TaskCancelled {
 		t.Errorf("task status = %s, want cancelled", res.Task.Status())
 	}
 }
 
 // TestRelaunchTaskTool re-runs a task via its stored relaunch closure.
 func TestRelaunchTaskTool(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{}) // detach window via blockingDetector
+	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
 	relaunched := make(chan struct{}, 1)
-	spec := agent.TaskSpec{Kind: "command", Desc: "cmd R"}
-	spec.Relaunch = func() (agent.SpawnResult, error) {
+	spec := task.TaskSpec{Kind: "command", Desc: "cmd R"}
+	spec.Relaunch = func() (task.SpawnResult, error) {
 		relaunched <- struct{}{}
-		return agent.SpawnResult{}, nil
+		return task.SpawnResult{}, nil
 	}
 	res := tm.Spawn(spec, blockingDetector())
 	defer tm.Cancel(res.Task.ID)
@@ -123,8 +123,8 @@ func TestRelaunchTaskTool(t *testing.T) {
 
 // TestResolveTask_Prefix resolves a task by a unique id prefix (board shows short ids).
 func TestResolveTask_Prefix(t *testing.T) {
-	tm := agent.NewTaskManager(agent.TaskManagerConfig{}) // detach window via blockingDetector
-	res := tm.Spawn(agent.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
+	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
 	defer tm.Cancel(res.Task.ID)
 
 	prefix := res.Task.ID[:8]

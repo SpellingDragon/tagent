@@ -1,9 +1,10 @@
 package agent
 
 // Task-layer symbols moved to the agent/task sub-package (zero inbound
-// coupling made it a natural boundary). These aliases keep every existing
-// consumer — tool/*, tests, examples — source-compatible; new code should
-// import "github.com/SpellingDragon/tagent/agent/task" directly.
+// coupling made it a natural boundary). All in-repo consumers now import
+// the sub-package directly; these aliases remain ONLY as an external-facing
+// compatibility facade (and for the agent package itself, where the `task`
+// identifier is shadowed by variable names).
 
 import (
 	"context"
