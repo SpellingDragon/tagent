@@ -17,13 +17,27 @@ tagent 构建于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go) �
 
 tagent 采用**事件驱动、记忆中心**的设计理念，核心哲学是：**inputs 是 event flow 的投影，event bus 承载 event flow，inputs 满则触发 Compact 和 memory 持久化**。
 
-### 三个不变量
+### 四个不变量
 
 | 不变量 | 含义 | 代码体现 |
 |--------|------|---------|
-| **① inputs 是投影** | 有界工作内存，读写同一份数据 | `onEvent` 追加到 `SessionProjection`，`ContextManager.BuildMessages` 读取同一份 `EventReference[]` |
-| **② Compact 修改投影** | 不修改事件流（bus）也不修改永久存储 | `Compactor.Compact` 替换 `SessionProjection` 中的旧引用为 summary reference |
-| **③ 工具结果回写 bus** | 不直接操作 inputs | 框架 Runner 执行工具后产生的事件经 `RunFlow` 回调回到 `SessionProjection` |
+| **① inputs 是投影** | 有界工作内存，是 LLM 输入的**唯一装配源** | `assembleRequest = [system] + render(投影)`，永不读回框架消息尾部 |
+| **② 写入统一** | 事件被存储 ⇔ 被投影，恰好一次，同点原子 | `MemoryPlugin.OnEvent` 存储后经 ctx 中的 `ProjectionSink` 同点追加引用 |
+| **③ 时序是构造保证** | BeforeModel 时投影必完整，非时序碰巧 | 框架对工具结果事件的 completion-wait：runner 在插件+session 处理完成后才放行下一轮 |
+| **④ Compact 只修改投影** | 不修改事件流也不修改永久存储 | `Compactor.Compact` 替换投影中的旧引用为 summary reference |
+
+### 应答与通知：两种正交的工具结果语义
+
+这是 tagent 异步化设计的核心分界：
+
+- **回合内 = 协议应答**：同步工具交互走原生 tool-call 协议（assistant ToolCalls ↔ role=tool 结果，ToolID 配对）。超过同步窗口的长任务也先返回 **ACK（含 task id）**作为本次调用的协议应答，配对即时闭合。
+- **跨回合 = 通知事件**：异步结果（`task_settled`）不是对某次 pending 调用的应答，而是一条**自包含的通知类 input 事件**，靠 task id 与先前 ACK 内容级关联。result 与 tool 无协议约束，因此压缩/丢失/乱序都不产生孤儿。
+
+对应地，时间线渲染遵循一条铁律：**系统永不在 assistant 历史中生成文本化调用语法**——任何文本调用语法（箭头、括号、任意格式）都会被模型在理解压力下模仿，产生执行不了任何工具的伪调用文本（实机验证两次踩坑后确立）。回合内历史以原生协议形态呈现（训练分布内）；无法配对的残余结果在渲染期降级为 user 侧输入注记（内容与关联 id 保留），保证任意压缩切窗仍是合法原生序列。
+
+### 事件元数据契约：框架一等职责
+
+事件元数据的注入与解析由框架单点保障（`event/metadata.go`）：`MetaKey*` 常量唯一定义、`ParseEventMeta` 统一解析、`meta_*` 前缀承载业务自定义元数据（如 chat_id 路由）。EventKey 的字符串形态统一为 **16 进制**（`FormatEventKey/ParseEventKey`），贯穿 `[evt_KEY|type]` 时间线前缀、压缩产物 key 清单、StateDelta 与 recall 工具出入参。
 
 ### 与 trpc-agent-go 的关系
 
@@ -49,9 +63,10 @@ graph TB
     LLM["[]model.Message<br/>发给 LLM 的上下文"]
     TOOL["Tool"]
 
-    EB -->|onEvent 追加引用| SP
-    EB -->|MemoryPlugin.OnEvent| MS
-    SP -->|BuildMessages 按需拉取| LLM
+    EB -->|驱动 turn: Pull → RunFlow| SP
+    EB -->|事件插件管线: 存储+同点投影| MS
+    MS -.ProjectionSink 同点追加引用.-> SP
+    SP -->|assembleRequest 原生渲染| LLM
     MS -->|recall/memory_query 工具查询| TOOL
 ```
 
@@ -95,15 +110,15 @@ graph LR
 
 | 类别 | 事件类型 | 触发条件 | 存入 Projection? |
 |------|---------|---------|-----------------|
-| **外部** | `external_input` | 用户消息、API 调用、TmuxMonitor 回调、冥想事件 | 是 |
-| **外部** | `external_input` (Source=`tool_result`) | 工具执行结果经 RunFlow 桥接到 EventBus | 否（不触发模型调用） |
-| **外部** | `external_input` (Source=`error`) | RunFlow 重试耗尽后发布错误事件 | 否（不触发模型调用） |
-| **外部** | `agent_output` | Agent 最终响应（无 tool_calls） | 是（作为 echo 回写 bus 时标记 source） |
+| **外部** | `external_input` | 用户消息、API 调用、task_settled 通知、冥想事件 | 是 |
+| **外部** | `agent_output` | Agent 最终响应（无 tool_calls） | 是 |
 | **动作** | `action_command` | 工具/命令执行结果 | 是 |
 | **思考** | `thinking_plan` | 带 tool_calls 的 assistant 消息 | 是 |
 | **思考** | `thinking_recall` | RecallAgent 输出 | 是 |
 | **思考** | `thinking_knowledge` | KnowledgeAgent 输出 | 是 |
-| **内部** | `context_compress` | SmartCompressor/Compactor 压缩后的摘要标记 | 否（仅 LLM 视图/投影摘要） |
+| **内部** | `context_compress` | SmartCompressor/Compactor 压缩后的摘要标记 | 是（投影内的摘要引用） |
+
+所有事件的存储与投影均在事件插件管线内同点完成；退化事件（nil-Response、流式 partial、无内容无 tool_calls 的空 final）在管线入口被守卫拦截，不存储不投影。
 
 ## 架构
 
@@ -186,22 +201,20 @@ graph LR
     START["StartLoop(userID, sessionID)"] --> PULL["EventBus.Pull<br/>批量取出待处理事件"]
     PULL --> BUILD["ContextManager.BuildInvocation<br/>合并为一条 user message"]
     BUILD --> RUN["ContextManager.RunFlow<br/>调用框架 runner.Run"]
-    RUN --> BM["BeforeModel 统一回调<br/>TryPull+持久化 → Compress → 重建消息"]
+    RUN --> BM["BeforeModel 统一回调<br/>TryPull+持久化 → Compress → [system]+render(投影)"]
     BM --> LLM["LLM 推理"]
     LLM --> LOOP["框架 ReAct 循环"]
-    LOOP --> ONEVT["runner 事件流 → onEvent 追加 EventReference"]
-    ONEVT --> OUT["最终响应 → outputCh + bus.Publish(agent_output echo)"]
+    LOOP --> PIPE["事件插件管线：存储 + ProjectionSink 同点投影"]
+    PIPE --> OUT["最终响应 → outputCh"]
     OUT --> PULL
 ```
 
 关键设计：
-- `runEventLoop` 是单一消费者，批量拉取事件后合并为一条消息
+- `runEventLoop` 是单一消费者，批量拉取事件后合并为一条消息；所有拉取到的事件均驱动 turn，循环不依赖 bus echo 自触发
 - 实际 ReAct 循环由框架 `runner.Run` 执行，tagent 通过 `ContextManager` 编排
-- BeforeModel 统一回调：TryPull 新事件 → 即时持久化到 MemoryStore + Projection → Compress → 提取当前轮次 → 重建消息列表
-- `RunFlow` 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次），重试耗尽后发布 `Source="error"` 事件到 EventBus
-- `BuildInvocation` 跳过 `Source="error"` 和 `Source="tool_result"` 事件，不触发模型调用
-- 框架产生的事件经 `onEvent` 回调追加到 `SessionProjection`
-- 最终响应会 echo 回 EventBus（source=`agent_output`），避免重复触发模型调用
+- BeforeModel 统一回调：TryPull 新事件 → 即时持久化入存储+投影 → Compress → 消息重建为 `[system] + render(投影)`（单行化，无当前轮抽取启发式）
+- `RunFlow` 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次）；退化空 turn（无工具调用+空 final，偶发模型抽风）额外重试一次并记录取证日志（reasoning/finish_reason/error）
+- 活跃异步任务看板以 **user 级独立虚事件**注入（声明为系统观察快照、勿模仿），不入历史不参与压缩
 
 ### 2. 上下文压缩与投影清理
 
@@ -230,31 +243,28 @@ tagent 有两个独立的上下文管理操作：
 框架 Runner 在每次产生事件时调用已注册插件：
 
 1. **MemoryPlugin**：
-   - 从 `Invocation.AgentName` 派生 `PartitionID`
-   - 生成 Snowflake `EventKey`
-   - 推断 `event_type` 和 `event_summary`（`action_command` 类型格式化为 `"调用工具: name(args)"`）
-   - 持久化 `FullEvent` 到 `MemoryStore`
+   - 入口守卫：nil-Response、流式 partial、退化空 final 直接跳过（不存储不投影）；assistant 输出中模型伪造的 `[evt_…]` 前缀在存储前剥离
+   - 从 `Invocation.AgentName` 派生 `PartitionID`（雪花键符号位恒 0：正数为真实事件，负数保留给压缩摘要引用）
+   - 生成 Snowflake `EventKey`，持久化 `FullEvent` 到 `MemoryStore`
    - 通过 `RelationStore.SetParent` 维护因果链
-   - 将 `event_key`、`partition_id`、`event_type`、`event_summary` 写入 `Event.StateDelta`
+   - **同点投影**：经 ctx 中的 `ProjectionSink` 追加 `EventReference`（存储与投影恰好一次，同点原子）
+   - 将 `event_key`（hex）、`partition_id`、`event_type`、`event_summary` 写入 `Event.StateDelta`
 
 2. **SummaryPlugin**：
    - 从消息中提取事件类型
    - 生成摘要并写入 `Event.Tag`
 
-3. **onEvent 回调**（`TagentAgent.makeOnEventCallback`）：
-   - 从 `StateDelta` 读取 `event_key`、`event_type`、`event_summary` 等信息
-   - 构建 `EventReference`（含 MemoryPlugin 生成的摘要）追加到 `SessionProjection`
+消费端（outputCh）只读事件元数据（`ParseEventMeta`）做展示与路由，不再参与投影构建。
 
 ### Event 与 Message 的统一关系
 
 tagent 通过单一 BeforeModel 回调统一了 event 和 message 的关系（Projection-first 设计）：
 
-1. **TryPull + 即时持久化**：从 EventBus 非阻塞拉取新事件（如 ReAct 迭代间到达的用户消息、异步工具结果），立即持久化到 MemoryStore 并追加到 Projection
-2. **Projection 解析**：从 `SessionProjection` 读取全部 `EventReference[]`，经 `ContextCompressor` 解析为带 `[evt_KEY|type]` 前缀的历史消息（超预算时触发 SmartCompressor 压缩）
-3. **当前轮次提取**：从框架 `args.Request.Messages` 中提取当前 ReAct 迭代产生的 assistant/tool 消息（尚未 emit 到 Projection）
-4. **消息重建**：`args.Request.Messages = [system] + 历史(from Projection) + 当前轮次`
+1. **TryPull + 即时持久化**：从 EventBus 非阻塞拉取新事件（如 ReAct 迭代间到达的用户消息、异步任务通知），立即持久化入存储+投影，当前 turn 内即可见
+2. **Projection 解析**：读取全部 `EventReference[]`，按原生时间线渲染为带 `[evt_KEY|type]`（hex）前缀的消息（超预算时触发 SmartCompressor 压缩）
+3. **消息重建**：`args.Request.Messages = [system] + render(投影)`——单行化，没有"当前轮抽取"启发式：因为写入统一（不变量②）+ completion-wait（不变量③）保证了 ReAct 中途步骤在下一次 BeforeModel 前必已入投影
 
-**设计关键**：Projection 是唯一时间线权威。不存在 content-based 对账——历史消息通过 EventKey 精确标识，当前轮次消息通过 `[evt_]` 前缀有无区分。
+**设计关键**：Projection 是唯一时间线权威，也是唯一装配源。不存在 content-based 对账，也不读回框架消息尾部——尾部注入任何垃圾都不影响装配（边界单向）。
 
 LLM 在每次调用时都看到带 `[evt_KEY|type]` 前缀的 messages，可将其传递给子 Agent 用于上下文获取。
 
@@ -284,7 +294,9 @@ graph TD
 
 `MeditationManager` 在 Agent 空闲时定期注入"冥想"事件（`external_input`），触发上下文清理、深度分析等活动。
 
-有效性规则：如果距最后一次事件不足 `MinGap`（默认 2h），本次冥想跳过。
+有效性规则（双门控，防自我喂养永动机）：
+- **idle 门**：距最后一次事件不足 `MinGap`（默认 2h）则跳过；冥想自身的输出不更新空闲锚点
+- **novelty 门**：上次冥想后若无真实新活动，本次跳过（不对同一段历史反复冥想）
 
 ```mermaid
 graph LR
@@ -340,18 +352,16 @@ sequenceDiagram
     TA->>TA: runEventLoop Pull 批量事件
     TA->>CM: BuildInvocation
     CM->>RUN: RunFlow → runner.Run
-    RUN->>RUN: BeforeModel: InjectEventKeys/SmartCompressor
+    RUN->>RUN: BeforeModel: [system]+render(投影)/SmartCompressor
     RUN->>RUN: ReAct 循环
-    RUN-->>CM: 事件流
-    CM->>CM: onEvent 追加 EventReference
+    RUN-->>CM: 事件流（存储+投影已在插件管线内完成）
     CM->>OC: 所有事件（阻塞写入）
     OC->>C: 持续消费
     C->>C: agent_output → 回复用户
     C->>C: thinking_plan → 日志/打字指示
-    CM->>EB: Publish(agent_output echo)
 ```
 
-**消费模式**：应用侧在 `StartLoop` 后启动持续消费 goroutine，持续读取 outputCh 直到 `StopLoop` 关闭。消费者作为**单一决策点**，从事件 `StateDelta` 中提取 `trigger_source` 和 `meta_chat_id`，按触发源路由响应：
+**消费模式**：应用侧在 `StartLoop` 后启动持续消费 goroutine，持续读取 outputCh 直到 `StopLoop` 关闭。消费者作为**单一决策点**，用 `event.ParseEventMeta` 解析事件元数据（`trigger_source`、`meta_chat_id` 等），按触发源路由响应：
 - `trigger_source=user` 或 `async_result`：提取 `meta_chat_id`，调用 `bot.SendTextToUser(chatID, content)` 发送响应
 - `trigger_source=meditation` 或 `error`：仅记录日志，不发送给用户
 - 长文本（>2000 字符）使用 `SendLongText` 或截断后发送
@@ -400,7 +410,7 @@ sequenceDiagram
 | 8 | RecallAgent | `Run()` → 独立事件循环 → 返回摘要 | `thinking_recall` | 子 Agent 存储 |
 | 9 | `ContextManager` BeforeModel | Token 超限 → SmartCompressor → 仍超限则 Compactor | `context_compress`（视图/投影） | 无变化 |
 | 10 | 框架 Runner → LLM | 生成最终响应 | `agent_output` | 存储 |
-| 11 | `ContextManager.RunFlow` | final response → outputCh + bus.Publish | — | — |
+| 11 | `ContextManager.RunFlow` | final response → outputCh | — | — |
 | 12 | `runEventLoop` | 回到 `Pull` | — | — |
 
 ### 事件链（因果关系）
@@ -601,6 +611,7 @@ python3 train/rl/convert_trajectories.py --input data/trajectories/ --output dat
 | `id` | 工具 ID（`kind: tool`） |
 | `description_file` | 工具描述 prompt 文件 |
 | `event_params` | 事件相关参数，如 `[event_keys]` |
+| `async` | 子 Agent 是否允许走异步任务层（默认 true；`false` 强制同步，降低弱模型的 ack/通知语义理解负担） |
 | `remote.url` | 远程 A2A Agent URL |
 | `properties` | 工具专属配置 |
 
