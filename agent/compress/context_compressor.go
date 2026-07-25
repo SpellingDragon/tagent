@@ -392,21 +392,14 @@ func demoteToInputNote(msg model.Message) model.Message {
 // lightweight metadata channel that lets SmartCompressor and buildRetainedRefs
 // track which projection refs survive compression.
 func prefixEventKey(content string, ref memory.EventReference) string {
-	if ref.EventKey == 0 || strings.HasPrefix(content, "[evt_") {
+	if ref.EventKey == 0 || tagentevent.HasEventPrefix(content) {
 		return content
 	}
 	eventType := ref.EventType
 	if eventType == "" {
 		eventType = "unknown"
 	}
-	return fmt.Sprintf("[evt_%s|%s] %s", tagentevent.FormatEventKey(ref.EventKey), eventType, content)
-}
-
-// stripEventKeyPrefix removes a leading [evt_KEY|type] prefix from content.
-// Returns the original content if no prefix is found.
-func StripEventKeyPrefix(content string) string {
-	_, _, remainder := ParseEventKeyAndType(content)
-	return remainder
+	return tagentevent.FormatEventPrefix(ref.EventKey, eventType) + " " + content
 }
 
 // buildRetainedRefs determines which EventReferences should be kept in the
@@ -461,7 +454,7 @@ func (cc *ContextCompressor) extractCardLine(ref memory.EventReference) string {
 	if idx := strings.IndexByte(summary, '\n'); idx >= 0 {
 		summary = summary[:idx]
 	}
-	summary = strings.TrimSpace(StripEventKeyPrefix(summary))
+	summary = strings.TrimSpace(tagentevent.StripEventKeyPrefix(summary))
 	if len(summary) > 80 {
 		summary = truncateString(summary, 80)
 	}
@@ -552,7 +545,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	for _, msg := range compressedMsgs {
 		content := msg.Content
 		for {
-			key, _, remainder := ParseEventKeyAndType(content)
+			key, _, remainder := tagentevent.ParseEventKeyAndType(content)
 			if key <= 0 {
 				break
 			}

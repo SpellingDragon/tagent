@@ -39,6 +39,10 @@ const (
 	// TypeThinkingKnowledge indicates knowledge retrieval events.
 	TypeThinkingKnowledge = "thinking_knowledge"
 
+	// TypeContextCompressSummary represents curated segment-summary artifacts
+	// (L3 archive output). Long-term memory: exempt from TTL and eviction.
+	TypeContextCompressSummary = "context_compress_summary"
+
 	// TypeContextCompress represents context compression events.
 	// Used when Agent performs context window management.
 	TypeContextCompress = "context_compress"

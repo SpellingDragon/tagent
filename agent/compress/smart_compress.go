@@ -410,7 +410,7 @@ func (sc *SmartCompressor) Compress(
 			// Extract event key from first message of the segment
 			segEventKey := int64(0)
 			if len(p.seg.Messages) > 0 {
-				k, _, _ := ParseEventKeyAndType(p.seg.Messages[0].Content)
+				k, _, _ := tagentevent.ParseEventKeyAndType(p.seg.Messages[0].Content)
 				segEventKey = k
 			}
 			if hit, ok := cachedArchives[i]; ok {
@@ -714,7 +714,7 @@ func (sc *SmartCompressor) collectCompressedEventInfo(
 
 	for _, seg := range oldSegments {
 		for _, msg := range seg.Messages {
-			key, evtType, remainder := ParseEventKeyAndType(msg.Content)
+			key, evtType, remainder := tagentevent.ParseEventKeyAndType(msg.Content)
 			if key > 0 && !seen[key] {
 				seen[key] = true
 				summary := truncate(remainder, sc.chunkSummaryLen)
@@ -731,36 +731,6 @@ func (sc *SmartCompressor) collectCompressedEventInfo(
 	}
 
 	return infos
-}
-
-// parseEventKeyAndType extracts EventKey and EventType from a message content
-// with "[evt_<KEY>|<type>] <remainder>" prefix.
-// Returns (0, "unknown", content) if no valid prefix is found.
-func ParseEventKeyAndType(content string) (key int64, eventType string, remainder string) {
-	const prefix = "[evt_"
-	if !strings.HasPrefix(content, prefix) {
-		return 0, "unknown", content
-	}
-	// Find the closing bracket
-	closePos := strings.IndexByte(content, ']')
-	if closePos < 0 {
-		return 0, "unknown", content
-	}
-	// Content between "[evt_" and "]" is "KEY|type"
-	inner := content[len(prefix):closePos]
-	barPos := strings.IndexByte(inner, '|')
-	if barPos < 0 {
-		return 0, "unknown", content
-	}
-	keyStr := inner[:barPos]
-	eventType = inner[barPos+1:]
-	k, err := tagentevent.ParseEventKey(keyStr)
-	if err != nil {
-		return 0, "unknown", content
-	}
-	// Remainder is everything after "] "
-	remainder = strings.TrimSpace(content[closePos+1:])
-	return k, eventType, remainder
 }
 
 // buildCompressEvent creates a context_compress event message.
@@ -838,7 +808,7 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 	var infos []EventInfo
 
 	for _, msg := range execMsgs {
-		key, evtType, remainder := ParseEventKeyAndType(msg.Content)
+		key, evtType, remainder := tagentevent.ParseEventKeyAndType(msg.Content)
 		if key > 0 && !seen[key] {
 			seen[key] = true
 			summary := truncate(remainder, sc.chunkSummaryLen)
@@ -899,7 +869,7 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 	var sourceKeys []string
 	var tailKey int64
 	for _, msg := range seg.Messages {
-		k, _, _ := ParseEventKeyAndType(msg.Content)
+		k, _, _ := tagentevent.ParseEventKeyAndType(msg.Content)
 		if k <= 0 {
 			continue
 		}
@@ -917,7 +887,7 @@ func (sc *SmartCompressor) archiveSegment(seg *TaskSegment, summary string) (int
 	summaryEvent := memory.FullEvent{
 		EventKey:     summaryKey,
 		PartitionID:  partitionID,
-		EventType:    "context_compress_summary",
+		EventType:    tagentevent.TypeContextCompressSummary,
 		EventSummary: summary,
 		Content:      summary,
 		Timestamp:    time.Now().UnixMilli(),

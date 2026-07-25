@@ -3,6 +3,7 @@ package compress
 import (
 	"context"
 	"fmt"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"strings"
 	"sync"
 	"testing"
@@ -404,41 +405,41 @@ func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
 // ============================================================================
 
 func TestParseEventKeyAndType_Valid(t *testing.T) {
-	key, evtType, remainder := ParseEventKeyAndType("[evt_75bcd15|task] user request content")
+	key, evtType, remainder := tagentevent.ParseEventKeyAndType("[evt_75bcd15|task] user request content")
 	assert.Equal(t, int64(123456789), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "user request content", remainder)
 }
 
 func TestParseEventKeyAndType_NoPrefix(t *testing.T) {
-	key, evtType, _ := ParseEventKeyAndType("user request content")
+	key, evtType, _ := tagentevent.ParseEventKeyAndType("user request content")
 	assert.Equal(t, int64(0), key)
 	assert.Equal(t, "unknown", evtType)
 }
 
 func TestParseEventKeyAndType_Malformed(t *testing.T) {
-	key, _, _ := ParseEventKeyAndType("[evt_invalid_key|task] content")
+	key, _, _ := tagentevent.ParseEventKeyAndType("[evt_invalid_key|task] content")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_NoBar(t *testing.T) {
-	key, _, _ := ParseEventKeyAndType("[evt_12345task] content")
+	key, _, _ := tagentevent.ParseEventKeyAndType("[evt_12345task] content")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_LargeKey(t *testing.T) {
-	key, evtType, _ := ParseEventKeyAndType("[evt_7fffffffffffffff|memory] large snowflake key")
+	key, evtType, _ := tagentevent.ParseEventKeyAndType("[evt_7fffffffffffffff|memory] large snowflake key")
 	assert.Equal(t, int64(9223372036854775807), key)
 	assert.Equal(t, "memory", evtType)
 }
 
 func TestParseEventKeyAndType_EmptyContent(t *testing.T) {
-	key, _, _ := ParseEventKeyAndType("")
+	key, _, _ := tagentevent.ParseEventKeyAndType("")
 	assert.Equal(t, int64(0), key)
 }
 
 func TestParseEventKeyAndType_OnlyPrefix(t *testing.T) {
-	key, evtType, remainder := ParseEventKeyAndType("[evt_2a|task]")
+	key, evtType, remainder := tagentevent.ParseEventKeyAndType("[evt_2a|task]")
 	assert.Equal(t, int64(42), key)
 	assert.Equal(t, "task", evtType)
 	assert.Equal(t, "", remainder)

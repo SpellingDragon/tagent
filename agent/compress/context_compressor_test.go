@@ -378,7 +378,7 @@ func TestContextCompressor_PreservesChronologicalOrder(t *testing.T) {
 	// Verify chronological order: user1 should appear BEFORE assistant1.
 	var order []string
 	for _, m := range result.Messages {
-		content := StripEventKeyPrefix(m.Content)
+		content := tagentevent.StripEventKeyPrefix(m.Content)
 		if len(content) > 30 {
 			content = content[:30]
 		}
@@ -509,7 +509,7 @@ func assertRenderLegality(t *testing.T, msgs []model.Message) {
 					declared[tc.ID] = true
 				}
 			}
-			if len(m.ToolCalls) == 0 && strings.TrimSpace(StripEventKeyPrefix(m.Content)) == "" {
+			if len(m.ToolCalls) == 0 && strings.TrimSpace(tagentevent.StripEventKeyPrefix(m.Content)) == "" {
 				t.Errorf("render legality: msg[%d] is an empty assistant output", i)
 			}
 		case model.RoleTool:
@@ -521,7 +521,7 @@ func assertRenderLegality(t *testing.T, msgs []model.Message) {
 			}
 			consumed[m.ToolID] = true
 		}
-		key, _, _ := ParseEventKeyAndType(m.Content)
+		key, _, _ := tagentevent.ParseEventKeyAndType(m.Content)
 		if key > 0 {
 			if seenKeys[key] {
 				t.Errorf("render legality: duplicate event key %d at msg[%d]", key, i)

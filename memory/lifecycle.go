@@ -43,7 +43,7 @@ func DefaultLifecycleConfig() LifecycleConfig {
 			// raw events may be forgotten by TTL, artifacts persist. The index
 			// cards in the rolling summary point at these keys — expiring them
 			// would leave dangling tickets. Negative = exempt from TTL.
-			"context_compress_summary": -1,
+			event.TypeContextCompressSummary: -1,
 		},
 	}
 }
@@ -248,7 +248,7 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 			// Curated artifacts are exempt from capacity eviction too (same rule
 			// as TTL): raw events may be forgotten, artifacts persist — index
 			// cards point at these keys.
-			if extractEventTypeFromJSON(pair.Value) == "context_compress_summary" {
+			if extractEventTypeFromJSON(pair.Value) == event.TypeContextCompressSummary {
 				continue
 			}
 
