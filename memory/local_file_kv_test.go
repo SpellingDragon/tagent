@@ -148,10 +148,11 @@ func TestLocalFileKV_Persistence(t *testing.T) {
 	require.NoError(t, kv1.Sync())
 	require.NoError(t, kv1.Close())
 
-	// Verify kv.json exists
-	kvPath := filepath.Join(dir, "kv.json")
-	_, err = os.Stat(kvPath)
-	require.NoError(t, err)
+	// Verify on-disk persistence exists (snapshot or WAL — small write
+	// volumes legally live only in kv.wal.jsonl under the snapshot+WAL layout)
+	_, snapErr := os.Stat(filepath.Join(dir, "kv.json"))
+	_, walErr := os.Stat(filepath.Join(dir, "kv.wal.jsonl"))
+	require.True(t, snapErr == nil || walErr == nil, "neither snapshot nor WAL exists after Close")
 
 	// Second instance: should load existing data
 	kv2, err := NewLocalFileKV(dir)
