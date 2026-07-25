@@ -48,7 +48,7 @@ func TestAgentToolWrapper_Declaration_WithEventKeys(t *testing.T) {
 	require.True(t, ok, "event_keys should be declared when eventParams includes 'event_key'")
 	assert.Equal(t, "array", eventKeysSchema.Type)
 	require.NotNil(t, eventKeysSchema.Items)
-	assert.Equal(t, "integer", eventKeysSchema.Items.Type)
+	assert.Equal(t, "string", eventKeysSchema.Items.Type) // hex 契约:key 以 canonical hex 字符串传递
 
 	// Should still have standard request parameter
 	_, hasRequest := decl.InputSchema.Properties["request"]
