@@ -141,21 +141,9 @@ graph LR
     C -->|over cap, LLM condensation| D["condensed cards<br/>(skeleton + key refs kept)"]
 ```
 
-- **Material law**: a layer-N summary consumes only layer-(N-1) artifacts — compression cost is O(new), independent of history size
-- **Card sequence**: the single representation of compacted history — `[Compacted N] + card lines + recent keys`; meditation outputs get ★; every degradation level holds (no model → oldest lines sink into a counter)
-- **Raw events may be forgotten, artifacts persist**: curated artifacts are exempt from TTL and eviction; the `[hex]` keys in cards are `memory_recall` tickets
-
-### Event classification and role attribution
-
-| Category | Event type | Role |
-|----------|-----------|------|
-| External input | `external_input` (user msg / task_settled / meditation) | user |
-| Final output | `agent_output` | assistant (always = real LLM tokens) |
-| Tool execution | `action_command` | tool (native protocol pairing) |
-| Thinking | `thinking_plan` / `thinking_recall` / `thinking_knowledge` | assistant (native ToolCalls) |
-| Compaction marker | `context_compress` | user-side archival note |
-
-One-line rule: **instructions → system (always one, always first); observations → user; assistant always equals what the LLM actually said.** Anti-forgery relies not on roles but on forged text being semantically inert (real references travel the EventKey/StateDelta metadata channel).
+- **Constant cost**: each layer summarizes only the previous layer's output, so compression cost depends on new content only — a year-old agent compresses as fast as a day-old one
+- **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + card lines + recent keys`); meditation outputs get ★ highlights
+- **Raw events may be forgotten, summaries persist**: summaries never expire; the `[hex]` key on each card is a recall ticket — `memory_recall` fetches the original text anytime
 
 ## ⚙️ Six mechanisms at a glance
 
@@ -163,7 +151,7 @@ One-line rule: **instructions → system (always one, always first); observation
 |-----------|-----------|-----------|
 | Persistent event loop | Pull batching; async results queue without interrupting an in-flight turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
 | Context compression | SmartCompressor (LLM view, L0-L3 levels) + Compactor (rolling card projection); pure view transforms | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
-| Event-driven memory | Snowflake EventKey (hex contract); partition isolation + `read_namespaces` cross-agent grants | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| Event-driven memory | every event has a globally unique, time-ordered key; per-agent storage isolation with explicit cross-agent read grants | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | Sub-agent invocation | `event_params: [event_keys]` passes events by key (data isolation); transparent remote A2A | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
 | Async task layer | Adaptive polling (dense → geometric backoff); 3-tier settle; live task board; `resume_task`; session reaping loop | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
 | Meditation heartbeat | Idle detection anchored on final outputs; self-state digest; conclusions sediment as ★ cards | [wiki/agent](docs/wiki/agent/agent-architecture.md) |
@@ -214,18 +202,14 @@ All dependencies are one-way, no cycles: `root → agent → plugin → memory`,
 
 ## 📐 Design Philosophy
 
-In one sentence: **inputs are a projection of the event flow; the event bus carries the flow; when inputs fill up, Compact and memory persistence fire.**
+Four promises, honored by every mechanism:
 
-| Invariant | Meaning |
-|-----------|---------|
-| ① Inputs are a projection | bounded working memory, the sole assembly source of LLM input |
-| ② Unified writes | stored ⇔ projected, exactly once, atomically at one point |
-| ③ Ordering by construction | the projection is complete at BeforeModel, not by lucky timing |
-| ④ Compact touches only the projection | never the event flow, never permanent storage |
+1. **Events are immutable**: what happened is stored forever and never rewritten — compression and forgetting act on *views*, never on facts
+2. **Context is bounded**: the working memory fed to the LLM always has a budget; over-budget triggers compaction — layered memory instead of an ever-growing window
+3. **Recall is exact**: everything compacted away leaves a ticket (its event key); redeem the ticket to get the original text back, zero hallucination
+4. **Async never loses the thread**: long tasks ACK first and notify on completion; notifications are self-contained, so compression or reordering can never orphan a task
 
-**Reply vs. notification (the async split)**: within a turn = native tool-call protocol replies (long tasks ACK first); across turns = self-contained notification events (`task_settled` correlates by task id) — compression/loss/reordering never creates orphans. Timeline iron rule: **the system never generates textualized call syntax in assistant history** (models imitate it into phantom calls — established after two field incidents).
-
-**Metadata contract**: single-point guarantee in `event/metadata.go` — EventKey's canonical string form is **hex**, used across timeline prefixes, compaction key lists, StateDelta and recall tool I/O.
+Full design arguments (invariants, timeline rendering rules, metadata contracts) live in [docs/wiki/](docs/wiki/) and [openspec/specs/](openspec/specs/).
 
 ## 🔧 Configuration Reference
 

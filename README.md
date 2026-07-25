@@ -124,8 +124,8 @@ graph TB
     TOOL["Tool"]
 
     EB -->|驱动 turn: Pull → RunFlow| SP
-    EB -->|事件插件管线: 存储+同点投影| MS
-    MS -.ProjectionSink 同点追加引用.-> SP
+    EB -->|插件管线: 事件入库| MS
+    MS -.同步追加轻量引用.-> SP
     SP -->|assembleRequest 原生渲染| LLM
     MS -->|memory_recall / recall 工具| TOOL
 ```
@@ -141,32 +141,20 @@ graph LR
     C -->|超限,LLM 整理| D["浓缩卡片<br/>(保骨架+key引用)"]
 ```
 
-- **素材律**：第 N 层摘要只消费第 N-1 层固化物——压缩成本 O(新增)，与历史总量无关
-- **卡片序列**：压缩历史的唯一表示，形如 `[Compacted N] + 卡片行 + recent keys`；冥想产出带 ★；每层降级不塌（无模型→最旧行沉底计数）
-- **原文可忘，固化物长存**：固化物豁免 TTL 与容量淘汰；卡片里的 `[hex]` key 即 `memory_recall` 票据
-
-### 事件分类与 Role 归属
-
-| 类别 | 事件类型 | Role 归属 |
-|------|---------|----------|
-| 外部输入 | `external_input`（用户消息 / task_settled 通知 / 冥想） | user |
-| 最终输出 | `agent_output` | assistant（恒等于 LLM 真实产出） |
-| 工具执行 | `action_command` | tool（原生协议配对） |
-| 思考规划 | `thinking_plan` / `thinking_recall` / `thinking_knowledge` | assistant（原生 ToolCalls） |
-| 压缩标记 | `context_compress` | user 级〔历史归档〕注记 |
-
-规则一句话：**指令类→system（恒单条恒首位）；观察类→user；assistant 恒等于 LLM 说过的话**。防伪造不靠 role，靠伪造无语义（真引用走 EventKey/StateDelta 元数据通道）。
+- **成本恒定**：每层摘要只基于上一层的产物，压缩开销只与新增内容有关，与历史总量无关——跑一年和跑一天一样快
+- **卡片序列**：压缩后的历史保持为可读的卡片行（`[Compacted N] + 卡片行 + recent keys`），冥想沉淀带 ★ 高亮
+- **原文可忘，摘要长存**：摘要永不过期；卡片里的 `[hex]` key 就是召回票据——随时用 `memory_recall` 取回原文
 
 ## ⚙️ 六大机制速览
 
 | 机制 | 亮点 | 详解 |
 |------|------|------|
 | 持久事件循环 | Pull 批处理；async 结果排队不打断进行中 turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
-| 上下文压缩 | SmartCompressor（LLM 视图，L0-L3 分级）+ Compactor（投影滚动卡片）双层；纯视图变换 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
-| 事件驱动记忆 | 雪花 EventKey（hex 契约）；分区隔离 + `read_namespaces` 跨 Agent 授权 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| 事件驱动记忆 | 每个事件有全局唯一 key（时间有序）；Agent 间存储隔离，跨 Agent 读需显式授权 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | 子 Agent 调用 | `event_params: [event_keys]` 按 key 传事件（数据隔离）；A2A 远程透明 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
-| 异步任务层 | 自适应轮询（dense→几何退避）；settle 三档；实时任务看板；`resume_task` 重入；会话回收闭环 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
-| 冥想心跳 | 空闲检测锚定最终输出；自我状态 digest；总结沉淀为 ★ 卡片 | [wiki/agent](docs/wiki/agent/agent-architecture.md) |
+| 异步任务层 | 快命令秒回、慢任务后台通知；实时任务看板；`resume_task` 随时续跑；退出不留孤儿进程 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
+| 冥想心跳 | 空闲期自动回顾近期工作，总结沉淀为 ★ 卡片进入长期记忆 | [wiki/agent](docs/wiki/agent/agent-architecture.md) |
 
 ## 🏗 架构
 
@@ -201,8 +189,8 @@ graph TB
 | 模块 | 职责 |
 |------|------|
 | `agent/` | 事件驱动引擎：EventBus、runEventLoop、ContextManager（粘合层）、冥想、子 Agent 封装 |
-| `agent/task/` | 任务生命周期：TaskManager、settle 探测、看板、resume（零引擎依赖的叶子包） |
-| `agent/compress/` | 压缩域：SmartCompressor（L0-L3）、卡片序列 Compactor、SessionProjection、TokenCounter |
+| `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
+| `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |
 | `memory/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期 |
 | `plugin/` | 框架插件：MemoryPlugin（持久化+因果链）、SummaryPlugin（元数据标注） |
 | `tool/` | 工具：ActionTool（tmux）、recall/knowledge 子工具、任务工具族、文件工具 |
@@ -214,18 +202,14 @@ graph TB
 
 ## 📐 设计哲学
 
-核心一句话：**inputs 是 event flow 的投影，event bus 承载 event flow，inputs 满则触发 Compact 和 memory 持久化**。
+四条承诺，贯穿所有机制：
 
-| 不变量 | 含义 |
-|--------|------|
-| ① inputs 是投影 | 有界工作内存，是 LLM 输入的唯一装配源 |
-| ② 写入统一 | 事件被存储 ⇔ 被投影，恰好一次，同点原子 |
-| ③ 时序是构造保证 | BeforeModel 时投影必完整，非时序碰巧 |
-| ④ Compact 只修改投影 | 不动事件流，不动永久存储 |
+1. **事件不可变**：发生过的事永久入库、永不修改——压缩、遗忘都只作用于"视图"，不作用于事实
+2. **上下文有界**：发给 LLM 的工作内存永远有预算上限，超限自动压缩——不靠无限窗口，靠分层记忆
+3. **召回精确**：压缩掉的内容都留有票据（事件 key），按票取回原文，零幻觉
+4. **异步不失联**：长任务先应答、完成后通知；通知自带完整上下文，压缩或乱序都不会产生"断线"的任务
 
-**应答与通知（异步化分界）**：回合内=原生 tool-call 协议应答（长任务先回 ACK）；跨回合=自包含通知事件（`task_settled` 靠 task id 内容级关联）——压缩/丢失/乱序都不产生孤儿。时间线铁律：**系统永不在 assistant 历史中生成文本化调用语法**（会被模型模仿产生伪调用，实机两次踩坑后确立）。
-
-**元数据契约**：`event/metadata.go` 单点保障——EventKey 统一 16 进制字符串形态，贯穿时间线前缀、压缩 key 清单、StateDelta 与 recall 出入参。
+更完整的设计论证（不变量、时间线渲染规则、元数据契约）见 [docs/wiki/](docs/wiki/) 与 [openspec/specs/](openspec/specs/)。
 
 ## 🔧 配置参考
 
