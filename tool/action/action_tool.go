@@ -30,6 +30,7 @@ var _ tool.CallableTool = (*ActionTool)(nil)
 // real-world resources triggered by natural language descriptions.
 type ActionTool struct {
 	workspace     string
+	outputDir     string // oversized-output save dir (scratch), separate from command cwd
 	runAsUser     string
 	runAsGroup    string
 	description   string // Configurable tool description
@@ -43,10 +44,25 @@ type ActionTool struct {
 // ActionToolOption configures ActionTool.
 type ActionToolOption func(*ActionTool)
 
-// WithActionWorkspace sets the workspace directory.
+// WithActionWorkspace sets the command working directory. Empty (the
+// default) inherits the process working directory — keeping exec's relative
+// paths consistent with the file tools' base directory, so the model sees ONE
+// coherent filesystem view. A mismatch here (e.g. defaulting exec into a
+// scratch dir) makes `list_file` results unreachable from `exec` and induces
+// path hallucinations.
 func WithActionWorkspace(dir string) ActionToolOption {
 	return func(ct *ActionTool) {
 		ct.workspace = dir
+	}
+}
+
+// WithActionOutputDir sets the directory where oversized command outputs are
+// saved (defaults to the process working directory when empty). Kept separate
+// from the command working directory — scratch artifacts must not force the
+// command cwd away from the agent's world.
+func WithActionOutputDir(dir string) ActionToolOption {
+	return func(ct *ActionTool) {
+		ct.outputDir = dir
 	}
 }
 
@@ -335,13 +351,19 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 	if output != "" {
 		output = cleanTmuxOutput(output)
 		if len(output) > 2000 {
-			outputDir := ct.workspace
+			outputDir := ct.outputDir
+			if outputDir == "" {
+				outputDir = ct.workspace
+			}
 			if outputDir == "" {
 				if wd, err := os.Getwd(); err == nil {
 					outputDir = wd
 				} else {
 					outputDir = "."
 				}
+			}
+			if err := os.MkdirAll(outputDir, 0o755); err != nil {
+				log.Warnf("[ActionTool] output dir %q ensure failed: %v", outputDir, err)
 			}
 			path := filepath.Join(outputDir, fmt.Sprintf("output_%s.txt", sessionID))
 			if err := os.WriteFile(path, []byte(output), 0644); err != nil {

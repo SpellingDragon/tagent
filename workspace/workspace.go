@@ -1,15 +1,15 @@
-// Package workspace centralizes tagent's on-disk scratch space so that tool
-// outputs and tmux command working directories live under one root, and provides
-// a periodic cleaner that bounds the accumulated files (by age and count).
+// Package workspace centralizes tagent's on-disk scratch space (oversized
+// tool outputs) under one root, and provides a periodic cleaner that bounds
+// the accumulated files (by age and count).
 //
 // Layout (under Root):
 //
-//	<root>/tool-output/   oversized tool outputs saved by OutputLimitTool
-//	<root>/exec/          tmux command working directory (ActionTool)
+//	<root>/tool-output/   oversized tool outputs (OutputLimitTool, ActionTool)
 //
-// The Cleaner MUST only ever target the tool-output directory. exec/ is a
-// task working directory whose lifecycle belongs to the task layer; cleaning
-// it by file age/count would delete live-task artifacts.
+// Command working directories are NOT part of the scratch space: exec
+// inherits the process working directory so its relative paths stay
+// consistent with the file tools' base directory (one coherent filesystem
+// view for the model).
 package workspace
 
 import (
@@ -30,7 +30,6 @@ const DefaultRoot = ".tagent-workspace"
 // Subdirectories under the root.
 const (
 	ToolOutputDir = "tool-output" // oversized tool outputs
-	ExecDir       = "exec"        // tmux command working directory
 )
 
 // Root normalizes a workspace root, falling back to DefaultRoot when empty.
@@ -43,9 +42,6 @@ func Root(root string) string {
 
 // ToolOutputPath returns the directory for oversized tool outputs.
 func ToolOutputPath(root string) string { return filepath.Join(Root(root), ToolOutputDir) }
-
-// ExecPath returns the tmux command working directory.
-func ExecPath(root string) string { return filepath.Join(Root(root), ExecDir) }
 
 // Cleaner periodically bounds the files under a workspace root by age and count.
 type Cleaner struct {

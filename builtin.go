@@ -32,13 +32,16 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 	var opts []action.ActionToolOption
 
-	// Working directory for tmux commands: explicit `workspace` property wins;
-	// otherwise default to the unified workspace's exec subdir (<root>/exec).
+	// Command working directory: explicit `workspace` property wins; otherwise
+	// inherit the process working directory — the SAME base the file tools
+	// resolve relative paths against. Defaulting exec into a scratch dir would
+	// split the model's filesystem view in two (list_file sees ./x, exec can't
+	// reach it) and induce path hallucinations. Oversized outputs go to the
+	// unified scratch (<root>/tool-output) instead.
 	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))
-	} else {
-		opts = append(opts, action.WithActionWorkspace(workspace.ExecPath(cfg.WorkspaceRoot)))
 	}
+	opts = append(opts, action.WithActionOutputDir(workspace.ToolOutputPath(cfg.WorkspaceRoot)))
 	if ru, ok := properties["run_as_user"].(string); ok && ru != "" {
 		opts = append(opts, action.WithActionRunAsUser(ru))
 	}
