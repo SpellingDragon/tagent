@@ -373,10 +373,20 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 	// Collect the final output from the sub-agent
 	var finalOutput string
 	var toolCallCount int
+	var lastErr *model.ResponseError
 	for evt := range eventCh {
 		var resp *model.Response
 		if evt.Response != nil {
 			resp = evt.Response.Clone()
+		}
+		// Surface upstream model-API errors instead of letting their message
+		// text masquerade as a normal final output — otherwise the parent
+		// agent (and the operator) only ever sees an opaque provider string
+		// with no error classification.
+		if resp != nil && resp.Error != nil {
+			lastErr = resp.Error
+			log.Warnf("[ToolAgent:%s] upstream model error: type=%s message=%s", agentName, resp.Error.Type, resp.Error.Message)
+			continue
 		}
 		if resp != nil && len(resp.Choices) > 0 {
 			choice := resp.Choices[len(resp.Choices)-1]
@@ -401,6 +411,13 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 	log.Infof("[TRACE] tool_exit agent=%s output_len=%d tool_calls=%d elapsed=%v",
 		agentName, len(finalOutput), toolCallCount, elapsed)
 
+	// A run that ended on an upstream error with no usable final output is a
+	// FAILURE: return err so the settle path classifies it (status=failed,
+	// 错误: ... in the task_settled notification) instead of storing the
+	// provider's opaque error text as if it were a result.
+	if finalOutput == "" && lastErr != nil {
+		return "", fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
+	}
 	if finalOutput == "" {
 		finalOutput = "tool agent completed without output"
 	}

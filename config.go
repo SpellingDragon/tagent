@@ -166,12 +166,17 @@ type AgentConfig struct {
 	Tools []ToolRef `json:"tools" yaml:"tools"`
 
 	// Agent parameters
-	MaxToolIterations int            `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
-	MaxTokens         int            `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
-	Temperature       float64        `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
-	CompressThreshold float64        `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
-	KeepRecentTasks   int            `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
-	Compress          CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
+	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
+	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
+	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
+	CompressThreshold float64 `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
+	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
+
+	// TaskSettledMaxInline caps the inline result length in a task_settled
+	// notification (default 2000); full results stay retrievable via
+	// get_task_result.
+	TaskSettledMaxInline int            `json:"task_settled_max_inline,omitempty" yaml:"task_settled_max_inline,omitempty"`
+	Compress             CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
 	// Generation controls thinking/reasoning mode for the LLM.
 	// When set, these fields are merged into model.GenerationConfig.
@@ -202,6 +207,15 @@ type CompressConfig struct {
 	MaxToolResultChars int `json:"max_tool_result_chars,omitempty" yaml:"max_tool_result_chars,omitempty"`
 	MaxExecStateChars  int `json:"max_exec_state_chars,omitempty"  yaml:"max_exec_state_chars,omitempty"`
 	ChunkSummaryLen    int `json:"chunk_summary_len,omitempty"      yaml:"chunk_summary_len,omitempty"`
+
+	// MaxNoticeChars caps the compress-notice text length (default 800).
+	MaxNoticeChars int `json:"max_notice_chars,omitempty" yaml:"max_notice_chars,omitempty"`
+	// CompactKeysListed caps the keys listed in the rolling compaction
+	// summary (default 32); older events stay retrievable via recall.
+	CompactKeysListed int `json:"compact_keys_listed,omitempty" yaml:"compact_keys_listed,omitempty"`
+	// RecentFullCount is how many most-recent refs resolve with full content
+	// from MemoryStore (default 4).
+	RecentFullCount int `json:"recent_full_count,omitempty" yaml:"recent_full_count,omitempty"`
 
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.

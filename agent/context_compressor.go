@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +52,33 @@ type ContextCompressor struct {
 	// recentFullCount is the number of most recent refs to resolve with
 	// full content from MemoryStore. Older refs use EventSummary.
 	recentFullCount int
+
+	// listedKeysCap bounds the keys listed in the rolling compaction summary
+	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
+	listedKeysCap int
+}
+
+// ContextCompressorOption configures optional ContextCompressor constraints.
+type ContextCompressorOption func(*ContextCompressor)
+
+// WithCompactKeysListed caps the number of keys listed in the rolling
+// compaction summary (default DefaultCompactKeysListed).
+func WithCompactKeysListed(n int) ContextCompressorOption {
+	return func(cc *ContextCompressor) {
+		if n > 0 {
+			cc.listedKeysCap = n
+		}
+	}
+}
+
+// WithRecentFullCount sets how many most-recent refs resolve with full
+// content from MemoryStore (default DefaultRecentFullCount).
+func WithRecentFullCount(n int) ContextCompressorOption {
+	return func(cc *ContextCompressor) {
+		if n > 0 {
+			cc.recentFullCount = n
+		}
+	}
 }
 
 // NewContextCompressor creates a ContextCompressor from a SmartCompressor.
@@ -62,6 +91,7 @@ func NewContextCompressor(
 	maxTokens int,
 	thresholdPct float64,
 	keepRecent int,
+	opts ...ContextCompressorOption,
 ) *ContextCompressor {
 	if tokenCounter == nil {
 		tokenCounter = NewDefaultTokenCounter()
@@ -75,15 +105,20 @@ func NewContextCompressor(
 	if keepRecent <= 0 {
 		keepRecent = 2
 	}
-	return &ContextCompressor{
+	cc := &ContextCompressor{
 		compressor:      sc,
 		memStore:        memStore,
 		tokenCounter:    tokenCounter,
 		maxTokens:       maxTokens,
 		thresholdPct:    thresholdPct,
 		keepRecent:      keepRecent,
-		recentFullCount: 4,
+		recentFullCount: DefaultRecentFullCount,
+		listedKeysCap:   DefaultCompactKeysListed,
 	}
+	for _, opt := range opts {
+		opt(cc)
+	}
+	return cc
 }
 
 // Compress resolves all projection refs into messages, checks token budget,
@@ -336,8 +371,21 @@ func stripEventKeyPrefix(content string) string {
 // Strategy:
 //   - Refs whose event keys appear in the compressed messages → retained.
 //   - Refs whose event keys are NOT in the compressed messages → were compressed.
-//     These are replaced with a single summary ref.
-//   - Summary refs (negative keys) that are not retained are silently dropped.
+//     These are replaced with a single ROLLING summary ref.
+//   - A prior summary ref (negative key) is absorbed into the new summary
+//     (count + time lower bound carry over) — never silently dropped.
+
+// maxListedCompactKeys — see WithCompactKeysListed / DefaultCompactKeysListed.
+// Without a cap the summary line grows without bound across a long-running
+// session (each key is ~17 hex chars; hundreds of compacted events would make
+// this single message kilobytes large). Older keys drop off the list but stay
+// retrievable via recall (time/semantic queries); the rolling total keeps the
+// count honest.
+
+// compactedCountRe extracts the rolling total from a prior summary reference
+// (single-point format: written and parsed only here).
+var compactedCountRe = regexp.MustCompile(`\[Compacted (\d+) historical events`)
+
 func (cc *ContextCompressor) buildRetainedRefs(
 	originalRefs []memory.EventReference,
 	compressedMsgs []model.Message,
@@ -361,13 +409,28 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	}
 
 	// Build retained refs: keep refs whose keys are in compressed messages,
-	// and replace compressed refs with a single summary ref.
+	// replace compressed refs with a single ROLLING summary ref. A prior
+	// summary ref (negative key) is absorbed into the new one — its count and
+	// time lower bound carry over — instead of being silently dropped (which
+	// would sever the timeline's entry point to earlier compacted history).
 	var retained []memory.EventReference
 	var compressedKeys []string
 	var minTs int64
+	priorCount := 0
 
 	for _, ref := range originalRefs {
 		if ref.EventKey == 0 {
+			continue
+		}
+		if ref.EventKey < 0 && ref.EventType == tagentevent.TypeContextCompress {
+			if m := compactedCountRe.FindStringSubmatch(ref.EventSummary); m != nil {
+				if n, err := strconv.Atoi(m[1]); err == nil {
+					priorCount += n
+				}
+			}
+			if minTs == 0 || ref.Timestamp < minTs {
+				minTs = ref.Timestamp
+			}
 			continue
 		}
 		if retainedKeys[ref.EventKey] {
@@ -380,15 +443,25 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		}
 	}
 
-	// If we have compressed refs, add a single summary reference.
-	if len(compressedKeys) > 0 {
+	// Emit the rolling summary whenever there is anything compacted — this
+	// round or carried over from prior rounds.
+	if total := priorCount + len(compressedKeys); total > 0 {
 		if minTs == 0 {
 			minTs = time.Now().UnixMilli()
 		}
+		listed := compressedKeys
+		if cap := cc.listedKeysCap; cap > 0 && len(listed) > cap {
+			listed = listed[len(listed)-cap:]
+		}
+		summary := fmt.Sprintf("[Compacted %d historical events; recent keys=%s", total, strings.Join(listed, ","))
+		if total > len(listed) {
+			summary += fmt.Sprintf("; %d earlier events retrievable via recall", total-len(listed))
+		}
+		summary += "]"
 		summaryRef := memory.EventReference{
 			EventKey:     -minTs,
 			EventType:    tagentevent.TypeContextCompress,
-			EventSummary: fmt.Sprintf("[Compacted %d historical events: keys=%s]", len(compressedKeys), strings.Join(compressedKeys, ",")),
+			EventSummary: summary,
 			Timestamp:    minTs,
 			Role:         "user",
 		}

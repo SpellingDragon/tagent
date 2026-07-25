@@ -61,6 +61,54 @@ func TestContextCompressor_PrefixesUnderBudget(t *testing.T) {
 	}
 }
 
+// TestBuildRetainedRefs_RollingSummary: a prior summary ref (negative key) is
+// absorbed into the new one — count accumulates, time lower bound carries
+// over — and the listed keys are capped at DefaultCompactKeysListed. Regression
+// guard for the unbounded-keys-list / silent-history-drop pair.
+func TestBuildRetainedRefs_RollingSummary(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1)
+
+	// Prior rolling summary: 105 events already compacted, oldest ts=1000.
+	refs := []memory.EventReference{{
+		EventKey:     -1000,
+		EventType:    tagentevent.TypeContextCompress,
+		EventSummary: "[Compacted 105 historical events; recent keys=aa,bb]",
+		Timestamp:    1000,
+		Role:         "user",
+	}}
+	// 40 fresh refs, all compressed away (none appear in compressedMsgs).
+	for i := 1; i <= 40; i++ {
+		refs = append(refs, memory.EventReference{
+			EventKey: int64(i), EventType: tagentevent.TypeExternalInput, Timestamp: int64(2000 + i),
+		})
+	}
+
+	retained := cc.buildRetainedRefs(refs, nil)
+	if len(retained) != 1 {
+		t.Fatalf("expected single rolling summary ref, got %d: %+v", len(retained), retained)
+	}
+	s := retained[0]
+	if s.EventKey != -1000 || s.Timestamp != 1000 {
+		t.Errorf("time lower bound must carry over from prior summary, got key=%d ts=%d", s.EventKey, s.Timestamp)
+	}
+	if !strings.Contains(s.EventSummary, "[Compacted 145 historical events") {
+		t.Errorf("rolling count must accumulate (105+40=145), got: %q", s.EventSummary)
+	}
+	if n := strings.Count(s.EventSummary, ",") + 1; n > DefaultCompactKeysListed {
+		t.Errorf("listed keys must be capped at %d, got %d: %q", DefaultCompactKeysListed, n, s.EventSummary)
+	}
+	if !strings.Contains(s.EventSummary, "retrievable via recall") {
+		t.Errorf("summary must point to recall for unlisted events, got: %q", s.EventSummary)
+	}
+
+	// A further round with NO new compression still preserves the entry point.
+	retained2 := cc.buildRetainedRefs(retained, nil)
+	if len(retained2) != 1 || !strings.Contains(retained2[0].EventSummary, "[Compacted 145 historical events") {
+		t.Errorf("summary must survive rounds without new compression: %+v", retained2)
+	}
+}
+
 func TestContextCompressor_RetainsRefsWhenCompressed(t *testing.T) {
 	memStore := memory.NewInMemoryStore()
 

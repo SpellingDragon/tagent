@@ -171,6 +171,11 @@ type ContextManagerConfig struct {
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
 
+	// CompactKeysListed / RecentFullCount configure ContextCompressor
+	// constraints (0 = package defaults).
+	CompactKeysListed int
+	RecentFullCount   int
+
 	// Unified Runner: plugins + session service registered on the same Runner
 	MemPlugin  *plugin.MemoryPlugin
 	SessionSvc session.Service
@@ -212,6 +217,8 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			cfg.MaxTokens,
 			cfg.ThresholdPct,
 			keepRecent,
+			WithCompactKeysListed(cfg.CompactKeysListed),
+			WithRecentFullCount(cfg.RecentFullCount),
 		)
 	}
 

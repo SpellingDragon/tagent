@@ -320,8 +320,12 @@ func buildAgent(
 			MaxToolResultChars: acfg.Compress.MaxToolResultChars,
 			MaxExecStateChars:  acfg.Compress.MaxExecStateChars,
 			ChunkSummaryLen:    acfg.Compress.ChunkSummaryLen,
+			MaxNoticeChars:     acfg.Compress.MaxNoticeChars,
+			CompactKeysListed:  acfg.Compress.CompactKeysListed,
+			RecentFullCount:    acfg.Compress.RecentFullCount,
 		},
-		WorkspaceRoot: acfg.WorkspaceRoot,
+		TaskSettledMaxInline: acfg.TaskSettledMaxInline,
+		WorkspaceRoot:        acfg.WorkspaceRoot,
 	}
 	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {
 		agentCfg.SummaryModel = summaryModel

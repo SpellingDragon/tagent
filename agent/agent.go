@@ -153,6 +153,11 @@ type TagentConfig struct {
 	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
 	Compress           CompressConfig     // SmartCompressor parameters
 
+	// TaskSettledMaxInline caps the inline result length in a task_settled
+	// notification (default: DefaultTaskSettledMaxInline); the full result
+	// stays retrievable via get_task_result.
+	TaskSettledMaxInline int
+
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
 	ThinkingEnabled      *bool
 	ThinkingTokens       *int
@@ -187,6 +192,18 @@ const (
 	DefaultAgentName                 = "tagent"
 	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
 
+	// DefaultTaskSettledMaxInline caps the inline result in task_settled
+	// notifications; the full result stays available via get_task_result.
+	DefaultTaskSettledMaxInline = 2000
+	// DefaultCompactKeysListed caps the keys listed in the rolling
+	// compaction summary; older events stay retrievable via recall.
+	DefaultCompactKeysListed = 32
+	// DefaultRecentFullCount is how many most-recent refs resolve with full
+	// content from MemoryStore.
+	DefaultRecentFullCount = 4
+	// DefaultMaxNoticeChars caps the compress-notice text length.
+	DefaultMaxNoticeChars = 800
+
 	// Default compress parameters
 	DefaultMaxExecStateChars  = 2000
 	DefaultMaxToolResultChars = 500
@@ -205,6 +222,14 @@ type CompressConfig struct {
 	MaxToolResultChars int
 	MaxExecStateChars  int
 	ChunkSummaryLen    int
+	// MaxNoticeChars caps the compress-notice text length (default 800).
+	MaxNoticeChars int
+	// CompactKeysListed caps the number of keys listed in the rolling
+	// compaction summary (default 32); older events stay recallable.
+	CompactKeysListed int
+	// RecentFullCount is the number of most recent refs resolved with full
+	// content from MemoryStore (default 4).
+	RecentFullCount int
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
@@ -297,7 +322,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// buffered until the current turn finishes — single-consumer queueing).
 	taskManager := NewTaskManager(TaskManagerConfig{
 		OnSettle: func(task *Task, sig SettleSignal) {
-			bus.Publish(newTaskSettledEvent(task, sig))
+			bus.Publish(newTaskSettledEvent(task, sig, cfg.TaskSettledMaxInline))
 		},
 	})
 
@@ -415,6 +440,9 @@ func buildCompressorOpts(cfg *TagentConfig) []SmartCompressorOption {
 	if cfg.Compress.ChunkSummaryLen > 0 {
 		opts = append(opts, WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
 	}
+	if cfg.Compress.MaxNoticeChars > 0 {
+		opts = append(opts, WithMaxNoticeChars(cfg.Compress.MaxNoticeChars))
+	}
 	return opts
 }
 
@@ -454,6 +482,8 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		TokenCounter:         NewDefaultTokenCounter(),
 		MaxTokens:            cfg.MaxTokens,
 		ThresholdPct:         cfg.CompressThreshold,
+		CompactKeysListed:    cfg.Compress.CompactKeysListed,
+		RecentFullCount:      cfg.Compress.RecentFullCount,
 		MemStore:             cfg.MemoryStore,
 		MemPlugin:            memPlugin,
 		SessionSvc:           sessionSvc,

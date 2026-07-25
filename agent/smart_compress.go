@@ -36,6 +36,7 @@ type SmartCompressor struct {
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
 	maxToolResultChars int // Per-tool-result truncation (default: 500)
 	maxToolArgsChars   int // Per-tool-args truncation (default: 80)
+	maxNoticeChars     int // Compress-notice text cap (default: DefaultMaxNoticeChars)
 
 	// Summary parameters
 	chunkSummaryLen int                // Summary length per segment (default: 150)
@@ -95,6 +96,14 @@ func WithMaxToolResultChars(n int) SmartCompressorOption {
 // WithMaxToolArgsChars sets the per-tool-args truncation limit.
 func WithMaxToolArgsChars(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.maxToolArgsChars = n }
+}
+
+// WithMaxNoticeChars caps the compress-notice text length (default
+// DefaultMaxNoticeChars).
+func WithMaxNoticeChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) {
+		sc.maxNoticeChars = n
+	}
 }
 
 // WithChunkSummaryLen sets the summary length per segment.
@@ -745,7 +754,10 @@ func (sc *SmartCompressor) buildCompressEvent(
 // regardless of whether the cause was file reads, model outputs, search results, etc.
 func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, level string) model.Message {
 	const maxNoticeInfos = 5
-	const maxNoticeChars = 800
+	maxNoticeChars := sc.maxNoticeChars
+	if maxNoticeChars <= 0 {
+		maxNoticeChars = DefaultMaxNoticeChars
+	}
 
 	levelDesc := map[string]string{
 		"selective": "选择性压缩",

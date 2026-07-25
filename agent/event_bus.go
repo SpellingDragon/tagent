@@ -92,7 +92,7 @@ const SourceTask = "task"
 // new turn. It carries the task description, status, and a (truncated) result
 // inline so the LLM needs no extra lookup for small results; large results are
 // tail-truncated with a hint to use get_task_result.
-func newTaskSettledEvent(task *Task, sig SettleSignal) *AgentEvent {
+func newTaskSettledEvent(task *Task, sig SettleSignal, maxInline int) *AgentEvent {
 	status := "completed"
 	switch {
 	case sig.Err != nil:
@@ -104,7 +104,9 @@ func newTaskSettledEvent(task *Task, sig SettleSignal) *AgentEvent {
 	}
 
 	result := sig.Output
-	const maxInline = 2000
+	if maxInline <= 0 {
+		maxInline = DefaultTaskSettledMaxInline
+	}
 	if len(result) > maxInline {
 		result = "...(已截断，完整结果用 get_task_result 拉取)\n" + result[len(result)-maxInline:]
 	}
