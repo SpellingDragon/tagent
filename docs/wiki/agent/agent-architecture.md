@@ -129,12 +129,12 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 投影有界化，注册为第二个 BeforeModel 回调。当 SmartCompressor 不足以压缩时，从 SessionProjection 层面清理旧引用替换为 summary reference。
 
-### 2.7 SessionProjection + BuildEventReference
+### 2.7 SessionProjection + ProjectionSink
 
-**文件**：`projection.go`（82 行）
+**文件**：`projection.go`（agent 包）+ `projection_sink.go`（plugin 包）
 **原型对应**：`inputs []string`
 
-`SessionProjection` 是有界的 `EventReference[]`，线程安全。`BuildEventReference` 从框架 event.Event 的 StateDelta 构建 EventReference。
+`SessionProjection` 是有界的 `EventReference[]`，线程安全、EventKey 幂等去重。写入统一在事件插件管线：RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，MemoryPlugin 在 store 成功后同点 `Append`（unified-event-projection D1）。
 
 ### 2.8 EventBus
 
@@ -205,7 +205,7 @@ sequenceDiagram
 | `http_api.go` | 153 | HTTP API（RL/AReaL 集成） | 无（生产扩展） |
 | `meditation.go` | 143 | 冥想心跳 | 无（生产扩展） |
 | `task_segmenter.go` | 141 | 任务分段 + Compactor | `Compact` |
-| `projection.go` | 82 | SessionProjection + BuildEventReference | `inputs []string` |
+| `projection.go` | 82 | SessionProjection（写入经 ProjectionSink 由插件管线驱动） | `inputs []string` |
 | `output_limit_tool.go` | 73 | 工具输出截断 | 无（生产扩展） |
 | **总计** | **~7600** | **10 个文件** | |
 
@@ -230,9 +230,8 @@ TagentAgent.runEventLoop:
        │    ├─ ContentRequestProcessor 从 session.Events 构建 messages (session limit=2)
        │    ├─ BeforeModel 统一回调 (Projection-first):
        │    │    ├─ TryPull + persistBusEvent（新事件即时入 Projection）
-       │    │    ├─ ContextCompressor.Compress(refs)（解析 + 压缩）
-       │    │    ├─ extractCurrentTurnMessages（提取当前 ReAct 轮次）
-       │    │    └─ 消息重建: [system] + history + currentTurn
+       │    │    ├─ ContextCompressor.Compress(refs)（原生时间线渲染 + 压缩）
+       │    │    └─ 消息重建: [system] + render(投影)（单行化，永不读回框架消息尾部）
        │    ├─ model.GenerateContent
        │    ├─ FunctionCallResponseProcessor (工具执行 + 迭代控制)
        │    ├─ handleEventPersistence (sessionService.AppendEvent)

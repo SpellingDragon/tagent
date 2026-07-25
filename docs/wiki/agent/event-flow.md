@@ -43,56 +43,57 @@ graph TD
 
 ## 三、BeforeModel 回调链
 
-当前实现将上下文重建收敛为**一个统一的 BeforeModel 回调**（外加一个诊断日志回调），按 4 步执行：
+当前实现将上下文重建收敛为**一个统一的 BeforeModel 装配回调**（另有任务看板注入与诊断日志回调）。投影是**唯一装配源**（unified-event-projection D2）：除 system 消息外，不读取框架 `Request.Messages` 的任何内容。
 
 ```mermaid
 graph TD
     M[messages from ContentRequestProcessor] --> S1
-    S1["Step 1: 持久化新 bus 事件<br/>EventBus.TryPull → persistBusEvent → projection"]
-    S1 --> S2["Step 2: 解析投影<br/>ContextCompressor.Compress(refs)<br/>→ 压缩历史消息(带 [evt_KEY|type] 前缀)"]
-    S2 --> S3["Step 3: 提取当前轮消息<br/>extractCurrentTurnMessages(filterUser)<br/>丢弃重复/回显的未前缀 user"]
-    S3 --> S4["Step 4: 重建 = [system] + 历史 + 当前轮"]
-    S4 --> DIAG["诊断回调: BeforeLLM 日志"]
+    S1["Step 1: 持久化中途 bus 事件<br/>EventBus.TryPull → persistBusEvent → projection"]
+    S1 --> S2["Step 2: 解析投影<br/>ContextCompressor.Compress(refs)<br/>→ 原生时间线渲染(带 [evt_KEY|type] hex 前缀)"]
+    S2 --> S3["Step 3: 重建 = [system] + render(投影)"]
+    S3 --> BOARD["看板回调: 活跃异步任务看板注入(不入投影)"]
+    BOARD --> DIAG["诊断回调: BeforeLLM 日志"]
     DIAG --> OUT[最终 Request.Messages → LLM]
 ```
 
-**重建顺序即消息顺序**：`[system] + 压缩历史 + 当前轮`。因此**驱动请求必须先进入 projection**（顶层由框架 emit + SessionHook 转发；子 Agent 由 `Run()` 的 `persistBusEvent` 显式写入），才能作为「历史」的首条紧跟 system；否则它会停留为框架未前缀的 invocation seed，被 `extractCurrentTurnMessages` 当作「当前轮」拼到末尾，随 ReAct 累积被挤到最后。
+**无读回、无当前轮抽取**：所有事件（驱动请求、ReAct 内部的 assistant/tool 步骤、final）均在事件插件管线内同步写入投影（见 §四），框架对工具结果事件的 completion-wait 保证下一次 BeforeModel 时投影必已完整（构造保证，非时序碰巧）。旧版的 `extractCurrentTurnMessages`/`filterUser` 读回启发式已删除。
 
-**filterUser 语义**：当压缩历史中已含 user（即请求已入 projection）时，`extractCurrentTurnMessages` 丢弃框架重复插入的未前缀 user（session echo / invocation seed），避免重复；ReAct 内部消息（带 tool_calls 的 assistant + tool 结果）始终保留。
+**原生时间线渲染（D3 v2）**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留），因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
 
-## 四、MemoryPlugin 持久化（含 nil-Response 过滤）
+## 四、事件插件管线：存储 + 投影同点原子（含 nil-Response / partial 过滤）
 
 ```mermaid
 graph TD
     E[event.Event] --> N{evt == nil ?}
     N -- yes --> R1[return nil]
     N -- no --> P{Response 为空<br/>或 Choices 为空 ?}
-    P -- yes --> R2["return evt（同步类事件，跳过）<br/>不生成 EventKey / StateDelta<br/>不写入 MemoryStore<br/>不进入 projection"]
-    P -- no --> K["生成 Snowflake EventKey"]
+    P -- yes --> R2["return evt（同步类事件，跳过）"]
+    P -- no --> PT{IsPartial ?}
+    PT -- yes --> R4["return evt（流式增量，仅聚合事件入库/入投影）"]
+    PT -- no --> H1{退化空 agent_output ?}
+    H1 -- yes --> R5["return evt（空 final 不存储、不投影）"]
+    H1 -- no --> K["生成 Snowflake EventKey"]
     K --> I[inferEventInfo<br/>按 Role 推断 EventType + summary]
-    I --> F["构建 FullEvent<br/>Content = msg.Content<br/>EventSummary = summary"]
+    I --> F["构建 FullEvent"]
     F --> S[StoreEvent 到 MemoryStore]
-    S --> SD[写入 StateDelta:<br/>event_key / partition_id / event_type / event_summary]
+    S --> SINK["ProjectionSink.Append(ref)<br/>ctx 绑定的 per-invocation 投影<br/>（存储↔投影同点原子，D1）"]
+    SINK --> SD[写入 StateDelta 元数据契约:<br/>event_key / partition_id / event_type / event_summary]
     SD --> R3[return evt]
 ```
 
-> 过滤逻辑是为避免框架在 ReAct 过程中发出的同步类事件（start / wait / barrier，无 payload）被误存为 `external_input` 空占位符，污染 projection。
+> 投影写入位于插件管线（而非消费 goroutine）：框架对工具结果事件的 completion-wait 覆盖插件处理，使“BeforeModel 时投影完整”成为构造保证。RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，主循环与子 agent 天然隔离。
 
 ## 五、SessionProjection 生命周期
 
 ```mermaid
 graph TD
-    E[框架 event.Event<br/>含 StateDelta] --> B[BuildEventReference]
-    B --> OK{有 event_key ?}
-    OK -- no --> SKIP[不追加]
-    OK -- yes --> APP["projection.Append(ref)<br/>EventKey / PartitionID / EventType / EventSummary / Role"]
-    APP --> PROJ[SessionProjection<br/>EventReference 数组]
+    E[事件插件管线<br/>MemoryPlugin store 成功] --> APP["ProjectionSink.Append(ref)<br/>EventKey / PartitionID / EventType / EventSummary / Role"]
+    BUS[bus 外部输入<br/>persistBusEvent] --> APP
+    APP --> PROJ[SessionProjection<br/>EventReference 数组<br/>EventKey 幂等去重]
 
     PROJ --> READ["ContextCompressor.Compress<br/>读取 refs"]
-    PROJ --> KEYS["Callback 0: InjectEventKeys<br/>读取 refs 注入前缀"]
-
-    READ --> COMPRESS["ContextCompressor<br/>解析 + 压缩 + 生成 retainedRefs"]
-    COMPRESS --> REP["projection.Replace(retainedRefs)<br/>旧 refs 替换为新摘要 + 保留近期"]
+    READ --> COMPRESS["解析 + 原生时间线渲染 + 压缩<br/>生成 retainedRefs"]
+    COMPRESS --> REP["projection.Replace(retainedRefs)<br/>旧 refs 替换为新摘要 + 保留近期（重建 seen）"]
 ```
 
 ## 六、ContextCompressor 统一压缩
@@ -130,19 +131,20 @@ sequenceDiagram
     EL->>CM: BuildInvocation + RunFlow(msg)
     CM->>R: runner.Run
     R->>MP: Plugin.OnEvent(user event)
-    MP-->>Proj: projection.Append(ref)
+    MP->>Proj: ProjectionSink.Append(ref)
     R->>R: ContentRequestProcessor 构建 messages
-    R->>Proj: InjectEventKeys 注入前缀
-    R->>CC: ContextCompressor.Compress
+    R->>CC: BeforeModel: assembleRequest
+    CC->>Proj: GetAll → 原生时间线渲染 → [system]+render(投影)
     CC-->>Proj: projection.Replace(retainedRefs)
     R->>LLM: GenerateContent
     LLM-->>R: response / tool_calls
     R->>MP: Plugin.OnEvent(assistant/tool events)
-    MP-->>Proj: projection.Append(refs)
+    MP->>Proj: ProjectionSink.Append(refs)
     R-->>CM: emit event channel
-    CM-->>Bus: final response echo (agent_output)
-    CM-->>U: outputCh → consumer
+    CM-->>U: outputCh → consumer（克隆事件 + trigger_source/meta_* 元数据）
 ```
+
+> 无 bus echo：final 响应仅经 outputCh 投递，循环靠 `Pull` 阻塞等待下一个外部/任务事件（unified-event-projection D5）。
 
 ## 八、压缩前后投影变化示例
 

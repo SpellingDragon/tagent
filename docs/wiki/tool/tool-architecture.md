@@ -41,7 +41,7 @@
 ├── smart_compress.go   # SmartCompressor
 ├── task_segmenter.go   # TaskSegmenter + Compactor
 ├── event_bus.go        # EventBus + AgentEvent
-├── projection.go       # SessionProjection + BuildEventReference
+├── projection.go       # SessionProjection（投影存储，写入经 ProjectionSink 由插件管线驱动）
 ├── meditation.go       # MeditationManager
 ├── trajectory_recorder.go # LLM 调用轨迹记录
 ├── http_api.go         # HTTP API（RL/AReaL 集成）

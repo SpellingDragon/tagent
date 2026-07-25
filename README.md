@@ -78,9 +78,9 @@ graph TB
 ```mermaid
 graph LR
     SUB["子 Agent<br/>事件写入自身分区"] -.隔离.- OTHER["其他 Agent 分区"]
-    TOP["顶层 Agent"] -->|recall(read_namespaces 限定)| Q["检索得到 event_keys"]
-    Q -->|"tool(event_keys=[...])"| ATW["AgentToolWrapper"]
-    ATW -->|"parentStore.GetEvent 跨分区还原"| EC["external_context (EventSummary)"]
+    TOP["顶层 Agent"] -->|"recall: read_namespaces 限定"| Q["检索得到 event_keys"]
+    Q -->|"tool: event_keys=[...]"| ATW["AgentToolWrapper"]
+    ATW -->|"parentStore.GetEvent 跨分区还原"| EC["external_context: EventSummary"]
     EC -->|注入| SUB
 ```
 

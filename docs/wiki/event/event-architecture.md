@@ -473,5 +473,5 @@ RunFlow:
 
 - `tagent/event` 包提供**事件类型常量**和**摘要生成**工具（纯函数，无状态）
 - `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）
-- `agent/context_manager.go` 使用 `tagent/event` 的类型常量进行事件过滤（`ShouldCallModel`、`BuildInvocation`）
+- `agent/context_manager.go` 使用 `tagent/event` 的类型常量进行事件处理（`BuildInvocation` 合并触发源；所有拉取到的事件均驱动 turn，无预过滤）
 - `agent/event_bus.go` 使用 `NewExternalInputEvent` / `NewToolUseEvent` 构造事件

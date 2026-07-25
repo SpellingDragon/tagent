@@ -265,8 +265,9 @@ func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
 | `event_key` | EventKey int64 → 字符串 | 关联 MemoryStore 中的 FullEvent |
 | `partition_id` | PartitionID int → 字符串 | 存储分区标识 |
 | `event_type` | EventType 字符串 | 事件类型元数据 |
+| `event_summary` | 摘要字符串 | 事件摘要元数据 |
 
-> 注意：`event_summary` **不写入** StateDelta。`BuildEventReference` 在 onEvent 回调中从 `event.Response.Choices[0].Message.Content` 提取摘要。
+> 元数据 key 由 `tagent/event` 包单点定义（`MetaKey*` 常量），消费端经 `ParseEventMeta` 解析（元数据契约，unified-event-projection D4）。投影写入与存储在同一同步点完成：store 成功后经 ctx 绑定的 `ProjectionSink.Append` 写入当前 invocation 的投影（D1）。
 
 ---
 
@@ -558,42 +559,23 @@ graph LR
 
 **Step 2 — 持久化**：`FullEvent.EventSummary` 存入 MemoryStore
 
-**Step 3 — 投影追加**：框架 Runner 产生的事件经 `onEvent` 回调，由 `BuildEventReference` 构建 `EventReference` 并追加到 `SessionProjection`：
+**Step 3 — 投影追加**：MemoryPlugin 在存储后同点通过 ctx 中的 `ProjectionSink` 追加 `EventReference`（store→project 同点原子，消费端不再自行构建引用）：
 
 ```go
-// agent/projection.go:75-79
-if evt.Response != nil && len(evt.Response.Choices) > 0 {
-    msg := evt.Response.Choices[0].Message
-    ref.Role = string(msg.Role)
-    ref.EventSummary = msg.Content  // 注意：这里直接用 msg.Content，而非 StateDelta
+// plugin/memory_plugin.go（存储后同点投影）
+if sink, ok := ProjectionSinkFromContext(ctx); ok {
+    sink.Append(memory.EventReference{EventKey: eventKey, EventType: eventType, ...})
 }
 ```
 
-**Step 4 — 构建 LLM 上下文**：`ContextManager.BuildMessages` 将 `SessionProjection` 中的 `EventReference[]` 转换为 `model.Message[]`：
+**Step 4 — 构建 LLM 上下文**：`assembleRequest` 在 BeforeModel 将投影全量交给 `ContextCompressor.Compress`，按原生时间线渲染（thinking_plan 携原生 ToolCalls、action_command 为 role=tool 配对、孤儿降级为输入注记），重建为 `[system] + render(投影)`：
 
-- 最近 `recentFullCount`（默认 4）条引用：通过 `memStore.GetEvent(key)` 拉取完整 `Response`，使用原始 `model.Message`
-- 更早的引用：使用 `EventReference.EventSummary` 构建轻量消息
-
-```go
-// agent/context_manager.go:222-240
-func (cm *ContextManager) BuildMessages(ctx context.Context, refs []memory.EventReference) []model.Message {
-    startFull := 0
-    if len(refs) > cm.recentFullCount {
-        startFull = len(refs) - cm.recentFullCount
-    }
-    for i, ref := range refs {
-        if i >= startFull {
-            msg = cm.resolveReferenceToMessage(ctx, ref)  // 拉取完整 Response
-        } else {
-            msg = model.Message{Role: model.Role(ref.Role), Content: ref.EventSummary}
-        }
-    }
-}
-```
+- 预算内：`resolveRef` 优先用 `memStore.GetEvent(key)` 拉取完整内容（FullEvent.Content 为存储期净化后的权威文本），拉不到时回退 `EventSummary`
+- 超预算：`SmartCompressor` 分层压缩，旧窗口替换为摘要（摘要保留 task id/tool_id/工具名等关联标识）
 
 **关键点**：
 
-- LLM **主要看到摘要**，但最近 N 条事件会还原为完整原始消息
+- 预算内 LLM 看到完整内容；超预算后旧事件折叠为摘要，可用 recall 按 hex key 回补
 - 这是设计内的信息折损：压缩质量由 `SmartCompressor` 两阶段机制保证
 
 ### 12.3 SmartCompress 与 EventSummary 的关系
@@ -675,7 +657,7 @@ sequenceDiagram
     MP->>MSS: StoreEvent(FullEvent) EventSummary 存入
     MP->>MP: 写回 StateDelta(event_key, partition_id, event_type)
 
-    R->>SP: onEvent → BuildEventReference → Append
+    R->>SP: MemoryPlugin → ProjectionSink.Append
 
     R->>CM: 下一次 LLM 调用 BeforeModel
     CM->>CM: TokenCounter.Estimate(SessionProjection → Messages)
