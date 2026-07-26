@@ -7,13 +7,16 @@ services:
     user: "1000:1000"                # 显式非 root 常规用户
     read_only: true                  # 只读根文件系统
     tmpfs:
-      - /app/logs:size=64m,mode=1777 # 日志写入内存盘
+      - /app/logs:size=64m,mode=1777       # 日志写入内存盘
+      - /app/workspace:size=256m,mode=1777 # exec/任务层暂存
     volumes:
-      - ./workspace:/app/workspace:rw   # agent 唯一可写工作根
-      - ./data:/app/data:ro             # 只读知识/配置（含 tagent.yaml）
+      # 持久化可写数据（记忆/轨迹/plan 规格化产出）——read_only 根下必须挂载
+      - tagent-memory:/app/.wechat-config       # localfile 记忆存储
+      - tagent-trajectories:/app/data/trajectories  # 轨迹 dump
+      - tagent-openspec:/app/openspec/changes   # plan 规格化产出
     environment:
       - ZAI_API_KEY=${ZAI_API_KEY}      # 从宿主 env / .env 注入，绝不走 ~/.zshrc
-      - TAGENT_CONFIG=/app/data/tagent.yaml
+      - TAGENT_CONFIG=/app/tagent.yaml  # 配置已烘入镜像
       - TAGENT_HTTP_PORT=8089
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
@@ -30,7 +33,7 @@ services:
     security_opt:
       - no-new-privileges:true      # 禁止 setuid 提权
     healthcheck:
-      test: ["CMD", "/app/wechat-bot", "-healthz", "http://127.0.0.1:8089/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8089/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -42,3 +45,8 @@ networks:
   tagent-net:
     driver: bridge
     # 配合 Cilium/Calico 或宿主 nftables 做 egress 白名单（见文档分论四）
+
+volumes:
+  tagent-memory:
+  tagent-trajectories:
+  tagent-openspec:

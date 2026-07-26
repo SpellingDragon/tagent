@@ -65,6 +65,10 @@ providers:
     provider: openai
     api_endpoint: "https://api.moonshot.cn/v1"
     api_key_env: "MOONSHOT_API_KEY"
+  tencent_hy:
+    provider: openai
+    api_endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3"
+    api_key_env: "TENCENT_HY_API_KEY"
   tencent:
     provider: openai
     api_endpoint: "https://tokenhub.tencentmaas.com/v1"
@@ -110,7 +114,7 @@ agents:
   # 顶层 Agent: 微信助手的主 Agent
   # ========================================================================
   tagent:
-    provider: tencent            # 引用 providers 注册表中的 "tencent" 配置
+    provider: tencent_hy            # 引用 providers 注册表中的 "tencent" 配置
     model: hy3
     system_prompt:
       files:
@@ -230,7 +234,7 @@ agents:
   # Knowledge Agent: 知识获取 & 翻译子 Agent
   # ========================================================================
   knowledge:
-    provider: tencent            # 可与父 agent 使用不同供应商
+    provider: tencent_hy            # 可与父 agent 使用不同供应商
     model: hy3
     system_prompt:
       files:
@@ -287,7 +291,7 @@ agents:
   # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
   # ========================================================================
   action:
-    provider: tencent
+    provider: tencent_hy
     model: hy3
     system_prompt:
       files:
