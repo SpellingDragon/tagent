@@ -166,11 +166,15 @@ check_api_key() {
     local key_value
     key_value=$(printenv "$key_env" 2>/dev/null)
 
-    # ZAI_API_KEY 尝试从 ~/.zshrc 加载（兼容现有用户配置）
+    # 【仅本地开发】ZAI_API_KEY 缺失时从 ~/.zshrc 回退读取（开发者本机便利）。
+    # 注意：这与容器生产的严格策略是有意区分的两级设计——
+    #   本地开发(run.sh)：允许 ~/.zshrc 回退，但会提示
+    #   容器生产(entrypoint.sh)：严格只认 env/secret 注入，拒绝任何文件回退
     if [[ -z "$key_value" && "$key_env" == "ZAI_API_KEY" ]]; then
         key_value=$(zsh -c 'source ~/.zshrc 2>/dev/null && echo $ZAI_API_KEY' 2>/dev/null)
         if [[ -n "$key_value" ]]; then
             export ZAI_API_KEY="$key_value"
+            echo "提示: $key_env 从 ~/.zshrc 读取（仅限本地开发；容器部署须经 env 注入，见 entrypoint.sh）"
         fi
     fi
 

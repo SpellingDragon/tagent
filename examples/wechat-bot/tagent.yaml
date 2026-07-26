@@ -114,7 +114,7 @@ agents:
   # 顶层 Agent: 微信助手的主 Agent
   # ========================================================================
   tagent:
-    provider: tencent_hy            # 引用 providers 注册表中的 "tencent" 配置
+    provider: tencent_hy            # 引用 providers 注册表中的 "tencent_hy" 配置
     model: hy3
     system_prompt:
       files:

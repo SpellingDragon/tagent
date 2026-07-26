@@ -3,6 +3,7 @@
 set -e
 
 # 1) 密钥必须来自 env（已在 compose 注入），拒绝回退 ~/.zshrc
+#    【容器生产严格策略】与本地开发(run.sh 允许 ~/.zshrc 回退)是有意区分的两级设计
 if [ -z "$ZAI_API_KEY" ]; then
   echo "ERROR: ZAI_API_KEY 未设置（应通过 env/secret 注入，而非 ~/.zshrc）" >&2
   exit 1
