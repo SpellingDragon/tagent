@@ -238,3 +238,47 @@ func TestContract_NoTextualToolCallImitation(t *testing.T) {
 		t.Errorf("model produced neither a native tool call nor a meaningful reply")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// C8 cwd 契约：action 每次调用都是 workspace 根的全新 shell（cd 不跨调用
+// 保持）。模型面对"上一轮 cd 过子目录"的历史，仍必须按根路径出命令——
+// 实机事故：模型误信 shell 持久，相对路径嵌套导致误删失败后靠绝对路径自救。
+// ---------------------------------------------------------------------------
+func TestContract_ActionCwdFreshShell(t *testing.T) {
+	desc := "执行 shell 命令。每次调用都在【工作区根目录】的全新 shell 中运行,cd 不跨调用保持;子目录操作请单次调用内 `cd sub && …` 链式,或使用相对工作区根的路径。"
+	actionTool := declTool("action", desc,
+		map[string]*tool.Schema{"command": {Type: "string"}}, "command")
+
+	// 历史：上一轮在子目录里干过活（迷航诱因）。
+	call := model.ToolCall{Type: "function", ID: "call_cd1"}
+	call.Function.Name = "action"
+	call.Function.Arguments = []byte(`{"command":"cd articles/2026 && ls"}`)
+	toolMsg := model.Message{Role: model.RoleTool, ToolID: "call_cd1", Content: "draft-a.md\ndraft-b.md"}
+
+	name, args, text := callOnce(t, []model.Message{
+		model.NewSystemMessage("你管理一个工作区。工作区根目录下有 articles/ 与 knowledge_base/ 两个顶级目录。"),
+		model.NewUserMessage("看下 2026 目录里有什么草稿"),
+		{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{call}},
+		toolMsg,
+		model.NewUserMessage("把 knowledge_base/old.md 删掉"),
+	}, map[string]tool.Tool{"action": actionTool})
+
+	if name != "action" {
+		t.Fatalf("model must call action, got tool=%q text=%q", name, text)
+	}
+	t.Logf("model args: %s", args)
+	var parsed struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(args, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	cmd := parsed.Command
+	if !strings.Contains(cmd, "knowledge_base/old.md") {
+		t.Errorf("command must target knowledge_base/old.md, got %q", cmd)
+	}
+	// 迷航特征：用 ../ 补偿"还在 articles/2026"的错误认知。
+	if strings.Contains(cmd, "../") {
+		t.Errorf("model compensated with ../ — it assumed the previous cd persisted: %q", cmd)
+	}
+}

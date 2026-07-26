@@ -352,7 +352,7 @@ agents:
         - plan_agent.md
     memory:
       type: memory
-    max_tool_iterations: 15
+    max_tool_iterations: 50
     max_tokens: 64000
     temperature: 0.3
     tools:
