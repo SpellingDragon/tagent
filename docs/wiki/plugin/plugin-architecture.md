@@ -967,3 +967,15 @@ Session 已有的 `Session.Events`（完整 event.Event）和框架的 Summaries
 | **因果回溯** | 无 | RelationStore.GetParent() 支持按因果链回溯历史 |
 
 **结论**：Session 是框架提供的通用会话管理，MemoryStore 是 tagent 的差异化能力（结构化因果记忆 + 按需精确检索）。两者互补而非替代。
+
+
+---
+
+## 已知缺口与演进方向
+
+> 本章主动声明当前设计尚未闭合的环。
+
+| 缺口 | 现状与防线 | 候选方向 |
+|------|-----------|---------|
+| **插件顺序契约隐式** | MemoryPlugin 写 StateDelta 必须先于消费方，当前靠注册顺序保证，无显式依赖声明——新增插件时需人工核对顺序 | 插件注册时声明 requires/provides，装配期校验 |
+| **summary 双计算** | 见 event 篇同条——MemoryPlugin/SummaryPlugin 各计算一次（纯函数结果一致） | StateDelta 复用 |

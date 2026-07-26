@@ -26,7 +26,26 @@
 
 ---
 
-## 三、Loader — 核心数据结构
+## 三、组件关系总览图
+
+```mermaid
+graph TB
+    CFG["Config (system_prompt.files / description_file)"]
+    L["Loader<br/>(BaseDir + 内嵌 FS 回退)"]
+    SRC["Source<br/>(mtime 感知热重载)"]
+    DISK["磁盘 prompt 文件<br/>(用户可覆盖)"]
+    EMB["内嵌 FS<br/>(二进制自带缺省)"]
+    SYS["Agent system prompt<br/>(bootstrap: AGENTS→SOUL→TOOLS…)"]
+    DESC["工具描述<br/>(AgentToolWrapper.Declaration)"]
+
+    CFG --> L
+    L -->|"优先"| DISK
+    L -.->|"miss 回退"| EMB
+    L --> SYS
+    L --> SRC --> DESC
+```
+
+## 四、Loader — 核心数据结构
 
 ### 3.1 数据结构
 
@@ -51,7 +70,7 @@ func NewLoader(baseDir string, opts ...LoaderOption) *Loader { // 支持 WithFal
 
 ---
 
-## 四、加载方法详解
+## 五、加载方法详解
 
 ### 4.1 LoadFromFile — 单文件加载
 
@@ -232,7 +251,7 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
 
 ---
 
-## 五、Bootstrap 加载 — Agent 系统提示词
+## 六、Bootstrap 加载 — Agent 系统提示词
 
 ### 5.1 BootstrapLoadOrder — 加载顺序
 
@@ -339,7 +358,7 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 
 ---
 
-## 六、辅助函数
+## 七、辅助函数
 
 ### 6.1 SplitCSV — CSV 解析
 
@@ -366,7 +385,7 @@ func SplitCSV(s string) []string {
 
 ---
 
-## 七、与其他模块的关系
+## 八、与其他模块的关系
 
 ### 7.1 依赖关系
 
@@ -422,7 +441,7 @@ loader.LoadFromFile("docs/skills/python.md")
 
 ---
 
-## 八、关键设计决策
+## 九、关键设计决策
 
 ### 8.1 为什么用 `"\n\n"` 而不是其他分隔符？
 
@@ -452,11 +471,11 @@ if content == "" {
 
 ---
 
-## 九、内嵌 FS 回退（prompt-loader-fallback）
+## 十、内嵌 FS 回退（prompt-loader-fallback）
 
 `NewLoader(baseDir, WithFallback(fsys, prefix))` 注入内嵌 prompt FS：磁盘 `BaseDir` 下找不到文件/目录时回退到 embed FS（`prefix` 为 FS 内 prompt 根路径，如 `resources/prompts`）。**磁盘永远优先**——用户可覆盖任意内置 prompt，二进制单文件分发时又不缺省。`fallbackFile/fallbackDir` 在 `LoadFromFile/LoadFromDir` 的 miss 路径内生效，调用方无感知。
 
-## 十、Source — 热重载 prompt 源
+## 十一、Source — 热重载 prompt 源
 
 ```go
 // prompt/source.go
@@ -467,3 +486,15 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 ```
 
 用途：`AgentToolWrapper.SetDescriptionSource` 使工具描述**热更新**——`Declaration()` 每次经 Source 取描述，改 prompt 文件立即生效，无需重启进程。inline-only（无 files）配置只加载一次并缓存。
+
+
+---
+
+## 已知缺口与演进方向
+
+> 本章主动声明当前设计尚未闭合的环。
+
+| 缺口 | 现状与防线 | 候选方向 |
+|------|-----------|---------|
+| **无 prompt 版本化** | Source 热重载即时生效，无灰度/回滚/AB；防线：磁盘优先+内嵌 fallback 保证总有可用版本 | prompt 变更走 git 审阅（现状惯例）；框架层不引入版本机制 |
+| **bootstrap 顺序固定** | AGENTS→SOUL→TOOLS… 顺序编码在 LoadBootstrap，不可配置 | 保持固定（顺序即契约）；如需自定义走 system_prompt.files 显式列表 |

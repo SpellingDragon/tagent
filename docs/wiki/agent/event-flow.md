@@ -155,3 +155,10 @@ sequenceDiagram
 | 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_5\|agent_output]`、`[evt_6\|action_command]`、`[evt_7\|external_input]`、`[evt_8\|agent_output]` |
 
 > 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `memory_recall(items=[{key}])` 精确回补原文，或 `recall` 子 agent 做多跳检索。
+
+
+---
+
+## 已知缺口
+
+事件流层面的缺口（收尾轮、单 session 循环、handoff schema）统一声明于 [agent-architecture.md](agent-architecture.md) 末章「已知缺口与演进方向」。

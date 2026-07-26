@@ -479,3 +479,15 @@ RunFlow:
 - `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）
 - `agent/context_manager.go` 使用 `tagent/event` 的类型常量进行事件处理（`BuildInvocation` 合并触发源；所有拉取到的事件均驱动 turn，无预过滤）
 - `agent/event_bus.go` 使用 `NewExternalInputEvent` / `NewToolUseEvent` 构造事件
+
+
+---
+
+## 已知缺口与演进方向
+
+> 本章主动声明当前设计尚未闭合的环。
+
+| 缺口 | 现状与防线 | 候选方向 |
+|------|-----------|---------|
+| **事件类型无版本化** | 类型语义演进（如 summary 语义从"总结"变"原文视图"）无 schema 版本标记，历史事件按当前语义解读 | 事件 Metadata 加 schema_version；读取侧按版本适配 |
+| **summary 双计算** | MemoryPlugin 与 SummaryPlugin 对同一事件各调一次 `GenerateEventSummary`（结果一致，纯函数），重复计算是小额性能债 | StateDelta 传递复用一次计算 |

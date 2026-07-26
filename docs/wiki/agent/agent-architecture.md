@@ -303,6 +303,18 @@ SmartCompressor 作为 BeforeModel 回调，在框架构建 messages 后、调�
 
 截断参数通过 `SmartCompressorOption` 配置（`WithMaxExecStateChars`、`WithMaxToolResultChars`、`WithMaxToolArgsChars`、`WithChunkSize`、`WithChunkSummaryLen`），也可通过 YAML `compress` 段配置。
 
+### 6.1.1 时间线渲染红线（外部分析常见误判点）
+
+压缩产物**永远不进 system**。渲染规则的三条铁律：
+
+| 铁律 | 含义 |
+|------|------|
+| system 恒单条恒首位 | 只装指令（system prompt）；任何机制产物不得追加进 system |
+| 压缩摘要 = user 级〔历史归档〕注记 | `context_compress` 渲染为带"非用户发言勿模仿"标注的 user 消息——观察类信息归 user |
+| assistant 恒等于 LLM 真实产出 | 系统永不代 assistant 说话，也永不在 assistant 历史中生成文本化调用语法（防模仿伪调用） |
+
+> 之所以单列：曾有外部分析（基于可见 API 契约的合理外推）误判为"摘要 system 内联"——这是常见框架做法，但 tagent 恰恰以不这样做为设计红线。凡对模型可感知的渲染行为，本文档显式声明，不留猜测空间。
+
 ### 6.2 Compact（Compactor）
 
 Compactor 作为第二个 BeforeModel 回调，当 SmartCompressor 不足以压缩时触发：
@@ -356,3 +368,17 @@ tools:
 5. 消费 outputCh 直到 final response，`close(invOutputCh)` 通知结束
 
 子 agent 的 MaxToolIterations 取 `min(父配置, 10)`，默认不超过 10；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
+
+
+---
+
+## 已知缺口与演进方向
+
+> 本章主动声明当前设计尚未闭合的环——供使用者评估适用边界，也供外部分析引用（缺口以工程事实陈述，含现有防线与候选方向）。
+
+| 缺口 | 现状与防线 | 候选方向 |
+|------|-----------|---------|
+| **子 Agent handoff 无结构化 schema** | 跨 Agent 传递依赖 `request` 自然语言 + `event_keys` 票据（票据本身是结构化 hex 契约，有真实 LLM 契约测试守护）；但"意图/约束/权限/未决决策"没有结构化载体 | 定义 handoff envelope（intent/constraints/grants 字段）随 external_context 传递 |
+| **迭代上限无收尾轮** | 撞 `max_tool_iterations` 时进行中的工具调用直接丢弃（实机：plan 子 Agent 3m52s 的文档工作被掐断，靠模型自恢复换路完成） | 预算剩 1 轮时注入收尾提示，让模型保存半成品再终止 |
+| **runEventLoop 单 session** | 一个 TagentAgent 实例绑定一个 (user, session) 循环；多会话需多实例 | 会话路由层（多循环共享引擎与存储） |
+| **冥想触发只有时间判据** | `interval`/`min_gap` 空闲检测，无"内容值得冥想"判据——空闲但无新事件时可能产出低价值回顾 | 未消化事件量/★ 卡片密度作为第二判据 |

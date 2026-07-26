@@ -164,16 +164,23 @@ EventKey 为 Snowflake int64（详见 [memory-architecture.md](../memory/memory-
 - 框架已有的 **AgentName** 是稳定的 agent 身份标识
 - **PartitionID = FNV-1a(AgentName) & 0x3FF**（0-1023），由 MemoryPlugin 在 tagent 层计算
 
-```
-框架层 (AgentName/FilterKey)     tagent 层 (MemoryPlugin)          Memory 层 (PartitionID)
-┌──────────────────────┐      ┌───────────────────────┐      ┌─────────────────┐
-│ AgentName = "tagent" │──────→│ FNV-1a("tagent")=42  │──────→│ partition=42    │
-│ FilterKey = "tagent" │      │ FNV-1a("knowledge")=85│──────→│ partition=85    │
-├──────────────────────┤      │ FNV-1a("recall")=123 │──────→│ partition=123   │
-│ AgentName = "know"   │      │                       │      │                 │
-└──────────────────────┘      │ AgentName → PartitionID│      │ 纯整数分区键    │
-                              │ Memory 不感知 agent   │      │ 无 agent 语义   │
-└──────────────────────┘      └───────────────────────┘      └─────────────────┘
+```mermaid
+graph LR
+    subgraph fw["框架层"]
+        AN["AgentName / FilterKey<br/>(LLM context 层隔离)"]
+    end
+    subgraph tg["tagent 层 (MemoryPlugin)"]
+        FNV["PartitionID = FNV-1a(AgentName) & 0x3FF<br/>AgentName → 纯整数分区键"]
+    end
+    subgraph mem["Memory 层"]
+        P1["partition=42 (tagent)"]
+        P2["partition=85 (knowledge)"]
+        P3["partition=123 (recall)"]
+    end
+    AN --> FNV
+    FNV --> P1 & P2 & P3
+    note["Memory 不感知 agent —— 分区键无 agent 语义"]
+    mem -.- note
 ```
 
 ### 4.3 EventKeys 注入流程
@@ -958,3 +965,17 @@ stateDiagram-v2
 | 运行时 | completed/error → 自动 kill session |
 | 优雅退出 | `ActionTool.Close()` 收编 monitor 内全部存活 session |
 | 崩溃/强杀后 | 下次启动 `CleanupOrphanSessions()` 按前缀清扫孤儿（每个孤儿占一个 pty，实机曾因此耗尽系统 pty 池）；多实例场景 `WithOrphanCleanupDisabled` 或独立前缀 |
+
+
+---
+
+## 已知缺口与演进方向
+
+> 本章主动声明当前设计尚未闭合的环——供使用者评估适用边界，也供外部分析引用。
+
+| 缺口 | 现状与防线 | 候选方向 |
+|------|-----------|---------|
+| **action 成功空输出无明确文案** | exit 0 且无输出时返回内容不明确，模型可能误判失败而重发（实机：探测命令 15 连发撞迭代上限） | 返回"命令成功，无输出"显式文案（一行改动，待做） |
+| **长文档任务迭代预算** | PlanAgent 等写作型任务轮次消耗大，撞上限时无收尾机会（见 agent 篇收尾轮缺口） | 收尾轮机制 / 写作型任务独立预算 |
+| **tmux 不可用时的同步兜底无任务层语义** | 降级路径可执行命令但无 resume/看板/后台通知 | 明确文档化为受限模式（已声明）；不投入补齐 |
+| **websearch 可靠性** | duckduckgo 无鉴权接口，限流/结构变化敏感 | 多 provider 回退链 |
