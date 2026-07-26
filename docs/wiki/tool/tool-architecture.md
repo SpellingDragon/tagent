@@ -979,3 +979,4 @@ stateDiagram-v2
 | **长文档任务迭代预算** | PlanAgent 等写作型任务轮次消耗大，撞上限时无收尾机会（见 agent 篇收尾轮缺口） | 收尾轮机制 / 写作型任务独立预算 |
 | **tmux 不可用时的同步兜底无任务层语义** | 降级路径可执行命令但无 resume/看板/后台通知 | 明确文档化为受限模式（已声明）；不投入补齐 |
 | **websearch 可靠性** | duckduckgo 无鉴权接口，限流/结构变化敏感 | 多 provider 回退链 |
+| **路径沙箱只覆盖 file 工具族** | file 工具 `base_dir` 是真沙箱（上游 ToolSet 拒绝 `../` 与绝对路径，已实证）；**exec 是 shell 全权**，无法工具级限制写路径——目录级禁写（如 plan 仅限 openspec/）依赖 prompt 禁令 + 部署层容器只读根兜底 | exec 增加可选 allowlist 包装（受限模式） |

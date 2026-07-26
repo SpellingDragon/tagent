@@ -13,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/SpellingDragon/tagent/tool/recall"
+	"github.com/SpellingDragon/tagent/tool/spec"
 	"github.com/SpellingDragon/tagent/tool/task"
 )
 
@@ -79,6 +80,9 @@ func RegisterBuiltinTools() error {
 		// task sub-tools: list_tasks, get_task_result, cancel_task,
 		// relaunch_task, resume_task
 		task.RegisterSubTools()
+
+		// spec: typed spec/plan management (no shell; openspec backend)
+		spec.RegisterTool()
 	})
 	return nil
 }

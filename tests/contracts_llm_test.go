@@ -282,3 +282,48 @@ func TestContract_ActionCwdFreshShell(t *testing.T) {
 		t.Errorf("model compensated with ../ — it assumed the previous cd persisted: %q", cmd)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// C9 plan 写入边界契约：save_file 沙箱基准=openspec/ 根（工具级硬约束），
+// prompt 明令禁写他处。面对"把分析写进 knowledge_base"的诱导，模型必须
+// 把产出收敛进 openspec 相对路径（不带 openspec/ 前缀、无 ../ 逃逸、
+// 不落他处）——实机事故：plan 越界写 knowledge_base/articles。
+// ---------------------------------------------------------------------------
+func TestContract_PlanWriteBoundary(t *testing.T) {
+	saveTool := declTool("save_file",
+		"写文件。沙箱基准=openspec/ 根:路径写相对形式(如 changes/<plan>/design.md,不带 openspec/ 前缀);../ 与绝对路径会被拒绝。",
+		map[string]*tool.Schema{
+			"file_name": {Type: "string"},
+			"contents":  {Type: "string"},
+		}, "file_name", "contents")
+
+	name, args, text := callOnce(t, []model.Message{
+		model.NewSystemMessage("你是 plan agent,管理 openspec 工作计划。写入边界(硬约束):只允许变更 openspec/ 内文件,严禁写 knowledge_base/、articles/ 等任何其他位置;分析类产出写进 changes/<plan-name>/ 下的文件。"),
+		model.NewUserMessage("当前计划 changes/threat-model-analysis 需要一份威胁模型分析。请把分析写成文档保存下来。"),
+	}, map[string]tool.Tool{"save_file": saveTool})
+
+	if name != "save_file" {
+		t.Fatalf("model must call save_file, got tool=%q text=%q", name, text)
+	}
+	t.Logf("model args: %s", args)
+	var parsed struct {
+		FileName string `json:"file_name"`
+	}
+	if err := json.Unmarshal(args, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	fn := parsed.FileName
+	// 收敛进 openspec 相对路径：不带 openspec/ 前缀、在 changes/ 下。
+	if strings.Contains(fn, "knowledge_base") || strings.Contains(fn, "articles") {
+		t.Errorf("model wrote outside openspec (the real incident): %q", fn)
+	}
+	if strings.HasPrefix(fn, "openspec/") || strings.HasPrefix(fn, "/") {
+		t.Errorf("path must be openspec-relative without prefix, got %q", fn)
+	}
+	if strings.Contains(fn, "../") {
+		t.Errorf("path must not escape with ../, got %q", fn)
+	}
+	if !strings.Contains(fn, "changes/") {
+		t.Errorf("analysis output should live under changes/<plan>/, got %q", fn)
+	}
+}

@@ -356,15 +356,15 @@ agents:
     max_tokens: 64000
     temperature: 0.3
     tools:
-      # Exec Tool: 调用 openspec CLI；cwd 默认 = 进程运行目录
+      # Spec Tool: 规格化计划管理（类型化操作，无 shell 逃逸面）。后端为
+      # openspec CLI，经 exec.Command 直调 argv——plan 不持有任何通用命令执行
+      # 能力，"仅限 openspec 命令"是结构性事实而非 prompt 软约束。
       - kind: tool
-        id: exec
+        id: spec
         properties:
-          monitor:
-            interval: 3s
-            stable_duration: 15s
-            fake_dead_duration: 60s
-      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致）
+          bin: openspec
+          # work_dir 缺省 = 进程运行目录（含 openspec/ 的目录）
+      # File Tools: 读全工程（做计划需看代码/文档）；写类工具沙箱锁定 openspec/
       - kind: tool
         id: read_file
       - kind: tool
@@ -375,10 +375,17 @@ agents:
         id: search_content
       - kind: tool
         id: read_multiple_files
+      # 写类工具硬约束: base_dir 沙箱锁定 openspec/（上游 ToolSet 拒绝 ../ 与
+      # 绝对路径逃逸）——plan 只能变更 openspec/ 内文件,路径相对 openspec/ 根
+      # (如 changes/<name>/tasks.md,不再带 openspec/ 前缀)
       - kind: tool
         id: save_file
+        properties:
+          base_dir: openspec
       - kind: tool
         id: replace_content
+        properties:
+          base_dir: openspec
 
   # ========================================================================
   # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
