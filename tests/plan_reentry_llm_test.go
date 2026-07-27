@@ -67,10 +67,11 @@ func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 
 	planCfg := tagent.AgentConfig{
 		SystemPrompt: tagent.PromptConfig{Inline: "你是 plan agent，负责制定 openspec 工作计划。\n" +
-			"制定计划需要足够信息：对象/范围/目标/约束/验收标准。\n" +
-			"信息不足时，不要臆测补全，向调用方提出具体的澄清问题（明确缺哪些信息）；\n" +
-			"调用方经后续输入补充后，你据此完善计划，可多轮迭代直至信息充分再产出正式计划。\n" +
-			"识别充分性：当对象/目标/约束等关键信息已明确时即视为充分，直接产出计划，不要反复追问次要细节。回答简洁。"},
+			"制定计划需要五个维度的信息：对象/范围/目标/约束/验收标准。\n" +
+			"信息不足时，不要臆测补全，输出一份结构化澄清诉求：先列【已知】(从任务已获得的)，\n" +
+			"再列【待补充】(只列缺失维度，每个维度给具体可回答的问题，如'重构哪个组件？')。\n" +
+			"调用方经后续输入逐项补充后，你更新已知、收敛待补充，多轮迭代直至信息充分。\n" +
+			"识别充分性：当对象/目标/约束等关键维度已明确时即视为充分，直接产出计划，不反复追问次要细节。回答简洁。"},
 		Memory:            tagent.MemoryConfig{Type: "memory"},
 		MaxToolIterations: 3,
 		MaxTokens:         16000,
@@ -91,15 +92,22 @@ func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 	))
 	t.Logf("round1: %s", truncStr(out1, 400))
 
+	// Round 1 assertion: the clarification must (a) explicitly enumerate WHICH
+	// info dimensions are missing and (b) ask concrete questions for them —
+	// not a finished plan.
 	asksQuestion := strings.Contains(out1, "？") || strings.Contains(out1, "?")
-	asksSpecifics := strings.Contains(out1, "重构") &&
-		(strings.Contains(out1, "哪个") || strings.Contains(out1, "什么") ||
-			strings.Contains(out1, "对象") || strings.Contains(out1, "范围") ||
-			strings.Contains(out1, "目标") || strings.Contains(out1, "模块") ||
-			strings.Contains(out1, "约束"))
+	dimensionHits := 0
+	for _, d := range []string{"对象", "范围", "目标", "约束", "验收"} {
+		if strings.Contains(out1, d) {
+			dimensionHits++
+		}
+	}
 	notFinishedPlan := !strings.Contains(out1, "- [ ]")
-	require.True(t, asksQuestion && asksSpecifics,
-		"underspecified task must trigger clarifying questions, got: %s", truncStr(out1, 300))
+	require.True(t, dimensionHits >= 3,
+		"clarification must explicitly list the missing info dimensions (>=3 of 对象/范围/目标/约束/验收), got %d in: %s",
+		dimensionHits, truncStr(out1, 300))
+	require.True(t, asksQuestion,
+		"clarification must pose concrete questions (？) for the missing info, got: %s", truncStr(out1, 300))
 	require.True(t, notFinishedPlan,
 		"plan must NOT fabricate a finished task list when info is lacking, got: %s", truncStr(out1, 300))
 
