@@ -3,10 +3,11 @@ package compress
 import (
 	"context"
 	"fmt"
-	tagentevent "github.com/SpellingDragon/tagent/event"
 	"strings"
 	"sync"
 	"testing"
+
+	tagentevent "github.com/SpellingDragon/tagent/event"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -683,4 +684,58 @@ func TestSmartCompress_EmptyTarget_NotFalseDegradation(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "user message of the empty-target segment must be preserved")
+}
+
+// reasoningOnlyMockModel returns EMPTY Content with the summary in
+// ReasoningContent (mimicking a reasoning model whose thinking chain consumed
+// the output budget), and captures the request's MaxTokens.
+type reasoningOnlyMockModel struct {
+	reasoning     string
+	lastMaxTokens *int
+	mu            sync.Mutex
+}
+
+func (m *reasoningOnlyMockModel) GenerateContent(
+	ctx context.Context, request *model.Request,
+) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.lastMaxTokens = request.MaxTokens
+	m.mu.Unlock()
+
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Choices: []model.Choice{{Message: model.Message{
+			Content:          "", // empty — the failure mode
+			ReasoningContent: m.reasoning,
+		}}},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *reasoningOnlyMockModel) Info() model.Info { return model.Info{Name: "reasoning-only"} }
+
+// TestGenerateSummary_SetsMaxTokens verifies the summary request reserves an
+// explicit output budget. Without it, a reasoning model's thinking chain
+// consumes the default reserve and Content comes back empty — the root cause
+// of the mass degradation that collapsed contexts to user-only messages.
+func TestGenerateSummary_SetsMaxTokens(t *testing.T) {
+	mock := &reasoningOnlyMockModel{reasoning: "思考后得到的摘要内容。"}
+	sc := NewSmartCompressor(WithSummaryModel(mock), WithMaxTokens(8000))
+
+	segments := []*TaskSegment{
+		{Messages: []model.Message{{Role: model.RoleUser, Content: strings.Repeat("x", 500)}}},
+	}
+	summary, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+
+	mock.mu.Lock()
+	mt := mock.lastMaxTokens
+	mock.mu.Unlock()
+	require.NotNil(t, mt, "summary request must set an explicit MaxTokens")
+	assert.GreaterOrEqual(t, *mt, 8192, "MaxTokens must leave room for reasoning + summary")
+
+	// Reasoning fallback: Content was empty, so the reasoning content is used
+	// rather than degrading to nothing.
+	assert.Contains(t, summary, "思考后得到的摘要内容")
 }

@@ -670,18 +670,29 @@ func (sc *SmartCompressor) generatePlainSummary(ctx context.Context, prompt stri
 			model.NewUserMessage(prompt),
 		},
 	}
+	// Same reasoning-model guard as generateSummaryRecursive: reserve ample
+	// output tokens so reasoning doesn't squeeze Content to empty.
+	plainMaxOut := 8192
+	req.MaxTokens = &plainMaxOut
 	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
 	if err != nil {
 		return "", err
 	}
 	var result string
+	var reasoning string
 	for resp := range respCh {
 		if resp.Error != nil {
 			return "", fmt.Errorf("summary model error: %s", resp.Error.Message)
 		}
 		if len(resp.Choices) > 0 {
 			result += resp.Choices[0].Message.Content
+			reasoning += resp.Choices[0].Message.ReasoningContent
 		}
+	}
+	// Reasoning-model fallback (see generateSummaryRecursive): use reasoning
+	// content when the model left Content empty.
+	if strings.TrimSpace(result) == "" && strings.TrimSpace(reasoning) != "" {
+		result = reasoning
 	}
 	return strings.TrimSpace(result), nil
 }
@@ -1134,6 +1145,19 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 			model.NewUserMessage(promptBuilder.String()),
 		},
 	}
+	// Reserve enough output tokens for BOTH reasoning and the summary. A
+	// reasoning model spends part of max_tokens on its thinking chain; with no
+	// explicit budget the default reserve is consumed by reasoning and Content
+	// comes back EMPTY — which degraded every segment and collapsed the context
+	// to user-only messages (observed live: 65/67 segments, "summary generated
+	// 0 chars"). chars≈tokens is a conservative estimate; ×2 leaves reasoning
+	// headroom, with a floor for small summaries. It is a cap, not a target —
+	// the model stops once the summary is produced.
+	maxOut := targetChars * 2
+	if maxOut < 8192 {
+		maxOut = 8192
+	}
+	req.MaxTokens = &maxOut
 
 	log.Debugf("[SmartCompress] batch %d/%d (depth=%d): inputChars=%d targetChars=%d ratio=%.1f",
 		batchIndex, totalBatches, depth, inputChars, targetChars, float64(inputChars)/float64(targetChars))
@@ -1145,6 +1169,7 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 	}
 
 	var result string
+	var reasoning string
 	for resp := range respCh {
 		if resp.Error != nil {
 			log.Errorf("[SmartCompress] stage2 response error: %v", resp.Error)
@@ -1152,7 +1177,19 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 		}
 		if len(resp.Choices) > 0 {
 			result += resp.Choices[0].Message.Content
+			reasoning += resp.Choices[0].Message.ReasoningContent
 		}
+	}
+	// Reasoning-model fallback: some models emit the summary into
+	// reasoning_content and leave Content empty. Without this, every such
+	// segment "summarized" to 0 chars → mass degradation → the context
+	// collapsed to user-only messages (observed live: 65/67 segments degraded,
+	// 40 consecutive user messages). Prefer Content; use reasoning only when
+	// Content is empty.
+	if strings.TrimSpace(result) == "" && strings.TrimSpace(reasoning) != "" {
+		log.Warnf("[SmartCompress] batch %d/%d (depth=%d): Content empty, falling back to reasoning_content (%d chars)",
+			batchIndex, totalBatches, depth, len(reasoning))
+		result = reasoning
 	}
 
 	log.Debugf("[SmartCompress] batch %d/%d (depth=%d): summary generated %d chars (target %d)",
