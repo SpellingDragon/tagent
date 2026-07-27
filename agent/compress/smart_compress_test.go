@@ -263,9 +263,12 @@ func TestSmartCompress_UnderThreshold(t *testing.T) {
 func TestSmartCompress_NoSystem(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(1))
 
+	// Long non-key assistant output gives the old segment a real compression
+	// target (short messages are all "key" → empty target → nothing to compress).
+	longOutput := strings.Repeat("detailed execution output padding ", 6)
 	messages := []model.Message{
 		{Role: model.RoleUser, Content: "task 1"},
-		{Role: model.RoleAssistant, Content: "result 1"},
+		{Role: model.RoleAssistant, Content: longOutput},
 		{Role: model.RoleUser, Content: "task 2"},
 		{Role: model.RoleAssistant, Content: "result 2"},
 	}
@@ -304,10 +307,14 @@ func TestSmartCompress_Fallback_NoModel(t *testing.T) {
 	// and injects a [context_compress_error] notice so the agent is aware.
 	sc := NewSmartCompressor(WithKeepRecentTasks(1))
 
+	// The old segment carries a LONG assistant message (>100 chars → non-key,
+	// compressible) so there is a genuine compression target; without a summary
+	// model that target degrades to first-stage with an error notice.
+	longOutput := strings.Repeat("detailed execution output padding ", 6)
 	messages := []model.Message{
 		{Role: model.RoleSystem, Content: "system"},
 		{Role: model.RoleUser, Content: "task 1"},
-		{Role: model.RoleAssistant, Content: "result 1"},
+		{Role: model.RoleAssistant, Content: longOutput},
 		{Role: model.RoleUser, Content: "task 2"},
 		{Role: model.RoleAssistant, Content: "result 2"},
 	}
@@ -331,9 +338,10 @@ func TestSmartCompress_Fallback_CompressNoticeFormat(t *testing.T) {
 	// Without summaryModel, verify the error notice format
 	sc := NewSmartCompressor(WithKeepRecentTasks(1))
 
+	longOutput := strings.Repeat("detailed execution output padding ", 6)
 	messages := []model.Message{
 		{Role: model.RoleUser, Content: "task 1"},
-		{Role: model.RoleAssistant, Content: "result 1"},
+		{Role: model.RoleAssistant, Content: longOutput},
 		{Role: model.RoleUser, Content: "task 2"},
 		{Role: model.RoleAssistant, Content: "result 2"},
 	}
@@ -739,3 +747,40 @@ func (m *inputRecordingModel) GenerateContent(ctx context.Context, req *model.Re
 }
 
 func (m *inputRecordingModel) Info() model.Info { return model.Info{Name: "input-recorder"} }
+
+// TestSmartCompress_EmptyTarget_NotFalseDegradation verifies that a segment
+// whose compression target is empty (e.g. an L1 segment that is only a user
+// message, with no non-key exec content to summarize) is NOT treated as an
+// LLM failure. Previously the empty summary was mistaken for a failure →
+// false degradation + a scary [context_compress_error] notice + firstStage
+// that barely reduces tokens (observed live as dur≈0 degradations where
+// after>=before). Regression guard for the empty-target skip.
+func TestSmartCompress_EmptyTarget_NotFalseDegradation(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+
+	// Segment 0 = [user "a"] only → L1 with EMPTY nonKeyMsgs (nothing to
+	// compress). Segment 1 = [user "b", assistant "result b"] is recent (L0).
+	messages := []model.Message{
+		{Role: model.RoleSystem, Content: "system"},
+		{Role: model.RoleUser, Content: "a"},
+		{Role: model.RoleUser, Content: "b"},
+		{Role: model.RoleAssistant, Content: "result b"},
+	}
+
+	result := sc.Compress(context.Background(), messages, nil)
+
+	// No false degradation: the empty-target segment must NOT produce an error
+	// notice (there was no LLM failure — there was simply nothing to compress).
+	for _, msg := range result {
+		assert.NotContains(t, msg.Content, "[context_compress_error]",
+			"empty compression target must not be reported as an LLM failure")
+	}
+	// The user message is preserved.
+	found := false
+	for _, msg := range result {
+		if msg.Content == "a" {
+			found = true
+		}
+	}
+	assert.True(t, found, "user message of the empty-target segment must be preserved")
+}

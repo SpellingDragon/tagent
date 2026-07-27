@@ -343,9 +343,18 @@ func (sc *SmartCompressor) Compress(
 			}
 			jobs = append(jobs, summaryJob{idx: i, level: 3, msgs: p.seg.Messages})
 		case 2:
-			jobs = append(jobs, summaryJob{idx: i, level: 2, msgs: p.execMsgs})
+			// Skip segments with nothing to compress at this level: an empty
+			// target is NOT a failure (previously the empty summary was mistaken
+			// for an LLM failure → false degradation + scary error notice +
+			// firstStage that barely reduces tokens, observed live as dur≈0
+			// degradations with after>=before).
+			if len(p.execMsgs) > 0 {
+				jobs = append(jobs, summaryJob{idx: i, level: 2, msgs: p.execMsgs})
+			}
 		case 1:
-			jobs = append(jobs, summaryJob{idx: i, level: 1, msgs: p.nonKeyMsgs})
+			if len(p.nonKeyMsgs) > 0 {
+				jobs = append(jobs, summaryJob{idx: i, level: 1, msgs: p.nonKeyMsgs})
+			}
 		}
 	}
 
