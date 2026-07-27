@@ -65,13 +65,13 @@ func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 
 	require.NoError(t, tagent.RegisterBuiltinTools())
 
+	// Use the FRAMEWORK DEFAULT plan_agent.md (embedded fallback), not an
+	// inline duplicate — the test validates the actual shipped prompt document,
+	// per the convention that sub-agent prompts are framework defaults.
+	loader := prompt.NewLoader("", prompt.WithFallback(tagent.DefaultPromptsFS(), tagent.DefaultPromptsPrefix))
+
 	planCfg := tagent.AgentConfig{
-		SystemPrompt: tagent.PromptConfig{Inline: "你是 plan agent，负责制定 openspec 工作计划。\n" +
-			"制定计划需要五个维度的信息：对象/范围/目标/约束/验收标准。\n" +
-			"信息不足时，不要臆测补全，输出一份结构化澄清诉求：先列【已知】(从任务已获得的)，\n" +
-			"再列【待补充】(只列缺失维度，每个维度给具体可回答的问题，如'重构哪个组件？')。\n" +
-			"调用方经后续输入逐项补充后，你更新已知、收敛待补充，多轮迭代直至信息充分。\n" +
-			"识别充分性：当对象/目标/约束等关键维度已明确时即视为充分，直接产出计划，不反复追问次要细节。回答简洁。"},
+		SystemPrompt:      tagent.PromptConfig{Files: []string{"plan_agent.md"}},
 		Memory:            tagent.MemoryConfig{Type: "memory"},
 		MaxToolIterations: 3,
 		MaxTokens:         16000,
@@ -82,7 +82,7 @@ func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 		Agents: map[string]tagent.AgentConfig{"plan": planCfg},
 	}
 	cache := map[string]*tagentagent.TagentAgent{}
-	planAgent, err := tagent.TestingBuildAgent("plan", planCfg, fullCfg, m, nil, nil, prompt.NewLoader(""), cache)
+	planAgent, err := tagent.TestingBuildAgent("plan", planCfg, fullCfg, m, nil, nil, loader, cache)
 	require.NoError(t, err)
 
 	// Round 1: an UNDERSPECIFIED task — no object/scope/goal/constraints.

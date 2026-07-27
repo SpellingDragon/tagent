@@ -248,7 +248,7 @@ func NewResumeTaskTool() *ResumeTaskTool { return &ResumeTaskTool{} }
 func (t *ResumeTaskTool) Declaration() *tool.Declaration {
 	return &tool.Declaration{
 		Name:        "resume_task",
-		Description: "向一个存活的后台任务（alive 状态，如服务/REPL 会话）继续输入命令或指令。快命令内联返回本轮增量输出；慢响应返回 ACK，结算后以 task_settled 通知回写（同一 task id）。终态任务请用 relaunch_task。",
+		Description: "向一个后台任务继续输入。两类场景：① 存活任务（alive，如服务/REPL 会话）——直接续发命令；② 已结算的子 agent 任务（如 plan 澄清后补充信息、续写）——resume 会恢复其上一轮上下文并续跑。快响应内联返回本轮增量输出；慢响应返回 ACK，结算后以 task_settled 通知回写（同一 task id）。注：action 命令任务一旦 completed 其会话即被回收，须用 relaunch_task；子 agent 任务 completed 后仍可 resume。",
 		InputSchema: &tool.Schema{
 			Type: "object",
 			Properties: map[string]*tool.Schema{
