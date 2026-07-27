@@ -4,11 +4,13 @@ package compress
 const (
 	DefaultMaxTokens         = 8000
 	DefaultCompressThreshold = 0.8
-	// DefaultMaxSummaryInputChars caps a single summary LLM call's input.
-	// Oversized task segments (e.g. a long sub-agent run with large file
-	// round-trips) are split recursively before summarization — one giant
-	// call is slow, failure-prone, and can exceed the summary model window.
-	DefaultMaxSummaryInputChars = 40000
+
+	// DefaultSummaryMaxTokens is the floor for the output-token budget reserved
+	// on each summary LLM call. A reasoning model spends part of max_tokens on
+	// its thinking chain; too small a budget leaves Content empty (mass
+	// degradation). The per-call budget scales up with the summary size
+	// (targetChars*2) but never below this floor.
+	DefaultSummaryMaxTokens = 8192
 
 	// DefaultArchiveCacheCap bounds the per-process L3 archive cache (the
 	// archives themselves persist in MemoryStore).

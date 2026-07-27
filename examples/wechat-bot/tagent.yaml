@@ -140,6 +140,10 @@ agents:
       # summary_provider: optional, defaults to same provider as this agent.
       # Use a different provider for cost optimization (e.g., cheaper model for compression).
       summary_provider: tencent
+      # summary_max_tokens: 每次摘要 LLM 调用的输出 token 预算下限（默认 8192）。
+      # 推理模型会把部分 max_tokens 耗在思考链上，预算不足会返回空 Content 导致
+      # 压缩全段降级（上下文塌缩成纯 user 消息）。实际预算随摘要大小上浮，但不低于此值。
+      summary_max_tokens: 8192
       # card_max_chars: 滚动压缩摘要中卡片序列的长度上限（默认 6000）。
       # 超限时旧卡片由 summary_model 整理为浓缩卡片；无模型则最旧行沉底为计数。
       # card_max_chars: 6000

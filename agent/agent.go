@@ -23,11 +23,12 @@ package agent
 import (
 	"context"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/compress"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/task"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -225,8 +226,9 @@ type CompressConfig struct {
 	// ArchiveCacheCap bounds the per-process L3 archive cache entries
 	// (default compress.DefaultArchiveCacheCap).
 	ArchiveCacheCap int
-	// MaxSummaryInputChars caps one summary call's input (0 → pkg default).
-	MaxSummaryInputChars int
+	// SummaryMaxTokens is the output-token budget floor for summary calls
+	// (0 → pkg default). Guards reasoning models against empty Content.
+	SummaryMaxTokens int
 }
 
 // NewTagentAgent creates a new TagentAgent with the given configuration.
@@ -443,8 +445,8 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	if cfg.Compress.ArchiveCacheCap > 0 {
 		opts = append(opts, compress.WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
 	}
-	if cfg.Compress.MaxSummaryInputChars > 0 {
-		opts = append(opts, compress.WithMaxSummaryInputChars(cfg.Compress.MaxSummaryInputChars))
+	if cfg.Compress.SummaryMaxTokens > 0 {
+		opts = append(opts, compress.WithSummaryMaxTokens(cfg.Compress.SummaryMaxTokens))
 	}
 	return opts
 }

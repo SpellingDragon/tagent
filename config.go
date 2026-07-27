@@ -227,10 +227,12 @@ type CompressConfig struct {
 	// (default 256; the archives themselves persist in MemoryStore).
 	ArchiveCacheCap int `json:"archive_cache_cap,omitempty" yaml:"archive_cache_cap,omitempty"`
 
-	// MaxSummaryInputChars caps a single summary LLM call's input characters;
-	// oversized task segments are split recursively before summarization
-	// (0 = package default 40000).
-	MaxSummaryInputChars int `json:"max_summary_input_chars,omitempty" yaml:"max_summary_input_chars,omitempty"`
+	// SummaryMaxTokens is the floor for the output-token budget reserved on each
+	// summary LLM call (0 = package default 8192). Reasoning models spend part
+	// of max_tokens on their thinking chain; too small a budget returns empty
+	// Content and degrades compression. The per-call budget scales up with the
+	// summary size but never below this floor.
+	SummaryMaxTokens int `json:"summary_max_tokens,omitempty" yaml:"summary_max_tokens,omitempty"`
 
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.

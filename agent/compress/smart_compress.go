@@ -36,10 +36,10 @@ type SmartCompressor struct {
 	// archiveCache maps segment content hash → archived artifact, so the same
 	// segment is NEVER re-summarized or re-stored across rounds (material law:
 	// cost stays O(new segments), independent of history size).
-	archiveCacheMu       sync.Mutex
-	archiveCache         map[string]archivedSegment
-	archiveCacheCap      int // bound on cached entries (0 → DefaultArchiveCacheCap)
-	maxSummaryInputChars int // per-call summary input cap (0 → DefaultMaxSummaryInputChars)
+	archiveCacheMu   sync.Mutex
+	archiveCache     map[string]archivedSegment
+	archiveCacheCap  int // bound on cached entries (0 → DefaultArchiveCacheCap)
+	summaryMaxTokens int // output-token budget floor for summary calls (0 → DefaultSummaryMaxTokens)
 
 	// Configurable truncation parameters
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
@@ -120,13 +120,14 @@ func WithChunkSummaryLen(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
 }
 
-// WithMaxSummaryInputChars caps the input characters of a single summary
-// LLM call (0 → DefaultMaxSummaryInputChars). Oversized inputs are split
-// recursively before calling the model.
-func WithMaxSummaryInputChars(n int) SmartCompressorOption {
+// WithSummaryMaxTokens sets the output-token budget floor for summary calls
+// (0 → DefaultSummaryMaxTokens). Reasoning models spend part of max_tokens on
+// their thinking chain; reserving enough output tokens keeps Content from
+// coming back empty (which would degrade every segment).
+func WithSummaryMaxTokens(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) {
 		if n > 0 {
-			sc.maxSummaryInputChars = n
+			sc.summaryMaxTokens = n
 		}
 	}
 }
@@ -672,7 +673,7 @@ func (sc *SmartCompressor) generatePlainSummary(ctx context.Context, prompt stri
 	}
 	// Same reasoning-model guard as generateSummaryRecursive: reserve ample
 	// output tokens so reasoning doesn't squeeze Content to empty.
-	plainMaxOut := 8192
+	plainMaxOut := sc.effectiveSummaryMaxTokens()
 	req.MaxTokens = &plainMaxOut
 	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
 	if err != nil {
@@ -1017,12 +1018,13 @@ func (sc *SmartCompressor) generateSummary(
 	return sc.generateSummaryRecursive(ctx, segments, batchIndex, totalBatches, 0)
 }
 
-// effectiveMaxSummaryInputChars returns the per-call summary input cap.
-func (sc *SmartCompressor) effectiveMaxSummaryInputChars() int {
-	if sc.maxSummaryInputChars > 0 {
-		return sc.maxSummaryInputChars
+// effectiveSummaryMaxTokens returns the output-token budget floor for summary
+// calls (config override or package default).
+func (sc *SmartCompressor) effectiveSummaryMaxTokens() int {
+	if sc.summaryMaxTokens > 0 {
+		return sc.summaryMaxTokens
 	}
-	return DefaultMaxSummaryInputChars
+	return DefaultSummaryMaxTokens
 }
 
 // generateSummaryRecursive is the recursive implementation with depth tracking.
@@ -1031,53 +1033,6 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 ) (summary string, hadError bool) {
 	if sc.summaryModel == nil {
 		return "", false
-	}
-
-	// Input-side split guard: one oversized LLM call is slow, failure-prone
-	// and can blow the summary model's context window (observed live: a
-	// single 128K-char task segment from a 16-round sub-agent run — 32s per
-	// call, degraded on failure). The output-side split below can never fire
-	// for single-segment calls, so oversized INPUT must be split before
-	// calling the model. Sub-summaries are then joined.
-	if depth < 2 {
-		totalChars := 0
-		for _, seg := range segments {
-			for _, msg := range seg.Messages {
-				totalChars += len(msg.Content)
-			}
-		}
-		if totalChars > sc.effectiveMaxSummaryInputChars() {
-			var left, right []*TaskSegment
-			if len(segments) > 1 {
-				mid := len(segments) / 2
-				left, right = segments[:mid], segments[mid:]
-			} else if len(segments[0].Messages) > 1 {
-				// Single oversized segment: bisect its messages into two
-				// temporary half-segments.
-				msgs := segments[0].Messages
-				mid := len(msgs) / 2
-				left = []*TaskSegment{{Messages: msgs[:mid]}}
-				right = []*TaskSegment{{Messages: msgs[mid:]}}
-			}
-			if left != nil {
-				log.Warnf("[SmartCompress] batch %d/%d input %d chars exceeds cap %d, splitting input (depth=%d)",
-					batchIndex, totalBatches, totalChars, sc.effectiveMaxSummaryInputChars(), depth)
-				leftSummary, leftErr := sc.generateSummaryRecursive(ctx, left, batchIndex, totalBatches, depth+1)
-				rightSummary, rightErr := sc.generateSummaryRecursive(ctx, right, batchIndex, totalBatches, depth+1)
-				switch {
-				case leftErr && rightErr:
-					return "", true
-				case !leftErr && !rightErr:
-					return leftSummary + "\n" + rightSummary, false
-				case !leftErr:
-					return leftSummary, false
-				default:
-					return rightSummary, false
-				}
-			}
-			// Single oversized message: fall through — the builder below
-			// truncates the input hard to the cap as a last resort.
-		}
 	}
 
 	// Build conversation content from old segments
@@ -1113,13 +1068,6 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 
 	// Dynamic target calculation based on actual input and token budget
 	inputChars := contentBuilder.Len()
-	// Last-resort input truncation (single un-splittable giant message).
-	if cap := sc.effectiveMaxSummaryInputChars(); inputChars > cap*2 {
-		truncated := contentBuilder.String()[:cap*2] + "\n...(输入过长已截断)"
-		contentBuilder.Reset()
-		contentBuilder.WriteString(truncated)
-		inputChars = contentBuilder.Len()
-	}
 	// Default compression ratio: 5x (target = 20% of input)
 	targetChars := inputChars / 5
 	// Cap: ensure all batch summaries fit within token budget.
@@ -1154,8 +1102,8 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 	// headroom, with a floor for small summaries. It is a cap, not a target —
 	// the model stops once the summary is produced.
 	maxOut := targetChars * 2
-	if maxOut < 8192 {
-		maxOut = 8192
+	if floor := sc.effectiveSummaryMaxTokens(); maxOut < floor {
+		maxOut = floor
 	}
 	req.MaxTokens = &maxOut
 
