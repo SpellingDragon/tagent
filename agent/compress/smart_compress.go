@@ -474,8 +474,9 @@ func (sc *SmartCompressor) Compress(
 				summaryKey, archiveErr := sc.archiveSegment(p.seg, summary)
 				if archiveErr == nil {
 					sc.storeArchive(sc.segmentContentHash(p.seg), archivedSegment{summaryKey: summaryKey, summary: summary})
-					// Archival note: user-side observation, never system (see
-					// buildCompressEvent rationale).
+					// Archival note: user-side observation, never system — system is
+					// reserved for instructions; mechanism-generated notes render as
+					// user messages (same rationale as buildSegmentCompressNotice).
 					result = append(result, model.NewUserMessage(
 						fmt.Sprintf("〔历史归档〕[context_archive] evt_%s 已摘要归档，摘要 key=%s", tagentevent.FormatEventKey(segEventKey), tagentevent.FormatEventKey(summaryKey)),
 					))
@@ -754,77 +755,6 @@ type EventInfo struct {
 	Summary string
 }
 
-// collectCompressedEventInfo extracts EventKey, EventType, and a content summary
-// from each message in oldSegments. It parses the "[evt_<KEY>|<type>]" prefix
-// injected by InjectEventKeys, then truncates the remaining content as summary.
-// For messages without a prefix, it falls back to [unknown] type.
-func (sc *SmartCompressor) collectCompressedEventInfo(
-	oldSegments []*TaskSegment,
-) []EventInfo {
-	seen := make(map[int64]bool)
-	var infos []EventInfo
-
-	for _, seg := range oldSegments {
-		for _, msg := range seg.Messages {
-			key, evtType, remainder := tagentevent.ParseEventKeyAndType(msg.Content)
-			if key > 0 && !seen[key] {
-				seen[key] = true
-				summary := truncate(remainder, sc.chunkSummaryLen)
-				if summary == "" {
-					summary = truncate(msg.Content, sc.chunkSummaryLen)
-				}
-				infos = append(infos, EventInfo{
-					Key:     key,
-					Type:    evtType,
-					Summary: summary,
-				})
-			}
-		}
-	}
-
-	return infos
-}
-
-// buildCompressEvent creates a context_compress event message.
-// Lists each compressed event with its key, type, and summary so the LLM
-// can selectively recall specific events by key.
-func (sc *SmartCompressor) buildCompressEvent(
-	segmentCount int,
-	infos []EventInfo,
-	batchCount int,
-	successCount int,
-	summaryHadError bool,
-) model.Message {
-	var content strings.Builder
-
-	content.WriteString(fmt.Sprintf("[context_compress] 压缩了 %d 个对话片段:", segmentCount))
-
-	if len(infos) > 0 {
-		content.WriteString("\n")
-		for _, info := range infos {
-			content.WriteString(fmt.Sprintf("\n- evt_%s [%s]: %s", tagentevent.FormatEventKey(info.Key), info.Type, info.Summary))
-		}
-		content.WriteString("\n\n使用 recall 工具检索对应 key 获取完整内容。")
-	} else {
-		content.WriteString(fmt.Sprintf("\n\n[Compressed: %d earlier tasks omitted.]", segmentCount))
-	}
-
-	switch {
-	case batchCount > 0 && successCount > 0:
-		content.WriteString(fmt.Sprintf("\n\n已生成 %d/%d 批摘要（见下方摘要消息）。", successCount, batchCount))
-		if successCount < batchCount {
-			content.WriteString("部分批次摘要生成失败。")
-		}
-	case batchCount > 0 && summaryHadError:
-		content.WriteString("\n\n摘要生成失败。完整上下文可通过 recall 工具获取。")
-	}
-
-	// USER-side archival note (observation input) — not system (authority
-	// amplification for paraphrased content) and not assistant (imitation
-	// template). See resolveRef's context_compress rationale.
-	return model.NewUserMessage("〔历史归档〕系统生成的压缩摘要（非用户发言，勿模仿此格式）：" + content.String())
-}
-
 // buildSegmentCompressNotice creates an inline compress notice for a single segment.
 // Only lists exec message keys (user input is preserved, not listed here).
 // Placed AFTER user input in the assembled messages.
@@ -1012,80 +942,6 @@ func (sc *SmartCompressor) segmentContentHash(seg *TaskSegment) string {
 		h.Write([]byte{0}) // separator
 	}
 	return fmt.Sprintf("%x", h.Sum64())
-}
-
-// extractExecutionState extracts a structured summary of tool calls and their
-// results from the given segments. This is pure code extraction (no LLM call),
-// ensuring that critical execution state (success/failure, key return values)
-// is never lost during compression.
-//
-// Output format:
-//
-//	[执行状态]
-//	- 调用: search_file({"path":"/tmp",...})
-//	  → 结果: Error: invalid path...
-//	- 调用: action({"command":"curl ..."})
-//	  → 结果: {"session_id":"...","status":"running"}
-//
-// Total length is capped at sc.maxExecStateChars (default: 2000). Each tool result is
-// truncated to sc.maxToolResultChars (default: 500). If total exceeds the cap, the
-// most recent entries are kept (earlier ones are dropped).
-func (sc *SmartCompressor) extractExecutionState(segments []*TaskSegment) string {
-	var lines []string
-
-	for _, seg := range segments {
-		for i := range seg.Messages {
-			msg := &seg.Messages[i]
-			// Tool calls from assistant
-			if msg.Role == model.RoleAssistant && len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					args := truncate(string(tc.Function.Arguments), sc.maxToolArgsChars)
-					lines = append(lines, fmt.Sprintf("- 调用: %s(%s)", tc.Function.Name, args))
-				}
-			}
-			// Tool results
-			if msg.Role == model.RoleTool && msg.Content != "" {
-				result := truncate(msg.Content, sc.maxToolResultChars)
-				lines = append(lines, fmt.Sprintf("  → 结果: %s", result))
-			}
-			// Async tool results injected as system messages (e.g., ActionTool tmux completion)
-			// These contain "[action_tool_result]" prefix from handleStateChange.
-			if msg.Role == model.RoleSystem && msg.Content != "" {
-				if strings.Contains(msg.Content, "[action_tool_result]") {
-					result := truncate(msg.Content, sc.maxToolResultChars)
-					lines = append(lines, fmt.Sprintf("  → 异步结果: %s", result))
-				}
-			}
-			// Plain assistant/user messages without tool calls: keep a short preview so
-			// the summary is never empty and we don't fall back to the full message.
-			if (msg.Role == model.RoleAssistant || msg.Role == model.RoleUser) && msg.Content != "" && len(msg.ToolCalls) == 0 {
-				label := roleLabel(msg.Role)
-				preview := truncate(msg.Content, sc.maxToolResultChars)
-				lines = append(lines, fmt.Sprintf("- %s: %s", label, preview))
-			}
-		}
-	}
-
-	if len(lines) == 0 {
-		return ""
-	}
-
-	result := "[执行状态]\n" + strings.Join(lines, "\n")
-
-	// Truncate to sc.maxExecStateChars, keeping the most recent entries
-	if len(result) > sc.maxExecStateChars {
-		// Find a clean cut point (start of a line) within the last sc.maxExecStateChars chars
-		cutStart := len(result) - sc.maxExecStateChars
-		// Find the first newline after cutStart to avoid cutting mid-line
-		for cutStart < len(result) && result[cutStart] != '\n' {
-			cutStart++
-		}
-		if cutStart < len(result) {
-			result = "[执行状态]\n" + result[cutStart+1:]
-		}
-	}
-
-	return result
 }
 
 // roleLabel returns a human-readable label for a model.Role.
@@ -1342,85 +1198,6 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 		log.Warnf("[SmartCompress] batch %d/%d summary still %d chars after re-summarization, hard truncating to %d",
 			batchIndex, totalBatches, len(result), targetChars)
 		result = result[:targetChars] + "...(摘要已截断)"
-	}
-
-	return result, false
-}
-
-// batchSegmentsByTokenBudget divides segments into batches where each batch's
-// estimated token count stays within maxTokens/2 (leaving room for summary output).
-// Segments that individually exceed the budget form their own batch.
-func (sc *SmartCompressor) batchSegmentsByTokenBudget(
-	segments []*TaskSegment, maxTokens int,
-) [][]*TaskSegment {
-	if len(segments) == 0 {
-		return nil
-	}
-
-	// Use half the token budget for input; reserve half for summary output
-	maxInputTokens := maxTokens / 2
-	if maxInputTokens < 100 {
-		maxInputTokens = 100
-	}
-
-	counter := sc.tokenCounter
-	var batches [][]*TaskSegment
-	var currentBatch []*TaskSegment
-	currentTokens := 0
-
-	for _, seg := range segments {
-		segTokens := counter.Estimate(seg.Messages)
-
-		// Start a new batch if adding this segment would exceed the budget
-		// and the current batch is non-empty
-		if currentTokens+segTokens > maxInputTokens && len(currentBatch) > 0 {
-			batches = append(batches, currentBatch)
-			currentBatch = nil
-			currentTokens = 0
-		}
-
-		currentBatch = append(currentBatch, seg)
-		currentTokens += segTokens
-	}
-
-	if len(currentBatch) > 0 {
-		batches = append(batches, currentBatch)
-	}
-
-	return batches
-}
-
-// summarizeBatches generates LLM summaries for each batch of segments.
-// Each successful summary is wrapped as an assistant message with batch numbering.
-// Failed batches are skipped (log warning). Returns (nil, true) if all batches fail.
-func (sc *SmartCompressor) summarizeBatches(
-	ctx context.Context, batches [][]*TaskSegment,
-) ([]model.Message, bool) {
-	if sc.summaryModel == nil || len(batches) == 0 {
-		return nil, false
-	}
-
-	var result []model.Message
-	successCount := 0
-	totalBatches := len(batches)
-
-	for i, batch := range batches {
-		summary, hadError := sc.generateSummary(ctx, batch, i+1, totalBatches)
-		if hadError || summary == "" {
-			log.Warnf("[SmartCompress] batch %d/%d summary failed, skipping", i+1, totalBatches)
-			continue
-		}
-		successCount++
-		content := fmt.Sprintf("[摘要批次 %d/%d]\n%s", i+1, totalBatches, summary)
-		result = append(result, model.Message{
-			Role:    model.RoleAssistant,
-			Content: content,
-		})
-	}
-
-	if successCount == 0 {
-		log.Warnf("[SmartCompress] all %d batch summaries failed", totalBatches)
-		return nil, true
 	}
 
 	return result, false

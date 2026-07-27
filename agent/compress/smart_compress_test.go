@@ -454,86 +454,6 @@ func TestParseEventKeyAndType_OnlyPrefix(t *testing.T) {
 }
 
 // ============================================================================
-// collectCompressedEventInfo tests
-// ============================================================================
-
-func TestCollectCompressedEventInfo_SingleKey(t *testing.T) {
-	sc := NewSmartCompressor()
-	segments := []*TaskSegment{
-		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_64|external_input] hello"},
-			{Role: model.RoleAssistant, Content: "[evt_65|thinking_plan] world"},
-		}},
-	}
-
-	infos := sc.collectCompressedEventInfo(segments)
-	assert.Len(t, infos, 2)
-	assert.Equal(t, int64(100), infos[0].Key)
-	assert.Equal(t, "external_input", infos[0].Type)
-	assert.Equal(t, "hello", infos[0].Summary)
-	assert.Equal(t, int64(101), infos[1].Key)
-	assert.Equal(t, "thinking_plan", infos[1].Type)
-}
-
-func TestCollectCompressedEventInfo_DuplicateKeys(t *testing.T) {
-	sc := NewSmartCompressor()
-	segments := []*TaskSegment{
-		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_64|external_input] task 1"},
-			{Role: model.RoleAssistant, Content: "[evt_64|task] result 1"},
-		}},
-	}
-
-	infos := sc.collectCompressedEventInfo(segments)
-	assert.Len(t, infos, 1, "duplicate keys should be deduplicated")
-}
-
-func TestCollectCompressedEventInfo_MessagesWithoutPrefix(t *testing.T) {
-	sc := NewSmartCompressor()
-	segments := []*TaskSegment{
-		{Messages: []model.Message{
-			{Role: model.RoleSystem, Content: "system prompt"},
-			{Role: model.RoleUser, Content: "[evt_c8|external_input] hello"},
-		}},
-	}
-
-	infos := sc.collectCompressedEventInfo(segments)
-	assert.Len(t, infos, 1)
-	assert.Equal(t, int64(200), infos[0].Key)
-}
-
-func TestCollectCompressedEventInfo_EmptySegments(t *testing.T) {
-	sc := NewSmartCompressor()
-
-	infos := sc.collectCompressedEventInfo(nil)
-	assert.Empty(t, infos)
-
-	infos = sc.collectCompressedEventInfo([]*TaskSegment{})
-	assert.Empty(t, infos)
-}
-
-func TestCollectCompressedEventInfo_DistinctEventKeys(t *testing.T) {
-	sc := NewSmartCompressor()
-	segments := []*TaskSegment{
-		{Messages: []model.Message{
-			{Role: model.RoleUser, Content: "[evt_6f|external_input] task 1"},
-		}},
-		{Messages: []model.Message{
-			{Role: model.RoleAssistant, Content: "[evt_de|thinking_plan] result 1"},
-		}},
-		{Messages: []model.Message{
-			{Role: model.RoleTool, Content: "[evt_14d|action_command] tool result"},
-		}},
-	}
-
-	infos := sc.collectCompressedEventInfo(segments)
-	assert.Len(t, infos, 3)
-	assert.Equal(t, int64(111), infos[0].Key)
-	assert.Equal(t, int64(222), infos[1].Key)
-	assert.Equal(t, int64(333), infos[2].Key)
-}
-
-// ============================================================================
 // generateSummary split-and-re-summarize tests
 // ============================================================================
 
@@ -638,26 +558,6 @@ func TestGenerateSummary_HardTruncateAsFallback(t *testing.T) {
 	assert.NotEmpty(t, summary)
 	// Should be hard-truncated (targetChars would be ~20 chars, 1.5x = ~30)
 	assert.Less(t, len(summary), len(oversized))
-}
-
-func TestSummarizeBatches_RoleIsAssistant(t *testing.T) {
-	mock := &oversizedMockModel{
-		responses: []string{"摘要内容。"},
-	}
-
-	sc := NewSmartCompressor(
-		WithSummaryModel(mock),
-		WithMaxTokens(8000),
-	)
-
-	batches := [][]*TaskSegment{
-		{{Messages: []model.Message{{Role: model.RoleUser, Content: "test"}}}},
-	}
-
-	msgs, hadError := sc.summarizeBatches(context.Background(), batches)
-	require.False(t, hadError)
-	require.Len(t, msgs, 1)
-	assert.Equal(t, model.RoleAssistant, msgs[0].Role)
 }
 
 // ============================================================================
