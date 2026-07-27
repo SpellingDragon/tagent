@@ -8,9 +8,11 @@ Describe in natural language what you want done and this tool runs it. Use this 
 - Service-type processes (long-lived, output stabilizes) report "ready" once, then run detached until they exit or you cancel them.
 
 **Working directory (IMPORTANT):**
-- Every call runs in a **fresh shell** starting at the workspace root. `cd` does **NOT** persist across calls.
-- To work inside a subdirectory, either chain within one call (`cd sub/dir && …`) or use paths relative to the workspace root / absolute paths.
-- Never assume you are "still" in a directory from a previous call — especially for destructive commands (`rm`/`mv`): prefer workspace-rooted paths.
+- Each `action` call runs in a **fresh shell** at the workspace root. `cd` does **NOT** carry over between **separate** `action` calls.
+- To work inside a subdirectory in one call, chain (`cd sub/dir && …`) or use paths relative to the workspace root / absolute paths.
+- **Re-entry is different**: a still-running session (a long-running command or interactive shell that is alive) is re-entered by `resume_task` into that **same shell** — so `cd`, exported variables and other shell state **DO persist across resumes**.
+- A command that has already exited has its session reaped; `resume_task` then fails — use `relaunch_task` instead.
+- For destructive commands (`rm`/`mv`) prefer workspace-rooted or absolute paths regardless of mode.
 
 **Usage:**
 - Skills live in `./skills/<name>/` — run them via shell (e.g. `./skills/url-fetcher/url_fetcher.js`).
