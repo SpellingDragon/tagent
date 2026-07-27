@@ -46,14 +46,14 @@ func truncStr(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// TestRealLLM_PlanReentry_RestoresPriorContext verifies the plan re-entry
-// capability end-to-end with a real model: a resumed plan agent receives its
-// prior round as restored external context and continues coherently — it
-// retrieves a task established in round 1 even though the round-2 instruction
-// never names it. This is the model-side complement to the white-box wiring
-// test (agent/subagent_resume_test.go): together they prove re-entry both
-// delivers the context AND that the model uses it.
-func TestRealLLM_PlanReentry_RestoresPriorContext(t *testing.T) {
+// TestRealLLM_PlanReentry_ClarificationLoop verifies the plan re-entry
+// capability is a CLARIFICATION LOOP, not mere continuation: when the task is
+// underspecified, plan must ASK the caller for the missing information (not
+// fabricate a plan); when the caller supplies it via a resumed round, plan
+// refines using exactly that information. This is the "缺乏信息时向顶层询问、
+// 持续交互完善" behavior — the model-side complement to the white-box wiring
+// test (agent/subagent_resume_test.go).
+func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-LLM test; skipped in -short")
 	}
@@ -66,7 +66,11 @@ func TestRealLLM_PlanReentry_RestoresPriorContext(t *testing.T) {
 	require.NoError(t, tagent.RegisterBuiltinTools())
 
 	planCfg := tagent.AgentConfig{
-		SystemPrompt:      tagent.PromptConfig{Inline: "你是 plan agent，负责管理 openspec 工作计划的创建、更新与归档。你只产出计划与规格文档，回答简洁。"},
+		SystemPrompt: tagent.PromptConfig{Inline: "你是 plan agent，负责制定 openspec 工作计划。\n" +
+			"制定计划需要足够信息：对象/范围/目标/约束/验收标准。\n" +
+			"信息不足时，不要臆测补全，向调用方提出具体的澄清问题（明确缺哪些信息）；\n" +
+			"调用方经后续输入补充后，你据此完善计划，可多轮迭代直至信息充分再产出正式计划。\n" +
+			"识别充分性：当对象/目标/约束等关键信息已明确时即视为充分，直接产出计划，不要反复追问次要细节。回答简洁。"},
 		Memory:            tagent.MemoryConfig{Type: "memory"},
 		MaxToolIterations: 3,
 		MaxTokens:         16000,
@@ -80,39 +84,53 @@ func TestRealLLM_PlanReentry_RestoresPriorContext(t *testing.T) {
 	planAgent, err := tagent.TestingBuildAgent("plan", planCfg, fullCfg, m, nil, nil, prompt.NewLoader(""), cache)
 	require.NoError(t, err)
 
-	const distinctive = "校验85条事实清单"
-
-	// Round 1: establish a plan whose first task has a distinctive name.
+	// Round 1: an UNDERSPECIFIED task — no object/scope/goal/constraints.
+	// plan must ask clarifying questions, not fabricate a finished plan.
 	out1 := runPlanInvocation(t, planAgent, trpcagent.NewInvocation(
-		trpcagent.WithInvocationMessage(model.NewUserMessage(
-			"建立一个 openspec 工作计划，第 1 个任务必须命名为『"+distinctive+"』。只需回复确认并写出这个任务名。")),
+		trpcagent.WithInvocationMessage(model.NewUserMessage("帮我做一个重构计划。")),
 	))
-	t.Logf("round1: %s", truncStr(out1, 300))
-	require.Contains(t, out1, distinctive, "round 1 must establish the distinctive task")
+	t.Logf("round1: %s", truncStr(out1, 400))
 
-	// Round 2 (re-entry): the resume instruction does NOT name the task — the
-	// agent can only produce it by reading the restored prior-round context.
-	// This mirrors exactly what subagentResume injects (task_round entry).
+	asksQuestion := strings.Contains(out1, "？") || strings.Contains(out1, "?")
+	asksSpecifics := strings.Contains(out1, "重构") &&
+		(strings.Contains(out1, "哪个") || strings.Contains(out1, "什么") ||
+			strings.Contains(out1, "对象") || strings.Contains(out1, "范围") ||
+			strings.Contains(out1, "目标") || strings.Contains(out1, "模块") ||
+			strings.Contains(out1, "约束"))
+	notFinishedPlan := !strings.Contains(out1, "- [ ]")
+	require.True(t, asksQuestion && asksSpecifics,
+		"underspecified task must trigger clarifying questions, got: %s", truncStr(out1, 300))
+	require.True(t, notFinishedPlan,
+		"plan must NOT fabricate a finished task list when info is lacking, got: %s", truncStr(out1, 300))
+
+	// Round 2 (re-entry): the caller supplies the missing information. plan
+	// must refine using EXACTLY these specifics (distinctive markers below).
 	restored := []tagentagent.ExternalContextEntry{{
 		EventType:    "task_round",
-		EventSummary: "〔本任务上一轮〕指令: 建立一个 openspec 工作计划，第 1 个任务命名为『" + distinctive + "』\n结果: " + truncStr(out1, 800),
+		EventSummary: "〔本任务上一轮〕指令: 帮我做一个重构计划。\n结果(你提出的澄清问题): " + truncStr(out1, 600),
 	}}
 	serialized, err := json.Marshal(restored)
 	require.NoError(t, err)
 
 	out2 := runPlanInvocation(t, planAgent, trpcagent.NewInvocation(
 		trpcagent.WithInvocationMessage(model.NewUserMessage(
-			"你上一轮已经建立了一个计划。请先说出该计划第 1 个任务的准确名称，再把它细化为 3 个子步骤。")),
+			"补充信息：重构对象是 memory 模块的 SmartCompressor（范围：仅输入切分逻辑），"+
+				"目标是把压缩延迟降到 20 秒内，硬约束是不能破坏 TestCompression 系列测试，"+
+				"验收标准是现有测试全绿且单次压缩 < 20s。信息已充分，请直接据此产出计划。")),
 		trpcagent.WithInvocationRunOptions(trpcagent.RunOptions{
 			RuntimeState: map[string]any{
 				tagentagent.ExternalContextKey: json.RawMessage(serialized),
 			},
 		}),
 	))
-	t.Logf("round2: %s", truncStr(out2, 500))
+	t.Logf("round2: %s", truncStr(out2, 600))
 
-	// Coherent continuation: the distinctive task name — absent from the
-	// round-2 instruction — must be retrieved from the restored context.
-	require.True(t, strings.Contains(out2, distinctive),
-		"resumed plan agent must retrieve the prior task from restored context (re-entry); got: %s", truncStr(out2, 400))
+	// plan incorporated the supplied specifics (distinctive markers that only
+	// came from the round-2 answer) — proof it refined from the clarification.
+	require.True(t, strings.Contains(out2, "SmartCompressor") || strings.Contains(out2, "memory"),
+		"refined plan must reference the supplied refactor target, got: %s", truncStr(out2, 400))
+	require.True(t, strings.Contains(out2, "20 秒") || strings.Contains(out2, "20秒") || strings.Contains(out2, "延迟"),
+		"refined plan must reference the supplied goal (latency), got: %s", truncStr(out2, 400))
+	require.True(t, strings.Contains(out2, "TestCompression"),
+		"refined plan must honor the supplied constraint, got: %s", truncStr(out2, 400))
 }
