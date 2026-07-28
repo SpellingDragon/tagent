@@ -2,6 +2,7 @@ package compress
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -10,13 +11,17 @@ import (
 )
 
 // countingSummaryModel counts GenerateContent calls and returns a fixed
-// summary (satisfies model.Model for L3 summarization).
+// summary (satisfies model.Model for L3 summarization). Mutex-guarded: the
+// legacy pipeline runs summary jobs concurrently.
 type countingSummaryModel struct {
+	mu    sync.Mutex
 	calls int
 }
 
 func (m *countingSummaryModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
 	m.calls++
+	m.mu.Unlock()
 	ch := make(chan *model.Response, 1)
 	ch <- &model.Response{Choices: []model.Choice{{Message: model.Message{
 		Role: model.RoleAssistant, Content: "固定段摘要: 任务完成",
@@ -91,6 +96,8 @@ func TestArchiveCache_SameSegmentNotResummarized(t *testing.T) {
 		WithSummaryModel(sm),
 		WithKeepRecentTasks(1),
 		WithMaxTokens(1),
+		// Archive cache belongs to the legacy L3 archive path.
+		WithSkeletonSegmentation(false),
 	)
 
 	msgs := buildL3CorpusMsgs()

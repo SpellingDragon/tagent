@@ -58,7 +58,7 @@ graph TD
 
 **无读回、无当前轮抽取**：所有事件（驱动请求、ReAct 内部的 assistant/tool 步骤、final）均在事件插件管线内同步写入投影（见 §四），框架对工具结果事件的 completion-wait 保证下一次 BeforeModel 时投影必已完整（构造保证，非时序碰巧）。旧版的 `extractCurrentTurnMessages`/`filterUser` 读回启发式已删除。
 
-**原生时间线渲染（D3 v2）**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留），因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
+**原生时间线渲染（D3 v2）**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点**双向**保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留）；反向地，结果不在渲染序列中的 assistant tool_calls 被剥离（骨架模型下 L1 常态丢弃 `action_command`，无此规则会每轮发出悬空调用）。因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
 
 ## 四、事件插件管线：存储 + 投影同点原子（含 nil-Response / partial 过滤）
 
@@ -100,17 +100,42 @@ graph TD
 
 ```mermaid
 graph TD
-    IN["Compress(ctx, refs, currentMessages)"] --> T{"usedTokens ≤ threshold ?"}
-    T -- yes --> P1["pass-through<br/>返回 currentMessages 不变<br/>返回 refs 不变"]
-
-    T -- no --> RES["resolveRef 解析历史 refs<br/>MemoryStore 优先取完整 Content<br/>打上 [evt_KEY|type] 前缀"]
-    RES --> MERGE["合并：historical + currentBody"]
-    MERGE --> SC["SmartCompressor.Compress<br/>价值驱动 L0-L3 压缩<br/>保留 KeepRecentTasks 个近期段"]
-    SC --> BR["buildRetainedRefs<br/>扫压缩后消息的 [evt_KEY] 前缀<br/>→ retainedKeys"]
+    IN["Compress(ctx, refs)"] --> RES["resolveRef 解析历史 refs<br/>最近 recentFullCount 条取 MemoryStore 完整 Content<br/>（默认 keepRecent×4，覆盖最近 keepRecent 个完整回合，显式配置优先）<br/>更老 refs 直接用 EventSummary（收敛 store 查询规模）<br/>打上 [evt_KEY|type] 前缀"]
+    RES --> LEG["渲染期配对合法性（双向）<br/>孤儿 tool 结果 → demoteToInputNote<br/>无应答 tool_calls → 剥离（防悬空调用）"]
+    LEG --> T{"usedTokens ≤ threshold ?"}
+    T -- yes --> P1["pass-through<br/>返回解析消息不变<br/>返回 refs 不变"]
+    T -- no --> SC["SmartCompressor.Compress<br/>骨架模型 L0-L3 压缩（见下）"]
+    SC --> BR["buildRetainedRefs<br/>扫压缩后消息的 [evt_KEY] 前缀<br/>→ retainedKeys；未存活 ref 汇入滚动 summary"]
     BR --> OUT["返回：Messages + RetainedRefs + Notices"]
 ```
 
-> 关键点：历史消息（`resolveRef` 解析得到）和当前消息（`InjectEventKeys` 注入过前缀）都带 `[evt_KEY|type]`，`buildRetainedRefs` 据此判断哪些投影 ref 被压缩、哪些被保留，最后调用 `projection.Replace(retainedRefs)` 一次原子替换。
+> 关键点：历史消息（`resolveRef` 解析得到）带 `[evt_KEY|type]` 前缀，压缩产物中被保留的消息**原样携带前缀**，`buildRetainedRefs` 据此判断哪些投影 ref 被压缩、哪些被保留，最后调用 `projection.Replace(retainedRefs)` 一次原子替换。
+
+### 6.1 骨架段模型（task-skeleton-compression）
+
+压缩的组织单元是**以 `agent_output` 为界的完整任务回合**（不再以 user 消息切段）：
+
+- **段 = 一次任务回合** `[external_input, (thinking_plan|action_command)*, agent_output]`，由最终回复闭合（`SegmentMessages`）。识别优先经 `[evt_KEY|type]` 前缀（`ParseEventKeyAndType`），缺前缀时退回启发式（assistant 且无 tool_calls）。
+- **连续 `external_input`**（用户连发、agent 未回）归入同一进行中段；无 `agent_output` 的尾部为**进行中段**（`IsComplete=false`），永不压缩。
+- **段内二分**为事件类型纯函数（`IsSkeletonMessage`，不读内容）：骨架 = `external_input` + `agent_output`；中间事件 = `action_command` / `thinking_plan`。
+- 灰度开关：`compress.skeleton_segmentation: false` 回退旧 user 切段管线（`WithSkeletonSegmentation`）。legacy 管线仍走 LLM 摘要，其单次摘要输入受 `max_summary_input_chars` 约束：超限按消息组二分拆分递归摘要，单条超限 as-is 不截断（D7）。
+
+### 6.2 定级：agent_output 段龄纯函数（deterministicLevel）
+
+`age = totalSegs - 1 - segIdx`（0 = 最新段），`keepRecent` 默认 2；`HasUserInput` 判据已废弃：
+
+| 级别 | 触发 | 段内保留 | 段内丢弃 |
+|------|------|---------|---------|
+| L0 | 进行中段 或 `age < keepRecent` | 全部消息 | 无 |
+| L1 | `age < keepRecent*2` | 骨架 + `thinking_plan` | `action_command`（tool 先丢） |
+| L2 | `age < keepRecent*3` | 仅骨架 | `action_command` + `thinking_plan` |
+| L3 | 更老 或 预算仍不足 | （整段移出时间线） | 全段 → 滚动 summary |
+
+丢弃序 `tool > assistant`：工具结果体积最大、复用价值最低，先丢；`thinking_plan` 承载推理脉络，后丢。预算不足时先把老段压到 L2（骨架），仍超再按最老优先逐段 L3。预算升级为 O(n)：预计算每段四级成本 `cost[i][0..3]`（4n 次 Estimate）后，升级步骤仅做 O(1) 增量更新，不重算全量时间线。
+
+### 6.3 多段压缩归档出口（L3）
+
+L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件（`external_input`/`agent_output`）生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，解开旧模型"每段含 user → 恒 L2 → L3 死代码 → 段数单调膨胀"的死锁（生产实证 `L2: 12→61`）。
 
 ## 七、一次完整请求的端到端时序
 
@@ -150,9 +175,9 @@ sequenceDiagram
 
 | 阶段 | SessionProjection 内容 |
 |------|----------------------|
-| 压缩前 | `[ref1(user), ref2(asst), ref3(tool), ref4(user), ref5(asst), ref6(tool), ref7(user), ref8(asst)]` |
-| KeepRecent=2，L3 压缩旧段 | `[summaryRef(context_compress), ref5(asst), ref6(tool), ref7(user), ref8(asst)]` |
-| 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_5\|agent_output]`、`[evt_6\|action_command]`、`[evt_7\|external_input]`、`[evt_8\|agent_output]` |
+| 压缩前 | `[ref1(user), ref2(tool), ref3(asst_out), ref4(user), ref5(tool), ref6(asst_out), ref7(user), ref8(tool), ref9(asst_out)]`（3 个 agent_output 界定的回合段） |
+| KeepRecent=1，老段 L3 多段压缩 | `[summaryRef(context_compress), ref7(user), ref8(tool), ref9(asst_out)]` |
+| 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_7\|external_input]`、`[evt_8\|action_command]`、`[evt_9\|agent_output]` |
 
 > 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `memory_recall(items=[{key}])` 精确回补原文，或 `recall` 子 agent 做多跳检索。
 

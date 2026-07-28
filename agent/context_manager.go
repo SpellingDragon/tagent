@@ -41,7 +41,6 @@ type ContextManager struct {
 	memStore          memory.MemoryStore
 	maxTokens         int
 	thresholdPct      float64
-	recentFullCount   int
 
 	// Framework integration
 	runner    runner.Runner
@@ -143,7 +142,8 @@ type ContextManagerConfig struct {
 	MemStore     memory.MemoryStore
 
 	// CompactKeysListed / RecentFullCount configure compress.ContextCompressor
-	// constraints (0 = package defaults).
+	// constraints (0 = package defaults; RecentFullCount derives from
+	// keepRecent × compress.DefaultRefsPerTurn when unset, D6).
 	CompactKeysListed int
 	RecentFullCount   int
 	CardMaxChars      int
@@ -166,7 +166,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		memStore:           cfg.MemStore,
 		maxTokens:          cfg.MaxTokens,
 		thresholdPct:       cfg.ThresholdPct,
-		recentFullCount:    4,
 		runner:             nil,
 		name:               cfg.Name,
 		userID:             cfg.UserID,

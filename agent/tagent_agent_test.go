@@ -1,9 +1,10 @@
 package agent
 
 import (
-	"github.com/SpellingDragon/tagent/agent/compress"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/compress"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
@@ -38,9 +39,10 @@ func TestDefaultTokenCounter_Estimate(t *testing.T) {
 	tokensWithTools := counter.Estimate(msgs)
 	assert.Greater(t, tokensWithTools, tokens, "messages with tool calls should have more tokens")
 
-	// Empty messages
+	// Empty messages cost nothing (an L3-compacted segment must not carry a
+	// spurious +1 token in budget escalation).
 	tokens = counter.Estimate([]model.Message{})
-	assert.Equal(t, 1, tokens, "empty messages should estimate as 1 (minimum)")
+	assert.Equal(t, 0, tokens, "empty messages should estimate as 0")
 
 	// Long content
 	longContent := string(make([]byte, 1000))

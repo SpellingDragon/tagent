@@ -17,6 +17,11 @@ func NewDefaultTokenCounter() *DefaultTokenCounter {
 }
 
 func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
+	// An empty set costs nothing — without this, every L3-compacted segment
+	// would carry a spurious +1 token in budget escalation.
+	if len(messages) == 0 {
+		return 0
+	}
 	total := 0
 	for i := range messages {
 		msg := &messages[i]

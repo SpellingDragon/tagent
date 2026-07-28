@@ -51,7 +51,10 @@ type ContextCompressor struct {
 	keepRecent   int
 
 	// recentFullCount is the number of most recent refs to resolve with
-	// full content from MemoryStore. Older refs use EventSummary.
+	// full content from MemoryStore. Older refs use EventSummary. When not
+	// explicitly configured it derives from keepRecent × DefaultRefsPerTurn
+	// so the most recent keepRecent complete turns resolve full as a whole
+	// (D6).
 	recentFullCount int
 
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
@@ -85,7 +88,8 @@ func WithCompactKeysListed(n int) ContextCompressorOption {
 }
 
 // WithRecentFullCount sets how many most-recent refs resolve with full
-// content from MemoryStore (default DefaultRecentFullCount).
+// content from MemoryStore, overriding the derived default
+// (keepRecent × DefaultRefsPerTurn, see D6).
 func WithRecentFullCount(n int) ContextCompressorOption {
 	return func(cc *ContextCompressor) {
 		if n > 0 {
@@ -149,18 +153,25 @@ func NewContextCompressor(
 		keepRecent = 2
 	}
 	cc := &ContextCompressor{
-		compressor:      sc,
-		memStore:        memStore,
-		tokenCounter:    tokenCounter,
-		maxTokens:       maxTokens,
-		thresholdPct:    thresholdPct,
-		keepRecent:      keepRecent,
-		recentFullCount: DefaultRecentFullCount,
-		listedKeysCap:   DefaultCompactKeysListed,
-		cardMaxChars:    DefaultCardMaxChars,
+		compressor:    sc,
+		memStore:      memStore,
+		tokenCounter:  tokenCounter,
+		maxTokens:     maxTokens,
+		thresholdPct:  thresholdPct,
+		keepRecent:    keepRecent,
+		listedKeysCap: DefaultCompactKeysListed,
+		cardMaxChars:  DefaultCardMaxChars,
 	}
 	for _, opt := range opts {
 		opt(cc)
+	}
+	// D6: unless explicitly configured, the full-resolution window covers the
+	// most recent keepRecent complete turns as a whole — a fixed small count
+	// would push the second-newest L0 turn into the summary-only zone and
+	// demote its action_command results, weakening the L0 full-fidelity
+	// semantics.
+	if cc.recentFullCount <= 0 {
+		cc.recentFullCount = keepRecent * DefaultRefsPerTurn
 	}
 	return cc
 }
@@ -196,16 +207,27 @@ func (cc *ContextCompressor) Compress(
 	// Resolve ALL refs from the projection into NATIVE timeline messages
 	// (D3 v2): assistant tool_calls and role=tool results keep protocol form —
 	// the model sees exactly its training distribution, leaving no textual
-	// call syntax to imitate. Pairing legality is enforced HERE at render time
-	// (single place): a result whose call is not in the rendered sequence
-	// (compacted away, or id lost) is demoted to a user-side input note —
-	// content preserved, so ANY compression window cut stays legal without
-	// the compressor being pairing-aware.
+	// call syntax to imitate. Pairing legality has TWO layers of ownership:
+	//   1. RENDER time (here): repairs pre-existing dangles in the projection
+	//      — results whose call is already gone (compacted in an earlier
+	//      round, or id lost) are demoted to user-side input notes, and
+	//      calls whose result is already gone are stripped below.
+	//   2. COMPRESS time (applySegmentLevel L1): when THIS round drops a
+	//      segment's action_command results, it strips the matching
+	//      tool_calls in the same pass — the output of one compression is
+	//      legal on its own.
+	// Content is preserved in both layers, so ANY compression window cut
+	// stays legal without the compressor being pairing-aware globally.
 	declared := make(map[string]bool)
 	consumed := make(map[string]bool)
 	resolved := make([]model.Message, 0, len(refs))
-	for _, ref := range refs {
-		msg := cc.resolveRef(ctx, ref)
+	// Only the most recent recentFullCount refs resolve with full content
+	// from MemoryStore; older refs render from their EventSummary. This
+	// bounds each BeforeModel's store-query volume to O(recentFullCount)
+	// instead of O(refs) (task-skeleton-compression, performance item).
+	fullFrom := len(refs) - cc.recentFullCount
+	for i, ref := range refs {
+		msg := cc.resolveRef(ctx, ref, i >= fullFrom)
 		switch msg.Role {
 		case model.RoleAssistant:
 			for _, tc := range msg.ToolCalls {
@@ -221,6 +243,26 @@ func (cc *ContextCompressor) Compress(
 			}
 		}
 		resolved = append(resolved, msg)
+	}
+	// Render-time legality for CALLS (layer 1, symmetric with
+	// demoteToInputNote): strip tool_calls whose result is not in the
+	// rendered sequence — the result ref was dropped by an EARLIER round's
+	// L1, or resolved summary-only past recentFullCount. Without this,
+	// stale unanswered calls would be re-sent every round. The prose
+	// content (with its event prefix) is preserved. This-round drops are
+	// layer 2's job (applySegmentLevel L1 strips calls alongside results).
+	for i := range resolved {
+		msg := &resolved[i]
+		if msg.Role != model.RoleAssistant || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		var kept []model.ToolCall
+		for _, tc := range msg.ToolCalls {
+			if tc.ID != "" && consumed[tc.ID] {
+				kept = append(kept, tc)
+			}
+		}
+		msg.ToolCalls = kept
 	}
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
@@ -270,12 +312,14 @@ func (cc *ContextCompressor) Compress(
 }
 
 // resolveRef resolves a single EventReference to a native timeline message.
-// Full content comes from MemoryStore when available, falling back to the
-// reference's EventSummary. The result is tagged with [evt_KEY|type] so
+// When full is true the content comes from MemoryStore; otherwise (older
+// refs beyond recentFullCount) the reference's EventSummary is used directly
+// — no store query. The result is tagged with [evt_KEY|type] so
 // SmartCompressor and buildRetainedRefs can track retained refs.
 func (cc *ContextCompressor) resolveRef(
 	ctx context.Context,
 	ref memory.EventReference,
+	full bool,
 ) model.Message {
 	// context_compress refs are summary references — rendered as a USER-side
 	// archival note (observation input), never role=system/assistant:
@@ -299,19 +343,19 @@ func (cc *ContextCompressor) resolveRef(
 	var toolCalls []model.ToolCall
 	toolID := ""
 	resolved := false
-	if cc.memStore != nil && ref.EventKey > 0 {
-		full, err := cc.memStore.GetEvent(ref.EventKey)
-		if err == nil && full != nil {
-			toolCalls = full.ToolCalls
-			toolID = full.ToolID
+	if full && cc.memStore != nil && ref.EventKey > 0 {
+		evt, err := cc.memStore.GetEvent(ref.EventKey)
+		if err == nil && evt != nil {
+			toolCalls = evt.ToolCalls
+			toolID = evt.ToolID
 			switch {
 			// FullEvent.Content is the authoritative (sanitized-at-storage) text;
 			// prefer it over the raw Response message.
-			case full.Content != "" || len(full.ToolCalls) > 0:
-				content = full.Content
+			case evt.Content != "" || len(evt.ToolCalls) > 0:
+				content = evt.Content
 				resolved = true
-			case full.Response != nil && len(full.Response.Choices) > 0:
-				m := full.Response.Choices[0].Message
+			case evt.Response != nil && len(evt.Response.Choices) > 0:
+				m := evt.Response.Choices[0].Message
 				content = m.Content
 				if len(m.ToolCalls) > 0 {
 					toolCalls = m.ToolCalls
@@ -320,8 +364,8 @@ func (cc *ContextCompressor) resolveRef(
 					toolID = m.ToolID
 				}
 				resolved = true
-			case full.EventSummary != "":
-				content = full.EventSummary
+			case evt.EventSummary != "":
+				content = evt.EventSummary
 				resolved = true
 			}
 		}

@@ -1,10 +1,6 @@
-# deterministic-compress-level Specification
+# deterministic-compress-level Delta
 
-## Purpose
-
-基于事件类型和段年龄的确定性压缩分级规则，以纯函数替代 LLM 价值评估，为每个任务回合段（以 `agent_output` 为边界）返回 0–3 的压缩级别，保证相同输入始终产出相同压缩决策。
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 确定性压缩分级纯函数
 

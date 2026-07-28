@@ -19,11 +19,12 @@ import (
 // SmartCompressor performs deterministic context compression with optional
 // LLM summary generation.
 //
-// Pipeline:
-//  1. Segment messages by user-input boundaries.
-//  2. Deterministic level assignment based on segment age and content type.
-//  3. Per-segment compression: L0 (keep) / L1 (selective) / L2 (partial) / L3 (archive).
-//  4. Assemble compressed context with inline notices.
+// Pipeline (skeleton model, default):
+//  1. Segment messages into task turns bounded by agent_output.
+//  2. Deterministic level per segment age (pure function).
+//  3. Per-segment drop: L0 (keep) / L1 (drop tool) / L2 (skeleton only) /
+//     L3 (multi-segment compaction — whole segment leaves the timeline).
+//  4. Assemble chronologically; kept messages keep their event key prefixes.
 //
 // This is a "view transformation" — it modifies the messages sent to the LLM,
 // but does NOT modify the Session or Projection.
@@ -33,13 +34,20 @@ type SmartCompressor struct {
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
 	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
 
+	// skeletonSegmentation selects the skeleton pipeline (task-skeleton-
+	// compression): agent_output-bounded segments, age-driven levels,
+	// tool>assistant drop order, L3 multi-segment compaction. Default on;
+	// false falls back to the legacy user-boundary pipeline below.
+	skeletonSegmentation bool
+
 	// archiveCache maps segment content hash → archived artifact, so the same
 	// segment is NEVER re-summarized or re-stored across rounds (material law:
 	// cost stays O(new segments), independent of history size).
-	archiveCacheMu   sync.Mutex
-	archiveCache     map[string]archivedSegment
-	archiveCacheCap  int // bound on cached entries (0 → DefaultArchiveCacheCap)
-	summaryMaxTokens int // output-token budget floor for summary calls (0 → DefaultSummaryMaxTokens)
+	archiveCacheMu       sync.Mutex
+	archiveCache         map[string]archivedSegment
+	archiveCacheCap      int // bound on cached entries (0 → DefaultArchiveCacheCap)
+	maxSummaryInputChars int // splitting threshold for one summary call's input (0 → DefaultMaxSummaryInputChars)
+	summaryMaxTokens     int // output-token budget floor for summary calls (0 → DefaultSummaryMaxTokens)
 
 	// Configurable truncation parameters
 	maxExecStateChars  int // Total execution state truncation (default: 2000)
@@ -56,13 +64,14 @@ type SmartCompressor struct {
 // NewSmartCompressor creates a new SmartCompressor.
 func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 	sc := &SmartCompressor{
-		KeepRecentTasks:    2,
-		tokenCounter:       NewDefaultTokenCounter(),
-		maxTokens:          DefaultMaxTokens,
-		maxExecStateChars:  2000,
-		maxToolResultChars: 500,
-		maxToolArgsChars:   80,
-		chunkSummaryLen:    150,
+		KeepRecentTasks:      2,
+		tokenCounter:         NewDefaultTokenCounter(),
+		maxTokens:            DefaultMaxTokens,
+		maxExecStateChars:    2000,
+		maxToolResultChars:   500,
+		maxToolArgsChars:     80,
+		chunkSummaryLen:      150,
+		skeletonSegmentation: true,
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -85,6 +94,13 @@ func WithKeepRecentTasks(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) {
 		sc.KeepRecentTasks = n
 	}
+}
+
+// WithSkeletonSegmentation toggles the skeleton pipeline (agent_output
+// segment boundaries + age-driven levels + multi-segment compaction).
+// Default true; false reverts to the legacy user-boundary pipeline.
+func WithSkeletonSegmentation(enabled bool) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.skeletonSegmentation = enabled }
 }
 
 // WithMaxTokens sets the token budget used for batch size calculation.
@@ -118,6 +134,18 @@ func WithMaxNoticeChars(n int) SmartCompressorOption {
 // WithChunkSummaryLen sets the summary length per segment.
 func WithChunkSummaryLen(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.chunkSummaryLen = n }
+}
+
+// WithMaxSummaryInputChars sets the splitting threshold for a single summary
+// call's input (0 → DefaultMaxSummaryInputChars). A giant segment exceeding it
+// is split into smaller message-groups (each summarized separately then
+// joined); a single oversized message is sent as-is (never content-truncated).
+func WithMaxSummaryInputChars(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) {
+		if n > 0 {
+			sc.maxSummaryInputChars = n
+		}
+	}
 }
 
 // WithSummaryMaxTokens sets the output-token budget floor for summary calls
@@ -156,7 +184,223 @@ func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.tokenCounter = tc }
 }
 
-// Compress implements budget-aware greedy compression with deterministic level assignment.
+// Compress implements budget-aware compression.
+//
+// Default (skeleton pipeline, task-skeleton-compression):
+// 1. Segment messages into task turns bounded by agent_output
+// 2. Deterministic level per segment age (pure function, zero LLM):
+//   - L0: keep all (in-progress segment, or age < keepRecent)
+//   - L1: drop action_command, keep skeleton + thinking_plan
+//   - L2: skeleton only (external_input + agent_output)
+//   - L3: multi-segment compaction — whole segment leaves the timeline;
+//     ContextCompressor.buildRetainedRefs folds it into the rolling summary
+//
+// 3. Budget escalation: old segments → L2, then oldest → L3 until under budget
+//
+// Legacy (WithSkeletonSegmentation(false)): user-boundary segments with
+// HasUserInput-driven levels and per-segment LLM summaries (see
+// compressLegacy).
+func (sc *SmartCompressor) Compress(
+	ctx context.Context,
+	messages []model.Message,
+	inv *agent.Invocation,
+) []model.Message {
+	if sc.skeletonSegmentation {
+		return sc.compressSkeleton(ctx, messages)
+	}
+	return sc.compressLegacy(ctx, messages, inv)
+}
+
+// deterministicLevel assigns a compression level to a task segment by age
+// (deterministic-compress-level spec). Pure function: no side effects, no
+// LLM/store reads; age = totalSegs - 1 - segIdx (0 = newest). The old
+// HasUserInput criterion is retired — segments are agent_output-bounded, so
+// archival (L3) is genuinely reachable.
+func deterministicLevel(seg *TaskSegment, segIdx, totalSegs, keepRecent int) int {
+	if seg == nil || !seg.IsComplete {
+		return 0 // in-progress segment: pending input, never compressed
+	}
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	age := totalSegs - 1 - segIdx
+	switch {
+	case age < keepRecent:
+		return 0
+	case age < keepRecent*2:
+		return 1
+	case age < keepRecent*3:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// applySegmentLevel renders the messages a segment keeps at a level. Kept
+// messages retain their original content — and thus the [evt_KEY|type]
+// prefix — so buildRetainedRefs can track surviving refs. Drop order is
+// tool > assistant: L1 drops action_command only, L2 drops thinking_plan
+// too, L3 drops the whole segment (multi-segment compaction).
+func applySegmentLevel(seg *TaskSegment, level int) []model.Message {
+	switch level {
+	case 0:
+		return seg.Messages
+	case 1:
+		out := make([]model.Message, 0, len(seg.Messages))
+		for i := range seg.Messages {
+			msg := seg.Messages[i]
+			if MessageEventType(&msg) == tagentevent.TypeActionCommand {
+				continue
+			}
+			// Results are dropped, so declared calls must go too — a
+			// dangling tool_call is illegal in native protocol form. Keep
+			// the prose (with its event prefix); drop pure-call messages.
+			if len(msg.ToolCalls) > 0 {
+				if msg.Content == "" {
+					continue
+				}
+				msg.ToolCalls = nil
+			}
+			out = append(out, msg)
+		}
+		return out
+	case 2:
+		out := make([]model.Message, 0, len(seg.Messages))
+		for i := range seg.Messages {
+			msg := seg.Messages[i]
+			if !IsSkeletonMessage(&msg) {
+				continue
+			}
+			msg.ToolCalls = nil
+			out = append(out, msg)
+		}
+		return out
+	default:
+		// L3 multi-segment compaction: the whole segment leaves the timeline.
+		// Its event keys never appear in the output, so buildRetainedRefs
+		// folds the skeleton (external_input/agent_output cards) into the
+		// rolling summary — the archival exit, zero LLM required.
+		return nil
+	}
+}
+
+// compressSkeleton is the skeleton-model pipeline. It is pure engineering —
+// no summary-model calls — so it never fails or degrades; with
+// summaryModel=nil the archival path still completes via the rolling-summary
+// index cards downstream.
+func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message) []model.Message {
+	startTime := time.Now()
+	systemMsg, rest := SplitSystemMessage(messages)
+	segments := SegmentMessages(rest)
+
+	keepRecent := sc.KeepRecentTasks
+	if keepRecent < 1 {
+		keepRecent = 1
+	}
+	completeCount := 0
+	for _, seg := range segments {
+		if seg.IsComplete {
+			completeCount++
+		}
+	}
+	beforeTokens := sc.tokenCounter.Estimate(messages)
+	if beforeTokens <= sc.maxTokens && completeCount <= keepRecent {
+		return messages
+	}
+
+	// Base levels by segment age (pure function).
+	levels := make([]int, len(segments))
+	for i, seg := range segments {
+		levels[i] = deterministicLevel(seg, i, len(segments), keepRecent)
+	}
+
+	// Precompute per-segment cost at every level (4n Estimate calls), so
+	// budget escalation below is O(1) incremental per step instead of
+	// re-estimating the whole timeline (O(n²) — code review M1).
+	systemCost := 0
+	if systemMsg != nil {
+		systemCost = sc.tokenCounter.Estimate([]model.Message{*systemMsg})
+	}
+	cost := make([][4]int, len(segments))
+	for i, seg := range segments {
+		for lvl := 0; lvl <= 3; lvl++ {
+			cost[i][lvl] = sc.tokenCounter.Estimate(applySegmentLevel(seg, lvl))
+		}
+	}
+	total := systemCost
+	for i := range segments {
+		total += cost[i][levels[i]]
+	}
+
+	// Budget escalation (D3 "预算仍不足"): press all old complete segments to
+	// skeleton first, then compact whole segments oldest-first. Segments
+	// within keepRecent and in-progress segments are never escalated.
+	escalate := func(i, lvl int) {
+		total -= cost[i][levels[i]] - cost[i][lvl]
+		levels[i] = lvl
+	}
+	if total > sc.maxTokens {
+		for i, seg := range segments {
+			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 2 {
+				escalate(i, 2)
+			}
+		}
+	}
+	if total > sc.maxTokens {
+		for i, seg := range segments {
+			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 3 {
+				escalate(i, 3)
+				if total <= sc.maxTokens {
+					break
+				}
+			}
+		}
+	}
+
+	// Chronological assembly: kept messages carry their original event key
+	// prefixes so surviving refs stay trackable downstream.
+	result := make([]model.Message, 0, len(messages))
+	if systemMsg != nil {
+		result = append(result, *systemMsg)
+	}
+	changed := false
+	levelCounts := map[int]int{0: 0, 1: 0, 2: 0, 3: 0}
+	for i, seg := range segments {
+		kept := applySegmentLevel(seg, levels[i])
+		if len(kept) != len(seg.Messages) {
+			changed = true
+		}
+		levelCounts[levels[i]]++
+		result = append(result, kept...)
+	}
+	if !changed {
+		return messages
+	}
+
+	afterTokens := sc.tokenCounter.Estimate(result)
+	metrics := map[string]interface{}{
+		"event":         "smart_compress",
+		"mode":          "skeleton",
+		"before_tokens": beforeTokens,
+		"after_tokens":  afterTokens,
+		"segments":      len(segments),
+		"l0_keep":       levelCounts[0],
+		"l1_drop_tool":  levelCounts[1],
+		"l2_skeleton":   levelCounts[2],
+		"l3_compact":    levelCounts[3],
+		"duration_ms":   time.Since(startTime).Milliseconds(),
+	}
+	if metricsJSON, err := json.Marshal(metrics); err == nil {
+		log.Infof("[SmartCompress] %s tokens=%d->%d (%+d) levels=L0:%d L1:%d L2:%d L3:%d",
+			string(metricsJSON), beforeTokens, afterTokens, afterTokens-beforeTokens,
+			levelCounts[0], levelCounts[1], levelCounts[2], levelCounts[3])
+	}
+	return result
+}
+
+// compressLegacy is the pre-skeleton pipeline (user-boundary segments,
+// HasUserInput-driven levels, per-segment LLM summaries), kept as the
+// WithSkeletonSegmentation(false) rollback path.
 //
 // Algorithm:
 // 1. Segment messages by user input boundary
@@ -169,7 +413,7 @@ func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
 //
 // 4. Per-segment LLM call for level 2 exec and level 1 non-key (degrade to first-stage on failure)
 // 5. Assemble: chronological order with level-specific handling
-func (sc *SmartCompressor) Compress(
+func (sc *SmartCompressor) compressLegacy(
 	ctx context.Context,
 	messages []model.Message,
 	inv *agent.Invocation,
@@ -180,7 +424,7 @@ func (sc *SmartCompressor) Compress(
 	systemMsg, rest := SplitSystemMessage(messages)
 
 	// 2. Segment by user input boundary
-	segments := SegmentMessages(rest)
+	segments := segmentMessagesByUser(rest)
 
 	// 3. Quick exit: not enough segments or under budget with few segments
 	beforeTokens := sc.tokenCounter.Estimate(messages)
@@ -1018,6 +1262,15 @@ func (sc *SmartCompressor) generateSummary(
 	return sc.generateSummaryRecursive(ctx, segments, batchIndex, totalBatches, 0)
 }
 
+// effectiveMaxSummaryInputChars returns the splitting threshold for one
+// summary call's input (config override or package default).
+func (sc *SmartCompressor) effectiveMaxSummaryInputChars() int {
+	if sc.maxSummaryInputChars > 0 {
+		return sc.maxSummaryInputChars
+	}
+	return DefaultMaxSummaryInputChars
+}
+
 // effectiveSummaryMaxTokens returns the output-token budget floor for summary
 // calls (config override or package default).
 func (sc *SmartCompressor) effectiveSummaryMaxTokens() int {
@@ -1033,6 +1286,50 @@ func (sc *SmartCompressor) generateSummaryRecursive(
 ) (summary string, hadError bool) {
 	if sc.summaryModel == nil {
 		return "", false
+	}
+
+	// Giant-segment splitting: bound each summary call's input by splitting an
+	// oversized input into smaller message-groups, summarized separately then
+	// joined. Only message-GROUP splitting is done — a single oversized message
+	// is sent as-is (splitting one message's content is meaningless and loses
+	// information).
+	if depth < 2 {
+		totalChars := 0
+		for _, seg := range segments {
+			for _, msg := range seg.Messages {
+				totalChars += len(msg.Content)
+			}
+		}
+		if totalChars > sc.effectiveMaxSummaryInputChars() {
+			var left, right []*TaskSegment
+			switch {
+			case len(segments) > 1:
+				mid := len(segments) / 2
+				left, right = segments[:mid], segments[mid:]
+			case len(segments[0].Messages) > 1:
+				msgs := segments[0].Messages
+				mid := len(msgs) / 2
+				left = []*TaskSegment{{Messages: msgs[:mid]}}
+				right = []*TaskSegment{{Messages: msgs[mid:]}}
+			}
+			if left != nil {
+				log.Debugf("[SmartCompress] batch %d/%d input %d chars exceeds split threshold %d, splitting (depth=%d)",
+					batchIndex, totalBatches, totalChars, sc.effectiveMaxSummaryInputChars(), depth)
+				leftSummary, leftErr := sc.generateSummaryRecursive(ctx, left, batchIndex, totalBatches, depth+1)
+				rightSummary, rightErr := sc.generateSummaryRecursive(ctx, right, batchIndex, totalBatches, depth+1)
+				switch {
+				case leftErr && rightErr:
+					return "", true
+				case !leftErr && !rightErr:
+					return leftSummary + "\n" + rightSummary, false
+				case !leftErr:
+					return leftSummary, false
+				default:
+					return rightSummary, false
+				}
+			}
+			// Single message exceeding the threshold: fall through and send as-is.
+		}
 	}
 
 	// Build conversation content from old segments

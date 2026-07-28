@@ -211,13 +211,18 @@ type CompressConfig struct {
 	MaxToolResultChars int
 	MaxExecStateChars  int
 	ChunkSummaryLen    int
+	// SkeletonSegmentation toggles agent_output-boundary skeleton compression
+	// (task-skeleton-compression). nil defaults to enabled; false falls back
+	// to the legacy user-boundary segmentation.
+	SkeletonSegmentation *bool
 	// MaxNoticeChars caps the compress-notice text length (default 800).
 	MaxNoticeChars int
 	// CompactKeysListed caps the number of keys listed in the rolling
 	// compaction summary (default 32); older events stay recallable.
 	CompactKeysListed int
 	// RecentFullCount is the number of most recent refs resolved with full
-	// content from MemoryStore (default 4).
+	// content from MemoryStore. Unset (0) derives keepRecent ×
+	// compress.DefaultRefsPerTurn (D6); explicit values win.
 	RecentFullCount int
 	// CardMaxChars caps the index-card section of the rolling compaction
 	// summary (default compress.DefaultCardMaxChars); beyond it old card lines are
@@ -226,6 +231,9 @@ type CompressConfig struct {
 	// ArchiveCacheCap bounds the per-process L3 archive cache entries
 	// (default compress.DefaultArchiveCacheCap).
 	ArchiveCacheCap int
+	// MaxSummaryInputChars is the splitting threshold for one summary call's
+	// input (0 → pkg default). Giant segments are split, not truncated.
+	MaxSummaryInputChars int
 	// SummaryMaxTokens is the output-token budget floor for summary calls
 	// (0 → pkg default). Guards reasoning models against empty Content.
 	SummaryMaxTokens int
@@ -445,8 +453,14 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	if cfg.Compress.ArchiveCacheCap > 0 {
 		opts = append(opts, compress.WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
 	}
+	if cfg.Compress.MaxSummaryInputChars > 0 {
+		opts = append(opts, compress.WithMaxSummaryInputChars(cfg.Compress.MaxSummaryInputChars))
+	}
 	if cfg.Compress.SummaryMaxTokens > 0 {
 		opts = append(opts, compress.WithSummaryMaxTokens(cfg.Compress.SummaryMaxTokens))
+	}
+	if cfg.Compress.SkeletonSegmentation != nil {
+		opts = append(opts, compress.WithSkeletonSegmentation(*cfg.Compress.SkeletonSegmentation))
 	}
 	return opts
 }

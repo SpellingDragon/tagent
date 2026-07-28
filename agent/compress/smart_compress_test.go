@@ -89,7 +89,7 @@ func TestSplitSystemMessage_Empty(t *testing.T) {
 }
 
 // ============================================================================
-// SegmentMessages tests
+// segmentMessagesByUser (legacy fallback) tests
 // ============================================================================
 
 func TestSplitByTaskBoundary_SingleTask(t *testing.T) {
@@ -98,7 +98,7 @@ func TestSplitByTaskBoundary_SingleTask(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "hi"},
 	}
 
-	segments := SegmentMessages(messages)
+	segments := segmentMessagesByUser(messages)
 	require.Len(t, segments, 1)
 	// Incomplete because no next user input to close it
 	assert.False(t, segments[0].IsComplete)
@@ -113,7 +113,7 @@ func TestSplitByTaskBoundary_MultipleTasks(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "result 2"},
 	}
 
-	segments := SegmentMessages(messages)
+	segments := segmentMessagesByUser(messages)
 	require.Len(t, segments, 2)
 	// First segment is complete (closed by next user input)
 	assert.True(t, segments[0].IsComplete)
@@ -128,7 +128,7 @@ func TestSplitByTaskBoundary_IncompleteTask(t *testing.T) {
 		{Role: model.RoleUser, Content: "task 2 (incomplete)"},
 	}
 
-	segments := SegmentMessages(messages)
+	segments := segmentMessagesByUser(messages)
 	require.Len(t, segments, 2)
 	assert.True(t, segments[0].IsComplete)
 	assert.False(t, segments[1].IsComplete, "last segment without next user input should be incomplete")
@@ -143,23 +143,23 @@ func TestSplitByTaskBoundary_ToolCallNotBoundary(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "final answer"},
 	}
 
-	segments := SegmentMessages(messages)
+	segments := segmentMessagesByUser(messages)
 	require.Len(t, segments, 1, "tool call cycle should be part of one task")
 	// Incomplete because no next user input to close it
 	assert.False(t, segments[0].IsComplete)
 }
 
 func TestSplitByTaskBoundary_Empty(t *testing.T) {
-	segments := SegmentMessages(nil)
+	segments := segmentMessagesByUser(nil)
 	assert.Nil(t, segments)
 }
 
 // ============================================================================
-// SmartCompressor Compress tests
+// SmartCompressor Compress tests (legacy pipeline, skeleton off)
 // ============================================================================
 
 func TestSmartCompress_Stage1Only(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1)) // Force compression
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1), WithSkeletonSegmentation(false)) // Force compression
 
 	// Build messages with multiple task segments
 	messages := []model.Message{
@@ -201,7 +201,7 @@ func TestSmartCompress_Stage1Only(t *testing.T) {
 }
 
 func TestSmartCompress_PreservesSystem(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithSkeletonSegmentation(false))
 
 	messages := []model.Message{
 		{Role: model.RoleSystem, Content: "important system prompt"},
@@ -218,7 +218,7 @@ func TestSmartCompress_PreservesSystem(t *testing.T) {
 }
 
 func TestSmartCompress_PreservesRecentTasks(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(2))
+	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithSkeletonSegmentation(false))
 
 	messages := []model.Message{
 		{Role: model.RoleSystem, Content: "system"},
@@ -249,7 +249,7 @@ func TestSmartCompress_PreservesRecentTasks(t *testing.T) {
 }
 
 func TestSmartCompress_UnderThreshold(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(2))
+	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithSkeletonSegmentation(false))
 
 	// Only 1 task segment, which is <= keepRecentTasks
 	messages := []model.Message{
@@ -262,7 +262,7 @@ func TestSmartCompress_UnderThreshold(t *testing.T) {
 }
 
 func TestSmartCompress_NoSystem(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithSkeletonSegmentation(false))
 
 	// Long non-key assistant output gives the old segment a real compression
 	// target (short messages are all "key" → empty target → nothing to compress).
@@ -306,7 +306,7 @@ func TestSmartCompress_NoSystem(t *testing.T) {
 func TestSmartCompress_Fallback_NoModel(t *testing.T) {
 	// Without summaryModel, L2 degrades to first-stage (drop tool, keep text)
 	// and injects a [context_compress_error] notice so the agent is aware.
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithSkeletonSegmentation(false))
 
 	// The old segment carries a LONG assistant message (>100 chars → non-key,
 	// compressible) so there is a genuine compression target; without a summary
@@ -337,7 +337,7 @@ func TestSmartCompress_Fallback_NoModel(t *testing.T) {
 
 func TestSmartCompress_Fallback_CompressNoticeFormat(t *testing.T) {
 	// Without summaryModel, verify the error notice format
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithSkeletonSegmentation(false))
 
 	longOutput := strings.Repeat("detailed execution output padding ", 6)
 	messages := []model.Message{
@@ -373,6 +373,7 @@ func TestSmartCompress_Fallback_WhenAllSegmentsRecent(t *testing.T) {
 		WithMaxTokens(50), // Force over-budget with only 2 segments
 		WithMemStore(memStore),
 		WithSummaryModel(&mockBatchSummaryModel{responses: []string{"summary of task 1"}}),
+		WithSkeletonSegmentation(false),
 	)
 
 	// Two task segments (both "recent" because keep_recent=2), with large
@@ -562,6 +563,94 @@ func TestGenerateSummary_HardTruncateAsFallback(t *testing.T) {
 }
 
 // ============================================================================
+// Giant-segment splitting tests (MaxSummaryInputChars, legacy path — D7)
+// ============================================================================
+
+// capturingSummaryModel records each summarization prompt (the user message
+// of the request) and returns a fixed short summary.
+type capturingSummaryModel struct {
+	mu      sync.Mutex
+	prompts []string
+}
+
+func (m *capturingSummaryModel) GenerateContent(
+	ctx context.Context, request *model.Request,
+) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	if len(request.Messages) > 1 {
+		m.prompts = append(m.prompts, request.Messages[1].Content)
+	}
+	m.mu.Unlock()
+
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Choices: []model.Choice{{Message: model.Message{Content: "短摘要。"}}},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *capturingSummaryModel) Info() model.Info { return model.Info{Name: "capturing-mock"} }
+
+// TestGenerateSummary_GiantSegmentSplitsByMessageGroup: input exceeding
+// MaxSummaryInputChars is split into message groups, each summarized in a
+// separate call whose input stays below the original total.
+func TestGenerateSummary_GiantSegmentSplitsByMessageGroup(t *testing.T) {
+	mock := &capturingSummaryModel{}
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+		WithMaxSummaryInputChars(1000),
+	)
+
+	// One segment, 4 messages × 400 runes (1200 bytes) = 4800 bytes > 1000 → split.
+	var msgs []model.Message
+	for i := 0; i < 4; i++ {
+		msgs = append(msgs, model.Message{Role: model.RoleAssistant, Content: strings.Repeat("内", 400)})
+	}
+	segments := []*TaskSegment{{Messages: msgs}}
+
+	summary, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+	assert.NotEmpty(t, summary)
+
+	mock.mu.Lock()
+	prompts := append([]string(nil), mock.prompts...)
+	mock.mu.Unlock()
+	require.GreaterOrEqual(t, len(prompts), 2, "oversized input must split into multiple summary calls")
+	totalContent := 4 * len(strings.Repeat("内", 400))
+	for i, p := range prompts {
+		assert.Less(t, len(p), totalContent, "call %d input must be a sub-group, not the whole segment", i)
+	}
+}
+
+// TestGenerateSummary_SingleOversizedMessageSentAsIs: a single message
+// exceeding the threshold is sent whole — splitting one message's content is
+// meaningless and content truncation is prohibited.
+func TestGenerateSummary_SingleOversizedMessageSentAsIs(t *testing.T) {
+	mock := &capturingSummaryModel{}
+	sc := NewSmartCompressor(
+		WithSummaryModel(mock),
+		WithMaxTokens(8000),
+		WithMaxSummaryInputChars(1000),
+	)
+
+	giant := "HEAD" + strings.Repeat("x", 2000) + "TAIL"
+	segments := []*TaskSegment{{Messages: []model.Message{
+		{Role: model.RoleUser, Content: giant},
+	}}}
+
+	_, hadError := sc.generateSummary(context.Background(), segments, 1, 1)
+	require.False(t, hadError)
+
+	mock.mu.Lock()
+	prompts := append([]string(nil), mock.prompts...)
+	mock.mu.Unlock()
+	require.Len(t, prompts, 1, "single oversized message must go in one call")
+	assert.Contains(t, prompts[0], giant, "content must be sent as-is, never truncated")
+}
+
+// ============================================================================
 // eventTypeToRole tests
 // ============================================================================
 
@@ -607,7 +696,7 @@ func TestEventTypeToRole(t *testing.T) {
 // that barely reduces tokens (observed live as dur≈0 degradations where
 // after>=before). Regression guard for the empty-target skip.
 func TestSmartCompress_EmptyTarget_NotFalseDegradation(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1))
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithSkeletonSegmentation(false))
 
 	// Segment 0 = [user "a"] only → L1 with EMPTY nonKeyMsgs (nothing to
 	// compress). Segment 1 = [user "b", assistant "result b"] is recent (L0).
