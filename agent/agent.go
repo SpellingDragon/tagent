@@ -161,6 +161,12 @@ type TagentConfig struct {
 	// stays retrievable via get_task_result.
 	TaskSettledMaxInline int
 
+	// TaskTerminalTTL is the grace period an exited task (completed/failed/
+	// cancelled/dead) is retained before pruning. It bounds the resume_task
+	// window for terminal subagent tasks (task-chain restorer). Non-positive
+	// falls back to the task package default (2m).
+	TaskTerminalTTL time.Duration
+
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
 	ThinkingEnabled      *bool
 	ThinkingTokens       *int
@@ -331,6 +337,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
 			bus.Publish(newTaskSettledEvent(tk, sig, cfg.TaskSettledMaxInline))
 		},
+		// Zero → task package default (2m). Bounds the resume window for
+		// terminal tasks; wired from YAML task_terminal_ttl.
+		TerminalTTL: cfg.TaskTerminalTTL,
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook

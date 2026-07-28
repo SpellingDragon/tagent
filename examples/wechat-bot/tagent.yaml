@@ -132,6 +132,17 @@ agents:
     reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
     compress_threshold: 0.8
     keep_recent_tasks: 2
+    # ===== 异步任务/重入相关（均可选，未配置时用默认值） =====
+    # task_terminal_ttl: 终态任务（completed/failed/cancelled/dead）被回收前的
+    #   保留期（duration 字符串，默认 "2m"）。它同时是终态 subagent 任务的
+    #   resume_task 重入窗口：超过此时长后任务被 prune，只能发起全新调用。
+    #   需要更长续行窗口（如 plan 任务隔很久追加指令）可调大。
+    # task_terminal_ttl: "30m"
+    # resume_context_rounds: 重入时任务链还原器注入的前序轮次数（默认 3）
+    # resume_context_rounds: 3
+    # task_settled_max_inline: task_settled 通知内联结果上限（默认 2000，
+    #   全量结果始终可经 get_task_result 查询）
+    # task_settled_max_inline: 2000
     # Compression configuration
     compress:
       # summary_model: LLM model for context compression summaries.

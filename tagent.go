@@ -337,6 +337,15 @@ func buildAgent(
 		TaskSettledMaxInline: acfg.TaskSettledMaxInline,
 		WorkspaceRoot:        acfg.WorkspaceRoot,
 	}
+	// task_terminal_ttl: duration string → time.Duration; empty/invalid falls
+	// back to the task package default (2m) via zero value.
+	if acfg.TaskTerminalTTL != "" {
+		if ttl, err := time.ParseDuration(acfg.TaskTerminalTTL); err == nil && ttl > 0 {
+			agentCfg.TaskTerminalTTL = ttl
+		} else {
+			log.Warnf("[tagent] agent %q: invalid task_terminal_ttl %q, using default", name, acfg.TaskTerminalTTL)
+		}
+	}
 	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {
 		agentCfg.SummaryModel = summaryModel
 	}

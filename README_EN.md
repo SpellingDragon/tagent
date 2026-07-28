@@ -241,6 +241,7 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 | `compress_threshold` | `0.8` | compression trigger ratio |
 | `keep_recent_tasks` | `2` | recent tasks kept on compression |
 | `task_settled_max_inline` | `2000` | inline result cap in task_settled |
+| `task_terminal_ttl` | `"2m"` | retention of exited tasks before pruning (also the resume_task window for terminal tasks) |
 | `resume_context_rounds` | `3` | prior rounds restored on sub-agent resume |
 | `temperature` | entry 0.7 / sub 0.3 | LLM temperature |
 | `meditation.enabled` | `false` | enable meditation (`interval`/`min_gap`/`prompt_file`) |

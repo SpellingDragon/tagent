@@ -176,6 +176,11 @@ type AgentConfig struct {
 	// notification (default 2000); full results stay retrievable via
 	// get_task_result.
 	TaskSettledMaxInline int `json:"task_settled_max_inline,omitempty" yaml:"task_settled_max_inline,omitempty"`
+	// TaskTerminalTTL is the grace period an exited task (completed/failed/
+	// cancelled/dead) is retained before pruning, as a duration string
+	// (e.g. "2m", "30m"). It bounds the resume_task window for terminal
+	// subagent tasks. Empty/invalid → default "2m".
+	TaskTerminalTTL string `json:"task_terminal_ttl,omitempty" yaml:"task_terminal_ttl,omitempty"`
 	// ResumeContextRounds caps how many prior rounds the subagent task-chain
 	// restorer injects on resume (default 3).
 	ResumeContextRounds int            `json:"resume_context_rounds,omitempty" yaml:"resume_context_rounds,omitempty"`

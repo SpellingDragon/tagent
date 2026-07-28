@@ -2,9 +2,11 @@ package tagent
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // ============================================================================
@@ -339,4 +341,23 @@ func TestLoadConfig_ExampleYAML(t *testing.T) {
 	assert.Contains(t, fileToolIDs, "save_file")
 	assert.NotContains(t, cfg.Agents, "read")
 	assert.NotContains(t, cfg.Agents, "write")
+}
+
+// TestAgentConfig_TaskTerminalTTL: the task_terminal_ttl YAML field parses as
+// a duration string and flows to agent.TagentConfig (bounds the resume_task
+// window for terminal subagent tasks).
+func TestAgentConfig_TaskTerminalTTL(t *testing.T) {
+	var acfg AgentConfig
+	require.NoError(t, yaml.Unmarshal([]byte("task_terminal_ttl: \"30m\"\n"), &acfg))
+	assert.Equal(t, "30m", acfg.TaskTerminalTTL)
+
+	ttl, err := time.ParseDuration(acfg.TaskTerminalTTL)
+	require.NoError(t, err)
+	assert.Equal(t, 30*time.Minute, ttl)
+
+	// Unset stays empty → buildAgent leaves TagentConfig.TaskTerminalTTL zero
+	// → task package default (2m).
+	var empty AgentConfig
+	require.NoError(t, yaml.Unmarshal([]byte("max_tokens: 1000\n"), &empty))
+	assert.Empty(t, empty.TaskTerminalTTL)
 }

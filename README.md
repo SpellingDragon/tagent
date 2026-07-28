@@ -241,6 +241,7 @@ graph TB
 | `compress_threshold` | `0.8` | 压缩触发比例 |
 | `keep_recent_tasks` | `2` | 压缩保留的最近任务数 |
 | `task_settled_max_inline` | `2000` | task_settled 通知内联结果上限 |
+| `task_terminal_ttl` | `"2m"` | 终态任务回收前保留期（也是终态任务的 resume_task 重入窗口） |
 | `resume_context_rounds` | `3` | 子 Agent 重入还原的前序轮次数 |
 | `temperature` | 入口 0.7 / 子 0.3 | LLM 温度 |
 | `meditation.enabled` | `false` | 启用冥想（`interval`/`min_gap`/`prompt_file`） |
