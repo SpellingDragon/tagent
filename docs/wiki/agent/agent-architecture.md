@@ -118,9 +118,19 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 **文件**：`compress/smart_compress.go`（agent/compress 子包）
 
-确定性定级（L0-L3 纯函数）+ 可选 LLM 摘要，注册为 BeforeModel 回调：
-- L0 保留 / L1 选择性 / L2 部分 / L3 全量归档（挂 RelationStore 因果链+来源 keys，同段跨轮不重摘）
+骨架模型确定性压缩（task-skeleton-compression，默认开启，`skeleton_segmentation: false` 回退旧 user 切段 legacy 管线）：
+
+| 级别 | 触发（age = 段在新→旧序列中的位置） | 段内保留 |
+|------|------|---------|
+| L0 | 进行中段 或 `age < keepRecent` | 全部消息 |
+| L1 | `age < keepRecent*2` | 骨架 + `thinking_plan`（丢 `action_command`） |
+| L2 | `age < keepRecent*3` | 仅骨架（`external_input` + `agent_output`） |
+| L3 | 更老 或 预算仍不足 | 整段移出时间线 → 滚动 summary 归档 |
+
+- 段 = 以 `agent_output` 为界的完整任务回合；定级为段龄纯函数（`deterministicLevel`，零 LLM）
+- 预算升级 O(n)：预计算每段四级成本后 O(1) 增量升档
 - 使用注入的 `TokenCounter`，不自行创建
+- legacy 管线保留可选 LLM 摘要与 L3 归档（挂 RelationStore 因果链+来源 keys，同段跨轮不重摘）
 
 ### 2.6 Compactor（滚动卡片序列）
 
@@ -294,14 +304,16 @@ TagentAgent.runEventLoop:
 
 ### 6.1 压缩（SmartCompressor）
 
-SmartCompressor 作为 BeforeModel 回调，在框架构建 messages 后、调用 model 前执行：
-- Stage 1：按任务边界（`agent_output`）丢弃旧任务段；`protectPendingAsyncSegments` 保护含 `{status:running}` 的未完成异步工具结果
-- Stage 2：对丢弃的段生成 LLM 摘要（如果配置了 `summaryModel`）
-- `buildCompressEvent`：从 oldSegments 消息的 `[evt_KEY|type]` 前缀提取每个被压缩事件的 key + type + summary，生成可读清单供 LLM 按需 recall
-- `extractExecutionState`：提取工具调用/结果精简行（截断参数可配置，扩展支持 `[system] tmux` 异步结果）
-- **仅修改 `args.Request.Messages`，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2）
+SmartCompressor 由 ContextCompressor 在 BeforeModel 装配回调中调用，在投影解析为消息后、调用 model 前执行（骨架模型，见 §2.5 定级表与 [event-flow.md §六](event-flow.md)）：
+- 以 `agent_output` 为界切分完整任务回合（`SegmentMessages`），段龄纯函数定级，按 `tool > assistant` 序丢弃中间事件，零 LLM 不失败不降级
+- L1 丢弃 `action_command` 结果时同步剥离对应 tool_calls（单轮产物自洽合法）
+- L3 整段不进入产物，由 `buildRetainedRefs` 收编进滚动 summary（`external_input`/`agent_output` 成卡片行，recall 可溯源）
+- 保留消息原样携带 `[evt_KEY|type]` 前缀，衔接存活 ref 判定
+- **仅修改发给 LLM 的消息视图，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2；投影替换由 ContextCompressor 的 RetainedRefs 返回值驱动）
 
-截断参数通过 `SmartCompressorOption` 配置（`WithMaxExecStateChars`、`WithMaxToolResultChars`、`WithMaxToolArgsChars`、`WithChunkSize`、`WithChunkSummaryLen`），也可通过 YAML `compress` 段配置。
+legacy 管线（`WithSkeletonSegmentation(false)`）保留旧 user 切段 + 可选 LLM 摘要路径，其单次摘要输入受 `max_summary_input_chars` 约束（超限按消息组二分拆分，单条超限 as-is 不截断）。
+
+截断/摘要参数通过 `SmartCompressorOption` 配置（`WithMaxExecStateChars`、`WithMaxToolResultChars`、`WithMaxToolArgsChars`、`WithChunkSummaryLen`、`WithSkeletonSegmentation`），也可通过 YAML `compress` 段配置。
 
 ### 6.1.1 时间线渲染红线（外部分析常见误判点）
 

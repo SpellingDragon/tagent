@@ -907,9 +907,10 @@ func resolvePartitions(query QueryOptions) []int {
 
 ```mermaid
 graph LR
-    A["事件原文<br/>(第0层,唯一全文接触点)"] -->|L3 归档,同段跨轮不重摘| B["段摘要<br/>context_compress_summary"]
-    B -->|工程化提取,零 LLM| C["卡片行<br/>(边界事件骨架)"]
-    C -->|超 card_max_chars,LLM 整理| D["浓缩卡片<br/>(保任务骨架+key引用)"]
+    A["事件原文<br/>(第0层,唯一全文接触点)"] -->|"骨架模型：多段压缩,工程化提取零 LLM"| C["卡片行<br/>(边界事件骨架)"]
+    A -->|"legacy：L3 归档,同段跨轮不重摘"| B["段摘要<br/>context_compress_summary"]
+    B -->|工程化提取,零 LLM| C
+    C -->|"超 card_max_chars,LLM 整理"| D["浓缩卡片<br/>(保任务骨架+key引用)"]
     B -.SetParent 挂 RelationStore.-> A
 ```
 
@@ -939,6 +940,6 @@ graph LR
 |------|-----------|---------|
 | **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文 | 沉底前抽取"约束型事实"入固化物；对账测试常态化 |
 | **向量检索未接入** | `SearchByEmbedding` 接口预留，实现返回 `ErrVectorSearchNotSupported`；语义召回当前仅关键词路径（`QueryOptions.Keyword`） | 接入向量库时 recall 协议入口不变（items/query 分流已隔离检索层） |
-| **固化物因果回溯不完整** | L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；但从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
+| **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |
 | **历史脏数据** | 旧 11 位 mask 时代的负 key / 超界分区（如 1167）残留于实机存量 | TTL 自然清退；不做主动迁移（读路径已容错） |

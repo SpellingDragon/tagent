@@ -592,56 +592,35 @@ LLM 看到的就是 EventSummary
 | 层次 | 机制 | 处理对象 |
 |------|------|----------|
 | **事件层** | `inferEventInfo()` | 单个 Event → EventSummary |
-| **消息层** | `SmartCompress` | model.Message[] → 按 task boundary 压缩 + LLM 生成摘要 |
+| **消息层** | `SmartCompress` | model.Message[] → 按任务回合切段 + 骨架压缩 |
 
-**SmartCompress 两阶段**：
+**SmartCompress 骨架模型（task-skeleton-compression，默认）**：
 
-```
-Stage 1: 按 task boundary 切分
-  model.Message[] → TaskSegment[]
-  保留最近的 N 个 segment（默认 2 个）
-  丢弃旧的 segment
+| 步骤 | 行为 |
+|------|------|
+| 切段 | 以 `agent_output` 为界切分完整任务回合（`SegmentMessages`） |
+| 定级 | 段龄纯函数 L0-L3（零 LLM），保留最近 keepRecent 个回合（默认 2） |
+| 段内丢弃 | `tool > assistant` 序：L1 丢 `action_command`，L2 仅留骨架 |
+| 归档 | L3 整段移出时间线，骨架事件经卡片行汇入滚动 summary（user 级〔历史归档〕注记，**永不插入 system**） |
 
-Stage 2: 丢弃的 segment 生成摘要
-  oldSegments → LLM → "[对话历史摘要] ..."
-  摘要作为 system message 插入
-```
+legacy 管线（`skeleton_segmentation: false`）保留旧 user 切段 + 可选 LLM 摘要路径。
 
+**SmartCompress 在 BeforeModel 执行**（由 `agent/context_manager.go` 的装配回调经 `compress.ContextCompressor` 调用）：投影 refs 解析为消息后估算 token，超 `max_tokens × compress_threshold` 阈值时调用 `SmartCompressor.Compress` 重写消息视图，并以 `RetainedRefs` 替换投影。
 
-**SmartCompress 在 BeforeModel 执行**（`context_intervention.go`）：
-
-```go
-func (ci *ContextIntervention) BeforeModel(ctx, args) {
-    usedTokens := ci.tokenCounter.Estimate(args.Request.Messages)
-    threshold := int(float64(ci.maxTokens) * ci.thresholdPct)
-
-    if usedTokens > threshold {
-        compressed := ci.compressor.Compress(ctx, args.Request.Messages)
-        args.Request.Messages = compressed  // 修改发给 LLM 的消息
-    }
-}
-```
-
-**视图转换原则**：SmartCompress **只修改发给 LLM 的 messages 视图**，不修改 Session 原始数据。Session.Events（EventReference[]）保持不变，MemoryStore 中的 FullEvent 也保持不变。
+**视图转换原则**：SmartCompress **只修改发给 LLM 的 messages 视图**，不修改 Session 原始数据，MemoryStore 中的 FullEvent 也保持不变（投影的 EventReference 替换由 ContextCompressor 的返回值驱动，是引用层的有界化，非事件本体修改）。
 
 ### 12.4 Token 估算公式
 
 ```go
-// agent/token_counter.go
+// agent/compress/token_counter.go
 Estimate(messages []model.Message) int {
-    // 1. 所有消息内容的字符数
-    totalChars := sum(len(msg.Content) for msg in messages)
-    // 2. 加上每个消息的固定 overhead（role + 分隔符）
-    totalChars += len(messages) * 10  // overhead per message
-    // 3. 加上 tool_calls 的 overhead
-    toolCallChars := sum(len(json(tc)) for tc in all_tool_calls)
-    totalChars += toolCallChars
-    // 4. 字符数 / chars_per_token
-    return (totalChars + overhead) / CharsPerToken
+    // 空集特判返回 0（L3 移出段不计成本）
+    // 每条消息：rune 数 / CharsPerToken + 10 固定 overhead
+    // 每个 tool_call：+20
 }
 ```
 
-**`CharsPerToken`**：经验值约 3.5~4.0（中英文混合场景约 2.5）。TokenCounter 是估算，不是精确计算，误差在 10-20%。
+**`CharsPerToken`**：默认 2.0（中英混合场景的保守估值）。TokenCounter 是估算，不是精确计算，误差在 10-20%。
 
 ### 12.5 完整数据流总览
 

@@ -249,10 +249,11 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `skeleton_segmentation` | `true` | skeleton compression (agent_output-bounded turns + age-driven levels + multi-segment archival); `false` falls back to legacy user-boundary segmentation |
 | `summary_model` / `summary_provider` | (inherit agent) | dedicated compression model (can be cheaper) |
 | `card_max_chars` | `6000` | card-section cap; beyond it old cards are LLM-condensed or sink |
 | `compact_keys_listed` | `32` | recent keys listed in the rolling summary |
-| `recent_full_count` | `4` | most-recent refs resolved with full content |
+| `recent_full_count` | `keep_recent_tasks × 4` | most-recent refs resolved with full content (derived when unset so recent complete turns resolve full; explicit values win) |
 | `max_notice_chars` | `800` | compression notice cap |
 | `archive_cache_cap` | `256` | in-process archive cache entries (artifacts persist in MemoryStore) |
 

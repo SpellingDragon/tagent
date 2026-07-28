@@ -182,7 +182,7 @@ func IsSpecialEventType(eventType string) bool
 
 ## 七、GenerateEventSummary — event_summary 元数据视图
 
-> **退位语义（unified-memory-curation）**：尽管函数名含 "Summary"，它**不是内容总结**——多数事件类型下它就是原文，action_command 下是机械化的工具调用行。它用于展示与 recall 列表；内容级总结只在压缩固化时刻发生（SmartCompressor L3 → 段摘要 → 卡片行，素材律）。
+> **退位语义（unified-memory-curation）**：尽管函数名含 "Summary"，它**不是内容总结**——多数事件类型下它就是原文，action_command 下是机械化的工具调用行。它用于展示与 recall 列表；内容级总结只在压缩固化时刻发生（骨架模型下：多段压缩 → 卡片行工程化提取，超限时 `curateCards` LLM 浓缩；legacy 路径保留 L3 → 段摘要 → 卡片行，素材律）。
 
 ### 7.1 函数签名
 

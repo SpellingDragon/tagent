@@ -249,10 +249,11 @@ graph TB
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
+| `skeleton_segmentation` | `true` | 骨架分段压缩（agent_output 切段 + 段龄定级 + 多段归档）；`false` 回退旧 user 切段 |
 | `summary_model` / `summary_provider` | （继承 agent） | 压缩摘要专用模型（可用廉价模型） |
 | `card_max_chars` | `6000` | 卡片序列长度上限；超限旧卡 LLM 整理或沉底 |
 | `compact_keys_listed` | `32` | 滚动摘要列出的 recent keys 上限 |
-| `recent_full_count` | `4` | 以全文解析的最近引用数 |
+| `recent_full_count` | `keep_recent_tasks × 4` | 以全文解析的最近引用数（未配置时派生，覆盖最近完整回合；显式配置优先） |
 | `max_notice_chars` | `800` | 压缩通知文案上限 |
 | `archive_cache_cap` | `256` | 进程内归档缓存条数（固化物本体永在 MemoryStore） |
 
