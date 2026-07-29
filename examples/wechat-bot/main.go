@@ -341,23 +341,39 @@ func main() {
 					}
 					log.Infof("[Agent][%s->%s] %s", triggerSource, userLabel, truncateLog(content))
 
+					// 原始文本（用于文件解析，避免被长文本截断逻辑破坏路径）
+					originalContent := content
+
 					// Send reply — use SendTextToUser to get the latest context token
-					// (interim messages may have refreshed the token)
+					// (interim messages may have refreshed the token). Long text
+					// (>2000) is split / converted to file via SendLongText.
+					textSent := false
 					if len(content) > 2000 {
-						// For long text, try SendLongText first
 						token, _ := bot.GetContextToken(chatID)
 						if token != "" {
-							_, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token)
-							if err == nil {
-								continue
+							if _, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token); err == nil {
+								textSent = true // 长文本已发送，跳过 SendTextToUser
+							} else {
+								// Fall through to SendTextToUser with truncated text
+								content = content[:2000] + "\n\n[Message truncated]"
 							}
-							// Fall through to SendTextToUser with truncated text
+						} else {
 							content = content[:2000] + "\n\n[Message truncated]"
 						}
 					}
-					if err := bot.SendTextToUser(ctx, chatID, content); err != nil {
-						log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
+					if !textSent {
+						if err := bot.SendTextToUser(ctx, chatID, content); err != nil {
+							log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
+						}
 					}
+
+					// Deliver any local files referenced in the original reply.
+					// Files are sent via WeChat using the persisted context_token,
+					// attaching to the correct conversation thread. Text sending is
+					// handled above; DeliverFiles only sends files. Per-file failures
+					// are logged and isolated inside DeliverFiles (non-fatal), so it
+					// always returns nil and needs no error check here.
+					DeliverFiles(bot, ctx, chatID, originalContent, wechatCfg.WorkspaceDir)
 				default:
 					// Unknown trigger source: log only
 					log.Warnf("[Agent][%s] 未知触发源，输出: %s", triggerSource, truncateLog(content))
@@ -495,6 +511,7 @@ type WechatAppConfig struct {
 	ConfigDir       string `json:"config_dir"`
 	TokenFile       string `json:"token_file"`
 	ContextTokenDir string `json:"context_token_dir"`
+	WorkspaceDir    string `json:"workspace_dir"`
 }
 
 // loadWechatConfig extracts WeChat config from tagent.yaml's app.wechat section.
@@ -516,6 +533,9 @@ func loadWechatConfig(app map[string]any) WechatAppConfig {
 		}
 		if v, ok := raw["context_token_dir"].(string); ok {
 			cfg.ContextTokenDir = v
+		}
+		if v, ok := raw["workspace_dir"].(string); ok {
+			cfg.WorkspaceDir = v
 		}
 	}
 	return cfg

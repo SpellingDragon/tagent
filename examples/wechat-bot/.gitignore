@@ -9,6 +9,8 @@
 !go.mod
 !go.sum
 !main.go
+!file_delivery.go
+!file_delivery_test.go
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml
