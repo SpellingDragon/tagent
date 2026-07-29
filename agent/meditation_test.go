@@ -37,37 +37,52 @@ func TestNewMeditationManager(t *testing.T) {
 	assert.Equal(t, inj, mgr.injector)
 }
 
-func TestMeditationManager_UpdateLastEventTime(t *testing.T) {
+func TestMeditationManager_UpdateAnchors(t *testing.T) {
 	inj := &mockMessageInjector{}
 	mgr := NewMeditationManager(MeditationConfig{}, inj)
 
 	now := time.Now()
-	mgr.UpdateLastEventTime(now)
+	mgr.UpdateLastUserInput(now)
+	mgr.UpdateLastTurnEnd(now)
 
-	stored := time.UnixMilli(mgr.lastEventTime.Load())
-	assert.WithinDuration(t, now, stored, time.Second)
+	assert.WithinDuration(t, now, time.UnixMilli(mgr.lastUserInput.Load()), time.Second)
+	assert.WithinDuration(t, now, time.UnixMilli(mgr.lastTurnEnd.Load()), time.Second)
 }
 
-func TestMeditationManager_checkAndMeditate_SkipsWhenNoEvents(t *testing.T) {
+func TestMeditationManager_checkAndMeditate_SkipsWhenNoUserInput(t *testing.T) {
 	inj := &mockMessageInjector{}
-	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Second}, inj)
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
 
+	// Even with a completed turn long ago, no user input ⇒ nothing to reflect on.
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.checkAndMeditate()
 
 	assert.Empty(t, inj.messages)
 }
 
-func TestMeditationManager_checkAndMeditate_SkipsWhenGapTooSmall(t *testing.T) {
+func TestMeditationManager_checkAndMeditate_SkipsWhenNoTurnCompleted(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
+
+	// User input arrived but no turn has completed yet (first turn in flight).
+	mgr.UpdateLastUserInput(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+
+	assert.Empty(t, inj.messages)
+}
+
+func TestMeditationManager_checkAndMeditate_SkipsWhenIdleTooSmall(t *testing.T) {
 	inj := &mockMessageInjector{}
 	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Hour}, inj)
 
-	mgr.UpdateLastEventTime(time.Now())
+	mgr.UpdateLastUserInput(time.Now().Add(-time.Second))
+	mgr.UpdateLastTurnEnd(time.Now())
 	mgr.checkAndMeditate()
 
 	assert.Empty(t, inj.messages)
 }
 
-func TestMeditationManager_checkAndMeditate_FiresWhenGapMet(t *testing.T) {
+func TestMeditationManager_checkAndMeditate_FiresWhenGatesMet(t *testing.T) {
 	inj := &mockMessageInjector{}
 	cfg := MeditationConfig{
 		MinGap:     time.Millisecond,
@@ -75,8 +90,9 @@ func TestMeditationManager_checkAndMeditate_FiresWhenGapMet(t *testing.T) {
 	}
 	mgr := NewMeditationManager(cfg, inj)
 
-	// Set last event time in the past so gap >= MinGap.
-	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	// Both gates pass: user input exists (novelty) and last turn ended long ago (idle).
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.checkAndMeditate()
 
 	require.Len(t, inj.messages, 1)
@@ -91,38 +107,85 @@ func TestMeditationManager_checkAndMeditate_UpdatesLastMeditation(t *testing.T) 
 	cfg := MeditationConfig{MinGap: time.Millisecond}
 	mgr := NewMeditationManager(cfg, inj)
 
-	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.checkAndMeditate()
 
 	assert.Greater(t, mgr.lastMeditation.Load(), int64(0))
 }
 
 // Novelty gate: during sustained silence a second meditation must NOT fire —
-// there has been no real activity since the previous one. Without this gate,
-// silence becomes a self-feeding loop of "nothing happened" summaries.
-func TestMeditationManager_checkAndMeditate_SkipsWithoutNewActivity(t *testing.T) {
+// no new user input since the previous one.
+func TestMeditationManager_checkAndMeditate_SkipsWithoutNewUserInput(t *testing.T) {
 	inj := &mockMessageInjector{}
 	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
 
-	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.checkAndMeditate()
 	require.Len(t, inj.messages, 1, "first meditation fires")
 
-	// No UpdateLastEventTime in between (silence) — second check must skip.
+	// Silence — second check must skip.
 	mgr.checkAndMeditate()
-	assert.Len(t, inj.messages, 1, "no second meditation without new activity")
+	assert.Len(t, inj.messages, 1, "no second meditation without new user input")
 
-	// Real activity arrives AFTER the last meditation → gate re-arms.
+	// New user input AFTER the last meditation → gate re-arms.
 	time.Sleep(2 * time.Millisecond)
-	mgr.UpdateLastEventTime(time.Now())
-	time.Sleep(2 * time.Millisecond) // let the idle gate (MinGap=1ms) pass
+	mgr.UpdateLastUserInput(time.Now())
+	mgr.UpdateLastTurnEnd(time.Now().Add(-10 * time.Millisecond)) // idle gate passes
 	mgr.checkAndMeditate()
-	assert.Len(t, inj.messages, 2, "meditation fires again after real activity")
+	assert.Len(t, inj.messages, 2, "meditation fires again after new user input")
 }
 
-// Anchor exclusion: a meditation-triggered final output must not update the
-// idle anchor — only real agent activity moves lastEventTime.
-func TestOnEventCallback_MeditationFinalDoesNotResetIdleAnchor(t *testing.T) {
+// Perpetual-motion regression (meditation-gate-split): turns derived from a
+// meditation (spawned tasks settling as Source="task" reclaim turns) move ONLY
+// the idle anchor. Without new user input, meditation must never re-fire, no
+// matter how many MinGap windows elapse.
+func TestMeditationManager_MeditationDerivedTurnsDoNotRearm(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
+
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	require.Len(t, inj.messages, 1, "first meditation fires")
+
+	// Simulate the meditation turn and its spawned tasks' settle turns ending
+	// repeatedly, each leaving the idle gate wide open again.
+	for i := 0; i < 3; i++ {
+		mgr.UpdateLastTurnEnd(time.Now().Add(-10 * time.Millisecond))
+		mgr.checkAndMeditate()
+	}
+	assert.Len(t, inj.messages, 1, "derived turn ends must not re-arm meditation")
+
+	// Only real user input re-arms the novelty gate.
+	time.Sleep(2 * time.Millisecond)
+	mgr.UpdateLastUserInput(time.Now())
+	mgr.UpdateLastTurnEnd(time.Now().Add(-10 * time.Millisecond))
+	mgr.checkAndMeditate()
+	assert.Len(t, inj.messages, 2, "meditation fires again after real user input")
+}
+
+// Self-lock: after firing, the novelty gate blocks all subsequent checks by
+// itself (lastUserInput <= lastMeditation) — no fire-time anchor reset needed.
+func TestMeditationManager_SelfLocksAfterFiring(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond}, inj)
+
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	require.Len(t, inj.messages, 1)
+
+	for i := 0; i < 5; i++ {
+		mgr.checkAndMeditate()
+	}
+	assert.Len(t, inj.messages, 1, "novelty gate self-locks without any reset")
+}
+
+// The event callback must not touch meditation anchors at all — gating moved
+// to the injection points (novelty) and runEventLoop turn ends (idle).
+func TestOnEventCallback_DoesNotTouchMeditationAnchors(t *testing.T) {
 	inj := &mockMessageInjector{}
 	mgr := NewMeditationManager(MeditationConfig{MinGap: time.Hour}, inj)
 	ta := &TagentAgent{name: "t", meditationMgr: mgr}
@@ -136,10 +199,61 @@ func TestOnEventCallback_MeditationFinalDoesNotResetIdleAnchor(t *testing.T) {
 	}
 
 	callback(final("meditation"))
-	assert.Zero(t, mgr.LastEventTime(), "meditation output must not move the idle anchor")
-
 	callback(final("user"))
-	assert.Greater(t, mgr.LastEventTime(), int64(0), "real output moves the idle anchor")
+	callback(final("task"))
+
+	assert.Zero(t, mgr.lastUserInput.Load(), "callback must not arm the novelty gate")
+	assert.Zero(t, mgr.lastTurnEnd.Load(), "callback must not move the idle anchor")
+}
+
+// Injection-side arming: only source=="user" updates the novelty anchor.
+func TestArmMeditationNoveltyGate_UserSourceOnly(t *testing.T) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{}, inj)
+	ta := &TagentAgent{name: "t", meditationMgr: mgr}
+
+	ta.armMeditationNoveltyGate("meditation")
+	ta.armMeditationNoveltyGate(SourceTask)
+	assert.Zero(t, mgr.lastUserInput.Load(), "non-user sources must not arm the gate")
+
+	ta.armMeditationNoveltyGate("user")
+	assert.Greater(t, mgr.lastUserInput.Load(), int64(0), "user source arms the gate")
+}
+
+// Mixed-batch defense (D4): meditation yields whenever it shares a batch.
+func TestDropMeditationFromMixedBatch(t *testing.T) {
+	newMed := func() *AgentEvent {
+		return NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"})
+	}
+	newTask := func() *AgentEvent {
+		return NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: "[task settled] done"})
+	}
+	newUser := func() *AgentEvent {
+		return NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "hi"})
+	}
+
+	t.Run("task first — meditation dropped, turn keeps task lineage", func(t *testing.T) {
+		filtered := dropMeditationFromMixedBatch([]*AgentEvent{newTask(), newMed()}, "t")
+		require.Len(t, filtered, 1)
+		assert.Equal(t, SourceTask, extractTriggerSource(filtered))
+	})
+
+	t.Run("meditation first — meditation dropped, turn keeps user lineage", func(t *testing.T) {
+		filtered := dropMeditationFromMixedBatch([]*AgentEvent{newMed(), newUser()}, "t")
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "user", extractTriggerSource(filtered))
+	})
+
+	t.Run("pure meditation batch passes through", func(t *testing.T) {
+		filtered := dropMeditationFromMixedBatch([]*AgentEvent{newMed()}, "t")
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "meditation", extractTriggerSource(filtered))
+	})
+
+	t.Run("no meditation batch passes through", func(t *testing.T) {
+		filtered := dropMeditationFromMixedBatch([]*AgentEvent{newUser(), newTask()}, "t")
+		assert.Len(t, filtered, 2)
+	})
 }
 
 func TestMeditationManager_StartStop(t *testing.T) {
@@ -151,7 +265,8 @@ func TestMeditationManager_StartStop(t *testing.T) {
 	}
 	mgr := NewMeditationManager(cfg, inj)
 
-	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.Start()
 
 	// Wait long enough for at least one tick.
@@ -198,7 +313,8 @@ func TestMeditationManager_MessageContainsRequiredMarkers(t *testing.T) {
 	cfg := MeditationConfig{PromptText: "meditation prompt"}
 	mgr := NewMeditationManager(cfg, inj)
 
-	mgr.UpdateLastEventTime(time.Now().Add(-time.Second))
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
 	mgr.checkAndMeditate()
 
 	require.Len(t, inj.messages, 1)

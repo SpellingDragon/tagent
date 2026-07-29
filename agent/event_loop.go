@@ -36,6 +36,17 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		if len(events) == 0 {
 			continue
 		}
+		// Mixed-batch defense (meditation-gate-split D4): a meditation event
+		// sharing a batch with anything else means the agent was NOT idle when
+		// the batch was pulled — meditation's constitutional premise ("never
+		// interrupt activity") is already broken, so it yields. This also keeps
+		// extractTriggerSource from mislabeling the whole turn in either
+		// direction (meditation content tagged "task" / a user task result
+		// tagged "meditation" and dropped by consumers).
+		events = dropMeditationFromMixedBatch(events, ta.name)
+		if len(events) == 0 {
+			continue
+		}
 		log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
 			ta.name, len(events), summarizeEvents(events))
 
@@ -104,7 +115,47 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			// Single failure without retry (shouldn't happen with current logic, but defensive)
 			log.Errorf("[runEventLoop:%s] RunFlow failed: %v", ta.name, lastErr)
 		}
+
+		// Idle-gate anchor (meditation-gate-split): every turn end counts as
+		// activity, regardless of trigger source or success — lineage-agnostic
+		// by design. A meditation-derived turn merely DELAYS the next
+		// meditation; only a user injection can re-arm the novelty gate.
+		if ta.meditationMgr != nil {
+			ta.meditationMgr.UpdateLastTurnEnd(time.Now())
+		}
 	}
+}
+
+// dropMeditationFromMixedBatch removes meditation events from a batch that
+// also contains any non-meditation event (meditation-gate-split D4).
+// The dropped meditation is NOT re-injected: lastMeditation already advanced
+// at fire time, and the novelty gate re-evaluates naturally at the next real
+// idle window. Pure-meditation batches pass through unchanged.
+func dropMeditationFromMixedBatch(events []*AgentEvent, agentName string) []*AgentEvent {
+	hasMeditation, hasOther := false, false
+	for _, evt := range events {
+		if evt == nil {
+			continue
+		}
+		if evt.Type == tagentevent.TypeExternalInput && evt.Source == "meditation" {
+			hasMeditation = true
+		} else {
+			hasOther = true
+		}
+	}
+	if !hasMeditation || !hasOther {
+		return events
+	}
+	filtered := make([]*AgentEvent, 0, len(events))
+	for _, evt := range events {
+		if evt != nil && evt.Type == tagentevent.TypeExternalInput && evt.Source == "meditation" {
+			continue
+		}
+		filtered = append(filtered, evt)
+	}
+	log.Infof("[runEventLoop:%s] mixed batch: dropped %d meditation event(s) — agent not idle",
+		agentName, len(events)-len(filtered))
+	return filtered
 }
 
 // extractTriggerSource determines the trigger source from a batch of

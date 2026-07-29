@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -26,9 +27,11 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 // on the persistent ContextManager will TryPull these messages and inject them
 // into the next ReAct iteration.
 func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message) {
-	// NOTE: meditation idle-detection is anchored on agent OUTPUT (see
-	// makeOnEventCallback), not on injected inputs — injections do not reset the
-	// idle clock here.
+	// Meditation novelty gate (meditation-gate-split): a source=="user"
+	// injection arms the gate HERE, at the injection point — input-side source
+	// is ground truth. Non-user sources (meditation/task/tmux) never arm it,
+	// and no output-side event ever does.
+	ta.armMeditationNoveltyGate(source)
 	// Always use persistentBus, not activeBus.
 	// activeBus may be invBus during sub-agent execution, but user messages
 	// should go to the persistent bus so the main runEventLoop's BeforeModel
@@ -57,6 +60,9 @@ func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message)
 //   - "user_name": human-readable user identifier for logs
 //   - "channel": communication channel (wechat, discord, etc.)
 func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Message, metadata map[string]string) {
+	// Same novelty-gate arming as InjectMessageWithSource — both injection
+	// entry points are the single source of truth for input lineage.
+	ta.armMeditationNoveltyGate(source)
 	evt := NewExternalInputEvent(source, msg)
 	// 将 metadata 复制到 AgentEvent.Metadata
 	if evt.Metadata == nil {
@@ -80,6 +86,15 @@ func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Messag
 		return
 	}
 	log.Warnf("[InjectMessageWithMetadata] agent %q has no bus, message dropped", ta.name)
+}
+
+// armMeditationNoveltyGate updates the meditation novelty-gate anchor for
+// source=="user" injections. No-op when meditation is disabled or the source
+// is not user.
+func (ta *TagentAgent) armMeditationNoveltyGate(source string) {
+	if source == "user" && ta.meditationMgr != nil {
+		ta.meditationMgr.UpdateLastUserInput(time.Now())
+	}
 }
 
 // IngestExternalEvents stores external events for later injection into

@@ -3,11 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 
 	"github.com/SpellingDragon/tagent/prompt"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -31,11 +32,16 @@ type messageInjector interface {
 }
 
 // MeditationManager periodically injects "meditation" external_input events
-// into the event loop when the agent has been idle for at least MinGap.
+// into the event loop when the agent has been idle for at least MinGap AND
+// there has been new user input since the last meditation.
 //
-// A meditation is valid only if no events (user input, agent output, tool
-// calls, etc.) have been received for at least MinGap duration. This ensures
-// meditation doesn't interrupt active conversations.
+// Gating is split across two independent anchors (meditation-gate-split):
+// the idle gate is lineage-AGNOSTIC (any turn end counts as busy), while the
+// novelty gate is INPUT-side anchored (only source=="user" injections arm it).
+// This split makes output-side lineage tracking unnecessary: activity derived
+// from a meditation turn (e.g. a spawned task settling as Source="task") can
+// only DELAY the next meditation via the idle gate, never re-arm the novelty
+// gate — which kills the self-feeding perpetual-motion loop.
 //
 // The meditation event triggers the LLM to perform context cleanup, deep
 // analysis of recent memories, and skill accumulation — all guided by the
@@ -49,9 +55,16 @@ type MeditationManager struct {
 	// (graceful degradation when no task layer is wired).
 	taskController task.TaskController
 
-	// lastEventTime tracks the most recent event timestamp (Unix milliseconds).
-	// Updated by TagentAgent on every InjectMessage and event forwarding.
-	lastEventTime atomic.Int64
+	// lastUserInput is the novelty-gate anchor (Unix ms): the most recent
+	// injection with source == "user". Updated only at the injection points
+	// (inject.go) — input-side source is ground truth and cannot be laundered
+	// by the task layer.
+	lastUserInput atomic.Int64
+
+	// lastTurnEnd is the idle-gate anchor (Unix ms): when the most recent turn
+	// ended — any trigger source, including failed turns. Updated
+	// unconditionally by runEventLoop after each RunFlow.
+	lastTurnEnd atomic.Int64
 
 	// lastMeditation tracks the most recent valid meditation timestamp.
 	lastMeditation atomic.Int64
@@ -107,58 +120,66 @@ func (m *MeditationManager) Stop() {
 	log.Info("[Meditation] manager stopped")
 }
 
-// UpdateLastEventTime records the timestamp of the most recent agent OUTPUT
-// (final response). Idle-detection is anchored on agent output — not injected
-// inputs — so meditation fires only after MinGap with no agent activity.
-func (m *MeditationManager) UpdateLastEventTime(t time.Time) {
-	m.lastEventTime.Store(t.UnixMilli())
+// UpdateLastUserInput records a source=="user" injection timestamp — the
+// novelty-gate anchor. Called from the injection points only (inject.go);
+// non-user sources (meditation/task/tmux) must never arm this gate.
+func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
+	m.lastUserInput.Store(t.UnixMilli())
 }
 
-// LastEventTime returns the most recent event timestamp in Unix milliseconds.
-func (m *MeditationManager) LastEventTime() int64 {
-	return m.lastEventTime.Load()
+// UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
+// Called unconditionally by runEventLoop after every RunFlow, regardless of
+// trigger source or success (lineage-agnostic by design).
+func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
+	m.lastTurnEnd.Store(t.UnixMilli())
 }
 
 // checkAndMeditate evaluates whether a meditation should fire.
-// Two gates must both pass:
-//  1. idle gate: gap since the last REAL agent output >= MinGap;
-//  2. novelty gate: there has been real activity SINCE the last meditation.
-//     Without it, silence becomes a perpetual-motion machine: each meditation's
-//     own output would eventually satisfy the idle gate again, producing an
-//     endless chain of "nothing happened" summaries that pollute the projection
-//     and burn LLM calls (meditation output does not update the idle anchor —
-//     see makeOnEventCallback — so lastEventTime only moves on real activity).
+// Two independent gates must both pass (meditation-gate-split):
+//  1. novelty gate (input-side): there has been user input SINCE the last
+//     meditation. Injection-point source is ground truth, so activity
+//     laundered through the task layer (Source="task" settles of
+//     meditation-spawned work) can never re-arm this gate — this alone kills
+//     the perpetual-motion loop of "nothing happened" summaries.
+//  2. idle gate (lineage-agnostic): gap since the last turn end >= MinGap.
+//     ANY turn counts as busy — meditation-derived turns merely delay the
+//     next meditation, which is harmless (and desirable while background
+//     work is still churning).
+//
+// No fire-time anchor reset is needed: storing lastMeditation locks the
+// novelty gate (lastUserInput <= lastMeditation) until real user input.
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
-	lastEventMs := m.lastEventTime.Load()
 
-	if lastEventMs == 0 {
-		// No events received yet — skip meditation.
+	lastUserMs := m.lastUserInput.Load()
+	if lastUserMs == 0 {
+		// No user input received yet — nothing to reflect on.
 		return
 	}
 
-	// Novelty gate: no real agent output since the previous meditation ⇒
-	// nothing new to reflect on.
-	if lm := m.lastMeditation.Load(); lm > 0 && lastEventMs <= lm {
-		log.Debugf("[Meditation] skipping: no new activity since last meditation")
+	// Novelty gate: no user input since the previous meditation ⇒ skip.
+	if lm := m.lastMeditation.Load(); lm > 0 && lastUserMs <= lm {
+		log.Debugf("[Meditation] skipping: no new user input since last meditation")
 		return
 	}
 
-	gap := now.Sub(time.UnixMilli(lastEventMs))
-	if gap < m.cfg.MinGap {
-		log.Debugf("[Meditation] skipping: gap=%s < min_gap=%s", gap, m.cfg.MinGap)
+	lastTurnMs := m.lastTurnEnd.Load()
+	if lastTurnMs == 0 {
+		// No turn has completed yet (first turn may still be in flight) — skip.
+		return
+	}
+	idle := now.Sub(time.UnixMilli(lastTurnMs))
+	if idle < m.cfg.MinGap {
+		log.Debugf("[Meditation] skipping: idle=%s < min_gap=%s", idle, m.cfg.MinGap)
 		return
 	}
 
 	// Conditions met — inject meditation message.
-	msg := m.buildMeditationMessage(now, gap)
+	msg := m.buildMeditationMessage(now, idle)
 	m.injector.InjectMessageWithSource("meditation", msg)
 	m.lastMeditation.Store(now.UnixMilli())
-	// Reset the idle clock on firing so we don't re-meditate every check
-	// interval before the resulting turn produces output (which also resets it).
-	m.lastEventTime.Store(now.UnixMilli())
 
-	log.Infof("[Meditation] triggered: gap=%s since last agent output", gap)
+	log.Infof("[Meditation] triggered: idle=%s since last turn end", idle)
 }
 
 // buildMeditationMessage constructs the meditation external_input message.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/compress"
 	"strings"
-	"time"
+
+	"github.com/SpellingDragon/tagent/agent/compress"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -213,7 +213,12 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 // writes happen in the event-plugin pipeline (MemoryPlugin → ProjectionSink),
 // not here. This callback only:
 // 1. Propagates currentMetadata from ContextManager to event.StateDelta ("meta_" prefix)
-// 2. Anchors meditation idle-detection on final agent output
+// 2. Marks meditation final outputs for ★-highlighted compaction cards
+//
+// Meditation gating is intentionally ABSENT here (meditation-gate-split):
+// the idle anchor is updated by runEventLoop at turn end (lineage-agnostic),
+// and the novelty anchor at the injection points (input-side) — no
+// output-side lineage filtering is needed anymore.
 func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 	return func(evt *event.Event) {
 		if evt == nil {
@@ -233,19 +238,6 @@ func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 					}
 					evt.StateDelta[key] = []byte(v)
 				}
-			}
-		}
-
-		// Anchor meditation idle-detection on actual agent OUTPUT: only a final
-		// agent response counts as activity. "Idle" then means "no agent output
-		// for MinGap", so meditation never fires while the agent is actively
-		// producing turns (e.g. reclaiming background task_settled events), and
-		// is not spuriously reset by injected inputs. A meditation's OWN final
-		// output is excluded — counting it would re-arm the idle gate and keep
-		// meditation firing forever during silence (self-feeding loop).
-		if ta.meditationMgr != nil && isFinalResponse(evt) {
-			if string(evt.StateDelta[tagentevent.MetaKeyTriggerSource]) != "meditation" {
-				ta.meditationMgr.UpdateLastEventTime(time.Now())
 			}
 		}
 
