@@ -1,7 +1,9 @@
 # example-local-file-delivery Specification
 
 ## Purpose
-TBD - created by archiving change auto-send-local-files. Update Purpose after archive.
+
+定义 wechat-bot 示例的本地文件投递能力：从 agent 最终回复文本中解析本地文件路径（绝对路径或经 `workspace_dir` 解析的相对路径），按扩展名选择微信发送接口（image/voice/video/file）以真实文件投递并保留原文本，使文件内容不再占用 LLM 输出 token 通道。
+
 ## Requirements
 ### Requirement: 从 agent 回复中解析本地文件路径
 wechat-bot 投递层 SHALL 提供纯函数 `ExtractFilePaths(text string, workspaceDir string) []string`，从 agent 最终回复文本中识别本地文件路径。识别规则：

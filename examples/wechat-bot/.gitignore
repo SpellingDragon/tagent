@@ -6,6 +6,7 @@
 
 # Allow directories (must end with / to match directories only)
 !.gitignore
+!README.md
 !go.mod
 !go.sum
 !main.go

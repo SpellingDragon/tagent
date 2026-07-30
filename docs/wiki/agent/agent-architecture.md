@@ -287,7 +287,7 @@ TagentAgent.runEventLoop:
 - `SessionProjection` + `Compactor`：有界投影 + 投影清理
 - `SmartCompressor`：两阶段上下文压缩
 - `MemoryStore` + `MemoryPlugin`：结构化事件存储 + 因果链
-- `MeditationManager`：定时冥想
+- `MeditationManager`：冥想心跳（双闸门触发：血统无关的空闲闸门 `lastTurnEnd` + 输入侧锚定的新颖性闸门 `lastUserInput`）
 - `TrajectoryRecorder`：LLM 调用轨迹记录
 
 **框架已有（tagent 复用）**：
@@ -393,4 +393,4 @@ tools:
 | **子 Agent handoff 无结构化 schema** | 跨 Agent 传递依赖 `request` 自然语言 + `event_keys` 票据（票据本身是结构化 hex 契约，有真实 LLM 契约测试守护）；但"意图/约束/权限/未决决策"没有结构化载体 | 定义 handoff envelope（intent/constraints/grants 字段）随 external_context 传递 |
 | **迭代上限无收尾轮** | 撞 `max_tool_iterations` 时进行中的工具调用直接丢弃（实机：plan 子 Agent 3m52s 的文档工作被掐断，靠模型自恢复换路完成） | 预算剩 1 轮时注入收尾提示，让模型保存半成品再终止 |
 | **runEventLoop 单 session** | 一个 TagentAgent 实例绑定一个 (user, session) 循环；多会话需多实例 | 会话路由层（多循环共享引擎与存储） |
-| **冥想触发只有时间判据** | `interval`/`min_gap` 空闲检测，无"内容值得冥想"判据——空闲但无新事件时可能产出低价值回顾 | 未消化事件量/★ 卡片密度作为第二判据 |
+| **冥想无内容价值判据** | 双闸门（meditation-idle-gating）已解决自触发永动机：触发需 `now - lastTurnEnd ≥ MinGap`（任意 turn 结束算忙）**且** `lastUserInput > lastMeditation`（上次冥想后有新用户输入）。但新颖性仅看“有无新用户输入”，不看内容价值——用户发一句无关闲聊也会解锁下一轮冥想 | 未消化事件量/★ 卡片密度作为内容价值第三判据 |

@@ -1,7 +1,9 @@
 # meditation-idle-gating Specification
 
 ## Purpose
-TBD - created by archiving change meditation-gate-split. Update Purpose after archive.
+
+定义冥想心跳的双闸门触发判据：以“真相便宜的位置”拆分空闲闸门（血统无关，任意 turn 结束算忙）与新颖性闸门（锚定输入侧 `source==user`），使冥想不依赖输出侧血统追踪即可免疫“冥想→派生任务→task_settled→再冥想”的自触发永动机。
+
 ## Requirements
 ### Requirement: 冥想触发采用双闸门判定
 

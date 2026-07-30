@@ -266,6 +266,7 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 | `agent` / `id` | sub-agent name / tool ID |
 | `description_file` | tool description prompt file |
 | `event_params` | event params, e.g. `[event_keys]` |
+| `extra_params` | extra routing params (e.g. plan's `action` enum + `name`); packed with `request` into a JSON message body for the sub-agent, kept as plain text when undeclared |
 | `async` | whether an agent tool uses the async task layer (default true) |
 | `remote.url` | remote A2A agent URL |
 | `properties` | tool-specific config (exec: `workspace`/`run_as_user`/`run_as_group`) |

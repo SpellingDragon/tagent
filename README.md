@@ -266,6 +266,7 @@ graph TB
 | `agent` / `id` | 子 Agent 名称 / 工具 ID |
 | `description_file` | 工具描述 prompt 文件 |
 | `event_params` | 事件参数，如 `[event_keys]` |
+| `extra_params` | 附加路由参数声明（如 plan 的 `action` enum + `name`）；调用时随 `request` 打包为 JSON 消息体透传子 Agent，未声明则消息体保持纯文本 |
 | `async` | 子 Agent 是否走异步任务层（默认 true） |
 | `remote.url` | 远程 A2A Agent URL |
 | `properties` | 工具专属配置（exec: `workspace`/`run_as_user`/`run_as_group`） |
