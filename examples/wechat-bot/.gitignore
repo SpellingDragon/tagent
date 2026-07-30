@@ -11,6 +11,10 @@
 !main.go
 !file_delivery.go
 !file_delivery_test.go
+!file_intake.go
+!file_intake_test.go
+!scripts/
+!scripts/verify_large_file.go
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml

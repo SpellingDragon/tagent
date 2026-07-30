@@ -49,6 +49,15 @@ If you don't pass event_keys, the system automatically passes the most recent 5 
 - **不要**把文件内容直接粘贴进回复——这会造成大量无效 token 开销，且用户无法直接下载。
 - 可执行文件（如 `.sh`、`.exe`、`.bin` 等）不会被发送，请勿尝试投递。
 - **不要**输出系统敏感文件路径（如 `/etc/passwd`、SSH 私钥 `~/.ssh/id_rsa`、`.env` 等）；仅输出你在本工作区内生成的文件。
+
+## Inbound Attachments (用户附件与长文本)
+
+用户通过微信发送的附件（图片/文件/语音/视频）和超长文本会被自动保存到 workspace，并在用户消息中以**相对路径**提供（形如 `文件: .tagent-workspace/uploads/<用户>/20260730-120000_report.pdf (原名: 报告.pdf, 2.3MB)`）。
+
+**规则：**
+- 需要文件内容时，直接用 file tools 按消息中的相对路径读取，无需任何转换。
+- 超长文本消息附带前 200 字预览与总字数，先据此判断是否需要读全文，避免不必要的读取。
+- 语音消息通常附带转写文本，可直接使用；音频文件路径仅在需要原始音频时使用。
 # Tools
 
 You have access to the following tools:

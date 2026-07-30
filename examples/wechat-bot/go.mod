@@ -6,7 +6,7 @@ replace github.com/SpellingDragon/tagent => ../..
 
 require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
-	github.com/SpellingDragon/wechat-robot-go v1.4.1
+	github.com/SpellingDragon/wechat-robot-go v1.4.2-0.20260730045947-d4c554dc789a
 	trpc.group/trpc-go/trpc-agent-go v1.10.0
 )
 

@@ -443,3 +443,6 @@ app:
     config_dir: ".wechat-config"
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
+    # 入站附件/长文本落盘根目录（相对进程 cwd，与 file tools 一致）。
+    # 容器内由 TAGENT_WECHAT_WORKSPACE_DIR=workspace 覆盖（tmpfs /app/workspace）。
+    workspace_dir: ".tagent-workspace"

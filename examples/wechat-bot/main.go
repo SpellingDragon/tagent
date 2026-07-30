@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -430,8 +431,8 @@ func main() {
 	//     the handler to run in a goroutine.
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
-		text := msg.Text()
-		if text == "" {
+		kind := ClassifyInbound(msg, wechatCfg.WorkspaceDir != "")
+		if kind == InboundIgnore {
 			return nil
 		}
 
@@ -443,12 +444,43 @@ func main() {
 			_ = bot.SendTyping(ctx, msg.FromUserID)
 			typingActive.Store(msg.FromUserID, time.Now())
 
+			injectText := msg.Text()
+			now := time.Now()
+
+			switch kind {
+			case InboundMedia:
+				if wechatCfg.WorkspaceDir == "" {
+					// 未配置 workspace：附件降级为不支持，伴随文本仍按原样注入。
+					_ = bot.SendTextToUser(ctx, msg.FromUserID, "暂不支持附件接收（未配置 workspace）")
+				} else {
+					outcome := IntakeMedia(ctx, bot, bot.CDNBaseURL(), wechatCfg.WorkspaceDir, msg.FromUserID, msg, now)
+					for _, reason := range outcome.Rejects {
+						_ = bot.SendTextToUser(ctx, msg.FromUserID, reason)
+					}
+					injectText = ComposeMediaInject(outcome, msg.Text(), wechatCfg.WorkspaceDir, msg.FromUserID, now)
+				}
+			case InboundLongText:
+				if _, inject, err := SaveLongText(wechatCfg.WorkspaceDir, msg.FromUserID, injectText, "input", now); err == nil {
+					injectText = inject
+				} else {
+					// 落盘失败降级为原样注入，不丢消息。
+					log.Errorf("[Intake] 长文本落盘失败 (chat=%s): %v", msg.FromUserID, err)
+				}
+			}
+
+			if injectText == "" {
+				// 全部被拒且无伴随文本：无事可注入，收回 typing。
+				_ = bot.StopTyping(ctx, msg.FromUserID)
+				typingActive.Delete(msg.FromUserID)
+				return
+			}
+
 			// Inject message with metadata into the persistent event loop.
 			// Metadata (chat_id, user_name) will be propagated through StateDelta
 			// and used by the consumer to route responses to the correct user.
 			ta.InjectMessageWithMetadata("user", model.Message{
 				Role:    model.RoleUser,
-				Content: text,
+				Content: injectText,
 			}, map[string]string{
 				"chat_id":   msg.FromUserID,
 				"user_name": msg.FromUserID, // Use FromUserID as user_name (no FromUserName field available)
@@ -538,12 +570,20 @@ func loadWechatConfig(app map[string]any) WechatAppConfig {
 			cfg.WorkspaceDir = v
 		}
 	}
+	// 容器内根文件系统只读，tmpfs 挂载点与本地目录名不同，用环境变量覆盖。
+	if v := os.Getenv("TAGENT_WECHAT_WORKSPACE_DIR"); v != "" {
+		cfg.WorkspaceDir = v
+	}
 	return cfg
 }
 
 // EnsureDirs creates necessary WeChat directories.
 func (c *WechatAppConfig) EnsureDirs() error {
-	for _, dir := range []string{c.ConfigDir, c.ContextTokenDir} {
+	dirs := []string{c.ConfigDir, c.ContextTokenDir}
+	if c.WorkspaceDir != "" {
+		dirs = append(dirs, filepath.Join(c.WorkspaceDir, uploadsSubdir))
+	}
+	for _, dir := range dirs {
 		if dir == "" {
 			continue
 		}

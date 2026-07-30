@@ -62,7 +62,8 @@ ENV HOME=/app \
     XDG_CONFIG_HOME=/app/.config \
     NODE_PATH=/usr/local/lib/node_modules \
     TAGENT_CONFIG=/app/tagent.yaml \
-    TAGENT_HTTP_PORT=8089
+    TAGENT_HTTP_PORT=8089 \
+    TAGENT_WECHAT_WORKSPACE_DIR=workspace
 
 EXPOSE 8089
 ENTRYPOINT ["/app/entrypoint.sh"]
