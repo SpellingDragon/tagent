@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/prompt"
 	"gopkg.in/yaml.v3"
 )
@@ -304,6 +305,10 @@ type MeditationConfig struct {
 	PromptFile string `json:"prompt_file,omitempty" yaml:"prompt_file,omitempty"`
 }
 
+// ExtraParam re-exports agent.ExtraParam for YAML/JSON config declaration
+// (ToolRef.extra_params).
+type ExtraParam = agent.ExtraParam
+
 // ToolRef declares a tool that an agent uses.
 // For agent-kind tools, the AgentID field references another AgentConfig in the Agents map.
 // For tool-kind tools, the ID field identifies the plain tool factory.
@@ -329,6 +334,14 @@ type ToolRef struct {
 	// context to the tool agent. This prevents the LLM from breaking context isolation —
 	// the LLM only outputs a numeric key, but the actual event content is resolved server-side.
 	EventParams []string `json:"event_params,omitempty" yaml:"event_params,omitempty"`
+
+	// ExtraParams declares additional routing-level parameters for agent-kind
+	// tools (plan-interaction-contract D2). Each declared parameter is added to
+	// the tool's InputSchema and, when present in a call, packed together with
+	// request into a JSON message body passed to the sub-agent (e.g. plan's
+	// action/name). Tools without extra_params keep the plain-text request
+	// message unchanged.
+	ExtraParams []ExtraParam `json:"extra_params,omitempty" yaml:"extra_params,omitempty"`
 
 	// Async controls whether an agent-kind tool may run through the async task
 	// layer (sync-wait window → inline result or background ack + task_settled).

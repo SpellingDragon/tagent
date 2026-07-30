@@ -463,6 +463,9 @@ func buildAgentToolRef(
 		if tr.Async != nil && !*tr.Async {
 			wrapper.SetAsyncDisabled(true)
 		}
+		if len(tr.ExtraParams) > 0 {
+			wrapper.SetExtraParams(tr.ExtraParams)
+		}
 		// Enable hot-reload for tool description if loaded from a file
 		if tr.DescriptionFile != "" {
 			wrapper.SetDescriptionSource(prompt.NewSource(loader, prompt.CompositeConfig{
@@ -495,6 +498,9 @@ func buildAgentToolRef(
 	wrapper := agent.NewAgentToolWrapper(agentImpl, desc, tr.EventParams, parentMemStore)
 	if tr.Async != nil && !*tr.Async {
 		wrapper.SetAsyncDisabled(true)
+	}
+	if len(tr.ExtraParams) > 0 {
+		wrapper.SetExtraParams(tr.ExtraParams)
 	}
 	// Enable hot-reload for tool description if loaded from a file
 	if tr.DescriptionFile != "" {

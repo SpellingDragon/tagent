@@ -146,6 +146,12 @@ func hintFor(op Op, output string) string {
 		return "workspace already initialized — this is safe to ignore; proceed with the next step"
 	case strings.Contains(low, "already exists"):
 		return "the change already exists; use status to inspect it or pick a new name"
+	case op == OpValidate && strings.Contains(low, "at least one delta"):
+		// A-level plans (proposal+tasks only) can NEVER pass validate — it
+		// requires specs deltas by design. Route the model to the correct
+		// closing step instead of letting it retry into a dead end
+		// (plan-interaction-contract D3).
+		return "无 specs deltas 的 A 级计划不应调用 validate（结构上必然失败）——改用 status(json=true) 确认 proposal 与 tasks 均为 done 即合规；仅 B 级（含 specs/design）以 validate 收尾"
 	case op == OpInstructions && strings.Contains(low, "artifact"):
 		return "instructions requires an artifact argument: proposal, specs, design, or tasks"
 	case strings.Contains(low, "not found") || strings.Contains(low, "no such"):

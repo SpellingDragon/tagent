@@ -132,12 +132,13 @@ agents:
     reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
     compress_threshold: 0.8
     keep_recent_tasks: 2
-    # ===== 异步任务/重入相关（均可选，未配置时用默认值） =====
+    # ===== 异步任务/重入相关（未配置项用默认值） =====
     # task_terminal_ttl: 终态任务（completed/failed/cancelled/dead）被回收前的
     #   保留期（duration 字符串，默认 "2m"）。它同时是终态 subagent 任务的
     #   resume_task 重入窗口：超过此时长后任务被 prune，只能发起全新调用。
-    #   需要更长续行窗口（如 plan 任务隔很久追加指令）可调大。
-    # task_terminal_ttl: "30m"
+    #   plan 计划生命周期（create→逐步 update→archive）依赖 resume 续行，
+    #   故调大到 30m（超窗后用带 name 的新调用继续）。
+    task_terminal_ttl: "30m"
     # resume_context_rounds: 重入时任务链还原器注入的前序轮次数（默认 3）
     # resume_context_rounds: 3
     # task_settled_max_inline: task_settled 通知内联结果上限（默认 2000，
@@ -180,10 +181,18 @@ agents:
       - kind: tool
         id: memory_recall
 
-      # Plan Agent: 工作计划管理
-      # tagent 告诉 plan 要做什么，plan 通过 openspec 创建/更新/归档计划
+      # Plan Agent: 工作计划管理（拆解/记账/归档审计，不代工）
+      # extra_params: 声明后进入 InputSchema 并随 request 打包为 JSON 透传子 agent；
+      # action 驱动 PlanAgent 双模式（progress 零 LLM 直读），name 在多计划并行时
+      # 定位目标 change，并作为同名任务单飞的幂等键。
       - agent: plan
         description_file: plan_tool_desc.md
+        extra_params:
+          - name: action
+            enum: [create, update, archive, progress]
+            description: "操作类型"
+          - name: name
+            description: "计划名(kebab-case)；update/progress/archive 必填"
 
       # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致，
       # 模型看到单一文件系统视图）

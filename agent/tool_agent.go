@@ -113,6 +113,18 @@ func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
 //   - Context delivery is unified: RuntimeState works for both local (direct Run)
 //     and remote (A2A metadata auto-mapping) sub-agents
 
+// ExtraParam declares one additional routing-level parameter for an
+// agent-kind tool (plan-interaction-contract D2). Declared params are added
+// to the tool's InputSchema and, when present in a call, packed together
+// with request into a JSON message body — a whitelist pass-through for small
+// routing fields (e.g. plan's action/name), NOT a general RPC channel.
+type ExtraParam struct {
+	Name        string   `json:"name" yaml:"name"`
+	Type        string   `json:"type,omitempty" yaml:"type,omitempty"` // default "string"
+	Enum        []string `json:"enum,omitempty" yaml:"enum,omitempty"`
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+}
+
 type AgentToolWrapper struct {
 	agent            agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
 	desc             string
@@ -134,6 +146,11 @@ type AgentToolWrapper struct {
 	// resumeContextRounds caps the prior rounds restored on resume
 	// (0 → DefaultResumeContextRounds).
 	resumeContextRounds int
+
+	// extraParams are additional routing-level parameters declared via ToolRef
+	// (plan-interaction-contract D2). Empty → plain-text request messages,
+	// behavior unchanged.
+	extraParams []ExtraParam
 }
 
 // autoInjectMaxEvents is the maximum number of recent events to auto-inject
@@ -185,6 +202,12 @@ func (w *AgentToolWrapper) SetResumeContextRounds(n int) {
 	w.resumeContextRounds = n
 }
 
+// SetExtraParams declares additional routing-level parameters for this tool
+// (added to InputSchema; packed with request into a JSON message when present).
+func (w *AgentToolWrapper) SetExtraParams(params []ExtraParam) {
+	w.extraParams = params
+}
+
 func (w *AgentToolWrapper) effectiveResumeRounds() int {
 	if w.resumeContextRounds > 0 {
 		return w.resumeContextRounds
@@ -223,6 +246,24 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	decl.InputSchema.Properties["request"] = &trpctool.Schema{
 		Type:        "string",
 		Description: "The request or instruction to process",
+	}
+
+	// Declared routing-level extra parameters (plan-interaction-contract D2).
+	for _, p := range w.extraParams {
+		if p.Name == "" || p.Name == "request" || p.Name == "event_keys" {
+			continue // never shadow the built-in parameters
+		}
+		typ := p.Type
+		if typ == "" {
+			typ = "string"
+		}
+		schema := &trpctool.Schema{Type: typ, Description: p.Description}
+		if len(p.Enum) > 0 {
+			for _, e := range p.Enum {
+				schema.Enum = append(schema.Enum, e)
+			}
+		}
+		decl.InputSchema.Properties[p.Name] = schema
 	}
 
 	// Declare event-derived parameters
@@ -285,6 +326,34 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	// Extract request text
 	request, _ := args["request"].(string)
 
+	// Collect declared extra params present in this call and build the
+	// message body: with extra params → JSON {params..., request} so the
+	// sub-agent (LLM and custom Run alike) sees the routing fields; without →
+	// plain-text request, behavior unchanged (D2).
+	messageBody := request
+	extraName := ""
+	if len(w.extraParams) > 0 {
+		packed := map[string]any{}
+		for _, p := range w.extraParams {
+			v, ok := args[p.Name]
+			if !ok || v == nil {
+				continue
+			}
+			packed[p.Name] = v
+			if p.Name == "name" {
+				if s, _ := v.(string); s != "" {
+					extraName = s
+				}
+			}
+		}
+		if len(packed) > 0 {
+			packed["request"] = request
+			if data, err := json.Marshal(packed); err == nil {
+				messageBody = string(data)
+			}
+		}
+	}
+
 	// Resolve event_keys → full event context
 	var keys []int64
 	var externalEvents []memory.FullEvent
@@ -340,7 +409,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	}
 
 	inv := agent.NewInvocation(
-		agent.WithInvocationMessage(model.NewUserMessage(request)),
+		agent.WithInvocationMessage(model.NewUserMessage(messageBody)),
 		agent.WithInvocationRunOptions(runOpts),
 	)
 
@@ -359,17 +428,33 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			out, err := w.runAndCollect(runCtx, inv, agentName)
 			if err == nil {
-				rounds.add(request, out)
+				rounds.add(messageBody, out)
 			}
 			return out, err
 		}, w.asyncDenseDuration)
+		// Idempotency key: a non-empty declared `name` (e.g. plan's change name)
+		// keys the task by identity, so concurrent calls on the SAME plan
+		// single-flight via task-layer dedup (plan-interaction-contract D4).
+		// Without a name, fall back to keying by request text.
+		spawnKey := agentName + ":" + request
+		if extraName != "" {
+			spawnKey = agentName + ":" + extraName
+		}
 		res := spawner.Spawn(task.TaskSpec{
 			Kind:     "subagent",
 			Desc:     agentName + ": " + truncate(request, 60),
-			Key:      agentName + ":" + request,
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
+			Key:      spawnKey,
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
+		if res.Deduped {
+			// Same-name single-flight: tell the caller how to continue instead
+			// of silently swallowing the duplicate (D4). The existing task is
+			// necessarily in-flight (dedup only matches active tasks), so
+			// resume would be rejected right now — point to settle first.
+			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果（或 get_task_result 查询），结算后再用 resume_task(%q, \"...\") 续行；不要重复发起同名调用。",
+				res.Task.ID, res.Task.ID), nil
+		}
 		if res.Settled {
 			if res.Signal.Err != nil {
 				return nil, fmt.Errorf("agent tool %q: run failed: %w", agentName, res.Signal.Err)
@@ -456,8 +541,11 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 }
 
 // subagentRelaunch returns a closure that re-runs the sub-agent with the same
-// invocation (used by relaunch_task). The re-spawned task is itself relaunchable.
-func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request string) func() (task.SpawnResult, error) {
+// invocation (used by relaunch_task). The re-spawned task is itself
+// relaunchable and keeps the SAME idempotency key as the original spawn
+// (name-based when a plan name was declared — D4 single-flight covers
+// relaunch rounds too, not just the first spawn).
+func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string) func() (task.SpawnResult, error) {
 	return func() (task.SpawnResult, error) {
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			return w.runAndCollect(runCtx, inv, agentName)
@@ -465,8 +553,8 @@ func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent
 		return spawner.Spawn(task.TaskSpec{
 			Kind:     "subagent",
 			Desc:     agentName + ": " + truncate(request, 60),
-			Key:      agentName + ":" + request,
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request),
+			Key:      spawnKey,
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 		}, detector), nil
 	}
 }

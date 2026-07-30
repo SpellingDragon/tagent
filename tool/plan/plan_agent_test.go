@@ -42,10 +42,72 @@ func TestExtractAction_Unknown(t *testing.T) {
 	assert.Equal(t, "", extractAction(inv))
 }
 
+// TestExtractName_JSON parses name from JSON message content (packed by
+// AgentToolWrapper extra_params).
+func TestExtractName_JSON(t *testing.T) {
+	inv := &agent.Invocation{
+		Message: model.Message{Content: `{"action":"progress","name":"my-plan","request":"查看进度"}`},
+	}
+	assert.Equal(t, "my-plan", extractName(inv))
+}
+
+func TestExtractName_AbsentOrPlainText(t *testing.T) {
+	assert.Empty(t, extractName(&agent.Invocation{Message: model.Message{Content: `{"action":"progress"}`}}))
+	assert.Empty(t, extractName(&agent.Invocation{Message: model.Message{Content: "plain text"}}))
+	assert.Empty(t, extractName(&agent.Invocation{Message: model.Message{Content: ""}}))
+}
+
+// TestExtractName_PlainTextFallback: the resume_task path delivers raw text
+// (bypasses wrapper packing); the contract form "progress name=<plan>" must
+// resolve the name (code-review Major-1 regression).
+func TestExtractName_PlainTextFallback(t *testing.T) {
+	tests := []struct {
+		content string
+		want    string
+	}{
+		{"progress name=my-plan", "my-plan"},
+		{"progress name=my-plan: 查看进度", "my-plan"},
+		{"update name=complete-oi-question-bank, 步骤 1.1 完成", "complete-oi-question-bank"},
+		{"Progress NAME=case-plan", "case-plan"}, // 前缀大小写宽容，值保留原样
+		{"progress name=", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.content, func(t *testing.T) {
+			inv := &agent.Invocation{Message: model.Message{Content: tt.content}}
+			assert.Equal(t, tt.want, extractName(inv))
+		})
+	}
+}
+
+// TestRunProgressQuery_ResumeTextPath: end-to-end over the resume-style raw
+// text input — multiple active changes, name in text → targeted summary, no
+// "please specify" bounce.
+func TestRunProgressQuery_ResumeTextPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	createChangeWithTasks(t, tmpDir, "plan-a", "- [x] 1.1 done\n")
+	createChangeWithTasks(t, tmpDir, "plan-b", "- [ ] 1.1 todo\n- [x] 1.2 done\n")
+
+	pa := NewPlanAgent(nil, tmpDir)
+	inv := &agent.Invocation{
+		Message: model.Message{Content: "progress name=plan-b: 查看进度"},
+	}
+	ch, err := pa.Run(context.Background(), inv)
+	require.NoError(t, err)
+	var evt *event.Event
+	for e := range ch {
+		evt = e
+	}
+	require.NotNil(t, evt)
+	content := evt.Response.Choices[0].Message.Content
+	assert.Contains(t, content, "plan-b")
+	assert.Contains(t, content, "1/2 完成")
+	assert.NotContains(t, content, "多个活跃", "named resume-text query must not bounce to the picker")
+}
+
 // TestBuildProgressSummary_NoActiveChanges tests with no openspec/changes/ directory.
 func TestBuildProgressSummary_NoActiveChanges(t *testing.T) {
 	pa := NewPlanAgent(nil, "/nonexistent")
-	summary := pa.buildProgressSummary()
+	summary := pa.buildProgressSummary("")
 	assert.Contains(t, summary, "没有活跃")
 }
 
@@ -57,7 +119,7 @@ func TestBuildProgressSummary_SingleActiveChange(t *testing.T) {
 `)
 
 	pa := NewPlanAgent(nil, tmpDir)
-	summary := pa.buildProgressSummary()
+	summary := pa.buildProgressSummary("")
 	assert.Contains(t, summary, "test-plan")
 	assert.Contains(t, summary, "1/2 完成")
 	assert.Contains(t, summary, "✓ 1.1 Done task")
@@ -66,12 +128,29 @@ func TestBuildProgressSummary_SingleActiveChange(t *testing.T) {
 
 func TestBuildProgressSummary_MultipleActiveChanges(t *testing.T) {
 	tmpDir := t.TempDir()
-	createChangeWithTasks(t, tmpDir, "change-1", "- [ ] task")
-	createChangeWithTasks(t, tmpDir, "change-2", "- [ ] task")
+	createChangeWithTasks(t, tmpDir, "change-1", "- [x] 1.1 done\n- [ ] 1.2 todo")
+	createChangeWithTasks(t, tmpDir, "change-2", "- [ ] 1.1 todo")
 
 	pa := NewPlanAgent(nil, tmpDir)
-	summary := pa.buildProgressSummary()
+	summary := pa.buildProgressSummary("")
+	// Never guess: list active plans with per-plan completion instead.
 	assert.Contains(t, summary, "多个活跃")
+	assert.Contains(t, summary, "change-1 (1/2 完成)")
+	assert.Contains(t, summary, "change-2 (0/1 完成)")
+}
+
+// TestBuildProgressSummary_NamedTarget: a non-empty name targets that change
+// directly even when multiple changes are active (multi-plan parallel).
+func TestBuildProgressSummary_NamedTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	createChangeWithTasks(t, tmpDir, "plan-a", "- [x] 1.1 a done\n")
+	createChangeWithTasks(t, tmpDir, "plan-b", "- [ ] 1.1 b todo\n")
+
+	pa := NewPlanAgent(nil, tmpDir)
+	summary := pa.buildProgressSummary("plan-b")
+	assert.Contains(t, summary, "plan-b")
+	assert.Contains(t, summary, "0/1 完成")
+	assert.NotContains(t, summary, "多个活跃")
 }
 
 // TestRunProgressQuery verifies that progress query returns an event with
@@ -82,7 +161,7 @@ func TestRunProgressQuery(t *testing.T) {
 
 	pa := NewPlanAgent(nil, tmpDir)
 	inv := &agent.Invocation{
-		Message: model.Message{Content: `{"action":"progress"}`},
+		Message: model.Message{Content: `{"action":"progress","name":"test-plan"}`},
 	}
 
 	ch, err := pa.runProgressQuery(context.Background(), inv)

@@ -248,15 +248,20 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	t.Logf("%s", truncateCmd(resultStr, 400))
 
 	// 核心断言：create 必须产出合规 openspec change（proposal.md + tasks.md），
-	// tasks.md 遵循官方模板，且以 openspec validate 收尾。
+	// tasks.md 遵循官方模板，且按级别收尾（plan-interaction-contract D3）：
+	// A 级以 openspec status 结构自检收尾，禁止 validate（无 specs deltas 必然失败）。
 	ranNewChange := false
 	ranValidate := false
+	ranStatusClose := false
 	for _, c := range commands {
 		if strings.Contains(c, "openspec new change") {
 			ranNewChange = true
 		}
 		if strings.Contains(c, "openspec validate") {
 			ranValidate = true
+		}
+		if strings.Contains(c, "openspec status") {
+			ranStatusClose = true
 		}
 	}
 	wroteProposal := false
@@ -300,10 +305,15 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	} else if tasksFollowsTemplate {
 		t.Logf("✅ tasks.md 符合官方模板（## N. 分组 + - [ ] N.M 复选框）")
 	}
-	if !ranValidate {
-		t.Errorf("❌ plan create 未以 `openspec validate` 收尾。执行的命令: %v", commands)
+	if !ranStatusClose {
+		t.Errorf("❌ plan create 未以 `openspec status` 结构自检收尾（A 级收尾方式）。执行的命令: %v", commands)
 	} else {
-		t.Logf("✅ plan create 执行了 `openspec validate`")
+		t.Logf("✅ plan create 以 `openspec status` 自检收尾")
+	}
+	if ranValidate {
+		t.Errorf("❌ A 级计划调用了 `openspec validate`（无 specs deltas 必然失败，新契约禁止）。执行的命令: %v", commands)
+	} else {
+		t.Logf("✅ A 级计划未调用 validate（符合新契约）")
 	}
 }
 

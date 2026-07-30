@@ -11,7 +11,7 @@
 - **TmuxMonitor**：自适应轮询 tmux session（dense→几何退避），状态变更经按会话回调驱动 `TmuxSettleDetector` → 任务层 settle
 - **File Tools**：封装 trpc-agent-go 内置文件操作工具（read_file、save_file 等）
 - **memory_recall**：召回标准协议纯函数工具（见 §六）；**任务工具族**（tool/task/）：list/get/cancel/relaunch/resume
-- **PlanAgent**（tool/plan/）：openspec 计划管理的双模式子 agent
+- **PlanAgent**（tool/plan/）：openspec 计划管理的双模式子 agent（交互契约见 §5.y）
 
 **设计原则**：
 - **职责分离**：理解层（KnowledgeAgent, RecallAgent）和执行层（ActionTool）分离，Agent 负责决策
@@ -409,6 +409,44 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 ```
 
 `PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPToolSets、ReadPartitionIDs、Properties），由 `buildPlainToolRef` 从当前 agent 的上下文注入。
+
+### 5.x 附加参数通道（ToolRef.extra_params）
+
+子 agent 工具默认只有 `request`（+ `event_keys`）两个参数。需要**路由级小参数**（如 plan 的 `action`/`name`）时，经 ToolRef 声明：
+
+```yaml
+- agent: plan
+  extra_params:
+    - name: action
+      enum: [create, update, archive, progress]
+    - name: name
+```
+
+语义（plan-interaction-contract D2）：
+
+| 阶段 | 行为 |
+|------|------|
+| 声明 | `AgentToolWrapper.Declaration()` 将声明参数并入 InputSchema（含 enum）；`request`/`event_keys` 不可被遮蔽 |
+| 透传 | `Call()` 收集本次调用中出现的声明参数，打包为 `{params..., request}` JSON 作为子 agent 的消息体 |
+| 未声明/未传 | 消息体仍为纯文本 `request`——其余子 agent 行为零影响 |
+| 幂等键 | 携带非空 `name` 时任务 Key = `agentName:name`（同名单飞）；否则 `agentName:request` |
+
+为何走消息体而非 RuntimeState：消息体是子 agent 的 LLM 与自定义 `Run`（如 `PlanAgent.extractAction`）**共同可见**的唯一位置；ReAct 路径需要模型自己也知道 action/name。
+
+### 5.y PlanAgent 交互契约（报账–审计）
+
+| 角色 | 身份 | 干 | 不干 |
+|------|------|-----|------|
+| 顶层 agent | 所有者/执行者/信息桥 | 决策、补信息、按计划执行、带证据报账 | 不拆计划、不直写 openspec/ |
+| plan | 规划师/记账员/审计员 | 拆解工件、勾选记账、归档审计 | **不产出工作成果**（派活请求转化为计划） |
+
+一个 change 对应一个 task id：`create` 用新调用（返回首行 `计划已创建: <name>`），其后 `update`/`progress`/`archive` 经 `resume_task` 续行（任务链还原器自动注入前序轮次，含 name 与上轮结论）。create 未 settle 期间的后续操作被任务层“轮次在飞”错误拒绝（拿到 ACK ≠ 计划已建立）；超出 `task_terminal_ttl` 后改用带 `name` 的新调用。
+
+**双模式与多计划并行**：`action=progress` 零 LLM 直读 tasks.md——有 `name` 直取；无 name 且恰一个活跃 change 取之；否则返回活跃清单（含各计划完成度）请调用方指定，**不猜**。
+
+**创建收尾按级别分派**：A 级（仅 proposal+tasks）用 `spec(op="status", json=true)` 结构自检；**A 级禁用 validate**——openspec validate 无论是否 strict 都要求 specs deltas，A 级结构上必然失败（该矛盾曾致生产迭代耗尽 51>50；`hintFor` 现已在该报错上回指正确收尾）。B 级（含 specs/design）维持 `validate --strict`。
+
+**路径基准不对称**（读全工程 vs 写锁沙箱，安全上不退让）：读类工具基准 = cwd（`openspec/changes/...`），写类工具基准 = `openspec/` 沙箱根（`changes/...`）——prompt 以**双列对照表**同时声明两侧，避免双向踩错（单侧声明曾产生 `openspec/openspec/` 幽灵目录）。
 
 ---
 

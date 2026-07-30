@@ -65,7 +65,8 @@ func (pa *PlanAgent) Run(ctx context.Context, inv *trpcagent.Invocation) (<-chan
 
 // extractAction parses the action field from the invocation message.
 // The message content is expected to be JSON: {"action":"progress", ...}
-// or plain text containing the action. Falls back to "" if not found.
+// (packed by AgentToolWrapper from declared extra_params) or plain text
+// containing the action. Falls back to "" if not found.
 func extractAction(inv *trpcagent.Invocation) string {
 	content := inv.Message.Content
 	if content == "" {
@@ -91,15 +92,47 @@ func extractAction(inv *trpcagent.Invocation) string {
 	return ""
 }
 
+// extractName parses the plan name from the invocation message. JSON first
+// (AgentToolWrapper extra_params packing); plain-text `name=<value>` as
+// fallback — the resume_task path delivers raw text (it bypasses the
+// wrapper's packing), and the contract's recommended form is
+// "progress name=<plan>". Empty when absent — the progress path then falls
+// back to the single-active-change heuristic.
+func extractName(inv *trpcagent.Invocation) string {
+	content := strings.TrimSpace(inv.Message.Content)
+	if content == "" {
+		return ""
+	}
+	var fields map[string]interface{}
+	if err := json.Unmarshal([]byte(content), &fields); err == nil {
+		if n, ok := fields["name"].(string); ok {
+			return strings.TrimSpace(n)
+		}
+		return ""
+	}
+	// Plain-text fallback: name=<token>, terminated by whitespace or common
+	// punctuation ("progress name=my-plan: 查看进度").
+	lower := strings.ToLower(content)
+	idx := strings.Index(lower, "name=")
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx+len("name="):]
+	if stop := strings.IndexAny(rest, " \t\n:，,;；"); stop >= 0 {
+		rest = rest[:stop]
+	}
+	return strings.TrimSpace(rest)
+}
+
 // ---------------------------------------------------------------------------
 // Progress query — direct file I/O, no LLM
 // ---------------------------------------------------------------------------
 
-// runProgressQuery reads openspec/changes/ for the active change,
+// runProgressQuery reads openspec/changes/ for the target change,
 // parses tasks.md checkboxes, and returns a progress summary event.
 // This does NOT create EventBus, does NOT start runEventLoop, does NOT call LLM.
 func (pa *PlanAgent) runProgressQuery(ctx context.Context, inv *trpcagent.Invocation) (<-chan *event.Event, error) {
-	summary := pa.buildProgressSummary()
+	summary := pa.buildProgressSummary(extractName(inv))
 
 	ch := make(chan *event.Event, 1)
 	ch <- buildProgressEvent(summary)
@@ -107,24 +140,35 @@ func (pa *PlanAgent) runProgressQuery(ctx context.Context, inv *trpcagent.Invoca
 	return ch, nil
 }
 
-// buildProgressSummary scans for active changes and returns a progress summary string.
-func (pa *PlanAgent) buildProgressSummary() string {
-	changes := pa.scanActiveChanges()
+// buildProgressSummary returns a progress summary for the named change.
+// Location rule (multi-plan parallel, plan-interaction-contract): a non-empty
+// name targets that change directly; without a name, exactly one active
+// change is taken; otherwise the active list (with per-plan completion) is
+// returned for the caller to pick — never guess.
+func (pa *PlanAgent) buildProgressSummary(name string) string {
+	if name != "" {
+		return pa.summarizeChange(name)
+	}
 
+	changes := pa.scanActiveChanges()
 	if len(changes) == 0 {
 		return "当前没有活跃的工作计划。"
 	}
-
 	if len(changes) > 1 {
-		var names []string
+		var sb strings.Builder
+		sb.WriteString("存在多个活跃的工作计划：\n")
 		for _, c := range changes {
-			names = append(names, c)
+			completed, total := pa.countTasks(c)
+			sb.WriteString(fmt.Sprintf("- %s (%d/%d 完成)\n", c, completed, total))
 		}
-		return fmt.Sprintf("存在多个活跃的工作计划: %s\n请指定要查询的计划。", strings.Join(names, ", "))
+		sb.WriteString("\n请指定目标计划（如 name=my-plan）后重试。")
+		return sb.String()
 	}
+	return pa.summarizeChange(changes[0])
+}
 
-	// Exactly one active change
-	changeName := changes[0]
+// summarizeChange renders one change's checkbox-level progress.
+func (pa *PlanAgent) summarizeChange(changeName string) string {
 	tasks, err := pa.parseTasksMd(changeName)
 	if err != nil {
 		return fmt.Sprintf("读取计划 %q 的 tasks.md 失败: %v", changeName, err)
@@ -154,6 +198,21 @@ func (pa *PlanAgent) buildProgressSummary() string {
 		}
 	}
 	return sb.String()
+}
+
+// countTasks returns completed/total checkbox counts for a change (0,0 on
+// read errors — the listing stays best-effort).
+func (pa *PlanAgent) countTasks(changeName string) (completed, total int) {
+	tasks, err := pa.parseTasksMd(changeName)
+	if err != nil {
+		return 0, 0
+	}
+	for _, t := range tasks {
+		if t.Done {
+			completed++
+		}
+	}
+	return completed, len(tasks)
 }
 
 // TaskItem represents a single task parsed from tasks.md.
