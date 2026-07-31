@@ -145,6 +145,26 @@ graph LR
 - **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + card lines + recent keys`); meditation outputs get ★ highlights
 - **Raw events may be forgotten, summaries persist**: summaries never expire; the `[hex]` key on each card is a recall ticket — `memory_recall` fetches the original text anytime
 
+### Memory data model (LSM)
+
+Storage is organized as an **LSM tree**: events from three pipelines (EventBus injection / framework LLM events / compression artifacts) converge on a single write path and are append-only into write-time-windowed segments; levels denote write recency and compaction generation, and sealing/compaction record truthful time bounds for query pruning; forgetting is handled by three independent layers — compaction, TTL, and capacity.
+
+```mermaid
+graph LR
+    P["Event pipelines<br/>inject / LLM events / artifacts"] --> W["StoreEvent<br/>collision guard + seq recovery"]
+    W --> S["Segmented store<br/>evt/idx/meta/tomb"]
+    S --> L["L0 active → L1 sealed → L2 → L3<br/>compaction writes truthful bounds"]
+    L --> R["Recall: ticket / semantic / cards"]
+    F["Forgetting: compaction · TTL · capacity"] -.tombstone.-> L
+```
+
+- **Recall and compression point the same way**: compression drops old / keeps new, so recall returns newest first — under `timestamp_desc`, truncation sacrifices only the oldest, never the newest memories
+- **Two time axes**: `Timestamp` (event time) is the single semantic time axis; the time embedded in EventKey (write time) is used only for segment placement and same-millisecond tie-breaking
+- **Events are immutable**: EventKey is the event's identity and duplicate writes are rejected; after a restart seq resumes from the existing maximum, never overwriting old events
+- **Forgetting is configurable**: TTL decays per event type (curated artifacts exempt), declared via `memory.lifecycle`; a negative global TTL is the master switch that disables forgetting
+
+See [wiki/memory §16](docs/wiki/memory/memory-architecture.md) for the full data flow, implicit connections, and hard contracts.
+
 ## ⚙️ Six mechanisms at a glance
 
 | Mechanism | Highlights | Deep dive |

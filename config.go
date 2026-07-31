@@ -286,6 +286,28 @@ type MemoryConfig struct {
 	// RustVikingBinary sets the rustviking CLI binary path for "file" type stores.
 	// Empty value uses "rustviking" (looked up via PATH).
 	RustVikingBinary string `json:"rustviking_binary,omitempty" yaml:"rustviking_binary,omitempty"`
+
+	// Lifecycle configures TTL / capacity-based forgetting for this store.
+	// Nil keeps the built-in defaults (global TTL 7d, per-type table, 1h checks).
+	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty" yaml:"lifecycle,omitempty"`
+}
+
+// LifecycleConfig declares the forgetting policy over YAML/JSON. Unset fields
+// fall back to memory.DefaultLifecycleConfig values.
+type LifecycleConfig struct {
+	// GlobalTTLDays is the default time-to-live in days (default: 7).
+	// Negative = disable TTL entirely (no event is ever tombstoned by age).
+	GlobalTTLDays *int `json:"global_ttl_days,omitempty" yaml:"global_ttl_days,omitempty"`
+
+	// TypeTTL overrides the global TTL per event type (days).
+	// Negative value = exempt (curated artifacts never expire).
+	TypeTTL map[string]int `json:"type_ttl,omitempty" yaml:"type_ttl,omitempty"`
+
+	// CheckInterval is how often the lifecycle scanner runs (e.g., "1h"). Default: "1h".
+	CheckInterval string `json:"check_interval,omitempty" yaml:"check_interval,omitempty"`
+
+	// MaxEventsPerPartition caps events per partition (0 = unlimited, default).
+	MaxEventsPerPartition *int `json:"max_events_per_partition,omitempty" yaml:"max_events_per_partition,omitempty"`
 }
 
 // MeditationConfig configures the periodic meditation/heartbeat mechanism.

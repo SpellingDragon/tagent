@@ -190,7 +190,12 @@ func (c *Compactor) checkL1ToL2Compaction() {
 			if err != nil || meta == nil {
 				continue
 			}
-			if meta.Layer == 1 {
+			// Only sealed segments are compaction sources (code-review P2):
+			// an active (unsealed) segment is still taking writes — merging it
+			// and deleting the source would make subsequent writes invisible
+			// until the next seal, and its EventCount=0 meta would corrupt
+			// accounting.
+			if meta.Layer == 1 && meta.Sealed {
 				l1Windows = append(l1Windows, w)
 			}
 		}
@@ -217,7 +222,7 @@ func (c *Compactor) checkL2ToL3Compaction() {
 			if err != nil || meta == nil {
 				continue
 			}
-			if meta.Layer == 2 {
+			if meta.Layer == 2 && meta.Sealed {
 				l2Windows = append(l2Windows, w)
 			}
 		}
@@ -272,12 +277,19 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	}
 
 	// 4. Build target L2 meta
+	// MinTime/MaxTime are the segment's TRUTHFUL time envelope: the nominal
+	// window (named after the earliest source window, day-aligned) understates
+	// the real coverage whenever the sources span more than a day, and query
+	// pruning/early-stop depend on a truthful upper bound. mergeEvents already
+	// sorted ascending by Timestamp, so first/last suffice — no extra scan.
 	l2WindowTS := computeDailyWindow(windowTSs[0])
 	meta := SegmentMeta{
 		PartitionID: pid,
 		WindowTS:    l2WindowTS,
 		Layer:       2,
 		EventCount:  len(events),
+		MinTime:     events[0].Timestamp,
+		MaxTime:     events[len(events)-1].Timestamp,
 		Sealed:      true,
 	}
 
@@ -302,8 +314,18 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 		return fmt.Errorf("failed to write L2 segment: %w", err)
 	}
 
-	// 6. Cleanup: delete source L1 segments (only after L2 is fully written = crash-safe)
-	if err := c.deleteSegments(pid, windowTSs); err != nil {
+	// 6. Cleanup: delete source L1 segments (only after L2 is fully written = crash-safe).
+	// Collision guard (code-review P1): when the earliest source window is
+	// day-aligned, l2WindowTS EQUALS that source window — the target prefix
+	// we just wrote IS a source prefix. Deleting it would erase the freshly
+	// compacted segment (data loss), so it must be excluded.
+	var cleanupWindows []int64
+	for _, w := range windowTSs {
+		if w != l2WindowTS {
+			cleanupWindows = append(cleanupWindows, w)
+		}
+	}
+	if err := c.deleteSegments(pid, cleanupWindows); err != nil {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
@@ -450,6 +472,15 @@ func (c *Compactor) findAliveAncestor(key int64, alive map[int64]bool) int64 {
 func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	var batchOps []KVOp
 
+	// Collect per-segment event counts BEFORE deletion (their meta keys are
+	// among the deleted) so the process-lifetime counter can be decremented.
+	var removedTotal int64
+	for _, windowTS := range windowTSs {
+		if meta, err := c.getSegmentMeta(pid, windowTS); err == nil && meta != nil && meta.EventCount > 0 {
+			removedTotal += int64(meta.EventCount)
+		}
+	}
+
 	for _, windowTS := range windowTSs {
 		// Delete event keys
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
@@ -466,7 +497,15 @@ func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	}
 
 	if len(batchOps) > 0 {
-		return c.kv.KVBatch(batchOps)
+		if err := c.kv.KVBatch(batchOps); err != nil {
+			return err
+		}
+	}
+
+	// Keep the process-lifetime count accurate (D11): the removed events are
+	// physically gone. The store reference may be nil in bare compactor uses.
+	if removedTotal > 0 && c.store != nil {
+		c.store.decrementEventCount(pid, removedTotal)
 	}
 	return nil
 }
@@ -504,11 +543,15 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	}
 
 	l3WindowTS := computeWeeklyWindow(windowTSs[0])
+	// Truthful time envelope (see CompactL1ToL2): events stay sorted ascending
+	// through filter/repair/summarize, so first/last are the real bounds.
 	meta := SegmentMeta{
 		PartitionID: pid,
 		WindowTS:    l3WindowTS,
 		Layer:       3,
 		EventCount:  len(events),
+		MinTime:     events[0].Timestamp,
+		MaxTime:     events[len(events)-1].Timestamp,
 		Sealed:      true,
 	}
 
@@ -531,7 +574,15 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 		return fmt.Errorf("failed to write L3 segment: %w", err)
 	}
 
-	if err := c.deleteSegments(pid, windowTSs); err != nil {
+	// Cleanup (with the same collision guard as CompactL1ToL2: a week-aligned
+	// earliest source window equals l3WindowTS and must not be deleted).
+	var l3CleanupWindows []int64
+	for _, w := range windowTSs {
+		if w != l3WindowTS {
+			l3CleanupWindows = append(l3CleanupWindows, w)
+		}
+	}
+	if err := c.deleteSegments(pid, l3CleanupWindows); err != nil {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 

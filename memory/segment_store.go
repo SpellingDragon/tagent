@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -201,6 +202,37 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 		state.currentWindow = windowTS
 		state.seqCounter = 0
 	}
+	if state.seqCounter == 0 {
+		// Recover the highest seq already used in this window (D12): an in-
+		// memory zero seqCounter cannot distinguish "fresh window" from
+		// "process restarted / window revisited", and reusing seq 0 would
+		// overwrite the existing slot — silently swallowing the event that
+		// lived there (production: one dangling idx already proved this).
+		// The scan is scoped to this single window and happens at most once
+		// per window switch. Recovery FAILS LOUD (M3): falling back to 0
+		// would re-introduce the overwrite it exists to prevent.
+		recovered, recErr := s.recoverWindowSeqLocked(pid, windowTS)
+		if recErr != nil {
+			state.mu.Unlock()
+			return fmt.Errorf("seq recovery failed for window %d: %w", windowTS, recErr)
+		}
+		state.seqCounter = recovered
+
+		// Revisit of a SEALED window (m5): its recorded MinTime/MaxTime no
+		// longer covers what we are about to add, so demote it back to
+		// memtable semantics (Sealed=false → always scanned, never pruned).
+		if rawMeta, metaErr := s.kv.KVGet(MetaKeyStr(pid, windowTS)); metaErr == nil {
+			var oldMeta SegmentMeta
+			if jsonErr := json.Unmarshal([]byte(rawMeta), &oldMeta); jsonErr == nil && oldMeta.Sealed {
+				oldMeta.Sealed = false
+				if patched, mErr := json.Marshal(oldMeta); mErr == nil {
+					if pErr := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(patched)); pErr != nil {
+						log.Warnf("[SegmentStore] failed to demote sealed window pid=%d window=%d: %v", pid, windowTS, pErr)
+					}
+				}
+			}
+		}
+	}
 	seq := state.seqCounter
 	state.seqCounter++
 	state.eventCount++
@@ -212,6 +244,19 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 		return fmt.Errorf("failed to marshal event %d: %w", key, err)
 	}
 
+	// Collision guard (D15, before any write per code-review M2): an EventKey
+	// IS the event's identity — a second write under the same key can only
+	// be a snowflake collision (the in-memory seq counter restarts across
+	// processes; two writers in the same second collide). Silently
+	// overwriting the idx pointer would break event immutability, so reject
+	// instead. All producers mint a fresh key per event; no caller relies on
+	// rewriting an existing key. Must precede the evt write: segment scans
+	// read events directly, so a rejected write must not leave a ghost.
+	idxKVKey := IndexKeyStr(pid, key)
+	if _, err := s.kv.KVGet(idxKVKey); err == nil {
+		return fmt.Errorf("event key %d already exists (snowflake collision?): refusing to overwrite", key)
+	}
+
 	// KV key for event content
 	evtKVKey := EventKeyStr(pid, windowTS, seq)
 	if err := s.kv.KVPut(evtKVKey, string(eventJSON)); err != nil {
@@ -219,7 +264,6 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	}
 
 	// KV key for index (EventKey → segment position)
-	idxKVKey := IndexKeyStr(pid, key)
 	idxValue := fmt.Sprintf("%d:%d", windowTS, seq)
 	if err := s.kv.KVPut(idxKVKey, idxValue); err != nil {
 		return fmt.Errorf("failed to store index for event %d: %w", key, err)
@@ -246,72 +290,32 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	return nil
 }
 
-// StoreEvents stores multiple events in batch.
-func (s *FileSegmentStore) StoreEvents(events map[int64]FullEvent) error {
-	// Build batch operations
-	ops := make([]KVOp, 0, len(events)*2)
-	for key, event := range events {
-		if key == 0 {
+// recoverWindowSeqLocked returns the next free seq for a window by scanning
+// its existing event keys. It returns 0 for an empty window and max(seq)+1
+// otherwise. seq keys are zero-padded-free strings (0,1,10,2…) so the max
+// must be computed numerically, not taken from scan order.
+//
+// A scan failure is an ERROR, not a silent 0: falling back to 0 would
+// overwrite existing slots (the very bug D12 exists to prevent), so the
+// caller fails the StoreEvent instead (code-review M3).
+//
+// Caller holds the partition state lock.
+func (s *FileSegmentStore) recoverWindowSeqLocked(pid int, windowTS int64) (int, error) {
+	pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, windowTS), 0)
+	if err != nil {
+		return 0, fmt.Errorf("scan window events: %w", err)
+	}
+	maxSeq := -1
+	for _, pair := range pairs {
+		pk, err := ParseKey(pair.Key)
+		if err != nil || pk.KeyType != "evt" {
 			continue
 		}
-		pid := event.PartitionID
-		if pid == 0 {
-			pid = PartitionIDFromEventKey(key)
+		if pk.Seq > maxSeq {
+			maxSeq = pk.Seq
 		}
-		event.EventKey = key
-		event.PartitionID = pid
-
-		tsSec := TimestampFromEventKey(key)
-		windowTS := WindowTimestamp(tsSec, DefaultWindowSize)
-
-		state := s.getPartitionState(pid)
-		state.mu.Lock()
-		if state.currentWindow != windowTS {
-			state.currentWindow = windowTS
-			state.seqCounter = 0
-		}
-		seq := state.seqCounter
-		state.seqCounter++
-		state.eventCount++
-		state.mu.Unlock()
-
-		eventJSON, err := json.Marshal(event)
-		if err != nil {
-			return fmt.Errorf("failed to marshal event %d: %w", key, err)
-		}
-
-		evtKVKey := EventKeyStr(pid, windowTS, seq)
-		ops = append(ops, KVOp{Type: "put", Key: evtKVKey, Value: string(eventJSON)})
-
-		idxKVKey := IndexKeyStr(pid, key)
-		idxValue := fmt.Sprintf("%d:%d", windowTS, seq)
-		ops = append(ops, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
-
-		s.cache.Add(key, &event)
 	}
-
-	if len(ops) > 0 {
-		return s.kv.KVBatch(ops)
-	}
-	return nil
-}
-
-// ensureSegmentMeta writes segment metadata if it doesn't exist.
-func (s *FileSegmentStore) ensureSegmentMeta(pid int, windowTS int64) error {
-	metaKVKey := MetaKeyStr(pid, windowTS)
-	_, err := s.kv.KVGet(metaKVKey)
-	if err == nil {
-		return nil // Already exists
-	}
-	// Create new segment meta
-	meta := SegmentMeta{
-		PartitionID: pid,
-		WindowTS:    windowTS,
-		Layer:       1,
-		Sealed:      false,
-	}
-	metaJSON, _ := json.Marshal(meta)
-	return s.kv.KVPut(metaKVKey, string(metaJSON))
+	return maxSeq + 1, nil
 }
 
 // ==================== Read Operations ====================
@@ -382,38 +386,47 @@ func (s *FileSegmentStore) GetEvents(keys []int64) ([]FullEvent, error) {
 }
 
 // QueryEvents queries events based on filters.
+//
+// Behavioral contract (segment-query-recency): the result is semantically
+// equivalent to "filter all events → total-order sort → offset/limit".
+// Segmentation, window pruning and early-stop below are optimizations only
+// and must not change the observable result. Total order: (Timestamp,
+// EventKey) — same-millisecond events are tie-broken by EventKey so any two
+// runs (and any store implementation) return identical sequences.
 func (s *FileSegmentStore) QueryEvents(query QueryOptions) ([]EventReference, error) {
 	// Determine which partitions to search
 	partitions := s.resolvePartitions(query)
 
-	var matched []EventReference
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 100 // Default limit
 	}
+	// Per-partition collection budget: the global top-(offset+limit) can only
+	// draw from each partition's own top-(offset+limit), so collecting that
+	// many per partition before the global sort is lossless.
+	budget := limit
+	if query.Offset > 0 {
+		budget += query.Offset
+	}
 
+	var matched []EventReference
 	for _, pid := range partitions {
-		if limit > 0 && len(matched) >= limit {
-			break
-		}
-		// Scan this partition's segments
-		refs, err := s.scanPartition(pid, query, limit-len(matched))
+		// Scan this partition's segments (no cross-partition truncation —
+		// truncating before the global sort would drop newer partitions).
+		refs, err := s.scanPartition(pid, query, budget)
 		if err != nil {
 			continue
 		}
 		matched = append(matched, refs...)
 	}
 
-	// Sort by timestamp
-	sort.Slice(matched, func(i, j int) bool {
-		if query.OrderBy == "timestamp_desc" {
-			return matched[i].Timestamp > matched[j].Timestamp
-		}
-		return matched[i].Timestamp < matched[j].Timestamp
-	})
+	sortRefsByTotalOrder(matched, query.OrderBy)
 
 	// Apply offset
-	if query.Offset > 0 && query.Offset < len(matched) {
+	if query.Offset > 0 {
+		if query.Offset >= len(matched) {
+			return nil, nil
+		}
 		matched = matched[query.Offset:]
 	}
 	// Apply limit after sorting
@@ -424,51 +437,156 @@ func (s *FileSegmentStore) QueryEvents(query QueryOptions) ([]EventReference, er
 	return matched, nil
 }
 
+// sortRefsByTotalOrder sorts references by the total order (Timestamp,
+// EventKey); orderBy "timestamp_desc" reverses both keys together.
+func sortRefsByTotalOrder(refs []EventReference, orderBy string) {
+	desc := orderBy == "timestamp_desc"
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Timestamp != refs[j].Timestamp {
+			if desc {
+				return refs[i].Timestamp > refs[j].Timestamp
+			}
+			return refs[i].Timestamp < refs[j].Timestamp
+		}
+		if desc {
+			return refs[i].EventKey > refs[j].EventKey
+		}
+		return refs[i].EventKey < refs[j].EventKey
+	})
+}
+
+// noUpperBoundMs marks a segment whose time upper bound cannot be proven.
+const noUpperBoundMs int64 = math.MaxInt64
+
+// segmentBounds derives the segment's TRUTHFUL event-time envelope for query
+// pruning and early-stop (segment-query-recency D14 — LSM key-range
+// metadata):
+//
+//   - Sealed with MinTime/MaxTime → those bounds (event time, stable once
+//     the segment is immutable). WindowTS remains a valid lower bound when
+//     MinTime is absent.
+//   - Unsealed (active memtable) OR sealed-but-boundless (legacy segment) →
+//     unprovable: provable=false, meaning NEVER prune, NEVER skip.
+//
+// The nominal window name/layer is NOT consulted for time reasoning — it
+// encodes write recency and compaction generation, not event-time coverage.
+func segmentBounds(windowTS int64, meta SegmentMeta) (lowerMs, upperMs int64, provable bool) {
+	if !meta.Sealed || meta.MaxTime <= 0 {
+		return 0, noUpperBoundMs, false
+	}
+	// MinTime is the REAL event-time minimum recorded at seal/compaction —
+	// trust it directly. Do NOT max() it against the nominal window start:
+	// placement follows WRITE time while MinTime is EVENT time, and the two
+	// diverge for asynchronous write-back (an event older than its window).
+	// The window name is only the fallback when MinTime is absent.
+	lowerMs = windowTS * 1000
+	if meta.MinTime > 0 {
+		lowerMs = meta.MinTime
+	}
+	return lowerMs, meta.MaxTime, true
+}
+
 // scanPartition scans a single partition's segments matching the query.
-func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, maxResults int) ([]EventReference, error) {
-	// Scan meta prefix to discover segments
+//
+// Windows are traversed in the query's time direction (desc: newest first) so
+// that early-stop sacrifices the oldest matches, never the newest — the
+// recall arrow must point the same way as compression (drop old, keep new).
+// Collection is whole-window: seq keys are lexicographic (0,1,10,2…), not
+// time-ordered, so a window must be fully scanned before its matches count.
+func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, budget int) ([]EventReference, error) {
+	// Phase 1: window discovery — scan meta prefix, parse (windowTS, layer,
+	// MinTime/MaxTime) from key + value (all ride in the meta JSON; no extra
+	// KVGet).
 	metaPrefix := MetaPrefix(pid)
 	metaPairs, err := s.kv.KVScan(metaPrefix, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	var matched []EventReference
+	type windowInfo struct {
+		ts       int64
+		layer    int
+		provable bool  // whether lower/upper are truthful (D14)
+		lowerMs  int64 // truthful lower bound when provable
+		upperMs  int64 // truthful upper bound when provable
+	}
+	var windows []windowInfo
 	for _, pair := range metaPairs {
-		if maxResults > 0 && len(matched) >= maxResults {
-			break
-		}
-
-		// Parse meta key to extract window_ts
 		pk, err := ParseKey(pair.Key)
 		if err != nil || pk.KeyType != "meta" {
 			continue
 		}
+		var meta SegmentMeta
+		if err := json.Unmarshal([]byte(pair.Value), &meta); err != nil {
+			meta = SegmentMeta{}
+		}
+		lowerMs, upperMs, provable := segmentBounds(pk.WindowTS, meta)
 
-		// Time range pruning: skip segments outside query range
-		if query.StartTime > 0 || query.EndTime > 0 {
-			windowStart := pk.WindowTS
-			windowEnd := pk.WindowTS + DefaultWindowSize
-			if query.EndTime > 0 && windowStart > query.EndTime {
+		// Time range pruning (Unix ms contract): a segment is pruned only when
+		// its PROVABLE bounds put it entirely outside the range. Active
+		// (unsealed) and boundless segments are memtables — never pruned.
+		if provable {
+			if query.EndTime > 0 && lowerMs > query.EndTime {
 				continue
 			}
-			if query.StartTime > 0 && windowEnd < query.StartTime {
+			if query.StartTime > 0 && upperMs < query.StartTime {
+				continue
+			}
+		}
+		windows = append(windows, windowInfo{ts: pk.WindowTS, layer: meta.Layer, provable: provable, lowerMs: lowerMs, upperMs: upperMs})
+	}
+
+	desc := query.OrderBy == "timestamp_desc"
+	sort.Slice(windows, func(i, j int) bool {
+		if desc {
+			return windows[i].ts > windows[j].ts
+		}
+		return windows[i].ts < windows[j].ts
+	})
+
+	// Phase 2: per-window collection with cross-window dedup and
+	// budget-based skipping.
+	var matched []EventReference
+	// Dedup: EventKey → (index in matched, layer of chosen version). On
+	// duplicates (compaction crash window: same event alive in source and
+	// target layers) keep the higher-layer version — direction-independent,
+	// so desc and asc return the same content version (D3).
+	seenIdx := make(map[int64]int)
+	seenLayer := make(map[int64]int)
+	// Collected-side bounds use ACTUAL event timestamps, never nominal window
+	// bounds (D10): nominal bounds are untruthful for compacted segments, and
+	// the real timestamps are already in hand and tighter.
+	var minCollectedTs, maxCollectedTs int64
+	collectedAny := false
+
+	for _, w := range windows {
+		// Early-stop as a per-window skip (layers have non-monotonic bounds, so
+		// a hard break could skip an overlapping daily/weekly window). Once the
+		// budget is met, a window can be skipped only when it provably cannot
+		// hold an event that outranks the collected set. Comparison is STRICT:
+		// on equality the same-millisecond EventKey tie-break could still let
+		// the candidate win.
+		if budget > 0 && len(matched) >= budget && collectedAny {
+			if desc && w.provable && w.upperMs < minCollectedTs {
+				// Every event in w is older than every collected match.
+				continue
+			}
+			if !desc && w.provable && w.lowerMs > maxCollectedTs {
+				// Every event in w is newer than every collected match.
 				continue
 			}
 		}
 
-		// Scan events in this segment
-		eventPrefix := SegmentEventPrefix(pid, pk.WindowTS)
+		wLayer := w.layer
+
+		// Scan events in this segment (whole window, no intra-window stop).
+		eventPrefix := SegmentEventPrefix(pid, w.ts)
 		eventPairs, err := s.kv.KVScan(eventPrefix, 0)
 		if err != nil {
 			continue
 		}
 
 		for _, ep := range eventPairs {
-			if maxResults > 0 && len(matched) >= maxResults {
-				break
-			}
-
 			evtPK, err := ParseKey(ep.Key)
 			if err != nil || evtPK.KeyType != "evt" {
 				continue
@@ -490,13 +608,33 @@ func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, maxResults
 				continue
 			}
 
-			matched = append(matched, EventReference{
+			ref := EventReference{
 				EventKey:     event.EventKey,
 				PartitionID:  event.PartitionID,
 				EventType:    event.EventType,
 				EventSummary: event.EventSummary,
 				Timestamp:    event.Timestamp,
-			})
+			}
+			if idx, dup := seenIdx[event.EventKey]; dup {
+				if wLayer > seenLayer[event.EventKey] {
+					matched[idx] = ref
+					seenLayer[event.EventKey] = wLayer
+				}
+				continue
+			}
+			seenIdx[event.EventKey] = len(matched)
+			seenLayer[event.EventKey] = wLayer
+			matched = append(matched, ref)
+
+			// Track the collected set's ACTUAL timestamp extremes — the
+			// early-stop basis (D10).
+			if !collectedAny || event.Timestamp < minCollectedTs {
+				minCollectedTs = event.Timestamp
+			}
+			if !collectedAny || event.Timestamp > maxCollectedTs {
+				maxCollectedTs = event.Timestamp
+			}
+			collectedAny = true
 		}
 	}
 
@@ -584,7 +722,23 @@ func (s *FileSegmentStore) DeleteEvent(key int64) error {
 	}
 
 	s.cache.Remove(key)
+
+	// Keep the process-lifetime count accurate (D11): capacity eviction
+	// reads this counter.
+	s.decrementEventCount(pid, 1)
 	return nil
+}
+
+// decrementEventCount lowers the process-lifetime event counter after
+// physical removal (DeleteEvent, compaction cleanup). Floored at zero.
+func (s *FileSegmentStore) decrementEventCount(pid int, n int64) {
+	state := s.getPartitionState(pid)
+	state.mu.Lock()
+	state.eventCount -= n
+	if state.eventCount < 0 {
+		state.eventCount = 0
+	}
+	state.mu.Unlock()
 }
 
 // GetStats returns storage statistics.
@@ -633,12 +787,40 @@ func (s *FileSegmentStore) SealCurrent(pid int) error {
 		return nil // Nothing to seal
 	}
 
+	// Sealing is the LSM flush point: the segment becomes immutable, so its
+	// truthful event-time envelope (MinTime/MaxTime) is recorded here and
+	// stays stable forever after. One scan of the window being sealed
+	// (hourly, per partition) — cheap compared to the queries it enables.
+	minTime, maxTime := int64(0), int64(0)
+	hasMin := false // 0 is a legal Timestamp; don't use it as the sentinel (n1)
+	eventPrefix := SegmentEventPrefix(pid, windowTS)
+	eventPairs, err := s.kv.KVScan(eventPrefix, 0)
+	if err == nil {
+		for _, ep := range eventPairs {
+			var evt struct {
+				Timestamp int64 `json:"timestamp"`
+			}
+			if jsonErr := json.Unmarshal([]byte(ep.Value), &evt); jsonErr != nil {
+				continue
+			}
+			if !hasMin || evt.Timestamp < minTime {
+				minTime = evt.Timestamp
+				hasMin = true
+			}
+			if evt.Timestamp > maxTime {
+				maxTime = evt.Timestamp
+			}
+		}
+	}
+
 	// Write/update segment metadata
 	meta := SegmentMeta{
 		PartitionID: pid,
 		WindowTS:    windowTS,
 		Layer:       1,
 		EventCount:  seqCount,
+		MinTime:     minTime,
+		MaxTime:     maxTime,
 		Sealed:      true,
 	}
 	metaJSON, err := json.Marshal(meta)

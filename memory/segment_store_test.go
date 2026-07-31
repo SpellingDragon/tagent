@@ -65,8 +65,9 @@ func TestSegmentStore_StoreAndGetEvents(t *testing.T) {
 		}
 	}
 
-	err := store.StoreEvents(events)
-	require.NoError(t, err, "StoreEvents should succeed")
+	for key, evt := range events {
+		require.NoError(t, store.StoreEvent(key, evt), "StoreEvent should succeed")
+	}
 
 	// Retrieve all keys
 	keys := make([]int64, 0, len(events))

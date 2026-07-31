@@ -24,6 +24,23 @@ type EventReference struct {
 // FullEvent represents a complete event with all details stored in MemoryStore.
 // This is the single source of truth for event data.
 //
+// TIME CONTRACT (segment-query-recency D8) — two timestamps exist, with
+// strictly separated roles:
+//
+//   - `Timestamp` (this struct) is the SINGLE semantic time axis: ordering,
+//     time-range filtering, TTL age and card timelines read ONLY this. It is
+//     the moment the event happened.
+//   - The time embedded in `EventKey` (Snowflake, see NewSnowflakeEventKey) is
+//     the moment the event was WRITTEN. It is used only to place the event in
+//     a segment window and to break ties between same-millisecond events in
+//     the total order — never for semantic time decisions.
+//
+// The two may diverge for asynchronous events (task_settled write-back,
+// batched delivery). That divergence is harmless precisely because no decision
+// depends on both: it only affects WHICH SEGMENT holds the event, and segment
+// placement carries no semantics (see the segment-vs-time-unit note in
+// docs/wiki/memory/memory-architecture.md §16.3).
+//
 // Note: ParentKey has been removed from this struct.
 // Event causal relationships are now maintained by RelationStore,
 // accessible via MemoryStore.RelationStore() method (if the store implements RelationStoreProvider).
@@ -56,9 +73,6 @@ type MemoryStore interface {
 
 	// StoreEvent stores a single event with its full details.
 	StoreEvent(key int64, event FullEvent) error
-
-	// StoreEvents stores multiple events in batch.
-	StoreEvents(events map[int64]FullEvent) error
 
 	// === Read Operations ===
 
@@ -119,11 +133,14 @@ type QueryOptions struct {
 	// Takes precedence over PartitionID if non-empty.
 	PartitionIDs []int    `json:"partition_ids"`
 	EventTypes   []string `json:"event_types"`
-	StartTime    int64    `json:"start_time"`
-	EndTime      int64    `json:"end_time"`
-	Limit        int      `json:"limit"`
-	Offset       int      `json:"offset"`
-	OrderBy      string   `json:"order_by"`
+	// StartTime/EndTime filter events by timestamp, in Unix MILLISECONDS
+	// (same unit as FullEvent.Timestamp and the recall tools' since/until).
+	// Zero = no bound.
+	StartTime int64  `json:"start_time"`
+	EndTime   int64  `json:"end_time"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+	OrderBy   string `json:"order_by"`
 	// Keyword filters events whose EventSummary or Content contains the keyword (case-insensitive).
 	// Empty string = no keyword filter.
 	Keyword string `json:"keyword,omitempty"`

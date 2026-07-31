@@ -1,6 +1,7 @@
 package tagent
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -360,4 +361,73 @@ func TestAgentConfig_TaskTerminalTTL(t *testing.T) {
 	var empty AgentConfig
 	require.NoError(t, yaml.Unmarshal([]byte("max_tokens: 1000\n"), &empty))
 	assert.Empty(t, empty.TaskTerminalTTL)
+}
+
+// TestResolveLifecycleConfig (D11): YAML-declared lifecycle fields override
+// the built-in defaults; unset fields fall back; negative global TTL disables
+// TTL-based forgetting entirely.
+func TestResolveLifecycleConfig(t *testing.T) {
+	// Nil → pure defaults.
+	cfg := resolveLifecycleConfig(nil)
+	assert.Equal(t, 7, cfg.GlobalTTLDays)
+	assert.Equal(t, 0, cfg.MaxEventsPerPartition)
+
+	// Full override.
+	ttl, maxEv := 30, 50000
+	cfg = resolveLifecycleConfig(&LifecycleConfig{
+		GlobalTTLDays:         &ttl,
+		TypeTTL:               map[string]int{"thinking_plan": 1},
+		CheckInterval:         "15m",
+		MaxEventsPerPartition: &maxEv,
+	})
+	assert.Equal(t, 30, cfg.GlobalTTLDays)
+	assert.Equal(t, 1, cfg.TypeTTL["thinking_plan"])
+	assert.Equal(t, 30, cfg.TypeTTL["external_input"], "unspecified types keep default table")
+	assert.Equal(t, 50000, cfg.MaxEventsPerPartition)
+	assert.Equal(t, int64(15*60), int64(cfg.CheckInterval.Seconds()))
+
+	// Negative global TTL disables TTL; invalid interval falls back.
+	off := -1
+	cfg = resolveLifecycleConfig(&LifecycleConfig{
+		GlobalTTLDays: &off,
+		CheckInterval: "not-a-duration",
+	})
+	assert.Equal(t, -1, cfg.GlobalTTLDays)
+	assert.Equal(t, int64(3600), int64(cfg.CheckInterval.Seconds()), "invalid interval keeps 1h default")
+}
+
+// TestLifecycleConfigYAML: the lifecycle block parses from YAML into
+// MemoryConfig (field names are the contract users write in tagent.yaml).
+func TestLifecycleConfigYAML(t *testing.T) {
+	yamlSrc := `
+entry: a
+model: m
+providers:
+  p:
+    api_endpoint: "http://x"
+agents:
+  a:
+    memory:
+      type: localfile
+      path: /tmp/x
+      lifecycle:
+        global_ttl_days: 30
+        type_ttl:
+          thinking_plan: 1
+        check_interval: "15m"
+        max_events_per_partition: 50000
+`
+	tmp := t.TempDir()
+	path := tmp + "/tagent.yaml"
+	require.NoError(t, os.WriteFile(path, []byte(yamlSrc), 0o644))
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	lc := cfg.Agents["a"].Memory.Lifecycle
+	require.NotNil(t, lc)
+	require.NotNil(t, lc.GlobalTTLDays)
+	assert.Equal(t, 30, *lc.GlobalTTLDays)
+	assert.Equal(t, 1, lc.TypeTTL["thinking_plan"])
+	assert.Equal(t, "15m", lc.CheckInterval)
+	require.NotNil(t, lc.MaxEventsPerPartition)
+	assert.Equal(t, 50000, *lc.MaxEventsPerPartition)
 }

@@ -683,6 +683,38 @@ func (rc *runtimeConfig) resolveSummaryModel(name string, acfg AgentConfig, cfg 
 	return rc.summaryModel
 }
 
+// resolveLifecycleConfig merges the optional YAML lifecycle declaration over
+// the built-in defaults. Nil or partially-set fields keep defaults; a
+// negative GlobalTTLDays disables TTL-based forgetting entirely.
+func resolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig {
+	cfg := memory.DefaultLifecycleConfig()
+	if c == nil {
+		return cfg
+	}
+	if c.GlobalTTLDays != nil {
+		cfg.GlobalTTLDays = *c.GlobalTTLDays
+	}
+	if len(c.TypeTTL) > 0 {
+		if cfg.TypeTTL == nil {
+			cfg.TypeTTL = make(map[string]int, len(c.TypeTTL))
+		}
+		for k, v := range c.TypeTTL {
+			cfg.TypeTTL[k] = v
+		}
+	}
+	if c.CheckInterval != "" {
+		if d, err := time.ParseDuration(c.CheckInterval); err == nil && d > 0 {
+			cfg.CheckInterval = d
+		} else {
+			log.Warnf("[tagent] invalid lifecycle check_interval %q, keeping default", c.CheckInterval)
+		}
+	}
+	if c.MaxEventsPerPartition != nil {
+		cfg.MaxEventsPerPartition = *c.MaxEventsPerPartition
+	}
+	return cfg
+}
+
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
 //
 // For type: file, creates a FileSegmentStore backed by RustViking CLI
@@ -737,7 +769,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		}
 		store.SetTombstoneSet(tombstone)
 
-		lm := memory.NewLifecycleManager(store, tombstone, memory.DefaultLifecycleConfig())
+		lm := memory.NewLifecycleManager(store, tombstone, resolveLifecycleConfig(mc.Lifecycle))
 		lm.Start()
 		store.SetLifecycleManager(lm)
 
@@ -777,7 +809,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		}
 		store.SetTombstoneSet(tombstone)
 
-		lm := memory.NewLifecycleManager(store, tombstone, memory.DefaultLifecycleConfig())
+		lm := memory.NewLifecycleManager(store, tombstone, resolveLifecycleConfig(mc.Lifecycle))
 		lm.Start()
 		store.SetLifecycleManager(lm)
 

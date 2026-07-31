@@ -188,27 +188,6 @@ func TestLifecycleManager_StartStop(t *testing.T) {
 	lm.Stop()
 }
 
-func TestExtractEventTypeFromJSON(t *testing.T) {
-	tests := []struct {
-		name     string
-		json     string
-		expected string
-	}{
-		{"simple", `{"event_type":"test","ts":123}`, "test"},
-		{"with prefix", `{"event_type":"thinking_plan","content":"hello"}`, "thinking_plan"},
-		{"empty", `{}`, ""},
-		{"no match", `{"type":"other"}`, ""},
-		{"nested", `{"event_type":"external_input","data":{"event_type":"inner"}}`, "external_input"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := extractEventTypeFromJSON(tt.json)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestLifecycleTombstoneIntegration(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 	mockKV := NewMockRustVikingClient()
@@ -242,4 +221,117 @@ func TestLifecycleTombstoneIntegration(t *testing.T) {
 	_, err = store.GetEvent(key)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "tombstoned")
+}
+
+// TestCheckTTL_MarksExpiredEvents (I3): the whole point of TTL. Writing an
+// event older than its type TTL must yield a tombstone after checkTTL — for
+// months this silently did nothing because EventKey was read from the KV key
+// (always zero), so `EventKey == 0 → continue` swallowed every event
+// (production: 0 tombstones, 1034 overdue thinking_plan events still live).
+func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
+	rel := newSimpleInMemRelationStore()
+	mockKV := NewMockRustVikingClient()
+	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
+	require.NoError(t, err)
+	ts := NewTombstoneSet(rel, mockKV, 1)
+	store.tombstones = ts
+	lm := NewLifecycleManager(store, ts, DefaultLifecycleConfig())
+
+	now := time.Now().UnixMilli()
+	overdue := NewSnowflakeEventKey(1, now-10*24*3600*1000) // 10 days old
+	require.NoError(t, store.StoreEvent(overdue, FullEvent{
+		EventKey: overdue, PartitionID: 1, EventType: "thinking_plan",
+		EventSummary: "old thinking", Timestamp: now - 10*24*3600*1000,
+	}))
+	fresh := NewSnowflakeEventKey(1, now-1000) // 1s old
+	require.NoError(t, store.StoreEvent(fresh, FullEvent{
+		EventKey: fresh, PartitionID: 1, EventType: "thinking_plan",
+		EventSummary: "fresh thinking", Timestamp: now - 1000,
+	}))
+	artifact := NewSnowflakeEventKey(1, now-40*24*3600*1000) // 40 days old but exempt
+	require.NoError(t, store.StoreEvent(artifact, FullEvent{
+		EventKey: artifact, PartitionID: 1, EventType: "context_compress_summary",
+		EventSummary: "curated artifact", Timestamp: now - 40*24*3600*1000,
+	}))
+
+	lm.checkTTL()
+
+	assert.True(t, ts.IsTombstone(overdue),
+		"thinking_plan (TTL=3d) at 10 days must be tombstoned")
+	assert.False(t, ts.IsTombstone(fresh),
+		"fresh event must not be tombstoned")
+	assert.False(t, ts.IsTombstone(artifact),
+		"curated artifacts (context_compress_summary) are exempt")
+
+	// Tombstoned events are invisible to precise recall (the honest-miss path).
+	_, err = store.GetEvent(overdue)
+	assert.Error(t, err, "GetEvent must report tombstoned events as missing")
+	_, err = store.GetEvent(fresh)
+	assert.NoError(t, err)
+}
+
+// TestNegativeGlobalTTLDisablesTTL (B1): a NEGATIVE GlobalTTLDays means
+// "disable TTL forgetting entirely" — it must survive NewLifecycleManager
+// (the zero value alone falls back to the default 7).
+func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
+	rel := newSimpleInMemRelationStore()
+	mockKV := NewMockRustVikingClient()
+	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
+	require.NoError(t, err)
+	ts := NewTombstoneSet(rel, mockKV, 1)
+	store.tombstones = ts
+
+	cfg := DefaultLifecycleConfig()
+	cfg.GlobalTTLDays = -1 // explicit off
+	lm := NewLifecycleManager(store, ts, cfg)
+
+	now := time.Now().UnixMilli()
+	overdue := NewSnowflakeEventKey(1, now-30*24*3600*1000)
+	require.NoError(t, store.StoreEvent(overdue, FullEvent{
+		EventKey: overdue, PartitionID: 1, EventType: "thinking_plan",
+		EventSummary: "ancient", Timestamp: now - 30*24*3600*1000,
+	}))
+
+	lm.checkTTL()
+	assert.False(t, ts.IsTombstone(overdue),
+		"GlobalTTLDays=-1 must disable TTL entirely (B1: must not be clamped to 7)")
+}
+
+// TestEvictionDecrementsLiveCount (M4): tombstoning must decrement the
+// logically-live counter. Without it, an over-capacity partition would evict
+// another excess+10 LIVE events every cycle — a ratchet that never stops
+// until compaction physically removes the tombstones.
+func TestEvictionDecrementsLiveCount(t *testing.T) {
+	rel := newSimpleInMemRelationStore()
+	mockKV := NewMockRustVikingClient()
+	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
+	require.NoError(t, err)
+	ts := NewTombstoneSet(rel, mockKV, 1)
+	store.tombstones = ts
+
+	cfg := DefaultLifecycleConfig()
+	cfg.MaxEventsPerPartition = 3
+	lm := NewLifecycleManager(store, ts, cfg)
+
+	now := time.Now().UnixMilli()
+	for i := 0; i < 6; i++ {
+		k := NewSnowflakeEventKey(1, now-int64(100+i))
+		require.NoError(t, store.StoreEvent(k, FullEvent{
+			EventKey: k, PartitionID: 1, EventType: "agent_output",
+			EventSummary: "event", Timestamp: now - int64(100+i),
+		}))
+	}
+	before := store.GetStats().TotalEvents
+	require.Equal(t, 6, before)
+
+	lm.checkCapacity() // evicts (6-3)+10 → capped by available events
+	after := store.GetStats().TotalEvents
+	assert.Less(t, after, before,
+		"eviction must decrement the live counter, or the next cycle re-evicts live events")
+
+	// A second cycle must NOT evict more than needed: counter already ≤ max.
+	before2 := store.GetStats().TotalEvents
+	lm.checkCapacity()
+	assert.Equal(t, before2, store.GetStats().TotalEvents,
+		"once within capacity, subsequent cycles must be no-ops")
 }

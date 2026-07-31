@@ -62,7 +62,11 @@ type LifecycleManager struct {
 
 // NewLifecycleManager creates a LifecycleManager.
 func NewLifecycleManager(store *FileSegmentStore, tombstone *TombstoneSet, config LifecycleConfig) *LifecycleManager {
-	if config.GlobalTTLDays <= 0 {
+	// Only the ZERO value falls back to the default (bare programmatic
+	// construction). A NEGATIVE GlobalTTLDays is meaningful: it disables
+	// TTL-based forgetting entirely (getEffectiveTTL <= 0 → skip), so it must
+	// NOT be clamped back to the default (code-review B1).
+	if config.GlobalTTLDays == 0 {
 		config.GlobalTTLDays = 7
 	}
 	if config.CheckInterval <= 0 {
@@ -148,30 +152,28 @@ func (lm *LifecycleManager) checkTTL() {
 			}
 
 			for _, pair := range pairs {
-				// Parse event key from KV key
-				eventPK, _ := ParseKey(pair.Key)
-				if eventPK == nil || eventPK.EventKey == 0 {
+				// The EventKey lives in the event's JSON VALUE, not in the KV key
+				// (whose format {pid}:evt:{window}:{seq} carries no event key —
+				// ParseKey leaves EventKey zero for evt keys, which silently
+				// disabled TTL for months: `EventKey == 0 → continue` swallowed
+				// every event).
+				var evt struct {
+					EventKey  int64  `json:"event_key"`
+					Timestamp int64  `json:"timestamp"`
+					Type      string `json:"event_type"`
+				}
+				if err := json.Unmarshal([]byte(pair.Value), &evt); err != nil || evt.EventKey == 0 {
 					continue
 				}
 
 				// Check if already tombstoned
-				if lm.tombstone.IsTombstone(eventPK.EventKey) {
+				if lm.tombstone.IsTombstone(evt.EventKey) {
 					continue
 				}
 
 				// Determine TTL for this event type
-				eventType := extractEventTypeFromJSON(pair.Value)
-
-				ttlDays, err := lm.getEffectiveTTL(eventType)
+				ttlDays, err := lm.getEffectiveTTL(evt.Type)
 				if err != nil || ttlDays <= 0 {
-					continue
-				}
-
-				// Parse actual Timestamp from event JSON for accurate TTL calculation
-				var evt struct {
-					Timestamp int64 `json:"timestamp"`
-				}
-				if err := json.Unmarshal([]byte(pair.Value), &evt); err != nil {
 					continue
 				}
 
@@ -179,9 +181,14 @@ func (lm *LifecycleManager) checkTTL() {
 				eventAge := now - evt.Timestamp
 
 				if eventAge > ttlMs {
-					if err := lm.tombstone.MarkTombstone(eventPK.EventKey); err != nil {
-						log.Errorf("[Lifecycle] MarkTombstone failed key=%d: %v", eventPK.EventKey, err)
+					if err := lm.tombstone.MarkTombstone(evt.EventKey); err != nil {
+						log.Errorf("[Lifecycle] MarkTombstone failed key=%d: %v", evt.EventKey, err)
+						continue
 					}
+					// eventCount tracks LOGICALLY LIVE events (capacity decisions);
+					// a tombstoned event is dead to readers even before compaction
+					// removes it physically — decrement on marking (code-review M4).
+					lm.store.decrementEventCount(pid, 1)
 				}
 			}
 		}
@@ -238,34 +245,48 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 			if evicted >= count {
 				break
 			}
-			eventPK, _ := ParseKey(pair.Key)
-			if eventPK == nil || eventPK.EventKey == 0 {
+			// EventKey from the JSON value, not the KV key (same fix as
+			// checkTTL — the KV key format carries no event key).
+			var evt struct {
+				EventKey int64  `json:"event_key"`
+				Type     string `json:"event_type"`
+			}
+			if err := json.Unmarshal([]byte(pair.Value), &evt); err != nil || evt.EventKey == 0 {
 				continue
 			}
-			if lm.tombstone.IsTombstone(eventPK.EventKey) {
+			if lm.tombstone.IsTombstone(evt.EventKey) {
 				continue
 			}
 			// Curated artifacts are exempt from capacity eviction too (same rule
 			// as TTL): raw events may be forgotten, artifacts persist — index
 			// cards point at these keys.
-			if extractEventTypeFromJSON(pair.Value) == event.TypeContextCompressSummary {
+			if evt.Type == event.TypeContextCompressSummary {
 				continue
 			}
 
-			if err := lm.tombstone.MarkTombstone(eventPK.EventKey); err != nil {
-				log.Errorf("[Lifecycle] evict MarkTombstone failed key=%d: %v", eventPK.EventKey, err)
+			if err := lm.tombstone.MarkTombstone(evt.EventKey); err != nil {
+				log.Errorf("[Lifecycle] evict MarkTombstone failed key=%d: %v", evt.EventKey, err)
 				continue
 			}
+			// Decrement the logically-live counter alongside the tombstone —
+			// otherwise every hourly cycle would evict another excess+10 LIVE
+			// events (tombstones don't change the physical count until the next
+			// compaction, which may never fire for quiet partitions).
+			lm.store.decrementEventCount(pid, 1)
 			evicted++
 		}
 	}
 }
 
 // getEffectiveTTL returns the effective TTL in days for a given event type.
-// A NEGATIVE type-specific TTL means the type is exempt from expiration
-// (curated artifacts — "raw events may be forgotten, artifacts persist");
-// the caller skips types whose effective TTL is <= 0.
+// A NEGATIVE global TTL is the master switch: it disables TTL entirely and
+// takes precedence over the per-type table. A NEGATIVE type-specific TTL
+// exempts that type (curated artifacts — "raw events may be forgotten,
+// artifacts persist"); the caller skips types whose effective TTL is <= 0.
 func (lm *LifecycleManager) getEffectiveTTL(eventType string) (int, error) {
+	if lm.config.GlobalTTLDays < 0 {
+		return 0, nil // master off switch (B1): nothing expires by age
+	}
 	// Type-specific TTL takes precedence; negative = exempt.
 	if ttl, ok := lm.config.TypeTTL[eventType]; ok {
 		if ttl < 0 {
@@ -277,46 +298,6 @@ func (lm *LifecycleManager) getEffectiveTTL(eventType string) (int, error) {
 	}
 	// Fall back to global TTL
 	return lm.config.GlobalTTLDays, nil
-}
-
-// ==================== Helper ====================
-
-// extractEventTypeFromJSON does a minimal parse of JSON to extract event_type field.
-// This avoids a full json.Unmarshal for the common case.
-func extractEventTypeFromJSON(jsonStr string) string {
-	// Simple string search for "event_type":"<value>"
-	// This is faster than full unmarshal for scan operations
-	const prefix = `"event_type":"`
-	start := indexOf(jsonStr, prefix)
-	if start < 0 {
-		return ""
-	}
-	start += len(prefix)
-	end := indexOfFrom(jsonStr, start, `"`)
-	if end < 0 {
-		return ""
-	}
-	return jsonStr[start:end]
-}
-
-// indexOf finds the first occurrence of substr in s.
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-// indexOfFrom finds the first occurrence of substr in s starting from start.
-func indexOfFrom(s string, start int, substr string) int {
-	for i := start; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
 
 // ==================== Compact integration ====================

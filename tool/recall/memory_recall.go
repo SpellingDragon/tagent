@@ -17,6 +17,7 @@ package recall
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -68,6 +69,9 @@ type memoryRecallResult struct {
 	Entries []memoryRecallEntry `json:"entries"`
 	Count   int                 `json:"count"`
 	Misses  int                 `json:"misses,omitempty"`
+	// Message carries the honest-truncation hint for query mode (empty when
+	// results did not hit the limit).
+	Message string `json:"message,omitempty"`
 }
 
 // NewMemoryRecallTool creates the protocol recall tool (pure function).
@@ -155,6 +159,7 @@ func recallByQuery(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
 		})
 	}
 	res.Count = len(res.Entries)
+	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
 	return res, nil
 }
 

@@ -360,6 +360,17 @@ type QueryOptions struct {
 
 **注意**：`QueryEvents` 始终返回 `[]EventReference`（轻量），不返回完整 `FullEvent`，避免大量 IO 开销。
 
+**查询语义契约**（segment-query-recency）——两个 store 实现（`InMemoryStore` / `FileSegmentStore`）对同一 `QueryOptions` 返回一致结果：
+
+| 契约 | 含义 |
+|------|------|
+| 声明式语义 | 结果 ≡ 全集过滤 → 全序排序 → offset/limit；分段、窗口剪枝、早停均为**优化**，不改变可观察结果 |
+| 全序确定性 | 排序键为 `(Timestamp, EventKey)`——同毫秒事件（并行工具调用常见）以 EventKey 决胜，任意实现/任意两次查询逐位一致 |
+| 最新优先 | `timestamp_desc` 下 limit 截断只牺牲最旧、永不牺牲最新——召回的时间箭头与压缩同向（压缩丢旧留新，召回必须新先于旧） |
+| 身份唯一 | 压实"先写目标层、后删源层"的崩溃窗口内同一事件可能双层并存；查询按 EventKey 去重，且**方向无关地**保留更高 layer 版本 |
+
+`FileSegmentStore` 的实现要点：窗口发现阶段从 meta 扫描解析 `(windowTS, layer)`（layer 决定剪枝跨度：L0/L1 = 1h、L2 = 1d、L3 = 1w），按查询方向遍历窗口；窗内 `seq` 是字符串序而非时间序，故收集以**整窗**为粒度，早停只跳过时间上不可能贡献结果的窗口。
+
 ### 6.3 StoreStats — 存储统计
 
 ```go
@@ -932,6 +943,188 @@ graph LR
 
 ---
 
+## 十六、数据流与硬契约
+
+> 本章说明记忆子系统的完整数据流，重点是那些**不经函数调用**、靠 KV 键名约定 / 内存态 / 后台工人隐式成立的连接——它们是本模块的真正边界，也是最容易被误改的地方。尚未闭合的环见末章「已知缺口」。
+
+### 16.0 记忆数据模型总览
+
+记忆按 **LSM 树**组织：事件从三条管线汇入唯一的 `StoreEvent` 写入路径，顺序追加进按写入时间分段的存储；层级表示写入新近度与压实代数（与事件的逻辑时间正交）；封口/压实写入真实时间边界（键范围元数据）供查询剪枝；遗忘由压实（分辨率）、TTL（价值衰减）、容量（保险）三层各自负责，均经墓碑达成。
+
+```mermaid
+graph TB
+    subgraph PIPE["事件管线（三个生产者）"]
+        E1["EventBus 注入事件<br/>persistBusEvent<br/>(external_input 等)"]
+        E2["框架 LLM 事件<br/>MemoryPlugin.OnEvent<br/>(thinking_plan/agent_output/action_command)"]
+        E3["压缩固化物<br/>archiveSegment<br/>(context_compress_summary)"]
+    end
+
+    subgraph STD["标准化（单点派生）"]
+        SE["StoreEvent(key, FullEvent)<br/>① 碰撞守卫：EventKey 唯一<br/>② seq 恢复 max+1（防覆写）<br/>③ 派生窗口/写 evt+idx+meta"]
+        REL["RelationStore.SetParent<br/>因果链"]
+    end
+
+    subgraph KV["KV 键空间（无外键，靠格式互指）"]
+        EVT["{pid}:evt:{窗}:{seq} → FullEvent"]
+        IDX["{pid}:idx:{eventKey} → 窗:seq"]
+        META["{pid}:meta:{窗} → SegmentMeta<br/>(layer/Sealed/MinTime/MaxTime)"]
+        TOMB["{pid}:tomb:{eventKey} → 墓碑"]
+    end
+
+    subgraph LSM["层级 = 写入新近度 / 压实代数"]
+        L0["L0 活跃段 = memtable<br/>Sealed=false，永远被扫描"]
+        L1["L1 封口段<br/>flush 写 MinTime/MaxTime"]
+        L2["L2 压实段（≥24 L1）"]
+        L3["L3 归档段（≥7 L2）<br/>低价值类型清空 Content"]
+    end
+
+    subgraph READ["召回（三原语）"]
+        R1["票据：GetEvent<br/>tomb→LRU→idx→evt，miss 诚实"]
+        R2["语义：QueryEvents<br/>meta 发现→键范围剪枝→方向遍历整窗<br/>→去重(高层优先)→全序(Timestamp,EventKey)"]
+        R3["卡片：投影内联<br/>[evt_key] 任务骨架"]
+    end
+
+    subgraph LIFE["遗忘（三层职责不重叠）"]
+        FC["压实 = 分辨率管理"]
+        FT["TTL = 价值衰减（类型曲线，固化物豁免）"]
+        FP["容量 = 最后保险（逻辑存活计数）"]
+    end
+
+    E1 --> SE
+    E2 --> SE
+    E3 --> SE
+    E2 --> REL
+    SE --> EVT
+    SE --> IDX
+    SE --> META
+    EVT --> L0
+    L0 -->|checkHourlySeal| L1
+    L1 -->|CompactL1ToL2| L2
+    L2 -->|CompactL2ToL3| L3
+    IDX --> R1
+    META --> R2
+    EVT --> R2
+    EVT --> R3
+    FC --> L2
+    FC --> L3
+    FT --> TOMB
+    FP --> TOMB
+    TOMB --> R1
+    TOMB --> R2
+    TOMB --> FC
+```
+
+**两条时间轴各归其位**：`FullEvent.Timestamp`（事件产生时刻）是唯一语义时间轴——排序/过滤/TTL/卡片时间线只认它；EventKey 内嵌时间（写入时刻）仅用于段放置与同毫秒决胜。二者在异步回写下可分叉，但无害——因为剪枝只读封口段的事件时间边界（`MinTime/MaxTime`），不读段名。
+
+### 16.1 写入全景：三个生产者
+
+```mermaid
+graph TB
+    subgraph PROD["生产者（全部经 StoreEvent 单写）"]
+        P1["MemoryPlugin.OnEvent<br/>框架 LLM 事件<br/>(thinking_plan/agent_output/action_command)"]
+        P2["ContextManager.persistBusEvent<br/>EventBus 注入事件<br/>(external_input 等)"]
+        P3["SmartCompressor.archiveSegment<br/>压缩固化物<br/>(context_compress_summary)"]
+    end
+    P1 --> SE["StoreEvent(key, FullEvent)<br/>① 窗口 = WindowTimestamp(key 内嵌秒)<br/>② seq = PartitionState.seqCounter++<br/>③ 写 evt 键 + idx 键 (+meta 若 seq==0)"]
+    P2 --> SE
+    P3 --> SE
+    P1 --> REL["RelationStore.SetParent<br/>因果链 parent=lastEventKeys[pid:session]"]
+    P2 --> PROJ["SessionProjection.Add<br/>同点投影（store 与视图同步）"]
+    SE --> KV["LocalFileKV<br/>kv.wal.jsonl 追加 → flushLoop 批量<br/>→ compactLocked 周期性 dump kv.json"]
+    REL --> RJ["relations.journal 追加<br/>+ 定期 relations.snap 快照"]
+```
+
+要点：
+- 三个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护。
+- **窗口与 seq 的分配住在内存态 `PartitionState`**（`sync.Map`，按 pid 惰性创建）。这是“槽位分配”的唯一权威，也是 16.6 恢复链路的关键一环。
+- 因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。
+
+### 16.2 KV 键空间：无外键的指向契约
+
+四类键之间**没有数据库级的引用约束**，全靠键名格式约定互相指向——这是阅读/修改本模块时必须先掌握的部分：
+
+```mermaid
+graph LR
+    IDX["{pid}:idx:{eventKey}<br/>→ '窗:seq'"] -.定位.-> EVT["{pid}:evt:{窗}:{seq}<br/>→ FullEvent JSON"]
+    META["{pid}:meta:{窗}<br/>→ SegmentMeta"] -.发现与描述.-> EVT
+    TOMB["{pid}:tomb:{eventKey}<br/>→ ''"] -.否定可见性.-> EVT
+    RELK["relations.journal / snap<br/>child → parent"] -.因果.-> EVT
+```
+
+| 指向契约 | 由谁维护 | 由谁消费 | 在本模块的作用 |
+|---|---|---|---|
+| idx 值指向的 evt 槽位装的就是该 eventKey 的事件 | `StoreEvent`（evt+idx 同时写）、压实（重建 idx） | `GetEvent` 票据召回 | 票据召回的 O(1) 寻址能力 |
+| 每个有事件的窗口都有 meta 键 | `StoreEvent`（首事件时建）、`SealCurrent`、压实 | `QueryEvents` 窗口发现、`ListSegments`、压实/生命周期枚举 | meta 前缀扫描是**发现段的唯一入口**：无 meta 的事件对查询不可见 |
+| tomb 键存在 ⇒ 对应事件对所有读路径不可见 | `TombstoneSet.MarkTombstone`（同时级联修因果链） | `GetEvent` 前置检查、`QueryEvents` 过滤、压实 `filterTombstoned` | 惰性遗忘：标记即不可见，物理清除推迟到下一次压实 |
+| `SegmentMeta.MinTime/MaxTime` 是段内容的真实时间包络 | 压实写入（合并时已按时间排序，取首尾即得） | `QueryEvents` 的窗口剪枝与早停判定 | 时间推理的权威来源（而非段名，见 16.3） |
+
+> 为何不引入外键或单一大索引：下层是纯 KV（RocksDB / LocalFileKV），只有前缀扫描与点查两种能力。把关系编码到键名里，换来的是“票据召回 O(1)、时间召回 O(相关段)”而无需维护额外索引结构。代价就是上表这四条约定必须由代码纪律保证。
+
+### 16.3 段的生命周期与“段名不是时间单位”
+
+```mermaid
+stateDiagram-v2
+    [*] --> L0: 首事件写入（建 meta, sealed=false）
+    L0 --> L1: checkHourlySeal 跨小时边界
+    L1 --> L2: L1 段数 ≥ L1Threshold(24)<br/>CompactL1ToL2
+    L2 --> L3: L2 段数 ≥ L2Threshold(7)<br/>CompactL2ToL3（低价值类型清空 Content）
+    L0 --> Tombstoned: TTL / 容量标记
+    L1 --> Tombstoned: TTL / 容量标记
+    L2 --> Tombstoned: TTL / 容量标记
+    Tombstoned --> [*]: 压实 filterTombstoned<br/>物理清除 + finalizeTombstones
+```
+
+**关键概念澄清：段是 LSM 式放置单位，不是时间单位**。记忆按 LSM 树管理：
+
+- **层级与段名 = 写入新近度与压实代数**，与事件的逻辑时间正交。段按写入时间放置（LSM 顺序追加、写放大最小的立命之本）；一个“日段”完全可能装着跨数天的事件——段名是对齐命名，不是覆盖承诺。
+- **键范围是剪枝的唯一依据**：封口（`SealCurrent`）与压实在段变为不可变时写入 `meta.MinTime/MaxTime`（事件时间的真实包络）；查询只读它，不读段名。
+- **活跃段 = memtable**：`Sealed=false` 的段键范围仍在变动，因此查询永远扫描它、不剪枝不跳过；历史遗留的无边界段同理保守扫描。
+- **压实的 crash-safe 顺序**是先写目标层、后删源层；崩溃窗口内同一事件可短暂双层并存，故查询需按 EventKey 去重并确定性地保留**更高层**版本（压实写入目标层即宣告该版本为 canonical）。
+
+### 16.4 后台工人：谁在何时改动存储
+
+除了前景的读写，存储还被三组后台工人定时改动——它们与前景无调用关系，仅经 KV 与内存态交互：
+
+| 工人 | 周期 | 读 | 写 | 职责边界 |
+|---|---|---|---|---|
+| `Compactor.checkHourlySeal` | 5min | `PartitionState.currentWindow` | `SealCurrent` → meta（sealed=true） | 只管封口，不动事件 |
+| `Compactor.CompactL1ToL2` / `CompactL2ToL3` | 5min | meta（按 layer 选源）+ 源段 evt 全量 | 目标段 evt/idx/meta → 删源段 → finalizeTombstones | **分辨率管理**（降级不遗忘）；L3 对低价值类型清空 Content |
+| `LifecycleManager.checkTTL` / `checkCapacity` | 1h | 分区内段与事件 | `MarkTombstone` → tomb 键 | **价值衰减管理**（按类型遗忘曲线，固化物豁免） |
+| `LocalFileKV.flushLoop` | 连续 | WAL 队列 | kv.wal.jsonl 追加 / 周期性 kv.json 全量 dump | 持久化而已，无语义 |
+
+三层遗忘/降级的**职责不重叠**是本模块的设计意图：压实管“存多细”、TTL 管“还存不存”、容量兼作最后保险。三者均不得破坏召回底线（见 16.5 契约 5）。
+
+### 16.5 硬契约（不变量）与其保障机制
+
+这些是记忆子系统对外的行为承诺；修改本模块时它们是不得跌破的底线。
+
+| 契约 | 含义 | 保障机制 |
+|---|---|---|
+| **1. 事件不可变** | 写入后的 FullEvent 永不被原地修改；压缩与遗忘只作用于“视图”和“可见性” | 写入只有 `StoreEvent` 一条路径；压实是搬迁而非改写；TTL 用墓碑而非原地删 |
+| **2. 槽位与身份一一对应** | `{pid}:evt:{窗}:{seq}` 槽位里装的必是 `{pid}:idx:{eventKey}` 指向它的那个事件 | seq 由 `PartitionState.seqCounter` 单调递增分配；evt 与 idx 同次写入 |
+| **3. 声明式查询语义** | `QueryEvents` 结果 ≡ 全集过滤 → 全序排序 → offset/limit；分段/剪枝/早停仅为优化 | 全序键 `(Timestamp, EventKey)`；剪枝与早停只依据真实时间边界；双实现一致性测试矩阵 |
+| **4. 召回时间箭头与压缩同向** | 压缩丢旧留新，因而召回必须新先于旧；`timestamp_desc` 下截断只牺牲最旧 | 窗口按查询方向遍历；整窗粒度收集（窗内 seq 是字符串序而非时间序） |
+| **5. 召回底线（可寻址性）** | 卡片里的 `[key]` 票据要么取回原文、要么诚实报 miss，绝不静默返回错误内容 | `GetEvent` 先查墓碑再查 idx；固化物（summary）豁免 TTL 与容量淘汰 |
+| **6. 时间真相源单一** | `FullEvent.Timestamp` 是**唯一时间轴**（排序/过滤/TTL/卡片时间线均只认它）；EventKey 内嵌时间仅用于段放置与同毫秒决胜 | 两者均在写入处一次派生；无任何判定同时依赖两个时间，因此异步事件下的分叉无害 |
+| **7. 分区隔离与显式授权** | 子 Agent 不得盲扫其他分区；跳区读取需 `read_namespaces` 显式授权 | `resolvePartitions` 无分区参数时返回空；工具层注入 `ReadPartitionIDs` |
+| **8. 压实 crash-safe** | 任何时刻崩溃不丢事件，最多短暂双层并存 | 先写目标层、后删源层；查询侧按 EventKey 去重并保留高层版本 |
+| **9. 同点投影** | “对 LLM 可见”与“已入投影”不得分家 | `persistBusEvent` 同步双写 store 与投影 |
+
+### 16.6 状态与恢复
+
+重启后哪些状态从磁盘重建、哪些靠重算：
+
+| 状态 | 位置 | 恢复机制 |
+|---|---|---|
+| 事件事实 | `kv.json` + `kv.wal.jsonl` | 启动 `loadSnapshot` + `replayWAL` |
+| 因果链 | `relations.snap` + `relations.journal` | `NewInMemRelationStore` 构造时 `recover()`（快照 + 日志重放） |
+| 墓碑集 | `{pid}:tomb:*` | `TombstoneSet.RecoverFromKV` |
+| LRU 缓存 | 仅内存 | 不需恢复（冷启动自然回填） |
+| 窗口 / seq / 事件计数 | 仅内存 `PartitionState` | 靠首次写入重建——这里是契约 2 的软肋，见末章缺口表 |
+
+
+
+
 ## 已知缺口与演进方向
 
 > 本章主动声明当前设计尚未闭合的环——供使用者评估适用边界，也供外部分析引用。
@@ -943,3 +1136,7 @@ graph LR
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |
 | **历史脏数据** | 旧 11 位 mask 时代的负 key / 超界分区（如 1167）残留于实机存量 | TTL 自然清退；不做主动迁移（读路径已容错） |
+| **压实未按日/周分组** | L2/L3 段名仅是对齐命名，一个“日段”可装跨数天事件——真实边界使其不再影响正确性，但超宽段剪枝粒度粗、几乎总被扫描 | 压实按日/周分组产段（性能优化，需重定义触发阈值语义） |
+| **TTL 扫描成本不受控** | 修复后每周期全量扫描分区内所有事件（O(事件数)/周期）；小库可接受，规模增加后成为瓶颈 | 游标式增量扫描或按段年龄剪枝（需新设计，原 `ttl-cursor-scan` 规格已撤回） |
+| **雪花 key 同秒碰撞窗口** | key 的同秒计数器存于内存；重启前后同一秒写入会生成相同 key——已由 `StoreEvent` 碰撞检测拒绝写入防住静默覆写，但写入会失败需重试 | 雪花 seq 随窗口恢复持久化，或 key 格式加随机后缀 |
+| **规格与实现系统性漂移（I6）** | `harden-event-storage-for-scale` 0/80 任务未完成即归档，delta 已入主 specs，形成"规格说有、代码没有"的空头契约（已处置：ttl-cursor-scan 撤回、event-lifecycle 改写、seqCounter 改写为轻量语义、StoreEvents 删除） | **归档应加实现核对：tasks 未完成不得同步 delta 入主 specs**；其余存量规格逐条兑现或如实降级 |

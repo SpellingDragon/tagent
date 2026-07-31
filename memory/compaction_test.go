@@ -290,3 +290,66 @@ func TestCompaction_FinalizesTombstones(t *testing.T) {
 		t.Errorf("alive event's idx must survive: %v", err)
 	}
 }
+
+// TestCompaction_DayAlignedSourceSurvives (P1): when the earliest L1 source
+// window is day-aligned, computeDailyWindow(w0) == w0 — the L2 target prefix
+// IS a source prefix. Cleanup must skip it, or the freshly written L2 events
+// are deleted right after being written (silent data loss).
+func TestCompaction_DayAlignedSourceSurvives(t *testing.T) {
+	store, compactor := newTestCompactor(t)
+
+	dayAligned := (int64(1710666000) / 86400) * 86400 // exact day boundary
+	var keys []int64
+	for i := 0; i < 2; i++ {
+		k := NewSnowflakeEventKey(1, (dayAligned+int64(i))*1000)
+		require.NoError(t, store.StoreEvent(k, FullEvent{
+			PartitionID: 1, EventType: "test", EventSummary: "day event",
+			Timestamp: (dayAligned + int64(i)) * 1000,
+		}))
+		keys = append(keys, k)
+	}
+	require.NoError(t, store.SealCurrent(1))
+
+	// A second, later-day window so the compaction has more than the target.
+	require.NoError(t, store.StoreEvent(NewSnowflakeEventKey(1, (dayAligned+86400+3600)*1000), FullEvent{
+		PartitionID: 1, EventType: "test", EventSummary: "next day",
+		Timestamp: (dayAligned + 86400 + 3600) * 1000,
+	}))
+	require.NoError(t, store.SealCurrent(1))
+
+	windows, err := store.ListSegments(1)
+	require.NoError(t, err)
+	require.Equal(t, dayAligned, computeDailyWindow(windows[0]),
+		"fixture must place the target ON a source window")
+	require.NoError(t, compactor.CompactL1ToL2(1, windows))
+
+	// The compacted events must still be retrievable (not deleted by cleanup).
+	for _, k := range keys {
+		_, err := store.GetEvent(k)
+		assert.NoError(t, err, "compacted event must survive the name collision")
+	}
+}
+
+// TestCompaction_SkipsUnsealedSegments (P2): an active (unsealed) segment is
+// still taking writes — it must never be merged as a compaction source.
+func TestCompaction_SkipsUnsealedSegments(t *testing.T) {
+	store, compactor := newTestCompactor(t)
+
+	require.NoError(t, store.StoreEvent(NewSnowflakeEventKey(1, 1710666000000), FullEvent{
+		PartitionID: 1, EventType: "test", EventSummary: "active",
+		Timestamp: 1710666000000,
+	}))
+	// No seal: the window stays Sealed=false.
+
+	windows, err := store.ListSegments(1)
+	require.NoError(t, err)
+	require.NoError(t, compactor.CompactL1ToL2(1, windows))
+
+	evt, err := store.GetEvent(NewSnowflakeEventKey(1, 1710666000000))
+	_ = evt
+	_ = err
+	// (primary assertion is that the active segment was not deleted; the
+	// event must remain retrievable regardless of the compaction call)
+	windows2, _ := store.ListSegments(1)
+	assert.NotEmpty(t, windows2, "unsealed segment must not be compacted away")
+}

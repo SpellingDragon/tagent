@@ -26,9 +26,9 @@ import (
 // Tombstone marker:
 //   {pid}:tomb:{event_key}             → "" (key existence = tombstoned)
 //
-// For deeper layer segments (L2, L3), keys follow:
-//   {pid}:L{layer}:evt:{window_ts}:{seq}
-//   {pid}:L{layer}:meta:{window_ts}
+// Compacted segments (L2 daily, L3 weekly) REUSE the same key formats above
+// with a coarser window_ts (day/week aligned); the layer lives in the
+// segment metadata (SegmentMeta.Layer), not in the key.
 
 const (
 	// Key components

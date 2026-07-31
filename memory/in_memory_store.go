@@ -58,27 +58,6 @@ func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 	return nil
 }
 
-// StoreEvents stores multiple events in batch.
-func (s *InMemoryStore) StoreEvents(events map[int64]FullEvent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	for key, event := range events {
-		event.EventKey = key
-		pid := event.PartitionID
-		if pid == 0 {
-			pid = PartitionIDFromEventKey(key)
-			event.PartitionID = pid
-		}
-		if s.events[pid] == nil {
-			s.events[pid] = make(map[int64]FullEvent)
-		}
-		s.events[pid][key] = event
-	}
-
-	return nil
-}
-
 // GetEvent retrieves a single event by its EventKey.
 func (s *InMemoryStore) GetEvent(key int64) (*FullEvent, error) {
 	s.mu.RLock()
@@ -135,15 +114,30 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 		}
 	}
 
-	// Sort by timestamp
+	// Sort by the total order (Timestamp, EventKey) — tie-break keeps
+	// same-millisecond events deterministic and behaviorally aligned with
+	// FileSegmentStore (segment-query-recency contract).
+	desc := query.OrderBy == "timestamp_desc"
 	sort.Slice(matched, func(i, j int) bool {
-		if query.OrderBy == "timestamp_desc" {
-			return matched[i].Timestamp > matched[j].Timestamp
+		if matched[i].Timestamp != matched[j].Timestamp {
+			if desc {
+				return matched[i].Timestamp > matched[j].Timestamp
+			}
+			return matched[i].Timestamp < matched[j].Timestamp
 		}
-		return matched[i].Timestamp < matched[j].Timestamp
+		if desc {
+			return matched[i].EventKey > matched[j].EventKey
+		}
+		return matched[i].EventKey < matched[j].EventKey
 	})
 
-	// Apply offset and limit
+	// Apply offset and limit. Limit <= 0 defaults to 100 — the same as
+	// FileSegmentStore, so the two implementations stay behaviorally
+	// identical under the parity contract (code-review m3).
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 100
+	}
 	start := 0
 	if query.Offset > 0 {
 		start = query.Offset
@@ -152,8 +146,8 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 		return nil, nil
 	}
 	matched = matched[start:]
-	if query.Limit > 0 && len(matched) > query.Limit {
-		matched = matched[:query.Limit]
+	if len(matched) > limit {
+		matched = matched[:limit]
 	}
 
 	// Convert to EventReference

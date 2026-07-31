@@ -3,6 +3,7 @@ package recall
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -73,7 +74,7 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 			return recallQueryResult{
 				Events:  results,
 				Count:   len(results),
-				Message: fmt.Sprintf("found %d events", len(results)),
+				Message: fmt.Sprintf("found %d events", len(results)) + truncationHint(len(results), limit),
 			}, nil
 		},
 		function.WithName("memory_query"),
@@ -191,8 +192,9 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 			}
 
 			return recallRecentResult{
-				Events: results,
-				Count:  len(results),
+				Events:  results,
+				Count:   len(results),
+				Message: strings.TrimPrefix(truncationHint(len(results), limit), "; "),
 			}, nil
 		},
 		function.WithName("memory_recent"),
@@ -254,8 +256,21 @@ type recallRecentArgs struct {
 }
 
 type recallRecentResult struct {
-	Events []recallEventItem `json:"events"`
-	Count  int               `json:"count"`
+	Events  []recallEventItem `json:"events"`
+	Count   int               `json:"count"`
+	Message string            `json:"message,omitempty"`
+}
+
+// truncationHint returns an honest-truncation notice when the result count
+// hit the limit — without it the LLM reads "returned N" as "only N exist"
+// and stops looking (the exact failure mode of the 2026-07-31 meditation
+// recall incident). Heuristic: count == limit may rarely equal the full set;
+// the false "maybe more" then just triggers one harmless narrowed retry.
+func truncationHint(count, limit int) string {
+	if limit > 0 && count == limit {
+		return "; 已达 limit，更旧的匹配未返回——可缩小时间范围、加关键词或增大 limit 继续查询"
+	}
+	return ""
 }
 
 // recallEventItem is a shared event item format for sub-tool results.

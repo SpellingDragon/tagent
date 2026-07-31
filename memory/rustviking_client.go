@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -336,10 +337,15 @@ func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error
 	for k, v := range m.data {
 		if strings.HasPrefix(k, prefix) {
 			results = append(results, KVPair{Key: k, Value: v})
-			if limit > 0 && len(results) >= limit {
-				break
-			}
 		}
+	}
+	// Lexicographic order to honor the KVStore scan contract (RocksDB and
+	// LocalFileKV both return sorted results); limit applies after sorting.
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Key < results[j].Key
+	})
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
 	}
 	return results, nil
 }
