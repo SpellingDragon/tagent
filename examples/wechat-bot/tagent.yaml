@@ -186,7 +186,7 @@ agents:
       # action 驱动 PlanAgent 双模式（progress 零 LLM 直读），name 在多计划并行时
       # 定位目标 change，并作为同名任务单飞的幂等键。
       - agent: plan
-        description_file: plan_tool_desc.md
+        description_file: /Users/pengweiye/Documents/codes/tagent/resources/prompts/plan_tool_desc.md  # 指向主树单一事实源（副本目录未含此文件）
         extra_params:
           - name: action
             enum: [create, update, archive, progress]
@@ -275,6 +275,11 @@ agents:
         id: skill_search
       - kind: tool
         id: skill_load
+      # read_file: 只读查看知识库内容（knowledge_base/ 链接树）。
+      # 有意只补 read_file 一项：不扩大权限（无 list/search/exec/write）；
+      # 知识库是 L0→L1→L2→L3 链接树，沿链接导航即可，基准目录=进程 cwd（相对路径）。
+      - kind: tool
+        id: read_file
       - kind: tool
         id: mcp_discover
       - kind: tool
