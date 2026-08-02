@@ -937,8 +937,9 @@ graph LR
 |---|---|---|
 | `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补 | 纯函数零幻觉；未命中显式 `miss`；hint 回显对账 |
 | `query`(+filters) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
+| `memory_turn(key)` | 沿 `GetParent` 回走到 `external_input` | 重建整轮执行过程（含被压缩丢弃的 tool 步骤）；边界=external_input，无需正向遍历 |
 
-`memory_recall` 为主 agent 直持纯函数工具（确定性路径无 LLM 中间层）；RecallAgent 保留给多跳编排（trace 等）。
+`memory_recall` 为主 agent 直持纯函数工具（确定性路径无 LLM 中间层）；`memory_turn` 为因果链召回（锚 agent_output 卡片回走重建“怎么做的”）；RecallAgent 保留给多跳编排（trace 等）。
 
 
 ---
@@ -1122,6 +1123,20 @@ stateDiagram-v2
 | LRU 缓存 | 仅内存 | 不需恢复（冷启动自然回填） |
 | 窗口 / seq / 事件计数 | 仅内存 `PartitionState` | 靠首次写入重建——这里是契约 2 的软肋，见末章缺口表 |
 
+### 16.7 压缩触发与执行过程召回（compress-digest-reconnect）
+
+**触发器多维化**。`ContextCompressor.Compress` 的触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。`completeTurns`（投影中 agent_output ref 数）复用现有 ref 遍历统计，零额外成本。稳态收敛到 ~3×keepRecent 个 retained agent_output（L0/L1/L2 段都保留边界事件），长会话里触发持续——这是 LSM 式连续维护滚动摘要的设计意图；成本缓解是投影有界 + 轮内幂等 no-op。
+
+**三层摄取模型**。压缩后的历史按三层被模型消费：
+
+| 层 | 内容 | 成本/定位 |
+|---|---|---|
+| 内联（基座） | 边界卡片：external_input 意图 + agent_output 结果（`[evt_key]` 票据） | 低冗余、高价值 what/result，直接入窗 |
+| 按需（精确） | `memory_turn`：锚 agent_output 卡片沿因果链回走到 external_input，取回该轮被 L1 丢弃的 thinking_plan/action_command | 低频 how，不占窗；被丢弃事件从未离开 MemoryStore，因果链独立于压缩 |
+| 可选顶层（可读） | LLM 文摘：`condenseCardLines` 只读卡片生成浓缩梗概（卡片超 `cardMaxChars` 时），票据仍内联 | 长历史可读性叠加层，不替换卡片基座 |
+
+**卡片可追溯提示**。`buildRetainedRefs` 压缩时统计每轮被丢弃的 tool 步数，L3（整段离场）回合的 agent_output 卡片追加“含 N 步工具调用，可用 memory_turn 追溯”——计数只在 agent_output（回合结束）重置，不被回合中途 bus 注入的 external_input（task_settled 等）误清零。
+
 
 
 
@@ -1131,7 +1146,7 @@ stateDiagram-v2
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文 | 沉底前抽取"约束型事实"入固化物；对账测试常态化 |
+| **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `memory_turn` 因果链召回**（卡片“含 N 步”提示引导） | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
 | **向量检索未接入** | `SearchByEmbedding` 接口预留，实现返回 `ErrVectorSearchNotSupported`；语义召回当前仅关键词路径（`QueryOptions.Keyword`） | 接入向量库时 recall 协议入口不变（items/query 分流已隔离检索层） |
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |

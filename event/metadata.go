@@ -45,7 +45,10 @@ func FormatEventKey(key int64) string {
 }
 
 // ParseEventKey parses the canonical hex string form back into an EventKey.
-// An optional 0x/0X prefix is tolerated.
+// Tolerates the forms a model is likely to echo back as a recall key:
+// optional 0x/0X prefix, the timeline-rendered "evt_" prefix (every
+// [evt_HEX|type] timeline message shows the key this way), the bracketed
+// "[evt_HEX|type]" form, and a trailing "|type" or "]".
 func ParseEventKey(s string) (int64, error) {
 	neg := false
 	if strings.HasPrefix(s, "-") {
@@ -53,6 +56,13 @@ func ParseEventKey(s string) (int64, error) {
 		s = s[1:]
 	}
 	s = strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimPrefix(s, "evt_")
+	if i := strings.IndexAny(s, "|]"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
 	v, err := strconv.ParseInt(s, 16, 64)
 	if err != nil {
 		return 0, err

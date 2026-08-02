@@ -221,12 +221,21 @@ func (cc *ContextCompressor) Compress(
 	declared := make(map[string]bool)
 	consumed := make(map[string]bool)
 	resolved := make([]model.Message, 0, len(refs))
+	// completeTurns counts agent_output boundary refs = complete task turns
+	// currently in the projection. Piggybacked on the resolution loop below
+	// (zero extra cost); it is the cheap, non-token trigger dimension that
+	// keeps compression from being starved by placeholder rendering (which
+	// keeps usedTokens low and would otherwise suppress compression forever).
+	completeTurns := 0
 	// Only the most recent recentFullCount refs resolve with full content
 	// from MemoryStore; older refs render from their EventSummary. This
 	// bounds each BeforeModel's store-query volume to O(recentFullCount)
 	// instead of O(refs) (task-skeleton-compression, performance item).
 	fullFrom := len(refs) - cc.recentFullCount
 	for i, ref := range refs {
+		if ref.EventType == tagentevent.TypeAgentOutput {
+			completeTurns++
+		}
 		msg := cc.resolveRef(ctx, ref, i >= fullFrom)
 		switch msg.Role {
 		case model.RoleAssistant:
@@ -268,18 +277,30 @@ func (cc *ContextCompressor) Compress(
 	usedTokens := cc.tokenCounter.Estimate(resolved)
 	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
 
-	if usedTokens <= threshold {
-		log.Infof("[ContextCompressor] under budget (%d <= %d), %d refs, %d messages",
-			usedTokens, threshold, len(refs), len(resolved))
+	// Trigger is multi-dimensional (compress-digest-reconnect): compress when
+	// over the token budget OR when complete turns exceed keepRecent (i.e.,
+	// there are old turns beyond the L0 keep-window with material to fold).
+	// The second dimension is what un-starves compression: placeholder
+	// rendering keeps usedTokens low, so a token-only gate would never fire
+	// and the skeleton pipeline / rolling summary would never form. Steady
+	// state converges to ~3×keepRecent retained agent_outputs (L0/L1/L2 all
+	// keep them), so in a long conversation the turn-count dimension fires
+	// every round — that is the INTENT (continuous rolling-summary maintenance,
+	// LSM-style), not a bug. Cost stays bounded: the projection is bounded
+	// (1 summary + ≤3k skeleton turns + keepRecent full + in-progress), and
+	// intra-turn repeats are idempotent no-ops (changed=false short-circuit).
+	if usedTokens <= threshold && completeTurns <= cc.keepRecent {
+		log.Infof("[ContextCompressor] under budget (%d <= %d) and turns %d <= %d, %d refs, %d messages",
+			usedTokens, threshold, completeTurns, cc.keepRecent, len(refs), len(resolved))
 		return CompressResult{
 			Messages:     resolved,
 			RetainedRefs: refs,
 		}
 	}
 
-	// Over threshold — compress via SmartCompressor.
-	log.Infof("[ContextCompressor] over budget (%d > %d), compressing %d messages from %d refs",
-		usedTokens, threshold, len(resolved), len(refs))
+	// Compress via SmartCompressor (over token budget, or excess complete turns).
+	log.Infof("[ContextCompressor] compressing (tokens %d vs %d, turns %d vs %d), %d messages from %d refs",
+		usedTokens, threshold, completeTurns, cc.keepRecent, len(resolved), len(refs))
 
 	originalKeepRecent := cc.compressor.KeepRecentTasks
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
@@ -609,6 +630,16 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	var minTs int64
 	priorCount := 0
 	earlier := 0
+	// toolSteps counts dropped tool events (thinking_plan/action_command)
+	// within the current turn, so the agent_output card can carry a
+	// "含 N 步工具调用，可用 memory_turn 追溯" hint. Reset ONLY at
+	// agent_output (turn end): bus-injected mid-turn events are ALSO typed
+	// external_input (persistBusEvent), so resetting on external_input would
+	// wrongly zero the count mid-turn (code-review Major). L3 turns always
+	// end with agent_output (in-progress turns are never dropped), so it is
+	// the correct turn boundary; L1/L2 turns keep their agent_output in the
+	// timeline so their accumulated count is simply never used.
+	toolSteps := 0
 
 	for _, ref := range originalRefs {
 		if ref.EventKey == 0 {
@@ -632,8 +663,20 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
+			// Track per-turn dropped tool steps for the memory_turn hint.
+			if ref.EventType == tagentevent.TypeThinkingPlan || ref.EventType == tagentevent.TypeActionCommand {
+				toolSteps++
+			}
 			if card := cc.extractCardLine(ref); card != "" {
+				if ref.EventType == tagentevent.TypeAgentOutput && toolSteps > 0 {
+					card = fmt.Sprintf("%s（含 %d 步工具调用，可用 memory_turn 追溯）", card, toolSteps)
+				}
 				newCards = append(newCards, card)
+			}
+			// Reset at turn END (agent_output), whether or not a card was emitted
+			// (agent_output cards are only produced for fully-dropped L3 turns).
+			if ref.EventType == tagentevent.TypeAgentOutput {
+				toolSteps = 0
 			}
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp

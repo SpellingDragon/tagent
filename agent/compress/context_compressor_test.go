@@ -530,3 +530,140 @@ func assertRenderLegality(t *testing.T, msgs []model.Message) {
 		}
 	}
 }
+
+// makeTurn builds one complete task turn: external_input → thinking_plan →
+// action_command → agent_output, with monotonically increasing keys/ts.
+func makeTurn(base int64) []memory.EventReference {
+	return []memory.EventReference{
+		{EventKey: base + 1, EventType: tagentevent.TypeExternalInput, EventSummary: "用户请求", Timestamp: base + 1},
+		{EventKey: base + 2, EventType: tagentevent.TypeThinkingPlan, EventSummary: "思考", Timestamp: base + 2},
+		{EventKey: base + 3, EventType: tagentevent.TypeActionCommand, EventSummary: "执行", Timestamp: base + 3},
+		{EventKey: base + 4, EventType: tagentevent.TypeAgentOutput, EventSummary: "完成", Timestamp: base + 4},
+	}
+}
+
+// TestContextCompressor_TriggersOnExcessTurns (compress-digest-reconnect P0):
+// with complete turns exceeding keepRecent, compression MUST run even when
+// under the token budget — this is what un-starves the skeleton pipeline
+// (previously a token-only gate never fired because placeholder rendering
+// keeps usedTokens low). fail-before: old token-only gate returned all refs
+// unchanged here.
+func TestContextCompressor_TriggersOnExcessTurns(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+
+	// 3 complete turns (12 refs), well under the (huge) token budget.
+	var refs []memory.EventReference
+	for i := int64(0); i < 3; i++ {
+		refs = append(refs, makeTurn(i*10)...)
+	}
+
+	result := cc.Compress(context.Background(), refs)
+
+	// Compression must have run: some refs folded away (RetainedRefs fewer
+	// than input) and/or a rolling summary ref (negative key) formed.
+	hasRolling := false
+	for _, r := range result.RetainedRefs {
+		if r.EventKey < 0 {
+			hasRolling = true
+		}
+	}
+	if len(result.RetainedRefs) >= len(refs) && !hasRolling {
+		t.Fatalf("compression must run on excess turns even under budget: retained %d >= input %d and no rolling summary",
+			len(result.RetainedRefs), len(refs))
+	}
+}
+
+// TestContextCompressor_NoTriggerFewTurns: with complete turns within
+// keepRecent and under budget, compression must NOT run (pass-through).
+func TestContextCompressor_NoTriggerFewTurns(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1_000_000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 2)
+
+	// 1 complete turn (4 refs) <= keepRecent=2, under budget.
+	refs := makeTurn(0)
+	result := cc.Compress(context.Background(), refs)
+
+	if len(result.RetainedRefs) != len(refs) {
+		t.Fatalf("no compression expected for few turns: retained %d != input %d",
+			len(result.RetainedRefs), len(refs))
+	}
+	for _, r := range result.RetainedRefs {
+		if r.EventKey < 0 {
+			t.Fatalf("no rolling summary expected when not triggered")
+		}
+	}
+}
+
+// TestContextCompressor_CardCarriesMemoryTurnHint (compress-digest-reconnect):
+// when a turn is fully dropped (L3), its agent_output card carries a
+// "含 N 步工具调用，可用 memory_turn 追溯" hint so the model knows the dropped
+// execution process is recoverable via memory_turn.
+func TestContextCompressor_CardCarriesMemoryTurnHint(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+
+	// 4 complete turns (each: external_input + thinking_plan + action_command +
+	// agent_output = 2 tool steps). keepRecent=1 → oldest turn ages to L3 and
+	// is fully dropped into the rolling summary.
+	var refs []memory.EventReference
+	for i := int64(0); i < 4; i++ {
+		refs = append(refs, makeTurn(i*10)...)
+	}
+
+	result := cc.Compress(context.Background(), refs)
+
+	// Find the rolling summary ref (negative key) and check the hint.
+	var summary string
+	for _, r := range result.RetainedRefs {
+		if r.EventKey < 0 {
+			summary = r.EventSummary
+		}
+	}
+	if summary == "" {
+		t.Fatalf("expected a rolling summary ref, got retained: %+v", result.RetainedRefs)
+	}
+	if !strings.Contains(summary, "含 2 步工具调用，可用 memory_turn 追溯") {
+		t.Errorf("agent_output card must carry the memory_turn hint with tool-step count, got:\n%s", summary)
+	}
+}
+
+// TestContextCompressor_HintIgnoresBusInjection (code-review Major): a
+// bus-injected mid-turn event is ALSO typed external_input (persistBusEvent
+// for task_settled etc.). The toolSteps counter must NOT reset on it — the
+// card must count ALL of the turn's tool steps, not just post-injection ones.
+func TestContextCompressor_HintIgnoresBusInjection(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+
+	// Oldest turn: ext, tp, ac, [task_settled bus injection typed external_input],
+	// tp, ac, out = 4 tool steps. Followed by 3 normal turns so it ages to L3.
+	oldest := []memory.EventReference{
+		{EventKey: 1, EventType: tagentevent.TypeExternalInput, EventSummary: "用户请求", Timestamp: 1},
+		{EventKey: 2, EventType: tagentevent.TypeThinkingPlan, EventSummary: "思考", Timestamp: 2},
+		{EventKey: 3, EventType: tagentevent.TypeActionCommand, EventSummary: "执行", Timestamp: 3},
+		{EventKey: 4, EventType: tagentevent.TypeExternalInput, EventSummary: "task_settled", Timestamp: 4}, // bus injection mid-turn
+		{EventKey: 5, EventType: tagentevent.TypeThinkingPlan, EventSummary: "思考2", Timestamp: 5},
+		{EventKey: 6, EventType: tagentevent.TypeActionCommand, EventSummary: "执行2", Timestamp: 6},
+		{EventKey: 7, EventType: tagentevent.TypeAgentOutput, EventSummary: "完成", Timestamp: 7},
+	}
+	refs := append([]memory.EventReference{}, oldest...)
+	for i := int64(1); i <= 3; i++ {
+		refs = append(refs, makeTurn(i*10)...)
+	}
+
+	result := cc.Compress(context.Background(), refs)
+
+	var summary string
+	for _, r := range result.RetainedRefs {
+		if r.EventKey < 0 {
+			summary = r.EventSummary
+		}
+	}
+	if summary == "" {
+		t.Fatalf("expected rolling summary, got %+v", result.RetainedRefs)
+	}
+	if !strings.Contains(summary, "含 4 步工具调用，可用 memory_turn 追溯") {
+		t.Errorf("bus injection must not truncate the tool-step count: want 含 4 步, got:\n%s", summary)
+	}
+}

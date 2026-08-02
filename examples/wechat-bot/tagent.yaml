@@ -181,6 +181,12 @@ agents:
       - kind: tool
         id: memory_recall
 
+      # Memory Turn: 因果链召回——锚 agent_output 卡片回走因果链到 external_input,
+      # 重建该轮被压缩丢弃的执行过程（thinking_plan/action_command）。卡片行的
+      # "含 N 步工具调用,可用 memory_turn 追溯"提示经此工具消费。
+      - kind: tool
+        id: memory_turn
+
       # Plan Agent: 工作计划管理（拆解/记账/归档审计，不代工）
       # extra_params: 声明后进入 InputSchema 并随 request 打包为 JSON 透传子 agent；
       # action 驱动 PlanAgent 双模式（progress 零 LLM 直读），name 在多计划并行时
@@ -314,6 +320,9 @@ agents:
         id: recall_recent
       - kind: tool
         id: recall_trace
+      # memory_turn: 锚 agent_output 卡片回走因果链重建整轮执行过程（与 recall_trace 同族，边界=external_input）
+      - kind: tool
+        id: memory_turn
 
   # ========================================================================
   # Action Agent: 执行中枢
