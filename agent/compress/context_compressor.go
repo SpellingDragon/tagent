@@ -224,6 +224,13 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
+	// Fold aged complete tool runs into compact tool_chain synthetic refs
+	// (tool-chain-consolidation D2) BEFORE resolving — so a long in-progress
+	// ReAct turn's tool-call history collapses to a few tool-chain lines
+	// instead of ~N placeholder/verbose messages. Only aged (full=false) runs
+	// are folded; the recent active frontier stays native.
+	refs = cc.foldToolRuns(refs)
+
 	// Resolve ALL refs from the projection into NATIVE timeline messages
 	// (D3 v2): assistant tool_calls and role=tool results keep protocol form —
 	// the model sees exactly its training distribution, leaving no textual
@@ -353,6 +360,179 @@ func (cc *ContextCompressor) Compress(
 	}
 }
 
+// foldToolRuns collapses runs of AGED complete tool events (thinking_plan +
+// action_command) into compact tool_chain synthetic refs (tool-chain-
+// consolidation D2). A "run" is a maximal consecutive sequence of tool events
+// not interrupted by a boundary event (external_input/agent_output). Only runs
+// in the aged range (before fullFrom = len-keepRecent×refsPerTurn) are folded;
+// the recent active frontier (full=true) stays native so tool-call pairing
+// stays legal. Folding is idempotent: a tool_chain ref is not a tool event, so
+// it is never re-folded; newly-aged tool events fold on subsequent rounds.
+func (cc *ContextCompressor) foldToolRuns(refs []memory.EventReference) []memory.EventReference {
+	fullFrom := len(refs) - cc.recentFullCount
+	if fullFrom <= 1 {
+		return refs // nothing aged to fold
+	}
+	result := make([]memory.EventReference, 0, len(refs))
+	i := 0
+	for i < len(refs) {
+		if i >= fullFrom {
+			result = append(result, refs[i:]...) // recent frontier: native
+			break
+		}
+		if isToolEventRef(refs[i].EventType) {
+			j := i
+			for j < fullFrom && isToolEventRef(refs[j].EventType) {
+				j++
+			}
+			run := refs[i:j]
+			if len(run) >= 2 {
+				// Merge into a trailing tool_chain ref when the new run is contiguous
+				// with it (no boundary event between), so one turn's aged tool events
+				// converge to ONE chain instead of a new chain every round
+				// (code-review M2a). A boundary event in between makes result's tail
+				// a non-chain ref, correctly starting a separate chain.
+				if n := len(result); n > 0 && result[n-1].EventType == tagentevent.TypeToolChain {
+					result[n-1] = mergeToolChainRef(result[n-1], run)
+				} else {
+					result = append(result, buildToolChainRef(run))
+				}
+			} else {
+				result = append(result, run...)
+			}
+			i = j
+		} else {
+			result = append(result, refs[i])
+			i++
+		}
+	}
+	return result
+}
+
+// isToolEventRef reports whether an event type is a tool-call or tool-result
+// event (the two halves of a tool pair).
+func isToolEventRef(eventType string) bool {
+	return eventType == tagentevent.TypeThinkingPlan || eventType == tagentevent.TypeActionCommand
+}
+
+// buildToolChainRef folds a run of tool events into one tool_chain synthetic
+// ref. Tool names are read from the thinking_plan EventSummaries ("调用 X",
+// populated by GenerateEventSummary D1) — no full-content refetch. The ref
+// carries a [evt_first→evt_last] recall ticket so memory_turn can retrieve the
+// full chain (the underlying events stay in MemoryStore).
+func buildToolChainRef(run []memory.EventReference) memory.EventReference {
+	var names []string
+	var minTs int64
+	steps := 0
+	firstKey := run[0].EventKey
+	lastKey := run[len(run)-1].EventKey
+	for _, ref := range run {
+		if ref.EventType == tagentevent.TypeThinkingPlan {
+			steps++
+			if name := extractToolNameFromSummary(ref.EventSummary); name != "" {
+				names = append(names, name)
+			}
+		}
+		if ref.Timestamp > 0 && (minTs == 0 || ref.Timestamp < minTs) {
+			minTs = ref.Timestamp
+		}
+	}
+	if minTs == 0 {
+		minTs = 1
+	}
+	var b strings.Builder
+	b.WriteString("- 工具链: ")
+	if len(names) > 0 {
+		b.WriteString(strings.Join(names, "→"))
+	} else {
+		b.WriteString("工具调用")
+	}
+	fmt.Fprintf(&b, "（%d步）[evt_%s→evt_%s]",
+		steps, tagentevent.FormatEventKey(firstKey), tagentevent.FormatEventKey(lastKey))
+	return memory.EventReference{
+		EventKey:     -minTs,
+		EventType:    tagentevent.TypeToolChain,
+		EventSummary: b.String(),
+		Timestamp:    minTs,
+		Role:         "user",
+	}
+}
+
+// mergeToolChainRef extends an existing tool_chain ref with a contiguous
+// later run (code-review M2a): the tool-name sequence, step count, and the
+// ticket's last key are extended; the chain's key (its oldest timestamp) is
+// kept so the merged chain still sorts at the run's start.
+func mergeToolChainRef(existing memory.EventReference, run []memory.EventReference) memory.EventReference {
+	names, steps, first := parseToolChainSummary(existing.EventSummary)
+	var runNames []string
+	runSteps := 0
+	lastKey := run[len(run)-1].EventKey
+	for _, ref := range run {
+		if ref.EventType == tagentevent.TypeThinkingPlan {
+			runSteps++
+			if n := extractToolNameFromSummary(ref.EventSummary); n != "" {
+				runNames = append(runNames, n)
+			}
+		}
+	}
+	allNames := names
+	if len(runNames) > 0 {
+		if allNames != "" && allNames != "工具调用" {
+			allNames += "→"
+		} else {
+			allNames = ""
+		}
+		allNames += strings.Join(runNames, "→")
+	}
+	if allNames == "" {
+		allNames = "工具调用"
+	}
+	var b strings.Builder
+	b.WriteString("- 工具链: ")
+	b.WriteString(allNames)
+	fmt.Fprintf(&b, "（%d步）[evt_%s→evt_%s]", steps+runSteps, first, tagentevent.FormatEventKey(lastKey))
+	out := existing
+	out.EventSummary = b.String()
+	return out
+}
+
+// parseToolChainSummary splits a tool_chain EventSummary
+// ("- 工具链: <names>（<N>步）[evt_<first>→<last>]") back into its parts so a
+// contiguous chain can be extended. Tool names are simple identifiers (no
+// "（"/"→"), so the fixed self-generated format parses unambiguously.
+func parseToolChainSummary(summary string) (names string, steps int, first string) {
+	s := strings.TrimPrefix(summary, "- 工具链: ")
+	if i := strings.LastIndex(s, "（"); i >= 0 {
+		names = strings.TrimSpace(s[:i])
+		s = s[i:]
+	}
+	if _, err := fmt.Sscanf(s, "（%d步）", &steps); err != nil {
+		steps = 0
+	}
+	if i := strings.Index(s, "["); i >= 0 {
+		rest := s[i+1:]
+		rest = strings.TrimPrefix(rest, "evt_")
+		if j := strings.Index(rest, "→"); j >= 0 {
+			first = rest[:j]
+		}
+	}
+	return names, steps, first
+}
+
+// extractToolNameFromSummary strips the "调用 " prefix from a thinking_plan
+// EventSummary ("调用 read_file、grep" -> "read_file、grep"). A thinking_plan
+// whose EventSummary is PROSE (think-then-call reasoning models: content
+// non-empty, summary = verbatim prose) does NOT carry the "调用 " prefix, so
+// it yields "" — the prose must never leak into the tool-chain line as a fake
+// "tool name" (code-review M1).
+func extractToolNameFromSummary(summary string) string {
+	s := strings.TrimSpace(summary)
+	if !strings.HasPrefix(s, "调用 ") {
+		return ""
+	}
+	return strings.TrimPrefix(s, "调用 ")
+}
+
 // resolveRef resolves a single EventReference to a native timeline message.
 // When full is true the content comes from MemoryStore; otherwise (older
 // refs beyond recentFullCount) the reference's EventSummary is used directly
@@ -378,6 +558,16 @@ func (cc *ContextCompressor) resolveRef(
 		return model.Message{
 			Role:    model.RoleUser,
 			Content: prefixEventKey("〔历史归档〕系统生成的压缩摘要（非用户发言，勿模仿此格式）："+ref.EventSummary, ref),
+		}
+	}
+	// tool_chain refs are consolidated tool-run references (tool-chain-
+	// consolidation D2) — rendered as a USER-side observation line (the
+	// EventSummary already is "- 工具链: …"), same rationale as context_compress
+	// (observation input, not instruction/assistant).
+	if ref.EventType == tagentevent.TypeToolChain {
+		return model.Message{
+			Role:    model.RoleUser,
+			Content: prefixEventKey(ref.EventSummary, ref),
 		}
 	}
 
@@ -628,7 +818,18 @@ func (cc *ContextCompressor) buildRetainedRefs(
 
 	// Collect all event keys present in compressed messages.
 	retainedKeys := make(map[int64]bool)
+	retainedChainKeys := make(map[int64]bool)
 	for _, msg := range compressedMsgs {
+		// Track tool_chain refs whose message actually survived this round (M2b):
+		// a chain whose segment reached L3 has its message dropped from the
+		// output, so its ref must be retired from the projection rather than
+		// kept as a zombie (its full chain stays retrievable via memory_turn on
+		// the turn's boundary-card key — the underlying events are in the store).
+		if MessageEventType(&msg) == tagentevent.TypeToolChain {
+			if k, _, _ := tagentevent.ParseEventKeyAndType(msg.Content); k < 0 {
+				retainedChainKeys[k] = true
+			}
+		}
 		content := msg.Content
 		for {
 			key, _, remainder := tagentevent.ParseEventKeyAndType(content)
@@ -651,16 +852,6 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	var minTs int64
 	priorCount := 0
 	earlier := 0
-	// toolSteps counts dropped tool events (thinking_plan/action_command)
-	// within the current turn, so the agent_output card can carry a
-	// "含 N 步工具调用，可用 memory_turn 追溯" hint. Reset ONLY at
-	// agent_output (turn end): bus-injected mid-turn events are ALSO typed
-	// external_input (persistBusEvent), so resetting on external_input would
-	// wrongly zero the count mid-turn (code-review Major). L3 turns always
-	// end with agent_output (in-progress turns are never dropped), so it is
-	// the correct turn boundary; L1/L2 turns keep their agent_output in the
-	// timeline so their accumulated count is simply never used.
-	toolSteps := 0
 
 	for _, ref := range originalRefs {
 		if ref.EventKey == 0 {
@@ -680,24 +871,25 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			}
 			continue
 		}
+		// tool_chain synthetic refs (negative key, tool-chain-consolidation D2)
+		// are kept ONLY if their message survived this round's compression (the
+		// chain's segment was not L3-archived). A chain whose segment reached L3
+		// has its message dropped from the output, so we retire the ref from the
+		// projection (M2b) instead of accumulating it as a zombie — the full
+		// chain stays retrievable via memory_turn on the turn's boundary-card
+		// key (underlying events live in MemoryStore, I4).
+		if ref.EventKey < 0 && ref.EventType == tagentevent.TypeToolChain {
+			if retainedChainKeys[ref.EventKey] {
+				retained = append(retained, ref)
+			}
+			continue
+		}
 		if retainedKeys[ref.EventKey] {
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
-			// Track per-turn dropped tool steps for the memory_turn hint.
-			if ref.EventType == tagentevent.TypeThinkingPlan || ref.EventType == tagentevent.TypeActionCommand {
-				toolSteps++
-			}
 			if card := cc.extractCardLine(ref); card != "" {
-				if ref.EventType == tagentevent.TypeAgentOutput && toolSteps > 0 {
-					card = fmt.Sprintf("%s（含 %d 步工具调用，可用 memory_turn 追溯）", card, toolSteps)
-				}
 				newCards = append(newCards, card)
-			}
-			// Reset at turn END (agent_output), whether or not a card was emitted
-			// (agent_output cards are only produced for fully-dropped L3 turns).
-			if ref.EventType == tagentevent.TypeAgentOutput {
-				toolSteps = 0
 			}
 			if minTs == 0 || ref.Timestamp < minTs {
 				minTs = ref.Timestamp

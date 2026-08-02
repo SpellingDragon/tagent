@@ -46,6 +46,15 @@ const (
 	// TypeContextCompress represents context compression events.
 	// Used when Agent performs context window management.
 	TypeContextCompress = "context_compress"
+
+	// TypeToolChain represents a consolidated tool-run synthetic reference
+	// (tool-chain-consolidation D2): a run of aged complete tool pairs
+	// (thinking_plan + action_command) folded into one compact line. It is a
+	// synthetic projection ref (negative key, like the rolling summary) that
+	// renders as "- 工具链: name1→name2→…（N步）[evt_first→evt_last]" and carries
+	// a recall ticket. Distinct from context_compress so buildRetainedRefs does
+	// NOT absorb it into the rolling-summary count.
+	TypeToolChain = "tool_chain"
 )
 
 // ExtractEventType determines the event type from a model.Message.
@@ -118,6 +127,14 @@ func DefaultOptionsForCompression() EventSummaryOptions {
 // summarization lives in the compression/curation pipeline.
 // IMPORTANT: No truncation - content exceeding context is handled by SmartCompress.
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string {
+	// Pure tool-call thinking_plan (empty prose, has tool calls): summarize as
+	// "调用 <names>" so aged rendering carries the tool names instead of an
+	// empty-summary placeholder, and tool-chain consolidation can read the
+	// names from EventSummary without refetching full content
+	// (tool-chain-consolidation D1).
+	if eventType == TypeThinkingPlan && msg.Content == "" && len(msg.ToolCalls) > 0 {
+		return formatToolNames(msg.ToolCalls)
+	}
 	// Special events: Summary = Original content (no truncation, no prefix)
 	if IsSpecialEventType(eventType) {
 		return msg.Content
@@ -157,6 +174,21 @@ func FormatEventDescription(index int, msg model.Message) string {
 // Simple heuristic: ~3 characters per token.
 func EstimateTokens(text string) int {
 	return len([]rune(text)) / 3
+}
+
+// formatToolNames summarizes a set of tool calls as "调用 name1、name2"
+// (names only, no args) — the compact "what tools were called" view used for
+// aged pure-tool-call thinking_plans and tool-chain consolidation.
+func formatToolNames(toolCalls []model.ToolCall) string {
+	names := make([]string, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		name := tc.Function.Name
+		if name == "" {
+			name = "工具"
+		}
+		names = append(names, name)
+	}
+	return "调用 " + strings.Join(names, "、")
 }
 
 // formatToolCallSummary generates a tool call summary.

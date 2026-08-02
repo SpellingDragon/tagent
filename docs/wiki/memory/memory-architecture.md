@@ -1145,6 +1145,28 @@ stateDiagram-v2
 
 **配置公式化**。以 `max_tokens`（M）与 `keep_recent_tasks`（k）为主变量，其余派生：`threshold = compress_threshold × M`、`recent_full_count = 4k`、定级边界 = `{k,2k,4k}`、`card_max_chars = M/20`、`compact_keys_listed = card_max_chars/200`。未显式设置时用公式默认，显式设置优先。
 
+### 16.9 工具链折叠（进行中段有界化，tool-chain-consolidation）
+
+**问题**：进行中段（当前 ReAct 循环）恒 L0 不压缩，长研究任务的工具调用历史无界累积（实测 ~60 步→~130 条消息），其中纯工具调用的 thinking_plan（content 空）老化后退化为零信息占位符 `(历史事件摘要为空…)`，稀释上下文信息密度。
+
+**D1 空摘要根治**：`GenerateEventSummary` 对纯工具调用 thinking_plan（`Content==""` 且 `ToolCalls` 非空）在**存储时**生成 `调用 <工具名>` 摘要（工程提取、零 LLM）——空摘要占位符源头消灭，并为折叠提供工具名素材。带散文的 thinking_plan（reasoning 模型 think-then-call）仍取原文。
+
+**D2 工具链折叠**：`foldToolRuns`（`Compress` 在 resolveRef 之前执行）把**老化区（full=false）连续 ≥2 条工具事件**（thinking_plan/action_command，不被 external_input/agent_output 打断）折叠为一个负 key 的 `tool_chain` 合成引用：
+
+```
+- 工具链: read_file→grep→edit_file（3步）[evt_first→evt_last]
+```
+
+工具名取自 ref.EventSummary（D1 已填，无需回取全文）；`[evt_first→evt_last]` 是召回票据，`memory_turn(evt_last)` 沿因果链可取回被折叠的完整工具链（工具事件本体永在 MemoryStore，I4）。
+
+**两个关键机制**（code-review 修订）：
+- **相邻链合并**（M2a）：新一轮老化对与尾部已有链连续时合并为一（`mergeToolChainRef` 扩展名/步数/票据），一轮内收敛为**每段连续工具序列一条链**而非每轮一条。
+- **归档退役**（M2b）：`buildRetainedRefs` 仅保留消息存活的链（`retainedChainKeys`）；段被 L3 归档后链行退役（完整链仍可经 memory_turn 取回），不滞留为僵尸 ref。
+
+**活跃前沿保护**：折叠只作用于老化完整对；最近 `recentFullCount` 条、未完成 tool_call、边界事件不折叠，原生配对合法性不破。
+
+**五项不变量**：I1 有界（进行中段工具历史 O(链行数)，与循环长度解耦）、I2 稠密（无零信息占位符）、I3 锚定（滚动摘要常驻）、I4 无损（工具事件本体永在，票据可召回）、I5 原生前沿（活跃前沿保持原生）。
+
 
 
 

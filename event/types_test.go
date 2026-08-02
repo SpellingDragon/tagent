@@ -78,3 +78,34 @@ func TestIsSpecialEventType_ThinkingPlan(t *testing.T) {
 		})
 	}
 }
+
+// TestGenerateEventSummary_ToolCallThinkingPlan (tool-chain-consolidation D1):
+// a pure tool-call thinking_plan (empty prose, has tool calls) gets a
+// "调用 <names>" summary instead of an empty string (which aged into a
+// zero-info placeholder).
+func TestGenerateEventSummary_ToolCallThinkingPlan(t *testing.T) {
+	opts := DefaultOptionsForLLMContext()
+	tc := func(names ...string) []model.ToolCall {
+		var calls []model.ToolCall
+		for _, n := range names {
+			calls = append(calls, model.ToolCall{Function: model.FunctionDefinitionParam{Name: n, Arguments: []byte(`{}`)}})
+		}
+		return calls
+	}
+
+	// Pure tool call, multiple calls -> "调用 name1、name2".
+	got := GenerateEventSummary(model.Message{Role: model.RoleAssistant, ToolCalls: tc("read_file", "grep")}, TypeThinkingPlan, opts)
+	if got != "调用 read_file、grep" {
+		t.Errorf("multi tool-call summary = %q, want %q", got, "调用 read_file、grep")
+	}
+	// Single call.
+	got = GenerateEventSummary(model.Message{Role: model.RoleAssistant, ToolCalls: tc("edit_file")}, TypeThinkingPlan, opts)
+	if got != "调用 edit_file" {
+		t.Errorf("single tool-call summary = %q, want %q", got, "调用 edit_file")
+	}
+	// thinking_plan WITH prose content is unaffected (returns content).
+	got = GenerateEventSummary(model.Message{Role: model.RoleAssistant, Content: "先读文件再分析", ToolCalls: tc("read_file")}, TypeThinkingPlan, opts)
+	if got != "先读文件再分析" {
+		t.Errorf("thinking_plan with content = %q, want original content", got)
+	}
+}

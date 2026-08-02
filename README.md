@@ -170,7 +170,7 @@ graph LR
 | 机制 | 亮点 | 详解 |
 |------|------|------|
 | 持久事件循环 | Pull 批处理；async 结果排队不打断进行中 turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
-| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；多维触发（token 阈值或完整任务段超龄）防占位符渲染饿死压缩；被丢弃的执行过程经 `memory_turn` 因果链召回；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；多维触发（token 阈值或完整任务段超龄）防占位符渲染饿死压缩；进行中段工具调用历史折叠为工具链行（有界化，无零信息占位符）；被丢弃的执行过程经 `memory_turn` 因果链召回；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | 事件驱动记忆 | 每个事件有全局唯一 key（时间有序）；Agent 间存储隔离，跨 Agent 读需显式授权 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | 子 Agent 调用 | `event_params: [event_keys]` 按 key 传事件（数据隔离）；A2A 远程透明 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
 | 异步任务层 | 快命令秒回、慢任务后台通知；实时任务看板；`resume_task` 随时续跑；退出不留孤儿进程 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |

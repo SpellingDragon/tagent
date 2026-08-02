@@ -615,18 +615,28 @@ func TestContextCompressor_CardCarriesMemoryTurnHint(t *testing.T) {
 
 	result := cc.Compress(context.Background(), refs)
 
-	// Find the rolling summary ref (negative key) and check the hint.
-	var summary string
+	// With tool-chain consolidation (tool-chain-consolidation), the aged tool
+	// events fold into a tool_chain ref (carrying the step count + recall
+	// ticket) rather than a per-card "含 N 步" hint (superseded). Verify the
+	// tool steps are represented and no zero-info placeholder appears.
+	hasChain := false
 	for _, r := range result.RetainedRefs {
-		if r.EventKey < 0 {
-			summary = r.EventSummary
+		if r.EventType == tagentevent.TypeToolChain {
+			hasChain = true
 		}
 	}
-	if summary == "" {
-		t.Fatalf("expected a rolling summary ref, got retained: %+v", result.RetainedRefs)
+	if !hasChain {
+		t.Fatalf("expected a tool_chain ref representing the aged tool steps, got: %+v", result.RetainedRefs)
 	}
-	if !strings.Contains(summary, "含 2 步工具调用，可用 memory_turn 追溯") {
-		t.Errorf("agent_output card must carry the memory_turn hint with tool-step count, got:\n%s", summary)
+	joined := ""
+	for _, m := range result.Messages {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "工具链") {
+		t.Errorf("model context must contain the tool-chain line, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "历史事件摘要为空") {
+		t.Errorf("model context must NOT contain empty-summary placeholder, got:\n%s", joined)
 	}
 }
 
@@ -656,17 +666,25 @@ func TestContextCompressor_HintIgnoresBusInjection(t *testing.T) {
 
 	result := cc.Compress(context.Background(), refs)
 
-	var summary string
+	// With tool-chain consolidation, the bus-injected external_input (a boundary)
+	// splits the tool run into separate tool_chains; the tool steps are still
+	// represented (not lost) and no zero-info placeholder appears. (The old
+	// "含 4 步" card hint is superseded by the tool_chain line's own count.)
+	chains := 0
 	for _, r := range result.RetainedRefs {
-		if r.EventKey < 0 {
-			summary = r.EventSummary
+		if r.EventType == tagentevent.TypeToolChain {
+			chains++
 		}
 	}
-	if summary == "" {
-		t.Fatalf("expected rolling summary, got %+v", result.RetainedRefs)
+	if chains < 1 {
+		t.Fatalf("expected tool_chain ref(s) representing the tool steps, got: %+v", result.RetainedRefs)
 	}
-	if !strings.Contains(summary, "含 4 步工具调用，可用 memory_turn 追溯") {
-		t.Errorf("bus injection must not truncate the tool-step count: want 含 4 步, got:\n%s", summary)
+	joined := ""
+	for _, m := range result.Messages {
+		joined += m.Content + "\n"
+	}
+	if strings.Contains(joined, "历史事件摘要为空") {
+		t.Errorf("model context must NOT contain empty-summary placeholder, got:\n%s", joined)
 	}
 }
 
