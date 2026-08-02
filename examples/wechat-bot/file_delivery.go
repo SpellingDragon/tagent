@@ -33,9 +33,12 @@ var executableExts = map[string]bool{
 }
 
 // pathCandidateRE 匹配以扩展名结尾的路径候选（绝对或相对）。
-// 具体是否为真实文件由 os.Stat 二次校验，故误匹配（如版本号 v1.2、域名 example.com）
-// 会被过滤；无目录信息的裸文件名（如 report.pdf）因不含 '/' 也不视为路径。
-var pathCandidateRE = regexp.MustCompile(`[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,10}`)
+// 字符类使用 \p{L}（任意 Unicode 字母，含中文/日文/韩文等）与 \p{N}（任意 Unicode 数字），
+// 以正确识别中文等非 ASCII 文件名（如 彭伟业_面试备战文档.md）；原仅 ASCII 的字符类会导致
+// 中文路径被静默截断、文件投递失败。具体是否为真实文件由 os.Stat 二次校验，故误匹配
+// （如版本号 v1.2、域名 example.com）会被过滤；无目录信息的裸文件名（如 report.pdf）
+// 因不含 '/' 也不视为路径。'-' 置于字符类末尾以避免被当作范围操作符。
+var pathCandidateRE = regexp.MustCompile(`[\p{L}\p{N}_./-]+\.[\p{L}\p{N}-]{1,10}`)
 
 // ExtractFilePaths 从 agent 回复文本中解析本地文件路径。
 //

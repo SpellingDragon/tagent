@@ -32,9 +32,9 @@
 provider: openai
 
 # LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
-model: glm-5
+model: glm-5.2
 # LLM API 基础地址 (全局默认，兼容旧配置；推荐使用 providers 注册表)
-api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
 
 # Provider 连接信息注册表
 # 每个 agent 可通过 provider 字段引用不同的供应商
@@ -42,7 +42,7 @@ api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
 #   agents:
 #     tagent:
 #       provider: zhipu        # 智谱 GLM（OpenAI 兼容协议）
-#       model: glm-5
+#       model: glm-5.2
 #     knowledge:
 #       provider: deepseek     # DeepSeek（OpenAI 兼容协议）
 #       model: deepseek-chat
@@ -55,7 +55,7 @@ providers:
   # 通过不同的 api_endpoint 区分。
   zhipu:
     provider: openai           # 关键: 指明使用 OpenAI 兼容协议
-    api_endpoint: "https://open.bigmodel.cn/api/paas/v4"
+    api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
     api_key_env: "ZAI_API_KEY"
   deepseek:
     provider: openai
@@ -131,7 +131,7 @@ agents:
     thinking_enabled: true       # 保留：对 honor thinking_enabled 的模型有效
     reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
     compress_threshold: 0.8
-    keep_recent_tasks: 2
+    keep_recent_tasks: 4
     # ===== 异步任务/重入相关（未配置项用默认值） =====
     # task_terminal_ttl: 终态任务（completed/failed/cancelled/dead）被回收前的
     #   保留期（duration 字符串，默认 "2m"）。它同时是终态 subagent 任务的
@@ -275,7 +275,7 @@ agents:
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
-    reasoning_effort: "high"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
+    reasoning_effort: "low"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
     tools:
       - kind: tool
         id: skill_search
@@ -340,7 +340,7 @@ agents:
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
-    reasoning_effort: "high"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
+    reasoning_effort: "low"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
     tools:
       # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致）
       - kind: tool
