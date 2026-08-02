@@ -153,17 +153,37 @@ func NewContextCompressor(
 		keepRecent = 2
 	}
 	cc := &ContextCompressor{
-		compressor:    sc,
-		memStore:      memStore,
-		tokenCounter:  tokenCounter,
-		maxTokens:     maxTokens,
-		thresholdPct:  thresholdPct,
-		keepRecent:    keepRecent,
-		listedKeysCap: DefaultCompactKeysListed,
-		cardMaxChars:  DefaultCardMaxChars,
+		compressor:   sc,
+		memStore:     memStore,
+		tokenCounter: tokenCounter,
+		maxTokens:    maxTokens,
+		thresholdPct: thresholdPct,
+		keepRecent:   keepRecent,
+		// listedKeysCap / cardMaxChars start at 0 (sentinel = "not explicitly
+		// set") and are derived from the primary knobs below (D3) unless an
+		// option overrides them.
+		listedKeysCap: 0,
+		cardMaxChars:  0,
 	}
 	for _, opt := range opts {
 		opt(cc)
+	}
+	// D3 (rolling-summary-anchor): formula defaults from the primary knobs
+	// max_tokens (M) and keep_recent_tasks (k), so users only tune those two.
+	// card_max_chars scales with the context budget (~5%); compact_keys_listed
+	// scales with the card budget (~one key per 200 chars). Explicit settings
+	// (via options above) always win.
+	if cc.cardMaxChars <= 0 {
+		cc.cardMaxChars = maxTokens / 20
+		if cc.cardMaxChars <= 0 {
+			cc.cardMaxChars = DefaultCardMaxChars
+		}
+	}
+	if cc.listedKeysCap <= 0 {
+		cc.listedKeysCap = cc.cardMaxChars / 200
+		if cc.listedKeysCap <= 0 {
+			cc.listedKeysCap = DefaultCompactKeysListed
+		}
 	}
 	// D6: unless explicitly configured, the full-resolution window covers the
 	// most recent keepRecent complete turns as a whole — a fixed small count
@@ -283,12 +303,13 @@ func (cc *ContextCompressor) Compress(
 	// The second dimension is what un-starves compression: placeholder
 	// rendering keeps usedTokens low, so a token-only gate would never fire
 	// and the skeleton pipeline / rolling summary would never form. Steady
-	// state converges to ~3×keepRecent retained agent_outputs (L0/L1/L2 all
-	// keep them), so in a long conversation the turn-count dimension fires
-	// every round — that is the INTENT (continuous rolling-summary maintenance,
-	// LSM-style), not a bug. Cost stays bounded: the projection is bounded
-	// (1 summary + ≤3k skeleton turns + keepRecent full + in-progress), and
-	// intra-turn repeats are idempotent no-ops (changed=false short-circuit).
+	// state converges to ~4×keepRecent retained agent_outputs (L0/L1/L2 all
+	// keep them; L2 dwells 2k under the exponential {k,2k,4k} ladder), so in a
+	// long conversation the turn-count dimension fires every round — that is
+	// the INTENT (continuous rolling-summary maintenance, LSM-style), not a
+	// bug. Cost stays bounded: the projection is bounded (1 summary + ≤4k
+	// skeleton turns + keepRecent full + in-progress), and intra-turn repeats
+	// are idempotent no-ops (changed=false short-circuit).
 	if usedTokens <= threshold && completeTurns <= cc.keepRecent {
 		log.Infof("[ContextCompressor] under budget (%d <= %d) and turns %d <= %d, %d refs, %d messages",
 			usedTokens, threshold, completeTurns, cc.keepRecent, len(refs), len(resolved))

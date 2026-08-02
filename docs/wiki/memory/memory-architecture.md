@@ -1125,7 +1125,7 @@ stateDiagram-v2
 
 ### 16.7 压缩触发与执行过程召回（compress-digest-reconnect）
 
-**触发器多维化**。`ContextCompressor.Compress` 的触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。`completeTurns`（投影中 agent_output ref 数）复用现有 ref 遍历统计，零额外成本。稳态收敛到 ~3×keepRecent 个 retained agent_output（L0/L1/L2 段都保留边界事件），长会话里触发持续——这是 LSM 式连续维护滚动摘要的设计意图；成本缓解是投影有界 + 轮内幂等 no-op。
+**触发器多维化**。`ContextCompressor.Compress` 的触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。`completeTurns`（投影中 agent_output ref 数）复用现有 ref 遍历统计，零额外成本。稳态收敛到 ~4×keepRecent 个 retained agent_output（指数定级下 L2 驻留 2k，见 16.8），长会话里触发持续——这是 LSM 式连续维护滚动摘要的设计意图；成本缓解是投影有界 + 轮内幂等 no-op。
 
 **三层摄取模型**。压缩后的历史按三层被模型消费：
 
@@ -1136,6 +1136,14 @@ stateDiagram-v2
 | 可选顶层（可读） | LLM 文摘：`condenseCardLines` 只读卡片生成浓缩梗概（卡片超 `cardMaxChars` 时），票据仍内联 | 长历史可读性叠加层，不替换卡片基座 |
 
 **卡片可追溯提示**。`buildRetainedRefs` 压缩时统计每轮被丢弃的 tool 步数，L3（整段离场）回合的 agent_output 卡片追加“含 N 步工具调用，可用 memory_turn 追溯”——计数只在 agent_output（回合结束）重置，不被回合中途 bus 注入的 external_input（task_settled 等）误清零。
+
+### 16.8 滚动摘要常驻与指数定级（rolling-summary-anchor）
+
+**滚动摘要豁免 L3（常驻可见）**。滚动摘要 ref 被 prepend 到投影最前→渲染成第一条消息→落进**段0**（与第一回合同段）。段0 段龄最高、最先升 L3，`applySegmentLevel` L3 返回 nil 会把**摘要消息随段0 一起丢出模型上下文**——ref 还在投影里（`buildRetainedRefs` 每轮重建），但消息死了。后果：K≥7 的长会话里模型对远期历史彻底失忆（最讽刺的是摘要在短会话 K=3–6 可见但不太需要，长会话最需要时反而消失）。修复：`compressSkeleton` 用 `splitRollingSummaryMessage`（类比 `SplitSystemMessage`）把领先的 `context_compress` 消息摘出、不参与分段/定级，压缩后无条件回填到系统消息后——**滚动摘要永远可见**。`buildRetainedRefs` 不受影响（负 key ref 仍被吸收重建，投影照常携带）。
+
+**指数定级（缓存复用）**。`deterministicLevel` 段龄阈值从线性 `{k, 2k, 3k}` 改**指数 `{k, 2k, 4k}`**（边界 = keepRecent×2^level，底数固定 2）。段在每个级别驻留更久（L2 跨度从 k 翻倍到 2k）、被折叠进滚动摘要的频率降低→滚动摘要（前缀）与段重渲染变化更慢→**LLM 前缀缓存复用率提升**。代价：retained 段略增（~4k vs ~3k），预算内。
+
+**配置公式化**。以 `max_tokens`（M）与 `keep_recent_tasks`（k）为主变量，其余派生：`threshold = compress_threshold × M`、`recent_full_count = 4k`、定级边界 = `{k,2k,4k}`、`card_max_chars = M/20`、`compact_keys_listed = card_max_chars/200`。未显式设置时用公式默认，显式设置优先。
 
 
 

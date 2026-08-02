@@ -67,7 +67,8 @@ func TestContextCompressor_PrefixesUnderBudget(t *testing.T) {
 // for the unbounded-keys-list / silent-history-drop pair.
 func TestBuildRetainedRefs_RollingSummary(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(8000))
-	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1)
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 8000, 0.8, 1,
+		WithCardMaxChars(6000), WithCompactKeysListed(32))
 
 	// Prior rolling summary: 105 events already compacted, one card line,
 	// oldest ts=1000.
@@ -603,11 +604,12 @@ func TestContextCompressor_CardCarriesMemoryTurnHint(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
 	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
 
-	// 4 complete turns (each: external_input + thinking_plan + action_command +
-	// agent_output = 2 tool steps). keepRecent=1 → oldest turn ages to L3 and
-	// is fully dropped into the rolling summary.
+	// 6 complete turns (each: external_input + thinking_plan + action_command +
+	// agent_output = 2 tool steps). keepRecent=1 + exponential {1,2,4} → the
+	// oldest turn (age 5) reaches L3 and is fully dropped into the rolling
+	// summary, its agent_output card carrying the tool-step hint.
 	var refs []memory.EventReference
-	for i := int64(0); i < 4; i++ {
+	for i := int64(0); i < 6; i++ {
 		refs = append(refs, makeTurn(i*10)...)
 	}
 
@@ -648,7 +650,7 @@ func TestContextCompressor_HintIgnoresBusInjection(t *testing.T) {
 		{EventKey: 7, EventType: tagentevent.TypeAgentOutput, EventSummary: "完成", Timestamp: 7},
 	}
 	refs := append([]memory.EventReference{}, oldest...)
-	for i := int64(1); i <= 3; i++ {
+	for i := int64(1); i <= 5; i++ { // 6 segments total → oldest (age 5) reaches L3 (exponential {1,2,4})
 		refs = append(refs, makeTurn(i*10)...)
 	}
 
@@ -665,5 +667,60 @@ func TestContextCompressor_HintIgnoresBusInjection(t *testing.T) {
 	}
 	if !strings.Contains(summary, "含 4 步工具调用，可用 memory_turn 追溯") {
 		t.Errorf("bus injection must not truncate the tool-step count: want 含 4 步, got:\n%s", summary)
+	}
+}
+
+// TestContextCompressor_RollingSummarySurvivesL3 (rolling-summary-anchor D1):
+// the rolling summary message must NOT be L3-dropped with segment 0. With the
+// summary split out (like the system message), it stays visible even when the
+// first turn's segment reaches L3. fail-before: the summary rode inside
+// segment 0 and was dropped, so Messages lost it.
+func TestContextCompressor_RollingSummarySurvivesL3(t *testing.T) {
+	// keepRecent=1 + exponential {1,2,4}: L3 needs age>=4. With 5 turns, segment
+	// 0 (turn 1) age = 5-1-0 = 4 → L3. This is the key: segment 0 must ACTUALLY
+	// reach L3 (code-review Major — with keepRecent=2 + 8 turns, exponential
+	// made segment 0 age 7 = L2, so the summary survived WITHOUT protection and
+	// the test had no regression coverage). keepRecent=1 + 5 turns forces L3.
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+
+	rolling := memory.EventReference{
+		EventKey: -1000, EventType: tagentevent.TypeContextCompress,
+		EventSummary: "[Compacted 100 historical events]\n- 早期卡片 [aa]\nrecent keys=aa",
+		Timestamp:    1000, Role: "user",
+	}
+	refs := []memory.EventReference{rolling}
+	for i := int64(0); i < 5; i++ { // 5 turns, keepRecent=1 -> segment 0 age 4 -> L3
+		refs = append(refs, makeTurn(i*10)...)
+	}
+
+	result := cc.Compress(context.Background(), refs)
+
+	// The rolling summary message must survive in the model context.
+	hasSummaryMsg := false
+	for _, m := range result.Messages {
+		if strings.Contains(m.Content, "context_compress") && strings.Contains(m.Content, "Compacted 100") {
+			hasSummaryMsg = true
+		}
+	}
+	if !hasSummaryMsg {
+		t.Fatalf("rolling summary message was L3-dropped from model context (D1 bug)")
+	}
+	// It must sit right after the system message (index 1) if a system msg exists,
+	// else be the first message.
+	if len(result.Messages) > 1 && result.Messages[0].Role == model.RoleSystem {
+		if !strings.Contains(result.Messages[1].Content, "context_compress") {
+			t.Errorf("rolling summary must be right after system message, got [1]=%.60q", result.Messages[1].Content)
+		}
+	}
+	// The rolling summary ref must still be rebuilt in RetainedRefs.
+	hasSummaryRef := false
+	for _, r := range result.RetainedRefs {
+		if r.EventKey < 0 && r.EventType == tagentevent.TypeContextCompress {
+			hasSummaryRef = true
+		}
+	}
+	if !hasSummaryRef {
+		t.Errorf("rolling summary ref must be rebuilt in RetainedRefs")
 	}
 }

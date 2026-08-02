@@ -223,16 +223,22 @@ func deterministicLevel(seg *TaskSegment, segIdx, totalSegs, keepRecent int) int
 	if keepRecent < 1 {
 		keepRecent = 1
 	}
+	// Exponential age boundaries (rolling-summary-anchor D2): level L covers
+	// age in [keepRecent·2^(L-1), keepRecent·2^L). Compared to the old linear
+	// {k,2k,3k}, each level's span doubles, so segments dwell longer at each
+	// level and are folded into the rolling summary less often — the rolling
+	// summary (a prefix) and segment re-renders change less frequently, which
+	// improves LLM prefix-cache reuse. Base is fixed at 2.
 	age := totalSegs - 1 - segIdx
 	switch {
 	case age < keepRecent:
-		return 0
+		return 0 // age < k·2^0
 	case age < keepRecent*2:
-		return 1
-	case age < keepRecent*3:
-		return 2
+		return 1 // age < k·2^1
+	case age < keepRecent*4:
+		return 2 // age < k·2^2
 	default:
-		return 3
+		return 3 // age >= k·2^2
 	}
 }
 
@@ -291,6 +297,10 @@ func applySegmentLevel(seg *TaskSegment, level int) []model.Message {
 func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message) []model.Message {
 	startTime := time.Now()
 	systemMsg, rest := SplitSystemMessage(messages)
+	// Extract the rolling summary so it never rides inside segment 0 (which is
+	// the first to be L3-dropped). It is re-prepended after compression, right
+	// after the system message — a permanent, always-visible prefix (D1).
+	rollingMsg, rest := splitRollingSummaryMessage(rest)
 	segments := SegmentMessages(rest)
 
 	keepRecent := sc.KeepRecentTasks
@@ -328,6 +338,13 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 		}
 	}
 	total := systemCost
+	// The protected rolling summary is always present in the output, so its
+	// tokens count toward the budget-escalation target — otherwise an
+	// escalated result could overshoot maxTokens by up to one rolling summary
+	// (code-review Minor).
+	if rollingMsg != nil {
+		total += sc.tokenCounter.Estimate([]model.Message{*rollingMsg})
+	}
 	for i := range segments {
 		total += cost[i][levels[i]]
 	}
@@ -362,6 +379,9 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	result := make([]model.Message, 0, len(messages))
 	if systemMsg != nil {
 		result = append(result, *systemMsg)
+	}
+	if rollingMsg != nil {
+		result = append(result, *rollingMsg)
 	}
 	changed := false
 	levelCounts := map[int]int{0: 0, 1: 0, 2: 0, 3: 0}
@@ -1242,6 +1262,26 @@ func SplitSystemMessage(messages []model.Message) (*model.Message, []model.Messa
 		return nil, nil
 	}
 	if messages[0].Role == model.RoleSystem {
+		return &messages[0], messages[1:]
+	}
+	return nil, messages
+}
+
+// splitRollingSummaryMessage extracts a LEADING context_compress (rolling
+// summary) message so it is never compacted away by L3 — analogous to
+// SplitSystemMessage. The rolling summary is the compressed-history anchor
+// (cards + recall tickets); if it rode inside segment 0 it would be the
+// FIRST thing L3-dropped (segment 0 is oldest → highest age → L3), making the
+// model lose all awareness of older history exactly when the conversation is
+// long enough to need it (rolling-summary-anchor D1). Splitting it out keeps
+// it a permanent, always-visible prefix (right after the system message).
+// Forgery is harmless: a real rolling summary ref carries a negative key in
+// the projection; imitated text parses into nothing downstream.
+func splitRollingSummaryMessage(messages []model.Message) (*model.Message, []model.Message) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	if MessageEventType(&messages[0]) == tagentevent.TypeContextCompress {
 		return &messages[0], messages[1:]
 	}
 	return nil, messages

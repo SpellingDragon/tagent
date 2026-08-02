@@ -35,13 +35,15 @@ func TestDeterministicLevel_Table(t *testing.T) {
 		{"mid turn drops tool (age=2)", complete, 3, 6, 2, 1},
 		{"old turn skeleton only (age=5)", complete, 2, 8, 2, 2},
 		{"older turn compacted (age=9)", complete, 0, 10, 2, 3},
-		// Boundary sweep with keepRecent=2.
+		// Boundary sweep with keepRecent=2 (exponential {k,2k,4k} = {2,4,8}).
 		{"age=0", complete, 4, 5, 2, 0},
 		{"age=3 → L1", complete, 1, 5, 2, 1},
 		{"age=4 → L2", complete, 0, 5, 2, 2},
-		{"age=6 → L3", complete, 0, 7, 2, 3},
-		// keepRecent floor.
-		{"keepRecent=0 treated as 1", complete, 0, 4, 0, 3},
+		{"age=6 → L2 (exponential)", complete, 0, 7, 2, 2},
+		{"age=7 → L2 (exponential)", complete, 0, 8, 2, 2},
+		{"age=8 → L3", complete, 0, 9, 2, 3},
+		// keepRecent floor (k=1 → exponential L3 at age>=4).
+		{"keepRecent=0 treated as 1", complete, 0, 5, 0, 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,36 +153,36 @@ func contentsOf(msgs []model.Message) string {
 	return sb.String()
 }
 
-// Level ladder over 8 complete turns with keepRecent=2:
-// ages 0-1 → L0, 2-3 → L1, 4-5 → L2, 6-7 → L3 (removed).
+// Level ladder over 10 complete turns with keepRecent=2 (exponential
+// {k,2k,4k}={2,4,8}): ages 0-1 → L0, 2-3 → L1, 4-7 → L2, 8-9 → L3 (removed).
 // Budget is ample — compression is triggered by segment count alone, so the
 // base age ladder shows without budget escalation.
 func TestCompressSkeleton_LevelLadder(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2))
-	msgs := buildTurns(8)
+	msgs := buildTurns(10)
 
 	result := sc.Compress(context.Background(), msgs, nil)
 	joined := contentsOf(result)
 
-	// L3 (turns 0-1): whole segments gone — no trace of their event keys.
+	// L3 (turns 0-1, age 9/8): whole segments gone — no trace of their event keys.
 	for _, turn := range []int{0, 1} {
 		assert.NotContains(t, joined, fmt.Sprintf("task %d", turn), "L3 turn %d must leave the timeline", turn)
 		assert.NotContains(t, joined, fmt.Sprintf("reply %d", turn), "L3 turn %d must leave the timeline", turn)
 	}
-	// L2 (turns 2-3): skeleton only.
-	for _, turn := range []int{2, 3} {
+	// L2 (turns 2-5, age 7-4): skeleton only.
+	for _, turn := range []int{2, 3, 4, 5} {
 		assert.Contains(t, joined, fmt.Sprintf("task %d", turn))
 		assert.Contains(t, joined, fmt.Sprintf("reply %d", turn))
 		assert.NotContains(t, joined, fmt.Sprintf("plan %d", turn), "L2 drops thinking_plan")
 		assert.NotContains(t, joined, fmt.Sprintf("tool %d", turn), "L2 drops action_command")
 	}
-	// L1 (turns 4-5): tool dropped, thinking kept.
-	for _, turn := range []int{4, 5} {
+	// L1 (turns 6-7, age 3/2): tool dropped, thinking kept.
+	for _, turn := range []int{6, 7} {
 		assert.Contains(t, joined, fmt.Sprintf("plan %d", turn), "L1 keeps thinking_plan")
 		assert.NotContains(t, joined, fmt.Sprintf("tool %d", turn), "L1 drops action_command")
 	}
-	// L0 (turns 6-7): everything kept.
-	for _, turn := range []int{6, 7} {
+	// L0 (turns 8-9, age 1/0): everything kept.
+	for _, turn := range []int{8, 9} {
 		assert.Contains(t, joined, fmt.Sprintf("tool %d", turn), "L0 keeps everything")
 	}
 	// Zero-LLM path: no error/degradation notices ever.
