@@ -51,7 +51,7 @@ func LoadConfig() (*Config, error) {
 	// Load endpoint
 	cfg.Endpoint = os.Getenv("TRPC_CLAW_API_ENDPOINT")
 	if cfg.Endpoint == "" {
-		cfg.Endpoint = "https://open.bigmodel.cn/api/paas/v4"
+		cfg.Endpoint = "https://open.bigmodel.cn/api/coding/paas/v4"
 	}
 
 	// Load model name

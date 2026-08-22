@@ -18,87 +18,84 @@ import (
 	"github.com/SpellingDragon/tagent/testutil"
 )
 
-// recordingActionTool 是一个记录所有执行命令的 mock action 工具。
-// 它模拟一个 openspec 可用的 shell 环境，返回真实感的输出，
-// 用于观察 plan agent 的 LLM 在 create 时到底执行了哪些命令。
-type recordingActionTool struct {
-	mu       sync.Mutex
-	commands []string
+// recordingSpecTool 是记录型 mock spec 工具（与生产 tagent.yaml 的 plan 工具
+// 集一致：计划管理经类型化 spec 工具，后端 openspec CLI，无 shell）。用于观察
+// plan agent 的 LLM 在 create 时到底发起了哪些 spec 操作。
+type recordingSpecTool struct {
+	mu  sync.Mutex
+	ops []string
 }
 
-func (t *recordingActionTool) Declaration() *tool.Declaration {
+func (t *recordingSpecTool) Declaration() *tool.Declaration {
 	return &tool.Declaration{
-		Name:        "action",
-		Description: "Execute a shell command via tmux and wait for it to stabilize. Returns the final status and captured output.",
+		Name:        "spec",
+		Description: "规格化计划管理（openspec 后端，类型化操作）：op ∈ init/new/status/validate/archive/instructions/list。",
 		InputSchema: &tool.Schema{
 			Type: "object",
 			Properties: map[string]*tool.Schema{
-				"command": {
-					Type:        "string",
-					Description: "The action to execute, described as a shell command. Runs via sh -c so pipes, redirects, and chaining are supported.",
-				},
+				"op":       {Type: "string", Description: "操作类型: init/new/status/validate/archive/instructions/list"},
+				"name":     {Type: "string", Description: "计划名（kebab-case）"},
+				"artifact": {Type: "string", Description: "instructions 的目标 artifact（proposal/specs/design/tasks）"},
+				"json":     {Type: "boolean", Description: "status 以 JSON 输出"},
 			},
-			Required: []string{"command"},
+			Required: []string{"op"},
 		},
 	}
 }
 
-func (t *recordingActionTool) record(cmd string) {
+func (t *recordingSpecTool) record(op string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.commands = append(t.commands, cmd)
+	t.ops = append(t.ops, op)
 }
 
-func (t *recordingActionTool) snapshot() []string {
+func (t *recordingSpecTool) snapshot() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]string, len(t.commands))
-	copy(out, t.commands)
+	out := make([]string, len(t.ops))
+	copy(out, t.ops)
 	return out
 }
 
-func (t *recordingActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+func (t *recordingSpecTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var args struct {
-		Command string `json:"command"`
+		Op       string `json:"op"`
+		Name     string `json:"name"`
+		Artifact string `json:"artifact"`
 	}
 	_ = json.Unmarshal(jsonArgs, &args)
-	t.record(args.Command)
+	t.record(args.Op)
 
-	// 模拟真实 openspec 环境的输出。
-	cmd := args.Command
-	switch {
-	case strings.Contains(cmd, "openspec init"):
-		return "OpenSpec initialized. Created openspec/ directory structure.", nil
-	case strings.Contains(cmd, "openspec new change"):
-		// 提取 change 名
-		name := "unknown"
-		if idx := strings.Index(cmd, "new change"); idx >= 0 {
-			rest := strings.TrimSpace(cmd[idx+len("new change"):])
-			rest = strings.Trim(rest, "\"' ")
-			if sp := strings.IndexAny(rest, " \"'&|;"); sp > 0 {
-				rest = rest[:sp]
-			}
-			if rest != "" {
-				name = rest
-			}
+	// 模拟真实 openspec CLI 的输出（与本机 openspec 实际文案对齐，
+	// 让模型能从 ✔/Created 标记确认操作成功，避免重试震荡）。
+	switch args.Op {
+	case "init":
+		return "✔ Initialized openspec directory structure (openspec/).", nil
+	case "new":
+		name := args.Name
+		if name == "" {
+			name = "unknown"
 		}
-		return fmt.Sprintf("Created change '%s' at openspec/changes/%s/\n  - proposal.md\n  - tasks.md\n  - design.md", name, name), nil
-	case strings.Contains(cmd, "openspec list"):
-		return "No active changes found.", nil
-	case strings.Contains(cmd, "openspec instructions"):
-		return "## Proposal Template\n\nDescribe the goal and motivation.\n\n## Tasks Template\n\n- [ ] Step description", nil
-	case strings.Contains(cmd, "openspec --help") || strings.Contains(cmd, "openspec -h"):
-		return "Usage: openspec [command]\n\nCommands:\n  init\n  new change <name>\n  list\n  status\n  archive\n  instructions", nil
-	case strings.Contains(cmd, "pwd"):
-		return "/workspace\ntotal 8\ndrwxr-xr-x  openspec/", nil
-	case strings.Contains(cmd, "ls"):
-		return "openspec/\ngo.mod\nREADME.md", nil
+		return fmt.Sprintf("- Creating change '%s'...\n✔ Created change '%s' at openspec/changes/%s/ (schema: spec-driven)\nNext: create artifacts with openspec instructions", name, name, name), nil
+	case "list":
+		return "Changes:\n  (none)", nil
+	case "instructions":
+		art := args.Artifact
+		if art == "" {
+			return "error: --artifact is required (proposal/specs/design/tasks)", nil
+		}
+		return fmt.Sprintf("- Generating instructions...\n<artifact id=%q change=%q schema=\"spec-driven\">\n## Template\n\nDescribe the goal.\n- [ ] Step description\n</artifact>", art, args.Name), nil
+	case "status":
+		if args.Name == "" {
+			return "Changes:\n  (none)", nil
+		}
+		return fmt.Sprintf(`{"changeName":%q,"schemaName":"spec-driven","isComplete":false,"applyRequires":["tasks"],"artifacts":[{"id":"proposal","status":"done"},{"id":"tasks","status":"done"}]}`, args.Name), nil
 	default:
-		return "OK (exit 0)", nil
+		return "error: unknown op " + args.Op, nil
 	}
 }
 
-// recordingSaveFileTool 记录 save_file 调用（写 tasks.md）。
+// recordingSaveFileTool 记录 save_file 调用（写 proposal.md / tasks.md）。
 type recordingSaveFileTool struct {
 	mu    sync.Mutex
 	saved map[string]string
@@ -145,17 +142,13 @@ func (t *recordingSaveFileTool) snapshot() map[string]string {
 }
 
 // TestPlanAgentCreateBehavior_RealPrompt 用真实的 plan_agent.md 系统提示词 +
-// 记录型 mock 工具，实际调用 glm-5.2，观察 plan agent 在收到 create 请求时
-// 到底执行了哪些命令——特别是是否真的执行了 `openspec new change`。
+// 记录型 mock 工具（spec + save_file，与生产 plan 工具集一致），实际调用真实
+// LLM，观察 plan agent 在收到 create 请求时到底发起了哪些操作——特别是是否
+// 经 spec(op="new") 建 change、产出合规 artifact（proposal.md + tasks.md）、
+// 并以 spec(op="status") 结构自检收尾。
 //
-// 这复现 wechat-bot 日志中观察到的现象：8 次 create 调用，0 次真正执行
-// `openspec new change`，全是 pwd/ls/openspec list 探索类命令。
-//
-// 运行方式：
-//
-//	TRPC_CLAW_MODEL_NAME=glm-5.2 go test -v \
-//	    -run TestPlanAgentCreateBehavior_RealPrompt \
-//	    ./tests/ -timeout 180s
+// 契约随 plan_agent.md 的 spec 工具流演进（原 shell openspec CLI 契约已废弃：
+// plan 无 shell 能力，spec 工具是唯一计划管理入口）。
 func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -181,20 +174,20 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 		openai.WithBaseURL(cfg.Endpoint),
 	)
 
-	actionTool := &recordingActionTool{}
+	specTool := &recordingSpecTool{}
 	saveTool := &recordingSaveFileTool{}
 
 	thinking := true
 	subAg, err := tagentagent.NewTagentAgent(&tagentagent.TagentConfig{
 		Model:             zhipuModel,
-		MaxToolIterations: 15, // 与修复后的 tagent.yaml 一致
+		MaxToolIterations: 40, // 模型探索冗余度不稳定（实测最多 37 次），留足预算走完 create→自检收尾
 		MaxTokens:         64000,
 		Temperature:       0.3,
 		SystemPrompt:      systemPrompt,
 		Name:              "plan",
 		Description:       "Plan agent",
 		ThinkingEnabled:   &thinking,
-		Tools:             []tool.Tool{actionTool, saveTool},
+		Tools:             []tool.Tool{specTool, saveTool},
 	})
 	if err != nil {
 		t.Fatalf("创建 agent 失败: %v", err)
@@ -202,7 +195,7 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 
 	wrapper := tagentagent.NewAgentToolWrapper(subAg, "Manage openspec work plans", nil, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	// 模拟真实的 create 请求（与日志中的请求类似）
@@ -219,26 +212,26 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	}
 
 	resultStr, _ := result.(string)
-	commands := actionTool.snapshot()
+	ops := specTool.snapshot()
 	savedFiles := saveTool.snapshot()
 
-	// 打印 plan agent 实际执行的所有命令
-	t.Logf("========== plan agent 执行的命令序列 (%d 条) ==========", len(commands))
-	for i, c := range commands {
+	// 打印 plan agent 实际发起的所有 spec 操作
+	t.Logf("========== plan agent 发起的 spec 操作序列 (%d 条) ==========", len(ops))
+	for i, op := range ops {
 		mark := ""
-		switch {
-		case strings.Contains(c, "openspec new change"):
-			mark = " <<< openspec new change (create 核心)"
-		case strings.Contains(c, "openspec init"):
+		switch op {
+		case "new":
+			mark = " <<< spec new (create 核心)"
+		case "init":
 			mark = " (init)"
-		case strings.Contains(c, "openspec --help"):
-			mark = " (help 探索)"
-		case strings.Contains(c, "openspec list"):
-			mark = " (list 探索)"
-		case strings.Contains(c, "pwd") || strings.Contains(c, "ls"):
-			mark = " (环境探索)"
+		case "list":
+			mark = " (list 盘点)"
+		case "instructions":
+			mark = " (取模板)"
+		case "status":
+			mark = " (自检收尾)"
 		}
-		t.Logf("  [%d] %s%s", i+1, truncateCmd(c, 100), mark)
+		t.Logf("  [%d] spec(op=%q)%s", i+1, op, mark)
 	}
 	t.Logf("========== save_file 写入的文件 (%d 个) ==========", len(savedFiles))
 	for p := range savedFiles {
@@ -249,18 +242,17 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 
 	// 核心断言：create 必须产出合规 openspec change（proposal.md + tasks.md），
 	// tasks.md 遵循官方模板，且按级别收尾（plan-interaction-contract D3）：
-	// A 级以 openspec status 结构自检收尾，禁止 validate（无 specs deltas 必然失败）。
-	ranNewChange := false
+	// A 级以 spec(op="status") 结构自检收尾，禁止 validate（无 specs deltas 必然失败）。
+	ranNew := false
 	ranValidate := false
 	ranStatusClose := false
-	for _, c := range commands {
-		if strings.Contains(c, "openspec new change") {
-			ranNewChange = true
-		}
-		if strings.Contains(c, "openspec validate") {
+	for _, op := range ops {
+		switch op {
+		case "new":
+			ranNew = true
+		case "validate":
 			ranValidate = true
-		}
-		if strings.Contains(c, "openspec status") {
+		case "status":
 			ranStatusClose = true
 		}
 	}
@@ -284,10 +276,10 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	tasksFollowsTemplate := groupHeadingRe.MatchString(tasksContent) && checkboxRe.MatchString(tasksContent)
 
 	// 诊断输出：明确 create 是否产出合规 change
-	if !ranNewChange {
-		t.Errorf("❌ plan create 未执行 `openspec new change`。执行的命令: %v", commands)
+	if !ranNew {
+		t.Errorf("❌ plan create 未发起 spec(op=\"new\")。发起的操作: %v", ops)
 	} else {
-		t.Logf("✅ plan create 执行了 `openspec new change`")
+		t.Logf("✅ plan create 发起了 spec(op=\"new\")")
 	}
 	// 关键：proposal.md 必须创建（不再是裸 tasks.md 目录）
 	if !wroteProposal {
@@ -306,12 +298,12 @@ func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 		t.Logf("✅ tasks.md 符合官方模板（## N. 分组 + - [ ] N.M 复选框）")
 	}
 	if !ranStatusClose {
-		t.Errorf("❌ plan create 未以 `openspec status` 结构自检收尾（A 级收尾方式）。执行的命令: %v", commands)
+		t.Errorf("❌ plan create 未以 spec(op=\"status\") 结构自检收尾（A 级收尾方式）。发起的操作: %v", ops)
 	} else {
-		t.Logf("✅ plan create 以 `openspec status` 自检收尾")
+		t.Logf("✅ plan create 以 spec(op=\"status\") 自检收尾")
 	}
 	if ranValidate {
-		t.Errorf("❌ A 级计划调用了 `openspec validate`（无 specs deltas 必然失败，新契约禁止）。执行的命令: %v", commands)
+		t.Errorf("❌ A 级计划调用了 spec(op=\"validate\")（无 specs deltas 必然失败，新契约禁止）。发起的操作: %v", ops)
 	} else {
 		t.Logf("✅ A 级计划未调用 validate（符合新契约）")
 	}

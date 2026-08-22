@@ -213,8 +213,8 @@ func TestExtractFilePaths(t *testing.T) {
 
 func TestSelectSendFn(t *testing.T) {
 	cases := []struct {
-		ext         string
-		wantMethod  string
+		ext          string
+		wantMethod   string
 		wantDuration int // 仅 voice 需要校验
 	}{
 		{".png", "SendImageFromPath", 0},
