@@ -1091,13 +1091,13 @@ func (sc *SmartCompressor) buildSegmentCompressNotice(execMsgs []model.Message, 
 			content.WriteString(fmt.Sprintf("\n... 还有 %d 条执行消息被压缩", len(execMsgs)-len(infos)))
 		}
 
-		// General warning: don't repeat operations that produced the compressed content.
-		// The overflow cause might be anything — large files, model outputs, search results, etc.
-		// The agent should not blindly re-execute the same operations to recover this information.
-		content.WriteString("\n\n**不要重复执行已被压缩的操作来获取相同内容**，否则将再次触发压缩。如需查找特定信息，请使用：")
-		content.WriteString("\n- `recall({\"event_keys\": [KEY]})` — 检索完整事件（如果可用）")
-		content.WriteString("\n- `search_content({\"path\": \"<path>\", \"query\": \"<关键词>\"})` — 搜索特定内容")
-		content.WriteString("\n- `read_file` 配合 `start_line`/`end_line` 参数 — 只读取需要的部分")
+		// General warning: don't repeat operations that produced the compressed
+		// content. The overflow cause might be anything — large files, model
+		// outputs, search results, etc. Ticket-only (stable-context-compaction
+		// D5): the evt key list above is the recall surface; framework text
+		// never advertises tool names (assembly may differ per agent) —
+		// recovery guidance lives in tool declarations.
+		content.WriteString("\n\n**不要重复执行已被压缩的操作来获取相同内容**，否则将再次触发压缩。上方列出的事件 key 即为检索票据，如需完整内容可凭票据召回。")
 	}
 
 	notice := content.String()

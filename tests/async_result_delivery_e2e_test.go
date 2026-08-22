@@ -95,7 +95,6 @@ func TestRealLLM_AsyncResultDelivery_EndToEnd(t *testing.T) {
 		Tools: []tool.Tool{
 			newSlowBackgroundTool(marker),
 			tasktool.NewListTasksTool(),
-			tasktool.NewGetTaskResultTool(),
 		},
 	})
 	if err != nil {

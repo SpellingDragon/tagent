@@ -140,11 +140,14 @@ func TestResolveRef_ToolChain(t *testing.T) {
 	}
 }
 
-// TestCompress_ToolChainEndToEnd: a long in-progress-style turn folds its aged
-// tool run; the model context shows the tool-chain line (no empty-summary
-// placeholder) and RetainedRefs carries the tool_chain ref.
+// TestCompress_ToolChainEndToEnd: a capacity-triggered compaction (D2: forced
+// here via a 1-token budget) folds the aged tool run; the model context shows
+// the tool-chain line (no empty-summary placeholder) and RetainedRefs carries
+// the tool_chain ref.
 func TestCompress_ToolChainEndToEnd(t *testing.T) {
-	cc := newFoldCC(2)
+	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1, 0.8, 2,
+		WithRecentFullCount(2))
 	refs := []memory.EventReference{
 		toolRef(1, tagentevent.TypeExternalInput, "研究任务", 1),
 		toolRef(2, tagentevent.TypeThinkingPlan, "调用 read_file", 2),
@@ -177,6 +180,34 @@ func TestCompress_ToolChainEndToEnd(t *testing.T) {
 	}
 	if !hasChain {
 		t.Errorf("RetainedRefs must carry the tool_chain ref, got: %+v", result.RetainedRefs)
+	}
+}
+
+// TestCompress_NoFoldUnderBudget (stable-context-compaction D4): folding is
+// part of the compaction act — an under-budget round passes through without
+// folding, so aged tool pairs keep their native refs (rendered from
+// EventSummary, byte-stable) until the next capacity-triggered compaction.
+func TestCompress_NoFoldUnderBudget(t *testing.T) {
+	cc := newFoldCC(2) // huge budget (1_000_000) → never triggers
+	refs := []memory.EventReference{
+		toolRef(1, tagentevent.TypeExternalInput, "研究任务", 1),
+		toolRef(2, tagentevent.TypeThinkingPlan, "调用 read_file", 2),
+		toolRef(3, tagentevent.TypeActionCommand, "文件内容", 3),
+		toolRef(4, tagentevent.TypeThinkingPlan, "调用 grep", 4),
+		toolRef(5, tagentevent.TypeActionCommand, "匹配", 5),
+		toolRef(6, tagentevent.TypeAgentOutput, "阶段完成", 6),
+		toolRef(7, tagentevent.TypeExternalInput, "近期", 7),
+		toolRef(8, tagentevent.TypeAgentOutput, "近期", 8),
+	}
+	result := cc.Compress(context.Background(), refs)
+	if len(result.RetainedRefs) != len(refs) {
+		t.Fatalf("under-budget round must pass through untouched: retained %d != input %d",
+			len(result.RetainedRefs), len(refs))
+	}
+	for _, r := range result.RetainedRefs {
+		if r.EventType == tagentevent.TypeToolChain {
+			t.Fatalf("under-budget round must NOT fold tool runs, got chain ref: %+v", r)
+		}
 	}
 }
 

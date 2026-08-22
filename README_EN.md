@@ -258,9 +258,8 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 | `memory.read_namespaces` | `[]` | readable partitions of other agents |
 | `max_tool_iterations` | entry 50 / sub 10 | max ReAct iterations |
 | `max_tokens` | entry 8000 / sub 4096 | context token budget |
-| `compress_threshold` | `0.8` | compression trigger ratio |
-| `keep_recent_tasks` | `2` | recent tasks kept on compression |
-| `task_settled_max_inline` | `2000` | inline result cap in task_settled |
+| `compress_threshold` | `0.8` | compression trigger ratio — the **sole compaction trigger** (compact only over capacity); task_settled notices carry full results inline, and the context prefix stays stable between compactions for cache reuse |
+| `keep_recent_tasks` | `2` | recent tasks kept **after compaction** (post-compaction state parameter feeding the L0 keep-zone / full window; never a trigger) |
 | `task_terminal_ttl` | `"2m"` | retention of exited tasks before pruning (also the resume_task window for terminal tasks) |
 | `resume_context_rounds` | `3` | prior rounds restored on sub-agent resume |
 | `temperature` | entry 0.7 / sub 0.3 | LLM temperature |
@@ -274,7 +273,7 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 | `summary_model` / `summary_provider` | (inherit agent) | dedicated compression model (can be cheaper) |
 | `card_max_chars` | `6000` | card-section cap; beyond it old cards are LLM-condensed or sink |
 | `compact_keys_listed` | `32` | recent keys listed in the rolling summary |
-| `recent_full_count` | `keep_recent_tasks × 4` | most-recent refs resolved with full content (derived when unset so recent complete turns resolve full; explicit values win) |
+| `recent_full_count` | `keep_recent_tasks × 4` | full-resolution window size (derived when unset; explicit values win); **anchored at compaction rounds and frozen between them** — existing refs before the anchor keep their summary render, newly appended events resolve full (active frontier), prefix byte-stable |
 | `max_notice_chars` | `800` | compression notice cap |
 | `archive_cache_cap` | `256` | in-process archive cache entries (artifacts persist in MemoryStore) |
 

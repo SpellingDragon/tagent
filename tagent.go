@@ -334,8 +334,7 @@ func buildAgent(
 			MaxSummaryInputChars: acfg.Compress.MaxSummaryInputChars,
 			SummaryMaxTokens:     acfg.Compress.SummaryMaxTokens,
 		},
-		TaskSettledMaxInline: acfg.TaskSettledMaxInline,
-		WorkspaceRoot:        acfg.WorkspaceRoot,
+		WorkspaceRoot: acfg.WorkspaceRoot,
 	}
 	// task_terminal_ttl: duration string → time.Duration; empty/invalid falls
 	// back to the task package default (2m) via zero value.

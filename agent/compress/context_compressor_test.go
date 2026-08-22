@@ -543,25 +543,23 @@ func makeTurn(base int64) []memory.EventReference {
 	}
 }
 
-// TestContextCompressor_TriggersOnExcessTurns (compress-digest-reconnect P0):
-// with complete turns exceeding keepRecent, compression MUST run even when
-// under the token budget — this is what un-starves the skeleton pipeline
-// (previously a token-only gate never fired because placeholder rendering
-// keeps usedTokens low). fail-before: old token-only gate returned all refs
-// unchanged here.
-func TestContextCompressor_TriggersOnExcessTurns(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
-	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
-
-	// 3 complete turns (12 refs), well under the (huge) token budget.
+// TestContextCompressor_TriggersOnCapacity (stable-context-compaction D2):
+// the token budget is the ONLY compaction trigger. Over budget → compaction
+// runs regardless of turn count; under budget → pass-through regardless of
+// turn count (the old turn-count dimension is retired — it jittered the
+// prefix every round at steady state).
+func TestContextCompressor_TriggersOnCapacity(t *testing.T) {
+	// 3 complete turns (12 refs); a 1-token budget forces the capacity gate.
 	var refs []memory.EventReference
 	for i := int64(0); i < 3; i++ {
 		refs = append(refs, makeTurn(i*10)...)
 	}
 
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1, 0.8, 1)
 	result := cc.Compress(context.Background(), refs)
 
-	// Compression must have run: some refs folded away (RetainedRefs fewer
+	// Compaction must have run: some refs folded away (RetainedRefs fewer
 	// than input) and/or a rolling summary ref (negative key) formed.
 	hasRolling := false
 	for _, r := range result.RetainedRefs {
@@ -570,13 +568,28 @@ func TestContextCompressor_TriggersOnExcessTurns(t *testing.T) {
 		}
 	}
 	if len(result.RetainedRefs) >= len(refs) && !hasRolling {
-		t.Fatalf("compression must run on excess turns even under budget: retained %d >= input %d and no rolling summary",
+		t.Fatalf("compaction must run over the capacity gate: retained %d >= input %d and no rolling summary",
 			len(result.RetainedRefs), len(refs))
+	}
+
+	// Counter-direction: the SAME turn count under a huge budget must
+	// pass through untouched — turn count alone never triggers (D2).
+	scBig := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
+	ccBig := NewContextCompressor(scBig, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+	resultBig := ccBig.Compress(context.Background(), refs)
+	if len(resultBig.RetainedRefs) != len(refs) {
+		t.Fatalf("under budget must pass through even with excess turns: retained %d != input %d",
+			len(resultBig.RetainedRefs), len(refs))
+	}
+	for _, r := range resultBig.RetainedRefs {
+		if r.EventKey < 0 {
+			t.Fatalf("no rolling summary expected when under budget")
+		}
 	}
 }
 
-// TestContextCompressor_NoTriggerFewTurns: with complete turns within
-// keepRecent and under budget, compression must NOT run (pass-through).
+// TestContextCompressor_NoTriggerFewTurns: under budget, compression must NOT
+// run (pass-through) — capacity is the sole gate.
 func TestContextCompressor_NoTriggerFewTurns(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1_000_000))
 	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 2)
@@ -601,13 +614,15 @@ func TestContextCompressor_NoTriggerFewTurns(t *testing.T) {
 // "含 N 步工具调用，可用 memory_turn 追溯" hint so the model knows the dropped
 // execution process is recoverable via memory_turn.
 func TestContextCompressor_CardCarriesMemoryTurnHint(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
-	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(300))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 300, 0.8, 1)
 
 	// 6 complete turns (each: external_input + thinking_plan + action_command +
 	// agent_output = 2 tool steps). keepRecent=1 + exponential {1,2,4} → the
 	// oldest turn (age 5) reaches L3 and is fully dropped into the rolling
-	// summary, its agent_output card carrying the tool-step hint.
+	// summary; the 300-token budget (render ≈540) passes the capacity gate
+	// (D2) without forcing the all-L3 escalation storm, so mid-aged turns
+	// dwell at L1/L2 where their tool_chain lines survive.
 	var refs []memory.EventReference
 	for i := int64(0); i < 6; i++ {
 		refs = append(refs, makeTurn(i*10)...)
@@ -645,8 +660,8 @@ func TestContextCompressor_CardCarriesMemoryTurnHint(t *testing.T) {
 // for task_settled etc.). The toolSteps counter must NOT reset on it — the
 // card must count ALL of the turn's tool steps, not just post-injection ones.
 func TestContextCompressor_HintIgnoresBusInjection(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(1_000_000))
-	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 1_000_000, 0.8, 1)
+	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(300))
+	cc := NewContextCompressor(sc, memory.NewInMemoryStore(), NewDefaultTokenCounter(), 300, 0.8, 1)
 
 	// Oldest turn: ext, tp, ac, [task_settled bus injection typed external_input],
 	// tp, ac, out = 4 tool steps. Followed by 3 normal turns so it ages to L3.

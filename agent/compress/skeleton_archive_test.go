@@ -102,9 +102,12 @@ func TestContextCompressor_SegmentCountConverges(t *testing.T) {
 	assert.Contains(t, refs[0].EventSummary, "[Compacted")
 }
 
-// TestContextCompressor_RecentFullCount (task 4.1): only the most recent
-// recentFullCount refs resolve full content from MemoryStore; older refs
-// render from EventSummary — bounding store queries per BeforeModel.
+// TestContextCompressor_RecentFullCount (stable-context-compaction D3): the
+// full window is ANCHORED at the compaction round and frozen afterwards.
+// Before any compaction everything renders full (small-session behavior);
+// a forced compaction anchors the window at the most recent recentFullCount
+// retained refs; subsequent under-budget rounds keep old refs frozen on their
+// summary render while newly appended refs render full (active frontier).
 func TestContextCompressor_RecentFullCount(t *testing.T) {
 	memStore := memory.NewInMemoryStore()
 	const n = 6
@@ -115,32 +118,64 @@ func TestContextCompressor_RecentFullCount(t *testing.T) {
 			Content:   fmt.Sprintf("FULL %d", i),
 		})
 	}
+	makeRefs := func(from, to int) []memory.EventReference {
+		var out []memory.EventReference
+		for i := from; i <= to; i++ {
+			out = append(out, memory.EventReference{
+				EventKey: int64(i), EventType: tagentevent.TypeExternalInput,
+				EventSummary: fmt.Sprintf("SUM %d", i), Timestamp: int64(i),
+			})
+		}
+		return out
+	}
 
+	// Round 1 — never compacted: everything renders full (boundary=0).
 	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(8000))
 	cc := NewContextCompressor(sc, memStore, NewDefaultTokenCounter(), 8000, 0.8, 2,
 		WithRecentFullCount(2))
-
-	var refs []memory.EventReference
-	for i := 1; i <= n; i++ {
-		refs = append(refs, memory.EventReference{
-			EventKey: int64(i), EventType: tagentevent.TypeExternalInput,
-			EventSummary: fmt.Sprintf("SUM %d", i),
-		})
+	r1 := cc.Compress(context.Background(), makeRefs(1, n))
+	require.Len(t, r1.Messages, n)
+	for i, msg := range r1.Messages {
+		assert.Contains(t, msg.Content, fmt.Sprintf("FULL %d", i+1),
+			"pre-compaction round must render everything full")
 	}
 
-	result := cc.Compress(context.Background(), refs)
-	require.Len(t, result.Messages, n)
-
+	// Round 2 — force a compaction (1-token budget): anchors the full window
+	// at the most recent recentFullCount(2) retained refs.
+	scSmall := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1))
+	ccSmall := NewContextCompressor(scSmall, memStore, NewDefaultTokenCounter(), 1, 0.8, 2,
+		WithRecentFullCount(2))
+	_ = ccSmall.Compress(context.Background(), makeRefs(1, n)) // anchor side effect lives on ccSmall
+	// Re-run on the SAME compressor with a healthy budget: refs at/before the
+	// anchor stay frozen on summary, refs after render full.
+	cc2 := ccSmall
+	retained := ccSmall.Compress(context.Background(), makeRefs(1, n)).RetainedRefs
+	result := cc2.Compress(context.Background(), retained)
 	for i, msg := range result.Messages {
-		if i < n-2 {
-			assert.Contains(t, msg.Content, fmt.Sprintf("SUM %d", i+1),
-				"old ref %d must resolve from EventSummary", i)
+		key := int64(i + 1)
+		if i < len(result.Messages)-2 {
+			assert.Contains(t, msg.Content, fmt.Sprintf("SUM %d", key),
+				"ref %d before the anchor must stay frozen on summary", key)
 			assert.NotContains(t, msg.Content, "FULL")
 		} else {
-			assert.Contains(t, msg.Content, fmt.Sprintf("FULL %d", i+1),
-				"recent ref %d must resolve full content", i)
+			assert.Contains(t, msg.Content, fmt.Sprintf("FULL %d", key),
+				"ref %d inside the anchored window must render full", key)
 		}
 	}
+
+	// Round 3 — append new refs under budget: old renders unchanged, new refs
+	// full (active frontier) — the render-freeze contract.
+	for i := n + 1; i <= n+2; i++ {
+		memStore.StoreEvent(int64(i), memory.FullEvent{
+			EventKey:  int64(i),
+			EventType: tagentevent.TypeExternalInput,
+			Content:   fmt.Sprintf("FULL %d", i),
+		})
+	}
+	r3 := cc2.Compress(context.Background(), append(retained, makeRefs(n+1, n+2)...))
+	assert.Len(t, r3.Messages, n+2)
+	assert.Contains(t, r3.Messages[len(r3.Messages)-1].Content, fmt.Sprintf("FULL %d", n+2),
+		"newly appended refs must render full")
 }
 
 // TestContextCompressor_StripsUnansweredToolCalls: an assistant tool_call

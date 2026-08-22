@@ -176,7 +176,9 @@ func TestSameNameSingleFlight(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, fmt.Sprint(res2), "同名计划任务已在运行", "same-name call must dedup")
 	assert.Contains(t, fmt.Sprint(res2), "task_settled", "loser is told to wait for settle first")
-	assert.Contains(t, fmt.Sprint(res2), "resume_task", "loser gets resume guidance for after settle")
+	assert.Contains(t, fmt.Sprint(res2), "不要重复发起同名调用", "loser is told not to re-spawn")
+	assert.NotContains(t, fmt.Sprint(res2), "resume_task", "dedup notice must stay ticket-only (no tool-name teaching)")
+	assert.NotContains(t, fmt.Sprint(res2), "get_task_result", "dedup notice must stay ticket-only (no tool-name teaching)")
 
 	assert.Len(t, tm.List(), 1, "exactly one task tracked for the same plan name")
 }

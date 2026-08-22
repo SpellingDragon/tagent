@@ -1125,7 +1125,7 @@ stateDiagram-v2
 
 ### 16.7 压缩触发与执行过程召回（compress-digest-reconnect）
 
-**触发器多维化**。`ContextCompressor.Compress` 的触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。`completeTurns`（投影中 agent_output ref 数）复用现有 ref 遍历统计，零额外成本。稳态收敛到 ~4×keepRecent 个 retained agent_output（指数定级下 L2 驻留 2k，见 16.8），长会话里触发持续——这是 LSM 式连续维护滚动摘要的设计意图；成本缓解是投影有界 + 轮内幂等 no-op。
+**触发器多维化**（⚠️ 已被 §16.10 取代：触发收敛为容量单维，轮数维度退役）。`ContextCompressor.Compress` 的历史触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）曾是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。但稳态下轮数维度每轮触发整理路径（折叠/窗口滑动每轮改写投影），与 LLM 前缀缓存复用冲突，故退役（见 16.10）；占位符低估问题已被工具调用摘要/工具链折叠根治，token 随 L2 骨架驻留累积终将触达阈值，整理不会饿死。
 
 **三层摄取模型**。压缩后的历史按三层被模型消费：
 
@@ -1151,7 +1151,7 @@ stateDiagram-v2
 
 **D1 空摘要根治**：`GenerateEventSummary` 对纯工具调用 thinking_plan（`Content==""` 且 `ToolCalls` 非空）在**存储时**生成 `调用 <工具名>` 摘要（工程提取、零 LLM）——空摘要占位符源头消灭，并为折叠提供工具名素材。带散文的 thinking_plan（reasoning 模型 think-then-call）仍取原文。
 
-**D2 工具链折叠**：`foldToolRuns`（`Compress` 在 resolveRef 之前执行）把**老化区（full=false）连续 ≥2 条工具事件**（thinking_plan/action_command，不被 external_input/agent_output 打断）折叠为一个负 key 的 `tool_chain` 合成引用：
+**D2 工具链折叠**：`foldToolRuns`（自 stable-context-compaction 起只在**整理轮**执行，见 16.10）把**老化区（full=false）连续 ≥2 条工具事件**（thinking_plan/action_command，不被 external_input/agent_output 打断）折叠为一个负 key 的 `tool_chain` 合成引用：
 
 ```
 - 工具链: read_file→grep→edit_file（3步）[evt_first→evt_last]
@@ -1166,6 +1166,18 @@ stateDiagram-v2
 **活跃前沿保护**：折叠只作用于老化完整对；最近 `recentFullCount` 条、未完成 tool_call、边界事件不折叠，原生配对合法性不破。
 
 **五项不变量**：I1 有界（进行中段工具历史 O(链行数)，与循环长度解耦）、I2 稠密（无零信息占位符）、I3 锚定（滚动摘要常驻）、I4 无损（工具事件本体永在，票据可召回）、I5 原生前沿（活跃前沿保持原生）。
+
+### 16.10 容量触发整理与渲染冻结（stable-context-compaction）
+
+**动机（生产实证）**：多维触发（16.7 的轮数维度）在稳态下每轮触发整理路径——折叠每轮改写投影、`recent_full_count` 滑动窗口每轮切换渲染方式，上下文前缀持续变化，LLM 前缀缓存持续失效。同期实证 task_settled 构造时截断的连锁后果：截断文案广告未装配工具（提示-能力脱钩，模型转述后穿帮）、全量只在 TaskManager 内存（TTL 后永久丢失）、截断文案进卡片永久污染。
+
+**容量单维触发**。整理（compaction）只由 `usedTokens > compress_threshold × max_tokens` 触发；未超阈轮 pass-through（不折叠、不定级、不重建 refs）。`keep_recent_tasks`/`recent_full_count`/定级边界全部纯化为**整理后状态参数**。小内容长会话 refs 缓慢增长是接受的行为变化（无容量压力时保持原文即最高保真；token 终将随 L2 骨架驻留累积触达阈值）。
+
+**渲染冻结（整理边界锚定）**。全文窗口在整理轮锚定为边界 key（最近 `recent_full_count` 条 retained 正 key refs 的最前一条），整理间冻结：新追加事件凭 Snowflake 单调 key 天然全文（活跃前沿），旧 refs 渲染方式不变——未触发轮的消息序列公共前缀字节级相同。折叠（foldToolRuns）同步移入整理路径：整理间老化工具对按 EventSummary 渲染（有界且稳定），折叠是“整理动作”而非持续维护。
+
+**settle 全量保真**。task_settled 回归“本体全量、视图有界化只发生在定级点”的一般模式（`GenerateEventSummary` 的“绝不截断”禁令）：结算结果全文入 Content，删除构造时截断与 `task_settled_max_inline` 配置；全量随事件本体永在 MemoryStore，凭 evt key 经 memory_recall 召回，与 TTL 解耦。`get_task_result` 工具退役（能力由召回承接）；list/cancel/relaunch/resume 保留。
+
+**文案票据化**。框架注入文案只发“什么在哪儿”（task id / evt key 票据），不广告工具名（装配因 agent 而异）：“怎么取”归工具声明——后者天然与装配一致，提示-能力脱钩被结构性消灭。已收缩：同名去重提示、归档通知工具列举、子代理 ACK。
 
 
 

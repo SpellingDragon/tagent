@@ -133,34 +133,49 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C3 task id 契约（通知→查询）：task_settled 通知里的 (task id: xxx)，
-// 模型必须能抄给 get_task_result。
+// C3 settle 票据契约（通知→召回，stable-context-compaction D6）：task_settled
+// 通知全文携带结果并带 [evt_KEY|external_input] 前缀票据，需要历史原文时
+// 模型必须能抄 evt key 给 memory_recall（get_task_result 已退役）。
 // ---------------------------------------------------------------------------
-func TestContract_TaskSettledID_ToGetTaskResult(t *testing.T) {
+func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
+	kSettle := int64(0x1201bb20000abc)
 	taskID := "a3f8c2d1-7e4b-4a9c-b2d5-9f1e8c7a6b50"
-	// 与 agent/event_bus.go newTaskSettledEvent 模板同步。
-	notice := "[task settled] 后台任务已结算\n任务: make build\n状态: completed\n(task id: " + taskID + ")\n结果(截断,完整结果用 get_task_result 获取): ...build ok..."
+	// 与 agent/event_bus.go newTaskSettledEvent 模板 + resolveRef 前缀同步：
+	// 全量结果内联，无截断提示。
+	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] 后台任务已结算\n任务: make build\n状态: completed\n(task id: " + taskID + ")\n结果:\n...build ok 完整输出..."
 
-	getTool := declTool("get_task_result", "按 task_id 获取后台任务完整结果。",
-		map[string]*tool.Schema{"task_id": {Type: "string"}}, "task_id")
+	recallTool := declTool("memory_recall",
+		"统一记忆召回。items=[{key,hint?}]：key 为 canonical hex 字符串，从事件前缀 [evt_KEY|type] 中原样复制。",
+		map[string]*tool.Schema{
+			"items": {Type: "array", Items: &tool.Schema{Type: "object", Properties: map[string]*tool.Schema{
+				"key":  {Type: "string", Description: "canonical hex event key"},
+				"hint": {Type: "string"},
+			}, Required: []string{"key"}}},
+		}, "items")
 
 	name, args, text := callOnce(t, []model.Message{
-		model.NewSystemMessage("后台任务结算以通知形式到达;要看完整结果就调用 get_task_result。"),
-		model.NewUserMessage(notice + "\n\n请把这次构建的完整输出拿给我。"),
-	}, map[string]tool.Tool{"get_task_result": getTool})
+		model.NewSystemMessage("后台任务结算以通知形式到达（全文内联）；需要历史事件原文时调用 memory_recall，key 从 evt 前缀原样复制。"),
+		model.NewUserMessage(notice + "\n\n请把这次结算事件的完整原文召回给我。"),
+	}, map[string]tool.Tool{"memory_recall": recallTool})
 
-	if name != "get_task_result" {
-		t.Fatalf("model must call get_task_result, got tool=%q text=%q", name, text)
+	if name != "memory_recall" {
+		t.Fatalf("model must call memory_recall, got tool=%q text=%q", name, text)
 	}
 	t.Logf("model args: %s", args)
 	var parsed struct {
-		TaskID string `json:"task_id"`
+		Items []struct {
+			Key string `json:"key"`
+		} `json:"items"`
 	}
-	if err := json.Unmarshal(args, &parsed); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(args, &parsed); err != nil || len(parsed.Items) == 0 {
+		t.Fatalf("items missing: %v args=%s", err, args)
 	}
-	if !strings.HasPrefix(taskID, strings.TrimSpace(parsed.TaskID)) || parsed.TaskID == "" {
-		t.Errorf("task_id must be copied from the notice (prefix ok), got %q want %q", parsed.TaskID, taskID)
+	k, err := tagentevent.ParseEventKey(trimEvt(parsed.Items[0].Key))
+	if err != nil {
+		t.Fatalf("unparseable ticket %q: %v", parsed.Items[0].Key, err)
+	}
+	if k != kSettle {
+		t.Errorf("recall key must be copied from the settle notice prefix, got %x want %x", k, kSettle)
 	}
 }
 
@@ -170,8 +185,8 @@ func TestContract_TaskSettledID_ToGetTaskResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 func TestContract_AckTaskID_ToResumeTask(t *testing.T) {
 	taskID := "5d2e91c4-8b7a-4f3d-a1c6-e9b8d7f6a542"
-	// 与 agent/tool_agent.go 子代理 ACK 模板同步。
-	ack := "子 agent \"plan\" 已在后台运行 (task " + taskID + ")；完成后其结果会作为 task_settled 回写，你也可用 get_task_result 查询。"
+	// 与 agent/tool_agent.go 子代理 ACK 模板同步（票据化，无工具名教学）。
+	ack := "子 agent \"plan\" 已在后台运行 (task " + taskID + ")；完成后其结果会作为 task_settled 回写。"
 	settled := "[task settled] 后台任务已结算\n任务: plan: 制定学习计划\n状态: completed\n(task id: " + taskID + ")\n结果: 已产出第一版计划,含 3 个里程碑。"
 
 	resumeTool := declTool("resume_task", "向已存活/已完成的后台任务继续输入指令(同一 task id 续跑)。",

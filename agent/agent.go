@@ -156,11 +156,6 @@ type TagentConfig struct {
 	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
 	Compress           CompressConfig     // compress.SmartCompressor parameters
 
-	// TaskSettledMaxInline caps the inline result length in a task_settled
-	// notification (default: DefaultTaskSettledMaxInline); the full result
-	// stays retrievable via get_task_result.
-	TaskSettledMaxInline int
-
 	// TaskTerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained before pruning. It bounds the resume_task
 	// window for terminal subagent tasks (task-chain restorer). Non-positive
@@ -199,9 +194,6 @@ const (
 	DefaultAgentName                 = "tagent"
 	DefaultAgentDescription          = "TagentAgent - AI assistant powered by tagent"
 
-	// DefaultTaskSettledMaxInline caps the inline result in task_settled
-	// notifications; the full result stays available via get_task_result.
-	DefaultTaskSettledMaxInline = 2000
 	// DefaultResumeContextRounds caps the rounds restored by the subagent
 	// task-chain restorer on resume.
 	DefaultResumeContextRounds = 3
@@ -335,7 +327,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// buffered until the current turn finishes — single-consumer queueing).
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig, cfg.TaskSettledMaxInline))
+			bus.Publish(newTaskSettledEvent(tk, sig))
 		},
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.

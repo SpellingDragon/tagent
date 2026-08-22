@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 时间线前缀 → event_keys | `[evt_HEX\|type]`（event.FormatEventPrefix） | 抄 hex key 给子 agent 工具 | `event_keys_llm_test.go` |
 | 卡片/归档票据 → memory_recall | 卡片行 `[HEX]`、`摘要 key=HEX`（compress） | 抄 hex 构造 items | `TestContract_CardTicket_ToMemoryRecall` |
-| settle 通知 → get_task_result | `(task id: xxx)`（event_bus） | 抄 task id 查全量 | `TestContract_TaskSettledID_ToGetTaskResult` |
+| settle 通知 → memory_recall | `[evt_HEX\|external_input]` 前缀 + 全文结果（event_bus） | 抄 evt key 召回原文 | `TestContract_TaskSettledTicket_ToMemoryRecall` |
 | ACK → resume_task | `已在后台运行 (task xxx)`（tool_agent） | 抄 task id + 续跑指令 | `TestContract_AckTaskID_ToResumeTask` |
 | 原生 tool 历史 → 无伪调用 | assistant ToolCalls + role=tool 配对 | 发起真实 ToolCall,文本零调用语法 | `TestContract_NoTextualToolCallImitation` |
 | cwd 语义 → 命令路径 | fresh-shell 声明（action_tool_desc） | 不假设 cd 跨调用保持,根路径出命令 | `TestContract_ActionCwdFreshShell` |

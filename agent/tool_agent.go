@@ -448,12 +448,12 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
 		if res.Deduped {
-			// Same-name single-flight: tell the caller how to continue instead
-			// of silently swallowing the duplicate (D4). The existing task is
-			// necessarily in-flight (dedup only matches active tasks), so
-			// resume would be rejected right now — point to settle first.
-			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果（或 get_task_result 查询），结算后再用 resume_task(%q, \"...\") 续行；不要重复发起同名调用。",
-				res.Task.ID, res.Task.ID), nil
+			// Same-name single-flight: factual ticket only (stable-context-
+			// compaction D5) — the existing task is necessarily in-flight
+			// (dedup only matches active tasks); no tool-name teaching here,
+			// lifecycle guidance lives in the plan tool description.
+			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果，不要重复发起同名调用。",
+				res.Task.ID), nil
 		}
 		if res.Settled {
 			if res.Signal.Err != nil {
@@ -461,7 +461,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			}
 			return res.Signal.Output, nil
 		}
-		return fmt.Sprintf("子 agent %q 已在后台运行 (task %s)；完成后其结果会作为 task_settled 回写，你也可用 get_task_result 查询。",
+		return fmt.Sprintf("子 agent %q 已在后台运行 (task %s)；完成后其结果会作为 task_settled 回写。",
 			agentName, res.Task.ID), nil
 	}
 

@@ -258,9 +258,8 @@ graph TB
 | `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区 |
 | `max_tool_iterations` | 入口 50 / 子 10 | 最大 ReAct 迭代次数 |
 | `max_tokens` | 入口 8000 / 子 4096 | 上下文 token 预算 |
-| `compress_threshold` | `0.8` | 压缩触发比例 |
-| `keep_recent_tasks` | `2` | 压缩保留的最近任务数 |
-| `task_settled_max_inline` | `2000` | task_settled 通知内联结果上限 |
+| `compress_threshold` | `0.8` | 压缩触发比例——**整理（compaction）的唯一触发条件**（容量超阈才整理）；task_settled 通知全文内联，整理间上下文前缀稳定以利缓存复用 |
+| `keep_recent_tasks` | `2` | **整理后**保留的最近任务数（L0 保留区与全文窗口派生的状态参数，不参与触发） |
 | `task_terminal_ttl` | `"2m"` | 终态任务回收前保留期（也是终态任务的 resume_task 重入窗口） |
 | `resume_context_rounds` | `3` | 子 Agent 重入还原的前序轮次数 |
 | `temperature` | 入口 0.7 / 子 0.3 | LLM 温度 |
@@ -274,7 +273,7 @@ graph TB
 | `summary_model` / `summary_provider` | （继承 agent） | 压缩摘要专用模型（可用廉价模型） |
 | `card_max_chars` | `6000` | 卡片序列长度上限；超限旧卡 LLM 整理或沉底 |
 | `compact_keys_listed` | `32` | 滚动摘要列出的 recent keys 上限 |
-| `recent_full_count` | `keep_recent_tasks × 4` | 以全文解析的最近引用数（未配置时派生，覆盖最近完整回合；显式配置优先） |
+| `recent_full_count` | `keep_recent_tasks × 4` | 全文解析窗口大小（未配置时派生，显式配置优先）；**在整理轮锚定、整理间冻结**——锚点后的既有引用保持摘要渲染，新追加事件全文（活跃前沿），前缀字节稳定 |
 | `max_notice_chars` | `800` | 压缩通知文案上限 |
 | `archive_cache_cap` | `256` | 进程内归档缓存条数（固化物本体永在 MemoryStore） |
 

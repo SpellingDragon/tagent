@@ -3,9 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/google/uuid"
@@ -90,10 +91,13 @@ const SourceTask = "task"
 
 // newTaskSettledEvent builds a self-contained external_input event describing a
 // background task that has settled, so the persistent loop reclaims it into a
-// new turn. It carries the task description, status, and a (truncated) result
-// inline so the LLM needs no extra lookup for small results; large results are
-// tail-truncated with a hint to use get_task_result.
-func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxInline int) *AgentEvent {
+// new turn. It carries the task description, status, and the FULL result
+// inline (stable-context-compaction D1): no construction-time truncation —
+// content-level bounding happens only at the compression pipeline's design
+// points (levels/cards), same as any other external_input; the full body
+// persists in MemoryStore and stays recallable by event-key ticket,
+// decoupled from the task layer's TTL window.
+func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal) *AgentEvent {
 	status := "completed"
 	switch {
 	case sig.Err != nil:
@@ -105,12 +109,6 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxInline int) *A
 	}
 
 	result := sig.Output
-	if maxInline <= 0 {
-		maxInline = DefaultTaskSettledMaxInline
-	}
-	if len(result) > maxInline {
-		result = "...(已截断，完整结果用 get_task_result 拉取)\n" + result[len(result)-maxInline:]
-	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[task settled] 后台任务已结算\n任务: %s\n状态: %s\n(task id: %s)",

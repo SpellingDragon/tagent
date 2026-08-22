@@ -1,8 +1,11 @@
 // Package task provides LLM-facing tools for managing async background tasks
-// tracked by the agent's TaskManager: listing, fetching full results, cancelling,
-// and relaunching. The tools are stateless — they retrieve the TaskController
-// from the invocation context (injected by the agent before each turn), so they
-// work with whatever TaskManager the running agent owns.
+// tracked by the agent's TaskManager: listing, cancelling, and relaunching.
+// The tools are stateless — they retrieve the TaskController from the
+// invocation context (injected by the agent before each turn), so they work
+// with whatever TaskManager the running agent owns. Full settled results are
+// NOT fetched by a tool here: task_settled events carry the full body in the
+// event store and are recallable by event-key ticket (stable-context-
+// compaction D6).
 package task
 
 import (
@@ -82,54 +85,6 @@ func (t *ListTasksTool) Call(ctx context.Context, _ []byte) (any, error) {
 		fmt.Fprintf(&b, "- id=%s [%s] %s\n", tk.ID, tk.Status(), tk.Spec.Desc)
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
-}
-
-// ---------------------------------------------------------------------------
-// get_task_result
-// ---------------------------------------------------------------------------
-
-// GetTaskResultTool returns a task's full captured result.
-type GetTaskResultTool struct{}
-
-var _ tool.CallableTool = (*GetTaskResultTool)(nil)
-
-// NewGetTaskResultTool creates a get_task_result tool.
-func NewGetTaskResultTool() *GetTaskResultTool { return &GetTaskResultTool{} }
-
-// Declaration implements tool.CallableTool.
-func (t *GetTaskResultTool) Declaration() *tool.Declaration {
-	return &tool.Declaration{
-		Name:        "get_task_result",
-		Description: "按 task_id 获取某个后台任务的完整结果/输出（task_settled 通知里的结果可能被截断，用本工具拉全量）。",
-		InputSchema: &tool.Schema{
-			Type: "object",
-			Properties: map[string]*tool.Schema{
-				"task_id": {Type: "string", Description: "任务 id（可用 list_tasks 或看板中的 id，支持前缀）"},
-			},
-			Required: []string{"task_id"},
-		},
-	}
-}
-
-// Call implements tool.CallableTool.
-func (t *GetTaskResultTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
-	var args taskIDArgs
-	if err := json.Unmarshal(jsonArgs, &args); err != nil {
-		return nil, fmt.Errorf("get_task_result: invalid args: %w", err)
-	}
-	ctrl, ok := task.TaskControllerFromContext(ctx)
-	if !ok {
-		return noControllerMsg, nil
-	}
-	tk, ok := resolveTask(ctrl, args.TaskID)
-	if !ok {
-		return fmt.Sprintf("未找到任务 %q。", args.TaskID), nil
-	}
-	result := tk.Result()
-	if result == "" {
-		result = "(无输出)"
-	}
-	return fmt.Sprintf("任务 %s [%s] %s\n结果：\n%s", tk.ID, tk.Status(), tk.Spec.Desc, result), nil
 }
 
 // ---------------------------------------------------------------------------

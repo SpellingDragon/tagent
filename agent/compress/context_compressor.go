@@ -50,12 +50,21 @@ type ContextCompressor struct {
 	thresholdPct float64
 	keepRecent   int
 
-	// recentFullCount is the number of most recent refs to resolve with
-	// full content from MemoryStore. Older refs use EventSummary. When not
-	// explicitly configured it derives from keepRecent × DefaultRefsPerTurn
-	// so the most recent keepRecent complete turns resolve full as a whole
-	// (D6).
+	// recentFullCount is the full-window size ANCHORED at each compaction
+	// round (stable-context-compaction D3): the most recent recentFullCount
+	// retained refs resolve full, and that window stays FROZEN between
+	// compactions (append-only stable prefix). When not explicitly configured
+	// it derives from keepRecent × DefaultRefsPerTurn so the most recent
+	// keepRecent complete turns resolve full as a whole (D6).
 	recentFullCount int
+
+	// fullBoundary anchors the full-render window at the last compaction
+	// round (D3 render freeze): refs with EventKey >= fullBoundary resolve
+	// full (window + newer appends, whose Snowflake keys are monotonic); older
+	// refs stay frozen on their EventSummary render. Zero (never compacted, or
+	// fewer retained refs than the window) keeps everything full. Written and
+	// read only from Compress (single BeforeModel goroutine) — no lock.
+	fullBoundary int64
 
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
 	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
@@ -87,9 +96,8 @@ func WithCompactKeysListed(n int) ContextCompressorOption {
 	}
 }
 
-// WithRecentFullCount sets how many most-recent refs resolve with full
-// content from MemoryStore, overriding the derived default
-// (keepRecent × DefaultRefsPerTurn, see D6).
+// WithRecentFullCount sets the full-window size anchored at compaction rounds,
+// overriding the derived default (keepRecent × DefaultRefsPerTurn, see D6).
 func WithRecentFullCount(n int) ContextCompressorOption {
 	return func(cc *ContextCompressor) {
 		if n > 0 {
@@ -224,13 +232,6 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// Fold aged complete tool runs into compact tool_chain synthetic refs
-	// (tool-chain-consolidation D2) BEFORE resolving — so a long in-progress
-	// ReAct turn's tool-call history collapses to a few tool-chain lines
-	// instead of ~N placeholder/verbose messages. Only aged (full=false) runs
-	// are folded; the recent active frontier stays native.
-	refs = cc.foldToolRuns(refs)
-
 	// Resolve ALL refs from the projection into NATIVE timeline messages
 	// (D3 v2): assistant tool_calls and role=tool results keep protocol form —
 	// the model sees exactly its training distribution, leaving no textual
@@ -245,25 +246,87 @@ func (cc *ContextCompressor) Compress(
 	//      legal on its own.
 	// Content is preserved in both layers, so ANY compression window cut
 	// stays legal without the compressor being pairing-aware globally.
+	resolved := cc.resolveRefs(ctx, refs)
+
+	usedTokens := cc.tokenCounter.Estimate(resolved)
+	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
+
+	// Capacity-gated compaction (stable-context-compaction D2): the token
+	// budget is the ONLY trigger. Between compactions the projection is
+	// untouched (no folding, no level re-derivation, no ref rebuild), so the
+	// rendered prefix stays byte-stable for LLM prefix-cache reuse; the
+	// full-window anchor frozen at the last compaction keeps every round's
+	// render deterministic (D3). keep_recent_tasks / recent_full_count are
+	// post-compaction STATE parameters, never trigger parameters.
+	if usedTokens <= threshold {
+		log.Infof("[ContextCompressor] under budget (%d <= %d), %d refs, %d messages",
+			usedTokens, threshold, len(refs), len(resolved))
+		return CompressResult{
+			Messages:     resolved,
+			RetainedRefs: refs,
+		}
+	}
+
+	// Compaction path: fold aged complete tool runs into compact tool_chain
+	// synthetic refs (tool-chain-consolidation D2 / stable-context-compaction
+	// D4) BEFORE resolving — folding is part of the compaction act, not a
+	// continuous maintenance, so between compactions aged tool pairs render
+	// from their EventSummary (bounded, byte-stable) instead of mutating the
+	// projection every round.
+	refs = cc.foldToolRuns(refs)
+	resolved = cc.resolveRefs(ctx, refs)
+
+	log.Infof("[ContextCompressor] compressing (tokens %d vs %d), %d messages from %d refs",
+		usedTokens, threshold, len(resolved), len(refs))
+
+	originalKeepRecent := cc.compressor.KeepRecentTasks
+	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
+	cc.compressor.KeepRecentTasks = cc.keepRecent
+
+	compressedMsgs := cc.compressor.Compress(ctx, resolved, nil)
+	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
+	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
+		usedTokens, newTokens, threshold)
+
+	// Build retained refs.
+	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx)
+
+	// Anchor the full-render window at this compaction point (D3 render
+	// freeze): between compactions, refs at/after the anchor resolve full and
+	// newer appends join them by monotonic keys (active frontier); everything
+	// older stays frozen on its EventSummary render — the rendered prefix is
+	// byte-stable across all under-budget rounds.
+	cc.fullBoundary = anchorFullBoundary(retainedRefs, cc.recentFullCount)
+
+	// Collect error notices.
+	var notices []model.Message
+	for _, msg := range compressedMsgs {
+		if strings.Contains(msg.Content, "[context_compress_error]") {
+			notices = append(notices, msg)
+		}
+	}
+
+	log.Infof("[ContextCompressor] refs=%d -> retained=%d, messages=%d, duration=%dms",
+		len(refs), len(retainedRefs), len(compressedMsgs), time.Since(startTime).Milliseconds())
+
+	return CompressResult{
+		Messages:     compressedMsgs,
+		RetainedRefs: retainedRefs,
+		Notices:      notices,
+	}
+}
+
+// resolveRefs resolves projection refs into native timeline messages with
+// render-time pairing repair. Full resolution (MemoryStore content) applies to
+// refs at/after the full-window anchor frozen at the last compaction round
+// (D3); older refs render from their EventSummary — bounding each BeforeModel's
+// store-query volume to the window plus newer appends instead of O(refs).
+func (cc *ContextCompressor) resolveRefs(ctx context.Context, refs []memory.EventReference) []model.Message {
 	declared := make(map[string]bool)
 	consumed := make(map[string]bool)
 	resolved := make([]model.Message, 0, len(refs))
-	// completeTurns counts agent_output boundary refs = complete task turns
-	// currently in the projection. Piggybacked on the resolution loop below
-	// (zero extra cost); it is the cheap, non-token trigger dimension that
-	// keeps compression from being starved by placeholder rendering (which
-	// keeps usedTokens low and would otherwise suppress compression forever).
-	completeTurns := 0
-	// Only the most recent recentFullCount refs resolve with full content
-	// from MemoryStore; older refs render from their EventSummary. This
-	// bounds each BeforeModel's store-query volume to O(recentFullCount)
-	// instead of O(refs) (task-skeleton-compression, performance item).
-	fullFrom := len(refs) - cc.recentFullCount
-	for i, ref := range refs {
-		if ref.EventType == tagentevent.TypeAgentOutput {
-			completeTurns++
-		}
-		msg := cc.resolveRef(ctx, ref, i >= fullFrom)
+	for _, ref := range refs {
+		msg := cc.resolveRef(ctx, ref, ref.EventKey > 0 && ref.EventKey >= cc.fullBoundary)
 		switch msg.Role {
 		case model.RoleAssistant:
 			for _, tc := range msg.ToolCalls {
@@ -283,7 +346,7 @@ func (cc *ContextCompressor) Compress(
 	// Render-time legality for CALLS (layer 1, symmetric with
 	// demoteToInputNote): strip tool_calls whose result is not in the
 	// rendered sequence — the result ref was dropped by an EARLIER round's
-	// L1, or resolved summary-only past recentFullCount. Without this,
+	// L1, or resolved summary-only past the full window. Without this,
 	// stale unanswered calls would be re-sent every round. The prose
 	// content (with its event prefix) is preserved. This-round drops are
 	// layer 2's job (applySegmentLevel L1 strips calls alongside results).
@@ -300,64 +363,24 @@ func (cc *ContextCompressor) Compress(
 		}
 		msg.ToolCalls = kept
 	}
+	return resolved
+}
 
-	usedTokens := cc.tokenCounter.Estimate(resolved)
-	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
-
-	// Trigger is multi-dimensional (compress-digest-reconnect): compress when
-	// over the token budget OR when complete turns exceed keepRecent (i.e.,
-	// there are old turns beyond the L0 keep-window with material to fold).
-	// The second dimension is what un-starves compression: placeholder
-	// rendering keeps usedTokens low, so a token-only gate would never fire
-	// and the skeleton pipeline / rolling summary would never form. Steady
-	// state converges to ~4×keepRecent retained agent_outputs (L0/L1/L2 all
-	// keep them; L2 dwells 2k under the exponential {k,2k,4k} ladder), so in a
-	// long conversation the turn-count dimension fires every round — that is
-	// the INTENT (continuous rolling-summary maintenance, LSM-style), not a
-	// bug. Cost stays bounded: the projection is bounded (1 summary + ≤4k
-	// skeleton turns + keepRecent full + in-progress), and intra-turn repeats
-	// are idempotent no-ops (changed=false short-circuit).
-	if usedTokens <= threshold && completeTurns <= cc.keepRecent {
-		log.Infof("[ContextCompressor] under budget (%d <= %d) and turns %d <= %d, %d refs, %d messages",
-			usedTokens, threshold, completeTurns, cc.keepRecent, len(refs), len(resolved))
-		return CompressResult{
-			Messages:     resolved,
-			RetainedRefs: refs,
+// anchorFullBoundary picks the full-window anchor after a compaction round
+// (D3): the oldest of the most recent recentFull positive-key retained refs.
+// Zero (fewer positive-key refs than the window) keeps everything full —
+// the small-session behavior.
+func anchorFullBoundary(refs []memory.EventReference, recentFull int) int64 {
+	count := 0
+	for i := len(refs) - 1; i >= 0; i-- {
+		if refs[i].EventKey > 0 {
+			count++
+			if count == recentFull {
+				return refs[i].EventKey
+			}
 		}
 	}
-
-	// Compress via SmartCompressor (over token budget, or excess complete turns).
-	log.Infof("[ContextCompressor] compressing (tokens %d vs %d, turns %d vs %d), %d messages from %d refs",
-		usedTokens, threshold, completeTurns, cc.keepRecent, len(resolved), len(refs))
-
-	originalKeepRecent := cc.compressor.KeepRecentTasks
-	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
-	cc.compressor.KeepRecentTasks = cc.keepRecent
-
-	compressedMsgs := cc.compressor.Compress(ctx, resolved, nil)
-	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
-	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
-		usedTokens, newTokens, threshold)
-
-	// Build retained refs.
-	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx)
-
-	// Collect error notices.
-	var notices []model.Message
-	for _, msg := range compressedMsgs {
-		if strings.Contains(msg.Content, "[context_compress_error]") {
-			notices = append(notices, msg)
-		}
-	}
-
-	log.Infof("[ContextCompressor] refs=%d -> retained=%d, messages=%d, duration=%dms",
-		len(refs), len(retainedRefs), len(compressedMsgs), time.Since(startTime).Milliseconds())
-
-	return CompressResult{
-		Messages:     compressedMsgs,
-		RetainedRefs: retainedRefs,
-		Notices:      notices,
-	}
+	return 0
 }
 
 // foldToolRuns collapses runs of AGED complete tool events (thinking_plan +
@@ -534,10 +557,10 @@ func extractToolNameFromSummary(summary string) string {
 }
 
 // resolveRef resolves a single EventReference to a native timeline message.
-// When full is true the content comes from MemoryStore; otherwise (older
-// refs beyond recentFullCount) the reference's EventSummary is used directly
-// — no store query. The result is tagged with [evt_KEY|type] so
-// SmartCompressor and buildRetainedRefs can track retained refs.
+// When full is true the content comes from MemoryStore; otherwise (refs before
+// the full-window anchor) the reference's EventSummary is used directly — no
+// store query. The result is tagged with [evt_KEY|type] so SmartCompressor and
+// buildRetainedRefs can track retained refs.
 func (cc *ContextCompressor) resolveRef(
 	ctx context.Context,
 	ref memory.EventReference,

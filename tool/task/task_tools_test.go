@@ -50,38 +50,6 @@ func TestListTasksTool(t *testing.T) {
 	}
 }
 
-// TestGetTaskResultTool returns a settled task's full result.
-func TestGetTaskResultTool(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{})
-	det := task.NewFuncSettleDetector(context.Background(), func(context.Context) (string, error) {
-		return "the full result", nil
-	})
-	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd X"}, det)
-	if !res.Settled {
-		t.Fatalf("expected inline settle")
-	}
-
-	out, err := NewGetTaskResultTool().Call(ctxWithTM(tm), mustJSON(t, map[string]string{"task_id": res.Task.ID}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.(string), "the full result") {
-		t.Errorf("get_task_result should return full result, got: %s", out)
-	}
-}
-
-// TestGetTaskResultTool_NotFound reports a missing task.
-func TestGetTaskResultTool_NotFound(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{})
-	out, err := NewGetTaskResultTool().Call(ctxWithTM(tm), mustJSON(t, map[string]string{"task_id": "nope"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.(string), "未找到") {
-		t.Errorf("expected not-found message, got: %s", out)
-	}
-}
-
 // TestCancelTaskTool cancels a running task.
 func TestCancelTaskTool(t *testing.T) {
 	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector

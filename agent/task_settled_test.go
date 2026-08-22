@@ -2,10 +2,11 @@ package agent
 
 import (
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
@@ -14,7 +15,7 @@ import (
 // external_input event (Source=tk) carrying desc, id, status, and result.
 func TestNewTaskSettledEvent_Content(t *testing.T) {
 	tk := &task.Task{ID: "tk-abc", Spec: task.TaskSpec{Kind: "command", Desc: "npm run build"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "build ok"}, 0)
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "build ok"})
 
 	if evt.Type != tagentevent.TypeExternalInput {
 		t.Errorf("type = %s, want external_input", evt.Type)
@@ -36,23 +37,27 @@ func TestNewTaskSettledEvent_Content(t *testing.T) {
 // error text.
 func TestNewTaskSettledEvent_Failed(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "bad cmd"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Err: fmt.Errorf("boom")}, 0)
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Err: fmt.Errorf("boom")})
 	if !strings.Contains(evt.Message.Content, "failed") || !strings.Contains(evt.Message.Content, "boom") {
 		t.Errorf("failed event content = %q", evt.Message.Content)
 	}
 }
 
-// TestNewTaskSettledEvent_LargeResultTruncated: large output is tail-truncated
-// with a get_task_result hint.
-func TestNewTaskSettledEvent_LargeResultTruncated(t *testing.T) {
+// TestNewTaskSettledEvent_LargeResultFullFidelity (stable-context-compaction
+// D1): large output is stored FULL — no construction-time truncation, no
+// tool-name hint. Content-level bounding is the compression pipeline's job
+// (design points only); the full body persists in the event store and stays
+// recallable by event-key ticket, decoupled from the task layer's TTL.
+func TestNewTaskSettledEvent_LargeResultFullFidelity(t *testing.T) {
 	tk := &task.Task{ID: "t3", Spec: task.TaskSpec{Desc: "big"}}
 	large := strings.Repeat("x", 5000)
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: large}, 0)
-	if strings.Count(evt.Message.Content, "x") >= 5000 {
-		t.Error("large output should be truncated inline")
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: large})
+	if strings.Count(evt.Message.Content, "x") != 5000 {
+		t.Errorf("large output must be stored full (got %d of 5000 chars)",
+			strings.Count(evt.Message.Content, "x"))
 	}
-	if !strings.Contains(evt.Message.Content, "get_task_result") {
-		t.Error("truncated result should hint get_task_result")
+	if strings.Contains(evt.Message.Content, "已截断") || strings.Contains(evt.Message.Content, "get_task_result") {
+		t.Error("full-fidelity settle must carry no truncation marker or tool-name hint")
 	}
 }
 
@@ -63,7 +68,7 @@ func TestTaskManager_BackgroundSettle_PublishesTaskSettled(t *testing.T) {
 	bus := NewEventBus()
 	tm := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig, 0))
+			bus.Publish(newTaskSettledEvent(tk, sig))
 		},
 	})
 
@@ -99,7 +104,7 @@ func TestTaskManager_BackgroundSettle_PublishesTaskSettled(t *testing.T) {
 func TestBuildInvocation_IncludesTaskSettled(t *testing.T) {
 	cm := &ContextManager{}
 	evt := newTaskSettledEvent(&task.Task{ID: "t1", Spec: task.TaskSpec{Desc: "npm run build"}},
-		task.SettleSignal{Kind: task.SettleCompleted, Output: "build done"}, 0)
+		task.SettleSignal{Kind: task.SettleCompleted, Output: "build done"})
 
 	msg := cm.BuildInvocation([]*AgentEvent{evt})
 	if !strings.Contains(msg.Content, "npm run build") || !strings.Contains(msg.Content, "build done") {
@@ -112,7 +117,7 @@ func TestBuildInvocation_IncludesTaskSettled(t *testing.T) {
 // pipeline surfaces it — so a reclaimed turn's output routes to the origin.
 func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 	tk := &task.Task{ID: "t1", Spec: task.TaskSpec{Desc: "x", Origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "done"}, 0)
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "done"})
 	if evt.Metadata["chat_id"] != "u1" {
 		t.Errorf("settle event missing origin chat_id: %v", evt.Metadata)
 	}
@@ -126,7 +131,7 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 // with no routing metadata (regression guard).
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0)
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted})
 	if len(evt.Metadata) != 0 {
 		t.Errorf("no-origin task should yield empty metadata, got %v", evt.Metadata)
 	}

@@ -256,7 +256,7 @@ func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
 }
 
 // TestPruneTerminal_KeepsWithinGrace: an exited task still within its grace TTL
-// is retained so the reclaim turn's get_task_result works.
+// is retained so the resume_task window stays reachable.
 func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()

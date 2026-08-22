@@ -141,9 +141,8 @@ agents:
     task_terminal_ttl: "30m"
     # resume_context_rounds: 重入时任务链还原器注入的前序轮次数（默认 3）
     # resume_context_rounds: 3
-    # task_settled_max_inline: task_settled 通知内联结果上限（默认 2000，
-    #   全量结果始终可经 get_task_result 查询）
-    # task_settled_max_inline: 2000
+    # task_settled 通知全文内联（无内联上限配置）：全量结果随事件本体持久化，
+    # 凭 evt key 经 memory_recall 召回，与 task_terminal_ttl 解耦。
     # Compression configuration
     compress:
       # summary_model: LLM model for context compression summaries.

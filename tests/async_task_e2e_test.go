@@ -56,11 +56,10 @@ func TestRealLLM_AsyncTask_EndToEnd(t *testing.T) {
 		SystemPrompt: "你是一个能执行 shell 命令的助手。用 action 工具执行用户要求的命令。" +
 			"长命令会在后台运行并立即返回“已在后台运行”，稍后你会收到一条 [task settled] 通知，" +
 			"里面带有该任务的最终结果/输出。收到 [task settled] 后，请把其中的结果原样、简洁地告诉用户。" +
-			"你也可以用 list_tasks / get_task_result 查询任务。",
+			"你也可以用 list_tasks 查询任务。",
 		Tools: []tool.Tool{
 			actionTool,
 			tasktool.NewListTasksTool(),
-			tasktool.NewGetTaskResultTool(),
 			tasktool.NewCancelTaskTool(),
 		},
 	})

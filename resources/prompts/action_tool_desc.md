@@ -17,6 +17,5 @@ Describe in natural language what you want done and this tool runs it. Use this 
 **Usage:**
 - Skills live in `./skills/<name>/` — run them via shell (e.g. `./skills/url-fetcher/url_fetcher.js`).
 - Chain commands with `&&` or pipe with `|` as needed.
-- Manage background tasks with `list_tasks` / `get_task_result` / `cancel_task` / `relaunch_task`.
 
 Knowledge discovers how; action executes.

@@ -173,10 +173,6 @@ type AgentConfig struct {
 	CompressThreshold float64 `json:"compress_threshold,omitempty"  yaml:"compress_threshold,omitempty"`
 	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"   yaml:"keep_recent_tasks,omitempty"`
 
-	// TaskSettledMaxInline caps the inline result length in a task_settled
-	// notification (default 2000); full results stay retrievable via
-	// get_task_result.
-	TaskSettledMaxInline int `json:"task_settled_max_inline,omitempty" yaml:"task_settled_max_inline,omitempty"`
 	// TaskTerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained before pruning, as a duration string
 	// (e.g. "2m", "30m"). It bounds the resume_task window for terminal
