@@ -7,6 +7,7 @@
 # 2. AReaL 训练启动/停止（areal / areal-stop / areal-log）
 # 3. 支持优雅关闭
 # 4. 日志查看
+# 5. 启动时旧日志自动归档清空（logs/archive/，保留最近 N 份）
 #
 # 用法:
 #   ./run.sh                    前台运行（微信模式）
@@ -36,6 +37,8 @@ INSTANCE_NAME="${INSTANCE_NAME:-default}"
 LOG_DIR="${SCRIPT_DIR}/logs"
 PID_FILE="${LOG_DIR}/.pid-${INSTANCE_NAME}"
 LOG_FILE="${LOG_DIR}/wechat-bot-${INSTANCE_NAME}.log"
+LOG_ARCHIVE_DIR="${LOG_ARCHIVE_DIR:-${LOG_DIR}/archive}"
+LOG_ARCHIVE_KEEP="${LOG_ARCHIVE_KEEP:-50}"
 
 # AReaL 配置
 AREAL_PID_FILE="${LOG_DIR}/.pid-areal"
@@ -96,6 +99,8 @@ show_help() {
     AREAL_PYTHON             Python 解释器 (默认: python3)
     AREAL_USE_TORCHRUN       是否使用 torchrun (默认: true, 设为 false 则直接 python)
     AREAL_EXTRA_ARGS         AReaL 训练额外参数 (如 scheduler.type=local)
+    LOG_ARCHIVE_DIR          日志归档目录 (默认: logs/archive/)
+    LOG_ARCHIVE_KEEP         归档保留份数 (默认: 50)
 
 典型 RL 训练流程:
     # 0. 安装 AReaL (首次)
@@ -111,6 +116,34 @@ show_help() {
     AREAL_USE_TORCHRUN=false AREAL_N_GPUS=1 \
     AREAL_EXTRA_ARGS="scheduler.type=local" ./run.sh areal
 EOF
+}
+
+# ============================================================================
+# 启动时归档旧日志
+# ============================================================================
+# 把已有日志移动到 archive/ 带时间戳归档，本次启动从空日志开始；
+# 只保留最近 LOG_ARCHIVE_KEEP 份归档（删最旧）。文件不存在/为空则跳过。
+archive_log() {
+    local log_file="$1"
+    [[ ! -s "$log_file" ]] && return 0
+
+    local base ts
+    base="$(basename "$log_file")"
+    ts="$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$LOG_ARCHIVE_DIR"
+    mv "$log_file" "${LOG_ARCHIVE_DIR}/${base%.log}-${ts}.log"
+    echo "已归档旧日志: ${LOG_ARCHIVE_DIR}/${base%.log}-${ts}.log"
+
+    # 归档保留上限：超出时删最旧（按修改时间排序）
+    local count excess
+    count=$(ls -1 "$LOG_ARCHIVE_DIR" 2>/dev/null | wc -l | tr -d ' ')
+    excess=$((count - LOG_ARCHIVE_KEEP))
+    if ((excess > 0)); then
+        ls -1t "$LOG_ARCHIVE_DIR" | tail -n "$excess" | while read -r f; do
+            rm -f "${LOG_ARCHIVE_DIR:?}/$f"
+        done
+        echo "已清理最旧 $excess 份归档（保留最近 ${LOG_ARCHIVE_KEEP} 份）"
+    fi
 }
 
 # ============================================================================
@@ -247,6 +280,7 @@ run_foreground() {
     check_api_key
     ensure_binary
     mkdir -p "$LOG_DIR"
+    archive_log "$LOG_FILE"
 
     exec "$SCRIPT_DIR/wechat-bot" 2>&1 | tee "$LOG_FILE"
 }
@@ -273,6 +307,7 @@ do_start() {
     fi
 
     mkdir -p "$LOG_DIR"
+    archive_log "$LOG_FILE"
 
     echo "启动机器人 (后台)..."
     echo "日志文件: $LOG_FILE"
@@ -484,6 +519,7 @@ run_areal_foreground() {
     export TAGENT_SESSION_ID="${TAGENT_SESSION_ID:-rl-session}"
 
     mkdir -p "$LOG_DIR"
+    archive_log "$AREAL_LOG_FILE"
 
     local cmd
     cmd=$(build_areal_cmd)
@@ -512,6 +548,7 @@ do_areal_start() {
     fi
 
     mkdir -p "$LOG_DIR"
+    archive_log "$AREAL_LOG_FILE"
 
     export TAGENT_URL="${TAGENT_URL:-http://localhost:${TAGENT_HTTP_PORT}}"
     export TAGENT_USER_ID="${TAGENT_USER_ID:-rl-user}"
