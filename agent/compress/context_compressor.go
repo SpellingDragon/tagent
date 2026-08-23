@@ -283,7 +283,7 @@ func (cc *ContextCompressor) Compress(
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
 	cc.compressor.KeepRecentTasks = cc.keepRecent
 
-	compressedMsgs := cc.compressor.Compress(ctx, resolved, nil)
+	compressedMsgs := cc.compressor.Compress(ctx, resolved)
 	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)

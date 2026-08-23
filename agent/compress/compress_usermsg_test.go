@@ -30,7 +30,7 @@ func TestCompress_PreservesPendingUserMessage(t *testing.T) {
 	}
 
 	sc := NewSmartCompressor() // KeepRecentTasks=2, no summaryModel
-	result := sc.Compress(context.Background(), messages, nil)
+	result := sc.Compress(context.Background(), messages)
 
 	require.NotEmpty(t, result)
 
@@ -64,7 +64,7 @@ func TestCompress_AddsGuidanceMessageWhenNoPendingUser(t *testing.T) {
 	}
 
 	sc := NewSmartCompressor()
-	result := sc.Compress(context.Background(), messages, nil)
+	result := sc.Compress(context.Background(), messages)
 
 	require.NotEmpty(t, result)
 

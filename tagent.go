@@ -194,14 +194,12 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 }
 
 // builtinAgentNames are agent names that must always be built via the
-// config-driven path. This protects knowledge/recall/action/speak/draw
+// config-driven path. This protects knowledge/recall/action
 // from being silently overridden by a registered ToolAgentFactory.
 var builtinAgentNames = map[string]bool{
 	"knowledge": true,
 	"recall":    true,
 	"action":    true,
-	"speak":     true,
-	"draw":      true,
 }
 
 // buildAgent recursively creates a TagentAgent for the given agent name.
@@ -251,7 +249,7 @@ func buildAgent(
 	}
 
 	// 3.5 Check for registered ToolAgentFactory — for custom agents only.
-	// Built-in agent names (knowledge/recall/action/read/write/speak/draw) are
+	// Built-in agent names (knowledge/recall/action) are
 	// protected and always built via the config-driven path. This prevents a
 	// registered factory from silently overriding the declared AgentConfig.Tools.
 	registry := GetRegistry()
@@ -322,17 +320,10 @@ func buildAgent(
 		ReasoningEffort:      acfg.ReasoningEffort,
 		ReasoningContentMode: acfg.ReasoningContentMode,
 		Compress: agent.CompressConfig{
-			MaxToolResultChars:   acfg.Compress.MaxToolResultChars,
-			MaxExecStateChars:    acfg.Compress.MaxExecStateChars,
-			ChunkSummaryLen:      acfg.Compress.ChunkSummaryLen,
-			SkeletonSegmentation: acfg.Compress.SkeletonSegmentation,
-			MaxNoticeChars:       acfg.Compress.MaxNoticeChars,
-			CompactKeysListed:    acfg.Compress.CompactKeysListed,
-			RecentFullCount:      acfg.Compress.RecentFullCount,
-			CardMaxChars:         acfg.Compress.CardMaxChars,
-			ArchiveCacheCap:      acfg.Compress.ArchiveCacheCap,
-			MaxSummaryInputChars: acfg.Compress.MaxSummaryInputChars,
-			SummaryMaxTokens:     acfg.Compress.SummaryMaxTokens,
+			CompactKeysListed: acfg.Compress.CompactKeysListed,
+			RecentFullCount:   acfg.Compress.RecentFullCount,
+			CardMaxChars:      acfg.Compress.CardMaxChars,
+			SummaryMaxTokens:  acfg.Compress.SummaryMaxTokens,
 		},
 		WorkspaceRoot: acfg.WorkspaceRoot,
 	}

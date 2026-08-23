@@ -188,7 +188,6 @@ func TestContextCompressor_RetainsRefsWhenCompressed(t *testing.T) {
 	sc := NewSmartCompressor(
 		WithKeepRecentTasks(2),
 		WithMaxTokens(1), // Force compression
-		WithMemStore(memStore),
 		WithSummaryModel(&mockBatchSummaryModel{responses: []string{"batch summary"}}),
 	)
 	cc := NewContextCompressor(sc, memStore, NewDefaultTokenCounter(), 1, 0.8, 2)
@@ -429,7 +428,6 @@ func TestContextCompressor_SummaryRefRetainedAcrossCompressions(t *testing.T) {
 	sc := NewSmartCompressor(
 		WithKeepRecentTasks(1),
 		WithMaxTokens(1),
-		WithMemStore(memStore),
 		WithSummaryModel(&mockBatchSummaryModel{responses: []string{"batch summary"}}),
 	)
 	cc := NewContextCompressor(sc, memStore, NewDefaultTokenCounter(), 1, 0.8, 1)

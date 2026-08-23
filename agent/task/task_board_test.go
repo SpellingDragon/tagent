@@ -80,6 +80,24 @@ func TestInjectTaskBoard_NoUserAppends(t *testing.T) {
 	}
 }
 
+// TestRenderTaskBoard_WaitGuidanceLine: when active tasks exist the board ends
+// with the fixed wait-guidance line (end-turn, no sleep spin); when there are
+// no active tasks the board is empty and no guidance appears.
+func TestRenderTaskBoard_WaitGuidanceLine(t *testing.T) {
+	board := RenderBoard([]*Task{mkBoardTask("r-11111111", "long job", TaskRunning)})
+	if board == "" {
+		t.Fatal("expected non-empty board")
+	}
+	for _, want := range []string{"结束本回合", "自动唤醒", "sleep"} {
+		if !strings.Contains(board, want) {
+			t.Errorf("board guidance line missing %q:\n%s", want, board)
+		}
+	}
+	if got := RenderBoard([]*Task{mkBoardTask("d", "x", TaskCompleted)}); got != "" {
+		t.Errorf("no-active board must be empty (no dangling guidance), got %q", got)
+	}
+}
+
 // ============================================================================
 // Board injection wiring (async-result-delivery: task-board-injection-order fix)
 // ============================================================================

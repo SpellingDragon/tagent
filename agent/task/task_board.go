@@ -56,6 +56,10 @@ func RenderBoard(tasks []*Task) string {
 		}
 		b.WriteString("\n")
 	}
+	// Fixed wait-guidance line: the only net copy addition in this change. It
+	// teaches the model that ending its turn is the legal way to wait for
+	// background tasks (settle auto-wakes) and forbids sleep-style spin-waiting.
+	b.WriteString("以上任务无需轮询等待：直接给出简短回复并结束本回合即可，结算会自动唤醒你；不要用 sleep 等命令等待。\n")
 	return strings.TrimRight(b.String(), "\n")
 }
 

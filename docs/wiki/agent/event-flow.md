@@ -118,7 +118,7 @@ graph TD
 - **段 = 一次任务回合** `[external_input, (thinking_plan|action_command)*, agent_output]`，由最终回复闭合（`SegmentMessages`）。识别优先经 `[evt_KEY|type]` 前缀（`ParseEventKeyAndType`），缺前缀时退回启发式（assistant 且无 tool_calls）。
 - **连续 `external_input`**（用户连发、agent 未回）归入同一进行中段；无 `agent_output` 的尾部为**进行中段**（`IsComplete=false`），永不压缩。
 - **段内二分**为事件类型纯函数（`IsSkeletonMessage`，不读内容）：骨架 = `external_input` + `agent_output`；中间事件 = `action_command` / `thinking_plan`。
-- 灰度开关：`compress.skeleton_segmentation: false` 回退旧 user 切段管线（`WithSkeletonSegmentation`）。legacy 管线仍走 LLM 摘要，其单次摘要输入受 `max_summary_input_chars` 约束：超限按消息组二分拆分递归摘要，单条超限 as-is 不截断（D7）。
+- 骨架管线为唯一压缩路径（纯工程零 LLM）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。管线中唯一的 LLM 文摘是卡片浓缩 `condenseCardLines`。
 
 ### 6.2 定级：agent_output 段龄纯函数（deterministicLevel）
 

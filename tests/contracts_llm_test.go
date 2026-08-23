@@ -12,7 +12,7 @@ package tagent_test
 //   - 时间线前缀:   event.FormatEventPrefix           ([evt_HEX|type])
 //   - 归档通知:     compress/smart_compress.go        (〔历史归档〕... 摘要 key=HEX)
 //   - 滚动摘要:     compress/context_compressor.go    ([Compacted N] + 卡片行 + recent keys)
-//   - settle 通知:  agent/event_bus.go                ([task settled] ... (task id: xxx))
+//   - settle 通知:  agent/event_bus.go                ([task settled] <marker> <desc> (id=xxx) <status> → 结果: ...)
 //   - 子代理 ACK:   agent/tool_agent.go               (已在后台运行 (task xxx))
 
 import (
@@ -139,10 +139,9 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 // ---------------------------------------------------------------------------
 func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
 	kSettle := int64(0x1201bb20000abc)
-	taskID := "a3f8c2d1-7e4b-4a9c-b2d5-9f1e8c7a6b50"
-	// 与 agent/event_bus.go newTaskSettledEvent 模板 + resolveRef 前缀同步：
+	// 与 agent/event_bus.go newTaskSettledEvent 单行轨迹模板 + resolveRef 前缀同步：
 	// 小结果全文内联（大结果为尾部+转储文件票据，此处验证票据可抄）。
-	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] 后台任务已结算\n任务: make build\n状态: completed\n(task id: " + taskID + ")\n结果:\n...build ok 输出..."
+	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] ✓ make build (id=a3f8c2d1) completed → 结果: ...build ok 输出..."
 
 	recallTool := declTool("recall",
 		"统一记忆召回（单入口）。items=[{key,hint?}]：key 为 canonical hex 字符串，从事件前缀 [evt_KEY|type] 中原样复制。",
@@ -187,7 +186,7 @@ func TestContract_AckTaskID_ToResumeTask(t *testing.T) {
 	taskID := "5d2e91c4-8b7a-4f3d-a1c6-e9b8d7f6a542"
 	// 与 agent/tool_agent.go 子代理 ACK 模板同步（票据化，无工具名教学）。
 	ack := "子 agent \"plan\" 已在后台运行 (task " + taskID + ")；完成后其结果会作为 task_settled 回写。"
-	settled := "[task settled] 后台任务已结算\n任务: plan: 制定学习计划\n状态: completed\n(task id: " + taskID + ")\n结果: 已产出第一版计划,含 3 个里程碑。"
+	settled := "[task settled] ✓ plan: 制定学习计划 (id=5d2e91c4) completed → 结果: 已产出第一版计划,含 3 个里程碑。"
 
 	resumeTool := declTool("resume_task", "向已存活/已完成的后台任务继续输入指令(同一 task id 续跑)。",
 		map[string]*tool.Schema{
@@ -341,4 +340,46 @@ func TestContract_PlanWriteBoundary(t *testing.T) {
 	if !strings.Contains(fn, "changes/") {
 		t.Errorf("analysis output should live under changes/<plan>/, got %q", fn)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// C10 反自旋等待契约（context-efficiency-and-trajectory）：仅剩一个后台任务
+// 在跑、无其他独立事项时，模型必须结束回合（简短回复），不得用 exec 执行
+// sleep/wait 类命令轮询等待——实机事故：模型发明 exec(sleep N) 自旋 6 轮，
+// 每轮携带 ~86K 上下文。守护对象是 ack/看板等待教学文案的行为效果。
+// ---------------------------------------------------------------------------
+func TestContract_WaitScenario_NoSleepSpin(t *testing.T) {
+	actionTool := declTool("action",
+		"执行 shell 命令（tmux 异步）。",
+		map[string]*tool.Schema{"command": {Type: "string"}}, "command")
+
+	// 与 agent/tool_agent.go 子代理 ACK + agent/task/task_board.go 看板指引同步。
+	ack := `子 agent "plan" 已在后台运行 (task 7aa4eea3)；完成后其结果会作为 task_settled 回写。`
+	board := "[后台任务看板] 系统注入的观察快照（非用户发言，不入历史，勿在回复中模仿此格式）：当前 1 个进行中\n" +
+		"- [running] plan: 制定学习计划 (id=7aa4eea3, 已运行 5s)\n" +
+		"以上任务无需轮询等待：直接给出简短回复并结束本回合即可，结算会自动唤醒你；不要用 sleep 等命令等待。"
+
+	name, args, text := callOnce(t, []model.Message{
+		model.NewSystemMessage("你是一个 agent。等待后台任务时，直接给出简短回复并结束回合；任务结算会以 task_settled 事件自动唤醒你。不要用 sleep/wait 等命令轮询等待。"),
+		model.NewUserMessage(ack + "\n" + board + "\n\n你现在该怎么做？"),
+	}, map[string]tool.Tool{"action": actionTool})
+
+	t.Logf("tool=%q args=%s text=%q", name, args, text)
+	// 反自旋核心断言：模型不得发起 sleep/wait 式等待命令。结束回合（无工具
+	// 调用、给出简短文本）是正确行为。
+	if name == "action" {
+		var parsed struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(args, &parsed); err == nil && isSleepWait(parsed.Command) {
+			t.Errorf("model spin-waits with a sleep-style command (the real incident): %q", parsed.Command)
+		}
+	}
+}
+
+// isSleepWait reports whether a command is a pure sleep/wait-style timer (the
+// spin-wait anti-pattern), not a real workload.
+func isSleepWait(cmd string) bool {
+	c := strings.TrimSpace(cmd)
+	return strings.HasPrefix(c, "sleep") || strings.HasPrefix(c, "wait")
 }

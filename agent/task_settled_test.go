@@ -173,3 +173,68 @@ func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 		t.Errorf("no-origin task should yield empty metadata, got %v", evt.Metadata)
 	}
 }
+
+// TestNewTaskSettledEvent_SingleLineTrajectory (context-efficiency-and-
+// trajectory D2/D3): the settle body is a compact SINGLE-LINE trajectory form —
+// no embedded newlines / standalone UUID lines, markers per status, and
+// information-lossless (desc + short id + status + result all present).
+func TestNewTaskSettledEvent_SingleLineTrajectory(t *testing.T) {
+	tk := &task.Task{ID: "abcd1234ef", Spec: task.TaskSpec{Desc: "并发抓取 4 篇资料进 knowledge_base"}}
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "line1\nline2\nline3"}, 0, "")
+	c := evt.Message.Content
+
+	if strings.Contains(c, "\n") {
+		t.Errorf("settle body must be single-line (newlines escaped), got: %q", c)
+	}
+	for _, want := range []string{"✓", "并发抓取", "id=abcd1234", "completed", "line1␤line2␤line3"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("single-line settle missing %q: %q", want, c)
+		}
+	}
+	// No standalone full-UUID line / blank-line padding from the old format.
+	if strings.Contains(c, "abcd1234ef\n") || strings.Contains(c, "\n\n") {
+		t.Errorf("old multi-line layout leaked: %q", c)
+	}
+}
+
+// TestNewTaskSettledEvent_StatusMarkers: failed / alive-detached / suspect map
+// to distinct markers + status words (trajectory legibility).
+func TestNewTaskSettledEvent_StatusMarkers(t *testing.T) {
+	tk := &task.Task{ID: "m1", Spec: task.TaskSpec{Desc: "d"}}
+	cases := []struct {
+		name   string
+		sig    task.SettleSignal
+		marker string
+		word   string
+	}{
+		{name: "failed", sig: task.SettleSignal{Err: fmt.Errorf("e")}, marker: "✗", word: "failed"},
+		{name: "alive", sig: task.SettleSignal{Kind: task.SettleStable}, marker: "∞", word: "alive-detached"},
+		{name: "suspect", sig: task.SettleSignal{Kind: task.SettleSuspect}, marker: "⚠", word: "suspect"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTaskSettledEvent(tk, tc.sig, 0, "").Message.Content
+			if !strings.Contains(c, tc.marker) || !strings.Contains(c, tc.word) {
+				t.Errorf("%s settle missing marker %q or word %q: %q", tc.name, tc.marker, tc.word, c)
+			}
+		})
+	}
+}
+
+// TestNewTaskSettledEvent_InfoLosslessSpilled: an oversized settle keeps the
+// lossless fields (desc / short id / status) AND a spill ticket with path +
+// tail preview, all on one line.
+func TestNewTaskSettledEvent_InfoLosslessSpilled(t *testing.T) {
+	dir := t.TempDir()
+	tk := &task.Task{ID: "big-9999", Spec: task.TaskSpec{Desc: "长任务描述"}}
+	large := strings.Repeat("z", 5000)
+	c := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: large}, settleInlineCapChars, dir).Message.Content
+	for _, want := range []string{"✓", "长任务描述", "id=big-9999", "completed", "output_spilled", "已保存到:", "尾部:"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("spilled settle missing %q: %q", want, truncateForTest(c, 300))
+		}
+	}
+	if strings.Contains(c, "\n") {
+		t.Errorf("spilled settle must stay single-line, got: %q", truncateForTest(c, 200))
+	}
+}

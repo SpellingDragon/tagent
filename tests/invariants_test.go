@@ -172,7 +172,6 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 	sc := compress.NewSmartCompressor(
 		compress.WithKeepRecentTasks(2),
 		compress.WithMaxTokens(1),
-		compress.WithMemStore(memStore),
 	)
 	cc := compress.NewContextCompressor(
 		sc, memStore, compress.NewDefaultTokenCounter(),

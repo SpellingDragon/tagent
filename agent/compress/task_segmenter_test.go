@@ -122,19 +122,3 @@ func TestIsSkeletonMessage(t *testing.T) {
 		assert.False(t, IsSkeletonMessage(&intermediate[i]), "message %d should be intermediate", i)
 	}
 }
-
-// TestSegmentMessagesByUser_Legacy locks the legacy fallback path
-// (WithSkeletonSegmentation(false)): user messages open segments.
-func TestSegmentMessagesByUser_Legacy(t *testing.T) {
-	msgs := []model.Message{
-		{Role: model.RoleUser, Content: "task1"},
-		{Role: model.RoleAssistant, Content: "resp1"},
-		{Role: model.RoleUser, Content: "task2"},
-		{Role: model.RoleAssistant, Content: "resp2"},
-	}
-
-	segments := segmentMessagesByUser(msgs)
-	require.Len(t, segments, 2)
-	assert.True(t, segments[0].IsComplete)
-	assert.False(t, segments[1].IsComplete, "legacy trailing segment stays incomplete")
-}

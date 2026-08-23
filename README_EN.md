@@ -129,18 +129,17 @@ graph TB
 
 **Key constraints**: the projection holds lightweight references only (key+type+summary); MemoryStore is the sole complete event chain; compression touches the LLM view and projection, never storage.
 
-### Memory primitives and the curation cascade
+### Memory primitives and the compression cascade
 
 ```mermaid
 graph LR
-    A["raw events<br/>(layer 0, sole full-text touchpoint)"] -->|L3 archive, never re-summarized| B["segment summaries<br/>(causal chain + source keys)"]
-    B -->|engineering extraction, zero LLM| C["card lines<br/>[evt_key] task skeleton"]
-    C -->|over cap, LLM condensation| D["condensed cards<br/>(skeleton + key refs kept)"]
+    A["raw events<br/>(sole full-text touchpoint)"] -->|L3 whole-segment fold, zero LLM| C["card lines<br/>[evt_key] task skeleton"]
+    C -->|over cap, card condensation condenseCardLines| D["condensed cards<br/>(skeleton + key refs kept)"]
 ```
 
-- **Constant cost**: each layer summarizes only the previous layer's output, so compression cost depends on new content only — a year-old agent compresses as fast as a day-old one
+- **Constant cost**: skeleton compression is pure engineering (zero LLM); cost depends on new segments only — a year-old agent compresses as fast as a day-old one. The only LLM extraction is card condensation (`condenseCardLines`) when cards exceed the cap
 - **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + card lines + recent keys`); meditation outputs get ★ highlights
-- **Raw events may be forgotten, summaries persist**: summaries never expire; the `[hex]` key on each card is a recall ticket — `recall` fetches the original text anytime
+- **Raw events may be forgotten, tickets persist**: the `[hex]` key on each card is a recall ticket — `recall` fetches the original text anytime (the legacy pipeline's L3 LLM segment summaries / artifacts were removed; existing artifacts keep TTL exemption and age out naturally)
 
 ### Memory data model (LSM)
 
@@ -266,13 +265,11 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `skeleton_segmentation` | `true` | skeleton compression (agent_output-bounded turns + age-driven levels + multi-segment archival); `false` falls back to legacy user-boundary segmentation |
 | `summary_model` / `summary_provider` | (inherit agent) | dedicated compression model (can be cheaper) |
 | `card_max_chars` | `6000` | card-section cap; beyond it old cards are LLM-condensed or sink |
 | `compact_keys_listed` | `32` | recent keys listed in the rolling summary |
 | `recent_full_count` | `keep_recent_tasks × 4` | full-resolution window size (derived when unset; explicit values win); **anchored at compaction rounds and frozen between them** — existing refs before the anchor keep their summary render, newly appended events resolve full (active frontier), prefix byte-stable |
-| `max_notice_chars` | `800` | compression notice cap |
-| `archive_cache_cap` | `256` | in-process archive cache entries (artifacts persist in MemoryStore) |
+| `summary_max_tokens` | `8192` | output-token budget floor per summary LLM call (keeps reasoning models from squeezing Content empty) |
 
 ### Tool reference (ToolRef)
 

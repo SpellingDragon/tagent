@@ -209,17 +209,6 @@ type AgentConfig struct {
 
 // CompressConfig configures SmartCompressor parameters.
 type CompressConfig struct {
-	MaxToolResultChars int `json:"max_tool_result_chars,omitempty" yaml:"max_tool_result_chars,omitempty"`
-	MaxExecStateChars  int `json:"max_exec_state_chars,omitempty"  yaml:"max_exec_state_chars,omitempty"`
-	ChunkSummaryLen    int `json:"chunk_summary_len,omitempty"      yaml:"chunk_summary_len,omitempty"`
-
-	// SkeletonSegmentation toggles agent_output-boundary skeleton compression
-	// (task-skeleton-compression). Default (nil) is enabled; set false to
-	// fall back to the legacy user-boundary segmentation.
-	SkeletonSegmentation *bool `json:"skeleton_segmentation,omitempty" yaml:"skeleton_segmentation,omitempty"`
-
-	// MaxNoticeChars caps the compress-notice text length (default 800).
-	MaxNoticeChars int `json:"max_notice_chars,omitempty" yaml:"max_notice_chars,omitempty"`
 	// CompactKeysListed caps the keys listed in the rolling compaction
 	// summary (default 32); older events stay retrievable via recall.
 	CompactKeysListed int `json:"compact_keys_listed,omitempty" yaml:"compact_keys_listed,omitempty"`
@@ -231,15 +220,6 @@ type CompressConfig struct {
 	// summary (default 6000); beyond it old card lines are LLM-condensed
 	// (with summary_model) or sink into an "earlier n items" counter.
 	CardMaxChars int `json:"card_max_chars,omitempty" yaml:"card_max_chars,omitempty"`
-	// ArchiveCacheCap bounds the per-process L3 archive cache entries
-	// (default 256; the archives themselves persist in MemoryStore).
-	ArchiveCacheCap int `json:"archive_cache_cap,omitempty" yaml:"archive_cache_cap,omitempty"`
-
-	// MaxSummaryInputChars is the splitting threshold for a single summary call's
-	// input (0 = package default 40000). A giant segment exceeding it is split
-	// into smaller message-groups (each summarized separately); a single
-	// oversized message is sent as-is (never content-truncated).
-	MaxSummaryInputChars int `json:"max_summary_input_chars,omitempty" yaml:"max_summary_input_chars,omitempty"`
 
 	// SummaryMaxTokens is the floor for the output-token budget reserved on each
 	// summary LLM call (0 = package default 8192). Reasoning models spend part

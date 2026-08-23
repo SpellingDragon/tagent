@@ -206,15 +206,6 @@ const (
 
 // CompressConfig holds compress.SmartCompressor parameters.
 type CompressConfig struct {
-	MaxToolResultChars int
-	MaxExecStateChars  int
-	ChunkSummaryLen    int
-	// SkeletonSegmentation toggles agent_output-boundary skeleton compression
-	// (task-skeleton-compression). nil defaults to enabled; false falls back
-	// to the legacy user-boundary segmentation.
-	SkeletonSegmentation *bool
-	// MaxNoticeChars caps the compress-notice text length (default 800).
-	MaxNoticeChars int
 	// CompactKeysListed caps the number of keys listed in the rolling
 	// compaction summary (default 32); older events stay recallable.
 	CompactKeysListed int
@@ -226,12 +217,6 @@ type CompressConfig struct {
 	// summary (default compress.DefaultCardMaxChars); beyond it old card lines are
 	// LLM-condensed (or sink, without a summary model).
 	CardMaxChars int
-	// ArchiveCacheCap bounds the per-process L3 archive cache entries
-	// (default compress.DefaultArchiveCacheCap).
-	ArchiveCacheCap int
-	// MaxSummaryInputChars is the splitting threshold for one summary call's
-	// input (0 → pkg default). Giant segments are split, not truncated.
-	MaxSummaryInputChars int
 	// SummaryMaxTokens is the output-token budget floor for summary calls
 	// (0 → pkg default). Guards reasoning models against empty Content.
 	SummaryMaxTokens int
@@ -327,7 +312,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// buffered until the current turn finishes — single-consumer queueing).
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig, maxOutputChars, outputWorkspace))
+			bus.Publish(newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace))
 		},
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
@@ -439,29 +424,8 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 		opts = append(opts, compress.WithSummaryModel(cfg.SummaryModel))
 	}
 	// Compress config
-	if cfg.Compress.MaxToolResultChars > 0 {
-		opts = append(opts, compress.WithMaxToolResultChars(cfg.Compress.MaxToolResultChars))
-	}
-	if cfg.Compress.MaxExecStateChars > 0 {
-		opts = append(opts, compress.WithMaxExecStateChars(cfg.Compress.MaxExecStateChars))
-	}
-	if cfg.Compress.ChunkSummaryLen > 0 {
-		opts = append(opts, compress.WithChunkSummaryLen(cfg.Compress.ChunkSummaryLen))
-	}
-	if cfg.Compress.MaxNoticeChars > 0 {
-		opts = append(opts, compress.WithMaxNoticeChars(cfg.Compress.MaxNoticeChars))
-	}
-	if cfg.Compress.ArchiveCacheCap > 0 {
-		opts = append(opts, compress.WithArchiveCacheCap(cfg.Compress.ArchiveCacheCap))
-	}
-	if cfg.Compress.MaxSummaryInputChars > 0 {
-		opts = append(opts, compress.WithMaxSummaryInputChars(cfg.Compress.MaxSummaryInputChars))
-	}
 	if cfg.Compress.SummaryMaxTokens > 0 {
 		opts = append(opts, compress.WithSummaryMaxTokens(cfg.Compress.SummaryMaxTokens))
-	}
-	if cfg.Compress.SkeletonSegmentation != nil {
-		opts = append(opts, compress.WithSkeletonSegmentation(*cfg.Compress.SkeletonSegmentation))
 	}
 	return opts
 }
@@ -476,13 +440,6 @@ func newCompressorFromConfig(cfg *TagentConfig) *compress.SmartCompressor {
 func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *compress.SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
 	copts := buildCompressorOpts(cfg)
 	copts = append(copts, compress.WithTokenCounter(compress.NewDefaultTokenCounter()))
-	// Inject MemStore and Projection into compress.SmartCompressor for chunk persistence
-	if cfg.MemoryStore != nil {
-		copts = append(copts, compress.WithMemStore(cfg.MemoryStore))
-	}
-	if projection != nil {
-		copts = append(copts, compress.WithProjection(projection))
-	}
 	compressor := compress.NewSmartCompressor(copts...)
 	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt

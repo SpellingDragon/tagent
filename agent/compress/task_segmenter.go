@@ -81,32 +81,6 @@ func SegmentMessages(messages []model.Message) []*TaskSegment {
 	return segments
 }
 
-// segmentMessagesByUser is the legacy user-boundary segmentation, kept as the
-// WithSkeletonSegmentation(false) fallback path.
-func segmentMessagesByUser(messages []model.Message) []*TaskSegment {
-	if len(messages) == 0 {
-		return nil
-	}
-	var segments []*TaskSegment
-	var current *TaskSegment
-	for i := range messages {
-		msg := &messages[i]
-		if msg.Role == model.RoleUser && current != nil {
-			current.IsComplete = true
-			segments = append(segments, current)
-			current = nil
-		}
-		if current == nil {
-			current = &TaskSegment{}
-		}
-		current.Messages = append(current.Messages, *msg)
-	}
-	if current != nil {
-		segments = append(segments, current)
-	}
-	return segments
-}
-
 // buildSummaryReference creates a compact summary reference for compressed events.
 // Used by ContextCompressor.buildRetainedRefs.
 func buildSummaryReference(keys []string, minTs int64) memory.EventReference {

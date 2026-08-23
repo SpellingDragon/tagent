@@ -1,9 +1,7 @@
-# tool-lifecycle-management Specification
+# tool-lifecycle-management Delta
 
-## Purpose
+## MODIFIED Requirements
 
-本规范定义 tool-lifecycle-management 能力。tagent SHALL 在 `tagent.New()` 中调用 `RegisterBuiltinTools()`，将所有内置工具（exec + knowledge/recall sub-tools）注册到 ToolRegistry。注册通过 `RegisterPlainTool(id, factory)` 完成。
-## Requirements
 ### Requirement: 内置工具通过 RegisterBuiltinTools 统一注册
 
 tagent SHALL 在 `tagent.New()` 中调用 `RegisterBuiltinTools()`，将所有内置工具（exec + knowledge/recall sub-tools）注册到 ToolRegistry。注册通过 `RegisterPlainTool(id, factory)` 完成。knowledge/recall 不再通过 `RegisterToolAgent` 注册工厂 — 它们变为 config-driven agent。
@@ -40,4 +38,3 @@ tagent SHALL 在 `tagent.New()` 中调用 `RegisterBuiltinTools()`，将所有�
 - **WHEN** 检视 `builtinAgentNames`
 - **THEN** SHALL 恰好包含 knowledge、recall、action
 - **AND** SHALL NOT 包含 speak、draw、read、write
-

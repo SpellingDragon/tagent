@@ -3,39 +3,7 @@
 ## Purpose
 
 本规范定义 compress-quality-fix 能力。When the LLM-generated summary exceeds `targetChars * 1.5`, `generateSummary` SHALL split the original segments into two sub-batches and independently summarize
-
 ## Requirements
-
-### Requirement: generateSummary splits and re-summarizes when result exceeds target
-
-When the LLM-generated summary exceeds `targetChars * 1.5`, `generateSummary` SHALL split the original segments into two sub-batches and independently summarize each with halved targetChars. The two sub-summaries SHALL be concatenated. If a sub-summary still exceeds its target (recursion depth limit: 2), it SHALL be hard-truncated to targetChars. The final summary message SHALL have Role=assistant. This ensures compression always reduces token count (invariant 1).
-
-#### Scenario: LLM returns oversized summary, triggers re-summarization
-
-- **WHEN** generateSummary receives a 59629-char summary from the LLM
-- **AND** targetChars is 6759
-- **THEN** generateSummary SHALL split the original segments into 2 sub-batches
-- **AND** SHALL call generateSummary on each sub-batch with targetChars/2
-- **AND** SHALL concatenate the two sub-summaries
-- **AND** the concatenated result SHALL NOT exceed targetChars * 1.5
-
-#### Scenario: Re-summarization still oversized, hard truncate
-
-- **WHEN** re-summarization at recursion depth 2 still produces oversized result
-- **THEN** the result SHALL be hard-truncated to targetChars
-- **AND** a truncation marker SHALL be appended
-
-#### Scenario: LLM summary within target
-
-- **WHEN** generateSummary receives a 6000-char summary
-- **AND** targetChars is 6759
-- **THEN** the result SHALL NOT be split or truncated
-
-#### Scenario: Summary message Role is assistant
-
-- **WHEN** summarizeBatches wraps a summary into a message
-- **THEN** the message Role SHALL be model.RoleAssistant
-
 ### Requirement: resolveReferenceToMessage infers Role from EventType
 
 When `full.Response == nil` (event has no LLM response), `resolveReferenceToMessage` SHALL infer the message Role from `ref.EventType` using a deterministic mapping: external_input→user, agent_output→assistant, action_command→tool, thinking_plan→assistant. If `ref.EventType` is also empty, SHALL default to RoleUser (safe degradation). This SHALL NOT produce messages with empty Role.
@@ -97,23 +65,6 @@ The warn log in `resolveReferenceToMessage` SHALL distinguish between "GetEvent 
 - **WHEN** GetEvent returns (full, nil) but full.Response is nil
 - **THEN** log SHALL say "event key=N has no Response, falling back to EventType inference"
 
-### Requirement: summarizeBatch truncates oversized LLM summary
-
-When the LLM-generated summary exceeds `targetChars * 1.5`, `summarizeBatch` SHALL truncate the result to `targetChars` and append `...(摘要已截断，原始长度 N 字符)`. This ensures compression always reduces token count (invariant 1).
-
-#### Scenario: LLM returns oversized summary
-
-- **WHEN** summarizeBatch receives a 59629-char summary from the LLM
-- **AND** targetChars is 6759
-- **THEN** the result SHALL be truncated to 6759 chars + truncation marker
-- **AND** the total result length SHALL NOT exceed targetChars * 1.5
-
-#### Scenario: LLM summary within target
-
-- **WHEN** summarizeBatch receives a 6000-char summary
-- **AND** targetChars is 6759
-- **THEN** the result SHALL NOT be truncated
-
 ### Requirement: resolveReferenceToMessage infers Role from EventType
 
 When `full.Response == nil` (event has no LLM response), `resolveReferenceToMessage` SHALL infer the message Role from `ref.EventType` using a deterministic mapping: external_input→user, agent_output→assistant, action_command→tool, thinking_plan→assistant. If `ref.EventType` is also empty, SHALL default to RoleUser (safe degradation). This SHALL NOT produce messages with empty Role.
@@ -169,3 +120,4 @@ The warn log in `resolveReferenceToMessage` SHALL distinguish between "GetEvent 
 
 - **WHEN** GetEvent returns (full, nil) but full.Response is nil
 - **THEN** log SHALL say "event key=N has no Response, falling back to EventType inference"
+

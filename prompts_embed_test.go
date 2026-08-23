@@ -14,12 +14,10 @@ func TestEmbeddedPrompts_ResolveViaFallback(t *testing.T) {
 
 	shared := []string{
 		"action_agent.md", "action_tool_desc.md",
-		"draw_agent.md", "draw_tool_desc.md",
 		"exec_tool_desc.md",
 		"knowledge_agent.md", "knowledge_tool_desc.md",
 		"meditation.md",
 		"recall_agent.md", "recall_tool_desc.md",
-		"speak_agent.md", "speak_tool_desc.md",
 	}
 	for _, f := range shared {
 		content, err := l.LoadFromFile(f)

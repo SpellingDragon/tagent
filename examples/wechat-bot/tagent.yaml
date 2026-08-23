@@ -208,14 +208,6 @@ agents:
       - kind: tool
         id: replace_content
 
-      # Speak Agent: 语音输出 (桩)
-      - agent: speak
-        description_file: speak_tool_desc.md
-
-      # Draw Agent: 图像生成 (桩)
-      - agent: draw
-        description_file: draw_tool_desc.md
-
       # Exec Tool: shell 命令执行 (异步, 通过 tmux)
       # cwd 默认 = 进程运行目录（与 file tools 一致），可用 properties.workspace 覆盖
       # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
@@ -346,14 +338,6 @@ agents:
       - kind: tool
         id: replace_content
 
-      # Speak Agent: 语音输出 (桩)
-      - agent: speak
-        description_file: speak_tool_desc.md
-
-      # Draw Agent: 图像生成 (桩)
-      - agent: draw
-        description_file: draw_tool_desc.md
-
       # Exec Tool: 直接 shell 命令执行 (简单命令)；cwd 默认 = 进程运行目录
       # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
       #   interval: 轮询检测间隔 (默认 30s)
@@ -416,37 +400,6 @@ agents:
         id: replace_content
         properties:
           base_dir: openspec
-
-  # ========================================================================
-  # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
-  # ========================================================================
-  speak:
-    provider: zhipu
-    model: glm-4.7
-    system_prompt:
-      files:
-        - speak_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 3
-    max_tokens: 1024
-    temperature: 0.3
-
-  # ========================================================================
-  # Draw Agent: 图像生成子 Agent (桩, 暂未启用)
-  # 待接入图像生成模型后激活
-  # ========================================================================
-  draw:
-    provider: zhipu
-    model: glm-4.7
-    system_prompt:
-      files:
-        - draw_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 3
-    max_tokens: 1024
-    temperature: 0.3
 
 # ===== 应用专属配置 (各应用自行反序列化) =====
 app:

@@ -95,28 +95,61 @@ const SourceTask = "task"
 // notice (aligned with ActionTool's tail view).
 const settleInlineTail = 2000
 
-// newTaskSettledEvent builds a self-contained external_input event describing a
-// background task that has settled, so the persistent loop reclaims it into a
-// new turn. Result bounding follows the sync-path spillover trio
-// (stable-context-compaction D1 revised): results over maxChars spill to a
-// file under outputDir (workspace.Cleaner bounds the directory) and the event
-// Content carries the tail + file-path ticket — the event body stays BOUNDED
-// so recalling it can never re-inject an oversized result; the full body is
-// consumed via read_file(start_line/num_lines) paging. Write failure degrades
-// to inline full text (availability over bounding). maxChars<=0 or empty
-// outputDir disables spillover (small results / tests).
-func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
-	status := "completed"
+// settleInlineCapChars is the compile-time inline-result cap for task_settled
+// notices (context-efficiency-and-trajectory D2/D3): results at/below this stay
+// inline (newlines escaped to ␤ for the single-line trajectory form); larger
+// results spill to the tool-output dir with a tail preview. It is a named
+// constant, NOT a config knob — the derivation `MaxTokens/2*4` that previously
+// fed this path (~256K chars at a 128K budget, an unowned formula accident) is
+// removed.
+const settleInlineCapChars = 600
+
+// settleDescMaxChars caps the task desc rendered in the single-line form.
+const settleDescMaxChars = 60
+
+// settleErrMaxChars caps the error text rendered inline for a failed settle.
+const settleErrMaxChars = 200
+
+// settleMarkerAndStatus maps a settle signal to its single-line trajectory
+// marker and English status word. Markers: ✓ completed / ✗ failed / ∞
+// alive-detached / ⚠ suspect.
+func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	switch {
 	case sig.Err != nil:
-		status = "failed"
+		return "✗", "failed"
 	case sig.Kind == task.SettleStable:
-		status = "就绪/存活 (alive-detached：后续不再重复通知，除非结束或你主动查询)"
+		return "∞", "alive-detached"
 	case sig.Kind == task.SettleSuspect:
-		status = "suspect (长时间无输出，可能假死，需确认)"
+		return "⚠", "suspect"
+	default:
+		return "✓", "completed"
 	}
+}
+
+// escapeNewlines flattens internal newlines to ␤ so a settle notice stays a
+// single-line trajectory entry (dense, no blank-line padding).
+func escapeNewlines(s string) string {
+	return strings.NewReplacer("\r\n", "␤", "\n", "␤", "\r", "␤").Replace(s)
+}
+
+// newTaskSettledEvent builds a self-contained external_input event describing a
+// background task that has settled, so the persistent loop reclaims it into a
+// new turn. The event body is a COMPACT SINGLE-LINE trajectory form
+// (context-efficiency-and-trajectory D2): `[task settled] <marker> <desc>
+// (id=<short>) <status> → 结果: <inline|spill>` — dense, append-only friendly,
+// and information-lossless (task_id / desc / status / error / result-or-spill
+// ticket all present; only layout redundancy is dropped). Result bounding keeps
+// the event body BOUNDED so recalling it can never re-inject an oversized
+// result: results over maxChars spill to a file under outputDir
+// (workspace.Cleaner bounds the directory) and the Content carries the path
+// ticket + tail preview; consumption goes through read_file paging. Write
+// failure degrades to inline full text (availability over bounding).
+// maxChars<=0 or empty outputDir disables spillover (tests / small results).
+func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
+	marker, statusWord := settleMarkerAndStatus(sig)
 
 	result := sig.Output
+	spillPath := ""
 	if maxChars > 0 && outputDir != "" && len(result) > maxChars {
 		shortID := tk.ID
 		if len(shortID) > 8 {
@@ -130,8 +163,9 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 				if len(result) > settleInlineTail {
 					tail = result[len(result)-settleInlineTail:]
 				}
-				result = fmt.Sprintf("[output_spilled] 结果 %d 字符超过阈值 %d。完整内容已保存到: %s（可用 read_file 配合 start_line/num_lines 分段读取）\n...%s",
-					len(sig.Output), maxChars, path, tail)
+				spillPath = path
+				result = fmt.Sprintf("output_spilled 结果 %d 字符已保存到: %s（可用 read_file 配合 start_line/num_lines 分段读取）；尾部: %s",
+					len(sig.Output), path, escapeNewlines(tail))
 			} else {
 				log.Warnf("[task_settled] spill write to %s failed (%v), falling back to inline full text", path, err)
 			}
@@ -141,13 +175,18 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "[task settled] 后台任务已结算\n任务: %s\n状态: %s\n(task id: %s)",
-		tk.Spec.Desc, status, tk.ID)
+	fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s",
+		marker, truncateRunes(tk.Spec.Desc, settleDescMaxChars), task.ShortID(tk.ID), statusWord)
 	if sig.Err != nil {
-		fmt.Fprintf(&b, "\n错误: %v", sig.Err)
+		fmt.Fprintf(&b, " 错误: %s", truncateRunes(sig.Err.Error(), settleErrMaxChars))
 	}
 	if result != "" {
-		fmt.Fprintf(&b, "\n结果:\n%s", result)
+		if spillPath != "" {
+			// result already carries the spill ticket + escaped tail
+			fmt.Fprintf(&b, " → %s", result)
+		} else {
+			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(result))
+		}
 	}
 	evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
 	// Carry the originating turn's opaque routing baggage (chat_id, ...) captured

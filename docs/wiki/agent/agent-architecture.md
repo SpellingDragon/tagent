@@ -118,19 +118,19 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 **文件**：`compress/smart_compress.go`（agent/compress 子包）
 
-骨架模型确定性压缩（task-skeleton-compression，默认开启，`skeleton_segmentation: false` 回退旧 user 切段 legacy 管线）：
+骨架模型确定性压缩（task-skeleton-compression，唯一压缩管线，纯工程零 LLM）：
 
-| 级别 | 触发（age = 段在新→旧序列中的位置） | 段内保留 |
+| 级别 | 触发（age = 段在新→旧序列中的位置，指数边界） | 段内保留 |
 |------|------|---------|
 | L0 | 进行中段 或 `age < keepRecent` | 全部消息 |
 | L1 | `age < keepRecent*2` | 骨架 + `thinking_plan`（丢 `action_command`） |
-| L2 | `age < keepRecent*3` | 仅骨架（`external_input` + `agent_output`） |
+| L2 | `age < keepRecent*4` | 仅骨架（`external_input` + `agent_output`） |
 | L3 | 更老 或 预算仍不足 | 整段移出时间线 → 滚动 summary 归档 |
 
 - 段 = 以 `agent_output` 为界的完整任务回合；定级为段龄纯函数（`deterministicLevel`，零 LLM）
 - 预算升级 O(n)：预计算每段四级成本后 O(1) 增量升档
 - 使用注入的 `TokenCounter`，不自行创建
-- legacy 管线保留可选 LLM 摘要与 L3 归档（挂 RelationStore 因果链+来源 keys，同段跨轮不重摘）
+- 卡片浓缩（`condenseCardLines`）是管线中唯一的 LLM 文摘：卡片超 `card_max_chars` 时浓缩较旧一半，保留 `[evt_key]` 票据
 
 ### 2.6 Compactor（滚动卡片序列）
 
@@ -213,7 +213,6 @@ graph TB
         SE["session.go + inject.go + lifecycle.go"]
         TW["tool_agent.go 子Agent封装"]
         MD["meditation*.go 冥想"]
-        AL["task_alias.go + compress_alias.go 兼容桥"]
     end
     subgraph compress["agent/compress 压缩域"]
         SC["smart_compress.go L0-L3"]
@@ -236,12 +235,11 @@ graph TB
 | `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner | `OnEvents` + `ModelCompletion` |
 | `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
 | `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest | 无（生产扩展） |
-| `task_alias.go` / `compress_alias.go` | 子包符号零破坏兼容桥 | — |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go） | 无（生产扩展） |
 | `rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI + SwappableModel | 无（生产扩展） |
 
-依赖方向由编译器执法：`agent → compress`、`agent → task`，子包零反向依赖；旧路径符号经别名桥永久兼容，新代码应直接 import 子包。
+依赖方向由编译器执法：`agent → compress`、`agent → task`，子包零反向依赖，新代码直接 import 子包。
 
 ## 四、数据流
 
@@ -311,9 +309,7 @@ SmartCompressor 由 ContextCompressor 在 BeforeModel 装配回调中调用，�
 - 保留消息原样携带 `[evt_KEY|type]` 前缀，衔接存活 ref 判定
 - **仅修改发给 LLM 的消息视图，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2；投影替换由 ContextCompressor 的 RetainedRefs 返回值驱动）
 
-legacy 管线（`WithSkeletonSegmentation(false)`）保留旧 user 切段 + 可选 LLM 摘要路径，其单次摘要输入受 `max_summary_input_chars` 约束（超限按消息组二分拆分，单条超限 as-is 不截断）。
-
-截断/摘要参数通过 `SmartCompressorOption` 配置（`WithMaxExecStateChars`、`WithMaxToolResultChars`、`WithMaxToolArgsChars`、`WithChunkSummaryLen`、`WithSkeletonSegmentation`），也可通过 YAML `compress` 段配置。
+压缩参数通过 YAML `compress` 段配置（`summary_model`/`card_max_chars`/`compact_keys_listed`/`recent_full_count`/`summary_max_tokens`）。旧 user 切段 legacy 管线与逐段 LLM 摘要/归档缓存已移除（context-efficiency-and-trajectory）：骨架管线为唯一压缩路径，其中唯一的 LLM 文摘是卡片浓缩 `condenseCardLines`。
 
 ### 6.1.1 时间线渲染红线（外部分析常见误判点）
 
@@ -352,9 +348,6 @@ agents:
       summary_model: deepseek-v4-flash    # 压缩专用模型(可用廉价模型)
       card_max_chars: 6000                # 卡片序列上限
       compact_keys_listed: 32             # 滚动摘要 recent keys 上限
-      max_tool_result_chars: 500
-      max_exec_state_chars: 2000
-      archive_cache_cap: 256
 ```
 
 TmuxMonitor 参数通过 ActionProperties `monitor` 段配置：

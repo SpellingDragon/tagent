@@ -61,7 +61,6 @@ tool/
 ├── plan/                # PlanAgent（openspec 计划,双模式 Run）
 ├── spec/                # spec 工具：类型化计划管理（op 白名单,openspec 后端可替换,无 shell）
 ├── file/                # trpc-agent-go 内置文件工具封装
-├── speak/ draw/         # stub
 ```
 
 > 行数不列入文档（必然腐化）；以 `wc -l` 实测为准。

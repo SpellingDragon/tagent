@@ -68,14 +68,6 @@ func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
 				SystemPrompt: PromptConfig{Inline: "action agent prompt"},
 				Memory:       MemoryConfig{Type: "memory"},
 			},
-			"speak": {
-				SystemPrompt: PromptConfig{Inline: "speak agent prompt"},
-				Memory:       MemoryConfig{Type: "memory"},
-			},
-			"draw": {
-				SystemPrompt: PromptConfig{Inline: "draw agent prompt"},
-				Memory:       MemoryConfig{Type: "memory"},
-			},
 		},
 	}
 	rc := &runtimeConfig{model: &factoryMockModel{}}

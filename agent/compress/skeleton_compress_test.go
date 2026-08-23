@@ -161,7 +161,7 @@ func TestCompressSkeleton_LevelLadder(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2))
 	msgs := buildTurns(10)
 
-	result := sc.Compress(context.Background(), msgs, nil)
+	result := sc.Compress(context.Background(), msgs)
 	joined := contentsOf(result)
 
 	// L3 (turns 0-1, age 9/8): whole segments gone — no trace of their event keys.
@@ -201,7 +201,7 @@ func TestCompressSkeleton_InProgressSegmentPreserved(t *testing.T) {
 		prefixedMsg(model.RoleTool, 9003, tagentevent.TypeActionCommand, "pending tool"),
 	)
 
-	result := sc.Compress(context.Background(), msgs, nil)
+	result := sc.Compress(context.Background(), msgs)
 	joined := contentsOf(result)
 
 	assert.Contains(t, joined, "pending ask")
@@ -215,7 +215,7 @@ func TestCompressSkeleton_RetainedMessagesKeepPrefixes(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(1))
 	msgs := append([]model.Message{{Role: model.RoleSystem, Content: "system"}}, buildTurns(8)...)
 
-	result := sc.Compress(context.Background(), msgs, nil)
+	result := sc.Compress(context.Background(), msgs)
 	require.NotEmpty(t, result)
 	assert.Equal(t, model.RoleSystem, result[0].Role)
 	for _, msg := range result[1:] {
@@ -228,7 +228,7 @@ func TestCompressSkeleton_RetainedMessagesKeepPrefixes(t *testing.T) {
 func TestCompressSkeleton_UnderBudgetNoChange(t *testing.T) {
 	sc := NewSmartCompressor(WithKeepRecentTasks(2))
 	msgs := buildTurns(2)
-	result := sc.Compress(context.Background(), msgs, nil)
+	result := sc.Compress(context.Background(), msgs)
 	assert.Equal(t, msgs, result)
 }
 
@@ -248,7 +248,7 @@ func TestCompressSkeleton_BudgetEscalationCompactsOldest(t *testing.T) {
 	}
 	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(80))
 
-	result := sc.Compress(context.Background(), msgs, nil)
+	result := sc.Compress(context.Background(), msgs)
 	joined := contentsOf(result)
 
 	// Oldest turns compacted away; the 2 most recent complete turns survive.

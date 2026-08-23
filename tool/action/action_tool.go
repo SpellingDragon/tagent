@@ -377,9 +377,9 @@ func settleToStatus(sig task.SettleSignal) string {
 // that did not settle within the sync-wait window. The session keeps running;
 // its settle is written back later through the task layer.
 func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task) *ActionToolResult {
-	note := "命令已在后台运行，稳定或完成后将回写结果；可用任务工具查询状态/结果。"
+	note := "命令已在后台运行，稳定或完成后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。"
 	if task != nil {
-		note = fmt.Sprintf("命令已在后台运行 (task %s)，稳定或完成后将回写结果；可用任务工具查询状态/结果。", task.ID)
+		note = fmt.Sprintf("命令已在后台运行 (task %s)，稳定或完成后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。", task.ID)
 	}
 	return &ActionToolResult{
 		SessionID: sessionID,
