@@ -77,7 +77,7 @@ func RegisterBuiltinTools() error {
 		// recall sub-tools (4 plain tools)
 		recall.RegisterSubTools()
 
-		// task sub-tools: list_tasks, get_task_result, cancel_task,
+		// task sub-tools: list_tasks, cancel_task,
 		// relaunch_task, resume_task
 		task.RegisterSubTools()
 

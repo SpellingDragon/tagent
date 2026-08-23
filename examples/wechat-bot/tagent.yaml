@@ -141,8 +141,8 @@ agents:
     task_terminal_ttl: "30m"
     # resume_context_rounds: 重入时任务链还原器注入的前序轮次数（默认 3）
     # resume_context_rounds: 3
-    # task_settled 通知全文内联（无内联上限配置）：全量结果随事件本体持久化，
-    # 凭 evt key 经 memory_recall 召回，与 task_terminal_ttl 解耦。
+    # task_settled 通知小结果全文内联；超大结果转储 tool-output 文件（自动清理），
+    # 通知携尾部+文件路径票据，全文经 read_file 分页读取。
     # Compression configuration
     compress:
       # summary_model: LLM model for context compression summaries.
@@ -171,20 +171,12 @@ agents:
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
 
-      # Recall Agent: 记忆检索（复杂检索/多跳编排）
-      - agent: recall
-        description_file: recall_tool_desc.md
-        event_params: [event_keys]
-
-      # Memory Recall: 统一召回协议（纯函数,票据在手直达;无需经子 agent）
+      # Recall: 统一召回入口（单工具，参数即路由：items 票据直达 / turn_key
+      # 因果链重建整轮执行过程 / query 关键词检索；orchestrate 为 LLM 多跳编排
+      # 保留形态）。收敛自 memory_recall + memory_turn + recall 子 agent 三入口
+      # （stable-context-compaction D7）。
       - kind: tool
-        id: memory_recall
-
-      # Memory Turn: 因果链召回——锚 agent_output 卡片回走因果链到 external_input,
-      # 重建该轮被压缩丢弃的执行过程（thinking_plan/action_command）。卡片行的
-      # "含 N 步工具调用,可用 memory_turn 追溯"提示经此工具消费。
-      - kind: tool
-        id: memory_turn
+        id: recall
 
       # Plan Agent: 工作计划管理（拆解/记账/归档审计，不代工）
       # extra_params: 声明后进入 InputSchema 并随 request 打包为 JSON 透传子 agent；
@@ -319,9 +311,6 @@ agents:
         id: recall_recent
       - kind: tool
         id: recall_trace
-      # memory_turn: 锚 agent_output 卡片回走因果链重建整轮执行过程（与 recall_trace 同族，边界=external_input）
-      - kind: tool
-        id: memory_turn
 
   # ========================================================================
   # Action Agent: 执行中枢

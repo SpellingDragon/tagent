@@ -8,11 +8,12 @@
 
 ## What Changes
 
-- **task_settled 全量保真**：结算结果全文入库（Content=全量），删除构造时截断与 `get_task_result` 提示；删除 `task_settled_max_inline` 配置项及全部穿线。全量随事件本体永在 MemoryStore，召回与 TTL 解耦。
+- **task_settled 输出转储**：对齐同步路径已有的转储三件套（OutputLimitTool/ActionTool/workspace.Cleaner）——结果超阈值（`MaxTokens/2×4` 字符，与同步同公式）→ 全文写 `tool-output/task-<id>-<ts>.txt`（自动清理），事件 Content = 尾部 + 路径票据，**事件本体有界**；全文消费经 `read_file` 行级分页。确立分层原则：超大内容的本体是文件不是事件（防进上下文、防召回复发、防读回爆炸）。删除旧构造时截断与 `task_settled_max_inline` 配置链。
 - **BREAKING** 压缩触发收敛为单一 token 容量阈值：删除"完整段超龄"触发维度；工具链折叠、段定级、滚动摘要维护、卡片整理全部只在**整理轮**（触发后）执行，未触发轮 pass-through 不触碰投影。
 - **渲染冻结（前缀稳定）**：全文窗口（`recent_full_count`）在整理时锚定为边界 key，整理间 append-only——新增事件全文追加到尾部，旧 refs 的渲染方式（全文/摘要）冻结不变。未触发轮的上下文前缀字节级稳定。
 - **框架文案票据化**：同名去重提示收缩为事实陈述（task id 票据），不再教学 `resume_task`；归档通知不再列举工具名（`search_content` 等），找回指引收敛到票据与工具自身声明。
-- **get_task_result 退役**：全量结果经事件本体 + `memory_recall`（票据=task_settled 的 evt key）召回，能力等价且与 TTL 解耦。`list_tasks`/`cancel_task`/`relaunch_task` 保留注册（能力无替代通道），框架文案不再引用。
+- **get_task_result 退役**：小结果随事件内联可见、大结果转储+read_file 分页承接；`list_tasks`/`cancel_task`/`relaunch_task` 保留注册（能力无替代通道），框架文案不再引用。
+- **recall 统一单入口**：合并 `memory_recall`/`memory_turn`/recall 子 agent 三张脸为单一 `recall` 工具，参数即路由（items 票据直达 / query 工程检索 / turn_key 因果链 / orchestrate 显式升级 LLM 编排）；确定性优先，LLM 编排不自动触发；子工具组收编为编排分支内部实现。
 
 ## Capabilities
 
@@ -22,11 +23,12 @@
 
 ### Modified Capabilities
 
-- `async-task-execution`: task_settled 通知携带**全量**结果（删除构造时截断行为），文本级关联标识保留
+- `async-task-execution`: task_settled 通知内容**有界化**——小结果全文内联，超大结果转储文件（尾部+路径票据，事件本体不持全文、召回复发不可能），文本级关联标识保留
 - `task-skeleton-compression`: 压缩触发器从多维收敛为单一 token 容量阈值；工具链折叠移入整理路径（整理时才折叠）；新增"整理间渲染冻结"需求（全文窗口锚定整理点，append-only 稳定）
-- `task-registry-and-board`: 任务操作工具组收缩——`get_task_result` 退役（全量召回由 recall 协议承接），其余工具保留注册
+- `task-registry-and-board`: 任务操作工具组收缩——`get_task_result` 退役（小结果内联可见、大结果转储+read_file 分页承接），其余工具保留注册
 - `plan-agent`: 同名去重提示票据化（task id + 等待 settle 的事实陈述），删除 resume_task 操作教学
 - `compress-event-enrichment`: 归档通知去工具名化——不再列举 `search_content` 等具体工具，指引收敛为"已归档 + 票据"事实
+- `recall-protocol`: 召回统一单入口 `recall`（参数路由四形态，确定性优先），memory_recall/memory_turn 工具名退役，RecallAgent 收编为编排分支内部实现
 
 ## Impact
 

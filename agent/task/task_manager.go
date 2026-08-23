@@ -251,8 +251,8 @@ type TaskManagerConfig struct {
 	OnSettle func(task *Task, sig SettleSignal)
 	// TerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained after settling before being pruned and its
-	// resources reclaimed. It only needs to cover the reclaim turn's
-	// get_task_result. Zero → defaultTerminalTTL.
+	// resources reclaimed. It bounds the resume_task re-entry window for
+	// terminal subagent tasks. Zero → defaultTerminalTTL.
 	TerminalTTL time.Duration
 }
 
@@ -260,8 +260,8 @@ type TaskManagerConfig struct {
 // The sync→async boundary is owned by each detector's detach signal (adaptive
 // poll schedule); TaskManager holds no sync_wait knob.
 // defaultTerminalTTL is the default grace period for retaining an exited task
-// before pruning + resource reclamation (only needs to cover the reclaim
-// turn's get_task_result).
+// before pruning + resource reclamation (bounds the resume_task re-entry
+// window for terminal subagent tasks).
 const defaultTerminalTTL = 2 * time.Minute
 
 type TaskManager struct {

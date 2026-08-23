@@ -205,12 +205,24 @@ var snowflakeSeqCnt = make(map[int]int)
 // partitionID: storage partition (0-2047), provided by caller.
 // nowMs: current time in milliseconds (0 = use time.Now).
 func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
-	if nowMs <= 0 {
+	// explicit=true when the caller drives the clock (tests); the real-clock
+	// path (nowMs=0) alone gets the regression guard.
+	explicit := nowMs > 0
+	if !explicit {
 		nowMs = time.Now().UnixMilli()
 	}
 	ts := nowMs/1000 - snowflakeEpoch
 
 	snowflakeSeqMu.Lock()
+	if !explicit && ts < snowflakeSeqLast[partitionID] {
+		// Real-clock regression (NTP backward step): pin to the last issued
+		// timestamp instead of resetting, so keys never regress below
+		// already-issued ones — the compression render-freeze full-window
+		// anchor (ref.EventKey >= boundary) is a hard dependency on key
+		// monotonicity (stable-context-compaction). Caller-controlled
+		// timestamps honor the given time (test semantics).
+		ts = snowflakeSeqLast[partitionID]
+	}
 	if ts == snowflakeSeqLast[partitionID] {
 		snowflakeSeqCnt[partitionID]++
 	} else {

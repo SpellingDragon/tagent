@@ -46,7 +46,7 @@
 
 ### Requirement: 老化工具运行折叠为工具链合成引用
 
-骨架压缩 SHALL 在**整理轮**（容量触发的压缩路径内）把**连续的老化完整工具对**（thinking_plan + action_command 序列，中间不被 external_input/agent_output 打断，且处于摘要渲染区间）折叠为一个 `tool_chain` 合成引用（负 key），其 EventSummary 为一行工具链（`- 工具链: name1→name2→…（N步）[evt_first→evt_last]`）。原工具事件 refs SHALL 从投影移除、由该合成引用替代（无双重表示）。该合成引用 SHALL 使用独立的 `tool_chain` 事件类型（区别于 `context_compress`，不被吸收进滚动摘要计数），且 `buildRetainedRefs` SHALL 一律保留它。工具名 SHALL 取自 ref.EventSummary（无需回取全文）。整理间（未触发轮）SHALL NOT 执行折叠——老化区间外的工具对按 EventSummary 渲染（有界且字节稳定），待下次整理统一折叠。
+骨架压缩 SHALL 在**整理轮**（容量触发的压缩路径内）把**连续的老化完整工具对**（thinking_plan + action_command 序列，中间不被 external_input/agent_output 打断，且处于位置式尾部窗口之外——最近 `recent_full_count` 条 refs 不折叠）折叠为一个 `tool_chain` 合成引用（负 key），其 EventSummary 为一行工具链（`- 工具链: name1→name2→…（N步）[evt_first→evt_last]`）。原工具事件 refs SHALL 从投影移除、由该合成引用替代（无双重表示）。该合成引用 SHALL 使用独立的 `tool_chain` 事件类型（区别于 `context_compress`，不被吸收进滚动摘要计数），且 `buildRetainedRefs` SHALL 一律保留它。工具名 SHALL 取自 ref.EventSummary（无需回取全文）。整理间（未触发轮）SHALL NOT 执行折叠——老化区间外的工具对按 EventSummary 渲染（有界且字节稳定），待下次整理统一折叠。
 
 #### Scenario: 连续工具对折叠为单行工具链
 

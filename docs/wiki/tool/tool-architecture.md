@@ -10,7 +10,7 @@
 - **ActionTool**：命令执行（注册 ID `exec`，声明名 `action`，统一走 tmux + 任务层；tmux 不可用时同步降级），纯执行器，不关心命令来源
 - **TmuxMonitor**：自适应轮询 tmux session（dense→几何退避），状态变更经按会话回调驱动 `TmuxSettleDetector` → 任务层 settle
 - **File Tools**：封装 trpc-agent-go 内置文件操作工具（read_file、save_file 等）
-- **memory_recall**：召回标准协议纯函数工具（见 §六）；**任务工具族**（tool/task/）：list/get/cancel/relaunch/resume
+- **recall**：统一召回入口（纯函数参数路由：items 票据/turn_key 因果链/query 检索/orchestrate 保留形态，见 §六）；**任务工具族**（tool/task/）：list/cancel/relaunch/resume（结果消费不走专用工具：小结果随 settle 内联，大结果转储文件经 read_file 分页）
 - **PlanAgent**（tool/plan/）：openspec 计划管理的双模式子 agent（交互契约见 §5.y）
 
 **设计原则**：
@@ -52,11 +52,12 @@ tool/
 │   ├── settle.go          # TmuxSettleDetector（会话绑定,Rearm）+ 三档分类
 │   └── poll_schedule.go   # dense→几何退避调度参数
 ├── recall/              # 召回
-│   ├── memory_recall.go   # 召回标准协议（纯函数,items/query 分流）
-│   ├── recall_agent.go    # RecallAgent 组装（多跳编排）
-│   └── recall_subtools.go # recall_query/get/recent/trace + RegisterSubTools()
+│   ├── recall.go          # 统一召回入口（参数即路由：items/turn_key/query/orchestrate，stable-context-compaction D7）
+│   ├── memory_recall.go   # 召回协议实现（recall 的 items/query 路由目标，纯函数）
+│   ├── recall_agent.go    # RecallAgent 组装（orchestrate 分支内部编排引擎）
+│   └── recall_subtools.go # recall_query/get/recent/trace + walkTurnChain + 统一注册（memory_recall/memory_turn 注册名已退役）
 ├── knowledge/           # 知识获取（knowledge_agent/subtools/websearch）
-├── task/                # 任务工具族：list_tasks/get_task_result/cancel/relaunch/resume_task
+├── task/                # 任务工具族：list_tasks/cancel/relaunch/resume_task（结果消费经 settle 内联/转储文件+read_file，无专用查询工具）
 ├── plan/                # PlanAgent（openspec 计划,双模式 Run）
 ├── spec/                # spec 工具：类型化计划管理（op 白名单,openspec 后端可替换,无 shell）
 ├── file/                # trpc-agent-go 内置文件工具封装
@@ -376,9 +377,9 @@ agents:
       - agent: knowledge
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
-      - agent: recall
-        description_file: recall_tool_desc.md
-        event_params: [event_keys]
+      # 统一召回入口（收敛自 memory_recall + memory_turn + recall 子 agent 三挂载）
+      - kind: tool
+        id: recall
       - kind: tool
         id: exec
         description_file: action_tool_desc.md
@@ -450,22 +451,24 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
-## 六、召回体系：memory_recall（协议入口）+ RecallAgent（多跳编排）
+## 六、召回体系：recall（统一入口，参数即路由）+ RecallAgent（orchestrate 内部引擎）
 
-### 6.0 memory_recall — 召回标准协议（纯函数，主 agent 直持）
+### 6.0 recall — 统一召回入口（stable-context-compaction D7）
 
-**文件**：`tool/recall/memory_recall.go`。索引卡即召回票据，按输入形态分流：
+**文件**：`tool/recall/recall.go`。模型侧单工具，**参数形态即路由**；确定性形态零 LLM：
 
-| 输入形态 | 路径 | 特性 |
+| 参数形态 | 路径 | 特性 |
 |---|---|---|
-| `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补（原序） | 零幻觉；未命中显式 `miss`；hint 回显对账；items 优先 |
+| `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补（原序） | 零幻觉；未命中显式 `miss`；hint 回显对账；确定性优先级最高 |
+| `turn_key`(+max_steps) | 因果链回走（walkTurnChain，至 external_input 停） | 重建整轮执行过程（含被压缩丢弃的工具步骤），时间序 |
 | `query`(+since/until/event_types) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
+| `orchestrate: true` | LLM 多跳编排保留形态 | 未接线时返回明确指引，不静默降级；确定性形态永不进 LLM 路径 |
 
-确定性路径上无 LLM 中间层；滚动压缩摘要卡片行里的 `[hex]` key 可直接抠出构造 items。
+输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
 
-### 6.1 RecallAgent — 复杂检索与多跳编排（定位收窄）
+### 6.1 RecallAgent — orchestrate 分支的内部编排引擎（定位收窄）
 
-RecallAgent 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答——适用于多跳因果追溯（trace）、跨轮收窄等复杂场景；简单精确/关键词召回请走 memory_recall。
+RecallAgent 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答——适用于多跳因果追溯（trace）、跨轮收窄等复杂场景；作为统一 `recall` 工具 `orchestrate` 分支的编排引擎（接线后），其子工具不再对主 agent 直接暴露；确定性召回经参数形态直达，不绕行编排。
 
 **设计决策**：RecallAgent 使用 config-driven TagentAgent + AgentToolWrapper 包装架构（与 KnowledgeAgent 统一），而非简单的 CallableTool。理由：需要 LLM 理解查询意图、综合多个子工具结果、提供结构化的记忆摘要。
 
@@ -492,10 +495,11 @@ type Config struct {
 
 | 子工具 | 工厂函数 | 说明 |
 |--------|---------|------|
-| `recall_query` | `recallQueryFactory(cfg)` | 按查询条件检索事件列表，支持时间范围过滤，自动注入 `ReadPartitionIDs` |
-| `recall_get` | `recallGetFactory(cfg)` | 根据 event_key 获取完整事件详情，支持 `include_parent` |
-| `recall_recent` | `recallRecentFactory(cfg)` | 快速获取最近的 N 条事件，自动注入 `ReadPartitionIDs` |
-| `recall_trace` | `recallTraceFactory(cfg)` | 沿 RelationStore 因果链回溯，最多 20 步 |
+| `recall` | `recallFactory(cfg)` | **统一召回入口**（参数即路由，见 6.0；主 agent 装配形态） |
+| `recall_query` | `recallQueryFactory(cfg)` | 按查询条件检索事件列表，支持时间范围过滤，自动注入 `ReadPartitionIDs`（编排引擎内部） |
+| `recall_get` | `recallGetFactory(cfg)` | 根据 event_key 获取完整事件详情，支持 `include_parent`（编排引擎内部） |
+| `recall_recent` | `recallRecentFactory(cfg)` | 快速获取最近的 N 条事件，自动注入 `ReadPartitionIDs`（编排引擎内部） |
+| `recall_trace` | `recallTraceFactory(cfg)` | 沿 RelationStore 因果链回溯，最多 20 步（编排引擎内部） |
 
 ### 6.4 构建路径
 

@@ -146,25 +146,35 @@ func TestContextCompressor_RecentFullCount(t *testing.T) {
 	ccSmall := NewContextCompressor(scSmall, memStore, NewDefaultTokenCounter(), 1, 0.8, 2,
 		WithRecentFullCount(2))
 	_ = ccSmall.Compress(context.Background(), makeRefs(1, n)) // anchor side effect lives on ccSmall
-	// Re-run on the SAME compressor with a healthy budget: refs at/before the
-	// anchor stay frozen on summary, refs after render full.
-	cc2 := ccSmall
-	retained := ccSmall.Compress(context.Background(), makeRefs(1, n)).RetainedRefs
-	result := cc2.Compress(context.Background(), retained)
+	require.NotZero(t, ccSmall.fullBoundary, "compaction must anchor a non-zero boundary")
+
+	// Round 3 — a HEALTHY-budget compressor inherits the anchor (same-package
+	// field access): the pass-through branch must be taken — projection
+	// untouched, old refs frozen on summary, window refs full. This is the
+	// "anchored + under budget" combination the render-freeze contract covers.
+	scHealthy := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(8000))
+	ccHealthy := NewContextCompressor(scHealthy, memStore, NewDefaultTokenCounter(), 8000, 0.8, 2,
+		WithRecentFullCount(2))
+	ccHealthy.fullBoundary = ccSmall.fullBoundary
+	retained := makeRefs(1, n)
+	result := ccHealthy.Compress(context.Background(), retained)
+	assert.Equal(t, retained, result.RetainedRefs,
+		"under-budget round must pass through with the projection untouched")
 	for i, msg := range result.Messages {
 		key := int64(i + 1)
-		if i < len(result.Messages)-2 {
+		if key >= ccHealthy.fullBoundary {
+			assert.Contains(t, msg.Content, fmt.Sprintf("FULL %d", key),
+				"ref %d inside the anchored window must render full", key)
+		} else {
 			assert.Contains(t, msg.Content, fmt.Sprintf("SUM %d", key),
 				"ref %d before the anchor must stay frozen on summary", key)
 			assert.NotContains(t, msg.Content, "FULL")
-		} else {
-			assert.Contains(t, msg.Content, fmt.Sprintf("FULL %d", key),
-				"ref %d inside the anchored window must render full", key)
 		}
 	}
 
-	// Round 3 — append new refs under budget: old renders unchanged, new refs
-	// full (active frontier) — the render-freeze contract.
+	// Round 4 — append new refs under budget: the previous render is a
+	// message-by-message PREFIX of the new render (byte-stable prefix, D3),
+	// and newly appended refs render full (active frontier).
 	for i := n + 1; i <= n+2; i++ {
 		memStore.StoreEvent(int64(i), memory.FullEvent{
 			EventKey:  int64(i),
@@ -172,9 +182,13 @@ func TestContextCompressor_RecentFullCount(t *testing.T) {
 			Content:   fmt.Sprintf("FULL %d", i),
 		})
 	}
-	r3 := cc2.Compress(context.Background(), append(retained, makeRefs(n+1, n+2)...))
-	assert.Len(t, r3.Messages, n+2)
-	assert.Contains(t, r3.Messages[len(r3.Messages)-1].Content, fmt.Sprintf("FULL %d", n+2),
+	r4 := ccHealthy.Compress(context.Background(), append(retained, makeRefs(n+1, n+2)...))
+	require.Len(t, r4.Messages, n+2)
+	for i := 0; i < len(result.Messages); i++ {
+		assert.Equal(t, result.Messages[i], r4.Messages[i],
+			"message %d must be byte-identical across under-budget rounds (prefix freeze)", i)
+	}
+	assert.Contains(t, r4.Messages[len(r4.Messages)-1].Content, fmt.Sprintf("FULL %d", n+2),
 		"newly appended refs must render full")
 }
 

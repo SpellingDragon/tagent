@@ -1,17 +1,16 @@
-// memory_recall: the recall PROTOCOL tool (unified-memory-curation D6).
+// memory_recall: the recall PROTOCOL implementation (unified-memory-curation
+// D6), now internal — the model-facing entry is the unified `recall` tool
+// (recall.go, stable-context-compaction D7) which routes items/query through
+// recallByItems/recallByQuery below.
 //
-// Index cards are recall tickets. This is a PURE FUNCTION tool held directly
-// by the top-level agent — no LLM in the deterministic path. Input-shape
-// dispatch (items take precedence):
+// Index cards are recall tickets. PURE FUNCTION paths — no LLM in the
+// deterministic route. Input-shape dispatch (items take precedence):
 //
 //	items: [{key, hint?}]  → engineering recall: batch GetEvent, original
 //	                          order, zero hallucination, misses reported
 //	query + filters        → semantic recall: QueryOptions keyword search
 //	                          (the retrieval layer may evolve independently —
 //	                          keyword → vector — the entry protocol stays)
-//
-// The RecallAgent (sub agent) remains for complex retrieval / multi-hop
-// orchestration; simple precise/semantic recall goes through here.
 package recall
 
 import (
@@ -22,7 +21,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 
-	"github.com/SpellingDragon/tagent/agent"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
@@ -161,11 +159,4 @@ func recallByQuery(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
 	res.Count = len(res.Entries)
 	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
 	return res, nil
-}
-
-func memoryRecallFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	if cfg.MemStore == nil {
-		return nil, fmt.Errorf("memory_recall requires MemStore")
-	}
-	return NewMemoryRecallTool(cfg.MemStore, cfg.ReadPartitionIDs).(tool.CallableTool), nil
 }

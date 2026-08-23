@@ -566,8 +566,8 @@ tagent/agent
     └── SmartCompress（不直接依赖，但因果链信息来自 MemoryStore）
 
 tagent/tool
-    ├── memory_recall（主 agent 直持纯函数：items 票据精确回补 / query 关键词检索）
-    ├── RecallAgent → recall_query / recall_get / recall_recent / recall_trace（复杂检索/多跳编排）
+    ├── recall（统一召回入口，参数即路由：items 票据直达 / turn_key 因果链重建 / query 检索 / orchestrate 保留形态；收敛自 memory_recall+memory_turn+recall 子 agent，见 16.11）
+    ├── RecallAgent → recall_query / recall_get / recall_recent / recall_trace（orchestrate 分支的内部编排引擎）
     └── KnowledgeAgent → memory_query（上下文感知搜索）
 
 tagent (root)
@@ -604,7 +604,7 @@ MemoryStore 的读取方按频率和场景分层：
 | 读取方 | 频率 | 场景 |
 |--------|------|------|
 | **AgentToolWrapper** | 🔥 最高频 | 顶层 LLM 筛选 `event_keys` → 传给子 tool → Wrapper 从 `parentStore` 取完整 `FullEvent` → 注入子 Agent 作为上下文 |
-| **memory_recall** 纯函数工具 | 高频 | 召回标准协议：`items=[{key,hint?}]` 票据精确回补（未命中显式 miss）/ `query` 关键词检索——确定性路径无 LLM 中间层 |
+| **recall** 统一召回入口 | 高频 | 参数即路由：`items=[{key,hint?}]` 票据精确回补（未命中显式 miss）/ `turn_key` 因果链重建 / `query` 关键词检索——确定性路径无 LLM 中间层（见 wiki/tool §六） |
 | **RecallAgent** 子工具 | 中频 | 复杂检索/多跳编排：`recall_query`（条件查询）、`recall_get`（按 key 取详情）、`recall_recent`（最近 N 条）、`recall_trace`（因果链回溯） |
 | **KnowledgeAgent** 子工具 | 低~中频 | 通过 `memory_query` 从父级 MemoryStore 查历史，辅助技能/MCP 搜索 |
 | **直接访问** (`TagentAgent.MemStore()`) | 调试/测试 | 开发阶段手工查事件 |
@@ -937,9 +937,9 @@ graph LR
 |---|---|---|
 | `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补 | 纯函数零幻觉；未命中显式 `miss`；hint 回显对账 |
 | `query`(+filters) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
-| `memory_turn(key)` | 沿 `GetParent` 回走到 `external_input` | 重建整轮执行过程（含被压缩丢弃的 tool 步骤）；边界=external_input，无需正向遍历 |
+| `recall(turn_key=key)` | 沿 `GetParent` 回走到 `external_input` | 重建整轮执行过程（含被压缩丢弃的 tool 步骤）；边界=external_input，无需正向遍历 |
 
-`memory_recall` 为主 agent 直持纯函数工具（确定性路径无 LLM 中间层）；`memory_turn` 为因果链召回（锚 agent_output 卡片回走重建“怎么做的”）；RecallAgent 保留给多跳编排（trace 等）。
+统一入口 `recall`（参数即路由，见 16.11）：items 为票据直达纯函数（确定性路径无 LLM 中间层）；turn_key 为因果链召回（锚 agent_output 卡片回走重建“怎么做的”）；RecallAgent 收编为 orchestrate 分支内部编排引擎（trace 等多跳）。
 
 
 ---
@@ -1132,10 +1132,10 @@ stateDiagram-v2
 | 层 | 内容 | 成本/定位 |
 |---|---|---|
 | 内联（基座） | 边界卡片：external_input 意图 + agent_output 结果（`[evt_key]` 票据） | 低冗余、高价值 what/result，直接入窗 |
-| 按需（精确） | `memory_turn`：锚 agent_output 卡片沿因果链回走到 external_input，取回该轮被 L1 丢弃的 thinking_plan/action_command | 低频 how，不占窗；被丢弃事件从未离开 MemoryStore，因果链独立于压缩 |
+| 按需（精确） | `recall(turn_key=…)`：锚 agent_output 卡片沿因果链回走到 external_input，取回该轮被 L1 丢弃的 thinking_plan/action_command | 低频 how，不占窗；被丢弃事件从未离开 MemoryStore，因果链独立于压缩 |
 | 可选顶层（可读） | LLM 文摘：`condenseCardLines` 只读卡片生成浓缩梗概（卡片超 `cardMaxChars` 时），票据仍内联 | 长历史可读性叠加层，不替换卡片基座 |
 
-**卡片可追溯提示**。`buildRetainedRefs` 压缩时统计每轮被丢弃的 tool 步数，L3（整段离场）回合的 agent_output 卡片追加“含 N 步工具调用，可用 memory_turn 追溯”——计数只在 agent_output（回合结束）重置，不被回合中途 bus 注入的 external_input（task_settled 等）误清零。
+**卡片可追溯提示**。`buildRetainedRefs` 压缩时统计每轮被丢弃的 tool 步数，L3（整段离场）回合的 agent_output 卡片追加“含 N 步工具调用，可用 recall(turn_key=…) 追溯”——计数只在 agent_output（回合结束）重置，不被回合中途 bus 注入的 external_input（task_settled 等）误清零。
 
 ### 16.8 滚动摘要常驻与指数定级（rolling-summary-anchor）
 
@@ -1157,7 +1157,7 @@ stateDiagram-v2
 - 工具链: read_file→grep→edit_file（3步）[evt_first→evt_last]
 ```
 
-工具名取自 ref.EventSummary（D1 已填，无需回取全文）；`[evt_first→evt_last]` 是召回票据，`memory_turn(evt_last)` 沿因果链可取回被折叠的完整工具链（工具事件本体永在 MemoryStore，I4）。
+工具名取自 ref.EventSummary（D1 已填，无需回取全文）；`[evt_first→evt_last]` 是召回票据，`recall(turn_key=evt_last)` 沿因果链可取回被折叠的完整工具链（工具事件本体永在 MemoryStore，I4）。
 
 **两个关键机制**（code-review 修订）：
 - **相邻链合并**（M2a）：新一轮老化对与尾部已有链连续时合并为一（`mergeToolChainRef` 扩展名/步数/票据），一轮内收敛为**每段连续工具序列一条链**而非每轮一条。
@@ -1175,9 +1175,14 @@ stateDiagram-v2
 
 **渲染冻结（整理边界锚定）**。全文窗口在整理轮锚定为边界 key（最近 `recent_full_count` 条 retained 正 key refs 的最前一条），整理间冻结：新追加事件凭 Snowflake 单调 key 天然全文（活跃前沿），旧 refs 渲染方式不变——未触发轮的消息序列公共前缀字节级相同。折叠（foldToolRuns）同步移入整理路径：整理间老化工具对按 EventSummary 渲染（有界且稳定），折叠是“整理动作”而非持续维护。
 
-**settle 全量保真**。task_settled 回归“本体全量、视图有界化只发生在定级点”的一般模式（`GenerateEventSummary` 的“绝不截断”禁令）：结算结果全文入 Content，删除构造时截断与 `task_settled_max_inline` 配置；全量随事件本体永在 MemoryStore，凭 evt key 经 memory_recall 召回，与 TTL 解耦。`get_task_result` 工具退役（能力由召回承接）；list/cancel/relaunch/resume 保留。
+**settle 输出转储（评审修订：初版"全文入 Content"被推翻）**。初版两个致命缺陷：① 巨型 settle 落不可压区（进行中段/keepRecent）且物理超 provider 硬上限 → 请求失败且空响应不闭合段 → 卡死不可自愈；② memory_recall 无分页，事件持全文 → 召回复发。修订版对齐同步路径转储三件套（OutputLimitTool 存文件+票据 / ActionTool 尾部视图 / workspace.Cleaner 自动清理）：结果超阈值（`MaxTokens/2×4` 字符，与同步同公式）→ 全文写 `tool-output/task-<id>-<ts>.txt`，事件 Content = 尾部 2000 + 文件路径票据，**事件本体有界**（召回永不复发），全文经 `read_file(start_line, num_lines)` 行级分页消费。确立分层原则：**超大内容的本体是文件，不是事件**——产生时转储（防进上下文）、记忆只持有界内容+票据（防召回复发）、read_file 分页（防读回爆炸）。`get_task_result` 工具退役；list/cancel/relaunch/resume 保留。
 
 **文案票据化**。框架注入文案只发“什么在哪儿”（task id / evt key 票据），不广告工具名（装配因 agent 而异）：“怎么取”归工具声明——后者天然与装配一致，提示-能力脱钩被结构性消灭。已收缩：同名去重提示、归档通知工具列举、子代理 ACK。
+
+### 16.11 recall 统一单入口（stable-context-compaction D7）
+
+**收敛三张脸**：模型侧不再区分 `memory_recall`（纯函数 items/query）、`memory_turn`（因果链）、recall 子 agent（LLM 编排）——单一 `recall` 工具，**参数即路由**：`items`→票据直达（零 LLM）/ `turn_key`→因果链重建整轮 / `query`→工程检索 / `orchestrate: true`→LLM 多跳编排保留形态（未接线时返回明确指引，不静默降级）。确定性优先：确定性形态永不进 LLM 路径；输出协议不变（`{key,type,summary,content,time}` 条目）。`memory_recall`/`memory_turn` 注册名退役（内部实现保留为路由目标）；RecallAgent 收编为 orchestrate 分支的内部编排引擎（子工具不再直接装配）；yaml 主 agent 三条挂载收敛为单条 `- kind: tool, id: recall`。
+
 
 
 
@@ -1188,7 +1193,7 @@ stateDiagram-v2
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `memory_turn` 因果链召回**（卡片“含 N 步”提示引导） | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
+| **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `recall(turn_key=…)` 因果链召回**（卡片“含 N 步”提示引导） | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
 | **向量检索未接入** | `SearchByEmbedding` 接口预留，实现返回 `ErrVectorSearchNotSupported`；语义召回当前仅关键词路径（`QueryOptions.Keyword`） | 接入向量库时 recall 协议入口不变（items/query 分流已隔离检索层） |
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |

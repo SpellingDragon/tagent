@@ -38,7 +38,7 @@ sequenceDiagram
     T-->>U: 🔔 部署完成（通知回写，非阻塞）
     Note over T,M: 上下文超预算 → 压缩：旧事件归档，<br/>历史浓缩为卡片行 [evt_1a2b] 部署成功…
     U->>T: （次日）"昨天部署时的报错细节是什么？"
-    T->>M: memory_recall(items=[{key: 1a2b}])
+    T->>M: recall(items=[{key: 1a2b}])
     M-->>T: 精确回补原文（零幻觉）
     T-->>U: 完整细节
 ```
@@ -64,11 +64,8 @@ agents:
       type: localfile
       path: /data/tagent/events
     tools:
-      - agent: recall            # 子 Agent 工具：复杂记忆检索
-        description_file: recall_tool_desc.md
-        event_params: [event_keys]
       - kind: tool
-        id: memory_recall        # 纯函数工具：票据/关键词召回
+        id: recall               # 统一召回入口：票据/因果链/关键词检索（参数即路由）
       - kind: tool
         id: exec                 # tmux 命令执行（异步任务层）
         description_file: action_tool_desc.md
@@ -127,7 +124,7 @@ graph TB
     EB -->|插件管线: 事件入库| MS
     MS -.同步追加轻量引用.-> SP
     SP -->|assembleRequest 原生渲染| LLM
-    MS -->|memory_recall / recall 工具| TOOL
+    MS -->|recall 工具| TOOL
 ```
 
 **关键约束**：投影只存轻量引用（key+type+summary）；MemoryStore 是唯一完整事件链；压缩只改 LLM 视图与投影，永不动存储。
@@ -143,7 +140,7 @@ graph LR
 
 - **成本恒定**：每层摘要只基于上一层的产物，压缩开销只与新增内容有关，与历史总量无关——跑一年和跑一天一样快
 - **卡片序列**：压缩后的历史保持为可读的卡片行（`[Compacted N] + 卡片行 + recent keys`），冥想沉淀带 ★ 高亮
-- **原文可忘，摘要长存**：摘要永不过期；卡片里的 `[hex]` key 就是召回票据——随时用 `memory_recall` 取回原文
+- **原文可忘，摘要长存**：摘要永不过期；卡片里的 `[hex]` key 就是召回票据——随时用 `recall` 取回原文
 
 ### 记忆数据模型（LSM）
 
@@ -170,7 +167,7 @@ graph LR
 | 机制 | 亮点 | 详解 |
 |------|------|------|
 | 持久事件循环 | Pull 批处理；async 结果排队不打断进行中 turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
-| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；多维触发（token 阈值或完整任务段超龄）防占位符渲染饿死压缩；进行中段工具调用历史折叠为工具链行（有界化，无零信息占位符）；被丢弃的执行过程经 `memory_turn` 因果链召回；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；**容量单维触发**（token 超阈才整理）+ 整理间渲染冻结（前缀字节稳定，缓存友好）；进行中段工具调用历史折叠为工具链行（有界化，无零信息占位符）；超大 settle 结果转储文件（事件本体有界，防召回复发）；被丢弃的执行过程经 `recall(turn_key=...)` 因果链召回；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | 事件驱动记忆 | 每个事件有全局唯一 key（时间有序）；Agent 间存储隔离，跨 Agent 读需显式授权 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | 子 Agent 调用 | `event_params: [event_keys]` 按 key 传事件（数据隔离）；A2A 远程透明 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
 | 异步任务层 | 快命令秒回、慢任务后台通知；实时任务看板；`resume_task` 随时续跑；退出不留孤儿进程 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |

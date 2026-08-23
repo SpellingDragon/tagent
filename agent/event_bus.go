@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -89,15 +91,21 @@ func NewToolUseEvent(toolCall model.ToolCall) *AgentEvent {
 // task reclaimed into a new turn).
 const SourceTask = "task"
 
+// settleInlineTail is the tail excerpt kept inline in a spilled task_settled
+// notice (aligned with ActionTool's tail view).
+const settleInlineTail = 2000
+
 // newTaskSettledEvent builds a self-contained external_input event describing a
 // background task that has settled, so the persistent loop reclaims it into a
-// new turn. It carries the task description, status, and the FULL result
-// inline (stable-context-compaction D1): no construction-time truncation —
-// content-level bounding happens only at the compression pipeline's design
-// points (levels/cards), same as any other external_input; the full body
-// persists in MemoryStore and stays recallable by event-key ticket,
-// decoupled from the task layer's TTL window.
-func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal) *AgentEvent {
+// new turn. Result bounding follows the sync-path spillover trio
+// (stable-context-compaction D1 revised): results over maxChars spill to a
+// file under outputDir (workspace.Cleaner bounds the directory) and the event
+// Content carries the tail + file-path ticket — the event body stays BOUNDED
+// so recalling it can never re-inject an oversized result; the full body is
+// consumed via read_file(start_line/num_lines) paging. Write failure degrades
+// to inline full text (availability over bounding). maxChars<=0 or empty
+// outputDir disables spillover (small results / tests).
+func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	status := "completed"
 	switch {
 	case sig.Err != nil:
@@ -109,6 +117,28 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal) *AgentEvent {
 	}
 
 	result := sig.Output
+	if maxChars > 0 && outputDir != "" && len(result) > maxChars {
+		shortID := tk.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		path := filepath.Join(outputDir, fmt.Sprintf("task-%s-%d.txt", shortID, time.Now().UnixMilli()))
+		if err := os.MkdirAll(outputDir, 0o755); err == nil {
+			if err := os.WriteFile(path, []byte(result), 0o644); err == nil {
+				log.Infof("[task_settled] result %d chars > %d limit, spilled to %s", len(result), maxChars, path)
+				tail := result
+				if len(result) > settleInlineTail {
+					tail = result[len(result)-settleInlineTail:]
+				}
+				result = fmt.Sprintf("[output_spilled] 结果 %d 字符超过阈值 %d。完整内容已保存到: %s（可用 read_file 配合 start_line/num_lines 分段读取）\n...%s",
+					len(sig.Output), maxChars, path, tail)
+			} else {
+				log.Warnf("[task_settled] spill write to %s failed (%v), falling back to inline full text", path, err)
+			}
+		} else {
+			log.Warnf("[task_settled] spill dir %s ensure failed, falling back to inline full text", outputDir)
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[task settled] 后台任务已结算\n任务: %s\n状态: %s\n(task id: %s)",

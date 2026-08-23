@@ -327,7 +327,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// buffered until the current turn finishes — single-consumer queueing).
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig))
+			bus.Publish(newTaskSettledEvent(tk, sig, maxOutputChars, outputWorkspace))
 		},
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.

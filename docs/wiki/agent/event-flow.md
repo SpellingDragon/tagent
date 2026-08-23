@@ -179,7 +179,7 @@ sequenceDiagram
 | KeepRecent=1，老段 L3 多段压缩 | `[summaryRef(context_compress), ref7(user), ref8(tool), ref9(asst_out)]` |
 | 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_7\|external_input]`、`[evt_8\|action_command]`、`[evt_9\|agent_output]` |
 
-> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `memory_recall(items=[{key}])` 精确回补原文，或 `recall` 子 agent 做多跳检索。
+> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求 LLM 多跳编排。
 
 
 ---

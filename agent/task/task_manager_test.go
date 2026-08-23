@@ -267,7 +267,7 @@ func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 	tm.pruneTerminal()
 
 	if _, ok := tm.Get("c1"); !ok {
-		t.Error("exited task within grace must be retained (get_task_result window)")
+		t.Error("exited task within grace must be retained (resume_task window)")
 	}
 	if d.Cancelled() {
 		t.Error("within-grace task must not be cancelled yet")

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,10 +14,11 @@ import (
 )
 
 // TestNewTaskSettledEvent_Content: a completed settle produces a self-contained
-// external_input event (Source=tk) carrying desc, id, status, and result.
+// external_input event (Source=tk) carrying desc, id, status, and result
+// (small results stay inline, spillover disabled).
 func TestNewTaskSettledEvent_Content(t *testing.T) {
 	tk := &task.Task{ID: "tk-abc", Spec: task.TaskSpec{Kind: "command", Desc: "npm run build"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "build ok"})
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "build ok"}, 0, "")
 
 	if evt.Type != tagentevent.TypeExternalInput {
 		t.Errorf("type = %s, want external_input", evt.Type)
@@ -37,28 +40,62 @@ func TestNewTaskSettledEvent_Content(t *testing.T) {
 // error text.
 func TestNewTaskSettledEvent_Failed(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "bad cmd"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Err: fmt.Errorf("boom")})
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Err: fmt.Errorf("boom")}, 0, "")
 	if !strings.Contains(evt.Message.Content, "failed") || !strings.Contains(evt.Message.Content, "boom") {
 		t.Errorf("failed event content = %q", evt.Message.Content)
 	}
 }
 
-// TestNewTaskSettledEvent_LargeResultFullFidelity (stable-context-compaction
-// D1): large output is stored FULL — no construction-time truncation, no
-// tool-name hint. Content-level bounding is the compression pipeline's job
-// (design points only); the full body persists in the event store and stays
-// recallable by event-key ticket, decoupled from the task layer's TTL.
-func TestNewTaskSettledEvent_LargeResultFullFidelity(t *testing.T) {
-	tk := &task.Task{ID: "t3", Spec: task.TaskSpec{Desc: "big"}}
+// TestNewTaskSettledEvent_LargeResultSpills (stable-context-compaction D1
+// revised): oversized results align with the sync-path spillover trio — full
+// body written to the tool-output dir, event Content = tail + file-path
+// ticket (the event body stays BOUNDED, so recalling it can never re-inject
+// the oversized result; consumption goes through read_file paging).
+func TestNewTaskSettledEvent_LargeResultSpills(t *testing.T) {
+	dir := t.TempDir()
+	tk := &task.Task{ID: "t3-large", Spec: task.TaskSpec{Desc: "big"}}
 	large := strings.Repeat("x", 5000)
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: large})
-	if strings.Count(evt.Message.Content, "x") != 5000 {
-		t.Errorf("large output must be stored full (got %d of 5000 chars)",
-			strings.Count(evt.Message.Content, "x"))
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: large}, 1000, dir)
+	content := evt.Message.Content
+
+	if !strings.Contains(content, "output_spilled") || !strings.Contains(content, "已保存到:") {
+		t.Errorf("oversized settle must carry the spill ticket, got: %s", truncateForTest(content, 200))
 	}
-	if strings.Contains(evt.Message.Content, "已截断") || strings.Contains(evt.Message.Content, "get_task_result") {
-		t.Error("full-fidelity settle must carry no truncation marker or tool-name hint")
+	if strings.Count(content, "x") >= 5000 {
+		t.Error("event Content must stay bounded (tail only, not the full body)")
 	}
+	// The spilled file holds the full body (read_file paging target).
+	matches, _ := filepath.Glob(filepath.Join(dir, "task-t3-large-*.txt"))
+	if len(matches) != 1 {
+		t.Fatalf("expected one spilled file under %s, got %v", dir, matches)
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil || string(data) != large {
+		t.Errorf("spilled file must hold the full result (err=%v, len=%d)", err, len(data))
+	}
+	// The ticket path inside the notice points at the spilled file (tasks 1.4:
+	// recall returns exactly this bounded Content — ticket reachable).
+	if !strings.Contains(content, matches[0]) {
+		t.Errorf("notice ticket must carry the spilled file path %s", matches[0])
+	}
+}
+
+// TestNewTaskSettledEvent_SpillDisabledInline: spillover disabled (maxChars=0)
+// keeps the result fully inline (small-result / test behavior).
+func TestNewTaskSettledEvent_SpillDisabledInline(t *testing.T) {
+	tk := &task.Task{ID: "t4", Spec: task.TaskSpec{Desc: "x"}}
+	body := strings.Repeat("y", 3000)
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: body}, 0, "")
+	if strings.Contains(evt.Message.Content, "output_spilled") || strings.Count(evt.Message.Content, "y") != 3000 {
+		t.Error("spillover disabled must keep the result fully inline")
+	}
+}
+
+func truncateForTest(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // TestTaskManager_BackgroundSettle_PublishesTaskSettled: wiring OnSettle to the
@@ -68,7 +105,7 @@ func TestTaskManager_BackgroundSettle_PublishesTaskSettled(t *testing.T) {
 	bus := NewEventBus()
 	tm := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig))
+			bus.Publish(newTaskSettledEvent(tk, sig, 0, ""))
 		},
 	})
 
@@ -104,7 +141,7 @@ func TestTaskManager_BackgroundSettle_PublishesTaskSettled(t *testing.T) {
 func TestBuildInvocation_IncludesTaskSettled(t *testing.T) {
 	cm := &ContextManager{}
 	evt := newTaskSettledEvent(&task.Task{ID: "t1", Spec: task.TaskSpec{Desc: "npm run build"}},
-		task.SettleSignal{Kind: task.SettleCompleted, Output: "build done"})
+		task.SettleSignal{Kind: task.SettleCompleted, Output: "build done"}, 0, "")
 
 	msg := cm.BuildInvocation([]*AgentEvent{evt})
 	if !strings.Contains(msg.Content, "npm run build") || !strings.Contains(msg.Content, "build done") {
@@ -117,7 +154,7 @@ func TestBuildInvocation_IncludesTaskSettled(t *testing.T) {
 // pipeline surfaces it — so a reclaimed turn's output routes to the origin.
 func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 	tk := &task.Task{ID: "t1", Spec: task.TaskSpec{Desc: "x", Origin: map[string]string{"chat_id": "u1", "user_name": "alice"}}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "done"})
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted, Output: "done"}, 0, "")
 	if evt.Metadata["chat_id"] != "u1" {
 		t.Errorf("settle event missing origin chat_id: %v", evt.Metadata)
 	}
@@ -131,7 +168,7 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 // with no routing metadata (regression guard).
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
-	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted})
+	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
 	if len(evt.Metadata) != 0 {
 		t.Errorf("no-origin task should yield empty metadata, got %v", evt.Metadata)
 	}

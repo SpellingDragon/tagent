@@ -1,9 +1,9 @@
-## 1. task_settled 全量保真（D1）
+## 1. task_settled 输出转储（D1 修订版：初版"全文入 Content"经评审推翻，改为对齐同步路径转储模式）
 
-- [x] 1.1 `agent/event_bus.go`：`newTaskSettledEvent` 删除截断分支与 `maxInline` 参数，结果全文直入 Content；删除 `get_task_result` 截断提示文案
-- [x] 1.2 删除配置链：`agent/event_bus.go` 的 `DefaultTaskSettledMaxInline`、`agent` 配置结构体 `TaskSettledMaxInline` 字段、`tagent.go`/`agent.go` 的穿线、`config.go` 的 yaml/json 键
-- [x] 1.3 迁移测试：`agent/task_settled_test.go` 的截断断言（`TestNewTaskSettledEvent_LargeResultTruncated`）改为全量断言（大结果 Content=全文、无截断标记、无工具提示）
-- [x] 1.4 新增断言：全量 settle 事件经 `memory_recall(items=[key])` 召回取到全文（TTL 无关，票据=evt key）
+- [x] 1.1 `agent/event_bus.go`：`newTaskSettledEvent` 增加转储逻辑——结果超阈值（与 OutputLimitTool 同公式 `MaxTokens/2×4` 字符）时全文写 `workspace tool-output/task-<id8>-<ts>.txt`（复用 `workspace.ToolOutputPath`），Content = 尾部 2000 字符 + 文件路径票据；≤阈值全文内联（配置链删除已随初版完成）
+- [x] 1.2 转储写入失败降级：文件写入失败时退回全文内联（可用性优先于有界性）并 Warnf
+- [x] 1.3 迁移测试：`agent/task_settled_test.go` 的全量断言改为分界断言（小结果全文内联无标记；大结果尾部+票据、事件 Content 有界、文件存在且为全文）
+- [x] 1.4 端到端断言：大结果事件经 memory_recall 召回返回**有界版+票据**（不复发）；`read_file` 对转储文件分页可读（start_line/num_lines）
 
 ## 2. 压缩触发单维化（D2，BREAKING）
 
@@ -44,3 +44,21 @@
 - [x] 7.2 README.md / README_EN.md 配置表：删 `task_settled_max_inline` 行；`keep_recent_tasks`/`recent_full_count` 描述纯化为"整理后状态参数"；触发描述改单维
 - [x] 7.3 `docs/wiki/memory/memory-architecture.md`：§16 新增小节（容量触发整理 + 渲染冻结 + settle 全量保真 + 文案票据化原则），修正既有"触发器多维化"表述
 - [x] 7.4 验证收尾：`openspec` 校验 delta 合法；`gofmt`/`golangci-lint` 通过
+
+## 8. 评审修复（fresh-eyes review 2026-08-23）
+
+- [x] 8.1 【Major】字节级前缀冻结测试：锚定后连续两轮 under-budget `Compress`，断言两轮 `Messages` 前缀逐条相等（D3 可执行定义，目前零覆盖）
+- [x] 8.2 【Major】修 `TestContextCompressor_RecentFullCount`：round 2/3 改用 healthy 预算 cc 直接继承 `fullBoundary`（同包赋值），真正走"锚定后+未超阈"直通分支；修正注释与路径不符
+- [x] 8.3 【Minor】清理 `get_task_result` 残留 5 处：`agent/task/task_manager.go` L255/L264 注释（改 resume 窗口语义）、`registry.go` L80 注释、wiki `agent-architecture.md`/`tool-architecture.md` 工具清单、`task_manager_test.go` L270 失败消息
+- [x] 8.4 【Minor】`anchorFullBoundary` 返回 0 退化行为加注释标注（正 key < 窗口时全渲染为正确小会话语义，理论 churn 自愈，不改代码）
+- [x] 8.5 【Minor】`memory/types.go` Snowflake 生成器加时钟回拨防护（`ts <= last` 时钉住）——渲染冻结对 key 单调性是硬依赖
+- [x] 8.6 【Nit】整理轮日志补折叠后实际输入估算（Debugf）
+- [x] 8.7 验证：`go test ./... -count=1 -p 1` 全绿（含 real-LLM；并行全量跨包干扰已确认为 tmux/长跑资源冲突，串行为基准）
+
+## 9. recall 统一单入口（D7）
+
+- [x] 9.1 `tool/recall`：新建统一 `recall` 工具——InputSchema 超集（items/query+filters/turn_key/orchestrate），路由复用既有实现（memory_recall 的 items/query 分流、memory_turn 的因果链回走、orchestrate 分支升级 RecallAgent）
+- [x] 9.2 注册面收敛：`recall_subtools.go` 新增 `recall` 注册，退役 `memory_recall`/`memory_turn` 独立注册名；recall 子 agent 五子工具不再注册为可装配项（保留为编排引擎内部实现）
+- [x] 9.3 装配更新：`examples/wechat-bot/tagent.yaml` 主 agent 工具清单收敛为单条 `- kind: tool, id: recall`（移除 memory_recall/memory_turn 挂载与 `- agent: recall` 挂载）
+- [x] 9.4 文案同步：卡片行/归档通知/占位符等框架文案中的召回指引统一为 `recall`（含空摘要占位符"可用 recall 检索"复核）；README 工具清单更新
+- [x] 9.5 测试：路由分流断言（items 纯函数/turn_key 因果链/orchestrate 升级），既有 memory_recall/memory_turn 测试迁移至统一入口形态；契约测试 C2/C3 改用 `recall` 工具声明

@@ -451,56 +451,66 @@ func NewMemoryTurnTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 				return memoryTurnResult{}, fmt.Errorf("event key is required (hex string)")
 			}
 
-			var chain []memoryTurnItem // collected newest → oldest
-			currentKey := startKey
-			reachedInput := false
-			for step := 0; step < maxSteps && currentKey != 0; step++ {
-				evt, gerr := accessor.GetEvent(currentKey)
-				if gerr != nil {
-					if step == 0 {
-						return memoryTurnResult{}, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
-					}
-					break // chain breaks at a missing link
-				}
-				chain = append(chain, memoryTurnItem{
-					Key:     tagentevent.FormatEventKey(evt.EventKey),
-					Type:    evt.EventType,
-					Summary: truncateTurnContent(evt.EventSummary), // external_input summary = full text; cap it like Content
-					Content: truncateTurnContent(evt.Content),
-					Time:    formatTimestamp(evt.Timestamp),
-				})
-				// Stop after recording the turn's external_input (turn start).
-				if evt.EventType == tagentevent.TypeExternalInput {
-					reachedInput = true
-					break
-				}
-				// Walk backward via the causal chain.
-				var parentKey int64
-				if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
-					pk, perr := rsp.RelationStore().GetParent(evt.EventKey)
-					if perr != nil {
-						log.Errorf("[Recall] memory_turn GetParent failed key=%d: %v", evt.EventKey, perr)
-					}
-					parentKey = pk
-				}
-				currentKey = parentKey
+			chain, complete, capped, werr := walkTurnChain(accessor, startKey, maxSteps)
+			if werr != nil {
+				return memoryTurnResult{}, werr
 			}
-
-			// Reverse to chronological order (oldest → newest).
-			for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
-				chain[i], chain[j] = chain[j], chain[i]
-			}
-
 			return memoryTurnResult{
 				Events:   chain,
 				Count:    len(chain),
-				Complete: reachedInput,
-				Capped:   len(chain) >= maxSteps && !reachedInput,
+				Complete: complete,
+				Capped:   capped,
 			}, nil
 		},
 		function.WithName("memory_turn"),
 		function.WithDescription("Reconstruct a task turn's execution process. Provide a boundary event key (usually an agent_output card key). Walks the causal chain backward to the turn's external_input and returns all events in the turn (including thinking_plan/action_command steps dropped by compression), oldest to newest. Use this to recover HOW a past task was executed."),
 	)
+}
+
+// walkTurnChain walks the causal chain backward from startKey until the
+// turn's external_input (inclusive) and returns the events oldest → newest.
+// Shared by memory_turn and the unified recall tool's turn_key form
+// (stable-context-compaction D7).
+func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxSteps int) (chain []memoryTurnItem, complete, capped bool, err error) {
+	currentKey := startKey
+	reachedInput := false
+	for step := 0; step < maxSteps && currentKey != 0; step++ {
+		evt, gerr := accessor.GetEvent(currentKey)
+		if gerr != nil {
+			if step == 0 {
+				return nil, false, false, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
+			}
+			break // chain breaks at a missing link
+		}
+		chain = append(chain, memoryTurnItem{
+			Key:     tagentevent.FormatEventKey(evt.EventKey),
+			Type:    evt.EventType,
+			Summary: truncateTurnContent(evt.EventSummary), // external_input summary = full text; cap it like Content
+			Content: truncateTurnContent(evt.Content),
+			Time:    formatTimestamp(evt.Timestamp),
+		})
+		// Stop after recording the turn's external_input (turn start).
+		if evt.EventType == tagentevent.TypeExternalInput {
+			reachedInput = true
+			break
+		}
+		// Walk backward via the causal chain.
+		var parentKey int64
+		if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
+			pk, perr := rsp.RelationStore().GetParent(evt.EventKey)
+			if perr != nil {
+				log.Errorf("[Recall] walkTurnChain GetParent failed key=%d: %v", evt.EventKey, perr)
+			}
+			parentKey = pk
+		}
+		currentKey = parentKey
+	}
+
+	// Reverse to chronological order (oldest → newest).
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain, reachedInput, len(chain) >= maxSteps && !reachedInput, nil
 }
 
 // buildRecallSubTools assembles the sub-tools for RecallAgent.
@@ -522,20 +532,21 @@ func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 // global tool registry. Called by tagent.RegisterBuiltinTools().
 //
 // Registered tools:
-//   - recall_query: query historical events with time range and keyword filtering
-//   - recall_get: get full event details by key, optionally include parent event
-//   - recall_recent: get the most recent events with optional time range filtering
-//   - recall_trace: trace the causal chain backward from an event by following ParentKey links
-//   - memory_turn: reconstruct a task turn's execution process (walk chain back to external_input)
-//   - memory_recall: the protocol recall tool (items-ticket or query, pure function)
+//   - recall: the UNIFIED recall entry (items tickets / turn_key causal chain /
+//     query semantic search / orchestrate reserved form) — supersedes the
+//     retired memory_recall and memory_turn tool names (stable-context-
+//     compaction D7)
+//   - recall_query / recall_get / recall_recent / recall_trace: RecallAgent
+//     orchestration sub-tools (internal to the orchestrate branch; not for
+//     direct top-level assembly)
 func RegisterSubTools() {
 	agent.RegisterPlainTool("recall_query", recallQueryFactory)
 	agent.RegisterPlainTool("recall_get", recallGetFactory)
 	agent.RegisterPlainTool("recall_recent", recallRecentFactory)
 	agent.RegisterPlainTool("recall_trace", recallTraceFactory)
-	agent.RegisterPlainTool("memory_turn", memoryTurnFactory)
-	// memory_recall: the protocol recall tool (top-level agent, pure function).
-	agent.RegisterPlainTool("memory_recall", memoryRecallFactory)
+	// recall: the unified entry (top-level agent, deterministic shapes are
+	// pure functions).
+	agent.RegisterPlainTool("recall", recallFactory)
 }
 
 func recallQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
@@ -564,11 +575,4 @@ func recallTraceFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 		return nil, fmt.Errorf("recall_trace requires MemStore")
 	}
 	return NewRecallTraceTool(cfg.MemStore).(tool.CallableTool), nil
-}
-
-func memoryTurnFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	if cfg.MemStore == nil {
-		return nil, fmt.Errorf("memory_turn requires MemStore")
-	}
-	return NewMemoryTurnTool(cfg.MemStore).(tool.CallableTool), nil
 }

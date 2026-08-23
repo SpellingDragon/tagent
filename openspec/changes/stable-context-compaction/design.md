@@ -21,21 +21,34 @@
 **Non-Goals:**
 
 - 不改 memory 层的 Compaction scheduler（L1→L2→L3 日/周程压缩，另一子系统）。
-- 不给巨型单事件（keepRecent/进行中段内）加渲染上限——escalation 已兜底，与用户消息同权的一般属性。
+- 不给巨型单事件加**条件式**渲染上限（随预算状态变化的截断会破坏 D3 渲染冻结的字节确定性）；超大输出的防线是产生时转储（见 D1 修订）。
 - 不动 `resume_task`（plan 生命周期真刚需）；不探"plan 状态文件化替代内存 rounds"（独立线程，另行提案）。
 - 不优化看板"已运行 Xs"秒级精度的微小抖动（记录为后续可选）。
 
 ## Decisions
 
-### D1: task_settled 全量保真（删构造时截断）
+### D1: task_settled 输出转储（评审修订版：全文→文件）
 
-`newTaskSettledEvent` 直接使用 `sig.Output` 全文构造 Content；删除截断分支、`maxInline` 参数、`DefaultTaskSettledMaxInline`、`TaskSettledMaxInline` 配置穿线。
+**初版（已废弃）**：直接用 `sig.Output` 全文构造 Content，"全量随事件本体永在 MemoryStore"。评审澄清后推翻，两个致命缺陷：
 
-**拒绝的替代**：
-- *保留宽上限（如 M/16）+ 全量另存*：FullEvent 无第二内容字段，"截断版本体 + 全量旁路"引入双表示复杂度，且违反"本体即真相"。
-- *渲染层防暴上限*：escalation 已是预算兜底；巨型结算与巨型用户消息同权，单独设防反而制造新例外。
+1. **不可压区硬上限死区**：巨型 settle 落入进行中段（agent_output 前恒 L0）或 keepRecent 窗口，escalation 够不到这两区（它只压 `IsComplete && age≥k` 的老段）。若不可压区合计物理超过 provider 硬上限（maxTokens）→ 请求 400 超限 → 空响应不 echo agent_output（既有防退化设计）→ 段永不闭合 → 会话卡死，不可自愈。M=128k 时单条约 >9 万字（中文）可触发——tmux 超宽行/中文密集输出可达。
+2. **召回复发**：`memory_recall` 是整事件返回、无分页——模型凭票据召回巨型全文，上下文当场再爆。事件持全文的方案只是把爆炸从"自动进"推迟到"召回进"。
 
-**成本账**：巨型结果全文驻留至 L3（窗口期 + L2 段龄 ≈ 4k=16 回合），每轮 token 增量受 escalation 管制；L3 后与现状完全相同（80 字符卡片）。
+**修订版（实施目标）**：对齐同步路径已有的转储三件套（`OutputLimitTool` 超限全文存文件+路径票据；`ActionTool` >2000 字符写 `output_<session>.txt`+尾部；`workspace.Cleaner` 周期清理 tool-output/，1h 扫描/24h 过期/200 文件封顶）——异步 settle 是唯一没接上这套模式的路径，补齐它：
+
+- 超过转储阈值（与 `OutputLimitTool` 同公式 `maxChars = MaxTokens/2×4` 字符，同步异步一个"超大"定义）→ 全文写 `workspace tool-output/task-<id8>-<ts>.txt`（Cleaner 自动管清理）；
+- 事件 Content = 尾部（对齐 ActionTool 的 2000 字符）+ 路径票据；**事件本体有界**，`memory_recall` 召回此事件返回有界版+票据，永不复发大结果；
+- 全文消费唯一通道：`read_file(path, start_line, num_lines)` 行级分页（上游 file 工具集已支持：返回带行号范围、大文件读全量报错强制分块）；
+- 小结果（≤阈值）全文内联，与现状一致。
+
+**确立的分层原则**：**超大内容的本体是文件，不是事件**——产生时转储（防进上下文）、记忆只持有界内容+路径票据（防召回复发）、read_file 分页消费（防读回爆炸）。三层各司其职，任何一层都不单独承担全文。
+
+**与初版的权衡差异**：全文不再永久随事件持久（文件受 24h/200 文件清理约束）——与同步工具输出同等待遇，对称即可接受；旧卖点"与 TTL 解耦永久召回"退役，由"24h 内 read_file 分页可读"替代。
+
+**拒绝的替代**（评审澄清过程淘汰）：
+- *渲染层条件式上限（预算升级后仍超限才截）*：截断随预算状态变化 → 同一事件各轮渲染不同 → 破坏 D3 字节稳定性，自相矛盾。
+- *失败时强制闭合段*：闭合后巨型内容仍在 keepRecent 窗口，需再等 4 回合老化+破例压缩才自愈，修不彻底。
+- *纯接受死区（零代码）*：死区触发条件极端（单条 >70% 预算）且卡死可重启恢复，但卡死表现（会话静默）对使用者不友好；转储方案复用既有三件套，增量极小，性价比高于接受。
 
 ### D2: 触发收敛为单一 token 容量阈值（BREAKING）
 
@@ -70,25 +83,47 @@
 
 ### D6: get_task_result 退役，其余任务工具保留
 
-- `get_task_result` 从 `RegisterSubTools` 注册表退役并删除实现与测试：能力等价替代为 `memory_recall(items=[{key}])`（票据=task_settled 事件的 evt key）→ FullEvent.Content 全量，且与 TTL 解耦。
+- `get_task_result` 从 `RegisterSubTools` 注册表退役并删除实现与测试：能力替代为双层——小结果随事件内联直接可见；超大结果经转储文件 + `read_file` 分页读取（D1），票据（evt key / 文件路径）均随通知可达。
 - `list_tasks`/`cancel_task`/`relaunch_task` **保留注册**（看板之外的主动查询、取消卡死任务、重跑，均无替代通道），仅框架文案不再引用；`action_tool_desc.md` 删除对任务工具组的引用句。
 - `resume_task` 保留（plan 生命周期契约）。
+
+### D7: recall 统一单入口（参数路由，确定性优先）
+
+**现状三张脸**（模型侧认知负担 + 误调用面）：`memory_recall`（纯函数，items/query 已有分流雏形）、`memory_turn`（因果链回走）、`recall` 子 agent（LLM 多跳编排，自带 recall_query/get/recent/trace/memory_turn 五个子工具）。用户裁决：模型侧不应当区分，工具自行按参数路由纯工程或 LLM。
+
+**统一形态**：单一 `recall` 工具，参数即路由——
+
+| 参数形态 | 路由 | 原工具 |
+|---|---|---|
+| `items=[{key,hint?}]` | 纯函数票据直达（批量 GetEvent，零 LLM） | memory_recall items |
+| `query`(+time/type/keyword filters) | 工程检索（QueryOptions，可演进向量） | memory_recall query |
+| `turn_key` | 因果链回走（external_input 边界停） | memory_turn |
+| `orchestrate: true`（显式） | 升级 RecallAgent LLM 多跳编排 | recall 子 agent |
+
+- **确定性优先**：LLM 编排为**显式 opt-in**（`orchestrate` 参数），不做自动升级——同一次调用在不同状态下走不同路径不可预测，与 D3 确定性精神一致。
+- **退役面**：`memory_recall`/`memory_turn` 工具名合并退役；recall 子 agent 的五子工具不再对主 agent 直接暴露，收编为编排分支的内部实现；RecallAgent 保留为编排引擎（prompt/定位不变，入口收窄）。
+- **装配**：yaml 从 `memory_recall`+`memory_turn`+`- agent: recall` 三条挂载收敛为单条 `- kind: tool, id: recall`。
+- **输出协议不变**：统一条目 `{key(hex), type, summary, content, time}`（含诚实截断提示）；大结果防复发由 D1 转储保证（事件本体有界，recall 任何路径都不会回流超大全文）。
+
+**拒绝的替代**：*保留多工具*——三张脸要求模型理解工具职责边界（生产日志已见误用与自报工具清单幻觉）；*自动判断升级 LLM*——不可预测路径。
 
 ## Risks / Trade-offs
 
 - [小内容长会话 refs 无界增长] → 接受（D2 论证）；渲染 O(refs) 每轮一次成本线性可测；后续如需兜底可加极宽 refs 上限（如 512），本 change 不做。
 - [整理轮前缀一次性大重排] → 触发频率 = token 摊销周期（LSM 锯齿模型）；指数定级延长段驻留减少重排幅度；这是容量触发整理的固有代价，换来整理间的完全稳定。
-- [巨型结算全文进一轮 LLM 调用] → escalation 预算兜底（L2→L3 oldest-first 收敛）；与巨型用户消息同权。
+- [转储文件被 Cleaner 清理后票据失效] → read_file 报 not found，模型可感知并停止依赖；与事件归档后的召回退化同级；24h 窗口内可读已覆盖绝大多数消费时机。
+- [转储阈值公式（M/2×4 chars）对中文偏松] → 与同步路径同公式保持一致性优先；即便单条巨型，其宿主段闭合后交由定级/escalation 处理，死区仅在"不可压区自身物理超限"触发，条件极端。
 - [触发但无料可整（进行中段独大）] → changed=false 幂等短路原样返回，无行为回退。
-- [BREAKING：轮数触发语义删除] → 既有依赖该行为的测试（skeleton_archive_test 收敛断言、hint 测试）迁移为容量触发等价断言；无部署配置依赖（`task_settled_max_inline` 在生产 yaml 中为注释态）。
-- [历史截断版 task_settled 事件] → 不迁移（事件不可变原则）；新结算起全量。
+- [BREAKING：轮数触发语义删除] → 既有依赖该行为的测试迁移为容量触发等价断言；无部署配置依赖。
+- [历史截断版 task_settled 事件] → 不迁移（事件不可变原则）；新结算起转储。
 
 ## Migration Plan
 
 1. 合入即生效，无持久化迁移；`task_settled_max_inline` 配置键删除后，yaml 残留键被忽略（现有解析容错）。
-2. 回滚 = git revert（无数据格式变化；投影 boundary 为进程内存态，重启自然重建）。
-3. 验证路径：单测（触发单维、渲染冻结字节断言、全量 settle）→ 全量 `go test ./...` → wechat-bot 实测观察 `[ContextCompressor]` 日志（预期：under budget 直通为主、compressing 稀疏化、SmartCompress 每次有效）。
+2. 回滚 = git revert（无数据格式变化；投影 boundary 为进程内存态，重启自然重建；转储文件随 Cleaner 自然回收）。
+3. 验证路径：单测（触发单维、渲染冻结字节断言、settle 转储/内联分界）→ 全量 `go test ./...` → wechat-bot 实测观察 `[ContextCompressor]` 日志（预期：under budget 直通为主、compressing 稀疏化、SmartCompress 每次有效）与巨型后台命令的 settle 转储行为。
 
 ## Open Questions
 
-（无——核心决策已在探索阶段闭合；看板时间精度为记录在案的后续可选优化）
+（recall 统一已纳入 D7，随本 change 实施）
+- 看板"已运行 Xs"秒级精度的微小抖动为记录在案的后续可选优化。

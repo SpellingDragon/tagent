@@ -9,8 +9,9 @@
 - **WHEN** agent 装配了 `list_tasks`/`cancel_task` 并调用
 - **THEN** 工具 SHALL 即时返回任务清单/取消结果（不进入 dense 窗口）
 
-#### Scenario: 大结果全量经事件召回
+#### Scenario: 结果消费不走专用工具
 
-- **WHEN** 一个 task_settled 事件携带全量结果被持久化，稍后模型需要完整内容
-- **THEN** 模型 SHALL 经 recall 协议（memory_recall，票据=该事件的 evt key）获取全文
+- **WHEN** 一个 task_settled 事件携带结果（小结果内联全文 / 超大结果尾部+文件路径票据）被持久化，稍后模型需要内容
+- **THEN** 小结果 SHALL 直接从通知/召回可见；超大结果 SHALL 经 `read_file` 分页读取转储文件
 - **AND** SHALL NOT 依赖 `get_task_result` 工具或任务层 TTL 窗口
+- **AND** 召回路径 SHALL NOT 返回超大全文（事件本体有界，复发不可能）

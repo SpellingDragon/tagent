@@ -276,8 +276,8 @@ func (cc *ContextCompressor) Compress(
 	refs = cc.foldToolRuns(refs)
 	resolved = cc.resolveRefs(ctx, refs)
 
-	log.Infof("[ContextCompressor] compressing (tokens %d vs %d), %d messages from %d refs",
-		usedTokens, threshold, len(resolved), len(refs))
+	log.Infof("[ContextCompressor] compressing (tokens %d vs %d; folded render %d tokens), %d messages from %d refs",
+		usedTokens, threshold, cc.tokenCounter.Estimate(resolved), len(resolved), len(refs))
 
 	originalKeepRecent := cc.compressor.KeepRecentTasks
 	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
@@ -369,7 +369,10 @@ func (cc *ContextCompressor) resolveRefs(ctx context.Context, refs []memory.Even
 // anchorFullBoundary picks the full-window anchor after a compaction round
 // (D3): the oldest of the most recent recentFull positive-key retained refs.
 // Zero (fewer positive-key refs than the window) keeps everything full —
-// the small-session behavior.
+// the small-session behavior: that round's retained set is tiny, so full
+// rendering is cheap and correct; if a later round re-anchors, prior frozen
+// refs that survived stay within the window semantics (a transient re-anchor
+// churn is self-healing — one extra compaction re-converges; no error).
 func anchorFullBoundary(refs []memory.EventReference, recentFull int) int64 {
 	count := 0
 	for i := len(refs) - 1; i >= 0; i-- {

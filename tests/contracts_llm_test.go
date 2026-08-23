@@ -76,7 +76,7 @@ func declTool(name, desc string, props map[string]*tool.Schema, required ...stri
 
 // ---------------------------------------------------------------------------
 // C2+C4 卡片票据契约：滚动摘要卡片行/归档通知里的 hex key，模型必须能
-// 原样抄给 memory_recall(items)。
+// 原样抄给 recall(items)。
 // ---------------------------------------------------------------------------
 func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 	kDeploy := int64(0x1201bb20000001)
@@ -90,8 +90,8 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 	archive := "〔历史归档〕[context_archive] evt_" + tagentevent.FormatEventKey(kDeploy) +
 		" 已摘要归档，摘要 key=" + tagentevent.FormatEventKey(kSummary)
 
-	recallTool := declTool("memory_recall",
-		"统一记忆召回。items=[{key,hint?}]：key 为 canonical hex 字符串,从卡片行/归档通知的 [key] 中原样复制。",
+	recallTool := declTool("recall",
+		"统一记忆召回（单入口）。items=[{key,hint?}]：key 为 canonical hex 字符串,从卡片行/归档通知的 [key] 中原样复制。",
 		map[string]*tool.Schema{
 			"items": {Type: "array", Items: &tool.Schema{Type: "object", Properties: map[string]*tool.Schema{
 				"key":  {Type: "string", Description: "canonical hex event key"},
@@ -100,12 +100,12 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 		}, "items")
 
 	name, args, text := callOnce(t, []model.Message{
-		model.NewSystemMessage("历史已压缩为卡片序列;需要原文时调用 memory_recall,key 从卡片行原样复制。"),
+		model.NewSystemMessage("历史已压缩为卡片序列;需要原文时调用 recall,key 从卡片行原样复制。"),
 		model.NewUserMessage(rolling + "\n" + archive + "\n\n请召回部署 v2 那次的完整原文。"),
-	}, map[string]tool.Tool{"memory_recall": recallTool})
+	}, map[string]tool.Tool{"recall": recallTool})
 
-	if name != "memory_recall" {
-		t.Fatalf("model must call memory_recall, got tool=%q text=%q", name, text)
+	if name != "recall" {
+		t.Fatalf("model must call recall, got tool=%q text=%q", name, text)
 	}
 	t.Logf("model args: %s", args)
 	var parsed struct {
@@ -133,19 +133,19 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// C3 settle 票据契约（通知→召回，stable-context-compaction D6）：task_settled
-// 通知全文携带结果并带 [evt_KEY|external_input] 前缀票据，需要历史原文时
-// 模型必须能抄 evt key 给 memory_recall（get_task_result 已退役）。
+// C3 settle 票据契约（通知→召回，stable-context-compaction D1 修订/D7）：
+// task_settled 通知渲染形态带 [evt_KEY|external_input] 前缀票据，需要历史
+// 原文时模型必须能抄 evt key 给统一 recall 工具（get_task_result 已退役）。
 // ---------------------------------------------------------------------------
 func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
 	kSettle := int64(0x1201bb20000abc)
 	taskID := "a3f8c2d1-7e4b-4a9c-b2d5-9f1e8c7a6b50"
 	// 与 agent/event_bus.go newTaskSettledEvent 模板 + resolveRef 前缀同步：
-	// 全量结果内联，无截断提示。
-	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] 后台任务已结算\n任务: make build\n状态: completed\n(task id: " + taskID + ")\n结果:\n...build ok 完整输出..."
+	// 小结果全文内联（大结果为尾部+转储文件票据，此处验证票据可抄）。
+	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] 后台任务已结算\n任务: make build\n状态: completed\n(task id: " + taskID + ")\n结果:\n...build ok 输出..."
 
-	recallTool := declTool("memory_recall",
-		"统一记忆召回。items=[{key,hint?}]：key 为 canonical hex 字符串，从事件前缀 [evt_KEY|type] 中原样复制。",
+	recallTool := declTool("recall",
+		"统一记忆召回（单入口）。items=[{key,hint?}]：key 为 canonical hex 字符串，从事件前缀 [evt_KEY|type] 中原样复制。",
 		map[string]*tool.Schema{
 			"items": {Type: "array", Items: &tool.Schema{Type: "object", Properties: map[string]*tool.Schema{
 				"key":  {Type: "string", Description: "canonical hex event key"},
@@ -154,12 +154,12 @@ func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
 		}, "items")
 
 	name, args, text := callOnce(t, []model.Message{
-		model.NewSystemMessage("后台任务结算以通知形式到达（全文内联）；需要历史事件原文时调用 memory_recall，key 从 evt 前缀原样复制。"),
+		model.NewSystemMessage("后台任务结算以通知形式到达；需要历史事件原文时调用 recall，key 从 evt 前缀原样复制。"),
 		model.NewUserMessage(notice + "\n\n请把这次结算事件的完整原文召回给我。"),
-	}, map[string]tool.Tool{"memory_recall": recallTool})
+	}, map[string]tool.Tool{"recall": recallTool})
 
-	if name != "memory_recall" {
-		t.Fatalf("model must call memory_recall, got tool=%q text=%q", name, text)
+	if name != "recall" {
+		t.Fatalf("model must call recall, got tool=%q text=%q", name, text)
 	}
 	t.Logf("model args: %s", args)
 	var parsed struct {

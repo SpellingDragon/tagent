@@ -38,7 +38,7 @@ sequenceDiagram
     T-->>U: 🔔 Deployment finished (notification, non-blocking)
     Note over T,M: context over budget → compact: old events archived,<br/>history condensed to card lines [evt_1a2b] deploy OK…
     U->>T: (next day) "What was that deploy error detail?"
-    T->>M: memory_recall(items=[{key: 1a2b}])
+    T->>M: recall(items=[{key: 1a2b}])
     M-->>T: precise readback (zero hallucination)
     T-->>U: full detail
 ```
@@ -64,11 +64,8 @@ agents:
       type: localfile
       path: /data/tagent/events
     tools:
-      - agent: recall            # sub-agent tool: complex retrieval
-        description_file: recall_tool_desc.md
-        event_params: [event_keys]
       - kind: tool
-        id: memory_recall        # pure-function tool: ticket/keyword recall
+        id: recall               # unified recall entry: tickets/causal-chain/keyword search (parameters are the router)
       - kind: tool
         id: exec                 # tmux execution (async task layer)
         description_file: action_tool_desc.md
@@ -127,7 +124,7 @@ graph TB
     EB -->|event plugin pipeline: store + project at one point| MS
     MS -.ProjectionSink appends reference.-> SP
     SP -->|assembleRequest native rendering| LLM
-    MS -->|memory_recall / recall tools| TOOL
+    MS -->|recall tool| TOOL
 ```
 
 **Key constraints**: the projection holds lightweight references only (key+type+summary); MemoryStore is the sole complete event chain; compression touches the LLM view and projection, never storage.
@@ -143,7 +140,7 @@ graph LR
 
 - **Constant cost**: each layer summarizes only the previous layer's output, so compression cost depends on new content only — a year-old agent compresses as fast as a day-old one
 - **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + card lines + recent keys`); meditation outputs get ★ highlights
-- **Raw events may be forgotten, summaries persist**: summaries never expire; the `[hex]` key on each card is a recall ticket — `memory_recall` fetches the original text anytime
+- **Raw events may be forgotten, summaries persist**: summaries never expire; the `[hex]` key on each card is a recall ticket — `recall` fetches the original text anytime
 
 ### Memory data model (LSM)
 
@@ -170,7 +167,7 @@ See [wiki/memory §16](docs/wiki/memory/memory-architecture.md) for the full dat
 | Mechanism | Highlights | Deep dive |
 |-----------|-----------|-----------|
 | Persistent event loop | Pull batching; async results queue without interrupting an in-flight turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
-| Context compression | SmartCompressor (LLM view, L0-L3 levels) + Compactor (rolling card projection); pure view transforms | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
+| Context compression | SmartCompressor (LLM view, L0-L3 levels) + Compactor (rolling card projection); **capacity-gated compaction** (compact only over the token threshold) with render freeze between rounds (byte-stable prefix, cache-friendly); oversized settle results spill to files; pure view transforms | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | Event-driven memory | every event has a globally unique, time-ordered key; per-agent storage isolation with explicit cross-agent read grants | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
 | Sub-agent invocation | `event_params: [event_keys]` passes events by key (data isolation); transparent remote A2A | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
 | Async task layer | Adaptive polling (dense → geometric backoff); 3-tier settle; live task board; `resume_task`; session reaping loop | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
