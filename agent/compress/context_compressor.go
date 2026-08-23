@@ -316,6 +316,17 @@ func (cc *ContextCompressor) Compress(
 	}
 }
 
+// FullBoundary returns the current full-render window anchor (D3). Zero
+// means everything renders full (never compacted, or fewer retained refs
+// than the window).
+func (cc *ContextCompressor) FullBoundary() int64 { return cc.fullBoundary }
+
+// SetFullBoundary overrides the full-render window anchor. Intended for
+// cross-instance boundary inheritance (e.g. simulations / future restart
+// restoration): the anchor is process-local state, so a fresh compressor
+// starts at zero unless explicitly seeded.
+func (cc *ContextCompressor) SetFullBoundary(key int64) { cc.fullBoundary = key }
+
 // resolveRefs resolves projection refs into native timeline messages with
 // render-time pairing repair. Full resolution (MemoryStore content) applies to
 // refs at/after the full-window anchor frozen at the last compaction round
