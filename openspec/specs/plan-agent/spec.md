@@ -3,9 +3,7 @@
 ## Purpose
 
 本规范定义 plan-agent 能力。The plan agent SHALL wrap `TagentAgent` with a custom `Run` method that inspects the `action` field from the invocation.
-
 ## Requirements
-
 ### Requirement: plan agent implements dual-mode Run via custom Run method
 
 The plan agent SHALL wrap `TagentAgent` with a custom `Run` method that inspects the `action` field from the invocation. When `action == "progress"`, it SHALL bypass the LLM entirely — directly reading `openspec/changes/`, parsing `tasks.md` checkboxes, and returning a progress summary as a final response event. For all other actions (`create`, `update`, `archive`), it SHALL delegate to the standard `TagentAgent.Run` for ReAct execution.
@@ -73,7 +71,7 @@ tagent SHALL NOT have direct access to openspec-specific file operations; all op
 
 ### Requirement: PlanProgressTracker removed
 
-The `PlanProgressTracker` BeforeModel callback, `OpenSpecDir` configuration field, and all related code SHALL be removed. Progress injection into tagent's context SHALL NOT happen automatically.
+The `PlanProgressTracker` BeforeModel callback, `OpenSpecDir` configuration field, and all related code SHALL be removed. Progress injection into tagent's context SHALL NOT happen automatically — tagent queries progress on demand via `tool_call(plan, ...)`.
 
 #### Scenario: no BeforeModel callback for plan progress
 
@@ -83,12 +81,13 @@ The `PlanProgressTracker` BeforeModel callback, `OpenSpecDir` configuration fiel
 
 ### Requirement: FrameworkPrompt does not hardcode plan tool
 
-The FrameworkPrompt SHALL NOT mention the plan tool by name. Plan tool usage guidance SHALL be entirely contained in `plan_tool_desc.md`.
+The FrameworkPrompt SHALL NOT mention the plan tool by name. Plan tool usage guidance SHALL be entirely contained in `plan_tool_desc.md`. FrameworkPrompt MAY mention that some tools provide structured planning capabilities, but SHALL NOT reference specific tool names.
 
 #### Scenario: FrameworkPrompt is tool-agnostic
 
 - **WHEN** FrameworkPrompt is prepended to an agent's system prompt
 - **THEN** it SHALL NOT contain the string "plan" as a tool name reference
+- **AND** plan usage guidance SHALL only exist in the tool description file
 
 ### Requirement: plan sub-agent manages openspec work plans via dual-mode operation
 
@@ -256,18 +255,19 @@ plan agent 的产出物 SHALL 仅为计划与规格文档（proposal / tasks / d
 
 ### Requirement: 同名计划任务单飞
 
-`AgentToolWrapper` 为 plan 类子 agent spawn 任务时，若调用携带非空 `name`，幂等 Key SHALL 为 `agentName + ":" + name`（relaunch 轮次 SHALL 透传同一 Key）；同名 change 的并发 spawn SHALL 被任务层去重短路（返回既有任务与 Deduped 标记），后到调用方 SHALL 收到含既有 task id 的提示，引导先等待 task_settled、结算后再 resume（去重发生时任务必为 running，直接 resume 会被“轮次在飞”拒绝）。未携带 `name` 的调用维持按 `request` 去重。
+`AgentToolWrapper` 为 plan 类子 agent spawn 任务时，若调用携带非空 `name`，幂等 Key SHALL 为 `agentName + ":" + name`（relaunch 轮次 SHALL 透传同一 Key）；同名 change 的并发 spawn SHALL 被任务层去重短路（返回既有任务与 Deduped 标记），后到调用方 SHALL 收到含既有 task id 的**事实性提示**（票据化：同名任务已在运行、等待其 task_settled 结果、勿重复发起同名调用）。提示 SHALL NOT 教学具体操作工具（如 `get_task_result` 查询、`resume_task` 续行的调用示例）——生命周期操作指引属于 plan 工具描述，与实际装配一致。未携带 `name` 的调用维持按 `request` 去重。
 
 #### Scenario: 同名并发 spawn 去重
 
 - **WHEN** 两次携带相同 `name` 的 plan 调用并发发生
 - **THEN** 恰有一个任务被跟踪
-- **AND** 后到者 SHALL 收到既有 task id 与“先等 task_settled、结算后再 resume_task 续行”的指引，SHALL NOT 产生第二个并发 Run
+- **AND** 后到者 SHALL 收到含既有 task id 与"等待 task_settled、勿重复发起"的事实性指引，SHALL NOT 产生第二个并发 Run
+- **AND** 提示文本 SHALL NOT 引用 `get_task_result` 或 `resume_task` 等工具名
 
 #### Scenario: relaunch 保持 name 键
 
-- **WHEN** 对携带 name 创建的 plan 任务执行 relaunch
-- **THEN** 新任务的幂等 Key SHALL 仍为 `agentName:name`，SHALL NOT 回退到 request 文本键
+- **WHEN** 同名任务的 relaunch 轮次再次 spawn
+- **THEN** 幂等 Key SHALL 透传同一 `agentName + ":" + name`，不产生重复任务
 
 ### Requirement: 文件工具路径基准双列对照
 
@@ -282,3 +282,4 @@ plan agent 的系统提示词 SHALL 以对照表形式同时声明读写两套�
 
 - **WHEN** plan agent 的系统提示词描述归档核查手段
 - **THEN** SHALL NOT 引用 plan 工具集中不存在的工具（如 `action`/shell）
+

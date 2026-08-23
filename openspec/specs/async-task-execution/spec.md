@@ -7,9 +7,7 @@ persistent event loop, by running each call as a Task in a task layer. A call
 either settles within the dense phase and returns inline, or crosses the
 dense→sparse boundary (detach) and returns an honest ack while the Task is
 tracked in the background (see also `adaptive-poll-scheduling`).
-
 ## Requirements
-
 ### Requirement: 工具调用经 spawn + dense 窗口执行
 
 每个纳入任务层的 tool / 子 agent 调用 SHALL 通过 spawn 一个 Task 执行。`Call()` SHALL 等待该 Task 的**第一个 settle 信号**直到调度的 **dense 阶段**结束（dense→sparse 边界，即 detach；见 `adaptive-poll-scheduling`）:
@@ -86,6 +84,8 @@ settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)�
 
 后台任务的结算结果（task_settled)SHALL 被视为"通知"类外部输入事件：它 SHALL NOT 被视为对某次"等待中" tool 调用的协议应答（同步应答已在 spawn 的 sync-wait 窗口内以 ack/内联结果完成）；它 SHALL 作为新的驱动事件进入时间线并触发回收 turn。通知内容 SHALL 携带文本级关联标识（task id 与任务简述），使模型能在内容上将通知与先前的调用关联。
 
+通知结果 SHALL **有界化**（对齐同步路径的输出转储模式）：结果不超过转储阈值（与 OutputLimitTool 同公式，`MaxTokens/2×4` 字符）时全文内联；超过时全文 SHALL 转储到 workspace 的 tool-output 目录（受 Cleaner 周期清理），通知 Content SHALL 携带尾部摘录（对齐 ActionTool 的 2000 字符）与文件路径票据，事件本体 SHALL NOT 持有全文——凭票据召回该事件返回的是有界版+票据，大结果永不经召回回流上下文。全文消费 SHALL 经 `read_file(start_line, num_lines)` 行级分页。
+
 #### Scenario: 慢命令的应答-通知二段式
 
 - **WHEN** 一个命令越过 dense 窗口转后台，稍后在后台 settle
@@ -98,6 +98,20 @@ settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)�
 - **THEN** 通知文本 SHALL 含 task id 与任务简述
 - **AND** 同时间线中先前 ack 文本 SHALL 含同一 task id
 
+#### Scenario: 小结果全文内联
+
+- **GIVEN** 一个 settle 输出低于转储阈值（如 800 字符）
+- **WHEN** task_settled 事件被构造并持久化
+- **THEN** 事件 Content SHALL 为结果全文，SHALL NOT 含截断标记或文件票据
+
+#### Scenario: 大结果转储文件且事件有界
+
+- **GIVEN** 一个 settle 输出远超转储阈值（如数万字符）
+- **WHEN** task_settled 事件被构造
+- **THEN** 全文 SHALL 已写入 tool-output 目录文件，通知 SHALL 含尾部摘录与文件路径票据
+- **AND** 事件 Content SHALL 有界（不含全文），凭 evt key 召回 SHALL 返回有界版+票据，不复发大结果
+- **AND** 模型 SHALL 可经 `read_file` 分页读取全文
+
 ### Requirement: 任务状态机 resume 边
 
 任务状态机 SHALL 新增 resume 边:合法源状态 {alive-detached, stable, completed, failed} --resume(input)--> running(dense)（存活类=会话重入;完成态=round 型执行器的自然续行点）;running/suspect/cancelled SHALL 拒绝并引导。resume 后的结算复用既有 settle 三档分类与 task_settled 通知路径,通知 SHALL 携带原 task id。任务工具族 SHALL 加入 `resume_task`（与 list/get/cancel/relaunch 并列）。
@@ -106,3 +120,4 @@ settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)�
 
 - **WHEN** resume 的命令在 dense 窗口外完成
 - **THEN** SHALL 发布 task_settled 通知（同一 task id）,持久循环按既有规则回收 turn
+

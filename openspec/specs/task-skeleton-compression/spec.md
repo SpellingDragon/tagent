@@ -3,9 +3,7 @@
 ## Purpose
 
 以 `agent_output` 为段边界、按 `tool > assistant` 优先级丢弃中间事件、保留 `external_input + agent_output` 任务骨架，并在骨架仍超预算时触发多段合并压缩（rolling summary 归档出口）的压缩能力。段 = 一次完整任务回合，骨架 = 用户原话与最终结论。
-
 ## Requirements
-
 ### Requirement: 以 agent_output 为段边界切分任务回合
 
 系统 SHALL 以 `agent_output` 事件为段闭合边界，将历史时间线切分为任务回合段：一个段 SHALL 包含 `[external_input, (thinking_plan|action_command)*, agent_output]`。`agent_output` 的识别 SHALL 优先依据消息的 event 类型前缀（`[evt_KEY|agent_output]`），对缺失前缀的输入 SHALL 退回启发式（`assistant` 且无 `tool_calls` 视为回合收尾）。
@@ -93,29 +91,6 @@
 - **THEN** 该 `KEY` 对应的 ref SHALL 被保留在 projection
 - **AND** 未出现在压缩结果中的 ref SHALL 被收编进 rolling summary
 
-### Requirement: 压缩触发器多维化（token 阈值或完整段超龄）
-
-`ContextCompressor.Compress` SHALL 在 token 阈值之外，增加**完整任务段超龄**作为独立触发维度：当 refs 中 `agent_output` 段边界计数（完整任务回合数）超过 `keepRecent` 时，即使 `usedTokens <= threshold` SHALL 调用 `SmartCompressor.Compress`。完整段计数 SHALL 复用现有的 ref 遍历统计（零额外扫描成本），SHALL NOT 通过每轮全量分段来获得。稳态收敛到 ~3×keepRecent 个 retained agent_output（L0/L1/L2 段都保留边界事件），长会话里触发持续——LSM 式连续维护滚动摘要的设计意图。
-
-#### Scenario: 完整段超龄时即使 under budget 也触发
-
-- **GIVEN** 会话有 5 个完整任务回合（keepRecent=2），`usedTokens` 低于阈值
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** SHALL 调用 `SmartCompressor.Compress`（此前因 under budget 直接返回，压缩从未运行）
-- **AND** 老回合 SHALL 按段龄被 L1 丢弃 tool 事件、L3 折叠进滚动摘要
-
-#### Scenario: 完整段未超龄时短路返回
-
-- **GIVEN** 会话仅有 1 个完整任务回合，且 `usedTokens` 低于阈值
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** SHALL NOT 调用 `SmartCompressor.Compress`，直接返回原始 refs
-
-#### Scenario: token 阈值触发保持有效（回归）
-
-- **GIVEN** `usedTokens` 超过阈值
-- **WHEN** 执行 `ContextCompressor.Compress`
-- **THEN** SHALL 调用 `SmartCompressor.Compress`（与既有行为一致）
-
 ### Requirement: LLM 文摘作为卡片之上的可选叠加层
 
 骨架压缩（`compressSkeleton`）是纯工程、零 LLM：L3 = 整段离场→`buildRetainedRefs` 折叠成滚动摘要卡片，**不做 LLM 段摘要**。骨架管线的 LLM 文摘是 `condenseCardLines`（`curateCards` 内）：卡片超 `cardMaxChars` 时 SHALL 用 summary 模型浓缩较旧一半卡片、保留最新卡片原文；无模型时 SHALL 将最旧行沉底为计数（不报错）。LLM 段摘要 + `segmentContentHash` 归档缓存（同内容复用、落库 `context_compress_summary` 固化物、TTL 豁免）是 `compressLegacy`（`skeleton_segmentation:false` 回退路径）独有。所有 LLM 生成的文摘/浓缩内容 SHALL 保留 `[evt_key]` 召回票据，使卡片始终是召回锚点。
@@ -193,12 +168,12 @@
 
 ### Requirement: 老化工具运行折叠为工具链合成引用
 
-骨架压缩 SHALL 把**连续的老化完整工具对**（thinking_plan + action_command 序列，中间不被 external_input/agent_output 打断，且处于 full=false 渲染区间）折叠为一个 `tool_chain` 合成引用（负 key），其 EventSummary 为一行工具链（`- 工具链: name1→name2→…（N步）[evt_first→evt_last]`）。原工具事件 refs SHALL 从投影移除、由该合成引用替代（无双重表示）。该合成引用 SHALL 使用独立的 `tool_chain` 事件类型（区别于 `context_compress`，不被吸收进滚动摘要计数），且 `buildRetainedRefs` SHALL 一律保留它。工具名 SHALL 取自 ref.EventSummary（无需回取全文）。
+骨架压缩 SHALL 在**整理轮**（容量触发的压缩路径内）把**连续的老化完整工具对**（thinking_plan + action_command 序列，中间不被 external_input/agent_output 打断，且处于位置式尾部窗口之外——最近 `recent_full_count` 条 refs 不折叠）折叠为一个 `tool_chain` 合成引用（负 key），其 EventSummary 为一行工具链（`- 工具链: name1→name2→…（N步）[evt_first→evt_last]`）。原工具事件 refs SHALL 从投影移除、由该合成引用替代（无双重表示）。该合成引用 SHALL 使用独立的 `tool_chain` 事件类型（区别于 `context_compress`，不被吸收进滚动摘要计数），且 `buildRetainedRefs` SHALL 一律保留它。工具名 SHALL 取自 ref.EventSummary（无需回取全文）。整理间（未触发轮）SHALL NOT 执行折叠——老化区间外的工具对按 EventSummary 渲染（有界且字节稳定），待下次整理统一折叠。
 
 #### Scenario: 连续工具对折叠为单行工具链
 
-- **GIVEN** 老化区间内有连续 3 对工具事件（read_file/grep/edit 及其结果）
-- **WHEN** 执行压缩前的工具链折叠
+- **GIVEN** 整理轮的老化区间内有连续 3 对工具事件（read_file/grep/edit 及其结果）
+- **WHEN** 执行整理路径内的工具链折叠
 - **THEN** SHALL 折叠为一个 `tool_chain` 合成引用，EventSummary 为 `- 工具链: read_file→grep→edit（3步）[evt_first→evt_last]`
 - **AND** 原 6 条工具事件 refs SHALL 从投影移除
 
@@ -207,6 +182,12 @@
 - **GIVEN** 工具运行中间隔着一个 agent_output 边界事件
 - **WHEN** 折叠
 - **THEN** SHALL 在边界处断开，两侧分别折叠，不跨回合合并
+
+#### Scenario: 未触发轮不折叠
+
+- **GIVEN** 摘要区间内有连续工具对，但 `usedTokens` 低于阈值（未触发整理）
+- **WHEN** 执行 `ContextCompressor.Compress`
+- **THEN** 工具对 SHALL 保持原生 refs（按 EventSummary 渲染），SHALL NOT 产生或扩展 `tool_chain` 合成引用
 
 ### Requirement: 活跃前沿与近期配对不折叠
 
@@ -229,3 +210,38 @@
 - **WHEN** 渲染模型上下文
 - **THEN** 工具历史 SHALL 收敛为少量工具链行（而非 ~130 条逐条消息）
 - **AND** 上下文中 SHALL NOT 出现 `(历史事件摘要为空，可用 recall 检索)` 占位符
+
+### Requirement: 压缩触发器单维化（token 容量阈值）
+
+`ContextCompressor.Compress` SHALL 以**单一维度**触发整理：仅当 `usedTokens > compress_threshold × max_tokens` 时才调用 `SmartCompressor.Compress` 与投影重写；未超阈值时 SHALL pass-through——直接返回按投影渲染的消息且**不触碰投影**（不折叠、不定级、不重建 refs）。完整回合计数 SHALL NOT 参与触发判断。
+
+#### Scenario: 未超阈值时完全直通
+
+- **GIVEN** 会话已有远超 `keep_recent_tasks` 的完整回合数，但 `usedTokens` 低于阈值
+- **WHEN** 执行 `ContextCompressor.Compress`
+- **THEN** SHALL NOT 调用 `SmartCompressor.Compress`，SHALL NOT 执行工具链折叠，投影 refs SHALL 原样返回
+
+#### Scenario: 超阈值触发整理（回归）
+
+- **GIVEN** `usedTokens` 超过 `compress_threshold × max_tokens`
+- **WHEN** 执行 `ContextCompressor.Compress`
+- **THEN** SHALL 调用 `SmartCompressor.Compress`（与既有 token 触发行为一致）
+
+### Requirement: 整理间渲染冻结（前缀字节稳定）
+
+整理（容量触发的压缩轮）之间，投影渲染 SHALL 是 **append-only 稳定**的：全文解析窗口（`recent_full_count`）SHALL 在整理轮锚定为投影内的边界 key（最近 `recent_full_count` 条 retained refs 的最前一条），整理间该边界 SHALL NOT 随 refs 追加而移动。整理后新增事件 SHALL 全文渲染（活跃前沿），既有 refs 的渲染方式（全文/摘要）SHALL 冻结不变——连续未触发轮发出的消息序列 SHALL 保持公共前缀字节级相同。
+
+#### Scenario: 整理间追加新事件不改变旧渲染
+
+- **GIVEN** 上次整理后投影含 refs R1..R50，其中 R35..R50 为全文窗口
+- **WHEN** 新事件 R51..R53 追加且未触发整理，渲染下一轮请求
+- **THEN** R1..R50 的渲染输出 SHALL 与上一轮逐字节相同（R35..R50 仍全文，R1..R34 仍摘要）
+- **AND** R51..R53 SHALL 全文渲染（活跃前沿）
+
+#### Scenario: 整理轮重设边界
+
+- **GIVEN** token 超阈值触发整理
+- **WHEN** `buildRetainedRefs` 产出新的 retained refs
+- **THEN** 全文窗口边界 SHALL 重设为最近 `recent_full_count` 条 retained refs 的最前一条
+- **AND** 之后整理间的渲染方式以新边界冻结
+
