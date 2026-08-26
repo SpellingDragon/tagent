@@ -163,7 +163,7 @@ func recallByQuery(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
 	// WAS searched and steer toward the deterministic shapes.
 	if res.Count == 0 {
 		res.Message = "无可读分区内的匹配事件：已检索本 agent 可读命名空间（自身 + read_namespaces）。" +
-			"可换关键词/时间范围重试；若时间线里有 [evt_…] 票据，用 items 按票据精确回补更可靠"
+			"query 是关键词子串匹配——请改用 1~3 个更短的关键词（勿整句提问）或加时间范围重试；若时间线里有 [evt_…] 票据，用 items 按票据精确回补更可靠"
 	}
 	return res, nil
 }

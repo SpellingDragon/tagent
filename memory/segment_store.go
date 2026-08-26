@@ -676,10 +676,12 @@ func matchesQueryFilters(event FullEvent, query QueryOptions) bool {
 	if query.EndTime > 0 && event.Timestamp > query.EndTime {
 		return false
 	}
-	// Filter by keyword
+	// Filter by keyword: term-split ANY-match (see matchesKeyword) — a
+	// literal whole-string match silently returns zero for the space-
+	// separated keyword lists and sentences models actually send.
 	if query.Keyword != "" {
-		if !containsIgnoreCase(event.EventSummary, query.Keyword) &&
-			!containsIgnoreCase(event.Content, query.Keyword) {
+		if !matchesKeyword(event.EventSummary, query.Keyword) &&
+			!matchesKeyword(event.Content, query.Keyword) {
 			return false
 		}
 	}

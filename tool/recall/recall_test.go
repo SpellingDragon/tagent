@@ -2,6 +2,7 @@ package recall
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,6 +43,25 @@ func TestUnifiedRecall_Routing(t *testing.T) {
 	t.Run("query uses the retrieval layer", func(t *testing.T) {
 		res := call(`{"query":"alpha"}`)
 		assert.Equal(t, "query", res.Mode)
+	})
+
+	// Pure time-range recall: since/until WITHOUT any keyword — the primary
+	// shape for "recall recent history" requests (no keyword guessing). The
+	// retrieval layer matches all events inside the range. Seed timestamps are
+	// the hex key values (kIn < kTp < kAc < kOut < kA).
+	t.Run("pure time-range recall without keyword", func(t *testing.T) {
+		res := call(`{"since":` + fmt.Sprintf("%d", kIn) + `,"until":` + fmt.Sprintf("%d", kAc) + `}`)
+		assert.Equal(t, "query", res.Mode)
+		// Timestamp ∈ [kIn, kAc]: kIn, kTp, kAc; kOut/kA excluded.
+		require.Len(t, res.Entries, 3)
+		// Newest first.
+		assert.Equal(t, tagentevent.FormatEventKey(kAc), res.Entries[0].Key)
+		assert.Equal(t, tagentevent.FormatEventKey(kIn), res.Entries[2].Key)
+	})
+
+	t.Run("since-only recalls everything after", func(t *testing.T) {
+		res := call(`{"since":` + fmt.Sprintf("%d", kOut) + `}`)
+		require.Len(t, res.Entries, 2, "kOut, kA")
 	})
 
 	t.Run("orchestrate returns explicit guidance, never silent fallback", func(t *testing.T) {
