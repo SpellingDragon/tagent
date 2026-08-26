@@ -23,6 +23,9 @@ type Config struct {
 	SkillRepo   tagentpkg.SkillRepository // Optional: skill source
 	MCPToolSets []tagenttool.ToolSet      // Optional: MCP tool sources
 	PromptDir   string                    // Optional: base directory for prompt files (default: "resources/prompts")
+	// ReadPartitionIDs scopes partition-isolated queries (memory_query) to the
+	// agent's readable partitions (own namespace first + read_namespaces).
+	ReadPartitionIDs []int
 
 	// Tools are the sub-tools available to this agent (e.g., skill_search, memory_query).
 	// In the config-driven path, these are injected by buildAgent from the agent's

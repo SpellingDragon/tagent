@@ -56,7 +56,7 @@ func BuildSubTools(cfg Config) []tool.Tool {
 	tools = append(tools, NewWebSearchTool())
 
 	if cfg.MemStore != nil {
-		tools = append(tools, NewMemoryQueryTool(cfg.MemStore))
+		tools = append(tools, NewMemoryQueryTool(cfg.MemStore, cfg.ReadPartitionIDs))
 	}
 
 	return tools
@@ -188,10 +188,13 @@ func NewMCPDiscoverTool(toolSets []tool.ToolSet) tool.Tool {
 }
 
 // NewMemoryQueryTool creates a tool that queries historical knowledge from memory.
-func NewMemoryQueryTool(memStore tagenttool.MemoryStoreAccessor) tool.Tool {
+// readPartitionIDs scopes the query to the agent's readable partitions (own
+// namespace first + read_namespaces, injected at build time); on partition-
+// isolated stores (FileSegmentStore) an empty list would scan nothing.
+func NewMemoryQueryTool(memStore tagenttool.MemoryStoreAccessor, readPartitionIDs []int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args memoryQueryArgs) (memoryQueryResult, error) {
-			results := queryHistoricalKnowledge(memStore, args.Query)
+			results := queryHistoricalKnowledge(memStore, readPartitionIDs, args.Query)
 			return memoryQueryResult{
 				Results: results,
 				Count:   len(results),
@@ -339,12 +342,16 @@ func discoverMCPTools(ctx context.Context, toolSets []tool.ToolSet, query string
 	return results
 }
 
-// queryHistoricalKnowledge queries historical knowledge events from memory.
-func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, query string) []KnowledgeResult {
+// queryHistoricalKnowledge queries historical knowledge events from memory,
+// scoped to the readable partitions (required by partition-isolated stores).
+func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, readPartitionIDs []int, query string) []KnowledgeResult {
 	opts := memory.QueryOptions{
 		Limit:   10,
 		OrderBy: "timestamp_desc",
 		Keyword: query, // Delegate filtering to MemoryStore (case-insensitive match on EventSummary/Content)
+	}
+	if len(readPartitionIDs) > 0 {
+		opts.PartitionIDs = readPartitionIDs
 	}
 
 	events, err := memStore.QueryEvents(opts)
@@ -409,7 +416,33 @@ func mcpDiscoverFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 }
 
 func webSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	return NewWebSearchTool().(tool.CallableTool), nil
+	return NewWebSearchToolWithConfig(webSearchConfigFromProperties(cfg.Properties)).(tool.CallableTool), nil
+}
+
+// webSearchConfigFromProperties builds a WebSearchConfig from the tool's
+// `properties` block, falling back to defaults for any unset field.
+// Recognized keys: endpoint, api_key_env, search_engine, count.
+func webSearchConfigFromProperties(props map[string]any) WebSearchConfig {
+	cfg := DefaultWebSearchConfig()
+	if props == nil {
+		return cfg
+	}
+	if v, ok := props["endpoint"].(string); ok && v != "" {
+		cfg.Endpoint = v
+	}
+	if v, ok := props["api_key_env"].(string); ok && v != "" {
+		cfg.APIKeyEnv = v
+	}
+	if v, ok := props["search_engine"].(string); ok && v != "" {
+		cfg.SearchEngine = v
+	}
+	switch v := props["count"].(type) {
+	case int:
+		cfg.Count = v
+	case float64:
+		cfg.Count = int(v)
+	}
+	return cfg
 }
 
 func duckDuckGoSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
@@ -420,5 +453,5 @@ func memoryQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 	if cfg.MemStore == nil {
 		return nil, fmt.Errorf("memory_query requires MemStore")
 	}
-	return NewMemoryQueryTool(cfg.MemStore).(tool.CallableTool), nil
+	return NewMemoryQueryTool(cfg.MemStore, cfg.ReadPartitionIDs).(tool.CallableTool), nil
 }
