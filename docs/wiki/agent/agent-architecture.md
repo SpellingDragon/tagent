@@ -118,7 +118,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 **文件**：`compress/smart_compress.go`（agent/compress 子包）
 
-骨架模型确定性压缩（task-skeleton-compression，唯一压缩管线，纯工程零 LLM）：
+骨架模型确定性压缩（task-skeleton-compression，唯一压缩管线；定级/丢弃纯工程，L3 折叠为双层结构）：
 
 | 级别 | 触发（age = 段在新→旧序列中的位置，指数边界） | 段内保留 |
 |------|------|---------|
@@ -130,7 +130,8 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 - 段 = 以 `agent_output` 为界的完整任务回合；定级为段龄纯函数（`deterministicLevel`，零 LLM）
 - 预算升级 O(n)：预计算每段四级成本后 O(1) 增量升档
 - 使用注入的 `TokenCounter`，不自行创建
-- 卡片浓缩（`condenseCardLines`）是管线中唯一的 LLM 文摘：卡片超 `card_max_chars` 时浓缩较旧一半，保留 `[evt_key]` 票据
+- L3 折叠双层：工程票据层（卡片行 + `[evt_key]` 召回票据）恒在；`summary_model` 配置时叠加 LLM 滚动综述 `synthesizeRollingNarrative`（旧综述 + 新折叠段骨架**原文**增量合成为单行 `〔历史综述〕`，编译期常量限长，失败/无模型降级纯工程，纯携带轮零调用）
+- 卡片浓缩（`condenseCardLines`）：卡片超 `card_max_chars` 时浓缩较旧一半，保留 `[evt_key]` 票据
 
 ### 2.6 Compactor（滚动卡片序列）
 
@@ -309,7 +310,7 @@ SmartCompressor 由 ContextCompressor 在 BeforeModel 装配回调中调用，�
 - 保留消息原样携带 `[evt_KEY|type]` 前缀，衔接存活 ref 判定
 - **仅修改发给 LLM 的消息视图，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2；投影替换由 ContextCompressor 的 RetainedRefs 返回值驱动）
 
-压缩参数通过 YAML `compress` 段配置（`summary_model`/`card_max_chars`/`compact_keys_listed`/`recent_full_count`/`summary_max_tokens`）。旧 user 切段 legacy 管线与逐段 LLM 摘要/归档缓存已移除（context-efficiency-and-trajectory）：骨架管线为唯一压缩路径，其中唯一的 LLM 文摘是卡片浓缩 `condenseCardLines`。
+压缩参数通过 YAML `compress` 段配置（`summary_model`/`card_max_chars`/`compact_keys_listed`/`recent_full_count`/`summary_max_tokens`）。旧 user 切段 legacy 管线与逐段 LLM 摘要/归档缓存已移除（context-efficiency-and-trajectory）：骨架管线为唯一压缩路径，其中 LLM 文摘恰有两处低频叠加层——L3 滚动综述 `synthesizeRollingNarrative` 与卡片浓缩 `condenseCardLines`，均无模型时降级为纯工程形态。
 
 ### 6.1.1 时间线渲染红线（外部分析常见误判点）
 

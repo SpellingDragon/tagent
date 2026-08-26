@@ -746,6 +746,21 @@ var earlierItemsRe = regexp.MustCompile(`(?m)^\(earlier (\d+) items retrievable 
 // cardTimeLayout renders card-line timestamps compactly.
 const cardTimeLayout = "01-02 15:04"
 
+// Rolling-narrative caps (compile-time constants, not config knobs — the
+// compression knob diet applies here too):
+//   - rollingNarrativeCapChars bounds the narrative section itself;
+//   - narrativeSkeletonCapChars bounds each skeleton excerpt fed to synthesis;
+//   - narrativeEventCap bounds the number of excerpts per L3 round.
+const (
+	rollingNarrativeCapChars  = 1500
+	narrativeSkeletonCapChars = 800
+	narrativeEventCap         = 24
+)
+
+// narrativePrefix marks the LLM rolling-narrative line inside a rolling
+// summary (single line, scrubbed at synthesis, parsed back next round).
+const narrativePrefix = "〔历史综述〕"
+
 // extractCardLine builds ONE index-card line for a compressed ref, or "" if
 // the event is not a task-skeleton node. Engineering extraction, zero LLM:
 // only boundary events (external_input / agent_output) become cards — tool
@@ -801,6 +816,18 @@ func parseCardSection(summary string) (cards []string, earlier int) {
 	return cards, earlier
 }
 
+// parseNarrativeSection extracts the prior 〔历史综述〕 line from a rolling
+// summary. The narrative is a SINGLE line (scrubbed at synthesis); cards and
+// trailers below it are unaffected.
+func parseNarrativeSection(summary string) string {
+	for _, line := range strings.Split(summary, "\n") {
+		if strings.HasPrefix(line, narrativePrefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, narrativePrefix))
+		}
+	}
+	return ""
+}
+
 // curateCards enforces the card-section bound: when the joined lines exceed
 // cardMaxChars, OLD lines are LLM-condensed (material law: input = card
 // lines, layer-2 artifacts); without a model or on failure the oldest lines
@@ -844,6 +871,75 @@ func (cc *ContextCompressor) condenseCardLines(ctx context.Context, lines []stri
 	return cc.compressor.generatePlainSummary(ctx, prompt)
 }
 
+// synthesizeRollingNarrative folds the prior narrative plus THIS round's
+// newly L3-compacted skeleton excerpts into a fresh single-line narrative via
+// the summary model (rolling-semantic-summary). The ticket layer (card lines)
+// stays pure engineering — this is the optional LLM layer on top of it, giving
+// the model a comprehension-level overview of the oldest history while the
+// [evt_key] tickets keep every compacted fact recallable.
+//
+// Degradation contract: no model / no new skeleton material / call failure →
+// the prior narrative is returned unchanged and compaction proceeds
+// engineering-only. Never blocks compaction, never loses tickets, never
+// invents facts beyond the given material (material law: excerpts are the
+// real stored text, not the second-hand card lines).
+func (cc *ContextCompressor) synthesizeRollingNarrative(ctx context.Context, prior string, dropped []memory.EventReference) string {
+	if cc.compressor == nil || cc.compressor.summaryModel == nil {
+		return prior
+	}
+	var b strings.Builder
+	n := 0
+	for _, ref := range dropped {
+		if n >= narrativeEventCap {
+			break
+		}
+		if ref.EventType != tagentevent.TypeExternalInput && ref.EventType != tagentevent.TypeAgentOutput {
+			continue
+		}
+		text := ref.EventSummary
+		if cc.memStore != nil && ref.EventKey > 0 {
+			if evt, err := cc.memStore.GetEvent(ref.EventKey); err == nil && evt != nil && evt.Content != "" {
+				text = evt.Content // material law: real stored text over summary
+			}
+		}
+		text = strings.Join(strings.Fields(text), " ")
+		role := "user"
+		if ref.EventType == tagentevent.TypeAgentOutput {
+			role = "assistant"
+		}
+		ts := ""
+		if ref.Timestamp > 0 {
+			ts = time.UnixMilli(ref.Timestamp).Format(cardTimeLayout) + " "
+		}
+		fmt.Fprintf(&b, "- %s%s: %s\n", ts, role, truncate(text, narrativeSkeletonCapChars))
+		n++
+	}
+	if b.Len() == 0 {
+		return prior // carry-over round or non-skeleton drops only: zero LLM cost
+	}
+
+	var pb strings.Builder
+	pb.WriteString("将「旧历史综述」与「新折叠的历史事件」合成为一段新的历史综述。硬性要求：\n")
+	pb.WriteString("- 保留旧综述中仍然有效的事实，融合新事件的关键信息（用户请求、完成的工作、重要结果与结论）\n")
+	pb.WriteString("- 按时间顺序组织，语言紧凑；事实仅限给定材料，不添加任何未出现的内容，不确定处省略\n")
+	fmt.Fprintf(&pb, "- 只输出一段连续文字：不要换行、不要列表、不要前缀，长度不超过 %d 个字符\n\n", rollingNarrativeCapChars)
+	if prior != "" {
+		pb.WriteString("旧历史综述：\n" + prior + "\n\n")
+	} else {
+		pb.WriteString("旧历史综述：（无）\n\n")
+	}
+	pb.WriteString("新折叠的历史事件（时间旧→新，user=用户输入 / assistant=助手产出）：\n")
+	pb.WriteString(b.String())
+
+	out, err := cc.compressor.generatePlainSummary(ctx, pb.String())
+	if err != nil || strings.TrimSpace(out) == "" {
+		log.Warnf("[ContextCompressor] rolling narrative synthesis failed (engineering-only fallback): %v", err)
+		return prior
+	}
+	narrative := strings.Join(strings.Fields(out), " ") // single-line scrub
+	return truncate(narrative, rollingNarrativeCapChars)
+}
+
 func (cc *ContextCompressor) buildRetainedRefs(
 	originalRefs []memory.EventReference,
 	compressedMsgs []model.Message,
@@ -885,10 +981,12 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	// would sever the timeline's entry point to earlier compacted history).
 	var retained []memory.EventReference
 	var compressedKeys []string
+	var droppedRefs []memory.EventReference
 	var newCards, oldCards []string
 	var minTs int64
 	priorCount := 0
 	earlier := 0
+	priorNarrative := ""
 
 	for _, ref := range originalRefs {
 		if ref.EventKey == 0 {
@@ -898,6 +996,13 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			if m := compactedCountRe.FindStringSubmatch(ref.EventSummary); m != nil {
 				if n, err := strconv.Atoi(m[1]); err == nil {
 					priorCount += n
+				}
+			}
+			if pn := parseNarrativeSection(ref.EventSummary); pn != "" {
+				if priorNarrative == "" {
+					priorNarrative = pn
+				} else {
+					priorNarrative += " " + pn
 				}
 			}
 			cards, e := parseCardSection(ref.EventSummary)
@@ -925,6 +1030,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
+			droppedRefs = append(droppedRefs, ref)
 			if card := cc.extractCardLine(ref); card != "" {
 				newCards = append(newCards, card)
 			}
@@ -943,9 +1049,16 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			minTs = time.Now().UnixMilli()
 		}
 		cards, earlierOut := cc.curateCards(ctx, append(oldCards, newCards...), earlier)
+		narrative := cc.synthesizeRollingNarrative(ctx, priorNarrative, droppedRefs)
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "[Compacted %d historical events]", total)
+		// Rolling LLM narrative (optional layer): comprehension-level overview
+		// of the oldest history, synthesized incrementally at the L3 fold point.
+		// Below it, the engineering ticket layer keeps every fact recallable.
+		if narrative != "" {
+			b.WriteString("\n" + narrativePrefix + narrative)
+		}
 		if len(cards) > 0 {
 			b.WriteString("\n")
 			b.WriteString(strings.Join(cards, "\n"))

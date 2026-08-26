@@ -62,14 +62,32 @@
 
 ### Requirement: 骨架仍超预算时触发多段压缩归档
 
-当骨架（L2 仅保留边界事件）仍超预算时，SHALL 触发多段压缩归档（L3）：最老段整段离场并由 `buildRetainedRefs` 折叠进滚动摘要卡片。骨架管线为**唯一压缩管线**：L3 是纯工程折叠（零 LLM、零归档缓存），SHALL NOT 存在 legacy 回退路径（`skeleton_segmentation` 配置及其 L3 LLM 段摘要、`segmentContentHash` 归档缓存、`level3Failed` 降级标记随 legacy 管线一并移除）。
+当骨架（L2 仅保留边界事件）仍超预算时，SHALL 触发多段压缩归档（L3）：最老段整段离场并由 `buildRetainedRefs` 折叠进滚动摘要。L3 折叠为**双层结构**：
 
-#### Scenario: L3 纯工程折叠进滚动摘要
+- **工程票据层（恒在，零 LLM）**：每个离场骨架事件折叠为一行卡片（`- [time] [evt_key] 骨架摘要`），`[evt_key]` 为召回票据；
+- **LLM 滚动综述层（可选，`summary_model` 配置时启用）**：以旧综述 + 本轮新折叠段骨架**原文**（素材律：从 MemoryStore 取真实存储文本，非二手卡片行）为素材，增量合成为单行 `〔历史综述〕`，置于卡片层之上；综述长度与单轮素材量受编译期常量约束（`rollingNarrativeCapChars` / `narrativeSkeletonCapChars` / `narrativeEventCap`），不新增配置旋钮。
 
-- **GIVEN** 骨架化后仍超预算，最老段被定为 L3
+降级契约：无模型 / 无新折叠素材 / 调用失败时 SHALL 保留旧综述原样、以纯工程形态继续（票据不丢、压缩不被阻塞）。SHALL NOT 存在 legacy 回退路径（`skeleton_segmentation` 配置及其 L3 LLM 段摘要、`segmentContentHash` 归档缓存、`level3Failed` 降级标记随 legacy 管线一并移除——本综述层是折叠点上的单次增量合成，非 legacy 的逐段摘要+分批管线）。
+
+#### Scenario: L3 双层折叠进滚动摘要
+
+- **GIVEN** 骨架化后仍超预算，最老段被定为 L3，且配置了 summary 模型
 - **WHEN** 执行多段压缩
-- **THEN** 该段 SHALL 整段离场并由 `buildRetainedRefs` 折叠为滚动摘要卡片行
-- **AND** 全程 SHALL NOT 调用 LLM，SHALL NOT 读写归档缓存
+- **THEN** 该段 SHALL 整段离场，工程票据层 SHALL 折叠为滚动摘要卡片行
+- **AND** SHALL 发生恰好一次 LLM 综述调用（旧综述 + 新折叠骨架原文 → 新单行综述），输出以 `〔历史综述〕` 前缀置于卡片层之上
+- **AND** SHALL NOT 读写归档缓存
+
+#### Scenario: 综述层降级不阻塞折叠
+
+- **GIVEN** summary 模型未配置或调用失败
+- **WHEN** 执行多段压缩
+- **THEN** 折叠 SHALL 以纯工程形态完成（无综述行或保留旧综述原样），卡片票据完整无损
+
+#### Scenario: 纯携带轮零 LLM 成本
+
+- **GIVEN** 本轮无新折叠事件（仅携带既有滚动摘要）
+- **WHEN** `buildRetainedRefs` 执行
+- **THEN** SHALL NOT 发起 LLM 综述调用，既有综述与卡片原样携带
 
 ### Requirement: 进行中段永不归档且始终保留
 
@@ -92,9 +110,14 @@
 - **THEN** 该 `KEY` 对应的 ref SHALL 被保留在 projection
 - **AND** 未出现在压缩结果中的 ref SHALL 被收编进 rolling summary
 
-### Requirement: LLM 文摘作为卡片之上的可选叠加层
+### Requirement: LLM 文摘作为工程层之上的可选叠加层
 
-骨架压缩（`compressSkeleton`）是纯工程、零 LLM：L3 = 整段离场→`buildRetainedRefs` 折叠成滚动摘要卡片，**不做 LLM 段摘要**。管线中唯一的 LLM 文摘是 `condenseCardLines`（`curateCards` 内）：卡片超 `cardMaxChars` 时 SHALL 用 summary 模型浓缩较旧一半卡片、保留最新卡片原文；无模型时 SHALL 将最旧行沉底为计数（不报错）。所有 LLM 生成的文摘/浓缩内容 SHALL 保留 `[evt_key]` 召回票据，使卡片始终是召回锚点。
+骨架压缩（`compressSkeleton`）的定级与丢弃是纯工程、零 LLM；L3 折叠的工程票据层亦恒在。管线中的 LLM 文摘恰有两处，均为可选叠加层，失败或无模型时 SHALL 降级为工程形态：
+
+1. **L3 滚动综述 `synthesizeRollingNarrative`**：折叠点的增量单行综述（见"多段压缩归档"需求）；
+2. **卡片浓缩 `condenseCardLines`**（`curateCards` 内）：卡片超 `cardMaxChars` 时 SHALL 用 summary 模型浓缩较旧一半卡片、保留最新卡片原文；无模型时 SHALL 将最旧行沉底为计数（不报错）。
+
+所有 LLM 生成的文摘/浓缩内容 SHALL 保留 `[evt_key]` 召回票据，使卡片始终是召回锚点。
 
 （`compressLegacy` 管线、其 LLM 段摘要、`segmentContentHash` 归档缓存与 `context_compress_summary` 固化物产生源已随本变更移除；存量固化物读路径容错、TTL 自然清退。）
 

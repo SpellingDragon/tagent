@@ -918,11 +918,11 @@ func resolvePartitions(query QueryOptions) []int {
 
 ```mermaid
 graph LR
-    A["事件原文<br/>(唯一全文接触点)"] -->|"骨架模型：多段压缩,工程化提取零 LLM"| C["卡片行<br/>(边界事件骨架)"]
+    A["事件原文<br/>(唯一全文接触点)"] -->|"L3 整段折叠: 票据层(工程) + 〔历史综述〕(LLM,可选)"| C["卡片行<br/>(边界事件骨架)"]
     C -->|"超 card_max_chars,卡片浓缩 condenseCardLines"| D["浓缩卡片<br/>(保任务骨架+key引用)"]
 ```
 
-成本律：骨架压缩纯工程零 LLM，开销 O(新增段) 与历史总量无关；管线中唯一的 LLM 文摘是卡片超限时的浓缩（`condenseCardLines`）。旧 legacy 管线的 L3 LLM 段摘要/`context_compress_summary` 固化物已移除（context-efficiency-and-trajectory）：存量固化物保留 TTL 豁免（`getEffectiveTTL` 负值语义 + evict 跳过）与读路径容错、自然清退，但不再产生新固化物；记忆召回改经卡片行 `[evt_key]` 票据 → recall 精确回补。
+成本律：定级与票据层纯工程零 LLM，开销 O(新增段) 与历史总量无关；LLM 仅两处低频叠加——L3 滚动综述 `synthesizeRollingNarrative`（每轮折叠 1 次，单行 `〔历史综述〕`，编译期常量限长）与卡片超限浓缩（`condenseCardLines`），均无模型/失败时降级纯工程。旧 legacy 管线的 L3 LLM 段摘要/`context_compress_summary` 固化物已移除（context-efficiency-and-trajectory）：存量固化物保留 TTL 豁免（`getEffectiveTTL` 负值语义 + evict 跳过）与读路径容错、自然清退，但不再产生新固化物；记忆召回改经卡片行 `[evt_key]` 票据 → recall 精确回补。
 
 ### 卡片序列（压缩历史的唯一表示）
 

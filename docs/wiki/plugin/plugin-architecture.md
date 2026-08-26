@@ -603,7 +603,7 @@ LLM 看到的就是 EventSummary
 | 段内丢弃 | `tool > assistant` 序：L1 丢 `action_command`，L2 仅留骨架 |
 | 归档 | L3 整段移出时间线，骨架事件经卡片行汇入滚动 summary（user 级〔历史归档〕注记，**永不插入 system**） |
 
-骨架管线为唯一压缩路径（纯工程零 LLM）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。
+骨架管线为唯一压缩路径（定级/丢弃纯工程；L3 折叠 = 工程票据层恒在 + 可选 LLM 滚动综述叠加）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。
 
 **SmartCompress 在 BeforeModel 执行**（由 `agent/context_manager.go` 的装配回调经 `compress.ContextCompressor` 调用）：投影 refs 解析为消息后估算 token，超 `max_tokens × compress_threshold` 阈值时调用 `SmartCompressor.Compress` 重写消息视图，并以 `RetainedRefs` 替换投影。
 

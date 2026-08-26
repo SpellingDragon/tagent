@@ -147,7 +147,11 @@ agents:
     compress:
       # summary_model: LLM model for context compression summaries.
       # Falls back to the agent's main model if not set.
-      summary_model: glm-4.7
+      summary_model: glm-5.3-flash
+      # summary_model 两处用途（均为可选叠加层，无模型/失败时降级纯工程）：
+      #   1. L3 滚动综述：最老历史整段折叠时，旧综述+新折叠段骨架原文增量合成
+      #      单行〔历史综述〕（每轮折叠 1 次调用，编译期常量限长）；
+      #   2. 卡片浓缩：卡片超 card_max_chars 时浓缩较旧一半。
       # summary_provider: optional, defaults to same provider as this agent.
       # Use a different provider for cost optimization (e.g., cheaper model for compression).
       summary_provider: zhipu
@@ -158,8 +162,6 @@ agents:
       # card_max_chars: 滚动压缩摘要中卡片序列的长度上限（默认 6000）。
       # 超限时旧卡片由 summary_model 整理为浓缩卡片；无模型则最旧行沉底为计数。
       # card_max_chars: 6000
-      # archive_cache_cap: 归档缓存条数上限（默认 256,固化物本体永在 MemoryStore）
-      # archive_cache_cap: 256
     tools:
       # Knowledge Agent: 知识获取与翻译
       # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，

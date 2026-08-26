@@ -118,7 +118,7 @@ graph TD
 - **段 = 一次任务回合** `[external_input, (thinking_plan|action_command)*, agent_output]`，由最终回复闭合（`SegmentMessages`）。识别优先经 `[evt_KEY|type]` 前缀（`ParseEventKeyAndType`），缺前缀时退回启发式（assistant 且无 tool_calls）。
 - **连续 `external_input`**（用户连发、agent 未回）归入同一进行中段；无 `agent_output` 的尾部为**进行中段**（`IsComplete=false`），永不压缩。
 - **段内二分**为事件类型纯函数（`IsSkeletonMessage`，不读内容）：骨架 = `external_input` + `agent_output`；中间事件 = `action_command` / `thinking_plan`。
-- 骨架管线为唯一压缩路径（纯工程零 LLM）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。管线中唯一的 LLM 文摘是卡片浓缩 `condenseCardLines`。
+- 骨架管线为唯一压缩路径（定级/丢弃纯工程）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。LLM 文摘恰有两处低频叠加：L3 滚动综述 `synthesizeRollingNarrative`（可选，失败降级）与卡片浓缩 `condenseCardLines`。
 
 ### 6.2 定级：agent_output 段龄纯函数（deterministicLevel）
 

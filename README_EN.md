@@ -133,12 +133,13 @@ graph TB
 
 ```mermaid
 graph LR
-    A["raw events<br/>(sole full-text touchpoint)"] -->|L3 whole-segment fold, zero LLM| C["card lines<br/>[evt_key] task skeleton"]
+    A["raw events<br/>(sole full-text touchpoint)"] -->|"L3 whole-segment fold: tickets (engineering) + narrative (LLM, optional)"| C["card lines<br/>[evt_key] task skeleton"]
     C -->|over cap, card condensation condenseCardLines| D["condensed cards<br/>(skeleton + key refs kept)"]
 ```
 
-- **Constant cost**: skeleton compression is pure engineering (zero LLM); cost depends on new segments only — a year-old agent compresses as fast as a day-old one. The only LLM extraction is card condensation (`condenseCardLines`) when cards exceed the cap
-- **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + card lines + recent keys`); meditation outputs get ★ highlights
+- **Two-layer fold**: when a segment leaves at L3, the engineering ticket layer (card lines + `[evt_key]` recall tickets) is always present; with `summary_model` configured, a single-line rolling narrative (`〔历史综述〕`) is layered on top (incremental synthesis, compile-time length caps, degrades to pure engineering on failure)
+- **Bounded cost**: level assignment and the ticket layer are pure engineering (zero LLM, cost proportional to new segments only); LLM appears at exactly two low-frequency overlays — the L3 rolling narrative (one call per fold) and card condensation (`condenseCardLines`) when cards exceed the cap; both degrade to engineering form without a model
+- **Card sequence**: compacted history stays readable as card lines (`[Compacted N] + narrative + card lines + recent keys`); meditation outputs get ★ highlights
 - **Raw events may be forgotten, tickets persist**: the `[hex]` key on each card is a recall ticket — `recall` fetches the original text anytime (the legacy pipeline's L3 LLM segment summaries / artifacts were removed; existing artifacts keep TTL exemption and age out naturally)
 
 ### Memory data model (LSM)
