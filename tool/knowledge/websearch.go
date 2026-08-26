@@ -1,49 +1,41 @@
 // Package knowledge provides tools for the Knowledge Agent (skill search + web search + MCP discovery).
 //
-// websearch.go contains the multi-engine HTML web search implementation,
-// formerly in tool/websearch/. Moved here as it is exclusively used as a
-// Knowledge Agent subtool.
+// websearch.go implements the web_search tool backed by the Zhipu Web Search
+// API (https://open.bigmodel.cn/api/paas/v4/web_search). Compared with the
+// former multi-engine HTML-scraping implementation, the API is purpose-built
+// for LLM consumption: it returns structured results (title / link / content /
+// media / publish_date) plus intent recognition, and is far more robust than
+// scraping engine HTML that changes without notice.
 //
-// Supported engines:
-//   - DuckDuckGo HTML (global, privacy-focused)
-//   - Bing (global + CN)
-//   - Baidu (CN)
-//   - Brave (global, privacy-focused)
-//
-// Region auto-detection: queries containing CJK characters default to CN engines,
-// otherwise global engines are used.
+// Authentication: the API key is read from an environment variable
+// (configurable via the tool's `api_key_env` property, default ZAI_API_KEY —
+// the same key used by the zhipu model provider).
 package knowledge
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"os"
 	"strings"
 	"time"
-	"unicode"
 
-	"golang.org/x/net/html"
+	"github.com/google/uuid"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
-// SearchEngine defines a search engine configuration.
-type SearchEngine struct {
-	Name   string // Engine name, e.g., "baidu", "duckduckgo"
-	URL    string // URL template with {keyword} placeholder
-	Region string // "cn" or "global"
-}
-
 // SearchResult represents a single search result.
 type SearchResult struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
-	Source      string `json:"source"` // Engine name
+	Source      string `json:"source"` // Media / source name (e.g. "搜狐")
 }
 
 // SearchResponse represents the search response.
@@ -54,41 +46,67 @@ type SearchResponse struct {
 	Message string         `json:"message,omitempty"`
 }
 
-// defaultEngines are the built-in search engine configurations.
-var defaultEngines = []SearchEngine{
-	// Chinese domestic engines
-	{Name: "bing_cn", URL: "https://cn.bing.com/search?q={keyword}", Region: "cn"},
-	{Name: "baidu", URL: "https://www.baidu.com/s?wd={keyword}", Region: "cn"},
-	// Global engines
-	{Name: "duckduckgo", URL: "https://html.duckduckgo.com/html/?q={keyword}", Region: "global"},
-	{Name: "bing", URL: "https://www.bing.com/search?q={keyword}", Region: "global"},
-	{Name: "brave", URL: "https://search.brave.com/search?q={keyword}", Region: "global"},
+// WebSearchConfig configures the Zhipu-backed web_search tool.
+type WebSearchConfig struct {
+	// Endpoint is the Zhipu Web Search API URL.
+	Endpoint string
+	// APIKeyEnv is the environment variable holding the Zhipu API key.
+	APIKeyEnv string
+	// SearchEngine selects the Zhipu search engine (e.g. "search_std", "search_pro").
+	SearchEngine string
+	// Count is the number of results to request (Zhipu accepts 1-50).
+	Count int
 }
 
-// webSearchTool wraps the multi-engine search logic as a CallableTool.
+// DefaultWebSearchConfig returns the default configuration, using the public
+// Zhipu Web Search endpoint and the ZAI_API_KEY env var shared with the zhipu
+// model provider.
+func DefaultWebSearchConfig() WebSearchConfig {
+	return WebSearchConfig{
+		Endpoint:     "https://open.bigmodel.cn/api/paas/v4/web_search",
+		APIKeyEnv:    "ZAI_API_KEY",
+		SearchEngine: "search_std",
+		Count:        10,
+	}
+}
+
+// webSearchTool wraps the Zhipu web search call as a CallableTool.
 type webSearchTool struct {
-	engines    []SearchEngine
+	cfg        WebSearchConfig
 	httpClient *http.Client
 }
 
-// NewWebSearchTool creates a new web_search tool with built-in engine configurations.
+// NewWebSearchTool creates a web_search tool with the default configuration.
 func NewWebSearchTool() tool.CallableTool {
+	return NewWebSearchToolWithConfig(DefaultWebSearchConfig())
+}
+
+// NewWebSearchToolWithConfig creates a web_search tool with the given config.
+func NewWebSearchToolWithConfig(cfg WebSearchConfig) tool.CallableTool {
+	if cfg.Endpoint == "" {
+		cfg.Endpoint = DefaultWebSearchConfig().Endpoint
+	}
+	if cfg.APIKeyEnv == "" {
+		cfg.APIKeyEnv = DefaultWebSearchConfig().APIKeyEnv
+	}
+	if cfg.SearchEngine == "" {
+		cfg.SearchEngine = DefaultWebSearchConfig().SearchEngine
+	}
+	if cfg.Count <= 0 {
+		cfg.Count = DefaultWebSearchConfig().Count
+	}
 	t := &webSearchTool{
-		engines: defaultEngines,
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	return function.NewFunctionTool(
 		t.search,
 		function.WithName("web_search"),
 		function.WithDescription(
-			"Search the web using multiple search engines. "+
-				"Returns titles, URLs, and snippets. "+
-				"Automatically selects the best engine based on query language: "+
-				"CJK queries use Bing CN or Baidu; English/global queries use DuckDuckGo, Bing, or Brave. "+
-				"Best for: current events, tutorials, documentation, news, and general web content. "+
-				"For factual/encyclopedic info (definitions, entity details), prefer duckduckgo_search instead.",
+			"Search the web using the Zhipu Web Search API. "+
+				"Returns titles, URLs, snippets, sources and publish dates. "+
+				"Best for: current events, news, tutorials, documentation, and general web content. "+
+				"This is the primary and most reliable web search tool; prefer it over duckduckgo_search.",
 		),
 	)
 }
@@ -98,462 +116,181 @@ type searchRequest struct {
 	Query string `json:"query" jsonschema:"description=The search query,required"`
 }
 
-// search performs the actual search operation.
+// zhipuSearchRequest is the request body for the Zhipu Web Search API.
+type zhipuSearchRequest struct {
+	SearchQuery         string `json:"search_query"`
+	SearchEngine        string `json:"search_engine"`
+	SearchIntent        bool   `json:"search_intent"`
+	Count               int    `json:"count"`
+	SearchDomainFilter  string `json:"search_domain_filter,omitempty"`
+	SearchRecencyFilter string `json:"search_recency_filter"`
+	RequestID           string `json:"request_id,omitempty"`
+	UserID              string `json:"user_id,omitempty"`
+}
+
+// zhipuSearchResultItem is a single entry in the Zhipu search_result array.
+type zhipuSearchResultItem struct {
+	Content     string `json:"content"`
+	Icon        string `json:"icon"`
+	Link        string `json:"link"`
+	Media       string `json:"media"`
+	PublishDate string `json:"publish_date"`
+	Refer       string `json:"refer"`
+	Title       string `json:"title"`
+}
+
+// zhipuSearchResponse is the Zhipu Web Search API response body.
+type zhipuSearchResponse struct {
+	Created      int64                   `json:"created"`
+	ID           string                  `json:"id"`
+	RequestID    string                  `json:"request_id"`
+	SearchIntent []zhipuSearchIntentItem `json:"search_intent"`
+	SearchResult []zhipuSearchResultItem `json:"search_result"`
+}
+
+// zhipuSearchIntentItem is an entry in the search_intent array.
+type zhipuSearchIntentItem struct {
+	Intent   string `json:"intent"`
+	Keywords string `json:"keywords"`
+	Query    string `json:"query"`
+}
+
+// zhipuAPIError captures the error shape Zhipu returns on failure.
+type zhipuAPIError struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// search performs the Zhipu web search.
 func (t *webSearchTool) search(ctx context.Context, req searchRequest) (SearchResponse, error) {
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
-		return SearchResponse{Message: "empty query"}, nil
+		return SearchResponse{Engine: "zhipu", Message: "empty query"}, nil
 	}
 
-	// Apply 30s timeout for the entire search operation
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	region := detectRegion(query)
-	engine := t.selectEngine(region)
-	searchURL := buildSearchURL(engine, query)
-
-	log.Debugf("[web_search] query=%q region=%s engine=%s", query, region, engine.Name)
-
-	results, err := t.fetchAndParse(ctx, searchURL, engine.Name)
-	if err != nil {
+	apiKey := os.Getenv(t.cfg.APIKeyEnv)
+	if apiKey == "" {
 		return SearchResponse{
-			Engine:  engine.Name,
+			Engine:  "zhipu",
 			Query:   query,
-			Message: fmt.Sprintf("search failed: %v", err),
+			Message: fmt.Sprintf("web_search unavailable: %s environment variable is not set", t.cfg.APIKeyEnv),
 		}, nil
 	}
 
-	log.Debugf("[web_search] found %d results via %s", len(results), engine.Name)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
-	return SearchResponse{
-		Results: results,
-		Engine:  engine.Name,
-		Query:   query,
-	}, nil
-}
-
-// detectRegion detects the region based on query language.
-func detectRegion(query string) string {
-	for _, r := range query {
-		if unicode.Is(unicode.Han, r) {
-			return "cn"
-		}
-	}
-	return "global"
-}
-
-// selectEngine selects the first engine matching the region.
-func (t *webSearchTool) selectEngine(region string) SearchEngine {
-	for _, e := range t.engines {
-		if e.Region == region {
-			return e
-		}
-	}
-	// Fallback to first global engine
-	for _, e := range t.engines {
-		if e.Region == "global" {
-			return e
-		}
-	}
-	return t.engines[0]
-}
-
-// buildSearchURL builds the search URL by replacing {keyword} placeholder.
-func buildSearchURL(engine SearchEngine, keyword string) string {
-	return strings.Replace(engine.URL, "{keyword}", url.QueryEscape(keyword), 1)
-}
-
-// fetchAndParse fetches the search page and parses results.
-func (t *webSearchTool) fetchAndParse(ctx context.Context, searchURL string, engineName string) ([]SearchResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	results, msg, err := t.callZhipu(ctx, query, apiKey)
 	if err != nil {
-		return nil, err
+		return SearchResponse{Engine: "zhipu", Query: query, Message: msg}, nil
 	}
 
-	// Set common headers to mimic browser
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+	log.Debugf("[web_search] zhipu returned %d results for %q", len(results), query)
+	return SearchResponse{Results: results, Engine: "zhipu", Query: query}, nil
+}
 
-	resp, err := t.httpClient.Do(req)
+// callZhipu issues the HTTP request and maps results. On failure it returns a
+// human-readable message alongside the error.
+func (t *webSearchTool) callZhipu(ctx context.Context, query, apiKey string) ([]SearchResult, string, error) {
+	count := t.cfg.Count
+	if count < 1 {
+		count = 1
+	}
+	if count > 50 {
+		count = 50
+	}
+
+	body := zhipuSearchRequest{
+		SearchQuery:         query,
+		SearchEngine:        t.cfg.SearchEngine,
+		SearchIntent:        false,
+		Count:               count,
+		SearchRecencyFilter: "noLimit",
+		RequestID:           uuid.NewString(),
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Sprintf("marshal request: %v", err), err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.cfg.Endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Sprintf("build request: %v", err), err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := t.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Sprintf("request failed: %v", err), err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	const maxBodySize = 1 * 1024 * 1024 // 1MB
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
+	// 无需在此限制读取大小：框架的 OutputLimitTool 已对所有工具的超大返回
+	// 输出自动转储为文件；且 Zhipu API 响应受 count≤50 约束、httpClient 30s
+	// 超时也已约束读取量。
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Sprintf("read response: %v", err), err
 	}
 
-	truncated := false
-	if len(body) > maxBodySize {
-		body = body[:maxBodySize]
-		truncated = true
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Sprintf("zhipu web_search HTTP %d: %s", resp.StatusCode, errorSnippet(raw)), nil
 	}
 
-	var results []SearchResult
-	switch engineName {
-	case "duckduckgo":
-		results, err = parseDuckDuckGo(body)
-	case "bing", "bing_cn":
-		results, err = parseBing(body)
-	case "baidu":
-		results, err = parseBaidu(body)
-	default:
-		results, err = parseGeneric(body)
+	// Zhipu signals API-level errors with an error object even on some statuses.
+	var apiErr zhipuAPIError
+	if err := json.Unmarshal(raw, &apiErr); err == nil && apiErr.Error.Code != "" {
+		return nil, fmt.Sprintf("zhipu web_search error %s: %s", apiErr.Error.Code, apiErr.Error.Message), nil
 	}
 
-	if truncated && err == nil {
+	var parsed zhipuSearchResponse
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Sprintf("parse response: %v", err), err
+	}
+
+	results := make([]SearchResult, 0, len(parsed.SearchResult))
+	for _, item := range parsed.SearchResult {
+		if item.Title == "" && item.Link == "" {
+			continue
+		}
 		results = append(results, SearchResult{
-			Title:       "[truncated at 1MB]",
-			Description: "Response body was truncated at 1MB, search results may be incomplete",
-			Source:      engineName,
+			Title:       strings.TrimSpace(item.Title),
+			Description: buildDescription(item),
+			URL:         item.Link,
+			Source:      sourceName(item),
 		})
 	}
-
-	return results, err
+	return results, "", nil
 }
 
-// ==================== HTML Parsers ====================
-
-// parseDuckDuckGo parses DuckDuckGo HTML search results.
-func parseDuckDuckGo(body []byte) ([]SearchResult, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
+// buildDescription composes the snippet, appending publish date for recency.
+func buildDescription(item zhipuSearchResultItem) string {
+	desc := strings.TrimSpace(item.Content)
+	if item.PublishDate != "" {
+		if desc != "" {
+			desc += " "
+		}
+		desc += "（发布于 " + item.PublishDate + "）"
 	}
-
-	var results []SearchResult
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if len(results) >= 10 {
-			return
-		}
-		if n.Type == html.ElementNode && n.Data == "a" {
-			var hasResultClass bool
-			var href string
-			for _, attr := range n.Attr {
-				if attr.Key == "class" && strings.Contains(attr.Val, "result__a") {
-					hasResultClass = true
-				}
-				if attr.Key == "href" {
-					href = attr.Val
-				}
-			}
-			if hasResultClass && href != "" {
-				title := extractText(n)
-				description := findSnippet(n.Parent)
-				actualURL := parseDDGURL(href)
-				if title != "" && actualURL != "" {
-					results = append(results, SearchResult{
-						Title:       strings.TrimSpace(title),
-						Description: strings.TrimSpace(description),
-						URL:         actualURL,
-						Source:      "duckduckgo",
-					})
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(doc)
-	return results, nil
+	return desc
 }
 
-// parseBing parses Bing search results.
-func parseBing(body []byte) ([]SearchResult, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
+// sourceName prefers the media name, falling back to a stable label.
+func sourceName(item zhipuSearchResultItem) string {
+	if item.Media != "" {
+		return item.Media
 	}
-
-	var results []SearchResult
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if len(results) >= 10 {
-			return
-		}
-		if n.Type == html.ElementNode && n.Data == "li" {
-			var isBAlgo bool
-			for _, attr := range n.Attr {
-				if attr.Key == "class" && strings.Contains(attr.Val, "b_algo") {
-					isBAlgo = true
-					break
-				}
-			}
-			if isBAlgo {
-				result := extractBingResult(n)
-				if result.Title != "" && result.URL != "" {
-					results = append(results, result)
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(doc)
-	return results, nil
+	return "zhipu"
 }
 
-// extractBingResult extracts title, URL, and description from a Bing result node.
-func extractBingResult(n *html.Node) SearchResult {
-	var result SearchResult
-	result.Source = "bing"
-	var f func(*html.Node)
-	f = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == "h2" {
-			for c := node.FirstChild; c != nil; c = c.NextSibling {
-				if c.Type == html.ElementNode && c.Data == "a" {
-					result.Title = extractText(c)
-					for _, attr := range c.Attr {
-						if attr.Key == "href" {
-							result.URL = attr.Val
-							break
-						}
-					}
-					break
-				}
-			}
-		}
-		if node.Type == html.ElementNode && (node.Data == "p" || node.Data == "div") {
-			for _, attr := range node.Attr {
-				if attr.Key == "class" && (strings.Contains(attr.Val, "b_caption") || strings.Contains(attr.Val, "b_lineclamp")) {
-					if result.Description == "" {
-						result.Description = extractText(node)
-					}
-					break
-				}
-			}
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
+// errorSnippet returns a short excerpt of an error body for messages.
+func errorSnippet(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 300 {
+		s = s[:300] + "..."
 	}
-	f(n)
-	return result
-}
-
-// parseBaidu parses Baidu search results.
-func parseBaidu(body []byte) ([]SearchResult, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-
-	var results []SearchResult
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if len(results) >= 10 {
-			return
-		}
-		if n.Type == html.ElementNode && n.Data == "div" {
-			var isResult bool
-			for _, attr := range n.Attr {
-				if attr.Key == "class" && (strings.Contains(attr.Val, "result ") || strings.Contains(attr.Val, "c-container")) {
-					isResult = true
-					break
-				}
-			}
-			if isResult {
-				result := extractBaiduResult(n)
-				if result.Title != "" && result.URL != "" {
-					results = append(results, result)
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(doc)
-	return results, nil
-}
-
-// extractBaiduResult extracts result from a Baidu result node.
-func extractBaiduResult(n *html.Node) SearchResult {
-	var result SearchResult
-	result.Source = "baidu"
-	var f func(*html.Node)
-	f = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == "h3" {
-			for c := node.FirstChild; c != nil; c = c.NextSibling {
-				if c.Type == html.ElementNode && c.Data == "a" {
-					result.Title = extractText(c)
-					for _, attr := range c.Attr {
-						if attr.Key == "href" {
-							result.URL = attr.Val
-							break
-						}
-					}
-					break
-				}
-			}
-		}
-		if node.Type == html.ElementNode && (node.Data == "span" || node.Data == "div") {
-			for _, attr := range node.Attr {
-				if attr.Key == "class" && strings.Contains(attr.Val, "content") {
-					if result.Description == "" {
-						result.Description = extractText(node)
-					}
-					break
-				}
-			}
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(n)
-	return result
-}
-
-// parseGeneric provides a generic HTML parser for other search engines.
-func parseGeneric(body []byte) ([]SearchResult, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-
-	var results []SearchResult
-	seenURLs := make(map[string]bool)
-
-	var f func(*html.Node)
-	f = func(n *html.Node) {
-		if len(results) >= 10 {
-			return
-		}
-		if n.Type == html.ElementNode && n.Data == "a" {
-			var href string
-			for _, attr := range n.Attr {
-				if attr.Key == "href" {
-					href = attr.Val
-					break
-				}
-			}
-			if isSearchResultLink(href) && !seenURLs[href] {
-				title := extractText(n)
-				if title != "" && len(title) > 5 {
-					seenURLs[href] = true
-					results = append(results, SearchResult{
-						Title:  strings.TrimSpace(title),
-						URL:    href,
-						Source: "generic",
-					})
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(doc)
-	return results, nil
-}
-
-// ==================== HTML Helper Functions ====================
-
-// extractText extracts all text content from a node.
-func extractText(n *html.Node) string {
-	var sb strings.Builder
-	var f func(*html.Node)
-	f = func(node *html.Node) {
-		if node.Type == html.TextNode {
-			sb.WriteString(node.Data)
-		}
-		for c := node.FirstChild; c != nil; c = c.NextSibling {
-			f(c)
-		}
-	}
-	f(n)
-	return strings.TrimSpace(sb.String())
-}
-
-// findSnippet finds the snippet/description text near a result link.
-func findSnippet(parent *html.Node) string {
-	if parent == nil {
-		return ""
-	}
-	var f func(*html.Node) string
-	f = func(n *html.Node) string {
-		if n.Type == html.ElementNode {
-			for _, attr := range n.Attr {
-				if attr.Key == "class" && strings.Contains(attr.Val, "result__snippet") {
-					return extractText(n)
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if result := f(c); result != "" {
-				return result
-			}
-		}
-		return ""
-	}
-	for p := parent; p != nil; p = p.Parent {
-		if result := f(p); result != "" {
-			return result
-		}
-		if p.Data == "body" || p.Data == "html" {
-			break
-		}
-	}
-	return ""
-}
-
-// parseDDGURL parses the actual URL from DuckDuckGo redirect URL.
-func parseDDGURL(ddgURL string) string {
-	if strings.Contains(ddgURL, "uddg=") {
-		parts := strings.Split(ddgURL, "uddg=")
-		if len(parts) >= 2 {
-			decoded, err := url.QueryUnescape(parts[1])
-			if err == nil {
-				if idx := strings.Index(decoded, "&"); idx > 0 {
-					decoded = decoded[:idx]
-				}
-				return decoded
-			}
-		}
-	}
-	if strings.HasPrefix(ddgURL, "http://") || strings.HasPrefix(ddgURL, "https://") {
-		return ddgURL
-	}
-	return ""
-}
-
-// isSearchResultLink checks if a URL looks like a search result rather than navigation.
-func isSearchResultLink(href string) bool {
-	if href == "" || href == "#" {
-		return false
-	}
-	if !strings.HasPrefix(href, "http://") && !strings.HasPrefix(href, "https://") {
-		return false
-	}
-	excludePatterns := []string{
-		"google.com/search",
-		"bing.com/search",
-		"duckduckgo.com",
-		"baidu.com/s?",
-		"/support",
-		"/help",
-		"/settings",
-		"/preferences",
-		"/advanced_search",
-	}
-	for _, pattern := range excludePatterns {
-		if strings.Contains(href, pattern) {
-			return false
-		}
-	}
-	return true
+	return s
 }

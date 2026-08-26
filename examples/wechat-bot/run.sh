@@ -195,35 +195,55 @@ check_api_key() {
         key_env="$extracted"
     fi
 
-    # 检查对应的环境变量
-    local key_value
-    key_value=$(printenv "$key_env" 2>/dev/null)
-
-    # 【仅本地开发】ZAI_API_KEY 缺失时从 ~/.zshrc 回退读取（开发者本机便利）。
+    # 【仅本地开发】缺失的 key 从 ~/.zshrc 回退读取（开发者本机便利）。
     # 注意：这与容器生产的严格策略是有意区分的两级设计——
     #   本地开发(run.sh)：允许 ~/.zshrc 回退，但会提示
     #   容器生产(entrypoint.sh)：严格只认 env/secret 注入，拒绝任何文件回退
-    if [[ -z "$key_value" && "$key_env" == "ZAI_API_KEY" ]]; then
-        key_value=$(zsh -c 'source ~/.zshrc 2>/dev/null && echo $ZAI_API_KEY' 2>/dev/null)
-        if [[ -n "$key_value" ]]; then
-            export ZAI_API_KEY="$key_value"
-            echo "提示: $key_env 从 ~/.zshrc 读取（仅限本地开发；容器部署须经 env 注入，见 entrypoint.sh）"
+    # 多 provider 配置下逐个检查 yaml 中出现的全部 api_key_env（主 agent
+    # 与子 agent/工具可能分属不同 provider，如 tencent_hy + zhipu）。
+    local all_keys k fallback
+    all_keys=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null \
+        | sed -E 's/.*: *"?([^"]*)"?/\1/' | sort -u)
+    [[ -z "$all_keys" ]] && all_keys="$key_env"
+
+    for k in $all_keys ZAI_API_KEY; do
+        if [[ -z "$(printenv "$k" 2>/dev/null)" ]]; then
+            fallback=$(zsh -c "source ~/.zshrc 2>/dev/null && echo \$$k" 2>/dev/null)
+            if [[ -n "$fallback" ]]; then
+                export "$k=$fallback"
+                echo "提示: $k 从 ~/.zshrc 读取（仅限本地开发；容器部署须经 env 注入，见 entrypoint.sh）"
+            fi
         fi
+    done
+
+    # 硬校验：首个 key（原有行为）+ 主 agent 实际 provider 的 key（否则
+    # 缺失会在启动后才暴露）。其余 key 属可选 provider（yaml 声明但未被
+    # agent 引用时不设也可启动），仅尽力回退导出不阻断。
+    local main_provider main_key
+    main_provider=$(awk '/^agents:/{a=1; next} a && /^  [^ ]/{n++} a && n==1 && /provider:/{print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
+    if [[ -n "$main_provider" ]]; then
+        main_key=$(awk -v p="$main_provider" '$1==p":"{f=1; next} f && /^[^ ]/{exit} f && /api_key_env:/{gsub(/["'"'"']/, "", $2); print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
     fi
 
-    if [[ -z "$key_value" ]]; then
-        echo "错误: $key_env 环境变量未设置 (配置: $config_file)"
-        echo
-        echo "请设置环境变量:"
-        echo "  export $key_env=your_api_key_here"
-        echo
-        if [[ "$key_env" == "ZAI_API_KEY" ]]; then
+    local key_value
+    key_value=$(printenv "$key_env" 2>/dev/null)
+    local main_key_value="present"
+    [[ -n "$main_key" ]] && main_key_value=$(printenv "$main_key" 2>/dev/null)
+
+    if [[ -z "$key_value" || -z "$main_key_value" ]]; then
+        for k in "$key_env" ${main_key:+"$main_key"}; do
+            [[ -n "$(printenv "$k" 2>/dev/null)" ]] && continue
+            echo "错误: $k 环境变量未设置 (配置: $config_file)"
+            echo
+            echo "请设置环境变量:"
+            echo "  export $k=your_api_key_here"
+            echo
             echo "或在 ~/.zshrc 中添加:"
-            echo "  export $key_env=your_api_key_here"
-        fi
-        echo
+            echo "  export $k=your_api_key_here"
+            echo
+        done
         echo "RL 训练模式:"
-        echo "  $key_env=your_key ./run.sh rl"
+        echo "  KEY=your_key ./run.sh rl"
         exit 1
     fi
 }
