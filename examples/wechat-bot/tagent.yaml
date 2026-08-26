@@ -32,7 +32,7 @@
 provider: openai
 
 # LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
-model: glm-5.2
+model: glm-5.3
 # LLM API 基础地址 (全局默认，兼容旧配置；推荐使用 providers 注册表)
 api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
 
@@ -42,7 +42,7 @@ api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
 #   agents:
 #     tagent:
 #       provider: zhipu        # 智谱 GLM（OpenAI 兼容协议）
-#       model: glm-5.2
+#       model: glm-5.3
 #     knowledge:
 #       provider: deepseek     # DeepSeek（OpenAI 兼容协议）
 #       model: deepseek-chat
@@ -114,8 +114,8 @@ agents:
   # 顶层 Agent: 微信助手的主 Agent
   # ========================================================================
   tagent:
-    provider: tencent_hy            # 引用 providers 注册表中的 "tencent_hy" 配置
-    model: hy3
+    provider: zhipu            # 引用 providers 注册表中的 "tencent" 配置
+    model: glm-5.3-flash
     system_prompt:
       files:
         - AGENTS.md
@@ -129,7 +129,7 @@ agents:
     max_tokens: 128000
     temperature: 0.7
     thinking_enabled: true       # 保留：对 honor thinking_enabled 的模型有效
-    reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
+    # reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
     compress_threshold: 0.8
     keep_recent_tasks: 4
     # ===== 异步任务/重入相关（未配置项用默认值） =====
@@ -147,10 +147,10 @@ agents:
     compress:
       # summary_model: LLM model for context compression summaries.
       # Falls back to the agent's main model if not set.
-      summary_model: deepseek-v4-flash-202605
+      summary_model: glm-4.7
       # summary_provider: optional, defaults to same provider as this agent.
       # Use a different provider for cost optimization (e.g., cheaper model for compression).
-      summary_provider: tencent
+      summary_provider: zhipu
       # summary_max_tokens: 每次摘要 LLM 调用的输出 token 预算下限（默认 8192）。
       # 推理模型会把部分 max_tokens 耗在思考链上，预算不足会返回空 Content 导致
       # 压缩全段降级（上下文塌缩成纯 user 消息）。实际预算随摘要大小上浮，但不低于此值。
@@ -247,13 +247,19 @@ agents:
   # Knowledge Agent: 知识获取 & 翻译子 Agent
   # ========================================================================
   knowledge:
-    provider: tencent_hy            # 可与父 agent 使用不同供应商
-    model: hy3
+    provider: zhipu            # 可与父 agent 使用不同供应商
+    model: glm-5.3-flash
     system_prompt:
       files:
         - knowledge_agent.md
     memory:
-      type: memory
+      # 共享持久存储（与主 agent 同路径 = 同一 FileSegmentStore 实例）：
+      # memory_query 才能查到跨重启的历史知识；自身命名空间恒可读，
+      # read_namespaces 额外授权读主 agent 时间线。
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces:
+        - tagent
     max_tool_iterations: 30
     max_tokens: 32000
     temperature: 0.3
@@ -273,6 +279,13 @@ agents:
         id: mcp_discover
       - kind: tool
         id: web_search
+        # Zhipu Web Search API。默认即用 ZAI_API_KEY 与官方端点，无需配置；
+        # 如需覆盖可打开以下 properties：
+        # properties:
+        #   api_key_env: ZAI_API_KEY
+        #   endpoint: https://open.bigmodel.cn/api/paas/v4/web_search
+        #   search_engine: search_std   # 或 search_pro
+        #   count: 10                   # 1-50
       - kind: tool
         id: duckduckgo_search
       - kind: tool
@@ -282,8 +295,8 @@ agents:
   # Recall Agent: 记忆检索子 Agent
   # ========================================================================
   recall:
-    provider: tencent
-    model: deepseek-v4-flash-202605
+    provider: zhipu
+    model: glm-5.3-flash
     system_prompt:
       files:
         - recall_agent.md
@@ -309,8 +322,8 @@ agents:
   # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
   # ========================================================================
   action:
-    provider: tencent_hy
-    model: hy3
+    provider: zhipu
+    model: glm-5.3-flash
     system_prompt:
       files:
         - action_agent.md
@@ -358,7 +371,7 @@ agents:
   # 通过 openspec CLI 创建/更新/归档结构化工作计划
   # ========================================================================
   plan:
-    model: glm-5.2
+    model: glm-5.3
     provider: zhipu
     thinking_enabled: true
     system_prompt:
