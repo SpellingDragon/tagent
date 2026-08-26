@@ -45,7 +45,7 @@ tagent SHALL 维护一个 `ToolRegistry` 实例，作为所有内置工具（pla
 
 - **WHEN** `buildAgent` 构建包含 `kind: tool, id: recall_query` 的 agent
 - **THEN** `PlainToolFactoryConfig.MemStore` 被设置为该 agent 的 MemoryStore
-- **AND** `PlainToolFactoryConfig.ReadPartitionIDs` 被设置为该 agent 的 ReadPartitionIDs（从 MemoryConfig.ReadNamespaces 解析）
+- **AND** `PlainToolFactoryConfig.ReadPartitionIDs` 被设置为该 agent 的读分区列表：自身命名空间分区（`PartitionIDFromName(agentName)`，恒在首位）+ `MemoryConfig.ReadNamespaces` 解析出的跨命名空间分区（去重）——agent 无 read_namespaces 时也至少能查询自身时间线
 
 #### Scenario: exec 工厂忽略运行时依赖字段
 

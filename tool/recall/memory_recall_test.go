@@ -79,6 +79,24 @@ func TestMemoryRecall_QuerySemantic(t *testing.T) {
 	}
 }
 
+// TestMemoryRecall_QueryZeroResultHonesty: a zero-result query must NOT return
+// a bare empty list (observed in production: the model concluded "the backend
+// has no history at all" from a silent count:0). It must carry a message
+// stating what was searched and steering toward items/turn_key.
+func TestMemoryRecall_QueryZeroResultHonesty(t *testing.T) {
+	tl := NewMemoryRecallTool(seedStore(t), nil)
+	out := callMemoryRecall(t, tl, `{"query":"不存在的关键词"}`)
+
+	if !strings.Contains(out, `"count":0`) {
+		t.Fatalf("expected zero-result query, got: %s", out)
+	}
+	for _, want := range []string{"无可读分区内的匹配事件", "items"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("zero-result message must mention %q, got: %s", want, out)
+		}
+	}
+}
+
 // TestMemoryRecall_ItemsPrecedence: when both items and query are provided,
 // items win (protocol rule).
 func TestMemoryRecall_ItemsPrecedence(t *testing.T) {

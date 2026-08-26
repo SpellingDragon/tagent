@@ -58,7 +58,7 @@ The system SHALL persist events in the RustViking KV store organized by time-win
 
 ### Requirement: resolvePartitions 默认隔离（无分区参数返回空）
 
-`resolvePartitions(query)` 在 `PartitionIDs` 与 `PartitionID` 均未指定时 SHALL 返回空集（即不扫描任何分区）——子 Agent SHALL NOT 通过无参查询盲扫其他分区的历史；跳分区读取 SHALL 由工具层根据 `read_namespaces` 显式注入 `PartitionIDs`。
+`resolvePartitions(query)` 在 `PartitionIDs` 与 `PartitionID` 均未指定时 SHALL 返回空集（即不扫描任何分区）——子 Agent SHALL NOT 通过无参查询盲扫其他分区的历史；分区读取 SHALL 由工具层显式注入 `PartitionIDs`：自身命名空间分区恒在首位（事件写入即写入该分区，agent 无额外配置也应能查询自身时间线），跨分区读取再根据 `read_namespaces` 追加（去重）。
 
 #### Scenario: 无分区参数的查询不盲扫
 

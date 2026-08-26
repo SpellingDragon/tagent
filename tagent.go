@@ -241,11 +241,22 @@ func buildAgent(
 	// 3. Resolve model — per-agent override supported
 	agentModel := rc.resolveAgentModel(name, acfg, cfg)
 
-	// Resolve ReadNamespaces to PartitionIDs for cross-namespace read access
-	// (computed once, used by both factory path and config-driven path)
-	var readPartitionIDs []int
+	// Resolve read partitions for recall/query tools (computed once, used by
+	// both factory path and config-driven path):
+	//   1. The agent's OWN namespace always comes first — events are written to
+	//      PartitionIDFromName(agentName), so an agent must be able to query its
+	//      own timeline (e.g. timeline recall via since/until) without any
+	//      extra config. Without this, query-mode recall on FileSegmentStore
+	//      silently returns 0 events (resolvePartitions treats "no partitions"
+	//      as "scan nothing", per event-segment-store isolation).
+	//   2. read_namespaces adds CROSS-namespace read access on top (deduped).
+	ownPartition := memory.PartitionIDFromName(name)
+	readPartitionIDs := []int{ownPartition}
 	for _, ns := range acfg.Memory.ReadNamespaces {
-		readPartitionIDs = append(readPartitionIDs, memory.PartitionIDFromName(ns))
+		pid := memory.PartitionIDFromName(ns)
+		if pid != ownPartition {
+			readPartitionIDs = append(readPartitionIDs, pid)
+		}
 	}
 
 	// 3.5 Check for registered ToolAgentFactory — for custom agents only.

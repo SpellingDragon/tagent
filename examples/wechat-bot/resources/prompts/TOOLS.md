@@ -9,13 +9,18 @@ Acquire knowledge from web search, skills, and historical memory. Use this when 
 - Retrieve previously learned knowledge from memory
 - Translate knowledge into executable plans
 
-## memory_recall
-统一记忆召回（纯函数，毫秒级）。**票据在手就用它**：历史归档卡片行与 `[evt_…]` 前缀里的 hex key 都是召回票据，直接构造 `items=[{key, hint?}]` 批量精确回补原文（未命中会明确标注 miss）。只有模糊线索时用 `query`（可加 since/until/event_types）做关键词检索。
-
 ## recall
-Retrieve and synthesize historical events from memory (sub agent, for COMPLEX retrieval: multi-hop causal tracing, cross-round synthesis). For simple precise or keyword recall, prefer memory_recall. Use this when you need to:
-- Trace causal chains or synthesize across many events
-- Review past actions and their outcomes with reasoning
+统一记忆召回单入口（纯函数，毫秒级，参数即路由）。四种形态按优先级：
+
+1. **票据在手就用它**：历史归档卡片行与 `[evt_…]` 前缀里的 hex key 都是召回票据，构造 `items=[{key, hint?}]` 批量精确回补原文（未命中明确标注 miss）。
+2. **模糊线索/时间线检索**：`query` + 可选 `since`/`until`（Unix 毫秒）/`event_types`/`limit` 关键词检索，按时间新→旧返回。
+3. **回放某一轮完整执行过程**：`turn_key`（回合边界 key，通常是 agent_output 卡片）沿因果链重建该轮全部步骤（含被压缩丢弃的工具步骤）。
+4. `orchestrate=true`：LLM 多跳编排（未接线时返回指引）。
+
+Use this when you need to:
+- Recall previous sessions/decisions by time or keywords
+- Trace causal chains or replay how a past task was executed
+- Synthesize across many historical events
 
 ## action
 Perform behavioral actions on real-world resources. Describe what you want to do in natural language, and it triggers execution. Use this when you need to:

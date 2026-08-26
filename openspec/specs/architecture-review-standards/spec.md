@@ -64,7 +64,7 @@
 
 ### Requirement: 审查 SHALL 验证上下文隔离完整性
 
-审查者 SHALL 检查 LLM 是否只输出 int64 数字 key，AgentToolWrapper 是否服务端解析获取完整事件内容。检查项包括：AgentToolWrapper.Call 的 event_keys 解析和 IngestExternalEvents 注入；ReadNamespaces → ReadPartitionIDs 的跨命名空间读权限转换；recall 子工具是否自动注入 readPartitionIDs。
+审查者 SHALL 检查 LLM 是否只输出 int64 数字 key，AgentToolWrapper 是否服务端解析获取完整事件内容。检查项包括：AgentToolWrapper.Call 的 event_keys 解析和 IngestExternalEvents 注入；读分区组装（自身命名空间分区恒在首位 + ReadNamespaces → ReadPartitionIDs 的跨命名空间转换去重）；recall 子工具是否自动注入 readPartitionIDs。
 
 #### Scenario: event_key 隔离验证
 

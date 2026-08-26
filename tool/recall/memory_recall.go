@@ -158,5 +158,12 @@ func recallByQuery(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
 	}
 	res.Count = len(res.Entries)
 	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
+	// Zero-result honesty: a bare empty list invites the wrong conclusion that
+	// the backend holds no history at all (observed in production). State what
+	// WAS searched and steer toward the deterministic shapes.
+	if res.Count == 0 {
+		res.Message = "无可读分区内的匹配事件：已检索本 agent 可读命名空间（自身 + read_namespaces）。" +
+			"可换关键词/时间范围重试；若时间线里有 [evt_…] 票据，用 items 按票据精确回补更可靠"
+	}
 	return res, nil
 }
