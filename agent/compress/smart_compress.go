@@ -95,11 +95,19 @@ func (sc *SmartCompressor) Compress(
 	return sc.compressSkeleton(ctx, messages)
 }
 
-// deterministicLevel assigns a compression level to a task segment by age
-// (deterministic-compress-level spec). Pure function: no side effects, no
+// deterministicLevel assigns a base compression level to a task segment by
+// age (deterministic-compress-level spec). Pure function: no side effects, no
 // LLM/store reads; age = totalSegs - 1 - segIdx (0 = newest). The old
 // HasUserInput criterion is retired — segments are agent_output-bounded, so
 // archival (L3) is genuinely reachable.
+//
+// The base ladder CAPS AT L2 (single-dimension-trigger alignment): L3 is
+// budget-escalation-only. Segment age governs the cheap, low-loss aging
+// bands (drop tool results, then thinking) — it must NOT archive segments on
+// its own, otherwise "enough segments" becomes an implicit second trigger
+// and lossy L3 folds (plus their LLM narrative calls) fire with budget to
+// spare. keepRecent remains a post-compaction STATE constraint: the most
+// recent k segments stay L0 on every path, including escalation.
 func deterministicLevel(seg *TaskSegment, segIdx, totalSegs, keepRecent int) int {
 	if seg == nil || !seg.IsComplete {
 		return 0 // in-progress segment: pending input, never compressed
@@ -107,22 +115,20 @@ func deterministicLevel(seg *TaskSegment, segIdx, totalSegs, keepRecent int) int
 	if keepRecent < 1 {
 		keepRecent = 1
 	}
-	// Exponential age boundaries (rolling-summary-anchor D2): level L covers
-	// age in [keepRecent·2^(L-1), keepRecent·2^L). Compared to the old linear
-	// {k,2k,3k}, each level's span doubles, so segments dwell longer at each
-	// level and are folded into the rolling summary less often — the rolling
-	// summary (a prefix) and segment re-renders change less frequently, which
-	// improves LLM prefix-cache reuse. Base is fixed at 2.
+	// Exponential age boundaries (rolling-summary-anchor D2): aging level L
+	// covers age in [keepRecent·2^(L-1), keepRecent·2^L). Compared to the old
+	// linear {k,2k,3k}, each level's span doubles, so segments dwell longer at
+	// each level — aged renders change less frequently, which improves LLM
+	// prefix-cache reuse. Base is fixed at 2. Above 2k everything is L2; L3
+	// exists only on the budget-escalation path in compressSkeleton.
 	age := totalSegs - 1 - segIdx
 	switch {
 	case age < keepRecent:
 		return 0 // age < k·2^0
 	case age < keepRecent*2:
 		return 1 // age < k·2^1
-	case age < keepRecent*4:
-		return 2 // age < k·2^2
 	default:
-		return 3 // age >= k·2^2
+		return 2 // age >= k·2^1: skeleton; NOT L3 — aging never archives
 	}
 }
 
@@ -187,14 +193,13 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	if keepRecent < 1 {
 		keepRecent = 1
 	}
-	completeCount := 0
-	for _, seg := range segments {
-		if seg.IsComplete {
-			completeCount++
-		}
-	}
 	beforeTokens := sc.tokenCounter.Estimate(messages)
-	if beforeTokens <= sc.maxTokens && completeCount <= keepRecent {
+	// Single-dimension trigger alignment: budget is the ONLY reason to modify
+	// the view here. Segment count / age alone SHALL NOT trigger aging or
+	// archival (the old `completeCount <= keepRecent` guard let many-segment
+	// histories lossy-compress with budget to spare — an implicit second
+	// trigger violating the single-dimension-trigger spec).
+	if beforeTokens <= sc.maxTokens {
 		return messages
 	}
 

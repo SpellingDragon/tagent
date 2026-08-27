@@ -124,10 +124,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 |------|------|---------|
 | L0 | 进行中段 或 `age < keepRecent` | 全部消息 |
 | L1 | `age < keepRecent*2` | 骨架 + `thinking_plan`（丢 `action_command`） |
-| L2 | `age < keepRecent*4` | 仅骨架（`external_input` + `agent_output`） |
-| L3 | 更老 或 预算仍不足 | 整段移出时间线 → 滚动 summary 归档 |
+| L2 | `age ≥ keepRecent*2`（老化封顶档） | 仅骨架（`external_input` + `agent_output`） |
+| L3 | 仅预算升级（骨架化后仍超预算，自最老段起逐段升档，达标即停；段龄不触发归档） | 整段移出时间线 → 滚动 summary 归档（票据层 + 可选综述层） |
 
-- 段 = 以 `agent_output` 为界的完整任务回合；定级为段龄纯函数（`deterministicLevel`，零 LLM）
+- 段 = 以 `agent_output` 为界的完整任务回合；基础定级为段龄纯函数（`deterministicLevel`，零 LLM，封顶 L2——L3 仅由预算升级抵达，段数不是触发器）
 - 预算升级 O(n)：预计算每段四级成本后 O(1) 增量升档
 - 使用注入的 `TokenCounter`，不自行创建
 - L3 折叠双层：工程票据层（卡片行 + `[evt_key]` 召回票据）恒在；`summary_model` 配置时叠加 LLM 滚动综述 `synthesizeRollingNarrative`（旧综述 + 新折叠段骨架**原文**增量合成为单行 `〔历史综述〕`，编译期常量限长，失败/无模型降级纯工程，纯携带轮零调用）

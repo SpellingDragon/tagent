@@ -34,16 +34,17 @@ func TestDeterministicLevel_Table(t *testing.T) {
 		{"recent turn kept (age=1)", complete, 3, 5, 2, 0},
 		{"mid turn drops tool (age=2)", complete, 3, 6, 2, 1},
 		{"old turn skeleton only (age=5)", complete, 2, 8, 2, 2},
-		{"older turn compacted (age=9)", complete, 0, 10, 2, 3},
-		// Boundary sweep with keepRecent=2 (exponential {k,2k,4k} = {2,4,8}).
+		{"older turn stays skeleton (age=9) — base caps at L2", complete, 0, 10, 2, 2},
+		// Boundary sweep with keepRecent=2 (exponential aging {k,2k} = {2,4};
+		// L3 is budget-escalation-only, never age-reachable).
 		{"age=0", complete, 4, 5, 2, 0},
 		{"age=3 → L1", complete, 1, 5, 2, 1},
 		{"age=4 → L2", complete, 0, 5, 2, 2},
 		{"age=6 → L2 (exponential)", complete, 0, 7, 2, 2},
 		{"age=7 → L2 (exponential)", complete, 0, 8, 2, 2},
-		{"age=8 → L3", complete, 0, 9, 2, 3},
-		// keepRecent floor (k=1 → exponential L3 at age>=4).
-		{"keepRecent=0 treated as 1", complete, 0, 5, 0, 3},
+		{"age=8 → L2 (base ladder never reaches L3)", complete, 0, 9, 2, 2},
+		// keepRecent floor (k=1 → aging L2 at age>=2; L3 still unreachable).
+		{"keepRecent=0 treated as 1", complete, 0, 5, 0, 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -153,26 +154,37 @@ func contentsOf(msgs []model.Message) string {
 	return sb.String()
 }
 
-// Level ladder over 10 complete turns with keepRecent=2 (exponential
-// {k,2k,4k}={2,4,8}): ages 0-1 → L0, 2-3 → L1, 4-7 → L2, 8-9 → L3 (removed).
-// Budget is ample — compression is triggered by segment count alone, so the
-// base age ladder shows without budget escalation.
-func TestCompressSkeleton_LevelLadder(t *testing.T) {
-	sc := NewSmartCompressor(WithKeepRecentTasks(2))
-	msgs := buildTurns(10)
+// Budget-driven aging ladder over 10 complete turns with keepRecent=2
+// (exponential aging {k,2k}={2,4}): ages 0-1 → L0, ages 2-3 → L1, ages 4-9 →
+// L2 — and NO L3: the base ladder never archives. maxTokens is tuned so the
+// full render exceeds it but the post-aging render fits, proving aging fires
+// on budget pressure and stops as soon as it fits (single-dimension trigger).
+func TestCompressSkeleton_BudgetAgingLadder(t *testing.T) {
+	var msgs []model.Message
+	for i := 0; i < 10; i++ {
+		base := int64(10 * (i + 1))
+		msgs = append(msgs,
+			prefixedMsg(model.RoleUser, base, tagentevent.TypeExternalInput, fmt.Sprintf("task %d %s", i, strings.Repeat("a", 1200))),
+			prefixedMsg(model.RoleAssistant, base+1, tagentevent.TypeThinkingPlan, fmt.Sprintf("plan %d %s", i, strings.Repeat("b", 600))),
+			prefixedMsg(model.RoleTool, base+2, tagentevent.TypeActionCommand, fmt.Sprintf("tool %d %s", i, strings.Repeat("c", 1800))),
+			prefixedMsg(model.RoleAssistant, base+3, tagentevent.TypeAgentOutput, fmt.Sprintf("reply %d %s", i, strings.Repeat("d", 1200))),
+		)
+	}
+	// Full render ≈ 25K tokens > 17K; post-aging render (6×L2 + 2×L1 + 2×L0)
+	// ≈ 15.6K tokens ≤ 17K → no escalation, no L3, L1 band preserved (sizes
+	// verified against the estimator: ~2 chars/token).
+	sc := NewSmartCompressor(WithKeepRecentTasks(2), WithMaxTokens(17000))
 
 	result := sc.Compress(context.Background(), msgs)
 	joined := contentsOf(result)
 
-	// L3 (turns 0-1, age 9/8): whole segments gone — no trace of their event keys.
-	for _, turn := range []int{0, 1} {
-		assert.NotContains(t, joined, fmt.Sprintf("task %d", turn), "L3 turn %d must leave the timeline", turn)
-		assert.NotContains(t, joined, fmt.Sprintf("reply %d", turn), "L3 turn %d must leave the timeline", turn)
+	// NO L3: every turn stays on the timeline (age never archives).
+	for turn := 0; turn < 10; turn++ {
+		assert.Contains(t, joined, fmt.Sprintf("task %d", turn), "turn %d must stay (no age-based L3)", turn)
+		assert.Contains(t, joined, fmt.Sprintf("reply %d", turn), "turn %d skeleton must stay", turn)
 	}
-	// L2 (turns 2-5, age 7-4): skeleton only.
-	for _, turn := range []int{2, 3, 4, 5} {
-		assert.Contains(t, joined, fmt.Sprintf("task %d", turn))
-		assert.Contains(t, joined, fmt.Sprintf("reply %d", turn))
+	// L2 (turns 0-5, age 9-4): skeleton only.
+	for _, turn := range []int{0, 1, 2, 3, 4, 5} {
 		assert.NotContains(t, joined, fmt.Sprintf("plan %d", turn), "L2 drops thinking_plan")
 		assert.NotContains(t, joined, fmt.Sprintf("tool %d", turn), "L2 drops action_command")
 	}
@@ -187,6 +199,17 @@ func TestCompressSkeleton_LevelLadder(t *testing.T) {
 	}
 	// Zero-LLM path: no error/degradation notices ever.
 	assert.NotContains(t, joined, "[context_compress_error]")
+}
+
+// Segment count alone is NOT a trigger (single-dimension-trigger spec): a
+// deep history (many complete segments) under budget passes through
+// untouched — no aging, no archival, no rolling-summary side effects.
+func TestCompressSkeleton_ManySegmentsUnderBudgetNoChange(t *testing.T) {
+	sc := NewSmartCompressor(WithKeepRecentTasks(2)) // default maxTokens = 8000
+	msgs := buildTurns(10)                           // ~1.3K tokens: far under budget
+
+	result := sc.Compress(context.Background(), msgs)
+	assert.Equal(t, msgs, result, "segment count alone must not trigger any compression")
 }
 
 // In-progress segment is fully preserved even when the history is deep

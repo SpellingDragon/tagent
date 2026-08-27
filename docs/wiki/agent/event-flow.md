@@ -128,8 +128,8 @@ graph TD
 |------|------|---------|---------|
 | L0 | 进行中段 或 `age < keepRecent` | 全部消息 | 无 |
 | L1 | `age < keepRecent*2` | 骨架 + `thinking_plan` | `action_command`（tool 先丢） |
-| L2 | `age < keepRecent*3` | 仅骨架 | `action_command` + `thinking_plan` |
-| L3 | 更老 或 预算仍不足 | （整段移出时间线） | 全段 → 滚动 summary |
+| L2 | `age ≥ keepRecent*2`（老化封顶档） | 仅骨架 | `action_command` + `thinking_plan` |
+| L3 | 仅预算升级（骨架化后仍超预算；段龄不触发） | （整段移出时间线） | 全段 → 滚动 summary |
 
 丢弃序 `tool > assistant`：工具结果体积最大、复用价值最低，先丢；`thinking_plan` 承载推理脉络，后丢。预算不足时先把老段压到 L2（骨架），仍超再按最老优先逐段 L3。预算升级为 O(n)：预计算每段四级成本 `cost[i][0..3]`（4n 次 Estimate）后，升级步骤仅做 O(1) 增量更新，不重算全量时间线。
 

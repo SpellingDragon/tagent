@@ -62,7 +62,7 @@
 
 ### Requirement: 骨架仍超预算时触发多段压缩归档
 
-当骨架（L2 仅保留边界事件）仍超预算时，SHALL 触发多段压缩归档（L3）：最老段整段离场并由 `buildRetainedRefs` 折叠进滚动摘要。L3 折叠为**双层结构**：
+当骨架（L2 仅保留边界事件）仍超预算时，SHALL 触发多段压缩归档（L3）：最老段整段离场并由 `buildRetainedRefs` 折叠进滚动摘要。L3 SHALL 仅由预算升级抵达——基础定级封顶 L2（见"段定级采用指数段龄边界"需求），段龄/段数 SHALL NOT 触发归档。L3 折叠为**双层结构**：
 
 - **工程票据层（恒在，零 LLM）**：每个离场骨架事件折叠为一行卡片（`- [time] [evt_key] 骨架摘要`），`[evt_key]` 为召回票据；
 - **LLM 滚动综述层（可选，`summary_model` 配置时启用）**：以旧综述 + 本轮新折叠段骨架**原文**（素材律：从 MemoryStore 取真实存储文本，非二手卡片行）为素材，增量合成为单行 `〔历史综述〕`，置于卡片层之上；综述长度与单轮素材量受编译期常量约束（`rollingNarrativeCapChars` / `narrativeSkeletonCapChars` / `narrativeEventCap`），不新增配置旋钮。
@@ -150,15 +150,24 @@
 - **WHEN** `buildRetainedRefs` 构建 RetainedRefs
 - **THEN** SHALL 仍吸收并重建滚动摘要 ref（负 key），投影照常携带到下一轮
 
-### Requirement: 段定级采用指数段龄边界
+### Requirement: 段定级采用指数段龄边界且封顶于 L2
 
-`deterministicLevel` 的段龄阈值 SHALL 为指数边界 `keepRecent × 2^level`（即 L0 < k、L1 < 2k、L2 < 4k、L3 ≥ 4k），而非线性 `{k, 2k, 3k}`，以使段在每个级别驻留更久、被折叠进滚动摘要的频率降低（前缀缓存更稳定）。指数底数 SHALL 固定为 2。
+`deterministicLevel` 的段龄阈值 SHALL 为指数边界 `keepRecent × 2^level`（即 L0 < k、L1 < 2k、L2 ≥ 2k），而非线性 `{k, 2k, 3k}`，以使段在每个老化级别驻留更久（前级渲染变化更少，缓存更稳定）。指数底数 SHALL 固定为 2。
 
-#### Scenario: 指数边界定级
+**封顶律（触发器单维化对齐）**：基础定级 SHALL 封顶于 L2——段龄 SHALL NOT 触发 L3 归档，否则"段数够多"成为隐性第二触发器，在预算宽裕时执行有损归档（连带 LLM 综述调用）。L3 SHALL 仅由预算升级路径抵达（见"多段压缩归档"需求）。`keepRecent` 为整理后状态约束：最近 k 段在一切路径（含升级）下恒为 L0。
+
+#### Scenario: 指数边界老化定级
 
 - **GIVEN** keepRecent=2
-- **WHEN** 计算段龄 age 的级别
-- **THEN** age=3 SHALL 为 L1、age=5 SHALL 为 L2、age=7 SHALL 为 L2、age=8 SHALL 为 L3（线性下 age=5/6 已为 L3）
+- **WHEN** 计算段龄 age 的基础级别
+- **THEN** age=3 SHALL 为 L1、age=5 SHALL 为 L2、age=7 SHALL 为 L2、age=8 SHALL 为 L2（基础阶梯永不抵达 L3；线性下 age=5/6 已为最高档）
+
+#### Scenario: 预算升级才抵达 L3
+
+- **GIVEN** keepRecent=2，历史含 10 个完整段且总 token 超预算
+- **WHEN** 执行骨架压缩，骨架化后仍超预算
+- **THEN** 预算升级 SHALL 自最老段起逐段升 L3（age ≥ keepRecent 才可升级），达标即停
+- **AND** 同样历史在预算内时 SHALL 全部保持在基础老化级别（无 L3、无归档）
 
 ### Requirement: 压缩配置参数公式化默认值
 
@@ -233,13 +242,19 @@
 
 ### Requirement: 压缩触发器单维化（token 容量阈值）
 
-`ContextCompressor.Compress` SHALL 以**单一维度**触发整理：仅当 `usedTokens > compress_threshold × max_tokens` 时才调用 `SmartCompressor.Compress` 与投影重写；未超阈值时 SHALL pass-through——直接返回按投影渲染的消息且**不触碰投影**（不折叠、不定级、不重建 refs）。完整回合计数 SHALL NOT 参与触发判断。
+`ContextCompressor.Compress` SHALL 以**单一维度**触发整理：仅当 `usedTokens > compress_threshold × max_tokens` 时才调用 `SmartCompressor.Compress` 与投影重写；未超阈值时 SHALL pass-through——直接返回按投影渲染的消息且**不触碰投影**（不折叠、不定级、不重建 refs）。完整回合计数 SHALL NOT 参与触发判断。`SmartCompressor.Compress` 内部提前退出 SHALL 同样仅以 token 预算判断（完整段数/段龄 SHALL NOT 作为触发条件，仅作为 keepRecent 保留保护的状态约束）。
 
 #### Scenario: 未超阈值时完全直通
 
 - **GIVEN** 会话已有远超 `keep_recent_tasks` 的完整回合数，但 `usedTokens` 低于阈值
 - **WHEN** 执行 `ContextCompressor.Compress`
 - **THEN** SHALL NOT 调用 `SmartCompressor.Compress`，SHALL NOT 执行工具链折叠，投影 refs SHALL 原样返回
+
+#### Scenario: 超阈值但折叠后低于预算则 SmartCompressor 原样返回
+
+- **GIVEN** `usedTokens` 超过阈值触发整理，但工具链折叠后渲染 token 已低于 `SmartCompressor` 预算
+- **WHEN** 执行 `SmartCompressor.Compress`
+- **THEN** SHALL 原样返回消息（不老化、不定级、不归档），投影仅发生工具链折叠
 
 #### Scenario: 超阈值触发整理（回归）
 
