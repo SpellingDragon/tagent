@@ -50,9 +50,11 @@ func TestRenderTaskBoard_EmptyWhenNoActive(t *testing.T) {
 	}
 }
 
-// TestInjectTaskBoard_BeforeLastUser: the board is inserted right before the
-// current input (last user message).
-func TestInjectTaskBoard_BeforeLastUser(t *testing.T) {
+// TestInjectTaskBoard_AppendAtTail: the board is appended AFTER the current
+// input — the byte-changing board must live strictly at the tail so the
+// prompt-cache prefix stays intact (2026-08-27 fix; it used to insert before
+// the last user message, breaking in-turn caching at every LLM call).
+func TestInjectTaskBoard_AppendAtTail(t *testing.T) {
 	msgs := []model.Message{
 		model.NewSystemMessage("sys"),
 		{Role: model.RoleUser, Content: "hello"},
@@ -63,11 +65,35 @@ func TestInjectTaskBoard_BeforeLastUser(t *testing.T) {
 	if len(out) != len(msgs)+1 {
 		t.Fatalf("expected +1 message, got %d", len(out))
 	}
-	if out[len(out)-1].Content != "do X" {
-		t.Errorf("last message should remain 'do X', got %q", out[len(out)-1].Content)
+	if out[len(out)-1].Content != "BOARD" {
+		t.Errorf("board must be the LAST message (tail), got %q", out[len(out)-1].Content)
 	}
-	if out[len(out)-2].Content != "BOARD" {
-		t.Errorf("board should precede the current input, got %q", out[len(out)-2].Content)
+	// Everything before the board is untouched, in order.
+	for i := range msgs {
+		if out[i].Role != msgs[i].Role || out[i].Content != msgs[i].Content {
+			t.Errorf("message %d must be unchanged, got (%s,%q) vs (%s,%q)",
+				i, out[i].Role, out[i].Content, msgs[i].Role, msgs[i].Content)
+		}
+	}
+}
+
+// TestInjectTaskBoard_TailAfterToolResults: mid-turn views end with tool
+// results; the board still appends after them (tool-call pairing untouched,
+// cache prefix covers the whole in-turn exchange).
+func TestInjectTaskBoard_TailAfterToolResults(t *testing.T) {
+	msgs := []model.Message{
+		model.NewSystemMessage("sys"),
+		{Role: model.RoleUser, Content: "do X"},
+		{Role: model.RoleAssistant, Content: "", ToolCalls: []model.ToolCall{{ID: "t1"}}},
+		{Role: model.RoleTool, ToolID: "t1", Content: "ack"},
+	}
+	out := InjectBoard(msgs, "BOARD")
+	if out[len(out)-1].Role != model.RoleUser || out[len(out)-1].Content != "BOARD" {
+		t.Fatalf("board must be the last message, got %+v", out[len(out)-1])
+	}
+	// Tool result stays directly after its assistant tool_call message.
+	if out[2].Role != model.RoleAssistant || out[3].Role != model.RoleTool || out[3].ToolID != "t1" {
+		t.Errorf("tool-call pairing must be untouched, got %+v", out[2:4])
 	}
 }
 

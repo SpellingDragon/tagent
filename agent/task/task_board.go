@@ -71,26 +71,18 @@ func ShortID(id string) string {
 	return id
 }
 
-// InjectBoard inserts the rendered board (as a user-role context message)
-// immediately before the last user message — i.e. after the latest agent
-// output, just before the current input — so it reads as fresh state framing
-// the request. When there is no user message it is appended at the end. A
-// non-empty board string is required; callers should skip injection for "".
+// InjectBoard appends the rendered board (as a user-role context message) at
+// the very END of the message list — after the current input and any pending
+// tool results.
+//
+// Cache rationale (2026-08-27 fix): the board is re-rendered before EVERY
+// LLM call (task ages tick, tasks settle), so its bytes change call-to-call.
+// Injecting it before the last user message broke the prompt-cache prefix at
+// that point — every in-turn LLM call re-paid the whole active turn. At the
+// tail, the cacheable prefix covers everything except the board itself; and
+// the wait-guidance being the last thing the model reads strengthens the
+// anti-spin teaching. A non-empty board string is required; callers should
+// skip injection for "".
 func InjectBoard(msgs []model.Message, board string) []model.Message {
-	boardMsg := model.Message{Role: model.RoleUser, Content: board}
-	lastUser := -1
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == model.RoleUser {
-			lastUser = i
-			break
-		}
-	}
-	if lastUser < 0 {
-		return append(msgs, boardMsg)
-	}
-	out := make([]model.Message, 0, len(msgs)+1)
-	out = append(out, msgs[:lastUser]...)
-	out = append(out, boardMsg)
-	out = append(out, msgs[lastUser:]...)
-	return out
+	return append(msgs, model.Message{Role: model.RoleUser, Content: board})
 }

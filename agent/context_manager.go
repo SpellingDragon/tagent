@@ -549,12 +549,16 @@ func cloneEventForDelivery(evt *event.Event) *event.Event {
 	return &cp
 }
 
-// injectLiveTaskBoard renders the current active-task board and injects it near
-// the last user input. The taskController nil-check is at CALL time, not
-// registration time: taskController is wired AFTER ContextManager construction
-// (agent.go), so a registration-time guard would permanently skip the board.
-// The board is ephemeral (request-only, never projected/compressed).
-// (async-result-delivery: task-board-injection-order fix.)
+// injectLiveTaskBoard renders the current active-task board and appends it at
+// the TAIL of the message list (after the current input / pending tool
+// results) — the board bytes change every call (task ages), so only the
+// tail position keeps the prompt-cache prefix intact. The taskController
+// nil-check is at CALL time, not registration time: taskController is wired
+// AFTER ContextManager construction (agent.go), so a registration-time guard
+// would permanently skip the board. The board is ephemeral (request-only,
+// never projected/compressed).
+// (async-result-delivery: task-board-injection-order fix; 2026-08-27 tail
+// reposition for prefix-cache stability.)
 func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	if cm.taskController == nil {
 		return

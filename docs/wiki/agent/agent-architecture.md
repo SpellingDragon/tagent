@@ -170,7 +170,7 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
 - **settle 三档**：`completed` / `stable` / `suspect`，探测器只做确定性分类，语义判断交给 LLM。
 - **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
-- **看板 + 工具**：`BeforeModel` 每 turn 从 registry 重渲染 live 看板（不参与压缩，置于 recency 锚点）；`list_tasks` / `cancel` / `relaunch` / `resume_task` 为即时同步工具（结果消费不走专用工具：小结果随 settle 通知内联，大结果转储文件经 read_file 分页）。
+- **看板 + 工具**：`BeforeModel` 每次调用从 registry 重渲染 live 看板（不参与压缩，**追加在消息列表末尾**——看板字节逐次变化，置于尾部使前缀缓存仅损失看板自身，等待指引行同时是模型读到的最后内容）；`list_tasks` / `cancel` / `relaunch` / `resume_task` 为即时同步工具（结果消费不走专用工具：小结果随 settle 通知内联，大结果转储文件经 read_file 分页）。
 - **resume_task 重入**：合法源状态 {alive-detached, stable, completed, failed}；tmux 经 detector `Rearm`（绑会话非轮次，零换绑），subagent 经新 Run + 任务链还原器。详见 [tool 架构文档「任务重入」章](../tool/tool-architecture.md)。
 - **会话回收闭环**：运行时 completed/error 即回收；优雅退出 `Close()` 收编存活会话；启动时按前缀清扫孤儿会话（防 pty 泄漏累积）。
 

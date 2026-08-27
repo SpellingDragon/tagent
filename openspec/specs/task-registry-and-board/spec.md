@@ -28,11 +28,11 @@ registry SHALL 为纯内存(ephemeral),SHALL NOT 跨进程重启持久化。
 
 ### Requirement: live 任务看板投影
 
-系统 SHALL 在每个 turn 的 `BeforeModel` 阶段从 TaskManager registry **重新渲染**一个紧凑的任务看板注入上下文。看板 SHALL 放置在**最后一个 agent_output 之后、当前输入之前**(recency 锚点)。
+系统 SHALL 在每次 LLM 调用的 `BeforeModel` 阶段从 TaskManager registry **重新渲染**一个紧凑的任务看板注入上下文。看板 SHALL **追加在消息列表末尾**（当前输入与任何待答工具结果之后）——看板字节随任务年龄/状态逐次变化，置于末尾使前缀缓存的损失严格限于看板自身；插入在输入之前会在看板处截断缓存前缀，导致回合内每次 LLM 调用重付整个活跃回合（2026-08-27 修复）。
 
 任务看板 SHALL NOT 参与上下文压缩——它是 live 状态快照而非历史事件。已被 LLM 处理(acknowledged)的 settled 任务 SHALL 在短 TTL 后从看板 age-out,以保持看板有界。
 
-**等待指引行**：看板存在活跃任务时,尾部 SHALL 追加一行固定文本的等待指引（语义：等待后台任务时直接给出简短回复并结束回合,结算会自动唤醒;不要用 sleep 等命令等待）。指引行 SHALL 为固定文本（不随任务数/年龄变化）,SHALL NOT 引入随 turn 变化的内容。
+**等待指引行**：看板存在活跃任务时,尾部 SHALL 追加一行固定文本的等待指引（语义：等待后台任务时直接给出简短回复并结束回合,结算会自动唤醒;不要用 sleep 等命令等待）。指引行 SHALL 为固定文本（不随任务数/年龄变化）,SHALL NOT 引入随 turn 变化的内容。看板作为模型读到的最后一条消息，同时强化反自旋教学（结束回合即合法等待）。
 
 #### Scenario: 看板每 turn 重新渲染且不被压缩
 
@@ -40,10 +40,11 @@ registry SHALL 为纯内存(ephemeral),SHALL NOT 跨进程重启持久化。
 - **THEN** 任务看板 SHALL 仍由 registry 重新渲染出当前活跃任务
 - **AND** 看板内容 SHALL NOT 被压缩器改写或丢弃
 
-#### Scenario: 看板位于 recency 锚点
+#### Scenario: 看板位于消息列表末尾（缓存稳定位）
 
-- **WHEN** 构建发给 LLM 的消息序列
-- **THEN** 任务看板 SHALL 位于最后一个 agent_output 之后、当前输入(或 settle 事件)之前
+- **WHEN** 构建发给 LLM 的消息序列（存在新输入或待答工具结果）
+- **THEN** 任务看板 SHALL 是最后一条消息
+- **AND** 其前全部消息 SHALL 原样保留（含工具调用配对），使前缀缓存仅损失看板自身
 
 #### Scenario: 已处理任务 age-out
 
