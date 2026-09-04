@@ -162,11 +162,25 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 	)
 }
 
-// NewMCPDiscoverTool creates a tool that discovers available MCP tools.
+// NewMCPDiscoverTool creates a tool that discovers available MCP tools
+// from a static toolset slice. Kept for the BuildSubTools compatibility
+// path; the config-driven path uses NewMCPDiscoverToolWithRegistry.
 func NewMCPDiscoverTool(toolSets []tool.ToolSet) tool.Tool {
+	return newMCPDiscoverTool(func(context.Context) []tool.ToolSet { return toolSets })
+}
+
+// NewMCPDiscoverToolWithRegistry creates a discover tool over the live MCP
+// registry: the server set is read at CALL time, so runtime-registered
+// servers become discoverable immediately without rebuilding any agent.
+func NewMCPDiscoverToolWithRegistry(reg tagenttool.MCPRegistry) tool.Tool {
+	return newMCPDiscoverTool(func(context.Context) []tool.ToolSet { return reg.List() })
+}
+
+// newMCPDiscoverTool builds the discover tool over a toolset source.
+func newMCPDiscoverTool(source func(context.Context) []tool.ToolSet) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args mcpDiscoverArgs) (mcpDiscoverResult, error) {
-			results := discoverMCPTools(ctx, toolSets, args.Query)
+			results := discoverMCPTools(ctx, source(ctx), args.Query)
 
 			var tools []mcpToolInfo
 			for _, r := range results {
@@ -183,7 +197,7 @@ func NewMCPDiscoverTool(toolSets []tool.ToolSet) tool.Tool {
 			}, nil
 		},
 		function.WithName("mcp_discover"),
-		function.WithDescription("Discover available MCP tools matching a query"),
+		function.WithDescription("Discover available MCP tools matching a query. Results include the exact mcp_call invocation (server/tool) and the tool's input schema."),
 	)
 }
 
@@ -313,33 +327,59 @@ func discoverMCPTools(ctx context.Context, toolSets []tool.ToolSet, query string
 			nameLower := strings.ToLower(decl.Name)
 			descLower := strings.ToLower(decl.Description)
 
-			if strings.Contains(nameLower, queryLower) ||
-				strings.Contains(descLower, queryLower) ||
-				strings.Contains(queryLower, nameLower) {
-
-				schemaInfo := ""
-				if decl.InputSchema != nil {
-					schemaBytes, _ := json.Marshal(decl.InputSchema)
-					schemaInfo = string(schemaBytes)
-				}
-
-				content := fmt.Sprintf("MCP tool '%s': %s\n\nCallable via command(mode=\"exec\", command=...).",
-					decl.Name, decl.Description)
-				if schemaInfo != "" {
-					content += fmt.Sprintf("\n\nInput Schema: %s", schemaInfo)
-				}
-
-				results = append(results, KnowledgeResult{
-					Type:    "mcp_tool",
-					Title:   decl.Name,
-					Content: content,
-					Source:  fmt.Sprintf("mcp:%s", ts.Name()),
-				})
+			if !mcpQueryMatches(queryLower, nameLower, descLower) {
+				continue
 			}
+
+			schemaInfo := ""
+			if decl.InputSchema != nil {
+				schemaBytes, _ := json.Marshal(decl.InputSchema)
+				schemaInfo = string(schemaBytes)
+			}
+
+			content := fmt.Sprintf("MCP tool '%s' on server '%s': %s\n\nCallable via mcp_call(server=%q, tool=%q, args={...}).",
+				decl.Name, ts.Name(), decl.Description, ts.Name(), decl.Name)
+			if schemaInfo != "" {
+				content += fmt.Sprintf("\n\nInput Schema: %s", schemaInfo)
+			}
+
+			results = append(results, KnowledgeResult{
+				Type:    "mcp_tool",
+				Title:   decl.Name,
+				Content: content,
+				Source:  fmt.Sprintf("mcp:%s", ts.Name()),
+			})
 		}
 	}
 
 	return results
+}
+
+// mcpQueryMatches reports whether a lowercased query matches a tool's
+// lowercased name/description. Beyond plain substring containment, it falls
+// back to token-AND matching (split on space/underscore/hyphen) so natural
+// language queries like "web search" match tools named "web_search_prime"
+// or described as "Search web information ..." regardless of word order or
+// separator style — LLM-issued queries are rarely exact substrings.
+func mcpQueryMatches(queryLower, nameLower, descLower string) bool {
+	if strings.Contains(nameLower, queryLower) ||
+		strings.Contains(descLower, queryLower) ||
+		strings.Contains(queryLower, nameLower) {
+		return true
+	}
+	tokens := strings.FieldsFunc(queryLower, func(r rune) bool {
+		return r == ' ' || r == '_' || r == '-'
+	})
+	if len(tokens) == 0 {
+		return false
+	}
+	combined := nameLower + " " + descLower
+	for _, tk := range tokens {
+		if !strings.Contains(combined, tk) {
+			return false
+		}
+	}
+	return true
 }
 
 // queryHistoricalKnowledge queries historical knowledge events from memory,
@@ -408,8 +448,13 @@ func skillLoadFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, erro
 }
 
 func mcpDiscoverFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
+	// Live registry preferred: runtime-registered servers are discoverable
+	// immediately (mcp-discovery-execution-loop).
+	if cfg.MCPRegistry != nil {
+		return NewMCPDiscoverToolWithRegistry(cfg.MCPRegistry).(tool.CallableTool), nil
+	}
 	if len(cfg.MCPToolSets) == 0 {
-		// Return a stub tool that returns empty results when MCPToolSets is not configured.
+		// Return a stub tool that returns empty results when no MCP source is configured.
 		return NewMCPDiscoverTool(nil).(tool.CallableTool), nil
 	}
 	return NewMCPDiscoverTool(cfg.MCPToolSets).(tool.CallableTool), nil

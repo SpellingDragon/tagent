@@ -9,6 +9,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/prompt"
+	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +89,13 @@ type Config struct {
 	//       api_key_env: "ANTHROPIC_API_KEY"
 	Providers map[string]ProviderConfig `json:"providers,omitempty" yaml:"providers,omitempty"`
 
+	// MCPServers maps server name → MCP connection declaration. Servers are
+	// loaded into the process-level MCP registry consumed by mcp_discover /
+	// mcp_call (mcp-discovery-execution-loop). Editing this section in the
+	// config file hot-syncs the registry (lazy mtime check) — no restart,
+	// and no agent tool declaration changes (prompt prefix stays stable).
+	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
+
 	// ===== Runtime configuration (was in config.yaml) =====
 
 	// APIEndpoint is the LLM API base URL (e.g., "https://open.bigmodel.cn/api/paas/v4").
@@ -117,7 +125,17 @@ type Config struct {
 	// TrajectoryDir is the directory for trajectory JSONL files.
 	// Default: "data/trajectories". Each session gets its own file: {dir}/{session_id}.jsonl
 	TrajectoryDir string `json:"trajectory_dir,omitempty" yaml:"trajectory_dir,omitempty"`
+
+	// ConfigPath records the file this Config was loaded from (set by
+	// LoadConfig; empty for programmatically constructed configs). It binds
+	// the MCP registry's mcp_servers hot-sync to the source file.
+	ConfigPath string `json:"-" yaml:"-"`
 }
+
+// MCPServerConfig declares one MCP server connection (top-level mcp_servers).
+// Alias of tool/mcp.ServerConfig so the MCP registry's config hot-sync
+// re-parses the same shape without importing the root package.
+type MCPServerConfig = toolmcp.ServerConfig
 
 // ProviderConfig holds connection info for a model provider.
 // Used in Config.Providers to declare provider endpoints and credentials.
@@ -599,6 +617,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate MCP server declarations (transport-normalized field rules).
+	for name, sc := range c.MCPServers {
+		if err := sc.Validate(name); err != nil {
+			return fmt.Errorf("tagent config: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -652,6 +677,14 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	default:
 		return nil, fmt.Errorf("unsupported config file extension %q (use .yaml, .yml, or .json)", ext)
+	}
+
+	// Record the source path (absolute when resolvable) so the MCP registry
+	// can hot-sync the mcp_servers section on file changes.
+	if abs, err := filepath.Abs(path); err == nil {
+		cfg.ConfigPath = abs
+	} else {
+		cfg.ConfigPath = path
 	}
 
 	cfg.ApplyDefaults()

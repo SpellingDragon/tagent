@@ -95,6 +95,18 @@ request_timeout_seconds: 3600
 trajectory_dump: true
 trajectory_dir: "data/trajectories"
 
+# ===== MCP Servers =====
+# 声明式 MCP server 注册表 (mcp-discovery-execution-loop):
+#   - knowledge 经 mcp_discover 实时发现; 持 mcp_call 工具的 agent 直调
+#   - 增删/修改本段并保存即热生效 (mtime 惰性同步), 无需重启
+#   - 不改任何 agent 的工具声明区 → prompt 前缀稳定, 前缀缓存不失效
+mcp_servers:
+  web-search-prime:
+    transport: streamable-http     # 自动归一化为 trpc 的 "streamable"
+    url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
+    # GLM Coding Plan 专属 MCP; 本配置 zhipu provider 即 coding 端点, 同一把 key 直接复用
+    api_key_env: ZAI_API_KEY
+
 # ===== Agent 配置 =====
 #
 # Thinking/Reasoning 模式控制 (每个 agent 可独立配置):
@@ -279,15 +291,11 @@ agents:
         id: read_file
       - kind: tool
         id: mcp_discover
+      # 联网搜索: 经 mcp_call 网关直调 zhipu web-search-prime 的 web_search_prime
+      # (实测工具名为下划线风格; 用法见 knowledge_agent.md; 参数不确定时先 mcp_discover 核实 schema)。
+      # 回退旧 REST 实现: 恢复 `- kind: tool / id: web_search` 即可 (工厂仍注册)。
       - kind: tool
-        id: web_search
-        # Zhipu Web Search API。默认即用 ZAI_API_KEY 与官方端点，无需配置；
-        # 如需覆盖可打开以下 properties：
-        # properties:
-        #   api_key_env: ZAI_API_KEY
-        #   endpoint: https://open.bigmodel.cn/api/paas/v4/web_search
-        #   search_engine: search_std   # 或 search_pro
-        #   count: 10                   # 1-50
+        id: mcp_call
       - kind: tool
         id: duckduckgo_search
       - kind: tool
@@ -367,6 +375,11 @@ agents:
             interval: 3s
             stable_duration: 30s
             fake_dead_duration: 180s
+
+      # MCP 执行网关: 直调注册表内 MCP server 的工具
+      # (发现经 knowledge 的 mcp_discover; server/tool/args 三参, 声明恒定)
+      - kind: tool
+        id: mcp_call
 
   # ========================================================================
   # Plan Agent: 工作计划管理子 Agent

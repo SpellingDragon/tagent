@@ -2,6 +2,7 @@ package tool
 
 import (
 	"trpc.group/trpc-go/trpc-agent-go/skill"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory"
 )
@@ -29,4 +30,20 @@ type MemoryStoreAccessor interface {
 type SkillRepository interface {
 	Summaries() []skill.Summary
 	Get(name string) (*skill.Skill, error)
+}
+
+// ==================== MCP Registry ====================
+
+// MCPRegistry provides read access to the live MCP server registry
+// (implemented by tool/mcp.Registry). Reads reflect the registry's CURRENT
+// content at call time — runtime registration and config hot-sync are
+// visible immediately, so tools holding an MCPRegistry must not snapshot
+// its content at construction. Implementations are safe for concurrent use.
+type MCPRegistry interface {
+	// Get returns the toolset registered under name.
+	Get(name string) (trpctool.ToolSet, bool)
+	// List returns all registered toolsets, sorted by server name.
+	List() []trpctool.ToolSet
+	// Names returns all registered server names, sorted.
+	Names() []string
 }

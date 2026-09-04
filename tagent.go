@@ -9,6 +9,7 @@
 //	tagent (root) → tool/action → memory
 //	tagent (root) → tool/recall → memory
 //	tagent (root) → tool/knowledge → memory
+//	tagent (root) → tool/mcp → tool (MCPRegistry interface)
 //	tagent (root) → prompt
 //
 // Tool Registration:
@@ -38,6 +39,7 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
 	"github.com/SpellingDragon/tagent/tool/action"
+	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/plan"
 
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -57,6 +59,11 @@ type runtimeConfig struct {
 	summaryModel model.Model // Optional: for Stage 2 LLM summary
 	skillRepo    tool.SkillRepository
 	mcpToolSets  []trpctool.ToolSet
+
+	// mcpRegistry is the process-level MCP server registry (config-declared
+	// servers + WithMCPToolSets merged). Consumed by mcp_discover/mcp_call;
+	// mutations never touch agent tool declarations.
+	mcpRegistry *toolmcp.Registry
 
 	// resolvedModels caches model.Model instances keyed by "provider:model" string.
 	// Agents sharing the same provider+model reuse the same instance.
@@ -97,7 +104,9 @@ func WithSkillRepo(sr tool.SkillRepository) Option {
 	return func(rc *runtimeConfig) { rc.skillRepo = sr }
 }
 
-// WithMCPToolSets sets the MCP tool sources for knowledge agent.
+// WithMCPToolSets injects pre-built MCP toolsets. They are merged into the
+// process-level MCP registry under their Name() (alongside YAML-declared
+// mcp_servers), becoming visible to mcp_discover/mcp_call immediately.
 func WithMCPToolSets(ts []trpctool.ToolSet) Option {
 	return func(rc *runtimeConfig) { rc.mcpToolSets = ts }
 }
@@ -153,6 +162,18 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("tagent: model is required (use WithModel)")
 	}
 
+	// Build the process-level MCP registry: config-declared servers plus
+	// WithMCPToolSets merged in, one live source for mcp_discover/mcp_call.
+	// Registry mutations (runtime add/remove, config hot-sync) never touch
+	// any agent's tool declarations, so the prompt prefix stays cache-stable.
+	rc.mcpRegistry = toolmcp.NewRegistry(toolmcp.WithConfigPath(cfg.ConfigPath))
+	rc.mcpRegistry.Seed(cfg.MCPServers)
+	for _, ts := range rc.mcpToolSets {
+		if ts != nil {
+			rc.mcpRegistry.Add(ts.Name(), ts)
+		}
+	}
+
 	// Wrap model with TrajectoryRecorder if enabled
 	if cfg.TrajectoryDump {
 		tr, err := rl.NewTrajectoryRecorder(rc.model, cfg.TrajectoryDir, cfg.APIEndpoint)
@@ -188,6 +209,13 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	if rc.trajectoryRecorder != nil {
 		entryAgent.SetTrajectoryRecorder(rc.trajectoryRecorder)
 		entryAgent.RegisterCloser(rc.trajectoryRecorder)
+	}
+
+	// Register the MCP registry for graceful shutdown — closes all MCP
+	// toolset connections once at process exit (registry is process-level,
+	// shared across agents).
+	if rc.mcpRegistry != nil {
+		entryAgent.RegisterCloser(rc.mcpRegistry)
 	}
 
 	return entryAgent, nil
@@ -281,6 +309,11 @@ func buildAgent(
 				ThinkingTokens:       acfg.ThinkingTokens,
 				ReasoningEffort:      acfg.ReasoningEffort,
 				ReasoningContentMode: acfg.ReasoningContentMode,
+			}
+			// Nil-guard: keep the interface field nil when no registry exists
+			// (a typed nil *Registry would read as non-nil).
+			if rc.mcpRegistry != nil {
+				factoryCfg.MCPRegistry = rc.mcpRegistry
 			}
 
 			ta, err := factory(factoryCfg)
@@ -530,7 +563,7 @@ func buildPlainToolRef(
 		return nil, false, fmt.Errorf("no plain tool factory registered for id %q", tr.ID)
 	}
 
-	callable, err := factory(agent.PlainToolFactoryConfig{
+	factoryCfg := agent.PlainToolFactoryConfig{
 		ID:               tr.ID,
 		Description:      desc,
 		Properties:       tr.Properties,
@@ -539,7 +572,13 @@ func buildPlainToolRef(
 		SkillRepo:        rc.skillRepo,
 		MCPToolSets:      rc.mcpToolSets,
 		ReadPartitionIDs: readPartitionIDs,
-	})
+	}
+	// Nil-guard: assigning a typed nil *Registry to the interface field
+	// would make cfg.MCPRegistry != nil inside factories.
+	if rc.mcpRegistry != nil {
+		factoryCfg.MCPRegistry = rc.mcpRegistry
+	}
+	callable, err := factory(factoryCfg)
 	if err != nil {
 		return nil, false, err
 	}

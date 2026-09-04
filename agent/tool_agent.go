@@ -791,8 +791,12 @@ type ToolAgentFactoryConfig struct {
 	// SkillRepo is the skill repository for knowledge agent (optional).
 	SkillRepo tagenttool.SkillRepository
 
-	// MCPToolSets are MCP tool sources for tool discovery (optional).
+	// MCPToolSets are MCP tool sources for tool discovery (optional, legacy).
 	MCPToolSets []trpctool.ToolSet
+
+	// MCPRegistry is the live MCP server registry (preferred over
+	// MCPToolSets): reads reflect runtime registration and config hot-sync.
+	MCPRegistry tagenttool.MCPRegistry
 
 	// Agent parameters
 	MaxToolIterations int
@@ -853,7 +857,8 @@ type PlainToolFactoryConfig struct {
 	// memory_query needs MemStore) extract them from here.
 	MemStore         memory.MemoryStore         // For memory-dependent tools
 	SkillRepo        tagenttool.SkillRepository // For skill-dependent tools
-	MCPToolSets      []trpctool.ToolSet         // For MCP-dependent tools
+	MCPToolSets      []trpctool.ToolSet         // For MCP-dependent tools (legacy static slice)
+	MCPRegistry      tagenttool.MCPRegistry     // Live MCP server registry (preferred over MCPToolSets)
 	ReadPartitionIDs []int                      // For recall tools that query cross-namespace
 }
 

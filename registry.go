@@ -12,6 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
+	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/SpellingDragon/tagent/tool/spec"
 	"github.com/SpellingDragon/tagent/tool/task"
@@ -61,6 +62,7 @@ func (r *ToolRegistry) GetToolAgentFactory(id string) (agent.ToolAgentFactory, b
 //   - file sub-tools: read_file, save_file, list_file, search_file, search_content, read_multiple_files, replace_content
 //   - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search, duckduckgo_search, memory_query
 //   - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
+//   - mcp_call: generic MCP execution gateway (mcp-discovery-execution-loop)
 var registerOnce sync.Once
 
 func RegisterBuiltinTools() error {
@@ -83,6 +85,10 @@ func RegisterBuiltinTools() error {
 
 		// spec: typed spec/plan management (no shell; openspec backend)
 		spec.RegisterTool()
+
+		// mcp_call: generic MCP execution gateway — constant declaration,
+		// resolves server/tool through the live MCP registry at call time
+		toolmcp.RegisterTool()
 	})
 	return nil
 }

@@ -3,6 +3,7 @@ Information and workflow discovery tool. Searches local skills, the web, and mem
 Use this BEFORE action when:
 - You need an approach for a task (fetch a URL, process a file, deploy, etc.) — knowledge searches local skills for ready-made automation workflows
 - You need facts, documentation, or current information — knowledge searches the web
+- You need an external capability (search, APIs, data sources) — knowledge discovers registered MCP tools and returns the exact mcp_call invocation
 - You need to recall past knowledge or earlier decisions — knowledge queries historical memory
 
 Knowledge discovers how to do it; action executes it. Always check knowledge first for any non-trivial task.
