@@ -87,12 +87,8 @@ func ExtractEventType(msg model.Message) string {
 // Special events (external_input, agent_output, thinking_plan) contain the full original content.
 // Most events (action_command, context_compress) only contain a summary.
 func IsSpecialEventType(eventType string) bool {
-	switch eventType {
-	case TypeExternalInput, TypeAgentOutput, TypeThinkingPlan:
-		return true
-	default:
-		return false
-	}
+	// 委托事件类型注册表（唯一权威源）：Special = external_input/agent_output/thinking_plan。
+	return specOrDefault(eventType).Special
 }
 
 // EventSummaryOptions configures how to generate event summary.
@@ -127,6 +123,7 @@ func DefaultOptionsForCompression() EventSummaryOptions {
 // summarization lives in the compression/curation pipeline.
 // IMPORTANT: No truncation - content exceeding context is handled by SmartCompress.
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string {
+	spec := specOrDefault(eventType)
 	// Pure tool-call thinking_plan (empty prose, has tool calls): summarize as
 	// "调用 <names>" so aged rendering carries the tool names instead of an
 	// empty-summary placeholder, and tool-chain consolidation can read the
@@ -135,18 +132,16 @@ func GenerateEventSummary(msg model.Message, eventType string, opts EventSummary
 	if eventType == TypeThinkingPlan && msg.Content == "" && len(msg.ToolCalls) > 0 {
 		return formatToolNames(msg.ToolCalls)
 	}
-	// Special events: Summary = Original content (no truncation, no prefix)
-	if IsSpecialEventType(eventType) {
+	// Special events: Summary = Original content (no truncation, no prefix).
+	if spec.Special {
 		return msg.Content
 	}
-
-	// Most events: Summary = Abstract
-	switch eventType {
-	case TypeActionCommand:
+	// Tool-line types (action_command): mechanical tool-call summary (registry-driven).
+	if spec.ToolLineSummary {
 		return formatToolCallSummary(msg, opts)
-	default:
-		return msg.Content
 	}
+	// Default: original content (verbatim view).
+	return msg.Content
 }
 
 // FormatEventDescription formats a complete event description for SmartCompress.

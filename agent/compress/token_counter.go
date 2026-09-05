@@ -1,6 +1,9 @@
 package compress
 
-import "trpc.group/trpc-go/trpc-agent-go/model"
+import (
+	tagentevent "github.com/SpellingDragon/tagent/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+)
 
 // TokenCounter estimates token count for message lists.
 type TokenCounter interface {
@@ -58,18 +61,8 @@ func truncateString(s string, n int) string {
 //	thinking_plan  → assistant
 //	(default)      → user (safe degradation)
 func EventTypeToRole(eventType string) model.Role {
-	switch eventType {
-	case "external_input":
-		return model.RoleUser
-	case "agent_output":
-		return model.RoleAssistant
-	case "action_command":
-		return model.RoleUser
-	case "thinking_plan":
-		return model.RoleAssistant
-	default:
-		return model.RoleUser
-	}
+	// 委托事件类型注册表（唯一权威源）。未知类型回退 RoleUser（安全降级）。
+	return tagentevent.EventTypeRole(eventType)
 }
 
 // truncate shortens s to maxLen runes with an ellipsis (local copy of the

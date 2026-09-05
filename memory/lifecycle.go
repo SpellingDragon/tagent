@@ -33,18 +33,11 @@ func DefaultLifecycleConfig() LifecycleConfig {
 		GlobalTTLDays:         7,
 		MaxEventsPerPartition: 0, // No limit by default
 		CheckInterval:         time.Hour,
-		TypeTTL: map[string]int{
-			event.TypeContextCompress: 3,  // Low-value: 3 days
-			event.TypeThinkingPlan:    3,  // Low-value: 3 days
-			event.TypeExternalInput:   30, // High-value: 30 days
-			event.TypeAgentOutput:     14, // Standard: 14 days
-			event.TypeActionCommand:   14, // Standard: 14 days
-			// Curated artifacts (segment summaries) are LONG-TERM MEMORY:
-			// raw events may be forgotten by TTL, artifacts persist. The index
-			// cards in the rolling summary point at these keys — expiring them
-			// would leave dangling tickets. Negative = exempt from TTL.
-			event.TypeContextCompressSummary: -1,
-		},
+		// TypeTTL 派生自事件类型注册表（唯一权威源，见 event/registry.go）：
+		// external_input=30, agent_output=14, action_command=14, thinking_plan=3,
+		// context_compress=3, context_compress_summary=-1（豁免遗忘，长期记忆：
+		// 索引卡片指向这些 key，过期会留下悬空票据）。
+		TypeTTL: event.DefaultTypeTTL(),
 	}
 }
 

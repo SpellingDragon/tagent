@@ -45,11 +45,9 @@ func isAgentOutputMessage(msg *model.Message) bool {
 // thinking_plan. Any other type (e.g. the rolling context_compress summary)
 // is conservatively treated as skeleton so it is never dropped in-segment.
 func IsSkeletonMessage(msg *model.Message) bool {
-	switch MessageEventType(msg) {
-	case tagentevent.TypeActionCommand, tagentevent.TypeThinkingPlan:
-		return false
-	}
-	return true
+	// 委托事件类型注册表：Skeleton=false 仅 action_command/thinking_plan，
+	// 其余（含未知类型）保守为 true，永不段内丢弃。
+	return tagentevent.IsSkeletonEventType(MessageEventType(msg))
 }
 
 // SegmentMessages splits messages into task-turn segments bounded by

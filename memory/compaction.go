@@ -48,10 +48,8 @@ func (l SegmentLayer) String() string {
 }
 
 // LowValueEventTypes are event types whose Content/ToolCalls can be discarded in L3.
-var LowValueEventTypes = map[string]bool{
-	event.TypeThinkingPlan:    true,
-	event.TypeContextCompress: true,
-}
+// Derived from the event registry (single source of truth): thinking_plan, context_compress.
+var LowValueEventTypes = event.LowValueTypes()
 
 // CompactionConfig configures the compactor behavior.
 type CompactionConfig struct {
