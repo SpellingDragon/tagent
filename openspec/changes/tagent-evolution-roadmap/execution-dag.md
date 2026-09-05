@@ -214,7 +214,7 @@ flowchart TB
 | FIX | COMPLETE | — | F1-fix(Metadata)重划归 TC0(使能器非独立bug,无当前误行为);F5 hy3 保留 TENCENT(混元专属) | F4 DefaultConfig action→exec + TestDefaultConfigBuildable 守漂移;F5 README 标准化 ZAI_API_KEY(GLM coding plan) |
 | T-A | COMPLETE | F2(done) | 门禁3 CodeReview并发审出 M1/M2/M3+7S+12Nit,全部清零并有回归测试锁定 | 交付:解耦缝C6+Embedder+InMemoryEngine(hybrid RRF/分区/异步)+engineBridge+config+recall hybrid+KV持久化重建+rustviking契约修复;审查修复:Close排空ctx/遗忘→向量移除/模型指纹+维度守卫/topK生效/退化契约/二道分区/重建Ready;门禁1-2-3全绿 |
 | T-B | COMPLETE(核心) | F2(done) | otel 提升直接依赖;agent包-race 3失败=pre-existing上游(Debug定性);trace锚点=一套数据模式三投影互链 | ✅turn root span(noop安全)+trace_id/span_id经attribution落事件Metadata+落trajectory LLMCallRecord(omitempty向后兼容)=指令2「一套数据模式多投影保一致性」;余(增强):异步task span link+memory/compress/recall轻量span |
-| T-G | PENDING | REG,FIX | | 两子包 |
+| T-G | PENDING | REG,FIX(done) | 核验:F2(outputCh)现有ctx.Done守卫非无限阻塞;F3(replayWAL)已容忍torn-tail坏行(中间坏行fail-fast有意)→报告F2/F3缺陷claim部分过时已缓解;T-G价值在新建子系统非缺陷修复 | 待建:ReliableBus(spill/durable+outputCh宽限落盘)+DegradationManager五依赖+governance(RiskClassifier C5/DenialLedger/Budget/Goal/Approval)+故障注入矩阵 |
 | TC0 | COMPLETE | REG(done) | Debug子agent三重证据定性:agent包3个-race失败=pre-existing上游trpc-agent-go@v1.10.0竞态(session.UpdatedAt/reflect clone/steer.Queue.Close),在c484d66/a88bf01同样复现,非本迭代回归→-race门禁对agent包豁免此3项(业务断言全过) | ✅归因地基(Attribution双路径盖章,修报告F1缺口)+prompt.Getter缝+evolution原语(BundleStore不可变/内容寻址/原子active切换/回滚/持久+VersionedSource实现Getter+BundleProvider)+消费方迁移(ContextManager系统提示源→Getter);全量20包-short绿+evolution-race绿 |
 | T-EVO | PENDING | TC0,TG,TB,FIX,REG | | 含 T-E/T-F 矛盾调和（风险分级发布道） |
 | T-D | PENDING | REG | | |

@@ -204,6 +204,9 @@ func init() {
 		{Name: TypeContextCompress, Role: model.RoleUser, Skeleton: true, LowValue: true, TTLDays: 3, Synthetic: true, Recallable: true},
 		// 工具链折叠 ref：合成负 key。
 		{Name: TypeToolChain, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
+		// 证据门控巩固产物（T-D）：长期记忆 TTL 豁免(-1)；正 key 真实事件；骨架保留、
+		// 可嵌入、可召回。一处注册即全链路（摘要/骨架/TTL/角色/嵌入/召回）生效。
+		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},
 	}
 	for _, spec := range builtin {
 		RegisterEventType(spec)

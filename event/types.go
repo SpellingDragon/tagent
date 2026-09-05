@@ -55,6 +55,12 @@ const (
 	// a recall ticket. Distinct from context_compress so buildRetainedRefs does
 	// NOT absorb it into the rolling-summary count.
 	TypeToolChain = "tool_chain"
+
+	// TypeConsolidation 是证据门控巩固产物（T-D 记忆策展）：冥想蒸馏/经验总结的事件，
+	// 携带源事件 EventKey 收据列表 + 服务端 SHA1 指纹（存于 Metadata），可回放验证、
+	// 防 LLM 伪造。正 key 真实事件、TTL 豁免（长期记忆，同 context_compress_summary 待遇）。
+	// 经 EventTypeSpec 注册表一处注册即全链路生效（REG 收敛「改 10 处」的兑现）。
+	TypeConsolidation = "consolidation"
 )
 
 // ExtractEventType determines the event type from a model.Message.
