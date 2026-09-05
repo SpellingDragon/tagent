@@ -93,7 +93,7 @@ func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 	for time.Now().Before(deadline) && !e2.RebuildDone() {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if _, _, _, vc := e2.Stats(); vc != 0 {
+	if vc := e2.Stats().VectorCount; vc != 0 {
 		t.Fatalf("M3: 换模型后重建应跳过旧模型向量, got vectorCount=%d", vc)
 	}
 }
@@ -116,7 +116,7 @@ func TestEngineBridge_RemoveVectorForwards(t *testing.T) {
 		t.Fatal("bridge 应实现 VectorRemover")
 	}
 	vr.RemoveVector(key) // 模拟遗忘物理删除回调
-	if _, _, _, vc := eng.Stats(); vc != 0 {
+	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("M2: RemoveVector 应移除引擎向量, got %d", vc)
 	}
 }

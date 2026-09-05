@@ -281,13 +281,38 @@ func (e *InMemoryEngine) Close() error {
 	return nil
 }
 
-// Stats 返回引擎运行指标（可观测/诊断用）。
-func (e *InMemoryEngine) Stats() (indexed, dropped, embedErr, vectorCount int64) {
+// EngineStats 是引擎内部计数快照（诊断/可观测读）。具名结构消除 diagnostics 匿名接口的
+// "N 个未命名 int64" 脆弱性（S4：签名漂移变编译错误，而非静默断言失败使诊断维度归零）。
+type EngineStats struct {
+	Indexed     int64 // 成功索引的向量数
+	Dropped     int64 // 队列满/API 失败丢弃数
+	EmbedErr    int64 // 嵌入错误数
+	VectorCount int64 // 当前索引中的向量数
+	DimMismatch int64 // 维度不匹配跳过数（换模型信号）
+}
+
+// StatsProvider 是可选能力接口：引擎暴露内部计数供诊断读取（与 RawVectorSearcher 并列的
+// 具名可选契约，非 C6 必需）。
+type StatsProvider interface {
+	Stats() EngineStats
+}
+
+// Stats 返回引擎运行指标（实现 StatsProvider，可观测/诊断用）。
+func (e *InMemoryEngine) Stats() EngineStats {
 	e.mu.RLock()
 	vc := int64(len(e.vectors))
 	e.mu.RUnlock()
-	return e.indexedCount.Load(), e.droppedCount.Load(), e.embedErrCount.Load(), vc
+	return EngineStats{
+		Indexed:     e.indexedCount.Load(),
+		Dropped:     e.droppedCount.Load(),
+		EmbedErr:    e.embedErrCount.Load(),
+		VectorCount: vc,
+		DimMismatch: e.dimMismatchCount.Load(),
+	}
 }
+
+// 编译期确认 InMemoryEngine 实现 StatsProvider（S4：契约锁定）。
+var _ StatsProvider = (*InMemoryEngine)(nil)
 
 // SearchByVector 实现 RawVectorSearcher：用预计算查询向量做余弦 topK（分区过滤），
 // 供 engineBridge.SearchByEmbedding 委托（消灭 MemoryStore 的向量 stub）。

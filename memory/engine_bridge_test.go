@@ -68,7 +68,7 @@ func TestEngineBridge_DeleteRemovesFromEngine(t *testing.T) {
 	// 等向量就绪。
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, _, vc := eng.Stats(); vc >= 1 {
+		if vc := eng.Stats().VectorCount; vc >= 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -76,7 +76,7 @@ func TestEngineBridge_DeleteRemovesFromEngine(t *testing.T) {
 	if err := bridge.DeleteEvent(key); err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
-	if _, _, _, vc := eng.Stats(); vc != 0 {
+	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("DeleteEvent 应从引擎移除向量, got %d", vc)
 	}
 }

@@ -56,20 +56,16 @@ func (d *MemoryDiagnostics) Snapshot() DiagnosticsSnapshot {
 		snap.CapVector = caps.Vector
 		snap.CapHybrid = caps.Hybrid
 		snap.EngineReady = d.engine.Ready()
-		// 引擎若暴露细粒度统计（InMemoryEngine.Stats），读取向量维度。
-		if st, ok := d.engine.(interface {
-			Stats() (indexed, dropped, embedErr, vectorCount int64)
-		}); ok {
-			indexed, dropped, embedErr, vectorCount := st.Stats()
-			snap.VectorIndexed = indexed
-			snap.VectorDropped = dropped
-			snap.VectorEmbedErr = embedErr
-			snap.VectorCount = vectorCount
-			snap.IndexHealth = indexHealth(indexed, dropped, embedErr)
-		}
-		// 维度不匹配计数（换模型信号）——可选接口。
-		if dm, ok := d.engine.(interface{ DimMismatch() int64 }); ok {
-			snap.VectorDimMismatch = dm.DimMismatch()
+		// 引擎若实现 StatsProvider（具名可选契约，S4），一次断言读全部向量维度指标——
+		// 替代此前两处匿名接口断言（4返回值 Stats + 单独 DimMismatch），签名漂移现为编译错误。
+		if st, ok := d.engine.(StatsProvider); ok {
+			s := st.Stats()
+			snap.VectorIndexed = s.Indexed
+			snap.VectorDropped = s.Dropped
+			snap.VectorEmbedErr = s.EmbedErr
+			snap.VectorCount = s.VectorCount
+			snap.VectorDimMismatch = s.DimMismatch
+			snap.IndexHealth = indexHealth(s.Indexed, s.Dropped, s.EmbedErr)
 		}
 	}
 	if d.store != nil {
@@ -89,6 +85,3 @@ func indexHealth(indexed, dropped, embedErr int64) float64 {
 	}
 	return float64(indexed) / float64(total)
 }
-
-// DimMismatch 暴露维度不匹配计数（InMemoryEngine 实现，供诊断读取）。
-func (e *InMemoryEngine) DimMismatch() int64 { return e.dimMismatchCount.Load() }

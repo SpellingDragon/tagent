@@ -59,9 +59,13 @@ type EventTypeSpec struct {
 
 	// Embeddable 标记是否纳入向量索引（T-A 选择性生成）。默认仅
 	// external_input / agent_output / thinking_knowledge / context_compress_summary。
+	// 归属澄清（C5）：策略消费方在 memory 域（engine_inmemory.go 的 IsEmbeddableType 决定
+	// 是否 embed），但声明归属 C1——本注册表是事件类型全部静态属性的单一权威源；新增类型时
+	// 在此一并决定 Embeddable，避免"新增事件类型需改两个包"（TTL 字段同理，被 lifecycle 消费）。
 	Embeddable bool
 
 	// Recallable 标记是否可被 recall 取回原文（票据有效）。内置类型均可召回。
+	// 消费方：tool/recall（票据取回路径）。归属同 Embeddable（声明在 C1，策略在 recall 域）。
 	Recallable bool
 }
 

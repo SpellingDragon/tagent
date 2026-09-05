@@ -51,7 +51,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	if !e2.RebuildDone() {
 		t.Fatal("engine2 应完成 KV 重建")
 	}
-	if _, _, _, vc := e2.Stats(); vc < 2 {
+	if vc := e2.Stats().VectorCount; vc < 2 {
 		t.Fatalf("重建后向量数应 >=2, got %d", vc)
 	}
 

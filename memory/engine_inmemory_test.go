@@ -62,12 +62,12 @@ func waitForVectors(t *testing.T, eng *InMemoryEngine, want int64, timeout time.
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, _, _, vc := eng.Stats(); vc >= want {
+		if vc := eng.Stats().VectorCount; vc >= want {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	_, _, _, vc := eng.Stats()
+	vc := eng.Stats().VectorCount
 	t.Fatalf("等待向量索引超时: got %d want >=%d", vc, want)
 }
 
@@ -234,13 +234,13 @@ func TestInMemoryEngine_SelectiveIndexSkipsNonEmbeddable(t *testing.T) {
 	// action_command 非 Embeddable（注册表），Index 应跳过——不产生向量。
 	_ = eng.Index(ctx, IndexableEvent{EventKey: 100, PartitionID: 1, EventType: "action_command", Text: "some tool call", Timestamp: 100})
 	time.Sleep(50 * time.Millisecond)
-	if _, _, _, vc := eng.Stats(); vc != 0 {
+	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("非 Embeddable 类型不应产生向量, got vectorCount=%d", vc)
 	}
 	// 负 key（合成投影引用）也不索引。
 	_ = eng.Index(ctx, IndexableEvent{EventKey: -5, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: 1})
 	time.Sleep(20 * time.Millisecond)
-	if _, _, _, vc := eng.Stats(); vc != 0 {
+	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("负 key 不应索引, got vectorCount=%d", vc)
 	}
 }
@@ -260,7 +260,7 @@ func TestInMemoryEngine_IndexNonBlocking_QueueFullDrop(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("Index 应非阻塞, 19 次耗时 %v", elapsed)
 	}
-	if _, dropped, _, _ := eng.Stats(); dropped == 0 {
+	if dropped := eng.Stats().Dropped; dropped == 0 {
 		t.Fatal("队列满应产生丢弃计数")
 	}
 }
@@ -277,7 +277,7 @@ func TestInMemoryEngine_RemoveDeletesVector(t *testing.T) {
 	if err := eng.Remove(context.Background(), key); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, _, _, vc := eng.Stats(); vc != 0 {
+	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("Remove 后向量应清空, got %d", vc)
 	}
 }
