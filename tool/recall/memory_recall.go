@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -123,7 +125,25 @@ func recallByItems(accessor tagenttool.MemoryStoreAccessor, items []recallItem) 
 // recallByQuery: semantic recall via the retrieval layer. T-A 起：accessor 暴露记忆
 // 引擎时走 关键词∪向量 RRF 融合（闭环在引擎内），否则纯关键词——协议与工具声明
 // 零变化（prefix-cache 不受影响）。
-func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int, args memoryRecallArgs) (memoryRecallResult, error) {
+// recallTracerName 是 recall 内部路径 span 的 tracer 名（T-B 5.1 内部轻量 span）。
+const recallTracerName = "github.com/SpellingDragon/tagent/tool/recall"
+
+func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int, args memoryRecallArgs) (result memoryRecallResult, err error) {
+	// T-B 5.1 内部路径轻量 span：recall 查询实现层。属性仅元数据（mode/分区数/查询长度/
+	// 命中数），查询内容零入 span（防敏感内容泄漏到 trace 后端）。noop 安全：未设 OTLP 零开销。
+	ctx, span := otel.Tracer(recallTracerName).Start(ctx, "tagent.recall.query")
+	defer func() {
+		span.SetAttributes(
+			attribute.String("recall.mode", result.Mode),
+			attribute.Int("recall.query_len", len(args.Query)),
+			attribute.Int("recall.partitions", len(readPartitionIDs)),
+			attribute.Int("recall.hits", len(result.Entries)),
+		)
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}()
 	limit := args.Limit
 	if limit <= 0 {
 		limit = 10
