@@ -212,7 +212,7 @@ flowchart TB
 | F2 | COMPLETE | F1(done) | 接口置 memory/engine.go，退化语义有测试 | C6 冻结：IndexBuilder/Retriever/MemoryEngine；返回排序票据两段式；build/vet/test 全绿 |
 | REG | COMPLETE | — | 注册表置 event/registry.go，6 触点委托/派生 | C1 冻结：9 类精确复现；全量单测 19 包 rc=0 零回归（等价验收线）|
 | FIX | COMPLETE | — | F1-fix(Metadata)重划归 TC0(使能器非独立bug,无当前误行为);F5 hy3 保留 TENCENT(混元专属) | F4 DefaultConfig action→exec + TestDefaultConfigBuildable 守漂移;F5 README 标准化 ZAI_API_KEY(GLM coding plan) |
-| T-A | PENDING | F2 | | |
+| T-A | IN_PROGRESS | F2(done) | 引擎按path共享(namedEngines);rustviking backend暂降级MVP;SearchByEmbedding经RawVectorSearcher消灭stub;发现InMemoryStore读写分区口径潜在不一致(生产Snowflake键一致,备查) | MVP引擎+Embedder(zhipu/mock)+engineBridge+config+recall hybrid 全绿-race,已提交2次;余:rustviking持久向量适配器(重写虚构index契约) |
 | T-B | PENDING | F2 | | |
 | T-G | PENDING | REG,FIX | | 两子包 |
 | TC0 | PENDING | REG | | 含 FIX 重划入的 FullEvent.Metadata 归因盖章管线(ctx 载体,覆盖两持久化路径) |

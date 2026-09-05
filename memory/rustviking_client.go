@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -235,60 +236,68 @@ func (c *RustVikingClient) KVBatch(ops []KVOp) error {
 	return err
 }
 
-// ==================== 向量操作（预留） ====================
+// ==================== 向量操作（rustviking index CLI · F1 实测契约）====================
+//
+// F1 核验（f1-rustviking-capability-report.md）：rustviking 真实向量命令是
+// `index insert/search/delete/info`（**非** `vector *`）；向量以逗号分隔 f32 传参
+// （clap value_delimiter=','）；`index search` 返回
+// `{query_dimension,k,count,results:[{id,score,level}]}`；`index delete` 真实存在。
+// 旧实现的 `vector insert`/`vector search`/`embed` 三命令均不存在（虚构契约，无调用
+// 方），是 SearchByEmbedding 永远为 stub 的根因，此处按真实 CLI 重写。
 
-// VectorInsert 插入向量。
-func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8) error {
-	vecJSON, err := json.Marshal(vector)
-	if err != nil {
-		return fmt.Errorf("failed to marshal vector: %w", err)
+// VectorResult 是向量检索的单条命中（id + 相似度分 + 层级）。
+type VectorResult struct {
+	ID    uint64  `json:"id"`
+	Score float32 `json:"score"`
+	Level uint8   `json:"level"`
+}
+
+// formatVector 把向量格式化为逗号分隔（rustviking index CLI 的 value_delimiter=','）。
+func formatVector(vec []float32) string {
+	parts := make([]string, len(vec))
+	for i, v := range vec {
+		parts[i] = strconv.FormatFloat(float64(v), 'g', -1, 32)
 	}
-	args := c.buildArgs("vector insert",
-		"-i", fmt.Sprintf("%d", id),
-		"-v", string(vecJSON),
-		"-l", fmt.Sprintf("%d", level))
-	_, err = c.run(args)
+	return strings.Join(parts, ",")
+}
+
+// VectorInsert 插入/覆盖向量（index insert）。level 为 rustviking 索引层级参数
+// （语义以其实现为准，F1 标注待验证；默认传 0）。
+func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8) error {
+	args := c.buildArgs("index insert",
+		"-i", strconv.FormatUint(id, 10),
+		"-v", formatVector(vector),
+		"-l", strconv.FormatUint(uint64(level), 10))
+	_, err := c.run(args)
 	return err
 }
 
-// VectorSearch 语义搜索。
-func (c *RustVikingClient) VectorSearch(query []float32, k int) ([]uint64, error) {
-	queryJSON, err := json.Marshal(query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal query: %w", err)
-	}
-	args := c.buildArgs("vector search",
-		"-q", string(queryJSON),
-		"-k", fmt.Sprintf("%d", k))
+// VectorSearch 向量检索（index search），返回按相似度排序的命中（含 score）。
+func (c *RustVikingClient) VectorSearch(query []float32, k int) ([]VectorResult, error) {
+	args := c.buildArgs("index search",
+		"-q", formatVector(query),
+		"-k", strconv.Itoa(k))
 	resp, err := c.run(args)
 	if err != nil {
 		return nil, err
 	}
-	var ids []uint64
-	if err := json.Unmarshal(resp.Data, &ids); err != nil {
-		return nil, fmt.Errorf("failed to parse vector search results: %w", err)
+	var parsed struct {
+		QueryDimension int            `json:"query_dimension"`
+		Count          int            `json:"count"`
+		Results        []VectorResult `json:"results"`
 	}
-	return ids, nil
+	if err := json.Unmarshal(resp.Data, &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse index search response: %w", err)
+	}
+	return parsed.Results, nil
 }
 
-// ==================== Embedding（预留） ====================
-
-// Embed 文本转向量。
-func (c *RustVikingClient) Embed(texts []string) ([][]float32, error) {
-	textJSON, err := json.Marshal(texts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal texts: %w", err)
-	}
-	args := c.buildArgs("embed", "-t", string(textJSON))
-	resp, err := c.run(args)
-	if err != nil {
-		return nil, err
-	}
-	var embeddings [][]float32
-	if err := json.Unmarshal(resp.Data, &embeddings); err != nil {
-		return nil, fmt.Errorf("failed to parse embeddings: %w", err)
-	}
-	return embeddings, nil
+// VectorDelete 删除向量（index delete，F1 确认真实存在——修正报告「无 VectorDelete」
+// 的包装层局限判断）。best-effort：不存在时按成功处理由调用方决定。
+func (c *RustVikingClient) VectorDelete(id uint64) error {
+	args := c.buildArgs("index delete", "-i", strconv.FormatUint(id, 10))
+	_, err := c.run(args)
+	return err
 }
 
 // ==================== Mock Client（测试用） ====================
