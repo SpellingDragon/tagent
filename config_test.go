@@ -177,7 +177,7 @@ func TestDefaultConfig_TagentTools(t *testing.T) {
 	tagentAgent, ok := cfg.Agents["tagent"]
 	require.True(t, ok, "tagent agent should exist in DefaultConfig")
 
-	// tagent should have 3 tools: knowledge (agent), recall (agent), action (tool)
+	// tagent should have 3 tools: knowledge (agent), recall (agent), exec (tool)
 	require.Len(t, tagentAgent.Tools, 3, "tagent should have 3 tools")
 
 	assert.Equal(t, ToolKindAgent, tagentAgent.Tools[0].Kind)
@@ -187,7 +187,7 @@ func TestDefaultConfig_TagentTools(t *testing.T) {
 	assert.Equal(t, "recall", tagentAgent.Tools[1].AgentID)
 
 	assert.Equal(t, ToolKindTool, tagentAgent.Tools[2].Kind)
-	assert.Equal(t, "action", tagentAgent.Tools[2].ID)
+	assert.Equal(t, "exec", tagentAgent.Tools[2].ID)
 }
 
 func TestDefaultConfig_MeditationConfig(t *testing.T) {
@@ -196,6 +196,23 @@ func TestDefaultConfig_MeditationConfig(t *testing.T) {
 	tagentAgent := cfg.Agents["tagent"]
 	assert.False(t, tagentAgent.Meditation.Enabled,
 		"DefaultConfig should not enable meditation by default")
+}
+
+// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类 BUG（报告 D4 §4.5.3）：
+// DefaultConfig 必须通过 ApplyDefaults + Validate + ValidateToolAccess 全链路，
+// 即 New(DefaultConfig()) 可构建。此前 DefaultConfig 引用 id:"action" 而注册表
+// 注册为 "exec"（registry.go），ValidateToolAccess 会失败——本测试锁死该回归。
+func TestDefaultConfigBuildable(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+
+	cfg := DefaultConfig()
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("DefaultConfig Validate 失败: %v", err)
+	}
+	if err := GetRegistry().ValidateToolAccess(&cfg); err != nil {
+		t.Fatalf("DefaultConfig 工具引用与注册表漂移（id:\"action\" vs \"exec\" 类 BUG）: %v", err)
+	}
 }
 
 // ============================================================================

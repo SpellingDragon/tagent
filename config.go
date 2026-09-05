@@ -40,7 +40,7 @@ import (
 //	        description_file: recall_tool_desc.md
 //	        event_params: [event_key]
 //	      - kind: tool
-//	        id: action
+//	        id: exec
 //	        description_file: action_tool_desc.md
 //	  knowledge:
 //	    model: glm-4-flash
@@ -473,7 +473,7 @@ func DefaultConfig() Config {
 					},
 					{
 						Kind:            ToolKindTool,
-						ID:              "action",
+						ID:              "exec",
 						DescriptionFile: "action_tool_desc.md",
 					},
 				},

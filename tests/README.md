@@ -24,4 +24,4 @@
 | mock 机制回归 | causal_chain/compression/inject_bus/invariants/multi_user/async_result_routing/tagent_integration | 确定性时序与不变量（I1-I4）,不承担模型行为守护 |
 | 白盒单元 | 各业务包内 `*_test.go` | 私有状态机中间态（勿迁入本目录,勿为迁移导出内部符号） |
 
-运行：`go test ./tests/`（真实 LLM 需 `TENCENT_API_KEY`；`-short` 全部跳过 LLM 用例）。契约套件单跑：`go test ./tests/ -run 'TestContract_|ModelCopiesHex' -v`。
+运行：`go test ./tests/`（真实 LLM 经 `testutil.LoadAPIKey` 读 `ZAI_API_KEY`——GLM Coding Plan，端点 `open.bigmodel.cn/api/coding/paas/v4`；`-short` 全部跳过 LLM 用例。例外：`hy3_thinking_test` 为混元专属测试，用 `TENCENT_API_KEY`）。契约套件单跑：`go test ./tests/ -run 'TestContract_|ModelCopiesHex' -v`。
