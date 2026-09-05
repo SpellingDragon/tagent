@@ -62,11 +62,11 @@ type Guardrail interface {
 	Breach(bundleID string) (breached bool, reason string)
 }
 
-// RiskRouter 决定一个 bundle 变更走哪条发布道（按 diff 内容判定，实现见 DiffRiskRouter）。
+// LaneRouter 决定一个 bundle 变更走哪条发布道（按 diff 内容判定，实现见 DiffLaneRouter）。
 // **与 governance.RiskClassifier(C5) 分层独立**：后者管运行时工具调用风险（输入 tool+args），
 // 本接口管版本发布道选择（输入 bundle diff）；evolution 不 import governance（见 eval.go 声明）。
-// nil = 一律走 slow（保守）。（S3 建议：本接口宜改名 LaneRouter，把 "Risk" 词根让给 C5。）
-type RiskRouter interface {
+// nil = 一律走 slow（保守）。命名 LaneRouter（非 RiskRouter）使 "Risk" 词根在仓库内专属 C5。
+type LaneRouter interface {
 	Route(diff BundleDiff) Lane
 }
 
@@ -94,7 +94,7 @@ type ReleaseRecord struct {
 // ReleaseManager 是风险分级发布状态机。并发安全。
 type ReleaseManager struct {
 	store     *BundleStore
-	router    RiskRouter
+	router    LaneRouter
 	evaluator Evaluator
 	guardrail Guardrail
 	// 门（可注入；nil 门视为通过——便于渐进接线）。
@@ -112,7 +112,7 @@ type ReleaseManager struct {
 // ReleaseDeps 是构建 ReleaseManager 的依赖集。
 type ReleaseDeps struct {
 	Store        *BundleStore
-	Router       RiskRouter
+	Router       LaneRouter
 	Evaluator    Evaluator
 	Guardrail    Guardrail
 	ValidateGate GateFunc
@@ -230,7 +230,7 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 	return rm.record(draft, lane, StageActive, "slow 道全门通过，正式生效", 0), nil
 }
 
-// route 决定发布道：protected 提示词改动强制 slow；否则委托 RiskRouter；无 router 走 slow。
+// route 决定发布道：protected 提示词改动强制 slow；否则委托 LaneRouter；无 router 走 slow。
 func (rm *ReleaseManager) route(active, draft *Bundle) Lane {
 	diff := Diff(active, draft)
 	if rm.touchesProtected(diff) {

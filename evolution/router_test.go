@@ -2,9 +2,9 @@ package evolution
 
 import "testing"
 
-// TestDiffRiskRouter 验证发布道路由（T-E/T-F 调和判据）：模型/参数变更→慢道，仅提示词→快道。
-func TestDiffRiskRouter(t *testing.T) {
-	r := NewDiffRiskRouter()
+// TestDiffLaneRouter 验证发布道路由（T-E/T-F 调和判据）：模型/参数变更→慢道，仅提示词→快道。
+func TestDiffLaneRouter(t *testing.T) {
+	r := NewDiffLaneRouter()
 	cases := []struct {
 		name string
 		diff BundleDiff
@@ -28,7 +28,7 @@ func TestDiffRiskRouter(t *testing.T) {
 	}
 }
 
-// TestDiffRiskRouter_ImplementsRiskRouter 验证 DiffRiskRouter 满足 RiskRouter 接口（编译期契约）。
-func TestDiffRiskRouter_ImplementsRiskRouter(t *testing.T) {
-	var _ RiskRouter = NewDiffRiskRouter()
+// TestDiffLaneRouter_ImplementsLaneRouter 验证 DiffLaneRouter 满足 LaneRouter 接口（编译期契约）。
+func TestDiffLaneRouter_ImplementsLaneRouter(t *testing.T) {
+	var _ LaneRouter = NewDiffLaneRouter()
 }

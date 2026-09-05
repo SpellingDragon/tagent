@@ -222,7 +222,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		rm, eerr := evolution.NewReleaseManager(evolution.ReleaseDeps{
 			Store:  store,
-			Router: evolution.NewDiffRiskRouter(), // 按 diff 路由：模型/参数→慢道，仅提示词→快道
+			Router: evolution.NewDiffLaneRouter(), // 按 diff 路由：模型/参数→慢道，仅提示词→快道
 			// Gate 四槽留 nil（runGate：nil→通过；replay/shadow cassette 门待交付，见 review S2）。
 			// Evaluator(LLM-judge)/Guardrail(指标闸) 于 buildAgent 阶段经 BindPosterior 绑定
 			// （需 entry agent 的 model + memStore，故延迟到 New 之后——见下方 buildAgent 接线）。
@@ -1139,10 +1139,15 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 		ecfg.KV = kvp.KVBackend()
 	}
 	switch ec.Backend {
-	case "", "memory", "rustviking":
-		// MVP 内存向量索引 + 可选 KV 持久化（rustviking-backed）。依据 F1 报告「追加发现」：
-		// rustviking 原生 index CLI 进程内易失，故用其 KV 持久化向量 + 启动重建；
-		// 原生 HNSW/IVF 索引持久化（接入 ivf_persist）为 rustviking backlog。
+	case "", "memory":
+		// MVP 内存向量索引 + 可选 KV 持久化。
+		return memory.NewInMemoryEngine(store, emb, ecfg), nil
+	case "rustviking":
+		// S1: rustviking 后端在 MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化
+		// 向量 + 启动重建，依据 F1 报告：rustviking 原生 index CLI 进程内易失）。**显式告警**
+		// 避免"配了 rustviking 却静默得到 memory 引擎"的假自由度错觉；原生 HNSW/IVF 索引持久化
+		// （接入 ivf_persist）为 rustviking backlog。
+		log.Infof("[tagent] memory engine backend=rustviking → MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化）；原生 HNSW/IVF 索引持久化为 rustviking backlog（见 f1-rustviking-capability-report.md）")
 		return memory.NewInMemoryEngine(store, emb, ecfg), nil
 	default:
 		return nil, fmt.Errorf("unknown memory engine backend %q", ec.Backend)

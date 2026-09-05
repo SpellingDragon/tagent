@@ -17,7 +17,7 @@ import (
 //   - MetricGuardrail：确定性指标闸（实现 release.go 的 Guardrail）——超阈值即 breach 触发快回滚。
 //
 // 保守原则：样本不足或收集失败 → 不判劣化（不误回滚，避免抖动错杀）。evolution 不 import
-// governance（分层独立，与 DiffRiskRouter 一致）；治理 subtype 值 "denial"/"approval" 是稳定契约。
+// governance（分层独立，与 DiffLaneRouter 一致）；治理 subtype 值 "denial"/"approval" 是稳定契约。
 
 // governance 事件 subtype 值的权威源在 event 包（event.SubtypeDenial/SubtypeApproval）——
 // evolution 直接引用 event 常量（C4：消除此前复制 "denial"/"approval" 字面量的静默漂移风险，
