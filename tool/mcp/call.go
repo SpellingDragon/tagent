@@ -127,6 +127,12 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	sort.Strings(toolNames)
 	if target == nil {
+		// S-1: server 枚举不出任何工具（toolNames 空）= server 不可达（最强的服务器级失败
+		// 信号）→ 上报 DepMCP 退化；toolNames 非空则是 tool 名错误（server 健康），不上报
+		// （避免名称错误误标 server 退化）。ctx 取消不计（与 M1 一致）。
+		if len(toolNames) == 0 && t.degradation != nil && ctx.Err() == nil {
+			t.degradation.ReportFailure(reliability.DepMCP, fmt.Errorf("mcp server %q unreachable (no tools enumerated)", a.Server))
+		}
 		return callErrorResult{
 			Error:          fmt.Sprintf("tool %q not found on MCP server %q (the server may be unreachable or the tool name wrong)", a.Tool, a.Server),
 			AvailableTools: toolNames,
@@ -139,8 +145,10 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	res, err := target.Call(ctx, args)
 	if err != nil {
-		// T-G: MCP server 调用失败 → 上报 DepMCP 退化（连续失败达阈值→degraded+governance 事件）。
-		if t.degradation != nil {
+		// T-G: MCP 调用失败 → 上报 DepMCP 退化。ctx 取消（关机/中止）不计（与 event_loop
+		// DepModel 一致，M1）。注：err 含传输错误 + tool 级业务错误，MVP 均计入 DepMCP；仅对
+		// 传输/连接失败上报（区分需 trpc MCP 层错误类型）为进阶方向，见 review M1。
+		if t.degradation != nil && ctx.Err() == nil {
 			t.degradation.ReportFailure(reliability.DepMCP, err)
 		}
 		var schemaJSON json.RawMessage

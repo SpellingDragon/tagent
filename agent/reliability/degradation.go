@@ -170,8 +170,10 @@ func (d *DegradationManager) IsDegraded(dep Dependency) bool {
 	return d.State(dep) != StateNormal
 }
 
-// ShouldProbe 报告 degraded 依赖是否到了探测时机（退避窗口已过）——供主动探测型
-// 依赖（如 mcp 半开）判断；上报型依赖（memory/disk）不需调用（真实操作即探针）。
+// ShouldProbe 报告 degraded 依赖是否到了探测时机（退避窗口已过）——供**主动探测型**依赖
+// 判断（半开熔断：degraded 期间只在探测窗放行真实调用）。当前五依赖均为**上报型**（真实操作
+// 即探针：memory/disk/rustviking 经存储栈、model 经 RunFlow、mcp 经 mcp_call 直连后上报），
+// 故 ShouldProbe/backoff 是预留能力（生产路径未接半开熔断，S-2）；接入主动探测型依赖时启用。
 func (d *DegradationManager) ShouldProbe(dep Dependency) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()

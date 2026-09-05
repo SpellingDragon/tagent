@@ -5,7 +5,7 @@
 // 无随机），规则表数据驱动，可表格测试；拒绝必记账（DenialLedger + governance 事件）。
 //
 // 契约 C5：RiskClassifier.Classify(RiskContext) → (level, ruleID, reason)，纯函数。
-// 消费方：GovernanceGate（工具执行治理）。注：T-EVO 发布道用独立的 evolution.DiffRiskRouter
+// 消费方：GovernanceGate（工具执行治理）。注：T-EVO 发布道用独立的 evolution.DiffLaneRouter
 // 按 bundle diff 路由，**不复用**本分级器（分层独立，输入域不同：工具调用 vs 版本变更）。
 package governance
 

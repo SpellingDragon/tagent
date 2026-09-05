@@ -7,7 +7,7 @@ import "github.com/SpellingDragon/tagent/memory"
 // 把 RiskClassifier(C5) + BudgetManager + GoalRegistry + ApprovalManager + DenialLedger
 // 串成一条决策管线：classify → critical 批准门 → goal 检查 → 预算闸 → 记账/放行。
 // GovernanceTool 装饰器（工具执行路径）消费本管线的裁决。（注：T-EVO 发布道用独立的
-// evolution.DiffRiskRouter 按 bundle diff 路由，**不复用**本管线——见 eval.go 分层独立声明。）
+// evolution.DiffLaneRouter 按 bundle diff 路由，**不复用**本管线——见 eval.go 分层独立声明。）
 //
 // 治理关闭（Enabled=false，默认）时全放行——现状零行为变化。「闸不是墙」：默认
 // enforcement=warn（记账放行 + 提示），strict 才拒绝；critical 恒走异步批准（不阻塞 loop）。

@@ -1147,7 +1147,7 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 		// 向量 + 启动重建，依据 F1 报告：rustviking 原生 index CLI 进程内易失）。**显式告警**
 		// 避免"配了 rustviking 却静默得到 memory 引擎"的假自由度错觉；原生 HNSW/IVF 索引持久化
 		// （接入 ivf_persist）为 rustviking backlog。
-		log.Infof("[tagent] memory engine backend=rustviking → MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化）；原生 HNSW/IVF 索引持久化为 rustviking backlog（见 f1-rustviking-capability-report.md）")
+		log.Warnf("[tagent] memory engine backend=rustviking → MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化）；原生 HNSW/IVF 索引持久化为 rustviking backlog（见 f1-rustviking-capability-report.md）")
 		return memory.NewInMemoryEngine(store, emb, ecfg), nil
 	default:
 		return nil, fmt.Errorf("unknown memory engine backend %q", ec.Backend)
