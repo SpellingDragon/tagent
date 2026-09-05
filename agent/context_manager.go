@@ -83,7 +83,7 @@ type ContextManager struct {
 
 	// systemPromptSource enables hot-reload of the system prompt.
 	// When set, the system message is re-read from files before each LLM call.
-	systemPromptSource *prompt.Source
+	systemPromptSource prompt.Getter
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
@@ -127,7 +127,7 @@ type ContextManagerConfig struct {
 
 	// SystemPromptSource enables hot-reload of system prompt from files.
 	// When set, the system message is re-read from disk before each LLM call.
-	SystemPromptSource *prompt.Source
+	SystemPromptSource prompt.Getter
 
 	// Thinking/reasoning controls
 	ThinkingEnabled      *bool

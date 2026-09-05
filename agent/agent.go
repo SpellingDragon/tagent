@@ -146,7 +146,7 @@ type TagentConfig struct {
 	Model              model.Model        // Required: LLM model
 	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
 	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
-	SystemPromptSource *prompt.Source     // Hot-reloadable system prompt (optional, overrides SystemPrompt)
+	SystemPromptSource prompt.Getter     // Hot-reloadable system prompt (optional, overrides SystemPrompt); TC0 起为 Getter 接口（可注入 VersionedSource）
 	Tools              []tool.Tool        // CallableTools to register
 	MaxToolIterations  int                // Default: DefaultMaxToolIterations (50)
 	MaxTokens          int                // Token budget for context (default: 8000)

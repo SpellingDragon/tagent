@@ -281,7 +281,7 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: load system prompt: %w", name, err)
 	}
 	// Create hot-reloadable source for system prompt
-	var systemPromptSource *prompt.Source
+	var systemPromptSource prompt.Getter
 	if !acfg.SystemPrompt.IsEmpty() {
 		systemPromptSource = prompt.NewSource(loader, acfg.SystemPrompt)
 	}

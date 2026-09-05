@@ -49,6 +49,9 @@ func NewStaticSource(content string) *Source {
 // if any file has changed since the last load.
 // For static sources, returns the cached content directly.
 func (s *Source) Get() (string, error) {
+	if s == nil {
+		return "", nil // nil-receiver 安全：typed-nil *Source 装入 prompt.Getter 接口时不 panic（TC0 迁移）
+	}
 	if s.loader == nil {
 		// Static source — no file watching
 		return s.cached, nil
