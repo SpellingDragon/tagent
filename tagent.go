@@ -219,10 +219,11 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			return nil, fmt.Errorf("tagent: init evolution bundle store: %w", eerr)
 		}
 		rm, eerr := evolution.NewReleaseManager(evolution.ReleaseDeps{
-			Store: store,
-			// Router/Evaluator/Guardrail/各 Gate 留 nil（保守降级：无 Router→慢道，nil Gate→通过，
-			// 无 Evaluator→canary 即 active）。后续接 governance.RiskClassifier 作 Router、
-			// LLM-judge 作 Evaluator、cassette 回放作 ReplayGate（T-EVO 剩余集成）。
+			Store:  store,
+			Router: evolution.NewDiffRiskRouter(), // 按 diff 路由：模型/参数→慢道，仅提示词→快道
+			// Evaluator/Guardrail/各 Gate 留 nil（保守降级：nil Gate→通过，无 Evaluator→canary
+			// 即 active，仅 guardrail 守护）。后续接 LLM-judge 作 Evaluator、cassette 回放作
+			// ReplayGate、指标闸作 Guardrail（T-EVO 剩余集成）。
 			Config: evolution.ReleaseConfig{
 				RequireApproval:  cfg.Evolution.RequireApproval,
 				ProtectedPrompts: cfg.Evolution.ProtectedPrompts,
