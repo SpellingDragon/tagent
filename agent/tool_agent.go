@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 
@@ -860,6 +861,10 @@ type PlainToolFactoryConfig struct {
 	MCPToolSets      []trpctool.ToolSet         // For MCP-dependent tools (legacy static slice)
 	MCPRegistry      tagenttool.MCPRegistry     // Live MCP server registry (preferred over MCPToolSets)
 	ReadPartitionIDs []int                      // For recall tools that query cross-namespace
+
+	// Degradation 是 per-agent 五依赖退化状态机（T-G，可选）。mcp_call 工具据此上报 DepMCP
+	// 退化（MCP server 连续失败→degraded，成功→恢复）。nil = 未启用退化追踪（现状）。
+	Degradation *reliability.DegradationManager
 }
 
 var (

@@ -488,7 +488,7 @@ func buildAgent(
 	var actionTool *action.ActionTool
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs)
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -646,6 +646,7 @@ func buildToolFromRef(
 	cache map[string]*agent.TagentAgent,
 	parentMemStore memory.MemoryStore,
 	readPartitionIDs []int,
+	degradationMgr *reliability.DegradationManager,
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
 	if err != nil {
@@ -656,7 +657,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, workspaceRoot, rc, parentMemStore, readPartitionIDs, desc)
+		return buildPlainToolRef(tr, workspaceRoot, rc, parentMemStore, readPartitionIDs, desc, degradationMgr)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -751,6 +752,7 @@ func buildPlainToolRef(
 	memStore memory.MemoryStore,
 	readPartitionIDs []int,
 	desc string,
+	degradationMgr *reliability.DegradationManager,
 ) (trpctool.Tool, bool, error) {
 	registry := GetRegistry()
 	factory, ok := registry.GetPlainToolFactory(tr.ID)
@@ -767,6 +769,7 @@ func buildPlainToolRef(
 		SkillRepo:        rc.skillRepo,
 		MCPToolSets:      rc.mcpToolSets,
 		ReadPartitionIDs: readPartitionIDs,
+		Degradation:      degradationMgr, // T-G: mcp_call 上报 DepMCP 退化（per-agent）
 	}
 	// Nil-guard: assigning a typed nil *Registry to the interface field
 	// would make cfg.MCPRegistry != nil inside factories.

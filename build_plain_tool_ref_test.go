@@ -66,7 +66,7 @@ func TestBuildPlainToolRef_InjectRuntimeDependencies(t *testing.T) {
 		Properties:  map[string]any{"key": "value"},
 	}
 
-	callable, isAction, err := buildPlainToolRef(tr, "", rc, memStore, readPartitionIDs, "desc")
+	callable, isAction, err := buildPlainToolRef(tr, "", rc, memStore, readPartitionIDs, "desc", nil)
 	require.NoError(t, err)
 	require.NotNil(t, callable)
 	assert.False(t, isAction)
@@ -91,7 +91,7 @@ func TestBuildPlainToolRef_UnregisteredID(t *testing.T) {
 		ID:   "not_registered_ever",
 	}
 
-	callable, _, err := buildPlainToolRef(tr, "", rc, memStore, nil, "desc")
+	callable, _, err := buildPlainToolRef(tr, "", rc, memStore, nil, "desc", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no plain tool factory registered")
 	assert.Nil(t, callable)
@@ -112,7 +112,7 @@ func TestBuildPlainToolRef_ActionToolIsMarked(t *testing.T) {
 		Description: "execute commands",
 	}
 
-	callable, isAction, err := buildPlainToolRef(tr, "", rc, memStore, nil, "exec tool")
+	callable, isAction, err := buildPlainToolRef(tr, "", rc, memStore, nil, "exec tool", nil)
 	require.NoError(t, err)
 	require.NotNil(t, callable)
 	assert.True(t, isAction)

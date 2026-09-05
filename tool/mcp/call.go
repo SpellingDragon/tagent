@@ -9,6 +9,7 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
 
@@ -29,6 +30,14 @@ var _ trpctool.CallableTool = (*CallTool)(nil)
 // tool result it can act on.
 type CallTool struct {
 	reg tagenttool.MCPRegistry
+	// degradation 可选（T-G）：非 nil 时 mcp_call 失败/成功上报 DepMCP 退化（MCP server 连续
+	// 失败→degraded，成功→恢复）。per-agent 视角追踪全局 MCP registry（各 agent 独立退化状态）。
+	degradation *reliability.DegradationManager
+}
+
+// SetDegradation 注入退化状态机（工厂从 PlainToolFactoryConfig.Degradation）。nil = 不上报。
+func (t *CallTool) SetDegradation(d *reliability.DegradationManager) {
+	t.degradation = d
 }
 
 // NewCallTool creates the mcp_call gateway over the given registry.
@@ -130,6 +139,10 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	res, err := target.Call(ctx, args)
 	if err != nil {
+		// T-G: MCP server 调用失败 → 上报 DepMCP 退化（连续失败达阈值→degraded+governance 事件）。
+		if t.degradation != nil {
+			t.degradation.ReportFailure(reliability.DepMCP, err)
+		}
 		var schemaJSON json.RawMessage
 		if decl := target.Declaration(); decl != nil && decl.InputSchema != nil {
 			schemaJSON, _ = json.Marshal(decl.InputSchema)
@@ -138,6 +151,10 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			Error:       fmt.Sprintf("mcp tool %s/%s failed: %v — check args against input_schema and retry", a.Server, a.Tool, err),
 			InputSchema: schemaJSON,
 		}, nil
+	}
+	// T-G: MCP 调用成功 → 上报 DepMCP 恢复（degraded→recovering→normal）。
+	if t.degradation != nil {
+		t.degradation.ReportSuccess(reliability.DepMCP)
 	}
 	return res, nil
 }
@@ -148,7 +165,9 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // references never fail at build time.
 func RegisterTool() {
 	agent.RegisterPlainTool(CallToolName, func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
-		return NewCallTool(cfg.MCPRegistry), nil
+		ct := NewCallTool(cfg.MCPRegistry)
+		ct.SetDegradation(cfg.Degradation) // T-G: mcp_call 上报 DepMCP 退化（per-agent，nil 则不上报）
+		return ct, nil
 	})
 }
 

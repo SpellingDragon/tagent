@@ -45,7 +45,7 @@ func TestBuildPlainToolRef_MCPCallInjectsRegistry(t *testing.T) {
 	rc := &runtimeConfig{mcpRegistry: reg}
 	tr := ToolRef{Kind: ToolKindTool, ID: "mcp_call"}
 
-	callable, isAction, err := buildPlainToolRef(tr, "", rc, memory.NewInMemoryStore(), nil, "mcp gateway")
+	callable, isAction, err := buildPlainToolRef(tr, "", rc, memory.NewInMemoryStore(), nil, "mcp gateway", nil)
 	require.NoError(t, err)
 	require.NotNil(t, callable)
 	assert.False(t, isAction)
@@ -68,7 +68,7 @@ func TestBuildPlainToolRef_MCPCallWithoutRegistry(t *testing.T) {
 	rc := &runtimeConfig{}
 	tr := ToolRef{Kind: ToolKindTool, ID: "mcp_call"}
 
-	callable, _, err := buildPlainToolRef(tr, "", rc, memory.NewInMemoryStore(), nil, "mcp gateway")
+	callable, _, err := buildPlainToolRef(tr, "", rc, memory.NewInMemoryStore(), nil, "mcp gateway", nil)
 	require.NoError(t, err)
 
 	ct, ok := callable.(trpctool.CallableTool)
