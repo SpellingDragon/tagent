@@ -97,7 +97,13 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 	digest := ArgsDigest(ctx.ArgsJSON)
 
 	// ① critical → 异步批准门（不阻塞 loop：未批准则挂起 + 登记请求）。
-	if level == RiskCritical && g.approval != nil {
+	if level == RiskCritical {
+		if g.approval == nil {
+			// 无批准机制：critical 无法获批 → 拒绝（绝不放行不可逆操作，防治理绕过）。
+			g.record(SubtypeDenial, ctx, level, ruleID, "critical 无批准机制", digest, "")
+			return Decision{Disposition: DispositionHold, Level: level, RuleID: ruleID, Reason: reason,
+				Denied: true, DenyReason: "critical 操作需人工批准，但运行时未配置批准机制（ApprovalManager）"}
+		}
 		if appr := g.approval.Check(ctx.ToolName, digest); appr != nil {
 			g.record(SubtypeAudit, ctx, level, ruleID, "critical 已批准放行", digest, "")
 			return Decision{Disposition: DispositionRecord, Level: level, RuleID: ruleID, Reason: "已批准"}

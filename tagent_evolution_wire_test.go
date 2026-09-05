@@ -77,3 +77,28 @@ func TestNew_EvolutionDisabled_NoSideEffect(t *testing.T) {
 	_, statErr := os.Stat(evoDir)
 	require.True(t, os.IsNotExist(statErr), "evolution 关闭时不应创建 bundle 目录")
 }
+
+// TestNew_GovernanceEnabled_Builds 验证 governance 接线：启用时 New 成功构建（govGate 构造 +
+// leaf 工具包裹路径执行）。配置门控——默认关闭则不构造。
+func TestNew_GovernanceEnabled_Builds(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
+	cfg.Governance.Enabled = true
+	cfg.Governance.Enforcement = "warn"
+	cfg.Governance.Dir = t.TempDir()
+
+	a, err := New(cfg, WithModel(fakeModel{}))
+	require.NoError(t, err)
+	require.NotNil(t, a)
+}
+
+// TestNew_GovernanceDisabled_Default 验证 governance 默认关闭（零值）→ New 成功，现状不变。
+func TestNew_GovernanceDisabled_Default(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
+	require.False(t, cfg.Governance.Enabled)
+
+	a, err := New(cfg, WithModel(fakeModel{}))
+	require.NoError(t, err)
+	require.NotNil(t, a)
+}

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -82,6 +83,10 @@ type runtimeConfig struct {
 	// evoStore 存不可变 bundle（内容寻址 + 原子 active 指针）；evoRelease 是风险分级发布状态机。
 	evoStore   *evolution.BundleStore
 	evoRelease *evolution.ReleaseManager
+
+	// governance (T-G)：治理闸运行时，cfg.Governance.Enabled 时构造，跨 agent 共享。
+	// govGate 对 entry agent 的 leaf 工具调用做风险分级 + 预算 + goal + critical 批准。
+	govGate *governance.GovernanceGate
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -230,6 +235,27 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		rc.evoStore = store
 		rc.evoRelease = rm
 		log.Infof("[tagent] evolution enabled: bundle store at %s (hot-config self-evolution)", dir)
+	}
+
+	// T-G: 治理闸运行时（配置门控，默认关闭 → 全放行，现状零行为变化）。构造 Budget/Approval/
+	// Goal/Ledger + GovernanceGate；entry agent 的 leaf 工具经 GovernanceTool 装饰器过闸。
+	if cfg.Governance.Enabled {
+		rc.govGate = governance.NewGovernanceGate(governance.GateDeps{
+			Budget: governance.NewBudgetManager(governance.BudgetConfig{
+				Window:        time.Duration(cfg.Governance.BudgetWindowMinutes) * time.Minute,
+				MaxHighRisk:   cfg.Governance.MaxHighRisk,
+				MaxMediumRisk: cfg.Governance.MaxMediumRisk,
+			}, cfg.Governance.Dir),
+			Approval: governance.NewApprovalManager(cfg.Governance.Dir, 0),
+			Goals:    governance.NewGoalRegistry(),
+			Ledger:   governance.NewDenialLedger(nil, 0), // 内存账本；治理事件持久化待接 entry memStore
+			Config: governance.GateConfig{
+				Enabled:         true,
+				Enforcement:     governance.Enforcement(cfg.Governance.Enforcement),
+				GoalRequiredFor: cfg.Governance.GoalRequiredFor,
+			},
+		})
+		log.Infof("[tagent] governance enabled: enforcement=%s (bounded autonomy gate)", cfg.Governance.Enforcement)
 	}
 
 	// Loader reads prompts from cfg.PromptDir on disk, falling back to the
@@ -418,6 +444,19 @@ func buildAgent(
 			actionTool = t.(*action.ActionTool)
 		}
 		tools = append(tools, t)
+	}
+
+	// T-G: 治理闸包裹 leaf 工具（配置门控，默认关闭则不包裹 → 现状逐字节不变）。跳过 sub-agent
+	// 包装器（*agent.AgentToolWrapper）——下游需按具体类型断言接 parentProjection；治理聚焦
+	// exec/file/mcp 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹 tools[]
+	// 不影响其 RegisterCloser；agent.go 随后包 OutputLimitTool，链式委托 GovernanceTool.Call。
+	if rc.govGate != nil && rc.govGate.Enabled() && name == cfg.Entry {
+		for i, t := range tools {
+			if _, isWrapper := t.(*agent.AgentToolWrapper); isWrapper {
+				continue
+			}
+			tools[i] = governance.NewGovernanceTool(t, rc.govGate)
+		}
 	}
 
 	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
