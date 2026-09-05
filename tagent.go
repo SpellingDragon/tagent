@@ -365,6 +365,16 @@ func buildAgent(
 				evolution.NewBundleProvider(rc.evoStore), "system", systemPromptSource,
 			)
 		}
+		// T-EVO 后验评估闭环：绑定 LLM-judge（模型决策回滚）+ MetricGuardrail（确定性指标闸）
+		// 到发布状态机。EvidenceSource 从 entry memStore 收集 canary 证据（治理拒绝率/critical
+		// 率/事件量），故延迟到 memStore 就绪后绑定。judge 复用主 model。
+		if rc.evoRelease != nil {
+			evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
+			rc.evoRelease.BindPosterior(
+				evolution.NewLLMJudgeEvaluator(rc.model, evSrc, 5, 0.5, 0),
+				evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),
+			)
+		}
 	}
 
 	// 3. Resolve model — per-agent override supported

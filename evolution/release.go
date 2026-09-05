@@ -290,3 +290,17 @@ func (rm *ReleaseManager) History() []ReleaseRecord {
 	copy(out, rm.history)
 	return out
 }
+
+// BindPosterior 延迟绑定后验评估器（Evaluator）+ 指标闸（Guardrail）。二者的 EvidenceSource
+// 需 entry agent 的 memStore（New 构造 ReleaseManager 时尚未就绪，per-agent 在 buildAgent
+// 构造），故延迟到 memStore 就绪后绑定。持 submitMu 与 Submit 互斥（字段读写序列化）。
+func (rm *ReleaseManager) BindPosterior(eval Evaluator, guard Guardrail) {
+	rm.submitMu.Lock()
+	defer rm.submitMu.Unlock()
+	if eval != nil {
+		rm.evaluator = eval
+	}
+	if guard != nil {
+		rm.guardrail = guard
+	}
+}
