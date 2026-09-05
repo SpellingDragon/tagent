@@ -545,12 +545,19 @@ func buildAgent(
 		meditationPromptSource := prompt.NewSource(loader, prompt.CompositeConfig{
 			Files: []string{promptFile},
 		})
+		// T-G AnchorStore：per-agent 冥想锚点持久化路径（<MeditationAnchorDir>/<name>.json）。
+		// MeditationAnchorDir 空则 AnchorPath 空（冥想锚点纯内存，现状零变化）。
+		meditationAnchorPath := ""
+		if cfg.Reliability.MeditationAnchorDir != "" {
+			meditationAnchorPath = filepath.Join(cfg.Reliability.MeditationAnchorDir, name+".json")
+		}
 		agentCfg.Meditation = agent.MeditationConfig{
 			Enabled:      true,
 			Interval:     interval,
 			MinGap:       minGap,
 			PromptText:   promptText,
 			PromptSource: meditationPromptSource,
+			AnchorPath:   meditationAnchorPath,
 		}
 	}
 

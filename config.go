@@ -172,6 +172,11 @@ type ReliabilityConfig struct {
 	// 而非丢弃，at-least-once，常驻不丢事件，重启可回收）。空 = 纯 channel（现状）。
 	// 每 agent 用其下子目录（<BusSpillDir>/<agentName>）隔离。建议置于 workspace 下。
 	BusSpillDir string `json:"bus_spill_dir,omitempty" yaml:"bus_spill_dir,omitempty"`
+
+	// MeditationAnchorDir 是冥想门控锚点持久化根目录（非空启用 AnchorStore：跨重启保留
+	// novelty/idle/last-meditation 三锚点，重启后不立即误触发冥想）。空 = 纯内存（现状）。
+	// 每 agent 用 <MeditationAnchorDir>/<agentName>.json。
+	MeditationAnchorDir string `json:"meditation_anchor_dir,omitempty" yaml:"meditation_anchor_dir,omitempty"`
 }
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).

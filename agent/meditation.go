@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	"github.com/SpellingDragon/tagent/agent/task"
 
 	"github.com/SpellingDragon/tagent/prompt"
@@ -23,6 +24,10 @@ type MeditationConfig struct {
 	MinGap       time.Duration  // Minimum idle gap for valid meditation (default: 2h)
 	PromptText   string         // Meditation prompt text (static, loaded once at init)
 	PromptSource *prompt.Source // Hot-reloadable meditation prompt (optional, overrides PromptText)
+
+	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
+	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
+	AnchorPath string
 }
 
 // messageInjector is the interface for injecting messages into the event loop.
@@ -69,6 +74,10 @@ type MeditationManager struct {
 	// lastMeditation tracks the most recent valid meditation timestamp.
 	lastMeditation atomic.Int64
 
+	// anchorStore 可选：持久化三锚点（T-G AnchorStore），跨重启保留冥想门控连续性。
+	// nil = 纯内存（现状，重启失忆）。经 SetAnchorStore 注入。
+	anchorStore *reliability.AnchorStore
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -88,6 +97,47 @@ func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *Medit
 // (digest is omitted — meditation behavior unchanged).
 func (m *MeditationManager) SetTaskController(tc task.TaskController) {
 	m.taskController = tc
+}
+
+// SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复三锚点——跨重启保留冥想
+// 门控连续性（重启后不立即误触发冥想、正确计算 novelty）。Load 失败保守用当前值（不阻断启动）。
+func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore) {
+	m.anchorStore = s
+	if s == nil {
+		return
+	}
+	a, err := s.Load()
+	if err != nil {
+		log.Warnf("[Meditation] anchor load failed (%v), starting fresh", err)
+		return
+	}
+	if a.LastUserInput > 0 {
+		m.lastUserInput.Store(a.LastUserInput)
+	}
+	if a.LastTurnEnd > 0 {
+		m.lastTurnEnd.Store(a.LastTurnEnd)
+	}
+	if a.LastMeditation > 0 {
+		m.lastMeditation.Store(a.LastMeditation)
+	}
+	log.Infof("[Meditation] anchors restored across restart: lastUserInput=%d lastTurnEnd=%d lastMeditation=%d",
+		a.LastUserInput, a.LastTurnEnd, a.LastMeditation)
+}
+
+// persistAnchors 保存当前三锚点到 anchorStore（若配置）。写失败仅告警（冥想门控降级为内存态，
+// 不阻断主流程）。锚点更新（turn end / user input / meditation fire）时调用。
+func (m *MeditationManager) persistAnchors() {
+	if m.anchorStore == nil {
+		return
+	}
+	a := reliability.MeditationAnchors{
+		LastUserInput:  m.lastUserInput.Load(),
+		LastTurnEnd:    m.lastTurnEnd.Load(),
+		LastMeditation: m.lastMeditation.Load(),
+	}
+	if err := m.anchorStore.Save(a); err != nil {
+		log.Warnf("[Meditation] anchor persist failed: %v", err)
+	}
 }
 
 // Start launches the meditation ticker goroutine.
@@ -125,6 +175,7 @@ func (m *MeditationManager) Stop() {
 // non-user sources (meditation/task/tmux) must never arm this gate.
 func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
 	m.lastUserInput.Store(t.UnixMilli())
+	m.persistAnchors()
 }
 
 // UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
@@ -132,6 +183,7 @@ func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
 // trigger source or success (lineage-agnostic by design).
 func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
 	m.lastTurnEnd.Store(t.UnixMilli())
+	m.persistAnchors()
 }
 
 // checkAndMeditate evaluates whether a meditation should fire.
@@ -178,6 +230,7 @@ func (m *MeditationManager) checkAndMeditate() {
 	msg := m.buildMeditationMessage(now, idle)
 	m.injector.InjectMessageWithSource("meditation", msg)
 	m.lastMeditation.Store(now.UnixMilli())
+	m.persistAnchors()
 
 	log.Infof("[Meditation] triggered: idle=%s since last turn end", idle)
 }

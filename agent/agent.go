@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	"github.com/SpellingDragon/tagent/agent/task"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -404,6 +405,15 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// Feed the read-only task controller so meditation carries a self-state
 		// digest (task-layer health). taskManager is always non-nil here.
 		ta.meditationMgr.SetTaskController(taskManager)
+		// T-G AnchorStore：锚点持久化路径非空则注入，跨重启保留冥想门控三锚点（重启后不
+		// 立即误触发冥想、正确计算 novelty）。init 失败降级为内存锚点（可用性优先）。
+		if cfg.Meditation.AnchorPath != "" {
+			if as, aerr := reliability.NewAnchorStore(cfg.Meditation.AnchorPath); aerr == nil {
+				ta.meditationMgr.SetAnchorStore(as)
+			} else {
+				log.Warnf("[Meditation] anchor store init failed (%v), anchors stay in-memory", aerr)
+			}
+		}
 	}
 
 	// Start the workspace cleaner. Scope: tool-output only. The exec/ dir is a
