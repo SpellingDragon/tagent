@@ -249,7 +249,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			}, cfg.Governance.Dir),
 			Approval: governance.NewApprovalManager(cfg.Governance.Dir, 0),
 			Goals:    governance.NewGoalRegistry(),
-			Ledger:   governance.NewDenialLedger(nil, 0), // 内存账本；治理事件持久化待接 entry memStore
+			Ledger:   nil, // S5: BindLedger 于 buildAgent 阶段接 entry memStore（NewGovernanceGate 对 nil 兜底建内存账本，省掉必然被替换的临时对象）
 			Config: governance.GateConfig{
 				Enabled:         true,
 				Enforcement:     governance.Enforcement(cfg.Governance.Enforcement),

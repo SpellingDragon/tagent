@@ -76,6 +76,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			UserID:        turnMeta["user_id"],
 			BatchSize:     len(events),
 			EventSources:  eventSources(events),
+			// C9：task_settled 回流的新 turn 携带原 spawn turn 的 trace 锚点（经 Origin→Metadata），
+			// 建 span link 闭合三投影的 OTel span 维度。非异步回流 turn 这两键为空 → 不建 link。
+			LinkTraceID: turnMeta[tagentevent.MetaKeyTraceID],
+			LinkSpanID:  turnMeta[tagentevent.MetaKeySpanID],
 		})
 		// T-G: 盖章 trigger source 到 turn ctx，供 GovernanceTool 做 goal-required 判定
 		// （meditation/task 触发的 high+ 操作须挂 goal；user 触发不需）。spanCtx 经 RunFlow

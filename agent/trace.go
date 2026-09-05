@@ -37,6 +37,13 @@ type turnSpanAttrs struct {
 	UserID        string
 	BatchSize     int
 	EventSources  []string // 批内事件的 Source 值（user/tmux/task/meditation/...）
+
+	// LinkTraceID/LinkSpanID 是异步任务回流的因果链接（C9）：task_settled 事件携带其 spawn
+	// turn 的 trace 锚点（经 Origin→Metadata 管道），新 turn span 据此建 OTel span link，使
+	// trace 后端里 spawn/settle 两棵 tree 相连——闭合三投影的 OTel span 维度（此前 Metadata/
+	// trajectory 两投影已互链，span 树断开）。空则不建 link（noop 安全，非异步回流 turn 无此字段）。
+	LinkTraceID string
+	LinkSpanID  string
 }
 
 // startTurnSpan 开启 turn root span，返回携带 span 的 ctx（供 RunFlow 传播，框架 span
@@ -62,7 +69,18 @@ func startTurnSpan(ctx context.Context, a turnSpanAttrs) (context.Context, trace
 	if len(a.EventSources) > 0 {
 		attrs = append(attrs, attribute.StringSlice("tagent.turn.event_sources", a.EventSources))
 	}
-	return tr.Start(ctx, TurnSpanName, trace.WithAttributes(attrs...))
+	opts := []trace.SpanStartOption{trace.WithAttributes(attrs...)}
+	// C9：异步任务回流因果链接——task_settled 带原 turn trace 锚点时建 span link（remote
+	// SpanContext）。hex 解析失败或空则跳过（noop 安全，不退化）。
+	if a.LinkTraceID != "" && a.LinkSpanID != "" {
+		if tid, err := trace.TraceIDFromHex(a.LinkTraceID); err == nil {
+			if sid, err := trace.SpanIDFromHex(a.LinkSpanID); err == nil {
+				sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, Remote: true})
+				opts = append(opts, trace.WithLinks(trace.Link{SpanContext: sc}))
+			}
+		}
+	}
+	return tr.Start(ctx, TurnSpanName, opts...)
 }
 
 // spanTraceIDs 从 ctx 提取当前 span 的 trace_id/span_id（hex），供 attribution 注入与
