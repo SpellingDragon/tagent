@@ -207,6 +207,9 @@ func init() {
 		// 证据门控巩固产物（T-D）：长期记忆 TTL 豁免(-1)；正 key 真实事件；骨架保留、
 		// 可嵌入、可召回。一处注册即全链路（摘要/骨架/TTL/角色/嵌入/召回）生效。
 		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},
+		// 治理记录（T-G）：永久 TTL(-1)；正 key 真实事件；骨架保留、可召回（审计查询）；
+		// 不可嵌入（治理记录非语义记忆）。subtype 经 Metadata 区分 denial/goal/approval/degraded/audit。
+		{Name: TypeGovernance, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: false, Recallable: true},
 	}
 	for _, spec := range builtin {
 		RegisterEventType(spec)

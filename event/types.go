@@ -61,6 +61,11 @@ const (
 	// 防 LLM 伪造。正 key 真实事件、TTL 豁免（长期记忆，同 context_compress_summary 待遇）。
 	// 经 EventTypeSpec 注册表一处注册即全链路生效（REG 收敛「改 10 处」的兑现）。
 	TypeConsolidation = "consolidation"
+
+	// TypeGovernance 是治理记录事件（T-G 常驻可靠性+治理）：否决/goal/批准/退化/审计
+	// 五类（Metadata.subtype 区分），正 key、TTL 永久（-1 豁免）、可查询可审计。
+	// 单类型 + subtype 而非五个类型（每加类型有注册成本，审计查询天然单类型过滤）。
+	TypeGovernance = "governance"
 )
 
 // ExtractEventType determines the event type from a model.Message.
