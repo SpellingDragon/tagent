@@ -13,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
+	"github.com/SpellingDragon/tagent/tool/memoryx"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/SpellingDragon/tagent/tool/spec"
 	"github.com/SpellingDragon/tagent/tool/task"
@@ -78,6 +79,10 @@ func RegisterBuiltinTools() error {
 
 		// recall sub-tools (4 plain tools)
 		recall.RegisterSubTools()
+
+		// memory curation sub-tools (T-D): memory_consolidate（证据门控巩固）、
+		// memory_health（维度锚定诊断）。工厂式注册，从 per-agent MemStore 取依赖。
+		memoryx.RegisterSubTools()
 
 		// task sub-tools: list_tasks, cancel_task,
 		// relaunch_task, resume_task

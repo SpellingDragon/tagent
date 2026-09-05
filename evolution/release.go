@@ -62,15 +62,20 @@ type Guardrail interface {
 	Breach(bundleID string) (breached bool, reason string)
 }
 
-// RiskRouter 决定一个 bundle 变更走哪条发布道（T-EVO 用 governance.RiskClassifier 实现，
-// 契约 C5 复用）。nil = 一律走 slow（保守）。
+// RiskRouter 决定一个 bundle 变更走哪条发布道（按 diff 内容判定，实现见 DiffRiskRouter）。
+// **与 governance.RiskClassifier(C5) 分层独立**：后者管运行时工具调用风险（输入 tool+args），
+// 本接口管版本发布道选择（输入 bundle diff）；evolution 不 import governance（见 eval.go 声明）。
+// nil = 一律走 slow（保守）。（S3 建议：本接口宜改名 LaneRouter，把 "Risk" 词根让给 C5。）
 type RiskRouter interface {
 	Route(diff BundleDiff) Lane
 }
 
 // ReleaseConfig 配置发布状态机。
 type ReleaseConfig struct {
-	RequireApproval  bool     // slow 道是否需人工批准门（默认 true，报告 D1）
+	// SkipApprovalGate 是反义字段：零值(false) = 慢道需人工批准门（保守默认，报告 D1）；
+	// true = 跳过批准门。用反义使 Go 零值 == 保守行为，根除「文档说默认 true 但 bool 零值
+	// 是 false」的默认反转（A4：用户开 evolution 不显式配置却得到无批准门）。
+	SkipApprovalGate bool
 	CanaryHoldMs     int64    // canary 激活后到后验评估的观察窗（默认 0 = 立即评估）
 	ProtectedPrompts []string // 受保护提示词（改动强制走 slow 道）
 }
@@ -215,8 +220,8 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 			return rm.record(draft, lane, StageRolledBack, "canary guardrail 违约: "+reason, 0), nil
 		}
 	}
-	// 人工批准门（require_approval 默认 true）。
-	if rm.cfg.RequireApproval {
+	// 人工批准门（默认需要；SkipApprovalGate=true 才跳过——反义字段使零值保守）。
+	if !rm.cfg.SkipApprovalGate {
 		if pass, reason := rm.runGate(rm.approveGate, ctx, draft); !pass {
 			rm.rollbackTo(draft.ParentID)
 			return rm.record(draft, lane, StageRolledBack, "人工批准拒绝，回滚: "+reason, 0), nil

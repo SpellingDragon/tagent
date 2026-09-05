@@ -12,8 +12,8 @@ type errEmbedder struct{}
 func (errEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, fmt.Errorf("boom")
 }
-func (errEmbedder) Dimension() int    { return 0 }
-func (errEmbedder) ModelID() string   { return "err-model" }
+func (errEmbedder) Dimension() int  { return 0 }
+func (errEmbedder) ModelID() string { return "err-model" }
 
 // TestTracedEmbedder_PassthroughNoop 验证组8.3 声明区守卫的核心：未设 OTLP（noop provider）
 // 时 TracedEmbedder 透传 inner，Embed 结果逐字节一致、Dimension/ModelID 透传——向量链路

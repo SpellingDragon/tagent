@@ -6,7 +6,8 @@ import "github.com/SpellingDragon/tagent/memory"
 //
 // 把 RiskClassifier(C5) + BudgetManager + GoalRegistry + ApprovalManager + DenialLedger
 // 串成一条决策管线：classify → critical 批准门 → goal 检查 → 预算闸 → 记账/放行。
-// GovernanceTool 装饰器（工具执行路径）与 T-EVO 发布道（版本风险路由）共用本管线。
+// GovernanceTool 装饰器（工具执行路径）消费本管线的裁决。（注：T-EVO 发布道用独立的
+// evolution.DiffRiskRouter 按 bundle diff 路由，**不复用**本管线——见 eval.go 分层独立声明。）
 //
 // 治理关闭（Enabled=false，默认）时全放行——现状零行为变化。「闸不是墙」：默认
 // enforcement=warn（记账放行 + 提示），strict 才拒绝；critical 恒走异步批准（不阻塞 loop）。
@@ -30,9 +31,9 @@ func (c GateConfig) withDefaults() GateConfig {
 	if c.Enforcement == "" {
 		c.Enforcement = EnforcementWarn
 	}
-	if c.GoalRequiredFor == nil {
-		c.GoalRequiredFor = []string{"meditation", "task"}
-	}
+	// GoalRequiredFor 默认空 = 不启用 goal 门（A7：goal_declare 工具尚未交付，若默认
+	// [meditation,task] 则 strict 模式下 high+ 自治操作恒拒且 agent 无自纠路径 → 反复撞墙）。
+	// 待 goal_declare/goal_close 工具交付后，由配置显式启用。
 	return c
 }
 
@@ -129,7 +130,7 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 		g.record(SubtypeDenial, ctx, level, ruleID, "缺 goal 登记", digest, "")
 		if g.cfg.Enforcement == EnforcementStrict {
 			return Decision{Disposition: disp, Level: level, RuleID: ruleID, Reason: reason,
-				Denied: true, DenyReason: "high+ 自治操作须先经 goal_declare 登记目标"}
+				Denied: true, DenyReason: "high+ 自治操作须挂 goal，但 goal_declare 入口尚未交付——请用 enforcement=warn 或清空 goal_required_for（A7）"}
 		}
 		// warn：记账放行（在工具结果附提醒由装饰器处理）。
 	}

@@ -5,7 +5,8 @@
 // 无随机），规则表数据驱动，可表格测试；拒绝必记账（DenialLedger + governance 事件）。
 //
 // 契约 C5：RiskClassifier.Classify(RiskContext) → (level, ruleID, reason)，纯函数。
-// T-EVO 发布道复用本分级器路由「快道（低风险可逆→后验）/慢道（高风险→门后）」。
+// 消费方：GovernanceGate（工具执行治理）。注：T-EVO 发布道用独立的 evolution.DiffRiskRouter
+// 按 bundle diff 路由，**不复用**本分级器（分层独立，输入域不同：工具调用 vs 版本变更）。
 package governance
 
 import (
@@ -196,6 +197,20 @@ func DefaultRules() []Rule {
 			},
 		},
 		// === medium：写入/修改（可逆但有副作用）===
+		{
+			ID: "refine.rollback", Level: RiskCritical,
+			Reason: "refine rollback 直接切换 active bundle（绕过发布道评估，最高权限自我修改）",
+			Match: func(c RiskContext) bool {
+				return c.ToolName == "refine" && argsContains(c, `"op":"rollback"`, `"op": "rollback"`)
+			},
+		},
+		{
+			ID: "refine.propose", Level: RiskMedium,
+			Reason: "refine propose 提案自我修改（经发布道裁决，占预算 + 记账）",
+			Match: func(c RiskContext) bool {
+				return c.ToolName == "refine"
+			},
+		},
 		{
 			ID: "file.write", Level: RiskMedium,
 			Reason: "文件写入/修改",

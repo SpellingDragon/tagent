@@ -221,11 +221,11 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		rm, eerr := evolution.NewReleaseManager(evolution.ReleaseDeps{
 			Store:  store,
 			Router: evolution.NewDiffRiskRouter(), // 按 diff 路由：模型/参数→慢道，仅提示词→快道
-			// Evaluator/Guardrail/各 Gate 留 nil（保守降级：nil Gate→通过，无 Evaluator→canary
-			// 即 active，仅 guardrail 守护）。后续接 LLM-judge 作 Evaluator、cassette 回放作
-			// ReplayGate、指标闸作 Guardrail（T-EVO 剩余集成）。
+			// Gate 四槽留 nil（runGate：nil→通过；replay/shadow cassette 门待交付，见 review S2）。
+			// Evaluator(LLM-judge)/Guardrail(指标闸) 于 buildAgent 阶段经 BindPosterior 绑定
+			// （需 entry agent 的 model + memStore，故延迟到 New 之后——见下方 buildAgent 接线）。
 			Config: evolution.ReleaseConfig{
-				RequireApproval:  cfg.Evolution.RequireApproval,
+				SkipApprovalGate: cfg.Evolution.SkipApproval, // 反义:config skip_approval 默认false→需批准门(保守)
 				ProtectedPrompts: cfg.Evolution.ProtectedPrompts,
 				CanaryHoldMs:     int64(cfg.Evolution.CanaryHoldSeconds) * 1000,
 			},
@@ -457,10 +457,17 @@ func buildAgent(
 		tools = append(tools, t)
 	}
 
+	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
+	// 仅 entry agent 且 evolution 启用时注册。**先于治理包裹追加**（A3：refine 是最高权限通道，
+	// rollback 直接切换 active bundle 绕过发布道评估，必须过治理闸；DefaultRules 有 refine 规则）。
+	if rc.evoStore != nil && name == cfg.Entry {
+		tools = append(tools, evolution.NewRefineTool(rc.evoStore, rc.evoRelease))
+	}
+
 	// T-G: 治理闸包裹 leaf 工具（配置门控，默认关闭则不包裹 → 现状逐字节不变）。跳过 sub-agent
 	// 包装器（*agent.AgentToolWrapper）——下游需按具体类型断言接 parentProjection；治理聚焦
-	// exec/file/mcp 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹 tools[]
-	// 不影响其 RegisterCloser；agent.go 随后包 OutputLimitTool，链式委托 GovernanceTool.Call。
+	// exec/file/mcp/refine 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹
+	// tools[] 不影响其 RegisterCloser；agent.go 随后包 OutputLimitTool，链式委托 GovernanceTool.Call。
 	if rc.govGate != nil && rc.govGate.Enabled() && name == cfg.Entry {
 		// 治理账本绑定 entry agent 的持久 memStore：治理记录写 governance 事件（可 recall
 		// 审计、跨重启重建）。分区 = agent 自身写分区（PartitionIDFromName）。
@@ -471,13 +478,6 @@ func buildAgent(
 			}
 			tools[i] = governance.NewGovernanceTool(t, rc.govGate)
 		}
-	}
-
-	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
-	// 仅 entry agent 且 evolution 启用时注册。agent 提案经 evoRelease 风险分级发布道裁决，
-	// 激活与否由状态机决定（agent 无直接激活权，D1 铁律）。工具声明恒定 → prefix-cache 稳定。
-	if rc.evoStore != nil && name == cfg.Entry {
-		tools = append(tools, evolution.NewRefineTool(rc.evoStore, rc.evoRelease))
 	}
 
 	// 5. Create TagentAgent

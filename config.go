@@ -153,15 +153,16 @@ type GovernanceConfig struct {
 	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`                 // 窗口内 high 上限(默认20)
 	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`             // 窗口内 medium 上限(默认200)
 
-	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"` // 须挂 goal 的 trigger source(默认 meditation,task)
-	RequireApproval bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`   // critical 是否需人工批准(默认 true)
+	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"` // 须挂 goal 的 trigger source(默认空=不启用 goal 门;待 goal_declare 工具交付后再配,见 gate.go A7)
+	// 注:critical 操作恒走 ApprovalManager 异步批准(gate.go critical 分支),无开关。
+	// 此前的 RequireApproval 是从未被读取的死字段(A5:全仓仅定义处出现),已删除。
 }
 
 // EvolutionConfig 是 TC0/T-EVO 热配置自进化的配置（映射到 evolution.BundleStore + ReleaseManager）。
 type EvolutionConfig struct {
 	Enabled           bool     `json:"enabled" yaml:"enabled"`
 	Dir               string   `json:"dir,omitempty" yaml:"dir,omitempty"`                                 // bundle 存储目录(默认 data/evolution)
-	RequireApproval   bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`       // 慢道是否需人工批准门(默认 true)
+	SkipApproval     bool     `json:"skip_approval,omitempty" yaml:"skip_approval,omitempty"`             // 跳过慢道人工批准门(默认false=需批准,保守;反义字段使Go零值安全)
 	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
 	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
 }

@@ -118,7 +118,7 @@ func TestRelease_SlowLane_GatedActivation(t *testing.T) {
 	rm, _ := NewReleaseManager(ReleaseDeps{
 		Store: store, Router: fixedRouter{LaneSlow},
 		ValidateGate: gate(true, ""), ReplayGate: gate(true, ""), ShadowGate: gate(true, ""),
-		ApproveGate: gate(true, ""), Config: ReleaseConfig{RequireApproval: true},
+		ApproveGate: gate(true, ""), Config: ReleaseConfig{}, // 零值 SkipApprovalGate=false → 需批准门
 	})
 	rec, _ := rm.Submit(context.Background(), draft)
 	if rec.Lane != LaneSlow || rec.Stage != StageActive {
@@ -153,7 +153,7 @@ func TestRelease_ProtectedPromptForcesSlowLane(t *testing.T) {
 		Store: store, Router: fixedRouter{LaneFast}, // router 说快道
 		ValidateGate: gate(true, ""), ReplayGate: gate(true, ""), ShadowGate: gate(true, ""),
 		ApproveGate: gate(true, ""),
-		Config:      ReleaseConfig{ProtectedPrompts: []string{"soul"}, RequireApproval: true},
+		Config:      ReleaseConfig{ProtectedPrompts: []string{"soul"}}, // 零值 SkipApprovalGate=false → 需批准
 	})
 	rec, _ := rm.Submit(context.Background(), draft)
 	if rec.Lane != LaneSlow {
