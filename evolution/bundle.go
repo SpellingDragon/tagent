@@ -37,12 +37,12 @@ type ModelRef struct {
 
 // Bundle 是不可变的版本快照。写后冻结——任何「修改」都是派生一个新 bundle。
 type Bundle struct {
-	ID        string            `json:"id"`         // 内容寻址短哈希
-	ParentID  string            `json:"parent_id"`  // 派生自哪个 bundle（空 = 基线）
-	Prompts   map[string]string `json:"prompts"`    // 逻辑名 → 提示词内容快照（不可变）
+	ID        string            `json:"id"`        // 内容寻址短哈希
+	ParentID  string            `json:"parent_id"` // 派生自哪个 bundle（空 = 基线）
+	Prompts   map[string]string `json:"prompts"`   // 逻辑名 → 提示词内容快照（不可变）
 	Params    BundleParams      `json:"params"`
 	Model     ModelRef          `json:"model"`
-	Hash      string            `json:"hash"`       // 内容寻址哈希（校验冻结完整性）
+	Hash      string            `json:"hash"` // 内容寻址哈希（校验冻结完整性）
 	CreatedMs int64             `json:"created_ms"`
 	CreatedBy string            `json:"created_by"` // "baseline"|"refine"|"manual"
 	Note      string            `json:"note"`
@@ -193,11 +193,11 @@ func (s *BundleStore) List() ([]*Bundle, error) {
 
 // Diff 返回两 bundle 的差异摘要（refine 工具 diff op 消费，报告 D1）。
 type BundleDiff struct {
-	PromptsChanged   []string `json:"prompts_changed"`
-	PromptsAdded     []string `json:"prompts_added"`
-	PromptsRemoved   []string `json:"prompts_removed"`
-	ParamsChanged    bool     `json:"params_changed"`
-	ModelChanged     bool     `json:"model_changed"`
+	PromptsChanged []string `json:"prompts_changed"`
+	PromptsAdded   []string `json:"prompts_added"`
+	PromptsRemoved []string `json:"prompts_removed"`
+	ParamsChanged  bool     `json:"params_changed"`
+	ModelChanged   bool     `json:"model_changed"`
 }
 
 // Diff 计算 from→to 的差异。

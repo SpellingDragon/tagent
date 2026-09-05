@@ -12,7 +12,7 @@ type staticGetter struct {
 }
 
 func (s staticGetter) Get() (string, error) { return s.content, nil }
-func (s staticGetter) IsEmpty() bool         { return s.empty }
+func (s staticGetter) IsEmpty() bool        { return s.empty }
 
 func TestBundleStore_CreateImmutableActiveRollback(t *testing.T) {
 	dir := t.TempDir()

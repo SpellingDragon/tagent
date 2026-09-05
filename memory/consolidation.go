@@ -28,9 +28,9 @@ import (
 const (
 	MetaReceiptKeys          = "receipt_keys"          // 源事件 EventKey hex 逗号列表
 	MetaReceiptFingerprint   = "receipt_fingerprint"   // 服务端 SHA1 指纹
-	MetaConsolidationKind    = "consolidation_kind"     // meditation_digest/experience_distill/manual
-	MetaConsolidationTrigger = "consolidation_trigger"  // capacity/value/meditation/manual
-	MetaSourceCount          = "source_count"           // 收据条数（冗余，便于诊断不解析列表）
+	MetaConsolidationKind    = "consolidation_kind"    // meditation_digest/experience_distill/manual
+	MetaConsolidationTrigger = "consolidation_trigger" // capacity/value/meditation/manual
+	MetaSourceCount          = "source_count"          // 收据条数（冗余，便于诊断不解析列表）
 )
 
 // ComputeReceiptFingerprint 服务端指纹：对排序后的 (key, type, content) 逐条滚动 SHA1。
