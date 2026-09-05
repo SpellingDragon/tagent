@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
@@ -76,6 +77,11 @@ type runtimeConfig struct {
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *rl.TrajectoryRecorder
+
+	// evolution (TC0/T-EVO)：热配置自进化运行时，cfg.Evolution.Enabled 时构造，跨 agent 共享。
+	// evoStore 存不可变 bundle（内容寻址 + 原子 active 指针）；evoRelease 是风险分级发布状态机。
+	evoStore   *evolution.BundleStore
+	evoRelease *evolution.ReleaseManager
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -195,6 +201,37 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 	}
 
+	// T-EVO/TC0: 热配置自进化运行时（配置门控，默认关闭 → 现状零行为变化）。
+	// 构造共享 BundleStore + 风险分级发布状态机；entry agent 的系统提示词经 VersionedSource
+	// 从 active bundle 读，refine 工具让 agent 提案（经发布道裁决，无直接激活权）。
+	if cfg.Evolution.Enabled {
+		dir := cfg.Evolution.Dir
+		if dir == "" {
+			dir = "data/evolution"
+		}
+		store, eerr := evolution.NewBundleStore(dir)
+		if eerr != nil {
+			return nil, fmt.Errorf("tagent: init evolution bundle store: %w", eerr)
+		}
+		rm, eerr := evolution.NewReleaseManager(evolution.ReleaseDeps{
+			Store: store,
+			// Router/Evaluator/Guardrail/各 Gate 留 nil（保守降级：无 Router→慢道，nil Gate→通过，
+			// 无 Evaluator→canary 即 active）。后续接 governance.RiskClassifier 作 Router、
+			// LLM-judge 作 Evaluator、cassette 回放作 ReplayGate（T-EVO 剩余集成）。
+			Config: evolution.ReleaseConfig{
+				RequireApproval:  cfg.Evolution.RequireApproval,
+				ProtectedPrompts: cfg.Evolution.ProtectedPrompts,
+				CanaryHoldMs:     int64(cfg.Evolution.CanaryHoldSeconds) * 1000,
+			},
+		})
+		if eerr != nil {
+			return nil, fmt.Errorf("tagent: init evolution release manager: %w", eerr)
+		}
+		rc.evoStore = store
+		rc.evoRelease = rm
+		log.Infof("[tagent] evolution enabled: bundle store at %s (hot-config self-evolution)", dir)
+	}
+
 	// Loader reads prompts from cfg.PromptDir on disk, falling back to the
 	// framework's embedded default prompts for anything not overridden there.
 	loader := prompt.NewLoader(cfg.PromptDir, prompt.WithFallback(defaultPromptsFS, DefaultPromptsPrefix))
@@ -285,6 +322,23 @@ func buildAgent(
 	if !acfg.SystemPrompt.IsEmpty() {
 		systemPromptSource = prompt.NewSource(loader, acfg.SystemPrompt)
 	}
+	// T-EVO/TC0: entry agent 系统提示词经 VersionedSource 从 active bundle 读（回合边界生效，
+	// 热配置）。首次无 active bundle 时用静态提示词初始化基线（幂等）。配置门控（rc.evoStore
+	// != nil 且 name == cfg.Entry）；非 entry agent 或未启用则原样（现状逐字节不变）。
+	if rc.evoStore != nil && name == cfg.Entry {
+		if rc.evoStore.Active() == nil && systemPrompt != "" {
+			if _, ierr := rc.evoStore.InitBaseline(
+				map[string]string{"system": systemPrompt}, evolution.BundleParams{}, evolution.ModelRef{},
+			); ierr != nil {
+				log.Warnf("[tagent] evolution init baseline failed: %v", ierr)
+			}
+		}
+		if rc.evoStore.Active() != nil {
+			systemPromptSource = evolution.NewVersionedSource(
+				evolution.NewBundleProvider(rc.evoStore), "system", systemPromptSource,
+			)
+		}
+	}
 
 	// 3. Resolve model — per-agent override supported
 	agentModel := rc.resolveAgentModel(name, acfg, cfg)
@@ -364,6 +418,13 @@ func buildAgent(
 			actionTool = t.(*action.ActionTool)
 		}
 		tools = append(tools, t)
+	}
+
+	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
+	// 仅 entry agent 且 evolution 启用时注册。agent 提案经 evoRelease 风险分级发布道裁决，
+	// 激活与否由状态机决定（agent 无直接激活权，D1 铁律）。工具声明恒定 → prefix-cache 稳定。
+	if rc.evoStore != nil && name == cfg.Entry {
+		tools = append(tools, evolution.NewRefineTool(rc.evoStore, rc.evoRelease))
 	}
 
 	// 5. Create TagentAgent
