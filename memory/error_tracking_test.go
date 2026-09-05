@@ -29,10 +29,10 @@ func (e *errStore) StoreEvent(k int64, ev FullEvent) error {
 
 func TestErrorTrackingStore_ClassifyAndReport(t *testing.T) {
 	cases := []struct {
-		name     string
-		err      error
-		wantDep  string
-		isFail   bool
+		name    string
+		err     error
+		wantDep string
+		isFail  bool
 	}{
 		{"fork/exec→rustviking", errors.New("fork/exec rustviking: no such file"), "rustviking", true},
 		{"executable not found→rustviking", errors.New("executable file not found in $PATH"), "rustviking", true},

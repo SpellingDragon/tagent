@@ -184,6 +184,11 @@ type ReliabilityConfig struct {
 	// 达阈值→degraded、探测成功→recovering→normal，状态迁移写 governance degraded 事件（可观测）。
 	// 默认 false = 不启用（ErrorTrackingStore 不包裹，现状逐字节零行为变化）。
 	DegradationEnabled bool `json:"degradation_enabled,omitempty" yaml:"degradation_enabled,omitempty"`
+
+	// MemSpillDir 是 memory 退化事件兜底目录（报告 D3 步4）：DegradationEnabled 且此非空时，
+	// StoreEvent 失败的事件落 <MemSpillDir>/<agent>.jsonl，memory 恢复后自动重放（事件不丢，
+	// at-least-once 延伸到存储层）。空 = 仅退化状态标记、不落盘兜底。建议置于 workspace 下。
+	MemSpillDir string `json:"mem_spill_dir,omitempty" yaml:"mem_spill_dir,omitempty"`
 }
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).

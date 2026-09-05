@@ -3,6 +3,8 @@ package memory
 import (
 	"errors"
 	"strings"
+
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // ==================== ErrorTrackingStore（T-G · 退化检测挂点，报告 D3 C2 契约最外层）====================
@@ -34,14 +36,50 @@ const (
 type ErrorTrackingStore struct {
 	inner MemoryStore
 	sink  DegradationSink // nil = 纯透传不上报（配置门控关闭）
+	spill *MemSpill       // nil = 不落盘兜底；非 nil 时 StoreEvent 失败事件落 JSONL（步4，事件不丢）
 }
 
 // 编译期锁定 ErrorTrackingStore 是 MemoryStore。
 var _ MemoryStore = (*ErrorTrackingStore)(nil)
 
-// NewErrorTrackingStore 包裹 inner 做错误追踪。sink 为 nil 则纯透传（不上报）。
-func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) MemoryStore {
+// NewErrorTrackingStore 包裹 inner 做错误追踪。sink 为 nil 则纯透传（不上报）。返回具体类型
+// 以支持 SetMemSpill/ReplaySpilled（步4 兜底），仍满足 MemoryStore 接口。
+func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTrackingStore {
 	return &ErrorTrackingStore{inner: inner, sink: sink}
+}
+
+// SetMemSpill 启用 memory 退化事件兜底（报告 D3 步4）：StoreEvent 失败时事件落 path 的 JSONL，
+// 恢复后经 ReplaySpilled 重放（事件不丢，at-least-once 延伸到存储层）。path 空则禁用。
+func (s *ErrorTrackingStore) SetMemSpill(path string) {
+	s.spill = NewMemSpill(path)
+}
+
+// ReplaySpilled 重放兜底事件到 inner store（绕过自身防递归）。返回重放成功数。由 memory 依赖
+// 恢复（DegradationManager onChange）或探针/运维触发。
+func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
+	if s.spill == nil {
+		return 0, nil
+	}
+	return s.spill.Replay(s.inner)
+}
+
+// MemSpillLen 返回当前兜底待重放事件数（诊断/背压信号）。
+func (s *ErrorTrackingStore) MemSpillLen() int {
+	if s.spill == nil {
+		return 0
+	}
+	return s.spill.Len()
+}
+
+// spillEvent 落盘 StoreEvent 失败的事件（步4 兜底，best-effort）。落盘失败仅告警——兜底也失败
+// （如磁盘满）则事件真丢，但已尽最后努力（DegradationManager 已记 disk/memory 退化，可观测）。
+func (s *ErrorTrackingStore) spillEvent(key int64, event FullEvent) {
+	if s.spill == nil {
+		return
+	}
+	if err := s.spill.Append(key, event); err != nil {
+		log.Warnf("[ErrorTrackingStore] mem_spill append failed (event may be lost): %v", err)
+	}
 }
 
 // classifyStoreErr 按 error 特征归因依赖（报告 D3 §5.2 降级矩阵）。disk 先判（S3：rustviking
@@ -81,6 +119,7 @@ func (s *ErrorTrackingStore) StoreEvent(key int64, event FullEvent) error {
 	err := s.inner.StoreEvent(key, event)
 	if err != nil {
 		s.report(classifyStoreErr(err), err)
+		s.spillEvent(key, event) // 步4：memory 退化事件兜底落盘（不丢，恢复后重放）
 	} else {
 		s.reportStoreHealthy()
 	}
@@ -91,6 +130,7 @@ func (s *ErrorTrackingStore) StoreEventWithEmbedding(key int64, event FullEvent,
 	err := s.inner.StoreEventWithEmbedding(key, event, embedding)
 	if err != nil {
 		s.report(classifyStoreErr(err), err)
+		s.spillEvent(key, event) // 步4：兜底落盘（embedding 不重放，重放走 StoreEvent 文本路径重嵌入）
 	} else {
 		s.reportStoreHealthy()
 	}

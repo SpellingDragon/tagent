@@ -334,6 +334,9 @@ func buildAgent(
 	if cfg.Reliability.DegradationEnabled {
 		baseStore := memStore
 		pid := memory.PartitionIDFromName(name)
+		// etsHolder 延迟引用：onChange 在 memory 恢复到 normal 时触发 mem_spill 重放（步4），
+		// 此刻 ErrorTrackingStore 尚未构造，故用 holder 闭包捕获（构造后回填）。
+		var etsHolder *memory.ErrorTrackingStore
 		degradationMgr = reliability.NewDegradationManager(func(dep reliability.Dependency, from, to reliability.DepState) {
 			content := fmt.Sprintf("[governance:degraded] 依赖 %s 状态迁移 %s→%s", dep, from, to)
 			evt := memory.FullEvent{
@@ -352,9 +355,20 @@ func buildAgent(
 			}
 			_ = baseStore.StoreEvent(evt.EventKey, evt) // baseStore 非 ErrorTrackingStore，无递归
 			log.Infof("[tagent] degradation: %s", content)
+			// 步4：memory 恢复到 normal → 重放退化期间兜底落盘的事件（回灌，不丢）。
+			if dep == reliability.DepMemory && to == reliability.StateNormal && etsHolder != nil {
+				if n, rerr := etsHolder.ReplaySpilled(); rerr == nil && n > 0 {
+					log.Infof("[tagent] mem_spill replayed %d events after memory recovery", n)
+				}
+			}
 		})
-		memStore = memory.NewErrorTrackingStore(memStore, reliability.MemorySink{Mgr: degradationMgr})
-		log.Infof("[tagent] degradation tracking enabled for agent %q (ErrorTrackingStore C2 outermost + 5-dep state machine)", name)
+		ets := memory.NewErrorTrackingStore(memStore, reliability.MemorySink{Mgr: degradationMgr})
+		if cfg.Reliability.MemSpillDir != "" {
+			ets.SetMemSpill(filepath.Join(cfg.Reliability.MemSpillDir, name+".jsonl"))
+		}
+		etsHolder = ets
+		memStore = ets
+		log.Infof("[tagent] degradation tracking enabled for agent %q (ErrorTrackingStore C2 outermost + 5-dep state machine + mem_spill=%q)", name, cfg.Reliability.MemSpillDir)
 	}
 	// 构建失败回收（审查 Nit5）：隔离 store（无共享）时，若后续步骤失败则关闭已启动的
 	// 引擎（worker/重建 goroutine），防泄漏。共享 store 的引擎按 path 复用，不在此关闭。
