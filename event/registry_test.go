@@ -103,6 +103,7 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 		TypeActionCommand:          14,
 		TypeContextCompressSummary: -1,
 		TypeConsolidation:          -1, // T-D 追加：巩固产物 TTL 豁免（长期记忆）
+		TypeGovernance:             -1, // T-G 追加：治理记录 TTL 永久（可审计）
 	}
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)
