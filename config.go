@@ -130,6 +130,37 @@ type Config struct {
 	// LoadConfig; empty for programmatically constructed configs). It binds
 	// the MCP registry's mcp_servers hot-sync to the source file.
 	ConfigPath string `json:"-" yaml:"-"`
+
+	// Governance 配置有界自治与审计（T-G）。默认零值 = 关闭（Enabled=false → 全放行，
+	// 现状零行为变化）。开启后经 GovernanceGate 对工具调用做风险分级 + 预算 + goal + critical 批准。
+	Governance GovernanceConfig `json:"governance,omitempty" yaml:"governance,omitempty"`
+
+	// Evolution 配置热配置自进化（TC0/T-EVO）。默认零值 = 关闭（Enabled=false → 用静态
+	// 提示词文件，现状）。开启后提示词/参数/模型经不可变 Bundle + 风险分级发布道治理，回合边界生效。
+	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
+}
+
+// GovernanceConfig 是 T-G 治理子系统的配置（映射到 governance.GateConfig + 各管理器）。
+type GovernanceConfig struct {
+	Enabled     bool   `json:"enabled" yaml:"enabled"`
+	Enforcement string `json:"enforcement,omitempty" yaml:"enforcement,omitempty"` // warn(默认,记账放行)|strict(拒绝)
+	Dir         string `json:"dir,omitempty" yaml:"dir,omitempty"`                 // budget/approval 持久化目录(空=纯内存)
+
+	BudgetWindowMinutes int `json:"budget_window_minutes,omitempty" yaml:"budget_window_minutes,omitempty"` // 滑动窗口(默认60)
+	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`                 // 窗口内 high 上限(默认20)
+	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`             // 窗口内 medium 上限(默认200)
+
+	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"` // 须挂 goal 的 trigger source(默认 meditation,task)
+	RequireApproval bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`   // critical 是否需人工批准(默认 true)
+}
+
+// EvolutionConfig 是 TC0/T-EVO 热配置自进化的配置（映射到 evolution.BundleStore + ReleaseManager）。
+type EvolutionConfig struct {
+	Enabled          bool     `json:"enabled" yaml:"enabled"`
+	Dir              string   `json:"dir,omitempty" yaml:"dir,omitempty"`                               // bundle 存储目录(默认 data/evolution)
+	RequireApproval  bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`     // 慢道是否需人工批准门(默认 true)
+	ProtectedPrompts []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`   // 受保护提示词(改动强制慢道)
+	CanaryHoldSeconds int     `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
 }
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).
