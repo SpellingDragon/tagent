@@ -110,11 +110,6 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 			if err := cm.RunFlow(spanCtx, msg); err != nil {
 				lastErr = err
-				// T-G: model 依赖退化上报（RunFlow 传输级失败连续达阈值 → DepModel degraded，
-				// onChange 写 governance degraded 事件；model-API 错误经 outputCh 不在此路径）。
-				if ta.degradation != nil {
-					ta.degradation.ReportFailure(reliability.DepModel, err)
-				}
 				log.Errorf("[runEventLoop:%s] RunFlow failed (attempt %d/%d): %v", ta.name, attempt+1, maxRetries+1, err)
 				if attempt < maxRetries {
 					retried = true
@@ -123,6 +118,12 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				// Retries exhausted. Note: RunFlow only returns transport-level
 				// errors (model-API errors flow through outputCh as events), so
 				// there is no meaningful error event to publish — just log.
+				// T-G: model 依赖退化上报——每 turn 仅一次（重试耗尽才算真失败；M1：避免单 turn
+				// 多次重试放大计数使 FailThreshold 语义塌缩、瞬时抖动即 degraded）；ctx 取消
+				// （关机）不计退化（N2）。
+				if ta.degradation != nil && ctx.Err() == nil {
+					ta.degradation.ReportFailure(reliability.DepModel, lastErr)
+				}
 				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries: %v", ta.name, maxRetries, lastErr)
 			} else {
 				lastErr = nil

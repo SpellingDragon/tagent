@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"strings"
 )
 
@@ -43,20 +44,21 @@ func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) MemoryStore 
 	return &ErrorTrackingStore{inner: inner, sink: sink}
 }
 
-// classifyStoreErr 按 error 特征归因依赖（报告 D3 §5.2 降级矩阵）：fork/exec/二进制缺失→
-// rustviking（CLI fork 失败），ENOSPC/配额→disk，其余→memory。
+// classifyStoreErr 按 error 特征归因依赖（报告 D3 §5.2 降级矩阵）。disk 先判（S3：rustviking
+// CLI 错误消息常内嵌 "rustviking"，若真因是 ENOSPC 会误归 rustviking 掩盖磁盘满，两者降级
+// 动作不同）；rustviking 收窄到 fork/exec 与二进制缺失（CLI fork 失败确证），不用泛 "rustviking"
+// 匹配（避免任何提及该词的业务错误都命中）；其余归 memory。
 func classifyStoreErr(err error) string {
 	if err == nil {
 		return depMemory
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "fork/exec") || strings.Contains(msg, "rustviking") ||
-		strings.Contains(msg, "executable file not found") {
-		return depRustViking
-	}
 	if strings.Contains(msg, "no space left") || strings.Contains(msg, "enospc") ||
 		strings.Contains(msg, "disk quota") {
 		return depDisk
+	}
+	if strings.Contains(msg, "fork/exec") || strings.Contains(msg, "executable file not found") {
+		return depRustViking
 	}
 	return depMemory
 }
@@ -80,7 +82,7 @@ func (s *ErrorTrackingStore) StoreEvent(key int64, event FullEvent) error {
 	if err != nil {
 		s.report(classifyStoreErr(err), err)
 	} else {
-		s.report(depMemory, nil)
+		s.reportStoreHealthy()
 	}
 	return err
 }
@@ -90,9 +92,18 @@ func (s *ErrorTrackingStore) StoreEventWithEmbedding(key int64, event FullEvent,
 	if err != nil {
 		s.report(classifyStoreErr(err), err)
 	} else {
-		s.report(depMemory, nil)
+		s.reportStoreHealthy()
 	}
 	return err
+}
+
+// reportStoreHealthy 写成功时上报存储栈三依赖恢复（M2：写成功证明 memory + disk + rustviking
+// 写路径均健康）。否则 disk/rustviking 一旦 degraded 无恢复信号，卡到重启，违背「检测→降级→
+// 恢复」三段式。ReportSuccess 对 normal 态依赖仅重置失败计数（无副作用），故对未退化依赖上报无害。
+func (s *ErrorTrackingStore) reportStoreHealthy() {
+	s.report(depMemory, nil)
+	s.report(depDisk, nil)
+	s.report(depRustViking, nil)
 }
 
 func (s *ErrorTrackingStore) DeleteEvent(key int64) error {
@@ -107,8 +118,12 @@ func (s *ErrorTrackingStore) DeleteEvent(key int64) error {
 
 func (s *ErrorTrackingStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
 	refs, err := s.inner.SearchByEmbedding(query, topK)
-	if err != nil {
-		s.report(depRustViking, err)
+	// S1: ErrVectorSearchNotSupported 是能力声明（未配引擎），非依赖失败——不上报（否则未配
+	// 语义检索的部署一调用即 rustviking degraded）。S2: 真失败按 classifyStoreErr 归因（引擎
+	// 路径失败已退回 inner，能到此的 error 多来自 GetEvents → memory/disk；MVP 向量索引进程内
+	// InMemoryEngine 与 rustviking 无关，不无条件归 rustviking）。
+	if err != nil && !errors.Is(err, ErrVectorSearchNotSupported) {
+		s.report(classifyStoreErr(err), err)
 	}
 	return refs, err
 }

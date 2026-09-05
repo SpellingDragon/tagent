@@ -53,8 +53,10 @@ func TestErrorTrackingStore_ClassifyAndReport(t *testing.T) {
 					t.Fatalf("失败应归因 %s, got failures=%v", tc.wantDep, sink.failures)
 				}
 			} else {
-				if len(sink.successes) != 1 || sink.successes[0] != tc.wantDep {
-					t.Fatalf("成功应上报 %s 恢复, got successes=%v", tc.wantDep, sink.successes)
+				// M2: 写成功上报存储栈三依赖恢复（memory+disk+rustviking），否则 disk/rustviking
+				// 一旦 degraded 无恢复信号，卡到重启（违背三段式）。
+				if len(sink.successes) != 3 {
+					t.Fatalf("写成功应上报 memory+disk+rustviking 三依赖恢复(M2), got %v", sink.successes)
 				}
 			}
 		})
@@ -106,5 +108,34 @@ func TestErrorTrackingStore_ReadPathReportsOnlyOnError(t *testing.T) {
 	}
 	if len(sink.failures) != 0 || len(sink.successes) != 0 {
 		t.Fatalf("读成功不应上报, got failures=%v successes=%v", sink.failures, sink.successes)
+	}
+}
+
+// TestErrorTrackingStore_VectorStubNotReported 是 S1 回归：未配引擎时 SearchByEmbedding 恒返回
+// ErrVectorSearchNotSupported（能力声明），不应计为 rustviking 失败（否则未配语义检索的部署
+// 一调用即退化）。
+func TestErrorTrackingStore_VectorStubNotReported(t *testing.T) {
+	sink := &mockSink{}
+	ets := NewErrorTrackingStore(NewInMemoryStore(), sink)
+	_, _ = ets.SearchByEmbedding([]float32{0.1, 0.2}, 5)
+	if len(sink.failures) != 0 {
+		t.Fatalf("能力 stub 错误(ErrVectorSearchNotSupported)不应上报失败(S1), got %v", sink.failures)
+	}
+}
+
+// TestClassifyStoreErr_DiskBeforeRustviking 是 S3 回归：disk 特征先判 + rustviking 收窄到
+// fork/exec（不用泛 "rustviking" 匹配）。
+func TestClassifyStoreErr_DiskBeforeRustviking(t *testing.T) {
+	// ENOSPC 内嵌 rustviking 字样 → 仍归 disk（disk 先判，防掩盖磁盘满根因）。
+	if got := classifyStoreErr(errors.New("rustviking kv put: no space left on device")); got != depDisk {
+		t.Fatalf("ENOSPC(含rustviking字样)应归 disk(S3), got %s", got)
+	}
+	// 纯 fork/exec → rustviking（CLI fork 失败确证）。
+	if got := classifyStoreErr(errors.New("fork/exec /usr/bin/rustviking: permission denied")); got != depRustViking {
+		t.Fatalf("fork/exec 应归 rustviking, got %s", got)
+	}
+	// 泛 rustviking 业务错误(无 fork/exec)→ memory（S3 收窄，不误归依赖退化）。
+	if got := classifyStoreErr(errors.New("rustviking: index corrupted")); got != depMemory {
+		t.Fatalf("泛 rustviking 业务错误应归 memory(S3收窄), got %s", got)
 	}
 }
