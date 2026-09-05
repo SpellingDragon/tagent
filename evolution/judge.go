@@ -136,11 +136,17 @@ func parseJudgeVerdict(text string) judgeVerdict {
 	if jsonStr == "" {
 		return conservative
 	}
-	var v judgeVerdict
-	if err := json.Unmarshal([]byte(jsonStr), &v); err != nil {
-		conservative.Reason = "裁决 JSON 非法，保守通过: " + text
+	// score 用指针检测「字段缺失」——合法 JSON 但无 score（或大小写不符/null）时，零值 0 会被
+	// 误判为劣化触发回滚（Major：违背「仅明确判定劣化才回滚」的保守原则）。缺失 → 保守通过。
+	var raw struct {
+		Score  *float64 `json:"score"`
+		Reason string   `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil || raw.Score == nil {
+		conservative.Reason = "裁决缺 score 或 JSON 非法，保守通过: " + text
 		return conservative
 	}
+	v := judgeVerdict{Score: *raw.Score, Reason: raw.Reason}
 	// score 越界防御：夹到 [0,1]。
 	if v.Score < 0 {
 		v.Score = 0

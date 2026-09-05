@@ -76,15 +76,20 @@ func NewStoreEvidenceSource(store memory.MemoryStore, partitionID int, window ti
 
 // Collect 读窗口事件算证据。store 为 nil 或查询失败返回空证据 + err（调用方保守不判劣化）。
 func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evidence, error) {
-	ev := Evidence{BundleID: bundleID, WindowMs: s.window.Milliseconds()}
+	// nil 守卫先行（Suggestion：typed-nil 装入 EvidenceSource 接口时方法仍可调，解引用前必判）。
 	if s == nil || s.store == nil {
-		return ev, nil
+		return Evidence{BundleID: bundleID}, nil
 	}
+	ev := Evidence{BundleID: bundleID, WindowMs: s.window.Milliseconds()}
 	cutoff := time.Now().Add(-s.window).UnixMilli()
+	// 服务端窗口过滤（StartTime）+ timestamp_desc：常驻 agent 分区事件量 >> Limit，asc 会返回
+	// 最旧的 Limit 条（全部早于 cutoff 被客户端滤掉 → TurnCount=0 → 后验评估永久静默失效，Major）。
+	// desc 截断时牺牲最旧、保住观察窗。客户端 cutoff 判断保留作兜底（段剪枝用 nominal bound）。
 	refs, err := s.store.QueryEvents(memory.QueryOptions{
 		PartitionIDs: []int{s.partitionID},
+		StartTime:    cutoff,
 		Limit:        10000,
-		OrderBy:      "timestamp_asc",
+		OrderBy:      "timestamp_desc",
 	})
 	if err != nil {
 		return ev, err

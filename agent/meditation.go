@@ -78,6 +78,11 @@ type MeditationManager struct {
 	// nil = 纯内存（现状，重启失忆）。经 SetAnchorStore 注入。
 	anchorStore *reliability.AnchorStore
 
+	// anchorMu 序列化「锚点更新 + persistAnchors 快照」——三锚点分属不同 goroutine 更新
+	// （user input 注入 / turn end 事件循环 / meditation ticker），无锁则 persistAnchors 对三
+	// atomic 分别 Load 可能持久化「回退」的旧快照（Suggestion：并发交错覆盖）。
+	anchorMu sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -174,16 +179,20 @@ func (m *MeditationManager) Stop() {
 // novelty-gate anchor. Called from the injection points only (inject.go);
 // non-user sources (meditation/task/tmux) must never arm this gate.
 func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
+	m.anchorMu.Lock()
 	m.lastUserInput.Store(t.UnixMilli())
 	m.persistAnchors()
+	m.anchorMu.Unlock()
 }
 
 // UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
 // Called unconditionally by runEventLoop after every RunFlow, regardless of
 // trigger source or success (lineage-agnostic by design).
 func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
+	m.anchorMu.Lock()
 	m.lastTurnEnd.Store(t.UnixMilli())
 	m.persistAnchors()
+	m.anchorMu.Unlock()
 }
 
 // checkAndMeditate evaluates whether a meditation should fire.
@@ -229,8 +238,10 @@ func (m *MeditationManager) checkAndMeditate() {
 	// Conditions met — inject meditation message.
 	msg := m.buildMeditationMessage(now, idle)
 	m.injector.InjectMessageWithSource("meditation", msg)
+	m.anchorMu.Lock()
 	m.lastMeditation.Store(now.UnixMilli())
 	m.persistAnchors()
+	m.anchorMu.Unlock()
 
 	log.Infof("[Meditation] triggered: idle=%s since last turn end", idle)
 }

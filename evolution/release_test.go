@@ -218,3 +218,23 @@ func TestRelease_FastLane_EvaluatorErrorRollsBack(t *testing.T) {
 		t.Fatal("评估失败回滚后 active 应恢复基线")
 	}
 }
+
+// TestRelease_FastLane_CanaryCtxCancelStaysCanary 是 Major 回归：canary 观察窗内 ctx 取消
+// → 诚实停留 canary（不回滚也不提升为「后验通过 active」），杜绝未评估变更被假通过。
+func TestRelease_FastLane_CanaryCtxCancelStaysCanary(t *testing.T) {
+	store := newTestStore(t)
+	_, _ = store.InitBaseline(map[string]string{"system": "v0"}, BundleParams{}, ModelRef{})
+	draft, _ := store.Create(nil, map[string]string{"system": "v1"}, BundleParams{}, ModelRef{}, "refine", "")
+	rm, _ := NewReleaseManager(ReleaseDeps{
+		Store: store, Router: fixedRouter{LaneFast},
+		Evaluator:    fixedEvaluator{pass: true}, // 即便会判通过，ctx 取消也不应走到评估
+		ValidateGate: gate(true, ""),
+		Config:       ReleaseConfig{CanaryHoldMs: 5000},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消 → canary hold 的 select 命中 ctx.Done
+	rec, _ := rm.Submit(ctx, draft)
+	if rec.Stage != StageCanary {
+		t.Fatalf("ctx 取消应诚实停留 canary（非 active 假通过、非回滚）, got stage=%s", rec.Stage)
+	}
+}

@@ -256,6 +256,14 @@ func NewReliableEventBus(spillDir string) *EventBus {
 // if the AgentLoop goroutine has exited unexpectedly.
 const publishTimeout = 5 * time.Second
 
+// maxSpillPerPull 是单次 Pull/TryPull 从磁盘回收的溢出项上限（= channel 容量）。防一次回收
+// 数万积压项拼成巨型 LLM 消息（Major：内存/token 双爆）；剩余留盘下次回收，语义无损。
+const maxSpillPerPull = 256
+
+// maxSpillBacklog 是磁盘溢出积压上限（10× channel 容量）。超限则 Publish 回退阻塞背压 +
+// 超时丢弃并告警——把「无界磁盘增长」变成「有界且有告警的降级」（Major）。
+const maxSpillBacklog = 2560
+
 // Publish enqueues an event. If the channel is full, waits up to
 // publishTimeout before dropping the event with a warning.
 // Logs a warning on nil events.
@@ -274,12 +282,33 @@ func (b *EventBus) Publish(event *AgentEvent) {
 		}
 		return
 	}
-	// 可靠模式：先非阻塞 try channel，满则溢出落盘（不丢，at-least-once）。
-	select {
-	case b.ch <- event:
-		return
-	default:
+	// 可靠模式全序不变量：channel 内事件恒早于磁盘溢出事件。故一旦磁盘有积压（pending>0），
+	// 后续 Publish 一律溢出（不再试 channel）——否则新事件会插到磁盘旧事件之前造成时序倒置
+	// （Blocker：误标 trigger source、extractRootMetadata 路由被旧事件覆盖回复到错误会话、
+	// projection 顺序错乱）。溢出仅发生在 channel 满(256)时，此刻 channel 内 256 个事件
+	// 全部早于溢出项，故「channel 先、spill 后」的回收顺序即全序。
+	pending := b.spill.Pending()
+	if pending == 0 {
+		// 磁盘无积压：先试 channel（快路径，绝大多数情况）。
+		select {
+		case b.ch <- event:
+			return
+		default:
+		}
 	}
+	// 背压上限：磁盘积压超限则回退阻塞入 channel + 超时丢弃并告警（防磁盘无界增长）。
+	if pending >= maxSpillBacklog {
+		log.Errorf("[ReliableBus] spill backlog %d >= %d, blocking publish (backpressure)", pending, maxSpillBacklog)
+		select {
+		case b.ch <- event:
+			return
+		case <-time.After(publishTimeout):
+			log.Errorf("[ReliableBus] Publish timeout (channel full + spill backlog exceeded), event DROPPED: type=%s source=%s",
+				event.Type, event.Source)
+			return
+		}
+	}
+	// 溢出落盘（不丢，at-least-once）。
 	data, err := json.Marshal(event)
 	if err == nil {
 		err = b.spill.Spill(data)
@@ -304,17 +333,19 @@ func (b *EventBus) Publish(event *AgentEvent) {
 // Returns the batch and nil error on success.
 // Returns nil and ctx.Err() when ctx is cancelled before any event arrives.
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
-	// 优先回收磁盘溢出项（时序更早：溢出发生在 channel 满时，早于此后入 channel 的新事件）。
-	if spilled := b.drainSpill(); len(spilled) > 0 {
-		return append(spilled, b.drainChannel()...), nil
+	// 全序回收：channel 内事件恒早于磁盘溢出（Publish 保证 pending>0 时一律溢出）→ 先 channel
+	// 后 spill。批量上限防单次回收数万积压项拼成巨型 LLM 消息（Major）。
+	batch := b.drainChannel()
+	batch = append(batch, b.drainSpill(maxSpillPerPull)...)
+	if len(batch) > 0 {
+		return batch, nil
 	}
-	// 无溢出：阻塞等 channel 首个事件（现状逻辑）。
+	// 皆空：阻塞等 channel 首个事件。
 	select {
 	case evt := <-b.ch:
 		batch := []*AgentEvent{evt}
 		batch = append(batch, b.drainChannel()...)
-		// channel 消费腾出空间后，回收可能存在的溢出项（防滞留）。
-		batch = append(batch, b.drainSpill()...)
+		batch = append(batch, b.drainSpill(maxSpillPerPull)...)
 		return batch, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -336,21 +367,25 @@ func (b *EventBus) drainChannel() []*AgentEvent {
 	}
 }
 
-// drainSpill 回收全部磁盘溢出项（反序列化为 AgentEvent）。坏项跳过（Reclaim 已删）；回收
-// 出错则停止本轮 drain（下次 Pull 再试，防死循环）。spill 为 nil 返回空（现状逐字节不变）。
-func (b *EventBus) drainSpill() []*AgentEvent {
-	if b.spill == nil {
+// drainSpill 从磁盘回收至多 max 个溢出项（反序列化为 AgentEvent）。pending 短路（Nit：无积压
+// 不付 ReadDir syscall，TryPull 热路径每迭代都调）。瞬时读错误（ok=false,err）→ 停止本轮
+// （文件保留下次重试，防死循环）；坏 JSON（ok=true,unmarshal fail）→ 跳过继续（不饿死后续
+// 有效项）；删失败（ok=true,err）→ 数据有效照收（可能重复投递，at-least-once 允许）。
+func (b *EventBus) drainSpill(max int) []*AgentEvent {
+	if b.spill == nil || b.spill.Pending() == 0 {
 		return nil
 	}
 	var batch []*AgentEvent
-	for {
+	for len(batch) < max {
 		data, ok, err := b.spill.Reclaim()
-		if err != nil {
-			log.Warnf("[ReliableBus] reclaim error, stopping drain: %v", err)
+		if !ok {
+			if err != nil {
+				log.Warnf("[ReliableBus] reclaim stopped this drain (will retry next pull): %v", err)
+			}
 			return batch
 		}
-		if !ok {
-			return batch
+		if err != nil {
+			log.Warnf("[ReliableBus] reclaim remove failed (may redeliver): %v", err)
 		}
 		var evt AgentEvent
 		if uerr := json.Unmarshal(data, &evt); uerr != nil {
@@ -359,15 +394,16 @@ func (b *EventBus) drainSpill() []*AgentEvent {
 		}
 		batch = append(batch, &evt)
 	}
+	return batch
 }
 
 // TryPull non-blocking reads all pending events without waiting.
 // Returns an empty (non-nil) slice if no events are pending.
 // Unlike Pull, this does not block — it immediately returns if the channel is empty.
 func (b *EventBus) TryPull() []*AgentEvent {
-	// 先回收溢出项，再排空 channel（与 Pull 一致的回收优先级）。
-	batch := b.drainSpill()
-	batch = append(batch, b.drainChannel()...)
+	// 全序：channel 先，spill 后（与 Pull 一致；pending 短路使无积压时零 ReadDir 开销）。
+	batch := b.drainChannel()
+	batch = append(batch, b.drainSpill(maxSpillPerPull)...)
 	if batch == nil {
 		batch = []*AgentEvent{}
 	}

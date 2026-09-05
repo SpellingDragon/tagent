@@ -164,6 +164,10 @@ func (rm *ReleaseManager) runFastLane(ctx context.Context, draft, active *Bundle
 	if rm.cfg.CanaryHoldMs > 0 {
 		select {
 		case <-ctx.Done():
+			// canary 观察被取消：诚实停留 canary（不回滚也不提升 active），下次 Submit/重启后
+			// 重评——绝不把未评估的变更记为「后验通过」（Major：ctx 取消经 judge 保守 Pass:true
+			// 会落到假通过路径，与「evaluator error 不许当通过」的意图矛盾）。
+			return rm.record(draft, lane, StageCanary, "canary 观察被取消，保持 canary 待重评: "+ctx.Err().Error(), 0), nil
 		case <-time.After(time.Duration(rm.cfg.CanaryHoldMs) * time.Millisecond):
 		}
 	}

@@ -25,11 +25,17 @@ import (
 
 const spillExt = ".spill"
 
+// maxHeadFails 是队头连续读失败上限：达此数才丢弃队头（防瞬时 I/O 错误静默销毁完好事件，
+// 同时防坏项永久卡死队头）。
+const maxHeadFails = 8
+
 // SpillStore 是溢出项的磁盘存储（并发安全）。
 type SpillStore struct {
-	dir string
-	mu  sync.Mutex   // 序列化 Reclaim 的读-删（防并发回收同一项）
-	seq atomic.Int64 // 单调递增溢出序号
+	dir       string
+	mu        sync.Mutex   // 序列化 Reclaim 的读-删（防并发回收同一项）+ 保护 headFails
+	seq       atomic.Int64 // 单调递增溢出序号
+	pending   atomic.Int64 // 当前未回收溢出项数（EventBus 全序判定 + 背压上限用）
+	headFails int          // 队头连续读失败计数（mu 保护）
 }
 
 // NewSpillStore 构建溢出存储。dir 为空返回 error（溢出必须持久化才有意义）。
@@ -53,16 +59,19 @@ func (s *SpillStore) recoverSeq() {
 		return
 	}
 	var max int64
+	var count int64
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), spillExt) {
 			continue
 		}
+		count++
 		n, err := strconv.ParseInt(strings.TrimSuffix(e.Name(), spillExt), 10, 64)
 		if err == nil && n > max {
 			max = n
 		}
 	}
 	s.seq.Store(max)
+	s.pending.Store(count) // 重启恢复未回收计数（全序判定依赖）
 }
 
 // Spill 溢出一项（序列化字节）到磁盘。原子写（tmp + rename）。磁盘满等错误返回给调用方
@@ -81,7 +90,16 @@ func (s *SpillStore) Spill(data []byte) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("reliability: spill rename: %w", err)
 	}
+	s.pending.Add(1)
 	return nil
+}
+
+// Pending 返回当前未回收溢出项数（EventBus 全序判定 + 背压上限）。
+func (s *SpillStore) Pending() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.pending.Load()
 }
 
 // Reclaim 取回最早溢出的一项（字典序最小 = 时序最早），消费即删。
@@ -109,13 +127,28 @@ func (s *SpillStore) Reclaim() ([]byte, bool, error) {
 	path := filepath.Join(s.dir, names[0])
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// 读失败：删除坏项（防卡死队头），报告错误让调用方跳过。
+		if os.IsNotExist(err) {
+			return nil, false, nil // 已被并发消费，非错误
+		}
+		// 瞬时 I/O 错误（EMFILE/EIO/EAGAIN 等）：数据可能完好，保留文件重试而非立即删
+		// （at-least-once：绝不因瞬时错误静默销毁完好事件）。连续失败超限才丢弃防队头卡死。
+		s.headFails++
+		if s.headFails < maxHeadFails {
+			return nil, false, fmt.Errorf("reliability: reclaim read %s (transient, attempt %d/%d): %w",
+				names[0], s.headFails, maxHeadFails, err)
+		}
 		_ = os.Remove(path)
-		return nil, false, fmt.Errorf("reliability: reclaim read %s: %w", names[0], err)
+		s.pending.Add(-1)
+		s.headFails = 0
+		return nil, false, fmt.Errorf("reliability: drop unreadable spill %s after %d attempts: %w",
+			names[0], maxHeadFails, err)
 	}
 	if err := os.Remove(path); err != nil {
+		// 读成功但删失败：返回数据（可能被重复投递，at-least-once 允许），pending 不减。
 		return data, true, fmt.Errorf("reliability: reclaim remove %s: %w", names[0], err)
 	}
+	s.pending.Add(-1)
+	s.headFails = 0
 	return data, true, nil
 }
 

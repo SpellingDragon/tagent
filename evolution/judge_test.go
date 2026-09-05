@@ -104,3 +104,19 @@ func TestExtractJSON(t *testing.T) {
 		t.Fatalf("无 JSON 应返回空, got %q", got)
 	}
 }
+
+// TestParseJudgeVerdict_MissingScoreConservative 是 Major 回归：合法 JSON 但缺 score（或
+// null/大小写不符）→ 保守 score=1.0 通过，绝不因零值 0 误判劣化触发回滚。
+func TestParseJudgeVerdict_MissingScoreConservative(t *testing.T) {
+	if v := parseJudgeVerdict(`{"reason":"证据不足"}`); v.Score != 1.0 {
+		t.Fatalf("缺 score 应保守 1.0（不误回滚）, got %f", v.Score)
+	}
+	if v := parseJudgeVerdict(`{"score":null,"reason":"x"}`); v.Score != 1.0 {
+		t.Fatalf("score=null 应保守 1.0, got %f", v.Score)
+	}
+	// Go encoding/json 默认大小写不敏感：{"Score":0.9} 匹配 json:"score" → 正常解析 0.9
+	// （非缺失，不触发保守分支）——记录实际行为，大小写变体的 score 仍被采纳。
+	if v := parseJudgeVerdict(`{"Score":0.9}`); v.Score != 0.9 {
+		t.Fatalf("Go json 大小写不敏感，Score 应解析为 0.9, got %f", v.Score)
+	}
+}
