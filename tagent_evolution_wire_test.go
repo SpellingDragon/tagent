@@ -102,3 +102,31 @@ func TestNew_GovernanceDisabled_Default(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, a)
 }
+
+// TestNew_ReliableBusSpillDir 验证 ReliableBus 接线：配置 BusSpillDir 后 New 成功，且 entry
+// agent 的 per-agent 溢出子目录 <BusSpillDir>/<entry> 被创建（NewReliableEventBus→NewSpillStore）。
+func TestNew_ReliableBusSpillDir(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+	spillRoot := filepath.Join(t.TempDir(), "bus-spill")
+	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
+	cfg.Reliability.BusSpillDir = spillRoot
+
+	a, err := New(cfg, WithModel(fakeModel{}))
+	require.NoError(t, err)
+	require.NotNil(t, a)
+
+	// per-agent 溢出子目录应被创建（<spillRoot>/tagent）。
+	_, statErr := os.Stat(filepath.Join(spillRoot, cfg.Entry))
+	require.NoError(t, statErr, "per-agent 溢出子目录 <BusSpillDir>/<entry> 应被创建")
+}
+
+// TestNew_ReliableBusDisabledDefault 验证配置门控：默认 BusSpillDir 空 → 不创建溢出目录（现状）。
+func TestNew_ReliableBusDisabledDefault(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
+	require.Empty(t, cfg.Reliability.BusSpillDir)
+
+	a, err := New(cfg, WithModel(fakeModel{}))
+	require.NoError(t, err)
+	require.NotNil(t, a)
+}

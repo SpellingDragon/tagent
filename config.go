@@ -138,6 +138,9 @@ type Config struct {
 	// Evolution 配置热配置自进化（TC0/T-EVO）。默认零值 = 关闭（Enabled=false → 用静态
 	// 提示词文件，现状）。开启后提示词/参数/模型经不可变 Bundle + 风险分级发布道治理，回合边界生效。
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
+
+	// Reliability 配置常驻可靠性（T-G）。默认零值 = 关闭（纯 channel bus，现状）。
+	Reliability ReliabilityConfig `json:"reliability,omitempty" yaml:"reliability,omitempty"`
 }
 
 // GovernanceConfig 是 T-G 治理子系统的配置（映射到 governance.GateConfig + 各管理器）。
@@ -160,7 +163,15 @@ type EvolutionConfig struct {
 	Dir               string   `json:"dir,omitempty" yaml:"dir,omitempty"`                                 // bundle 存储目录(默认 data/evolution)
 	RequireApproval   bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`       // 慢道是否需人工批准门(默认 true)
 	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
-	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
+	CanaryHoldSeconds int     `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
+}
+
+// ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。
+type ReliabilityConfig struct {
+	// BusSpillDir 是事件总线磁盘溢出根目录（非空启用 ReliableBus：channel 满则事件溢出落盘
+	// 而非丢弃，at-least-once，常驻不丢事件，重启可回收）。空 = 纯 channel（现状）。
+	// 每 agent 用其下子目录（<BusSpillDir>/<agentName>）隔离。建议置于 workspace 下。
+	BusSpillDir string `json:"bus_spill_dir,omitempty" yaml:"bus_spill_dir,omitempty"`
 }
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).

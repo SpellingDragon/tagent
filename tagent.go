@@ -505,6 +505,11 @@ func buildAgent(
 		},
 		WorkspaceRoot: acfg.WorkspaceRoot,
 	}
+	// T-G ReliableBus：per-agent 溢出子目录（<BusSpillDir>/<agentName> 隔离，防多 agent 事件串）。
+	// 全局 BusSpillDir 空则保持空（NewReliableEventBus 回退纯 channel bus，现状零变化）。
+	if cfg.Reliability.BusSpillDir != "" {
+		agentCfg.BusSpillDir = filepath.Join(cfg.Reliability.BusSpillDir, name)
+	}
 	// task_terminal_ttl: duration string → time.Duration; empty/invalid falls
 	// back to the task package default (2m) via zero value.
 	if acfg.TaskTerminalTTL != "" {

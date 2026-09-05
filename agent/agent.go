@@ -185,6 +185,10 @@ type TagentConfig struct {
 	WorkspaceCleanupInterval time.Duration // default: 1h
 	WorkspaceCleanupMaxAge   time.Duration // default: 24h
 	WorkspaceCleanupMaxFiles int           // default: 200
+
+	// BusSpillDir 是事件总线磁盘溢出目录（T-G ReliableBus）。非空时 channel 满则事件溢出
+	// 落盘而非丢弃（at-least-once，常驻不丢事件），重启后未消费项可回收；空 = 纯 channel（现状）。
+	BusSpillDir string
 }
 
 // Default configuration values
@@ -302,7 +306,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 5. Create outputCh + EventBus + projection EARLY so the
 	// AppendEventHook (created next) can capture them.
 	outputCh := make(chan *event.Event, 100)
-	bus := NewEventBus()
+	// T-G ReliableBus：BusSpillDir 非空则启用磁盘溢出（channel 满不丢事件，at-least-once）；
+	// 空 dir → NewReliableEventBus 回退纯 channel bus（现状逐字节不变）。
+	bus := NewReliableEventBus(cfg.BusSpillDir)
 	projection := compress.NewSessionProjection()
 
 	// Task layer: tools spawn long-running work via the injected task.TaskSpawner;
