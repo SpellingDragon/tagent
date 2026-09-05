@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -40,6 +41,20 @@ type TrajectoryRecord struct {
 type LLMCallRecord struct {
 	Request  LLMRequestRecord  `json:"request"`
 	Response LLMResponseRecord `json:"response"`
+	// T-B 统一可观测数据模型：关联 turn span 的 trace_id/span_id（omitempty → noop/未
+	// 启用 OTLP 时省略，旧 RL 消费者向后兼容）。使 trajectory（RL 训练投影）与 OTel span
+	// 树（运维投影）由同一锚点双向互链（指令2「一套数据模式、多场景投影、保一致性」）。
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
+}
+
+// traceIDsFromCtx 从 ctx 提取当前 span 的 trace_id/span_id（hex）；noop/无 span 返回空。
+func traceIDsFromCtx(ctx context.Context) (traceID, spanID string) {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return "", ""
+	}
+	return sc.TraceID().String(), sc.SpanID().String()
 }
 
 // LLMRequestRecord 记录 LLM 请求。
@@ -208,6 +223,7 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 	tr.mu.Unlock()
 
 	modelName := inner.Info().Name
+	traceID, spanID := traceIDsFromCtx(ctx) // T-B: 关联 turn span（noop/未启用 OTLP 时空）
 
 	respCh, err := inner.GenerateContent(ctx, request)
 	if err != nil {
@@ -223,6 +239,8 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 					GenerationConfig: request.GenerationConfig,
 				},
 				Response: LLMResponseRecord{Error: err.Error()},
+				TraceID:  traceID,
+				SpanID:   spanID,
 			},
 			Metadata: TrajectoryMetadata{
 				DurationMs:    time.Since(start).Milliseconds(),
@@ -256,6 +274,8 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 					Model:            modelName,
 					GenerationConfig: request.GenerationConfig,
 				},
+				TraceID: traceID,
+				SpanID:  spanID,
 			},
 			Metadata: TrajectoryMetadata{
 				DurationMs:    time.Since(start).Milliseconds(),
