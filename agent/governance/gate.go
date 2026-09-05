@@ -1,5 +1,7 @@
 package governance
 
+import "github.com/SpellingDragon/tagent/memory"
+
 // ==================== GovernanceGate（T-G · 治理决策管线）====================
 //
 // 把 RiskClassifier(C5) + BudgetManager + GoalRegistry + ApprovalManager + DenialLedger
@@ -19,9 +21,9 @@ const (
 
 // GateConfig 配置治理门。
 type GateConfig struct {
-	Enabled         bool          // 总开关（默认 false = 全放行，现状）
-	Enforcement     Enforcement   // warn/strict（默认 warn）
-	GoalRequiredFor []string      // 须挂 goal 的 trigger source（默认 meditation/task）
+	Enabled         bool        // 总开关（默认 false = 全放行，现状）
+	Enforcement     Enforcement // warn/strict（默认 warn）
+	GoalRequiredFor []string    // 须挂 goal 的 trigger source（默认 meditation/task）
 }
 
 func (c GateConfig) withDefaults() GateConfig {
@@ -165,4 +167,23 @@ func (g *GovernanceGate) record(subtype string, ctx RiskContext, level RiskLevel
 		Subtype: subtype, ToolName: ctx.ToolName, Level: level,
 		RuleID: ruleID, Reason: reason, ArgsDigest: digest, GoalID: goalID,
 	})
+}
+
+// BindLedger 把治理账本绑定到持久 MemoryStore——治理记录写 governance 事件（可 recall 审计、
+// 跨重启重建）。运行时接线用：New 构造 gate 时 entry agent 的 memStore 尚未就绪（per-agent
+// 在 buildAgent 构造），故延迟到 memStore 就绪后绑定。仅启动期调用一次（buildAgent 单
+// goroutine，先于事件循环 go statement，happens-before 保证对运行期 record 可见）。
+func (g *GovernanceGate) BindLedger(store memory.MemoryStore, partitionID int) {
+	if g == nil || store == nil {
+		return
+	}
+	g.ledger = NewDenialLedger(store, partitionID)
+}
+
+// Ledger 暴露治理账本（诊断/审计查询入口）。
+func (g *GovernanceGate) Ledger() *DenialLedger {
+	if g == nil {
+		return nil
+	}
+	return g.ledger
 }

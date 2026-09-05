@@ -44,7 +44,9 @@ var ErrBudgetExhausted = budgetExhaustedError{}
 
 type budgetExhaustedError struct{}
 
-func (budgetExhaustedError) Error() string { return "governance: operation budget exhausted for this window" }
+func (budgetExhaustedError) Error() string {
+	return "governance: operation budget exhausted for this window"
+}
 
 // BudgetManager 是滑动窗口预算闸（并发安全，持久化 epoch 防重启刷预算）。
 type BudgetManager struct {
@@ -181,7 +183,7 @@ func (b *BudgetManager) currentBucket() int {
 }
 
 type budgetSnapshot struct {
-	Epoch   int64             `json:"epoch"`
+	Epoch   int64              `json:"epoch"`
 	Buckets map[string][]int64 `json:"buckets"`
 }
 

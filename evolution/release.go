@@ -34,10 +34,10 @@ const (
 type ReleaseStage string
 
 const (
-	StageDraft     ReleaseStage = "draft"
-	StageRejected  ReleaseStage = "rejected"
-	StageCanary    ReleaseStage = "canary"
-	StageActive    ReleaseStage = "active"
+	StageDraft      ReleaseStage = "draft"
+	StageRejected   ReleaseStage = "rejected"
+	StageCanary     ReleaseStage = "canary"
+	StageActive     ReleaseStage = "active"
 	StageRolledBack ReleaseStage = "rolled_back"
 )
 
@@ -70,20 +70,20 @@ type RiskRouter interface {
 
 // ReleaseConfig 配置发布状态机。
 type ReleaseConfig struct {
-	RequireApproval bool       // slow 道是否需人工批准门（默认 true，报告 D1）
-	CanaryHoldMs    int64      // canary 激活后到后验评估的观察窗（默认 0 = 立即评估）
-	ProtectedPrompts []string  // 受保护提示词（改动强制走 slow 道）
+	RequireApproval  bool     // slow 道是否需人工批准门（默认 true，报告 D1）
+	CanaryHoldMs     int64    // canary 激活后到后验评估的观察窗（默认 0 = 立即评估）
+	ProtectedPrompts []string // 受保护提示词（改动强制走 slow 道）
 }
 
 // ReleaseRecord 是一次发布的留痕（审计）。
 type ReleaseRecord struct {
-	BundleID   string       `json:"bundle_id"`
-	ParentID   string       `json:"parent_id"`
-	Lane       Lane         `json:"lane"`
-	Stage      ReleaseStage `json:"stage"`
-	Reason     string       `json:"reason"`
-	EvalScore  float64      `json:"eval_score,omitempty"`
-	Timestamp  int64        `json:"ts"`
+	BundleID  string       `json:"bundle_id"`
+	ParentID  string       `json:"parent_id"`
+	Lane      Lane         `json:"lane"`
+	Stage     ReleaseStage `json:"stage"`
+	Reason    string       `json:"reason"`
+	EvalScore float64      `json:"eval_score,omitempty"`
+	Timestamp int64        `json:"ts"`
 }
 
 // ReleaseManager 是风险分级发布状态机。并发安全。
@@ -99,8 +99,8 @@ type ReleaseManager struct {
 	approveGate  GateFunc
 	cfg          ReleaseConfig
 
-	submitMu sync.Mutex    // 序列化 Submit：activate+evaluate+rollback 临界区原子（防并发 Submit 竞争 SetActive）
-	mu       sync.Mutex    // 保护 history
+	submitMu sync.Mutex // 序列化 Submit：activate+evaluate+rollback 临界区原子（防并发 Submit 竞争 SetActive）
+	mu       sync.Mutex // 保护 history
 	history  []ReleaseRecord
 }
 

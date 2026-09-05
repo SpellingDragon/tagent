@@ -70,9 +70,9 @@ type RiskContext struct {
 
 // Rule 是一条数据驱动的风险规则（纯函数匹配）。
 type Rule struct {
-	ID     string                  // 规则标识（记账/审计引用）
-	Level  RiskLevel               // 命中时的风险级别
-	Reason string                  // 人类可读理由
+	ID     string                     // 规则标识（记账/审计引用）
+	Level  RiskLevel                  // 命中时的风险级别
+	Reason string                     // 人类可读理由
 	Match  func(ctx RiskContext) bool // 匹配谓词（纯函数，无 IO 无随机）
 }
 

@@ -12,16 +12,16 @@ package memory
 // DiagnosticsSnapshot 是记忆健康度的维度快照（JSON 可序列化，供工具/可观测消费）。
 type DiagnosticsSnapshot struct {
 	// 向量索引维度
-	VectorIndexed    int64 `json:"vector_indexed"`     // 成功索引的向量数
-	VectorCount      int64 `json:"vector_count"`       // 当前索引中的向量数
-	VectorDropped    int64 `json:"vector_dropped"`     // 队列满/API 失败丢弃数
-	VectorEmbedErr   int64 `json:"vector_embed_err"`   // 嵌入错误数
+	VectorIndexed     int64 `json:"vector_indexed"`      // 成功索引的向量数
+	VectorCount       int64 `json:"vector_count"`        // 当前索引中的向量数
+	VectorDropped     int64 `json:"vector_dropped"`      // 队列满/API 失败丢弃数
+	VectorEmbedErr    int64 `json:"vector_embed_err"`    // 嵌入错误数
 	VectorDimMismatch int64 `json:"vector_dim_mismatch"` // 维度不匹配跳过数（换模型信号）
 
 	// 检索能力维度
-	CapKeyword bool `json:"cap_keyword"`
-	CapVector  bool `json:"cap_vector"`
-	CapHybrid  bool `json:"cap_hybrid"`
+	CapKeyword  bool `json:"cap_keyword"`
+	CapVector   bool `json:"cap_vector"`
+	CapHybrid   bool `json:"cap_hybrid"`
 	EngineReady bool `json:"engine_ready"`
 
 	// 存储规模维度

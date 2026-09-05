@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent/governance"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -76,6 +77,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			BatchSize:     len(events),
 			EventSources:  eventSources(events),
 		})
+		// T-G: 盖章 trigger source 到 turn ctx，供 GovernanceTool 做 goal-required 判定
+		// （meditation/task 触发的 high+ 操作须挂 goal；user 触发不需）。spanCtx 经 RunFlow
+		// 派生流到工具调用，GovernanceTool.Call 从 ctx 读回。治理关闭时该值不被消费（零开销）。
+		spanCtx = governance.WithTriggerSource(spanCtx, extractTriggerSource(events))
 
 		// RunFlow with exponential backoff retry
 		var lastErr error

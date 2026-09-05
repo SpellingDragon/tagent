@@ -452,6 +452,9 @@ func buildAgent(
 	// exec/file/mcp 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹 tools[]
 	// 不影响其 RegisterCloser；agent.go 随后包 OutputLimitTool，链式委托 GovernanceTool.Call。
 	if rc.govGate != nil && rc.govGate.Enabled() && name == cfg.Entry {
+		// 治理账本绑定 entry agent 的持久 memStore：治理记录写 governance 事件（可 recall
+		// 审计、跨重启重建）。分区 = agent 自身写分区（PartitionIDFromName）。
+		rc.govGate.BindLedger(memStore, memory.PartitionIDFromName(name))
 		for i, t := range tools {
 			if _, isWrapper := t.(*agent.AgentToolWrapper); isWrapper {
 				continue

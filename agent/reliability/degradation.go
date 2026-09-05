@@ -24,8 +24,8 @@ const (
 type DepState string
 
 const (
-	StateNormal    DepState = "normal"
-	StateDegraded  DepState = "degraded"
+	StateNormal     DepState = "normal"
+	StateDegraded   DepState = "degraded"
 	StateRecovering DepState = "recovering"
 )
 

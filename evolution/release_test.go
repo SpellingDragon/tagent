@@ -51,7 +51,7 @@ func TestRelease_FastLane_PosteriorPass(t *testing.T) {
 
 	rm, _ := NewReleaseManager(ReleaseDeps{
 		Store: store, Router: fixedRouter{LaneFast},
-		Evaluator: fixedEvaluator{pass: true, score: 0.9},
+		Evaluator:    fixedEvaluator{pass: true, score: 0.9},
 		ValidateGate: gate(true, ""),
 	})
 	rec, err := rm.Submit(context.Background(), draft)
@@ -74,7 +74,7 @@ func TestRelease_FastLane_PosteriorFailRollback(t *testing.T) {
 
 	rm, _ := NewReleaseManager(ReleaseDeps{
 		Store: store, Router: fixedRouter{LaneFast},
-		Evaluator: fixedEvaluator{pass: false, score: 0.2, reason: "质量下降"},
+		Evaluator:    fixedEvaluator{pass: false, score: 0.2, reason: "质量下降"},
 		ValidateGate: gate(true, ""),
 	})
 	rec, _ := rm.Submit(context.Background(), draft)
@@ -94,8 +94,8 @@ func TestRelease_FastLane_GuardrailBreachRollback(t *testing.T) {
 
 	rm, _ := NewReleaseManager(ReleaseDeps{
 		Store: store, Router: fixedRouter{LaneFast},
-		Guardrail: fixedGuardrail{breach: true, reason: "错误率飙升"},
-		Evaluator: fixedEvaluator{pass: true}, // 即便评估通过，guardrail 先违约
+		Guardrail:    fixedGuardrail{breach: true, reason: "错误率飙升"},
+		Evaluator:    fixedEvaluator{pass: true}, // 即便评估通过，guardrail 先违约
 		ValidateGate: gate(true, ""),
 	})
 	rec, _ := rm.Submit(context.Background(), draft)
@@ -153,7 +153,7 @@ func TestRelease_ProtectedPromptForcesSlowLane(t *testing.T) {
 		Store: store, Router: fixedRouter{LaneFast}, // router 说快道
 		ValidateGate: gate(true, ""), ReplayGate: gate(true, ""), ShadowGate: gate(true, ""),
 		ApproveGate: gate(true, ""),
-		Config: ReleaseConfig{ProtectedPrompts: []string{"soul"}, RequireApproval: true},
+		Config:      ReleaseConfig{ProtectedPrompts: []string{"soul"}, RequireApproval: true},
 	})
 	rec, _ := rm.Submit(context.Background(), draft)
 	if rec.Lane != LaneSlow {

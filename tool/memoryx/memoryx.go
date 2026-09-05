@@ -23,11 +23,11 @@ type consolidateArgs struct {
 
 // consolidateResult 是巩固结果（含服务端指纹与回放验证裁决）。
 type consolidateResult struct {
-	Key         string `json:"key"`                   // 巩固事件 EventKey hex
-	Fingerprint string `json:"fingerprint"`           // 服务端 SHA1 指纹（LLM 不可伪造）
-	Resolved    int    `json:"resolved"`              // 收据取回的源事件数
-	Tombstoned  int    `json:"tombstoned"`            // 已遗忘的源事件数（诚实衰减）
-	Verified    bool   `json:"verified"`              // 回放验证指纹是否匹配
+	Key         string `json:"key"`         // 巩固事件 EventKey hex
+	Fingerprint string `json:"fingerprint"` // 服务端 SHA1 指纹（LLM 不可伪造）
+	Resolved    int    `json:"resolved"`    // 收据取回的源事件数
+	Tombstoned  int    `json:"tombstoned"`  // 已遗忘的源事件数（诚实衰减）
+	Verified    bool   `json:"verified"`    // 回放验证指纹是否匹配
 	Message     string `json:"message"`
 }
 

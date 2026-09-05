@@ -30,13 +30,13 @@ type refineArgs struct {
 
 // bundleInfo 是 bundle 的对外摘要（不暴露全文，避免上下文膨胀）。
 type bundleInfo struct {
-	ID        string   `json:"id"`
-	ParentID  string   `json:"parent_id,omitempty"`
-	Note      string   `json:"note,omitempty"`
-	CreatedBy string   `json:"created_by,omitempty"`
+	ID         string   `json:"id"`
+	ParentID   string   `json:"parent_id,omitempty"`
+	Note       string   `json:"note,omitempty"`
+	CreatedBy  string   `json:"created_by,omitempty"`
 	PromptKeys []string `json:"prompt_keys"`
-	Model     string   `json:"model,omitempty"`
-	Active    bool     `json:"active"`
+	Model      string   `json:"model,omitempty"`
+	Active     bool     `json:"active"`
 }
 
 // refineResult 是 refine 工具输出。
