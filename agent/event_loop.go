@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -109,6 +110,11 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 			if err := cm.RunFlow(spanCtx, msg); err != nil {
 				lastErr = err
+				// T-G: model 依赖退化上报（RunFlow 传输级失败连续达阈值 → DepModel degraded，
+				// onChange 写 governance degraded 事件；model-API 错误经 outputCh 不在此路径）。
+				if ta.degradation != nil {
+					ta.degradation.ReportFailure(reliability.DepModel, err)
+				}
 				log.Errorf("[runEventLoop:%s] RunFlow failed (attempt %d/%d): %v", ta.name, attempt+1, maxRetries+1, err)
 				if attempt < maxRetries {
 					retried = true
@@ -120,6 +126,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries: %v", ta.name, maxRetries, lastErr)
 			} else {
 				lastErr = nil
+				// T-G: model 依赖成功上报（degraded→recovering→normal 恢复路径）。
+				if ta.degradation != nil {
+					ta.degradation.ReportSuccess(reliability.DepModel)
+				}
 				// A degenerate turn (no tool call, empty final) is an occasional
 				// model hiccup that would otherwise stall the conversation until
 				// the next external event — retry it exactly once.

@@ -120,6 +120,10 @@ type TagentAgent struct {
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 
+	// degradation 是五依赖退化状态机（T-G，报告 D3）。可选（nil=未启用）：event_loop 在
+	// RunFlow 失败/成功时上报 DepModel；ErrorTrackingStore（存储栈最外层）上报 memory/disk/rustviking。
+	degradation *reliability.DegradationManager
+
 	// cleanupCancel stops the workspace cleaner goroutine (started in NewTagentAgent).
 	cleanupCancel context.CancelFunc
 
@@ -175,6 +179,10 @@ type TagentConfig struct {
 
 	// Meditation configures the meditation/heartbeat mechanism.
 	Meditation MeditationConfig
+
+	// Degradation 是五依赖退化状态机（T-G，可选）。非 nil 时 event_loop 上报 model 依赖、
+	// ErrorTrackingStore（wireMemoryEngine 最外层）上报 memory/disk/rustviking。nil=不启用（现状）。
+	Degradation *reliability.DegradationManager
 
 	// WorkspaceRoot is the unified on-disk scratch root (default: .tagent-workspace).
 	// Oversized tool outputs go to <root>/tool-output; the tmux command working
@@ -394,6 +402,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		outputCh:      outputCh,
 		closers:       []Closer{},
 		projection:    projection,
+		degradation:   cfg.Degradation,
 	}
 
 	// 8. Create onEvent callback and ContextManager.

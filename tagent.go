@@ -35,6 +35,8 @@ import (
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/reliability"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -324,6 +326,36 @@ func buildAgent(
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
 	}
+	// 1.6 T-G DegradationManager（报告 D3 C2 契约最外层）：配置启用时构造五依赖退化状态机 +
+	// ErrorTrackingStore 包裹 memStore，补齐此前 DegradationManager 零接线的断点。onChange 写
+	// governance degraded 事件用 baseStore（ErrorTrackingStore 包裹前），防「写失败→上报→
+	// onChange→写事件」递归。未启用则 degradationMgr=nil、memStore 不包裹（现状零变化）。
+	var degradationMgr *reliability.DegradationManager
+	if cfg.Reliability.DegradationEnabled {
+		baseStore := memStore
+		pid := memory.PartitionIDFromName(name)
+		degradationMgr = reliability.NewDegradationManager(func(dep reliability.Dependency, from, to reliability.DepState) {
+			content := fmt.Sprintf("[governance:degraded] 依赖 %s 状态迁移 %s→%s", dep, from, to)
+			evt := memory.FullEvent{
+				EventKey:     memory.NewSnowflakeEventKey(pid, 0),
+				PartitionID:  pid,
+				EventType:    tagentevent.TypeGovernance,
+				Content:      content,
+				EventSummary: content,
+				Timestamp:    time.Now().UnixMilli(),
+				Metadata: map[string]string{
+					tagentevent.MetaKeySubtype: tagentevent.SubtypeDegraded,
+					"dependency":               string(dep),
+					"from":                     string(from),
+					"to":                       string(to),
+				},
+			}
+			_ = baseStore.StoreEvent(evt.EventKey, evt) // baseStore 非 ErrorTrackingStore，无递归
+			log.Infof("[tagent] degradation: %s", content)
+		})
+		memStore = memory.NewErrorTrackingStore(memStore, reliability.MemorySink{Mgr: degradationMgr})
+		log.Infof("[tagent] degradation tracking enabled for agent %q (ErrorTrackingStore C2 outermost + 5-dep state machine)", name)
+	}
 	// 构建失败回收（审查 Nit5）：隔离 store（无共享）时，若后续步骤失败则关闭已启动的
 	// 引擎（worker/重建 goroutine），防泄漏。共享 store 的引擎按 path 复用，不在此关闭。
 	buildOK := false
@@ -510,6 +542,8 @@ func buildAgent(
 	if cfg.Reliability.BusSpillDir != "" {
 		agentCfg.BusSpillDir = filepath.Join(cfg.Reliability.BusSpillDir, name)
 	}
+	// T-G: DegradationManager 注入 agent（event_loop 据此上报 model 依赖退化；nil 若未启用）。
+	agentCfg.Degradation = degradationMgr
 	// task_terminal_ttl: duration string → time.Duration; empty/invalid falls
 	// back to the task package default (2m) via zero value.
 	if acfg.TaskTerminalTTL != "" {

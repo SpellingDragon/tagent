@@ -19,10 +19,10 @@ import (
 // MeditationConfig is the runtime configuration for the meditation manager.
 // Converted from config.MeditationConfig (string durations) by tagent.go.
 type MeditationConfig struct {
-	Enabled      bool
-	Interval     time.Duration  // Check interval (default: 30m)
-	MinGap       time.Duration  // Minimum idle gap for valid meditation (default: 2h)
-	PromptText   string         // Meditation prompt text (static, loaded once at init)
+	Enabled    bool
+	Interval   time.Duration // Check interval (default: 30m)
+	MinGap     time.Duration // Minimum idle gap for valid meditation (default: 2h)
+	PromptText string        // Meditation prompt text (static, loaded once at init)
 	// PromptSource 用 prompt.Getter 接口（而非具体 *prompt.Source）：使冥想提示词可注入
 	// evolution.VersionedSource 纳入 bundle 版本治理（C6：此前具体类型绕过了 TC0 建的 Getter 缝，
 	// 系统提示词可被 refine/发布道/回滚治理而冥想提示词不可——冥想恰是最该治理的自治驱动源）。

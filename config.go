@@ -162,7 +162,7 @@ type GovernanceConfig struct {
 type EvolutionConfig struct {
 	Enabled           bool     `json:"enabled" yaml:"enabled"`
 	Dir               string   `json:"dir,omitempty" yaml:"dir,omitempty"`                                 // bundle 存储目录(默认 data/evolution)
-	SkipApproval     bool     `json:"skip_approval,omitempty" yaml:"skip_approval,omitempty"`             // 跳过慢道人工批准门(默认false=需批准,保守;反义字段使Go零值安全)
+	SkipApproval      bool     `json:"skip_approval,omitempty" yaml:"skip_approval,omitempty"`             // 跳过慢道人工批准门(默认false=需批准,保守;反义字段使Go零值安全)
 	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
 	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
 }
@@ -178,6 +178,12 @@ type ReliabilityConfig struct {
 	// novelty/idle/last-meditation 三锚点，重启后不立即误触发冥想）。空 = 纯内存（现状）。
 	// 每 agent 用 <MeditationAnchorDir>/<agentName>.json。
 	MeditationAnchorDir string `json:"meditation_anchor_dir,omitempty" yaml:"meditation_anchor_dir,omitempty"`
+
+	// DegradationEnabled 启用五依赖退化状态机（T-G DegradationManager，报告 D3）：
+	// ErrorTrackingStore 最外层捕获存储错误(memory/disk/rustviking)+event_loop 捕获 model 失败，
+	// 达阈值→degraded、探测成功→recovering→normal，状态迁移写 governance degraded 事件（可观测）。
+	// 默认 false = 不启用（ErrorTrackingStore 不包裹，现状逐字节零行为变化）。
+	DegradationEnabled bool `json:"degradation_enabled,omitempty" yaml:"degradation_enabled,omitempty"`
 }
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).

@@ -130,3 +130,16 @@ func TestNew_ReliableBusDisabledDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, a)
 }
+
+// TestNew_DegradationEnabled_Builds 验证 A2 接线：DegradationEnabled 时 New 成功构建
+// （DegradationManager 构造 + ErrorTrackingStore 最外层包裹 memStore + agentCfg.Degradation
+// 注入 + event_loop model 上报就绪）——补齐此前 DegradationManager 零接线的断点。
+func TestNew_DegradationEnabled_Builds(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
+	cfg.Reliability.DegradationEnabled = true
+
+	a, err := New(cfg, WithModel(fakeModel{}))
+	require.NoError(t, err)
+	require.NotNil(t, a)
+}
