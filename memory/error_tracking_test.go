@@ -84,14 +84,15 @@ func TestErrorTrackingStore_OptionalInterfacePassthrough(t *testing.T) {
 	eng := NewInMemoryEngine(inner, NewMockEmbedder(16), EngineConfig{})
 	defer eng.Close()
 	bridge := NewEngineBridge(inner, eng)
-	ets := NewErrorTrackingStore(bridge, nil)
+	// 下游拿到的是 MemoryStore 接口（memStore），故赋给接口再断言可选能力穿透。
+	var ms MemoryStore = NewErrorTrackingStore(bridge, nil)
 
-	ep, ok := ets.(MemoryEngineProvider)
+	ep, ok := ms.(MemoryEngineProvider)
 	if !ok || ep.MemoryEngine() == nil {
 		t.Fatal("ErrorTrackingStore 应透传 MemoryEngineProvider（否则 recall hybrid 失效）")
 	}
 	// Close 透传（agent 引擎回收依赖）。
-	c, ok := ets.(interface{ Close() error })
+	c, ok := ms.(interface{ Close() error })
 	if !ok {
 		t.Fatal("ErrorTrackingStore 应透传 Close（agent.Closer 引擎回收）")
 	}
