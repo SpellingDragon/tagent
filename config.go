@@ -163,7 +163,7 @@ type EvolutionConfig struct {
 	Dir               string   `json:"dir,omitempty" yaml:"dir,omitempty"`                                 // bundle 存储目录(默认 data/evolution)
 	RequireApproval   bool     `json:"require_approval,omitempty" yaml:"require_approval,omitempty"`       // 慢道是否需人工批准门(默认 true)
 	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
-	CanaryHoldSeconds int     `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
+	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
 }
 
 // ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。

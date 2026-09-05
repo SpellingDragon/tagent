@@ -17,9 +17,9 @@ import (
 
 // MeditationAnchors 是冥想门控锚点的持久化快照（Unix ms）。
 type MeditationAnchors struct {
-	LastUserInput  int64 `json:"last_user_input"`  // novelty gate 锚点
-	LastTurnEnd    int64 `json:"last_turn_end"`    // idle gate 锚点
-	LastMeditation int64 `json:"last_meditation"`  // 最近有效冥想时刻
+	LastUserInput  int64 `json:"last_user_input"` // novelty gate 锚点
+	LastTurnEnd    int64 `json:"last_turn_end"`   // idle gate 锚点
+	LastMeditation int64 `json:"last_meditation"` // 最近有效冥想时刻
 }
 
 // AnchorStore 持久化冥想锚点（单 JSON 文件，tmp+rename 原子写）。并发安全。

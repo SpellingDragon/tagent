@@ -137,6 +137,22 @@ agents:
     memory:
       type: localfile
       path: .wechat-config/data
+      # ===== 语义检索（T-A hybrid-semantic-recall）：默认关闭 → 纯关键词召回、零嵌入成本 =====
+      # 开启后：入库事件异步嵌入（zhipu embedding-3，按量计费），recall 走 hybrid 融合
+      # （向量 topK ∪ 关键词 topK → RRF k=60）。工具声明区恒定——开关不影响 recall Declaration
+      # （prefix-cache 稳定，守卫见 tool/recall/declaration_stable_test.go）。未配置时全链路逐字节不变。
+      # engine:
+      #   backend: memory          # MVP 内存向量索引；file/localfile store 时向量自动序列化入
+      #                            #   底层 KV + 启动重建（rustviking 原生 HNSW 持久化属其 backlog，
+      #                            #   见 openspec/.../f1-rustviking-capability-report.md：index CLI 进程内易失）
+      #   embedding:
+      #     provider: zhipu        # 或 mock（本地确定性伪向量，零成本，仅验证融合/过滤机制）
+      #     model: embedding-3
+      #     api_key_env: ZAI_API_KEY   # GLM Coding Plan；缺失则嵌入优雅降级为纯关键词
+      #     dimensions: 1024       # 512/1024/2048：维度越高召回越准、成本越高（X2 待实测定默认）
+      #   vector_top_k: 20         # 融合调参（默认 20/20/60）
+      #   keyword_top_k: 20
+      #   rrf_k: 60
     max_tool_iterations: 300
     max_tokens: 128000
     temperature: 0.7
