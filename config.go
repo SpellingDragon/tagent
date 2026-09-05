@@ -284,6 +284,37 @@ type MemoryConfig struct {
 	// Lifecycle configures TTL / capacity-based forgetting for this store.
 	// Nil keeps the built-in defaults (global TTL 7d, per-type table, 1h checks).
 	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty" yaml:"lifecycle,omitempty"`
+
+	// Engine 配置记忆引擎（语义/混合检索，T-A 解耦缝）。缺省 nil = 引擎关闭，
+	// recall 行为与现状逐字节一致（纯关键词）。配置后：写入旁路异步嵌入索引，
+	// recall query 走 关键词∪向量 RRF 融合（工具声明区不变，prefix-cache 不受影响）。
+	Engine *MemoryEngineConfig `json:"engine,omitempty" yaml:"engine,omitempty"`
+}
+
+// MemoryEngineConfig 配置记忆引擎（向量后端选择与融合调参）。
+type MemoryEngineConfig struct {
+	// Backend 选择向量后端："memory"（MVP 内存索引，默认）或 "rustviking"（持久向量后端）。
+	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
+	// Embedding 配置嵌入器。nil = 无向量，引擎不接线（行为同现状纯关键词）。
+	Embedding *EmbeddingConfig `json:"embedding,omitempty" yaml:"embedding,omitempty"`
+	// VectorTopK / KeywordTopK / RRFK 融合调参（0 取引擎默认 20/20/60）。
+	VectorTopK  int `json:"vector_top_k,omitempty" yaml:"vector_top_k,omitempty"`
+	KeywordTopK int `json:"keyword_top_k,omitempty" yaml:"keyword_top_k,omitempty"`
+	RRFK        int `json:"rrf_k,omitempty" yaml:"rrf_k,omitempty"`
+}
+
+// EmbeddingConfig 配置文本嵌入器（zhipu embedding-3，openai 兼容 /embeddings）。
+type EmbeddingConfig struct {
+	// Provider："zhipu"（默认，openai 兼容 HTTP）或 "mock"（确定性哈希，测试/离线）。
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
+	// Model 默认 "embedding-3"。
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+	// APIKeyEnv 默认 "ZAI_API_KEY"（GLM Coding Plan）。缺失 = 嵌入关闭（优雅降级）。
+	APIKeyEnv string `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	// Endpoint 默认 zhipu embeddings 端点（open.bigmodel.cn/api/paas/v4/embeddings）。
+	Endpoint string `json:"endpoint,omitempty" yaml:"endpoint,omitempty"`
+	// Dimensions 请求维度（embedding-3 支持 512/1024/2048）；0 = 模型默认。
+	Dimensions int `json:"dimensions,omitempty" yaml:"dimensions,omitempty"`
 }
 
 // LifecycleConfig declares the forgetting policy over YAML/JSON. Unset fields

@@ -73,7 +73,7 @@ func NewRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
 			case args.TurnKey != "":
 				return recallByTurn(accessor, args)
 			case args.Query != "" || args.Since > 0 || args.Until > 0 || len(args.EventTypes) > 0:
-				return recallByQuery(accessor, readPartitionIDs, memoryRecallArgs{
+				return recallByQuery(ctx, accessor, readPartitionIDs, memoryRecallArgs{
 					Query:      args.Query,
 					EventTypes: args.EventTypes,
 					Since:      args.Since,

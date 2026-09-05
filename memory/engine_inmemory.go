@@ -226,6 +226,43 @@ func (e *InMemoryEngine) Stats() (indexed, dropped, embedErr, vectorCount int64)
 	return e.indexedCount.Load(), e.droppedCount.Load(), e.embedErrCount.Load(), vc
 }
 
+// SearchByVector 实现 RawVectorSearcher：用预计算查询向量做余弦 topK（分区过滤），
+// 供 engineBridge.SearchByEmbedding 委托（消灭 MemoryStore 的向量 stub）。
+func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK int, partitionIDs []int) ([]RetrievalHit, error) {
+	if len(query) == 0 {
+		return nil, nil
+	}
+	type scored struct {
+		key   int64
+		score float32
+	}
+	e.mu.RLock()
+	cands := make([]scored, 0, len(e.vectors))
+	for key, vec := range e.vectors {
+		if key <= 0 {
+			continue
+		}
+		if !matchPartition(partitionIDs, e.vmeta[key].partitionID) {
+			continue
+		}
+		cands = append(cands, scored{key: key, score: cosine(query, vec)})
+	}
+	e.mu.RUnlock()
+
+	sort.Slice(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
+	if topK > 0 && len(cands) > topK {
+		cands = cands[:topK]
+	}
+	hits := make([]RetrievalHit, len(cands))
+	for i, c := range cands {
+		hits[i] = RetrievalHit{EventKey: c.key, Score: c.score}
+	}
+	return hits, nil
+}
+
+// 编译期锁定可选能力。
+var _ RawVectorSearcher = (*InMemoryEngine)(nil)
+
 // ---------------------------------------------------------------------------
 // 内部：向量路
 // ---------------------------------------------------------------------------

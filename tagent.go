@@ -91,6 +91,11 @@ var (
 	// they share the same FileSegmentStore — so recall can read tagent's partition.
 	namedFileMu     sync.Mutex
 	namedFileStores = map[string]*memory.FileSegmentStore{}
+
+	// namedEngines 按 path 共享记忆引擎（与 namedMemStores/namedFileStores 同键），
+	// 使共享 store 的引擎也共享——保跨 agent 语义召回一致（T-A）。空 path = 每 agent 独立引擎。
+	namedEngineMu sync.Mutex
+	namedEngines  = map[string]memory.MemoryEngine{}
 )
 
 // WithModel sets the resolved model instance (required).
@@ -249,6 +254,11 @@ func buildAgent(
 	memStore, err := resolveMemoryStore(acfg.Memory)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
+	}
+	// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
+	memStore, err = wireMemoryEngine(memStore, acfg.Memory)
+	if err != nil {
+		return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
 	}
 
 	// 2. Resolve system prompt
@@ -861,6 +871,80 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		return store, nil
 	default:
 		return nil, fmt.Errorf("unknown memory store type %q", mc.Type)
+	}
+}
+
+// wireMemoryEngine 按 MemoryConfig.Engine 为 store 包裹记忆引擎（T-A 解耦缝）。
+// 未配置 Engine 或无 Embedding → 返回原 store（纯关键词，行为逐字节不变）。
+// 共享 store（path 非空）的引擎按 path 共享（namedEngines），保跨 agent 语义召回一致。
+// 嵌入器初始化失败（如无 API key）→ 优雅降级：记录并返回原 store（不阻断 agent 构建）。
+func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig) (memory.MemoryStore, error) {
+	if mc.Engine == nil || mc.Engine.Embedding == nil {
+		return store, nil
+	}
+	if mc.Path != "" {
+		namedEngineMu.Lock()
+		defer namedEngineMu.Unlock()
+		if eng, ok := namedEngines[mc.Path]; ok {
+			return memory.NewEngineBridge(store, eng), nil
+		}
+		eng, err := buildMemoryEngine(store, *mc.Engine)
+		if err != nil {
+			log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
+			return store, nil
+		}
+		namedEngines[mc.Path] = eng
+		return memory.NewEngineBridge(store, eng), nil
+	}
+	eng, err := buildMemoryEngine(store, *mc.Engine)
+	if err != nil {
+		log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
+		return store, nil
+	}
+	return memory.NewEngineBridge(store, eng), nil
+}
+
+// buildMemoryEngine 按配置构建嵌入器 + 引擎。嵌入器不可用（无 key）时返回 error（调用方降级）。
+func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.MemoryEngine, error) {
+	emb, err := buildEmbedder(*ec.Embedding)
+	if err != nil {
+		return nil, err
+	}
+	ecfg := memory.EngineConfig{
+		VectorTopK:  ec.VectorTopK,
+		KeywordTopK: ec.KeywordTopK,
+		RRFK:        ec.RRFK,
+	}
+	switch ec.Backend {
+	case "", "memory":
+		return memory.NewInMemoryEngine(store, emb, ecfg), nil
+	case "rustviking":
+		// T-A 后续件：rustviking 持久向量后端适配器（F1 已定契约）。未就绪前降级内存 MVP。
+		log.Warnf("[tagent] engine backend 'rustviking' 尚未接线，降级为内存 MVP 引擎（向量不持久）")
+		return memory.NewInMemoryEngine(store, emb, ecfg), nil
+	default:
+		return nil, fmt.Errorf("unknown memory engine backend %q", ec.Backend)
+	}
+}
+
+// buildEmbedder 按配置构建嵌入器。zhipu 无 key 时返回 error（调用方优雅降级）。
+func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
+	switch ec.Provider {
+	case "mock":
+		dim := ec.Dimensions
+		if dim <= 0 {
+			dim = 64
+		}
+		return memory.NewMockEmbedder(dim), nil
+	case "", "zhipu":
+		return memory.NewZhipuEmbedder(memory.ZhipuEmbedderConfig{
+			Endpoint:   ec.Endpoint,
+			Model:      ec.Model,
+			APIKeyEnv:  ec.APIKeyEnv,
+			Dimensions: ec.Dimensions,
+		})
+	default:
+		return nil, fmt.Errorf("unknown embedding provider %q", ec.Provider)
 	}
 }
 

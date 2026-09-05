@@ -120,3 +120,10 @@ type MemoryEngine interface {
 	Retriever
 	io.Closer
 }
+
+// RawVectorSearcher 是可选引擎能力：支持「预计算查询向量」检索（供
+// MemoryStore.SearchByEmbedding 委托，消灭 stub）。文本查询走 Retriever.Retrieve；
+// 本接口服务于已持有查询向量的调用方。partitionIDs 非空时过滤（nil = 不限）。
+type RawVectorSearcher interface {
+	SearchByVector(ctx context.Context, query []float32, topK int, partitionIDs []int) ([]RetrievalHit, error)
+}
