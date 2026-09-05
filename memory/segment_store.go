@@ -759,6 +759,10 @@ func (s *FileSegmentStore) GetStats() StoreStats {
 	}
 }
 
+// KVBackend 暴露底层 KVStore（KVProvider 实现）——供记忆引擎做向量持久化
+// （序列化向量入 KV + 启动重建，见 engine_persist.go）。
+func (s *FileSegmentStore) KVBackend() KVStore { return s.kv }
+
 // SearchByEmbedding performs semantic search (stub — not supported).
 func (s *FileSegmentStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
 	return nil, ErrVectorSearchNotSupported

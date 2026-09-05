@@ -915,12 +915,16 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 		KeywordTopK: ec.KeywordTopK,
 		RRFK:        ec.RRFK,
 	}
+	// 持久化：store 若提供底层 KV（FileSegmentStore over rustviking/LocalFileKV），
+	// 引擎向量序列化入 KV + 启动重建——跨重启恢复语义召回。纯内存 store 无 KV → 不持久。
+	if kvp, ok := store.(memory.KVProvider); ok {
+		ecfg.KV = kvp.KVBackend()
+	}
 	switch ec.Backend {
-	case "", "memory":
-		return memory.NewInMemoryEngine(store, emb, ecfg), nil
-	case "rustviking":
-		// T-A 后续件：rustviking 持久向量后端适配器（F1 已定契约）。未就绪前降级内存 MVP。
-		log.Warnf("[tagent] engine backend 'rustviking' 尚未接线，降级为内存 MVP 引擎（向量不持久）")
+	case "", "memory", "rustviking":
+		// MVP 内存向量索引 + 可选 KV 持久化（rustviking-backed）。依据 F1 报告「追加发现」：
+		// rustviking 原生 index CLI 进程内易失，故用其 KV 持久化向量 + 启动重建；
+		// 原生 HNSW/IVF 索引持久化（接入 ivf_persist）为 rustviking backlog。
 		return memory.NewInMemoryEngine(store, emb, ecfg), nil
 	default:
 		return nil, fmt.Errorf("unknown memory engine backend %q", ec.Backend)

@@ -23,6 +23,12 @@ type MemoryEngineProvider interface {
 	MemoryEngine() MemoryEngine
 }
 
+// KVProvider 是可选接口：MemoryStore 实现若持有底层 KVStore（如 FileSegmentStore），
+// 据此暴露给记忆引擎做向量持久化（T-A：序列化向量入 KV + 启动重建，跨重启恢复语义召回）。
+type KVProvider interface {
+	KVBackend() KVStore
+}
+
 // engineBridge 装饰 MemoryStore，桥接「写入 → 引擎索引」并暴露引擎供检索。
 type engineBridge struct {
 	inner  MemoryStore

@@ -54,3 +54,18 @@
 - 解耦缝须抽象三接口：**IndexBuilder**（事件→索引，引擎内部嵌入/存储）+ **Retriever**（查询→票据，引擎内部 keyword/vector/hybrid）+ 生命周期（Closer/Ready）。
 - 两实现：**RustVikingEngine**（适配 `index` CLI + tagent 嵌入 + RRF + 分区过滤）、**InMemoryEngine**（MVP 兜底）。
 - `VectorHit` 须含 `Score`（rustviking `index search` 返回 score，RRF 可用 rank，score 供诊断/阈值）。
+
+## 追加发现（T-A 实施期，决定性）
+
+**rustviking `index` CLI 是「进程内内存索引、每次调用新建、无 load/save」**（main.rs:129 `IvfIndex::new(params, dimension)`，无持久化装载）。因 rustviking 是 per-call-fork CLI，`index insert` 在进程退出后即丢失，后续 `index search` 进程新建空索引 → **`index` 命令对 tagent 的逐调用模型完全不可用作持久向量后端**（尽管 `src/index/ivf_persist.rs`/`hnsw_persist.rs` 存在持久化代码，但未接入 CLI）。
+
+**修订裁决（替代 DECIDED F1-②的存储部分）**：
+
+| 方案 | 可行性 | 裁决 |
+|---|---|---|
+| rustviking `index` CLI 作持久向量后端 | ❌ 进程内易失 | 否决 |
+| rustviking `find`/`write`（VikingFS 语义层） | ⚠️ 文档导向(viking://)、默认 mock 嵌入、不契合 EventKey 模型 | 否决（不契合事件模型） |
+| **MVP 内存向量索引 + 向量序列化到 rustviking KV（持久）+ 启动重建** | ✅ rustviking KV CLI 持久可用 | **采纳**（= 原 hybrid 变更 D1-A；引擎 = InMemoryEngine + KV 持久层） |
+| 强化 rustviking CLI 接入 ivf_persist 持久化原生 HNSW/IVF | 🔧 需 Rust 改动 + 验证 | **rustviking backlog**（更先进、大规模时启用；「优化依赖」路径） |
+
+**client 契约修复已落地**（memory/rustviking_client.go）：`VectorInsert/VectorSearch` 改为真实 `index insert/search`（逗号分隔向量、scored 解析），新增 `VectorDelete`，删除虚构 `Embed`——虽 `index` 易失使这些方法暂不用于持久后端，但虚构契约（landmine）已清除，且为 rustviking backlog（原生索引持久化）就绪。

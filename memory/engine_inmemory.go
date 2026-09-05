@@ -42,6 +42,12 @@ type EngineConfig struct {
 	EmbedFlushInterval time.Duration
 	// MaxTextRunes 嵌入文本截断上限（默认 8000；仅嵌入侧截断，不动 FullEvent.Content）。
 	MaxTextRunes int
+	// KV 是向量持久化后端（nil = 纯内存，向量不持久，重启丢失）。设置后：worker
+	// flush 时序列化向量入 KV，构造时异步从 KV 重建（rustviking-backed 持久化，
+	// 见 engine_persist.go 与 f1-rustviking-capability-report.md「追加发现」）。
+	KV KVStore
+	// VecKeyPrefix 是向量 KV 键前缀（默认 "tagent:vec:"）。
+	VecKeyPrefix string
 }
 
 func (c EngineConfig) withDefaults() EngineConfig {
@@ -69,6 +75,9 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	if c.MaxTextRunes <= 0 {
 		c.MaxTextRunes = 8000
 	}
+	if c.VecKeyPrefix == "" {
+		c.VecKeyPrefix = "tagent:vec:"
+	}
 	return c
 }
 
@@ -95,6 +104,11 @@ type InMemoryEngine struct {
 	closed    atomic.Bool
 	started   atomic.Bool
 
+	// KV 持久层（可选，见 engine_persist.go）。
+	kv          KVStore
+	vecPrefix   string
+	rebuildDone atomic.Bool
+
 	// 指标（可观测，T-B/组8 消费）。
 	indexedCount atomic.Int64 // 成功写入向量数
 	droppedCount atomic.Int64 // 队列满/API 失败丢弃数
@@ -107,19 +121,32 @@ var _ MemoryEngine = (*InMemoryEngine)(nil)
 // NewInMemoryEngine 构建并启动 MVP 引擎。store 供关键词路（可 nil），emb 供向量路
 // （nil = 纯关键词降级）。后台嵌入 worker 随引擎启动，Close 时排空停止。
 func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMemoryEngine {
+	cfg = cfg.withDefaults()
 	e := &InMemoryEngine{
-		store:   store,
-		emb:     emb,
-		cfg:     cfg.withDefaults(),
-		vectors: make(map[int64][]float32),
-		vmeta:   make(map[int64]vectorMeta),
+		store:     store,
+		emb:       emb,
+		cfg:       cfg,
+		vectors:   make(map[int64][]float32),
+		vmeta:     make(map[int64]vectorMeta),
+		kv:        cfg.KV,
+		vecPrefix: cfg.VecKeyPrefix,
 	}
+	e.rebuildDone.Store(true) // 默认无重建
 	if emb != nil {
 		e.queue = make(chan IndexableEvent, e.cfg.QueueCap)
 		ctx, cancel := context.WithCancel(context.Background())
 		e.cancel = cancel
 		e.wg.Add(1)
 		go e.embedWorker(ctx)
+	}
+	// KV 持久层：启动异步重建（不阻塞构造；向量渐进可用，重建期检索退化为关键词）。
+	if e.kv != nil {
+		e.rebuildDone.Store(false)
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.rebuildFromKV()
+		}()
 	}
 	e.started.Store(true)
 	return e
@@ -152,6 +179,7 @@ func (e *InMemoryEngine) Remove(_ context.Context, eventKey int64) error {
 	delete(e.vectors, eventKey)
 	delete(e.vmeta, eventKey)
 	e.mu.Unlock()
+	e.removePersisted(eventKey) // 同步删 KV 持久向量，防重建复活已删事件
 	return nil
 }
 
@@ -310,6 +338,7 @@ func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 			}
 		}
 		e.mu.Unlock()
+		e.persistVectors(batch, vecs) // KV 持久层（kv==nil 时 no-op）
 		batch = batch[:0]
 	}
 
