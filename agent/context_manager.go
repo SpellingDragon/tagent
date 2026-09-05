@@ -428,6 +428,16 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		Timestamp:    evt.Timestamp.UnixMilli(),
 		Content:      msg.Content,
 	}
+	// 归因盖章（TC0，路径2/2）：与插件管线 onEvent 同盖，避免归因盲区（报告 R5）。
+	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 待
+	// BundleProvider 落地后并入。
+	fullEvent.Metadata = map[string]string{
+		tagentevent.MetaKeyAgentName:     cm.name,
+		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
+	}
+	if cm.sessionID != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
 
 	if cm.memStore != nil {
 		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
@@ -466,6 +476,13 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	// (write unification, unified-event-projection D1).
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
+		// 归因章注入（TC0，路径1/2）：本回合产出事件经 MemoryPlugin onEvent 盖章
+		// rollout_id 到 Metadata（bundle_id 待 BundleProvider 落地后并入）。
+		if cm.sessionID != "" {
+			ctx = plugin.WithAttribution(ctx, plugin.Attribution{
+				tagentevent.MetaKeyRolloutID: cm.sessionID,
+			})
+		}
 	}
 	// Inject the task spawner so tools can delegate long-running work to the
 	// task layer (sync-wait window → inline or ack). Absent → synchronous.

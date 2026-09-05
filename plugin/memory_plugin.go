@@ -136,6 +136,18 @@ func (p *MemoryPlugin) onEvent(
 		EventSummary: eventSummary,
 		Timestamp:    timestamp,
 	}
+	// 归因盖章（TC0）：填充 FullEvent.Metadata——修复「Metadata 从未被填充」缺口
+	// （报告 §4.3 F1）。基线盖 agent_name（provenance，立即可用）；ctx 归因载体
+	// （WithAttribution）叠加 bundle_id/rollout_id（RunFlow 注入，T-EVO 版本归因）。
+	fullEvent.Metadata = make(map[string]string, 2)
+	if agentName != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyAgentName] = agentName
+	}
+	if attr, ok := AttributionFrom(ctx); ok {
+		for k, v := range attr {
+			fullEvent.Metadata[k] = v
+		}
+	}
 
 	if evt.Response != nil && len(evt.Response.Choices) > 0 {
 		msg := evt.Response.Choices[0].Message

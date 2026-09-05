@@ -27,6 +27,12 @@ const (
 	MetaKeyEventSummary  = "event_summary"
 	MetaKeyTriggerSource = "trigger_source"
 
+	// 归因章键（TC0/T-EVO）：写入 FullEvent.Metadata，使产出事件可回溯到生效版本。
+	// 与上述 StateDelta 存储标识不同——这些经 plugin.Attribution ctx 载体盖章。
+	MetaKeyAgentName = "agent_name" // 产生该事件的 agent（provenance 基线）
+	MetaKeyBundleID  = "bundle_id"  // 生效的 prompt/参数/模型 bundle 版本（T-EVO）
+	MetaKeyRolloutID = "rollout_id" // 回合/invocation 标识
+
 	// MetaPrefix marks passthrough metadata keys (meta_chat_id, meta_user_name, …).
 	MetaPrefix = "meta_"
 )
