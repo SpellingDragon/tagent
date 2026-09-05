@@ -3,6 +3,8 @@
 > roadmap P1.5 执行体(2026-09-05 立项,归属裁决见 openspec/changes/LEDGER.md)。
 > 不依赖 hybrid-semantic-recall,可先行;向量链路自身的 span/metric 归 hybrid 变更组 8,本变更只做 tagent 自有层的 trace 骨架与跨世界关联。
 > 交接背景与全局上下文见 roadmap design.md「D6 交接须知」。
+>
+> ⚠️ 并存设计(开工前必读):docs/.dev/tagent下一步迭代设计报告.md 的 **D4 评估、可观测与发布工程**覆盖同主题且更细(过程指标双源对账 + held-out 防过拟合 + 行为回归事件级 diff + CI 四层分流)。两者并存作参考、未定权威(见 roadmap design D6「并存规划」);apply 前 MUST 先对照 D4 讨论,厘清本变更(trace 骨架)与报告 D4(含 evals/CI)的边界与取舍。
 
 ## Why
 

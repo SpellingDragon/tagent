@@ -4,6 +4,8 @@
 > 保留其仍然成立的问题定义与向量方案精华,淘汰已被架构演进淘汰的部分
 > (ProjectionOrganizer 挂载点、独立语义工具形态),并按 2026-09 的代码现实重编任务。
 > 裁决依据见 openspec/changes/LEDGER.md。
+>
+> ⚠️ 并存设计(开工前必读):docs/.dev/tagent下一步迭代设计报告.md 的 **D2 记忆与召回增强**是同主题更详细方案(VectorStore 装饰器 + 异步嵌入队列 + RRF + VectorDelete 三层对策 + 风险 R1/R2),与本变更存储选型(内存索引 + RustViking KV 序列化)存在分歧。两者并存作参考、未定权威(见 roadmap design D6「并存规划」);apply 前 MUST 先对照 D2 讨论调和存储方案,避免返工。
 
 ## Why
 

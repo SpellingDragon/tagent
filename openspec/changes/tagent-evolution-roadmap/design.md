@@ -4,7 +4,7 @@
 
 输入源四份,已经本机核查/调研验证:
 
-1. 两篇评审文档(examples/wechat-bot/ 下):差距清单收敛于七项——反馈归因、评估体系、Harness 自进化、多 Agent 组织、语义检索、工具治理/沙箱、发布工程。其中"handoff 无结构化 schema"断言已被核查推翻(ExtraParams 已存在),"MCP 深度不足"已由 mcp-discovery-execution-loop(2026-09-04 归档)解决。
+1. 两篇评审文档(现位于 docs/.dev/,不随 git 走):差距清单收敛于七项——反馈归因、评估体系、Harness 自进化、多 Agent 组织、语义检索、工具治理/沙箱、发布工程。其中"handoff 无结构化 schema"断言已被核查推翻(ExtraParams 已存在),"MCP 深度不足"已由 mcp-discovery-execution-loop(2026-09-04 归档)解决。
 2. 今日探索沉淀:prefix-cache 稳定性是 tagent 的第一性设计约束(声明区恒定、动态内容渗透尾部/历史);Engine(有状态)/Policy(配置派生)分离;内容变更即时热载、结构变更走配置。
 3. trpc/rustviking 调研:evaluation(AgentEvaluator/EvalSet/Metric/Criterion,直接 import,成本小)、team(ModeCoordinator/ModeSwarm,直接 import,成本小)、codeexecutor container(Docker 沙箱,NetworkMode=none,直接 import,成本小)、knowledge vectorstore(6 后端 + SearchModeHybrid)+embedder(openai/gemini/ollama/huggingface)、telemetry、rustviking VectorStore/EmbeddingProvider 插件 + tagent RustVikingClient 已预留 VectorSearch/Embed 方法。
 4. 参考项目调研:crush permission(Go,allow-list + session 缓存 + auto-approve + 异步审批,直接借鉴)、nanobot skills(SKILL.md 与 trpc skill.FSRepository 格式兼容,技能库可直接复用)、AReaL reward 抽象(MathVerifyWorker/自定义 reward fn/workflow discount)、OpenSpace gdpval_bench(两阶段 cold→warm 评估 + TokenTracker + LLMEvaluator + payment cliff)、deer-flow guardrails(AgentMiddleware + AllowlistProvider)、letta sleeptime(设计参考)、pi-mono(低价值,排除)。
@@ -113,9 +113,20 @@ flowchart TB
 
 ### D6 交接须知(2026-09-05 追加;接手者从这里开始)
 
+**接手者阅读顺序(三层,由浅入深)**:
+
+| 层 | 读什么 | 位置 | 是否随 git |
+|---|---|---|---|
+| ① 项目是什么/怎么跑 | README + 架构 wiki(agent/event/memory/tool/prompt/plugin 六篇) | `README.md`、`docs/wiki/` | ✅ 跟踪,clone 即得 |
+| ② 下一步做什么/当前状态 | 本 roadmap(尤其本 D6)+ LEDGER 账本 + 两个执行体变更 | `openspec/changes/` | ✅ 跟踪 |
+| ③ 深度设计参考 | 《下一步迭代设计报告》(五方向可编码设计)+ 两篇评审 + 50 篇历史设计 | `docs/.dev/` | ❌ 被 .gitignore 忽略,交接载体由交接方处理 |
+
+⚠️ 关键前提:第 ③ 层不随 git 走(`.gitignore:55` 的 `.*/` 规则忽略所有点目录)。本 roadmap 与两个变更均引用了 `.dev` 里的报告——**若交接只给 git 仓库,这些引用会悬空**,接手者需另行获得 `docs/.dev/`。建议交接 = 仓库 + docs/.dev 目录一并交付。
+
 **背景脉络(决策链速读)**:
 1. 起点:用户欲以 zhipu web-search-prime MCP 替代 web_search 工具 → 探索发现 tagent MCP 只有"发现"无"执行",且原生声明式接入会摧毁 prefix cache → 用户拍板"knowledge 发现、action 执行"的渗透式哲学(工具知识以消息渗透进上下文,声明区恒定)→ 落地为 mcp-discovery-execution-loop(2026-09-04 归档,含真实 LLM 验证:glm 路由 6/6 正确;实测工具名 web_search_prime 为下划线风格,官方文档的 webSearchPrime 是错的)。
-2. 两篇外部评审(未入库,examples/wechat-bot/*.md)给出七项差距 → 本路线图立项 → 用户要求谨慎 → 收缩为"地图 + 疼点驱动" → 活跃变更大清账(见 LEDGER.md)→ 现状:1 地图 + 2 执行体(hybrid-semantic-recall、observability-tracing)。
+2. 两篇外部评审(docs/.dev/,不随 git 走)给出七项差距 → 本路线图立项 → 用户要求谨慎 → 收缩为"地图 + 疼点驱动" → 活跃变更大清账(见 LEDGER.md)→ 现状:1 地图 + 2 执行体(hybrid-semantic-recall、observability-tracing)。
+3. **并存规划(重要)**:docs/.dev/ 另有一份今天生成的《tagent下一步迭代设计报告》(305KB,五方向 D1-D5 + Wave0-3 里程碑,可编码粒度),与本 roadmap 独立产出、主题重叠。按用户裁决,两份文档**并存作交接参考,不预设谁为准,接手后讨论迭代调和**。详见 D6「并存规划与待调和项」。
 
 **全局不变量(任何子变更 design 必须显式声明遵守,specs 有守卫场景)**:
 - prefix-cache 稳定性:agent 工具声明区恒定;动态能力经注册表/内容渗透,不进声明;
@@ -137,7 +148,20 @@ flowchart TB
 | openspec/changes/hybrid-semantic-recall/ | P1 语义检索执行体(前身 risk-mitigation-semantic-recall 的重编,继承关系写在其 proposal 头) |
 | openspec/changes/observability-tracing/ | P1.5 trace 执行体(spike-first;探索证据在其 design Context) |
 | openspec/specs/(68+ 能力) | 已归档能力的主规格;mcp-* 三个是最新成员 |
-| examples/wechat-bot/*.md 两篇评审 | 外部输入(未入库,修订处置见 tasks 6.2) |
+| docs/.dev/ 两篇评审 + 50 篇历史设计 | 外部输入与过程档案(被 .gitignore 忽略,不随 git 走;交接载体由交接方处理) |
+| **docs/.dev/tagent下一步迭代设计报告.md** | **并存的五方向详细设计(D1-D5,305KB,可编码粒度);与本 roadmap 重叠,见下「并存规划与待调和项」** |
+
+**并存规划与待调和项(接手者必读)**:本 roadmap(P0-P4,治理粒度)与 docs/.dev《下一步迭代设计报告》(D1-D5,可编码粒度)是同期、同源(均基于两篇评审+调研)、独立产出的两套规划。用户裁决:两者并存作参考,接手后讨论迭代,**不预设权威**。映射与已知分歧:
+
+| 报告方向 | 本 roadmap 对应 | 关系 |
+|---|---|---|
+| D2 向量混合检索(VectorStore 装饰器+异步嵌入队列+RRF+VectorDelete 三层对策;风险 R1/R2) | hybrid-semantic-recall 变更(内存索引+RustViking KV 序列化;X1 待实测) | ⚠️ **同问题不同存储方案,须二选一调和**;RRF/异步队列/rustviking 风险(R1↔X1)方向一致 |
+| D4 评估/可观测/发布(过程指标双源对账+held-out 防过拟合+行为回归 diff+CI 四层分流) | observability-tracing 变更 + roadmap P0/P1 | 🟡 高度重叠,报告更细 |
+| D1 自我改进(refine 无 activate op+回执反馈绑定+发布状态机+cassette 回放) | roadmap P2(反馈归因)+P3(RHI 自进化) | 🟡 报告方案更成熟 |
+| D5 多智能体(handoff 契约 ratchet+ReviewGate critic+judge/verifier 分离+RL 反馈通道) | roadmap P4(组织模式) | 🟡 报告更深 |
+| D3 常驻可靠性(可靠总线两级+治理账本+退化路径+有界自治+故障注入矩阵) | roadmap **几乎未覆盖** | 🔴 roadmap 缺口,报告独有 |
+
+调和前的临时纪律:hybrid-semantic-recall / observability-tracing 两变更开工前 MUST 先对照报告 D2 / D4,确认存储方案与观测方案的取舍(避免与报告的更深设计冲突返工)。
 
 **执行入口**:放行某变更 = `/opsx:apply <change-name>`;治理流程(门禁/CONFIRM/ESCALATE)= roadmap-governance spec + D3 流程图。当前待用户放行:hybrid-semantic-recall(首步 X1 实测 rustviking 向量命令面)、observability-tracing(首步 D0 spike)、P0 直做清单。
 
