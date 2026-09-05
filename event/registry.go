@@ -74,15 +74,15 @@ var (
 // defaultSpec 复现既有函数对**未知类型**的 fallback：
 // Role=user、非 special、非 tool-line、骨架保守 true、非低价值、TTL 继承、非合成。
 var defaultSpec = EventTypeSpec{
-	Role:         model.RoleUser,
-	Special:      false,
+	Role:            model.RoleUser,
+	Special:         false,
 	ToolLineSummary: false,
-	Skeleton:     true,
-	LowValue:     false,
-	TTLDays:      0,
-	Synthetic:    false,
-	Embeddable:   false,
-	Recallable:   true,
+	Skeleton:        true,
+	LowValue:        false,
+	TTLDays:         0,
+	Synthetic:       false,
+	Embeddable:      false,
+	Recallable:      true,
 }
 
 // RegisterEventType 注册（或覆盖）一个事件类型 spec。

@@ -212,7 +212,7 @@ flowchart TB
 | F2 | COMPLETE | F1(done) | 接口置 memory/engine.go，退化语义有测试 | C6 冻结：IndexBuilder/Retriever/MemoryEngine；返回排序票据两段式；build/vet/test 全绿 |
 | REG | COMPLETE | — | 注册表置 event/registry.go，6 触点委托/派生 | C1 冻结：9 类精确复现；全量单测 19 包 rc=0 零回归（等价验收线）|
 | FIX | COMPLETE | — | F1-fix(Metadata)重划归 TC0(使能器非独立bug,无当前误行为);F5 hy3 保留 TENCENT(混元专属) | F4 DefaultConfig action→exec + TestDefaultConfigBuildable 守漂移;F5 README 标准化 ZAI_API_KEY(GLM coding plan) |
-| T-A | COMPLETE | F2(done) | 引擎按path共享;rustviking index易失→KV持久化+重建(F1追加发现);SearchByEmbedding经RawVectorSearcher消灭stub | 交付:解耦缝C6+Embedder(zhipu/mock)+InMemoryEngine(hybrid RRF/分区过滤/异步非阻塞)+engineBridge+config+recall hybrid+KV持久化重建+rustviking契约修复;门禁1-2绿(build/vet/test-race+全量19包) |
+| T-A | IN_PROGRESS(回炉) | F2(done) | 门禁3 CodeReview并发跑出 M1/M2/M3+7S+12Nit;must-fix清零中 | MVP引擎+接线已提交;审查发现:Close排空用取消ctx丢向量(M1)/遗忘不调DeleteEvent致Remove死代码+死键复活(M2)/持久化无模型指纹+维度不匹配收0分候选(M3);修复中 |
 | T-B | PENDING | F2 | | |
 | T-G | PENDING | REG,FIX | | 两子包 |
 | TC0 | IN_PROGRESS | REG(done) | 门禁3(CodeReview)集中到MG前(自决,marathon规模);Metadata基线盖agent_name/trigger_source/rollout_id,bundle_id待BundleProvider | ✅归因地基:Attribution ctx载体+双路径盖章(修报告F1缺口)+meta keys,全绿;余:prompt.Getter接口化+BundleStore+VersionedSource |

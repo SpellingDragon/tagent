@@ -260,6 +260,16 @@ func buildAgent(
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
 	}
+	// 构建失败回收（审查 Nit5）：隔离 store（无共享）时，若后续步骤失败则关闭已启动的
+	// 引擎（worker/重建 goroutine），防泄漏。共享 store 的引擎按 path 复用，不在此关闭。
+	buildOK := false
+	defer func() {
+		if !buildOK && acfg.Memory.Path == "" {
+			if c, ok := memStore.(agent.Closer); ok {
+				_ = c.Close()
+			}
+		}
+	}()
 
 	// 2. Resolve system prompt
 	systemPrompt, err := loader.LoadComposite(
@@ -448,6 +458,7 @@ func buildAgent(
 	ta.SetToolParentProjection()
 
 	cache[name] = ta
+	buildOK = true // 构建成功：取消失败回收 defer（审查 Nit5）
 	return ta, nil
 }
 
@@ -883,25 +894,55 @@ func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig) (memory.MemoryS
 		return store, nil
 	}
 	if mc.Path != "" {
+		// 引擎缓存键含 backend/model/dimensions（审查 Nit6）：同 path 但不同引擎配置
+		// 不串用（否则会静默复用一个语义不同的引擎）。
+		cacheKey := engineCacheKey(mc)
 		namedEngineMu.Lock()
 		defer namedEngineMu.Unlock()
-		if eng, ok := namedEngines[mc.Path]; ok {
-			return memory.NewEngineBridge(store, eng), nil
+		if eng, ok := namedEngines[cacheKey]; ok {
+			return newEngineBridgeWithRemover(store, eng), nil
 		}
 		eng, err := buildMemoryEngine(store, *mc.Engine)
 		if err != nil {
 			log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
 			return store, nil
 		}
-		namedEngines[mc.Path] = eng
-		return memory.NewEngineBridge(store, eng), nil
+		namedEngines[cacheKey] = eng
+		return newEngineBridgeWithRemover(store, eng), nil
 	}
 	eng, err := buildMemoryEngine(store, *mc.Engine)
 	if err != nil {
 		log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
 		return store, nil
 	}
-	return memory.NewEngineBridge(store, eng), nil
+	return newEngineBridgeWithRemover(store, eng), nil
+}
+
+// engineCacheKey 构造共享引擎缓存键：path + backend + embedding model/dimensions
+// （审查 Nit6：同 path 不同引擎配置不串用）。
+func engineCacheKey(mc MemoryConfig) string {
+	backend, model, dims := "", "", 0
+	if mc.Engine != nil {
+		backend = mc.Engine.Backend
+		if mc.Engine.Embedding != nil {
+			model = mc.Engine.Embedding.Model
+			dims = mc.Engine.Embedding.Dimensions
+		}
+	}
+	return fmt.Sprintf("%s|%s|%s|%d", mc.Path, backend, model, dims)
+}
+
+// newEngineBridgeWithRemover 创建 engineBridge 并把向量移除回调接到 base store（若支持
+// SetVectorRemover）——使 TTL/容量遗忘物理删除事件时同步移除向量（内存索引 + KV 持久键），
+// 消除 engine.Remove 死代码、防死键堆积与重启复活（审查 M2）。
+func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngine) memory.MemoryStore {
+	bridge := memory.NewEngineBridge(store, eng)
+	if setter, ok := store.(interface{ SetVectorRemover(memory.VectorRemover) }); ok {
+		if vr, ok := bridge.(memory.VectorRemover); ok {
+			setter.SetVectorRemover(vr)
+		}
+	}
+	return bridge
 }
 
 // buildMemoryEngine 按配置构建嵌入器 + 引擎。嵌入器不可用（无 key）时返回 error（调用方降级）。

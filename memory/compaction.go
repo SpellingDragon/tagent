@@ -394,6 +394,9 @@ func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	batchOps := make([]KVOp, 0, len(dead))
 	for _, key := range dead {
 		batchOps = append(batchOps, KVOp{Type: "delete", Key: IndexKeyStr(pid, key)})
+		if c.store != nil {
+			c.store.removeVector(key) // 同步移除向量（内存索引+KV），防死键复活（审查 M2）
+		}
 	}
 	if err := c.kv.KVBatch(batchOps); err != nil {
 		log.Errorf("[Compaction] delete dangling idx failed pid=%d: %v", pid, err)

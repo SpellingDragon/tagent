@@ -29,6 +29,19 @@ type KVProvider interface {
 	KVBackend() KVStore
 }
 
+// VectorRemover 由持有向量索引的组件实现；FileSegmentStore 在 TTL/容量遗忘**物理删除**
+// 事件时（Compactor.finalizeTombstones）回调，使引擎同步移除向量（内存索引 + KV 持久键），
+// 防死键堆积与重启复活（审查 M2）。
+type VectorRemover interface {
+	RemoveVector(eventKey int64)
+}
+
+// VectorRemoverFunc 适配普通函数为 VectorRemover。
+type VectorRemoverFunc func(eventKey int64)
+
+// RemoveVector 实现 VectorRemover。
+func (f VectorRemoverFunc) RemoveVector(eventKey int64) { f(eventKey) }
+
 // engineBridge 装饰 MemoryStore，桥接「写入 → 引擎索引」并暴露引擎供检索。
 type engineBridge struct {
 	inner  MemoryStore
@@ -68,8 +81,10 @@ func (b *engineBridge) StoreEvent(key int64, event FullEvent) error {
 	return nil
 }
 
-// StoreEventWithEmbedding 调用方自带向量：委托 inner 存储；引擎侧此路径不经
-// 异步嵌入（MVP 引擎忽略外部向量，保持文本嵌入一致性）。
+// StoreEventWithEmbedding 调用方自带向量：委托 inner 存储。
+// 语义警示（审查 Nit9）：此路径**不经引擎索引**（MVP 引擎只索引经 StoreEvent 的文本嵌入，
+// 保持嵌入模型一致性）——若调用方用它写可嵌入事件，该事件不会获得引擎向量。需要外部
+// 向量入索引时应扩展 IndexWithVector 接口（后续增强），当前保持透传语义。
 func (b *engineBridge) StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error {
 	return b.inner.StoreEventWithEmbedding(key, event, embedding)
 }
@@ -85,6 +100,9 @@ func (b *engineBridge) DeleteEvent(key int64) error {
 
 // SearchByEmbedding 委托引擎的向量路（消灭 stub）：原始查询向量 → 引擎向量检索 →
 // 水合为 EventReference。引擎不支持向量时退回 inner（现状 stub 行为）。
+// 语义警示（审查 S5）：本方法以 nil 分区白名单调用 SearchByVector，即**全库向量检索**
+// （不按分区过滤）——因原始向量 API 不携带分区上下文。当前无生产调用方；若接入需按
+// 命名空间隔离，应由调用方改用 Retriever.Retrieve（带 PartitionIDs）或在此注入分区集。
 func (b *engineBridge) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
 	if b.engine == nil || !b.engine.Capabilities().Vector {
 		return b.inner.SearchByEmbedding(query, topK)
@@ -125,6 +143,14 @@ func (b *engineBridge) SupportsVectorSearch() bool {
 
 // MemoryEngine 暴露引擎（MemoryEngineProvider）。
 func (b *engineBridge) MemoryEngine() MemoryEngine { return b.engine }
+
+// RemoveVector 实现 VectorRemover：转发引擎 Remove（遗忘物理删除时由 FileSegmentStore
+// 回调，同步移除内存索引 + KV 持久向量，审查 M2）。
+func (b *engineBridge) RemoveVector(eventKey int64) {
+	if b.engine != nil {
+		_ = b.engine.Remove(context.Background(), eventKey)
+	}
+}
 
 // Close 关闭引擎（停后台嵌入 worker）并委托 inner 的 Close（若可关闭，如
 // FileSegmentStore 的持久化 flush）。满足 agent.Closer——resolveMemoryStore 的

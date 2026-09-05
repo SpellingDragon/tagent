@@ -181,18 +181,25 @@ func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor,
 	return res, nil
 }
 
+// maxRecallLimit 钳制模型入参 limit，防批量水合放大（审查 Nit10）。
+const maxRecallLimit = 100
+
 // recallViaEngine 经记忆引擎做 hybrid 检索并水合为统一协议条目（T-A）。
 // 返回 ok=false 表示应降级到纯关键词路径（引擎报错、零命中或全部悬挂）。
-// 两段式保持：引擎只返回排序票据（EventKey），摘要/类型经 accessor.GetEvent 水合，
-// 悬挂/已删命中在水合时自然消失（零幻觉）。
+// 两段式保持：引擎只返回排序票据（EventKey），全文经批量水合，悬挂/已删命中自然消失。
 func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int, args memoryRecallArgs, limit int) (memoryRecallResult, bool) {
+	if limit > maxRecallLimit {
+		limit = maxRecallLimit
+	}
+	// 超取补偿悬挂/墓碑命中（审查 M2）：引擎返回 limit*2 候选，水合过滤后裁到 limit，
+	// 避免死键占据 topK 导致静默少返回。
 	hits, err := eng.Retrieve(ctx, memory.RetrievalQuery{
 		Query:        args.Query,
 		PartitionIDs: readPartitionIDs,
 		EventTypes:   args.EventTypes,
 		StartTime:    args.Since,
 		EndTime:      args.Until,
-		Limit:        limit,
+		Limit:        limit * 2,
 		Mode:         memory.ModeAuto,
 	})
 	if err != nil {
@@ -202,18 +209,30 @@ func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tage
 	if len(hits) == 0 {
 		return memoryRecallResult{}, false
 	}
-	res := memoryRecallResult{Mode: "query"}
+	// 第二道分区防线（审查 S4）：EventKey 高位即分区，水合前零成本过滤，
+	// 防持久化/重建链路 pid 缺失时跨命名空间泄漏。
+	keys := make([]int64, 0, len(hits))
 	for _, h := range hits {
-		evt, err := accessor.GetEvent(h.EventKey)
-		if err != nil || evt == nil {
-			continue // 水合过滤：悬挂/已删向量命中自然消失
+		if partitionAllowed(memory.PartitionIDFromEventKey(h.EventKey), readPartitionIDs) {
+			keys = append(keys, h.EventKey)
 		}
+	}
+	if len(keys) == 0 {
+		return memoryRecallResult{}, false
+	}
+	events := hydrateKeys(accessor, keys) // 批量水合（保序、跳缺失，审查 Nit10）
+	res := memoryRecallResult{Mode: "query"}
+	for i := range events {
+		evt := &events[i]
 		res.Entries = append(res.Entries, memoryRecallEntry{
 			Key:     tagentevent.FormatEventKey(evt.EventKey),
 			Type:    evt.EventType,
 			Summary: evt.EventSummary,
 			Time:    formatTimestamp(evt.Timestamp),
 		})
+		if len(res.Entries) >= limit {
+			break // 裁到 limit
+		}
 	}
 	res.Count = len(res.Entries)
 	if res.Count == 0 {
@@ -221,4 +240,37 @@ func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tage
 	}
 	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
 	return res, true
+}
+
+// partitionAllowed 报告 pid 是否在白名单（空白名单 = 不限）。
+func partitionAllowed(pid int, whitelist []int) bool {
+	if len(whitelist) == 0 {
+		return true
+	}
+	for _, p := range whitelist {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// hydrateKeys 批量取回事件全文，保持 keys 顺序、跳过缺失（悬挂/墓碑）。
+// 优先 GetEvents 批量（FileSegmentStore 后端下避免 N 次 CLI 子进程，审查 Nit10），
+// accessor 不支持批量时退化逐 key GetEvent。
+func hydrateKeys(accessor tagenttool.MemoryStoreAccessor, keys []int64) []memory.FullEvent {
+	if batcher, ok := accessor.(interface {
+		GetEvents([]int64) ([]memory.FullEvent, error)
+	}); ok {
+		if events, err := batcher.GetEvents(keys); err == nil {
+			return events
+		}
+	}
+	out := make([]memory.FullEvent, 0, len(keys))
+	for _, k := range keys {
+		if evt, err := accessor.GetEvent(k); err == nil && evt != nil {
+			out = append(out, *evt)
+		}
+	}
+	return out
 }

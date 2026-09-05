@@ -48,6 +48,12 @@ type EngineConfig struct {
 	KV KVStore
 	// VecKeyPrefix 是向量 KV 键前缀（默认 "tagent:vec:"）。
 	VecKeyPrefix string
+	// DrainTimeout 是 Close 时排空在途嵌入批的超时（默认 2s）——用独立不取消的
+	// ctx，避免合规嵌入器（尊重 ctx 取消）在排空期必然失败丢向量（审查 M1）。
+	DrainTimeout time.Duration
+	// RebuildWaitTimeout 是 Close 等待 KV 重建 goroutine 的上限（默认 3s），
+	// 防 KV 后端挂住导致 Close 永久阻塞（审查 S6）。
+	RebuildWaitTimeout time.Duration
 }
 
 func (c EngineConfig) withDefaults() EngineConfig {
@@ -77,6 +83,12 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	}
 	if c.VecKeyPrefix == "" {
 		c.VecKeyPrefix = "tagent:vec:"
+	}
+	if c.DrainTimeout <= 0 {
+		c.DrainTimeout = 2 * time.Second
+	}
+	if c.RebuildWaitTimeout <= 0 {
+		c.RebuildWaitTimeout = 3 * time.Second
 	}
 	return c
 }
@@ -108,11 +120,13 @@ type InMemoryEngine struct {
 	kv          KVStore
 	vecPrefix   string
 	rebuildDone atomic.Bool
+	rebuildCh   chan struct{} // 重建完成信号（与 worker wg 分离，Close 有界等待，审查 S6）
 
 	// 指标（可观测，T-B/组8 消费）。
-	indexedCount atomic.Int64 // 成功写入向量数
-	droppedCount atomic.Int64 // 队列满/API 失败丢弃数
-	embedErrCount atomic.Int64
+	indexedCount     atomic.Int64 // 成功写入向量数
+	droppedCount     atomic.Int64 // 队列满/API 失败丢弃数
+	embedErrCount    atomic.Int64
+	dimMismatchCount atomic.Int64 // 维度不匹配跳过数（换模型/维度后旧向量，审查 M3）
 }
 
 // 编译期锁定 C6。
@@ -132,6 +146,7 @@ func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMem
 		vecPrefix: cfg.VecKeyPrefix,
 	}
 	e.rebuildDone.Store(true) // 默认无重建
+	e.rebuildCh = make(chan struct{})
 	if emb != nil {
 		e.queue = make(chan IndexableEvent, e.cfg.QueueCap)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -139,14 +154,16 @@ func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMem
 		e.wg.Add(1)
 		go e.embedWorker(ctx)
 	}
-	// KV 持久层：启动异步重建（不阻塞构造；向量渐进可用，重建期检索退化为关键词）。
+	// KV 持久层：启动异步重建（独立 goroutine，不入 worker wg——Close 有界等待，
+	// 防 KV 后端挂住永久阻塞 Close，审查 S6）。重建期 Ready=false → 检索退化关键词。
 	if e.kv != nil {
 		e.rebuildDone.Store(false)
-		e.wg.Add(1)
 		go func() {
-			defer e.wg.Done()
+			defer close(e.rebuildCh)
 			e.rebuildFromKV()
 		}()
+	} else {
+		close(e.rebuildCh)
 	}
 	e.started.Store(true)
 	return e
@@ -204,19 +221,25 @@ func (e *InMemoryEngine) Retrieve(ctx context.Context, q RetrievalQuery) ([]Retr
 		return e.keywordRetrieve(q, limit), nil
 	}
 
-	overfetch := limit * e.cfg.Overfetch
-	kwKeys := e.keywordKeys(ctx, q, overfetch)
+	// 候选容量：超取补偿 ∪ 配置 topK 下限（审查 S1：vector_top_k/keyword_top_k 生效）。
+	kwCap := max(limit*e.cfg.Overfetch, e.cfg.KeywordTopK)
+	vecCap := max(limit*e.cfg.Overfetch, e.cfg.VectorTopK)
 
-	if mode == ModeVector || !e.vectorAvailable() {
-		vecKeys := e.vectorKeys(ctx, q, overfetch)
-		if mode == ModeVector {
+	vecKeys := e.vectorKeys(ctx, q, vecCap)
+
+	// 显式向量模式：有结果则返回；无则按 C6 契约退化为关键词（审查 S2）。
+	if mode == ModeVector {
+		if len(vecKeys) > 0 {
 			return e.toHits(vecKeys, limit), nil
 		}
-		// hybrid 但向量不可用 → 纯关键词
-		return e.toHits(kwKeys, limit), nil
+		return e.keywordRetrieve(q, limit), nil
 	}
 
-	vecKeys := e.vectorKeys(ctx, q, overfetch)
+	// hybrid：向量零命中 → 纯关键词（不浪费关键词扫描）；否则 RRF 融合。
+	if len(vecKeys) == 0 {
+		return e.keywordRetrieve(q, limit), nil
+	}
+	kwKeys := e.keywordKeys(ctx, q, kwCap)
 	fused := rrfFuse([][]int64{kwKeys, vecKeys}, e.cfg.RRFK)
 	return e.toHits(fused, limit), nil
 }
@@ -231,17 +254,29 @@ func (e *InMemoryEngine) Capabilities() RetrievalCaps {
 	}
 }
 
-// Ready 引擎是否就绪。内存引擎无重建窗口，启动即就绪（向量随索引渐增）。
-func (e *InMemoryEngine) Ready() bool { return e.started.Load() && !e.closed.Load() }
+// Ready 引擎是否就绪：已启动、未关闭、且 KV 重建完成（若有 KV）。重建完成前为
+// false → 向量路 vectorAvailable() 返回 false，Retrieve 退化为关键词（对齐 C6
+// 契约「重启重建完成前 Ready=false」，审查 S7）。
+func (e *InMemoryEngine) Ready() bool {
+	return e.started.Load() && !e.closed.Load() && e.rebuildDone.Load()
+}
 
-// Close 停止后台 worker 并排空。幂等。
+// Close 停止后台 worker（排空在途批，用独立不取消 ctx，审查 M1）并有界等待 KV 重建
+// goroutine（审查 S6：防 KV 后端挂住导致 Close 永久阻塞）。幂等。
 func (e *InMemoryEngine) Close() error {
 	e.closeOnce.Do(func() {
 		e.closed.Store(true)
 		if e.cancel != nil {
-			e.cancel()
+			e.cancel() // 通知 worker 进入排空
 		}
-		e.wg.Wait()
+		e.wg.Wait() // 等 worker 排空退出（排空有 DrainTimeout 上界）
+		if e.rebuildCh != nil {
+			select {
+			case <-e.rebuildCh:
+			case <-time.After(e.cfg.RebuildWaitTimeout):
+				log.Warnf("[InMemoryEngine] Close: KV 重建未在 %v 内完成，放弃等待", e.cfg.RebuildWaitTimeout)
+			}
+		}
 	})
 	return nil
 }
@@ -271,6 +306,10 @@ func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK
 			continue
 		}
 		if !matchPartition(partitionIDs, e.vmeta[key].partitionID) {
+			continue
+		}
+		if len(vec) != len(query) {
+			e.dimMismatchCount.Add(1) // 维度不匹配跳过（审查 M3）
 			continue
 		}
 		cands = append(cands, scored{key: key, score: cosine(query, vec)})
@@ -309,7 +348,7 @@ func (e *InMemoryEngine) vectorAvailable() bool {
 func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 	defer e.wg.Done()
 	batch := make([]IndexableEvent, 0, e.cfg.EmbedBatch)
-	flush := func() {
+	flush := func(fctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
@@ -317,7 +356,7 @@ func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 		for i, evt := range batch {
 			texts[i] = e.textForIndex(evt.Text)
 		}
-		vecs, err := e.emb.Embed(ctx, texts)
+		vecs, err := e.emb.Embed(fctx, texts)
 		if err != nil {
 			e.embedErrCount.Add(int64(len(batch)))
 			e.droppedCount.Add(int64(len(batch)))
@@ -347,26 +386,29 @@ func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 排空剩余队列（尽力，不阻塞退出）。
+			// 排空剩余队列（审查 M1）：用独立、不继承取消、带超时的 ctx，否则合规
+			// 嵌入器（尊重 ctx 取消）在排空期必然失败，丢在途向量且不持久化。
+			drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), e.cfg.DrainTimeout)
+			defer cancelDrain()
 			for {
 				select {
 				case evt := <-e.queue:
 					batch = append(batch, evt)
 					if len(batch) >= e.cfg.EmbedBatch {
-						flush()
+						flush(drainCtx)
 					}
 				default:
-					flush()
+					flush(drainCtx)
 					return
 				}
 			}
 		case evt := <-e.queue:
 			batch = append(batch, evt)
 			if len(batch) >= e.cfg.EmbedBatch {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }
@@ -409,6 +451,10 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q RetrievalQuery, k int
 			continue
 		}
 		if !matchTimeRange(q.StartTime, q.EndTime, meta.timestamp) {
+			continue
+		}
+		if len(vec) != len(qv) {
+			e.dimMismatchCount.Add(1) // 维度不匹配（换模型/维度后旧向量）：跳过，不收 0 分候选（审查 M3）
 			continue
 		}
 		cands = append(cands, scored{key: key, score: cosine(qv, vec)})
@@ -460,6 +506,9 @@ func (e *InMemoryEngine) keywordKeys(ctx context.Context, q RetrievalQuery, k in
 	for _, r := range refs {
 		keys = append(keys, r.EventKey) // QueryEvents 已按 OrderBy（timestamp_desc）排序 = 关键词路排名
 	}
+	// 语义警示（审查 S3）：关键词腿按 timestamp_desc 排名（非相关度），故 RRF 融合结果
+	// 在关键词侧偏向新近事件。向量腿为余弦相关度秩。这是 MVP 的已知取舍——相关度重排
+	// （token 重叠/Jaccard）列为后续增强；当前融合仍优于纯关键词（向量腿提供语义信号）。
 	return keys
 }
 

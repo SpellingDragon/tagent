@@ -293,7 +293,11 @@ type MemoryConfig struct {
 
 // MemoryEngineConfig 配置记忆引擎（向量后端选择与融合调参）。
 type MemoryEngineConfig struct {
-	// Backend 选择向量后端："memory"（MVP 内存索引，默认）或 "rustviking"（持久向量后端）。
+	// Backend 选择向量后端："memory"（MVP 内存索引，默认）或 "rustviking"。
+	// 注意（审查 Nit7）：MVP 阶段两者等价——均为内存向量索引；差异在持久化：store 为
+	// file/localfile 时向量自动序列化入其底层 KV（rustviking/LocalFile）+ 启动重建。
+	// rustviking 原生 HNSW/IVF 索引持久化（接入 ivf_persist）为 rustviking backlog
+	// （见 f1-rustviking-capability-report.md：rustviking index CLI 进程内易失）。
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// Embedding 配置嵌入器。nil = 无向量，引擎不接线（行为同现状纯关键词）。
 	Embedding *EmbeddingConfig `json:"embedding,omitempty" yaml:"embedding,omitempty"`

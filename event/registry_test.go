@@ -10,14 +10,14 @@ import (
 // 注册表对 9 个内置类型的声明式元数据必须精确复现委托前各函数的行为。
 func TestRegistryReproducesBuiltinBehavior(t *testing.T) {
 	cases := []struct {
-		name         string
-		special      bool // IsSpecialEventType
-		toolLine     bool // GenerateEventSummary 走工具行
-		skeleton     bool // IsSkeletonMessage
-		lowValue     bool // LowValueEventTypes
-		ttl          int  // TypeTTL（0=继承全局）
-		role         model.Role
-		synthetic    bool
+		name      string
+		special   bool // IsSpecialEventType
+		toolLine  bool // GenerateEventSummary 走工具行
+		skeleton  bool // IsSkeletonMessage
+		lowValue  bool // LowValueEventTypes
+		ttl       int  // TypeTTL（0=继承全局）
+		role      model.Role
+		synthetic bool
 	}{
 		{TypeExternalInput, true, false, true, false, 30, model.RoleUser, false},
 		{TypeAgentOutput, true, false, true, false, 14, model.RoleAssistant, false},
@@ -119,15 +119,15 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 func TestRegistryOneRegistrationWholeChain(t *testing.T) {
 	const newType = "consolidation_probe"
 	RegisterEventType(EventTypeSpec{
-		Name:        newType,
-		Role:        model.RoleSystem,
-		Special:     false,
-		Skeleton:    true,
-		LowValue:    false,
-		TTLDays:     -1, // 豁免遗忘（长期记忆）
-		Synthetic:   false,
-		Embeddable:  true,
-		Recallable:  true,
+		Name:       newType,
+		Role:       model.RoleSystem,
+		Special:    false,
+		Skeleton:   true,
+		LowValue:   false,
+		TTLDays:    -1, // 豁免遗忘（长期记忆）
+		Synthetic:  false,
+		Embeddable: true,
+		Recallable: true,
 	})
 	// 一处注册后，全链路自动生效：
 	if got := EventTypeRole(newType); got != model.RoleSystem {

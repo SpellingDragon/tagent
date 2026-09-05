@@ -72,7 +72,11 @@ func (m *MockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 func (m *MockEmbedder) embedOne(text string) []float32 {
-	vec := make([]float32, m.dim)
+	dim := m.dim
+	if dim <= 0 {
+		dim = 64 // 零值 MockEmbedder{} 兜底，防除零 panic（审查 Nit8）
+	}
+	vec := make([]float32, dim)
 	// 词元哈希袋：按空白/标点粗切，每词元投到两个维度（增碰撞分辨）。
 	start := 0
 	for i := 0; i <= len(text); i++ {
@@ -82,8 +86,8 @@ func (m *MockEmbedder) embedOne(text string) []float32 {
 				h := fnv.New32a()
 				_, _ = h.Write([]byte(tok))
 				sum := h.Sum32()
-				vec[sum%uint32(m.dim)] += 1.0
-				vec[(sum>>7)%uint32(m.dim)] += 0.5
+				vec[sum%uint32(dim)] += 1.0
+				vec[(sum>>7)%uint32(dim)] += 0.5
 			}
 			start = i + 1
 		}
@@ -223,50 +227,61 @@ func (z *ZhipuEmbedder) Embed(ctx context.Context, texts []string) ([][]float32,
 func (z *ZhipuEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ { // 重试 ≤1
-		vecs, err := z.doEmbedRequest(ctx, texts)
+		vecs, retryable, err := z.doEmbedRequest(ctx, texts)
 		if err == nil {
 			return vecs, nil
 		}
 		lastErr = err
-		// ctx 取消不重试。
 		if ctx.Err() != nil {
+			return nil, ctx.Err() // ctx 取消不重试
+		}
+		if !retryable {
+			return nil, err // 4xx（非 429）等不可恢复错误不重试（审查 Nit4：省配额、快反馈）
+		}
+		// 可恢复（429/5xx/网络）：短退避后重试。
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
 		}
 	}
 	return nil, lastErr
 }
 
-func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][]float32, error) {
+// doEmbedRequest 发一次嵌入请求。返回 (向量, 是否可重试, 错误)：
+// 网络错误/429/5xx 可重试；其余 4xx（密钥错、参数非法）与解析错误不可重试（审查 Nit4）。
+func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][]float32, bool, error) {
 	body, err := json.Marshal(embeddingsRequest{
 		Model:      z.cfg.Model,
 		Input:      texts,
 		Dimensions: z.cfg.Dimensions,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("marshal embeddings request: %w", err)
+		return nil, false, fmt.Errorf("marshal embeddings request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, z.cfg.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build embeddings request: %w", err)
+		return nil, false, fmt.Errorf("build embeddings request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+z.apiKey)
 
 	resp, err := z.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("embeddings http: %w", err)
+		return nil, true, fmt.Errorf("embeddings http: %w", err) // 网络错误可重试
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embeddings http %d: %s", resp.StatusCode, truncateForError(string(raw)))
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return nil, retryable, fmt.Errorf("embeddings http %d: %s", resp.StatusCode, truncateForError(string(raw)))
 	}
 	var parsed embeddingsResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse embeddings response: %w", err)
+		return nil, false, fmt.Errorf("parse embeddings response: %w", err)
 	}
 	if parsed.Error != nil {
-		return nil, fmt.Errorf("embeddings api error: %s", parsed.Error.Message)
+		return nil, false, fmt.Errorf("embeddings api error: %s", parsed.Error.Message)
 	}
 	// 按 index 排序还原（端点可能乱序返回）。
 	out := make([][]float32, len(texts))
@@ -277,10 +292,10 @@ func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][
 	}
 	for i, v := range out {
 		if v == nil {
-			return nil, fmt.Errorf("embeddings response missing index %d", i)
+			return nil, false, fmt.Errorf("embeddings response missing index %d", i)
 		}
 	}
-	return out, nil
+	return out, true, nil
 }
 
 func truncateForError(s string) string {

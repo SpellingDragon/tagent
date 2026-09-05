@@ -8,12 +8,12 @@ import (
 // stubEngine 是 MemoryEngine 的最小参考实现，用于编译期锁定契约 C6，
 // 并为 T-A 的 InMemoryEngine/RustVikingEngine 提供接口满足性基线。
 type stubEngine struct {
-	indexed  int
-	removed  int
-	closed   bool
-	ready    bool
-	caps     RetrievalCaps
-	hits     []RetrievalHit
+	indexed   int
+	removed   int
+	closed    bool
+	ready     bool
+	caps      RetrievalCaps
+	hits      []RetrievalHit
 	lastQuery RetrievalQuery
 }
 

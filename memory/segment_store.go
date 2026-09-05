@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -138,6 +139,12 @@ type FileSegmentStore struct {
 	lifecycle *LifecycleManager
 	compactor *Compactor
 	closeOnce sync.Once
+
+	// vecRemover 是可选向量移除回调（VectorRemover，atomic 存）：遗忘物理删除事件时
+	// （Compactor.finalizeTombstones）回调，使记忆引擎同步移除向量（内存索引 + KV
+	// 持久键），防死键堆积与重启复活（审查 M2）。compactor 先于本回调设置启动，故用
+	// atomic 防竞态。由 wireMemoryEngine 经 SetVectorRemover 接线。
+	vecRemover atomic.Value // VectorRemover
 }
 
 // NewFileSegmentStore creates a FileSegmentStore.
@@ -762,6 +769,23 @@ func (s *FileSegmentStore) GetStats() StoreStats {
 // KVBackend 暴露底层 KVStore（KVProvider 实现）——供记忆引擎做向量持久化
 // （序列化向量入 KV + 启动重建，见 engine_persist.go）。
 func (s *FileSegmentStore) KVBackend() KVStore { return s.kv }
+
+// SetVectorRemover 注册向量移除回调（wireMemoryEngine 包裹引擎后调用）。
+// 用 atomic 存：compactor goroutine 可能已在运行，读写需无竞态。
+func (s *FileSegmentStore) SetVectorRemover(vr VectorRemover) {
+	if vr != nil {
+		s.vecRemover.Store(vr)
+	}
+}
+
+// removeVector 回调已注册的向量移除器（未注册则 no-op）。遗忘物理删除时调用（审查 M2）。
+func (s *FileSegmentStore) removeVector(eventKey int64) {
+	if v := s.vecRemover.Load(); v != nil {
+		if vr, ok := v.(VectorRemover); ok {
+			vr.RemoveVector(eventKey)
+		}
+	}
+}
 
 // SearchByEmbedding performs semantic search (stub — not supported).
 func (s *FileSegmentStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {

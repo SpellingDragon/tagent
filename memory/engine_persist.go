@@ -26,6 +26,7 @@ const rebuildScanLimit = 200000
 // 元数据（pid/type/ts）随向量持久，使重建无需回读事件即可恢复过滤维度。
 type persistedVector struct {
 	Vec         []float32 `json:"v"`
+	ModelID     string    `json:"m,omitempty"` // 嵌入模型指纹：换模型/维度后旧向量重建时跳过（审查 M3）
 	PartitionID int       `json:"pid"`
 	EventType   string    `json:"t"`
 	Timestamp   int64     `json:"ts"`
@@ -34,6 +35,14 @@ type persistedVector struct {
 // vecKVKey 构造向量的 KV 键：{prefix}{eventKey}。
 func (e *InMemoryEngine) vecKVKey(eventKey int64) string {
 	return e.vecPrefix + strconv.FormatInt(eventKey, 10)
+}
+
+// modelID 返回当前嵌入器模型标识（无嵌入器返回空）。用于持久化指纹比对。
+func (e *InMemoryEngine) modelID() string {
+	if e.emb != nil {
+		return e.emb.ModelID()
+	}
+	return ""
 }
 
 // persistVectors 批量把向量写入 KV（worker flush 后调用）。失败仅记日志，不传染。
@@ -48,6 +57,7 @@ func (e *InMemoryEngine) persistVectors(batch []IndexableEvent, vecs [][]float32
 		}
 		raw, err := json.Marshal(persistedVector{
 			Vec:         vecs[i],
+			ModelID:     e.modelID(),
 			PartitionID: evt.PartitionID,
 			EventType:   evt.EventType,
 			Timestamp:   evt.Timestamp,
@@ -88,7 +98,8 @@ func (e *InMemoryEngine) rebuildFromKV() {
 		e.rebuildDone.Store(true)
 		return
 	}
-	var loaded, corrupt int
+	var loaded, corrupt, staleModel int
+	curModel := e.modelID()
 	e.mu.Lock()
 	for _, p := range pairs {
 		key, err := strconv.ParseInt(strings.TrimPrefix(p.Key, e.vecPrefix), 10, 64)
@@ -101,13 +112,19 @@ func (e *InMemoryEngine) rebuildFromKV() {
 			corrupt++
 			continue
 		}
+		// 换模型/维度后的旧向量：跳过，防维度不匹配 0 分候选与语义混用（审查 M3）。
+		if curModel != "" && pv.ModelID != "" && pv.ModelID != curModel {
+			staleModel++
+			continue
+		}
 		e.vectors[key] = pv.Vec
 		e.vmeta[key] = vectorMeta{partitionID: pv.PartitionID, eventType: pv.EventType, timestamp: pv.Timestamp}
 		loaded++
 	}
 	e.mu.Unlock()
+	e.indexedCount.Add(int64(loaded)) // 重建计入 indexed，与 vectorCount 语义一致（审查 Nit1）
 	e.rebuildDone.Store(true)
-	log.Infof("[InMemoryEngine] rebuilt %d vectors from KV (prefix %q, corrupt=%d)", loaded, e.vecPrefix, corrupt)
+	log.Infof("[InMemoryEngine] rebuilt %d vectors from KV (prefix %q, corrupt=%d, staleModel=%d)", loaded, e.vecPrefix, corrupt, staleModel)
 }
 
 // RebuildDone 报告 KV 重建是否完成（可观测/测试同步用；生产检索不等待，向量渐进可用）。
