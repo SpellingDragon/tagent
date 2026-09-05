@@ -215,7 +215,7 @@ flowchart TB
 | T-A | COMPLETE | F2(done) | 引擎按path共享;rustviking index易失→KV持久化+重建(F1追加发现);SearchByEmbedding经RawVectorSearcher消灭stub | 交付:解耦缝C6+Embedder(zhipu/mock)+InMemoryEngine(hybrid RRF/分区过滤/异步非阻塞)+engineBridge+config+recall hybrid+KV持久化重建+rustviking契约修复;门禁1-2绿(build/vet/test-race+全量19包) |
 | T-B | PENDING | F2 | | |
 | T-G | PENDING | REG,FIX | | 两子包 |
-| TC0 | PENDING | REG | | 含 FIX 重划入的 FullEvent.Metadata 归因盖章管线(ctx 载体,覆盖两持久化路径) |
+| TC0 | IN_PROGRESS | REG(done) | 门禁3(CodeReview)集中到MG前(自决,marathon规模);Metadata基线盖agent_name/trigger_source/rollout_id,bundle_id待BundleProvider | ✅归因地基:Attribution ctx载体+双路径盖章(修报告F1缺口)+meta keys,全绿;余:prompt.Getter接口化+BundleStore+VersionedSource |
 | T-EVO | PENDING | TC0,TG,TB,FIX,REG | | 含 T-E/T-F 矛盾调和（风险分级发布道） |
 | T-D | PENDING | REG | | |
 | MG | PENDING | 全部 | | |
