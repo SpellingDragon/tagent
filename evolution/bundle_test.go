@@ -172,3 +172,17 @@ func TestBundleStore_ContentAddressed(t *testing.T) {
 		t.Fatalf("相同内容应内容寻址同 id, got %s vs %s", b1.ID, b2.ID)
 	}
 }
+
+// TestBundleStore_RejectsPathTraversal 是 Major 回归：非法 id（路径遍历/过短/空/非 hex）
+// 须被 Get 拒——防 LLM 输入的 target_id 经 filepath.Join 遍历文件系统。
+func TestBundleStore_RejectsPathTraversal(t *testing.T) {
+	store, err := NewBundleStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewBundleStore: %v", err)
+	}
+	for _, bad := range []string{"../../../etc/passwd", "nothex", "", "abcd1234", "bundles/x"} {
+		if _, err := store.Get(bad); err == nil {
+			t.Fatalf("非法 id %q 应被拒（路径遍历防护）", bad)
+		}
+	}
+}

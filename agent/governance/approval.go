@@ -93,8 +93,9 @@ func (a *ApprovalManager) Request(toolName, argsJSON, argsPreview, level, ruleID
 	}
 	a.mu.Lock()
 	a.index[req.ID] = req
+	snapshot := *req // 值拷贝：write 在锁外读副本，避免与并发访问竞争共享对象
 	a.mu.Unlock()
-	if err := a.write(req); err != nil {
+	if err := a.write(&snapshot); err != nil {
 		return nil, err
 	}
 	return req, nil
@@ -128,8 +129,9 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) er
 	}
 	req.Status = status
 	req.DecidedBy = by
+	snapshot := *req // 值拷贝：write 在锁外读副本，避免与并发 Check/Decide 竞争共享对象
 	a.mu.Unlock()
-	return a.write(req)
+	return a.write(&snapshot)
 }
 
 // Pending 返回全部未过期 pending 请求（供审批通道展示），按创建时间升序。

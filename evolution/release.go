@@ -99,8 +99,9 @@ type ReleaseManager struct {
 	approveGate  GateFunc
 	cfg          ReleaseConfig
 
-	mu      sync.Mutex
-	history []ReleaseRecord
+	submitMu sync.Mutex    // 序列化 Submit：activate+evaluate+rollback 临界区原子（防并发 Submit 竞争 SetActive）
+	mu       sync.Mutex    // 保护 history
+	history  []ReleaseRecord
 }
 
 // ReleaseDeps 是构建 ReleaseManager 的依赖集。
@@ -135,6 +136,11 @@ func (rm *ReleaseManager) Submit(ctx context.Context, draft *Bundle) (ReleaseRec
 	if draft == nil {
 		return ReleaseRecord{}, fmt.Errorf("evolution: nil draft bundle")
 	}
+	// 序列化整个发布流程（validate→activate→evaluate→promote/rollback 为原子临界区），
+	// 防并发 Submit 竞争 SetActive 造成 active 指针错乱。Submit 稀疏（自进化提案），
+	// 持锁跨越评估器（可能慢）可接受。
+	rm.submitMu.Lock()
+	defer rm.submitMu.Unlock()
 	active := rm.store.Active()
 	lane := rm.route(active, draft)
 
@@ -171,7 +177,13 @@ func (rm *ReleaseManager) runFastLane(ctx context.Context, draft, active *Bundle
 	// 双回滚触发②：后验评估（LLM-judge/程序化，模型决策回滚）。
 	if rm.evaluator != nil {
 		res, err := rm.evaluator.Evaluate(ctx, draft.ID)
-		if err == nil && !res.Pass {
+		if err != nil {
+			// 评估失败（ctx 取消/LLM 不可用/评分器异常）：保守回滚——无法确认安全则
+			// 不留在 active（修复：绝不把 evaluator error 当「通过」造成假激活）。
+			rm.rollback(active)
+			return rm.record(draft, lane, StageRolledBack, "后验评估失败(错误)，保守回滚: "+err.Error(), 0), nil
+		}
+		if !res.Pass {
 			rm.rollback(active)
 			return rm.record(draft, lane, StageRolledBack, "后验评估劣化回滚: "+res.Reason, res.Score), nil
 		}

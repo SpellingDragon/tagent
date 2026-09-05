@@ -141,7 +141,7 @@ func DefaultRules() []Rule {
 					return false
 				}
 				if argsContains(c,
-					"rm -rf", "rm -fr", "mkfs", "dd if=", ":(){", "shutdown", "reboot",
+					"rm -rf", "rm -fr", "rm -r -f", "rm -f -r", "rm --recursive", "mkfs", "dd if=", ":(){", "shutdown", "reboot",
 					"halt", "poweroff", "chmod -r 777", "> /dev/sda", "mv /* ",
 					"git push --force", "git push -f") {
 					return true

@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -189,4 +190,31 @@ func TestRelease_AgentCannotDirectlyActivate(t *testing.T) {
 		t.Fatal("Create draft 不应改 active（agent 无直接激活权，D1 铁律）")
 	}
 	_ = draft
+}
+
+// errEvaluator 模拟评估器不可用（LLM 超时/ctx 取消）。
+type errEvaluator struct{}
+
+func (errEvaluator) Evaluate(context.Context, string) (EvalResult, error) {
+	return EvalResult{}, fmt.Errorf("evaluator unavailable")
+}
+
+// TestRelease_FastLane_EvaluatorErrorRollsBack 是 Blocker 回归：评估器返回 error 时
+// 绝不可被当「通过」造成假激活，须保守回滚到父版本。
+func TestRelease_FastLane_EvaluatorErrorRollsBack(t *testing.T) {
+	store := newTestStore(t)
+	base, _ := store.InitBaseline(map[string]string{"system": "v0"}, BundleParams{}, ModelRef{})
+	draft, _ := store.Create(base, map[string]string{"system": "v1"}, BundleParams{}, ModelRef{}, "refine", "")
+	rm, _ := NewReleaseManager(ReleaseDeps{
+		Store: store, Router: fixedRouter{LaneFast},
+		Evaluator:    errEvaluator{}, // 评估失败
+		ValidateGate: gate(true, ""),
+	})
+	rec, _ := rm.Submit(context.Background(), draft)
+	if rec.Stage != StageRolledBack {
+		t.Fatalf("评估器 error 应保守回滚（非假激活）, got stage=%s", rec.Stage)
+	}
+	if store.Active().ID != base.ID {
+		t.Fatal("评估失败回滚后 active 应恢复基线")
+	}
 }

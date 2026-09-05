@@ -147,8 +147,12 @@ func (s *BundleStore) SetActive(id string) error {
 // Rollback 回滚到历史 bundle（= SetActive，基线不可变故任意历史版本皆可回）。
 func (s *BundleStore) Rollback(toID string) error { return s.SetActive(toID) }
 
-// Get 按 id 读取 bundle（先内存 active，后磁盘）。
+// Get 按 id 读取 bundle（先内存 active，后磁盘）。id 须为合法内容寻址 hex——防路径遍历
+// （target_id 可能来自 LLM 输入，直传 filepath.Join 前必须校验）。
 func (s *BundleStore) Get(id string) (*Bundle, error) {
+	if !validBundleID(id) {
+		return nil, fmt.Errorf("evolution: invalid bundle id %q (需 16 位内容寻址 hex)", id)
+	}
 	s.mu.RLock()
 	if s.active != nil && s.active.ID == id {
 		b := s.active
@@ -165,6 +169,21 @@ func (s *BundleStore) Get(id string) (*Bundle, error) {
 		return nil, fmt.Errorf("evolution: parse bundle %s: %w", id, err)
 	}
 	return &b, nil
+}
+
+// validBundleID 校验 bundle id：内容寻址 sha256 截断 = 16 位小写 hex（见 Create 的
+// b.ID = b.Hash[:16]）。拒绝任何含路径分隔符/".."/非 hex/长度不符的 id——防 LLM 输入的
+// target_id 经 bundlePath 的 filepath.Join 遍历文件系统。
+func validBundleID(id string) bool {
+	if len(id) != 16 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // List 返回全部 bundle（按创建时间升序）。
