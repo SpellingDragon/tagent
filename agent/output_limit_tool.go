@@ -12,6 +12,11 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// toolOutputCapChars 是 OutputLimitTool 的默认输出上限（≈15K tokens）与 MaxTokens/2*4 派生的
+// 封顶值（A6）。与 MaxTokens 解耦的具名常量——此前纯派生式在 128K budget 时 = 256K 字符，
+// 长上下文下溢出保护形同不存在（与 event_bus.go settleInlineCapChars 移除"无主公式意外"自洽）。
+const toolOutputCapChars = 60_000
+
 // OutputLimitTool wraps a CallableTool and handles output that exceeds
 // maxChars. When the serialized result exceeds the limit, the full output
 // is saved to a file and a summary with the file path is returned instead.

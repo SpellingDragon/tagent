@@ -23,7 +23,11 @@ type MeditationConfig struct {
 	Interval     time.Duration  // Check interval (default: 30m)
 	MinGap       time.Duration  // Minimum idle gap for valid meditation (default: 2h)
 	PromptText   string         // Meditation prompt text (static, loaded once at init)
-	PromptSource *prompt.Source // Hot-reloadable meditation prompt (optional, overrides PromptText)
+	// PromptSource 用 prompt.Getter 接口（而非具体 *prompt.Source）：使冥想提示词可注入
+	// evolution.VersionedSource 纳入 bundle 版本治理（C6：此前具体类型绕过了 TC0 建的 Getter 缝，
+	// 系统提示词可被 refine/发布道/回滚治理而冥想提示词不可——冥想恰是最该治理的自治驱动源）。
+	// *prompt.Source 满足 Getter，既有构造点零改动；Source.Get 有 nil-receiver 守卫。
+	PromptSource prompt.Getter // Hot-reloadable meditation prompt (optional, overrides PromptText)
 
 	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
 	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。

@@ -292,7 +292,12 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	description := cfg.Description
 
 	// 4. Wrap all tools with OutputLimitTool
+	// A6：封顶 MaxTokens/2*4 派生——保留小 budget 的比例语义，但封顶 toolOutputCapChars，
+	// 防长上下文配置（128K budget → 256K 字符）下溢出保护形同不存在。
 	maxOutputChars := cfg.MaxTokens / 2 * 4
+	if maxOutputChars <= 0 || maxOutputChars > toolOutputCapChars {
+		maxOutputChars = toolOutputCapChars
+	}
 	outputWorkspace := workspace.ToolOutputPath(cfg.WorkspaceRoot)
 	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
 		wrapped := make([]tool.Tool, len(cfg.Tools))
