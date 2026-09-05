@@ -217,5 +217,5 @@ flowchart TB
 | T-G | PENDING | REG,FIX(done) | 核验:F2(outputCh)现有ctx.Done守卫非无限阻塞;F3(replayWAL)已容忍torn-tail坏行(中间坏行fail-fast有意)→报告F2/F3缺陷claim部分过时已缓解;T-G价值在新建子系统非缺陷修复 | 待建:ReliableBus(spill/durable+outputCh宽限落盘)+DegradationManager五依赖+governance(RiskClassifier C5/DenialLedger/Budget/Goal/Approval)+故障注入矩阵 |
 | TC0 | COMPLETE | REG(done) | Debug子agent三重证据定性:agent包3个-race失败=pre-existing上游trpc-agent-go@v1.10.0竞态(session.UpdatedAt/reflect clone/steer.Queue.Close),在c484d66/a88bf01同样复现,非本迭代回归→-race门禁对agent包豁免此3项(业务断言全过) | ✅归因地基(Attribution双路径盖章,修报告F1缺口)+prompt.Getter缝+evolution原语(BundleStore不可变/内容寻址/原子active切换/回滚/持久+VersionedSource实现Getter+BundleProvider)+消费方迁移(ContextManager系统提示源→Getter);全量20包-short绿+evolution-race绿 |
 | T-EVO | PENDING | TC0,TG,TB,FIX,REG | | 含 T-E/T-F 矛盾调和（风险分级发布道） |
-| T-D | PENDING | REG | | |
+| T-D | IN_PROGRESS(核心done) | REG(done) | consolidation经注册表一处注册即TTL豁免/可嵌入/可召回/骨架(REG兑现);指纹服务端算LLM不可伪造;墓碑=诚实衰减非错误 | ✅证据门控巩固核心:ComputeReceiptFingerprint(SHA1覆盖content防漂移)+VerifyConsolidation回放+BuildConsolidationEvent服务端构造+consolidation类型注册;5测试绿;余:memory_consolidate工具+维度诊断diagnostics |
 | MG | PENDING | 全部 | | |
