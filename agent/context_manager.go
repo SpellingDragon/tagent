@@ -497,10 +497,21 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// task, so a background settle can be routed back to the originating
 		// session. The task layer never interprets it. (async-result-delivery.)
 		var spawner task.TaskSpawner = cm.taskController
-		if md := cm.GetInvocationMetadata(); len(md) > 0 {
-			cp := make(map[string]string, len(md))
+		// Origin baggage = invocation metadata (chat_id, ...) + T-B turn trace 锚点
+		// (trace_id/span_id)。后者使异步 task_settled 事件经 Origin→Metadata 管道携带触发
+		// 它的 turn 的 trace 锚点——指令2「一套数据模式多场景保一致性」延伸到异步任务链路：
+		// task settle 回流的新 turn 可关联回原 trace（异步链路可追溯），复用现有 Origin 管道
+		// 零新结构、零 task 包侵入。
+		md := cm.GetInvocationMetadata()
+		traceID, spanID := spanTraceIDs(ctx)
+		if len(md) > 0 || traceID != "" {
+			cp := make(map[string]string, len(md)+2)
 			for k, v := range md {
 				cp[k] = v
+			}
+			if traceID != "" {
+				cp[tagentevent.MetaKeyTraceID] = traceID
+				cp[tagentevent.MetaKeySpanID] = spanID
 			}
 			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
 		}
