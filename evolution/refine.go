@@ -4,10 +4,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
+
+// refineSubmitTimeout 限界 refinePropose 内 ReleaseManager.Submit 的同步时长（Suggestion：
+// Submit 跨 canary hold + LLM-judge 可能数十秒，而 refine 工具调用在单消费者事件循环内同步
+// 执行）。超时 → ReleaseManager 诚实停留 canary（Major6：不回滚不假通过），agent 得 StageCanary
+// 稍后经 status 查终态。取 90s（> judge 默认 60s，让正常评估完成，同时限界 canary hold 配大的最坏）。
+const refineSubmitTimeout = 90 * time.Second
 
 // ==================== refine 工具（T-EVO · agent 自我修改通道）====================
 //
@@ -96,12 +103,15 @@ func refinePropose(ctx context.Context, store *BundleStore, rm *ReleaseManager, 
 	if err != nil {
 		return refineResult{Op: "propose", OK: false}, fmt.Errorf("创建 draft bundle 失败: %w", err)
 	}
-	// 提交发布状态机——激活与否由风险分级发布道裁决（agent 无直接激活权）。
+	// 提交发布状态机——激活与否由风险分级发布道裁决（agent 无直接激活权）。限界超时防挂死
+	// 单消费者事件循环（Suggestion）；超时则停留 canary（Major6），agent 稍后 status 查终态。
 	if rm == nil {
 		return refineResult{Op: "propose", OK: true, BundleID: draft.ID, Stage: string(StageDraft),
 			Message: "draft 已创建（无发布状态机，停留 draft；激活需 ReleaseManager）"}, nil
 	}
-	rec, err := rm.Submit(ctx, draft)
+	sctx, cancel := context.WithTimeout(ctx, refineSubmitTimeout)
+	defer cancel()
+	rec, err := rm.Submit(sctx, draft)
 	if err != nil {
 		return refineResult{Op: "propose", OK: false, BundleID: draft.ID}, fmt.Errorf("发布状态机失败: %w", err)
 	}

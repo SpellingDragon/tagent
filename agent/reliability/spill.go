@@ -61,11 +61,20 @@ func (s *SpillStore) recoverSeq() {
 	var max int64
 	var count int64
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), spillExt) {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// 清理崩溃遗留的孤儿 .tmp（Nit：rename 前崩溃会留下 tmp，防无限堆积）。
+		if strings.HasSuffix(name, ".tmp") {
+			_ = os.Remove(filepath.Join(s.dir, name))
+			continue
+		}
+		if !strings.HasSuffix(name, spillExt) {
 			continue
 		}
 		count++
-		n, err := strconv.ParseInt(strings.TrimSuffix(e.Name(), spillExt), 10, 64)
+		n, err := strconv.ParseInt(strings.TrimSuffix(name, spillExt), 10, 64)
 		if err == nil && n > max {
 			max = n
 		}
@@ -82,9 +91,22 @@ func (s *SpillStore) Spill(data []byte) error {
 	}
 	n := s.seq.Add(1)
 	name := filepath.Join(s.dir, fmt.Sprintf("%020d%s", n, spillExt))
-	tmp := name + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("reliability: spill write: %w", err)
+	// tmp 名加 pid + O_EXCL 创建：防同目录多实例（滚动重启重叠）从同一 seq 起编号时 tmp 冲突
+	// （Suggestion）。O_EXCL 冲突则报错而非静默覆盖。注：多实例共享同一 dir 仍可能在 rename
+	// 目标碰撞——生产应按 agent/process 配独立 dir（tagent.go 已 per-agent 子目录隔离）。
+	tmp := fmt.Sprintf("%s.%d.tmp", name, os.Getpid())
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("reliability: spill create tmp: %w", err)
+	}
+	if _, werr := f.Write(data); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("reliability: spill write: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("reliability: spill close: %w", cerr)
 	}
 	if err := os.Rename(tmp, name); err != nil {
 		_ = os.Remove(tmp)

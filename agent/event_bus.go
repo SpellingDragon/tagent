@@ -29,30 +29,30 @@ import (
 // agent_output does NOT enter the bus — it is emitted directly to outputCh.
 type AgentEvent struct {
 	// ID is a unique identifier for this event.
-	ID string
+	ID string `json:"id"`
 
 	// Type is the event type (e.g., "external_input", "tool_use").
 	// Reuses tagentevent.TypeExternalInput for external inputs.
 	// Uses TypeToolUse for tool invocations.
-	Type string
+	Type string `json:"type"`
 
 	// Source identifies the producer of this event.
 	// Values: "user", "tmux", "meditation", "subagent", "agent_loop", "inject".
-	Source string
+	Source string `json:"source"`
 
 	// Timestamp is when this event was created.
-	Timestamp time.Time
+	Timestamp time.Time `json:"timestamp"`
 
 	// Message carries the payload for external_input events.
 	// Nil for non-external_input events.
-	Message *model.Message
+	Message *model.Message `json:"message,omitempty"`
 
 	// ToolCall carries the payload for tool_use events.
 	// Nil for non-tool_use events.
-	ToolCall *model.ToolCall
+	ToolCall *model.ToolCall `json:"tool_call,omitempty"`
 
 	// Metadata holds extension data (event_key, partition_id, source_session, etc.).
-	Metadata map[string]any
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // TypeToolUse identifies tool invocation events on the bus.
