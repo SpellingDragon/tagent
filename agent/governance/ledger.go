@@ -18,13 +18,14 @@ import (
 // GoalRegistry（报告 D3 §4.6.1）：自治须挂登记 goal。默认 enforcement=warn（记账放行 +
 // 提示），strict 才拒绝——强制 goal 声明增加模型负担，先 warn 收集数据再升 strict。
 
-// governance 事件的 subtype 值（Metadata["subtype"]）。
+// governance 事件的 subtype 值——权威源在 event 包（C3/C4：evolution.StoreEvidenceSource
+// 也引用 event.Subtype*，消除跨包字面量复制的静默漂移）。此处别名保持 governance 内部引用不变。
 const (
-	SubtypeDenial   = "denial"
-	SubtypeGoal     = "goal"
-	SubtypeApproval = "approval"
-	SubtypeDegraded = "degraded"
-	SubtypeAudit    = "audit"
+	SubtypeDenial   = event.SubtypeDenial
+	SubtypeGoal     = event.SubtypeGoal
+	SubtypeApproval = event.SubtypeApproval
+	SubtypeDegraded = event.SubtypeDegraded
+	SubtypeAudit    = event.SubtypeAudit
 )
 
 // DenialRecord 是一条治理记录（拒绝/审计）。
@@ -105,13 +106,13 @@ func (l *DenialLedger) writeGovernanceEvent(rec DenialRecord) {
 		Content:      content,
 		Timestamp:    rec.Timestamp,
 		Metadata: map[string]string{
-			"subtype":     rec.Subtype,
-			"tool":        rec.ToolName,
-			"level":       rec.Level.String(),
-			"rule_id":     rec.RuleID,
-			"reason":      rec.Reason,
-			"args_digest": rec.ArgsDigest,
-			"goal_id":     rec.GoalID,
+			event.MetaKeySubtype: rec.Subtype,
+			"tool":               rec.ToolName,
+			"level":              rec.Level.String(),
+			"rule_id":            rec.RuleID,
+			"reason":             rec.Reason,
+			"args_digest":        rec.ArgsDigest,
+			"goal_id":            rec.GoalID,
 		},
 	}
 	// 尽力写入（治理账本失败不阻断主链路）。
@@ -133,7 +134,7 @@ func (l *DenialLedger) rebuildFromStore() {
 	defer l.mu.Unlock()
 	for _, e := range events {
 		l.records = append(l.records, DenialRecord{
-			Subtype: e.Metadata["subtype"], ToolName: e.Metadata["tool"],
+			Subtype: e.Metadata[event.MetaKeySubtype], ToolName: e.Metadata["tool"],
 			Level: parseRiskLevel(e.Metadata["level"]), RuleID: e.Metadata["rule_id"],
 			Reason: e.Metadata["reason"], ArgsDigest: e.Metadata["args_digest"],
 			GoalID: e.Metadata["goal_id"], Timestamp: e.Timestamp,

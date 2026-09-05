@@ -38,6 +38,17 @@ const (
 	MetaKeyTraceID = "trace_id"
 	MetaKeySpanID  = "span_id"
 
+	// governance 事件（TypeGovernance）子类型键与值（C3/C4：FullEvent.Metadata 键的权威源
+	// 统一在 event 包——governance.DenialLedger 写、evolution.StoreEvidenceSource 读同一常量，
+	// 消除跨包字面量复制的静默漂移；漂移会使 evidence 的 DenialCount 归零、废掉快道回滚防线）。
+	MetaKeySubtype = "subtype"
+
+	SubtypeDenial   = "denial"   // 治理拒绝
+	SubtypeGoal     = "goal"     // goal 登记
+	SubtypeApproval = "approval" // critical 挂起待批准
+	SubtypeDegraded = "degraded" // 依赖退化
+	SubtypeAudit    = "audit"    // 审计放行
+
 	// MetaPrefix marks passthrough metadata keys (meta_chat_id, meta_user_name, …).
 	MetaPrefix = "meta_"
 )
