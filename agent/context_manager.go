@@ -476,13 +476,18 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	// (write unification, unified-event-projection D1).
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
-		// 归因章注入（TC0，路径1/2）：本回合产出事件经 MemoryPlugin onEvent 盖章
-		// rollout_id 到 Metadata（bundle_id 待 BundleProvider 落地后并入）。
+		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
+		// → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
+		// 双向互链（指令2「一套数据模式、多场景投影、保一致性」）。空归因不注入。
+		attr := plugin.Attribution{}
 		if cm.sessionID != "" {
-			ctx = plugin.WithAttribution(ctx, plugin.Attribution{
-				tagentevent.MetaKeyRolloutID: cm.sessionID,
-			})
+			attr[tagentevent.MetaKeyRolloutID] = cm.sessionID
 		}
+		if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
+			attr[tagentevent.MetaKeyTraceID] = traceID
+			attr[tagentevent.MetaKeySpanID] = spanID
+		}
+		ctx = plugin.WithAttribution(ctx, attr)
 	}
 	// Inject the task spawner so tools can delegate long-running work to the
 	// task layer (sync-wait window → inline or ack). Absent → synchronous.

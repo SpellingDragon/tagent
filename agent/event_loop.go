@@ -65,6 +65,18 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// the source event to all derived events via StateDelta["meta_*"].
 		cm.SetInvocationMetadata(extractRootMetadata(events))
 
+		// T-B: turn root span（一 turn 一 trace）。spanCtx 传给 RunFlow，框架自动 span 挂
+		// 为子树；turn 末显式 End（循环内禁用 defer，否则累积到函数退出）。noop 当未配 OTLP。
+		turnMeta := extractRootMetadata(events)
+		spanCtx, turnSpan := startTurnSpan(ctx, turnSpanAttrs{
+			AgentName:     ta.name,
+			TriggerSource: extractTriggerSource(events),
+			ChatID:        turnMeta["chat_id"],
+			UserID:        turnMeta["user_id"],
+			BatchSize:     len(events),
+			EventSources:  eventSources(events),
+		})
+
 		// RunFlow with exponential backoff retry
 		var lastErr error
 		retried := false
@@ -86,7 +98,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				}
 			}
 
-			if err := cm.RunFlow(ctx, msg); err != nil {
+			if err := cm.RunFlow(spanCtx, msg); err != nil {
 				lastErr = err
 				log.Errorf("[runEventLoop:%s] RunFlow failed (attempt %d/%d): %v", ta.name, attempt+1, maxRetries+1, err)
 				if attempt < maxRetries {
@@ -115,6 +127,9 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 			// Single failure without retry (shouldn't happen with current logic, but defensive)
 			log.Errorf("[runEventLoop:%s] RunFlow failed: %v", ta.name, lastErr)
 		}
+
+		// T-B: 关闭 turn span（退化重试标记为属性，同一 turn 不另开 root span）。
+		endTurnSpan(turnSpan, retriedDegenerate)
 
 		// Idle-gate anchor (meditation-gate-split): every turn end counts as
 		// activity, regardless of trigger source or success — lineage-agnostic

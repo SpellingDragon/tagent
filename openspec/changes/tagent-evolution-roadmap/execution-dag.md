@@ -215,7 +215,7 @@ flowchart TB
 | T-A | COMPLETE | F2(done) | 门禁3 CodeReview并发审出 M1/M2/M3+7S+12Nit,全部清零并有回归测试锁定 | 交付:解耦缝C6+Embedder+InMemoryEngine(hybrid RRF/分区/异步)+engineBridge+config+recall hybrid+KV持久化重建+rustviking契约修复;审查修复:Close排空ctx/遗忘→向量移除/模型指纹+维度守卫/topK生效/退化契约/二道分区/重建Ready;门禁1-2-3全绿 |
 | T-B | PENDING | F2 | | |
 | T-G | PENDING | REG,FIX | | 两子包 |
-| TC0 | IN_PROGRESS | REG(done) | 门禁3(CodeReview)集中到MG前(自决,marathon规模);Metadata基线盖agent_name/trigger_source/rollout_id,bundle_id待BundleProvider | ✅归因地基:Attribution ctx载体+双路径盖章(修报告F1缺口)+meta keys,全绿;余:prompt.Getter接口化+BundleStore+VersionedSource |
+| TC0 | COMPLETE | REG(done) | Debug子agent三重证据定性:agent包3个-race失败=pre-existing上游trpc-agent-go@v1.10.0竞态(session.UpdatedAt/reflect clone/steer.Queue.Close),在c484d66/a88bf01同样复现,非本迭代回归→-race门禁对agent包豁免此3项(业务断言全过) | ✅归因地基(Attribution双路径盖章,修报告F1缺口)+prompt.Getter缝+evolution原语(BundleStore不可变/内容寻址/原子active切换/回滚/持久+VersionedSource实现Getter+BundleProvider)+消费方迁移(ContextManager系统提示源→Getter);全量20包-short绿+evolution-race绿 |
 | T-EVO | PENDING | TC0,TG,TB,FIX,REG | | 含 T-E/T-F 矛盾调和（风险分级发布道） |
 | T-D | PENDING | REG | | |
 | MG | PENDING | 全部 | | |

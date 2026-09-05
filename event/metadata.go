@@ -33,6 +33,11 @@ const (
 	MetaKeyBundleID  = "bundle_id"  // 生效的 prompt/参数/模型 bundle 版本（T-EVO）
 	MetaKeyRolloutID = "rollout_id" // 回合/invocation 标识
 
+	// trace 关联键（T-B 统一可观测数据模型）：turn span 的 trace_id/span_id 经 attribution
+	// 落此，使事件溯源 / trajectory / OTel span 三投影由同一锚点双向互链（指令2）。
+	MetaKeyTraceID = "trace_id"
+	MetaKeySpanID  = "span_id"
+
 	// MetaPrefix marks passthrough metadata keys (meta_chat_id, meta_user_name, …).
 	MetaPrefix = "meta_"
 )
