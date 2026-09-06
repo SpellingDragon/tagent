@@ -90,6 +90,18 @@ func NewGovernanceGate(deps GateDeps) *GovernanceGate {
 // Enabled 报告治理是否开启。
 func (g *GovernanceGate) Enabled() bool { return g != nil && g.cfg.Enabled }
 
+// Approval 暴露审批管理器（W2，§8.3）：供消息/CLI 审批通道调 Decide（批准/拒绝 pending）与
+// Pending（展示待批）。审批送达形态（用户裁决）= **文件为主 + 预留微信接口**：外部审批者直接
+// 写 <dir>/approvals/<id>.json（人工 digest 落盘）经 Check 节流重扫可见；微信交互通道则调本
+// 访问器 Decide(id, status, by) 回写。此前 Gate 不暴露 Approval → Decide 全仓无调用方 →
+// critical 恒 Hold（审批闭环断路）。
+func (g *GovernanceGate) Approval() *ApprovalManager {
+	if g == nil {
+		return nil
+	}
+	return g.approval
+}
+
 // Evaluate 对一个工具调用做治理裁决（管线：classify → 批准 → goal → 预算 → 记账）。
 func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 	if !g.Enabled() {

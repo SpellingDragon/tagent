@@ -53,6 +53,8 @@ type ApprovalManager struct {
 
 	mu    sync.RWMutex
 	index map[string]*ApprovalRequest // id → 请求（内存索引，启动从文件重建）
+
+	lastRescan int64 // W2：上次重扫目录的纳秒时刻（Check 未命中时节流重扫，防高频重试反复 IO）
 }
 
 // NewApprovalManager 构建批准管理器。dir 非空时持久化到 <dir>/approvals/ 并重建索引。
@@ -101,9 +103,39 @@ func (a *ApprovalManager) Request(toolName, argsJSON, argsPreview, level, ruleID
 	return req, nil
 }
 
+// approvalRescanInterval 是 Check 未命中后重扫 approvals 目录的最小间隔（W2 节流）。
+const approvalRescanInterval = 2 * time.Second
+
 // Check 查找匹配 (toolName, argsDigest) 的、已批准且未过期的请求（批准放行判据）。
 // 精确匹配 digest → 防「批准后换参数」。无匹配返回 nil（调用方据此挂起/拒绝）。
+// W2（§8.3）：索引未命中时**节流重扫** approvals 目录——外部审批者（人工 digest 文件 / 微信
+// 通道回写）在运行中落盘批准文件后须可见。否则 Check 只读构造时索引 → 运行中外部批准永不
+// 可见 → critical 恒 Hold、重试持续堆积 pending（治理审批闭环断路）。
 func (a *ApprovalManager) Check(toolName, argsDigest string) *ApprovalRequest {
+	if req := a.checkIndex(toolName, argsDigest); req != nil {
+		return req
+	}
+	if a.dir != "" && a.rescanDue() {
+		a.rebuild() // 加载运行中新落盘的批准文件
+		return a.checkIndex(toolName, argsDigest)
+	}
+	return nil
+}
+
+// rescanDue 报告是否到了重扫时机（节流：距上次 >= approvalRescanInterval），并更新 lastRescan。
+func (a *ApprovalManager) rescanDue() bool {
+	now := time.Now().UnixNano()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if now-a.lastRescan < int64(approvalRescanInterval) {
+		return false
+	}
+	a.lastRescan = now
+	return true
+}
+
+// checkIndex 在当前内存索引查匹配（已批准、未过期、精确 digest），返回最新创建者。
+func (a *ApprovalManager) checkIndex(toolName, argsDigest string) *ApprovalRequest {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	now := time.Now().UnixMilli()
