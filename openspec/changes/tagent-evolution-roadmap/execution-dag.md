@@ -237,7 +237,7 @@ flowchart TB
 - **设计思想脊柱未破**:prefix-cache/Engine-Policy/事件不可变/失败渗透 + 六条既有不变量(Snowflake 单源/压缩唯一触发/同步点未挪/墓碑先行/内容不截断)逐条 file:line 审计 **全 PASS**;所有新功能配置门控默认关闭、零行为变化有测试锁定;prompt.Source mtime 热载语义保留(TC0 只加 nil-receiver 守卫)。
 - **接线裁定:6 处 Major 闭环缺口**(核心已交付、闭环/覆盖未接通型)+ 12 Minor。fe5ecfa 的 MCP 变更语义未破坏(DepMCP 上报为纯副作用)。
 
-### 8.3 Major 清单(接手者按此修;每项均已 file:line 定位)
+### 8.3 Major 清单(✅ **全部 FIXED 2026-09-06**,见 §8.8;每项均已 file:line 定位)
 
 | # | 类 | 问题 | 位置 | 修复方向 |
 |---|---|---|---|---|
@@ -269,3 +269,22 @@ flowchart TB
 - 门禁亲验(修复轮后):build/vet ✅;全量 `-short` **33 包全 ok**;新子系统+tool/...+rl **11 包 `-race` 全绿**。
 - 新卫生项:`.qoder-handover.sh` 临时脚本被误提交进 git(本记录随附 commit 中已 git rm)。
 - **处置裁决(用户,2026-09-06)**:六项 Major 修复**交接接手者执行**,容器 = `postmerge-review-fixes/`(tasks.md 已填实为可勾选清单,引用 §8.3/§8.4,含 W2/W3 设计决策点);不另起变更;§8.6 启用禁令持续有效至对应项修复。
+
+### 8.8 修复完成(2026-09-06,postmerge-review-fixes 执行)
+
+**§8.3 六项 Major 全部 FIXED**(每项 fail-before/pass-after 回归锁定,详见 LEDGER):
+
+| # | 修复 | 回归测试 |
+|---|---|---|
+| E1 | refineRollback 传 rm + `wasActive` 白名单(只可回滚曾 Stage=active 的 bundle,堵被拒 draft 绕发布道) | TestRefineDiffStatusRollback |
+| E2 | runSlowLane approveGate nil 且未 SkipApprovalGate → StageRejected(堵审批门空转) | TestRelease_SlowLane_NilApproveGateRejects |
+| W1 | MemSpill.Replay 重放前 GetEvent 预检幂等(假阴性不撞 already-exists,spill 收敛) | TestMemSpill_ReplayIdempotentFalseNegative |
+| W2 | Approval.Check 未命中节流重扫目录(运行中外部批准可见)+ Gate.Approval() 暴露(文件为主+预留微信) | TestApproval_RescanSeesRuntimeApproval / TestGate_ApprovalAccessorExposed |
+| W3 | 治理包裹去 name==Entry 扩展所有 agent leaf 工具 + per-agent 独立 BudgetManager + Gate 暴露 Classifier/Goals/Config | TestGovernanceGate_SharedComponentAccessors |
+| W4 | ActivationLog 记 bundle 激活时刻,Collect 以激活时刻为窗口起点(修 CanaryHold=0 无判别力) | TestStoreEvidenceSource_ActivationWindowStart |
+
+**§8.4 Minor 9/12 修**:M2/M3/M5/M6/M8/M9/M10/M11/M12(详见 LEDGER)。**标注后续 3**:M1(declaration test 真构 engineBridge,测试增强)/M4(canary 卡死重评机制,较大增强,当前诚实停留 canary 是安全态)/M7(DepMCP 区分业务/传输错误,已 MVP 标注,需 trpc MCP 层错误类型)。
+
+**§8.6 启用禁令解除**:W2/W3 修毕 → **Governance 可真实部署**;E1/E2/W4 修毕 → **Evolution 可出实验环境**。
+
+门禁:build/vet rc=0 + 全量 23 包 -short 绿 + evolution/governance/memory -race 绿(agent 包 3 项 pre-existing 上游豁免)。**5.3 archive 待用户裁决**(BLOCKED:真实 key 实测/Jaeger/AReaL)。
