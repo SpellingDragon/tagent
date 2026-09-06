@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/agent/governance"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
@@ -36,6 +37,24 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Load config failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// 3.2（design-report-closeout）：CLI 审批入口——`wechat-bot approve <digest>` /
+	// `wechat-bot reject <digest>`（零新服务器：直接对 approvals 目录的 pending 请求
+	// 写回应文件，运行中的 agent 下次 Check 重扫即生效）。
+	if len(os.Args) >= 3 && (os.Args[1] == "approve" || os.Args[1] == "reject") {
+		approvalsDir := filepath.Join(tagentCfg.Governance.Dir, "approvals")
+		if tagentCfg.Governance.Dir == "" {
+			fmt.Fprintln(os.Stderr, "governance.dir 未配置——审批文件通道不可用")
+			os.Exit(1)
+		}
+		msg, err := governance.RespondFile(approvalsDir, os.Args[2], os.Args[1] == "approve", "cli")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "审批失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(msg)
+		return
 	}
 
 	// Extract app-specific wechat config from tagent.yaml's app.wechat section
@@ -431,6 +450,19 @@ func main() {
 	//     the handler to run in a goroutine.
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
+		// 3.3（design-report-closeout）：审批回复拦截——"approve/reject <digest>"（含中文
+		// 动词）由框架纯函数解析并写回应文件，不进 agent 对话（批准是人的动作，不是
+		// 对话内容；agent 无批准权）。非审批回复照常走 agent。
+		if digest, approve, ok := governance.ParseApprovalReply(msg.Text()); ok && tagentCfg.Governance.Dir != "" {
+			approvalsDir := filepath.Join(tagentCfg.Governance.Dir, "approvals")
+			reply, err := governance.RespondFile(approvalsDir, digest, approve, "wechat:"+msg.FromUserID)
+			if err != nil {
+				reply = "审批失败: " + err.Error()
+			}
+			_ = bot.SendTextToUser(ctx, msg.FromUserID, reply)
+			return nil
+		}
+
 		kind := ClassifyInbound(msg, wechatCfg.WorkspaceDir != "")
 		if kind == InboundIgnore {
 			return nil

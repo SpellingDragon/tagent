@@ -712,6 +712,12 @@ func buildAgent(
 		})
 	}
 
+	// 3.3（design-report-closeout）：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
+	// 送达用户）。Deliver 失败不阻塞门——pending 文件已落盘，CLI/文件批准始终可用。
+	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil {
+		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
+	}
+
 	// 4.2（design-report-closeout）：容量 hint 回填——渗透消息进事件循环（建议式：
 	// 执行权在 LLM + memory_consolidate；source=consolidation_hint 供消费端识别）。
 	if hintTracker != nil {
@@ -1432,4 +1438,32 @@ func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
 		}
 	}
 	return NewConsolidationHintTracker(c.CapacityThreshold, snooze)
+}
+
+// approvalInjectChannel（3.3 design-report-closeout）把 pending 审批请求渗透为
+// external_input 消息（source=approval）进 entry 事件循环——渠道层（微信等）随
+// 普通回复送达用户；用户回复 approve/reject <digest> 由渠道侧 listener 经
+// governance.ParseApprovalReply + governance.RespondFile 落盘生效。
+type approvalInjectChannel struct {
+	ta *agent.TagentAgent
+}
+
+// Deliver 实现 governance.ApprovalChannel。永不返回错误阻塞门（闸不是墙）：
+// 注入失败仅记日志，pending 文件已在 approvals 目录等待 CLI/文件批准。
+func (c *approvalInjectChannel) Deliver(req *governance.ApprovalRequest) error {
+	if c == nil || c.ta == nil || req == nil {
+		return nil
+	}
+	short := req.ArgsDigest
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	c.ta.InjectMessageWithSource("approval", model.Message{
+		Role: model.RoleUser,
+		Content: fmt.Sprintf("[approval_request] critical 操作等待人工批准：tool=%s risk=%s reason=%s digest=%s。"+
+			"批准请回复 approve %s（或 CLI：wechat-bot approve %s）；拒绝请回复 reject %s。%s 后过期。",
+			req.ToolName, req.RiskLevel, req.Reason, short, short, short, short,
+			time.Until(time.UnixMilli(req.ExpiresMs)).Round(time.Minute)),
+	})
+	return nil
 }

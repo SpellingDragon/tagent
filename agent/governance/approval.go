@@ -51,6 +51,11 @@ type ApprovalManager struct {
 	dir string        // <dir>/approvals/
 	ttl time.Duration // 请求过期时长（默认 30m）
 
+	// channels（3.1 design-report-closeout）：审批请求送达通道（微信注入等，装配期
+	// AddChannel 注册）。Deliver 失败不阻塞审批门——pending 文件已落盘，CLI/文件批准
+	// 始终可用（闸不是墙）。
+	channels []ApprovalChannel
+
 	// rescanInterval 是 Check 未命中后重扫 approvals 目录的最小间隔（W2 节流）。默认
 	// approvalRescanInterval（2s）；⑦（§9.2）：测试可注入小值 + 假时钟，消除对真实 wall-clock
 	// 的依赖（CI 重载 >2s 会致旧节流测假失败——窗内两次 Check 实际跨窗被误判为已重扫）。
@@ -113,6 +118,8 @@ func (a *ApprovalManager) Request(toolName, argsJSON, argsPreview, level, ruleID
 	if err := a.write(&snapshot); err != nil {
 		return nil, err
 	}
+	// 3.1（design-report-closeout）：尽力送达全部通道（失败仅日志，门不依赖通道在线）。
+	a.deliverAll(&snapshot)
 	return req, nil
 }
 

@@ -19,9 +19,9 @@
 
 ## 3. D1 approve 通道
 
-- [ ] 3.1 ApprovalChannel 接口 + 审批状态机（requested→responded→consumed，重复回应幂等）+ 纯函数单测
-- [ ] 3.2 CLI 入口 `tagent approve <digest> [--reject]`（写回应文件，零新服务器）+ CLI 测试
-- [ ] 3.3 微信注入：pending→EventBus external_input(source=approval) 渗透 + `approve/reject <digest>` 解析纯函数（框架侧）+ wechat-bot listener 挂接（examples 侧）+ 双测；通道失败不阻塞门（闸不是墙）回归
+- [x] 3.1 ApprovalChannel 接口 + 审批状态机（requested→responded→consumed，重复回应幂等）+ 纯函数单测
+- [x] 3.2 CLI 入口 `tagent approve <digest> [--reject]`（写回应文件，零新服务器）+ CLI 测试
+- [x] 3.3 微信注入：pending→EventBus external_input(source=approval) 渗透 + `approve/reject <digest>` 解析纯函数（框架侧）+ wechat-bot listener 挂接（examples 侧）+ 双测；通道失败不阻塞门（闸不是墙）回归
 
 ## 4. D2 巩固触发
 
