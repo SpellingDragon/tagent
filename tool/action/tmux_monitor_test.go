@@ -98,13 +98,6 @@ func (m *mockInspector) setOutput(output string, err error) {
 	m.outputErr = err
 }
 
-// setHeartbeat sets the heartbeat response.
-func (m *mockInspector) setHeartbeat(resp string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.heartbeatResp = resp
-}
-
 // resetCallCounters resets all call counters.
 func (m *mockInspector) resetCallCounters() {
 	m.mu.Lock()
