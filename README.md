@@ -362,7 +362,8 @@ graph TB
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
 | 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
 | 设计规格（OpenSpec） | [openspec/specs/](openspec/specs/) |
-| 完整示例：裸机 systemd 部署（WeChat Bot） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
+| 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
+| 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | 真实 LLM 契约守护矩阵 | [tests/README.md](tests/README.md) |
 
 ## 开发

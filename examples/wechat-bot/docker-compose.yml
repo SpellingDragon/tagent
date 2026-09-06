@@ -41,6 +41,29 @@ services:
     networks:
       - tagent-net
 
+  # 可观测后端（可选）：默认**不启动**——需显式 `docker compose --profile observability up -d`。
+  # 启用后在 .env 或宿主 env 设 OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317（同网络服务名），
+  # tagent 的 turn span 与框架层 span 即导出至此，UI 见 http://127.0.0.1:16686。
+  # 未启用时 OTEL_EXPORTER_OTLP_ENDPOINT 为空 → noop provider，零开销、行为逐字节不变。
+  jaeger:
+    image: jaegertracing/all-in-one:latest   # 生产建议固定到具体版本号，避免 latest 漂移
+    container_name: tagent-jaeger
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true          # 开启 OTLP 接收（gRPC 4317 / HTTP 4318）
+      - SPAN_STORAGE_TYPE=memory             # 内存存储：排障用，重启即清空（持久化改用 badger/es）
+      - MEMORY_MAX_TRACES=20000              # 内存态 trace 上限，防长期运行 OOM
+    ports:
+      - "127.0.0.1:16686:16686"              # Jaeger UI（仅绑本地，经 SSH 隧道或反代访问）
+      - "127.0.0.1:4317:4317"                # OTLP gRPC（宿主进程形态的 tagent 亦可直连）
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    networks:
+      - tagent-net
+
 networks:
   tagent-net:
     driver: bridge

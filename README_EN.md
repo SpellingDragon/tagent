@@ -370,7 +370,8 @@ See [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subs
 | Agent architecture / event flow | [docs/wiki/agent/](docs/wiki/agent/) |
 | Event system / plugins / prompts | [docs/wiki/](docs/wiki/) |
 | Design specs (OpenSpec) | [openspec/specs/](openspec/specs/) |
-| Full example: bare-metal systemd deployment (WeChat Bot) | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
+| Full example (WeChat Bot: five-agent orchestration / message pipeline / RL mode) | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
+| Bare-metal systemd deployment (incl. Jaeger observability backend) | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | Real-LLM contract guard matrix | [tests/README.md](tests/README.md) |
 
 ## Development

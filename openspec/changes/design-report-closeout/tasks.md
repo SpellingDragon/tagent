@@ -62,7 +62,13 @@
 - [ ] 7.6 （原 5A.6）canary 时间窗 ∨ 样本数下限双条件（分歧④联动；依赖本变更 §2 feedback 落地后评估 judge min_samples）
 - [ ] 7.7 roadmap §3 P2 余项收口：**3.5** 的「反馈→事件→召回」闭环集成测试（依赖本变更 §2.3 OnSettle 自动来源）；本变更 §6.3 门禁+commit+archive 即等价于 roadmap **3.6**（其转出标注已指向本变更收尾）
 - [ ] 7.8 工程收尾候选（roadmap **1.5** / CONFIRM **C11**）：首个 version tag（默认 v0.1.0）打出并 push——前置已就绪（全程 conventional commit + push、CI 门禁 build/vet/short/race 实装绿），仅剩打 tag 动作与时点裁决
+      - **用户裁决（2026-09-07）：暂不打 tag**——保持 pre-release 状态，不对外暗示版本稳定性；前置继续维持就绪，待后续显式发起时再打（届时 CHANGELOG 的 `[Unreleased]` 一次收口为正式版本段）
 - [ ] 7.9 后续候选（非任何阶段准出条件，登记以防丢失）：
       - roadmap **2.4**：nanobot `skills/` 兼容技能并入 examples skills（SKILL.md 格式核对，注明来源）
       - observability-tracing **1.1/1.2**（环境实装项，非代码缺口）：起 Jaeger all-in-one 或 OTLP 调试后端，设 `OTEL_EXPORTER_OTLP_ENDPOINT` 跑冒烟 + 集成测试，实录框架层 span 形态（名称/属性/父子/时延）与自动 metrics、评估单 turn span 数量级、顺带评估 langfuse exporter 适配性（代码侧导出链路已就绪：noop 默认零开销，设端点即导出）
+        - **已具备执行路径（用户裁决 2026-09-07：远端部署时顺带起 Jaeger）**：`docker-compose.yml` 已内置 `jaeger` 服务（归入 `observability` profile，默认不启动故不影响既有部署）；`deploy/README.md` §九 含启动命令、端点取值（裸机 `127.0.0.1:4317` / 容器 `jaeger:4317`）、**五项 span 形态实录清单**与排障表——部署时照单执行即可闭合本条与 4.2 之外的两项
       - observability-tracing **4.2**（跨仓协调项）：AReaL reward 侧消费格式核对（tagent 侧已尽向后兼容义务——`LLMCallRecord.trace_id/span_id` 均 omitempty，不破坏既有 JSONL 解析）
+- [ ] 7.10 文档全量同步（**用户裁决 2026-09-07：本轮不改机制、不随组同步，待本变更 §2-§5 落地后统一做一次全量代码交叉印证修订**）
+      - 已知滞后面（本次归档整合时量化）：`consolidation_hint` / `capacity_threshold` / `min_source_events` / `ApprovalChannel` / `negative_feedback_rate` 五项能力在 README、README_EN 与 docs/wiki 全 9 篇中**0 篇命中**；`goal_declare` 五工具与 `feedback` 事件类型亦仅零星提及
+      - 待同步文档面：README 配置表（`memory.engine.consolidation` 段 + goal/feedback 相关）、wiki platform 篇（审批通道 / 降级行为 / 巩固触发）、wiki memory 篇（巩固触发节）、wiki event 篇（若新增事件类型）、tests/README（若新增契约测试）
+      - 本变更 §6.2 已登记同一意图；本条为其**范围与方法的细化**（按 2026-09-07 全量审计流程：机械化核查标识符/文件引用/清单完整性 + 逐段语义核对 + 门禁复验）

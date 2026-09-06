@@ -37,7 +37,9 @@ Environment=TAGENT_CONFIG=/opt/tagent/wechat-bot/tagent.yaml
 Environment=TAGENT_HTTP_PORT=8089
 # node/openspec 全局模块路径(plan 子 agent 的 spec 工具后端);按发行版调整(见 README 依赖表)
 Environment=NODE_PATH=/usr/lib/node_modules
-# OTLP 追踪导出(可选):取消注释并填端点即启用 turn span 导出,留空=noop 零开销
+# OTLP 追踪导出(可选):取消注释并填端点即启用 turn span 导出,留空=noop 零开销、行为逐字节不变。
+# 起 Jaeger 后端、端点取值(裸机 127.0.0.1:4317 / 容器 jaeger:4317)、span 形态实录清单与排障
+# 见同目录 README.md §九「可观测后端」。
 # Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # agent 工作根(TAGENT_WORKING_DIR):通常由 .env(wizard.sh 步骤3写入)经上方 EnvironmentFile 注入,
 # 无需在此重复;若要在 unit 内固定,取消下行注释并填 clone 根绝对路径:

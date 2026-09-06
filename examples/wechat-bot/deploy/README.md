@@ -204,6 +204,71 @@ sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子�
 两种部署形态**并存**,择一即可:
 
 - **裸机 systemd**(本指南):无 Docker 依赖,贴近个人助手,资源开销低 —— **本次远端部署推荐**;
-- **Docker Compose**(根目录 `docker-compose.yml`):镜像隔离,适合已有容器编排基建的场景。
+- **Docker Compose**(本目录 `docker-compose.yml`):镜像隔离,适合已有容器编排基建的场景。
 
 二者共用同一 `tagent.yaml`(能力配置一致)与 `.env`(密钥),安全加固级别对齐。
+
+---
+
+## 九、可观测后端（Jaeger，可选）
+
+**默认不起也完全正常**：未设 `OTEL_EXPORTER_OTLP_ENDPOINT` 时 tagent 走 noop provider——零导出、
+零开销、事件循环/工具/轨迹行为与无观测时逐字节一致。起后端只是为了**看见** turn span 树。
+
+### 9.1 启动 Jaeger all-in-one
+
+裸机形态（podman 或 docker 均可，单容器、内存存储、重启即清空）：
+
+```bash
+sudo podman run -d --name tagent-jaeger --restart=unless-stopped \
+  -e COLLECTOR_OTLP_ENABLED=true \
+  -e SPAN_STORAGE_TYPE=memory \
+  -e MEMORY_MAX_TRACES=20000 \
+  -p 127.0.0.1:16686:16686 -p 127.0.0.1:4317:4317 \
+  docker.io/jaegertracing/all-in-one:latest
+```
+
+容器形态：compose 已内置 `jaeger` 服务并归入 `observability` profile（**默认不启动**，不影响既有部署）：
+
+```bash
+docker compose --profile observability up -d
+```
+
+端口均只绑 `127.0.0.1`——UI（16686）经 SSH 隧道访问：`ssh -L 16686:127.0.0.1:16686 <服务器>`。
+
+### 9.2 让 tagent 导出
+
+| 形态 | 端点值 | 配置位置 |
+|---|---|---|
+| 裸机 systemd（Jaeger 同机） | `http://127.0.0.1:4317` | `.env` 加 `OTEL_EXPORTER_OTLP_ENDPOINT=...`，或 unit 内取消该行注释（模板已预留） |
+| 容器（compose 同网络） | `http://jaeger:4317` | `.env` 或宿主 env（compose 已透传该变量） |
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart tagent-wechat
+journalctl -u tagent-wechat -n 50        # 应无 OTLP 连接错误
+```
+
+### 9.3 验证与 span 形态实录清单
+
+发一条微信消息触发一个 turn，然后在 UI（`http://127.0.0.1:16686`）按 service 查 tagent。
+以下五项是 `observability-tracing` 变更归档时转出的**环境实装项**（代码侧导出链路已就绪，仅缺后端
+实录），部署时顺带完成即可闭合：
+
+| # | 实录项 | 怎么看 |
+|---|---|---|
+| 1 | **turn root span 形态** | 找 `tagent.turn`：属性应含 `agent`/`trigger_source`/`chat_id`/`batch_size`/`event_sources`；退化重试为属性而非另开 span |
+| 2 | **框架层 span 名称与父子关系** | `tagent.turn` 下应挂 trpc-agent-go 自动埋点的 llmflow / functioncall 子 span；记录实际名称层级 |
+| 3 | **单 turn span 数量级** | 一次含 N 个工具调用的 turn 共产生多少 span（评估长期运行的 trace 存储压力与采样必要性） |
+| 4 | **异步任务跨 turn 关联** | 触发一个慢命令（走 tmux 后台），确认 `task_settled` 回流的新 turn 上有指向原 spawn turn 的 span link |
+| 5 | **langfuse exporter 适配性** | 若考虑换后端：OTLP 端点形态是否可直接对接（tagent 侧只认 `OTEL_EXPORTER_OTLP_ENDPOINT`，不绑定 Jaeger） |
+
+实录结论建议回写 `openspec/changes/LEDGER.md`（该变更已归档，按重编原则 #1 归档区不改写，裁决集中记账）。
+
+### 9.4 排障
+
+| 现象 | 排查 |
+|---|---|
+| UI 无任何 trace | 端点未生效：`systemctl show tagent-wechat -p Environment` 核对；确认 tagent 进程能连通 4317（`nc -zv 127.0.0.1 4317`） |
+| 有 span 但缺 `tagent.turn` | 该 turn 未走持久循环（子 agent 单轮 `Run()` 路径由父 turn 覆盖）；或 `trigger_source` 过滤所致 |
+| Jaeger 容器 OOM | 上调 `MEMORY_MAX_TRACES` 或内存限额；长期留存应改 `SPAN_STORAGE_TYPE=badger` 并挂卷 |
+| 担心开销 | 不设端点即 noop（零开销）；需要时常开、排障毕注释掉该行再 restart 即回到 noop |
