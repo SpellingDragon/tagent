@@ -38,3 +38,13 @@
 
 - [x] 7.1 预算 Dir="" 不落盘(修 tagent.go:542 filepath.Join 契约违反,优先);mem_spill.go:16 过时注释清除;E2 parentless draft 拒绝分支 rollbackTo 空值守卫
 - [x] 7.2 W2 decided/expired 审批文件清理(rebuild 时);tasks 3.1 宣称校准(Decide 通道=预留,闭环=文件重扫);W3 工厂路径 agent 包裹缺口记录或补包;ActivationLog 持久化(或注释固化重启回退语义);测试补缺:buildAgent 级"子 agent exec 过闸" + W2 节流窗内不重扫
+
+## 8. 三轮增补 — 第四轮复验遗留(2026-09-06,execution-dag §8.10;**本组关闭前 5.3 不得执行**)
+
+- [ ] 8.1 Major:治理审计事件补来源 agent 归属——DenialRecord 加 AgentName 字段 + GateDeps 注入 agent name + writeGovernanceEvent 写 metadata["agent"](ledger.go:114-136、tagent.go:564 接线处传入);回归测试:双 agent 治理事件可按 agent 区分来源
+- [ ] 8.2 宣称不符修正:7.2 勾选的"buildAgent 级子 agent exec 过闸测试"实际不存在(仓内仅 governance 包模拟双 gate 测试;wire 测试只断言 New 成功)——补双 agent + exec 工具真实构建过闸测试,或措辞改回未做
+
+## 9. 三轮增补 — Minor 批量(§8.10 八项)
+
+- [ ] 9.1 Ledger.Record 补 RLock 快照 store/partitionID(锁纪律);N1 补 Submit→重载→refineRollback 成功用例;N2 补各 gate Ledger 同指针集成断言;NoteActive 幂等化或重启对 active 基线补 seed(修 InitBaseline 崩溃窗口:active.json 已写而 releases.jsonl 未写→基线永久不入白名单)
+- [ ] 9.2 删 BindLedger 死代码(语义与 BindStore 相反易误用);slow 道 SetActive 前加 active==nil 直接 reject 守卫(InitBaseline 失败被 Warn 吞+refine 照注册→拒绝分支回滚落空);W2 节流测试注入时钟(参数化 interval)+补窗过期恢复重扫正向用例;hybrid tasks 头部过时 BLOCKED 措辞同步

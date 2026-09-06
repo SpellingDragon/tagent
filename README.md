@@ -103,13 +103,28 @@ for evt := range outputCh {
 }
 ```
 
-**3. 跑通完整示例**
+**3. 跑通完整示例（WeChat Bot）**
+
+**本地裸机部署（推荐，个人助手场景）**——交互式向导一步到位：
+
+```bash
+cd examples/wechat-bot
+./wizard.sh    # 检查依赖(go≥1.24/tmux 硬性;node/openspec/rustviking 软性) + 引导填 ZAI_API_KEY
+               # (不回显) + 生成 .env(chmod 600) + 验证连通性(embedding 端点,不耗 chat 额度)
+./run.sh       # 前台启动（./run.sh start 后台；./run.sh --help 看全部命令；./run.sh setup 亦触发向导）
+```
+
+密钥写入 `.env`（已被 `examples/wechat-bot/.gitignore` 白名单模式天然忽略，绝不入库）；`run.sh`
+启动时自动加载 `.env`，**已导出的环境变量优先**（支持 `ZAI_API_KEY=x ./run.sh` 临时覆盖）。
+`wizard.sh --check` 仅查依赖、`--verify` 仅验连通。
+
+或直接 `go run`（需已 `export ZAI_API_KEY`）：
 
 ```bash
 cd examples/wechat-bot && go run .    # 微信机器人：持久循环+全部机制实战
 ```
 
-其他运行模式：A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL）——见 [examples/](examples/) 与 [docs/wiki/](docs/wiki/)。
+其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`）——见 [examples/](examples/) 与 [docs/wiki/](docs/wiki/)。
 
 ## 🧠 心智模型
 

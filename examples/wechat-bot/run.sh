@@ -32,6 +32,19 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# 加载 .env（wizard.sh 生成）为默认值：已导出的 shell 环境变量**优先**（不覆盖），保留
+# `KEY=x ./run.sh` 的临时覆盖能力（与本文档 RL 示例一致）。仅接受合法 KEY=VALUE 行，跳过注释。
+if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        [[ "$_line" =~ ^[[:space:]]*(#|$) ]] && continue
+        [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+        _k="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
+        [[ -n "${!_k:-}" ]] && continue   # 已设置则跳过（env 优先于 .env）
+        export "${_k}=${_v}"
+    done < "${SCRIPT_DIR}/.env"
+    unset _line _k _v
+fi
+
 # 默认配置
 INSTANCE_NAME="${INSTANCE_NAME:-default}"
 LOG_DIR="${SCRIPT_DIR}/logs"
@@ -61,6 +74,7 @@ show_help() {
 用法: $0 [命令] [选项]
 
 命令:
+    setup           初始化向导（检查依赖+引导密钥+生成 .env，等价 ./wizard.sh）
     (无命令)         前台运行机器人
     start           后台启动机器人
     stop            停止后台运行的机器人
@@ -667,6 +681,10 @@ do_areal_log() {
 COMMAND=""
 while [[ $# -gt 0 ]]; do
     case $1 in
+        setup|wizard|init)
+            COMMAND="setup"
+            shift
+            ;;
         start|stop|restart|status|log)
             COMMAND="$1"
             shift
@@ -729,6 +747,7 @@ done
 # 执行命令
 # ============================================================================
 case "$COMMAND" in
+    setup)        exec "${SCRIPT_DIR}/wizard.sh" ;;
     start)        do_start        ;;
     stop)         do_stop         ;;
     restart)      do_restart      ;;
