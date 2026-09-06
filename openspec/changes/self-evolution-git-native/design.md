@@ -161,6 +161,16 @@ evolution:
 | K13 | 两变更 tasks 交叉 | 低 | 先 archive 再 apply(7.4) |
 | K14 | scripts/ 不在默认受控清单 | 低 | 默认三目录(7.4) |
 
+### 7.6 优雅化二次细化(2026-09-07 复核,现状已验证)
+
+**S1 · 渗透面 edge(诚实登记)**:DigestExtra 仅在冥想消息构建时渲染(meditation.go L284,已验)——**高交互期(无 idle)建议不呈现**,直到下一次冥想。缓解三层:① `refine status` 主动可查(工具面随时)② idle 终会到来(建议 eventual)③ 若未来需即时性,**装配层(root 包)天然可桥接 agent×evolution**(tagent.go 已 import 两者)——构造时把 agent 方法作为回调传入不违反依赖红线;记为 future option,当前按裁决走事件化。
+
+**S2 · 版本章缓存的实现边界**(bundleIDFn,context_manager L67 已验签名不变):函数体来源=「最新 improvement 事件 sha」——**内存缓存+原子更新**(register 成功后写 atomic.Value;persistBusEvent 读缓存 O(1),不逐事件查询);**重启惰性恢复**:首次盖章前查一次(QueryOptions EventTypes=[governance]+时间倒序+Content 解码取最新 improvement,查不到=不盖章)。缓存是性能层非真源——真源=事件(优雅化原则不破)。竞态测试入 4.4(-race)。
+
+**S3 · 装配时序与构造单元**:judge/guardrail/evSrc 从 BindPosterior(需 memStore 就绪,现状时序)迁移到 register 工具构造——**同一点位换接线**;建议单一构造单元 `NewGitEvolution(store, model, cfg) → (tool, lifecycle)`,装配层不散落三者;评估 goroutine 的 {sha, ts} 由 register 闭包快照携带(**零查询**——不必从事件反查锚点)。
+
+**S4 · status 的 join 实现**:QueryOptions 无 Metadata/subtype 过滤(已验 L128-138)——评估结论 join=「拉最近 N 条 governance 事件(EventTypes 过滤)+Content 解码」;改进频率=冥想频率(量级低),可行;可选优化:EventSummary 编码 sha 前缀(`[eval:sha8]`)做粗筛。不为此扩 QueryOptions(避免查询面为单消费方加字段)。
+
 ## 6. 决策记录(探索会话已裁)
 
 | 决策 | 裁定 | 时间 |
