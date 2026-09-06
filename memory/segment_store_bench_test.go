@@ -8,7 +8,7 @@ import (
 
 // BenchmarkSegmentStore_GetEvent benchmarks GetEvent with LRU caching.
 func BenchmarkSegmentStore_GetEvent(b *testing.B) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
 	if err != nil {
 		b.Fatal(err)
@@ -44,7 +44,7 @@ func BenchmarkSegmentStore_GetEvent(b *testing.B) {
 
 // BenchmarkSegmentStore_GetEvent_Cold benchmarks GetEvent without caching (cold start).
 func BenchmarkSegmentStore_GetEvent_Cold(b *testing.B) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
 	if err != nil {
 		b.Fatal(err)
@@ -86,7 +86,7 @@ func BenchmarkSegmentStore_GetEvent_Cold(b *testing.B) {
 
 // BenchmarkSegmentStore_QueryEvents benchmarks QueryEvents by time range.
 func BenchmarkSegmentStore_QueryEvents(b *testing.B) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
 	if err != nil {
 		b.Fatal(err)
@@ -123,7 +123,7 @@ func BenchmarkSegmentStore_QueryEvents(b *testing.B) {
 
 // BenchmarkSegmentStore_StoreEvent benchmarks StoreEvent throughput.
 func BenchmarkSegmentStore_StoreEvent(b *testing.B) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
 	if err != nil {
 		b.Fatal(err)

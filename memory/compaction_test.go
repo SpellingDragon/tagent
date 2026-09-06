@@ -13,7 +13,7 @@ import (
 // newTestCompactor creates a Compactor with a mock KV store for testing.
 func newTestCompactor(t *testing.T) (*FileSegmentStore, *Compactor) {
 	t.Helper()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 	compactor := NewCompactor(store, mockKV, store.rel, nil, DefaultCompactionConfig())
@@ -220,7 +220,7 @@ func TestCompactor_NewCompactorCustomConfig(t *testing.T) {
 		L2Threshold:   3,
 		CheckInterval: time.Minute,
 	}
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -231,7 +231,7 @@ func TestCompactor_NewCompactorCustomConfig(t *testing.T) {
 }
 
 func TestCompactor_ZeroConfig(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -245,11 +245,7 @@ func TestCompactor_ZeroConfig(t *testing.T) {
 // tombstoned event, its tombstone entry (memory+KV) and dangling idx key are
 // finalized — otherwise every deleted event leaks three traces forever.
 func TestCompaction_FinalizesTombstones(t *testing.T) {
-	dir := t.TempDir()
-	kv, err := NewLocalFileKV(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	kv := newMockKV()
 	defer kv.Close()
 
 	rel := newSimpleInMemRelationStore()

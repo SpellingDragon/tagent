@@ -40,6 +40,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/engine"
+	"github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
@@ -1054,7 +1055,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create rustviking config: %w", err)
 		}
-		kv := memory.NewRustVikingClient(mc.RustVikingBinary, configPath)
+		kv := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
 		store, err := memory.NewFileSegmentStore(kv, rel, mc.Path, 1000)
 		if err != nil {
 			return nil, fmt.Errorf("create file segment store: %w", err)
@@ -1092,7 +1093,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create relation store: %w", err)
 		}
-		kv, err := memory.NewLocalFileKV(mc.Path)
+		kv, err := kv.NewLocalFileKV(mc.Path)
 		if err != nil {
 			return nil, fmt.Errorf("create local file kv: %w", err)
 		}

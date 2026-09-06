@@ -10,7 +10,7 @@ import (
 // newTestSegmentStore creates a FileSegmentStore with a mock KV store for testing.
 func newTestSegmentStore(t *testing.T) *FileSegmentStore {
 	t.Helper()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 	require.NotNil(t, store)
@@ -272,7 +272,7 @@ func TestSegmentStore_WithRealRelationStore(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { rel.Close() })
 
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, rel, dir, 100)
 	require.NoError(t, err)
 	require.NotNil(t, store)

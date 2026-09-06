@@ -31,7 +31,7 @@ func TestTombstoneSet_ZeroKey(t *testing.T) {
 
 func TestTombstoneSet_RemoveTombstones(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	ts := NewTombstoneSet(rel, mockKV, 1)
 
 	ts.MarkTombstone(100)
@@ -171,7 +171,7 @@ func TestGetEffectiveTTL_ArtifactExemption(t *testing.T) {
 }
 
 func TestLifecycleManager_StartStop(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -190,7 +190,7 @@ func TestLifecycleManager_StartStop(t *testing.T) {
 
 func TestLifecycleTombstoneIntegration(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -230,7 +230,7 @@ func TestLifecycleTombstoneIntegration(t *testing.T) {
 // (production: 0 tombstones, 1034 overdue thinking_plan events still live).
 func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
 	require.NoError(t, err)
 	ts := NewTombstoneSet(rel, mockKV, 1)
@@ -275,7 +275,7 @@ func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
 // (the zero value alone falls back to the default 7).
 func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
 	require.NoError(t, err)
 	ts := NewTombstoneSet(rel, mockKV, 1)
@@ -303,7 +303,7 @@ func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
 // until compaction physically removes the tombstones.
 func TestEvictionDecrementsLiveCount(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
 	require.NoError(t, err)
 	ts := NewTombstoneSet(rel, mockKV, 1)

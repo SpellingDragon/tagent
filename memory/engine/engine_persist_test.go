@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/kv"
 
 	"context"
 	"testing"
@@ -26,7 +27,7 @@ func waitForKVKeys(t *testing.T, kv memory.KVStore, prefix string, want int, tim
 // engine1 索引事件 → 向量序列化入 KV → 关闭；engine2 用同一 KV 启动 → 从 KV 重建
 // 内存索引 → 向量检索命中 engine1 索引的事件（跨"重启"语义召回恢复）。
 func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
-	kv := memory.NewMockRustVikingClient() // 实现 memory.KVStore，模拟持久后端
+	kv := kv.NewMockRustVikingClient() // 实现 memory.KVStore，模拟持久后端
 	emb := NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
@@ -76,7 +77,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 // TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删 KV 持久向量，
 // 重建后不复活已删事件。
 func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
-	kv := memory.NewMockRustVikingClient()
+	kv := kv.NewMockRustVikingClient()
 	emb := NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()

@@ -1,4 +1,4 @@
-package memory
+package kv
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/SpellingDragon/tagent/memory"
 )
 
 // ==================== RustVikingClient ====================
@@ -27,13 +29,13 @@ type CLIResponse struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-// KVPair 表示一个键值对。
+// memory.KVPair 表示一个键值对。
 type KVPair struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
-// KVOp 表示一个批量操作。
+// memory.KVOp 表示一个批量操作。
 type KVOp struct {
 	Type  string `json:"op"` // "put" or "delete"
 	Key   string `json:"key"`
@@ -165,7 +167,7 @@ func (c *RustVikingClient) KVDelete(key string) error {
 }
 
 // KVScan 前缀扫描。
-func (c *RustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error) {
+func (c *RustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair, error) {
 	args := c.buildArgs("kv scan", "-p", prefix)
 	if limit > 0 {
 		args = append(args, "-l", fmt.Sprintf("%d", limit))
@@ -176,8 +178,8 @@ func (c *RustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error) {
 	}
 	// rustviking 返回嵌套结构: {"count": N, "entries": [...], "prefix": ...}
 	var scanResult struct {
-		Count   int      `json:"count"`
-		Entries []KVPair `json:"entries"`
+		Count   int             `json:"count"`
+		Entries []memory.KVPair `json:"entries"`
 	}
 	if err := json.Unmarshal(resp.Data, &scanResult); err != nil {
 		return nil, fmt.Errorf("failed to parse KV scan results: %w", err)
@@ -187,7 +189,7 @@ func (c *RustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error) {
 
 // KVRange 范围扫描。
 // 注意: rustviking CLI 不直接支持 range 操作，使用 KVScan 扫描公共前缀后过滤。
-func (c *RustVikingClient) KVRange(start, end string, limit int) ([]KVPair, error) {
+func (c *RustVikingClient) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
 	// 用 start 和 end 的最长公共前缀扫描
 	prefix := longestCommonPrefix(start, end)
 	if prefix == "" {
@@ -199,7 +201,7 @@ func (c *RustVikingClient) KVRange(start, end string, limit int) ([]KVPair, erro
 		return nil, err
 	}
 	// 客户端过滤：只保留 start <= key < end 的结果
-	var filtered []KVPair
+	var filtered []memory.KVPair
 	for _, p := range pairs {
 		if p.Key >= start && (end == "" || p.Key < end) {
 			filtered = append(filtered, p)
@@ -226,7 +228,7 @@ func longestCommonPrefix(a, b string) string {
 
 // KVBatch 批量写入（通过 stdin pipe）。
 // rustviking 期望 JSON 格式: [{"op":"put","key":"k1","value":"v1"},{"op":"delete","key":"k2"}]
-func (c *RustVikingClient) KVBatch(ops []KVOp) error {
+func (c *RustVikingClient) KVBatch(ops []memory.KVOp) error {
 	data, err := json.Marshal(ops)
 	if err != nil {
 		return fmt.Errorf("failed to marshal batch ops: %w", err)
@@ -343,16 +345,16 @@ func (m *MockRustVikingClient) KVDelete(key string) error {
 	return nil
 }
 
-func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error) {
+func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var results []KVPair
+	var results []memory.KVPair
 	for k, v := range m.data {
 		if strings.HasPrefix(k, prefix) {
-			results = append(results, KVPair{Key: k, Value: v})
+			results = append(results, memory.KVPair{Key: k, Value: v})
 		}
 	}
-	// Lexicographic order to honor the KVStore scan contract (RocksDB and
+	// Lexicographic order to honor the memory.KVStore scan contract (RocksDB and
 	// LocalFileKV both return sorted results); limit applies after sorting.
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Key < results[j].Key
@@ -363,13 +365,13 @@ func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]KVPair, error
 	return results, nil
 }
 
-func (m *MockRustVikingClient) KVRange(start, end string, limit int) ([]KVPair, error) {
+func (m *MockRustVikingClient) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var results []KVPair
+	var results []memory.KVPair
 	for k, v := range m.data {
 		if k >= start && k < end {
-			results = append(results, KVPair{Key: k, Value: v})
+			results = append(results, memory.KVPair{Key: k, Value: v})
 			if limit > 0 && len(results) >= limit {
 				break
 			}
@@ -378,7 +380,7 @@ func (m *MockRustVikingClient) KVRange(start, end string, limit int) ([]KVPair, 
 	return results, nil
 }
 
-func (m *MockRustVikingClient) KVBatch(ops []KVOp) error {
+func (m *MockRustVikingClient) KVBatch(ops []memory.KVOp) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, op := range ops {
@@ -390,14 +392,4 @@ func (m *MockRustVikingClient) KVBatch(ops []KVOp) error {
 		}
 	}
 	return nil
-}
-
-// KVStore 接口抽象了 RustViking KV 操作，便于测试时替换。
-type KVStore interface {
-	KVPut(key, value string) error
-	KVGet(key string) (string, error)
-	KVDelete(key string) error
-	KVScan(prefix string, limit int) ([]KVPair, error)
-	KVRange(start, end string, limit int) ([]KVPair, error)
-	KVBatch(ops []KVOp) error
 }

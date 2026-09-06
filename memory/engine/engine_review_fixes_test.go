@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/kv"
 
 	"context"
 	"testing"
@@ -31,7 +32,7 @@ func (c *ctxStrictEmbedder) ModelID() string { return "ctx-strict" }
 // 不取消的 ctx（context.WithoutCancel + DrainTimeout），合规嵌入器仍成功嵌入 + 持久化，
 // 不丢在途向量。修复前排空用已取消的 ctx → 合规嵌入器必失败 → 向量丢失且不持久化。
 func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
-	kv := memory.NewMockRustVikingClient()
+	kv := kv.NewMockRustVikingClient()
 	emb := &ctxStrictEmbedder{dim: 8}
 	// 长 flush 间隔 + 大批：确保 Index 后事件停留在队列/批中，仅靠 Close 排空触发嵌入。
 	e := NewInMemoryEngine(nil, emb, EngineConfig{
@@ -78,7 +79,7 @@ func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
 // TestInMemoryEngine_RebuildSkipsStaleModel 验证审查 M3：换嵌入模型后重启，
 // 重建跳过旧模型指纹的向量（防跨模型语义混用）。
 func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
-	kv := memory.NewMockRustVikingClient()
+	kv := kv.NewMockRustVikingClient()
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "model:vec:"}
 	ctx := context.Background()
 

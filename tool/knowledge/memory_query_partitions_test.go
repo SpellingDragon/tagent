@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/kv"
 )
 
 // TestQueryHistoricalKnowledge_PartitionScoped locks the memory_query
@@ -13,7 +14,7 @@ import (
 // matches the recall fix (own namespace first + read_namespaces).
 func TestQueryHistoricalKnowledge_PartitionScoped(t *testing.T) {
 	dir := t.TempDir()
-	kv, err := memory.NewLocalFileKV(dir)
+	kv, err := kv.NewLocalFileKV(dir)
 	if err != nil {
 		t.Fatalf("local kv: %v", err)
 	}

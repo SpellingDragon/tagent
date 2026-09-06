@@ -398,12 +398,12 @@ func TestQueryEvents_StoreImplementationParity(t *testing.T) {
 // explicitly. Guarded here because a violation would silently break recency
 // ordering rather than fail loudly.
 func TestKVScanLexicographicOrder(t *testing.T) {
+	// 原为 MockRustVikingClient + LocalFileKV 双后端一致性验证；两后端已迁
+	// memory/kv 子包（白盒不可 import），跨后端一致性由 kv 子包测试承接，
+	// 此处保留 mockKV 的字典序守卫。
 	backends := map[string]KVStore{
-		"MockRustVikingClient": NewMockRustVikingClient(),
+		"mockKV": newMockKV(),
 	}
-	localKV, err := NewLocalFileKV(t.TempDir())
-	require.NoError(t, err)
-	backends["LocalFileKV"] = localKV
 
 	// Insert in deliberately shuffled order.
 	windows := []int64{1785010000, 1785000000, 1785030000, 1785020000}
@@ -728,7 +728,7 @@ func TestUnsealedSegmentIsMemtable(t *testing.T) {
 // seq 0..4 must resume at seq 5 — never overwrite the slots (production: one
 // event was silently swallowed this way, leaving a dangling idx).
 func TestStoreEvent_SeqRecoveredAfterRestart(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store1, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 

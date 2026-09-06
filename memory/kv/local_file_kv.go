@@ -1,6 +1,8 @@
-package memory
+package kv
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -12,7 +14,7 @@ import (
 	"time"
 )
 
-// LocalFileKV is a file-backed KVStore with a snapshot + WAL layout:
+// LocalFileKV is a file-backed memory.KVStore with a snapshot + WAL layout:
 //
 //	kv.json      — full-map snapshot (rewritten only at compaction)
 //	kv.wal.jsonl — append-only op log, one JSON op per line
@@ -312,14 +314,14 @@ func (k *LocalFileKV) KVDelete(key string) error {
 
 // KVScan returns all key-value pairs whose keys start with the given prefix,
 // sorted lexicographically by key. If limit > 0, at most limit pairs are returned.
-func (k *LocalFileKV) KVScan(prefix string, limit int) ([]KVPair, error) {
+func (k *LocalFileKV) KVScan(prefix string, limit int) ([]memory.KVPair, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	var results []KVPair
+	var results []memory.KVPair
 	for key, val := range k.data {
 		if strings.HasPrefix(key, prefix) {
-			results = append(results, KVPair{Key: key, Value: val})
+			results = append(results, memory.KVPair{Key: key, Value: val})
 		}
 	}
 
@@ -336,14 +338,14 @@ func (k *LocalFileKV) KVScan(prefix string, limit int) ([]KVPair, error) {
 
 // KVRange returns all key-value pairs whose keys fall in [start, end),
 // sorted lexicographically by key. If limit > 0, at most limit pairs are returned.
-func (k *LocalFileKV) KVRange(start, end string, limit int) ([]KVPair, error) {
+func (k *LocalFileKV) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
-	var results []KVPair
+	var results []memory.KVPair
 	for key, val := range k.data {
 		if key >= start && key < end {
-			results = append(results, KVPair{Key: key, Value: val})
+			results = append(results, memory.KVPair{Key: key, Value: val})
 		}
 	}
 
@@ -359,7 +361,7 @@ func (k *LocalFileKV) KVRange(start, end string, limit int) ([]KVPair, error) {
 
 // KVBatch applies a batch of put/delete operations atomically and persists
 // them asynchronously.
-func (k *LocalFileKV) KVBatch(ops []KVOp) error {
+func (k *LocalFileKV) KVBatch(ops []memory.KVOp) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 

@@ -10,6 +10,7 @@ import (
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/kv"
 )
 
 // ==================== Helpers ====================
@@ -17,7 +18,7 @@ import (
 // newTestMemoryStore creates a MemoryStore pre-populated with test events.
 func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.MemoryStore {
 	t.Helper()
-	store, err := memory.NewFileSegmentStore(memory.NewMockRustVikingClient(), nil, ":memory:", 100)
+	store, err := memory.NewFileSegmentStore(kv.NewMockRustVikingClient(), nil, ":memory:", 100)
 	if err != nil {
 		t.Fatalf("Failed to create memory store: %v", err)
 	}

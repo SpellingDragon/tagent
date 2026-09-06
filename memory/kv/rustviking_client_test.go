@@ -1,6 +1,8 @@
-package memory
+package kv
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -41,29 +43,29 @@ func TestCLIResponse_JSON(t *testing.T) {
 	assert.Equal(t, "key not found", resp.Error)
 }
 
-// TestKVPair_JSON tests KVPair JSON serialization.
+// TestKVPair_JSON tests memory.KVPair JSON serialization.
 func TestKVPair_JSON(t *testing.T) {
-	pair := KVPair{Key: "mykey", Value: "myvalue"}
+	pair := memory.KVPair{Key: "mykey", Value: "myvalue"}
 	data, err := json.Marshal(pair)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"key":"mykey"`)
 	assert.Contains(t, string(data), `"value":"myvalue"`)
 }
 
-// TestKVOp_JSON tests KVOp JSON serialization.
+// TestKVOp_JSON tests memory.KVOp JSON serialization.
 func TestKVOp_JSON(t *testing.T) {
-	putOp := KVOp{Type: "put", Key: "testkey", Value: "testvalue"}
+	putOp := memory.KVOp{Type: "put", Key: "testkey", Value: "testvalue"}
 	data, err := json.Marshal(putOp)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"op":"put"`)
 
-	deleteOp := KVOp{Type: "delete", Key: "todelete"}
+	deleteOp := memory.KVOp{Type: "delete", Key: "todelete"}
 	data, err = json.Marshal(deleteOp)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"op":"delete"`)
 }
 
-// TestMockRustVikingClient_Interface tests that MockRustVikingClient satisfies the KVStore interface.
+// TestMockRustVikingClient_Interface tests that MockRustVikingClient satisfies the memory.KVStore interface.
 func TestMockRustVikingClient_Interface(t *testing.T) {
 	mock := NewMockRustVikingClient()
 	require.NotNil(t, mock)
@@ -94,7 +96,7 @@ func TestMockRustVikingClient_Interface(t *testing.T) {
 	assert.Len(t, pairs, 2)
 
 	// KVBatch
-	err = mock.KVBatch([]KVOp{
+	err = mock.KVBatch([]memory.KVOp{
 		{Type: "put", Key: "bk1", Value: "bv1"},
 		{Type: "put", Key: "bk2", Value: "bv2"},
 	})
@@ -217,7 +219,7 @@ func TestRustVikingClient_Integration(t *testing.T) {
 	})
 
 	t.Run("Batch", func(t *testing.T) {
-		err := client.KVBatch([]KVOp{
+		err := client.KVBatch([]memory.KVOp{
 			{Type: "put", Key: "batch:1", Value: "bv1"},
 			{Type: "put", Key: "batch:2", Value: "bv2"},
 		})

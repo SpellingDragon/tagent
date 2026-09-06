@@ -35,10 +35,24 @@
 | `consolidation.go` | 证据门控巩固：服务端 SHA1 收据指纹（LLM 不可伪造）+ 回放验证 |
 | `error_tracking.go` | ErrorTrackingStore 最外层装饰：存储失败归因（memory/disk/rustviking）上报 DegradationManager |
 | `mem_spill.go` | StoreEvent 失败兜底：事件落 JSONL，恢复后重放（GetEvent 预检幂等） |
-| `rustviking_client.go` | rustviking CLI 客户端（kv/index 真实契约；VectorInsert 预留无调用方） |
-| `local_file_kv.go` / `key_schema.go` | localfile KV 与键空间模式（evt/idx/meta/tomb + `tagent:vec:` 向量前缀） |
+| `kv/`（子包，2026-09-06 分包） | **KV 存储后端专区**：`kv/rustviking_client.go`（rustviking CLI 客户端，kv/index 真实契约，VectorInsert 预留）、`kv/local_file_kv.go`（JSON 文件 KV + WAL/快照）。**新增持久化后端只进此子包** |
+| `key_schema.go` | 键空间模式契约（evt/idx/meta/tomb + `tagent:vec:` 向量前缀）——格式属于核心与各后端的公共词汇 |
 | `query_keyword.go` | 关键词检索（term-split 匹配，hybrid 的关键词侧） |
 | `diagnostics.go` | 维度锚定诊断（MemoryDiagnostics 健康快照） |
+
+---
+
+## 二点五、拓展：接入新的记忆引擎
+
+记忆有三类可替换面，契约全部居核心包 `memory`（`kv.go` 顶部附同样的指南），实现各居专属子包——**新后端永远不需要修改核心存储/压缩/事件代码**：
+
+| 路径 | 目标 | 实现 | 接线点 |
+|------|------|------|--------|
+| A. KV 存储后端 | 换持久化底座（RocksDB-direct、Redis、Badger…），保留事件/检索全套语义 | `memory/kv/` 新文件实现 `memory.KVStore`（Put/Get/Delete/Scan/Range/Batch，键格式见 `key_schema.go`） | 根包 `resolveMemoryStore` 加 case + `MemoryConfig.Type` 校验登记 |
+| B. 语义检索引擎 | 换向量/混合召回（Milvus、Qdrant、rustviking HNSW…） | `memory/engine/` 新文件实现 `memory.MemoryEngine`（C6 冻结契约：票据两段式、Ready 门控退化关键词、遗忘联动 RemoveVector） | 根包 `buildMemoryEngine` 加 case + `memory.engine` 配置 |
+| C. 嵌入器 | 换/加 embedding 供应商 | `memory/engine/` 实现 `Embedder` 接口（或复用 zhipu/mock/traced） | `memory.engine.embedding.provider` 路由 |
+
+**约束红线**（A/B 共享）：白盒测试文件不得 import 适配器子包（测试 import 环）——跨包协作测试一律黑盒（`package memory_test`）；适配器失败永不传染主链路（降级为关键词/透传）。
 
 ---
 

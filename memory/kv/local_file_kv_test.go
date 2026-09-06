@@ -1,6 +1,8 @@
-package memory
+package kv
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLocalFileKV_Interface verifies LocalFileKV satisfies the KVStore interface.
+// TestLocalFileKV_Interface verifies LocalFileKV satisfies the memory.KVStore interface.
 func TestLocalFileKV_Interface(t *testing.T) {
-	var _ KVStore = (*LocalFileKV)(nil)
+	var _ memory.KVStore = (*LocalFileKV)(nil)
 }
 
 // TestLocalFileKV_CRUD tests basic put/get/delete operations.
@@ -105,7 +107,7 @@ func TestLocalFileKV_Batch(t *testing.T) {
 	require.NoError(t, err)
 
 	// Batch put
-	err = kv.KVBatch([]KVOp{
+	err = kv.KVBatch([]memory.KVOp{
 		{Type: "put", Key: "b1", Value: "v1"},
 		{Type: "put", Key: "b2", Value: "v2"},
 		{Type: "put", Key: "b3", Value: "v3"},
@@ -118,7 +120,7 @@ func TestLocalFileKV_Batch(t *testing.T) {
 	assert.Equal(t, "v2", val)
 
 	// Batch with delete
-	err = kv.KVBatch([]KVOp{
+	err = kv.KVBatch([]memory.KVOp{
 		{Type: "delete", Key: "b1"},
 		{Type: "put", Key: "b4", Value: "v4"},
 	})

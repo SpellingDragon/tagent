@@ -11,7 +11,7 @@ import (
 // TombstoneSet → LifecycleManager → Compactor to a FileSegmentStore,
 // both background components are running.
 func TestProductionWiring_LifecycleAndCompactorStarted(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -40,7 +40,7 @@ func TestProductionWiring_LifecycleAndCompactorStarted(t *testing.T) {
 // TestProductionWiring_CloseStopsAll verifies that Close() stops both
 // LifecycleManager and Compactor.
 func TestProductionWiring_CloseStopsAll(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -70,7 +70,7 @@ func TestProductionWiring_CloseStopsAll(t *testing.T) {
 // TestProductionWiring_CloseIdempotent verifies that calling Close() multiple times
 // does not panic or error.
 func TestProductionWiring_CloseIdempotent(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 
@@ -102,7 +102,7 @@ func TestProductionWiring_CloseIdempotent(t *testing.T) {
 // TestProductionWiring_TombstoneFilterActive verifies that after wiring,
 // tombstoned events are filtered from GetEvent and QueryEvents.
 func TestProductionWiring_TombstoneFilterActive(t *testing.T) {
-	mockKV := NewMockRustVikingClient()
+	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
 	require.NoError(t, err)
 

@@ -15,6 +15,7 @@ import (
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
+	tagentkv "github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/SpellingDragon/tagent/testutil"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/stretchr/testify/require"
@@ -320,7 +321,7 @@ func (t *echoToolStruct) Call(ctx context.Context, jsonArgs []byte) (any, error)
 // createRecallTestStore creates a MemoryStore pre-populated with test events for RecallAgent tests.
 func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
 	t.Helper()
-	store, err := tagentmemory.NewFileSegmentStore(tagentmemory.NewMockRustVikingClient(), nil, ":memory:", 100)
+	store, err := tagentmemory.NewFileSegmentStore(tagentkv.NewMockRustVikingClient(), nil, ":memory:", 100)
 	if err != nil {
 		t.Fatalf("Failed to create memory store: %v", err)
 	}
