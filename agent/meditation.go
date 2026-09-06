@@ -29,6 +29,11 @@ type MeditationConfig struct {
 	// *prompt.Source 满足 Getter，既有构造点零改动；Source.Get 有 nil-receiver 守卫。
 	PromptSource prompt.Getter // Hot-reloadable meditation prompt (optional, overrides PromptText)
 
+	// DigestExtra（4.3 design-report-closeout）：可选的 digest 附加段生成器——
+	// 冥想自我状态摘要末尾追加（如巩固候选清单）。nil = 无附加（现状）。
+	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
+	DigestExtra func() string
+
 	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
 	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
@@ -275,6 +280,15 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 	var digest string
 	if m.taskController != nil {
 		digest = renderSelfStateDigest(m.taskController.List(), idle)
+		// 4.3（design-report-closeout）：巩固候选等附加段（装配层注入，nil 安全）。
+		if m.cfg.DigestExtra != nil {
+			if extra := m.cfg.DigestExtra(); extra != "" {
+				if digest != "" {
+					digest += "\n"
+				}
+				digest += extra
+			}
+		}
 	}
 
 	header := fmt.Sprintf("[meditation] 这是一次定时冥想事件。\n\n"+

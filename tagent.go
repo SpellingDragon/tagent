@@ -341,7 +341,13 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
 	}
 	// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
-	memStore, err = wireMemoryEngine(memStore, acfg.Memory)
+	// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
+	hintTracker := newConsolidationHintTracker(acfg)
+	var trackFn func(int64, int, string)
+	if hintTracker != nil {
+		trackFn = hintTracker.Track
+	}
+	memStore, err = wireMemoryEngine(memStore, acfg.Memory, trackFn)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
 	}
@@ -666,6 +672,13 @@ func buildAgent(
 			PromptSource: meditationPromptSource,
 			AnchorPath:   meditationAnchorPath,
 		}
+		// 4.3（design-report-closeout）：巩固候选清单注入冥想 digest（建议式——
+		// 列 key 与计数，执行权在 LLM + memory_consolidate）。tracker nil 时不注入。
+		if hintTracker != nil {
+			tracker := hintTracker
+			pid := memory.PartitionIDFromName(name)
+			agentCfg.Meditation.DigestExtra = func() string { return tracker.CandidatesText(pid) }
+		}
 	}
 
 	ta, err := agent.NewTagentAgent(agentCfg)
@@ -683,6 +696,19 @@ func buildAgent(
 				return b.ID
 			}
 			return ""
+		})
+	}
+
+	// 4.2（design-report-closeout）：容量 hint 回填——渗透消息进事件循环（建议式：
+	// 执行权在 LLM + memory_consolidate；source=consolidation_hint 供消费端识别）。
+	if hintTracker != nil {
+		hintTracker.SetOnHint(func(pid, count int) {
+			ta.InjectMessageWithSource("consolidation_hint", model.Message{
+				Role: model.RoleUser,
+				Content: fmt.Sprintf("[consolidation_hint] 本分区已累计 %d 个边界事件（用户意图/任务产出）未做巩固。"+
+					"若其中有值得沉淀的经验、约束或事实，可用 memory_consolidate 巩固（源事件 key 见近期时间线卡片，"+
+					"工具会做收据指纹校验）；若无可沉淀内容，忽略本提示即可（snooze 窗内不会重复打扰）。", count),
+			})
 		})
 	}
 
@@ -1165,9 +1191,19 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 // 未配置 Engine 或无 Embedding → 返回原 store（纯关键词，行为逐字节不变）。
 // 共享 store（path 非空）的引擎按 path 共享（namedEngines），保跨 agent 语义召回一致。
 // 嵌入器初始化失败（如无 API key）→ 优雅降级：记录并返回原 store（不阻断 agent 构建）。
-func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig) (memory.MemoryStore, error) {
-	if mc.Engine == nil || mc.Engine.Embedding == nil {
+func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig, onStoreEvent func(eventKey int64, partitionID int, eventType string)) (memory.MemoryStore, error) {
+	hasEngine := mc.Engine != nil && mc.Engine.Embedding != nil
+	if !hasEngine && onStoreEvent == nil {
 		return store, nil
+	}
+	if !hasEngine {
+		// 4.2（design-report-closeout）：容量触发-only——bridge 作纯写入旁路装饰器
+		// （engine=nil：Index 跳过、向量方法退 inner），仅提供 capacityHook 计数点。
+		bridge := engine.NewEngineBridge(store, nil)
+		if provider, ok := bridge.(memory.CapacityHookProvider); ok {
+			provider.SetCapacityHook(onStoreEvent)
+		}
+		return bridge, nil
 	}
 	if mc.Path != "" {
 		// 引擎缓存键含 backend/model/dimensions（审查 Nit6）：同 path 但不同引擎配置
@@ -1176,7 +1212,7 @@ func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig) (memory.MemoryS
 		namedEngineMu.Lock()
 		defer namedEngineMu.Unlock()
 		if eng, ok := namedEngines[cacheKey]; ok {
-			return newEngineBridgeWithRemover(store, eng), nil
+			return newEngineBridgeWithRemover(store, eng, onStoreEvent), nil
 		}
 		eng, err := buildMemoryEngine(store, *mc.Engine)
 		if err != nil {
@@ -1184,14 +1220,14 @@ func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig) (memory.MemoryS
 			return store, nil
 		}
 		namedEngines[cacheKey] = eng
-		return newEngineBridgeWithRemover(store, eng), nil
+		return newEngineBridgeWithRemover(store, eng, onStoreEvent), nil
 	}
 	eng, err := buildMemoryEngine(store, *mc.Engine)
 	if err != nil {
 		log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
 		return store, nil
 	}
-	return newEngineBridgeWithRemover(store, eng), nil
+	return newEngineBridgeWithRemover(store, eng, onStoreEvent), nil
 }
 
 // engineCacheKey 构造共享引擎缓存键：path + backend + embedding model/dimensions
@@ -1211,8 +1247,13 @@ func engineCacheKey(mc MemoryConfig) string {
 // newEngineBridgeWithRemover 创建 engineBridge 并把向量移除回调接到 base store（若支持
 // SetVectorRemover）——使 TTL/容量遗忘物理删除事件时同步移除向量（内存索引 + KV 持久键），
 // 消除 engine.Remove 死代码、防死键堆积与重启复活（审查 M2）。
-func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngine) memory.MemoryStore {
+func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngine, onStoreEvent func(eventKey int64, partitionID int, eventType string)) memory.MemoryStore {
 	bridge := engine.NewEngineBridge(store, eng)
+	if onStoreEvent != nil {
+		if provider, ok := bridge.(memory.CapacityHookProvider); ok {
+			provider.SetCapacityHook(onStoreEvent) // 4.2: 容量触发计数点
+		}
+	}
 	if setter, ok := store.(interface{ SetVectorRemover(memory.VectorRemover) }); ok {
 		if vr, ok := bridge.(memory.VectorRemover); ok {
 			setter.SetVectorRemover(vr)
@@ -1358,4 +1399,24 @@ func consolidationMinSources(acfg AgentConfig) int {
 		return 0
 	}
 	return c.MinSourceEvents
+}
+
+// newConsolidationHintTracker（4.2 design-report-closeout）从 agent 配置构造容量
+// 触发器；配置缺失/非法/threshold<=0 返回 nil（关闭，零行为变化）。
+func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
+	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
+		return nil
+	}
+	c := *acfg.Memory.Engine.Consolidation
+	if err := c.Validate(); err != nil {
+		log.Warnf("[tagent] invalid consolidation config (%v); capacity hint disabled", err)
+		return nil
+	}
+	var snooze time.Duration
+	if c.Snooze != "" {
+		if d, err := time.ParseDuration(c.Snooze); err == nil {
+			snooze = d
+		}
+	}
+	return NewConsolidationHintTracker(c.CapacityThreshold, snooze)
 }

@@ -10,7 +10,7 @@ import (
 // （不包裹引擎）——保证 T-A 对现状零影响。
 func TestWireMemoryEngine_NilEngineUnchanged(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	got, err := wireMemoryEngine(store, MemoryConfig{})
+	got, err := wireMemoryEngine(store, MemoryConfig{}, nil)
 	if err != nil {
 		t.Fatalf("wireMemoryEngine: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestWireMemoryEngine_NilEngineUnchanged(t *testing.T) {
 // 不接线（无向量能力 = 纯关键词 = 现状）。
 func TestWireMemoryEngine_EmbeddingNilUnchanged(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	got, err := wireMemoryEngine(store, MemoryConfig{Engine: &MemoryEngineConfig{}})
+	got, err := wireMemoryEngine(store, MemoryConfig{Engine: &MemoryEngineConfig{}}, nil)
 	if err != nil {
 		t.Fatalf("wireMemoryEngine: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestWireMemoryEngine_EmbeddingNilUnchanged(t *testing.T) {
 func TestWireMemoryEngine_MockEmbedderWraps(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	mc := MemoryConfig{Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 32}}}
-	got, err := wireMemoryEngine(store, mc)
+	got, err := wireMemoryEngine(store, mc, nil)
 	if err != nil {
 		t.Fatalf("wireMemoryEngine: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestWireMemoryEngine_ZhipuNoKeyDegrades(t *testing.T) {
 	t.Setenv("ZAI_API_KEY", "")
 	store := memory.NewInMemoryStore()
 	mc := MemoryConfig{Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "zhipu"}}}
-	got, err := wireMemoryEngine(store, mc)
+	got, err := wireMemoryEngine(store, mc, nil)
 	if err != nil {
 		t.Fatalf("无 key 应优雅降级不报错, got %v", err)
 	}
@@ -74,7 +74,7 @@ func TestWireMemoryEngine_UnknownBackendErrors(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	mc := MemoryConfig{Engine: &MemoryEngineConfig{Backend: "bogus", Embedding: &EmbeddingConfig{Provider: "mock"}}}
 	// 未知 backend：buildMemoryEngine 报错 → wireMemoryEngine 优雅降级返回原 store（不阻断）。
-	got, err := wireMemoryEngine(store, mc)
+	got, err := wireMemoryEngine(store, mc, nil)
 	if err != nil {
 		t.Fatalf("应优雅降级不报错, got %v", err)
 	}

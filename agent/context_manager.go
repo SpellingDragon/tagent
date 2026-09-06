@@ -477,8 +477,40 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	}
 	cm.projection.Append(ref)
 
+	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
+	// 确定性 settle 裁决自动绑定 feedback（parent=task_settled 事件自身：结算记录
+	// 即任务产出，bundle_id 章使其可归因到 active bundle；suspect/stable 不写）。
+	if evt.Source == SourceTask {
+		cm.writeSettleFeedback(eventKey, evt.Metadata)
+	}
+
 	log.Infof("[persistBusEvent] persisted bus event key=%d type=%s source=%s content=%s",
 		eventKey, eventType, evt.Source, truncateForLog(msg.Content, 80))
+}
+
+// writeSettleFeedback（2.3 design-report-closeout）把确定性任务裁决写为 feedback
+// 事件（因果边指向 task_settled 事件）。completed→positive / failed→negative；
+// suspect/alive-detached/未知状态不写（只记确定性裁决，防噪声污染 guardrail）。
+// 失败仅记日志（反馈是旁路产物，不阻塞主链路）。
+func (cm *ContextManager) writeSettleFeedback(settledKey int64, md map[string]any) {
+	if cm.memStore == nil || md == nil {
+		return
+	}
+	status, _ := md["settle_status"].(string)
+	var verdict string
+	switch status {
+	case "completed":
+		verdict = "positive"
+	case "failed":
+		verdict = "negative"
+	default:
+		return // suspect / alive-detached / unknown: no deterministic verdict
+	}
+	if _, err := memory.BindFeedback(cm.memStore, settledKey, memory.FeedbackPayload{
+		Verdict: verdict, Source: "task_settle",
+	}); err != nil {
+		log.Warnf("[persistBusEvent] settle feedback bind failed (key=%d): %v", settledKey, err)
+	}
 }
 
 // truncateForLog truncates a string for logging purposes.

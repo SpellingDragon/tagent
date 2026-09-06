@@ -25,6 +25,18 @@ import (
 type engineBridge struct {
 	inner  memory.MemoryStore
 	engine memory.MemoryEngine
+
+	// capacityHook（4.2 design-report-closeout）：每次 StoreEvent 成功后旁路调用
+	// （partitionID, eventType）——巩固容量触发的计数点。不依赖引擎是否接线
+	// （engine 可为 nil，bridge 仍作为写入旁路装饰器存在）。非阻塞、失败无关。
+	// 接线纪律：仅在装配期（wireMemoryEngine）设置一次，运行期只读——无锁安全。
+	capacityHook func(eventKey int64, partitionID int, eventType string)
+}
+
+// SetCapacityHook 实现 memory.CapacityHookProvider（4.2）：注册写入旁路计数回调
+// （装配期一次性调用；运行期只读，见字段注释）。
+func (b *engineBridge) SetCapacityHook(fn func(eventKey int64, partitionID int, eventType string)) {
+	b.capacityHook = fn
 }
 
 // 编译期锁定：engineBridge 是 memory.MemoryStore + memory.MemoryEngineProvider（+ 尽力 memory.RelationStoreProvider）。
@@ -44,6 +56,9 @@ func NewEngineBridge(inner memory.MemoryStore, engine memory.MemoryEngine) memor
 func (b *engineBridge) StoreEvent(key int64, event memory.FullEvent) error {
 	if err := b.inner.StoreEvent(key, event); err != nil {
 		return err
+	}
+	if b.capacityHook != nil {
+		b.capacityHook(key, event.PartitionID, event.EventType)
 	}
 	if b.engine != nil {
 		if err := b.engine.Index(context.Background(), memory.IndexableEvent{

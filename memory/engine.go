@@ -142,6 +142,13 @@ type KVProvider interface {
 	KVBackend() KVStore
 }
 
+// CapacityHookProvider 是可选接口（4.2 design-report-closeout）：装饰器在每次
+// StoreEvent 成功后旁路调用回调（eventKey, partitionID, eventType），供巩固容量触发计数。
+// 实现位于子包 memory/engine 的 engineBridge。回调 MUST 非阻塞、不得失败主链路。
+type CapacityHookProvider interface {
+	SetCapacityHook(fn func(eventKey int64, partitionID int, eventType string))
+}
+
 // VectorRemover 由持有向量索引的组件实现；FileSegmentStore 在 TTL/容量遗忘**物理删除**
 // 事件时（Compactor.finalizeTombstones）回调，使引擎同步移除向量（内存索引 + KV 持久键），
 // 防死键堆积与重启复活（审查 M2）。

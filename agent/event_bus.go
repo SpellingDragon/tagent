@@ -198,6 +198,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	for k, v := range tk.Spec.Origin {
 		evt.Metadata[k] = v
 	}
+	// 2.3（design-report-closeout）：结构化 settle 状态随事件携带——persistBusEvent
+	// 落库后据此自动写 task_settle feedback（completed→positive / failed→negative；
+	// suspect/alive-detached 不写，只记确定性裁决）。
+	evt.Metadata["settle_status"] = statusWord
 	return evt
 }
 

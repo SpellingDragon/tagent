@@ -165,12 +165,19 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 }
 
 // TestNewTaskSettledEvent_NoOriginSafe: a task with no Origin yields an event
-// with no routing metadata (regression guard).
+// with no routing metadata (regression guard). settle_status is NOT routing
+// metadata — it is the deterministic settle verdict carried for the OnSettle
+// feedback path (2.3, design-report-closeout), always present.
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
-	if len(evt.Metadata) != 0 {
-		t.Errorf("no-origin task should yield empty metadata, got %v", evt.Metadata)
+	for k := range evt.Metadata {
+		if k != "settle_status" {
+			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
+		}
+	}
+	if evt.Metadata["settle_status"] != "completed" {
+		t.Errorf("settle_status must always be carried (2.3 feedback path), got %v", evt.Metadata["settle_status"])
 	}
 }
 
