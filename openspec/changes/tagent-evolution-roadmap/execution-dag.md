@@ -299,6 +299,12 @@ flowchart TB
 - **启用禁令修订**:Evolution 可出实验环境(N1 为功能不可用非安全风险,记为已知限制);**Governance 真实部署建议补 N2 后放开**(主风险面审计不持久;接受内存审计可注明降级)。
 - 处置:N1/N2 + Minor 8 已增补至 postmerge-review-fixes tasks §6/§7;**N1/N2 关闭前该变更不 archive**。
 
+### 8.11 第五轮复验(§8/§9 修复轮 audit,commit 996dd2f)
+
+- **裁定:全部真修,声称与实现零偏差**——四方核对(tasks/execution-dag/LEDGER/代码)一致:§8.1 AgentName 全链路 PASS(生产唯一写路径 gate.record 全填、omitempty 单 entry 零噪声、rebuild 回读、tagent.go 接线);§8.2 wire 测试**真走 buildAgent×2** + 断言 [governance_denied] 双拒 + AgentName 区分 + 同一 govLedger 行为同指针证明;9.1 Record 锁内快照消 race + Submit→重载→rollback 生命周期回归 + seedActiveBaseline/NoteActive 幂等修崩溃窗口;9.2 BindLedger 死代码删净 + active==nil 守卫(submitMu 内 route 前,快慢两道通吃)+ 假时钟全覆盖(approval 全部时间读走注入)。fail-before 探针三条均可信(推演)。门禁亲验:build/vet + 全量 -short 28 包零 FAIL + 五包 -race 绿。
+- **Minor 7 项(不阻断)**:①审计查询侧归属不可达(EventSummary 无 agent 段,memory_query 关键词查不到;修法=Summary 追加 agent= 段);②rebuildFromStore 锁外读(同 Record 补快照);③NoteActive 幂等两次持锁非原子(单线程调用方无实害);④wire 测试双顶层直构,未复现 agent-kind 递归时序(建议补一条);⑤**postmerge 缺 proposal.md,openspec archive 会被校验拒**——归档前须补最小 proposal(来源=§8 审计容器);⑥hybrid tasks 7.2 行尾措辞过时(主 specs 已落);⑦M1(declaration test 真构 engineBridge)仍只在 §8.4 正文未进活清单。
+- **archive 就绪度:ready-with-notes**——六 Major + N1/N2 + §8.1 全 FIXED 且各有具名回归;三步路径:补 proposal.md → `scripts/check-openspec.sh` → `openspec archive` + 勾 5.3。三变更剩余未勾(hybrid 3.4/6.1、obs 环境项、roadmap backlog)均 postmerge 范围外不阻断。
+
 - **修复完成(2026-09-06)**:N1/N2 + Minor 8 **全部 FIXED**(见 LEDGER + tasks §6/§7 勾选)。N1(ReleaseRecord 持久化 releases.jsonl + NoteActive seed 基线→rollback 到基线可用 + 重启 history 恢复,回归 TestReleaseHistory_PersistReload/TestRefineRollback_BaselineAllowed)/N2(DenialLedger.BindStore 延迟绑定 + rc.govLedger 跨 agent 共享→子 agent 治理审计 durable,回归 TestDenialLedger_BindStoreDeferred)。Minor 8:①预算 Dir="" 不落盘 CWD ②mem_spill 注释更新 ③runSlowLane parentless 用 prev active 回退 ④审批过期文件清理 ⑤tasks 宣称校准(Decide=预留) ⑥ToolAgentFactory 工厂路径边界标注 ⑦ActivationLog 重启回退注释 ⑧节流+过期测试补缺。**§8.9 启用禁令全解除**:Evolution 可出实验(rollback 到基线可用)+ Governance 可真实部署(子 agent 主风险面审计 durable)。**postmerge-review-fixes 全关闭**(六 Major + N1/N2 + Minor 20 项),archive 待用户裁决(仅余 Jaeger/AReaL 未实装项,非本容器职责)。
 
 ### 8.10 第四轮复验(N1/N2+Minor8 修复轮 audit,2026-09-06)
