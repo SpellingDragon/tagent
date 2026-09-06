@@ -5,11 +5,12 @@
 > 执行顺序:组 1→7;组 8(向量链路可观测)在组 5 之后、组 7 门禁之前执行。
 > 交接背景与全局上下文见 roadmap design.md「D6 交接须知」。
 >
-> **执行状态(2026-09-05 /opsx-apply 对照核对)**:核心链路(组1-4、组8)已交付并 -race 绿;
+> **执行状态(2026-09-06 更新)**:核心链路(组1-4、组8)已交付并 -race 绿;
 > 实现载体为 execution-dag.md 的 T-A 节点(解耦缝 C6:Embedder/InMemoryEngine/engineBridge/
-> KV持久化/recall hybrid/rustviking契约修复)+ 本次补齐组8向量可观测(TracedEmbedder)、
-> 4.2声明恒定测试、5.2 yaml 示例。BLOCKED 项需真实 ZAI_API_KEY(5.1/5.3);X3(6.1)裁决为
-> 后续变更候选。逐行状态见各项行尾标注。
+> KV持久化/recall hybrid/rustviking契约修复)+ 补齐组8向量可观测(TracedEmbedder)、
+> 4.2声明恒定测试、5.2 yaml 示例。原 BLOCKED 项(5.1/5.3 需真实 ZAI_API_KEY)已于
+> 2026-09-06 用真实 key 实测完成(5.1 维度对比 / 5.3 语义召回闭环,见各行尾标注),BLOCKED 解除;
+> X3(6.1)裁决为后续变更候选。逐行状态见各项行尾标注。
 
 ## 1. 选型实测与地基
 
@@ -57,4 +58,4 @@
 
 - [x] 7.1 三道门禁:build/vet/test -race → 真实集成抽查 → CodeReview sub-agent fresh-eyes(必须修复项清零) — build/vet/全量23包-short绿+新子系统-race绿;CodeReview gate-3(T-A 首轮 M1/M2/M3+7S+12Nit 全清零;真实集成抽查**完成** 2026-09-06 真实 ZAI_API_KEY:embedder 5.1/5.3 实测 PASS + real-LLM 契约套件 8/8 PASS)
 - [x] 7.2 delta specs 同步主 specs(semantic-search、recall-hybrid-fusion 新增;recall-protocol 若有 MODIFIED 项按全文拷贝规程) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
-- [ ] 7.3 commit(conventional 风格)+ archive 本变更 + 回写 LEDGER.md 与 roadmap P1 检查点 — commit✅(conventional 全程)+LEDGER✅(两次驱动记账);**archive 待裁决**(5.1/5.3 BLOCKED 项是否阻断 archive 由用户定;核心链路已交付)
+- [ ] 7.3 commit(conventional 风格)+ archive 本变更 + 回写 LEDGER.md 与 roadmap P1 检查点 — commit✅(conventional 全程)+LEDGER✅(两次驱动记账);**archive 待裁决**(原 5.1/5.3 BLOCKED 项已于 2026-09-06 真实 ZAI_API_KEY 实测完成、BLOCKED 解除;核心链路已交付,archive 时机由用户定)

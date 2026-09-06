@@ -37,7 +37,10 @@ type DenialRecord struct {
 	Reason     string    `json:"reason"`
 	ArgsDigest string    `json:"args_digest,omitempty"`
 	GoalID     string    `json:"goal_id,omitempty"`
-	Timestamp  int64     `json:"ts"`
+	// AgentName 标注记录来源 agent（§8.1）：W3 后所有 agent 共享同一 entry Ledger，无此字段则
+	// 多 agent 治理事件无法区分来源。omitempty 保持单 entry 场景（历史事件无 agent）向后兼容。
+	AgentName string `json:"agent,omitempty"`
+	Timestamp int64  `json:"ts"`
 }
 
 // DenialLedger 是治理账本：内存索引 + governance 事件（可选持久化到 MemoryStore）。
@@ -81,10 +84,13 @@ func (l *DenialLedger) Record(rec DenialRecord) {
 	}
 	l.mu.Lock()
 	l.records = append(l.records, rec)
+	// ①（§9.1）锁内快照 store/partitionID：BindStore 并发写这两字段（同锁保护），若在锁外读
+	// l.store 则与 BindStore 竞争（-race data race）。快照后锁外写事件，锁纪律一致。
+	store, pid := l.store, l.partitionID
 	l.mu.Unlock()
 
-	if l.store != nil {
-		l.writeGovernanceEvent(rec)
+	if store != nil {
+		l.writeGovernanceEvent(rec, store, pid)
 	}
 }
 
@@ -111,28 +117,33 @@ func (l *DenialLedger) Count() int {
 	return len(l.records)
 }
 
-func (l *DenialLedger) writeGovernanceEvent(rec DenialRecord) {
+func (l *DenialLedger) writeGovernanceEvent(rec DenialRecord, store memory.MemoryStore, partitionID int) {
 	content := fmt.Sprintf("[governance:%s] tool=%s level=%s rule=%s reason=%s",
 		rec.Subtype, rec.ToolName, rec.Level, rec.RuleID, rec.Reason)
+	metadata := map[string]string{
+		event.MetaKeySubtype: rec.Subtype,
+		"tool":               rec.ToolName,
+		"level":              rec.Level.String(),
+		"rule_id":            rec.RuleID,
+		"reason":             rec.Reason,
+		"args_digest":        rec.ArgsDigest,
+		"goal_id":            rec.GoalID,
+	}
+	if rec.AgentName != "" {
+		// §8.1：来源 agent（omitempty 语义——单 entry 场景不写噪声空键，历史事件也无此键）。
+		metadata["agent"] = rec.AgentName
+	}
 	evt := memory.FullEvent{
-		EventKey:     memory.NewSnowflakeEventKey(l.partitionID, 0),
-		PartitionID:  l.partitionID,
+		EventKey:     memory.NewSnowflakeEventKey(partitionID, 0),
+		PartitionID:  partitionID,
 		EventType:    event.TypeGovernance,
 		EventSummary: content,
 		Content:      content,
 		Timestamp:    rec.Timestamp,
-		Metadata: map[string]string{
-			event.MetaKeySubtype: rec.Subtype,
-			"tool":               rec.ToolName,
-			"level":              rec.Level.String(),
-			"rule_id":            rec.RuleID,
-			"reason":             rec.Reason,
-			"args_digest":        rec.ArgsDigest,
-			"goal_id":            rec.GoalID,
-		},
+		Metadata:     metadata,
 	}
 	// 尽力写入（治理账本失败不阻断主链路）。
-	_ = l.store.StoreEvent(evt.EventKey, evt)
+	_ = store.StoreEvent(evt.EventKey, evt)
 }
 
 func (l *DenialLedger) rebuildFromStore() {
@@ -153,7 +164,7 @@ func (l *DenialLedger) rebuildFromStore() {
 			Subtype: e.Metadata[event.MetaKeySubtype], ToolName: e.Metadata["tool"],
 			Level: parseRiskLevel(e.Metadata["level"]), RuleID: e.Metadata["rule_id"],
 			Reason: e.Metadata["reason"], ArgsDigest: e.Metadata["args_digest"],
-			GoalID: e.Metadata["goal_id"], Timestamp: e.Timestamp,
+			GoalID: e.Metadata["goal_id"], AgentName: e.Metadata["agent"], Timestamp: e.Timestamp,
 		})
 	}
 }

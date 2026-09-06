@@ -559,10 +559,11 @@ func buildAgent(
 				MaxHighRisk:   cfg.Governance.MaxHighRisk,
 				MaxMediumRisk: cfg.Governance.MaxMediumRisk,
 			}, budgetDir), // per-agent 独立 epoch 持久化（Dir="" 则纯内存）
-			Approval: rc.govGate.Approval(),
-			Goals:    rc.govGate.Goals(),
-			Ledger:   rc.govLedger, // N2：共享 entry 持久账本（子 agent 治理记录也 durable，非兜底内存）
-			Config:   rc.govGate.Config(),
+			Approval:  rc.govGate.Approval(),
+			Goals:     rc.govGate.Goals(),
+			Ledger:    rc.govLedger, // N2：共享 entry 持久账本（子 agent 治理记录也 durable，非兜底内存）
+			Config:    rc.govGate.Config(),
+			AgentName: name, // §8.1：治理记录标注来源 agent（共享 Ledger 下多 agent 事件可区分）
 		})
 		if name == cfg.Entry {
 			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的

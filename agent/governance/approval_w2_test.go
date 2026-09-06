@@ -79,21 +79,61 @@ func TestGate_ApprovalAccessorExposed(t *testing.T) {
 	}
 }
 
-// TestApproval_RescanThrottled 是 W2 Minor⑧（§8.9）补缺：Check 未命中的重扫受
-// approvalRescanInterval（2s）节流——窗内第二次 Check 不重扫目录（防高频重试反复 IO）。
+// TestApproval_RescanThrottled 是 W2 Minor⑧（§8.9）+ ⑦（§9.2）补缺：Check 未命中的重扫受
+// rescanInterval 节流——窗内第二次 Check 不重扫目录（防高频重试反复 IO）。⑦：注入假时钟 +
+// 参数化 interval，消除对真实 wall-clock 的依赖（旧测用固定 2s 常量，CI 重载 >2s 会致窗内两次
+// Check 实际跨窗被误判为已重扫 → 假失败）。
 func TestApproval_RescanThrottled(t *testing.T) {
 	dir := t.TempDir()
 	am := NewApprovalManager(dir, 30*time.Minute)
+	// ⑦：注入假时钟（可确定性推进）+ 1s 节流间隔（远小于 ttl，避免 approved 被误判过期）。
+	base := time.Now()
+	cur := base
+	am.now = func() time.Time { return cur }
+	am.rescanInterval = time.Second
+
 	req, _ := am.Request("exec", `{"cmd":"x"}`, "x", "critical", "exec.sudo", "提权", "")
-	// 首次 Check 未命中 → rescanDue(lastRescan=0 → true) 重扫，lastRescan 更新为 now。
+	// 首次 Check 未命中 → rescanDue(lastRescan=0 → true) 重扫，lastRescan 更新为 base。
 	_ = am.Check("exec", req.ArgsDigest)
 	// 立即写 approved 文件（外部审批者运行中落盘）。
 	req.Status = ApprovalApproved
 	raw, _ := json.MarshalIndent(req, "", "  ")
 	_ = os.WriteFile(filepath.Join(dir, "approvals", req.ID+".json"), raw, 0o644)
-	// 2s 节流窗内第二次 Check → rescanDue false（不重扫）→ 仍读内存 pending → nil（节流生效）。
+	// 节流窗内（推进 500ms < 1s 间隔）第二次 Check → rescanDue false（不重扫）→ 仍读内存
+	// pending → nil（节流生效）。假时钟确定性推进，无真实 sleep、无 wall-clock 竞态。
+	cur = base.Add(500 * time.Millisecond)
 	if got := am.Check("exec", req.ArgsDigest); got != nil {
-		t.Fatal("W2 节流: 2s 窗内第二次 Check 不应重扫目录(应仍 nil,防高频重试反复 IO)")
+		t.Fatal("W2 节流: 窗内第二次 Check 不应重扫目录(应仍 nil,防高频重试反复 IO)")
+	}
+}
+
+// TestApproval_RescanWindowExpiryResumes 是 ⑦（§9.2）正向补缺：节流窗过期后 Check 恢复重扫，
+// 运行中外部落盘的批准文件经重扫可见（闭环不因节流永久断路）。旧测只验窗内节流、未验窗过期恢复。
+func TestApproval_RescanWindowExpiryResumes(t *testing.T) {
+	dir := t.TempDir()
+	am := NewApprovalManager(dir, 30*time.Minute)
+	base := time.Now()
+	cur := base
+	am.now = func() time.Time { return cur }
+	am.rescanInterval = time.Second
+
+	req, _ := am.Request("exec", `{"cmd":"y"}`, "y", "critical", "exec.sudo", "提权", "")
+	_ = am.Check("exec", req.ArgsDigest) // 首次重扫，lastRescan=base
+	// 窗内落盘 approved 文件。
+	req.Status = ApprovalApproved
+	raw, _ := json.MarshalIndent(req, "", "  ")
+	_ = os.WriteFile(filepath.Join(dir, "approvals", req.ID+".json"), raw, 0o644)
+	// 窗内（500ms < 1s）不重扫 → nil。
+	cur = base.Add(500 * time.Millisecond)
+	if got := am.Check("exec", req.ArgsDigest); got != nil {
+		t.Fatal("窗内不应重扫(节流生效)")
+	}
+	// ⑦正向：推进假时钟越过节流窗（1.5s >= 1s，且 << 30m ttl 免 approved 被判过期）→
+	// rescanDue true → 重扫读入 approved → 命中放行（节流窗过期后闭环恢复）。
+	cur = base.Add(1500 * time.Millisecond)
+	got := am.Check("exec", req.ArgsDigest)
+	if got == nil || got.Status != ApprovalApproved {
+		t.Fatalf("W2 节流窗过期后应恢复重扫并命中 approved, got %+v", got)
 	}
 }
 

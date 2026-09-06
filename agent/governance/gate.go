@@ -1,7 +1,6 @@
 package governance
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -59,6 +58,9 @@ type GovernanceGate struct {
 	ledger     *DenialLedger
 	goals      *GoalRegistry
 	cfg        GateConfig
+	// agentName 是本 gate 服务的 agent 名（§8.1）：治理记录写事件时标注来源 agent——W3 后
+	// 所有 agent 共享同一 entry Ledger，无此字段则多 agent 治理事件无法区分来源。
+	agentName string
 }
 
 // GateDeps 是构建 GovernanceGate 的依赖集（nil 组件按各自降级语义处理）。
@@ -69,6 +71,9 @@ type GateDeps struct {
 	Ledger     *DenialLedger
 	Goals      *GoalRegistry
 	Config     GateConfig
+	// AgentName 是本 gate 服务的 agent 名（§8.1）：治理记录写事件时标注来源 agent。W3 后所有
+	// agent 共享同一 entry Ledger，无此字段则多 agent 治理事件无法区分来源。
+	AgentName string
 }
 
 // NewGovernanceGate 构建治理门。缺失组件用安全默认（classifier 默认规则，其余 nil 跳过）。
@@ -80,6 +85,7 @@ func NewGovernanceGate(deps GateDeps) *GovernanceGate {
 		ledger:     deps.Ledger,
 		goals:      deps.Goals,
 		cfg:        deps.Config.withDefaults(),
+		agentName:  deps.AgentName,
 	}
 	if g.classifier == nil {
 		g.classifier = NewRiskClassifier(nil, 0)
@@ -215,18 +221,8 @@ func (g *GovernanceGate) record(subtype string, ctx RiskContext, level RiskLevel
 	g.ledger.Record(DenialRecord{
 		Subtype: subtype, ToolName: ctx.ToolName, Level: level,
 		RuleID: ruleID, Reason: reason, ArgsDigest: digest, GoalID: goalID,
+		AgentName: g.agentName, // §8.1：标注来源 agent（共享 Ledger 下多 agent 治理事件可区分）
 	})
-}
-
-// BindLedger 把治理账本绑定到持久 MemoryStore——治理记录写 governance 事件（可 recall 审计、
-// 跨重启重建）。运行时接线用：New 构造 gate 时 entry agent 的 memStore 尚未就绪（per-agent
-// 在 buildAgent 构造），故延迟到 memStore 就绪后绑定。仅启动期调用一次（buildAgent 单
-// goroutine，先于事件循环 go statement，happens-before 保证对运行期 record 可见）。
-func (g *GovernanceGate) BindLedger(store memory.MemoryStore, partitionID int) {
-	if g == nil || store == nil {
-		return
-	}
-	g.ledger = NewDenialLedger(store, partitionID)
 }
 
 // Ledger 暴露治理账本（诊断/审计查询入口）。

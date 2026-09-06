@@ -42,6 +42,37 @@ func newTestStore(t *testing.T) *BundleStore {
 	return s
 }
 
+// TestRelease_SubmitNoActiveBaselineRejected 是 ⑥（§8.10）回归：无 active 基线（InitBaseline 失败
+// 被 Warn 吞 / 未初始化）时 Submit 必须直接拒绝（StageRejected），而非 canary SetActive(draft) 后
+// 因拒绝/回滚 rollback(active=nil) 落空 → draft 滞留 active（无回滚锚点，违反"拒绝即回滚到发布前
+// 状态"语义）。修复前 Submit 无此守卫：空 store 上快道发布会 SetActive(draft) 成功 → 孤儿 draft 卡在
+// active（后续任何回滚 rollback(nil) 落空）。守卫在 route/SetActive 前触发，draft 不得滞留 active。
+func TestRelease_SubmitNoActiveBaselineRejected(t *testing.T) {
+	store := newTestStore(t) // 未 InitBaseline → store.Active()==nil（复现 InitBaseline 失败/未初始化）
+	if store.Active() != nil {
+		t.Fatal("前置: 未 InitBaseline 的 store Active 应为 nil")
+	}
+	// refine 仍注册了一个 on-disk draft（parentless，InitBaseline 失败下的孤儿提案——在盘故
+	// 无守卫时快道 SetActive 会成功，真实复现"draft 滞留 active"）。
+	draft, err := store.Create(nil, map[string]string{"system": "v1 orphan"}, BundleParams{}, ModelRef{}, "refine", "orphan (no baseline)")
+	if err != nil {
+		t.Fatalf("Create orphan draft: %v", err)
+	}
+	rm, _ := NewReleaseManager(ReleaseDeps{Store: store, Router: fixedRouter{LaneFast}, ValidateGate: gate(true, "")})
+
+	rec, err := rm.Submit(context.Background(), draft)
+	if err != nil {
+		t.Fatalf("⑥: Submit 应以 record(StageRejected) 拒绝（非 error）, err=%v", err)
+	}
+	if rec.Stage != StageRejected {
+		t.Fatalf("⑥: 无 active 基线应拒绝发布(StageRejected), got stage=%s reason=%s", rec.Stage, rec.Reason)
+	}
+	// 关键：draft 不得滞留 active（守卫在 SetActive 前触发，active 仍 nil）。
+	if store.Active() != nil {
+		t.Fatalf("⑥: 拒绝后 active 应仍为 nil(draft 不得滞留 active，防无回滚锚点), got %s", store.Active().ID)
+	}
+}
+
 // TestRelease_FastLane_PosteriorPass 验证快道（指令4 后验评估）：低风险 → 先激活 canary
 // → 后验评估通过 → 正式 active。这是「先生效、后验评估」的调和落地。
 func TestRelease_FastLane_PosteriorPass(t *testing.T) {

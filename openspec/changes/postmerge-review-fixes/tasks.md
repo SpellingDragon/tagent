@@ -41,10 +41,10 @@
 
 ## 8. 三轮增补 — 第四轮复验遗留(2026-09-06,execution-dag §8.10;**本组关闭前 5.3 不得执行**)
 
-- [ ] 8.1 Major:治理审计事件补来源 agent 归属——DenialRecord 加 AgentName 字段 + GateDeps 注入 agent name + writeGovernanceEvent 写 metadata["agent"](ledger.go:114-136、tagent.go:564 接线处传入);回归测试:双 agent 治理事件可按 agent 区分来源
-- [ ] 8.2 宣称不符修正:7.2 勾选的"buildAgent 级子 agent exec 过闸测试"实际不存在(仓内仅 governance 包模拟双 gate 测试;wire 测试只断言 New 成功)——补双 agent + exec 工具真实构建过闸测试,或措辞改回未做
+- [x] 8.1 Major:治理审计事件补来源 agent 归属——DenialRecord.AgentName(json `agent,omitempty`)+ GateDeps.AgentName + GovernanceGate.agentName + writeGovernanceEvent metadata["agent"](omitempty,单 entry 不写噪声键)+ rebuildFromStore 回读 + tagent.go:565 接线传 `name`;回归:governance_wire_test.go 双 agent(tagent/worker)治理记录按 AgentName 区分来源(fail-before 探针:临时置 AgentName="" 则 sawEntry/sawSub 断言双双失败)
+- [x] 8.2 补 governance_wire_test.go `TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger`:走**真实 buildAgent** 构建 entry(tagent)+ 子 agent(worker),经构建出的 exec 工具链(OutputLimitTool→GovernanceTool→mock,Declaration.Name="exec")驱动 critical `rm -rf`,断言两 agent 均被治理闸拒(`[governance_denied]`)——此前仅 governance 包 gate_w3_test 手动模拟双 gate、wire 测试只断言 New 成功,无 buildAgent 级子 agent 过闸证明
 
 ## 9. 三轮增补 — Minor 批量(§8.10 八项)
 
-- [ ] 9.1 Ledger.Record 补 RLock 快照 store/partitionID(锁纪律);N1 补 Submit→重载→refineRollback 成功用例;N2 补各 gate Ledger 同指针集成断言;NoteActive 幂等化或重启对 active 基线补 seed(修 InitBaseline 崩溃窗口:active.json 已写而 releases.jsonl 未写→基线永久不入白名单)
-- [ ] 9.2 删 BindLedger 死代码(语义与 BindStore 相反易误用);slow 道 SetActive 前加 active==nil 直接 reject 守卫(InitBaseline 失败被 Warn 吞+refine 照注册→拒绝分支回滚落空);W2 节流测试注入时钟(参数化 interval)+补窗过期恢复重扫正向用例;hybrid tasks 头部过时 BLOCKED 措辞同步
+- [x] 9.1 Ledger.Record 锁内快照 store/pid(消与 BindStore 并发写字段的 -race 竞争,governance `-race` 绿);n1_test 补 `TestRelease_SubmitReloadRefineRollback`(Submit 快道 draft1/draft2 正式 active→重载新 ReleaseManager loadHistory 恢复→refineRollback 到曾 active 的 draft1 成功);governance_wire_test 断言两 agent 记录落**同一** rc.govLedger(③ 行为证明同指针);release.go ④ `seedActiveBaseline`(NewReleaseManager 对当前 active 补 seed)+ NoteActive 幂等(wasActive 早返回)修 InitBaseline 崩溃窗口(active.json 已写而 releases.jsonl 未写→重启仍入白名单)
+- [x] 9.2 删 gate.go `BindLedger` 死代码(语义与 ledger.BindStore 相反:N2 后无调用方,tagent.go 已改用 rc.govLedger.BindStore;删后 gate.go 不再 import memory);release.go Submit ⑥ `active==nil` 直接 reject 守卫(fail-before 探针:临时禁用守卫则孤儿 draft 快道 SetActive 滞留 active、stage=active);approval.go ⑦ 注入 `now func()`+`rescanInterval` 字段,approval_w2_test 假时钟确定性验节流(消 CI 重载 >2s 假失败)+ 补 `TestApproval_RescanWindowExpiryResumes` 窗过期恢复重扫正向用例;hybrid-semantic-recall/tasks.md 头部执行状态 + 7.3 过时 BLOCKED 措辞同步(5.1/5.3 已于 2026-09-06 真实 ZAI_API_KEY 实测完成、BLOCKED 解除)

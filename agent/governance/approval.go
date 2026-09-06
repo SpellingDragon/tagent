@@ -51,10 +51,18 @@ type ApprovalManager struct {
 	dir string        // <dir>/approvals/
 	ttl time.Duration // 请求过期时长（默认 30m）
 
+	// rescanInterval 是 Check 未命中后重扫 approvals 目录的最小间隔（W2 节流）。默认
+	// approvalRescanInterval（2s）；⑦（§9.2）：测试可注入小值 + 假时钟，消除对真实 wall-clock
+	// 的依赖（CI 重载 >2s 会致旧节流测假失败——窗内两次 Check 实际跨窗被误判为已重扫）。
+	rescanInterval time.Duration
+
 	mu    sync.RWMutex
 	index map[string]*ApprovalRequest // id → 请求（内存索引，启动从文件重建）
 
 	lastRescan int64 // W2：上次重扫目录的纳秒时刻（Check 未命中时节流重扫，防高频重试反复 IO）
+
+	// now 是可注入时钟（默认 time.Now）。⑦：测试注入假时钟以确定性推进节流窗，无需真实 sleep。
+	now func() time.Time
 }
 
 // NewApprovalManager 构建批准管理器。dir 非空时持久化到 <dir>/approvals/ 并重建索引。
@@ -62,7 +70,12 @@ func NewApprovalManager(dir string, ttl time.Duration) *ApprovalManager {
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
-	a := &ApprovalManager{ttl: ttl, index: make(map[string]*ApprovalRequest)}
+	a := &ApprovalManager{
+		ttl:            ttl,
+		rescanInterval: approvalRescanInterval,
+		index:          make(map[string]*ApprovalRequest),
+		now:            time.Now,
+	}
 	if dir != "" {
 		a.dir = filepath.Join(dir, "approvals")
 		_ = os.MkdirAll(a.dir, 0o755)
@@ -79,7 +92,7 @@ func ArgsDigest(argsJSON string) string {
 
 // Request 登记一个 pending 批准请求（写文件 + 内存索引）。返回请求（含 ID/ExpiresMs）。
 func (a *ApprovalManager) Request(toolName, argsJSON, argsPreview, level, ruleID, reason, goalID string) (*ApprovalRequest, error) {
-	now := time.Now()
+	now := a.now()
 	req := &ApprovalRequest{
 		ID:          fmt.Sprintf("appr-%d", now.UnixNano()),
 		ToolName:    toolName,
@@ -122,12 +135,12 @@ func (a *ApprovalManager) Check(toolName, argsDigest string) *ApprovalRequest {
 	return nil
 }
 
-// rescanDue 报告是否到了重扫时机（节流：距上次 >= approvalRescanInterval），并更新 lastRescan。
+// rescanDue 报告是否到了重扫时机（节流：距上次 >= rescanInterval），并更新 lastRescan。
 func (a *ApprovalManager) rescanDue() bool {
-	now := time.Now().UnixNano()
+	now := a.now().UnixNano()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if now-a.lastRescan < int64(approvalRescanInterval) {
+	if now-a.lastRescan < int64(a.rescanInterval) {
 		return false
 	}
 	a.lastRescan = now
@@ -138,7 +151,7 @@ func (a *ApprovalManager) rescanDue() bool {
 func (a *ApprovalManager) checkIndex(toolName, argsDigest string) *ApprovalRequest {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	now := time.Now().UnixMilli()
+	now := a.now().UnixMilli()
 	var best *ApprovalRequest
 	for _, req := range a.index {
 		if req.ToolName == toolName && req.ArgsDigest == argsDigest &&
@@ -170,7 +183,7 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) er
 func (a *ApprovalManager) Pending() []*ApprovalRequest {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	now := time.Now().UnixMilli()
+	now := a.now().UnixMilli()
 	out := make([]*ApprovalRequest, 0)
 	for _, req := range a.index {
 		if req.Status == ApprovalPending && req.ExpiresMs > now {
@@ -203,7 +216,7 @@ func (a *ApprovalManager) rebuild() {
 	if err != nil {
 		return
 	}
-	now := time.Now().UnixMilli()
+	now := a.now().UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, e := range entries {

@@ -142,7 +142,8 @@ func NewReleaseManager(deps ReleaseDeps) (*ReleaseManager, error) {
 		cfg:           deps.Config,
 		activationLog: NewActivationLog(), // W4：内部建，经 getter 共享给 StoreEvidenceSource
 	}
-	rm.loadHistory() // N1：重启恢复发布历史（wasActive 白名单跨重启有效）
+	rm.loadHistory()        // N1：重启恢复发布历史（wasActive 白名单跨重启有效）
+	rm.seedActiveBaseline() // ④（§8.10）：修 InitBaseline 崩溃窗口，对当前 active 补 seed（幂等）
 	return rm, nil
 }
 
@@ -162,6 +163,12 @@ func (rm *ReleaseManager) Submit(ctx context.Context, draft *Bundle) (ReleaseRec
 	rm.submitMu.Lock()
 	defer rm.submitMu.Unlock()
 	active := rm.store.Active()
+	// ⑥（§8.10）：无 active 基线（InitBaseline 失败被 Warn 吞 / 未初始化）→ 拒绝发布。否则 canary
+	// SetActive(draft) 后若拒绝/回滚，rollback(active=nil) 落空 → draft 滞留 active（无回滚锚点，
+	// 违反"拒绝即回滚到发布前状态"语义）。要求先有基线再提案（refine propose 亦有此前提）。
+	if active == nil {
+		return rm.record(draft, LaneSlow, StageRejected, "无 active 基线（应先初始化基线 bundle）——拒绝发布以防 canary 后回滚落空（⑥）", 0), nil
+	}
 	lane := rm.route(active, draft)
 
 	// gate1: validate（恒过——廉价确定性：schema/可加载/diff 限额）。
@@ -333,11 +340,29 @@ func (rm *ReleaseManager) NoteActive(bundleID, reason string) {
 	if rm == nil || bundleID == "" {
 		return
 	}
+	// ④幂等（§8.10）：已在白名单则不重复记录——防崩溃恢复重复 seed / 多次调用堆积 releases.jsonl。
+	// wasActive 自持锁并释放，与下方 mu.Lock 不重入。
+	if rm.wasActive(bundleID) {
+		return
+	}
 	rec := ReleaseRecord{BundleID: bundleID, Stage: StageActive, Reason: reason, Timestamp: time.Now().UnixMilli()}
 	rm.mu.Lock()
 	rm.history = append(rm.history, rec)
 	rm.mu.Unlock()
 	rm.persistRecord(rec)
+}
+
+// seedActiveBaseline 对当前 active bundle 补 seed 到发布历史（④，§8.10）：修 InitBaseline
+// 崩溃窗口——active.json 已写而 releases.jsonl 未写（NoteActive 前进程崩溃）时，重启后当前
+// active 不在 wasActive 白名单 → refine rollback 到基线被拒。loadHistory 后调用；NoteActive
+// 幂等保证已在历史时不重复。
+func (rm *ReleaseManager) seedActiveBaseline() {
+	if rm.store == nil {
+		return
+	}
+	if active := rm.store.Active(); active != nil {
+		rm.NoteActive(active.ID, "active seed on startup (InitBaseline crash-window recovery)")
+	}
 }
 
 // persistRecord 追加发布记录到 <bundle dir>/releases.jsonl（N1：history 持久化，重启恢复）。
