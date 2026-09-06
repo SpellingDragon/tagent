@@ -287,6 +287,10 @@ func (b *EventBus) Publish(event *AgentEvent) {
 	// （Blocker：误标 trigger source、extractRootMetadata 路由被旧事件覆盖回复到错误会话、
 	// projection 顺序错乱）。溢出仅发生在 channel 满(256)时，此刻 channel 内 256 个事件
 	// 全部早于溢出项，故「channel 先、spill 后」的回收顺序即全序。
+	// M5（§8.4）并发假设：pending 读与下方 channel/spill 写非原子——多 goroutine 并发 Publish
+	// 且 channel 临界满时存在理论窄窗（两 goroutine 同读 pending==0，一个入 channel 一个溢出，
+	// 完成先后不定）。tagent 的 Publish 由单消费者 runEventLoop 的 onEvent 串行驱动，此窄窗在
+	// 生产模型下不可达；若未来引入多 goroutine Publish，须为「pending 读 + 写分发」加锁序列化。
 	pending := b.spill.Pending()
 	if pending == 0 {
 		// 磁盘无积压：先试 channel（快路径，绝大多数情况）。

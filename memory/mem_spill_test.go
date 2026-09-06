@@ -41,7 +41,7 @@ func (f *falseNegativeStore) StoreEvent(k int64, ev FullEvent) error {
 		f.written = map[int64]bool{}
 	}
 	f.written[k] = true
-	_ = f.InMemoryStore.StoreEvent(k, ev) // 实际写入成功
+	_ = f.InMemoryStore.StoreEvent(k, ev)                                       // 实际写入成功
 	return errors.New("rustviking: response parse failed (KV already written)") // 假阴性
 }
 

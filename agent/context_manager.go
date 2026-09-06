@@ -431,6 +431,11 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	// 归因盖章（TC0，路径2/2）：与插件管线 onEvent 同盖，避免归因盲区（报告 R5）。
 	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 待
 	// BundleProvider 落地后并入。
+	// M9（§8.4）设计边界（非缺陷）：persistBusEvent 处理 bus 回流的**系统注入消息**（如
+	// action_tool_result，见上 RoleSystem→RoleUser 转换），非 RunFlow 的 LLM 调用产出——不属
+	// 单一 turn span，故**不注入** turn trace 锚（trace_id/span_id 是 RunFlow 主路径 486-489 经
+	// Attribution 的职责）。其溯源经 rollout_id(sessionID) + trigger_source 达成（关联到会话与
+	// 触发源，足够审计）；强加 turn span 锚反而会错误归属到无关 turn。
 	fullEvent.Metadata = map[string]string{
 		tagentevent.MetaKeyAgentName:     cm.name,
 		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
