@@ -2,8 +2,8 @@ package evolution
 
 import (
 	"context"
-	"strings"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
