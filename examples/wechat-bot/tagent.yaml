@@ -1,547 +1,249 @@
 # ============================================================================
 # tagent WeChat Bot 配置文件 (Single Source of Truth)
 # ============================================================================
+# 分层:tagent YAML(agent 定义) · providers(连接注册表) · ToolRef.Remote(A2A 连接)。
+# 敏感信息(API Key)一律经环境变量注入,不写此文件。
 #
-# 所有配置统一在此文件中管理，无需维护多份配置文件。
+# 编排约定(消除冗余,语义等价):
+#   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 config.go resolveAgentModel),
+#     仅 plan 覆盖 model。改全局默认即改全体,无需逐 agent 重复。
+#   · x-anchors 定义共享锚点(&),下方 *引用 —— 被 tagent 配置解析忽略(yaml.v3 非 strict),
+#     仅用于消除 engine/exec-monitor 的逐字重复,解析结果与展开写值逐字段等价。
 #
-# 配置分层说明:
-#   - tagent YAML: agent 定义（模型、供应商、超参、prompt、event_params）
-#   - providers: 供应商连接信息注册表（endpoint, api_key_env）
-#   - ToolRef.Remote: 连接信息（remote.url = "这个 agent 在哪里"）
-#   - trpc Go options: 通信细节（A2A 协议、TransferStateKey）— tagent.go 内部自动生成
-#
-# 多供应商支持:
-#   每个 agent 可通过 provider 字段引用不同的模型供应商（openai/anthropic/gemini/ollama/hunyuan）
-#   示例: knowledge agent 使用 Anthropic Claude，其他 agent 使用智谱 GLM
-#
-# 敏感信息:
-#   API Key 通过环境变量设置，不要写在此文件中
+# 平台子系统(治理/自进化/可靠性/语义召回)启用后的**行为详情**见:
+#   docs/wiki/platform/agent-behavior-matrix.md(分场景溯源代码) + platform-subsystems.md
 # ============================================================================
 
-# ===== 运行时配置 =====
-
-# 全局默认 provider (不填则默认 "openai")
-# 支持 5 种 provider 实现:
-#   openai    — OpenAI 兼容协议（OpenAI / 智谱 GLM / DeepSeek / Moonshot / Baichuan / 通义千问等）
-#   anthropic — Anthropic Claude 原生协议
-#   gemini    — Google Gemini 原生协议
-#   ollama    — Ollama 本地模型
-#   hunyuan   — 腾讯混元原生协议
-# 注意: 大多数国内模型（GLM、DeepSeek、Kimi 等）都使用 OpenAI 兼容 API，
-#       因此 provider 应填 "openai"，通过 api_endpoint 区分具体供应商。
-provider: openai
-
-# LLM 模型 (所有 agent 的默认模型，各 agent 可单独覆盖)
-model: glm-5.3
-# LLM API 基础地址 (全局默认，兼容旧配置；推荐使用 providers 注册表)
-api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
-
-# Provider 连接信息注册表
-# 每个 agent 可通过 provider 字段引用不同的供应商
-# 示例：
-#   agents:
-#     tagent:
-#       provider: zhipu        # 智谱 GLM（OpenAI 兼容协议）
-#       model: glm-5.3
-#     knowledge:
-#       provider: deepseek     # DeepSeek（OpenAI 兼容协议）
-#       model: deepseek-chat
-#     action:
-#       provider: anthropic    # Anthropic Claude（原生协议）
-#       model: claude-3-5-sonnet-20241022
-providers:
-  # ===== OpenAI 兼容协议的供应商 =====
-  # 以下供应商都使用 OpenAI 兼容 API，provider 字段统一填 "openai"，
-  # 通过不同的 api_endpoint 区分。
-  zhipu:
-    provider: openai           # 关键: 指明使用 OpenAI 兼容协议
-    api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"
-    api_key_env: "ZAI_API_KEY"
-  deepseek:
-    provider: openai
-    api_endpoint: "https://api.deepseek.com/v1"
-    api_key_env: "DEEPSEEK_API_KEY"
-  moonshot:
-    provider: openai
-    api_endpoint: "https://api.moonshot.cn/v1"
-    api_key_env: "MOONSHOT_API_KEY"
-  tencent_hy:
-    provider: openai
-    api_endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3"
-    api_key_env: "TENCENT_HY_API_KEY"
-  tencent:
-    provider: openai
-    api_endpoint: "https://tokenhub.tencentmaas.com/v1"
-    api_key_env: "TENCENT_API_KEY"
-  # ===== 非 OpenAI 兼容协议的供应商 =====
-  # 以下供应商使用各自的私有协议，provider 字段填对应的协议名称。
-  # anthropic:
-  #   provider: anthropic
-  #   api_endpoint: "https://api.anthropic.com"
-  #   api_key_env: "ANTHROPIC_API_KEY"
-  # gemini:
-  #   provider: gemini
-  #   api_key_env: "GOOGLE_API_KEY"
-
-# 日志级别: "debug", "info", "warn", "error"
-# debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等——**远端/生产不宜**(明文落日志有泄露面
-# + 日志量放大 + 性能开销),故默认 info。临时排障:./run.sh -d 或 LOG_LEVEL=debug(systemd 下
-# `systemctl edit tagent-wechat` 加 Environment=LOG_LEVEL=debug);排障毕务必复原。
-# 可通过环境变量 LOG_LEVEL 覆盖(见 config.go ApplyDefaults:env 优先于本文件)
-log_level: "info"
-
-# 请求超时（秒），默认 3600 (60 分钟)
+# ===== 全局默认(agent 省略 provider/model 时回退此)=====
+provider: zhipu                                              # providers 注册表键(智谱 GLM,openai 兼容协议)
+model: glm-5.3-flash                                         # 主模型;plan 覆盖为 glm-5.3
+api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"  # 全局 fallback(providers.zhipu 已含同端点)
+log_level: "info"                                            # debug 打印 LLM 明文,远端不宜;排障用 ./run.sh -d 或 LOG_LEVEL=debug
 request_timeout_seconds: 3600
-
-# 轨迹记录 — 启用后将每次 LLM 调用记录为 JSONL 文件，可用于后续 SFT/RL 训练
-trajectory_dump: true
+trajectory_dump: true                                        # 每次 LLM 调用记录 JSONL(SFT/RL 训练用)
 trajectory_dir: "data/trajectories"
 
-# ===== MCP Servers =====
-# 声明式 MCP server 注册表 (mcp-discovery-execution-loop):
-#   - knowledge 经 mcp_discover 实时发现; 持 mcp_call 工具的 agent 直调
-#   - 增删/修改本段并保存即热生效 (mtime 惰性同步), 无需重启
-#   - 不改任何 agent 的工具声明区 → prompt 前缀稳定, 前缀缓存不失效
+# ===== Provider 连接注册表 =====
+# provider 字段 = 协议实现(openai 兼容 / anthropic / gemini / ollama / hunyuan);国内模型多用 openai 兼容,以 api_endpoint 区分。
+providers:
+  zhipu:      { provider: openai, api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4", api_key_env: "ZAI_API_KEY" }
+  deepseek:   { provider: openai, api_endpoint: "https://api.deepseek.com/v1",                 api_key_env: "DEEPSEEK_API_KEY" }
+  moonshot:   { provider: openai, api_endpoint: "https://api.moonshot.cn/v1",                  api_key_env: "MOONSHOT_API_KEY" }
+  tencent_hy: { provider: openai, api_endpoint: "https://api.lkeap.cloud.tencent.com/plan/v3", api_key_env: "TENCENT_HY_API_KEY" }
+  tencent:    { provider: openai, api_endpoint: "https://tokenhub.tencentmaas.com/v1",         api_key_env: "TENCENT_API_KEY" }
+  # 私有协议按需启用:
+  # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
+  # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
+
+# ===== MCP Servers(声明式;增删本段热生效 mtime 惰性同步,免重启,不动工具声明区→prefix-cache 稳定)=====
 mcp_servers:
   web-search-prime:
-    transport: streamable-http     # 自动归一化为 trpc 的 "streamable"
+    transport: streamable-http                              # 归一化为 trpc "streamable"
     url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
-    # GLM Coding Plan 专属 MCP; 本配置 zhipu provider 即 coding 端点, 同一把 key 直接复用
-    api_key_env: ZAI_API_KEY
+    api_key_env: ZAI_API_KEY                                # GLM Coding Plan 专属,复用同一把 key
 
-# ===== 平台子系统(治理 · 自进化 · 常驻可靠性)=====
-# 三大子系统默认关闭 = 与既有行为逐字节一致;此处按「远端常驻部署」显式启用(postmerge-review-fixes
-# 已解除启用禁令:Governance 可真实部署、Evolution 可出实验)。设计纪律:全部配置门控、不触碰工具
-# Declaration(prefix-cache 稳定)、失败以 result 渗透不中断 loop。持久化目录均自动 MkdirAll(开箱即用)。
-# ⚠️ 启用后 agent 在各复杂场景的行为反应,务必先读 docs/wiki/platform/agent-behavior-matrix.md。
-
-# --- 治理闸(T-Governance):有界自治 + 审计 ---
-# 全部 agent 的非 wrapper leaf 工具(exec/mcp_call/save_file/replace_content/refine)经 GovernanceTool
-# 过闸:classify(四级风险) → critical 批准门 → goal 检查 → 预算滑窗 → 记账/放行。
-# enforcement=warn(推荐起步):只记账放行 + 附提示,不拒绝——先收集真实风险数据、零行为阻断;确认规则
-#   贴合业务后升 strict(违规拒绝)。critical(rm -rf/sudo/mkfs/git push -f 等)恒走异步人工批准:未批准
-#   则 deny+Hold(不阻塞 loop),外部落盘 <dir>/approvals/<id>.json 即生效(Check 节流重扫),或微信/CLI 回写。
-# dir 非空 → budget 滑窗 + approvals 审批文件持久化(远端重启后预算窗口与待批状态不丢);空=纯内存。
-governance:
+# ===== 平台子系统(默认关闭=零行为变化;此处按远端常驻部署启用。行为详情见 agent-behavior-matrix.md)=====
+governance:                    # 治理闸:leaf 工具过闸 classify→critical批准→goal→预算→记账
   enabled: true
-  enforcement: warn              # warn(记账放行,推荐起步) | strict(违规拒绝)
-  dir: data/governance           # budget + approvals 持久化(裸机磁盘,重启不丢)
-  budget_window_minutes: 60      # 滑动窗口(默认 60)
-  max_high_risk: 20              # 窗口内 high 级操作上限(默认 20;超限 warn 记账 / strict 拒绝)
-  max_medium_risk: 200           # 窗口内 medium 级操作上限(默认 200)
-  # goal_required_for: []        # 须挂 goal 的 trigger source;留空=不启用 goal 门。goal_declare 工具
-                                 # 尚未交付,启用会使 high+ 自治操作无自纠路径而反复撞墙(见 gate.go A7)。
+  enforcement: warn            # warn(记账放行,推荐起步) | strict(拒绝);critical 恒需人工批准(不受此放松)
+  dir: data/governance         # budget+approvals 持久化(重启不丢;空=纯内存)
+  budget_window_minutes: 60
+  max_high_risk: 20            # 窗口内 high 上限(per-agent 独立预算)
+  max_medium_risk: 200
+  # goal_required_for: []      # 留空=不启用 goal 门(goal_declare 工具未交付,见 gate.go A7)
 
-# --- 自进化(T-EVO):提示词热优化 + 风险分级发布道 ---
-# refine 工具(仅 entry agent)是 agent 自我修改通道:propose/diff/status/rollback 四 op,**永无 activate**
-#   ——激活只能经 ReleaseManager 发布道(agent 无直接激活权,铁律)。DiffLaneRouter 按 bundle diff 路由:
-#   仅提示词改动 → 快道(validate→canary 激活→后验评估,先生效后验);模型/参数/protected → 慢道(加人工批准门)。
-# 后验评估以 bundle **激活时刻**为证据窗起点(ActivationLog),LLMJudge + MetricGuardrail 双回滚;judge
-#   不可用/样本不足一律保守通过(不误回滚)。发布历史持久化 releases.jsonl,rollback 白名单=曾 Stage=active
-#   的版本(含基线 seed,跨重启恢复)。回合边界生效(热配置原子切 active 指针)。
-# 注(M12 宣称收窄):bundle schema 含 params/model 字段=存储就绪,但运行期应用点当前仅**提示词**;
-#   参数/模型热切换为后续增强。
-evolution:
+evolution:                     # 自进化:refine(仅entry)propose/diff/status/rollback(无activate)→发布道裁决
   enabled: true
-  dir: data/evolution            # 不可变 bundle 存储 + releases.jsonl 发布历史(裸机磁盘持久化)
-  skip_approval: false           # false=慢道需人工批准门(保守,零值安全);true=跳过(仅实验环境)
-  protected_prompts:             # 改动强制走慢道(人工批准)——核心人格/安全提示词不可快道自动生效
-    - SOUL.md
-    - AGENTS.md
-  canary_hold_seconds: 0         # canary 激活后到后验评估的观察窗(0=立即评估)
-  # 后验 LLM-judge 参数(省略走内部默认 minSamples=5 / threshold=0.5 / timeout=60s):
-  # judge_min_samples: 5
-  # judge_pass_threshold: 0.5
-  # judge_timeout_seconds: 60
+  dir: data/evolution          # 不可变 bundles + releases.jsonl 发布历史(持久化)
+  skip_approval: false         # false=慢道需人工批准(保守);true=跳过(仅实验)
+  protected_prompts: [SOUL.md, AGENTS.md]   # 改动强制走慢道(核心人格不可快道自动生效)
+  canary_hold_seconds: 0
+  # judge_min_samples/judge_pass_threshold/judge_timeout_seconds 省略走默认(5 / 0.5 / 60s)
 
-# --- 常驻可靠性(T-G Reliability):不丢事件 + 退化可观测 + 重启稳定 ---
-# 面向远端长期运行的核心保障。全部 per-agent 隔离子目录;各 dir 留空则该项回退现状(纯内存/纯 channel)。
-reliability:
-  # ReliableBus:事件总线 channel 满则溢出落盘(channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复),
-  #   at-least-once 不丢事件(否则高峰期 channel 满直接丢弃)。
-  bus_spill_dir: data/reliability/bus
-  # mem_spill:StoreEvent 失败(memory/disk 退化)→ JSONL 兜底落盘,memory 恢复后自动重放(重放前 GetEvent
-  #   预检幂等,不撞 already-exists)。事件不丢,at-least-once 延伸到存储层。
-  mem_spill_dir: data/reliability/memspill
-  # AnchorStore:冥想三锚点(novelty/idle/last-meditation)持久化,重启后不立即误触发冥想(纯内存则重启即忘)。
-  meditation_anchor_dir: data/reliability/anchors
-  # DegradationManager:memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机;ErrorTrackingStore 最外层
-  #   装饰捕获存储错误 + event_loop 捕获 model 失败 + mcp_call 上报,达阈值→degraded、探测成功→recovering
-  #   →normal,状态迁移写 governance degraded 事件(可观测、可 recall 审计)。
-  degradation_enabled: true
+reliability:                   # 常驻可靠性:不丢事件+退化可观测+重启稳定(per-agent 隔离;各 dir 空则回退内存/channel)
+  bus_spill_dir: data/reliability/bus             # 事件总线 channel 满溢出落盘(at-least-once)
+  mem_spill_dir: data/reliability/memspill        # StoreEvent 失败兜底,memory 恢复重放(幂等)
+  meditation_anchor_dir: data/reliability/anchors # 冥想锚点持久化(重启不误触发)
+  degradation_enabled: true                       # 五依赖(memory/disk/rustviking/model/mcp)退化-恢复状态机
+
+# ===== 共享锚点(被配置解析忽略;供下方 *引用,解析结果与逐字展开等价)=====
+x-anchors:
+  # 语义引擎:tagent/knowledge/recall 三 agent 共享 —— cacheKey(path|backend|model|dims)一致
+  # → namedEngines 同一实例,保跨 agent 召回一致。缺 ZAI_API_KEY 时优雅降级纯关键词(不阻断)。
+  # 512 维 = X2 实测决议(分离度≈1024 而成本减半)。融合:向量 topK ∪ 关键词 topK → RRF(k=60)。
+  engine: &shared_engine
+    backend: memory                                          # MVP 内存向量索引;localfile 时向量序列化入底层 KV + 启动重建
+    embedding: { provider: zhipu, model: embedding-3, api_key_env: ZAI_API_KEY, dimensions: 512 }
+    vector_top_k: 20
+    keyword_top_k: 20
+    rrf_k: 60
+  # exec 工具的 tmux 监控参数(tagent/action 共享)。
+  exec_monitor: &exec_monitor
+    interval: 3s
+    stable_duration: 30s
+    fake_dead_duration: 180s
 
 # ===== Agent 配置 =====
-#
-# Thinking/Reasoning 模式控制 (每个 agent 可独立配置):
-#   thinking_enabled: true/false    — 开启 thinking 模式 (GLM/Claude/Gemini/DeepSeek honor 此字段；hy3 忽略)
-#   thinking_tokens: 4096           — thinking token 预算 (Claude/Gemini 需要；hy3 忽略)
-#   reasoning_effort: "high"        — 推理强度 (low/medium/high)；OpenAI o-series 与 hy3/hunyuan 的思考开关
-#   reasoning_content_mode: "discard_previous" — 历史推理内容处理策略:
-#     keep_all           — 保留所有 reasoning_content
-#     discard_previous   — 丢弃历史轮次 (默认, 推荐 DeepSeek)
-#     discard_all        — 丢弃所有
-
+# thinking_enabled(GLM/Claude/Gemini honor;hy3 忽略) · reasoning_effort(hy3/o-series 思考开关) ·
+# reasoning_content_mode(keep_all / discard_previous 默认 / discard_all)。子 agent 运行参数在其自身定义处。
 entry: tagent
 prompt_dir: resources/prompts
 
 agents:
-  # ========================================================================
-  # 顶层 Agent: 微信助手的主 Agent
-  # ========================================================================
+  # ---- 顶层主 Agent(微信助手)----
   tagent:
-    provider: zhipu            # 引用 providers 注册表中的 "tencent" 配置
-    model: glm-5.3-flash
+    # provider/model 省略 → 回退全局(zhipu / glm-5.3-flash)
     system_prompt:
-      files:
-        - AGENTS.md
-        - SOUL.md
-        - USER.md
-        - TOOLS.md
+      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
     memory:
       type: localfile
-      path: .wechat-config/data
-      # ===== 语义检索（T-A hybrid-semantic-recall）：已启用 → recall query 走 向量∪关键词 RRF 融合 =====
-      # 入库事件异步嵌入（zhipu embedding-3，按量计费约 40 次/天），recall query 模式融合召回
-      # （向量 topK ∪ 关键词 topK → RRF k=60），同义改写无共同关键词也可召回。工具声明区恒定——开关
-      # 不影响 recall Declaration（prefix-cache 稳定，守卫见 tool/recall/declaration_stable_test.go）。
-      # 缺 ZAI_API_KEY / embedding API 故障 → buildMemoryEngine Warn + 优雅降级纯关键词（不阻断 loop）。
-      # ⚠️ 引擎按 path 跨 agent 共享（namedEngines[cacheKey=path|backend|model|dims]）：tagent/knowledge/
-      #   recall 三 agent 同 path 同配置 → 共享同一引擎实例,保跨 agent 语义召回一致。**三者须同配**,
-      #   只配其一则未配的 agent 走纯关键词 stub(SearchByEmbedding 不生效)。
-      engine:
-        backend: memory          # MVP 内存向量索引；localfile store 时向量自动序列化入底层 KV + 启动重建
-                                 #   (rustviking 原生 HNSW 持久化属其 backlog,见 f1-rustviking-capability-report.md)
-        embedding:
-          provider: zhipu        # 或 mock（本地确定性伪向量，零成本，仅验证融合/过滤机制）
-          model: embedding-3
-          api_key_env: ZAI_API_KEY   # GLM Coding Plan；缺失则嵌入优雅降级为纯关键词
-          dimensions: 512        # X2 实测决议:512 维分离度 0.2838 ≈ 1024 维 0.2878(差 0.004),
-                                 #   判别力相当而存储/计算成本减半 → 默认推荐 512(embedding-3 支持 512/1024/2048)
-        vector_top_k: 20         # 融合调参（引擎默认 20/20/60）
-        keyword_top_k: 20
-        rrf_k: 60
+      path: .wechat-config/data          # 共享持久存储(knowledge/recall 同 path = 同一 FileSegmentStore 实例)
+      engine: *shared_engine             # 语义召回(见 x-anchors)
     max_tool_iterations: 300
     max_tokens: 128000
     temperature: 0.7
-    thinking_enabled: true       # 保留：对 honor thinking_enabled 的模型有效
-    # reasoning_effort: "high"     # hy3 真正的思考触发器（hy3 忽略 thinking_enabled）
+    thinking_enabled: true
     compress_threshold: 0.8
     keep_recent_tasks: 4
-    # ===== 异步任务/重入相关（未配置项用默认值） =====
-    # task_terminal_ttl: 终态任务（completed/failed/cancelled/dead）被回收前的
-    #   保留期（duration 字符串，默认 "2m"）。它同时是终态 subagent 任务的
-    #   resume_task 重入窗口：超过此时长后任务被 prune，只能发起全新调用。
-    #   plan 计划生命周期（create→逐步 update→archive）依赖 resume 续行，
-    #   故调大到 30m（超窗后用带 name 的新调用继续）。
-    task_terminal_ttl: "30m"
-    # resume_context_rounds: 重入时任务链还原器注入的前序轮次数（默认 3）
-    # resume_context_rounds: 3
-    # task_settled 通知小结果全文内联；超大结果转储 tool-output 文件（自动清理），
-    # 通知携尾部+文件路径票据，全文经 read_file 分页读取。
-    # Compression configuration
+    task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
     compress:
-      # summary_model: LLM model for context compression summaries.
-      # Falls back to the agent's main model if not set.
-      summary_model: glm-5.3-flash
-      # summary_model 两处用途（均为可选叠加层，无模型/失败时降级纯工程）：
-      #   1. L3 滚动综述：最老历史整段折叠时，旧综述+新折叠段骨架原文增量合成
-      #      单行〔历史综述〕（每轮折叠 1 次调用，编译期常量限长）；
-      #   2. 卡片浓缩：卡片超 card_max_chars 时浓缩较旧一半。
-      # summary_provider: optional, defaults to same provider as this agent.
-      # Use a different provider for cost optimization (e.g., cheaper model for compression).
+      summary_model: glm-5.3-flash       # L3 滚动综述 + 卡片浓缩(无模型/失败降级纯工程)
       summary_provider: zhipu
-      # summary_max_tokens: 每次摘要 LLM 调用的输出 token 预算下限（默认 8192）。
-      # 推理模型会把部分 max_tokens 耗在思考链上，预算不足会返回空 Content 导致
-      # 压缩全段降级（上下文塌缩成纯 user 消息）。实际预算随摘要大小上浮，但不低于此值。
-      summary_max_tokens: 8192
-      # card_max_chars: 滚动压缩摘要中卡片序列的长度上限（默认 6000）。
-      # 超限时旧卡片由 summary_model 整理为浓缩卡片；无模型则最旧行沉底为计数。
-      # card_max_chars: 6000
+      summary_max_tokens: 8192           # 摘要输出预算下限(推理模型耗思考链,不足会空 Content 塌缩)
     tools:
-      # Knowledge Agent: 知识获取与翻译
-      # event_keys 参数: LLM 从上下文中选择相关事件的 Snowflake EventKey 列表，
-      # AgentToolWrapper 自动从父 agent 的 MemStore 还原完整事件并序列化到
-      # RuntimeState["external_context"]，子 agent 通过 Run 读取。
-      # 子 agent 的运行参数（max_tool_iterations/max_tokens/temperature）在其自身
-      # 的 agents.<name> 定义处配置；ToolRef 只声明引用关系。
-      - agent: knowledge
+      - agent: knowledge                 # 知识获取/翻译;event_keys 由 wrapper 从父 memStore 还原完整事件
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
-
-      # Recall: 统一召回入口（单工具，参数即路由：items 票据直达 / turn_key
-      # 因果链重建整轮执行过程 / query 关键词检索；orchestrate 为 LLM 多跳编排
-      # 保留形态）。收敛自 memory_recall + memory_turn + recall 子 agent 三入口
-      # （stable-context-compaction D7）。
-      - kind: tool
+      - kind: tool                       # 统一召回入口(items 票据 / turn_key 因果链 / query 检索)
         id: recall
-
-      # Plan Agent: 工作计划管理（拆解/记账/归档审计，不代工）
-      # extra_params: 声明后进入 InputSchema 并随 request 打包为 JSON 透传子 agent；
-      # action 驱动 PlanAgent 双模式（progress 零 LLM 直读），name 在多计划并行时
-      # 定位目标 change，并作为同名任务单飞的幂等键。
-      - agent: plan
-        description_file: plan_tool_desc.md  # roadmap1.2：硬编码绝对路径改副本目录裸名（与 knowledge/exec 同构，相对 prompt_dir 解析）
+      - agent: plan                      # 工作计划管理(拆解/记账/归档审计,不代工)
+        description_file: plan_tool_desc.md
         extra_params:
-          - name: action
-            enum: [create, update, archive, progress]
-            description: "操作类型"
-          - name: name
-            description: "计划名(kebab-case)；update/progress/archive 必填"
-
-      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致，
-      # 模型看到单一文件系统视图）
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: list_file
-      - kind: tool
-        id: search_file
-      - kind: tool
-        id: search_content
-      - kind: tool
-        id: read_multiple_files
-      - kind: tool
-        id: save_file
-      - kind: tool
-        id: replace_content
-
-      # Exec Tool: shell 命令执行 (异步, 通过 tmux)
-      # cwd 默认 = 进程运行目录（与 file tools 一致），可用 properties.workspace 覆盖
-      # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
-      #   interval: 轮询检测间隔 (默认 30s)
-      #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
-      #   interactive_stable_duration: 交互式命令稳定判定时间 (默认 90s)
-      #   fake_dead_duration: 假死判定时间 (默认 150s)
-      - kind: tool
+          - { name: action, enum: [create, update, archive, progress], description: "操作类型" }
+          - { name: name, description: "计划名(kebab-case)；update/progress/archive 必填" }
+      # File Tools(相对路径基准 = 进程 cwd,与 exec 一致 → 模型看到单一文件系统视图)
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: read_multiple_files }
+      - { kind: tool, id: save_file }
+      - { kind: tool, id: replace_content }
+      - kind: tool                       # exec:shell 异步执行(经 tmux)
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          monitor:
-            interval: 3s
-            stable_duration: 30s
-            fake_dead_duration: 180s
-
-      # 远程 Agent 示例 (A2A 通信):
-      # 当子 agent 部署在独立进程时，只需声明 remote.url。
-      # tagent.go 自动创建 A2AAgent 并配置 TransferStateKey，
-      # 上下文通过 RuntimeState → A2A metadata → RuntimeState 自动传递。
-      #
+          monitor: *exec_monitor
+      # 远程 A2A 子 agent 示例:声明 remote.url 即可,tagent.go 自动建 A2AAgent + TransferStateKey
       # - agent: remote-knowledge
       #   description_file: knowledge_tool_desc.md
       #   event_params: [event_keys]
-      #   remote:
-      #     url: "http://knowledge-service:8088"
-
-    # Meditation (定时心跳): 空闲时触发上下文清理、深度分析和 skill 积累
-    # 仅在 entry agent 上生效
-    meditation:
+      #   remote: { url: "http://knowledge-service:8088" }
+    meditation:                          # 定时心跳(仅 entry):空闲触发上下文清理/深度分析/skill 积累
       enabled: true
-      interval: "30m"     # 检查间隔
-      min_gap: "2h"       # 距上次事件不足此值则跳过
+      interval: "30m"
+      min_gap: "2h"
       prompt_file: "meditation.md"
 
-  # ========================================================================
-  # Knowledge Agent: 知识获取 & 翻译子 Agent
-  # ========================================================================
+  # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
-    provider: zhipu            # 可与父 agent 使用不同供应商
-    model: glm-5.3-flash
     system_prompt:
-      files:
-        - knowledge_agent.md
+      files: [knowledge_agent.md]
     memory:
-      # 共享持久存储（与主 agent 同路径 = 同一 FileSegmentStore 实例）：
-      # memory_query 才能查到跨重启的历史知识；自身命名空间恒可读，
-      # read_namespaces 额外授权读主 agent 时间线。
       type: localfile
       path: .wechat-config/data
-      read_namespaces:
-        - tagent
-      # 语义引擎:与 tagent/recall **同 path 同配置**(cacheKey=path|backend|model|dims 一致)→ 共享同一
-      # namedEngines 实例(见 tagent memory 段说明)。knowledge 的 memory_query 亦受益语义召回;缺 key 降级。
-      engine:
-        backend: memory
-        embedding:
-          provider: zhipu
-          model: embedding-3
-          api_key_env: ZAI_API_KEY
-          dimensions: 512
-        vector_top_k: 20
-        keyword_top_k: 20
-        rrf_k: 60
+      read_namespaces: [tagent]          # 授权读主 agent 时间线(自身命名空间恒可读)
+      engine: *shared_engine
     max_tool_iterations: 30
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
-    reasoning_effort: "low"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
+    reasoning_effort: "low"              # hy3 思考触发器(thinking_enabled 对 hy3 无效)
     tools:
-      - kind: tool
-        id: skill_search
-      - kind: tool
-        id: skill_load
-      # read_file: 只读查看知识库内容（knowledge_base/ 链接树）。
-      # 有意只补 read_file 一项：不扩大权限（无 list/search/exec/write）；
-      # 知识库是 L0→L1→L2→L3 链接树，沿链接导航即可，基准目录=进程 cwd（相对路径）。
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: mcp_discover
-      # 联网搜索: 经 mcp_call 网关直调 zhipu web-search-prime 的 web_search_prime
-      # (实测工具名为下划线风格; 用法见 knowledge_agent.md; 参数不确定时先 mcp_discover 核实 schema)。
-      # 回退旧 REST 实现: 恢复 `- kind: tool / id: web_search` 即可 (工厂仍注册)。
-      - kind: tool
-        id: mcp_call
-      - kind: tool
-        id: duckduckgo_search
-      - kind: tool
-        id: memory_query
+      - { kind: tool, id: skill_search }
+      - { kind: tool, id: skill_load }
+      - { kind: tool, id: read_file }    # 只读知识库(不扩权:无 list/search/exec/write)
+      - { kind: tool, id: mcp_discover }
+      - { kind: tool, id: mcp_call }     # 经网关直调 web-search-prime(实测工具名 web_search_prime)
+      - { kind: tool, id: duckduckgo_search }
+      - { kind: tool, id: memory_query }
 
-  # ========================================================================
-  # Recall Agent: 记忆检索子 Agent
-  # ========================================================================
+  # ---- Recall:记忆检索子 Agent ----
   recall:
-    provider: zhipu
-    model: glm-5.3-flash
     system_prompt:
-      files:
-        - recall_agent.md
+      files: [recall_agent.md]
     memory:
       type: localfile
       path: .wechat-config/data
-      read_namespaces:
-        - tagent
-      # 语义引擎:与 tagent/knowledge **同 path 同配置** → 共享同一 namedEngines 实例。recall 子 agent 的
-      # recall_query 走 hybrid 融合(向量 topK ∪ 关键词 topK → RRF k=60);缺 key/重建窗口优雅降级纯关键词。
-      engine:
-        backend: memory
-        embedding:
-          provider: zhipu
-          model: embedding-3
-          api_key_env: ZAI_API_KEY
-          dimensions: 512
-        vector_top_k: 20
-        keyword_top_k: 20
-        rrf_k: 60
+      read_namespaces: [tagent]
+      engine: *shared_engine             # recall_query 走 hybrid 融合(向量∪关键词 RRF)
     max_tool_iterations: 5
     max_tokens: 32000
     tools:
-      - kind: tool
-        id: recall_query
-      - kind: tool
-        id: recall_get
-      - kind: tool
-        id: recall_recent
-      - kind: tool
-        id: recall_trace
+      - { kind: tool, id: recall_query }
+      - { kind: tool, id: recall_get }
+      - { kind: tool, id: recall_recent }
+      - { kind: tool, id: recall_trace }
 
-  # ========================================================================
-  # Action Agent: 执行中枢
-  # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
-  # ========================================================================
+  # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
-    provider: zhipu
-    model: glm-5.3-flash
     system_prompt:
-      files:
-        - action_agent.md
+      files: [action_agent.md]
     memory:
       type: memory
     max_tool_iterations: 50
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
-    reasoning_effort: "low"     # hy3 思考触发器（thinking_enabled 对 hy3 无效）
+    reasoning_effort: "low"
     tools:
-      # File Tools: 相对路径基准 = 进程运行目录（与 exec 的 cwd 一致）
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: list_file
-      - kind: tool
-        id: search_file
-      - kind: tool
-        id: search_content
-      - kind: tool
-        id: read_multiple_files
-      - kind: tool
-        id: save_file
-      - kind: tool
-        id: replace_content
-
-      # Exec Tool: 直接 shell 命令执行 (简单命令)；cwd 默认 = 进程运行目录
-      # TmuxMonitor 配置可通过 properties.monitor 段覆盖默认值:
-      #   interval: 轮询检测间隔 (默认 30s)
-      #   stable_duration: 非交互命令稳定判定时间 (默认 60s)
-      #   interactive_stable_duration: 交互式命令稳定判定时间 (默认 90s)
-      #   fake_dead_duration: 假死判定时间 (默认 150s)
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: read_multiple_files }
+      - { kind: tool, id: save_file }
+      - { kind: tool, id: replace_content }
       - kind: tool
         id: exec
         description_file: exec_tool_desc.md
         properties:
-          monitor:
-            interval: 3s
-            stable_duration: 30s
-            fake_dead_duration: 180s
+          monitor: *exec_monitor
+      - { kind: tool, id: mcp_call }     # MCP 执行网关(发现经 knowledge mcp_discover)
 
-      # MCP 执行网关: 直调注册表内 MCP server 的工具
-      # (发现经 knowledge 的 mcp_discover; server/tool/args 三参, 声明恒定)
-      - kind: tool
-        id: mcp_call
-
-  # ========================================================================
-  # Plan Agent: 工作计划管理子 Agent
-  # 通过 openspec CLI 创建/更新/归档结构化工作计划
-  # ========================================================================
+  # ---- Plan:工作计划管理子 Agent(openspec CLI,无通用 shell 逃逸面)----
   plan:
-    model: glm-5.3
-    provider: zhipu
+    model: glm-5.3                       # 覆盖全局 flash(plan 需更强推理)
     thinking_enabled: true
     system_prompt:
-      files:
-        - plan_agent.md
+      files: [plan_agent.md]
     memory:
       type: memory
     max_tool_iterations: 50
     max_tokens: 64000
     temperature: 0.3
     tools:
-      # Spec Tool: 规格化计划管理（类型化操作，无 shell 逃逸面）。后端为
-      # openspec CLI，经 exec.Command 直调 argv——plan 不持有任何通用命令执行
-      # 能力，"仅限 openspec 命令"是结构性事实而非 prompt 软约束。
-      - kind: tool
+      - kind: tool                       # spec:类型化计划管理(后端 openspec CLI,argv 直调,无 shell)
         id: spec
-        properties:
-          bin: openspec
-          # work_dir 缺省 = 进程运行目录（含 openspec/ 的目录）
-      # File Tools: 读全工程（做计划需看代码/文档）；写类工具沙箱锁定 openspec/
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: list_file
-      - kind: tool
-        id: search_file
-      - kind: tool
-        id: search_content
-      - kind: tool
-        id: read_multiple_files
-      # 写类工具硬约束: base_dir 沙箱锁定 openspec/（上游 ToolSet 拒绝 ../ 与
-      # 绝对路径逃逸）——plan 只能变更 openspec/ 内文件,路径相对 openspec/ 根
-      # (如 changes/<name>/tasks.md,不再带 openspec/ 前缀)
+        properties: { bin: openspec }    # work_dir 缺省 = 进程 cwd(含 openspec/)
+      # 读全工程(做计划需看代码/文档)
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: read_multiple_files }
+      # 写类工具 base_dir 沙箱锁定 openspec/(上游 ToolSet 拒绝 ../ 与绝对路径逃逸)
       - kind: tool
         id: save_file
-        properties:
-          base_dir: openspec
+        properties: { base_dir: openspec }
       - kind: tool
         id: replace_content
-        properties:
-          base_dir: openspec
+        properties: { base_dir: openspec }
 
-# ===== 应用专属配置 (各应用自行反序列化) =====
+# ===== 应用专属配置(各应用自行反序列化)=====
 app:
   wechat:
     config_dir: ".wechat-config"
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
-    # 入站附件/长文本落盘根目录（相对进程 cwd，与 file tools 一致）。
-    # 容器内由 TAGENT_WECHAT_WORKSPACE_DIR=workspace 覆盖（tmpfs /app/workspace）。
-    workspace_dir: ".tagent-workspace"
+    workspace_dir: ".tagent-workspace"   # 入站附件/长文本落盘(容器内 TAGENT_WECHAT_WORKSPACE_DIR 覆盖)
