@@ -105,6 +105,13 @@ var (
 	namedFileMu     sync.Mutex
 	namedFileStores = map[string]*memory.FileSegmentStore{}
 
+	// namedRVStores provides shared rustviking-backed FileSegmentStore instances
+	// by path（M-1，四审）：type: file 与 memory/localfile 同构——同 path 必须同实例，否则跨
+	// agent read_namespaces 下 InMemRelationStore 内存图分歧（因果链断链）+ 双 Compactor
+	// 基于独立视图并发覆盖同一 KV 键 + 双 LifecycleManager 重复扫描。
+	namedRVMu     sync.Mutex
+	namedRVStores = map[string]*memory.FileSegmentStore{}
+
 	// namedEngines 按 path 共享记忆引擎（与 namedMemStores/namedFileStores 同键），
 	// 使共享 store 的引擎也共享——保跨 agent 语义召回一致（T-A）。空 path = 每 agent 独立引擎。
 	namedEngineMu sync.Mutex
@@ -986,6 +993,13 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		if mc.Path == "" {
 			return nil, fmt.Errorf("file memory store requires path")
 		}
+		// Shared by path（M-1，四审）：与 localfile 同构——同 path 同实例，防跨 agent
+		// read_namespaces 下 RelationStore 内存图分歧（因果链断链）与双 Compactor 并发覆盖。
+		namedRVMu.Lock()
+		defer namedRVMu.Unlock()
+		if s, ok := namedRVStores[mc.Path]; ok {
+			return s, nil
+		}
 		rel, err := memory.NewInMemRelationStore(mc.Path)
 		if err != nil {
 			return nil, fmt.Errorf("create relation store: %w", err)
@@ -1015,6 +1029,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		compactor.Start()
 		store.SetCompactor(compactor)
 
+		namedRVStores[mc.Path] = store
 		return store, nil
 	case "localfile":
 		if mc.Path == "" {

@@ -396,7 +396,15 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, readParti
 
 	events, err := memStore.QueryEvents(opts)
 	if err != nil {
-		return nil
+		// S-2（四审，信号倒置）：存储故障这一强信号不得静默塌缩为"无历史"（否则 agent 误判
+		// 无相关知识、转冗余搜索，且故障不可观测）——显式返回 query_error 结果项，与"确实
+		// 没有历史"可区分；对齐 recall 侧对同一查询的显式报错语义（memory_recall.go）。
+		return []KnowledgeResult{{
+			Type:    "historical_memory",
+			Title:   "query_error",
+			Content: fmt.Sprintf("memory query failed (relevant history may exist): %v", err),
+			Source:  "memory",
+		}}
 	}
 
 	var results []KnowledgeResult

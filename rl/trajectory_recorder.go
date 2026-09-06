@@ -357,8 +357,14 @@ func (tr *TrajectoryRecorder) writeLoop() {
 		}
 	}
 
+	// S-1（四审，C1 文档谎言实例）：对齐 Close doc 的"drain + sync on close"承诺——channel
+	// 满（256 积压）时 sentinel 被 non-blocking 丢弃、writeLoop 仅 drain 退出，此前此处只
+	// Close 不 Sync。补 final Sync 兜底（Go os.File 直写 syscall 无用户态缓冲，掉电才可能丢）。
 	fileMu.Lock()
 	for _, f := range openFiles {
+		if err := f.Sync(); err != nil {
+			log.Warnf("[TrajectoryRecorder] final sync failed: %v", err)
+		}
 		f.Close()
 	}
 	fileMu.Unlock()
