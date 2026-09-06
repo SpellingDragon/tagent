@@ -76,22 +76,31 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
         msg := cm.BuildInvocation(events)     // ② 合并为一条 user message
         if msg.Content == "" { continue }
 
-        // ③ RunFlow with exponential backoff retry
+        spanCtx, turnSpan := startTurnSpan(ctx, events)      // ③ turn root span（tagent.turn，noop 安全）
+        spanCtx = governance.WithTriggerSource(spanCtx, source) // ctx 盖章 trigger source（goal 门消费）
+
+        retriedDegenerate := false
         for attempt := 0; attempt <= maxRetries; attempt++ {
-            if err := cm.RunFlow(ctx, msg); err != nil {
+            if err := cm.RunFlow(spanCtx, msg); err != nil {
+                if ctx.Err() != nil { endTurnSpan(turnSpan, retriedDegenerate); return } // ctx 早退（补 End 防泄漏）
                 if attempt < maxRetries {
                     time.Sleep(retryDelays[attempt])  // 退避等待
                     continue
                 }
-                ta.publishErrorEvent(bus, err)  // 重试耗尽→发布错误事件
+                log.Errorf(...)  // 重试耗尽：仅记日志 + degradation.ReportFailure(DepModel)
+                                   // （每 turn 至多一次；成功上报恢复；不再发布错误事件）
             }
             break
         }
+        if cm.LastTurnDegenerate() && !retriedDegenerate {
+            retriedDegenerate = true; continue  // 退化 turn（无工具调用且空 final）重试一次
+        }
+        endTurnSpan(turnSpan, retriedDegenerate)
     }
 }
 ```
 
-**错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次）。重试耗尽后发布 `AgentEvent{Type: "external_input", Source: "error"}` 到 EventBus。`BuildInvocation` 跳过 `Source="error"` 事件，不触发模型调用，但外部监听器可感知。
+**错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次；ctx 取消不计）。重试耗尽后**仅记日志并上报 DegradationManager 的 model 依赖失败**（每 turn 至多一次，成功上报恢复路径；RunFlow 返回的是传输层错误，model-API 错误经 outputCh 流出，故不再发布错误事件）。退化 turn（无工具调用且空 final）额外重试一次（同一 turn span，`degenerate_retry` 属性标记，不另开 span）。`BuildInvocation` 只要求 `Type=external_input` 且 `Message` 非空，不区分 Source。
 
 `StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`。
 
@@ -148,10 +157,10 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 ### 2.8 EventBus
 
-**文件**：`event_bus.go`（154 行）
+**文件**：`event_bus.go`
 **原型对应**：`eventBus chan Event`
 
-per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
+per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。构造经 `NewReliableEventBus(spillDir)`（T-G ReliableBus）：配置 `reliability.bus_spill_dir` 时 channel 满则事件溢出落盘而非丢弃（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复，at-least-once），空则回退纯 channel（默认，零行为变化）。文件亦含 task_settled 事件构建（自包含 + Origin trace 锚回填）。
 
 ### 2.9 AgentToolWrapper
 
@@ -170,6 +179,7 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
 - **settle 三档**：`completed` / `stable` / `suspect`，探测器只做确定性分类，语义判断交给 LLM。
 - **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
+- **Origin 信使行李**：TaskSpec.Origin 携带 spawn turn 的调用元数据（chat_id 等 + trace_id/span_id 锚点），任务层只透传不解读；task_settled 回流的新 turn 据锚点建 OTel span link，连接 spawn/settle 两棵 trace（C9 跨 turn 闭环）。
 - **看板 + 工具**：`BeforeModel` 每次调用从 registry 重渲染 live 看板（不参与压缩，**追加在消息列表末尾**——看板字节逐次变化，置于尾部使前缀缓存仅损失看板自身，等待指引行同时是模型读到的最后内容）；`list_tasks` / `cancel` / `relaunch` / `resume_task` 为即时同步工具（结果消费不走专用工具：小结果随 settle 通知内联，大结果转储文件经 read_file 分页）。
 - **resume_task 重入**：合法源状态 {alive-detached, stable, completed, failed}；tmux 经 detector `Rearm`（绑会话非轮次，零换绑），subagent 经新 Run + 任务链还原器。详见 [tool 架构文档「任务重入」章](../tool/tool-architecture.md)。
 - **会话回收闭环**：运行时 completed/error 即回收；优雅退出 `Close()` 收编存活会话；启动时按前缀清扫孤儿会话（防 pty 泄漏累积）。
@@ -203,6 +213,14 @@ sequenceDiagram
 
 对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
 
+### 2.11 治理与可靠性接线（本模块落点）
+
+buildAgent 对**所有 agent** 的非 wrapper leaf 工具经 GovernanceTool 过闸（包裹链 `OutputLimitTool(GovernanceTool(raw))`，per-agent 独立 BudgetManager + 共享 Ledger/Classifier/Approval/Goals；refine 工具仅 entry、先于治理包裹追加）；event_loop 上报 model 依赖退化、turn ctx 盖章 trigger source（goal 门消费）；ReliableBus/AnchorStore 为 opt-in（目录配置非空启用）。详见 [platform 篇](../platform/platform-subsystems.md)。
+
+### 2.12 turn-as-trace 可观测
+
+每 turn 一棵 trace（`tagent.turn` root span，属性含 trigger_source/chat_id/event_sources；退化重试记为属性不另开 span；ctx 早退补 End；task_settled 据 Origin 锚建 span link）——事件 Metadata / RL 轨迹 / OTel span 三投影由 trace_id 互链，noop provider 零开销。详见 [platform 篇](../platform/platform-subsystems.md)。
+
 ## 三、包与文件结构（分包后）
 
 ```mermaid
@@ -210,6 +228,7 @@ graph TB
     subgraph agent["agent/ 引擎本体"]
         AG["agent.go 组合根"]
         EL["event_loop.go + event_bus.go"]
+        TR["trace.go turn span"]
         CM["context_manager.go 粘合层"]
         SE["session.go + inject.go + lifecycle.go"]
         TW["tool_agent.go 子Agent封装"]
@@ -225,22 +244,35 @@ graph TB
         TM["task_manager.go 生命周期+resume"]
         TB["task_board.go 看板"]
     end
+    subgraph governance["agent/governance 治理闸（默认关）"]
+        GT["gate.go + tool.go 决策管线+装饰器"]
+        GB["budget/ledger/approval/classifier"]
+    end
+    subgraph reliability["agent/reliability 常驻可靠性（默认关）"]
+        DG["degradation.go 五依赖状态机"]
+        SP["spill.go + anchor.go"]
+    end
     agent --> compress
     agent --> task
+    agent --> governance
+    agent --> reliability
 ```
 
 | 包/文件 | 职责 | 原型对应 |
 |------|------|---------|
-| `agent.go` | 顶层装配 + TagentConfig | `BaseTAgent.New()` |
-| `event_loop.go` / `event_bus.go` | 持久循环 + 事件队列 | `DefaultRun` / `eventBus chan` |
-| `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner | `OnEvents` + `ModelCompletion` |
+| `agent.go` | 顶层装配 + TagentConfig；OutputLimitTool 包裹全部工具（封顶 `toolOutputCapChars`=60K，与 MaxTokens 解耦——防长 budget 下 MaxTokens/2×4 派生形同虚设；超限全量存 `<workspace>/tool-output`，返回带路径摘要） | `BaseTAgent.New()` |
+| `event_loop.go` / `event_bus.go` | 持久循环（turn span + model 退化上报 + 退化重试）+ 事件队列（可选 ReliableBus 溢出） | `DefaultRun` / `eventBus chan` |
+| `trace.go` | turn root span（`tagent.turn`）开/关与属性（trigger_source/chat_id/event_sources）；task_settled span link | 无（2026-09） |
+| `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner + Attribution/OriginSpawner 绑定 | `OnEvents` + `ModelCompletion` |
 | `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
-| `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest | 无（生产扩展） |
+| `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest（PromptSource 为 prompt.Getter） | 无（生产扩展） |
+| `governance/` | GovernanceGate 决策管线（classify→critical 批准→goal→budget→记账）、GovernanceTool leaf 装饰器、BudgetManager、ApprovalManager、DenialLedger、RiskClassifier | 无（2026-09，默认关） |
+| `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、SpillStore（ReliableBus 磁盘溢出）、AnchorStore（冥想锚点跨重启） | 无（2026-09，默认关） |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
-| `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go） | 无（生产扩展） |
-| `rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI + SwappableModel | 无（生产扩展） |
+| `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go）；Origin 携带 trace 锚 | 无（生产扩展） |
+| `rl/`（独立顶级包） | TrajectoryRecorder（含 trace 关联字段）+ HTTPAPI + SwappableModel | 无（生产扩展） |
 
-依赖方向由编译器执法：`agent → compress`、`agent → task`，子包零反向依赖，新代码直接 import 子包。
+依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖，新代码直接 import 子包。
 
 ## 四、数据流
 
@@ -254,7 +286,8 @@ EventBus.Publish(AgentEvent{external_input})
 TagentAgent.runEventLoop:
   ① bus.Pull(ctx) → 批量取出事件
   ② cm.BuildInvocation(events) → 合并为一条 model.Message
-  ③ cm.RunFlow(ctx, msg)
+  ③ startTurnSpan(tagent.turn) → spanCtx
+  ④ cm.RunFlow(spanCtx, msg)
        │
        ├─ runner.Run(ctx, userID, sessionID, msg)
        │    ├─ 创建/获取 session
@@ -276,7 +309,7 @@ TagentAgent.runEventLoop:
             └─ if final: bus.Publish(agent_output echo)
                 │
                 ▼
-  ④ 回到 bus.Pull — 下一轮事件
+  ⑤ 回到 bus.Pull — 下一轮事件
 ```
 
 ## 五、tagent 与 trpc-agent-go 的边界

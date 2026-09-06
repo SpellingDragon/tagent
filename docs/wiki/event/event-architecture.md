@@ -21,8 +21,10 @@
 
 | 文件 | 职责 |
 |------|------|
-| `types.go` | 事件类型常量、类型推断、event_summary 视图、Token 估算 |
-| `metadata.go` | 元数据契约：`MetaKey*` 常量、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀 |
+| `types.go` | 事件类型常量（11 个，含 consolidation/governance）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
+| `metadata.go` | 元数据契约：`MetaKey*` 常量（含归因键 agent_name/bundle_id/rollout_id/trace_id/span_id 与 governance subtype 单源常量）、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀、trigger_source |
+| `registry.go` | EventTypeSpec 注册表：类型元数据唯一权威源（Name/Role/Special/Skeleton/LowValue/TTLDays/Embeddable/Recallable 等），既有函数/变量委托派生 |
+| `timeline.go` | 时间线前缀契约：`FormatEventPrefix/ParseEventKeyAndType/HasEventPrefix/StripEventKeyPrefix`（`[evt_KEY|type]` 读写同点） |
 
 ---
 
@@ -195,20 +197,30 @@ func GenerateEventSummary(msg model.Message, eventType string, opts EventSummary
 
 ```go
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string {
-    // 特殊事件：摘要 = 原文全文（无截断）
-    if IsSpecialEventType(eventType) {
+    // 委托注册表 spec（event/registry.go 单点声明类型元数据）
+    spec := specOrDefault(eventType)
+
+    // 纯工具调用 thinking_plan（无 Content 有 ToolCalls）：摘要 = 「调用 name1、name2」
+    if msg.Content == "" && len(msg.ToolCalls) > 0 {
+        return formatToolNames(msg.ToolCalls)
+    }
+
+    // 特殊事件（spec.Special）：摘要 = 原文全文（无截断）
+    if spec.Special {
         return msg.Content
     }
 
-    // 普通事件：action_command 使用工具调用摘要
+    // 普通事件：action_command 使用工具调用摘要（含 Tool 结果 JSON 关键字段提取）
     switch eventType {
     case TypeActionCommand:
-        return formatToolCallSummary(msg, opts)
+        return formatToolCallSummary(msg, opts)  // 内含 summarizeToolResult（status/session/count/error 等关键字段）
     default:
-        return msg.Content
+        return spec.ToolLineSummary(msg)  // 未配置则原文
     }
 }
 ```
+
+> 事件类型常量现为 **11 个**（新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
 
 ### 7.3 formatToolCallSummary — 工具调用摘要
 
@@ -395,13 +407,13 @@ sequenceDiagram
 
 ```go
 type AgentEvent struct {
-    ID        string           // UUID 唯一标识
-    Type      string           // "external_input" | "tool_use"
-    Source    string           // "user" | "tmux" | "meditation" | "subagent" | "agent_loop" | "inject"
-    Timestamp time.Time
-    Message   *model.Message   // external_input 载荷
-    ToolCall  *model.ToolCall  // tool_use 载荷
-    Metadata  map[string]any   // 扩展数据
+    ID        string           `json:"id"`                  // UUID 唯一标识
+    Type      string           `json:"type"`                // "external_input" | "tool_use"
+    Source    string           `json:"source"`              // "user" | "tmux" | "meditation" | "subagent" | "agent_loop" | "inject"
+    Timestamp time.Time        `json:"timestamp"`
+    Message   *model.Message   `json:"message,omitempty"`   // external_input 载荷
+    ToolCall  *model.ToolCall  `json:"tool_call,omitempty"` // tool_use 载荷
+    Metadata  map[string]any   `json:"metadata,omitempty"`  // 扩展数据（含 Origin trace 锚回填）
 }
 ```
 
@@ -424,7 +436,7 @@ Tool result ────┤
 | Bus 事件类型 | 进入 Bus 的生产者 | 在 runEventLoop 中的处理 |
 |---------|------------|---------|
 | `external_input` | InjectMessage、TmuxMonitor、MeditationManager、A2A Server、HTTPAPI | `BuildInvocation` 合并为一条 user message，触发 `RunFlow` |
-| `agent_output`（echo） | `RunFlow` 在最终响应时 echo 回 bus | `BuildInvocation` 识别 `Source == agent_output` 并跳过，避免自触发 |
+| `agent_output`（不进 bus） | 直发 outputCh 投递（RunFlow 注释明示 no bus echo） | `BuildInvocation` 按 `Type != external_input` 过滤，无 Source 判断 |
 | `tool_use` | 当前实现中**不实际产生**到 Bus | `BuildInvocation` 只处理 `TypeExternalInput`，tool_use 会被忽略 |
 
 > **注意**：`TypeToolUse = "tool_use"` 常量定义在 `agent/event_bus.go` 而非 `tagent/event` 包中，因为它是 Bus 内部的潜在触发器类型，不属于持久化事件类型体系。当前 `runEventLoop` 不消费 `tool_use` 事件——工具执行由框架 Runner 在 `RunFlow` 内部完成。
@@ -441,9 +453,9 @@ RunFlow:
       outputCh <- fwEvt   → 对外输出
 ```
 
-`TagentAgent.makeOnEventCallback` 仅做一件事：从 `event.Event.StateDelta` 读取 `MemoryPlugin` 写入的 `event_key`、`partition_id`、`event_type`，构建 `EventReference` 并追加到 `SessionProjection`。
+`TagentAgent.makeOnEventCallback` 是**纯投递侧回调**（meta_* 元数据透传 + meditation ★ 标记）。投影写入已统一到插件管线：MemoryPlugin 在 StoreEvent 成功的同一同步点经 ProjectionSink 追加 EventReference（写统一 D1）。
 
-框架 Runner 已完成 `sessionService.AppendEvent` 和 `MemoryPlugin.OnEvent`。tagent 的 `onEvent` 不重复持久化。
+框架 Runner 已完成 `sessionService.AppendEvent` 和 `MemoryPlugin.OnEvent`（存储+投影双写）。tagent 的 `onEvent` 不重复持久化。
 
 ### 11.5 三层数据表示与流转
 

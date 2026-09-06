@@ -9,13 +9,13 @@
 - 定义 `MemoryStore` 接口规范
 - 提供 `InMemoryStore`（内存实现）和 `FileSegmentStore`（基于 KV store 的分层存储实现）
 - 通过 `EventKey` 和 `RelationStore.SetParent` 构建有向因果事件链
-- 提供向量搜索接口（`SearchByEmbedding`），当前实现返回 `ErrVectorSearchNotSupported`，可扩展接入向量数据库
+- 向量搜索经 `engineBridge` 装饰器委托 `MemoryEngine`（T-A 解耦缝 C6）：配置 `memory.engine.embedding` 时接入 hybrid RRF 引擎，未配置时退化为 `ErrVectorSearchNotSupported`（详见 [platform 篇](../platform/platform-subsystems.md)）
 
 **设计原则**：
 - **信息隔离**：Session 只保存轻量引用（`EventReference`），完整数据在 MemoryStore
 - **因果优先**：每个事件通过 `RelationStore.SetParent` 指向其前驱事件，支持因果回溯
 - **视图独立**：压缩只修改 LLM 消息视图，不修改 MemoryStore 中的数据
-- **向量搜索扩展**：`MemoryStore` 接口包含 `SearchByEmbedding`/`StoreEventWithEmbedding`/`SupportsVectorSearch`，当前实现返回 `ErrVectorSearchNotSupported`，可扩展接入向量数据库
+- **引擎旁路**：向量索引是派生投影（事件不可变；遗忘物理删除时联动移除向量），不进存储同步点
 
 ---
 
@@ -27,9 +27,20 @@
 | `in_memory_store.go` | 内存存储实现（测试/原型场景）+ 向量搜索空实现 |
 | `segment_store.go` | 基于 KV store 的分层存储实现（L0/L1/L2/L3 时间窗分段） |
 | `relation_store.go` | 因果链关系存储（SetParent/GetParent/GetChildren，LRU+可选 KV 持久化） |
-| `compaction.go` | 分层压实调度（L1→L2→L3 自动压实） |
-| `lifecycle.go` | TTL 生命周期管理（过期墓碑标记；`context_compress_summary` 固化物豁免 TTL 与容量淘汰） |
+| `compaction.go` | 分层压实调度（L1→L2→L3 自动压实；物理删除时联动移除向量） |
+| `lifecycle.go` | TTL 生命周期管理（过期墓碑标记；TypeTTL 派生自 `event/registry.go` EventTypeSpec；consolidation/governance 与固化物同享豁免） |
 | `tombstone.go` | 墓碑集管理（标记已删除事件） |
+| `engine.go` | MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover） |
+| `engine_bridge.go` | 装饰器：StoreEvent 成功后旁路索引；向量方法委托引擎（失败退回 inner） |
+| `engine_inmemory.go` | MVP 内存引擎：异步嵌入队列 + hybrid RRF(k=60) + 分区过滤 + 向量 KV 持久化与启动重建 |
+| `embedder.go` / `embedder_trace.go` | zhipu embedding-3（openai 兼容）/ mock / traced（GenAI semconv span）嵌入器 |
+| `consolidation.go` | 证据门控巩固：服务端 SHA1 收据指纹（LLM 不可伪造）+ 回放验证 |
+| `error_tracking.go` | ErrorTrackingStore 最外层装饰：存储失败归因（memory/disk/rustviking）上报 DegradationManager |
+| `mem_spill.go` | StoreEvent 失败兜底：事件落 JSONL，恢复后重放（GetEvent 预检幂等） |
+| `rustviking_client.go` | rustviking CLI 客户端（kv/index 真实契约；VectorInsert 预留无调用方） |
+| `local_file_kv.go` / `key_schema.go` | localfile KV 与键空间模式（evt/idx/meta/tomb + `tagent:vec:` 向量前缀） |
+| `query_keyword.go` | 关键词检索（term-split 匹配，hybrid 的关键词侧） |
+| `diagnostics.go` | 维度锚定诊断（MemoryDiagnostics 健康快照） |
 
 ---
 
@@ -101,7 +112,7 @@ graph TB
 
 **字符串形态**：EventKey 对 LLM/工具的展示与入参统一为 **16 进制**（`event.FormatEventKey/ParseEventKey`，负号保留给摘要引用），存储层仍为 int64。
 
-**生成函数**（`memory/types.go`）：
+**生成函数**（`memory/types.go`，含 NTP 时钟回拨钉住 `snowflakeSeqLast` 与 explicit 判定——渲染冻结全窗锚定依赖 key 单调性，详见源码）：
 
 ```go
 func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
@@ -287,7 +298,6 @@ RecallAgent 可沿因果链回溯原始事件
 type MemoryStore interface {
     // === 写操作 ===
     StoreEvent(key int64, event FullEvent) error
-    StoreEvents(events map[int64]FullEvent) error
 
     // === 读操作 ===
     GetEvent(key int64) (*FullEvent, error)
@@ -295,7 +305,7 @@ type MemoryStore interface {
     QueryEvents(query QueryOptions) ([]EventReference, error)
 
     // === 向量搜索 ===
-    // 当前实现返回 ErrVectorSearchNotSupported；可扩展接入向量数据库
+    // 裸实现返回 ErrVectorSearchNotSupported；engineBridge 装饰后委托 MemoryEngine
     SearchByEmbedding(query []float32, topK int) ([]EventReference, error)
     StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error
     SupportsVectorSearch() bool
@@ -510,42 +520,21 @@ KV key 由 `SegmentEventPrefix(pid, windowTS)` 派生，按分区+时间窗前�
 
 ## 十、向量搜索支持
 
-### 10.1 设计背景
+### 10.1 现状：MemoryEngine 已落地（T-A）
 
-`MemoryStore` 接口包含向量搜索方法，为未来接入专业向量数据库（Milvus、Qdrant、pgvector 等）预留接口。当前 `InMemoryStore` 和 `FileSegmentStore` 实现返回 `ErrVectorSearchNotSupported`。
+向量检索经 C6 解耦缝接入：`resolveMemoryStore → wireMemoryEngine（配置 `memory.engine.embedding` 时包 engineBridge，未配置原样返回）→ ErrorTrackingStore`（冻结契约 C2 装饰顺序）。引擎为 MVP 内存实现（InMemoryEngine）：异步嵌入队列（选择性生成 external_input/agent_output）→ 向量 KV 持久化（`tagent:vec:` 前缀）→ 启动异步重建（Ready 门控，窗口期退化关键词）。recall query 模式融合：向量 topK ∪ 关键词 topK → RRF(k=60)，逐跳降级保底关键词。实测（zhipu embedding-3）：512 维分离度 ≈ 1024 维，默认推荐 512。细节见 [platform 篇](../platform/platform-subsystems.md)。
 
 ### 10.2 向量搜索方法说明
 
-| 方法 | 说明 | 默认实现 |
-|------|------|----------|
-| `SearchByEmbedding(query []float32, topK int)` | 使用查询向量搜索相似事件 | 返回 `ErrVectorSearchNotSupported` |
-| `StoreEventWithEmbedding(key, event, embedding)` | 存储事件时同时存储向量 | 忽略 embedding，仅存储事件 |
-| `SupportsVectorSearch()` | 是否支持向量搜索 | 返回 `false` |
+| 方法 | 说明 | 实现 |
+|------|------|------|
+| `SearchByEmbedding(query []float32, topK int)` | 余弦相似度 topK | engineBridge 委托引擎 RawVectorSearcher；裸 store 返回 `ErrVectorSearchNotSupported` |
+| `StoreEventWithEmbedding(key, event, embedding)` | 保留接口位 | 引擎走旁路索引（不入此方法） |
+| `SupportsVectorSearch()` | 能力探测 | 引擎就绪且配置开启时 true |
 
-### 10.3 向量搜索空实现
+### 10.3 扩展方向
 
-```go
-// InMemoryStore 和 FileSegmentStore 的向量搜索均为空实现
-
-// SearchByEmbedding 总是返回错误
-func (s *InMemoryStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
-    return nil, ErrVectorSearchNotSupported
-}
-
-// StoreEventWithEmbedding 忽略 embedding 参数
-func (s *InMemoryStore) StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error {
-    return s.StoreEvent(key, event)
-}
-
-// SupportsVectorSearch 返回 false
-func (s *InMemoryStore) SupportsVectorSearch() bool {
-    return false
-}
-```
-
-### 10.4 扩展方向
-
-接入向量数据库时，实现 `SearchByEmbedding` 和 `StoreEventWithEmbedding` 方法，同时将 `SupportsVectorSearch()` 改为返回 `true`。
+rustviking 原生 `index insert/search/delete` CLI 为预留后端（VectorInsert 现无生产调用方，`-l` level 语义待实测）；接入前须对真实二进制做契约探索。
 
 ---
 
@@ -843,8 +832,10 @@ case "localfile":
 |------|---------|------------|
 | `type: memory`（无 path） | 每次新建 | 完全隔离 |
 | `type: memory, path: "X"` | 同 path → 同实例 | 同一 `map[PartitionID]map[EventKey]FullEvent` |
-| `type: file, path: "/X"` | 同 path → 同实例 | RustViking KV + 文件系统 |
+| `type: file, path: "/X"` | 同 path → 同实例（namedRVStores 注册，与 localfile 同构） | RustViking KV + 文件系统 |
 | `type: localfile, path: "/X"` | 同 path → 同实例 | 本地 JSON 文件 |
+
+**装饰链（冻结契约 C2）**：`resolveMemoryStore → wireMemoryEngine`（配置 `memory.engine` 时包 engineBridge；引擎按 path+backend+model+dim 共享 namedEngines，保跨 agent 语义召回一致；未配置原样返回=零行为变化）`→ ErrorTrackingStore`（DegradationManager 启用时最外层包裹，内含 MemSpill）。MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover）详见 `engine.go` 与 [platform 篇](../platform/platform-subsystems.md)。
 
 ### 13.0.2 path 字段的语义
 
@@ -916,6 +907,12 @@ func resolvePartitions(query QueryOptions) []int {
 
 记忆只有三个原语：**store**（事件入库，不可变）、**compress**（总结+自然遗忘，同一动作两面）、**recall**（回忆）。没有独立"总结引擎"——内容级总结只在压缩固化时刻发生。
 
+> **事件类型元数据单点**：类型曲线（Role/低价值/骨架/TTL/可嵌入/可召回）唯一权威源为 `event/registry.go` 的 EventTypeSpec 注册表——`lifecycle` TypeTTL、compaction 低价值清空、嵌入选择性生成全委托/派生自它（"加一个类型只改注册表一处即全链路生效"）。内置 11 类，新增 consolidation（策展）/governance（治理）均为 TTL 豁免（-1）。
+
+### 证据门控巩固（consolidation，2026-09 T-D）
+
+冥想/工具触发的巩固是**建议式**：执行权与质量门在 LLM + 工具硬校验。`memory_consolidate` 工具在**服务端**计算源事件收据 SHA1 指纹（LLM 不可伪造——指纹不进 prompt，回放时 `VerifyConsolidation` 重算比对）；consolidation 事件经注册表注册（TTL 豁免）；源事件后续墓碑 = 诚实衰减（不阻止，追溯留痕）。诊断（`memory_health`）读实时引擎状态而非死计数器。详见 [platform 篇](../platform/platform-subsystems.md)。
+
 ```mermaid
 graph LR
     A["事件原文<br/>(唯一全文接触点)"] -->|"L3 整段折叠: 票据层(工程) + 〔历史综述〕(LLM,可选)"| C["卡片行<br/>(边界事件骨架)"]
@@ -951,10 +948,9 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph PIPE["事件管线（三个生产者）"]
+    subgraph PIPE["事件管线（两个生产者）"]
         E1["EventBus 注入事件<br/>persistBusEvent<br/>(external_input 等)"]
         E2["框架 LLM 事件<br/>MemoryPlugin.OnEvent<br/>(thinking_plan/agent_output/action_command)"]
-        E3["压缩固化物<br/>archiveSegment<br/>(context_compress_summary)"]
     end
 
     subgraph STD["标准化（单点派生）"]
@@ -1014,32 +1010,31 @@ graph TB
 
 **两条时间轴各归其位**：`FullEvent.Timestamp`（事件产生时刻）是唯一语义时间轴——排序/过滤/TTL/卡片时间线只认它；EventKey 内嵌时间（写入时刻）仅用于段放置与同毫秒决胜。二者在异步回写下可分叉，但无害——因为剪枝只读封口段的事件时间边界（`MinTime/MaxTime`），不读段名。
 
-### 16.1 写入全景：三个生产者
+### 16.1 写入全景：两个生产者
 
 ```mermaid
 graph TB
     subgraph PROD["生产者（全部经 StoreEvent 单写）"]
         P1["MemoryPlugin.OnEvent<br/>框架 LLM 事件<br/>(thinking_plan/agent_output/action_command)"]
         P2["ContextManager.persistBusEvent<br/>EventBus 注入事件<br/>(external_input 等)"]
-        P3["SmartCompressor.archiveSegment<br/>压缩固化物<br/>(context_compress_summary)"]
     end
     P1 --> SE["StoreEvent(key, FullEvent)<br/>① 窗口 = WindowTimestamp(key 内嵌秒)<br/>② seq = PartitionState.seqCounter++<br/>③ 写 evt 键 + idx 键 (+meta 若 seq==0)"]
     P2 --> SE
-    P3 --> SE
     P1 --> REL["RelationStore.SetParent<br/>因果链 parent=lastEventKeys[pid:session]"]
     P2 --> PROJ["SessionProjection.Add<br/>同点投影（store 与视图同步）"]
     SE --> KV["LocalFileKV<br/>kv.wal.jsonl 追加 → flushLoop 批量<br/>→ compactLocked 周期性 dump kv.json"]
     REL --> RJ["relations.journal 追加<br/>+ 定期 relations.snap 快照"]
+    SE -.StoreEvent 成功后旁路.-> ENG["engineBridge<br/>异步嵌入队列→向量索引"]
 ```
 
 要点：
-- 三个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护。
+- 两个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护（旧 archiveSegment 固化物生产者已随 legacy 管线移除）。
 - **窗口与 seq 的分配住在内存态 `PartitionState`**（`sync.Map`，按 pid 惰性创建）。这是“槽位分配”的唯一权威，也是 16.6 恢复链路的关键一环。
 - 因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。
 
 ### 16.2 KV 键空间：无外键的指向契约
 
-四类键之间**没有数据库级的引用约束**，全靠键名格式约定互相指向——这是阅读/修改本模块时必须先掌握的部分：
+五类键之间**没有数据库级的引用约束**，全靠键名格式约定互相指向——这是阅读/修改本模块时必须先掌握的部分（第五类为引擎持久化向量键 `tagent:vec:`，独立于事件数字键空间）：
 
 ```mermaid
 graph LR
@@ -1047,6 +1042,7 @@ graph LR
     META["{pid}:meta:{窗}<br/>→ SegmentMeta"] -.发现与描述.-> EVT
     TOMB["{pid}:tomb:{eventKey}<br/>→ ''"] -.否定可见性.-> EVT
     RELK["relations.journal / snap<br/>child → parent"] -.因果.-> EVT
+    VEC["tagent:vec:{eventKey}<br/>→ embedding"] -.派生索引.-> EVT
 ```
 
 | 指向契约 | 由谁维护 | 由谁消费 | 在本模块的作用 |
@@ -1086,7 +1082,7 @@ stateDiagram-v2
 | 工人 | 周期 | 读 | 写 | 职责边界 |
 |---|---|---|---|---|
 | `Compactor.checkHourlySeal` | 5min | `PartitionState.currentWindow` | `SealCurrent` → meta（sealed=true） | 只管封口，不动事件 |
-| `Compactor.CompactL1ToL2` / `CompactL2ToL3` | 5min | meta（按 layer 选源）+ 源段 evt 全量 | 目标段 evt/idx/meta → 删源段 → finalizeTombstones | **分辨率管理**（降级不遗忘）；L3 对低价值类型清空 Content |
+| `Compactor.CompactL1ToL2` / `CompactL2ToL3` | 5min | meta（按 layer 选源）+ 源段 evt 全量 | 目标段 evt/idx/meta → 删源段 → finalizeTombstones（物理删除时联动 `removeVector`，防向量死键重启复活） | **分辨率管理**（降级不遗忘）；L3 对低价值类型清空 Content |
 | `LifecycleManager.checkTTL` / `checkCapacity` | 1h | 分区内段与事件 | `MarkTombstone` → tomb 键 | **价值衰减管理**（按类型遗忘曲线，固化物豁免） |
 | `LocalFileKV.flushLoop` | 连续 | WAL 队列 | kv.wal.jsonl 追加 / 周期性 kv.json 全量 dump | 持久化而已，无语义 |
 
@@ -1102,7 +1098,7 @@ stateDiagram-v2
 | **2. 槽位与身份一一对应** | `{pid}:evt:{窗}:{seq}` 槽位里装的必是 `{pid}:idx:{eventKey}` 指向它的那个事件 | seq 由 `PartitionState.seqCounter` 单调递增分配；evt 与 idx 同次写入 |
 | **3. 声明式查询语义** | `QueryEvents` 结果 ≡ 全集过滤 → 全序排序 → offset/limit；分段/剪枝/早停仅为优化 | 全序键 `(Timestamp, EventKey)`；剪枝与早停只依据真实时间边界；双实现一致性测试矩阵 |
 | **4. 召回时间箭头与压缩同向** | 压缩丢旧留新，因而召回必须新先于旧；`timestamp_desc` 下截断只牺牲最旧 | 窗口按查询方向遍历；整窗粒度收集（窗内 seq 是字符串序而非时间序） |
-| **5. 召回底线（可寻址性）** | 卡片里的 `[key]` 票据要么取回原文、要么诚实报 miss，绝不静默返回错误内容 | `GetEvent` 先查墓碑再查 idx；固化物（summary）豁免 TTL 与容量淘汰 |
+| **5. 召回底线（可寻址性）** | 卡片里的 `[key]` 票据要么取回原文、要么诚实报 miss，绝不静默返回错误内容 | `GetEvent` 先查墓碑再查 idx；固化物（summary）/ consolidation / governance 豁免 TTL 与容量淘汰 |
 | **6. 时间真相源单一** | `FullEvent.Timestamp` 是**唯一时间轴**（排序/过滤/TTL/卡片时间线均只认它）；EventKey 内嵌时间仅用于段放置与同毫秒决胜 | 两者均在写入处一次派生；无任何判定同时依赖两个时间，因此异步事件下的分叉无害 |
 | **7. 分区隔离与显式授权** | 子 Agent 不得盲扫其他分区；跳区读取需 `read_namespaces` 显式授权 | `resolvePartitions` 无分区参数时返回空；工具层注入 `ReadPartitionIDs` |
 | **8. 压实 crash-safe** | 任何时刻崩溃不丢事件，最多短暂双层并存 | 先写目标层、后删源层；查询侧按 EventKey 去重并保留高层版本 |
@@ -1119,6 +1115,8 @@ stateDiagram-v2
 | 墓碑集 | `{pid}:tomb:*` | `TombstoneSet.RecoverFromKV` |
 | LRU 缓存 | 仅内存 | 不需恢复（冷启动自然回填） |
 | 窗口 / seq / 事件计数 | 仅内存 `PartitionState` | 靠首次写入重建——这里是契约 2 的软肋，见末章缺口表 |
+| 向量索引 | `tagent:vec:*`（引擎 KV） | 启动异步重建（Ready 门控；窗口期退化关键词，不阻塞启动） |
+| StoreEvent 失败兜底 | `<MemSpillDir>/<agent>.jsonl` | memory 恢复（onChange）触发 ReplaySpilled——重放前 `GetEvent` 预检幂等（防 already-exists 撞墙），重放走 inner 绕过 ErrorTrackingStore 防递归 |
 
 ### 16.7 压缩触发与执行过程召回（compress-digest-reconnect）
 
@@ -1191,7 +1189,7 @@ stateDiagram-v2
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
 | **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `recall(turn_key=…)` 因果链召回**（卡片“含 N 步”提示引导） | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
-| **向量检索未接入** | `SearchByEmbedding` 接口预留，实现返回 `ErrVectorSearchNotSupported`；语义召回当前仅关键词路径（`QueryOptions.Keyword`） | 接入向量库时 recall 协议入口不变（items/query 分流已隔离检索层） |
+| **rustviking 原生向量 CLI 未接线** | 引擎 MVP 走内存索引+KV 序列化持久化；rustviking `index insert/search/delete` CLI 为预留后端（VectorInsert 无调用方，level 语义待实测） | 实测后迁移同库向量后端（引擎侧适配，协议不变） |
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |
 | **历史脏数据** | 旧 11 位 mask 时代的负 key / 超界分区（如 1167）残留于实机存量 | TTL 自然清退；不做主动迁移（读路径已容错） |

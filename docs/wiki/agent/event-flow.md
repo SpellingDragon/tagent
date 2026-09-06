@@ -11,9 +11,9 @@ graph TD
     SubAgent["子 Agent 结果"] -->|Publish| Bus
     Task["后台任务 settle<br/>(TaskManager)"] -->|task_settled Publish| Bus
 
-    Bus -->|Pull 批量拉取| EL[runEventLoop]
+    Bus -->|Pull 批量拉取| EL[runEventLoop<br/>每 turn 一 trace(tagent.turn)]
     EL -->|① BuildInvocation| Msg[model.Message 合并]
-    EL -->|② RunFlow| CM[ContextManager]
+    EL -->|② startTurnSpan + RunFlow| CM[ContextManager]
     CM -->|runner.Run| Runner[框架 Runner]
 
     Runner -->|emit event channel| OutCh[outputCh]
@@ -22,7 +22,7 @@ graph TD
     OutCh -.->|isFinalResponse| Bus
 ```
 
-> **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。详见 `agent-architecture.md` §2.10 任务层。
+> **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link，跨 turn 闭环（见 [platform 篇](../platform/platform-subsystems.md)）。详见 `agent-architecture.md` §2.10 任务层。
 
 ## 二、Runner 内部流转
 
@@ -74,8 +74,9 @@ graph TD
     H1 -- yes --> R5["return evt（空 final 不存储、不投影）"]
     H1 -- no --> K["生成 Snowflake EventKey"]
     K --> I[inferEventInfo<br/>按 Role 推断 EventType + summary]
-    I --> F["构建 FullEvent"]
-    F --> S[StoreEvent 到 MemoryStore]
+    I --> A["构建 FullEvent<br/>（Content 经 sanitize，填 ToolID）"]
+    A --> M["归因盖章 Metadata：agent_name 基线 + ctx Attribution（rollout_id / turn trace_id/span_id），先于 StoreEvent"]
+    M --> S[StoreEvent 到 MemoryStore]
     S --> SINK["ProjectionSink.Append(ref)<br/>ctx 绑定的 per-invocation 投影<br/>（存储↔投影同点原子，D1）"]
     SINK --> SD[写入 StateDelta 元数据契约:<br/>event_key / partition_id / event_type / event_summary]
     SD --> R3[return evt]
@@ -88,7 +89,7 @@ graph TD
 ```mermaid
 graph TD
     E[事件插件管线<br/>MemoryPlugin store 成功] --> APP["ProjectionSink.Append(ref)<br/>EventKey / PartitionID / EventType / EventSummary / Role"]
-    BUS[bus 外部输入<br/>persistBusEvent] --> APP
+    BUS[bus 外部输入<br/>persistBusEvent<br/>不注 turn trace 锚（设计边界）] --> APP
     APP --> PROJ[SessionProjection<br/>EventReference 数组<br/>EventKey 幂等去重]
 
     PROJ --> READ["ContextCompressor.Compress<br/>读取 refs"]
@@ -153,7 +154,9 @@ sequenceDiagram
 
     U->>Bus: InjectMessage(user)
     Bus->>EL: Pull 拉取事件
+    EL->>EL: startTurnSpan(tagent.turn, trigger_source 等属性)
     EL->>CM: BuildInvocation + RunFlow(msg)
+    CM->>CM: 绑 ProjectionSink + Attribution(turn trace 锚) + OriginSpawner
     CM->>R: runner.Run
     R->>MP: Plugin.OnEvent(user event)
     MP->>Proj: ProjectionSink.Append(ref)
@@ -167,6 +170,7 @@ sequenceDiagram
     MP->>Proj: ProjectionSink.Append(refs)
     R-->>CM: emit event channel
     CM-->>U: outputCh → consumer（克隆事件 + trigger_source/meta_* 元数据）
+    EL->>EL: endTurnSpan
 ```
 
 > 无 bus echo：final 响应仅经 outputCh 投递，循环靠 `Pull` 阻塞等待下一个外部/任务事件（unified-event-projection D5）。
@@ -179,7 +183,7 @@ sequenceDiagram
 | KeepRecent=1，老段 L3 多段压缩 | `[summaryRef(context_compress), ref7(user), ref8(tool), ref9(asst_out)]` |
 | 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_7\|external_input]`、`[evt_8\|action_command]`、`[evt_9\|agent_output]` |
 
-> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求 LLM 多跳编排。
+> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求 LLM 多跳编排（当前未接线，返回确定性迭代指引）。
 
 
 ---

@@ -21,7 +21,8 @@
 | 文件 | 行数 | 职责 |
 |------|------|------|
 | `loader.go` | Prompt 加载器：单文件/目录/组合/bootstrap 加载 + 内嵌 FS 回退（`WithFallback`） |
-| `source.go` | `Source`：mtime 感知的热重载 prompt 源（工具描述热更新用） |
+| `source.go` | `Source`：mtime 感知的热重载 prompt 源（工具描述热更新用；nil-receiver 守卫） |
+| `getter.go` | `Getter` 接口（`Get() (string, error)` + `IsEmpty() bool` 两方法）：热配置提示词源抽象缝；`*Source` 编译期满足 |
 | `loader_test.go` | 10.1KB | 单元测试 |
 
 ---
@@ -416,7 +417,7 @@ sequenceDiagram
     PL->>PL: 以 "\n\n" 连接各部分
     PL-->>Root: combinedPrompt 字符串
     Root->>TA: NewTagentAgent(cfg{SystemPrompt: combinedPrompt})
-    TA->>CM: NewContextManager(cfg)
+    TA->>CM: NewContextManager(cfg{SystemPrompt + SystemPromptSource(Getter: 热载或 bundle 版本切换)})
     CM->>CM: llmagent.WithInstruction(combinedPrompt)
     Note over TA: Agent 初始化完成
 ```
@@ -487,6 +488,8 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 
 用途：`AgentToolWrapper.SetDescriptionSource` 使工具描述**热更新**——`Declaration()` 每次经 Source 取描述，改 prompt 文件立即生效，无需重启进程。inline-only（无 files）配置只加载一次并缓存。
 
+**Getter 缝与热配置（TC0）**：`Source` 满足 `Getter`（两方法：`Get() (string, error)` / `IsEmpty() bool`）。ContextManager 的 `SystemPromptSource` 与 MeditationConfig 的 `PromptSource` 字段已迁为 `prompt.Getter` 接口——可注入 `evolution.VersionedSource`（从 active bundle 读、无 active 回退 base、**回合边界生效**），未启用 evolution 时仍注入 `*prompt.Source` 走 mtime 热载（语义零变化）。bundle 版本化与发布道详见 [platform 篇](../platform/platform-subsystems.md)。注意例外：工具描述路径未迁 Getter（`SetDescriptionSource(src *prompt.Source)` 仍具体类型）。
+
 
 ---
 
@@ -496,5 +499,5 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **无 prompt 版本化** | Source 热重载即时生效，无灰度/回滚/AB；防线：磁盘优先+内嵌 fallback 保证总有可用版本 | prompt 变更走 git 审阅（现状惯例）；框架层不引入版本机制 |
+| **参数/模型热切换仅存储就绪** | TC0 起 BundleStore+VersionedSource 提供 bundle 版本化（仅 prompts 有运行期应用点，回合边界生效）；refine 白名单现仅 prompts——bundle.Params/Model 无运行期应用点 | 接线 BeforeModel 读 active.Params/Model，或收窄宣称为「提示词热配置」 |
 | **bootstrap 顺序固定** | AGENTS→SOUL→TOOLS… 顺序编码在 LoadBootstrap，不可配置 | 保持固定（顺序即契约）；如需自定义走 system_prompt.files 显式列表 |

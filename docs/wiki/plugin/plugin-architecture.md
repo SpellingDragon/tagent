@@ -7,7 +7,7 @@
 **核心职责**：通过 `plugin.Plugin` 接口将 tagent 的差异化能力（持久化、摘要）注入到框架的事件流中。
 
 **设计原则**：
-- **每个 Plugin 职责单一**：MemoryPlugin 专注持久化 + 因果链 + 同点投影（ProjectionSink），SummaryPlugin 专注 Tag 与 `event_summary` 元数据标注（**原文视图，非内容总结**——内容级总结收归压缩固化时刻）
+- **每个 Plugin 职责单一**：MemoryPlugin 专注持久化 + 因果链 + 同点投影（ProjectionSink）+ 归因盖章（FullEvent.Metadata：agent_name 基线 + ctx Attribution 叠加 rollout_id/trace_id/span_id，构造期先于 StoreEvent；细节见 [platform 篇](../platform/platform-subsystems.md)），SummaryPlugin 专注 Tag 与 `event_summary` 元数据标注（**原文视图，非内容总结**——内容级总结收归压缩固化时刻）
 - **严格拒绝非设计折损**：摘要中完全禁止任何形式的截断，内容超限由 SmartCompress 处理
 - **通过 OnEvent 而非 Before/After Model**：在事件层面处理，不侵入 LLM 调用流程
 
@@ -17,8 +17,10 @@
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `memory_plugin.go` | 222 | 事件持久化：推断类型、生成 EventKey、构建因果链、写入 StateDelta |
-| `summary_plugin.go` | 76 | 事件摘要：生成 Tag 并追加到事件 |
+| `memory_plugin.go` | 266 | 事件持久化：推断类型、生成 EventKey、归因盖章、构建因果链、写入 StateDelta |
+| `summary_plugin.go` | 80 | 事件摘要：生成 Tag 并追加到事件 |
+| `attribution.go` | 38 | 归因章 ctx 载体：WithAttribution/AttributionFrom，MemoryPlugin 存储前盖章 FullEvent.Metadata |
+| `projection_sink.go` | 37 | ProjectionSink 接口：存储⇔投影同一同步点 |
 | `memory_plugin_test.go` | 165 | 单元测试：覆盖类型推断、因果链、摘要策略 |
 
 ---
@@ -146,7 +148,7 @@ type MemoryPlugin struct {
 
 ### 5.2 OnEvent 钩子 — 10 步详解
 
-源码位置：`memory_plugin.go:63-131`
+源码位置：`memory_plugin.go:69-212`（入口三重早退守卫：无 Response/Choices、`IsPartial` 流式增量、退化空 agent_output 终答——均直接 return，不落库不投影）
 
 ```go
 func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
@@ -177,7 +179,11 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     // Step 5: 提取时间戳
     timestamp := extractTimestamp(evt)
 
-    // Step 6: 构建 FullEvent 基础字段
+    // Step 6: 构建 FullEvent 基础字段（Content 经 sanitizeAssistantContent 清洗伪造 [evt_...] 前缀，填 ToolID）
+
+    // Step 6.5: 归因盖章（构造期，先于 StoreEvent）—— Metadata 基线写 agent_name，
+    // 再经 AttributionFrom(ctx) 叠加 RunFlow 注入的 rollout_id/trace_id/span_id/bundle_id；
+    // persistBusEvent 路径同序盖章但刻意不注 turn trace 锚（设计边界，见 M9 注释）
     fullEvent := memory.FullEvent{
         EventKey:     eventKey,
         PartitionID:  partitionID,
@@ -215,7 +221,7 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
     evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
     evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 
-    // Step 10: 更新分区+会话级因果链，并通过 RelationStore 维护因果关系
+    // Step 10: 更新会话级因果链 map（SetParent 已移入 StoreEvent 成功分支内执行，失败仅记日志）
     p.mu.Lock()
     p.lastEventKeys[causalKey] = eventKey
     p.mu.Unlock()
@@ -503,7 +509,7 @@ MemoryPlugin.OnEvent → 构建 FullEvent → StoreEvent(int64 Key)
 
 - MemoryStore 不感知 Agent（纯存储概念），仅通过 `PartitionID` 区分分区
 - `PartitionIDFromName(agentName)` 将 Agent 映射到稳定的分区 ID（FNV-1a 哈希）
-- 每个分区维护独立的因果链（`lastEventKeys[PartitionID]`），防止子 Agent 事件破坏父 Agent 因果链
+- 每个分区+会话维护独立因果链（`lastEventKeys["partitionID:sessionID"]`），防止子 Agent 与跨会话事件互相破坏因果链
 
 ### 11.3 QueryOptions
 

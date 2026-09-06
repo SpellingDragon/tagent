@@ -56,7 +56,9 @@ tool/
 │   ├── memory_recall.go   # 召回协议实现（recall 的 items/query 路由目标，纯函数）
 │   ├── recall_agent.go    # RecallAgent 组装（orchestrate 分支内部编排引擎）
 │   └── recall_subtools.go # recall_query/get/recent/trace + walkTurnChain + 统一注册（memory_recall/memory_turn 注册名已退役）
-├── knowledge/           # 知识获取（knowledge_agent/subtools/websearch）
+├── knowledge/           # 知识获取（knowledge_agent/subtools/websearch/query_error 信号）
+├── mcp/                 # MCP server Registry（YAML mcp_servers + mtime 热同步）+ mcp_call 网关（声明恒定）
+├── memoryx/             # 记忆策展工具（memory_consolidate 服务端指纹 / memory_health 维度诊断）
 ├── task/                # 任务工具族：list_tasks/cancel/relaunch/resume_task（结果消费经 settle 内联/转储文件+read_file，无专用查询工具）
 ├── plan/                # PlanAgent（openspec 计划,双模式 Run）
 ├── spec/                # spec 工具：类型化计划管理（op 白名单,openspec 后端可替换,无 shell）
@@ -283,6 +285,8 @@ AgentToolWrapper.Call
 
 所有 tagent 工具都实现了 `trpc-agent-go/tool.CallableTool` 接口：
 
+> **装配期两道包裹**（配置门控，默认零行为变化）：① GovernanceTool（治理启用时）装饰**所有 agent** 的非 wrapper leaf 工具（链式 `OutputLimitTool(GovernanceTool(raw))`，Declaration 透传保 prefix-cache）；② OutputLimitTool（恒定）封顶 `toolOutputCapChars`=60K（与 MaxTokens 解耦，防长 budget 下 MaxTokens/2×4 形同虚设），超大输出落盘 `tool-output/` + read_file 票据。详见 [platform 篇](../platform/platform-subsystems.md)。
+
 ```go
 // action/action_tool.go
 var _ tool.CallableTool = (*ActionTool)(nil)
@@ -335,12 +339,18 @@ func RegisterBuiltinTools() error {
     registerOnce.Do(func() {
         agent.RegisterPlainTool("exec", actionFactory)
         file.RegisterTools()
-        knowledge.RegisterSubTools()
-        recall.RegisterSubTools()
+        knowledge.RegisterSubTools()  // skill_search/skill_load/mcp_discover/web_search/duckduckgo_search/memory_query
+        recall.RegisterSubTools()     // recall_query/get/recent/trace（统一入口本体）
+        task.RegisterSubTools()       // list_tasks/cancel/relaunch/resume
+        spec.RegisterTool()           // spec（openspec 后端）
+        toolmcp.RegisterTool()        // mcp_call（MCP 网关，声明恒定）
+        memoryx.RegisterSubTools()    // memory_consolidate/memory_health
     })
     return nil
 }
 ```
+
+> refine 工具**不走注册表**：仅 entry agent 且 `evolution.enabled` 时由 buildAgent 直接追加（propose/diff/status/rollback，无 activate），且先于治理包裹——激活仅经 ReleaseManager 发布道。配置门控默认关闭时 YAML 引用会被 ValidateToolAccess 拒绝。
 
 注册后 ToolRegistry 中可查询的 plain tool：
 
@@ -356,7 +366,10 @@ func RegisterBuiltinTools() error {
 | `replace_content` | file/file.go | 替换内容 |
 | `skill_search` | knowledge/knowledge_subtools.go | 搜索技能库 |
 | `skill_load` | knowledge/knowledge_subtools.go | 加载技能内容 |
-| `mcp_discover` | knowledge/knowledge_subtools.go | 发现 MCP 工具 |
+| `mcp_discover` | knowledge/knowledge_subtools.go | 发现 MCP 工具（live registry 调用时读取 + 分词 AND 匹配，运行时注册即时可见） |
+| `mcp_call` | tool/mcp/call.go | MCP 网关（声明恒定 server/tool/args；失败返回自纠材料含可用清单/InputSchema；上报 DepMCP） |
+| `memory_consolidate` | tool/memoryx/register.go | 证据门控巩固（服务端 SHA1 指纹，YAML 声明挂载） |
+| `memory_health` | tool/memoryx/register.go | 记忆维度诊断快照 |
 | `web_search` | knowledge/knowledge_subtools.go | 搜索通用网页 |
 | `duckduckgo_search` | knowledge/knowledge_subtools.go | DuckDuckGo 事实搜索 |
 | `memory_query` | knowledge/knowledge_subtools.go | 查询历史知识记录 |
@@ -408,7 +421,7 @@ ToolRef (kind=agent) → buildAgentToolRef → buildAgent() 递归创建子 Agen
 ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(id) → factory(PlainToolFactoryConfig) → CallableTool
 ```
 
-`PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPToolSets、ReadPartitionIDs、Properties），由 `buildPlainToolRef` 从当前 agent 的上下文注入。
+`PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPRegistry（live，优先）/MCPToolSets（legacy）、Degradation（per-agent 退化状态机，mcp_call 据此上报 DepMCP）、ReadPartitionIDs、WorkspaceRoot、Properties），由 `buildPlainToolRef` 从当前 agent 的上下文注入。
 
 ### 5.x 附加参数通道（ToolRef.extra_params）
 
@@ -460,7 +473,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 |---|---|---|
 | `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补（原序） | 零幻觉；未命中显式 `miss`；hint 回显对账；确定性优先级最高 |
 | `turn_key`(+max_steps) | 因果链回走（walkTurnChain，至 external_input 停） | 重建整轮执行过程（含被压缩丢弃的工具步骤），时间序 |
-| `query`(+since/until/event_types) | `QueryOptions` 关键词检索 | 检索层可独立演进（→向量），入口协议不变 |
+| `query`(+since/until/event_types) | 引擎就绪时 hybrid（关键词∪向量 RRF，引擎内融合），否则纯关键词 | 入口协议与 Declaration 恒定（prefix-cache 不变）；逐跳降级保底关键词 |
 | `orchestrate: true` | LLM 多跳编排保留形态 | 未接线时返回明确指引，不静默降级；确定性形态永不进 LLM 路径 |
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
@@ -567,7 +580,7 @@ tagent.New()
 | `mcp_discover` | `mcpDiscoverFactory(cfg)` | 发现 MCP 工具 |
 | `duckduckgo_search` | `duckDuckGoSearchFactory(cfg)` | 搜索事实性知识 |
 | `web_search` | `webSearchFactory(cfg)` | 搜索通用网页内容 |
-| `memory_query` | `memoryQueryFactory(cfg)` | 查询历史知识记录 |
+| `memory_query` | `memoryQueryFactory(cfg)` | 查询历史知识记录；存储故障显式返回 `query_error` 结果项（区分「存储故障」与「确实无历史」，防信号倒置） |
 
 ### 7.4 Prompt 文件化
 
