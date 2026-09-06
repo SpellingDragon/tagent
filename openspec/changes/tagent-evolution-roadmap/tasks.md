@@ -48,6 +48,8 @@
 
 ## 3. P2 反馈归因闭环(子变更建议名:feedback-attribution-loop)
 
+> 2026-09-06 注:本节主体(POST /feedback+因果边+归因地基消费)已由 **design-report-closeout §2** 承载;剩余 3.1 CONFIRM/3.4/3.5 在该变更落地后收口,evals 侧消费(3.4)转 5A.2。
+
 - [ ] 3.1 CONFIRM C5(反馈来源;默认仅 HTTPAPI /feedback 最小面) — **未决议**:P2 反馈端点未启动(仅地基达成)
 - [ ] 3.2 派生子变更并完成工件(EventKey 作 record-id 的 Reef 模式设计;AReaL reward 消费路径衔接) — **地基达成,未派生**:TC0 归因地基(Attribution 双路径盖章,EventKey 入事件 Metadata)+ T-B 轨迹互链(LLMCallRecord trace 锚点)= P2 归因的数据地基;但未派生 feedback-attribution-loop 子变更、未做 Reef 模式 record-id 设计
 - [ ] 3.3 检查点:HTTPAPI 新增 POST /feedback(event_key/task_id/score/label/reason),评分作为新事件写入 MemoryStore 并关联目标事件(RelationStore 因果边) — **未做**:HTTPAPI /feedback 端点 + RelationStore 因果边属 P2 主体,本次马拉松未覆盖(注:T-D consolidation 的收据指纹机制是「事件关联」的相邻能力,可复用)
@@ -72,6 +74,17 @@
 - [ ] 5.4 检查点:沙箱可选路径按 C8 决议落地或明确不做(记录决策) — **明确不做(C8 默认)**:Docker 沙箱不替换 exec;OS 降权(sudo -n -u)仍是最后防线;记录决策=不纳入本次
 - [ ] 5.5 检查点:critic/verifier 协作模式最小可用(plan 产出经 critic 对抗评审后放行;与 AgentToolWrapper/prefix-cache 兼容) — **未做**:critic/verifier 协作(C10)未启动;注:gate-3 CodeReview 子 agent 是「开发期对抗评审」的实践,但非运行时 critic tool agent
 - [x] 5.6 三道门禁 → commit → archive + specs 同步 → 回写 — 门禁✅(build/vet/race+CodeReview gate-3二轮揪出Blocker事件时序倒置等)+commit✅+回写✅;archive/specs 待板块4
+
+## 5A. P2 支柱建设 backlog（design-report-closeout 后续计划，2026-09-06 用户裁决登记）
+
+> 来源：docs/.dev 五方向报告 vs 代码差距盘点（design-report-closeout 提案期）；P0+P1 已由 design-report-closeout 承载，本节登记其后继——**五分歧裁定的联动增强项全部落位于此**（裁定表见 LEDGER 2026-09-06 行）。
+
+- [ ] 5A.1 D1 cassette 录制/回放 + replay 门接线（分歧②汇合点：快慢道之外补中档风险分级；shadow 维持不做）
+- [ ] 5A.2 D4 三支柱：G1 obs 过程指标（FanoutSink 在线聚合+JSONL 文件即后端+TrajectoryAggregator 对账）→ G2 evals（suites yaml+ProgramScorer/LLMScorer+held-out，含 D2 欠的 recall@10 基线）→ G3 行为回归（cassette 语料+事件级归一化 diff）；含 TraceExporter/tagtrace（分歧⑤余项）；release 工程（nightly/失败分类）
+- [ ] 5A.3 D5 M1-M4（报告锚点已核实零漂移）：handoff 契约 ratchet→ReviewGate critic→方案契约三件套→RL 反馈通道 long-poll+TurnTracker；**前置**：恢复 http_api_test 覆盖（新建 mockAgentLoop）+ jsonschema 依赖决策 + 报告 2 处 mock 表述勘误附录（mock_agent_loop_test.go 已删）
+- [ ] 5A.4 D3 M6 故障注入矩阵（1/10→10 场景：SIGKILL/时钟回拨/磁盘满/WAL 损坏/网络分区等；依赖 F2 先修——已在 design-report-closeout P0）
+- [ ] 5A.5 D2 诊断补全：悬挂率统计+召回质量/收据完整率维度（分歧③联动；SuggestedActions/vector_admin rebuild）
+- [ ] 5A.6 canary 时间窗 ∨ 样本数下限双条件（分歧④联动；依赖 design-report-closeout §2 feedback 落地后评估 judge min_samples）
 
 ## 6. 路线图收尾
 
