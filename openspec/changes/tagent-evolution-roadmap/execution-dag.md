@@ -288,3 +288,13 @@ flowchart TB
 **§8.6 启用禁令解除**:W2/W3 修毕 → **Governance 可真实部署**;E1/E2/W4 修毕 → **Evolution 可出实验环境**。
 
 门禁:build/vet rc=0 + 全量 23 包 -short 绿 + evolution/governance/memory -race 绿(agent 包 3 项 pre-existing 上游豁免)。**5.3 archive 待用户裁决**(BLOCKED:真实 key 实测/Jaeger/AReaL)。
+
+### 8.9 第三轮复验(2026-09-06,修复轮 audit)
+
+- **裁定:真修复**——6 Major 方向全部正确落地;测试真实性抽查 3/3 真回归(W1 假阴性场景/E2 旧 nil 放行/W4 旧固定窗,均旧代码必失败);Minor 9 项抽验全实装(M3/M5/M6/M8/M9/M10/M11/M12/M2);横切不变量保持;W3 包裹不挡 ActionTool 断言(isAction 包裹前提取,无 tmux 泄漏)。门禁亲验:build/vet ✅ + 全量 -short 29 包零 FAIL + 六包 -race 全绿。
+- **但修复自身引入 2 个新 Major**:
+  - **N1**(E1 后遗症):`wasActive` 白名单只查内存 history,而 history 仅 Submit 写入——基线 bundle 经 InitBaseline 直接激活永不在白名单 → **rollback 到基线恒被拒**;重启后 history 清零全部 rollback 失效(refine_test 靠直接 append history 模拟,佐证生产无记录来源)。位置 release.go:329-343 + tagent.go:408-415。修复:ReleaseRecord 持久化到 bundle dir,或启动时 seed 磁盘 active.json 曾指向的 id / 显式豁免基线。
+  - **N2**(W3 后遗症):非 entry agent 的 Gate 未接 Ledger → 兜底纯内存账本,子 agent 治理记录(denial/approval)重启即失、无 accessor——**W3 新覆盖的主风险面(action/knowledge 的 exec)无 durable 审计**,与注释宣称矛盾。位置 tagent.go:533-550 + gate.go:87-89。修复:子 agent gate 复用 entry 持久 Ledger(共享实例写同一 governance 分区)。
+- **Minor 8 项**:①预算 Dir="" 时意外落盘 CWD(tagent.go:542,违反"空=纯内存"契约,双路审计独立发现,优先);②mem_spill.go:16 注释残留"幂等覆盖"(已被 W1 推翻);③E2 parentless draft 拒绝分支 rollbackTo no-op;④W2 decided/expired 审批文件永不清理;⑤W2 Decide 无生产调用方(tasks 3.1"接通消息/CLI"言过其实,闭环实际靠文件重扫);⑥W3 工厂路径 agent(ToolAgentFactory)绕过包裹;⑦ActivationLog 不持久(重启回退固定窗);⑧测试缺口(W3 无 buildAgent 级子 agent exec 过闸测试/W2 节流窗内未测)。
+- **启用禁令修订**:Evolution 可出实验环境(N1 为功能不可用非安全风险,记为已知限制);**Governance 真实部署建议补 N2 后放开**(主风险面审计不持久;接受内存审计可注明降级)。
+- 处置:N1/N2 + Minor 8 已增补至 postmerge-review-fixes tasks §6/§7;**N1/N2 关闭前该变更不 archive**。
