@@ -423,6 +423,10 @@ func buildAgent(
 		// 率/事件量），故延迟到 memStore 就绪后绑定。judge 复用主 model。
 		if rc.evoRelease != nil {
 			evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
+			// W4（§8.3）：共享 ReleaseManager 的激活时刻表，使后验评估窗口以 bundle 激活时刻为
+			// 起点——否则 CanaryHold=0「激活即评估」时固定回看窗全是旧 bundle 数据，judge 对新
+			// bundle 无判别力，"劣化即回滚"形同虚设。
+			evSrc.SetActivationLog(rc.evoRelease.ActivationLog())
 			rc.evoRelease.BindPosterior(
 				evolution.NewLLMJudgeEvaluator(rc.model, evSrc, 5, 0.5, 0),
 				evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),

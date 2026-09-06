@@ -161,6 +161,29 @@ func TestRelease_ProtectedPromptForcesSlowLane(t *testing.T) {
 	}
 }
 
+// TestRelease_SlowLane_NilApproveGateRejects 是 E2（§8.3）回归：慢道 approveGate 为 nil 且未
+// 显式 SkipApprovalGate 时必须 reject（不得空转通过）——否则 protected 提示词零审批零后验即
+// 激活，违反"高风险必经人工批准"铁律。要求运维显式注入门或显式声明跳过。
+func TestRelease_SlowLane_NilApproveGateRejects(t *testing.T) {
+	store := newTestStore(t)
+	base, _ := store.InitBaseline(map[string]string{"soul": "v0"}, BundleParams{}, ModelRef{})
+	draft, _ := store.Create(base, map[string]string{"soul": "v1 改灵魂"}, BundleParams{}, ModelRef{}, "refine", "")
+
+	rm, _ := NewReleaseManager(ReleaseDeps{
+		Store: store, Router: fixedRouter{LaneSlow},
+		ValidateGate: gate(true, ""), ReplayGate: gate(true, ""), ShadowGate: gate(true, ""),
+		// ApproveGate 故意不注入（nil）；SkipApprovalGate 零值 false → E2 要求 reject。
+		Config: ReleaseConfig{ProtectedPrompts: []string{"soul"}},
+	})
+	rec, _ := rm.Submit(context.Background(), draft)
+	if rec.Stage != StageRejected {
+		t.Fatalf("E2: nil approveGate 且未 SkipApprovalGate 应 reject（不得空转激活）, got stage=%s reason=%s", rec.Stage, rec.Reason)
+	}
+	if store.Active().ID != base.ID {
+		t.Fatal("E2: reject 后 active 应保持基线（protected 提示词零审批不可激活）")
+	}
+}
+
 // TestRelease_ValidateGateAlwaysRequired 验证 validate 门恒过要求：失败则 rejected（两条道共用）。
 func TestRelease_ValidateGateAlwaysRequired(t *testing.T) {
 	store := newTestStore(t)

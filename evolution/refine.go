@@ -71,7 +71,7 @@ func NewRefineTool(store *BundleStore, rm *ReleaseManager) tool.Tool {
 			case "status":
 				return refineStatus(store)
 			case "rollback":
-				return refineRollback(store, args)
+				return refineRollback(store, rm, args)
 			default:
 				return refineResult{Op: args.Op, OK: false},
 					fmt.Errorf("未知 op %q（白名单：propose/diff/status/rollback；无 activate——激活必经发布状态机）", args.Op)
@@ -160,12 +160,19 @@ func refineStatus(store *BundleStore) (refineResult, error) {
 	return res, nil
 }
 
-func refineRollback(store *BundleStore, args refineArgs) (refineResult, error) {
+func refineRollback(store *BundleStore, rm *ReleaseManager, args refineArgs) (refineResult, error) {
 	if args.TargetID == "" {
 		return refineResult{Op: "rollback", OK: false}, fmt.Errorf("rollback 需 target_id")
 	}
 	if _, err := store.Get(args.TargetID); err != nil {
 		return refineResult{Op: "rollback", OK: false}, err
+	}
+	// E1（§8.3）：rollback 目标必须是发布历史中曾 Stage=active 的 bundle——否则 agent 可经
+	// rollback 直接 SetActive 任意在盘 bundle（含被拒 draft），绕过"agent 永无直接激活权"铁律
+	// （tagent.go 原注释自认此绕过）。限定白名单 = ReleaseManager.History 的已激活版本。
+	if !rm.wasActive(args.TargetID) {
+		return refineResult{Op: "rollback", OK: false},
+			fmt.Errorf("rollback 目标 %s 不在发布历史的已激活版本中——仅可回滚到曾正式生效(Stage=active)的 bundle，防绕过发布道直接激活被拒 draft（E1）", shortID(args.TargetID))
 	}
 	if err := store.Rollback(args.TargetID); err != nil {
 		return refineResult{Op: "rollback", OK: false}, fmt.Errorf("回滚失败: %w", err)

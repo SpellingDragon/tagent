@@ -3,6 +3,7 @@ package evolution
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
@@ -56,12 +57,49 @@ type EvidenceSource interface {
 	Collect(ctx context.Context, bundleID string) (Evidence, error)
 }
 
+// ActivationLog 记录 bundle 激活时刻（W4，§8.3）：ReleaseManager 在 canary SetActive 时写入，
+// StoreEvidenceSource.Collect 读取作为证据窗口起点（bundleID→activationTs）——使后验评估只看该
+// bundle 激活后的表现，而非固定回看窗（CanaryHold=0「激活即评估」时固定窗全是旧 bundle 数据，
+// 对新 bundle 无判别力）。由 ReleaseManager 与 StoreEvidenceSource 共享同一实例（getter 接线）。
+type ActivationLog struct {
+	mu sync.Mutex
+	ts map[string]int64
+}
+
+// NewActivationLog 构建激活时刻表。
+func NewActivationLog() *ActivationLog { return &ActivationLog{ts: make(map[string]int64)} }
+
+// Record 记录 bundle 激活时刻（UnixMilli）。nil-safe。
+func (a *ActivationLog) Record(bundleID string, ts int64) {
+	if a == nil || bundleID == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ts == nil {
+		a.ts = make(map[string]int64)
+	}
+	a.ts[bundleID] = ts
+}
+
+// Since 返回 bundle 激活时刻（UnixMilli）；未记录返回 (0,false)。nil-safe。
+func (a *ActivationLog) Since(bundleID string) (int64, bool) {
+	if a == nil {
+		return 0, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ts, ok := a.ts[bundleID]
+	return ts, ok
+}
+
 // StoreEvidenceSource 从 MemoryStore 读最近 window 的事件算证据。canary hold 期间调用即
 // 近似该 bundle 激活后的表现（治理记录 + 事件量是主要信号）。
 type StoreEvidenceSource struct {
-	store       memory.MemoryStore
-	partitionID int
-	window      time.Duration
+	store         memory.MemoryStore
+	partitionID   int
+	window        time.Duration
+	activationLog *ActivationLog // W4：可选，bundle 激活时刻表（Collect 窗口起点）
 }
 
 // NewStoreEvidenceSource 构建证据源。window<=0 取默认 10m（canary 观察窗）。
@@ -72,6 +110,13 @@ func NewStoreEvidenceSource(store memory.MemoryStore, partitionID int, window ti
 	return &StoreEvidenceSource{store: store, partitionID: partitionID, window: window}
 }
 
+// SetActivationLog 注入激活时刻表（W4）：Collect 以 bundle 激活时刻为窗口起点，而非固定回看。
+func (s *StoreEvidenceSource) SetActivationLog(log *ActivationLog) {
+	if s != nil {
+		s.activationLog = log
+	}
+}
+
 // Collect 读窗口事件算证据。store 为 nil 或查询失败返回空证据 + err（调用方保守不判劣化）。
 func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evidence, error) {
 	// nil 守卫先行（Suggestion：typed-nil 装入 EvidenceSource 接口时方法仍可调，解引用前必判）。
@@ -79,7 +124,14 @@ func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evi
 		return Evidence{BundleID: bundleID}, nil
 	}
 	ev := Evidence{BundleID: bundleID, WindowMs: s.window.Milliseconds()}
+	// W4（§8.3）：窗口起点 = bundle 激活时刻（若已记录且落在回看窗内），而非固定 now-window。
+	// 否则 CanaryHold=0（激活即评估）时固定回看窗全是旧 bundle 数据，judge 对新 bundle 无判别力，
+	// "劣化即回滚"形同虚设。激活时刻早于回看窗时用 now-window 兜底（避免窗口无界扩大）。
 	cutoff := time.Now().Add(-s.window).UnixMilli()
+	if ts, ok := s.activationLog.Since(bundleID); ok && ts > cutoff {
+		cutoff = ts
+		ev.WindowMs = time.Now().UnixMilli() - ts
+	}
 	// 服务端窗口过滤（StartTime）+ timestamp_desc：常驻 agent 分区事件量 >> Limit，asc 会返回
 	// 最旧的 Limit 条（全部早于 cutoff 被客户端滤掉 → TurnCount=0 → 后验评估永久静默失效，Major）。
 	// desc 截断时牺牲最旧、保住观察窗。客户端 cutoff 判断保留作兜底（段剪枝用 nominal bound）。

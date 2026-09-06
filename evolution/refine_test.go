@@ -102,16 +102,24 @@ func TestRefineDiffStatusRollback(t *testing.T) {
 		t.Fatalf("历史应含 2 bundle, got %d", len(sres.History))
 	}
 
-	// rollback 到 draft。
-	rres, err := refineRollback(store, refineArgs{Op: "rollback", TargetID: draft.ID})
+	// rollback：E1（§8.3）——目标必须是发布历史中曾 Stage=active 的 bundle，防 agent 经 rollback
+	// 直接 SetActive 任意在盘 draft 绕过发布道（"agent 永无直接激活权"铁律）。
+	rm, _ := NewReleaseManager(ReleaseDeps{Store: store})
+	// draft 从未经发布道 active → rollback 必须被拒。
+	if _, err := refineRollback(store, rm, refineArgs{Op: "rollback", TargetID: draft.ID}); err == nil {
+		t.Fatal("E1 守卫: rollback 到未 active 的 draft 应被拒（防绕过发布道直接激活被拒 draft）")
+	}
+	// 模拟 draft 曾正式发布（History 记 Stage=active）→ rollback 允许。
+	rm.history = append(rm.history, ReleaseRecord{BundleID: draft.ID, Stage: StageActive})
+	rres, err := refineRollback(store, rm, refineArgs{Op: "rollback", TargetID: draft.ID})
 	if err != nil || !rres.OK {
-		t.Fatalf("rollback 应成功, err=%v res=%+v", err, rres)
+		t.Fatalf("rollback 到曾 active 的 bundle 应成功, err=%v res=%+v", err, rres)
 	}
 	if store.Active().ID != draft.ID {
 		t.Fatal("回滚后 active 应为 draft")
 	}
 	// rollback 缺 target 报错。
-	if _, err := refineRollback(store, refineArgs{Op: "rollback"}); err == nil {
+	if _, err := refineRollback(store, rm, refineArgs{Op: "rollback"}); err == nil {
 		t.Fatal("rollback 缺 target_id 应报错")
 	}
 }

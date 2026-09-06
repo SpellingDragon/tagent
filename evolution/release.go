@@ -104,6 +104,10 @@ type ReleaseManager struct {
 	approveGate  GateFunc
 	cfg          ReleaseConfig
 
+	// activationLog 记录 canary 激活时刻（W4）：供 StoreEvidenceSource 以后验评估窗口起点，
+	// 而非固定回看（CanaryHold=0 时固定窗全是旧 bundle 数据，对新 bundle 无判别力）。
+	activationLog *ActivationLog
+
 	submitMu sync.Mutex // 序列化 Submit：activate+evaluate+rollback 临界区原子（防并发 Submit 竞争 SetActive）
 	mu       sync.Mutex // 保护 history
 	history  []ReleaseRecord
@@ -131,9 +135,14 @@ func NewReleaseManager(deps ReleaseDeps) (*ReleaseManager, error) {
 		store: deps.Store, router: deps.Router, evaluator: deps.Evaluator, guardrail: deps.Guardrail,
 		validateGate: deps.ValidateGate, replayGate: deps.ReplayGate,
 		shadowGate: deps.ShadowGate, approveGate: deps.ApproveGate,
-		cfg: deps.Config,
+		cfg:           deps.Config,
+		activationLog: NewActivationLog(), // W4：内部建，经 getter 共享给 StoreEvidenceSource
 	}, nil
 }
+
+// ActivationLog 暴露 canary 激活时刻表（W4）：buildAgent 接线时共享给 StoreEvidenceSource，
+// 使后验评估证据窗口以 bundle 激活时刻为起点（否则 CanaryHold=0 时对刚激活的 bundle 无判别力）。
+func (rm *ReleaseManager) ActivationLog() *ActivationLog { return rm.activationLog }
 
 // Submit 提交一个 draft bundle 走发布状态机。返回最终 ReleaseRecord。
 // agent 只能 propose（调本方法），激活由状态机按策略决定——agent 无直接激活权。
@@ -166,6 +175,7 @@ func (rm *ReleaseManager) runFastLane(ctx context.Context, draft, active *Bundle
 	if err := rm.store.SetActive(draft.ID); err != nil {
 		return rm.record(draft, lane, StageRejected, "canary 激活失败: "+err.Error(), 0), nil
 	}
+	rm.activationLog.Record(draft.ID, time.Now().UnixMilli()) // W4：记录激活时刻（后验窗口起点）
 	if rm.cfg.CanaryHoldMs > 0 {
 		select {
 		case <-ctx.Done():
@@ -214,6 +224,7 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 	if err := rm.store.SetActive(draft.ID); err != nil {
 		return rm.record(draft, lane, StageRejected, "canary 激活失败: "+err.Error(), 0), nil
 	}
+	rm.activationLog.Record(draft.ID, time.Now().UnixMilli()) // W4：记录激活时刻（后验窗口起点）
 	if rm.guardrail != nil {
 		if breached, reason := rm.guardrail.Breach(draft.ID); breached {
 			rm.rollbackTo(draft.ParentID)
@@ -221,7 +232,15 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 		}
 	}
 	// 人工批准门（默认需要；SkipApprovalGate=true 才跳过——反义字段使零值保守）。
+	// E2（§8.3）：approveGate 为 nil 且未显式 SkipApprovalGate → **reject**（不得空转通过）。
+	// runGate 的"nil 门视为通过"仅适用于 validate/replay/shadow 等渐进接线的非安全门；审批门是
+	// 安全关键——nil 空转会使 protected 提示词零审批即激活，违反"高风险必经人工批准"铁律。
+	// 要求运维显式注入 approveGate 或显式声明 SkipApprovalGate（实验环境）。
 	if !rm.cfg.SkipApprovalGate {
+		if rm.approveGate == nil {
+			rm.rollbackTo(draft.ParentID)
+			return rm.record(draft, lane, StageRejected, "慢道需人工批准但 approveGate 未接线且未显式 SkipApprovalGate——拒绝空转通过（E2：要求显式注入门或显式跳过）", 0), nil
+		}
 		if pass, reason := rm.runGate(rm.approveGate, ctx, draft); !pass {
 			rm.rollbackTo(draft.ParentID)
 			return rm.record(draft, lane, StageRolledBack, "人工批准拒绝，回滚: "+reason, 0), nil
@@ -298,6 +317,22 @@ func (rm *ReleaseManager) History() []ReleaseRecord {
 	out := make([]ReleaseRecord, len(rm.history))
 	copy(out, rm.history)
 	return out
+}
+
+// wasActive 报告 bundleID 是否在发布历史中曾达到 Stage=active（E1：refine rollback 目标白名单，
+// 只允许回滚到曾正式生效的版本，防直接激活被拒 draft 绕过发布道）。rm 为 nil 时返回 false（保守）。
+func (rm *ReleaseManager) wasActive(bundleID string) bool {
+	if rm == nil {
+		return false
+	}
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	for _, rec := range rm.history {
+		if rec.BundleID == bundleID && rec.Stage == StageActive {
+			return true
+		}
+	}
+	return false
 }
 
 // BindPosterior 延迟绑定后验评估器（Evaluator）+ 指标闸（Guardrail）。二者的 EvidenceSource

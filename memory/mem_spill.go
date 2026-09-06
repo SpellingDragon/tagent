@@ -73,6 +73,14 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 	var failed []spilledEvent
 	replayed := 0
 	for _, sp := range pending {
+		// W1（§8.3）：重放前 GetEvent 预检——若事件已存在（假阴性失败：KV 已写但 CLI 响应
+		// 解析失败，StoreEvent 误报 error 致落盘），视为幂等成功移除。否则重放必撞
+		// FileSegmentStore 的 "already exists 拒绝重写"守卫（segment_store.go:263）→ spill
+		// 永久滞留、恢复每次失败、不收敛。GetEvent 出错（store 仍故障）则走 StoreEvent 重试。
+		if existing, gerr := store.GetEvent(sp.Key); gerr == nil && existing != nil {
+			replayed++ // 已存在 = 之前的"失败"实为假阴性，幂等计成功
+			continue
+		}
 		if serr := store.StoreEvent(sp.Key, sp.Event); serr != nil {
 			failed = append(failed, sp) // 仍失败，保留待下次重放
 			continue
