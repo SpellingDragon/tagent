@@ -213,7 +213,7 @@ agents:
       # action 驱动 PlanAgent 双模式（progress 零 LLM 直读），name 在多计划并行时
       # 定位目标 change，并作为同名任务单飞的幂等键。
       - agent: plan
-        description_file: /Users/pengweiye/Documents/codes/tagent/resources/prompts/plan_tool_desc.md  # 指向主树单一事实源（副本目录未含此文件）
+        description_file: plan_tool_desc.md  # roadmap1.2：硬编码绝对路径改副本目录裸名（与 knowledge/exec 同构，相对 prompt_dir 解析）
         extra_params:
           - name: action
             enum: [create, update, archive, progress]

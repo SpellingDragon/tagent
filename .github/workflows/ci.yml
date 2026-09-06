@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # tmux is required by exec-tool / async-task-layer tests (agent package
+      # guards with skip when absent, but install to keep the signal on CI).
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # All unit tests use mocks — no API keys needed. real-LLM tests under
+      # tests/ self-skip without credentials and never block CI.
+      - name: Test (short)
+        run: go test ./... -short -count=1
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # agent package has 3 known pre-existing upstream races in
+      # trpc-agent-go@v1.10.0 (session.UpdatedAt / reflect clone / steer.Queue.Close)
+      # — excluded here; see openspec/changes/LEDGER.md for the waiver record.
+      - name: Race (new subsystems)
+        run: go test ./memory/ ./agent/reliability/ ./agent/governance/ ./evolution/ ./event/ ./tool/... -race -count=1

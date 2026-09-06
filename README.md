@@ -43,6 +43,15 @@ sequenceDiagram
     T-->>U: 完整细节
 ```
 
+## 📦 环境依赖
+
+| 依赖 | 要求 | 用途 |
+|---|---|---|
+| Go | ≥ 1.24 | 构建（`go build ./...`；go.mod 声明为准） |
+| tmux | 任意近期版本 | exec 工具命令执行 + 异步任务层（fast 路径内联返回 / slow 路径 tmux 后台 + `task_settled` 回写） |
+| rustviking | 可选 | 仅 `memory.type: file` 持久后端的 KV；缺省用 `memory`/`localfile` 后端（零外部二进制依赖） |
+| ZAI_API_KEY | 按需 | GLM Coding Plan 模型（examples 默认）；**全部单测使用 mock，无需任何 key** |
+
 ## 🚀 快速开始
 
 **1. 声明式配置（YAML）**
