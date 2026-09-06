@@ -46,7 +46,7 @@ func TestBuildAndVerifyConsolidation(t *testing.T) {
 	k2 := seedSourceEvent(t, store, 1, "重试后部署成功", 1750000001000)
 
 	evt, verdict, err := BuildConsolidationEvent(store, 1,
-		"经验：部署遇数据库超时应重试", "experience_distill", "meditation", []int64{k1, k2})
+		"经验：部署遇数据库超时应重试", "experience_distill", "meditation", []int64{k1, k2}, 0)
 	if err != nil {
 		t.Fatalf("BuildConsolidationEvent: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestVerifyConsolidation_TombstonedIsHonestDecay(t *testing.T) {
 	store := NewInMemoryStore()
 	k1 := seedSourceEvent(t, store, 1, "源事件A", 1750000000000)
 	k2 := seedSourceEvent(t, store, 1, "源事件B", 1750000001000)
-	evt, _, err := BuildConsolidationEvent(store, 1, "巩固", "manual", "manual", []int64{k1, k2})
+	evt, _, err := BuildConsolidationEvent(store, 1, "巩固", "manual", "manual", []int64{k1, k2}, 0)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -125,7 +125,36 @@ func TestConsolidationRegisteredTTLExempt(t *testing.T) {
 // TestBuildConsolidationEvent_EmptyContentRejected 验证空内容被拒（不产生空巩固）。
 func TestBuildConsolidationEvent_EmptyContentRejected(t *testing.T) {
 	store := NewInMemoryStore()
-	if _, _, err := BuildConsolidationEvent(store, 1, "   ", "manual", "manual", nil); err == nil {
+	if _, _, err := BuildConsolidationEvent(store, 1, "   ", "manual", "manual", nil, 0); err == nil {
 		t.Fatal("空内容应被拒")
+	}
+}
+
+// TestConsolidate_MinSourcesReject (4.4, design-report-closeout): the
+// min_source_events hard gate rejects consolidation when fewer source events
+// actually resolve than required — refuse to fabricate memory from missing
+// evidence. Fail-before: lenient pass-through (only actually-resolved sources
+// entered the receipt, no floor). 0 keeps the legacy lenient behavior.
+func TestConsolidate_MinSourcesReject(t *testing.T) {
+	store := NewInMemoryStore()
+	k1 := seedSourceEvent(t, store, 1, "源一", 1750000000000)
+	ghost := NewSnowflakeEventKey(1, 1750000009000) // never stored → unresolvable
+
+	// Gate off (0): lenient — consolidation succeeds with only k1 resolved.
+	if _, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, ghost}, 0); err != nil {
+		t.Fatalf("gate=0 must stay lenient: %v", err)
+	}
+	// Gate on (3): only 1 of 2 resolves → explicit rejection.
+	_, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, ghost}, 3)
+	if err == nil {
+		t.Fatal("min_source_events=3 with 1 resolved source must reject")
+	}
+	if !strings.Contains(err.Error(), "min_source_events") {
+		t.Fatalf("rejection must name the gate: %v", err)
+	}
+	// Gate satisfied: both sources resolve → passes with floor 2.
+	k2 := seedSourceEvent(t, store, 1, "源二", 1750000001000)
+	if _, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, k2}, 2); err != nil {
+		t.Fatalf("floor satisfied must pass: %v", err)
 	}
 }

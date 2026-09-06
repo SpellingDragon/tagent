@@ -35,7 +35,14 @@ type consolidateResult struct {
 // NewConsolidateTool 构建 memory_consolidate 工具（证据门控巩固）。
 // 服务端构造：工具自己 GetEvents 拉源事件算指纹后入库——LLM 在 content 里手写任何
 // "fingerprint" 都无意义（Metadata 由工具构造，防伪造）。
+// NewConsolidateTool 构造巩固工具（minSources=0：不校验源数，现状兼容）。
 func NewConsolidateTool(store memory.MemoryStore, partitionID int) tool.Tool {
+	return NewConsolidateToolWithGate(store, partitionID, 0)
+}
+
+// NewConsolidateToolWithGate（4.4 design-report-closeout）带 min_source_events
+// 硬门控：实际取回源不足时 memory.BuildConsolidationEvent 显式拒绝。
+func NewConsolidateToolWithGate(store memory.MemoryStore, partitionID, minSources int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args consolidateArgs) (consolidateResult, error) {
 			if strings.TrimSpace(args.Content) == "" {
@@ -53,7 +60,7 @@ func NewConsolidateTool(store memory.MemoryStore, partitionID int) tool.Tool {
 			if kind == "" {
 				kind = "manual"
 			}
-			evt, _, err := memory.BuildConsolidationEvent(store, partitionID, args.Content, kind, "manual", keys)
+			evt, _, err := memory.BuildConsolidationEvent(store, partitionID, args.Content, kind, "manual", keys, minSources)
 			if err != nil {
 				return consolidateResult{}, fmt.Errorf("构造巩固事件失败: %w", err)
 			}

@@ -93,7 +93,7 @@ func VerifyConsolidation(store MemoryStore, evt FullEvent) ReceiptVerdict {
 // BuildConsolidationEvent 服务端构造巩固事件：拉取源事件、算指纹、封装收据 Metadata。
 // 指纹由本函数（服务端）计算，LLM 无法伪造。返回待存储的 FullEvent（正 key、TTL 豁免
 // 经注册表声明）与构造时的验证裁决。调用方（memory_consolidate 工具）负责 StoreEvent。
-func BuildConsolidationEvent(store MemoryStore, partitionID int, content, kind, trigger string, sourceKeys []int64) (FullEvent, ReceiptVerdict, error) {
+func BuildConsolidationEvent(store MemoryStore, partitionID int, content, kind, trigger string, sourceKeys []int64, minSources int) (FullEvent, ReceiptVerdict, error) {
 	if strings.TrimSpace(content) == "" {
 		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf("consolidation content is empty")
 	}
@@ -111,6 +111,13 @@ func BuildConsolidationEvent(store MemoryStore, partitionID int, content, kind, 
 	sources, err := store.GetEvents(dedup)
 	if err != nil {
 		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf("fetch source events: %w", err)
+	}
+	// 4.4（design-report-closeout）：min_source_events 硬门控——实际取回的源不足即拒绝，
+	// 防「证据缺失的记忆伪造」。0 = 不校验（现状兼容；宽松放行语义保留给默认零配置）。
+	if minSources > 0 && len(sources) < minSources {
+		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf(
+			"consolidation rejected: only %d/%d source events resolved (min_source_events=%d) — refuse to fabricate memory from missing evidence",
+			len(sources), len(dedup), minSources)
 	}
 	// 收据 hex 列表基于**实际取回**的源事件（墓碑/缺失的不入收据，诚实）。
 	hexes := make([]string, 0, len(sources))

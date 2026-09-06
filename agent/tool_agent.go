@@ -880,6 +880,11 @@ type PlainToolFactoryConfig struct {
 	// 熔断半开探测间隔（每 N 次放行 1 次）。0 = 关闭。由 buildPlainToolRef 从 agent
 	// DegradationBehaviors 注入。
 	MCPProbeEvery int
+
+	// ConsolidationMinSources（4.4 design-report-closeout）：memory_consolidate
+	// 的 min_source_events 硬门控（实际取回源不足即拒绝）。0 = 不校验。由
+	// buildPlainToolRef 从该 agent 的 memory.engine.consolidation 注入。
+	ConsolidationMinSources int
 }
 
 var (

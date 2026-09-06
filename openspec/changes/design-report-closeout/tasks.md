@@ -25,10 +25,10 @@
 
 ## 4. D2 巩固触发
 
-- [ ] 4.1 配置结构 `memory.engine.consolidation { capacity_threshold(默认0=关)/min_source_events(3)/snooze }` + Validate
+- [x] 4.1 配置结构 `memory.engine.consolidation { capacity_threshold(默认0=关)/min_source_events(3)/snooze }` + Validate
 - [ ] 4.2 容量路：引擎 Index 后旁路计数→超阈发 consolidation_hint（EventBus）+ SNOOZED（`0:vmeta:consolidation_state` KV）snooze 窗不重复；回归 TestCapacityHint_TriggerAndSnooze
 - [ ] 4.3 冥想 hint 路：meditation digest 附 TopN 可巩固候选；回归 TestMeditationDigest_IncludesCandidates
-- [ ] 4.4 min_source_events 硬门控前置 BuildConsolidationEvent；回归 TestConsolidate_MinSourcesReject（fail-before：现宽松放行）
+- [x] 4.4 min_source_events 硬门控前置 BuildConsolidationEvent；回归 TestConsolidate_MinSourcesReject（fail-before：现宽松放行）
 
 ## 5. D3 goal 工具 + 降级行为层
 

@@ -30,7 +30,7 @@ func consolidateFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 	if len(cfg.ReadPartitionIDs) > 0 {
 		pid = cfg.ReadPartitionIDs[0] // 首个 = agent 自身写分区（巩固事件写入处，见 tagent.go resolveReadPartitions）
 	}
-	ct, ok := NewConsolidateTool(cfg.MemStore, pid).(tool.CallableTool)
+	ct, ok := NewConsolidateToolWithGate(cfg.MemStore, pid, cfg.ConsolidationMinSources).(tool.CallableTool)
 	if !ok {
 		return nil, fmt.Errorf("memory_consolidate: inner tool is not CallableTool")
 	}

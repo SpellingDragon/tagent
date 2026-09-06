@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -381,6 +382,37 @@ type MemoryConfig struct {
 	Engine *MemoryEngineConfig `json:"engine,omitempty" yaml:"engine,omitempty"`
 }
 
+// ConsolidationConfig（4.1 design-report-closeout）：巩固建议式触发 + 硬门控。
+// 触发是建议（渗透/冥想 hint），执行权与质量门在 LLM + 工具硬校验（D2 核心主张）。
+type ConsolidationConfig struct {
+	// CapacityThreshold：分区未巩固边界事件计数超此值 → 发 consolidation_hint 渗透
+	// 消息（非自动执行）。0 = 容量路关闭。
+	CapacityThreshold int `json:"capacity_threshold,omitempty" yaml:"capacity_threshold,omitempty"`
+	// MinSourceEvents：memory_consolidate 硬门控——实际取回的源事件数不足即显式拒绝
+	// （防证据缺失的记忆伪造）。0 = 不校验。默认建议 3。
+	MinSourceEvents int `json:"min_source_events,omitempty" yaml:"min_source_events,omitempty"`
+	// Snooze：hint 被拒/已发后的静默窗（duration 字符串，如 "24h"），防重复打扰。
+	// 空 = 每次超阈都提示。
+	Snooze string `json:"snooze,omitempty" yaml:"snooze,omitempty"`
+}
+
+// Validate 校验巩固配置（4.1 design-report-closeout）：负值非法；Snooze 非空
+// 时必须是合法 duration。零值全部合法（= 触发关闭/不校验，现状行为）。
+func (c ConsolidationConfig) Validate() error {
+	if c.CapacityThreshold < 0 {
+		return fmt.Errorf("consolidation.capacity_threshold must be >= 0")
+	}
+	if c.MinSourceEvents < 0 {
+		return fmt.Errorf("consolidation.min_source_events must be >= 0")
+	}
+	if c.Snooze != "" {
+		if _, err := time.ParseDuration(c.Snooze); err != nil {
+			return fmt.Errorf("consolidation.snooze %q: %w", c.Snooze, err)
+		}
+	}
+	return nil
+}
+
 // MemoryEngineConfig 配置记忆引擎（向量后端选择与融合调参）。
 type MemoryEngineConfig struct {
 	// Backend 选择向量后端："memory"（MVP 内存索引，默认）或 "rustviking"。
@@ -391,6 +423,10 @@ type MemoryEngineConfig struct {
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// Embedding 配置嵌入器。nil = 无向量，引擎不接线（行为同现状纯关键词）。
 	Embedding *EmbeddingConfig `json:"embedding,omitempty" yaml:"embedding,omitempty"`
+	// Consolidation 配置巩固的建议式触发与硬门控（4.1 design-report-closeout）。
+	// 零值 = 触发关闭（纯 manual，现状行为不变）；MinSourceEvents>0 时
+	// memory_consolidate 对实际取回源数不足的调用显式拒绝。
+	Consolidation *ConsolidationConfig `json:"consolidation,omitempty" yaml:"consolidation,omitempty"`
 	// VectorTopK / KeywordTopK / RRFK 融合调参（0 取引擎默认 20/20/60）。
 	VectorTopK  int `json:"vector_top_k,omitempty" yaml:"vector_top_k,omitempty"`
 	KeywordTopK int `json:"keyword_top_k,omitempty" yaml:"keyword_top_k,omitempty"`

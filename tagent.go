@@ -517,7 +517,7 @@ func buildAgent(
 	var actionTool *action.ActionTool
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr)
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg))
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -732,6 +732,7 @@ func buildToolFromRef(
 	parentMemStore memory.MemoryStore,
 	readPartitionIDs []int,
 	degradationMgr *reliability.DegradationManager,
+	consolidationMin int,
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
 	if err != nil {
@@ -742,7 +743,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr)
+		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -839,6 +840,7 @@ func buildPlainToolRef(
 	readPartitionIDs []int,
 	desc string,
 	degradationMgr *reliability.DegradationManager,
+	consolidationMinSources int,
 ) (trpctool.Tool, bool, error) {
 	registry := GetRegistry()
 	factory, ok := registry.GetPlainToolFactory(tr.ID)
@@ -847,17 +849,18 @@ func buildPlainToolRef(
 	}
 
 	factoryCfg := agent.PlainToolFactoryConfig{
-		ID:               tr.ID,
-		Description:      desc,
-		Properties:       tr.Properties,
-		WorkspaceRoot:    workspaceRoot,
-		WorkingDir:       workingDir,
-		MemStore:         memStore,
-		SkillRepo:        rc.skillRepo,
-		MCPToolSets:      rc.mcpToolSets,
-		ReadPartitionIDs: readPartitionIDs,
-		Degradation:      degradationMgr,                          // T-G: mcp_call 上报 DepMCP 退化（per-agent）
-		MCPProbeEvery:    rc.reliability.DegradationMCPProbeEvery, // 5.4: degraded 熔断半开探测
+		ID:                      tr.ID,
+		Description:             desc,
+		Properties:              tr.Properties,
+		WorkspaceRoot:           workspaceRoot,
+		WorkingDir:              workingDir,
+		MemStore:                memStore,
+		SkillRepo:               rc.skillRepo,
+		MCPToolSets:             rc.mcpToolSets,
+		ReadPartitionIDs:        readPartitionIDs,
+		Degradation:             degradationMgr,                          // T-G: mcp_call 上报 DepMCP 退化（per-agent）
+		MCPProbeEvery:           rc.reliability.DegradationMCPProbeEvery, // 5.4: degraded 熔断半开探测
+		ConsolidationMinSources: consolidationMinSources,                 // 4.4: min_source_events 硬门控
 	}
 	// Nil-guard: assigning a typed nil *Registry to the interface field
 	// would make cfg.MCPRegistry != nil inside factories.
@@ -1341,4 +1344,18 @@ func buildDegradationBehaviors(rc ReliabilityConfig) agent.DegradationBehaviors 
 	behaviors.MCPProbeEvery = rc.DegradationMCPProbeEvery
 	behaviors.DiskBlockSpawn = rc.DegradationDiskBlockSpawn
 	return behaviors
+}
+
+// consolidationMinSources（4.4 design-report-closeout）提取该 agent 的
+// memory.engine.consolidation.min_source_events（nil 链安全，缺省 0=不校验）。
+func consolidationMinSources(acfg AgentConfig) int {
+	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
+		return 0
+	}
+	c := *acfg.Memory.Engine.Consolidation
+	if err := c.Validate(); err != nil {
+		log.Warnf("[tagent] invalid consolidation config (%v); min_source gate disabled", err)
+		return 0
+	}
+	return c.MinSourceEvents
 }
