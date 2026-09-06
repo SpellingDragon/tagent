@@ -428,7 +428,9 @@ func buildAgent(
 			// bundle 无判别力，"劣化即回滚"形同虚设。
 			evSrc.SetActivationLog(rc.evoRelease.ActivationLog())
 			rc.evoRelease.BindPosterior(
-				evolution.NewLLMJudgeEvaluator(rc.model, evSrc, 5, 0.5, 0),
+				evolution.NewLLMJudgeEvaluator(rc.model, evSrc,
+					cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
+					time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second), // M8：参数配置化(零值走 judge 内部默认)
 				evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),
 			)
 		}

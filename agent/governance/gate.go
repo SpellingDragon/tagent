@@ -1,6 +1,9 @@
 package governance
 
-import "github.com/SpellingDragon/tagent/memory"
+import (
+	"github.com/SpellingDragon/tagent/memory"
+	"trpc.group/trpc-go/trpc-agent-go/log"
+)
 
 // ==================== GovernanceGate（T-G · 治理决策管线）====================
 //
@@ -147,17 +150,26 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 			g.record(SubtypeAudit, ctx, level, ruleID, "critical 已批准放行", digest, "")
 			return Decision{Disposition: DispositionRecord, Level: level, RuleID: ruleID, Reason: "已批准"}
 		}
-		req, _ := g.approval.Request(ctx.ToolName, ctx.ArgsJSON, ctx.ArgsJSON, level.String(), ruleID, reason, "")
+		req, reqErr := g.approval.Request(ctx.ToolName, ctx.ArgsJSON, ctx.ArgsJSON, level.String(), ruleID, reason, "")
+		if reqErr != nil {
+			// M11（§8.4）：approval Request 失败（写 pending 文件错误）不得静默吞掉——否则
+			// critical 挂起却无 pending 文件，运维无从知晓审批通道故障（磁盘满/权限）。
+			log.Warnf("[governance] approval Request failed for tool %q: %v", ctx.ToolName, reqErr)
+		}
 		approvalID := ""
 		if req != nil {
 			approvalID = req.ID
 		}
 		g.record(SubtypeApproval, ctx, level, ruleID, "critical 挂起待批准", digest, "")
 		denied := g.cfg.Enforcement == EnforcementStrict
+		denyReason := "critical 操作需人工批准（已登记请求 " + approvalID + "，批准后重试）"
+		if reqErr != nil {
+			denyReason = "critical 操作需人工批准，但审批请求登记失败（" + reqErr.Error() + "）——审批通道故障，请检查 governance dir 可写性"
+		}
 		return Decision{
 			Disposition: DispositionHold, Level: level, RuleID: ruleID, Reason: reason,
 			ApprovalID: approvalID, Denied: denied,
-			DenyReason: "critical 操作需人工批准（已登记请求 " + approvalID + "，批准后重试）",
+			DenyReason: denyReason,
 		}
 	}
 

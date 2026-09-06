@@ -96,6 +96,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				// Check ctx before retrying
 				if err := ctx.Err(); err != nil {
 					log.Infof("[runEventLoop:%s] ctx cancelled during retry, exiting: %v", ta.name, err)
+					endTurnSpan(turnSpan, retriedDegenerate) // M10（§8.4）：早退也 End span（防泄漏）
 					return
 				}
 				delay := retryDelays[attempt-1]
@@ -104,6 +105,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				case <-time.After(delay):
 				case <-ctx.Done():
 					log.Infof("[runEventLoop:%s] ctx cancelled during retry wait, exiting", ta.name)
+					endTurnSpan(turnSpan, retriedDegenerate) // M10（§8.4）：早退也 End span（防泄漏）
 					return
 				}
 			}

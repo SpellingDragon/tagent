@@ -136,7 +136,10 @@ type Config struct {
 	Governance GovernanceConfig `json:"governance,omitempty" yaml:"governance,omitempty"`
 
 	// Evolution 配置热配置自进化（TC0/T-EVO）。默认零值 = 关闭（Enabled=false → 用静态
-	// 提示词文件，现状）。开启后提示词/参数/模型经不可变 Bundle + 风险分级发布道治理，回合边界生效。
+	// 提示词文件，现状）。开启后**提示词**经不可变 Bundle + 风险分级发布道治理，回合边界生效。
+	// （M12 §8.4 宣称收窄：bundle schema 亦含 params/model 字段 = 存储就绪，但运行期应用点当前
+	// 仅提示词——VersionedSource 只应用 prompts、refine 提案字段白名单只含 prompts；参数/模型
+	// 热切换的运行期应用为后续增强，DiffLaneRouter 的模型/参数分支对 refine 提案暂不可达。）
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
 
 	// Reliability 配置常驻可靠性（T-G）。默认零值 = 关闭（纯 channel bus，现状）。
@@ -165,6 +168,12 @@ type EvolutionConfig struct {
 	SkipApproval      bool     `json:"skip_approval,omitempty" yaml:"skip_approval,omitempty"`             // 跳过慢道人工批准门(默认false=需批准,保守;反义字段使Go零值安全)
 	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
 	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
+
+	// 后验 LLM-judge 参数（M8 §8.4：此前硬编码于 tagent.go，运维不可调）。零值走 judge 内部
+	// 默认（minSamples=5 / threshold=0.5 / timeout=60s），故省略即现状默认，向后安全。
+	JudgeMinSamples     int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
+	JudgePassThreshold  float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化回滚)
+	JudgeTimeoutSeconds int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
 }
 
 // ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。

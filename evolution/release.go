@@ -206,7 +206,14 @@ func (rm *ReleaseManager) runFastLane(ctx context.Context, draft, active *Bundle
 			rm.rollback(active)
 			return rm.record(draft, lane, StageRolledBack, "后验评估劣化回滚: "+res.Reason, res.Score), nil
 		}
-		return rm.record(draft, lane, StageActive, "后验通过，正式生效", res.Score), nil
+		// M3（§8.4）：保留 judge 的评估原因到发布留痕——保守通过（judge 不可用/样本不足/解析
+		// 失败）时 res.Reason 说明"为何保守通过"，固定文案"后验通过"会覆盖这一关键审计信息
+		// （运维无法区分「真评估通过」与「judge 缺席保守放行」）。
+		passReason := "后验通过，正式生效"
+		if res.Reason != "" {
+			passReason += "（judge: " + res.Reason + "）"
+		}
+		return rm.record(draft, lane, StageActive, passReason, res.Score), nil
 	}
 	// 无评估器：canary 即 active（仅 guardrail 守护）。
 	return rm.record(draft, lane, StageActive, "canary 生效（无后验评估器）", 0), nil

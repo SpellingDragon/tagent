@@ -263,6 +263,10 @@ func formatVector(vec []float32) string {
 
 // VectorInsert 插入/覆盖向量（index insert）。level 为 rustviking 索引层级参数
 // （语义以其实现为准，F1 标注待验证；默认传 0）。
+// M2（§8.4）：本方法当前**无生产调用方**（预留能力）——MVP 向量持久化走 KVPut 序列化 + 启动
+// 重建（rustviking 原生 index CLI 进程内易失，见 f1-report），原生 index insert 未接线。且显式
+// `-l 0` 偏离 rustviking 默认 level=1、语义未经真实 binary 验证——接入原生 index 持久化时须先
+// 实测 level 语义（0 vs 1 的索引结构差异）再定传参，勿沿用当前默认 0。
 func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8) error {
 	args := c.buildArgs("index insert",
 		"-i", strconv.FormatUint(id, 10),

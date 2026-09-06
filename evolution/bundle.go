@@ -2,7 +2,9 @@
 //
 // TC0 交付（本文件 + source.go）：不可变 Bundle 快照 + BundleStore（内容寻址、原子
 // active 指针、任意版本回滚）+ VersionedSource（实现 prompt.Getter，从 active bundle
-// 读提示词，回合边界生效）。这是「运行期切换 prompt/参数/模型版本而无需重启」的地基，
+// 读提示词，回合边界生效）。这是「运行期切换 prompt 版本而无需重启」的地基（M12 §8.4 宣称
+// 收窄：bundle schema 含 params/model 字段 = 存储就绪，但当前运行期应用点仅 prompts——
+// VersionedSource 只读提示词、refine 字段白名单只含 prompts；参数/模型热切换待后续应用点），
 // 也是 T-EVO 发布状态机（draft→…→active）与后验回滚的存储层。
 //
 // 设计纪律（报告 D1）：bundle 写后冻结（不可变）；激活 = 原子切换 active 指针；基线
@@ -131,16 +133,19 @@ func (s *BundleStore) Active() *Bundle {
 
 // SetActive 原子切换 active 指针到指定 bundle（激活/回滚同一机制）。
 func (s *BundleStore) SetActive(id string) error {
-	b, err := s.Get(id)
+	b, err := s.Get(id) // Get 用 RLock，须在写锁外调用（否则与下方 Lock 死锁）
 	if err != nil {
 		return err
 	}
+	// M6（§8.4）：磁盘指针写 + 内存缓存更新在**单一写锁**内配对——否则并发 SetActive 时
+	// writeActivePointer(磁盘 active.json) 与 s.active(内存) 非原子，可能磁盘指向 A 而内存指向 B
+	// （重启后读到 A、运行期用 B，分叉）。writeActivePointer 自身不加 s.mu，故此处持锁安全。
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.writeActivePointer(id); err != nil {
 		return err
 	}
-	s.mu.Lock()
 	s.active = b
-	s.mu.Unlock()
 	return nil
 }
 
