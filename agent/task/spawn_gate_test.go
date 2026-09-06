@@ -46,3 +46,49 @@ func TestSpawnGate(t *testing.T) {
 		}
 	})
 }
+
+// cancelledDetector records Cancel calls (8.1 regression probe).
+type cancelledDetector struct {
+	neverSettleDetector
+	cancelled bool
+}
+
+func (d *cancelledDetector) Cancel() { d.cancelled = true }
+
+// TestSpawnGate_DedupWinsAndCancels (8.1/8.6, review §8): with the disk gate
+// ACTIVE, (a) an in-flight task with the same Key still hits dedup (Deduped,
+// NOT Blocked — "in-flight tasks are never gated" holds), and (b) a NEW key
+// is Blocked AND its detector is cancelled inside Spawn (no orphan watcher).
+// Fail-before: gate preceded dedup (same-key in-flight got Blocked) and no
+// Cancel happened.
+func TestSpawnGate_DedupWinsAndCancels(t *testing.T) {
+	degraded := false
+	tm := NewTaskManager(TaskManagerConfig{
+		SpawnGate: func() string {
+			if degraded {
+				return "disk degraded"
+			}
+			return ""
+		},
+	})
+	// Phase 1 (healthy): seed an in-flight task with Key "k".
+	first := tm.Spawn(TaskSpec{Kind: "command", Desc: "x", Key: "k"}, neverSettleDetector{})
+	if first.Task == nil {
+		t.Fatal("seed spawn must pass while healthy")
+	}
+	// Phase 2 (degraded): same Key → dedup wins over the gate.
+	degraded = true
+	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "x", Key: "k"}, neverSettleDetector{})
+	if res.Blocked != "" || !res.Deduped {
+		t.Fatalf("in-flight same-key must dedup, not block: %+v", res)
+	}
+	// New key while degraded → Blocked + detector cancelled.
+	det := &cancelledDetector{}
+	res2 := tm.Spawn(TaskSpec{Kind: "command", Desc: "y", Key: "new-key"}, det)
+	if res2.Blocked == "" {
+		t.Fatal("new spawn must be blocked while degraded")
+	}
+	if !det.cancelled {
+		t.Fatal("8.1: gate branch must cancel the detector (no orphan watcher)")
+	}
+}

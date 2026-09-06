@@ -1216,13 +1216,7 @@ func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig, onStoreEvent fu
 		return store, nil
 	}
 	if !hasEngine {
-		// 4.2（design-report-closeout）：容量触发-only——bridge 作纯写入旁路装饰器
-		// （engine=nil：Index 跳过、向量方法退 inner），仅提供 capacityHook 计数点。
-		bridge := engine.NewEngineBridge(store, nil)
-		if provider, ok := bridge.(memory.CapacityHookProvider); ok {
-			provider.SetCapacityHook(onStoreEvent)
-		}
-		return bridge, nil
+		return wrapCapacityOnly(store, onStoreEvent), nil
 	}
 	if mc.Path != "" {
 		// 引擎缓存键含 backend/model/dimensions（审查 Nit6）：同 path 但不同引擎配置
@@ -1235,16 +1229,19 @@ func wireMemoryEngine(store memory.MemoryStore, mc MemoryConfig, onStoreEvent fu
 		}
 		eng, err := buildMemoryEngine(store, *mc.Engine)
 		if err != nil {
+			// 8.10（review §8）：embedding 构建失败只降级向量能力——capacityHook
+			//（巩固触发）不得连带丢失（「触发不依赖 embedding」承诺）。
 			log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
-			return store, nil
+			return wrapCapacityOnly(store, onStoreEvent), nil
 		}
 		namedEngines[cacheKey] = eng
 		return newEngineBridgeWithRemover(store, eng, onStoreEvent), nil
 	}
 	eng, err := buildMemoryEngine(store, *mc.Engine)
 	if err != nil {
+		// 8.10：同上——降级路径保 capacityHook。
 		log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
-		return store, nil
+		return wrapCapacityOnly(store, onStoreEvent), nil
 	}
 	return newEngineBridgeWithRemover(store, eng, onStoreEvent), nil
 }
@@ -1413,8 +1410,10 @@ func consolidationMinSources(acfg AgentConfig) int {
 		return 0
 	}
 	c := *acfg.Memory.Engine.Consolidation
-	if err := c.Validate(); err != nil {
-		log.Warnf("[tagent] invalid consolidation config (%v); min_source gate disabled", err)
+	// 8.9（review §8）：min_source 硬门控只依赖自己的字段——其余字段非法独立降级
+	//（此前整体 Validate 一票否决：snooze 拼错即静默关闭安全门）。
+	if c.MinSourceEvents < 0 {
+		log.Warnf("[tagent] consolidation.min_source_events < 0; min_source gate disabled")
 		return 0
 	}
 	return c.MinSourceEvents
@@ -1466,4 +1465,18 @@ func (c *approvalInjectChannel) Deliver(req *governance.ApprovalRequest) error {
 			time.Until(time.UnixMilli(req.ExpiresMs)).Round(time.Minute)),
 	})
 	return nil
+}
+
+// wrapCapacityOnly（4.2/8.10 design-report-closeout）包一层无引擎的 bridge：
+// 仅提供 capacityHook 写入旁路计数点（Index 跳过、向量方法退 inner）。hook 为 nil
+// 时原样返回（零装饰）。
+func wrapCapacityOnly(store memory.MemoryStore, onStoreEvent func(int64, int, string)) memory.MemoryStore {
+	if onStoreEvent == nil {
+		return store
+	}
+	bridge := engine.NewEngineBridge(store, nil)
+	if provider, ok := bridge.(memory.CapacityHookProvider); ok {
+		provider.SetCapacityHook(onStoreEvent)
+	}
+	return bridge
 }

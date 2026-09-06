@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -35,7 +36,9 @@ func BindFeedback(store MemoryStore, parentKey int64, payload FeedbackPayload) (
 	}
 	parent, err := store.GetEvent(parentKey)
 	if err != nil || parent == nil {
-		return 0, fmt.Errorf("feedback: parent event %d not found: %v", parentKey, err)
+		// 8.5（review §8）：sentinel——parent-miss 与「已落库但因果边失败」必须可区分
+		//（http 层据此 404 vs 201+warning，防客户端误重试造成重复 feedback）。
+		return 0, fmt.Errorf("feedback: parent event %d not found: %w: %v", parentKey, ErrFeedbackParentNotFound, err)
 	}
 	payload.ParentKey = tagentevent.FormatEventKey(parentKey)
 	if payload.Timestamp == 0 {
@@ -48,6 +51,14 @@ func BindFeedback(store MemoryStore, parentKey int64, payload FeedbackPayload) (
 
 	pid := parent.PartitionID
 	key := NewSnowflakeEventKey(pid, 0)
+	// 8.4（review §8）：继承 parent 的 bundle_id 章——guardrail 沿因果边精确 join 到
+	// 产出该事件的 bundle 版本（否则无章 feedback 回退时间窗，跨 bundle 误归因可致误回滚）。
+	metadata := map[string]string{
+		tagentevent.MetaKeySubtype: payload.Source,
+	}
+	if bid, ok := parent.Metadata[tagentevent.MetaKeyBundleID]; ok && bid != "" {
+		metadata[tagentevent.MetaKeyBundleID] = bid
+	}
 	evt := FullEvent{
 		EventKey:     key,
 		PartitionID:  pid,
@@ -55,9 +66,7 @@ func BindFeedback(store MemoryStore, parentKey int64, payload FeedbackPayload) (
 		EventSummary: fmt.Sprintf("feedback[%s]: %s → %s", payload.Source, payload.Verdict, payload.ParentKey),
 		Timestamp:    payload.Timestamp,
 		Content:      string(content),
-		Metadata: map[string]string{
-			tagentevent.MetaKeySubtype: payload.Source,
-		},
+		Metadata:     metadata,
 	}
 	if err := store.StoreEvent(key, evt); err != nil {
 		return 0, fmt.Errorf("feedback: store event: %w", err)
@@ -67,9 +76,18 @@ func BindFeedback(store MemoryStore, parentKey int64, payload FeedbackPayload) (
 		if rel := provider.RelationStore(); rel != nil {
 			if err := rel.SetParent(key, parentKey); err != nil {
 				// 事件已落库，因果边失败不回滚（反馈优先；关系可后补）。
-				return key, fmt.Errorf("feedback stored (key=%d) but SetParent failed: %w", key, err)
+				// 8.5：sentinel 标注「部分成功」——调用方据此 201+warning 而非 404 重试。
+				return key, fmt.Errorf("%w: feedback stored (key=%d) but SetParent failed: %v", ErrFeedbackEdgePartial, key, err)
 			}
 		}
 	}
 	return key, nil
 }
+
+// ErrFeedbackParentNotFound 标记 parent 不存在（8.5）：调用方应视为确定性失败
+// （404），不得重试。
+var ErrFeedbackParentNotFound = errors.New("feedback-parent-not-found")
+
+// ErrFeedbackEdgePartial 标记「事件已落库但因果边失败」（8.5）：反馈本体成功，
+// 调用方应返回成功+warning（201），不得按失败重试（会写重复 feedback）。
+var ErrFeedbackEdgePartial = errors.New("feedback-edge-partial")

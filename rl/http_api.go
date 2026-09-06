@@ -7,6 +7,7 @@ package rl
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -109,8 +110,21 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 		Verdict: req.Verdict, Rating: req.Rating, Note: req.Note, Source: "api",
 	})
 	if err != nil {
-		// BindFeedback's contract: parent-miss is an explicit error.
-		writeJSONError(w, http.StatusNotFound, "parent_not_found", err.Error())
+		// 8.5（review §8）：按 sentinel 分类——parent-miss=确定性 404（勿重试）；
+		// edge-partial=事件已落库仅因果边失败 → 201+warning（重试会写重复 feedback）；
+		// 其余=500。
+		switch {
+		case errors.Is(err, memory.ErrFeedbackParentNotFound):
+			writeJSONError(w, http.StatusNotFound, "parent_not_found", err.Error())
+		case errors.Is(err, memory.ErrFeedbackEdgePartial):
+			log.Warnf("[HTTPAPI] feedback stored but edge partial: %v", err)
+			writeJSON(w, http.StatusCreated, map[string]any{
+				"status": "bound_with_warning", "feedback_key": tagentevent.FormatEventKey(fbKey),
+				"warning": err.Error(),
+			})
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "bind_failed", err.Error())
+		}
 		return
 	}
 	log.Infof("[HTTPAPI] feedback bound: parent=%s verdict=%s feedback=%s",

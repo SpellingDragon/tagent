@@ -3,8 +3,6 @@ package governance
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
-	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -44,9 +42,9 @@ func (g *GoalRegistry) BindStore(store memory.MemoryStore, partitionID int) {
 
 // writeGoalEvent 把 goal 操作写为 governance 事件（尽力：失败仅记日志，
 // 内存态已生效——goal 门可用性优先，审计持久化尽力）。
-func (g *GoalRegistry) writeGoalEvent(p goalEventPayload) {
+func (g *GoalRegistry) writeGoalEvent(p goalEventPayload, evtKey int64, ts int64, pid int) {
 	g.mu.RLock()
-	store, pid := g.store, g.partitionID
+	store := g.store
 	g.mu.RUnlock()
 	if store == nil {
 		return
@@ -57,21 +55,20 @@ func (g *GoalRegistry) writeGoalEvent(p goalEventPayload) {
 		return
 	}
 	summary := fmt.Sprintf("[governance:goal] %s %s", p.Op, p.GoalID)
-	key := memory.NewSnowflakeEventKey(pid, 0)
 	evt := memory.FullEvent{
-		EventKey:     key,
+		EventKey:     evtKey,
 		PartitionID:  pid,
 		EventType:    event.TypeGovernance,
 		EventSummary: summary,
 		Content:      string(content),
-		Timestamp:    time.Now().UnixMilli(),
+		Timestamp:    ts,
 		Metadata: map[string]string{
 			event.MetaKeySubtype: event.SubtypeGoal,
 			"goal_op":            p.Op,
 			"goal_id":            p.GoalID,
 		},
 	}
-	if err := store.StoreEvent(key, evt); err != nil {
+	if err := store.StoreEvent(evtKey, evt); err != nil {
 		log.Warnf("[governance] goal event store failed (op=%s id=%s): %v", p.Op, p.GoalID, err)
 	}
 }
@@ -104,7 +101,8 @@ func (g *GoalRegistry) rebuildFromStore() {
 		log.Warnf("[governance] goal rebuild fetch failed: %v", err)
 		return
 	}
-	sort.Slice(events, func(i, j int) bool { return events[i].Timestamp < events[j].Timestamp })
+	// 8.8（review §8）：不重排——QueryEvents 契约即 (Timestamp, EventKey) 全序
+	//（声明式查询语义#3）；先前 sort.Slice 不稳定反而抹掉同毫秒 EventKey 兜底序。
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

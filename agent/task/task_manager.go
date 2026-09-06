@@ -306,14 +306,9 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 // parallel (blocking ≈ the slowest, not the sum).
 func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
 	tm.pruneTerminal()
-	// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
-	// 进行中任务的 settle/轮询不受影响；nil gate = 不拒绝）。
-	if tm.spawnGate != nil {
-		if reason := tm.spawnGate(); reason != "" {
-			return SpawnResult{Blocked: reason}
-		}
-	}
 	// Idempotent dedup: an active task with the same Key short-circuits.
+	// 8.6（review §8）：gate 在 dedup **之后**——同 Key 在飞任务命中 dedup 正常返回，
+	// 不被 gate 误报 Blocked（"进行中任务不受影响"承诺）。
 	tm.mu.Lock()
 	if spec.Key != "" {
 		if id, ok := tm.byKey[spec.Key]; ok {
@@ -322,6 +317,20 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 				detector.Cancel() // never double-run
 				return SpawnResult{Task: existing, Deduped: true}
 			}
+		}
+	}
+	// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
+	// 进行中任务的 settle/轮询不受影响；nil gate = 不拒绝）。
+	// 8.1（review §8）：调用方在 Spawn 前已启动实际工作（tmux 会话/子 agent goroutine），
+	// gate 拒绝时 MUST detector.Cancel() 防孤儿会话/失控后台——Cancel 收敛在此单点，
+	// 调用方文案须如实告知"已执行但未纳入任务层管理"。
+	if tm.spawnGate != nil {
+		if reason := tm.spawnGate(); reason != "" {
+			tm.mu.Unlock()
+			if detector != nil {
+				detector.Cancel() // block adoption, not the work itself (already running)
+			}
+			return SpawnResult{Blocked: reason}
 		}
 	}
 	task := &Task{

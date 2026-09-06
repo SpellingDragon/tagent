@@ -232,33 +232,46 @@ func NewGoalRegistry() *GoalRegistry {
 }
 
 // Declare 登记一个 goal，返回其 ID。BindStore 后同步写 governance 事件（5.2）。
+// 8.7（review §8）：事件 Timestamp/EventKey 在锁内分配——并发 Declare/Resolve 时
+// 事件的 (Timestamp, EventKey) 全序与内存操作序一致，rebuild 不会让已关闭 goal 复活。
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string {
 	g.mu.Lock()
 	g.seq++
 	id := fmt.Sprintf("g-%d", g.seq)
+	now := time.Now().UnixMilli()
 	goal := &Goal{
 		ID: id, Statement: statement, CreatedBy: createdBy,
-		Status: GoalActive, CreatedMs: time.Now().UnixMilli(), ExpiresMs: expiresMs,
+		Status: GoalActive, CreatedMs: now, ExpiresMs: expiresMs,
 	}
 	g.goals[id] = goal
+	evtKey := g.eventKeyLocked()
+	pid := g.partitionID
 	g.mu.Unlock()
 	g.writeGoalEvent(goalEventPayload{
 		GoalID: id, Op: "declared", Statement: statement,
 		CreatedBy: createdBy, ExpiresMs: expiresMs,
-	})
+	}, evtKey, now, pid)
 	return id
 }
 
-// Resolve 更新 goal 状态。BindStore 后同步写 governance 事件（5.2）。
+// eventKeyLocked 在锁内为 governance 事件分配 Snowflake key（调用方持有 g.mu）。
+func (g *GoalRegistry) eventKeyLocked() int64 {
+	return memory.NewSnowflakeEventKey(g.partitionID, 0)
+}
+
+// Resolve 更新 goal 状态。BindStore 后同步写 governance 事件（5.2，锁内时序见 Declare）。
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool {
 	g.mu.Lock()
 	goal, ok := g.goals[id]
 	if ok {
 		goal.Status = status
 	}
+	evtKey := g.eventKeyLocked()
+	now := time.Now().UnixMilli()
+	pid := g.partitionID
 	g.mu.Unlock()
 	if ok {
-		g.writeGoalEvent(goalEventPayload{GoalID: id, Op: "resolved", Status: string(status)})
+		g.writeGoalEvent(goalEventPayload{GoalID: id, Op: "resolved", Status: string(status)}, evtKey, now, pid)
 	}
 	return ok
 }

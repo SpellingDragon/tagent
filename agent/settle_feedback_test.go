@@ -18,7 +18,7 @@ import (
 // bundle_id stamp makes it attributable).
 func TestOnSettle_WritesDeterministicFeedback(t *testing.T) {
 	cases := []struct {
-		status     string
+		status      string
 		wantVerdict string // "" = no feedback expected
 	}{
 		{"completed", "positive"},

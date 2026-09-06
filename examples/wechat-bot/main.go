@@ -190,6 +190,9 @@ func main() {
 		httpPort = "8089"
 	}
 	httpAPI := rl.NewHTTPAPI(ta)
+	// 8.3（review §8）：接线 feedback 生产链路——entry memStore 供 POST /feedback
+	// 绑定外部 verdict（此前仅测试调用，端点恒 503，闭环未通）。
+	httpAPI.SetFeedbackStore(ta.MemStore())
 	// Set model update callback: when AReaL adapter sends llm_base_url,
 	// create a new openai model with that URL and swap it in.
 	httpAPI.SetModelUpdateFn(func(baseURL string) {
@@ -454,6 +457,14 @@ func main() {
 		// 动词）由框架纯函数解析并写回应文件，不进 agent 对话（批准是人的动作，不是
 		// 对话内容；agent 无批准权）。非审批回复照常走 agent。
 		if digest, approve, ok := governance.ParseApprovalReply(msg.Text()); ok && tagentCfg.Governance.Dir != "" {
+			// 8.2（review §8）：审批人白名单——digest 随 approval_request 明文送达，
+			// 无白名单时任意外部用户可批准 critical。安全默认：未配置 approvers 时
+			// 消息通道批准关闭（仅 CLI 可批准）；配置后仅白名单用户生效。
+			if !wechatCfg.IsApprover(msg.FromUserID) {
+				_ = bot.SendTextToUser(ctx, msg.FromUserID,
+					"你没有审批权限（不在 app.wechat.approvers 白名单）。请由审批人经 CLI（wechat-bot approve <digest>）执行。")
+				return nil
+			}
 			approvalsDir := filepath.Join(tagentCfg.Governance.Dir, "approvals")
 			reply, err := governance.RespondFile(approvalsDir, digest, approve, "wechat:"+msg.FromUserID)
 			if err != nil {
@@ -576,6 +587,21 @@ type WechatAppConfig struct {
 	TokenFile       string `json:"token_file"`
 	ContextTokenDir string `json:"context_token_dir"`
 	WorkspaceDir    string `json:"workspace_dir"`
+	// Approvers（8.2 review §8）：可经消息通道批准 critical 操作的用户 ID 白名单。
+	// 空 = 消息通道批准关闭（安全默认——digest 随请求明文送达，任意可达者可批准），
+	// 批准仅经 CLI（wechat-bot approve <digest>）。
+	Approvers []string `json:"approvers,omitempty"`
+}
+
+// IsApprover reports whether the user id may approve via the message
+// channel (8.2: empty whitelist denies everyone — approval goes via CLI).
+func (c WechatAppConfig) IsApprover(userID string) bool {
+	for _, id := range c.Approvers {
+		if id == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // loadWechatConfig extracts WeChat config from tagent.yaml's app.wechat section.
@@ -591,6 +617,14 @@ func loadWechatConfig(app map[string]any) WechatAppConfig {
 	if raw, ok := app["wechat"].(map[string]any); ok {
 		if v, ok := raw["config_dir"].(string); ok {
 			cfg.ConfigDir = v
+		}
+		if rawList, ok := raw["approvers"].([]any); ok {
+			cfg.Approvers = nil
+			for _, item := range rawList {
+				if id, ok := item.(string); ok && id != "" {
+					cfg.Approvers = append(cfg.Approvers, id)
+				}
+			}
 		}
 		if v, ok := raw["token_file"].(string); ok {
 			cfg.TokenFile = v

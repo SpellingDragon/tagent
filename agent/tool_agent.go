@@ -449,9 +449,9 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
 		if res.Blocked != "" {
-			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以
-			// result 渗透（可读原因，子 agent 稍后可重发）。
-			return "子任务被暂停（未执行）：" + res.Blocked, nil
+			// 5.4（design-report-closeout）+ §8.1：子 agent 在 Spawn 前已开跑，gate 拒绝
+			// = 不纳入任务层（Spawn 已 Cancel detector 防失控）——文案必须如实。
+			return "子任务未被任务层纳管（已启动的后台运行已被取消跟踪，结果不会回写）：" + res.Blocked + "。可稍后重发。", nil
 		}
 		if res.Deduped {
 			// Same-name single-flight: factual ticket only (stable-context-

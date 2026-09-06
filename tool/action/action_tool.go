@@ -394,13 +394,18 @@ func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task)
 	}
 }
 
-// buildBlockedResult (5.4, design-report-closeout) renders a spawn rejection
-// (disk degraded) as a readable tool result — failure permeates as result,
-// never as error, so the model can retry later or fall back.
+// buildBlockedResult (5.4, design-report-closeout; §8.1 wording fix) renders a
+// spawn rejection (disk degraded) as a readable tool result — failure permeates
+// as result, never as error. NOTE: the command session was ALREADY started by
+// startSession before Spawn — the honest wording says "executed but unmanaged"
+// (the detector is cancelled by Spawn's gate branch, so there is no orphan
+// watcher; the tmux session itself keeps running untracked until the
+// session-reclaim sweep).
 func (ct *ActionTool) buildBlockedResult(reason string) *ActionToolResult {
 	return &ActionToolResult{
 		Status: "blocked",
-		Note:   "命令未执行：" + reason,
+		Note: "命令已执行但未被任务层纳管（结果不会被自动跟踪/回写）：" + reason +
+			"。如需结果请稍后用 exec 重新以同步方式确认，或等 disk 恢复后重发。",
 	}
 }
 

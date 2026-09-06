@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/memory"
@@ -56,5 +57,55 @@ func TestGoalRegistry_NoStoreNoEvents(t *testing.T) {
 	reg.Resolve(id, GoalAchieved)
 	if reg.HasActive() {
 		t.Fatal("resolve failed")
+	}
+}
+
+// TestGoalRegistry_ConcurrentNoResurrection (8.7/8.8, review §8): concurrent
+// Declare/Resolve churn must not reorder governance events — after a rebuild
+// a RESOLVED goal must stay resolved. Fail-before: event key/ts were
+// allocated outside the lock, so a declared event could land AFTER its
+// resolved event and resurrect the goal as active.
+func TestGoalRegistry_ConcurrentNoResurrection(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	pid := memory.PartitionIDFromName("tagent")
+	reg := NewGoalRegistry()
+	reg.BindStore(store, pid)
+
+	const churn = 40
+	ids := make(chan string, churn)
+	var declareWG, resolveWG sync.WaitGroup
+
+	// Resolver: resolve each id as soon as it is declared.
+	resolveWG.Add(1)
+	go func() {
+		defer resolveWG.Done()
+		for id := range ids {
+			reg.Resolve(id, GoalAchieved)
+		}
+	}()
+
+	// Concurrent churn declares + noise declares.
+	for i := 0; i < churn; i++ {
+		declareWG.Add(2)
+		go func() {
+			defer declareWG.Done()
+			ids <- reg.Declare("churn", "agent", 0)
+		}()
+		go func() {
+			defer declareWG.Done()
+			reg.Declare("noise", "agent", 0)
+		}()
+	}
+	declareWG.Wait()
+	close(ids)
+	resolveWG.Wait()
+
+	// All churn goals were resolved → rebuild must show zero ACTIVE churn.
+	reg2 := NewGoalRegistry()
+	reg2.BindStore(store, pid)
+	for _, g := range reg2.List() {
+		if g.Statement == "churn" && g.Status == GoalActive {
+			t.Fatalf("resurrection: churn goal %s revived as active after rebuild", g.ID)
+		}
 	}
 }

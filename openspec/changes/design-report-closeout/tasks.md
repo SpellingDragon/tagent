@@ -75,14 +75,14 @@
 
 ## 8. 第六轮 review 遗留(2026-09-07,双 CodeReview sub-agent + 主线程亲验;archive 前须关闭 Blocker+Major)
 
-- [ ] 8.1 **Blocker**:disk spawn gate 时序错位——ActionTool `startSession` 已真起 tmux、子 agent `NewFuncSettleDetector` 构造即 `go fn()` 之后才进 Spawn,gate 拒绝时工作**已在执行**,却返回「命令未执行/子任务被暂停」(对模型谎报)且 detector 未 Cancel(tmux 孤儿会话/失控后台子 agent)。修:①Blocked 分支必须 `detector.Cancel()`;②文案改「已执行但未纳管(结果不经任务层跟踪)」;③更优:gate 前置为起会话前的预检(TaskSpawner 暴露 WouldBlock() 或工具侧先查)
-- [ ] 8.2 **Major(安全)**:微信审批回复无身份校验——任意可达 bot 的用户发 "approve <digest>"(digest 随 approval_request 明文送达)即可批准 critical。修:审批人白名单配置(app.wechat 或 governance 段),非白名单回复拒绝并留痕
-- [ ] 8.3 **Major**:POST /feedback 生产链路未接线——SetFeedbackStore 全仓仅测试调用,example 装配缺失→端点恒 503,2.4 闭环未通。修:examples/wechat-bot main.go RL 模式装配处注入 entry memStore
-- [ ] 8.4 **Major**:feedback 事件不继承 parent 的 bundle_id 章→guardrail join 退化时间窗,跨 bundle 误归因可致误回滚。修:BindFeedback 从 parent.Metadata 复制 bundle_id
-- [ ] 8.5 **Major**:http /feedback 把 BindFeedback 全部错误映射 404——SetParent 失败时事件已落库却报 404,客户端重试→重复 feedback→NegFeedback 虚高。修:区分 sentinel 错误(parent-miss=404;已落库+边失败=201+warning)
-- [ ] 8.6 **Major**:spawn gate 前置于 dedup——同 Key 在飞任务被误报 Blocked,违背「进行中任务不受影响」。修:gate 移到 dedup 短路之后
-- [ ] 8.7 **Major**:writeGoalEvent 在锁外生成 Timestamp/EventKey——Declare/Resolve 并发时 declared 可后落库,rebuild 后已关闭 goal 复活为 active(治理门重开)。修:g.mu 内分配 Timestamp+Key 再锁外写
-- [ ] 8.8 **Major**:goal rebuild 用 sort.Slice(不稳定)且两 store 已按 (Timestamp,EventKey) 全序返回——同毫秒抹掉 EventKey 兜底序。修:改 SliceStable+EventKey 次序键(或直接信任 store 序)
-- [ ] 8.9 **Major**:consolidationMinSources 用整体 Validate 一票否决——snooze 拼错即静默关闭 min_source 硬门控(安全闸被无关字段拖垮)。修:仅校验 MinSourceEvents,其余字段独立降级
-- [ ] 8.10 **Major**:wireMemoryEngine 的 embedding 构建失败降级路径 `return store` 丢掉 capacityHook——与「巩固触发不依赖 embedding」相悖。修:降级路径也走 capacity-only bridge
+- [x] 8.1 **Blocker**:disk spawn gate 时序错位——ActionTool `startSession` 已真起 tmux、子 agent `NewFuncSettleDetector` 构造即 `go fn()` 之后才进 Spawn,gate 拒绝时工作**已在执行**,却返回「命令未执行/子任务被暂停」(对模型谎报)且 detector 未 Cancel(tmux 孤儿会话/失控后台子 agent)。修:①Blocked 分支必须 `detector.Cancel()`;②文案改「已执行但未纳管(结果不经任务层跟踪)」;③更优:gate 前置为起会话前的预检(TaskSpawner 暴露 WouldBlock() 或工具侧先查)
+- [x] 8.2 **Major(安全)**:微信审批回复无身份校验——任意可达 bot 的用户发 "approve <digest>"(digest 随 approval_request 明文送达)即可批准 critical。修:审批人白名单配置(app.wechat 或 governance 段),非白名单回复拒绝并留痕
+- [x] 8.3 **Major**:POST /feedback 生产链路未接线——SetFeedbackStore 全仓仅测试调用,example 装配缺失→端点恒 503,2.4 闭环未通。修:examples/wechat-bot main.go RL 模式装配处注入 entry memStore
+- [x] 8.4 **Major**:feedback 事件不继承 parent 的 bundle_id 章→guardrail join 退化时间窗,跨 bundle 误归因可致误回滚。修:BindFeedback 从 parent.Metadata 复制 bundle_id
+- [x] 8.5 **Major**:http /feedback 把 BindFeedback 全部错误映射 404——SetParent 失败时事件已落库却报 404,客户端重试→重复 feedback→NegFeedback 虚高。修:区分 sentinel 错误(parent-miss=404;已落库+边失败=201+warning)
+- [x] 8.6 **Major**:spawn gate 前置于 dedup——同 Key 在飞任务被误报 Blocked,违背「进行中任务不受影响」。修:gate 移到 dedup 短路之后
+- [x] 8.7 **Major**:writeGoalEvent 在锁外生成 Timestamp/EventKey——Declare/Resolve 并发时 declared 可后落库,rebuild 后已关闭 goal 复活为 active(治理门重开)。修:g.mu 内分配 Timestamp+Key 再锁外写
+- [x] 8.8 **Major**:goal rebuild 用 sort.Slice(不稳定)且两 store 已按 (Timestamp,EventKey) 全序返回——同毫秒抹掉 EventKey 兜底序。修:改 SliceStable+EventKey 次序键(或直接信任 store 序)
+- [x] 8.9 **Major**:consolidationMinSources 用整体 Validate 一票否决——snooze 拼错即静默关闭 min_source 硬门控(安全闸被无关字段拖垮)。修:仅校验 MinSourceEvents,其余字段独立降级
+- [x] 8.10 **Major**:wireMemoryEngine 的 embedding 构建失败降级路径 `return store` 丢掉 capacityHook——与「巩固触发不依赖 embedding」相悖。修:降级路径也走 capacity-only bridge
 - [ ] 8.11 Minor 批量(13 项):①verdict 子串判定脆弱(eval.go,建议 Metadata 冗余 verdict)②deliverEvent send/timer 同时就绪的双投递窗口③RespondFile 同前缀多文件字母序遮蔽 pending+L105 死分支④digest 未验 hex 字符集⑤WalQuarantined 无消费方(接 diagnostics)⑥MaxNegFbRate<=0 即启用默认值,禁用须 >1 反直觉⑦goal rebuild Limit:10000 在 subtype 过滤前,治理事件多时截掉 goal⑧tracker 触发清 counts 不清 recent(CandidatesText 口径不一致)⑨SetOnHint 晚于 NewTagentAgent,窗口内触发丢提示(清零+snooze 已记)⑩gate.go 拒绝文案仍写「goal_declare 尚未交付」(已交付)+五工具落 default medium 非 low(占预算,strict+预算耗尽时 goal_declare 自我拒绝)⑪engineBridge 不透传 KVProvider(capacity-only 包裹后 ETS.KVBackend 由可用变 nil,当前无消费方)⑫model backoff 在 retry 循环内每次重试叠加(设计为 turn 间,建议 attempt==0 条件)⑬mcp 熔断 probeCount 恢复后残留(相位偏移,无正确性问题)

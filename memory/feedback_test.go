@@ -64,3 +64,24 @@ func TestBindFeedback_ParentMiss(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestBindFeedback_InheritsBundleID (8.4, review §8): the feedback event
+// inherits the parent's bundle_id stamp so the guardrail joins along the
+// causal edge to the producing bundle — not the fallback time window.
+func TestBindFeedback_InheritsBundleID(t *testing.T) {
+	store := NewInMemoryStore()
+	pid := PartitionIDFromName("tagent")
+	parentKey := NewSnowflakeEventKey(pid, testBaseMs)
+	_ = store.StoreEvent(parentKey, FullEvent{
+		EventKey: parentKey, PartitionID: pid, Timestamp: testBaseMs,
+		Metadata: map[string]string{"bundle_id": "b-xyz"},
+	})
+	fbKey, err := BindFeedback(store, parentKey, FeedbackPayload{Verdict: "negative", Source: "task_settle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb, _ := store.GetEvent(fbKey)
+	if fb.Metadata["bundle_id"] != "b-xyz" {
+		t.Fatalf("feedback must inherit parent bundle_id, got %v", fb.Metadata)
+	}
+}
