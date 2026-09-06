@@ -209,7 +209,7 @@ flowchart TB
 | 节点 | 状态 | 阻塞于 | DECIDED 日志 | 备注 |
 |---|---|---|---|---|
 | F1 | COMPLETE | — | F1-①②③ 见 f1-rustviking-capability-report.md | rustviking index 子系统 live 可用(dim768)；tagent 向量客户端三重虚构契约(T-A 重写)；裁决:适配器层做 hybrid/嵌入/分区,rustviking 作向量后端 |
-| F2 | COMPLETE | F1(done) | 接口置 memory/engine.go，退化语义有测试 | C6 冻结：IndexBuilder/Retriever/MemoryEngine；返回排序票据两段式；build/vet/test 全绿 |
+| F2 | COMPLETE | F1(done) | 接口置 memory/engine.go（2026-09-06 分包：契约留核心 memory.go，实现迁 memory/engine/ 子包），退化语义有测试 | C6 冻结：IndexBuilder/Retriever/MemoryEngine；返回排序票据两段式；build/vet/test 全绿 |
 | REG | COMPLETE | — | 注册表置 event/registry.go，6 触点委托/派生 | C1 冻结：9 类精确复现；全量单测 19 包 rc=0 零回归（等价验收线）|
 | FIX | COMPLETE | — | F1-fix(Metadata)重划归 TC0(使能器非独立bug,无当前误行为);F5 hy3 保留 TENCENT(混元专属) | F4 DefaultConfig action→exec + TestDefaultConfigBuildable 守漂移;F5 README 标准化 ZAI_API_KEY(GLM coding plan) |
 | T-A | COMPLETE | F2(done) | 门禁3 CodeReview并发审出 M1/M2/M3+7S+12Nit,全部清零并有回归测试锁定 | 交付:解耦缝C6+Embedder+InMemoryEngine(hybrid RRF/分区/异步)+engineBridge+config+recall hybrid+KV持久化重建+rustviking契约修复;审查修复:Close排空ctx/遗忘→向量移除/模型指纹+维度守卫/topK生效/退化契约/二道分区/重建Ready;门禁1-2-3全绿 |

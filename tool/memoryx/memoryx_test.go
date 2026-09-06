@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
 // TestToolsConstruct 验证两个策展工具可构造（薄封装；核心逻辑 BuildConsolidationEvent/
@@ -13,8 +14,8 @@ func TestToolsConstruct(t *testing.T) {
 	if NewConsolidateTool(store, 1) == nil {
 		t.Fatal("memory_consolidate 工具构造失败")
 	}
-	emb := memory.NewMockEmbedder(32)
-	eng := memory.NewInMemoryEngine(store, emb, memory.EngineConfig{})
+	emb := engine.NewMockEmbedder(32)
+	eng := engine.NewInMemoryEngine(store, emb, engine.EngineConfig{})
 	defer eng.Close()
 	if NewHealthTool(eng, store) == nil {
 		t.Fatal("memory_health 工具构造失败")

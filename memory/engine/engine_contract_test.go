@@ -1,23 +1,25 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"testing"
 )
 
-// stubEngine 是 MemoryEngine 的最小参考实现，用于编译期锁定契约 C6，
+// stubEngine 是 memory.MemoryEngine 的最小参考实现，用于编译期锁定契约 C6，
 // 并为 T-A 的 InMemoryEngine/RustVikingEngine 提供接口满足性基线。
 type stubEngine struct {
 	indexed   int
 	removed   int
 	closed    bool
 	ready     bool
-	caps      RetrievalCaps
-	hits      []RetrievalHit
-	lastQuery RetrievalQuery
+	caps      memory.RetrievalCaps
+	hits      []memory.RetrievalHit
+	lastQuery memory.RetrievalQuery
 }
 
-func (s *stubEngine) Index(_ context.Context, _ IndexableEvent) error {
+func (s *stubEngine) Index(_ context.Context, _ memory.IndexableEvent) error {
 	s.indexed++
 	return nil
 }
@@ -27,28 +29,28 @@ func (s *stubEngine) Remove(_ context.Context, _ int64) error {
 	return nil
 }
 
-func (s *stubEngine) Retrieve(_ context.Context, q RetrievalQuery) ([]RetrievalHit, error) {
+func (s *stubEngine) Retrieve(_ context.Context, q memory.RetrievalQuery) ([]memory.RetrievalHit, error) {
 	s.lastQuery = q
-	if !s.ready && (q.Mode == ModeVector || q.Mode == ModeHybrid || q.Mode == ModeAuto) {
+	if !s.ready && (q.Mode == memory.ModeVector || q.Mode == memory.ModeHybrid || q.Mode == memory.ModeAuto) {
 		// 契约：索引未就绪时退化为关键词而非报错（此处 stub 返回空集表示退化）。
 		return nil, nil
 	}
 	return s.hits, nil
 }
 
-func (s *stubEngine) Capabilities() RetrievalCaps { return s.caps }
-func (s *stubEngine) Ready() bool                 { return s.ready }
-func (s *stubEngine) Close() error                { s.closed = true; return nil }
+func (s *stubEngine) Capabilities() memory.RetrievalCaps { return s.caps }
+func (s *stubEngine) Ready() bool                        { return s.ready }
+func (s *stubEngine) Close() error                       { s.closed = true; return nil }
 
-// 编译期锁定 C6：stubEngine 必须满足 MemoryEngine（IndexBuilder + Retriever + Closer）。
-var _ MemoryEngine = (*stubEngine)(nil)
+// 编译期锁定 C6：stubEngine 必须满足 memory.MemoryEngine（memory.IndexBuilder + memory.Retriever + Closer）。
+var _ memory.MemoryEngine = (*stubEngine)(nil)
 
 // TestMemoryEngineContractDegradation 验证契约的退化语义：
 // 索引未就绪时 Retrieve 对 Auto/Vector/Hybrid 退化（返回空、无错误），不 panic。
 func TestMemoryEngineContractDegradation(t *testing.T) {
-	eng := &stubEngine{ready: false, caps: RetrievalCaps{Keyword: true}}
-	for _, mode := range []RetrievalMode{ModeAuto, ModeVector, ModeHybrid} {
-		hits, err := eng.Retrieve(context.Background(), RetrievalQuery{Query: "q", Mode: mode})
+	eng := &stubEngine{ready: false, caps: memory.RetrievalCaps{Keyword: true}}
+	for _, mode := range []memory.RetrievalMode{memory.ModeAuto, memory.ModeVector, memory.ModeHybrid} {
+		hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "q", Mode: mode})
 		if err != nil {
 			t.Fatalf("mode=%d: 未就绪应退化而非报错, got err=%v", mode, err)
 		}
@@ -60,10 +62,10 @@ func TestMemoryEngineContractDegradation(t *testing.T) {
 
 // TestMemoryEngineContractLifecycle 验证索引/移除/关闭的调用面与能力声明。
 func TestMemoryEngineContractLifecycle(t *testing.T) {
-	eng := &stubEngine{ready: true, caps: RetrievalCaps{Keyword: true, Vector: true, Hybrid: true}}
+	eng := &stubEngine{ready: true, caps: memory.RetrievalCaps{Keyword: true, Vector: true, Hybrid: true}}
 	ctx := context.Background()
 
-	if err := eng.Index(ctx, IndexableEvent{EventKey: 1, PartitionID: 2, EventType: TypeExternalInputProbe, Text: "hello"}); err != nil {
+	if err := eng.Index(ctx, memory.IndexableEvent{EventKey: 1, PartitionID: 2, EventType: TypeExternalInputProbe, Text: "hello"}); err != nil {
 		t.Fatalf("Index: %v", err)
 	}
 	if err := eng.Remove(ctx, 1); err != nil {
@@ -76,8 +78,8 @@ func TestMemoryEngineContractLifecycle(t *testing.T) {
 		t.Fatal("Capabilities 应声明 Hybrid")
 	}
 	// 就绪后 hybrid 返回预置命中，且透传分区白名单（跨分区泄漏防线由实现遵守）。
-	eng.hits = []RetrievalHit{{EventKey: 42, Score: 1.5}}
-	hits, err := eng.Retrieve(ctx, RetrievalQuery{Query: "q", PartitionIDs: []int{2}, Mode: ModeHybrid, Limit: 5})
+	eng.hits = []memory.RetrievalHit{{EventKey: 42, Score: 1.5}}
+	hits, err := eng.Retrieve(ctx, memory.RetrievalQuery{Query: "q", PartitionIDs: []int{2}, Mode: memory.ModeHybrid, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

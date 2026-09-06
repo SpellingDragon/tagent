@@ -1,26 +1,28 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"testing"
 	"time"
 )
 
 func TestMemoryDiagnostics_Snapshot(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	// 存两个事件（store 维度）。
 	for i, c := range []string{"事件A", "事件B"} {
-		k := NewSnowflakeEventKey(1, testBaseMs+int64(i)*1000)
-		_ = store.StoreEvent(k, FullEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Content: c, Timestamp: testBaseMs})
+		k := memory.NewSnowflakeEventKey(1, testBaseMs+int64(i)*1000)
+		_ = store.StoreEvent(k, memory.FullEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Content: c, Timestamp: testBaseMs})
 	}
 	emb := NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 
 	// 索引一个事件（向量维度）。
-	k := NewSnowflakeEventKey(1, testBaseMs+2000)
-	_ = store.StoreEvent(k, FullEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "语义内容", Timestamp: testBaseMs})
-	_ = eng.Index(context.Background(), IndexableEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "语义内容", Timestamp: testBaseMs})
+	k := memory.NewSnowflakeEventKey(1, testBaseMs+2000)
+	_ = store.StoreEvent(k, memory.FullEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "语义内容", Timestamp: testBaseMs})
+	_ = eng.Index(context.Background(), memory.IndexableEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "语义内容", Timestamp: testBaseMs})
 	waitForVectors(t, eng, 1, 2*time.Second)
 
 	diag := NewMemoryDiagnostics(eng, store)
@@ -61,8 +63,8 @@ func TestMemoryDiagnostics_DimMismatchSurfaced(t *testing.T) {
 	emb := NewMockEmbedder(8)
 	eng := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
-	k := NewSnowflakeEventKey(1, testBaseMs)
-	_ = eng.Index(context.Background(), IndexableEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: testBaseMs})
+	k := memory.NewSnowflakeEventKey(1, testBaseMs)
+	_ = eng.Index(context.Background(), memory.IndexableEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: testBaseMs})
 	waitForVectors(t, eng, 1, 2*time.Second)
 	// 维度不匹配查询 → dimMismatch 计数上升，诊断快照可见。
 	_, _ = eng.SearchByVector(context.Background(), []float32{0.1, 0.2}, 5, nil)

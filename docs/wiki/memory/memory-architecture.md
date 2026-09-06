@@ -30,10 +30,8 @@
 | `compaction.go` | 分层压实调度（L1→L2→L3 自动压实；物理删除时联动移除向量） |
 | `lifecycle.go` | TTL 生命周期管理（过期墓碑标记；TypeTTL 派生自 `event/registry.go` EventTypeSpec；consolidation/governance 与固化物同享豁免） |
 | `tombstone.go` | 墓碑集管理（标记已删除事件） |
-| `engine.go` | MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover） |
-| `engine_bridge.go` | 装饰器：StoreEvent 成功后旁路索引；向量方法委托引擎（失败退回 inner） |
-| `engine_inmemory.go` | MVP 内存引擎：异步嵌入队列 + hybrid RRF(k=60) + 分区过滤 + 向量 KV 持久化与启动重建 |
-| `embedder.go` / `embedder_trace.go` | zhipu embedding-3（openai 兼容）/ mock / traced（GenAI semconv span）嵌入器 |
+| `engine.go` | MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover；**契约与数据类型居核心包——缝属于被缝两侧的公共依赖**） |
+| `engine/`（子包，2026-09-06 分包） | **引擎适配器专区**：`engine/engine_bridge.go` 装饰器（StoreEvent 旁路索引；向量方法委托引擎，失败退回 inner）、`engine/engine_inmemory.go` MVP 内存引擎（异步嵌入队列 + hybrid RRF(k=60) + 分区过滤 + 向量 KV 持久化与启动重建）、`engine/engine_persist.go`（向量 KV 序列化）、`engine/embedder.go` / `embedder_trace.go`（zhipu embedding-3 / mock / traced，GenAI semconv span）、`engine/diagnostics.go`（维度锚定诊断）。**新增引擎/embedder 后端只进此子包** |
 | `consolidation.go` | 证据门控巩固：服务端 SHA1 收据指纹（LLM 不可伪造）+ 回放验证 |
 | `error_tracking.go` | ErrorTrackingStore 最外层装饰：存储失败归因（memory/disk/rustviking）上报 DegradationManager |
 | `mem_spill.go` | StoreEvent 失败兜底：事件落 JSONL，恢复后重放（GetEvent 预检幂等） |

@@ -127,3 +127,24 @@ type MemoryEngine interface {
 type RawVectorSearcher interface {
 	SearchByVector(ctx context.Context, query []float32, topK int, partitionIDs []int) ([]RetrievalHit, error)
 }
+
+// MemoryEngineProvider 是可选接口：装饰器据此暴露其记忆引擎。
+// 仿 RelationStoreProvider——recall/插件经类型断言获取引擎，未接线时断言失败即降级
+// 为纯关键词（现状行为）。这是 tagent 核心与引擎实现之间的解耦触点。
+// （实现位于子包 memory/engine 的 engineBridge。）
+type MemoryEngineProvider interface {
+	MemoryEngine() MemoryEngine
+}
+
+// KVProvider 是可选接口：MemoryStore 实现若持有底层 KVStore（如 FileSegmentStore），
+// 据此暴露给记忆引擎做向量持久化（T-A：序列化向量入 KV + 启动重建，跨重启恢复语义召回）。
+type KVProvider interface {
+	KVBackend() KVStore
+}
+
+// VectorRemover 由持有向量索引的组件实现；FileSegmentStore 在 TTL/容量遗忘**物理删除**
+// 事件时（Compactor.finalizeTombstones）回调，使引擎同步移除向量（内存索引 + KV 持久键），
+// 防死键堆积与重启复活（审查 M2）。
+type VectorRemover interface {
+	RemoveVector(eventKey int64)
+}

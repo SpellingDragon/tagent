@@ -1,12 +1,14 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"testing"
 	"time"
 )
 
-func waitForKVKeys(t *testing.T, kv KVStore, prefix string, want int, timeout time.Duration) {
+func waitForKVKeys(t *testing.T, kv memory.KVStore, prefix string, want int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -24,18 +26,18 @@ func waitForKVKeys(t *testing.T, kv KVStore, prefix string, want int, timeout ti
 // engine1 索引事件 → 向量序列化入 KV → 关闭；engine2 用同一 KV 启动 → 从 KV 重建
 // 内存索引 → 向量检索命中 engine1 索引的事件（跨"重启"语义召回恢复）。
 func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
-	kv := NewMockRustVikingClient() // 实现 KVStore，模拟持久后端
+	kv := memory.NewMockRustVikingClient() // 实现 memory.KVStore，模拟持久后端
 	emb := NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
 
-	k1 := NewSnowflakeEventKey(1, testBaseMs)
-	k2 := NewSnowflakeEventKey(1, testBaseMs+1000)
+	k1 := memory.NewSnowflakeEventKey(1, testBaseMs)
+	k2 := memory.NewSnowflakeEventKey(1, testBaseMs+1000)
 
 	// engine1：索引 → 持久化到 KV。
 	e1 := NewInMemoryEngine(nil, emb, cfg)
-	_ = e1.Index(ctx, IndexableEvent{EventKey: k1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "database connection error 数据库报错", Timestamp: testBaseMs})
-	_ = e1.Index(ctx, IndexableEvent{EventKey: k2, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "deploy service success 部署成功", Timestamp: testBaseMs + 1000})
+	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: k1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "database connection error 数据库报错", Timestamp: testBaseMs})
+	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: k2, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "deploy service success 部署成功", Timestamp: testBaseMs + 1000})
 	waitForKVKeys(t, kv, "test:vec:", 2, 2*time.Second)
 	if err := e1.Close(); err != nil {
 		t.Fatalf("e1.Close: %v", err)
@@ -56,7 +58,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	}
 
 	// 向量检索命中 engine1 索引的事件（跨"重启"恢复）。
-	hits, err := e2.Retrieve(ctx, RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: ModeVector, Limit: 5})
+	hits, err := e2.Retrieve(ctx, memory.RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: memory.ModeVector, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -74,15 +76,15 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 // TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删 KV 持久向量，
 // 重建后不复活已删事件。
 func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
-	kv := NewMockRustVikingClient()
+	kv := memory.NewMockRustVikingClient()
 	emb := NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
 
 	e := NewInMemoryEngine(nil, emb, cfg)
 	defer e.Close()
-	k1 := NewSnowflakeEventKey(1, testBaseMs)
-	_ = e.Index(ctx, IndexableEvent{EventKey: k1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha token", Timestamp: testBaseMs})
+	k1 := memory.NewSnowflakeEventKey(1, testBaseMs)
+	_ = e.Index(ctx, memory.IndexableEvent{EventKey: k1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha token", Timestamp: testBaseMs})
 	waitForKVKeys(t, kv, "test:vec:", 1, 2*time.Second)
 
 	if err := e.Remove(ctx, k1); err != nil {

@@ -239,7 +239,7 @@ graph TB
 | `agent/` | 事件驱动引擎：EventBus、runEventLoop、ContextManager（粘合层）、冥想、子 Agent 封装 |
 | `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
 | `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |
-| `memory/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期 |
+| `memory/` + `memory/engine/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期；C6 解耦缝契约居核心，引擎适配器（bridge/hybrid RRF/embedder/诊断）独立子包，新增向量后端只进子包 |
 | `plugin/` | 框架插件：MemoryPlugin（持久化+因果链）、SummaryPlugin（元数据标注） |
 | `tool/` | 工具：ActionTool（tmux）、recall/knowledge 子工具、任务工具族、文件工具 |
 | `event/` | 事件类型系统与元数据契约（`FormatEventKey`/`ParseEventMeta`）；EventTypeSpec 注册表（类型元数据单点声明） |

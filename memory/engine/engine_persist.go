@@ -1,6 +1,8 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -12,7 +14,7 @@ import (
 //
 // 裁决依据 f1-rustviking-capability-report.md「追加发现」：rustviking `index` CLI 是
 // 进程内易失索引，不可作持久后端；改用 rustviking / LocalFile **KV**（持久）序列化向量
-// + 启动异步重建内存索引（= 原 hybrid 变更 D1-A 方案）。KVStore 接口两后端
+// + 启动异步重建内存索引（= 原 hybrid 变更 D1-A 方案）。memory.KVStore 接口两后端
 // （RustVikingClient / LocalFileKV / MockRustVikingClient）皆可，引擎不感知具体后端。
 //
 // 优雅降级：KV 持久失败仅记日志 + 计数，绝不传染索引/检索主链路（向量是增强索引）。
@@ -46,11 +48,11 @@ func (e *InMemoryEngine) modelID() string {
 }
 
 // persistVectors 批量把向量写入 KV（worker flush 后调用）。失败仅记日志，不传染。
-func (e *InMemoryEngine) persistVectors(batch []IndexableEvent, vecs [][]float32) {
+func (e *InMemoryEngine) persistVectors(batch []memory.IndexableEvent, vecs [][]float32) {
 	if e.kv == nil {
 		return
 	}
-	ops := make([]KVOp, 0, len(batch))
+	ops := make([]memory.KVOp, 0, len(batch))
 	for i, evt := range batch {
 		if i >= len(vecs) || len(vecs[i]) == 0 {
 			continue
@@ -65,7 +67,7 @@ func (e *InMemoryEngine) persistVectors(batch []IndexableEvent, vecs [][]float32
 		if err != nil {
 			continue
 		}
-		ops = append(ops, KVOp{Type: "put", Key: e.vecKVKey(evt.EventKey), Value: string(raw)})
+		ops = append(ops, memory.KVOp{Type: "put", Key: e.vecKVKey(evt.EventKey), Value: string(raw)})
 	}
 	if len(ops) == 0 {
 		return

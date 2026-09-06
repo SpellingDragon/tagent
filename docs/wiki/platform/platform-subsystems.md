@@ -11,7 +11,7 @@
 | `agent/governance/` | RiskClassifier（C5 纯函数四级分级）、BudgetManager（滑窗+epoch 持久化）、ApprovalManager（digest 绑定+目录重扫）、DenialLedger（BindStore 延迟绑定持久审计）、GoalRegistry、GovernanceGate 决策管线、GovernanceTool leaf 装饰器 |
 | `agent/reliability/` | DegradationManager（五依赖退化状态机）、SpillStore/ReliableBus（磁盘溢出全序）、AnchorStore（冥想锚点跨重启） |
 | `evolution/` | BundleStore（不可变内容寻址+原子 active）、VersionedSource（prompt.Getter，回合边界生效）、ReleaseManager（风险分级发布道+双回滚）、refine 工具（无 activate）、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估） |
-| `memory/`（增量） | engine.go（C6 解耦缝：IndexBuilder/Retriever/MemoryEngine）、embedder（zhipu/mock/traced）、engine_inmemory（hybrid RRF）、engine_bridge（装饰器）、mem_spill、error_tracking、consolidation（服务端指纹） |
+| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、mem_spill、error_tracking、consolidation（服务端指纹） |
 | `tool/mcp/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报） |
 | `tool/memoryx/` | memory_consolidate、memory_health |
 | `event/`（增量） | EventTypeSpec 注册表（类型元数据单点） |

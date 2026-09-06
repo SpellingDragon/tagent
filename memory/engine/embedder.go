@@ -1,4 +1,4 @@
-package memory
+package engine
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 // ==================== Embedder（T-A · 引擎内部构件）====================
 //
 // Embedder 是文本→向量的抽象，属记忆引擎实现的内部构件（不进 C6 解耦缝——
-// tagent 核心只依赖 MemoryEngine，不直接依赖 Embedder）。
+// tagent 核心只依赖 memory.MemoryEngine，不直接依赖 Embedder）。
 //
 // 实现：
 //   - MockEmbedder：确定性哈希向量，无网络，供单测/开发/降级验证（同义改写不命中，

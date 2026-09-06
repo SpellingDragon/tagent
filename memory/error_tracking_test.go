@@ -77,27 +77,9 @@ func TestErrorTrackingStore_NilSinkPassthrough(t *testing.T) {
 	}
 }
 
-func TestErrorTrackingStore_OptionalInterfacePassthrough(t *testing.T) {
-	// 包裹 engineBridge（有 MemoryEngine）→ ErrorTrackingStore 必须透传 MemoryEngineProvider，
-	// 否则 recall hybrid 断言 memStore.(MemoryEngineProvider) 失效（能力丢失）。
-	inner := NewInMemoryStore()
-	eng := NewInMemoryEngine(inner, NewMockEmbedder(16), EngineConfig{})
-	defer eng.Close()
-	bridge := NewEngineBridge(inner, eng)
-	// 下游拿到的是 MemoryStore 接口（memStore），故赋给接口再断言可选能力穿透。
-	var ms MemoryStore = NewErrorTrackingStore(bridge, nil)
-
-	ep, ok := ms.(MemoryEngineProvider)
-	if !ok || ep.MemoryEngine() == nil {
-		t.Fatal("ErrorTrackingStore 应透传 MemoryEngineProvider（否则 recall hybrid 失效）")
-	}
-	// Close 透传（agent 引擎回收依赖）。
-	c, ok := ms.(interface{ Close() error })
-	if !ok {
-		t.Fatal("ErrorTrackingStore 应透传 Close（agent.Closer 引擎回收）")
-	}
-	_ = c.Close()
-}
+// TestErrorTrackingStore_OptionalInterfacePassthrough 已迁至黑盒文件
+// error_tracking_engine_test.go（package memory_test）——需构造 engineBridge
+//（memory/engine 子包），白盒测试文件 import 子包会构成测试 import 环。
 
 func TestErrorTrackingStore_ReadPathReportsOnlyOnError(t *testing.T) {
 	// 读路径成功不上报（读成功不代表写依赖恢复），失败上报。

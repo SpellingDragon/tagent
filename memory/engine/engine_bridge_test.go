@@ -1,20 +1,22 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"testing"
 	"time"
 )
 
 func TestEngineBridge_StoreEventIndexesAndProvider(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	emb := NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)
 
-	key := NewSnowflakeEventKey(1, testBaseMs)
-	if err := bridge.StoreEvent(key, FullEvent{
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
+	if err := bridge.StoreEvent(key, memory.FullEvent{
 		EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe,
 		Content: "database connection error 数据库报错", EventSummary: "db error", Timestamp: testBaseMs,
 	}); err != nil {
@@ -22,18 +24,18 @@ func TestEngineBridge_StoreEventIndexesAndProvider(t *testing.T) {
 	}
 
 	// inner 收到事件（QueryEvents 经 bridge 委托可见）。
-	refs, err := bridge.QueryEvents(QueryOptions{PartitionIDs: []int{1}})
+	refs, err := bridge.QueryEvents(memory.QueryOptions{PartitionIDs: []int{1}})
 	if err != nil || len(refs) != 1 {
 		t.Fatalf("inner 应有 1 事件, got %d err=%v", len(refs), err)
 	}
 
-	// bridge 暴露引擎（MemoryEngineProvider）——recall 据此走 hybrid。
-	ep, ok := bridge.(MemoryEngineProvider)
+	// bridge 暴露引擎（memory.MemoryEngineProvider）——recall 据此走 hybrid。
+	ep, ok := bridge.(memory.MemoryEngineProvider)
 	if !ok {
-		t.Fatal("bridge 应实现 MemoryEngineProvider")
+		t.Fatal("bridge 应实现 memory.MemoryEngineProvider")
 	}
 	if ep.MemoryEngine() == nil {
-		t.Fatal("MemoryEngine() 不应为 nil")
+		t.Fatal("memory.MemoryEngine() 不应为 nil")
 	}
 
 	// 引擎异步索引完成 → 向量就绪 → SupportsVectorSearch 转真。
@@ -57,14 +59,14 @@ func TestEngineBridge_StoreEventIndexesAndProvider(t *testing.T) {
 }
 
 func TestEngineBridge_DeleteRemovesFromEngine(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	emb := NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)
 
-	key := NewSnowflakeEventKey(1, testBaseMs)
-	_ = bridge.StoreEvent(key, FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "alpha token", Timestamp: testBaseMs})
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
+	_ = bridge.StoreEvent(key, memory.FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "alpha token", Timestamp: testBaseMs})
 	// 等向量就绪。
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -82,34 +84,34 @@ func TestEngineBridge_DeleteRemovesFromEngine(t *testing.T) {
 }
 
 func TestEngineBridge_RelationStorePassthrough(t *testing.T) {
-	store := NewInMemoryStore() // 实现 RelationStoreProvider
+	store := memory.NewInMemoryStore() // 实现 memory.RelationStoreProvider
 	eng := NewInMemoryEngine(store, nil, testEngineConfig())
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)
 
-	rsp, ok := bridge.(RelationStoreProvider)
+	rsp, ok := bridge.(memory.RelationStoreProvider)
 	if !ok {
-		t.Fatal("bridge 应透传 RelationStoreProvider")
+		t.Fatal("bridge 应透传 memory.RelationStoreProvider")
 	}
 	if rsp.RelationStore() == nil {
-		t.Fatal("RelationStore 透传不应为 nil")
+		t.Fatal("memory.RelationStore 透传不应为 nil")
 	}
 }
 
 func TestEngineBridge_NoEngineUnchanged(t *testing.T) {
 	// engine=nil 的 bridge：StoreEvent 仅委托 inner，SupportsVectorSearch=false，
 	// SearchByEmbedding 退回 inner（stub）——保证「未接线行为逐字节不变」。
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	bridge := NewEngineBridge(store, nil)
 
-	key := NewSnowflakeEventKey(1, testBaseMs)
-	if err := bridge.StoreEvent(key, FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "x", Timestamp: testBaseMs}); err != nil {
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
+	if err := bridge.StoreEvent(key, memory.FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "x", Timestamp: testBaseMs}); err != nil {
 		t.Fatalf("StoreEvent: %v", err)
 	}
 	if bridge.SupportsVectorSearch() {
 		t.Fatal("无引擎时 SupportsVectorSearch 应为 false")
 	}
 	if _, err := bridge.SearchByEmbedding([]float32{0.1, 0.2}, 5); err == nil {
-		t.Fatal("无引擎时应退回 inner stub（ErrVectorSearchNotSupported）")
+		t.Fatal("无引擎时应退回 inner stub（memory.ErrVectorSearchNotSupported）")
 	}
 }

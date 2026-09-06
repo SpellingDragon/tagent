@@ -1,6 +1,8 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"sync"
 	"testing"
@@ -36,10 +38,10 @@ func testEngineConfig() EngineConfig {
 }
 
 // seedEvent 用 Snowflake 一致键（分区编码 == pid）存事件，返回 key。
-func seedEvent(t *testing.T, s *InMemoryStore, pid int, etype, content string, ts int64) int64 {
+func seedEvent(t *testing.T, s *memory.InMemoryStore, pid int, etype, content string, ts int64) int64 {
 	t.Helper()
-	key := NewSnowflakeEventKey(pid, ts)
-	if err := s.StoreEvent(key, FullEvent{
+	key := memory.NewSnowflakeEventKey(pid, ts)
+	if err := s.StoreEvent(key, memory.FullEvent{
 		EventKey: key, PartitionID: pid, EventType: etype,
 		EventSummary: content, Content: content, Timestamp: ts,
 	}); err != nil {
@@ -51,7 +53,7 @@ func seedEvent(t *testing.T, s *InMemoryStore, pid int, etype, content string, t
 // indexEvent 向引擎投递索引（内容直接传入，不依赖 store.GetEvent）。
 func indexEvent(t *testing.T, eng *InMemoryEngine, key int64, pid int, etype, content string, ts int64) {
 	t.Helper()
-	if err := eng.Index(context.Background(), IndexableEvent{
+	if err := eng.Index(context.Background(), memory.IndexableEvent{
 		EventKey: key, PartitionID: pid, EventType: etype, Text: content, Timestamp: ts,
 	}); err != nil {
 		t.Fatalf("Index(%d): %v", key, err)
@@ -71,7 +73,7 @@ func waitForVectors(t *testing.T, eng *InMemoryEngine, want int64, timeout time.
 	t.Fatalf("等待向量索引超时: got %d want >=%d", vc, want)
 }
 
-func hitKeys(hits []RetrievalHit) map[int64]bool {
+func hitKeys(hits []memory.RetrievalHit) map[int64]bool {
 	m := make(map[int64]bool, len(hits))
 	for _, h := range hits {
 		m[h.EventKey] = true
@@ -146,7 +148,7 @@ func TestMockEmbedder_DeterministicNormalized(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestInMemoryEngine_KeywordOnlyDegradation(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "部署服务失败 deploy error", testBaseMs)
 	seedEvent(t, store, 1, TypeExternalInputProbe, "天气晴朗 weather sunny", testBaseMs+1000)
 
@@ -159,7 +161,7 @@ func TestInMemoryEngine_KeywordOnlyDegradation(t *testing.T) {
 	if !eng.Capabilities().Keyword {
 		t.Fatal("有 store 时应声明 Keyword 能力")
 	}
-	hits, err := eng.Retrieve(context.Background(), RetrievalQuery{Query: "deploy", PartitionIDs: []int{1}, Limit: 5})
+	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "deploy", PartitionIDs: []int{1}, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -169,7 +171,7 @@ func TestInMemoryEngine_KeywordOnlyDegradation(t *testing.T) {
 }
 
 func TestInMemoryEngine_HybridRecall(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	kDB := seedEvent(t, store, 1, TypeExternalInputProbe, "database connection error 数据库连接报错", testBaseMs)
 	seedEvent(t, store, 1, TypeExternalInputProbe, "deploy service success 部署成功", testBaseMs+1000)
 	seedEvent(t, store, 1, TypeExternalInputProbe, "weather sunny today 今天天气晴朗", testBaseMs+2000)
@@ -179,9 +181,9 @@ func TestInMemoryEngine_HybridRecall(t *testing.T) {
 	defer eng.Close()
 
 	indexEvent(t, eng, kDB, 1, TypeExternalInputProbe, "database connection error 数据库连接报错", testBaseMs)
-	kDeploy := NewSnowflakeEventKey(1, testBaseMs+1000)
+	kDeploy := memory.NewSnowflakeEventKey(1, testBaseMs+1000)
 	indexEvent(t, eng, kDeploy, 1, TypeExternalInputProbe, "deploy service success 部署成功", testBaseMs+1000)
-	kWeather := NewSnowflakeEventKey(1, testBaseMs+2000)
+	kWeather := memory.NewSnowflakeEventKey(1, testBaseMs+2000)
 	indexEvent(t, eng, kWeather, 1, TypeExternalInputProbe, "weather sunny today 今天天气晴朗", testBaseMs+2000)
 	waitForVectors(t, eng, 3, 2*time.Second)
 
@@ -189,7 +191,7 @@ func TestInMemoryEngine_HybridRecall(t *testing.T) {
 		t.Fatal("store+emb 就绪后应声明 Hybrid")
 	}
 	// 查询与 kDB 共享词元（database/error/报错）→ 关键词路与向量路都应命中，融合居首。
-	hits, err := eng.Retrieve(context.Background(), RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: ModeHybrid, Limit: 3})
+	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: memory.ModeHybrid, Limit: 3})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}
@@ -202,7 +204,7 @@ func TestInMemoryEngine_HybridRecall(t *testing.T) {
 }
 
 func TestInMemoryEngine_PartitionFilterNoLeak(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "alpha shared token 共享词元", testBaseMs)
 	k2 := seedEvent(t, store, 2, TypeExternalInputProbe, "alpha shared token 共享词元", testBaseMs+1000)
 
@@ -215,7 +217,7 @@ func TestInMemoryEngine_PartitionFilterNoLeak(t *testing.T) {
 	waitForVectors(t, eng, 2, 2*time.Second)
 
 	// 仅查分区 1：k2（分区 2）MUST NOT 泄漏——跨分区泄漏防线（向量路 + 关键词路双重过滤）。
-	hits, _ := eng.Retrieve(context.Background(), RetrievalQuery{Query: "alpha shared", PartitionIDs: []int{1}, Mode: ModeHybrid, Limit: 10})
+	hits, _ := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "alpha shared", PartitionIDs: []int{1}, Mode: memory.ModeHybrid, Limit: 10})
 	keys := hitKeys(hits)
 	if keys[k2] {
 		t.Fatalf("分区过滤失效: 分区2事件泄漏到分区1查询: %v", hits)
@@ -232,13 +234,13 @@ func TestInMemoryEngine_SelectiveIndexSkipsNonEmbeddable(t *testing.T) {
 
 	ctx := context.Background()
 	// action_command 非 Embeddable（注册表），Index 应跳过——不产生向量。
-	_ = eng.Index(ctx, IndexableEvent{EventKey: 100, PartitionID: 1, EventType: "action_command", Text: "some tool call", Timestamp: 100})
+	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: 100, PartitionID: 1, EventType: "action_command", Text: "some tool call", Timestamp: 100})
 	time.Sleep(50 * time.Millisecond)
 	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("非 Embeddable 类型不应产生向量, got vectorCount=%d", vc)
 	}
 	// 负 key（合成投影引用）也不索引。
-	_ = eng.Index(ctx, IndexableEvent{EventKey: -5, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: 1})
+	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: -5, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: 1})
 	time.Sleep(20 * time.Millisecond)
 	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("负 key 不应索引, got vectorCount=%d", vc)
@@ -251,11 +253,11 @@ func TestInMemoryEngine_IndexNonBlocking_QueueFullDrop(t *testing.T) {
 	defer eng.Close()
 
 	ctx := context.Background()
-	_ = eng.Index(ctx, IndexableEvent{EventKey: 1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "a", Timestamp: 1})
+	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: 1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "a", Timestamp: 1})
 	<-be.started // 确定 worker 已进入 Embed 阻塞
 	start := time.Now()
 	for i := 2; i <= 20; i++ {
-		_ = eng.Index(ctx, IndexableEvent{EventKey: int64(i), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: int64(i)})
+		_ = eng.Index(ctx, memory.IndexableEvent{EventKey: int64(i), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: int64(i)})
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("Index 应非阻塞, 19 次耗时 %v", elapsed)
@@ -270,7 +272,7 @@ func TestInMemoryEngine_RemoveDeletesVector(t *testing.T) {
 	eng := NewInMemoryEngine(nil, emb, testEngineConfig())
 	defer eng.Close()
 
-	key := NewSnowflakeEventKey(1, testBaseMs)
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
 	indexEvent(t, eng, key, 1, TypeExternalInputProbe, "alpha token", testBaseMs)
 	waitForVectors(t, eng, 1, 2*time.Second)
 
@@ -283,14 +285,14 @@ func TestInMemoryEngine_RemoveDeletesVector(t *testing.T) {
 }
 
 func TestInMemoryEngine_EmptyQueryDegradesToKeyword(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "some content", testBaseMs)
 	emb := NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, testEngineConfig())
 	defer eng.Close()
 
 	// 空查询 = 纯浏览/过滤，走关键词路（QueryEvents），不触发嵌入。
-	hits, err := eng.Retrieve(context.Background(), RetrievalQuery{Query: "", PartitionIDs: []int{1}, Limit: 5})
+	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "", PartitionIDs: []int{1}, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
 	}

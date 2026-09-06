@@ -1,6 +1,8 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"math"
 	"os"
@@ -50,7 +52,7 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedder: %v", err)
 	}
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	eng := NewInMemoryEngine(store, emb, EngineConfig{VectorTopK: 5, KeywordTopK: 5})
 	defer eng.Close()
 	bridged := NewEngineBridge(store, eng)
@@ -62,8 +64,8 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 		"Kubernetes pod 因内存超限被 OOMKilled 频繁重启",
 	}
 	for i, text := range docs {
-		k := NewSnowflakeEventKey(pid, testBaseMs+int64(i))
-		if err := bridged.StoreEvent(k, FullEvent{
+		k := memory.NewSnowflakeEventKey(pid, testBaseMs+int64(i))
+		if err := bridged.StoreEvent(k, memory.FullEvent{
 			EventKey: k, PartitionID: pid, EventType: TypeExternalInputProbe,
 			Content: text, Timestamp: testBaseMs + int64(i),
 		}); err != nil {
@@ -75,7 +77,7 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 
 	// 语义召回：查询"服务器内存不足崩溃重启"与 OOMKilled 语义最近（无共同关键词"内存超限"
 	// vs"内存不足"、"崩溃重启"vs"OOMKilled 重启"），考验真实向量语义而非字面匹配。
-	hits, err := eng.Retrieve(context.Background(), RetrievalQuery{
+	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{
 		Query: "服务器内存不足导致进程崩溃并不断重启", PartitionIDs: []int{pid}, Limit: 3,
 	})
 	if err != nil {

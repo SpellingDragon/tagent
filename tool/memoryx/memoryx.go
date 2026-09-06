@@ -10,6 +10,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	mengine "github.com/SpellingDragon/tagent/memory/engine"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -92,7 +93,7 @@ type healthResult struct {
 // NewHealthTool 构建 memory_health 工具（维度锚定诊断，读引擎+store 实时态）。
 // engine/store 可为 nil（对应维度省略）。
 func NewHealthTool(engine memory.MemoryEngine, store memory.MemoryStore) tool.Tool {
-	diag := memory.NewMemoryDiagnostics(engine, store)
+	diag := mengine.NewMemoryDiagnostics(engine, store)
 	return function.NewFunctionTool(
 		func(ctx context.Context, args struct{}) (healthResult, error) {
 			s := diag.Snapshot()

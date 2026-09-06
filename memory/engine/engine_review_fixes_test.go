@@ -1,6 +1,8 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"testing"
 	"time"
@@ -29,7 +31,7 @@ func (c *ctxStrictEmbedder) ModelID() string { return "ctx-strict" }
 // 不取消的 ctx（context.WithoutCancel + DrainTimeout），合规嵌入器仍成功嵌入 + 持久化，
 // 不丢在途向量。修复前排空用已取消的 ctx → 合规嵌入器必失败 → 向量丢失且不持久化。
 func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
-	kv := NewMockRustVikingClient()
+	kv := memory.NewMockRustVikingClient()
 	emb := &ctxStrictEmbedder{dim: 8}
 	// 长 flush 间隔 + 大批：确保 Index 后事件停留在队列/批中，仅靠 Close 排空触发嵌入。
 	e := NewInMemoryEngine(nil, emb, EngineConfig{
@@ -41,8 +43,8 @@ func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
 	})
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
-		_ = e.Index(ctx, IndexableEvent{
-			EventKey: NewSnowflakeEventKey(1, testBaseMs+int64(i)*1000), PartitionID: 1,
+		_ = e.Index(ctx, memory.IndexableEvent{
+			EventKey: memory.NewSnowflakeEventKey(1, testBaseMs+int64(i)*1000), PartitionID: 1,
 			EventType: TypeExternalInputProbe, Text: "payload", Timestamp: testBaseMs,
 		})
 	}
@@ -59,8 +61,8 @@ func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
 	emb := NewMockEmbedder(8) // 索引向量 dim=8
 	e := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer e.Close()
-	key := NewSnowflakeEventKey(1, testBaseMs)
-	_ = e.Index(context.Background(), IndexableEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha", Timestamp: testBaseMs})
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
+	_ = e.Index(context.Background(), memory.IndexableEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha", Timestamp: testBaseMs})
 	waitForVectors(t, e, 1, 2*time.Second)
 
 	// 用 dim=4 查询向量（与索引 dim=8 不匹配）→ 应全部跳过，零命中。
@@ -76,13 +78,13 @@ func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
 // TestInMemoryEngine_RebuildSkipsStaleModel 验证审查 M3：换嵌入模型后重启，
 // 重建跳过旧模型指纹的向量（防跨模型语义混用）。
 func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
-	kv := NewMockRustVikingClient()
+	kv := memory.NewMockRustVikingClient()
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "model:vec:"}
 	ctx := context.Background()
 
 	// engine1：模型 A（mock dim=8 → ModelID "mock-embed-8"）索引并持久化。
 	e1 := NewInMemoryEngine(nil, NewMockEmbedder(8), cfg)
-	_ = e1.Index(ctx, IndexableEvent{EventKey: NewSnowflakeEventKey(1, testBaseMs), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha", Timestamp: testBaseMs})
+	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: memory.NewSnowflakeEventKey(1, testBaseMs), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha", Timestamp: testBaseMs})
 	waitForKVKeys(t, kv, "model:vec:", 1, 2*time.Second)
 	_ = e1.Close()
 
@@ -98,22 +100,22 @@ func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 	}
 }
 
-// TestEngineBridge_RemoveVectorForwards 验证审查 M2：engineBridge 作为 VectorRemover，
+// TestEngineBridge_RemoveVectorForwards 验证审查 M2：engineBridge 作为 memory.VectorRemover，
 // RemoveVector 转发引擎 Remove（遗忘物理删除时同步移除向量，消除 Remove 死代码）。
 func TestEngineBridge_RemoveVectorForwards(t *testing.T) {
-	store := NewInMemoryStore()
+	store := memory.NewInMemoryStore()
 	emb := NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)
 
-	key := NewSnowflakeEventKey(1, testBaseMs)
-	_ = bridge.StoreEvent(key, FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "alpha token", Timestamp: testBaseMs})
+	key := memory.NewSnowflakeEventKey(1, testBaseMs)
+	_ = bridge.StoreEvent(key, memory.FullEvent{EventKey: key, PartitionID: 1, EventType: TypeExternalInputProbe, Content: "alpha token", Timestamp: testBaseMs})
 	waitForVectors(t, eng, 1, 2*time.Second)
 
-	vr, ok := bridge.(VectorRemover)
+	vr, ok := bridge.(memory.VectorRemover)
 	if !ok {
-		t.Fatal("bridge 应实现 VectorRemover")
+		t.Fatal("bridge 应实现 memory.VectorRemover")
 	}
 	vr.RemoveVector(key) // 模拟遗忘物理删除回调
 	if vc := eng.Stats().VectorCount; vc != 0 {

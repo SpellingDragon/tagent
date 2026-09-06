@@ -39,6 +39,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/engine"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
@@ -1173,7 +1174,7 @@ func engineCacheKey(mc MemoryConfig) string {
 // SetVectorRemover）——使 TTL/容量遗忘物理删除事件时同步移除向量（内存索引 + KV 持久键），
 // 消除 engine.Remove 死代码、防死键堆积与重启复活（审查 M2）。
 func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngine) memory.MemoryStore {
-	bridge := memory.NewEngineBridge(store, eng)
+	bridge := engine.NewEngineBridge(store, eng)
 	if setter, ok := store.(interface{ SetVectorRemover(memory.VectorRemover) }); ok {
 		if vr, ok := bridge.(memory.VectorRemover); ok {
 			setter.SetVectorRemover(vr)
@@ -1188,7 +1189,7 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 	if err != nil {
 		return nil, err
 	}
-	ecfg := memory.EngineConfig{
+	ecfg := engine.EngineConfig{
 		VectorTopK:  ec.VectorTopK,
 		KeywordTopK: ec.KeywordTopK,
 		RRFK:        ec.RRFK,
@@ -1201,31 +1202,31 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 	switch ec.Backend {
 	case "", "memory":
 		// MVP 内存向量索引 + 可选 KV 持久化。
-		return memory.NewInMemoryEngine(store, emb, ecfg), nil
+		return engine.NewInMemoryEngine(store, emb, ecfg), nil
 	case "rustviking":
 		// S1: rustviking 后端在 MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化
 		// 向量 + 启动重建，依据 F1 报告：rustviking 原生 index CLI 进程内易失）。**显式告警**
 		// 避免"配了 rustviking 却静默得到 memory 引擎"的假自由度错觉；原生 HNSW/IVF 索引持久化
 		// （接入 ivf_persist）为 rustviking backlog。
 		log.Warnf("[tagent] memory engine backend=rustviking → MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化）；原生 HNSW/IVF 索引持久化为 rustviking backlog（见 f1-rustviking-capability-report.md）")
-		return memory.NewInMemoryEngine(store, emb, ecfg), nil
+		return engine.NewInMemoryEngine(store, emb, ecfg), nil
 	default:
 		return nil, fmt.Errorf("unknown memory engine backend %q", ec.Backend)
 	}
 }
 
 // buildEmbedder 按配置构建嵌入器。zhipu 无 key 时返回 error（调用方优雅降级）。
-func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
-	var inner memory.Embedder
+func buildEmbedder(ec EmbeddingConfig) (engine.Embedder, error) {
+	var inner engine.Embedder
 	switch ec.Provider {
 	case "mock":
 		dim := ec.Dimensions
 		if dim <= 0 {
 			dim = 64
 		}
-		inner = memory.NewMockEmbedder(dim)
+		inner = engine.NewMockEmbedder(dim)
 	case "", "zhipu":
-		z, err := memory.NewZhipuEmbedder(memory.ZhipuEmbedderConfig{
+		z, err := engine.NewZhipuEmbedder(engine.ZhipuEmbedderConfig{
 			Endpoint:   ec.Endpoint,
 			Model:      ec.Model,
 			APIKeyEnv:  ec.APIKeyEnv,
@@ -1240,7 +1241,7 @@ func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
 	}
 	// 组8 向量链路可观测：TracedEmbedder 统一包裹（embedding span + GenAI 属性 + counter/
 	// histogram）。noop 安全——未设 OTLP 时零开销、Embed 行为逐字节不变。
-	return memory.NewTracedEmbedder(inner), nil
+	return engine.NewTracedEmbedder(inner), nil
 }
 
 // ensureRustVikingConfig writes a rustviking config.toml to the data directory

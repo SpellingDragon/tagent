@@ -7,6 +7,7 @@ import (
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
 const hybridTestBaseMs = int64(1750000000000)
@@ -34,10 +35,10 @@ func seedAndIndex(t *testing.T, store *memory.InMemoryStore, eng memory.MemoryEn
 // 语义相近（共享词元）的事件被召回——协议输出不变（key/type/summary/time）。
 func TestRecallByQuery_HybridViaEngine(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	emb := memory.NewMockEmbedder(128)
-	eng := memory.NewInMemoryEngine(store, emb, memory.EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
+	emb := engine.NewMockEmbedder(128)
+	eng := engine.NewInMemoryEngine(store, emb, engine.EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
-	accessor := memory.NewEngineBridge(store, eng) // MemoryStore + MemoryEngineProvider
+	accessor := engine.NewEngineBridge(store, eng) // MemoryStore + MemoryEngineProvider
 
 	kDB := seedAndIndex(t, store, eng, 1, "database connection error 数据库连接报错", hybridTestBaseMs)
 	seedAndIndex(t, store, eng, 1, "deploy service success 部署服务成功", hybridTestBaseMs+1000)

@@ -1,4 +1,6 @@
-package memory
+package engine
+
+import "github.com/SpellingDragon/tagent/memory"
 
 // ==================== 维度锚定诊断（T-D · 记忆健康度）====================
 //
@@ -35,12 +37,12 @@ type DiagnosticsSnapshot struct {
 
 // MemoryDiagnostics 维度锚定记忆诊断器（读引擎 + store 实时态）。
 type MemoryDiagnostics struct {
-	engine MemoryEngine // 可选（nil = 无向量维度）
-	store  MemoryStore  // 可选（nil = 无存储维度）
+	engine memory.MemoryEngine // 可选（nil = 无向量维度）
+	store  memory.MemoryStore  // 可选（nil = 无存储维度）
 }
 
 // NewMemoryDiagnostics 构建诊断器。engine/store 可为 nil（对应维度省略）。
-func NewMemoryDiagnostics(engine MemoryEngine, store MemoryStore) *MemoryDiagnostics {
+func NewMemoryDiagnostics(engine memory.MemoryEngine, store memory.MemoryStore) *MemoryDiagnostics {
 	return &MemoryDiagnostics{engine: engine, store: store}
 }
 

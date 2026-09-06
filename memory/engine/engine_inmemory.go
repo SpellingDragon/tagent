@@ -1,6 +1,8 @@
-package memory
+package engine
 
 import (
+	"github.com/SpellingDragon/tagent/memory"
+
 	"context"
 	"math"
 	"sort"
@@ -15,7 +17,7 @@ import (
 
 // ==================== InMemoryEngine（T-A · MVP 兜底引擎）====================
 //
-// MemoryEngine 的轻量内存实现（契约 C6）：无外部依赖，供开发/测试/降级。
+// memory.MemoryEngine 的轻量内存实现（契约 C6）：无外部依赖，供开发/测试/降级。
 //   - 关键词路：委托 store.QueryEvents（复用既有 term-split 分词 + 时间窗 + 分区）。
 //   - 向量路：自有内存余弦索引（eventKey→向量）；Index 经非阻塞队列后台异步嵌入。
 //   - 融合：RRF(k=60) 在引擎内闭环；分区/类型/时间过滤在融合前 applied（防跨分区泄漏）。
@@ -40,12 +42,12 @@ type EngineConfig struct {
 	EmbedBatch int
 	// EmbedFlushInterval 后台批量聚合窗口（默认 200ms）。
 	EmbedFlushInterval time.Duration
-	// MaxTextRunes 嵌入文本截断上限（默认 8000；仅嵌入侧截断，不动 FullEvent.Content）。
+	// MaxTextRunes 嵌入文本截断上限（默认 8000；仅嵌入侧截断，不动 memory.FullEvent.Content）。
 	MaxTextRunes int
 	// KV 是向量持久化后端（nil = 纯内存，向量不持久，重启丢失）。设置后：worker
 	// flush 时序列化向量入 KV，构造时异步从 KV 重建（rustviking-backed 持久化，
 	// 见 engine_persist.go 与 f1-rustviking-capability-report.md「追加发现」）。
-	KV KVStore
+	KV memory.KVStore
 	// VecKeyPrefix 是向量 KV 键前缀（默认 "tagent:vec:"）。
 	VecKeyPrefix string
 	// DrainTimeout 是 Close 时排空在途嵌入批的超时（默认 2s）——用独立不取消的
@@ -99,17 +101,17 @@ type vectorMeta struct {
 	timestamp   int64
 }
 
-// InMemoryEngine 是 MemoryEngine 的内存 MVP 实现。
+// InMemoryEngine 是 memory.MemoryEngine 的内存 MVP 实现。
 type InMemoryEngine struct {
-	store MemoryStore // 关键词路（可为 nil = 纯向量，无关键词）
-	emb   Embedder    // 向量路（可为 nil = 纯关键词降级）
+	store memory.MemoryStore // 关键词路（可为 nil = 纯向量，无关键词）
+	emb   Embedder           // 向量路（可为 nil = 纯关键词降级）
 	cfg   EngineConfig
 
 	mu      sync.RWMutex
 	vectors map[int64][]float32
 	vmeta   map[int64]vectorMeta
 
-	queue     chan IndexableEvent
+	queue     chan memory.IndexableEvent
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -117,7 +119,7 @@ type InMemoryEngine struct {
 	started   atomic.Bool
 
 	// KV 持久层（可选，见 engine_persist.go）。
-	kv          KVStore
+	kv          memory.KVStore
 	vecPrefix   string
 	rebuildDone atomic.Bool
 	rebuildCh   chan struct{} // 重建完成信号（与 worker wg 分离，Close 有界等待，审查 S6）
@@ -130,11 +132,11 @@ type InMemoryEngine struct {
 }
 
 // 编译期锁定 C6。
-var _ MemoryEngine = (*InMemoryEngine)(nil)
+var _ memory.MemoryEngine = (*InMemoryEngine)(nil)
 
 // NewInMemoryEngine 构建并启动 MVP 引擎。store 供关键词路（可 nil），emb 供向量路
 // （nil = 纯关键词降级）。后台嵌入 worker 随引擎启动，Close 时排空停止。
-func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMemoryEngine {
+func NewInMemoryEngine(store memory.MemoryStore, emb Embedder, cfg EngineConfig) *InMemoryEngine {
 	cfg = cfg.withDefaults()
 	e := &InMemoryEngine{
 		store:     store,
@@ -148,7 +150,7 @@ func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMem
 	e.rebuildDone.Store(true) // 默认无重建
 	e.rebuildCh = make(chan struct{})
 	if emb != nil {
-		e.queue = make(chan IndexableEvent, e.cfg.QueueCap)
+		e.queue = make(chan memory.IndexableEvent, e.cfg.QueueCap)
 		ctx, cancel := context.WithCancel(context.Background())
 		e.cancel = cancel
 		e.wg.Add(1)
@@ -172,7 +174,7 @@ func NewInMemoryEngine(store MemoryStore, emb Embedder, cfg EngineConfig) *InMem
 // Index 将事件纳入索引。关键词路由 store 在查询时处理（无需在此建索引）；
 // 向量路：选择性（event 注册表 Embeddable）+ 非阻塞投递后台嵌入队列。
 // MUST NOT 阻塞或失败主链路——队列满则丢弃 + 计数。
-func (e *InMemoryEngine) Index(_ context.Context, evt IndexableEvent) error {
+func (e *InMemoryEngine) Index(_ context.Context, evt memory.IndexableEvent) error {
 	if e.closed.Load() || e.emb == nil || e.queue == nil {
 		return nil // 纯关键词降级：无需向量索引
 	}
@@ -202,22 +204,22 @@ func (e *InMemoryEngine) Remove(_ context.Context, eventKey int64) error {
 
 // Retrieve 混合检索：关键词 ∪ 向量 → RRF 融合 → 排序票据。
 // 向量不可用（无 emb/未就绪/查询空）时退化为纯关键词；store 为 nil 时纯向量。
-func (e *InMemoryEngine) Retrieve(ctx context.Context, q RetrievalQuery) ([]RetrievalHit, error) {
+func (e *InMemoryEngine) Retrieve(ctx context.Context, q memory.RetrievalQuery) ([]memory.RetrievalHit, error) {
 	limit := q.Limit
 	if limit <= 0 {
 		limit = 10
 	}
 	mode := q.Mode
-	if mode == ModeAuto {
+	if mode == memory.ModeAuto {
 		if e.vectorAvailable() && q.Query != "" {
-			mode = ModeHybrid
+			mode = memory.ModeHybrid
 		} else {
-			mode = ModeKeyword
+			mode = memory.ModeKeyword
 		}
 	}
 
 	// 纯过滤/浏览（无查询词）或显式关键词：走 store 关键词路。
-	if q.Query == "" || mode == ModeKeyword {
+	if q.Query == "" || mode == memory.ModeKeyword {
 		return e.keywordRetrieve(q, limit), nil
 	}
 
@@ -228,7 +230,7 @@ func (e *InMemoryEngine) Retrieve(ctx context.Context, q RetrievalQuery) ([]Retr
 	vecKeys := e.vectorKeys(ctx, q, vecCap)
 
 	// 显式向量模式：有结果则返回；无则按 C6 契约退化为关键词（审查 S2）。
-	if mode == ModeVector {
+	if mode == memory.ModeVector {
 		if len(vecKeys) > 0 {
 			return e.toHits(vecKeys, limit), nil
 		}
@@ -245,9 +247,9 @@ func (e *InMemoryEngine) Retrieve(ctx context.Context, q RetrievalQuery) ([]Retr
 }
 
 // Capabilities 声明能力：关键词取决于 store，向量取决于 emb 且已就绪。
-func (e *InMemoryEngine) Capabilities() RetrievalCaps {
+func (e *InMemoryEngine) Capabilities() memory.RetrievalCaps {
 	vec := e.vectorAvailable()
-	return RetrievalCaps{
+	return memory.RetrievalCaps{
 		Keyword: e.store != nil,
 		Vector:  vec,
 		Hybrid:  e.store != nil && vec,
@@ -291,7 +293,7 @@ type EngineStats struct {
 	DimMismatch int64 // 维度不匹配跳过数（换模型信号）
 }
 
-// StatsProvider 是可选能力接口：引擎暴露内部计数供诊断读取（与 RawVectorSearcher 并列的
+// StatsProvider 是可选能力接口：引擎暴露内部计数供诊断读取（与 memory.RawVectorSearcher 并列的
 // 具名可选契约，非 C6 必需）。
 type StatsProvider interface {
 	Stats() EngineStats
@@ -314,9 +316,9 @@ func (e *InMemoryEngine) Stats() EngineStats {
 // 编译期确认 InMemoryEngine 实现 StatsProvider（S4：契约锁定）。
 var _ StatsProvider = (*InMemoryEngine)(nil)
 
-// SearchByVector 实现 RawVectorSearcher：用预计算查询向量做余弦 topK（分区过滤），
-// 供 engineBridge.SearchByEmbedding 委托（消灭 MemoryStore 的向量 stub）。
-func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK int, partitionIDs []int) ([]RetrievalHit, error) {
+// SearchByVector 实现 memory.RawVectorSearcher：用预计算查询向量做余弦 topK（分区过滤），
+// 供 engineBridge.SearchByEmbedding 委托（消灭 memory.MemoryStore 的向量 stub）。
+func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK int, partitionIDs []int) ([]memory.RetrievalHit, error) {
 	if len(query) == 0 {
 		return nil, nil
 	}
@@ -345,15 +347,15 @@ func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK
 	if topK > 0 && len(cands) > topK {
 		cands = cands[:topK]
 	}
-	hits := make([]RetrievalHit, len(cands))
+	hits := make([]memory.RetrievalHit, len(cands))
 	for i, c := range cands {
-		hits[i] = RetrievalHit{EventKey: c.key, Score: c.score}
+		hits[i] = memory.RetrievalHit{EventKey: c.key, Score: c.score}
 	}
 	return hits, nil
 }
 
 // 编译期锁定可选能力。
-var _ RawVectorSearcher = (*InMemoryEngine)(nil)
+var _ memory.RawVectorSearcher = (*InMemoryEngine)(nil)
 
 // ---------------------------------------------------------------------------
 // 内部：向量路
@@ -372,7 +374,7 @@ func (e *InMemoryEngine) vectorAvailable() bool {
 // embedWorker 后台批量嵌入：聚合队列事件，批量调 embedder，写向量索引。
 func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 	defer e.wg.Done()
-	batch := make([]IndexableEvent, 0, e.cfg.EmbedBatch)
+	batch := make([]memory.IndexableEvent, 0, e.cfg.EmbedBatch)
 	flush := func(fctx context.Context) {
 		if len(batch) == 0 {
 			return
@@ -447,7 +449,7 @@ func (e *InMemoryEngine) textForIndex(text string) string {
 }
 
 // vectorKeys 嵌入查询 → 余弦 topK → 分区/类型/时间过滤 → 排序 EventKey。
-func (e *InMemoryEngine) vectorKeys(ctx context.Context, q RetrievalQuery, k int) []int64 {
+func (e *InMemoryEngine) vectorKeys(ctx context.Context, q memory.RetrievalQuery, k int) []int64 {
 	if e.emb == nil || q.Query == "" {
 		return nil
 	}
@@ -501,7 +503,7 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q RetrievalQuery, k int
 // 内部：关键词路（委托 store.QueryEvents）
 // ---------------------------------------------------------------------------
 
-func (e *InMemoryEngine) keywordRetrieve(q RetrievalQuery, limit int) []RetrievalHit {
+func (e *InMemoryEngine) keywordRetrieve(q memory.RetrievalQuery, limit int) []memory.RetrievalHit {
 	if e.store == nil {
 		return nil
 	}
@@ -510,14 +512,14 @@ func (e *InMemoryEngine) keywordRetrieve(q RetrievalQuery, limit int) []Retrieva
 		log.Warnf("[InMemoryEngine] keyword QueryEvents failed: %v", err)
 		return nil
 	}
-	hits := make([]RetrievalHit, 0, len(refs))
+	hits := make([]memory.RetrievalHit, 0, len(refs))
 	for _, r := range refs {
-		hits = append(hits, RetrievalHit{EventKey: r.EventKey})
+		hits = append(hits, memory.RetrievalHit{EventKey: r.EventKey})
 	}
 	return hits
 }
 
-func (e *InMemoryEngine) keywordKeys(ctx context.Context, q RetrievalQuery, k int) []int64 {
+func (e *InMemoryEngine) keywordKeys(ctx context.Context, q memory.RetrievalQuery, k int) []int64 {
 	if e.store == nil {
 		return nil
 	}
@@ -537,8 +539,8 @@ func (e *InMemoryEngine) keywordKeys(ctx context.Context, q RetrievalQuery, k in
 	return keys
 }
 
-func (e *InMemoryEngine) toQueryOptions(q RetrievalQuery, limit int) QueryOptions {
-	return QueryOptions{
+func (e *InMemoryEngine) toQueryOptions(q memory.RetrievalQuery, limit int) memory.QueryOptions {
+	return memory.QueryOptions{
 		PartitionIDs: q.PartitionIDs,
 		EventTypes:   q.EventTypes,
 		StartTime:    q.StartTime,
@@ -549,13 +551,13 @@ func (e *InMemoryEngine) toQueryOptions(q RetrievalQuery, limit int) QueryOption
 	}
 }
 
-func (e *InMemoryEngine) toHits(keys []int64, limit int) []RetrievalHit {
+func (e *InMemoryEngine) toHits(keys []int64, limit int) []memory.RetrievalHit {
 	if limit > 0 && len(keys) > limit {
 		keys = keys[:limit]
 	}
-	hits := make([]RetrievalHit, len(keys))
+	hits := make([]memory.RetrievalHit, len(keys))
 	for i, k := range keys {
-		hits[i] = RetrievalHit{EventKey: k}
+		hits[i] = memory.RetrievalHit{EventKey: k}
 	}
 	return hits
 }
