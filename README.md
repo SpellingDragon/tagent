@@ -18,6 +18,12 @@
 | 🤖 **子 Agent 编排** | 本地 `AgentToolWrapper` / 远程 A2A 协议统一封装；事件跨 Agent 按 key 精确传递 |
 | 🧘 **冥想心跳** | 空闲期自动回顾与沉淀，产出 ★ 高亮卡片进入长期记忆 |
 | 🎓 **RL 集成** | HTTPAPI + SwappableModel + TrajectoryRecorder，与 AReaL 对接采集训练轨迹 |
+| 🔌 **MCP 闭环** | `mcp_servers` 声明式注册表（增删热同步）+ `mcp_call` 网关 + `mcp_discover` 发现——工具知识按需渗透进上下文，工具声明区恒定（缓存友好） |
+| 🔍 **混合语义召回** | `memory.engine.embedding` 开启后向量∪关键词 RRF 融合召回；语义发现→票据取回两段式不变；未配置时行为与纯关键词逐字节一致 |
+| 📊 **统一可观测** | turn root span + trace_id 三投影互链（事件 Metadata / RL 轨迹 / OTel span 树）；设 OTLP endpoint 导出，未设 noop 零开销 |
+| 🛡 **治理闸**（默认关） | RiskClassifier 四级风险 + 预算滑窗 + critical 异步审批（外部落盘批准文件）+ DenialLedger 审计；GovernanceTool 装饰全部 leaf 工具 |
+| 🧬 **自进化**（默认关） | BundleStore 不可变热配置 + 风险分级发布道（快道后验评估/慢道门后）+ refine 工具（propose/diff/status/rollback，**无 activate**——agent 永无直接激活权） |
+| 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once 不丢事件）+ DegradationManager 五依赖退化追踪 + mem_spill 存储失败兜底重放 |
 
 ## 🎬 一个长期运行的日常
 
@@ -51,6 +57,7 @@ sequenceDiagram
 | tmux | 任意近期版本 | exec 工具命令执行 + 异步任务层（fast 路径内联返回 / slow 路径 tmux 后台 + `task_settled` 回写） |
 | rustviking | 可选 | 仅 `memory.type: file` 持久后端的 KV；缺省用 `memory`/`localfile` 后端（零外部二进制依赖） |
 | ZAI_API_KEY | 按需 | GLM Coding Plan 模型（examples 默认）；**全部单测使用 mock，无需任何 key** |
+| OTLP endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出（Jaeger/Tempo 等）；未设为 noop，零开销零行为变化 |
 
 ## 🚀 快速开始
 
@@ -235,8 +242,13 @@ graph TB
 | `memory/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期 |
 | `plugin/` | 框架插件：MemoryPlugin（持久化+因果链）、SummaryPlugin（元数据标注） |
 | `tool/` | 工具：ActionTool（tmux）、recall/knowledge 子工具、任务工具族、文件工具 |
-| `event/` | 事件类型系统与元数据契约（`FormatEventKey`/`ParseEventMeta`） |
-| `rl/` | RL 集成：TrajectoryRecorder、SwappableModel、HTTPAPI |
+| `event/` | 事件类型系统与元数据契约（`FormatEventKey`/`ParseEventMeta`）；EventTypeSpec 注册表（类型元数据单点声明） |
+| `rl/` | RL 集成：TrajectoryRecorder（含 trace 关联字段）、SwappableModel、HTTPAPI |
+| `tool/mcp/` | MCP server 注册表（YAML 声明 + 热同步）+ `mcp_call` 网关（声明恒定） |
+| `tool/memoryx/` | 记忆策展工具：memory_consolidate（服务端指纹防伪造）、memory_health（维度诊断） |
+| `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
+| `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
+| `evolution/` | 热配置自进化（默认关）：BundleStore、VersionedSource、ReleaseManager、refine 工具 |
 | `tagent.go` + `config.go` | 组合根与声明式配置 |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
@@ -267,6 +279,7 @@ graph TB
 | `request_timeout_seconds` | `3600` | 请求超时 |
 | `trajectory_dump` | `false` | 启用轨迹记录 |
 | `trajectory_dir` | `data/trajectories` | 轨迹文件目录 |
+| `mcp_servers` | `{}` | MCP server 声明式注册表：每项 `transport`（stdio/sse/streamable-http）/`url`/`headers`/`api_key_env`/`command`/`args`/`timeout`；增删保存即热生效（无需重启），经 `mcp_discover`/`mcp_call` 使用 |
 
 ### Agent 级选项
 
@@ -277,6 +290,7 @@ graph TB
 | `memory.type` | `memory` | `memory`/`file`/`localfile` |
 | `memory.path` | `""` | 存储路径/标识 |
 | `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区 |
+| `memory.engine.embedding` | （关闭） | 语义检索：`provider`（zhipu/mock）/`model`（embedding-3）/`api_key_env`/`endpoint`/`dimensions`（512/1024/2048）；开启后 recall 升级向量∪关键词 RRF 融合，key 缺失优雅降级 |
 | `max_tool_iterations` | 入口 50 / 子 10 | 最大 ReAct 迭代次数 |
 | `max_tokens` | 入口 8000 / 子 4096 | 上下文 token 预算 |
 | `compress_threshold` | `0.8` | 压缩触发比例——**整理（compaction）的唯一触发条件**（容量超阈才整理）；task_settled 通知全文内联，整理间上下文前缀稳定以利缓存复用 |
@@ -311,11 +325,22 @@ graph TB
 
 > agent 运行参数（`max_tool_iterations`/`max_tokens`/`temperature`）**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系。
 
+### 平台子系统（默认全部关闭 = 零行为变化；按需开启）
+
+| 配置块 | 关键字段 | 说明 |
+|--------|---------|------|
+| `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效）；DenialLedger 审计事件写 entry memStore |
+| `evolution:` | `enabled` / `dir` / `skip_approval`（默认 false=慢道需批准）/ `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | 热配置自进化：refine 提案经发布道（快道 validate→canary→后验 LLM-judge；慢道加审批门）；rollback 仅限发布历史中曾生效版本 |
+| `reliability:` | `bus_spill_dir`（非空启用事件溢出）/ `meditation_anchor_dir`（冥想锚点跨重启）/ `mem_spill_dir`（StoreEvent 失败兜底重放） | 常驻可靠性：每 agent 子目录隔离；退化追踪（memory/disk/rustviking/model/mcp 五依赖）随 governance.dir 启用 |
+
+详见 [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md)。
+
 ## 📚 深入阅读
 
 | 主题 | 文档 |
 |------|------|
 | 记忆架构 / 策展 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
+| 平台子系统（治理 / 自进化 / 可靠性 / 可观测 / 记忆引擎 / MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
 | 工具架构 / 任务重入 / 会话回收 | [docs/wiki/tool/tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
 | 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
@@ -325,11 +350,13 @@ graph TB
 ## 开发
 
 ```bash
-go build ./...                        # 构建（Go 1.21+）
-go test ./...                         # 测试
-bash scripts/race_check.sh            # race 门禁
-cd examples/wechat-bot && go run .    # 运行示例
+go build ./... && go vet ./...         # 构建 + 静态检查
+go test ./... -short                   # 测试（CI 同款：short + 新子系统 -race，见 .github/workflows/ci.yml）
+bash scripts/race_check.sh             # race 门禁（本地全量）
+cd examples/wechat-bot && go run .     # 运行示例
 ```
+
+CI（GitHub Actions）在 push/PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI。
 
 ## License
 

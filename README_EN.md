@@ -4,6 +4,8 @@
 
 English | [中文](README.md)
 
+> **Note (2026-09):** the Chinese README is the source of truth for the latest iteration (MCP loop, hybrid semantic recall, observability, governance gate, self-evolution, resident reliability — all config-gated, default off). This English version has not yet been synced; see [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) (Chinese) for details.
+
 ---
 
 ## ✨ Features

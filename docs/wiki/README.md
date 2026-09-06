@@ -13,6 +13,7 @@
 | 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | MemoryPlugin（持久化+因果+同点投影）、SummaryPlugin（元数据标注） |
 | 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层）、召回体系、任务工具族、EventKeys 传递 |
 | Prompt | [prompt/prompt-architecture.md](prompt/prompt-architecture.md) | Loader / bootstrap / 内嵌回退 / 热重载 Source |
+| 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化发布道 · 常驻可靠性 · 统一可观测 · 记忆引擎(C6 缝) · MCP 闭环（2026-09 迭代，默认全部关闭） |
 
 ## 撰写约定（新增或修订时遵循）
 
