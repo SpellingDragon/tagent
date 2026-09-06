@@ -179,9 +179,10 @@ func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evi
 			}
 		}
 		if e.EventType == event.TypeFeedback {
-			// verdict 存于结构化 Content（BindFeedback 生成）；快速子串判定
-			// negative，避免逐事件 JSON 反序列化。
-			if strings.Contains(e.Content, `"verdict":"negative"`) {
+			// §8.11①：优先读 Metadata 冗余 verdict（写入时冗余，无序列化格式依赖）；
+			// 子串判定保留为旧事件（修复前落库）的后备。
+			if e.Metadata["verdict"] == "negative" ||
+				(e.Metadata["verdict"] == "" && strings.Contains(e.Content, `"verdict":"negative"`)) {
 				ev.NegFeedback++
 			}
 		}
@@ -193,7 +194,7 @@ func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evi
 type GuardrailConfig struct {
 	MaxDenialRate   float64 // canary 窗口治理拒绝率上限（默认 0.3）
 	MaxCriticalRate float64 // critical 操作率上限（默认 0.2）
-	MaxNegFbRate    float64 // negative feedback 率上限（默认 0.3，独立可配；禁用请显式设 >1 不可达值）
+	MaxNegFbRate    float64 // negative feedback 率上限（0=默认 0.3；**负值=显式禁用**判据——§8.11⑥ 禁用不再依赖 >1 不可达值）
 	MinSamples      int     // 最小样本数（不足不判，默认 5，防抖动错杀）
 }
 
@@ -204,9 +205,9 @@ func (c GuardrailConfig) withDefaults() GuardrailConfig {
 	if c.MaxCriticalRate <= 0 {
 		c.MaxCriticalRate = 0.2
 	}
-	if c.MaxNegFbRate <= 0 {
+	if c.MaxNegFbRate == 0 {
 		c.MaxNegFbRate = 0.3
-	}
+	} // 负值保持原样：Breach 侧据此跳过判据（显式禁用）
 	if c.MinSamples <= 0 {
 		c.MinSamples = 5
 	}
@@ -242,10 +243,12 @@ func (g *MetricGuardrail) Breach(bundleID string) (bool, string) {
 			ev.DenialRate(), g.cfg.MaxDenialRate, ev.DenialCount, ev.TurnCount)
 	}
 	// D1（design-report-closeout §2.5）：负反馈率判据——feedback 事件（沿因果边 join 到
-	// 本 bundle 的 parent）中 negative 占比超阈即回滚，与两率并列。
-	if nf := float64(ev.NegFeedback) / float64(ev.TurnCount); nf > g.cfg.MaxNegFbRate {
-		return true, fmt.Sprintf("canary 负反馈率 %.2f 超阈值 %.2f（%d/%d 事件）",
-			nf, g.cfg.MaxNegFbRate, ev.NegFeedback, ev.TurnCount)
+	// 本 bundle 的 parent）中 negative 占比超阈即回滚，与两率并列。负阈值=显式禁用。
+	if g.cfg.MaxNegFbRate > 0 {
+		if nf := float64(ev.NegFeedback) / float64(ev.TurnCount); nf > g.cfg.MaxNegFbRate {
+			return true, fmt.Sprintf("canary 负反馈率 %.2f 超阈值 %.2f（%d/%d 事件）",
+				nf, g.cfg.MaxNegFbRate, ev.NegFeedback, ev.TurnCount)
+		}
 	}
 	if ev.CriticalRate() > g.cfg.MaxCriticalRate {
 		return true, fmt.Sprintf("canary critical 操作率 %.2f 超阈值 %.2f（%d/%d 事件）",

@@ -33,7 +33,7 @@ func (c GateConfig) withDefaults() GateConfig {
 	if c.Enforcement == "" {
 		c.Enforcement = EnforcementWarn
 	}
-	// GoalRequiredFor 默认空 = 不启用 goal 门（A7：goal_declare 工具尚未交付，若默认
+	// GoalRequiredFor 默认空 = 不启用 goal 门（A7：goal_declare 已交付（§5.1 govx 五件套，
 	// [meditation,task] 则 strict 模式下 high+ 自治操作恒拒且 agent 无自纠路径 → 反复撞墙）。
 	// 待 goal_declare/goal_close 工具交付后，由配置显式启用。
 	return c
@@ -184,7 +184,7 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 		g.record(SubtypeDenial, ctx, level, ruleID, "缺 goal 登记", digest, "")
 		if g.cfg.Enforcement == EnforcementStrict {
 			return Decision{Disposition: disp, Level: level, RuleID: ruleID, Reason: reason,
-				Denied: true, DenyReason: "high+ 自治操作须挂 goal，但 goal_declare 入口尚未交付——请用 enforcement=warn 或清空 goal_required_for（A7）"}
+				Denied: true, DenyReason: "high+ 自治操作须挂 goal——请先用 goal_declare 工具登记自治目标，或由运维清空 goal_required_for（A7；goal_declare 属 entry 治理面工具）"}
 		}
 		// warn：记账放行（在工具结果附提醒由装饰器处理）。
 	}

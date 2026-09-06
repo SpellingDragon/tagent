@@ -33,6 +33,23 @@ type engineBridge struct {
 	capacityHook func(eventKey int64, partitionID int, eventType string)
 }
 
+// KVBackend 实现 memory.KVProvider 透传（§8.11⑪）——capacity-only 包裹后外层
+// ErrorTrackingStore 等下游仍可取底层 KV（此前由可用变 nil 的能力丢失）。
+func (b *engineBridge) KVBackend() memory.KVStore {
+	if provider, ok := b.inner.(memory.KVProvider); ok {
+		return provider.KVBackend()
+	}
+	return nil
+}
+
+// WalQuarantined 透传底层 LocalFileKV 的隔离计数（§8.11⑤——诊断经装饰链可达）。
+func (b *engineBridge) WalQuarantined() int64 {
+	if q, ok := b.inner.(interface{ WalQuarantined() int64 }); ok {
+		return q.WalQuarantined()
+	}
+	return 0
+}
+
 // SetCapacityHook 实现 memory.CapacityHookProvider（4.2）：注册写入旁路计数回调
 // （装配期一次性调用；运行期只读，见字段注释）。
 func (b *engineBridge) SetCapacityHook(fn func(eventKey int64, partitionID int, eventType string)) {

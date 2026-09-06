@@ -55,6 +55,9 @@ func BindFeedback(store MemoryStore, parentKey int64, payload FeedbackPayload) (
 	// 产出该事件的 bundle 版本（否则无章 feedback 回退时间窗，跨 bundle 误归因可致误回滚）。
 	metadata := map[string]string{
 		tagentevent.MetaKeySubtype: payload.Source,
+		// §8.11①：verdict 冗余入 Metadata——消费侧（guardrail）不再依赖 JSON 序列化
+		// 格式的子串匹配（脆弱：字段序/转义变化即漏判）。
+		"verdict": payload.Verdict,
 	}
 	if bid, ok := parent.Metadata[tagentevent.MetaKeyBundleID]; ok && bid != "" {
 		metadata[tagentevent.MetaKeyBundleID] = bid

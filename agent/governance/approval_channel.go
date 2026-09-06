@@ -54,8 +54,8 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 	if approvalsDir == "" {
 		return "", fmt.Errorf("governance: approvals dir not configured")
 	}
-	if len(digest) < 8 {
-		return "", fmt.Errorf("governance: digest %q too short (need >= 8 hex chars)", digest)
+	if !isHexDigest(digest) {
+		return "", fmt.Errorf("governance: digest %q invalid (need >= 8 hex chars)", digest)
 	}
 	entries, err := os.ReadDir(approvalsDir)
 	if err != nil {
@@ -65,7 +65,14 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 	if approve {
 		status = ApprovalApproved
 	}
-	matched := 0
+	// §8.11③：两段式——先收集全部前缀匹配，pending 优先响应；已回应项不因字母序
+	// 遮蔽 pending（同前缀并存时旧实现按 ReadDir 顺序可能先撞上已回应文件返回
+	// 「幂等」而漏批 pending）。全部已回应 → 幂等说明；零匹配 → 显式错。
+	type match struct {
+		path string
+		req  ApprovalRequest
+	}
+	var pending, responded []match
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -82,27 +89,34 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 		if !strings.HasPrefix(req.ArgsDigest, digest) {
 			continue
 		}
-		matched++
-		if req.Status != ApprovalPending {
-			// 幂等：已回应不重复改写（重复 approve/reject 无副作用）。
-			return fmt.Sprintf("请求 %s 已是 %s 状态（幂等，未改写）", req.ID, req.Status), nil
+		if req.Status == ApprovalPending {
+			pending = append(pending, match{path, req})
+		} else {
+			responded = append(responded, match{path, req})
 		}
-		req.Status = status
-		req.DecidedBy = by
-		out, err := json.Marshal(req)
+	}
+	if len(pending) > 0 {
+		m := pending[0] // digest 前缀 ≥8 位，多 pending 同前缀极罕见；取首个并提示歧义
+		if len(pending) > 1 {
+			log.Warnf("[governance] digest prefix %q matches %d pending requests; responding to %s", digest, len(pending), m.req.ID)
+		}
+		m.req.Status = status
+		m.req.DecidedBy = by
+		out, err := json.Marshal(m.req)
 		if err != nil {
 			return "", fmt.Errorf("governance: marshal response: %w", err)
 		}
-		if err := os.WriteFile(path, out, 0o600); err != nil {
+		if err := os.WriteFile(m.path, out, 0o600); err != nil {
 			return "", fmt.Errorf("governance: write response: %w", err)
 		}
 		return fmt.Sprintf("请求 %s（tool=%s）已置为 %s（by %s）；agent 下次 Check 重扫即生效",
-			req.ID, req.ToolName, status, by), nil
+			m.req.ID, m.req.ToolName, status, by), nil
 	}
-	if matched == 0 {
-		return "", fmt.Errorf("governance: no approval request matches digest prefix %q", digest)
+	if len(responded) > 0 {
+		// 幂等：已回应不重复改写（重复 approve/reject 无副作用）。
+		return fmt.Sprintf("请求 %s 已是 %s 状态（幂等，未改写）", responded[0].req.ID, responded[0].req.Status), nil
 	}
-	return "", nil
+	return "", fmt.Errorf("governance: no approval request matches digest prefix %q", digest)
 }
 
 // ParseApprovalReply 解析消息通道的人工回复（3.3 微信注入侧共用纯函数）：
@@ -126,8 +140,22 @@ func ParseApprovalReply(text string) (digest string, approve bool, ok bool) {
 	}
 	rest := strings.TrimSpace(trimmed[len(verb):])
 	fields := strings.Fields(rest)
-	if len(fields) == 0 || len(fields[0]) < 8 {
+	if len(fields) == 0 || !isHexDigest(fields[0]) {
 		return "", false, false
 	}
 	return fields[0], verb == "approve " || verb == "批准 ", true
+}
+
+// isHexDigest（§8.11④）：digest 输入必须是 8-64 位十六进制——任意字符串此前可作
+// 前缀匹配输入（实际受 sha256 hex 约束无匹配风险，但输入面应收紧）。
+func isHexDigest(s string) bool {
+	if len(s) < 8 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

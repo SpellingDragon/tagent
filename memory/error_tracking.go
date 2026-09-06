@@ -80,6 +80,14 @@ func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
 	return s.spill.ReplayWithNotify(s.inner, fn)
 }
 
+// WalQuarantined 透传底层 WAL 隔离计数（§8.11⑤——最外层装饰器保诊断可达）。
+func (s *ErrorTrackingStore) WalQuarantined() int64 {
+	if q, ok := s.inner.(interface{ WalQuarantined() int64 }); ok {
+		return q.WalQuarantined()
+	}
+	return 0
+}
+
 // MemSpillLen 返回当前兜底待重放事件数（诊断/背压信号）。
 func (s *ErrorTrackingStore) MemSpillLen() int {
 	if s.spill == nil {

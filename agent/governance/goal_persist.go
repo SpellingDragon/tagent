@@ -3,6 +3,7 @@ package governance
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -92,9 +93,16 @@ func (g *GoalRegistry) rebuildFromStore() {
 		log.Warnf("[governance] goal rebuild query failed: %v", err)
 		return
 	}
+	// §8.11⑦：refs 级预筛（EventSummary 前缀）——Limit 截断作用于全部 governance 事件
+	//（denial/degraded 占大头），不预筛会把 goal 事件挤出窗口。预筛后 GetEvents 只取 goal。
 	keys := make([]int64, 0, len(refs))
 	for _, r := range refs {
-		keys = append(keys, r.EventKey)
+		if strings.Contains(r.EventSummary, "[governance:goal]") {
+			keys = append(keys, r.EventKey)
+		}
+	}
+	if len(keys) == 0 {
+		return
 	}
 	events, err := store.GetEvents(keys)
 	if err != nil {

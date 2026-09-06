@@ -133,6 +133,19 @@ func argsContains(ctx RiskContext, substrs ...string) bool {
 // 设计：exec（shell）是主风险面，按命令内容分级；文件写/删中危；只读工具低危。
 func DefaultRules() []Rule {
 	return []Rule{
+		// === low：治理面工具（§8.11⑩——登记/查询无副作用，此前落 default medium
+		// 占预算，strict 且预算耗尽时 goal_declare 会自我拒绝，形成死锁） ===
+		{
+			ID: "govface.readonly", Level: RiskLow,
+			Reason: "治理面登记/查询工具（goal/denial/approval 只读或登记，无执行副作用）",
+			Match: func(c RiskContext) bool {
+				switch c.ToolName {
+				case "goal_declare", "goal_list", "goal_resolve", "denial_query", "approval_list":
+					return true
+				}
+				return false
+			},
+		},
 		// === critical：不可逆/系统级破坏 ===
 		{
 			ID: "exec.destructive", Level: RiskCritical,
