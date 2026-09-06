@@ -31,10 +31,10 @@
 
 ## 6. 二轮增补 — 修复轮复验新发现(2026-09-06 第三轮复验,§8.9;**本组关闭前 5.3 不得执行**)
 
-- [ ] 6.1 N1:wasActive 白名单数据源修复——ReleaseRecord 持久化到 bundle dir(重启恢复),或启动时 seed 磁盘 active.json 曾指向的 id / 显式豁免基线;回归测试:基线 rollback 可用 + 重启后历史 active 仍可回滚
-- [ ] 6.2 N2:子 agent gate 复用 entry 持久 Ledger(共享实例写同一 governance 分区),替代兜底内存账本;回归测试:子 agent 治理事件重启后可 recall
+- [x] 6.1 N1:wasActive 白名单数据源修复——ReleaseRecord 持久化到 bundle dir(重启恢复),或启动时 seed 磁盘 active.json 曾指向的 id / 显式豁免基线;回归测试:基线 rollback 可用 + 重启后历史 active 仍可回滚
+- [x] 6.2 N2:子 agent gate 复用 entry 持久 Ledger(共享实例写同一 governance 分区),替代兜底内存账本;回归测试:子 agent 治理事件重启后可 recall
 
 ## 7. 二轮增补 — Minor 批量(§8.9 八项)
 
-- [ ] 7.1 预算 Dir="" 不落盘(修 tagent.go:542 filepath.Join 契约违反,优先);mem_spill.go:16 过时注释清除;E2 parentless draft 拒绝分支 rollbackTo 空值守卫
-- [ ] 7.2 W2 decided/expired 审批文件清理(rebuild 时);tasks 3.1 宣称校准(Decide 通道=预留,闭环=文件重扫);W3 工厂路径 agent 包裹缺口记录或补包;ActivationLog 持久化(或注释固化重启回退语义);测试补缺:buildAgent 级"子 agent exec 过闸" + W2 节流窗内不重扫
+- [x] 7.1 预算 Dir="" 不落盘(修 tagent.go:542 filepath.Join 契约违反,优先);mem_spill.go:16 过时注释清除;E2 parentless draft 拒绝分支 rollbackTo 空值守卫
+- [x] 7.2 W2 decided/expired 审批文件清理(rebuild 时);tasks 3.1 宣称校准(Decide 通道=预留,闭环=文件重扫);W3 工厂路径 agent 包裹缺口记录或补包;ActivationLog 持久化(或注释固化重启回退语义);测试补缺:buildAgent 级"子 agent exec 过闸" + W2 节流窗内不重扫
