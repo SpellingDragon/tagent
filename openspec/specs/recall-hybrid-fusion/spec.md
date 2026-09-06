@@ -1,5 +1,8 @@
 # recall-hybrid-fusion Specification
 
+## Purpose
+在 recall 统一入口的 query 模式融合向量与分词关键词两路检索(RRF 重排,k=60),提升同义改写等无共同关键词场景的召回;保持两段式票据召回哲学与 recall 工具声明恒定,向量不可用时逐字节退化为纯关键词路径。
+
 ## Requirements
 
 ### Requirement: query 模式 RRF 融合

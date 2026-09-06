@@ -1,5 +1,8 @@
 # trajectory-trace-correlation Specification
 
+## Purpose
+在 RL 轨迹记录与 OTLP trace 之间建立双向关联:TrajectoryRecorder 录制的 LLM 调用携带 trace_id/span_id 可跳转到 trace,启用 TrajectoryDump 时 turn root span 反向携带轨迹定位属性可跳转到轨迹文件;trace 未启用(noop)时字段省略,轨迹文件向后逐字节兼容。
+
 ## Requirements
 
 ### Requirement: 轨迹记录携带 trace 关联字段
@@ -20,6 +23,4 @@ TrajectoryRecorder 录制 LLM 调用时 SHALL 从 ctx 提取当前 trace_id/span
 - **WHEN** OTLP 与 TrajectoryDump 同时启用
 - **THEN** tagent.turn span 属性含 tagent.trajectory.dir 与 session 文件标识
 
-## MODIFIED Requirements
-
-<!-- trajectory-recording 主规格(openspec/specs/trajectory-recording/)如有 LLMCallRecord 字段结构的既有条目,归档同步时按"全文拷贝+增量字段"规程合并;本 delta 仅新增可选字段,不改变既有字段语义 -->
+<!-- 与 trajectory-recording 主规格的关系:本能力仅为其 LLMCallRecord 新增可选 trace 关联字段(omitempty),不改变既有字段语义;如 trajectory-recording 有字段结构既有条目,按"全文拷贝+增量字段"规程协调。 -->

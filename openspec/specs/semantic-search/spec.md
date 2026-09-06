@@ -1,5 +1,8 @@
 # semantic-search Specification
 
+## Purpose
+为记忆事件提供语义向量检索能力:异步生成 embedding、以独立键空间持久化并于启动时重建索引、落地 SearchByEmbedding;向量不可用(未配置/重建中/无向量)时优雅退化为关键词召回,不阻塞事件循环、不触碰工具声明,未配置时零行为变化。
+
 ## Requirements
 
 ### Requirement: 异步向量生成流水线

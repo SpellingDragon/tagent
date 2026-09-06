@@ -1,5 +1,8 @@
 # turn-tracing Specification
 
+## Purpose
+为事件循环的每个 turn 建立可观测 trace 树:turn 级 root span(携批内 EventKey/trigger_source/agent)、异步任务派生与 settle 的 span link 双向可跳、内部路径轻量 span;未配置 OTLP 导出时全链路 noop,零开销、零行为变化、不触碰工具声明。
+
 ## Requirements
 
 ### Requirement: turn 级 root span
