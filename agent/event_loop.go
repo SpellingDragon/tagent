@@ -110,9 +110,9 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				}
 			}
 
-			// 5.4（design-report-closeout）：model 依赖退化的行为响应——下一 turn 前
-			// 退避停顿（闸不是墙；零配置=关闭；恢复上报后 IsDegraded=false 即正常）。
-			if ta.config != nil && ta.config.DegradationBehaviors.ModelBackoff > 0 &&
+			// 5.4（design-report-closeout）+ §8.11⑫：model 依赖退化的行为响应——turn 级
+			// 退避（仅首个 attempt；重试已有 retryDelays，不叠加）。
+			if attempt == 0 && ta.config != nil && ta.config.DegradationBehaviors.ModelBackoff > 0 &&
 				ta.degradation != nil && ta.degradation.IsDegraded(reliability.DepModel) {
 				log.Warnf("[runEventLoop:%s] DepModel degraded, backing off %v before RunFlow (gate-not-wall)",
 					ta.name, ta.config.DegradationBehaviors.ModelBackoff)

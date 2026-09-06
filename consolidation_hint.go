@@ -87,8 +87,9 @@ func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventT
 		t.mu.Unlock() // snooze 窗内：不打扰（计数保留，窗过期后的下一次边界事件再提示）
 		return
 	}
-	// 触发：清零重新积累 + 记 hint 时刻（snooze 起点）。
+	// 触发：清零重新积累（counts 与 recent 同步——候选清单口径一致）+ 记 hint 时刻。
 	t.counts[partitionID] = 0
+	t.recent[partitionID] = nil
 	t.lastHint[partitionID] = now
 	fn := t.onHint
 	t.mu.Unlock()
