@@ -32,7 +32,7 @@ graph LR
 
 | 依赖 | 必需性 | 用途 | 安装(Debian/Ubuntu) |
 |------|--------|------|---------------------|
-| **go ≥ 1.24** | 硬性 | 构建二进制 | `apt install golang-1.24` 或 https://go.dev/dl/ |
+| **go ≥ 1.24** | 硬性 | 构建二进制 | 官方 tarball（https://go.dev/dl/，推荐）或发行版 backports；`apt install golang-go` 在多数稳定版源中版本偏低，装后务必 `go version` 核对 ≥1.24 |
 | **tmux** | 硬性 | exec 工具的异步任务层 | `apt install tmux` |
 | **node 22 + openspec** | 软性 | plan 子 agent 的 spec 工具后端 | `apt install nodejs` + `npm i -g @fission-ai/openspec` |
 | **curl** | 软性 | 健康探针 `/healthz` | `apt install curl` |

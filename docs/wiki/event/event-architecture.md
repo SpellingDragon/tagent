@@ -21,7 +21,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `types.go` | 事件类型常量（11 个，含 consolidation/governance）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
+| `types.go` | 事件类型常量（12 个，含 consolidation/governance/feedback）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
 | `metadata.go` | 元数据契约：`MetaKey*` 常量（含归因键 agent_name/bundle_id/rollout_id/trace_id/span_id 与 governance subtype 单源常量）、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀、trigger_source |
 | `registry.go` | EventTypeSpec 注册表：类型元数据唯一权威源（Name/Role/Special/Skeleton/LowValue/TTLDays/Embeddable/Recallable 等），既有函数/变量委托派生 |
 | `timeline.go` | 时间线前缀契约：`FormatEventPrefix/ParseEventKeyAndType/HasEventPrefix/StripEventKeyPrefix`（`[evt_KEY|type]` 读写同点） |
@@ -59,7 +59,7 @@ graph TB
 ### 4.1 完整常量列表
 
 ```go
-// event/types.go:18-44
+// event/types.go
 const (
     // 所有外部输入（用户消息、API 调用、系统注入消息、后台任务结算 task_settled）
     TypeExternalInput   = "external_input"
@@ -79,10 +79,38 @@ const (
     // 知识检索
     TypeThinkingKnowledge = "thinking_knowledge"
 
-    // 上下文压缩
+    // 策展固化物：L3 归档产物（正 key 真实事件，长期记忆，TTL 与容量淘汰双豁免）
+    TypeContextCompressSummary = "context_compress_summary"
+
+    // 上下文压缩：滚动摘要 ref（负 key 合成投影引用，不落库）
     TypeContextCompress = "context_compress"
+
+    // 工具链折叠 ref：一串老化的完整工具对（thinking_plan + action_command）折叠为
+    // 单行紧凑引用（负 key 合成投影，携召回票据；与 context_compress 区分，
+    // 使 buildRetainedRefs 不把它吸收进滚动摘要计数）
+    TypeToolChain = "tool_chain"
+
+    // 记忆策展：证据门控巩固产物（携源事件 EventKey 收据 + 服务端 SHA1 指纹，
+    // 可回放验证、防 LLM 伪造；正 key，TTL 豁免）
+    TypeConsolidation = "consolidation"
+
+    // 治理记录：否决/goal/批准/退化/审计五类经 Metadata.subtype 区分
+    // （单类型 + subtype 而非五个类型：审计查询天然单类型过滤；正 key，TTL 永久豁免）
+    TypeGovernance = "governance"
+
+    // 回执-反馈：用户反馈/任务成败/API 评分绑定到具体产出事件（经 RelationStore
+    // 因果边，零新索引；正 key，Role=system，TTL 默认 30 天，subtype 区分
+    // user/task_settle/api，Content 为结构化 JSON）
+    TypeFeedback = "feedback"
 )
 ```
+
+**两类 key 语义务必区分**（决定是否落库、是否可召回）：
+
+| 类别 | 类型 | key | 是否经 `StoreEvent` 落库 |
+|------|------|-----|------------------------|
+| 真实事件 | `external_input`/`agent_output`/`action_command`/`thinking_*`/`context_compress_summary`/`consolidation`/`governance`/`feedback` | 正 key（Snowflake） | 是 |
+| 合成投影引用 | `context_compress`（滚动摘要）/`tool_chain`（工具链折叠） | 负 key | 否——只存在于 SessionProjection，是压缩产物的渲染载体，携 `[hex]` 票据供 recall 回补原文 |
 
 ### 4.2 类型分类逻辑
 
@@ -116,7 +144,7 @@ graph LR
 ### 5.1 函数签名
 
 ```go
-// event/types.go:52-70
+// event/types.go
 func ExtractEventType(msg model.Message) string
 ```
 
@@ -161,7 +189,7 @@ func ExtractEventType(msg model.Message) string {
 ### 6.1 函数签名
 
 ```go
-// event/types.go:75-82
+// event/types.go
 func IsSpecialEventType(eventType string) bool
 ```
 
@@ -189,7 +217,7 @@ func IsSpecialEventType(eventType string) bool
 ### 7.1 函数签名
 
 ```go
-// event/types.go:113-126
+// event/types.go
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string
 ```
 
@@ -220,12 +248,12 @@ func GenerateEventSummary(msg model.Message, eventType string, opts EventSummary
 }
 ```
 
-> 事件类型常量现为 **11 个**（新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
+> 事件类型常量现为 **12 个**（在早期七个之外新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`、`feedback`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
 
 ### 7.3 formatToolCallSummary — 工具调用摘要
 
 ```go
-// event/types.go:155-171
+// event/types.go
 func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
     if len(msg.ToolCalls) == 0 {
         if msg.Role == model.RoleTool {
@@ -258,7 +286,7 @@ func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
 ### 7.4 EventSummaryOptions — 配置项
 
 ```go
-// event/types.go:88-91
+// event/types.go
 type EventSummaryOptions struct {
     StructuredFormat bool  // true: 多行格式; false: 单行格式（节省 token）
 }
@@ -323,7 +351,7 @@ Token 消耗降低 ✅
 为 SmartCompress 生成结构化的事件描述（完整信息，不截断）：
 
 ```go
-// event/types.go:128-147
+// event/types.go
 func FormatEventDescription(index int, msg model.Message) string
 
 // 输出示例：
@@ -338,7 +366,7 @@ func FormatEventDescription(index int, msg model.Message) string
 简单的 Token 估算（启发式，约每 3 个字符 1 个 token）：
 
 ```go
-// event/types.go:149-153
+// event/types.go
 func EstimateTokens(text string) int {
     return len([]rune(text)) / 3
 }

@@ -32,9 +32,11 @@
 ```
 # 根包 (tagent)
 ├── tagent.go           # New() 工厂：声明式 Config + Option 装配
-├── config.go           # Config / AgentConfig / ToolRef / MemoryConfig / CompressConfig
+├── config.go           # Config / AgentConfig / ToolRef / MemoryConfig（含 Lifecycle/MemoryEngine/Embedding）
+│                       #   / CompressConfig / MeditationConfig / ProviderConfig / MCPServerConfig
+│                       #   / GovernanceConfig / EvolutionConfig / ReliabilityConfig；WorkingDir 统一工作根
 ├── registry.go         # ToolRegistry + RegisterBuiltinTools()
-├── builtin.go          # 内置 plain tool 工厂（actionFactory + monitor 配置解析）
+├── builtin.go          # 内置 plain tool 工厂（actionFactory + monitor 配置解析 + WorkingDir→exec cwd 回退）
 
 # agent 包（引擎）+ 子包
 agent/
@@ -373,10 +375,16 @@ func RegisterBuiltinTools() error {
 | `web_search` | knowledge/knowledge_subtools.go | 搜索通用网页 |
 | `duckduckgo_search` | knowledge/knowledge_subtools.go | DuckDuckGo 事实搜索 |
 | `memory_query` | knowledge/knowledge_subtools.go | 查询历史知识记录 |
-| `recall_query` | recall/recall_subtools.go | 按条件检索事件 |
+| `recall` | recall/recall_subtools.go | **统一召回入口**（参数即路由：`items` 票据直达 / `turn_key` 因果链重建整轮 / `query` 工程检索 / `orchestrate` LLM 多跳编排） |
+| `recall_query` | recall/recall_subtools.go | 按条件检索事件（`recall` 的 query 路由目标） |
 | `recall_get` | recall/recall_subtools.go | 获取完整事件详情 |
 | `recall_recent` | recall/recall_subtools.go | 快速获取最近事件 |
 | `recall_trace` | recall/recall_subtools.go | 因果链回溯 |
+| `list_tasks` | task/register.go | 任务看板（活跃/终态任务清单） |
+| `cancel_task` | task/register.go | 取消任务（杀 tmux 会话 / 标记子 agent 任务取消） |
+| `relaunch_task` | task/register.go | 重新启动已结束的任务 |
+| `resume_task` | task/register.go | 任务重入（存活服务续输入 / 完成的子 agent 续指令，自动还原上下文） |
+| `spec` | spec/spec_tool.go | 类型化规格/计划管理（op 白名单，openspec 后端可替换，无 shell 逃逸面） |
 
 **阶段三：配置层**（YAML AgentConfig.Tools）
 
@@ -610,7 +618,7 @@ ActionTool 是**无状态执行器**：`Call` 创建 tmux 会话与会话绑定�
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `workspace` | string | 命令工作目录；**默认继承进程运行目录**（与 file tools 的相对路径基准一致，避免路径分裂诱发模型幻觉） |
+| `workspace` | string | 命令工作目录。缺省时回退全局 `working_dir`（`config.working_dir` / `$TAGENT_WORKING_DIR`），再回退**继承进程运行目录**——与 file tools 的 `base_dir` 走同一优先级链，二者恒一致，避免路径分裂诱发模型幻觉 |
 | `run_as_user` | string | 通过 `sudo -u` 执行命令时使用的用户 |
 | `run_as_group` | string | 通过 `sudo -g` 执行命令时使用的用户组 |
 
@@ -647,7 +655,7 @@ type ActionTool struct {
 ### 8.3 Declaration
 
 ```go
-// action/action_tool.go:138-166
+// action/action_tool.go
 func (ct *ActionTool) Declaration() *tool.Declaration {
     return &tool.Declaration{
         Name:        "action",
@@ -814,7 +822,13 @@ func (te *TmuxExecutor) CreateSession(...) (*TmuxSession, error) {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `base_dir` | string | 文件操作的根目录（默认当前工作目录 `.`） |
+| `base_dir` | string | 文件操作的根目录（沙箱边界）。缺省时回退全局 `working_dir`，再回退进程工作目录 `.` |
+
+**根目录解析优先级**（`resolveBaseDir`，与 exec 命令 cwd 走同一优先级链，二者恒一致 → 模型看到单一文件系统视图）：
+
+```
+properties.base_dir  >  config.working_dir / $TAGENT_WORKING_DIR  >  "."（进程 cwd）
+```
 
 ```yaml
 tools:
@@ -825,9 +839,13 @@ tools:
       base_dir: "./workspace"
 ```
 
+> 只想统一改 file 与 exec 的工作根（如设为项目 clone 根）时，用全局 `working_dir` 一处配置即可，无需逐工具写 `base_dir`。`working_dir` 只影响 agent 的文件/命令路径基准，tagent 自身的配置/资源/数据路径仍相对进程 cwd。
+
 ### 11.4 实现方式
 
-`file.NewToolSet(baseDir)` 创建 trpc-agent-go 内置 file toolset，`makeFileToolFactory` 根据工具名从 toolset 中取出对应的 `CallableTool`。
+`makeFileToolFactory` 先经 `resolveBaseDir(cfg.Properties, cfg.WorkingDir)` 定根目录，再以
+`file.NewToolSet(file.WithBaseDir(baseDir))`（上游 trpc-agent-go 的 file toolset）按工具名取出对应
+`CallableTool`。ToolSet 按 baseDir 缓存（`toolSetCache`）——相同根目录的多个 file 工具复用同一实例。
 
 ---
 

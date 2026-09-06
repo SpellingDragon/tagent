@@ -4,7 +4,9 @@
 
 English | [中文](README.md)
 
-> **Note (2026-09):** the Chinese README is the source of truth for the latest iteration (MCP loop, hybrid semantic recall, observability, governance gate, self-evolution, resident reliability — all config-gated, default off). This English version has not yet been synced; see [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) (Chinese) for details.
+> **Note:** the Chinese [README.md](README.md) remains the source of truth; this English version is
+> synced to the same 2026-09 architecture. Mechanism-level detail lives in
+> [docs/wiki/](docs/wiki/) (Chinese).
 
 ---
 
@@ -20,6 +22,12 @@ English | [中文](README.md)
 | 🤖 **Sub-agent orchestration** | Local `AgentToolWrapper` / remote A2A unified; events passed across agents by key |
 | 🧘 **Meditation heartbeat** | Idle-time reflection sediments into ★-highlighted cards in long-term memory |
 | 🎓 **RL integration** | HTTPAPI + SwappableModel + TrajectoryRecorder for AReaL training data collection |
+| 🔌 **MCP loop** | `mcp_servers` declarative registry (hot-synced on add/remove) + `mcp_call` gateway + `mcp_discover` — tool knowledge permeates context on demand while the tool declaration block stays constant (cache-friendly) |
+| 🔍 **Hybrid semantic recall** | With `memory.engine.embedding` on, recall fuses vector ∪ keyword via RRF; the discover-then-redeem two-phase protocol is unchanged; byte-identical to keyword-only when unconfigured |
+| 📊 **Unified observability** | turn root span + trace_id linking three projections (event metadata / RL trajectory / OTel span tree); export by setting an OTLP endpoint, noop with zero overhead otherwise |
+| 🛡 **Governance gate** (off by default) | RiskClassifier four risk levels + sliding-window budget + async approval for critical (external approval files) + DenialLedger audit; GovernanceTool decorates every leaf tool |
+| 🧬 **Self-evolution** (off by default) | BundleStore immutable hot config + risk-routed release lanes (fast lane posterior evaluation / slow lane gated) + refine tool (propose/diff/status/rollback, **no activate** — the agent never holds direct activation power) |
+| 🚡 **Resident reliability** (off by default) | EventBus disk spill (at-least-once, no dropped events) + DegradationManager five-dependency tracking + mem_spill fallback replay on store failure |
 
 ## 🎬 A day in a long-running agent
 
@@ -44,6 +52,16 @@ sequenceDiagram
     M-->>T: precise readback (zero hallucination)
     T-->>U: full detail
 ```
+
+## 📦 Requirements
+
+| Dependency | Requirement | Purpose |
+|---|---|---|
+| Go | ≥ 1.24 | build (`go build ./...`; go.mod is authoritative) |
+| tmux | any recent version | exec-tool command execution + async task layer (fast path returns inline / slow path backgrounds in tmux and reports back via `task_settled`) |
+| rustviking | optional | KV backend only for the `memory.type: file` persistent store; the default `memory`/`localfile` backends need no external binary |
+| ZAI_API_KEY | as needed | GLM Coding Plan models (examples default); **every unit test uses mocks and needs no key** |
+| OTLP endpoint | optional | set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces (Jaeger/Tempo/…); unset means noop with zero overhead and zero behavior change |
 
 ## 🚀 Quick Start
 
@@ -96,13 +114,38 @@ for evt := range outputCh {
 }
 ```
 
-**3. Run the full example**
+**3. Run the full example (WeChat Bot)**
+
+**Bare-metal local deployment (recommended for a personal assistant)** — one interactive wizard:
+
+```bash
+cd examples/wechat-bot
+./wizard.sh    # 7 steps: ① check deps (go≥1.24 / tmux required; node / openspec / rustviking optional)
+               # ② collect ZAI_API_KEY (no echo, kept out of shell history) ③ set the agent working
+               # root (TAGENT_WORKING_DIR) ④ write .env (chmod 600) ⑤ workspace ACL setup
+               # ⑥ verify connectivity (embedding endpoint, no chat quota spent) ⑦ next steps
+./run.sh       # foreground (./run.sh start for background; ./run.sh --help lists all commands)
+```
+
+Keys land in `.env`, which the whitelist-style `examples/wechat-bot/.gitignore` ignores by
+construction (never committed); `run.sh` loads `.env` at startup with **already-exported variables
+winning** (`ZAI_API_KEY=x ./run.sh` overrides temporarily). Sub-commands: `wizard.sh --check`
+(deps only), `--verify` (connectivity only), `--perms` (redo workspace permissions only).
+
+**Remote always-on deployment (bare-metal systemd)** — `./run.sh build` produces a fully static
+binary (`CGO_ENABLED=0`, no gcc needed) → install `deploy/tagent-wechat.service` (non-root /
+`ProtectSystem=strict` + `ReadWritePaths` allowlist / `Restart=always` self-healing / graceful
+SIGTERM shutdown / resource caps) → `systemctl enable --now`. Full steps, data directories and
+backups, the two working-root ACL gates, operations and troubleshooting:
+[examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) (or `./run.sh systemd`).
+
+Or plain `go run` (with `ZAI_API_KEY` exported):
 
 ```bash
 cd examples/wechat-bot && go run .    # WeChat bot: persistent loop + every mechanism live
 ```
 
-Other modes: A2A server (`agent.NewA2AServer`), RL rollout worker (`agent.NewHTTPAPI` for AReaL) — see [examples/](examples/) and [docs/wiki/](docs/wiki/).
+Other modes: container deployment (`examples/wechat-bot/Dockerfile` + `docker-compose.yml`, podman/docker compatible, secrets injected via env), A2A server (`agent.NewA2AServer`), RL rollout worker (`agent.NewHTTPAPI` for AReaL, `./run.sh rl`) — see [docs/wiki/](docs/wiki/).
 
 ## 🧠 Mental Model
 
@@ -146,11 +189,13 @@ graph LR
 
 ### Memory data model (LSM)
 
-Storage is organized as an **LSM tree**: events from three pipelines (EventBus injection / framework LLM events / compression artifacts) converge on a single write path and are append-only into write-time-windowed segments; levels denote write recency and compaction generation, and sealing/compaction record truthful time bounds for query pruning; forgetting is handled by three independent layers — compaction, TTL, and capacity.
+Storage is organized as an **LSM tree**: events from the **two live pipelines** (EventBus injection / framework LLM events) converge on a single write path and are append-only into write-time-windowed segments; levels denote write recency and compaction generation, and sealing/compaction record truthful time bounds for query pruning; forgetting is handled by three independent layers — compaction, TTL, and capacity.
+
+> The legacy compression-artifact write pipeline has been **removed**: compaction output (`context_compress` rolling summaries) lives in the projection as **negative-key** summary references and never reaches `StoreEvent`; existing artifacts (`context_compress_summary`, positive keys) stay read-only, keep TTL exemption, and age out naturally.
 
 ```mermaid
 graph LR
-    P["Event pipelines<br/>inject / LLM events / artifacts"] --> W["StoreEvent<br/>collision guard + seq recovery"]
+    P["Event pipelines<br/>inject / LLM events"] --> W["StoreEvent<br/>collision guard + seq recovery"]
     W --> S["Segmented store<br/>evt/idx/meta/tomb"]
     S --> L["L0 active → L1 sealed → L2 → L3<br/>compaction writes truthful bounds"]
     L --> R["Recall: ticket / semantic / cards"]
@@ -210,11 +255,16 @@ graph TB
 | `agent/` | event-driven engine: EventBus, runEventLoop, ContextManager (glue), meditation, sub-agent wrapper |
 | `agent/task/` | task lifecycle: TaskManager, settle detection, board, resume (leaf package, zero engine deps) |
 | `agent/compress/` | compression domain: SmartCompressor (L0-L3), card-sequence compactor, SessionProjection, TokenCounter |
-| `memory/` | structured event storage: InMemoryStore, FileSegmentStore, RelationStore, lifecycle |
-| `plugin/` | framework plugins: MemoryPlugin (persistence + causal chain), SummaryPlugin (metadata annotation) |
+| `memory/` + `memory/engine/` + `memory/kv/` | structured event storage: InMemoryStore, FileSegmentStore, RelationStore, lifecycle. The C6 decoupling-seam contracts and the KVStore contract live in the core package; semantic engine adapters (bridge / hybrid RRF / embedder / diagnostics) and KV backends (localfile / rustviking) each live in their own sub-package — new engines/backends go only into the matching sub-package, see `memory/kv.go` for the extension guide |
+| `plugin/` | framework plugins: MemoryPlugin (persistence + causal chain + same-point projection), SummaryPlugin (metadata annotation) |
 | `tool/` | tools: ActionTool (tmux), recall/knowledge sub-tools, task tool family, file tools |
-| `event/` | event type system and metadata contract (`FormatEventKey`/`ParseEventMeta`) |
-| `rl/` | RL integration: TrajectoryRecorder, SwappableModel, HTTPAPI |
+| `event/` | event type system and metadata contract (`FormatEventKey`/`ParseEventMeta`); EventTypeSpec registry (single point of type metadata) |
+| `rl/` | RL integration: TrajectoryRecorder (with trace correlation fields), SwappableModel, HTTPAPI |
+| `tool/mcp/` | MCP server registry (YAML declaration + hot sync) + `mcp_call` gateway (constant declaration) |
+| `tool/memoryx/` | memory curation tools: memory_consolidate (server-side fingerprint, forgery-proof), memory_health (dimension diagnostics) |
+| `agent/governance/` | governance gate (off by default): RiskClassifier, Budget/Approval/DenialLedger/Goal, GovernanceTool decorator |
+| `agent/reliability/` | resident reliability (off by default): DegradationManager, ReliableBus disk spill, AnchorStore, mem_spill |
+| `evolution/` | hot-config self-evolution (off by default): BundleStore, VersionedSource, ReleaseManager, refine tool |
 | `tagent.go` + `config.go` | composition root and declarative config |
 
 All dependencies are one-way, no cycles: `root → agent → plugin → memory`, `tool/* → memory`.
@@ -245,6 +295,9 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 | `request_timeout_seconds` | `3600` | request timeout |
 | `trajectory_dump` | `false` | enable trajectory recording |
 | `trajectory_dir` | `data/trajectories` | trajectory directory |
+| `working_dir` | `""` | **unified agent working root** — the common base for file-tool `base_dir` and exec command cwd (always identical, preserving the model's single filesystem view). Empty = inherit the process working directory; set it to a project clone root to let the agent operate on every repo underneath, while tagent's own config/resource/data paths stay unaffected. Precedence: `properties.base_dir`/`workspace` > `working_dir` > process cwd. Overridable via the `TAGENT_WORKING_DIR` environment variable (no YAML edit at deploy time) |
+| `api_key_env` | `ZAI_API_KEY` | global API key variable name (`providers.<name>.api_key_env` wins) |
+| `mcp_servers` | `{}` | MCP server declarative registry: per entry `transport` (stdio/sse/streamable-http) / `url` / `headers` / `api_key_env` / `command` / `args` / `timeout`; saving an add/remove hot-syncs immediately (no restart), consumed via `mcp_discover` / `mcp_call` |
 
 ### Agent-level options
 
@@ -252,9 +305,14 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 |--------|---------|-------------|
 | `model` / `provider` | (inherit global) | LLM model and provider |
 | `system_prompt.files` | `[]` | prompt files to load |
-| `memory.type` | `memory` | `memory`/`file`/`localfile` |
-| `memory.path` | `""` | storage path/identifier |
-| `memory.read_namespaces` | `[]` | readable partitions of other agents |
+| `memory.type` | `memory` | `memory` (in-process) / `file` (rustviking CLI, persistent) / `localfile` (JSON file KV, persistent, zero external deps) |
+| `memory.path` | `""` | storage path/identifier; agents sharing the same path under `memory` type share one instance, empty = isolated store |
+| `memory.read_namespaces` | `[]` | readable partitions of other agents (cross-agent memory access requires an explicit grant) |
+| `memory.rustviking_binary` | `rustviking` | `type: file` only: rustviking CLI path (empty = look it up on PATH) |
+| `memory.lifecycle` | built-in defaults | forgetting policy: `global_ttl_days` (default 7, **negative = disable TTL forgetting**) / `type_ttl` (per event type override, negative exempts) / `check_interval` (default `1h`) / `max_events_per_partition` (default 0 = unlimited) |
+| `memory.engine` | (off) | semantic retrieval engine: `backend` (memory/rustviking — equivalent in the MVP, they differ in the vector persistence substrate) / `embedding` (below) / `vector_top_k` (20) / `keyword_top_k` (20) / `rrf_k` (60) |
+| `memory.engine.embedding` | (off) | `provider` (zhipu/mock) / `model` (embedding-3) / `api_key_env` (ZAI_API_KEY) / `endpoint` / `dimensions` (512/1024/2048); once on, recall upgrades to vector ∪ keyword RRF fusion, degrading gracefully to keyword-only when the key is missing |
+| `workspace_root` | `.tagent-workspace` | **scratch root** (not the working root): oversized tool outputs go to `<root>/tool-output`, tmux command dir is `<root>/exec`; a different concept from `working_dir` (the path base for file/exec) |
 | `max_tool_iterations` | entry 50 / sub 10 | max ReAct iterations |
 | `max_tokens` | entry 8000 / sub 4096 | context token budget |
 | `compress_threshold` | `0.8` | compression trigger ratio — the **sole compaction trigger** (compact only over capacity); task_settled notices carry full results inline, and the context prefix stays stable between compactions for cache reuse |
@@ -280,34 +338,53 @@ Full design arguments (invariants, timeline rendering rules, metadata contracts)
 |-------|-------------|
 | `kind` | `agent` (default) or `tool` |
 | `agent` / `id` | sub-agent name / tool ID |
-| `description_file` | tool description prompt file |
+| `description` / `description_file` | tool description: inline text / prompt file (relative to `prompt_dir`). `kind: agent` requires one of the two |
 | `event_params` | event params, e.g. `[event_keys]` |
 | `extra_params` | extra routing params (e.g. plan's `action` enum + `name`); packed with `request` into a JSON message body for the sub-agent, kept as plain text when undeclared |
-| `async` | whether an agent tool uses the async task layer (default true) |
-| `remote.url` | remote A2A agent URL |
-| `properties` | tool-specific config (exec: `workspace`/`run_as_user`/`run_as_group`) |
+| `async` | whether an agent tool uses the async task layer (default true; false = always synchronous, an operator knob for weaker models that struggle with ack/notification semantics) |
+| `remote.url` | remote A2A agent URL (when set, an A2AAgent is created instead of a local TagentAgent) |
+| `properties` | tool-specific config: exec's `workspace` (command cwd) / `run_as_user` / `run_as_group` / `monitor` (polling params); the file tool family's `base_dir` (sandbox root). Both fall back to the global `working_dir`, then to the process cwd |
+| `factory` | custom factory path (extension point for non-builtin tools/agents) |
 
 > Agent runtime parameters (`max_tool_iterations`/`max_tokens`/`temperature`) are configured ONLY on the referenced agent's own `agents.<name>` entry — a ToolRef declares the reference relationship only.
+
+### Platform subsystems (all off by default = zero behavior change; enable as needed)
+
+| Block | Key fields | Description |
+|-------|-----------|-------------|
+| `governance:` | `enabled` / `enforcement` (warn = record and pass \| strict = deny) / `dir` (empty = in-memory only) / `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | Governance gate: every agent's leaf tools pass RiskClassifier leveling + sliding-window budget + async approval for critical (dropping a file into the external `approvals/` directory takes effect); DenialLedger audit events are written to the entry memStore, tagged with the originating agent |
+| `evolution:` | `enabled` / `dir` / `skip_approval` (default false = slow lane needs approval) / `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | Hot-config self-evolution: refine proposals go through release lanes (fast lane validate→canary→posterior LLM-judge; slow lane adds an approval gate); rollback is limited to versions that were once active in the release history |
+| `reliability:` | `degradation_enabled` (master switch for the five-dependency state machine) / `bus_spill_dir` (non-empty enables event spill) / `mem_spill_dir` (StoreEvent failure fallback replay) / `meditation_anchor_dir` (meditation anchors across restarts) | Resident reliability: per-agent sub-directory isolation; **degradation tracking is controlled by the independent `degradation_enabled` switch** (ErrorTrackingStore wraps memStore outermost + event_loop reports model failures + mcp_call reports), with no coupling to governance config; `mem_spill_dir` is wired only when `degradation_enabled` is true |
+
+See [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) and
+[docs/wiki/platform/agent-behavior-matrix.md](docs/wiki/platform/agent-behavior-matrix.md).
 
 ## 📚 Further Reading
 
 | Topic | Doc |
 |-------|-----|
 | Memory architecture / curation / recall protocol | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
+| Platform subsystems (governance / self-evolution / reliability / observability / memory engine / MCP) | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
+| How the agent behaves in complex scenarios once subsystems are enabled | [docs/wiki/platform/agent-behavior-matrix.md](docs/wiki/platform/agent-behavior-matrix.md) |
 | Tool architecture / task reentry / session reaping | [docs/wiki/tool/tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
 | Agent architecture / event flow | [docs/wiki/agent/](docs/wiki/agent/) |
 | Event system / plugins / prompts | [docs/wiki/](docs/wiki/) |
 | Design specs (OpenSpec) | [openspec/specs/](openspec/specs/) |
-| Full example (WeChat Bot + RL) | [examples/wechat-bot/](examples/wechat-bot/) |
+| Full example: bare-metal systemd deployment (WeChat Bot) | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
+| Real-LLM contract guard matrix | [tests/README.md](tests/README.md) |
 
 ## Development
 
 ```bash
-go build ./...                        # build (Go 1.21+)
-go test ./...                         # test
-bash scripts/race_check.sh            # race gate
-cd examples/wechat-bot && go run .    # run the example
+go build ./... && go vet ./...         # build + static analysis (Go 1.24+)
+go test ./... -short                   # tests (same as CI: short + -race on new subsystems, see .github/workflows/ci.yml)
+bash scripts/race_check.sh             # race gate (full local run)
+cd examples/wechat-bot && go run .     # run the example
 ```
+
+CI (GitHub Actions) runs on push/PR: build + vet + full short test suite + `-race` on the new
+subsystems (memory / governance / reliability / evolution / event / tool …). Real-LLM contract
+tests under `tests/` self-skip without credentials and never block CI.
 
 ## License
 

@@ -15,13 +15,13 @@
 
 ## 二、文件清单
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `memory_plugin.go` | 266 | 事件持久化：推断类型、生成 EventKey、归因盖章、构建因果链、写入 StateDelta |
-| `summary_plugin.go` | 80 | 事件摘要：生成 Tag 并追加到事件 |
-| `attribution.go` | 38 | 归因章 ctx 载体：WithAttribution/AttributionFrom，MemoryPlugin 存储前盖章 FullEvent.Metadata |
-| `projection_sink.go` | 37 | ProjectionSink 接口：存储⇔投影同一同步点 |
-| `memory_plugin_test.go` | 165 | 单元测试：覆盖类型推断、因果链、摘要策略 |
+| 文件 | 职责 |
+|------|------|
+| `memory_plugin.go` | 事件持久化：推断类型、生成 EventKey、归因盖章、构建因果链、写入 StateDelta |
+| `summary_plugin.go` | 事件摘要：生成 Tag 并追加到事件 |
+| `attribution.go` | 归因章 ctx 载体：WithAttribution/AttributionFrom，MemoryPlugin 存储前盖章 FullEvent.Metadata |
+| `projection_sink.go` | ProjectionSink 接口：存储⇔投影同一同步点 |
+| `memory_plugin_test.go` / `attribution_test.go` / `projection_sink_test.go` | 单元测试：类型推断、因果链、摘要策略、归因盖章、同点投影 |
 
 ---
 
@@ -71,7 +71,7 @@ graph TB
 
 ### 4.1 tagent 与框架的集成点
 
-`plugin.Plugin` 接口（`trpc-agent-go/plugin/manager.go:33-39`）：
+`plugin.Plugin` 接口（`trpc-agent-go/plugin/manager.go`）：
 
 ```go
 type Plugin interface {
@@ -80,21 +80,31 @@ type Plugin interface {
 }
 ```
 
-tagent 在 `NewTagentAgent` 中注册两个 Plugin：
+tagent 在构建 `ContextManager`（统一 Runner）时注册两个 Plugin：
 
 ```go
-// tagent_agent.go:118-122
-r := runner.NewRunner("tagent", llmAgent, runner.WithPlugins(
-    tagentplugin.NewSummaryPlugin(),  // 先注册：Tag 注入
-    memPlugin,                        // 后注册：持久化
-))
+// agent/context_manager.go
+fwAgent := llmagent.New(cfg.Name, agentOpts...)
+
+// Create unified Runner: LLMAgent + MemoryPlugin + SummaryPlugin + SessionService.
+runnerOpts := []runner.Option{}
+if cfg.MemPlugin != nil {
+    runnerOpts = append(runnerOpts, runner.WithPlugins(
+        plugin.NewSummaryPlugin(), // 先注册：Tag 注入
+        cfg.MemPlugin,             // 后注册：持久化
+    ))
+}
+if cfg.SessionSvc != nil {
+    runnerOpts = append(runnerOpts, runner.WithSessionService(cfg.SessionSvc))
+}
+cm.runner = runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
 ```
 
-**注册顺序有意义**：`SummaryPlugin` 先注册先执行，先注入 Tag；`MemoryPlugin` 后注册后执行，持久化时事件已包含 Tag。
+**注册顺序有意义**：`SummaryPlugin` 先注册先执行，先注入 Tag；`MemoryPlugin` 后注册后执行，持久化时事件已包含 Tag。`cfg.MemPlugin == nil` 时整条 Plugin 装配跳过（无持久化的轻量调用路径）；`SessionSvc` 非空时 Runner 走注入的 session 服务（含 AppendEventHook），否则用框架默认。
 
 ### 4.2 OnEvent 的调用时机
 
-`Runner.processSingleAgentEvent` 在处理每个事件时调用 OnEvent（`trpc-agent-go/runner/runner.go:756-794`）：
+`Runner.processSingleAgentEvent` 在处理每个事件时调用 OnEvent（`trpc-agent-go/runner/runner.go`）：
 
 ```go
 func (r *runner) processSingleAgentEvent(ctx context.Context, loop *eventLoopContext, agentEvent *event.Event) error {
@@ -113,7 +123,7 @@ func (r *runner) processSingleAgentEvent(ctx context.Context, loop *eventLoopCon
 
 ### 4.3 链式传递机制
 
-`Manager.OnEvent` 按注册顺序依次执行钩子，链式传递事件对象（`trpc-agent-go/plugin/manager.go:275-295`）：
+`Manager.OnEvent` 按注册顺序依次执行钩子，链式传递事件对象（`trpc-agent-go/plugin/manager.go`）：
 
 ```go
 func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *event.Event) (*event.Event, error) {
@@ -138,7 +148,7 @@ func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *
 ### 5.1 数据结构
 
 ```go
-// memory_plugin.go:28-42
+// memory_plugin.go
 type MemoryPlugin struct {
     memStore      memory.MemoryStore  // 存储后端
     mu            sync.Mutex          // 保护 lastEventKeys 并发安全
@@ -148,7 +158,7 @@ type MemoryPlugin struct {
 
 ### 5.2 OnEvent 钩子 — 10 步详解
 
-源码位置：`memory_plugin.go:69-212`（入口三重早退守卫：无 Response/Choices、`IsPartial` 流式增量、退化空 agent_output 终答——均直接 return，不落库不投影）
+源码位置：`memory_plugin.go`（入口三重早退守卫：无 Response/Choices、`IsPartial` 流式增量、退化空 agent_output 终答——均直接 return，不落库不投影）
 
 ```go
 func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
@@ -260,7 +270,7 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 
 ### 5.4 StateDelta 写回
 
-`MemoryPlugin` 写入 `StateDelta` 是为了**确保 Runner 持久化事件**。Runner 的 `shouldPersistEvent` 规则（`trpc-agent-go/runner/runner.go:997-1003`）：
+`MemoryPlugin` 写入 `StateDelta` 是为了**确保 Runner 持久化事件**。Runner 的 `shouldPersistEvent` 规则（`trpc-agent-go/runner/runner.go`）：
 
 ```go
 func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
@@ -281,7 +291,7 @@ SummaryPlugin 在 `MemoryPlugin` 之前执行，负责给事件附加**可读的
 
 ### 6.2 OnEvent 钩子详解
 
-源码位置：`summary_plugin.go:38-76`
+源码位置：`summary_plugin.go`
 
 ```go
 func (p *SummaryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
@@ -441,7 +451,7 @@ shouldPersistEvent(agentEvent) = len(agentEvent.StateDelta) > 0 ||
 ### 10.1 EventKey — Snowflake int64 唯一标识符
 
 ```go
-// memory/types.go:164-186
+// memory/types.go
 // Snowflake-like int64，编码 PartitionID + Timestamp + Sequence
 func NewSnowflakeEventKey(partitionID int, nowMs int64) int64
 ```
@@ -453,7 +463,7 @@ func NewSnowflakeEventKey(partitionID int, nowMs int64) int64
 ### 10.2 FullEvent — 完整事件
 
 ```go
-// FullEvent 在 plugin 中的构建（memory_plugin.go:91-105）
+// FullEvent 在 plugin 中的构建（memory_plugin.go）
 // 基础字段始终填充，Content/ToolCalls/Response 仅在 evt.Response 非空时填充
 type FullEvent struct {
     EventKey     int64                // Snowflake int64
@@ -473,7 +483,7 @@ type FullEvent struct {
 ### 10.3 EventReference — 轻量引用
 
 ```go
-// memory/types.go:15-21
+// memory/types.go
 type EventReference struct {
     EventKey     int64  `json:"event_key"`
     PartitionID  int    `json:"partition_id,omitempty"`
@@ -514,7 +524,7 @@ MemoryPlugin.OnEvent → 构建 FullEvent → StoreEvent(int64 Key)
 ### 11.3 QueryOptions
 
 ```go
-// memory/types.go:96-109
+// memory/types.go
 type QueryOptions struct {
     PartitionID  int
     PartitionIDs []int
@@ -664,7 +674,7 @@ sequenceDiagram
 
 ### 13.1 StateDelta 的定位
 
-`Event.StateDelta`（`trpc-agent-go/event/event.go:95`）是框架提供的事件级状态传递机制：
+`Event.StateDelta`（`trpc-agent-go/event/event.go`）是框架提供的事件级状态传递机制：
 
 ```go
 type Event struct {
@@ -683,7 +693,7 @@ type Event struct {
 ### 13.2 MemoryPlugin 写入 StateDelta 的目的
 
 ```go
-// memory_plugin.go:118-123
+// memory_plugin.go
 if evt.StateDelta == nil {
     evt.StateDelta = make(map[string][]byte)
 }
@@ -702,7 +712,7 @@ evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 
 ### 13.3 Session 持久化完整流程
 
-**源码路径**：`trpc-agent-go/runner/runner.go:756-794`
+**源码路径**：`trpc-agent-go/runner/runner.go`
 
 ```go
 func (r *runner) processSingleAgentEvent(ctx, loop, agentEvent) error {
@@ -717,7 +727,7 @@ func (r *runner) processSingleAgentEvent(ctx, loop, agentEvent) error {
 }
 ```
 
-**handleEventPersistence** 内部（`runner.go:920-995`）：
+**handleEventPersistence** 内部（`runner.go`）：
 
 ```go
 func (r *runner) handleEventPersistence(ctx, invocation, sess, agentEvent) {
@@ -730,7 +740,7 @@ func (r *runner) handleEventPersistence(ctx, invocation, sess, agentEvent) {
 
 ### 13.4 shouldPersistEvent — 持久化条件
 
-**源码**（`runner.go:997-1003`）：
+**源码**（`runner.go`）：
 
 ```go
 func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
@@ -746,7 +756,7 @@ func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
 
 ### 13.5 Session.UpdateUserSession — StateDelta merge
 
-**源码**（`session/session.go:454-470`）：
+**源码**（`session/session.go`）：
 
 ```go
 func (sess *Session) UpdateUserSession(event *event.Event, opts ...Option) {
@@ -766,7 +776,7 @@ func (sess *Session) UpdateUserSession(event *event.Event, opts ...Option) {
 
 ### 13.6 Session.ApplyEventStateDelta — 合并逻辑
 
-**源码**（`session/session.go:522-543`）：
+**源码**（`session/session.go`）：
 
 ```go
 func (sess *Session) ApplyEventStateDelta(e *event.Event) {
@@ -789,7 +799,7 @@ func (sess *Session) ApplyEventStateDelta(e *event.Event) {
 
 ### 13.7 Redis 后端的原子性保证
 
-Redis 后端通过 Lua 脚本实现 AppendEvent 的原子性（`session/redis/internal/hashidx/lua.go:14-69`）：
+Redis 后端通过 Lua 脚本实现 AppendEvent 的原子性（`session/redis/internal/hashidx/lua.go`）：
 
 ```lua
 -- Step 1: 检查 session 存在
@@ -843,7 +853,7 @@ sequenceDiagram
 ### 14.2 Session 数据结构
 
 ```go
-// trpc-agent-go/session/session.go:46-73
+// trpc-agent-go/session/session.go
 type Session struct {
     ID        string           // AppName:UserID:SessionID
     AppName   string

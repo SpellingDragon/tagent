@@ -32,7 +32,37 @@
 - **记忆策展（T-D）**：证据门控巩固（服务端 SHA1 指纹防伪造 + receipts 收据）+ MemoryDiagnostics
   维度锚定诊断 + `memory_consolidate`/`memory_health` agent 工具。
 - **RL 轨迹（rl）**：TrajectoryRecorder JSONL 流水（含 trace 锚点、final sync on close）。
-- **CI**：GitHub Actions（build + vet + 全量 short 测试，全 mock 无需 key）。
+- **CI**：GitHub Actions（build + vet + 全量 short 测试 + 新子系统 `-race`，全 mock 无需 key）。
+- **框架级 agent 工作根 `working_dir`**：file 工具 `base_dir` 与 exec 命令 cwd 的共同基准
+  （`ToolRef.properties` > `working_dir` > 进程 cwd），二者恒一致以保持模型单一文件系统视图；
+  可经 `TAGENT_WORKING_DIR` 环境变量覆盖（部署时指向项目 clone 根而无需改 YAML）。空值 = 现状零变化。
+- **裸机部署资产（examples/wechat-bot）**：`wizard.sh` 七步初始化向导（依赖检查 / 密钥不回显收集 /
+  工作根引导 / 生成 `.env` chmod 600 / 工作区 POSIX ACL 授权 / 连通性验证 / 下一步），
+  `deploy/tagent-wechat.service` systemd 单元（非 root + `ProtectSystem=strict` + `ReadWritePaths`
+  白名单 + `Restart=always` + SIGTERM 优雅关闭 + 资源上限）与 `deploy/README.md` 部署指南；
+  `run.sh` 新增 `build` / `systemd` 子命令。
+- **治理审计来源归属**：`DenialRecord.AgentName` → 事件 `metadata["agent"]`（omitempty）→
+  `rebuildFromStore` 回读；多子 agent 共享同一 Ledger 时治理事件可按来源 agent 区分。
+
+### Changed
+
+- **memory 包按职责拆分**：语义引擎适配器（bridge / hybrid RRF / embedder / 诊断）迁入 `memory/engine/`，
+  KV 存储后端（localfile / rustviking）迁入 `memory/kv/`；`MemoryEngine`（C6 解耦缝）与 `KVStore`
+  契约仍居核心包（`memory/engine.go`、`memory/kv.go`，后者附「接入新引擎/后端」两路径指南）。
+  新增实现只进对应子包，核心存储/压缩/事件代码不需改动。
+- **wechat-bot example 启用全平台子系统**：治理闸（`enforcement=warn` 记账放行 + per-agent 预算 +
+  critical 恒审批）、自进化（refine 发布道 + `protected_prompts` 走慢道）、常驻可靠性
+  （bus/mem spill + 冥想锚点 + 五依赖退化状态机）、记忆引擎（zhipu embedding-3，512 维，
+  tagent/knowledge/recall 三 agent 共享同一引擎实例）；`log_level` 由 debug 改 info（远端不落 LLM 明文）。
+- **example `tagent.yaml` 编排精简**（547 → 249 行，语义零变化，经归一化等价测试逐字段验证）：
+  全局 `provider`/`model` 默认继承 + `x-anchors` 共享锚点消除 engine/monitor 重复 + 注释外移到 wiki。
+- **文档全量代码交叉印证修订**：清除 wiki 中 39 处已腐化的源码行号标注（撰写约定禁列行号）；
+  修正 `prompt-architecture.md` 16 处子节编号偏移、文件清单表头列数破损、代码块缺失的 fallback 分支
+  与错误的项目名示例；`plugin-architecture.md` 的 Runner 装配代码块重写为当前实现（原文引用已不存在的
+  文件名）；`agent-architecture.md` 的 `runEventLoop` 伪码对齐实际签名与控制流；`memory-architecture.md`
+  与两份 README 的事件管线数由三条更正为两条现役管线；README_EN 同步 2026-09 架构（六项新特性、
+  环境依赖、部署路径、模块表、配置表、平台子系统表、Go 1.24）；`docs/config-migration.md` 重写
+  （原文示例字段全部失效，示例经真实 `LoadConfig` 验证）；`tests/README.md` 补齐测试文件清单。
 
 ### Fixed
 
@@ -45,3 +75,16 @@
   judge 缺 score 零值误回滚、canary ctx 取消假通过、后验评估 Limit+asc 静默失效、file 后端
   同 path 多实例（跨 agent 因果链断链 + 双 Compactor 并发覆盖）、DegradationManager 计数
   语义塌缩/无恢复路径、knowledge 吞存储错误等（详见 `openspec/changes/LEDGER.md`）。
+- 发布道与治理账本的一批修复：发布历史持久化到 `releases.jsonl` 并对当前 active 基线补 seed
+  （rollback 白名单跨重启有效，修「回滚到基线恒被拒」与 `InitBaseline` 崩溃窗口）；子 agent 治理
+  审计复用 entry 持久 Ledger（不再是重启即失的内存账本）；无 active 基线时 `Submit` 直接拒绝
+  （防孤儿 draft 滞留 active 且无回滚锚点）；`DenialLedger.Record` 锁内快照 store/partitionID
+  （消除与延迟绑定的数据竞争）；审批重扫节流间隔可注入时钟（消除 CI 重载下的假失败）；
+  删除语义与 `BindStore` 相反的死代码 `BindLedger`。
+- 文档失真修正：README 把退化追踪的启用条件误记为「随 `governance.dir` 启用」，实为
+  `reliability.degradation_enabled` 独立开关（`mem_spill_dir` 亦仅在它为真时接线）；
+  `docs/config-migration.md` 全文示例字段失效（`tagent:` 根键、`name`/`type`、`system_prompt_file`、
+  `memory.data_dir` 等均已不存在）；`prompt-architecture.md` 示例误用他项目名；
+  `plugin-architecture.md` 引用已重命名删除的源文件；`rustviking-client` 规格的构造函数签名
+  与实现不符（写作单 `cfg` 参数，实为两个字符串参数）；`wiki-code-sync` 规格以一次性行数修正清单
+  为契约、且要求与 wiki 撰写约定（禁列行数）冲突，已重写为持久校验规则。

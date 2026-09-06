@@ -22,11 +22,13 @@ The `MemoryConfig` struct SHALL include an optional `RustVikingBinary` field to 
 
 When `MemoryConfig.Type` is `"file"`, `resolveMemoryStore` SHALL create a `FileSegmentStore` backed by `RustVikingClient` (real CLI) and `InMemRelationStore` (WAL + snapshot persistence), NOT `MockRustVikingClient` or `simpleInMemRelationStore`.
 
+`RustVikingClient` / `LocalFileKV` 居于 `memory/kv` 子包；`InMemRelationStore` 与 `KVStore` 契约居核心包 `memory`。
+
 #### Scenario: File type creates real client
 - **WHEN** `type: file` with `path: /data/events` and `rustviking_binary` set
-- **THEN** the system SHALL create `NewRustVikingClient(binaryPath, dataDir)` and `NewInMemRelationStore(dataDir)`
+- **THEN** the system SHALL create `kv.NewRustVikingClient(mc.RustVikingBinary, configPath)` and `memory.NewInMemRelationStore(dataDir)`
 - **AND** events SHALL be persisted to RocksDB via rustviking CLI
 
 #### Scenario: File type without binary path
 - **WHEN** `type: file` with `rustviking_binary` empty
-- **THEN** the system SHALL create `NewRustVikingClient("", dataDir)` using default binary name
+- **THEN** the system SHALL create `kv.NewRustVikingClient("", configPath)`，由客户端回退默认 binary 名 `"rustviking"`

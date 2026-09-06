@@ -80,7 +80,7 @@ wiki 文档 SHALL 记录 NewTagentAgent 中 SessionService 的创建和 AppendEv
 
 wiki 文档 SHALL 记录 tagent.go 中 resolveMemoryStore 的完整组装逻辑（file 类型）：
 - `NewInMemRelationStore(mc.Path)` 创建关系存储
-- `NewRustVikingClient(mc.RustVikingBinary, configPath)` 创建 KV 客户端
+- `kv.NewRustVikingClient(mc.RustVikingBinary, configPath)` 创建 KV 客户端（`memory/kv` 子包）
 - `NewFileSegmentStore(kv, rel, mc.Path, 1000)` 创建文件段存储
 - `NewTombstoneSet(rel, kv, 0)` 创建墓碑集
 - `NewLifecycleManager(store, tombstone, config)` 创建生命周期管理器

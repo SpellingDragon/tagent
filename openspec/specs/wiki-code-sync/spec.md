@@ -2,173 +2,143 @@
 
 ## Purpose
 
-规范 wiki 架构文档与 Go 源码之间的交叉校验规则：行数引用、字段/方法名称、代码示例须与源码保持一致，避免文档随代码演进而失真，作为文档质量门禁的依据。
+规范 `docs/wiki/` 架构文档与 Go 源码之间的交叉校验规则，作为文档质量门禁的依据：文档中的文件引用、
+标识符、代码示例、配置字段与默认值 SHALL 与源码保持一致，避免文档随代码演进而失真。
+
+本规范表达**持久校验规则**，不记录某一次同步的具体修正清单（后者属变更级产物，随变更归档）。
+撰写约定的可读版见 `docs/wiki/README.md`「撰写约定」章，两者 SHALL 保持一致。
 
 ## Requirements
-### Requirement: agent-architecture.md 行数与结构体字段同步
 
-agent-architecture.md 中引用的文件行数和结构体字段 SHALL 与实际 Go 源码一致。具体修正：
-- tagent_agent.go 行数 339→434
-- context_intervention.go 行数 290→216
-- smart_compress.go 行数 298→446
-- tagent.go 行数 ~230→423
-- TagentAgent 结构体 SHALL 补充 `sessionMu sync.Mutex` 和 `closers []Closer` 字段
-- NewTagentAgent 初始化步骤 SHALL 补充 Step 7（SessionService with AppendEventHook）和 Step 8（Runner with session service）
-- Closer 接口定义 SHALL 记录在文档中
+### Requirement: 文件引用必须指向仓内真实存在的文件
 
-#### Scenario: 行数引用准确
+wiki 文档引用的 tagent 自有源文件 SHALL 在当前仓库中真实存在。文件被重命名、拆分或移动（如包
+拆分为子包）时，引用 SHALL 在同一变更内同步更新。引用上游依赖（trpc-agent-go 等）文件时 SHALL
+明示其属上游，避免读者误在本仓查找。
 
-- **WHEN** 阅读 agent-architecture.md 中关于 tagent_agent.go 的行数引用
-- **THEN** 文档显示的数与实际文件行数一致（434 行）
+#### Scenario: 引用文件存在
 
-#### Scenario: TagentAgent 结构体完整
+- **WHEN** 文档中出现形如 `some_file.go` 或 `pkg/some_file.go` 的 tagent 自有文件引用
+- **THEN** 该文件 SHALL 存在于当前仓库对应路径
+- **AND** 已重命名/删除的文件 SHALL NOT 被引用（历史说明除外，且须标注为历史）
 
-- **WHEN** 阅读 agent-architecture.md 中 TagentAgent 结构体定义
-- **THEN** 文档包含 `sessionMu sync.Mutex` 字段
-- **AND** 文档包含 `closers []Closer` 字段
+#### Scenario: 包拆分后路径同步
 
-#### Scenario: NewTagentAgent 步骤完整
+- **WHEN** 某类型的实现从核心包迁入子包（例如 KV 后端迁入 `memory/kv`、引擎适配器迁入 `memory/engine`）
+- **THEN** 文档中的文件清单与符号归属说明 SHALL 同步为新子包路径
 
-- **WHEN** 阅读 agent-architecture.md 中 NewTagentAgent 初始化流程
-- **THEN** 文档包含 Step 7 SessionService 创建（含 AppendEventHook）
-- **AND** 文档包含 Step 8 Runner 创建（含 WithSessionService 选项）
+### Requirement: 禁止行号与行数标注
 
-### Requirement: agent-architecture.md BeforeModel 代码段重写
+wiki 文档 SHALL NOT 标注源码行号（如 `file.go:120-145`）或文件行数（如「266 行」、文件清单表的
+「行数」列）。行号与行数随任意提交漂移，属必然腐化的引用；定位 SHALL 只到**文件名 + 符号名**
+（类型/函数/常量），符号名可被 grep 稳定检索。
 
-agent-architecture.md 中 BeforeModel 拦截器的代码示例 SHALL 与实际 context_intervention.go 实现一致。具体修正：
-- 移除不存在的 `getSessionEvents` 和 `applyEventView` 函数
-- 替换为 `injectEventKeyPrefixes` 前缀注入方案
-- `logPhaseComplete` SHALL 替换为 `logAccess`
-- SmartCompressor 结构体 SHALL 补充 `maxTokens` 字段
-- `WithMaxTokens` option SHALL 记录
+#### Scenario: 无行号引用
 
-#### Scenario: BeforeModel 代码段无虚构函数
+- **WHEN** 扫描 wiki 文档全文
+- **THEN** SHALL NOT 出现 `\.go:[0-9]+` 形态的行号标注
+- **AND** 代码块的位置注记 SHALL 只写文件名（如 `// prompt/loader.go`）
 
-- **WHEN** 阅读 agent-architecture.md 中 BeforeModel 拦截器代码
-- **THEN** 代码段不包含 `getSessionEvents` 函数调用
-- **AND** 代码段不包含 `applyEventView` 函数调用
-- **AND** 代码段包含 `injectEventKeyPrefixes` 函数调用
+#### Scenario: 文件清单无行数列
 
-#### Scenario: 日志函数名一致
+- **WHEN** 阅读各篇「文件清单」章
+- **THEN** 表格 SHALL 为「文件 → 职责」两列，SHALL NOT 含行数列或文件体积列
 
-- **WHEN** 阅读 agent-architecture.md 中 context_intervention 的日志调用
-- **THEN** 使用 `logAccess` 而非 `logPhaseComplete`
+### Requirement: 标识符与代码一致
 
-#### Scenario: SmartCompressor 字段完整
+文档中出现的类型名、函数名、方法名、字段名、常量名与其默认值 SHALL 与源码逐字一致。默认值
+（如超时、上限、TTL、预算）修订时 SHALL 同步文档；无法确定的值 SHALL 改为指向常量名而非写死数字。
 
-- **WHEN** 阅读 agent-architecture.md 中 SmartCompressor 结构体
-- **THEN** 文档包含 3 个字段（包括 `maxTokens`）
+#### Scenario: 结构体字段完整且无虚构
 
-### Requirement: agent-architecture.md 补充 injectEventKeyPrefixes 文档
+- **WHEN** 文档给出某结构体定义或字段表
+- **THEN** 所列字段 SHALL 存在于源码该结构体中（私有字段可择要列出，但不得虚构）
+- **AND** 源码中影响行为的关键字段 SHALL NOT 被遗漏
 
-agent-architecture.md SHALL 记录 `injectEventKeyPrefixes` 函数的完整行为：跳过 system/tool 消息，按索引匹配 user/assistant 消息到事件，添加 `[evt_<KEY>|<type>]` 前缀。
+#### Scenario: 默认值与常量一致
 
-#### Scenario: injectEventKeyPrefixes 行为描述
+- **WHEN** 文档声明某配置项或常量的默认值
+- **THEN** 该值 SHALL 与源码 `ApplyDefaults` / 常量定义一致
 
-- **WHEN** 阅读 agent-architecture.md 中 injectEventKeyPrefixes 文档
-- **THEN** 文档说明跳过 system 和 tool role 消息
-- **AND** 文档说明按索引匹配 user/assistant 消息到 Session 事件
-- **AND** 文档说明添加 `[evt_<KEY>|<type>]` 格式前缀
+### Requirement: 代码示例与实现一致
 
-### Requirement: memory-architecture.md 移除 ParentKey 引用
+文档中的 Go 代码块若声称展示实际实现，SHALL 与源码在**函数签名、控制流分支、错误处理路径**上
+一致；简化 SHALL 不改变语义（例如不得把条件分支内的逻辑画到分支外）。纯示意代码 SHALL 明示为示意。
 
-memory-architecture.md 中所有对 FullEvent.ParentKey 字段的引用 SHALL 移除或替换为 RelationStore 说明。影响区域：§4.2 表格、§5.1、§5.3、§8.3、§14.3、§14.6。
+#### Scenario: 签名一致
 
-#### Scenario: §4.2 表格无 ParentKey
+- **WHEN** 文档展示某函数的调用或定义
+- **THEN** 参数个数、参数类型与返回值 SHALL 与源码一致
 
-- **WHEN** 阅读 memory-architecture.md §4.2 FullEvent 结构体表格
-- **THEN** 表格不包含 ParentKey 行
-- **AND** 表格包含注释说明因果关系由 RelationStore 维护
+#### Scenario: 控制流位置一致
 
-#### Scenario: §5.1 代码示例无 ParentKey
+- **WHEN** 文档以伪码或代码块描述某段控制流（重试、降级、回退）
+- **THEN** 各分支的嵌套位置 SHALL 与源码一致（判定发生在成功分支还是失败分支、循环内还是循环外）
 
-- **WHEN** 阅读 memory-architecture.md §5.1 事件创建代码示例
-- **THEN** 代码不设置 `evt.ParentKey` 字段
-- **AND** 代码通过 `rsp.RelationStore().SetParent(eventKey, parentKey)` 设置因果关系
+#### Scenario: 降级与回退路径不缺漏
 
-#### Scenario: §8.3 查询代码示例无 ParentKey
+- **WHEN** 源码某函数含回退分支（如磁盘 miss 回退内嵌 FS、缺配置优雅降级）
+- **THEN** 文档展示该函数时 SHALL 体现该分支，或在紧邻文字中说明；SHALL NOT 出现「文档代码块无回退、
+  正文却称有回退」的自相矛盾
 
-- **WHEN** 阅读 memory-architecture.md §8.3 查询相关代码示例
-- **THEN** 代码不使用 `evt.ParentKey` 访问字段
+### Requirement: 文件清单完整
 
-### Requirement: memory-architecture.md 补充 RelationStoreProvider 接口
+各篇「文件清单」章 SHALL 覆盖该模块的全部非测试源文件；测试文件可按组合并列出。清单 SHALL 反映
+子包划分（若模块已拆分子包，SHALL 说明各子包职责边界与「新增实现只进哪个子包」的约束）。
 
-memory-architecture.md SHALL 记录 `RelationStoreProvider` 接口定义及其使用方式：`MemoryStore` 可通过 type assertion 转为 `RelationStoreProvider`，调用 `RelationStore()` 获取 `RelationStore`。
+#### Scenario: 清单覆盖全部源文件
 
-#### Scenario: RelationStoreProvider 接口文档
+- **WHEN** 将文档文件清单与该模块目录下实际 `.go` 文件对比
+- **THEN** 每个非测试源文件 SHALL 在清单中出现
+- **AND** 清单中 SHALL NOT 出现目录下不存在的文件
 
-- **WHEN** 阅读 memory-architecture.md 中 RelationStoreProvider 文档
-- **THEN** 文档包含接口定义：`RelationStoreProvider interface { RelationStore() RelationStore }`
-- **AND** 文档说明通过 type assertion 使用
+### Requirement: 章节编号自洽
 
-### Requirement: memory-architecture.md 行数和命名同步
+文档的 `###` 子节编号 SHALL 与其所属 `##` 父章编号一致（父章「四、」下的子节 SHALL 为 `4.x`）。
+插入或删除章节时 SHALL 同步重编号，且正文中的交叉引用（`§x.y`）SHALL 一并更新。
 
-memory-architecture.md 中的文件行数和类型名称 SHALL 与实际代码一致：
-- types.go 行数 235→250
-- in_memory_store.go 行数 327→499
-- `FileBackend` SHALL 替换为 `FileSegmentStore`
-- `QueryOptions.Keyword` 字段 SHALL 记录
+#### Scenario: 子节号匹配父章号
 
-#### Scenario: 行数引用准确
+- **WHEN** 扫描文档全部 `###` 标题
+- **THEN** 每个 `### N.M` 的 `N` SHALL 等于其上方最近 `##` 章的序号
 
-- **WHEN** 阅读 memory-architecture.md 中 types.go 的行数引用
-- **THEN** 文档显示 250 行
+### Requirement: 已移除机制只留历史注记
 
-#### Scenario: FileBackend 已更名
+机制被替代或代码被删除后，文档 SHALL 删除其代码留存与详细说明，最多保留一行历史注记说明「已移除
+/已由 X 替代」。SHALL NOT 保留可供复制的失效代码或已不存在的符号作为现行说明。
 
-- **WHEN** 搜索 memory-architecture.md 中的 "FileBackend"
-- **THEN** 返回零结果
-- **AND** 所有引用已替换为 "FileSegmentStore"
+#### Scenario: 历史注记形式
 
-#### Scenario: QueryOptions 包含 Keyword
+- **WHEN** 文档提及已移除的机制或符号
+- **THEN** 该提及 SHALL 明确标注为历史（如「早期 X 已在 Y 重构中移除，相应代码已删除」）
+- **AND** SHALL NOT 以现行时态描述其行为
 
-- **WHEN** 阅读 memory-architecture.md 中 QueryOptions 结构体
-- **THEN** 文档包含 `Keyword string` 字段
+### Requirement: 内部审计编号不进入 wiki
 
-### Requirement: tool-architecture.md AgentToolWrapper 完整文档
+wiki 正文 SHALL 以工程语义直接陈述事实（写清是什么行为、由哪个文件或哪个字段决定），SHALL NOT 以
+变更级审计或复验的条目编号作为解释依据——这类编号（某轮 review 的小节号、带圈序号、单字母加数字
+的代号）在其所属变更归档后即不可解。设计契约编号（如解耦缝 C6、决策 D1）在 `openspec/specs/` 或
+roadmap 中有定义者可保留，且首次出现处宜给白话解释。
 
-tool-architecture.md SHALL 记录 AgentToolWrapper 的完整实现，包括：
-- 行数 ~160→373
-- Call 方法中的 Response.Clone() 防御层
-- event_key → 外部上下文解析逻辑
-- finalOutput 提取逻辑（取最后一个有效 choice）
+#### Scenario: 无归档变更的条目编号
 
-#### Scenario: AgentToolWrapper 行数准确
+- **WHEN** 扫描 wiki 正文
+- **THEN** SHALL NOT 出现只能经查阅已归档变更才能理解的审计条目编号
+- **AND** 相应位置 SHALL 以工程语义描述替代（含决定该行为的文件/字段/常量名）
 
-- **WHEN** 阅读 tool-architecture.md 中 tool_agent.go 的行数引用
-- **THEN** 文档显示 373 行
+### Requirement: 末章声明已知缺口
 
-#### Scenario: Response.Clone 防御层文档
+每篇 wiki SHALL 以「已知缺口与演进方向」末章主动声明尚未闭合的环，以工程事实陈述**现状与防线 +
+候选方向**，不粉饰、不承诺排期。缺口被修复后 SHALL 更新该章（可保留一行「已修」注记并写明由哪个
+字段/函数承载），SHALL NOT 留存过时的缺口描述。
 
-- **WHEN** 阅读 tool-architecture.md 中 AgentToolWrapper.Call 方法文档
-- **THEN** 文档说明对 evt.Response 调用 Clone() 方法
-- **AND** 文档说明 Clone 的目的是防御性隔离
+#### Scenario: 缺口章存在且非粉饰
 
-### Requirement: plugin-architecture.md ParentKey 和 SetParent 修正
+- **WHEN** 阅读任一篇 wiki 的末章
+- **THEN** SHALL 存在「已知缺口与演进方向」章
+- **AND** 每条缺口 SHALL 含现状/防线与候选方向两部分
 
-plugin-architecture.md SHALL 移除 FullEvent 中的 ParentKey 字段（§10.2），并修正 MemoryPlugin Step 10 的 SetParent 实现为 type assertion 方式。
+#### Scenario: 已修缺口同步
 
-#### Scenario: §10.2 FullEvent 无 ParentKey
-
-- **WHEN** 阅读 plugin-architecture.md §10.2 FullEvent 结构体
-- **THEN** 不包含 ParentKey 字段
-
-#### Scenario: Step 10 SetParent 使用 type assertion
-
-- **WHEN** 阅读 plugin-architecture.md 中 MemoryPlugin Step 10 SetParent 实现
-- **THEN** 代码使用 `p.memStore.(memory.RelationStoreProvider)` type assertion
-- **AND** 包含 ok 检查保护
-
-#### Scenario: memory_plugin.go 行数准确
-
-- **WHEN** 阅读 plugin-architecture.md 中 memory_plugin.go 的行数引用
-- **THEN** 文档显示 223 行
-
-### Requirement: recall_subtools.go 代码示例无 ParentKey
-
-所有 wiki 文档中引用 recall_subtools.go 的代码示例 SHALL 不访问 `evt.ParentKey` 字段。
-
-#### Scenario: recall 相关代码示例无 ParentKey
-
-- **WHEN** 搜索所有 wiki 文档中对 `ParentKey` 的引用
-- **THEN** 返回零结果（除非在历史说明上下文中）
+- **WHEN** 某缺口在代码中已闭合
+- **THEN** 该条 SHALL 被更新为已修状态并指明承载实现，或移出缺口清单

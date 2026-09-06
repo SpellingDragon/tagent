@@ -43,10 +43,13 @@ The RustViking CLI SHALL expose a `kv range` subcommand accepting `--start` (inc
 
 `RustVikingClient` SHALL integrate with RustViking **exclusively via local CLI** (`exec.Cmd`). The client SHALL NOT expose a `mode` configuration, a `server` / `gRPC` / `HTTP` branch, or any `ErrServerNotImplemented` placeholder. All KV operations SHALL dispatch directly to `rustviking <subcommand>` subprocess.
 
+实现居于 `memory/kv` 子包（KV 存储后端专区）；`KVStore` 契约本身居核心包 `memory/kv.go`。
+
 #### Scenario: Client construction accepts only CLI config
 
-- **WHEN** `NewRustVikingClient(cfg)` is called
-- **THEN** `cfg` SHALL expose only `BinaryPath` and `ConfigPath`; no `Mode` / `ServerAddr` / `Endpoint` fields SHALL exist
+- **WHEN** `kv.NewRustVikingClient(binaryPath, configPath)` is called
+- **THEN** 构造函数 SHALL 只接受 binary 路径与 config/data 路径两个字符串参数（`binaryPath` 为空时默认 `"rustviking"` 并经 PATH 查找）
+- **AND** `RustVikingClient` SHALL NOT 暴露 `Mode` / `ServerAddr` / `Endpoint` 等配置字段或分支
 
 #### Scenario: All KV operations fork CLI subprocess
 

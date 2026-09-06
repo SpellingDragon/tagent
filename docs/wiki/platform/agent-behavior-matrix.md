@@ -7,7 +7,8 @@
 > **本 example(wechat-bot/tagent.yaml)的生效配置快照**:
 > 治理 `enforcement=warn` + 预算(high 20/medium 200 每 60min,per-agent) + critical 恒审批;
 > 自进化 `enabled` + `skip_approval=false` + protected=`[SOUL.md, AGENTS.md]`;
-> 可靠性 `degradation_enabled` + bus/mem spill + 冥想锚点持久化;语义引擎 `512 维 zhipu embedding-3`。
+> 可靠性 `degradation_enabled` + bus/mem spill + 冥想锚点持久化;语义引擎 `512 维 zhipu embedding-3`;
+> 工作根 `working_dir` 默认空(= 部署目录),部署时经 `TAGENT_WORKING_DIR` 指定 clone 根(见 §六)。
 
 ---
 
@@ -47,7 +48,7 @@ sequenceDiagram
 
 **关键行为**:
 - **digest 绑定防绕过**:批准绑定参数 sha256;若 agent 批准后**改了参数**再调,`digest` 不匹配 → 不命中 → 重新走审批(`approval.go checkIndex`)。
-- **异步不阻塞**:critical 挂起不阻塞事件循环(立即返回拒绝 + 请求 ID),审批经文件重扫可见(`Check` 节流 2s 重扫 `approvals/`)。
+- **异步不阻塞**:critical 挂起不阻塞事件循环(立即返回拒绝 + 请求 ID),审批经文件重扫可见(`Check` 未命中时节流重扫 `approvals/`,间隔默认 2s、可注入)。
 - **warn 不放松 critical**:即使 `enforcement=warn`,critical 未批准**仍不执行**(Disposition=Hold 恒触发拒绝)——warn 只放松 high/medium 的记账放行,不放松不可逆操作。
 
 ### 1.3 预算耗尽(`gate.go` budget 分支 + `budget.go`)
@@ -56,7 +57,7 @@ sequenceDiagram
 |------|-----------|
 | 60min 窗内 high 级操作 > 20 次 | 第 21 次 high 操作 → **拒绝**(Denied=true),返回"本窗口 high 级预算已耗尽,请稍后或降低风险" |
 | 60min 窗内 medium 级 > 200 次 | 同上,medium 预算耗尽拒绝 |
-| 预算按 **agent 独立**(W3 用户裁决) | 子 agent 刷爆自己的预算**不影响** entry/其他 agent(各持独立 BudgetManager,`data/governance/budget/<agent>`) |
+| 预算按 **agent 独立**(设计裁决:子 agent 不共享 entry 预算) | 子 agent 刷爆自己的预算**不影响** entry/其他 agent(各持独立 BudgetManager,`data/governance/budget/<agent>`) |
 | 滑窗恢复 | 窗口滑过(60min)后计数衰减,操作恢复放行 |
 
 > ⚠️ **预算是硬闸**:`Denied=true` **不受 `enforcement=warn` 放松**(warn 不会让超预算操作放行)。这是有意的——预算防单 agent 失控刷爆,是安全底线。
@@ -72,13 +73,13 @@ sequenceDiagram
 
 **结论**:本 example 的 `warn` 模式下,治理**几乎不阻断正常操作**(high/medium 放行),仅在
 critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影响"high+ 无 goal"分支(需先交付
-`goal_declare` 工具,否则 strict 下 high+ 自治操作会反复撞墙——见 `gate.go` A7 注释)。
+`goal_declare` 工具,否则 strict 下 high+ 自治操作会反复撞墙——见 `gate.go` 中 goal 门的设计注释)。
 
 ### 1.5 审计与可观测
 
 - 每次 record/denial/approval/degraded 写一条 `governance` 事件到 **entry agent 的持久 memStore**
-  (N2:所有 agent 共享同一 `DenialLedger`,子 agent 审计也 durable,重启可 recall)。
-- 事件含**来源 agent 归属**(§8.1:`metadata["agent"]`)——多子 agent 治理事件可按来源区分。
+  (所有 agent 共享同一 `DenialLedger` 实例,子 agent 审计也 durable,重启可 recall)。
+- 事件含**来源 agent 归属**(`DenialRecord.AgentName` → `metadata["agent"]`,omitempty)——多子 agent 共享 Ledger 时治理事件可按来源区分。
 - 你可用 `recall` / `memory_query` 检索治理历史(如"最近被拒的操作")。
 
 ---
@@ -103,7 +104,7 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 flowchart TD
     P["refine propose"] --> S["Submit(draft)"]
     S --> B{有 active 基线?}
-    B -->|否| REJ0["拒绝(⑥守卫):无基线不回滚落空"]
+    B -->|否| REJ0["拒绝(无基线守卫):防回滚落空"]
     B -->|是| R{DiffLaneRouter 路由}
     R -->|仅提示词改动| FAST["快道:SetActive(canary)→后验评估"]
     R -->|模型/参数/protected| SLOW["慢道:replay→shadow→canary→人工批准门"]
@@ -121,15 +122,15 @@ flowchart TD
 | 场景 | agent/系统反应 | 依据 |
 |------|---------------|------|
 | **protected 提示词改动**(SOUL.md/AGENTS.md) | 强制走**慢道** → 需人工批准(`skip_approval=false`)才激活;未批准不生效 | `release.go touchesProtected` |
-| **无 active 基线**时 propose/submit | Submit 直接 **reject**(不 canary,防孤儿 draft 滞留 active 无回滚锚点) | `release.go` ⑥守卫 |
-| **后验 judge 不可用/样本 < 5** | **保守通过**(不劣化回滚)——避免因 judge 缺席误杀正常变更 | `release.go` M3 + judge |
+| **无 active 基线**时 propose/submit | Submit 直接 **reject**(不 canary,防孤儿 draft 滞留 active 无回滚锚点) | `release.go` 无基线守卫 |
+| **后验 judge 不可用/样本 < 5** | **保守通过**(不劣化回滚)——避免因 judge 缺席误杀正常变更 | `evolution/judge.go` 保守策略 |
 | **canary 观察窗 ctx 被取消** | **诚实停留 canary**(不提升 active 也不回滚),下次 Submit/重启重评 | `release.go` fast lane |
-| **rollback 到被拒 draft** | wasActive 白名单**拒绝**(只可回滚曾 Stage=active 的版本,防绕发布道) | `refine.go` E1 |
-| **rollback 到基线** | 允许(基线经 `seedActiveBaseline` 自动入白名单,跨重启恢复) | `release.go` ④ N1 |
+| **rollback 到被拒 draft** | wasActive 白名单**拒绝**(只可回滚曾 Stage=active 的版本,防绕发布道直接激活) | `refine.go` wasActive 白名单 |
+| **rollback 到基线** | 允许(基线经 `seedActiveBaseline` 自动入白名单,跨重启恢复) | `release.go` seedActiveBaseline |
 | **重启后** | 发布历史从 `data/evolution/releases.jsonl` 重建,rollback 白名单跨重启有效 | `release.go` loadHistory |
 | 生效时机 | 激活在**回合边界**原子切 active 指针(热配置,不中断当前 turn) | VersionedSource |
 
-> 注(M12 宣称收窄):当前运行期应用点仅**提示词**;bundle 的 params/model 字段=存储就绪,
+> 注(宣称收窄):当前运行期应用点仅**提示词**;bundle 的 params/model 字段=存储就绪,
 > 参数/模型热切换为后续增强(refine 提案字段白名单只含 prompts)。
 
 ---
@@ -235,6 +236,9 @@ stateDiagram-v2
 | 改 `mcp_servers` 段 | **热同步**(mtime 惰性检查),增删 MCP server **免重启** |
 | 改 governance/evolution/reliability/agents | 需 `systemctl restart` 生效 |
 | 临时排障开 debug | `systemctl edit` 加 `Environment=LOG_LEVEL=debug`(默认 info,避免明文落日志) |
+| 设了工作根(`TAGENT_WORKING_DIR`,如项目 clone 根) | agent 的 **file 工具 `base_dir` 与 exec 命令 cwd 同时**以它为基准(二者恒一致 → 模型看到单一文件系统视图),可读写该目录下所有仓库;tagent 自身的配置/资源/数据路径**不受影响**(仍相对部署目录) |
+| 工作根设在部署目录**外** | 需**两道放行**才可写:① 文件系统层 ACL(`./wizard.sh --perms` 给服务用户追加 `rwX`,含已有文件 + 默认 ACL 继承新建,不改原有 owner/group/mode);② systemd 沙箱层 `ReadWritePaths` 追加该绝对路径(`ProtectSystem=strict` 下缺此则只读失败) |
+| 工作根留空(默认) | file/exec 均继承进程工作目录(= 部署目录),行为与未引入该配置前逐字节一致 |
 
 ---
 

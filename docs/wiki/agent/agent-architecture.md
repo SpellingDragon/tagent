@@ -2,7 +2,7 @@
 
 ## 一、模块定位
 
-`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [prototype/agent.go](../../../prototype/agent.go)（126 行抽象实现），原型用可替换的函数字段定义了一个可扩展的框架骨架。
+`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [prototype/agent.go](../../../prototype/agent.go) 的抽象实现，原型用可替换的函数字段定义了一个可扩展的框架骨架。
 
 ### 原型到生产的映射
 
@@ -72,35 +72,55 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
     retryDelays := []time.Duration{100ms, 200ms, 400ms}
 
     for {
-        events, err := bus.Pull(ctx)          // ① 拉取事件（批量）
+        events, err := bus.Pull(ctx)          // ① 拉取事件（批量；混合批先丢弃冥想事件）
         msg := cm.BuildInvocation(events)     // ② 合并为一条 user message
         if msg.Content == "" { continue }
 
-        spanCtx, turnSpan := startTurnSpan(ctx, events)      // ③ turn root span（tagent.turn，noop 安全）
+        cm.SetTriggerSource(extractTriggerSource(events))     // 消费侧确定性派发
+        cm.SetInvocationMetadata(extractRootMetadata(events)) // chat_id/user_name 等经 meta_* 传播
+
+        spanCtx, turnSpan := startTurnSpan(ctx, turnSpanAttrs{   // ③ turn root span（noop 安全）
+            AgentName: ta.name, TriggerSource: source, ChatID: chatID,
+            BatchSize: len(events), EventSources: eventSources(events),
+            LinkTraceID: meta[trace_id], LinkSpanID: meta[span_id], // task_settled 回流 → span link
+        })
         spanCtx = governance.WithTriggerSource(spanCtx, source) // ctx 盖章 trigger source（goal 门消费）
 
-        retriedDegenerate := false
+        retried, retriedDegenerate := false, false
         for attempt := 0; attempt <= maxRetries; attempt++ {
-            if err := cm.RunFlow(spanCtx, msg); err != nil {
-                if ctx.Err() != nil { endTurnSpan(turnSpan, retriedDegenerate); return } // ctx 早退（补 End 防泄漏）
-                if attempt < maxRetries {
-                    time.Sleep(retryDelays[attempt])  // 退避等待
-                    continue
+            if attempt > 0 {                    // 重试前查 ctx + 退避等待（select 可被 ctx 打断）
+                if ctx.Err() != nil { endTurnSpan(turnSpan, retriedDegenerate); return }
+                select {
+                case <-time.After(retryDelays[attempt-1]):
+                case <-ctx.Done(): endTurnSpan(turnSpan, retriedDegenerate); return
                 }
-                log.Errorf(...)  // 重试耗尽：仅记日志 + degradation.ReportFailure(DepModel)
-                                   // （每 turn 至多一次；成功上报恢复；不再发布错误事件）
             }
-            break
+            if err := cm.RunFlow(spanCtx, msg); err != nil {
+                if attempt < maxRetries { retried = true; continue }
+                // 重试耗尽：仅记日志 + degradation.ReportFailure(DepModel)——每 turn 至多一次，
+                // ctx 取消（关机）不计退化；RunFlow 只返回传输层错误（model-API 错误经 outputCh
+                // 流出），故不发布错误事件。
+                if ta.degradation != nil && ctx.Err() == nil {
+                    ta.degradation.ReportFailure(DepModel, err)
+                }
+            } else {
+                if ta.degradation != nil { ta.degradation.ReportSuccess(DepModel) } // 恢复路径
+                // 退化 turn（无工具调用且空 final）额外重试一次——判定在**成功分支内**
+                if cm.LastTurnDegenerate() && !retriedDegenerate && attempt < maxRetries {
+                    retriedDegenerate = true; continue
+                }
+                break
+            }
         }
-        if cm.LastTurnDegenerate() && !retriedDegenerate {
-            retriedDegenerate = true; continue  // 退化 turn（无工具调用且空 final）重试一次
+        endTurnSpan(turnSpan, retriedDegenerate) // 退化重试记为属性，同一 turn 不另开 root span
+        if ta.meditationMgr != nil {
+            ta.meditationMgr.UpdateLastTurnEnd(time.Now()) // 空闲闸门锚点：任意 turn 结束都算忙
         }
-        endTurnSpan(turnSpan, retriedDegenerate)
     }
 }
 ```
 
-**错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次；ctx 取消不计）。重试耗尽后**仅记日志并上报 DegradationManager 的 model 依赖失败**（每 turn 至多一次，成功上报恢复路径；RunFlow 返回的是传输层错误，model-API 错误经 outputCh 流出，故不再发布错误事件）。退化 turn（无工具调用且空 final）额外重试一次（同一 turn span，`degenerate_retry` 属性标记，不另开 span）。`BuildInvocation` 只要求 `Type=external_input` 且 `Message` 非空，不区分 Source。
+**错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次；ctx 取消不计）。重试耗尽后**仅记日志并上报 DegradationManager 的 model 依赖失败**（每 turn 至多一次，成功时经 `ReportSuccess` 走 degraded→recovering→normal 恢复路径；RunFlow 返回的是传输层错误，model-API 错误经 outputCh 流出，故不再发布错误事件）。退化 turn（无工具调用且空 final）在**成功分支内**判定并额外重试一次（同一 turn span，`degenerate_retry` 属性标记，不另开 span）。`BuildInvocation` 只要求 `Type=external_input` 且 `Message` 非空，不区分 Source。
 
 `StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`。
 

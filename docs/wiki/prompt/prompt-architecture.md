@@ -18,12 +18,13 @@
 
 ## 二、文件清单
 
-| 文件 | 行数 | 职责 |
-|------|------|------|
+| 文件 | 职责 |
+|------|------|
 | `loader.go` | Prompt 加载器：单文件/目录/组合/bootstrap 加载 + 内嵌 FS 回退（`WithFallback`） |
 | `source.go` | `Source`：mtime 感知的热重载 prompt 源（工具描述热更新用；nil-receiver 守卫） |
 | `getter.go` | `Getter` 接口（`Get() (string, error)` + `IsEmpty() bool` 两方法）：热配置提示词源抽象缝；`*Source` 编译期满足 |
-| `loader_test.go` | 10.1KB | 单元测试 |
+| `loader_test.go` / `loader_fallback_test.go` | 加载器单元测试 + 内嵌 FS 回退专项（磁盘优先、miss 回退、绝对路径不回退） |
+| `source_test.go` | 热重载 Source 单元测试（mtime 变更重读、inline-only 只加载一次） |
 
 ---
 
@@ -48,39 +49,57 @@ graph TB
 
 ## 四、Loader — 核心数据结构
 
-### 3.1 数据结构
+### 4.1 数据结构
 
 ```go
-// prompt/loader.go:12-16
+// prompt/loader.go
 type Loader struct {
     // BaseDir: 所有相对路径的基准目录
     BaseDir string
+
+    // fallbackFS: 内嵌缺省 prompt FS（经 WithFallback 注入）。磁盘 BaseDir 下
+    // 文件/目录缺失时回退到它——磁盘永远优先。
+    // fallbackPrefix: FS 内 prompt 根路径（如 resources/prompts），正斜杠分隔。
+    fallbackFS     fs.FS
+    fallbackPrefix string
 }
 ```
 
-`Loader` 是一个轻量结构，`BaseDir` 为所有相对路径提供基准路径解析。
+`Loader` 是一个轻量结构，`BaseDir` 为所有相对路径提供基准路径解析；两个私有 fallback
+字段承载内嵌缺省（详见 §十）。
 
-### 3.2 工厂函数
+### 4.2 工厂函数
 
 ```go
-// prompt/loader.go:18-23
-func NewLoader(baseDir string, opts ...LoaderOption) *Loader { // 支持 WithFallback 等选项
-    return &Loader{BaseDir: baseDir}
+// prompt/loader.go
+func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
+    l := &Loader{
+        BaseDir: baseDir,
+    }
+    for _, opt := range opts {
+        opt(l) // WithFallback 等选项在此生效
+    }
+    return l
 }
 ```
+
+无选项时只读磁盘 `BaseDir`（行为与引入 fallback 前一致）；传 `WithFallback(fsys, prefix)`
+才启用内嵌缺省回退。
 
 ---
 
 ## 五、加载方法详解
 
-### 4.1 LoadFromFile — 单文件加载
+### 5.1 LoadFromFile — 单文件加载
 
 ```go
-// prompt/loader.go:43-69
+// prompt/loader.go
 func (l *Loader) LoadFromFile(path string) (string, error) {
     if path == "" {
         return "", errors.New("prompt file path is empty")
     }
+
+    orig := path // 保留原始路径，供内嵌回退按 base name 查找
 
     if !filepath.IsAbs(path) && l.BaseDir != "" {
         path = filepath.Join(l.BaseDir, path)
@@ -93,6 +112,10 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 
     data, err := os.ReadFile(path)
     if err != nil {
+        // 磁盘 miss + 已配内嵌 FS → 回退内嵌缺省（磁盘永远优先；绝对路径不回退）
+        if content, ok := l.fallbackFile(orig, err); ok {
+            return content, nil
+        }
         return "", fmt.Errorf("read prompt file %s: %w", path, err)
     }
 
@@ -108,16 +131,18 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 - 支持绝对路径和相对路径（相对路径以 `BaseDir` 为基准）
 - 路径 trim 空格，避免意外空格导致的路径错误
 - 空文件返回空字符串（`nil` 错误），而非报错
-- 文件不存在时返回 `fmt.Errorf` 包装的错误，调用方可通过 `errors.Is` 解包
+- 磁盘读失败时先试内嵌 FS 回退（`fallbackFile`，仅 `os.ErrNotExist` 且非绝对路径），未配置回退或回退也 miss 才返回 `fmt.Errorf` 包装的错误，调用方可通过 `errors.Is` 解包
 
-### 4.2 LoadFromDir — 目录加载
+### 5.2 LoadFromDir — 目录加载
 
 ```go
-// prompt/loader.go:75-127
+// prompt/loader.go
 func (l *Loader) LoadFromDir(dir string) (string, error) {
     if dir == "" {
         return "", errors.New("prompt directory path is empty")
     }
+
+    orig := dir // 保留原始路径，供内嵌回退按 base name 查找
 
     if !filepath.IsAbs(dir) && l.BaseDir != "" {
         dir = filepath.Join(l.BaseDir, dir)
@@ -130,6 +155,10 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 
     entries, err := os.ReadDir(dir)
     if err != nil {
+        // 整目录回退：磁盘目录缺失时扫内嵌同名目录（不与磁盘做逐文件合并）
+        if content, ok := l.fallbackDir(orig, err); ok {
+            return content, nil
+        }
         return "", fmt.Errorf("read prompt directory %s: %w", dir, err)
     }
 
@@ -170,11 +199,12 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 - **非递归**：不递归子目录，仅处理当前目录文件
 - **仅 .md**：加载 `.md` 文件（大小写不敏感）
 - **严格错误处理**：任何文件加载失败都会中断整个目录加载
+- **整目录回退**：磁盘目录不存在时回退内嵌同名目录（`fallbackDir`，同样排序 + `\n\n` 拼接）；不与磁盘内容做逐文件合并——磁盘目录存在即完全以磁盘为准
 
-### 4.3 LoadFiles — 多文件加载
+### 5.3 LoadFiles — 多文件加载
 
 ```go
-// prompt/loader.go:132-152
+// prompt/loader.go
 func (l *Loader) LoadFiles(paths []string) (string, error) {
     parts := make([]string, 0, len(paths))
 
@@ -205,10 +235,10 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 | 顺序 | 按 `paths` 参数顺序 | 按文件名排序 |
 | 失败行为 | 遇到错误中断 | 遇到错误中断（同样严格） |
 
-### 4.4 LoadComposite — 组合加载
+### 5.4 LoadComposite — 组合加载
 
 ```go
-// prompt/loader.go:160-192
+// prompt/loader.go
 func (l *Loader) LoadComposite(inline string, files []string, dir string) (string, error) {
     parts := make([]string, 0, 1+len(files))
 
@@ -254,10 +284,10 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
 
 ## 六、Bootstrap 加载 — Agent 系统提示词
 
-### 5.1 BootstrapLoadOrder — 加载顺序
+### 6.1 BootstrapLoadOrder — 加载顺序
 
 ```go
-// prompt/loader.go:265-273
+// prompt/loader.go
 var BootstrapLoadOrder = []string{
     "AGENTS.md",     // 1. Agent 自身定义
     "SOUL.md",       // 2. 核心价值观/灵魂
@@ -268,10 +298,10 @@ var BootstrapLoadOrder = []string{
 }
 ```
 
-### 5.2 LoadBootstrap — Bootstrap 加载逻辑
+### 6.2 LoadBootstrap — Bootstrap 加载逻辑
 
 ```go
-// prompt/loader.go:215-278
+// prompt/loader.go
 func (l *Loader) LoadBootstrap(dir string) (string, error) {
     if dir == "" {
         return "", errors.New("bootstrap directory is empty")
@@ -330,7 +360,7 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 }
 ```
 
-### 5.3 Bootstrap 文件语义
+### 6.3 Bootstrap 文件语义
 
 | 文件 | 语义 | 典型内容 |
 |------|------|---------|
@@ -361,10 +391,10 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 
 ## 七、辅助函数
 
-### 6.1 SplitCSV — CSV 解析
+### 7.1 SplitCSV — CSV 解析
 
 ```go
-// prompt/loader.go:196-210
+// prompt/loader.go
 func SplitCSV(s string) []string {
     if s == "" {
         return nil
@@ -388,7 +418,7 @@ func SplitCSV(s string) []string {
 
 ## 八、与其他模块的关系
 
-### 7.1 依赖关系
+### 8.1 依赖关系
 
 ```
 tagent/prompt（加载层）
@@ -400,7 +430,7 @@ tagent/agent
         └── llmagent.WithInstruction（将 prompt 注入 system message）
 ```
 
-### 7.2 在 Agent 初始化中的位置
+### 8.2 在 Agent 初始化中的位置
 
 实际调用链：`tagent.New()` → `buildAgent()` → `loader.LoadComposite(inline, files, dir)`。
 `LoadComposite` 支持三种来源的灵活组装：内联文本、指定文件列表、整个目录。
@@ -425,17 +455,17 @@ sequenceDiagram
 > **补充**：`LoadBootstrap()` 提供了按 `BootstrapLoadOrder` 顺序加载指定文件的备选路径，
 > 适合固定的 bootstrap 文件约定场景。当前主流程使用 `LoadComposite` 以获得更大灵活性。
 
-### 7.3 BaseDir 的作用
+### 8.3 BaseDir 的作用
 
 `BaseDir` 使得 prompt 文件可以使用相对路径引用：
 
 ```go
-// 示例：BaseDir = "/path/to/openclaw"
-loader := prompt.NewLoader("/path/to/openclaw")
+// 示例：BaseDir = 部署目录下的 prompt 根
+loader := prompt.NewLoader("resources/prompts")
 
-// 加载相对路径 "docs/skills/python.md"
-// 实际读取 "/path/to/openclaw/docs/skills/python.md"
-loader.LoadFromFile("docs/skills/python.md")
+// 加载相对路径 "recall_tool_desc.md"
+// 实际读取 "resources/prompts/recall_tool_desc.md"
+loader.LoadFromFile("recall_tool_desc.md")
 ```
 
 这使得 prompt 文件的路径引用与部署环境解耦。
@@ -444,14 +474,14 @@ loader.LoadFromFile("docs/skills/python.md")
 
 ## 九、关键设计决策
 
-### 8.1 为什么用 `"\n\n"` 而不是其他分隔符？
+### 9.1 为什么用 `"\n\n"` 而不是其他分隔符？
 
 `"\n\n"`（两个换行）在 Markdown 中通常表示段落分隔，视觉效果清晰：
 - **可读性**：在源文件中是自然的段落分隔
 - **LLM 友好**：大多数 LLM 能正确理解段落边界的语义
 - **无歧义**：不会与单换行或代码块内的换行混淆
 
-### 8.2 为什么空文件不报错？
+### 9.2 为什么空文件不报错？
 
 ```go
 if content == "" {
@@ -461,7 +491,7 @@ if content == "" {
 
 **原因**：Bootstrap 场景中某些可选文件（如 `HEARTBEAT.md`）可能不存在。不存在和存在但为空都应该跳过，不中断整个加载过程。
 
-### 8.3 为什么目录加载不递归子目录？
+### 9.3 为什么目录加载不递归子目录？
 
 **原因**：
 - 避免意外的加载顺序（子目录深度不确定）

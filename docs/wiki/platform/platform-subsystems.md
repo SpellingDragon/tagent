@@ -50,10 +50,12 @@ refine 工具是 agent 的自我修改通道：**propose/diff/status/rollback �
 
 ## 六、常驻可靠性（reliability）
 
-- **ReliableBus**：channel 满则事件溢出落盘（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复），at-least-once 不丢事件；
-- **DegradationManager**：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 + event_loop model 上报 + mcp_call DepMCP 上报）；
-- **mem_spill**：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
-- **AnchorStore**：冥想三锚点持久化，重启不误触发。
+四项各自独立的开关（全部空/false = 现状零行为变化）：
+
+- **ReliableBus**（开关 `bus_spill_dir` 非空）：channel 满则事件溢出落盘（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复），at-least-once 不丢事件；
+- **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；
+- **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
+- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
 
 ## 七、可观测（默认 noop 零开销）
 
@@ -75,7 +77,7 @@ C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现；engine
 
 ## 已知缺口与演进方向
 
-- ~~治理审计事件尚无来源 agent 字段~~ **已修(§8.1,postmerge-review-fixes 已归档)**:`DenialRecord.AgentName` + 事件 `metadata["agent"]`(omitempty),多子 agent 共享 Ledger 时治理审计可按来源区分;
+- ~~治理审计事件尚无来源 agent 字段~~ **已修**：`DenialRecord.AgentName`（json `agent,omitempty`）经 `GateDeps.AgentName` 由组合根按 agent 名注入 → 写事件 `metadata["agent"]`（omitempty，单 entry 场景不写噪声空键）→ `rebuildFromStore` 回读；多子 agent 共享同一 Ledger 时治理审计可按来源区分；
 - 慢道 replay/shadow 门为预留（nil 通过 + 审批门已实装默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点；
 - Jaeger OTLP 实录与 AReaL reward 消费格式核对为环境实装项（非代码缺口）；
 - **启用后 agent 在各复杂场景的行为反应**:见 [agent-behavior-matrix.md](./agent-behavior-matrix.md)(分场景分类,溯源代码);
