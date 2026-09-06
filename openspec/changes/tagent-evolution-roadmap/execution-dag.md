@@ -261,3 +261,11 @@ flowchart TB
 - **W2/W3 修复前,禁止在任何真实部署启用 Governance**(critical 恒 Hold + 主风险面绕闸);
 - **E1/E2/W4 修复前,Evolution 仅限实验环境**(默认关闭不伤现状);
 - flaky 两例维持 D6 名单处置(失败先 Debug 三重证据定性,不阻塞准出但记录)。
+
+### 8.7 复验(2026-09-06 第二轮:修复轮 audit,重要认知更正)
+
+- **修复轮(a6b2de2..26c1e16,3 commits)实测为正交修复,非 §8 Major 的修复**:①四审 M-1——`type:file` 后端补 `namedRVStores` 共享注册(复验 PASS:裸实例入表、装饰仍在 buildAgent 侧 tagent.go:332/337,与 localfile 同构);②S-1 trajectory final Sync;③S-2 knowledge `query_error` 显式返回(信号不再倒置);④P0 直做(CI workflow 结构合理:tmux 预装/short+race 分流/3 上游竞态豁免有据;README 依赖表;CHANGELOG;plan desc 路径修复);⑤4 个 delta specs 升主规格。
+- **§8.3 六项 Major 逐项复验:全部 NOT FIXED**——修复轮 19 文件中 refine.go / mem_spill.go / approval.go / eval.go / release.go **零命中**;E1/W1/W3 代码逐字符未变;W2 的 Decide 生产调用方与 Gate Approval 访问器仍双空(grep 复核);W4 仅新增"近似该 bundle 激活后的表现"注释——**以注释承认近似,而非修复**。`postmerge-review-fixes/` 原为空壳。
+- 门禁亲验(修复轮后):build/vet ✅;全量 `-short` **33 包全 ok**;新子系统+tool/...+rl **11 包 `-race` 全绿**。
+- 新卫生项:`.qoder-handover.sh` 临时脚本被误提交进 git(本记录随附 commit 中已 git rm)。
+- **处置裁决(用户,2026-09-06)**:六项 Major 修复**交接接手者执行**,容器 = `postmerge-review-fixes/`(tasks.md 已填实为可勾选清单,引用 §8.3/§8.4,含 W2/W3 设计决策点);不另起变更;§8.6 启用禁令持续有效至对应项修复。
