@@ -97,7 +97,7 @@ evolution:
 
 ## 4. 退役面与兼容
 
-- **删除清单**:bundle.go/source.go/release.go 状态机+全部测试;refine propose/diff;tagent.go 的 VersionedSource 装配/InitBaseline/N1 seed/BindPosterior 接线(改为 WindowTracker 接线);config 发布道字段。
+- **删除清单**:bundle.go/source.go/release.go 状态机+全部测试;refine propose/diff;tagent.go 的 VersionedSource 装配/InitBaseline/N1 seed/BindPosterior 接线(评估改由 register 后的 judge_delay 定时触发,窗口=improvement 事件);config 发布道字段。
 - **既有 bundle 存档**:不做自动迁移(默认关的功能,无生产迁移压力);README 迁移注记一行(历史 bundle JSON 为只读存档)。
 - **roadmap 联动**:D4 replay/shadow 门 → git worktree 双版本对照(设计挂 P2 重启时);D5 发布道条目 → 本变更替代;§5A 相关裁定行由本变更 proposal 引用修订。
 
