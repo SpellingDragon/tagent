@@ -7,7 +7,6 @@ import (
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
-	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // ==================== 巩固容量触发（4.2 design-report-closeout） ====================
@@ -87,17 +86,19 @@ func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventT
 		t.mu.Unlock() // snooze 窗内：不打扰（计数保留，窗过期后的下一次边界事件再提示）
 		return
 	}
+	// §8.11⑨：sink 未就绪（SetOnHint 晚于 agent 构造的装配窗口）时**不清零不记 snooze**
+	// ——保留计数，sink 接线后的下一条边界事件即触发（提示延迟不丢）。
+	fn := t.onHint
+	if fn == nil {
+		t.mu.Unlock()
+		return
+	}
 	// 触发：清零重新积累（counts 与 recent 同步——候选清单口径一致）+ 记 hint 时刻。
 	t.counts[partitionID] = 0
 	t.recent[partitionID] = nil
 	t.lastHint[partitionID] = now
-	fn := t.onHint
 	t.mu.Unlock()
-	if fn != nil {
-		fn(partitionID, count)
-	} else {
-		log.Infof("[consolidation-hint] partition %d reached %d boundary events (no hint sink wired)", partitionID, count)
-	}
+	fn(partitionID, count)
 }
 
 // CandidatesText（4.3 design-report-closeout）渲染该分区的可巩固候选段（冥想 digest

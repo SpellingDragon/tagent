@@ -214,10 +214,10 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 	<-done
 }
 
-// TestWalQuarantinedSurfacedInDiagnostics (§8.11⑤): the F3 quarantine counter
-// must be reachable through the decorator chain (bridge + ErrorTrackingStore)
-// by the diagnostics snapshot — previously defined but never consumed.
-func TestWalQuarantinedSurfacedInDiagnostics(t *testing.T) {
+// TestWalQuarantined_BareKV (§8.11⑤): bare-KV level quarantine counting.
+// The full decorator-chain reachability is covered by
+// TestDiagnostics_WALQuarantinedThroughChain in memory/engine.
+func TestWalQuarantined_BareKV(t *testing.T) {
 	dir := t.TempDir()
 	// Hand-write a WAL: good head + bad mid line + good tail (the good tail
 	// proves the bad line is mid-file → quarantined, not torn-tail).

@@ -81,6 +81,13 @@ func (cm *ContextManager) deliverEvent(ctx context.Context, evt *event.Event) bo
 	case <-ctx.Done():
 		return false
 	case <-time.After(outputSendGrace):
+		// §8.11②：宽限到期瞬间 send 可能恰好就绪（select 多 case 就绪时随机择一）——
+		// 落盘前先非阻塞重试一次直接送达，避免不必要的落盘+票据化。
+		select {
+		case cm.outputCh <- evt:
+			return true
+		default:
+		}
 		if cm.overflowDir == "" {
 			log.Warnf("[RunFlow] outputCh stalled >%s; event dropped (no overflow dir configured)", outputSendGrace)
 			return false

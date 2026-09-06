@@ -33,7 +33,7 @@ func (c GateConfig) withDefaults() GateConfig {
 	if c.Enforcement == "" {
 		c.Enforcement = EnforcementWarn
 	}
-	// GoalRequiredFor 默认空 = 不启用 goal 门（A7：goal_declare 已交付（§5.1 govx 五件套，
+	// GoalRequiredFor 默认空 = 不启用 goal 门（A7 注：goal_declare 已交付——§5.1 govx 五件套；
 	// [meditation,task] 则 strict 模式下 high+ 自治操作恒拒且 agent 无自纠路径 → 反复撞墙）。
 	// 待 goal_declare/goal_close 工具交付后，由配置显式启用。
 	return c

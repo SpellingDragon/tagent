@@ -179,6 +179,11 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if err != nil {
 		return fmt.Sprintf("重跑任务 %s 失败：%v", tk.ID, err), nil
 	}
+	// §8.1 第三调用点（review 第七轮）：gate 拒绝时如实告知——重跑的启动已执行但
+	// 未纳管（detector 已被 Spawn 取消），绝不能报「已重跑」。
+	if res.Blocked != "" {
+		return fmt.Sprintf("重跑未被任务层纳管（启动已执行但跟踪已取消，结果不会回写）：%s。可稍后重试。", res.Blocked), nil
+	}
 	if res.Task != nil {
 		return fmt.Sprintf("已重跑任务（原 %s，新 %s）：%s", tk.ID, res.Task.ID, tk.Spec.Desc), nil
 	}

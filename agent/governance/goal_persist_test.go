@@ -103,9 +103,20 @@ func TestGoalRegistry_ConcurrentNoResurrection(t *testing.T) {
 	// All churn goals were resolved → rebuild must show zero ACTIVE churn.
 	reg2 := NewGoalRegistry()
 	reg2.BindStore(store, pid)
+	activeChurn, resolvedChurn := 0, 0
 	for _, g := range reg2.List() {
-		if g.Statement == "churn" && g.Status == GoalActive {
-			t.Fatalf("resurrection: churn goal %s revived as active after rebuild", g.ID)
+		if g.Statement != "churn" {
+			continue
 		}
+		if g.Status == GoalActive {
+			activeChurn++
+		} else {
+			resolvedChurn++
+		}
+	}
+	// 正向断言（第七轮 review）：40 条 churn 全部以 resolved 形态重建——
+	// rebuild 丢事件也会让此断言失败（此前只断言"无 active"，全丢也 PASS）。
+	if activeChurn != 0 || resolvedChurn != churn {
+		t.Fatalf("rebuild incomplete: active=%d resolved=%d, want 0/%d", activeChurn, resolvedChurn, churn)
 	}
 }

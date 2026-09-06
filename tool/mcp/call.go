@@ -106,6 +106,12 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("mcp_call: invalid args: %w", err)
 	}
 
+	// §8.11⑬：恢复后惰性归零探测计数——下次再退化时从头计数（无相位漂移）。
+	if t.degradation != nil && t.probeEvery > 0 && !t.degradation.IsDegraded(reliability.DepMCP) {
+		t.mu.Lock()
+		t.probeCount = 0
+		t.mu.Unlock()
+	}
 	// 5.4（design-report-closeout）：DepMCP degraded 熔断——每 N 次放行 1 次真探测
 	// （半开），其余快失败（自纠材料随 result 渗透，不 error）。零配置=关闭。
 	if t.degradation != nil && t.degradation.IsDegraded(reliability.DepMCP) {

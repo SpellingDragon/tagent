@@ -770,6 +770,15 @@ func (s *FileSegmentStore) GetStats() StoreStats {
 // （序列化向量入 KV + 启动重建，见 engine_persist.go）。
 func (s *FileSegmentStore) KVBackend() KVStore { return s.kv }
 
+// WalQuarantined 透传底层 KV 的 WAL 隔离计数（§8.11⑤ 第三跳——此前装饰链在
+// FileSegmentStore 断裂，诊断恒采 0）。
+func (s *FileSegmentStore) WalQuarantined() int64 {
+	if q, ok := s.kv.(interface{ WalQuarantined() int64 }); ok {
+		return q.WalQuarantined()
+	}
+	return 0
+}
+
 // SetVectorRemover 注册向量移除回调（wireMemoryEngine 包裹引擎后调用）。
 // 用 atomic 存：compactor goroutine 可能已在运行，读写需无竞态。
 func (s *FileSegmentStore) SetVectorRemover(vr VectorRemover) {

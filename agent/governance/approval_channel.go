@@ -54,6 +54,7 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 	if approvalsDir == "" {
 		return "", fmt.Errorf("governance: approvals dir not configured")
 	}
+	digest = strings.ToLower(digest) // §8.11④：ArgsDigest 为小写 sha256 hex，输入归一
 	if !isHexDigest(digest) {
 		return "", fmt.Errorf("governance: digest %q invalid (need >= 8 hex chars)", digest)
 	}
