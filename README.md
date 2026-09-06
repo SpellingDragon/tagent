@@ -305,6 +305,7 @@ graph TB
 | `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，**负值 = 关闭 TTL 遗忘**）/`type_ttl`（按事件类型覆盖，负值豁免）/`check_interval`（默认 `1h`）/`max_events_per_partition`（默认 0 = 不限） |
 | `memory.engine` | （关闭） | 语义检索引擎：`backend`（memory/rustviking，MVP 阶段等价，差异在向量持久化底座）/`embedding`（见下）/`vector_top_k`（20）/`keyword_top_k`（20）/`rrf_k`（60） |
 | `memory.engine.embedding` | （关闭） | `provider`（zhipu/mock）/`model`（embedding-3）/`api_key_env`（ZAI_API_KEY）/`endpoint`/`dimensions`（512/1024/2048）；开启后 recall 升级向量∪关键词 RRF 融合，key 缺失优雅降级纯关键词 |
+| `memory.engine.consolidation` | （关闭） | 巩固建议式触发（不依赖 embedding）：`capacity_threshold`（边界事件计数超阈发 consolidation_hint 渗透消息+冥想 digest 附候选，0=关）/`min_source_events`（memory_consolidate 硬门控，源不足显式拒绝）/`snooze`（提示静默窗，如 24h）。触发只是建议——执行权在 LLM+工具 |
 | `workspace_root` | `.tagent-workspace` | **scratch 根**（非工作根）：超大工具输出落 `<root>/tool-output`、tmux 命令目录 `<root>/exec`；与 `working_dir`（file/exec 的路径基准）是两个不同概念 |
 | `max_tool_iterations` | 入口 50 / 子 10 | 最大 ReAct 迭代次数 |
 | `max_tokens` | 入口 8000 / 子 4096 | 上下文 token 预算 |
@@ -347,7 +348,7 @@ graph TB
 |--------|---------|------|
 | `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效）；DenialLedger 审计事件写 entry memStore |
 | `evolution:` | `enabled` / `dir` / `skip_approval`（默认 false=慢道需批准）/ `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | 热配置自进化：refine 提案经发布道（快道 validate→canary→后验 LLM-judge；慢道加审批门）；rollback 仅限发布历史中曾生效版本 |
-| `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放）/ `meditation_anchor_dir`（冥想锚点跨重启） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线 |
+| `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放，重放双写投影）/ `meditation_anchor_dir`（冥想锚点跨重启）/ **降级行为层**（默认全关）：`degradation_model_backoff`（model 退化时 turn 间退避，如 5s）/ `degradation_mcp_probe_every`（mcp 退化时熔断半开探测间隔 N）/ `degradation_disk_block_spawn`（disk 退化时禁新任务 spawn，进行中任务不受影响） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线；降级行为是「闸不是墙」——每项独立开关，恢复即回正常路径 |
 
 详见 [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md)。
 

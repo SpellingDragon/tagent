@@ -40,9 +40,9 @@
 
 ## 6. 收尾
 
-- [ ] 6.1 LEDGER 五分歧裁定行核对引用（**已于提案期固化**——用户 2026-09-06 确认全部保持实际实现，联动增强项已登记 roadmap §5A，执行时核对无漂移即可）
-- [ ] 6.2 文档同步：README（feedback/approve/goal 工具与配置行）、wiki platform 篇（审批通道/降级行为/巩固触发）、wiki memory 篇（巩固触发节）
-- [ ] 6.3 门禁全绿 + git commit（conventional,引用本变更）
+- [x] 6.1 LEDGER 五分歧裁定行核对引用（**已于提案期固化**——用户 2026-09-06 确认全部保持实际实现，联动增强项已登记 roadmap §5A，执行时核对无漂移即可）
+- [x] 6.2 文档同步：README（feedback/approve/goal 工具与配置行）、wiki platform 篇（审批通道/降级行为/巩固触发）、wiki memory 篇（巩固触发节）
+- [x] 6.3 门禁全绿 + git commit（conventional,引用本变更）
 
 ## 7. 路线图转入 backlog（tagent-evolution-roadmap 归档承接，2026-09-07）
 
