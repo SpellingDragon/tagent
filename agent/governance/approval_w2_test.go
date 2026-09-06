@@ -78,3 +78,46 @@ func TestGate_ApprovalAccessorExposed(t *testing.T) {
 		t.Fatal("nil Gate.Approval() 应返回 nil")
 	}
 }
+
+// TestApproval_RescanThrottled 是 W2 Minor⑧（§8.9）补缺：Check 未命中的重扫受
+// approvalRescanInterval（2s）节流——窗内第二次 Check 不重扫目录（防高频重试反复 IO）。
+func TestApproval_RescanThrottled(t *testing.T) {
+	dir := t.TempDir()
+	am := NewApprovalManager(dir, 30*time.Minute)
+	req, _ := am.Request("exec", `{"cmd":"x"}`, "x", "critical", "exec.sudo", "提权", "")
+	// 首次 Check 未命中 → rescanDue(lastRescan=0 → true) 重扫，lastRescan 更新为 now。
+	_ = am.Check("exec", req.ArgsDigest)
+	// 立即写 approved 文件（外部审批者运行中落盘）。
+	req.Status = ApprovalApproved
+	raw, _ := json.MarshalIndent(req, "", "  ")
+	_ = os.WriteFile(filepath.Join(dir, "approvals", req.ID+".json"), raw, 0o644)
+	// 2s 节流窗内第二次 Check → rescanDue false（不重扫）→ 仍读内存 pending → nil（节流生效）。
+	if got := am.Check("exec", req.ArgsDigest); got != nil {
+		t.Fatal("W2 节流: 2s 窗内第二次 Check 不应重扫目录(应仍 nil,防高频重试反复 IO)")
+	}
+}
+
+// TestApproval_ExpiredFileCleanup 是 Minor④（§8.9）回归：rebuild 清理过期审批文件（防 approvals
+// 目录随运行时间无界堆积）。
+func TestApproval_ExpiredFileCleanup(t *testing.T) {
+	dir := t.TempDir()
+	am := NewApprovalManager(dir, 30*time.Minute)
+	// 构造一个已过期请求文件（ExpiresMs < now）。
+	expired := &ApprovalRequest{
+		ID: "appr-expired", ToolName: "exec", ArgsDigest: "d1",
+		Status: ApprovalApproved, CreatedMs: time.Now().Add(-2 * time.Hour).UnixMilli(),
+		ExpiresMs: time.Now().Add(-1 * time.Hour).UnixMilli(),
+	}
+	raw, _ := json.MarshalIndent(expired, "", "  ")
+	apprDir := filepath.Join(dir, "approvals")
+	if err := os.WriteFile(filepath.Join(apprDir, expired.ID+".json"), raw, 0o644); err != nil {
+		t.Fatalf("write expired: %v", err)
+	}
+	am.rebuild() // 应清理过期文件
+	if _, err := os.Stat(filepath.Join(apprDir, expired.ID+".json")); !os.IsNotExist(err) {
+		t.Fatal("Minor④: rebuild 应删除过期审批文件(防无界堆积)")
+	}
+	if am.Check("exec", "d1") != nil {
+		t.Fatal("过期请求不应命中(已清理出索引)")
+	}
+}

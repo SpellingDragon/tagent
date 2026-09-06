@@ -540,16 +540,25 @@ func buildAgent(
 	// W3（§8.3）：治理扩展到**所有 agent**（此前 name==cfg.Entry 只包 entry，致 action/knowledge
 	// 子 agent 的 exec/save_file/mcp_call 主风险面全部绕闸）。用户裁决：子 agent **独立预算**
 	// （per-agent BudgetManager，隔离单 agent 刷爆，每 agent 各自有界）。共享 Classifier(纯函数)/
-	// Approval(文件通道全局)/Goals(全局注册)/Config；Ledger 仍限 entry（治理事件统一写 entry
-	// memStore 审计）。rc.govGate 作跨 agent 共享组件源（New 构造，其自身 Budget 不作生产用）。
+	// Approval(文件通道全局)/Goals(全局注册)/Config/**Ledger**(N2：rc.govLedger 共享账本，entry
+	// buildAgent 延迟绑定 entry memStore，子 agent 治理记录也 durable 非兜底内存)。rc.govGate 作
+	// 跨 agent 共享组件源（New 构造，其自身 Budget 不作生产用）。
+	// Minor⑥（§8.9）已知边界：自定义 ToolAgentFactory（RegisterToolAgent）构造的 agent 不经本
+	// buildPlainToolRef 包裹路径，其 leaf 工具需工厂自行治理（或后续在 factory 输出统一包裹）。
 	if rc.govGate != nil && rc.govGate.Enabled() {
+		// Minor①（§8.9，优先）：Governance.Dir="" 时预算纯内存不落盘——filepath.Join("", "budget",
+		// name) 会得相对路径 "budget/name" 意外落盘进程 CWD，违反 BudgetManager"空 dir=纯内存"契约。
+		budgetDir := ""
+		if cfg.Governance.Dir != "" {
+			budgetDir = filepath.Join(cfg.Governance.Dir, "budget", name)
+		}
 		agentGate := governance.NewGovernanceGate(governance.GateDeps{
 			Classifier: rc.govGate.Classifier(),
 			Budget: governance.NewBudgetManager(governance.BudgetConfig{
 				Window:        time.Duration(cfg.Governance.BudgetWindowMinutes) * time.Minute,
 				MaxHighRisk:   cfg.Governance.MaxHighRisk,
 				MaxMediumRisk: cfg.Governance.MaxMediumRisk,
-			}, filepath.Join(cfg.Governance.Dir, "budget", name)), // per-agent 独立 epoch 持久化
+			}, budgetDir), // per-agent 独立 epoch 持久化（Dir="" 则纯内存）
 			Approval: rc.govGate.Approval(),
 			Goals:    rc.govGate.Goals(),
 			Ledger:   rc.govLedger, // N2：共享 entry 持久账本（子 agent 治理记录也 durable，非兜底内存）

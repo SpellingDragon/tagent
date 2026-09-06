@@ -13,9 +13,11 @@ import (
 // 重放（按原 key StoreEvent）。使 memory 退化期间事件不丢——at-least-once 延伸到存储层：
 // DegradationManager 检测退化状态（可观测），MemSpill 提供退化的**实质兜底行为**（不丢事件）。
 //
-// 重放幂等：按原 key StoreEvent（FileSegmentStore/InMemoryStore key 幂等覆盖）；projection 侧
-// 由 memory_plugin 的 stored 分支 + projection seen map 去重（报告 line 2229）。重放用 inner
-// store（绕过 ErrorTrackingStore，防重放失败再次触发上报/落盘的递归）。
+// 重放幂等（W1 修订，§8.3）：重放前逐条 GetEvent 预检——事件已存在（假阴性失败：KV 已写但
+// CLI 响应解析失败误报 error）即计成功移除，避免撞 FileSegmentStore "already exists 拒绝重写"
+// 守卫致 spill 永久滞留（原设计误设"按原 key 幂等覆盖"，实际 FileSegmentStore 拒绝重写，见
+// segment_store.go:263）。projection 侧由 memory_plugin stored 分支 + seen map 去重。重放用
+// inner store（绕过 ErrorTrackingStore，防重放失败再次触发上报/落盘递归）。
 
 // spilledEvent 是兜底 JSONL 的一行（key + 完整事件）。
 type spilledEvent struct {

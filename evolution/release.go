@@ -170,7 +170,7 @@ func (rm *ReleaseManager) Submit(ctx context.Context, draft *Bundle) (ReleaseRec
 	}
 
 	if lane == LaneSlow {
-		return rm.runSlowLane(ctx, draft, lane)
+		return rm.runSlowLane(ctx, draft, active, lane)
 	}
 	return rm.runFastLane(ctx, draft, active, lane)
 }
@@ -226,7 +226,7 @@ func (rm *ReleaseManager) runFastLane(ctx context.Context, draft, active *Bundle
 }
 
 // runSlowLane：高风险/protected → replay → shadow → canary → approve → active（门后生效）。
-func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane Lane) (ReleaseRecord, error) {
+func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft, active *Bundle, lane Lane) (ReleaseRecord, error) {
 	if pass, reason := rm.runGate(rm.replayGate, ctx, draft); !pass {
 		return rm.record(draft, lane, StageRejected, "replay(cassette) 门失败: "+reason, 0), nil
 	}
@@ -240,7 +240,9 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 	rm.activationLog.Record(draft.ID, time.Now().UnixMilli()) // W4：记录激活时刻（后验窗口起点）
 	if rm.guardrail != nil {
 		if breached, reason := rm.guardrail.Breach(draft.ID); breached {
-			rm.rollbackTo(draft.ParentID)
+			// Minor③（§8.9）：回退到 canary 激活前的 active（非 draft.ParentID——parentless draft
+			// 时 ParentID="" 使 rollbackTo no-op，draft 会滞留 active）。
+			rm.rollback(active)
 			return rm.record(draft, lane, StageRolledBack, "canary guardrail 违约: "+reason, 0), nil
 		}
 	}
@@ -251,11 +253,11 @@ func (rm *ReleaseManager) runSlowLane(ctx context.Context, draft *Bundle, lane L
 	// 要求运维显式注入 approveGate 或显式声明 SkipApprovalGate（实验环境）。
 	if !rm.cfg.SkipApprovalGate {
 		if rm.approveGate == nil {
-			rm.rollbackTo(draft.ParentID)
+			rm.rollback(active) // Minor③：回退 prev active（parentless draft 时 rollbackTo(ParentID) no-op）
 			return rm.record(draft, lane, StageRejected, "慢道需人工批准但 approveGate 未接线且未显式 SkipApprovalGate——拒绝空转通过（E2：要求显式注入门或显式跳过）", 0), nil
 		}
 		if pass, reason := rm.runGate(rm.approveGate, ctx, draft); !pass {
-			rm.rollbackTo(draft.ParentID)
+			rm.rollback(active) // Minor③：回退 prev active
 			return rm.record(draft, lane, StageRolledBack, "人工批准拒绝，回滚: "+reason, 0), nil
 		}
 	}

@@ -16,7 +16,7 @@
 
 ## 3. Major — 治理闭环(W2/W3,含设计决策点)
 
-- [x] 3.1 W2:Approval.Check 未命中时重扫 approvals 目录;Gate 暴露 `Approval()`;Decide 接通消息/CLI 审批通道。**设计决策点(与维护者确认)**:审批送达通道形态(digest 文件人工落盘 vs 微信交互审批)
+- [x] 3.1 W2:Approval.Check 未命中时重扫 approvals 目录(**审批闭环实际靠此文件重扫**——外部落盘批准文件即经 Check 可见);Gate 暴露 `Approval()`。**Minor⑤宣称校准**:Decide=**预留接口**(供微信/CLI 通道回写,当前无生产调用方;原"Decide 接通消息/CLI 审批通道"言过其实,闭环实际靠文件重扫非 Decide)。**用户裁决**:审批送达=文件为主(external 落盘 approvals/<id>.json)+预留微信接口(调 Approval().Decide)
 - [x] 3.2 W3:治理包裹扩展到所有 agent 的非 wrapper leaf 工具。**设计决策点**:子 agent 独立预算 vs 共享 entry 预算(影响 BudgetManager 语义)
 
 ## 4. Minor 批量(§8.4 全部 12 项)

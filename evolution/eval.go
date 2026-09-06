@@ -61,6 +61,11 @@ type EvidenceSource interface {
 // StoreEvidenceSource.Collect 读取作为证据窗口起点（bundleID→activationTs）——使后验评估只看该
 // bundle 激活后的表现，而非固定回看窗（CanaryHold=0「激活即评估」时固定窗全是旧 bundle 数据，
 // 对新 bundle 无判别力）。由 ReleaseManager 与 StoreEvidenceSource 共享同一实例（getter 接线）。
+//
+// Minor⑦（§8.9）重启回退语义（有意，非缺陷）：ActivationLog 是**内存态**（不持久化）——重启后
+// 激活记录清零，Collect 对重启前激活的 bundle 回退固定回看窗（now-window）。这是可接受降级：
+// 重启后 canary 通常已结算（active/rolledback），后验评估主要针对重启后新激活的 bundle（其激活
+// 时刻会重新 Record）；持久化 ActivationLog 为后续增强（此处注释固化回退语义，非静默降级）。
 type ActivationLog struct {
 	mu sync.Mutex
 	ts map[string]int64

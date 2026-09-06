@@ -203,20 +203,30 @@ func (a *ApprovalManager) rebuild() {
 	if err != nil {
 		return
 	}
+	now := time.Now().UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(a.dir, e.Name()))
+		path := filepath.Join(a.dir, e.Name())
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
 		var req ApprovalRequest
-		if err := json.Unmarshal(raw, &req); err == nil && req.ID != "" {
-			a.index[req.ID] = &req
+		if err := json.Unmarshal(raw, &req); err != nil || req.ID == "" {
+			continue
 		}
+		// Minor④（§8.9）：清理过期审批文件——decided/expired 请求永不清理会随运行时间无界堆积
+		// approvals 目录。过期（ExpiresMs < now）即删文件 + 移出索引（TTL 默认 30m）。
+		if req.ExpiresMs > 0 && req.ExpiresMs < now {
+			_ = os.Remove(path)
+			delete(a.index, req.ID)
+			continue
+		}
+		a.index[req.ID] = &req
 	}
 }
 
