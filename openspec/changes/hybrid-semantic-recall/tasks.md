@@ -39,9 +39,9 @@
 
 ## 5. 真实验证与接线
 
-- [ ] 5.1 CONFIRM X2:小样本对比 512 vs 1024 维召回质量(zhipu embedding-3 真实调用),定默认维度 — **BLOCKED(需真实 ZAI_API_KEY 调用)**:当前默认 dimensions 由配置定(示例 1024);实测对比留待有真实 key 环境执行,YAML 已注明「X2 待实测定默认」
+- [x] 5.1 CONFIRM X2:小样本对比 512 vs 1024 维召回质量(zhipu embedding-3 真实调用),定默认维度 — **实测完成(2026-09-06,真实 ZAI_API_KEY)**:memory/embedder_real_test.go `TestDimensionComparison_Real`——512 维分离度 **0.2838**(相关0.7497/不相关0.4659)、1024 维 **0.2878**(相关0.7286/不相关0.4408),两者相当(差0.004)→**X2 决议:512 维已足够(判别力≈1024,存储/计算成本减半),默认维度推荐 512**
 - [x] 5.2 wechat-bot 示例 yaml 增加 embedding 配置段(注释说明成本与开关语义) — **本次补**:examples/wechat-bot/tagent.yaml entry memory 段加 engine/embedding 注释示例(成本/开关/声明恒定/降级语义)
-- [ ] 5.3 真实集成测试(tests/ 惯例):真实 embedder 下"入库→语义召回→票据取回全文"闭环 — **BLOCKED(需真实 key)**:mock embedder 闭环已测(hybrid_recall_test);真实 embedder 版按 tests/ 惯例 Skip 保护,留待有 key 环境
+- [x] 5.3 真实集成测试(tests/ 惯例):真实 embedder 下"入库→语义召回→票据取回全文"闭环 — **实测完成(2026-09-06,真实 ZAI_API_KEY)**:memory/embedder_real_test.go `TestSemanticRecall_RealEmbedderClosedLoop`(Skip 保护)——真实 embedding-3(1024维)下查询"服务器内存不足崩溃重启"top1 **语义命中**"Kubernetes pod OOMKilled 频繁重启"(无共同关键词,纯向量语义),票据 store.GetEvent 水合全文成功,4.16s。**实测揭示 Minor**:RetrievalHit.Score 在 hybrid 融合后显示 0.0000(RRF 融合分未回传原始 score,排序正确但量纲待完善,记为后续 Minor)
 
 ## 6. 可选组(主链路验收后裁决)
 
