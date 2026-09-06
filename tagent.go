@@ -525,15 +525,32 @@ func buildAgent(
 	// 包装器（*agent.AgentToolWrapper）——下游需按具体类型断言接 parentProjection；治理聚焦
 	// exec/file/mcp/refine 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹
 	// tools[] 不影响其 RegisterCloser；agent.go 随后包 OutputLimitTool，链式委托 GovernanceTool.Call。
-	if rc.govGate != nil && rc.govGate.Enabled() && name == cfg.Entry {
-		// 治理账本绑定 entry agent 的持久 memStore：治理记录写 governance 事件（可 recall
-		// 审计、跨重启重建）。分区 = agent 自身写分区（PartitionIDFromName）。
-		rc.govGate.BindLedger(memStore, memory.PartitionIDFromName(name))
+	// W3（§8.3）：治理扩展到**所有 agent**（此前 name==cfg.Entry 只包 entry，致 action/knowledge
+	// 子 agent 的 exec/save_file/mcp_call 主风险面全部绕闸）。用户裁决：子 agent **独立预算**
+	// （per-agent BudgetManager，隔离单 agent 刷爆，每 agent 各自有界）。共享 Classifier(纯函数)/
+	// Approval(文件通道全局)/Goals(全局注册)/Config；Ledger 仍限 entry（治理事件统一写 entry
+	// memStore 审计）。rc.govGate 作跨 agent 共享组件源（New 构造，其自身 Budget 不作生产用）。
+	if rc.govGate != nil && rc.govGate.Enabled() {
+		agentGate := governance.NewGovernanceGate(governance.GateDeps{
+			Classifier: rc.govGate.Classifier(),
+			Budget: governance.NewBudgetManager(governance.BudgetConfig{
+				Window:        time.Duration(cfg.Governance.BudgetWindowMinutes) * time.Minute,
+				MaxHighRisk:   cfg.Governance.MaxHighRisk,
+				MaxMediumRisk: cfg.Governance.MaxMediumRisk,
+			}, filepath.Join(cfg.Governance.Dir, "budget", name)), // per-agent 独立 epoch 持久化
+			Approval: rc.govGate.Approval(),
+			Goals:    rc.govGate.Goals(),
+			Config:   rc.govGate.Config(),
+		})
+		if name == cfg.Entry {
+			// 治理账本仅绑定 entry memStore：治理记录写 governance 事件（可 recall 审计、跨重启重建）。
+			agentGate.BindLedger(memStore, memory.PartitionIDFromName(name))
+		}
 		for i, t := range tools {
 			if _, isWrapper := t.(*agent.AgentToolWrapper); isWrapper {
 				continue
 			}
-			tools[i] = governance.NewGovernanceTool(t, rc.govGate)
+			tools[i] = governance.NewGovernanceTool(t, agentGate)
 		}
 	}
 

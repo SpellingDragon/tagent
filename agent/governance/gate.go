@@ -102,6 +102,30 @@ func (g *GovernanceGate) Approval() *ApprovalManager {
 	return g.approval
 }
 
+// Classifier/Goals/Config 暴露跨 agent 共享组件（W3）：buildAgent 为每个 agent 构造独立
+// GovernanceGate（per-agent BudgetManager，用户裁决子 agent 独立预算）时复用这些共享件——
+// Classifier 纯函数无状态、Goals 全局注册表、Config 同策略。均 nil-safe。
+func (g *GovernanceGate) Classifier() *RiskClassifier {
+	if g == nil {
+		return nil
+	}
+	return g.classifier
+}
+
+func (g *GovernanceGate) Goals() *GoalRegistry {
+	if g == nil {
+		return nil
+	}
+	return g.goals
+}
+
+func (g *GovernanceGate) Config() GateConfig {
+	if g == nil {
+		return GateConfig{}
+	}
+	return g.cfg
+}
+
 // Evaluate 对一个工具调用做治理裁决（管线：classify → 批准 → goal → 预算 → 记账）。
 func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 	if !g.Enabled() {
