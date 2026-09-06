@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -27,6 +29,10 @@ type ModelUpdateFn func(baseURL string)
 type HTTPAPI struct {
 	agent         AgentLoop
 	modelUpdateFn ModelUpdateFn // optional: set by main.go for AReaL proxy support
+	// feedbackStore (D1 design-report-closeout 2.4): optional MemoryStore for
+	// POST /feedback — binds an external verdict to a produced event via the
+	// feedback causal edge. nil → 503 (endpoint disabled).
+	feedbackStore memory.MemoryStore
 }
 
 // NewHTTPAPI creates a new HTTPAPI for the given agent.
@@ -42,6 +48,12 @@ func (h *HTTPAPI) SetModelUpdateFn(fn ModelUpdateFn) {
 	h.modelUpdateFn = fn
 }
 
+// SetFeedbackStore enables POST /feedback (D1 design-report-closeout): the
+// store receives feedback events bound to produced events by hex event_key.
+func (h *HTTPAPI) SetFeedbackStore(store memory.MemoryStore) {
+	h.feedbackStore = store
+}
+
 // ServeHTTP routes requests to the appropriate handler.
 func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -49,11 +61,64 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/task":
 		h.handlePostTask(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/feedback":
+		h.handlePostFeedback(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 		h.handleHealthz(w, r)
 	default:
 		writeJSONError(w, http.StatusNotFound, "not_found", fmt.Sprintf("no route for %s %s", r.Method, r.URL.Path))
 	}
+}
+
+// feedbackRequest is the body for POST /feedback.
+type feedbackRequest struct {
+	EventKey string  `json:"event_key"` // hex event key of the produced event to bind
+	Verdict  string  `json:"verdict"`   // positive / negative / neutral
+	Note     string  `json:"note,omitempty"`
+	Rating   float64 `json:"rating,omitempty"`
+}
+
+// handlePostFeedback binds an external verdict to a produced event
+// (D1 design-report-closeout 2.4). Missing parent → explicit 404 (no
+// feedback on hallucinated keys); disabled → 503.
+func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
+	if h.feedbackStore == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "feedback_disabled", "no feedback store wired")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "read_body_error", err.Error())
+		return
+	}
+	var req feedbackRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if req.EventKey == "" || req.Verdict == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_fields", "event_key and verdict are required")
+		return
+	}
+	key, err := tagentevent.ParseEventKey(req.EventKey)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_event_key", err.Error())
+		return
+	}
+	fbKey, err := memory.BindFeedback(h.feedbackStore, key, memory.FeedbackPayload{
+		Verdict: req.Verdict, Rating: req.Rating, Note: req.Note, Source: "api",
+	})
+	if err != nil {
+		// BindFeedback's contract: parent-miss is an explicit error.
+		writeJSONError(w, http.StatusNotFound, "parent_not_found", err.Error())
+		return
+	}
+	log.Infof("[HTTPAPI] feedback bound: parent=%s verdict=%s feedback=%s",
+		req.EventKey, req.Verdict, tagentevent.FormatEventKey(fbKey))
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"status":       "bound",
+		"feedback_key": tagentevent.FormatEventKey(fbKey),
+	})
 }
 
 // taskRequest is the body for POST /task.

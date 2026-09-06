@@ -244,6 +244,11 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			Relaunch: ct.relaunchClosure(spawner, args),
 			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
 		}, detector)
+		if res.Blocked != "" {
+			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以 result
+			// 渗透（可读原因，模型可稍后重试或改同步小命令）。
+			return ct.buildBlockedResult(res.Blocked), nil
+		}
 		if res.Settled {
 			return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal), nil
 		}
@@ -386,6 +391,16 @@ func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task)
 		Command:   command,
 		Status:    "running",
 		Note:      note,
+	}
+}
+
+// buildBlockedResult (5.4, design-report-closeout) renders a spawn rejection
+// (disk degraded) as a readable tool result — failure permeates as result,
+// never as error, so the model can retry later or fall back.
+func (ct *ActionTool) buildBlockedResult(reason string) *ActionToolResult {
+	return &ActionToolResult{
+		Status: "blocked",
+		Note:   "命令未执行：" + reason,
 	}
 }
 

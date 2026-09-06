@@ -448,6 +448,11 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
+		if res.Blocked != "" {
+			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以
+			// result 渗透（可读原因，子 agent 稍后可重发）。
+			return "子任务被暂停（未执行）：" + res.Blocked, nil
+		}
 		if res.Deduped {
 			// Same-name single-flight: factual ticket only (stable-context-
 			// compaction D5) — the existing task is necessarily in-flight
@@ -870,6 +875,11 @@ type PlainToolFactoryConfig struct {
 	// Degradation 是 per-agent 五依赖退化状态机（T-G，可选）。mcp_call 工具据此上报 DepMCP
 	// 退化（MCP server 连续失败→degraded，成功→恢复）。nil = 未启用退化追踪（现状）。
 	Degradation *reliability.DegradationManager
+
+	// MCPProbeEvery（5.4 design-report-closeout）：DepMCP degraded 时 mcp_call 的
+	// 熔断半开探测间隔（每 N 次放行 1 次）。0 = 关闭。由 buildPlainToolRef 从 agent
+	// DegradationBehaviors 注入。
+	MCPProbeEvery int
 }
 
 var (

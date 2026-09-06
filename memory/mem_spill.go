@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"trpc.group/trpc-go/trpc-agent-go/log"
+
 	"bufio"
 	"encoding/json"
 	"os"
@@ -63,6 +65,14 @@ func (s *MemSpill) Append(key int64, event FullEvent) error {
 // Replay 重放兜底事件到 store（按原 key StoreEvent）。成功的移除、仍失败的保留在文件。
 // 返回重放成功数。store 应为 inner（绕过 ErrorTrackingStore 防递归）。坏行跳过。
 func (s *MemSpill) Replay(store MemoryStore) (int, error) {
+	return s.ReplayWithNotify(store, nil)
+}
+
+// ReplayWithNotify 是 Replay 的双写形态（design-report-closeout 5.5）：每条重放成功
+// （含幂等命中）的事件回调 notify——调用方据此补投影（projection.Append），恢复
+// 「存储⇔投影同点原子」的等价语义（写入统一 D1 在退化路径上的延伸）。notify 为 nil
+// 或内部失败不影响重放结果（投影可后补，事件不丢优先）。
+func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error) {
 	if s == nil || store == nil {
 		return 0, nil
 	}
@@ -74,6 +84,18 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 	}
 	var failed []spilledEvent
 	replayed := 0
+	notifySafe := func(ev FullEvent) {
+		if notify == nil {
+			return
+		}
+		// 投影失败仅记录（与主链路同语义：投影是派生视图，可后补）。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warnf("[mem_spill] replay notify panic (projection skipped): %v", r)
+			}
+		}()
+		notify(ev)
+	}
 	for _, sp := range pending {
 		// W1（§8.3）：重放前 GetEvent 预检——若事件已存在（假阴性失败：KV 已写但 CLI 响应
 		// 解析失败，StoreEvent 误报 error 致落盘），视为幂等成功移除。否则重放必撞
@@ -81,6 +103,7 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 		// 永久滞留、恢复每次失败、不收敛。GetEvent 出错（store 仍故障）则走 StoreEvent 重试。
 		if existing, gerr := store.GetEvent(sp.Key); gerr == nil && existing != nil {
 			replayed++ // 已存在 = 之前的"失败"实为假阴性，幂等计成功
+			notifySafe(sp.Event)
 			continue
 		}
 		if serr := store.StoreEvent(sp.Key, sp.Event); serr != nil {
@@ -88,6 +111,7 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 			continue
 		}
 		replayed++
+		notifySafe(sp.Event)
 	}
 	// 重写文件（仅保留仍失败的）；全部成功则文件清空。
 	if rerr := s.rewrite(failed); rerr != nil {

@@ -203,6 +203,19 @@ type ReliabilityConfig struct {
 	// 默认 false = 不启用（ErrorTrackingStore 不包裹，现状逐字节零行为变化）。
 	DegradationEnabled bool `json:"degradation_enabled,omitempty" yaml:"degradation_enabled,omitempty"`
 
+	// DegradationModelBackoff（5.4 design-report-closeout）：model 依赖 degraded 时
+	// runEventLoop 在下一 turn 前的退避停顿（duration 字符串，如 "5s"）。空/非法 = 关闭
+	// （零行为变化）。警告级「闸不是墙」——退避只为免打已确认故障的端点，恢复即正常。
+	DegradationModelBackoff string `json:"degradation_model_backoff,omitempty" yaml:"degradation_model_backoff,omitempty"`
+
+	// DegradationMCPProbeEvery（5.4）：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
+	// 每 N 次调用放行 1 次真探测，其余直接返回熔断 result（含自纠材料）。0 = 关闭熔断。
+	DegradationMCPProbeEvery int `json:"degradation_mcp_probe_every,omitempty" yaml:"degradation_mcp_probe_every,omitempty"`
+
+	// DegradationDiskBlockSpawn（5.4）：DepDisk degraded 时拒绝新任务 spawn（返回可读
+	// 原因；进行中任务的 settle/轮询不受影响）。默认 false = 不拒绝。
+	DegradationDiskBlockSpawn bool `json:"degradation_disk_block_spawn,omitempty" yaml:"degradation_disk_block_spawn,omitempty"`
+
 	// MemSpillDir 是 memory 退化事件兜底目录（报告 D3 步4）：DegradationEnabled 且此非空时，
 	// StoreEvent 失败的事件落 <MemSpillDir>/<agent>.jsonl，memory 恢复后自动重放（事件不丢，
 	// at-least-once 延伸到存储层）。空 = 仅退化状态标记、不落盘兜底。建议置于 workspace 下。

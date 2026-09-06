@@ -171,6 +171,7 @@ type SpawnResult struct {
 	Settled bool         // true: settled within the sync-wait window (inline)
 	Signal  SettleSignal // valid when Settled
 	Deduped bool         // true: an equivalent active task already existed
+	Blocked string       // non-empty: spawn rejected (e.g. disk degraded, 5.4 design-report-closeout) — readable reason for the model
 }
 
 // TaskSpawner is the narrow interface tools (e.g. ActionTool) use to hand a
@@ -256,6 +257,10 @@ type TaskManagerConfig struct {
 	// resources reclaimed. It bounds the resume_task re-entry window for
 	// terminal subagent tasks. Zero → defaultTerminalTTL.
 	TerminalTTL time.Duration
+	// SpawnGate (5.4, design-report-closeout): optional; returns a non-empty
+	// readable reason to REJECT a new spawn (e.g. disk degraded). In-flight
+	// tasks are never gated — a gate, not a wall. May be nil.
+	SpawnGate func() string
 }
 
 // TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
@@ -271,6 +276,7 @@ type TaskManager struct {
 	tasks       map[string]*Task // id → task
 	byKey       map[string]string
 	onSettle    func(task *Task, sig SettleSignal)
+	spawnGate   func() string
 	terminalTTL time.Duration
 	now         func() time.Time // injectable clock (tests); defaults to time.Now
 }
@@ -285,6 +291,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		tasks:       make(map[string]*Task),
 		byKey:       make(map[string]string),
 		onSettle:    cfg.OnSettle,
+		spawnGate:   cfg.SpawnGate,
 		terminalTTL: ttl,
 		now:         time.Now,
 	}
@@ -299,6 +306,13 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 // parallel (blocking ≈ the slowest, not the sum).
 func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
 	tm.pruneTerminal()
+	// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
+	// 进行中任务的 settle/轮询不受影响；nil gate = 不拒绝）。
+	if tm.spawnGate != nil {
+		if reason := tm.spawnGate(); reason != "" {
+			return SpawnResult{Blocked: reason}
+		}
+	}
 	// Idempotent dedup: an active task with the same Key short-circuits.
 	tm.mu.Lock()
 	if spec.Key != "" {

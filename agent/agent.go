@@ -22,8 +22,8 @@ package agent
 
 import (
 	"context"
-	"path/filepath"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,6 +178,11 @@ type TagentConfig struct {
 	// ErrorTrackingStore（wireMemoryEngine 最外层）上报 memory/disk/rustviking。nil=不启用（现状）。
 	Degradation *reliability.DegradationManager
 
+	// DegradationBehaviors（5.4 design-report-closeout）是依赖退化的行为响应层（警告级，
+	// 每项独立、默认零值=全部关闭，仅 Degradation 非 nil 时生效）。闸不是墙：行为只是
+	// 免打已确认故障的依赖，上报恢复即回正常路径。
+	DegradationBehaviors DegradationBehaviors
+
 	// WorkspaceRoot is the unified on-disk scratch root (default: .tagent-workspace).
 	// Oversized tool outputs go to <root>/tool-output; the tmux command working
 	// directory is <root>/exec. A periodic cleaner bounds tool-output files.
@@ -192,6 +197,21 @@ type TagentConfig struct {
 	// BusSpillDir 是事件总线磁盘溢出目录（T-G ReliableBus）。非空时 channel 满则事件溢出
 	// 落盘而非丢弃（at-least-once，常驻不丢事件），重启后未消费项可回收；空 = 纯 channel（现状）。
 	BusSpillDir string
+}
+
+// DegradationBehaviors (5.4, design-report-closeout) configures the
+// behavior-level responses to dependency degradation. All fields are
+// independent; zero values disable each behavior (zero behavior change).
+// Only effective when Degradation is wired; “a gate, not a wall”.
+type DegradationBehaviors struct {
+	// ModelBackoff pauses the loop between turns while DepModel is degraded.
+	ModelBackoff time.Duration
+	// MCPProbeEvery circuit-breaks mcp_call while DepMCP is degraded and
+	// lets 1 real probe through every N calls (half-open recovery).
+	MCPProbeEvery int
+	// DiskBlockSpawn rejects NEW task spawns while DepDisk is degraded
+	// (in-flight tasks are unaffected).
+	DiskBlockSpawn bool
 }
 
 // Default configuration values
@@ -331,6 +351,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,
+		// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
+		// 进行中任务的 settle/轮询不受影响）。默认关（DiskBlockSpawn=false 或
+		// Degradation 未接线 → gate 为 nil）。
+		SpawnGate: buildSpawnGate(cfg),
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
@@ -396,14 +420,14 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
 		memPlugin:           memPlugin,
-		config:        cfg,
-		sessionSvc:    sessionSvc,
-		name:          name,
-		description:   description,
-		outputCh:      outputCh,
-		closers:       []Closer{},
-		projection:    projection,
-		degradation:   cfg.Degradation,
+		config:              cfg,
+		sessionSvc:          sessionSvc,
+		name:                name,
+		description:         description,
+		outputCh:            outputCh,
+		closers:             []Closer{},
+		projection:          projection,
+		degradation:         cfg.Degradation,
 	}
 
 	// 8. Create onEvent callback and ContextManager.
@@ -502,4 +526,20 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 	// default workspace when cfg.WorkspaceRoot is empty).
 	cm.overflowDir = filepath.Join(workspace.ToolOutputPath(cfg.WorkspaceRoot), "output-overflow")
 	return cm
+}
+
+// buildSpawnGate (5.4, design-report-closeout) returns the disk-degradation
+// spawn gate, or nil when disabled (zero behavior change). A gate, not a wall:
+// in-flight tasks are never gated.
+func buildSpawnGate(cfg *TagentConfig) func() string {
+	if cfg == nil || !cfg.DegradationBehaviors.DiskBlockSpawn || cfg.Degradation == nil {
+		return nil
+	}
+	degradation := cfg.Degradation
+	return func() string {
+		if degradation.IsDegraded(reliability.DepDisk) {
+			return "disk dependency degraded: new background tasks are paused (in-flight tasks unaffected); retry after disk recovers"
+		}
+		return ""
+	}
 }

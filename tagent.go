@@ -71,6 +71,10 @@ type runtimeConfig struct {
 	// mutations never touch agent tool declarations.
 	mcpRegistry *toolmcp.Registry
 
+	// reliability 是根配置可靠性段副本（5.4 design-report-closeout）：
+	// buildPlainToolRef 据此注入 MCPProbeEvery（降级行为配置，per-agent 工具共用）。
+	reliability ReliabilityConfig
+
 	// resolvedModels caches model.Model instances keyed by "provider:model" string.
 	// Agents sharing the same provider+model reuse the same instance.
 	resolvedModels map[string]model.Model
@@ -185,7 +189,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("tagent: tool access validation: %w", err)
 	}
 
-	rc := &runtimeConfig{}
+	rc := &runtimeConfig{reliability: cfg.Reliability}
 	for _, opt := range opts {
 		opt(rc)
 	}
@@ -346,12 +350,12 @@ func buildAgent(
 	// governance degraded 事件用 baseStore（ErrorTrackingStore 包裹前），防「写失败→上报→
 	// onChange→写事件」递归。未启用则 degradationMgr=nil、memStore 不包裹（现状零变化）。
 	var degradationMgr *reliability.DegradationManager
+	// etsHolder 延迟引用（函数级）：onChange 触发重放（步4）与 NewTagentAgent 后的
+	// 重放投影双写回填（5.5, design-report-closeout）都晚于 ErrorTrackingStore 构造。
+	var etsHolder *memory.ErrorTrackingStore
 	if cfg.Reliability.DegradationEnabled {
 		baseStore := memStore
 		pid := memory.PartitionIDFromName(name)
-		// etsHolder 延迟引用：onChange 在 memory 恢复到 normal 时触发 mem_spill 重放（步4），
-		// 此刻 ErrorTrackingStore 尚未构造，故用 holder 闭包捕获（构造后回填）。
-		var etsHolder *memory.ErrorTrackingStore
 		degradationMgr = reliability.NewDegradationManager(func(dep reliability.Dependency, from, to reliability.DepState) {
 			content := fmt.Sprintf("[governance:degraded] 依赖 %s 状态迁移 %s→%s", dep, from, to)
 			evt := memory.FullEvent{
@@ -597,6 +601,7 @@ func buildAgent(
 		ThinkingTokens:       acfg.ThinkingTokens,
 		ReasoningEffort:      acfg.ReasoningEffort,
 		ReasoningContentMode: acfg.ReasoningContentMode,
+		DegradationBehaviors: buildDegradationBehaviors(cfg.Reliability),
 		Compress: agent.CompressConfig{
 			CompactKeysListed: acfg.Compress.CompactKeysListed,
 			RecentFullCount:   acfg.Compress.RecentFullCount,
@@ -666,6 +671,32 @@ func buildAgent(
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
+	}
+
+	// D1-B（design-report-closeout）：entry agent 双持久化路径盖 bundle_id 章——
+	// 事件归属精确到 active bundle 版本（guardrail/feedback join 键）。evolution
+	// 未启用或无 active bundle 时 fn 返回空串，不写键（行为不变）。
+	if rc.evoStore != nil && name == cfg.Entry {
+		evoStore := rc.evoStore
+		ta.SetBundleIDProvider(func() string {
+			if b := evoStore.Active(); b != nil {
+				return b.ID
+			}
+			return ""
+		})
+	}
+
+	// 5.5（design-report-closeout）：mem_spill 重放双写——重放成功的每条事件补投影
+	// （projection 此时已由 NewTagentAgent 创建），恢复「存储⇔投影同点」在退化路径
+	// 的等价语义（Role 从事件类型派生）。
+	if etsHolder != nil {
+		etsHolder.SetReplayProjection(func(ev memory.FullEvent) {
+			ta.AppendProjectionRef(memory.EventReference{
+				EventKey: ev.EventKey, PartitionID: ev.PartitionID,
+				EventType: ev.EventType, EventSummary: ev.EventSummary,
+				Timestamp: ev.Timestamp, Role: string(tagentevent.EventTypeRole(ev.EventType)),
+			})
+		})
 	}
 
 	// Register ActionTool for cleanup on agent shutdown.
@@ -825,7 +856,8 @@ func buildPlainToolRef(
 		SkillRepo:        rc.skillRepo,
 		MCPToolSets:      rc.mcpToolSets,
 		ReadPartitionIDs: readPartitionIDs,
-		Degradation:      degradationMgr, // T-G: mcp_call 上报 DepMCP 退化（per-agent）
+		Degradation:      degradationMgr,                          // T-G: mcp_call 上报 DepMCP 退化（per-agent）
+		MCPProbeEvery:    rc.reliability.DegradationMCPProbeEvery, // 5.4: degraded 熔断半开探测
 	}
 	// Nil-guard: assigning a typed nil *Registry to the interface field
 	// would make cfg.MCPRegistry != nil inside factories.
@@ -1294,4 +1326,19 @@ func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
 	// For tool-kind tools, description is optional — the tool's built-in
 	// description from trpc-agent-go will be used if not provided.
 	return "", nil
+}
+
+// buildDegradationBehaviors (5.4, design-report-closeout) maps ReliabilityConfig
+// behavior fields into the agent-side struct. Invalid duration → zero (behavior
+// off, warn logged once at load time by config Validate).
+func buildDegradationBehaviors(rc ReliabilityConfig) agent.DegradationBehaviors {
+	var behaviors agent.DegradationBehaviors
+	if d, err := time.ParseDuration(rc.DegradationModelBackoff); err == nil && d > 0 {
+		behaviors.ModelBackoff = d
+	} else if rc.DegradationModelBackoff != "" {
+		log.Warnf("[tagent] invalid degradation_model_backoff %q, model backoff disabled", rc.DegradationModelBackoff)
+	}
+	behaviors.MCPProbeEvery = rc.DegradationMCPProbeEvery
+	behaviors.DiskBlockSpawn = rc.DegradationDiskBlockSpawn
+	return behaviors
 }

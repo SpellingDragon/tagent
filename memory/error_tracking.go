@@ -3,6 +3,7 @@ package memory
 import (
 	"errors"
 	"strings"
+	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -37,6 +38,10 @@ type ErrorTrackingStore struct {
 	inner MemoryStore
 	sink  DegradationSink // nil = 纯透传不上报（配置门控关闭）
 	spill *MemSpill       // nil = 不落盘兜底；非 nil 时 StoreEvent 失败事件落 JSONL（步4，事件不丢）
+
+	mu sync.RWMutex
+	// replayProjection（design-report-closeout 5.5）：重放成功的每条事件回调补投影。
+	replayProjection func(FullEvent)
 }
 
 // 编译期锁定 ErrorTrackingStore 是 MemoryStore。
@@ -54,13 +59,25 @@ func (s *ErrorTrackingStore) SetMemSpill(path string) {
 	s.spill = NewMemSpill(path)
 }
 
+// SetReplayProjection 注册重放双写回调（design-report-closeout 5.5）：每条重放成功的
+// 事件经 fn 补投影（projection.Append），恢复「存储⇔投影同点」在退化路径的等价语义。
+// fn 失败/panic 不影响重放（事件不丢优先，投影可后补）。nil 清除。
+func (s *ErrorTrackingStore) SetReplayProjection(fn func(FullEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replayProjection = fn
+}
+
 // ReplaySpilled 重放兜底事件到 inner store（绕过自身防递归）。返回重放成功数。由 memory 依赖
 // 恢复（DegradationManager onChange）或探针/运维触发。
 func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
 	if s.spill == nil {
 		return 0, nil
 	}
-	return s.spill.Replay(s.inner)
+	s.mu.Lock()
+	fn := s.replayProjection
+	s.mu.Unlock()
+	return s.spill.ReplayWithNotify(s.inner, fn)
 }
 
 // MemSpillLen 返回当前兜底待重放事件数（诊断/背压信号）。

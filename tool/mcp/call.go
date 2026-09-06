@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
@@ -33,6 +34,21 @@ type CallTool struct {
 	// degradation 可选（T-G）：非 nil 时 mcp_call 失败/成功上报 DepMCP 退化（MCP server 连续
 	// 失败→degraded，成功→恢复）。per-agent 视角追踪全局 MCP registry（各 agent 独立退化状态）。
 	degradation *reliability.DegradationManager
+
+	// probeEvery/probeCount（5.4 design-report-closeout）：DepMCP degraded 时的熔断
+	// 半开探测——每 N 次放行 1 次真调用。N<=0 = 关闭。
+	mu         sync.Mutex
+	probeEvery int
+	probeCount int
+}
+
+// SetMCPProbeEvery（5.4 design-report-closeout）配置熔断半开探测间隔：DepMCP degraded 时
+// 每 N 次调用放行 1 次真探测（其余直接返回熔断 result），探测成功经既有成功上报路径
+// 触发恢复。N<=0 = 关闭熔断（零行为变化）。
+func (t *CallTool) SetMCPProbeEvery(n int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.probeEvery = n
 }
 
 // SetDegradation 注入退化状态机（工厂从 PlainToolFactoryConfig.Degradation）。nil = 不上报。
@@ -88,6 +104,22 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var a callArgs
 	if err := json.Unmarshal(jsonArgs, &a); err != nil {
 		return nil, fmt.Errorf("mcp_call: invalid args: %w", err)
+	}
+
+	// 5.4（design-report-closeout）：DepMCP degraded 熔断——每 N 次放行 1 次真探测
+	// （半开），其余快失败（自纠材料随 result 渗透，不 error）。零配置=关闭。
+	if t.degradation != nil && t.degradation.IsDegraded(reliability.DepMCP) {
+		t.mu.Lock()
+		n := t.probeEvery
+		t.probeCount++
+		allow := n <= 0 || t.probeCount%n == 0
+		t.mu.Unlock()
+		if !allow {
+			return callErrorResult{
+				Error:            fmt.Sprintf("MCP 依赖降级中（熔断保护，稍后重试；每 %d 次放行一次探测）", n),
+				AvailableServers: t.reg.Names(),
+			}, nil
+		}
 	}
 
 	names := t.reg.Names()
@@ -174,7 +206,8 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 func RegisterTool() {
 	agent.RegisterPlainTool(CallToolName, func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
 		ct := NewCallTool(cfg.MCPRegistry)
-		ct.SetDegradation(cfg.Degradation) // T-G: mcp_call 上报 DepMCP 退化（per-agent，nil 则不上报）
+		ct.SetDegradation(cfg.Degradation)     // T-G: mcp_call 上报 DepMCP 退化（per-agent，nil 则不上报）
+		ct.SetMCPProbeEvery(cfg.MCPProbeEvery) // 5.4: degraded 熔断半开探测（0=关）
 		return ct, nil
 	})
 }

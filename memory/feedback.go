@@ -17,12 +17,12 @@ import (
 
 // FeedbackPayload 是 feedback 事件 Content 的结构化 JSON（verdict/rating/note/source）。
 type FeedbackPayload struct {
-	Verdict   string  `json:"verdict"`            // positive / negative / neutral
-	Rating    float64 `json:"rating,omitempty"`   // 可选数值评分
-	Note      string  `json:"note,omitempty"`     // 可选说明
-	Source    string  `json:"source"`             // user / task_settle / api
-	ParentKey string  `json:"parent_key"`         // hex 形态的产出事件 key（人可读回溯）
-	Timestamp int64   `json:"timestamp"`          // Unix 毫秒
+	Verdict   string  `json:"verdict"`          // positive / negative / neutral
+	Rating    float64 `json:"rating,omitempty"` // 可选数值评分
+	Note      string  `json:"note,omitempty"`   // 可选说明
+	Source    string  `json:"source"`           // user / task_settle / api
+	ParentKey string  `json:"parent_key"`       // hex 形态的产出事件 key（人可读回溯）
+	Timestamp int64   `json:"timestamp"`        // Unix 毫秒
 }
 
 // BindFeedback 写入一条绑定到 parentKey 的 feedback 事件并建立因果边。

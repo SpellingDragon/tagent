@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"github.com/SpellingDragon/tagent/memory"
 
 	"github.com/SpellingDragon/tagent/rl"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -85,6 +86,17 @@ func (ta *TagentAgent) SetBundleIDProvider(fn func() string) {
 		return
 	}
 	ta.contextManager.bundleIDFn = fn
+}
+
+// AppendProjectionRef appends an EventReference to this agent's session
+// projection (5.5, design-report-closeout): used by the mem_spill replay
+// double-write so replayed events restore the store⇔projection invariant.
+// nil-safe.
+func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference) {
+	if ta == nil || ta.contextManager == nil || ta.contextManager.projection == nil {
+		return
+	}
+	ta.contextManager.projection.Append(ref)
 }
 
 // StartLoop starts the persistent event loop for this agent.

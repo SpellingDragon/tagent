@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // ==================== outputCh 溢出落盘（F2, design-report-closeout） ====================
