@@ -36,9 +36,9 @@
 | `error_tracking.go` | ErrorTrackingStore 最外层装饰：存储失败归因（memory/disk/rustviking）上报 DegradationManager |
 | `mem_spill.go` | StoreEvent 失败兜底：事件落 JSONL，恢复后重放（GetEvent 预检幂等） |
 | `kv/`（子包，2026-09-06 分包） | **KV 存储后端专区**：`kv/rustviking_client.go`（rustviking CLI 客户端，kv/index 真实契约，VectorInsert 预留）、`kv/local_file_kv.go`（JSON 文件 KV + WAL/快照）。**新增持久化后端只进此子包** |
+| `kv.go` | KVStore 契约（KVPair/KVOp）+ 「接入新的记忆引擎」两路径指南（见 §二点五） |
 | `key_schema.go` | 键空间模式契约（evt/idx/meta/tomb + `tagent:vec:` 向量前缀）——格式属于核心与各后端的公共词汇 |
 | `query_keyword.go` | 关键词检索（term-split 匹配，hybrid 的关键词侧） |
-| `diagnostics.go` | 维度锚定诊断（MemoryDiagnostics 健康快照） |
 
 ---
 
