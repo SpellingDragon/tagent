@@ -77,6 +77,16 @@ func (ta *TagentAgent) Close() error {
 	return nil
 }
 
+// SetBundleIDProvider wires the active-bundle lookup used by both event
+// persistence paths to stamp bundle_id into FullEvent.Metadata
+// (D1-B, design-report-closeout). Entry-only; nil/no-active -> no stamp.
+func (ta *TagentAgent) SetBundleIDProvider(fn func() string) {
+	if ta == nil || ta.contextManager == nil {
+		return
+	}
+	ta.contextManager.bundleIDFn = fn
+}
+
 // StartLoop starts the persistent event loop for this agent.
 // The loop runs in a dedicated goroutine and processes events until StopLoop is called.
 // Returns the output channel that emits events as they are processed.

@@ -22,6 +22,7 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,12 @@ var _ agent.Agent = (*TagentAgent)(nil)
 // are published to the bus; the AgentLoop consumes them, calls the model
 // via Preprocessor, and dispatches tool_use events asynchronously.
 type TagentAgent struct {
+	// droppedOutputEvents counts SessionHook deliveries skipped because the
+	// outputCh was full at try-time (F2 observability, design-report-closeout).
+	// Pointer: the SessionHook closure is registered before ta is built and
+	// shares the counter.
+	droppedOutputEvents *atomic.Int64
+
 	// activeBus is the single event bus for this agent, regardless of
 	// whether it is running in persistent loop mode (StartLoop) or
 	// sub-agent invocation mode (Run). Tools (e.g., ActionTool via
@@ -332,6 +339,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// event-plugin pipeline via ProjectionSink, unified-event-projection D1).
 	var onEventRef func(evt *event.Event)
 
+	// F2 observability: counter shared by the SessionHook closure (registered
+	// below, before ta exists) and TagentAgent.
+	droppedOutputCounter := &atomic.Int64{}
+
 	// 6. Create SessionService
 	// Limit session events to 2: only the current invocation's user message
 	// and the latest tool result are needed for ContentRequestProcessor's
@@ -368,7 +379,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 				select {
 				case outputCh <- emitEvt:
 				default:
-					log.Warnf("[SessionHook] outputCh full, user message event dropped")
+					droppedOutputCounter.Add(1)
+					log.Warnf("[SessionHook] outputCh full, user message event dropped (total dropped: %d)",
+						droppedOutputCounter.Load())
 				}
 			}
 
@@ -378,10 +391,11 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 
 	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
 	ta := &TagentAgent{
-		persistentBus: bus,
-		activeBus:     bus,
-		memStore:      memStore,
-		memPlugin:     memPlugin,
+		persistentBus:       bus,
+		activeBus:           bus,
+		droppedOutputEvents: droppedOutputCounter,
+		memStore:            memStore,
+		memPlugin:           memPlugin,
 		config:        cfg,
 		sessionSvc:    sessionSvc,
 		name:          name,
@@ -456,7 +470,7 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt
 
-	return NewContextManager(ContextManagerConfig{
+	cm := NewContextManager(ContextManagerConfig{
 		Name:                 cfg.Name,
 		Model:                cfg.Model,
 		Tools:                cfg.Tools,
@@ -483,4 +497,9 @@ func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlug
 		Projection:           projection,
 		OnEvent:              onEvent,
 	})
+	// F2 (design-report-closeout): stalled-consumer overflow persists under
+	// <workspace>/tool-output/output-overflow (workspace.Root applies the
+	// default workspace when cfg.WorkspaceRoot is empty).
+	cm.overflowDir = filepath.Join(workspace.ToolOutputPath(cfg.WorkspaceRoot), "output-overflow")
+	return cm
 }

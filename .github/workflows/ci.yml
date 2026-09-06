@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# API key secrets (F5, design-report-closeout): none are required — the
+# deterministic suite is fully mocked. If real-LLM contract layers are added
+# later, BOTH keys are optional and independent: ZAI_API_KEY (GLM Coding
+# Plan family: glm models / zhipu embedding / web-search-prime MCP) and
+# TENCENT_HY_API_KEY (hunyuan family, hy3 tests only).
 jobs:
   test:
     runs-on: ubuntu-latest

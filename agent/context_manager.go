@@ -54,6 +54,18 @@ type ContextManager struct {
 	projection *compress.SessionProjection
 	onEvent    func(evt *event.Event)
 
+	// overflowDir persists events when the outputCh consumer stalls beyond
+	// the F2 grace period (empty = drop with warning, e.g. sub-agent paths
+	// with no workspace). <workspace>/tool-output/output-overflow.
+	overflowDir string
+
+	// bundleIDFn returns the currently active evolution bundle id (empty when
+	// evolution is disabled or no bundle is active). Both persistence paths
+	// stamp it into FullEvent.Metadata (bundle_id, D1-B design-report-closeout)
+	// so guardrail/feedback aggregation can join events to bundle versions
+	// precisely. nil-safe.
+	bundleIDFn func() string
+
 	// taskController, when set, is injected into the RunFlow ctx (as a
 	// task.TaskSpawner) so tools can hand long-running work to the task layer, and
 	// is used to render the live task board at BeforeModel. nil → tools fall
@@ -429,11 +441,11 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		Content:      msg.Content,
 	}
 	// 归因盖章（TC0，路径2/2）：与插件管线 onEvent 同盖，避免归因盲区（报告 R5）。
-	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 待
-	// BundleProvider 落地后并入。
+	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 属会话级
+	// 版本上下文（非 turn 锚），D1-B（design-report-closeout）起双路径同盖。
 	// M9（§8.4）设计边界（非缺陷）：persistBusEvent 处理 bus 回流的**系统注入消息**（如
 	// action_tool_result，见上 RoleSystem→RoleUser 转换），非 RunFlow 的 LLM 调用产出——不属
-	// 单一 turn span，故**不注入** turn trace 锚（trace_id/span_id 是 RunFlow 主路径 486-489 经
+	// 单一 turn span，故**不注入** turn trace 锚（trace_id/span_id 是 RunFlow 主路径经
 	// Attribution 的职责）。其溯源经 rollout_id(sessionID) + trigger_source 达成（关联到会话与
 	// 触发源，足够审计）；强加 turn span 锚反而会错误归属到无关 turn。
 	fullEvent.Metadata = map[string]string{
@@ -442,6 +454,11 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	}
 	if cm.sessionID != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	if cm.bundleIDFn != nil {
+		if bid := cm.bundleIDFn(); bid != "" {
+			fullEvent.Metadata[tagentevent.MetaKeyBundleID] = bid
+		}
 	}
 
 	if cm.memStore != nil {
@@ -491,6 +508,13 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
 			attr[tagentevent.MetaKeyTraceID] = traceID
 			attr[tagentevent.MetaKeySpanID] = spanID
+		}
+		// D1-B (design-report-closeout): stamp the active bundle id so every
+		// produced event attributes to the exact prompt/config version.
+		if cm.bundleIDFn != nil {
+			if bid := cm.bundleIDFn(); bid != "" {
+				attr[tagentevent.MetaKeyBundleID] = bid
+			}
 		}
 		ctx = plugin.WithAttribution(ctx, attr)
 	}
@@ -557,9 +581,9 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 			cm.onEvent(evt)
 		}
 		if cm.outputCh != nil {
-			select {
-			case cm.outputCh <- evt:
-			case <-ctx.Done():
+			// F2 (design-report-closeout): 2s grace → persist + ticket, never
+			// block the loop on a stalled consumer.
+			if !cm.deliverEvent(ctx, evt) && ctx.Err() != nil {
 				return nil
 			}
 		}

@@ -161,6 +161,12 @@ func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evi
 		if e.Timestamp < cutoff {
 			continue // 客户端时间窗口过滤（canary 观察窗）
 		}
+		// D1-B（design-report-closeout）：bundle_id 精确 join——带章事件归属其真实
+		// bundle（他 bundle 的事件不计入本窗口证据）；无章事件（历史/未启用自进化
+		// 时期）回退时间窗归属。ActivationLog 时间窗从主判据降为缺章回退。
+		if bid, ok := e.Metadata[event.MetaKeyBundleID]; ok && bid != bundleID {
+			continue
+		}
 		ev.TurnCount++
 		if e.EventType == event.TypeGovernance {
 			switch e.Metadata[event.MetaKeySubtype] {

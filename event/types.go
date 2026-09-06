@@ -66,6 +66,12 @@ const (
 	// 五类（Metadata.subtype 区分），正 key、TTL 永久（-1 豁免）、可查询可审计。
 	// 单类型 + subtype 而非五个类型（每加类型有注册成本，审计查询天然单类型过滤）。
 	TypeGovernance = "governance"
+
+	// TypeFeedback 是回执-反馈事件（D1 design-report-closeout）：用户反馈/任务成败/
+	// API 评分绑定到具体产出事件（经 RelationStore 因果边，零新索引）。正 key、
+	// Role=system、TTL 默认 30 天（治理数据，可配置）、可召回；subtype 经 Metadata
+	// 区分 user/task_settle/api。Content 为结构化 JSON（verdict/rating/note/source）。
+	TypeFeedback = "feedback"
 )
 
 // ExtractEventType determines the event type from a model.Message.

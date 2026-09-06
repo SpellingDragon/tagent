@@ -1,8 +1,6 @@
 package kv
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
-
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -11,7 +9,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/SpellingDragon/tagent/memory"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // LocalFileKV is a file-backed memory.KVStore with a snapshot + WAL layout:
@@ -42,6 +44,12 @@ type LocalFileKV struct {
 	data     map[string]string
 	snapPath string
 	walPath  string
+
+	// quarantined counts WAL lines skipped at replay due to mid-file
+	// corruption (F3, design-report-closeout): a single bit flip must not
+	// cost the whole store. Torn tail lines (crash mid-append) are not
+	// counted — they are the normal crash signature.
+	quarantined atomic.Int64
 
 	// Deferred flush state
 	pending  []walOp // ops not yet appended to the WAL file
@@ -137,8 +145,10 @@ func (k *LocalFileKV) loadSnapshot() error {
 }
 
 // replayWAL applies WAL ops on top of the snapshot. A torn (unparseable)
-// final line — the signature of a crash mid-append — stops replay silently;
-// any unparseable line before the end is a real corruption and is reported.
+// final line — the signature of a crash mid-append — stops replay silently.
+// An unparseable line followed by further good lines is mid-file corruption:
+// it is skipped and counted in the quarantine counter (F3) instead of
+// failing startup — observability over data loss of a single op.
 func (k *LocalFileKV) replayWAL() error {
 	f, err := os.Open(k.walPath)
 	if err != nil {
@@ -148,19 +158,34 @@ func (k *LocalFileKV) replayWAL() error {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 64<<20) // allow large values
-	var pendingErr error
+	var (
+		badLines  int
+		firstErr  error
+		badLineNo int
+	)
+	lineNo := 0
 	for sc.Scan() {
+		lineNo++
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
 		}
-		if pendingErr != nil {
-			return fmt.Errorf("wal corruption (bad line not at tail): %w", pendingErr)
-		}
 		var op walOp
 		if err := json.Unmarshal(line, &op); err != nil {
-			pendingErr = err // tolerated iff it is the final line
+			if firstErr == nil {
+				firstErr = err
+				badLineNo = lineNo
+			}
+			badLines++
 			continue
+		}
+		// A good line after bad lines proves the corruption is mid-file
+		// (not a torn tail): flush the quarantine batch and keep going.
+		if badLines > 0 {
+			k.quarantined.Add(int64(badLines))
+			log.Warnf("[kv] wal corruption: quarantined %d bad line(s) starting at line %d of %s (first err: %v); replay continues",
+				badLines, badLineNo, k.walPath, firstErr)
+			badLines, firstErr, badLineNo = 0, nil, 0
 		}
 		switch op.Op {
 		case "p":
@@ -169,8 +194,14 @@ func (k *LocalFileKV) replayWAL() error {
 			delete(k.data, op.K)
 		}
 	}
+	// Trailing bad lines: torn tail from a crash mid-append — tolerated
+	// silently (not quarantined), same as the previous behavior.
 	return sc.Err()
 }
+
+// WalQuarantined returns the number of WAL lines skipped at replay due to
+// mid-file corruption (F3). Exposed for diagnostics/observability.
+func (k *LocalFileKV) WalQuarantined() int64 { return k.quarantined.Load() }
 
 // appendWALLocked appends pending ops to the WAL file and triggers
 // compaction when the WAL exceeds compactWALBytes.

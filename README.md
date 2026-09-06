@@ -56,7 +56,8 @@ sequenceDiagram
 | Go | ≥ 1.24 | 构建（`go build ./...`；go.mod 声明为准） |
 | tmux | 任意近期版本 | exec 工具命令执行 + 异步任务层（fast 路径内联返回 / slow 路径 tmux 后台 + `task_settled` 回写） |
 | rustviking | 可选 | 仅 `memory.type: file` 持久后端的 KV；缺省用 `memory`/`localfile` 后端（零外部二进制依赖） |
-| ZAI_API_KEY | 按需 | GLM Coding Plan 模型（examples 默认）；**全部单测使用 mock，无需任何 key** |
+| ZAI_API_KEY | 按需 | **GLM Coding Plan 系**（zhipu glm 模型 + zhipu embedding + web-search-prime MCP，一把 key 通吃；examples 默认）；**全部单测使用 mock，无需任何 key** |
+| TENCENT_HY_API_KEY | 按需 | **混元系**（tencent_hy provider 的 hy3 模型，仅 tests/hy3_thinking_test.go 使用）——与 ZAI 分属两家供应商，按所用模型配置，二者均可选 |
 | OTLP endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出（Jaeger/Tempo 等）；未设为 noop，零开销零行为变化 |
 
 ## 🚀 快速开始
@@ -116,14 +117,22 @@ for evt := range outputCh {
 
 ```bash
 cd examples/wechat-bot
-./wizard.sh    # 检查依赖(go≥1.24/tmux 硬性;node/openspec/rustviking 软性) + 引导填 ZAI_API_KEY
-               # (不回显) + 生成 .env(chmod 600) + 验证连通性(embedding 端点,不耗 chat 额度)
+./wizard.sh    # 7 步向导：① 检查依赖(go≥1.24/tmux 硬性;node/openspec/rustviking 软性)
+               # ② 引导填 ZAI_API_KEY(不回显、不入 history) ③ 设 agent 工作根(TAGENT_WORKING_DIR)
+               # ④ 生成 .env(chmod 600) ⑤ 工作区 ACL 权限初始化 ⑥ 验证连通性(embedding 端点,
+               # 不耗 chat 额度) ⑦ 下一步指引
 ./run.sh       # 前台启动（./run.sh start 后台；./run.sh --help 看全部命令；./run.sh setup 亦触发向导）
 ```
 
 密钥写入 `.env`（已被 `examples/wechat-bot/.gitignore` 白名单模式天然忽略，绝不入库）；`run.sh`
 启动时自动加载 `.env`，**已导出的环境变量优先**（支持 `ZAI_API_KEY=x ./run.sh` 临时覆盖）。
-`wizard.sh --check` 仅查依赖、`--verify` 仅验连通。
+子命令：`wizard.sh --check` 仅查依赖、`--verify` 仅验连通、`--perms` 仅重做工作区权限。
+
+**远端常驻部署（裸机 systemd）**——`./run.sh build` 构建纯静态二进制（`CGO_ENABLED=0`，无需 gcc）→
+安装 `deploy/tagent-wechat.service`（非 root / `ProtectSystem=strict` + `ReadWritePaths` 白名单 /
+`Restart=always` 崩溃自愈 / SIGTERM 优雅关闭 / 资源上限）→ `systemctl enable --now`。
+完整步骤、数据目录与备份、工作根 ACL 两道放行、运维与故障排查见
+[examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md)（或 `./run.sh systemd` 打印指引）。
 
 或直接 `go run`（需已 `export ZAI_API_KEY`）：
 
@@ -131,7 +140,7 @@ cd examples/wechat-bot
 cd examples/wechat-bot && go run .    # 微信机器人：持久循环+全部机制实战
 ```
 
-其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`）——见 [examples/](examples/) 与 [docs/wiki/](docs/wiki/)。
+其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`）——见 [docs/wiki/](docs/wiki/)。
 
 ## 🧠 心智模型
 
@@ -279,6 +288,8 @@ graph TB
 | `request_timeout_seconds` | `3600` | 请求超时 |
 | `trajectory_dump` | `false` | 启用轨迹记录 |
 | `trajectory_dir` | `data/trajectories` | 轨迹文件目录 |
+| `working_dir` | `""` | **agent 统一工作根**——file 工具 `base_dir` 与 exec 命令 cwd 的共同基准（二者恒一致，保模型单一文件系统视图）。空 = 继承进程工作目录；设为项目 clone 根即让 agent 操作该目录下所有仓库，而 tagent 自身配置/资源/数据路径不受影响。优先级 `properties.base_dir`/`workspace` > `working_dir` > 进程 cwd。可经环境变量 `TAGENT_WORKING_DIR` 覆盖（部署时免改 YAML） |
+| `api_key_env` | `ZAI_API_KEY` | 全局 API key 环境变量名（`providers.<name>.api_key_env` 优先） |
 | `mcp_servers` | `{}` | MCP server 声明式注册表：每项 `transport`（stdio/sse/streamable-http）/`url`/`headers`/`api_key_env`/`command`/`args`/`timeout`；增删保存即热生效（无需重启），经 `mcp_discover`/`mcp_call` 使用 |
 
 ### Agent 级选项
@@ -287,10 +298,14 @@ graph TB
 |------|--------|------|
 | `model` / `provider` | （继承全局） | LLM 模型与 provider |
 | `system_prompt.files` | `[]` | 加载的 prompt 文件 |
-| `memory.type` | `memory` | `memory`/`file`/`localfile` |
-| `memory.path` | `""` | 存储路径/标识 |
-| `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区 |
-| `memory.engine.embedding` | （关闭） | 语义检索：`provider`（zhipu/mock）/`model`（embedding-3）/`api_key_env`/`endpoint`/`dimensions`（512/1024/2048）；开启后 recall 升级向量∪关键词 RRF 融合，key 缺失优雅降级 |
+| `memory.type` | `memory` | `memory`（进程内）/`file`（rustviking CLI 持久）/`localfile`（JSON 文件 KV 持久，零外部依赖） |
+| `memory.path` | `""` | 存储路径/标识；`memory` 型下同 path 的 agent 共享同一实例，空 = 隔离存储 |
+| `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区（跨 agent 记忆访问须显式授权） |
+| `memory.rustviking_binary` | `rustviking` | 仅 `type: file`：rustviking CLI 路径（空则走 PATH 查找） |
+| `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，**负值 = 关闭 TTL 遗忘**）/`type_ttl`（按事件类型覆盖，负值豁免）/`check_interval`（默认 `1h`）/`max_events_per_partition`（默认 0 = 不限） |
+| `memory.engine` | （关闭） | 语义检索引擎：`backend`（memory/rustviking，MVP 阶段等价，差异在向量持久化底座）/`embedding`（见下）/`vector_top_k`（20）/`keyword_top_k`（20）/`rrf_k`（60） |
+| `memory.engine.embedding` | （关闭） | `provider`（zhipu/mock）/`model`（embedding-3）/`api_key_env`（ZAI_API_KEY）/`endpoint`/`dimensions`（512/1024/2048）；开启后 recall 升级向量∪关键词 RRF 融合，key 缺失优雅降级纯关键词 |
+| `workspace_root` | `.tagent-workspace` | **scratch 根**（非工作根）：超大工具输出落 `<root>/tool-output`、tmux 命令目录 `<root>/exec`；与 `working_dir`（file/exec 的路径基准）是两个不同概念 |
 | `max_tool_iterations` | 入口 50 / 子 10 | 最大 ReAct 迭代次数 |
 | `max_tokens` | 入口 8000 / 子 4096 | 上下文 token 预算 |
 | `compress_threshold` | `0.8` | 压缩触发比例——**整理（compaction）的唯一触发条件**（容量超阈才整理）；task_settled 通知全文内联，整理间上下文前缀稳定以利缓存复用 |
@@ -316,12 +331,13 @@ graph TB
 |------|------|
 | `kind` | `agent`（默认）或 `tool` |
 | `agent` / `id` | 子 Agent 名称 / 工具 ID |
-| `description_file` | 工具描述 prompt 文件 |
+| `description` / `description_file` | 工具描述：内联文本 / prompt 文件（相对 `prompt_dir`）。`kind: agent` 必须二者其一 |
 | `event_params` | 事件参数，如 `[event_keys]` |
 | `extra_params` | 附加路由参数声明（如 plan 的 `action` enum + `name`）；调用时随 `request` 打包为 JSON 消息体透传子 Agent，未声明则消息体保持纯文本 |
-| `async` | 子 Agent 是否走异步任务层（默认 true） |
-| `remote.url` | 远程 A2A Agent URL |
-| `properties` | 工具专属配置（exec: `workspace`/`run_as_user`/`run_as_group`） |
+| `async` | 子 Agent 是否走异步任务层（默认 true；false = 恒同步，减轻弱模型对 ack/通知语义的负担） |
+| `remote.url` | 远程 A2A Agent URL（设置后创建 A2AAgent 而非本地 TagentAgent） |
+| `properties` | 工具专属配置：exec 的 `workspace`（命令 cwd）/`run_as_user`/`run_as_group`/`monitor`（轮询参数）；file 工具族的 `base_dir`（沙箱根）。二者缺省时回退全局 `working_dir`，再回退进程 cwd |
+| `factory` | 自定义工厂路径（非内置工具/agent 的扩展点） |
 
 > agent 运行参数（`max_tool_iterations`/`max_tokens`/`temperature`）**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系。
 
@@ -331,7 +347,7 @@ graph TB
 |--------|---------|------|
 | `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效）；DenialLedger 审计事件写 entry memStore |
 | `evolution:` | `enabled` / `dir` / `skip_approval`（默认 false=慢道需批准）/ `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | 热配置自进化：refine 提案经发布道（快道 validate→canary→后验 LLM-judge；慢道加审批门）；rollback 仅限发布历史中曾生效版本 |
-| `reliability:` | `bus_spill_dir`（非空启用事件溢出）/ `meditation_anchor_dir`（冥想锚点跨重启）/ `mem_spill_dir`（StoreEvent 失败兜底重放） | 常驻可靠性：每 agent 子目录隔离；退化追踪（memory/disk/rustviking/model/mcp 五依赖）随 governance.dir 启用 |
+| `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放）/ `meditation_anchor_dir`（冥想锚点跨重启） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线 |
 
 详见 [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md)。
 
@@ -341,11 +357,13 @@ graph TB
 |------|------|
 | 记忆架构 / 策展 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
 | 平台子系统（治理 / 自进化 / 可靠性 / 可观测 / 记忆引擎 / MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
+| 启用子系统后 agent 在各复杂场景的行为反应 | [docs/wiki/platform/agent-behavior-matrix.md](docs/wiki/platform/agent-behavior-matrix.md) |
 | 工具架构 / 任务重入 / 会话回收 | [docs/wiki/tool/tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
 | 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
 | 设计规格（OpenSpec） | [openspec/specs/](openspec/specs/) |
-| 完整示例（WeChat Bot + RL） | [examples/wechat-bot/](examples/wechat-bot/) |
+| 完整示例：裸机 systemd 部署（WeChat Bot） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
+| 真实 LLM 契约守护矩阵 | [tests/README.md](tests/README.md) |
 
 ## 开发
 
