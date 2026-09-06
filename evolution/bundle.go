@@ -152,6 +152,10 @@ func (s *BundleStore) SetActive(id string) error {
 // Rollback 回滚到历史 bundle（= SetActive，基线不可变故任意历史版本皆可回）。
 func (s *BundleStore) Rollback(toID string) error { return s.SetActive(toID) }
 
+// Dir 返回 bundle 存储目录（N1：供 ReleaseManager 持久化发布历史 releases.jsonl 到同目录，
+// 使 wasActive 白名单跨重启恢复）。
+func (s *BundleStore) Dir() string { return s.dir }
+
 // Get 按 id 读取 bundle（先内存 active，后磁盘）。id 须为合法内容寻址 hex——防路径遍历
 // （target_id 可能来自 LLM 输入，直传 filepath.Join 前必须校验）。
 func (s *BundleStore) Get(id string) (*Bundle, error) {

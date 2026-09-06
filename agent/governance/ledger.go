@@ -58,6 +58,22 @@ func NewDenialLedger(store memory.MemoryStore, partitionID int) *DenialLedger {
 	return l
 }
 
+// BindStore 延迟绑定持久化 store（N2，§8.9）：所有 agent gate 共享同一 DenialLedger 实例，但
+// entry memStore 在子 agent 之后才就绪（entry 依赖子 agent，buildAgent 递归先构造子 agent），
+// 故 Ledger 先以 nil store 创建（纯内存），entry buildAgent 时经本方法绑定持久 store + rebuild。
+// 绑定后所有 gate（含子 agent 主风险面 exec/save_file/mcp_call）的治理记录写同一 entry
+// governance 分区（durable，重启可 recall）——修复 W3 子 agent gate 兜底内存账本致审计重启即失。
+func (l *DenialLedger) BindStore(store memory.MemoryStore, partitionID int) {
+	if l == nil || store == nil {
+		return
+	}
+	l.mu.Lock()
+	l.store = store
+	l.partitionID = partitionID
+	l.mu.Unlock()
+	l.rebuildFromStore() // 加载已持久化治理事件（重启恢复审计）
+}
+
 // Record 记一条治理记录（内存索引 + governance 事件）。写事件失败不阻断（记账尽力）。
 func (l *DenialLedger) Record(rec DenialRecord) {
 	if rec.Timestamp == 0 {

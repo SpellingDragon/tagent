@@ -89,6 +89,10 @@ type runtimeConfig struct {
 	// governance (T-G)：治理闸运行时，cfg.Governance.Enabled 时构造，跨 agent 共享。
 	// govGate 对 entry agent 的 leaf 工具调用做风险分级 + 预算 + goal + critical 批准。
 	govGate *governance.GovernanceGate
+	// govLedger 是跨 agent 共享的治理账本（N2）：所有 agent gate 复用同一实例，entry buildAgent
+	// 时延迟绑定 entry memStore（子 agent 先构造、entry memStore 后就绪），使子 agent 治理记录
+	// 也持久化到 entry governance 分区（durable 审计，重启可 recall）。
+	govLedger *governance.DenialLedger
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -250,6 +254,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	// T-G: 治理闸运行时（配置门控，默认关闭 → 全放行，现状零行为变化）。构造 Budget/Approval/
 	// Goal/Ledger + GovernanceGate；entry agent 的 leaf 工具经 GovernanceTool 装饰器过闸。
 	if cfg.Governance.Enabled {
+		// N2：共享治理账本（所有 agent gate 复用），entry buildAgent 时延迟绑定 entry memStore。
+		rc.govLedger = governance.NewDenialLedger(nil, 0)
 		rc.govGate = governance.NewGovernanceGate(governance.GateDeps{
 			Budget: governance.NewBudgetManager(governance.BudgetConfig{
 				Window:        time.Duration(cfg.Governance.BudgetWindowMinutes) * time.Minute,
@@ -258,7 +264,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			}, cfg.Governance.Dir),
 			Approval: governance.NewApprovalManager(cfg.Governance.Dir, 0),
 			Goals:    governance.NewGoalRegistry(),
-			Ledger:   nil, // S5: BindLedger 于 buildAgent 阶段接 entry memStore（NewGovernanceGate 对 nil 兜底建内存账本，省掉必然被替换的临时对象）
+			Ledger:   rc.govLedger, // N2：共享账本（替代 nil 兜底内存，供所有 agent gate 复用）
 			Config: governance.GateConfig{
 				Enabled:         true,
 				Enforcement:     governance.Enforcement(cfg.Governance.Enforcement),
@@ -407,10 +413,14 @@ func buildAgent(
 	// != nil 且 name == cfg.Entry）；非 entry agent 或未启用则原样（现状逐字节不变）。
 	if rc.evoStore != nil && name == cfg.Entry {
 		if rc.evoStore.Active() == nil && systemPrompt != "" {
-			if _, ierr := rc.evoStore.InitBaseline(
+			if base, ierr := rc.evoStore.InitBaseline(
 				map[string]string{"system": systemPrompt}, evolution.BundleParams{}, evolution.ModelRef{},
 			); ierr != nil {
 				log.Warnf("[tagent] evolution init baseline failed: %v", ierr)
+			} else if rc.evoRelease != nil && base != nil {
+				// N1（§8.9）：基线经 InitBaseline 直接激活不走 Submit，须显式 seed 到发布历史，
+				// 否则 wasActive 白名单不含基线 → refine rollback 到基线恒被拒（E1 后遗症）。
+				rc.evoRelease.NoteActive(base.ID, "baseline init")
 			}
 		}
 		if rc.evoStore.Active() != nil {
@@ -542,11 +552,13 @@ func buildAgent(
 			}, filepath.Join(cfg.Governance.Dir, "budget", name)), // per-agent 独立 epoch 持久化
 			Approval: rc.govGate.Approval(),
 			Goals:    rc.govGate.Goals(),
+			Ledger:   rc.govLedger, // N2：共享 entry 持久账本（子 agent 治理记录也 durable，非兜底内存）
 			Config:   rc.govGate.Config(),
 		})
 		if name == cfg.Entry {
-			// 治理账本仅绑定 entry memStore：治理记录写 governance 事件（可 recall 审计、跨重启重建）。
-			agentGate.BindLedger(memStore, memory.PartitionIDFromName(name))
+			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的
+			// 治理记录写 entry governance 分区，重启可 recall）。替代原 agentGate.BindLedger。
+			rc.govLedger.BindStore(memStore, memory.PartitionIDFromName(name))
 		}
 		for i, t := range tools {
 			if _, isWrapper := t.(*agent.AgentToolWrapper); isWrapper {

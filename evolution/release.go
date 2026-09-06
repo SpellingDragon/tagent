@@ -1,8 +1,12 @@
 package evolution
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -131,13 +135,15 @@ func NewReleaseManager(deps ReleaseDeps) (*ReleaseManager, error) {
 	if deps.Store == nil {
 		return nil, fmt.Errorf("evolution: ReleaseManager requires BundleStore")
 	}
-	return &ReleaseManager{
+	rm := &ReleaseManager{
 		store: deps.Store, router: deps.Router, evaluator: deps.Evaluator, guardrail: deps.Guardrail,
 		validateGate: deps.ValidateGate, replayGate: deps.ReplayGate,
 		shadowGate: deps.ShadowGate, approveGate: deps.ApproveGate,
 		cfg:           deps.Config,
 		activationLog: NewActivationLog(), // W4：内部建，经 getter 共享给 StoreEvidenceSource
-	}, nil
+	}
+	rm.loadHistory() // N1：重启恢复发布历史（wasActive 白名单跨重启有效）
+	return rm, nil
 }
 
 // ActivationLog 暴露 canary 激活时刻表（W4）：buildAgent 接线时共享给 StoreEvidenceSource，
@@ -314,7 +320,62 @@ func (rm *ReleaseManager) record(draft *Bundle, lane Lane, stage ReleaseStage, r
 	rm.mu.Lock()
 	rm.history = append(rm.history, rec)
 	rm.mu.Unlock()
+	rm.persistRecord(rec) // N1：持久化发布历史（重启后 wasActive 白名单恢复）
 	return rec
+}
+
+// NoteActive 记录一个 bundle 为曾激活（Stage=active）到发布历史并持久化（N1，§8.9）：基线经
+// InitBaseline 直接激活**不走 Submit**，若不显式 seed 则永不在 wasActive 白名单 → refine rollback
+// 到基线恒被拒（E1 修复的后遗症）。buildAgent 在 InitBaseline 后调用本方法 seed 基线。
+func (rm *ReleaseManager) NoteActive(bundleID, reason string) {
+	if rm == nil || bundleID == "" {
+		return
+	}
+	rec := ReleaseRecord{BundleID: bundleID, Stage: StageActive, Reason: reason, Timestamp: time.Now().UnixMilli()}
+	rm.mu.Lock()
+	rm.history = append(rm.history, rec)
+	rm.mu.Unlock()
+	rm.persistRecord(rec)
+}
+
+// persistRecord 追加发布记录到 <bundle dir>/releases.jsonl（N1：history 持久化，重启恢复）。
+// best-effort——落盘失败不影响内存 history（当前进程 wasActive 仍可用），仅重启恢复受损。
+func (rm *ReleaseManager) persistRecord(rec ReleaseRecord) {
+	if rm.store == nil {
+		return
+	}
+	path := filepath.Join(rm.store.Dir(), "releases.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(raw, '\n'))
+}
+
+// loadHistory 从 releases.jsonl 重建 history（N1：重启恢复发布历史，使 wasActive 白名单跨重启
+// 有效——否则重启后 history 清零，所有 rollback 失效）。坏行跳过。
+func (rm *ReleaseManager) loadHistory() {
+	if rm.store == nil {
+		return
+	}
+	f, err := os.Open(filepath.Join(rm.store.Dir(), "releases.jsonl"))
+	if err != nil {
+		return // 文件不存在 = 无历史（首次运行）
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var rec ReleaseRecord
+		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.BundleID != "" {
+			rm.history = append(rm.history, rec)
+		}
+	}
 }
 
 // History 返回发布留痕（审计）。
