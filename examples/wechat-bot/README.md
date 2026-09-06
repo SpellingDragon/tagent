@@ -20,6 +20,7 @@ tagent 框架的**全机制实战示例**：一个常驻的微信机器人，把
 
 ## Agent 编排（五个，`tagent.yaml`）
 
+
 | Agent | 角色 | 工具面与权限边界 |
 |---|---|---|
 | `tagent` | **entry**：接收用户消息、编排全局、直接回复 | 子 agent `knowledge`/`plan` + 统一 `recall` 入口 + 7 个 file 工具 + `exec` |
@@ -32,6 +33,15 @@ tagent 框架的**全机制实战示例**：一个常驻的微信机器人，把
 （refine 发布道，`SOUL.md`/`AGENTS.md` 走慢道人工批准）、常驻可靠性（溢出 / 兜底 / 退化状态机 /
 冥想锚点）、语义引擎（zhipu embedding-3，512 维，三个共享存储的 agent 共用同一引擎实例）。
 启用后 agent 在各复杂场景的实际反应见 [agent-behavior-matrix.md](../../docs/wiki/platform/agent-behavior-matrix.md)。
+
+## 治理审批（critical 操作人工把关）
+
+治理闸启用且 critical 操作被拦截时，bot 会向对话推送审批请求（含 digest）。
+
+- **消息批准**：回复 `approve <digest>` / `reject <digest>`（或「批准/拒绝 <digest>」）——
+  仅 `app.wechat.approvers` 白名单内的用户生效（安全默认：未配置白名单时消息批准关闭）；
+- **CLI 批准**：`./wechat-bot approve <digest>`（`reject <digest>` 拒绝；零服务器，直接写审批文件）；
+- **查看待批**：向 agent 发「列出待批准项」触发 `approval_list` 工具。
 
 ## 消息链路
 

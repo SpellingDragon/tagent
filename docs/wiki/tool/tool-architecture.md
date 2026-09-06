@@ -471,6 +471,25 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
+
+---
+
+## 附：治理面工具五件套（tool/govx，design-report-closeout §5.1）
+
+`goal_declare` / `goal_list` / `goal_resolve` / `denial_query` / `approval_list`——
+有界自治的**治理面入口**（entry only，与 refine 同槽位由 buildAgent 追加，先于治理包裹；
+新包 `tool/govx/`，不经注册表）：
+
+- **goal_declare/goal_resolve**：goal 门的凭证管理——high+ 风险操作要求存在活跃 goal；
+  声明/关闭**双写 governance 事件**（重启经事件回放重建，goal 门不因重启静默重开）；
+- **goal_list**：活跃/全部目标清单；
+- **denial_query**：最近治理拒绝记录（工具/原因/风险级/来源 agent）——自省材料；
+- **approval_list**：待人工批准的 critical 项（digest/工具/摘要/批准方式）——
+  **只列不批**，批准权始终在人（消息回复 approve/reject <digest> 或 CLI）。
+
+classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无副作用）——
+避免 strict 模式预算耗尽时 goal_declare 自我拒绝的死锁。
+
 ## 六、召回体系：recall（统一入口，参数即路由）+ RecallAgent（orchestrate 内部引擎）
 
 ### 6.0 recall — 统一召回入口（stable-context-compaction D7）

@@ -550,6 +550,27 @@ rustviking 原生 `index insert/search/delete` CLI 为预留后端（VectorInser
 
 ---
 
+
+---
+
+## 附：回执-反馈绑定（feedback，design-report-closeout §2）
+
+`feedback` 事件类型（EventTypeSpec 注册：正 key、Role=system、TTL 默认 30 天、可召回、
+不可嵌入）把「评价」绑定到具体产出事件：
+
+- **BindFeedback**（memory/feedback.go）：写 feedback 事件（Content=结构化 JSON
+  verdict/rating/note/source/parent_key）+ RelationStore.SetParent 因果边（零新索引）；
+  **继承 parent 的 bundle_id 章**（guardrail 沿因果边精确 join 到产出 bundle，不回退时间窗）；
+  parent 不存在 → 显式错误（不允许对幻觉产出反馈）；sentinel 双错误（ParentNotFound /
+  EdgePartial）供调用方区分 404 与 201+warning。
+- **来源**：① OnSettle——task_settled 落库后自动绑定确定性裁决（completed→positive /
+  failed→negative；suspect/alive-detached **不写**，防噪声污染 guardrail）；② `POST /feedback`
+  （rl HTTPAPI，hex event_key + verdict + note）；③ 自评来源不做（随冥想智能化后续）。
+- **消费**：MetricGuardrail canary 窗口 `negative_feedback_rate` 判据（MaxNegFbRate，
+  0=默认 0.3、负值=显式禁用）；verdict 同时冗余入 Metadata（消费侧不依赖 JSON 序列化格式）。
+- **白名单**（examples）：消息通道批准仅 `app.wechat.approvers` 白名单用户生效——
+  agent 永远无批准权，批准是人的动作。
+
 ## 十一、与其他模块的关系
 
 ### 11.1 依赖关系

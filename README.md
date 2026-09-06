@@ -21,7 +21,8 @@
 | 🔌 **MCP 闭环** | `mcp_servers` 声明式注册表（增删热同步）+ `mcp_call` 网关 + `mcp_discover` 发现——工具知识按需渗透进上下文，工具声明区恒定（缓存友好） |
 | 🔍 **混合语义召回** | `memory.engine.embedding` 开启后向量∪关键词 RRF 融合召回；语义发现→票据取回两段式不变；未配置时行为与纯关键词逐字节一致 |
 | 📊 **统一可观测** | turn root span + trace_id 三投影互链（事件 Metadata / RL 轨迹 / OTel span 树）；设 OTLP endpoint 导出，未设 noop 零开销 |
-| 🛡 **治理闸**（默认关） | RiskClassifier 四级风险 + 预算滑窗 + critical 异步审批（外部落盘批准文件）+ DenialLedger 审计；GovernanceTool 装饰全部 leaf 工具 |
+| 🛡 **治理闸**（默认关） | RiskClassifier 四级风险 + 预算滑窗 + critical 异步审批（**审批消息流**：请求渗透为消息→人工回复 approve/reject <digest> 或 CLI 批准→白名单校验→落盘生效）+ DenialLedger 审计 + **goal 五工具**（goal_declare/goal_list/goal_resolve/denial_query/approval_list，entry only）+ **负反馈 guardrail 判据**；GovernanceTool 装饰全部 leaf 工具 |
+| 🔁 **回执-反馈闭环** | 任务结算自动写 task_settle feedback（completed→positive/failed→negative，suspect 不写）+ `POST /feedback` 外部评分 + FeedbackBinder 因果边绑定产出事件；negative_feedback_rate 进入发布 guardrail 判据（跨 bundle 误归因防线=bundle_id 精确 join） |
 | 🧬 **自进化**（默认关） | BundleStore 不可变热配置 + 风险分级发布道（快道后验评估/慢道门后）+ refine 工具（propose/diff/status/rollback，**无 activate**——agent 永无直接激活权） |
 | 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once 不丢事件）+ DegradationManager 五依赖退化追踪 + mem_spill 存储失败兜底重放 |
 
@@ -346,7 +347,7 @@ graph TB
 
 | 配置块 | 关键字段 | 说明 |
 |--------|---------|------|
-| `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效）；DenialLedger 审计事件写 entry memStore |
+| `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效；**审批请求渗透为消息、人工回复 approve/reject <digest> 即生效**，`app.wechat.approvers` 白名单校验发送者）；DenialLedger 审计事件写 entry memStore；goal 五工具（entry only）登记自治目标 |
 | `evolution:` | `enabled` / `dir` / `skip_approval`（默认 false=慢道需批准）/ `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | 热配置自进化：refine 提案经发布道（快道 validate→canary→后验 LLM-judge；慢道加审批门）；rollback 仅限发布历史中曾生效版本 |
 | `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放，重放双写投影）/ `meditation_anchor_dir`（冥想锚点跨重启）/ **降级行为层**（默认全关）：`degradation_model_backoff`（model 退化时 turn 间退避，如 5s）/ `degradation_mcp_probe_every`（mcp 退化时熔断半开探测间隔 N）/ `degradation_disk_block_spawn`（disk 退化时禁新任务 spawn，进行中任务不受影响） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线；降级行为是「闸不是墙」——每项独立开关，恢复即回正常路径 |
 
