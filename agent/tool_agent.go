@@ -852,6 +852,11 @@ type PlainToolFactoryConfig struct {
 	// action/exec tool uses <root>/exec as its tmux command working directory).
 	WorkspaceRoot string
 
+	// WorkingDir 是 agent 的统一工作根(file tools 的 base_dir 与 exec 命令 cwd 的共同基准)。
+	// 空 = 各工具回退自身默认(file base_dir="."、exec 继承进程 cwd,现状不变);非空则作为二者
+	// 共同根,优先级仍低于 ToolRef.properties 的显式 base_dir/workspace。由 config.WorkingDir 注入。
+	WorkingDir string
+
 	// Runtime dependencies (optional, injected by buildAgent).
 	// Most plain tools (e.g., exec) ignore these fields.
 	// Sub-tools that need runtime objects (e.g., skill_search needs SkillRepo,

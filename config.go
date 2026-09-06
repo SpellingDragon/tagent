@@ -126,6 +126,15 @@ type Config struct {
 	// Default: "data/trajectories". Each session gets its own file: {dir}/{session_id}.jsonl
 	TrajectoryDir string `json:"trajectory_dir,omitempty" yaml:"trajectory_dir,omitempty"`
 
+	// WorkingDir 是 agent 的统一工作根目录 —— file tools 的 base_dir 与 exec 命令的 cwd 的共同基准。
+	// 空(默认)= 继承进程工作目录(现状逐字节不变);非空则 file/exec 的相对路径均以此为根,且二者
+	// 始终一致(保持模型"单一文件系统视图",见 workspace.go / action_tool.go 设计约定:分裂 base 会致
+	// list_file 结果从 exec 不可达 + 路径幻觉)。典型用途:设为项目 clone 根(如 /home/user/codes),
+	// 使 agent 能操作该目录下所有仓库;tagent 自身的配置/资源/数据路径**不受影响**(仍相对进程 cwd)。
+	// 优先级:ToolRef.properties(base_dir/workspace) > WorkingDir > 进程 cwd。
+	// 可经环境变量 TAGENT_WORKING_DIR 覆盖(部署时灵活指定 clone 根,免改 yaml;见 ApplyDefaults)。
+	WorkingDir string `json:"working_dir,omitempty" yaml:"working_dir,omitempty"`
+
 	// ConfigPath records the file this Config was loaded from (set by
 	// LoadConfig; empty for programmatically constructed configs). It binds
 	// the MCP registry's mcp_servers hot-sync to the source file.
@@ -639,6 +648,12 @@ func (c *Config) ApplyDefaults() {
 	// LOG_LEVEL env var overrides config file
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		c.LogLevel = v
+	}
+
+	// TAGENT_WORKING_DIR env var overrides config file — deploy-time agent working root
+	// (e.g. project clone root). Lets systemd/.env set it without editing tagent.yaml.
+	if v := os.Getenv("TAGENT_WORKING_DIR"); v != "" {
+		c.WorkingDir = v
 	}
 
 	for name := range c.Agents {

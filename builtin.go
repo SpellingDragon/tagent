@@ -32,14 +32,15 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 	var opts []action.ActionToolOption
 
-	// Command working directory: explicit `workspace` property wins; otherwise
-	// inherit the process working directory — the SAME base the file tools
-	// resolve relative paths against. Defaulting exec into a scratch dir would
-	// split the model's filesystem view in two (list_file sees ./x, exec can't
-	// reach it) and induce path hallucinations. Oversized outputs go to the
-	// unified scratch (<root>/tool-output) instead.
+	// Command working directory 优先级:显式 `workspace` property > agent 级 WorkingDir
+	// (config.working_dir / TAGENT_WORKING_DIR) > 继承进程工作目录。file tools 的 base_dir 走
+	// 同一优先级(resolveBaseDir),二者始终一致 —— 同一 base 让模型看到单一文件系统视图;若把
+	// exec 默认进 scratch dir 会分裂视图(list_file 见 ./x 而 exec 够不着)诱发路径幻觉。
+	// oversized 输出仍走统一 scratch(<root>/tool-output)。
 	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))
+	} else if cfg.WorkingDir != "" {
+		opts = append(opts, action.WithActionWorkspace(cfg.WorkingDir))
 	}
 	opts = append(opts, action.WithActionOutputDir(workspace.ToolOutputPath(cfg.WorkspaceRoot)))
 	if ru, ok := properties["run_as_user"].(string); ok && ru != "" {

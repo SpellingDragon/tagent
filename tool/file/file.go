@@ -61,7 +61,7 @@ func RegisterTools() {
 // makeFileToolFactory returns a plain tool factory for the given file tool name.
 func makeFileToolFactory(name string) agent.PlainToolFactory {
 	return func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
-		baseDir := resolveBaseDir(cfg.Properties)
+		baseDir := resolveBaseDir(cfg.Properties, cfg.WorkingDir)
 
 		ts, err := getToolSet(baseDir)
 		if err != nil {
@@ -84,16 +84,19 @@ func makeFileToolFactory(name string) agent.PlainToolFactory {
 	}
 }
 
-// resolveBaseDir extracts the base directory from tool properties.
-func resolveBaseDir(props map[string]any) string {
-	if props == nil {
-		return "."
+// resolveBaseDir 解析 file 工具的根目录。优先级:显式 properties.base_dir > agent 级 WorkingDir
+// (config.working_dir / TAGENT_WORKING_DIR) > "."(进程 cwd,现状默认)。与 exec 命令 cwd 走同一
+// 优先级(builtin.go actionFactory),二者始终一致 → 模型看到单一文件系统视图。
+func resolveBaseDir(props map[string]any, workingDir string) string {
+	if props != nil {
+		if v, ok := props["base_dir"].(string); ok && v != "" {
+			return v
+		}
 	}
-	v, ok := props["base_dir"].(string)
-	if !ok || v == "" {
-		return "."
+	if workingDir != "" {
+		return workingDir
 	}
-	return v
+	return "."
 }
 
 // getToolSet returns a cached file.ToolSet for the given base directory.

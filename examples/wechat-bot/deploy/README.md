@@ -55,21 +55,25 @@ git clone <your-tagent-repo> /opt/tagent/repo
 cd /opt/tagent/repo/examples/wechat-bot
 # 若部署目录就是此处,可直接用;否则拷贝 examples/wechat-bot 到 /opt/tagent/wechat-bot
 
-# 1) 依赖检查 + 密钥引导(生成 .env,chmod 600,已被 gitignore)
-./wizard.sh                       # 交互式;或 NONINTERACTIVE=1 预置 env 后跑
+# 1) 初始化向导(7 步:依赖→密钥→**工作根**→.env→**ACL 权限**→连通→下一步)
+#    工作根(TAGENT_WORKING_DIR)可设为项目 clone 根(如 /home/user/codes),使 agent 操作其下所有仓库;
+#    向导步骤5 对工作根做 ACL 授权(服务用户 tagent 可读写**含已有文件**,不改原有 owner/group/mode)。
+./wizard.sh                       # 交互式;或 NONINTERACTIVE=1 预置 env 后跑(权限步骤需 sudo)
 
 # 2) 构建二进制(纯静态,无需 gcc)
 CGO_ENABLED=0 ./run.sh build      # 产出 ./wechat-bot
 
-# 3) 创建专用非 root 系统用户 + HOME 目录
+# 3) HOME 目录(tagent 系统用户已由 wizard 步骤5 创建;此处补 HOME,幂等)
 sudo useradd -r -s /usr/sbin/nologin tagent 2>/dev/null || true
 mkdir -p .home                    # HOME 收敛到部署目录内(数据集中、便于备份)
 
 # 4) 安装 systemd 单元(路径不同则先 sed 替换)
 sudo install -m 644 deploy/tagent-wechat.service /etc/systemd/system/
 # sudo sed -i "s#/opt/tagent/wechat-bot#$(pwd)#g" /etc/systemd/system/tagent-wechat.service
+# ⚠️ 若工作根在部署目录**外**(如 /home/user/codes),编辑 unit 的 ReadWritePaths 追加该路径为续行
+#    (在 .home 行末加 \ 换行填工作根绝对路径),否则 ProtectSystem=strict 会拒 agent 写工作区。
 
-# 5) 目录属主交给 tagent 用户(数据目录须可写)
+# 5) 部署目录属主交给 tagent(数据目录须可写);工作区(codes)权限已由 wizard ACL 处理(不改原有)
 sudo chown -R tagent:tagent "$(pwd)"
 
 # 6) 启动 + 开机自启
@@ -108,6 +112,33 @@ curl -fsS http://127.0.0.1:8089/healthz        # 健康探针
 sudo -u tagent tar czf tagent-backup-$(date +%F).tgz \
   .wechat-config data/governance data/evolution openspec/changes
 ```
+
+### 工作根（TAGENT_WORKING_DIR）与 ACL 权限
+
+**工作根** = agent 的 file tools `base_dir` 与 exec 命令 `cwd` 的**共同基准**（框架 `config.WorkingDir`，
+二者恒一致 → 模型看到单一文件系统视图）。默认空 = 进程工作目录（部署目录）；设为项目 **clone 根**
+（如 `/home/user/codes`）→ agent 可读写该目录下**所有仓库**，而 tagent 自身配置/资源/数据路径不受影响
+（仍相对部署目录）。三种设置方式（优先级 env > yaml > 进程 cwd）：
+
+| 方式 | 位置 | 适用 |
+|------|------|------|
+| `TAGENT_WORKING_DIR` 环境变量 | `.env`（wizard 步骤3 引导写入）/ unit `Environment=` | **推荐**:部署时按实际 clone 位置填,yaml 保持便携 |
+| `working_dir:` | `tagent.yaml` 顶层 | 固定工作根、随配置入库 |
+| `properties.base_dir`/`workspace` | 单个 tool | 覆盖个别工具(优先级最高) |
+
+**ACL 权限**（wizard 步骤5 / `./wizard.sh --perms`）：让服务用户 `tagent` 能读写工作根（含**已有文件**），
+但**不改动**工作区原有的 owner/group/mode —— 用 POSIX ACL 追加而非 chown/chmod：
+
+```bash
+sudo setfacl -R -m  u:tagent:rwX <工作根>   # -R 递归覆盖已有文件(rwX:文件 rw、目录 rwx)
+sudo setfacl -R -d -m u:tagent:rwX <工作根>   # -d 默认 ACL:工作区内新建文件自动继承 tagent 权限
+```
+
+- **为何不影响原有权限**:ACL 只追加 named-user 条目,`mask ≥ owning group` ⇒ 原有 group 有效权限不变,
+  owner/other 完全不受影响（`ls -l` 的 group 位此后显示为 mask,属正常现象,有效权限未变）。
+- **两道放行**:ACL（文件系统层,服务用户可读写）+ systemd `ReadWritePaths`（沙箱层,须含工作根）——
+  二者都需覆盖工作根,agent 才能写;缺任一则 file/exec 对工作区只读失败。
+- **降级**:非 Linux / 无 `setfacl`（`apt install acl`）/ 无 sudo → wizard 告警并给手动指引,不中断部署。
 
 ---
 
@@ -157,6 +188,8 @@ sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子�
 | 现象 | 排查 |
 |------|------|
 | 启动即退出,status 示权限错 | 数据目录属主非 tagent:`sudo chown -R tagent:tagent <部署目录>`;确认 `ReadWritePaths` 覆盖 |
+| agent 写工作区(clone 根)失败/只读 | 工作根**两道放行**缺一:①unit `ReadWritePaths` 未含工作根 → 追加其绝对路径为续行;②ACL 未设 → `./wizard.sh --perms`(或 `getfacl <工作根>` 核对 tagent 条目) |
+| 工作根设了但 agent 仍在部署目录操作 | `TAGENT_WORKING_DIR` 未被读到:确认在 `.env`(wizard 步骤3 写入)或 unit `Environment=`;`systemctl show tagent-wechat -p Environment` 核对 |
 | `ZAI_API_KEY 未设置` | `.env` 缺失或未被 `EnvironmentFile` 读到;重跑 `./wizard.sh`,确认 `.env` 在部署目录且 chmod 600 |
 | exec 工具报 tmux 错 | tmux 未装或 `PrivateTmp` 下 socket 异常:`apt install tmux`;必要时临时关 `PrivateTmp` 验证 |
 | plan 子 agent spec 工具失败 | node/openspec 未装或 `NODE_PATH` 不符:`npm i -g @fission-ai/openspec`,`which openspec` 核对 |

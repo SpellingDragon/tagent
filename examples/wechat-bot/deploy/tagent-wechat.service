@@ -39,6 +39,12 @@ Environment=TAGENT_HTTP_PORT=8089
 Environment=NODE_PATH=/usr/lib/node_modules
 # OTLP 追踪导出(可选):取消注释并填端点即启用 turn span 导出,留空=noop 零开销
 # Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+# agent 工作根(TAGENT_WORKING_DIR):通常由 .env(wizard.sh 步骤3写入)经上方 EnvironmentFile 注入,
+# 无需在此重复;若要在 unit 内固定,取消下行注释并填 clone 根绝对路径:
+# Environment=TAGENT_WORKING_DIR=/home/user/codes
+# ⚠️ 一旦工作根设在部署目录**之外**(如 /home/user/codes),必须把该路径追加到下方 ReadWritePaths——
+#    否则 ProtectSystem=strict 会使 agent 的 file/exec 对工作区只读失败。wizard.sh --perms 已对该
+#    路径做 ACL 授权(服务用户可读写含已有文件);ReadWritePaths 是 systemd 沙箱层的**第二道**放行。
 
 # systemd 直接管理二进制:SIGTERM 直达 → 优雅关闭(排空 ReliableBus/关闭 tmux/flush 轨迹)
 ExecStart=/opt/tagent/wechat-bot/wechat-bot
@@ -62,6 +68,10 @@ ProtectKernelModules=true         # 禁加载内核模块
 ProtectControlGroups=true         # cgroup 只读
 RestrictSUIDSGID=true             # 禁创建 SUID/SGID 文件
 # 可写白名单(ProtectSystem=strict 下仅此列可写)——记忆/数据/工作区/规格化产出/HOME
+# ⚠️ 若 TAGENT_WORKING_DIR 设在部署目录**外**(如 /home/user/codes),须追加其绝对路径为续行,例如:
+#      ReadWritePaths=... \
+#                     /opt/tagent/wechat-bot/.home \
+#                     /home/user/codes          ← 追加工作根(否则 agent 写工作区被 strict 拒)
 ReadWritePaths=/opt/tagent/wechat-bot/.wechat-config \
                /opt/tagent/wechat-bot/data \
                /opt/tagent/wechat-bot/workspace \

@@ -23,6 +23,12 @@ request_timeout_seconds: 3600
 trajectory_dump: true                                        # 每次 LLM 调用记录 JSONL(SFT/RL 训练用)
 trajectory_dir: "data/trajectories"
 
+# agent 统一工作根:file tools 的 base_dir 与 exec 命令 cwd 的**共同基准**(二者恒一致 = 模型单一文件系统视图)。
+# 空(默认)= 继承进程工作目录(部署目录);设为项目 clone 根(如 /home/user/codes)→ agent 可操作该目录下所有
+# 仓库,而 tagent 自身配置/资源/数据路径不受影响(仍相对进程 cwd)。优先级:properties.base_dir/workspace > 此 > 进程 cwd。
+# 部署时**推荐用环境变量 TAGENT_WORKING_DIR 指定**(免改本文件、随 clone 位置灵活;见 .env.example + deploy/README.md)。
+# working_dir: /home/user/codes
+
 # ===== Provider 连接注册表 =====
 # provider 字段 = 协议实现(openai 兼容 / anthropic / gemini / ollama / hunyuan);国内模型多用 openai 兼容,以 api_endpoint 区分。
 providers:

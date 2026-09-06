@@ -711,7 +711,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, workspaceRoot, rc, parentMemStore, readPartitionIDs, desc, degradationMgr)
+		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -802,6 +802,7 @@ func buildAgentToolRef(
 func buildPlainToolRef(
 	tr ToolRef,
 	workspaceRoot string,
+	workingDir string,
 	rc *runtimeConfig,
 	memStore memory.MemoryStore,
 	readPartitionIDs []int,
@@ -819,6 +820,7 @@ func buildPlainToolRef(
 		Description:      desc,
 		Properties:       tr.Properties,
 		WorkspaceRoot:    workspaceRoot,
+		WorkingDir:       workingDir,
 		MemStore:         memStore,
 		SkillRepo:        rc.skillRepo,
 		MCPToolSets:      rc.mcpToolSets,
