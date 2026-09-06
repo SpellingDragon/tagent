@@ -315,12 +315,6 @@ func (rm *ReleaseManager) rollback(to *Bundle) {
 	}
 }
 
-func (rm *ReleaseManager) rollbackTo(id string) {
-	if id != "" {
-		_ = rm.store.Rollback(id)
-	}
-}
-
 func (rm *ReleaseManager) record(draft *Bundle, lane Lane, stage ReleaseStage, reason string, score float64) ReleaseRecord {
 	rec := ReleaseRecord{
 		BundleID: draft.ID, ParentID: draft.ParentID, Lane: lane,

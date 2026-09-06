@@ -1,11 +1,7 @@
 package compress
 
 import (
-	"fmt"
-	"strings"
-
 	tagentevent "github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -77,19 +73,4 @@ func SegmentMessages(messages []model.Message) []*TaskSegment {
 		segments = append(segments, current)
 	}
 	return segments
-}
-
-// buildSummaryReference creates a compact summary reference for compressed events.
-// Used by ContextCompressor.buildRetainedRefs.
-func buildSummaryReference(keys []string, minTs int64) memory.EventReference {
-	if minTs == 0 {
-		minTs = 1
-	}
-	return memory.EventReference{
-		EventKey:     -minTs,
-		EventType:    tagentevent.TypeContextCompress,
-		EventSummary: fmt.Sprintf("[Compacted %d historical events: keys=%s]", len(keys), strings.Join(keys, ",")),
-		Timestamp:    minTs,
-		Role:         "system",
-	}
 }

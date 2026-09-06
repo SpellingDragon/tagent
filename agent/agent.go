@@ -131,19 +131,6 @@ type TagentAgent struct {
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
 	// passed to each invocation's AgentLoop.
 	projection *compress.SessionProjection
-
-	// asyncTaskCheckers are checked by Run() before returning.
-	// If any checker reports pending async tasks, Run() continues waiting
-	// instead of returning immediately (call stack semantics: don't pop
-	// until all async tasks complete).
-	asyncTaskCheckers []AsyncTaskChecker
-}
-
-// AsyncTaskChecker is implemented by tools that have pending async operations.
-// Run() calls HasPendingAsyncTasks() before returning a final response;
-// if true, it continues waiting for async results to arrive via InjectMessage.
-type AsyncTaskChecker interface {
-	HasPendingAsyncTasks() bool
 }
 
 // TagentConfig holds configuration for creating a TagentAgent.
@@ -458,11 +445,6 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 		opts = append(opts, compress.WithSummaryMaxTokens(cfg.Compress.SummaryMaxTokens))
 	}
 	return opts
-}
-
-// newCompressorFromConfig creates a compress.SmartCompressor from TagentConfig.
-func newCompressorFromConfig(cfg *TagentConfig) *compress.SmartCompressor {
-	return compress.NewSmartCompressor(buildCompressorOpts(cfg)...)
 }
 
 // newContextManagerFromConfig creates a ContextManager from TagentConfig.

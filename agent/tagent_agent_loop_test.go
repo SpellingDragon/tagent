@@ -39,12 +39,6 @@ func (m *mockLoopModel) Info() model.Info {
 	return model.Info{Name: "mock-loop-model"}
 }
 
-func (m *mockLoopModel) getCallCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.callCount
-}
-
 // newLoopTestAgent creates a TagentAgent configured for loop tests.
 func newLoopTestAgent(t *testing.T) *TagentAgent {
 	t.Helper()

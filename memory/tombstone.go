@@ -13,12 +13,6 @@ import (
 // TombstoneSet manages tombstoned EventKeys.
 // Tombstones are memory-resident (map[int64]bool) and persisted
 // to RustViking KV for crash recovery.
-
-// TombstonePrefix is the KV key prefix for tombstone persistence.
-// Format: {pid}:tomb:{event_key} → "1"
-const tombstonePersistPrefix = "tomb"
-
-// TombstoneSet manages the set of tombstoned EventKeys.
 type TombstoneSet struct {
 	mu    sync.RWMutex
 	keys  map[int64]bool // EventKey → tombstoned

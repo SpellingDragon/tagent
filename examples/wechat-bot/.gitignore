@@ -28,6 +28,11 @@
 !docker-compose.yml
 !entrypoint.sh
 
+# 裸机 systemd 部署资产(unit 模板 + 部署指南;不含密钥,可安全入库)
+!deploy/
+!deploy/tagent-wechat.service
+!deploy/README.md
+
 # 本地部署向导 + 环境变量模板（wizard 生成 .env；.env 本身因上方白名单模式天然被忽略，
 # 绝不含 !.env 放行——只放行不含密钥的 .example 模板与向导脚本）
 !wizard.sh

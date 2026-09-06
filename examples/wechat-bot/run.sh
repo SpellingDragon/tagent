@@ -75,6 +75,8 @@ show_help() {
 
 命令:
     setup           初始化向导（检查依赖+引导密钥+生成 .env，等价 ./wizard.sh）
+    build           仅构建二进制（go build -o wechat-bot .；供 systemd/CI 部署预构建）
+    systemd         打印 systemd 裸机常驻部署指引（unit 模板见 deploy/tagent-wechat.service）
     (无命令)         前台运行机器人
     start           后台启动机器人
     stop            停止后台运行的机器人
@@ -272,6 +274,38 @@ ensure_binary() {
         echo "构建失败"
         exit 1
     }
+}
+
+# ============================================================================
+# systemd 裸机部署指引（常驻服务；unit 模板见 deploy/tagent-wechat.service）
+# ============================================================================
+show_systemd_guide() {
+    cat <<EOF
+==============================================
+  tagent WeChat Bot · systemd 裸机常驻部署
+==============================================
+  unit 模板:  ${SCRIPT_DIR}/deploy/tagent-wechat.service
+  完整指南:   ${SCRIPT_DIR}/deploy/README.md
+
+  快速步骤(约定部署路径 /opt/tagent/wechat-bot;需 sudo):
+    1) 构建二进制:       cd ${SCRIPT_DIR} && ./run.sh build
+    2) 初始化密钥:       ./wizard.sh          # 生成 .env(chmod 600,已被 gitignore)
+    3) 专用用户 + 装 unit:
+         sudo useradd -r -s /usr/sbin/nologin tagent 2>/dev/null || true
+         sudo install -m 644 deploy/tagent-wechat.service /etc/systemd/system/
+         # 部署路径 ≠ /opt/tagent/wechat-bot 时,替换 unit 内路径后再 daemon-reload:
+         #   sudo sed -i "s#/opt/tagent/wechat-bot#${SCRIPT_DIR}#g" /etc/systemd/system/tagent-wechat.service
+         sudo chown -R tagent:tagent "${SCRIPT_DIR}"
+    4) 启动 + 开机自启:  sudo systemctl daemon-reload && sudo systemctl enable --now tagent-wechat
+    5) 观测:             systemctl status tagent-wechat
+                         journalctl -u tagent-wechat -f
+                         curl -fsS http://127.0.0.1:${TAGENT_HTTP_PORT}/healthz
+
+  说明:systemd 直接管理二进制(Type=simple + Restart=always + SIGTERM 优雅关闭 +
+       journald 收日志),安全加固(NoNewPrivileges/ProtectSystem=strict/ReadWritePaths
+       白名单/资源上限)对标 docker-compose。数据目录(.wechat-config/data、data/*、
+       workspace)须在 ReadWritePaths 内且属 tagent 用户。
+EOF
 }
 
 # ============================================================================
@@ -685,7 +719,7 @@ while [[ $# -gt 0 ]]; do
             COMMAND="setup"
             shift
             ;;
-        start|stop|restart|status|log)
+        start|stop|restart|status|log|build|systemd)
             COMMAND="$1"
             shift
             ;;
@@ -748,6 +782,8 @@ done
 # ============================================================================
 case "$COMMAND" in
     setup)        exec "${SCRIPT_DIR}/wizard.sh" ;;
+    build)        ensure_binary; echo "✓ 构建完成: ${SCRIPT_DIR}/wechat-bot" ;;
+    systemd)      show_systemd_guide ;;
     start)        do_start        ;;
     stop)         do_stop         ;;
     restart)      do_restart      ;;

@@ -1,0 +1,86 @@
+# ============================================================================
+# tagent WeChat Bot — systemd 裸机常驻服务单元
+# ============================================================================
+# 安装(需 sudo;完整步骤见同目录 README.md 或 `./run.sh systemd`):
+#   sudo install -m 644 deploy/tagent-wechat.service /etc/systemd/system/
+#   # 部署路径 ≠ /opt/tagent/wechat-bot 时,先替换路径:
+#   #   sudo sed -i "s#/opt/tagent/wechat-bot#<你的路径>#g" /etc/systemd/system/tagent-wechat.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now tagent-wechat
+#
+# 设计:systemd 直接管理二进制(Type=simple + Restart=always + SIGTERM 优雅关闭 +
+#       journald 收日志);安全加固对标 docker-compose.yml(非 root / 只读根 +
+#       ReadWritePaths 白名单 / NoNewPrivileges / 资源上限),但避免过度 sandbox
+#       误挡 exec 工具的正常子命令(未启用 RestrictAddressFamilies 等,见文末可选加固)。
+# ============================================================================
+
+[Unit]
+Description=tagent WeChat Bot — 个人助手 agent(治理/自进化/可靠性/语义召回全启用)
+Documentation=file:///opt/tagent/wechat-bot/deploy/README.md
+# 依赖网络在线(LLM API / MCP / 微信网关均需出网);network-online 确保出网就绪后启动
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 专用非 root 系统用户(useradd -r -s /usr/sbin/nologin tagent);对标 compose user:"1000:1000"
+User=tagent
+Group=tagent
+# 工作目录 = 部署目录:所有数据目录(.wechat-config/data、data/*、workspace)相对此解析
+WorkingDirectory=/opt/tagent/wechat-bot
+
+# 密钥/运行环境从 .env 注入(wizard.sh 生成,chmod 600,已 gitignore)——绝不走 ~/.zshrc
+EnvironmentFile=/opt/tagent/wechat-bot/.env
+# HOME 收敛到部署目录内(数据集中、便于备份/迁移);ProtectHome=true 保护真实 /home 不可见
+Environment=HOME=/opt/tagent/wechat-bot/.home
+Environment=XDG_CONFIG_HOME=/opt/tagent/wechat-bot/.home/.config
+Environment=TAGENT_CONFIG=/opt/tagent/wechat-bot/tagent.yaml
+Environment=TAGENT_HTTP_PORT=8089
+# node/openspec 全局模块路径(plan 子 agent 的 spec 工具后端);按发行版调整(见 README 依赖表)
+Environment=NODE_PATH=/usr/lib/node_modules
+# OTLP 追踪导出(可选):取消注释并填端点即启用 turn span 导出,留空=noop 零开销
+# Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+
+# systemd 直接管理二进制:SIGTERM 直达 → 优雅关闭(排空 ReliableBus/关闭 tmux/flush 轨迹)
+ExecStart=/opt/tagent/wechat-bot/wechat-bot
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# 崩溃自愈:异常退出 5s 后重启(配合 reliability 子系统 → 重启恢复 spill/锚点/发布历史)
+Restart=always
+RestartSec=5
+# 日志 → journald(journalctl -u tagent-wechat -f);不落文件,免 logrotate
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tagent-wechat
+
+# ===== 安全加固(对标 docker-compose.yml)=====
+NoNewPrivileges=true              # 禁止 setuid 提权(= compose no-new-privileges)
+ProtectSystem=strict              # 整个 / 只读,仅 ReadWritePaths 白名单可写(= compose read_only)
+ProtectHome=true                  # /home /root /run/user 不可见(HOME 已收敛到部署目录内)
+PrivateTmp=true                   # 私有 /tmp:exec 工具的 tmux socket 落此(可写,服务间隔离)
+ProtectKernelTunables=true        # 禁改内核参数(/proc/sys 等只读)
+ProtectKernelModules=true         # 禁加载内核模块
+ProtectControlGroups=true         # cgroup 只读
+RestrictSUIDSGID=true             # 禁创建 SUID/SGID 文件
+# 可写白名单(ProtectSystem=strict 下仅此列可写)——记忆/数据/工作区/规格化产出/HOME
+ReadWritePaths=/opt/tagent/wechat-bot/.wechat-config \
+               /opt/tagent/wechat-bot/data \
+               /opt/tagent/wechat-bot/workspace \
+               /opt/tagent/wechat-bot/.tagent-workspace \
+               /opt/tagent/wechat-bot/openspec/changes \
+               /opt/tagent/wechat-bot/.home
+# 资源上限(= compose deploy.resources:防 fork 炸弹 / 内存爆)
+LimitNOFILE=65536
+TasksMax=256                      # 进程/线程上限(防 exec 派生失控)
+MemoryMax=1G                      # 内存硬上限(超限 OOM-kill → Restart 自愈)
+
+[Install]
+WantedBy=multi-user.target
+
+# ============================================================================
+# 可选进一步加固(按需取消注释;注意可能限制 exec 工具能力,启用前验证业务命令)
+# ============================================================================
+# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX   # 限制 socket 家族(exec 网络命令仍可用)
+# RestrictNamespaces=true                            # 禁 namespace 创建(挡容器内套娃)
+# LockPersonality=true                               # 禁切换执行域
+# CapabilityBoundingSet=                             # 清空 capability(= compose cap_drop ALL)
+# SystemCallFilter=@system-service                   # seccomp 白名单(最严,可能挡部分 exec)

@@ -114,9 +114,11 @@ type Task struct {
 	Spec      TaskSpec
 	StartedAt time.Time
 
-	mu        sync.Mutex
-	status    TaskStatus
-	result    string
+	mu     sync.Mutex
+	status TaskStatus
+	result string
+	// resultRef 预留：任务结果 → 记忆固化物反查桥（memory 策展缺口表
+	// 「固化物因果回溯不完整」的候选落点），当前无写入方。
 	resultRef string
 	err       error
 	settledAt time.Time

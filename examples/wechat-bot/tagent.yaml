@@ -84,9 +84,11 @@ providers:
   #   api_key_env: "GOOGLE_API_KEY"
 
 # 日志级别: "debug", "info", "warn", "error"
-# debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等
-# 可通过环境变量 LOG_LEVEL 覆盖
-log_level: "debug"
+# debug 级别会打印 LLM 上下文明文、工具调用详情、压缩细节等——**远端/生产不宜**(明文落日志有泄露面
+# + 日志量放大 + 性能开销),故默认 info。临时排障:./run.sh -d 或 LOG_LEVEL=debug(systemd 下
+# `systemctl edit tagent-wechat` 加 Environment=LOG_LEVEL=debug);排障毕务必复原。
+# 可通过环境变量 LOG_LEVEL 覆盖(见 config.go ApplyDefaults:env 优先于本文件)
+log_level: "info"
 
 # 请求超时（秒），默认 3600 (60 分钟)
 request_timeout_seconds: 3600
@@ -106,6 +108,67 @@ mcp_servers:
     url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
     # GLM Coding Plan 专属 MCP; 本配置 zhipu provider 即 coding 端点, 同一把 key 直接复用
     api_key_env: ZAI_API_KEY
+
+# ===== 平台子系统(治理 · 自进化 · 常驻可靠性)=====
+# 三大子系统默认关闭 = 与既有行为逐字节一致;此处按「远端常驻部署」显式启用(postmerge-review-fixes
+# 已解除启用禁令:Governance 可真实部署、Evolution 可出实验)。设计纪律:全部配置门控、不触碰工具
+# Declaration(prefix-cache 稳定)、失败以 result 渗透不中断 loop。持久化目录均自动 MkdirAll(开箱即用)。
+# ⚠️ 启用后 agent 在各复杂场景的行为反应,务必先读 docs/wiki/platform/agent-behavior-matrix.md。
+
+# --- 治理闸(T-Governance):有界自治 + 审计 ---
+# 全部 agent 的非 wrapper leaf 工具(exec/mcp_call/save_file/replace_content/refine)经 GovernanceTool
+# 过闸:classify(四级风险) → critical 批准门 → goal 检查 → 预算滑窗 → 记账/放行。
+# enforcement=warn(推荐起步):只记账放行 + 附提示,不拒绝——先收集真实风险数据、零行为阻断;确认规则
+#   贴合业务后升 strict(违规拒绝)。critical(rm -rf/sudo/mkfs/git push -f 等)恒走异步人工批准:未批准
+#   则 deny+Hold(不阻塞 loop),外部落盘 <dir>/approvals/<id>.json 即生效(Check 节流重扫),或微信/CLI 回写。
+# dir 非空 → budget 滑窗 + approvals 审批文件持久化(远端重启后预算窗口与待批状态不丢);空=纯内存。
+governance:
+  enabled: true
+  enforcement: warn              # warn(记账放行,推荐起步) | strict(违规拒绝)
+  dir: data/governance           # budget + approvals 持久化(裸机磁盘,重启不丢)
+  budget_window_minutes: 60      # 滑动窗口(默认 60)
+  max_high_risk: 20              # 窗口内 high 级操作上限(默认 20;超限 warn 记账 / strict 拒绝)
+  max_medium_risk: 200           # 窗口内 medium 级操作上限(默认 200)
+  # goal_required_for: []        # 须挂 goal 的 trigger source;留空=不启用 goal 门。goal_declare 工具
+                                 # 尚未交付,启用会使 high+ 自治操作无自纠路径而反复撞墙(见 gate.go A7)。
+
+# --- 自进化(T-EVO):提示词热优化 + 风险分级发布道 ---
+# refine 工具(仅 entry agent)是 agent 自我修改通道:propose/diff/status/rollback 四 op,**永无 activate**
+#   ——激活只能经 ReleaseManager 发布道(agent 无直接激活权,铁律)。DiffLaneRouter 按 bundle diff 路由:
+#   仅提示词改动 → 快道(validate→canary 激活→后验评估,先生效后验);模型/参数/protected → 慢道(加人工批准门)。
+# 后验评估以 bundle **激活时刻**为证据窗起点(ActivationLog),LLMJudge + MetricGuardrail 双回滚;judge
+#   不可用/样本不足一律保守通过(不误回滚)。发布历史持久化 releases.jsonl,rollback 白名单=曾 Stage=active
+#   的版本(含基线 seed,跨重启恢复)。回合边界生效(热配置原子切 active 指针)。
+# 注(M12 宣称收窄):bundle schema 含 params/model 字段=存储就绪,但运行期应用点当前仅**提示词**;
+#   参数/模型热切换为后续增强。
+evolution:
+  enabled: true
+  dir: data/evolution            # 不可变 bundle 存储 + releases.jsonl 发布历史(裸机磁盘持久化)
+  skip_approval: false           # false=慢道需人工批准门(保守,零值安全);true=跳过(仅实验环境)
+  protected_prompts:             # 改动强制走慢道(人工批准)——核心人格/安全提示词不可快道自动生效
+    - SOUL.md
+    - AGENTS.md
+  canary_hold_seconds: 0         # canary 激活后到后验评估的观察窗(0=立即评估)
+  # 后验 LLM-judge 参数(省略走内部默认 minSamples=5 / threshold=0.5 / timeout=60s):
+  # judge_min_samples: 5
+  # judge_pass_threshold: 0.5
+  # judge_timeout_seconds: 60
+
+# --- 常驻可靠性(T-G Reliability):不丢事件 + 退化可观测 + 重启稳定 ---
+# 面向远端长期运行的核心保障。全部 per-agent 隔离子目录;各 dir 留空则该项回退现状(纯内存/纯 channel)。
+reliability:
+  # ReliableBus:事件总线 channel 满则溢出落盘(channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复),
+  #   at-least-once 不丢事件(否则高峰期 channel 满直接丢弃)。
+  bus_spill_dir: data/reliability/bus
+  # mem_spill:StoreEvent 失败(memory/disk 退化)→ JSONL 兜底落盘,memory 恢复后自动重放(重放前 GetEvent
+  #   预检幂等,不撞 already-exists)。事件不丢,at-least-once 延伸到存储层。
+  mem_spill_dir: data/reliability/memspill
+  # AnchorStore:冥想三锚点(novelty/idle/last-meditation)持久化,重启后不立即误触发冥想(纯内存则重启即忘)。
+  meditation_anchor_dir: data/reliability/anchors
+  # DegradationManager:memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机;ErrorTrackingStore 最外层
+  #   装饰捕获存储错误 + event_loop 捕获 model 失败 + mcp_call 上报,达阈值→degraded、探测成功→recovering
+  #   →normal,状态迁移写 governance degraded 事件(可观测、可 recall 审计)。
+  degradation_enabled: true
 
 # ===== Agent 配置 =====
 #
@@ -137,22 +200,26 @@ agents:
     memory:
       type: localfile
       path: .wechat-config/data
-      # ===== 语义检索（T-A hybrid-semantic-recall）：默认关闭 → 纯关键词召回、零嵌入成本 =====
-      # 开启后：入库事件异步嵌入（zhipu embedding-3，按量计费），recall 走 hybrid 融合
-      # （向量 topK ∪ 关键词 topK → RRF k=60）。工具声明区恒定——开关不影响 recall Declaration
-      # （prefix-cache 稳定，守卫见 tool/recall/declaration_stable_test.go）。未配置时全链路逐字节不变。
-      # engine:
-      #   backend: memory          # MVP 内存向量索引；file/localfile store 时向量自动序列化入
-      #                            #   底层 KV + 启动重建（rustviking 原生 HNSW 持久化属其 backlog，
-      #                            #   见 openspec/.../f1-rustviking-capability-report.md：index CLI 进程内易失）
-      #   embedding:
-      #     provider: zhipu        # 或 mock（本地确定性伪向量，零成本，仅验证融合/过滤机制）
-      #     model: embedding-3
-      #     api_key_env: ZAI_API_KEY   # GLM Coding Plan；缺失则嵌入优雅降级为纯关键词
-      #     dimensions: 1024       # 512/1024/2048：维度越高召回越准、成本越高（X2 待实测定默认）
-      #   vector_top_k: 20         # 融合调参（默认 20/20/60）
-      #   keyword_top_k: 20
-      #   rrf_k: 60
+      # ===== 语义检索（T-A hybrid-semantic-recall）：已启用 → recall query 走 向量∪关键词 RRF 融合 =====
+      # 入库事件异步嵌入（zhipu embedding-3，按量计费约 40 次/天），recall query 模式融合召回
+      # （向量 topK ∪ 关键词 topK → RRF k=60），同义改写无共同关键词也可召回。工具声明区恒定——开关
+      # 不影响 recall Declaration（prefix-cache 稳定，守卫见 tool/recall/declaration_stable_test.go）。
+      # 缺 ZAI_API_KEY / embedding API 故障 → buildMemoryEngine Warn + 优雅降级纯关键词（不阻断 loop）。
+      # ⚠️ 引擎按 path 跨 agent 共享（namedEngines[cacheKey=path|backend|model|dims]）：tagent/knowledge/
+      #   recall 三 agent 同 path 同配置 → 共享同一引擎实例,保跨 agent 语义召回一致。**三者须同配**,
+      #   只配其一则未配的 agent 走纯关键词 stub(SearchByEmbedding 不生效)。
+      engine:
+        backend: memory          # MVP 内存向量索引；localfile store 时向量自动序列化入底层 KV + 启动重建
+                                 #   (rustviking 原生 HNSW 持久化属其 backlog,见 f1-rustviking-capability-report.md)
+        embedding:
+          provider: zhipu        # 或 mock（本地确定性伪向量，零成本，仅验证融合/过滤机制）
+          model: embedding-3
+          api_key_env: ZAI_API_KEY   # GLM Coding Plan；缺失则嵌入优雅降级为纯关键词
+          dimensions: 512        # X2 实测决议:512 维分离度 0.2838 ≈ 1024 维 0.2878(差 0.004),
+                                 #   判别力相当而存储/计算成本减半 → 默认推荐 512(embedding-3 支持 512/1024/2048)
+        vector_top_k: 20         # 融合调参（引擎默认 20/20/60）
+        keyword_top_k: 20
+        rrf_k: 60
     max_tool_iterations: 300
     max_tokens: 128000
     temperature: 0.7
@@ -290,6 +357,18 @@ agents:
       path: .wechat-config/data
       read_namespaces:
         - tagent
+      # 语义引擎:与 tagent/recall **同 path 同配置**(cacheKey=path|backend|model|dims 一致)→ 共享同一
+      # namedEngines 实例(见 tagent memory 段说明)。knowledge 的 memory_query 亦受益语义召回;缺 key 降级。
+      engine:
+        backend: memory
+        embedding:
+          provider: zhipu
+          model: embedding-3
+          api_key_env: ZAI_API_KEY
+          dimensions: 512
+        vector_top_k: 20
+        keyword_top_k: 20
+        rrf_k: 60
     max_tool_iterations: 30
     max_tokens: 32000
     temperature: 0.3
@@ -331,6 +410,18 @@ agents:
       path: .wechat-config/data
       read_namespaces:
         - tagent
+      # 语义引擎:与 tagent/knowledge **同 path 同配置** → 共享同一 namedEngines 实例。recall 子 agent 的
+      # recall_query 走 hybrid 融合(向量 topK ∪ 关键词 topK → RRF k=60);缺 key/重建窗口优雅降级纯关键词。
+      engine:
+        backend: memory
+        embedding:
+          provider: zhipu
+          model: embedding-3
+          api_key_env: ZAI_API_KEY
+          dimensions: 512
+        vector_top_k: 20
+        keyword_top_k: 20
+        rrf_k: 60
     max_tool_iterations: 5
     max_tokens: 32000
     tools:

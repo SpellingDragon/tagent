@@ -13,9 +13,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 
 	tagentagent "github.com/SpellingDragon/tagent/agent"
-	tagentevent "github.com/SpellingDragon/tagent/event"
-	tagentmemory "github.com/SpellingDragon/tagent/memory"
-	tagentkv "github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/SpellingDragon/tagent/testutil"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/stretchr/testify/require"
@@ -314,62 +311,6 @@ func (t *echoToolStruct) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	}
 
 	return message, nil
-}
-
-// ==================== 6.3 RecallAgent 测试用例（需真实 LLM）====================
-
-// createRecallTestStore creates a MemoryStore pre-populated with test events for RecallAgent tests.
-func createRecallTestStore(t *testing.T) tagentmemory.MemoryStore {
-	t.Helper()
-	store, err := tagentmemory.NewFileSegmentStore(tagentkv.NewMockRustVikingClient(), nil, ":memory:", 100)
-	if err != nil {
-		t.Fatalf("Failed to create memory store: %v", err)
-	}
-
-	// Pre-populate with test events using Snowflake EventKeys
-	partitionID := tagentmemory.PartitionIDFromName("tagent")
-	testEvents := []tagentmemory.FullEvent{
-		{
-			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
-			PartitionID:  partitionID,
-			EventType:    tagentevent.TypeActionCommand,
-			EventSummary: "用户要求整理文件",
-			Timestamp:    time.Now().Add(-2 * time.Hour).UnixMilli(),
-			Content:      "整理 /tmp 目录下的文件",
-		},
-		{
-			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
-			PartitionID:  partitionID,
-			EventType:    tagentevent.TypeAgentOutput,
-			EventSummary: "文件整理完成",
-			Timestamp:    time.Now().Add(-2*time.Hour + 5*time.Minute).UnixMilli(),
-			Content:      "成功整理 /tmp 目录下的 15 个文件，释放 200MB 空间",
-		},
-		{
-			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
-			PartitionID:  partitionID,
-			EventType:    tagentevent.TypeActionCommand,
-			EventSummary: "执行部署命令",
-			Timestamp:    time.Now().Add(-1 * time.Hour).UnixMilli(),
-			Content:      "deploy.sh --env production",
-		},
-		{
-			EventKey:     tagentmemory.NewSnowflakeEventKey(partitionID, 0),
-			PartitionID:  partitionID,
-			EventType:    tagentevent.TypeAgentOutput,
-			EventSummary: "部署成功",
-			Timestamp:    time.Now().Add(-1*time.Hour + 2*time.Minute).UnixMilli(),
-			Content:      "部署成功: 3 个服务已更新，耗时 2m30s",
-		},
-	}
-
-	for _, evt := range testEvents {
-		if err := store.StoreEvent(evt.EventKey, evt); err != nil {
-			t.Fatalf("Failed to store event %d: %v", evt.EventKey, err)
-		}
-	}
-
-	return store
 }
 
 // ==================== KnowledgeAgent Integration Tests (requires real LLM) ====================

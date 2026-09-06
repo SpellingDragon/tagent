@@ -75,7 +75,8 @@ C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现；engine
 
 ## 已知缺口与演进方向
 
-- **治理审计事件尚无来源 agent 字段**（多子 agent 审计查询无法区分来源）——修复方向与证据见 execution-dag §8.10 + postmerge-review-fixes tasks §8；
+- ~~治理审计事件尚无来源 agent 字段~~ **已修(§8.1,postmerge-review-fixes 已归档)**:`DenialRecord.AgentName` + 事件 `metadata["agent"]`(omitempty),多子 agent 共享 Ledger 时治理审计可按来源区分;
 - 慢道 replay/shadow 门为预留（nil 通过 + 审批门已实装默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点；
 - Jaeger OTLP 实录与 AReaL reward 消费格式核对为环境实装项（非代码缺口）；
+- **启用后 agent 在各复杂场景的行为反应**:见 [agent-behavior-matrix.md](./agent-behavior-matrix.md)(分场景分类,溯源代码);
 - 完整裁决与修复账本：`openspec/changes/LEDGER.md`、`openspec/changes/tagent-evolution-roadmap/execution-dag.md`；行为契约：`openspec/specs/`（mcp-*、semantic-search、recall-hybrid-fusion、turn-tracing、trajectory-trace-correlation 等）。

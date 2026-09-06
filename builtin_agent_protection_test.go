@@ -8,29 +8,8 @@ import (
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
-	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
-
-// factoryMockAgent is a lightweight agent.Agent for ToolAgentFactory tests.
-type factoryMockAgent struct {
-	name string
-}
-
-func (m *factoryMockAgent) Run(_ context.Context, _ *trpcagent.Invocation) (<-chan *event.Event, error) {
-	ch := make(chan *event.Event)
-	close(ch)
-	return ch, nil
-}
-
-func (m *factoryMockAgent) Tools() []trpctool.Tool { return nil }
-func (m *factoryMockAgent) Info() trpcagent.Info {
-	return trpcagent.Info{Name: m.name, Description: "factory-built mock agent"}
-}
-func (m *factoryMockAgent) SubAgents() []trpcagent.Agent          { return nil }
-func (m *factoryMockAgent) FindSubAgent(_ string) trpcagent.Agent { return nil }
 
 // factoryMockModel satisfies model.Model for config-driven builds.
 type factoryMockModel struct{}
