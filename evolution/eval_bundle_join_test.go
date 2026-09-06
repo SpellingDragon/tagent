@@ -2,11 +2,12 @@ package evolution
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/memory"
 	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
 )
 
 // TestEvidence_BundleJoin is the D1-B regression (design-report-closeout):
@@ -53,5 +54,39 @@ func TestEvidence_BundleJoin(t *testing.T) {
 	}
 	if ev2.DenialCount != 2 { // 102 (exact) + 103 (fallback)
 		t.Fatalf("b2 DenialCount = %d, want 2", ev2.DenialCount)
+	}
+}
+
+// TestGuardrail_NegativeFeedbackRollback (2.5, design-report-closeout): the
+// negative-feedback rate criterion must breach the guardrail when the share
+// of negative feedback attributed to the canary bundle exceeds the
+// threshold. Fail-before: no such criterion existed.
+func TestGuardrail_NegativeFeedbackRollback(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	pid := 1
+	now := time.Now().UnixMilli()
+	put := func(seq int64, etype, subtype, content string) {
+		key := memory.NewSnowflakeEventKey(pid, now+seq)
+		md := map[string]string{}
+		if subtype != "" {
+			md[tagentevent.MetaKeySubtype] = subtype
+		}
+		_ = store.StoreEvent(key, memory.FullEvent{
+			EventKey: key, PartitionID: pid, EventType: etype,
+			Timestamp: now + seq, Content: content, Metadata: md,
+		})
+	}
+	// 6 events under b1: 5 neutral turns + 3 negative feedback → rate 0.5 > 0.3.
+	for i := 0; i < 5; i++ {
+		put(int64(i), tagentevent.TypeExternalInput, "", "turn")
+	}
+	for i := 5; i < 8; i++ {
+		put(int64(i), tagentevent.TypeFeedback, "task_settle", `{"verdict":"negative","source":"task_settle"}`)
+	}
+	src := NewStoreEvidenceSource(store, pid, time.Hour)
+	g := NewMetricGuardrail(src, GuardrailConfig{MinSamples: 5, MaxNegFbRate: 0.3})
+	breach, reason := g.Breach("b1")
+	if !breach || !strings.Contains(reason, "负反馈率") {
+		t.Fatalf("breach=%v reason=%q", breach, reason)
 	}
 }

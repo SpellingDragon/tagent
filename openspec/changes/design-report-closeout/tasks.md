@@ -13,9 +13,9 @@
 
 - [x] 2.1 feedback EventTypeSpec 注册（TTL 默认 30 天可配置、正 key、非 LowValue、Recallable）+ 注册表契约测试
 - [x] 2.2 FeedbackBinder（SetParent 因果边 + 结构化 JSON Content）纯函数 + 单测
-- [ ] 2.3 OnSettle 自动来源：TaskManager settle completed/failed→对 spawn turn agent_output 写 task_settle feedback（suspect 不写）；回归 TestOnSettle_WritesDeterministicFeedback
+- [ ] 2.3 OnSettle 自动来源：TaskManager settle completed/failed→对 spawn turn agent_output 写 task_settle feedback（suspect 不写）；回归 TestOnSettle_WritesDeterministicFeedback — **探明结论(2026-09-06)**:spawn 时 Origin 无法携带 spawn turn 的 agent_output key(turn 尚未结束);候选锚点=feedback.parent=task_settled 事件自身(结算即任务产出,join 用其 bundle_id 章),需维护者确认语义微调后实施(TaskManager FeedbackHook+wire)
 - [ ] 2.4 HTTP API `POST /feedback`（event_key+verdict+note，不存在显式错）挂 rl/httpapi + handler 测试
-- [ ] 2.5 MetricGuardrail 补 negative_feedback_rate 判据（feedback→因果边 parent→bundle_id join，阈值独立配置）；回归 TestGuardrail_NegativeFeedbackRollback（fail-before：无此判据）
+- [x] 2.5 MetricGuardrail 补 negative_feedback_rate 判据（feedback→因果边 parent→bundle_id join，阈值独立配置）；回归 TestGuardrail_NegativeFeedbackRollback（fail-before：无此判据）
 
 ## 3. D1 approve 通道
 
