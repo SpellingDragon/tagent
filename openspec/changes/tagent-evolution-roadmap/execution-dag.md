@@ -219,3 +219,45 @@ flowchart TB
 | T-EVO | COMPLETE | TC0,TG(C5),TB,FIX,REG(done) | 风险分级发布道调和T-E/T-F;门禁3揪出Blocker(评估器error假激活)+路径遍历已修+回归锁定;后验评估闭环=指令4落地 | ✅ReleaseManager(快道后验/慢道门后+双回滚+protected慢道+agent无直接激活权)+refine工具(无activate)+DiffRiskRouter(模型/参数→慢道,提示词→快道)+**后验评估闭环LIVE**(Evidence+StoreEvidenceSource从memStore收集canary证据+MetricGuardrail确定性闸+LLMJudgeEvaluator模型决策回滚,BindPosterior延迟绑定,judge复用主model)+运行时接线(VersionedSource/refine/posterior);保守原则:judge不可用/样本不足/解析失败均保守通过不误回滚 |
 | T-D | COMPLETE | REG(done) | consolidation一处注册全链路(REG兑现);指纹服务端算防伪造;墓碑=诚实衰减;诊断读实时态非死计数器 | ✅证据门控巩固(ComputeReceiptFingerprint/VerifyConsolidation/BuildConsolidationEvent)+consolidation类型注册+维度诊断MemoryDiagnostics+agent工具(memory_consolidate/memory_health);全测试绿 |
 | MG | COMPLETE(记账+gate-3二轮) | 全部done | 两轮gate-3 CodeReview(T-A + reliability/eval)揪出Blocker(评估器假激活/事件时序倒置)+多Major全修回归;execution-dag.md=plan of record;LEDGER记账 | ✅全10节点(脊柱F1/F2/REG/FIX+track T-A/T-B/T-G/TC0/T-EVO/T-D)交付;全量23包-short绿+新子系统(evolution/governance/reliability/memory/event/memoryx)-race绿;所有新功能配置门控默认关闭零行为变化;剩(可选):openspec roadmap proposal/design/tasks正式重编为per-track规格(当前execution-dag+LEDGER已充分记录交付与裁决) |
+
+## 8. 交接前深度 Review(2026-09-06,主 agent 逐模块审计,接手者必读)
+
+> 审计方式:四域并行 CodeReview sub-agent(memory T-A/T-D、T-G reliability+governance、T-EVO+TC0、T-B+横切不变量)+ 主线程门禁亲验(§4.3:不信看板报告)。范围 71d7347..HEAD(42 commits/106 文件/+11420)。
+
+### 8.1 门禁亲验结果
+
+| 批次 | 结果 |
+|---|---|
+| build + vet | ✅ |
+| 全量 `go test ./...` | 22 包 ok;tests/ 2 失败 = D6 flaky 名单内(TestContract_PlanWriteBoundary、TestPlanAgentCreateBehavior_RealPrompt,跨运行漂移特征吻合,非本迭代回归) |
+| 新子系统 `-race` | ✅ 9 包全绿(注意路径:治理包在 `./agent/governance/...`、可靠性在 `./agent/reliability/...`,非根目录) |
+
+### 8.2 总裁定
+
+- **设计思想脊柱未破**:prefix-cache/Engine-Policy/事件不可变/失败渗透 + 六条既有不变量(Snowflake 单源/压缩唯一触发/同步点未挪/墓碑先行/内容不截断)逐条 file:line 审计 **全 PASS**;所有新功能配置门控默认关闭、零行为变化有测试锁定;prompt.Source mtime 热载语义保留(TC0 只加 nil-receiver 守卫)。
+- **接线裁定:6 处 Major 闭环缺口**(核心已交付、闭环/覆盖未接通型)+ 12 Minor。fe5ecfa 的 MCP 变更语义未破坏(DepMCP 上报为纯副作用)。
+
+### 8.3 Major 清单(接手者按此修;每项均已 file:line 定位)
+
+| # | 类 | 问题 | 位置 | 修复方向 |
+|---|---|---|---|---|
+| **E1** | 铁律偏离 | `refine rollback` 可直接 SetActive 任意在盘 bundle(含被拒 draft),违反"agent 永无直接激活权";tagent.go:507-508 注释自认绕过发布道 | evolution/refine.go:163-175→bundle.go:148 | rollback 目标限定 ReleaseManager.History 中 Stage=active 的 bundle,或经 rm 走审批道 |
+| **E2** | 铁律偏离 | 慢道审批门空转:approveGate 接线为 nil→通过;保守默认 SkipApprovalGate=false 形同虚设,protected 提示词零审批零后验即激活;注释仅披露 replay/shadow 待交付,未披露 approve 同空转 | tagent.go:226-233 + evolution/release.go:264-268 | nil 门且未显式 Skip 时默认 **reject**(要求显式注入或显式跳过) |
+| **W1** | 收敛缺陷 | mem_spill 重放不收敛:幂等假设与 FileSegmentStore "already exists 拒绝重写"守卫矛盾——假阴性失败(KV 已写但 CLI 响应解析失败,rustviking_client.go:93-94)重放必撞墙→spill 永久滞留、恢复每次失败;另 evt/idx 两段 KVPut 非原子 | memory/mem_spill.go:16-17 vs memory/segment_store.go:263-265 | 重放前逐条 `GetEvent(sp.Key)` 预检,命中即计成功移除;或识别 "already exists" 为幂等成功 |
+| **W2** | 闭环未接 | 治理审批闭环断路:Approval.Check 只读构造时索引,运行中外部批准文件永不可见;Decide 全仓无调用方;Gate 不暴露 Approval 访问器→critical 恒 Hold,重试持续堆积 pending | agent/governance/approval.go:104-120,169;gate.go:184-190 | Check 未命中重扫 approvals 目录(或 fsnotify);Gate 暴露 Approval() 供消息/CLI 通道调 Decide |
+| **W3** | 覆盖缺口 | 治理只包 entry 的 leaf 工具(tagent.go:517 `name==cfg.Entry`):action/knowledge 子 agent 的 exec/save_file/mcp_call(主风险面)全部绕闸 | tagent.go:517 + examples/wechat-bot/tagent.yaml | 所有 agent 的非 wrapper leaf 工具统一包裹(BindLedger 仍限 entry) |
+| **W4** | 判别力缺陷 | 后验评估证据窗错位:固定回看 10m 且 Collect 忽略 bundleID 参数;CanaryHold 默认 0=激活即评估→judge 看的全是旧 bundle 数据,"劣化即回滚"对新 bundle 无判别力 | evolution/eval.go:68-72 + tagent.go:232 | 记录 bundle 激活时间戳,Collect 以激活时刻为窗口起点(bundleID→activationTs 查表) |
+
+### 8.4 Minor 择要(12 项,批量一轮清)
+
+测试:declaration_stable_test 未真构 engineBridge 形态(断言弱于宣称,tool/recall/declaration_stable_test.go:15-46);VectorInsert 显式 `-l 0` 偏离 rustviking 默认 level=1 且语义未验证(rustviking_client.go:266-273)。审计:judge 保守原因被固定文案覆盖(release.go:199);canary 卡死无重评机制(release.go:169-177)。并发:发布窄窗全序(event_bus.go:290-298);SetActive 磁盘写与内存缓存非互斥配对(bundle.go:133-145)。接线:DepMCP 不区分业务/传输错误(call.go:146-153,已自认 MVP);judge 参数硬编码不可配(tagent.go:420);persistBusEvent 路径缺 trace 锚(context_manager.go:407,归因盲区残留);turn span ctx 取消早退未 End(event_loop.go:97-107);gate.go:114 吞 approval Request 错误。宣称:bundle.Params/Model 无运行期应用点——"参数/模型热切换"仅为存储就绪,DiffLaneRouter 模型/参数分支对 refine 提案不可达。
+
+### 8.5 行为变化记录(有意,非缺陷)
+
+- OutputLimitTool 封顶从 `MaxTokens/2*4` 解耦为 `toolOutputCapChars`=60K(agent.go:305-308):128K 预算 agent(wechat-bot entry)的工具输出上限 256K→60K 字符,60K-256K 段改落盘+read_file 票据(修复原公式在此预算下 no-op)。
+
+### 8.6 处置纪律(启用禁令)
+
+- **W2/W3 修复前,禁止在任何真实部署启用 Governance**(critical 恒 Hold + 主风险面绕闸);
+- **E1/E2/W4 修复前,Evolution 仅限实验环境**(默认关闭不伤现状);
+- flaky 两例维持 D6 名单处置(失败先 Debug 三重证据定性,不阻塞准出但记录)。
