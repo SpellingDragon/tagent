@@ -5,6 +5,10 @@
 > 执行顺序:组 1→7;组 8(向量链路可观测)在组 5 之后、组 7 门禁之前执行。
 > 交接背景与全局上下文见 roadmap design.md「D6 交接须知」。
 >
+> **执行状态(2026-09-07 归档整合)**:全组收口——核心链路(组1-4、组8)已交付并 -race 绿,
+> 真实 ZAI_API_KEY 实测通过(5.1/5.3),delta specs 已入主 specs 且 strict 校验绿;
+> 3.4(可选回填)与 6.1(X3 主动召回)两项转出登记 LEDGER 承接;本变更归档。
+>
 > **执行状态(2026-09-06 更新)**:核心链路(组1-4、组8)已交付并 -race 绿;
 > 实现载体为 execution-dag.md 的 T-A 节点(解耦缝 C6:Embedder/InMemoryEngine/engineBridge/
 > KV持久化/recall hybrid/rustviking契约修复)+ 补齐组8向量可观测(TracedEmbedder)、
@@ -30,7 +34,7 @@
 - [x] 3.1 内存向量索引(余弦 topK;分区维度组织;条目数指标) — InMemoryEngine vectors/vmeta(分区过滤)+cosine+vectorKeys topK+Stats(条目数)
 - [x] 3.2 KV 序列化持久化(独立键前缀)+ 启动 KVRange 异步重建;重建窗口退化行为测试 — engine_persist.go(VecKeyPrefix 独立前缀+persistedVector 含 ModelID 指纹)+rebuildFromKV 异步重建(不阻塞构造,重建窗口向量渐进可用,Ready() 含 rebuildDone)
 - [x] 3.3 InMemoryStore.SearchByEmbedding / FileSegmentStore.SearchByEmbedding 落地 + SupportsVectorSearch 语义;未配置时保持 stub 行为的回归测试 — engineBridge.SearchByEmbedding→RawVectorSearcher;SupportsVectorSearch 反映引擎能力(engine_bridge.go:140);stub 回归:engine=nil 时 SupportsVectorSearch=false(engine_bridge_test)
-- [ ] 3.4 (可选)历史事件一次性回填命令/工具(KVRange 全量 → 批量 embed) — **可选未做**:标注为后续增强候选(新事件已自动索引;历史回填非主链路验收必需)
+- [ ] 3.4 (可选)历史事件一次性回填命令/工具(KVRange 全量 → 批量 embed) — **转出(归档整合 2026-09-07)**:可选增强,非主链路验收必需(新事件已自动索引);承接登记于 LEDGER「后续候选」段,不随本变更归档而丢失
 
 ## 4. recall hybrid 融合
 
@@ -46,7 +50,7 @@
 
 ## 6. 可选组(主链路验收后裁决)
 
-- [ ] 6.1 CONFIRM X3:主动召回 hint 是否纳入本变更;纳入则实现 meditation 空闲任务(L3 归档摘要语义补召→pitfall/insight 沉淀),否则记录为后续变更候选并关闭本组 — **DEGRADED(裁决:后续变更候选)**:主动召回 hint 与 T-D 记忆策展(meditation 巩固)主题重叠,记录为后续变更候选,关闭本组;本变更聚焦被动 hybrid 召回
+- [x] 6.1 CONFIRM X3:主动召回 hint 是否纳入本变更;纳入则实现 meditation 空闲任务(L3 归档摘要语义补召→pitfall/insight 沉淀),否则记录为后续变更候选并关闭本组 — **已决议(DEGRADED 路径)**:CONFIRM 任务的完成即形成决议——裁决为「不纳入本变更、记录为后续变更候选并关闭本组」(主动召回 hint 与 T-D 记忆策展 meditation 巩固主题重叠,已由 consolidation 事件类型 + memory_consolidate 工具承载);承接登记于 LEDGER「后续候选」段
 
 ## 8. 向量链路可观测(2026-09-05 追加,归属裁决见 LEDGER;turn 级 trace 骨架属 observability-tracing 变更,不在本组)
 
@@ -57,5 +61,5 @@
 ## 7. 门禁与收尾
 
 - [x] 7.1 三道门禁:build/vet/test -race → 真实集成抽查 → CodeReview sub-agent fresh-eyes(必须修复项清零) — build/vet/全量23包-short绿+新子系统-race绿;CodeReview gate-3(T-A 首轮 M1/M2/M3+7S+12Nit 全清零;真实集成抽查**完成** 2026-09-06 真实 ZAI_API_KEY:embedder 5.1/5.3 实测 PASS + real-LLM 契约套件 8/8 PASS)
-- [x] 7.2 delta specs 同步主 specs(semantic-search、recall-hybrid-fusion 新增;recall-protocol 若有 MODIFIED 项按全文拷贝规程) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
-- [ ] 7.3 commit(conventional 风格)+ archive 本变更 + 回写 LEDGER.md 与 roadmap P1 检查点 — commit✅(conventional 全程)+LEDGER✅(两次驱动记账);**archive 待裁决**(原 5.1/5.3 BLOCKED 项已于 2026-09-06 真实 ZAI_API_KEY 实测完成、BLOCKED 解除;核心链路已交付,archive 时机由用户定)
+- [x] 7.2 delta specs 同步主 specs(semantic-search、recall-hybrid-fusion 新增;recall-protocol 若有 MODIFIED 项按全文拷贝规程) — **已完成(代码现状核验 2026-09-07)**:`openspec/specs/semantic-search/` 与 `openspec/specs/recall-hybrid-fusion/` 均已存在;2026-09-06 归档 postmerge-review-fixes 时补齐二者缺失的 `## Purpose` 段,`scripts/check-openspec.sh` strict 校验通过(76 passed / 0 failed)
+- [x] 7.3 commit(conventional 风格)+ archive 本变更 + 回写 LEDGER.md 与 roadmap P1 检查点 — **全部完成**:commit✅(conventional 全程)+LEDGER✅(多次驱动记账)+roadmap P1 回写✅(板块2 §2.1);**archive 已执行**(2026-09-07 用户裁决「全部归档、未完成项重新整合」;原 5.1/5.3 BLOCKED 项已于 2026-09-06 真实 ZAI_API_KEY 实测完成、BLOCKED 解除;3.4/6.1 转出项已登记 LEDGER 承接)
