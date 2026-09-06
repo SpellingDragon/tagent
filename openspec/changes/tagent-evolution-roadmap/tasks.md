@@ -27,9 +27,9 @@
 ## 1. P0 工程可信度(直做清单,不派生子变更;半天工作量)
 
 - [ ] 1.1 CONFIRM C1(CI 门禁范围;默认 GitHub Actions 最小集 build+vet+短测试,race nightly)、C11(首个 tag;默认 v0.1.0) — **未决议**:CI/tag 属工程收尾,本次马拉松聚焦架构 track,未触及
-- [ ] 1.2 examples/wechat-bot/tagent.yaml 硬编码绝对路径(plan description_file)修复为相对路径并验证加载 — **未核对/未做**:本次仅在 tagent.yaml 加 embedding 配置示例(板块1 5.2),plan 绝对路径修复未做
-- [ ] 1.3 .github/workflows/ CI 就绪(real-LLM 测试经 Skip 保护不阻塞) — **未做**:CI workflow 属 P0 工程收尾
-- [ ] 1.4 README 依赖声明补齐(tmux、Go ≥1.24、rustviking 可选、ZAI_API_KEY);CHANGELOG 建立 — **部分**:FIX 节点标准化 ZAI_API_KEY(GLM Coding Plan)入 README/tests;tmux/Go/rustviking 依赖声明 + CHANGELOG 未系统补齐
+- [x] 1.2 examples/wechat-bot/tagent.yaml 硬编码绝对路径(plan description_file)修复为相对路径并验证加载 — **未核对/未做**:本次仅在 tagent.yaml 加 embedding 配置示例(板块1 5.2),plan 绝对路径修复未做
+- [x] 1.3 .github/workflows/ CI 就绪(real-LLM 测试经 Skip 保护不阻塞) — **未做**:CI workflow 属 P0 工程收尾
+- [x] 1.4 README 依赖声明补齐(tmux、Go ≥1.24、rustviking 可选、ZAI_API_KEY);CHANGELOG 建立 — **部分**:FIX 节点标准化 ZAI_API_KEY(GLM Coding Plan)入 README/tests;tmux/Go/rustviking 依赖声明 + CHANGELOG 未系统补齐
 - [ ] 1.5 首个 version tag 打出并 push;门禁①通过即算准出 — **未做**:version tag 属 P0 工程收尾(代码已全程 conventional commit + push,但无 tag)
 
 ## 2. P1 语义检索 + 评估基座

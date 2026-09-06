@@ -56,5 +56,5 @@
 ## 7. 门禁与收尾
 
 - [x] 7.1 三道门禁:build/vet/test -race → 真实集成抽查 → CodeReview sub-agent fresh-eyes(必须修复项清零) — build/vet/全量23包-short绿+新子系统-race绿;CodeReview gate-3(T-A 首轮 M1/M2/M3+7S+12Nit 全清零;真实集成抽查 BLOCKED 需 key)
-- [ ] 7.2 delta specs 同步主 specs(semantic-search、recall-hybrid-fusion 新增;recall-protocol 若有 MODIFIED 项按全文拷贝规程) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
+- [x] 7.2 delta specs 同步主 specs(semantic-search、recall-hybrid-fusion 新增;recall-protocol 若有 MODIFIED 项按全文拷贝规程) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
 - [ ] 7.3 commit(conventional 风格)+ archive 本变更 + 回写 LEDGER.md 与 roadmap P1 检查点 — commit✅(conventional 全程)+LEDGER✅(两次驱动记账);**archive 待裁决**(5.1/5.3 BLOCKED 项是否阻断 archive 由用户定;核心链路已交付)

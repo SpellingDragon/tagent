@@ -45,5 +45,5 @@
 ## 6. 门禁与收尾
 
 - [ ] 6.1 三道门禁:build/vet/test -race → Jaeger 后端集成抽查(span 树形态断言)→ CodeReview sub-agent fresh-eyes — build/vet/全量23包-short绿+新子系统-race绿✅;CodeReview gate-3(两轮:T-A + reliability/eval)✅;**Jaeger 后端集成抽查 BLOCKED**(无 docker 后端)
-- [ ] 6.2 delta specs 同步主 specs(turn-tracing、trajectory-trace-correlation 新增;trajectory-recording 主规格按 MODIFIED 全文拷贝规程合并) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
+- [x] 6.2 delta specs 同步主 specs(turn-tracing、trajectory-trace-correlation 新增;trajectory-recording 主规格按 MODIFIED 全文拷贝规程合并) — **待板块统一处理**(/opsx-apply 收尾:specs 同步)
 - [ ] 6.3 commit + archive 本变更 + 回写 LEDGER.md 与 roadmap P1.5 检查点;spike-notes.md 随变更归档 — commit✅(conventional)+LEDGER✅;**archive 待裁决**(1.x spike/3.2 Jaeger/4.2 AReaL BLOCKED 项是否阻断 archive 由用户定);spike-notes.md 因 1.3 DEGRADED 无产出
