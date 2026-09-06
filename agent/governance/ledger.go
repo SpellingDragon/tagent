@@ -215,10 +215,15 @@ type Goal struct {
 }
 
 // GoalRegistry 管理 goal 声明（有界自治：high+ 操作须挂 goal）。并发安全。
+// store/partitionID（5.2 design-report-closeout）：BindStore 延迟绑定后
+// Declare/Resolve 双写 governance 事件，重启经事件回放重建。
 type GoalRegistry struct {
 	mu    sync.RWMutex
 	goals map[string]*Goal
 	seq   int
+
+	store       memory.MemoryStore
+	partitionID int
 }
 
 // NewGoalRegistry 构建 goal 注册表。
@@ -226,28 +231,49 @@ func NewGoalRegistry() *GoalRegistry {
 	return &GoalRegistry{goals: make(map[string]*Goal)}
 }
 
-// Declare 登记一个 goal，返回其 ID。
+// Declare 登记一个 goal，返回其 ID。BindStore 后同步写 governance 事件（5.2）。
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.seq++
 	id := fmt.Sprintf("g-%d", g.seq)
-	g.goals[id] = &Goal{
+	goal := &Goal{
 		ID: id, Statement: statement, CreatedBy: createdBy,
 		Status: GoalActive, CreatedMs: time.Now().UnixMilli(), ExpiresMs: expiresMs,
 	}
+	g.goals[id] = goal
+	g.mu.Unlock()
+	g.writeGoalEvent(goalEventPayload{
+		GoalID: id, Op: "declared", Statement: statement,
+		CreatedBy: createdBy, ExpiresMs: expiresMs,
+	})
 	return id
 }
 
-// Resolve 更新 goal 状态。
+// Resolve 更新 goal 状态。BindStore 后同步写 governance 事件（5.2）。
 func (g *GoalRegistry) Resolve(id string, status GoalStatus) bool {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if goal, ok := g.goals[id]; ok {
+	goal, ok := g.goals[id]
+	if ok {
 		goal.Status = status
-		return true
 	}
-	return false
+	g.mu.Unlock()
+	if ok {
+		g.writeGoalEvent(goalEventPayload{GoalID: id, Op: "resolved", Status: string(status)})
+	}
+	return ok
+}
+
+// List 返回全部 goal 的快照副本（5.1 goal_list 工具消费；按 ID 序不保证，
+// 调用方按需排序）。返回副本防外部改动内部状态。
+func (g *GoalRegistry) List() []*Goal {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]*Goal, 0, len(g.goals))
+	for _, goal := range g.goals {
+		cp := *goal
+		out = append(out, &cp)
+	}
+	return out
 }
 
 // HasActive 报告是否存在未过期的 active goal（GovernanceGate 的 goal 检查判据）。

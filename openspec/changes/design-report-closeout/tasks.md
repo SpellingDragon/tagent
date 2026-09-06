@@ -32,8 +32,8 @@
 
 ## 5. D3 goal 工具 + 降级行为层
 
-- [ ] 5.1 goal 五工具（goal_declare/goal_list/goal_resolve/denial_query/approval_list）PlainTool 注册，entry only + 治理包裹；goal_declare/resolve 写 governance 事件（subtype）；回归 TestGoalTools_EntryOnly + TestGoalDeclare_PersistsEvent
-- [ ] 5.2 GoalRegistry 从 governance 事件回放重建（构造期单线程，对齐 DenialLedger）；回归 TestGoalRegistry_RebuildFromEvents（重启不丢 goal）
+- [x] 5.1 goal 五工具（goal_declare/goal_list/goal_resolve/denial_query/approval_list）PlainTool 注册，entry only + 治理包裹；goal_declare/resolve 写 governance 事件（subtype）；回归 TestGoalTools_EntryOnly + TestGoalDeclare_PersistsEvent
+- [x] 5.2 GoalRegistry 从 governance 事件回放重建（构造期单线程，对齐 DenialLedger）；回归 TestGoalRegistry_RebuildFromEvents（重启不丢 goal）
 - [x] 5.3 governance EventTypeSpec Skeleton→false；回归 TestGovernanceEvent_NotSkeletonized（压缩定级含 governance 段全文保留）
 - [x] 5.4 降级行为层三项（独立配置默认关）：model 退避（runEventLoop turn 间）/ mcp 熔断+半开（mcp_call 入口）/ disk 禁新 spawn（TaskManager.Spawn 前）；各配独立回归（默认关=零行为变化断言必含）
 - [x] 5.5 mem_spill 重放补 projection.Append（失败仅记日志）；回归 TestMemSpillReplay_AppendsProjection（fail-before：现只回灌 StoreEvent）

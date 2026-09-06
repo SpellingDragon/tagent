@@ -104,3 +104,50 @@ func callBuiltExec(t *testing.T, ta *agent.TagentAgent) string {
 	t.Fatal("未找到声明名为 exec 的工具——治理包裹的 leaf 工具未经 buildAgent 构建")
 	return ""
 }
+
+// TestGoalTools_EntryOnly (5.1, design-report-closeout): the five governance
+// face tools are appended for the ENTRY agent only (governance enabled), and
+// are themselves wrapped by the gate (appended before the wrapping loop).
+// Sub-agents never get them — the governance surface converges on the main
+// loop, same as refine.
+func TestGoalTools_EntryOnly(t *testing.T) {
+	rc := &runtimeConfig{model: &factoryMockModel{}}
+	rc.govLedger = governance.NewDenialLedger(nil, 0)
+	rc.govGate = governance.NewGovernanceGate(governance.GateDeps{
+		Ledger: rc.govLedger,
+		Goals:  governance.NewGoalRegistry(),
+		Config: governance.GateConfig{Enabled: true, Enforcement: governance.EnforcementStrict},
+	})
+	cfg := Config{
+		Entry: "tagent",
+		Agents: map[string]AgentConfig{
+			"tagent": {SystemPrompt: PromptConfig{Inline: "entry prompt"}, Memory: MemoryConfig{Type: "memory"}},
+			"worker": {SystemPrompt: PromptConfig{Inline: "worker prompt"}, Memory: MemoryConfig{Type: "memory"}},
+		},
+	}
+	cfg.Governance.Enabled = true
+	loader := prompt.NewLoader("")
+	cache := make(map[string]*agent.TagentAgent)
+
+	entry, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache)
+	require.NoError(t, err)
+	sub, err := buildAgent("worker", cfg.Agents["worker"], cfg, rc, loader, cache)
+	require.NoError(t, err)
+
+	hasGoalTools := func(ta *agent.TagentAgent) int {
+		n := 0
+		for _, tl := range ta.Tools() {
+			switch tl.Declaration().Name {
+			case "goal_declare", "goal_list", "goal_resolve", "denial_query", "approval_list":
+				n++
+			}
+		}
+		return n
+	}
+	if got := hasGoalTools(entry); got != 5 {
+		t.Fatalf("entry should carry all 5 governance tools, got %d", got)
+	}
+	if got := hasGoalTools(sub); got != 0 {
+		t.Fatalf("sub-agent must NOT carry governance tools, got %d", got)
+	}
+}

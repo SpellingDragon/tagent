@@ -45,6 +45,7 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
 	"github.com/SpellingDragon/tagent/tool/action"
+	"github.com/SpellingDragon/tagent/tool/govx"
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/plan"
 
@@ -545,6 +546,15 @@ func buildAgent(
 		tools = append(tools, evolution.NewRefineTool(rc.evoStore, rc.evoRelease))
 	}
 
+	// 5.1（design-report-closeout）：治理面工具五件套（goal_declare/goal_list/
+	// goal_resolve/denial_query/approval_list）——仅 entry agent 且治理启用时追加
+	// （治理面收敛主循环，与 refine 同级）；先于治理包裹追加（goal 工具自身也过闸，
+	// classify 判 low 直接放行）。工具只做登记/查询——批准权始终在人（approval_list
+	// 只列 pending 与批准方式）。
+	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry {
+		tools = append(tools, govx.NewGoalTools(rc.govGate)...)
+	}
+
 	// T-G: 治理闸包裹 leaf 工具（配置门控，默认关闭则不包裹 → 现状逐字节不变）。跳过 sub-agent
 	// 包装器（*agent.AgentToolWrapper）——下游需按具体类型断言接 parentProjection；治理聚焦
 	// exec/file/mcp/refine 等 leaf 工具（主风险面）。actionTool 原始引用已在循环内提取，包裹
@@ -581,6 +591,9 @@ func buildAgent(
 			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的
 			// 治理记录写 entry governance 分区，重启可 recall）。替代原 agentGate.BindLedger。
 			rc.govLedger.BindStore(memStore, memory.PartitionIDFromName(name))
+			// 5.2（design-report-closeout）：goal 声明持久化——同 entry 分区（治理审计
+			// 单区）；Declare/Resolve 双写 governance 事件，重启经回放重建。
+			rc.govGate.Goals().BindStore(memStore, memory.PartitionIDFromName(name))
 		}
 		for i, t := range tools {
 			if _, isWrapper := t.(*agent.AgentToolWrapper); isWrapper {
