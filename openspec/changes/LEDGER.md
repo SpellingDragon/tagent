@@ -85,6 +85,7 @@
 ## 重编原则(后续清账沿用)
 
 | 2026-09-07 | **self-evolution-git-native 落地(21/21)**:bundle 体系退役(bundle/source/release 状态机/router/n1 测试+refine propose/diff 全删,grep 零残留含注释清理);**GitEvolution 装配单元**(NewGitEvolution+BindRuntime 延迟绑定,同 BindPosterior 时序)+gitrefine 纯函数集(git 身份局部注入 K3/行首锚定 grep 含正则转义修正——`[self-improve]` 方括号不转义会被当字符类/段匹配 `**` 手写 N5)+refine 三 op(register/status/rollback);**improvement/evaluation 事件直写**(feedback.go 模式);评估一次性窗口快照(Q1)+结论四态(K7);劣化只出 evaluation 事件+建议文案(P4,回归=HEAD 无 revert);rollback 终态不评估(Q3);版本章=LatestSha atomic 缓存+重启事件惰性恢复(S2,回归=新实例恢复);K4 生命周期挂 RegisterCloser(stopCloser 适配);配置重构(protected_paths 三目录+judge_delay);meditation.md 登记纪律+adoption 经 refine status;README/yaml/platform wiki 统一叙事;example evolution enabled:true(Q2)+源码仓污染警示。D4/D5 P2 项由本变更替代(D5 发布道退役/D4 门待挂 git 载体重启)。门禁:vet+全量 short+3 包 race 全绿 | 逐任务实施(本会话),证据=下述 commit |
+| 2026-09-07 | **独立全面评审+修复轮(ad6d698)+五特性覆盖闭环**:带定位宣言(docs/.dev/tagent定位与差距答案-2026-09-07.md 五主张)独立评审周末变更。**哲学层 4 PASS+1 VIOLATION**:M1 渗透式——DigestExtra 只接一源,Q4 三来源未接线(tasks 勾选≠实现完成再实证)。**4 Major 全修**:M1 DigestSummary+回归三 Contains/M2 QueryEvents 默认 asc 取最旧→timestamp_desc(恢复错章+评估截断,单事件测试盲区)/M3 裸 commit 卷暂存区→commit --only/M4 Stop 挂满 delay→stopCh 抢占+mu 护 WaitGroup;Minor 三项(阈值 config 通路/rename 行/wiki 残留)。**答案层抽查 PASS**(feedback/governance/embedding)。**五特性覆盖闭环**:git-native 深审/feedback+审批+goal 抽查级(R1/R5 在案)/**降级+巩固本轮补定向验证 PASS**(backoff attempt==0/probeCount 归零/disk 配置/hint 注入/min_source 五点俱在)。门禁:vet+全量 short+3 包 race 绿 | 独立 sub-agent+主线程补审,证据=ad6d698 |
 
 1. 归档区不改写,裁决集中记录于本账本;
 2. "问题是否还在"以代码现状为准,不以任务勾选状态为准(勾选落后于演进是停滞变更的通病);
