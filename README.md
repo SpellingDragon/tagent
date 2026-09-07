@@ -16,14 +16,14 @@
 | ⚡ **异步任务层** | 长命令/服务经 tmux 后台运行：快命令内联返回，慢任务 ACK + `task_settled` 通知回写 |
 | 🔁 **任务重入** | `resume_task` 对存活服务续输入（REPL 式）、对完成的子 Agent 续指令（自动还原上下文） |
 | 🤖 **子 Agent 编排** | 本地 `AgentToolWrapper` / 远程 A2A 协议统一封装；事件跨 Agent 按 key 精确传递 |
-| 🧘 **冥想心跳** | 空闲期自动回顾与沉淀，产出 ★ 高亮卡片进入长期记忆 |
+| 🧘 **冥想心跳** | 自我改进引擎：空闲期(novelty+idle 门控)反思近期工作，产出脚本/skill/prompt 三类改进产物并经 `refine register` 登记（git 留痕+评估窗口）——不是被动日记 |
 | 🎓 **RL 集成** | HTTPAPI + SwappableModel + TrajectoryRecorder，与 AReaL 对接采集训练轨迹 |
 | 🔌 **MCP 闭环** | `mcp_servers` 声明式注册表（增删热同步）+ `mcp_call` 网关 + `mcp_discover` 发现——工具知识按需渗透进上下文，工具声明区恒定（缓存友好） |
 | 🔍 **混合语义召回** | `memory.engine.embedding` 开启后向量∪关键词 RRF 融合召回；语义发现→票据取回两段式不变；未配置时行为与纯关键词逐字节一致 |
 | 📊 **统一可观测** | turn root span + trace_id 三投影互链（事件 Metadata / RL 轨迹 / OTel span 树）；设 OTLP endpoint 导出，未设 noop 零开销 |
 | 🛡 **治理闸**（默认关） | RiskClassifier 四级风险 + 预算滑窗 + critical 异步审批（**审批消息流**：请求渗透为消息→人工回复 approve/reject <digest> 或 CLI 批准→白名单校验→落盘生效）+ DenialLedger 审计 + **goal 五工具**（goal_declare/goal_list/goal_resolve/denial_query/approval_list，entry only）+ **负反馈 guardrail 判据**；GovernanceTool 装饰全部 leaf 工具 |
 | 🔁 **回执-反馈闭环** | 任务结算自动写 task_settle feedback（completed→positive/failed→negative，suspect 不写）+ `POST /feedback` 外部评分 + FeedbackBinder 因果边绑定产出事件；negative_feedback_rate 进入发布 guardrail 判据（跨 bundle 误归因防线=bundle_id 精确 join） |
-| 🧬 **自进化**（默认关） | BundleStore 不可变热配置 + 风险分级发布道（快道后验评估/慢道门后）+ refine 工具（propose/diff/status/rollback，**无 activate**——agent 永无直接激活权） |
+| 🧬 **自进化**（默认关） | **git 原生**改进通道：文件即真源（热重载直生效）+ git 版本层（`[self-improve]` 标记 commit/revert/log）+ refine 工具（register 登记/status 台账/rollback 安全回滚）+ 后验评估（guardrail/judge 劣化**只出建议**——执行权永远在 agent） |
 | 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once 不丢事件）+ DegradationManager 五依赖退化追踪 + mem_spill 存储失败兜底重放 |
 
 ## 🎬 一个长期运行的日常
@@ -258,7 +258,7 @@ graph TB
 | `tool/memoryx/` | 记忆策展工具：memory_consolidate（服务端指纹防伪造）、memory_health（维度诊断） |
 | `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
 | `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
-| `evolution/` | 热配置自进化（默认关）：BundleStore、VersionedSource、ReleaseManager、refine 工具 |
+| `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
 | `tagent.go` + `config.go` | 组合根与声明式配置 |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
@@ -348,7 +348,7 @@ graph TB
 | 配置块 | 关键字段 | 说明 |
 |--------|---------|------|
 | `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效；**审批请求渗透为消息、人工回复 approve/reject <digest> 即生效**，`app.wechat.approvers` 白名单校验发送者）；DenialLedger 审计事件写 entry memStore；goal 五工具（entry only）登记自治目标 |
-| `evolution:` | `enabled` / `dir` / `skip_approval`（默认 false=慢道需批准）/ `protected_prompts` / `canary_hold_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | 热配置自进化：refine 提案经发布道（快道 validate→canary→后验 LLM-judge；慢道加审批门）；rollback 仅限发布历史中曾生效版本 |
+| `evolution:` | `enabled` / `protected_paths`（默认 `resources/prompts/**`,`skills/**`,`scripts/**`）/ `judge_delay_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | git 原生自进化：refine register 登记改进（`[self-improve]` commit+improvement 事件+评估窗口）；judge_delay 后 guardrail/judge 评估一次，劣化只出建议（evaluation 事件→冥想 digest）；rollback 安全 revert。⚠ 生产=独立部署仓 |
 | `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放，重放双写投影）/ `meditation_anchor_dir`（冥想锚点跨重启）/ **降级行为层**（默认全关）：`degradation_model_backoff`（model 退化时 turn 间退避，如 5s）/ `degradation_mcp_probe_every`（mcp 退化时熔断半开探测间隔 N）/ `degradation_disk_block_spawn`（disk 退化时禁新任务 spawn，进行中任务不受影响） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线；降级行为是「闸不是墙」——每项独立开关，恢复即回正常路径 |
 
 详见 [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md)。

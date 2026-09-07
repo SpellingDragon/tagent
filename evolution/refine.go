@@ -3,203 +3,109 @@ package evolution
 import (
 	"context"
 	"fmt"
-	"sort"
-	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
-// refineSubmitTimeout 限界 refinePropose 内 ReleaseManager.Submit 的同步时长（Suggestion：
-// Submit 跨 canary hold + LLM-judge 可能数十秒，而 refine 工具调用在单消费者事件循环内同步
-// 执行）。超时 → ReleaseManager 诚实停留 canary（Major6：不回滚不假通过），agent 得 StageCanary
-// 稍后经 status 查终态。取 90s（> judge 默认 60s，让正常评估完成，同时限界 canary hold 配大的最坏）。
-const refineSubmitTimeout = 90 * time.Second
-
-// ==================== refine 工具（T-EVO · agent 自我修改通道）====================
+// ==================== refine 工具（git 原生自我改进通道）====================
 //
-// 核心主张（报告 D1 §9）：**agent 永远无法直接生效自我修改**——refine 工具**无 activate
-// op**。op 白名单：propose（提案 → 发布状态机裁决）/ diff（版本对比）/ status（当前+历史）/
-// rollback（回退到历史已验证版本，安全操作）。propose 只是把 draft 提交给 ReleaseManager，
-// 激活与否由风险分级发布道决定（快道后验/慢道门后），agent 无直接激活权（调和 T-E/T-F）。
-//
-// 有界自治（报告 D1 §4.5.2）：op 白名单 + 字段白名单（bundle v1 只含 prompts/params/model，
-// 不含工具集）+ 每日提案预算（由调用方 Gate 约束）+ ProtectedPrompts 强制慢道。
+// 三操作（Q 系裁决）：register（登记：git commit+improvement 事件+开评估窗口）/
+// status（改进台账+窗口结论+未登记提醒）/ rollback（安全 git revert，终态不评估）。
+// diff 已删——exec git diff 可达。哲学：改文件即生效（P2），登记是评估与回滚保护的
+// 前提而非生效前提；劣化只出建议（P4）。
 
-// refineArgs 是 refine 工具入参（op 即路由，无 activate）。
+// refineArgs 是 refine 工具入参。
 type refineArgs struct {
-	Op        string `json:"op" jsonschema:"description=操作,enum=propose,enum=diff,enum=status,enum=rollback"`
-	PromptKey string `json:"prompt_key,omitempty" jsonschema:"description=propose 要改的提示词逻辑名(如 system)"`
-	Content   string `json:"content,omitempty" jsonschema:"description=propose 新提示词内容"`
-	Note      string `json:"note,omitempty" jsonschema:"description=propose 修改理由(审计留痕)"`
-	TargetID  string `json:"target_id,omitempty" jsonschema:"description=diff/rollback 目标 bundle id"`
-}
-
-// bundleInfo 是 bundle 的对外摘要（不暴露全文，避免上下文膨胀）。
-type bundleInfo struct {
-	ID         string   `json:"id"`
-	ParentID   string   `json:"parent_id,omitempty"`
-	Note       string   `json:"note,omitempty"`
-	CreatedBy  string   `json:"created_by,omitempty"`
-	PromptKeys []string `json:"prompt_keys"`
-	Model      string   `json:"model,omitempty"`
-	Active     bool     `json:"active"`
+	Op    string   `json:"op" jsonschema:"description=操作,enum=register,enum=status,enum=rollback"`
+	Paths []string `json:"paths,omitempty" jsonschema:"description=register:改进产物路径(受控清单内)"`
+	Note  string   `json:"note,omitempty" jsonschema:"description=register:痛点→产物→预期收益"`
+	Sha   string   `json:"sha,omitempty" jsonschema:"description=rollback:目标改进 commit sha(可前缀)"`
 }
 
 // refineResult 是 refine 工具输出。
 type refineResult struct {
-	Op       string        `json:"op"`
-	OK       bool          `json:"ok"`
-	Message  string        `json:"message"`
-	BundleID string        `json:"bundle_id,omitempty"` // propose 产生的 draft id
-	Lane     string        `json:"lane,omitempty"`      // 发布道 fast/slow
-	Stage    string        `json:"stage,omitempty"`     // 发布结果阶段
-	Diff     *BundleDiff   `json:"diff,omitempty"`
-	Active   *bundleInfo   `json:"active,omitempty"`
-	History  []*bundleInfo `json:"history,omitempty"`
+	Op      string   `json:"op"`
+	OK      bool     `json:"ok"`
+	Message string   `json:"message"`
+	Sha     string   `json:"sha,omitempty"`
+	Items   []string `json:"items,omitempty"` // status: 台账行
 }
 
-// NewRefineTool 构建 refine 工具（agent 自我修改通道，无 activate op）。
-func NewRefineTool(store *BundleStore, rm *ReleaseManager) tool.Tool {
+// NewRefineTool 构建 git 原生 refine 工具（entry only，装配层先于治理包裹追加——A3）。
+func NewRefineTool(g *GitEvolution) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args refineArgs) (refineResult, error) {
 			switch args.Op {
-			case "propose":
-				return refinePropose(ctx, store, rm, args)
-			case "diff":
-				return refineDiff(store, args)
+			case "register":
+				return refineRegister(g, args)
 			case "status":
-				return refineStatus(store)
+				return refineStatus(g)
 			case "rollback":
-				return refineRollback(store, rm, args)
+				return refineRollback(g, args)
 			default:
 				return refineResult{Op: args.Op, OK: false},
-					fmt.Errorf("未知 op %q（白名单：propose/diff/status/rollback；无 activate——激活必经发布状态机）", args.Op)
+					fmt.Errorf("未知 op %q（白名单：register/status/rollback）", args.Op)
 			}
 		},
 		function.WithName("refine"),
-		function.WithDescription("有界自治的自我改进通道（无直接生效权）。op：① propose——提案修改提示词"+
-			"(prompt_key+content+note)，提交发布状态机按风险分级裁决（快道后验评估/慢道门后生效），"+
-			"agent 不能直接激活；② diff——对比 active 与 target_id 版本差异；③ status——查看当前 active 与发布历史；"+
-			"④ rollback——回退到历史已验证版本(target_id)。bundle v1 只治理 prompts/params/model，不含工具集。"),
+		function.WithDescription("git 原生自我改进通道（默认生效哲学：改文件即生效，本工具负责登记/台账/回滚）。"+
+			"op：① register——产物落盘后登记留痕（paths+note），开评估窗口，劣化将有回滚建议；"+
+			"未登记的改进没有评估保护也无法安全回滚；② status——改进历史+各窗口评估结论+未登记提醒；"+
+			"③ rollback——安全回滚指定改进 commit（仅 [self-improve] 标记，防误 revert 用户提交）。"),
 	)
 }
 
-func refinePropose(ctx context.Context, store *BundleStore, rm *ReleaseManager, args refineArgs) (refineResult, error) {
-	if args.PromptKey == "" || args.Content == "" {
-		return refineResult{Op: "propose", OK: false}, fmt.Errorf("propose 需 prompt_key 与 content")
+func refineRegister(g *GitEvolution, args refineArgs) (refineResult, error) {
+	if len(args.Paths) == 0 || args.Note == "" {
+		return refineResult{Op: "register", OK: false}, fmt.Errorf("register 需 paths 与 note(痛点→产物→预期收益)")
 	}
-	active := store.Active()
-	if active == nil {
-		return refineResult{Op: "propose", OK: false}, fmt.Errorf("无 active 基线，无法提案（应先初始化基线 bundle）")
-	}
-	// 从 active 派生 draft：复制 prompts，覆盖目标 key（字段白名单：仅 prompts）。
-	prompts := make(map[string]string, len(active.Prompts))
-	for k, v := range active.Prompts {
-		prompts[k] = v
-	}
-	prompts[args.PromptKey] = args.Content
-	draft, err := store.Create(active, prompts, active.Params, active.Model, "refine", args.Note)
+	sha, msg, err := g.Register(args.Paths, args.Note)
 	if err != nil {
-		return refineResult{Op: "propose", OK: false}, fmt.Errorf("创建 draft bundle 失败: %w", err)
+		return refineResult{Op: "register", OK: false, Message: err.Error()}, err
 	}
-	// 提交发布状态机——激活与否由风险分级发布道裁决（agent 无直接激活权）。限界超时防挂死
-	// 单消费者事件循环（Suggestion）；超时则停留 canary（Major6），agent 稍后 status 查终态。
-	if rm == nil {
-		return refineResult{Op: "propose", OK: true, BundleID: draft.ID, Stage: string(StageDraft),
-			Message: "draft 已创建（无发布状态机，停留 draft；激活需 ReleaseManager）"}, nil
-	}
-	sctx, cancel := context.WithTimeout(ctx, refineSubmitTimeout)
-	defer cancel()
-	rec, err := rm.Submit(sctx, draft)
-	if err != nil {
-		return refineResult{Op: "propose", OK: false, BundleID: draft.ID}, fmt.Errorf("发布状态机失败: %w", err)
-	}
-	return refineResult{
-		Op: "propose", OK: rec.Stage == StageActive, BundleID: draft.ID,
-		Lane: string(rec.Lane), Stage: string(rec.Stage),
-		Message: fmt.Sprintf("提案经%s道裁决：%s（%s）", rec.Lane, rec.Stage, rec.Reason),
-	}, nil
+	return refineResult{Op: "register", OK: true, Sha: sha, Message: msg}, nil
 }
 
-func refineDiff(store *BundleStore, args refineArgs) (refineResult, error) {
-	active := store.Active()
-	if active == nil {
-		return refineResult{Op: "diff", OK: false}, fmt.Errorf("无 active 基线")
-	}
-	target := active
-	if args.TargetID != "" {
-		b, err := store.Get(args.TargetID)
-		if err != nil {
-			return refineResult{Op: "diff", OK: false}, err
-		}
-		target = b
-	}
-	d := Diff(active, target)
-	return refineResult{Op: "diff", OK: true, Diff: &d,
-		Message: fmt.Sprintf("active(%s) → target(%s) 差异", shortID(active.ID), shortID(target.ID))}, nil
-}
-
-func refineStatus(store *BundleStore) (refineResult, error) {
+func refineStatus(g *GitEvolution) (refineResult, error) {
 	res := refineResult{Op: "status", OK: true}
-	if a := store.Active(); a != nil {
-		res.Active = toBundleInfo(a, true)
-	}
-	all, err := store.List()
+	infos, err := GitLogFiltered(g.cfg.WorkDir, 20)
 	if err != nil {
-		return res, nil
+		return res, fmt.Errorf("改进台账读取失败（需 git 仓）: %w", err)
 	}
-	activeID := ""
-	if res.Active != nil {
-		activeID = res.Active.ID
+	evals := g.Evaluations()
+	for _, c := range infos {
+		line := fmt.Sprintf("%s %s %s", shortSha(c.Sha), c.Time, c.Note)
+		if ev, ok := evals[c.Sha]; ok {
+			line += " ｜评估:" + ev.Verdict
+			if ev.Reason != "" {
+				line += "（" + ev.Reason + "）"
+			}
+			if ev.Advice != "" {
+				line += " ｜" + ev.Advice
+			}
+		} else {
+			line += " ｜评估:未到期"
+		}
+		res.Items = append(res.Items, line)
 	}
-	for _, b := range all {
-		res.History = append(res.History, toBundleInfo(b, b.ID == activeID))
+	if un := g.Unregistered(); len(un) > 0 {
+		res.Items = append(res.Items, fmt.Sprintf("⚠ 未登记产物（已改动未 register，无评估保护）：%v", un))
 	}
-	res.Message = fmt.Sprintf("active=%s，历史 %d 个 bundle", shortID(activeID), len(res.History))
+	res.Message = fmt.Sprintf("改进 %d 条", len(infos))
 	return res, nil
 }
 
-func refineRollback(store *BundleStore, rm *ReleaseManager, args refineArgs) (refineResult, error) {
-	if args.TargetID == "" {
-		return refineResult{Op: "rollback", OK: false}, fmt.Errorf("rollback 需 target_id")
+func refineRollback(g *GitEvolution, args refineArgs) (refineResult, error) {
+	if args.Sha == "" {
+		return refineResult{Op: "rollback", OK: false}, fmt.Errorf("rollback 需 sha（改进 commit，可前缀）")
 	}
-	if _, err := store.Get(args.TargetID); err != nil {
-		return refineResult{Op: "rollback", OK: false}, err
+	out, err := GitRevertSafe(g.cfg.WorkDir, args.Sha)
+	if err != nil {
+		// 冲突/校验失败以 result 渗透详情（不 error 打断——失败渗透原则）
+		return refineResult{Op: "rollback", OK: false, Message: err.Error() + "｜git 输出:" + out}, nil
 	}
-	// E1（§8.3）：rollback 目标必须是发布历史中曾 Stage=active 的 bundle——否则 agent 可经
-	// rollback 直接 SetActive 任意在盘 bundle（含被拒 draft），绕过"agent 永无直接激活权"铁律
-	// （tagent.go 原注释自认此绕过）。限定白名单 = ReleaseManager.History 的已激活版本。
-	if !rm.wasActive(args.TargetID) {
-		return refineResult{Op: "rollback", OK: false},
-			fmt.Errorf("rollback 目标 %s 不在发布历史的已激活版本中——仅可回滚到曾正式生效(Stage=active)的 bundle，防绕过发布道直接激活被拒 draft（E1）", shortID(args.TargetID))
-	}
-	if err := store.Rollback(args.TargetID); err != nil {
-		return refineResult{Op: "rollback", OK: false}, fmt.Errorf("回滚失败: %w", err)
-	}
-	return refineResult{Op: "rollback", OK: true, BundleID: args.TargetID,
-		Message: fmt.Sprintf("已回滚到 %s（下一回合边界生效）", shortID(args.TargetID))}, nil
-}
-
-func toBundleInfo(b *Bundle, active bool) *bundleInfo {
-	keys := make([]string, 0, len(b.Prompts))
-	for k := range b.Prompts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	model := b.Model.Name
-	if b.Model.Provider != "" {
-		model = b.Model.Provider + "/" + b.Model.Name
-	}
-	return &bundleInfo{
-		ID: b.ID, ParentID: b.ParentID, Note: b.Note, CreatedBy: b.CreatedBy,
-		PromptKeys: keys, Model: model, Active: active,
-	}
-}
-
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
+	// 裁决 Q3：回滚是终态——不写事件、不开窗口（信任执行者）。
+	return refineResult{Op: "rollback", OK: true,
+		Message: "已回滚 " + shortSha(args.Sha) + "（revert commit 已生成；文件即真源，热重载即时生效）"}, nil
 }

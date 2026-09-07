@@ -58,12 +58,11 @@ governance:                    # 治理闸:leaf 工具过闸 classify→critical
   max_medium_risk: 200
   # goal_required_for: []      # 留空=不启用 goal 门(goal_declare 工具未交付,见 gate.go A7)
 
-evolution:                     # 自进化:refine(仅entry)propose/diff/status/rollback(无activate)→发布道裁决
-  enabled: true
-  dir: data/evolution          # 不可变 bundles + releases.jsonl 发布历史(持久化)
-  skip_approval: false         # false=慢道需人工批准(保守);true=跳过(仅实验)
-  protected_prompts: [SOUL.md, AGENTS.md]   # 改动强制走慢道(核心人格不可快道自动生效)
-  canary_hold_seconds: 0
+evolution:                     # git 原生自进化:文件即真源(热重载)+git 版本层+建议式评估
+  enabled: true                # 裁决:example 演示完整自迭代特性。⚠ 生产=独立部署仓;
+                               # 在源码仓内跑 bot,refine register 的改进 commit 会落入源码仓,自担
+  # protected_paths: ["resources/prompts/**", "skills/**", "scripts/**"]   # register 受控清单(默认即此三目录)
+  # judge_delay_seconds: 1800  # register 后评估延迟窗(0=立即;建议≥30m 收集 feedback 样本)
   # judge_min_samples/judge_pass_threshold/judge_timeout_seconds 省略走默认(5 / 0.5 / 60s)
 
 reliability:                   # 常驻可靠性:不丢事件+退化可观测+重启稳定(per-agent 隔离;各 dir 空则回退内存/channel)

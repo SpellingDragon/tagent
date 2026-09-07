@@ -145,11 +145,8 @@ type Config struct {
 	// 现状零行为变化）。开启后经 GovernanceGate 对工具调用做风险分级 + 预算 + goal + critical 批准。
 	Governance GovernanceConfig `json:"governance,omitempty" yaml:"governance,omitempty"`
 
-	// Evolution 配置热配置自进化（TC0/T-EVO）。默认零值 = 关闭（Enabled=false → 用静态
-	// 提示词文件，现状）。开启后**提示词**经不可变 Bundle + 风险分级发布道治理，回合边界生效。
-	// （M12 §8.4 宣称收窄：bundle schema 亦含 params/model 字段 = 存储就绪，但运行期应用点当前
-	// 仅提示词——VersionedSource 只应用 prompts、refine 提案字段白名单只含 prompts；参数/模型
-	// 热切换的运行期应用为后续增强，DiffLaneRouter 的模型/参数分支对 refine 提案暂不可达。）
+	// Evolution 配置 git 原生自进化（self-evolution-git-native）。默认零值 = 关闭（现状）。
+	// 开启后文件即真源（热重载直生效）+ refine register 登记（[self-improve] commit+评估窗口）。
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
 
 	// Reliability 配置常驻可靠性（T-G）。默认零值 = 关闭（纯 channel bus，现状）。
@@ -171,18 +168,19 @@ type GovernanceConfig struct {
 	// 此前的 RequireApproval 是从未被读取的死字段(A5:全仓仅定义处出现),已删除。
 }
 
-// EvolutionConfig 是 TC0/T-EVO 热配置自进化的配置（映射到 evolution.BundleStore + ReleaseManager）。
+// EvolutionConfig 是 git 原生自进化配置（self-evolution-git-native：bundle/发布道已退役，
+// 文件即真源+git 版本层+建议式评估）。
 type EvolutionConfig struct {
-	Enabled           bool     `json:"enabled" yaml:"enabled"`
-	Dir               string   `json:"dir,omitempty" yaml:"dir,omitempty"`                                 // bundle 存储目录(默认 data/evolution)
-	SkipApproval      bool     `json:"skip_approval,omitempty" yaml:"skip_approval,omitempty"`             // 跳过慢道人工批准门(默认false=需批准,保守;反义字段使Go零值安全)
-	ProtectedPrompts  []string `json:"protected_prompts,omitempty" yaml:"protected_prompts,omitempty"`     // 受保护提示词(改动强制慢道)
-	CanaryHoldSeconds int      `json:"canary_hold_seconds,omitempty" yaml:"canary_hold_seconds,omitempty"` // canary 激活后到后验评估的观察窗(默认0=立即)
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// ProtectedPaths 是 refine register 的受控路径 patterns（段匹配：`**` 任意段序列/`*` 段内通配）。
+	// 默认三目录：resources/prompts/**, skills/**, scripts/**（scripts 缺失则冥想脚本产物断链）。
+	ProtectedPaths []string `json:"protected_paths,omitempty" yaml:"protected_paths,omitempty"`
+	// JudgeDelaySeconds 是 register 后到评估的延迟窗（原 canary_hold 语义，W4 迁移；0=立即）。
+	JudgeDelaySeconds int `json:"judge_delay_seconds,omitempty" yaml:"judge_delay_seconds,omitempty"`
 
-	// 后验 LLM-judge 参数（M8 §8.4：此前硬编码于 tagent.go，运维不可调）。零值走 judge 内部
-	// 默认（minSamples=5 / threshold=0.5 / timeout=60s），故省略即现状默认，向后安全。
+	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
 	JudgeMinSamples     int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
-	JudgePassThreshold  float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化回滚)
+	JudgePassThreshold  float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
 	JudgeTimeoutSeconds int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
 }
 

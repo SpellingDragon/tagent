@@ -25,6 +25,27 @@ import (
 // evolution 直接引用 event 常量（C4：消除此前复制 "denial"/"approval" 字面量的静默漂移风险，
 // 漂移会使 DenialCount 归零、MetricGuardrail 永不 breach、快道确定性回滚防线失效）。
 
+// ==================== 评估契约（self-evolution-git-native：随发布道退役自 release.go 迁入）====================
+
+// EvalResult 是后验评估结果。
+type EvalResult struct {
+	Score  float64
+	Pass   bool
+	Reason string
+}
+
+// Evaluator 是后验评估器：对一个改进窗口（key=commit sha）的实际表现打分。
+// nil = 跳过 judge（仅 guardrail）。
+type Evaluator interface {
+	Evaluate(ctx context.Context, key string) (EvalResult, error)
+}
+
+// Guardrail 是确定性指标闸：breach 即劣化信号。nil = 不监控。
+// （git-native 后输出为建议式 evaluation 事件——P4 框架不动手。）
+type Guardrail interface {
+	Breach(key string) (breached bool, reason string)
+}
+
 // Evidence 是 canary 期间的表现证据（后验评估/Guardrail 的输入）。
 type Evidence struct {
 	BundleID      string `json:"bundle_id"`

@@ -45,9 +45,22 @@ graph TB
 
 全部 agent 的非 wrapper leaf 工具经 GovernanceTool 过闸：`classify → critical 批准 → goal → budget → 记账`。critical 未批准 → deny+Hold（外部落盘 `approvals/<id>.json` 即生效，Check 节流重扫目录）；预算滑窗按 agent 独立持久化；审计事件（DenialLedger）共享单实例、写 entry memStore 治理分区（durable）。`enforcement: warn` 只记账放行，`strict` 拒绝。
 
-## 五、自进化（evolution）
+## 五、自进化（evolution · git 原生）
 
-refine 工具是 agent 的自我修改通道：**propose/diff/status/rollback 四 op，永无 activate**——激活只能经 ReleaseManager 发布道。DiffLaneRouter 按 diff 路由：仅提示词 → 快道（validate→canary→后验评估）；模型/参数/protected → 慢道（加人工批准门）。后验评估以 bundle **激活时刻**为证据窗起点（ActivationLog），MetricGuardrail 确定性闸 + LLMJudge 模型决策双回滚；judge 不可用/样本不足一律保守通过（不误回滚）。发布历史持久化 `releases.jsonl`，rollback 白名单 = 曾 Stage=active 的版本（含基线 seed）。
+> self-evolution-git-native（设计返工，2026-09-07）：bundle 快照/发布道已退役——违反哲学四原则
+> （文件即真源/复用 git/默认自迭代/信号建议式）。
+
+自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。
+refine 三 op：**register**（产物落盘后登记：`[self-improve]` 标记 commit（仅 add 显式受控路径，
+默认 `resources/prompts/**`,`skills/**`,`scripts/**`）+ improvement 事件即评估窗口锚）/
+**status**（git log 过滤 + 窗口结论四态 join + 未登记产物提醒）/ **rollback**（安全 revert：
+仅改进标记 commit，防误 revert 用户提交；回滚是终态不再评估）。后验评估：register 后
+`judge_delay` 到期 guardrail（确定性）+ LLMJudge（质性）各评估一次，**劣化只写 evaluation 事件**
+（verdict+证据+`refine rollback <sha>` 建议文案）——经冥想 digest/召回渗透，框架永不动手 revert；
+样本不足显示「insufficient」不冒充健康。版本章：事件 Metadata 的 bundle_id 值=最新 improvement
+的 commit sha（guardrail/feedback 沿因果边精确 join，缓存=性能层、事件=真源）。git 双轨台账：
+git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制面）。
+⚠ 生产部署=独立 clone 部署仓；在源码仓内跑 example，改进 commit 会落入源码仓。
 
 ## 六、常驻可靠性（reliability）
 

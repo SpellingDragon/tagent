@@ -88,10 +88,10 @@ type runtimeConfig struct {
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *rl.TrajectoryRecorder
 
-	// evolution (TC0/T-EVO)：热配置自进化运行时，cfg.Evolution.Enabled 时构造，跨 agent 共享。
-	// evoStore 存不可变 bundle（内容寻址 + 原子 active 指针）；evoRelease 是风险分级发布状态机。
-	evoStore   *evolution.BundleStore
-	evoRelease *evolution.ReleaseManager
+	// evolution (self-evolution-git-native)：git 原生自进化装配单元（配置门控，默认关）。
+	// 文件即真源（热重载直生效）+ git 版本层（commit/revert/log）+ 建议式评估（judge/guardrail
+	// 只产 evaluation 事件，P4 框架不动手）。judge/guard 在 buildAgent 经 BindRuntime 延迟绑定。
+	evoGit *evolution.GitEvolution
 
 	// governance (T-G)：治理闸运行时，cfg.Governance.Enabled 时构造，跨 agent 共享。
 	// govGate 对 entry agent 的 leaf 工具调用做风险分级 + 预算 + goal + critical 批准。
@@ -226,36 +226,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 	}
 
-	// T-EVO/TC0: 热配置自进化运行时（配置门控，默认关闭 → 现状零行为变化）。
-	// 构造共享 BundleStore + 风险分级发布状态机；entry agent 的系统提示词经 VersionedSource
-	// 从 active bundle 读，refine 工具让 agent 提案（经发布道裁决，无直接激活权）。
+	// evolution (self-evolution-git-native)：git 原生自进化（配置门控，默认关 → 零行为变化）。
+	// 文件即真源+git 版本层；启动自检 git 仓（Warn 不阻断——非仓下改文件仍生效，无留痕/评估）。
 	if cfg.Evolution.Enabled {
-		dir := cfg.Evolution.Dir
-		if dir == "" {
-			dir = "data/evolution"
-		}
-		store, eerr := evolution.NewBundleStore(dir)
-		if eerr != nil {
-			return nil, fmt.Errorf("tagent: init evolution bundle store: %w", eerr)
-		}
-		rm, eerr := evolution.NewReleaseManager(evolution.ReleaseDeps{
-			Store:  store,
-			Router: evolution.NewDiffLaneRouter(), // 按 diff 路由：模型/参数→慢道，仅提示词→快道
-			// Gate 四槽留 nil（runGate：nil→通过；replay/shadow cassette 门待交付，见 review S2）。
-			// Evaluator(LLM-judge)/Guardrail(指标闸) 于 buildAgent 阶段经 BindPosterior 绑定
-			// （需 entry agent 的 model + memStore，故延迟到 New 之后——见下方 buildAgent 接线）。
-			Config: evolution.ReleaseConfig{
-				SkipApprovalGate: cfg.Evolution.SkipApproval, // 反义:config skip_approval 默认false→需批准门(保守)
-				ProtectedPrompts: cfg.Evolution.ProtectedPrompts,
-				CanaryHoldMs:     int64(cfg.Evolution.CanaryHoldSeconds) * 1000,
-			},
+		rc.evoGit = evolution.NewGitEvolution(evolution.GitEvolutionConfig{
+			WorkDir:        "", // 运行 cwd
+			ProtectedPaths: cfg.Evolution.ProtectedPaths,
+			JudgeDelay:     time.Duration(cfg.Evolution.JudgeDelaySeconds) * time.Second,
 		})
-		if eerr != nil {
-			return nil, fmt.Errorf("tagent: init evolution release manager: %w", eerr)
+		if !rc.evoGit.IsRepo() {
+			log.Warnf("[tagent] evolution enabled but cwd is not a git repo — improvements will take effect (hot-reload) but have no git trail/evaluation")
 		}
-		rc.evoStore = store
-		rc.evoRelease = rm
-		log.Infof("[tagent] evolution enabled: bundle store at %s (hot-config self-evolution)", dir)
 	}
 
 	// T-G: 治理闸运行时（配置门控，默认关闭 → 全放行，现状零行为变化）。构造 Budget/Approval/
@@ -421,42 +402,21 @@ func buildAgent(
 	if !acfg.SystemPrompt.IsEmpty() {
 		systemPromptSource = prompt.NewSource(loader, acfg.SystemPrompt)
 	}
-	// T-EVO/TC0: entry agent 系统提示词经 VersionedSource 从 active bundle 读（回合边界生效，
-	// 热配置）。首次无 active bundle 时用静态提示词初始化基线（幂等）。配置门控（rc.evoStore
-	// != nil 且 name == cfg.Entry）；非 entry agent 或未启用则原样（现状逐字节不变）。
-	if rc.evoStore != nil && name == cfg.Entry {
-		if rc.evoStore.Active() == nil && systemPrompt != "" {
-			if base, ierr := rc.evoStore.InitBaseline(
-				map[string]string{"system": systemPrompt}, evolution.BundleParams{}, evolution.ModelRef{},
-			); ierr != nil {
-				log.Warnf("[tagent] evolution init baseline failed: %v", ierr)
-			} else if rc.evoRelease != nil && base != nil {
-				// N1（§8.9）：基线经 InitBaseline 直接激活不走 Submit，须显式 seed 到发布历史，
-				// 否则 wasActive 白名单不含基线 → refine rollback 到基线恒被拒（E1 后遗症）。
-				rc.evoRelease.NoteActive(base.ID, "baseline init")
-			}
-		}
-		if rc.evoStore.Active() != nil {
-			systemPromptSource = evolution.NewVersionedSource(
-				evolution.NewBundleProvider(rc.evoStore), "system", systemPromptSource,
-			)
-		}
-		// T-EVO 后验评估闭环：绑定 LLM-judge（模型决策回滚）+ MetricGuardrail（确定性指标闸）
-		// 到发布状态机。EvidenceSource 从 entry memStore 收集 canary 证据（治理拒绝率/critical
-		// 率/事件量），故延迟到 memStore 就绪后绑定。judge 复用主 model。
-		if rc.evoRelease != nil {
-			evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
-			// W4（§8.3）：共享 ReleaseManager 的激活时刻表，使后验评估窗口以 bundle 激活时刻为
-			// 起点——否则 CanaryHold=0「激活即评估」时固定回看窗全是旧 bundle 数据，judge 对新
-			// bundle 无判别力，"劣化即回滚"形同虚设。
-			evSrc.SetActivationLog(rc.evoRelease.ActivationLog())
-			rc.evoRelease.BindPosterior(
-				evolution.NewLLMJudgeEvaluator(rc.model, evSrc,
-					cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
-					time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second), // M8：参数配置化(零值走 judge 内部默认)
-				evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),
-			)
-		}
+	// evolution (self-evolution-git-native)：**系统提示词回归文件直读（mtime 热重载）**——
+	// bundle 快照遮蔽层（VersionedSource）已随发布道退役（P2：文件即真源）。
+	// 后验评估闭环：judge+guardrail 经 BindRuntime 绑定到 GitEvolution（同点位换接，
+	// memStore 就绪时序保持——S3）；评估窗口锚=register 时刻（improvement 事件，W4 迁移），
+	// 判定只产 evaluation 事件（建议式，P4）。
+	if rc.evoGit != nil && name == cfg.Entry {
+		evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
+		evSrc.SetActivationLog(rc.evoGit.Log())
+		rc.evoGit.BindRuntime(
+			memStore, memory.PartitionIDFromName(name),
+			evolution.NewLLMJudgeEvaluator(rc.model, evSrc,
+				cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
+				time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second), // M8：零值走 judge 内部默认
+			evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),
+		)
 	}
 
 	// 3. Resolve model — per-agent override supported
@@ -542,8 +502,11 @@ func buildAgent(
 	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
 	// 仅 entry agent 且 evolution 启用时注册。**先于治理包裹追加**（A3：refine 是最高权限通道，
 	// rollback 直接切换 active bundle 绕过发布道评估，必须过治理闸；DefaultRules 有 refine 规则）。
-	if rc.evoStore != nil && name == cfg.Entry {
-		tools = append(tools, evolution.NewRefineTool(rc.evoStore, rc.evoRelease))
+	// evolution: git 原生 refine 工具（register/status/rollback）——仅 entry agent 且
+	// evolution 启用时注册。**先于治理包裹追加**（A3：refine 是最高权限通道，rollback 改
+	// 受控产物必须过治理闸；DefaultRules 有 refine 规则）。
+	if rc.evoGit != nil && name == cfg.Entry {
+		tools = append(tools, evolution.NewRefineTool(rc.evoGit))
 	}
 
 	// 5.1（design-report-closeout）：治理面工具五件套（goal_declare/goal_list/
@@ -699,17 +662,14 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
 	}
 
-	// D1-B（design-report-closeout）：entry agent 双持久化路径盖 bundle_id 章——
-	// 事件归属精确到 active bundle 版本（guardrail/feedback join 键）。evolution
-	// 未启用或无 active bundle 时 fn 返回空串，不写键（行为不变）。
-	if rc.evoStore != nil && name == cfg.Entry {
-		evoStore := rc.evoStore
-		ta.SetBundleIDProvider(func() string {
-			if b := evoStore.Active(); b != nil {
-				return b.ID
-			}
-			return ""
-		})
+	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
+	// 事件归属精确到**最新 improvement 的 commit sha**（guardrail/feedback join 键；键名
+	// MetaKeyBundleID 保留，8.4 继承机制不变）。无改进事件时返回空串不盖章（退化时间窗 join）。
+	if rc.evoGit != nil && name == cfg.Entry {
+		evoGit := rc.evoGit
+		ta.SetBundleIDProvider(evoGit.LatestSha)
+		// K4：评估 goroutine 生命周期挂 entry agent shutdown（Stop 收敛+waitgroup）。
+		ta.RegisterCloser(stopCloser(evoGit.Stop))
 	}
 
 	// 3.3（design-report-closeout）：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
@@ -1480,3 +1440,8 @@ func wrapCapacityOnly(store memory.MemoryStore, onStoreEvent func(int64, int, st
 	}
 	return bridge
 }
+
+// stopCloser 适配 func() → agent.Closer（K4：GitEvolution.Stop 挂 shutdown 链）。
+type stopCloser func()
+
+func (f stopCloser) Close() error { f(); return nil }
