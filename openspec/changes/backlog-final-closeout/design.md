@@ -48,7 +48,25 @@ tag v0.1.0:CHANGELOG.md 核对返工条目→`git tag -a v0.1.0 -m "..."`→push
 | long-poll 占用 handler | 超时上限 30s+单飞(队列消费即返) |
 | evals 引入 LLM 依赖 | mock 可跑进 CI;真实 LLM 项 opt-in(tests 短跳机制同款) |
 
-## 6. 决策记录
+
+## 7. 隐蔽问题预判(C 系,2026-09-07 细化,现状已验证)
+
+**C1 · TurnCount 类型名臆造(M4)**:设计中「TypeTurnStart 计数」——event 包**无此类型**(已验证)。修正:TurnTracker 基于现有类型计数(窗口内 TypeExternalInput 即用户输入型,实施时以 registry 实名为准)。**联动机会**:现 TurnCount=「窗口内全事件数」(eval.go L52),neg_fb_rate 分母被稀释(已知限制⑥)——M4 顺手把口径修为真实 turn 数,guardrail 判据可达性质变。
+
+**C2 · AddChannel 装配面缺失(R5)**:AddChannel 调用点在 New() 内部(tagent.go L687,框架自注入 inject channel)——**example 无法追加**。需新暴露面:最小=TagentAgent.AddApprovalChannel passthrough(或 WithApprovalChannel option);实施选 passthrough(运行期可加,与「装配期」注释语义放宽需同步改注释)。
+
+**C3 · MemStore 层级(R2)**:诊断需读装饰链顶层(ETS 才有 wal_quarantined)——ta.MemStore() 返回 ta.memStore,其层级=buildAgent 注入时的变量(应为顶层);实施时以 TestDiagnostics_WALQuarantinedThroughChain 同构断言验证,若非顶层则装配处换顶 层引用。
+
+**C4 · 溢出票据自带取回指引(R3)**:登记事件只解决「recall 可达」;agent 取全文还需知道「怎么取」——**票据文本(投 outputCh 的摘要)与事件 Content 均须含行动指引**(「全文已存 <path>,可 exec cat 取回」),否则 agent 见票据不会动作。
+
+**C5 · Bad Case 是 fail-first 探针(2.3)**:hex 断裂用例断言「显式拒绝」——**现状未必满足**(若 recall 现为静默空,该 eval 首跑即红,揭示真 bug)——预期内:落地时按红灯修 recall 的畸形 key 校验,eval 转绿即资产化完成。
+
+**C6 · 契约 prompt 属受控路径(M1)**:plan/knowledge prompt 改动落在 resources/prompts/**——CI 里 evals 触发压缩/断言不涉及 git,无污染;但**开发者本地改契约 prompt 要走 refine register**(新哲学),evals README 注明。
+
+**C7 · long-poll 队列重启丢失(M4)**:pending 队列内存态,重启清空——声明「接受丢失」(拉取方语义:wait 是增量通知,recent 全量靠事件库直查;不为此加持久层)。
+
+**C8 · evals 进 CI 的 short 语义(2.x)**:go test ./... 会收 evals 包——mock 项常跑、真实 LLM 项以 key 缺失跳过(tests/ 同款);票据 eval 的压缩触发**直接调用 Compactor API**(不等自然 token 超阈——黑盒等待在 CI 不稳定)。
+\n## 6. 决策记录
 
 | 决策 | 裁定 |
 |---|---|
