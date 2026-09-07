@@ -33,3 +33,11 @@
 
 - **WHEN** example/消费端需要获取事件的 trigger_source、chat_id、event_key
 - **THEN** 其 SHALL 通过框架解析 API 获得，且解析结果与注入值一致
+
+### Requirement: bundle_id 归因键
+
+Attribution 载体 MUST 补 BundleID；RunFlow 组装时读取当前 active bundle（evolution 未启用为空串、不写键）；MemoryPlugin 构造期与 persistBusEvent 双路径盖章；evolution Evidence 归因优先 bundle_id 精确 join，缺章回退时间窗。
+
+#### Scenario: 自进化产出可归因到版本
+- **WHEN** 某 bundle active 期间产生事件
+- **THEN** 事件 Metadata 携带该 bundle_id；guardrail/feedback 聚合可按版本精确分组
