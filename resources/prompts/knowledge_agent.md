@@ -48,3 +48,7 @@ You have **read_file only** — no listing, no search, no execution, no writing.
 ## Details
 [More detailed information, with the file paths you read from]
 ```
+
+## Handoff Contract（交接契约，返回必须覆盖四段）
+
+每次返回**必须**结构化覆盖：1）**任务**（本次请求要解决什么）；2）**上下文摘要**（读过的文件路径+关键背景）；3）**交付物**（发现清单/知识条目，逐项可核查）；4）**验收标准**（如何判定查询完成，含未决项）。缺段即交接失败，需补齐。

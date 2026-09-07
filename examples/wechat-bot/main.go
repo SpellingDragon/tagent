@@ -151,6 +151,7 @@ func main() {
 	//   swap the LLM endpoint at runtime.
 	// Other agents with model/provider fields are resolved internally by tagent.New()
 	// via the provider.Model() factory (supports multi-vendor: openai/anthropic/gemini/etc).
+	var approvalCh *wechatApprovalChannel
 	opts := []tagent.Option{
 		tagent.WithModel(globalModel),
 		tagent.WithSummaryModel(globalModel),
@@ -158,6 +159,11 @@ func main() {
 			tagentCfg.Entry: swappableModel,
 		}),
 		tagent.WithSkillRepo(skillRepo),
+	}
+	// R5：审批直投通道（目标=首个 approver；未配置白名单则不装配——安全默认）。
+	if n := len(wechatCfg.Approvers); n > 0 {
+		approvalCh = &wechatApprovalChannel{to: wechatCfg.Approvers[0]}
+		opts = append(opts, tagent.WithApprovalChannel(approvalCh))
 	}
 
 	ta, err := tagent.New(*tagentCfg, opts...)
@@ -241,6 +247,9 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 	bot := wechat.NewBot(wechat.WithLogger(slogLogger))
+	if approvalCh != nil {
+		approvalCh.SetBot(bot)
+	}
 
 	// 9. Login
 	fmt.Println("Logging in to WeChat...")
@@ -591,6 +600,36 @@ type WechatAppConfig struct {
 	// 空 = 消息通道批准关闭（安全默认——digest 随请求明文送达，任意可达者可批准），
 	// 批准仅经 CLI（wechat-bot approve <digest>）。
 	Approvers []string `json:"approvers,omitempty"`
+}
+
+// wechatApprovalChannel（R5 backlog-final-closeout）：审批请求直投微信（不经 agent
+// 转述）。晚绑定 bot（构造时序：ta 先于 bot），SetBot 后可用。
+type wechatApprovalChannel struct {
+	mu  sync.Mutex
+	bot *wechat.Bot
+	to  string // 投递目标 = 首个 approver
+}
+
+func (c *wechatApprovalChannel) SetBot(b *wechat.Bot) {
+	c.mu.Lock()
+	c.bot = b
+	c.mu.Unlock()
+}
+
+func (c *wechatApprovalChannel) Deliver(req *governance.ApprovalRequest) error {
+	c.mu.Lock()
+	b := c.bot
+	c.mu.Unlock()
+	if b == nil {
+		return fmt.Errorf("wechat bot not ready")
+	}
+	d := req.ArgsDigest
+	if len(d) > 8 {
+		d = d[:8]
+	}
+	text := fmt.Sprintf("⚠ 审批请求（tool=%s）\ndigest: %s\n批准回复: approve %s ｜ 拒绝: reject %s",
+		req.ToolName, d, d, d)
+	return b.SendTextToUser(context.Background(), c.to, text)
 }
 
 // IsApprover reports whether the user id may approve via the message

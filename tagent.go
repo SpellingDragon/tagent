@@ -93,6 +93,9 @@ type runtimeConfig struct {
 	// 只产 evaluation 事件，P4 框架不动手）。judge/guard 在 buildAgent 经 BindRuntime 延迟绑定。
 	evoGit *evolution.GitEvolution
 
+	// approvalChannels（R5）：外部审批送达通道（WithApprovalChannel 注入，govGate 构造后注册）。
+	approvalChannels []governance.ApprovalChannel
+
 	// governance (T-G)：治理闸运行时，cfg.Governance.Enabled 时构造，跨 agent 共享。
 	// govGate 对 entry agent 的 leaf 工具调用做风险分级 + 预算 + goal + critical 批准。
 	govGate *governance.GovernanceGate
@@ -133,6 +136,15 @@ var (
 // This is the default model; individual agents can override via AgentConfig.Model.
 func WithModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.model = m }
+}
+
+// WithApprovalChannel 注入外部审批送达通道（R5 backlog-final-closeout）——审批请求经
+// Deliver 渠道直投（如微信 SendTextToUser），不依赖 agent 转述。evolution/governance
+// 未启用时为 no-op。可多次调用（多通道尽力投递）。
+func WithApprovalChannel(ch governance.ApprovalChannel) Option {
+	return func(rc *runtimeConfig) {
+		rc.approvalChannels = append(rc.approvalChannels, ch)
+	}
 }
 
 // WithSkillRepo sets the skill repository for knowledge agent.
@@ -685,6 +697,10 @@ func buildAgent(
 	// 送达用户）。Deliver 失败不阻塞门——pending 文件已落盘，CLI/文件批准始终可用。
 	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil {
 		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
+		// R5：外部审批直投通道（example/宿主经 WithApprovalChannel 注入）。
+		for _, ch := range rc.approvalChannels {
+			rc.govGate.Approval().AddChannel(ch)
+		}
 	}
 
 	// 4.2（design-report-closeout）：容量 hint 回填——渗透消息进事件循环（建议式：

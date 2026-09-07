@@ -49,7 +49,7 @@ type Guardrail interface {
 // Evidence 是 canary 期间的表现证据（后验评估/Guardrail 的输入）。
 type Evidence struct {
 	BundleID      string `json:"bundle_id"`
-	TurnCount     int    `json:"turn_count"`     // 窗口内事件数（近似活动量）
+	TurnCount     int    `json:"turn_count"`     // 窗口内真实 turn 数（用户输入型事件；C1 口径修正）
 	DenialCount   int    `json:"denial_count"`   // 治理拒绝数（行为变差信号：agent 频试危险操作）
 	CriticalCount int    `json:"critical_count"` // critical 挂起数
 	NegFeedback   int    `json:"neg_feedback"`   // negative feedback 数（D1 design-report-closeout：任务成败/用户反馈负评）
@@ -190,7 +190,12 @@ func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evi
 		if bid, ok := e.Metadata[event.MetaKeyBundleID]; ok && bid != bundleID {
 			continue
 		}
-		ev.TurnCount++
+		// C1（backlog-final-closeout）：TurnCount 口径修正——真实 turn 边界
+		//（用户输入型），不再计全事件数；neg_fb/denial/critical 分母随之质变
+		//（原「全事件数」稀释判据可达性，见定位答案文档已知限制⑥）。
+		if e.EventType == event.TypeExternalInput {
+			ev.TurnCount++
+		}
 		if e.EventType == event.TypeGovernance {
 			switch e.Metadata[event.MetaKeySubtype] {
 			case event.SubtypeDenial:

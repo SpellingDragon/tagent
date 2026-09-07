@@ -111,8 +111,10 @@ func TestStoreEvidenceSource_Collect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if ev.TurnCount != 8 {
-		t.Fatalf("应统计 8 事件, got %d", ev.TurnCount)
+	if ev.TurnCount != 5 {
+		// C1（backlog-final-closeout）口径修正：TurnCount 只计真实 turn 边界
+		//（ExternalInput 5 条），governance 不再计入分母。
+		t.Fatalf("新口径应统计 5 turn, got %d", ev.TurnCount)
 	}
 	if ev.DenialCount != 3 {
 		t.Fatalf("应 3 denial, got %d", ev.DenialCount)

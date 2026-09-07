@@ -1,0 +1,6 @@
+# 票据可召回率 suite(声明式元数据;执行体=evals_test.go TestSuite_TicketRecall_Roundtrip)
+name: ticket-recall
+capability: memory
+component: compress + recall
+assertion: 全部卡片 key 经票据取回原文(成功率必须 100%——记忆命脉)
+ci: true

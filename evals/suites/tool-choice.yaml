@@ -1,0 +1,6 @@
+# 工具选择 suite(骨架:mock model 注入期望 tool_calls,断言注册表路由)
+name: tool-choice
+capability: tool
+component: registry routing
+assertion: 场景→期望工具命中(mock model 注入)
+ci: true

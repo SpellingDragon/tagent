@@ -375,6 +375,7 @@ graph TB
 ```bash
 go build ./... && go vet ./...         # 构建 + 静态检查
 go test ./... -short                   # 测试（CI 同款：short + 新子系统 -race，见 .github/workflows/ci.yml）
+go test ./evals/                       # 组件级行为评估（票据可召回率/工具选择/Bad Case 资产）
 bash scripts/race_check.sh             # race 门禁（本地全量）
 cd examples/wechat-bot && go run .     # 运行示例
 ```

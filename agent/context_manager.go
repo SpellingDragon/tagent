@@ -475,7 +475,11 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		Timestamp:    evt.Timestamp.UnixMilli(),
 		Role:         string(msg.Role),
 	}
-	cm.projection.Append(ref)
+	// R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
+	// 裸 cm 时不崩溃（零值鲁棒性；主路径恒有投影，行为不变）。
+	if cm.projection != nil {
+		cm.projection.Append(ref)
+	}
 
 	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
 	// 确定性 settle 裁决自动绑定 feedback（parent=task_settled 事件自身：结算记录

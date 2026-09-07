@@ -48,6 +48,8 @@ flowchart TD
 
 使用 recall 工具回顾自上次冥想以来的事件。传入描述性请求，例如：
 - "回顾自 {上次冥想时间} 以来的所有事件"
+- **负反馈优先**：回顾含 feedback 事件（任务失败 negative/用户不满）——失败教训是
+  最高价值的反思素材，逐条归因到痛点
 - "获取最近 50 条事件"
 - 若需特定类型（如只看 action_command / external_input），追加一次按类型过滤的 recall
 
@@ -98,7 +100,11 @@ recall 会返回事件的摘要和关键信息。
 - 直接优化：`resources/prompts/` 下的 AGENTS.md / SOUL.md / TOOLS.md / USER.md，或本 meditation.md
   （文件即真源——热重载即时生效）。改完必须 `refine register` 登记留痕。
 
-**产物纪律**：
+**产物纪律（登记前 critic 自检——不过则回炉，不得 register）**：
+- [ ] **可运行**：脚本能跑通 / skill 步骤完整可循 / prompt 语义清晰？
+- [ ] **位置对**：落在约定目录（scripts/、skills/<name>/、resources/prompts/）？
+- [ ] **可核查**：下轮冥想能凭本条验证采用与效果？
+- 任意一条不过 → 回炉修正后再登记；带病登记会污染台账。
 - 每个高优痛点至少对应一个产物；产物要**具体、可运行、可复用**，不空泛。
 - 写完后简要自验（如脚本跑通、skill 结构完整、prompt 改动语义清晰）。
 

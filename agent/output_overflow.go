@@ -62,6 +62,8 @@ func overflowTicket(evt *event.Event, path string) *event.Event {
 		if len(c) > overflowTicketHead+overflowTicketTail {
 			msg.Content = c[:overflowTicketHead] + "\n...[output stalled, full content persisted]...\n" + c[len(c)-overflowTicketTail:]
 		}
+		// C4：票据自带取回指引——agent 见票据即知道全文位置与取回方式。
+		msg.Content += fmt.Sprintf("\n[全文已存 %s，可 exec cat 取回]", path)
 	}
 	ticket.StateDelta["output_overflow_path"] = []byte(path)
 	return ticket
@@ -100,6 +102,17 @@ func (cm *ContextManager) deliverEvent(ctx context.Context, evt *event.Event) bo
 		log.Warnf("[RunFlow] outputCh stalled >%s; full event persisted to %s (retrievable via read_file)", outputSendGrace, path)
 		// Non-blocking ticket: if the consumer is still stalled, the ticket
 		// is skipped too — the file is the durable record either way.
+		// R3（backlog-final-closeout）：溢出登记事件——recall 可达（票据只到 UI，
+		// agent 侧凭本事件知道全文在哪、怎么取）。尽力而为：写失败仅日志。
+		cm.persistBusEvent(&AgentEvent{
+			ID:        fmt.Sprintf("overflow-%d", time.Now().UnixNano()),
+			Type:      "external_input",
+			Timestamp: time.Now(),
+			Message: &model.Message{
+				Role:    model.RoleUser,
+				Content: fmt.Sprintf("溢出全文已存 %s（可 exec cat 取回）", path),
+			},
+		})
 		select {
 		case cm.outputCh <- overflowTicket(evt, path):
 		default:

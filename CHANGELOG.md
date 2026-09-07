@@ -6,7 +6,19 @@
 
 ## [Unreleased]
 
+### Changed（设计返工，self-evolution-git-native 2026-09-07）
+
+- **变更控制特性整体返工为 git 原生**（维护者裁定：原 bundle/发布道设计违反哲学四原则——文件即真源/复用 git/默认自迭代/信号建议式）：
+  - **退役**：BundleStore（不可变快照）、VersionedSource（prompt 遮蔽层）、ReleaseManager 发布状态机（Lane/Stage/审批门/ProtectedPrompts/预算 Gate）、refine propose/diff——文件回归唯一真源（mtime 热重载直生效），改进 commit 以 `[self-improve]` 标记进 git。
+  - **新增**：refine register/status/rollback 三 op（受控路径约束/结构化 commit/安全 revert 仅限改进标记）；GET /feedback/wait long-poll（AReaL 拉取）；improvement/evaluation 事件双轨台账；后验评估锚迁移至登记 commit 时刻；劣化**只出建议**（P4，框架永不动手 revert）。
+  - **保留**：judge/guardrail/证据链（口径修正：TurnCount=真实 turn 数，原全事件数稀释判据可达性）；feedback 因果边 join（版本章=最新 improvement sha，键名兼容）。
+
 ### Added
+
+- **evals 组件级行为评估**：evals/ 一等目录（票据可召回率 suite/工具选择 suite/Bad Case 资产化——tests/README「静默存活多日」教训转回归）。
+- **诊断快照消费面**：GET /diagnostics（DiagnosticsSnapshot JSON，含 wal_quarantined——F3 隔离计数经装饰链可达）。
+- **溢出票据取回指引**：票据与登记事件均含「可 exec cat 取回」行动指引（agent 侧可恢复溢出全文）。
+- **审批直投通道**：WithApprovalChannel option + example 装配（审批请求不经 agent 转述，直送微信）。
 
 - **混合语义召回（T-A）**：Embedder + InMemoryEngine（hybrid RRF 融合 / 分区隔离 / 异步嵌入
   worker）+ engineBridge 解耦缝（契约 C6：IndexBuilder+Retriever+io.Closer，引擎仅在组合根出现）

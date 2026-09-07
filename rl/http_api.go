@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"sync"
+	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -34,6 +37,14 @@ type HTTPAPI struct {
 	// POST /feedback — binds an external verdict to a produced event via the
 	// feedback causal edge. nil → 503 (endpoint disabled).
 	feedbackStore memory.MemoryStore
+	diagnosticsFn func() any
+
+	// fbMu/fbPending/fbNotify（3.3 backlog-final-closeout）：long-poll 反馈通道——
+	// POST /feedback 成功后入队+通知；GET /feedback/wait 阻塞至超时或新事件。
+	// 内存态重启清空=接受丢失（C7）；wait 是增量通知，全量靠事件库。
+	fbMu      sync.Mutex
+	fbPending []map[string]any
+	fbNotify  chan struct{}
 }
 
 // NewHTTPAPI creates a new HTTPAPI for the given agent.
@@ -49,6 +60,12 @@ func (h *HTTPAPI) SetModelUpdateFn(fn ModelUpdateFn) {
 	h.modelUpdateFn = fn
 }
 
+// SetDiagnosticsFn 注入诊断快照构造器（R2 backlog-final-closeout：诊断快照获得消费
+// 面——GET /diagnostics 输出 JSON）。fn 为 nil 时不注册端点（404）。
+func (h *HTTPAPI) SetDiagnosticsFn(fn func() any) {
+	h.diagnosticsFn = fn
+}
+
 // SetFeedbackStore enables POST /feedback (D1 design-report-closeout): the
 // store receives feedback events bound to produced events by hex event_key.
 func (h *HTTPAPI) SetFeedbackStore(store memory.MemoryStore) {
@@ -62,6 +79,33 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/task":
 		h.handlePostTask(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/diagnostics":
+		if h.diagnosticsFn == nil {
+			writeJSONError(w, http.StatusNotFound, "diagnostics_disabled", "diagnostics not wired")
+			return
+		}
+		writeJSON(w, http.StatusOK, h.diagnosticsFn())
+	case r.Method == http.MethodGet && r.URL.Path == "/feedback/wait":
+		// 3.3（backlog-final-closeout）：long-poll——阻塞至超时或新 feedback。
+		// 内存态队列重启清空=接受丢失（C7）；wait 是增量通知，全量靠事件库。
+		timeout := 30 * time.Second
+		if v := r.URL.Query().Get("timeout"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 && secs <= 30 {
+				timeout = time.Duration(secs) * time.Second
+			}
+		}
+		select {
+		case <-h.fbNotify:
+		case <-time.After(timeout):
+		}
+		h.fbMu.Lock()
+		pending := h.fbPending
+		h.fbPending = nil
+		h.fbMu.Unlock()
+		if pending == nil {
+			pending = []map[string]any{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": pending})
 	case r.Method == http.MethodPost && r.URL.Path == "/feedback":
 		h.handlePostFeedback(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
@@ -133,6 +177,22 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 		"status":       "bound",
 		"feedback_key": tagentevent.FormatEventKey(fbKey),
 	})
+	// 3.3（backlog-final-closeout）：成功登记 → 通知 long-poll 等待者并入队。
+	h.fbEnqueue(map[string]any{
+		"feedback_key": tagentevent.FormatEventKey(fbKey),
+		"parent":       req.EventKey, "verdict": req.Verdict, "source": "api",
+	})
+}
+
+// fbEnqueue（3.3）：feedback 成功入队并通知 long-poll 等待者（非阻塞，容量1）。
+func (h *HTTPAPI) fbEnqueue(item map[string]any) {
+	h.fbMu.Lock()
+	h.fbPending = append(h.fbPending, item)
+	h.fbMu.Unlock()
+	select {
+	case h.fbNotify <- struct{}{}:
+	default:
+	}
 }
 
 // taskRequest is the body for POST /task.
