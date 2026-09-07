@@ -132,7 +132,7 @@ func GitRevertSafe(dir, sha string) (string, error) {
 	}
 	out, err := gitCmd(dir, "revert", "--no-edit", sha)
 	if err != nil {
-		return out, fmt.Errorf("revert 冲突或失败（详情见输出，可自行处置后重试）: %w", err)
+		return out, fmt.Errorf("revert 冲突或失败（处置指引：`git revert --abort` 放弃本次回滚回到干净状态，或解决冲突后 `git revert --continue`;处置后可重试）: %w", err)
 	}
 	return out, nil
 }

@@ -157,7 +157,10 @@ func DefaultRules() []Rule {
 				if argsContains(c,
 					"rm -rf", "rm -fr", "rm -r -f", "rm -f -r", "rm --recursive", "mkfs", "dd if=", ":(){", "shutdown", "reboot",
 					"halt", "poweroff", "chmod -r 777", "> /dev/sda", "mv /* ",
-					"git push --force", "git push -f") {
+					"git push --force", "git push -f",
+					// G2（哲学审查补强）：git 历史毁灭性操作——reset --hard/checkout . /clean
+					// 会不可逆清除受控路径的未提交改进与工作区，与 rm -rf 同级。
+					"git reset --hard", "git checkout -- .", "git checkout .", "git clean -f", "git clean -fd") {
 					return true
 				}
 				// 下载并管道执行远程脚本（curl/wget ... | sh/bash）——精确检测，
