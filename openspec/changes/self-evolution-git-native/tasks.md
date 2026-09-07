@@ -9,13 +9,13 @@
 ## 2. GitRefine 核心(P3:git 原生改进通道)
 
 - [ ] 2.1 新建 `evolution/gitrefine.go`:**纯函数集(无状态)**——`IsRepo()`(启动自检 Warn)、`AddCommit(paths, note) → sha`(message `[self-improve] <note>`,仅 add 显式受控路径;**每命令 `-c user.email=tagent@local -c user.name=tagent` 防裸环境身份缺失**)、`LogFiltered(tag)`(**行首锚定 `^\[self-improve\]` 排除 Revert commit**)、`RevertSafe(sha)`(先验标记,冲突返回详情)——无组件、无状态、无生命周期
-- [ ] 2.2 受控路径校验:`MatchProtectedPaths(paths, patterns)`(**路径先相对运行 cwd 归一**——绝对/相对/workspace 相对三态均先 Rel+Clean 再 glob;越界拒绝并列出清单);单测:命中/越界/通配边界/三态路径
+- [ ] 2.2 受控路径校验:`MatchProtectedPaths(paths, patterns)`(**手写段匹配**——path.Match 不支持 `**`;pattern 按 `/` 分段,`**`=任意段序列,`*`=段内通配,~25 行零依赖;**路径先相对运行 cwd 归一**——绝对/相对/workspace 相对三态均先 Rel+Clean 再匹配;越界拒绝并列出清单);单测:命中/越界/通配边界/三态路径
 - [ ] 2.3 `Register`:校验→AddCommit→**写 improvement 事件即开窗口**(Content={sha,ts,paths,note};仿 memory/feedback.go 直写模式:FullEvent+StoreEvent+SnowflakeEventKey,不经 governance 包——evolution↛governance 红线);返回 sha+窗口提示;**自愈**:status 检测「git log 有标记 commit 但无事件」时按 commit 时间补提示
 - [ ] 2.4 git 回归(tempdir git 仓):register 产生带标记 commit 且不含工作区其他改动;非 git 仓返回明确错误;revert 拒绝非标记 commit;revert 冲突路径返回详情
 
 ## 3. refine 工具重写与装配
 
-- [ ] 3.1 重写 `evolution/refine.go`:op=register/status/rollback(jsonschema 参数:paths/note/sha);status=git log 过滤+窗口结论 join(结论四态:健康/劣化/**样本不足**/未到期——不足不得冒充健康)+「已回滚」识别+未登记产物提醒(受控路径 mtime > 最后登记时间);删除 propose/diff
+- [ ] 3.1 重写 `evolution/refine.go`:op=register/status/rollback(jsonschema 参数:paths/note/sha);register 含**空提交场景**(无改动→result「无改动可登记」,非 error);status=git log 过滤+窗口结论 join(结论四态:健康/劣化/**样本不足**/未到期)+「已回滚」识别+**双源漂移标注**(事件含 sha 但 git 无此 commit→「外部变更,窗口失效」;反向走 2.3 自愈)+未登记产物提醒(受控路径 mtime > 最后登记时间);rollback 成功后**同样写 improvement 事件(op=rollback,sha=revert commit)开评估窗口**(误回滚也可被评估捕获);删除 propose/diff
 - [ ] 3.2 `tagent.go` 接线:**单一构造单元 `NewGitEvolution(store, model, cfg)`→(tool, lifecycle)**(judge/guardrail/evSrc 同单元,替代 BindPosterior 接线,同点位换接——memStore 就绪时序保持);评估 goroutine 的 {sha,ts} 由 register 闭包快照携带(零反查);evolution 启用时注册新 refine 工具(entry only,先于治理包裹——A3 不变);DigestExtra 装配处组合(consolidation 候选+evaluation 结论两来源);classifier refine 规则核对(动词更新)
 - [ ] 3.3 工具面回归:三操作 happy path+越界拒绝+非 git 仓降级(mock 或 tempdir)
 
@@ -29,7 +29,7 @@
 ## 5. 冥想 prompt 与文档统一
 
 - [ ] 5.1 改写 `resources/prompts/meditation.md`:§3.3 确认直改文件+删搁置话术;§3 末新增登记纪律(refine register,未登记=无评估保护);§4 adoption 核查改 refine status;开头补「登记与三途径正交」一句
-- [ ] 5.2 README:冥想行改「自我改进引擎」定位(删「★卡片沉淀」)+refine 行改 git 原生通道+evolution 配置表重构;wiki platform 篇自进化节重写(架构图/design §1)+tool 篇 refine 工具段更新;agent 篇冥想节定位修正
+- [ ] 5.2 README:冥想行改「自我改进引擎」定位(删「★卡片沉淀」)+refine 行改 git 原生通道+evolution 配置表重构;wiki platform 篇自进化节重写(架构图/design §1)+tool 篇 refine 工具段更新;agent 篇冥想节定位修正;**examples/wechat-bot/tagent.yaml evolution 段重写为新 schema**(旧字段全删;注释注明「生产=独立部署仓,开发仓建议 enabled: false」——现 enabled:true 在源码仓内跑即改进 commit 污染源码仓)
 - [ ] 5.3 roadmap 联动:`tagent-evolution-roadmap` D4 replay/shadow 门条目改挂 git 载体注记、D5 发布道条目标注由本变更替代;§5A 相关裁定行修订引用
 
 ## 6. 门禁与收尾

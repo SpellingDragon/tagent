@@ -173,6 +173,22 @@ evolution:
 
 ## 6. 决策记录(探索会话已裁)
 
+### 7.7 执行前细化(2026-09-07 第三轮,场景层+实现定案)
+
+**N1 · example yaml 是返工遗漏面**:examples/wechat-bot/tagent.yaml L61-66 evolution 段全部字段过期(dir/skip_approval/protected_prompts/canary_hold_seconds)且 `enabled: true`——**开发仓内跑 bot 即 K2 污染现实化**。返工须同步重写该段为新 schema,并在注释注明「生产=独立部署仓;开发仓建议 enabled: false」。
+
+**N2 · rollback 也要开评估窗口(五轴轴1 补漏)**:revert 本身是一次变更(可能是误回滚)——rollback 成功后同样写 improvement 事件(op=rollback,sha=revert commit)+开窗口,复用同一机制零新概念。
+
+**N3 · 双源漂移呈现规则(场景定案)**:外部 git 操作(reset/amend)可使 git 与事件不一致——**git 为版本事实源,事件为控制面**;status 检测「事件含 sha 但 git 无此 commit」→ 标注「外部变更,窗口失效」;反向(标记 commit 无事件)→ 2.3 自愈已覆盖。
+
+**N4 · register 空提交**:文件无改动时 commit 报 nothing-to-commit——返回明确 result「无改动可登记」,不按 error。
+
+**N5 · `**` 通配定案**:Go path.Match 不支持 `**`——MatchProtectedPaths 手写段匹配(pattern 按 `/` 分段:`**`=任意段序列,`*`=段内通配,~25 行,零依赖)。
+
+**场景矩阵(已定义)**:register{正常/未改 N4/越界/非仓}· rollback{正常/冲突返回/非标记拒绝/重复 revert 冲突}· status{正常/漂移 N3/空}· 评估{超时=保守通过/中断=无结论}· 并发{多窗口独立}· 生命周期{Stop 收敛(对齐 MeditationManager.Stop 先例)}。
+
+**思想核验(PASS)**:refine 三 op 静态注册(prefix-cache 声明区恒定 ✅);动态渗透仅事件 ✅;improvement/evaluation 复用 governance 类型(TTL=-1 永久,台账语义,与 goal 同)✅;无新增框架执行权 ✅。
+
 | 决策 | 裁定 | 时间 |
 |---|---|---|
 | bundle 处置 | c1 退役(不留双后端开关)——「大刀阔斧,不留冗余」 | 2026-09-07 |
