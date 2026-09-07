@@ -38,6 +38,8 @@ type GitEvolution struct {
 	judge   Evaluator      // 可 nil（仅 guardrail）
 	guard   Guardrail      // 可 nil（仅 judge）
 	log     *ActivationLog // 窗口时刻表（sha→ts）
+	stopCh  chan struct{}  // M4：评估 goroutine 抢占通道（Stop 即时收敛）
+	mu      sync.Mutex     // M4：Register/Stop 并发下保护 wg.Add 与 stopped
 	wg      sync.WaitGroup
 	stopped atomic.Bool
 
@@ -51,7 +53,7 @@ func NewGitEvolution(cfg GitEvolutionConfig) *GitEvolution {
 	if len(cfg.ProtectedPaths) == 0 {
 		cfg.ProtectedPaths = []string{"resources/prompts/**", "skills/**", "scripts/**"}
 	}
-	return &GitEvolution{cfg: cfg, log: NewActivationLog()}
+	return &GitEvolution{cfg: cfg, log: NewActivationLog(), stopCh: make(chan struct{})}
 }
 
 // BindRuntime 延迟绑定运行时依赖（entry memStore + 评估器对）。幂等。
@@ -68,8 +70,17 @@ func (g *GitEvolution) IsRepo() bool { return GitIsRepo(g.cfg.WorkDir) }
 // Log 暴露窗口时刻表（装配层共享给 StoreEvidenceSource——W4 锚点接线）。
 func (g *GitEvolution) Log() *ActivationLog { return g.log }
 
-// Stop 收敛评估 goroutine（生命周期挂 TagentAgent——K4）。
-func (g *GitEvolution) Stop() { g.stopped.Store(true); g.wg.Wait() }
+// Stop 收敛评估 goroutine（生命周期挂 TagentAgent——K4；M4：经 stopCh 抢占，
+// 不再等满 judge_delay）。
+func (g *GitEvolution) Stop() {
+	g.mu.Lock()
+	if !g.stopped.Load() {
+		g.stopped.Store(true)
+		close(g.stopCh)
+	}
+	g.mu.Unlock()
+	g.wg.Wait()
+}
 
 // LatestSha 返回最新 improvement 的 sha（版本章来源——SetBundleIDProvider 接它）。
 // 空串 = 无改进（不盖章）。首次调用做一次惰性恢复（S2：查最新 improvement 事件）。
@@ -94,7 +105,9 @@ func (g *GitEvolution) recoverLatest() string {
 		return ""
 	}
 	refs, err := g.store.QueryEvents(memory.QueryOptions{
-		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance}, Limit: 50,
+		// M2(独立评审):默认 asc 会取到最旧 improvement——必须倒序取最新。
+		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance},
+		OrderBy: "timestamp_desc", Limit: 50,
 	})
 	if err != nil {
 		return ""
@@ -169,11 +182,19 @@ func (g *GitEvolution) Register(paths []string, note string) (string, string, er
 }
 
 // scheduleEvaluation 一次性窗口快照（Q1 裁决）：judge_delay 到期评估一次。
+// M4：Register/Stop 并发经 mu 串行化（防 WaitGroup Add/Wait 误用）；
+// 到期等待可被 stopCh 抢占。
 func (g *GitEvolution) scheduleEvaluation(sha string, ts int64) {
 	if g.judge == nil && g.guard == nil {
 		return
 	}
+	g.mu.Lock()
+	if g.stopped.Load() {
+		g.mu.Unlock()
+		return
+	}
 	g.wg.Add(1)
+	g.mu.Unlock()
 	go func() {
 		defer g.wg.Done()
 		if g.cfg.JudgeDelay > 0 {
@@ -181,12 +202,12 @@ func (g *GitEvolution) scheduleEvaluation(sha string, ts int64) {
 			defer t.Stop()
 			select {
 			case <-t.C:
-			case <-time.After(24 * time.Hour): // 兜底防永久滞留
-				return
+			case <-g.stopCh:
+				return // 抢占退出（评估未发生=窗口无结论，如实降级）
 			}
-			if g.stopped.Load() {
-				return
-			}
+		}
+		if g.stopped.Load() {
+			return
 		}
 		g.evaluate(sha, ts)
 	}()
@@ -237,7 +258,9 @@ func (g *GitEvolution) Evaluations() map[string]improvementContent {
 		return out
 	}
 	refs, err := g.store.QueryEvents(memory.QueryOptions{
-		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance}, Limit: 100,
+		// M2:同上——倒序,否则近期评估被最旧 100 条挤出。
+		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance},
+		OrderBy: "timestamp_desc", Limit: 100,
 	})
 	if err != nil {
 		return out
@@ -275,12 +298,39 @@ func (g *GitEvolution) Unregistered() []string {
 			continue
 		}
 		p := strings.TrimSpace(line[3:])
+		// rename 行（R old -> new）取新路径。
+		if idx := strings.Index(p, " -> "); idx >= 0 {
+			p = p[idx+4:]
+		}
 		ok, _ := MatchProtectedPaths(g.cfg.WorkDir, []string{p}, g.cfg.ProtectedPaths)
 		if ok {
 			files = append(files, p)
 		}
 	}
 	return files
+}
+
+// DigestSummary 供冥想 digest 渗透的自我改进摘要（M1/裁决 Q4 三来源之二、三）：
+// 最近评估结论（劣化建议必现）+ 未登记产物清单。空串=无内容。
+func (g *GitEvolution) DigestSummary() string {
+	var b strings.Builder
+	evals := g.Evaluations()
+	infos, err := GitLogFiltered(g.cfg.WorkDir, 5)
+	if err == nil {
+		for _, c := range infos {
+			if ev, ok := evals[c.Sha]; ok && ev.Verdict == "degraded" {
+				fmt.Fprintf(&b, "改进 %s 劣化：%s", shortSha(c.Sha), ev.Reason)
+				if ev.Advice != "" {
+					b.WriteString("｜" + ev.Advice)
+				}
+				b.WriteString("\n")
+			}
+		}
+	}
+	if un := g.Unregistered(); len(un) > 0 {
+		fmt.Fprintf(&b, "⚠ 未登记产物（已改动未 register，无评估保护）：%s\n", strings.Join(un, ", "))
+	}
+	return b.String()
 }
 
 func shortSha(sha string) string {

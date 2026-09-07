@@ -178,6 +178,12 @@ type EvolutionConfig struct {
 	// JudgeDelaySeconds 是 register 后到评估的延迟窗（原 canary_hold 语义，W4 迁移；0=立即）。
 	JudgeDelaySeconds int `json:"judge_delay_seconds,omitempty" yaml:"judge_delay_seconds,omitempty"`
 
+	// Guardrail 三阈值（Minor①独立评审：每门独立可配置）。零值走 GuardrailConfig 默认；
+	// MaxNegFBRate 负值=显式禁用负反馈判据。
+	MaxDenialRate   float64 `json:"max_denial_rate,omitempty" yaml:"max_denial_rate,omitempty"`
+	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
+	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
+
 	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
 	JudgeMinSamples     int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
 	JudgePassThreshold  float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)

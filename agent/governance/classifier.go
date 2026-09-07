@@ -6,7 +6,7 @@
 //
 // 契约 C5：RiskClassifier.Classify(RiskContext) → (level, ruleID, reason)，纯函数。
 // 消费方：GovernanceGate（工具执行治理）。注：evolution 的后验评估（guardrail/judge）独立于本管线
-//（评估对象是改进窗口的表现证据，非工具调用风险）。
+// （评估对象是改进窗口的表现证据，非工具调用风险）。
 package governance
 
 import (

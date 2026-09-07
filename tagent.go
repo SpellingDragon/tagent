@@ -415,7 +415,11 @@ func buildAgent(
 			evolution.NewLLMJudgeEvaluator(rc.model, evSrc,
 				cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
 				time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second), // M8：零值走 judge 内部默认
-			evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{}),
+			evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{
+				MaxDenialRate:   cfg.Evolution.MaxDenialRate,
+				MaxCriticalRate: cfg.Evolution.MaxCriticalRate,
+				MaxNegFbRate:    cfg.Evolution.MaxNegFBRate,
+			}), // Minor①：阈值经 config 通路（零值走内部默认）
 		)
 	}
 
@@ -650,7 +654,15 @@ func buildAgent(
 		if hintTracker != nil {
 			tracker := hintTracker
 			pid := memory.PartitionIDFromName(name)
-			agentCfg.Meditation.DigestExtra = func() string { return tracker.CandidatesText(pid) }
+			// M1（独立评审/裁决 Q4）：三来源组合——巩固候选 + 改进评估结论（劣化建议
+			// 在下轮反思必现）+ 未登记产物提醒。evolution 关时退回纯候选（现状）。
+			evoDigest := ""
+			if rc.evoGit != nil {
+				evoDigest = rc.evoGit.DigestSummary()
+			}
+			agentCfg.Meditation.DigestExtra = func() string {
+				return tracker.CandidatesText(pid) + evoDigest
+			}
 		}
 	}
 

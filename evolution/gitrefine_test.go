@@ -208,3 +208,23 @@ func TestGitEvolution_LatestShaStamp(t *testing.T) {
 	g2.BindRuntime(store, pid, nil, nil)
 	require.Equal(t, sha, g2.LatestSha(), "重启经 improvement 事件恢复版本章")
 }
+
+// TestGitEvolution_DigestSummary_SurfacesDegradation（M1 独立评审回归）：
+// 劣化结论与未登记产物必须出现在冥想 digest 摘要（被看见链路的三来源接线）。
+func TestGitEvolution_DigestSummary_SurfacesDegradation(t *testing.T) {
+	dir := initGitRepo(t)
+	store := memory.NewInMemoryStore()
+	pid := memory.PartitionIDFromName("tagent")
+	g := NewGitEvolution(GitEvolutionConfig{WorkDir: dir})
+	g.BindRuntime(store, pid, nil, fakeGuard{breach: true, why: "负反馈率 0.9"})
+	writeFile(t, dir, "resources/prompts/SOUL.md", "v")
+	sha, _, err := g.Register([]string{"resources/prompts/SOUL.md"}, "risky")
+	require.NoError(t, err)
+	g.EvaluateNow(sha, 0)
+	writeFile(t, dir, "skills/orphan/README.md", "未登记产物") // 改动不 register
+
+	sum := g.DigestSummary()
+	require.Contains(t, sum, "劣化", "劣化结论必须在 digest 呈现")
+	require.Contains(t, sum, "refine rollback", "建议文案必须可被 agent 看见")
+	require.Contains(t, sum, "未登记", "未登记产物提醒必须在 digest 呈现")
+}

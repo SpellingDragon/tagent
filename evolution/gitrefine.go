@@ -52,7 +52,10 @@ func GitAddCommit(dir string, paths []string, note string) (sha string, err erro
 		return "", err
 	}
 	msg := selfImproveTag + " " + note
-	if _, err := gitCmd(dir, "commit", "-m", msg); err != nil {
+	// M3(独立评审):--only 限定 pathspec——裸 commit 会提交整个 index,卷入用户
+	// 手工暂存内容或上次失败遗留的暂存文件(revert 时连带回滚用户工作)。
+	commitArgs := append([]string{"commit", "--only", "-m", msg, "--"}, paths...)
+	if _, err := gitCmd(dir, commitArgs...); err != nil {
 		if strings.Contains(err.Error(), "nothing to commit") ||
 			strings.Contains(err.Error(), "no changes added to commit") {
 			return "", ErrNothingToCommit

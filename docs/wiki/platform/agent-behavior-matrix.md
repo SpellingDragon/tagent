@@ -174,7 +174,6 @@ stateDiagram-v2
 | 冥想三锚点(novelty/idle/last-meditation) | `data/reliability/anchors/<agent>.json` | **不立即误触发冥想**(纯内存则重启即忘、马上冥想) |
 | 治理预算窗口 | `data/governance/budget/<agent>` | 预算计数跨重启延续(不清零) |
 | 待批审批 | `data/governance/approvals/` | pending 请求跨重启可见 |
-| 发布历史 | `data/evolution/releases.jsonl` | rollback 白名单跨重启有效 |
 | 未消费事件/记忆兜底 | bus/mem spill | 重启后回灌/重放,不丢 |
 
 ---
@@ -247,7 +246,6 @@ stateDiagram-v2
 2. 落盘后调 `refine register`(paths+note)→ `[self-improve]` commit+开评估窗口(low 记账放行)。
 3. judge_delay 后 guardrail+LLMJudge 评估:健康 → 留存;劣化 → evaluation 事件带建议经下轮冥想 digest 呈现。
 4. agent 收到劣化建议自行决定:`refine rollback`(critical 过治理闸)或 diff 复核后保留。
-5. 发布历史落 `releases.jsonl`;若效果差,agent 可 `refine rollback`(critical,需审批)回退到曾 active 版本。
 
 **场景 C:远端服务器网络抖动 + 重启**
 1. model 调用失败累积 → DegradationManager 标 `degraded`,写 governance degraded 事件。
