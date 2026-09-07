@@ -26,7 +26,7 @@ English | [中文](README.md)
 | 🔍 **Hybrid semantic recall** | With `memory.engine.embedding` on, recall fuses vector ∪ keyword via RRF; the discover-then-redeem two-phase protocol is unchanged; byte-identical to keyword-only when unconfigured |
 | 📊 **Unified observability** | turn root span + trace_id linking three projections (event metadata / RL trajectory / OTel span tree); export by setting an OTLP endpoint, noop with zero overhead otherwise |
 | 🛡 **Governance gate** (off by default) | RiskClassifier four risk levels + sliding-window budget + async approval for critical (external approval files) + DenialLedger audit; GovernanceTool decorates every leaf tool |
-| 🧬 **Self-evolution** (off by default) | BundleStore immutable hot config + risk-routed release lanes (fast lane posterior evaluation / slow lane gated) + refine tool (propose/diff/status/rollback, **no activate** — the agent never holds direct activation power) |
+| 🧬 **Self-evolution** (off by default) | **Git-native** improvement channel: files are the single source of truth (hot-reload) + git as the version layer (`[self-improve]` tagged commit/revert/log) + refine tool (register/status/safe rollback) + posterior evaluation (guardrail/judge degradation emits **advice only** — the agent always holds execution power) |
 | 🚡 **Resident reliability** (off by default) | EventBus disk spill (at-least-once, no dropped events) + DegradationManager five-dependency tracking + mem_spill fallback replay on store failure |
 
 ## 🎬 A day in a long-running agent
@@ -264,7 +264,7 @@ graph TB
 | `tool/memoryx/` | memory curation tools: memory_consolidate (server-side fingerprint, forgery-proof), memory_health (dimension diagnostics) |
 | `agent/governance/` | governance gate (off by default): RiskClassifier, Budget/Approval/DenialLedger/Goal, GovernanceTool decorator |
 | `agent/reliability/` | resident reliability (off by default): DegradationManager, ReliableBus disk spill, AnchorStore, mem_spill |
-| `evolution/` | hot-config self-evolution (off by default): BundleStore, VersionedSource, ReleaseManager, refine tool |
+| `evolution/` | git-native self-evolution (off by default): GitEvolution wiring unit, gitrefine pure functions, refine tool, judge/guardrail |
 | `tagent.go` + `config.go` | composition root and declarative config |
 
 All dependencies are one-way, no cycles: `root → agent → plugin → memory`, `tool/* → memory`.

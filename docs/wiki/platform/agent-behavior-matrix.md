@@ -23,7 +23,7 @@
 |--------|---------------------|------|------------------------|
 | **critical** | `exec rm -rf` / `sudo rm` / `mkfs` / `dd if=` / `shutdown` / `git push -f` / `curl…\| sh` / `refine rollback` | Hold(恒需批准) | **不执行**,返回 `[governance_denied]` + 审批请求 ID,提示"批准后重试" |
 | **high** | `exec sudo …` / `rm`/`mv`/`shred` / `git push` / `docker rm` / `kubectl delete` / `npm publish` / `delete_file` | Record(记账) | **放行执行** + 写审计事件;超预算则拒绝(见 1.4) |
-| **medium** | `save_file`/`replace_content`/`edit_file` / `exec`(默认) / `mcp_call` / `refine propose` | Record(记账) | **放行执行** + 写审计事件;超预算则拒绝 |
+| **medium** | `save_file`/`replace_content`/`edit_file` / `exec`(默认) / `mcp_call` | Record(记账) | **放行执行** + 写审计事件;超预算则拒绝 |
 | **low** | `read_file`/`list_file`/`search_*`/`recall`/`memory_query`/`skill_*` | Allow(零开销) | 直接放行,不记账 |
 
 ### 1.2 critical 操作审批闭环(时序 · `gate.go` critical 分支 + `approval.go`)
@@ -84,56 +84,47 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 
 ---
 
-## 二、自进化行为(Evolution · refine + 发布道)
+## 二、自进化行为(Evolution · git 原生)
 
-`refine` 工具(**仅 entry agent**)是 agent 自我修改通道,四 op **永无 activate**(`evolution/refine.go`);
-激活只能经 `ReleaseManager` 发布道(`release.go`)。
+> self-evolution-git-native(2026-09-07 设计返工):bundle/发布道退役——文件即真源+git 版本层+建议式评估。
 
-### 2.1 refine 四 op 行为
+`refine` 工具(**仅 entry agent**)三 op(`evolution/refine.go`);冥想产物落盘后经 register 登记开评估保护。
+
+### 2.1 refine 三 op 行为
 
 | op | 风险级 | agent 反应 |
 |----|--------|-----------|
-| `propose`(prompt_key + content) | medium(protected/模型/参数→慢道) | 创建 draft bundle → Submit 发布道 → 返回 stage(canary/active/rejected) |
-| `diff`(target_id) | 只读 | 返回 active↔target 的 bundle 差异(不改动) |
-| `status` | 只读 | 返回当前 active + 历史 bundle 列表 |
-| `rollback`(target_id) | **critical**(过治理闸) | 校验 target 在 wasActive 白名单 → 通过则切 active;**需 critical 审批**(见 1.2) |
+| `register`(paths+note) | low(登记无副作用) | 受控路径校验 → `[self-improve]` 标记 commit(仅 add 显式产物,不卷入工作区其他改动) → improvement 事件即评估窗口 → judge_delay 后评估一次 |
+| `status` | low(只读) | git log 过滤(行首锚定)+窗口结论四态(健康/劣化/样本不足/未到期)join+未登记产物提醒 |
+| `rollback`(sha) | **critical**(过治理闸) | 校验 commit 带改进标记(防误 revert 用户提交) → git revert;冲突返回详情由 agent 处置;**回滚是终态不再评估** |
 
-### 2.2 发布道路由 + 后验(`release.go` Submit → route → 快/慢道)
+### 2.2 评估与建议式信号
 
 ```mermaid
 flowchart TD
-    P["refine propose"] --> S["Submit(draft)"]
-    S --> B{有 active 基线?}
-    B -->|否| REJ0["拒绝(无基线守卫):防回滚落空"]
-    B -->|是| R{DiffLaneRouter 路由}
-    R -->|仅提示词改动| FAST["快道:SetActive(canary)→后验评估"]
-    R -->|模型/参数/protected| SLOW["慢道:replay→shadow→canary→人工批准门"]
-    FAST --> EV{LLMJudge+Guardrail}
-    EV -->|通过| ACT["Stage=active 正式生效"]
-    EV -->|劣化/违约| RB["回滚到发布前 active"]
-    EV -->|judge不可用/样本不足| CONS["保守通过(不误回滚)"]
-    SLOW --> AP{approveGate}
-    AP -->|批准| ACT
-    AP -->|拒绝/无门且未skip| RB2["拒绝/回滚(protected 零审批不激活)"]
+    R["refine register"] --> C["git commit([self-improve])"]
+    R --> E["improvement 事件(窗口锚=commit 时刻)"]
+    E -->|judge_delay 到期| EV{"Guardrail + LLMJudge"}
+    EV -->|健康| H["evaluation 事件:healthy"]
+    EV -->|劣化| D["evaluation 事件:degraded+建议 refine rollback sha"]
+    EV -->|样本不足/评估失败| I["evaluation 事件:insufficient(不冒充健康)"]
+    D -->|冥想 digest/召回渗透| AG["agent 决定:rollback/diff 复核/保留"]
+    AG -->|refine rollback| RV["git revert(框架永不动手)"]
 ```
 
 ### 2.3 边界场景(复杂情况)
 
 | 场景 | agent/系统反应 | 依据 |
 |------|---------------|------|
-| **protected 提示词改动**(SOUL.md/AGENTS.md) | 强制走**慢道** → 需人工批准(`skip_approval=false`)才激活;未批准不生效 | `release.go touchesProtected` |
-| **无 active 基线**时 propose/submit | Submit 直接 **reject**(不 canary,防孤儿 draft 滞留 active 无回滚锚点) | `release.go` 无基线守卫 |
-| **后验 judge 不可用/样本 < 5** | **保守通过**(不劣化回滚)——避免因 judge 缺席误杀正常变更 | `evolution/judge.go` 保守策略 |
-| **canary 观察窗 ctx 被取消** | **诚实停留 canary**(不提升 active 也不回滚),下次 Submit/重启重评 | `release.go` fast lane |
-| **rollback 到被拒 draft** | wasActive 白名单**拒绝**(只可回滚曾 Stage=active 的版本,防绕发布道直接激活) | `refine.go` wasActive 白名单 |
-| **rollback 到基线** | 允许(基线经 `seedActiveBaseline` 自动入白名单,跨重启恢复) | `release.go` seedActiveBaseline |
-| **重启后** | 发布历史从 `data/evolution/releases.jsonl` 重建,rollback 白名单跨重启有效 | `release.go` loadHistory |
-| 生效时机 | 激活在**回合边界**原子切 active 指针(热配置,不中断当前 turn) | VersionedSource |
-
-> 注(宣称收窄):当前运行期应用点仅**提示词**;bundle 的 params/model 字段=存储就绪,
-> 参数/模型热切换为后续增强(refine 提案字段白名单只含 prompts)。
-
----
+| **受控路径外登记** | 拒绝并列出受控清单(默认三目录 prompts/skills/scripts) | `gitrefine.go` MatchProtectedPaths |
+| **产物无改动时 register** | 返回 result「无改动可登记」(非 error) | `evolve.go` ErrNothingToCommit |
+| **非 git 仓运行** | register 明确报错;文件改动仍生效(热重载),如实降级 | 启动自检 Warn |
+| **judge 样本不足** | 结论=insufficient(**不冒充健康**,K7) | `evolve.go` 结论四态 |
+| **外部 reset/amend 使 git 与事件漂移** | status 标注「外部变更,窗口失效」(git=版本事实源,事件=控制面) | tasks 3.1 |
+| **revert 冲突**(后续改进叠加) | 返回冲突详情,由 agent 决定(建议式) | `gitrefine.go` RevertSafe |
+| **rollback 用户提交** | 拒绝(仅可 revert 改进标记 commit) | `gitrefine.go` GitCommitHasTag |
+| **重启后** | 版本章惰性恢复(查最新 improvement 事件);窗口=事件持久 | `evolve.go` LatestSha |
+| 生效时机 | 文件即真源——落盘+热重载即时生效(register 是留痕非生效前提) | mtime 热重载 |
 
 ## 三、常驻可靠性行为(Reliability)
 
@@ -252,10 +243,10 @@ stateDiagram-v2
 5. 若执行中 memory 写失败 → mem_spill 兜底,恢复后重放。
 
 **场景 B:agent 自我优化提示词**
-1. 模型调 `refine propose`(改 TOOLS.md 措辞)→ 治理 medium 记账放行。
-2. Submit → DiffLaneRouter:仅提示词 + 非 protected → **快道** → canary 激活。
-3. 后验 LLMJudge(以激活时刻开窗):通过 → **active 生效**(回合边界);劣化 → **回滚**发布前版本。
-4. 若改的是 SOUL.md(protected)→ **慢道** → 需你人工批准才激活。
+1. 冥想反思判定行为偏差根因在 TOOLS.md → 直接改文件(热重载即时生效)。
+2. 落盘后调 `refine register`(paths+note)→ `[self-improve]` commit+开评估窗口(low 记账放行)。
+3. judge_delay 后 guardrail+LLMJudge 评估:健康 → 留存;劣化 → evaluation 事件带建议经下轮冥想 digest 呈现。
+4. agent 收到劣化建议自行决定:`refine rollback`(critical 过治理闸)或 diff 复核后保留。
 5. 发布历史落 `releases.jsonl`;若效果差,agent 可 `refine rollback`(critical,需审批)回退到曾 active 版本。
 
 **场景 C:远端服务器网络抖动 + 重启**

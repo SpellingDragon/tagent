@@ -30,7 +30,7 @@ tagent 框架的**全机制实战示例**：一个常驻的微信机器人，把
 | `plan` | 工作计划管理（拆解 / 记账 / 归档审计，**不代工**） | `spec` 类型化工具（openspec 后端，op 白名单，无 shell 逃逸面） |
 
 四大子系统在本配置中**已启用**：治理闸 `enforcement=warn`（记账放行 + critical 恒审批）、自进化
-（refine 发布道，`SOUL.md`/`AGENTS.md` 走慢道人工批准）、常驻可靠性（溢出 / 兜底 / 退化状态机 /
+（refine git 原生通道：改文件即生效+`[self-improve]` 登记+劣化建议式评估）、常驻可靠性（溢出 / 兜底 / 退化状态机 /
 冥想锚点）、语义引擎（zhipu embedding-3，512 维，三个共享存储的 agent 共用同一引擎实例）。
 启用后 agent 在各复杂场景的实际反应见 [agent-behavior-matrix.md](../../docs/wiki/platform/agent-behavior-matrix.md)。
 

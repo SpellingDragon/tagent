@@ -499,9 +499,6 @@ func buildAgent(
 		tools = append(tools, t)
 	}
 
-	// T-EVO: refine 工具（agent 自我修改通道 propose/diff/status/rollback，无 activate）——
-	// 仅 entry agent 且 evolution 启用时注册。**先于治理包裹追加**（A3：refine 是最高权限通道，
-	// rollback 直接切换 active bundle 绕过发布道评估，必须过治理闸；DefaultRules 有 refine 规则）。
 	// evolution: git 原生 refine 工具（register/status/rollback）——仅 entry agent 且
 	// evolution 启用时注册。**先于治理包裹追加**（A3：refine 是最高权限通道，rollback 改
 	// 受控产物必须过治理闸；DefaultRules 有 refine 规则）。

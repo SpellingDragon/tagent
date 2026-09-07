@@ -11,7 +11,7 @@
 | `agent/governance/` | RiskClassifier（C5 纯函数四级分级）、BudgetManager（滑窗+epoch 持久化）、ApprovalManager（digest 绑定+目录重扫+**ApprovalChannel 送达抽象**：Deliver 失败不阻塞门）、DenialLedger（BindStore 延迟绑定持久审计）、GoalRegistry（**BindStore 事件持久化+重启回放重建**）、GovernanceGate 决策管线、GovernanceTool leaf 装饰器；审批人工回应纯函数 RespondFile（digest 前缀匹配+幂等）/ParseApprovalReply（approve/reject 含中文动词） |
 | `tool/govx/` | 治理面工具五件套（goal_declare/goal_list/goal_resolve/denial_query/approval_list）——**entry only**（与 refine 同槽位，先于治理包裹追加）；只登记/查询，批准权始终在人 |
 | `agent/reliability/` | DegradationManager（五依赖退化状态机）、SpillStore/ReliableBus（磁盘溢出全序）、AnchorStore（冥想锚点跨重启） |
-| `evolution/` | BundleStore（不可变内容寻址+原子 active）、VersionedSource（prompt.Getter，回合边界生效）、ReleaseManager（风险分级发布道+双回滚）、refine 工具（无 activate）、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估） |
+| `evolution/` | GitEvolution 装配单元（NewGitEvolution+BindRuntime 延迟绑定）、gitrefine 纯函数集（git exec+段匹配）、refine 工具（register/status/rollback）、improvement/evaluation 事件、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估，劣化只出建议） |
 | `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南）、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单，snooze 静默窗；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
 | `tool/mcp/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报） |
 | `tool/memoryx/` | memory_consolidate、memory_health |
@@ -24,7 +24,7 @@
 graph TB
     subgraph Policy["Policy（配置派生，默认关）"]
         GOV["governance:"] --> GT["GovernanceTool 装饰全部 leaf 工具"]
-        EVO["evolution:"] --> RM["ReleaseManager 发布道"]
+        EVO["evolution:"] --> GE["GitEvolution 装配单元"]
         REL["reliability:"] --> RB["ReliableBus / mem_spill"]
     end
     subgraph Engine["Engine（常驻）"]
@@ -32,10 +32,9 @@ graph TB
         LOOP --> CM["ContextManager"]
         CM --> STORE["MemoryStore ← ErrorTrackingStore(engineBridge(FileSegmentStore))"]
     end
-    REFINE["refine 工具(仅 entry)"] -->|"propose/diff/status/rollback(无 activate)"| BS["BundleStore"]
-    BS -->|"active 指针(回合边界)"| VS["VersionedSource → 系统提示词"]
-    RM --> BS
-    RM -->|"后验: 激活时刻开窗"| JUDGE["LLMJudge + Guardrail"]
+    REFINE["refine 工具(仅 entry)"] -->|"register/status/rollback"| GIT["git 仓([self-improve] commit/revert/log)"]
+    REFINE -->|"improvement/evaluation 事件"| STORE
+    GE -->|"judge_delay 后一次性评估(锚=register 时刻)"| JUDGE["LLMJudge + Guardrail(劣化只出建议事件)"]
     EMB["memory.engine.embedding"] --> ENGINE["InMemoryEngine(hybrid RRF)"]
     MCPCFG["mcp_servers"] --> MREG["MCP Registry(热同步)"]
     MREG --> MCALL["mcp_call / mcp_discover"]
@@ -87,7 +86,7 @@ C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现；engine
 
 - 装饰器顺序（冻结契约 C2）：ErrorTrackingStore(engineBridge(FileSegmentStore))——退化追踪最外层，引擎旁路中间；
 - 治理包裹在 refine 追加之后、OutputLimitTool 之前（治理先于执行，OutputLimit 封顶最终输出）；
-- VersionedSource 与 prompt.Source 并存：未启用 evolution 走 mtime 热载（语义不变），启用后走 active bundle 回合边界生效。
+- 提示词真源唯一（git-native）：文件即真源——mtime 热载直生效；改进经 refine register 登记纳入评估保护，无版本遮蔽层。
 
 ## 已知缺口与演进方向
 

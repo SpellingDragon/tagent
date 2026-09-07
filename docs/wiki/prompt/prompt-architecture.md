@@ -518,7 +518,7 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 
 用途：`AgentToolWrapper.SetDescriptionSource` 使工具描述**热更新**——`Declaration()` 每次经 Source 取描述，改 prompt 文件立即生效，无需重启进程。inline-only（无 files）配置只加载一次并缓存。
 
-**Getter 缝与热配置（TC0）**：`Source` 满足 `Getter`（两方法：`Get() (string, error)` / `IsEmpty() bool`）。ContextManager 的 `SystemPromptSource` 与 MeditationConfig 的 `PromptSource` 字段已迁为 `prompt.Getter` 接口——可注入 `evolution.VersionedSource`（从 active bundle 读、无 active 回退 base、**回合边界生效**），未启用 evolution 时仍注入 `*prompt.Source` 走 mtime 热载（语义零变化）。bundle 版本化与发布道详见 [platform 篇](../platform/platform-subsystems.md)。注意例外：工具描述路径未迁 Getter（`SetDescriptionSource(src *prompt.Source)` 仍具体类型）。
+**Getter 缝与热配置（TC0）**：`Source` 满足 `Getter`（两方法：`Get() (string, error)` / `IsEmpty() bool`）。ContextManager 的 `SystemPromptSource` 与 MeditationConfig 的 `PromptSource` 字段为 `prompt.Getter` 接口（C6 遗产缝）——git-native 后默认实现即 `*prompt.Source` 走 mtime 热载（**文件即真源**，改动即时生效）；改动经 `refine register` 登记纳入评估保护（见 [platform 篇](../platform/platform-subsystems.md)）。注意例外：工具描述路径未迁 Getter（`SetDescriptionSource(src *prompt.Source)` 仍具体类型）。
 
 
 ---
@@ -529,5 +529,5 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **参数/模型热切换仅存储就绪** | TC0 起 BundleStore+VersionedSource 提供 bundle 版本化（仅 prompts 有运行期应用点，回合边界生效）；refine 白名单现仅 prompts——bundle.Params/Model 无运行期应用点 | 接线 BeforeModel 读 active.Params/Model，或收窄宣称为「提示词热配置」 |
+| **~~参数/模型热切换仅存储就绪~~（已随 bundle 体系退役）** | git-native 后提示词=文件直读热重载，无版本遮蔽层；改进经 refine register 留痕评估 | — |
 | **bootstrap 顺序固定** | AGENTS→SOUL→TOOLS… 顺序编码在 LoadBootstrap，不可配置 | 保持固定（顺序即契约）；如需自定义走 system_prompt.files 显式列表 |

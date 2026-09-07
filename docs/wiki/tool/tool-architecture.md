@@ -352,7 +352,7 @@ func RegisterBuiltinTools() error {
 }
 ```
 
-> refine 工具**不走注册表**：仅 entry agent 且 `evolution.enabled` 时由 buildAgent 直接追加（propose/diff/status/rollback，无 activate），且先于治理包裹——激活仅经 ReleaseManager 发布道。配置门控默认关闭时 YAML 引用会被 ValidateToolAccess 拒绝。
+> refine 工具**不走注册表**：仅 entry agent 且 `evolution.enabled` 时由 buildAgent 直接追加（register/status/rollback，git 原生），且先于治理包裹——rollback 改受控产物须过治理闸（critical）。配置门控默认关闭时 YAML 引用会被 ValidateToolAccess 拒绝。
 
 注册后 ToolRegistry 中可查询的 plain tool：
 
