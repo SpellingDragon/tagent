@@ -175,9 +175,13 @@ evolution:
 
 ### 7.7 执行前细化(2026-09-07 第三轮,场景层+实现定案)
 
-**N1 · example yaml 是返工遗漏面**:examples/wechat-bot/tagent.yaml L61-66 evolution 段全部字段过期(dir/skip_approval/protected_prompts/canary_hold_seconds)且 `enabled: true`——**开发仓内跑 bot 即 K2 污染现实化**。返工须同步重写该段为新 schema,并在注释注明「生产=独立部署仓;开发仓建议 enabled: false」。
+**N1 · example yaml 是返工遗漏面(2026-09-07 裁决修订)**:examples/wechat-bot/tagent.yaml L61-66 evolution 段全部字段过期——返工须重写为新 schema;**默认 enabled: true(维护者裁决:example 演示完整自迭代特性)**,注释注明「生产=独立部署仓;开发仓内跑会有改进 commit 落入源码仓,由使用者自担」。
 
-**N2 · rollback 也要开评估窗口(五轴轴1 补漏)**:revert 本身是一次变更(可能是误回滚)——rollback 成功后同样写 improvement 事件(op=rollback,sha=revert commit)+开窗口,复用同一机制零新概念。
+**N2 ·~~rollback 开评估窗口~~(2026-09-07 裁决撤销)**:回滚是 agent/人的终态决定,**不再评估**——revert 后不写 improvement 事件、不开窗口;信任执行者,保持更简。
+
+**N4b · 未登记产物提醒(2026-09-07 裁决强化)**:除 refine status 软提醒外,**冥想 DigestExtra 同列未登记产物**(组合三来源:巩固候选+评估结论+未登记清单)——反思点强制可见,登记纪律更硬。
+
+**N2 · rollback 开评估窗口(五轴轴1 补漏)**:~~revert 本身是一次变更(可能是误回滚)——rollback 成功后同样写 improvement 事件(op=rollback,sha=revert commit)+开窗口~~ **已撤销,见 N1 区 N2 修订**。
 
 **N3 · 双源漂移呈现规则(场景定案)**:外部 git 操作(reset/amend)可使 git 与事件不一致——**git 为版本事实源,事件为控制面**;status 检测「事件含 sha 但 git 无此 commit」→ 标注「外部变更,窗口失效」;反向(标记 commit 无事件)→ 2.3 自愈已覆盖。
 

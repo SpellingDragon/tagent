@@ -15,8 +15,8 @@
 
 ## 3. refine 工具重写与装配
 
-- [ ] 3.1 重写 `evolution/refine.go`:op=register/status/rollback(jsonschema 参数:paths/note/sha);register 含**空提交场景**(无改动→result「无改动可登记」,非 error);status=git log 过滤+窗口结论 join(结论四态:健康/劣化/**样本不足**/未到期)+「已回滚」识别+**双源漂移标注**(事件含 sha 但 git 无此 commit→「外部变更,窗口失效」;反向走 2.3 自愈)+未登记产物提醒(受控路径 mtime > 最后登记时间);rollback 成功后**同样写 improvement 事件(op=rollback,sha=revert commit)开评估窗口**(误回滚也可被评估捕获);删除 propose/diff
-- [ ] 3.2 `tagent.go` 接线:**单一构造单元 `NewGitEvolution(store, model, cfg)`→(tool, lifecycle)**(judge/guardrail/evSrc 同单元,替代 BindPosterior 接线,同点位换接——memStore 就绪时序保持);评估 goroutine 的 {sha,ts} 由 register 闭包快照携带(零反查);evolution 启用时注册新 refine 工具(entry only,先于治理包裹——A3 不变);DigestExtra 装配处组合(consolidation 候选+evaluation 结论两来源);classifier refine 规则核对(动词更新)
+- [ ] 3.1 重写 `evolution/refine.go`:op=register/status/rollback(jsonschema 参数:paths/note/sha);register 含**空提交场景**(无改动→result「无改动可登记」,非 error);status=git log 过滤+窗口结论 join(结论四态:健康/劣化/**样本不足**/未到期)+「已回滚」识别+**双源漂移标注**(事件含 sha 但 git 无此 commit→「外部变更,窗口失效」;反向走 2.3 自愈)+未登记产物提醒(受控路径 mtime > 最后登记时间);**rollback 为终态:revert 后不写事件不开窗口(裁决)**;删除 propose/diff
+- [ ] 3.2 `tagent.go` 接线:**单一构造单元 `NewGitEvolution(store, model, cfg)`→(tool, lifecycle)**(judge/guardrail/evSrc 同单元,替代 BindPosterior 接线,同点位换接——memStore 就绪时序保持);评估 goroutine 的 {sha,ts} 由 register 闭包快照携带(零反查);evolution 启用时注册新 refine 工具(entry only,先于治理包裹——A3 不变);DigestExtra 装配处组合**三来源**(巩固候选+评估结论+未登记产物清单——裁决 Q4:反思点强制可见);classifier refine 规则核对(动词更新)
 - [ ] 3.3 工具面回归:三操作 happy path+越界拒绝+非 git 仓降级(mock 或 tempdir)
 
 ## 4. 评估锚点迁移与建议式信号
@@ -29,7 +29,7 @@
 ## 5. 冥想 prompt 与文档统一
 
 - [ ] 5.1 改写 `resources/prompts/meditation.md`:§3.3 确认直改文件+删搁置话术;§3 末新增登记纪律(refine register,未登记=无评估保护);§4 adoption 核查改 refine status;开头补「登记与三途径正交」一句
-- [ ] 5.2 README:冥想行改「自我改进引擎」定位(删「★卡片沉淀」)+refine 行改 git 原生通道+evolution 配置表重构;wiki platform 篇自进化节重写(架构图/design §1)+tool 篇 refine 工具段更新;agent 篇冥想节定位修正;**examples/wechat-bot/tagent.yaml evolution 段重写为新 schema**(旧字段全删;注释注明「生产=独立部署仓,开发仓建议 enabled: false」——现 enabled:true 在源码仓内跑即改进 commit 污染源码仓)
+- [ ] 5.2 README:冥想行改「自我改进引擎」定位(删「★卡片沉淀」)+refine 行改 git 原生通道+evolution 配置表重构;wiki platform 篇自进化节重写(架构图/design §1)+tool 篇 refine 工具段更新;agent 篇冥想节定位修正;**examples/wechat-bot/tagent.yaml evolution 段重写为新 schema**(**默认 enabled: true(裁决:example 演示完整特性)**;注释注明「生产=独立部署仓,开发仓内跑改进 commit 会落入源码仓,自担」)
 - [ ] 5.3 roadmap 联动:`tagent-evolution-roadmap` D4 replay/shadow 门条目改挂 git 载体注记、D5 发布道条目标注由本变更替代;§5A 相关裁定行修订引用
 
 ## 6. 门禁与收尾
