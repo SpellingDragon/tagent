@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/agent/governance"
 	tagentevent "github.com/SpellingDragon/tagent/event"
+	mengine "github.com/SpellingDragon/tagent/memory/engine"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -199,6 +200,12 @@ func main() {
 	// 8.3（review §8）：接线 feedback 生产链路——entry memStore 供 POST /feedback
 	// 绑定外部 verdict（此前仅测试调用，端点恒 503，闭环未通）。
 	httpAPI.SetFeedbackStore(ta.MemStore())
+	// B1（哲学审查）：诊断快照消费面装配——GET /diagnostics 输出 DiagnosticsSnapshot
+	// JSON（含 wal_quarantined）。ta.MemStore() 为装饰链顶层（C3 验证），F3 隔离计数可达。
+	diagStore := ta.MemStore()
+	httpAPI.SetDiagnosticsFn(func() any {
+		return mengine.NewMemoryDiagnostics(nil, diagStore).Snapshot()
+	})
 	// Set model update callback: when AReaL adapter sends llm_base_url,
 	// create a new openai model with that URL and swap it in.
 	httpAPI.SetModelUpdateFn(func(baseURL string) {
@@ -623,13 +630,17 @@ func (c *wechatApprovalChannel) Deliver(req *governance.ApprovalRequest) error {
 	if b == nil {
 		return fmt.Errorf("wechat bot not ready")
 	}
+	// C1（哲学审查）：Deliver 同步于治理管线（deliverAll）——无超时的 Background 会让
+	// 微信 API 挂起时阻塞审批门。5s 超时使「失败不阻塞门」也覆盖「悬挂不阻塞」。
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	d := req.ArgsDigest
 	if len(d) > 8 {
 		d = d[:8]
 	}
 	text := fmt.Sprintf("⚠ 审批请求（tool=%s）\ndigest: %s\n批准回复: approve %s ｜ 拒绝: reject %s",
 		req.ToolName, d, d, d)
-	return b.SendTextToUser(context.Background(), c.to, text)
+	return b.SendTextToUser(ctx, c.to, text)
 }
 
 // IsApprover reports whether the user id may approve via the message

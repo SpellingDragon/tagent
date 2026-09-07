@@ -49,7 +49,9 @@ type HTTPAPI struct {
 
 // NewHTTPAPI creates a new HTTPAPI for the given agent.
 func NewHTTPAPI(agent AgentLoop) *HTTPAPI {
-	return &HTTPAPI{agent: agent}
+	// F1（哲学审查）：fbNotify 必须 make——nil channel 接收恒阻塞，long-poll
+	// 唤醒通路会是死代码（等待者只能等满 30s）。
+	return &HTTPAPI{agent: agent, fbNotify: make(chan struct{}, 1)}
 }
 
 // SetModelUpdateFn sets the callback for runtime LLM endpoint updates.
@@ -165,6 +167,11 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusCreated, map[string]any{
 				"status": "bound_with_warning", "feedback_key": tagentevent.FormatEventKey(fbKey),
 				"warning": err.Error(),
+			})
+			// F2（哲学审查）：事件已落库即入队通知——与「POST 成功后入队」语义一致。
+			h.fbEnqueue(map[string]any{
+				"feedback_key": tagentevent.FormatEventKey(fbKey),
+				"parent":       req.EventKey, "verdict": req.Verdict, "source": "api", "warning": err.Error(),
 			})
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "bind_failed", err.Error())

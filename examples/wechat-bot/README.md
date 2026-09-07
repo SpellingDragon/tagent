@@ -42,7 +42,7 @@ tagent 框架的**全机制实战示例**：一个常驻的微信机器人，把
   仅 `app.wechat.approvers` 白名单内的用户生效（安全默认：未配置白名单时消息批准关闭）；
 - **CLI 批准**：`./wechat-bot approve <digest>`（`reject <digest>` 拒绝；零服务器，直接写审批文件）；
 - **查看待批**：向 agent 发「列出待批准项」触发 `approval_list` 工具。
-- **直投通道**：已装配 `ApprovalChannel`——审批请求不经 agent 转述，直接送达微信（配置 `app.wechat.approvers` 后启用）。
+- **直投通道**：已装配 `ApprovalChannel`——审批请求不经 agent 转述，直接送达微信（配置 `app.wechat.approvers` 后启用；**直投目标=白名单首个 approver**，其余审批人仍可经回复/CLI 批准）。
 
 ## 消息链路
 

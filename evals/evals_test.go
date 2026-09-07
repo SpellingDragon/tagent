@@ -1,10 +1,12 @@
 package evals
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/require"
 )
@@ -62,6 +64,27 @@ func TestSuite_BadCase_HexBrokenKeyRejected(t *testing.T) {
 	v, err := event.ParseEventKey("0xdeadbeef")
 	require.NoError(t, err)
 	require.Equal(t, int64(0xdeadbeef), v)
+}
+
+// TestSuite_ToolChoice_OpWhitelist（tool-choice suite 执行体——op 路由白名单守护）：
+// 未知 op MUST 显式拒绝——工具面路由契约（漂移即红）。
+func TestSuite_ToolChoice_OpWhitelist(t *testing.T) {
+	g := evolution.NewGitEvolution(evolution.GitEvolutionConfig{WorkDir: t.TempDir()})
+	refineTool := evolution.NewRefineTool(g)
+	ct, ok := refineTool.(interface {
+		Call(ctx context.Context, args []byte) (any, error)
+	})
+	require.True(t, ok, "refine 工具必须可调用（CallableTool 契约）")
+	ctx := context.Background()
+
+	// 合法 op 路由可达（非 git 仓下 status 显式报错——环境如实呈现）。
+	_, err := ct.Call(ctx, []byte(`{"op":"status"}`))
+	require.Error(t, err, "非 git 仓下 status 应显式报错（环境如实呈现）")
+
+	// 非法 op 拒绝。
+	_, err = ct.Call(ctx, []byte(`{"op":"activate"}`))
+	require.Error(t, err, "未白名单 op 必须拒绝（propose/activate 已随发布道退役）")
+	require.Contains(t, err.Error(), "白名单")
 }
 
 // TestSuite_ContractPresence（3.1 M1 契约守护）：handoff 四段契约写入子 Agent prompt——
