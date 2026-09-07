@@ -22,3 +22,11 @@
 #### Scenario: README 叙事一致
 - **WHEN** 读者查看 README 特性表与 wiki platform/tool 篇
 - **THEN** 冥想行描述为自我改进引擎,refine 行描述为 git 原生改进通道,两者关系(引擎×通道)在文案中可见
+
+### Requirement: 负反馈回顾(反思素材)
+
+冥想回顾清单 MUST 包含 feedback 事件(任务失败 negative/用户不满)——失败教训是最高价值反思素材;§2 分析提示应将 negative 归因到痛点。
+
+#### Scenario: 负反馈进反思
+- **WHEN** 冥想触发且回顾近期事件
+- **THEN** 反思清单覆盖 feedback 事件(negative 优先归因)——负反馈→冥想→改进的闭环闭合

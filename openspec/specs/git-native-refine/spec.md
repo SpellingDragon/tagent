@@ -44,3 +44,19 @@ git 原生自我改进通道:refine register/status/rollback 三操作、受控�
 #### Scenario: 默认路径零摩擦
 - **WHEN** evolution 启用、治理闸未配置受控路径规则时,agent 经 file 工具写入受控路径
 - **THEN** 写入直接生效(热重载),无审批、无阻断
+
+### Requirement: 溢出全文取回面
+
+输出溢出落盘时 MUST 经 persistBusEvent 登记 overflow_dump 事件(Summary 含路径+大小,Content 含取回指引「可 exec cat 取回」);溢出票据 MUST 自带同一指引——agent 见票据即知道全文位置与取回方式。
+
+#### Scenario: 溢出后 recall 可达
+- **WHEN** outputCh 宽限耗尽、事件落盘并登记
+- **THEN** recall「溢出」可命中该事件票据,agent 经 exec cat 取回全文
+
+### Requirement: 审批直投通道(宿主装配)
+
+宿主/example MUST 可经 WithApprovalChannel option 注入审批直投通道(Deliver→渠道);直投目标=白名单首个 approver(声明于文档);Deliver MUST 带超时(悬挂不阻塞审批门)。
+
+#### Scenario: example 直投装配
+- **WHEN** example 配置 approvers 并以 WithApprovalChannel 装配
+- **THEN** critical 审批请求直接送达微信(不经 agent 转述);bot 未就绪时 Deliver 显式报错
