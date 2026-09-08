@@ -11,8 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+
+	"github.com/SpellingDragon/tagent/event"
 )
 
 // ==================== InMemoryEngine（T-A · MVP 兜底引擎）====================
@@ -104,7 +105,7 @@ type vectorMeta struct {
 // InMemoryEngine 是 memory.MemoryEngine 的内存 MVP 实现。
 type InMemoryEngine struct {
 	store memory.MemoryStore // 关键词路（可为 nil = 纯向量，无关键词）
-	emb   Embedder           // 向量路（可为 nil = 纯关键词降级）
+	emb   memory.Embedder    // 向量路（可为 nil = 纯关键词降级）
 	cfg   EngineConfig
 
 	mu      sync.RWMutex
@@ -136,7 +137,7 @@ var _ memory.MemoryEngine = (*InMemoryEngine)(nil)
 
 // NewInMemoryEngine 构建并启动 MVP 引擎。store 供关键词路（可 nil），emb 供向量路
 // （nil = 纯关键词降级）。后台嵌入 worker 随引擎启动，Close 时排空停止。
-func NewInMemoryEngine(store memory.MemoryStore, emb Embedder, cfg EngineConfig) *InMemoryEngine {
+func NewInMemoryEngine(store memory.MemoryStore, emb memory.Embedder, cfg EngineConfig) *InMemoryEngine {
 	cfg = cfg.withDefaults()
 	e := &InMemoryEngine{
 		store:     store,

@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SpellingDragon/tagent/event"
 )
 
 // newTestCompactor creates a Compactor with a mock KV store for testing.

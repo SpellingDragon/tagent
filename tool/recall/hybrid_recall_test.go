@@ -7,6 +7,7 @@ import (
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
@@ -35,7 +36,7 @@ func seedAndIndex(t *testing.T, store *memory.InMemoryStore, eng memory.MemoryEn
 // 语义相近（共享词元）的事件被召回——协议输出不变（key/type/summary/time）。
 func TestRecallByQuery_HybridViaEngine(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	emb := engine.NewMockEmbedder(128)
+	emb := membed.NewMockEmbedder(128)
 	eng := engine.NewInMemoryEngine(store, emb, engine.EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	accessor := engine.NewEngineBridge(store, eng) // MemoryStore + MemoryEngineProvider

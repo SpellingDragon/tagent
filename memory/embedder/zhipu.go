@@ -1,130 +1,17 @@
-package engine
+package embedder
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/SpellingDragon/tagent/memory"
 )
-
-// ==================== Embedder（T-A · 引擎内部构件）====================
-//
-// Embedder 是文本→向量的抽象，属记忆引擎实现的内部构件（不进 C6 解耦缝——
-// tagent 核心只依赖 memory.MemoryEngine，不直接依赖 Embedder）。
-//
-// 实现：
-//   - MockEmbedder：确定性哈希向量，无网络，供单测/开发/降级验证（同义改写不命中，
-//     但相同/前缀文本相近，足以验证 hybrid 融合与分区过滤的机制正确性）。
-//   - ZhipuEmbedder：zhipu embedding-3（openai 兼容 /embeddings），复用 GLM Coding
-//     Plan 的 ZAI_API_KEY；维度可配；HTTP 超时 + 重试 ≤1；失败丢弃该批（关键词兜底）。
-//
-// 裁决依据：f1-rustviking-capability-report.md DECIDED F1-③（嵌入用 tagent 侧 zhipu
-// HTTP，非 rustviking mock/CLI——rustviking 无 embed CLI 且默认 mock）。
-
-// Embedder 文本向量化。批量语义：返回与 texts 等长、顺序对应的向量切片。
-type Embedder interface {
-	// Embed 批量嵌入。实现 MUST 尊重 ctx 取消/超时。
-	Embed(ctx context.Context, texts []string) ([][]float32, error)
-	// Dimension 返回向量维度；0 = 未知（尚未探测）。
-	Dimension() int
-	// ModelID 返回嵌入模型标识（用于索引指纹比对，防换模型后向量混用）。
-	ModelID() string
-}
-
-// ---------------------------------------------------------------------------
-// MockEmbedder — 确定性哈希向量（无网络）
-// ---------------------------------------------------------------------------
-
-// MockEmbedder 用 FNV 哈希把文本映射到固定维度的确定性伪向量。
-// 语义：相同文本 → 相同向量；共享词元越多 → 余弦越高（弱语义）。
-// 仅用于验证机制（融合/过滤/降级），不承诺真实语义质量。
-type MockEmbedder struct {
-	dim int
-}
-
-// NewMockEmbedder 创建确定性 mock 嵌入器（dim<=0 时取 64）。
-func NewMockEmbedder(dim int) *MockEmbedder {
-	if dim <= 0 {
-		dim = 64
-	}
-	return &MockEmbedder{dim: dim}
-}
-
-func (m *MockEmbedder) Dimension() int { return m.dim }
-func (m *MockEmbedder) ModelID() string {
-	return fmt.Sprintf("mock-embed-%d", m.dim)
-}
-
-// Embed 对每条文本做词元哈希袋（bag-of-token-hashes）→ L2 归一化向量。
-// 共享词元产生重叠维度，故余弦相似度随词元重叠单调——足以驱动 RRF 机制测试。
-func (m *MockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		out[i] = m.embedOne(t)
-	}
-	return out, nil
-}
-
-func (m *MockEmbedder) embedOne(text string) []float32 {
-	dim := m.dim
-	if dim <= 0 {
-		dim = 64 // 零值 MockEmbedder{} 兜底，防除零 panic（审查 Nit8）
-	}
-	vec := make([]float32, dim)
-	// 词元哈希袋：按空白/标点粗切，每词元投到两个维度（增碰撞分辨）。
-	start := 0
-	for i := 0; i <= len(text); i++ {
-		if i == len(text) || isDelim(text[i]) {
-			if i > start {
-				tok := text[start:i]
-				h := fnv.New32a()
-				_, _ = h.Write([]byte(tok))
-				sum := h.Sum32()
-				vec[sum%uint32(dim)] += 1.0
-				vec[(sum>>7)%uint32(dim)] += 0.5
-			}
-			start = i + 1
-		}
-	}
-	l2normalize(vec)
-	return vec
-}
-
-func isDelim(c byte) bool {
-	switch {
-	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		return false
-	case c >= 0x80: // UTF-8 多字节（中文等）：按字节聚合到词元，不切分
-		return false
-	default:
-		return true
-	}
-}
-
-// l2normalize 原地 L2 归一化（零向量保持不变，避免除零）。
-func l2normalize(vec []float32) {
-	var sum float64
-	for _, v := range vec {
-		sum += float64(v) * float64(v)
-	}
-	if sum == 0 {
-		return
-	}
-	norm := float32(math.Sqrt(sum))
-	for i := range vec {
-		vec[i] /= norm
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ZhipuEmbedder — zhipu embedding-3（openai 兼容 /embeddings）
-// ---------------------------------------------------------------------------
 
 // ZhipuEmbedderConfig 配置 zhipu 兼容嵌入端点。
 type ZhipuEmbedderConfig struct {
@@ -143,12 +30,15 @@ type ZhipuEmbedderConfig struct {
 	MaxBatch int
 }
 
-// ZhipuEmbedder 经 openai 兼容 /embeddings 端点生成向量。
+// ZhipuEmbedder 经 openai 兼容 /embeddings 端点生成向量（实现 memory.Embedder；
+// 复用 GLM Coding Plan 的 ZAI_API_KEY）。
 type ZhipuEmbedder struct {
 	cfg    ZhipuEmbedderConfig
 	client *http.Client
 	apiKey string
 }
+
+var _ memory.Embedder = (*ZhipuEmbedder)(nil)
 
 // NewZhipuEmbedder 构建嵌入器。apiKey 为空时从 cfg.APIKeyEnv（默认 ZAI_API_KEY）
 // 环境变量读取；仍为空则返回 error（调用方据此判定「未配置=功能关闭」优雅降级）。

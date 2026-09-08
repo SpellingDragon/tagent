@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/SpellingDragon/tagent/agent"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
+
+	"github.com/SpellingDragon/tagent/agent"
 )
 
 // specArgs is the LLM-facing argument shape: a closed op plus optional fields.

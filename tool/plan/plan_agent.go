@@ -16,12 +16,13 @@ import (
 	"regexp"
 	"strings"
 
-	tagentagent "github.com/SpellingDragon/tagent/agent"
-	tagentevent "github.com/SpellingDragon/tagent/event"
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+
+	tagentagent "github.com/SpellingDragon/tagent/agent"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
 // ---------------------------------------------------------------------------

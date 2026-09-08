@@ -10,9 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent/task"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // Verify ActionTool implements tool.CallableTool at compile time.

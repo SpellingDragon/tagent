@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory"
 )
 
 // TestRecallTools_DeclarationDeterministic 验证 tasks 4.2：recall 工具 Declaration 确定性——

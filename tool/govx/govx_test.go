@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/memory"
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // TestGoalDeclare_PersistsEvent (5.1, design-report-closeout): goal_declare

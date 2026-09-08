@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 
 	"context"
 	"testing"
@@ -15,7 +16,7 @@ func TestMemoryDiagnostics_Snapshot(t *testing.T) {
 		k := memory.NewSnowflakeEventKey(1, testBaseMs+int64(i)*1000)
 		_ = store.StoreEvent(k, memory.FullEvent{EventKey: k, PartitionID: 1, EventType: TypeExternalInputProbe, Content: c, Timestamp: testBaseMs})
 	}
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 
@@ -60,7 +61,7 @@ func TestMemoryDiagnostics_NilSafe(t *testing.T) {
 }
 
 func TestMemoryDiagnostics_DimMismatchSurfaced(t *testing.T) {
-	emb := NewMockEmbedder(8)
+	emb := membed.NewMockEmbedder(8)
 	eng := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	k := memory.NewSnowflakeEventKey(1, testBaseMs)

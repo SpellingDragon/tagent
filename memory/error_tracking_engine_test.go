@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
@@ -15,7 +16,7 @@ func TestErrorTrackingStore_OptionalInterfacePassthrough(t *testing.T) {
 	// 包裹 engineBridge（有 MemoryEngine）→ ErrorTrackingStore 必须透传 MemoryEngineProvider，
 	// 否则 recall hybrid 断言 memStore.(MemoryEngineProvider) 失效（能力丢失）。
 	inner := memory.NewInMemoryStore()
-	eng := engine.NewInMemoryEngine(inner, engine.NewMockEmbedder(16), engine.EngineConfig{})
+	eng := engine.NewInMemoryEngine(inner, membed.NewMockEmbedder(16), engine.EngineConfig{})
 	defer eng.Close()
 	bridge := engine.NewEngineBridge(inner, eng)
 	// 下游拿到的是 MemoryStore 接口（memStore），故赋给接口再断言可选能力穿透。

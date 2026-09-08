@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"strings"
 
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+	"trpc.group/trpc-go/trpc-agent-go/tool/function"
+
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	mengine "github.com/SpellingDragon/tagent/memory/engine"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
-	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
 // consolidateArgs 是 memory_consolidate 的入参（LLM 提交巩固内容 + 源事件票据）。

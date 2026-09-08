@@ -1,7 +1,9 @@
-package engine
+package embedder
 
 import (
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	meng "github.com/SpellingDragon/tagent/memory/engine"
 
 	"context"
 	"math"
@@ -53,9 +55,9 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 		t.Fatalf("embedder: %v", err)
 	}
 	store := memory.NewInMemoryStore()
-	eng := NewInMemoryEngine(store, emb, EngineConfig{VectorTopK: 5, KeywordTopK: 5})
+	eng := meng.NewInMemoryEngine(store, emb, meng.EngineConfig{VectorTopK: 5, KeywordTopK: 5})
 	defer eng.Close()
-	bridged := NewEngineBridge(store, eng)
+	bridged := meng.NewEngineBridge(store, eng)
 
 	pid := 1
 	docs := []string{
@@ -64,10 +66,10 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 		"Kubernetes pod 因内存超限被 OOMKilled 频繁重启",
 	}
 	for i, text := range docs {
-		k := memory.NewSnowflakeEventKey(pid, testBaseMs+int64(i))
+		k := memory.NewSnowflakeEventKey(pid, 1_700_000_000_000+int64(i))
 		if err := bridged.StoreEvent(k, memory.FullEvent{
-			EventKey: k, PartitionID: pid, EventType: TypeExternalInputProbe,
-			Content: text, Timestamp: testBaseMs + int64(i),
+			EventKey: k, PartitionID: pid, EventType: tagentevent.TypeExternalInput,
+			Content: text, Timestamp: 1_700_000_000_000 + int64(i),
 		}); err != nil {
 			t.Fatalf("StoreEvent: %v", err)
 		}
@@ -129,7 +131,7 @@ func TestDimensionComparison_Real(t *testing.T) {
 	}
 }
 
-func avgPairSim(t *testing.T, emb Embedder, pairs [][2]string) float64 {
+func avgPairSim(t *testing.T, emb memory.Embedder, pairs [][2]string) float64 {
 	t.Helper()
 	var sum float64
 	for _, p := range pairs {

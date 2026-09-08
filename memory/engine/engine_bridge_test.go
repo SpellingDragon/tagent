@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 
 	"context"
 	"testing"
@@ -10,7 +11,7 @@ import (
 
 func TestEngineBridge_StoreEventIndexesAndProvider(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)
@@ -60,7 +61,7 @@ func TestEngineBridge_StoreEventIndexesAndProvider(t *testing.T) {
 
 func TestEngineBridge_DeleteRemovesFromEngine(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)

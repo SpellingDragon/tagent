@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/kv"
 
 	"context"
@@ -28,7 +29,7 @@ func waitForKVKeys(t *testing.T, kv memory.KVStore, prefix string, want int, tim
 // 内存索引 → 向量检索命中 engine1 索引的事件（跨"重启"语义召回恢复）。
 func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	kv := kv.NewMockRustVikingClient() // 实现 memory.KVStore，模拟持久后端
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
 
@@ -78,7 +79,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 // 重建后不复活已删事件。
 func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
 	kv := kv.NewMockRustVikingClient()
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
 
@@ -99,7 +100,7 @@ func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
 
 // TestInMemoryEngine_NoKVPureInMemory 验证 kv==nil 时纯内存（现状行为，不持久）。
 func TestInMemoryEngine_NoKVPureInMemory(t *testing.T) {
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	e := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer e.Close()
 	// 无 KV → rebuildDone 立即为真（无重建）。

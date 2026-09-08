@@ -14,8 +14,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/agent/task"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 const noControllerMsg = "任务管理当前不可用（未启用 task 层）。"

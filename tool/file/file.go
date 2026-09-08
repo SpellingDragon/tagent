@@ -24,9 +24,10 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/agent"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/file"
+
+	"github.com/SpellingDragon/tagent/agent"
 )
 
 // fileToolNames lists the tool names exposed by trpc-agent-go's file toolset.

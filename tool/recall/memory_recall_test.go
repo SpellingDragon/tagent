@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func callMemoryRecall(t *testing.T, tl tool.Tool, args string) string {

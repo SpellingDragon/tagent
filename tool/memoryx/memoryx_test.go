@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
@@ -14,7 +15,7 @@ func TestToolsConstruct(t *testing.T) {
 	if NewConsolidateTool(store, 1) == nil {
 		t.Fatal("memory_consolidate 工具构造失败")
 	}
-	emb := engine.NewMockEmbedder(32)
+	emb := membed.NewMockEmbedder(32)
 	eng := engine.NewInMemoryEngine(store, emb, engine.EngineConfig{})
 	defer eng.Close()
 	if NewHealthTool(eng, store) == nil {

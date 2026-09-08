@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 
 	"context"
 	"sync"
@@ -123,7 +124,7 @@ func TestCosine_IdenticalAndOrthogonal(t *testing.T) {
 }
 
 func TestMockEmbedder_DeterministicNormalized(t *testing.T) {
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	v1, _ := emb.Embed(context.Background(), []string{"部署 服务 deploy"})
 	v2, _ := emb.Embed(context.Background(), []string{"部署 服务 deploy"})
 	if len(v1) != 1 || len(v1[0]) != 64 {
@@ -176,7 +177,7 @@ func TestInMemoryEngine_HybridRecall(t *testing.T) {
 	seedEvent(t, store, 1, TypeExternalInputProbe, "deploy service success 部署成功", testBaseMs+1000)
 	seedEvent(t, store, 1, TypeExternalInputProbe, "weather sunny today 今天天气晴朗", testBaseMs+2000)
 
-	emb := NewMockEmbedder(128)
+	emb := membed.NewMockEmbedder(128)
 	eng := NewInMemoryEngine(store, emb, testEngineConfig())
 	defer eng.Close()
 
@@ -208,7 +209,7 @@ func TestInMemoryEngine_PartitionFilterNoLeak(t *testing.T) {
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "alpha shared token 共享词元", testBaseMs)
 	k2 := seedEvent(t, store, 2, TypeExternalInputProbe, "alpha shared token 共享词元", testBaseMs+1000)
 
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, testEngineConfig())
 	defer eng.Close()
 
@@ -228,7 +229,7 @@ func TestInMemoryEngine_PartitionFilterNoLeak(t *testing.T) {
 }
 
 func TestInMemoryEngine_SelectiveIndexSkipsNonEmbeddable(t *testing.T) {
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(nil, emb, testEngineConfig())
 	defer eng.Close()
 
@@ -268,7 +269,7 @@ func TestInMemoryEngine_IndexNonBlocking_QueueFullDrop(t *testing.T) {
 }
 
 func TestInMemoryEngine_RemoveDeletesVector(t *testing.T) {
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(nil, emb, testEngineConfig())
 	defer eng.Close()
 
@@ -287,7 +288,7 @@ func TestInMemoryEngine_RemoveDeletesVector(t *testing.T) {
 func TestInMemoryEngine_EmptyQueryDegradesToKeyword(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "some content", testBaseMs)
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, testEngineConfig())
 	defer eng.Close()
 

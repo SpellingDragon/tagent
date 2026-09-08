@@ -5,8 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+
+	"github.com/SpellingDragon/tagent/event"
 )
 
 // ==================== Lifecycle Manager ====================

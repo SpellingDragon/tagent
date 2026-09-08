@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // buildChainedTurn stores one task turn with a causal chain:

@@ -3,9 +3,10 @@ package memoryx
 import (
 	"fmt"
 
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // ==================== 工厂式注册（A1 修复：接入 agent 工具装配链）====================

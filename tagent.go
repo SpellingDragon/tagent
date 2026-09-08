@@ -39,6 +39,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
 	"github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -1296,17 +1297,17 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 }
 
 // buildEmbedder 按配置构建嵌入器。zhipu 无 key 时返回 error（调用方优雅降级）。
-func buildEmbedder(ec EmbeddingConfig) (engine.Embedder, error) {
-	var inner engine.Embedder
+func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
+	var inner memory.Embedder
 	switch ec.Provider {
 	case "mock":
 		dim := ec.Dimensions
 		if dim <= 0 {
 			dim = 64
 		}
-		inner = engine.NewMockEmbedder(dim)
+		inner = membed.NewMockEmbedder(dim)
 	case "", "zhipu":
-		z, err := engine.NewZhipuEmbedder(engine.ZhipuEmbedderConfig{
+		z, err := membed.NewZhipuEmbedder(membed.ZhipuEmbedderConfig{
 			Endpoint:   ec.Endpoint,
 			Model:      ec.Model,
 			APIKeyEnv:  ec.APIKeyEnv,
@@ -1321,7 +1322,7 @@ func buildEmbedder(ec EmbeddingConfig) (engine.Embedder, error) {
 	}
 	// 组8 向量链路可观测：TracedEmbedder 统一包裹（embedding span + GenAI 属性 + counter/
 	// histogram）。noop 安全——未设 OTLP 时零开销、Embed 行为逐字节不变。
-	return engine.NewTracedEmbedder(inner), nil
+	return membed.NewTracedEmbedder(inner), nil
 }
 
 // ensureRustVikingConfig writes a rustviking config.toml to the data directory

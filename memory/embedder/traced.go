@@ -1,7 +1,9 @@
-package engine
+package embedder
 
 import (
 	"context"
+
+	"github.com/SpellingDragon/tagent/memory"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -27,7 +29,7 @@ const (
 
 // TracedEmbedder 是带 span/metric 的 Embedder 装饰器（实现 Embedder 接口）。
 type TracedEmbedder struct {
-	inner Embedder
+	inner memory.Embedder
 	calls metric.Int64Counter   // embedding API 调用数
 	texts metric.Int64Counter   // 嵌入文本总条数
 	dims  metric.Int64Histogram // 向量维度分布
@@ -35,7 +37,7 @@ type TracedEmbedder struct {
 
 // NewTracedEmbedder 包裹 inner 加向量链路可观测。inner 为 nil 返回 nil。metric 创建失败
 // 用 noop 计数（otel 保证返回可用零值，不阻断）。
-func NewTracedEmbedder(inner Embedder) *TracedEmbedder {
+func NewTracedEmbedder(inner memory.Embedder) *TracedEmbedder {
 	if inner == nil {
 		return nil
 	}
@@ -76,5 +78,5 @@ func (t *TracedEmbedder) Dimension() int { return t.inner.Dimension() }
 // ModelID 透传 inner（索引指纹比对不受装饰影响）。
 func (t *TracedEmbedder) ModelID() string { return t.inner.ModelID() }
 
-// 编译期确认 TracedEmbedder 实现 Embedder 接口。
-var _ Embedder = (*TracedEmbedder)(nil)
+// 编译期确认 TracedEmbedder 实现 memory.Embedder 接口。
+var _ memory.Embedder = (*TracedEmbedder)(nil)

@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/agent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/SpellingDragon/tagent/agent"
 )
 
 func TestRegisterTools_CreatesCallableTools(t *testing.T) {

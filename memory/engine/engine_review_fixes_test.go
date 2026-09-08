@@ -2,6 +2,7 @@ package engine
 
 import (
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/kv"
 
 	"context"
@@ -59,7 +60,7 @@ func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
 // TestInMemoryEngine_DimensionMismatchSkipped 验证审查 M3：查询向量维度与索引向量
 // 不一致时跳过（不收 0 分候选），避免返回不确定顺序的垃圾票据。
 func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
-	emb := NewMockEmbedder(8) // 索引向量 dim=8
+	emb := membed.NewMockEmbedder(8) // 索引向量 dim=8
 	e := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer e.Close()
 	key := memory.NewSnowflakeEventKey(1, testBaseMs)
@@ -84,13 +85,13 @@ func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 	ctx := context.Background()
 
 	// engine1：模型 A（mock dim=8 → ModelID "mock-embed-8"）索引并持久化。
-	e1 := NewInMemoryEngine(nil, NewMockEmbedder(8), cfg)
+	e1 := NewInMemoryEngine(nil, membed.NewMockEmbedder(8), cfg)
 	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: memory.NewSnowflakeEventKey(1, testBaseMs), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "alpha", Timestamp: testBaseMs})
 	waitForKVKeys(t, kv, "model:vec:", 1, 2*time.Second)
 	_ = e1.Close()
 
 	// engine2：模型 B（mock dim=16 → ModelID "mock-embed-16"）重建 → 应跳过模型 A 的向量。
-	e2 := NewInMemoryEngine(nil, NewMockEmbedder(16), cfg)
+	e2 := NewInMemoryEngine(nil, membed.NewMockEmbedder(16), cfg)
 	defer e2.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && !e2.RebuildDone() {
@@ -105,7 +106,7 @@ func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 // RemoveVector 转发引擎 Remove（遗忘物理删除时同步移除向量，消除 Remove 死代码）。
 func TestEngineBridge_RemoveVectorForwards(t *testing.T) {
 	store := memory.NewInMemoryStore()
-	emb := NewMockEmbedder(64)
+	emb := membed.NewMockEmbedder(64)
 	eng := NewInMemoryEngine(store, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer eng.Close()
 	bridge := NewEngineBridge(store, eng)

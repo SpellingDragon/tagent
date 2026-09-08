@@ -12,8 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+
+	"github.com/SpellingDragon/tagent/memory"
 )
 
 // LocalFileKV is a file-backed memory.KVStore with a snapshot + WAL layout:
