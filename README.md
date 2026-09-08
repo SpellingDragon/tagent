@@ -259,7 +259,7 @@ graph TB
 | `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
 | `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
 | `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
-| `tagent.go` + `config.go` | 组合根与声明式配置 |
+| `tagent.go` + `build_agent.go` + `wiring.go` + `config.go` | 组合根（类型/Option/New · agent 装配族 · resolve+wire 族）与声明式配置 |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
 
