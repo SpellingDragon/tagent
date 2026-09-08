@@ -65,6 +65,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Message-level idempotency across restarts (dedup + persistence).
+	seenStore := NewSeenStore(wechatCfg.ConfigDir, slog.Default())
+
 	// Set framework log level
 	log.SetLevel(tagentCfg.LogLevel)
 
@@ -253,7 +256,13 @@ func main() {
 	slogLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	bot := wechat.NewBot(wechat.WithLogger(slogLogger))
+	// Persist the getupdates polling cursor so message delivery resumes from
+	// where it left off across restarts (see wechat.CursorStore).
+	cursorStore := wechat.NewFileCursorStore(filepath.Join(wechatCfg.ConfigDir, "cursor.txt"))
+	bot := wechat.NewBot(
+		wechat.WithLogger(slogLogger),
+		wechat.WithCursorStore(cursorStore),
+	)
 	if approvalCh != nil {
 		approvalCh.SetBot(bot)
 	}
@@ -469,6 +478,12 @@ func main() {
 	//     the handler to run in a goroutine.
 
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
+		// Dedup gate (design D3): drop replayed/duplicated deliveries before
+		// any stateful handling (approval replies, intake, agent injection).
+		if seenStore != nil && !seenStore.CheckAndMark(DedupKey(msg)) {
+			log.Warnf("[Dedup] duplicate message dropped (chat=%s)", msg.FromUserID)
+			return nil
+		}
 		// 3.3（design-report-closeout）：审批回复拦截——"approve/reject <digest>"（含中文
 		// 动词）由框架纯函数解析并写回应文件，不进 agent 对话（批准是人的动作，不是
 		// 对话内容；agent 无批准权）。非审批回复照常走 agent。

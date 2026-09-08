@@ -90,3 +90,5 @@ require (
 	trpc.group/trpc-go/trpc-agent-go/model/provider v1.10.0 // indirect
 	trpc.group/trpc-go/trpc-mcp-go v0.0.10 // indirect
 )
+
+replace github.com/SpellingDragon/wechat-robot-go => /home/lighthouse/src/wechat-robot-go
