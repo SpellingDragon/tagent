@@ -206,7 +206,7 @@ check_api_key() {
 
     # 尝试从配置文件提取 api_key_env 字段（跳过注释行）
     local extracted
-    extracted=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null | head -1 | sed -E 's/.*: *"?([^"]*)"?/\1/')
+    extracted=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null | head -1 | sed -E 's/[[:space:]]*#.*$//' | sed -E 's/.*: *"?([^"]*)"?/\1/' | tr -d '[:space:]')
     if [[ -n "$extracted" ]]; then
         key_env="$extracted"
     fi
@@ -219,7 +219,7 @@ check_api_key() {
     # 与子 agent/工具可能分属不同 provider，如 tencent_hy + zhipu）。
     local all_keys k fallback
     all_keys=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null \
-        | sed -E 's/.*: *"?([^"]*)"?/\1/' | sort -u)
+        | sed -E 's/[[:space:]]*#.*$//' | sed -E 's/.*: *"?([^"]*)"?/\1/' | tr -d '[:space:]' | sort -u)
     [[ -z "$all_keys" ]] && all_keys="$key_env"
 
     for k in $all_keys ZAI_API_KEY; do
@@ -238,7 +238,7 @@ check_api_key() {
     local main_provider main_key
     main_provider=$(awk '/^agents:/{a=1; next} a && /^  [^ ]/{n++} a && n==1 && /provider:/{print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
     if [[ -n "$main_provider" ]]; then
-        main_key=$(awk -v p="$main_provider" '$1==p":"{f=1; next} f && /^[^ ]/{exit} f && /api_key_env:/{gsub(/["'"'"']/, "", $2); print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
+        main_key=$(awk -v p="$main_provider" '$1==p":"{f=1; next} f && /^[^ ]/{exit} f && /api_key_env:/{sub(/[[:space:]]*#.*$/,""); gsub(/["'"'"']/, "", $2); print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
     fi
 
     local key_value

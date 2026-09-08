@@ -232,6 +232,31 @@ generate_env() {
   fi
 }
 
+# 运行环境准备（必需目录初始化）：把启动脚本运行时才暴露的缺失目录提前到向导阶段备好
+prepare_runtime_dirs() {
+  step "4.5/7" "运行环境准备（必需目录初始化）"
+  local cfg="$CONFIG_FILE"
+  [ -f "$cfg" ] || { warn "配置文件 $cfg 不存在，跳过目录准备"; return 0; }
+  local dirs
+  dirs=$(grep -hoE '(base_dir|work_dir|directory)[:=][[:space:]]*[A-Za-z0-9_./-]+' "$cfg" 2>/dev/null | sed -E 's/.*[:=][[:space:]]*//' | sort -u)
+  local extra=""
+  grep -q 'openspec' "$cfg" 2>/dev/null && extra="openspec"
+  local d created=0
+  for d in $dirs $extra; do
+    [ -z "$d" ] && continue
+    case "$d" in
+      /*|*..*|~*) continue ;;
+    esac
+    if [ ! -d "$SCRIPT_DIR/$d" ]; then
+      mkdir -p "$SCRIPT_DIR/$d" 2>/dev/null && { ok "已创建运行目录：$d"; created=$((created+1)); } || warn "无法创建目录 $d（权限不足？可手动 mkdir -p $d）"
+    else
+      info "运行目录已存在：$d"
+    fi
+  done
+  [ "$created" -eq 0 ] && info "所有必需运行目录已就绪"
+  return 0
+}
+
 # ── 步骤 5：工作区权限初始化（POSIX ACL，不改原有 owner/group/mode）──────────
 # 需求：让 tagent 服务用户能读写工作区（含**已有文件**），但不动工作区原有的用户/组/权限。
 # 方案：POSIX ACL（setfacl）追加 named-user 权限——
@@ -384,6 +409,7 @@ main() {
   collect_keys
   collect_working_dir
   generate_env
+  prepare_runtime_dirs
   setup_permissions
   # 让验证步骤读到刚收集的 ZAI_API_KEY
   local kv
