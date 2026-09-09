@@ -3,6 +3,8 @@
 ## Purpose
 
 本规范定义 compress-event-enrichment 能力。When `SmartCompressor` discards old task segments, `buildCompressEvent` SHALL extract each compressed event's EventKey, EventType, a short content summary, `val
+
+> **状态核验（2026-09-09）**：本规范描述的 `buildCompressEvent` 富集注记（逐事件 `score=<分数>` / `proc=<处理策略>` 元数据，依赖 `EventValuator` 估值产物）**已被骨架卡片行替代**——压缩产物现为滚动摘要 ref（负 key）内的卡片行序列（`[hex] type 摘要`，票据恒在），无分数/策略元数据。Req2 的原则（注记不含工具名广告、只携事实与票据）**仍有效**并由现渲染路径遵守。本文其余 SHALL 条款不再约束当前实现，保留作为设计决策记录；现状形态见 [task-skeleton-compression](../task-skeleton-compression/spec.md) 与 [event-timeline-rendering](../event-timeline-rendering/spec.md)。
 ## Requirements
 ### Requirement: buildCompressEvent outputs key, type, summary, value score, and processing strategy
 

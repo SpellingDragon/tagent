@@ -4,6 +4,8 @@
 
 本规范定义 view-transform-stateless 能力。When `oldSegments` is empty (all segments moved to recentSegments or total segment count is too small), SmartCompressor SHALL return the original messages witho
 
+> **符号与形态对照（2026-09-09 核验）**：`oldSegments`/`recentSegments` 为撰写时实现命名——现实现为段龄定级（`deterministicLevel`，`agent/compress/task_segmenter.go`），无同名变量；「无事不产压缩通知」的契约由 `SmartCompressor.Compress` 的阈值判定 pass-through 分支承载（未超阈返回原消息不变）。压缩通知现形态为负 key 滚动摘要 ref 的 **user 侧**渲染（`〔历史归档〕`注记，时间线渲染红线：永不进 system），非本文所述 `[context_compress]` system message。Req2 的 `protectPendingAsyncSegments` 移除断言仍真（该函数及其 `{status:running}` 保护假设已不存在）。
+
 ## Requirements
 
 ### Requirement: SmartCompressor returns original messages when no segments to compress

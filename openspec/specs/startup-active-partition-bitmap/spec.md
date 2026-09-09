@@ -4,6 +4,8 @@
 
 本规范定义 startup-active-partition-bitmap 能力。The system SHALL maintain a `global:active_partitions` KV entry as a fixed-size 2048-bit bitmap (256 bytes), with bit `N` set iff partition `N` has at least one
 
+> **状态核验（2026-09-09，未实现/以等价形态达成）**：本规范描述的 `global:active_partitions` 位图与 `{pid}:cursor` 游标机制**未实现**（代码中无此二键）；启动时活跃分区的 seq 恢复现由 `memory/segment_store.go` 的 `PartitionState.seqCounter` 恢复路径承载（从持久化状态 recover，含零值与新窗口的区分逻辑），活跃分区本身由各段窗口的持久化键空间直接枚举。本规范属设计预案未被采纳，SHALL 条款不约束当前实现；若未来分区数增长到全量扫描成为瓶颈，可依本预案复活（复活前按 LEDGER 重编原则 #3 做前提核验）。
+
 ## Requirements
 
 ### Requirement: Active partition bitmap drives Init discovery

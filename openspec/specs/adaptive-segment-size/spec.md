@@ -4,6 +4,8 @@
 
 本规范定义 adaptive-segment-size 能力。`PartitionDefaults` SHALL expose `max_events_per_segment` (default `10000`).
 
+> **状态核验（2026-09-09，未实现/部分被替代）**：本规范描述的段级数量封段（`max_events_per_segment`，含 L1→L2→L3 合并输出拆分与 per-partition override）**未实现**——现状封段仅按时间窗边界，容量管控以**分区级** `LifecycleConfig.max_events_per_partition`（`config.go` LifecycleConfig，默认 0=不限）承载，超出由 lifecycle 容量遗忘层处理而非提前封段。单段事件数过大时的 range-scan O() 顾虑由 `{pid}:evt:{窗}:{seq}` 键序天然有界（单窗口事件数）缓解。本文 SHALL 条款不约束当前实现，保留作为设计预案；若单窗口写入风暴成为实测瓶颈可依本预案复活。
+
 ## Requirements
 
 ### Requirement: Segment seals early when event count reaches threshold

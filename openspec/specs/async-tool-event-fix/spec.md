@@ -4,6 +4,8 @@
 
 本规范定义 async-tool-event-fix 能力。When `InjectBusInputs` appends an event message to `args.Request.Messages`, if `evt.Message.Role == model.RoleSystem`, it SHALL create a copy of the message wit
 
+> **状态核验（2026-09-09，三分支状态分化）**：① Req1/Req4（InjectBusInputs RoleSystem→RoleUser）：注入机制已演进为统一 `NewExternalInputEvent`（一切总线消息皆以 external_input 类型入库，`agent/inject.go`），消息层 Role 转换不再需要，`InjectBusInputs` 函数已不存在（仅存注释提及）；② Req2/Req3（user/external_input 开始新段的边界语义）**已被 task-skeleton-compression 推翻**——段边界现为 agent_output 闭合回合（`SegmentMessages` 现实现），`isMessageTaskBoundary`/`isReferenceTaskBoundary` 符号已移除；③ Req5（非交互命令 stable 即 completed）**有效**，由 `tool/action/settle.go` 三档分类（completed/stable/suspect）实现；Req6 相关符号（findPendingUserMessage）已随压缩重构移除，但「压缩产物不含引导消息」的行为由骨架模型保持（卡片行无引导语）。
+
 ## Requirements
 
 ### Requirement: InjectBusInputs converts RoleSystem to RoleUser

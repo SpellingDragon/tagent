@@ -4,6 +4,8 @@
 
 本规范定义 action-tool-config 能力。ActionProperties SHALL accept a `monitor` configuration map that overrides DefaultMonitorConfig values.
 
+> **状态核验（2026-09-09，部分有效）**：`monitor` 配置部分**有效**——`properties.monitor`（dense_interval/dense_duration/backoff_factor/max_interval）经 actionFactory 解析并注入 TmuxMonitor（yaml 示例见根 README 与 agent-architecture §6.4）。本规范的 `compress` 子配置部分（`max_tool_result_chars`/`max_exec_state_chars`/`chunk_size`/`chunk_summary_len`，tool 级压缩超参覆盖）**已退役**——压缩超参现由 agent 级 `compress` 块（`config.go` CompressConfig：summary_model/card_max_chars/compact_keys_listed/recent_full_count/summary_max_tokens）统一承载，不再提供 tool 级覆盖（单压缩管线在 entry agent，tool 级覆盖无消费方）。compress 相关 SHALL 条款不约束当前实现。
+
 ## Requirements
 
 ### Requirement: TmuxMonitor configuration is exposed via ActionProperties

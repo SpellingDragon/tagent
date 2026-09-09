@@ -4,6 +4,8 @@
 
 本规范定义 compress-quality-fix 能力。When the LLM-generated summary exceeds `targetChars * 1.5`, `generateSummary` SHALL split the original segments into two sub-batches and independently summarize
 ## Requirements
+
+> **符号对照（2026-09-09 核验）**：本文四个 Requirement 所指的实现符号已随压缩重构更名/重组，行为契约由现载体承载——`resolveReferenceToMessage` → `ContextCompressor.resolveRef`（Role 决定逻辑在其内：context_compress 摘要 → user 侧注记，正 key 事件按 ref.Role/EventType；见 context_compressor.go 注释）；`BuildEventReference` 的 Role 填充 → `plugin/memory_plugin.go` 事件管线（`inferEventInfo` 推断 + Response Role 直取，投影 sink 同点追加）；`findPendingUserMessage` 按 event key 去重 → `SessionProjection.seen` 幂等去重（EventKey 级，projection.go）；`generateSummary`（LLM 摘要超长拆分）→ 已随 legacy 管线退役（现 `synthesizeRollingNarrative` 编译期常量限长）。行为 SHALL 以现实现为准，原文保留作为质量修复决策记录。
 ### Requirement: resolveReferenceToMessage infers Role from EventType
 
 When `full.Response == nil` (event has no LLM response), `resolveReferenceToMessage` SHALL infer the message Role from `ref.EventType` using a deterministic mapping: external_input→user, agent_output→assistant, action_command→tool, thinking_plan→assistant. If `ref.EventType` is also empty, SHALL default to RoleUser (safe degradation). This SHALL NOT produce messages with empty Role.

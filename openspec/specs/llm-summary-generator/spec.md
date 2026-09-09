@@ -4,6 +4,8 @@
 
 本规范定义 llm-summary-generator 能力。`LLMSummarizer` SHALL implement the `SummaryGenerator` interface defined by the upstream `l3-archive-summarization` capability.
 
+> **状态核验（2026-09-09）**：本规范描述的逐事件 LLM 语义摘要管线（`LLMSummarizer`/`PassthroughSummarizer`/`GenerateBatch`/`Config.ArchiveSummarizer.Enabled`，及上游 `l3-archive-summarization` 能力）**已随 legacy 压缩管线移除**。L3 摘要现由双层折叠承载：工程票据层（卡片行 + `[evt_key]` 召回票据，纯工程零 LLM）恒在，`summary_model` 配置时叠加单行滚动综述 `synthesizeRollingNarrative`（增量合成、编译期常量限长、失败降级纯工程），卡片超限由 `condenseCardLines` 浓缩。本文 SHALL 条款不再约束当前实现，保留作为设计决策记录；现状契约见 [task-skeleton-compression](../task-skeleton-compression/spec.md)。
+
 ## Requirements
 
 ### Requirement: LLMSummarizer implements SummaryGenerator interface

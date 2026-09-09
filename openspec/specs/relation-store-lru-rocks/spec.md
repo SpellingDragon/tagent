@@ -30,6 +30,8 @@
 
 `RelationStore.GetChildren(parent int64, limit int)` SHALL return `([]int64, hasMore bool, error)`. Implementation SHALL use RocksDB range scan over `{pid}:revrel:{parent}:` prefix, reading at most `limit+1` entries to determine `hasMore`.
 
+> **状态核验（2026-09-09，签名漂移）**：现签名为 `GetChildren(parentKey int64) ([]int64, error)`（`memory/relation_store.go`，InMemRelationStore）——无 limit/hasMore 参数，全量返回子节点；反向索引仍为 `{pid}:revrel:{parent}:` 前缀（key_schema 契约未变），持久化底座为 `memory/kv/` 后端（rustviking/localfile，经 RelationStoreProvider 接入）而非 RocksDB 直连。若子节点规模实测成为瓶颈，本规范的 limit/hasMore 分页契约可作为增强预案复活。本条签名 SHALL 不约束当前实现。
+
 #### Scenario: GetChildren returns all when count <= limit
 
 - **WHEN** parent `50` has 3 children (100, 101, 102) and `GetChildren(50, 10)` is called

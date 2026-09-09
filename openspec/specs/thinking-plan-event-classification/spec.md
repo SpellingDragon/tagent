@@ -45,5 +45,5 @@ When `ContextIntervention.applyEventView` transforms a `thinking_plan` event for
 
 #### Scenario: thinking_plan event gets correct view prefix
 
-- **WHEN** `extractEventInfo` extracts metadata from an event where `StateDelta["event_type"]` resolves to `"thinking_plan"`
-- **THEN** the prefix SHALL be `"[evt_{key}|thinking_plan]"` where `{key}` is the Snowflake EventKey decimal representation
+- **WHEN** `inferEventInfo` extracts metadata from an event where `StateDelta["event_type"]` resolves to `"thinking_plan"`
+- **THEN** the prefix SHALL be `"[evt_{key}|thinking_plan]"` where `{key}` is the Snowflake EventKey lowercase hexadecimal representation

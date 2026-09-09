@@ -10,9 +10,9 @@
 
 All Go source files in tagent SHALL use `trpc-agent-go/log` for logging. The standard library `log` package SHALL NOT be used.
 
-#### Scenario: command_tool.go log usage
+#### Scenario: action_tool.go log usage
 
-- **WHEN** command_tool.go logs a message
+- **WHEN** action_tool.go logs a message
 - **THEN** it uses `log.Infof`/`log.Errorf` from `trpc-agent-go/log`, not standard library `log.Printf`
 
 ### Requirement: Error return values are checked

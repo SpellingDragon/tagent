@@ -4,6 +4,8 @@
 
 本规范定义 llm-event-valuation 能力。The `agent` package SHALL define an `EventValuator` interface.
 
+> **状态核验（2026-09-09）**：本规范描述的 LLM 事件估值机制（`EventValuator`/`LLMEventValuator`/`ValueScore`/`KeyFacts`/`processing` 策略）**已被骨架模型替代**——事件价值分级现由 `agent/compress/task_segmenter.go` 的段龄纯函数 `deterministicLevel` 承载（L0-L3 确定性定级，零 LLM、零失败路径），价值语义由 `event/registry.go` EventTypeSpec 的 LowValue/TTLDays 元数据与 `consolidation` 策展承载。本文 SHALL 条款不再约束当前实现，保留作为设计决策记录（为何放弃 LLM 打分：不可确定性、失败路径、成本）；现状契约见 [task-skeleton-compression](../task-skeleton-compression/spec.md)。
+
 ## Requirements
 
 ### Requirement: EventValuator interface evaluates events in batch

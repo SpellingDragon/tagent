@@ -4,6 +4,8 @@
 
 本规范定义 event-compaction 能力。The system SHALL provide a `TaskSegmenter` utility in `agent/task_segmenter.go` that exposes two functions: `SegmentMessages(messages []model.Message) []*TaskSe
 
+> **状态核验（2026-09-09，部分落地/部分退役）**：Req1 的 `SegmentMessages` 已落地（`agent/compress/task_segmenter.go`，以 agent_output 闭合回合——边界语义后经 task-skeleton-compression 演进，见该 spec）；`TaskSegmenter` 类型名与 `SegmentReferences` 函数未实现——refs 分组由压缩管线内部承载，无需独立工具。Req2/Req3 的 `UseFrameworkFlow` 双路径开关**已退役**——legacy `Preprocessor.Process` 路径已移除，SmartCompressor 与 Compactor 均由 BeforeModel 回调单路径驱动（现状即 Req2/Req3 的 framework-flow 分支，无开关）。双路径相关 SHALL 条款不约束当前实现。
+
 ## Requirements
 
 ### Requirement: TaskSegmenter provides unified task boundary segmentation
