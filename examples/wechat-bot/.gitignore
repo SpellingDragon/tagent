@@ -16,6 +16,8 @@
 !file_intake_test.go
 !scripts/
 !scripts/verify_large_file.go
+!scripts/loggrep.py
+!scripts/doc_snapshot.py
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml
@@ -37,6 +39,10 @@
 # 绝不含 !.env 放行——只放行不含密钥的 .example 模板与向导脚本）
 !wizard.sh
 !.env.example
+
+# OpenSpec 工作文档（变更提案/规格/归档，纯文本无密钥）
+!openspec/
+!openspec/**
 
 # Allow prompt resources
 !resources/
