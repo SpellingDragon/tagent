@@ -40,10 +40,6 @@
 !wizard.sh
 !.env.example
 
-# OpenSpec 工作文档（变更提案/规格/归档，纯文本无密钥）
-!openspec/
-!openspec/**
-
 # Allow prompt resources
 !resources/
 !resources/prompts/
@@ -76,3 +72,4 @@ logs/
 wechat-bot
 skills/
 data/
+openspec/
