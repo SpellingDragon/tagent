@@ -300,6 +300,10 @@ func main() {
 	//     responses to the correct user. This eliminates the need for replyTarget
 	//     and lastUser tracking, and fixes the responseCh deadlock bug.
 	typingActive := sync.Map{} // chat_id -> time.Time
+	// lastActiveChat 记录最近一次用户消息来源的会话（chat_id）。task 结算等异步
+	// 回合的事件可能不带 meta_chat_id，若无此回退锚点，其用户可见回复会被静默
+	// 丢弃（实测 2026-09-09 丢 ≥2 条）。仅作 task 来源的兜底路由。(async-result-delivery.)
+	lastActiveChat := sync.Map{} // "latest" -> chat_id
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -333,6 +337,9 @@ func main() {
 				triggerSource = "user"
 			}
 			chatID := meta.Meta["chat_id"]
+			if triggerSource == "user" && chatID != "" {
+				lastActiveChat.Store("latest", chatID)
+			}
 			userName := meta.Meta["user_name"]
 
 			// Check for final response (agent_output — no tool calls)
@@ -369,6 +376,14 @@ func main() {
 					// turn: both deliver to the originating session (meta_chat_id).
 					// A settled task fulfilling the user's async request is a
 					// first-class user-visible reply. (async-result-delivery.)
+					if chatID == "" {
+						// Async settled-task turns may lack meta_chat_id; fall back to the
+						// most recent active user session instead of dropping the reply.
+						if v, ok := lastActiveChat.Load("latest"); ok {
+							chatID = v.(string)
+							log.Infof("[Agent][task] 无 meta_chat_id，回退最近活跃会话 %s", chatID)
+						}
+					}
 					if chatID == "" {
 						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
 						continue

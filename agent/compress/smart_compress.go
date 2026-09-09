@@ -27,6 +27,7 @@ type SmartCompressor struct {
 	summaryModel    model.Model  // Optional: used for index-card condensation (condenseCardLines)
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
+	triggerBudget   int          // Post-compression target (0 = same as maxTokens). Unified-threshold mode: set to trigger budget so aging targets the trigger line, eliminating the dead zone between trigger and budget lines
 	tokenCounter    TokenCounter // Token estimator (injected, not NewDefaultTokenCounter)
 
 	// Summary parameters
@@ -39,6 +40,7 @@ func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor {
 		KeepRecentTasks: 2,
 		tokenCounter:    NewDefaultTokenCounter(),
 		maxTokens:       DefaultMaxTokens,
+		triggerBudget:   0, // 0 = legacy behavior (post-compress target == maxTokens)
 	}
 	for _, opt := range opts {
 		opt(sc)
@@ -66,6 +68,25 @@ func WithKeepRecentTasks(n int) SmartCompressorOption {
 // WithMaxTokens sets the token budget used for batch size calculation.
 func WithMaxTokens(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.maxTokens = n }
+}
+
+// WithTriggerBudget sets the post-compression token target. When > 0, aging
+// escalation and L3 archival target this budget instead of maxTokens, aligning
+// the compression target with the trigger line (unified-threshold mode). This
+// eliminates the dead zone where a session baseline sits between the trigger
+// line (threshold*maxTokens) and the budget line (maxTokens): the compressor
+// fires at the trigger line but refuses to age anything because the budget
+// appears unspent, causing an every-turn no-op compression loop.
+func WithTriggerBudget(n int) SmartCompressorOption {
+	return func(sc *SmartCompressor) { sc.triggerBudget = n }
+}
+
+// budget returns the effective post-compression target budget.
+func (sc *SmartCompressor) budget() int {
+	if sc.triggerBudget > 0 && sc.triggerBudget < sc.maxTokens {
+		return sc.triggerBudget
+	}
+	return sc.maxTokens
 }
 
 // WithSummaryMaxTokens sets the output-token budget floor for summary calls
@@ -199,7 +220,7 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	// archival (the old `completeCount <= keepRecent` guard let many-segment
 	// histories lossy-compress with budget to spare — an implicit second
 	// trigger violating the single-dimension-trigger spec).
-	if beforeTokens <= sc.maxTokens {
+	if beforeTokens <= sc.budget() {
 		return messages
 	}
 
@@ -241,18 +262,18 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 		total -= cost[i][levels[i]] - cost[i][lvl]
 		levels[i] = lvl
 	}
-	if total > sc.maxTokens {
+	if total > sc.budget() {
 		for i, seg := range segments {
 			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 2 {
 				escalate(i, 2)
 			}
 		}
 	}
-	if total > sc.maxTokens {
+	if total > sc.budget() {
 		for i, seg := range segments {
 			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 3 {
 				escalate(i, 3)
-				if total <= sc.maxTokens {
+				if total <= sc.budget() {
 					break
 				}
 			}

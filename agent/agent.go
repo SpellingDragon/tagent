@@ -472,6 +472,15 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	opts := []compress.SmartCompressorOption{
 		compress.WithMaxTokens(cfg.MaxTokens),
 	}
+	// Post-compression aging target defaults to the trigger line
+	// (threshold*MaxTokens) instead of MaxTokens. Kills the dead zone where
+	// a sticky session baseline sits between trigger line and budget line,
+	// which caused every-turn no-op compression invocations.
+	pct := cfg.CompressThreshold
+	if pct <= 0 || pct > 1 {
+		pct = 0.8
+	}
+	opts = append(opts, compress.WithTriggerBudget(int(float64(pct)*float64(cfg.MaxTokens))))
 	if cfg.KeepRecentTasks > 0 {
 		opts = append(opts, compress.WithKeepRecentTasks(cfg.KeepRecentTasks))
 	}

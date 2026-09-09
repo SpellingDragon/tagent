@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"time"
 
+	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
-	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/agent"

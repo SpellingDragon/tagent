@@ -47,6 +47,10 @@ mcp_servers:
     transport: streamable-http                              # 归一化为 trpc "streamable"
     url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
     api_key_env: ZAI_API_KEY                                # GLM Coding Plan 专属,复用同一把 key
+  zread:                                                    # URL 阅读器(docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server)
+    transport: streamable-http
+    url: https://open.bigmodel.cn/api/mcp/zread/mcp
+    api_key_env: ZAI_API_KEY                                # 同为 Coding Plan 配额,复用同一把 key
 
 # ===== 平台子系统(默认关闭=零行为变化;此处按远端常驻部署启用。行为详情见 agent-behavior-matrix.md)=====
 governance:                    # 治理闸:leaf 工具过闸 classify→critical批准→goal→预算→记账
