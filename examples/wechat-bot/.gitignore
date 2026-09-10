@@ -40,10 +40,11 @@
 !wizard.sh
 !.env.example
 
-# Allow prompt resources
+# Allow prompt resources (USER.md is personal context, never tracked)
 !resources/
 !resources/prompts/
 !resources/prompts/*.md
+resources/prompts/USER.md
 
 # Allow skills (only README and source, not node_modules)
 !skills/
