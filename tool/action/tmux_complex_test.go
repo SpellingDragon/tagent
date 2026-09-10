@@ -17,7 +17,7 @@ func TestActionTool_TmuxComplexOutput(t *testing.T) {
 		t.Skip("tmux not available, skipping tmux test")
 	}
 
-	tool := NewActionTool()
+	tool := NewActionTool(WithOrphanCleanupDisabled())
 	defer tool.Close()
 
 	// Execute a command that produces complex multi-line output
@@ -69,7 +69,7 @@ func TestActionTool_TmuxLongOutput(t *testing.T) {
 		t.Skip("tmux not available, skipping tmux test")
 	}
 
-	tool := NewActionTool(WithActionWorkspace(t.TempDir()))
+	tool := NewActionTool(WithActionWorkspace(t.TempDir()), WithOrphanCleanupDisabled())
 	defer tool.Close()
 
 	// Generate ~7500 chars of output
@@ -106,7 +106,7 @@ func TestActionTool_TmuxExitCode(t *testing.T) {
 		t.Skip("tmux not available, skipping tmux test")
 	}
 
-	tool := NewActionTool()
+	tool := NewActionTool(WithOrphanCleanupDisabled())
 	defer tool.Close()
 
 	ctx := context.Background()

@@ -10,7 +10,7 @@ import (
 // ==================== Task 4.7: ActionTool.Close() 停止 TmuxMonitor ====================
 
 func TestActionTool_CloseStopsTmuxMonitor(t *testing.T) {
-	ct := NewActionTool()
+	ct := NewActionTool(WithOrphanCleanupDisabled())
 	if ct.tmuxMonitor == nil {
 		t.Skip("tmux not available, skipping")
 	}
@@ -32,7 +32,7 @@ func TestActionTool_CloseStopsTmuxMonitor(t *testing.T) {
 }
 
 func TestActionTool_CloseIdempotent(t *testing.T) {
-	ct := NewActionTool()
+	ct := NewActionTool(WithOrphanCleanupDisabled())
 	if ct.tmuxMonitor == nil {
 		t.Skip("tmux not available, skipping")
 	}
@@ -181,11 +181,12 @@ func TestHandleFakeDead_Integration_RetryCycle(t *testing.T) {
 	)
 
 	session := &TmuxSession{
-		ID:        "test-cycle",
-		Name:      "test-cycle",
-		Command:   "sleep 9999",
-		Status:    SessionRunning,
-		CreatedAt: time.Now(),
+		ID:            "test-cycle",
+		Name:          "test-cycle",
+		Command:       "sleep 9999",
+		Status:        SessionRunning,
+		CreatedAt:     time.Now(),
+		IsInteractive: true, // A1: heartbeat→fake-dead retry cycle is interactive-only now
 	}
 	tm.AddSession(session)
 

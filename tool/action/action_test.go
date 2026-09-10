@@ -29,7 +29,7 @@ func TestActionTool_TmuxExec(t *testing.T) {
 		t.Skip("tmux not available, skipping tmux test")
 	}
 
-	tool := NewActionTool()
+	tool := NewActionTool(WithOrphanCleanupDisabled())
 	defer tool.Close()
 
 	ctx := context.Background()
@@ -60,7 +60,7 @@ func TestActionTool_TmuxExec(t *testing.T) {
 // TestActionTool_TmuxUnavailable verifies that Call() returns a clear error
 // when tmux is unavailable.
 func TestActionTool_TmuxUnavailable(t *testing.T) {
-	tool := NewActionTool()
+	tool := NewActionTool(WithOrphanCleanupDisabled())
 	if tool.tmuxMonitor != nil {
 		defer tool.tmuxMonitor.Stop()
 	}
@@ -81,7 +81,7 @@ func TestActionTool_TmuxUnavailable(t *testing.T) {
 // TestActionTool_EmptyCommand verifies that an empty command is rejected
 // before any tmux session is created.
 func TestActionTool_EmptyCommand(t *testing.T) {
-	tool := NewActionTool()
+	tool := NewActionTool(WithOrphanCleanupDisabled())
 	defer tool.Close()
 
 	ctx := context.Background()
@@ -115,7 +115,7 @@ func TestCommandParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tool := NewActionTool()
+			tool := NewActionTool(WithOrphanCleanupDisabled())
 			defer tool.Close()
 
 			ctx := context.Background()

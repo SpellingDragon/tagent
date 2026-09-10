@@ -210,11 +210,12 @@ func TestDetectSessionState_OutputStable_TransitionToStable(t *testing.T) {
 	// Advance time past stableDuration (10ms)
 	time.Sleep(15 * time.Millisecond)
 
-	// Check 2: output still "A" → non-interactive command should transition to Completed
+	// Check 2: output still "A", process alive → stays Stable (A1 semantics:
+	// alive+quiet without explicit quiet_timeout is NOT completion).
 	status = tm.detectSessionState(session)
 
-	if status != SessionCompleted {
-		t.Errorf("check 2: expected SessionCompleted for non-interactive command, got %s", status)
+	if status != SessionStable {
+		t.Errorf("check 2: expected SessionStable (alive+quiet, no auto-complete), got %s", status)
 	}
 	if session.LastOutput != "A" {
 		t.Errorf("expected LastOutput='A', got %q", session.LastOutput)
@@ -305,7 +306,7 @@ func TestCheckSession_NoStateChange_NoCallback(t *testing.T) {
 func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 	// Simulate a realistic scenario: command produces output in chunks,
 	// then stabilizes. Verify LastOutput tracks correctly through each step.
-	// With new behavior: non-interactive commands go directly to completed after stable.
+	// A1 behavior: alive+quiet settles to Stable (not auto-completed).
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 
@@ -333,9 +334,9 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 			status = tm.detectSessionState(session)
 		}
 
-		// Non-interactive command: stable → completed
-		if i == 4 && status != SessionCompleted {
-			t.Errorf("step %d: expected completed (non-interactive after stable), got %s", i, status)
+		// A1 semantics: alive+quiet → stable (not auto-completed)
+		if i == 4 && status != SessionStable {
+			t.Errorf("step %d: expected stable (alive+quiet, no auto-complete), got %s", i, status)
 		}
 	}
 
@@ -351,7 +352,7 @@ func TestOutputConsistency_MultipleUpdatesBeforeStable(t *testing.T) {
 
 func TestOutputConsistency_OutputMD5_EmptyOutput(t *testing.T) {
 	// Edge case: empty output should also work for MD5 comparison
-	// With new behavior: non-interactive commands go directly to completed after stable.
+	// A1 behavior: alive+quiet settles to Stable (not auto-completed).
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)
 
@@ -369,10 +370,10 @@ func TestOutputConsistency_OutputMD5_EmptyOutput(t *testing.T) {
 	// Advance time past stableDuration
 	time.Sleep(15 * time.Millisecond)
 
-	// Check 2: empty → completed (non-interactive after stable)
+	// Check 2: empty → stable (A1: alive+quiet is not completion)
 	status := tm.detectSessionState(session)
-	if status != SessionCompleted {
-		t.Errorf("expected SessionCompleted for consistent empty output (non-interactive), got %s", status)
+	if status != SessionStable {
+		t.Errorf("expected SessionStable for consistent empty output (alive+quiet), got %s", status)
 	}
 }
 
@@ -500,6 +501,7 @@ func TestStateMachine_FakeDeadLifecycle(t *testing.T) {
 	tm.fakeDeadDuration = 10 * time.Millisecond // short to trigger fakeDead
 
 	session := newTestSession("fake", SessionRunning, "X")
+	session.IsInteractive = true // A1: heartbeat→fake-dead path is interactive-only now
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("X")))
 	tm.sessions["fake"] = session
 
@@ -963,6 +965,7 @@ func TestDetectSessionState_FakeAlive_HeartbeatOk(t *testing.T) {
 	tm.fakeDeadDuration = 10 * time.Millisecond
 
 	session := newTestSession("fakealive", SessionRunning, "unchanged")
+	session.IsInteractive = true // A1: heartbeat path requires interactive
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("unchanged")))
 	session.StableSince = time.Now().Add(-1 * time.Hour) // simulate long stability
 
@@ -996,6 +999,7 @@ func TestDetectSessionState_FakeDead_RecheckPaneDead(t *testing.T) {
 	tm.fakeDeadDuration = 10 * time.Millisecond
 
 	session := newTestSession("recheck", SessionRunning, "stable_output")
+	session.IsInteractive = true // A1: heartbeat path requires interactive
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stable_output")))
 	session.StableSince = time.Now().Add(-1 * time.Hour)
 
@@ -1026,6 +1030,7 @@ func TestHandleFakeAlive_RestartSuccess_ContinuesTracking(t *testing.T) {
 	tm.fakeDeadDuration = 10 * time.Millisecond
 
 	session := newTestSession("restart_ok", SessionRunning, "stuck")
+	session.IsInteractive = true // A1: heartbeat path requires interactive
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
 	session.StableSince = time.Now().Add(-1 * time.Hour)
 	tm.sessions["restart_ok"] = session
@@ -1091,6 +1096,7 @@ func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
 	tm.fakeDeadDuration = 10 * time.Millisecond
 
 	session := newTestSession("restart_fail", SessionRunning, "stuck")
+	session.IsInteractive = true // A1: heartbeat path requires interactive
 	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
 	session.StableSince = time.Now().Add(-1 * time.Hour)
 	tm.sessions["restart_fail"] = session

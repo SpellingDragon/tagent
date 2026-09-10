@@ -171,3 +171,15 @@ node <skill-name>.js --help
 - 强制核查项：文件系统事实核查、承诺-落地追踪、重复/分裂检测、空窗口策略
 - 发现问题后调用 path-map / knowledge-base-manager 处置
 - 详见 `meditation-checklist/README.md`
+
+### N. Interview (interview)
+
+面试备战助手（引用型技能）：驱动 `/home/lighthouse/agent-interview-helper` 的零依赖 CLI，
+跨 agent/ai-infra/llm/mygo 四题库抽题、模拟面试、查计划。微信触发词：「抽一道题」「模拟面试」。
+详见 `skills/interview/SKILL.md`。
+
+### M. ima (ima)
+
+腾讯 ima OpenAPI 统一技能（notes + knowledge-base 双模块）：搜/存笔记、知识库检索与上传。
+凭据 `~/.config/ima/`（600，不入库）。知识库范式（2026-09-10 用户拍板）：**云端 ima 单源，本地仅临时暂存编辑，不再长期落本地**；
+LLM Wiki 维护范式见 `skills/ima/SKILL.md` 顶部「知识库工作流」段。

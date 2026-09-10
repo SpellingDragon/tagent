@@ -2,6 +2,7 @@ package action
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +82,22 @@ type TmuxSettleDetector struct {
 	mu       sync.Mutex      // guards detach + baseline (round state)
 	detach   <-chan struct{} // fires at the dense→sparse boundary (sync→async)
 	baseline int             // output lines before the current round's input
+
+	// Watch (2026-09-11 C1): pattern-triggered wakeups for resident sessions.
+	// OnWatchOutput receives the WHOLE visible pane buffer each refresh (same
+	// semantics as OnStateChange); the hit count is diffed against the last
+	// snapshot, so pane scrolling/truncation degrades to "missed hits" rather
+	// than corruption. Hits merge inside watchWindow (one pending signal max);
+	// the cumulative count is reported in the signal.
+	watchRe     *regexp.Regexp
+	watchWindow time.Duration
+	watchMu     sync.Mutex
+	watchSeen   int
+	watchHits   int
+	watchLast   time.Time
+
+	probeMu     sync.Mutex // guards probe failure bookkeeping (C2)
+	probeFailed bool       // a failure signal is outstanding (no repeat until a success resets)
 }
 
 // NewTmuxSettleDetector creates a detector for the given session. cancelFn, when
@@ -123,6 +140,10 @@ func (d *TmuxSettleDetector) Detached() <-chan struct{} {
 
 // Settled implements task.SettleDetector.
 func (d *TmuxSettleDetector) Settled() <-chan task.SettleSignal { return d.ch }
+
+// Done returns a channel closed when the detector closes (terminal status or
+// Cancel). Sidecar loops (probe) select on it to exit.
+func (d *TmuxSettleDetector) Done() <-chan struct{} { return d.stop }
 
 // Cancel implements task.SettleDetector: reaps the session and closes the
 // settle stream.
@@ -178,4 +199,98 @@ func (d *TmuxSettleDetector) close() {
 		close(d.stop) // stop the detach timer — the session settled/terminated
 		close(d.ch)
 	})
+}
+
+// SetWatch attaches a pattern-triggered wakeup to the detector (2026-09-11
+// C1). The regex is matched against INCREMENTAL output fed via
+// OnWatchOutput; hits inside window are merged (one pending signal max),
+// with the cumulative hit count in the signal output — a log flood of 50
+// ERRORs wakes the agent once with "xN", not 50 times.
+func (d *TmuxSettleDetector) SetWatch(pattern string, window time.Duration) error {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Errorf("action: watch pattern: %w", err)
+	}
+	d.watchMu.Lock()
+	defer d.watchMu.Unlock()
+	d.watchRe = re
+	if window <= 0 {
+		window = 5 * time.Second
+	}
+	d.watchWindow = window
+	return nil
+}
+
+// OnWatchOutput feeds the current visible pane buffer through the watch
+// pattern. Called from the monitor's per-session callback on every refresh
+// (including stable refreshes — a resident session's silence must not starve
+// its watch). Snapshot-diff model: count hits in the WHOLE buffer, subtract
+// the previous snapshot's count — no byte offsets, so pane scrollback
+// rotation merely caps delta at 0 instead of mis-slicing content.
+func (d *TmuxSettleDetector) OnWatchOutput(output string) {
+	d.watchMu.Lock()
+	re := d.watchRe
+	if re == nil {
+		d.watchMu.Unlock()
+		return
+	}
+	hitsNow := len(re.FindAllString(output, -1))
+	delta := hitsNow - d.watchSeen
+	if delta < 0 {
+		delta = 0 // pane scrolled/truncated — lost lines, never fake hits
+	}
+	d.watchSeen = hitsNow
+	if delta == 0 {
+		d.watchMu.Unlock()
+		return
+	}
+	d.watchHits += delta
+	total := d.watchHits
+	last := d.watchLast
+	now := time.Now()
+	// Merge window: rapid successive hits fold into the pending signal; the
+	// NEXT emit carries the updated cumulative count.
+	if !last.IsZero() && now.Sub(last) < d.watchWindow {
+		d.watchMu.Unlock()
+		return
+	}
+	d.watchLast = now
+	d.watchMu.Unlock()
+
+	select {
+	case d.ch <- task.SettleSignal{
+		Kind:   task.SettleWatch,
+		Output: fmt.Sprintf("watch pattern %q hit x%d (cumulative)", re.String(), delta),
+		Err:    fmt.Errorf("%d matches", total),
+	}:
+	default: // buffer full — the agent already has a pending signal
+	}
+}
+
+// EmitProbeResult reports a liveness-probe outcome (2026-09-11 C2). A failure
+// emits a watch-kind signal ONCE; repeated failures stay silent until a
+// success resets the latch. This is the resident-session "service died"
+// wakeup: the agent learns within one probe interval, not when a human notices.
+func (d *TmuxSettleDetector) EmitProbeResult(ok bool, detail string) {
+	d.probeMu.Lock()
+	if ok {
+		d.probeFailed = false
+		d.probeMu.Unlock()
+		return
+	}
+	if d.probeFailed {
+		d.probeMu.Unlock()
+		return // already reported; wait for a success before re-reporting
+	}
+	d.probeFailed = true
+	d.probeMu.Unlock()
+
+	select {
+	case d.ch <- task.SettleSignal{
+		Kind:   task.SettleWatch,
+		Output: "probe FAILED: " + detail,
+		Err:    fmt.Errorf("liveness probe failed: %s", detail),
+	}:
+	default:
+	}
 }

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -41,6 +44,9 @@ type ActionTool struct {
 	// orphanCleanupDisabled skips the startup reaping of prefix-matched
 	// leftover sessions (see WithOrphanCleanupDisabled).
 	orphanCleanupDisabled bool
+
+	// peeks tracks incremental peek cursors per session (B3 session ops).
+	peeks peekCursors
 
 	closeOnce sync.Once
 }
@@ -141,6 +147,10 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		if !ct.orphanCleanupDisabled {
 			ct.tmuxExecutor.CleanupOrphanSessions()
 		}
+		// D1: resident sessions survive agent restarts (tmux server keeps
+		// them + their pipe-pane loggers). Rebuild tracking from the
+		// persisted metadata so their watch/probe keep working.
+		ct.ReattachResidentSessions()
 	}
 
 	return ct
@@ -191,6 +201,52 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 					Type:        "boolean",
 					Description: "Set to true if the command is a TUI application (e.g., vim, htop, qodercli). TUI apps use a screen-based monitor strategy that skips output-stability detection.",
 				},
+				"quiet_timeout": {
+					Type:        "integer",
+					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds.",
+				},
+				"mode": {
+					Type:        "string",
+					Description: "Session liveness semantics: 'oneshot' (default, command semantics — settles when the process exits), 'resident' (long-lived service: dev server / tunnel / training — silence is healthy, no auto-kill, only unexpected death reports back; pair with an output redirect to a log file you can read later), 'interactive' (REPL-like session you intend to send input to later via resume).",
+					Enum:        []any{"oneshot", "resident", "interactive"},
+				},
+				"name": {
+					Type:        "string",
+					Description: "Optional deterministic logical name (a-z A-Z 0-9 '-', max 64) for the session. Named sessions are addressable across calls (restart/exists) and duplicate spawn under an existing name is refused. Recommended for mode=resident/interactive services.",
+				},
+				"op": {
+					Type:        "string",
+					Description: "Session operation on an EXISTING session (instead of spawning): 'peek' = read incremental output since last peek (streaming log; use tail=N to cap lines, ansi=true to keep escape codes), 'send' = inject keys into an interactive/resident session (refused for TUI), 'stop' = graceful SIGTERM then kill-session after grace seconds. Requires session_id or name. When op is set, command/mode/is_tui are ignored.",
+					Enum:        []any{"peek", "send", "stop"},
+				},
+				"keys": {
+					Type:        "string",
+					Description: "Keys to inject when op=send. A trailing Enter is appended unless enter=false.",
+				},
+				"enter": {
+					Type:        "boolean",
+					Description: "op=send only: append Enter after keys (default true).",
+				},
+				"tail": {
+					Type:        "integer",
+					Description: "op=peek only: return at most the last N lines of the new output.",
+				},
+				"ansi": {
+					Type:        "boolean",
+					Description: "op=peek only: keep ANSI escape sequences (default false = stripped for readability).",
+				},
+				"grace": {
+					Type:        "integer",
+					Description: "op=stop only: seconds to wait after SIGTERM before kill-session (default 5).",
+				},
+				"session_id": {
+					Type:        "string",
+					Description: "Exact tmux session id (from a previous action result) when op is set. Takes precedence over name.",
+				},
+				"watch": {
+					Type:        "string",
+					Description: "Regex (Go syntax). While the session runs, output matching it wakes the agent with a 'watch' settle (hits merged in a 5s window, cumulative count reported). Intended for resident sessions: watch 'ERROR|panic|OOM'.",
+				},
 			},
 			Required: []string{"command"},
 		},
@@ -210,12 +266,50 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: invalid args: %w", err)
 	}
 
+	if ct.tmuxExecutor == nil || ct.tmuxMonitor == nil {
+		return nil, fmt.Errorf("action: tmux not available (install: brew install tmux)")
+	}
+
+	// Session-operations dispatch (2026-09-11 B3): when "op" is present the
+	// call addresses an EXISTING session (peek/send/stop) instead of spawning
+	// a new one. Command semantics (spawn) remain the default path. Dispatch
+	// precedes the command-required check: op calls carry no command.
+	if args.Op != "" {
+		return ct.callSessionOp(ctx, &args)
+	}
+
 	if args.Command == "" {
 		return nil, fmt.Errorf("action: command is required")
 	}
 
-	if ct.tmuxExecutor == nil || ct.tmuxMonitor == nil {
-		return nil, fmt.Errorf("action: tmux not available (install: brew install tmux)")
+	// quiet_timeout validation: must be either 0 (default) or >= the stability
+	// window, otherwise a session would be killed as fake-dead before it ever
+	// gets a chance to fire its Stable event.
+	if args.QuietTimeout < 0 {
+		return nil, fmt.Errorf("action: quiet_timeout must be >= 0, got %d", args.QuietTimeout)
+	}
+	if args.QuietTimeout > 0 {
+		if minQuiet := int(ct.tmuxMonitor.stableWindow(args.IsTUI) / time.Second); args.QuietTimeout < minQuiet {
+			return nil, fmt.Errorf("action: quiet_timeout (%ds) must be >= stability window (%ds) or 0 (default); shorter values would kill the session before it can stabilize", args.QuietTimeout, minQuiet)
+		}
+	}
+
+	// mode validation + normalization (B1). Empty = oneshot.
+	switch args.Mode {
+	case "", string(ModeOneshot):
+		args.Mode = string(ModeOneshot)
+	case string(ModeResident), string(ModeInteractive):
+		if args.IsTUI {
+			return nil, fmt.Errorf("action: mode=%s conflicts with is_tui=true (TUI sessions have their own strategy)", args.Mode)
+		}
+	default:
+		return nil, fmt.Errorf("action: unknown mode %q (want oneshot | resident | interactive)", args.Mode)
+	}
+
+	// name validation (B2): DNS-label-safe, bounded, so the derived tmux
+	// session name is always a valid tmux target.
+	if err := validSessionName(args.Name); err != nil {
+		return nil, err
 	}
 
 	log.Infof("[ActionTool] executing cmd=%q", args.Command)
@@ -275,10 +369,15 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // a per-session callback, and ensures the monitor is running. Shared by Call
 // and the relaunch closure.
 func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string, *TmuxSettleDetector, error) {
+	if (args.Mode == string(ModeResident) || args.Mode == string(ModeInteractive)) && !ct.CanSpawnResident() {
+		return "", nil, fmt.Errorf("action: resident session cap (%d) reached; stop an existing resident (op=stop) before spawning another", maxResidentSessions)
+	}
 	session, err := ct.tmuxExecutor.CreateSession(ctx, TmuxCreateOptions{
 		Command: args.Command,
 		WorkDir: args.WorkDir,
 		Env:     args.Env,
+		Mode:    SessionMode(args.Mode),
+		Name:    args.Name,
 	})
 	if err != nil {
 		// Do not re-wrap the "failed to create tmux session" prefix (CreateSession
@@ -291,16 +390,35 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 			log.Warnf("[ActionTool] kill session %s: %v", sessionID, err)
 		}
 		ct.tmuxMonitor.RemoveSession(sessionID)
-	})
+		ct.removeResidentMeta(sessionID)
+	}) // QuietTimeout >0 only: zero value must stay zero so the monitor falls
+	// back to its global default. relaunch reuses args, so the override
+	// semantics carry over to relaunched sessions automatically.
+	if args.Watch != "" {
+		if err := detector.SetWatch(args.Watch, 5*time.Second); err != nil {
+			return "", nil, err
+		}
+	}
+	if args.Probe != "" {
+		ct.startProbeLoop(sessionID, args, detector)
+	}
+	ct.saveResidentMeta(sessionID, args)
+	var quietTimeout time.Duration
+	if args.QuietTimeout > 0 {
+		quietTimeout = time.Duration(args.QuietTimeout) * time.Second
+	}
 	ct.tmuxMonitor.AddSessionWithCallback(&TmuxSession{
-		ID:        sessionID,
-		Name:      session.Name,
-		Command:   args.Command,
-		WorkDir:   args.WorkDir,
-		Status:    SessionRunning,
-		CreatedAt: time.Now(),
-		IsTUI:     args.IsTUI,
+		ID:           sessionID,
+		Name:         session.Name,
+		Command:      args.Command,
+		WorkDir:      args.WorkDir,
+		Status:       SessionRunning,
+		CreatedAt:    time.Now(),
+		IsTUI:        args.IsTUI,
+		Mode:         SessionMode(args.Mode),
+		QuietTimeout: quietTimeout,
 	}, func(_ string, _, newStatus SessionStatus, output string) {
+		detector.OnWatchOutput(output) // C1: pattern watch on every refresh
 		detector.OnStateChange(newStatus, output)
 	})
 	if !ct.tmuxMonitor.IsRunning() {
@@ -481,6 +599,69 @@ type ActionArgs struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	IsTUI   bool              `json:"is_tui,omitempty"` // Hint that this is a TUI application (different monitor strategy)
+	// QuietTimeout overrides the fake-dead detection threshold for this session
+	// (seconds). Silent-but-legal tasks (long downloads, compiles, inference
+	// waits) produce no output while working; the default 150s threshold kills
+	// them. 0 = use global default. Values < StableDuration are rejected in Call.
+	QuietTimeout int `json:"quiet_timeout,omitempty"`
+	// Mode selects session liveness semantics (2026-09-11 B1):
+	//   "oneshot" (default) — command; settles on real exit; 60s quiet reports
+	//   stable (never kills).
+	//   "resident" — long-lived service (dev server / tunnel / trainer);
+	//   silence is healthy, no auto-kill, only unexpected death settles.
+	//   "interactive" — long conversational session (REPL); stable settle +
+	//   resume supported.
+	Mode string `json:"mode,omitempty"`
+	// Name (2026-09-11 B2): deterministic logical name for the session
+	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
+	// later calls (restart/exists checks); duplicate spawn under the same
+	// name is refused. Empty = auto-generated unique name (legacy).
+	Name string `json:"name,omitempty"`
+	// Session-operations (2026-09-11 B3). When Op != "" the call addresses an
+	// existing session instead of spawning a new one:
+	//   Op="peek" — read incremental output since the last peek cursor
+	//   (tail=N caps lines; ansi=true keeps escape sequences).
+	//   Op="send" — inject Keys into the session (append Enter unless
+	//   enter=false); the session must be non-TUI.
+	//   Op="stop" — graceful stop: SIGTERM the pane process (fallback
+	//   kill-session), grace seconds then SIGKILL.
+	// Target: session_id (exact) or name (logical name → n-<name>).
+	Op        string `json:"op,omitempty"`
+	Keys      string `json:"keys,omitempty"`
+	Enter     *bool  `json:"enter,omitempty"`
+	Tail      int    `json:"tail,omitempty"`
+	Ansi      bool   `json:"ansi,omitempty"`
+	GraceSec  int    `json:"grace,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	// Watch (2026-09-11 C1): pattern-triggered wakeups. While the session
+	// runs, output matching this regex wakes the agent (merged within a
+	// 5s window; cumulative hit count reported). Primary use: resident
+	// sessions (watch "ERROR|panic|OOM" on a dev server / trainer log).
+	Watch string `json:"watch,omitempty"`
+	// Probe (2026-09-11 C2): liveness check for resident sessions. A shell
+	// command run every ProbeIntervalSec (default 30); after ProbeFailures
+	// (default 3) consecutive failures the agent is woken once. Example:
+	// "curl -sf http://localhost:8080/healthz".
+	Probe            string `json:"probe,omitempty"`
+	ProbeIntervalSec int    `json:"probe_interval,omitempty"`
+	ProbeFailures    int    `json:"probe_failures,omitempty"`
+}
+
+// validSessionName validates a caller-supplied logical session name (B2).
+// Empty is legal (legacy auto-naming). Returns nil when valid.
+func validSessionName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if len(name) > 64 {
+		return fmt.Errorf("action: name %q too long (max 64 chars)", name)
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("action: name %q contains invalid character %q (allowed: a-z A-Z 0-9 -)", name, r)
+		}
+	}
+	return nil
 }
 
 // ActionToolResult represents the outcome of a tmux command execution after
@@ -528,4 +709,278 @@ func cleanTmuxOutput(output string) string {
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// ---- Session operations (2026-09-11 B3): peek / send / stop ----
+
+// ansiEscape matches ANSI/VT escape sequences (CSI, OSC, simple two-byte).
+var ansiEscape = regexp.MustCompile("\\x1b(?:\\[[0-9;?]*[a-zA-Z]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|[@-Z\\\\-_])")
+
+// stripANSI removes ANSI escape sequences for LLM-friendly output.
+func stripANSI(s string) string {
+	return ansiEscape.ReplaceAllString(s, "")
+}
+
+// peekCursor tracks the byte offset each session's incremental peek has
+// consumed from its pipe log. Guarded by peekMu.
+type peekCursors struct {
+	mu      sync.Mutex
+	offsets map[string]int64
+}
+
+func (c *peekCursors) get(id string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.offsets == nil {
+		return 0
+	}
+	return c.offsets[id]
+}
+
+func (c *peekCursors) set(id string, off int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.offsets == nil {
+		c.offsets = make(map[string]int64)
+	}
+	c.offsets[id] = off
+}
+
+// resolveTarget maps call args to a concrete tmux session id: explicit
+// session_id wins; otherwise name must be present and maps to n-<name>.
+func (ct *ActionTool) resolveTarget(args *ActionArgs) (string, error) {
+	if args.SessionID != "" {
+		return args.SessionID, nil
+	}
+	if args.Name != "" {
+		if err := validSessionName(args.Name); err != nil {
+			return "", err
+		}
+		return NamedSessionName(args.Name), nil
+	}
+	return "", fmt.Errorf("action: op=%s requires session_id or name", args.Op)
+}
+
+// pipeRotateBytes is the pipe-log rotation threshold (2026-09-11 D3). Var,
+// not const, so tests can shrink it. Long-resident sessions pipe megabytes
+// of log; without rotation both peek reads and inode size grow unbounded.
+var pipeRotateBytes int64 = 10 << 20 // 10MB
+
+// maybeRotatePipe opportunistically rotates an overgrown pipe log on peek.
+// COPYTRUNCATE semantics: copy current content to pf+".1", then truncate the
+// live file. pipe-pane's O_APPEND fd keeps appending from offset 0 after
+// truncate — no re-attach, no lost writes (a rename would leave the fd
+// writing into the rotated-away inode). peek's existing "len < cursor →
+// reset" rule transparently adapts to the truncation.
+func (ct *ActionTool) maybeRotatePipe(target string) {
+	rotatePipeFile(ct.tmuxExecutor.PipeFileFor(target))
+}
+
+// rotatePipeFile is the copytruncate core, path-addressed for testability.
+func rotatePipeFile(pf string) {
+	st, err := os.Stat(pf)
+	if err != nil || st.Size() < pipeRotateBytes {
+		return
+	}
+	b, err := os.ReadFile(pf)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(pf+".1", b, 0o600); err != nil {
+		return // keep the live file; retry on next peek
+	}
+	_ = os.Truncate(pf, 0)
+	log.Infof("[ActionTool] rotated pipe log %s (%d bytes → .1)", pf, len(b))
+}
+
+// callSessionOp executes peek/send/stop against an existing session.
+func (ct *ActionTool) callSessionOp(ctx context.Context, args *ActionArgs) (any, error) {
+	target, err := ct.resolveTarget(args)
+	if err != nil {
+		return nil, err
+	}
+	switch args.Op {
+	case "peek":
+		return ct.opPeek(args, target)
+	case "send":
+		return ct.opSend(args, target)
+	case "stop":
+		return ct.opStop(args, target)
+	default:
+		return nil, fmt.Errorf("action: unknown op %q (want peek | send | stop)", args.Op)
+	}
+}
+
+// opPeek returns output appended since the last peek on this session (or the
+// whole log on first peek). tail=N bounds the returned lines (last N);
+// ansi=true keeps escape sequences, default strips them for LLM readability.
+func (ct *ActionTool) opPeek(args *ActionArgs, target string) (any, error) {
+	ct.maybeRotatePipe(target)
+	pf := ct.tmuxExecutor.PipeFileFor(target)
+	b, err := os.ReadFile(pf)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No pipe log: session predates pipe attach or died cleaned-up.
+			return map[string]any{
+				"session_id": target, "status": "no_output_log",
+				"note": "pipe log missing — session may have exited and been archived; use a fresh spawn or check archived pipes",
+			}, nil
+		}
+		return nil, fmt.Errorf("action: peek %s: %w", target, err)
+	}
+
+	from := ct.peeks.get(target)
+	if int64(len(b)) < from {
+		// Log was truncated/rotated underneath us — reset to whole file.
+		from = 0
+	}
+	fresh := b[from:]
+	ct.peeks.set(target, int64(len(b)))
+
+	// Trim ONE trailing newline so split doesn't produce a phantom empty
+	// last element (which would eat into the tail=N budget and surface as
+	// a stray blank line in the output).
+	text := string(fresh)
+	text = strings.TrimSuffix(text, "\n")
+	var lines []string
+	if text == "" {
+		lines = nil
+	} else {
+		lines = strings.Split(text, "\n")
+	}
+	truncated := false
+	if args.Tail > 0 && len(lines) > args.Tail {
+		lines = lines[len(lines)-args.Tail:]
+		truncated = true
+	}
+	out := strings.Join(lines, "\n")
+	if !args.Ansi {
+		out = stripANSI(out)
+	}
+	return map[string]any{
+		"session_id": target,
+		"status":     "ok",
+		"bytes_new":  len(fresh),
+		"truncated":  truncated,
+		"output":     out,
+	}, nil
+}
+
+// opSend injects keys into the session (interactive/resident only; TUI
+// sessions are refused — send-keys corrupts their screen state).
+func (ct *ActionTool) opSend(args *ActionArgs, target string) (any, error) {
+	if args.Keys == "" {
+		return nil, fmt.Errorf("action: op=send requires keys")
+	}
+	if !ct.tmuxExecutor.SessionExists(target) {
+		return nil, fmt.Errorf("action: session %s not found (stopped or never spawned)", target)
+	}
+	if sess, ok := ct.tmuxMonitor.GetSession(target); ok && sess.IsTUI {
+		return nil, fmt.Errorf("action: send refused: session %s is a TUI session (send-keys corrupts screen state); stop and respawn non-TUI instead", target)
+	}
+	enter := true
+	if args.Enter != nil {
+		enter = *args.Enter
+	}
+	keys := args.Keys
+	if enter {
+		keys += "\n"
+	}
+	if err := ct.tmuxExecutor.SendKeys(target, keys); err != nil {
+		return nil, fmt.Errorf("action: send to %s: %w", target, err)
+	}
+	return map[string]any{
+		"session_id": target, "status": "ok",
+		"note": "keys injected; peek to observe the response",
+	}, nil
+}
+
+// opStop gracefully terminates a session: SIGTERM the pane process first,
+// escalating to kill-session after a grace period.
+func (ct *ActionTool) opStop(args *ActionArgs, target string) (any, error) {
+	if !ct.tmuxExecutor.SessionExists(target) {
+		return map[string]any{"session_id": target, "status": "already_gone"}, nil
+	}
+	grace := 5
+	if args.GraceSec > 0 {
+		grace = args.GraceSec
+	}
+	// Graceful phase: SIGTERM the pane process (if resolvable).
+	if pid, err := ct.tmuxExecutor.GetSessionPIDPublic(target); err == nil && pid > 0 {
+		if p, findErr := os.FindProcess(pid); findErr == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
+		deadline := time.Now().Add(time.Duration(grace) * time.Second)
+		for time.Now().Before(deadline) {
+			if !ct.tmuxExecutor.SessionExists(target) {
+				return map[string]any{"session_id": target, "status": "stopped", "how": "sigterm"}, nil
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	// Hard phase: kill the whole session.
+	if err := ct.tmuxExecutor.KillSession(target); err != nil {
+		return nil, fmt.Errorf("action: stop %s: %w", target, err)
+	}
+	return map[string]any{"session_id": target, "status": "stopped", "how": "kill-session"}, nil
+}
+
+// startProbeLoop launches the background liveness prober for a resident
+// session (2026-09-11 C2). Runs args.Probe via sh every interval; after
+// `failures` consecutive failures it wakes the agent once via the detector
+// (EmitProbeResult latches until a success resets). The loop exits when the
+// session's detector is cancelled/reaped — the reaper closure stops it.
+func (ct *ActionTool) startProbeLoop(sessionID string, args ActionArgs, detector *TmuxSettleDetector) {
+	interval := time.Duration(args.ProbeIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	failures := args.ProbeFailures
+	if failures <= 0 {
+		failures = 3
+	}
+	stop := detector.Done()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		consec := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				probeCtx, cancel := context.WithTimeout(context.Background(), interval/2)
+				out, err := ct.probeOnce(probeCtx, args.Probe)
+				cancel()
+				if err == nil {
+					consec = 0
+					detector.EmitProbeResult(true, "")
+					continue
+				}
+				consec++
+				log.Warnf("[ActionTool] probe %s failed (%d/%d): %v%s", sessionID, consec, failures, err, truncateForLog(out, 120))
+				if consec >= failures {
+					detector.EmitProbeResult(false, fmt.Sprintf("%d consecutive failures, last: %v", consec, err))
+				}
+			}
+		}
+	}()
+}
+
+// probeOnce runs one probe command with its own timeout. Output is truncated
+// to keep the settle signal small.
+func (ct *ActionTool) probeOnce(ctx context.Context, probe string) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", probe)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func truncateForLog(s string, n int) string {
+	if len(s) > n {
+		return " out=" + s[:n] + "…"
+	}
+	if s != "" {
+		return " out=" + s
+	}
+	return ""
 }

@@ -31,6 +31,7 @@ const (
 	SettleCompleted SettleKind = "completed" // runnable exited — definitely done
 	SettleStable    SettleKind = "stable"    // output stable, still alive — usable but maybe waiting
 	SettleSuspect   SettleKind = "suspect"   // quiet beyond fake-dead threshold — likely hung
+	SettleWatch     SettleKind = "watch"     // output matched a watch pattern (C1); informational, no state change
 )
 
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
@@ -431,6 +432,14 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
 	switch sig.Kind {
+	case SettleWatch:
+		// Watch hits are pure notifications: never change lifecycle state,
+		// never suppress — but DO respect merge at the detector level.
+		task.mu.Unlock()
+		if tm.onSettle != nil {
+			tm.onSettle(task, sig)
+		}
+		return
 	case SettleStable:
 		if task.aliveDetached {
 			task.mu.Unlock()
@@ -459,6 +468,8 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	task.err = sig.Err
 	task.settledAt = time.Now()
 	switch sig.Kind {
+	case SettleWatch:
+		// Informational: keep lifecycle status as-is.
 	case SettleCompleted:
 		if sig.Err != nil {
 			task.status = TaskFailed

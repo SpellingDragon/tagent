@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,9 +115,22 @@ type TmuxSession struct {
 	StableSince   time.Time // When output first became unchanged (zero if output changed in last check).
 	// Used as the sole stability indicator: elapsed duration determines
 	// Stable / fakeDead thresholds, replacing count-based detection.
-	IsInteractive  bool
-	IsTUI          bool // TUI apps skip heartbeat (send-keys injection) at fakeDead threshold
-	PID            int
+	IsInteractive bool
+	IsTUI         bool // TUI apps skip heartbeat (send-keys injection) at fakeDead threshold
+	// Mode selects the liveness interpretation (zero value = ModeOneshot).
+	// See SessionMode docs. Derived: IsTUI → ModeInteractive-like handling
+	// remains via IsTUI checks; Mode only extends, never overrides IsTUI.
+	Mode SessionMode
+	// QuietTimeout overrides the global fakeDeadDuration for THIS session
+	// (silent-but-legal tasks: long downloads, compiles, inference waits).
+	// Zero value = fall back to the monitor's global default (150s).
+	QuietTimeout time.Duration
+	PID          int
+	// PipeFile is the streaming output log attached via tmux pipe-pane at
+	// session creation. It records every pty byte as it arrives, so it stays
+	// COMPLETE even after the pane dies (unlike capture-pane, which reads the
+	// pane grid and can freeze a stale truncation frame on dead panes).
+	PipeFile       string
 	KillRetryCount int // Number of failed KillSession attempts (used by handleFakeDead retry logic)
 }
 
@@ -133,18 +147,58 @@ const (
 	SessionTimedOut  SessionStatus = "timed_out" // TUI session exceeded fakeDeadDuration without output change
 )
 
+// SessionMode classifies how a session's liveness should be interpreted by the
+// monitor and the settle stream (2026-09-11 async-action overhaul, B1).
+//
+//	ModeOneshot     (default) command semantics: settle on exit; a
+//	                60s-quiet alive session reports Stable (never Completed —
+//	                see detectSessionState), and quiet_timeout (if set) is a
+//	                hard kill deadline.
+//	ModeResident    long-lived services (dev servers, tunnels, training):
+//	                silence is HEALTHY — no stable settle, no fake-dead kill,
+//	                no auto-reap. Only unexpected death (Completed/Error)
+//	                settles. Pair with watch/probe to hear from it.
+//	ModeInteractive long-running conversational sessions (REPL, coding
+//	                agents): stable settle + resume/send-keys semantics,
+//	                heartbeat-based fake-dead detection (unchanged legacy).
+type SessionMode string
+
+const (
+	ModeOneshot     SessionMode = "oneshot"
+	ModeResident    SessionMode = "resident"
+	ModeInteractive SessionMode = "interactive"
+)
+
 // TmuxCreateOptions defines how to create a tmux session
 type TmuxCreateOptions struct {
 	Command       string
 	WorkDir       string
 	IsInteractive bool
-	Env           map[string]string
+	// Mode selects the liveness interpretation (zero value = ModeOneshot).
+	Mode SessionMode
+	Env  map[string]string
+	// Name (2026-09-11 B2): request a deterministic session name instead of
+	// the generated prefix-timestamp. Empty = auto-generate (legacy). Non-empty
+	// names must be DNS-label-safe ([a-zA-Z0-9-]{1,64}, enforced in Call) and
+	// are prefixed to avoid colliding with generated names. Use-case: named
+	// resident/interactive services so later calls can address them
+	// (exists/restart/send) without keeping a session-id ticket.
+	Name string
 }
 
 // CreateSession creates a new tmux session with the command
 func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOptions) (*TmuxSession, error) {
-	// Generate unique session name
+	// Session name: caller-requested deterministic name (B2) or generated.
 	sessionName := fmt.Sprintf("%s-%d", te.prefix, time.Now().UnixNano())
+	if opts.Name != "" {
+		sessionName = NamedSessionName(opts.Name)
+		// Duplicate protection: a named session must be explicitly restarted
+		// or stopped, never silently double-spawned (two dev servers on one
+		// port is the classic footgun this guard exists for).
+		if te.SessionExists(sessionName) {
+			return nil, fmt.Errorf("action: session %q already exists (stop it first or use resume); duplicate spawn refused", sessionName)
+		}
+	}
 
 	// Build tmux command.
 	// Use tmux's ';' separator to set remain-on-exit inline during session
@@ -180,6 +234,17 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 	// pane persists after the command exits. Using ";" (tmux command separator)
 	// ensures this runs atomically with session creation.
 	args = append(args, ";", "set-option", "remain-on-exit", "on")
+
+	// Inline pipe-pane attach: same rationale as remain-on-exit -- the three
+	// tmux commands execute back-to-back inside the tmux server, shrinking the
+	// mount race from a cross-process RTT to <1ms. The pipe log records raw
+	// pty bytes as they arrive and stays complete after pane death (the pane
+	// grid can freeze a stale truncation frame on tmux 3.4). Worst case if a
+	// hyper-fast command still outruns the mount: the log is missing the
+	// HEAD of the stream, never the tail -- and consumers assert on tails.
+	pipeFile := te.pipeFilePath(sessionName)
+	os.WriteFile(pipeFile, nil, 0o600) // pre-create so fallback checks are deterministic
+	args = append(args, ";", "pipe-pane", "-o", "-t", sessionName, "cat >> "+pipeFile)
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
 	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
@@ -219,6 +284,7 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 		CreatedAt:     time.Now(),
 		IsInteractive: opts.IsInteractive,
 		PID:           pid,
+		PipeFile:      pipeFile,
 	}
 
 	return session, nil
@@ -228,7 +294,28 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 func (te *TmuxExecutor) KillSession(sessionID string) error {
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"kill-session", "-t", sessionID})
 	cmd := exec.Command(cmdName, cmdArgs...)
-	return cmd.Run()
+	err := cmd.Run()
+	// (2026-09-11 async-action overhaul, A3) Preserve the forensic pipe log
+	// instead of deleting it: it is the only complete record of what the
+	// session actually printed (capture-pane freezes a stale truncation frame
+	// on dead panes). Archive under the tool-output dir; the workspace cleaner
+	// bounds growth. A missing pipe file (never attached) is fine.
+	if pf := te.pipeFilePath(sessionID); true {
+		if _, statErr := os.Stat(pf); statErr == nil {
+			dest := filepath.Join(os.TempDir(), "tagent-archived-pipes")
+			if mkErr := os.MkdirAll(dest, 0o755); mkErr == nil {
+				archived := filepath.Join(dest, filepath.Base(pf))
+				if renErr := os.Rename(pf, archived); renErr != nil {
+					log.Warnf("[tmux] archive pipe log %s failed: %v", pf, renErr)
+					os.Remove(pf) // fall back to the old delete semantics
+				}
+			} else {
+				log.Warnf("[tmux] archive dir %s create failed: %v", dest, mkErr)
+				os.Remove(pf)
+			}
+		}
+	}
+	return err
 }
 
 // SessionExists checks if a tmux session exists
@@ -239,13 +326,50 @@ func (te *TmuxExecutor) SessionExists(sessionID string) bool {
 }
 
 // GetSessionOutput gets the current output of a tmux session
+// pipeFilePath returns the conventional streaming-log path for a session.
+func (te *TmuxExecutor) pipeFilePath(sessionID string) string {
+	return filepath.Join(os.TempDir(), "tagent-pipe-"+sessionID+".log")
+}
+
+// PipeFileFor exposes the streaming-log path for a session (B3 peek).
+func (te *TmuxExecutor) PipeFileFor(sessionID string) string {
+	return te.pipeFilePath(sessionID)
+}
+
+// GetSessionPIDPublic exposes the pane process PID lookup (B3 stop).
+func (te *TmuxExecutor) GetSessionPIDPublic(sessionID string) (int, error) {
+	return te.getSessionPID(sessionID)
+}
+
+// NamedSessionName maps a caller-supplied logical name to the deterministic
+// tmux session name (2026-09-11 B2). The "n-" prefix segment keeps named
+// sessions visually and syntactically distinct from generated
+// prefix-timestamp names. Callers validate the logical name first
+// (validSessionName in action_tool.go); this function is the single place
+// that knows the naming convention.
+func NamedSessionName(logical string) string {
+	return "n-" + logical
+}
+
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
+	// Prefer the pipe-pane streaming log: it records raw pty bytes as they
+	// arrive and remains complete after pane death. capture-pane reads the
+	// pane grid, which on a dead pane can be frozen at a stale truncation
+	// frame (the root cause of missing END_MARKER tails).
+	pipeFile := te.pipeFilePath(sessionID)
+	if b, err := os.ReadFile(pipeFile); err == nil && len(b) > 0 {
+		return string(b), nil
+	}
+	// Fallback: capture-pane (sessions created before this change, or when
+	// pipe-pane attach failed at creation).
 	// Use -S -1000 to capture full scrollback history, not just visible pane.
 	// This ensures we get output from commands that finished quickly and
 	// whose output may have scrolled past the visible area (especially when
 	// tmux appends "Pane is dead" messages after remain-on-exit).
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"capture-pane", "-p", "-S", "-1000", "-t", sessionID})
-	cmd := exec.Command(cmdName, cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 
