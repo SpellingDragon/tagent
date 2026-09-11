@@ -28,6 +28,11 @@ type CompressResult struct {
 	RetainedRefs []memory.EventReference
 	// Notices contains error/degradation notices injected during compression.
 	Notices []model.Message
+	// Compressed reports whether this round performed a real compaction
+	// (budget-exceeded path). False for under-budget early returns and
+	// degraded paths — only true results carry a persisted snapshot (D2,
+	// tagent-compress-event-sourcing).
+	Compressed bool
 }
 
 // ContextCompressor is the projection-only compression engine.
@@ -341,6 +346,7 @@ func (cc *ContextCompressor) Compress(
 		Messages:     compressedMsgs,
 		RetainedRefs: retainedRefs,
 		Notices:      notices,
+		Compressed:   true,
 	}
 }
 

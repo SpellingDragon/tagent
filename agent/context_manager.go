@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"time"
 	"context"
 	"fmt"
 	"strings"
@@ -447,6 +448,13 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	refs := cm.projection.GetAll()
 	result := cm.contextCompressor.Compress(ctx, refs)
 	cm.projection.Replace(result.RetainedRefs)
+	// D2（tagent-compress-event-sourcing）：先 Replace 后写快照事件；失败留痕不阻断。
+	if notice := cm.persistSnapshotEvent(result, refs); notice != nil {
+		// D2 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
+		// （[context_compress_error] 先例——Notices 目前无包外读者），双写保证可感知。
+		result.Notices = append(result.Notices, *notice)
+		result.Messages = append(result.Messages, *notice)
+	}
 
 	// Rebuild: [system] + render(projection). The system message is the only
 	// part of args.Request.Messages that is read.
@@ -458,6 +466,86 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	rebuilt = append(rebuilt, result.Messages...)
 
 	args.Request.Messages = rebuilt
+}
+
+
+// persistSnapshotEvent（D2，tagent-compress-event-sourcing）：真压缩后把压缩器三态
+// 快照（boundary/threshold/meditationKeys/compressedKeys/retainedRefs）落 WAL——
+// context_compress 事件 Metadata[SnapshotMetaKey]。重放侧据此 Replace+回灌确定性复原。
+// 快照事件不 Append 进投影：活路径 LLM 上下文与改造前逐字节一致，重放侧同样跳过其 ref。
+// StoreEvent 失败仅 ERROR 留痕并返回 [compress_event_write_failed] 通知（不阻断当轮装配，
+// 降级回重推导）；其余失败（marshal）为编程期错误，ERROR 即可。返回 nil = 成功/跳过。
+func (cm *ContextManager) persistSnapshotEvent(result compress.CompressResult, refs []memory.EventReference) *model.Message {
+	if !result.Compressed || cm.memStore == nil || cm.contextCompressor == nil {
+		return nil
+	}
+	cardText := ""
+	for i := range result.Messages {
+		if strings.HasPrefix(result.Messages[i].Content, "[context_compress") {
+			cardText = result.Messages[i].Content
+			if len(cardText) > 8000 {
+				cardText = cardText[:8000]
+			}
+			break
+		}
+	}
+	// compressed_keys = 输入 refs 中被本轮折叠掉的键（差集，保持输入序）。
+	retained := make(map[int64]bool, len(result.RetainedRefs))
+	for _, r := range result.RetainedRefs {
+		retained[r.EventKey] = true
+	}
+	var compressedKeys []int64
+	for _, r := range refs {
+		if !retained[r.EventKey] {
+			compressedKeys = append(compressedKeys, r.EventKey)
+		}
+	}
+	if cm.contextCompressor.FullBoundary() <= 0 {
+		// 退化守卫：boundary<=0 与读取侧 D4 数值域校验对称——真压缩后恒为正键，
+		// 0 值意味着压缩器状态异常，落盘也过不了解析门，跳过（WARN 留痕）。
+		log.Warnf("[persistSnapshotEvent] degenerate boundary=0, skip snapshot persist")
+		return nil
+	}
+	snap := compress.CompressionSnapshot{
+		SchemaVersion:  compress.SnapshotSchemaV1,
+		FullBoundary:   cm.contextCompressor.FullBoundary(),
+		Threshold:      cm.contextCompressor.Threshold(),
+		MeditationKeys: cm.contextCompressor.MeditationKeysSnapshot(),
+		CompressedKeys: compressedKeys,
+		RetainedRefs:   result.RetainedRefs,
+		CardText:       cardText,
+		CreatedAt:      time.Now().UnixMilli(),
+	}
+	raw, err := compress.MarshalSnapshot(&snap)
+	if err != nil {
+		log.Errorf("[persistSnapshotEvent] marshal failed: %v", err)
+		return nil
+	}
+	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	fullEvent := memory.FullEvent{
+		EventKey:     eventKey,
+		PartitionID:  cm.partitionID,
+		EventType:    tagentevent.TypeContextCompress,
+		EventSummary: fmt.Sprintf("压缩现场快照 v1: boundary=%d refs=%d meditation=%d",
+			snap.FullBoundary, len(snap.RetainedRefs), len(snap.MeditationKeys)),
+		Timestamp: time.Now().UnixMilli(),
+		Content:   "[context_compress_snapshot] 压缩器三态快照已落盘（重放侧 Replace+回灌复原）",
+		Metadata: map[string]string{
+			tagentevent.MetaKeyAgentName:     cm.name,
+			tagentevent.MetaKeyTriggerSource: cm.triggerSource,
+			compress.SnapshotMetaKey:         raw,
+		},
+	}
+	if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+		log.Errorf("[persistSnapshotEvent] StoreEvent failed key=%d: %v", eventKey, err)
+		return &model.Message{
+			Role: model.RoleUser,
+			Content: fmt.Sprintf("[compress_event_write_failed] 压缩现场快照落库失败 key=%d: %v（本轮保持重推导降级，下次压缩重建快照）", eventKey, err),
+		}
+	}
+	log.Infof("[persistSnapshotEvent] snapshot persisted key=%d boundary=%d refs=%d",
+		eventKey, snap.FullBoundary, len(snap.RetainedRefs))
+	return nil
 }
 
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
