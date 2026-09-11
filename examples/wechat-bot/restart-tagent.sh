@@ -27,6 +27,14 @@ DONEF="$DONEDIR/restart.done"
 mkdir -p "$DONEDIR" 2>/dev/null
 log(){ echo "[$(date '+%F %T')] $*"; }
 
+# 0-pre. mutual exclusion vs the cron insurance (restart-maintenance.sh is
+# wrapped in flock -n on this same lock path by crontab). 2026-09-12 00:23
+# lesson: the two scripts interleaved — the dogfood swap SIGTERMed the bot the
+# insurance had just spawned, both raced on /tmp/tagent_env.snapshot, and the
+# spawn came up without ZAI_API_KEY (healthz down 60s, insurance re-engaged).
+exec 9>/tmp/tagent_maintenance.lock
+flock -n 9 || { log "FATAL: another restart/insurance holds the lock - abort (no interference)"; exit 1; }
+
 # idempotence gate (crond fires every minute until we succeed/remove marker)
 if [ -f /tmp/tagent_restart.done ]; then log "marker present, skip (already restarted)"; exit 0; fi
 log "=== restart session start (target pid=$OLD_PID, shell $$) ==="
@@ -97,7 +105,7 @@ import os
 env = dict(l.split('=',1) for l in open('$SNAP', encoding='utf-8', errors='surrogateescape').read().splitlines() if '=' in l)
 os.chdir('$BASE')
 os.execve('./wechat-bot', ['./wechat-bot'], env)
-" >> "$LOGF" 2>&1 &
+" >> "$LOGF" 2>&1 9>&- &
 NEW_PID=$!
 echo "$NEW_PID" > "$PIDF"
 log "launched pid=$NEW_PID (env re-injected)"
@@ -107,6 +115,14 @@ for i in $(seq 1 30); do
     sleep 2
     if curl -sf --max-time 3 http://127.0.0.1:8089/healthz > /tmp/tagent_healthz.json 2>/dev/null; then
         LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+        # 2026-09-12 00:23 lesson: healthz OK alone is a false positive - in the
+        # script race the "RESTART OK" line credited a pid that was not the
+        # spawned one. Require the 8089 listener to be our spawn (setsid keeps
+        # the pid; if it forked, accept only when the spawn pid itself is gone).
+        if [ -n "$LISTEN_PID" ] && [ "$LISTEN_PID" != "$NEW_PID" ] && kill -0 "$NEW_PID" 2>/dev/null; then
+            log "note: healthz up but listener pid=$LISTEN_PID != spawned $NEW_PID - keep waiting"
+            continue
+        fi
         echo "${LISTEN_PID:-$NEW_PID}" > "$DONEF"  # handshake: insurance baseline = real listening pid
         touch /tmp/tagent_restart.done; log "RESTART OK: healthz=$(cat /tmp/tagent_healthz.json) new_pid=${LISTEN_PID:-?} after ~$((i*2))s"
         # archive env snapshot for the next reincarnation (same fallback as insurance v2)
