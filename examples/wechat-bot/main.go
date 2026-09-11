@@ -193,6 +193,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 5a-bis. Reincarnation notice (openspec/changes/wechat-bot-reincarnation-notice):
+	// after an insurance-chain self-replacement, tell the new process what it was
+	// doing when its predecessor died (D1 detect / D2 meditation source / D3+D8
+	// compose / D5 consume-marker). One-shot goroutine, never crashes the bot.
+	go maybeInjectReincarnationNotice(ta, filepath.Join("run"), 5*time.Second)
+
 	// 5b. Start HTTPAPI for local observability and RL task submission.
 	//     Endpoints: GET /healthz, POST /task
 	httpPort := os.Getenv("TAGENT_HTTP_PORT")
