@@ -28,7 +28,9 @@ package tagent
 
 import (
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -71,6 +73,11 @@ type runtimeConfig struct {
 	// modelOverrides injects pre-resolved model instances for specific agents.
 	// This supports scenarios like SwappableModel for entry agent (AReaL proxy).
 	modelOverrides map[string]model.Model
+
+	// configPath (agent-config-hot-reload, incremental A): when set via
+	// WithConfigPath, arms a lazy org-config watcher on the entry agent.
+	// Empty = disabled (default).
+	configPath string
 
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
@@ -150,6 +157,16 @@ func WithMCPToolSets(ts []trpctool.ToolSet) Option {
 // WithSummaryModel sets the model for Stage 2 LLM summary compression.
 func WithSummaryModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.summaryModel = m }
+}
+
+// WithConfigPath records the on-disk path the Config was loaded from
+// (agent-config-hot-reload, incremental A). When set, the entry agent arms
+// a lazy org-config watcher: before each LLM call it stats the file and on
+// change re-parses + fingerprints the org whitelist subset — migratable
+// numeric params (compress_threshold) are hot-applied; structural diffs
+// are logged as restart-required until snapshot rebuild (incremental B).
+func WithConfigPath(path string) Option {
+	return func(rc *runtimeConfig) { rc.configPath = path }
 }
 
 // WithModelOverrides injects pre-resolved model instances for specific agents.
@@ -288,6 +305,64 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	// shared across agents).
 	if rc.mcpRegistry != nil {
 		entryAgent.RegisterCloser(rc.mcpRegistry)
+	}
+
+	// Org-layer config hot reload (agent-config-hot-reload, incremental A).
+	// When the config path is known, arm a lazy check on the entry agent:
+	// before each LLM call, stat the file; on mtime churn re-parse and
+	// fingerprint the org whitelist subset (D3). Behavior:
+	//   - fingerprint UNCHANGED: hot-apply migratable numeric params
+	//     (compress_threshold) onto the live agent via ApplyOrgParams.
+	//   - fingerprint CHANGED: structural diff (tools/agents/model wiring).
+	//     Snapshot rebuild lands in incremental B; until then log loudly
+	//     that a restart is required and keep serving (fail-closed).
+	if rc.configPath != "" {
+		cfgPath := rc.configPath
+		var ( // closure-captured reload state
+			lastFP        string
+			lastSeenMtime int64      // atomic; -nanos of last processed config mtime
+			mu            sync.Mutex // single-flight reload
+		)
+		if fp, err := computeOrgFingerprint(&cfg); err == nil {
+			lastFP = fp
+		}
+		entryAgent.SetOrgReloader(func() {
+			info, err := os.Stat(cfgPath)
+			if err != nil {
+				return // file gone/unreachable: keep serving, nothing to do
+			}
+			mt := info.ModTime().UnixNano()
+			if mt == atomic.LoadInt64(&lastSeenMtime) {
+				return // hot path: unchanged
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if info2, err2 := os.Stat(cfgPath); err2 == nil {
+				if info2.ModTime().UnixNano() == atomic.LoadInt64(&lastSeenMtime) {
+					return // re-check under lock
+				}
+				atomic.StoreInt64(&lastSeenMtime, info2.ModTime().UnixNano())
+			}
+			fresh, err := LoadConfig(cfgPath)
+			if err != nil {
+				log.Errorf("[org-hotreload] config parse FAILED — serving previous: %v", err)
+				return
+			}
+			fp, err := computeOrgFingerprint(fresh)
+			if err != nil {
+				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
+				return
+			}
+			if fp == lastFP {
+				// org structure unchanged: hot-apply migratable numeric params
+				if ac, ok := fresh.Agents[cfg.Entry]; ok && ac.CompressThreshold > 0 {
+					entryAgent.ApplyOrgParams(ac.CompressThreshold)
+					log.Infof("[org-hotreload] compress_threshold hot-applied: %v", ac.CompressThreshold)
+				}
+				return
+			}
+			log.Errorf("[org-hotreload] org structure changed (fp %s.. -> %s..) — snapshot rebuild is incremental B; RESTART required to apply", short(lastFP), short(fp))
+		})
 	}
 
 	return entryAgent, nil

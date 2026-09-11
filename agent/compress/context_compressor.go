@@ -3,10 +3,12 @@ package compress
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -47,8 +49,11 @@ type ContextCompressor struct {
 	memStore     memory.MemoryStore
 	tokenCounter TokenCounter
 	maxTokens    int
-	thresholdPct float64
-	keepRecent   int
+	// thresholdPct is hot-reloadable (org-layer config hot reload): read via
+	// currentThreshold() (atomic), written only via UpdateThreshold (atomic
+	// store on bits). 0 bits = unset sentinel handled by currentThreshold().
+	thresholdBits atomic.Uint64
+	keepRecent    int
 
 	// recentFullCount is the full-window size ANCHORED at each compaction
 	// round (stable-context-compaction D3): the most recent recentFullCount
@@ -118,6 +123,27 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 
 // MarkMeditationKey records that the given event key is a meditation-turn
 // output; its index card line will carry the ★ highlight.
+// UpdateThreshold hot-swaps the compression threshold percentage (org-layer
+// config hot reload, design D3 incremental A). Safe for concurrent use:
+// readers go through currentThreshold(); non-positive or NaN/Inf values are
+// rejected (keep the current value).
+func (cc *ContextCompressor) UpdateThreshold(pct float64) {
+	if pct <= 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
+		return
+	}
+	cc.thresholdBits.Store(math.Float64bits(pct))
+}
+
+// currentThreshold returns the live threshold as float64 via atomic load.
+// Zero bits (no UpdateThreshold ever called) falls back to the default.
+func (cc *ContextCompressor) currentThreshold() float64 {
+	bits := cc.thresholdBits.Load()
+	if bits == 0 {
+		return DefaultCompressThreshold
+	}
+	return math.Float64frombits(bits)
+}
+
 func (cc *ContextCompressor) MarkMeditationKey(key int64) {
 	if cc == nil || key == 0 {
 		return
@@ -165,7 +191,6 @@ func NewContextCompressor(
 		memStore:     memStore,
 		tokenCounter: tokenCounter,
 		maxTokens:    maxTokens,
-		thresholdPct: thresholdPct,
 		keepRecent:   keepRecent,
 		// listedKeysCap / cardMaxChars start at 0 (sentinel = "not explicitly
 		// set") and are derived from the primary knobs below (D3) unless an
@@ -176,6 +201,9 @@ func NewContextCompressor(
 	for _, opt := range opts {
 		opt(cc)
 	}
+	// Org-layer hot reload (D3): threshold stored as atomic bits; constructor
+	// parameter seeds the initial value (already default-normalized above).
+	cc.UpdateThreshold(thresholdPct)
 	// D3 (rolling-summary-anchor): formula defaults from the primary knobs
 	// max_tokens (M) and keep_recent_tasks (k), so users only tune those two.
 	// card_max_chars scales with the context budget (~5%); compact_keys_listed
@@ -249,7 +277,7 @@ func (cc *ContextCompressor) Compress(
 	resolved := cc.resolveRefs(ctx, refs)
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
-	threshold := int(float64(cc.maxTokens) * cc.thresholdPct)
+	threshold := int(float64(cc.maxTokens) * cc.currentThreshold())
 
 	// Capacity-gated compaction (stable-context-compaction D2): the token
 	// budget is the ONLY trigger. Between compactions the projection is

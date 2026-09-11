@@ -59,6 +59,13 @@ type ContextManager struct {
 	// with no workspace). <workspace>/tool-output/output-overflow.
 	overflowDir string
 
+	// orgReloader (agent-config-hot-reload, incremental A): optional lazy
+	// check invoked at the top of the unified BeforeModel callback. Wired
+	// by the tagent layer when a config path is known (WithConfigPath).
+	// Must be cheap when nothing changed (single stat) and never fail the
+	// LLM call (log-and-degrade inside the closure).
+	orgReloader func()
+
 	// bundleIDFn returns the currently active evolution bundle id (empty when
 	// evolution is disabled or no bundle is active). Both persistence paths
 	// stamp it into FullEvent.Metadata (bundle_id, D1-B design-report-closeout)
@@ -99,6 +106,49 @@ type ContextManager struct {
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
+// ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
+// migrated onto the live ContextManager without rebuilding the agent
+// topology (design: incremental A of agent-config-hot-reload).
+//
+// Currently migratable: compress_threshold (via the live
+// compress.ContextCompressor's atomic UpdateThreshold). cm.thresholdPct is
+// kept in sync for introspection consistency; the authoritative consumer is
+// the compressor.
+//
+// Structural fields (tools, sub-agents, prompts wiring, memStore) are NOT
+// touched here — they belong to snapshot-level rebuild (incremental B).
+func (cm *ContextManager) ApplyOrgParams(thresholdPct float64) {
+	if thresholdPct > 0 {
+		cm.thresholdPct = thresholdPct
+	}
+	if cm.contextCompressor != nil {
+		cm.contextCompressor.UpdateThreshold(thresholdPct)
+	}
+}
+
+// SetOrgReloader arms the lazy org-config check (see orgReloader field).
+// CheckOrgReload invokes the armed lazy org-config check once (ops/test hook;
+// the production path fires it in the BeforeModel callback).
+func (cm *ContextManager) CheckOrgReload() {
+	if cm.orgReloader != nil {
+		cm.orgReloader()
+	}
+}
+
+func (cm *ContextManager) SetOrgReloader(fn func()) {
+	cm.orgReloader = fn
+}
+
+// RunOrgReloader explicitly invokes the armed reloader if present. The lazy
+// path fires it before each LLM call; this exported entry point lets tests and
+// operators trigger the identical check deterministically (the closure itself
+// is single-flight and mtime-guarded, so redundant calls are cheap no-ops).
+func (cm *ContextManager) RunOrgReloader() {
+	if cm.orgReloader != nil {
+		cm.orgReloader()
+	}
+}
+
 func (cm *ContextManager) SetTriggerSource(source string) {
 	cm.triggerSource = source
 }
@@ -241,6 +291,9 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	// pipeline or persistBusEvent, so the boundary is strictly one-way.
 	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			if cm.orgReloader != nil {
+				cm.orgReloader() // lazy org-config hot-reload check (incr. A)
+			}
 			cm.assembleRequest(ctx, args)
 			return nil, nil
 		})
