@@ -6,7 +6,7 @@ replace github.com/SpellingDragon/tagent => ../..
 
 require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
-	github.com/SpellingDragon/wechat-robot-go v1.5.0
+	github.com/SpellingDragon/wechat-robot-go v1.5.1
 	trpc.group/trpc-go/trpc-agent-go v1.10.0
 )
 
@@ -90,5 +90,3 @@ require (
 	trpc.group/trpc-go/trpc-agent-go/model/provider v1.10.0 // indirect
 	trpc.group/trpc-go/trpc-mcp-go v0.0.10 // indirect
 )
-
-replace github.com/SpellingDragon/wechat-robot-go => /home/lighthouse/src/wechat-robot-go

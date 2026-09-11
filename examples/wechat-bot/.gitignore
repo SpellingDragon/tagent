@@ -78,3 +78,5 @@ wechat-bot
 skills/
 data/
 openspec/
+!dedup.go
+!dedup_test.go
