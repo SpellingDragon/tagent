@@ -23,6 +23,12 @@ const (
 	TaskCancelled     TaskStatus = "cancelled"      // explicitly cancelled
 )
 
+// defaultZombieGrace is the minimum age a running/suspect task must reach
+// before reconcileZombies may retire it. The liveness probe — not age — is
+// the kill criterion; the grace merely keeps the sweep away from spawn
+// windows and legitimately quiet long-runners.
+const defaultZombieGrace = 10 * time.Minute
+
 // SettleKind classifies how a task reached a settle point. Detectors emit this
 // deterministically; the LLM interprets ambiguous kinds (stable/suspect) later.
 type SettleKind string
@@ -32,6 +38,7 @@ const (
 	SettleStable    SettleKind = "stable"    // output stable, still alive — usable but maybe waiting
 	SettleSuspect   SettleKind = "suspect"   // quiet beyond fake-dead threshold — likely hung
 	SettleWatch     SettleKind = "watch"     // output matched a watch pattern (C1); informational, no state change
+	SettleFailed    SettleKind = "failed"    // reconcile-retired: backing session provably gone (zombie sweep)
 )
 
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
@@ -269,6 +276,10 @@ type TaskManagerConfig struct {
 	// readable reason to REJECT a new spawn (e.g. disk degraded). In-flight
 	// tasks are never gated — a gate, not a wall. May be nil.
 	SpawnGate func() string
+	// ZombieGrace is the minimum age a running/suspect task must reach before
+	// the liveness reconcile may retire it as a zombie (reconcileZombies:
+	// no settle + probe-dead backing session). Zero -> defaultZombieGrace.
+	ZombieGrace time.Duration
 }
 
 // TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
@@ -287,6 +298,7 @@ type TaskManager struct {
 	spawnGate   func() string
 	terminalTTL time.Duration
 	now         func() time.Time // injectable clock (tests); defaults to time.Now
+	zombieGrace time.Duration
 }
 
 // NewTaskManager creates a TaskManager.
@@ -295,12 +307,17 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if ttl <= 0 {
 		ttl = defaultTerminalTTL
 	}
+	zg := cfg.ZombieGrace
+	if zg <= 0 {
+		zg = defaultZombieGrace
+	}
 	return &TaskManager{
 		tasks:       make(map[string]*Task),
 		byKey:       make(map[string]string),
 		onSettle:    cfg.OnSettle,
 		spawnGate:   cfg.SpawnGate,
 		terminalTTL: ttl,
+		zombieGrace: zg,
 		now:         time.Now,
 	}
 }
@@ -515,6 +532,7 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 // unchanged. Probe calls run outside tm.mu (they shell out to tmux); the
 // re-check under t.mu makes double-retire impossible.
 func (tm *TaskManager) reconcileDetached() {
+	tm.reconcileZombies()
 	tm.mu.Lock()
 	var candidates []*Task
 	for _, t := range tm.tasks {
@@ -548,6 +566,60 @@ func (tm *TaskManager) reconcileDetached() {
 			t.mu.Unlock()
 			if tm.onSettle != nil {
 				tm.onSettle(t, SettleSignal{Kind: SettleCompleted, Output: out})
+			}
+		} else {
+			t.mu.Unlock()
+		}
+	}
+}
+
+// reconcileZombies closes the running-state blind spot of reconcileDetached:
+// a task whose detector never emits a settle (frozen output pipe, tmux
+// session lost out-of-band) lingered on the board as [running] forever —
+// observed live as a millisecond probe stuck for 4h+. A running/suspect task
+// older than zombieGrace whose Alive probe reports the backing session gone
+// is retired through the terminal failed path, so onSettle notifies exactly
+// once and pruneTerminal reclaims the detector. Nil-probe tasks (subagents)
+// are never touched; a live probe protects a quiet long-runner at any age.
+func (tm *TaskManager) reconcileZombies() {
+	now := tm.now()
+	tm.mu.Lock()
+	var candidates []*Task
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		need := t.Spec.Alive != nil &&
+			(t.status == TaskRunning || t.status == TaskSuspect) &&
+			now.Sub(t.StartedAt) >= tm.zombieGrace
+		t.mu.Unlock()
+		if need {
+			candidates = append(candidates, t)
+		}
+	}
+	tm.mu.Unlock()
+	for _, t := range candidates {
+		t.mu.Lock()
+		st := t.status
+		if st != TaskRunning && st != TaskSuspect {
+			t.mu.Unlock()
+			continue
+		}
+		probe := t.Spec.Alive
+		t.mu.Unlock()
+		if probe() {
+			continue // backing session alive - quiet, not dead
+		}
+		out := "(zombie retired: no settle and backing session gone beyond grace - auto-retired by liveness reconcile)"
+		t.mu.Lock()
+		st = t.status
+		if st == TaskRunning || st == TaskSuspect {
+			t.status = TaskFailed
+			t.result = out
+			if t.settledAt.IsZero() {
+				t.settledAt = tm.now()
+			}
+			t.mu.Unlock()
+			if tm.onSettle != nil {
+				tm.onSettle(t, SettleSignal{Kind: SettleFailed, Output: out})
 			}
 		} else {
 			t.mu.Unlock()
