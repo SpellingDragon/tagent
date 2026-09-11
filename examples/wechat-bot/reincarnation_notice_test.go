@@ -77,11 +77,13 @@ func TestReadNoticeMetadata(t *testing.T) {
 
 // fakeStore adapts a canned QueryEvents result for D8 contract tests.
 type fakeStore struct {
-	refs []memory.EventReference
-	err  error
+	refs      []memory.EventReference
+	err       error
+	lastQuery memory.QueryOptions // captured: partition-contract assertions
 }
 
 func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference, error) {
+	f.lastQuery = q
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -92,14 +94,25 @@ func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference,
 // propagation for logged degradation (never swallowed), nil-store unavailability.
 func TestFetchWALTail(t *testing.T) {
 	refs := []memory.EventReference{{EventKey: 1, EventType: "agent_output"}, {EventKey: 2, EventType: "thinking_plan"}}
-	got, err := fetchWALTail(&fakeStore{refs: refs}, 5)
+	store := &fakeStore{refs: refs}
+	got, err := fetchWALTail(store, "tagent", 5)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("tail query failed: %v %v", got, err)
 	}
-	if _, err := fetchWALTail(&fakeStore{err: os.ErrPermission}, 5); err == nil {
+	// Partition contract (2026-09-12 production find): resolvePartitions returns
+	// nil for a query without PartitionIDs -> zero partitions scanned -> empty
+	// result. The tail query MUST target the agent's own namespace partition.
+	wantPID := memory.PartitionIDFromName("tagent")
+	if len(store.lastQuery.PartitionIDs) != 1 || store.lastQuery.PartitionIDs[0] != wantPID {
+		t.Fatalf("query must pass PartitionIDs=[%d] (agent namespace), got %v", wantPID, store.lastQuery.PartitionIDs)
+	}
+	if store.lastQuery.Limit != 5 || store.lastQuery.OrderBy != "timestamp_desc" {
+		t.Fatalf("limit/orderBy contract broken: %+v", store.lastQuery)
+	}
+	if _, err := fetchWALTail(&fakeStore{err: os.ErrPermission}, "tagent", 5); err == nil {
 		t.Fatal("store error must propagate (D8 forbids silent degradation)")
 	}
-	if _, err := fetchWALTail(nil, 5); err == nil {
+	if _, err := fetchWALTail(nil, "tagent", 5); err == nil {
 		t.Fatal("nil store must report unavailability")
 	}
 }

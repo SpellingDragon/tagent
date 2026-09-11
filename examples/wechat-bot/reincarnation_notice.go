@@ -99,13 +99,19 @@ type tailQuerier interface {
 
 // fetchWALTail queries the newest events time-desc, limited (D8). Errors are
 // returned for logged degradation — D8 forbids swallowing them.
-func fetchWALTail(store tailQuerier, limit int) ([]memory.EventReference, error) {
+func fetchWALTail(store tailQuerier, agentName string, limit int) ([]memory.EventReference, error) {
 	if store == nil {
 		return nil, fmt.Errorf("memstore unavailable")
 	}
+	// Partitioned store contract (segment_store.go resolvePartitions): a query
+	// without PartitionIDs scans zero partitions and silently returns empty.
+	// The agent's own events live in PartitionIDFromName(agentName) — same
+	// derivation as build_agent.go wiring — so pass it explicitly.
+	pid := memory.PartitionIDFromName(agentName)
 	return store.QueryEvents(memory.QueryOptions{
-		Limit:   limit,
-		OrderBy: "timestamp_desc", // segment_store.go: valid value
+		PartitionIDs: []int{pid},
+		Limit:        limit,
+		OrderBy:      "timestamp_desc", // segment_store.go: valid value
 	})
 }
 
@@ -178,7 +184,7 @@ func buildNoticeText(meta map[string]string, refs []memory.EventReference, walEr
 // the event loop to settle, detect (D1), compose (D3+D8), inject via the
 // meditation source (D2), then rename the marker (D5). Every step is logged;
 // nothing here is allowed to crash the bot.
-func maybeInjectReincarnationNotice(ta noticeInjector, runDir string, delay time.Duration) {
+func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir string, delay time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		// cwd can drift across launchers; anchors resolve relative to the binary.
 		if exe, err := os.Executable(); err == nil {
@@ -198,7 +204,7 @@ func maybeInjectReincarnationNotice(ta noticeInjector, runDir string, delay time
 	if meta == nil {
 		log.Warnf("[reincarnation] NOTICE archive missing at %s — degraded metadata", noticePath)
 	}
-	refs, walErr := fetchWALTail(ta.MemStore(), walTailEventLimit)
+	refs, walErr := fetchWALTail(ta.MemStore(), agentName, walTailEventLimit)
 	if walErr != nil {
 		log.Warnf("[reincarnation] WAL tail query failed: %v — degraded scene block", walErr)
 	}
