@@ -227,7 +227,14 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 
 // LoadFiles loads multiple prompt files and concatenates them.
 // Files are separated by double newlines.
-// Empty paths or empty content are skipped.
+// Empty paths or empty content are skipped. A file absent on disk (and not
+// present in the fallback FS) is ALSO skipped rather than fatal: these are
+// optional context files following the nanobot bootstrap pattern (USER.md,
+// HEARTBEAT.md, MEMORY.md are personal/optional and a clean checkout legitimately
+// lacks them). This mirrors LoadBootstrap's skip-missing semantics — previously
+// LoadFiles hard-failed on any absent file, so a committed config referencing an
+// optional, git-ignored file (e.g. USER.md) could not start from a clean checkout.
+// Only not-exist is tolerated; real read errors (e.g. permission) still propagate.
 func (l *Loader) LoadFiles(paths []string) (string, error) {
 	parts := make([]string, 0, len(paths))
 
@@ -239,6 +246,15 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 
 		content, err := l.LoadFromFile(path)
 		if err != nil {
+			// Optional-file semantics: skip an absent file (load-if-present), keeping
+			// the framework's own DefaultConfig/BootstrapLoadOrder contract that
+			// USER.md/HEARTBEAT.md/MEMORY.md may be absent. Logged at info so a
+			// misspelled required filename is still visible, not silently swallowed.
+			// Genuine read errors (permission, I/O) are not os.ErrNotExist → propagate.
+			if errors.Is(err, os.ErrNotExist) {
+				log.Infof("[prompt] optional file %q absent, skipping (load-if-present)", path)
+				continue
+			}
 			return "", err
 		}
 
