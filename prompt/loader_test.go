@@ -156,6 +156,46 @@ func TestLoader_LoadFiles(t *testing.T) {
 	}
 }
 
+// TestLoader_LoadFiles_SkipsAbsentOptionalFile verifies load-if-present semantics
+// for optional context files: a filename listed in system_prompt.files that is
+// absent on disk (e.g. USER.md on a clean checkout, where it is a git-ignored
+// personal file) is skipped without failing the whole load, while present files
+// still concatenate in order. Fail-before: without the os.ErrNotExist skip in
+// LoadFiles this returns an error, so a committed config referencing an optional
+// git-ignored file could not start from a clean checkout.
+func TestLoader_LoadFiles_SkipsAbsentOptionalFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Present files; USER.md deliberately NOT created (simulates a clean checkout
+	// where the git-ignored personal file is absent).
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents ctx"), 0644); err != nil {
+		t.Fatalf("Failed to create AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "TOOLS.md"), []byte("tools ctx"), 0644); err != nil {
+		t.Fatalf("Failed to create TOOLS.md: %v", err)
+	}
+
+	loader := NewLoader(dir)
+	// USER.md is absent → skipped, not fatal; order of present files preserved.
+	result, err := loader.LoadFiles([]string{"AGENTS.md", "USER.md", "TOOLS.md"})
+	if err != nil {
+		t.Fatalf("LoadFiles should skip absent optional file, got error: %v", err)
+	}
+	expected := "agents ctx\n\ntools ctx"
+	if result != expected {
+		t.Errorf("Expected %q, got %q", expected, result)
+	}
+
+	// All-absent list yields empty content and no error (degenerate but not fatal).
+	result, err = loader.LoadFiles([]string{"NOPE1.md", "NOPE2.md"})
+	if err != nil {
+		t.Fatalf("LoadFiles with all-absent files should not error: %v", err)
+	}
+	if result != "" {
+		t.Errorf("Expected empty result for all-absent files, got %q", result)
+	}
+}
+
 func TestLoader_LoadComposite(t *testing.T) {
 	dir := t.TempDir()
 
