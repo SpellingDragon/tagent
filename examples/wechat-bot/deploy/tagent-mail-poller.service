@@ -1,0 +1,47 @@
+# ============================================================================
+# tagent-mail-poller — 邮件入站渠道拉取器 (openspec: agentmail-email-inbound-channel)
+# 职责: agently-cli message +watch (长轮询) -> NDJSON 解析 -> message_id 去重
+#       -> POST http://127.0.0.1:8089/task 注入 tagent 消费
+# 凭据: agently-cli OAuth token 由 CLI 自管理, 本服务不经手任何密钥
+# ============================================================================
+[Unit]
+Description=tagent mail inbound poller (agently +watch -> tagent /task)
+After=network-online.target tagent-wechat.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lighthouse
+Group=lighthouse
+WorkingDirectory=/home/lighthouse/tagent/examples/wechat-bot
+# node 不在 systemd 默认 PATH, 而 agently-cli shebang 是 /usr/bin/env node (缺此行 +watch exit 127)
+Environment=PATH=/home/lighthouse/.local/lib/node-v22.14.0-linux-x64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/python3 /home/lighthouse/tagent/examples/wechat-bot/mail-poller/mail_poller.py
+# 崩溃自愈: 5s 内拉起 (任务 3.3 验证语义)
+Restart=always
+RestartSec=5
+# 环境模板: cp mail-poller/.env.example mail-poller/.env 后按需改 (密钥不入 git)
+# 取消下行注释即启用自定义环境
+#EnvironmentFile=/home/lighthouse/tagent/examples/wechat-bot/mail-poller/.env
+# 日志: 追加文件 (journalctl -u tagent-mail-poller 亦可读)
+StandardOutput=append:/home/lighthouse/tagent/examples/wechat-bot/data/mail-poller/poller.log
+StandardError=append:/home/lighthouse/tagent/examples/wechat-bot/data/mail-poller/watch-stderr.log
+# ---- 安全加固 (平移 tagent-wechat.service 模式, 按 poller 实需裁剪) ----
+# systemd 不支持行内注释, 全部独立成行
+NoNewPrivileges=true
+# /usr /boot /etc 只读; HOME 保持可写(CLI token 缓存需要)
+ProtectSystem=full
+# 私有 /tmp
+PrivateTmp=true
+ProtectControlGroups=true
+# cgroup/sysctl 只读
+ProtectKernelTunables=true
+# 禁创建 SUID/SGID 文件
+RestrictSUIDSGID=true
+# 资源上限
+LimitNOFILE=8192
+TasksMax=32
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

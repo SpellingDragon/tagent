@@ -80,3 +80,14 @@ data/
 openspec/
 !dedup.go
 !dedup_test.go
+
+# ---- mail-poller (openspec: agentmail-email-inbound-channel) ----
+# 白名单制补充: 拉取器代码/文档/部署单元入库; .env 与 data/ 运行态保持忽略
+!mail-poller/
+!mail-poller/mail_poller.py
+!mail-poller/README.md
+!mail-poller/.env.example
+!deploy/tagent-mail-poller.service
+!docs/
+!docs/notes/
+!docs/notes/mail-poller-notes.md
