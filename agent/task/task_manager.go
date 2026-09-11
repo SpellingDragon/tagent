@@ -101,6 +101,13 @@ type TaskSpec struct {
 	// re-enters the standard dense→ACK→settle lifecycle under the SAME task id.
 	// Nil → the task is not resumable.
 	ResumeFn func(input string) (SettleDetector, error)
+	// Alive, when non-nil, is a liveness probe for service-type tasks. After a
+	// task settles into alive_detached, List() consults the probe lazily: a
+	// false answer retires the task through the normal completion path, so
+	// board entries whose backing session (tmux) died out-of-band are not
+	// shown forever. Nil -> never reconciled (e.g. subagent tasks).
+	// See TaskManager.reconcileDetached.
+	Alive func() bool
 	// Origin is opaque baggage: a snapshot of the spawning turn's invocation
 	// metadata (e.g. chat_id), stamped by the framework at spawn time and
 	// carried verbatim to the task_settled event so a background result can be
@@ -497,6 +504,57 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 	return t, ok
 }
 
+// reconcileDetached retires alive_detached tasks whose liveness probe
+// (Spec.Alive) reports the backing session gone - e.g. a tmux session
+// killed out-of-band after the task had already settled once into
+// alive_detached. Without this, such entries linger on the board forever:
+// pruneTerminal only reaps terminal states, and nothing reconciles
+// alive_detached against ground truth. The retire follows normal
+// completion semantics (status -> completed, settledAt stamped, exactly
+// one final onSettle notification) so downstream TTL pruning applies
+// unchanged. Probe calls run outside tm.mu (they shell out to tmux); the
+// re-check under t.mu makes double-retire impossible.
+func (tm *TaskManager) reconcileDetached() {
+	tm.mu.Lock()
+	var candidates []*Task
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		need := t.status == TaskAliveDetached && t.Spec.Alive != nil
+		t.mu.Unlock()
+		if need {
+			candidates = append(candidates, t)
+		}
+	}
+	tm.mu.Unlock()
+	for _, t := range candidates {
+		t.mu.Lock()
+		if t.status != TaskAliveDetached {
+			t.mu.Unlock()
+			continue
+		}
+		probe := t.Spec.Alive
+		t.mu.Unlock()
+		if probe() {
+			continue // backing session still alive - nothing to do
+		}
+		out := "(backing session gone - auto-retired by liveness reconcile)"
+		t.mu.Lock()
+		if t.status == TaskAliveDetached {
+			t.status = TaskCompleted
+			t.result = out
+			if t.settledAt.IsZero() {
+				t.settledAt = tm.now()
+			}
+			t.mu.Unlock()
+			if tm.onSettle != nil {
+				tm.onSettle(t, SettleSignal{Kind: SettleCompleted, Output: out})
+			}
+		} else {
+			t.mu.Unlock()
+		}
+	}
+}
+
 // pruneTerminal removes exited tasks (completed/failed/cancelled/dead) whose
 // grace period has elapsed, reclaiming each victim's detector resources
 // (goroutine/context/tmux session). It is lazy — invoked from List and Spawn —
@@ -524,6 +582,7 @@ func (tm *TaskManager) pruneTerminal() {
 
 // List returns a snapshot of all tracked tasks.
 func (tm *TaskManager) List() []*Task {
+	tm.reconcileDetached()
 	tm.pruneTerminal()
 	tm.mu.Lock()
 	defer tm.mu.Unlock()

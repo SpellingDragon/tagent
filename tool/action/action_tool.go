@@ -338,6 +338,7 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			Key:      args.Command,
 			Relaunch: ct.relaunchClosure(spawner, args),
 			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Alive:    ct.sessionAliveClosure(sessionID),
 		}, detector)
 		if res.Blocked != "" {
 			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以 result
@@ -443,8 +444,18 @@ func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs)
 			Key:      args.Command,
 			Relaunch: ct.relaunchClosure(spawner, args),
 			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Alive:    ct.sessionAliveClosure(sessionID),
 		}, detector), nil
 	}
+}
+
+// sessionAliveClosure binds a TaskSpec.Alive liveness probe to the spawned
+// tmux session: true while SessionExists holds. Wired into both spawn
+// sites (fresh command + relaunch) so the task layer can retire
+// alive_detached board entries whose backing session was killed
+// out-of-band.
+func (ct *ActionTool) sessionAliveClosure(sessionID string) func() bool {
+	return func() bool { return ct.tmuxExecutor.SessionExists(sessionID) }
 }
 
 // resumeClosure returns the tmux-specific resume implementation: feed input
