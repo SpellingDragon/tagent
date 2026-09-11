@@ -427,13 +427,7 @@ func buildAgent(
 	// （projection 此时已由 NewTagentAgent 创建），恢复「存储⇔投影同点」在退化路径
 	// 的等价语义（Role 从事件类型派生）。
 	if etsHolder != nil {
-		etsHolder.SetReplayProjection(func(ev memory.FullEvent) {
-			ta.AppendProjectionRef(memory.EventReference{
-				EventKey: ev.EventKey, PartitionID: ev.PartitionID,
-				EventType: ev.EventType, EventSummary: ev.EventSummary,
-				Timestamp: ev.Timestamp, Role: string(tagentevent.EventTypeRole(ev.EventType)),
-			})
-		})
+		etsHolder.SetReplayProjection(agent.ReplayProjectionHandler(ta))
 	}
 
 	// Register ActionTool for cleanup on agent shutdown.
