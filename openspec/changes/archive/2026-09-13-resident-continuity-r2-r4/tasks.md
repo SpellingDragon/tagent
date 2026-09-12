@@ -70,5 +70,5 @@
 
 - [x] 4.1 全量门禁：build+vet+全量 -short 零 FAIL+相关包 -race（agent 存量 3 处上游 race 非阻断；event 镜像契约已纳入 task_spawned/resident_session）
 - [x] 4.2 文档同步：memory-architecture.md（旁路产物两层记录：task_spawned/resident_session+registry 重建入口）、agent-architecture.md（R2 registry fold+承诺表/org 级单例、R3 orphan 重定义+三态加闸+跨重启连续序）、agent-behavior-matrix.md（重启恢复表补 R1-R4 四行：上下文/任务/常驻/热更）
-- [ ] 4.3 roadmap 勾选回写 + LEDGER 落地行
-- [ ] 4.4 validate --strict + delta 同步 + 归档 + commit（conventional，节间提交边界可独立 revert）
+- [x] 4.3 roadmap 勾选回写（2.3/4.3 落地行+裁决注记） + LEDGER 落地行（实现面/验证面全记）
+- [x] 4.4 validate --strict（变更+主 specs 88/88） + delta 同步（task-registry MOD 反转纯内存禁令+看板连续 ADDED；resident-session-continuity/swappable-executor NEW 主 spec）+ 归档 + commit（conventional，节间提交边界可独立 revert）

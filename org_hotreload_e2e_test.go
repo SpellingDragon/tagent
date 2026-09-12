@@ -6,6 +6,10 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/prompt"
+	"github.com/stretchr/testify/require"
 )
 
 // e2eYAML renders the minimal org config used by the hot-shift e2e test.
@@ -79,4 +83,72 @@ func TestOrgHotShift_EndToEnd(t *testing.T) {
 	if got := entry.OrgThreshold(); got != 0.5 {
 		t.Fatalf("after broken config threshold = %v, want 0.5 (fail-closed)", got)
 	}
+}
+
+// TestOrgHotReload_ExecutorSwapEndToEnd（R4，resident-continuity-r2-r4 roadmap 4.5）：
+// 结构变更（fingerprint 变化）→ executorOnly 重建壳 → SwapExecutor 换入 →
+// 非重启换代生效且常驻不变量原封。与 TestOrgHotShift_EndToEnd（incremental A
+// 全链路懒检查）互补：本测聚焦 B 面（换缝）缝合点。
+// fail-before 对照：不 Swap（旧「RESTART required」方案）时 Runner 引用永不变化。
+func TestOrgHotReload_ExecutorSwapEndToEnd(t *testing.T) {
+	rc := &runtimeConfig{model: &factoryMockModel{}}
+	cfg := Config{
+		Entry: "tagent",
+		Agents: map[string]AgentConfig{
+			"tagent": {
+				SystemPrompt: PromptConfig{Inline: "gen1 prompt"},
+				Memory:       MemoryConfig{Type: "memory"},
+			},
+		},
+	}
+	loader := prompt.NewLoader("")
+	cache := make(map[string]*agent.TagentAgent)
+
+	// 1) 常驻 entry（冷启动，非 executorOnly）。
+	resident, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache, false)
+	require.NoError(t, err)
+	// New() 的 🔴1 回填：懒检查 Reload 依赖常驻资源注入（此处镜像）。
+	rc.entryMemStore = resident.MemStore()
+	rc.entrySessionSvc = resident.SessionSvc()
+	require.NotNil(t, rc.entryMemStore)
+	require.NotNil(t, rc.entrySessionSvc)
+
+	oldRunner := resident.Runner()
+	require.NotNil(t, oldRunner)
+	oldStore := resident.MemStore()
+	oldSvc := resident.SessionSvc()
+	oldTM := resident.TaskManager()
+
+	// 2) 结构变更（prompt 变更 → fingerprint 变化）→ executorOnly 重建壳。
+	gen2 := cfg.Agents["tagent"]
+	gen2.SystemPrompt = PromptConfig{Inline: "gen2 prompt"}
+	rebuilt, err := buildAgent("tagent", gen2, cfg, rc, loader, make(map[string]*agent.TagentAgent), true)
+	require.NoError(t, err)
+	newRunner := rebuilt.Runner()
+	require.NotNil(t, newRunner)
+	require.NotSame(t, oldRunner, newRunner, "rebuilt shell must carry a NEW runner")
+
+	// 🔴1 回归：壳复用常驻事实链 store 与 session 服务（ownership 表）。
+	require.Same(t, oldStore, rebuilt.MemStore(), "executorOnly shell must reuse the resident memStore")
+	require.Same(t, oldSvc, rebuilt.SessionSvc(), "executorOnly shell must reuse the resident sessionSvc")
+
+	// 3) fail-before 对照：不 Swap 时（旧「RESTART required」方案）结构变更不可见。
+	require.Same(t, oldRunner, resident.Runner(), "pre-swap: runner unchanged (structural change invisible)")
+
+	// 4) SwapExecutor：非重启换代生效（下一 turn 起新 runner）。
+	resident.SwapExecutor(newRunner)
+	require.Same(t, newRunner, resident.Runner(), "post-swap: next turn sees the new runner")
+
+	// 5) 常驻不变量：org 级基础设施原封（状态⊥执行器）。
+	require.Same(t, oldStore, resident.MemStore(), "fact chain must survive the swap")
+	require.Same(t, oldSvc, resident.SessionSvc(), "session service must survive the swap")
+	require.Same(t, oldTM, resident.TaskManager(), "task registry must survive the swap")
+
+	// 6) Rollback 面：钩子注入 + 触发（ring 2 数据源在懒检查闭包内，此处验证接线）。
+	rolled := false
+	resident.SetRollbackFn(func() { rolled = true })
+	resident.Rollback()
+	require.True(t, rolled, "Rollback() must invoke the wired hook")
+	resident.SetRollbackFn(nil)
+	resident.Rollback() // no-op, must not panic
 }
