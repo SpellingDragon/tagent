@@ -63,6 +63,10 @@ type Config struct {
 	// Defaults to "tagent" if empty.
 	Entry string `json:"entry" yaml:"entry"`
 
+	// ResidentMetaDir（R3，resident-continuity-r2-r4 2.5）：常驻会话元数据目录
+	//（默认 $TMPDIR/tagent-resident-meta；指向持久卷可跨机器重启审计/TTL sweep）。
+	ResidentMetaDir string `json:"resident_meta_dir" yaml:"resident_meta_dir"`
+
 	// Agents maps agent name → AgentConfig. Each agent is independently configured.
 	Agents map[string]AgentConfig `json:"agents" yaml:"agents"`
 

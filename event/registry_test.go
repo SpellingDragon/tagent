@@ -105,6 +105,8 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 		TypeConsolidation:          -1, // T-D 追加：巩固产物 TTL 豁免（长期记忆）
 		TypeGovernance:             -1, // T-G 追加：治理记录 TTL 永久（可审计）
 		TypeFeedback:               30, // D1 追加（design-report-closeout）：反馈是治理数据，默认 30 天
+		TypeTaskSpawned:            30, // R2 追加（resident-continuity-r2-r4）：任务 spawn 事实链记录，与 external_input 对齐
+		TypeResidentSession:        30, // R3 追加（resident-continuity-r2-r4）：常驻会话生命周期事实链记录，同上对齐
 	}
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)

@@ -202,6 +202,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	// 落库后据此自动写 task_settle feedback（completed→positive / failed→negative；
 	// suspect/alive-detached 不写，只记确定性裁决）。
 	evt.Metadata["settle_status"] = statusWord
+	// R2（resident-continuity-r2-r4）：全量 task_id（UUID）随事件携带——事实链
+	// settle 记录的结构化关联键（RebuildTaskRegistry 按此归并 spawned/settled，
+	// 不解析正文；ShortID 仅人类可读）。
+	evt.Metadata["task_id"] = tk.ID
 	return evt
 }
 

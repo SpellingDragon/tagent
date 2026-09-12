@@ -208,6 +208,11 @@ func init() {
 		{Name: TypeContextCompress, Role: model.RoleUser, Skeleton: true, LowValue: true, TTLDays: 3, Synthetic: true, Recallable: true},
 		// 工具链折叠 ref：合成负 key。
 		{Name: TypeToolChain, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
+		// 任务 spawn 记录（R2）：registry 重建数据源；事实链记录不进投影；TTL 与
+		// external_input 对齐（30d，超期常驻服务由 R3 重挂+TaskID 桥兜底）。
+		{Name: TypeTaskSpawned, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true},
+		// 常驻会话生命周期记录（R3）：spawn 全参/终态结局；事实链审计记录不进投影。
+		{Name: TypeResidentSession, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true},
 		// 证据门控巩固产物（T-D）：长期记忆 TTL 豁免(-1)；正 key 真实事件；骨架保留、
 		// 可嵌入、可召回。一处注册即全链路（摘要/骨架/TTL/角色/嵌入/召回）生效。
 		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},

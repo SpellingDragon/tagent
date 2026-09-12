@@ -20,6 +20,8 @@ type TmuxMonitor struct {
 	fakeDeadDuration          time.Duration
 	heartbeatCommand          string
 	heartbeatTimeout          time.Duration
+	// probeUnknownLimitN（R3）：fail-dead 加闸阈值（拍平配置，0→default 3）。
+	probeUnknownLimitN int
 
 	sessions map[string]*TmuxSession
 	mu       sync.RWMutex
@@ -56,6 +58,9 @@ type TmuxMonitor struct {
 type sessionInspector interface {
 	ProcessExists(sessionID string) bool
 	IsPaneDead(sessionID string) bool
+	// SessionAlive3（R3）：三态探测——list-sessions 单源；known=false 表示命令
+	// 不可辨（monitor 计数加闸，不立即判死）。
+	SessionAlive3(sessionID string) (alive, known bool)
 	GetSessionOutput(sessionID string) (string, error)
 	SendHeartbeat(sessionID string) string
 	KillSession(sessionID string) error
@@ -80,6 +85,21 @@ type MonitorConfig struct {
 	DenseDuration time.Duration
 	BackoffFactor float64
 	MaxInterval   time.Duration
+
+	// ProbeUnknownLimit（R3）：连续 unknown 探测加闸阈值——达到才按 dead 处理。
+	// 0 → defaultProbeUnknownLimit（3）。
+	ProbeUnknownLimit int
+}
+
+// defaultProbeUnknownLimit is the fail-dead gate threshold (R3): how many
+// consecutive UNKNOWN probes before a session is treated as dead.
+const defaultProbeUnknownLimit = 3
+
+func (tm *TmuxMonitor) probeUnknownLimit() int {
+	if tm.probeUnknownLimitN > 0 {
+		return tm.probeUnknownLimitN
+	}
+	return defaultProbeUnknownLimit
 }
 
 // DefaultMonitorConfig returns default monitor configuration
@@ -108,6 +128,7 @@ func WithMonitorConfig(cfg MonitorConfig) TmuxMonitorOption {
 		tm.stableDuration = cfg.StableDuration
 		tm.interactiveStableDuration = cfg.InteractiveStableDuration
 		tm.fakeDeadDuration = cfg.FakeDeadDuration
+		tm.probeUnknownLimitN = cfg.ProbeUnknownLimit
 		tm.heartbeatCommand = cfg.HeartbeatCommand
 		tm.heartbeatTimeout = cfg.HeartbeatTimeout
 		if cfg.Interval > 0 {
@@ -507,8 +528,41 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		return SessionError
 	}
 
+	// R3（resident-continuity-r2-r4 2.2，fail-dead 加闸）：三态探测先行。
+	// unknown（list-sessions 不可辨）不判死——保留会话并计数，连续 N 次
+	//（ProbeUnknownLimit，默认 3）才按 dead 处理（fail-before：旧路径 err→
+	// assume-dead→Completed→杀会话，tmux 抖动即误杀常驻会话）。
+	alive, known := tm.executor.SessionAlive3(session.ID)
+	if !known {
+		session.ProbeUnknownCount++
+		if session.ProbeUnknownCount < tm.probeUnknownLimit() {
+			log.Warnf("[TmuxMonitor] probe UNKNOWN for %s (%d/%d) — keeping session alive",
+				session.ID, session.ProbeUnknownCount, tm.probeUnknownLimit())
+			return SessionRunning
+		}
+		log.Errorf("[TmuxMonitor] probe UNKNOWN %d consecutive times for %s — treating as dead",
+			session.ProbeUnknownCount, session.ID)
+		// 连续超限：按 dead 处理（进入 Completed 路径）
+		processExists, isPaneDead := false, true
+		currentOutput, err := tm.executor.GetSessionOutput(session.ID)
+		if err != nil {
+			currentOutput = ""
+		}
+		if strings.TrimSpace(currentOutput) != "" {
+			session.LastOutput = currentOutput
+			session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
+		}
+		_ = processExists
+		_ = isPaneDead
+		return SessionCompleted
+	}
+	session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
+
 	// Check if session exists
 	processExists := tm.executor.ProcessExists(session.ID)
+	if !alive {
+		processExists = false // list-sessions 已确定性判死：不再被 display-message err 误导
+	}
 	isPaneDead := tm.executor.IsPaneDead(session.ID)
 
 	// Get current output

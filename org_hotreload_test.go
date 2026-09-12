@@ -110,3 +110,53 @@ func TestOrgFingerprint_CanonicalStable(t *testing.T) {
 		t.Errorf("canonical form unstable: %s.. vs %s..", f1[:8], f2[:8])
 	}
 }
+
+// R4（resident-continuity-r2-r4 3.2）回归：memory 先序检测可达（🔴5）——
+// memory 被 org 指纹白名单排除，仅改 memory 时 org 指纹不变；computeMemoryFingerprint
+// 必须独立感知该变更（否则懒检查静默走 ApplyOrgParams 分支，变更不生效也不告警）。
+func TestMemoryFingerprint_DetectsMemoryOnlyChanges(t *testing.T) {
+	base := cfgFor()
+	orgFP, err := computeOrgFingerprint(base)
+	if err != nil {
+		t.Fatalf("org fp: %v", err)
+	}
+	memFP, err := computeMemoryFingerprint(base)
+	if err != nil {
+		t.Fatalf("mem fp: %v", err)
+	}
+
+	// 仅改 memory 段：org 指纹必须不变（既有白名单语义），memory 指纹必须变。
+	mod := cfgFor()
+	mod.Agents["main"] = AgentConfig{
+		Model: "gpt-x", Tools: []ToolRef{{Kind: "tool", ID: "recall"}},
+		Memory: MemoryConfig{Type: "file", Path: "data/mem2"},
+	}
+	orgFP2, err := computeOrgFingerprint(mod)
+	if err != nil {
+		t.Fatalf("org fp2: %v", err)
+	}
+	if orgFP2 != orgFP {
+		t.Errorf("memory-only change must NOT alter the org fingerprint (D3 whitelist)")
+	}
+	memFP2, err := computeMemoryFingerprint(mod)
+	if err != nil {
+		t.Fatalf("mem fp2: %v", err)
+	}
+	if memFP2 == memFP {
+		t.Errorf("memory-only change MUST alter the memory fingerprint (R4 3.1 detection reachable)")
+	}
+
+	// 非 memory 变更不误报：org 指纹变、memory 指纹不变（先序检测零误伤）。
+	orgMod := cfgFor()
+	a := orgMod.Agents["main"]
+	a.Model = "gpt-z"
+	orgMod.Agents["main"] = a
+	if m2, err := computeMemoryFingerprint(orgMod); err == nil && m2 != memFP {
+		t.Errorf("non-memory change must not alter the memory fingerprint")
+	}
+
+	// canonical 稳定：map 迭代序无关。
+	if m3, err := computeMemoryFingerprint(cfgFor()); err != nil || m3 != memFP {
+		t.Errorf("memory fingerprint must be canonical-stable (err=%v)", err)
+	}
+}

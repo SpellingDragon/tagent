@@ -90,6 +90,10 @@ type TagentAgent struct {
 	// task_settled events by its OnSettle hook.
 	taskManager *task.TaskManager
 
+	// orgRollback（R4，resident-continuity-r2-r4 3.8）：热更回滚钩子（tagent
+	// 包懒检查闭包注入；Rollback() 触发）。
+	orgRollback func()
+
 	// Framework integration
 	memStore   memory.MemoryStore
 	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
@@ -344,10 +348,17 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// OnSettle hook publishes a task_settled event onto the bus, which the
 	// persistent loop reclaims into a new turn (idle → wakes Pull; mid-turn →
 	// buffered until the current turn finishes — single-consumer queueing).
+	//
+	// R2（resident-continuity-r2-r4 1.6）：OnSpawn/OnInlineSettle 经 late-bind sink
+	// 写事实链记录（task_spawned 载 Declarative / inline settle 终态记录——registry
+	// 重建数据源，记录-only 不发 bus 不进投影）。cm 在下方创建后才绑定。
+	taskRecords := &taskRecordSink{}
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
 			bus.Publish(newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace))
 		},
+		OnSpawn:        taskRecords.onSpawn,
+		OnInlineSettle: taskRecords.onInlineSettle,
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,
@@ -434,6 +445,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	onEvent := ta.makeOnEventCallback()
 	onEventRef = onEvent // Wire the hook's callback.
 	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
+	taskRecords.cm = cm // R2: bind the record sink (late — hooks are best-effort nil-safe before this)
 	ta.contextManager = cm
 	ta.taskManager = taskManager
 	cm.taskController = taskManager

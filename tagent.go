@@ -289,7 +289,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 
 	// Build entry agent (the top-level agent returned by New)
 	entryCfg := cfg.Agents[cfg.Entry]
-	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache)
+	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, false)
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
 	}
@@ -320,11 +320,18 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		cfgPath := rc.configPath
 		var ( // closure-captured reload state
 			lastFP        string
-			lastSeenMtime int64      // atomic; -nanos of last processed config mtime
-			mu            sync.Mutex // single-flight reload
+			lastMemFP     string         // R4 3.1：memory 先序检测（🔴5——被 org 指纹排除，不先检则静默不生效）
+			lastSeenMtime int64          // atomic; -nanos of last processed config mtime
+			mu            sync.Mutex     // single-flight reload
+			execGen       int            // R4 3.8：执行器代次（代际日志）
+			prevKeep      *Config        // R4 3.8：ring 2 当前代配置（换代时转 prevSnapshot）
+			prevSnapshot  reloadSnapshot // R4 3.8：ring 2 上一代（Rollback 数据源）
 		)
 		if fp, err := computeOrgFingerprint(&cfg); err == nil {
 			lastFP = fp
+		}
+		if mfp, err := computeMemoryFingerprint(&cfg); err == nil {
+			lastMemFP = mfp
 		}
 		entryAgent.SetOrgReloader(func() {
 			info, err := os.Stat(cfgPath)
@@ -353,6 +360,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
 				return
 			}
+			// R4 3.1（🔴5）memory 先序：org 指纹比对**之前**独立 diff memory 段——
+			// 命中即拒绝热更并明示须重启（fail-closed；不依赖 fingerprint 变化路径）。
+			mfp, merr := computeMemoryFingerprint(fresh)
+			if merr == nil && mfp != lastMemFP {
+				log.Errorf("[org-hotreload] agents.*.memory.* CHANGED (mem-fp %s.. -> %s..) — runtime storage migration is not supported; RESTART required to apply", short(lastMemFP), short(mfp))
+				lastMemFP = mfp
+				return
+			}
 			if fp == lastFP {
 				// org structure unchanged: hot-apply migratable numeric params
 				if ac, ok := fresh.Agents[cfg.Entry]; ok && ac.CompressThreshold > 0 {
@@ -361,7 +376,55 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				}
 				return
 			}
-			log.Errorf("[org-hotreload] org structure changed (fp %s.. -> %s..) — snapshot rebuild is incremental B; RESTART required to apply", short(lastFP), short(fp))
+			// R4（resident-continuity-r2-r4 3.5/3.8）：结构变化→cm.runner 级热重建
+			//（executorOnly 模式：丢弃壳仅取 runner；按 ownership 表跳过对共享物
+			// 副作用），build-validate-then-swap：构建失败 fail-closed（旧 runner
+			// 原样服务），成功 SwapExecutor+代际日志（下一 turn 生效；in-flight
+			// turn 用旧 runner 跑完）。ring 2 上一代配置供 Rollback。
+			newTA, rerr := buildAgent(cfg.Entry, fresh.Agents[cfg.Entry], *fresh, rc, loader, map[string]*agent.TagentAgent{}, true)
+			if rerr != nil {
+				log.Errorf("[org-hotreload] executor rebuild FAILED — serving previous (fail-closed): %v", rerr)
+				return
+			}
+			newRunner := newTA.Runner()
+			if newRunner == nil {
+				log.Errorf("[org-hotreload] executor rebuild produced no runner — serving previous (fail-closed)")
+				return
+			}
+			oldFP := lastFP
+			entryAgent.SwapExecutor(newRunner)
+			lastFP = fp
+			execGen++
+			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
+				execGen, short(oldFP), short(fp))
+			// ring 2（3.8）：保留上一代配置摘要供 Rollback（覆盖更早代）。
+			prevSnapshot = reloadSnapshot{fp: oldFP, cfg: prevKeep}
+			prevKeep = fresh
+			entryAgent.SetRollbackFn(func() {
+				if prevSnapshot.cfg == nil {
+					log.Warnf("[org-hotreload] rollback: no previous generation snapshot")
+					return
+				}
+				rollbackC := *prevSnapshot.cfg
+				rbp, rerr0 := computeOrgFingerprint(&rollbackC)
+				if rerr0 != nil {
+					log.Errorf("[org-hotreload] rollback fingerprint FAILED: %v", rerr0)
+					return
+				}
+				if rbp == fp {
+					log.Warnf("[org-hotreload] rollback: previous generation equals current (fp %s..)", short(fp))
+					return
+				}
+				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, true); rerr2 != nil {
+					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
+					return
+				} else if r2 := ta2.Runner(); r2 != nil {
+					entryAgent.SwapExecutor(r2)
+					execGen++
+					lastFP = rbp
+					log.Infof("[org-hotreload] executor generation %d rolled back to fp %s..", execGen, short(rbp))
+				}
+			})
 		})
 	}
 

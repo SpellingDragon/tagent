@@ -35,6 +35,41 @@ type mockInspector struct {
 	sendHeartbeatCalls  int
 	killSessionCalls    int
 	restartSessionCalls int
+
+	// R3 三态探测 mock：aliveKnown=false 时 SessionAlive3 返回 unknown。
+	alive3      bool
+	alive3Knwn  bool
+	alive3Err   bool // true → (false,false)：命令不可辨
+	alive3Calls int
+}
+
+func (m *mockInspector) SessionAlive3(sessionID string) (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alive3Calls++
+	if m.alive3Err {
+		return false, false
+	}
+	if !m.alive3Knwn && !m.alive3 {
+		// 未显式编程三态：回落旧语义（零值兼容既有测试），由
+		// processExists 派生确定性判定。
+		return m.processExists, true
+	}
+	return m.alive3, m.alive3Knwn
+}
+
+// setAlive3 programs the tri-state probe (R3): alive=false+known=true → dead;
+// alive=true+known=true → alive; known=false → unknown.
+func (m *mockInspector) setAlive3(alive, known bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alive3, m.alive3Knwn = alive, known
+}
+
+func (m *mockInspector) setAlive3Err(err bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.alive3Err = err
 }
 
 func (m *mockInspector) ProcessExists(sessionID string) bool {

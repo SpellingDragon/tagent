@@ -1,0 +1,151 @@
+package agent
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/tool/action"
+)
+
+// R2（resident-continuity-r2-r4 1.7/1.11）回归：spawn/inline-settle 事实链记录
+// 与 RebuildTaskRegistry 纯全量回放。fail-before：无事件重建→板空（证明事件承重）。
+
+const rb2Partition = 99
+
+func rb2Key(ms int64) int64 { return memory.NewSnowflakeEventKey(rb2Partition, ms) }
+
+// storeSpawned 写一条 task_spawned 记录（模拟 OnSpawn 产物）。
+func storeSpawned(t *testing.T, store *memory.InMemoryStore, taskID string, decl task.Declarative, ms int64) {
+	t.Helper()
+	raw, err := json.Marshal(decl)
+	if err != nil {
+		t.Fatalf("marshal declarative: %v", err)
+	}
+	if err := store.StoreEvent(rb2Key(ms), memory.FullEvent{
+		EventKey:     rb2Key(ms),
+		PartitionID:  rb2Partition,
+		EventType:    tagentevent.TypeTaskSpawned,
+		EventSummary: "任务创建: " + decl.Desc,
+		Content:      string(raw),
+		Timestamp:    ms,
+		Metadata:     map[string]string{"task_id": taskID},
+	}); err != nil {
+		t.Fatalf("store spawned: %v", err)
+	}
+}
+
+// storeSettle 写一条 settle 记录（external_input + 结构化 Metadata，模拟
+// persistBusEvent 拷贝后的形态；inline 标记可选）。
+func storeSettle(t *testing.T, store *memory.InMemoryStore, taskID, status string, ms int64, inline bool) {
+	t.Helper()
+	md := map[string]string{"task_id": taskID, "settle_status": status}
+	if inline {
+		md["task_inline_record"] = "true"
+	}
+	if err := store.StoreEvent(rb2Key(ms), memory.FullEvent{
+		EventKey:     rb2Key(ms),
+		PartitionID:  rb2Partition,
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: "[task settled] x",
+		Content:      "[task settled] x (id=" + taskID + ") " + status,
+		Timestamp:    ms,
+		Metadata:     md,
+	}); err != nil {
+		t.Fatalf("store settle: %v", err)
+	}
+}
+
+func TestRebuildTaskRegistry_ActiveStates(t *testing.T) {
+	now := time.Now().UnixMilli()
+	store := memory.NewInMemoryStore()
+	// 2 running（无 settle 记录）、1 alive-detached、2 completed（其一 inline）、1 failed。
+	storeSpawned(t, store, "t-run-1", task.Declarative{Kind: "command", Desc: "svc1", Key: "svc1", Command: "svc1"}, now-60_000)
+	storeSpawned(t, store, "t-run-2", task.Declarative{Kind: "command", Desc: "svc2", Command: "svc2"}, now-50_000)
+	storeSpawned(t, store, "t-ad-1", task.Declarative{Kind: "command", Desc: "svc3", Command: "svc3"}, now-40_000)
+	storeSpawned(t, store, "t-done-1", task.Declarative{Kind: "command", Desc: "job1", Command: "job1"}, now-30_000)
+	storeSpawned(t, store, "t-done-2", task.Declarative{Kind: "command", Desc: "job2", Command: "job2"}, now-20_000)
+	storeSpawned(t, store, "t-fail-1", task.Declarative{Kind: "command", Desc: "job3", Command: "job3"}, now-10_000)
+	storeSettle(t, store, "t-ad-1", "alive-detached", now-35_000, false)
+	storeSettle(t, store, "t-done-1", "completed", now-25_000, false)
+	storeSettle(t, store, "t-done-2", "completed", now-15_000, true) // inline 记录同为终态
+	storeSettle(t, store, "t-fail-1", "failed", now-5_000, false)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	restored := RebuildTaskRegistry(store, rb2Partition, tm, nil)
+	if restored != 3 {
+		t.Fatalf("restored = %d, want 3 (2 running→suspect + 1 alive-detached; terminal excluded)", restored)
+	}
+	if got, ok := tm.Get("t-run-1"); !ok || got == nil {
+		t.Fatal("t-run-1 not restored")
+	} else if s := got.Status(); s != task.TaskSuspect {
+		t.Errorf("t-run-1 status = %v, want suspect (running degrades cross-restart)", s)
+	}
+	if got, ok := tm.Get("t-ad-1"); !ok || got.Status() != task.TaskAliveDetached {
+		t.Errorf("t-ad-1 not restored as alive-detached (ok=%v)", ok)
+	}
+	for _, id := range []string{"t-done-1", "t-done-2", "t-fail-1"} {
+		if _, ok := tm.Get(id); ok {
+			t.Errorf("%s restored but is terminal (inline settle records must prevent ghost suspects)", id)
+		}
+	}
+}
+
+func TestRebuildTaskRegistry_FailBefore_NoRecordsEmpty(t *testing.T) {
+	store := memory.NewInMemoryStore() // 无任务事件
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	if n := RebuildTaskRegistry(store, rb2Partition, tm, nil); n != 0 {
+		t.Fatalf("restored = %d, want 0 (fail-before: no events → empty board)", n)
+	}
+	if len(tm.List()) != 0 {
+		t.Fatal("registry must be empty without task_spawned records")
+	}
+}
+
+func TestRebuildTaskRegistry_LastSettleWins(t *testing.T) {
+	now := time.Now().UnixMilli()
+	store := memory.NewInMemoryStore()
+	// alive-detached 通知后再 failed —— 末次 settle 决定终态。
+	storeSpawned(t, store, "t-x", task.Declarative{Kind: "command", Desc: "svc", Command: "svc"}, now-90_000)
+	storeSettle(t, store, "t-x", "alive-detached", now-60_000, false)
+	storeSettle(t, store, "t-x", "failed", now-30_000, false)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	if n := RebuildTaskRegistry(store, rb2Partition, tm, nil); n != 0 {
+		t.Fatalf("restored = %d, want 0 (last settle=failed is terminal)", n)
+	}
+}
+
+func TestRebuildTaskRegistry_SubagentResumeGuidance(t *testing.T) {
+	now := time.Now().UnixMilli()
+	store := memory.NewInMemoryStore()
+	storeSpawned(t, store, "t-sub-1", task.Declarative{
+		Kind: "subagent", Desc: "researcher: 查一下", Key: "researcher:查一下",
+		AgentName: "researcher", MessageBody: "查一下",
+	}, now-60_000)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	redispatch := func(agentName, body string) (task.SpawnResult, error) {
+		t.Logf("redispatch %s", agentName)
+		return task.SpawnResult{}, nil
+	}
+	RebuildTaskRegistry(store, rb2Partition, tm, func(decl task.Declarative) task.TaskSpec {
+		return action.SubagentSpecFromDeclarative(redispatch, decl)
+	})
+	got, ok := tm.Get("t-sub-1")
+	if !ok {
+		t.Fatal("subagent task not restored")
+	}
+	if got.Spec.ResumeFn == nil {
+		t.Fatal("ResumeFn must exist (guidance error, not nil)")
+	}
+	if _, err := got.Spec.ResumeFn("继续"); err == nil || !strings.Contains(err.Error(), "relaunch") {
+		t.Errorf("cross-restart subagent resume must return relaunch guidance, got err=%v", err)
+	}
+	if got.Spec.Relaunch == nil {
+		t.Fatal("subagent Relaunch must be rebuilt (promise table)")
+	}
+}

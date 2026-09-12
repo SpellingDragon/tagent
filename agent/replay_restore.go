@@ -34,7 +34,10 @@ func (ta *TagentAgent) MarkMeditationEvent(key int64) {
 func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent) {
 	return func(ev memory.FullEvent) {
 		if ev.EventType == tagentevent.TypeContextCompressSummary ||
-			ev.Metadata[legacySnapshotMetaKey] != "" {
+			ev.EventType == tagentevent.TypeTaskSpawned ||
+			ev.EventType == tagentevent.TypeResidentSession ||
+			ev.Metadata[legacySnapshotMetaKey] != "" ||
+			ev.Metadata["task_inline_record"] != "" {
 			return
 		}
 		if ev.EventType == tagentevent.TypeAgentOutput &&

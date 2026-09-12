@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,10 +45,11 @@ type ContextManager struct {
 	thresholdPct      float64
 
 	// Framework integration
-	runner    runner.Runner
-	name      string
-	userID    string
-	sessionID string
+	runner     runner.Runner
+	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——SwapExecutor（写）vs RunFlow per-turn RLock（读）
+	name       string
+	userID     string
+	sessionID  string
 
 	// Event routing
 	outputCh   chan *event.Event
@@ -384,7 +386,14 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	}
 
 	fwAgent := llmagent.New(cfg.Name, agentOpts...)
+	cm.runner = buildRunner(cfg, fwAgent)
 
+	return cm
+}
+
+// buildRunner（R4 3.3/3.5 抽取）：fwAgent+runner 装配为纯函数段（依赖仅
+// cfg）——冷启动与 SwapExecutor 热重建共用同一装配路径（行为学一致）。
+func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Runner {
 	// Create unified Runner: LLMAgent + MemoryPlugin + SummaryPlugin + SessionService.
 	runnerOpts := []runner.Option{}
 	if cfg.MemPlugin != nil {
@@ -396,9 +405,29 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	if cfg.SessionSvc != nil {
 		runnerOpts = append(runnerOpts, runner.WithSessionService(cfg.SessionSvc))
 	}
-	cm.runner = runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
+	return runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
+}
 
-	return cm
+// SwapExecutor（R4 3.3）：原子换入新 runner（含其 tools/prompt 装配——随
+// runner 一并构建完成）。drain-free turn 级：进行中 turn 已持有的旧 runner
+// 引用跑完，下一 turn 起用新。返回被换下的旧 runner（调用方决定处置）。
+func (cm *ContextManager) SwapExecutor(newRunner runner.Runner) runner.Runner {
+	if cm == nil || newRunner == nil {
+		return nil
+	}
+	cm.executorMu.Lock()
+	defer cm.executorMu.Unlock()
+	old := cm.runner
+	cm.runner = newRunner
+	return old
+}
+
+// currentRunner（R4 3.3）：RunFlow per-turn 取引用（RLock 即放——不持锁跑
+// turn，否则换入会被长 turn 阻塞）。in-flight turn 用旧 runner 跑完。
+func (cm *ContextManager) currentRunner() runner.Runner {
+	cm.executorMu.RLock()
+	defer cm.executorMu.RUnlock()
+	return cm.runner
 }
 
 // BuildInvocation merges a batch of AgentEvents into a single model.Message.
@@ -568,6 +597,91 @@ func (cm *ContextManager) latestCompactionKey() int64 {
 	return 0
 }
 
+// persistTaskRecord（R2，resident-continuity-r2-r4 1.6）：记录-only 持久化——只写
+// 事实链，不发 bus（不唤醒）、不进投影（task_spawned/inline settle 记录均非投影
+// ref：看板由 registry 每轮渲染；inline 结果已作为工具结果在投影内）。best-effort。
+func (cm *ContextManager) persistTaskRecord(fullEvent memory.FullEvent) {
+	if cm == nil || cm.memStore == nil {
+		return
+	}
+	if fullEvent.EventKey == 0 {
+		fullEvent.EventKey = memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	}
+	fullEvent.PartitionID = cm.partitionID
+	if err := cm.memStore.StoreEvent(fullEvent.EventKey, fullEvent); err != nil {
+		log.Errorf("[persistTaskRecord] StoreEvent failed key=%d type=%s: %v", fullEvent.EventKey, fullEvent.EventType, err)
+	}
+}
+
+// PersistTaskRecord exposes the record-only sink for the task-layer hooks
+// (OnSpawn / OnInlineSettle wiring — late-bound after cm creation).
+func (cm *ContextManager) PersistTaskRecord(fullEvent memory.FullEvent) {
+	cm.persistTaskRecord(fullEvent)
+}
+
+// EmitTaskSpawnedRecord builds and persists the fact-chain task_spawned record
+// for a freshly registered task (OnSpawn hook). Registry-only record: never a
+// projection ref, never bus-published.
+func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
+	if cm == nil || tk == nil || tk.Spec.Declarative == nil {
+		return // no declarative → not replayable, no record (best-effort)
+	}
+	decl := *tk.Spec.Declarative
+	if decl.StartedAtMilli == 0 {
+		decl.StartedAtMilli = tk.StartedAt.UnixMilli()
+	}
+	raw, err := json.Marshal(decl)
+	if err != nil {
+		log.Errorf("[EmitTaskSpawnedRecord] marshal declarative failed: %v", err)
+		return
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeTaskSpawned,
+		EventSummary: fmt.Sprintf("任务创建: %s", truncateForLog(tk.Spec.Desc, 80)),
+		Content:      string(raw),
+		Timestamp:    tk.StartedAt.UnixMilli(),
+		Metadata:     md,
+	})
+}
+
+// EmitTaskInlineSettleRecord builds and persists the registry-only settle
+// record for an INLINE settle (OnInlineSettle hook): minimal terminal note
+// (status+task_id; the result itself already returned in-turn as the tool
+// result). Flagged task_inline_record — projection rebuild/replay skip it
+// (sixth-round 🔴3: without a record, inline settles become replay ghosts).
+func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.SettleSignal) {
+	if cm == nil || tk == nil {
+		return
+	}
+	status := string(sig.Kind)
+	if tk.Status() != "" {
+		status = string(tk.Status())
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+		"settle_status":              status,
+		"task_inline_record":         "true",
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: fmt.Sprintf("[task settled inline] %s (id=%s) %s", truncateForLog(tk.Spec.Desc, 60), task.ShortID(tk.ID), status),
+		Content:      fmt.Sprintf("[task settled inline] %s (id=%s) %s", tk.Spec.Desc, tk.ID, status),
+		Timestamp:    time.Now().UnixMilli(),
+		Metadata:     md,
+	})
+}
+
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
 // to the compress.SessionProjection immediately. This ensures that all messages
 // visible to the LLM are also tracked in the projection — eliminating the
@@ -612,6 +726,16 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	fullEvent.Metadata = map[string]string{
 		tagentevent.MetaKeyAgentName:     cm.name,
 		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
+	}
+	// R2（resident-continuity-r2-r4 1.5）：task 来源事件的结构化 settle 键拷入
+	// FullEvent.Metadata——事实链 settle 记录可被 RebuildTaskRegistry 机器辨读
+	// （task_id/settle_status；task_inline_record 标记内联终态记录，投影重建跳过）。
+	if evt.Source == SourceTask {
+		for _, k := range []string{"task_id", "settle_status", "task_inline_record"} {
+			if v, ok := evt.Metadata[k]; ok {
+				fullEvent.Metadata[k] = fmt.Sprint(v)
+			}
+		}
 	}
 	if cm.sessionID != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyRolloutID] = cm.sessionID
@@ -771,7 +895,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		}
 		ctx = task.WithTaskSpawner(ctx, spawner)
 	}
-	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
+	eventCh, err := cm.currentRunner().Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		return fmt.Errorf("runner.Run: %w", err)
 	}
@@ -863,7 +987,7 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 
 // Close releases the runner resources.
 func (cm *ContextManager) Close() error {
-	if r, ok := cm.runner.(interface{ Close() error }); ok {
+	if r, ok := cm.currentRunner().(interface{ Close() error }); ok {
 		return r.Close()
 	}
 	return nil

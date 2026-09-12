@@ -14,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/agent/reliability"
+	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
@@ -30,6 +31,15 @@ func buildAgent(
 	rc *runtimeConfig,
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
+	// executorOnly（R4，resident-continuity-r2-r4 3.4/3.5）：热重建专用——产物
+	// ta 仅用于取 runner（Swap 进常驻实例），其自身 cm/bus/projection/registry
+	// 全部丢弃。按 ownership 表跳过对进程级共享物的副作用：memory store 换
+	// 内存实例（不双开文件句柄）、govLedger/Goals 不重绑、Approval 不 AddChannel
+	//（累积泄漏+旧 channel 多播）、R1/R2 冷启动重建不重跑。
+	executorOnly bool,
+	// subagentCollectors（R2）：递归进来的 wrapper 收集器（外层组装跨重启
+	// redispatch 表；变参以最小化签名波及，递归调用透传）。
+	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (*agent.TagentAgent, error) {
 	// Check cache first
 	if ta, ok := cache[name]; ok {
@@ -37,20 +47,29 @@ func buildAgent(
 	}
 
 	// 1. Create this agent's MemoryStore (isolated per-agent)
-	memStore, err := resolveMemoryStore(acfg.Memory)
-	if err != nil {
-		return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
-	}
-	// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
-	// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
-	hintTracker := newConsolidationHintTracker(acfg)
-	var trackFn func(int64, int, string)
-	if hintTracker != nil {
-		trackFn = hintTracker.Track
-	}
-	memStore, err = wireMemoryEngine(memStore, acfg.Memory, trackFn)
-	if err != nil {
-		return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
+	var memStore memory.MemoryStore
+	var hintTracker *ConsolidationHintTracker
+	var err error
+	if executorOnly {
+		// R4 ownership 表：热重建产物丢弃壳——内存实例即可（不双开文件句柄）；
+		// 常驻实例的 store 经 Swap 不变。hintTracker 不接线（丢弃壳无消费循环）。
+		memStore = memory.NewInMemoryStore()
+	} else {
+		memStore, err = resolveMemoryStore(acfg.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
+		}
+		// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
+		// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
+		hintTracker = newConsolidationHintTracker(acfg)
+		var trackFn func(int64, int, string)
+		if hintTracker != nil {
+			trackFn = hintTracker.Track
+		}
+		memStore, err = wireMemoryEngine(memStore, acfg.Memory, trackFn)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
+		}
 	}
 	// 1.6 T-G DegradationManager（报告 D3 C2 契约最外层）：配置启用时构造五依赖退化状态机 +
 	// ErrorTrackingStore 包裹 memStore，补齐此前 DegradationManager 零接线的断点。onChange 写
@@ -205,16 +224,26 @@ func buildAgent(
 	// 4. Build tools from ToolRef list
 	var tools []trpctool.Tool
 	var actionTool *action.ActionTool
+	// R2：本 agent 工具面里的 subagent wrapper 表（冷启动 registry 重建的
+	// redispatch 数据源；与 subagentCollectors 变参收集同点位）。
+	localSubagentWrappers := map[string]*agent.AgentToolWrapper{}
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg))
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), executorOnly, subagentCollectors...)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
 		// Agent-level task knobs flow to sub-agent wrappers at assembly time
 		// (ToolRef stays a pure reference declaration).
-		if w, ok := t.(*agent.AgentToolWrapper); ok && acfg.ResumeContextRounds > 0 {
-			w.SetResumeContextRounds(acfg.ResumeContextRounds)
+		if w, ok := t.(*agent.AgentToolWrapper); ok {
+			if acfg.ResumeContextRounds > 0 {
+				w.SetResumeContextRounds(acfg.ResumeContextRounds)
+			}
+			// R2：收集 wrapper 供冷启动 registry 重建的 subagent redispatch 表。
+			localSubagentWrappers[w.DeclaredAgentName()] = w
+			for _, collect := range subagentCollectors {
+				collect(w.DeclaredAgentName(), w)
+			}
 		}
 		if isAction {
 			actionTool = t.(*action.ActionTool)
@@ -270,7 +299,7 @@ func buildAgent(
 			Config:    rc.govGate.Config(),
 			AgentName: name, // §8.1：治理记录标注来源 agent（共享 Ledger 下多 agent 事件可区分）
 		})
-		if name == cfg.Entry {
+		if name == cfg.Entry && !executorOnly {
 			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的
 			// 治理记录写 entry governance 分区，重启可 recall）。替代原 agentGate.BindLedger。
 			rc.govLedger.BindStore(memStore, memory.PartitionIDFromName(name))
@@ -390,10 +419,19 @@ func buildAgent(
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
 	}
 
+	// R3（resident-continuity-r2-r4 2.5/2.6）：常驻会话事实链 sink + meta 目录
+	// late-bind（ActionTool 在工厂层构造、先于 ta/cm；ta 就绪后接线）。
+	if actionTool != nil {
+		actionTool.SetResidentRecordSink(ta.RecordResidentSession)
+		if cfg.ResidentMetaDir != "" {
+			actionTool.SetResidentMetaDir(cfg.ResidentMetaDir)
+		}
+	}
+
 	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
 	// 事件归属精确到**最新 improvement 的 commit sha**（guardrail/feedback join 键；键名
 	// MetaKeyBundleID 保留，8.4 继承机制不变）。无改进事件时返回空串不盖章（退化时间窗 join）。
-	if rc.evoGit != nil && name == cfg.Entry {
+	if rc.evoGit != nil && name == cfg.Entry && !executorOnly {
 		evoGit := rc.evoGit
 		ta.SetBundleIDProvider(evoGit.LatestSha)
 		// K4：评估 goroutine 生命周期挂 entry agent shutdown（Stop 收敛+waitgroup）。
@@ -402,7 +440,7 @@ func buildAgent(
 
 	// 3.3（design-report-closeout）：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
 	// 送达用户）。Deliver 失败不阻塞门——pending 文件已落盘，CLI/文件批准始终可用。
-	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil {
+	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil && !executorOnly {
 		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
 		// R5：外部审批直投通道（example/宿主经 WithApprovalChannel 注入）。
 		for _, ch := range rc.approvalChannels {
@@ -427,7 +465,45 @@ func buildAgent(
 	// compaction snapshot + 尾部重放，逐字节复原上下文以复用 prefix-cache）。
 	// 启动期一次、进空投影，且先于 spill 重放接线（spec 顺序）；事实链无
 	// 代际标记的 compaction 事件时 no-op（首启/未折叠，维持现状行为）。
-	ta.RebuildProjectionFromWAL()
+	// R4 ownership 表：executorOnly 热重建跳过（投影属常驻实例，丢弃壳空跑）。
+	if !executorOnly {
+		ta.RebuildProjectionFromWAL()
+	}
+
+	// R2（resident-continuity-r2-r4 D1.3）：任务 registry 重建——同样从事实链
+	// 纯全量回放（task_spawned − 终态 settle；running→suspect 交 R3 探测裁决），
+	// 填入常驻 ta.taskManager（D3 裁决：TagentAgent 常驻，TaskManager 即 org 级
+	// 单例，换执行器代不丢任务板）。无任务事件时 no-op。闭包工厂按承诺表：
+	// command 全套（Resume 真正供能待 R3 重挂）/subagent 仅 Relaunch（Redispatch
+	// 经 wrapper 表；Resume 引导文案）/generic 展示。
+	if tm := ta.TaskManager(); tm != nil && !executorOnly {
+		redispatch := agent.SubagentRedispatcher(localSubagentWrappers, tm)
+		rebuildClosures := func(decl task.Declarative) task.TaskSpec {
+			switch decl.Kind {
+			case "command":
+				if actionTool != nil {
+					return actionTool.SpecFromDeclarative(tm, decl)
+				}
+			case "subagent":
+				return action.SubagentSpecFromDeclarative(redispatch, decl)
+			}
+			return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, Declarative: &decl}
+		}
+		ta.RebuildTaskRegistryFromWAL(memStore, rebuildClosures)
+		// R3 2.6（TaskID 桥）：重挂（NewActionTool 内，先于本块）已让 monitor 跟踪
+		// 存活会话——重建的 suspect 任务若其 Declarative.TaskID（=session id）被跟踪
+		// → 会话活→确定性提升 running；未被跟踪→保持 suspect 交探测/zombie 裁决。
+		if actionTool != nil {
+			for _, tk := range tm.List() {
+				if tk.Status() != task.TaskSuspect || tk.Spec.Declarative == nil {
+					continue
+				}
+				if actionTool.IsTrackedSession(tk.Spec.Declarative.TaskID) {
+					tm.MarkTaskRunning(tk.ID)
+				}
+			}
+		}
+	}
 
 	// 5.5（design-report-closeout）：mem_spill 重放双写——重放成功的每条事件补投影
 	// （projection 此时已由 NewTagentAgent 创建），恢复「存储⇔投影同点」在退化路径
@@ -470,6 +546,8 @@ func buildToolFromRef(
 	readPartitionIDs []int,
 	degradationMgr *reliability.DegradationManager,
 	consolidationMin int,
+	executorOnly bool,
+	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
 	if err != nil {
@@ -478,7 +556,7 @@ func buildToolFromRef(
 
 	switch tr.Kind {
 	case ToolKindAgent:
-		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc)
+		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, executorOnly, subagentCollectors...)
 	case ToolKindTool:
 		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin)
 	default:
@@ -497,6 +575,8 @@ func buildAgentToolRef(
 	cache map[string]*agent.TagentAgent,
 	parentMemStore memory.MemoryStore,
 	desc string,
+	executorOnly bool,
+	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	// Remote path: create A2AAgent that communicates via trpc-a2a-go
 	if tr.Remote != nil && tr.Remote.URL != "" {
@@ -535,7 +615,7 @@ func buildAgentToolRef(
 		return nil, false, fmt.Errorf("referenced agent %q not found in config", tr.AgentID)
 	}
 
-	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache)
+	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache, executorOnly, subagentCollectors...)
 	if err != nil {
 		return nil, false, err
 	}

@@ -19,19 +19,22 @@ import (
 // agents.*.memory.*) are excluded on purpose — changing them at runtime cannot
 // migrate resources and must go through a restart.
 
-// orgSnapshot is an immutable generation of the agent organization.
-// It is built from a full LoadConfig + New()-equivalent wiring and swapped in
-// atomically. In-flight events keep using the previous snapshot until done
-// (D2 drain-free); the old snapshot becomes garbage once unreferenced.
-type orgSnapshot struct {
-	fingerprint string                 // SHA-256 over the canonical org subset
-	entry       string                 // entry agent name
-	agents      map[string]*builtAgent // name → built instance
+// reloadSnapshot（R4，resident-continuity-r2-r4 3.8）：ring 2 上一代配置
+// 摘要（Rollback 数据源；换代时覆盖更早代）。orgSnapshot/builtAgent 原
+// 「整代原子快照」intent 已被第六轮 fresh-eyes 证伪（常驻 loop 形态下无
+// drain-free 可立）——按 roadmap D5 原案落地为 cm.runner 级 SwapExecutor
+// （tagent.go 懒检查编排；本文件保留 fingerprint/检测面）。
+type reloadSnapshot struct {
+	fp  string
+	cfg *Config
 }
 
-// builtAgent pairs a built agent with the config that produced it.
-type builtAgent struct {
-	agent interface{} // *agent.TagentAgent; typed as interface to avoid import cycle in this file's docs
+// short truncates a fingerprint for compact logs.
+func short(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // orgSubset is the canonical in-memory representation of the fingerprinted
@@ -67,6 +70,30 @@ func computeOrgFingerprint(cfg *Config) (string, error) {
 	b, err := json.Marshal(sub)
 	if err != nil {
 		return "", fmt.Errorf("org fingerprint: canonical marshal: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// computeMemoryFingerprint（R4，resident-continuity-r2-r4 3.1 修 🔴5）：
+// agents.*.Memory 段的独立 canonical 指纹。memory 被 org 指纹白名单排除（运行
+// 时不可迁移存储资源），若不先检则仅改 memory 时 org 指纹不变→静默走
+// ApplyOrgParams 分支→变更不生效也不告警。懒检查先序：mtime 变→先比
+// memory 指纹（命中=ERROR+须重启+return，检测可达）→再比 org 指纹。
+// MemoryConfig 含 Lifecycle/Engine 指针字段——用 JSON canonical 而非 ==。
+func computeMemoryFingerprint(cfg *Config) (string, error) {
+	type memEntry struct {
+		Name   string       `json:"name"`
+		Memory MemoryConfig `json:"memory"`
+	}
+	entries := make([]memEntry, 0, len(cfg.Agents))
+	for name, ac := range cfg.Agents {
+		entries = append(entries, memEntry{Name: name, Memory: ac.Memory})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	b, err := json.Marshal(entries)
+	if err != nil {
+		return "", fmt.Errorf("memory fingerprint: canonical marshal: %w", err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil

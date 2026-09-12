@@ -1067,6 +1067,7 @@ graph TB
 - 两个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护（旧 archiveSegment 固化物生产者已随 legacy 管线移除；压缩折叠的 compaction 事件是第三类合法写入——它记录折叠本身，不产生事实事件）。
 - **窗口与 seq 的分配住在内存态 `PartitionState`**（`sync.Map`，按 pid 惰性创建）。这是“槽位分配”的唯一权威，也是 16.6 恢复链路的关键一环。
 - 因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。投影的重建是同一 fold 的全量入口：`RebuildProjectionFromWAL` 在启动期（先于 spill 重放）从事实链回放复原（compaction snapshot + 尾部），与运行期增量 `Add` 等价（不变量：正常路径精确、退化恢复路径最终一致）。
+- 同模式的两层旁路记录（R2/R3，resident-continuity）：`task_spawned`（任务 spawn 全参，registry 重建数据源）与 `resident_session`（常驻会话生命周期）——**事实链记录不进投影**（看板由 registry 每轮渲染、inline 结果已随工具结果在投影内，追加即双重表示）；任务 registry 的重建入口 = `RebuildTaskRegistry`（task_spawned − 终态 settle，settle 以结构化 `task_id/settle_status` Metadata 机器关联）。
 
 ### 16.2 KV 键空间：无外键的指向契约
 

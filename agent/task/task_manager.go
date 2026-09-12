@@ -89,6 +89,32 @@ func DetachAfter(d time.Duration, stop <-chan struct{}) <-chan struct{} {
 	return ch
 }
 
+// Declarative is the serializable projection of a TaskSpec — everything
+// needed to rebuild the closure trio (Relaunch/ResumeFn/Alive)
+// cross-restart via the tool/action closure factory. The in-process closures
+// remain authoritative while alive; Declarative is what task_spawned events
+// carry and what RebuildTaskRegistry replays (registry = fold of the fact
+// chain, resident-continuity-r2-r4 D1).
+type Declarative struct {
+	Kind    string `json:"kind"`              // "command" | "subagent" | "generic"
+	Desc    string `json:"desc"`              // board/logs
+	Key     string `json:"key,omitempty"`     // idempotency key
+	Command string `json:"command,omitempty"` // command Kind: original command line
+	// subagent Kind relaunch inputs (re-dispatch through the resident agents
+	// map). Resume is NOT rebuildable for subagent (rounds has no event source
+	// — the factory returns a relaunch-guidance error, D1.2 promise table).
+	AgentName   string            `json:"agent_name,omitempty"`
+	MessageBody string            `json:"message_body,omitempty"`
+	EventKeys   []int64           `json:"event_keys,omitempty"`
+	Origin      map[string]string `json:"origin,omitempty"`  // routing baggage (courier)
+	TaskID      string            `json:"task_id,omitempty"` // tmux session binding (R3 bridge)
+	// Params carries the ActionArgs spawn fields (WorkDir/Env/Mode/Name/IsTUI/
+	// Watch/Probe/ProbeIntervalSec/ProbeFailures/QuietTimeout/Timeout — encoded
+	// as strings; session-op fields excluded; conversion lives in tool/action).
+	Params         map[string]string `json:"params,omitempty"`
+	StartedAtMilli int64             `json:"started_at_ms"` // board age + zombie grace reseed
+}
+
 // TaskSpec captures enough to describe and (re)launch a task.
 type TaskSpec struct {
 	Kind string // "command" | "subagent" | "generic"
@@ -121,6 +147,12 @@ type TaskSpec struct {
 	// routed back to the originating session. The task layer NEVER reads or
 	// interprets it (courier, not router). Nil for tasks with no origin.
 	Origin map[string]string
+
+	// Declarative is the serializable projection of this spec for the fact-chain
+	// task_spawned record and cross-restart rebuild (R2). Optional at spawn
+	// time: callers may set only closures (legacy path); when set, Spawn
+	// persists it via OnSpawn so RebuildTaskRegistry can replay the task.
+	Declarative *Declarative
 }
 
 // Task is a unit of async work tracked by the TaskManager.
@@ -267,6 +299,17 @@ type TaskManagerConfig struct {
 	// i.e. a background settle that must be written back as a task_settled event.
 	// May be nil.
 	OnSettle func(task *Task, sig SettleSignal)
+	// OnSpawn (R2, resident-continuity-r2-r4): invoked after a task registers
+	// (best-effort fact-chain task_spawned record; never blocks the spawn
+	// path). May be nil.
+	OnSpawn func(task *Task)
+	// OnInlineSettle (R2): invoked when a task settles INSIDE its sync-wait
+	// window (inline). Historically inline settles emitted NO record — the
+	// result returns in-turn via the tool result — leaving fact-chain ghosts
+	// for the registry replay. This hook emits a minimal settle record
+	// (registry-only, never published to the bus — the LLM already saw the
+	// result inline). May be nil.
+	OnInlineSettle func(task *Task, sig SettleSignal)
 	// TerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained after settling before being pruned and its
 	// resources reclaimed. It bounds the resume_task re-entry window for
@@ -291,14 +334,16 @@ type TaskManagerConfig struct {
 const defaultTerminalTTL = 2 * time.Minute
 
 type TaskManager struct {
-	mu          sync.Mutex
-	tasks       map[string]*Task // id → task
-	byKey       map[string]string
-	onSettle    func(task *Task, sig SettleSignal)
-	spawnGate   func() string
-	terminalTTL time.Duration
-	now         func() time.Time // injectable clock (tests); defaults to time.Now
-	zombieGrace time.Duration
+	mu             sync.Mutex
+	tasks          map[string]*Task // id → task
+	byKey          map[string]string
+	onSettle       func(task *Task, sig SettleSignal)
+	onSpawn        func(task *Task)
+	onInlineSettle func(task *Task, sig SettleSignal)
+	spawnGate      func() string
+	terminalTTL    time.Duration
+	now            func() time.Time // injectable clock (tests); defaults to time.Now
+	zombieGrace    time.Duration
 }
 
 // NewTaskManager creates a TaskManager.
@@ -312,13 +357,15 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		zg = defaultZombieGrace
 	}
 	return &TaskManager{
-		tasks:       make(map[string]*Task),
-		byKey:       make(map[string]string),
-		onSettle:    cfg.OnSettle,
-		spawnGate:   cfg.SpawnGate,
-		terminalTTL: ttl,
-		zombieGrace: zg,
-		now:         time.Now,
+		tasks:          make(map[string]*Task),
+		byKey:          make(map[string]string),
+		onSettle:       cfg.OnSettle,
+		onSpawn:        cfg.OnSpawn,
+		onInlineSettle: cfg.OnInlineSettle,
+		spawnGate:      cfg.SpawnGate,
+		terminalTTL:    ttl,
+		zombieGrace:    zg,
+		now:            time.Now,
 	}
 }
 
@@ -373,6 +420,12 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	}
 	tm.mu.Unlock()
 
+	// R2: best-effort fact-chain spawn record (never blocks the spawn path;
+	// the in-memory registry above is already authoritative for this process).
+	if tm.onSpawn != nil {
+		tm.onSpawn(task)
+	}
+
 	go tm.watch(task, detector, task.watchDone)
 
 	// Wait for the first of {settle, detach}. The detach signal (dense→sparse
@@ -382,6 +435,12 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	select {
 	case sig := <-task.firstSettle:
 		tm.closeWindow(task, false) // settle closed the window; already consumed
+		// R2: inline settles emit a registry-only settle record (sixth-round
+		// fresh-eyes 🔴3: without it, the most common settle form leaves a
+		// spawned-without-settled ghost for the restart replay).
+		if tm.onInlineSettle != nil {
+			tm.onInlineSettle(task, sig)
+		}
 		return SpawnResult{Task: task, Settled: true, Signal: sig}
 	case <-detector.Detached():
 		tm.closeWindow(task, true) // detach closed the window; drain any boundary settle
@@ -511,6 +570,58 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 			task.status = TaskSuspect
 		}
 	}
+}
+
+// RestoreTask（R2，resident-continuity-r2-r4 D1.3）：冷启动回放重建一个跨重启
+// 存续的任务——注册到 registry（复用原 id/Key 去重语义）但不启动 watch
+// goroutine（进程内探测器不可恢复：running 语义降级为 suspect 交 R3 存活探测
+// 裁决；alive-detached 原态恢复并置 aliveDetached 使 reconcileDetached 探针
+// 路径可用）。spec 的闭包由调用方经工厂重建（承诺表）；未重建则仅展示。
+func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task {
+	if tm == nil || id == "" {
+		return nil
+	}
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	tk := &Task{
+		ID:           id,
+		Spec:         spec,
+		StartedAt:    startedAt,
+		status:       status,
+		windowClosed: true, // sync-wait window is history — resume re-arms it
+	}
+	if status == TaskAliveDetached {
+		tk.aliveDetached = true // suppress repeat "ready" notifications
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if _, exists := tm.tasks[id]; exists {
+		return tm.tasks[id] // idempotent restore (replay duplicates)
+	}
+	tm.tasks[id] = tk
+	if spec.Key != "" {
+		if _, dup := tm.byKey[spec.Key]; !dup {
+			tm.byKey[spec.Key] = id
+		}
+	}
+	return tk
+}
+
+// MarkTaskRunning（R3 2.6，TaskID 桥）：重挂发现会话存活时把重建的 suspect
+// 任务提升回 running（探测裁决的确定性分支；suspect→running 单向，不动其他态）。
+func (tm *TaskManager) MarkTaskRunning(id string) bool {
+	if tm == nil || id == "" {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tk, ok := tm.tasks[id]
+	if !ok || tk.status != TaskSuspect {
+		return false
+	}
+	tk.status = TaskRunning
+	return true
 }
 
 // Get returns a task by id.

@@ -104,9 +104,14 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	for _, ev := range tail {
 		// Compaction/legacy-snapshot events are fact-chain records, never
 		// projection refs (double-representation guard, same as the replay
-		// handler).
+		// handler). R2 task records likewise: task_spawned is registry data
+		// (board renders live from the registry); task_inline_record settles
+		// returned in-turn as tool results (appending would double-render).
 		if ev.EventType == tagentevent.TypeContextCompressSummary ||
-			ev.Metadata[legacySnapshotMetaKey] != "" {
+			ev.EventType == tagentevent.TypeTaskSpawned ||
+			ev.EventType == tagentevent.TypeResidentSession ||
+			ev.Metadata[legacySnapshotMetaKey] != "" ||
+			ev.Metadata["task_inline_record"] != "" {
 			continue
 		}
 		if ev.EventType == tagentevent.TypeAgentOutput &&
