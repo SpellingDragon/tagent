@@ -24,7 +24,7 @@ func (ta *TagentAgent) TaskManager() *task.TaskManager {
 
 // PartitionID exposes the context manager's snowflake partition (registry
 // rebuild queries the same partition that wrote the records).
-func (ta *TagentAgent) PartitionID() int {
+func (ta *TagentAgent) partitionID() int {
 	if ta == nil || ta.contextManager == nil {
 		return 0
 	}
@@ -38,7 +38,7 @@ func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	if ta == nil || ta.taskManager == nil || store == nil {
 		return 0
 	}
-	return RebuildTaskRegistry(store, ta.PartitionID(), ta.taskManager, rebuildClosures)
+	return RebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuildClosures)
 }
 
 // SubagentRedispatcher（R2，resident-continuity-r2-r4 D1.2）：跨重启 subagent

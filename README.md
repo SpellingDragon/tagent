@@ -25,6 +25,8 @@
 | 🔁 **回执-反馈闭环** | 任务结算自动写 task_settle feedback（completed→positive/failed→negative，suspect 不写）+ `POST /feedback` 外部评分 + FeedbackBinder 因果边绑定产出事件；negative_feedback_rate 进入改进窗口 guardrail 判据（跨版本误归因防线=改进版本章精确 join） |
 | 🧬 **自进化**（默认关） | **git 原生**改进通道：文件即真源（热重载直生效）+ git 版本层（`[self-improve]` 标记 commit/revert/log）+ refine 工具（register 登记/status 台账/rollback 安全回滚）+ 后验评估（guardrail/judge 劣化**只出建议**——执行权永远在 agent） |
 | 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once 不丢事件）+ DegradationManager 五依赖退化追踪 + mem_spill 存储失败兜底重放 |
+| ♻️ **重启连续**（R1-R3） | 三层状态全部从事实链重建，重启不丢上下文：**对话投影**（compaction snapshot+尾部回放，逐字节复原、prefix-cache 复用）；**任务板**（`task_spawned`/settle 事实链 fold，active 任务重建、relaunch 跨重启可用）；**常驻会话**（元数据持久化+存活重挂+TaskID 桥，探测三态化+连续 unknown 加闸防误杀） |
+| 🔥 **非重启热更**（R4） | 配置结构变更（model/tools/prompt wiring）经懒检查自动换执行器：build-validate-then-swap **fail-closed**、drain-free turn 级（进行中 turn 用旧 runner 跑完）、投影/任务板/常驻会话原封；`memory.*` 变更拒绝并明示须重启；代际日志 + ring 2 回滚 |
 
 ## 🎬 一个长期运行的日常
 

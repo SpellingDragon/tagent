@@ -613,12 +613,6 @@ func (cm *ContextManager) persistTaskRecord(fullEvent memory.FullEvent) {
 	}
 }
 
-// PersistTaskRecord exposes the record-only sink for the task-layer hooks
-// (OnSpawn / OnInlineSettle wiring — late-bound after cm creation).
-func (cm *ContextManager) PersistTaskRecord(fullEvent memory.FullEvent) {
-	cm.persistTaskRecord(fullEvent)
-}
-
 // EmitTaskSpawnedRecord builds and persists the fact-chain task_spawned record
 // for a freshly registered task (OnSpawn hook). Registry-only record: never a
 // projection ref, never bus-published.

@@ -51,9 +51,6 @@ type ActionTool struct {
 	residentSink func(sessionID, kind, name, detail string)
 	// residentMetaDirOverride（R3 2.5）：ResidentMeta 目录覆盖（默认 $TMPDIR）。
 	residentMetaDirOverride string
-	// residentReattachForce（R4 review 🟠4）：绕过唯一挂载点 CAS（executorOnly
-	// 热重建壳的新 monitor 必须重挂跟踪，否则换代后 IsTrackedSession/TUI 保护失效）。
-	residentReattachForce bool
 
 	// peeks tracks incremental peek cursors per session (B3 session ops).
 	peeks peekCursors
@@ -140,22 +137,6 @@ func WithResidentMetaDir(dir string) ActionToolOption {
 	}
 }
 
-// WithResidentReattachForce（R4 review 🟠4）：绕过唯一挂载点 CAS 强制重挂
-// （executorOnly 热重建壳专用；SetResidentReattachForce 为构造后注入）。
-func WithResidentReattachForce() ActionToolOption {
-	return func(ct *ActionTool) {
-		ct.residentReattachForce = true
-	}
-}
-
-// SetResidentReattachForce wires the force flag post-construction (R4；
-// build 路径在工厂层构造后注入）。
-func (ct *ActionTool) SetResidentReattachForce(force bool) {
-	if ct != nil {
-		ct.residentReattachForce = force
-	}
-}
-
 // IsTrackedSession reports whether the monitor currently tracks the session
 // （R3 2.6 TaskID 桥：重挂后按此与重建 registry 的任务重关联）。
 func (ct *ActionTool) IsTrackedSession(sessionID string) bool {
@@ -218,10 +199,9 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		// them + their pipe-pane loggers). Rebuild tracking from the
 		// persisted metadata so their watch/probe keep working.
 		// R3 2.6（唯一挂载点）：多 agent org 中仅首个实例执行重挂（重复重挂=
-		// 同会话 N 份 detector/probe 回调）。
-		// R4（review 🟠4）：executorOnly 热重建壳强制重挂——否则换代后新 monitor 空、
-		// IsTrackedSession/TUI 保护/稳定时长附加注全部失效。
-		if ct.residentReattachForce || residentReattachOnce.CompareAndSwap(false, true) {
+		// 同会话 N 份 detector/probe 回调）。热重建壳（executorOnly）不走此处——
+		// 由 build 路径显式重入 ReattachResidentSessions（幂等）。
+		if residentReattachOnce.CompareAndSwap(false, true) {
 			ct.ReattachResidentSessions()
 		} else {
 			log.Infof("[ActionTool] resident reattach already done by another instance (single mount point)")
