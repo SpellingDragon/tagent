@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -165,6 +166,23 @@ func (cc *ContextCompressor) isMeditationKey(key int64) bool {
 	cc.meditationMu.Lock()
 	defer cc.meditationMu.Unlock()
 	return cc.meditationKeys[key]
+}
+
+// MeditationKeysSnapshot returns a sorted copy of the meditation protection
+// keys (lock-held snapshot; safe for the caller to hold/traverse).
+// Observability for the projection-rebuild reseed path and its tests
+// (event-sourced-projection D3); the old snapshot.go consumer is gone but
+// the read surface stays — ★ rendering correctness depends on these keys
+// surviving restarts.
+func (cc *ContextCompressor) MeditationKeysSnapshot() []int64 {
+	cc.meditationMu.Lock()
+	defer cc.meditationMu.Unlock()
+	out := make([]int64, 0, len(cc.meditationKeys))
+	for k := range cc.meditationKeys {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // NewContextCompressor creates a ContextCompressor from a SmartCompressor.

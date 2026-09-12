@@ -683,6 +683,11 @@ func matchesQueryFilters(event FullEvent, query QueryOptions) bool {
 	if query.EndTime > 0 && event.Timestamp > query.EndTime {
 		return false
 	}
+	// Filter by write-order key bound (strictly greater; see QueryOptions.
+	// MinEventKey — write axis, never a semantic-time approximation).
+	if query.MinEventKey != 0 && event.EventKey <= query.MinEventKey {
+		return false
+	}
 	// Filter by keyword: term-split ANY-match (see matchesKeyword) — a
 	// literal whole-string match silently returns zero for the space-
 	// separated keyword lists and sentences models actually send.

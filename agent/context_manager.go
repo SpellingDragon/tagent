@@ -1,11 +1,11 @@
 package agent
 
 import (
-	"time"
 	"context"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/task"
@@ -448,12 +448,18 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	refs := cm.projection.GetAll()
 	result := cm.contextCompressor.Compress(ctx, refs)
 	cm.projection.Replace(result.RetainedRefs)
-	// D2（tagent-compress-event-sourcing）：先 Replace 后写快照事件；失败留痕不阻断。
-	if notice := cm.persistSnapshotEvent(result, refs); notice != nil {
-		// D2 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
-		// （[context_compress_error] 先例——Notices 目前无包外读者），双写保证可感知。
-		result.Notices = append(result.Notices, *notice)
-		result.Messages = append(result.Messages, *notice)
+	// event-sourced-projection D2：折叠本身是事实链的一条 compaction 事件（仅真折叠时发射，
+	// 先 Replace 后写事件；失败留痕不阻断）。投影恒为事实链的旁路产物。
+	// Compressed 门控（review 🟠1）：under-budget 轮 RetainedRefs 原样返回，首位仍是
+	// 上次折叠遗留的综述负 key ref——仪靠 BuildCompactionPayload 的首位判定拦不住
+	// 「已折叠后的 under-budget 轮」，会每轮误发（写放大+违反 spec「未折叠不写」）。
+	if result.Compressed {
+		if notice := cm.emitCompactionEvent(result.RetainedRefs); notice != nil {
+			// 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
+			// （[context_compress_error] 先例），双写保证可感知。
+			result.Notices = append(result.Notices, *notice)
+			result.Messages = append(result.Messages, *notice)
+		}
 	}
 
 	// Rebuild: [system] + render(projection). The system message is the only
@@ -468,84 +474,98 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	args.Request.Messages = rebuilt
 }
 
-
-// persistSnapshotEvent（D2，tagent-compress-event-sourcing）：真压缩后把压缩器三态
-// 快照（boundary/threshold/meditationKeys/compressedKeys/retainedRefs）落 WAL——
-// context_compress 事件 Metadata[SnapshotMetaKey]。重放侧据此 Replace+回灌确定性复原。
-// 快照事件不 Append 进投影：活路径 LLM 上下文与改造前逐字节一致，重放侧同样跳过其 ref。
-// StoreEvent 失败仅 ERROR 留痕并返回 [compress_event_write_failed] 通知（不阻断当轮装配，
-// 降级回重推导）；其余失败（marshal）为编程期错误，ERROR 即可。返回 nil = 成功/跳过。
-func (cm *ContextManager) persistSnapshotEvent(result compress.CompressResult, refs []memory.EventReference) *model.Message {
-	if !result.Compressed || cm.memStore == nil || cm.contextCompressor == nil {
+// emitCompactionEvent（event-sourced-projection D1/D4/D6）：真折叠后把折叠产物作为
+// 一等 compaction 事件落事实链——context_compress_summary 正 key 事件，Content/EventSummary
+// = 综述正文（可召回正文即叙事本身），Metadata[compaction_payload] 载重建载荷（综述 ref +
+// 有序 retained 列表：正 key 只存 key、tool_chain 合成 ref 全身份逐字节 + fullBoundary）。
+// 滚动 supersede：写前查 prior（限定 compaction=v1 代际标记，legacy 固化物不删不选）、
+// 写后 DeleteEvent(prior)。事件自身 Timestamp=写入时刻（非综述 minTs，D4）。仅真折叠发射
+// （under-budget 轮 BuildCompactionPayload 返回 ok=false）。StoreEvent 失败 ERROR 留痕并
+// 返回通知（不阻断当轮装配）；supersede 失败仅 ERROR（下轮再补）。返回 nil = 成功/跳过。
+func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) *model.Message {
+	if cm.memStore == nil || cm.contextCompressor == nil {
 		return nil
 	}
-	cardText := ""
-	for i := range result.Messages {
-		if strings.HasPrefix(result.Messages[i].Content, "[context_compress") {
-			cardText = result.Messages[i].Content
-			if len(cardText) > 8000 {
-				cardText = cardText[:8000]
-			}
-			break
-		}
+	payload, ok := compress.BuildCompactionPayload(retained, cm.contextCompressor.FullBoundary())
+	if !ok {
+		return nil // no real fold this round (under-budget / no new summary ref)
 	}
-	// compressed_keys = 输入 refs 中被本轮折叠掉的键（差集，保持输入序）。
-	retained := make(map[int64]bool, len(result.RetainedRefs))
-	for _, r := range result.RetainedRefs {
-		retained[r.EventKey] = true
-	}
-	var compressedKeys []int64
-	for _, r := range refs {
-		if !retained[r.EventKey] {
-			compressedKeys = append(compressedKeys, r.EventKey)
-		}
-	}
-	if cm.contextCompressor.FullBoundary() <= 0 {
-		// 退化守卫：boundary<=0 与读取侧 D4 数值域校验对称——真压缩后恒为正键，
-		// 0 值意味着压缩器状态异常，落盘也过不了解析门，跳过（WARN 留痕）。
-		log.Warnf("[persistSnapshotEvent] degenerate boundary=0, skip snapshot persist")
-		return nil
-	}
-	snap := compress.CompressionSnapshot{
-		SchemaVersion:  compress.SnapshotSchemaV1,
-		FullBoundary:   cm.contextCompressor.FullBoundary(),
-		Threshold:      cm.contextCompressor.Threshold(),
-		MeditationKeys: cm.contextCompressor.MeditationKeysSnapshot(),
-		CompressedKeys: compressedKeys,
-		RetainedRefs:   result.RetainedRefs,
-		CardText:       cardText,
-		CreatedAt:      time.Now().UnixMilli(),
-	}
-	raw, err := compress.MarshalSnapshot(&snap)
+	raw, err := payload.MarshalPayload()
 	if err != nil {
-		log.Errorf("[persistSnapshotEvent] marshal failed: %v", err)
+		log.Errorf("[emitCompactionEvent] payload marshal failed: %v", err)
 		return nil
 	}
+	// Supersede order (D4): query prior BEFORE writing — after the write a
+	// timestamp_desc query would find the just-written event and delete it.
+	priorKey := cm.latestCompactionKey()
 	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	md := map[string]string{
+		compress.CompactionMetaKey:        compress.CompactionGenV1,
+		compress.CompactionPayloadMetaKey: raw,
+		tagentevent.MetaKeyAgentName:      cm.name,
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
 	fullEvent := memory.FullEvent{
 		EventKey:     eventKey,
 		PartitionID:  cm.partitionID,
-		EventType:    tagentevent.TypeContextCompress,
-		EventSummary: fmt.Sprintf("压缩现场快照 v1: boundary=%d refs=%d meditation=%d",
-			snap.FullBoundary, len(snap.RetainedRefs), len(snap.MeditationKeys)),
-		Timestamp: time.Now().UnixMilli(),
-		Content:   "[context_compress_snapshot] 压缩器三态快照已落盘（重放侧 Replace+回灌复原）",
-		Metadata: map[string]string{
-			tagentevent.MetaKeyAgentName:     cm.name,
-			tagentevent.MetaKeyTriggerSource: cm.triggerSource,
-			compress.SnapshotMetaKey:         raw,
-		},
+		EventType:    tagentevent.TypeContextCompressSummary,
+		EventSummary: payload.SummaryRef.EventSummary,
+		Timestamp:    time.Now().UnixMilli(), // write time (D4), never the summary minTs
+		Content:      payload.SummaryRef.EventSummary,
+		Metadata:     md,
 	}
 	if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-		log.Errorf("[persistSnapshotEvent] StoreEvent failed key=%d: %v", eventKey, err)
+		log.Errorf("[emitCompactionEvent] StoreEvent failed key=%d: %v", eventKey, err)
 		return &model.Message{
-			Role: model.RoleUser,
-			Content: fmt.Sprintf("[compress_event_write_failed] 压缩现场快照落库失败 key=%d: %v（本轮保持重推导降级，下次压缩重建快照）", eventKey, err),
+			Role:    model.RoleUser,
+			Content: fmt.Sprintf("[compaction_event_write_failed] compaction 事件落库失败 key=%d: %v（本轮降级：重启重建将缺最新折叠）", eventKey, err),
 		}
 	}
-	log.Infof("[persistSnapshotEvent] snapshot persisted key=%d boundary=%d refs=%d",
-		eventKey, snap.FullBoundary, len(snap.RetainedRefs))
+	if priorKey > 0 {
+		if err := cm.memStore.DeleteEvent(priorKey); err != nil {
+			log.Errorf("[emitCompactionEvent] supersede DeleteEvent(prior=%d) failed: %v", priorKey, err)
+		}
+	}
+	log.Infof("[emitCompactionEvent] compaction event persisted key=%d (superseded prior=%d) boundary=%d retained=%d",
+		eventKey, priorKey, payload.FullBoundary, len(payload.Retained))
 	return nil
+}
+
+// latestCompactionKey returns the newest marker-tagged compaction event key
+// (0 = none). QueryEvents cannot filter on Metadata, so this walks a short
+// timestamp_desc window and checks the generation marker via GetEvent —
+// legacy 固化物 (same type, no marker, TTL-immortal) is never selected and
+// therefore never superseded/deleted (fresh-eyes D).
+func (cm *ContextManager) latestCompactionKey() int64 {
+	if cm.memStore == nil {
+		return 0
+	}
+	refs, err := cm.memStore.QueryEvents(memory.QueryOptions{
+		PartitionIDs: []int{cm.partitionID},
+		EventTypes:   []string{tagentevent.TypeContextCompressSummary},
+		OrderBy:      "timestamp_desc",
+		Limit:        5,
+	})
+	if err != nil {
+		return 0
+	}
+	for _, r := range refs {
+		evt, err := cm.memStore.GetEvent(r.EventKey)
+		if err != nil || evt == nil {
+			continue
+		}
+		// Agent identity check (review 🟠2): PartitionIDFromName is a 10-bit
+		// FNV hash (collisions expected at ~38 agents) — without this check a
+		// colliding agent's latest compaction event would be supersede-deleted
+		// cross-agent, silently dropping that agent's rebuild snapshot.
+		if evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 &&
+			evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name {
+			return r.EventKey
+		}
+	}
+	return 0
 }
 
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
@@ -602,9 +622,18 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		}
 	}
 
+	// Stored-gate (event-sourced-projection D2, fresh-eyes E①): a failed
+	// StoreEvent must NOT append to the projection — otherwise the projection
+	// holds a ref the fact chain lacks and the rebuild invariant (projection =
+	// fold of the fact chain) breaks. The spill path (ErrorTrackingStore →
+	// ReplaySpilled dual-write) re-stores AND re-appends this event on
+	// recovery, restoring the same-point semantics. nil store (test/bypass
+	// scenarios) keeps the previous always-append behavior.
+	stored := true
 	if cm.memStore != nil {
 		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-			log.Errorf("[persistBusEvent] StoreEvent failed key=%d: %v", eventKey, err)
+			stored = false
+			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
 		}
 	}
 
@@ -618,13 +647,17 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	}
 	// R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
 	// 裸 cm 时不崩溃（零值鲁棒性；主路径恒有投影，行为不变）。
-	if cm.projection != nil {
+	if stored && cm.projection != nil {
 		cm.projection.Append(ref)
 	}
 
 	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
 	// 确定性 settle 裁决自动绑定 feedback（parent=task_settled 事件自身：结算记录
 	// 即任务产出，bundle_id 章使其可归因到 active bundle；suspect/stable 不写）。
+	// KNOWN WINDOW（review 🟡3）：StoreEvent 失败时 writeSettleFeedback 的
+	// BindFeedback 会因 parent 未落库而丢弃该次裁决（spill 恢复只补事件本体，
+	// 不补 feedback）——与改动前行为一致，非回归；如需消除可将本分支纳入
+	// stored 门控（spill 恢复时补裁决），另立小变更。
 	if evt.Source == SourceTask {
 		cm.writeSettleFeedback(eventKey, evt.Metadata)
 	}
@@ -666,6 +699,36 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// buildTurnAttribution assembles the per-turn attribution stamped onto
+// LLM-produced events via plugin.WithAttribution: rollout/trace/bundle
+// anchors, plus the trigger source. The trigger source (notably
+// "meditation") MUST persist into agent_output Metadata — projection
+// rebuild re-marks meditation keys from the fact chain, and without this
+// stamp the reseed condition Metadata[trigger_source]==meditation can
+// never fire (event-sourced-projection D3; previously it only lived on
+// the in-memory StateDelta).
+func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attribution {
+	attr := plugin.Attribution{}
+	if cm.sessionID != "" {
+		attr[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
+		attr[tagentevent.MetaKeyTraceID] = traceID
+		attr[tagentevent.MetaKeySpanID] = spanID
+	}
+	// D1-B (design-report-closeout): stamp the active bundle id so every
+	// produced event attributes to the exact prompt/config version.
+	if cm.bundleIDFn != nil {
+		if bid := cm.bundleIDFn(); bid != "" {
+			attr[tagentevent.MetaKeyBundleID] = bid
+		}
+	}
+	if cm.triggerSource != "" {
+		attr[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
+	}
+	return attr
+}
+
 // RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
@@ -678,22 +741,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
 		// → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
 		// 双向互链（指令2「一套数据模式、多场景投影、保一致性」）。空归因不注入。
-		attr := plugin.Attribution{}
-		if cm.sessionID != "" {
-			attr[tagentevent.MetaKeyRolloutID] = cm.sessionID
-		}
-		if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
-			attr[tagentevent.MetaKeyTraceID] = traceID
-			attr[tagentevent.MetaKeySpanID] = spanID
-		}
-		// D1-B (design-report-closeout): stamp the active bundle id so every
-		// produced event attributes to the exact prompt/config version.
-		if cm.bundleIDFn != nil {
-			if bid := cm.bundleIDFn(); bid != "" {
-				attr[tagentevent.MetaKeyBundleID] = bid
-			}
-		}
-		ctx = plugin.WithAttribution(ctx, attr)
+		ctx = plugin.WithAttribution(ctx, cm.buildTurnAttribution(ctx))
 	}
 	// Inject the task spawner so tools can delegate long-running work to the
 	// task layer (sync-wait window → inline or ack). Absent → synchronous.

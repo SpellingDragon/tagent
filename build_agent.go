@@ -423,6 +423,12 @@ func buildAgent(
 		})
 	}
 
+	// event-sourced-projection D3：冷启动投影重建——投影=事实链的纯回放（最新
+	// compaction snapshot + 尾部重放，逐字节复原上下文以复用 prefix-cache）。
+	// 启动期一次、进空投影，且先于 spill 重放接线（spec 顺序）；事实链无
+	// 代际标记的 compaction 事件时 no-op（首启/未折叠，维持现状行为）。
+	ta.RebuildProjectionFromWAL()
+
 	// 5.5（design-report-closeout）：mem_spill 重放双写——重放成功的每条事件补投影
 	// （projection 此时已由 NewTagentAgent 创建），恢复「存储⇔投影同点」在退化路径
 	// 的等价语义（Role 从事件类型派生）。
