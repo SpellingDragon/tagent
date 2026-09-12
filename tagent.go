@@ -44,6 +44,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -98,6 +99,13 @@ type runtimeConfig struct {
 	// 时延迟绑定 entry memStore（子 agent 先构造、entry memStore 后就绪），使子 agent 治理记录
 	// 也持久化到 entry governance 分区（durable 审计，重启可 recall）。
 	govLedger *governance.DenialLedger
+
+	// entryMemStore/entrySessionSvc（R4，review 🔴1）：常驻 entry 的持久事实链 store
+	// 与 session 服务（含 AppendEventHook→outputCh 接线）——executorOnly 热重建壳
+	// **复用**它们（而非内存实例/新 sessionSvc），否则换代后事实链停止增长、
+	// 用户消息出向投递断链。New() 构造 entry 后回填。
+	entryMemStore   memory.MemoryStore
+	entrySessionSvc session.Service
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -293,6 +301,10 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
 	}
+	// R4（review 🔴1）：回填常驻 entry 资源——懒检查 fp 变分支的 executorOnly 热重建
+	// 从这里取真实事实链 store 与 session 服务。
+	rc.entryMemStore = entryAgent.MemStore()
+	rc.entrySessionSvc = entryAgent.SessionSvc()
 
 	// Register TrajectoryRecorder for graceful shutdown and session info
 	if rc.trajectoryRecorder != nil {
@@ -401,6 +413,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			prevSnapshot = reloadSnapshot{fp: oldFP, cfg: prevKeep}
 			prevKeep = fresh
 			entryAgent.SetRollbackFn(func() {
+				mu.Lock()
+				defer mu.Unlock()
 				if prevSnapshot.cfg == nil {
 					log.Warnf("[org-hotreload] rollback: no previous generation snapshot")
 					return

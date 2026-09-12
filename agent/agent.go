@@ -148,6 +148,7 @@ type TagentAgent struct {
 type TagentConfig struct {
 	Model              model.Model        // Required: LLM model
 	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
+	SessionSvc         session.Service    // R4（review 🔴1）：外部 SessionSvc 注入（executorOnly 热重建壳复用常驻实例；nil=内部新建）
 	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
 	SystemPromptSource prompt.Getter      // Hot-reloadable system prompt (optional, overrides SystemPrompt); Getter 接口（文件即真源，mtime 热重载）
 	Tools              []tool.Tool        // CallableTools to register
@@ -389,40 +390,47 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// appends user messages to session but does NOT emit them through the
 	// agent event channel — without this hook the consumer would never see
 	// them).
-	sessionSvc := sessioninmemory.NewSessionService(
-		sessioninmemory.WithSessionEventLimit(2),
-		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
-			original := ctx.Event
-			var evtCopy event.Event
-			if original.Response != nil {
-				evtCopy = *original
-				evtCopy.Response = original.Response.Clone()
-				ctx.Event = &evtCopy
-			}
-			err := next()
-			ctx.Event = original
-
-			// Forward user message events to outputCh (delivery). LLM/tool
-			// events are emitted via eventCh in RunFlow, not here. Projection
-			// writes happen in the event-plugin pipeline (MemoryPlugin →
-			// ProjectionSink), which has already run for this event. Deliver a
-			// clone with its own StateDelta map: onEventRef writes meta_* and
-			// must never mutate the framework's shared event object.
-			if onEventRef != nil && original.IsUserMessage() {
-				emitEvt := cloneEventForDelivery(original)
-				onEventRef(emitEvt)
-				select {
-				case outputCh <- emitEvt:
-				default:
-					droppedOutputCounter.Add(1)
-					log.Warnf("[SessionHook] outputCh full, user message event dropped (total dropped: %d)",
-						droppedOutputCounter.Load())
+	var sessionSvc session.Service
+	// R4（review 🔴1）：外部注入的 SessionSvc（executorOnly 热重建壳）优先——
+	// 其 AppendEventHook 已绑定常驻 outputCh，session 记录续写同一 session。
+	if cfg.SessionSvc != nil {
+		sessionSvc = cfg.SessionSvc
+	} else {
+		sessionSvc = sessioninmemory.NewSessionService(
+			sessioninmemory.WithSessionEventLimit(2),
+			sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
+				original := ctx.Event
+				var evtCopy event.Event
+				if original.Response != nil {
+					evtCopy = *original
+					evtCopy.Response = original.Response.Clone()
+					ctx.Event = &evtCopy
 				}
-			}
+				err := next()
+				ctx.Event = original
 
-			return err
-		}),
-	)
+				// Forward user message events to outputCh (delivery). LLM/tool
+				// events are emitted via eventCh in RunFlow, not here. Projection
+				// writes happen in the event-plugin pipeline (MemoryPlugin →
+				// ProjectionSink), which has already run for this event. Deliver a
+				// clone with its own StateDelta map: onEventRef writes meta_* and
+				// must never mutate the framework's shared event object.
+				if onEventRef != nil && original.IsUserMessage() {
+					emitEvt := cloneEventForDelivery(original)
+					onEventRef(emitEvt)
+					select {
+					case outputCh <- emitEvt:
+					default:
+						droppedOutputCounter.Add(1)
+						log.Warnf("[SessionHook] outputCh full, user message event dropped (total dropped: %d)",
+							droppedOutputCounter.Load())
+					}
+				}
+
+				return err
+			}),
+		)
+	}
 
 	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
 	ta := &TagentAgent{

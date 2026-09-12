@@ -167,32 +167,43 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 		return 0
 	}
 
-	// 1) spawned 记录（task_spawned 类型，Content=Declarative JSON）。
-	spawnedRefs, err := store.QueryEvents(memory.QueryOptions{
-		PartitionIDs: []int{partitionID},
-		EventTypes:   []string{tagentevent.TypeTaskSpawned},
-		Limit:        500,
-	})
-	if err != nil {
-		log.Errorf("[rebuild-task-registry] query spawned failed: %v", err)
-		return 0
-	}
+	// 1) spawned 记录（task_spawned 类型，Content=Declarative JSON）——分页取全
+	//（review 🟠3：单页 Limit 500 会静默截断早期 spawned，对应任务重启丢失）。
 	type spawnRec struct {
 		id   string
 		decl task.Declarative
 	}
-	spawns := make([]spawnRec, 0, len(spawnedRefs))
-	for _, r := range spawnedRefs {
-		ev, err := store.GetEvent(r.EventKey)
-		if err != nil || ev == nil {
+	var spawns []spawnRec
+	for off := 0; ; off += 500 {
+		batch, err := store.QueryEvents(memory.QueryOptions{
+			PartitionIDs: []int{partitionID},
+			EventTypes:   []string{tagentevent.TypeTaskSpawned},
+			Limit:        500,
+			Offset:       off,
+		})
+		if err != nil {
+			log.Errorf("[rebuild-task-registry] query spawned failed: %v", err)
+			break
+		}
+		keys := make([]int64, 0, len(batch))
+		for _, r := range batch {
+			keys = append(keys, r.EventKey)
+		}
+		evs, gerr := store.GetEvents(keys)
+		if gerr != nil {
 			continue
 		}
-		var decl task.Declarative
-		if err := json.Unmarshal([]byte(ev.Content), &decl); err != nil {
-			log.Warnf("[rebuild-task-registry] spawned record %d corrupt, skipping: %v", r.EventKey, err)
-			continue
+		for _, ev := range evs {
+			var decl task.Declarative
+			if err := json.Unmarshal([]byte(ev.Content), &decl); err != nil {
+				log.Warnf("[rebuild-task-registry] spawned record %d corrupt, skipping: %v", ev.EventKey, err)
+				continue
+			}
+			spawns = append(spawns, spawnRec{id: ev.Metadata["task_id"], decl: decl})
 		}
-		spawns = append(spawns, spawnRec{id: ev.Metadata["task_id"], decl: decl})
+		if len(batch) < 500 {
+			break
+		}
 	}
 	if len(spawns) == 0 {
 		return 0

@@ -664,6 +664,13 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 	if tk.Status() != "" {
 		status = string(tk.Status())
 	}
+	// R4 review 🟡10：与 background 路径词汇归一——SettleStable 在 background
+	// 侧记 "alive-detached"（detached 转换发生在 emitBackground），inline 侧
+	// tk.Status() 仍是 running/stable；归一后恢复时 aliveDetached 抑制标志
+	// 语义一致（避免恢复后多发一次 ready 通知）。
+	if sig.Kind == task.SettleStable {
+		status = "alive-detached"
+	}
 	md := map[string]string{
 		tagentevent.MetaKeyAgentName: cm.name,
 		"task_id":                    tk.ID,

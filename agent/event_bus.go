@@ -117,6 +117,13 @@ const settleErrMaxChars = 200
 // alive-detached / ⚠ suspect.
 func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	switch {
+	case sig.Kind == task.SettleWatch:
+		// R2（review 🔴2）：watch 命中是**通知**而非终态——信号恒带哨兵 Err
+		//（"%d matches"），若落入下方 Err 判定则记为 failed 终态，RebuildTaskRegistry
+		// 按「spawned−终态」折叠后，仍在运行的 watch 型服务任务重启即消失。
+		// 记为非终态词汇 "watch"（不在终态集合 {completed,failed,cancelled,dead}，
+		// 不抵消 spawned；通知正文照发不变）。
+		return "◈", "watch"
 	case sig.Err != nil:
 		return "✗", "failed"
 	case sig.Kind == task.SettleStable:

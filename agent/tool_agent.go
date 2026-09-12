@@ -589,9 +589,18 @@ func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent
 			return w.runAndCollect(runCtx, inv, agentName)
 		}, w.asyncDenseDuration)
 		return spawner.Spawn(task.TaskSpec{
-			Kind:     "subagent",
-			Desc:     agentName + ": " + truncate(request, 60),
-			Key:      spawnKey,
+			Kind: "subagent",
+			Desc: agentName + ": " + truncate(request, 60),
+			Key:  spawnKey,
+			// R2（review 🟠8）：relaunch 产物同样携带声明式投影——否则该产物重启后
+			// 成幽灵（无 task_spawned 记录可回放）。
+			Declarative: &task.Declarative{
+				Kind:        "subagent",
+				Desc:        agentName + ": " + truncate(request, 60),
+				Key:         spawnKey,
+				AgentName:   agentName,
+				MessageBody: request,
+			},
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 		}, detector), nil
 	}

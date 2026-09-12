@@ -51,9 +51,14 @@ func buildAgent(
 	var hintTracker *ConsolidationHintTracker
 	var err error
 	if executorOnly {
-		// R4 ownership 表：热重建产物丢弃壳——内存实例即可（不双开文件句柄）；
-		// 常驻实例的 store 经 Swap 不变。hintTracker 不接线（丢弃壳无消费循环）。
-		memStore = memory.NewInMemoryStore()
+		// R4 ownership 表（review 🔴1 修正）：热重建壳**复用常驻 entry 的 memStore**
+		//（而非内存实例）——runner 内的 MemoryPlugin 写入路径必须落在真实事实链上，
+		// 否则换代后事实链停止增长、R1 投影丢失换代后全部 turn、recall/巩固读空壳。
+		memStore = rc.entryMemStore
+		if memStore == nil {
+			memStore = memory.NewInMemoryStore()
+		}
+		// hintTracker 不接线（丢弃壳无消费循环）。
 	} else {
 		memStore, err = resolveMemoryStore(acfg.Memory)
 		if err != nil {
@@ -145,7 +150,10 @@ func buildAgent(
 	// 后验评估闭环：judge+guardrail 经 BindRuntime 绑定到 GitEvolution（同点位换接，
 	// memStore 就绪时序保持——S3）；评估窗口锚=register 时刻（improvement 事件，W4 迁移），
 	// 判定只产 evaluation 事件（建议式，P4）。
-	if rc.evoGit != nil && name == cfg.Entry {
+	// R4（review 🟠9）：evoGit.BindRuntime 是**进程级共享重绑**（把共享 evolution
+	// 的证据源/judge/guardrail 重指到本构建的 store）——热重建丢弃壳必须跳过，
+	// 否则换代后 evolution 评估从空壳 store 取证据，评估闭环静默失明。
+	if rc.evoGit != nil && name == cfg.Entry && !executorOnly {
 		evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
 		evSrc.SetActivationLog(rc.evoGit.Log())
 		rc.evoGit.BindRuntime(
@@ -247,6 +255,12 @@ func buildAgent(
 		}
 		if isAction {
 			actionTool = t.(*action.ActionTool)
+			// R4（review 🟠4）：热重建壳强制重挂——构造期 CAS 已被首个实例消耗，
+			// 此处显式重入（幂等：已跟踪会话跳过），否则换代后新 monitor 空、
+			// IsTrackedSession/TUI 保护/稳定时长附加注全部失效。
+			if executorOnly {
+				actionTool.ReattachResidentSessions()
+			}
 		}
 		tools = append(tools, t)
 	}
@@ -317,9 +331,12 @@ func buildAgent(
 
 	// 5. Create TagentAgent
 	agentCfg := &agent.TagentConfig{
-		Name:                 name,
-		Model:                agentModel,
-		MemoryStore:          memStore,
+		Name:        name,
+		Model:       agentModel,
+		MemoryStore: memStore,
+		// R4（review 🔴1）：executorOnly 壳复用常驻 sessionSvc（AppendEventHook→
+		// 常驻 outputCh 接线不断、session 记录续写同一 session）。
+		SessionSvc:           rc.entrySessionSvc,
 		SystemPrompt:         systemPrompt,
 		SystemPromptSource:   systemPromptSource,
 		Tools:                tools,
