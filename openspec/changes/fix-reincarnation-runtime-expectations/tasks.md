@@ -6,7 +6,7 @@
 - [x] 1.3 回归测试 `agent/task/task_prune_nil_detector_test.go`（真 RestoreTask 路径 + List/Spawn 双入口）
 - [x] 1.4 `gofmt` / `go build ./...` / `go vet` / `go test ./agent/...` 全绿
 - [x] 1.5 commit `4aedeef`
-- [ ] 1.6 换装部署到运行进程，确认新二进制携带该修复
+- [x] 1.6 换装部署到运行进程，确认新二进制携带该修复
       证据口径（三项齐备即可判定）：a. 新二进制 build_sha `f882854a5aae`、size 55283368 bytes；
       b. 运行进程为新二进制：pid 启动时间晚于二进制 mtime；c. logs/restart.log 含 RESTART OK，healthz ok。
 
@@ -14,7 +14,7 @@
 - [x] 2.1 根因：`wiring.go:37-40` 空 agent provider 回退全局 deepseek
 - [x] 2.2 修复 `tagent.yaml` plan 段补 `provider: zhipu`
 - [x] 2.3 commit `d438666`
-- [ ] 2.4 换装后实测 `plan` 工具恢复可用（证据：调用返回摘要，非 400）
+- [x] 2.4 换装后实测 `plan` 工具恢复可用（证据：调用返回摘要，非 400）
 
 ## 3. 转世运行预期（设计）
 - [ ] 3.1 成文《转世运行预期》：三类状态 × 预期行为 × 降级策略 × 可观测证据
@@ -24,8 +24,8 @@
 - [ ] 3.4 验收标准与演练脚本（并入 expectations 文档末章）
 
 ## 4. 部署与验证
-- [ ] 4.1 换装部署（与 1.6 同一动作，一次部署覆盖 1.6/2.4/4.1/4.3 前置）
-- [ ] 4.2 验证 panic 消失（换装后 ≥5 轮含工具调用的消息处理，日志无 panic/nil pointer/detector 栈）
+- [x] 4.1 换装部署（与 1.6 同一动作，一次部署覆盖 1.6/2.4/4.1/4.3 前置）
+- [x] 4.2 验证 panic 消失（换装后 ≥5 轮含工具调用的消息处理，日志无 panic/nil pointer/detector 栈）
 - [ ] 4.3 验证 plan 工具可用（与 2.4 同一动作，合并报账）
 
 ## 5. 模型配置五坑处置（本阶段由 plan 扩充，2026-09-13）
@@ -35,7 +35,7 @@
       - 清理 `tagent.yaml` L20 全局 `api_endpoint` 死配置（被 L36 providers.deepseek 覆盖）及误导注释（L21「与 zhipu 同端点」）；处理方式随坑4决策（回退 deepseek → 死配置随之消失；保留 deepseek → 删除死配置+修正注释）
       - 将 `main.go:112/133` 的 `openai.New()` 硬编码迁至 resolveAgentModel 工厂统一解析（或经评审确认保留双链路的正当理由并成文）
       - 证据口径：gofmt/go build/go vet/go test 全绿 + 前后 diff + git commit hash
-- [ ] 5.2 坑3：观测盲区修复（depends_on: 5.1 链路统一结论）
+- [x] 5.2 坑3：观测盲区修复（depends_on: 5.1 链路统一结论）
       - 依据 5.1 核实结论：若主 agent 命中 early-return 跳过 TrajectoryRecorder 包装 → 移除 early-return 或在其分支内补包装
       - 若主 agent 走 `main.go` 独立链路未包装 → 在 `openai.New()` 产物外补 TrajectoryRecorder
       - 证据口径：换装后 trajectory dump 中可见主 agent LLM 调用条目（路径 + 条目数）
