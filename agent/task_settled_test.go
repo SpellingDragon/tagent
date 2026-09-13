@@ -165,19 +165,25 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 }
 
 // TestNewTaskSettledEvent_NoOriginSafe: a task with no Origin yields an event
-// with no routing metadata (regression guard). settle_status is NOT routing
-// metadata — it is the deterministic settle verdict carried for the OnSettle
-// feedback path (2.3, design-report-closeout), always present.
+// with no routing metadata (regression guard). settle_status and task_id are
+// NOT routing metadata — settle_status is the deterministic settle verdict
+// carried for the OnSettle feedback path (2.3, design-report-closeout), always
+// present; task_id is the R2 structured registry key
+// (resident-continuity-r2-r4 1.5: machine-readable settle association, never
+// parsed from content), always present.
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
 	for k := range evt.Metadata {
-		if k != "settle_status" {
+		if k != "settle_status" && k != "task_id" {
 			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
 		}
 	}
 	if evt.Metadata["settle_status"] != "completed" {
 		t.Errorf("settle_status must always be carried (2.3 feedback path), got %v", evt.Metadata["settle_status"])
+	}
+	if evt.Metadata["task_id"] != "t2" {
+		t.Errorf("task_id must always be carried (R2 registry key), got %v", evt.Metadata["task_id"])
 	}
 }
 

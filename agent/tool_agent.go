@@ -442,9 +442,18 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			spawnKey = agentName + ":" + extraName
 		}
 		res := spawner.Spawn(task.TaskSpec{
-			Kind:     "subagent",
-			Desc:     agentName + ": " + truncate(request, 60),
-			Key:      spawnKey,
+			Kind: "subagent",
+			Desc: agentName + ": " + truncate(request, 60),
+			Key:  spawnKey,
+			// R2（resident-continuity-r2-r4）：声明式投影——重启后 Relaunch 经 agents map
+			// 重投递（承诺表：subagent Resume 不可重建，rounds 无事件源）。
+			Declarative: &task.Declarative{
+				Kind:        "subagent",
+				Desc:        agentName + ": " + truncate(request, 60),
+				Key:         spawnKey,
+				AgentName:   agentName,
+				MessageBody: request,
+			},
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
@@ -483,6 +492,29 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 // final output from the event stream. Shared by the synchronous path and the
 // async task detector. Isolation is preserved by Run (fresh bus/CM/projection
 // per invocation), so this is safe to run concurrently / in a background task.
+// RedispatchAsync（R2，resident-continuity-r2-r4 D1.2）：跨重启 subagent relaunch
+// 的重投递入口——以原 request 重新走 Call 的完整 spawn 路径（声明了 extra
+// params 时按无参调用降级：plan-name 等 extra 参数不跨重启保留，已知边界）。
+func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string) (any, error) {
+	args, err := json.Marshal(map[string]any{"request": request})
+	if err != nil {
+		return nil, err
+	}
+	return w.Call(ctx, args)
+}
+
+// DeclaredAgentName reports the wrapped sub-agent's name (registry key for
+// the cross-restart redispatch table).
+func (w *AgentToolWrapper) DeclaredAgentName() string {
+	return w.agent.Info().Name
+}
+
+// DenseDuration exposes the async dense-window length (R2 redispatch detector
+// shape parity with subagentRelaunch).
+func (w *AgentToolWrapper) DenseDuration() time.Duration {
+	return w.asyncDenseDuration
+}
+
 func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	startTime := time.Now()
 
@@ -557,9 +589,18 @@ func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent
 			return w.runAndCollect(runCtx, inv, agentName)
 		}, w.asyncDenseDuration)
 		return spawner.Spawn(task.TaskSpec{
-			Kind:     "subagent",
-			Desc:     agentName + ": " + truncate(request, 60),
-			Key:      spawnKey,
+			Kind: "subagent",
+			Desc: agentName + ": " + truncate(request, 60),
+			Key:  spawnKey,
+			// R2（review 🟠8）：relaunch 产物同样携带声明式投影——否则该产物重启后
+			// 成幽灵（无 task_spawned 记录可回放）。
+			Declarative: &task.Declarative{
+				Kind:        "subagent",
+				Desc:        agentName + ": " + truncate(request, 60),
+				Key:         spawnKey,
+				AgentName:   agentName,
+				MessageBody: request,
+			},
 			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
 		}, detector), nil
 	}

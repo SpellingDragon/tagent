@@ -2,13 +2,21 @@ package action
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
+
+// residentReattachOnce（R3 2.6，唯一挂载点）：多 agent org 中每个配置了 action
+// 工具的 agent 都构造各自 ActionTool+monitor——若都跑重挂则同一批 n- 会话被
+// N 份 detector/probe-loop/watch 回调重复跟踪（🟠9）。进程级一次：首个实例执行
+// 重挂，后续实例跳过（cleanup 保持幂等：n- 已被 orphan 重定义排除）。
+var residentReattachOnce atomic.Bool
 
 // Resident-session recovery (2026-09-11 D1).
 //
@@ -27,14 +35,21 @@ import (
 // (legacy/oneshot leftovers) are left to the existing orphan cleanup.
 
 // ResidentMeta is the persisted parameter set needed to rebuild tracking.
+// R3（resident-continuity-r2-r4 2.5）补 Command/TaskID/Origin：Command 供人/LLM
+// 审计与重建描述；TaskID=会话 id 桥键（与 task_spawned 事件的 Declarative.TaskID
+// 同源——重挂时按此与重建 registry 的任务重关联）；Origin 为可选路由 baggage
+// （真相源在 task_spawned 事件，meta 侧预留零值兼容）。旧记录缺新字段：零值容错。
 type ResidentMeta struct {
-	Name             string `json:"name"`
-	Mode             string `json:"mode"`
-	Watch            string `json:"watch,omitempty"`
-	Probe            string `json:"probe,omitempty"`
-	ProbeIntervalSec int    `json:"probe_interval,omitempty"`
-	ProbeFailures    int    `json:"probe_failures,omitempty"`
-	SpawnedAt        string `json:"spawned_at"`
+	Name             string            `json:"name"`
+	Mode             string            `json:"mode"`
+	Watch            string            `json:"watch,omitempty"`
+	Probe            string            `json:"probe,omitempty"`
+	ProbeIntervalSec int               `json:"probe_interval,omitempty"`
+	ProbeFailures    int               `json:"probe_failures,omitempty"`
+	SpawnedAt        string            `json:"spawned_at"`
+	Command          string            `json:"command,omitempty"` // R3：原命令行（审计/重建描述）
+	TaskID           string            `json:"task_id,omitempty"` // R3：桥键（=session id）
+	Origin           map[string]string `json:"origin,omitempty"`  // R3：预留（真相源=task_spawned 事件）
 }
 
 // metaPath returns the metadata file for a session id.
@@ -43,6 +58,9 @@ func (ct *ActionTool) metaPath(sessionID string) string {
 }
 
 func (ct *ActionTool) metaDir() string {
+	if ct.residentMetaDirOverride != "" {
+		return ct.residentMetaDirOverride // R3 2.5：resident_meta_dir 可配（离 /tmp 的持久卷）
+	}
 	return filepath.Join(os.TempDir(), "tagent-resident-meta")
 }
 
@@ -60,6 +78,8 @@ func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 		ProbeIntervalSec: args.ProbeIntervalSec,
 		ProbeFailures:    args.ProbeFailures,
 		SpawnedAt:        time.Now().Format(time.RFC3339),
+		Command:          args.Command, // R3：全参数入事实链/meta
+		TaskID:           sessionID,    // R3：桥键=会话 id（与 Declarative.TaskID 同源）
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -67,11 +87,36 @@ func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 	}
 	_ = os.MkdirAll(ct.metaDir(), 0o755)
 	_ = os.WriteFile(ct.metaPath(sessionID), b, 0o600)
+	// R3 2.5：spawn 全参入事实链（旁路 best-effort；真相源链=meta 文件+tmux 存活）。
+	ct.emitResidentSessionEvent(sessionID, m, false)
 }
 
 // removeResidentMeta drops the record when the session ends for any reason.
 func (ct *ActionTool) removeResidentMeta(sessionID string) {
+	// R3 2.5：终态结局入事实链（读 meta 组事件体；读不到则最小记录）。
+	if b, err := os.ReadFile(ct.metaPath(sessionID)); err == nil {
+		var m ResidentMeta
+		if json.Unmarshal(b, &m) == nil {
+			ct.emitResidentSessionEvent(sessionID, m, true)
+		}
+	}
 	_ = os.Remove(ct.metaPath(sessionID))
+}
+
+// emitResidentSessionEvent writes a resident_session lifecycle record to the
+// fact chain via the optional sink (wired by the build path to cm's
+// record-only persistence; nil sink = standalone use, skip). Best-effort.
+func (ct *ActionTool) emitResidentSessionEvent(sessionID string, m ResidentMeta, terminal bool) {
+	if ct.residentSink == nil {
+		return
+	}
+	kind := "spawn"
+	detail := fmt.Sprintf("命令=%q 模式=%s watch=%q probe=%q", m.Command, m.Mode, m.Watch, m.Probe)
+	if terminal {
+		kind = "end"
+		detail = fmt.Sprintf("会话结束（曾运行命令=%q 模式=%s）", m.Command, m.Mode)
+	}
+	ct.residentSink(sessionID, kind, m.Name, detail)
 }
 
 // ReattachResidentSessions reconciles surviving tmux sessions against the

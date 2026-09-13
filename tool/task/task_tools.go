@@ -176,6 +176,12 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if !ok {
 		return fmt.Sprintf("未找到任务 %q。", args.TaskID), nil
 	}
+	// R2（review 🟠7）：恢复型 suspect（跨重启重建/进程内 fake-dead）占着 byKey——
+	// 直接 Relaunch 会命中 dedup 永久锁死（报「已重跑」实际什么都没跑）。用户显式
+	// relaunch 即选择重跑：先退役旧条目（写 cancelled 终态，事实链自洽），再重跑。
+	if tk.Status() == task.TaskSuspect {
+		ctrl.Cancel(tk.ID)
+	}
 	res, err := ctrl.Relaunch(tk.ID)
 	if err != nil {
 		return fmt.Sprintf("重跑任务 %s 失败：%v", tk.ID, err), nil

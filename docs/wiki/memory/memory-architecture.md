@@ -980,7 +980,7 @@ graph LR
 
 记忆按 **LSM 树**组织：事件从**两条现役管线**（EventBus 注入 / 框架 LLM 事件，见下图「两个生产者」）汇入唯一的 `StoreEvent` 写入路径，顺序追加进按写入时间分段的存储；层级表示写入新近度与压实代数（与事件的逻辑时间正交）；封口/压实写入真实时间边界（键范围元数据）供查询剪枝；遗忘由压实（分辨率）、TTL（价值衰减）、容量（保险）三层各自负责，均经墓碑达成。
 
-> 旧 legacy 压缩固化物写入管线**已移除**：压缩产物（`context_compress` 滚动摘要）是投影内**负 key** 的 summary reference，不经 `StoreEvent` 落库；存量固化物（`context_compress_summary`，正 key）只读不清、享 TTL 豁免自然清退。
+> 旧 legacy 压缩固化物写入管线已随 legacy 移除；**event-sourced-projection 起，压缩折叠本身是事实链的一等事件**：真折叠时向事实链追加一条 `context_compress_summary` 正 key **compaction 事件**（`Metadata[compaction]=v1` 代际标记；Content/EventSummary=综述正文——可召回正文即叙事；`Metadata[compaction_payload]` 载重建载荷：综述 ref + 有序 retained 列表[负 key tool_chain 合成 ref 全身份逐字节/正 key 只存 key] + fullBoundary），并滚动 supersede（写前查 prior、写后 DeleteEvent，限定代际标记——legacy 固化物不删不选）。投影由此成为**事实链的纯回放**（运行期 `StoreEvent→projection.Add` 增量；重启 `RebuildProjectionFromWAL`= 最新 compaction 作 snapshot + 按 `QueryOptions.MinEventKey` 写序过滤的尾部重放，逐字节重建、prefix-cache 复用）。折叠产物在投影内仍是负 key summary ref（渲染语义不变）。
 
 ```mermaid
 graph TB
@@ -1064,9 +1064,10 @@ graph TB
 ```
 
 要点：
-- 两个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护（旧 archiveSegment 固化物生产者已随 legacy 管线移除）。
+- 两个生产者归一到**同一条 `StoreEvent` 写入路径**：写入侧只有一个收口，因而只有一组写入不变量需要守护（旧 archiveSegment 固化物生产者已随 legacy 管线移除；压缩折叠的 compaction 事件是第三类合法写入——它记录折叠本身，不产生事实事件）。
 - **窗口与 seq 的分配住在内存态 `PartitionState`**（`sync.Map`，按 pid 惰性创建）。这是“槽位分配”的唯一权威，也是 16.6 恢复链路的关键一环。
-- 因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。
+- 因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。投影的重建是同一 fold 的全量入口：`RebuildProjectionFromWAL` 在启动期（先于 spill 重放）从事实链回放复原（compaction snapshot + 尾部），与运行期增量 `Add` 等价（不变量：正常路径精确、退化恢复路径最终一致）。
+- 同模式的两层旁路记录（R2/R3，resident-continuity）：`task_spawned`（任务 spawn 全参，registry 重建数据源）与 `resident_session`（常驻会话生命周期）——**事实链记录不进投影**（看板由 registry 每轮渲染、inline 结果已随工具结果在投影内，追加即双重表示）；任务 registry 的重建入口 = `RebuildTaskRegistry`（task_spawned − 终态 settle，settle 以结构化 `task_id/settle_status` Metadata 机器关联）。
 
 ### 16.2 KV 键空间：无外键的指向契约
 

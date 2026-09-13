@@ -28,7 +28,9 @@ package tagent
 
 import (
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -42,6 +44,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -72,6 +75,11 @@ type runtimeConfig struct {
 	// This supports scenarios like SwappableModel for entry agent (AReaL proxy).
 	modelOverrides map[string]model.Model
 
+	// configPath (agent-config-hot-reload, incremental A): when set via
+	// WithConfigPath, arms a lazy org-config watcher on the entry agent.
+	// Empty = disabled (default).
+	configPath string
+
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *rl.TrajectoryRecorder
@@ -91,6 +99,13 @@ type runtimeConfig struct {
 	// 时延迟绑定 entry memStore（子 agent 先构造、entry memStore 后就绪），使子 agent 治理记录
 	// 也持久化到 entry governance 分区（durable 审计，重启可 recall）。
 	govLedger *governance.DenialLedger
+
+	// entryMemStore/entrySessionSvc（R4，review 🔴1）：常驻 entry 的持久事实链 store
+	// 与 session 服务（含 AppendEventHook→outputCh 接线）——executorOnly 热重建壳
+	// **复用**它们（而非内存实例/新 sessionSvc），否则换代后事实链停止增长、
+	// 用户消息出向投递断链。New() 构造 entry 后回填。
+	entryMemStore   memory.MemoryStore
+	entrySessionSvc session.Service
 }
 
 // namedMemStores provides shared InMemoryStore instances by path.
@@ -150,6 +165,16 @@ func WithMCPToolSets(ts []trpctool.ToolSet) Option {
 // WithSummaryModel sets the model for Stage 2 LLM summary compression.
 func WithSummaryModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.summaryModel = m }
+}
+
+// WithConfigPath records the on-disk path the Config was loaded from
+// (agent-config-hot-reload, incremental A). When set, the entry agent arms
+// a lazy org-config watcher: before each LLM call it stats the file and on
+// change re-parses + fingerprints the org whitelist subset — migratable
+// numeric params (compress_threshold) are hot-applied; structural diffs
+// are logged as restart-required until snapshot rebuild (incremental B).
+func WithConfigPath(path string) Option {
+	return func(rc *runtimeConfig) { rc.configPath = path }
 }
 
 // WithModelOverrides injects pre-resolved model instances for specific agents.
@@ -272,10 +297,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 
 	// Build entry agent (the top-level agent returned by New)
 	entryCfg := cfg.Agents[cfg.Entry]
-	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache)
+	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, buildModeResident)
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
 	}
+	// R4（review 🔴1）：回填常驻 entry 资源——懒检查 fp 变分支的 executorOnly 热重建
+	// 从这里取真实事实链 store 与 session 服务。
+	rc.entryMemStore = entryAgent.MemStore()
+	rc.entrySessionSvc = entryAgent.SessionSvc()
 
 	// Register TrajectoryRecorder for graceful shutdown and session info
 	if rc.trajectoryRecorder != nil {
@@ -288,6 +317,129 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	// shared across agents).
 	if rc.mcpRegistry != nil {
 		entryAgent.RegisterCloser(rc.mcpRegistry)
+	}
+
+	// Org-layer config hot reload (agent-config-hot-reload, incremental A).
+	// When the config path is known, arm a lazy check on the entry agent:
+	// before each LLM call, stat the file; on mtime churn re-parse and
+	// fingerprint the org whitelist subset (D3). Behavior:
+	//   - fingerprint UNCHANGED: hot-apply migratable numeric params
+	//     (compress_threshold) onto the live agent via ApplyOrgParams.
+	//   - fingerprint CHANGED: structural diff (tools/agents/model wiring).
+	//     Snapshot rebuild lands in incremental B; until then log loudly
+	//     that a restart is required and keep serving (fail-closed).
+	if rc.configPath != "" {
+		cfgPath := rc.configPath
+		var ( // closure-captured reload state
+			lastFP        string
+			lastMemFP     string         // R4 3.1：memory 先序检测（🔴5——被 org 指纹排除，不先检则静默不生效）
+			lastSeenMtime int64          // atomic; -nanos of last processed config mtime
+			mu            sync.Mutex     // single-flight reload
+			execGen       int            // R4 3.8：执行器代次（代际日志）
+			prevKeep      *Config        // R4 3.8：ring 2 当前代配置（换代时转 prevSnapshot）
+			prevSnapshot  reloadSnapshot // R4 3.8：ring 2 上一代（Rollback 数据源）
+		)
+		if fp, err := computeOrgFingerprint(&cfg); err == nil {
+			lastFP = fp
+		}
+		if mfp, err := computeMemoryFingerprint(&cfg); err == nil {
+			lastMemFP = mfp
+		}
+		entryAgent.SetOrgReloader(func() {
+			info, err := os.Stat(cfgPath)
+			if err != nil {
+				return // file gone/unreachable: keep serving, nothing to do
+			}
+			mt := info.ModTime().UnixNano()
+			if mt == atomic.LoadInt64(&lastSeenMtime) {
+				return // hot path: unchanged
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if info2, err2 := os.Stat(cfgPath); err2 == nil {
+				if info2.ModTime().UnixNano() == atomic.LoadInt64(&lastSeenMtime) {
+					return // re-check under lock
+				}
+				atomic.StoreInt64(&lastSeenMtime, info2.ModTime().UnixNano())
+			}
+			fresh, err := LoadConfig(cfgPath)
+			if err != nil {
+				log.Errorf("[org-hotreload] config parse FAILED — serving previous: %v", err)
+				return
+			}
+			fp, err := computeOrgFingerprint(fresh)
+			if err != nil {
+				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
+				return
+			}
+			// R4 3.1（🔴5）memory 先序：org 指纹比对**之前**独立 diff memory 段——
+			// 命中即拒绝热更并明示须重启（fail-closed；不依赖 fingerprint 变化路径）。
+			mfp, merr := computeMemoryFingerprint(fresh)
+			if merr == nil && mfp != lastMemFP {
+				log.Errorf("[org-hotreload] agents.*.memory.* CHANGED (mem-fp %s.. -> %s..) — runtime storage migration is not supported; RESTART required to apply", short(lastMemFP), short(mfp))
+				lastMemFP = mfp
+				return
+			}
+			if fp == lastFP {
+				// org structure unchanged: hot-apply migratable numeric params
+				if ac, ok := fresh.Agents[cfg.Entry]; ok && ac.CompressThreshold > 0 {
+					entryAgent.ApplyOrgParams(ac.CompressThreshold)
+					log.Infof("[org-hotreload] compress_threshold hot-applied: %v", ac.CompressThreshold)
+				}
+				return
+			}
+			// R4（resident-continuity-r2-r4 3.5/3.8）：结构变化→cm.runner 级热重建
+			//（executorOnly 模式：丢弃壳仅取 runner；按 ownership 表跳过对共享物
+			// 副作用），build-validate-then-swap：构建失败 fail-closed（旧 runner
+			// 原样服务），成功 SwapExecutor+代际日志（下一 turn 生效；in-flight
+			// turn 用旧 runner 跑完）。ring 2 上一代配置供 Rollback。
+			newTA, rerr := buildAgent(cfg.Entry, fresh.Agents[cfg.Entry], *fresh, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell)
+			if rerr != nil {
+				log.Errorf("[org-hotreload] executor rebuild FAILED — serving previous (fail-closed): %v", rerr)
+				return
+			}
+			newRunner := newTA.Runner()
+			if newRunner == nil {
+				log.Errorf("[org-hotreload] executor rebuild produced no runner — serving previous (fail-closed)")
+				return
+			}
+			oldFP := lastFP
+			entryAgent.SwapExecutor(newRunner)
+			lastFP = fp
+			execGen++
+			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
+				execGen, short(oldFP), short(fp))
+			// ring 2（3.8）：保留上一代配置摘要供 Rollback（覆盖更早代）。
+			prevSnapshot = reloadSnapshot{fp: oldFP, cfg: prevKeep}
+			prevKeep = fresh
+			entryAgent.SetRollbackFn(func() {
+				mu.Lock()
+				defer mu.Unlock()
+				if prevSnapshot.cfg == nil {
+					log.Warnf("[org-hotreload] rollback: no previous generation snapshot")
+					return
+				}
+				rollbackC := *prevSnapshot.cfg
+				rbp, rerr0 := computeOrgFingerprint(&rollbackC)
+				if rerr0 != nil {
+					log.Errorf("[org-hotreload] rollback fingerprint FAILED: %v", rerr0)
+					return
+				}
+				if rbp == fp {
+					log.Warnf("[org-hotreload] rollback: previous generation equals current (fp %s..)", short(fp))
+					return
+				}
+				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell); rerr2 != nil {
+					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
+					return
+				} else if r2 := ta2.Runner(); r2 != nil {
+					entryAgent.SwapExecutor(r2)
+					execGen++
+					lastFP = rbp
+					log.Infof("[org-hotreload] executor generation %d rolled back to fp %s..", execGen, short(rbp))
+				}
+			})
+		})
 	}
 
 	return entryAgent, nil

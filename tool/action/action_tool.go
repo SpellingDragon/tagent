@@ -45,6 +45,13 @@ type ActionTool struct {
 	// leftover sessions (see WithOrphanCleanupDisabled).
 	orphanCleanupDisabled bool
 
+	// residentSink（R3，resident-continuity-r2-r4 2.5）：常驻会话生命周期事件
+	//（resident_session）的可选事实链写入槽——build 路径接线到 cm 的记录-only
+	// 持久化；nil=standalone 使用，跳过（best-effort）。
+	residentSink func(sessionID, kind, name, detail string)
+	// residentMetaDirOverride（R3 2.5）：ResidentMeta 目录覆盖（默认 $TMPDIR）。
+	residentMetaDirOverride string
+
 	// peeks tracks incremental peek cursors per session (B3 session ops).
 	peeks peekCursors
 
@@ -114,6 +121,47 @@ func WithActionMonitorConfig(cfg MonitorConfig) ActionToolOption {
 	}
 }
 
+// WithResidentRecordSink（R3，resident-continuity-r2-r4 2.5）：接线常驻会话
+// 生命周期事件的事实链写入槽（build 路径→cm 记录-only 持久化）。best-effort。
+func WithResidentRecordSink(sink func(sessionID, kind, name, detail string)) ActionToolOption {
+	return func(ct *ActionTool) {
+		ct.residentSink = sink
+	}
+}
+
+// WithResidentMetaDir（R3 2.5）：ResidentMeta 目录覆盖（默认 $TMPDIR；可指向
+// 持久卷以便机器重启后仍可审计/TTL sweep）。
+func WithResidentMetaDir(dir string) ActionToolOption {
+	return func(ct *ActionTool) {
+		ct.residentMetaDirOverride = dir
+	}
+}
+
+// IsTrackedSession reports whether the monitor currently tracks the session
+// （R3 2.6 TaskID 桥：重挂后按此与重建 registry 的任务重关联）。
+func (ct *ActionTool) IsTrackedSession(sessionID string) bool {
+	if ct == nil || ct.tmuxMonitor == nil || sessionID == "" {
+		return false
+	}
+	_, ok := ct.tmuxMonitor.GetSession(sessionID)
+	return ok
+}
+
+// SetResidentRecordSink wires the fact-chain sink post-construction (R3 2.5;
+// the build path obtains the ActionTool after factory creation).
+func (ct *ActionTool) SetResidentRecordSink(sink func(sessionID, kind, name, detail string)) {
+	if ct != nil {
+		ct.residentSink = sink
+	}
+}
+
+// SetResidentMetaDir overrides the ResidentMeta directory post-construction.
+func (ct *ActionTool) SetResidentMetaDir(dir string) {
+	if ct != nil {
+		ct.residentMetaDirOverride = dir
+	}
+}
+
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
@@ -150,7 +198,14 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		// D1: resident sessions survive agent restarts (tmux server keeps
 		// them + their pipe-pane loggers). Rebuild tracking from the
 		// persisted metadata so their watch/probe keep working.
-		ct.ReattachResidentSessions()
+		// R3 2.6（唯一挂载点）：多 agent org 中仅首个实例执行重挂（重复重挂=
+		// 同会话 N 份 detector/probe 回调）。热重建壳（executorOnly）不走此处——
+		// 由 build 路径显式重入 ReattachResidentSessions（幂等）。
+		if residentReattachOnce.CompareAndSwap(false, true) {
+			ct.ReattachResidentSessions()
+		} else {
+			log.Infof("[ActionTool] resident reattach already done by another instance (single mount point)")
+		}
 	}
 
 	return ct
@@ -333,11 +388,15 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	// preserves the original blocking semantics.
 	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok {
 		res := spawner.Spawn(task.TaskSpec{
-			Kind:     "command",
-			Desc:     args.Command,
-			Key:      args.Command,
-			Relaunch: ct.relaunchClosure(spawner, args),
-			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Kind: "command",
+			Desc: args.Command,
+			Key:  args.Command,
+			// R2（resident-continuity-r2-r4 1.2）：声明式投影随 spec 携带——OnSpawn
+			// 写入 task_spawned 事实链记录，重启后 RebuildTaskRegistry 回放重建。
+			Declarative: DeclarativeFromArgs(args, sessionID),
+			Relaunch:    ct.relaunchClosure(spawner, args),
+			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Alive:       ct.sessionAliveClosure(sessionID),
 		}, detector)
 		if res.Blocked != "" {
 			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以 result
@@ -438,13 +497,25 @@ func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs)
 			return task.SpawnResult{}, err
 		}
 		return spawner.Spawn(task.TaskSpec{
-			Kind:     "command",
-			Desc:     args.Command,
-			Key:      args.Command,
-			Relaunch: ct.relaunchClosure(spawner, args),
-			ResumeFn: ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Kind: "command",
+			Desc: args.Command,
+			Key:  args.Command,
+			// R2：relaunch 也携带声明式投影（重启后的 relaunch 产物同样可回放）。
+			Declarative: DeclarativeFromArgs(args, sessionID),
+			Relaunch:    ct.relaunchClosure(spawner, args),
+			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
+			Alive:       ct.sessionAliveClosure(sessionID),
 		}, detector), nil
 	}
+}
+
+// sessionAliveClosure binds a TaskSpec.Alive liveness probe to the spawned
+// tmux session: true while SessionExists holds. Wired into both spawn
+// sites (fresh command + relaunch) so the task layer can retire
+// alive_detached board entries whose backing session was killed
+// out-of-band.
+func (ct *ActionTool) sessionAliveClosure(sessionID string) func() bool {
+	return func() bool { return ct.tmuxExecutor.SessionExists(sessionID) }
 }
 
 // resumeClosure returns the tmux-specific resume implementation: feed input

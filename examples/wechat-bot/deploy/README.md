@@ -272,3 +272,13 @@ journalctl -u tagent-wechat -n 50        # 应无 OTLP 连接错误
 | 有 span 但缺 `tagent.turn` | 该 turn 未走持久循环（子 agent 单轮 `Run()` 路径由父 turn 覆盖）；或 `trigger_source` 过滤所致 |
 | Jaeger 容器 OOM | 上调 `MEMORY_MAX_TRACES` 或内存限额；长期留存应改 `SPAN_STORAGE_TYPE=badger` 并挂卷 |
 | 担心开销 | 不设端点即 noop（零开销）；需要时常开、排障毕注释掉该行再 restart 即回到 noop |
+
+## 十、systemd unit 撰写通用陷阱（mail-poller 实战复盘）
+
+新增 unit（如 `tagent-mail-poller.service`）时，以下三类坑均已实战踩过，撰写/排障先对照：
+
+1. **行内注释静默吞值**：`ProtectSystem=full  # 注释` 整值解析失败被忽略（`systemd-analyze verify` 仅告警不拦截）。
+   纪律：unit 文件注释一律独立成行；verify 有输出即视为失败，逐条清零。
+2. **service PATH ≠ 交互 shell PATH**：`/usr/bin/env <interpreter>` shebang 的可执行（node/python venv 等）在 systemd 最小 PATH 下 exit 127。
+   纪律：unit 显式 `Environment=PATH=<解释器所在目录>:/usr/bin:/bin`；tmux 手测通过 ≠ service 环境通过，**验收必须以 `systemctl status` + 服务日志为证**。
+3. **崩溃自愈须实测**：`Restart=always` 写了不算数，`sudo systemctl kill -s SIGKILL` 后确认 MainPID 更换、子进程重拉、持久化状态完好（参照 mail-poller notes 5.1 场景 5）。

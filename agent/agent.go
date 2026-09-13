@@ -90,6 +90,10 @@ type TagentAgent struct {
 	// task_settled events by its OnSettle hook.
 	taskManager *task.TaskManager
 
+	// orgRollback（R4，resident-continuity-r2-r4 3.8）：热更回滚钩子（tagent
+	// 包懒检查闭包注入；Rollback() 触发）。
+	orgRollback func()
+
 	// Framework integration
 	memStore   memory.MemoryStore
 	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
@@ -144,6 +148,7 @@ type TagentAgent struct {
 type TagentConfig struct {
 	Model              model.Model        // Required: LLM model
 	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
+	SessionSvc         session.Service    // R4（review 🔴1）：外部 SessionSvc 注入（executorOnly 热重建壳复用常驻实例；nil=内部新建）
 	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
 	SystemPromptSource prompt.Getter      // Hot-reloadable system prompt (optional, overrides SystemPrompt); Getter 接口（文件即真源，mtime 热重载）
 	Tools              []tool.Tool        // CallableTools to register
@@ -344,10 +349,18 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// OnSettle hook publishes a task_settled event onto the bus, which the
 	// persistent loop reclaims into a new turn (idle → wakes Pull; mid-turn →
 	// buffered until the current turn finishes — single-consumer queueing).
+	//
+	// R2（resident-continuity-r2-r4 1.6）：OnSpawn/OnInlineSettle 经 late-bind sink
+	// 写事实链记录（task_spawned 载 Declarative / inline settle 终态记录——registry
+	// 重建数据源，记录-only 不发 bus 不进投影）。cm 在下方创建后才绑定。
+	taskRecords := &taskRecordSink{}
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
 			bus.Publish(newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace))
 		},
+		OnSpawn:        taskRecords.onSpawn,
+		OnInlineSettle: taskRecords.onInlineSettle,
+		OnCancel:       taskRecords.onCancel,
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,
@@ -378,40 +391,47 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// appends user messages to session but does NOT emit them through the
 	// agent event channel — without this hook the consumer would never see
 	// them).
-	sessionSvc := sessioninmemory.NewSessionService(
-		sessioninmemory.WithSessionEventLimit(2),
-		sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
-			original := ctx.Event
-			var evtCopy event.Event
-			if original.Response != nil {
-				evtCopy = *original
-				evtCopy.Response = original.Response.Clone()
-				ctx.Event = &evtCopy
-			}
-			err := next()
-			ctx.Event = original
-
-			// Forward user message events to outputCh (delivery). LLM/tool
-			// events are emitted via eventCh in RunFlow, not here. Projection
-			// writes happen in the event-plugin pipeline (MemoryPlugin →
-			// ProjectionSink), which has already run for this event. Deliver a
-			// clone with its own StateDelta map: onEventRef writes meta_* and
-			// must never mutate the framework's shared event object.
-			if onEventRef != nil && original.IsUserMessage() {
-				emitEvt := cloneEventForDelivery(original)
-				onEventRef(emitEvt)
-				select {
-				case outputCh <- emitEvt:
-				default:
-					droppedOutputCounter.Add(1)
-					log.Warnf("[SessionHook] outputCh full, user message event dropped (total dropped: %d)",
-						droppedOutputCounter.Load())
+	var sessionSvc session.Service
+	// R4（review 🔴1）：外部注入的 SessionSvc（executorOnly 热重建壳）优先——
+	// 其 AppendEventHook 已绑定常驻 outputCh，session 记录续写同一 session。
+	if cfg.SessionSvc != nil {
+		sessionSvc = cfg.SessionSvc
+	} else {
+		sessionSvc = sessioninmemory.NewSessionService(
+			sessioninmemory.WithSessionEventLimit(2),
+			sessioninmemory.WithAppendEventHook(func(ctx *session.AppendEventContext, next func() error) error {
+				original := ctx.Event
+				var evtCopy event.Event
+				if original.Response != nil {
+					evtCopy = *original
+					evtCopy.Response = original.Response.Clone()
+					ctx.Event = &evtCopy
 				}
-			}
+				err := next()
+				ctx.Event = original
 
-			return err
-		}),
-	)
+				// Forward user message events to outputCh (delivery). LLM/tool
+				// events are emitted via eventCh in RunFlow, not here. Projection
+				// writes happen in the event-plugin pipeline (MemoryPlugin →
+				// ProjectionSink), which has already run for this event. Deliver a
+				// clone with its own StateDelta map: onEventRef writes meta_* and
+				// must never mutate the framework's shared event object.
+				if onEventRef != nil && original.IsUserMessage() {
+					emitEvt := cloneEventForDelivery(original)
+					onEventRef(emitEvt)
+					select {
+					case outputCh <- emitEvt:
+					default:
+						droppedOutputCounter.Add(1)
+						log.Warnf("[SessionHook] outputCh full, user message event dropped (total dropped: %d)",
+							droppedOutputCounter.Load())
+					}
+				}
+
+				return err
+			}),
+		)
+	}
 
 	// 7. Create TagentAgent (without contextManager yet — wired after callback creation)
 	ta := &TagentAgent{
@@ -434,6 +454,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	onEvent := ta.makeOnEventCallback()
 	onEventRef = onEvent // Wire the hook's callback.
 	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
+	taskRecords.cm = cm // R2: bind the record sink (late — hooks are best-effort nil-safe before this)
 	ta.contextManager = cm
 	ta.taskManager = taskManager
 	cm.taskController = taskManager

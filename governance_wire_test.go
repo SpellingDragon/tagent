@@ -56,10 +56,10 @@ func TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger(t *testing.T) {
 	loader := prompt.NewLoader("")
 	cache := make(map[string]*agent.TagentAgent)
 
-	entry, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache)
+	entry, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
-	sub, err := buildAgent("worker", cfg.Agents["worker"], cfg, rc, loader, cache)
+	sub, err := buildAgent("worker", cfg.Agents["worker"], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
 	require.NotNil(t, sub)
 
@@ -129,9 +129,9 @@ func TestGoalTools_EntryOnly(t *testing.T) {
 	loader := prompt.NewLoader("")
 	cache := make(map[string]*agent.TagentAgent)
 
-	entry, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache)
+	entry, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
-	sub, err := buildAgent("worker", cfg.Agents["worker"], cfg, rc, loader, cache)
+	sub, err := buildAgent("worker", cfg.Agents["worker"], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
 
 	hasGoalTools := func(ta *agent.TagentAgent) int {

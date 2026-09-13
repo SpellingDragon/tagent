@@ -136,11 +136,17 @@ type QueryOptions struct {
 	// StartTime/EndTime filter events by timestamp, in Unix MILLISECONDS
 	// (same unit as FullEvent.Timestamp and the recall tools' since/until).
 	// Zero = no bound.
-	StartTime int64  `json:"start_time"`
-	EndTime   int64  `json:"end_time"`
-	Limit     int    `json:"limit"`
-	Offset    int    `json:"offset"`
-	OrderBy   string `json:"order_by"`
+	StartTime int64 `json:"start_time"`
+	EndTime   int64 `json:"end_time"`
+	// MinEventKey filters events whose EventKey is STRICTLY GREATER than this
+	// value — the write-order axis, never semantic time (see the TIME CONTRACT
+	// on FullEvent: async write-back events carry an EventKey assigned at
+	// write time while their Timestamp is the bus-arrival moment, so a
+	// StartTime approximation mis-cuts such stragglers). 0 = no bound.
+	MinEventKey int64  `json:"min_event_key,omitempty"`
+	Limit       int    `json:"limit"`
+	Offset      int    `json:"offset"`
+	OrderBy     string `json:"order_by"`
 	// Keyword filters events whose EventSummary or Content contains the keyword (case-insensitive).
 	// Empty string = no keyword filter.
 	Keyword string `json:"keyword,omitempty"`

@@ -132,6 +132,10 @@ type TmuxSession struct {
 	// pane grid and can freeze a stale truncation frame on dead panes).
 	PipeFile       string
 	KillRetryCount int // Number of failed KillSession attempts (used by handleFakeDead retry logic)
+	// ProbeUnknownCount（R3，resident-continuity-r2-r4 2.2）：连续不可辨探测
+	//（list-sessions err）计数——加闸达到 ProbeUnknownLimit 才按 dead 处理；
+	// 任一可辨探测（alive/dead）清零。会话级字段（非包级），重启清零可接受。
+	ProbeUnknownCount int
 }
 
 // SessionStatus represents the state of a tmux session
@@ -390,10 +394,33 @@ func (te *TmuxExecutor) IsPaneDead(sessionID string) bool {
 
 	err := cmd.Run()
 	if err != nil {
-		return true // Assume dead if can't check
+		// R3（resident-continuity-r2-r4 2.2，三态化）：探测 err ≠ 死——不再
+		// assume dead（旧路径 err→true→detectSessionState 判 Completed→杀会话）。
+		// 不可辨返回 false（alive 倾向），确定性由 SessionAlive3 的 list-sessions
+		// 单源判定+monitor 连续 unknown 加闸兑观。
+		return false
 	}
 
 	return strings.TrimSpace(stdout.String()) == "1"
+}
+
+// SessionAlive3（R3，resident-continuity-r2-r4 2.2）：三态存活探测——list-sessions
+// 单源（会话在列表=活；不在=确定性死；命令 err=不可辨）。known=false 时调用方
+// （monitor）计入 ProbeUnknownCount 连续加闸，不立即判死。
+func (te *TmuxExecutor) SessionAlive3(sessionID string) (alive, known bool) {
+	cmdName, cmdArgs := te.buildTmuxCommand([]string{"list-sessions", "-F", "#{session_name}"})
+	cmd := exec.Command(cmdName, cmdArgs...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return false, false // tmux server 不可达/命令失败 — unknown
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if strings.TrimSpace(line) == sessionID {
+			return true, true
+		}
+	}
+	return false, true // 列表可靠且不含 — dead
 }
 
 // ProcessExists checks if the main process of a tmux session is still running
@@ -475,8 +502,10 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 			continue
 		}
 
-		// Only include sessions with our prefix
-		if strings.HasPrefix(line, te.prefix) {
+		// R3（resident-continuity-r2-r4 2.1）：双条件收录——默认 prefix（历史语义）
+		// ∨ named 会话（n- 前缀，本工具创建的常驻/交互会话）。修复枚举死代码：
+		// 修复前 ReattachResidentSessions 的 n- 检查与 prefix 过滤不相交、重挂恒空。
+		if strings.HasPrefix(line, te.prefix) || strings.HasPrefix(line, "n-") {
 			sessions = append(sessions, &TmuxSession{
 				ID:   line,
 				Name: line,
@@ -487,11 +516,16 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 	return sessions, nil
 }
 
-// CleanupOrphanSessions kills all prefix-matched tmux sessions. Called at
+// CleanupOrphanSessions kills prefix-matched generated-name tmux sessions. Called at
 // startup: sessions from a previous (crashed or stopped) instance have no
 // monitor watching them — they would never be reaped and each holds a pty
 // (system-wide pty exhaustion was observed in the field). Best effort: a
 // missing tmux server means nothing to clean. Returns the number killed.
+//
+// R3（resident-continuity-r2-r4 2.1，orphan 语义重定义）：n- named 会话被排除——
+// cleanup 在装配时先于 reattach 执行，若纳入 named 会话则会屠杀全部常驻会话
+// （修复前语义冲突：枚举双条件修复会让 cleanup 杀光 n-）。orphan=仅无主生成名
+// 会话；named 会话由 R3 重挂接管或由 ResidentMeta TTL sweep 兑现终局。
 func (te *TmuxExecutor) CleanupOrphanSessions() int {
 	sessions, err := te.ListSessions()
 	if err != nil {
@@ -499,6 +533,9 @@ func (te *TmuxExecutor) CleanupOrphanSessions() int {
 	}
 	killed := 0
 	for _, s := range sessions {
+		if strings.HasPrefix(s.ID, "n-") {
+			continue // named sessions are owned (reattach/TTL sweep), never orphans
+		}
 		if err := te.KillSession(s.ID); err != nil {
 			log.Warnf("[TmuxExecutor] orphan cleanup: kill %s failed: %v", s.ID, err)
 			continue

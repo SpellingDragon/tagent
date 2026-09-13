@@ -75,7 +75,7 @@ func TestBuildAgent_ReadPartitionsIncludeOwnNamespace(t *testing.T) {
 			loader := prompt.NewLoader("")
 			cache := make(map[string]*agent.TagentAgent)
 
-			_, err := buildAgent(tc.agentName, cfg.Agents[tc.agentName], cfg, rc, loader, cache)
+			_, err := buildAgent(tc.agentName, cfg.Agents[tc.agentName], cfg, rc, loader, cache, buildModeResident)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantPartitions, captured.ReadPartitionIDs,
 				"read partitions must always include the agent's own namespace first")

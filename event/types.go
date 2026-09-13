@@ -56,6 +56,23 @@ const (
 	// NOT absorb it into the rolling-summary count.
 	TypeToolChain = "tool_chain"
 
+	// TypeTaskSpawned records a task spawn into the fact chain for the
+	// registry rebuild (R2, resident-continuity-r2-r4): it carries the
+	// Declarative spec so RebuildTaskRegistry can reconstruct the active task
+	// set cross-restart. It is a fact-chain record ONLY — never a projection
+	// ref (the board renders live from the in-memory registry; projection
+	// rebuild/replay skip this type like compaction events). TTL aligned with
+	// external_input (30d): a service running past that without any settle is
+	// re-registered by the R3 session reattach + TaskID bridge instead.
+	TypeTaskSpawned = "task_spawned"
+
+	// TypeResidentSession records a resident/interactive tmux session's
+	// lifecycle (spawn with full params / terminal outcome) into the fact
+	// chain (R3, resident-continuity-r2-r4 2.5). Registry/audit record ONLY —
+	// never a projection ref (projection rebuild/replay skip it like
+	// task_spawned). TTL aligned with external_input (30d).
+	TypeResidentSession = "resident_session"
+
 	// TypeConsolidation 是证据门控巩固产物（T-D 记忆策展）：冥想蒸馏/经验总结的事件，
 	// 携带源事件 EventKey 收据列表 + 服务端 SHA1 指纹（存于 Metadata），可回放验证、
 	// 防 LLM 伪造。正 key 真实事件、TTL 豁免（长期记忆，同 context_compress_summary 待遇）。

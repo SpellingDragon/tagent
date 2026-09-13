@@ -15,6 +15,45 @@ func (ta *TagentAgent) RegisterCloser(c Closer) {
 	ta.closers = append(ta.closers, c)
 }
 
+// ApplyOrgParams hot-swaps org-layer numeric parameters onto the live agent
+// without rebuilding the topology (agent-config-hot-reload, incremental A).
+// Currently migratable: compress_threshold. Structural changes (tools,
+// sub-agents, prompts wiring) require the snapshot-level rebuild path and
+// are NOT handled here.
+// CheckOrgReload runs the armed org-config hot-reload check once (ops/test
+// entry point; production arms it per-LLM-call via SetOrgReloader). No-op when
+// no reloader is armed (config path unknown).
+func (ta *TagentAgent) CheckOrgReload() {
+	if ta.contextManager != nil {
+		ta.contextManager.CheckOrgReload()
+	}
+}
+
+// OrgThreshold returns the live compression threshold (introspection for
+// tests/ops; the authoritative consumer is the compressor's atomic threshold).
+func (ta *TagentAgent) OrgThreshold() float64 {
+	if ta.contextManager == nil {
+		return 0
+	}
+	return ta.contextManager.thresholdPct
+}
+
+func (ta *TagentAgent) ApplyOrgParams(thresholdPct float64) {
+	if ta.contextManager != nil {
+		ta.contextManager.ApplyOrgParams(thresholdPct)
+	}
+}
+
+// SetOrgReloader arms a lazy org-config check invoked before each LLM call
+// (agent-config-hot-reload, incremental A). The tagent layer wires this
+// when a config path is known (WithConfigPath). fn must be cheap when
+// nothing changed and must never fail the calling path.
+func (ta *TagentAgent) SetOrgReloader(fn func()) {
+	if ta.contextManager != nil {
+		ta.contextManager.SetOrgReloader(fn)
+	}
+}
+
 // SetTrajectoryRecorder sets the trajectory recorder for this agent.
 // When set, StartLoop will automatically call SetSessionInfo on it.
 // The recorder should also be registered via RegisterCloser for graceful shutdown.

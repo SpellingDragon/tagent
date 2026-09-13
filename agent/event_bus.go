@@ -117,6 +117,13 @@ const settleErrMaxChars = 200
 // alive-detached / ⚠ suspect.
 func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	switch {
+	case sig.Kind == task.SettleWatch:
+		// R2（review 🔴2）：watch 命中是**通知**而非终态——信号恒带哨兵 Err
+		//（"%d matches"），若落入下方 Err 判定则记为 failed 终态，RebuildTaskRegistry
+		// 按「spawned−终态」折叠后，仍在运行的 watch 型服务任务重启即消失。
+		// 记为非终态词汇 "watch"（不在终态集合 {completed,failed,cancelled,dead}，
+		// 不抵消 spawned；通知正文照发不变）。
+		return "◈", "watch"
 	case sig.Err != nil:
 		return "✗", "failed"
 	case sig.Kind == task.SettleStable:
@@ -202,6 +209,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	// 落库后据此自动写 task_settle feedback（completed→positive / failed→negative；
 	// suspect/alive-detached 不写，只记确定性裁决）。
 	evt.Metadata["settle_status"] = statusWord
+	// R2（resident-continuity-r2-r4）：全量 task_id（UUID）随事件携带——事实链
+	// settle 记录的结构化关联键（RebuildTaskRegistry 按此归并 spawned/settled，
+	// 不解析正文；ShortID 仅人类可读）。
+	evt.Metadata["task_id"] = tk.ID
 	return evt
 }
 

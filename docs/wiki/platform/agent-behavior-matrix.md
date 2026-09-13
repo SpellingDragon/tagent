@@ -175,6 +175,10 @@ stateDiagram-v2
 | 治理预算窗口 | `data/governance/budget/<agent>` | 预算计数跨重启延续(不清零) |
 | 待批审批 | `data/governance/approvals/` | pending 请求跨重启可见 |
 | 未消费事件/记忆兜底 | bus/mem spill | 重启后回灌/重放,不丢 |
+| 对话上下文(R1) | 事实链(compaction+尾部回放) | 投影逐字节复原,prefix-cache 复用 |
+| 任务板(R2) | 事实链(task_spawned − 终态 settle) | active 任务重建(running→suspect 交探测裁决;inline-settled 不重建无幽灵);relaunch 跨重启可用,subagent resume 返回引导 |
+| 常驻会话(R3) | meta 文件+tmux 存活真相源 | 重挂唯一挂载点重建跟踪(watch/probe);TaskID 桥把存活会话的任务提升回 running;探测三态+加闸(连续 3 次 unknown 才判死) |
+| 配置结构变更(R4) | 懒检查(memory 先检→fingerprint) | **非重启**换执行器(runner 级 SwapExecutor,drain-free turn 级);memory 变更拒绝并明示须重启;失败 fail-closed 旧 runner 原样;ring 2 支持回滚 |
 
 ---
 

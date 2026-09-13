@@ -33,5 +33,5 @@ func TestingBuildAgent(
 		skillRepo:   skillRepo,
 		mcpToolSets: mcpToolSets,
 	}
-	return buildAgent(name, acfg, cfg, rc, loader, cache)
+	return buildAgent(name, acfg, cfg, rc, loader, cache, buildModeResident)
 }

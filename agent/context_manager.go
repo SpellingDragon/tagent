@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/task"
@@ -43,10 +45,11 @@ type ContextManager struct {
 	thresholdPct      float64
 
 	// Framework integration
-	runner    runner.Runner
-	name      string
-	userID    string
-	sessionID string
+	runner     runner.Runner
+	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——SwapExecutor（写）vs RunFlow per-turn RLock（读）
+	name       string
+	userID     string
+	sessionID  string
 
 	// Event routing
 	outputCh   chan *event.Event
@@ -58,6 +61,13 @@ type ContextManager struct {
 	// the F2 grace period (empty = drop with warning, e.g. sub-agent paths
 	// with no workspace). <workspace>/tool-output/output-overflow.
 	overflowDir string
+
+	// orgReloader (agent-config-hot-reload, incremental A): optional lazy
+	// check invoked at the top of the unified BeforeModel callback. Wired
+	// by the tagent layer when a config path is known (WithConfigPath).
+	// Must be cheap when nothing changed (single stat) and never fail the
+	// LLM call (log-and-degrade inside the closure).
+	orgReloader func()
 
 	// bundleIDFn returns the currently active evolution bundle id (empty when
 	// evolution is disabled or no bundle is active). Both persistence paths
@@ -99,6 +109,49 @@ type ContextManager struct {
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
+// ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
+// migrated onto the live ContextManager without rebuilding the agent
+// topology (design: incremental A of agent-config-hot-reload).
+//
+// Currently migratable: compress_threshold (via the live
+// compress.ContextCompressor's atomic UpdateThreshold). cm.thresholdPct is
+// kept in sync for introspection consistency; the authoritative consumer is
+// the compressor.
+//
+// Structural fields (tools, sub-agents, prompts wiring, memStore) are NOT
+// touched here — they belong to snapshot-level rebuild (incremental B).
+func (cm *ContextManager) ApplyOrgParams(thresholdPct float64) {
+	if thresholdPct > 0 {
+		cm.thresholdPct = thresholdPct
+	}
+	if cm.contextCompressor != nil {
+		cm.contextCompressor.UpdateThreshold(thresholdPct)
+	}
+}
+
+// SetOrgReloader arms the lazy org-config check (see orgReloader field).
+// CheckOrgReload invokes the armed lazy org-config check once (ops/test hook;
+// the production path fires it in the BeforeModel callback).
+func (cm *ContextManager) CheckOrgReload() {
+	if cm.orgReloader != nil {
+		cm.orgReloader()
+	}
+}
+
+func (cm *ContextManager) SetOrgReloader(fn func()) {
+	cm.orgReloader = fn
+}
+
+// RunOrgReloader explicitly invokes the armed reloader if present. The lazy
+// path fires it before each LLM call; this exported entry point lets tests and
+// operators trigger the identical check deterministically (the closure itself
+// is single-flight and mtime-guarded, so redundant calls are cheap no-ops).
+func (cm *ContextManager) RunOrgReloader() {
+	if cm.orgReloader != nil {
+		cm.orgReloader()
+	}
+}
+
 func (cm *ContextManager) SetTriggerSource(source string) {
 	cm.triggerSource = source
 }
@@ -241,6 +294,9 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	// pipeline or persistBusEvent, so the boundary is strictly one-way.
 	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
+			if cm.orgReloader != nil {
+				cm.orgReloader() // lazy org-config hot-reload check (incr. A)
+			}
 			cm.assembleRequest(ctx, args)
 			return nil, nil
 		})
@@ -330,7 +386,14 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	}
 
 	fwAgent := llmagent.New(cfg.Name, agentOpts...)
+	cm.runner = buildRunner(cfg, fwAgent)
 
+	return cm
+}
+
+// buildRunner（R4 3.3/3.5 抽取）：fwAgent+runner 装配为纯函数段（依赖仅
+// cfg）——冷启动与 SwapExecutor 热重建共用同一装配路径（行为学一致）。
+func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Runner {
 	// Create unified Runner: LLMAgent + MemoryPlugin + SummaryPlugin + SessionService.
 	runnerOpts := []runner.Option{}
 	if cfg.MemPlugin != nil {
@@ -342,9 +405,29 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	if cfg.SessionSvc != nil {
 		runnerOpts = append(runnerOpts, runner.WithSessionService(cfg.SessionSvc))
 	}
-	cm.runner = runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
+	return runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
+}
 
-	return cm
+// SwapExecutor（R4 3.3）：原子换入新 runner（含其 tools/prompt 装配——随
+// runner 一并构建完成）。drain-free turn 级：进行中 turn 已持有的旧 runner
+// 引用跑完，下一 turn 起用新。返回被换下的旧 runner（调用方决定处置）。
+func (cm *ContextManager) SwapExecutor(newRunner runner.Runner) runner.Runner {
+	if cm == nil || newRunner == nil {
+		return nil
+	}
+	cm.executorMu.Lock()
+	defer cm.executorMu.Unlock()
+	old := cm.runner
+	cm.runner = newRunner
+	return old
+}
+
+// currentRunner（R4 3.3）：RunFlow per-turn 取引用（RLock 即放——不持锁跑
+// turn，否则换入会被长 turn 阻塞）。in-flight turn 用旧 runner 跑完。
+func (cm *ContextManager) currentRunner() runner.Runner {
+	cm.executorMu.RLock()
+	defer cm.executorMu.RUnlock()
+	return cm.runner
 }
 
 // BuildInvocation merges a batch of AgentEvents into a single model.Message.
@@ -394,6 +477,19 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	refs := cm.projection.GetAll()
 	result := cm.contextCompressor.Compress(ctx, refs)
 	cm.projection.Replace(result.RetainedRefs)
+	// event-sourced-projection D2：折叠本身是事实链的一条 compaction 事件（仅真折叠时发射，
+	// 先 Replace 后写事件；失败留痕不阻断）。投影恒为事实链的旁路产物。
+	// Compressed 门控（review 🟠1）：under-budget 轮 RetainedRefs 原样返回，首位仍是
+	// 上次折叠遗留的综述负 key ref——仪靠 BuildCompactionPayload 的首位判定拦不住
+	// 「已折叠后的 under-budget 轮」，会每轮误发（写放大+违反 spec「未折叠不写」）。
+	if result.Compressed {
+		if notice := cm.emitCompactionEvent(result.RetainedRefs); notice != nil {
+			// 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
+			// （[context_compress_error] 先例），双写保证可感知。
+			result.Notices = append(result.Notices, *notice)
+			result.Messages = append(result.Messages, *notice)
+		}
+	}
 
 	// Rebuild: [system] + render(projection). The system message is the only
 	// part of args.Request.Messages that is read.
@@ -405,6 +501,211 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	rebuilt = append(rebuilt, result.Messages...)
 
 	args.Request.Messages = rebuilt
+}
+
+// emitCompactionEvent（event-sourced-projection D1/D4/D6）：真折叠后把折叠产物作为
+// 一等 compaction 事件落事实链——context_compress_summary 正 key 事件，Content/EventSummary
+// = 综述正文（可召回正文即叙事本身），Metadata[compaction_payload] 载重建载荷（综述 ref +
+// 有序 retained 列表：正 key 只存 key、tool_chain 合成 ref 全身份逐字节 + fullBoundary）。
+// 滚动 supersede：写前查 prior（限定 compaction=v1 代际标记，legacy 固化物不删不选）、
+// 写后 DeleteEvent(prior)。事件自身 Timestamp=写入时刻（非综述 minTs，D4）。仅真折叠发射
+// （under-budget 轮 BuildCompactionPayload 返回 ok=false）。StoreEvent 失败 ERROR 留痕并
+// 返回通知（不阻断当轮装配）；supersede 失败仅 ERROR（下轮再补）。返回 nil = 成功/跳过。
+func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) *model.Message {
+	if cm.memStore == nil || cm.contextCompressor == nil {
+		return nil
+	}
+	payload, ok := compress.BuildCompactionPayload(retained, cm.contextCompressor.FullBoundary())
+	if !ok {
+		return nil // no real fold this round (under-budget / no new summary ref)
+	}
+	raw, err := payload.MarshalPayload()
+	if err != nil {
+		log.Errorf("[emitCompactionEvent] payload marshal failed: %v", err)
+		return nil
+	}
+	// Supersede order (D4): query prior BEFORE writing — after the write a
+	// timestamp_desc query would find the just-written event and delete it.
+	priorKey := cm.latestCompactionKey()
+	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	md := map[string]string{
+		compress.CompactionMetaKey:        compress.CompactionGenV1,
+		compress.CompactionPayloadMetaKey: raw,
+		tagentevent.MetaKeyAgentName:      cm.name,
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	fullEvent := memory.FullEvent{
+		EventKey:     eventKey,
+		PartitionID:  cm.partitionID,
+		EventType:    tagentevent.TypeContextCompressSummary,
+		EventSummary: payload.SummaryRef.EventSummary,
+		Timestamp:    time.Now().UnixMilli(), // write time (D4), never the summary minTs
+		Content:      payload.SummaryRef.EventSummary,
+		Metadata:     md,
+	}
+	if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+		log.Errorf("[emitCompactionEvent] StoreEvent failed key=%d: %v", eventKey, err)
+		return &model.Message{
+			Role:    model.RoleUser,
+			Content: fmt.Sprintf("[compaction_event_write_failed] compaction 事件落库失败 key=%d: %v（本轮降级：重启重建将缺最新折叠）", eventKey, err),
+		}
+	}
+	if priorKey > 0 {
+		if err := cm.memStore.DeleteEvent(priorKey); err != nil {
+			log.Errorf("[emitCompactionEvent] supersede DeleteEvent(prior=%d) failed: %v", priorKey, err)
+		}
+	}
+	log.Infof("[emitCompactionEvent] compaction event persisted key=%d (superseded prior=%d) boundary=%d retained=%d",
+		eventKey, priorKey, payload.FullBoundary, len(payload.Retained))
+	return nil
+}
+
+// latestCompactionKey returns the newest marker-tagged compaction event key
+// (0 = none). QueryEvents cannot filter on Metadata, so this walks a short
+// timestamp_desc window and checks the generation marker via GetEvent —
+// legacy 固化物 (same type, no marker, TTL-immortal) is never selected and
+// therefore never superseded/deleted (fresh-eyes D).
+func (cm *ContextManager) latestCompactionKey() int64 {
+	if cm.memStore == nil {
+		return 0
+	}
+	refs, err := cm.memStore.QueryEvents(memory.QueryOptions{
+		PartitionIDs: []int{cm.partitionID},
+		EventTypes:   []string{tagentevent.TypeContextCompressSummary},
+		OrderBy:      "timestamp_desc",
+		Limit:        5,
+	})
+	if err != nil {
+		return 0
+	}
+	for _, r := range refs {
+		evt, err := cm.memStore.GetEvent(r.EventKey)
+		if err != nil || evt == nil {
+			continue
+		}
+		// Agent identity check (review 🟠2): PartitionIDFromName is a 10-bit
+		// FNV hash (collisions expected at ~38 agents) — without this check a
+		// colliding agent's latest compaction event would be supersede-deleted
+		// cross-agent, silently dropping that agent's rebuild snapshot.
+		if evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 &&
+			evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name {
+			return r.EventKey
+		}
+	}
+	return 0
+}
+
+// persistTaskRecord（R2，resident-continuity-r2-r4 1.6）：记录-only 持久化——只写
+// 事实链，不发 bus（不唤醒）、不进投影（task_spawned/inline settle 记录均非投影
+// ref：看板由 registry 每轮渲染；inline 结果已作为工具结果在投影内）。best-effort。
+func (cm *ContextManager) persistTaskRecord(fullEvent memory.FullEvent) {
+	if cm == nil || cm.memStore == nil {
+		return
+	}
+	if fullEvent.EventKey == 0 {
+		fullEvent.EventKey = memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	}
+	fullEvent.PartitionID = cm.partitionID
+	if err := cm.memStore.StoreEvent(fullEvent.EventKey, fullEvent); err != nil {
+		log.Errorf("[persistTaskRecord] StoreEvent failed key=%d type=%s: %v", fullEvent.EventKey, fullEvent.EventType, err)
+	}
+}
+
+// EmitTaskSpawnedRecord builds and persists the fact-chain task_spawned record
+// for a freshly registered task (OnSpawn hook). Registry-only record: never a
+// projection ref, never bus-published.
+func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
+	if cm == nil || tk == nil || tk.Spec.Declarative == nil {
+		return // no declarative → not replayable, no record (best-effort)
+	}
+	decl := *tk.Spec.Declarative
+	if decl.StartedAtMilli == 0 {
+		decl.StartedAtMilli = tk.StartedAt.UnixMilli()
+	}
+	raw, err := json.Marshal(decl)
+	if err != nil {
+		log.Errorf("[EmitTaskSpawnedRecord] marshal declarative failed: %v", err)
+		return
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeTaskSpawned,
+		EventSummary: fmt.Sprintf("任务创建: %s", truncateForLog(tk.Spec.Desc, 80)),
+		Content:      string(raw),
+		Timestamp:    tk.StartedAt.UnixMilli(),
+		Metadata:     md,
+	})
+}
+
+// EmitTaskCancelledRecord（R2，review 终审🔴）：Cancel 终态的事实链记录
+// （registry-only；形态与 inline settle 同款）。不写则重启回放以 suspect 复活
+// （看板幽灵 + subagent 同 Key dedup 永久锁死）。
+func (cm *ContextManager) EmitTaskCancelledRecord(tk *task.Task) {
+	if cm == nil || tk == nil {
+		return
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+		"settle_status":              "cancelled",
+		"task_inline_record":         "true",
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: fmt.Sprintf("[task cancelled] %s (id=%s)", truncateForLog(tk.Spec.Desc, 60), task.ShortID(tk.ID)),
+		Content:      fmt.Sprintf("[task cancelled] %s (id=%s) cancelled", tk.Spec.Desc, tk.ID),
+		Timestamp:    time.Now().UnixMilli(),
+		Metadata:     md,
+	})
+}
+
+// EmitTaskInlineSettleRecord builds and persists the registry-only settle
+// record for an INLINE settle (OnInlineSettle hook): minimal terminal note
+// (status+task_id; the result itself already returned in-turn as the tool
+// result). Flagged task_inline_record — projection rebuild/replay skip it
+// (sixth-round 🔴3: without a record, inline settles become replay ghosts).
+func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.SettleSignal) {
+	if cm == nil || tk == nil {
+		return
+	}
+	status := string(sig.Kind)
+	if tk.Status() != "" {
+		status = string(tk.Status())
+	}
+	// R4 review 🟡10：与 background 路径词汇归一——SettleStable 在 background
+	// 侧记 "alive-detached"（detached 转换发生在 emitBackground），inline 侧
+	// tk.Status() 仍是 running/stable；归一后恢复时 aliveDetached 抑制标志
+	// 语义一致（避免恢复后多发一次 ready 通知）。
+	if sig.Kind == task.SettleStable {
+		status = "alive-detached"
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+		"settle_status":              status,
+		"task_inline_record":         "true",
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: fmt.Sprintf("[task settled inline] %s (id=%s) %s", truncateForLog(tk.Spec.Desc, 60), task.ShortID(tk.ID), status),
+		Content:      fmt.Sprintf("[task settled inline] %s (id=%s) %s", tk.Spec.Desc, tk.ID, status),
+		Timestamp:    time.Now().UnixMilli(),
+		Metadata:     md,
+	})
 }
 
 // persistBusEvent persists an EventBus event to MemoryStore and appends it
@@ -452,6 +753,16 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		tagentevent.MetaKeyAgentName:     cm.name,
 		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
 	}
+	// R2（resident-continuity-r2-r4 1.5）：task 来源事件的结构化 settle 键拷入
+	// FullEvent.Metadata——事实链 settle 记录可被 RebuildTaskRegistry 机器辨读
+	// （task_id/settle_status；task_inline_record 标记内联终态记录，投影重建跳过）。
+	if evt.Source == SourceTask {
+		for _, k := range []string{"task_id", "settle_status", "task_inline_record"} {
+			if v, ok := evt.Metadata[k]; ok {
+				fullEvent.Metadata[k] = fmt.Sprint(v)
+			}
+		}
+	}
 	if cm.sessionID != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyRolloutID] = cm.sessionID
 	}
@@ -461,9 +772,18 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		}
 	}
 
+	// Stored-gate (event-sourced-projection D2, fresh-eyes E①): a failed
+	// StoreEvent must NOT append to the projection — otherwise the projection
+	// holds a ref the fact chain lacks and the rebuild invariant (projection =
+	// fold of the fact chain) breaks. The spill path (ErrorTrackingStore →
+	// ReplaySpilled dual-write) re-stores AND re-appends this event on
+	// recovery, restoring the same-point semantics. nil store (test/bypass
+	// scenarios) keeps the previous always-append behavior.
+	stored := true
 	if cm.memStore != nil {
 		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-			log.Errorf("[persistBusEvent] StoreEvent failed key=%d: %v", eventKey, err)
+			stored = false
+			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
 		}
 	}
 
@@ -477,13 +797,17 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	}
 	// R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
 	// 裸 cm 时不崩溃（零值鲁棒性；主路径恒有投影，行为不变）。
-	if cm.projection != nil {
+	if stored && cm.projection != nil {
 		cm.projection.Append(ref)
 	}
 
 	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
 	// 确定性 settle 裁决自动绑定 feedback（parent=task_settled 事件自身：结算记录
 	// 即任务产出，bundle_id 章使其可归因到 active bundle；suspect/stable 不写）。
+	// KNOWN WINDOW（review 🟡3）：StoreEvent 失败时 writeSettleFeedback 的
+	// BindFeedback 会因 parent 未落库而丢弃该次裁决（spill 恢复只补事件本体，
+	// 不补 feedback）——与改动前行为一致，非回归；如需消除可将本分支纳入
+	// stored 门控（spill 恢复时补裁决），另立小变更。
 	if evt.Source == SourceTask {
 		cm.writeSettleFeedback(eventKey, evt.Metadata)
 	}
@@ -525,6 +849,36 @@ func truncateForLog(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// buildTurnAttribution assembles the per-turn attribution stamped onto
+// LLM-produced events via plugin.WithAttribution: rollout/trace/bundle
+// anchors, plus the trigger source. The trigger source (notably
+// "meditation") MUST persist into agent_output Metadata — projection
+// rebuild re-marks meditation keys from the fact chain, and without this
+// stamp the reseed condition Metadata[trigger_source]==meditation can
+// never fire (event-sourced-projection D3; previously it only lived on
+// the in-memory StateDelta).
+func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attribution {
+	attr := plugin.Attribution{}
+	if cm.sessionID != "" {
+		attr[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
+		attr[tagentevent.MetaKeyTraceID] = traceID
+		attr[tagentevent.MetaKeySpanID] = spanID
+	}
+	// D1-B (design-report-closeout): stamp the active bundle id so every
+	// produced event attributes to the exact prompt/config version.
+	if cm.bundleIDFn != nil {
+		if bid := cm.bundleIDFn(); bid != "" {
+			attr[tagentevent.MetaKeyBundleID] = bid
+		}
+	}
+	if cm.triggerSource != "" {
+		attr[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
+	}
+	return attr
+}
+
 // RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
@@ -537,22 +891,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
 		// → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
 		// 双向互链（指令2「一套数据模式、多场景投影、保一致性」）。空归因不注入。
-		attr := plugin.Attribution{}
-		if cm.sessionID != "" {
-			attr[tagentevent.MetaKeyRolloutID] = cm.sessionID
-		}
-		if traceID, spanID := spanTraceIDs(ctx); traceID != "" {
-			attr[tagentevent.MetaKeyTraceID] = traceID
-			attr[tagentevent.MetaKeySpanID] = spanID
-		}
-		// D1-B (design-report-closeout): stamp the active bundle id so every
-		// produced event attributes to the exact prompt/config version.
-		if cm.bundleIDFn != nil {
-			if bid := cm.bundleIDFn(); bid != "" {
-				attr[tagentevent.MetaKeyBundleID] = bid
-			}
-		}
-		ctx = plugin.WithAttribution(ctx, attr)
+		ctx = plugin.WithAttribution(ctx, cm.buildTurnAttribution(ctx))
 	}
 	// Inject the task spawner so tools can delegate long-running work to the
 	// task layer (sync-wait window → inline or ack). Absent → synchronous.
@@ -582,7 +921,7 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		}
 		ctx = task.WithTaskSpawner(ctx, spawner)
 	}
-	eventCh, err := cm.runner.Run(ctx, cm.userID, cm.sessionID, msg)
+	eventCh, err := cm.currentRunner().Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		return fmt.Errorf("runner.Run: %w", err)
 	}
@@ -674,7 +1013,7 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 
 // Close releases the runner resources.
 func (cm *ContextManager) Close() error {
-	if r, ok := cm.runner.(interface{ Close() error }); ok {
+	if r, ok := cm.currentRunner().(interface{ Close() error }); ok {
 		return r.Close()
 	}
 	return nil
