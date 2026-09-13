@@ -17,11 +17,11 @@
 - [x] 2.4 换装后实测 `plan` 工具恢复可用（证据：调用返回摘要，非 400）
 
 ## 3. 转世运行预期（设计）
-- [ ] 3.1 成文《转世运行预期》：三类状态 × 预期行为 × 降级策略 × 可观测证据
+- [x] 3.1 成文《转世运行预期》：三类状态 × 预期行为 × 降级策略 × 可观测证据
       产出物：`reincarnation-expectations.md`（本 change 目录下独立文档）
-- [ ] 3.2 projection 无 compaction 快照时的 fallback 重建设计（并入 expectations 文档「记忆投影」章节）
-- [ ] 3.3 nil-probe 任务（plan/subagent）的回收策略设计（并入 expectations 文档「任务看板」章节）
-- [ ] 3.4 验收标准与演练脚本（并入 expectations 文档末章）
+- [x] 3.2 projection 无 compaction 快照时的 fallback 重建设计（并入 expectations 文档「记忆投影」章节）
+- [x] 3.3 nil-probe 任务（plan/subagent）的回收策略设计（并入 expectations 文档「任务看板」章节）
+- [x] 3.4 验收标准与演练脚本（并入 expectations 文档末章）
 
 ## 4. 部署与验证
 - [x] 4.1 换装部署（与 1.6 同一动作，一次部署覆盖 1.6/2.4/4.1/4.3 前置）
@@ -61,18 +61,18 @@
 - [ ] 5.7 热更换在途回合安全（2026-09-13 21:5x 事故修复，阻塞 5.6 重落）：org-hotreload 指纹变更触发的 executor 换装在回合中途执行，在途回合消息序列丢失（system-only 请求 → zhipu 400/1214 ×3 @21:51:21/21:51:37/21:55:57）。要求：换装前 quiesce 检查（无在途 LLM 调用才 swap）或换装时在途状态迁移；证据口径：yaml 变更期间在途回合 LLM 调用不受影响（trajectory 无 system-only 请求、无 400）
       - 注：5.6（knowledge→deepseek-flash+max）已于 21:50 首次上线即触发本事故，用户回滚（worktree=0c136b5，main 已复位）；重落前置 = 5.7 完成 + 改走重启部署 + 预检 deepseek 端点对 effort=max 的接受度
 ## 6. WAL fallback 重建实现（depends_on: §3.2 设计成文）
-- [ ] 6.1 测试先行：为 `projection_rebuild.go` 补 `latestCompactionKey()==0` 场景单测（新世空投影=失忆），先红后绿
-- [ ] 6.2 实现 fallback 重建：`latestCompactionKey()==0` 时改走 `fetchTailEvents(0)` + 设计文档五类过滤 + cap 截断
-- [ ] 6.3 回归：gofmt/go build/go vet/go test ./agent/... 全绿；补充全量投影重建正确性对比（有/无 compaction 快照两路径结果一致性）
-- [ ] 6.4 commit
+- [x] 6.1 测试先行：为 `projection_rebuild.go` 补 `latestCompactionKey()==0` 场景单测（新世空投影=失忆），先红后绿
+- [x] 6.2 实现 fallback 重建：`latestCompactionKey()==0` 时改走 `fetchTailEvents(0)` + 设计文档五类过滤 + cap 截断
+- [x] 6.3 回归：gofmt/go build/go vet/go test ./agent/... 全绿；补充全量投影重建正确性对比（有/无 compaction 快照两路径结果一致性）
+- [x] 6.4 commit
 
 ## 7. nil-probe 任务双通道回收实现（depends_on: §3.3 设计成文）
-- [ ] 7.1 实现 reconcileZombies 豁免条款 + isTerminalExpired 对 suspect 的处理 + dedup key 挡 re-spawn 的解除条件
-- [ ] 7.2 实测：构造 nil-probe plan/subagent 任务，验证回收链路（标记→回收→re-spawn 不再被挡）
-- [ ] 7.3 回归全绿 + commit
+- [x] 7.1 实现 reconcileZombies 豁免条款 + isTerminalExpired 对 suspect 的处理 + dedup key 挡 re-spawn 的解除条件
+- [x] 7.2 实测：构造 nil-probe plan/subagent 任务，验证回收链路（标记→回收→re-spawn 不再被挡）
+- [x] 7.3 回归全绿 + commit
 
 ## 8. 验收与换装演练（depends_on: 5/6/7 全部完成）
 - [ ] 8.1 全量回归：go build/vet/test ./... 全绿
-- [ ] 8.2 换装部署演练：走 restart-tagent.sh 或既有换装流程，留存部署证据（二进制 sha/size、restart.log、healthz）
+- [x] 8.2 换装部署演练：走 restart-tagent.sh 或既有换装流程，留存部署证据（二进制 sha/size、restart.log、healthz）
 - [ ] 8.3 转世演练验收：模拟未压缩 WAL 重启 → 投影 fallback 重建成功（新世可见上一世尾部事件）；模拟 nil-probe 任务 → 回收链路生效；主 agent LLM 调用入 trajectory 可见
 - [ ] 8.4 验收矩阵全绿 + 归档准备（报账后由 plan 执行 archive）
