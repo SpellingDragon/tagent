@@ -224,6 +224,7 @@ agents:
 
   # ---- Plan:工作计划管理子 Agent(openspec CLI,无通用 shell 逃逸面)----
   plan:
+    provider: zhipu                      # 必须显式覆盖:全局 provider=deepseek,wiring.go:37-40 只回退 provider→glm-5.3 会被发给 DeepSeek 端点→400
     model: glm-5.3                       # 覆盖全局 flash(plan 需更强推理)
     thinking_enabled: true
     system_prompt:
