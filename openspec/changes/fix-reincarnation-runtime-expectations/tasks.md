@@ -39,7 +39,7 @@
       - 依据 5.1 核实结论：若主 agent 命中 early-return 跳过 TrajectoryRecorder 包装 → 移除 early-return 或在其分支内补包装
       - 若主 agent 走 `main.go` 独立链路未包装 → 在 `openai.New()` 产物外补 TrajectoryRecorder
       - 证据口径：换装后 trajectory dump 中可见主 agent LLM 调用条目（路径 + 条目数）
-- [ ] 5.3 坑4：zhipu→deepseek 切换决策（用户决策点，阻塞后续执行）
+- [x] 5.3 坑4：zhipu→deepseek 切换决策（用户决策点）——已裁决 A：回退 glm-5.3-flash；commit 65aff87（19:26）+ 换装 887174（20:02）实证生效：wiring.go:156 resolved "glm-5.3-flash" via "zhipu"；决策记录见 decision-log.md
       - 决策选项 A：回退 cc21241，恢复用户 9-11 指令的「全部改 glm-5.3-flash」
       - 决策选项 B：保留 deepseek 切换，补齐观测（LLM 调用入 trajectory）与 provider 健康监控后再确认
       - 决策需用户明确拍板；决策结果记录于本 change 目录 `decision-log.md`
