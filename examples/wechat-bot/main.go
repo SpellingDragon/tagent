@@ -310,6 +310,7 @@ func main() {
 	// 回合的事件可能不带 meta_chat_id，若无此回退锚点，其用户可见回复会被静默
 	// 丢弃（实测 2026-09-09 丢 ≥2 条）。仅作 task 来源的兜底路由。(async-result-delivery.)
 	lastActiveChat := sync.Map{} // "latest" -> chat_id
+	seedLastActiveChat(&lastActiveChat, runDir())
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -345,6 +346,7 @@ func main() {
 			chatID := meta.Meta["chat_id"]
 			if triggerSource == "user" && chatID != "" {
 				lastActiveChat.Store("latest", chatID)
+				persistLastActiveChat(chatID, runDir())
 			}
 			userName := meta.Meta["user_name"]
 
@@ -598,6 +600,61 @@ func main() {
 }
 
 // truncateLog truncates a string for log output (max 120 chars).
+
+// runDir resolves the runtime state directory, anchored to the executable so
+// cwd drift across launchers cannot misplace the persistence file.
+func runDir() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "run")
+	}
+	return "run"
+}
+
+// persistLastActiveChat atomically writes the latest active chat_id to
+// run/last_active_chat (tmp+rename). Errors are logged and non-fatal: losing
+// the anchor degrades to the old in-memory-only behavior, never blocks the
+// event loop. (fix-lastactive-chat-reincarnation-drop.)
+func persistLastActiveChat(chatID, dir string) {
+	if chatID == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Warnf("[Agent] persistLastActiveChat: mkdir %s: %v", dir, err)
+		return
+	}
+	final := filepath.Join(dir, "last_active_chat")
+	tmp := final + ".tmp"
+	if err := os.WriteFile(tmp, []byte(chatID), 0o644); err != nil {
+		log.Warnf("[Agent] persistLastActiveChat: write tmp: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		log.Warnf("[Agent] persistLastActiveChat: rename: %v", err)
+	}
+}
+
+// seedLastActiveChat restores the last-active-chat anchor from disk at boot.
+// After a hot-swap/restart the in-memory anchor starts empty, so the first
+// post-reincarnation output (no meta_chat_id, e.g. a settled-task report)
+// would be silently dropped (observed 2026-09-13). Missing file is silent
+// (cold start); unreadable/corrupt content warns and continues.
+// (fix-lastactive-chat-reincarnation-drop.)
+func seedLastActiveChat(m *sync.Map, dir string) {
+	b, err := os.ReadFile(filepath.Join(dir, "last_active_chat"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Warnf("[Agent] seedLastActiveChat: %v", err)
+		}
+		return
+	}
+	chatID := strings.TrimSpace(string(b))
+	if chatID == "" {
+		log.Warnf("[Agent] seedLastActiveChat: empty content, skip")
+		return
+	}
+	m.Store("latest", chatID)
+	log.Infof("[Agent] seedLastActiveChat: 回种最近活跃会话 %s", chatID)
+}
 func truncateLog(s string) string {
 	return truncateLogN(s, 120)
 }
