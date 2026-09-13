@@ -49,6 +49,11 @@
       - 逐一排查：thinking 参数（thinking_enabled=true 对 56 条消息上下文的兼容性）、流式/非流式、超时、请求体参数
       - 建议先采集：一次带完整请求体的失败调用日志（或本地 curl 复现）作为诊断基线
       - 产出：诊断结论（根因归类：thinking/流式/超时/其他）+ 修复或规避方案；若与供应商端点相关，反馈进 5.3 决策
+- [ ] 5.6 knowledge 子 agent 换 deepseek-flash + reasoning effort=max（用户 2026-09-13 20:2x 指令；**门控：5.1/5.2 修复完成且换装生效后执行**）
+      - 改点：tagent.yaml agents.knowledge 段显式 provider: deepseek / model: deepseek-flash + effort 字段（先实证 effort 配置 schema：grep ReasoningEffort 消费链，勿猜）
+      - 深浅注意：deepseek 走 api.deepseek.com/v1，与全局 zhipu 并存；改后需换装重启（全局/agent 级模型不在热更指纹范围——5.1 修复前）
+      - 验证：wiring.go:82/156 resolved 日志 + knowledge 实调 trajectory 确认 model=deepseek-flash
+
 - [ ] 5.5 设计文档 canonical 归位核查（轻量）
       - `reincarnation-expectations.md` 已在 canonical change 目录（此前核查已达成）→ 本任务降级为：随 §3 设计产出更新后，确认文档内容与 §6/§7 实现对齐（设计→实现同步核查）
       - 无需移动文件动作
