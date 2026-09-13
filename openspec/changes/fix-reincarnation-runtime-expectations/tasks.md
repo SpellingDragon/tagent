@@ -74,5 +74,5 @@
 ## 8. 验收与换装演练（depends_on: 5/6/7 全部完成）
 - [ ] 8.1 全量回归：go build/vet/test ./... 全绿
 - [x] 8.2 换装部署演练：走 restart-tagent.sh 或既有换装流程，留存部署证据（二进制 sha/size、restart.log、healthz）
-- [ ] 8.3 转世演练验收：模拟未压缩 WAL 重启 → 投影 fallback 重建成功（新世可见上一世尾部事件）；模拟 nil-probe 任务 → 回收链路生效；主 agent LLM 调用入 trajectory 可见
+- [ ] 8.3 转世演练验收：模拟未压缩 WAL 重启 → 投影 fallback 重建成功（验收语义=新世可见上一世**去世时刻的上下文**：cap 内完整恢复、顺序一致；cap 外有界降级=boundary 记账+WARN，被截事件仍留事实链可 recall）；模拟 nil-probe 任务 → 回收链路生效；主 agent LLM 调用入 trajectory 可见
 - [ ] 8.4 验收矩阵全绿 + 归档准备（报账后由 plan 执行 archive）
