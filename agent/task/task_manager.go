@@ -29,6 +29,12 @@ const (
 // windows and legitimately quiet long-runners.
 const defaultZombieGrace = 10 * time.Minute
 
+// defaultOrphanGrace bounds the reincarnation-orphan adjudication (§7):
+// conservative enough to never kill a quiet but young this-life subagent,
+// large enough that restored multi-hour suspects (the actual target) qualify
+// immediately at rebuild.
+const defaultOrphanGrace = 30 * time.Minute
+
 // SettleKind classifies how a task reached a settle point. Detectors emit this
 // deterministically; the LLM interprets ambiguous kinds (stable/suspect) later.
 type SettleKind string
@@ -328,6 +334,18 @@ type TaskManagerConfig struct {
 	// the liveness reconcile may retire it as a zombie (reconcileZombies:
 	// no settle + probe-dead backing session). Zero -> defaultZombieGrace.
 	ZombieGrace time.Duration
+	// OrphanGrace is the minimum age a nil-probe suspect task (Spec.Alive ==
+	// nil, Declarative declared, backing session untracked) must reach before
+	// the reincarnation-orphan adjudication (RetireOrphans) retires it as
+	// failed. Covers restored (previous-life) suspects and this-life quiet
+	// nil-probe subagents alike; tracked sessions and probe-carrying tasks
+	// are never touched. Zero -> defaultOrphanGrace.
+	OrphanGrace time.Duration
+	// SessionTracker reports whether a task's Declarative.TaskID session is
+	// still tracked by a live monitor (tmux). Wired post-construction via
+	// SetSessionTracker (build_agent owns the ActionTool; TaskManager must
+	// not import tool/action). May be nil.
+	SessionTracker func(sessionID string) bool
 }
 
 // TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
@@ -339,17 +357,19 @@ type TaskManagerConfig struct {
 const defaultTerminalTTL = 2 * time.Minute
 
 type TaskManager struct {
-	mu             sync.Mutex
-	tasks          map[string]*Task // id → task
-	byKey          map[string]string
-	onSettle       func(task *Task, sig SettleSignal)
-	onSpawn        func(task *Task)
-	onInlineSettle func(task *Task, sig SettleSignal)
-	onCancel       func(task *Task)
-	spawnGate      func() string
-	terminalTTL    time.Duration
-	now            func() time.Time // injectable clock (tests); defaults to time.Now
-	zombieGrace    time.Duration
+	mu               sync.Mutex
+	tasks            map[string]*Task // id → task
+	byKey            map[string]string
+	onSettle         func(task *Task, sig SettleSignal)
+	onSpawn          func(task *Task)
+	onInlineSettle   func(task *Task, sig SettleSignal)
+	onCancel         func(task *Task)
+	spawnGate        func() string
+	terminalTTL      time.Duration
+	now              func() time.Time // injectable clock (tests); defaults to time.Now
+	zombieGrace      time.Duration
+	orphanGrace      time.Duration
+	isSessionTracked func(sessionID string) bool
 }
 
 // NewTaskManager creates a TaskManager.
@@ -362,17 +382,23 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if zg <= 0 {
 		zg = defaultZombieGrace
 	}
+	og := cfg.OrphanGrace
+	if og <= 0 {
+		og = defaultOrphanGrace
+	}
 	return &TaskManager{
-		tasks:          make(map[string]*Task),
-		byKey:          make(map[string]string),
-		onSettle:       cfg.OnSettle,
-		onSpawn:        cfg.OnSpawn,
-		onInlineSettle: cfg.OnInlineSettle,
-		onCancel:       cfg.OnCancel,
-		spawnGate:      cfg.SpawnGate,
-		terminalTTL:    ttl,
-		zombieGrace:    zg,
-		now:            time.Now,
+		tasks:            make(map[string]*Task),
+		byKey:            make(map[string]string),
+		onSettle:         cfg.OnSettle,
+		onSpawn:          cfg.OnSpawn,
+		onInlineSettle:   cfg.OnInlineSettle,
+		onCancel:         cfg.OnCancel,
+		spawnGate:        cfg.SpawnGate,
+		terminalTTL:      ttl,
+		zombieGrace:      zg,
+		orphanGrace:      og,
+		isSessionTracked: cfg.SessionTracker,
+		now:              time.Now,
 	}
 }
 
@@ -691,6 +717,75 @@ func (tm *TaskManager) reconcileDetached() {
 	}
 }
 
+// SetSessionTracker wires the live-session tracking signal post-construction
+// (build_agent owns the ActionTool; TaskManager must not import tool/action).
+func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.isSessionTracked = fn
+}
+
+// sessionTrackerFn snapshots the wired tracker (lock-safe read).
+func (tm *TaskManager) sessionTrackerFn() func(sessionID string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.isSessionTracked
+}
+
+// RetireOrphans adjudicates reincarnation-orphan suspect tasks (§7 双通道回收):
+// nil-probe (Spec.Alive == nil) + declared (Declarative != nil) + backing
+// session untracked + age >= orphanGrace → terminal failed via the same
+// settle-once path as zombie retirement. Restored previous-life suspects
+// qualify by their carried StartedAt (channel 1: called once at rebuild,
+// before the suspect→running promotion, so orphans never get promoted then
+// re-adjudicated); the same criterion re-runs from reconcileZombies as the
+// runtime backstop (channel 2). Probe-carrying tasks and tracked sessions are
+// never touched; generic display tasks without Declarative are never touched.
+// Returns the number retired.
+func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int {
+	now := tm.now()
+	tm.mu.Lock()
+	var candidates []*Task
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		need := t.status == TaskSuspect &&
+			t.Spec.Alive == nil &&
+			t.Spec.Declarative != nil &&
+			now.Sub(t.StartedAt) >= tm.orphanGrace
+		t.mu.Unlock()
+		if need {
+			candidates = append(candidates, t)
+		}
+	}
+	tm.mu.Unlock()
+
+	retired := 0
+	for _, t := range candidates {
+		t.mu.Lock()
+		taskID := ""
+		if t.Spec.Declarative != nil {
+			taskID = t.Spec.Declarative.TaskID
+		}
+		tracked := taskID != "" && isTracked != nil && isTracked(taskID)
+		if tracked || t.status != TaskSuspect {
+			t.mu.Unlock()
+			continue
+		}
+		out := "(reincarnation orphan: nil-probe suspect untracked beyond grace - retired by orphan adjudication)"
+		t.status = TaskFailed
+		t.result = out
+		if t.settledAt.IsZero() {
+			t.settledAt = now
+		}
+		t.mu.Unlock()
+		retired++
+		if tm.onSettle != nil {
+			tm.onSettle(t, SettleSignal{Kind: SettleFailed, Output: out})
+		}
+	}
+	return retired
+}
+
 // reconcileZombies closes the running-state blind spot of reconcileDetached:
 // a task whose detector never emits a settle (frozen output pipe, tmux
 // session lost out-of-band) lingered on the board as [running] forever —
@@ -701,6 +796,11 @@ func (tm *TaskManager) reconcileDetached() {
 // are never touched; a live probe protects a quiet long-runner at any age.
 func (tm *TaskManager) reconcileZombies() {
 	now := tm.now()
+	// §7 通道 2（运行期兜底）：同款孤儿判据随每次 reconcile 复评——覆盖
+	// 重建后新产生的 nil-probe 孤儿（如 subagent 会话被销毁后未 settle）。
+	if fn := tm.sessionTrackerFn(); fn != nil {
+		tm.RetireOrphans(fn)
+	}
 	tm.mu.Lock()
 	var candidates []*Task
 	for _, t := range tm.tasks {

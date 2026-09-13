@@ -536,6 +536,13 @@ func buildAgent(
 	// 单例，换执行器代不丢任务板）。无任务事件时 no-op。闭包工厂按承诺表：
 	// command 全套（Resume 真正供能待 R3 重挂）/subagent 仅 Relaunch（Redispatch
 	// 经 wrapper 表；Resume 引导文案）/generic 展示。
+	// §7（双通道回收）tracker 接线：两种 build 模式都要做——executorOnly 热
+	// 重建换代 ActionTool 后，旧闭包指向旧 monitor，须重接（幂等）。孤儿裁决
+	// 本体：通道 1 在下方 ownsPersistentState 分支（先于重挂提升），通道 2 挂
+	// reconcileZombies 运行期兜底。
+	if tm := ta.TaskManager(); tm != nil && actionTool != nil {
+		tm.SetSessionTracker(actionTool.IsTrackedSession)
+	}
 	if tm := ta.TaskManager(); tm != nil && mode.ownsPersistentState() {
 		redispatch := agent.SubagentRedispatcher(localSubagentWrappers, tm)
 		rebuildClosures := func(decl task.Declarative) task.TaskSpec {
@@ -554,6 +561,13 @@ func buildAgent(
 		// 存活会话——重建的 suspect 任务若其 Declarative.TaskID（=session id）被跟踪
 		// → 会话活→确定性提升 running；未被跟踪→保持 suspect 交探测/zombie 裁决。
 		if actionTool != nil {
+			// §7 通道 1（启动期一次性裁决）：先于重挂提升裁决上一世孤儿——
+			// nil-probe ∧ Declarative ∧ 未跟踪 ∧ 超 orphanGrace 的 suspect →
+			// failed（settledAt 置上 → terminalTTL 后 pruneTerminal 自然回收、
+			// byKey 释放、re-spawn 解禁）。先裁后升，避免“升 running 再裁决”抖动。
+			if n := tm.RetireOrphans(actionTool.IsTrackedSession); n > 0 {
+				log.Infof("[rebuild-task-registry] orphan adjudication: retired %d nil-probe suspect(s) (reincarnation orphans)", n)
+			}
 			for _, tk := range tm.List() {
 				if tk.Status() != task.TaskSuspect || tk.Spec.Declarative == nil {
 					continue
