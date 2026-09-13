@@ -26,7 +26,7 @@
 ## 4. 部署与验证
 - [x] 4.1 换装部署（与 1.6 同一动作，一次部署覆盖 1.6/2.4/4.1/4.3 前置）
 - [x] 4.2 验证 panic 消失（换装后 ≥5 轮含工具调用的消息处理，日志无 panic/nil pointer/detector 栈）
-- [ ] 4.3 验证 plan 工具可用（与 2.4 同一动作，合并报账）
+- [x] 4.3 验证 plan 工具可用（与 2.4 同一动作，合并报账）
 
 ## 5. 模型配置五坑处置（本阶段由 plan 扩充，2026-09-13）
 - [x] 5.1 坑1+坑2：统一模型解析链路——已落地（commit 见 git log fix(wiring)）：全局默认走 resolveGlobalDefaultModel 注册表工厂（热更可感知，缓存 key 含 endpoint）；entry SwappableModel 保留双链路（AReaL TAGENT_API_ENDPOINT + 运行时 swap，评审成文 decision-log D-2026-09-13-02）；org 指纹纳入全局 Model/Provider + 新增测试；死配置 api_endpoint 已删；gofmt/build/vet/test 全绿（t6 EXIT=0）
@@ -54,7 +54,7 @@
       - 深浅注意：deepseek 走 api.deepseek.com/v1，与全局 zhipu 并存；改后需换装重启（全局/agent 级模型不在热更指纹范围——5.1 修复前）
       - 验证：wiring.go:82/156 resolved 日志 + knowledge 实调 trajectory 确认 model=deepseek-flash
 
-- [ ] 5.5 设计文档 canonical 归位核查（轻量）
+- [x] 5.5 设计文档 canonical 归位核查（轻量）
       - `reincarnation-expectations.md` 已在 canonical change 目录（此前核查已达成）→ 本任务降级为：随 §3 设计产出更新后，确认文档内容与 §6/§7 实现对齐（设计→实现同步核查）
       - 无需移动文件动作
 
