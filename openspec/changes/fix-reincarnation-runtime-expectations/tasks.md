@@ -29,7 +29,7 @@
 - [ ] 4.3 验证 plan 工具可用（与 2.4 同一动作，合并报账）
 
 ## 5. 模型配置五坑处置（本阶段由 plan 扩充，2026-09-13）
-- [ ] 5.1 坑1+坑2：统一模型解析链路
+- [x] 5.1 坑1+坑2：统一模型解析链路——已落地（commit 见 git log fix(wiring)）：全局默认走 resolveGlobalDefaultModel 注册表工厂（热更可感知，缓存 key 含 endpoint）；entry SwappableModel 保留双链路（AReaL TAGENT_API_ENDPOINT + 运行时 swap，评审成文 decision-log D-2026-09-13-02）；org 指纹纳入全局 Model/Provider + 新增测试；死配置 api_endpoint 已删；gofmt/build/vet/test 全绿（t6 EXIT=0）
       - 核实主 agent trajectory 包装顺序（`main.go:112/133` `openai.New()` 与 TrajectoryRecorder 的先后关系），确认主 agent LLM 调用是否入 trajectory
       - 核实主 agent 在换装/hot-reload 场景是否命中 `wiring.go` resolveAgentModel 的 modelOverrides early-return 分支
       - 清理 `tagent.yaml` L20 全局 `api_endpoint` 死配置（被 L36 providers.deepseek 覆盖）及误导注释（L21「与 zhipu 同端点」）；处理方式随坑4决策（回退 deepseek → 死配置随之消失；保留 deepseek → 删除死配置+修正注释）
