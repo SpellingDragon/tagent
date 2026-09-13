@@ -158,7 +158,8 @@ func main() {
 	var approvalCh *wechatApprovalChannel
 	opts := []tagent.Option{
 		tagent.WithModel(globalModel),
-		tagent.WithSummaryModel(globalModel),
+		// WithSummaryModel removed (no-op orphan after ModelRef unification,
+		// cc21241): YAML compress.summary is the only summary path.
 		tagent.WithModelOverrides(map[string]model.Model{
 			tagentCfg.Entry: swappableModel,
 		}),

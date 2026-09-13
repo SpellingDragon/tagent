@@ -141,10 +141,21 @@ func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference) {
 // StartLoop starts the persistent event loop for this agent.
 // The loop runs in a dedicated goroutine and processes events until StopLoop is called.
 // Returns the output channel that emits events as they are processed.
+// The channel is closed exactly once, when the loop goroutine exits.
+// StopLoop is TERMINAL: a second StartLoop on the same instance returns an
+// error — the closed outputCh makes silent restart a production panic (V15).
+// Creates a new TagentAgent for a fresh loop.
 func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event, error) {
 	// Use sessionMu to prevent concurrent StartLoop calls from racing
 	// on the loopActive check + initialization sequence.
 	ta.sessionMu.Lock()
+	// Terminal lifecycle (V15): after StopLoop the outputCh is closed — a
+	// silent restart would hand consumers a dead channel and double-close it
+	// on the next Stop. Fail explicitly instead.
+	if ta.loopTerminated.Load() {
+		ta.sessionMu.Unlock()
+		return nil, fmt.Errorf("persistent loop already terminated: StopLoop is terminal on a TagentAgent instance; create a new agent for a fresh loop")
+	}
 	if ta.loopActive.Load() {
 		ta.sessionMu.Unlock()
 		return ta.outputCh, nil
@@ -198,6 +209,7 @@ func (ta *TagentAgent) StopLoop() {
 		return
 	}
 	ta.loopActive.Store(false)
+	ta.loopTerminated.Store(true) // terminal: see StartLoop doc (V15 lifecycle fix)
 
 	// Stop meditation manager first (stop injecting new meditation events).
 	if ta.meditationMgr != nil {
