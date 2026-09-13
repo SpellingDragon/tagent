@@ -21,7 +21,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `types.go` | 事件类型常量（12 个，含 consolidation/governance/feedback）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
+| `types.go` | 事件类型常量（14 个，含 consolidation/governance/feedback/task_spawned/resident_session）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
 | `metadata.go` | 元数据契约：`MetaKey*` 常量（含归因键 agent_name/bundle_id/rollout_id/trace_id/span_id 与 governance subtype 单源常量）、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀、trigger_source |
 | `registry.go` | EventTypeSpec 注册表：类型元数据唯一权威源（Name/Role/Special/Skeleton/LowValue/TTLDays/Embeddable/Recallable 等），既有函数/变量委托派生 |
 | `timeline.go` | 时间线前缀契约：`FormatEventPrefix/ParseEventKeyAndType/HasEventPrefix/StripEventKeyPrefix`（`[evt_KEY|type]` 读写同点） |
@@ -102,6 +102,13 @@ const (
     // 因果边，零新索引；正 key，Role=system，TTL 默认 30 天，subtype 区分
     // user/task_settle/api，Content 为结构化 JSON）
     TypeFeedback = "feedback"
+
+    // 任务 spawn 记录（R2）：registry 重建数据源，载 Declarative 声明式投影；
+    // 事实链记录**不进投影**；TTL 与 external_input 对齐（30d）
+    TypeTaskSpawned = "task_spawned"
+
+    // 常驻会话生命周期记录（R3）：spawn 全参/终态结局；事实链审计记录**不进投影**；TTL 30d
+    TypeResidentSession = "resident_session"
 )
 ```
 
@@ -109,8 +116,9 @@ const (
 
 | 类别 | 类型 | key | 是否经 `StoreEvent` 落库 |
 |------|------|-----|------------------------|
-| 真实事件 | `external_input`/`agent_output`/`action_command`/`thinking_*`/`context_compress_summary`/`consolidation`/`governance`/`feedback` | 正 key（Snowflake） | 是 |
+| 真实事件 | `external_input`/`agent_output`/`action_command`/`thinking_*`/`context_compress_summary`/`consolidation`/`governance`/`feedback`/`task_spawned`/`resident_session` | 正 key（Snowflake） | 是 |
 | 合成投影引用 | `context_compress`（滚动摘要）/`tool_chain`（工具链折叠） | 负 key | 否——只存在于 SessionProjection，是压缩产物的渲染载体，携 `[hex]` 票据供 recall 回补原文 |
+| 事实链记录但不进投影 | `task_spawned`/`resident_session`/`context_compress_summary`（compaction 事件） | 正 key | 是；投影重建/回放按类型跳过——看板由 registry 每轮渲染，追加即双重表示 |
 
 ### 4.2 类型分类逻辑
 
@@ -248,7 +256,7 @@ func GenerateEventSummary(msg model.Message, eventType string, opts EventSummary
 }
 ```
 
-> 事件类型常量现为 **12 个**（在早期七个之外新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`、`feedback`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
+> 事件类型常量现为 **14 个**（在早期七个之外新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`、`feedback`、`task_spawned`、`resident_session`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
 
 ### 7.3 formatToolCallSummary — 工具调用摘要
 

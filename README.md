@@ -14,19 +14,19 @@
 | 🧠 **记忆三原语** | store（事件不可变入库）/ compress（总结+自然遗忘）/ recall（票据或语义召回） |
 | 🗂 **卡片序列** | 压缩后的历史浓缩为索引卡片行——模型始终"看得见做过什么"，每张卡自带召回票据 |
 | ⚡ **异步任务层** | 长命令/服务经 tmux 后台运行：快命令内联返回，慢任务 ACK + `task_settled` 通知回写 |
-| 🔁 **任务重入** | `resume_task` 对存活服务续输入（REPL 式）、对完成的子 Agent 续指令（自动还原上下文） |
+| 🔁 **任务重入** | `resume_task` 对存活服务续输入、对完成的子 Agent 续指令（自动还原上下文） |
 | 🤖 **子 Agent 编排** | 本地 `AgentToolWrapper` / 远程 A2A 协议统一封装；事件跨 Agent 按 key 精确传递 |
-| 🧘 **冥想心跳** | 自我改进引擎：空闲期(novelty+idle 门控)反思近期工作，产出脚本/skill/prompt 三类改进产物并经 `refine register` 登记（git 留痕+评估窗口）——不是被动日记 |
+| 🧘 **冥想心跳** | 自我改进引擎：空闲期反思近期工作，产出脚本/skill/prompt 三类改进产物并经 `refine register` 登记 |
 | 🎓 **RL 集成** | HTTPAPI + SwappableModel + TrajectoryRecorder，与 AReaL 对接采集训练轨迹 |
-| 🔌 **MCP 闭环** | `mcp_servers` 声明式注册表（增删热同步）+ `mcp_call` 网关 + `mcp_discover` 发现——工具知识按需渗透进上下文，工具声明区恒定（缓存友好） |
-| 🔍 **混合语义召回** | `memory.engine.embedding` 开启后向量∪关键词 RRF 融合召回；语义发现→票据取回两段式不变；未配置时行为与纯关键词逐字节一致 |
-| 📊 **统一可观测** | turn root span + trace_id 三投影互链（事件 Metadata / RL 轨迹 / OTel span 树）；设 OTLP endpoint 导出，未设 noop 零开销 |
-| 🛡 **治理闸**（默认关） | RiskClassifier 四级风险 + 预算滑窗 + critical 异步审批（**审批消息流**：请求渗透为消息→人工回复 approve/reject <digest> 或 CLI 批准→白名单校验→落盘生效）+ DenialLedger 审计 + **goal 五工具**（goal_declare/goal_list/goal_resolve/denial_query/approval_list，entry only）+ **负反馈 guardrail 判据**；GovernanceTool 装饰全部 leaf 工具 |
-| 🔁 **回执-反馈闭环** | 任务结算自动写 task_settle feedback（completed→positive/failed→negative，suspect 不写）+ `POST /feedback` 外部评分 + FeedbackBinder 因果边绑定产出事件；negative_feedback_rate 进入改进窗口 guardrail 判据（跨版本误归因防线=改进版本章精确 join） |
-| 🧬 **自进化**（默认关） | **git 原生**改进通道：文件即真源（热重载直生效）+ git 版本层（`[self-improve]` 标记 commit/revert/log）+ refine 工具（register 登记/status 台账/rollback 安全回滚）+ 后验评估（guardrail/judge 劣化**只出建议**——执行权永远在 agent） |
-| 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once 不丢事件）+ DegradationManager 五依赖退化追踪 + mem_spill 存储失败兜底重放 |
-| ♻️ **重启连续**（R1-R3） | 三层状态全部从事实链重建，重启不丢上下文：**对话投影**（compaction snapshot+尾部回放，逐字节复原、prefix-cache 复用）；**任务板**（`task_spawned`/settle 事实链 fold，active 任务重建、relaunch 跨重启可用）；**常驻会话**（元数据持久化+存活重挂+TaskID 桥，探测三态化+连续 unknown 加闸防误杀） |
-| 🔥 **非重启热更**（R4） | 配置结构变更（model/tools/prompt wiring）经懒检查自动换执行器：build-validate-then-swap **fail-closed**、drain-free turn 级（进行中 turn 用旧 runner 跑完）、投影/任务板/常驻会话原封；`memory.*` 变更拒绝并明示须重启；代际日志 + ring 2 回滚 |
+| 🔌 **MCP 闭环** | 声明式注册表（增删热同步）+ `mcp_call` 网关 + `mcp_discover` 发现——工具声明区恒定，缓存友好 |
+| 🔍 **混合语义召回** | 配置 embedding 后向量∪关键词 RRF 融合召回；语义发现→票据取回两段式；未配置时行为逐字节不变 |
+| 📊 **统一可观测** | turn root span + trace_id 三投影互链；设 OTLP endpoint 导出，未设 noop 零开销 |
+| 🛡 **治理闸**（默认关） | 风险四级分级 + 预算滑窗 + critical 异步审批 + DenialLedger 审计 + goal 五工具 |
+| 🔁 **回执-反馈闭环** | 任务结算自动写 feedback + `POST /feedback` 外部评分 + 因果边绑定；negative_feedback_rate 进入 guardrail 判据 |
+| 🧬 **自进化**（默认关） | git 原生改进通道：文件即真源 + git 版本层 + refine 工具 + 后验评估（劣化**只出建议**——执行权永远在 agent） |
+| 🚡 **常驻可靠性**（默认关） | EventBus 磁盘溢出（at-least-once）+ 五依赖退化追踪 + mem_spill 兜底重放 |
+| ♻️ **重启连续**（R1-R3） | 对话投影 / 任务板 / 常驻会话三层状态全部从事实链重建，重启不丢上下文、逐字节复原、prefix-cache 复用 |
+| 🔥 **非重启热更**（R4） | 配置结构变更经懒检查自动换执行器：build-validate-then-swap fail-closed、drain-free turn 级、状态原封；代际日志 + ring 2 回滚 |
 
 ## 🎬 一个长期运行的日常
 
@@ -56,12 +56,11 @@ sequenceDiagram
 
 | 依赖 | 要求 | 用途 |
 |---|---|---|
-| Go | ≥ 1.24 | 构建（`go build ./...`；go.mod 声明为准） |
-| tmux | 任意近期版本 | exec 工具命令执行 + 异步任务层（fast 路径内联返回 / slow 路径 tmux 后台 + `task_settled` 回写） |
-| rustviking | 可选 | 仅 `memory.type: file` 持久后端的 KV；缺省用 `memory`/`localfile` 后端（零外部二进制依赖） |
-| ZAI_API_KEY | 按需 | **GLM Coding Plan 系**（zhipu glm 模型 + zhipu embedding + web-search-prime MCP，一把 key 通吃；examples 默认）；**全部单测使用 mock，无需任何 key** |
-| TENCENT_HY_API_KEY | 按需 | **混元系**（tencent_hy provider 的 hy3 模型，仅 tests/hy3_thinking_test.go 使用）——与 ZAI 分属两家供应商，按所用模型配置，二者均可选 |
-| OTLP endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出（Jaeger/Tempo 等）；未设为 noop，零开销零行为变化 |
+| Go | ≥ 1.24 | 构建 |
+| tmux | 任意近期版本 | exec 命令执行 + 异步任务层 |
+| rustviking | 可选 | 仅 `memory.type: file` 持久后端；缺省用 localfile（零外部依赖） |
+| ZAI_API_KEY / TENCENT_HY_API_KEY | 按需 | 模型 API key（examples 默认 GLM 系）；**全部单测使用 mock，无需任何 key** |
+| OTLP endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出；未设 noop |
 
 ## 🚀 快速开始
 
@@ -180,41 +179,11 @@ graph LR
     C -->|超限,卡片浓缩 condenseCardLines| D["浓缩卡片<br/>(保骨架+key引用)"]
 ```
 
-- **双层折叠**：L3 整段离场时，工程票据层（卡片行 + `[evt_key]` 召回票据）恒在；配置 `summary_model` 时叠加单行 `〔历史综述〕` LLM 滚动综述（增量合成、编译期常量限长，失败降级纯工程）
-- **成本可控**：骨架定级与票据层纯工程零 LLM，开销只与新增段有关；LLM 仅两处低频叠加——L3 滚动综述（每轮折叠 1 次）与卡片超限浓缩（`condenseCardLines`），无模型时均降级为工程形态
-- **卡片序列**：压缩后的历史保持为可读的卡片行（`[Compacted N] + 〔历史综述〕 + 卡片行 + recent keys`），冥想沉淀带 ★ 高亮
-- **原文可忘，票据长存**：卡片里的 `[hex]` key 就是召回票据——随时用 `recall` 取回原文（旧 legacy 管线的 L3 LLM 段摘要/固化物已移除，存量固化物保留 TTL 豁免、自然清退）
+- **双层折叠**：L3 离场时工程票据层（卡片行 + `[evt_key]` 召回票据）恒在；配置 `summary_model` 时叠加单行 `〔历史综述〕` LLM 滚动综述，失败降级纯工程
+- **卡片序列**：压缩后的历史保持为可读卡片行，冥想沉淀带 ★ 高亮；`[hex]` key 随时用 `recall` 取回原文（零幻觉）
+- **成本可控**：骨架定级与票据层纯工程零 LLM；LLM 仅两处低频叠加（L3 综述 / 卡片浓缩）
 
-### 记忆数据模型（LSM）
-
-存储按 **LSM 树**组织：事件从两条现役管线（EventBus 注入 / 框架 LLM 事件）汇入唯一写入路径（旧 legacy 压缩固化物管线已移除，存量固化物只读不清），顺序追加进按写入时间分段的存储；层级表示写入新近度与压实代数，封口/压实写入真实时间边界供查询剪枝；遗忘由压实、TTL、容量三层各自负责。
-
-```mermaid
-graph LR
-    P["事件管线<br/>注入/LLM事件"] --> W["StoreEvent<br/>碰撞守卫+seq恢复"]
-    W --> S["分段存储<br/>evt/idx/meta/tomb"]
-    S --> L["L0活跃→L1封口→L2→L3<br/>压实写真实边界"]
-    L --> R["召回：票据/语义/卡片"]
-    F["遗忘：压实·TTL·容量"] -.墓碑.-> L
-```
-
-- **召回与压缩同向**：压缩丢旧留新，召回新先于旧——`timestamp_desc` 下截断只牺牲最旧，永不丢最新记忆
-- **两条时间轴**：`Timestamp`（事件时刻）是唯一语义时间轴；EventKey 内嵌时间（写入时刻）仅用于段放置与同毫秒决胜
-- **事件不可变**：EventKey 是事件身份，重复写入被拒绝；重启后 seq 从已有最大值恢复，不覆写旧事件
-- **遗忘可配置**：TTL 按事件类型衰减（固化物豁免），经 `memory.lifecycle` 声明；负全局 TTL = 总开关关闭遗忘
-
-完整数据流、隐式连接与硬契约见 [wiki/memory §16](docs/wiki/memory/memory-architecture.md)。
-
-## ⚙️ 六大机制速览
-
-| 机制 | 亮点 | 详解 |
-|------|------|------|
-| 持久事件循环 | Pull 批处理；async 结果排队不打断进行中 turn | [wiki/agent](docs/wiki/agent/event-flow.md) |
-| 上下文压缩 | 双层设计：发给 LLM 的视图分级压缩 + 工作内存滚动成卡片；**容量单维触发**（token 超阈才整理）+ 整理间渲染冻结（前缀字节稳定，缓存友好）；进行中段工具调用历史折叠为工具链行（有界化，无零信息占位符）；超大 settle 结果转储文件（事件本体有界，防召回复发）；被丢弃的执行过程经 `recall(turn_key=...)` 因果链召回；永不修改已存储的事件 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
-| 事件驱动记忆 | 每个事件有全局唯一 key（时间有序）；Agent 间存储隔离，跨 Agent 读需显式授权 | [wiki/memory](docs/wiki/memory/memory-architecture.md) |
-| 子 Agent 调用 | `event_params: [event_keys]` 按 key 传事件（数据隔离）；A2A 远程透明 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
-| 异步任务层 | 快命令秒回、慢任务后台通知；实时任务看板；`resume_task` 随时续跑；退出不留孤儿进程 | [wiki/tool](docs/wiki/tool/tool-architecture.md) |
-| 冥想心跳 | 自我改进引擎（空闲门控反思）：产出脚本/skill/prompt 三类改进并 `refine register` 登记；输出以 ★ 高亮卡片进长期记忆 | [wiki/agent](docs/wiki/agent/agent-architecture.md) |
+存储按 **LSM 树**组织（L0 活跃→L1 封口→L2→L3 压实），遗忘由压实、TTL、容量三层各自负责；事件不可变、重复写入被拒；压缩丢旧留新、召回新先于旧——截断永不丢最新记忆。完整数据流、隐式连接与硬契约见 [wiki/memory](docs/wiki/memory/memory-architecture.md)。
 
 ## 🏗 架构
 
@@ -293,9 +262,9 @@ graph TB
 | `request_timeout_seconds` | `3600` | 请求超时 |
 | `trajectory_dump` | `false` | 启用轨迹记录 |
 | `trajectory_dir` | `data/trajectories` | 轨迹文件目录 |
-| `working_dir` | `""` | **agent 统一工作根**——file 工具 `base_dir` 与 exec 命令 cwd 的共同基准（二者恒一致，保模型单一文件系统视图）。空 = 继承进程工作目录；设为项目 clone 根即让 agent 操作该目录下所有仓库，而 tagent 自身配置/资源/数据路径不受影响。优先级 `properties.base_dir`/`workspace` > `working_dir` > 进程 cwd。可经环境变量 `TAGENT_WORKING_DIR` 覆盖（部署时免改 YAML） |
-| `api_key_env` | `ZAI_API_KEY` | 全局 API key 环境变量名（`providers.<name>.api_key_env` 优先） |
-| `mcp_servers` | `{}` | MCP server 声明式注册表：每项 `transport`（stdio/sse/streamable-http）/`url`/`headers`/`api_key_env`/`command`/`args`/`timeout`；增删保存即热生效（无需重启），经 `mcp_discover`/`mcp_call` 使用 |
+| `working_dir` | `""` | **agent 统一工作根**——file 工具与 exec 命令的共同路径基准；空 = 继承进程 cwd。可经 `TAGENT_WORKING_DIR` 覆盖 |
+| `api_key_env` | `ZAI_API_KEY` | 全局 API key 环境变量名 |
+| `mcp_servers` | `{}` | MCP server 声明式注册表；增删保存即热生效，经 `mcp_discover`/`mcp_call` 使用 |
 
 ### Agent 级选项
 
@@ -306,19 +275,14 @@ graph TB
 | `memory.type` | `memory` | `memory`（进程内）/`file`（rustviking CLI 持久）/`localfile`（JSON 文件 KV 持久，零外部依赖） |
 | `memory.path` | `""` | 存储路径/标识；`memory` 型下同 path 的 agent 共享同一实例，空 = 隔离存储 |
 | `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区（跨 agent 记忆访问须显式授权） |
-| `memory.rustviking_binary` | `rustviking` | 仅 `type: file`：rustviking CLI 路径（空则走 PATH 查找） |
-| `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，**负值 = 关闭 TTL 遗忘**）/`type_ttl`（按事件类型覆盖，负值豁免）/`check_interval`（默认 `1h`）/`max_events_per_partition`（默认 0 = 不限） |
-| `memory.engine` | （关闭） | 语义检索引擎：`backend`（memory/rustviking，MVP 阶段等价，差异在向量持久化底座）/`embedding`（见下）/`vector_top_k`（20）/`keyword_top_k`（20）/`rrf_k`（60） |
-| `memory.engine.embedding` | （关闭） | `provider`（zhipu/mock）/`model`（embedding-3）/`api_key_env`（ZAI_API_KEY）/`endpoint`/`dimensions`（512/1024/2048）；开启后 recall 升级向量∪关键词 RRF 融合，key 缺失优雅降级纯关键词 |
-| `memory.engine.consolidation` | （关闭） | 巩固建议式触发（不依赖 embedding）：`capacity_threshold`（边界事件计数超阈发 consolidation_hint 渗透消息+冥想 digest 附候选，0=关）/`min_source_events`（memory_consolidate 硬门控，源不足显式拒绝）/`snooze`（提示静默窗，如 24h）。触发只是建议——执行权在 LLM+工具 |
-| `workspace_root` | `.tagent-workspace` | **scratch 根**（非工作根）：超大工具输出落 `<root>/tool-output`、tmux 命令目录 `<root>/exec`；与 `working_dir`（file/exec 的路径基准）是两个不同概念 |
-| `max_tool_iterations` | 入口 50 / 子 10 | 最大 ReAct 迭代次数 |
-| `max_tokens` | 入口 8000 / 子 4096 | 上下文 token 预算 |
-| `compress_threshold` | `0.8` | 压缩触发比例——**整理（compaction）的唯一触发条件**（容量超阈才整理）；task_settled 通知全文内联，整理间上下文前缀稳定以利缓存复用 |
-| `keep_recent_tasks` | `2` | **整理后**保留的最近任务数（L0 保留区与全文窗口派生的状态参数，不参与触发） |
-| `task_terminal_ttl` | `"2m"` | 终态任务回收前保留期（也是终态任务的 resume_task 重入窗口） |
+| `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，负值=关闭）/`type_ttl`/`check_interval`/`max_events_per_partition` |
+| `memory.engine` | （关闭） | 语义检索引擎：`embedding`（provider/model/dimensions，开启后 recall 升级向量∪关键词 RRF 融合，缺 key 优雅降级）/`consolidation`（巩固建议式触发：`capacity_threshold`/`min_source_events`/`snooze`——触发只是建议，执行权在 LLM+工具） |
+| `workspace_root` | `.tagent-workspace` | **scratch 根**（非工作根）：超大工具输出与 tmux 命令目录的落点 |
+| `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 · 子 10/4096/0.3 | ReAct 迭代 / token 预算 / 温度（只在被引用 agent 自身定义处配置） |
+| `compress_threshold` | `0.8` | 整理（compaction）的唯一触发条件；整理间前缀字节稳定以利缓存复用 |
+| `keep_recent_tasks` | `2` | 整理后保留的最近任务数（不参与触发） |
+| `task_terminal_ttl` | `"2m"` | 终态任务回收保留期（也是 resume_task 重入窗口） |
 | `resume_context_rounds` | `3` | 子 Agent 重入还原的前序轮次数 |
-| `temperature` | 入口 0.7 / 子 0.3 | LLM 温度 |
 | `meditation.enabled` | `false` | 启用冥想（`interval`/`min_gap`/`prompt_file`） |
 
 ### compress 块（压缩家族）
@@ -326,10 +290,8 @@ graph TB
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
 | `summary_model` / `summary_provider` | （继承 agent） | 压缩摘要专用模型（可用廉价模型） |
-| `card_max_chars` | `6000` | 卡片序列长度上限；超限旧卡 LLM 整理或沉底 |
-| `compact_keys_listed` | `32` | 滚动摘要列出的 recent keys 上限 |
-| `recent_full_count` | `keep_recent_tasks × 4` | 全文解析窗口大小（未配置时派生，显式配置优先）；**在整理轮锚定、整理间冻结**——锚点后的既有引用保持摘要渲染，新追加事件全文（活跃前沿），前缀字节稳定 |
-| `summary_max_tokens` | `8192` | 每次摘要 LLM 调用的输出 token 预算下限（防 reasoning 模型挤空 Content） |
+| `card_max_chars` / `compact_keys_listed` / `summary_max_tokens` | `6000` / `32` / `8192` | 卡片序列上限 / recent keys 上限 / 摘要输出预算下限 |
+| `recent_full_count` | `keep_recent_tasks × 4` | 全文解析窗口；整理轮锚定、整理间冻结（前缀字节稳定） |
 
 ### 工具引用（ToolRef）
 
@@ -337,25 +299,25 @@ graph TB
 |------|------|
 | `kind` | `agent`（默认）或 `tool` |
 | `agent` / `id` | 子 Agent 名称 / 工具 ID |
-| `description` / `description_file` | 工具描述：内联文本 / prompt 文件（相对 `prompt_dir`）。`kind: agent` 必须二者其一 |
+| `description` / `description_file` | 工具描述：内联文本 / prompt 文件；`kind: agent` 必须二者其一 |
 | `event_params` | 事件参数，如 `[event_keys]` |
-| `extra_params` | 附加路由参数声明（如 plan 的 `action` enum + `name`）；调用时随 `request` 打包为 JSON 消息体透传子 Agent，未声明则消息体保持纯文本 |
-| `async` | 子 Agent 是否走异步任务层（默认 true；false = 恒同步，减轻弱模型对 ack/通知语义的负担） |
-| `remote.url` | 远程 A2A Agent URL（设置后创建 A2AAgent 而非本地 TagentAgent） |
-| `properties` | 工具专属配置：exec 的 `workspace`（命令 cwd）/`run_as_user`/`run_as_group`/`monitor`（轮询参数）；file 工具族的 `base_dir`（沙箱根）。二者缺省时回退全局 `working_dir`，再回退进程 cwd |
+| `extra_params` | 附加路由参数声明；调用时随 `request` 打包为 JSON 消息体透传子 Agent |
+| `async` | 子 Agent 是否走异步任务层（默认 true） |
+| `remote.url` | 远程 A2A Agent URL |
+| `properties` | 工具专属配置：exec 的 `workspace`/`run_as_user`/`monitor`；file 工具族的 `base_dir`；缺省回退全局 `working_dir` |
 | `factory` | 自定义工厂路径（非内置工具/agent 的扩展点） |
 
-> agent 运行参数（`max_tool_iterations`/`max_tokens`/`temperature`）**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系。
+> agent 运行参数**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系。
 
 ### 平台子系统（默认全部关闭 = 零行为变化；按需开启）
 
 | 配置块 | 关键字段 | 说明 |
 |--------|---------|------|
-| `governance:` | `enabled` / `enforcement`（warn 放行记账 \| strict 拒绝）/ `dir`（空=纯内存）/ `budget_window_minutes` / `max_high_risk` / `max_medium_risk` / `goal_required_for` | 治理闸：全部 agent 的 leaf 工具过 RiskClassifier 分级 + 预算滑窗 + critical 异步审批（外部落盘 `approvals/` 目录即生效；**审批请求渗透为消息、人工回复 approve/reject <digest> 即生效**，`app.wechat.approvers` 白名单校验发送者）；DenialLedger 审计事件写 entry memStore；goal 五工具（entry only）登记自治目标 |
-| `evolution:` | `enabled` / `protected_paths`（默认 `resources/prompts/**`,`skills/**`,`scripts/**`）/ `judge_delay_seconds` / `judge_min_samples` / `judge_pass_threshold` / `judge_timeout_seconds` | git 原生自进化：refine register 登记改进（`[self-improve]` commit+improvement 事件+评估窗口）；judge_delay 后 guardrail/judge 评估一次，劣化只出建议（evaluation 事件→冥想 digest）；rollback 安全 revert。⚠ 生产=独立部署仓 |
-| `reliability:` | `degradation_enabled`（五依赖退化状态机总开关）/ `bus_spill_dir`（非空启用事件溢出）/ `mem_spill_dir`（StoreEvent 失败兜底重放，重放双写投影）/ `meditation_anchor_dir`（冥想锚点跨重启）/ **降级行为层**（默认全关）：`degradation_model_backoff`（model 退化时 turn 间退避，如 5s）/ `degradation_mcp_probe_every`（mcp 退化时熔断半开探测间隔 N）/ `degradation_disk_block_spawn`（disk 退化时禁新任务 spawn，进行中任务不受影响） | 常驻可靠性：每 agent 子目录隔离；**退化追踪由 `degradation_enabled` 独立开关控制**（ErrorTrackingStore 最外层包裹 memStore + event_loop 上报 model 失败 + mcp_call 上报），与 governance 配置无耦合；`mem_spill_dir` 仅在 `degradation_enabled` 为真时接线；降级行为是「闸不是墙」——每项独立开关，恢复即回正常路径 |
+| `governance:` | `enabled` / `enforcement`（warn\|strict）/ `dir` / 预算窗口与阈值 / `goal_required_for` | 治理闸：全部 leaf 工具过风险分级 + 预算滑窗 + critical 异步审批（审批请求渗透为消息，人工回复即生效）；DenialLedger 审计；goal 五工具 |
+| `evolution:` | `enabled` / `protected_paths` / judge 四参数 | git 原生自进化：refine 登记 + 后验评估（劣化只出建议）；rollback 安全 revert。⚠ 生产=独立部署仓 |
+| `reliability:` | `degradation_enabled` / `bus_spill_dir` / `mem_spill_dir` / `meditation_anchor_dir` / 降级行为三项 | 常驻可靠性：五依赖退化追踪独立开关，与 governance 无耦合；降级行为是「闸不是墙」 |
 
-详见 [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md)。
+完整字段与行为矩阵见 [docs/wiki/platform/](docs/wiki/platform/platform-subsystems.md)。
 
 ## 📚 深入阅读
 
