@@ -11,9 +11,9 @@
 | 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |
 | 事件契约 | [event/event-architecture.md](event/event-architecture.md) | 事件类型系统、元数据契约、时间线前缀（读写单点） |
 | 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | MemoryPlugin（持久化+因果+同点投影）、SummaryPlugin（元数据标注） |
-| 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层）、召回体系、任务工具族、EventKeys 传递 |
+| 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层+跨重启连续）、召回体系、任务工具族、EventKeys 传递 |
 | Prompt | [prompt/prompt-architecture.md](prompt/prompt-architecture.md) | Loader / bootstrap / 内嵌回退 / 热重载 Source |
-| 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化(git 原生) · 常驻可靠性 · 统一可观测 · 记忆引擎(C6 缝) · MCP 闭环（2026-09 迭代，默认全部关闭） |
+| 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化(git 原生) · 常驻可靠性 · 配置热重载(R4) · 统一可观测 · 记忆引擎(C6 缝) · MCP 闭环（默认关闭项全部 opt-in） |
 | agent 行为矩阵 | [platform/agent-behavior-matrix.md](platform/agent-behavior-matrix.md) | 启用上述子系统后，agent 在治理/自进化/可靠性/语义召回/可观测/部署各复杂场景下的**实际反应**（逐条溯源到代码） |
 
 ## 撰写约定（新增或修订时遵循）

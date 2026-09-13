@@ -24,6 +24,17 @@ graph TD
 
 > **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link，跨 turn 闭环（见 [platform 篇](../platform/platform-subsystems.md)）。详见 `agent-architecture.md` §2.10 任务层。
 
+### 冷启动重建序（R1→R2→R3）
+
+持久循环启动前，build 路径按固定顺序从事实链重建三层状态（均一次、进空态、无据则 no-op）：
+
+1. **R1 投影重建**（`RebuildProjectionFromWAL`）：最新 compaction 事件作 snapshot + `MinEventKey` 写序尾部回放，逐字节复原上下文（prefix-cache 复用）；先于 spill 重放接线；
+2. **R2 任务 registry 重建**（`RebuildTaskRegistryFromWAL`）：`task_spawned` − 终态 settle 纯全量回放，running→suspect 交存活探测裁决；
+3. **R3 常驻会话重挂**（`ReattachResidentSessions`）：tmux list 对账 ResidentMeta → 存活会话重挂 → TaskID 桥把 suspect 任务提升回 running；
+4. **spill 重放双写**（mem_spill 兜底路径）：重放成功事件补投影，恢复「存储⇔投影同点」在退化路径的等价语义。
+
+R4 热重建壳（`buildModeExecutorShell`）跳过上述全部状态重建与共享绑定（ownership 谓词见 `build_agent.go`）——壳仅取 runner 原子换入常驻实例，状态原封流过。
+
 ## 二、Runner 内部流转
 
 ```mermaid

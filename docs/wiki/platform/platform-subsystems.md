@@ -17,6 +17,7 @@
 | `tool/memoryx/` | memory_consolidate、memory_health |
 | `event/`（增量） | EventTypeSpec 注册表（类型元数据单点） |
 | `agent/`（增量） | turn root span、trace.go、plugin/attribution.go |
+| 根包（R4 热更） | `org_hotreload.go`（org 白名单子集指纹 + canonical 化）、`tagent.go`（WithConfigPath 懒检查接线 + Reload 编排 + ring 2 代际快照）、`build_agent.go`（buildMode 三谓词：isExecutorShell/ownsPersistentState/bindsProcessShared——build ownership 契约类型化）、`build_agent.go` 内 `buildRunner` 纯函数段（冷启动与热重建共用同一装配路径） |
 
 ## 三、组件关系总览
 
@@ -69,6 +70,17 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 - **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（design-report-closeout 5.4，三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
 - **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
+
+## 六·A、配置热重载（R4，非重启）
+
+与上述 opt-in 子系统不同，R4 是运行机制层：`WithConfigPath` 记录配置来源后，每次 LLM 调用前（BeforeModel 顶部）触发懒检查（单次 stat，未变更零成本）——
+
+1. **memory 先检**（computeMemoryFingerprint，JSON canonical）：`memory.*` 变更**拒绝**并明示须重启（事实链/引擎接线属常驻态，不可热换）；
+2. **org 指纹对比**（computeOrgFingerprint 白名单子集：model/providers/tools/prompt wiring 等结构字段；数值参数 `compress_threshold` 经 `ApplyOrgParams` 原子热切换，不触发重建）；
+3. **结构变更 → build-validate-then-swap**：以 `buildModeExecutorShell` 重建 entry（复用常驻 memStore/SessionSvc，跳过共享绑定与状态重建——三谓词见 `build_agent.go`），构建失败 **fail-closed** 旧 runner 原样服务；成功则 `SwapExecutor` 原子换入（cm 内 executorMu RWMutex：写换/读运行，drain-free turn 级——进行中 turn 用旧 runner 跑完）；
+4. **代际日志 + ring 2 回滚**（`Rollback()` 按上一代配置重建换回）。
+
+两级边界：数值参数热切换（incremental A）⊂ 结构变更重建换执行器（R4）⊂ `memory.*` 明确拒绝（阶段性取舍，非终态）。
 
 ## 七、可观测（默认 noop 零开销）
 

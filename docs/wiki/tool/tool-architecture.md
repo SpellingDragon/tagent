@@ -736,32 +736,24 @@ const (
 )
 ```
 
-### 9.3 detectSessionState — 状态检测逻辑
+### 9.3 detectSessionState — 状态检测逻辑（R3 三态化）
+
+探测单源化：`SessionAlive3(sessionID) (alive, known bool)`（list-sessions 单源）。`has-session` 的 exit code 无法区分 dead/unknown（实测 tmux 3.6a 同为非零），故改用 list-sessions 输出判定；命令不可辨时返回 `known=false`：
 
 ```go
 // action/tmux_monitor.go
-func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
-    processExists := tm.executor.ProcessExists(session.ID)
-    isPaneDead := tm.executor.IsPaneDead(session.ID)
-    currentMD5 := md5.Sum([]byte(currentOutput))
-
-    if processExists && !isPaneDead {
-        if currentMD5 == session.LastOutputMD5 {
-            session.StableCount++
-        } else {
-            session.StableCount = 0
-        }
+alive, known := tm.executor.SessionAlive3(session.ID)
+if !known {
+    session.ProbeUnknownCount++
+    if session.ProbeUnknownCount < tm.probeUnknownLimit() { // 默认 3（fail-dead 加闸）
+        return SessionRunning // 连续 unknown 未达阈：保持现状，不误杀
     }
-
-    if !processExists || isPaneDead {
-        return SessionCompleted
-    }
-    if session.StableCount >= threshold {
-        return SessionStable
-    }
-    return SessionRunning
+    // 达阈才按 dead 处理（tmux 抖动不再屠杀常驻会话）
 }
+session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 ```
+
+R3 前的 `ProcessExists/IsPaneDead(err→assume dead)` 双探针已退役——探测失败即屠杀是独立成立过的真 bug（监控层 fail-dead），三态化 + 加闸是双层防线。
 
 ### 9.4 FakeAlive / FakeDead 处理
 
@@ -790,6 +782,29 @@ func DefaultMonitorConfig() MonitorConfig {
 ```
 
 ---
+
+## 九·A、跨重启连续（R2/R3，resident-continuity）— ActionTool 的声明式投影与重挂
+
+任务与常驻会话的跨重启语义在本模块落地（事实链 fold 的数据源与闭包工厂均在 `tool/action`）：
+
+### 九·A.1 Declarative — TaskSpec 的声明式投影
+
+`TaskSpec` 的三个生命周期钩子（Relaunch/ResumeFn/Alive）是闭包，不可序列化。`declarative.go` 提供 `DeclarativeFromArgs(args, sessionID)`：把 command spawn 的 `ActionArgs` 投影为可序列化的 `task.Declarative`（params 为白名单键全集，严格解码——未知键拒绝，防半重建 spec 静默变行为），随 `task_spawned` 事件入事实链；重启后 `SpecFromDeclarative` / `SubagentSpecFromDeclarative` 按**承诺表**重建闭包：
+
+| Kind | Relaunch | Alive | Resume |
+|------|----------|-------|--------|
+| command | ✅ fresh startSession | ✅ TaskID 会话核查 | ✅ `rebuiltResumeClosure`（镜像 resumeClosure 主体新建 detector；重挂前返回引导） |
+| subagent | ✅ 经 `SubagentRedispatcher`（spawnKey 幂等去重） | ✅ | ❌ rounds 链无事件源，返回引导 |
+| generic | 展示 | — | — |
+
+### 九·A.2 ResidentMeta 与常驻会话事实链
+
+- `ResidentMeta`（command/origin/task_id/…）持久化于 `resident_meta_dir`（可配，离 /tmp 的持久卷）；旧记录零值容错
+- spawn 全参 / 终态结局经 `SetResidentRecordSink` 写 `resident_session` 事件（**记录-only：不发 bus、不进投影**）
+
+### 九·A.3 ReattachResidentSessions — 存活重挂
+
+冷启动/rebuild 壳显式重入（幂等，已跟踪会话跳过）：以 **tmux list 为 liveness 真源**对账 ResidentMeta 目录，逐会话 `reattachOne`（新 detector 入 monitor 回调链）→ 任务板 suspect 任务经 **TaskID 桥**（`IsTrackedSession`）确定性提升回 running。`CleanupOrphanSessions` 的 orphan 语义重定义：**仅无主生成名会话**——`n-` named 会话排除（否则 cleanup 先于 reattach 屠杀常驻）。
 
 ## 十、TmuxExecutor — Tmux Session 管理
 

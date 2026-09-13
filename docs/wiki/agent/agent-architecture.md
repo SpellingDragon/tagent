@@ -243,6 +243,15 @@ buildAgent 对**所有 agent** 的非 wrapper leaf 工具经 GovernanceTool 过�
 
 每 turn 一棵 trace（`tagent.turn` root span，属性含 trigger_source/chat_id/event_sources；退化重试记为属性不另开 span；ctx 早退补 End；task_settled 据 Origin 锚建 span link）——事件 Metadata / RL 轨迹 / OTel span 三投影由 trace_id 互链，noop provider 零开销。详见 [platform 篇](../platform/platform-subsystems.md)。
 
+### 2.13 执行器热换与 build ownership（R4）
+
+ContextManager 的 runner 是**可换缝**：
+
+- **executorMu RWMutex**：`SwapExecutor`（写）与 RunFlow per-turn RLock（读）互斥——换入原子、drain-free turn 级（进行中 turn 用旧 runner 跑完）；
+- **buildRunner 纯函数段**：fwAgent+runner 装配抽取为纯函数（依赖仅 cfg）——冷启动与热重建共用同一装配路径（行为学一致，防双路径漂移）；
+- **buildMode 三谓词**（`build_agent.go`，ownership 契约类型化）：`isExecutorShell`（壳专属：复用常驻 memStore/SessionSvc、tmux 强制重挂）/ `ownsPersistentState`（R1/R2 状态重建属常驻构建）/ `bindsProcessShared`（evoGit/govLedger/BundleID/Approval 等进程级 once 绑定仅常驻 entry 有权）——原先散落在签名注释与布尔判断间的 ownership 规则收敛为类型语义，编译期防误传；
+- **懒检查**：`SetOrgReloader` 闭包在 BeforeModel 顶部触发（单次 stat，未变更零成本）；`compress_threshold` 数值参数经 `ApplyOrgParams` 热切换不重建；结构变更经指纹对比触发 build-validate-then-swap（fail-closed + ring 2 回滚）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
+
 ## 三、包与文件结构（分包后）
 
 ```mermaid

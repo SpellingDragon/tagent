@@ -201,7 +201,7 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 - **严格错误处理**：任何文件加载失败都会中断整个目录加载
 - **整目录回退**：磁盘目录不存在时回退内嵌同名目录（`fallbackDir`，同样排序 + `\n\n` 拼接）；不与磁盘内容做逐文件合并——磁盘目录存在即完全以磁盘为准
 
-### 5.3 LoadFiles — 多文件加载
+### 5.3 LoadFiles — 多文件加载（可选文件 load-if-present）
 
 ```go
 // prompt/loader.go
@@ -216,6 +216,12 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 
         content, err := l.LoadFromFile(path)
         if err != nil {
+            // 可选文件语义：缺失（os.ErrNotExist）跳过 + Infof 留痕（拼错的
+            // 必需文件名仍可见，不静默吞）；权限/IO 等真实错误仍返回错误
+            if errors.Is(err, os.ErrNotExist) {
+                log.Infof("[prompt] optional file %q absent, skipping", path)
+                continue
+            }
             return "", err
         }
 
@@ -228,12 +234,14 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 }
 ```
 
+> **可选文件语义（2026-09 起）**：磁盘上不存在的文件（且内嵌回退 FS 也无）**跳过而非硬失败**——USER.md/HEARTBEAT.md/MEMORY.md 等个人/可选上下文遵循 LoadBootstrap 的 skip-missing 契约；此前缺失即硬失败，致干净检出因配置引用 git-ignored 文件而无法启动。仅容忍 not-exist；真实读错误照常传播。
+
 **与 LoadFromDir 的区别**：
 | 对比 | `LoadFiles` | `LoadFromDir` |
 |------|-----------|---------------|
 | 来源 | 显式指定文件列表 | 目录遍历 |
 | 顺序 | 按 `paths` 参数顺序 | 按文件名排序 |
-| 失败行为 | 遇到错误中断 | 遇到错误中断（同样严格） |
+| 失败行为 | 缺失文件跳过（load-if-present）；真实读错误中断 | 遇到错误中断（同样严格） |
 
 ### 5.4 LoadComposite — 组合加载
 
