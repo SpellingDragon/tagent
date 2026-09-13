@@ -232,8 +232,18 @@ func main() {
 		log.Infof("[HTTPAPI] LLM base URL updated to %s", baseURL)
 	})
 	go func() {
-		fmt.Printf("  HTTPAPI:     http://localhost:%s\n", httpPort)
-		if err := http.ListenAndServe(":"+httpPort, httpAPI); err != nil {
+		// Authentication + loopback fail-closed guard (implementation-hardening 3.3):
+		// the API can inject messages into the agent and redirect the LLM
+		// endpoint — without a token it must not be reachable from off-host.
+		rlToken := rl.AuthTokenFromEnv()
+		httpAPI.SetAuthToken(rlToken)
+		listenAddr := ":" + httpPort
+		if err := rl.ValidateListenAddr(listenAddr, rlToken); err != nil {
+			listenAddr = "127.0.0.1:" + httpPort
+			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
+		}
+		fmt.Printf("  HTTPAPI:     http://%s\n", listenAddr)
+		if err := http.ListenAndServe(listenAddr, httpAPI); err != nil {
 			log.Warnf("HTTPAPI stopped: %v", err)
 		}
 	}()

@@ -93,9 +93,22 @@ func NewMemoryRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	)
 }
 
+// maxRecallItems bounds the items hydration path (implementation-hardening
+// 3.4): a model sending hundreds of tickets must not turn one recall call
+// into an unbounded GetEvent storm. Over-limit tickets are dropped and the
+// truncation is reported in Message — never silent (honesty contract).
+const maxRecallItems = 50
+
 // recallByItems: engineering recall — batch precise readback, original order.
 func recallByItems(accessor tagenttool.MemoryStoreAccessor, items []recallItem) memoryRecallResult {
 	res := memoryRecallResult{Mode: "items"}
+	if len(items) > maxRecallItems {
+		dropped := len(items) - maxRecallItems
+		res.Message = fmt.Sprintf(
+			"items truncated: %d of %d tickets dropped (limit %d) — batch the rest into follow-up calls",
+			dropped, len(items), maxRecallItems)
+		items = items[:maxRecallItems]
+	}
 	for _, it := range items {
 		entry := memoryRecallEntry{Key: it.Key, Hint: it.Hint}
 		key, err := tagentevent.ParseEventKey(it.Key)

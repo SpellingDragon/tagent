@@ -44,11 +44,11 @@
 
 ## 3. WP3 安全收口（按 D2 修正后 API 层方案）
 
-- [ ] 3.1 token 中枢：HTTPAPI 加 `SetAuthToken` + ServeHTTP 顶部【rl/http_api.go:80 起】单一强制点验 Bearer（401，无副作用）；`rl.AuthTokenFromEnv()` 助手；**坑**：诊断/健康类端点若有豁免需求——本变更不豁免任何端点（fail-closed 一致性）
-- [ ] 3.2 监听守卫：`rl.ValidateListenAddr(addr, token) error`（非 loopback 且无 token → 错误列三出路）；测试：0.0.0.0 拒 / 127.0.0.1 过 / 有 token 任意地址过
-- [ ] 3.3 wechat-bot 接线【main.go:208/235】：读 `TAGENT_RL_AUTH_TOKEN` → SetAuthToken；无 token 时监听改 `127.0.0.1:port` 并 WARN 指引（**现状 `:port` 全接口，fail-closed 直接打破——此任务即迁移本体**）；部署 README 同步
-- [ ] 3.4 recall items 上限【memory_recall.go:84→97 recallByItems（N11 已正）】：钳制（对齐 engine 路径量级，如 50）+ 截断说明（丢弃计数+建议）；测试覆盖超量输入
-- [ ] 3.5 回归门：`go test ./rl/ ./tool/recall/ -short -count=1` + wechat-bot 模块 `go build ./...` 全绿
+- [x] 3.1 token 中枢：HTTPAPI 加 `SetAuthToken` + ServeHTTP 顶部【rl/http_api.go:80 起】单一强制点验 Bearer（401，无副作用）；`rl.AuthTokenFromEnv()` 助手；**坑**：诊断/健康类端点若有豁免需求——本变更不豁免任何端点（fail-closed 一致性）
+- [x] 3.2 监听守卫：`rl.ValidateListenAddr(addr, token) error`（非 loopback 且无 token → 错误列三出路）；测试：0.0.0.0 拒 / 127.0.0.1 过 / 有 token 任意地址过
+- [x] 3.3 wechat-bot 接线【main.go:208/235】：读 `TAGENT_RL_AUTH_TOKEN` → SetAuthToken；无 token 时监听改 `127.0.0.1:port` 并 WARN 指引（**现状 `:port` 全接口，fail-closed 直接打破——此任务即迁移本体**）；部署 README 同步
+- [x] 3.4 recall items 上限【memory_recall.go:84→97 recallByItems（N11 已正）】：钳制（对齐 engine 路径量级，如 50）+ 截断说明（丢弃计数+建议）；测试覆盖超量输入
+- [x] 3.5 回归门：`go test ./rl/ ./tool/recall/ -short -count=1` + wechat-bot 模块 `go build ./...` 全绿
 
 ## 4. WP5 死代码二清（先于 WP4——不给死码做回收）
 

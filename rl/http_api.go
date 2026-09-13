@@ -6,11 +6,14 @@
 package rl
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -33,9 +36,11 @@ type ModelUpdateFn func(baseURL string)
 type HTTPAPI struct {
 	agent         AgentLoop
 	modelUpdateFn ModelUpdateFn // optional: set by main.go for AReaL proxy support
-	// feedbackStore (D1 design-report-closeout 2.4): optional MemoryStore for
-	// POST /feedback — binds an external verdict to a produced event via the
-	// feedback causal edge. nil → 503 (endpoint disabled).
+	// authToken (implementation-hardening 3.1): when non-empty, every request
+	// MUST carry `Authorization: Bearer <token>` — enforced at the top of
+	// ServeHTTP, before routing, so no endpoint (including /healthz) executes
+	// any side effect unauthenticated. Set via SetAuthToken / AuthTokenFromEnv.
+	authToken     string
 	feedbackStore memory.MemoryStore
 	diagnosticsFn func() any
 
@@ -74,9 +79,70 @@ func (h *HTTPAPI) SetFeedbackStore(store memory.MemoryStore) {
 	h.feedbackStore = store
 }
 
+// SetAuthToken enables bearer-token authentication for every endpoint
+// (implementation-hardening 3.1). With a token set, requests without a
+// matching `Authorization: Bearer` header get 401 before any routing or side
+// effect. Pair with ValidateListenAddr for the loopback fail-closed guard.
+func (h *HTTPAPI) SetAuthToken(token string) { h.authToken = token }
+
+// AuthTokenFromEnv reads TAGENT_RL_AUTH_TOKEN — the host-side convenience for
+// wiring SetAuthToken (the rl package has no config section of its own; the
+// listen address and token provisioning belong to the host app).
+func AuthTokenFromEnv() string { return os.Getenv("TAGENT_RL_AUTH_TOKEN") }
+
+// ValidateListenAddr is the loopback fail-closed guard (implementation-hardening
+// 3.2): WITHOUT a token, the API must only listen on loopback — any reachable
+// caller could otherwise InjectMessage (steer the agent) or redirect the LLM
+// endpoint via llm_base_url (full prompt exfiltration). Hosts MUST call this
+// before ListenAndServe; a non-loopback address without a token returns an
+// error listing the three ways out. With a token set, any address is allowed.
+func ValidateListenAddr(addr, token string) error {
+	if token != "" {
+		return nil
+	}
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if host == "" {
+		host = "0.0.0.0" // ":8089" binds all interfaces
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("RL HTTP API refuses to listen on %q without authentication: it can inject messages into the agent and redirect the LLM endpoint (prompt exfiltration). Fix one of three ways: (1) set TAGENT_RL_AUTH_TOKEN and call SetAuthToken; (2) listen on loopback (127.0.0.1); (3) if you fully accept the risk, bind via your own http.ListenAndServe bypassing this guard", addr)
+}
+
+// authorized reports whether the request carries the configured bearer token
+// (constant-time compare). Empty configured token → false (fail-closed when
+// the host forgot SetAuthToken but the guard was bypassed).
+func (h *HTTPAPI) authorized(r *http.Request) bool {
+	if h.authToken == "" {
+		return false
+	}
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if len(got) <= len(prefix) || got[:len(prefix)] != prefix {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(h.authToken)) == 1
+}
+
 // ServeHTTP routes requests to the appropriate handler.
 func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	// Single auth enforcement point (implementation-hardening 3.1): before
+	// routing, so no endpoint — /task, /feedback, /diagnostics, /healthz —
+	// executes any side effect unauthenticated (fail-closed consistency; no
+	// exemptions by design).
+	if h.authToken != "" && !h.authorized(r) {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid Authorization: Bearer header")
+		return
+	}
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/task":
