@@ -297,7 +297,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 
 	// Build entry agent (the top-level agent returned by New)
 	entryCfg := cfg.Agents[cfg.Entry]
-	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, false)
+	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, buildModeResident)
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
 	}
@@ -393,7 +393,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			// 副作用），build-validate-then-swap：构建失败 fail-closed（旧 runner
 			// 原样服务），成功 SwapExecutor+代际日志（下一 turn 生效；in-flight
 			// turn 用旧 runner 跑完）。ring 2 上一代配置供 Rollback。
-			newTA, rerr := buildAgent(cfg.Entry, fresh.Agents[cfg.Entry], *fresh, rc, loader, map[string]*agent.TagentAgent{}, true)
+			newTA, rerr := buildAgent(cfg.Entry, fresh.Agents[cfg.Entry], *fresh, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell)
 			if rerr != nil {
 				log.Errorf("[org-hotreload] executor rebuild FAILED — serving previous (fail-closed): %v", rerr)
 				return
@@ -429,7 +429,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					log.Warnf("[org-hotreload] rollback: previous generation equals current (fp %s..)", short(fp))
 					return
 				}
-				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, true); rerr2 != nil {
+				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell); rerr2 != nil {
 					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
 					return
 				} else if r2 := ta2.Runner(); r2 != nil {

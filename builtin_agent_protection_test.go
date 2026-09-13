@@ -56,7 +56,7 @@ func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
 	for name := range builtinAgentNames {
 		factoryRegistered = false
 		acfg := cfg.Agents[name]
-		ta, err := buildAgent(name, acfg, cfg, rc, loader, cache, false)
+		ta, err := buildAgent(name, acfg, cfg, rc, loader, cache, buildModeResident)
 		require.NoError(t, err, "building builtin agent %q should succeed via config-driven path", name)
 		require.NotNil(t, ta)
 		assert.False(t, factoryRegistered, "builtin agent %q should not use ToolAgentFactory", name)
@@ -89,7 +89,7 @@ func TestBuildAgent_AllowsCustomAgentFactory(t *testing.T) {
 	loader := prompt.NewLoader("")
 	cache := make(map[string]*agent.TagentAgent)
 
-	ta, err := buildAgent(customName, cfg.Agents[customName], cfg, rc, loader, cache, false)
+	ta, err := buildAgent(customName, cfg.Agents[customName], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
 	require.NotNil(t, ta)
 	assert.Equal(t, "factory-built", ta.Info().Name, "custom agent should use ToolAgentFactory")

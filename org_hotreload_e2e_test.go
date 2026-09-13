@@ -105,7 +105,7 @@ func TestOrgHotReload_ExecutorSwapEndToEnd(t *testing.T) {
 	cache := make(map[string]*agent.TagentAgent)
 
 	// 1) 常驻 entry（冷启动，非 executorOnly）。
-	resident, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache, false)
+	resident, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, cache, buildModeResident)
 	require.NoError(t, err)
 	// New() 的 🔴1 回填：懒检查 Reload 依赖常驻资源注入（此处镜像）。
 	rc.entryMemStore = resident.MemStore()
@@ -122,7 +122,7 @@ func TestOrgHotReload_ExecutorSwapEndToEnd(t *testing.T) {
 	// 2) 结构变更（prompt 变更 → fingerprint 变化）→ executorOnly 重建壳。
 	gen2 := cfg.Agents["tagent"]
 	gen2.SystemPrompt = PromptConfig{Inline: "gen2 prompt"}
-	rebuilt, err := buildAgent("tagent", gen2, cfg, rc, loader, make(map[string]*agent.TagentAgent), true)
+	rebuilt, err := buildAgent("tagent", gen2, cfg, rc, loader, make(map[string]*agent.TagentAgent), buildModeExecutorShell)
 	require.NoError(t, err)
 	newRunner := rebuilt.Runner()
 	require.NotNil(t, newRunner)

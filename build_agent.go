@@ -25,6 +25,35 @@ import (
 	"github.com/SpellingDragon/tagent/tool/plan"
 )
 
+// buildMode 类型化 R4 的 build ownership 契约（resident-continuity-r2-r4
+// 3.4/3.5），替代散落在签名与注释间的裸 bool：调用点自描述（常驻 vs 壳），
+// ownership 规则集中为谓词（本类型即唯一真源），编译期防误传。
+type buildMode uint8
+
+const (
+	// buildModeResident：常驻构建——冷启动 entry 及其子 agent 树。进程级共享
+	// 物的唯一 bind 点，事实链状态（投影/任务 registry）的属主。
+	buildModeResident buildMode = iota
+	// buildModeExecutorShell：R4 热重建壳——产物 ta 仅用于取 runner（Swap 进
+	// 常驻实例），其自身 cm/bus/projection/registry 全部丢弃。
+	buildModeExecutorShell
+)
+
+// isExecutorShell：壳专属动作——memStore 复用常驻事实链（runner 写入必须落在
+// 真实链上，否则换代后事实链停止增长、R1 投影丢失换代后全部 turn）、tmux 常驻
+// 会话强制重挂（构造期 CAS 已被首实例消耗）、entry 壳复用常驻 SessionSvc。
+func (m buildMode) isExecutorShell() bool { return m == buildModeExecutorShell }
+
+// ownsPersistentState：是否拥有事实链持久状态（R1 投影重建 / R2 任务 registry
+// 重建）。壳的这些产物属常驻实例，重建在壳上空跑，故跳过。
+func (m buildMode) ownsPersistentState() bool { return m == buildModeResident }
+
+// bindsProcessShared：是否执行进程级共享物的 once 绑定（evoGit.BindRuntime、
+// govLedger/Goals BindStore、BundleIDProvider、Approval AddChannel）。仅常驻
+// entry 有权绑定——壳重绑会把共享组件重指到即将丢弃的 store（评估闭环静默
+// 失明），或审批通道累积泄漏+旧 channel 多播（review 🔴1/🟠9）。
+func (m buildMode) bindsProcessShared() bool { return m == buildModeResident }
+
 func buildAgent(
 	name string,
 	acfg AgentConfig,
@@ -32,12 +61,9 @@ func buildAgent(
 	rc *runtimeConfig,
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
-	// executorOnly（R4，resident-continuity-r2-r4 3.4/3.5）：热重建专用——产物
-	// ta 仅用于取 runner（Swap 进常驻实例），其自身 cm/bus/projection/registry
-	// 全部丢弃。按 ownership 表跳过对进程级共享物的副作用：memory store 换
-	// 内存实例（不双开文件句柄）、govLedger/Goals 不重绑、Approval 不 AddChannel
-	//（累积泄漏+旧 channel 多播）、R1/R2 冷启动重建不重跑。
-	executorOnly bool,
+	// mode（R4，resident-continuity-r2-r4 3.4/3.5）：build ownership 契约，
+	// 语义与谓词见 buildMode——壳仅取 runner，共享绑定与状态重建按谓词跳过。
+	mode buildMode,
 	// subagentCollectors（R2）：递归进来的 wrapper 收集器（外层组装跨重启
 	// redispatch 表；变参以最小化签名波及，递归调用透传）。
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
@@ -51,7 +77,7 @@ func buildAgent(
 	var memStore memory.MemoryStore
 	var hintTracker *ConsolidationHintTracker
 	var err error
-	if executorOnly {
+	if mode.isExecutorShell() {
 		// R4 ownership 表（review 🔴1 修正）：热重建壳**复用常驻 entry 的 memStore**
 		//（而非内存实例）——runner 内的 MemoryPlugin 写入路径必须落在真实事实链上，
 		// 否则换代后事实链停止增长、R1 投影丢失换代后全部 turn、recall/巩固读空壳。
@@ -154,7 +180,7 @@ func buildAgent(
 	// R4（review 🟠9）：evoGit.BindRuntime 是**进程级共享重绑**（把共享 evolution
 	// 的证据源/judge/guardrail 重指到本构建的 store）——热重建丢弃壳必须跳过，
 	// 否则换代后 evolution 评估从空壳 store 取证据，评估闭环静默失明。
-	if rc.evoGit != nil && name == cfg.Entry && !executorOnly {
+	if rc.evoGit != nil && name == cfg.Entry && mode.bindsProcessShared() {
 		evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
 		evSrc.SetActivationLog(rc.evoGit.Log())
 		rc.evoGit.BindRuntime(
@@ -238,7 +264,7 @@ func buildAgent(
 	localSubagentWrappers := map[string]*agent.AgentToolWrapper{}
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), executorOnly, subagentCollectors...)
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), mode, subagentCollectors...)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -259,7 +285,7 @@ func buildAgent(
 			// R4（review 🟠4）：热重建壳强制重挂——构造期 CAS 已被首个实例消耗，
 			// 此处显式重入（幂等：已跟踪会话跳过），否则换代后新 monitor 空、
 			// IsTrackedSession/TUI 保护/稳定时长附加注全部失效。
-			if executorOnly {
+			if mode.isExecutorShell() {
 				actionTool.ReattachResidentSessions()
 			}
 		}
@@ -314,7 +340,7 @@ func buildAgent(
 			Config:    rc.govGate.Config(),
 			AgentName: name, // §8.1：治理记录标注来源 agent（共享 Ledger 下多 agent 事件可区分）
 		})
-		if name == cfg.Entry && !executorOnly {
+		if name == cfg.Entry && mode.bindsProcessShared() {
 			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的
 			// 治理记录写 entry governance 分区，重启可 recall）。替代原 agentGate.BindLedger。
 			rc.govLedger.BindStore(memStore, memory.PartitionIDFromName(name))
@@ -333,7 +359,7 @@ func buildAgent(
 	// 5. Create TagentAgent
 	// R4（终审🟠）：executorOnly 壳的 SessionSvc——仅 entry 复用常驻实例。
 	var sessionSvcForShell session.Service
-	if executorOnly && name == cfg.Entry {
+	if mode.isExecutorShell() && name == cfg.Entry {
 		sessionSvcForShell = rc.entrySessionSvc
 	}
 	agentCfg := &agent.TagentConfig{
@@ -457,7 +483,7 @@ func buildAgent(
 	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
 	// 事件归属精确到**最新 improvement 的 commit sha**（guardrail/feedback join 键；键名
 	// MetaKeyBundleID 保留，8.4 继承机制不变）。无改进事件时返回空串不盖章（退化时间窗 join）。
-	if rc.evoGit != nil && name == cfg.Entry && !executorOnly {
+	if rc.evoGit != nil && name == cfg.Entry && mode.bindsProcessShared() {
 		evoGit := rc.evoGit
 		ta.SetBundleIDProvider(evoGit.LatestSha)
 		// K4：评估 goroutine 生命周期挂 entry agent shutdown（Stop 收敛+waitgroup）。
@@ -466,7 +492,7 @@ func buildAgent(
 
 	// 3.3（design-report-closeout）：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
 	// 送达用户）。Deliver 失败不阻塞门——pending 文件已落盘，CLI/文件批准始终可用。
-	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil && !executorOnly {
+	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil && mode.bindsProcessShared() {
 		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
 		// R5：外部审批直投通道（example/宿主经 WithApprovalChannel 注入）。
 		for _, ch := range rc.approvalChannels {
@@ -492,7 +518,7 @@ func buildAgent(
 	// 启动期一次、进空投影，且先于 spill 重放接线（spec 顺序）；事实链无
 	// 代际标记的 compaction 事件时 no-op（首启/未折叠，维持现状行为）。
 	// R4 ownership 表：executorOnly 热重建跳过（投影属常驻实例，丢弃壳空跑）。
-	if !executorOnly {
+	if mode.ownsPersistentState() {
 		ta.RebuildProjectionFromWAL()
 	}
 
@@ -502,7 +528,7 @@ func buildAgent(
 	// 单例，换执行器代不丢任务板）。无任务事件时 no-op。闭包工厂按承诺表：
 	// command 全套（Resume 真正供能待 R3 重挂）/subagent 仅 Relaunch（Redispatch
 	// 经 wrapper 表；Resume 引导文案）/generic 展示。
-	if tm := ta.TaskManager(); tm != nil && !executorOnly {
+	if tm := ta.TaskManager(); tm != nil && mode.ownsPersistentState() {
 		redispatch := agent.SubagentRedispatcher(localSubagentWrappers, tm)
 		rebuildClosures := func(decl task.Declarative) task.TaskSpec {
 			switch decl.Kind {
@@ -572,7 +598,7 @@ func buildToolFromRef(
 	readPartitionIDs []int,
 	degradationMgr *reliability.DegradationManager,
 	consolidationMin int,
-	executorOnly bool,
+	mode buildMode,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
@@ -582,7 +608,7 @@ func buildToolFromRef(
 
 	switch tr.Kind {
 	case ToolKindAgent:
-		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, executorOnly, subagentCollectors...)
+		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, mode, subagentCollectors...)
 	case ToolKindTool:
 		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin)
 	default:
@@ -601,7 +627,7 @@ func buildAgentToolRef(
 	cache map[string]*agent.TagentAgent,
 	parentMemStore memory.MemoryStore,
 	desc string,
-	executorOnly bool,
+	mode buildMode,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	// Remote path: create A2AAgent that communicates via trpc-a2a-go
@@ -641,7 +667,7 @@ func buildAgentToolRef(
 		return nil, false, fmt.Errorf("referenced agent %q not found in config", tr.AgentID)
 	}
 
-	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache, executorOnly, subagentCollectors...)
+	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache, mode, subagentCollectors...)
 	if err != nil {
 		return nil, false, err
 	}
