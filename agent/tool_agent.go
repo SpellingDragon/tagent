@@ -652,8 +652,8 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 // stays a single-turn primitive; restoration is the framework's engineering
 // feed, not sub-agent statefulness.
 //
-// NOTE(curation): once settle results carry their archived event key
-// (task.resultRef bridge), the restorer can additionally walk RelationStore
+// NOTE(curation): once settle results carry their archived event key (a
+// resultRef bridge), the restorer can additionally walk RelationStore
 // for curated artifacts on this task's causal chain; the injection slot is
 // already here.
 func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRounds) func(string) (task.SettleDetector, error) {

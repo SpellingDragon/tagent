@@ -53,10 +53,9 @@ type Option func(*runtimeConfig)
 
 // runtimeConfig holds runtime-only dependencies.
 type runtimeConfig struct {
-	model        model.Model // Default model (can be overridden per-agent)
-	summaryModel model.Model // Optional: for Stage 2 LLM summary
-	skillRepo    tool.SkillRepository
-	mcpToolSets  []trpctool.ToolSet
+	model       model.Model // Default model (can be overridden per-agent)
+	skillRepo   tool.SkillRepository
+	mcpToolSets []trpctool.ToolSet
 
 	// mcpRegistry is the process-level MCP server registry (config-declared
 	// servers + WithMCPToolSets merged). Consumed by mcp_discover/mcp_call;
@@ -162,11 +161,6 @@ func WithMCPToolSets(ts []trpctool.ToolSet) Option {
 	return func(rc *runtimeConfig) { rc.mcpToolSets = ts }
 }
 
-// WithSummaryModel sets the model for Stage 2 LLM summary compression.
-func WithSummaryModel(m model.Model) Option {
-	return func(rc *runtimeConfig) { rc.summaryModel = m }
-}
-
 // WithConfigPath records the on-disk path the Config was loaded from
 // (agent-config-hot-reload, incremental A). When set, the entry agent arms
 // a lazy org-config watcher: before each LLM call it stats the file and on
@@ -244,11 +238,6 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		rc.trajectoryRecorder = tr
 		rc.model = tr
 		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s", cfg.TrajectoryDir)
-		// Also wrap summary model if present
-		if rc.summaryModel != nil {
-			// Summary model shares the same recorder (same JSONL files)
-			rc.summaryModel = tr
-		}
 	}
 
 	// evolution (self-evolution-git-native)：git 原生自进化（配置门控，默认关 → 零行为变化）。

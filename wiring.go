@@ -83,12 +83,6 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 	return m
 }
 
-// resolveSummaryModel resolves the summary model for a specific agent.
-// Resolution order:
-//  1. If agent has SummaryModel field in YAML → resolve via provider (SummaryProvider or agent's Provider)
-//  2. If rc.summaryModel is set via Go option → use that
-//  3. Otherwise → nil (no summary model)
-//
 // resolvedModelRef is the outcome of resolving a direct call site's ModelRef:
 // the resolved model plus the generation knobs that ride on the request.
 type resolvedModelRef struct {
@@ -170,70 +164,6 @@ func (rc *runtimeConfig) judgeModel(name string, cfg Config) model.Model {
 		return ref.model
 	}
 	return rc.model
-}
-
-func (rc *runtimeConfig) resolveSummaryModel(name string, acfg AgentConfig, cfg Config) model.Model {
-	// Resolve model and provider from compress config.
-	// Falls back to agent's main model/provider if compress.summary_model is empty.
-	// Folded ModelRef wins; legacy flat fields are already folded into it at
-	// load time (FoldModelRefAliases), so reading Summary alone is complete.
-	summaryModel := acfg.Compress.Summary.Model
-	summaryProvider := acfg.Compress.Summary.Provider
-
-	// 1. If resolved summary_model, resolve it
-	if summaryModel != "" {
-		// Use summaryProvider if specified, otherwise fall back to agent's Provider or global Provider
-		providerName := summaryProvider
-		if providerName == "" {
-			providerName = acfg.Provider
-		}
-		if providerName == "" {
-			providerName = cfg.Provider
-		}
-		cacheKey := "summary:" + providerName + ":" + summaryModel
-		if m, ok := rc.resolvedModels[cacheKey]; ok {
-			return m
-		}
-
-		var opts []provider.Option
-		protocolName := providerName // default to registry key name
-		if pcfg, ok := cfg.Providers[providerName]; ok {
-			// If ProviderConfig specifies a protocol, use it (e.g., "zhipu" -> "openai")
-			if pcfg.Provider != "" {
-				protocolName = pcfg.Provider
-			}
-			if pcfg.APIEndpoint != "" {
-				opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
-			}
-			if pcfg.APIKeyEnv != "" {
-				if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
-					opts = append(opts, provider.WithAPIKey(key))
-				}
-			}
-		}
-
-		m, err := provider.Model(protocolName, summaryModel, opts...)
-		if err != nil {
-			log.Warnf("agent %q: resolve summary model %q via provider %q (protocol %q) failed: %v, falling back to rc.summaryModel",
-				name, summaryModel, providerName, protocolName, err)
-			return rc.summaryModel
-		}
-
-		if rc.trajectoryRecorder != nil {
-			m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
-			log.Debugf("[tagent] agent %q: wrapped summary model %q with TrajectoryRecorder", name, summaryModel)
-		}
-
-		if rc.resolvedModels == nil {
-			rc.resolvedModels = make(map[string]model.Model)
-		}
-		rc.resolvedModels[cacheKey] = m
-		log.Infof("[tagent] agent %q: resolved summary model %q via provider %q", name, summaryModel, providerName)
-		return m
-	}
-
-	// 2. Fall back to Go option
-	return rc.summaryModel
 }
 
 // resolveLifecycleConfig merges the optional YAML lifecycle declaration over

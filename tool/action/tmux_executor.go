@@ -600,7 +600,7 @@ func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions)
 	}
 
 	// Set environment variables on the restarted session
-	te.setSessionEnv(nil, sessionID, opts.Env)
+	te.setSessionEnv(context.TODO(), sessionID, opts.Env)
 
 	return nil
 }

@@ -785,7 +785,7 @@ func cleanTmuxOutput(output string) string {
 // ---- Session operations (2026-09-11 B3): peek / send / stop ----
 
 // ansiEscape matches ANSI/VT escape sequences (CSI, OSC, simple two-byte).
-var ansiEscape = regexp.MustCompile("\\x1b(?:\\[[0-9;?]*[a-zA-Z]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|[@-Z\\\\-_])")
+var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
 
 // stripANSI removes ANSI escape sequences for LLM-friendly output.
 func stripANSI(s string) string {

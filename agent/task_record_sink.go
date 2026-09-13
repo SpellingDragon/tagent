@@ -112,11 +112,8 @@ func (ta *TagentAgent) SwapExecutor(r runner.Runner) {
 	ta.contextManager.SwapExecutor(r)
 }
 
-// orgRollbackFn（R4 3.8）：回滚钩子（tagent 包懒检查闭包注入——按 ring 2
-// 上一代配置重建并 Swap 回）。
-type orgRollbackFn func()
-
-// SetRollbackFn wires the rollback hook (R4 3.8；宿主/运维可调 Rollback())。
+// SetRollbackFn wires the rollback hook (R4 3.8；tagent 包懒检查闭包注入——按
+// ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。
 func (ta *TagentAgent) SetRollbackFn(fn func()) {
 	if ta == nil {
 		return
