@@ -58,7 +58,8 @@
       - `reincarnation-expectations.md` 已在 canonical change 目录（此前核查已达成）→ 本任务降级为：随 §3 设计产出更新后，确认文档内容与 §6/§7 实现对齐（设计→实现同步核查）
       - 无需移动文件动作
 
-- [ ] 5.7 热更换在途回合安全（2026-09-13 21:5x 事故修复，阻塞 5.6 重落）：org-hotreload 指纹变更触发的 executor 换装在回合中途执行，在途回合消息序列丢失（system-only 请求 → zhipu 400/1214 ×3 @21:51:21/21:51:37/21:55:57）。要求：换装前 quiesce 检查（无在途 LLM 调用才 swap）或换装时在途状态迁移；证据口径：yaml 变更期间在途回合 LLM 调用不受影响（trajectory 无 system-only 请求、无 400）
+- [x] 5.7 热更换在途回合安全（2026-09-13 21:5x 事故修复，阻塞 5.6 重落）：org-hotreload 指纹变更触发的 executor 换装在回合中途执行，在途回合消息序列丢失（system-only 请求 → zhipu 400/1214 ×3 @21:51:21/21:51:37/21:55:57）。要求：换装前 quiesce 检查（无在途 LLM 调用才 swap）或换装时在途状态迁移；证据口径：yaml 变更期间在途回合 LLM 调用不受影响（trajectory 无 system-only 请求、无 400）
+      - ✅ 2026-09-14 03:44 生产实证：根因钉死（换装入的 runner 闭包捕获新壳空投影 cm，装配 n=1 system-only → 400×3）；修复 commit 9ecd941（RebuildExecutorOn 常驻 cm + 装配健康守卫 + 插桩，+178/-20）；换装 s58 SUCCESS（1810602→2122606，healthz ok），二进制 vcs.revision=9ecd941；换装后首个真实请求 n_msgs=418（trajectory 实证），无 system-only、无 400
       - 注：5.6（knowledge→deepseek-flash+max）已于 21:50 首次上线即触发本事故，用户回滚（worktree=0c136b5，main 已复位）；重落前置 = 5.7 完成 + 改走重启部署 + 预检 deepseek 端点对 effort=max 的接受度
 ## 6. WAL fallback 重建实现（depends_on: §3.2 设计成文）
 - [x] 6.1 测试先行：为 `projection_rebuild.go` 补 `latestCompactionKey()==0` 场景单测（新世空投影=失忆），先红后绿
