@@ -156,6 +156,9 @@ agents:
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
+    provider: deepseek
+    model: deepseek-flash
+    reasoning_effort: max
     system_prompt:
       files: [knowledge_agent.md]
     memory:
