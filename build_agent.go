@@ -9,6 +9,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent/a2aagent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -330,13 +331,21 @@ func buildAgent(
 	}
 
 	// 5. Create TagentAgent
+	// R4（终审🟠）：executorOnly 壳的 SessionSvc——仅 entry 复用常驻实例。
+	var sessionSvcForShell session.Service
+	if executorOnly && name == cfg.Entry {
+		sessionSvcForShell = rc.entrySessionSvc
+	}
 	agentCfg := &agent.TagentConfig{
 		Name:        name,
 		Model:       agentModel,
 		MemoryStore: memStore,
-		// R4（review 🔴1）：executorOnly 壳复用常驻 sessionSvc（AppendEventHook→
-		// 常驻 outputCh 接线不断、session 记录续写同一 session）。
-		SessionSvc:           rc.entrySessionSvc,
+		// R4（review 🔴1 + 终审🟠）：executorOnly 壳的 SessionSvc 策略——
+		// **仅 entry 壳**复用常驻 sessionSvc（AppendEventHook→常驻 outputCh 接线
+		// 不断、session 记录续写同一 session）；子代理壳保持 nil 自建——若也复用，
+		// 其 runner 的 user-message append 会经 entry hook 泄漏进宿主 outputCh
+		// 并污染 entry session（与冷启动行为不一致）。
+		SessionSvc:           sessionSvcForShell,
 		SystemPrompt:         systemPrompt,
 		SystemPromptSource:   systemPromptSource,
 		Tools:                tools,

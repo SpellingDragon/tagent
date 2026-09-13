@@ -154,6 +154,13 @@ func (s *taskRecordSink) onInlineSettle(tk *task.Task, sig task.SettleSignal) {
 	s.cm.EmitTaskInlineSettleRecord(tk, sig)
 }
 
+func (s *taskRecordSink) onCancel(tk *task.Task) {
+	if s == nil || s.cm == nil {
+		return
+	}
+	s.cm.EmitTaskCancelledRecord(tk)
+}
+
 // RebuildTaskRegistry（R2 1.9，resident-continuity-r2-r4 D1.3）：冷启动从事实链
 // 纯全量回放重建 active 任务集（registry=fold：task_spawned 记录 − 终态 settle）。
 // 无 compaction snapshot（任务无折叠语义）。状态映射：running→suspect（进程内

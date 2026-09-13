@@ -645,6 +645,31 @@ func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
 	})
 }
 
+// EmitTaskCancelledRecord（R2，review 终审🔴）：Cancel 终态的事实链记录
+// （registry-only；形态与 inline settle 同款）。不写则重启回放以 suspect 复活
+// （看板幽灵 + subagent 同 Key dedup 永久锁死）。
+func (cm *ContextManager) EmitTaskCancelledRecord(tk *task.Task) {
+	if cm == nil || tk == nil {
+		return
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"task_id":                    tk.ID,
+		"settle_status":              "cancelled",
+		"task_inline_record":         "true",
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: fmt.Sprintf("[task cancelled] %s (id=%s)", truncateForLog(tk.Spec.Desc, 60), task.ShortID(tk.ID)),
+		Content:      fmt.Sprintf("[task cancelled] %s (id=%s) cancelled", tk.Spec.Desc, tk.ID),
+		Timestamp:    time.Now().UnixMilli(),
+		Metadata:     md,
+	})
+}
+
 // EmitTaskInlineSettleRecord builds and persists the registry-only settle
 // record for an INLINE settle (OnInlineSettle hook): minimal terminal note
 // (status+task_id; the result itself already returned in-turn as the tool

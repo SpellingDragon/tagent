@@ -310,6 +310,11 @@ type TaskManagerConfig struct {
 	// (registry-only, never published to the bus — the LLM already saw the
 	// result inline). May be nil.
 	OnInlineSettle func(task *Task, sig SettleSignal)
+	// OnCancel (R2, review 终审🔴)：任务被 Cancel 置为 cancelled 终态后调用——
+	// 写事实链 cancelled 终态记录。终审发现：Cancel 仅改内存态，回放折叠
+	// （spawned − 终态）下被取消的任务重启后以 suspect 复活（看板幽灵 +
+	// subagent 同 Key dedup 永久锁死）。May be nil。
+	OnCancel func(task *Task)
 	// TerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained after settling before being pruned and its
 	// resources reclaimed. It bounds the resume_task re-entry window for
@@ -340,6 +345,7 @@ type TaskManager struct {
 	onSettle       func(task *Task, sig SettleSignal)
 	onSpawn        func(task *Task)
 	onInlineSettle func(task *Task, sig SettleSignal)
+	onCancel       func(task *Task)
 	spawnGate      func() string
 	terminalTTL    time.Duration
 	now            func() time.Time // injectable clock (tests); defaults to time.Now
@@ -362,6 +368,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		onSettle:       cfg.OnSettle,
 		onSpawn:        cfg.OnSpawn,
 		onInlineSettle: cfg.OnInlineSettle,
+		onCancel:       cfg.OnCancel,
 		spawnGate:      cfg.SpawnGate,
 		terminalTTL:    ttl,
 		zombieGrace:    zg,
@@ -796,6 +803,11 @@ func (tm *TaskManager) Cancel(id string) bool {
 		t.settledAt = tm.now()
 	}
 	t.mu.Unlock()
+	// R2（review 终审🔴）：cancelled 终态入事实链（回放折叠的终态集合成员——
+	// 不写则重启后以 suspect 复活）。
+	if tm.onCancel != nil {
+		tm.onCancel(t)
+	}
 	return true
 }
 

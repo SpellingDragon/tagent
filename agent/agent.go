@@ -360,6 +360,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		},
 		OnSpawn:        taskRecords.onSpawn,
 		OnInlineSettle: taskRecords.onInlineSettle,
+		OnCancel:       taskRecords.onCancel,
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,

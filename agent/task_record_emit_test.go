@@ -101,3 +101,33 @@ func TestPersistBusEvent_TaskMetadataCopied(t *testing.T) {
 	require.Equal(t, "t-uuid-3", ev.Metadata["task_id"], "full task_id must be copied into FullEvent.Metadata")
 	require.Equal(t, "completed", ev.Metadata["settle_status"])
 }
+
+// R2（review 终审🔴）fail-before：Cancel 此前仅改内存态，事实链无 cancelled
+// 终态记录 → 回放折叠以 suspect 复活（看板幽灵 + subagent 同 Key dedup 锁死）。
+func TestCancel_EmitsCancelledRecord_FailBefore(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	storeSpawned(t, store, "t-cancel", task.Declarative{
+		Kind: "command", Desc: "svc", TaskID: "n-x",
+	}, time.Now().UnixMilli()-60_000)
+	tm.RestoreTask("t-cancel", task.TaskSpec{
+		Kind: "command", Desc: "svc",
+		Declarative: &task.Declarative{Kind: "command", Desc: "svc", TaskID: "n-x"},
+	}, time.Now(), task.TaskSuspect)
+
+	// fail-before：无 cancelled 记录时重建为幽灵 suspect。
+	if n := RebuildTaskRegistry(store, rb2Partition, tm, nil); n != 1 {
+		t.Fatalf("pre-record: restored = %d, want 1 (ghost suspect)", n)
+	}
+	// 写 cancelled 终态记录（OnCancel 接线产物）→ 回放不再重建。
+	cm := &ContextManager{partitionID: rb2Partition, memStore: store, name: "t-agent"}
+	tk, _ := tm.Get("t-cancel")
+	cm.EmitTaskCancelledRecord(tk)
+	tm2 := task.NewTaskManager(task.TaskManagerConfig{})
+	if n := RebuildTaskRegistry(store, rb2Partition, tm2, nil); n != 0 {
+		t.Fatalf("post-record: restored = %d, want 0 (cancelled is terminal — ghost eliminated)", n)
+	}
+	if _, ok := tm2.Get("t-cancel"); ok {
+		t.Fatal("cancelled task must NOT be rebuilt after the fact-chain record")
+	}
+}
