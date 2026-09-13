@@ -22,8 +22,9 @@ const tailPageSize = 500
 // RebuildProjectionFromWAL rebuilds the projection from the fact chain at
 // cold start (build_agent wiring; runs BEFORE spill replay is armed).
 // Startup-only, once, into an EMPTY projection. No marker-tagged compaction
-// event in the chain → no-op (first boot / never folded; maintains the
-// pre-existing behavior — spec: 无 compaction 事件时 no-op).
+// event in the chain → D1 fallback full replay (rebuildProjectionFallback;
+// 2026-09-13 spec change: WAL is the durable record — context must be
+// recoverable even without compaction; supersedes the old no-op).
 func (ta *TagentAgent) RebuildProjectionFromWAL() {
 	if ta == nil || ta.contextManager == nil {
 		return
@@ -45,7 +46,9 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 
 	snapKey := cm.latestCompactionKey()
 	if snapKey == 0 {
-		log.Infof("[rebuild-projection] no compaction event in fact chain, rebuild no-op")
+		// D1 fallback (2026-09-13 spec change): WAL is the durable record —
+		// recover context even without any compaction anchor; supersedes no-op.
+		cm.rebuildProjectionFallback()
 		return
 	}
 	snapEv, err := cm.memStore.GetEvent(snapKey)
@@ -107,26 +110,79 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 		// handler). R2 task records likewise: task_spawned is registry data
 		// (board renders live from the registry); task_inline_record settles
 		// returned in-turn as tool results (appending would double-render).
-		if ev.EventType == tagentevent.TypeContextCompressSummary ||
-			ev.EventType == tagentevent.TypeTaskSpawned ||
-			ev.EventType == tagentevent.TypeResidentSession ||
-			ev.Metadata[legacySnapshotMetaKey] != "" ||
-			ev.Metadata["task_inline_record"] != "" {
+		if skipProjectionEvent(ev) {
 			continue
 		}
-		if ev.EventType == tagentevent.TypeAgentOutput &&
-			ev.Metadata[tagentevent.MetaKeyTriggerSource] == "meditation" {
-			cm.contextCompressor.MarkMeditationKey(ev.EventKey)
-		}
-		cm.projection.Append(memory.EventReference{
-			EventKey: ev.EventKey, PartitionID: ev.PartitionID,
-			EventType: ev.EventType, EventSummary: ev.EventSummary,
-			Timestamp: ev.Timestamp, Role: string(tagentevent.EventTypeRole(ev.EventType)),
-		})
+		cm.appendProjectionRef(ev)
 	}
 
 	log.Infof("[rebuild-projection] rebuilt from compaction key=%d: snapshot refs=%d tail=%d boundary=%d",
 		snapKey, len(final), len(tail), payload.FullBoundary)
+}
+
+// fallbackCap bounds the D1 fallback full replay: a chain without any
+// compaction anchor may be arbitrarily long, so keep the NEWEST fallbackCap
+// events and seed the truncation point as the full boundary (2026-09-13
+// user expectation: WAL is the durable record — recover even without
+// compaction).
+const fallbackCap = 500
+
+// skipProjectionEvent reports whether ev is a fact-chain record that must
+// never become a projection ref (compaction/legacy snapshots, registry
+// data, inline tool records) — the double-representation guard shared by
+// the tail replay and the fallback full replay.
+func skipProjectionEvent(ev memory.FullEvent) bool {
+	return ev.EventType == tagentevent.TypeContextCompressSummary ||
+		ev.EventType == tagentevent.TypeTaskSpawned ||
+		ev.EventType == tagentevent.TypeResidentSession ||
+		ev.Metadata[legacySnapshotMetaKey] != "" ||
+		ev.Metadata["task_inline_record"] != ""
+}
+
+// appendProjectionRef appends ev to the projection as an EventReference,
+// stamping meditation outputs first (same treatment as the runtime path).
+func (cm *ContextManager) appendProjectionRef(ev memory.FullEvent) {
+	if ev.EventType == tagentevent.TypeAgentOutput &&
+		ev.Metadata[tagentevent.MetaKeyTriggerSource] == "meditation" {
+		cm.contextCompressor.MarkMeditationKey(ev.EventKey)
+	}
+	cm.projection.Append(memory.EventReference{
+		EventKey: ev.EventKey, PartitionID: ev.PartitionID,
+		EventType: ev.EventType, EventSummary: ev.EventSummary,
+		Timestamp: ev.Timestamp, Role: string(tagentevent.EventTypeRole(ev.EventType)),
+	})
+}
+
+// rebuildProjectionFallback is the D1 fallback for chains WITHOUT any
+// compaction anchor (snapKey==0): full replay from key 0 using the same
+// skip-set as the tail replay, newest-wins cap at fallbackCap. The oldest
+// kept key is seeded as fullBoundary so recent-window logic sees a
+// consistent "everything older is history" truncation marker. The mode is
+// logged distinctly (fallback vs snapshot) for observability.
+func (cm *ContextManager) rebuildProjectionFallback() {
+	all := cm.fetchTailEvents(0)
+	if len(all) == 0 {
+		log.Infof("[rebuild-projection] fallback: fact chain empty, projection stays empty (mode=fallback)")
+		return
+	}
+	total := len(all)
+	truncated := false
+	if total > fallbackCap {
+		truncated = true
+		all = all[total-fallbackCap:]
+		log.Warnf("[rebuild-projection] fallback: chain=%d exceeds cap=%d, keeping newest %d",
+			total, fallbackCap, fallbackCap)
+	}
+	for i := range all {
+		if skipProjectionEvent(all[i]) {
+			continue
+		}
+		cm.appendProjectionRef(all[i])
+	}
+	boundary := all[0].EventKey // oldest kept event = truncation marker
+	cm.contextCompressor.SetFullBoundary(boundary)
+	log.Infof("[rebuild-projection] fallback rebuild: scanned=%d oldest_kept=%d boundary=%d truncated=%v (mode=fallback, no compaction anchor)",
+		total, all[0].EventKey, boundary, truncated)
 }
 
 // fetchTailEvents returns the events with EventKey strictly greater than
