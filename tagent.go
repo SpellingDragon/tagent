@@ -398,13 +398,18 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				log.Errorf("[org-hotreload] executor rebuild FAILED — serving previous (fail-closed): %v", rerr)
 				return
 			}
-			newRunner := newTA.Runner()
+			// hotswap-fix 5.7：不再把新壳的 runner 整壳换入（新壳 fwAgent 的
+			// BeforeModel 闭包捕获新壳自己的空 cm → 换装后请求装配接到空投影，
+			// n=1 system-only → provider 400/1214，2026-09-13 21:5x 事故根因）。
+			// 改为在常驻 cm 上只重建执行面（模型/工具/提示词），projection/bus/
+			// sessionSvc/回调闭包全部同源保留。newTA 仅作构建验证（fail-closed 语义：构建不过不换）。
+			newRunner := newTA.RebuildExecutorOn(entryAgent.ContextManager())
 			if newRunner == nil {
 				log.Errorf("[org-hotreload] executor rebuild produced no runner — serving previous (fail-closed)")
 				return
 			}
 			oldFP := lastFP
-			entryAgent.SwapExecutor(newRunner)
+			_ = newTA
 			lastFP = fp
 			execGen++
 			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
@@ -432,7 +437,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell); rerr2 != nil {
 					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
 					return
-				} else if r2 := ta2.Runner(); r2 != nil {
+				} else if r2 := ta2.RebuildExecutorOn(entryAgent.ContextManager()); r2 != nil {
 					entryAgent.SwapExecutor(r2)
 					execGen++
 					lastFP = rbp

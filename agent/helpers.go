@@ -6,6 +6,13 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
+// ContextManager exposes the resident context manager (hotswap-fix 5.7):
+// org hot-reload passes it to RebuildExecutorOn so the fresh executor face
+// is rebuilt on the resident cm (state face preserved).
+func (ta *TagentAgent) ContextManager() *ContextManager {
+	return ta.contextManager
+}
+
 // MemStore returns the MemoryStore for direct access (e.g., by RecallTool).
 func (ta *TagentAgent) MemStore() memory.MemoryStore {
 	return ta.memStore

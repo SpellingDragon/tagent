@@ -105,6 +105,19 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 // SwapExecutor atomically swaps the executor runner (R4 3.3/3.5；drain-free
 // turn 级——进行中 turn 用旧 runner 跑完)。cm/bus/loop/projection/TaskManager
 // 等常驻不换（宿主入口零变化）。Runner() 取当前代已在 helpers.go。
+// RebuildExecutorOn（hotswap-fix 5.7）：把**本 TA 冷启动时的执行面配置**
+// （model/tools/prompt/genConfig——构建验证已通过的产物）应用到**目标 cm**
+// 上重建 executor。org 热更换装专用：target=常驻 entry cm，其 projection/
+// bus/sessionSvc/回调闭包全部保留——修复旧路径整壳换入导致请求装配被接到
+// 新壳空投影的事故（n=1 system-only → provider 400/1214）。newTA 在此仅作
+// 执行面配置载体；其自身的 cm/runner 构建产物即弃。
+func (ta *TagentAgent) RebuildExecutorOn(target *ContextManager) runner.Runner {
+	if ta == nil || target == nil || ta.contextManager == nil {
+		return nil
+	}
+	return target.RebuildExecutor(ta.contextManager.execCfg)
+}
+
 func (ta *TagentAgent) SwapExecutor(r runner.Runner) {
 	if ta == nil || ta.contextManager == nil {
 		return

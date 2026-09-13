@@ -39,10 +39,17 @@ import (
 //   - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
 type ContextManager struct {
 	contextCompressor *compress.ContextCompressor
-	tokenCounter      compress.TokenCounter
-	memStore          memory.MemoryStore
-	maxTokens         int
-	thresholdPct      float64
+
+	// hotswap-fix 5.7：executor 重建所需的状态面引用与执行面快照。
+	// NewContextManager 时从 cfg 快照；RebuildExecutor 重建时执行面取调用方
+	// 覆盖值、状态面复用快照实例（cfg 零值不可信）。
+	memPlugin    *plugin.MemoryPlugin
+	sessionSvc   session.Service
+	execCfg      ContextManagerConfig // 冷启动 cfg 快照（含全部字段）
+	tokenCounter compress.TokenCounter
+	memStore     memory.MemoryStore
+	maxTokens    int
+	thresholdPct float64
 
 	// Framework integration
 	runner     runner.Runner
@@ -259,6 +266,69 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		)
 	}
 
+	cb := cm.buildModelCallbacks()
+
+	// Build LLMAgent.
+	maxIters := cfg.MaxToolIters
+	if maxIters <= 0 {
+		maxIters = DefaultMaxToolIterations
+	}
+	agentOpts := []llmagent.Option{
+		llmagent.WithModel(cfg.Model),
+		llmagent.WithModelCallbacks(cb),
+		llmagent.WithMaxToolIterations(maxIters),
+		// Parallel tool execution: a single turn's multiple tool_calls run
+		// concurrently. Required by the async task model so parallel command
+		// spawns each wait their own sync-wait window (blocking ≈ max, not sum;
+		// D2). Safe here because tagent's tools are stateless / mutex-guarded.
+		llmagent.WithEnableParallelTools(true),
+	}
+	if cfg.SystemPrompt != "" {
+		agentOpts = append(agentOpts, llmagent.WithInstruction(cfg.SystemPrompt))
+	}
+	if len(cfg.Tools) > 0 {
+		agentOpts = append(agentOpts, llmagent.WithTools(cfg.Tools))
+	}
+
+	// Build GenerationConfig from config fields
+	genConfig := model.GenerationConfig{}
+	if cfg.Temperature > 0 {
+		temp := cfg.Temperature
+		genConfig.Temperature = &temp
+	}
+	if cfg.ThinkingEnabled != nil {
+		genConfig.ThinkingEnabled = cfg.ThinkingEnabled
+	}
+	if cfg.ThinkingTokens != nil {
+		genConfig.ThinkingTokens = cfg.ThinkingTokens
+	}
+	if cfg.ReasoningEffort != nil {
+		genConfig.ReasoningEffort = cfg.ReasoningEffort
+	}
+	if genConfig.Temperature != nil || genConfig.ThinkingEnabled != nil ||
+		genConfig.ThinkingTokens != nil || genConfig.ReasoningEffort != nil {
+		agentOpts = append(agentOpts, llmagent.WithGenerationConfig(genConfig))
+	}
+	// ReasoningContentMode controls how reasoning_content is handled in history
+	if cfg.ReasoningContentMode != "" {
+		agentOpts = append(agentOpts, llmagent.WithReasoningContentMode(cfg.ReasoningContentMode))
+	}
+
+	// hotswap-fix 5.7：快照完整 cfg（执行面+状态面），供 RebuildExecutor 复用。
+	cm.execCfg = cfg
+	cm.memPlugin = cfg.MemPlugin
+	cm.sessionSvc = cfg.SessionSvc
+
+	fwAgent := cm.buildLLMAgent(cfg)
+	cm.runner = buildRunner(cfg, fwAgent)
+
+	return cm
+}
+
+// buildModelCallbacks（hotswap-fix 5.7）：回调链构造抽为 cm 方法——闭包捕获
+// 同一个 cm（装配/热载/任务板/诊断全部同源）。冷启动与 RebuildExecutor 共用，
+// 保证换装后 BeforeModel 闭包仍指向常驻状态面（修复空投影装配事故）。
+func (cm *ContextManager) buildModelCallbacks() *model.Callbacks {
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
 
@@ -339,7 +409,14 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		return nil, nil
 	})
 
-	// Build LLMAgent.
+	return cb
+}
+
+// buildLLMAgent（hotswap-fix 5.7）：从 ContextManagerConfig 构造 fwAgent 的
+// 纯函数段（依赖仅 cfg）。冷启动与 RebuildExecutor 共用，保证两条路径构造的
+// fwAgent 行为学一致（model/tools/prompt/genConfig/并行工具开关）。
+func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMAgent {
+	cb := cm.buildModelCallbacks()
 	maxIters := cfg.MaxToolIters
 	if maxIters <= 0 {
 		maxIters = DefaultMaxToolIterations
@@ -348,10 +425,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		llmagent.WithModel(cfg.Model),
 		llmagent.WithModelCallbacks(cb),
 		llmagent.WithMaxToolIterations(maxIters),
-		// Parallel tool execution: a single turn's multiple tool_calls run
-		// concurrently. Required by the async task model so parallel command
-		// spawns each wait their own sync-wait window (blocking ≈ max, not sum;
-		// D2). Safe here because tagent's tools are stateless / mutex-guarded.
 		llmagent.WithEnableParallelTools(true),
 	}
 	if cfg.SystemPrompt != "" {
@@ -360,8 +433,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	if len(cfg.Tools) > 0 {
 		agentOpts = append(agentOpts, llmagent.WithTools(cfg.Tools))
 	}
-
-	// Build GenerationConfig from config fields
 	genConfig := model.GenerationConfig{}
 	if cfg.Temperature > 0 {
 		temp := cfg.Temperature
@@ -380,15 +451,10 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		genConfig.ThinkingTokens != nil || genConfig.ReasoningEffort != nil {
 		agentOpts = append(agentOpts, llmagent.WithGenerationConfig(genConfig))
 	}
-	// ReasoningContentMode controls how reasoning_content is handled in history
 	if cfg.ReasoningContentMode != "" {
 		agentOpts = append(agentOpts, llmagent.WithReasoningContentMode(cfg.ReasoningContentMode))
 	}
-
-	fwAgent := llmagent.New(cfg.Name, agentOpts...)
-	cm.runner = buildRunner(cfg, fwAgent)
-
-	return cm
+	return llmagent.New(cfg.Name, agentOpts...)
 }
 
 // buildRunner（R4 3.3/3.5 抽取）：fwAgent+runner 装配为纯函数段（依赖仅
@@ -420,6 +486,60 @@ func (cm *ContextManager) SwapExecutor(newRunner runner.Runner) runner.Runner {
 	old := cm.runner
 	cm.runner = newRunner
 	return old
+}
+
+// RebuildExecutor（hotswap-fix 5.7）：在**同一 cm** 上重建 executor——
+// 新 fwAgent（新 model/tools/prompt/genConfig）+ 新 runner，但 projection/bus/
+// compressor/sessionSvc/BeforeModel 回调闭包全部保留。修复 2026-09-13 21:5x
+// 事故根因：旧换装路径把「新壳自己的 runner」换进常驻 cm，而新壳 fwAgent 的
+// BeforeModel 闭包捕获新壳自己的空 cm → 换装后所有 turn 的请求装配被接到空
+// 投影上（n=1 system-only → provider 400/1214 ×3）。本方法保证装配闭包与
+// 状态永远同源（都来自这个 cm），换装只换「模型+工具+提示词」这个纯执行面。
+// cfg：沿用冷启动同构的 ContextManagerConfig（调用方从 fresh 配置装配）；
+// 装配逻辑与 NewContextManager 尾段一致（fwAgent 构造 + buildRunner）。
+func (cm *ContextManager) RebuildExecutor(cfg ContextManagerConfig) runner.Runner {
+	if cm == nil {
+		return nil
+	}
+	// 执行面取调用方覆盖（零值字段回落到冷启动快照 execCfg）；状态面强制
+	// 复用 cm 快照实例——换装新配置只提供执行面差异，状态面永不换。
+	merged := cm.execCfg
+	if cfg.Model != nil {
+		merged.Model = cfg.Model
+	}
+	if len(cfg.Tools) > 0 {
+		merged.Tools = cfg.Tools
+	}
+	if cfg.SystemPrompt != "" {
+		merged.SystemPrompt = cfg.SystemPrompt
+	}
+	if cfg.SystemPromptSource != nil {
+		merged.SystemPromptSource = cfg.SystemPromptSource
+	}
+	if cfg.Temperature > 0 {
+		merged.Temperature = cfg.Temperature
+	}
+	if cfg.MaxToolIters > 0 {
+		merged.MaxToolIters = cfg.MaxToolIters
+	}
+	if cfg.ThinkingEnabled != nil {
+		merged.ThinkingEnabled = cfg.ThinkingEnabled
+	}
+	if cfg.ThinkingTokens != nil {
+		merged.ThinkingTokens = cfg.ThinkingTokens
+	}
+	if cfg.ReasoningEffort != nil {
+		merged.ReasoningEffort = cfg.ReasoningEffort
+	}
+	if cfg.ReasoningContentMode != "" {
+		merged.ReasoningContentMode = cfg.ReasoningContentMode
+	}
+	execCfg := merged
+	execCfg.MemPlugin = cm.memPlugin
+	execCfg.SessionSvc = cm.sessionSvc
+	fwAgent := cm.buildLLMAgent(execCfg)
+	cm.SwapExecutor(buildRunner(execCfg, fwAgent))
+	return cm.currentRunner()
 }
 
 // currentRunner（R4 3.3）：RunFlow per-turn 取引用（RLock 即放——不持锁跑
@@ -499,6 +619,19 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 		rebuilt = append(rebuilt, *systemMsg)
 	}
 	rebuilt = append(rebuilt, result.Messages...)
+
+	// hotswap-fix 5.7 健康探针：装配产物只有 system（n<=1）说明投影/会话
+	// 状态面异常（如换装事故中的空投影装配）。此时不打到 provider 吃 400，
+	// 而是注入降级 user 消息：请求形态合法（LLM 可应答），同时 ERROR 日志
+	// 带投影计数与重建模式，一击定位。user 消息本身会经事件管线回流，
+	// 下个 turn 投影非空即自然恢复。
+	if len(rebuilt) <= 1 {
+		log.Errorf("[assemble-health] request has only %d message(s) (system-only); "+
+			"projection len=%d — injecting degradation notice (hotswap empty-projection guard)",
+			len(rebuilt), cm.projection.Len())
+		rebuilt = append(rebuilt, model.NewUserMessage(
+			"[context-guard] 会话状态异常（上下文为空）。请向用户如实说明当前对话上下文不可用，请其重发上一条消息。"))
+	}
 
 	args.Request.Messages = rebuilt
 }
