@@ -42,7 +42,13 @@ func short(s string) string {
 // defines the JSON key order of the canonical form, so it is stable across
 // map iteration orders.
 type orgSubset struct {
-	Entry     string                     `json:"entry"`
+	Entry string `json:"entry"`
+	// Model/Provider: global defaults now participate in agent instance
+	// rebuilds (5.1: sub-agents without explicit model resolve through the
+	// provider registry from cfg.Provider/cfg.Model), so per the D3 criterion
+	// they must force a rebuild fingerprint.
+	Model     string                     `json:"model,omitempty"`
+	Provider  string                     `json:"provider,omitempty"`
 	PromptDir string                     `json:"prompt_dir,omitempty"`
 	Providers map[string]providerSubset  `json:"providers,omitempty"`
 	Agents    map[string]json.RawMessage `json:"agents"` // canonical per-agent subset
@@ -105,6 +111,8 @@ func computeMemoryFingerprint(cfg *Config) (string, error) {
 func extractOrgSubset(cfg *Config) (*orgSubset, error) {
 	sub := &orgSubset{
 		Entry:     cfg.Entry,
+		Model:     cfg.Model,
+		Provider:  cfg.Provider,
 		PromptDir: cfg.PromptDir,
 		Providers: map[string]providerSubset{},
 		Agents:    map[string]json.RawMessage{},

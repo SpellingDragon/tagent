@@ -21,15 +21,33 @@ import (
 )
 
 func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Config) model.Model {
-	// 1. Check overrides (SwappableModel for entry agent, etc.)
+	// 1. Check overrides (SwappableModel for entry agent, etc.).
+	// 5.2 observation-blinding fix: overrides used to early-return WITHOUT the
+	// TrajectoryRecorder wrapper, leaving entry-agent LLM calls invisible in
+	// the trajectory dump. Wrap here too — OUTSIDE the SwappableModel so the
+	// recorder observes post-swap traffic (recorder(Swappable) order); the
+	// wrapper is created per buildAgent call, so repeated resolves never
+	// stack wrappers on the same instance.
 	if rc.modelOverrides != nil {
 		if m, ok := rc.modelOverrides[name]; ok {
+			if rc.trajectoryRecorder != nil {
+				m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+			}
 			return m
 		}
 	}
 
-	// 2. If agent has no model override, use parent model
+	// 2. If agent has no model override, resolve the GLOBAL default model
+	// (cfg.Provider+cfg.Model) through the provider registry — same factory
+	// path as explicit agent models — so yaml-only changes to the global
+	// default take effect in hot-reload rebuilds (the WithModel-injected
+	// instance is frozen at boot). Falls back to the injected rc.model when
+	// the config carries no resolvable global provider (tests/minimal
+	// configs): behavior-preserving.
 	if acfg.Model == "" {
+		if m := rc.resolveGlobalDefaultModel(cfg); m != nil {
+			return m
+		}
 		return rc.model
 	}
 
@@ -80,6 +98,56 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 	}
 	rc.resolvedModels[cacheKey] = m
 	log.Infof("[tagent] agent %q: resolved model %q via provider %q", name, acfg.Model, providerName)
+	return m
+}
+
+// resolveGlobalDefaultModel resolves cfg.Provider+cfg.Model via the provider
+// registry (identical resolution to explicit agent models) and caches the
+// instance under a reserved key. Returns nil when the config has no global
+// provider/model to resolve — the caller then falls back to the
+// WithModel-injected instance (rc.model), preserving legacy behavior for
+// minimal configs and tests. Resolve failures return nil WITHOUT caching so
+// a later hot-reload rebuild can retry (e.g. after env/API key appears).
+func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
+	if cfg.Model == "" || cfg.Provider == "" {
+		return nil
+	}
+	var opts []provider.Option
+	protocolName := cfg.Provider
+	endpoint := ""
+	if pcfg, ok := cfg.Providers[cfg.Provider]; ok {
+		if pcfg.Provider != "" {
+			protocolName = pcfg.Provider
+		}
+		if pcfg.APIEndpoint != "" {
+			endpoint = pcfg.APIEndpoint
+			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
+		}
+		if pcfg.APIKeyEnv != "" {
+			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
+				opts = append(opts, provider.WithAPIKey(key))
+			}
+		}
+	}
+	// Cache key includes the resolved endpoint: a same-name provider whose
+	// api_endpoint changed in yaml must NOT hit the old-instance cache.
+	cacheKey := "@@global:" + cfg.Provider + ":" + cfg.Model + ":" + endpoint
+	if m, ok := rc.resolvedModels[cacheKey]; ok {
+		return m
+	}
+	m, err := provider.Model(protocolName, cfg.Model, opts...)
+	if err != nil {
+		log.Debugf("[tagent] global default model %q via provider %q: registry resolve failed (%v); using injected instance", cfg.Model, cfg.Provider, err)
+		return nil
+	}
+	if rc.trajectoryRecorder != nil {
+		m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
+	}
+	if rc.resolvedModels == nil {
+		rc.resolvedModels = make(map[string]model.Model)
+	}
+	rc.resolvedModels[cacheKey] = m
+	log.Infof("[tagent] resolved global default model %q via provider %q", cfg.Model, cfg.Provider)
 	return m
 }
 

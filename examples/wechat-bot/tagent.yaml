@@ -17,7 +17,6 @@
 # ===== 全局默认(agent 省略 provider/model 时回退此)=====
 provider: zhipu                                           # providers 注册表键(智谱 GLM,openai 兼容协议)
 model: glm-5.3-flash                                        # 主模型;plan 覆盖为 glm-5.3
-api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"  # 全局 fallback(providers.zhipu 已含同端点)
 log_level: "info"                                            # debug 打印 LLM 明文,远端不宜;排障用 ./run.sh -d 或 LOG_LEVEL=debug
 request_timeout_seconds: 3600
 trajectory_dump: true                                        # 每次 LLM 调用记录 JSONL(SFT/RL 训练用)

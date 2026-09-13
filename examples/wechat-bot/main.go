@@ -163,6 +163,10 @@ func main() {
 			tagentCfg.Entry: swappableModel,
 		}),
 		tagent.WithSkillRepo(skillRepo),
+		// 5.1: arm the org-config hot-reloader. Without this the lazy fp
+		// watcher is never installed (tagent.go: `if rc.configPath != ""`)
+		// and yaml-only model changes silently require a manual restart.
+		tagent.WithConfigPath(configPath),
 	}
 	// R5：审批直投通道（目标=首个 approver；未配置白名单则不装配——安全默认）。
 	if n := len(wechatCfg.Approvers); n > 0 {

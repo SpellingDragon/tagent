@@ -114,6 +114,34 @@ func TestOrgFingerprint_CanonicalStable(t *testing.T) {
 // R4（resident-continuity-r2-r4 3.2）回归：memory 先序检测可达（🔴5）——
 // memory 被 org 指纹白名单排除，仅改 memory 时 org 指纹不变；computeMemoryFingerprint
 // 必须独立感知该变更（否则懒检查静默走 ApplyOrgParams 分支，变更不生效也不告警）。
+func TestOrgFingerprint_ChangesOnGlobalModelDefaults(t *testing.T) {
+	// 5.1: global provider/model now drive sub-agent instance resolution
+	// (resolveGlobalDefaultModel), so they must participate in the org
+	// fingerprint — otherwise yaml-only flips stay invisible to hot-reload.
+	base := &Config{Entry: "main", Provider: "zhipu", Model: "glm-5.3-flash"}
+	fp0, err := computeOrgFingerprint(base)
+	if err != nil {
+		t.Fatalf("baseline fingerprint: %v", err)
+	}
+	for _, mut := range []struct {
+		name string
+		mut  func(c *Config)
+	}{
+		{"model", func(c *Config) { c.Model = "glm-5.3" }},
+		{"provider", func(c *Config) { c.Provider = "deepseek" }},
+	} {
+		c := *base
+		mut.mut(&c)
+		fp, err := computeOrgFingerprint(&c)
+		if err != nil {
+			t.Fatalf("%s: fingerprint: %v", mut.name, err)
+		}
+		if fp == fp0 {
+			t.Errorf("%s change did NOT alter org fingerprint (fp %s)", mut.name, fp[:8])
+		}
+	}
+}
+
 func TestMemoryFingerprint_DetectsMemoryOnlyChanges(t *testing.T) {
 	base := cfgFor()
 	orgFP, err := computeOrgFingerprint(base)
