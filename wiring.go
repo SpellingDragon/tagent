@@ -284,7 +284,11 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create relation store: %w", err)
 		}
-		kv, err := kv.NewLocalFileKV(mc.Path)
+		kvOpts := []kv.LocalFileKVOption{}
+		if mc.FSync != nil && !*mc.FSync {
+			kvOpts = append(kvOpts, kv.WithFSync(false)) // nil → default enabled (D1)
+		}
+		kv, err := kv.NewLocalFileKV(mc.Path, kvOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("create local file kv: %w", err)
 		}

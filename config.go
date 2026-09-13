@@ -404,6 +404,14 @@ type MemoryConfig struct {
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
+	// FSync (localfile type only; implementation-hardening D1): durability
+	// switch for the local-file KV — when enabled (default), every WAL append
+	// is fsynced and snapshot renames are directory-synced, so acknowledged
+	// writes survive power loss. Pointer semantics: nil = default (enabled);
+	// explicit false trades durability for throughput (a downgrade warning is
+	// logged at startup).
+	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
+
 	// ReadNamespaces lists agent names whose storage partitions this agent
 	// is allowed to read. Each name is converted to a PartitionID at build time.
 	// For example, recall can read tagent's events by declaring:

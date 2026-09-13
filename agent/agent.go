@@ -125,7 +125,7 @@ type TagentAgent struct {
 	// StopLoop 后实例终结（loopTerminated），二次 StartLoop 显式报错——输出通道
 	// 在循环 goroutine 退出时恰好关闭一次（消费者 range 语义的终态信号），
 	// 复用已关通道即生产 panic（V15，2026-09-14 修复）。
-	outputCh       chan *event.Event // 持久输出 channel（循环 goroutine 退出时恰好关闭一次）
+	outputCh       chan *event.Event  // 持久输出 channel（循环 goroutine 退出时恰好关闭一次）
 	loopCtx        context.Context    // Loop context（StopLoop 取消）
 	loopCancel     context.CancelFunc // Loop cancel
 	loopActive     atomic.Bool        // Loop 是否运行中

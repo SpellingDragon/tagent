@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+
 	"github.com/SpellingDragon/tagent/memory"
 
 	"github.com/SpellingDragon/tagent/rl"

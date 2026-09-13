@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,13 @@ type LocalFileKV struct {
 	writeCnt int
 	closed   bool
 
+	// fsync (durability, implementation-hardening D1): when true (default),
+	// every WAL append f.Sync()s and snapshot compaction syncs the tmp file
+	// + the directory before rename/removal — acknowledged writes survive
+	// power loss, not just process death. RelationStore already ran per-line
+	// Sync; this aligns the two durability standards.
+	fsync bool
+
 	flushDone chan struct{}
 }
 
@@ -77,6 +85,29 @@ const (
 	compactWALBytes = 4 << 20 // 4 MiB
 )
 
+// LocalFileKVOption customizes a LocalFileKV at construction.
+type LocalFileKVOption func(*LocalFileKV)
+
+// WithFSync disables (false) per-append fsync. Default is enabled: the store
+// guarantees acknowledged writes survive power loss. Disabling trades that
+// for throughput — the store logs a one-time durability downgrade warning.
+func WithFSync(enabled bool) LocalFileKVOption {
+	return func(k *LocalFileKV) { k.fsync = enabled }
+}
+
+// syncDirDurably best-effort fsyncs a directory so a rename inside it is
+// itself durable. Some platforms/filesystems reject directory fsync — the
+// error is intentionally swallowed (best-effort, caller already synced the
+// file itself).
+func syncDirDurably(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
+}
+
 // NewLocalFileKV creates a LocalFileKV backed by kv.json (snapshot) and
 // kv.wal.jsonl (op log) in the given dataDir. Existing data is loaded on
 // startup: snapshot first, then WAL replay (torn tail lines from a crash are
@@ -85,7 +116,7 @@ const (
 //
 // Backward compatible with the previous single-file layout: an old kv.json
 // simply loads as the snapshot (no WAL present).
-func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
+func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
 	}
@@ -94,7 +125,14 @@ func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 		data:      make(map[string]string),
 		snapPath:  filepath.Join(dataDir, "kv.json"),
 		walPath:   filepath.Join(dataDir, "kv.wal.jsonl"),
+		fsync:     true, // durability default: acknowledged writes survive power loss
 		flushDone: make(chan struct{}),
+	}
+	for _, opt := range opts {
+		opt(kv)
+	}
+	if !kv.fsync {
+		log.Warnf("[LocalFileKV] fsync disabled — acknowledged writes may be lost on power loss (durability downgrade)")
 	}
 
 	// Clean up leftover snapshot tmp from a crashed compaction.
@@ -231,6 +269,15 @@ func (k *LocalFileKV) appendWALLocked() error {
 		f.Close()
 		return fmt.Errorf("flush kv wal: %w", err)
 	}
+	// Durability (D1): fsync the WAL before acknowledging — without this the
+	// OS page cache can lose acknowledged writes on power loss (process-death
+	// survival is NOT the same guarantee).
+	if k.fsync {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return fmt.Errorf("fsync kv wal: %w", err)
+		}
+	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close kv wal: %w", err)
 	}
@@ -255,11 +302,30 @@ func (k *LocalFileKV) compactLocked() error {
 		return fmt.Errorf("marshal kv snapshot: %w", err)
 	}
 	tmp := k.snapPath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0644); err != nil {
+	// Write + fsync the tmp file BEFORE rename: the rename is only as durable
+	// as the file it exposes.
+	tf, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create kv snapshot tmp: %w", err)
+	}
+	if _, err := tf.Write(raw); err != nil {
+		tf.Close()
 		return fmt.Errorf("write kv snapshot tmp: %w", err)
+	}
+	if k.fsync {
+		if err := tf.Sync(); err != nil {
+			tf.Close()
+			return fmt.Errorf("fsync kv snapshot tmp: %w", err)
+		}
+	}
+	if err := tf.Close(); err != nil {
+		return fmt.Errorf("close kv snapshot tmp: %w", err)
 	}
 	if err := os.Rename(tmp, k.snapPath); err != nil {
 		return fmt.Errorf("rename kv snapshot: %w", err)
+	}
+	if k.fsync {
+		syncDirDurably(filepath.Dir(k.snapPath)) // make the rename itself durable
 	}
 	if err := os.Remove(k.walPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("truncate kv wal: %w", err)
@@ -268,12 +334,43 @@ func (k *LocalFileKV) compactLocked() error {
 	return nil
 }
 
-// Sync forces an immediate append of pending ops to the WAL.
-// Safe to call concurrently.
+// Sync forces an immediate append of all pending ops to the WAL and (when
+// fsync is on) fsyncs it — a durability barrier: writes acknowledged before
+// Sync survive power loss. Safe to call concurrently.
 func (k *LocalFileKV) Sync() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return k.appendWALLocked()
+}
+
+// ListPartitionIDs enumerates persisted partition IDs from key namespaces
+// (`{pid}:evt|idx|meta|tomb:…` — any persisted key in a partition's namespace
+// proves the partition exists; segment-meta alone only appears after a window
+// seal). Optional capability (implementation-hardening 2.4): deliberately NOT
+// part of the KVStore six-method interface — FileSegmentStore consumes it via
+// a type assertion, so backends without enumeration keep the old
+// lazy-discovery behavior.
+func (k *LocalFileKV) ListPartitionIDs() []int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	seen := make(map[int]struct{})
+	for key := range k.data {
+		sep := strings.IndexByte(key, ':')
+		if sep <= 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(key[:sep])
+		if err != nil {
+			continue // non-partition namespace (e.g. global:* keys)
+		}
+		seen[pid] = struct{}{}
+	}
+	out := make([]int, 0, len(seen))
+	for pid := range seen {
+		out = append(out, pid)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // Compact forces a snapshot rewrite + WAL truncation regardless of WAL size.

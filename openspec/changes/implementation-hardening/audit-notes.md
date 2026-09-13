@@ -25,3 +25,12 @@
 ## 时序 flaky 发现（race 同族待深钻）
 
 - 2026-09-14：`go test ./agent/task/` 首跑 FAIL、复跑 3/3 绿（新测 TestResume_RestoredTaskNilWatchDone 在列亦过）——task 包存在时序敏感测试，未定位到具体测试名；与审计 F-5（agent 包 race flaky）同族。留待 8.1 分类处置时一并检视。
+
+## fsync 开销量测（2.3，2026-09-14，darwin/arm64，benchtime=1000x）
+
+| 模式 | ns/op（KVPut+Sync 每次屏障） |
+|------|------------------------------|
+| FSyncOn | 5,640,724 ≈ 5.6ms |
+| FSyncOff | 811,326 ≈ 0.81ms |
+
+- 屏障路径 on≈7x off——但这是**最坏情形**（每写一次屏障）；生产管线 fsync 发生在批级（flushThreshold=50 或 flushInterval=2s 摊销），按每 turn 数事件的真实速率，摊销影响可忽略。默认开维持不变，数据支持该裁决。

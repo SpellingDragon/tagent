@@ -155,24 +155,45 @@ func NewFileSegmentStore(kv KVStore, rel RelationStore, dataDir string, cacheSiz
 	if rel == nil {
 		rel = newSimpleInMemRelationStore()
 	}
-	return &FileSegmentStore{
+	s := &FileSegmentStore{
 		kv:      kv,
 		rel:     rel,
 		cache:   newSimpleLRU(cacheSize),
 		dataDir: dataDir,
-	}, nil
+	}
+	// Cold-partition discovery at construction (implementation-hardening 2.4):
+	// forgetting scans Range over s.partitions — without startup discovery, a
+	// partition this process never wrote to stayed invisible to TTL/capacity/
+	// compaction forever. Non-fatal: a backend without enumeration capability
+	// logs a known limitation and keeps the old lazy-discovery behavior.
+	if err := s.Init(); err != nil {
+		log.Warnf("[FileSegmentStore] cold-partition discovery failed (non-fatal, forgetting falls back to warm partitions only): %v", err)
+	}
+	return s, nil
 }
 
-// Init initializes the FileSegmentStore by scanning existing KV data
-// and recovering partition states. Called on startup after crash recovery.
+// Init discovers persisted partitions and registers them in s.partitions so
+// the forgetting scans (TTL / capacity / compaction, which Range over the
+// map) cover the FULL store — not just partitions this process wrote to
+// (cold-partition blind spot, implementation-hardening 2.4). Partition
+// enumeration uses the optional ListPartitionIDs capability via type
+// assertion; backends without it keep lazy discovery (known limitation,
+// logged). seqCounter recovery stays in StoreEvent's window path (D12).
+// Called from NewFileSegmentStore; safe to call again.
 func (s *FileSegmentStore) Init() error {
-	// Scan for existing segment metadata to discover partitions
-	// We need to scan all possible partition prefixes.
-	// In practice, partitions are discovered from the meta keys.
-	// For simplicity, we don't pre-scan all partitions here;
-	// they are lazily initialized on first access via getPartitionState.
-	// The RustViking RocksDB handles its own crash recovery via WAL,
-	// so no local file truncation is needed.
+	lister, ok := s.kv.(interface{ ListPartitionIDs() []int })
+	if !ok {
+		log.Infof("[FileSegmentStore] kv backend has no ListPartitionIDs capability — cold partitions stay undiscovered (known limitation)")
+		return nil
+	}
+	discovered := 0
+	for _, pid := range lister.ListPartitionIDs() {
+		s.getPartitionState(pid) // registers; D12 seq recovery runs on first write
+		discovered++
+	}
+	if discovered > 0 {
+		log.Infof("[FileSegmentStore] discovered %d persisted partition(s) at startup — forgetting scans cover them", discovered)
+	}
 	return nil
 }
 

@@ -36,11 +36,11 @@
 
 ## 2. WP2 耐久收口
 
-- [ ] 2.1 fsync：appendWALLocked【local_file_kv.go:210，Flush 后】加 `f.Sync()`；snapshot 写后目录 Sync（best-effort）；`NewLocalFileKV` 加 `WithFSync(bool)` 选项；MemoryConfig 加 `FSync *bool`（**nil 归一 true——禁用裸 bool+omitempty，零值歧义坑**）管道 config.go:393 → wiring.go:287；fsync=false 时启动一次性 WARN
-- [ ] 2.2 durability 测试：补「KVPut→Sync→不 Close 直接弃置（模拟崩溃）→ 新实例读回」；fsync=false 回归；**坑**：页缓存语义使单测无法真证掉电不丢——测试断言「Sync 路径调用了 f.Sync」（可注入 file 以 spy），掉电语义以代码结构保证并在测试注释声明
-- [ ] 2.3 量测：基准写 N=1000 事件（fsync on/off 各一轮），耗时差记 LEDGER
-- [ ] 2.4 冷分区（N5 机制）：LocalFileKV 加 `ListPartitionIDs() []int`（扫内存 data map `^(\d+):meta:` 前缀，实例方法**不扩 KVStore 六方法接口**）；FileSegmentStore.Init()（现空函数，segment_store.go:168-176）以类型断言 `if lp, ok := s.kv.(interface{ ListPartitionIDs() []int }); ok` 消费——启动时把持久化分区注册进 partitions sync.Map（含 PartitionState 从 KV 恢复 seqCounter，D12 路径既有）；rustviking 后端无枚举能力则记已知限制入 LEDGER；测试：「写入→新进程重开（Init）→TTL 到期→旧分区事件被遗忘」；eventCount 恢复或文档化放弃
-- [ ] 2.5 回归门：`go test ./memory/... -short -count=1` 全绿
+- [x] 2.1 fsync：appendWALLocked【local_file_kv.go:210，Flush 后】加 `f.Sync()`；snapshot 写后目录 Sync（best-effort）；`NewLocalFileKV` 加 `WithFSync(bool)` 选项；MemoryConfig 加 `FSync *bool`（**nil 归一 true——禁用裸 bool+omitempty，零值歧义坑**）管道 config.go:393 → wiring.go:287；fsync=false 时启动一次性 WARN
+- [x] 2.2 durability 测试：补「KVPut→Sync→不 Close 直接弃置（模拟崩溃）→ 新实例读回」；fsync=false 回归；**坑**：页缓存语义使单测无法真证掉电不丢——测试断言「Sync 路径调用了 f.Sync」（可注入 file 以 spy），掉电语义以代码结构保证并在测试注释声明
+- [x] 2.3 量测：基准写 N=1000 事件（fsync on/off 各一轮），耗时差记 LEDGER
+- [x] 2.4 冷分区（N5 机制）：LocalFileKV 加 `ListPartitionIDs() []int`（扫内存 data map `^(\d+):meta:` 前缀，实例方法**不扩 KVStore 六方法接口**）；FileSegmentStore.Init()（现空函数，segment_store.go:168-176）以类型断言 `if lp, ok := s.kv.(interface{ ListPartitionIDs() []int }); ok` 消费——启动时把持久化分区注册进 partitions sync.Map（含 PartitionState 从 KV 恢复 seqCounter，D12 路径既有）；rustviking 后端无枚举能力则记已知限制入 LEDGER；测试：「写入→新进程重开（Init）→TTL 到期→旧分区事件被遗忘」；eventCount 恢复或文档化放弃
+- [x] 2.5 回归门：`go test ./memory/... -short -count=1` 全绿
 
 ## 3. WP3 安全收口（按 D2 修正后 API 层方案）
 

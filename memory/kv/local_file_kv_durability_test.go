@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -156,3 +157,100 @@ func TestLocalFileKV_LegacySingleFileLayout(t *testing.T) {
 		t.Errorf("legacy snapshot must load, got %q err=%v", v, err)
 	}
 }
+
+// TestLocalFileKV_CrashAfterSyncDurability (implementation-hardening 2.2):
+// the power-loss contract — KVPut followed by Sync() means the write is on
+// disk; an abrupt process death after that point (NO Close) must not lose it.
+// A userspace test cannot cut real power; what it CAN prove is the structural
+// guarantee: Sync() flushes + fsyncs pending ops to the WAL, so a fresh
+// instance over the same dir reads everything back. The f.Sync() call itself
+// is verified structurally (appendWALLocked calls it when k.fsync).
+func TestLocalFileKV_CrashAfterSyncDurability(t *testing.T) {
+	dir := t.TempDir()
+	kv, err := NewLocalFileKV(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !kv.fsync {
+		t.Fatal("fsync must default to enabled")
+	}
+	for i := 0; i < 10; i++ { // below flushThreshold(50): sits in pending
+		if err := kv.KVPut(fmt.Sprintf("crash-k%d", i), fmt.Sprintf("v%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Explicit Sync = durability barrier (what KVPut does NOT promise by
+	// itself — deferred flush window is a documented exception, see
+	// TestLocalFileKV_CloseDurability for the graceful-exit path).
+	if err := kv.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// Simulate crash: abandon kv WITHOUT Close (skip final flush), reopen.
+	re, err := NewLocalFileKV(dir)
+	if err != nil {
+		t.Fatalf("reopen after crash: %v", err)
+	}
+	defer re.Close()
+	for i := 0; i < 10; i++ {
+		got, err := re.KVGet(fmt.Sprintf("crash-k%d", i))
+		if err != nil || got != fmt.Sprintf("v%d", i) {
+			t.Errorf("after crash-reopen crash-k%d=%q err=%v — synced write lost", i, got, err)
+		}
+	}
+}
+
+// TestLocalFileKV_FSyncDisabled_OverrideAndReadback: WithFSync(false) flips
+// the durability switch (and the construction-time downgrade warning fires —
+// observed via the flag, not the log), with functional readback unchanged.
+func TestLocalFileKV_FSyncDisabled_OverrideAndReadback(t *testing.T) {
+	dir := t.TempDir()
+	kv, err := NewLocalFileKV(dir, WithFSync(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kv.fsync {
+		t.Fatal("WithFSync(false) must disable fsync")
+	}
+	if err := kv.KVPut("off-k", "off-v"); err != nil {
+		t.Fatal(err)
+	}
+	if err := kv.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := kv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := NewLocalFileKV(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer re.Close()
+	if got, err := re.KVGet("off-k"); err != nil || got != "off-v" {
+		t.Errorf("off-k=%q err=%v, want off-v", got, err)
+	}
+}
+
+// Benchmarks for the fsync durability switch (implementation-hardening 2.3):
+// per-Sync cost of the durability barrier, on vs off. Run:
+//
+//	go test ./memory/kv/ -run '^$' -bench BenchmarkWrites_FSync -benchtime 1000x
+func benchmarkWrites(b *testing.B, fsync bool) {
+	dir := b.TempDir()
+	kv, err := NewLocalFileKV(dir, WithFSync(fsync))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer kv.Close()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := kv.KVPut(fmt.Sprintf("bk%d", i%64), "v"); err != nil {
+			b.Fatal(err)
+		}
+		if err := kv.Sync(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkWrites_FSyncOn(b *testing.B)  { benchmarkWrites(b, true) }
+func BenchmarkWrites_FSyncOff(b *testing.B) { benchmarkWrites(b, false) }
