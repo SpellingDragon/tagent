@@ -29,10 +29,21 @@ score 语义：1.0=表现优秀，0.5=可接受边界，0.0=严重劣化。score
 // LLMJudgeEvaluator 用 LLM 对 canary 表现证据做质量裁决（实现 release.go 的 Evaluator）。
 type LLMJudgeEvaluator struct {
 	judge         model.Model
+	effort        *string
 	src           EvidenceSource
 	minSamples    int
 	passThreshold float64
 	timeout       time.Duration
+}
+
+// WithEffort sets the reasoning_effort knob for judge requests (optional).
+// (tagent-unify-model-call-config.)
+func (e *LLMJudgeEvaluator) WithEffort(effort string) *LLMJudgeEvaluator {
+	if e != nil && effort != "" {
+		v := effort
+		e.effort = &v
+	}
+	return e
 }
 
 // NewLLMJudgeEvaluator 构建 LLM 评审器。judge 为 nil 时 Evaluate 恒保守通过。
@@ -67,7 +78,7 @@ func (e *LLMJudgeEvaluator) Evaluate(ctx context.Context, bundleID string) (Eval
 
 	jctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
-	text, err := collectModelText(jctx, e.judge, buildJudgeRequest(ev, bundleID))
+	text, err := collectModelText(jctx, e.judge, e.buildRequest(ev, bundleID))
 	if err != nil {
 		// judge 调用失败：保守通过（judge 暂时不可用不应回滚已激活的低风险变更）。
 		return EvalResult{Pass: true, Score: 1.0, Reason: "judge 调用失败，保守通过: " + err.Error()}, nil
@@ -84,6 +95,14 @@ func (e *LLMJudgeEvaluator) Evaluate(ctx context.Context, bundleID string) (Eval
 type judgeVerdict struct {
 	Score  float64 `json:"score"`
 	Reason string  `json:"reason"`
+}
+
+func (e *LLMJudgeEvaluator) buildRequest(ev Evidence, bundleID string) *model.Request {
+	req := buildJudgeRequest(ev, bundleID)
+	if e.effort != nil {
+		req.ReasoningEffort = e.effort
+	}
+	return req
 }
 
 func buildJudgeRequest(ev Evidence, bundleID string) *model.Request {

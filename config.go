@@ -189,9 +189,16 @@ type EvolutionConfig struct {
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
 
 	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
-	JudgeMinSamples     int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
-	JudgePassThreshold  float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
-	JudgeTimeoutSeconds int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
+	// Judge is the unified ModelRef for the evolution judge LLM. Zero value
+	// keeps the legacy behavior: fall back to the entry agent's model.
+	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
+	// Deprecated legacy flat judge knobs (compat aliases, folded into Judge):
+	JudgeModel           string  `json:"judge_model,omitempty" yaml:"judge_model,omitempty"`
+	JudgeProvider        string  `json:"judge_provider,omitempty" yaml:"judge_provider,omitempty"`
+	JudgeReasoningEffort string  `json:"judge_reasoning_effort,omitempty" yaml:"judge_reasoning_effort,omitempty"`
+	JudgeMinSamples      int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
+	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
+	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
 }
 
 // ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。
@@ -324,6 +331,28 @@ type AgentConfig struct {
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
+// ModelRef is the unified declarative spec for a direct (non-agent) model
+// call site: which provider/model to use and how to generate. It mirrors the
+// generation knobs agents get via AgentConfig so every LLM call site is
+// configurable with one vocabulary. (tagent-unify-model-call-config.)
+type ModelRef struct {
+	Provider             string   `json:"provider,omitempty" yaml:"provider,omitempty"`
+	Model                string   `json:"model,omitempty" yaml:"model,omitempty"`
+	Temperature          *float64 `json:"temperature,omitempty" yaml:"temperature,omitempty"`
+	MaxTokens            *int     `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	ThinkingEnabled      *bool    `json:"thinking_enabled,omitempty" yaml:"thinking_enabled,omitempty"`
+	ThinkingTokens       *int     `json:"thinking_tokens,omitempty" yaml:"thinking_tokens,omitempty"`
+	ReasoningEffort      *string  `json:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`
+	ReasoningContentMode string   `json:"reasoning_content_mode,omitempty" yaml:"reasoning_content_mode,omitempty"`
+}
+
+// IsZero reports whether the ref carries no explicit declaration at all.
+func (m ModelRef) IsZero() bool {
+	return m.Provider == "" && m.Model == "" && m.Temperature == nil && m.MaxTokens == nil &&
+		m.ThinkingEnabled == nil && m.ThinkingTokens == nil && m.ReasoningEffort == nil &&
+		m.ReasoningContentMode == ""
+}
+
 // CompressConfig configures SmartCompressor parameters.
 type CompressConfig struct {
 	// CompactKeysListed caps the keys listed in the rolling compaction
@@ -347,10 +376,16 @@ type CompressConfig struct {
 
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
+	// Deprecated: declare compress.summary (ModelRef) instead; folded at load.
 	SummaryModel string `json:"summary_model,omitempty" yaml:"summary_model,omitempty"`
 	// SummaryProvider is the provider name for the summary model.
 	// Falls back to the agent's provider if empty.
+	// Deprecated: declare compress.summary (ModelRef) instead; folded at load.
 	SummaryProvider string `json:"summary_provider,omitempty" yaml:"summary_provider,omitempty"`
+	// Summary is the unified ModelRef declaration for the summary call site
+	// (model + generation knobs incl. reasoning_effort). When both this and
+	// the legacy flat fields are present, Summary wins per-field at fold time.
+	Summary ModelRef `json:"summary,omitempty" yaml:"summary,omitempty"`
 }
 
 // MemoryConfig configures an agent's memory store.
@@ -680,6 +715,7 @@ func DefaultConfig() Config {
 
 // ApplyDefaults fills in zero/empty values with defaults.
 func (c *Config) ApplyDefaults() {
+	c.FoldModelRefAliases()
 	if c.Entry == "" {
 		c.Entry = DefaultEntry
 	}

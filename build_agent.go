@@ -183,11 +183,16 @@ func buildAgent(
 	if rc.evoGit != nil && name == cfg.Entry && mode.bindsProcessShared() {
 		evSrc := evolution.NewStoreEvidenceSource(memStore, memory.PartitionIDFromName(name), 0)
 		evSrc.SetActivationLog(rc.evoGit.Log())
+		judgeModelRef := rc.resolveModelRef(cfg.Evolution.Judge, name, acfg, cfg)
+		evJudge := evolution.NewLLMJudgeEvaluator(rc.judgeModel(name, cfg), evSrc,
+			cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
+			time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second) // M8：零值走 judge 内部默认
+		if judgeModelRef != nil && judgeModelRef.effort != nil {
+			evJudge = evJudge.WithEffort(*judgeModelRef.effort)
+		}
 		rc.evoGit.BindRuntime(
 			memStore, memory.PartitionIDFromName(name),
-			evolution.NewLLMJudgeEvaluator(rc.model, evSrc,
-				cfg.Evolution.JudgeMinSamples, cfg.Evolution.JudgePassThreshold,
-				time.Duration(cfg.Evolution.JudgeTimeoutSeconds)*time.Second), // M8：零值走 judge 内部默认
+			evJudge,
 			evolution.NewMetricGuardrail(evSrc, evolution.GuardrailConfig{
 				MaxDenialRate:   cfg.Evolution.MaxDenialRate,
 				MaxCriticalRate: cfg.Evolution.MaxCriticalRate,
@@ -409,8 +414,11 @@ func buildAgent(
 			log.Warnf("[tagent] agent %q: invalid task_terminal_ttl %q, using default", name, acfg.TaskTerminalTTL)
 		}
 	}
-	if summaryModel := rc.resolveSummaryModel(name, acfg, cfg); summaryModel != nil {
-		agentCfg.SummaryModel = summaryModel
+	if summaryRef := rc.resolveModelRef(acfg.Compress.Summary, name, acfg, cfg); summaryRef != nil {
+		agentCfg.SummaryModel = summaryRef.model
+		if summaryRef.effort != nil {
+			agentCfg.SummaryEffort = *summaryRef.effort
+		}
 	}
 
 	// Parse meditation config (string durations → time.Duration)

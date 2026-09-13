@@ -88,11 +88,97 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 //  1. If agent has SummaryModel field in YAML → resolve via provider (SummaryProvider or agent's Provider)
 //  2. If rc.summaryModel is set via Go option → use that
 //  3. Otherwise → nil (no summary model)
+//
+// resolvedModelRef is the outcome of resolving a direct call site's ModelRef:
+// the resolved model plus the generation knobs that ride on the request.
+type resolvedModelRef struct {
+	model  model.Model
+	effort *string
+}
+
+// resolveModelRef is the single three-tier resolution chain for direct call
+// sites (summary compression, evolution judge): explicit ModelRef → owning
+// agent's provider/model → global provider/model. Previously only the summary
+// site had a fallback chain and the judge was hard-wired to the entry model.
+// (tagent-unify-model-call-config.)
+func (rc *runtimeConfig) resolveModelRef(ref ModelRef, name string, acfg AgentConfig, cfg Config) *resolvedModelRef {
+	out := &resolvedModelRef{effort: ref.ReasoningEffort}
+
+	providerName := ref.Provider
+	modelName := ref.Model
+	if providerName == "" {
+		providerName = acfg.Provider
+	}
+	if providerName == "" {
+		providerName = cfg.Provider
+	}
+	if modelName == "" {
+		modelName = acfg.Model
+	}
+	if modelName == "" {
+		modelName = cfg.Model
+	}
+	if modelName == "" {
+		return nil
+	}
+
+	cacheKey := "direct:" + providerName + ":" + modelName
+	if m, ok := rc.resolvedModels[cacheKey]; ok {
+		out.model = m
+		return out
+	}
+
+	var opts []provider.Option
+	protocolName := providerName
+	if pcfg, ok := cfg.Providers[providerName]; ok {
+		if pcfg.Provider != "" {
+			protocolName = pcfg.Provider
+		}
+		if pcfg.APIEndpoint != "" {
+			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
+		}
+		if pcfg.APIKeyEnv != "" {
+			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
+				opts = append(opts, provider.WithAPIKey(key))
+			}
+		}
+	}
+
+	m, err := provider.Model(protocolName, modelName, opts...)
+	if err != nil {
+		log.Warnf("[tagent] agent %q: resolve direct model %q via %q: %v", name, modelName, providerName, err)
+		return nil
+	}
+	if rc.resolvedModels == nil {
+		rc.resolvedModels = make(map[string]model.Model)
+	}
+	rc.resolvedModels[cacheKey] = m
+	log.Infof("[tagent] agent %q: resolved direct model %q via provider %q", name, modelName, providerName)
+	out.model = m
+	return out
+}
+
+// judgeModel resolves the evolution judge's model: explicit evolution.judge
+// ModelRef wins; zero value falls back to the entry agent's model (legacy
+// hard-wire behavior). (tagent-unify-model-call-config.)
+func (rc *runtimeConfig) judgeModel(name string, cfg Config) model.Model {
+	entry, ok := cfg.Agents[cfg.Entry]
+	if !ok {
+		entry = AgentConfig{}
+	}
+	if ref := rc.resolveModelRef(cfg.Evolution.Judge, name, entry, cfg); ref != nil {
+		return ref.model
+	}
+	return rc.model
+}
+
 func (rc *runtimeConfig) resolveSummaryModel(name string, acfg AgentConfig, cfg Config) model.Model {
 	// Resolve model and provider from compress config.
 	// Falls back to agent's main model/provider if compress.summary_model is empty.
-	summaryModel := acfg.Compress.SummaryModel
-	summaryProvider := acfg.Compress.SummaryProvider
+	// Folded ModelRef wins; legacy flat fields are already folded into it at
+	// load time (FoldModelRefAliases), so reading Summary alone is complete.
+	summaryModel := acfg.Compress.Summary.Model
+	summaryProvider := acfg.Compress.Summary.Provider
 
 	// 1. If resolved summary_model, resolve it
 	if summaryModel != "" {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/modelutil"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -25,6 +26,7 @@ import (
 // but does NOT modify the Session or Projection.
 type SmartCompressor struct {
 	summaryModel    model.Model  // Optional: used for index-card condensation (condenseCardLines)
+	summaryEffort   *string      // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
 	maxTokens       int          // Token budget for calculating batch size (default: DefaultMaxTokens)
 	triggerBudget   int          // Post-compression target (0 = same as maxTokens). Unified-threshold mode: set to trigger budget so aging targets the trigger line, eliminating the dead zone between trigger and budget lines
@@ -93,6 +95,13 @@ func (sc *SmartCompressor) budget() int {
 // (0 → DefaultSummaryMaxTokens). Reasoning models spend part of max_tokens on
 // their thinking chain; reserving enough output tokens keeps Content from
 // coming back empty (which would degrade every segment).
+// WithSummaryEffort sets the reasoning_effort for summary LLM calls
+// (optional; nil = leave unset). (tagent-unify-model-call-config.)
+func WithSummaryEffort(effort string) SmartCompressorOption {
+	v := effort
+	return func(sc *SmartCompressor) { sc.summaryEffort = &v }
+}
+
 func WithSummaryMaxTokens(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) {
 		if n > 0 {
@@ -331,36 +340,22 @@ func (sc *SmartCompressor) generatePlainSummary(ctx context.Context, prompt stri
 	if sc.summaryModel == nil {
 		return "", fmt.Errorf("no summary model configured")
 	}
-	req := &model.Request{
-		Messages: []model.Message{
-			model.NewSystemMessage("你是一个历史记录浓缩助手。严格遵循用户的硬性要求。"),
-			model.NewUserMessage(prompt),
-		},
-	}
 	// Same reasoning-model guard as the retired batch summarizer: reserve ample
-	// output tokens so reasoning doesn't squeeze Content to empty.
+	// output tokens so reasoning doesn't squeeze Content to empty. Assembly and
+	// the reasoning-fallback drain are shared with the judge site via modelutil
+	// so both direct call sites speak one ModelRef vocabulary.
+	// (tagent-unify-model-call-config.)
 	plainMaxOut := sc.effectiveSummaryMaxTokens()
-	req.MaxTokens = &plainMaxOut
-	respCh, err := sc.summaryModel.GenerateContent(ctx, req)
+	req := modelutil.BuildRequest([]model.Message{
+		model.NewSystemMessage("你是一个历史记录浓缩助手。严格遵循用户的硬性要求。"),
+		model.NewUserMessage(prompt),
+	}, modelutil.Knobs{MaxTokens: &plainMaxOut, ReasoningEffort: sc.summaryEffort})
+	result, err := modelutil.Call(ctx, sc.summaryModel, req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("summary model error: %w", err)
 	}
-	var result string
-	var reasoning string
-	for resp := range respCh {
-		if resp.Error != nil {
-			return "", fmt.Errorf("summary model error: %s", resp.Error.Message)
-		}
-		if len(resp.Choices) > 0 {
-			result += resp.Choices[0].Message.Content
-			reasoning += resp.Choices[0].Message.ReasoningContent
-		}
-	}
-	// Reasoning-model fallback: use reasoning content when the model left
-	// Content empty.
-	if strings.TrimSpace(result) == "" && strings.TrimSpace(reasoning) != "" {
-		result = reasoning
-	}
+	// Reasoning-model fallback (empty Content → reasoning_content) is built
+	// into modelutil.Call.
 	return strings.TrimSpace(result), nil
 }
 

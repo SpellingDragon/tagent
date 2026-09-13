@@ -156,6 +156,7 @@ type TagentConfig struct {
 	MaxTokens          int                // Token budget for context (default: 8000)
 	CompressThreshold  float64            // Compression trigger threshold (default: 0.8)
 	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
+	SummaryEffort      string             // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
 	Temperature        float64            // Optional: LLM temperature (default: 0.7)
 	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
 	Compress           CompressConfig     // compress.SmartCompressor parameters
@@ -507,6 +508,9 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	}
 	if cfg.SummaryModel != nil {
 		opts = append(opts, compress.WithSummaryModel(cfg.SummaryModel))
+	}
+	if cfg.SummaryEffort != "" {
+		opts = append(opts, compress.WithSummaryEffort(cfg.SummaryEffort))
 	}
 	// Compress config
 	if cfg.Compress.SummaryMaxTokens > 0 {

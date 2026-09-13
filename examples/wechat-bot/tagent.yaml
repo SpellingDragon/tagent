@@ -15,8 +15,8 @@
 # ============================================================================
 
 # ===== 全局默认(agent 省略 provider/model 时回退此)=====
-provider: zhipu                                              # providers 注册表键(智谱 GLM,openai 兼容协议)
-model: glm-5.3-flash                                         # 主模型;plan 覆盖为 glm-5.3
+provider: deepseek                                           # providers 注册表键(DeepSeek,openai 兼容协议)
+model: deepseek-flash                                        # 主模型;plan 覆盖为 glm-5.3
 api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4"  # 全局 fallback(providers.zhipu 已含同端点)
 log_level: "info"                                            # debug 打印 LLM 明文,远端不宜;排障用 ./run.sh -d 或 LOG_LEVEL=debug
 request_timeout_seconds: 3600
@@ -116,8 +116,9 @@ agents:
     keep_recent_tasks: 4
     task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
     compress:
-      summary_model: glm-5.3-flash       # L3 滚动综述 + 卡片浓缩(无模型/失败降级纯工程)
-      summary_provider: zhipu
+      summary_model: deepseek-flash      # L3 滚动综述 + 卡片浓缩(无模型/失败降级纯工程)
+      summary_provider: deepseek
+      summary_effort: "low"              # 摘要调用透传 reasoning_effort(压缩成本低优先级,框架 smart_compress 支持)
       summary_max_tokens: 8192           # 摘要输出预算下限(推理模型耗思考链,不足会空 Content 塌缩)
     tools:
       - agent: knowledge                 # 知识获取/翻译;event_keys 由 wrapper 从父 memStore 还原完整事件
@@ -188,6 +189,7 @@ agents:
       engine: *shared_engine             # recall_query 走 hybrid 融合(向量∪关键词 RRF)
     max_tool_iterations: 5
     max_tokens: 32000
+    reasoning_effort: "low"              # 检索/拼装类任务,低思考档
     tools:
       - { kind: tool, id: recall_query }
       - { kind: tool, id: recall_get }
