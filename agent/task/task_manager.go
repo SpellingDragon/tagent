@@ -766,7 +766,15 @@ func (tm *TaskManager) pruneTerminal() {
 	}
 	tm.mu.Unlock()
 	for _, t := range victims {
-		t.detector.Cancel()
+		// detector may be nil: tasks rebuilt from the fact chain (RestoreTask)
+		// carry no live detector (nothing to reclaim) — read under t.mu both to
+		// guard the nil and to avoid racing Resume's detector swap.
+		t.mu.Lock()
+		detector := t.detector
+		t.mu.Unlock()
+		if detector != nil {
+			detector.Cancel()
+		}
 	}
 }
 
