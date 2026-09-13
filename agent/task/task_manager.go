@@ -766,7 +766,14 @@ func (tm *TaskManager) pruneTerminal() {
 	}
 	tm.mu.Unlock()
 	for _, t := range victims {
-		t.detector.Cancel()
+		// detector 可为 nil：RestoreTask 重建的任务（跨重启不可复原，设计使然）。
+		// 与 Cancel()/Spawn() 的守卫风格一致；锁内拷出避免与 resume 换 detector 竞态。
+		t.mu.Lock()
+		detector := t.detector
+		t.mu.Unlock()
+		if detector != nil {
+			detector.Cancel()
+		}
 	}
 }
 
