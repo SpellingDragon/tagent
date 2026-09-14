@@ -14,7 +14,7 @@
 #   4. SIGTERM old (15s grace) -> SIGKILL fallback
 #   4b. stage REINCARNATION_NOTICE (scene block for the next process)
 #   5. relaunch with snapshot env (python execve), session detached
-#   6. healthz loop 30x2s -> OK/FAIL verdict in restart.log
+#   6. healthz loop 90x2s -> OK/FAIL verdict in restart.log
 set -u
 BASE=/home/lighthouse/tagent/examples/wechat-bot
 OLD_PID="${1:?usage: restart-tagent.sh <old_pid>}"
@@ -120,7 +120,7 @@ echo "$NEW_PID" > "$PIDF"
 log "launched pid=$NEW_PID (env re-injected)"
 
 # 6. health check loop
-for i in $(seq 1 30); do
+for i in $(seq 1 90); do
     sleep 2
     if curl -sf --max-time 3 http://127.0.0.1:8089/healthz > /tmp/tagent_healthz.json 2>/dev/null; then
         LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
@@ -149,6 +149,6 @@ log "=== restart session end (SUCCESS) ==="
         exit 1
     fi
 done
-touch /tmp/tagent_restart.done; log "FAIL: healthz not up in 60s (process may still be initializing) - manual check required"
+touch /tmp/tagent_restart.done; log "FAIL: healthz not up in 180s (process may still be initializing) - manual check required"
 log "=== restart session end (TIMEOUT) ==="
 exit 1

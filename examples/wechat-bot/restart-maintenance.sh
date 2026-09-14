@@ -148,7 +148,7 @@ echo "$SPAWN_PID" > "$PIDF"
 log "launched spawn wrapper pid=$SPAWN_PID (fds 3+ closed before exec)"
 
 # ---- 6. 健康门控 ----
-for i in $(seq 1 30); do
+for i in $(seq 1 90); do
     sleep 2
     if curl -sf -m 3 "$HEALTH" > /tmp/tagent_healthz.json 2>/dev/null; then
         NEW_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
@@ -168,6 +168,6 @@ log "=== insurance session end (SUCCESS) ==="
         exit 0
     fi
 done
-log "FAIL: healthz not up in 60s — manual check required. rollback: cp wechat-bot.prev wechat-bot"
+log "FAIL: healthz not up in 180s — manual check required. rollback: cp wechat-bot.prev wechat-bot"
 log "=== insurance session end (FAILED) ==="
 exit 1
