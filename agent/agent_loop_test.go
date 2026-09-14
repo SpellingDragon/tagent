@@ -153,20 +153,3 @@ func TestRunEventLoop_ToolCallResponse(t *testing.T) {
 	assert.GreaterOrEqual(t, mock.getCallCount(), 1)
 	assert.Equal(t, 1, mockTool.getCallCount())
 }
-
-func TestRunEventLoop_OnlyToolUse_NoModelCall(t *testing.T) {
-	bus := NewEventBus()
-	outputCh := make(chan *event.Event, 10)
-
-	mock := &loopMockModel{responses: nil}
-	ta := newTestTagentAgent("test-loop", mock, nil, outputCh, bus)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	go ta.runEventLoop(ctx, bus, ta.contextManager)
-
-	bus.Publish(NewToolUseEvent(model.ToolCall{ID: "tc1", Function: model.FunctionDefinitionParam{Name: "unknown_tool"}}))
-	<-ctx.Done()
-
-	assert.Equal(t, 0, mock.getCallCount(), "model should not be called for tool_use-only batches")
-}

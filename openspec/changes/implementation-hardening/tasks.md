@@ -52,9 +52,9 @@
 
 ## 4. WP5 死代码二清（先于 WP4——不给死码做回收）
 
-- [ ] 4.1 删 TypeToolUse + NewToolUseEvent + :27/:36 注释段【event_bus.go:58-91；registry 无条目 R12 已证】；头注释改写实：「turn 间事件邮箱 + turn 内框架原生 ReAct」；**坑**：测试文件引用须同步清理（grep _test 全量）；删后 grep 归零验证
-- [ ] 4.2 删 modelref.go BuildDirectRequest/CallDirectModel/errDirectCall（**删前再 grep 一遍调用面归零——守则 1 防线**）；FoldModelRefAliases 保留（config.go:718 在用）
-- [ ] 4.3 IsTmuxAvailable 改 `exec.LookPath("tmux")` 真探测【action_tool.go:751】（**独立于 NewTmuxExecutor 构造——勿再用 `!= nil` 判定**）；:176 降级分支语义测试（PATH 置空场景 t.Setenv）
+- [x] 4.1 删 TypeToolUse + NewToolUseEvent + :27/:36 注释段【event_bus.go:58-91；registry 无条目 R12 已证】；头注释改写实：「turn 间事件邮箱 + turn 内框架原生 ReAct」；**坑**：测试文件引用须同步清理（grep _test 全量）；删后 grep 归零验证
+- [x] 4.2 删 modelref.go BuildDirectRequest/CallDirectModel/errDirectCall（**删前再 grep 一遍调用面归零——守则 1 防线**）；FoldModelRefAliases 保留（config.go:718 在用）
+- [x] 4.3 IsTmuxAvailable 改 `exec.LookPath("tmux")` 真探测【action_tool.go:751】（**独立于 NewTmuxExecutor 构造——勿再用 `!= nil` 判定**）；:176 降级分支语义测试（PATH 置空场景 t.Setenv）
 - [ ] 4.4 回归门：staticcheck 全量零输出 + `go vet ./...` + 全包 -short 绿
 
 ## 5. WP4 资源与触发面收口

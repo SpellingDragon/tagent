@@ -18,26 +18,27 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// AgentEvent is the unified event type for the agent's event bus.
-// Every event flowing through the bus is represented as an AgentEvent,
-// carrying a typed payload that the Preprocessor and AgentLoop inspect.
+// AgentEvent is the unified event type for the agent's persistent event bus
+// (turn-间事件邮箱). Every event flowing through the bus is an AgentEvent.
 //
-// Only two event types serve as bus triggers:
-//   - TypeExternalInput: external input (user, tmux, meditation, sub-agent result)
-//   - TypeToolUse: LLM decided to call a tool (dispatched asynchronously)
+// Exactly one event type serves as a bus trigger:
+//   - TypeExternalInput: external input (user, tmux, meditation, task settle)
 //
 // agent_output does NOT enter the bus — it is emitted directly to outputCh.
+// Honest scope note: the bus coordinates TURNS; the turn-INTERNAL tool loop
+// remains the upstream framework's synchronous ReAct (runner.Run). The old
+// "tool_use bus trigger" abstraction (TypeToolUse) had no producer and no
+// consumer — removed as ghost code (implementation-hardening 4.1).
 type AgentEvent struct {
 	// ID is a unique identifier for this event.
 	ID string `json:"id"`
 
-	// Type is the event type (e.g., "external_input", "tool_use").
+	// Type is the event type (e.g., "external_input").
 	// Reuses tagentevent.TypeExternalInput for external inputs.
-	// Uses TypeToolUse for tool invocations.
 	Type string `json:"type"`
 
 	// Source identifies the producer of this event.
-	// Values: "user", "tmux", "meditation", "subagent", "agent_loop", "inject".
+	// Values: "user", "tmux", "meditation", "task", "subagent", "inject".
 	Source string `json:"source"`
 
 	// Timestamp is when this event was created.
@@ -46,10 +47,6 @@ type AgentEvent struct {
 	// Message carries the payload for external_input events.
 	// Nil for non-external_input events.
 	Message *model.Message `json:"message,omitempty"`
-
-	// ToolCall carries the payload for tool_use events.
-	// Nil for non-tool_use events.
-	ToolCall *model.ToolCall `json:"tool_call,omitempty"`
 
 	// Metadata holds extension data (event_key, partition_id, source_session, etc.).
 	Metadata map[string]any `json:"metadata,omitempty"`
@@ -73,18 +70,6 @@ func NewExternalInputEvent(source string, msg model.Message) *AgentEvent {
 		Source:    source,
 		Timestamp: time.Now(),
 		Message:   &msg,
-		Metadata:  make(map[string]any),
-	}
-}
-
-// NewToolUseEvent creates a tool_use event from a model.ToolCall.
-func NewToolUseEvent(toolCall model.ToolCall) *AgentEvent {
-	return &AgentEvent{
-		ID:        uuid.NewString(),
-		Type:      TypeToolUse,
-		Source:    "agent_loop",
-		Timestamp: time.Now(),
-		ToolCall:  &toolCall,
 		Metadata:  make(map[string]any),
 	}
 }
