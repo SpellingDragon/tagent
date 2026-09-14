@@ -26,3 +26,13 @@
 | 白盒单元 | 各业务包内 `*_test.go` | 私有状态机中间态（勿迁入本目录，勿为迁移导出内部符号） |
 
 运行：`go test ./tests/`（真实 LLM 经 `testutil.LoadAPIKey` 读 `ZAI_API_KEY`——GLM Coding Plan，端点 `open.bigmodel.cn/api/coding/paas/v4`；`-short` 全部跳过 LLM 用例。例外：`hy3_thinking_test` 为混元专属测试，用 `TENCENT_API_KEY`）。契约套件单跑：`go test ./tests/ -run 'TestContract_|ModelCopiesHex' -v`。
+
+## Soak 连续性测试（-tags soak，implementation-hardening 8.3）
+
+「连续运行数天不失忆」的长程证据生成器：N 轮「写事件→Close（持久屏障）→新实例重建→断言 round-0 仍可召回」，参数化轮数与每轮事件量：
+
+```bash
+go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -args -rounds=30 -events-per-round=30
+```
+
+CI 经 workflow_dispatch 手动触发（ci.yml soak job）。默认套件不含（build tag 隔离）。

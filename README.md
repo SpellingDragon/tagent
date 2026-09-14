@@ -154,7 +154,7 @@ cd examples/wechat-bot
 cd examples/wechat-bot && go run .    # 微信机器人：持久循环+全部机制实战
 ```
 
-其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`）——见 [docs/wiki/](docs/wiki/)。
+其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`；HTTPAPI 默认 fail-closed——设 `TAGENT_RL_AUTH_TOKEN` 走 Bearer 认证可外露，未设仅绑 127.0.0.1）——见 [docs/wiki/](docs/wiki/)。
 
 ## 🧠 心智模型
 
@@ -261,6 +261,8 @@ graph TB
 
 ## 🔧 配置参考
 
+> 配置键**严格解析**：未知字段启动即报错并列名（拼写错误不再静默漂移）；结构变更走弃用流程（旧别名有重叠期）。
+
 ### 全局选项
 
 | 选项 | 默认值 | 说明 |
@@ -285,6 +287,7 @@ graph TB
 | `model` / `provider` | （继承全局） | LLM 模型与 provider |
 | `system_prompt.files` | `[]` | 加载的 prompt 文件 |
 | `memory.type` | `memory` | `memory`（进程内）/`file`（rustviking CLI 持久）/`localfile`（JSON 文件 KV 持久，零外部依赖） |
+| `memory.fsync` | `true` | localfile 专用耐久开关：WAL 追加/快照/目录三级 fsync，已确认写入抗掉电；`false` 换吞吐（启动留降级告警） |
 | `memory.path` | `""` | 存储路径/标识；`memory` 型下同 path 的 agent 共享同一实例，空 = 隔离存储 |
 | `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区（跨 agent 记忆访问须显式授权） |
 | `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，负值=关闭）/`type_ttl`/`check_interval`/`max_events_per_partition` |

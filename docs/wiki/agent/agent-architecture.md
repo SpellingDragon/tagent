@@ -59,7 +59,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 - `StartLoop(userID, sessionID)` — 启动持久事件循环，返回 outputCh
 - `Run(ctx, inv)` — 子 agent 单轮调用，创建临时 ContextManager + 临时 EventBus，直调一次 `RunFlow`
 - `InjectMessage(msg)` — 向 activeBus 发布 external_input
-- `StopLoop()` — 停止持久循环
+- `StopLoop()` — 停止持久循环并**终结实例**（输出通道恰关一次；二次 `StartLoop` 显式报错——V15，重启语义=新建 agent 实例）
 - `Close()` — 关闭 ContextManager（释放 Runner）
 
 ### 2.2 runEventLoop（事件循环）
@@ -122,7 +122,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 **错误处理**：RunFlow 失败后指数退避重试（100ms → 200ms → 400ms，最多 3 次；ctx 取消不计）。重试耗尽后**仅记日志并上报 DegradationManager 的 model 依赖失败**（每 turn 至多一次，成功时经 `ReportSuccess` 走 degraded→recovering→normal 恢复路径；RunFlow 返回的是传输层错误，model-API 错误经 outputCh 流出，故不再发布错误事件）。退化 turn（无工具调用且空 final）在**成功分支内**判定并额外重试一次（同一 turn span，`degenerate_retry` 属性标记，不另开 span）。`BuildInvocation` 只要求 `Type=external_input` 且 `Message` 非空，不区分 Source。
 
-`StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`。
+`StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`（终结态，不可重启——输出通道在循环退出时恰好关闭一次，二次关闭会 panic，故二次 Start 显式拒绝）。
 
 `Run()`（子 Agent 调用路径）**不使用 `runEventLoop`**：它创建临时 EventBus + ContextManager 后，先将驱动请求 `persistBusEvent` 写入临时 `SessionProjection`（保证请求位于时间线首条），再在 goroutine 中**直接调用一次 `RunFlow`**。Turn 边界即 `RunFlow` 的自然返回——`RunFlow` 内部由框架跑完完整 ReAct 工具循环（多轮）直到最终 assistant 响应才返回，随后 `close(invOutputCh)` 通知调用方结束。子 Agent 与持久循环**共享同一个 turn 原语 `RunFlow`**，区别仅在于是否包裹 `for { Pull }` 守护循环；不再依赖「事件流探测 + drain 定时器 + 强制 cancel」判断 turn 结束。
 
