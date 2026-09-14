@@ -49,7 +49,8 @@
       - 逐一排查：thinking 参数（thinking_enabled=true 对 56 条消息上下文的兼容性）、流式/非流式、超时、请求体参数
       - 建议先采集：一次带完整请求体的失败调用日志（或本地 curl 复现）作为诊断基线
       - 产出：诊断结论（根因归类：thinking/流式/超时/其他）+ 修复或规避方案；若与供应商端点相关，反馈进 5.3 决策
-- [ ] 5.6 knowledge 子 agent 换 deepseek-flash + reasoning effort=max（用户 2026-09-13 20:2x 指令；**门控：5.1/5.2 修复完成且换装生效后执行**）
+- [x] 5.6 knowledge 子 agent 换 deepseek-flash + reasoning effort=max（用户 2026-09-13 20:2x 指令；**门控：5.1/5.2 修复完成且换装生效后执行**）
+      - ✅ 2026-09-14 落地：yaml 2c9b5aa（knowledge→deepseek/deepseek-flash/reasoning_effort=max）；预检 deepseek 端点 HTTP 200 接受 effort=max；部署事故如实入册——2c9b5aa knowledge 块残留 'low' 与新增 'max' 并存→yaml.v3 strict 重复键→03:52:31 启动即死，宕机至用户 12:05:06 手修复活；手修版已 fix-forward 提交 b3d4f5f，启动横幅实证 wiring.go:224 knowledge resolved deepseek-flash via deepseek（12:05:08）。流程教训：部署失败路径此前无探针全盲——后续一切部署强制附 ~75s 验证探针任务（pid+healthz+横幅），FAIL 即唤醒
       - 改点：tagent.yaml agents.knowledge 段显式 provider: deepseek / model: deepseek-flash + effort 字段（先实证 effort 配置 schema：grep ReasoningEffort 消费链，勿猜）
       - 深浅注意：deepseek 走 api.deepseek.com/v1，与全局 zhipu 并存；改后需换装重启（全局/agent 级模型不在热更指纹范围——5.1 修复前）
       - 验证：wiring.go:82/156 resolved 日志 + knowledge 实调 trajectory 确认 model=deepseek-flash
