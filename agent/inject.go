@@ -51,6 +51,40 @@ func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message)
 	log.Warnf("[InjectMessageWithSource] agent %q has no bus, message dropped", ta.name)
 }
 
+// EmitSystemAlert publishes an environment-level alert (config errors, hot
+// reload failures/rollbacks, degraded fallbacks) onto the persistent bus so
+// the agent perceives infrastructure problems as events (external_input) on
+// its next iteration, instead of them being silently confined to log files.
+// 2026-09-14: motivated by the 03:52 incident -- the hot-reloader correctly
+// rejected a bad config ("parse FAILED - serving previous") but the agent
+// never saw it; the follow-up restart then cold-booted the same bad config.
+func (ta *TagentAgent) EmitSystemAlert(alert string) {
+	if ta == nil {
+		return
+	}
+	msg := model.Message{
+		Role:    model.RoleSystem,
+		Content: "[system-alert] " + alert,
+	}
+	evt := NewExternalInputEvent("system_alert", msg)
+	if evt.Metadata == nil {
+		evt.Metadata = make(map[string]any)
+	}
+	evt.Metadata["alert"] = alert
+	if ta.persistentBus != nil {
+		ta.persistentBus.Publish(evt)
+		return
+	}
+	ta.activeBusMu.Lock()
+	bus := ta.activeBus
+	ta.activeBusMu.Unlock()
+	if bus != nil {
+		bus.Publish(evt)
+		return
+	}
+	log.Warnf("[EmitSystemAlert] agent %q has no bus, alert dropped: %s", ta.name, alert)
+}
+
 // InjectMessageWithMetadata injects a message with a source label and
 // arbitrary metadata. The metadata is propagated to all events derived
 // from this message via event.StateDelta with "meta_" prefix.

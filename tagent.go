@@ -365,11 +365,13 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			fresh, err := LoadConfig(cfgPath)
 			if err != nil {
 				log.Errorf("[org-hotreload] config parse FAILED — serving previous: %v", err)
+				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 配置解析失败，沿用旧配置（未生效）: %v", err))
 				return
 			}
 			fp, err := computeOrgFingerprint(fresh)
 			if err != nil {
 				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
+				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 指纹计算失败，沿用旧配置: %v", err))
 				return
 			}
 			// R4 3.1（🔴5）memory 先序：org 指纹比对**之前**独立 diff memory 段——
@@ -377,6 +379,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			mfp, merr := computeMemoryFingerprint(fresh)
 			if merr == nil && mfp != lastMemFP {
 				log.Errorf("[org-hotreload] agents.*.memory.* CHANGED (mem-fp %s.. -> %s..) — runtime storage migration is not supported; RESTART required to apply", short(lastMemFP), short(mfp))
+				entryAgent.EmitSystemAlert("org-hotreload: memory 段变更需重启迁移，本次未热更（须重启生效）")
 				lastMemFP = mfp
 				return
 			}
@@ -406,6 +409,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			newRunner := newTA.RebuildExecutorOn(entryAgent.ContextManager())
 			if newRunner == nil {
 				log.Errorf("[org-hotreload] executor rebuild produced no runner — serving previous (fail-closed)")
+				entryAgent.EmitSystemAlert("org-hotreload: executor 重建失败，沿用旧配置（fail-closed）")
 				return
 			}
 			oldFP := lastFP
@@ -414,6 +418,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			execGen++
 			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
 				execGen, short(oldFP), short(fp))
+			entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 热更新已生效（generation %d，fp %s.. → %s..，下回合起用新配置）", execGen, short(oldFP), short(fp)))
 			// ring 2（3.8）：保留上一代配置摘要供 Rollback（覆盖更早代）。
 			prevSnapshot = reloadSnapshot{fp: oldFP, cfg: prevKeep}
 			prevKeep = fresh
@@ -422,12 +427,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				defer mu.Unlock()
 				if prevSnapshot.cfg == nil {
 					log.Warnf("[org-hotreload] rollback: no previous generation snapshot")
+					entryAgent.EmitSystemAlert("org-hotreload: 回滚失败——无上一代快照")
 					return
 				}
 				rollbackC := *prevSnapshot.cfg
 				rbp, rerr0 := computeOrgFingerprint(&rollbackC)
 				if rerr0 != nil {
 					log.Errorf("[org-hotreload] rollback fingerprint FAILED: %v", rerr0)
+					entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚指纹计算失败: %v", rerr0))
 					return
 				}
 				if rbp == fp {
@@ -436,6 +443,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				}
 				if ta2, rerr2 := buildAgent(cfg.Entry, rollbackC.Agents[cfg.Entry], rollbackC, rc, loader, map[string]*agent.TagentAgent{}, buildModeExecutorShell); rerr2 != nil {
 					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
+					entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚重建失败，保留当前代（fail-closed）: %v", rerr2))
 					return
 				} else if r2 := ta2.RebuildExecutorOn(entryAgent.ContextManager()); r2 != nil {
 					entryAgent.SwapExecutor(r2)
