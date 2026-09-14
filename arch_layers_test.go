@@ -28,7 +28,10 @@ func internalDeps(t *testing.T, pkg string) map[string]bool {
 	deps := map[string]bool{}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, mod+"/") {
+		switch {
+		case line == mod:
+			deps["."] = true // the ROOT package itself (agent must not import it)
+		case strings.HasPrefix(line, mod+"/"):
 			deps[strings.TrimPrefix(line, mod+"/")] = true
 		}
 	}
@@ -37,6 +40,9 @@ func internalDeps(t *testing.T, pkg string) map[string]bool {
 
 func assertNoDeps(t *testing.T, pkg string, deps map[string]bool, forbidden ...string) {
 	t.Helper()
+	if len(forbidden) == 0 {
+		t.Fatalf("assertNoDeps(%s): empty forbidden set — the assertion is a no-op (self-check against silent guard rot)", pkg)
+	}
 	for _, f := range forbidden {
 		if deps[f] {
 			t.Errorf("layer violation: %s imports %s (declared direction: root → agent → plugin → memory; event is a leaf)", pkg, f)
@@ -62,14 +68,18 @@ func TestArch_LayeredDependencyDirection(t *testing.T) {
 
 	// plugin: may depend on event + memory; not agent/root/tool.
 	deps := internalDeps(t, mod+"/plugin")
-	delete(deps, "event"); delete(deps, "memory")
+	delete(deps, "event")
+	delete(deps, "memory")
 	assertNoDeps(t, mod+"/plugin", deps, "agent", "tool", "rl", "evolution")
 
 	// agent (+task/compress/governance/reliability): may depend on event +
-	// memory + plugin; not the root package.
+	// memory + plugin; NOT the root package (review P1-1: the empty-string
+	// forbidden made this layer a no-op — root is collected as ".").
 	for _, pkg := range []string{mod + "/agent", mod + "/agent/task", mod + "/agent/compress", mod + "/agent/governance", mod + "/agent/reliability"} {
 		deps := internalDeps(t, pkg)
-		delete(deps, "event"); delete(deps, "memory"); delete(deps, "plugin")
-		assertNoDeps(t, pkg, deps, "")
+		delete(deps, "event")
+		delete(deps, "memory")
+		delete(deps, "plugin")
+		assertNoDeps(t, pkg, deps, ".")
 	}
 }

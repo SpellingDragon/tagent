@@ -143,3 +143,13 @@
 **审计 F-4 更正**：真身为上游 inmemory session service/invocation 内部竞态（U3），非 Session.Clone。
 **缓行项**（D11 路由表）：god file 解体（冻结后首变）、detector/EventKey 类型化、后端注册表化。
 **v0.2.0 前重跑 maintainability-audit**（再审节奏首锚点）。
+
+## 复审修正（code review 2026-09-14）
+
+- **P1①**：arch_layers_test 的 agent 层断言空转（forbidden 传空串 + 根包不入 deps 集）——已修：根包记为 "."、agent 层禁 "."、assertNoDeps 加空集自检。
+- **P1②**：soak job 缺 workflow_dispatch 触发器（永不可运行）——已补。
+- **P2③**：5.1 兜底清扫裁撤为**超龄泄漏告警**（retiredLeakAfter=10min WARN；强关会破 drain-free）——tasks/LEDGER 如实改写；RunFlow 单消费者前提列入红色耦合观察面（并发化前须恢复兜底）。
+- **P2④**：strictyaml 补多文档/尾随内容拒绝（原单次 Decode 静默丢弃第二文档——新的静默忽略面，与 fail-loudly 目标相悖）。
+- **P2⑤**：authorized 注释如实化（token 空=本层停用，闭环靠 ValidateListenAddr）+ Bearer scheme EqualFold（RFC 9110）。
+- **盲区补测**：Diamond 构建一次测试；RetireRunner 50 代 race 压力（并发 sweep/Close）。
+- **冷分区容量语义锁定**：Init 注册的冷分区 eventCount 不恢复 → checkCapacity 对其恒跳过（容量遗忘对存量失效，**TTL 遗忘有效**）——现状语义经评审确认为接受项，留档防止未来误当 bug 排查；如需容量遗忘覆盖存量，另立案恢复 eventCount 持久化。

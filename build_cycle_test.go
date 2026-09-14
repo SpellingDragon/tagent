@@ -58,3 +58,30 @@ func TestStrictDecode_RejectsUnknownField(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "wroking_dir")
 }
+
+// TestBuildAgent_DiamondBuildsOnce (review test-blind-spot #3): A→{B,C},
+// B→D, C→D — the stack is path-scoped, so the diamond is legal and D is
+// built exactly once via the cache. Locks the other half of the cycle-check
+// contract: a regression that stops deleting stack entries on exit would
+// make this legal shape report a false cycle.
+func TestBuildAgent_DiamondBuildsOnce(t *testing.T) {
+	cfg := Config{
+		Entry: "a",
+		Agents: map[string]AgentConfig{
+			"a": {Tools: []ToolRef{
+				{Kind: ToolKindAgent, AgentID: "b", Description: "b"},
+				{Kind: ToolKindAgent, AgentID: "c", Description: "c"},
+			}},
+			"b": {Tools: []ToolRef{{Kind: ToolKindAgent, AgentID: "d", Description: "d via b"}}},
+			"c": {Tools: []ToolRef{{Kind: ToolKindAgent, AgentID: "d", Description: "d via c"}}},
+			"d": {},
+		},
+	}
+	rc := &runtimeConfig{model: &factoryMockModel{}}
+	loader := prompt.NewLoader("")
+	cache := map[string]*agent.TagentAgent{}
+
+	_, err := buildAgent("a", cfg.Agents["a"], cfg, rc, loader, cache, buildModeResident)
+	require.NoError(t, err)
+	require.Contains(t, cache, "d", "shared dependency d must be built (once) and cached")
+}

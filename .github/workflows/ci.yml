@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # API key secrets (F5, design-report-closeout): none are required — the
 # deterministic suite is fully mocked. If real-LLM contract layers are added

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,15 +118,17 @@ func ValidateListenAddr(addr, token string) error {
 }
 
 // authorized reports whether the request carries the configured bearer token
-// (constant-time compare). Empty configured token → false (fail-closed when
-// the host forgot SetAuthToken but the guard was bypassed).
+// (constant-time compare; scheme matched case-insensitively per RFC 9110).
+// An empty configured token disables auth entirely at this layer — the
+// security loop for that case is ValidateListenAddr's loopback guard on the
+// host side (the single enforcement point for the no-token deployment shape).
 func (h *HTTPAPI) authorized(r *http.Request) bool {
 	if h.authToken == "" {
 		return false
 	}
 	const prefix = "Bearer "
 	got := r.Header.Get("Authorization")
-	if len(got) <= len(prefix) || got[:len(prefix)] != prefix {
+	if len(got) <= len(prefix) || !strings.EqualFold(got[:len(prefix)], prefix) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got[len(prefix):]), []byte(h.authToken)) == 1

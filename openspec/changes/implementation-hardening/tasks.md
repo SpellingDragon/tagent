@@ -30,7 +30,7 @@
 - [x] 1.2 修复：RestoreTask 补 `watchDone/firstSettle: make(...)`（detector 保持 nil，设计语义）；Resume 换代判定改 `task.detector == nil || detector != task.detector`【锚点 :899】
 - [x] 1.3 nil detector 守卫：Spawn select【:449】与 Resume select【:918】的 `detector.Detached()` 分支加 `if detector != nil`（nil → 只等 firstSettle，与 :443 注释「纯同步」对齐）；watch()【:460】对 nil detector 直接 return。**坑**：nil-detach-channel 与 nil-interface 是两态，注释里写清（注释宣称的 nil 支持实为 nil Detached channel 形态）
 - [x] 1.4 KeepRecentTasks：SmartCompressor.Compress 加 `CompressOptions{KeepRecentTasks int}` 参数（**自有具体类型，无接口契约，R28 已证**），删 context_compressor.go:333-335 暂存-改写-defer；全调用方仅 :337 一处（R4 已证）+ 测试迁移
-- [ ] 1.5 模式级审计：全库 grep `close(` 裸调 + detector/Closer 接口方法裸调，产出清单（file:line+处置）入 LEDGER；同型者修或豁免（豁免写不可达论证）
+- [x] 1.5 模式级审计（清单落 audit-notes.md，随 8.5 并入 LEDGER）：全库 grep `close(` 裸调 + detector/Closer 接口方法裸调，产出清单（file:line+处置）入 LEDGER；同型者修或豁免（豁免写不可达论证）
 - [x] 1.6 V15 重启修复：方案 A——StartLoop 每次重建 `ta.outputCh = make(chan *event.Event, cap)`（goroutine defer close 当次通道；旧消费者已收 close 终态）；**先 grep ta.outputCh 全部读写点**（若有成员快照/其他写入方需一并梳理）+ fail-before e2e（Start→Stop→Start→Inject 断言消费；Start→Stop→Start→Stop 断言无二次 close panic）+ 冥想重启行为锁定（N2）
 - [x] 1.7 回归门：`go build ./... && go vet ./... && go test ./agent/... -short -count=1` 全绿
 
@@ -59,7 +59,7 @@
 
 ## 5. WP4 资源与触发面收口
 
-- [x] 5.1 旧 runner 延迟 Close（N7 细节 + D5 定时兜底）：ContextManager 加 retired 列表 + 全局 in-flight 计数（RunFlow 入口 inc/defer dec，归零时扫描 retired 逐个 `io.Closer` 断言 Close，幂等 once）；**另配年龄阈值定时兜底清扫**（如换代后 10 分钟仍因持续负载未归零则强制 Close——补持续负载软点）；tagent.go 换代处把跌出 ring-2 的 old 调 `cm.RetireRunner(old)`（ring-2 在 reload 闭包 prevKeep/prevSnapshot，tagent.go:323-328，N10）；测试：三代热更断言第一代 Close 恰一次、ring 内不关；另测「持续 in-flight 下兜底清扫仍回收」
+- [x] 5.1 旧 runner 延迟 Close（N7 细节 + D5 定时兜底）：ContextManager 加 retired 列表 + 全局 in-flight 计数（RunFlow 入口 inc/defer dec，归零时扫描 retired 逐个 `io.Closer` 断言 Close，幂等 once）；**另配超龄泄漏告警**（retired 记时戳，>10min 仍被 in-flight 压制则 WARN——评审 P2-3：强关会破 drain-free，故兜底裁撤为告警面，RunFlow 并发化前须重审）；tagent.go 换代处把跌出 ring-2 的 old 调 `cm.RetireRunner(old)`（ring-2 在 reload 闭包 prevKeep/prevSnapshot，tagent.go:323-328，N10）；测试：三代热更断言第一代 Close 恰一次、ring 内不关；另测「持续 in-flight 下兜底清扫仍回收」；复审补充 50 代 race 压力（含并发 sweep/Close）与终态无条件清扫测试
 - [x] 5.2 SwappableModel 同型：GenerateContent 计数包裹，Swap 换下归零后断言式 Close【swappable_model.go:35-47】；**坑**：in-flight 期间 Swap 多次——只追记「待关列表」，勿假设一代
 - [x] 5.3 lastEventKeys 封顶 4096：超限按 value（int64 单调）淘汰最旧【memory_plugin.go:36/208】；测试：超限修剪 + 因果链 parentKey 正确性保持
 - [x] 5.4 Rollback 手动触发面（N10：核心零改动）：wechat-bot main.go 宿主侧接 SIGUSR2【:241 现有 signal.NotifyContext 处扩展】→ 调已有 `ta.Rollback()`（task_record_sink.go:125）；e2e：触发→断言换回上一代（日志指纹）
@@ -68,7 +68,7 @@
 ## 6. WP6 配置健壮性
 
 - [x] 6.1 strict（两处一点）：抽共享 `strictDecode(data, out)` 助手（**一实现两调用点**，L3 单点），config.go:882 与 tool/mcp/registry.go:274（R2 已证）同步改接；助手内部 `yaml.NewDecoder + KnownFields(true)`，错误列全部未知字段；测试：拼错键报错并列名；**另附弃用流程注**（strict 抬高了 schema 演化税：字段改名/删除自此为显式破坏性变更，弃用流程写入 config.go 头注——两版本重叠期后再删）
-- [ ] 6.2 环检测：buildAgent 递归加 visited（A↔B/自引用两形态报错指名）；测试覆盖两形态
+- [x] 6.2 环检测：buildAgent 递归加 visited（A↔B/自引用两形态报错指名）；测试覆盖两形态
 - [x] 6.3 迁移验证：仓库内全部随载 yaml（resources/examples/tests + wechat-bot 独立模块）逐一过 strict；**坑**：wechat-bot 生产 yaml 可能含已 Deprecated 但仍合法的别名字段——它们在 struct 内不会报错；报错的是真未知字段，逐个修正或（若属拼写）上报
 - [x] 6.4 回归门：根包 + `cd examples/wechat-bot && go build ./... && go test ./... -short` 全绿
 
