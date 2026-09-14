@@ -104,3 +104,22 @@
 2. "问题是否还在"以代码现状为准,不以任务勾选状态为准(勾选落后于演进是停滞变更的通病);
 3. 未动工变更复活前必须做前提核验(挂载点是否已被退役/重构);
 4. 活跃集目标规模:≤ 1 张地图 + ≤ 2 个执行中变更(单维护者节奏)。
+
+## 红色耦合台账（implementation-hardening 7A.3，2026-09-14）
+
+上游内部行为假设（trpc-agent-go v1.10.0）——升级时逐项对照钉测/豁免状态：
+
+| # | 假设 | 状态 |
+|---|------|------|
+| U1 | 插件管线在 tool-result 事件上**同步等待完成**（投影完备性 I2 的构造保证） | ✅ 钉测 `TestI2_BeforeModelCompleteness_RealPipeline`（agent/invariants_i2_test.go） |
+| U2 | runner 内部 steer 队列关闭路径与事件消费并发安全 | ❌ 上游内部竞态（-race 实测），豁免：见 CI race job 注释 + 上游 issue 待报 |
+| U3 | inmemory session service 的 hook 链并发读写（session.go:122 栈族） | ❌ 上游内部竞态，豁免同上；审计 F-4 的「Session.Clone」描述系误判，真身为本条 |
+| U4 | BeforeModel 回调时序（投影装配先于 LLM 调用） | ✅ 由 U1 钉测覆盖同链路 |
+
+隐式耦合（包间暗连，非 import）：
+
+| # | 耦合 | 状态 |
+|---|------|------|
+| C1 | evolution guardrail 证据 ← governance 事件流（治理关闭则两判据空转） | ✅ 显式化：`SetGovernanceSignalsAvailable` 注入 + 评估输出声明（7.3） |
+| C2 | 分区哈希（FNV-1a 32 位）碰撞 → 两 agent 记忆命名空间静默合并 | ⚠️ 低概率已知，未修（撞名即显性化；文档留痕） |
+| C3 | task 包时序敏感测试首跑 FAIL 复跑绿（2026-09-14 实录，具体测试未定位） | ⚠️ 与 F-5 同族，8.1 分类处置一并检视 |

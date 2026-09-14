@@ -82,10 +82,10 @@
 
 ## 7A. WP9 架构防呆立法（v0.1.0 冻结前置；D11 路由表之入案四件）
 
-- [ ] 7A.1 分层断言测试（L2）：新增 `arch_layers_test.go`（根包或 tests/）——`go list -deps` 枚举传递依赖，断言：memory/plugin 及子包不引 agent/根包；event 不引任何其他内部包；agent 及子包不引根包；现状已核验全绿（L1 核验 2026-09-14），测试为纯新增固化，未来违例即红；测试注释标 L2 梯级与 spec 条目引用
-- [ ] 7A.2 上游假设钉（L1）：invariants_test.go 补 `TestI2_BeforeModelCompleteness_RealPipeline`——**走真实上游管线**（非 mock 插件序列）：事件经真实 plugin pipeline 落库后，BeforeModel 渲染包含全部先前已存储事件；钉的假设（插件管线在 tool-result 事件上同步等待完成）写入测试头注；若上游行为已变（测试红），停下上报（守则 1）而非改测试迁就
-- [ ] 7A.3 红色耦合台账：LEDGER 新节——上游内部假设清单（插件管线同步等待/BeforeModel 时序/session service 行为等，逐项标 7A.2 钉测或豁免+论证）+ 隐式耦合清单（governance→evolution 信号、分区哈希碰撞面）；与 8.1 的 race 豁免清单交叉引用
-- [ ] 7A.4 回归门：`go test . ./agent/ -short -count=1 -run 'TestArch|TestI2'` 全绿（含新钉测）
+- [x] 7A.1 分层断言测试（L2）：新增 `arch_layers_test.go`（根包或 tests/）——`go list -deps` 枚举传递依赖，断言：memory/plugin 及子包不引 agent/根包；event 不引任何其他内部包；agent 及子包不引根包；现状已核验全绿（L1 核验 2026-09-14），测试为纯新增固化，未来违例即红；测试注释标 L2 梯级与 spec 条目引用
+- [x] 7A.2 上游假设钉（L1）：invariants_test.go 补 `TestI2_BeforeModelCompleteness_RealPipeline`——**走真实上游管线**（非 mock 插件序列）：事件经真实 plugin pipeline 落库后，BeforeModel 渲染包含全部先前已存储事件；钉的假设（插件管线在 tool-result 事件上同步等待完成）写入测试头注；若上游行为已变（测试红），停下上报（守则 1）而非改测试迁就
+- [x] 7A.3 红色耦合台账：LEDGER 新节——上游内部假设清单（插件管线同步等待/BeforeModel 时序/session service 行为等，逐项标 7A.2 钉测或豁免+论证）+ 隐式耦合清单（governance→evolution 信号、分区哈希碰撞面）；与 8.1 的 race 豁免清单交叉引用
+- [x] 7A.4 回归门：`go test . ./agent/ -short -count=1 -run 'TestArch|TestI2'` 全绿（含新钉测）
 
 ## 8. WP8 战略收尾（前置：WP1-7 与 7A 全绿）
 
