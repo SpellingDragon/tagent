@@ -44,7 +44,8 @@
       - 决策选项 B：保留 deepseek 切换，补齐观测（LLM 调用入 trajectory）与 provider 健康监控后再确认
       - 决策需用户明确拍板；决策结果记录于本 change 目录 `decision-log.md`
       - 决策后执行：A 路线 → 执行回退 + tagent.yaml 模型名修正 + 回归；B 路线 → 实施观测补齐 + 偂康监控
-- [ ] 5.4 坑5：plan 子 agent 空响应诊断（depends_on: 5.3，因空响应与供应商链路相关）
+- [x] 5.4 坑5：plan 子 agent 空响应诊断（depends_on: 5.3，因空响应与供应商链路相关）
+      - ✅ 2026-09-14 诊断：11/2072=0.53% 空 choices（plan glm-5.3 deep-thinking+长上下文），两类形态；观测守卫落 rl/trajectory_recorder.go:300（200+空choices→ERROR 含 model/n_msgs/duration），触发语义=告警不重放（重试属 agent loop 错误路径）；agent/根/rl 三包测试 EXIT=0；commit 见 feat(rl)
       - 复现确认：zhipu glm-5.3-flash 空响应在 plan 子 agent（model=glm-5.3, messages=56, thinking_enabled=true）是否复现
       - 逐一排查：thinking 参数（thinking_enabled=true 对 56 条消息上下文的兼容性）、流式/非流式、超时、请求体参数
       - 建议先采集：一次带完整请求体的失败调用日志（或本地 curl 复现）作为诊断基线
@@ -74,7 +75,8 @@
 - [x] 7.3 回归全绿 + commit
 
 ## 8. 验收与换装演练（depends_on: 5/6/7 全部完成）
-- [ ] 8.1 全量回归：go build/vet/test ./... 全绿
+- [x] 8.1 全量回归：go build/vet/test ./... 全绿
+      - ✅ 2026-09-14 12:2x 全量回归 /tmp/regress_81.txt：BUILD_EXIT=0 VET_EXIT=0；全部包 ok，唯 tool/action FAIL(53.9s)——单包重跑 ok 62.9s EXIT=0（/tmp/ta_fail.txt），定性为并发负载下 TmuxMonitor 计时敏感 flaky，非真回归（如实记录）
 - [x] 8.2 换装部署演练：走 restart-tagent.sh 或既有换装流程，留存部署证据（二进制 sha/size、restart.log、healthz）
 - [x] 8.3 转世演练验收：模拟未压缩 WAL 重启 → 投影 fallback 重建成功（验收语义=新世可见上一世**去世时刻的上下文**：cap 内完整恢复、顺序一致；cap 外有界降级=boundary 记账+WARN，被截事件仍留事实链可 recall）；模拟 nil-probe 任务 → 回收链路生效；主 agent LLM 调用入 trajectory 可见
       - ✅ 2026-09-14 生产演练矩阵（比模拟更硬）：① 未压缩 WAL 重启 → fallback 重建成功：12:05:08 `mode=fallback scanned=517 truncated=true boundary=…`（cap 内保留最新500、截断记账+WARN，被截事件留事实链）+ 12:05:13 snapshot 路径 `refs=414 tail=35`（同窗双路径对照）；② nil-probe 回收：00:28 通道1 一次裁决 5 个孤儿 suspect（7c2d4d8b/561c5812/fb969979/d991cdfd/a4b2173d）→ 看板清空 + re-spawn 解禁；③ 主 agent LLM 入 trajectory：s58 换装后首个真实请求 03:47:55 n_msgs=418（system×3+完整历史）。语义级活证：12:05 重启后本会话携带完整上一世上下文继续对话至今
