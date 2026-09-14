@@ -127,6 +127,10 @@ func TestRunEventLoop_FinalResponse(t *testing.T) {
 }
 
 func TestRunEventLoop_ToolCallResponse(t *testing.T) {
+	if raceEnabled {
+		t.Skip("upstream trpc-agent-go internal race (LEDGER 红色耦合台账 U2/U3) — exemption per implementation-hardening 8.1")
+	}
+
 	bus := NewEventBus()
 	outputCh := make(chan *event.Event, 10)
 

@@ -123,3 +123,23 @@
 | C1 | evolution guardrail 证据 ← governance 事件流（治理关闭则两判据空转） | ✅ 显式化：`SetGovernanceSignalsAvailable` 注入 + 评估输出声明（7.3） |
 | C2 | 分区哈希（FNV-1a 32 位）碰撞 → 两 agent 记忆命名空间静默合并 | ⚠️ 低概率已知，未修（撞名即显性化；文档留痕） |
 | C3 | task 包时序敏感测试首跑 FAIL 复跑绿（2026-09-14 实录，具体测试未定位） | ⚠️ 与 F-5 同族，8.1 分类处置一并检视 |
+
+## implementation-hardening 变更台账（2026-09-14 执行完毕，main）
+
+三份第二轮外部评审（设计7.5/实现6.6）→ 逐条核验（V1-V14 证实 + 3 反证）→ 深钻补证（V15-V18）→ 分 WP 落地：
+
+| WP | 内容 | 要点 |
+|----|------|------|
+| WP1 裂缝收口 | Resume close(nil watchDone)（fail-before 先红后绿）；nil detector 守卫（nil通道变量式）；KeepRecentTasks 参数化（共享字段竞态结构性消除）；**V15 翻案修复**：StartLoop goroutine defer close(outputCh) + 成员复用 → Stop 终结化（方案 D：二次 Start 显式报错；宿主 range-close 契约保留；hook 闭包捕获构造期通道使重建方案被否） | R15 反证系核验不完整——**教训：反证须穷尽读写两侧** |
+| WP2 耐久 | LocalFileKV fsync（WAL批/快照tmp/目录，`FSync *bool` 默认开，关闭留 WARN）；冷分区发现（Init 实装 + ListPartitionIDs 类型断言式，New 自动接线；**Init 原本连生产调用方都没有**）；bench 屏障 5.6ms vs 0.81ms（批级摊销影响可忽略） | |
+| WP3 安全 | RL HTTP Bearer 认证（ServeHTTP 顶部单点，全端点无豁免）+ ValidateListenAddr loopback fail-closed；wechat-bot 无 token 自动回退 127.0.0.1（原 ：port 全接口为实际漏洞面）；recallByItems 钳 50 + 截断说明 | |
+| WP5 死码二清 | TypeToolUse/NewToolUseEvent/ToolCall 字段/两幽灵测试；modelref 死导出；IsTmuxAvailable 真 LookPath 探测（原恒真）；event_bus 头注改写实 | 上轮清理漏验 wechat-bot 独立模块（WithSummaryModel 调用残留）——本轮补验并修 |
+| WP4 资源回收 | ContextManager.RetireRunner（retired+in-flight 计数，归零幂等 Close；Close 终态无条件清扫）；SwappableModel 同型（测试捕获同例替换误退役缺陷并修）；lastEventKeys 封顶 4096 按 key 单调淘汰；Rollback 触发面=宿主 SIGUSR2（核心零改动） | 实施修正：runner.Runner 自带幂等 Close（R11 误判更正）；回滚重建不复用旧 runner，退役无需 ring 豁免 |
+| WP6 配置 | internal/strictyaml 单实现，LoadConfig+mcp/registry 两点接通；buildAgent path-scoped 环检测（A↔B/自引用显式报错）。strict 首战擒三真实漂移：x-anchors（补扩展保留位）/summary_effort（补别名+fold——此前静默丢弃的功能缺口）/e2e 夹具 api_key 明文（改 api_key_env） | |
+| WP7 文档 | README「永久」三处改 TTL 实述；compaction gzip 化石注释改真；guardrail 治理耦合显式化（SetGovernanceSignalsAvailable + 评估输出声明）；wiki 四处同步 | |
+| WP9/7A 立法 | 分层依赖断言测试（现状全绿固化）；**上游假设钉 TestI2**（真实管线，I2 投影完备性）；LEDGER 红色耦合台账（U1-U4/C1-C3）；verify_doc 悬空 [0] 系第三方评审存档原文（不改写留痕） | |
+| WP8 战略 | race 分类处置：**十案全为上游内部（U2/U3）+ 时序 flaky（C3）——无本地可修案，不为过门禁改生产码**；raceEnabled build-tag 豁免机制 + 触发测试挂账；**agent 包纳入 race 门禁**（ci.yml）；soak 骨架（-tags soak，rounds 参数化，已跑通 4 轮重启持久验证） | |
+
+**审计 F-4 更正**：真身为上游 inmemory session service/invocation 内部竞态（U3），非 Session.Clone。
+**缓行项**（D11 路由表）：god file 解体（冻结后首变）、detector/EventKey 类型化、后端注册表化。
+**v0.2.0 前重跑 maintainability-audit**（再审节奏首锚点）。

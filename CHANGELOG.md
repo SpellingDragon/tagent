@@ -1,10 +1,27 @@
 # Changelog
 
 本项目所有显著变更记录于此。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。首个 tag（v0.1.0）打出前的变更统一记于
-`[Unreleased]`（按 roadmap 裁决 C11，tag 时点待定）。
+版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
+
+（空——冻结期：治理/自进化闭环需在真实部署连续运行一个月后方启动下一轮功能迭代。）
+
+## [v0.1.0] - 2026-09-14
+
+### implementation-hardening（收尾加固，冻结承诺面前置）
+
+- **安全收口**：RL HTTP API Bearer token 认证（`TAGENT_RL_AUTH_TOKEN`；ServeHTTP 单点强制、全端点无豁免）+ `ValidateListenAddr` loopback fail-closed（无 token 非 loopback 拒绝监听）；wechat-bot 未设 token 自动仅绑 127.0.0.1。**部署注意**：原 `:port` 全接口监听的部署需设 token 或接受回环约束。
+- **耐久收口**：LocalFileKV WAL/快照/目录三级 fsync（`memory.fsync` 默认开，关闭留降级告警）——已确认写入自此抗掉电；冷分区启动发现（重启后未触碰分区纳入 TTL/容量/压实遗忘扫描）。
+- **正确性收口**：RestoreTask 生命周期通道补全（修复重启后 resume `close(nil)` panic，fail-before 回归）；Spawn/Resume/watch nil detector 防御；KeepRecentTasks 改每调用参数（消除共享字段竞态）；**StopLoop 终结化**——二次 StartLoop 显式报错（原实现重启返回已关通道且二次 Stop 必 panic；重启语义=新建 agent 实例）。
+- **资源回收**：SwapExecutor/SwappableModel.Swap 换下的旧 runner/model 延迟 Close（in-flight 计数门控）；lastEventKeys 封顶 4096。
+- **配置健壮**：YAML/JSON 严格解析（未知字段启动报错并列名——**含未知键的旧配置将启动失败，请迁移**）；agent 引用环构建期检测。
+- **死代码二清**：TypeToolUse 幽灵抽象、modelref 死导出删除；IsTmuxAvailable 真 PATH 探测。
+- **架构立法**：分层依赖方向断言测试；上游内部行为假设钉（I2 投影完备性真实管线钉测）；LEDGER 红色耦合台账；soak 连续性测试骨架（`-tags soak`，CI 手动触发）。
+- **race 门禁扩面**：agent 核心包纳入 CI race（上游内部竞态经 `raceEnabled` 豁免挂账，LEDGER U2/U3；上游 issue 待报）。
+- **文档对齐**：「事件永久入库」实述为「不可变入库 + 默认类型 TTL（3-30 天）可配永久」；治理关闭时评估输出显式声明信号不可用。
+
+## [Unreleased]（v0.1.0 前历史，随 v0.1.0 一并发布）
 
 ### Changed（设计返工，self-evolution-git-native 2026-09-07）
 

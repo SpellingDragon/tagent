@@ -53,6 +53,10 @@ func (m *recordingModel) Info() model.Info { return model.Info{Name: "recording-
 // asynchronous, this test fails HERE — before the invariant silently breaks
 // in production (implementation-hardening 7A.2).
 func TestI2_BeforeModelCompleteness_RealPipeline(t *testing.T) {
+	if raceEnabled {
+		t.Skip("assumption pin walks the real pipeline — trips LEDGER U2/U3 upstream races under -race; behavioral coverage runs in non-race CI (implementation-hardening 8.1)")
+	}
+
 	bus := NewEventBus()
 	outputCh := make(chan *event.Event, 10)
 
