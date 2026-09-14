@@ -61,13 +61,40 @@ func buildAgent(
 	rc *runtimeConfig,
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
+	mode buildMode,
+	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
+) (*agent.TagentAgent, error) {
+	return buildAgentDFS(name, acfg, cfg, rc, loader, cache, mode, map[string]bool{}, subagentCollectors...)
+}
+
+// buildAgentDFS is buildAgent with a reference-path set (implementation-
+// hardening 6.2): agents referencing each other through config (A→B→A, or
+// self-reference) fail with an explicit cycle error instead of overflowing
+// the stack — the build cache only dedupes COMPLETED agents, so a cycle
+// recurses forever without this check. Path-scoped (deleted on exit), so
+// legitimate diamonds (A→B, A→C, B,C→D) still build D once via the cache.
+func buildAgentDFS(
+	name string,
+	acfg AgentConfig,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	cache map[string]*agent.TagentAgent,
 	// mode（R4，resident-continuity-r2-r4 3.4/3.5）：build ownership 契约，
 	// 语义与谓词见 buildMode——壳仅取 runner，共享绑定与状态重建按谓词跳过。
 	mode buildMode,
+	// stack：当前装配路径上的 agent 名（环检测）。
+	stack map[string]bool,
 	// subagentCollectors（R2）：递归进来的 wrapper 收集器（外层组装跨重启
 	// redispatch 表；变参以最小化签名波及，递归调用透传）。
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (*agent.TagentAgent, error) {
+	if stack[name] {
+		return nil, fmt.Errorf("agent %q: reference cycle detected in config agents", name)
+	}
+	stack[name] = true
+	defer delete(stack, name)
+
 	// Check cache first
 	if ta, ok := cache[name]; ok {
 		return ta, nil
@@ -269,7 +296,7 @@ func buildAgent(
 	localSubagentWrappers := map[string]*agent.AgentToolWrapper{}
 
 	for _, tr := range acfg.Tools {
-		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), mode, subagentCollectors...)
+		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), mode, stack, subagentCollectors...)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: build tool %q: %w", name, tr.AgentID, err)
 		}
@@ -607,6 +634,7 @@ func buildToolFromRef(
 	degradationMgr *reliability.DegradationManager,
 	consolidationMin int,
 	mode buildMode,
+	stack map[string]bool,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	desc, err := resolveToolDescription(tr, loader)
@@ -616,7 +644,7 @@ func buildToolFromRef(
 
 	switch tr.Kind {
 	case ToolKindAgent:
-		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, mode, subagentCollectors...)
+		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, mode, stack, subagentCollectors...)
 	case ToolKindTool:
 		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin)
 	default:
@@ -636,6 +664,7 @@ func buildAgentToolRef(
 	parentMemStore memory.MemoryStore,
 	desc string,
 	mode buildMode,
+	stack map[string]bool,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
 	// Remote path: create A2AAgent that communicates via trpc-a2a-go
@@ -675,7 +704,7 @@ func buildAgentToolRef(
 		return nil, false, fmt.Errorf("referenced agent %q not found in config", tr.AgentID)
 	}
 
-	subAgent, err := buildAgent(tr.AgentID, refCfg, cfg, rc, loader, cache, mode, subagentCollectors...)
+	subAgent, err := buildAgentDFS(tr.AgentID, refCfg, cfg, rc, loader, cache, mode, stack, subagentCollectors...)
 	if err != nil {
 		return nil, false, err
 	}

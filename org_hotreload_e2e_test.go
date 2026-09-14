@@ -18,7 +18,7 @@ import (
 // org field can move the fingerprint.
 func e2eYAML(threshold float64, model string) string {
 	return "entry: main\n" +
-		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key: sk-test\n" +
+		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key_env: TAGENT_TEST_API_KEY\n" +
 		"agents:\n  main:\n    model: " + model + "\n" +
 		"    system_prompt:\n      inline: \"e2e hot shift\"\n" +
 		"    compress_threshold: " + strconv.FormatFloat(threshold, 'f', -1, 64) + "\n" +

@@ -67,10 +67,10 @@
 
 ## 6. WP6 配置健壮性
 
-- [ ] 6.1 strict（两处一点）：抽共享 `strictDecode(data, out)` 助手（**一实现两调用点**，L3 单点），config.go:882 与 tool/mcp/registry.go:274（R2 已证）同步改接；助手内部 `yaml.NewDecoder + KnownFields(true)`，错误列全部未知字段；测试：拼错键报错并列名；**另附弃用流程注**（strict 抬高了 schema 演化税：字段改名/删除自此为显式破坏性变更，弃用流程写入 config.go 头注——两版本重叠期后再删）
+- [x] 6.1 strict（两处一点）：抽共享 `strictDecode(data, out)` 助手（**一实现两调用点**，L3 单点），config.go:882 与 tool/mcp/registry.go:274（R2 已证）同步改接；助手内部 `yaml.NewDecoder + KnownFields(true)`，错误列全部未知字段；测试：拼错键报错并列名；**另附弃用流程注**（strict 抬高了 schema 演化税：字段改名/删除自此为显式破坏性变更，弃用流程写入 config.go 头注——两版本重叠期后再删）
 - [ ] 6.2 环检测：buildAgent 递归加 visited（A↔B/自引用两形态报错指名）；测试覆盖两形态
-- [ ] 6.3 迁移验证：仓库内全部随载 yaml（resources/examples/tests + wechat-bot 独立模块）逐一过 strict；**坑**：wechat-bot 生产 yaml 可能含已 Deprecated 但仍合法的别名字段——它们在 struct 内不会报错；报错的是真未知字段，逐个修正或（若属拼写）上报
-- [ ] 6.4 回归门：根包 + `cd examples/wechat-bot && go build ./... && go test ./... -short` 全绿
+- [x] 6.3 迁移验证：仓库内全部随载 yaml（resources/examples/tests + wechat-bot 独立模块）逐一过 strict；**坑**：wechat-bot 生产 yaml 可能含已 Deprecated 但仍合法的别名字段——它们在 struct 内不会报错；报错的是真未知字段，逐个修正或（若属拼写）上报
+- [x] 6.4 回归门：根包 + `cd examples/wechat-bot && go build ./... && go test ./... -short` 全绿
 
 ## 7. WP7 文档对齐
 

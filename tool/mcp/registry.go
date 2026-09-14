@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,9 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/internal/strictyaml"
 
 	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
@@ -266,12 +266,12 @@ func parseServersFile(path string) (map[string]ServerConfig, error) {
 	}
 	var section configFileServers
 	if strings.ToLower(filepath.Ext(path)) == ".json" {
-		if err := json.Unmarshal(data, &section); err != nil {
+		if err := strictyaml.DecodeJSON(data, &section); err != nil {
 			return nil, err
 		}
 		return section.MCPServers, nil
 	}
-	if err := yaml.Unmarshal(data, &section); err != nil {
+	if err := strictyaml.DecodeYAML(data, &section); err != nil {
 		return nil, err
 	}
 	return section.MCPServers, nil

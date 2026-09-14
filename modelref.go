@@ -22,6 +22,13 @@ func (c *Config) FoldModelRefAliases() {
 			changed = true
 			log.Warnf("[tagent] agent %q: compress.summary_provider is deprecated, folded into compress.summary.provider=%q", name, ac.Compress.Summary.Provider)
 		}
+		if ac.Compress.SummaryEffort != "" && ac.Compress.Summary.ReasoningEffort == nil {
+			effort := ac.Compress.SummaryEffort
+			ac.Compress.Summary.ReasoningEffort = &effort
+			ac.Compress.SummaryEffort = ""
+			changed = true
+			log.Warnf("[tagent] agent %q: compress.summary_effort is deprecated, folded into compress.summary.reasoning_effort=%q", name, effort)
+		}
 		if changed {
 			c.Agents[name] = ac
 		}
