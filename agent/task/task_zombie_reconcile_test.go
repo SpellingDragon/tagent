@@ -84,3 +84,45 @@ func TestReconcileZombies_NilProbeSkipped(t *testing.T) {
 	}
 	d.Done()
 }
+
+// TestPruneTerminal_NilDetectorRestoredTask: a task restored from the fact
+// chain (RestoreTask) has NO detector by design — cross-restart detectors are
+// unrecoverable. Its Spec.Alive, however, IS rebuilt from the promise table,
+// and StartedAt is the historical spawn time: exactly the profile that
+// reconcileZombies retires. Production hit a BeforeModel panic here
+// (2026-09-13: pruneTerminal → t.detector.Cancel() on the nil detector) on
+// the first deployment carrying R2 restore + zombie reconcile together.
+func TestPruneTerminal_NilDetectorRestoredTask(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{})
+	tk := tm.RestoreTask("t-restored", TaskSpec{
+		Kind:  "command",
+		Desc:  "nightly probe",
+		Key:   "nightly",
+		Alive: func() bool { return false }, // backing session long gone
+	}, time.Now().Add(-2*time.Hour), TaskRunning)
+	if tk == nil {
+		t.Fatal("RestoreTask returned nil")
+	}
+	if got := tk.Status(); got != TaskRunning {
+		t.Fatalf("status = %s, want running (restored)", got)
+	}
+
+	// First List(): zombie reconcile retires the stale restored task
+	// (terminal failed + settledAt set).
+	if got := len(tm.List()); got != 1 {
+		t.Fatalf("List len = %d, want 1 (terminal grace window)", got)
+	}
+	if got := tk.Status(); got != TaskFailed {
+		t.Fatalf("status = %s, want failed (zombie retire)", got)
+	}
+
+	// Past the terminal TTL: the next List() must prune it cleanly — no
+	// panic on the nil detector (fail-before: without the guard this
+	// panics with a nil pointer dereference).
+	tk.mu.Lock()
+	tk.settledAt = time.Now().Add(-5 * time.Minute)
+	tk.mu.Unlock()
+	if got := len(tm.List()); got != 0 {
+		t.Fatalf("List len = %d, want 0 (pruned after TTL)", got)
+	}
+}

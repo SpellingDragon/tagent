@@ -1,7 +1,6 @@
 package tagent
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,9 +8,9 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/internal/strictyaml"
 	"github.com/SpellingDragon/tagent/prompt"
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
-	"gopkg.in/yaml.v3"
 )
 
 // Config is the top-level tagent configuration.
@@ -59,6 +58,12 @@ import (
 //	      type: memory
 //	    max_tool_iterations: 5
 type Config struct {
+	// XAnchors is an extension-reserved key ("x-" convention): YAML anchors
+	// shared across the file are declared under it and ignored by the
+	// framework. Declared so strict parsing accepts the convention
+	// (implementation-hardening 6.1); the framework never reads it.
+	XAnchors map[string]any `json:"x-anchors,omitempty" yaml:"x-anchors,omitempty"`
+
 	// Entry specifies which agent in the Agents map is the top-level agent.
 	// Defaults to "tagent" if empty.
 	Entry string `json:"entry" yaml:"entry"`
@@ -374,6 +379,10 @@ type CompressConfig struct {
 	// summary size but never below this floor.
 	SummaryMaxTokens int `json:"summary_max_tokens,omitempty" yaml:"summary_max_tokens,omitempty"`
 
+	// SummaryEffort is the legacy alias for summary.reasoning_effort
+	// (deprecated — folded by FoldModelRefAliases). The field must exist for
+	// strict parsing to accept the legacy key (implementation-hardening 6.1).
+	SummaryEffort string `json:"summary_effort,omitempty" yaml:"summary_effort,omitempty"`
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
 	// Deprecated: declare compress.summary (ModelRef) instead; folded at load.
@@ -403,6 +412,14 @@ type MemoryConfig struct {
 	//     type: memory and same path share a single InMemoryStore instance
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
+
+	// FSync (localfile type only; implementation-hardening D1): durability
+	// switch for the local-file KV — when enabled (default), every WAL append
+	// is fsynced and snapshot renames are directory-synced, so acknowledged
+	// writes survive power loss. Pointer semantics: nil = default (enabled);
+	// explicit false trades durability for throughput (a downgrade warning is
+	// logged at startup).
+	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent
 	// is allowed to read. Each name is converted to a PartitionID at build time.
@@ -878,13 +895,12 @@ func LoadConfig(path string) (*Config, error) {
 	cfg := &Config{}
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
-	case ".yaml", ".yml":
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parse YAML config %s: %w", path, err)
-		}
-	case ".json":
-		if err := json.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parse JSON config %s: %w", path, err)
+	case ".yaml", ".yml", ".json":
+		// Strict decode (implementation-hardening 6.1): unknown fields fail
+		// loading — a typo'd key must never be silently ignored. Dispatch by
+		// extension mirrors the format auto-detection.
+		if err := strictyaml.DecodeByExt(path, data, cfg); err != nil {
+			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported config file extension %q (use .yaml, .yml, or .json)", ext)

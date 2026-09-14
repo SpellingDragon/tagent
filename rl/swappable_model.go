@@ -3,6 +3,7 @@ package rl
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -22,6 +23,13 @@ import (
 type SwappableModel struct {
 	mu    sync.RWMutex
 	inner model.Model
+
+	// Retired-model recycling (implementation-hardening 5.2): swapped-out
+	// models wait here until no in-flight GenerateContent call references any
+	// of them, then get an io.Closer Close (model.Model has no Close; most
+	// models are stateless clients — the mechanism guards stateful wrappers).
+	inFlight atomic.Int64
+	retired  []model.Model
 }
 
 // NewSwappableModel creates a SwappableModel wrapping the given model.
@@ -31,15 +39,47 @@ func NewSwappableModel(m model.Model) *SwappableModel {
 
 // Swap replaces the inner model atomically.
 // In-flight GenerateContent calls continue with the old model;
-// subsequent calls use the new model.
+// subsequent calls use the new model. The old model is retired: once no
+// in-flight call references any retired model, each gets an io.Closer Close
+// (implementation-hardening 5.2 — the drain-free "tail" the swap used to
+// leave dangling).
 func (m *SwappableModel) Swap(inner model.Model) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	old := m.inner
 	m.inner = inner
+	if old != nil && old != inner { // same instance → no leak, nothing to retire
+		m.retired = append(m.retired, old)
+	}
+	m.mu.Unlock()
+	m.sweepRetired()
 }
 
-// GenerateContent delegates to the current inner model.
+// sweepRetired closes retired models when no in-flight call remains.
+func (m *SwappableModel) sweepRetired() {
+	if m.inFlight.Load() != 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.inFlight.Load() != 0 { // re-check under lock (a call may have started)
+		return
+	}
+	for _, old := range m.retired {
+		if c, ok := old.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
+	m.retired = nil
+}
+
+// GenerateContent delegates to the current inner model, accounting the
+// in-flight counter that gates retired-model sweeps.
 func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
+	m.inFlight.Add(1)
+	defer func() {
+		m.inFlight.Add(-1)
+		m.sweepRetired()
+	}()
 	m.mu.RLock()
 	inner := m.inner
 	m.mu.RUnlock()

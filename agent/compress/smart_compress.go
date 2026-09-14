@@ -114,6 +114,16 @@ func WithTokenCounter(tc TokenCounter) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.tokenCounter = tc }
 }
 
+// CompressOptions carries per-call overrides. Zero-value fields fall back to
+// the compressor's configured defaults.
+type CompressOptions struct {
+	// KeepRecentTasks overrides SmartCompressor.KeepRecentTasks for this call
+	// (<= 0 → configured value). Per-call instead of mutating the shared
+	// field: the stash-rewrite-restore dance was a data race under concurrent
+	// compress — correctness is now structural, not single-goroutine-discipline.
+	KeepRecentTasks int
+}
+
 // Compress implements budget-aware compression via the skeleton pipeline
 // (task-skeleton-compression): agent_output-bounded segments, age-driven
 // deterministic levels, tool>assistant drop order, L3 multi-segment
@@ -122,7 +132,16 @@ func (sc *SmartCompressor) Compress(
 	ctx context.Context,
 	messages []model.Message,
 ) []model.Message {
-	return sc.compressSkeleton(ctx, messages)
+	return sc.compressSkeleton(ctx, messages, 0)
+}
+
+// CompressWithOptions is Compress with per-call overrides (see CompressOptions).
+func (sc *SmartCompressor) CompressWithOptions(
+	ctx context.Context,
+	messages []model.Message,
+	opts CompressOptions,
+) []model.Message {
+	return sc.compressSkeleton(ctx, messages, opts.KeepRecentTasks)
 }
 
 // deterministicLevel assigns a base compression level to a task segment by
@@ -210,7 +229,7 @@ func applySegmentLevel(seg *TaskSegment, level int) []model.Message {
 	}
 }
 
-func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message) []model.Message {
+func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message, keepRecentOverride int) []model.Message {
 	startTime := time.Now()
 	systemMsg, rest := SplitSystemMessage(messages)
 	// Extract the rolling summary so it never rides inside segment 0 (which is
@@ -220,6 +239,9 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	segments := SegmentMessages(rest)
 
 	keepRecent := sc.KeepRecentTasks
+	if keepRecentOverride > 0 {
+		keepRecent = keepRecentOverride // per-call override; shared field untouched (race-free by construction)
+	}
 	if keepRecent < 1 {
 		keepRecent = 1
 	}

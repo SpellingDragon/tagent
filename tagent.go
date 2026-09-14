@@ -53,10 +53,9 @@ type Option func(*runtimeConfig)
 
 // runtimeConfig holds runtime-only dependencies.
 type runtimeConfig struct {
-	model        model.Model // Default model (can be overridden per-agent)
-	summaryModel model.Model // Optional: for Stage 2 LLM summary
-	skillRepo    tool.SkillRepository
-	mcpToolSets  []trpctool.ToolSet
+	model       model.Model // Default model (can be overridden per-agent)
+	skillRepo   tool.SkillRepository
+	mcpToolSets []trpctool.ToolSet
 
 	// mcpRegistry is the process-level MCP server registry (config-declared
 	// servers + WithMCPToolSets merged). Consumed by mcp_discover/mcp_call;
@@ -162,11 +161,6 @@ func WithMCPToolSets(ts []trpctool.ToolSet) Option {
 	return func(rc *runtimeConfig) { rc.mcpToolSets = ts }
 }
 
-// WithSummaryModel sets the model for Stage 2 LLM summary compression.
-func WithSummaryModel(m model.Model) Option {
-	return func(rc *runtimeConfig) { rc.summaryModel = m }
-}
-
 // WithConfigPath records the on-disk path the Config was loaded from
 // (agent-config-hot-reload, incremental A). When set, the entry agent arms
 // a lazy org-config watcher: before each LLM call it stats the file and on
@@ -244,11 +238,6 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		rc.trajectoryRecorder = tr
 		rc.model = tr
 		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s", cfg.TrajectoryDir)
-		// Also wrap summary model if present
-		if rc.summaryModel != nil {
-			// Summary model shares the same recorder (same JSONL files)
-			rc.summaryModel = tr
-		}
 	}
 
 	// evolution (self-evolution-git-native)：git 原生自进化（配置门控，默认关 → 零行为变化）。
@@ -446,7 +435,10 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚重建失败，保留当前代（fail-closed）: %v", rerr2))
 					return
 				} else if r2 := ta2.RebuildExecutorOn(entryAgent.ContextManager()); r2 != nil {
-					entryAgent.SwapExecutor(r2)
+					// 5.7×5.1 融合：RebuildExecutorOn→cm.RebuildExecutor 已完成 SwapExecutor，
+					// 旧 runner 已在其内部交 RetireRunner 延迟 Close；不得二次换入
+					// （新签名下 SwapExecutor(r2) 返回 r2 作“旧 runner”，误 retire 关闭在用 runner）。
+					_ = r2
 					execGen++
 					lastFP = rbp
 					log.Infof("[org-hotreload] executor generation %d rolled back to fp %s..", execGen, short(rbp))

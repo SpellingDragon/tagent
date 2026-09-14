@@ -118,18 +118,25 @@ func (ta *TagentAgent) RebuildExecutorOn(target *ContextManager) runner.Runner {
 	return target.RebuildExecutor(ta.contextManager.execCfg)
 }
 
-func (ta *TagentAgent) SwapExecutor(r runner.Runner) {
+// 返回被换下的旧 runner（调用方应交 RetireRunner 退役——延迟 Close，5.1）。
+func (ta *TagentAgent) SwapExecutor(r runner.Runner) runner.Runner {
+	if ta == nil || ta.contextManager == nil {
+		return nil
+	}
+	return ta.contextManager.SwapExecutor(r)
+}
+
+// RetireRunner 退役被换下的旧 runner（implementation-hardening 5.1）：排入
+// retired 队列，待无 in-flight turn 引用时幂等 Close（drain-free 的「尾」）。
+func (ta *TagentAgent) RetireRunner(old runner.Runner) {
 	if ta == nil || ta.contextManager == nil {
 		return
 	}
-	ta.contextManager.SwapExecutor(r)
+	ta.contextManager.RetireRunner(old)
 }
 
-// orgRollbackFn（R4 3.8）：回滚钩子（tagent 包懒检查闭包注入——按 ring 2
-// 上一代配置重建并 Swap 回）。
-type orgRollbackFn func()
-
-// SetRollbackFn wires the rollback hook (R4 3.8；宿主/运维可调 Rollback())。
+// SetRollbackFn wires the rollback hook (R4 3.8；tagent 包懒检查闭包注入——按
+// ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。
 func (ta *TagentAgent) SetRollbackFn(fn func()) {
 	if ta == nil {
 		return

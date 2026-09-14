@@ -748,10 +748,14 @@ type ActionToolResult struct {
 	Note       string `json:"note,omitempty"`
 }
 
-// IsTmuxAvailable checks if tmux is available on the system.
+// IsTmuxAvailable reports whether tmux is actually usable on this system —
+// a real PATH probe (implementation-hardening 4.3). The old implementation
+// returned NewTmuxExecutor() != nil, which was always true (the constructor
+// never returns nil), making the availability gate at the construction site
+// inert: no-tmux environments sailed through to first-execution failures.
 func IsTmuxAvailable() bool {
-	// Simple check: try to find tmux binary
-	return NewTmuxExecutor() != nil
+	_, err := exec.LookPath("tmux")
+	return err == nil
 }
 
 // cleanTmuxOutput strips trailing blank lines from tmux capture-pane output.
@@ -785,7 +789,7 @@ func cleanTmuxOutput(output string) string {
 // ---- Session operations (2026-09-11 B3): peek / send / stop ----
 
 // ansiEscape matches ANSI/VT escape sequences (CSI, OSC, simple two-byte).
-var ansiEscape = regexp.MustCompile("\\x1b(?:\\[[0-9;?]*[a-zA-Z]|\\][^\\x07]*(?:\\x07|\\x1b\\\\)|[@-Z\\\\-_])")
+var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
 
 // stripANSI removes ANSI escape sequences for LLM-friendly output.
 func stripANSI(s string) string {

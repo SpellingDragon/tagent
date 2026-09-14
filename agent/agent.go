@@ -121,12 +121,16 @@ type TagentAgent struct {
 	// Set via SetTrajectoryRecorder. StartLoop calls SetSessionInfo on it.
 	trajectoryRecorder *rl.TrajectoryRecorder
 
-	// Persistent Event Loop — 持久事件循环（StartLoop 模式）
-	outputCh   chan *event.Event  // 持久输出 channel（Loop 模式下不关闭）
-	loopCtx    context.Context    // Loop context（StopLoop 取消）
-	loopCancel context.CancelFunc // Loop cancel
-	loopActive atomic.Bool        // Loop 是否运行中
-	loopWg     sync.WaitGroup     // 等待 Loop goroutine 退出
+	// Persistent Event Loop — 持久事件循环（StartLoop 模式）。生命周期一次性：
+	// StopLoop 后实例终结（loopTerminated），二次 StartLoop 显式报错——输出通道
+	// 在循环 goroutine 退出时恰好关闭一次（消费者 range 语义的终态信号），
+	// 复用已关通道即生产 panic（V15，2026-09-14 修复）。
+	outputCh       chan *event.Event  // 持久输出 channel（循环 goroutine 退出时恰好关闭一次）
+	loopCtx        context.Context    // Loop context（StopLoop 取消）
+	loopCancel     context.CancelFunc // Loop cancel
+	loopActive     atomic.Bool        // Loop 是否运行中
+	loopTerminated atomic.Bool        // Loop 已终结（StopLoop 后不可再 Start）
+	loopWg         sync.WaitGroup     // 等待 Loop goroutine 退出
 
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager

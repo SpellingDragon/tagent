@@ -127,3 +127,26 @@ func TestInjectMessage_LoopNotStarted(t *testing.T) {
 	ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "hello"})
 	// No panic, no error — message is just dropped.
 }
+
+// TestStartLoop_AfterStop_TerminalLifecycle: StopLoop is TERMINAL on a
+// TagentAgent instance. The old behavior silently let a second StartLoop
+// return the already-closed outputCh (the loop goroutine's defer closes it on
+// exit, lifecycle.go) — consumers then read zero values forever, and a second
+// Stop re-closed the channel, panicking past the recover. Fail-before: the
+// second Start used to succeed; after the fix it must return an explicit
+// error (restart semantics = create a new agent).
+func TestStartLoop_AfterStop_TerminalLifecycle(t *testing.T) {
+	ta := newLoopTestAgent(t)
+
+	outputCh, err := ta.StartLoop("test-user", "test-session")
+	require.NoError(t, err)
+	ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "hello"})
+	evt := waitForFinalResponse(t, outputCh, 5*time.Second)
+	require.NotNil(t, evt)
+
+	ta.StopLoop()
+
+	_, err = ta.StartLoop("test-user", "test-session")
+	require.Error(t, err, "second StartLoop after StopLoop must be rejected")
+	require.Contains(t, err.Error(), "terminated")
+}

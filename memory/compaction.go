@@ -18,8 +18,10 @@ import (
 // In the KV store model:
 //   - L0 (hot): Current time window - events being written
 //   - L1 (warm): Sealed hourly segments (past 24 hours)
-//   - L2 (cold): Daily segments (1-7 days) - gzip compressed
-//   - L3 (archive): Weekly segments (7+ days) - gzip + summarization
+//   - L2 (cold): Daily segments (1-7 days)
+//   - L3 (archive): Weekly segments (7+ days) - low-value types have their
+//     Content cleared (schema kept); no gzip / no LLM summarization happens
+//     at this layer (fossil-comment fix, implementation-hardening 7.2)
 //
 // Compaction flow: Merge → Filter → Repair → Compress → Cleanup
 

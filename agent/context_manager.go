@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -54,9 +55,16 @@ type ContextManager struct {
 	// Framework integration
 	runner     runner.Runner
 	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——SwapExecutor（写）vs RunFlow per-turn RLock（读）
-	name       string
-	userID     string
-	sessionID  string
+
+	// Retired-runner recycling (implementation-hardening 5.1): swapped-out
+	// runners wait here until no in-flight turn references any of them, then
+	// get an idempotent io.Closer Close. See RetireRunner / sweepRetiredRunners.
+	retireMu       sync.Mutex
+	retiredRunners []runner.Runner
+	runnerInFlight atomic.Int64
+	name           string
+	userID         string
+	sessionID      string
 
 	// Event routing
 	outputCh   chan *event.Event
@@ -538,8 +546,49 @@ func (cm *ContextManager) RebuildExecutor(cfg ContextManagerConfig) runner.Runne
 	execCfg.MemPlugin = cm.memPlugin
 	execCfg.SessionSvc = cm.sessionSvc
 	fwAgent := cm.buildLLMAgent(execCfg)
-	cm.SwapExecutor(buildRunner(execCfg, fwAgent))
+	if old := cm.SwapExecutor(buildRunner(execCfg, fwAgent)); old != nil {
+		cm.RetireRunner(old)
+	}
 	return cm.currentRunner()
+}
+
+// RetireRunner queues a swapped-out runner for delayed Close (implementation-
+// hardening 5.1): closed by the next sweep that observes zero in-flight turns
+// (the persistent loop is a single consumer, so quiescence arrives at every
+// turn boundary — a sustained-load fallback timer is unnecessary), or by
+// Close. Rollback does NOT reuse old runners (it rebuilds from the ring-2
+// config snapshot), so every retired runner is pure garbage. Close is part
+// of the upstream Runner interface and documented idempotent.
+func (cm *ContextManager) RetireRunner(old runner.Runner) {
+	if cm == nil || old == nil {
+		return
+	}
+	cm.retireMu.Lock()
+	cm.retiredRunners = append(cm.retiredRunners, old)
+	cm.retireMu.Unlock()
+	cm.sweepRetiredRunners()
+}
+
+// sweepRetiredRunners closes retired runners when no turn is in flight.
+// Callers: RunFlow exit (counter drop), RetireRunner, Close.
+func (cm *ContextManager) sweepRetiredRunners() {
+	if cm.runnerInFlight.Load() != 0 {
+		return
+	}
+	cm.retireMu.Lock()
+	defer cm.retireMu.Unlock()
+	if cm.runnerInFlight.Load() != 0 { // re-check under lock (inc may have raced in)
+		return
+	}
+	for _, r := range cm.retiredRunners {
+		if r == nil {
+			continue
+		}
+		if err := r.Close(); err != nil { // upstream documents Close as idempotent
+			log.Warnf("[ContextManager] retired runner Close: %v", err)
+		}
+	}
+	cm.retiredRunners = nil
 }
 
 // currentRunner（R4 3.3）：RunFlow per-turn 取引用（RLock 即放——不持锁跑
@@ -1016,6 +1065,15 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
+	// Runner lifecycle accounting (implementation-hardening 5.1): this turn
+	// holds a runner reference — the counter gates retired-runner sweeps so a
+	// swapped-out runner is only closed after the last turn holding it ends
+	// (drain-free swap semantics: “切” must be paired with “尾”).
+	cm.runnerInFlight.Add(1)
+	defer func() {
+		cm.runnerInFlight.Add(-1)
+		cm.sweepRetiredRunners()
+	}()
 	// Bind this invocation's projection as the pipeline projection sink:
 	// MemoryPlugin projects each stored event at the same synchronous point
 	// (write unification, unified-event-projection D1).
@@ -1146,6 +1204,16 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 
 // Close releases the runner resources.
 func (cm *ContextManager) Close() error {
+	// Terminal: drain retired runners unconditionally — no new turns will run
+	// after Close, so the in-flight gate no longer applies.
+	cm.retireMu.Lock()
+	for _, r := range cm.retiredRunners {
+		if r != nil {
+			_ = r.Close() // upstream documents Close as idempotent
+		}
+	}
+	cm.retiredRunners = nil
+	cm.retireMu.Unlock()
 	if r, ok := cm.currentRunner().(interface{ Close() error }); ok {
 		return r.Close()
 	}

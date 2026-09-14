@@ -167,12 +167,9 @@ type Task struct {
 	Spec      TaskSpec
 	StartedAt time.Time
 
-	mu     sync.Mutex
-	status TaskStatus
-	result string
-	// resultRef 预留：任务结果 → 记忆固化物反查桥（memory 策展缺口表
-	// 「固化物因果回溯不完整」的候选落点），当前无写入方。
-	resultRef string
+	mu        sync.Mutex
+	status    TaskStatus
+	result    string
 	err       error
 	settledAt time.Time
 
@@ -459,12 +456,23 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		tm.onSpawn(task)
 	}
 
-	go tm.watch(task, detector, task.watchDone)
+	if detector != nil {
+		go tm.watch(task, detector, task.watchDone)
+	}
 
 	// Wait for the first of {settle, detach}. The detach signal (dense→sparse
 	// boundary, owned by the detector) is the sync→async ack point — there is no
 	// separate sync_wait timer. A detector with no detach channel (nil) blocks
 	// here until settle (pure synchronous).
+	//
+	// Nil-detector defense (poka-yoke): a nil interface would panic on
+	// .Detached(); receive from a nil channel instead — same "blocks until
+	// settle" semantics, no panic. (Two distinct nils: nil INTERFACE vs nil
+	// DETACHED CHANNEL; the doc contract refers to the latter.)
+	var detachCh <-chan struct{}
+	if detector != nil {
+		detachCh = detector.Detached()
+	}
 	select {
 	case sig := <-task.firstSettle:
 		tm.closeWindow(task, false) // settle closed the window; already consumed
@@ -475,7 +483,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 			tm.onInlineSettle(task, sig)
 		}
 		return SpawnResult{Task: task, Settled: true, Signal: sig}
-	case <-detector.Detached():
+	case <-detachCh:
 		tm.closeWindow(task, true) // detach closed the window; drain any boundary settle
 		return SpawnResult{Task: task, Settled: false}
 	}
@@ -487,6 +495,9 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 // send, so no settle is lost at the window boundary. It exits when the detector's
 // channel closes OR when the watch is retired (resume re-arms a fresh detector).
 func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan struct{}) {
+	if detector == nil {
+		return // nil detector: nothing to watch (pure-sync task settles via firstSettle)
+	}
 	for {
 		select {
 		case <-done:
@@ -623,6 +634,13 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		StartedAt:    startedAt,
 		status:       status,
 		windowClosed: true, // sync-wait window is history — resume re-arms it
+		// Lifecycle channels are initialized here even though the detector is
+		// not: cross-restart detector state is unrecoverable (by design), but
+		// Resume re-arms the watch by close(task.watchDone) — a nil channel here
+		// panicked on the first post-restart resume (same crack family as the
+		// pruneTerminal nil-detector panic, fixed 2026-09-13).
+		watchDone:   make(chan struct{}),
+		firstSettle: make(chan SettleSignal, 1),
 	}
 	if status == TaskAliveDetached {
 		tk.aliveDetached = true // suppress repeat "ready" notifications
@@ -866,9 +884,8 @@ func (tm *TaskManager) pruneTerminal() {
 	}
 	tm.mu.Unlock()
 	for _, t := range victims {
-		// detector may be nil: tasks rebuilt from the fact chain (RestoreTask)
-		// carry no live detector (nothing to reclaim) — read under t.mu both to
-		// guard the nil and to avoid racing Resume's detector swap.
+		// detector 可为 nil：RestoreTask 重建的任务（跨重启不可复原，设计使然）。
+		// 与 Cancel()/Spawn() 的守卫风格一致；锁内拷出避免与 resume 换 detector 竞态。
 		t.mu.Lock()
 		detector := t.detector
 		t.mu.Unlock()
@@ -999,7 +1016,10 @@ func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
 	//   - NEW detector (subagent: each round is a new Run) → retire the old
 	//     watch via watchDone and start a fresh one.
 	task.mu.Lock()
-	newWatch := detector != task.detector
+	// Watch generation: a restored task has detector == nil (cross-restart,
+	// unrecoverable) — that always counts as a new watch so the re-arm below
+	// never closes a channel from a previous life.
+	newWatch := task.detector == nil || detector != task.detector
 	if newWatch {
 		close(task.watchDone)
 		task.watchDone = make(chan struct{})
@@ -1012,14 +1032,22 @@ func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
 	task.mu.Unlock()
 
 	if newWatch {
-		go tm.watch(task, detector, done)
+		if detector != nil {
+			go tm.watch(task, detector, done)
+		}
 	}
 
+	// Same nil-detector defense as Spawn: receive from a nil channel instead of
+	// calling .Detached() on a nil interface.
+	var detachCh <-chan struct{}
+	if detector != nil {
+		detachCh = detector.Detached()
+	}
 	select {
 	case sig := <-task.firstSettle:
 		tm.closeWindow(task, false)
 		return SpawnResult{Task: task, Settled: true, Signal: sig}, nil
-	case <-detector.Detached():
+	case <-detachCh:
 		tm.closeWindow(task, true)
 		return SpawnResult{Task: task, Settled: false}, nil
 	}

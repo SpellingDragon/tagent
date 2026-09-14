@@ -330,11 +330,9 @@ func (cc *ContextCompressor) Compress(
 	log.Infof("[ContextCompressor] compressing (tokens %d vs %d; folded render %d tokens), %d messages from %d refs",
 		usedTokens, threshold, cc.tokenCounter.Estimate(resolved), len(resolved), len(refs))
 
-	originalKeepRecent := cc.compressor.KeepRecentTasks
-	defer func() { cc.compressor.KeepRecentTasks = originalKeepRecent }()
-	cc.compressor.KeepRecentTasks = cc.keepRecent
-
-	compressedMsgs := cc.compressor.Compress(ctx, resolved)
+	// Per-call keepRecent override (no shared-field mutation — the old
+	// stash-rewrite-restore dance was a data race under concurrent compress).
+	compressedMsgs := cc.compressor.CompressWithOptions(ctx, resolved, CompressOptions{KeepRecentTasks: cc.keepRecent})
 	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)

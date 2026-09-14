@@ -21,7 +21,7 @@
 - **不变量 1**：inputs 是投影（有界，LLM 输入的唯一装配源）→ SessionProjection = EventReference[]（现居 `agent/compress` 包），`assembleRequest = [system] + render(投影)`，永不读回框架消息尾部
 - **不变量 2**：写入统一——事件被存储 ⇔ 被投影，恰好一次，同点原子（MemoryPlugin.OnEvent 存储后经 ProjectionSink 同点追加）
 - **不变量 3**：时序是构造保证——BeforeModel 时投影必完整，非时序碰巧
-- **不变量 4**：Compact 只修改投影，不修改事件流也不修改永久存储
+- **不变量 4**：Compact 只修改投影，不修改事件流也不修改存储层
 
 ### 框架 Runner 内部行为
 
@@ -301,7 +301,7 @@ graph TB
 | `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、SpillStore（ReliableBus 磁盘溢出）、AnchorStore（冥想锚点跨重启） | 无（2026-09，默认关） |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go）；Origin 携带 trace 锚 | 无（生产扩展） |
-| `rl/`（独立顶级包） | TrajectoryRecorder（含 trace 关联字段）+ HTTPAPI + SwappableModel | 无（生产扩展） |
+| `rl/`（独立顶级包） | TrajectoryRecorder（含 trace 关联字段）+ HTTPAPI（**token 认证 + loopback fail-closed**：`TAGENT_RL_AUTH_TOKEN`/`ValidateListenAddr`，实施加固 3.x）+ SwappableModel（retired model 延迟回收，5.2） | 无（生产扩展） |
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖，新代码直接 import 子包。
 

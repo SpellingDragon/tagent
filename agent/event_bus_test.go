@@ -34,7 +34,7 @@ func TestEventBus_PullBatch(t *testing.T) {
 	// Publish 3 events quickly before pulling.
 	e1 := NewExternalInputEvent("user", model.Message{Content: "a"})
 	e2 := NewExternalInputEvent("tmux", model.Message{Content: "b"})
-	e3 := NewToolUseEvent(model.ToolCall{ID: "tc1", Function: model.FunctionDefinitionParam{Name: "action"}})
+	e3 := NewExternalInputEvent("tmux", model.Message{Content: "c"})
 
 	bus.Publish(e1)
 	bus.Publish(e2)
@@ -47,7 +47,7 @@ func TestEventBus_PullBatch(t *testing.T) {
 	assert.Equal(t, e1.ID, batch[0].ID)
 	assert.Equal(t, e2.ID, batch[1].ID)
 	assert.Equal(t, e3.ID, batch[2].ID)
-	assert.Equal(t, "tool_use", batch[2].Type)
+	assert.Equal(t, "external_input", batch[2].Type)
 }
 
 func TestEventBus_PullBlocks(t *testing.T) {
@@ -131,27 +131,6 @@ func TestNewExternalInputEvent(t *testing.T) {
 	assert.False(t, evt.Timestamp.IsZero())
 	assert.NotNil(t, evt.Message)
 	assert.Equal(t, "tmux done", evt.Message.Content)
-	assert.Nil(t, evt.ToolCall)
-	assert.NotNil(t, evt.Metadata)
-}
-
-func TestNewToolUseEvent(t *testing.T) {
-	tc := model.ToolCall{
-		ID: "call-1",
-		Function: model.FunctionDefinitionParam{
-			Name:      "action",
-			Arguments: []byte(`{"command":"ls"}`),
-		},
-	}
-	evt := NewToolUseEvent(tc)
-
-	assert.NotEmpty(t, evt.ID)
-	assert.Equal(t, "tool_use", evt.Type)
-	assert.Equal(t, "agent_loop", evt.Source)
-	assert.False(t, evt.Timestamp.IsZero())
-	assert.Nil(t, evt.Message)
-	assert.NotNil(t, evt.ToolCall)
-	assert.Equal(t, "action", evt.ToolCall.Function.Name)
 	assert.NotNil(t, evt.Metadata)
 }
 

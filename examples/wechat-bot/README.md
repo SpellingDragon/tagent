@@ -98,6 +98,15 @@ graph LR
 另一终端 `./run.sh areal` 起 AReaL 侧；`train_tagent.py` + `train_rl_config.yaml` 为训练入口与配置。
 轨迹 JSONL 落 `data/trajectories/`，含 `trace_id`/`span_id` 可回跳 OTel trace。
 
+### HTTPAPI 认证与监听（实施加固 3.x，必读）
+
+HTTPAPI 可注入消息、可重定向 LLM 端点——默认 fail-closed：
+
+- 设 `TAGENT_RL_AUTH_TOKEN=<token>` → 全端点要求 `Authorization: Bearer <token>`，任意地址监听；
+  AReaL 侧请求须携带同 token。
+- 未设 token → 自动仅绑 `127.0.0.1:<port>`（日志给出指引），局域网不可达。
+- `/healthz` 亦在认证之后（无豁免）。
+
 ## 深入阅读
 
 | 主题 | 位置 |

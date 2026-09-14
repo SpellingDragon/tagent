@@ -469,7 +469,7 @@ func mcpDiscoverFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 }
 
 func webSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	return NewWebSearchToolWithConfig(webSearchConfigFromProperties(cfg.Properties)).(tool.CallableTool), nil
+	return NewWebSearchToolWithConfig(webSearchConfigFromProperties(cfg.Properties)), nil
 }
 
 // webSearchConfigFromProperties builds a WebSearchConfig from the tool's
@@ -499,7 +499,7 @@ func webSearchConfigFromProperties(props map[string]any) WebSearchConfig {
 }
 
 func duckDuckGoSearchFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	return duckduckgo.NewTool().(tool.CallableTool), nil
+	return duckduckgo.NewTool(), nil
 }
 
 func memoryQueryFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {

@@ -240,3 +240,34 @@ func TestWalQuarantined_BareKV(t *testing.T) {
 		t.Fatalf("good tail lost: v=%q err=%v", v, err)
 	}
 }
+
+// TestLocalFileKV_ListPartitionIDs (implementation-hardening 2.4): any
+// persisted key in a partition's namespace ({pid}:evt|idx|meta|tomb:…)
+// proves the partition; non-partition namespaces (global:*) and unparsable
+// prefixes are ignored.
+func TestLocalFileKV_ListPartitionIDs(t *testing.T) {
+	dir := t.TempDir()
+	kv, err := NewLocalFileKV(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kv.Close()
+	for _, k := range []string{
+		"7:evt:1710676800:1",
+		"7:meta:1710676800",
+		"42:tomb:deadbeef",
+		"global:active_partitions",
+		"not-a-pid:evt:1",
+	} {
+		if err := kv.KVPut(k, "{}"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := kv.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	got := kv.ListPartitionIDs()
+	if len(got) != 2 || got[0] != 7 || got[1] != 42 {
+		t.Fatalf("ListPartitionIDs = %v, want [7 42]", got)
+	}
+}

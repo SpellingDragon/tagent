@@ -30,8 +30,6 @@
 package prototype
 
 import (
-	"sync"
-
 	jsoniter "github.com/json-iterator/go"
 )
 
@@ -58,11 +56,9 @@ type Event struct {
 // The production TagentAgent keeps the same conceptual pieces but wires them
 // through trpc-agent-go interfaces and adds persistence/compression/A2A.
 type BaseTAgent struct {
-	mu              sync.Mutex
 	eventBus        chan Event
 	tools           map[string]func(inputs []string) string
 	inputs          []string
-	model           *Model
 	Run             func()
 	ModelCompletion func(inputs []string) string
 	Compact         func()
@@ -116,17 +112,15 @@ func (agent *BaseTAgent) Input(input string) {
 // event merging via ContextManager.BuildInvocation, and framework ReAct
 // execution via ContextManager.RunFlow.
 func (agent *BaseTAgent) DefaultRun() {
-	select {
-	case <-agent.eventBus:
-		eventLen := len(agent.eventBus)
-		batchEvents := make([]Event, eventLen)
-		for i := 0; i < eventLen; i++ {
-			batchEvents[i] = <-agent.eventBus
-		}
-		output := agent.OnEvents(batchEvents)
-		if output.EventType != 0 {
-			agent.eventBus <- output
-		}
+	<-agent.eventBus
+	eventLen := len(agent.eventBus)
+	batchEvents := make([]Event, eventLen)
+	for i := 0; i < eventLen; i++ {
+		batchEvents[i] = <-agent.eventBus
+	}
+	output := agent.OnEvents(batchEvents)
+	if output.EventType != 0 {
+		agent.eventBus <- output
 	}
 }
 

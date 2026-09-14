@@ -96,9 +96,50 @@
 | 2026-09-12 | **resident-continuity-r2-r4 提案(R2+R3+R4 合并单变更·/opsx:propose)**:用户裁决「一次规划一次实现」——剩余三需求收进单变更（偏离 roadmap D6 分阶段，roadmap tasks 已改记合并；缓解=任务三节+节间门禁+节序 R2→R3→R4）。**本轮新核实**（补 roadmap 验证）:①R2—TaskSpec 三闭包（Relaunch/ResumeFn/Alive，task_manager.go:100-117）不可序列化、registry 主 spec 明文禁持久化（task-registry-and-board:17）待反转、**task 层无 spawn 事件**（仅 OnSettle 接点）→需新增 task_spawned+Declarative+工厂；②R3—ResidentMeta 缺 Command/Origin/TaskID、枚举死代码坐实（n- :95 vs prefix=tagent tmux_executor.go:479-481 交集恒空）；③R4—**dev 已有 computeOrgFingerprint 白名单（org_hotreload.go:62-135）+orgSnapshot/builtAgent 类型声明（D1原子快照/D2 drain-free/D3指纹/D4 fail-closed intent）但零消费者**（incremental B 画饼）、其引用 design.md 悬空——R4-B 按其 D1-D4 intent 中的 fingerprint/fail-closed/drain-free 语义落地，但**换代单元经第六轮 fresh-eyes 证伪 orgSnapshot 整代方案后缩小为 cm.runner 级 SwapExecutor**（常驻 loop 形态下整代换入无 drain-free 可立；org 基础设施 loop/bus/cm/TaskManager/monitor 常驻不换），**因地制宜一个原子换缝不搬 Cordis**。设计 D0-D4：D1 R2=registry 事实链 fold（纯全量回放无 compaction snapshot）+声明式化按 Kind 拆分承诺（subagent 跨重启 resume 不承诺，rounds 无事件源）+inline settle 补发终态记录+settle 结构化 Metadata+TaskManager org 级单例；D2 R3=双条件枚举+**CleanupOrphanSessions 排除 n-**（orphan 重定义，否则 cleanup 先于 reattach 屠杀常驻）+list-sessions 三态+N 次 unknown 加闸（计数入 TmuxSession）+唯一挂载点重挂+resident_meta_dir 可配；D3 R4=懒检查先序（memory canonical diff 先检拒绝→fingerprint）+cm.runner 级 SwapExecutor（RWMutex、RunFlow per-turn RLock、build-validate-then-swap、fail-closed、ownership 表不重复 RegisterCloser/AddChannel）+代际日志/Rollback；D4 节间门禁。specs:MOD task-registry-and-board（反转纯内存禁令）+NEW resident-session-continuity/swappable-executor。**状态**:第六轮 fresh-eyes 5🔴+4🟠+5🟡 已全折入；第七轮快核设计层 10/10 PASS、同步层 4 MUST FIX（proposal/LEDGER/roadmap 旧案残留+Params 缺 Timeout/ProbeFailures）已修，待放行编码 | 用户「一次性完成计划制定一次性实现」裁决;本轮代码核实(task层/tmux·monitor/fingerprint+orgSnapshot 零消费者+悬空 design.md 发现);R1 立范模式直接沿用;六/七两轮 fresh-eyes |
 | 2026-09-13 | **resident-continuity-r2-r4 落地(36/36·R2+R3+R4 三节+节门禁全绿)**:实现与验证要点——**R2**:task_spawned 一等事件(载 Declarative 含 StartedAt)+inline settle 补发终态记录(task_inline_record 标记,external_input+subtype 沿用不新增类型)+persistBusEvent 结构化 task_id/settle_status 拷入+OnSpawn/OnInlineSettle hooks(late-bind taskRecordSink)+RebuildTaskRegistry 纯全量回放(task_spawned − 终态 settle;running→suspect;LastSettleWins;inline-settled 不重建无幽灵)+RestoreTask(幂等/无 watch/windowClosed+aliveDetached)+承诺表工厂(SpecFromDeclarative command 全套/SubagentSpecFromDeclarative Relaunch 经 RedispatchAsync+Resume 引导)+build_agent 变参 collector 收集 wrapper 表;**R3**:ListSessions 双条件+CleanupOrphanSessions 排除 n-(真 tmux 验证存活)+SessionAlive3 三态(list-sessions 单源)+IsPaneDead err→不 assume-dead+ProbeUnknownCount 加闸(TmuxSession 字段,默认 3)+ResidentMeta 补 Command/TaskID/Origin(旧记录零值容错)+resident_meta_dir 可配+resident_session 事件(SetResidentRecordSink 旁路)+residentReattachOnce 唯一挂载点+TaskID 桥(IsTrackedSession→MarkTaskRunning)+跨重启 resume 真供能(rebuiltResumeClosure 镜像 resumeClosure 主体新建 detector);**R4**:computeMemoryFingerprint 先序(🔴5 修复:memory 被白名单排除不先检则静默不生效)+executorMu+currentRunner/SwapExecutor(cm 缝;RunFlow per-turn RLock)+buildRunner 装配段抽取(冷启/热重建同路径)+buildAgent executorOnly 模式(ownership 表:内存 store 丢弃壳/govLedger+Goals 不重绑/Approval 不 AddChannel/evoGit 不重盖/R1+R2 重建跳过)+懒检查 fp 变分支编排 Reload(build-validate-then-swap fail-closed)+代际日志+ring2 prevSnapshot+SetRollbackFn/Rollback()+org_coordinator.go 零消费者死代码删除(orgSnapshot/builtAgent 类型随 D3.5 删除);**验证**:节间门禁×3+全量 -short 零 FAIL+根包/agent/task/action -race(存量 3 race 非阻断)+fail-before 回归×8(板空证事件承重/inline 无记录历史→ghost/cleanup 屠杀时序/n- 枚举恒空/unknown 1-2 次保留) | 节间门禁纪律;六/七两轮 fresh-eyes 全折入后放行;R1 立范模式沿用;真 tmux 契约验证 | 
 
+| 2026-09-13 | **maintainability-audit 立案并完成审计（/opsx:propose + /opsx:apply 同日闭环）**:逐包逐文件审阅 main@cf006e1 全部 29 Go 包（~27.6k 源码行），产出 9 份评分卡（五维 S/A/B/C）+发现台账 11 条（🔴0/🟠3/🟡8：F-4 session 边界 7 处 DATA RACE 存量、F-5 race flaky 待定性、F-6 rustviking CLI fork 无超时致退化防线失效、F-8 git exec 同类、F-7 MemoryStore 接口宽 stub 模式、F-11 DenialLedger 写失败静默、F-1/2/9/10 卫生债）+backlog 三级（P1 外部命令超时同修/agent-session race 清理）；横切结论：TODO/FIXME 零残留、错误处理与锁纪律判例良好、残余集中在 agent-session 边界与外部 exec 无超时两类；方法契约升格主 spec maintainability-audit（只读性/评分卡结构/证据纪律/台账结构/可复现五 Requirement）——fresh-eyes 抽验 5 发现 4 实证 1 行号漂移依符号引用修正（spec Scenario 活例）；改进动作全部分流后续独立变更 | 用户指令逐包评估可维护性;三份外部评估复杂度警告+生产 pruneTerminal panic 为直接动因 |
+
 ## 重编原则(后续清账沿用)
 
 1. 归档区不改写,裁决集中记录于本账本;
 2. "问题是否还在"以代码现状为准,不以任务勾选状态为准(勾选落后于演进是停滞变更的通病);
 3. 未动工变更复活前必须做前提核验(挂载点是否已被退役/重构);
 4. 活跃集目标规模:≤ 1 张地图 + ≤ 2 个执行中变更(单维护者节奏)。
+
+## 红色耦合台账（implementation-hardening 7A.3，2026-09-14）
+
+上游内部行为假设（trpc-agent-go v1.10.0）——升级时逐项对照钉测/豁免状态：
+
+| # | 假设 | 状态 |
+|---|------|------|
+| U1 | 插件管线在 tool-result 事件上**同步等待完成**（投影完备性 I2 的构造保证） | ✅ 钉测 `TestI2_BeforeModelCompleteness_RealPipeline`（agent/invariants_i2_test.go） |
+| U2 | runner 内部 steer 队列关闭路径与事件消费并发安全 | ❌ 上游内部竞态（-race 实测），豁免：见 CI race job 注释 + 上游 issue 待报 |
+| U3 | inmemory session service 的 hook 链并发读写（session.go:122 栈族） | ❌ 上游内部竞态，豁免同上；审计 F-4 的「Session.Clone」描述系误判，真身为本条 |
+| U4 | BeforeModel 回调时序（投影装配先于 LLM 调用） | ✅ 由 U1 钉测覆盖同链路 |
+
+隐式耦合（包间暗连，非 import）：
+
+| # | 耦合 | 状态 |
+|---|------|------|
+| C1 | evolution guardrail 证据 ← governance 事件流（治理关闭则两判据空转） | ✅ 显式化：`SetGovernanceSignalsAvailable` 注入 + 评估输出声明（7.3） |
+| C2 | 分区哈希（FNV-1a 32 位）碰撞 → 两 agent 记忆命名空间静默合并 | ⚠️ 低概率已知，未修（撞名即显性化；文档留痕） |
+| C3 | task 包时序敏感测试首跑 FAIL 复跑绿（2026-09-14 实录，具体测试未定位） | ⚠️ 与 F-5 同族，8.1 分类处置一并检视 |
+
+## implementation-hardening 变更台账（2026-09-14 执行完毕，main）
+
+三份第二轮外部评审（设计7.5/实现6.6）→ 逐条核验（V1-V14 证实 + 3 反证）→ 深钻补证（V15-V18）→ 分 WP 落地：
+
+| WP | 内容 | 要点 |
+|----|------|------|
+| WP1 裂缝收口 | Resume close(nil watchDone)（fail-before 先红后绿）；nil detector 守卫（nil通道变量式）；KeepRecentTasks 参数化（共享字段竞态结构性消除）；**V15 翻案修复**：StartLoop goroutine defer close(outputCh) + 成员复用 → Stop 终结化（方案 D：二次 Start 显式报错；宿主 range-close 契约保留；hook 闭包捕获构造期通道使重建方案被否） | R15 反证系核验不完整——**教训：反证须穷尽读写两侧** |
+| WP2 耐久 | LocalFileKV fsync（WAL批/快照tmp/目录，`FSync *bool` 默认开，关闭留 WARN）；冷分区发现（Init 实装 + ListPartitionIDs 类型断言式，New 自动接线；**Init 原本连生产调用方都没有**）；bench 屏障 5.6ms vs 0.81ms（批级摊销影响可忽略） | |
+| WP3 安全 | RL HTTP Bearer 认证（ServeHTTP 顶部单点，全端点无豁免）+ ValidateListenAddr loopback fail-closed；wechat-bot 无 token 自动回退 127.0.0.1（原 ：port 全接口为实际漏洞面）；recallByItems 钳 50 + 截断说明 | |
+| WP5 死码二清 | TypeToolUse/NewToolUseEvent/ToolCall 字段/两幽灵测试；modelref 死导出；IsTmuxAvailable 真 LookPath 探测（原恒真）；event_bus 头注改写实 | 上轮清理漏验 wechat-bot 独立模块（WithSummaryModel 调用残留）——本轮补验并修 |
+| WP4 资源回收 | ContextManager.RetireRunner（retired+in-flight 计数，归零幂等 Close；Close 终态无条件清扫）；SwappableModel 同型（测试捕获同例替换误退役缺陷并修）；lastEventKeys 封顶 4096 按 key 单调淘汰；Rollback 触发面=宿主 SIGUSR2（核心零改动） | 实施修正：runner.Runner 自带幂等 Close（R11 误判更正）；回滚重建不复用旧 runner，退役无需 ring 豁免 |
+| WP6 配置 | internal/strictyaml 单实现，LoadConfig+mcp/registry 两点接通；buildAgent path-scoped 环检测（A↔B/自引用显式报错）。strict 首战擒三真实漂移：x-anchors（补扩展保留位）/summary_effort（补别名+fold——此前静默丢弃的功能缺口）/e2e 夹具 api_key 明文（改 api_key_env） | |
+| WP7 文档 | README「永久」三处改 TTL 实述；compaction gzip 化石注释改真；guardrail 治理耦合显式化（SetGovernanceSignalsAvailable + 评估输出声明）；wiki 四处同步 | |
+| WP9/7A 立法 | 分层依赖断言测试（现状全绿固化）；**上游假设钉 TestI2**（真实管线，I2 投影完备性）；LEDGER 红色耦合台账（U1-U4/C1-C3）；verify_doc 悬空 [0] 系第三方评审存档原文（不改写留痕） | |
+| WP8 战略 | race 分类处置：**十案全为上游内部（U2/U3）+ 时序 flaky（C3）——无本地可修案，不为过门禁改生产码**；raceEnabled build-tag 豁免机制 + 触发测试挂账；**agent 包纳入 race 门禁**（ci.yml）；soak 骨架（-tags soak，rounds 参数化，已跑通 4 轮重启持久验证） | |
+
+**审计 F-4 更正**：真身为上游 inmemory session service/invocation 内部竞态（U3），非 Session.Clone。
+**缓行项**（D11 路由表）：god file 解体（冻结后首变）、detector/EventKey 类型化、后端注册表化。
+**v0.2.0 前重跑 maintainability-audit**（再审节奏首锚点）。

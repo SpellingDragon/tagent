@@ -203,12 +203,46 @@ func (p *MemoryPlugin) onEvent(
 	evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 	evt.StateDelta[tagentevent.MetaKeyEventSummary] = []byte(eventSummary)
 
-	// 9. Update independent causal chain (thread-safe)
+	// 9. Update independent causal chain (thread-safe). Bounded at
+	// maxLastEventKeys (implementation-hardening 5.3): the map is keyed by
+	// "partition:session" — long-running agents accumulate sessions, and an
+	// unbounded map leaks. Eviction drops the OLDEST entry by event key
+	// (int64 event keys are time-monotonic within a partition, so min-value
+	// = least-recently-updated causal chain — the one least likely to be a
+	// parent for future events).
 	p.mu.Lock()
 	p.lastEventKeys[causalKey] = eventKey
+	if len(p.lastEventKeys) > maxLastEventKeys {
+		p.evictOldestLastEventKeysLocked()
+	}
 	p.mu.Unlock()
 
 	return evt, nil
+}
+
+
+// maxLastEventKeys bounds the causal-chain map (implementation-hardening 5.3):
+// long-running agents accumulate "partition:session" keys without bound.
+const maxLastEventKeys = 4096
+
+// evictOldestLastEventKeysLocked drops oldest-by-event-key entries until the
+// map is back under the cap. Caller must hold p.mu. O(n) per overflow batch —
+// n ≤ cap(4096), amortized over thousands of inserts.
+func (p *MemoryPlugin) evictOldestLastEventKeysLocked() {
+	for len(p.lastEventKeys) > maxLastEventKeys {
+		oldestKey := ""
+		var oldestVal int64
+		first := true
+		for k, v := range p.lastEventKeys {
+			if first || v < oldestVal {
+				oldestKey, oldestVal, first = k, v, false
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(p.lastEventKeys, oldestKey)
+	}
 }
 
 // fakeEvtPrefixRe matches model-fabricated timeline prefixes at the start of
