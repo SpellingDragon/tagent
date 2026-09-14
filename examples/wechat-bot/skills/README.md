@@ -152,34 +152,15 @@ node <skill-name>.js --help
 ## 📂 新增技能（2026-07-15 增补）
 
 ### 6. Path Map (path-map)
-项目路径拓扑与访问规范。消除路径混乱：
-- 主知识库唯一位置：`/Users/pengweiye/Documents/codes/tagent/examples/wechat-bot/knowledge_base/`
+项目路径拓扑与访问规范（**本 skill 未随仓库分发，此节仅存档说明**）：
+- 主知识库唯一位置：**ima 云端知识库**（经 `skills/ima/` 访问，KBID 见 `~/.config/ima/wiki_kbid`；2026-09-14 起本地零沉淀——拆条即上传，临时件即删，删除前 tar 备份）
 - skill 真实位置：`examples/wechat-bot/skills/`（**非 repo 根**）
-- 含致命易错点（read_file 绝对路径 bug、微信抓取 title 为空、相对路径落错位置）
-- 详见 `path-map/README.md`
+- 详见 `path-map/README.md`（如存在）
 
-### 7. Knowledge Base Manager (knowledge-base-manager)
-知识库管理规范（SSoT = `/Users/pengweiye/Documents/codes/tagent/examples/wechat-bot/knowledge_base/`）：
-- 主库目录结构、抓取→归档→关联→评估 SOP
-- 历史分裂合并流程（wechat-bot 旧库 3 篇稿并入主库，需用户确认后执行）
-- 详见 `knowledge-base-manager/README.md`
+### 7. Knowledge Base Manager（已退役，并入 ima）
+知识库管理已收敛为**云端单源**模式（2026-09-10 用户拍板，2026-09-14 完成本地清零）：
+- SSoT = ima 云端知识库（54+ 条），操作入口 = `skills/ima/SKILL.md`
+- 旧的本地目录 SOP（抓取→归档→关联→评估）已废弃；原 knowledge-base-manager/ 目录不存在
 
 ---
 
-### 8. Meditation Checklist (meditation-checklist)
-冥想文件系统核查清单。修复"冥想只回顾记忆不取证物理状态"的缺陷：
-- 强制核查项：文件系统事实核查、承诺-落地追踪、重复/分裂检测、空窗口策略
-- 发现问题后调用 path-map / knowledge-base-manager 处置
-- 详见 `meditation-checklist/README.md`
-
-### N. Interview (interview)
-
-面试备战助手（引用型技能）：驱动 `/home/lighthouse/agent-interview-helper` 的零依赖 CLI，
-跨 agent/ai-infra/llm/mygo 四题库抽题、模拟面试、查计划。微信触发词：「抽一道题」「模拟面试」。
-详见 `skills/interview/SKILL.md`。
-
-### M. ima (ima)
-
-腾讯 ima OpenAPI 统一技能（notes + knowledge-base 双模块）：搜/存笔记、知识库检索与上传。
-凭据 `~/.config/ima/`（600，不入库）。知识库范式（2026-09-10 用户拍板）：**云端 ima 单源，本地仅临时暂存编辑，不再长期落本地**；
-LLM Wiki 维护范式见 `skills/ima/SKILL.md` 顶部「知识库工作流」段。
