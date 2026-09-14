@@ -297,6 +297,13 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 		}
 
 		record.Metadata.DurationMs = time.Since(start).Milliseconds()
+		// 5.4 guard: provider returned no error but zero choices (observed 11/2072
+		// on plan glm-5.3, deep-thinking + long context). Surface loudly at the
+		// observability layer; retry semantics live in the agent loop (edge tests).
+		if lastResp != nil && lastResp.Error == nil && len(lastResp.Choices) == 0 {
+			log.Errorf("[trajectory] EMPTY-CHOICES response: model=%s n_msgs=%d duration_ms=%d -- provider served 200 with no choices",
+				modelName, len(request.Messages), record.Metadata.DurationMs)
+		}
 		tr.record(record)
 	}()
 
