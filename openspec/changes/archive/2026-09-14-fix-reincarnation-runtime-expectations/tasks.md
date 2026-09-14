@@ -83,4 +83,5 @@
 - [x] 8.2 换装部署演练：走 restart-tagent.sh 或既有换装流程，留存部署证据（二进制 sha/size、restart.log、healthz）
 - [x] 8.3 转世演练验收：模拟未压缩 WAL 重启 → 投影 fallback 重建成功（验收语义=新世可见上一世**去世时刻的上下文**：cap 内完整恢复、顺序一致；cap 外有界降级=boundary 记账+WARN，被截事件仍留事实链可 recall）；模拟 nil-probe 任务 → 回收链路生效；主 agent LLM 调用入 trajectory 可见
       - ✅ 2026-09-14 生产演练矩阵（比模拟更硬）：① 未压缩 WAL 重启 → fallback 重建成功：12:05:08 `mode=fallback scanned=517 truncated=true boundary=…`（cap 内保留最新500、截断记账+WARN，被截事件留事实链）+ 12:05:13 snapshot 路径 `refs=414 tail=35`（同窗双路径对照）；② nil-probe 回收：00:28 通道1 一次裁决 5 个孤儿 suspect（7c2d4d8b/561c5812/fb969979/d991cdfd/a4b2173d）→ 看板清空 + re-spawn 解禁；③ 主 agent LLM 入 trajectory：s58 换装后首个真实请求 03:47:55 n_msgs=418（system×3+完整历史）。语义级活证：12:05 重启后本会话携带完整上一世上下文继续对话至今
-- [ ] 8.4 验收矩阵全绿 + 归档准备（报账后由 plan 执行 archive）
+- [x] 8.4 验收矩阵全绿 + 归档准备（报账后由 plan 执行 archive）
+      - 完成（2026-09-14 14:0x）：门禁 check-openspec.sh GATE_EXIT=0（✗ 项均为其他历史 change 存量，非本计划）；openspec archive --yes 成功 → archive/2026-09-14-fix-reincarnation-runtime-expectations；spec delta task-registry-rebuild +2 场景并入 canonical specs；plan b34b8303 复核 5.8 产物实证通过（advisory 2 条：LEDGER 建议采纳、maintenance.sh 白名单经实证已追踪仍补放行 7624e13）
