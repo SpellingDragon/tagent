@@ -256,6 +256,55 @@ func TestDropMeditationFromMixedBatch(t *testing.T) {
 	})
 }
 
+// Meditation-lineage regression (2026-09-14): a task_settled reclaim event
+// spawned during a meditation turn carries trigger_source="meditation" in its
+// Origin baggage (Metadata). extractTriggerSource must honor that lineage so
+// the reclaim turn's output stays behind the meditation delivery gate instead
+// of falling back to lastActiveChat (user chat leak, seen live at 17:30).
+func TestExtractTriggerSource_TaskSettleLineage(t *testing.T) {
+	newMedSettle := func() *AgentEvent {
+		evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: "[task settled] meditation-spawned job"})
+		evt.Metadata[tagentevent.MetaKeyTriggerSource] = "meditation"
+		return evt
+	}
+	newUserSettle := func() *AgentEvent {
+		evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: "[task settled] user-spawned job"})
+		evt.Metadata[tagentevent.MetaKeyTriggerSource] = "user"
+		return evt
+	}
+	newBareTask := func() *AgentEvent {
+		return NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: "[task settled] legacy"})
+	}
+	newUser := func() *AgentEvent {
+		return NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "hi"})
+	}
+
+	t.Run("meditation lineage wins over mechanical task source", func(t *testing.T) {
+		assert.Equal(t, "meditation", extractTriggerSource([]*AgentEvent{newMedSettle()}))
+	})
+
+	t.Run("user lineage from user-spawned task resolves to user", func(t *testing.T) {
+		assert.Equal(t, "user", extractTriggerSource([]*AgentEvent{newUserSettle()}))
+	})
+
+	t.Run("bare task event without lineage keeps mechanical source", func(t *testing.T) {
+		assert.Equal(t, SourceTask, extractTriggerSource([]*AgentEvent{newBareTask()}))
+	})
+
+	t.Run("real user input outranks meditation lineage in mixed batch", func(t *testing.T) {
+		assert.Equal(t, "user", extractTriggerSource([]*AgentEvent{newMedSettle(), newUser()}))
+		assert.Equal(t, "user", extractTriggerSource([]*AgentEvent{newUser(), newMedSettle()}))
+	})
+
+	t.Run("user lineage outranks foreign mechanical source", func(t *testing.T) {
+		assert.Equal(t, "user", extractTriggerSource([]*AgentEvent{newBareTask(), newUserSettle()}))
+	})
+
+	t.Run("empty batch defaults to user", func(t *testing.T) {
+		assert.Equal(t, "user", extractTriggerSource(nil))
+	})
+}
+
 func TestMeditationManager_StartStop(t *testing.T) {
 	inj := &mockMessageInjector{}
 	cfg := MeditationConfig{

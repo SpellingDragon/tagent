@@ -213,13 +213,41 @@ func dropMeditationFromMixedBatch(events []*AgentEvent, agentName string) []*Age
 // provides deterministic source identification for consumer dispatch
 // (meditation vs task vs user) without content-based inference.
 func extractTriggerSource(events []*AgentEvent) string {
+	// Priority chain (meditation-lineage fix, 2026-09-14):
+	// 1. A real user input in the batch always wins (mechanical Source "user").
+	// 2. Lineage: task_settled reclaim events carry the spawning turn's
+	//    trigger_source in Metadata (Origin baggage captured at spawn time,
+	//    fanned out at settle). A task spawned during a meditation turn must
+	//    keep meditation lineage so app-side delivery gates (main.go dispatch)
+	//    hold its reclaim output back from the user chat.
+	// 3. Mechanical Source (pre-existing behavior for events without lineage).
+	// 4. Default "user".
+	firstLineage := ""
+	firstMechanical := ""
 	for _, evt := range events {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
 			continue
 		}
-		if evt.Source != "" {
-			return evt.Source
+		if evt.Source == "user" {
+			return "user"
 		}
+		if firstLineage == "" {
+			if v, ok := evt.Metadata[tagentevent.MetaKeyTriggerSource].(string); ok && v != "" {
+				firstLineage = v
+			}
+		}
+		if firstMechanical == "" && evt.Source != "" {
+			firstMechanical = evt.Source
+		}
+	}
+	if firstLineage == "user" {
+		return "user"
+	}
+	if firstLineage != "" {
+		return firstLineage
+	}
+	if firstMechanical != "" {
+		return firstMechanical
 	}
 	return "user"
 }
