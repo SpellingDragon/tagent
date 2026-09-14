@@ -151,7 +151,7 @@ agents:
     meditation:                          # 定时心跳(仅 entry):空闲触发上下文清理/深度分析/skill 积累
       enabled: true
       interval: "30m"
-      min_gap: "2h"
+      min_gap: "1h"
       prompt_file: "meditation.md"
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
