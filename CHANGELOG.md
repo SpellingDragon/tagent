@@ -7,9 +7,9 @@
 
 （空——冻结期：治理/自进化闭环需在真实部署连续运行一个月后方启动下一轮功能迭代。）
 
-## [v0.1.0] - 2026-09-14
+## [v0.2.0] - 2026-09-14
 
-### implementation-hardening（收尾加固，冻结承诺面前置）
+### implementation-hardening（收尾加固；0.x 阶段含行为变化，部署前阅「迁移注意」）
 
 - **安全收口**：RL HTTP API Bearer token 认证（`TAGENT_RL_AUTH_TOKEN`；ServeHTTP 单点强制、全端点无豁免）+ `ValidateListenAddr` loopback fail-closed（无 token 非 loopback 拒绝监听）；wechat-bot 未设 token 自动仅绑 127.0.0.1。**部署注意**：原 `:port` 全接口监听的部署需设 token 或接受回环约束。
 - **耐久收口**：LocalFileKV WAL/快照/目录三级 fsync（`memory.fsync` 默认开，关闭留降级告警）——已确认写入自此抗掉电；冷分区启动发现（重启后未触碰分区纳入 TTL/容量/压实遗忘扫描）。
@@ -21,7 +21,9 @@
 - **race 门禁扩面**：agent 核心包纳入 CI race（上游内部竞态经 `raceEnabled` 豁免挂账，LEDGER U2/U3；上游 issue 待报）。
 - **文档对齐**：「事件永久入库」实述为「不可变入库 + 默认类型 TTL（3-30 天）可配永久」；治理关闭时评估输出显式声明信号不可用。
 
-## [Unreleased]（v0.1.0 前历史，随 v0.1.0 一并发布）
+## [v0.1.0] - 2026-09-10（历史版本）
+
+> 以下为 v0.1.0（tag f1beefa，evals backlog-final-closeout）至 v0.2.0 前的历史记录，随 v0.1.0 首发未含本段标题。
 
 ### Changed（设计返工，self-evolution-git-native 2026-09-07）
 
