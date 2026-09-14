@@ -98,6 +98,6 @@
 
 ## 9. 收尾
 
-- [ ] 9.1 `openspec validate implementation-hardening --strict` 通过
-- [ ] 9.2 双分支：全部提交 main 并推送；dev cherry-pick 可行则同步、冲突则留待合并继承（同 848b412 先例）并注明
-- [ ] 9.3 邮件通知远端：变更清单 + v0.1.0 + 部署注意（strict yaml 迁移、RL token/loopback 二选一、fsync 默认开）
+- [x] 9.1 `openspec validate implementation-hardening --strict` 通过
+- [x] 9.2 双分支：全部提交 main 并推送；dev cherry-pick 可行则同步、冲突则留待合并继承（同 848b412 先例）并注明
+- [x] 9.3 邮件通知远端：变更清单 + v0.1.0 + 部署注意（strict yaml 迁移、RL token/loopback 二选一、fsync 默认开）
