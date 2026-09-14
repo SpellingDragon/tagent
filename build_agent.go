@@ -217,6 +217,11 @@ func buildAgentDFS(
 		if judgeModelRef != nil && judgeModelRef.effort != nil {
 			evJudge = evJudge.WithEffort(*judgeModelRef.effort)
 		}
+		// 7.3：治理信号可用性注入——评估输出在治理关闭时显式声明两判据不可用
+		// （闭包晚绑定：govGate 在此之后才接线，evaluate 时刻读取）。
+		rc.evoGit.SetGovernanceSignalsAvailable(func() bool {
+			return cfg.Governance.Enabled && rc.govGate != nil
+		})
 		rc.evoGit.BindRuntime(
 			memStore, memory.PartitionIDFromName(name),
 			evJudge,

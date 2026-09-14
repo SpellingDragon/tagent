@@ -504,7 +504,7 @@ RunFlow:
             │
             ├── onEvent → 追加 EventReference 到 SessionProjection ──→ 层2: SessionProjection (投影, 有界)
             │
-            └── MemoryPlugin.OnEvent → StoreEvent ───────────────────→ 层3: MemoryStore FullEvent (永久存储, 不可变)
+            └── MemoryPlugin.OnEvent → StoreEvent ───────────────────→ 层3: MemoryStore FullEvent (不可变, TTL 遗忘)
 
 层2 (SessionProjection) → BuildMessages → 按需从 MemoryStore 拉取完整 Content
                        → InjectEventKeys → [evt_KEY|type] 前缀注入

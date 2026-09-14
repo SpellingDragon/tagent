@@ -35,19 +35,29 @@ type GitEvolution struct {
 	store memory.MemoryStore // improvement/evaluation 事件直写（feedback.go 模式，不经 governance 包）
 	pid   int                // 事件分区（entry）
 
-	judge   Evaluator      // 可 nil（仅 guardrail）
-	guard   Guardrail      // 可 nil（仅 judge）
-	log     *ActivationLog // 窗口时刻表（sha→ts）
-	stopCh  chan struct{}  // M4：评估 goroutine 抢占通道（Stop 即时收敛）
-	mu      sync.Mutex     // M4：Register/Stop 并发下保护 wg.Add 与 stopped
-	wg      sync.WaitGroup
-	stopped atomic.Bool
+	judge Evaluator // 可 nil（仅 judge）
+	guard Guardrail // 可 nil（仅 guardrail）
+
+	signalsAvailable func() bool    // 治理信号可用性（7.3）：nil=未声明（遗留行为）
+	log              *ActivationLog // 窗口时刻表（sha→ts）
+	stopCh           chan struct{}  // M4：评估 goroutine 抢占通道（Stop 即时收敛）
+	mu               sync.Mutex     // M4：Register/Stop 并发下保护 wg.Add 与 stopped
+	wg               sync.WaitGroup
+	stopped          atomic.Bool
 
 	latestSha atomic.Value // string——版本章缓存（S2：性能层，真源=improvement 事件）
 	recovered atomic.Bool  // 重启惰性恢复只做一次
 }
 
 // NewGitEvolution 构建装配单元。store/judge/guard 可为零值——buildAgent 阶段经
+// SetGovernanceSignalsAvailable declares whether the governance gate is
+// wired (implementation-hardening 7.3): MetricGuardrail's denial/critical
+// criteria feed on governance events — with governance off they are
+// structurally unavailable, and evaluate() says so explicitly instead of
+// letting zero-counts masquerade as healthy evidence. Nil setter state =
+// legacy behavior (no annotation).
+func (g *GitEvolution) SetGovernanceSignalsAvailable(fn func() bool) { g.signalsAvailable = fn }
+
 // BindRuntime 延迟绑定（memStore/model 就绪后，同旧 BindPosterior 时序——S3）。
 func NewGitEvolution(cfg GitEvolutionConfig) *GitEvolution {
 	if len(cfg.ProtectedPaths) == 0 {
@@ -216,6 +226,10 @@ func (g *GitEvolution) scheduleEvaluation(sha string, ts int64) {
 // evaluate 执行评估并写 evaluation 事件（结论四态——K7：样本不足不得冒充健康）。
 func (g *GitEvolution) evaluate(sha string, ts int64) {
 	ic := improvementContent{Op: "evaluation", Sha: sha, Verdict: "pending"}
+	governanceNote := ""
+	if g.signalsAvailable != nil && !g.signalsAvailable() {
+		governanceNote = "governance disabled: denial/critical signals unavailable; "
+	}
 	if g.guard != nil {
 		if breached, reason := g.guard.Breach(sha); breached {
 			ic.Verdict = "degraded"
@@ -239,11 +253,11 @@ func (g *GitEvolution) evaluate(sha string, ts int64) {
 			ic.Advice = fmt.Sprintf("LLM-judge 判劣化，建议复核后 `refine rollback %s`", shortSha(sha))
 		} else {
 			ic.Verdict = "healthy"
-			ic.Reason = res.Reason
+			ic.Reason = governanceNote + res.Reason
 		}
 	} else {
 		ic.Verdict = "healthy"
-		ic.Reason = "无评估器，仅记录窗口"
+		ic.Reason = governanceNote + "无评估器，仅记录窗口"
 	}
 	g.writeEvent(ic, time.Now().UnixMilli())
 }

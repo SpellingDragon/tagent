@@ -74,11 +74,11 @@
 
 ## 7. WP7 文档对齐
 
-- [ ] 7.1 README【:3/:167/:253 三处】：「永久入库/永久存储」→「不可变入库 + 默认按类型 TTL（3-30 天）+ 可配永久」；配置永久之法（TTLDays -1 豁免）在配置参考可达
-- [ ] 7.2 compaction.go:19-24 化石注释改真（L3=低价值类型清空 Content，无 gzip）；**deterministic-compress-level spec:24-30 定改**（V16 已证：线性边界→指数 {k,2k,4k}，与 smart_compress.go:148-153 对齐）
-- [ ] 7.3 guardrail 耦合声明：evolve.go:218 评估构建处，治理关闭时附 `governance disabled: denial/critical signals unavailable`（判定来源：治理 Gate 是否接线——经 BindRuntime 注入态判，勿靠事件计数推断）；wiki 平台篇同步
-- [ ] 7.4 wiki 复核：README/wiki 与三处行为变化（fsync 默认/strict/RL 认证）一致；三项评审反证（invBus/namedStores/behavior-matrix）与 V15 翻案过程入 LEDGER 留档（含 R15 误判教训：反证须穷尽读写两侧）
-- [ ] 7.5 docs 门：仓库文档检查脚本（若有）通过
+- [x] 7.1 README【:3/:167/:253 三处】：「永久入库/永久存储」→「不可变入库 + 默认按类型 TTL（3-30 天）+ 可配永久」；配置永久之法（TTLDays -1 豁免）在配置参考可达
+- [x] 7.2 compaction.go:19-24 化石注释改真（L3=低价值类型清空 Content，无 gzip）；**deterministic-compress-level spec:24-30 定改**（V16 已证：线性边界→指数 {k,2k,4k}，与 smart_compress.go:148-153 对齐）
+- [x] 7.3 guardrail 耦合声明：evolve.go:218 评估构建处，治理关闭时附 `governance disabled: denial/critical signals unavailable`（判定来源：治理 Gate 是否接线——经 BindRuntime 注入态判，勿靠事件计数推断）；wiki 平台篇同步
+- [x] 7.4 wiki 复核：README/wiki 与三处行为变化（fsync 默认/strict/RL 认证）一致；三项评审反证（invBus/namedStores/behavior-matrix）与 V15 翻案过程入 LEDGER 留档（含 R15 误判教训：反证须穷尽读写两侧）
+- [x] 7.5 docs 门：仓库文档检查脚本（若有）通过
 
 ## 7A. WP9 架构防呆立法（v0.1.0 冻结前置；D11 路由表之入案四件）
 

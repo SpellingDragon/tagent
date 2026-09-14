@@ -1,6 +1,6 @@
 # tagent
 
-**记忆驱动的长期运行 Agent 框架** —— 基于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go)，用事件驱动引擎替代同步 ReAct 循环：事件永久入库、上下文按需压缩、历史随时召回，让 Agent 可以**连续运行数天而不失忆、不失控**。
+**记忆驱动的长期运行 Agent 框架** —— 基于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go)，用事件驱动引擎替代同步 ReAct 循环：事件不可变入库（默认按类型 TTL 遗忘曲线，可配置永久）、上下文按需压缩、历史随时召回，让 Agent 可以**连续运行数天而不失忆、不失控**。
 
 [English](README_EN.md) | 中文
 
@@ -164,7 +164,7 @@ cd examples/wechat-bot && go run .    # 微信机器人：持久循环+全部机
 |-----|------|------|----------|
 | **EventBus AgentEvent** | Agent 内存 | 事件触发队列 | Publish → Pull 后丢弃 |
 | **SessionProjection EventReference[]** | Agent 内存 | 投影（有界工作内存） | 可被 Compactor 清理 |
-| **MemoryStore FullEvent** | 内存/文件/DB | 永久存储（不可变） | 永久 |
+| **MemoryStore FullEvent** | 内存/文件/DB | 不可变存储 | 按类型 TTL（3-30 天，可配永久 `-1`） |
 
 ```mermaid
 graph TB
@@ -250,7 +250,7 @@ graph TB
 
 四条承诺，贯穿所有机制：
 
-1. **事件不可变**：发生过的事永久入库、永不修改——压缩、遗忘都只作用于"视图"，不作用于事实
+1. **事件不可变**：发生过的事入库即不可修改——压缩、遗忘都只作用于"视图"，不作用于事实；遗忘按类型 TTL 曲线（3-30 天，可配永久），非无限保留
 2. **上下文有界**：发给 LLM 的工作内存永远有预算上限，超限自动压缩——不靠无限窗口，靠分层记忆
 3. **召回精确**：压缩掉的内容都留有票据（事件 key），按票取回原文，零幻觉
 4. **异步不失联**：长任务先应答、完成后通知；通知自带完整上下文，压缩或乱序都不会产生"断线"的任务
