@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 	"os"
 	"path/filepath"
 	"time"
