@@ -160,7 +160,7 @@ agents:
     model: deepseek-flash
     reasoning_effort: max
     system_prompt:
-      files: [knowledge_agent.md]
+      files: [knowledge_agent.md, knowledge_backend.md]
     memory:
       type: localfile
       path: .wechat-config/data
