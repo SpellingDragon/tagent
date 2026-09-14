@@ -170,7 +170,6 @@ agents:
     max_tokens: 32000
     temperature: 0.3
     thinking_enabled: true
-    reasoning_effort: "low"              # hy3 思考触发器(thinking_enabled 对 hy3 无效)
     tools:
       - { kind: tool, id: skill_search }
       - { kind: tool, id: skill_load }
