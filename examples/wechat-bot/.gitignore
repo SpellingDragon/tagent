@@ -10,6 +10,7 @@
 !go.mod
 !go.sum
 !main.go
+!system_alert.go
 !file_delivery.go
 !file_delivery_test.go
 !file_intake.go

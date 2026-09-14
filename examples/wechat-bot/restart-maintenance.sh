@@ -31,6 +31,13 @@ DONEDIR="$BASE/run"
 DONEF="$DONEDIR/restart.done"
 HEALTH=http://127.0.0.1:8089/healthz
 log(){ echo "[$(date '+%F %T')] $*"; }
+
+# 5.8 system-alert dead-man switch (mirror of restart-tagent.sh)
+ALERTF="$BASE/run/SYSTEM_ALERT"; S58_OK=0; S58_LAST=""
+on_exit58(){ rc=$?; [ "$rc" = 0 ] && return 0; [ "$S58_OK" = 1 ] && return 0;
+  printf 'restart-maintenance.sh FAILED exit=%s at %s\nlast_step: %s\n' "$rc" "$(date '+%F %T')" "${S58_LAST:-n/a}" > "$ALERTF.part" 2>/dev/null && mv -f "$ALERTF.part" "$ALERTF" 2>/dev/null || true; }
+trap on_exit58 EXIT TERM INT
+log(){ echo "[$(date '+%F %T')] $*"; S58_LAST="$*"; }
 mkdir -p "$DONEDIR" 2>/dev/null
 
 # ---- 0. 幂等门: 哨兵 pid 仍健康则无事可做 ----
@@ -156,7 +163,8 @@ for i in $(seq 1 30); do
             cp -f "$SNAP" "$BASE/run/env.snapshot" 2>/dev/null && chmod 600 "$BASE/run/env.snapshot"
             rm -f "$SNAP"
         fi
-        log "=== insurance session end (SUCCESS) ==="
+        S58_OK=1
+log "=== insurance session end (SUCCESS) ==="
         exit 0
     fi
 done

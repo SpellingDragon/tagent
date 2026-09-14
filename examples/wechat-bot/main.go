@@ -202,6 +202,10 @@ func main() {
 	// doing when its predecessor died (D1 detect / D2 meditation source / D3+D8
 	// compose / D5 consume-marker). One-shot goroutine, never crashes the bot.
 	go maybeInjectReincarnationNotice(ta, tagentCfg.Entry, filepath.Join("run"), 5*time.Second)
+	// 5a-ter. System-alert dead-man switch (5.8): consume run/SYSTEM_ALERT
+	// staged by restart scripts on FAIL (EXIT/TERM trap) so the agent learns
+	// about failed restart attempts instead of staying blind.
+	go maybeConsumeSystemAlert(ta, filepath.Join("run"), 5*time.Second)
 
 	// 5b. Start HTTPAPI for local observability and RL task submission.
 	//     Endpoints: GET /healthz, POST /task

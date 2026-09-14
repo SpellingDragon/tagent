@@ -27,6 +27,15 @@ DONEF="$DONEDIR/restart.done"
 mkdir -p "$DONEDIR" 2>/dev/null
 log(){ echo "[$(date '+%F %T')] $*"; }
 
+# 5.8 system-alert dead-man switch: any non-success exit (including SIGTERM
+# killing this script mid-flight) stages run/SYSTEM_ALERT so the next bot
+# boot injects the failure instead of staying blind (13x FAIL 11:51-12:04).
+ALERTF="$DONEDIR/SYSTEM_ALERT"; S58_OK=0; S58_LAST=""
+on_exit58(){ rc=$?; [ "$rc" = 0 ] && return 0; [ "$S58_OK" = 1 ] && return 0;
+  printf 'restart-tagent.sh FAILED exit=%s at %s\nlast_step: %s\n' "$rc" "$(date '+%F %T')" "${S58_LAST:-n/a}" > "$ALERTF.part" 2>/dev/null && mv -f "$ALERTF.part" "$ALERTF" 2>/dev/null || true; }
+trap on_exit58 EXIT TERM INT
+log(){ echo "[$(date '+%F %T')] $*"; S58_LAST="$*"; }
+
 # 0-pre. mutual exclusion vs the cron insurance (restart-maintenance.sh is
 # wrapped in flock -n on this same lock path by crontab). 2026-09-12 00:23
 # lesson: the two scripts interleaved — the dogfood swap SIGTERMed the bot the
@@ -130,7 +139,8 @@ for i in $(seq 1 30); do
             cp -f "$SNAP" "$DONEDIR/env.snapshot" 2>/dev/null && chmod 600 "$DONEDIR/env.snapshot"
         fi
         rm -f "$SNAP"
-        log "=== restart session end (SUCCESS) ==="
+        S58_OK=1
+log "=== restart session end (SUCCESS) ==="
         exit 0
     fi
     if ! kill -0 "$NEW_PID" 2>/dev/null; then
