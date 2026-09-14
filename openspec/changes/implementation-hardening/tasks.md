@@ -92,9 +92,9 @@
 - [x] 8.1 V17 分类处置（探索轮已取全栈，/tmp/race 探针方法可重现）：A 类（上游 inmemory session service/steer 关闭）→豁免清单+向 trpc-agent-go 报 issue 附栈证据；B 类（loopMockTool.getCallCount 测试 mock）→测试侧加锁修复；审计 F-4「Session.Clone」描述在 LEDGER 更正为真身；**不为过门禁改生产码**
 - [x] 8.2 race 门禁扩面：ci.yml:52 命令加 `./agent/`（:48-50 注释同步改写为现状）；本地 `go test ./agent/ -race -count=1` 通过（或仅剩已豁免项）
 - [x] 8.3 soak 骨架：tests/soak_test.go（build tag `soak`，默认跳过）：N 轮「写事件→压缩→票据召回→关进程重开→投影重建断言逐字节」，N 与数据量参数化；CI workflow_dispatch 手动 job
-- [ ] 8.4 全量回归：`go build ./... && go test ./... -short -count=1 && staticcheck ./...` + ci.yml 六组 race 等价本地跑
-- [ ] 8.5 LEDGER 回写：本变更台账（0 批定谳结论、2.3 开销数据、8.1 栈定位与处置、三项反证与 V15 翻案、**7A.3 红色耦合台账**、D11 立法留痕与缓行项 backlog 坐标）；另注「v0.2.0 前重跑 maintainability-audit」（再审节奏首锚点）
-- [ ] 8.6 v0.1.0：CHANGELOG 定稿（含三处行为变化的迁移说明 + 立法三件与准绳）→ 打 tag 推送
+- [x] 8.4 全量回归：`go build ./... && go test ./... -short -count=1 && staticcheck ./...` + ci.yml 六组 race 等价本地跑
+- [x] 8.5 LEDGER 回写：本变更台账（0 批定谳结论、2.3 开销数据、8.1 栈定位与处置、三项反证与 V15 翻案、**7A.3 红色耦合台账**、D11 立法留痕与缓行项 backlog 坐标）；另注「v0.2.0 前重跑 maintainability-audit」（再审节奏首锚点）
+- [x] 8.6 v0.1.0：CHANGELOG 定稿（含三处行为变化的迁移说明 + 立法三件与准绳）→ 打 tag 推送
 
 ## 9. 收尾
 
