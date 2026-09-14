@@ -252,6 +252,19 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// 6b. Manual rollback trigger surface (implementation-hardening 5.4):
+	// SIGUSR2 rolls the executor back to the ring-2 previous generation
+	// (core semantics covered by agent org-hotreload e2e; this is host wiring
+	// — the library never registers global signals itself).
+	usr2 := make(chan os.Signal, 1)
+	signal.Notify(usr2, syscall.SIGUSR2)
+	go func() {
+		for range usr2 {
+			log.Infof("[SIGUSR2] rollback requested — rebuilding executor from ring-2 previous generation")
+			ta.Rollback()
+		}
+	}()
+
 	// 7. OTLP telemetry — distributed tracing export (optional).
 	//    Set OTEL_EXPORTER_OTLP_ENDPOINT to enable (e.g., "localhost:4317" for Jaeger/Tempo).
 	//    Without this, the tracer is noop (zero overhead).

@@ -59,11 +59,11 @@
 
 ## 5. WP4 资源与触发面收口
 
-- [ ] 5.1 旧 runner 延迟 Close（N7 细节 + D5 定时兜底）：ContextManager 加 retired 列表 + 全局 in-flight 计数（RunFlow 入口 inc/defer dec，归零时扫描 retired 逐个 `io.Closer` 断言 Close，幂等 once）；**另配年龄阈值定时兜底清扫**（如换代后 10 分钟仍因持续负载未归零则强制 Close——补持续负载软点）；tagent.go 换代处把跌出 ring-2 的 old 调 `cm.RetireRunner(old)`（ring-2 在 reload 闭包 prevKeep/prevSnapshot，tagent.go:323-328，N10）；测试：三代热更断言第一代 Close 恰一次、ring 内不关；另测「持续 in-flight 下兜底清扫仍回收」
-- [ ] 5.2 SwappableModel 同型：GenerateContent 计数包裹，Swap 换下归零后断言式 Close【swappable_model.go:35-47】；**坑**：in-flight 期间 Swap 多次——只追记「待关列表」，勿假设一代
-- [ ] 5.3 lastEventKeys 封顶 4096：超限按 value（int64 单调）淘汰最旧【memory_plugin.go:36/208】；测试：超限修剪 + 因果链 parentKey 正确性保持
-- [ ] 5.4 Rollback 手动触发面（N10：核心零改动）：wechat-bot main.go 宿主侧接 SIGUSR2【:241 现有 signal.NotifyContext 处扩展】→ 调已有 `ta.Rollback()`（task_record_sink.go:125）；e2e：触发→断言换回上一代（日志指纹）
-- [ ] 5.5 回归门：`go test ./agent/... ./rl/ ./plugin/ -short -count=1` 全绿
+- [x] 5.1 旧 runner 延迟 Close（N7 细节 + D5 定时兜底）：ContextManager 加 retired 列表 + 全局 in-flight 计数（RunFlow 入口 inc/defer dec，归零时扫描 retired 逐个 `io.Closer` 断言 Close，幂等 once）；**另配年龄阈值定时兜底清扫**（如换代后 10 分钟仍因持续负载未归零则强制 Close——补持续负载软点）；tagent.go 换代处把跌出 ring-2 的 old 调 `cm.RetireRunner(old)`（ring-2 在 reload 闭包 prevKeep/prevSnapshot，tagent.go:323-328，N10）；测试：三代热更断言第一代 Close 恰一次、ring 内不关；另测「持续 in-flight 下兜底清扫仍回收」
+- [x] 5.2 SwappableModel 同型：GenerateContent 计数包裹，Swap 换下归零后断言式 Close【swappable_model.go:35-47】；**坑**：in-flight 期间 Swap 多次——只追记「待关列表」，勿假设一代
+- [x] 5.3 lastEventKeys 封顶 4096：超限按 value（int64 单调）淘汰最旧【memory_plugin.go:36/208】；测试：超限修剪 + 因果链 parentKey 正确性保持
+- [x] 5.4 Rollback 手动触发面（N10：核心零改动）：wechat-bot main.go 宿主侧接 SIGUSR2【:241 现有 signal.NotifyContext 处扩展】→ 调已有 `ta.Rollback()`（task_record_sink.go:125）；e2e：触发→断言换回上一代（日志指纹）
+- [x] 5.5 回归门：`go test ./agent/... ./rl/ ./plugin/ -short -count=1` 全绿
 
 ## 6. WP6 配置健壮性
 

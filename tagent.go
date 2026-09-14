@@ -393,7 +393,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			oldFP := lastFP
-			entryAgent.SwapExecutor(newRunner)
+			if oldRunner := entryAgent.SwapExecutor(newRunner); oldRunner != nil {
+				entryAgent.RetireRunner(oldRunner) // 5.1: delayed Close after in-flight drops
+			}
 			lastFP = fp
 			execGen++
 			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
@@ -422,7 +424,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					log.Errorf("[org-hotreload] rollback rebuild FAILED — serving current (fail-closed): %v", rerr2)
 					return
 				} else if r2 := ta2.Runner(); r2 != nil {
-					entryAgent.SwapExecutor(r2)
+					if oldRunner := entryAgent.SwapExecutor(r2); oldRunner != nil {
+						entryAgent.RetireRunner(oldRunner) // 5.1
+					}
 					execGen++
 					lastFP = rbp
 					log.Infof("[org-hotreload] executor generation %d rolled back to fp %s..", execGen, short(rbp))
