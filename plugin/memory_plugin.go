@@ -220,7 +220,6 @@ func (p *MemoryPlugin) onEvent(
 	return evt, nil
 }
 
-
 // maxLastEventKeys bounds the causal-chain map (implementation-hardening 5.3):
 // long-running agents accumulate "partition:session" keys without bound.
 const maxLastEventKeys = 4096

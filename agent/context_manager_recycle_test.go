@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	upagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -76,5 +79,68 @@ func TestContextManager_Close_DrainsRetiredUnconditionally(t *testing.T) {
 	}
 	if old.closed != 1 {
 		t.Fatalf("retired runner closed = %d, want 1 (unconditional terminal drain)", old.closed)
+	}
+}
+
+// TestRetireRunner_RaceStress (review test-blind-spot #1): concurrent
+// RetireRunner / in-flight jitter / sweeps / Close under -race — the lock
+// discipline on retireMu + runnerInFlight must hold with no double-Close of
+// any runner (each countingRunner asserts closed <= 1 via the shared max).
+func TestRetireRunner_RaceStress(t *testing.T) {
+	cm := &ContextManager{name: "race-stress"}
+	cm.runner = &countingRunner{}
+
+	const gens = 50
+	runners := make([]*countingRunner, gens)
+	for i := range runners {
+		runners[i] = &countingRunner{}
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Flapper: jitters the in-flight gate continuously.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				cm.runnerInFlight.Add(1)
+				cm.runnerInFlight.Add(-1)
+			}
+		}
+	}()
+
+	// Swapper: retires every generation.
+	for i := 0; i < gens; i++ {
+		old := cm.SwapExecutor(&countingRunner{})
+		cm.RetireRunner(old)
+	}
+
+	// Concurrent sweeper.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < gens; i++ {
+			cm.sweepRetiredRunners()
+			select {
+			case <-stop:
+				return
+			default:
+			}
+		}
+	}()
+
+	close(stop)
+	wg.Wait()
+	require.NoError(t, cm.Close()) // terminal drain closes everything remaining
+
+	for i, r := range runners {
+		if r.closed > 1 {
+			t.Fatalf("generation %d closed %d times, want <= 1 (idempotent)", i, r.closed)
+		}
 	}
 }

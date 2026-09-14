@@ -60,7 +60,7 @@ type ContextManager struct {
 	// runners wait here until no in-flight turn references any of them, then
 	// get an idempotent io.Closer Close. See RetireRunner / sweepRetiredRunners.
 	retireMu       sync.Mutex
-	retiredRunners []runner.Runner
+	retiredRunners []retiredRunner
 	runnerInFlight atomic.Int64
 	name           string
 	userID         string
@@ -552,6 +552,18 @@ func (cm *ContextManager) RebuildExecutor(cfg ContextManagerConfig) runner.Runne
 	return cm.currentRunner()
 }
 
+// retiredRunner pairs a swapped-out runner with its retirement time (the
+// leak-alarm input: a retiree still gated by in-flight turns after
+// retiredLeakAfter is flagged loudly instead of silently leaking).
+type retiredRunner struct {
+	r  runner.Runner
+	at time.Time
+}
+
+// retiredLeakAfter gates the leak alarm: past this age a retiree that still
+// cannot be closed is almost certainly a leak (see sweepRetiredRunners).
+const retiredLeakAfter = 10 * time.Minute
+
 // RetireRunner queues a swapped-out runner for delayed Close (implementation-
 // hardening 5.1): closed by the next sweep that observes zero in-flight turns
 // (the persistent loop is a single consumer, so quiescence arrives at every
@@ -564,7 +576,7 @@ func (cm *ContextManager) RetireRunner(old runner.Runner) {
 		return
 	}
 	cm.retireMu.Lock()
-	cm.retiredRunners = append(cm.retiredRunners, old)
+	cm.retiredRunners = append(cm.retiredRunners, retiredRunner{r: old, at: time.Now()})
 	cm.retireMu.Unlock()
 	cm.sweepRetiredRunners()
 }
@@ -573,6 +585,18 @@ func (cm *ContextManager) RetireRunner(old runner.Runner) {
 // Callers: RunFlow exit (counter drop), RetireRunner, Close.
 func (cm *ContextManager) sweepRetiredRunners() {
 	if cm.runnerInFlight.Load() != 0 {
+		// Leak alarm (review P2-3): in-flight turns gate the close — correct
+		// for drain-free, but a retiree stuck past retiredLeakAfter means the
+		// gate never opens (sustained concurrent flows). Say so loudly;
+		// force-closing here would break the in-flight turns instead.
+		cm.retireMu.Lock()
+		for _, e := range cm.retiredRunners {
+			if time.Since(e.at) > retiredLeakAfter {
+				log.Warnf("[ContextManager] retired runner pending >%s under sustained in-flight load — possible leak, investigate RunFlow concurrency", retiredLeakAfter)
+				break // one alarm per sweep
+			}
+		}
+		cm.retireMu.Unlock()
 		return
 	}
 	cm.retireMu.Lock()
@@ -580,11 +604,8 @@ func (cm *ContextManager) sweepRetiredRunners() {
 	if cm.runnerInFlight.Load() != 0 { // re-check under lock (inc may have raced in)
 		return
 	}
-	for _, r := range cm.retiredRunners {
-		if r == nil {
-			continue
-		}
-		if err := r.Close(); err != nil { // upstream documents Close as idempotent
+	for _, e := range cm.retiredRunners {
+		if err := e.r.Close(); err != nil { // upstream documents Close as idempotent
 			log.Warnf("[ContextManager] retired runner Close: %v", err)
 		}
 	}
@@ -1207,10 +1228,8 @@ func (cm *ContextManager) Close() error {
 	// Terminal: drain retired runners unconditionally — no new turns will run
 	// after Close, so the in-flight gate no longer applies.
 	cm.retireMu.Lock()
-	for _, r := range cm.retiredRunners {
-		if r != nil {
-			_ = r.Close() // upstream documents Close as idempotent
-		}
+	for _, e := range cm.retiredRunners {
+		_ = e.r.Close() // upstream documents Close as idempotent
 	}
 	cm.retiredRunners = nil
 	cm.retireMu.Unlock()

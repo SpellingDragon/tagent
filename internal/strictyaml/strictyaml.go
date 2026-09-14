@@ -16,7 +16,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DecodeYAML strictly parses YAML into out, rejecting unknown fields.
+// DecodeYAML strictly parses YAML into out, rejecting unknown fields AND any
+// trailing documents after the first (a silent second document could carry
+// config the user believes is live — review P2-4).
 func DecodeYAML(data []byte, out any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -26,10 +28,19 @@ func DecodeYAML(data []byte, out any) error {
 		}
 		return fmt.Errorf("strict yaml: %w", err)
 	}
-	return nil
+	var extra yaml.Node
+	switch err := dec.Decode(&extra); {
+	case errors.Is(err, io.EOF):
+		return nil // exactly one document
+	case err != nil:
+		return fmt.Errorf("strict yaml: trailing content: %w", err)
+	default:
+		return fmt.Errorf("strict yaml: unexpected second document after the first (multi-document streams are not config)")
+	}
 }
 
-// DecodeJSON strictly parses JSON into out, rejecting unknown fields.
+// DecodeJSON strictly parses JSON into out, rejecting unknown fields AND any
+// trailing content after the first value.
 func DecodeJSON(data []byte, out any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -38,6 +49,13 @@ func DecodeJSON(data []byte, out any) error {
 			return nil
 		}
 		return fmt.Errorf("strict json: %w", err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return fmt.Errorf("strict json: trailing content: %w", err)
+		}
+		return fmt.Errorf("strict json: unexpected content after the first value")
 	}
 	return nil
 }
