@@ -10,6 +10,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent/compress"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -394,4 +395,69 @@ func TestReplayProjectionHandler_Branches(t *testing.T) {
 		PartitionID: rbPid, EventType: tagentevent.TypeContextCompressSummary,
 		Metadata: map[string]string{compress.CompactionMetaKey: compress.CompactionGenV1}})
 	require.Equal(t, before, proj.Len(), "compaction events must not append as projection refs")
+}
+
+// TestRebuildProjectionFromWAL_DiskRoundtripByteIdentical (verification
+// audit, 2026-09-16): the crown assertion runs against InMemoryStore — the
+// REAL disk persistence layer (LocalFileKV WAL/snapshot across an actual
+// Close → reopen) had no byte-identity assertion of its own (soak asserts
+// recallability only). This closes that gap: identical fold + tail lifecycle
+// against a FileSegmentStore on disk, durability barrier (Sync+Close), then
+// a cold reopen (WAL replay + cold-partition discovery) must reproduce the
+// byte-identical render AND the projection identity.
+func TestRebuildProjectionFromWAL_DiskRoundtripByteIdentical(t *testing.T) {
+	dir := t.TempDir()
+	kv1, err := kv.NewLocalFileKV(dir)
+	require.NoError(t, err)
+	store1, err := memory.NewFileSegmentStore(kv1, nil, dir, 200)
+	require.NoError(t, err)
+
+	projA := compress.NewSessionProjection()
+	// Same lifecycle as the crown test: real fold on aged refs (driveRealFold
+	// builds its own cm/cc and returns the cm), then the dual-time straggler
+	// tail (F first-written/newer-timestamp, E later-written/older-timestamp —
+	// write order [F, E]).
+	cmA := driveRealFold(t, store1, projA, 2)
+	ccA := cmA.contextCompressor
+
+	base := rbNowMs() + 300_000_000
+	fRef := rbStore(t, store1, memory.NewSnowflakeEventKey(rbPid, base), tagentevent.TypeAgentOutput,
+		"F-产出", "FULL-F-产出", base+1000,
+		map[string]string{tagentevent.MetaKeyTriggerSource: "meditation"})
+	eRef := rbStore(t, store1, memory.NewSnowflakeEventKey(rbPid, base+50_000), tagentevent.TypeExternalInput,
+		"E-结算", "FULL-E-结算", base-500, nil)
+	projA.Append(fRef)
+	projA.Append(eRef)
+	ccA.MarkMeditationKey(fRef.EventKey)
+
+	renderA := ccA.Compress(context.Background(), projA.GetAll()).Messages
+	snapshotA := projA.GetAll()
+	boundaryA := ccA.FullBoundary()
+
+	// Durability barrier then crash simulation: Sync flushes the WAL (fsync
+	// on by default), Close does the final flush; the store object is simply
+	// abandoned — exactly the process-death shape Sync() promises to survive.
+	require.NoError(t, kv1.Sync())
+	require.NoError(t, kv1.Close())
+
+	// Cold reopen: LocalFileKV replays snapshot+WAL, Init() rediscovers the
+	// persisted partition (2.4), and the projection rebuild walks the same
+	// fact chain from disk.
+	kv2, err := kv.NewLocalFileKV(dir)
+	require.NoError(t, err)
+	defer kv2.Close()
+	store2, err := memory.NewFileSegmentStore(kv2, nil, dir, 200)
+	require.NoError(t, err)
+
+	projB := compress.NewSessionProjection()
+	cmB, _ := rbFoldCM(store2, projB, 2)
+	cmB.rebuildProjectionFromWAL()
+
+	gotB := projB.GetAll()
+	require.Equal(t, snapshotA, gotB, "disk roundtrip: rebuilt projection must equal the pre-restart projection")
+
+	ccB := cmB.contextCompressor
+	renderB := ccB.Compress(context.Background(), projB.GetAll()).Messages
+	require.Equal(t, renderA, renderB, "disk roundtrip: render(projection) must be byte-identical across a real persist/reopen cycle")
+	require.Equal(t, boundaryA, ccB.FullBoundary(), "fullBoundary must seed from the persisted payload, not be recomputed")
 }
