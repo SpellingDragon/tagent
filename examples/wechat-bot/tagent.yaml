@@ -108,7 +108,7 @@ agents:
       path: .wechat-config/data          # 共享持久存储(knowledge/recall 同 path = 同一 FileSegmentStore 实例)
       engine: *shared_engine             # 语义召回(见 x-anchors)
     max_tool_iterations: 300
-    max_tokens: 128000
+    max_tokens: 512000
     temperature: 0.7
     thinking_enabled: true
     compress_threshold: 0.8
@@ -167,7 +167,7 @@ agents:
       read_namespaces: [tagent]          # 授权读主 agent 时间线(自身命名空间恒可读)
       engine: *shared_engine
     max_tool_iterations: 30
-    max_tokens: 32000
+    max_tokens: 128000
     temperature: 0.3
     thinking_enabled: true
     tools:
@@ -189,7 +189,7 @@ agents:
       read_namespaces: [tagent]
       engine: *shared_engine             # recall_query 走 hybrid 融合(向量∪关键词 RRF)
     max_tool_iterations: 5
-    max_tokens: 32000
+    max_tokens: 128000
     reasoning_effort: "low"              # 检索/拼装类任务,低思考档
     tools:
       - { kind: tool, id: recall_query }
@@ -204,7 +204,7 @@ agents:
     memory:
       type: memory
     max_tool_iterations: 50
-    max_tokens: 32000
+    max_tokens: 128000
     temperature: 0.3
     thinking_enabled: true
     reasoning_effort: "low"
@@ -233,7 +233,7 @@ agents:
     memory:
       type: memory
     max_tool_iterations: 50
-    max_tokens: 64000
+    max_tokens: 256000
     temperature: 0.3
     tools:
       - kind: tool                       # spec:类型化计划管理(后端 openspec CLI,argv 直调,无 shell)
