@@ -1120,14 +1120,24 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// 零新结构、零 task 包侵入。
 		md := cm.GetInvocationMetadata()
 		traceID, spanID := spanTraceIDs(ctx)
-		if len(md) > 0 || traceID != "" {
-			cp := make(map[string]string, len(md)+2)
+		// meditation-leak-r2 (2026-09-15): lineage WRITE side. The turn's resolved
+		// trigger source rides the Origin baggage, so the async task_settled event
+		// (event_bus.go copies Origin -> Metadata) re-arms extractTriggerSource's
+		// lineage branch in the reclaim turn. Without this capture the read side
+		// (e2195fc) never fires: meditation-spawned tasks settle as bare "task"
+		// triggers and their outputs leak to lastActiveChat.
+		ts := cm.triggerSource
+		if len(md) > 0 || traceID != "" || ts != "" {
+			cp := make(map[string]string, len(md)+3)
 			for k, v := range md {
 				cp[k] = v
 			}
 			if traceID != "" {
 				cp[tagentevent.MetaKeyTraceID] = traceID
 				cp[tagentevent.MetaKeySpanID] = spanID
+			}
+			if ts != "" {
+				cp[tagentevent.MetaKeyTriggerSource] = ts
 			}
 			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
 		}
