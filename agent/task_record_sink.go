@@ -135,6 +135,19 @@ func (ta *TagentAgent) RetireRunner(old runner.Runner) {
 	ta.contextManager.RetireRunner(old)
 }
 
+// ApplyOrgHotParams applies the hot numeric bundle to the resident cm and
+// task manager (full-hot-config Phase 1): threshold/maxTokens/keepRecent on
+// the compressor, terminal TTL on the task registry.
+func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
+	if ta == nil || ta.contextManager == nil {
+		return
+	}
+	ta.contextManager.ApplyOrgHotParams(p)
+	if p.TaskTerminalTTL > 0 && ta.taskManager != nil {
+		ta.taskManager.SetTerminalTTL(p.TaskTerminalTTL)
+	}
+}
+
 // SetRollbackFn wires the rollback hook (R4 3.8；tagent 包懒检查闭包注入——按
 // ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。
 func (ta *TagentAgent) SetRollbackFn(fn func()) {

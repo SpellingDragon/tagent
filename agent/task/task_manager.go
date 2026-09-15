@@ -370,6 +370,18 @@ type TaskManager struct {
 }
 
 // NewTaskManager creates a TaskManager.
+// SetTerminalTTL hot-updates the terminal grace period (full-hot-config
+// Phase 1). Reads happen under tm.mu in pruneTerminal — same lock here.
+// d <= 0 keeps the current value.
+func (tm *TaskManager) SetTerminalTTL(d time.Duration) {
+	if tm == nil || d <= 0 {
+		return
+	}
+	tm.mu.Lock()
+	tm.terminalTTL = d
+	tm.mu.Unlock()
+}
+
 func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	ttl := cfg.TerminalTTL
 	if ttl <= 0 {

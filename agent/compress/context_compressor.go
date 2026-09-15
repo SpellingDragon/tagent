@@ -133,6 +133,41 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 // config hot reload, design D3 incremental A). Safe for concurrent use:
 // readers go through currentThreshold(); non-positive or NaN/Inf values are
 // rejected (keep the current value).
+// ApplyHotParams applies the org hot numeric bundle at ONE point
+// (full-hot-config Phase 1, 2026-09-16): threshold first (budget line =
+// maxTokens × threshold recomputes at the next Compress), then the budget
+// base and keep-recent count. Zero/negative values keep current settings.
+func (cc *ContextCompressor) ApplyHotParams(thresholdPct float64, maxTokens, keepRecent int) {
+	cc.UpdateThreshold(thresholdPct)
+	cc.UpdateMaxTokens(maxTokens)
+	cc.UpdateKeepRecent(keepRecent)
+}
+
+// BudgetLine exposes the effective compression trigger line
+// (maxTokens × currentThreshold) for introspection and tests — the number
+// the "under budget (x <= y)" log prints.
+func (cc *ContextCompressor) BudgetLine() int {
+	return int(float64(cc.maxTokens) * cc.currentThreshold())
+}
+
+// UpdateMaxTokens hot-updates the compression budget base — the C-defect fix
+// (full-hot-config Phase 1): maxTokens was construction-frozen, so yaml
+// window changes never reached the resident cm's budget line.
+func (cc *ContextCompressor) UpdateMaxTokens(n int) {
+	if n > 0 {
+		cc.maxTokens = n
+	}
+}
+
+// UpdateKeepRecent hot-updates the keep-recent task count on both the
+// per-call override default and the grading ladder input.
+func (cc *ContextCompressor) UpdateKeepRecent(n int) {
+	if n > 0 {
+		cc.keepRecent = n
+		cc.compressor.KeepRecentTasks = n
+	}
+}
+
 func (cc *ContextCompressor) UpdateThreshold(pct float64) {
 	if pct <= 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
 		return

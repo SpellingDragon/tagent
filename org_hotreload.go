@@ -154,16 +154,17 @@ type agentSubset struct {
 	SystemPrompt      PromptConfig `json:"system_prompt,omitempty"`
 	Tools             []ToolRef    `json:"tools,omitempty"`
 	MaxToolIterations int          `json:"max_tool_iterations,omitempty"`
-	MaxTokens         int          `json:"max_tokens,omitempty"`
 	Temperature       float64      `json:"temperature,omitempty"`
-	// CompressThreshold is intentionally EXCLUDED from the fingerprint:
-	// it is hot-applicable via ApplyOrgParams (compressor atomic threshold
-	// swap), so per the D3 criterion ("only fields whose change requires
-	// rebuilding agent instances fingerprint") it must NOT force a rebuild.
-	// The unchanged-fingerprint branch in the tagent.New reloader hot-applies it.
-	KeepRecentTasks      int              `json:"keep_recent_tasks,omitempty"`
-	TaskTerminalTTL      string           `json:"task_terminal_ttl,omitempty"`
-	ResumeContextRounds  int              `json:"resume_context_rounds,omitempty"`
+	// CompressThreshold / MaxTokens / KeepRecentTasks / TaskTerminalTTL are
+	// intentionally EXCLUDED from the fingerprint (full-hot-config Phase 1,
+	// 2026-09-16): all four are hot-applicable via ApplyOrgHotParams
+	// (compressor atomic threshold+budget swap, task manager TTL setter), so
+	// per the D3 criterion ("only fields whose change requires rebuilding
+	// agent instances fingerprint") they must NOT force a rebuild. The
+	// unchanged-fingerprint branch in the tagent.New reloader hot-applies them.
+	KeepRecentTasks     int              `json:"-"`
+	TaskTerminalTTL     string           `json:"-"`
+	ResumeContextRounds int              `json:"resume_context_rounds,omitempty"`
 	Compress             CompressConfig   `json:"compress,omitempty"`
 	ThinkingEnabled      *bool            `json:"thinking_enabled,omitempty"`
 	ThinkingTokens       *int             `json:"thinking_tokens,omitempty"`
@@ -178,9 +179,8 @@ func canonicalAgentSubset(ac *AgentConfig) (json.RawMessage, error) {
 	as := agentSubset{
 		Model: ac.Model, Provider: ac.Provider, PromptDir: ac.PromptDir,
 		SystemPrompt: ac.SystemPrompt, Tools: ac.Tools,
-		MaxToolIterations: ac.MaxToolIterations, MaxTokens: ac.MaxTokens,
-		Temperature:     ac.Temperature,
-		KeepRecentTasks: ac.KeepRecentTasks, TaskTerminalTTL: ac.TaskTerminalTTL,
+		MaxToolIterations: ac.MaxToolIterations,
+		Temperature:       ac.Temperature,
 		ResumeContextRounds: ac.ResumeContextRounds, Compress: ac.Compress,
 		ThinkingEnabled: ac.ThinkingEnabled, ThinkingTokens: ac.ThinkingTokens,
 		ReasoningEffort: ac.ReasoningEffort, ReasoningContentMode: ac.ReasoningContentMode,

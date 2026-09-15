@@ -124,6 +124,17 @@ type ContextManager struct {
 }
 
 // SetTriggerSource sets the trigger source for the next RunFlow call.
+// OrgHotParams is the hot-applicable numeric bundle (full-hot-config Phase 1,
+// 2026-09-16): zero/negative fields keep current settings. Structural wiring
+// (memStore/bus/projection/runner) is NOT in this bundle — that follows the
+// shell-rebuild path.
+type OrgHotParams struct {
+	ThresholdPct    float64
+	MaxTokens       int
+	KeepRecentTasks int
+	TaskTerminalTTL time.Duration
+}
+
 // ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
 // migrated onto the live ContextManager without rebuilding the agent
 // topology (design: incremental A of agent-config-hot-reload).
@@ -136,11 +147,19 @@ type ContextManager struct {
 // Structural fields (tools, sub-agents, prompts wiring, memStore) are NOT
 // touched here — they belong to snapshot-level rebuild (incremental B).
 func (cm *ContextManager) ApplyOrgParams(thresholdPct float64) {
-	if thresholdPct > 0 {
-		cm.thresholdPct = thresholdPct
+	cm.ApplyOrgHotParams(OrgHotParams{ThresholdPct: thresholdPct})
+}
+
+// ApplyOrgHotParams applies the full hot numeric bundle at one point
+// (full-hot-config Phase 1): the C-defect fix — maxTokens joins threshold in
+// the hot face, so a yaml window change reaches the resident cm WITHOUT a
+// process restart.
+func (cm *ContextManager) ApplyOrgHotParams(p OrgHotParams) {
+	if p.ThresholdPct > 0 {
+		cm.thresholdPct = p.ThresholdPct
 	}
 	if cm.contextCompressor != nil {
-		cm.contextCompressor.UpdateThreshold(thresholdPct)
+		cm.contextCompressor.ApplyHotParams(p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks)
 	}
 }
 

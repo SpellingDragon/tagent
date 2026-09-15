@@ -373,10 +373,26 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			if fp == lastFP {
-				// org structure unchanged: hot-apply migratable numeric params
-				if ac, ok := fresh.Agents[cfg.Entry]; ok && ac.CompressThreshold > 0 {
-					entryAgent.ApplyOrgParams(ac.CompressThreshold)
-					log.Infof("[org-hotreload] compress_threshold hot-applied: %v", ac.CompressThreshold)
+				// org structure unchanged: hot-apply the full numeric bundle
+				// (full-hot-config Phase 1: threshold/maxTokens/keepRecent/
+				// taskTerminalTTL — all fingerprint-excluded, hot by design).
+				if ac, ok := fresh.Agents[cfg.Entry]; ok {
+					p := agent.OrgHotParams{}
+					if ac.CompressThreshold > 0 {
+						p.ThresholdPct = ac.CompressThreshold
+					}
+					if ac.MaxTokens > 0 {
+						p.MaxTokens = ac.MaxTokens
+					}
+					if ac.KeepRecentTasks > 0 {
+						p.KeepRecentTasks = ac.KeepRecentTasks
+					}
+					if ttl, perr := time.ParseDuration(ac.TaskTerminalTTL); perr == nil && ttl > 0 {
+						p.TaskTerminalTTL = ttl
+					}
+					entryAgent.ApplyOrgHotParams(p)
+					log.Infof("[org-hotreload] hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s",
+						p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL)
 				}
 				return
 			}
