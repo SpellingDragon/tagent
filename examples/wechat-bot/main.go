@@ -27,6 +27,21 @@ import (
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
+// resolveTriggerSource applies the delivery-gate policy to a raw
+// trigger_source value read from an output event (unified gate, 2026-09-15).
+// Policy is FAIL-CLOSED: an output event with NO stamped lineage is treated
+// as internal and must NOT reach the user chat. Every legitimate user-visible
+// turn stamps its own source at the RunFlow forwarding block
+// (agent/context_manager.go), so real user turns always carry "user" and are
+// unaffected. This closes the fail-open hole where unstamped events (e.g. a
+// task settled from a pre-lineage spawn) were coerced to "user" and delivered.
+func resolveTriggerSource(raw string) (source string, deliverable bool) {
+	if raw == "" {
+		return "internal-unstamped", false
+	}
+	return raw, true
+}
+
 func main() {
 	// 1. Load single config file (tagent.yaml)
 	configPath := "tagent.yaml"
@@ -371,10 +386,7 @@ func main() {
 			eventType := meta.EventType
 			// Trigger source values: "user", "task" (delivered to originating
 			// session), "meditation" (internal, not delivered).
-			triggerSource := meta.TriggerSource
-			if triggerSource == "" {
-				triggerSource = "user"
-			}
+			triggerSource, deliverable := resolveTriggerSource(meta.TriggerSource)
 			chatID := meta.Meta["chat_id"]
 			if triggerSource == "user" && chatID != "" {
 				lastActiveChat.Store("latest", chatID)
@@ -400,6 +412,15 @@ func main() {
 					// suppresses the empty agent_output echo; this is the
 					// consumer-side half. (async-result-delivery.)
 					log.Debugf("[Agent] 丢弃空 final 响应 (trigger=%s)", triggerSource)
+					continue
+				}
+
+				// FAIL-CLOSED gate (unified-event-delivery, 2026-09-15): unstamped
+				// output events are internal and must never reach the user chat.
+				// Every legitimate deliverable turn carries a stamped
+				// trigger_source from the RunFlow forwarding block.
+				if !deliverable {
+					log.Infof("[Agent][gate] 未盖章输出，内部消化 (source=%s): %s", triggerSource, truncateLog(content))
 					continue
 				}
 
