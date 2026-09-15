@@ -132,6 +132,11 @@ type TagentAgent struct {
 	loopTerminated atomic.Bool        // Loop 已终结（StopLoop 后不可再 Start）
 	loopWg         sync.WaitGroup     // 等待 Loop goroutine 退出
 
+	// residentReady closes once the cold-start rebuild sequence (R1
+	// projection + R2 task registry + R3 orphan adjudication) completes —
+	// the host-side replacement for fixed-sleep timing guesses (β-fix).
+	residentReady chan struct{}
+
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
 

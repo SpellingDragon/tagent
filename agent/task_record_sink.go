@@ -148,6 +148,24 @@ func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
 	}
 }
 
+// Ready returns a channel that closes when the cold-start rebuild sequence
+// (projection rebuild + task registry + orphan adjudication) completes.
+// Host-side timing code should wait on this instead of sleeping fixed
+// durations. For executor-shell builds, the channel is closed immediately.
+func (ta *TagentAgent) Ready() <-chan struct{} {
+	return ta.residentReady
+}
+
+// ReadyCh is the internal accessor used by build_agent.go.
+func (ta *TagentAgent) ReadyCh() chan struct{} {
+	return ta.residentReady
+}
+
+// SetReadyCh wires the ready channel (build_agent.go constructor path).
+func (ta *TagentAgent) SetReadyCh(ch chan struct{}) {
+	ta.residentReady = ch
+}
+
 // SetRollbackFn wires the rollback hook (R4 3.8；tagent 包懒检查闭包注入——按
 // ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。
 func (ta *TagentAgent) SetRollbackFn(fn func()) {

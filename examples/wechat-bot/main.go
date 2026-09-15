@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -266,8 +267,23 @@ func main() {
 			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
 		}
 		fmt.Printf("  HTTPAPI:     http://%s\n", listenAddr)
-		if err := http.ListenAndServe(listenAddr, httpAPI); err != nil {
-			log.Warnf("HTTPAPI stopped: %v", err)
+		// S1 fix (systemic-α): a goroutine that Warn-and-exits is a silent
+		// death — healthz/task/feedback all vanish with no recovery. Retry
+		// with backoff; the restart script's healthz probe is the outer
+		// watchdog, but the inner loop must not give up on the first bind
+		// conflict (e.g. old process's socket lingering during swap).
+		for attempt := 1; ; attempt++ {
+			if err := http.ListenAndServe(listenAddr, httpAPI); err != nil {
+				if errors.Is(err, http.ErrServerClosed) {
+					return // graceful shutdown: don't retry
+				}
+				wait := time.Duration(attempt) * 5 * time.Second
+				if wait > 60*time.Second {
+					wait = 60 * time.Second
+				}
+				log.Errorf("HTTPAPI attempt %d failed: %v — retrying in %v", attempt, err, wait)
+				time.Sleep(wait)
+			}
 		}
 	}()
 

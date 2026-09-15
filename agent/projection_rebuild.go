@@ -2,6 +2,7 @@ package agent
 
 import (
 	"sort"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -33,6 +34,7 @@ func (ta *TagentAgent) RebuildProjectionFromWAL() {
 }
 
 func (cm *ContextManager) rebuildProjectionFromWAL() {
+	rebuildStart := time.Now()
 	if cm == nil || cm.memStore == nil || cm.projection == nil || cm.contextCompressor == nil {
 		return
 	}
@@ -66,10 +68,15 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	//    positive keys resolved via GetEvent (immutable store → byte-exact
 	//    ref). Missing/tombstoned keys degrade to a WARN + skip, never block.
 	ordered, posKeys, posIdx := payload.RestoreRefs()
+	lostKeys := 0
 	for i, k := range posKeys {
 		ev, err := cm.memStore.GetEvent(k)
 		if err != nil || ev == nil {
-			log.Warnf("[rebuild-projection] retained key %d missing/tombstoned, skipping slot", k)
+			// S3 fix (systemic-α): each lost key is a fact-chain hole —
+			// Error (not Warn) + count, so trajectory-comparison tools and
+			// diagnostics can attribute byte-mismatch to known lost slots.
+			lostKeys++
+			log.Errorf("[rebuild-projection] retained key %d missing/tombstoned — SLOT LOST (count=%d): %v", k, lostKeys, err)
 			ordered[posIdx[i]] = memory.EventReference{}
 			continue
 		}
@@ -116,8 +123,11 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 		cm.appendProjectionRef(ev)
 	}
 
-	log.Infof("[rebuild-projection] rebuilt from compaction key=%d: snapshot refs=%d tail=%d boundary=%d",
-		snapKey, len(final), len(tail), payload.FullBoundary)
+	log.Infof("[rebuild-projection] rebuilt from compaction key=%d: snapshot refs=%d tail=%d boundary=%d lostKeys=%d took=%v",
+		snapKey, len(final), len(tail), payload.FullBoundary, lostKeys, time.Since(rebuildStart))
+	if lostKeys > 0 {
+		log.Errorf("[rebuild-projection] LOST %d retained key(s) — projection has holes; trajectory prefix-match will show gaps at these slots", lostKeys)
+	}
 }
 
 // fallbackCap bounds the D1 fallback full replay: a chain without any

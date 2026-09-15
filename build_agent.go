@@ -559,7 +559,11 @@ func buildAgentDFS(
 	// 代际标记的 compaction 事件时 no-op（首启/未折叠，维持现状行为）。
 	// R4 ownership 表：executorOnly 热重建跳过（投影属常驻实例，丢弃壳空跑）。
 	if mode.ownsPersistentState() {
+		ta.SetReadyCh(make(chan struct{}))
 		ta.RebuildProjectionFromWAL()
+	} else {
+		ta.SetReadyCh(make(chan struct{}))
+		close(ta.ReadyCh()) // shell builds: no cold-start work, ready now
 	}
 
 	// R2（resident-continuity-r2-r4 D1.3）：任务 registry 重建——同样从事实链
@@ -616,6 +620,18 @@ func buildAgentDFS(
 	// 的等价语义（Role 从事件类型派生）。
 	if etsHolder != nil {
 		etsHolder.SetReplayProjection(agent.ReplayProjectionHandler(ta))
+	}
+
+	// β-fix: cold-start rebuild sequence (R1→R2→R3 orphan) is now complete.
+	// Signal readiness to any host-side waiter — replaces fixed-sleep timing
+	// guesses (reincarnation notice, restart verdicts, healthz warm-up).
+	if mode.ownsPersistentState() && ta.ReadyCh() != nil {
+		select {
+		case <-ta.ReadyCh():
+			// already closed (e.g. double build) — idempotent
+		default:
+			close(ta.ReadyCh())
+		}
 	}
 
 	// Register ActionTool for cleanup on agent shutdown.
