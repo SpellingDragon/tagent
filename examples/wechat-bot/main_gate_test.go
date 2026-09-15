@@ -34,3 +34,16 @@ func TestResolveTriggerSource_InternalStampedHeld(t *testing.T) {
 		t.Fatalf("meditation: got (%q,%v)", src, ok)
 	}
 }
+
+// TestResolveTriggerSource_HostNoticesDeliver (B-fix, 2026-09-16): host
+// notices stamped with dedicated sources must stay deliverable — the old
+// code borrowed "meditation" for these and the delivery gate's internal
+// branch silently withheld their output.
+func TestResolveTriggerSource_HostNoticesDeliver(t *testing.T) {
+	for _, s := range []string{"reincarnation", "system_alert"} {
+		src, ok := resolveTriggerSource(s)
+		if !ok || src != s {
+			t.Fatalf("host notice %q: got (%q,%v), want passthrough", s, src, ok)
+		}
+	}
+}

@@ -217,7 +217,7 @@ func main() {
 	// after an insurance-chain self-replacement, tell the new process what it was
 	// doing when its predecessor died (D1 detect / D2 meditation source / D3+D8
 	// compose / D5 consume-marker). One-shot goroutine, never crashes the bot.
-	go maybeInjectReincarnationNotice(ta, tagentCfg.Entry, filepath.Join("run"), 5*time.Second)
+	go maybeInjectReincarnationNotice(ta, tagentCfg.Entry, filepath.Join("run"), noticeWaitMax)
 	// 5a-ter. System-alert dead-man switch (5.8): consume run/SYSTEM_ALERT
 	// staged by restart scripts on FAIL (EXIT/TERM trap) so the agent learns
 	// about failed restart attempts instead of staying blind.
@@ -385,7 +385,8 @@ func main() {
 			meta := tagentevent.ParseEventMeta(evt)
 			eventType := meta.EventType
 			// Trigger source values: "user", "task" (delivered to originating
-			// session), "meditation" (internal, not delivered).
+			// session), "meditation" (internal, not delivered),
+			// "reincarnation"/"system_alert" (host notices — delivered).
 			triggerSource, deliverable := resolveTriggerSource(meta.TriggerSource)
 			chatID := meta.Meta["chat_id"]
 			if triggerSource == "user" && chatID != "" {
@@ -432,7 +433,7 @@ func main() {
 				case "error":
 					// Error: log only, don't send to user.
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
-				case "user", "task":
+				case "user", "task", "reincarnation", "system_alert":
 					// User input, or a background task result reclaimed into a
 					// turn: both deliver to the originating session (meta_chat_id).
 					// A settled task fulfilling the user's async request is a

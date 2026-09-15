@@ -180,11 +180,39 @@ func buildNoticeText(meta map[string]string, refs []memory.EventReference, walEr
 	return b.String()
 }
 
-// maybeInjectReincarnationNotice is the one-shot startup hook (D4): wait for
-// the event loop to settle, detect (D1), compose (D3+D8), inject via the
-// meditation source (D2), then rename the marker (D5). Every step is logged;
-// nothing here is allowed to crash the bot.
-func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir string, delay time.Duration) {
+// noticeWaitMax caps how long startup polls for the NOTICE file to appear
+// (implementation-hardening B-fix): the insurance-chain script writes it
+// around restart, and a single check after a fixed sleep silently missed
+// slow writers (the s67 absent-notice incident). Poll until it shows up or
+// the budget expires — freshness is still gated by restartDoneFreshWindow.
+const (
+	noticeWaitMax  = 60 * time.Second
+	noticePollStep = 500 * time.Millisecond
+)
+
+// waitNoticeAppearance polls for the NOTICE file until it exists or maxWait
+// elapses. Returns whether it was seen (freshness is checked by the caller).
+func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
+	deadline := time.Now().Add(maxWait)
+	for {
+		if _, err := os.Stat(noticePath); err == nil {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(poll)
+	}
+}
+
+// maybeInjectReincarnationNotice is the one-shot startup hook (D4): poll for
+// the NOTICE file (D1, polling instead of the fixed 5s sleep that raced slow
+// insurance-chain writers — the s67 absent-notice incident), detect
+// freshness, compose (D3+D8), inject via the dedicated "reincarnation"
+// source (B-fix: the old "meditation" stamp got withheld by the delivery
+// gate's internal-source policy), then rename the marker (D5). Every step is
+// logged; nothing here is allowed to crash the bot.
+func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir string, noticeWait time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		// cwd can drift across launchers; anchors resolve relative to the binary.
 		if exe, err := os.Executable(); err == nil {
@@ -193,10 +221,11 @@ func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir 
 	}
 	noticePath := filepath.Join(runDir, "REINCARNATION_NOTICE")
 
-	time.Sleep(delay)
-
+	if !waitNoticeAppearance(noticePath, noticeWait, noticePollStep) {
+		return // no NOTICE within budget: cold start / stale / consumed — silent no-op
+	}
 	if !detectReincarnation(noticePath, time.Now()) {
-		return // cold start / stale NOTICE / already consumed: silent no-op
+		return // appeared but stale (outside fresh window): cold start
 	}
 	log.Infof("[reincarnation] D1 hit: fresh REINCARNATION_NOTICE at %s", noticePath)
 
@@ -210,11 +239,13 @@ func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir 
 	}
 
 	text := buildNoticeText(meta, refs, walErr)
-	ta.InjectMessageWithSource("meditation", model.Message{
+	// B-fix: dedicated source. The delivery gate routes "reincarnation" to
+	// the user chat (main.go switch) — the notice exists to be seen.
+	ta.InjectMessageWithSource("reincarnation", model.Message{
 		Role:    model.RoleUser,
 		Content: text,
 	})
-	log.Infof("[reincarnation] notice injected via meditation source (%d WAL events, meta=%v)", len(refs), meta != nil)
+	log.Infof("[reincarnation] notice injected via reincarnation source (%d WAL events, meta=%v)", len(refs), meta != nil)
 
 	// D5: mark consumed. Failure to rename is logged and non-fatal; a duplicate
 	// notice next boot is acceptable, a crash here is not.

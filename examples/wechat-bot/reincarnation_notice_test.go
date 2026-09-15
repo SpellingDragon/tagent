@@ -170,3 +170,25 @@ func TestHasOpenBreakpoint(t *testing.T) {
 		t.Fatal("empty refs must be closed (nothing to resume)")
 	}
 }
+
+// TestWaitNoticeAppearance (B-fix): polling replaces the fixed 5s sleep that
+// silently missed slow insurance-chain writers (s67 absent-notice incident).
+func TestWaitNoticeAppearance(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "REINCARNATION_NOTICE")
+
+	// Never appears → false after the (short) budget.
+	if waitNoticeAppearance(p, 150*time.Millisecond, 50*time.Millisecond) {
+		t.Fatal("waitNoticeAppearance = true for a file that never appears")
+	}
+
+	// Appears 200ms in → found within the budget.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		if err := os.WriteFile(p, []byte("k: v"), 0o644); err != nil {
+			t.Errorf("write notice: %v", err)
+		}
+	}()
+	if !waitNoticeAppearance(p, 3*time.Second, 50*time.Millisecond) {
+		t.Fatal("waitNoticeAppearance missed a file that appeared in time")
+	}
+}
