@@ -9,7 +9,8 @@ HEADN="${2:-0}"
 BASES="/home/lighthouse/tagent/examples/wechat-bot/.tagent-workspace/tool-output /home/lighthouse/tagent/tests/.tagent-workspace/tool-output /home/lighthouse/tagent/.tagent-workspace/tool-output /home/lighthouse/.tagent-workspace/tool-output"
 found=0
 for b in $BASES; do
-  for f in "$b"/task-"$ID"-*.txt; do
+  # Match both spill shapes: task settle (task-<id>-*.txt) and action output (output_tagent-<session>.txt)
+  for f in "$b"/task-"$ID"-*.txt "$b"/output_*"$ID"*.txt; do
     [ -e "$f" ] || continue
     echo "FOUND: $f"
     found=1
