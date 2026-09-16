@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -25,6 +26,10 @@ import (
 // This is a "view transformation" — it modifies the messages sent to the LLM,
 // but does NOT modify the Session or Projection.
 type SmartCompressor struct {
+	// paramMu guards the hot-swappable numeric bundle (cold-eyes P2-2):
+	// ApplyParams writes from the reloader goroutine race concurrent
+	// Compress reads of maxTokens/triggerBudget/KeepRecentTasks.
+	paramMu         sync.Mutex
 	summaryModel    model.Model  // Optional: used for index-card condensation (condenseCardLines)
 	summaryEffort   *string      // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
 	KeepRecentTasks int          // Number of recent complete tasks to keep (default: 2)
@@ -91,6 +96,8 @@ func WithTriggerBudget(n int) SmartCompressorOption {
 // no-op-compressing and an enlarged window over-compressed.
 // Caller (ContextCompressor.ApplyHotParams) owns the lock discipline.
 func (sc *SmartCompressor) ApplyParams(maxTokens, triggerBudget, keepRecent int) {
+	sc.paramMu.Lock()
+	defer sc.paramMu.Unlock()
 	if maxTokens > 0 {
 		sc.maxTokens = maxTokens
 	}
@@ -104,6 +111,8 @@ func (sc *SmartCompressor) ApplyParams(maxTokens, triggerBudget, keepRecent int)
 
 // budget returns the effective post-compression target budget.
 func (sc *SmartCompressor) budget() int {
+	sc.paramMu.Lock()
+	defer sc.paramMu.Unlock()
 	if sc.triggerBudget > 0 && sc.triggerBudget < sc.maxTokens {
 		return sc.triggerBudget
 	}
@@ -257,7 +266,9 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	rollingMsg, rest := splitRollingSummaryMessage(rest)
 	segments := SegmentMessages(rest)
 
+	sc.paramMu.Lock()
 	keepRecent := sc.KeepRecentTasks
+	sc.paramMu.Unlock()
 	if keepRecentOverride > 0 {
 		keepRecent = keepRecentOverride // per-call override; shared field untouched (race-free by construction)
 	}

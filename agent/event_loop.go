@@ -268,6 +268,16 @@ func extractTriggerSource(events []*AgentEvent) string {
 // extractRootMetadata extracts metadata from a batch of AgentEvents.
 // Collects metadata from external_input events and merges them into a single
 // map. Later events override earlier ones. Empty keys or values are ignored.
+// controlMetaKeys never propagate through the Origin/courier pipeline
+// (cold-eyes P2-3): they are deterministic per-event facts written by the
+// framework (settle verdicts, gate markers, registry keys, detached
+// timestamps) — leaking them into a later task's Origin baggage makes the
+// chain look like lineage and can mis-restore another task's detachedAt.
+var controlMetaKeys = map[string]bool{
+	"settle_status": true, "task_id": true, "lineage_absent": true,
+	"detached_at_ms": true,
+}
+
 func extractRootMetadata(events []*AgentEvent) map[string]string {
 	md := make(map[string]string)
 	for _, evt := range events {
@@ -275,7 +285,7 @@ func extractRootMetadata(events []*AgentEvent) map[string]string {
 			continue
 		}
 		for k, v := range evt.Metadata {
-			if k == "" {
+			if k == "" || controlMetaKeys[k] {
 				continue
 			}
 			if s, ok := v.(string); ok && s != "" {

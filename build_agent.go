@@ -634,20 +634,25 @@ func buildAgentDFS(
 				log.Infof("[rebuild-task-registry] orphan adjudication: retired %d nil-probe suspect(s) (reincarnation orphans)", n)
 			}
 			for _, tk := range tm.List() {
-				if tk.Status() != task.TaskSuspect || tk.Spec.Declarative == nil {
+				if tk.Spec.Declarative == nil {
+					continue
+				}
+				st := tk.Status()
+				if st != task.TaskSuspect && st != task.TaskAliveDetached && st != task.TaskStale {
 					continue
 				}
 				if actionTool.IsTrackedSession(tk.Spec.Declarative.TaskID) {
-					tm.MarkTaskRunning(tk.ID)
-					// hardening-review-batch2 3.1/3.2（R3 信号链接通）：会话
-					// 存活 ≠ 信号可达——重挂构建的 detector 必须绑定回任务，
-					// 否则 watch/probe 命中永远到不了 TaskManager（settle
-					// 路径断裂）。绑定失败仅告警（任务保持 suspect 交兜底）。
+					if st == task.TaskSuspect {
+						tm.MarkTaskRunning(tk.ID)
+					}
+					// hardening-review-batch2 3.1/3.2（R3 信号链接通）+ 冷眼
+					// P2-5：detached/stale 恢复任务同样需要信号消费链（probe
+					// 死回收与 stale/deadline 治理都依赖 detector 在位）。
 					if d := actionTool.TakeReattachedDetector(tk.Spec.Declarative.TaskID); d != nil {
 						if berr := tm.BindDetector(tk.ID, d); berr != nil {
 							log.Warnf("[build] bind reattached detector to task %s failed: %v", tk.ID, berr)
 						} else {
-							log.Infof("[build] reattached detector bound: task=%s session=%s", tk.ID, tk.Spec.Declarative.TaskID)
+							log.Infof("[build] reattached detector bound: task=%s session=%s status=%s", tk.ID, tk.Spec.Declarative.TaskID, st)
 						}
 					}
 				}

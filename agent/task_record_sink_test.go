@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,64 @@ func TestRebuildTaskRegistry_OriginPreservedThroughRestore(t *testing.T) {
 	}
 	if tk.Spec.Key != "svc-key" {
 		t.Fatalf("Key lost through restore+factory-override: %q", tk.Spec.Key)
+	}
+}
+
+// cold-eyes P1-2：stale 一次性告警（settle_status=watch）不得覆盖
+// alive-detached 的末次结算语义——恢复态保持 alive_detached，detachedAt
+// 从 watch 记录的 detached_at_ms 还原（真实脱离时长）。
+func TestRebuildTaskRegistry_WatchNoticeDoesNotDowngradeDetached(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now().UnixMilli()
+	storeSpawned(t, store, "t-w", task.Declarative{
+		Kind: "command", Desc: "svc", Key: "svc-w", TaskID: "n-w",
+	}, now-4*60_000)
+
+	// alive-detached 结算（带 detached_at_ms）。
+	storeEventStatus(t, store, "t-w", "alive-detached", now-3*60_000, now-3*60_000)
+	// 其后的 stale 一次性告警（watch + detached_at_ms 同值）。
+	storeEventStatus(t, store, "t-w", "watch", now-1*60_000, now-3*60_000)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	if n := RebuildTaskRegistry(store, rb2Partition, tm, nil); n != 1 {
+		t.Fatalf("restored = %d, want 1", n)
+	}
+	tk, ok := tm.Get("t-w")
+	if !ok {
+		t.Fatal("task must be restored")
+	}
+	if got := tk.Status(); got != task.TaskAliveDetached {
+		t.Fatalf("status = %s, want alive_detached (watch must not downgrade)", got)
+	}
+	detachedAt := baseMilli(now - 3*60_000)
+	if tk.DetachedAtMilli() == 0 {
+		t.Fatal("detachedAt must be restored from detached_at_ms")
+	}
+	if tk.DetachedAtMilli() != detachedAt {
+		t.Fatalf("detachedAt = %d, want %d (real age, not restore time)", tk.DetachedAtMilli(), detachedAt)
+	}
+}
+
+func baseMilli(ms int64) int64 { return ms }
+
+func storeEventStatus(t *testing.T, store *memory.InMemoryStore, taskID, status string, tsMs, detachedMs int64) {
+	t.Helper()
+	k := rb2Key(tsMs)
+	ev := memory.FullEvent{
+		EventKey: k, PartitionID: rb2Partition,
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: "[task settled] notice",
+		Content:      "[task settled] svc " + status,
+		Timestamp:    tsMs,
+		Metadata: map[string]string{
+			"task_id":       taskID,
+			"settle_status": status,
+		},
+	}
+	if detachedMs > 0 {
+		ev.Metadata["detached_at_ms"] = fmt.Sprintf("%d", detachedMs)
+	}
+	if err := store.StoreEvent(k, ev); err != nil {
+		t.Fatalf("StoreEvent: %v", err)
 	}
 }

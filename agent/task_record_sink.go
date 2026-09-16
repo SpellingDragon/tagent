@@ -299,14 +299,21 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 		for _, ev := range evs {
 			if st, ok := ev.Metadata["settle_status"]; ok && st != "" {
 				if id := ev.Metadata["task_id"]; id != "" {
-					settled[id] = st // 全序扫描下后者覆盖前者（末次胜）
-					// hardening-review-batch2 2.4：alive-detached 转变时刻随
-					// 事件持久化——恢复侧据它还原 detachedAt（真实脱离时长）。
-					if st == "alive-detached" || st == "alive_detached" {
-						if msStr := ev.Metadata["detached_at_ms"]; msStr != "" {
-							if ms, perr := strconv.ParseInt(msStr, 10, 64); perr == nil {
-								detachedMs[id] = ms
-							}
+					// cold-eyes P1-2：watch 是通知非终态——不得覆盖既有
+					// settle_status（stale 告警曾把 alive-detached 顶成 watch，
+					// 恢复侧随即降级 suspect 且 detachedAt 丢失）。
+					if st == "watch" {
+						if _, exists := settled[id]; !exists {
+							settled[id] = st
+						}
+					} else {
+						settled[id] = st // 全序扫描下后者覆盖前者（末次胜）
+					}
+					// detached 转变时刻：任意记录携带即取（末次胜；detached
+					// 每任务至多一次，watch/stable 记录值一致）。
+					if msStr := ev.Metadata["detached_at_ms"]; msStr != "" {
+						if ms, perr := strconv.ParseInt(msStr, 10, 64); perr == nil {
+							detachedMs[id] = ms
 						}
 					}
 				}

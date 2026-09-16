@@ -209,7 +209,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 	// hardening-review-batch2 2.4：alive-detached 转变时刻随事件持久化——
 	// 恢复侧据它还原 detachedAt（沿用真实脱离时长，不以恢复时间替代）。
-	if sig.Kind == task.SettleStable {
+	// cold-eyes P1-2：stale 一次性通知（Watch）同样携带——否则 watch 的
+	// settle_status 会覆盖 alive-detached 成为末次记录，恢复侧 detachedAt
+	// 与 detached 语义双双丢失。
+	if sig.Kind == task.SettleStable || sig.Kind == task.SettleWatch {
 		if ms := tk.DetachedAtMilli(); ms > 0 {
 			evt.Metadata["detached_at_ms"] = fmt.Sprintf("%d", ms)
 		}
