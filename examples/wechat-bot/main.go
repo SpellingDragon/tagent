@@ -267,7 +267,12 @@ func main() {
 	// hardening-review-batch2 4.6（HTTP Server host-owned）：srv 由宿主持有，
 	// 重试循环受 stopHTTP 取消、SIGTERM 走 Shutdown 优雅等待——goroutine 不再
 	// 无控制永久循环（retry 间隔为线性递增封顶 60s，非指数退避）。
-	srv := &http.Server{Handler: httpAPI}
+	// fix(addr-regression 2026-09-16): batch2 重构为 srv 持有后 Addr 丢失——
+	// http.Server.ListenAndServe() 在 Addr 为空时静默默认绑 :80（非 root 必 permission
+	// denied）→ healthz 永不可达 → 保险链 sentinel-dead 每 4 分钟重启循环。
+	// 端口解析上移至 srv 构造前，Addr 显式携带（listenAddr 的校验/打印逻辑不变）。
+	listenAddr := ":" + httpPort
+	srv := &http.Server{Addr: listenAddr, Handler: httpAPI}
 	stopHTTP := make(chan struct{})
 	httpDone := make(chan struct{})
 	go func() {
@@ -277,7 +282,6 @@ func main() {
 		// endpoint — without a token it must not be reachable from off-host.
 		rlToken := rl.AuthTokenFromEnv()
 		httpAPI.SetAuthToken(rlToken)
-		listenAddr := ":" + httpPort
 		if err := rl.ValidateListenAddr(listenAddr, rlToken); err != nil {
 			listenAddr = "127.0.0.1:" + httpPort
 			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
