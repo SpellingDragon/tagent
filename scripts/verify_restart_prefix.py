@@ -27,6 +27,11 @@ def main():
         i = 0
         while i < len(ms) and ms[i].get('role') == 'system': i += 1
         return ms[i:]
+    BOARD = '[后台任务看板]'
+    def strip_board(ms):
+        # 看板快照行渲染随版本演进（措辞/计数变化），比对时豁免——
+        # 渲染演进不该计为不命中（远端裁决 2026-09-16；该类行均为系统注入）
+        return [m for m in ms if not str(m.get('content','')).startswith(BOARD)]
     def pml(a, b):
         n = min(len(a), len(b))
         for i in range(n):
@@ -41,13 +46,13 @@ def main():
     stats = {'EXACT':0,'FOLD':0,'FRESH':0,'CRITICAL':0,'REVIEW':0}
     rows = []
     for bi in zeros:
-        B = recs[bi]; bh = strip_sys(msgs(B))
+        B = recs[bi]; bh = strip_board(strip_sys(msgs(B)))
         if not bh or len(bh) < 30:
             stats['FRESH'] += 1
             continue
         best = (0, -1, 0)  # m, j, len(ah)
         for j in range(bi-1, max(0, bi-300)-1, -1):
-            ah = strip_sys(msgs(recs[j]))
+            ah = strip_board(strip_sys(msgs(recs[j])))
             if not ah or len(ah) < 10: continue
             m = pml(ah, bh)
             if m == len(ah):

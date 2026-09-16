@@ -3,6 +3,10 @@
 #
 # Invoked DETACHED from the agent's own process tree:
 #   setsid nohup bash restart-tagent.sh <old_pid> >> logs/restart.log 2>&1 &
+# 调用纪律（2026-09-16 远端裁决，假活第三案例）：凡经由 bot 发起的换装/作业调用，
+# 必须整体重定向并脱离 bot 管道——`bash restart-tagent.sh <pid> </dev/null >file 2>&1 &`
+# 后续 echo 一律写 file 而非 bot stdout；否则 SIGTERM 旧 bot 后调用方会话因写死管道
+# 永久阻塞 → probe 恒真 → 回收无墙（af4aa4c7 挂 8h40m 实证）。
 # The agent dies mid-way; this script must survive and leave evidence for the
 # reincarnated agent to verify (销假). Every outcome lands in restart.log.
 #
