@@ -40,7 +40,16 @@ func resolveTriggerSource(raw string) (source string, deliverable bool) {
 	if raw == "" {
 		return "internal-unstamped", false
 	}
-	return raw, true
+	// hardening-review-batch2 1.3：白名单化——仅认可来源可投递。框架对无世系
+	// task 结算降级的 "task-unstamped"（及其它未识别值）一律扣留：未知不得
+	// 升级为可投递来源。meditation 保持 passthrough（ok=true）：其投递决策
+	// 仍在 dispatch switch（log-only 扣留）——既有双层语义不变。
+	switch raw {
+	case "user", "task", "reincarnation", "system_alert", "meditation":
+		return raw, true
+	default:
+		return raw, false
+	}
 }
 
 func main() {
@@ -255,7 +264,14 @@ func main() {
 		}
 		log.Infof("[HTTPAPI] LLM base URL updated to %s", baseURL)
 	})
+	// hardening-review-batch2 4.6（HTTP Server host-owned）：srv 由宿主持有，
+	// 重试循环受 stopHTTP 取消、SIGTERM 走 Shutdown 优雅等待——goroutine 不再
+	// 无控制永久循环（retry 间隔为线性递增封顶 60s，非指数退避）。
+	srv := &http.Server{Handler: httpAPI}
+	stopHTTP := make(chan struct{})
+	httpDone := make(chan struct{})
 	go func() {
+		defer close(httpDone)
 		// Authentication + loopback fail-closed guard (implementation-hardening 3.3):
 		// the API can inject messages into the agent and redirect the LLM
 		// endpoint — without a token it must not be reachable from off-host.
@@ -267,22 +283,23 @@ func main() {
 			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
 		}
 		fmt.Printf("  HTTPAPI:     http://%s\n", listenAddr)
-		// S1 fix (systemic-α): a goroutine that Warn-and-exits is a silent
-		// death — healthz/task/feedback all vanish with no recovery. Retry
-		// with backoff; the restart script's healthz probe is the outer
-		// watchdog, but the inner loop must not give up on the first bind
-		// conflict (e.g. old process's socket lingering during swap).
+		// S1 fix (systemic-α): a Warn-and-exit goroutine is a silent death —
+		// healthz/task/feedback all vanish. Retry instead; the restart
+		// script's healthz probe remains the outer watchdog.
 		for attempt := 1; ; attempt++ {
-			if err := http.ListenAndServe(listenAddr, httpAPI); err != nil {
-				if errors.Is(err, http.ErrServerClosed) {
-					return // graceful shutdown: don't retry
-				}
-				wait := time.Duration(attempt) * 5 * time.Second
-				if wait > 60*time.Second {
-					wait = 60 * time.Second
-				}
-				log.Errorf("HTTPAPI attempt %d failed: %v — retrying in %v", attempt, err, wait)
-				time.Sleep(wait)
+			listenErr := srv.ListenAndServe()
+			if listenErr == nil || errors.Is(listenErr, http.ErrServerClosed) {
+				return // graceful shutdown or clean stop: don't retry
+			}
+			wait := time.Duration(attempt) * 5 * time.Second
+			if wait > 60*time.Second {
+				wait = 60 * time.Second
+			}
+			log.Errorf("HTTPAPI attempt %d failed: %v — retrying in %v", attempt, listenErr, wait)
+			select {
+			case <-stopHTTP:
+				return
+			case <-time.After(wait):
 			}
 		}
 	}()
@@ -466,7 +483,6 @@ func main() {
 						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
 						continue
 					}
-
 					// Stop typing indicator for this user
 					if startTime, ok := typingActive.Load(chatID); ok {
 						if t, ok := startTime.(time.Time); ok && time.Since(t) < 60*time.Second {
@@ -664,7 +680,20 @@ func main() {
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)
+		// 4.6：HTTP Server 是宿主持有资源——异常退出路径同样优雅关闭，
+		// 避免 goroutine 持有端口导致重启换装 bind 冲突。
+		close(stopHTTP)
+		_ = srv.Shutdown(context.Background())
 		os.Exit(1)
+	}
+	// 正常退出（SIGTERM/SIGINT）：优雅关闭 HTTP Server。
+	close(stopHTTP)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Warnf("HTTPAPI shutdown: %v", err)
+	} else {
+		<-httpDone
 	}
 	fmt.Println("Bot stopped gracefully.")
 }

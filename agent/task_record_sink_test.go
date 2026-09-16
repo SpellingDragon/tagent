@@ -149,3 +149,35 @@ func TestRebuildTaskRegistry_SubagentResumeGuidance(t *testing.T) {
 		t.Fatal("subagent Relaunch must be rebuilt (promise table)")
 	}
 }
+
+// hardening-review-batch2 1.2/1.4（世系跨重启保真 roundtrip 前半）：带 Origin
+// 的 task_spawned 经 RebuildTaskRegistry 恢复后，恢复闭包工厂覆盖 spec 不得
+// 丢失 Origin/Key——身份以持久层为准，工厂仅补执行能力。
+func TestRebuildTaskRegistry_OriginPreservedThroughRestore(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	storeSpawned(t, store, "t-orig-1", task.Declarative{
+		Kind: "command", Desc: "svc", Key: "svc-key",
+		TaskID: "n-orig",
+		Origin: map[string]string{"trigger_source": "meditation", "chat_id": "c-9"},
+	}, time.Now().UnixMilli()-60_000)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	rebuildClosures := func(decl task.Declarative) task.TaskSpec {
+		// 模拟真实工厂：只带执行能力描述，不带 Origin/Key。
+		return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc,
+			Declarative: &task.Declarative{Kind: decl.Kind, TaskID: decl.TaskID}}
+	}
+	if n := RebuildTaskRegistry(store, rb2Partition, tm, rebuildClosures); n != 1 {
+		t.Fatalf("restored = %d, want 1", n)
+	}
+	tk, ok := tm.Get("t-orig-1")
+	if !ok {
+		t.Fatal("task must be restored")
+	}
+	if tk.Spec.Origin == nil || tk.Spec.Origin["trigger_source"] != "meditation" {
+		t.Fatalf("Origin lost through restore+factory-override: %+v", tk.Spec.Origin)
+	}
+	if tk.Spec.Key != "svc-key" {
+		t.Fatalf("Key lost through restore+factory-override: %q", tk.Spec.Key)
+	}
+}

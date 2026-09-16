@@ -33,6 +33,12 @@ var _ tool.CallableTool = (*ActionTool)(nil)
 // Tool name is "action" — it represents performing behavioral actions on
 // real-world resources triggered by natural language descriptions.
 type ActionTool struct {
+	// reattachedDetectors caches detectors built during startup reattach so
+	// the build path can BindDetector them to restored tasks AFTER the
+	// registry rebuild (reattach runs before it — hardening-review-batch2 3.1).
+	reattachMu    sync.Mutex
+	reattachedMap map[string]task.SettleDetector
+
 	workspace     string
 	outputDir     string // oversized-output save dir (scratch), separate from command cwd
 	runAsUser     string
@@ -1058,4 +1064,26 @@ func truncateForLog(s string, n int) string {
 		return " out=" + s
 	}
 	return ""
+}
+
+// rememberReattachedDetector caches a reattach-built detector (3.1 bridge).
+func (ct *ActionTool) rememberReattachedDetector(sessionID string, d task.SettleDetector) {
+	ct.reattachMu.Lock()
+	defer ct.reattachMu.Unlock()
+	if ct.reattachedMap == nil {
+		ct.reattachedMap = make(map[string]task.SettleDetector)
+	}
+	ct.reattachedMap[sessionID] = d
+}
+
+// TakeReattachedDetector pops the reattach-built detector for a session
+// (build_agent binds it to the restored task after RebuildTaskRegistry).
+func (ct *ActionTool) TakeReattachedDetector(sessionID string) task.SettleDetector {
+	ct.reattachMu.Lock()
+	defer ct.reattachMu.Unlock()
+	d, ok := ct.reattachedMap[sessionID]
+	if ok {
+		delete(ct.reattachedMap, sessionID)
+	}
+	return d
 }

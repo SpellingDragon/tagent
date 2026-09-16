@@ -47,3 +47,19 @@ func TestResolveTriggerSource_HostNoticesDeliver(t *testing.T) {
 		}
 	}
 }
+
+// hardening-review-batch2 1.3/1.4：未知来源与框架降级的 task-unstamped 必须
+// 扣留（fail-closed 白名单）；meditation 双层语义不变。
+func TestResolveTriggerSource_UnknownAndUnstampedHeld(t *testing.T) {
+	if src, ok := resolveTriggerSource("task-unstamped"); ok {
+		t.Fatalf("task-unstamped (lineage_absent degrade) must be held, got (%q,%v)", src, ok)
+	}
+	for _, s := range []string{"unknown-future-value", "weird"} {
+		if src, ok := resolveTriggerSource(s); ok {
+			t.Fatalf("unknown source %q must be held, got (%q,%v)", s, src, ok)
+		}
+	}
+	if src, ok := resolveTriggerSource("meditation"); !ok || src != "meditation" {
+		t.Fatalf("meditation passthrough semantics must be preserved, got (%q,%v)", src, ok)
+	}
+}

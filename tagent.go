@@ -334,6 +334,11 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		if mfp, err := computeMemoryFingerprint(&cfg); err == nil {
 			lastMemFP = mfp
 		}
+		// hardening-review-batch2 5.5（首代快照）：启动代即 ring-2 的第零代——
+		// 否则首次结构热更把 prevKeep(nil→启动后第一代) 存进 prevSnapshot，
+		// Rollback 永远报「无上一代快照」。启动代快照让首次换代即可回滚。
+		startupCfg := cfg
+		prevKeep = &startupCfg
 		entryAgent.SetOrgReloader(func() {
 			info, err := os.Stat(cfgPath)
 			if err != nil {
@@ -390,12 +395,15 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					if ttl, perr := time.ParseDuration(ac.TaskTerminalTTL); perr == nil && ttl > 0 {
 						p.TaskTerminalTTL = ttl
 					}
-					if wall, werr := time.ParseDuration(ac.TaskMaxDetachedAge); werr == nil && ac.TaskMaxDetachedAge != "" {
-						p.TaskMaxDetachedAge = wall // >0 set / <0 disable; 0 (unparsed empty) keeps
+					if sa, saerr := time.ParseDuration(ac.TaskStaleAfter); saerr == nil && ac.TaskStaleAfter != "" {
+						p.TaskStaleAfter = sa // >0 set / <0 disable; 0 (unparsed empty) keeps
+					}
+					if jd, jderr := time.ParseDuration(ac.TaskJobDeadline); jderr == nil && ac.TaskJobDeadline != "" {
+						p.TaskJobDeadline = jd
 					}
 					entryAgent.ApplyOrgHotParams(p)
-					log.Infof("[org-hotreload] hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s maxDetachedAge=%s",
-						p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskMaxDetachedAge)
+					log.Infof("[org-hotreload] hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s staleAfter=%s jobDeadline=%s",
+						p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskStaleAfter, p.TaskJobDeadline)
 				}
 				return
 			}
@@ -422,10 +430,37 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			}
 			oldFP := lastFP
 			_ = newTA
+			// hardening-review-batch2 5.1/5.4（热更统一应用）：结构变化分支
+			// 同批应用数值参数（旧实现互斥——结构换代后常驻 cm 的
+			// compressor/TaskManager 保留旧值且不再收到数值热更）。回执按
+			// effective 报告实际应用值。
+			hotP := agent.OrgHotParams{}
+			if ac, aok := fresh.Agents[cfg.Entry]; aok {
+				if ac.CompressThreshold > 0 {
+					hotP.ThresholdPct = ac.CompressThreshold
+				}
+				if ac.MaxTokens > 0 {
+					hotP.MaxTokens = ac.MaxTokens
+				}
+				if ac.KeepRecentTasks > 0 {
+					hotP.KeepRecentTasks = ac.KeepRecentTasks
+				}
+				if ttl, perr := time.ParseDuration(ac.TaskTerminalTTL); perr == nil && ttl > 0 {
+					hotP.TaskTerminalTTL = ttl
+				}
+				if sa, saerr := time.ParseDuration(ac.TaskStaleAfter); saerr == nil && ac.TaskStaleAfter != "" {
+					hotP.TaskStaleAfter = sa
+				}
+				if jd, jderr := time.ParseDuration(ac.TaskJobDeadline); jderr == nil && ac.TaskJobDeadline != "" {
+					hotP.TaskJobDeadline = jd
+				}
+				entryAgent.ApplyOrgHotParams(hotP)
+			}
 			lastFP = fp
 			execGen++
-			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched)",
-				execGen, short(oldFP), short(fp))
+			log.Infof("[org-hotreload] executor generation %d swapped (fp %s.. -> %s.., effective next turn; prompt/model/tools rebuilt, cm/bus/projection/registry untouched) — effective numeric: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s staleAfter=%s jobDeadline=%s",
+				execGen, short(oldFP), short(fp),
+				hotP.ThresholdPct, hotP.MaxTokens, hotP.KeepRecentTasks, hotP.TaskTerminalTTL, hotP.TaskStaleAfter, hotP.TaskJobDeadline)
 			entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 热更新已生效（generation %d，fp %s.. → %s..，下回合起用新配置）", execGen, short(oldFP), short(fp)))
 			// ring 2（3.8）：保留上一代配置摘要供 Rollback（覆盖更早代）。
 			prevSnapshot = reloadSnapshot{fp: oldFP, cfg: prevKeep}

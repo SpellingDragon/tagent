@@ -171,11 +171,15 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 // present; task_id is the R2 structured registry key
 // (resident-continuity-r2-r4 1.5: machine-readable settle association, never
 // parsed from content), always present.
+// hardening-review-batch2 1.3 adds lineage_absent=true for Origin-less tasks:
+// also a deterministic fact (delivery-gate marker, NOT routing baggage) — it
+// makes the host hold the reclaim output instead of letting the mechanical
+// "task" fallback deliver it.
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
 	for k := range evt.Metadata {
-		if k != "settle_status" && k != "task_id" {
+		if k != "settle_status" && k != "task_id" && k != "lineage_absent" {
 			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
 		}
 	}
@@ -184,6 +188,9 @@ func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	}
 	if evt.Metadata["task_id"] != "t2" {
 		t.Errorf("task_id must always be carried (R2 registry key), got %v", evt.Metadata["task_id"])
+	}
+	if evt.Metadata["lineage_absent"] != "true" {
+		t.Errorf("lineage_absent must be marked for Origin-less tasks (1.3 gate marker), got %v", evt.Metadata["lineage_absent"])
 	}
 }
 

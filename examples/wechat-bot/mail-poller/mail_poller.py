@@ -159,10 +159,17 @@ class SeenStore:
                 pass
             raise
 
+def rl_token() -> str:
+    """hardening-review-batch2 4.5：与 Go 侧 rl.AuthTokenFromEnv 同源。"""
+    return os.environ.get("TAGENT_RL_AUTH_TOKEN", "")
+
 def inject(url: str, content: str, timeout: float = 10.0) -> bool:
     payload = json.dumps({"messages": [{"role": "user", "content": content}]}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload,
-                                 headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json"}
+    tok = rl_token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             ok = r.status == 202
@@ -170,6 +177,11 @@ def inject(url: str, content: str, timeout: float = 10.0) -> bool:
                 log(f"注入非202返回: HTTP {r.status}")
             return ok
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            # 认证失败：立即退出（exit 3=auth 类），绝不无限重试——
+            # 退避轮询由外层 classify_exit 的 auth 策略接管。
+            log(f"注入认证失败 HTTP {e.code}: 检查 TAGENT_RL_AUTH_TOKEN")
+            sys.exit(3)
         log(f"注入 HTTPError: {e.code}")
         return False
     except Exception as e:

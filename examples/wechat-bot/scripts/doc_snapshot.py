@@ -25,7 +25,14 @@ def snapdir(target: Path) -> Path:
 
 
 def snaps(target: Path):
-    return sorted(snapdir(target).glob(f'{target.name}.*.bak'))
+    """Normal snapshots only (hardening-review-batch2 7.4): strict date-named
+    pattern — `.damaged.*.bak` keeps must NEVER re-enter restore candidates
+    (lexicographic sort put 'damaged' after dates, so a second restore
+    re-selected the damaged copy as the 'latest' good snapshot)."""
+    import re
+    pat = re.compile(re.escape(target.name) + r'\.\d{8}-\d{6}\.bak$')
+    return sorted(p for p in snapdir(target).iterdir()
+                  if pat.fullmatch(p.name))
 
 
 def main() -> int:

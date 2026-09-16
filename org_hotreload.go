@@ -156,7 +156,7 @@ type agentSubset struct {
 	MaxToolIterations int          `json:"max_tool_iterations,omitempty"`
 	Temperature       float64      `json:"temperature,omitempty"`
 	// CompressThreshold / MaxTokens / KeepRecentTasks / TaskTerminalTTL /
-	// TaskMaxDetachedAge are intentionally EXCLUDED from the fingerprint
+	// TaskStaleAfter / TaskJobDeadline are intentionally EXCLUDED from the fingerprint
 	// (full-hot-config Phase 1, 2026-09-16): all are hot-applicable via
 	// ApplyOrgHotParams (compressor atomic threshold+budget swap, task
 	// manager TTL / stale-detached wall setters), so per the D3 criterion

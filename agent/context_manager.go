@@ -129,11 +129,12 @@ type ContextManager struct {
 // (memStore/bus/projection/runner) is NOT in this bundle — that follows the
 // shell-rebuild path.
 type OrgHotParams struct {
-	ThresholdPct       float64
-	MaxTokens          int
-	KeepRecentTasks    int
-	TaskTerminalTTL    time.Duration
-	TaskMaxDetachedAge time.Duration // >0 set wall / <0 disable / 0 keep
+	ThresholdPct    float64
+	MaxTokens       int
+	KeepRecentTasks int
+	TaskTerminalTTL time.Duration
+	TaskStaleAfter  time.Duration // >0 set observation threshold / <0 disable / 0 keep
+	TaskJobDeadline time.Duration // >0 enable termination policy / <0 disable / 0 keep
 }
 
 // ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
@@ -294,7 +295,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		)
 	}
 
-	cb := cm.buildModelCallbacks()
+	cb := cm.buildModelCallbacks(cfg.SystemPromptSource)
 
 	// Build LLMAgent.
 	maxIters := cfg.MaxToolIters
@@ -356,7 +357,7 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 // buildModelCallbacks（hotswap-fix 5.7）：回调链构造抽为 cm 方法——闭包捕获
 // 同一个 cm（装配/热载/任务板/诊断全部同源）。冷启动与 RebuildExecutor 共用，
 // 保证换装后 BeforeModel 闭包仍指向常驻状态面（修复空投影装配事故）。
-func (cm *ContextManager) buildModelCallbacks() *model.Callbacks {
+func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callbacks {
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
 
@@ -364,9 +365,12 @@ func (cm *ContextManager) buildModelCallbacks() *model.Callbacks {
 	// When SystemPromptSource is configured, re-reads system prompt files
 	// before each LLM call and replaces the system message.
 	// This enables prompt tuning without restarting the agent process.
-	if cm.systemPromptSource != nil {
+	// hardening-review-batch2 6.2（执行代快照）：捕获**本代配置**的 source，
+	// 而非 cm 的可变字段——热更换 prompt source 后，旧代 in-flight runner 的
+	// 回调仍读旧 source（不受扰），新代读新 source。
+	if source != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			freshPrompt, err := cm.systemPromptSource.Get()
+			freshPrompt, err := source.Get()
 			if err != nil || freshPrompt == "" {
 				return nil, nil // Graceful: keep existing system prompt
 			}
@@ -444,7 +448,7 @@ func (cm *ContextManager) buildModelCallbacks() *model.Callbacks {
 // 纯函数段（依赖仅 cfg）。冷启动与 RebuildExecutor 共用，保证两条路径构造的
 // fwAgent 行为学一致（model/tools/prompt/genConfig/并行工具开关）。
 func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMAgent {
-	cb := cm.buildModelCallbacks()
+	cb := cm.buildModelCallbacks(cfg.SystemPromptSource)
 	maxIters := cfg.MaxToolIters
 	if maxIters <= 0 {
 		maxIters = DefaultMaxToolIterations
@@ -565,6 +569,18 @@ func (cm *ContextManager) RebuildExecutor(cfg ContextManagerConfig) runner.Runne
 	execCfg := merged
 	execCfg.MemPlugin = cm.memPlugin
 	execCfg.SessionSvc = cm.sessionSvc
+	// hardening-review-batch2 6.1（执行代绑定）：换入前把新代工具 wrapper 的
+	// parentProjection 重绑到常驻投影——新壳构建路径的 SetToolParentProjection
+	// 绑的是新壳空投影（其 projection 为 nil/空），换入后子 agent 自动上下文
+	// 注入会读到空（event_keys 省略时 nil）。
+	for _, t := range execCfg.Tools {
+		if w, ok := t.(*AgentToolWrapper); ok {
+			w.SetParentProjection(cm.projection)
+		}
+	}
+	// 6.2：生效代快照更新——本代 system prompt source 即 execCfg 所带；
+	// （cm.systemPromptSource 保持冷启动值，供诊断/回退对照，不参与新代
+	// callback——callback 已按代捕获。）
 	fwAgent := cm.buildLLMAgent(execCfg)
 	if old := cm.SwapExecutor(buildRunner(execCfg, fwAgent)); old != nil {
 		cm.RetireRunner(old)
@@ -846,6 +862,23 @@ func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
 	decl := *tk.Spec.Declarative
 	if decl.StartedAtMilli == 0 {
 		decl.StartedAtMilli = tk.StartedAt.UnixMilli()
+	}
+	// hardening-review-batch2 1.1（世系跨重启保真）：Declarative 构造点
+	// （tool_agent / SpecFromDeclarative）不携带运行态 Spec.Origin——框架
+	// OriginSpawner 在 Spawn 入口 stamp 到 spec 上，此处（OnSpawn hook，晚于
+	// stamp）单点补填，保证 task_spawned 持久化记录携带 routing baggage。
+	// 声明式字段已填 Origin 时以声明式为准（不覆盖）。
+	if len(decl.Origin) == 0 && len(tk.Spec.Origin) > 0 {
+		cp := make(map[string]string, len(tk.Spec.Origin))
+		for k, v := range tk.Spec.Origin {
+			cp[k] = v
+		}
+		decl.Origin = cp
+	}
+	// hardening-review-batch2 2.4：lifetime 类持久化——恢复侧据它还原同一
+	// 生命周期分类（job 受 stale/deadline 治理；service 永不因年龄终止）。
+	if decl.Lifetime == "" {
+		decl.Lifetime = task.LifetimeOf(tk.Spec)
 	}
 	raw, err := json.Marshal(decl)
 	if err != nil {

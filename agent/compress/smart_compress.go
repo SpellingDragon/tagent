@@ -83,6 +83,25 @@ func WithTriggerBudget(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.triggerBudget = n }
 }
 
+// ApplyParams hot-swaps the compression parameter set as ONE generation
+// (hardening-review-batch2 5.3): maxTokens, triggerBudget and keepRecent move
+// together so the trigger line (ContextCompressor) and the compression target
+// (SmartCompressor) never disagree — the 86ed494 hot-params gap left the
+// inner target at its cold-construction value, so a shrunken window kept
+// no-op-compressing and an enlarged window over-compressed.
+// Caller (ContextCompressor.ApplyHotParams) owns the lock discipline.
+func (sc *SmartCompressor) ApplyParams(maxTokens, triggerBudget, keepRecent int) {
+	if maxTokens > 0 {
+		sc.maxTokens = maxTokens
+	}
+	if triggerBudget > 0 {
+		sc.triggerBudget = triggerBudget
+	}
+	if keepRecent > 0 {
+		sc.KeepRecentTasks = keepRecent
+	}
+}
+
 // budget returns the effective post-compression target budget.
 func (sc *SmartCompressor) budget() int {
 	if sc.triggerBudget > 0 && sc.triggerBudget < sc.maxTokens {

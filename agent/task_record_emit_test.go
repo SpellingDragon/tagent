@@ -62,6 +62,49 @@ func TestEmitTaskSpawnedRecord_Shape(t *testing.T) {
 	require.Equal(t, started.UnixMilli(), decl.StartedAtMilli, "StartedAt is backfilled from task")
 }
 
+// hardening-review-batch2 1.1（世系跨重启保真）：EmitTaskSpawnedRecord 必须
+// 把运行态 Spec.Origin 补填进持久化 Declarative（OriginSpawner 在 Spawn 入口
+// stamp，声明式构造点不携带）——否则恢复后的任务退化为无世系、可被宿主
+// 误投递。已填 Origin 时以声明式为准（不覆盖）。
+func TestEmitTaskSpawnedRecord_OriginBackfilled(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	cm := &ContextManager{partitionID: rb2Partition, memStore: store, name: "t-agent"}
+	started := time.Now()
+	tk := &task.Task{ID: "t-uuid-origin", Spec: task.TaskSpec{
+		Kind: "command", Desc: "svc",
+		Origin:      map[string]string{"trigger_source": "meditation", "chat_id": "c-1"},
+		Declarative: &task.Declarative{Kind: "command", Desc: "svc", Key: "svc"},
+	}, StartedAt: started}
+	cm.EmitTaskSpawnedRecord(tk)
+
+	refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{rb2Partition}})
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	ev, err := store.GetEvent(refs[0].EventKey)
+	require.NoError(t, err)
+	var decl task.Declarative
+	require.NoError(t, json.Unmarshal([]byte(ev.Content), &decl))
+	require.Equal(t, map[string]string{"trigger_source": "meditation", "chat_id": "c-1"},
+		decl.Origin, "runtime Spec.Origin must be backfilled into the persisted declarative")
+
+	// 声明式已带 Origin：不覆盖。
+	tk2 := &task.Task{ID: "t-uuid-origin2", Spec: task.TaskSpec{
+		Kind: "command", Desc: "svc2",
+		Origin:      map[string]string{"trigger_source": "runtime"},
+		Declarative: &task.Declarative{Kind: "command", Desc: "svc2", Origin: map[string]string{"trigger_source": "declared"}},
+	}, StartedAt: started}
+	cm.EmitTaskSpawnedRecord(tk2)
+	refs2, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{rb2Partition}})
+	require.NoError(t, err)
+	require.Len(t, refs2, 2)
+	ev2, err := store.GetEvent(refs2[1].EventKey)
+	require.NoError(t, err)
+	var decl2 task.Declarative
+	require.NoError(t, json.Unmarshal([]byte(ev2.Content), &decl2))
+	require.Equal(t, map[string]string{"trigger_source": "declared"}, decl2.Origin,
+		"declared Origin wins — backfill must not overwrite")
+}
+
 // agent 层：inline settle 记录形态（task_inline_record 标记 + 结构化键；registry-only）。
 func TestEmitTaskInlineSettleRecord_Shape(t *testing.T) {
 	store := memory.NewInMemoryStore()

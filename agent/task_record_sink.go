@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
@@ -146,8 +147,11 @@ func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
 	if p.TaskTerminalTTL > 0 && ta.taskManager != nil {
 		ta.taskManager.SetTerminalTTL(p.TaskTerminalTTL)
 	}
-	if p.TaskMaxDetachedAge != 0 && ta.taskManager != nil {
-		ta.taskManager.SetMaxDetachedAge(p.TaskMaxDetachedAge)
+	if p.TaskStaleAfter != 0 && ta.taskManager != nil {
+		ta.taskManager.SetStaleAfter(p.TaskStaleAfter)
+	}
+	if p.TaskJobDeadline != 0 && ta.taskManager != nil {
+		ta.taskManager.SetJobDeadline(p.TaskJobDeadline)
 	}
 }
 
@@ -272,7 +276,8 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 
 	// 2) settle 记录（external_input + Metadata[settle_status]；含 inline 标记）。
 	// 全量扫 external_input 按结构化 Metadata 归并 task_id→末次 settle_status。
-	settled := map[string]string{} // task_id → last settle_status
+	settled := map[string]string{}   // task_id → last settle_status
+	detachedMs := map[string]int64{} // task_id → detached 转变时刻（2.4 跨重启保真）
 	for off := 0; ; off += 500 {
 		batch, err := store.QueryEvents(memory.QueryOptions{
 			PartitionIDs: []int{partitionID},
@@ -295,6 +300,15 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 			if st, ok := ev.Metadata["settle_status"]; ok && st != "" {
 				if id := ev.Metadata["task_id"]; id != "" {
 					settled[id] = st // 全序扫描下后者覆盖前者（末次胜）
+					// hardening-review-batch2 2.4：alive-detached 转变时刻随
+					// 事件持久化——恢复侧据它还原 detachedAt（真实脱离时长）。
+					if st == "alive-detached" || st == "alive_detached" {
+						if msStr := ev.Metadata["detached_at_ms"]; msStr != "" {
+							if ms, perr := strconv.ParseInt(msStr, 10, 64); perr == nil {
+								detachedMs[id] = ms
+							}
+						}
+					}
 				}
 			}
 		}
@@ -316,9 +330,21 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 		if settled[sp.id] == "alive-detached" || settled[sp.id] == "alive_detached" {
 			status = task.TaskAliveDetached
 		}
-		spec := task.TaskSpec{Kind: sp.decl.Kind, Desc: sp.decl.Desc, Key: sp.decl.Key, Origin: sp.decl.Origin}
+		spec := task.TaskSpec{Kind: sp.decl.Kind, Desc: sp.decl.Desc, Key: sp.decl.Key, Origin: sp.decl.Origin, Lifetime: sp.decl.Lifetime}
 		if rebuildClosures != nil {
 			if rebuilt := rebuildClosures(sp.decl); rebuilt.Desc != "" || rebuilt.Kind != "" {
+				// hardening-review-batch2 1.2（世系跨重启保真）：工厂仅供执行
+				// 能力——身份字段以持久层为准，覆盖后回填缺口（工厂输出不带
+				// Origin，整体覆盖曾致内部世系丢失→宿主误投递）。
+				if spec.Origin != nil && rebuilt.Origin == nil {
+					rebuilt.Origin = spec.Origin
+				}
+				if spec.Key != "" && rebuilt.Key == "" {
+					rebuilt.Key = spec.Key
+				}
+				if spec.Lifetime != "" && rebuilt.Lifetime == "" {
+					rebuilt.Lifetime = spec.Lifetime
+				}
 				spec = rebuilt
 			}
 		}
@@ -326,7 +352,12 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 			spec.Desc = sp.decl.Desc
 		}
 		started := time.UnixMilli(sp.decl.StartedAtMilli)
-		tm.RestoreTask(sp.id, spec, started, status)
+		tk := tm.RestoreTask(sp.id, spec, started, status)
+		// hardening-review-batch2 2.4：还原真实 detached 转变时刻——观测/
+		// 终止判定沿用原时长，不以恢复时刻替代。
+		if tk != nil && status == task.TaskAliveDetached {
+			tk.SetDetachedAtMilli(detachedMs[sp.id])
+		}
 		restored++
 	}
 	if restored > 0 {

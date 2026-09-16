@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+	"gopkg.in/yaml.v3"
 
 	"github.com/SpellingDragon/tagent/internal/strictyaml"
 
@@ -259,22 +261,58 @@ type configFileServers struct {
 
 // parseServersFile reads the mcp_servers section from a YAML or JSON
 // config file (extension-detected, mirroring tagent.LoadConfig).
+// hardening-review-batch2 6.4：registry 绑定的是**完整项目配置文件**（entry/
+// agents/providers/mcp_servers 共存）——严格解码必须只作用于 mcp_servers 子树，
+// 否则其余合法根字段被判 unknown，热同步静默失败并永远保留旧 registry。
+// 两段式：宽松解析整文档定位子树 → 对子树严格解码（strict 校验不放松）。
 func parseServersFile(path string) (map[string]ServerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var section configFileServers
+	var subtree []byte
 	if strings.ToLower(filepath.Ext(path)) == ".json" {
-		if err := strictyaml.DecodeJSON(data, &section); err != nil {
+		var full map[string]json.RawMessage
+		if err := json.Unmarshal(data, &full); err != nil {
+			return nil, err
+		}
+		raw, ok := full["mcp_servers"]
+		if !ok {
+			return map[string]ServerConfig{}, nil // 无 MCP 段：空表（合法）
+		}
+		subtree = raw
+		var section configFileServers
+		if err := strictyaml.DecodeJSON(subtree, &section); err != nil {
 			return nil, err
 		}
 		return section.MCPServers, nil
 	}
-	if err := strictyaml.DecodeYAML(data, &section); err != nil {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, err
 	}
-	return section.MCPServers, nil
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = *root.Content[0]
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "mcp_servers" {
+			node := root.Content[i+1]
+			subtree, err = yaml.Marshal(node)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	if subtree == nil {
+		return map[string]ServerConfig{}, nil // 无 MCP 段：空表（合法）
+	}
+	// 子树本身即 servers 映射（非 configFileServers 包装）。
+	var servers map[string]ServerConfig
+	if err := strictyaml.DecodeYAML(subtree, &servers); err != nil {
+		return nil, err
+	}
+	return servers, nil
 }
 
 // closeToolSets closes toolsets outside the registry lock.

@@ -108,3 +108,49 @@ func TestUpdateMaxTokens_PassThroughBoundary(t *testing.T) {
 		t.Fatal("after hot budget raise: same turn must pass through unchanged")
 	}
 }
+
+// hardening-review-batch2 5.3：参数同代——缩窗热更后真实压缩必须按新预算
+// 执行（内层 SmartCompressor 同步换装），而非沿用冷构造大目标产出 no-op。
+func TestApplyHotParams_ShrinkWindow_RealCompressionFollows(t *testing.T) {
+	// 自建 store（newHotTestCC 的第二返回值为 nil——其 fixture 不暴露 store）。
+	store := memory.NewInMemoryStore()
+	cc := NewContextCompressor(
+		NewSmartCompressor(WithKeepRecentTasks(2)),
+		store, NewDefaultTokenCounter(), 60, 0.8, 2)
+	// 冷构造：maxTokens=60。先热更换到 50000（扩窗）再缩回 60——暴露「内层
+	// 不跟随」的旧缺陷（扩窗后内层 60；本用例反向：外层 50000 → 缩回 60）。
+	cc.ApplyHotParams(0.8, 50000, 2)
+	if got := cc.BudgetLine(); got != 40000 {
+		t.Fatalf("budget line after enlarge = %d, want 40000", got)
+	}
+
+	// 存入足量历史（真实 tokens 超过缩窗后的预算线 48）。
+	for i := 0; i < 6; i++ {
+		storeTurn(t, store, strings.Repeat("payload-", 40)+string(rune('a'+i)))
+	}
+	refs := allRefs(t, store)
+
+	// 缩窗回 60×0.8=48：触发线远低于现有体量。
+	cc.ApplyHotParams(0.8, 60, 2)
+	if got := cc.BudgetLine(); got != 48 {
+		t.Fatalf("budget line after shrink = %d, want 48", got)
+	}
+
+	res := cc.Compress(context.Background(), refs)
+	if !res.Compressed {
+		t.Fatalf("expected real compression after shrink (inner target must follow), got no-op")
+	}
+	// 注：不断言输出 ≤ 预算线——keepRecent 全保真回合 + 骨架有结构下限，
+	// 分层压缩按轮次升级；本用例锁定的是「内层目标跟随同一代」：旧实现
+	// （内层仍 50000）会判预算未花而 no-op（Compressed=false）。
+	_ = cc.tokenCounter.Estimate(res.Messages)
+}
+
+func allRefs(t *testing.T, store memory.MemoryStore) []memory.EventReference {
+	t.Helper()
+	refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{1}})
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	return refs
+}

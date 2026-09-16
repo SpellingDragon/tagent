@@ -193,6 +193,14 @@ func (cm *ContextManager) rebuildProjectionFallback() {
 	cm.contextCompressor.SetFullBoundary(boundary)
 	log.Infof("[rebuild-projection] fallback rebuild: scanned=%d oldest_kept=%d boundary=%d truncated=%v (mode=fallback, no compaction anchor)",
 		total, all[0].EventKey, boundary, truncated)
+	// hardening-review-batch2 7.1（partial 显式化）：截断必须可被调用方/日志
+	// 辨识——VERDICT 行统一两模式的完整性结论（snapshot 模式的对应结论在
+	// 主路径汇总行的 lostKeys 字段）。
+	if truncated {
+		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated to %d of %d events; no compaction anchor — run a compaction to bound future chains)", fallbackCap, total)
+	} else {
+		log.Infof("[rebuild-projection] VERDICT: FULL (fallback replay complete)")
+	}
 }
 
 // fetchTailEvents returns the events with EventKey strictly greater than

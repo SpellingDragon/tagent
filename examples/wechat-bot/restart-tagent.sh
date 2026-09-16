@@ -124,9 +124,24 @@ echo "$NEW_PID" > "$PIDF"
 log "launched pid=$NEW_PID (env re-injected)"
 
 # 6. health check loop
+# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧
+# rl.AuthTokenFromEnv 同源（env TAGENT_RL_AUTH_TOKEN）。401=AUTH_FAIL：
+# 告警且不误判新进程死亡（不 kill、不回滚），等人工/凭据修复。
+RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
+AUTH_ARGS=()
+[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
 for i in $(seq 1 90); do
     sleep 2
-    if curl -sf --max-time 3 http://127.0.0.1:8089/healthz > /tmp/tagent_healthz.json 2>/dev/null; then
+    CODE=$(curl -s -o /tmp/tagent_healthz.json -w '%{http_code}' \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} --max-time 3 \
+        http://127.0.0.1:8089/healthz 2>/dev/null)
+    if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+        log "AUTH_FAIL: healthz returned $CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
+        rm -f /tmp/tagent_restart.done
+        log "=== restart session end (AUTH_FAIL) ==="
+        exit 3
+    fi
+    if [ "$CODE" = "200" ]; then
         LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         # 2026-09-12 00:23 lesson: healthz OK alone is a false positive - in the
         # script race the "RESTART OK" line credited a pid that was not the
@@ -148,11 +163,12 @@ log "=== restart session end (SUCCESS) ==="
         exit 0
     fi
     if ! kill -0 "$NEW_PID" 2>/dev/null; then
-        touch /tmp/tagent_restart.done; log "FAIL: new process $NEW_PID died during startup - see tail of $LOGF; rollback hint: cp wechat-bot.prev wechat-bot && restart"
+        touch /tmp/tagent_restart.failed; log "FAIL: new process $NEW_PID died during startup - see tail of $LOGF; rollback hint: cp wechat-bot.prev wechat-bot && restart"
         log "=== restart session end (FAILED) ==="
         exit 1
     fi
 done
-touch /tmp/tagent_restart.done; log "FAIL: healthz not up in 180s (process may still be initializing) - manual check required"
+rm -f /tmp/tagent_restart.done; touch /tmp/tagent_restart.timeout
+log "FAIL: healthz not up in 180s (process may still be initializing) - manual check required"
 log "=== restart session end (TIMEOUT) ==="
 exit 1

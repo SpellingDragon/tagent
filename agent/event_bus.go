@@ -109,14 +109,24 @@ func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 		// 记为非终态词汇 "watch"（不在终态集合 {completed,failed,cancelled,dead}，
 		// 不抵消 spawned；通知正文照发不变）。
 		return "◈", "watch"
+	case sig.Kind == task.SettleFailed:
+		// hardening-review-batch2 1.6：reconcile 回收（zombie/orphan/wall）的
+		// 失败信号——此前无 Err 时落 default=completed，WAL/反馈错记成功。
+		return "✗", "failed"
 	case sig.Err != nil:
 		return "✗", "failed"
 	case sig.Kind == task.SettleStable:
 		return "∞", "alive-detached"
 	case sig.Kind == task.SettleSuspect:
 		return "⚠", "suspect"
-	default:
+	case sig.Kind == task.SettleCompleted:
 		return "✓", "completed"
+	default:
+		// hardening-review-batch2 1.6：未知 Kind 显式化——不默认 completed
+		//（那会把调用方 bug 写成成功事实）。unknown 不在终态集合，不抵消
+		// spawned；告警由调用侧记。
+		log.Warnf("[task_settled] unknown settle kind %q — mapped to unknown (not completed)", sig.Kind)
+		return "?", "unknown"
 	}
 }
 
@@ -189,6 +199,20 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	// pipeline. (async-result-delivery.)
 	for k, v := range tk.Spec.Origin {
 		evt.Metadata[k] = v
+	}
+	// hardening-review-batch2 1.3（unknown 保守扣留）：Origin 缺失（旧版本记录
+	// /框架外 spawn）的任务，其结算事件无世系——下游 extractTriggerSource 会
+	// 机械兜底为 "task" 并被宿主白名单放投。源头打标，让下游显式降级为
+	// task-unstamped（宿主扣留），未知不得升级为可投递来源。
+	if len(tk.Spec.Origin) == 0 {
+		evt.Metadata["lineage_absent"] = "true"
+	}
+	// hardening-review-batch2 2.4：alive-detached 转变时刻随事件持久化——
+	// 恢复侧据它还原 detachedAt（沿用真实脱离时长，不以恢复时间替代）。
+	if sig.Kind == task.SettleStable {
+		if ms := tk.DetachedAtMilli(); ms > 0 {
+			evt.Metadata["detached_at_ms"] = fmt.Sprintf("%d", ms)
+		}
 	}
 	// 2.3（design-report-closeout）：结构化 settle 状态随事件携带——persistBusEvent
 	// 落库后据此自动写 task_settle feedback（completed→positive / failed→negative；

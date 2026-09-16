@@ -10,6 +10,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 
+	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
@@ -303,6 +304,35 @@ func TestExtractTriggerSource_TaskSettleLineage(t *testing.T) {
 	t.Run("empty batch defaults to user", func(t *testing.T) {
 		assert.Equal(t, "user", extractTriggerSource(nil))
 	})
+
+	// hardening-review-batch2 1.3：源头标记 lineage_absent 的 task 结算（Origin
+	// 缺失——旧版本记录/框架外 spawn）必须降级为 task-unstamped（宿主
+	// fail-closed 扣留），不得机械兜底 "task" 被白名单放投。无标记的 bare task
+	// 保持既有 mechanical 语义（上一用例）。
+	t.Run("lineage_absent task settles degrade to task-unstamped", func(t *testing.T) {
+		newMarkedBareTask := func() *AgentEvent {
+			evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: "[task settled] restored-without-origin"})
+			evt.Metadata["lineage_absent"] = "true"
+			return evt
+		}
+		assert.Equal(t, "task-unstamped", extractTriggerSource([]*AgentEvent{newMarkedBareTask()}))
+		// 混合批次：user 输入仍最高优先。
+		assert.Equal(t, "user", extractTriggerSource([]*AgentEvent{newMarkedBareTask(), newUser()}))
+	})
+}
+
+// hardening-review-batch2 1.3：宿主侧白名单——newTaskSettledEvent 对 Origin
+// 缺失的任务打 lineage_absend 标记（源头事实），resolveTriggerSource（宿主）
+// 对 task-unstamped 及一切未识别值扣留。
+func TestNewTaskSettledEvent_LineageAbsentMarked(t *testing.T) {
+	evt := newTaskSettledEvent(&task.Task{ID: "t-no-origin", Spec: task.TaskSpec{Kind: "command", Desc: "svc"}},
+		task.SettleSignal{Kind: task.SettleCompleted, Output: "ok"}, 1<<20, "")
+	require.Equal(t, "true", evt.Metadata["lineage_absent"], "Origin-less task must be marked at the source")
+
+	evt2 := newTaskSettledEvent(&task.Task{ID: "t-with-origin", Spec: task.TaskSpec{
+		Kind: "command", Desc: "svc", Origin: map[string]string{"trigger_source": "user"},
+	}}, task.SettleSignal{Kind: task.SettleCompleted, Output: "ok"}, 1<<20, "")
+	require.NotEqual(t, "true", evt2.Metadata["lineage_absent"], "lineaged task must not be marked")
 }
 
 func TestMeditationManager_StartStop(t *testing.T) {

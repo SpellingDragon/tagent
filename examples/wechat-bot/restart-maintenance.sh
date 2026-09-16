@@ -30,6 +30,15 @@ NEWBIN=/tmp/wechat-bot.new
 DONEDIR="$BASE/run"
 DONEF="$DONEDIR/restart.done"
 HEALTH=http://127.0.0.1:8089/healthz
+# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧
+# rl.AuthTokenFromEnv 同源（env TAGENT_RL_AUTH_TOKEN）；401 视为 AUTH_FAIL，
+# 不判死进程、不触发重启。
+RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
+AUTH_ARGS=()
+[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
+healthz_code() {
+  curl -s -o /dev/null -w '%{http_code}' ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -m 3 "$HEALTH" 2>/dev/null
+}
 log(){ echo "[$(date '+%F %T')] $*"; }
 
 # 5.8 system-alert dead-man switch (mirror of restart-tagent.sh)
@@ -43,7 +52,7 @@ mkdir -p "$DONEDIR" 2>/dev/null
 # ---- 0. 幂等门: 哨兵 pid 仍健康则无事可做 ----
 if [ -f "$DONEF" ]; then
     BPID=$(cat "$DONEF" 2>/dev/null)
-    if [ -n "$BPID" ] && kill -0 "$BPID" 2>/dev/null && curl -sf -m 3 "$HEALTH" >/dev/null 2>&1; then
+    if [ -n "$BPID" ] && kill -0 "$BPID" 2>/dev/null && [ "$(healthz_code)" = "200" ]; then
         exit 0   # 健康, 静默退出 —— 不写日志, 不打扰
     fi
     log "note: done sentinel pid=$BPID no longer healthy — insurance engaging"
@@ -60,7 +69,7 @@ if [ -z "$OLD_PID" ]; then
 fi
 
 # bot 活着且健康 → 一切正常, 静默退出（含首次部署场景）
-if [ -n "$OLD_PID" ] && curl -sf -m 3 "$HEALTH" >/dev/null 2>&1; then
+if [ -n "$OLD_PID" ] && [ "$(healthz_code)" = "200" ]; then
     echo "$OLD_PID" > "$DONEF" 2>/dev/null   # 基线校准: 当前健康 pid 即基线
     exit 0
 fi
@@ -126,9 +135,12 @@ then log "reincarnation notice staged (pre-spawn): $DONEDIR/REINCARNATION_NOTICE
 else log "WARN: notice staging failed (non-blocking)"
 fi
 # ---- 5. 重启: posix_spawn 显式关闭继承 fd（根治锁/管道 fd 泄漏给 bot） ----
-python3 - "$BASE" "$SNAP" <<'PYEOF' >> "$LOGF" 2>&1 &
+# hardening-review-batch2 7.5：pidfile 记录**真实 bot PID**（posix_spawn 返回
+# 值），非 python wrapper 自身——wrapper PID 退出后 pidfile 指向幽灵。
+# 同步执行（不再 & 后台）：spawn 本身即刻返回，pidfile 先落盘再进健康门。
+python3 - "$BASE" "$SNAP" "$PIDF" >> "$LOGF" 2>&1 <<'PYINNER'
 import os, sys
-base, snap = sys.argv[1], sys.argv[2]
+base, snap, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]
 env = {}
 if os.path.isfile(snap):
     for line in open(snap, encoding='utf-8', errors='surrogateescape').read().splitlines():
@@ -140,17 +152,23 @@ env.setdefault('PATH', '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 os.chdir(base)
 # 关键: spawn 前关闭所有非标准 fd —— 不带走外层 flock 锁/日志/管道
 file_actions = [(os.POSIX_SPAWN_CLOSE, fd) for fd in range(3, 1024)]
-os.posix_spawn('./wechat-bot', ['./wechat-bot'], env, file_actions=file_actions)
-sys.exit(0)
-PYEOF
-SPAWN_PID=$!
-echo "$SPAWN_PID" > "$PIDF"
-log "launched spawn wrapper pid=$SPAWN_PID (fds 3+ closed before exec)"
+child = os.posix_spawn('./wechat-bot', ['./wechat-bot'], env, file_actions=file_actions)
+with open(pidfile, 'w') as f:
+    f.write(str(child))
+print(f"spawned bot pid={child} (real child, pidfile updated)")
+PYINNER
+SPAWN_PID=$(cat "$PIDF" 2>/dev/null || echo "?")
+log "launched bot pid=$SPAWN_PID (real child from posix_spawn; fds 3+ closed before exec)"
 
 # ---- 6. 健康门控 ----
 for i in $(seq 1 90); do
     sleep 2
-    if curl -sf -m 3 "$HEALTH" > /tmp/tagent_healthz.json 2>/dev/null; then
+    HC=$(healthz_code)
+    if [ "$HC" = "401" ] || [ "$HC" = "403" ]; then
+        log "AUTH_FAIL: healthz returned $HC — token missing/mismatch. NOT killing; manual fix required"
+        exit 3
+    fi
+    if [ "$HC" = "200" ]; then
         NEW_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         echo "${NEW_PID:-$SPAWN_PID}" > "$DONEDIR/restart.done"
         log "RESTART OK: healthz=$(cat /tmp/tagent_healthz.json) new_pid=${NEW_PID:-?} after ~$((i*2))s"

@@ -446,14 +446,33 @@ func buildAgentDFS(
 			log.Warnf("[tagent] agent %q: invalid task_terminal_ttl %q, using default", name, acfg.TaskTerminalTTL)
 		}
 	}
-	// task_max_detached_age: duration string → time.Duration. Empty falls
-	// back to the task package default (1h); a NEGATIVE value (e.g. "-1s")
-	// explicitly disables the stale-detached wall; invalid strings warn.
-	if acfg.TaskMaxDetachedAge != "" {
-		if wall, err := time.ParseDuration(acfg.TaskMaxDetachedAge); err == nil {
-			agentCfg.TaskMaxDetachedAge = wall // >0 set / <0 disable; NewTaskManager tri-states
+	// task_stale_after: duration string → time.Duration. Empty falls back to
+	// the task package default (1h); NEGATIVE ("-1s") disables observation.
+	if acfg.TaskStaleAfter != "" {
+		if sa, err := time.ParseDuration(acfg.TaskStaleAfter); err == nil {
+			agentCfg.TaskStaleAfter = sa
 		} else {
-			log.Warnf("[tagent] agent %q: invalid task_max_detached_age %q, using default", name, acfg.TaskMaxDetachedAge)
+			log.Warnf("[tagent] agent %q: invalid task_stale_after %q, using default", name, acfg.TaskStaleAfter)
+		}
+	}
+	// task_job_deadline: optional termination policy. Empty → disabled.
+	if acfg.TaskJobDeadline != "" {
+		if jd, err := time.ParseDuration(acfg.TaskJobDeadline); err == nil {
+			agentCfg.TaskJobDeadline = jd
+		} else {
+			log.Warnf("[tagent] agent %q: invalid task_job_deadline %q, ignored", name, acfg.TaskJobDeadline)
+		}
+	}
+	// Deprecated task_max_detached_age: remap to stale_after with a warning
+	// (the old force-fail semantics were redesignated observation-only, 2.5).
+	if acfg.TaskMaxDetachedAge != "" {
+		if sa, err := time.ParseDuration(acfg.TaskMaxDetachedAge); err == nil {
+			if agentCfg.TaskStaleAfter == 0 {
+				agentCfg.TaskStaleAfter = sa
+				log.Warnf("[tagent] agent %q: task_max_detached_age is deprecated — remapped to task_stale_after (observation-only; use task_job_deadline to terminate)", name)
+			}
+		} else {
+			log.Warnf("[tagent] agent %q: invalid task_max_detached_age %q, ignored", name, acfg.TaskMaxDetachedAge)
 		}
 	}
 	if summaryRef := rc.resolveModelRef(acfg.Compress.Summary, name, acfg, cfg); summaryRef != nil {
@@ -620,6 +639,17 @@ func buildAgentDFS(
 				}
 				if actionTool.IsTrackedSession(tk.Spec.Declarative.TaskID) {
 					tm.MarkTaskRunning(tk.ID)
+					// hardening-review-batch2 3.1/3.2（R3 信号链接通）：会话
+					// 存活 ≠ 信号可达——重挂构建的 detector 必须绑定回任务，
+					// 否则 watch/probe 命中永远到不了 TaskManager（settle
+					// 路径断裂）。绑定失败仅告警（任务保持 suspect 交兜底）。
+					if d := actionTool.TakeReattachedDetector(tk.Spec.Declarative.TaskID); d != nil {
+						if berr := tm.BindDetector(tk.ID, d); berr != nil {
+							log.Warnf("[build] bind reattached detector to task %s failed: %v", tk.ID, berr)
+						} else {
+							log.Infof("[build] reattached detector bound: task=%s session=%s", tk.ID, tk.Spec.Declarative.TaskID)
+						}
+					}
 				}
 			}
 		}

@@ -137,10 +137,18 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 // (full-hot-config Phase 1, 2026-09-16): threshold first (budget line =
 // maxTokens × threshold recomputes at the next Compress), then the budget
 // base and keep-recent count. Zero/negative values keep current settings.
+// hardening-review-batch2 5.3（参数同代）：trigger budget 与 maxTokens/keepRecent
+// 一起换装到内层 SmartCompressor——外层触发线与内层压缩目标必须来自同一代；
+// 旧实现只动外层，内层保持冷构造值（缩窗→no-op 压缩，扩窗→过度压缩）。
+// TriggerBudget 取 maxTokens×threshold（与冷构造 agent.go 对齐公式一致）。
 func (cc *ContextCompressor) ApplyHotParams(thresholdPct float64, maxTokens, keepRecent int) {
 	cc.UpdateThreshold(thresholdPct)
 	cc.UpdateMaxTokens(maxTokens)
 	cc.UpdateKeepRecent(keepRecent)
+	// 同代同步内层：triggerBudget = 同一 effective maxTokens × 同一 threshold。
+	if maxTokens > 0 {
+		cc.compressor.ApplyParams(maxTokens, cc.BudgetLine(), keepRecent)
+	}
 }
 
 // BudgetLine exposes the effective compression trigger line

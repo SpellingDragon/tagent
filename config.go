@@ -308,11 +308,18 @@ type AgentConfig struct {
 	// subagent tasks. Empty/invalid → default "2m".
 	TaskTerminalTTL string `json:"task_terminal_ttl,omitempty" yaml:"task_terminal_ttl,omitempty"`
 
-	// TaskMaxDetachedAge is the stale-detached wall as a duration string
-	// (e.g. "1h"): job-kind alive_detached tasks exceeding this age are
-	// retired as failed even when their probe still reports alive
-	// (dead-pipe zombie shape). Empty → default "1h"; negative ("−1s")
-	// disables the wall; generic-kind tasks are exempt.
+	// TaskStaleAfter is the stale-observation threshold as a duration string
+	// (e.g. "1h"): job-kind alive_detached tasks past it are marked stale and
+	// noticed once — observation only, never terminated (2.5). Empty →
+	// default "1h"; negative ("−1s") disables observation.
+	TaskStaleAfter string `json:"task_stale_after,omitempty" yaml:"task_stale_after,omitempty"`
+	// TaskJobDeadline is the OPTIONAL termination policy as a duration
+	// string: job-kind tasks detached past it are cancelled by owner and
+	// finalized failed (2.6). Empty/zero → termination disabled.
+	TaskJobDeadline string `json:"task_job_deadline,omitempty" yaml:"task_job_deadline,omitempty"`
+	// Deprecated: TaskMaxDetachedAge is the pre-2.5 name of task_stale_after
+	// (the "wall" force-fail semantics were redesignated as observation-only).
+	// Kept for one release cycle: values map to TaskStaleAfter with a warning.
 	TaskMaxDetachedAge string `json:"task_max_detached_age,omitempty" yaml:"task_max_detached_age,omitempty"`
 	// ResumeContextRounds caps how many prior rounds the subagent task-chain
 	// restorer injects on resume (default 3).

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // TaskStatus is the lifecycle state of a Task.
@@ -16,6 +17,7 @@ const (
 	TaskRunning       TaskStatus = "running"        // in flight, no settle yet
 	TaskStable        TaskStatus = "stable"         // output stable, process alive (usable, maybe waiting)
 	TaskAliveDetached TaskStatus = "alive_detached" // service-type: settled once, still alive (Phase 2)
+	TaskStale         TaskStatus = "stale"          // hardening-review-batch2 2.5: job detached past stale_after — observed, NOT terminal (probe/reconcile still govern it)
 	TaskCompleted     TaskStatus = "completed"      // finished successfully
 	TaskFailed        TaskStatus = "failed"         // finished with error
 	TaskSuspect       TaskStatus = "suspect"        // quiet too long — likely hung
@@ -46,6 +48,30 @@ const (
 	SettleWatch     SettleKind = "watch"     // output matched a watch pattern (C1); informational, no state change
 	SettleFailed    SettleKind = "failed"    // reconcile-retired: backing session provably gone (zombie sweep)
 )
+
+// Task lifecycle classes (hardening-review-batch2 2.4): jobs are one-round
+// work units subject to stale observation and an optional deadline; services
+// are long-lived by design and are never age-terminated.
+const (
+	LifetimeJob     = "job"
+	LifetimeService = "service"
+)
+
+// LifetimeOf resolves the effective lifecycle class: an explicit declaration
+// wins; otherwise Kind is the proxy (command/subagent behave as jobs — one
+// round then exit; generic/unknown default to service — the conservative
+// class that the stale wall never terminates).
+func LifetimeOf(spec TaskSpec) string {
+	if spec.Lifetime == LifetimeJob || spec.Lifetime == LifetimeService {
+		return spec.Lifetime
+	}
+	switch spec.Kind {
+	case "command", "subagent":
+		return LifetimeJob
+	default:
+		return LifetimeService
+	}
+}
 
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
 type SettleSignal struct {
@@ -114,6 +140,16 @@ type Declarative struct {
 	EventKeys   []int64           `json:"event_keys,omitempty"`
 	Origin      map[string]string `json:"origin,omitempty"`  // routing baggage (courier)
 	TaskID      string            `json:"task_id,omitempty"` // tmux session binding (R3 bridge)
+	// Lifetime declares the job/service lifecycle class (hardening-review-
+	// batch2 2.4): job tasks are subject to the stale-after observation and
+	// an optional job deadline; service tasks are never age-terminated.
+	// Persisted so restores re-derive the same class.
+	Lifetime string `json:"lifetime,omitempty"`
+	// DetachedAtMilli persists the alive-detached transition time so a
+	// restored task keeps its REAL detached age (restore time must never
+	// silently replace it). Carried on the alive-detached settle event's
+	// metadata and replayed by RebuildTaskRegistry.
+	DetachedAtMilli int64 `json:"detached_at_ms,omitempty"`
 	// Params carries the ActionArgs spawn fields (WorkDir/Env/Mode/Name/IsTUI/
 	// Watch/Probe/ProbeIntervalSec/ProbeFailures/QuietTimeout/Timeout — encoded
 	// as strings; session-op fields excluded; conversion lives in tool/action).
@@ -154,6 +190,10 @@ type TaskSpec struct {
 	// interprets it (courier, not router). Nil for tasks with no origin.
 	Origin map[string]string
 
+	// Lifetime declares the job/service class (hardening-review-batch2 2.4).
+	// Empty → inferred from Kind (command/subagent → job, generic → service).
+	Lifetime string
+
 	// Declarative is the serializable projection of this spec for the fact-chain
 	// task_spawned record and cross-restart rebuild (R2). Optional at spawn
 	// time: callers may set only closures (legacy path); when set, Spawn
@@ -177,12 +217,40 @@ type Task struct {
 	firstSettle   chan SettleSignal // cap 1: carries the first settle into the sync-wait window
 	windowClosed  bool              // true once the sync-wait window ended (inline settle OR timeout)
 	aliveDetached bool              // true once a service task's first stable "ready" was emitted (D4)
-	detachedAt    time.Time         // when aliveDetached was set — stale-detached wall anchor
+	detachedAt    time.Time         // when aliveDetached was set — stale/deadline observation anchor
+	staleNoted    bool              // one-time stale observation notice already emitted
 	watchDone     chan struct{}     // closed to retire the current watch goroutine (resume re-arms it)
 }
 
 // Status returns the task's current status (thread-safe snapshot).
 func (t *Task) Status() TaskStatus { t.mu.Lock(); defer t.mu.Unlock(); return t.status }
+
+// DetachedAtMilli returns the alive-detached transition time (0 = never
+// detached). Thread-safe snapshot for fact-chain persistence.
+func (t *Task) DetachedAtMilli() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.detachedAt.IsZero() {
+		return 0
+	}
+	return t.detachedAt.UnixMilli()
+}
+
+// setDetachedAtMilli restores the detached transition time from the fact
+// chain (RebuildTaskRegistry replay). Must NOT be used at runtime — runtime
+// transitions stamp it in emitBackground.
+func (t *Task) setDetachedAtMilli(ms int64) {
+	if ms <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.detachedAt = time.UnixMilli(ms)
+	t.mu.Unlock()
+}
+
+// SetDetachedAtMilli is the exported restore-side hook (agent package owns
+// the replay; runtime transitions must use emitBackground instead).
+func (t *Task) SetDetachedAtMilli(ms int64) { t.setDetachedAtMilli(ms) }
 
 // Result returns the latest captured output (thread-safe snapshot).
 func (t *Task) Result() string { t.mu.Lock(); defer t.mu.Unlock(); return t.result }
@@ -192,7 +260,18 @@ func (t *Task) isActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch t.status {
-	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
+	case TaskRunning, TaskStable, TaskAliveDetached, TaskStale, TaskSuspect:
+		return true
+	default:
+		return false
+	}
+}
+
+// isTerminalStatus reports whether s is an exited state (pruneTerminal
+// reclaims these). Lock-free: callers must already hold t.mu.
+func isTerminalStatus(s TaskStatus) bool {
+	switch s {
+	case TaskCompleted, TaskFailed, TaskCancelled, TaskDead:
 		return true
 	default:
 		return false
@@ -207,7 +286,7 @@ func (t *Task) isTerminalExpired(now time.Time, ttl time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch t.status {
-	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
+	case TaskRunning, TaskStable, TaskAliveDetached, TaskStale, TaskSuspect:
 		return false
 	}
 	if t.settledAt.IsZero() {
@@ -339,15 +418,19 @@ type TaskManagerConfig struct {
 	// nil-probe subagents alike; tracked sessions and probe-carrying tasks
 	// are never touched. Zero -> defaultOrphanGrace.
 	OrphanGrace time.Duration
-	// MaxDetachedAge is the stale-detached wall (2026-09-16 af4aa4c7): a
-	// command/subagent-kind task that has been alive_detached longer than
-	// this is retired as failed by the liveness reconcile even though its
-	// probe still reports alive — a job that should have exited but hangs
-	// forever on a dead stdout pipe keeps probe() true with no reclaim path
-	// otherwise. generic-kind tasks are exempt (long-lived service/display
-	// is by design). Zero -> defaultMaxDetachedAge; negative disables the
-	// wall entirely.
-	MaxDetachedAge time.Duration
+	// StaleAfter is the stale-observation threshold (hardening-review-batch2
+	// 2.5): a JOB-kind task alive_detached longer than this is marked TaskStale
+	// (observed, one-time notice) — it is NOT terminated: age+alive never
+	// prove a hang, and 7080753's force-fail mislabeled healthy services.
+	// Service-kind tasks are never marked. Zero -> defaultStaleAfter; negative
+	// disables observation entirely.
+	StaleAfter time.Duration
+	// JobDeadline is the OPTIONAL termination policy (2.6): a job-kind task
+	// detached longer than this is cancelled by its owner (detector.Cancel)
+	// and finalized failed — the one honest way to retire a suspected
+	// dead-pipe zombie (cancel → confirmed exit → single settlement). Zero
+	// (default) disables termination; negative is treated as zero.
+	JobDeadline time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via
 	// SetSessionTracker (build_agent owns the ActionTool; TaskManager must
@@ -363,11 +446,10 @@ type TaskManagerConfig struct {
 // window for terminal subagent tasks).
 const defaultTerminalTTL = 2 * time.Minute
 
-// defaultMaxDetachedAge bounds the alive_detached stay for job-kind tasks
-// (command/subagent): a job detached this long is presumed a dead-pipe
-// zombie (probe true forever, no exit), not a healthy service. generic-kind
-// tasks are exempt — see TaskManagerConfig.MaxDetachedAge.
-const defaultMaxDetachedAge = time.Hour
+// defaultStaleAfter bounds how long a job-kind detached task stays unnoticed
+// before the stale observation fires (2.5). Observation only — see
+// TaskManagerConfig.StaleAfter / JobDeadline.
+const defaultStaleAfter = time.Hour
 
 type TaskManager struct {
 	mu               sync.Mutex
@@ -382,7 +464,8 @@ type TaskManager struct {
 	now              func() time.Time // injectable clock (tests); defaults to time.Now
 	zombieGrace      time.Duration
 	orphanGrace      time.Duration
-	maxDetachedAge   time.Duration // 0 = wall disabled (configured negative)
+	staleAfter       time.Duration // stale observation threshold; 0 = disabled (configured negative)
+	jobDeadline      time.Duration // optional job termination policy; 0 = disabled
 	isSessionTracked func(sessionID string) bool
 }
 
@@ -399,18 +482,33 @@ func (tm *TaskManager) SetTerminalTTL(d time.Duration) {
 	tm.mu.Unlock()
 }
 
-// SetMaxDetachedAge hot-updates the stale-detached wall (full-hot-config
-// Phase 1). Positive d sets the wall; negative d disables it (0-wall);
+// SetStaleAfter hot-updates the stale-observation threshold (full-hot-config
+// Phase 1). Positive d sets the threshold; negative d disables observation;
 // zero keeps the current value. Same lock protocol as SetTerminalTTL.
-func (tm *TaskManager) SetMaxDetachedAge(d time.Duration) {
+func (tm *TaskManager) SetStaleAfter(d time.Duration) {
 	if tm == nil || d == 0 {
 		return
 	}
 	tm.mu.Lock()
 	if d > 0 {
-		tm.maxDetachedAge = d
+		tm.staleAfter = d
 	} else {
-		tm.maxDetachedAge = 0 // explicit disable
+		tm.staleAfter = 0 // explicit disable
+	}
+	tm.mu.Unlock()
+}
+
+// SetJobDeadline hot-updates the OPTIONAL job termination policy. Positive d
+// enables; zero keeps; negative disables termination entirely.
+func (tm *TaskManager) SetJobDeadline(d time.Duration) {
+	if tm == nil || d == 0 {
+		return
+	}
+	tm.mu.Lock()
+	if d > 0 {
+		tm.jobDeadline = d
+	} else {
+		tm.jobDeadline = 0 // explicit disable
 	}
 	tm.mu.Unlock()
 }
@@ -428,14 +526,18 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if og <= 0 {
 		og = defaultOrphanGrace
 	}
-	// MaxDetachedAge tri-state: 0 → default wall, negative → disabled,
-	// positive → explicit value.
-	md := cfg.MaxDetachedAge
+	// StaleAfter tri-state: 0 → default threshold, negative → disabled,
+	// positive → explicit value. JobDeadline: non-positive → disabled.
+	sa := cfg.StaleAfter
 	switch {
-	case md == 0:
-		md = defaultMaxDetachedAge
-	case md < 0:
-		md = 0
+	case sa == 0:
+		sa = defaultStaleAfter
+	case sa < 0:
+		sa = 0
+	}
+	jd := cfg.JobDeadline
+	if jd < 0 {
+		jd = 0
 	}
 	return &TaskManager{
 		tasks:            make(map[string]*Task),
@@ -448,7 +550,8 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		terminalTTL:      ttl,
 		zombieGrace:      zg,
 		orphanGrace:      og,
-		maxDetachedAge:   md,
+		staleAfter:       sa,
+		jobDeadline:      jd,
 		isSessionTracked: cfg.SessionTracker,
 		now:              time.Now,
 	}
@@ -561,6 +664,17 @@ func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan st
 			if !ok {
 				return
 			}
+			// hardening-review-batch2 1.7（fencing）：信号到达时任务已终态 →
+			// 丢弃整条信号（不得改状态/通知）。注意 fence 只能放信号入口——
+			// applyStatus→emitBackground 是同一信号的流水两段，emitBackground
+			// 入口不得拦截（否则合法完成通知被杀）。
+			task.mu.Lock()
+			terminal := isTerminalStatus(task.status)
+			task.mu.Unlock()
+			if terminal {
+				log.Warnf("[task] drop post-terminal signal: task=%s status=%s late_kind=%s", task.ID, task.status, sig.Kind)
+				continue
+			}
 			tm.applyStatus(task, sig)
 
 			task.mu.Lock()
@@ -613,6 +727,10 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 //   - completion/failure (process death) always emits and ends the task.
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
+	// 注：fencing 在 watch 循环信号入口——本函数与 applyStatus 是同一信号的
+	// 两段流水，入口拦截会误杀合法完成通知（TestAliveDetached_CompletionEnds
+	// AndNotifies 回归教训）。closeWindow drain 路径的信号产生于非终态时刻，
+	// 同样不受 fence。
 	switch sig.Kind {
 	case SettleWatch:
 		// Watch hits are pure notifications: never change lifecycle state,
@@ -644,12 +762,20 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 }
 
 // applyStatus maps a settle kind to the task's status and records the result.
+// (Fencing lives at the watch-loop signal entry — applyStatus/emitBackground
+// are two stages of the SAME signal and must not gate each other; this
+// function's terminal check is a secondary guard for non-watch callers.)
 func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	task.mu.Lock()
 	defer task.mu.Unlock()
+	// hardening-review-batch2 1.7（fencing）：终态后迟到的 detector 信号一律
+	// 丢弃——finalize 是唯一终态写入点，此处不得复活或重复结算。
+	if isTerminalStatus(task.status) {
+		return
+	}
 	task.result = sig.Output
 	task.err = sig.Err
-	task.settledAt = time.Now()
+	task.settledAt = tm.now()
 	switch sig.Kind {
 	case SettleWatch:
 		// Informational: keep lifecycle status as-is.
@@ -677,6 +803,37 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 // goroutine（进程内探测器不可恢复：running 语义降级为 suspect 交 R3 存活探测
 // 裁决；alive-detached 原态恢复并置 aliveDetached 使 reconcileDetached 探针
 // 路径可用）。spec 的闭包由调用方经工厂重建（承诺表）；未重建则仅展示。
+// BindDetector wires a detector to an EXISTING (typically restored) task and
+// starts the standard watch consumption — the R3 reattach bridge (hardening-
+// review-batch2 3.1). Restored tasks have no in-process detector; without
+// this binding their watch/probe signals never reach the manager and a
+// "tracked session" silently loses its settle path. A finalized task refuses
+// the bind (fencing). The task's watchDone retires the consumption on resume
+// re-arm, same as Spawn.
+func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
+	if tm == nil || id == "" {
+		return fmt.Errorf("BindDetector: empty id")
+	}
+	tm.mu.Lock()
+	t, ok := tm.tasks[id]
+	tm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("BindDetector: task %s not found", id)
+	}
+	t.mu.Lock()
+	if isTerminalStatus(t.status) {
+		t.mu.Unlock()
+		return fmt.Errorf("BindDetector: task %s already finalized (%s)", id, t.status)
+	}
+	t.detector = d
+	done := t.watchDone
+	t.mu.Unlock()
+	if d != nil {
+		go tm.watch(t, d, done)
+	}
+	return nil
+}
+
 func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task {
 	if tm == nil || id == "" {
 		return nil
@@ -771,21 +928,15 @@ func (tm *TaskManager) reconcileDetached() {
 		probe := t.Spec.Alive
 		t.mu.Unlock()
 		if probe() {
-			tm.enforceDetachedWall(t)
-			continue // backing session still alive - nothing to do
+			tm.markStaleDetached(t)
+			tm.enforceJobDeadline(t)
+			continue // backing session still alive - nothing more to do
 		}
 		out := "(backing session gone - auto-retired by liveness reconcile)"
 		t.mu.Lock()
 		if t.status == TaskAliveDetached {
-			t.status = TaskCompleted
-			t.result = out
-			if t.settledAt.IsZero() {
-				t.settledAt = tm.now()
-			}
 			t.mu.Unlock()
-			if tm.onSettle != nil {
-				tm.onSettle(t, SettleSignal{Kind: SettleCompleted, Output: out})
-			}
+			tm.finalize(t, SettleCompleted, out, nil)
 		} else {
 			t.mu.Unlock()
 		}
@@ -800,39 +951,121 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 	tm.isSessionTracked = fn
 }
 
-// enforceDetachedWall retires a job-kind alive_detached task whose detached
-// stay has exceeded the wall, even though its probe still reports alive —
-// the dead-pipe zombie shape (2026-09-16 af4aa4c7): a job that should have
-// exited hangs forever writing to an orphaned stdout pipe, probe true with
-// no reclaim path. generic-kind tasks are exempt (long-lived service/display
-// is by design); a zero wall (configured negative) disables the check.
+// finalize is the SINGLE terminal-transition entry point (hardening-review-
+// batch2 1.5): it stamps status/result/settledAt from one kind+err pair so the
+// in-memory state, the SettleSignal kind, the WAL settle_status (mapper), and
+// the feedback polarity cannot diverge — the 7080753 wall stamped TaskFailed
+// in memory but signalled SettleCompleted, and the mapper's default branch
+// recorded orphan/zombie SettleFailed as completed. Called with t.mu NOT held
+// (takes it briefly); onSettle fires outside the lock, same as all emitters.
+// Only reconcile-class terminals route through here; the sync-wait window's
+// normal settle path (applyStatus) is unchanged.
+func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err error) {
+	t.mu.Lock()
+	// TOCTOU guard: candidates were collected outside the lock; another
+	// reconciler may have finalized first. First terminal wins. Terminality
+	// is judged by STATUS (not settledAt): resume legally restarts from
+	// completed/failed and leaves the old settledAt in place.
+	if isTerminalStatus(t.status) {
+		t.mu.Unlock()
+		return
+	}
+	t.result = output
+	t.err = err
+	t.settledAt = tm.now() // verdict time (aligns with applyStatus)
+	switch {
+	case kind == SettleFailed || err != nil:
+		t.status = TaskFailed
+	case kind == SettleCompleted:
+		t.status = TaskCompleted
+	default:
+		// Reconcile retirement is always terminal failed/completed; anything
+		// else is a caller bug — fail closed rather than guessing.
+		t.status = TaskFailed
+		kind = SettleFailed
+		if err == nil {
+			err = fmt.Errorf("finalize: non-terminal reconcile kind %q coerced to failed", kind)
+		}
+	}
+	t.mu.Unlock()
+	if tm.onSettle != nil {
+		tm.onSettle(t, SettleSignal{Kind: kind, Output: output, Err: err})
+	}
+}
+
+// markStaleDetached observes a job-kind alive_detached task whose detached
+// stay exceeded StaleAfter: it flips the task to TaskStale (one-time notice)
+// WITHOUT touching the process — age plus a live probe never prove a hang,
+// and 7080753's force-fail mislabeled healthy services as failed.
+// enforceJobDeadline (below) is the only age-based termination, and only
+// when the host explicitly configures one.
 // Called from reconcileDetached's probe-alive branch — tm.mu is NOT held
 // here (probe may shell out); tm state is snapshotted before taking t.mu to
 // keep the tm.mu→t.mu lock order.
-func (tm *TaskManager) enforceDetachedWall(t *Task) {
+func (tm *TaskManager) markStaleDetached(t *Task) {
 	tm.mu.Lock()
-	wall, now := tm.maxDetachedAge, tm.now()
+	staleAfter, now := tm.staleAfter, tm.now()
 	tm.mu.Unlock()
-	if wall <= 0 {
+	if staleAfter <= 0 {
 		return
 	}
 	t.mu.Lock()
-	if t.status != TaskAliveDetached || t.detachedAt.IsZero() || t.Spec.Kind == "generic" {
+	if (t.status != TaskAliveDetached && t.status != TaskStale) || t.detachedAt.IsZero() {
 		t.mu.Unlock()
 		return
 	}
-	if now.Sub(t.detachedAt) < wall {
+	if LifetimeOf(t.Spec) != LifetimeJob {
+		t.mu.Unlock()
+		return // service/display: long stay is by design — never staled
+	}
+	if now.Sub(t.detachedAt) < staleAfter || t.staleNoted {
 		t.mu.Unlock()
 		return
 	}
-	out := "(stale-detached: job-kind task detached beyond the wall - auto-retired; likely dead-pipe zombie)"
-	t.status = TaskFailed
-	t.result = out
-	t.settledAt = now
+	t.staleNoted = true
+	t.status = TaskStale
+	note := "(stale-detached: job-kind task detached past the observation threshold — suspected dead-pipe zombie; configure task_job_deadline to terminate)"
 	t.mu.Unlock()
+	log.Warnf("[task] stale-detached observation: task=%s note=%s", t.ID, note)
 	if tm.onSettle != nil {
-		tm.onSettle(t, SettleSignal{Kind: SettleCompleted, Output: out})
+		// One-time notice (Watch = non-terminal notification semantics).
+		tm.onSettle(t, SettleSignal{Kind: SettleWatch, Output: note})
 	}
+}
+
+// enforceJobDeadline is the explicit termination policy (2.6): a job-kind
+// task detached past JobDeadline is cancelled by its owner (detector.Cancel
+// — which kills the backing session) and finalized failed ONCE. Service-kind
+// tasks are never age-terminated. A disabled policy (<=0) is a no-op.
+func (tm *TaskManager) enforceJobDeadline(t *Task) {
+	tm.mu.Lock()
+	deadline, now := tm.jobDeadline, tm.now()
+	tm.mu.Unlock()
+	if deadline <= 0 {
+		return
+	}
+	t.mu.Lock()
+	if (t.status != TaskAliveDetached && t.status != TaskStale) || t.detachedAt.IsZero() {
+		t.mu.Unlock()
+		return
+	}
+	if LifetimeOf(t.Spec) != LifetimeJob {
+		t.mu.Unlock()
+		return
+	}
+	if now.Sub(t.detachedAt) < deadline {
+		t.mu.Unlock()
+		return
+	}
+	detector := t.detector
+	t.mu.Unlock()
+	// Owner terminates the backing work OUTSIDE any lock (Cancel kills the
+	// tmux session / goroutine), then a single failed settlement.
+	if detector != nil {
+		detector.Cancel()
+	}
+	out := "(job-deadline-exceeded: job-kind task detached past the configured deadline - cancelled by owner and retired)"
+	tm.finalize(t, SettleFailed, out, nil)
 }
 
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
@@ -882,16 +1115,9 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 			continue
 		}
 		out := "(reincarnation orphan: nil-probe suspect untracked beyond grace - retired by orphan adjudication)"
-		t.status = TaskFailed
-		t.result = out
-		if t.settledAt.IsZero() {
-			t.settledAt = now
-		}
 		t.mu.Unlock()
 		retired++
-		if tm.onSettle != nil {
-			tm.onSettle(t, SettleSignal{Kind: SettleFailed, Output: out})
-		}
+		tm.finalize(t, SettleFailed, out, nil)
 	}
 	return retired
 }
@@ -940,15 +1166,8 @@ func (tm *TaskManager) reconcileZombies() {
 		t.mu.Lock()
 		st = t.status
 		if st == TaskRunning || st == TaskSuspect {
-			t.status = TaskFailed
-			t.result = out
-			if t.settledAt.IsZero() {
-				t.settledAt = tm.now()
-			}
 			t.mu.Unlock()
-			if tm.onSettle != nil {
-				tm.onSettle(t, SettleSignal{Kind: SettleFailed, Output: out})
-			}
+			tm.finalize(t, SettleFailed, out, nil)
 		} else {
 			t.mu.Unlock()
 		}

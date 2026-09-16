@@ -257,3 +257,44 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	require.NoError(t, r.Close())
 }
+
+// hardening-review-batch2 6.4：完整项目配置形态（entry/agents/providers 与
+// mcp_servers 共存）热同步——严格解码只作用于 mcp_servers 子树，合法根字段
+// 不再被判 unknown 而静默保留旧表。
+func TestRegistry_HotSync_FullProjectConfigShape(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tagent.yaml")
+	base := time.Now().Add(-time.Hour)
+
+	writeConfig(t, cfgPath, `entry: tagent
+providers:
+  zhipu:
+    api_key: sk-x
+agents:
+  tagent:
+    model: glm-5.3-flash
+mcp_servers:
+  alpha:
+    transport: streamable-http
+    url: https://example.com/alpha
+`, base)
+
+	r := NewRegistry(WithConfigPath(cfgPath))
+	assert.Equal(t, []string{"alpha"}, r.Names(), "full-shape config must hot-sync (root fields not 'unknown')")
+
+	// 热更：改 alpha URL。
+	writeConfig(t, cfgPath, `entry: tagent
+providers:
+  zhipu:
+    api_key: sk-x
+agents:
+  tagent:
+    model: glm-5.3-flash
+mcp_servers:
+  alpha:
+    transport: streamable-http
+    url: https://example.com/alpha-v2
+`, base.Add(2*time.Second))
+	_, ok := r.Get("alpha")
+	require.True(t, ok)
+}

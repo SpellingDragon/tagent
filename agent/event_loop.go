@@ -224,6 +224,7 @@ func extractTriggerSource(events []*AgentEvent) string {
 	// 4. Default "user".
 	firstLineage := ""
 	firstMechanical := ""
+	taskWithoutLineage := false
 	for _, evt := range events {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput {
 			continue
@@ -239,6 +240,12 @@ func extractTriggerSource(events []*AgentEvent) string {
 		if firstMechanical == "" && evt.Source != "" {
 			firstMechanical = evt.Source
 		}
+		// hardening-review-batch2 1.3：源头标记的「无世系 task 结算」——机械
+		// 兜底 "task" 不可信（宿主白名单会放投）。降级为 task-unstamped，
+		// 宿主 fail-closed 扣留；既有 bare-task 语义（无标记）不变。
+		if evt.Source == SourceTask && evt.Metadata["lineage_absent"] == "true" {
+			taskWithoutLineage = true
+		}
 	}
 	if firstLineage == "user" {
 		return "user"
@@ -247,7 +254,13 @@ func extractTriggerSource(events []*AgentEvent) string {
 		return firstLineage
 	}
 	if firstMechanical != "" {
+		if firstMechanical == SourceTask && taskWithoutLineage {
+			return "task-unstamped"
+		}
 		return firstMechanical
+	}
+	if taskWithoutLineage {
+		return "task-unstamped"
 	}
 	return "user"
 }
