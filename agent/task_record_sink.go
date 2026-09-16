@@ -146,6 +146,9 @@ func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
 	if p.TaskTerminalTTL > 0 && ta.taskManager != nil {
 		ta.taskManager.SetTerminalTTL(p.TaskTerminalTTL)
 	}
+	if p.TaskMaxDetachedAge != 0 && ta.taskManager != nil {
+		ta.taskManager.SetMaxDetachedAge(p.TaskMaxDetachedAge)
+	}
 }
 
 // Ready returns a channel that closes when the cold-start rebuild sequence

@@ -307,6 +307,13 @@ type AgentConfig struct {
 	// (e.g. "2m", "30m"). It bounds the resume_task window for terminal
 	// subagent tasks. Empty/invalid → default "2m".
 	TaskTerminalTTL string `json:"task_terminal_ttl,omitempty" yaml:"task_terminal_ttl,omitempty"`
+
+	// TaskMaxDetachedAge is the stale-detached wall as a duration string
+	// (e.g. "1h"): job-kind alive_detached tasks exceeding this age are
+	// retired as failed even when their probe still reports alive
+	// (dead-pipe zombie shape). Empty → default "1h"; negative ("−1s")
+	// disables the wall; generic-kind tasks are exempt.
+	TaskMaxDetachedAge string `json:"task_max_detached_age,omitempty" yaml:"task_max_detached_age,omitempty"`
 	// ResumeContextRounds caps how many prior rounds the subagent task-chain
 	// restorer injects on resume (default 3).
 	ResumeContextRounds int            `json:"resume_context_rounds,omitempty" yaml:"resume_context_rounds,omitempty"`

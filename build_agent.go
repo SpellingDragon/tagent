@@ -446,6 +446,16 @@ func buildAgentDFS(
 			log.Warnf("[tagent] agent %q: invalid task_terminal_ttl %q, using default", name, acfg.TaskTerminalTTL)
 		}
 	}
+	// task_max_detached_age: duration string → time.Duration. Empty falls
+	// back to the task package default (1h); a NEGATIVE value (e.g. "-1s")
+	// explicitly disables the stale-detached wall; invalid strings warn.
+	if acfg.TaskMaxDetachedAge != "" {
+		if wall, err := time.ParseDuration(acfg.TaskMaxDetachedAge); err == nil {
+			agentCfg.TaskMaxDetachedAge = wall // >0 set / <0 disable; NewTaskManager tri-states
+		} else {
+			log.Warnf("[tagent] agent %q: invalid task_max_detached_age %q, using default", name, acfg.TaskMaxDetachedAge)
+		}
+	}
 	if summaryRef := rc.resolveModelRef(acfg.Compress.Summary, name, acfg, cfg); summaryRef != nil {
 		agentCfg.SummaryModel = summaryRef.model
 		if summaryRef.effort != nil {

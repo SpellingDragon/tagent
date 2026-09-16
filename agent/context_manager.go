@@ -129,10 +129,11 @@ type ContextManager struct {
 // (memStore/bus/projection/runner) is NOT in this bundle — that follows the
 // shell-rebuild path.
 type OrgHotParams struct {
-	ThresholdPct    float64
-	MaxTokens       int
-	KeepRecentTasks int
-	TaskTerminalTTL time.Duration
+	ThresholdPct       float64
+	MaxTokens          int
+	KeepRecentTasks    int
+	TaskTerminalTTL    time.Duration
+	TaskMaxDetachedAge time.Duration // >0 set wall / <0 disable / 0 keep
 }
 
 // ApplyOrgParams hot-swaps the org-layer numeric parameters that can be

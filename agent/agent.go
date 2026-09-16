@@ -176,6 +176,13 @@ type TagentConfig struct {
 	// falls back to the task package default (2m).
 	TaskTerminalTTL time.Duration
 
+	// TaskMaxDetachedAge is the stale-detached wall: job-kind (command/
+	// subagent) alive_detached tasks exceeding this age are retired as
+	// failed even when their probe still reports alive (dead-pipe zombie
+	// shape, af4aa4c7). Zero → task package default (1h); negative disables
+	// the wall. generic-kind tasks are exempt.
+	TaskMaxDetachedAge time.Duration
+
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
 	ThinkingEnabled      *bool
 	ThinkingTokens       *int
@@ -374,6 +381,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,
+		// Zero → task package default (1h); negative disables. Job-kind
+		// stale-detached wall, wired from YAML task_max_detached_age.
+		MaxDetachedAge: cfg.TaskMaxDetachedAge,
 		// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
 		// 进行中任务的 settle/轮询不受影响）。默认关（DiskBlockSpawn=false 或
 		// Degradation 未接线 → gate 为 nil）。

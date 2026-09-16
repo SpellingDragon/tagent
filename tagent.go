@@ -390,9 +390,12 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					if ttl, perr := time.ParseDuration(ac.TaskTerminalTTL); perr == nil && ttl > 0 {
 						p.TaskTerminalTTL = ttl
 					}
+					if wall, werr := time.ParseDuration(ac.TaskMaxDetachedAge); werr == nil && ac.TaskMaxDetachedAge != "" {
+						p.TaskMaxDetachedAge = wall // >0 set / <0 disable; 0 (unparsed empty) keeps
+					}
 					entryAgent.ApplyOrgHotParams(p)
-					log.Infof("[org-hotreload] hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s",
-						p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL)
+					log.Infof("[org-hotreload] hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s maxDetachedAge=%s",
+						p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskMaxDetachedAge)
 				}
 				return
 			}

@@ -177,6 +177,7 @@ type Task struct {
 	firstSettle   chan SettleSignal // cap 1: carries the first settle into the sync-wait window
 	windowClosed  bool              // true once the sync-wait window ended (inline settle OR timeout)
 	aliveDetached bool              // true once a service task's first stable "ready" was emitted (D4)
+	detachedAt    time.Time         // when aliveDetached was set — stale-detached wall anchor
 	watchDone     chan struct{}     // closed to retire the current watch goroutine (resume re-arms it)
 }
 
@@ -338,6 +339,15 @@ type TaskManagerConfig struct {
 	// nil-probe subagents alike; tracked sessions and probe-carrying tasks
 	// are never touched. Zero -> defaultOrphanGrace.
 	OrphanGrace time.Duration
+	// MaxDetachedAge is the stale-detached wall (2026-09-16 af4aa4c7): a
+	// command/subagent-kind task that has been alive_detached longer than
+	// this is retired as failed by the liveness reconcile even though its
+	// probe still reports alive — a job that should have exited but hangs
+	// forever on a dead stdout pipe keeps probe() true with no reclaim path
+	// otherwise. generic-kind tasks are exempt (long-lived service/display
+	// is by design). Zero -> defaultMaxDetachedAge; negative disables the
+	// wall entirely.
+	MaxDetachedAge time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via
 	// SetSessionTracker (build_agent owns the ActionTool; TaskManager must
@@ -353,6 +363,12 @@ type TaskManagerConfig struct {
 // window for terminal subagent tasks).
 const defaultTerminalTTL = 2 * time.Minute
 
+// defaultMaxDetachedAge bounds the alive_detached stay for job-kind tasks
+// (command/subagent): a job detached this long is presumed a dead-pipe
+// zombie (probe true forever, no exit), not a healthy service. generic-kind
+// tasks are exempt — see TaskManagerConfig.MaxDetachedAge.
+const defaultMaxDetachedAge = time.Hour
+
 type TaskManager struct {
 	mu               sync.Mutex
 	tasks            map[string]*Task // id → task
@@ -366,6 +382,7 @@ type TaskManager struct {
 	now              func() time.Time // injectable clock (tests); defaults to time.Now
 	zombieGrace      time.Duration
 	orphanGrace      time.Duration
+	maxDetachedAge   time.Duration // 0 = wall disabled (configured negative)
 	isSessionTracked func(sessionID string) bool
 }
 
@@ -382,6 +399,22 @@ func (tm *TaskManager) SetTerminalTTL(d time.Duration) {
 	tm.mu.Unlock()
 }
 
+// SetMaxDetachedAge hot-updates the stale-detached wall (full-hot-config
+// Phase 1). Positive d sets the wall; negative d disables it (0-wall);
+// zero keeps the current value. Same lock protocol as SetTerminalTTL.
+func (tm *TaskManager) SetMaxDetachedAge(d time.Duration) {
+	if tm == nil || d == 0 {
+		return
+	}
+	tm.mu.Lock()
+	if d > 0 {
+		tm.maxDetachedAge = d
+	} else {
+		tm.maxDetachedAge = 0 // explicit disable
+	}
+	tm.mu.Unlock()
+}
+
 func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	ttl := cfg.TerminalTTL
 	if ttl <= 0 {
@@ -395,6 +428,15 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if og <= 0 {
 		og = defaultOrphanGrace
 	}
+	// MaxDetachedAge tri-state: 0 → default wall, negative → disabled,
+	// positive → explicit value.
+	md := cfg.MaxDetachedAge
+	switch {
+	case md == 0:
+		md = defaultMaxDetachedAge
+	case md < 0:
+		md = 0
+	}
 	return &TaskManager{
 		tasks:            make(map[string]*Task),
 		byKey:            make(map[string]string),
@@ -406,6 +448,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		terminalTTL:      ttl,
 		zombieGrace:      zg,
 		orphanGrace:      og,
+		maxDetachedAge:   md,
 		isSessionTracked: cfg.SessionTracker,
 		now:              time.Now,
 	}
@@ -586,6 +629,7 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		}
 		task.aliveDetached = true
 		task.status = TaskAliveDetached
+		task.detachedAt = tm.now()
 	case SettleSuspect:
 		if task.aliveDetached {
 			task.mu.Unlock()
@@ -727,6 +771,7 @@ func (tm *TaskManager) reconcileDetached() {
 		probe := t.Spec.Alive
 		t.mu.Unlock()
 		if probe() {
+			tm.enforceDetachedWall(t)
 			continue // backing session still alive - nothing to do
 		}
 		out := "(backing session gone - auto-retired by liveness reconcile)"
@@ -753,6 +798,41 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.isSessionTracked = fn
+}
+
+// enforceDetachedWall retires a job-kind alive_detached task whose detached
+// stay has exceeded the wall, even though its probe still reports alive —
+// the dead-pipe zombie shape (2026-09-16 af4aa4c7): a job that should have
+// exited hangs forever writing to an orphaned stdout pipe, probe true with
+// no reclaim path. generic-kind tasks are exempt (long-lived service/display
+// is by design); a zero wall (configured negative) disables the check.
+// Called from reconcileDetached's probe-alive branch — tm.mu is NOT held
+// here (probe may shell out); tm state is snapshotted before taking t.mu to
+// keep the tm.mu→t.mu lock order.
+func (tm *TaskManager) enforceDetachedWall(t *Task) {
+	tm.mu.Lock()
+	wall, now := tm.maxDetachedAge, tm.now()
+	tm.mu.Unlock()
+	if wall <= 0 {
+		return
+	}
+	t.mu.Lock()
+	if t.status != TaskAliveDetached || t.detachedAt.IsZero() || t.Spec.Kind == "generic" {
+		t.mu.Unlock()
+		return
+	}
+	if now.Sub(t.detachedAt) < wall {
+		t.mu.Unlock()
+		return
+	}
+	out := "(stale-detached: job-kind task detached beyond the wall - auto-retired; likely dead-pipe zombie)"
+	t.status = TaskFailed
+	t.result = out
+	t.settledAt = now
+	t.mu.Unlock()
+	if tm.onSettle != nil {
+		tm.onSettle(t, SettleSignal{Kind: SettleCompleted, Output: out})
+	}
 }
 
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
