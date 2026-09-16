@@ -22,6 +22,8 @@ graph TD
     OutCh -.->|isFinalResponse| Bus
 ```
 
+> **task_settled 结构化语义（hardening-review-batch2）**：`settle_status` 五值 `completed/failed/alive-detached/suspect|watch/unknown`——failed 显式携带（`SettleFailed` 或 Err），**未知 Kind 映射 unknown 并告警**，不再默认 completed；反馈按 status 极性落库。Origin 缺失的任务结算打 `lineage_absent` 标记，回收 turn 降级 `task-unstamped`（宿主 fail-closed 扣留）；控制键（settle_status/task_id/lineage_absent/detached_at_ms）不进 Origin baggage。
+
 > **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link，跨 turn 闭环（见 [platform 篇](../platform/platform-subsystems.md)）。详见 `agent-architecture.md` §2.10 任务层。
 
 ### 冷启动重建序（R1→R2→R3）
