@@ -110,7 +110,7 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	//    (fresh-eyes A/B): no StartTime approximation (dual-time divergence),
 	//    no Timestamp-order replay (runtime append order ≡ EventKey write
 	//    order; stragglers invert), no silent truncation (paginated).
-	tail := cm.fetchTailEvents(snapKey)
+	tail, tailStats := cm.fetchTailEvents(snapKey)
 	for _, ev := range tail {
 		// Compaction/legacy-snapshot events are fact-chain records, never
 		// projection refs (double-representation guard, same as the replay
@@ -125,8 +125,10 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 
 	log.Infof("[rebuild-projection] rebuilt from compaction key=%d: snapshot refs=%d tail=%d boundary=%d lostKeys=%d took=%v",
 		snapKey, len(final), len(tail), payload.FullBoundary, lostKeys, time.Since(rebuildStart))
-	if lostKeys > 0 {
-		log.Errorf("[rebuild-projection] LOST %d retained key(s) — projection has holes; trajectory prefix-match will show gaps at these slots", lostKeys)
+	if lostKeys > 0 || tailStats.anyFailure() {
+		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (lostKeys=%d pagesFailed=%d batchErrors=%d — projection has holes; trajectory prefix-match will show gaps at these slots)", lostKeys, tailStats.pagesFailed, tailStats.batchErrors)
+	} else {
+		log.Infof("[rebuild-projection] VERDICT: FULL (snapshot+tail replay complete)")
 	}
 }
 
@@ -170,7 +172,7 @@ func (cm *ContextManager) appendProjectionRef(ev memory.FullEvent) {
 // consistent "everything older is history" truncation marker. The mode is
 // logged distinctly (fallback vs snapshot) for observability.
 func (cm *ContextManager) rebuildProjectionFallback() {
-	all := cm.fetchTailEvents(0)
+	all, fallbackStats := cm.fetchTailEvents(0)
 	if len(all) == 0 {
 		log.Infof("[rebuild-projection] fallback: fact chain empty, projection stays empty (mode=fallback)")
 		return
@@ -196,8 +198,8 @@ func (cm *ContextManager) rebuildProjectionFallback() {
 	// hardening-review-batch2 7.1（partial 显式化）：截断必须可被调用方/日志
 	// 辨识——VERDICT 行统一两模式的完整性结论（snapshot 模式的对应结论在
 	// 主路径汇总行的 lostKeys 字段）。
-	if truncated {
-		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated to %d of %d events; no compaction anchor — run a compaction to bound future chains)", fallbackCap, total)
+	if truncated || fallbackStats.anyFailure() {
+		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated=%v to %d of %d events, fetchFailures=%v; no compaction anchor — run a compaction to bound future chains)", truncated, fallbackCap, total, fallbackStats.anyFailure())
 	} else {
 		log.Infof("[rebuild-projection] VERDICT: FULL (fallback replay complete)")
 	}
@@ -214,8 +216,19 @@ func (cm *ContextManager) rebuildProjectionFallback() {
 // ref.EventType exclusively (renderTimelineMessage), so the rendered
 // prefix is byte-identical; only the ref field differs (debug logs).
 // Documented here rather than silently diverging.
-func (cm *ContextManager) fetchTailEvents(afterKey int64) []memory.FullEvent {
+// tailFetchStats carries the hardening-review-batch2 7.2 observability
+// counters: a partial (page/batch failure) fetch must be visible to the
+// caller so the rebuild verdict is PARTIAL, never silently short.
+type tailFetchStats struct {
+	pagesFailed int
+	batchErrors int
+}
+
+func (s tailFetchStats) anyFailure() bool { return s.pagesFailed > 0 || s.batchErrors > 0 }
+
+func (cm *ContextManager) fetchTailEvents(afterKey int64) ([]memory.FullEvent, tailFetchStats) {
 	var refs []memory.EventReference
+	var stats tailFetchStats
 	for off := 0; ; off += tailPageSize {
 		batch, err := cm.memStore.QueryEvents(memory.QueryOptions{
 			PartitionIDs: []int{cm.partitionID},
@@ -224,6 +237,7 @@ func (cm *ContextManager) fetchTailEvents(afterKey int64) []memory.FullEvent {
 			Offset:       off,
 		})
 		if err != nil {
+			stats.pagesFailed++
 			log.Errorf("[rebuild-projection] tail page offset=%d failed: %v", off, err)
 			break
 		}
@@ -233,7 +247,7 @@ func (cm *ContextManager) fetchTailEvents(afterKey int64) []memory.FullEvent {
 		}
 	}
 	if len(refs) == 0 {
-		return nil
+		return nil, stats
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].EventKey < refs[j].EventKey })
 	keys := make([]int64, 0, len(refs))
@@ -242,8 +256,9 @@ func (cm *ContextManager) fetchTailEvents(afterKey int64) []memory.FullEvent {
 	}
 	evs, err := cm.memStore.GetEvents(keys)
 	if err != nil {
+		stats.batchErrors++
 		log.Errorf("[rebuild-projection] tail batch GetEvents failed: %v", err)
-		return nil
+		return nil, stats
 	}
-	return evs
+	return evs, stats
 }
