@@ -1,7 +1,8 @@
-# ops-deployment-integrity Delta
+# ops-deployment-integrity Specification
 
-## ADDED Requirements
-
+## Purpose
+TBD - created by archiving change hardening-review-batch2. Update Purpose after archive.
+## Requirements
 ### Requirement: 运维探针认证集成
 restart / maintenance 健康探针与 mail poller MUST 从受控凭证源（环境变量或 rl 配置文件）读取认证 token 并随请求发送；`/healthz` 保持鉴权不豁免。探针 MUST 区分响应类别：401 → AUTH_FAIL（告警、不触发杀进程）、连接拒绝 → 等待窗口内正常状态、200 → 健康判定继续。
 
@@ -26,3 +27,4 @@ wechat-bot 的 HTTP API server MUST 由宿主代码持有（http.Server）：重
 #### Scenario: 进程退出
 - **WHEN** 进程收到 SIGTERM 且 HTTP 正在重试等待
 - **THEN** 重试循环 MUST 立即取消并走 Shutdown，进程 MUST NOT 因 HTTP goroutine 阻塞退出
+

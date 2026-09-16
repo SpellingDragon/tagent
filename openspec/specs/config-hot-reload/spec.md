@@ -1,7 +1,8 @@
-# config-hot-reload Delta
+# config-hot-reload Specification
 
-## ADDED Requirements
-
+## Purpose
+TBD - created by archiving change hardening-review-batch2. Update Purpose after archive.
+## Requirements
 ### Requirement: 配置热更统一应用模型
 配置热更 MUST 以「每次加载形成逐 agent 完整有效配置」为单位统一应用：数值参数集（compress_threshold / max_tokens / keep_recent_tasks / task_terminal_ttl / task_stale_after / task_job_deadline）与结构参数集（指纹覆盖字段）MUST 在同一次加载中非互斥地全部应用——结构重建不得跳过数值应用，数值应用不得仅覆盖 entry agent。
 
@@ -40,3 +41,4 @@
 #### Scenario: 首次热更后立即回滚
 - **WHEN** 进程启动后的第一次结构热更成功，随后调用 Rollback
 - **THEN** 回滚 MUST 恢复到启动代配置并再次可用，不得报「无上一代快照」
+

@@ -3,9 +3,7 @@
 ## Purpose
 
 本规范定义 mcp-server-registry 能力:MCP server 的声明式注册与运行时生命周期管理。tagent SHALL 维护一个进程级 `MCPRegistry`(name → ToolSet 表),由顶层 YAML `mcp_servers` 声明填充,支持运行时增删与配置文件 mtime 惰性热同步。注册表变更 MUST NOT 改变任何 agent 的工具声明集合(prompt 前缀缓存稳定性不变量,mcp-discovery-execution-loop D1)。
-
 ## Requirements
-
 ### Requirement: 声明式 MCP server 配置
 `Config` SHALL 支持顶层 `mcp_servers` 映射(name → MCPServerConfig),字段包含 `transport`、`url`、`headers`、`api_key_env`、`command`、`args`、`timeout`。配置校验 SHALL 在 transport 归一化后执行:`sse`/`streamable` 必填 `url`,`stdio` 必填 `command`,非法 transport 报错。
 
@@ -51,19 +49,11 @@
 - **THEN** 对应 toolset 的 `Close()` 被调用且 `Get(name)` 返回不存在
 
 ### Requirement: 配置文件热同步
-注册表 SHALL 在 `Get/List/Names` 入口惰性检查配置文件 mtime;变化时重新解析 `mcp_servers` 段并 diff-apply:新增项 Add、删除项 Close+Remove、字段变更项 Close 旧实例后重建。解析失败 SHALL 保留现有注册表内容。
+registry 监听的配置文件 MUST 支持完整项目配置形态（含 entry / agents / providers / mcp_servers 等根字段）：热同步解析 MUST 仅对 mcp_servers 子树执行严格解码，完整文件中的其他合法根字段 MUST NOT 被判为 unknown 而导致同步失败；解析失败时保留旧 registry 并告警的行为不变。
 
-#### Scenario: 配置新增 server 热生效
-- **WHEN** 向 tagent.yaml 的 `mcp_servers` 添加新 server 并保存,随后调用 `List()`
-- **THEN** 返回包含新 server,进程未重启
-
-#### Scenario: 配置删除 server 热移除
-- **WHEN** 从 tagent.yaml 删除某 server 并保存,随后调用 `Names()`
-- **THEN** 该 server 不再出现,且其 toolset 已被关闭
-
-#### Scenario: 配置解析失败保持现状
-- **WHEN** tagent.yaml 被写入非法 YAML 后调用 `List()`
-- **THEN** 返回变更前的 server 集合,不 panic 不清空
+#### Scenario: 修改完整配置中的 MCP 声明
+- **WHEN**运维在真实项目配置文件（含 agents/providers 等根字段）中新增一个 MCP server 声明并保存
+- **THEN** 热同步 MUST 成功识别变更并更新 registry，MUST NOT 因根字段被判 unknown 而静默保留旧表
 
 ### Requirement: 构建期装配与生命周期
 `tagent.New()` SHALL 从 `Config.MCPServers` 构建注册表并经 `PlainToolFactoryConfig.MCPRegistry` 注入工具工厂;`WithMCPToolSets` 注入的 toolset SHALL 以其 `Name()` 并入注册表;注册表 SHALL 实现 `Closer` 并在 entry agent 上注册,进程关闭时统一关闭全部 toolset(幂等)。
@@ -75,3 +65,4 @@
 #### Scenario: 关停统一释放
 - **WHEN** entry agent `Close()` 被调用
 - **THEN** 注册表内全部 toolset 的 `Close()` 各被调用一次
+

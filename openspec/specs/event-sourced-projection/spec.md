@@ -3,9 +3,7 @@
 ## Purpose
 
 投影作为事实链（KV LSM 事件日志）的纯回放映射：压缩折叠以一等 compaction 事件（`context_compress_summary`，代际标记滚动 supersede）入事实链，冷启动经「最新 compaction snapshot + 尾部重放」逐字节重建投影（prefix-cache 复用）；单一真相源（事实链），无游离 checkpoint。覆盖 R1（上下文跨重启连续）。
-
 ## Requirements
-
 ### Requirement: 投影是事实链的纯回放（一等不变量）
 
 投影（SessionProjection）SHALL 恒等于事实链（KV LSM 事件日志）的 fold/回放映射（**正常运行路径精确成立；退化恢复路径最终一致**，见下），兑现「投影是写入的旁路产物、事实链只在 KV 里」（memory-architecture.md:1060/1069）。运行期每次 `StoreEvent` SHALL 伴随 `projection.Add`（增量回放；`persistBusEvent` SHALL 对齐 stored-gate：StoreEvent 失败 SHALL NOT Append，交由 spill 恢复双写补回）；压缩折叠 SHALL 作为事实链的一条 compaction 事件（非游离于事实链外的投影态快照）。系统 SHALL NOT 把投影态持久化到事实链之外的独立 checkpoint（避免双真相源）。**文档化边界**：跨退化恢复的重启可能缺 spill 补写事件（spill 沿用旧 key，晚于 compaction 补写时被 tail 边界切掉）——最终一致非逐字节。
@@ -118,3 +116,18 @@ compaction 事件 SHALL 保持 `context_compress_summary` 的 `Recallable:true`�
 #### Scenario: 无游离快照事件
 - **WHEN** 审查事实链中的压缩相关事件
 - **THEN** SHALL 只有 `context_compress_summary` compaction 事件，SHALL NOT 有 dev 的三态快照 `context_compress` 正 key 事件
+
+### Requirement: 无锚恢复不静默截断
+无 compaction anchor 的冷启动回放 MUST NOT 静默丢弃历史：回放 MUST 全量分页读取后过滤非投影事件；若因内存护栏必须截断，rebuild 结果 MUST 显式标记 partial（truncated_events 计数 + Error 级日志 + diagnostics 字段），MUST NOT 以截断结果冒充完整恢复。
+
+#### Scenario: 超护栏长链冷启动
+- **WHEN** 事实链无 compaction anchor 且事件数超过回放护栏
+- **THEN** rebuild MUST 输出 partial 标记与截断计数，调用方与日志可辨「恢复不完整」，MUST NOT 无标记地返回截断投影
+
+### Requirement: 恢复观测覆盖全误差面
+投影重建的观测 MUST 覆盖全部误差来源：快照 lost keys、tail 分页失败（pages_failed）、批量读取错误（batch_errors）、payload 解析失败（payload_errors）各自计数并进入汇总日志行；单次零丢失 MUST NOT 被解读为恢复完整性证明。
+
+#### Scenario: tail 分页部分失败
+- **WHEN** 恢复期间某 tail 分页查询返回错误
+- **THEN** 汇总日志 MUST 含 pages_failed≥1 且 rebuild 结果标记 partial，MUST NOT 静默跳页后报告成功
+
