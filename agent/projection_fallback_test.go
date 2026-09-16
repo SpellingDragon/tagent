@@ -48,19 +48,21 @@ func TestRebuildFallback_NoAnchor_RecoversTail(t *testing.T) {
 	require.Equal(t, tagentevent.TypeAgentOutput, got[n-1].EventType)
 }
 
-func TestRebuildFallback_CapKeepsNewest500(t *testing.T) {
+func TestRebuildFallback_NoCap_RecoversFullChain(t *testing.T) {
+	// 2026-09-16 host directive: replay cap removed — a chain that fit before a
+	// restart must fit after it. 505 events (> legacy cap 500) must ALL recover.
 	store := memory.NewInMemoryStore()
 	proj := compress.NewSessionProjection()
 	cm, _ := rbFoldCM(store, proj, 4)
-	const n = 505 // fallbackCap + 5
+	const n = 505 // > legacy fallbackCap=500, would have truncated before
 	keys := fbChainStore(t, store, n, rbNowMs())
 
 	cm.rebuildProjectionFromWAL()
 
-	require.Equal(t, 500, proj.Len(), "fallback caps at fallbackCap=500, newest-wins")
+	require.Equal(t, n, proj.Len(), "fallback must recover the FULL chain, no cap")
 	got := proj.GetAll()
-	require.Equal(t, keys[n-500], got[0].EventKey, "truncation must drop the OLDEST 5")
-	require.Equal(t, keys[n-1], got[499].EventKey)
+	require.Equal(t, keys[0], got[0].EventKey, "oldest event must survive")
+	require.Equal(t, keys[n-1], got[n-1].EventKey)
 }
 
 func TestRebuildFallback_EmptyChain_StaysEmpty(t *testing.T) {

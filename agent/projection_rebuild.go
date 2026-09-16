@@ -137,7 +137,12 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 // events and seed the truncation point as the full boundary (2026-09-13
 // user expectation: WAL is the durable record — recover even without
 // compaction).
-const fallbackCap = 500
+// DEPRECATED 2026-09-16 (host directive): full-replay cap removed. A chain
+// that fit before a restart must fit after it — dropping the oldest events on
+// rebuild is data loss, not memory hygiene. Long-chain bounding is the job of
+// compaction anchors, not an arbitrary replay cap. Symbol kept (referenced by
+// tests/legacy comments) but no longer applied as a truncation bound.
+const fallbackCap = 0
 
 // skipProjectionEvent reports whether ev is a fact-chain record that must
 // never become a projection ref (compaction/legacy snapshots, registry
@@ -179,7 +184,7 @@ func (cm *ContextManager) rebuildProjectionFallback() {
 	}
 	total := len(all)
 	truncated := false
-	if total > fallbackCap {
+	if fallbackCap > 0 && total > fallbackCap {
 		truncated = true
 		all = all[total-fallbackCap:]
 		log.Warnf("[rebuild-projection] fallback: chain=%d exceeds cap=%d, keeping newest %d",
@@ -199,7 +204,7 @@ func (cm *ContextManager) rebuildProjectionFallback() {
 	// 辨识——VERDICT 行统一两模式的完整性结论（snapshot 模式的对应结论在
 	// 主路径汇总行的 lostKeys 字段）。
 	if truncated || fallbackStats.anyFailure() {
-		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated=%v to %d of %d events, fetchFailures=%v; no compaction anchor — run a compaction to bound future chains)", truncated, fallbackCap, total, fallbackStats.anyFailure())
+		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated=%v to %d of %d events, fetchFailures=%v; no compaction anchor — run a compaction to bound future chains)", truncated, len(all), total, fallbackStats.anyFailure())
 	} else {
 		log.Infof("[rebuild-projection] VERDICT: FULL (fallback replay complete)")
 	}
