@@ -670,9 +670,10 @@ func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan st
 			// 入口不得拦截（否则合法完成通知被杀）。
 			task.mu.Lock()
 			terminal := isTerminalStatus(task.status)
+			st := task.status
 			task.mu.Unlock()
 			if terminal {
-				log.Warnf("[task] drop post-terminal signal: task=%s status=%s late_kind=%s", task.ID, task.status, sig.Kind)
+				log.Warnf("[task] drop post-terminal signal: task=%s status=%s late_kind=%s", task.ID, st, sig.Kind)
 				continue
 			}
 			tm.applyStatus(task, sig)
@@ -788,7 +789,9 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	case SettleStable:
 		// Do not revert an already-detached service back to plain stable on a
 		// subsequent output change; emitBackground keeps it alive-detached.
-		if task.status != TaskAliveDetached {
+		// hardening-review-batch2 cold-eyes P1-1：stale 是观测事实，输出再变化
+		// 不回滚（回滚即进入第三种僵尸轨道——治理面三不管）。
+		if task.status != TaskAliveDetached && task.status != TaskStale {
 			task.status = TaskStable
 		}
 	case SettleSuspect:
@@ -912,7 +915,7 @@ func (tm *TaskManager) reconcileDetached() {
 	var candidates []*Task
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		need := t.status == TaskAliveDetached && t.Spec.Alive != nil
+		need := (t.status == TaskAliveDetached || t.status == TaskStale) && t.Spec.Alive != nil
 		t.mu.Unlock()
 		if need {
 			candidates = append(candidates, t)
@@ -921,7 +924,7 @@ func (tm *TaskManager) reconcileDetached() {
 	tm.mu.Unlock()
 	for _, t := range candidates {
 		t.mu.Lock()
-		if t.status != TaskAliveDetached {
+		if t.status != TaskAliveDetached && t.status != TaskStale {
 			t.mu.Unlock()
 			continue
 		}
@@ -934,7 +937,7 @@ func (tm *TaskManager) reconcileDetached() {
 		}
 		out := "(backing session gone - auto-retired by liveness reconcile)"
 		t.mu.Lock()
-		if t.status == TaskAliveDetached {
+		if t.status == TaskAliveDetached || t.status == TaskStale {
 			t.mu.Unlock()
 			tm.finalize(t, SettleCompleted, out, nil)
 		} else {

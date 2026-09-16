@@ -251,3 +251,11 @@
 ### N2（3.3 执行中发现）：恢复任务 resume 测试用例死锁
 - 现象：BindDetector 后调用 Resume 的测试超时——Resume 内部等待新 detector 的 dense/detach 生命周期，ManualDetector 不 FireDetach 则挂起。
 - 处置：删除该自建用例；resume 原子替换语义由既有 task_resume_test（旧信号隔离）与 Resume 实现（close 旧 watchDone→换 detector→新 watch）覆盖。BindDetector 与 Resume 的组合由 fencing（终态拒绝绑定）+ watchDone 退休保证。
+
+### N3（冷眼复审 2026-09-16）：发布阻断集修复
+- P0-1：TaskStale 曾脱离 reconcileDetached 候选集（三处判据只认 AliveDetached）→ 生产推荐配置（stale 1h < deadline 8h）下 deadline 永不触发 + probe 死不回收 = 永久僵尸（af4aa4c7 复发路径）。已修：三处判据纳入 TaskStale；补两回归（先 stale 后 deadline 真实时序 / stale 后 probe 死复回收）。
+- P1-1：applyStatus Stable 分支曾把 stale 回滚成 stable（第三种僵尸轨道）。已修：stale 不回滚（除非 resume）。
+- P1-3：MCP JSON 分支曾误用 configFileServers 包装（任何带 mcp_servers 的 JSON 必然解析失败——本批引入的回归）。已修：子树直解 map + JSON 全形态测试。
+- P1-5：staleFixture 曾存在 DATA RACE（-race 门 FAIL）。已修：settleLog 锁安全 recorder + snapshot。
+- P2-1 顺手修：watch fence 日志锁内拷 status。
+- P1-4：5.1 虚勾改回（逐 agent 未实现，见任务行）；P1-2（跨重启 stale 事实丢失：watch 事件覆盖 alive-detached 末次 settle）与 P2-2/3/4/5 记入下一批。

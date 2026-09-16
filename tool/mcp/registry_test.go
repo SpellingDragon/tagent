@@ -298,3 +298,20 @@ mcp_servers:
 	_, ok := r.Get("alpha")
 	require.True(t, ok)
 }
+
+// cold-eyes P1-3：JSON 完整配置形态（子树即 servers 映射，非 configFileServers
+// 包装）——曾必然解析失败（"alpha" 被判 unknown）。
+func TestRegistry_HotSync_JSONFullConfigShape(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "tagent.json")
+	base := time.Now().Add(-time.Hour)
+	writeConfig(t, cfgPath, `{
+  "entry": "tagent",
+  "providers": {"zhipu": {"api_key": "sk-x"}},
+  "mcp_servers": {
+    "alpha": {"transport": "streamable-http", "url": "https://example.com/alpha"}
+  }
+}`, base)
+	r := NewRegistry(WithConfigPath(cfgPath))
+	assert.Equal(t, []string{"alpha"}, r.Names(), "JSON full-shape config must hot-sync")
+}

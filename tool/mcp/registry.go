@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-	"gopkg.in/yaml.v3"
 
 	"github.com/SpellingDragon/tagent/internal/strictyaml"
 
@@ -280,12 +280,14 @@ func parseServersFile(path string) (map[string]ServerConfig, error) {
 		if !ok {
 			return map[string]ServerConfig{}, nil // 无 MCP 段：空表（合法）
 		}
-		subtree = raw
-		var section configFileServers
-		if err := strictyaml.DecodeJSON(subtree, &section); err != nil {
+		// cold-eyes P1-3：子树本身即 servers 映射，直接严格解码到 map——
+		// 曾误用 configFileServers 包装（顶层 "alpha" 被判 unknown，任何带
+		// mcp_servers 段的 JSON 配置必然解析失败）。
+		var servers map[string]ServerConfig
+		if err := strictyaml.DecodeJSON(raw, &servers); err != nil {
 			return nil, err
 		}
-		return section.MCPServers, nil
+		return servers, nil
 	}
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
