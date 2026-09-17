@@ -35,3 +35,41 @@ func AttributionFrom(ctx context.Context) (Attribution, bool) {
 	a, ok := ctx.Value(attributionKey{}).(Attribution)
 	return a, ok && len(a) > 0
 }
+
+// durableInboundCtxKey is the context key for the durable inbound provenance
+// of the CURRENT turn (cold-eyes Major 1): the claimed envelope's path and
+// the per-message dedup key, so the MemoryPlugin fact path participates in
+// the replay-dedup contract (not just persistBusEvent).
+type durableInboundCtxKey struct{}
+
+// DurableInbound carries the current turn's envelope provenance.
+type DurableInbound struct {
+	Path      string // inbox envelope path (diagnostics)
+	RequestID string // batch identity
+	DedupKey  string // hex fact key carried by the claim (replay evidence)
+
+	// FactsPrePersisted (cold-eyes R2 M-1): the event loop already stored this
+	// turn's durable input facts via persistBusEvent (per message, dedup-aware,
+	// writeback included) — the pipeline must skip re-storing the echoed user
+	// input, otherwise the merged fact would either duplicate or swallow a
+	// same-key-different-content collision.
+	FactsPrePersisted bool
+}
+
+// WithDurableInbound returns a context carrying the turn's durable inbound
+// provenance. Empty path → not injected (no durable envelope this turn).
+func WithDurableInbound(ctx context.Context, d DurableInbound) context.Context {
+	if d.Path == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, durableInboundCtxKey{}, d)
+}
+
+// DurableInboundFrom extracts the turn's durable inbound provenance, if any.
+func DurableInboundFrom(ctx context.Context) (DurableInbound, bool) {
+	if ctx == nil {
+		return DurableInbound{}, false
+	}
+	d, ok := ctx.Value(durableInboundCtxKey{}).(DurableInbound)
+	return d, ok
+}

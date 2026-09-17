@@ -325,14 +325,23 @@ func TestEvictionDecrementsLiveCount(t *testing.T) {
 	before := store.GetStats().TotalEvents
 	require.Equal(t, 6, before)
 
-	lm.checkCapacity() // evicts (6-3)+10 → capped by available events
+	// 2.8 契约：counts unknown（mockKV 无枚举）时 checkCapacity 必须整体
+	// 短路——未知计数不得驱动淘汰，也不得被当成 0。
+	lm.checkCapacity()
+	require.Equal(t, before, store.GetStats().TotalEvents,
+		"unknown counts must pause capacity eviction")
+	require.False(t, store.LivesCountKnown())
+
+	// 直调 evictOldest 验证 M4/防重减语义：每轮只把「存活」事件标墓碑并
+	// 递减一次；已墓碑的旧事件被 IsTombstone 跳过，绝不二次递减。
+	lm.evictOldest(1, 3)
 	after := store.GetStats().TotalEvents
 	assert.Less(t, after, before,
 		"eviction must decrement the live counter, or the next cycle re-evicts live events")
 
-	// A second cycle must NOT evict more than needed: counter already ≤ max.
-	before2 := store.GetStats().TotalEvents
-	lm.checkCapacity()
-	assert.Equal(t, before2, store.GetStats().TotalEvents,
-		"once within capacity, subsequent cycles must be no-ops")
+	// 第二轮：跳过已墓碑 3 个、只对存活 3 个墓碑化并各减一次——若重复递减
+	// 已死事件，这里会击穿 0 并继续误减存活事件。
+	lm.evictOldest(1, 3)
+	assert.Equal(t, 0, store.GetStats().TotalEvents,
+		"second pass must skip already-tombstoned events (no double decrement)")
 }

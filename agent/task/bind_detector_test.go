@@ -36,6 +36,14 @@ func TestBindDetector_SignalsReachManager(t *testing.T) {
 	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
 	waitUntil(t, time.Second, func() bool { return tk.Status() == TaskCompleted })
 
+	// applyStatus（状态可见）先于 emitBackground→OnSettle（通知入账），两者是
+	// 同一信号的流水两段（batch2 1.7/N1）：观察终态后必须等通知到达再断言，
+	// 否则在 -race/并行负载下会撞进「状态已置、settles 未入账」窗口。
+	waitUntil(t, time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(settles) == 2
+	})
 	mu.Lock()
 	defer mu.Unlock()
 	if len(settles) != 2 {

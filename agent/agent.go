@@ -95,10 +95,21 @@ type TagentAgent struct {
 	orgRollback func()
 
 	// Framework integration
-	memStore   memory.MemoryStore
-	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
-	config     *TagentConfig
-	sessionSvc session.Service
+	memStore memory.MemoryStore
+	// memStoreRelease (resident-readiness-plan 4.2): lease release bound to
+	// THIS agent's lifecycle — executed from Close; nil for borrowed/shell
+	// agents and for isolated stores the agent fully owns via its own Close.
+	memStoreRelease func()
+
+	// residentNames (4.5/4.6 introspection): the resident topology binding
+	// table this agent belongs to (entry + sub-agents), set at New().
+	residentNames map[string]bool
+	// residentTable (4.5): name → resident agent instance — the binding table
+	// the hot-reload shells borrow per-agent resources from.
+	residentTable map[string]*TagentAgent
+	memPlugin     *plugin.MemoryPlugin // registered on ContextManager's Runner
+	config        *TagentConfig
+	sessionSvc    session.Service
 
 	// Agent identity (for agent.Agent interface)
 	name        string
@@ -155,20 +166,25 @@ type TagentAgent struct {
 
 // TagentConfig holds configuration for creating a TagentAgent.
 type TagentConfig struct {
-	Model              model.Model        // Required: LLM model
-	MemoryStore        memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
-	SessionSvc         session.Service    // R4（review 🔴1）：外部 SessionSvc 注入（executorOnly 热重建壳复用常驻实例；nil=内部新建）
-	SystemPrompt       string             // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
-	SystemPromptSource prompt.Getter      // Hot-reloadable system prompt (optional, overrides SystemPrompt); Getter 接口（文件即真源，mtime 热重载）
-	Tools              []tool.Tool        // CallableTools to register
-	MaxToolIterations  int                // Default: DefaultMaxToolIterations (50)
-	MaxTokens          int                // Token budget for context (default: 8000)
-	CompressThreshold  float64            // Compression trigger threshold (default: 0.8)
-	SummaryModel       model.Model        // Optional: for Stage 2 LLM summary
-	SummaryEffort      string             // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
-	Temperature        float64            // Optional: LLM temperature (default: 0.7)
-	KeepRecentTasks    int                // Min task segments to keep during compression (default: 2)
-	Compress           CompressConfig     // compress.SmartCompressor parameters
+	Model       model.Model        // Required: LLM model
+	MemoryStore memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
+	// MemStoreRelease (resident-readiness-plan 4.2): lease release for the
+	// provided MemoryStore; executed exactly once from Close. nil = the agent
+	// does not own a registry lease (borrowed/shell agents; isolated stores
+	// closed via the normal Close path).
+	MemStoreRelease    func()
+	SessionSvc         session.Service // R4（review 🔴1）：外部 SessionSvc 注入（executorOnly 热重建壳复用常驻实例；nil=内部新建）
+	SystemPrompt       string          // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
+	SystemPromptSource prompt.Getter   // Hot-reloadable system prompt (optional, overrides SystemPrompt); Getter 接口（文件即真源，mtime 热重载）
+	Tools              []tool.Tool     // CallableTools to register
+	MaxToolIterations  int             // Default: DefaultMaxToolIterations (50)
+	MaxTokens          int             // Token budget for context (default: 8000)
+	CompressThreshold  float64         // Compression trigger threshold (default: 0.8)
+	SummaryModel       model.Model     // Optional: for Stage 2 LLM summary
+	SummaryEffort      string          // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
+	Temperature        float64         // Optional: LLM temperature (default: 0.7)
+	KeepRecentTasks    int             // Min task segments to keep during compression (default: 2)
+	Compress           CompressConfig  // compress.SmartCompressor parameters
 
 	// TaskTerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained before pruning. It bounds the resume_task
@@ -358,9 +374,13 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 5. Create outputCh + EventBus + projection EARLY so the
 	// AppendEventHook (created next) can capture them.
 	outputCh := make(chan *event.Event, 100)
-	// T-G ReliableBus：BusSpillDir 非空则启用磁盘溢出（channel 满不丢事件，at-least-once）；
-	// 空 dir → NewReliableEventBus 回退纯 channel bus（现状逐字节不变）。
-	bus := NewReliableEventBus(cfg.BusSpillDir)
+	// T-G ReliableBus（resident-readiness-plan 3.2）：BusSpillDir 非空启用 durable
+	// inbox（所有输入先持久化，durable receipt 后才被消费）。配置了可靠性却构建失败
+	// （磁盘不可写 / 旧 .spill 未排空）必须 fail-loud —— 可靠性绝不静默降级。
+	bus, busErr := NewReliableEventBus(cfg.BusSpillDir)
+	if busErr != nil {
+		return nil, fmt.Errorf("agent %q: durable inbox init failed: %w", name, busErr)
+	}
 	projection := compress.NewSessionProjection()
 
 	// Task layer: tools spawn long-running work via the injected task.TaskSpawner;
@@ -462,6 +482,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		activeBus:           bus,
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
+		memStoreRelease:     cfg.MemStoreRelease,
 		memPlugin:           memPlugin,
 		config:              cfg,
 		sessionSvc:          sessionSvc,

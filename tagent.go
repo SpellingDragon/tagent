@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
@@ -90,6 +91,17 @@ type runtimeConfig struct {
 
 	// approvalChannels（R5）：外部审批送达通道（WithApprovalChannel 注入，govGate 构造后注册）。
 	approvalChannels []governance.ApprovalChannel
+
+	// storeOwners（resident-readiness-plan 4.4）：底层 store 指针 → pid → 首个
+	// 占名 agent——共享 store 内不同名同 pid 的冲突在构建期 fail-closed。
+	storeOwners   map[string]map[int]string
+	storeOwnersMu sync.Mutex
+
+	// residentAgents（resident-readiness-plan 4.5）：常驻构建后的 name → agent
+	// 绑定表——热更壳子树按 agent 身份借用其常驻资源（store 等），绝不全部
+	// 复用 entryMemStore（防子 agent 存储漂移）。拓扑增减（新增/删除 agent）
+	// 在 reloader 中 fail-closed 拒绝（须重启）。
+	residentAgents map[string]*agent.TagentAgent
 
 	// governance (T-G)：治理闸运行时，cfg.Governance.Enabled 时构造，跨 agent 共享。
 	// govGate 对 entry agent 的 leaf 工具调用做风险分级 + 预算 + goal + critical 批准。
@@ -209,7 +221,10 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("tagent: tool access validation: %w", err)
 	}
 
-	rc := &runtimeConfig{reliability: cfg.Reliability}
+	rc := &runtimeConfig{
+		reliability: cfg.Reliability,
+		storeOwners: make(map[string]map[int]string),
+	}
 	for _, opt := range opts {
 		opt(rc)
 	}
@@ -294,6 +309,15 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	// 从这里取真实事实链 store 与 session 服务。
 	rc.entryMemStore = entryAgent.MemStore()
 	rc.entrySessionSvc = entryAgent.SessionSvc()
+	rc.residentAgents = agentCache // 4.5：常驻身份绑定表（含 entry 与全部子 agent）
+	names := make(map[string]bool, len(agentCache))
+	for n := range agentCache {
+		names[n] = true
+	}
+	entryAgent.SetResidentNames(names)
+	for _, a := range agentCache { // 4.5：全拓扑共享绑定表（含自身）
+		a.SetResidentTable(agentCache)
+	}
 
 	// Register TrajectoryRecorder for graceful shutdown and session info
 	if rc.trajectoryRecorder != nil {
@@ -331,8 +355,23 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		// hardening-review-batch2 5.1（逐 agent 热更）：hotParamsFor 提取 +
 		// agentCache 全遍历——数值热更不得仅覆盖 entry（spec config-hot-reload：
 		// 只改子 agent keep_recent_tasks 时该子 agent 压缩器 MUST 收到新值）。
-		hotParamsFor := func(ac *AgentConfig) agent.OrgHotParams {
-			p := agent.OrgHotParams{}
+		// 4.7（desired/effective 全量语义）：hotParamsFor 输出**全量 desired**——
+		// 显式配置生效，字段删除回落解析默认（entry 8000 / 子 4096；阈值 0.8；
+		// keepRecent 2；task 2m/1h/关）。ApplyOrgHotParams 的零值保护对正默认
+		// 透明；「显式 0/负」仍可表达（StaleAfter/JobDeadline 支持负语义）。
+		hotParamsFor := func(aname string, ac *AgentConfig) agent.OrgHotParams {
+			isEntry := aname == cfg.Entry
+			defMax := 4096
+			if isEntry {
+				defMax = 8000
+			}
+			p := agent.OrgHotParams{
+				ThresholdPct:    compress.DefaultCompressThreshold,
+				MaxTokens:       defMax,
+				KeepRecentTasks: 2,               // agent-layer parsed default (agent/agent.go)
+				TaskTerminalTTL: 2 * time.Minute, // task.defaultTerminalTTL (agent/task)
+				TaskStaleAfter:  time.Hour,       // task.defaultStaleAfter (agent/task)
+			}
 			if ac == nil {
 				return p
 			}
@@ -349,7 +388,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				p.TaskTerminalTTL = ttl
 			}
 			if sa, saerr := time.ParseDuration(ac.TaskStaleAfter); saerr == nil && ac.TaskStaleAfter != "" {
-				p.TaskStaleAfter = sa
+				p.TaskStaleAfter = sa // 显式负值 = 关闭观测（语义保留）
 			}
 			if jd, jderr := time.ParseDuration(ac.TaskJobDeadline); jderr == nil && ac.TaskJobDeadline != "" {
 				p.TaskJobDeadline = jd
@@ -362,7 +401,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					continue
 				}
 				src := freshCfg.Agents[aname] // 值类型：hotParamsFor 取址安全（map 内元素不可寻址，拷贝后取）
-				p := hotParamsFor(&src)
+				p := hotParamsFor(aname, &src)
 				a.ApplyOrgHotParams(p)
 				log.Infof("[org-hotreload] agent %q hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s staleAfter=%s jobDeadline=%s",
 					aname, p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskStaleAfter, p.TaskJobDeadline)
@@ -379,6 +418,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		// Rollback 永远报「无上一代快照」。启动代快照让首次换代即可回滚。
 		startupCfg := cfg
 		prevKeep = &startupCfg
+		curReach := reachableAgents(&cfg, cfg.Entry) // 4.5：启动代可达拓扑（增减检测基准）
 		entryAgent.SetOrgReloader(func() {
 			info, err := os.Stat(cfgPath)
 			if err != nil {
@@ -414,7 +454,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			if merr == nil && mfp != lastMemFP {
 				log.Errorf("[org-hotreload] agents.*.memory.* CHANGED (mem-fp %s.. -> %s..) — runtime storage migration is not supported; RESTART required to apply", short(lastMemFP), short(mfp))
 				entryAgent.EmitSystemAlert("org-hotreload: memory 段变更需重启迁移，本次未热更（须重启生效）")
-				lastMemFP = mfp
+				// 4.7：拒绝不推进 effective——同一未生效 memory 配置再次编辑
+				// 其他字段时仍以 effective 为基准拒绝，绝不借第二次检查绕过。
 				return
 			}
 			if fp == lastFP {
@@ -422,6 +463,24 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				// EVERY built agent (5.1 逐 agent) — per-agent effective 回执。
 				applyHotAll(fresh)
 				return
+			}
+			// 4.5 拓扑增减检测：新增/删除 agent 的热更被拒（须重启）——常驻身份
+			// 绑定表只覆盖启动代拓扑；热更壳对既有 agent 按身份借用其常驻资源，
+			// 对新增 agent 无常驻资源可借（其资源生命周期无法安全并入常驻层）。
+			freshReach := reachableAgents(fresh, cfg.Entry)
+			for aname := range freshReach {
+				if _, resident := rc.residentAgents[aname]; !resident {
+					log.Errorf("[org-hotreload] NEW agent %q cannot be hot-added — RESTART required (fail-closed)", aname)
+					entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 新增 agent %q 需重启生效，本次未热更", aname))
+					return
+				}
+			}
+			for aname := range curReach {
+				if _, ok := freshReach[aname]; !ok {
+					log.Errorf("[org-hotreload] REMOVED agent %q cannot be hot-removed — RESTART required (fail-closed)", aname)
+					entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 删除 agent %q 需重启生效，本次未热更", aname))
+					return
+				}
 			}
 			// R4（resident-continuity-r2-r4 3.5/3.8）：结构变化→cm.runner 级热重建
 			//（executorOnly 模式：丢弃壳仅取 runner；按 ownership 表跳过对共享物

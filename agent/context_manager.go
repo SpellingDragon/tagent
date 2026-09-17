@@ -39,6 +39,18 @@ import (
 //   - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
 //   - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
 type ContextManager struct {
+	// turnDurableInbound (cold-eyes Major 1): the CURRENT turn's claimed
+	// envelope provenance — set by runEventLoop before the runner runs, read
+	// via RunFlow's ctx injection so the MemoryPlugin fact path participates
+	// in replay dedup. Single-consumer event loop → no locking needed.
+	turnDurableInbound plugin.DurableInbound
+
+	// recovery* (resident-readiness-plan 3.8): cold-start rebuild outcome and
+	// the one-shot model-facing notice; written once at rebuild, read-only after.
+	recoveryMu     sync.Mutex
+	recovery       *RecoveryResult
+	recoveryNotice string
+
 	contextCompressor *compress.ContextCompressor
 
 	// hotswap-fix 5.7：executor 重建所需的状态面引用与执行面快照。
@@ -985,7 +997,34 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		msg.Role = model.RoleUser
 	}
 
-	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	// Inbox-replay dedup (resident-readiness-plan 3.4): a replayed durable
+	// event carries inbox_dedup_keys — the fact keys already committed by the
+	// first (crashed) execution. Reuse the SAME key: StoreEvent is skipped
+	// (with a GetEvent guard falling back to the idempotent completion path),
+	// and the projection Append dedupes by key — the fact and its projection
+	// are NOT duplicated across the at-least-once replay.
+	// cold-eyes Major 3：优先单数 inbox_dedup_key（消息序号对齐的单条 key），
+	// 复数 joined 形式仅为旧事件兼容（取第一个）。
+	dedupKeyHex := ""
+	if v, ok := evt.Metadata["inbox_dedup_key"].(string); ok {
+		dedupKeyHex = strings.TrimSpace(v)
+	} else if v, ok := evt.Metadata["inbox_dedup_keys"].(string); ok {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				dedupKeyHex = part
+				break
+			}
+		}
+	}
+	eventKey := int64(0)
+	if dedupKeyHex != "" {
+		if k, perr := tagentevent.ParseEventKey(dedupKeyHex); perr == nil {
+			eventKey = k
+		}
+	}
+	if eventKey == 0 {
+		eventKey = memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	}
 	eventType := tagentevent.ExtractEventType(msg)
 	eventSummary := tagentevent.GenerateEventSummary(msg, eventType, tagentevent.DefaultOptionsForLLMContext())
 
@@ -1037,9 +1076,30 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	// scenarios) keeps the previous always-append behavior.
 	stored := true
 	if cm.memStore != nil {
-		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-			stored = false
-			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
+		alreadyStored := false
+		if dedupKeyHex != "" {
+			// Replay path: verify the dedup evidence before trusting it — a
+			// missing slot falls through to a normal store (same key + same
+			// content = deterministic completion, never a different fact).
+			if existing, gerr := cm.memStore.GetEvent(eventKey); gerr == nil && existing != nil {
+				alreadyStored = true
+			}
+		}
+		if !alreadyStored {
+			if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+				stored = false
+				log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
+			}
+		}
+	}
+	// Committed-fact writeback (3.4): after a successful store under inbox
+	// provenance, record the fact key ON the claimed envelope so a crash
+	// before the receipt replays with inbox_dedup_keys (no double write).
+	if stored && cm.bus != nil {
+		if rid, _ := evt.Metadata["inbox_request_id"].(string); rid != "" {
+			if path, _ := evt.Metadata["inbox_path"].(string); path != "" {
+				cm.bus.AppendDurableEventKeys(path, []string{tagentevent.FormatEventKey(eventKey)})
+			}
 		}
 	}
 
@@ -1151,6 +1211,11 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	// Bind this invocation's projection as the pipeline projection sink:
 	// MemoryPlugin projects each stored event at the same synchronous point
 	// (write unification, unified-event-projection D1).
+	if cm.turnDurableInbound.Path != "" {
+		// cold-eyes Major 1: expose the claimed envelope provenance to the
+		// plugin fact path (dedup on replay + key writeback on first exec).
+		ctx = plugin.WithDurableInbound(ctx, cm.turnDurableInbound)
+	}
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
 		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id

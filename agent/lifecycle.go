@@ -3,8 +3,11 @@ package agent
 import (
 	"context"
 	"fmt"
+	"time"
 
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/plugin"
 
 	"github.com/SpellingDragon/tagent/rl"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -90,8 +93,21 @@ func (ta *TagentAgent) Close() error {
 		}
 	}
 
-	// Close memory store if it supports closing (e.g., FileSegmentStore stops lifecycle components)
-	if c, ok := ta.memStore.(interface{ Close() error }); ok {
+	// Close the durable inbox (unconfirmed items stay on disk for the next
+	// process — shutdown is NOT data loss; resident-readiness-plan 3.2).
+	if ta.persistentBus != nil {
+		if err := ta.persistentBus.CloseDurable(); err != nil {
+			errs = append(errs, fmt.Errorf("close durable inbox: %w", err))
+		}
+	}
+
+	// Memory-store shutdown (resident-readiness-plan 4.2): an agent holding a
+	// registry lease RELEASES it (the last lease closes the store); agents
+	// without a lease (borrowed shells) never touch the shared store, and
+	// fully-owned isolated stores fall back to direct Close.
+	if ta.memStoreRelease != nil {
+		ta.memStoreRelease()
+	} else if c, ok := ta.memStore.(interface{ Close() error }); ok {
 		if err := c.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close memory store: %w", err))
 		}
@@ -225,4 +241,93 @@ func (ta *TagentAgent) StopLoop() {
 // IsLoopActive returns true if the persistent event loop is currently running.
 func (ta *TagentAgent) IsLoopActive() bool {
 	return ta.loopActive.Load()
+}
+
+// finishDurableBatch (resident-readiness-plan 3.4/3.5): the consuming turn
+// finished — per consumed envelope: ① persist a fact-chain inbox_receipt
+// event (the dedup-window truth source; stored-gate: failure ⇒ NOT receipted,
+// the claim replays), ② receipt+ack the envelope. Facts committed during the
+// turn were already written back onto the envelope by persistBusEvent
+// (AppendDurableEventKeys), so a replay after a mid-turn crash carries
+// inbox_dedup_keys and does NOT duplicate facts/projection.
+func (ta *TagentAgent) finishDurableBatch(events []*AgentEvent) {
+	if ta == nil || ta.persistentBus == nil {
+		return
+	}
+	for _, pr := range ta.persistentBus.DurableProvenance(events) {
+		path, rid := pr[0], pr[1]
+		if !ta.persistInboxReceipt(rid) {
+			log.Warnf("[finishDurableBatch] receipt event for %s NOT stored — claim stays for replay", rid)
+			continue
+		}
+		if err := ta.persistentBus.ConfirmDurable(path); err != nil {
+			log.Warnf("[finishDurableBatch] confirm for %s deferred (replay will Ack-skip): %v", rid, err)
+		}
+	}
+}
+
+// persistInboxReceipt stores the fact-chain receipt for one request id.
+// Returns false when the store is unavailable or the write fails (fail-safe:
+// the envelope stays claimed and replays — never an unbacked ack).
+// reconcileDurableReceipts (cold-eyes Major 2): startup bridge between the
+// fact-chain receipt events (collected during the rebuild scan) and the live
+// inbox — envelopes that were receipted but never acked are converged without
+// re-execution. Must run AFTER RebuildProjectionFromWAL (which populates the
+// receipt list) and after the persistentBus is wired.
+// SetTurnDurableInbound installs the current turn's claimed envelope
+// provenance (cold-eyes Major 1); clearTurnDurableInbound resets it at turn
+// end. Both are event-loop-only (single consumer).
+func (ta *TagentAgent) SetTurnDurableInbound(d plugin.DurableInbound) {
+	if ta == nil || ta.contextManager == nil {
+		return
+	}
+	ta.contextManager.turnDurableInbound = d
+}
+
+func (ta *TagentAgent) clearTurnDurableInbound() {
+	if ta == nil || ta.contextManager == nil {
+		return
+	}
+	ta.contextManager.turnDurableInbound = plugin.DurableInbound{}
+}
+
+// ReconcileDurableReceipts converges durable envelopes whose fact-chain
+// receipt survived a crash but whose ack did not (cold-eyes Major 2) —
+// startup-only, after RebuildProjectionFromWAL populated the receipt list.
+func (ta *TagentAgent) ReconcileDurableReceipts() {
+	if ta == nil || ta.persistentBus == nil || ta.contextManager == nil {
+		return
+	}
+	res := ta.contextManager.RecoveryResult()
+	if res == nil || len(res.ReceiptedRequestIDs) == 0 {
+		return
+	}
+	if n := ta.persistentBus.ReconcileReceipted(res.ReceiptedRequestIDs); n > 0 {
+		log.Infof("[recovery] %d durable envelope(s) reconciled from fact-chain receipts (no re-execution)", n)
+	}
+}
+
+func (ta *TagentAgent) persistInboxReceipt(requestID string) bool {
+	cm := ta.contextManager
+	if cm == nil || cm.memStore == nil {
+		return false
+	}
+	key := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	now := time.Now().UnixMilli()
+	ev := memory.FullEvent{
+		EventKey:     key,
+		PartitionID:  cm.partitionID,
+		EventType:    tagentevent.TypeInboxReceipt,
+		EventSummary: "[inbox receipt] " + requestID,
+		Content:      "[inbox receipt] " + requestID,
+		Timestamp:    now,
+		Metadata: map[string]string{
+			"inbox_request_id":           requestID,
+			tagentevent.MetaKeyAgentName: ta.name,
+		},
+	}
+	if cm.sessionID != "" {
+		ev.Metadata[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	return cm.memStore.StoreEvent(key, ev) == nil
 }

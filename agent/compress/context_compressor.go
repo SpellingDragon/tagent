@@ -169,6 +169,21 @@ func (cc *ContextCompressor) UpdateMaxTokens(n int) {
 
 // UpdateKeepRecent hot-updates the keep-recent task count on both the
 // per-call override default and the grading ladder input.
+// SeedKeepRecent aligns the compressor-level keepRecent with the startup
+// config (4.7 introspection truth source): WithKeepRecentTasks feeds the
+// inner SmartCompressor; this seeds the ContextCompressor's own field so
+// hot-reload reads back the EFFECTIVE startup value.
+func (cc *ContextCompressor) SeedKeepRecent(n int) {
+	if n > 0 {
+		cc.keepRecent = n
+	}
+}
+
+// KeepRecentValue returns the live keepRecent (introspection, 4.6).
+func (cc *ContextCompressor) KeepRecentValue() int {
+	return cc.keepRecent
+}
+
 func (cc *ContextCompressor) UpdateKeepRecent(n int) {
 	if n > 0 {
 		cc.keepRecent = n

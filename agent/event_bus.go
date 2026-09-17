@@ -2,11 +2,11 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/reliability"
@@ -243,14 +243,38 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 // Design rationale: a single consumer (AgentLoop) means no fan-out races,
 // no ordering guarantees across consumers, and simple backpressure (channel
 // fills up → Publish blocks).
+//
+// Durable mode (resident-readiness-plan 3.2): with an Inbox configured, ALL
+// inbound events are persisted to inbox-v1 BEFORE the durable receipt — the
+// channel carries only wake-ups, never the durable truth. Durable envelopes
+// are consumed strictly in enqueue order (zero-padded seq); volatile channel
+// events are best-effort by definition. Receipted items replaying after a
+// crash are Ack-skipped without re-execution.
 type EventBus struct {
 	ch chan *AgentEvent
 
-	// spill 是可选的磁盘溢出存储（T-G ReliableBus）。非 nil 时 Publish 在 channel 满时
-	// 溢出落盘而非丢弃（at-least-once，常驻不丢事件），Pull 在 channel 空时优先回收溢出项。
-	// nil = 纯 channel（现状，向后兼容：NewEventBus 不设，行为逐字节不变）。
-	spill *reliability.SpillStore
+	// inbox 是可选的 durable 输入信箱（inbox-v1）。nil = 纯 channel 轻量模式。
+	inbox *reliability.Inbox
+
+	// publishDropped counts events the LEGACY void Publish could not accept
+	// (timeout/closed) — the void entry never fails loudly by contract, but
+	// the rejection must stay observable (3.1).
+	publishDropped atomic.Int64
 }
+
+// PublishReceipt is the decidable result of a context-aware acceptance (3.1).
+type PublishReceipt struct {
+	RequestID string // stable identity of THIS acceptance (uuid of the event)
+	Durable   bool   // true = persisted through the inbox barrier
+}
+
+// Publish errors — callers of PublishContext can branch on these; the void
+// Publish only logs and counts them.
+var (
+	ErrPublishTimeout = fmt.Errorf("eventbus: publish timed out (queue full)")
+	ErrNilEvent       = fmt.Errorf("eventbus: nil event")
+	ErrBusClosed      = fmt.Errorf("eventbus: bus closed or not accepting")
+)
 
 // NewEventBus creates an EventBus backed by a buffered channel (cap=256,
 // matching the historical mailbox size).
@@ -260,22 +284,186 @@ func NewEventBus() *EventBus {
 	}
 }
 
-// NewReliableEventBus 创建带磁盘溢出的 EventBus（T-G ReliableBus）：channel 满时事件溢出
-// 落盘而非丢弃（at-least-once），重启后未消费溢出项可回收。spillDir 为空或 SpillStore 构建
-// 失败 → 回退纯 channel bus（现状，可用性优先于持久性）。
-func NewReliableEventBus(spillDir string) *EventBus {
+// NewReliableEventBus opens the durable inbox under spillDir/inbox-v1
+// (resident-readiness-plan 3.2). Legacy *.spill leftovers REFUSE the upgrade
+// (fail-loud with migration guidance) — the previous binary must drain them.
+// All errors are returned: reliability requested by config must never
+// silently degrade to volatile.
+func NewReliableEventBus(spillDir string) (*EventBus, error) {
 	b := NewEventBus()
 	if spillDir == "" {
-		return b
+		return b, nil
 	}
-	store, err := reliability.NewSpillStore(spillDir)
+	inbox, err := reliability.NewInbox(spillDir, 0)
 	if err != nil {
-		log.Errorf("[ReliableBus] spill store init failed (%v), falling back to in-memory bus", err)
-		return b
+		return nil, err
 	}
-	b.spill = store
-	log.Infof("[ReliableBus] disk spill enabled at %s (at-least-once, no event drop on full channel)", spillDir)
-	return b
+	b.inbox = inbox
+	log.Infof("[ReliableBus] durable inbox enabled at %s (all inputs persisted before receipt; pending=%d)", inbox.Dir(), inbox.Pending())
+	return b, nil
+}
+
+// CloseDurable releases the inbox (unconfirmed items stay on disk for the
+// next process). Called from the agent shutdown path.
+func (b *EventBus) CloseDurable() error {
+	if b == nil || b.inbox == nil {
+		return nil
+	}
+	return b.inbox.Close()
+}
+
+// DurablePending returns the unconfirmed durable envelope count (diagnostics).
+func (b *EventBus) DurablePending() int64 {
+	if b == nil || b.inbox == nil {
+		return 0
+	}
+	return b.inbox.Pending()
+}
+
+// PublishDropped counts rejections made through the legacy void entry (3.1).
+func (b *EventBus) PublishDropped() int64 {
+	if b == nil {
+		return 0
+	}
+	return b.publishDropped.Load()
+}
+
+// PublishContext is the decidable acceptance entry (3.1): it returns a
+// receipt on success (volatile or durable) or an error — full/timeout/closed
+// are NEVER reported as accepted. The legacy void Publish wraps this.
+func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (PublishReceipt, error) {
+	if event == nil {
+		return PublishReceipt{}, ErrNilEvent
+	}
+	receipt := PublishReceipt{RequestID: event.ID}
+
+	// Durable mode: EVERY event goes through the inbox barrier first.
+	if b.inbox != nil {
+		env := reliability.Envelope{
+			RequestID: event.ID,
+			Source:    event.Source,
+			Messages:  []reliability.EnvelopeMessage{{Role: eventRole(event), Content: eventContent(event)}},
+		}
+		if _, err := b.inbox.Enqueue(&env); err != nil {
+			return receipt, fmt.Errorf("eventbus: durable enqueue rejected: %w", err)
+		}
+		receipt.Durable = true
+		// Wake the consumer with a DEDICATED sentinel (never the event itself
+		// — the event lives in the inbox and must not ALSO travel the channel,
+		// or consumers would see it twice). Full channel: harmless, the next
+		// Pull drains the inbox regardless.
+		select {
+		case b.ch <- wakeEvent():
+		default:
+		}
+		return receipt, nil
+	}
+
+	// Volatile mode: bounded channel + timeout, then an explicit error.
+	select {
+	case b.ch <- event:
+		return receipt, nil
+	default:
+	}
+	select {
+	case b.ch <- event:
+		return receipt, nil
+	case <-ctx.Done():
+		b.publishDropped.Add(1)
+		return receipt, fmt.Errorf("%w: %v", ErrPublishTimeout, ctx.Err())
+	case <-time.After(publishTimeout):
+		b.publishDropped.Add(1)
+		return receipt, ErrPublishTimeout
+	}
+}
+
+// inboxWakeType marks a channel wake-up sentinel for durable items — it is
+// filtered out of every batch and never becomes a turn input.
+const inboxWakeType = "inbox_wake"
+
+func wakeEvent() *AgentEvent {
+	return &AgentEvent{Type: inboxWakeType, ID: uuid.NewString(), Timestamp: time.Now()}
+}
+
+func isInboxWake(e *AgentEvent) bool { return e != nil && e.Type == inboxWakeType }
+
+// eventContent extracts the payload text of a bus event for envelope storage.
+// eventRole extracts the message role carried by an AgentEvent (cold-eyes R2
+// Minor 5): system-type events (EmitSystemAlert) must survive the durable
+// round-trip with their role intact — an empty role defaults to user.
+func eventRole(event *AgentEvent) string {
+	if event.Message != nil && event.Message.Role != "" {
+		return string(event.Message.Role)
+	}
+	return string(model.RoleUser)
+}
+
+func eventContent(event *AgentEvent) string {
+	if event.Message != nil {
+		return event.Message.Content
+	}
+	return ""
+}
+
+// PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope
+// (resident-readiness-plan 3.3/5.2): every message keeps its own identity in
+// the envelope, and the batch is durable (or rejected) as a unit — never
+// partially accepted. Volatile mode falls back to per-message PublishContext.
+func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message) (PublishReceipt, error) {
+	if len(msgs) == 0 {
+		return PublishReceipt{}, ErrNilEvent
+	}
+	requestID := uuid.NewString()
+	receipt := PublishReceipt{RequestID: requestID}
+
+	if b.inbox != nil {
+		env := reliability.Envelope{RequestID: requestID, Source: source}
+		for _, m := range msgs {
+			env.Messages = append(env.Messages, reliability.EnvelopeMessage{Role: string(m.Role), Content: m.Content})
+		}
+		if _, err := b.inbox.Enqueue(&env); err != nil {
+			return receipt, fmt.Errorf("eventbus: durable enqueue rejected: %w", err)
+		}
+		receipt.Durable = true
+		select {
+		case b.ch <- wakeEvent():
+		default:
+		}
+		return receipt, nil
+	}
+	// Volatile: per-message acceptance; first failure rejects the batch.
+	for _, m := range msgs {
+		evt := NewExternalInputEvent(source, m)
+		select {
+		case b.ch <- evt:
+		default:
+			select {
+			case b.ch <- evt:
+			case <-ctx.Done():
+				b.publishDropped.Add(1)
+				return receipt, fmt.Errorf("%w: %v", ErrPublishTimeout, ctx.Err())
+			case <-time.After(publishTimeout):
+				b.publishDropped.Add(1)
+				return receipt, ErrPublishTimeout
+			}
+		}
+	}
+	return receipt, nil
+}
+
+// Publish enqueues an event (legacy void entry, 3.1 compatibility): it wraps
+// PublishContext, logging and counting rejections instead of failing. New
+// callers — HTTP, hosts, anything that reports acceptance to a user — MUST
+// use PublishContext/InjectMessageContext.
+func (b *EventBus) Publish(event *AgentEvent) {
+	if event == nil {
+		log.Warnf("[EventBus] Publish nil event, skipped")
+		return
+	}
+	if _, err := b.PublishContext(context.Background(), event); err != nil {
+		// PublishContext already counted the rejection — log only.
+		log.Warnf("[EventBus] Publish rejected: %v (type=%s source=%s)", err, event.Type, event.Source)
+	}
 }
 
 // publishTimeout is the maximum time Publish will wait before dropping
@@ -283,80 +471,126 @@ func NewReliableEventBus(spillDir string) *EventBus {
 // if the AgentLoop goroutine has exited unexpectedly.
 const publishTimeout = 5 * time.Second
 
-// maxSpillPerPull 是单次 Pull/TryPull 从磁盘回收的溢出项上限（= channel 容量）。防一次回收
-// 数万积压项拼成巨型 LLM 消息（Major：内存/token 双爆）；剩余留盘下次回收，语义无损。
-const maxSpillPerPull = 256
+// maxClaimPerPull 是单次 Pull/TryPull 从 inbox claim 的 envelope 上限：防一次
+// 取出全部积压拼成巨型 LLM 消息；剩余按 seq 留待下次（语义无损，顺序不变）。
+const maxClaimPerPull = 32
 
-// maxSpillBacklog 是磁盘溢出积压上限（10× channel 容量）。超限则 Publish 回退阻塞背压 +
-// 超时丢弃并告警——把「无界磁盘增长」变成「有界且有告警的降级」（Major）。
-const maxSpillBacklog = 2560
+// claimDurable takes the OLDEST pending durable envelopes (strict enqueue
+// order), converting each to in-batch AgentEvents tagged with the inbox
+// provenance (inbox_path / inbox_request_id in Metadata) so the consumer can
+// Receipt+Ack the envelope after the turn. Receipted items replaying after a
+// crash are Ack-skipped WITHOUT re-execution (已确认 receipt 不重复处理).
+// A claim is NOT a deletion: a crash after claim replays the envelope.
+func (b *EventBus) claimDurable() []*AgentEvent {
+	if b.inbox == nil {
+		return nil
+	}
+	var batch []*AgentEvent
+	for i := 0; i < maxClaimPerPull; i++ {
+		env, path, err := b.inbox.ClaimNext()
+		if err != nil {
+			log.Warnf("[ReliableBus] inbox claim failed (kept for retry): %v", err)
+			return batch
+		}
+		if env == nil {
+			return batch
+		}
+		if env.State == reliability.InboxStateReceipted {
+			// 处理完成 receipt 已持久：只补 Ack，不重执行（2.4 幂等）。
+			if aerr := b.inbox.Ack(path); aerr != nil {
+				log.Warnf("[ReliableBus] ack of receipted %s deferred: %v", env.RequestID, aerr)
+			}
+			continue
+		}
+		for i2, m := range env.Messages {
+			// cold-eyes R2 Minor 5: honor the persisted role — system-type
+			// events (EmitSystemAlert) must not come back as user messages.
+			role := model.Role(m.Role)
+			if role == "" {
+				role = model.RoleUser
+			}
+			evt := NewExternalInputEvent(env.Source, model.Message{Role: role, Content: m.Content})
+			if evt.Metadata == nil {
+				evt.Metadata = make(map[string]any)
+			}
+			evt.Metadata["inbox_path"] = path
+			evt.Metadata["inbox_request_id"] = env.RequestID
+			if len(env.EventKeys) > 0 && i2 < len(env.EventKeys) {
+				// 已提交事实键回写（3.4）：重放的消费者据此跳过重复入库，
+				// 投影按同 key 幂等（满足「原始事件与投影不重复追加」）。
+				// cold-eyes Major 3 修复：按消息序号分配**单条** key——joined
+				// 复数形式会让第 2..n 条消息全部命中第 1 条的 key 而被误判
+				// alreadyStored，事实静默丢失；EventKeys[i] 与 Messages[i] 序号对齐。
+				evt.Metadata["inbox_dedup_key"] = env.EventKeys[i2]
+			}
+			batch = append(batch, evt)
+		}
+	}
+	return batch
+}
 
-// Publish enqueues an event. If the channel is full, waits up to
-// publishTimeout before dropping the event with a warning.
-// Logs a warning on nil events.
-func (b *EventBus) Publish(event *AgentEvent) {
-	if event == nil {
-		log.Warnf("[EventBus] Publish nil event, skipped")
+// ReconcileReceipted (cold-eyes Major 2): converge envelopes whose fact-chain
+// receipt event survived a crash but whose ack did not — claimed envelopes are
+// receipted+acked WITHOUT re-execution. Returns the number converged.
+func (b *EventBus) ReconcileReceipted(rids []string) int {
+	if b == nil || b.inbox == nil {
+		return 0
+	}
+	n := 0
+	for _, rid := range rids {
+		if b.inbox.ConfirmDurableByRequestID(rid) {
+			n++
+			log.Infof("[ReliableBus] receipted %s reconciled from fact-chain receipt (no re-execution)", rid)
+		}
+	}
+	return n
+}
+
+// DurableProvenance returns deduplicated (path, requestID) pairs for every
+// durable envelope consumed by a finished turn.
+func (b *EventBus) DurableProvenance(events []*AgentEvent) [][2]string {
+	if b.inbox == nil {
+		return nil
+	}
+	var out [][2]string
+	seen := map[string]bool{}
+	for _, evt := range events {
+		if evt == nil {
+			continue
+		}
+		path, _ := evt.Metadata["inbox_path"].(string)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		rid, _ := evt.Metadata["inbox_request_id"].(string)
+		out = append(out, [2]string{path, rid})
+	}
+	return out
+}
+
+// AppendDurableEventKeys writes committed fact keys back onto the envelope
+// (idempotent-replay dedup evidence; 3.4). Errors are the caller's to log —
+// a failed writeback degrades replay to at-least-once re-execution.
+func (b *EventBus) AppendDurableEventKeys(path string, keys []string) {
+	if b.inbox == nil || len(keys) == 0 {
 		return
 	}
-	// 纯 channel 模式（现状，向后兼容）：阻塞等 publishTimeout 后丢弃。
-	if b.spill == nil {
-		select {
-		case b.ch <- event:
-		case <-time.After(publishTimeout):
-			log.Warnf("[EventBus] Publish timeout (channel full), event dropped: type=%s source=%s",
-				event.Type, event.Source)
-		}
-		return
+	if err := b.inbox.RecordEventKeys(path, keys); err != nil {
+		log.Warnf("[ReliableBus] event-keys writeback failed for %s (replay may re-execute): %v", path, err)
 	}
-	// 可靠模式全序不变量：channel 内事件恒早于磁盘溢出事件。故一旦磁盘有积压（pending>0），
-	// 后续 Publish 一律溢出（不再试 channel）——否则新事件会插到磁盘旧事件之前造成时序倒置
-	// （Blocker：误标 trigger source、extractRootMetadata 路由被旧事件覆盖回复到错误会话、
-	// projection 顺序错乱）。溢出仅发生在 channel 满(256)时，此刻 channel 内 256 个事件
-	// 全部早于溢出项，故「channel 先、spill 后」的回收顺序即全序。
-	// M5（§8.4）并发假设：pending 读与下方 channel/spill 写非原子——多 goroutine 并发 Publish
-	// 且 channel 临界满时存在理论窄窗（两 goroutine 同读 pending==0，一个入 channel 一个溢出，
-	// 完成先后不定）。tagent 的 Publish 由单消费者 runEventLoop 的 onEvent 串行驱动，此窄窗在
-	// 生产模型下不可达；若未来引入多 goroutine Publish，须为「pending 读 + 写分发」加锁序列化。
-	pending := b.spill.Pending()
-	if pending == 0 {
-		// 磁盘无积压：先试 channel（快路径，绝大多数情况）。
-		select {
-		case b.ch <- event:
-			return
-		default:
-		}
+}
+
+// ConfirmDurable records the processing receipt then Acks. Failure leaves
+// the claim on disk for replay (at-least-once).
+func (b *EventBus) ConfirmDurable(path string) error {
+	if b.inbox == nil {
+		return nil
 	}
-	// 背压上限：磁盘积压超限则回退阻塞入 channel + 超时丢弃并告警（防磁盘无界增长）。
-	if pending >= maxSpillBacklog {
-		log.Errorf("[ReliableBus] spill backlog %d >= %d, blocking publish (backpressure)", pending, maxSpillBacklog)
-		select {
-		case b.ch <- event:
-			return
-		case <-time.After(publishTimeout):
-			log.Errorf("[ReliableBus] Publish timeout (channel full + spill backlog exceeded), event DROPPED: type=%s source=%s",
-				event.Type, event.Source)
-			return
-		}
+	if err := b.inbox.RecordReceipt(path, "turn finished"); err != nil {
+		return err
 	}
-	// 溢出落盘（不丢，at-least-once）。
-	data, err := json.Marshal(event)
-	if err == nil {
-		err = b.spill.Spill(data)
-	}
-	if err != nil {
-		// 序列化或溢出失败：回退阻塞入 channel（尽力不丢），超时才丢弃（可用性优先）。
-		log.Errorf("[ReliableBus] spill failed (%v), falling back to blocking publish", err)
-		select {
-		case b.ch <- event:
-		case <-time.After(publishTimeout):
-			log.Warnf("[ReliableBus] Publish timeout (channel full + spill failed), event dropped: type=%s source=%s",
-				event.Type, event.Source)
-		}
-		return
-	}
-	log.Warnf("[ReliableBus] channel full, event spilled to disk (at-least-once): type=%s source=%s",
-		event.Type, event.Source)
+	return b.inbox.Ack(path)
 }
 
 // Pull blocks until at least one event arrives or ctx is cancelled.
@@ -364,22 +598,47 @@ func (b *EventBus) Publish(event *AgentEvent) {
 // Returns the batch and nil error on success.
 // Returns nil and ctx.Err() when ctx is cancelled before any event arrives.
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
-	// 全序回收：channel 内事件恒早于磁盘溢出（Publish 保证 pending>0 时一律溢出）→ 先 channel
-	// 后 spill。批量上限防单次回收数万积压项拼成巨型 LLM 消息（Major）。
-	batch := b.drainChannel()
-	batch = append(batch, b.drainSpill(maxSpillPerPull)...)
-	if len(batch) > 0 {
-		return batch, nil
+	// 回收顺序：channel 内 volatile 事件先（尽力而为），随后按 seq 严格序
+	// claim durable envelope。批量上限防巨型 LLM 消息。
+	for {
+		batch := b.drainChannelNonWake()
+		batch = append(batch, b.claimDurable()...)
+		if len(batch) > 0 {
+			return batch, nil
+		}
+		// 皆空：阻塞等 channel 首个事件（volatile 输入或 durable 唤醒哨兵）。
+		select {
+		case evt := <-b.ch:
+			if !isInboxWake(evt) {
+				batch = append(batch, evt)
+			}
+			batch = append(batch, b.drainChannelNonWake()...)
+			batch = append(batch, b.claimDurable()...)
+			if len(batch) > 0 {
+				return batch, nil
+			}
+			continue // 仅哨兵：重新阻塞等待
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	// 皆空：阻塞等 channel 首个事件。
-	select {
-	case evt := <-b.ch:
-		batch := []*AgentEvent{evt}
-		batch = append(batch, b.drainChannel()...)
-		batch = append(batch, b.drainSpill(maxSpillPerPull)...)
-		return batch, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+}
+
+// drainChannelNonWake drains volatile events, dropping wake sentinels.
+func (b *EventBus) drainChannelNonWake() []*AgentEvent {
+	var batch []*AgentEvent
+	for {
+		select {
+		case evt := <-b.ch:
+			if isInboxWake(evt) {
+				continue
+			}
+			if evt != nil {
+				batch = append(batch, evt)
+			}
+		default:
+			return batch
+		}
 	}
 }
 
@@ -398,43 +657,13 @@ func (b *EventBus) drainChannel() []*AgentEvent {
 	}
 }
 
-// drainSpill 从磁盘回收至多 max 个溢出项（反序列化为 AgentEvent）。pending 短路（Nit：无积压
-// 不付 ReadDir syscall，TryPull 热路径每迭代都调）。瞬时读错误（ok=false,err）→ 停止本轮
-// （文件保留下次重试，防死循环）；坏 JSON（ok=true,unmarshal fail）→ 跳过继续（不饿死后续
-// 有效项）；删失败（ok=true,err）→ 数据有效照收（可能重复投递，at-least-once 允许）。
-func (b *EventBus) drainSpill(max int) []*AgentEvent {
-	if b.spill == nil || b.spill.Pending() == 0 {
-		return nil
-	}
-	var batch []*AgentEvent
-	for len(batch) < max {
-		data, ok, err := b.spill.Reclaim()
-		if !ok {
-			if err != nil {
-				log.Warnf("[ReliableBus] reclaim stopped this drain (will retry next pull): %v", err)
-			}
-			return batch
-		}
-		if err != nil {
-			log.Warnf("[ReliableBus] reclaim remove failed (may redeliver): %v", err)
-		}
-		var evt AgentEvent
-		if uerr := json.Unmarshal(data, &evt); uerr != nil {
-			log.Warnf("[ReliableBus] reclaim unmarshal failed, dropping spilled event: %v", uerr)
-			continue
-		}
-		batch = append(batch, &evt)
-	}
-	return batch
-}
-
 // TryPull non-blocking reads all pending events without waiting.
 // Returns an empty (non-nil) slice if no events are pending.
 // Unlike Pull, this does not block — it immediately returns if the channel is empty.
 func (b *EventBus) TryPull() []*AgentEvent {
-	// 全序：channel 先，spill 后（与 Pull 一致；pending 短路使无积压时零 ReadDir 开销）。
-	batch := b.drainChannel()
-	batch = append(batch, b.drainSpill(maxSpillPerPull)...)
+	// 回收顺序与 Pull 一致：channel volatile 先，durable 按 seq 严格序。
+	batch := b.drainChannelNonWake() // cold-eyes Minor 1: wake sentinels never leak into pulls
+	batch = append(batch, b.claimDurable()...)
 	if batch == nil {
 		batch = []*AgentEvent{}
 	}

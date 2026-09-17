@@ -264,15 +264,38 @@ func main() {
 		}
 		log.Infof("[HTTPAPI] LLM base URL updated to %s", baseURL)
 	})
+	// resident-readiness-plan 5.3：动态端点重定向默认禁用；RL 训练部署显式开启
+	//（TAGENT_RL_ALLOW_LLM_REDIRECT=1）并要求 allowlist（精确 host，任意端口）。
+	// 更新回调改用 error 版——重建失败整批拒绝（502），旧端点继续服务。
+	// 已知限制（cold-eyes Major 5 降级文档化）：allowlist 只约束初始 URL，
+	// 端点自身 30x 跳转不受逐跳校验——allowlist 中的 host 必须可信（不会
+	// 跳出清单），或部署在离网环境。后续变更为 LLM client 装 CheckRedirect。
+	// 已知限制（cold-eyes Major 5 降级文档化）：allowlist 只约束初始 URL，
+	// 端点自身 30x 跳转不受逐跳校验——allowlist 中的 host 必须可信（不会
+	// 跳出清单），或部署在离网环境。后续变更为 LLM client 装 CheckRedirect。
+	if os.Getenv("TAGENT_RL_ALLOW_LLM_REDIRECT") == "1" {
+		allowlist := []string{}
+		if v := os.Getenv("TAGENT_RL_ENDPOINT_ALLOWLIST"); v != "" {
+			for _, hst := range strings.Split(v, ",") {
+				if hst = strings.TrimSpace(strings.ToLower(hst)); hst != "" {
+					allowlist = append(allowlist, hst)
+				}
+			}
+		}
+		httpAPI.SetEndpointPolicy(true, allowlist)
+		log.Infof("[HTTPAPI] dynamic llm_base_url redirect ENABLED (allowlist=%v)", allowlist)
+	} else {
+		httpAPI.SetEndpointPolicy(false, nil)
+	}
+
 	// hardening-review-batch2 4.6（HTTP Server host-owned）：srv 由宿主持有，
 	// 重试循环受 stopHTTP 取消、SIGTERM 走 Shutdown 优雅等待——goroutine 不再
 	// 无控制永久循环（retry 间隔为线性递增封顶 60s，非指数退避）。
-	// fix(addr-regression 2026-09-16): batch2 重构为 srv 持有后 Addr 丢失——
-	// http.Server.ListenAndServe() 在 Addr 为空时静默默认绑 :80（非 root 必 permission
-	// denied）→ healthz 永不可达 → 保险链 sentinel-dead 每 4 分钟重启循环。
-	// 端口解析上移至 srv 构造前，Addr 显式携带（listenAddr 的校验/打印逻辑不变）。
+	// fix(addr-regression 2026-09-16) + resident-readiness-plan 5.5：srv 用
+	// rl.NewHTTPServer 硬化构造——Addr 显式携带（空 Addr 静默绑 :80 事故）+
+	// Read/Write/Idle timeouts。
 	listenAddr := ":" + httpPort
-	srv := &http.Server{Addr: listenAddr, Handler: httpAPI}
+	srv := rl.NewHTTPServer(listenAddr, httpAPI)
 	stopHTTP := make(chan struct{})
 	httpDone := make(chan struct{})
 	go func() {
@@ -284,6 +307,7 @@ func main() {
 		httpAPI.SetAuthToken(rlToken)
 		if err := rl.ValidateListenAddr(listenAddr, rlToken); err != nil {
 			listenAddr = "127.0.0.1:" + httpPort
+			srv.Addr = listenAddr // :80 事故教训：fallback 必须同步显式 Addr，绝不留空
 			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
 		}
 		fmt.Printf("  HTTPAPI:     http://%s\n", listenAddr)

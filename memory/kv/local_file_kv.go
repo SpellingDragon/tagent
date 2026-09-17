@@ -3,6 +3,7 @@ package kv
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -66,7 +68,41 @@ type LocalFileKV struct {
 	// Sync; this aligns the two durability standards.
 	fsync bool
 
+	// walNeedsDirSync (resident-readiness-plan 2.3): set at open when the
+	// WAL file did not exist yet — its FIRST creation must be followed by a
+	// directory sync so the file's directory entry itself is durable.
+	walNeedsDirSync bool
+
+	// lastErr records the most recent DEFERRED-flush failure (threshold or
+	// periodic). Pending ops are retained by appendWALLocked's error paths;
+	// the next Sync() (explicit or event barrier) re-attempts and surfaces
+	// the error — a deferred failure never upgrades to a silent success
+	// (resident-readiness-plan 2.4). Exposed via LastError for diagnostics.
+	lastErr error
+
+	// ops abstracts the durability syscalls so tests can inject failures at
+	// each boundary (resident-readiness-plan 2.2) without touching real data
+	// directories. Production code must only use k.ops.*, never os.*.
+	ops fileOps
+
 	flushDone chan struct{}
+}
+
+// fileOps is the injectable syscall surface of LocalFileKV.
+type fileOps struct {
+	openFile func(name string, flag int, perm os.FileMode) (*os.File, error)
+	syncFile func(f *os.File) error
+	rename   func(old, new string) error
+	remove   func(name string) error
+	syncDir  func(dir string) error
+}
+
+var defaultFileOps = fileOps{
+	openFile: os.OpenFile,
+	syncFile: func(f *os.File) error { return f.Sync() },
+	rename:   os.Rename,
+	remove:   os.Remove,
+	syncDir:  syncDir,
 }
 
 // walOp is a single WAL record. Op is "p" (put) or "d" (delete).
@@ -95,17 +131,40 @@ func WithFSync(enabled bool) LocalFileKVOption {
 	return func(k *LocalFileKV) { k.fsync = enabled }
 }
 
-// syncDirDurably best-effort fsyncs a directory so a rename inside it is
-// itself durable. Some platforms/filesystems reject directory fsync — the
-// error is intentionally swallowed (best-effort, caller already synced the
-// file itself).
-func syncDirDurably(dir string) {
+// syncDir best-effort syncs a directory so a rename/create inside it is
+// itself durable. Platform-unsupported directory fsync is recorded as a
+// degraded durability capability (logged once per call site) and swallowed;
+// any OTHER error propagates — it means the rename's durability is NOT
+// guaranteed and must not be reported as success (delta spec「屏障失败」).
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		return
+		return fmt.Errorf("open dir for sync %s: %w", dir, err)
 	}
-	_ = d.Sync()
-	_ = d.Close()
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		if isUnsupportedDirSync(syncErr) {
+			log.Warnf("[LocalFileKV] directory fsync unsupported on this platform (%v) — durability of renames in %s is best-effort (degraded capability)", syncErr, dir)
+			return nil
+		}
+		return fmt.Errorf("fsync dir %s: %w", dir, syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close dir %s: %w", dir, closeErr)
+	}
+	return nil
+}
+
+// isUnsupportedDirSync reports whether the error means "this platform or
+// filesystem does not support directory fsync" (as opposed to a real I/O
+// failure that must propagate).
+func isUnsupportedDirSync(err error) bool {
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EINVAL || errno == syscall.ENOTSUP || errno == syscall.EOPNOTSUPP
+	}
+	return false
 }
 
 // NewLocalFileKV creates a LocalFileKV backed by kv.json (snapshot) and
@@ -126,6 +185,7 @@ func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, er
 		snapPath:  filepath.Join(dataDir, "kv.json"),
 		walPath:   filepath.Join(dataDir, "kv.wal.jsonl"),
 		fsync:     true, // durability default: acknowledged writes survive power loss
+		ops:       defaultFileOps,
 		flushDone: make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -150,20 +210,29 @@ func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, er
 		if err := kv.replayWAL(); err != nil {
 			return nil, fmt.Errorf("replay kv wal %s: %w", kv.walPath, err)
 		}
+	} else {
+		// WAL absent (or stat failed): its first creation will need a
+		// directory sync so the directory entry is durable (2.3).
+		kv.walNeedsDirSync = true
 	}
 
 	go kv.flushLoop()
 	return kv, nil
 }
 
-// flushLoop periodically appends pending ops to the WAL.
+// flushLoop periodically appends pending ops to the WAL. A failure here is
+// recorded in lastErr (pending retained) — never silently dropped (2.4).
 func (k *LocalFileKV) flushLoop() {
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			_ = k.Sync() // best-effort periodic flush
+			if err := k.Sync(); err != nil {
+				k.mu.Lock()
+				k.lastErr = err
+				k.mu.Unlock()
+			}
 		case <-k.flushDone:
 			// Final flush is handled synchronously by Close; nothing to do.
 			return
@@ -249,7 +318,7 @@ func (k *LocalFileKV) appendWALLocked() error {
 	if len(k.pending) == 0 {
 		return nil
 	}
-	f, err := os.OpenFile(k.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := k.ops.openFile(k.walPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return fmt.Errorf("open kv wal: %w", err)
 	}
@@ -273,13 +342,21 @@ func (k *LocalFileKV) appendWALLocked() error {
 	// OS page cache can lose acknowledged writes on power loss (process-death
 	// survival is NOT the same guarantee).
 	if k.fsync {
-		if err := f.Sync(); err != nil {
+		if err := k.ops.syncFile(f); err != nil {
 			f.Close()
 			return fmt.Errorf("fsync kv wal: %w", err)
 		}
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close kv wal: %w", err)
+	}
+	// First WAL creation: make the directory entry itself durable before any
+	// caller treats the append as a barrier (resident-readiness-plan 2.3).
+	if k.fsync && k.walNeedsDirSync {
+		if err := k.ops.syncDir(filepath.Dir(k.walPath)); err != nil {
+			return fmt.Errorf("fsync kv wal dir: %w", err)
+		}
+		k.walNeedsDirSync = false
 	}
 	k.pending = k.pending[:0]
 	k.writeCnt = 0
@@ -304,7 +381,7 @@ func (k *LocalFileKV) compactLocked() error {
 	tmp := k.snapPath + ".tmp"
 	// Write + fsync the tmp file BEFORE rename: the rename is only as durable
 	// as the file it exposes.
-	tf, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	tf, err := k.ops.openFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("create kv snapshot tmp: %w", err)
 	}
@@ -313,7 +390,7 @@ func (k *LocalFileKV) compactLocked() error {
 		return fmt.Errorf("write kv snapshot tmp: %w", err)
 	}
 	if k.fsync {
-		if err := tf.Sync(); err != nil {
+		if err := k.ops.syncFile(tf); err != nil {
 			tf.Close()
 			return fmt.Errorf("fsync kv snapshot tmp: %w", err)
 		}
@@ -321,13 +398,18 @@ func (k *LocalFileKV) compactLocked() error {
 	if err := tf.Close(); err != nil {
 		return fmt.Errorf("close kv snapshot tmp: %w", err)
 	}
-	if err := os.Rename(tmp, k.snapPath); err != nil {
+	if err := k.ops.rename(tmp, k.snapPath); err != nil {
 		return fmt.Errorf("rename kv snapshot: %w", err)
 	}
 	if k.fsync {
-		syncDirDurably(filepath.Dir(k.snapPath)) // make the rename itself durable
+		// Make the rename itself durable; a real I/O failure here must fail
+		// the barrier (the caller keeps pending and re-attempts — replay is
+		// idempotent), only platform-unsupported dir fsync degrades.
+		if err := k.ops.syncDir(filepath.Dir(k.snapPath)); err != nil {
+			return fmt.Errorf("fsync kv snapshot dir: %w", err)
+		}
 	}
-	if err := os.Remove(k.walPath); err != nil && !os.IsNotExist(err) {
+	if err := k.ops.remove(k.walPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("truncate kv wal: %w", err)
 	}
 	k.walSize = 0
@@ -399,19 +481,34 @@ func (k *LocalFileKV) Close() error {
 	return k.Sync()
 }
 
+// LastError returns the most recent deferred-flush failure, if any (2.4).
+// Pending ops are retained; the next Sync re-attempts them. Exposed for the
+// diagnostics chain — a deferred failure must stay observable.
+func (k *LocalFileKV) LastError() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.lastErr
+}
+
 // enqueueLocked records an op and appends to the WAL early when the write
-// threshold is reached. Caller must hold the mutex.
+// threshold is reached. Caller must hold the mutex. A threshold-flush
+// failure is recorded in lastErr (pending retained) — the KVPut itself
+// stays an async acceptance; only Sync constitutes the durability barrier.
 func (k *LocalFileKV) enqueueLocked(op walOp) {
 	k.pending = append(k.pending, op)
 	k.writeCnt++
 	if k.writeCnt >= flushThreshold {
-		_ = k.appendWALLocked()
+		if err := k.appendWALLocked(); err != nil {
+			k.lastErr = err
+		}
 	}
 }
 
-// KVPut stores a key-value pair. The write is persisted to the WAL
-// asynchronously (within flushInterval) or immediately when the write
-// threshold is reached.
+// KVPut stores a key-value pair. THIS IS AN ASYNC ACCEPTANCE ONLY: the
+// write lands in memory immediately and persists to the WAL within
+// flushInterval / flushThreshold writes. Only a subsequent Sync() (or an
+// event-level barrier via FileSegmentStore) makes it durable — the return
+// value nil MUST NOT be read as a durability guarantee.
 func (k *LocalFileKV) KVPut(key, value string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -420,14 +517,14 @@ func (k *LocalFileKV) KVPut(key, value string) error {
 	return nil
 }
 
-// KVGet retrieves the value for a key.
-// Returns an error if the key does not exist.
+// KVGet retrieves the value for the key. A missing key returns an error
+// wrapping memory.ErrKeyNotFound — any other error is storage I/O.
 func (k *LocalFileKV) KVGet(key string) (string, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	value, ok := k.data[key]
 	if !ok {
-		return "", fmt.Errorf("key not found: %s", key)
+		return "", memory.KeyNotFound(key, nil)
 	}
 	return value, nil
 }

@@ -157,6 +157,11 @@ type StoreStats struct {
 	TotalEvents int    `json:"total_events"`
 	StorageSize int64  `json:"storage_size"`
 	DataDir     string `json:"data_dir"`
+	// CountsKnown (resident-readiness-plan 2.8): false when the live counts
+	// could not be rebuilt from the fact chain (backend without partition
+	// enumeration, or a scan failure). Capacity eviction pauses on unknown —
+	// unknown counts must never be reported as a precise 0.
+	CountsKnown bool `json:"counts_known"`
 }
 
 // Event type constants are defined in the event package (event.Type*).

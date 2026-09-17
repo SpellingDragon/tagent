@@ -3,10 +3,7 @@
 ## Purpose
 
 执行器（fwAgent+runner+tools 装配）=配置可重导出的无状态函数，经 cm 内可换执行器缝（SwapExecutor）非重启原子换入：懒检查先序（memory canonical diff 拒绝→fingerprint 检测）、build-validate-then-swap fail-closed、drain-free turn 级、副作用 ownership 表、代际日志与 ring 2 回滚。org 级基础设施（loop/bus/cm/projection/TaskManager/monitor）常驻不换。
-
-
 ## Requirements
-
 ### Requirement: 执行器可热换（cm.runner 级换代，非重启）
 
 执行器（fwAgent+runner+其 tools 装配）SHALL 是「配置→turn 行为」的可重导出函数，经 **cm 内可换执行器缝**原子换入：`SwapExecutor(newRunner)` 在 RWMutex 下原子替换；`RunFlow` 每 turn 取当前 runner 引用（**drain-free turn 级**：in-flight turn 用旧 runner 跑完）。**TagentAgent/事件循环/bus/cm/projection/TaskManager/monitor/org 级基础设施 SHALL 常驻不换**（宿主入口 StartLoop/InjectMessage/outputCh 零变化）。结构热更 SHALL NOT 依赖进程重启。
@@ -26,19 +23,15 @@
 
 ### Requirement: fingerprint 检测与 memory 拒绝（懒检查先序）
 
-配置变更检测 SHALL 以懒检查（既有 orgReloader 模式）为先序：mtime 变→**先独立 canonical diff（JSON）agents.*.Memory 段**→命中 SHALL 记 ERROR+「须重启」通知并 return（memory 被 fingerprint 白名单排除，若不先检则静默不生效）；未命中→`computeOrgFingerprint` 白名单比对→变化→结构热更路径；不变→仅 ApplyOrgParams。
+配置变更 SHALL 懒检查 mtime；解析后先将 agents.*.Memory canonical 指纹与当前 effective 比较，变化即拒绝热迁移、保留当前代并明确须重启，SHALL NOT 因拒绝而推进 effective 指纹。其余结构变化先 build-validate-then-swap，数值变化按成功执行代逐 agent 应用，不与结构分支互斥。
 
 #### Scenario: tools 增删热生效
-
-- **GIVEN** 配置新增一个工具引用
-- **WHEN** fingerprint 变化触发 Reload 成功
-- **THEN** 后续 turn 的 LLM 工具声明集含新工具，历史事件照常渲染（不可变事实，R1 红利）
+- **WHEN** 工具引用变化且构建验证通过
+- **THEN** 下一 turn 使用新声明集，历史 tool_call/result 不被改写，同批数值配置也生效
 
 #### Scenario: memory 变更拒绝热更（检测可达）
-
-- **GIVEN** 配置仅变更 agents.*.memory.*（fingerprint 不变）
-- **WHEN** 懒检查触发（mtime 变）
-- **THEN** memory 先序检测命中→SHALL NOT 换 runner，SHALL 记 ERROR 并通知「该配置须重启生效」（fail-closed；不依赖 fingerprint 变化路径）
+- **WHEN** 仅 memory 变化或同一未生效 memory 再次随其他字段编辑
+- **THEN** 每次都以 effective 为比较基准拒绝热迁移，旧资源不变且给出通知
 
 ### Requirement: build-validate-then-swap 可逆（fail-closed，副作用 ownership）
 
@@ -74,12 +67,19 @@ Reload SHALL 先完整构建并校验新执行器装配（LoadConfig 校验 + fw
 
 ### Requirement: 退役执行器与模型延迟回收
 
-SwapExecutor 换代时，跌出 ring-2 回滚窗口的旧 runner SHALL 在无 in-flight turn 引用后被 Close（若实现 Closer 语义）；SwappableModel.Swap 换下的旧 model SHALL 以同型 in-flight 计数延迟 Close。Close SHALL 幂等。回收 MUST NOT 影响回滚能力（ring 内代际不 Close）。
+ring-2 SHALL 保留配置快照以支持重建回滚，不以存活 runner 作为回滚真源。旧 runner 在无 in-flight turn 后 SHALL 由 owner 幂等 Close。SwappableModel 的 in-flight SHALL 覆盖返回流关闭/取消之前的完整生命周期，而非仅 GenerateContent 函数调用；error/nil-stream SHALL 释放租约。当前在用或被重新选中的实例 SHALL NOT 被退役清扫，借用的模型 SHALL NOT 被非 owner 关闭。
 
 #### Scenario: 连续三次热更后的资源回收
+- **WHEN** 执行器连续换代且旧 turn 均完成
+- **THEN** 非在用旧 runner 恰关闭一次，配置快照仍可用于回滚，不要求 ring 内旧 runner 存活
 
-- **WHEN** 执行器连续换代三代（第一代已跌出 ring-2）且期间无未完成 turn
-- **THEN** 第一代 runner 的 Close 被调用且仅一次，ring-2 内两代不被关闭
+#### Scenario: 流未结束时换模型
+- **WHEN** GenerateContent 已返回 channel，但旧流仍在发送，随后 Swap
+- **THEN** 旧 model 不被关闭，所有响应继续可读，流结束/取消后才释放并回收
+
+#### Scenario: 重新选择仍在用实例
+- **WHEN** A→B→A 且 A 尚有在飞流
+- **THEN** A 不被旧退役记录错误关闭，最终各 owner 只关闭一次
 
 ### Requirement: Rollback 手动触发面
 
@@ -89,3 +89,20 @@ SwapExecutor 的 Rollback 能力 SHALL 具备生产可达的手动触发面（�
 
 - **WHEN** 常驻进程收到约定的回滚信号
 - **THEN** 按 ring-2 快照重建执行器并 Swap 回，日志记录代际与指纹，后续 turn 使用上一代配置
+
+### Requirement: 逐 agent 执行代与有效配置一致
+
+热更 SHALL 按 agent 身份绑定其常驻 store/session/projection/task，而不是给所有子树复用 entry store。新拓扑准备失败 SHALL 保持上一代；成功时数值与结构 SHALL 同批作用于新代真实对象，日志/回执 SHALL 回读 effective 并列 desired、generation、held/rejected。删除配置字段 SHALL 回归默认值。memory 拒绝 SHALL 不推进 effective 指纹；回滚 SHALL 同时恢复上一成功配置的结构与数值。
+
+#### Scenario: 多 agent 混合变更
+- **WHEN** entry 与两个子 agent 同次变更工具、模型和预算
+- **THEN** 各自真实请求使用对应参数，各写入原命名空间，投影与任务板不因验证壳丢失
+
+#### Scenario: 内存配置反复被拒绝
+- **WHEN** 未生效 memory 配置保留在文件中并再次编辑其他字段
+- **THEN** 仍拒绝热迁移，effective memory 指纹不变化，不以第二次检查绕过拒绝
+
+#### Scenario: 首次结构换代后回滚
+- **WHEN** 首次换代成功后主动 Rollback
+- **THEN** 按启动代配置重建且恢复数值参数，行为与启动代等价，现有在飞 turn 不受影响
+

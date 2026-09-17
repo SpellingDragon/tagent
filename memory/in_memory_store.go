@@ -36,6 +36,11 @@ func NewInMemoryStoreWithRelation(rel RelationStore) *InMemoryStore {
 }
 
 // StoreEvent stores a single event.
+//
+// Contract parity with FileSegmentStore (resident-readiness-plan 2.7): a
+// duplicate EventKey is REFUSED (an EventKey is the event's identity, never
+// silently overwritten) and the stored event is a defensive clone, so the
+// caller mutating its input afterwards cannot corrupt stored facts.
 func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 	if key == 0 {
 		return fmt.Errorf("event key cannot be zero")
@@ -51,14 +56,18 @@ func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 	}
 	event.EventKey = key
 
+	if _, exists := s.events[pid][key]; exists {
+		return fmt.Errorf("event key %d already exists: %w", key, ErrDuplicateEventKey)
+	}
 	if s.events[pid] == nil {
 		s.events[pid] = make(map[int64]FullEvent)
 	}
-	s.events[pid][key] = event
+	s.events[pid][key] = cloneFullEvent(event)
 	return nil
 }
 
-// GetEvent retrieves a single event by its EventKey.
+// GetEvent retrieves a single event by its EventKey. The returned event is
+// a defensive clone — caller mutations must not corrupt stored facts (2.7).
 func (s *InMemoryStore) GetEvent(key int64) (*FullEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -66,16 +75,18 @@ func (s *InMemoryStore) GetEvent(key int64) (*FullEvent, error) {
 	pid := PartitionIDFromEventKey(key)
 	partition, ok := s.events[pid]
 	if !ok {
-		return nil, fmt.Errorf("event not found: %d", key)
+		return nil, fmt.Errorf("event %d not found: %w", key, ErrKeyNotFound)
 	}
 	event, ok := partition[key]
 	if !ok {
-		return nil, fmt.Errorf("event not found: %d", key)
+		return nil, fmt.Errorf("event %d not found: %w", key, ErrKeyNotFound)
 	}
-	return &event, nil
+	evt := cloneFullEvent(event)
+	return &evt, nil
 }
 
-// GetEvents retrieves multiple events by their EventKeys.
+// GetEvents retrieves multiple events by their EventKeys. Returned events
+// are defensive clones (2.7).
 func (s *InMemoryStore) GetEvents(keys []int64) ([]FullEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -85,7 +96,7 @@ func (s *InMemoryStore) GetEvents(keys []int64) ([]FullEvent, error) {
 		pid := PartitionIDFromEventKey(key)
 		if partition, ok := s.events[pid]; ok {
 			if event, ok := partition[key]; ok {
-				results = append(results, event)
+				results = append(results, cloneFullEvent(event))
 			}
 		}
 	}
@@ -165,6 +176,11 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 }
 
 // resolvePartitions determines which partitions to search based on query.
+//
+// Contract parity with FileSegmentStore (2.7): with no explicit partition
+// filter the result is EMPTY — cross-partition reads require explicit
+// authorization (event-segment-store isolation); "scan everything" remains
+// available only through the explicit debug helpers (AllEvents*).
 func (s *InMemoryStore) resolvePartitions(query QueryOptions) []int {
 	if len(query.PartitionIDs) > 0 {
 		return query.PartitionIDs
@@ -172,13 +188,8 @@ func (s *InMemoryStore) resolvePartitions(query QueryOptions) []int {
 	if query.PartitionID > 0 {
 		return []int{query.PartitionID}
 	}
-	// All partitions
-	pids := make([]int, 0, len(s.events))
-	for pid := range s.events {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	return pids
+	// No partition filter — scan nothing (isolation, same as FileSegmentStore).
+	return nil
 }
 
 // matchesQuery checks if an event matches the query filters.

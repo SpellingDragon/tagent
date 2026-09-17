@@ -279,118 +279,113 @@ func resolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig {
 //
 // For type: localfile, creates a FileSegmentStore backed by LocalFileKV
 // (JSON file persistence, no external binary dependency) and InMemRelationStore.
-// Same path → same FileSegmentStore instance (shared via namedFileStores registry).
 //
-// For type: memory, when a non-empty path is provided, the same path
-// returns the same InMemoryStore instance (shared via registry).
-// An empty path creates an isolated store — suitable for agents that
-// don't need cross-agent memory access (e.g., knowledge agent).
-func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, error) {
+// Shared-path stores go through the RuntimeResources registry (4.2): same
+// path + same fingerprint → same instance + one lease per consumer; the LAST
+// release closes the store and frees the directory writer-lock (4.3), and an
+// incompatible fingerprint is REJECTED (4.1 T3). Empty path = isolated store
+// owned exclusively by that agent.
+//
+// The returned release func is bound to the acquiring agent's lifecycle
+// (executed from TagentAgent.Close); executor shells do NOT acquire (they
+// borrow the resident entry's store).
+func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, func(), error) {
 	switch mc.Type {
 	case "memory", "":
 		if mc.Path == "" {
 			// Isolated store — no sharing needed
+			return memory.NewInMemoryStore(), nil, nil
+		}
+		// Shared by path → registry lease（4.2：租约化，最后释放才关闭）。
+		return defaultResources.acquire("mem", mc.Path, fingerprintMemory(mc), func() (memory.MemoryStore, error) {
 			return memory.NewInMemoryStore(), nil
-		}
-		// Shared by path: same path → same InMemoryStore instance
-		namedMemMu.Lock()
-		defer namedMemMu.Unlock()
-		if s, ok := namedMemStores[mc.Path]; ok {
-			return s, nil
-		}
-		s := memory.NewInMemoryStore()
-		namedMemStores[mc.Path] = s
-		return s, nil
+		})
 	case "file":
 		if mc.Path == "" {
-			return nil, fmt.Errorf("file memory store requires path")
+			return nil, nil, fmt.Errorf("file memory store requires path")
 		}
-		// Shared by path（M-1，四审）：与 localfile 同构——同 path 同实例，防跨 agent
-		// read_namespaces 下 RelationStore 内存图分歧（因果链断链）与双 Compactor 并发覆盖。
-		namedRVMu.Lock()
-		defer namedRVMu.Unlock()
-		if s, ok := namedRVStores[mc.Path]; ok {
-			return s, nil
-		}
-		rel, err := memory.NewInMemRelationStore(mc.Path)
-		if err != nil {
-			return nil, fmt.Errorf("create relation store: %w", err)
-		}
-		configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
-		if err != nil {
-			return nil, fmt.Errorf("create rustviking config: %w", err)
-		}
-		kv := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
-		store, err := memory.NewFileSegmentStore(kv, rel, mc.Path, 1000)
-		if err != nil {
-			return nil, fmt.Errorf("create file segment store: %w", err)
-		}
-
-		// Wire up lifecycle components: TombstoneSet → LifecycleManager → Compactor
-		tombstone := memory.NewTombstoneSet(rel, kv, 0) // pid=0 for store-level tombstones
-		if err := tombstone.RecoverFromKV(); err != nil {
-			log.Warnf("[tagent] tombstone recovery failed (non-fatal): %v", err)
-		}
-		store.SetTombstoneSet(tombstone)
-
-		lm := memory.NewLifecycleManager(store, tombstone, resolveLifecycleConfig(mc.Lifecycle))
-		lm.Start()
-		store.SetLifecycleManager(lm)
-
-		compactor := memory.NewCompactor(store, kv, rel, tombstone, memory.DefaultCompactionConfig())
-		compactor.Start()
-		store.SetCompactor(compactor)
-
-		namedRVStores[mc.Path] = store
-		return store, nil
+		// Shared by path（M-1，四审）→ registry lease（4.2/4.3）。open 闭包含
+		// tombstone 恢复 → 计数重建 → 扫描器启动的完整时序（2.8/2.9）。
+		return defaultResources.acquire("rv", mc.Path, fingerprintMemory(mc), func() (memory.MemoryStore, error) {
+			return openRVStore(mc)
+		})
 	case "localfile":
 		if mc.Path == "" {
-			return nil, fmt.Errorf("localfile memory store requires path")
+			return nil, nil, fmt.Errorf("localfile memory store requires path")
 		}
-		// Shared by path: same path → same FileSegmentStore instance
-		// (so recall can read tagent's partition via read_namespaces)
-		namedFileMu.Lock()
-		defer namedFileMu.Unlock()
-		if s, ok := namedFileStores[mc.Path]; ok {
-			return s, nil
-		}
-		rel, err := memory.NewInMemRelationStore(mc.Path)
-		if err != nil {
-			return nil, fmt.Errorf("create relation store: %w", err)
-		}
-		kvOpts := []kv.LocalFileKVOption{}
-		if mc.FSync != nil && !*mc.FSync {
-			kvOpts = append(kvOpts, kv.WithFSync(false)) // nil → default enabled (D1)
-		}
-		kv, err := kv.NewLocalFileKV(mc.Path, kvOpts...)
-		if err != nil {
-			return nil, fmt.Errorf("create local file kv: %w", err)
-		}
-		store, err := memory.NewFileSegmentStore(kv, rel, mc.Path, 1000)
-		if err != nil {
-			return nil, fmt.Errorf("create file segment store: %w", err)
-		}
-
-		// Wire up lifecycle components: TombstoneSet → LifecycleManager → Compactor
-		tombstone := memory.NewTombstoneSet(rel, kv, 0)
-		if err := tombstone.RecoverFromKV(); err != nil {
-			log.Warnf("[tagent] tombstone recovery failed (non-fatal): %v", err)
-		}
-		store.SetTombstoneSet(tombstone)
-
-		lm := memory.NewLifecycleManager(store, tombstone, resolveLifecycleConfig(mc.Lifecycle))
-		lm.Start()
-		store.SetLifecycleManager(lm)
-
-		compactor := memory.NewCompactor(store, kv, rel, tombstone, memory.DefaultCompactionConfig())
-		compactor.Start()
-		store.SetCompactor(compactor)
-
-		namedFileStores[mc.Path] = store
-		return store, nil
+		return defaultResources.acquire("localfile", mc.Path, fingerprintMemory(mc), func() (memory.MemoryStore, error) {
+			return openLocalFileStore(mc)
+		})
 	default:
-		return nil, fmt.Errorf("unknown memory store type %q", mc.Type)
+		return nil, nil, fmt.Errorf("unknown memory store type %q", mc.Type)
 	}
+}
+
+// openLocalFileStore builds (and fully wires) a localfile-backed store.
+func openLocalFileStore(mc MemoryConfig) (memory.MemoryStore, error) {
+	rel, err := memory.NewInMemRelationStore(mc.Path)
+	if err != nil {
+		return nil, fmt.Errorf("create relation store: %w", err)
+	}
+	kvOpts := []kv.LocalFileKVOption{}
+	if mc.FSync != nil && !*mc.FSync {
+		kvOpts = append(kvOpts, kv.WithFSync(false)) // nil → default enabled (D1)
+	}
+	kvStore, err := kv.NewLocalFileKV(mc.Path, kvOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("create local file kv: %w", err)
+	}
+	store, err := memory.NewFileSegmentStore(kvStore, rel, mc.Path, 1000)
+	if err != nil {
+		return nil, fmt.Errorf("create file segment store: %w", err)
+	}
+	wireStoreLifecycle(store, kvStore, rel, tombstoneOf(store, rel, kvStore, 0), resolveLifecycleConfig(mc.Lifecycle))
+	return store, nil
+}
+
+// openRVStore builds (and fully wires) a rustviking-backed store.
+func openRVStore(mc MemoryConfig) (memory.MemoryStore, error) {
+	rel, err := memory.NewInMemRelationStore(mc.Path)
+	if err != nil {
+		return nil, fmt.Errorf("create relation store: %w", err)
+	}
+	configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
+	if err != nil {
+		return nil, fmt.Errorf("create rustviking config: %w", err)
+	}
+	kvClient := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
+	store, err := memory.NewFileSegmentStore(kvClient, rel, mc.Path, 1000)
+	if err != nil {
+		return nil, fmt.Errorf("create file segment store: %w", err)
+	}
+	wireStoreLifecycle(store, kvClient, rel, tombstoneOf(store, rel, kvClient, 0), resolveLifecycleConfig(mc.Lifecycle))
+	return store, nil
+}
+
+// tombstoneOf creates + recovers the store-level tombstone set.
+func tombstoneOf(store *memory.FileSegmentStore, rel memory.RelationStore, kvStore memory.KVStore, pid int) *memory.TombstoneSet {
+	tombstone := memory.NewTombstoneSet(rel, kvStore, pid)
+	if err := tombstone.RecoverFromKV(); err != nil {
+		log.Warnf("[tagent] tombstone recovery failed (non-fatal): %v", err)
+	}
+	store.SetTombstoneSet(tombstone)
+	return tombstone
+}
+
+// wireStoreLifecycle starts tombstone rebuild → scanners in the 2.8 order
+// (tombstone recovery happens in tombstoneOf BEFORE this; count rebuild next;
+// lifecycle/compaction scanners LAST).
+func wireStoreLifecycle(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, tombstone *memory.TombstoneSet, lc memory.LifecycleConfig) {
+	if err := store.RebuildLiveCounts(); err != nil {
+		log.Warnf("[tagent] live-count rebuild failed — capacity eviction paused (counts unknown): %v", err)
+	}
+	lm := memory.NewLifecycleManager(store, tombstone, lc)
+	lm.Start()
+	store.SetLifecycleManager(lm)
+
+	compactor := memory.NewCompactor(store, kvStore, rel, tombstone, memory.DefaultCompactionConfig())
+	compactor.Start()
+	store.SetCompactor(compactor)
 }
 
 // wireMemoryEngine 按 MemoryConfig.Engine 为 store 包裹记忆引擎（T-A 解耦缝）。

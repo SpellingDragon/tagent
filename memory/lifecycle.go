@@ -195,6 +195,12 @@ func (lm *LifecycleManager) checkCapacity() {
 	if lm.config.MaxEventsPerPartition <= 0 {
 		return
 	}
+	// Unknown counts must never drive eviction (2.8): a failed/unavailable
+	// rebuild would otherwise be misread as "0 events" and skip, or a stale
+	// count could over-evict. Pause until a successful RebuildLiveCounts.
+	if !lm.store.LivesCountKnown() {
+		return
+	}
 
 	lm.store.partitions.Range(func(key, value interface{}) bool {
 		pid := key.(int)

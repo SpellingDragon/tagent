@@ -3,6 +3,7 @@ package memory
 import (
 	"container/list"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -145,6 +146,12 @@ type FileSegmentStore struct {
 	// 持久键），防死键堆积与重启复活（审查 M2）。compactor 先于本回调设置启动，故用
 	// atomic 防竞态。由 wireMemoryEngine 经 SetVectorRemover 接线。
 	vecRemover atomic.Value // VectorRemover
+
+	// countsKnown (resident-readiness-plan 2.8): true only after a successful
+	// RebuildLiveCounts — the eventCount fields then reflect the FULL logical
+	// live set (deduped, tombstone-excluded), not just this process's writes.
+	// Unknown counts pause capacity eviction (never treated as 0).
+	countsKnown atomic.Bool
 }
 
 // NewFileSegmentStore creates a FileSegmentStore.
@@ -197,6 +204,54 @@ func (s *FileSegmentStore) Init() error {
 	return nil
 }
 
+// LivesCountKnown reports whether the per-partition live counts reflect the
+// full logical set (2.8). Capacity eviction must pause when false.
+func (s *FileSegmentStore) LivesCountKnown() bool { return s.countsKnown.Load() }
+
+// RebuildLiveCounts rebuilds each discovered partition's logical live count
+// from the single fact chain (resident-readiness-plan 2.8): dedup by
+// EventKey (compaction crash windows keep both layers alive briefly) and
+// tombstone exclusion. Must run AFTER tombstone recovery and BEFORE the
+// lifecycle/compaction scanners start. Any scan failure leaves the counts
+// unknown (capacity eviction pauses) instead of pretending an empty store.
+func (s *FileSegmentStore) RebuildLiveCounts() error {
+	lister, ok := s.kv.(interface{ ListPartitionIDs() []int })
+	if !ok {
+		return fmt.Errorf("kv backend has no ListPartitionIDs capability")
+	}
+	for _, pid := range lister.ListPartitionIDs() {
+		live := make(map[int64]struct{})
+		windows, err := s.ListSegments(pid)
+		if err != nil {
+			return fmt.Errorf("list segments pid=%d: %w", pid, err)
+		}
+		for _, windowTS := range windows {
+			pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, windowTS), 0)
+			if err != nil {
+				return fmt.Errorf("scan window pid=%d window=%d: %w", pid, windowTS, err)
+			}
+			for _, pair := range pairs {
+				var evt struct {
+					EventKey int64 `json:"event_key"`
+				}
+				if json.Unmarshal([]byte(pair.Value), &evt) != nil || evt.EventKey == 0 {
+					continue
+				}
+				if s.tombstones != nil && s.tombstones.IsTombstone(evt.EventKey) {
+					continue // logically dead — not part of the live count
+				}
+				live[evt.EventKey] = struct{}{} // dedup across crash-window layers
+			}
+		}
+		state := s.getPartitionState(pid)
+		state.mu.Lock()
+		state.eventCount = int64(len(live))
+		state.mu.Unlock()
+	}
+	s.countsKnown.Store(true)
+	return nil
+}
+
 // getPartitionState returns (or creates) the PartitionState for a given partition ID.
 func (s *FileSegmentStore) getPartitionState(pid int) *PartitionState {
 	actual, _ := s.partitions.LoadOrStore(pid, &PartitionState{})
@@ -206,6 +261,13 @@ func (s *FileSegmentStore) getPartitionState(pid int) *PartitionState {
 // ==================== Write Operations ====================
 
 // StoreEvent stores a single event via RustViking KV.
+//
+// Commit semantics (resident-readiness-plan 2.3): the event is committed
+// serially — collision check → evt → idx → (meta) → DURABILITY BARRIER →
+// cache/count publication. Success means the barrier completed: the event
+// survives an unclean process termination even below the WAL flush
+// threshold. Any failure leaves the cache and the live count untouched and
+// the caller (stored-gate) must not project the event.
 func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	if key == 0 {
 		return fmt.Errorf("event key cannot be zero")
@@ -263,7 +325,6 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	}
 	seq := state.seqCounter
 	state.seqCounter++
-	state.eventCount++
 	state.mu.Unlock()
 
 	// Serialize event
@@ -277,12 +338,20 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	// be a snowflake collision (the in-memory seq counter restarts across
 	// processes; two writers in the same second collide). Silently
 	// overwriting the idx pointer would break event immutability, so reject
-	// instead. All producers mint a fresh key per event; no caller relies on
-	// rewriting an existing key. Must precede the evt write: segment scans
-	// read events directly, so a rejected write must not leave a ghost.
+	// with the typed duplicate error. A storage I/O error here fails the
+	// commit LOUD — it must never be misread as "the key is free" (2.5).
+	// Must precede the evt write: segment scans read events directly, so a
+	// rejected write must not leave a ghost.
 	idxKVKey := IndexKeyStr(pid, key)
 	if _, err := s.kv.KVGet(idxKVKey); err == nil {
-		return fmt.Errorf("event key %d already exists (snowflake collision?): refusing to overwrite", key)
+		// The identity already has a slot. Deterministic replay (2.6): if the
+		// stored content is byte-identical to what we are writing, this is an
+		// uncommitted orphan from a failed barrier — complete the commit
+		// idempotently (re-run the barrier, republish cache, count once).
+		// Any DIFFERENT content under the same identity stays refused (D15).
+		return s.completeOrphanCommit(pid, key, idxKVKey, event, eventJSON, state)
+	} else if !errors.Is(err, ErrKeyNotFound) {
+		return fmt.Errorf("collision probe for event %d failed: %w", key, err)
 	}
 
 	// KV key for event content
@@ -293,11 +362,75 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 
 	// KV key for index (EventKey → segment position)
 	idxValue := fmt.Sprintf("%d:%d", windowTS, seq)
+	return s.finishCommit(pid, key, idxKVKey, idxValue, windowTS, seq, event, state)
+}
+
+// completeOrphanCommit finishes an UNCOMMITTED write found under the same
+// EventKey (2.6): the evt/idx pair exists but a failed barrier means the
+// event never committed (no cache, no count, caller errored). When the
+// stored slot content is byte-identical to the retry, complete the commit
+// idempotently — same EventKey, same content, one count. Different content
+// under the same identity remains a refused collision (D15): an EventKey IS
+// the event's identity.
+func (s *FileSegmentStore) completeOrphanCommit(
+	pid int, key int64, idxKVKey string, event FullEvent, eventJSON []byte, state *PartitionState,
+) error {
+	idxValue, err := s.kv.KVGet(idxKVKey)
+	if err != nil {
+		return fmt.Errorf("orphan probe for event %d failed: %w", key, err)
+	}
+	var windowTS, seq int64
+	if _, err := fmt.Sscanf(idxValue, "%d:%d", &windowTS, &seq); err != nil {
+		return fmt.Errorf("orphan index for event %d unreadable (%q): %w", key, idxValue, err)
+	}
+	evtKVKey := EventKeyStr(pid, windowTS, int(seq))
+	stored, err := s.kv.KVGet(evtKVKey)
+	if err != nil {
+		// evt slot missing while idx exists (half-orphans included): the
+		// retry content becomes the slot of record — same identity, so this
+		// is a completion, not an overwrite of a DIFFERENT fact.
+		if !errors.Is(err, ErrKeyNotFound) {
+			return fmt.Errorf("orphan slot read for event %d failed: %w", key, err)
+		}
+	} else if stored != string(eventJSON) {
+		return fmt.Errorf("event key %d already exists with DIFFERENT content (snowflake collision?): %w",
+			key, ErrDuplicateEventKey)
+	}
+	if seq == 0 {
+		meta := SegmentMeta{PartitionID: pid, WindowTS: windowTS, Layer: 1, Sealed: false}
+		metaJSON, _ := json.Marshal(meta)
+		if err := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(metaJSON)); err != nil {
+			return fmt.Errorf("failed to store segment meta for event %d: %w", key, err)
+		}
+	}
+	if syncer, ok := s.kv.(interface{ Sync() error }); ok {
+		if err := syncer.Sync(); err != nil {
+			return fmt.Errorf("durability barrier for event %d failed: %w", key, err)
+		}
+	}
+	storedClone := cloneFullEvent(event)
+	s.cache.Add(key, &storedClone)
+	state.mu.Lock()
+	state.eventCount++
+	state.mu.Unlock()
+	return nil
+}
+
+// finishCommit performs the tail of the commit protocol shared by fresh
+// writes and idempotent orphan completion (2.6): idx → (meta) → barrier →
+// cache/count publication.
+func (s *FileSegmentStore) finishCommit(
+	pid int, key int64, idxKVKey, idxValue string, windowTS int64, seq int,
+	event FullEvent, state *PartitionState,
+) error {
 	if err := s.kv.KVPut(idxKVKey, idxValue); err != nil {
 		return fmt.Errorf("failed to store index for event %d: %w", key, err)
 	}
 
-	// Write/update segment metadata (if first event in window)
+	// Write/update segment metadata (if first event in window). Meta is the
+	// segment-discovery entry point — a failed meta write must NOT be
+	// reported as a committed event (2.5): fail the commit; the orphan
+	// evt/idx pair is repaired by the deterministic replay path (2.6).
 	if seq == 0 {
 		meta := SegmentMeta{
 			PartitionID: pid,
@@ -308,12 +441,26 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 		metaJSON, _ := json.Marshal(meta)
 		metaKVKey := MetaKeyStr(pid, windowTS)
 		if err := s.kv.KVPut(metaKVKey, string(metaJSON)); err != nil {
-			log.Errorf("[SegmentStore] KVPut meta failed pid=%d window=%d: %v", pid, windowTS, err)
+			return fmt.Errorf("failed to store segment meta for event %d: %w", key, err)
 		}
 	}
 
-	// Update LRU cache
-	s.cache.Add(key, &event)
+	// Durability barrier (2.3): the event is committed only once its
+	// evt+idx(+meta) writes are flushed/fsynced by the backend. Backends
+	// without a Sync capability keep flush-level semantics (documented).
+	if syncer, ok := s.kv.(interface{ Sync() error }); ok {
+		if err := syncer.Sync(); err != nil {
+			return fmt.Errorf("durability barrier for event %d failed: %w", key, err)
+		}
+	}
+
+	// Publication happens ONLY after the barrier: cache (defensive clone) and
+	// the live count. A failed commit above leaves both untouched (2.9).
+	stored := cloneFullEvent(event)
+	s.cache.Add(key, &stored)
+	state.mu.Lock()
+	state.eventCount++
+	state.mu.Unlock()
 
 	return nil
 }
@@ -349,6 +496,11 @@ func (s *FileSegmentStore) recoverWindowSeqLocked(pid int, windowTS int64) (int,
 // ==================== Read Operations ====================
 
 // GetEvent retrieves a single event by its EventKey.
+//
+// Error taxonomy (2.5): a genuinely absent key returns an error wrapping
+// ErrKeyNotFound; storage I/O failures are returned AS-IS (never dressed up
+// as "not found") so upper layers can tell a miss from an outage. Returned
+// events are defensive clones — callers may mutate them freely.
 func (s *FileSegmentStore) GetEvent(key int64) (*FullEvent, error) {
 	if key == 0 {
 		return nil, fmt.Errorf("event key cannot be zero")
@@ -356,12 +508,13 @@ func (s *FileSegmentStore) GetEvent(key int64) (*FullEvent, error) {
 
 	// Check tombstone
 	if s.tombstones != nil && s.tombstones.IsTombstone(key) {
-		return nil, fmt.Errorf("event %d not found: tombstoned", key)
+		return nil, fmt.Errorf("event %d not found: %w (tombstoned)", key, ErrKeyNotFound)
 	}
 
-	// 1. Check LRU cache
+	// 1. Check LRU cache (clone: the cache must not alias what we hand out)
 	if cached, ok := s.cache.Get(key); ok {
-		return cached, nil
+		evt := cloneFullEvent(*cached)
+		return &evt, nil
 	}
 
 	// 2. Look up index to find segment position
@@ -369,7 +522,10 @@ func (s *FileSegmentStore) GetEvent(key int64) (*FullEvent, error) {
 	idxKVKey := IndexKeyStr(pid, key)
 	idxValue, err := s.kv.KVGet(idxKVKey)
 	if err != nil {
-		return nil, fmt.Errorf("event %d not found (index lookup failed): %w", key, err)
+		if errors.Is(err, ErrKeyNotFound) {
+			return nil, fmt.Errorf("event %d not found: %w", key, ErrKeyNotFound)
+		}
+		return nil, fmt.Errorf("event %d index lookup failed (storage I/O): %w", key, err)
 	}
 
 	// Parse index value: "windowTS:seq"
@@ -387,7 +543,10 @@ func (s *FileSegmentStore) GetEvent(key int64) (*FullEvent, error) {
 	evtKVKey := EventKeyStr(pid, windowTS, int(seq))
 	eventJSON, err := s.kv.KVGet(evtKVKey)
 	if err != nil {
-		return nil, fmt.Errorf("event %d not found at %s: %w", key, evtKVKey, err)
+		if errors.Is(err, ErrKeyNotFound) {
+			return nil, fmt.Errorf("event %d not found at %s: %w", key, evtKVKey, ErrKeyNotFound)
+		}
+		return nil, fmt.Errorf("event %d read failed at %s (storage I/O): %w", key, evtKVKey, err)
 	}
 
 	var event FullEvent
@@ -395,22 +554,34 @@ func (s *FileSegmentStore) GetEvent(key int64) (*FullEvent, error) {
 		return nil, fmt.Errorf("failed to unmarshal event %d: %w", key, err)
 	}
 
-	// Add to cache
-	s.cache.Add(key, &event)
-	return &event, nil
+	// Add to cache (clone) and hand back an independent copy.
+	stored := cloneFullEvent(event)
+	s.cache.Add(key, &stored)
+	evt := cloneFullEvent(event)
+	return &evt, nil
 }
 
-// GetEvents retrieves multiple events by their EventKeys.
+// GetEvents retrieves multiple events by their EventKeys. A genuinely
+// missing key (typed) is skipped; a storage I/O failure is NOT silently
+// swallowed — the successfully read events are returned together with the
+// error so callers can tell a partial result from a complete one (2.5).
 func (s *FileSegmentStore) GetEvents(keys []int64) ([]FullEvent, error) {
 	results := make([]FullEvent, 0, len(keys))
+	var firstErr error
 	for _, key := range keys {
 		evt, err := s.GetEvent(key)
 		if err != nil {
-			continue // Skip missing keys
+			if errors.Is(err, ErrKeyNotFound) {
+				continue // legal miss: tombstoned or never written
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("GetEvents key %d: %w", key, err)
+			}
+			continue
 		}
 		results = append(results, *evt)
 	}
-	return results, nil
+	return results, firstErr
 }
 
 // QueryEvents queries events based on filters.
@@ -438,11 +609,17 @@ func (s *FileSegmentStore) QueryEvents(query QueryOptions) ([]EventReference, er
 	}
 
 	var matched []EventReference
+	var queryErr error
 	for _, pid := range partitions {
 		// Scan this partition's segments (no cross-partition truncation —
 		// truncating before the global sort would drop newer partitions).
+		// A partition scan failure is recorded and returned with the partial
+		// result — it must not degrade into a silent empty answer (2.5).
 		refs, err := s.scanPartition(pid, query, budget)
 		if err != nil {
+			if queryErr == nil {
+				queryErr = fmt.Errorf("scan partition %d: %w", pid, err)
+			}
 			continue
 		}
 		matched = append(matched, refs...)
@@ -453,7 +630,7 @@ func (s *FileSegmentStore) QueryEvents(query QueryOptions) ([]EventReference, er
 	// Apply offset
 	if query.Offset > 0 {
 		if query.Offset >= len(matched) {
-			return nil, nil
+			return nil, queryErr
 		}
 		matched = matched[query.Offset:]
 	}
@@ -462,7 +639,7 @@ func (s *FileSegmentStore) QueryEvents(query QueryOptions) ([]EventReference, er
 		matched = matched[:limit]
 	}
 
-	return matched, nil
+	return matched, queryErr
 }
 
 // sortRefsByTotalOrder sorts references by the total order (Timestamp,
@@ -575,6 +752,7 @@ func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, budget int
 	// Phase 2: per-window collection with cross-window dedup and
 	// budget-based skipping.
 	var matched []EventReference
+	var scanErr error
 	// Dedup: EventKey → (index in matched, layer of chosen version). On
 	// duplicates (compaction crash window: same event alive in source and
 	// target layers) keep the higher-layer version — direction-independent,
@@ -608,9 +786,15 @@ func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, budget int
 		wLayer := w.layer
 
 		// Scan events in this segment (whole window, no intra-window stop).
+		// A window scan failure is recorded (first error wins) and scanning
+		// continues with the remaining windows — the result stays partial,
+		// never a silent empty answer (2.5).
 		eventPrefix := SegmentEventPrefix(pid, w.ts)
 		eventPairs, err := s.kv.KVScan(eventPrefix, 0)
 		if err != nil {
+			if scanErr == nil {
+				scanErr = fmt.Errorf("scan window %d: %w", w.ts, err)
+			}
 			continue
 		}
 
@@ -666,7 +850,7 @@ func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, budget int
 		}
 	}
 
-	return matched, nil
+	return matched, scanErr
 }
 
 // resolvePartitions determines which partitions to search.
@@ -729,18 +913,30 @@ func (s *FileSegmentStore) RelationStore() RelationStore {
 // ==================== Management Operations ====================
 
 // DeleteEvent permanently deletes an event from storage.
+//
+// Idempotent against logical death (2.9): an already-tombstoned event had
+// its live count decremented at marking time — a repeated (or compaction
+// cleanup) delete must NOT decrement again.
 func (s *FileSegmentStore) DeleteEvent(key int64) error {
 	if key == 0 {
 		return fmt.Errorf("event key cannot be zero")
+	}
+	if s.tombstones != nil && s.tombstones.IsTombstone(key) {
+		return nil // logically dead already: deletion is idempotent, no re-decrement
 	}
 
 	pid := PartitionIDFromEventKey(key)
 	idxKVKey := IndexKeyStr(pid, key)
 
-	// Get the event key to determine the full KV key to delete
+	// Get the event key to determine the full KV key to delete. A genuinely
+	// absent key (typed missing) makes the deletion IDEMPOTENT (2.9): no
+	// error, no double decrement — "delete what is already gone" succeeded.
 	idxValue, err := s.kv.KVGet(idxKVKey)
 	if err != nil {
-		return fmt.Errorf("event %d not found", key)
+		if errors.Is(err, ErrKeyNotFound) {
+			return nil
+		}
+		return fmt.Errorf("event %d delete probe failed (storage I/O): %w", key, err)
 	}
 
 	var windowTS, seq int64
@@ -789,6 +985,7 @@ func (s *FileSegmentStore) GetStats() StoreStats {
 	return StoreStats{
 		TotalEvents: int(total),
 		DataDir:     s.dataDir,
+		CountsKnown: s.countsKnown.Load(),
 	}
 }
 

@@ -80,7 +80,10 @@ func TestSwapExecutor_ConcurrentSwapVsRead(t *testing.T) {
 func TestSwapExecutor_ResidentInvariants(t *testing.T) {
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	proj := compress.NewSessionProjection()
-	bus := NewReliableEventBus("")
+	bus, err := NewReliableEventBus("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	cm := &ContextManager{runner: &fakeRunner{id: "g1"}, taskController: tm, projection: proj, bus: bus}
 
 	cm.SwapExecutor(&fakeRunner{id: "g2"})

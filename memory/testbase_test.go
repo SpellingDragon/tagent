@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -36,7 +35,7 @@ func (m *mockKV) KVGet(key string) (string, error) {
 	defer m.mu.Unlock()
 	v, ok := m.data[key]
 	if !ok {
-		return "", fmt.Errorf("key not found: %s", key)
+		return "", KeyNotFound(key, nil) // typed contract (2.5)
 	}
 	return v, nil
 }
@@ -92,5 +91,42 @@ func (m *mockKV) KVBatch(ops []KVOp) error {
 	}
 	return nil
 }
+
+// ListPartitionIDs mirrors LocalFileKV's optional enumeration capability
+// (resident-readiness-plan 2.8): any persisted `{pid}:…` key proves the
+// partition exists, so live-count rebuild and capacity eviction are
+// exercisable against the in-package mock.
+func (m *mockKV) ListPartitionIDs() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := map[int]struct{}{}
+	for key := range m.data {
+		sep := strings.IndexByte(key, ':')
+		if sep <= 0 {
+			continue
+		}
+		pid := 0
+		for _, c := range key[:sep] {
+			if c < '0' || c > '9' {
+				pid = -1
+				break
+			}
+			pid = pid*10 + int(c-'0')
+		}
+		if pid >= 0 {
+			seen[pid] = struct{}{}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for pid := range seen {
+		out = append(out, pid)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// Sync gives the mock a no-op durability barrier so FileSegmentStore's
+// event-level barrier path is exercised identically (2.3).
+func (m *mockKV) Sync() error { return nil }
 
 func (m *mockKV) Close() error { return nil }

@@ -73,3 +73,41 @@ func TestRebuildFallback_EmptyChain_StaysEmpty(t *testing.T) {
 	cm.rebuildProjectionFromWAL()
 	require.Equal(t, 0, proj.Len())
 }
+
+// TestRebuildFallback_FilterBeforeCap（resident-readiness-plan 3.9，经 b871d30
+// 宿主指令修订）：无锚回放**全链存活**（fallback cap 已移除——重启后完整历史
+// 必须可复原），但过滤次序不变：task_spawned 等非投影记录永不占用投影槽位。
+func TestRebuildFallback_FilterBeforeCap(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	proj := compress.NewSessionProjection()
+	cm, _ := rbFoldCM(store, proj, 4)
+
+	// 600 条有效 + 600 条非投影（task_spawned）交错写入。
+	base := rbNowMs()
+	for i := 0; i < 600; i++ {
+		ms := base + int64(2*i)
+		k := memory.NewSnowflakeEventKey(rbPid, ms)
+		rbStore(t, store, k, tagentevent.TypeAgentOutput,
+			fmt.Sprintf("valid %d", i), fmt.Sprintf("content %d", i), ms, nil)
+		k2 := memory.NewSnowflakeEventKey(rbPid, ms+1)
+		rbStore(t, store, k2, tagentevent.TypeTaskSpawned,
+			fmt.Sprintf("spawn %d", i), fmt.Sprintf("spawn-body %d", i), ms+1, nil)
+	}
+
+	cm.rebuildProjectionFromWAL()
+
+	// b871d30：cap 移除——600 有效全部保留（先过滤后保留的次序仍由断言固化）。
+	require.Equal(t, 600, proj.Len(), "cap removed: full chain survives restart")
+	got := proj.GetAll()
+	for _, ref := range got {
+		require.NotEqual(t, tagentevent.TypeTaskSpawned, ref.EventType,
+			"internal records must not occupy projection slots")
+	}
+	// 无 cap：无截断，VERDICT=FULL。
+	rec := cm.RecoveryResult()
+	require.NotNil(t, rec)
+	require.Equal(t, "fallback", rec.Mode)
+	require.Equal(t, 0, rec.Truncated, "cap removed: nothing truncated")
+	require.Equal(t, "full", rec.Status)
+	require.Empty(t, cm.TakeRecoveryNotice(), "full recovery has no model-facing notice")
+}

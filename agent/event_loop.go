@@ -10,6 +10,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/agent/reliability"
 	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -47,15 +48,51 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// tagged "meditation" and dropped by consumers).
 		events = dropMeditationFromMixedBatch(events, ta.name)
 		if len(events) == 0 {
+			// cold-eyes Warning 2：被清空的批次若含已 claim 的 durable 事件，
+			// 跳过 receipt/ack 会僵尸化 envelope（每次重启重 claim→再空跑）。
+			// finishDurableBatch 对空 provenance 幂等，此处安全收敛。
+			ta.clearTurnDurableInbound()
+			ta.finishDurableBatch(events)
 			continue
 		}
 		log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
 			ta.name, len(events), summarizeEvents(events))
 
+		// cold-eyes R2 M-1（结构修）: claim 事实统一由 persistBusEvent 逐消息
+		// 预落库（GetEvent-guard 重放去重 + 单数 dedup_key + 回写一次到位），
+		// 管线（MemoryPlugin）经 FactsPrePersisted 跳过合并输入的重复入库——
+		// 消除「合并事实 vs 逐消息事实」粒度分裂：多 envelope 批次/跨 crash
+		// 批次组成变化下每个 envelope 都有自有证据，receipt+ack 永不失据。
+		prePersisted := false
+		for _, ev := range events {
+			if path, _ := ev.Metadata["inbox_path"].(string); path == "" {
+				continue
+			}
+			cm.persistBusEvent(ev)
+			prePersisted = true
+		}
+		if prePersisted {
+			ev0 := events[0]
+			path, _ := ev0.Metadata["inbox_path"].(string)
+			rid, _ := ev0.Metadata["inbox_request_id"].(string)
+			dk, _ := ev0.Metadata["inbox_dedup_key"].(string)
+			ta.SetTurnDurableInbound(plugin.DurableInbound{
+				Path: path, RequestID: rid, DedupKey: dk, FactsPrePersisted: true,
+			})
+		}
 		msg := cm.BuildInvocation(events)
 		if msg.Content == "" {
 			log.Debugf("[runEventLoop:%s] empty message after merge, skipping", ta.name)
+			ta.clearTurnDurableInbound()
+			ta.finishDurableBatch(events) // cold-eyes Warning 2：同上，防 envelope 僵尸化
 			continue
+		}
+		// Recovery one-shot tail notice (3.10): appended to the request TAIL —
+		// never into the fact chain, never mutating the historical prefix
+		// (prefix-cache safe). Empty for the healthy path.
+		if notice := cm.TakeRecoveryNotice(); notice != "" {
+			msg.Content += "\n\n" + notice
+			log.Infof("[runEventLoop:%s] recovery notice attached to first request", ta.name)
 		}
 
 		// Determine trigger source from batch events for deterministic
@@ -165,6 +202,13 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 		// T-B: 关闭 turn span（退化重试标记为属性，同一 turn 不另开 root span）。
 		endTurnSpan(turnSpan, retriedDegenerate)
+
+		// Durable inbox confirmation (3.4/3.5): the consuming turn finished —
+		// write the fact-chain receipt event (dedup window truth source) and
+		// only then receipt+ack the envelope. Store failure keeps the claim
+		// on disk; the next process replays it.
+		ta.clearTurnDurableInbound() // cold-eyes Major 1: turn-scoped provenance ends here
+		ta.finishDurableBatch(events)
 
 		// Idle-gate anchor (meditation-gate-split): every turn end counts as
 		// activity, regardless of trigger source or success — lineage-agnostic
@@ -276,6 +320,11 @@ func extractTriggerSource(events []*AgentEvent) string {
 var controlMetaKeys = map[string]bool{
 	"settle_status": true, "task_id": true, "lineage_absent": true,
 	"detached_at_ms": true,
+	// cold-eyes R2 S-1: inbox control metadata must never leak into Origin
+	// baggage (filesystem paths downstream; stale inbox_path misleading the
+	// receipt path when such an event re-enters a batch).
+	"inbox_path": true, "inbox_request_id": true, "inbox_dedup_key": true,
+	"inbox_dedup_keys": true,
 }
 
 func extractRootMetadata(events []*AgentEvent) map[string]string {

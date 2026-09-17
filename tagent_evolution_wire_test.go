@@ -130,9 +130,12 @@ func TestNew_DegradationEnabled_Builds(t *testing.T) {
 // 内存图分歧（recall 因果链断链）+ 双 Compactor 基于独立视图并发覆盖同一 KV 键。
 func TestResolveMemoryStore_FileSamePathShared(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shared-mem")
-	s1, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
+	s1, rel1, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
 	require.NoError(t, err)
-	s2, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
+	s2, rel2, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
 	require.NoError(t, err)
 	require.Same(t, s1, s2, "file 后端同 path 必须共享同一实例（M-1：防因果链断链/双 Compactor 并发覆盖）")
+	// 4.2：测试收尾释放租约（两次 acquire → 两次 release，第二次才真关）。
+	rel1()
+	rel2()
 }

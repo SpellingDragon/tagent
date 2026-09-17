@@ -12,6 +12,12 @@ import (
 // exist. Without this the LLM reads "returned N" as "only N exist" and stops
 // looking — the 2026-07-31 meditation recall failure mode.
 
+// seedManyPartitions 同 memory_recall_test.seedPartitions：隔离契约下查询
+// 必须显式授权种子事件所在分区（2.7）。
+func seedManyPartitions() []int {
+	return []int{memory.PartitionIDFromEventKey(1000)}
+}
+
 func seedManyStore(t *testing.T, n int) memory.MemoryStore {
 	t.Helper()
 	store := memory.NewInMemoryStore()
@@ -32,7 +38,7 @@ func seedManyStore(t *testing.T, n int) memory.MemoryStore {
 
 // TestTruncationHint_AtLimit: results hitting the limit carry the notice.
 func TestTruncationHint_AtLimit(t *testing.T) {
-	tl := NewMemoryRecallTool(seedManyStore(t, 20), nil)
+	tl := NewMemoryRecallTool(seedManyStore(t, 20), seedManyPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"部署","limit":5}`)
 
 	if !strings.Contains(out, "已达 limit") {
@@ -43,7 +49,7 @@ func TestTruncationHint_AtLimit(t *testing.T) {
 // TestTruncationHint_BelowLimit: full result sets carry no notice (no false
 // "maybe more" when everything was returned).
 func TestTruncationHint_BelowLimit(t *testing.T) {
-	tl := NewMemoryRecallTool(seedManyStore(t, 3), nil)
+	tl := NewMemoryRecallTool(seedManyStore(t, 3), seedManyPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"部署","limit":10}`)
 
 	if strings.Contains(out, "已达 limit") {

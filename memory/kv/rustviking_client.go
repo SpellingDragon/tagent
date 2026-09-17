@@ -154,7 +154,10 @@ func (c *RustVikingClient) KVGet(key string) (string, error) {
 		return "", fmt.Errorf("failed to parse KV get response: %w", err)
 	}
 	if result.Value == nil {
-		return "", fmt.Errorf("key not found: %s", key)
+		// Typed missing (resident-readiness-plan 2.5): a null value means the
+		// key genuinely does not exist — callers must be able to
+		// errors.Is(ErrKeyNotFound) it apart from CLI/transport I/O errors.
+		return "", memory.KeyNotFound(key, nil)
 	}
 	return *result.Value, nil
 }
@@ -333,7 +336,7 @@ func (m *MockRustVikingClient) KVGet(key string) (string, error) {
 	defer m.mu.Unlock()
 	value, ok := m.data[key]
 	if !ok {
-		return "", fmt.Errorf("key not found: %s", key)
+		return "", memory.KeyNotFound(key, nil) // typed contract (2.5)
 	}
 	return value, nil
 }

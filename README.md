@@ -348,6 +348,8 @@ graph TB
 | 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
 | 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | 真实 LLM 契约守护矩阵 | [tests/README.md](tests/README.md) |
+| 常驻可靠性 / 资源所有权 / 控制面规格（durable inbox-v1、租约化 store、HTTP limits、endpoint 策略） | [openspec/specs/](openspec/specs/)（persistent-event-loop / runtime-resource-ownership / resident-release-evidence） |
+| RL 集成 / trajectory 分析（`rl/trajectory_analyze.py`：压缩回收率、大消息 TOP-N、chars/token 偏差） | [rl/](rl/) |
 
 ## 开发
 
@@ -358,6 +360,13 @@ go test ./evals/                       # 组件级行为评估（票据可召回
 bash scripts/race_check.sh             # race 门禁（本地全量）
 cd examples/wechat-bot && go run .     # 运行示例
 ```
+
+### RL 部署环境变量（examples/wechat-bot）
+
+| 变量 | 说明 |
+|------|------|
+| `TAGENT_RL_ALLOW_LLM_REDIRECT` | `1` 才允许 `/task` 携带 `llm_base_url` 动态重定向（默认禁用；**allowlist 只约束初始 URL，30x 跳转需可信 host**，后续变更为 LLM client 安装 CheckRedirect） |
+| `TAGENT_RL_ENDPOINT_ALLOWLIST` | 逗号分隔 host allowlist（精确 host、任意端口），如 `proxy.example.com,proxy2.internal` |
 
 CI（GitHub Actions）在 push/PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI。
 

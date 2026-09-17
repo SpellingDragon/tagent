@@ -476,15 +476,6 @@ func (c *Compactor) findAliveAncestor(key int64, alive map[int64]bool) int64 {
 func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	var batchOps []KVOp
 
-	// Collect per-segment event counts BEFORE deletion (their meta keys are
-	// among the deleted) so the process-lifetime counter can be decremented.
-	var removedTotal int64
-	for _, windowTS := range windowTSs {
-		if meta, err := c.getSegmentMeta(pid, windowTS); err == nil && meta != nil && meta.EventCount > 0 {
-			removedTotal += int64(meta.EventCount)
-		}
-	}
-
 	for _, windowTS := range windowTSs {
 		// Delete event keys
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
@@ -506,11 +497,11 @@ func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 		}
 	}
 
-	// Keep the process-lifetime count accurate (D11): the removed events are
-	// physically gone. The store reference may be nil in bare compactor uses.
-	if removedTotal > 0 && c.store != nil {
-		c.store.decrementEventCount(pid, removedTotal)
-	}
+	// NOTE (resident-readiness-plan 2.9): NO live-count decrement here.
+	// Events moved into the target layer are alive (net-zero for the move);
+	// events dropped as tombstoned were already decremented once at
+	// tombstone MARK time (lifecycle M4). Physically removing segments is a
+	// migration + cleanup, never a second logical death.
 	return nil
 }
 

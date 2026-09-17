@@ -17,7 +17,7 @@ import (
 // routes by parameter shape — items tickets / turn_key causal chain / query
 // semantic search / orchestrate reserved form.
 func TestUnifiedRecall_Routing(t *testing.T) {
-	tl := NewRecallTool(seedUnifiedStore(t), nil).(tool.CallableTool)
+	tl := NewRecallTool(seedUnifiedStore(t), []int{memory.PartitionIDFromEventKey(kIn)}).(tool.CallableTool)
 	call := func(args string) memoryRecallResult {
 		out, err := tl.Call(context.Background(), []byte(args))
 		require.NoError(t, err)

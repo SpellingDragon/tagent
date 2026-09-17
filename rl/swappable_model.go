@@ -38,52 +38,124 @@ func NewSwappableModel(m model.Model) *SwappableModel {
 }
 
 // Swap replaces the inner model atomically.
-// In-flight GenerateContent calls continue with the old model;
-// subsequent calls use the new model. The old model is retired: once no
-// in-flight call references any retired model, each gets an io.Closer Close
-// (implementation-hardening 5.2 — the drain-free "tail" the swap used to
-// leave dangling).
+// In-flight GenerateContent calls — INCLUDING their still-open response
+// streams — continue with the old model; subsequent calls use the new model.
+// The old model is retired: once no in-flight lease (call + full stream)
+// references it AND it is not the current inner, it gets an io.Closer Close
+// exactly once.
 func (m *SwappableModel) Swap(inner model.Model) {
 	m.mu.Lock()
 	old := m.inner
 	m.inner = inner
-	if old != nil && old != inner { // same instance → no leak, nothing to retire
-		m.retired = append(m.retired, old)
+	if old != nil && old != inner {
+		dup := false
+		for _, r := range m.retired {
+			if r == old {
+				dup = true // re-retired after a A→B→A bounce: entry already queued
+				break
+			}
+		}
+		if !dup {
+			m.retired = append(m.retired, old)
+		}
 	}
 	m.mu.Unlock()
 	m.sweepRetired()
 }
 
-// sweepRetired closes retired models when no in-flight call remains.
+// sweepRetired closes retired models when no in-flight lease remains and the
+// model is not the current inner (A→B→A keeps the reselected instance alive).
 func (m *SwappableModel) sweepRetired() {
 	if m.inFlight.Load() != 0 {
 		return
 	}
+	m.mu.RLock()
+	current := m.inner
+	m.mu.RUnlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.inFlight.Load() != 0 { // re-check under lock (a call may have started)
 		return
 	}
+	keep := m.retired[:0]
 	for _, old := range m.retired {
+		if old == current {
+			keep = append(keep, old) // still in use — never close the current inner
+			continue
+		}
 		if c, ok := old.(interface{ Close() error }); ok {
 			_ = c.Close()
 		}
 	}
-	m.retired = nil
+	m.retired = keep
 }
 
-// GenerateContent delegates to the current inner model, accounting the
-// in-flight counter that gates retired-model sweeps.
+// release drops one in-flight lease (call + stream lifecycle) and sweeps.
+func (m *SwappableModel) release() {
+	m.inFlight.Add(-1)
+	m.sweepRetired()
+}
+
+// GenerateContent delegates to the current inner model. The in-flight lease
+// now covers the FULL returned-stream lifecycle (resident-readiness-plan
+// 4.8): responses are forwarded to the caller until the upstream channel is
+// closed (or context cancellation closes it) — only then is the lease
+// released and the model eligible for retirement Close. Error/nil streams
+// release immediately. A model that leaks its channel keeps the lease
+// (conservative: never close a possibly-live resource).
 func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
-	m.inFlight.Add(1)
-	defer func() {
-		m.inFlight.Add(-1)
-		m.sweepRetired()
-	}()
+	m.inFlight.Add(1) // lease acquired HERE — held until the stream fully ends
 	m.mu.RLock()
 	inner := m.inner
 	m.mu.RUnlock()
-	return inner.GenerateContent(ctx, request)
+
+	ch, err := inner.GenerateContent(ctx, request)
+	if err != nil {
+		m.release()
+		return nil, err
+	}
+	if ch == nil {
+		m.release()
+		return nil, nil
+	}
+	out := make(chan *model.Response, cap(ch))
+	go func() {
+		defer close(out)
+		defer m.release()
+		// cold-eyes R2 Warning 3: a caller that abandons `out` (upstream
+		// cancel without draining) must not wedge this goroutine on
+		// `out <- r` forever — the lease would never be released and the
+		// retired model never closed. On ctx cancel, drain the upstream to
+		// its close, then exit: the lease is ALWAYS eventually freed.
+		cancelled := false
+		for {
+			select {
+			case r, ok := <-ch:
+				if !ok {
+					return
+				}
+				if cancelled {
+					continue // keep draining upstream after cancel
+				}
+				select {
+				case out <- r:
+				case <-ctx.Done():
+					cancelled = true
+				}
+			case <-ctx.Done():
+				if cancelled {
+					// ctx already fired before: keep draining via the range
+					// below so the upstream sender never blocks either.
+					for range ch {
+					}
+					return
+				}
+				cancelled = true
+			}
+		}
+	}()
+	return out, nil
 }
 
 // Info delegates to the current inner model.

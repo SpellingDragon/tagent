@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -8,6 +10,64 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
+
+// ErrLoopTerminated is returned by InjectMessageContext after StopLoop: the
+// instance's output channel is closed (terminal lifecycle, V15) — a silent
+// acceptance here would strand the input forever (3.1).
+var ErrLoopTerminated = errors.New("agent: persistent loop already terminated — create a new agent for a fresh loop")
+
+// InjectMessageContext is the decidable injection entry (resident-readiness-
+// plan 3.1): it returns a receipt (volatile/durable accepted) or an error —
+// terminated loop, full queue, timeout and durable-write failure are NEVER
+// reported as accepted. Hosts and HTTP handlers MUST use this entry; the
+// legacy void wrappers keep working for internal producers only.
+func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, msg model.Message) (PublishReceipt, error) {
+	if ta == nil {
+		return PublishReceipt{}, ErrNilEvent
+	}
+	// Terminal lifecycle check (V15): StopLoop is terminal on this instance.
+	if ta.loopTerminated.Load() {
+		return PublishReceipt{}, ErrLoopTerminated
+	}
+	// Meditation novelty gate (meditation-gate-split): armed HERE at the
+	// input-side injection point — ground truth, unchanged.
+	ta.armMeditationNoveltyGate(source)
+	bus := ta.persistentBus
+	if bus == nil {
+		ta.activeBusMu.Lock()
+		bus = ta.activeBus
+		ta.activeBusMu.Unlock()
+	}
+	if bus == nil {
+		return PublishReceipt{}, ErrBusClosed
+	}
+	evt := NewExternalInputEvent(source, msg)
+	return bus.PublishContext(ctx, evt)
+}
+
+// InjectEnvelope accepts a WHOLE batch as one acceptance unit (5.2): durable
+// mode persists a single multi-message envelope; the returned requestID is
+// the batch's stable identity (202 semantics belong to the HTTP layer).
+func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (requestID string, durable bool, err error) {
+	if ta == nil {
+		return "", false, ErrNilEvent
+	}
+	if ta.loopTerminated.Load() {
+		return "", false, ErrLoopTerminated
+	}
+	ta.armMeditationNoveltyGate(source)
+	bus := ta.persistentBus
+	if bus == nil {
+		ta.activeBusMu.Lock()
+		bus = ta.activeBus
+		ta.activeBusMu.Unlock()
+	}
+	if bus == nil {
+		return "", false, ErrBusClosed
+	}
+	rec, err := bus.PublishEnvelopeContext(ctx, source, msgs)
+	return rec.RequestID, rec.Durable, err
+}
 
 // InjectMessage injects a user message into the agent's event bus.
 // The message is published to the persistent bus (not the invocation bus)

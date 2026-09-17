@@ -107,6 +107,7 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 		TypeFeedback:               30, // D1 追加（design-report-closeout）：反馈是治理数据，默认 30 天
 		TypeTaskSpawned:            30, // R2 追加（resident-continuity-r2-r4）：任务 spawn 事实链记录，与 external_input 对齐
 		TypeResidentSession:        30, // R3 追加（resident-continuity-r2-r4）：常驻会话生命周期事实链记录，同上对齐
+		TypeInboxReceipt:           30, // RRP 3.4/3.5 追加：durable 输入的 fact-chain receipt，30 天即 request-id 去重窗口
 	}
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)

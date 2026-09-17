@@ -42,8 +42,9 @@ func TestFileSegmentStore_ColdPartitionDiscovery(t *testing.T) {
 // without ListPartitionIDs must not break construction (known limitation —
 // e.g. rustviking today), matching the pre-fix behavior.
 func TestFileSegmentStore_NoEnumerationBackend_KeepsLazyDiscovery(t *testing.T) {
-	base := newMockKV()
-	base.data["7:evt:1710676800:1"] = "{}"
+	base := &noEnumKV{data: map[string]string{
+		"7:evt:1710676800:1": "{}",
+	}}
 
 	s, err := NewFileSegmentStore(base, nil, ":memory:", 100)
 	require.NoError(t, err)

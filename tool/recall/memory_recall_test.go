@@ -26,6 +26,12 @@ func callMemoryRecall(t *testing.T, tl tool.Tool, args string) string {
 	return string(b)
 }
 
+// seedPartitions 返回种子事件所在的显式授权分区——隔离契约（2.7）下无分区
+// 查询返回空，查询必须显式授权（生产中宿主恒注入 agent 自身分区）。
+func seedPartitions() []int {
+	return []int{memory.PartitionIDFromEventKey(100)}
+}
+
 func seedStore(t *testing.T) memory.MemoryStore {
 	t.Helper()
 	store := memory.NewInMemoryStore()
@@ -42,7 +48,7 @@ func seedStore(t *testing.T) memory.MemoryStore {
 // TestMemoryRecall_ItemsPrecise: tickets are resolved precisely, in order,
 // with hints echoed back and full content returned.
 func TestMemoryRecall_ItemsPrecise(t *testing.T) {
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"`+tagentevent.FormatEventKey(200)+`","hint":"部署完成卡片"},{"key":"`+tagentevent.FormatEventKey(100)+`"}]}`)
 
 	for _, want := range []string{`"mode":"items"`, "服务已部署", "请部署服务", "部署完成卡片"} {
@@ -58,7 +64,7 @@ func TestMemoryRecall_ItemsPrecise(t *testing.T) {
 // TestMemoryRecall_MissReported: unknown keys are explicitly marked miss,
 // never silently omitted.
 func TestMemoryRecall_MissReported(t *testing.T) {
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"dead"},{"key":"`+tagentevent.FormatEventKey(100)+`"}]}`)
 
 	if !strings.Contains(out, `"miss":true`) || !strings.Contains(out, `"misses":1`) {
@@ -72,7 +78,7 @@ func TestMemoryRecall_MissReported(t *testing.T) {
 // TestMemoryRecall_QuerySemantic: free-text query goes through the retrieval
 // layer (keyword match).
 func TestMemoryRecall_QuerySemantic(t *testing.T) {
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"部署"}`)
 
 	if !strings.Contains(out, `"mode":"query"`) || !strings.Contains(out, "部署完成") {
@@ -85,7 +91,7 @@ func TestMemoryRecall_QuerySemantic(t *testing.T) {
 // has no history at all" from a silent count:0). It must carry a message
 // stating what was searched and steering toward items/turn_key.
 func TestMemoryRecall_QueryZeroResultHonesty(t *testing.T) {
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"不存在的关键词"}`)
 
 	if !strings.Contains(out, `"count":0`) {
@@ -101,7 +107,7 @@ func TestMemoryRecall_QueryZeroResultHonesty(t *testing.T) {
 // TestMemoryRecall_ItemsPrecedence: when both items and query are provided,
 // items win (protocol rule).
 func TestMemoryRecall_ItemsPrecedence(t *testing.T) {
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"`+tagentevent.FormatEventKey(100)+`"}],"query":"部署"}`)
 
 	if !strings.Contains(out, `"mode":"items"`) {
@@ -118,7 +124,7 @@ func TestMemoryRecall_TicketLosslessness(t *testing.T) {
 	end := strings.IndexByte(cardLine, ']')
 	ticket := cardLine[start+1 : end]
 
-	tl := NewMemoryRecallTool(seedStore(t), nil)
+	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"`+ticket+`"}]}`)
 	if strings.Contains(out, `"miss":true`) || !strings.Contains(out, "服务已部署") {
 		t.Errorf("card-line ticket must resolve losslessly, got: %s", out)

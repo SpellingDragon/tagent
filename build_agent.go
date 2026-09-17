@@ -104,19 +104,34 @@ func buildAgentDFS(
 	var memStore memory.MemoryStore
 	var hintTracker *ConsolidationHintTracker
 	var err error
+	var memStoreRelease func()
 	if mode.isExecutorShell() {
-		// R4 ownership 表（review 🔴1 修正）：热重建壳**复用常驻 entry 的 memStore**
-		//（而非内存实例）——runner 内的 MemoryPlugin 写入路径必须落在真实事实链上，
-		// 否则换代后事实链停止增长、R1 投影丢失换代后全部 turn、recall/巩固读空壳。
-		memStore = rc.entryMemStore
+		// 4.5（resident-readiness-plan）：热更壳子树按 **agent 身份**借用其常驻
+		// 资源（store 取自身份绑定表），绝不全部复用 entryMemStore——否则子
+		// agent 的存储归属随代际漂移（F06）。拓扑增减已在 reloader 拒绝，故
+		// 此处必能命中；未命中（防御）回落 entry store。租约归常驻层，壳不 acquire。
+		if ra := rc.residentAgents[name]; ra != nil {
+			memStore = ra.MemStore()
+		} else {
+			memStore = rc.entryMemStore
+		}
 		if memStore == nil {
 			memStore = memory.NewInMemoryStore()
 		}
 		// hintTracker 不接线（丢弃壳无消费循环）。
 	} else {
-		memStore, err = resolveMemoryStore(acfg.Memory)
+		var underlying memory.MemoryStore
+		underlying, memStoreRelease, err = resolveMemoryStore(acfg.Memory)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
+		}
+		memStore = underlying
+		// 4.4：以「装饰前」的底层 store 指针登记 owner（bridge 包装会让指针身份失效）。
+		if err := rc.registerStoreOwner(name, underlying); err != nil {
+			if memStoreRelease != nil {
+				memStoreRelease()
+			}
+			return nil, err
 		}
 		// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
 		// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
@@ -174,14 +189,12 @@ func buildAgentDFS(
 		memStore = ets
 		log.Infof("[tagent] degradation tracking enabled for agent %q (ErrorTrackingStore C2 outermost + 5-dep state machine + mem_spill=%q)", name, cfg.Reliability.MemSpillDir)
 	}
-	// 构建失败回收（审查 Nit5）：隔离 store（无共享）时，若后续步骤失败则关闭已启动的
-	// 引擎（worker/重建 goroutine），防泄漏。共享 store 的引擎按 path 复用，不在此关闭。
+	// 构建失败回收（审查 Nit5 → 4.2 统一）：后续步骤失败时释放本 agent 刚取得的
+	// 租约（registry 归零才真关，共享者不受影响）——不再按 path=="" 特判。
 	buildOK := false
 	defer func() {
-		if !buildOK && acfg.Memory.Path == "" {
-			if c, ok := memStore.(agent.Closer); ok {
-				_ = c.Close()
-			}
+		if !buildOK && memStoreRelease != nil {
+			memStoreRelease()
 		}
 	}()
 
@@ -403,6 +416,8 @@ func buildAgentDFS(
 		Name:        name,
 		Model:       agentModel,
 		MemoryStore: memStore,
+		// 4.2：租约释放绑定本 agent 的 Close（registry 归零才真关共享 store）。
+		MemStoreRelease: memStoreRelease,
 		// R4（review 🔴1 + 终审🟠）：executorOnly 壳的 SessionSvc 策略——
 		// **仅 entry 壳**复用常驻 sessionSvc（AppendEventHook→常驻 outputCh 接线
 		// 不断、session 记录续写同一 session）；子代理壳保持 nil 自建——若也复用，
@@ -590,6 +605,7 @@ func buildAgentDFS(
 	if mode.ownsPersistentState() {
 		ta.SetReadyCh(make(chan struct{}))
 		ta.RebuildProjectionFromWAL()
+		ta.ReconcileDurableReceipts() // cold-eyes Major 2: receipt→ack crash-window bridge
 	} else {
 		ta.SetReadyCh(make(chan struct{}))
 		close(ta.ReadyCh()) // shell builds: no cold-start work, ready now

@@ -34,6 +34,7 @@ type MemoryPlugin struct {
 	memStore      memory.MemoryStore
 	mu            sync.Mutex
 	lastEventKeys map[string]int64 // "partitionID:sessionID" → lastEventKey
+
 }
 
 // NewMemoryPlugin creates a new MemoryPlugin.
@@ -108,7 +109,11 @@ func (p *MemoryPlugin) onEvent(
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)
 
-	// 2. Generate Snowflake EventKey
+	// 2. Generate Snowflake EventKey. (cold-eyes R2: durable replay dedup is
+	// owned by the event loop's persistBusEvent pre-persist — this pipeline
+	// skips pre-persisted user inputs entirely and NEVER consumes
+	// ErrDuplicateEventKey, whose semantics are a collision per D15.)
+	durableInbound, hasDurable := DurableInboundFrom(ctx)
 	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
 	// 3. Infer event type and generate summary
@@ -162,6 +167,15 @@ func (p *MemoryPlugin) onEvent(
 	// single place where a stored event also enters the invocation's
 	// projection. The projection's own EventKey idempotency (L1) makes
 	// re-delivery harmless.
+	// cold-eyes R2 W-1/M-1: when this turn's durable facts were pre-persisted
+	// by the event loop (persistBusEvent per message), the pipeline must NOT
+	// re-store the echoed user input — skip before any store attempt.
+	if hasDurable && durableInbound.FactsPrePersisted {
+		if msg := evt.Response.Choices[0].Message; msg.Role == model.RoleUser {
+			log.Debugf("[Memory] durable turn: input fact pre-persisted by event loop, pipeline skips")
+			return evt, nil
+		}
+	}
 	stored := false
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
