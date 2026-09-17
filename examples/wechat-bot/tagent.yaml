@@ -112,7 +112,7 @@ agents:
     temperature: 0.7
     thinking_enabled: true
     compress_threshold: 0.8
-    keep_recent_tasks: 4
+    keep_recent_tasks: 1
     task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
     task_stale_after: "1h"               # 僵死观测阈值(默认 1h):job 型 alive_detached 超龄 → stale 观测态+一次性告警,不终止
                                          # (af4aa4c7 案 8h40m 死管道假活;generic 服务型不受限;"-1s" 关闭观测)
