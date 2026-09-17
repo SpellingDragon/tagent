@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SpellingDragon/tagent/event"
 	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -963,6 +964,20 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 // (takes it briefly); onSettle fires outside the lock, same as all emitters.
 // Only reconcile-class terminals route through here; the sync-wait window's
 // normal settle path (applyStatus) is unchanged.
+// finalizeRetired is the retirement-path finalize (zombie/orphan/stale-deadline):
+// the settle signal must NOT inherit the task's original trigger lineage (a
+// user-spawned task retired by bookkeeping would otherwise be delivered back
+// to the user as if it were the user's awaited result — leak, 2026-09-17).
+// Lineage is downgraded to the dedicated "task-retired" stamp, which the
+// fail-closed delivery gate holds by default.
+func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
+	if t.Spec.Origin == nil {
+		t.Spec.Origin = map[string]string{}
+	}
+	t.Spec.Origin[event.MetaKeyTriggerSource] = "task-retired"
+	tm.finalize(t, SettleFailed, output, err)
+}
+
 func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err error) {
 	t.mu.Lock()
 	// TOCTOU guard: candidates were collected outside the lock; another
@@ -1068,7 +1083,7 @@ func (tm *TaskManager) enforceJobDeadline(t *Task) {
 		detector.Cancel()
 	}
 	out := "(job-deadline-exceeded: job-kind task detached past the configured deadline - cancelled by owner and retired)"
-	tm.finalize(t, SettleFailed, out, nil)
+	tm.finalizeRetired(t, out, nil)
 }
 
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
@@ -1120,7 +1135,7 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 		out := "(reincarnation orphan: nil-probe suspect untracked beyond grace - retired by orphan adjudication)"
 		t.mu.Unlock()
 		retired++
-		tm.finalize(t, SettleFailed, out, nil)
+		tm.finalizeRetired(t, out, nil)
 	}
 	return retired
 }
@@ -1170,7 +1185,7 @@ func (tm *TaskManager) reconcileZombies() {
 		st = t.status
 		if st == TaskRunning || st == TaskSuspect {
 			t.mu.Unlock()
-			tm.finalize(t, SettleFailed, out, nil)
+			tm.finalizeRetired(t, out, nil)
 		} else {
 			t.mu.Unlock()
 		}
