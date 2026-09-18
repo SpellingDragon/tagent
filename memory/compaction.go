@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -78,6 +79,12 @@ type Compactor struct {
 	tombstone *TombstoneSet // For filtering tombstoned events during compaction
 	config    CompactionConfig
 
+	// Live thresholds, seeded from config and retunable via SetThresholds
+	// (atomic so a soak/E2E harness can retune while the scheduler runs —
+	// resident-remaining-hardening 3.1 "至少一次 compaction").
+	l1Threshold atomic.Int64
+	l2Threshold atomic.Int64
+
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
@@ -95,7 +102,7 @@ func NewCompactor(store *FileSegmentStore, kv KVStore, rel RelationStore, tombst
 	if config.CheckInterval <= 0 {
 		config.CheckInterval = 5 * time.Minute
 	}
-	return &Compactor{
+	c := &Compactor{
 		store:     store,
 		kv:        kv,
 		rel:       rel,
@@ -103,6 +110,30 @@ func NewCompactor(store *FileSegmentStore, kv KVStore, rel RelationStore, tombst
 		config:    config,
 		stopCh:    make(chan struct{}),
 	}
+	c.l1Threshold.Store(int64(config.L1Threshold))
+	c.l2Threshold.Store(int64(config.L2Threshold))
+	return c
+}
+
+// SetThresholds retunes the compaction thresholds at runtime (harness hook —
+// resident-remaining-hardening 3.1: a soak subprocess must exercise the real
+// compaction path without producing 24 sealed hourly segments). Values <= 0
+// are ignored. Atomic against the background scheduler by construction.
+func (c *Compactor) SetThresholds(l1, l2 int) {
+	if l1 > 0 {
+		c.l1Threshold.Store(int64(l1))
+	}
+	if l2 > 0 {
+		c.l2Threshold.Store(int64(l2))
+	}
+}
+
+// CompactOnce runs one synchronous compaction sweep (hourly seal + L1→L2 +
+// L2→L3) with the CURRENT thresholds. The scheduler self-ticks every
+// CheckInterval (default 5min) — harnesses that must not wait call this
+// instead; it is the same sweep body, so no second semantic exists.
+func (c *Compactor) CompactOnce() {
+	c.checkAndCompact()
 }
 
 // Start starts the compaction scheduler in a background goroutine.
@@ -201,7 +232,7 @@ func (c *Compactor) checkL1ToL2Compaction() {
 			}
 		}
 
-		if len(l1Windows) >= c.config.L1Threshold {
+		if len(l1Windows) >= int(c.l1Threshold.Load()) {
 			if err := c.CompactL1ToL2(pid, l1Windows); err != nil {
 				log.Errorf("[Compactor] L1→L2 failed pid=%d: %v", pid, err)
 			}
@@ -228,7 +259,7 @@ func (c *Compactor) checkL2ToL3Compaction() {
 			}
 		}
 
-		if len(l2Windows) >= c.config.L2Threshold {
+		if len(l2Windows) >= int(c.l2Threshold.Load()) {
 			if err := c.CompactL2ToL3(pid, l2Windows); err != nil {
 				log.Errorf("[Compactor] L2→L3 failed pid=%d: %v", pid, err)
 			}

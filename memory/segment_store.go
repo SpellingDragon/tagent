@@ -1150,6 +1150,13 @@ func (s *FileSegmentStore) SetCompactor(c *Compactor) {
 	s.compactor = c
 }
 
+// Compactor returns the injected background compactor (nil when the store
+// runs without one). Harness hook for synchronous compaction triggering
+// (resident-remaining-hardening 3.1 soak subprocess).
+func (s *FileSegmentStore) Compactor() *Compactor {
+	return s.compactor
+}
+
 // closer is an internal interface for resources that need cleanup.
 type closer interface {
 	Close() error

@@ -23,7 +23,7 @@
 
 ## 3. 批次 C：综合验证（继承 7.1–7.6；7.7–7.9 授权类）
 
-- [ ] 3.1 soak 骨架子进程化：独立 write/terminate/reopen，禁用进程共享 registry 捷径；真实 localfile、默认 fsync、至少一次 compaction、校验进程 ID 与恢复实例不同（7.1）。
+- [x] 3.1 soak 骨架子进程化：独立 write/terminate/reopen，禁用进程共享 registry 捷径；真实 localfile、默认 fsync、至少一次 compaction、校验进程 ID 与恢复实例不同（7.1）。
 - [ ] 3.2 30 轮快速 E2E：accepted ID 对账、store→projection→实际请求→recall→宿主投递门；Content≠Summary、无锚/有锚/TTL 失效/partial（7.2）。
 - [ ] 3.3 任务完整链：spawn Origin→事实记录→registry→R3 detector→watch/settle→反馈→投递门；nil 恢复、unknown 来源、service/job、stale/deadline、迟到信号、resume 换绑（7.3）。
 - [ ] 3.4 governance/evolution/meditation 开关组合回归：证据不可用明确 unavailable/insufficient；无用户新颖性不自馈电；无审批不执行 critical（7.4）。
