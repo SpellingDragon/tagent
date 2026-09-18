@@ -1051,15 +1051,19 @@ func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err err
 	}
 	t.mu.Unlock()
 	tm.mu.Lock()
-	collector := tm.batchCollect
-	tm.mu.Unlock()
-	if collector != nil {
+	if tm.batchCollect != nil {
 		// Batch mode (6.7①): state transition done above; the bus-side
 		// notification is collected and delivered once by the outermost
-		// beginBatchRetire finish.
-		*collector = append(*collector, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: output, Err: err}})
+		// beginBatchRetire finish. The append is taken UNDER tm.mu: batchCollect
+		// is a shared TaskManager field and concurrent reconciles (turn
+		// renderBoard + background meditation + tool List()) can reach finalize
+		// at once. The previous read-under-lock/append-outside-lock raced the
+		// collector slice and could drop a settle (3.9 independent review 🟠#1).
+		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: output, Err: err}})
+		tm.mu.Unlock()
 		return
 	}
+	tm.mu.Unlock()
 	if tm.onSettle != nil {
 		tm.onSettle(t, SettleSignal{Kind: kind, Output: output, Err: err})
 	}
