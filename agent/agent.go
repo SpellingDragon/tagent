@@ -400,6 +400,18 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		OnSpawn:        taskRecords.onSpawn,
 		OnInlineSettle: taskRecords.onInlineSettle,
 		OnCancel:       taskRecords.onCancel,
+		// 6.7①（resident-remaining-hardening）：批量退役汇总——per-task settle
+		// 记录仍逐条 record-only 落链（registry 归并数据源不变），bus 只发一条
+		// 汇总 external_input（终结结算风暴：孤儿/zombie 批量退役不再以
+		// 2.2 万字符/条的消息刷满上下文）。
+		OnBatchRetire: func(batch []task.BatchRetired) {
+			for _, r := range batch {
+				taskRecords.onInlineSettle(r.Task, r.Sig)
+			}
+			if evt := newBatchRetiredSummaryEvent(batch); evt != nil {
+				bus.Publish(evt)
+			}
+		},
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,

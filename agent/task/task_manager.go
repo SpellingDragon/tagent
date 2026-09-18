@@ -383,6 +383,12 @@ type TaskManagerConfig struct {
 	// i.e. a background settle that must be written back as a task_settled event.
 	// May be nil.
 	OnSettle func(task *Task, sig SettleSignal)
+
+	// OnBatchRetire (resident-remaining-hardening 1.1): optional batch sink for
+	// reconcile/orphan retirements — per-task state transitions and record-only
+	// bookkeeping stay per-task, but the bus-side notification collapses to ONE
+	// summary event. Nil → legacy per-settle OnSettle behavior.
+	OnBatchRetire func(batch []BatchRetired)
 	// OnSpawn (R2, resident-continuity-r2-r4): invoked after a task registers
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
@@ -457,6 +463,8 @@ type TaskManager struct {
 	tasks            map[string]*Task // id → task
 	byKey            map[string]string
 	onSettle         func(task *Task, sig SettleSignal)
+	onBatchRetire    func(batch []BatchRetired)
+	batchCollect     *[]BatchRetired // set by retire loops; finalize appends instead of emitting
 	onSpawn          func(task *Task)
 	onInlineSettle   func(task *Task, sig SettleSignal)
 	onCancel         func(task *Task)
@@ -544,6 +552,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		tasks:            make(map[string]*Task),
 		byKey:            make(map[string]string),
 		onSettle:         cfg.OnSettle,
+		onBatchRetire:    cfg.OnBatchRetire,
 		onSpawn:          cfg.OnSpawn,
 		onInlineSettle:   cfg.OnInlineSettle,
 		onCancel:         cfg.OnCancel,
@@ -970,6 +979,41 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 // to the user as if it were the user's awaited result — leak, 2026-09-17).
 // Lineage is downgraded to the dedicated "task-retired" stamp, which the
 // fail-closed delivery gate holds by default.
+// BatchRetired is one task settled inside a batch retirement (6.7①): the
+// per-task fact (record-only chain entry + registry fold) stays per-task; only
+// the bus-side notification is collapsed.
+type BatchRetired struct {
+	Task *Task
+	Sig  SettleSignal
+}
+
+// beginBatchRetire switches finalize into collect mode for the duration of a
+// reconcile/orphan loop. NESTED-SAFE: reconcileZombies internally calls
+// RetireOrphans — an inner begin reuses the outer collector and its finish is
+// a no-op; only the outermost finish delivers the batch to OnBatchRetire.
+func (tm *TaskManager) beginBatchRetire() (finish func()) {
+	tm.mu.Lock()
+	if tm.batchCollect != nil { // nested: outer loop owns delivery
+		tm.mu.Unlock()
+		return func() {}
+	}
+	if tm.onBatchRetire == nil { // legacy host: keep per-settle OnSettle emission
+		tm.mu.Unlock()
+		return func() {}
+	}
+	batch := make([]BatchRetired, 0, 8)
+	tm.batchCollect = &batch
+	tm.mu.Unlock()
+	return func() {
+		tm.mu.Lock()
+		tm.batchCollect = nil
+		tm.mu.Unlock()
+		if tm.onBatchRetire != nil && len(batch) > 0 {
+			tm.onBatchRetire(batch)
+		}
+	}
+}
+
 func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
 	if t.Spec.Origin == nil {
 		t.Spec.Origin = map[string]string{}
@@ -1006,6 +1050,16 @@ func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err err
 		}
 	}
 	t.mu.Unlock()
+	tm.mu.Lock()
+	collector := tm.batchCollect
+	tm.mu.Unlock()
+	if collector != nil {
+		// Batch mode (6.7①): state transition done above; the bus-side
+		// notification is collected and delivered once by the outermost
+		// beginBatchRetire finish.
+		*collector = append(*collector, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: output, Err: err}})
+		return
+	}
 	if tm.onSettle != nil {
 		tm.onSettle(t, SettleSignal{Kind: kind, Output: output, Err: err})
 	}
@@ -1121,6 +1175,7 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 	tm.mu.Unlock()
 
 	retired := 0
+	finishBatch := tm.beginBatchRetire() // 6.7①: bus 侧通知折叠为一条汇总
 	for _, t := range candidates {
 		t.mu.Lock()
 		taskID := ""
@@ -1137,6 +1192,7 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 		retired++
 		tm.finalizeRetired(t, out, nil)
 	}
+	finishBatch()
 	return retired
 }
 
@@ -1168,6 +1224,7 @@ func (tm *TaskManager) reconcileZombies() {
 		}
 	}
 	tm.mu.Unlock()
+	finishBatch := tm.beginBatchRetire() // 6.7①: zombie 侧同折叠（嵌套安全）
 	for _, t := range candidates {
 		t.mu.Lock()
 		st := t.status
@@ -1190,6 +1247,7 @@ func (tm *TaskManager) reconcileZombies() {
 			t.mu.Unlock()
 		}
 	}
+	finishBatch()
 }
 
 // pruneTerminal removes exited tasks (completed/failed/cancelled/dead) whose

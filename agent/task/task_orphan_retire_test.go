@@ -1,6 +1,7 @@
 package task
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -111,5 +112,72 @@ func TestReconcileZombies_NoTrackerWired_Unchanged(t *testing.T) {
 	tk, ok := tm.Get("legacy")
 	if !ok || tk.Status() != TaskSuspect {
 		t.Fatalf("without a wired tracker, legacy behavior must hold (suspect kept)")
+	}
+}
+
+// TestBatchRetire_CollapsedNotification（resident-remaining-hardening 1.1）：
+// 注册 OnBatchRetire 后，批量退役的 bus 侧通知折叠为一次回调（N 条 BatchRetired），
+// 逐条 OnSettle 不再触发；未注册回调时保持逐条旧行为（既有测试锁定）。
+func TestBatchRetire_CollapsedNotification(t *testing.T) {
+	var batch []BatchRetired
+	perSettle := 0
+	tm := NewTaskManager(TaskManagerConfig{
+		TerminalTTL: time.Minute,
+		OnSettle:    func(tk *Task, sig SettleSignal) { perSettle++ },
+		OnBatchRetire: func(b []BatchRetired) {
+			batch = append(batch, b...)
+		},
+	})
+	base := time.Now()
+	for i := 0; i < 3; i++ {
+		if tk := tm.RestoreTask(fmt.Sprintf("p%d", i), orphanSpec(fmt.Sprintf("k%d", i), fmt.Sprintf("sess-%d", i)), base.Add(-2*time.Hour), TaskSuspect); tk == nil {
+			t.Fatalf("RestoreTask %d returned nil", i)
+		}
+	}
+	tm.now = func() time.Time { return base }
+	if n := tm.RetireOrphans(func(string) bool { return false }); n != 3 {
+		t.Fatalf("retired = %d, want 3", n)
+	}
+	if len(batch) != 3 {
+		t.Fatalf("OnBatchRetire batch = %d, want 3", len(batch))
+	}
+	if perSettle != 0 {
+		t.Fatalf("per-task OnSettle must be suppressed in batch mode, got %d", perSettle)
+	}
+	for _, r := range batch {
+		if r.Task.Status() != TaskFailed {
+			t.Fatalf("batch task status = %v, want failed", r.Task.Status())
+		}
+	}
+}
+
+// TestBatchRetire_NestedNoDoubleDelivery（嵌套安全）：reconcileZombies 内部调
+// RetireOrphans——内层 begin 复用外层 collector，回调只发生一次且覆盖全部条目。
+func TestBatchRetire_NestedNoDoubleDelivery(t *testing.T) {
+	var deliveries [][]BatchRetired
+	tm := NewTaskManager(TaskManagerConfig{
+		TerminalTTL: time.Minute,
+		OnBatchRetire: func(b []BatchRetired) {
+			cp := make([]BatchRetired, len(b))
+			copy(cp, b)
+			deliveries = append(deliveries, cp)
+		},
+	})
+	outer := tm.beginBatchRetire() // simulate outer reconcileZombies scope
+	inner := tm.beginBatchRetire() // nested RetireOrphans scope
+	tk := tm.RestoreTask("pn", orphanSpec("kn", "sess-n"), time.Now().Add(-2*time.Hour), TaskSuspect)
+	if tk == nil {
+		t.Fatal("RestoreTask returned nil")
+	}
+	if n := tm.RetireOrphans(func(string) bool { return false }); n != 1 {
+		t.Fatalf("retired = %d, want 1", n)
+	}
+	inner() // nested finish: must NOT deliver
+	if len(deliveries) != 0 {
+		t.Fatalf("nested finish must not deliver, got %d deliveries", len(deliveries))
+	}
+	outer() // outer finish: delivers once with the collected entry
+	if len(deliveries) != 1 || len(deliveries[0]) != 1 {
+		t.Fatalf("outer finish must deliver exactly once with 1 entry, got %+v", deliveries)
 	}
 }

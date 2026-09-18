@@ -149,6 +149,34 @@ func escapeNewlines(s string) string {
 // ticket + tail preview; consumption goes through read_file paging. Write
 // failure degrades to inline full text (availability over bounding).
 // maxChars<=0 or empty outputDir disables spillover (tests / small results).
+// newBatchRetiredSummaryEvent (resident-remaining-hardening 1.2): ONE
+// external_input carrying N per-task settled lines — the 6.7① storm collapse.
+// Line format mirrors newTaskSettledEvent's header (retire outputs are short
+// machine verdicts; no spill needed). Empty batch returns nil.
+func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
+	if len(batch) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for i, r := range batch {
+		marker, statusWord := settleMarkerAndStatus(r.Sig)
+		if i > 0 {
+			b.WriteString("\n\n---\n\n")
+		}
+		fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s",
+			marker, truncateRunes(r.Task.Spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord)
+		if r.Sig.Err != nil {
+			fmt.Fprintf(&b, " 错误: %s", truncateRunes(r.Sig.Err.Error(), settleErrMaxChars))
+		}
+		if out := r.Sig.Output; out != "" {
+			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(out))
+		}
+	}
+	msg := model.Message{Role: model.RoleUser, Content: b.String()}
+	evt := NewExternalInputEvent("task-batch-retire", msg)
+	return evt
+}
+
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	marker, statusWord := settleMarkerAndStatus(sig)
 
