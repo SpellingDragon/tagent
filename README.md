@@ -365,7 +365,7 @@ cd examples/wechat-bot && go run .     # 运行示例
 
 | 变量 | 说明 |
 |------|------|
-| `TAGENT_RL_ALLOW_LLM_REDIRECT` | `1` 才允许 `/task` 携带 `llm_base_url` 动态重定向（默认禁用；**allowlist 只约束初始 URL，30x 跳转需可信 host**，后续变更为 LLM client 安装 CheckRedirect） |
+| `TAGENT_RL_ALLOW_LLM_REDIRECT` | `1` 才允许 `/task` 携带 `llm_base_url` 动态重定向（默认禁用；LLM client 逐跳 CheckRedirect：30x 每一跳目标 host 必须 ∈ allowlist，未启用时任何跳转全拒） |
 | `TAGENT_RL_ENDPOINT_ALLOWLIST` | 逗号分隔 host allowlist（精确 host、任意端口），如 `proxy.example.com,proxy2.internal` |
 
 CI（GitHub Actions）在 push/PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI。

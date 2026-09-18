@@ -208,6 +208,9 @@ func init() {
 		{Name: TypeContextCompress, Role: model.RoleUser, Skeleton: true, LowValue: true, TTLDays: 3, Synthetic: true, Recallable: true},
 		// 工具链折叠 ref：合成负 key。
 		{Name: TypeToolChain, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
+		// 结算通知折叠卡片 ref：合成负 key（resident-remaining-hardening 1.3）。
+		// 骨架保留（卡片不被段内丢弃）；卡片行的 evt_key 票据指向正 key 原文。
+		{Name: TypeSettleFold, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
 		// 任务 spawn 记录（R2）：registry 重建数据源；事实链记录不进投影；TTL 与
 		// external_input 对齐（30d，超期常驻服务由 R3 重挂+TaskID 桥兜底）。
 		{Name: TypeTaskSpawned, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true},

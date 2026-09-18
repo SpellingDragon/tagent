@@ -7,6 +7,7 @@ replace github.com/SpellingDragon/tagent => ../..
 require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
 	github.com/SpellingDragon/wechat-robot-go v1.5.1
+	github.com/openai/openai-go v1.12.0
 	trpc.group/trpc-go/trpc-agent-go v1.10.0
 )
 
@@ -49,7 +50,6 @@ require (
 	github.com/mailru/easyjson v0.9.0 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/ollama/ollama v0.16.3 // indirect
-	github.com/openai/openai-go v1.12.0 // indirect
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect

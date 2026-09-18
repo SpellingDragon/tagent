@@ -5,11 +5,11 @@
 
 ## 1. 批次 A：压缩回收提升（6.7 展开 + Major 5）
 
-- [ ] 1.1 task.TaskManager 增加 OnBatchRetire([]RetiredReceipt) 可选回调：RetireOrphans/reconcileZombies 循环收集 (task, sig)，循环结束统一回调一次；回调为 nil 保持逐个 onSettle 旧行为（design D1；fail-before：先写多 envelope 风暴场景测试）。
-- [ ] 1.2 agent 层注册 OnBatchRetire：per-task settle 记录逐条 record-only 落链（task_record_sink 同款，供 RebuildTaskRegistry 归并），bus 只发布一条汇总 external_input（N 行票据摘要，复用 newTaskSettledEvent 行格式）。
-- [ ] 1.3 settled 类 external_input 纳入压缩票据化折叠：折叠判定识别 `[task settled]` 前缀（或等价 Metadata 子型），多条连续 ref 合并单张汇总卡片（`✗/✓ [evt_key] 摘要行` + recall 提示文案）；测试覆盖「50 条结算折叠 ≥80% 字符回收 + 事实链/registry 不受影响 + recall 可取回原文」。
-- [ ] 1.4 rl 包新增 EndpointRedirectPolicy(allowlist) 导出 helper（返回 http.Client 可用 CheckRedirect func：逐跳 host ∈ allowlist，空 allowlist 全拒）；宿主装配到 LLM client（先侦察 openai SDK 的 http.Client 注入点，不可行则按 design D3 降级为 swappable 层 transport 包装）。
-- [ ] 1.5 测试：302 跳出 allowlist 被拒且无对越界主机请求；未启用重定向时跳转全拒；README 的「已知限制」注释更新为已实现。
+- [x] 1.1 task.TaskManager 增加 OnBatchRetire([]RetiredReceipt) 可选回调：RetireOrphans/reconcileZombies 循环收集 (task, sig)，循环结束统一回调一次；回调为 nil 保持逐个 onSettle 旧行为（design D1；fail-before：先写多 envelope 风暴场景测试）。
+- [x] 1.2 agent 层注册 OnBatchRetire：per-task settle 记录逐条 record-only 落链（task_record_sink 同款，供 RebuildTaskRegistry 归并），bus 只发布一条汇总 external_input（N 行票据摘要，复用 newTaskSettledEvent 行格式）。
+- [x] 1.3 settled 类 external_input 纳入压缩票据化折叠：折叠判定识别 `[task settled]` 前缀（或等价 Metadata 子型），多条连续 ref 合并单张汇总卡片（`✗/✓ [evt_key] 摘要行` + recall 提示文案）；测试覆盖「50 条结算折叠 ≥80% 字符回收 + 事实链/registry 不受影响 + recall 可取回原文」。
+- [x] 1.4 rl 包新增 EndpointRedirectPolicy(allowlist) 导出 helper（返回 http.Client 可用 CheckRedirect func：逐跳 host ∈ allowlist，空 allowlist 全拒）；宿主装配到 LLM client（先侦察 openai SDK 的 http.Client 注入点，不可行则按 design D3 降级为 swappable 层 transport 包装）。
+- [x] 1.5 测试：302 跳出 allowlist 被拒且无对越界主机请求；未启用重定向时跳转全拒；README 的「已知限制」注释更新为已实现。
 - [ ] 1.6 估值器测量结论（非立项）：D2 上线后用远端 24h 基线数据出 chars/token 实测报告，决定是否另案立项。
 
 ## 2. 批次 B：票据守卫与基准（继承 6.1–6.6）

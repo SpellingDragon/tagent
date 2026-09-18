@@ -21,12 +21,30 @@ import (
 	mengine "github.com/SpellingDragon/tagent/memory/engine"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
+	openaiopt "github.com/openai/openai-go/option"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
+
+// endpointPolicyFromEnv reads the dynamic-endpoint redirect policy from the
+// environment (5.3 + resident-remaining-hardening 1.4): enable flag plus the
+// exact-host allowlist (any port). Shared by the HTTPAPI endpoint policy and
+// the LLM client's per-hop CheckRedirect guard so the two can never drift.
+func endpointPolicyFromEnv() (enabled bool, allowlist []string) {
+	enabled = os.Getenv("TAGENT_RL_ALLOW_LLM_REDIRECT") == "1"
+	allowlist = []string{}
+	if v := os.Getenv("TAGENT_RL_ENDPOINT_ALLOWLIST"); v != "" {
+		for _, hst := range strings.Split(v, ",") {
+			if hst = strings.TrimSpace(strings.ToLower(hst)); hst != "" {
+				allowlist = append(allowlist, hst)
+			}
+		}
+	}
+	return enabled, allowlist
+}
 
 // resolveTriggerSource applies the delivery-gate policy to a raw
 // trigger_source value read from an output event (unified gate, 2026-09-15).
@@ -123,6 +141,15 @@ func main() {
 	// tagent resolves provider endpoints/API keys from Config. The application only
 	// wires them into model instances and the SwappableModel used by AReaL/HTTPAPI.
 
+	// resident-remaining-hardening 1.4 (cold-eyes Major 5 closure): the LLM HTTP
+	// client enforces the endpoint allowlist on EVERY hop of a 30x chain, so an
+	// allowlisted llm_base_url cannot bridge out to arbitrary hosts (metadata
+	// SSRF). Dynamic redirect disabled → empty allowlist → all hops rejected
+	// (redirect-disabled semantics).
+	redirectEnabled, endpointAllowlist := endpointPolicyFromEnv()
+	guardedClient := rl.NewEndpointGuardedClient(endpointAllowlist)
+	modelHTTP := openai.WithOpenAIOptions(openaiopt.WithHTTPClient(guardedClient))
+
 	// 2a. Global fallback model (for sub-agents without explicit model/provider).
 	globalEndpoint, globalKeyEnv, err := tagentCfg.ResolveAgentProvider("")
 	if err != nil {
@@ -138,6 +165,7 @@ func main() {
 		tagentCfg.Model,
 		openai.WithAPIKey(globalAPIKey),
 		openai.WithBaseURL(globalEndpoint),
+		modelHTTP,
 	)
 
 	// 2b. Entry agent model (SwappableModel for AReaL proxy support).
@@ -159,6 +187,7 @@ func main() {
 		effectiveModel,
 		openai.WithAPIKey(entryAPIKey),
 		openai.WithBaseURL(entryEndpoint),
+		modelHTTP,
 	)
 	swappableModel := rl.NewSwappableModel(entryModel)
 
@@ -256,6 +285,7 @@ func main() {
 			effectiveModel,
 			openai.WithAPIKey(entryAPIKey),
 			openai.WithBaseURL(baseURL),
+			modelHTTP,
 		)
 		swappableModel.Swap(newModel)
 		// Update TrajectoryRecorder's endpoint to reflect the swap
@@ -267,23 +297,12 @@ func main() {
 	// resident-readiness-plan 5.3：动态端点重定向默认禁用；RL 训练部署显式开启
 	//（TAGENT_RL_ALLOW_LLM_REDIRECT=1）并要求 allowlist（精确 host，任意端口）。
 	// 更新回调改用 error 版——重建失败整批拒绝（502），旧端点继续服务。
-	// 已知限制（cold-eyes Major 5 降级文档化）：allowlist 只约束初始 URL，
-	// 端点自身 30x 跳转不受逐跳校验——allowlist 中的 host 必须可信（不会
-	// 跳出清单），或部署在离网环境。后续变更为 LLM client 装 CheckRedirect。
-	// 已知限制（cold-eyes Major 5 降级文档化）：allowlist 只约束初始 URL，
-	// 端点自身 30x 跳转不受逐跳校验——allowlist 中的 host 必须可信（不会
-	// 跳出清单），或部署在离网环境。后续变更为 LLM client 装 CheckRedirect。
-	if os.Getenv("TAGENT_RL_ALLOW_LLM_REDIRECT") == "1" {
-		allowlist := []string{}
-		if v := os.Getenv("TAGENT_RL_ENDPOINT_ALLOWLIST"); v != "" {
-			for _, hst := range strings.Split(v, ",") {
-				if hst = strings.TrimSpace(strings.ToLower(hst)); hst != "" {
-					allowlist = append(allowlist, hst)
-				}
-			}
-		}
-		httpAPI.SetEndpointPolicy(true, allowlist)
-		log.Infof("[HTTPAPI] dynamic llm_base_url redirect ENABLED (allowlist=%v)", allowlist)
+	// Major 5 已闭环（resident-remaining-hardening 1.4）：allowlist 不再只约束
+	// 初始 URL——LLM client 携带逐跳 CheckRedirect（guardedClient），端点自身
+	// 30x 的每一跳目标 host 必须在 allowlist 内，越界跳转以明确错误终止。
+	if redirectEnabled {
+		httpAPI.SetEndpointPolicy(true, endpointAllowlist)
+		log.Infof("[HTTPAPI] dynamic llm_base_url redirect ENABLED (allowlist=%v, per-hop redirect guard ON)", endpointAllowlist)
 	} else {
 		httpAPI.SetEndpointPolicy(false, nil)
 	}

@@ -167,7 +167,7 @@ func TestContextLifecycleSimulation(t *testing.T) {
 		compress.WithRecentFullCount(8))
 	rD := ccSmall.Compress(context.Background(), refs)
 	dumpPhase(t, "D compaction", rD.Messages)
-	hasSummary, hasChain := false, false
+	hasSummary, hasChain, hasSettleFold := false, false, false
 	for _, r := range rD.RetainedRefs {
 		if r.EventType == "context_compress" {
 			hasSummary = true
@@ -186,9 +186,19 @@ func TestContextLifecycleSimulation(t *testing.T) {
 				t.Fatalf("D: tool_chain line must carry the step count + tickets: %s", r.EventSummary)
 			}
 		}
+		// resident-remaining-hardening 1.3: the two adjacent settles fold into
+		// one ticket card; that reclaim can bring the folded render under the
+		// SmartCompressor budget, making the rolling summary genuinely
+		// unnecessary this round (folding settles beats L3 lossy archival).
+		if r.EventType == "settle_fold" {
+			hasSettleFold = true
+			if !strings.Contains(r.EventSummary, "memory_recall") {
+				t.Fatalf("D: settle_fold card must carry the recall hint: %s", r.EventSummary)
+			}
+		}
 	}
-	if !hasSummary || !hasChain {
-		t.Fatalf("D: compaction must form a rolling summary and tool chains (summary=%v chain=%v)", hasSummary, hasChain)
+	if !hasChain || (!hasSummary && !hasSettleFold) {
+		t.Fatalf("D: compaction must form tool chains plus a rolling summary or settle-fold card (summary=%v chain=%v fold=%v)", hasSummary, hasChain, hasSettleFold)
 	}
 	retainedD := rD.RetainedRefs
 

@@ -56,6 +56,15 @@ const (
 	// NOT absorb it into the rolling-summary count.
 	TypeToolChain = "tool_chain"
 
+	// TypeSettleFold represents a folded run of task-settle notification
+	// external_inputs (resident-remaining-hardening 1.3 / design D2): N
+	// consecutive `[task settled]` refs merged into ONE synthetic projection
+	// ref (negative key) whose EventSummary is a ticket card — a header line
+	// plus per-event `✗/✓ [evt_key] 摘要行` rows. Only the projection view is
+	// affected: the underlying settle events stay in the fact chain and are
+	// recallable by their per-row evt_key tickets.
+	TypeSettleFold = "settle_fold"
+
 	// TypeTaskSpawned records a task spawn into the fact chain for the
 	// registry rebuild (R2, resident-continuity-r2-r4): it carries the
 	// Declarative spec so RebuildTaskRegistry can reconstruct the active task
