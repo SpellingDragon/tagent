@@ -1,0 +1,827 @@
+{
+ "tokenizer": "tiktoken cl100k_base",
+ "tiktoken_version": "0.14.0",
+ "generated_by": "tests/offline_bench/gen_token_fixture.py",
+ "corpora": {
+  "zh": {
+   "count": 50,
+   "samples": [
+    {
+     "text": "[000] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000000",
+     "tokens": 59
+    },
+    {
+     "text": "[001] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000013",
+     "tokens": 62
+    },
+    {
+     "text": "[002] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000026",
+     "tokens": 61
+    },
+    {
+     "text": "[003] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000039",
+     "tokens": 55
+    },
+    {
+     "text": "[004] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000052",
+     "tokens": 59
+    },
+    {
+     "text": "[005] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000065",
+     "tokens": 62
+    },
+    {
+     "text": "[006] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000078",
+     "tokens": 61
+    },
+    {
+     "text": "[007] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000091",
+     "tokens": 55
+    },
+    {
+     "text": "[008] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000104",
+     "tokens": 59
+    },
+    {
+     "text": "[009] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000117",
+     "tokens": 62
+    },
+    {
+     "text": "[010] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000130",
+     "tokens": 61
+    },
+    {
+     "text": "[011] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000143",
+     "tokens": 55
+    },
+    {
+     "text": "[012] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000156",
+     "tokens": 59
+    },
+    {
+     "text": "[013] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000169",
+     "tokens": 62
+    },
+    {
+     "text": "[014] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000182",
+     "tokens": 61
+    },
+    {
+     "text": "[015] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000195",
+     "tokens": 55
+    },
+    {
+     "text": "[016] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000208",
+     "tokens": 59
+    },
+    {
+     "text": "[017] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000221",
+     "tokens": 62
+    },
+    {
+     "text": "[018] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000234",
+     "tokens": 61
+    },
+    {
+     "text": "[019] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000247",
+     "tokens": 55
+    },
+    {
+     "text": "[020] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000260",
+     "tokens": 59
+    },
+    {
+     "text": "[021] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000273",
+     "tokens": 62
+    },
+    {
+     "text": "[022] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000286",
+     "tokens": 61
+    },
+    {
+     "text": "[023] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000299",
+     "tokens": 55
+    },
+    {
+     "text": "[024] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000312",
+     "tokens": 59
+    },
+    {
+     "text": "[025] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000325",
+     "tokens": 62
+    },
+    {
+     "text": "[026] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000338",
+     "tokens": 61
+    },
+    {
+     "text": "[027] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000351",
+     "tokens": 55
+    },
+    {
+     "text": "[028] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000364",
+     "tokens": 59
+    },
+    {
+     "text": "[029] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000377",
+     "tokens": 62
+    },
+    {
+     "text": "[030] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000390",
+     "tokens": 61
+    },
+    {
+     "text": "[031] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000403",
+     "tokens": 55
+    },
+    {
+     "text": "[032] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000416",
+     "tokens": 59
+    },
+    {
+     "text": "[033] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000429",
+     "tokens": 62
+    },
+    {
+     "text": "[034] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000442",
+     "tokens": 61
+    },
+    {
+     "text": "[035] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000455",
+     "tokens": 55
+    },
+    {
+     "text": "[036] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000468",
+     "tokens": 59
+    },
+    {
+     "text": "[037] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000481",
+     "tokens": 62
+    },
+    {
+     "text": "[038] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000494",
+     "tokens": 61
+    },
+    {
+     "text": "[039] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000507",
+     "tokens": 55
+    },
+    {
+     "text": "[040] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000520",
+     "tokens": 59
+    },
+    {
+     "text": "[041] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000533",
+     "tokens": 62
+    },
+    {
+     "text": "[042] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000546",
+     "tokens": 61
+    },
+    {
+     "text": "[043] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 1，毫秒 1700000000559",
+     "tokens": 55
+    },
+    {
+     "text": "[044] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 2，毫秒 1700000000572",
+     "tokens": 59
+    },
+    {
+     "text": "[045] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 3，毫秒 1700000000585",
+     "tokens": 62
+    },
+    {
+     "text": "[046] 资源租约的目录锁必须先于文件打开获取避免竞态，事实链记录保持逐条落库不变。分区 4，毫秒 1700000000598",
+     "tokens": 61
+    },
+    {
+     "text": "[047] 端点 allowlist 对每一跳重定向执行精确 host 校验，事实链记录保持逐条落库不变。分区 5，毫秒 1700000000611",
+     "tokens": 55
+    },
+    {
+     "text": "[048] 常驻会话的耐久收件箱在启动期完成收据对齐，事实链记录保持逐条落库不变。分区 6，毫秒 1700000000624",
+     "tokens": 59
+    },
+    {
+     "text": "[049] 任务结算通知折叠为票据卡片后投影字符量显著下降，事实链记录保持逐条落库不变。分区 0，毫秒 1700000000637",
+     "tokens": 62
+    }
+   ]
+  },
+  "en": {
+   "count": 50,
+   "samples": [
+    {
+     "text": "#000 The persistent event loop reclaims external input events into a new turn. Partition 0, timestamp 1700000000000.",
+     "tokens": 28
+    },
+    {
+     "text": "#001 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 1, timestamp 1700000000013.",
+     "tokens": 29
+    },
+    {
+     "text": "#002 Compaction anchors the full-render window at the last fold boundary. Partition 2, timestamp 1700000000026.",
+     "tokens": 27
+    },
+    {
+     "text": "#003 The persistent event loop reclaims external input events into a new turn. Partition 3, timestamp 1700000000039.",
+     "tokens": 28
+    },
+    {
+     "text": "#004 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 4, timestamp 1700000000052.",
+     "tokens": 29
+    },
+    {
+     "text": "#005 Compaction anchors the full-render window at the last fold boundary. Partition 5, timestamp 1700000000065.",
+     "tokens": 27
+    },
+    {
+     "text": "#006 The persistent event loop reclaims external input events into a new turn. Partition 6, timestamp 1700000000078.",
+     "tokens": 28
+    },
+    {
+     "text": "#007 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 0, timestamp 1700000000091.",
+     "tokens": 29
+    },
+    {
+     "text": "#008 Compaction anchors the full-render window at the last fold boundary. Partition 1, timestamp 1700000000104.",
+     "tokens": 27
+    },
+    {
+     "text": "#009 The persistent event loop reclaims external input events into a new turn. Partition 2, timestamp 1700000000117.",
+     "tokens": 28
+    },
+    {
+     "text": "#010 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 3, timestamp 1700000000130.",
+     "tokens": 29
+    },
+    {
+     "text": "#011 Compaction anchors the full-render window at the last fold boundary. Partition 4, timestamp 1700000000143.",
+     "tokens": 27
+    },
+    {
+     "text": "#012 The persistent event loop reclaims external input events into a new turn. Partition 5, timestamp 1700000000156.",
+     "tokens": 28
+    },
+    {
+     "text": "#013 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 6, timestamp 1700000000169.",
+     "tokens": 29
+    },
+    {
+     "text": "#014 Compaction anchors the full-render window at the last fold boundary. Partition 0, timestamp 1700000000182.",
+     "tokens": 27
+    },
+    {
+     "text": "#015 The persistent event loop reclaims external input events into a new turn. Partition 1, timestamp 1700000000195.",
+     "tokens": 28
+    },
+    {
+     "text": "#016 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 2, timestamp 1700000000208.",
+     "tokens": 29
+    },
+    {
+     "text": "#017 Compaction anchors the full-render window at the last fold boundary. Partition 3, timestamp 1700000000221.",
+     "tokens": 27
+    },
+    {
+     "text": "#018 The persistent event loop reclaims external input events into a new turn. Partition 4, timestamp 1700000000234.",
+     "tokens": 28
+    },
+    {
+     "text": "#019 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 5, timestamp 1700000000247.",
+     "tokens": 29
+    },
+    {
+     "text": "#020 Compaction anchors the full-render window at the last fold boundary. Partition 6, timestamp 1700000000260.",
+     "tokens": 27
+    },
+    {
+     "text": "#021 The persistent event loop reclaims external input events into a new turn. Partition 0, timestamp 1700000000273.",
+     "tokens": 28
+    },
+    {
+     "text": "#022 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 1, timestamp 1700000000286.",
+     "tokens": 29
+    },
+    {
+     "text": "#023 Compaction anchors the full-render window at the last fold boundary. Partition 2, timestamp 1700000000299.",
+     "tokens": 27
+    },
+    {
+     "text": "#024 The persistent event loop reclaims external input events into a new turn. Partition 3, timestamp 1700000000312.",
+     "tokens": 28
+    },
+    {
+     "text": "#025 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 4, timestamp 1700000000325.",
+     "tokens": 29
+    },
+    {
+     "text": "#026 Compaction anchors the full-render window at the last fold boundary. Partition 5, timestamp 1700000000338.",
+     "tokens": 27
+    },
+    {
+     "text": "#027 The persistent event loop reclaims external input events into a new turn. Partition 6, timestamp 1700000000351.",
+     "tokens": 28
+    },
+    {
+     "text": "#028 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 0, timestamp 1700000000364.",
+     "tokens": 29
+    },
+    {
+     "text": "#029 Compaction anchors the full-render window at the last fold boundary. Partition 1, timestamp 1700000000377.",
+     "tokens": 27
+    },
+    {
+     "text": "#030 The persistent event loop reclaims external input events into a new turn. Partition 2, timestamp 1700000000390.",
+     "tokens": 28
+    },
+    {
+     "text": "#031 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 3, timestamp 1700000000403.",
+     "tokens": 29
+    },
+    {
+     "text": "#032 Compaction anchors the full-render window at the last fold boundary. Partition 4, timestamp 1700000000416.",
+     "tokens": 27
+    },
+    {
+     "text": "#033 The persistent event loop reclaims external input events into a new turn. Partition 5, timestamp 1700000000429.",
+     "tokens": 28
+    },
+    {
+     "text": "#034 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 6, timestamp 1700000000442.",
+     "tokens": 29
+    },
+    {
+     "text": "#035 Compaction anchors the full-render window at the last fold boundary. Partition 0, timestamp 1700000000455.",
+     "tokens": 27
+    },
+    {
+     "text": "#036 The persistent event loop reclaims external input events into a new turn. Partition 1, timestamp 1700000000468.",
+     "tokens": 28
+    },
+    {
+     "text": "#037 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 2, timestamp 1700000000481.",
+     "tokens": 29
+    },
+    {
+     "text": "#038 Compaction anchors the full-render window at the last fold boundary. Partition 3, timestamp 1700000000494.",
+     "tokens": 27
+    },
+    {
+     "text": "#039 The persistent event loop reclaims external input events into a new turn. Partition 4, timestamp 1700000000507.",
+     "tokens": 28
+    },
+    {
+     "text": "#040 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 5, timestamp 1700000000520.",
+     "tokens": 29
+    },
+    {
+     "text": "#041 Compaction anchors the full-render window at the last fold boundary. Partition 6, timestamp 1700000000533.",
+     "tokens": 27
+    },
+    {
+     "text": "#042 The persistent event loop reclaims external input events into a new turn. Partition 0, timestamp 1700000000546.",
+     "tokens": 28
+    },
+    {
+     "text": "#043 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 1, timestamp 1700000000559.",
+     "tokens": 29
+    },
+    {
+     "text": "#044 Compaction anchors the full-render window at the last fold boundary. Partition 2, timestamp 1700000000572.",
+     "tokens": 27
+    },
+    {
+     "text": "#045 The persistent event loop reclaims external input events into a new turn. Partition 3, timestamp 1700000000585.",
+     "tokens": 28
+    },
+    {
+     "text": "#046 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 4, timestamp 1700000000598.",
+     "tokens": 29
+    },
+    {
+     "text": "#047 Compaction anchors the full-render window at the last fold boundary. Partition 5, timestamp 1700000000611.",
+     "tokens": 27
+    },
+    {
+     "text": "#048 The persistent event loop reclaims external input events into a new turn. Partition 6, timestamp 1700000000624.",
+     "tokens": 28
+    },
+    {
+     "text": "#049 Deduplication keys align one-to-one with messages inside an envelope batch. Partition 0, timestamp 1700000000637.",
+     "tokens": 29
+    }
+   ]
+  },
+  "code": {
+   "count": 50,
+   "samples": [
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns0(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns1(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns2(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns3(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns4(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns5(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns6(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns7(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns8(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns9(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns10(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns11(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns12(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns13(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns14(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns15(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns16(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns17(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns18(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns19(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns20(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns21(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns22(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns23(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns24(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns25(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns26(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns27(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns28(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns29(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns30(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns31(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns32(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns33(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns34(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns35(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns36(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns37(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns38(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns39(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns40(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns41(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns42(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns43(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns44(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns45(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns46(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns47(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 2 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns48(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 0 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    },
+    {
+     "text": "func (cc *ContextCompressor) foldSettleRuns49(refs []memory.EventReference) []memory.EventReference {\n\tresult := make([]memory.EventReference, 0, len(refs))\n\tfor j := 0; j < len(refs); j++ {\n\t\tif isSettleNoticeRef(refs[j]) && j%2 == 1 {\n\t\t\tresult = append(result, buildSettleFoldRef(refs[j:j+1]))\n\t\t}\n\t}\n\treturn result\n}",
+     "tokens": 101
+    }
+   ]
+  },
+  "json": {
+   "count": 50,
+   "samples": [
+    {
+     "text": "{\"content\": \"任务 0 完成，结果已落盘 /workspace/out/0.txt\", \"event_key\": 1700000000000, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 1 完成，结果已落盘 /workspace/out/1.txt\", \"event_key\": 1700000000001, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 2 完成，结果已落盘 /workspace/out/2.txt\", \"event_key\": 1700000000002, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 3 完成，结果已落盘 /workspace/out/3.txt\", \"event_key\": 1700000000003, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 4 完成，结果已落盘 /workspace/out/4.txt\", \"event_key\": 1700000000004, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 5 完成，结果已落盘 /workspace/out/5.txt\", \"event_key\": 1700000000005, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 6 完成，结果已落盘 /workspace/out/6.txt\", \"event_key\": 1700000000006, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 7 完成，结果已落盘 /workspace/out/7.txt\", \"event_key\": 1700000000007, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 8 完成，结果已落盘 /workspace/out/8.txt\", \"event_key\": 1700000000008, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 9 完成，结果已落盘 /workspace/out/9.txt\", \"event_key\": 1700000000009, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 10 完成，结果已落盘 /workspace/out/10.txt\", \"event_key\": 1700000000010, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 11 完成，结果已落盘 /workspace/out/11.txt\", \"event_key\": 1700000000011, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 12 完成，结果已落盘 /workspace/out/12.txt\", \"event_key\": 1700000000012, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 13 完成，结果已落盘 /workspace/out/13.txt\", \"event_key\": 1700000000013, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 14 完成，结果已落盘 /workspace/out/14.txt\", \"event_key\": 1700000000014, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 15 完成，结果已落盘 /workspace/out/15.txt\", \"event_key\": 1700000000015, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 16 完成，结果已落盘 /workspace/out/16.txt\", \"event_key\": 1700000000016, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 17 完成，结果已落盘 /workspace/out/17.txt\", \"event_key\": 1700000000017, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 18 完成，结果已落盘 /workspace/out/18.txt\", \"event_key\": 1700000000018, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 19 完成，结果已落盘 /workspace/out/19.txt\", \"event_key\": 1700000000019, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 20 完成，结果已落盘 /workspace/out/20.txt\", \"event_key\": 1700000000020, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 21 完成，结果已落盘 /workspace/out/21.txt\", \"event_key\": 1700000000021, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 22 完成，结果已落盘 /workspace/out/22.txt\", \"event_key\": 1700000000022, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 23 完成，结果已落盘 /workspace/out/23.txt\", \"event_key\": 1700000000023, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 24 完成，结果已落盘 /workspace/out/24.txt\", \"event_key\": 1700000000024, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 25 完成，结果已落盘 /workspace/out/25.txt\", \"event_key\": 1700000000025, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 26 完成，结果已落盘 /workspace/out/26.txt\", \"event_key\": 1700000000026, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 27 完成，结果已落盘 /workspace/out/27.txt\", \"event_key\": 1700000000027, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 28 完成，结果已落盘 /workspace/out/28.txt\", \"event_key\": 1700000000028, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 29 完成，结果已落盘 /workspace/out/29.txt\", \"event_key\": 1700000000029, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 30 完成，结果已落盘 /workspace/out/30.txt\", \"event_key\": 1700000000030, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 31 完成，结果已落盘 /workspace/out/31.txt\", \"event_key\": 1700000000031, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 32 完成，结果已落盘 /workspace/out/32.txt\", \"event_key\": 1700000000032, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 33 完成，结果已落盘 /workspace/out/33.txt\", \"event_key\": 1700000000033, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 34 完成，结果已落盘 /workspace/out/34.txt\", \"event_key\": 1700000000034, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 35 完成，结果已落盘 /workspace/out/35.txt\", \"event_key\": 1700000000035, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 36 完成，结果已落盘 /workspace/out/36.txt\", \"event_key\": 1700000000036, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 37 完成，结果已落盘 /workspace/out/37.txt\", \"event_key\": 1700000000037, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 38 完成，结果已落盘 /workspace/out/38.txt\", \"event_key\": 1700000000038, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 39 完成，结果已落盘 /workspace/out/39.txt\", \"event_key\": 1700000000039, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 40 完成，结果已落盘 /workspace/out/40.txt\", \"event_key\": 1700000000040, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 41 完成，结果已落盘 /workspace/out/41.txt\", \"event_key\": 1700000000041, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 42 完成，结果已落盘 /workspace/out/42.txt\", \"event_key\": 1700000000042, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 43 完成，结果已落盘 /workspace/out/43.txt\", \"event_key\": 1700000000043, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 1}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 44 完成，结果已落盘 /workspace/out/44.txt\", \"event_key\": 1700000000044, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 2}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 45 完成，结果已落盘 /workspace/out/45.txt\", \"event_key\": 1700000000045, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 0, \"source\": \"task\"}, \"partition_id\": 3}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 46 完成，结果已落盘 /workspace/out/46.txt\", \"event_key\": 1700000000046, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 1, \"source\": \"task\"}, \"partition_id\": 4}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 47 完成，结果已落盘 /workspace/out/47.txt\", \"event_key\": 1700000000047, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 2, \"source\": \"task\"}, \"partition_id\": 5}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 48 完成，结果已落盘 /workspace/out/48.txt\", \"event_key\": 1700000000048, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 3, \"source\": \"task\"}, \"partition_id\": 6}",
+     "tokens": 65
+    },
+    {
+     "text": "{\"content\": \"任务 49 完成，结果已落盘 /workspace/out/49.txt\", \"event_key\": 1700000000049, \"event_type\": \"external_input\", \"metadata\": {\"attempt\": 4, \"source\": \"task\"}, \"partition_id\": 0}",
+     "tokens": 65
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,489 @@
+{
+  "compression": [
+    {
+      "allocs_bytes_per_round": 2901.656,
+      "compressed": true,
+      "duration_ms": 2,
+      "refs": 1000,
+      "retained_refs": 29,
+      "rss": {
+        "heap_inuse_mib": 5.867,
+        "sys_mib": 1705.227
+      }
+    },
+    {
+      "allocs_bytes_per_round": 3085.674,
+      "compressed": true,
+      "duration_ms": 21,
+      "refs": 10000,
+      "retained_refs": 29,
+      "rss": {
+        "heap_inuse_mib": 22.375,
+        "sys_mib": 1705.227
+      }
+    },
+    {
+      "allocs_bytes_per_round": 3223.793,
+      "compressed": true,
+      "duration_ms": 213,
+      "refs": 100000,
+      "retained_refs": 29,
+      "rss": {
+        "heap_inuse_mib": 121.094,
+        "sys_mib": 1705.227
+      }
+    }
+  ],
+  "generated": "2026-09-18T12:32:12+08:00",
+  "storage": {
+    "cells": [
+      {
+        "allocs_bytes_per_write": 6602.896,
+        "fsync": true,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 15.4,
+              "mean_ms": 4.079,
+              "n": 20,
+              "p50_ms": 5.496,
+              "p95_ms": 15.4
+            },
+            "probes": 20,
+            "throughput_ps": 244.917
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 15.629,
+              "mean_ms": 5.203,
+              "n": 200,
+              "p50_ms": 7.141,
+              "p95_ms": 12.313
+            },
+            "probes": 200,
+            "throughput_ps": 1867.203
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 223.219,
+              "mean_ms": 42.641,
+              "n": 2000,
+              "p50_ms": 5.89,
+              "p95_ms": 137.644
+            },
+            "probes": 2000,
+            "throughput_ps": 2151.105
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 8.648,
+          "sys_mib": 79.77
+        },
+        "sampled": false,
+        "scale": 1000,
+        "write": {
+          "max_ms": 13.733,
+          "mean_ms": 0.283,
+          "n": 1000,
+          "p50_ms": 0.005,
+          "p95_ms": 0.03
+        },
+        "write_thr": 3520.016,
+        "written": 1000
+      },
+      {
+        "allocs_bytes_per_write": 6520.464,
+        "fsync": false,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 5.693,
+              "mean_ms": 2.683,
+              "n": 20,
+              "p50_ms": 5.084,
+              "p95_ms": 5.693
+            },
+            "probes": 20,
+            "throughput_ps": 372.485
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 14.269,
+              "mean_ms": 5.187,
+              "n": 200,
+              "p50_ms": 6.755,
+              "p95_ms": 12.251
+            },
+            "probes": 200,
+            "throughput_ps": 1868.172
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 260.186,
+              "mean_ms": 47.892,
+              "n": 2000,
+              "p50_ms": 10.15,
+              "p95_ms": 131.23
+            },
+            "probes": 2000,
+            "throughput_ps": 1959.014
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 11.625,
+          "sys_mib": 79.77
+        },
+        "sampled": false,
+        "scale": 1000,
+        "write": {
+          "max_ms": 3.139,
+          "mean_ms": 0.045,
+          "n": 1000,
+          "p50_ms": 0.002,
+          "p95_ms": 0.015
+        },
+        "write_thr": 22042.778,
+        "written": 1000
+      },
+      {
+        "allocs_bytes_per_write": 15394.25,
+        "fsync": true,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 1,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 85.198,
+              "mean_ms": 30.161,
+              "n": 20,
+              "p50_ms": 54.342,
+              "p95_ms": 85.198
+            },
+            "probes": 20,
+            "throughput_ps": 33.147
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0.83,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 113.721,
+              "mean_ms": 43.969,
+              "n": 200,
+              "p50_ms": 69.99,
+              "p95_ms": 98.864
+            },
+            "probes": 200,
+            "throughput_ps": 221.522
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0.812,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 2054.942,
+              "mean_ms": 384.101,
+              "n": 2000,
+              "p50_ms": 283.332,
+              "p95_ms": 1059.527
+            },
+            "probes": 2000,
+            "throughput_ps": 234.555
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 39.57,
+          "sys_mib": 452.134
+        },
+        "sampled": false,
+        "scale": 10000,
+        "write": {
+          "max_ms": 62.193,
+          "mean_ms": 0.291,
+          "n": 10000,
+          "p50_ms": 0.014,
+          "p95_ms": 0.05
+        },
+        "write_thr": 3430.485,
+        "written": 10000
+      },
+      {
+        "allocs_bytes_per_write": 12875.002,
+        "fsync": false,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 1,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 57.257,
+              "mean_ms": 27.356,
+              "n": 20,
+              "p50_ms": 53.017,
+              "p95_ms": 57.257
+            },
+            "probes": 20,
+            "throughput_ps": 36.552
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0.83,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 129.522,
+              "mean_ms": 48.067,
+              "n": 200,
+              "p50_ms": 69.829,
+              "p95_ms": 110.116
+            },
+            "probes": 200,
+            "throughput_ps": 204.598
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0.817,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 1920.052,
+              "mean_ms": 386.781,
+              "n": 2000,
+              "p50_ms": 308.249,
+              "p95_ms": 999.503
+            },
+            "probes": 2000,
+            "throughput_ps": 234.798
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 59.172,
+          "sys_mib": 452.134
+        },
+        "sampled": false,
+        "scale": 10000,
+        "write": {
+          "max_ms": 27.003,
+          "mean_ms": 0.04,
+          "n": 10000,
+          "p50_ms": 0.003,
+          "p95_ms": 0.012
+        },
+        "write_thr": 24777.971,
+        "written": 10000
+      },
+      {
+        "allocs_bytes_per_write": 18056.76,
+        "fsync": true,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 1,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 114.849,
+              "mean_ms": 54.216,
+              "n": 20,
+              "p50_ms": 106.355,
+              "p95_ms": 114.849
+            },
+            "probes": 20,
+            "throughput_ps": 18.444
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0.85,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 194.955,
+              "mean_ms": 84.362,
+              "n": 200,
+              "p50_ms": 144.573,
+              "p95_ms": 181.815
+            },
+            "probes": 200,
+            "throughput_ps": 114.882
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0.861,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 3372.384,
+              "mean_ms": 792.03,
+              "n": 2000,
+              "p50_ms": 624.252,
+              "p95_ms": 1958.873
+            },
+            "probes": 2000,
+            "throughput_ps": 116.905
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 112.891,
+          "sys_mib": 846.308
+        },
+        "sampled": true,
+        "scale": 100000,
+        "write": {
+          "max_ms": 82.713,
+          "mean_ms": 0.285,
+          "n": 20000,
+          "p50_ms": 0.013,
+          "p95_ms": 0.052
+        },
+        "write_thr": 3495.731,
+        "written": 20000
+      },
+      {
+        "allocs_bytes_per_write": 63881.94,
+        "fsync": false,
+        "probes": {
+          "1": {
+            "kv_ops_per_probe": {
+              "get": 1,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 563.96,
+              "mean_ms": 271.619,
+              "n": 20,
+              "p50_ms": 533.066,
+              "p95_ms": 563.96
+            },
+            "probes": 20,
+            "throughput_ps": 3.682
+          },
+          "10": {
+            "kv_ops_per_probe": {
+              "get": 0.88,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 1023.647,
+              "mean_ms": 435.069,
+              "n": 200,
+              "p50_ms": 691.67,
+              "p95_ms": 943.565
+            },
+            "probes": 200,
+            "throughput_ps": 22.382
+          },
+          "100": {
+            "kv_ops_per_probe": {
+              "get": 0.887,
+              "range": 0,
+              "scan": 1
+            },
+            "latency": {
+              "max_ms": 10452.683,
+              "mean_ms": 4114.211,
+              "n": 2000,
+              "p50_ms": 4021.845,
+              "p95_ms": 7172.887
+            },
+            "probes": 2000,
+            "throughput_ps": 22.803
+          }
+        },
+        "rss": {
+          "heap_inuse_mib": 501.891,
+          "sys_mib": 1705.227
+        },
+        "sampled": false,
+        "scale": 100000,
+        "write": {
+          "max_ms": 265.93,
+          "mean_ms": 0.082,
+          "n": 100000,
+          "p50_ms": 0.003,
+          "p95_ms": 0.012
+        },
+        "write_thr": 12038.089,
+        "written": 100000
+      }
+    ],
+    "note": "fork/s is not exercised by this memory/compress workload (tmux probes live in the action domain)"
+  },
+  "token_estimator": {
+    "code": {
+      "abs_err_pct_p50": 68.317,
+      "abs_err_pct_p90": 68.317,
+      "est_over_ref_p50": 1.683,
+      "est_over_ref_p90": 1.683,
+      "samples": 50
+    },
+    "en": {
+      "abs_err_pct_p50": 140.741,
+      "abs_err_pct_p90": 142.857,
+      "est_over_ref_p50": 2.407,
+      "est_over_ref_p90": 2.429,
+      "samples": 50
+    },
+    "json": {
+      "abs_err_pct_p50": 50.769,
+      "abs_err_pct_p90": 50.769,
+      "est_over_ref_p50": 1.508,
+      "est_over_ref_p90": 1.508,
+      "samples": 50
+    },
+    "reference": "tiktoken cl100k_base",
+    "tiktoken_version": "0.14.0",
+    "zh": {
+      "abs_err_pct_p50": 31.148,
+      "abs_err_pct_p90": 32.258,
+      "est_over_ref_p50": 0.695,
+      "est_over_ref_p90": 0.855,
+      "samples": 50
+    }
+  }
+}

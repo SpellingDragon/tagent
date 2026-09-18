@@ -77,6 +77,10 @@ type ContextCompressor struct {
 	// read only from Compress (single BeforeModel goroutine) — no lock.
 	fullBoundary int64
 
+	// budgetUnrepresentable counts single over-cap cards whose tickets-only
+	// form still exceeded card_max_chars (6.3 observability; monotone).
+	budgetUnrepresentable atomic.Int64
+
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
 	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
 	listedKeysCap int
@@ -1070,8 +1074,12 @@ func parseNarrativeSection(summary string) string {
 
 // curateCards enforces the card-section bound: when the joined lines exceed
 // cardMaxChars, OLD lines are LLM-condensed (material law: input = card
-// lines, layer-2 artifacts); without a model or on failure the oldest lines
-// SINK into the earlier-items counter (engineering fallback, never breaks).
+// lines, layer-2 artifacts) — but ONLY after the machine ticket guard passes
+// (resident-remaining-hardening 2.1/2.2, archived design D6). A rejected or
+// failed condensation falls through to deterministic sinking: without a
+// model, on error, or when the condensed text drops/forges recall tickets,
+// the oldest ORIGINAL lines sink into the earlier-items counter (engineering
+// fallback, never breaks, model text never enters the payload).
 func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, earlier int) ([]string, int) {
 	joined := strings.Join(cards, "\n")
 	if cc.cardMaxChars <= 0 || len(joined) <= cc.cardMaxChars {
@@ -1085,22 +1093,166 @@ func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, ea
 		// lines; a multi-line LLM output would have its continuation lines
 		// silently dropped next round (or split into phantom cards).
 		condensed = strings.Join(strings.Fields(condensed), " ")
+		reject := ""
 		if err == nil && condensed != "" {
+			reject = guardCondensedCard(condensed, cards[:half])
+		}
+		switch {
+		case err != nil:
+			log.Warnf("[ContextCompressor] card condensation failed (sinking instead): %v", err)
+		case reject != "":
+			// Ticket guard rejected the model text (lost head/tail/★ ticket,
+			// fabricated or unparseable ticket). Never a second LLM ask —
+			// deterministic sinking of the verbatim originals proceeds.
+			log.Warnf("[ContextCompressor] card condensation REJECTED by ticket guard (sinking instead): %s", reject)
+		case condensed == "":
+			// empty model text: deterministic sinking
+		default:
 			newCards := append([]string{"- " + condensed}, cards[half:]...)
 			if len(strings.Join(newCards, "\n")) <= cc.cardMaxChars {
 				return newCards, earlier
 			}
 			cards = newCards // condensed but still over — fall through to sinking
-		} else if err != nil {
-			log.Warnf("[ContextCompressor] card condensation failed (sinking instead): %v", err)
 		}
 	}
-	// Engineering fallback: sink oldest lines until under the cap.
-	for len(cards) > 1 && len(strings.Join(cards, "\n")) > cc.cardMaxChars {
+	// Engineering fallback: sink oldest lines until under the cap. The joined
+	// length is tracked INCREMENTALLY — recomputing strings.Join inside the
+	// loop made eviction O(n²) per round (the 2.5 offline baseline profile put
+	// 23s of CPU in curateCards on a 25k-card drop; same semantics, linear now).
+	joint := len(strings.Join(cards, "\n"))
+	for len(cards) > 1 && joint > cc.cardMaxChars {
+		dropped := len(cards[0]) + 1 // line plus its separator
 		cards = cards[1:]
+		joint -= dropped
 		earlier++
 	}
+	// A single card left still over cap (6.3): bound it while preserving
+	// EVERY ticket; if even the tickets-only form cannot fit, that is
+	// budget-unrepresentable — keep the tickets (never silently drop them,
+	// never grow unbounded) and make the state observable.
+	if len(cards) == 1 && len(cards[0]) > cc.cardMaxChars {
+		fitted, representable := fitTicketCard(cards[0], cc.cardMaxChars)
+		cards[0] = fitted
+		if !representable {
+			cc.noteBudgetUnrepresentable(len(fitted), cc.cardMaxChars, fitted)
+		}
+	}
 	return cards, earlier
+}
+
+// budgetUnrepresentable counts (observable, monotone per compressor) how
+// often the card budget could not express even the tickets-only form of a
+// single over-cap card — an operator-tuning signal (card_max_chars scales
+// with max_tokens, so hitting it means the budget formula is under-sized).
+func (cc *ContextCompressor) noteBudgetUnrepresentable(got, cap int, line string) {
+	cc.budgetUnrepresentable.Add(1)
+	log.Errorf("[ContextCompressor] budget-unrepresentable: single card needs %d chars > cap %d, kept tickets-only: %q", got, cap, line)
+}
+
+// BudgetUnrepresentable returns the cumulative count of budget-unrepresentable
+// card states (diagnostics surface; 6.3 "无法表达状态传给诊断").
+func (cc *ContextCompressor) BudgetUnrepresentable() int64 {
+	return cc.budgetUnrepresentable.Load()
+}
+
+// fitTicketCard bounds one over-cap card line to at most cap chars while
+// keeping every recall ticket it carries. Prose is stripped first (tickets +
+// truncation marker survive); the result is idempotent — re-fitting an already
+// fitted line is a no-op when it fits, or the same tickets-only form again.
+// ok=false reports budget-unrepresentable: even the tickets-only line exceeds
+// the cap (the tickets-only line is still returned — losing tickets silently
+// is not an option).
+func fitTicketCard(line string, cap int) (fitted string, ok bool) {
+	var b strings.Builder
+	b.WriteString("- ")
+	if strings.Contains(line, "★") {
+		b.WriteString("★ ")
+	}
+	for _, k := range parseCardTickets(line) {
+		b.WriteString("[" + k + "] ")
+	}
+	b.WriteString("〔预算截断〕")
+	fitted = strings.TrimRight(b.String(), " ")
+	if len(fitted) <= cap {
+		return fitted, true
+	}
+	return fitted, false
+}
+
+// cardTicketRe matches canonical recall tickets inside card lines:
+// "[<hex>]" in FormatEventKey form (lowercase hex, negative keys allowed).
+// Uppercase or non-hex bracketed text is NOT a ticket — a model-echoed
+// fabrication like "[AAAA0004]" must fail the subset check rather than pass
+// as a case-insensitive match.
+var cardTicketRe = regexp.MustCompile(`\[(-?[0-9a-f]+)\]`)
+
+// parseCardTickets extracts the recall tickets of one card line.
+func parseCardTickets(line string) []string {
+	ms := cardTicketRe.FindAllStringSubmatch(line, -1)
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// guardCondensedCard machine-checks one scrubbed condensed card line against
+// the folded old-half input lines (archived design D6). It returns "" when
+// the text is safe to adopt, else a rejection reason. Requirements:
+//   - output tickets ⊆ input tickets (no fabrication — forged tickets would
+//     enter the compaction payload and poison every later recall),
+//   - head, tail and every ★ highlighted line's tickets all survive (the
+//     navigation anchors and long-term reflection conclusions),
+//   - input carrying tickets but output none = total ticket loss → reject.
+//
+// Input without parseable tickets (legacy/prose fixtures) is not rejected —
+// the guard only ever guards real tickets. Zero LLM calls, zero store reads.
+func guardCondensedCard(condensed string, input []string) string {
+	in := make(map[string]bool)
+	required := make(map[string]bool)
+	markAll := func(keys []string, into map[string]bool) {
+		for _, k := range keys {
+			into[k] = true
+		}
+	}
+	for _, l := range input {
+		keys := parseCardTickets(l)
+		markAll(keys, in)
+	}
+	if len(in) == 0 {
+		return "" // nothing to protect
+	}
+	if len(input) > 0 {
+		markAll(parseCardTickets(input[0]), required)
+		markAll(parseCardTickets(input[len(input)-1]), required)
+		for _, l := range input {
+			if strings.Contains(l, "★") {
+				markAll(parseCardTickets(l), required)
+			}
+		}
+	}
+	out := parseCardTickets(condensed)
+	if len(out) == 0 {
+		return "no recall ticket survived"
+	}
+	for _, k := range out {
+		if !in[k] {
+			return "unknown ticket [" + k + "]"
+		}
+	}
+	outSet := make(map[string]bool, len(out))
+	markAll(out, outSet)
+	for _, l := range input {
+		for _, k := range parseCardTickets(l) {
+			if !required[k] {
+				continue
+			}
+			if !outSet[k] {
+				return "required ticket [" + k + "] dropped"
+			}
+		}
+	}
+	return ""
 }
 
 // condenseCardLines asks the summary model to condense old card lines into a
