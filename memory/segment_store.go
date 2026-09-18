@@ -1157,6 +1157,13 @@ func (s *FileSegmentStore) Compactor() *Compactor {
 	return s.compactor
 }
 
+// Lifecycle returns the injected lifecycle manager (nil when the store runs
+// without one). Harness hook for synchronous TTL/capacity sweeps
+// (resident-remaining-hardening 3.2 E2E).
+func (s *FileSegmentStore) Lifecycle() *LifecycleManager {
+	return s.lifecycle
+}
+
 // closer is an internal interface for resources that need cleanup.
 type closer interface {
 	Close() error

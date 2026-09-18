@@ -27,8 +27,10 @@ import (
 // agent_output does NOT enter the bus — it is emitted directly to outputCh.
 // Honest scope note: the bus coordinates TURNS; the turn-INTERNAL tool loop
 // remains the upstream framework's synchronous ReAct (runner.Run). The old
-// "tool_use bus trigger" abstraction (TypeToolUse) had no producer and no
-// consumer — removed as ghost code (implementation-hardening 4.1).
+// "tool_use bus trigger" abstraction had no producer and no consumer and is
+// gone as ghost code (implementation-hardening 4.1; resident-remaining-
+// hardening 4.4 removed the dangling const its own note had already declared
+// deleted).
 type AgentEvent struct {
 	// ID is a unique identifier for this event.
 	ID string `json:"id"`
@@ -51,15 +53,6 @@ type AgentEvent struct {
 	// Metadata holds extension data (event_key, partition_id, source_session, etc.).
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
-
-// TypeToolUse identifies tool invocation events on the bus.
-// Unlike tagentevent.TypeThinkingPlan (which is an event *type* for persistence),
-// TypeToolUse is a bus *trigger*: it causes the AgentLoop to dispatch the tool
-// asynchronously and continue without blocking.
-//
-// The LLM's tool_calls are converted to TypeToolUse events on the bus;
-// the LLM itself never sees this type in its context.
-const TypeToolUse = "tool_use"
 
 // NewExternalInputEvent creates an external_input event with the given source and message payload.
 // The message is stored by pointer — callers MUST NOT mutate it after publishing.
@@ -136,19 +129,6 @@ func escapeNewlines(s string) string {
 	return strings.NewReplacer("\r\n", "␤", "\n", "␤", "\r", "␤").Replace(s)
 }
 
-// newTaskSettledEvent builds a self-contained external_input event describing a
-// background task that has settled, so the persistent loop reclaims it into a
-// new turn. The event body is a COMPACT SINGLE-LINE trajectory form
-// (context-efficiency-and-trajectory D2): `[task settled] <marker> <desc>
-// (id=<short>) <status> → 结果: <inline|spill>` — dense, append-only friendly,
-// and information-lossless (task_id / desc / status / error / result-or-spill
-// ticket all present; only layout redundancy is dropped). Result bounding keeps
-// the event body BOUNDED so recalling it can never re-inject an oversized
-// result: results over maxChars spill to a file under outputDir
-// (workspace.Cleaner bounds the directory) and the Content carries the path
-// ticket + tail preview; consumption goes through read_file paging. Write
-// failure degrades to inline full text (availability over bounding).
-// maxChars<=0 or empty outputDir disables spillover (tests / small results).
 // newBatchRetiredSummaryEvent (resident-remaining-hardening 1.2): ONE
 // external_input carrying N per-task settled lines — the 6.7① storm collapse.
 // Line format mirrors newTaskSettledEvent's header (retire outputs are short
@@ -177,6 +157,19 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	return evt
 }
 
+// newTaskSettledEvent builds a self-contained external_input event describing a
+// background task that has settled, so the persistent loop reclaims it into a
+// new turn. The event body is a COMPACT SINGLE-LINE trajectory form
+// (context-efficiency-and-trajectory D2): `[task settled] <marker> <desc>
+// (id=<short>) <status> → 结果: <inline|spill>` — dense, append-only friendly,
+// and information-lossless (task_id / desc / status / error / result-or-spill
+// ticket all present; only layout redundancy is dropped). Result bounding keeps
+// the event body BOUNDED so recalling it can never re-inject an oversized
+// result: results over maxChars spill to a file under outputDir
+// (workspace.Cleaner bounds the directory) and the Content carries the path
+// ticket + tail preview; consumption goes through read_file paging. Write
+// failure degrades to inline full text (availability over bounding).
+// maxChars<=0 or empty outputDir disables spillover (tests / small results).
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	marker, statusWord := settleMarkerAndStatus(sig)
 

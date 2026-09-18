@@ -37,6 +37,21 @@ jobs:
       - name: Test (short)
         run: go test ./... -short -count=1
 
+      # Second module (resident-remaining-hardening 3.5): examples/wechat-bot is
+      # an independent module with no go.work, so the root `./...` never reaches
+      # it. Build/vet/test it explicitly or its regressions ship silently.
+      - name: Build (bot module)
+        working-directory: examples/wechat-bot
+        run: go build ./...
+
+      - name: Vet (bot module)
+        working-directory: examples/wechat-bot
+        run: go vet ./...
+
+      - name: Test (bot module, short)
+        working-directory: examples/wechat-bot
+        run: go test ./... -short -count=1
+
   race:
     runs-on: ubuntu-latest
     steps:
@@ -51,8 +66,49 @@ jobs:
       # excluded per-test via the `raceEnabled` build-tag skip (see
       # agent/race_enabled_test.go); agent core now JOINS the race gate
       # (implementation-hardening 8.1/8.2). Upstream issue to be filed.
-      - name: Race (new subsystems + agent core)
-        run: go test ./memory/ ./agent/... ./evolution/ ./event/ ./tool/... -race -count=1
+      #
+      # resident-remaining-hardening 3.5: the gate runs through
+      # scripts/race_check.sh, whose exit-code fidelity is the contract —
+      # go test's status is authoritative, waivers apply ONLY when every top
+      # offending frame matches a registered upstream signature AND there is
+      # no plain (non-race) failure. A green-looking race log from a failed
+      # command (compile error / bad package / timeout) can never be reported
+      # as success. Package set widened to the memory SUBpackages, plugin, and
+      # rl (was: top-level memory only, no plugin/rl).
+      - name: Race (memory subpkgs + agent + evolution + event + tools + plugin + rl)
+        run: ./scripts/race_check.sh ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
+
+  validators:
+    # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
+    # last line of defense for the restart-prefix invariant; their NEGATIVE
+    # cases (the v2 false-EXACT and the v2 IndexError crash) must keep failing
+    # closed. And race_check.sh's own classifier is unit-tested so the gate
+    # can never regress to masking a real failure.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: restart-prefix verifier negative cases
+        run: python3 scripts/test_verify_restart_prefix.py
+      - name: race_check classifier self-test (no masking)
+        run: bash scripts/test_race_check.sh
+
+  openspec:
+    # resident-remaining-hardening 3.5: main specs (openspec/specs/) are the
+    # source of truth and MUST stay strict-valid. In-flight changes are
+    # reported but do not fail the gate (check-openspec.sh encodes that split).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install openspec
+        run: npm install -g openspec
+      - name: OpenSpec spec-hygiene gate
+        run: ./scripts/check-openspec.sh
 
   soak:
     # Long-run continuity evidence (implementation-hardening 8.3): manual only.

@@ -196,7 +196,7 @@ sequenceDiagram
 | KeepRecent=1，老段 L3 多段压缩 | `[summaryRef(context_compress), ref7(user), ref8(tool), ref9(asst_out)]` |
 | 注入前缀后 LLM 看到 | `[evt_summary\|context_compress]...`、`[evt_7\|external_input]`、`[evt_8\|action_command]`、`[evt_9\|agent_output]` |
 
-> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求 LLM 多跳编排（当前未接线，返回确定性迭代指引）。
+> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可通过 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求 LLM 多跳编排（当前未接线，返回确定性迭代指引）。**诚实 miss**：票据未命中（原文已超 TTL/淘汰）时 recall 逐项显式标注 `"miss":true` 并计 `"misses":N`，**零伪造**——绝不以相近内容冒充取回，也不谎报 `orchestrate` 未接通的多跳；断链（父事件缺失）返回 `Complete=false` 如实降级，不谎称完整回合。
 
 
 ---

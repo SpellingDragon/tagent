@@ -207,6 +207,7 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **stale 观测 + 显式 deadline（假活治理）**：job 型任务（Lifetime 显式或按 Kind 推断：command/subagent→job，generic→service）detached 超过 `task_stale_after`（默认 1h）→ `stale` **观测态**（一次性告警、进程不动——年龄+probe 活不能证明僵死）；可选 `task_job_deadline`：job 型超线由 owner `detector.Cancel` 真实终止并 finalize failed 一次结算。service 型永不因年龄终止。detachedAt 入事实链，重启沿用真实脱离时长。
 - **世系跨重启保真**：`Spec.Origin` 深拷贝入 `task_spawned`，恢复时身份字段以持久层为准（恢复闭包只补执行能力，不得整体覆盖）；无世系历史恢复为 `unknown`，宿主对 unknown 与内部来源同等扣留——内部任务（如冥想派生）跨重启不再退化为可投递来源。`settle_status/task_id/lineage_absent/detached_at_ms` 为框架控制键，不进后续任务的 Origin baggage。
 - **跨重启连续（R2/R3）**：冷启动序 = R1 投影重建 → R2 registry 重建 → R3 重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
+  - **进程重启 vs 整机重启（证据边界）**：R3 以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
 
 **一个 tmux 命令的一生**（把上面的零件串成一条线）：
 

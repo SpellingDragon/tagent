@@ -71,6 +71,20 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
 - **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
 
+### 六.1 投递四态边界（volatile → durable → processed → delivered）
+
+契约见 `persistent-event-loop` spec「输入处理确认与幂等」；四态**互不等价**，逐态诚实标注，绝不把前态冒充后态：
+
+| 态 | 含义 | 代码锚点 | 崩溃存活 | 承诺边界 |
+|----|------|---------|---------|---------|
+| volatile accepted | 入内存 channel，未过 inbox 屏障 | `PublishReceipt{Durable:false}`（`agent/event_bus.go`） | 否 | 队列满/超时/存储失败 SHALL NOT 表示为 accepted |
+| durable accepted | 文件+目录屏障完成后的回执 | `PublishReceipt{Durable:true}`、`Inbox.Enqueue`（fsync + 目录同步后才 durable，`agent/reliability/inbox.go`） | 是 | 202/accepted **只表示接收**，不表示已处理/已送达 |
+| processed | turn 消费、事实链写处理回执并耐久后 ack inbox | `TypeInboxReceipt`（非投影、30d=去重窗口，`event/inbox_receipt.go`）；claim 不删原件，未 ack 崩溃可重试 | 是 | **至少一次**，不宣称 exactly-once；超 30d 同 request-id 不承诺幂等 |
+| delivered | 经 outputCh 呈现给宿主/消费者 | outputCh（final 不回灌 EventBus）；慢消费者 2s 宽限→溢出落盘票据 | — | 投递仅经 outputCh，与 bus 自触发脉冲无关 |
+
+> 未启用可靠模式（`bus_spill_dir` 空）= 纯 volatile：无 durable inbox，行为与旧 channel 逐字节一致（向后兼容）。
+
+
 ## 六·A、配置热重载（R4，非重启）
 
 与上述 opt-in 子系统不同，R4 是运行机制层：`WithConfigPath` 记录配置来源后，每次 LLM 调用前（BeforeModel 顶部）触发懒检查（单次 stat，未变更零成本）——

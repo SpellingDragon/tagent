@@ -73,6 +73,35 @@ def tool_of(m):
     return m.get("name") or ""
 
 
+def estimate_default_tokens(msgs, chars_per_token=2.0):
+    """Faithful Python replica of compress.DefaultTokenCounter.Estimate (token_counter.go).
+
+    Counts ONLY each message's string `content` runes / chars_per_token, +10 per
+    message, +20 per tool_call. It deliberately ignores: multimodal content parts,
+    tool_call argument bytes, reasoning_content, and the request's tool-schema array.
+    Kept byte-for-byte aligned with the Go estimator so the measured bias reflects
+    the code actually shipped, not this analyzer's own msg_len char proxy.
+    """
+    if not msgs:
+        return 0
+    total = 0
+    for m in msgs:
+        c = m.get("content")
+        content = c if isinstance(c, str) else ""  # Go reads msg.Content (string only)
+        total += int(len(content) / chars_per_token)
+        total += 10
+        if m.get("tool_calls"):
+            total += 20 * len(m["tool_calls"])
+    return max(1, total)
+
+
+def _pct(a, q):
+    if not a:
+        return 0.0
+    a = sorted(a)
+    return a[min(len(a) - 1, int(q * len(a)))]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("trajectory", help="trajectory JSONL（或 .gz）")
@@ -93,6 +122,7 @@ def main():
             "n_msgs": len(msgs),
             "chars": sum(msg_len(m) for m in msgs),
             "prompt_tokens": usage.get("prompt_tokens") or 0,
+            "est": estimate_default_tokens(msgs),
             "completion_tokens": usage.get("completion_tokens") or 0,
             "duration_ms": ((r.get("metadata") or {}).get("duration_ms")) or 0,
         })
@@ -145,6 +175,21 @@ def main():
     worst = min((t["prompt_tokens"] for t in turns if t["prompt_tokens"]), default=0)
     peak = max((t["prompt_tokens"] for t in turns if t["prompt_tokens"]), default=0)
 
+    # [estimator-bias]: shipped DefaultTokenCounter (chars/2.0) vs the provider's REAL
+    # prompt_tokens (this corpus is the ground truth). est/real < 1 ⇒ the estimator
+    # UNDER-counts ⇒ compressor believes it has more headroom than it does ⇒ compaction
+    # triggers LATE ⇒ provider-overflow risk grows with context size.
+    ratios = [t["est"] / t["prompt_tokens"] for t in turns if t["prompt_tokens"] > 0]
+    big = [t["est"] / t["prompt_tokens"] for t in turns if t["prompt_tokens"] >= 8000]
+    est_bias = {
+        "n": len(ratios),
+        "p50": round(_pct(ratios, 0.5), 3), "p90": round(_pct(ratios, 0.9), 3),
+        "under_rate": round(sum(1 for x in ratios if x < 1.0) / len(ratios), 3) if ratios else 0,
+        "large_ctx_n": len(big),
+        "large_ctx_p50": round(_pct(big, 0.5), 3), "large_ctx_p90": round(_pct(big, 0.9), 3),
+        "large_ctx_under_rate": round(sum(1 for x in big if x < 1.0) / len(big), 3) if big else 0,
+    }
+
     if not args.json:
         print(f"records={len(turns)}  batch {turns[0]['batch_index']}..{turns[-1]['batch_index']}")
         print(f"prompt_tokens: peak={peak} floor={worst} (floor/peak={worst / peak:.1%})" if peak else "no usage")
@@ -168,6 +213,12 @@ def main():
         print("\n[roles]:")
         for k, a in sorted(roles.items(), key=lambda kv: -kv[1]["chars"]):
             print(f"  {k:<32} count={a['count']:>4} chars={a['chars'] / 1e6:.2f}M ({a['chars'] / total_chars * 100:.1f}%)")
+        print(f"\n[estimator-bias] DefaultTokenCounter(chars/2.0) vs 真实 prompt_tokens (n={est_bias['n']}):")
+        print(f"  全体 est/real: p50={est_bias['p50']} p90={est_bias['p90']} 低估率={est_bias['under_rate']:.0%}")
+        if est_bias["large_ctx_n"]:
+            print(f"  大上下文(≥8k tok, n={est_bias['large_ctx_n']}): p50={est_bias['large_ctx_p50']} "
+                  f"p90={est_bias['large_ctx_p90']} 低估率={est_bias['large_ctx_under_rate']:.0%} "
+                  f"—— est<real=低估→压缩晚触发→溢出风险随上下文增大")
         if settled_like:
             print(f"\n[verdict] task_settled 结算消息 {len(settled_like)} 条占 "
                   f"{settled_chars / total_chars:.1%} —— 结算风暴固化进投影（external_input "
@@ -179,6 +230,7 @@ def main():
             "top_messages": top, "roles": roles,
             "settled_like": {"count": len(settled_like), "chars": settled_chars},
             "peak_prompt_tokens": peak, "floor_prompt_tokens": worst,
+            "estimator_bias": est_bias,
         }, ensure_ascii=False, indent=2))
     return 0
 

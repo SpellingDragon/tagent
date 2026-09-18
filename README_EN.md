@@ -372,7 +372,8 @@ See [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subs
 | Design specs (OpenSpec) | [openspec/specs/](openspec/specs/) |
 | Full example (WeChat Bot: five-agent orchestration / message pipeline / RL mode) | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
 | Bare-metal systemd deployment (incl. Jaeger observability backend) | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
-| Real-LLM contract guard matrix | [tests/README.md](tests/README.md) |
+| Real-LLM contract guard matrix (model↔framework text seams) | [tests/README.md](tests/README.md) |
+| Provider-protocol contract matrix (text / usage / streaming / native tool_calls / tool-result round-trip / reasoning passthrough) | root-package `model_contract_matrix_test.go` (drives the real openai-compatible adapter via `resolveAgentModel`; whole group self-skips without `DEEPSEEK_API_KEY`, never blocks CI) |
 
 ## Development
 
@@ -385,7 +386,8 @@ cd examples/wechat-bot && go run .     # run the example
 
 CI (GitHub Actions) runs on push/PR: build + vet + full short test suite + `-race` on the new
 subsystems (memory / governance / reliability / evolution / event / tool …). Real-LLM contract
-tests under `tests/` self-skip without credentials and never block CI.
+tests under `tests/` self-skip without credentials and never block CI; the root-package
+`model_contract_matrix_test.go` (provider-protocol matrix) likewise self-skips without `DEEPSEEK_API_KEY`.
 
 ## License
 

@@ -124,6 +124,15 @@ func (lm *LifecycleManager) scannerLoop() {
 	}
 }
 
+// SweepOnce runs one synchronous lifecycle pass (TTL scan + capacity check)
+// — the scheduler body, exported so E2E/soak harnesses exercise real TTL
+// expiry without waiting the scanner interval
+// (resident-remaining-hardening 3.2). Same semantics, no second truth.
+func (lm *LifecycleManager) SweepOnce() {
+	lm.checkTTL()
+	lm.checkCapacity()
+}
+
 // checkTTL scans events and marks expired ones as tombstoned.
 func (lm *LifecycleManager) checkTTL() {
 	now := time.Now().UnixMilli()
