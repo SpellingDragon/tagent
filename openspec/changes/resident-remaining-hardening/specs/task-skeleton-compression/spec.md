@@ -22,3 +22,17 @@ reconcile/orphan 通道的批量退役 SHALL 在任务层聚合：per-task 的 s
 
 - **WHEN** 一次 reconcile 退役 30 个孤儿任务且宿主注册了批量回调
 - **THEN** 事实链新增 30 条 settle 记录（record-only），bus/投影只出现 1 条汇总 external_input
+
+### Requirement: 浓缩导航丢失可观测
+
+浓缩守卫的必需集（首尾/★）之外，被浓缩文本吞入散文的每张 recall 票据都是导航地址丢失。守卫 SHALL 保持浓缩的压缩权衡不因此失效，但此类消亡 MUST NOT 静默：接纳前 SHALL 计数并告警（累计值可经诊断面读取），事件本体仍按时间范围可召回的事实不受影响。
+
+#### Scenario: 非必需票据被折入散文被计数
+
+- **WHEN** 合法浓缩输出保留首尾/★ 票据但省略了旧半区其他票据
+- **THEN** 该文本仍被接纳，但丢失票据数计入累计计数并记 Warn，诊断 getter 可读出非零值
+
+#### Scenario: 全票据存活不告警
+
+- **WHEN** 浓缩输出携带输入旧半区全部票据
+- **THEN** 计数不增长、无告警

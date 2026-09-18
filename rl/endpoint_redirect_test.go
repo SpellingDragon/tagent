@@ -97,6 +97,31 @@ func TestGuardedClient_AllowlistedHopChainSucceeds(t *testing.T) {
 	}
 }
 
+// TestEndpointRedirectPolicy_HopCap (cold-eyes W-1): a custom CheckRedirect
+// replaces the stdlib's built-in 10-hop loop bound, so the policy must
+// re-impose it — allowlisted ping-pong fails loud instead of hanging.
+func TestEndpointRedirectPolicy_HopCap(t *testing.T) {
+	pol := EndpointRedirectPolicy([]string{"proxy.allowed.example"})
+	initial := httptest.NewRequest("POST", "http://proxy.allowed.example/v1/chat", nil)
+	req := httptest.NewRequest("GET", "http://proxy.allowed.example/again", nil)
+
+	via := make([]*http.Request, 0, 12)
+	for i := 0; i < maxRedirectHops-1; i++ {
+		via = append(via, initial)
+	}
+	if err := pol(req, via); err != nil {
+		t.Errorf("hop %d (below cap) must pass, got %v", len(via), err)
+	}
+	via = append(via, initial) // now len(via) == maxRedirectHops
+	err := pol(req, via)
+	if err == nil {
+		t.Fatal("hop at the cap must be rejected even for an allowlisted host")
+	}
+	if !strings.Contains(err.Error(), "hop cap exceeded") {
+		t.Errorf("rejection must name the cap reason: %v", err)
+	}
+}
+
 func TestNormalizeRedirectHost(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"Proxy.Example.COM:8443", "proxy.example.com"},

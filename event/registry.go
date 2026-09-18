@@ -53,7 +53,8 @@ type EventTypeSpec struct {
 	TTLDays int
 
 	// Synthetic 标记「合成投影引用」类型（负 EventKey，非落库真实事件）：
-	// context_compress（滚动摘要 ref）/ tool_chain（工具链折叠 ref）。
+	// context_compress（滚动摘要 ref）/ tool_chain（工具链折叠 ref）/
+	// settle_fold（结算票据卡片 ref）。
 	// 供存储/召回/渲染区分正负 key 语义（不变量：正负 key）。
 	Synthetic bool
 

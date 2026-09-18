@@ -104,8 +104,8 @@ func TestSwappableModel_ReselectDoesNotCloseLiveInstance(t *testing.T) {
 	sm := NewSwappableModel(a)
 
 	_, _ = sm.GenerateContent(context.Background(), &model.Request{}) // a in use
-	sm.Swap(b)                                                          // a → retired
-	sm.Swap(a)                                                          // b → retired, a back as current
+	sm.Swap(b)                                                        // a → retired
+	sm.Swap(a)                                                        // b → retired, a back as current
 
 	require.Equal(t, 0, a.closedCount(), "reselected current instance must not be swept")
 

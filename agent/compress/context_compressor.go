@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -80,6 +81,12 @@ type ContextCompressor struct {
 	// budgetUnrepresentable counts single over-cap cards whose tickets-only
 	// form still exceeded card_max_chars (6.3 observability; monotone).
 	budgetUnrepresentable atomic.Int64
+
+	// condensedTicketsLost counts recall tickets that card condensation folded
+	// into prose (cold-eyes W-3 observability; the guard only forces
+	// head/tail/★ survival, every further drop is a navigation-address loss —
+	// legitimate compression, but never silent).
+	condensedTicketsLost atomic.Int64
 
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
 	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
@@ -746,7 +753,9 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference) []memo
 // the recall path, then one row per settle event carrying its evt_key ticket.
 func buildSettleFoldRef(run []memory.EventReference) memory.EventReference {
 	var b strings.Builder
-	fmt.Fprintf(&b, "〔结算汇总〕%d 条任务结算通知已折叠为票据卡片，原文可用 memory_recall 按卡片中的 [evt_key] 票据逐条取回：", len(run))
+	// Counting honesty (cold-eyes m-2): a batch-retire summary event is ONE
+	// event carrying N task lines — it folds to one row, one count.
+	fmt.Fprintf(&b, "〔结算汇总〕%d 个结算通知事件已折叠为票据卡片（批量汇总事件计 1 条，批内多行共享其票据），原文可用 memory_recall 按卡片中的 [evt_key] 票据逐条取回：", len(run))
 	var minTs int64
 	for _, ref := range run {
 		b.WriteString("\n- ")
@@ -785,8 +794,10 @@ func settleFoldLine(ref memory.EventReference) string {
 	if sp := strings.IndexByte(line, ' '); sp > 0 {
 		marker, rest = line[:sp], strings.TrimSpace(line[sp+1:])
 	}
-	if len(rest) > settleFoldRowMaxChars {
-		rest = truncateString(rest, settleFoldRowMaxChars)
+	if utf8.RuneCountInString(rest) > settleFoldRowMaxChars {
+		// rune-axis truncate (cold-eyes m-1): byte-axis cutting mid-CJK would
+		// emit invalid UTF-8 into every downstream JSON render.
+		rest = truncate(rest, settleFoldRowMaxChars)
 	}
 	return fmt.Sprintf("%s [%s] %s", marker, tagentevent.FormatEventKey(ref.EventKey), rest)
 }
@@ -1110,6 +1121,7 @@ func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, ea
 		default:
 			newCards := append([]string{"- " + condensed}, cards[half:]...)
 			if len(strings.Join(newCards, "\n")) <= cc.cardMaxChars {
+				cc.noteCondensedTicketsLost(condensed, cards[:half])
 				return newCards, earlier
 			}
 			cards = newCards // condensed but still over — fall through to sinking
@@ -1153,6 +1165,42 @@ func (cc *ContextCompressor) noteBudgetUnrepresentable(got, cap int, line string
 // card states (diagnostics surface; 6.3 "无法表达状态传给诊断").
 func (cc *ContextCompressor) BudgetUnrepresentable() int64 {
 	return cc.budgetUnrepresentable.Load()
+}
+
+// noteCondensedTicketsLost makes condensation's navigation trade observable
+// (cold-eyes W-3): the guard forces head/tail/★ ticket survival, every ticket
+// BEYOND those that the condensed prose swallows is a recall-address loss —
+// legitimate compression (the events stay recallable by time range), but a
+// counted and logged one. Silent ticket death is the failure mode this closes.
+func (cc *ContextCompressor) noteCondensedTicketsLost(condensed string, input []string) {
+	in := make(map[string]bool)
+	for _, l := range input {
+		for _, k := range parseCardTickets(l) {
+			in[k] = true
+		}
+	}
+	out := make(map[string]bool)
+	for _, k := range parseCardTickets(condensed) {
+		out[k] = true
+	}
+	lost := 0
+	for k := range in {
+		if !out[k] {
+			lost++
+		}
+	}
+	if lost == 0 {
+		return
+	}
+	cc.condensedTicketsLost.Add(int64(lost))
+	log.Warnf("[ContextCompressor] card condensation folded %d recall ticket(s) into prose (cumulative %d; events stay recallable by time range)",
+		lost, cc.condensedTicketsLost.Load())
+}
+
+// CondensedTicketsLost returns the cumulative count of recall tickets folded
+// into prose by card condensation (diagnostics surface; cold-eyes W-3).
+func (cc *ContextCompressor) CondensedTicketsLost() int64 {
+	return cc.condensedTicketsLost.Load()
 }
 
 // fitTicketCard bounds one over-cap card line to at most cap chars while

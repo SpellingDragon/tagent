@@ -57,3 +57,4 @@ data/
 !.github/
 # Also un-ignore .git itself (handled by git)
 !.git/
+*.prof

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -136,6 +137,11 @@ func TestSettleFoldLine_MarkerTruncationAndPrefixStrip(t *testing.T) {
 	}
 	if len([]rune(line)) > settleFoldRowMaxChars+40 {
 		t.Errorf("row must stay bounded, got %d chars: %q", len([]rune(line)), line)
+	}
+	// cold-eyes m-1: CJK truncation must stay on rune boundaries — a card
+	// line with invalid UTF-8 corrupts every downstream JSON render.
+	if !utf8.ValidString(line) {
+		t.Errorf("truncated row must be valid UTF-8: %q", line)
 	}
 }
 

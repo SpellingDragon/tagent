@@ -21,6 +21,13 @@ import (
 // HTTPAPI.validateEndpointURL). An empty allowlist rejects every redirect,
 // which is the disabled-redirect deployment semantics: dynamic llm_base_url
 // redirect is off, so no hop may leave the initial URL.
+//
+// A custom CheckRedirect REPLACES net/http's default policy wholesale —
+// including its built-in 10-hop loop bound — so the hop cap is re-imposed
+// here explicitly (cold-eyes W-1): allowlisted hosts ping-ponging 30x must
+// fail loud, never hang the turn until ctx cancellation.
+const maxRedirectHops = 10 // mirrors the stdlib default ("stop after 10 consecutive requests")
+
 func EndpointRedirectPolicy(allowedHosts []string) func(*http.Request, []*http.Request) error {
 	allowlist := make(map[string]bool, len(allowedHosts))
 	for _, hst := range allowedHosts {
@@ -32,6 +39,10 @@ func EndpointRedirectPolicy(allowedHosts []string) func(*http.Request, []*http.R
 		host := normalizeRedirectHost(req.URL.Host)
 		if host == "" {
 			return fmt.Errorf("endpoint redirect policy: unparseable redirect target %q", req.URL.Host)
+		}
+		if len(via) >= maxRedirectHops {
+			return fmt.Errorf("endpoint redirect policy: hop cap exceeded after %d redirects (last target host %q)",
+				len(via), host)
 		}
 		if !allowlist[host] {
 			return fmt.Errorf("endpoint redirect policy: hop %d target host %q not in endpoint allowlist (initial URL %q)",

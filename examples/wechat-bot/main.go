@@ -145,8 +145,12 @@ func main() {
 	// client enforces the endpoint allowlist on EVERY hop of a 30x chain, so an
 	// allowlisted llm_base_url cannot bridge out to arbitrary hosts (metadata
 	// SSRF). Dynamic redirect disabled → empty allowlist → all hops rejected
-	// (redirect-disabled semantics).
+	// (redirect-disabled semantics, cold-eyes W-2: the guard must fail CLOSED
+	// on the enable switch too, not just on list emptiness).
 	redirectEnabled, endpointAllowlist := endpointPolicyFromEnv()
+	if !redirectEnabled {
+		endpointAllowlist = nil
+	}
 	guardedClient := rl.NewEndpointGuardedClient(endpointAllowlist)
 	modelHTTP := openai.WithOpenAIOptions(openaiopt.WithHTTPClient(guardedClient))
 

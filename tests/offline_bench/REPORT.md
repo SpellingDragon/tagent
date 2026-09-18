@@ -2,7 +2,7 @@
 
 > 本机基线（macOS 笔记本，APFS，Go darwin/arm64），运行于 2026-09-18，**含 2.6 的 curateCards O(n²) 定因修复后复测**。
 > 复现：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=<绝对路径>/report.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v`
-> 原始数据：[`report-2026-09-18.json`](report-2026-09-18.json)；CPU profile：[`bench-2026-09-18.cpu.prof`](bench-2026-09-18.cpu.prof)。
+> 原始数据：[`report-2026-09-18.json`](report-2026-09-18.json)；profile 复现：`RUN_OFFLINE_BENCH=1 go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -cpuprofile <绝对路径>/bench.cpu.prof`，`go tool pprof -top -cum bench.cpu.prof`（产物不入库，可再生）。
 > 后续改动按 D7 对照：相同机器/数据集/配置，固定场景 **p95 与 allocs 退化 >20% 须解释并重新批准**；耐久（fsync=true）开销单列，不与 fsync=false 混用。
 
 ## 支持规模（FileSegmentStore + LocalFileKV 实测记录，不虚构通用吞吐目标）

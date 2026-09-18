@@ -96,6 +96,11 @@ func TestCurateCards_TicketGuard_ValidCondensationAdopted(t *testing.T) {
 			t.Errorf("required ticket [%s] must survive in the condensed line: %q", k, out[0])
 		}
 	}
+	// Cold-eyes W-3: the non-required ticket folded into prose (aaaa0002) is a
+	// counted, observable navigation loss — never silent.
+	if cc.CondensedTicketsLost() != 1 {
+		t.Errorf("dropped non-required ticket must be counted, got %d", cc.CondensedTicketsLost())
+	}
 }
 
 func TestCurateCards_TicketGuard_RejectsTicketLossAndFabrication(t *testing.T) {
@@ -152,6 +157,24 @@ func containsLine(lines []string, line string) bool {
 		}
 	}
 	return false
+}
+
+// TestCurateCards_FullTicketSurvivalNotCounted: the all-tickets-survive
+// scenario of the "浓缩导航丢失可观测" spec requirement — condensation that
+// carries every input ticket must not touch the loss counter.
+func TestCurateCards_FullTicketSurvivalNotCounted(t *testing.T) {
+	condensed := cardAll("", []string{"aaaa0001", "aaaa0002", "aaaa0003", "aaaa0004"}, "浓缩")
+	cc, _, cards := guardFixture(condensed)
+	out, earlier := cc.curateCards(context.Background(), cards, 0)
+	if earlier != 0 {
+		t.Fatalf("expected adoption, got sinking (earlier=%d)", earlier)
+	}
+	if !strings.Contains(out[0], "浓缩") {
+		t.Errorf("condensed line expected, got %q", out[0])
+	}
+	if cc.CondensedTicketsLost() != 0 {
+		t.Errorf("full ticket survival must not count any loss, got %d", cc.CondensedTicketsLost())
+	}
 }
 
 // --- 6.3 single over-cap card & budget-unrepresentable -----------------------
