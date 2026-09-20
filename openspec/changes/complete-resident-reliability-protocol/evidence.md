@@ -1238,3 +1238,14 @@ r30 child 顺带修正为**逐信封**相位完成（backlog 混批=协议正常
 **淘汰清单零遗留复核**：§8.7 `TestEliminationList_ZeroLegacySymbols` 在门内重跑 ok。
 **未运行项**：`tests` 非 short 长驻基线（§8.1 既有口径：需外部依赖，CI 长窗口位）与环境阻塞：无其他。
 **验证**：本节纯汇总零代码改动；TEMP 零残留；未提交。
+
+## §8.9 评审 7677c07 修复轮（2026-09-21）
+
+CodeReview 子代理评审结论：**无必须修项，可作发布候选**；锁序/计数真源/保留租约/§8.5 守卫/崩溃矩阵诚实性逐项确认。两条反馈均落实：
+
+1. **🟡 消除测非递归**：`TestEliminationList_ZeroLegacySymbols` 改 `filepath.WalkDir` 全仓递归（豁免 `.` 前缀目录与 openspec；首版误把根 `.` 自身 dot-skip 致 files 空，被 `require.NotEmpty` 防线红出→修正）。此前"全绿"实为覆盖面假象，修复后仍全绿（子目录当前无逃逸的评审判断得到独立证实）。
+2. **🟢 kv tmp glob 名不副实**：`kv.json.*.tmp` → 真实布局 `kv.json.tmp`（LocalFileKV snapPath+".tmp"，源码核验）。
+
+**新发现（评审外，由 drill 全包 race 暴露并登记为第 4 先存签名）**：`steer.(*Queue).Close(steer.go:74) × cloneStateReflectValue(invocation.go:1658)`——v1.10.0 框架把带 mutex 的 Queue 附入 invocation state 并被 reflect 浅拷贝，runner 收尾 defer Close 与在飞 View clone 无外方可 synchronise。归因证据链：双栈 accessor 全框架帧；产品代码 `steer.`/`GetStateValue` 零引用（grep=0）；**变更前 HEAD a16fdce root -race 6 轮零出现**（旧 HEAD 无多轮 boot/Close 测试形态）→ 缺陷在框架、触发面由本变更测试扩大；生产单代优雅 Close 同样可撞（真实 latent 风险，非测试伪影）。处置：①tri 三态与 drill LEG e 改**独立子进程 boot**（证据层级升级+共享 `runRaceExemptChild`）；②分类器按**族签名配对**豁免（steerFamily/sessionFamily 成对帧命中才免；未知形态 accessor 含 tagent 帧仍硬否决；FAIL 块仅许 race verdict 行，真实断言失败绝不后藏）；③`TestTriRaceOnlyFrameworkClassifier` 五形态自测钉死分类器语义。fail-before 旁证：分类器旧判据（裸 accessor 扫描）把带 wrapper 调用链的族块否决→tri 精确红——签名配对修正后绿。
+**验证**：root `-race` 4/4 稳定 ok（此前 1/3–2/3 FAIL）；`./... -short` 全绿；wechat-bot short ok；TEMP 零残留。
+**后续行动登记**：上游缺陷报告 trpc-agent-go（steer Queue 入 state 的生命周期竞态）+ 框架升级评估归独立变更，修复前本族签名按 §9.5 发布证据逐出现核验。

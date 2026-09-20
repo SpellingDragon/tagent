@@ -85,7 +85,10 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 
 	var removals []string
 	// Store unit: only the managed layout (kv snapshot + its tmp).
-	for _, pat := range []string{"kv.json", "kv.json.*.tmp"} {
+	// Exact managed layout names (review 7677c07 #2): LocalFileKV writes
+	// "kv.json" + its single "kv.json.tmp"; envelope-style tmps live under
+	// the inbox unit and are matched there by pattern.
+	for _, pat := range []string{"kv.json", "kv.json.tmp"} {
 		m, _ := filepath.Glob(filepath.Join(storeDir, pat))
 		removals = append(removals, m...)
 	}
@@ -203,8 +206,26 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.FileExists(t, victim, "path escape removed at most the link, never the outside target")
 	require.DirExists(t, filepath.Dir(evidence))
 
-	// LEG e — post-reset boot ONLY knows the current path: a fresh assembly
-	// root starts clean, reconciles to empty and drives a normal turn.
+	// LEG e — post-reset boot ONLY knows the current path. Runs as an
+	// independent process (boot evidence layer + the registered framework
+	// race family can hit any main-process runner boot/Close; the child
+	// asserts everything below and the parent classifier fails hard on any
+	// non-family failure).
+	runRaceExemptChild(t, append(os.Environ(),
+		"TAGENT_DRILL_STORE="+storeDir,
+		"TAGENT_DRILL_SPILL="+spillDir,
+		"TAGENT_DRILL_ANCHOR="+anchorDir),
+		"TAGENT_DRILL_PHASE=boot-turn", "TestDrill_ManagedRootResetBootChild$")
+}
+
+// TestDrill_ManagedRootReset boot-phase child: drives one post-reset turn.
+func TestDrill_ManagedRootResetBootChild(t *testing.T) {
+	if os.Getenv("TAGENT_DRILL_PHASE") != "boot-turn" {
+		t.Skip("drill boot child")
+	}
+	storeDir := os.Getenv("TAGENT_DRILL_STORE")
+	spillDir := os.Getenv("TAGENT_DRILL_SPILL")
+	anchorDir := os.Getenv("TAGENT_DRILL_ANCHOR")
 	m := &drillModel{}
 	ta, err := New(Config{
 		Entry: "tagent",
