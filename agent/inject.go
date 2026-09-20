@@ -26,7 +26,7 @@ func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, 
 		return PublishReceipt{}, ErrNilEvent
 	}
 	// Terminal lifecycle check (V15): StopLoop is terminal on this instance.
-	if ta.loopTerminated.Load() {
+	if ta.loopTerminatedNow() {
 		return PublishReceipt{}, ErrLoopTerminated
 	}
 	// Meditation novelty gate (meditation-gate-split): armed HERE at the
@@ -52,7 +52,7 @@ func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs [
 	if ta == nil {
 		return "", false, ErrNilEvent
 	}
-	if ta.loopTerminated.Load() {
+	if ta.loopTerminatedNow() {
 		return "", false, ErrLoopTerminated
 	}
 	ta.armMeditationNoveltyGate(source)

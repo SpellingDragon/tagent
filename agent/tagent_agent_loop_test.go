@@ -62,7 +62,7 @@ func TestStartLoop_InjectMessage_ReceivesEvents(t *testing.T) {
 
 	outputCh, err := ta.StartLoop("test-user", "test-session")
 	require.NoError(t, err)
-	assert.True(t, ta.loopActive.Load())
+	assert.True(t, ta.IsLoopActive())
 
 	// Inject a message — it should trigger the AgentLoop.
 	ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "hello"})
@@ -73,7 +73,7 @@ func TestStartLoop_InjectMessage_ReceivesEvents(t *testing.T) {
 	assert.NotEmpty(t, evt.Response.Choices[0].Message.Content)
 
 	ta.StopLoop()
-	assert.False(t, ta.loopActive.Load())
+	assert.False(t, ta.IsLoopActive())
 }
 
 func TestStartLoop_MultipleInjects(t *testing.T) {
@@ -102,7 +102,7 @@ func TestStopLoop_Idempotent(t *testing.T) {
 	// StopLoop should be safe to call multiple times.
 	ta.StopLoop()
 	ta.StopLoop() // no-op
-	assert.False(t, ta.loopActive.Load())
+	assert.False(t, ta.IsLoopActive())
 }
 
 func TestStartLoop_DuplicateCall(t *testing.T) {

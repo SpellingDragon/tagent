@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,6 +54,28 @@ type AgentEvent struct {
 
 	// Metadata holds extension data (event_key, partition_id, source_session, etc.).
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// claim is the runtime reference to the durable inbox envelope a claimed
+	// event came from (fix-resident-reliability-boundaries D2/3.3). It is NOT
+	// serialized (json:"-"), never travels in business Metadata/Origin/model
+	// context, and is set only by claimDurable on the consumer side. Nil for
+	// volatile events and for events not yet claimed.
+	claim *durableClaim
+}
+
+// durableClaim is the typed, non-JSON provenance of one claimed inbox message
+// slot. It replaces the v1 practice of stuffing inbox_path/inbox_request_id/
+// inbox_dedup_key into AgentEvent.Metadata (F1/F4 root cause: those control
+// keys leaked into Origin baggage, the model context and host delivery fields).
+// PreparedFact carries the canonical FullEvent JSON frozen on the FIRST claim
+// (D2 write-before barrier) so a replay reuses the exact key and never
+// re-stamps time/attribution/summary.
+type durableClaim struct {
+	Path         string          // inbox envelope file path (durable location)
+	RequestID    string          // envelope request id (batch identity)
+	Slot         int             // fixed message slot within the envelope
+	ReceiptKey   string          // reserved receipt EventKey (hex); "" until prepared
+	PreparedFact json.RawMessage // frozen canonical FullEvent for THIS slot; "" until prepared
 }
 
 // NewExternalInputEvent creates an external_input event with the given source and message payload.
@@ -265,17 +289,25 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 // no ordering guarantees across consumers, and simple backpressure (channel
 // fills up → Publish blocks).
 //
-// Durable mode (resident-readiness-plan 3.2): with an Inbox configured, ALL
-// inbound events are persisted to inbox-v1 BEFORE the durable receipt — the
-// channel carries only wake-ups, never the durable truth. Durable envelopes
-// are consumed strictly in enqueue order (zero-padded seq); volatile channel
-// events are best-effort by definition. Receipted items replaying after a
-// crash are Ack-skipped without re-execution.
+// Durable mode (resident-readiness-plan 3.2; lossless under D2): with an Inbox
+// configured, ALL inbound events are persisted to inbox-v2 BEFORE the durable
+// receipt — the channel carries only wake-ups, never the durable truth. Each
+// message slot keeps a lossless JSON snapshot of the original AgentEvent
+// (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
+// restores everything inbox-v1 dropped (F1). Durable envelopes are consumed
+// strictly in enqueue order (zero-padded seq); volatile channel events are
+// best-effort by definition. Receipted items replaying after a crash are
+// Ack-skipped without re-execution.
 type EventBus struct {
 	ch chan *AgentEvent
 
-	// inbox 是可选的 durable 输入信箱（inbox-v1）。nil = 纯 channel 轻量模式。
+	// inbox 是可选的 durable 输入信箱（inbox-v2）。nil = 纯 channel 轻量模式。
 	inbox *reliability.Inbox
+
+	// retention 是可选的 §2.8 材料保留能力（memory.RetentionGuard 的结构性投影，
+	// 避免此处 import memory）。durable inbox 下由 agent 装配注入，用于从现有未确认
+	// envelope 重建保留租约并在 ack 后释放。nil = 未接线（不 arm、不释放）。
+	retention retentionGuard
 
 	// publishDropped counts events the LEGACY void Publish could not accept
 	// (timeout/closed) — the void entry never fails loudly by contract, but
@@ -305,9 +337,10 @@ func NewEventBus() *EventBus {
 	}
 }
 
-// NewReliableEventBus opens the durable inbox under spillDir/inbox-v1
-// (resident-readiness-plan 3.2). Legacy *.spill leftovers REFUSE the upgrade
-// (fail-loud with migration guidance) — the previous binary must drain them.
+// NewReliableEventBus opens the durable inbox under spillDir/inbox-v2
+// (resident-readiness-plan 3.2). Legacy *.spill leftovers or an undrained
+// inbox-v1 tree REFUSE the upgrade (fail-loud with migration guidance) — the
+// previous binary must drain them; v2 never guess-migrates (task 3.5).
 // All errors are returned: reliability requested by config must never
 // silently degrade to volatile.
 func NewReliableEventBus(spillDir string) (*EventBus, error) {
@@ -341,6 +374,136 @@ func (b *EventBus) DurablePending() int64 {
 	return b.inbox.Pending()
 }
 
+// Durable reports whether the bus was configured with a durable inbox. The
+// agent constructor uses this to enforce that reliable mode never runs against
+// a store lacking explicit replay capability (task 3.5): a durable inbox whose
+// facts cannot be idempotently replayed would silently degrade durability.
+func (b *EventBus) Durable() bool {
+	return b != nil && b.inbox != nil
+}
+
+// retentionGuard is the §2.8 材料保留 capability surface the bus needs from the store
+// (structurally mirrors memory.RetentionGuard to avoid importing memory here). The
+// recovery owner protects the durable originals of unacked envelopes until they are
+// acked (dir-synced) and released, so TTL/capacity/compaction cannot destroy material
+// a restart still needs.
+type retentionGuard interface {
+	ProtectKey(key int64)
+	ReleaseKey(key int64)
+	ArmRetention()
+	// BeginHold/EndHold raise/release the §5.8 registration barrier (structurally
+	// mirrors memory.RetentionGuard): forgetting pauses while an owner inventories.
+	BeginHold()
+	EndHold()
+}
+
+// SetRetentionGuard injects the store's retention guard (durable inbox only). Must be
+// called before ArmRetentionFromInbox; a nil guard disables protect/release.
+func (b *EventBus) SetRetentionGuard(g retentionGuard) {
+	if b == nil {
+		return
+	}
+	b.retention = g
+}
+
+// materialKeys converts envelope material to store EventKeys: the prepared fact keys
+// plus the reserved receipt key (hex → int64). Only successfully-derived keys return.
+func materialKeys(m reliability.UnackedMaterial) []int64 {
+	keys := make([]int64, 0, len(m.FactKeys)+1)
+	keys = append(keys, m.FactKeys...)
+	if m.ReceiptKey != "" {
+		if rk, err := tagentevent.ParseEventKey(m.ReceiptKey); err == nil && rk != 0 {
+			keys = append(keys, rk)
+		}
+	}
+	return keys
+}
+
+// ArmRetentionFromInbox rebuilds the store's retention lease from existing unacked
+// envelopes (§2.8 restart recovery) and then arms it, releasing the lifecycle scanner's
+// first destructive pass. Called once at agent-open after SetRetentionGuard. A durable
+// inbox with no material still arms (empty protect) so the scanner is not gated on an
+// inbox that never registers. A failed enumeration does NOT arm (never under-protect on
+// a partial view); the lifecycle startup grace is the anti-starvation backstop.
+func (b *EventBus) ArmRetentionFromInbox() error {
+	if b == nil || b.inbox == nil || b.retention == nil {
+		return nil
+	}
+	// §5.8: raise the registration barrier BEFORE touching the dir — on an already
+	// running store (late attach) or a fresh one, no forgetting pass may land
+	// between "inventory started" and "keys protected".
+	b.retention.BeginHold()
+	mats, err := b.inbox.UnackedMaterial()
+	if err != nil {
+		// The dir cannot be inventoried: HOLD the barrier (显式阻断). Forgetting
+		// stays gated indefinitely — surviving material must not be destroyed on an
+		// incomplete view. The caller refuses ingest (agent build fails), so the
+		// block is reported, never silently swept.
+		log.Errorf("[ReliableBus] recovery inventory FAILED — retention barrier HELD, forgetting stays blocked: %v", err)
+		return err
+	}
+	for _, m := range mats {
+		for _, k := range materialKeys(m) {
+			b.retention.ProtectKey(k)
+		}
+	}
+	b.retention.EndHold()
+	b.retention.ArmRetention()
+	log.Infof("[ReliableBus] retention lease armed from inbox: %d unacked envelope(s) protected", len(mats))
+	return nil
+}
+
+// releaseRetention drops the lease holders for an acked envelope's originals so they
+// resume normal age-based handling. The caller MUST read the material BEFORE Ack (which
+// removes the file) and pass it here; releasing after dir-sync is the §2.8 release point.
+func (b *EventBus) releaseRetention(m reliability.UnackedMaterial) {
+	if b == nil || b.retention == nil {
+		return
+	}
+	for _, k := range materialKeys(m) {
+		b.retention.ReleaseKey(k)
+	}
+}
+
+// DrainRetentionCleanups finalizes deferred ack-cleanup barriers (§3.6/L96): for
+// every envelope whose unlink landed but whose dir-sync previously failed, it
+// completes the outstanding barrier and, once durable, releases the retention lease
+// for its protected material — exactly once (L110). Driven from the consume loop
+// each turn so an uncertain ack converges to a single capacity+lease release
+// without re-executing the input. Returns the number of accounts finalized.
+func (b *EventBus) DrainRetentionCleanups() int {
+	if b == nil || b.inbox == nil {
+		return 0
+	}
+	mats := b.inbox.DrainCleanups()
+	for _, m := range mats {
+		b.releaseRetention(m)
+	}
+	return len(mats)
+}
+
+// TransitionalData reports previous-format (inbox-v1 / .spill) items the inbox found
+// at open (§3.7). They are inert — never read or consumed — and the agent bootstraps
+// may surface them to the operator. Safe to call on a nil/volatile bus (returns
+// nils). A managed reset (ResetTransitional) is the only thing that clears them.
+func (b *EventBus) TransitionalData() (spill, v1 []string) {
+	if b == nil || b.inbox == nil {
+		return nil, nil
+	}
+	return b.inbox.TransitionalData()
+}
+
+// ResetTransitional is the operator-invoked managed reset of previous-format data
+// for this bus's inbox (§3.7). It is destructive and requires an explicit confirm;
+// it never runs automatically and never clears current-format corruption (which
+// must surface, not be wiped). See reliability.Inbox.ResetTransitional.
+func (b *EventBus) ResetTransitional(confirm bool) (int, error) {
+	if b == nil || b.inbox == nil {
+		return 0, nil
+	}
+	return b.inbox.ResetTransitional(confirm)
+}
+
 // PublishDropped counts rejections made through the legacy void entry (3.1).
 func (b *EventBus) PublishDropped() int64 {
 	if b == nil {
@@ -358,12 +521,20 @@ func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (Publi
 	}
 	receipt := PublishReceipt{RequestID: event.ID}
 
-	// Durable mode: EVERY event goes through the inbox barrier first.
+	// Durable mode: EVERY event goes through the inbox barrier first, stored as
+	// a lossless JSON snapshot of the whole AgentEvent (3.2). An event that
+	// cannot be JSON-encoded is REFUSED at acceptance — never silently stripped
+	// of the offending field. After the snapshot is written the caller may keep
+	// mutating the in-memory event without affecting the durable payload.
 	if b.inbox != nil {
+		src, merr := json.Marshal(event)
+		if merr != nil {
+			return receipt, fmt.Errorf("eventbus: event not JSON-encodable, durable acceptance refused: %w", merr)
+		}
 		env := reliability.Envelope{
 			RequestID: event.ID,
 			Source:    event.Source,
-			Messages:  []reliability.EnvelopeMessage{{Role: eventRole(event), Content: eventContent(event)}},
+			Messages:  []reliability.MessageSlot{{SourceEvent: src}},
 		}
 		if _, err := b.inbox.Enqueue(&env); err != nil {
 			return receipt, fmt.Errorf("eventbus: durable enqueue rejected: %w", err)
@@ -408,24 +579,6 @@ func wakeEvent() *AgentEvent {
 
 func isInboxWake(e *AgentEvent) bool { return e != nil && e.Type == inboxWakeType }
 
-// eventContent extracts the payload text of a bus event for envelope storage.
-// eventRole extracts the message role carried by an AgentEvent (cold-eyes R2
-// Minor 5): system-type events (EmitSystemAlert) must survive the durable
-// round-trip with their role intact — an empty role defaults to user.
-func eventRole(event *AgentEvent) string {
-	if event.Message != nil && event.Message.Role != "" {
-		return string(event.Message.Role)
-	}
-	return string(model.RoleUser)
-}
-
-func eventContent(event *AgentEvent) string {
-	if event.Message != nil {
-		return event.Message.Content
-	}
-	return ""
-}
-
 // PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope
 // (resident-readiness-plan 3.3/5.2): every message keeps its own identity in
 // the envelope, and the batch is durable (or rejected) as a unit — never
@@ -438,9 +591,18 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 	receipt := PublishReceipt{RequestID: requestID}
 
 	if b.inbox != nil {
+		// Build every slot's lossless snapshot FIRST: an unencodable message
+		// rejects the whole batch before anything is written (never a partially
+		// accepted envelope). Each message becomes its own AgentEvent so its
+		// per-message identity (id/timestamp) survives the round-trip.
 		env := reliability.Envelope{RequestID: requestID, Source: source}
 		for _, m := range msgs {
-			env.Messages = append(env.Messages, reliability.EnvelopeMessage{Role: string(m.Role), Content: m.Content})
+			evt := NewExternalInputEvent(source, m)
+			src, merr := json.Marshal(evt)
+			if merr != nil {
+				return receipt, fmt.Errorf("eventbus: message not JSON-encodable, durable acceptance refused: %w", merr)
+			}
+			env.Messages = append(env.Messages, reliability.MessageSlot{SourceEvent: src})
 		}
 		if _, err := b.inbox.Enqueue(&env); err != nil {
 			return receipt, fmt.Errorf("eventbus: durable enqueue rejected: %w", err)
@@ -497,11 +659,13 @@ const publishTimeout = 5 * time.Second
 const maxClaimPerPull = 32
 
 // claimDurable takes the OLDEST pending durable envelopes (strict enqueue
-// order), converting each to in-batch AgentEvents tagged with the inbox
-// provenance (inbox_path / inbox_request_id in Metadata) so the consumer can
-// Receipt+Ack the envelope after the turn. Receipted items replaying after a
-// crash are Ack-skipped WITHOUT re-execution (已确认 receipt 不重复处理).
-// A claim is NOT a deletion: a crash after claim replays the envelope.
+// order), restoring each message slot from its lossless source_event snapshot
+// and tagging the reconstructed AgentEvent with a typed durableClaim (path,
+// request id, slot, reserved receipt_key, any already-frozen prepared_fact).
+// The claim is a non-JSON field — no inbox_path/inbox_dedup_key control keys
+// leak into business Metadata (F1/F4). Receipted items replaying after a crash
+// are Ack-skipped WITHOUT re-execution. A claim is NOT a deletion: a crash
+// after claim replays the envelope.
 func (b *EventBus) claimDurable() []*AgentEvent {
 	if b.inbox == nil {
 		return nil
@@ -518,31 +682,30 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 		}
 		if env.State == reliability.InboxStateReceipted {
 			// 处理完成 receipt 已持久：只补 Ack，不重执行（2.4 幂等）。
+			m := reliability.MaterialOf(env) // §2.8: capture originals before Ack removes the file
 			if aerr := b.inbox.Ack(path); aerr != nil {
 				log.Warnf("[ReliableBus] ack of receipted %s deferred: %v", env.RequestID, aerr)
+			} else {
+				b.releaseRetention(m) // Ack dir-synced → release the lease holders (§2.8)
 			}
 			continue
 		}
-		for i2, m := range env.Messages {
-			// cold-eyes R2 Minor 5: honor the persisted role — system-type
-			// events (EmitSystemAlert) must not come back as user messages.
-			role := model.Role(m.Role)
-			if role == "" {
-				role = model.RoleUser
+		for _, m := range env.Messages {
+			evt, derr := decodeSourceEvent(m.SourceEvent)
+			if derr != nil {
+				// The leaf already quarantines unreadable envelopes; a slot
+				// that still fails here is an anomaly. Keep the envelope
+				// claimed (never silently ack a slot we could not restore) and
+				// skip this slot so a re-claim retries.
+				log.Errorf("[ReliableBus] undecodable source_event at %s slot %d (kept for retry): %v", path, m.Slot, derr)
+				continue
 			}
-			evt := NewExternalInputEvent(env.Source, model.Message{Role: role, Content: m.Content})
-			if evt.Metadata == nil {
-				evt.Metadata = make(map[string]any)
-			}
-			evt.Metadata["inbox_path"] = path
-			evt.Metadata["inbox_request_id"] = env.RequestID
-			if len(env.EventKeys) > 0 && i2 < len(env.EventKeys) {
-				// 已提交事实键回写（3.4）：重放的消费者据此跳过重复入库，
-				// 投影按同 key 幂等（满足「原始事件与投影不重复追加」）。
-				// cold-eyes Major 3 修复：按消息序号分配**单条** key——joined
-				// 复数形式会让第 2..n 条消息全部命中第 1 条的 key 而被误判
-				// alreadyStored，事实静默丢失；EventKeys[i] 与 Messages[i] 序号对齐。
-				evt.Metadata["inbox_dedup_key"] = env.EventKeys[i2]
+			evt.claim = &durableClaim{
+				Path:         path,
+				RequestID:    env.RequestID,
+				Slot:         m.Slot,
+				ReceiptKey:   env.ReceiptKey,
+				PreparedFact: m.PreparedFact,
 			}
 			batch = append(batch, evt)
 		}
@@ -550,25 +713,23 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 	return batch
 }
 
-// ReconcileReceipted (cold-eyes Major 2): converge envelopes whose fact-chain
-// receipt event survived a crash but whose ack did not — claimed envelopes are
-// receipted+acked WITHOUT re-execution. Returns the number converged.
-func (b *EventBus) ReconcileReceipted(rids []string) int {
-	if b == nil || b.inbox == nil {
-		return 0
+// decodeSourceEvent restores the lossless AgentEvent snapshot persisted at
+// acceptance. ID/Type/Source/Timestamp/full Message/business Metadata all come
+// back intact (F1) — nothing is re-stamped or dropped. The restored event's
+// claim is nil (json:"-"); the caller attaches the typed claim.
+func decodeSourceEvent(raw json.RawMessage) (*AgentEvent, error) {
+	var evt AgentEvent
+	if err := json.Unmarshal(raw, &evt); err != nil {
+		return nil, err
 	}
-	n := 0
-	for _, rid := range rids {
-		if b.inbox.ConfirmDurableByRequestID(rid) {
-			n++
-			log.Infof("[ReliableBus] receipted %s reconciled from fact-chain receipt (no re-execution)", rid)
-		}
+	if evt.Metadata == nil {
+		evt.Metadata = make(map[string]any)
 	}
-	return n
+	return &evt, nil
 }
 
 // DurableProvenance returns deduplicated (path, requestID) pairs for every
-// durable envelope consumed by a finished turn.
+// durable envelope consumed by a finished turn, read from the typed claim.
 func (b *EventBus) DurableProvenance(events []*AgentEvent) [][2]string {
 	if b.inbox == nil {
 		return nil
@@ -576,42 +737,97 @@ func (b *EventBus) DurableProvenance(events []*AgentEvent) [][2]string {
 	var out [][2]string
 	seen := map[string]bool{}
 	for _, evt := range events {
-		if evt == nil {
+		if evt == nil || evt.claim == nil {
 			continue
 		}
-		path, _ := evt.Metadata["inbox_path"].(string)
+		path := evt.claim.Path
 		if path == "" || seen[path] {
 			continue
 		}
 		seen[path] = true
-		rid, _ := evt.Metadata["inbox_request_id"].(string)
-		out = append(out, [2]string{path, rid})
+		out = append(out, [2]string{path, evt.claim.RequestID})
 	}
 	return out
 }
 
-// AppendDurableEventKeys writes committed fact keys back onto the envelope
-// (idempotent-replay dedup evidence; 3.4). Errors are the caller's to log —
-// a failed writeback degrades replay to at-least-once re-execution.
-func (b *EventBus) AppendDurableEventKeys(path string, keys []string) {
-	if b.inbox == nil || len(keys) == 0 {
-		return
+// PrepareEnvelope durably freezes the per-slot prepared facts and a reserved
+// receipt_key onto the claimed envelope at path, BEFORE the caller writes any
+// fact (D2 write-before barrier, task 3.4). facts are slot-aligned; a nil
+// entry keeps that slot's already-frozen fact (replay partial-prepare). An
+// already-durable receipt_key must match (a different one is a conflict). The
+// caller MUST treat a returned error as "write nothing this turn" — the claim
+// stays and replays. This replaces v1's post-hoc AppendDurableEventKeys/
+// RecordEventKeys writeback (F4).
+func (b *EventBus) PrepareEnvelope(path, receiptKey string, facts []json.RawMessage) error {
+	if b.inbox == nil {
+		return errors.New("eventbus: no durable inbox configured")
 	}
-	if err := b.inbox.RecordEventKeys(path, keys); err != nil {
-		log.Warnf("[ReliableBus] event-keys writeback failed for %s (replay may re-execute): %v", path, err)
+	if path == "" {
+		return errors.New("eventbus: prepare requires an envelope path")
 	}
+	return b.inbox.PrepareFacts(path, receiptKey, facts)
 }
 
-// ConfirmDurable records the processing receipt then Acks. Failure leaves
-// the claim on disk for replay (at-least-once).
-func (b *EventBus) ConfirmDurable(path string) error {
+// RecordCompletion durably freezes a turn's completion payload onto the envelope
+// at path BEFORE its receipt is submitted (§5.3, D3 step 7). Idempotent on an
+// identical payload; a differing payload on an already-frozen envelope is a
+// conflict (reliability.ErrCompletionConflict) — the frozen completion is
+// authoritative and the caller must NOT overwrite it. The caller treats an error
+// as "receipt not yet safe": the claim stays and the completion write is retried
+// in-process without re-running the model (design 决策5 L62).
+func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) error {
+	if b.inbox == nil {
+		return errors.New("eventbus: no durable inbox configured")
+	}
+	if path == "" {
+		return errors.New("eventbus: completion requires an envelope path")
+	}
+	return b.inbox.RecordCompletion(path, completion)
+}
+
+// QuarantineEnvelope isolates a deterministic-conflict envelope (kept on disk for
+// inspection, capacity freed). See Inbox.QuarantineEnvelope (§4.2).
+func (b *EventBus) QuarantineEnvelope(path, reason string) {
+	if b == nil || b.inbox == nil {
+		return
+	}
+	b.inbox.QuarantineEnvelope(path, reason)
+}
+
+// ReleaseClaim returns a claimed envelope to pending for ordered re-claim on a
+// transient submit failure (§4.2). See Inbox.ReleaseClaim.
+func (b *EventBus) ReleaseClaim(path string) error {
+	if b == nil || b.inbox == nil {
+		return nil
+	}
+	return b.inbox.ReleaseClaim(path)
+}
+
+// ConfirmDurable records the processing receipt then Acks. §5.4: the caller
+// must present the verified receipt credential issued from a legal durable
+// completion (ContextManager.verifyReceiptCredential) — RecordReceipt refuses
+// without it, so no bare description string or request id can confirm an
+// envelope. Failure leaves the claim on disk for replay (at-least-once).
+func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredential) error {
 	if b.inbox == nil {
 		return nil
 	}
-	if err := b.inbox.RecordReceipt(path, "turn finished"); err != nil {
+	// §2.8: read the envelope's originals BEFORE Ack removes the file, so the lease
+	// holders can be released once the ack is dir-synced (the release point).
+	m, ok, merr := b.inbox.MaterialOfPath(path)
+	if merr != nil {
+		log.Warnf("[ReliableBus] retention material read %s failed: %v", path, merr)
+	}
+	if err := b.inbox.RecordReceipt(path, cred); err != nil {
 		return err
 	}
-	return b.inbox.Ack(path)
+	if err := b.inbox.Ack(path); err != nil {
+		return err
+	}
+	if ok {
+		b.releaseRetention(m) // Ack dir-synced → release (§2.8)
+	}
+	return nil
 }
 
 // Pull blocks until at least one event arrives or ctx is cancelled.

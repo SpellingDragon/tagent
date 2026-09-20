@@ -60,3 +60,40 @@ func TestPersistBusEvent_StoredGate(t *testing.T) {
 	nilStore.persistBusEvent(mkEvt())
 	require.Equal(t, 1, nilStore.projection.Len())
 }
+
+// nonReplayStore hides the embedded store's EventReplayer method: only the
+// methods of the memory.MemoryStore *interface* are promoted, and that set has
+// no ReplayEvent. It satisfies memory.MemoryStore but NOT memory.EventReplayer
+// — the exact shape the durable-mode capability gate must refuse.
+type nonReplayStore struct {
+	memory.MemoryStore
+}
+
+// TestNewTagentAgent_DurableRequiresReplayCapableStore (task 3.5): a durable
+// inbox wired to a store without explicit replay capability would silently
+// degrade "at-least-once" delivery to a possible double-write, so construction
+// must fail loud. Without durability configured the same store is accepted —
+// the capability is required only when the inbox barrier is actually active.
+func TestNewTagentAgent_DurableRequiresReplayCapableStore(t *testing.T) {
+	mock := &mockModel{info: model.Info{Name: "test"}}
+
+	_, err := NewTagentAgent(&TagentConfig{
+		Model:             mock,
+		MemoryStore:       nonReplayStore{memory.NewInMemoryStore()},
+		BusSpillDir:       t.TempDir(),
+		MaxToolIterations: 1,
+		MaxTokens:         1000,
+	})
+	require.Error(t, err, "durable inbox must refuse a non-replay store")
+	require.Contains(t, err.Error(), "replay-capable")
+
+	ta, err := NewTagentAgent(&TagentConfig{
+		Model:             mock,
+		MemoryStore:       nonReplayStore{memory.NewInMemoryStore()},
+		MaxToolIterations: 1,
+		MaxTokens:         1000,
+	})
+	require.NoError(t, err, "volatile bus needs no replay capability")
+	require.NotNil(t, ta)
+	_ = ta.Close()
+}

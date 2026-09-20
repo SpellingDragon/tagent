@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -22,6 +23,9 @@ type InMemoryStore struct {
 func NewInMemoryStore() *InMemoryStore {
 	return NewInMemoryStoreWithRelation(nil)
 }
+
+// compile-time: InMemoryStore implements EventReplayer (D4 chain completeness for tests).
+var _ EventReplayer = (*InMemoryStore)(nil)
 
 // NewInMemoryStoreWithRelation creates a new InMemoryStore with a RelationStore.
 // If rel is nil, creates a default simpleInMemRelationStore that stores relationships in memory.
@@ -64,6 +68,48 @@ func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 	}
 	s.events[pid][key] = cloneFullEvent(event)
 	return nil
+}
+
+// ReplayEvent implements EventReplayer (D4 design): canonical content-checked replay.
+// InMemoryStore has no orphan/half-orphan states (no segment file layer), so only two
+// outcomes exist: new commit (ReplayNew) or already-committed (ReplayAlreadyCommitted).
+// Different content under the same identity is a hard collision error (D15 parity).
+func (s *InMemoryStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error) {
+	if key == 0 {
+		return ReplayNew, canonicalFact, fmt.Errorf("event key cannot be zero")
+	}
+	pid := canonicalFact.PartitionID
+	if pid == 0 {
+		pid = PartitionIDFromEventKey(key)
+	}
+	canonicalFact.EventKey = key
+	canonicalFact.PartitionID = pid
+
+	incomingJSON, err := json.Marshal(canonicalFact)
+	if err != nil {
+		return ReplayNew, canonicalFact, fmt.Errorf("marshal event %d: %w", key, err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if existing, found := s.events[pid][key]; found {
+		existingJSON, jerr := json.Marshal(existing)
+		if jerr != nil {
+			return ReplayNew, canonicalFact, fmt.Errorf("marshal stored event %d for compare: %w", key, jerr)
+		}
+		if string(existingJSON) != string(incomingJSON) {
+			return ReplayNew, canonicalFact,
+				fmt.Errorf("event key %d exists with DIFFERENT content: %w", key, ErrDuplicateEventKey)
+		}
+		return ReplayAlreadyCommitted, canonicalFact, nil
+	}
+
+	if s.events[pid] == nil {
+		s.events[pid] = make(map[int64]FullEvent)
+	}
+	s.events[pid][key] = cloneFullEvent(canonicalFact)
+	return ReplayNew, canonicalFact, nil
 }
 
 // GetEvent retrieves a single event by its EventKey. The returned event is

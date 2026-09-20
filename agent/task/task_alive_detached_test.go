@@ -109,7 +109,7 @@ func TestAliveDetached_CompletionEndsAndNotifies(t *testing.T) {
 // TestAliveDetached_OnBoard: an alive-detached task shows compactly on the board.
 func TestAliveDetached_OnBoard(t *testing.T) {
 	task := &Task{ID: "svc-11111111", Spec: TaskSpec{Desc: "server :8080"}, status: TaskAliveDetached, StartedAt: time.Now()}
-	board := RenderBoard([]*Task{task})
+	board := RenderBoard([]*Task{task}, 10*time.Minute)
 	if !strings.Contains(board, "server :8080") || !strings.Contains(board, "alive_detached") {
 		t.Errorf("alive-detached task should appear on board:\n%s", board)
 	}

@@ -158,6 +158,64 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 	return out, nil
 }
 
+// GenerateContentIter (§4.5B) preserves the inner model's real IterModel capability
+// instead of hiding it. When SwappableModel is passed to a flow that prefers
+// model.IterModel, a decorator that only implements GenerateContent would silently
+// downgrade an iterator-capable base to the channel+goroutine path. Here:
+//   - Lazy: creating the returned Seq does NOT acquire a lease or touch the inner
+//     (no call/goroutine/side-effect) until the caller starts iterating — "creating the
+//     iterator is not calling the model".
+//   - If the inner is an IterModel, delegate DIRECTLY to its GenerateContentIter (the
+//     real fast path, no channel bridge).
+//   - Otherwise bridge the inner's channel into the Seq.
+//
+// The in-flight lease is held for the whole iteration (mirroring GenerateContent), so a
+// swapped-out model is never closed mid-stream; early-stop / ctx-cancel drain the
+// upstream so the producer never wedges and the lease is always eventually freed.
+func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
+	return func(yield func(*model.Response) bool) {
+		m.inFlight.Add(1) // lease acquired at actual iteration, not at Seq creation
+		defer m.release()
+
+		m.mu.RLock()
+		inner := m.inner
+		m.mu.RUnlock()
+
+		if it, ok := inner.(model.IterModel); ok {
+			seq, err := it.GenerateContentIter(ctx, request)
+			if err != nil {
+				return
+			}
+			seq(yield)
+			return
+		}
+
+		ch, err := inner.GenerateContent(ctx, request)
+		if err != nil || ch == nil {
+			return
+		}
+		for {
+			select {
+			case r, ok := <-ch:
+				if !ok {
+					return
+				}
+				if !yield(r) {
+					go func() {
+						for range ch {
+						}
+					}() // drain so the producer isn't wedged; lease freed by defer
+					return
+				}
+			case <-ctx.Done():
+				for range ch {
+				}
+				return
+			}
+		}
+	}, nil
+}
+
 // Info delegates to the current inner model.
 func (m *SwappableModel) Info() model.Info {
 	m.mu.RLock()

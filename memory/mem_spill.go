@@ -5,6 +5,7 @@ import (
 
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 )
@@ -31,6 +32,51 @@ type spilledEvent struct {
 type MemSpill struct {
 	path string
 	mu   sync.Mutex
+
+	// §2.8：可选保留租约守卫（由 ErrorTrackingStore 从 inner store 注入）。非 nil 时，
+	// 每条 spill 待重放 key 在其 durable 原文上注册一个持有者（append 即 protect、重放成功
+	// 即 release、启动 ProtectAllPending 从现有文件重建），使其在重放前不受 TTL/容量/压实销毁。
+	guard RetentionGuard
+}
+
+// SetGuard 注入 §2.8 保留租约守卫（nil = 不保护）。由持有本 spill 的装饰器从其后端取得。
+func (s *MemSpill) SetGuard(g RetentionGuard) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.guard = g
+}
+
+// ProtectAllPending 从现有 spill 文件重建保留租约（§2.8 重启恢复）：对每条待重放 key
+// 注册一个持有者。由恢复 owner 在装载 spill 后、放行扫描器前调用。
+func (s *MemSpill) ProtectAllPending() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.guard == nil {
+		return nil
+	}
+	// §5.8: the spill inventory lands under the registration barrier — on an
+	// already-running store (late attach) no forgetting pass may squeeze between
+	// "rebuild started" and "pending keys protected". A read failure KEEPS the
+	// hold (explicit block: unreadable spill material must not be destroyed on an
+	// incomplete view) and surfaces to the caller.
+	s.guard.BeginHold()
+	pending, err := s.readAll()
+	if err != nil {
+		return err
+	}
+	for _, sp := range pending {
+		if sp.Key != 0 {
+			s.guard.ProtectKey(sp.Key)
+		}
+	}
+	s.guard.EndHold()
+	return nil
 }
 
 // NewMemSpill 构建兜底存储。path 为空返回 nil（禁用，ErrorTrackingStore 据此跳过落盘）。
@@ -59,6 +105,9 @@ func (s *MemSpill) Append(key int64, event FullEvent) error {
 		return err
 	}
 	_, err = f.Write(append(raw, '\n'))
+	if err == nil && s.guard != nil {
+		s.guard.ProtectKey(key) // §2.8: a spilled pending key's original is retained until replayed
+	}
 	return err
 }
 
@@ -72,6 +121,15 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 // （含幂等命中）的事件回调 notify——调用方据此补投影（projection.Append），恢复
 // 「存储⇔投影同点原子」的等价语义（写入统一 D1 在退化路径上的延伸）。notify 为 nil
 // 或内部失败不影响重放结果（投影可后补，事件不丢优先）。
+//
+// §2.6 canonical replay only: spill replay MUST use the store's EventReplayer contract
+// (ReplayEvent) — it distinguishes new-commit / orphan-repair / already-committed
+// atomically against the durable fact chain. A store that does NOT implement
+// EventReplayer is refused and its spill originals are retained (spec L99: 内层没有显式
+// 恢复能力 → 能力检查失败、原件保留). The former GetEvent+StoreEvent weak fallback was
+// removed: a GetEvent hit only proves a read returns the record, not that the durable
+// commit (barrier + index/meta publication) completed, and public StoreEvent now REFUSES
+// an existing key (§2.1) so it can never complete an orphan anyway.
 func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error) {
 	if s == nil || store == nil {
 		return 0, nil
@@ -81,6 +139,12 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 	pending, err := s.readAll()
 	if err != nil || len(pending) == 0 {
 		return 0, err
+	}
+	replayer, ok := store.(EventReplayer)
+	if !ok {
+		// §2.6: fail the capability check loudly and keep every original rather than
+		// degrade to a GetEvent/StoreEvent weak fallback. Nothing is consumed.
+		return 0, fmt.Errorf("mem_spill: store %T does not implement EventReplayer; replay refused and spill originals retained (§2.6: no GetEvent weak fallback)", store)
 	}
 	var failed []spilledEvent
 	replayed := 0
@@ -97,20 +161,19 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 		notify(ev)
 	}
 	for _, sp := range pending {
-		// W1（§8.3）：重放前 GetEvent 预检——若事件已存在（假阴性失败：KV 已写但 CLI 响应
-		// 解析失败，StoreEvent 误报 error 致落盘），视为幂等成功移除。否则重放必撞
-		// FileSegmentStore 的 "already exists 拒绝重写"守卫（segment_store.go:263）→ spill
-		// 永久滞留、恢复每次失败、不收敛。GetEvent 出错（store 仍故障）则走 StoreEvent 重试。
-		if existing, gerr := store.GetEvent(sp.Key); gerr == nil && existing != nil {
-			replayed++ // 已存在 = 之前的"失败"实为假阴性，幂等计成功
-			notifySafe(sp.Event)
+		// §2.6 canonical path: ReplayEvent is idempotent and handles all orphan states.
+		result, _, rerr := replayer.ReplayEvent(sp.Key, sp.Event)
+		if rerr != nil {
+			failed = append(failed, sp) // store faulty / forgotten / conflict: keep for next replay
 			continue
 		}
-		if serr := store.StoreEvent(sp.Key, sp.Event); serr != nil {
-			failed = append(failed, sp) // 仍失败，保留待下次重放
-			continue
-		}
+		// ReplayNew, ReplayRepaired, and ReplayAlreadyCommitted all count as success:
+		// the fact is now durable in the store (at-least-once guarantee fulfilled).
+		_ = result
 		replayed++
+		if s.guard != nil {
+			s.guard.ReleaseKey(sp.Key) // §2.8: replayed and (via rewrite) removed → drop the spill holder
+		}
 		notifySafe(sp.Event)
 	}
 	// 重写文件（仅保留仍失败的）；全部成功则文件清空。
@@ -118,6 +181,28 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 		return replayed, rerr
 	}
 	return replayed, nil
+}
+
+// PendingKeys 返回仍在等待 spill 重放的事件 key（§2.8）。恢复 owner 启动时据此从现有
+// 未确认 spill 材料重建保留租约，令其 durable 原文在被重放移除前不受 TTL/容量/压实销毁。
+// nil-safe；读文件失败返回错误（调用方保守处理，不得据此开放淘汰）。
+func (s *MemSpill) PendingKeys() ([]int64, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending, err := s.readAll()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]int64, 0, len(pending))
+	for _, sp := range pending {
+		if sp.Key != 0 {
+			out = append(out, sp.Key)
+		}
+	}
+	return out, nil
 }
 
 // Len 返回当前兜底事件数（诊断/背压信号）。

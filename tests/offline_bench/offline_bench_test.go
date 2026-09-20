@@ -14,10 +14,12 @@ package offline_bench
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -70,9 +72,19 @@ func TestOfflineBenchmark(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // countingKV wraps a KVStore and counts operations per method.
+//
+// F10 fix (fix-resident-reliability-boundaries D7, 8.1): FileSegmentStore
+// consumes Sync and ListPartitionIDs via type assertion, not the memory.KVStore
+// interface (which declares neither). Embedding only memory.KVStore would let
+// those assertions fail on the wrapper, silently hiding the underlying
+// LocalFileKV's event-level durability barrier and cold-partition enumeration —
+// so the benchmark would measure flush-only latency and skip cold discovery.
+// These methods forward both capabilities (and Sync errors) explicitly so the
+// benchmark crosses the SAME commit path as production.
 type countingKV struct {
 	memory.KVStore
 	gets, puts, scans, ranges, batches, deletes atomic.Int64
+	syncs                                       atomic.Int64
 }
 
 func (c *countingKV) KVGet(k string) (string, error) { c.gets.Add(1); return c.KVStore.KVGet(k) }
@@ -89,6 +101,60 @@ func (c *countingKV) KVRange(s, e string, l int) ([]memory.KVPair, error) {
 func (c *countingKV) KVBatch(ops []memory.KVOp) error {
 	c.batches.Add(1)
 	return c.KVStore.KVBatch(ops)
+}
+
+// Sync forwards the durability barrier to the underlying store (F10 fix) and
+// counts the call. Without this the FileSegmentStore barrier assertion
+// `s.kv.(interface{ Sync() error })` fails and the event-level commit barrier
+// is silently skipped, making the benchmark measure flush-only latency rather
+// than the true durable-commit path production takes.
+func (c *countingKV) Sync() error {
+	c.syncs.Add(1)
+	if s, ok := c.KVStore.(interface{ Sync() error }); ok {
+		return s.Sync()
+	}
+	return nil // backend has no explicit barrier; same semantics as no-op
+}
+
+// ListPartitionIDs forwards partition enumeration so FileSegmentStore.Init()
+// discovers cold partitions over the wrapper too (F10 fix).
+func (c *countingKV) ListPartitionIDs() []int {
+	if l, ok := c.KVStore.(interface{ ListPartitionIDs() []int }); ok {
+		return l.ListPartitionIDs()
+	}
+	return nil
+}
+
+// Compile-time capability locks (D7 8.1): the wrapper must keep the two
+// optional capabilities FileSegmentStore consumes via type assertion. If either
+// is ever dropped, these fail to compile — forbidding a silent no-op fake that
+// would hide the barrier/enumeration from the benchmark.
+var (
+	_ interface{ Sync() error }             = (*countingKV)(nil)
+	_ interface{ ListPartitionIDs() []int } = (*countingKV)(nil)
+)
+
+// errBarrierBoom marks an injected underlying-Sync failure.
+var errBarrierBoom = errors.New("underlying Sync barrier failed")
+
+// syncErrKV is a KVStore spy whose Sync always fails; the 6 KVStore methods are
+// inherited from the (nil) embedded interface and never called by the test.
+type syncErrKV struct{ memory.KVStore }
+
+func (syncErrKV) Sync() error { return errBarrierBoom }
+
+// TestCountingKVSyncErrorPropagates proves the wrapper forwards the underlying
+// Sync error rather than swallowing it (F10/D7「禁止 no-op 假能力」): a no-op
+// Sync would let the benchmark report a durability barrier that never happened.
+// It also proves the call is counted even on failure.
+func TestCountingKVSyncErrorPropagates(t *testing.T) {
+	ckv := &countingKV{KVStore: syncErrKV{}}
+	if err := ckv.Sync(); !errors.Is(err, errBarrierBoom) {
+		t.Fatalf("countingKV must propagate the underlying Sync error, got %v", err)
+	}
+	if got := ckv.syncs.Load(); got < 1 {
+		t.Fatalf("Sync must be counted even when it fails, got %d", got)
+	}
 }
 
 func (c *countingKV) snapshot() [6]int64 {
@@ -333,4 +399,154 @@ func tokenEstimatorError(t *testing.T) map[string]any {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// F10/D7 (8.2): benchmark wrapper barrier fidelity — single event, unclean exit
+// ---------------------------------------------------------------------------
+
+// benchBarrierMarker is the single event's content, read back by a fresh process.
+const benchBarrierMarker = "bench-wrapper-barrier-marker"
+
+// TestBenchWrapperBarrierDurableWithoutClose proves the offline benchmark wraps
+// the KV with the SAME event-level durability barrier production uses
+// (fix-resident-reliability-boundaries D7, 8.2). The benchmark stores every
+// event through countingKV; before the F10 fix countingKV exposed no Sync, so
+// FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion failed, the
+// commit barrier was skipped, and a single acknowledged write stayed in
+// LocalFileKV's in-memory pending buffer (KVPut is async acceptance) — lost on
+// an unclean exit.
+//
+// The child replicates the benchmark's exact wrapping (countingKV over
+// LocalFileKV), stores ONE event, records the countingKV.syncs delta, then
+// terminates WITHOUT Close. The parent asserts (1) the wrapper's Sync was
+// reached (delta >= 1: the barrier ran through the wrapper, not around it) and
+// (2) a fresh, independent store over the same directory reads the event back —
+// so the benchmark and production cross the same event barrier.
+//
+// fsync boundary (D7「报告不混为掉电耐久」):
+//   - fsync=true  → f.Sync() on the WAL; acknowledged write survives power loss.
+//   - fsync=false → Flush-level Sync only (bufio→kernel + close): survives an
+//     unclean PROCESS exit (what a subprocess kill reproduces) but NOT power
+//     loss. Both must cross the wrapper barrier; only the syscall strength differs.
+func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
+	if os.Getenv("TAGENT_BENCH_BARRIER_SUBPROC") == "1" {
+		runBenchBarrierChild()
+		return // unreachable: the child exits inside
+	}
+
+	cases := []struct {
+		name  string
+		fsync bool
+	}{
+		{"fsync-on", true},
+		{"flush-only", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			syncsFile := filepath.Join(t.TempDir(), "syncs.txt")
+
+			cmd := exec.Command(os.Args[0], "-test.run", "^TestBenchWrapperBarrierDurableWithoutClose$", "-test.v")
+			cmd.Env = append(os.Environ(),
+				"TAGENT_BENCH_BARRIER_SUBPROC=1",
+				"TAGENT_BENCH_BARRIER_DIR="+dir,
+				fmt.Sprintf("TAGENT_BENCH_BARRIER_FSYNC=%d", b2i(tc.fsync)),
+				"TAGENT_BENCH_BARRIER_SYNCS_FILE="+syncsFile,
+			)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("child did not acknowledge the barrier write (err=%v): %s", err, out)
+			}
+
+			// (1) Fail-before discriminator: the wrapper must have been reached.
+			raw, err := os.ReadFile(syncsFile)
+			if err != nil {
+				t.Fatalf("read syncs marker: %v", err)
+			}
+			var syncs int64
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(raw)), "%d", &syncs); err != nil {
+				t.Fatalf("parse syncs marker %q: %v", raw, err)
+			}
+			if syncs < 1 {
+				t.Fatalf("countingKV did not forward the event barrier (syncs=%d): benchmark path diverges from production", syncs)
+			}
+
+			// (2) Fresh, independent reader (no wrapper) over the same dir.
+			inner, err := kv.NewLocalFileKV(dir)
+			if err != nil {
+				t.Fatalf("reopen kv: %v", err)
+			}
+			store, err := memory.NewFileSegmentStore(inner, nil, dir, 1000)
+			if err != nil {
+				t.Fatalf("reopen store: %v", err)
+			}
+			pid := memory.PartitionIDFromName("benchbarrier")
+			refs, err := store.QueryEvents(memory.QueryOptions{
+				PartitionIDs: []int{pid},
+				Keyword:      benchBarrierMarker,
+			})
+			if err != nil || len(refs) == 0 {
+				t.Fatalf("wrapper-barrier event lost after unclean exit (fsync=%v): refs=%d err=%v", tc.fsync, len(refs), err)
+			}
+			evt, err := store.GetEvent(refs[0].EventKey)
+			if err != nil {
+				t.Fatalf("GetEvent via idx after reopen: %v", err)
+			}
+			if evt.Content != benchBarrierMarker || evt.Metadata["m"] != "1" {
+				t.Fatalf("event corrupted across restart: %+v", evt)
+			}
+		})
+	}
+}
+
+// runBenchBarrierChild replicates the benchmark wrapping, stores one event,
+// records the syncs delta, and exits WITHOUT Close so only a forwarded barrier
+// can persist the write. Env-only inputs; never returns.
+func runBenchBarrierChild() {
+	dir := os.Getenv("TAGENT_BENCH_BARRIER_DIR")
+	fsync := os.Getenv("TAGENT_BENCH_BARRIER_FSYNC") == "1"
+	syncsFile := os.Getenv("TAGENT_BENCH_BARRIER_SYNCS_FILE")
+
+	inner, err := kv.NewLocalFileKV(dir, kv.WithFSync(fsync))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "child: open kv:", err)
+		os.Exit(2)
+	}
+	ckv := &countingKV{KVStore: inner} // EXACTLY the benchmark's wrapper (F10).
+	store, err := memory.NewFileSegmentStore(ckv, nil, dir, 1000)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "child: open store:", err)
+		os.Exit(2)
+	}
+
+	pid := memory.PartitionIDFromName("benchbarrier")
+	key := memory.NewSnowflakeEventKey(pid, 0)
+	before := ckv.syncs.Load()
+	if err := store.StoreEvent(key, memory.FullEvent{
+		EventKey:     key,
+		PartitionID:  pid,
+		EventType:    "external_input",
+		EventSummary: benchBarrierMarker,
+		Content:      benchBarrierMarker,
+		Timestamp:    1700000000000,
+		Metadata:     map[string]string{"m": "1"},
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, "child: StoreEvent:", err)
+		os.Exit(3)
+	}
+	delta := ckv.syncs.Load() - before
+	if err := os.WriteFile(syncsFile, []byte(fmt.Sprintf("%d", delta)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "child: write syncs marker:", err)
+		os.Exit(4)
+	}
+	// Acknowledged → terminate WITHOUT Close: no flush-tick, no final flush.
+	os.Exit(0)
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

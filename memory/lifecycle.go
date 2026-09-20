@@ -102,9 +102,46 @@ func (lm *LifecycleManager) Stop() {
 	lm.wg.Wait()
 }
 
+// armGrace bounds how long the first destructive scan waits for the §2.8 retention
+// lease to be armed before proceeding (anti-starvation backstop for a durable store
+// opened without a durable recovery owner). Normal wiring arms in milliseconds.
+const armGrace = 60 * time.Second
+
+func (lm *LifecycleManager) armGrace() time.Duration { return armGrace }
+
 // scannerLoop runs periodically to check for expired events and capacity.
 func (lm *LifecycleManager) scannerLoop() {
 	defer lm.wg.Done()
+
+	// §2.8 B: never run the first destructive pass until the recovery owner has rebuilt
+	// the retention lease from existing unacked material. A store with no lease (nil)
+	// proceeds immediately (no durable recovery to guard, behavior unchanged); a leased
+	// store blocks here until MarkReady, closing the restart race (spec L117-119) where an
+	// overdue-but-retained original could otherwise be tombstoned before its lease lands.
+	// A startup grace backstops the wait so a leased store whose recovery owner never arms
+	// (e.g. a durable backend opened without a durable inbox) cannot starve TTL/capacity
+	// forever — in normal wiring the arm lands in milliseconds, far inside the grace. Stop()
+	// unblocks this via stopCh. SweepOnce (harness) bypasses the gate deliberately.
+	select {
+	case <-lm.store.RetentionLease().Ready():
+	case <-time.After(lm.armGrace()):
+		if lm.store.RetentionLease() != nil {
+			log.Warnf("[Lifecycle] retention lease not armed within grace — proceeding with forgetting (no durable recovery owner registered; §2.8 backstop)")
+		}
+	case <-lm.stopCh:
+		return
+	}
+
+	// §5.8: an active registration barrier pauses forgetting UNCONDITIONALLY — the
+	// armGrace backstop above only covers "a recovery owner never registered";
+	// while an owner is mid-inventory (composition-root build gate, a late
+	// attach, or a BLOCKED inventory whose hold is deliberately kept), no timed
+	// escape may release a destructive pass. Nil lease / no hold passes at once.
+	select {
+	case <-lm.store.RetentionLease().HoldClear():
+	case <-lm.stopCh:
+		return
+	}
 
 	// Run initial check
 	lm.checkTTL()
@@ -116,11 +153,29 @@ func (lm *LifecycleManager) scannerLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			// §5.8: a late-attaching owner (new shared recovery dir on an already
+			// running store) raises the barrier at any time; passes issued while it
+			// holds must pause — skip this tick, the next one lands shortly.
+			if lm.forgettingPaused() {
+				continue
+			}
 			lm.checkTTL()
 			lm.checkCapacity()
 		case <-lm.stopCh:
 			return
 		}
+	}
+}
+
+// forgettingPaused reports an active §5.8 registration barrier without waiting
+// (the pass for this tick is skipped; forgetting resumes on the next tick once
+// every in-flight inventory has ended its hold).
+func (lm *LifecycleManager) forgettingPaused() bool {
+	select {
+	case <-lm.store.RetentionLease().HoldClear():
+		return false
+	default:
+		return true
 	}
 }
 
@@ -174,6 +229,13 @@ func (lm *LifecycleManager) checkTTL() {
 					continue
 				}
 
+				// §2.8: a still-retained unacked-recovery original must not be expired by
+				// TTL — its lease is released only after ack/spill-removal, after which the
+				// key resumes normal age-based expiry using its ORIGINAL timestamp.
+				if lm.store.IsKeyProtected(evt.EventKey) {
+					continue
+				}
+
 				// Determine TTL for this event type
 				ttlDays, err := lm.getEffectiveTTL(evt.Type)
 				if err != nil || ttlDays <= 0 {
@@ -217,7 +279,16 @@ func (lm *LifecycleManager) checkCapacity() {
 
 		state.mu.Lock()
 		count := state.eventCount
+		known := state.countKnown
 		state.mu.Unlock()
+
+		// 2.5: never evict THIS partition on an untrusted count (a partition marked
+		// unknown by an uncertain durability outcome pauses its own eviction, while
+		// unrelated known partitions keep evicting — the store-level gate above is
+		// belt-and-suspenders for a never-rebuilt store).
+		if !known {
+			return true
+		}
 
 		if count <= int64(lm.config.MaxEventsPerPartition) {
 			return true
@@ -264,6 +335,10 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 				continue
 			}
 			if lm.tombstone.IsTombstone(evt.EventKey) {
+				continue
+			}
+			// §2.8: never capacity-evict a still-retained unacked-recovery original.
+			if lm.store.IsKeyProtected(evt.EventKey) {
 				continue
 			}
 			// Curated artifacts are exempt from capacity eviction too (same rule

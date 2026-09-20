@@ -156,16 +156,15 @@ type agentSubset struct {
 	MaxToolIterations int          `json:"max_tool_iterations,omitempty"`
 	Temperature       float64      `json:"temperature,omitempty"`
 	// CompressThreshold / MaxTokens / KeepRecentTasks / TaskTerminalTTL /
-	// TaskStaleAfter / TaskJobDeadline are intentionally EXCLUDED from the fingerprint
+	// TaskDefaultTTL are intentionally EXCLUDED from the fingerprint
 	// (full-hot-config Phase 1, 2026-09-16): all are hot-applicable via
 	// ApplyOrgHotParams (compressor atomic threshold+budget swap, task
-	// manager TTL / stale-detached wall setters), so per the D3 criterion
+	// manager TTL reaper setters), so per the D3 criterion
 	// ("only fields whose change requires rebuilding agent instances
 	// fingerprint") they must NOT force a rebuild. The unchanged-fingerprint
 	// branch in the tagent.New reloader hot-applies them.
 	KeepRecentTasks      int              `json:"-"`
 	TaskTerminalTTL      string           `json:"-"`
-	TaskMaxDetachedAge   string           `json:"-"`
 	ResumeContextRounds  int              `json:"resume_context_rounds,omitempty"`
 	Compress             CompressConfig   `json:"compress,omitempty"`
 	ThinkingEnabled      *bool            `json:"thinking_enabled,omitempty"`

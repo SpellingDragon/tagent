@@ -121,7 +121,7 @@ func TestEmitTaskInlineSettleRecord_Shape(t *testing.T) {
 	ev, err := store.GetEvent(refs[0].EventKey)
 	require.NoError(t, err)
 	require.Equal(t, "t-uuid-2", ev.Metadata["task_id"])
-	require.Equal(t, "true", ev.Metadata["task_inline_record"], "inline flag marks registry-only records")
+	require.Equal(t, "true", ev.Metadata[tagentevent.MetaKeyTaskInlineRecord], "inline flag marks registry-only records")
 	require.NotEmpty(t, ev.Metadata["settle_status"])
 }
 

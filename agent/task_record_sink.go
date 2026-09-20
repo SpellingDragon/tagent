@@ -147,11 +147,9 @@ func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
 	if p.TaskTerminalTTL > 0 && ta.taskManager != nil {
 		ta.taskManager.SetTerminalTTL(p.TaskTerminalTTL)
 	}
-	if p.TaskStaleAfter != 0 && ta.taskManager != nil {
-		ta.taskManager.SetStaleAfter(p.TaskStaleAfter)
-	}
-	if p.TaskJobDeadline != 0 && ta.taskManager != nil {
-		ta.taskManager.SetJobDeadline(p.TaskJobDeadline)
+	if p.TaskDefaultTTL != 0 && ta.taskManager != nil {
+		// §10.5: hot-reload the unified reaper's fallback lifetime (no stale/deadline knobs remain).
+		ta.taskManager.SetDefaultTTL(p.TaskDefaultTTL)
 	}
 }
 

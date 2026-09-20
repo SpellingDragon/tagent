@@ -22,7 +22,14 @@ const maxBoardTasks = 20
 // persisted, so it does NOT participate in context compression (D6): it is a
 // live recency anchor of current async state. Returns "" when no active tasks
 // exist (the caller then injects nothing).
-func RenderBoard(tasks []*Task) string {
+//
+// Each row renders the task's effective REMAINING lifetime to the unified reaper
+// (async-task-lifetime 10.6) — the same value reconcileTTL honors — so the model
+// can decide once from a single read: every task is bounded and self-reclaiming,
+// so a quiet/suspect task needs no per-turn re-arbitration. defaultTTL is the
+// manager's reaper floor (TaskManager.DefaultTTL), used for tasks with no explicit
+// spec.TTL.
+func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 	active := make([]*Task, 0, len(tasks))
 	for _, t := range tasks {
 		if t.isActive() {
@@ -41,6 +48,7 @@ func RenderBoard(tasks []*Task) string {
 		active = active[:maxBoardTasks]
 	}
 
+	now := time.Now()
 	var b strings.Builder
 	// Virtual-event framing: the board is a SYSTEM-generated observation
 	// snapshot delivered as a standalone user-level input — the same category
@@ -49,12 +57,23 @@ func RenderBoard(tasks []*Task) string {
 	// produce or imitate in its own output.
 	fmt.Fprintf(&b, "[后台任务看板] 系统注入的观察快照（非用户发言，不入历史，勿在回复中模仿此格式）：当前 %d 个进行中\n", len(active))
 	for _, t := range active {
-		age := time.Since(t.StartedAt).Round(time.Second)
-		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v)", t.Status(), t.Spec.Desc, ShortID(t.ID), age)
-		if t.Status() == TaskSuspect {
-			b.WriteString(" ⚠ 长时间无输出，可能假死，需确认")
+		age := now.Sub(t.StartedAt).Round(time.Second)
+		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v", t.Status(), t.Spec.Desc, ShortID(t.ID), age)
+		// Render the reaper's remaining lifetime instead of any non-terminal
+		// “需确认” arbitration invitation: a bounded, self-reclaiming task is
+		// decided once by reading this number, not re-judged every turn (10.6).
+		if rem, ok := t.remainingLifetime(now, defaultTTL); ok {
+			if rem <= 0 {
+				b.WriteString(", 即将回收")
+			} else {
+				r := rem.Round(time.Minute)
+				if r <= 0 {
+					r = rem.Round(time.Second)
+				}
+				fmt.Fprintf(&b, ", 剩余 %v 后回收", r)
+			}
 		}
-		b.WriteString("\n")
+		b.WriteString(")\n")
 	}
 	// Fixed wait-guidance line: the only net copy addition in this change. It
 	// teaches the model that ending its turn is the legal way to wait for

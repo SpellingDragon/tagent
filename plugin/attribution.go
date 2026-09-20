@@ -1,6 +1,9 @@
 package plugin
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // ==================== 归因章 ctx 载体（TC0 · 热配置/自进化地基）====================
 //
@@ -36,40 +39,89 @@ func AttributionFrom(ctx context.Context) (Attribution, bool) {
 	return a, ok && len(a) > 0
 }
 
-// durableInboundCtxKey is the context key for the durable inbound provenance
-// of the CURRENT turn (cold-eyes Major 1): the claimed envelope's path and
-// the per-message dedup key, so the MemoryPlugin fact path participates in
-// the replay-dedup contract (not just persistBusEvent).
-type durableInboundCtxKey struct{}
+// echoCredentialCtxKey is the context key for THIS attempt's echo credential.
+// §4.4 (design 决策4): replaces the old whole-turn DurableInbound "first envelope /
+// any user" flag. A fresh credential is minted per runner attempt (RunFlow) and
+// released when the call's ctx ends — no turn-global or "first envelope" state.
+type echoCredentialCtxKey struct{}
 
-// DurableInbound carries the current turn's envelope provenance.
-type DurableInbound struct {
-	Path      string // inbox envelope path (diagnostics)
-	RequestID string // batch identity
-	DedupKey  string // hex fact key carried by the claim (replay evidence)
+// EchoCredential identifies THIS attempt's expected input echo so MemoryPlugin can
+// skip re-storing it precisely, instead of skipping every user event in a durable turn.
+// The event loop commits the batch's per-message facts before running the model; the
+// framework then echoes the merged input back through the plugin pipeline. Only the
+// exact echo matching this credential may skip storage — sub-calls, assistants, tools,
+// and any other user message take the normal path.
+type EchoCredential struct {
+	AttemptToken  string  // unique per runner attempt (a retry mints a new one, reusing the same facts)
+	Agent         string  // expected agent name
+	Session       string  // expected session id
+	MergedMessage string  // the canonical merged input the loop built (normalized-match target)
+	CommittedKeys []int64 // fact keys already persisted for this batch (consumed by §4.5)
 
-	// FactsPrePersisted (cold-eyes R2 M-1): the event loop already stored this
-	// turn's durable input facts via persistBusEvent (per message, dedup-aware,
-	// writeback included) — the pipeline must skip re-storing the echoed user
-	// input, otherwise the merged fact would either duplicate or swallow a
-	// same-key-different-content collision.
-	FactsPrePersisted bool
+	mu       sync.Mutex
+	boundID  string // exact event invocation id bound on the first match
+	boundSet bool
+	rejected bool   // §4.5: a field-mismatch / plugin error downgraded this attempt
+	reason   string // why rejected (diagnostics)
 }
 
-// WithDurableInbound returns a context carrying the turn's durable inbound
-// provenance. Empty path → not injected (no durable envelope this turn).
-func WithDurableInbound(ctx context.Context, d DurableInbound) context.Context {
-	if d.Path == "" {
+// Verified reports whether this attempt's expected echo was positively identified
+// (bound) AND not later rejected. The model-entry gate (§4.5) blocks the model when a
+// credential was installed for the turn but Verified() is false — the committed inputs
+// were never confirmed to be the ones the framework ran on.
+func (c *EchoCredential) Verified() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.boundSet && !c.rejected
+}
+
+// MarkRejected downgrades an already-installed credential to non-verifiable (§4.5:
+// "字段不匹配或插件记录错误 → 调用级凭据置为拒绝"). Sticky (first reason wins). The
+// model-entry gate and the loop's ack decision consult Verified(), so a swallowed
+// plugin error can no longer let the turn cross the commit gate.
+func (c *EchoCredential) MarkRejected(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.rejected {
+		c.rejected = true
+		c.reason = reason
+	}
+}
+
+// Bind records the ROOT INVOCATION id of the first echo match (idempotent: later
+// matches within the same attempt don't overwrite). event.Event carries no per-event
+// ID (it embeds *model.Response + InvocationID), so the root invocation id is the
+// exact, stable identity of THIS attempt's input echo; §4.5's verify MUST assert at
+// this per-attempt granularity, not per-event. Audit / §4.5 hook.
+func (c *EchoCredential) Bind(invocationID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.boundSet {
+		c.boundID = invocationID
+		c.boundSet = true
+	}
+}
+
+// BoundID returns the invocation id bound on the first echo match (empty until bound).
+func (c *EchoCredential) BoundID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.boundID
+}
+
+// WithEchoCredential returns a context carrying this attempt's echo credential.
+func WithEchoCredential(ctx context.Context, c *EchoCredential) context.Context {
+	if c == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, durableInboundCtxKey{}, d)
+	return context.WithValue(ctx, echoCredentialCtxKey{}, c)
 }
 
-// DurableInboundFrom extracts the turn's durable inbound provenance, if any.
-func DurableInboundFrom(ctx context.Context) (DurableInbound, bool) {
+// EchoCredentialFrom extracts the attempt's echo credential, if any.
+func EchoCredentialFrom(ctx context.Context) (*EchoCredential, bool) {
 	if ctx == nil {
-		return DurableInbound{}, false
+		return nil, false
 	}
-	d, ok := ctx.Value(durableInboundCtxKey{}).(DurableInbound)
-	return d, ok
+	c, ok := ctx.Value(echoCredentialCtxKey{}).(*EchoCredential)
+	return c, ok && c != nil
 }

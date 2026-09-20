@@ -1,9 +1,10 @@
 package engine
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
-
 	"context"
+	"fmt"
+
+	"github.com/SpellingDragon/tagent/memory"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -50,16 +51,52 @@ func (b *engineBridge) WalQuarantined() int64 {
 	return 0
 }
 
+// memory.RetentionGuard 递归透传（§2.8/§2.6 spec L89「材料保留」恢复能力）：恢复 owner
+// 经装饰链保护/释放未确认原文并 arm 首扫门控。内层无租约（如非持久后端）则 no-op。
+func (b *engineBridge) ProtectKey(key int64) {
+	if g, ok := b.inner.(memory.RetentionGuard); ok {
+		g.ProtectKey(key)
+	}
+}
+
+func (b *engineBridge) ReleaseKey(key int64) {
+	if g, ok := b.inner.(memory.RetentionGuard); ok {
+		g.ReleaseKey(key)
+	}
+}
+
+func (b *engineBridge) ArmRetention() {
+	if g, ok := b.inner.(memory.RetentionGuard); ok {
+		g.ArmRetention()
+	}
+}
+
+// BeginHold/EndHold 透传 §5.8 登记屏障（装饰链完整，无屏障能力的底层静默跳过）。
+func (b *engineBridge) BeginHold() {
+	if h, ok := b.inner.(memory.RetentionHoldable); ok {
+		h.BeginHold()
+	}
+}
+
+func (b *engineBridge) EndHold() {
+	if h, ok := b.inner.(memory.RetentionHoldable); ok {
+		h.EndHold()
+	}
+}
+
 // SetCapacityHook 实现 memory.CapacityHookProvider（4.2）：注册写入旁路计数回调
 // （装配期一次性调用；运行期只读，见字段注释）。
 func (b *engineBridge) SetCapacityHook(fn func(eventKey int64, partitionID int, eventType string)) {
 	b.capacityHook = fn
 }
 
-// 编译期锁定：engineBridge 是 memory.MemoryStore + memory.MemoryEngineProvider（+ 尽力 memory.RelationStoreProvider）。
+// 编译期锁定：engineBridge 是 memory.MemoryStore + memory.MemoryEngineProvider（+ 尽力 memory.RelationStoreProvider）
+// + memory.EventReplayer（D4 透传链完整）。
 var (
 	_ memory.MemoryStore          = (*engineBridge)(nil)
 	_ memory.MemoryEngineProvider = (*engineBridge)(nil)
+	_ memory.EventReplayer        = (*engineBridge)(nil)
+	_ memory.RetentionGuard       = (*engineBridge)(nil)
 )
 
 // NewEngineBridge 用引擎包裹 store。engine 的关键词路应指向 inner（构造引擎时传入），
@@ -98,6 +135,43 @@ func (b *engineBridge) StoreEvent(key int64, event memory.FullEvent) error {
 // 向量入索引时应扩展 IndexWithVector 接口（后续增强），当前保持透传语义。
 func (b *engineBridge) StoreEventWithEmbedding(key int64, event memory.FullEvent, embedding []float32) error {
 	return b.inner.StoreEventWithEmbedding(key, event, embedding)
+}
+
+// ReplayEvent implements memory.EventReplayer (D4 design): canonical replay passthrough.
+// The engine index and capacityHook run only for ReplayNew/ReplayRepaired; a
+// ReplayAlreadyCommitted result skips both so that live-count is never double-incremented
+// and the engine does not receive a redundant index enqueue for a fact already in the store.
+func (b *engineBridge) ReplayEvent(key int64, canonicalFact memory.FullEvent) (memory.ReplayResult, memory.FullEvent, error) {
+	replayer, ok := b.inner.(memory.EventReplayer)
+	if !ok {
+		return memory.ReplayNew, canonicalFact,
+			fmt.Errorf("engineBridge: inner store %T does not implement EventReplayer", b.inner)
+	}
+	result, stored, err := replayer.ReplayEvent(key, canonicalFact)
+	if err != nil {
+		return result, stored, err
+	}
+	if result == memory.ReplayAlreadyCommitted {
+		// D4/F8: already-committed replay — do not call capacityHook (would double-increment
+		// the consolidation counter) and do not re-index the engine (idempotent index is not
+		// guaranteed by the MemoryEngine contract).
+		return result, stored, nil
+	}
+	if b.capacityHook != nil {
+		b.capacityHook(key, stored.PartitionID, stored.EventType)
+	}
+	if b.engine != nil {
+		if idxErr := b.engine.Index(context.Background(), memory.IndexableEvent{
+			EventKey:    key,
+			PartitionID: stored.PartitionID,
+			EventType:   stored.EventType,
+			Text:        textForIndex(stored),
+			Timestamp:   stored.Timestamp,
+		}); idxErr != nil {
+			log.Debugf("[engineBridge] replay index enqueue key=%d: %v", key, idxErr)
+		}
+	}
+	return result, stored, nil
 }
 
 // DeleteEvent 删 inner，成功后尽力从引擎移除（防悬挂召回）。
@@ -164,9 +238,10 @@ func (b *engineBridge) RemoveVector(eventKey int64) {
 }
 
 // Close 关闭引擎（停后台嵌入 worker）并委托 inner 的 Close（若可关闭，如
-// FileSegmentStore 的持久化 flush）。满足 agent.Closer——resolveMemoryStore 的
-// 既有清理路径（memStore.(agent.Closer)）据此在 agent 关闭时回收引擎，防 goroutine 泄漏。
-// 共享 store 场景下引擎按 path 共享，Close 幂等（引擎内部 closeOnce）。
+// FileSegmentStore 的持久化 flush）。它是 store 关闭链的委托腿：独享（空 path）
+// 场景由 agent 的 Close 尾部（memStoreOwned fallback）触发；共享场景桥只是借面，
+// 真正回收的是 registry entry 经 closeResource 关闭同代 engine + base store
+// （§6.2/§6.3：借用壳/桥无共享释放权）。引擎自身 Close 幂等（内部 closeOnce）。
 func (b *engineBridge) Close() error {
 	var err error
 	if b.engine != nil {

@@ -86,14 +86,13 @@ func createTestAgent(t *testing.T) *TagentAgent {
 // for tests that need an active loop. Returns a cleanup function.
 func startTestLoop(ta *TagentAgent) func() {
 	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopActive.Store(true)
+	ta.loopState.Store(1) // loopRunning (agent 包 §6.1 状态机)
 	ta.loopWg.Add(1)
 	go func() {
 		defer ta.loopWg.Done()
 		ta.runEventLoop(ta.loopCtx, ta.persistentBus, ta.contextManager)
 	}()
 	return func() {
-		ta.loopActive.Store(false)
 		ta.loopCancel()
 		ta.loopWg.Wait()
 	}

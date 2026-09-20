@@ -866,16 +866,20 @@ func (cc *ContextCompressor) resolveRef(
 	content := ""
 	var toolCalls []model.ToolCall
 	toolID := ""
+	var contentParts []model.ContentPart
 	resolved := false
 	if full && cc.memStore != nil && ref.EventKey > 0 {
 		evt, err := cc.memStore.GetEvent(ref.EventKey)
 		if err == nil && evt != nil {
 			toolCalls = evt.ToolCalls
 			toolID = evt.ToolID
+			contentParts = evt.ContentParts
 			switch {
 			// FullEvent.Content is the authoritative (sanitized-at-storage) text;
-			// prefer it over the raw Response message.
-			case evt.Content != "" || len(evt.ToolCalls) > 0:
+			// prefer it over the raw Response message. A multimodal input has empty
+			// Content but non-empty ContentParts (§4.3) — resolve it as content, not
+			// summary, so the image reaches the request.
+			case evt.Content != "" || len(evt.ToolCalls) > 0 || len(evt.ContentParts) > 0:
 				content = evt.Content
 				resolved = true
 			case evt.Response != nil && len(evt.Response.Choices) > 0:
@@ -900,7 +904,7 @@ func (cc *ContextCompressor) resolveRef(
 			content = "(历史事件摘要为空，可用 recall 检索)"
 		}
 	}
-	return renderTimelineMessage(ref, content, toolCalls, toolID)
+	return renderTimelineMessage(ref, content, toolCalls, toolID, contentParts)
 }
 
 // renderTimelineMessage renders one event in NATIVE protocol form (D3 v2):
@@ -917,6 +921,7 @@ func renderTimelineMessage(
 	content string,
 	toolCalls []model.ToolCall,
 	toolID string,
+	contentParts []model.ContentPart,
 ) model.Message {
 	switch ref.EventType {
 	case tagentevent.TypeThinkingPlan:
@@ -932,9 +937,12 @@ func renderTimelineMessage(
 			Content: prefixEventKey(content, ref),
 		}
 	default:
+		// External/user-side input: carry multimodal parts so an image-only (empty-text)
+		// input still reaches the request (§4.3). Text-only inputs have nil parts → no-op.
 		return model.Message{
-			Role:    EventTypeToRole(ref.EventType),
-			Content: prefixEventKey(content, ref),
+			Role:         EventTypeToRole(ref.EventType),
+			Content:      prefixEventKey(content, ref),
+			ContentParts: contentParts,
 		}
 	}
 }

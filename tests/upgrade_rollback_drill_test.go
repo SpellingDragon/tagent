@@ -18,6 +18,7 @@ package tagent_test
 // Runs by default (file ops + pure functions, no sleeps, no real restart).
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,36 +29,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newEnv builds a minimal inbox-v2 envelope: one fixed slot carrying a lossless
+// source_event snapshot (the leaf requires a non-empty source_event per slot —
+// D2). The drill only exercises the reliability-leaf lifecycle
+// (enqueue→claim→receipt→ack), so the snapshot body is opaque to it.
 func newEnv(id string) *reliability.Envelope {
+	src, _ := json.Marshal(map[string]any{
+		"id": id, "type": "external_input", "source": "user",
+		"message": map[string]any{"role": "user", "content": "m-" + id},
+	})
 	return &reliability.Envelope{
 		RequestID: id, Source: "user", State: reliability.InboxStatePending,
-		Messages: []reliability.EnvelopeMessage{{Role: "user", Content: "m-" + id}},
+		Messages: []reliability.MessageSlot{{SourceEvent: src}},
 	}
 }
 
-// 1. Upgrade path: the inbox-v1 binary refuses to open a dir that still holds
-// pre-migration *.spill items (the version that wrote them must drain them),
-// then, once drained, accepts the dir and runs the full durable lifecycle.
-func TestDrill_UpgradeDrainsLegacySpillThenAccepts(t *testing.T) {
+// 1. Upgrade path (§3.7 reworked): pre-migration *.spill no longer blocks boot —
+// the v2 binary opens the dir, classifies the legacy item as INERT transitional
+// data (never reinterpreted/absorbed), and an explicit managed ResetTransitional
+// clears it. The full durable lifecycle then runs on the current format.
+func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "00000000000000000001.spill")
 	require.NoError(t, os.WriteFile(legacy, []byte(`{"legacy":"pre-migration"}`), 0o644))
 
-	_, err := reliability.NewInbox(dir, 10)
-	require.ErrorIs(t, err, reliability.ErrLegacySpillNotDrained,
-		"upgrade MUST fail loud while legacy .spill sibling present (never silently reinterpreted)")
-
-	// Operator drains with the previous binary (modelled here as removal).
-	require.NoError(t, os.Remove(legacy))
 	in, err := reliability.NewInbox(dir, 10)
-	require.NoError(t, err, "after drain the upgrade binary opens the same dir")
+	require.NoError(t, err, "§3.7: legacy .spill must NOT block boot; it is inert transitional data")
 	defer in.Close()
+
+	require.Equal(t, int64(0), in.Pending(), "legacy .spill is never absorbed as a v2 input")
+	sp, _ := in.TransitionalData()
+	require.Contains(t, sp, legacy, "classified as transitional, awaiting an explicit reset")
+
+	removed, rerr := in.ResetTransitional(true)
+	require.NoError(t, rerr)
+	require.Equal(t, 1, removed, "managed reset clears exactly the enumerated legacy file")
+	require.NoFileExists(t, legacy)
 
 	require.NoError(t, func() error { _, e := in.Enqueue(newEnv("req-1")); return e }())
 	env, path, err := in.ClaimNext()
 	require.NoError(t, err)
 	require.Equal(t, "req-1", env.RequestID)
-	require.NoError(t, in.RecordReceipt(path, "turn done"))
+	// §5.4: the drain path follows the CURRENT protocol — reservation, then
+	// completion durable BEFORE a credentialed receipt (the state machine refuses
+	// a receipt without one, and without the credential matching the reservation).
+	require.NoError(t, in.PrepareFacts(path, "rk-req-1", []json.RawMessage{json.RawMessage(`{"event_key":11}`)}))
+	require.NoError(t, in.RecordCompletion(path, json.RawMessage(`{"completion_version":1}`)))
+	require.NoError(t, in.RecordReceipt(path, reliability.ReceiptCredential{ReceiptKey: "rk-req-1"}))
 	require.NoError(t, in.Ack(path))
 	require.EqualValues(t, 0, in.Pending(), "acked envelope leaves nothing outstanding")
 }
@@ -86,12 +104,16 @@ func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	require.EqualValues(t, 2, in2.Pending(), "crash leaves both envelopes outstanding after reopen")
 	require.Greater(t, in2.Pending(), int64(0), "outstanding>0 → MUST NOT downgrade to pre-inbox binary")
 
-	// Drain to zero (claim→receipt→ack) before any downgrade is data-safe.
+	// Drain to zero (claim→prepare→completion→credentialed receipt→ack) before any
+	// downgrade is data-safe.
 	for in2.Pending() > 0 {
 		env, path, cerr := in2.ClaimNext()
 		require.NoError(t, cerr)
 		require.NotNil(t, env)
-		require.NoError(t, in2.RecordReceipt(path, "drain"))
+		key := "rk-" + env.RequestID
+		require.NoError(t, in2.PrepareFacts(path, key, []json.RawMessage{json.RawMessage(`{"event_key":11}`)}))
+		require.NoError(t, in2.RecordCompletion(path, json.RawMessage(`{"completion_version":1}`)))
+		require.NoError(t, in2.RecordReceipt(path, reliability.ReceiptCredential{ReceiptKey: key}))
 		require.NoError(t, in2.Ack(path))
 	}
 	require.EqualValues(t, 0, in2.Pending(), "drained → rollback to pre-inbox binary is now data-safe")

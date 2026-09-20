@@ -17,6 +17,7 @@ import (
 // Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID 非 spawn 参数，排除；Command 单列）。
 const (
 	pTimeout    = "timeout"
+	pTTL        = "ttl"
 	pWorkDir    = "work_dir"
 	pIsTUI      = "is_tui"
 	pQuiet      = "quiet_timeout"
@@ -37,6 +38,9 @@ func DeclarativeFromArgs(args ActionArgs, sessionID string) *task.Declarative {
 	}
 	if args.WorkDir != "" {
 		p[pWorkDir] = args.WorkDir
+	}
+	if args.TTL > 0 {
+		p[pTTL] = strconv.Itoa(args.TTL)
 	}
 	if args.IsTUI {
 		p[pIsTUI] = "true"
@@ -86,6 +90,12 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 				return args, fmt.Errorf("param %s=%q: %w", k, v, err)
 			}
 			args.Timeout = n
+		case pTTL:
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return args, fmt.Errorf("param %s=%q: %w", k, v, err)
+			}
+			args.TTL = n
 		case pWorkDir:
 			args.WorkDir = v
 		case pIsTUI:
@@ -131,13 +141,20 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.Declarative) task.TaskSpec {
 	args, err := argsFromDeclarative(decl)
 	if err != nil {
-		// Unrecoverable projection: display-only task (no closures).
-		return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, Declarative: &decl}
+		// Unrecoverable projection: display-only task (no closures). Still bound the
+		// reaper to the floor so a restore that lost its params is not immortal.
+		return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, TTL: defaultTaskTTL, Declarative: &decl}
 	}
 	spec := task.TaskSpec{
-		Kind:        "command",
-		Desc:        args.Command,
-		Key:         args.Command,
+		Kind: "command",
+		Desc: args.Command,
+		Key:  args.Command,
+		// §10.5(a): rebuild the reaper binding on restore. The model's explicit
+		// `ttl` is persisted in Params and recovered here; absent (pre-TTL records)
+		// resolveTTL falls back to the configured default / 10m floor. This is what
+		// keeps a restored long-running task (the 56bf24c3 class) bounded across
+		// restarts instead of lingering on the board forever.
+		TTL:         ct.resolveTTL(args),
 		Relaunch:    ct.relaunchClosure(spawner, args),
 		ResumeFn:    ct.rebuiltResumeClosure(decl.TaskID, args.IsTUI),
 		Alive:       ct.sessionAliveClosure(decl.TaskID),

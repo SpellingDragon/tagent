@@ -30,10 +30,6 @@ type RecoveryResult struct {
 	BatchErrors   int      `json:"batch_errors"`
 	PayloadErrors int      `json:"payload_errors"`
 	DurationMS    int64    `json:"duration_ms"`
-	// ReceiptedRequestIDs (cold-eyes Major 2): inbox receipt events seen during
-	// the rebuild scan — the startup reconcile converges envelopes whose
-	// receipt landed but whose ack did not (crash window), no re-execution.
-	ReceiptedRequestIDs []string `json:"receipted_request_ids,omitempty"`
 }
 
 // recoveryStatusOf derives the verdict: full only when nothing was lost.
@@ -184,17 +180,15 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	tail, _ := cm.fetchTailEvents(snapKey, result)
 	result.Scanned += len(tail)
 	for _, ev := range tail {
-		if ev.EventType == tagentevent.TypeInboxReceipt {
-			if rid := ev.Metadata["inbox_request_id"]; rid != "" {
-				result.ReceiptedRequestIDs = append(result.ReceiptedRequestIDs, rid)
-			}
-		}
-		// Compaction/legacy-snapshot events are fact-chain records, never
-		// projection refs (double-representation guard, same as the replay
-		// handler). R2 task records likewise: task_spawned is registry data
-		// (board renders live from the registry); task_inline_record settles
-		// returned in-turn as tool results (appending would double-render).
-		if skipProjectionEvent(ev) {
+		// §5.7: receipt confirmation is NEVER harvested from this scan — the startup
+		// reconcile inventories outstanding envelopes and checks each one's own
+		// fixed key directly; a key outside the snapshot/tail window must not be
+		// missed. Compaction events are fact-chain records, never projection refs (the
+		// double-representation guard) alongside registry data and inline tool
+		// records — §5.5: the classification is the event package's single
+		// predicate, shared verbatim by the normal-commit, spill-replay and
+		// cold-start paths.
+		if tagentevent.IsNonProjectionRecord(ev.EventType, ev.Metadata) {
 			continue
 		}
 		cm.appendProjectionRef(ev)
@@ -216,19 +210,6 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 // compaction anchors, not an arbitrary replay cap. Symbol kept (referenced by
 // tests/legacy comments) but no longer applied as a truncation bound.
 const fallbackCap = 0
-
-// skipProjectionEvent reports whether ev is a fact-chain record that must
-// never become a projection ref (compaction/legacy snapshots, registry
-// data, inline tool records) — the double-representation guard shared by
-// the tail replay and the fallback full replay.
-func skipProjectionEvent(ev memory.FullEvent) bool {
-	return ev.EventType == tagentevent.TypeContextCompressSummary ||
-		ev.EventType == tagentevent.TypeTaskSpawned ||
-		ev.EventType == tagentevent.TypeInboxReceipt ||
-		ev.EventType == tagentevent.TypeResidentSession ||
-		ev.Metadata[legacySnapshotMetaKey] != "" ||
-		ev.Metadata["task_inline_record"] != ""
-}
 
 // appendProjectionRef appends ev to the projection as an EventReference,
 // stamping meditation outputs first (same treatment as the runtime path).
@@ -256,12 +237,7 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	result.Scanned += len(all)
 	valid := make([]memory.FullEvent, 0, len(all))
 	for i := range all {
-		if all[i].EventType == tagentevent.TypeInboxReceipt {
-			if rid := all[i].Metadata["inbox_request_id"]; rid != "" {
-				result.ReceiptedRequestIDs = append(result.ReceiptedRequestIDs, rid)
-			}
-		}
-		if skipProjectionEvent(all[i]) {
+		if tagentevent.IsNonProjectionRecord(all[i].EventType, all[i].Metadata) {
 			continue // task/receipt/snapshot records never occupy the 500 slots
 		}
 		valid = append(valid, all[i])
@@ -280,7 +256,7 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 		truncated = true
 	}
 	for i := range valid { // fetchTailEvents already returns EventKey-ascending
-		if skipProjectionEvent(valid[i]) {
+		if tagentevent.IsNonProjectionRecord(valid[i].EventType, valid[i].Metadata) {
 			continue
 		}
 		cm.appendProjectionRef(valid[i])

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -105,6 +106,19 @@ func (p *MemoryPlugin) onEvent(
 		return evt, nil
 	}
 
+	// §4.4 (design 决策4): precise echo identification — BEFORE any key allocation or
+	// write. This attempt's EchoCredential (fresh per RunFlow; no whole-turn / "first
+	// envelope" state) names the exact merged input the event loop already committed.
+	// Skip ONLY when THIS event is that echo: root invocation (no parent), author=user,
+	// and normalized content equals the committed merged message. Sub-calls (parent≠nil),
+	// assistant/tool outputs, and any other user message fall through to the normal path.
+	if cred, ok := EchoCredentialFrom(ctx); ok && isExpectedInputEcho(inv, evt, cred) {
+		cred.Bind(evt.InvocationID)
+		log.Debugf("[Memory] §4.4: expected input echo (attempt=%s invocation=%s) already committed by the event loop — skipping store",
+			cred.AttemptToken, evt.InvocationID)
+		return evt, nil
+	}
+
 	// 1. Derive PartitionID from AgentName
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)
@@ -113,7 +127,6 @@ func (p *MemoryPlugin) onEvent(
 	// owned by the event loop's persistBusEvent pre-persist — this pipeline
 	// skips pre-persisted user inputs entirely and NEVER consumes
 	// ErrDuplicateEventKey, whose semantics are a collision per D15.)
-	durableInbound, hasDurable := DurableInboundFrom(ctx)
 	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
 	// 3. Infer event type and generate summary
@@ -157,6 +170,14 @@ func (p *MemoryPlugin) onEvent(
 	if evt.Response != nil && len(evt.Response.Choices) > 0 {
 		msg := evt.Response.Choices[0].Message
 		fullEvent.Content = sanitizeAssistantContent(msg)
+		// §4.3: carry non-text parts on the PLUGIN store path too (parity with
+		// buildBusFact). Without this, volatile-mode user images and assistant/tool
+		// multimodal outputs stored via onEvent would lose their ContentParts, so a
+		// later compression/rebuild (which reads FullEvent.ContentParts) silently drops
+		// them — the plugin path must keep non-text alive as completely as durable.
+		// §4.3 all-chain parity with buildBusFact: carry non-text parts on the plugin store
+		// path so a later compression/rebuild (reads FullEvent.ContentParts) keeps the image.
+		fullEvent.ContentParts = msg.ContentParts
 		fullEvent.ToolCalls = msg.ToolCalls
 		fullEvent.ToolID = msg.ToolID
 		fullEvent.Response = evt.Response
@@ -166,16 +187,8 @@ func (p *MemoryPlugin) onEvent(
 	// (write unification, unified-event-projection D1): the pipeline is the
 	// single place where a stored event also enters the invocation's
 	// projection. The projection's own EventKey idempotency (L1) makes
-	// re-delivery harmless.
-	// cold-eyes R2 W-1/M-1: when this turn's durable facts were pre-persisted
-	// by the event loop (persistBusEvent per message), the pipeline must NOT
-	// re-store the echoed user input — skip before any store attempt.
-	if hasDurable && durableInbound.FactsPrePersisted {
-		if msg := evt.Response.Choices[0].Message; msg.Role == model.RoleUser {
-			log.Debugf("[Memory] durable turn: input fact pre-persisted by event loop, pipeline skips")
-			return evt, nil
-		}
-	}
+	// re-delivery harmless. (§4.4: the durable input echo is already skipped
+	// earlier by the precise EchoCredential check — before any key allocation.)
 	stored := false
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
@@ -192,6 +205,16 @@ func (p *MemoryPlugin) onEvent(
 			}
 			log.Debugf("[Memory] stored key=%d partition=%d type=%s summary_len=%d",
 				eventKey, partitionID, eventType, len(eventSummary))
+		}
+	}
+	// §4.5: the framework LOGS a plugin error and continues, so a swallowed store failure
+	// must NOT let the turn cross the durable commit gate. Downgrade this attempt's
+	// credential to non-verifiable; the model-entry gate / loop ack check then fail-closed.
+	// (Guarded on p.memStore != nil so a nil-store bypass scenario is not treated as an
+	// error.)
+	if !stored && p.memStore != nil {
+		if c, ok := EchoCredentialFrom(ctx); ok {
+			c.MarkRejected("memory store error during credentialed turn")
 		}
 	}
 	if stored {
@@ -289,6 +312,40 @@ func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
 	}
 	return "unknown"
 }
+
+// isExpectedInputEcho reports whether (inv, evt) is THIS attempt's expected merged
+// input echo. It requires, in order: a ROOT invocation (no parent — only the root
+// echoes the turn's input), author=="user", a user-role message, and content equal
+// (whitespace-normalized) to the merged message the event loop committed. Every
+// condition is verified to hold on the real framework echo (see
+// agent/echo_grounding_e2e_test.go), so requiring them cannot under-skip (which would
+// double-store the input); sub-calls / assistant / tool / other-user events fail it
+// and take the normal store path (§4.4). A nil credential-adjacent field is never a
+// match.
+func isExpectedInputEcho(inv *agent.Invocation, evt *event.Event, cred *EchoCredential) bool {
+	if cred == nil || inv == nil || inv.GetParentInvocation() != nil {
+		return false
+	}
+	if evt.Author != "user" || evt.Response == nil || len(evt.Response.Choices) == 0 {
+		return false
+	}
+	m := evt.Response.Choices[0].Message
+	if m.Role != model.RoleUser {
+		return false
+	}
+	// Empty-mergedMessage tradeoff (§4.4, deliberate): an image-only durable input has
+	// empty Content, so this content-equality also matches a spurious empty user event.
+	// That is ACCEPTABLE and required: NOT skipping it would re-store the merged image
+	// echo the loop already committed (the exact §4.4 double-write this prevents), and
+	// the only over-skip is a genuinely content-less event that carries no information.
+	// Non-text echo identity (parts-aware) precision is validated in §4.7, not guessed
+	// here (an ungrounded parts-match would risk under-skip → double-store).
+	return normalizeEchoContent(m.Content) == normalizeEchoContent(cred.MergedMessage)
+}
+
+// normalizeEchoContent canonicalizes content for echo matching (trims surrounding
+// whitespace; the merged body itself is compared verbatim).
+func normalizeEchoContent(s string) string { return strings.TrimSpace(s) }
 
 // extractTimestamp extracts the timestamp from an Event.
 func extractTimestamp(evt *event.Event) int64 {

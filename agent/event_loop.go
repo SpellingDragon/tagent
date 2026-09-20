@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,13 +11,36 @@ import (
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/agent/reliability"
 	tagentevent "github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // runEventLoop runs the persistent event loop for this agent.
 // It pulls events from the EventBus, builds an invocation, and runs the flow.
 // The loop runs in a dedicated goroutine and exits when ctx is cancelled.
+// durableCommittedKeys collects the distinct fact EventKeys already committed for this
+// batch (§4.4): each durable claim carries its frozen FullEvent JSON (PreparedFact); the
+// keys seed the echo credential consumed by §4.5. Volatile events (no claim) contribute
+// nothing.
+func durableCommittedKeys(events []*AgentEvent) []int64 {
+	seen := make(map[int64]bool)
+	var keys []int64
+	for _, ev := range events {
+		if ev == nil || ev.claim == nil || len(ev.claim.PreparedFact) == 0 {
+			continue
+		}
+		var f memory.FullEvent
+		if err := json.Unmarshal(ev.claim.PreparedFact, &f); err != nil || f.EventKey == 0 {
+			continue
+		}
+		if !seen[f.EventKey] {
+			seen[f.EventKey] = true
+			keys = append(keys, f.EventKey)
+		}
+	}
+	return keys
+}
+
 func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *ContextManager) {
 	const maxRetries = 3
 	retryDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
@@ -46,54 +70,93 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// extractTriggerSource from mislabeling the whole turn in either
 		// direction (meditation content tagged "task" / a user task result
 		// tagged "meditation" and dropped by consumers).
+		// §4.1 (design 决策4 L106): the original consumed set is FROZEN and never
+		// overwritten. Meditation yielding is a model-input DISPOSITION (selected ⊆
+		// received), not a mutation of the batch. Receipt/ack provenance always runs
+		// over the full received set, so a yielding meditation's durable envelope is
+		// still consumed-and-evidenced and never zombied by filtering (previously a
+		// partially-dropped batch left the dropped-but-claimed envelope un-finished).
+		received := events
 		events = dropMeditationFromMixedBatch(events, ta.name)
 		if len(events) == 0 {
-			// cold-eyes Warning 2：被清空的批次若含已 claim 的 durable 事件，
-			// 跳过 receipt/ack 会僵尸化 envelope（每次重启重 claim→再空跑）。
-			// finishDurableBatch 对空 provenance 幂等，此处安全收敛。
-			ta.clearTurnDurableInbound()
-			ta.finishDurableBatch(events)
+			// cold-eyes Warning 2 + §4.1: the batch emptied after the meditation
+			// disposition. Every consumed durable envelope (including the yielding
+			// ones) still gets its completion evidence over `received`, so none is
+			// re-claimed and re-run empty forever (zombie). finishDurableBatch is
+			// idempotent on already-settled envelopes.
+			cm.turnEcho = nil
+			ta.finishDurableBatch(ctx, received, nil, completedOutcome())
 			continue
 		}
 		log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
 			ta.name, len(events), summarizeEvents(events))
 
-		// cold-eyes R2 M-1（结构修）: claim 事实统一由 persistBusEvent 逐消息
-		// 预落库（GetEvent-guard 重放去重 + 单数 dedup_key + 回写一次到位），
-		// 管线（MemoryPlugin）经 FactsPrePersisted 跳过合并输入的重复入库——
-		// 消除「合并事实 vs 逐消息事实」粒度分裂：多 envelope 批次/跨 crash
-		// 批次组成变化下每个 envelope 都有自有证据，receipt+ack 永不失据。
-		prePersisted := false
-		for _, ev := range events {
-			if path, _ := ev.Metadata["inbox_path"].(string); path == "" {
-				continue
-			}
-			cm.persistBusEvent(ev)
-			prePersisted = true
+		// §3.6/L96: converge any deferred ack-cleanup barriers from prior turns —
+		// envelopes whose unlink landed but whose dir-sync failed keep holding
+		// capacity + the retention lease until this drain completes the barrier and
+		// releases them exactly once. Idempotent and cheap when nothing is owed.
+		ta.persistentBus.DrainRetentionCleanups()
+
+		// §4.2/§4.3 durable submit gate: freeze + commit the WHOLE batch before the
+		// model. The gate returns a CLASSIFIED outcome (not a bool), so the loop never
+		// treats one input as the batch: a deterministic conflict isolates the input and
+		// stops auto-consumption; a transient I/O failure is re-attempted on the SAME
+		// batch under bounded backoff; the model is reached ONLY once every selected fact
+		// committed. Batch all-or-nothing (§3.6-①): no fact is written unless every
+		// envelope prepared, so a half-prepared input never enters the fact chain.
+		switch outcome := ta.submitDurableBatchWithBackoff(ctx, received, events); outcome.status {
+		case submitCancelled:
+			cm.turnEcho = nil
+			log.Infof("[runEventLoop:%s] submit cancelled mid-batch — claims retained, exiting", ta.name)
+			return
+		case submitConflict:
+			// Fail-closed: the conflicting envelope is isolated (quarantined, kept on
+			// disk); the remaining claims are retained (NOT acked, NOT dropped) and this
+			// agent STOPS auto-consuming rather than guessing past the conflict (§4.2).
+			cm.turnEcho = nil
+			log.Errorf("[runEventLoop:%s] deterministic submit conflict on %s — isolated; STOPPING auto-consumption (fail-closed, §4.2)",
+				ta.name, outcome.conflict)
+			return
+		case submitTransient:
+			// Backoff budget spent, batch still uncommitted: requeue claims to pending
+			// (oldest re-claimed first, order preserved) and skip the model — never pull a
+			// next batch ahead of the stuck one, never model with missing inputs (§4.2).
+			ta.releaseBatchClaims(events)
+			cm.turnEcho = nil
+			log.Warnf("[runEventLoop:%s] transient submit failure after backoff — claims requeued, model NOT called, next batch NOT taken", ta.name)
+			continue
+		case submitOK:
+			// Every selected fact is committed — proceed to build the invocation + model.
 		}
-		if prePersisted {
-			ev0 := events[0]
-			path, _ := ev0.Metadata["inbox_path"].(string)
-			rid, _ := ev0.Metadata["inbox_request_id"].(string)
-			dk, _ := ev0.Metadata["inbox_dedup_key"].(string)
-			ta.SetTurnDurableInbound(plugin.DurableInbound{
-				Path: path, RequestID: rid, DedupKey: dk, FactsPrePersisted: true,
-			})
-		}
+
 		msg := cm.BuildInvocation(events)
-		if msg.Content == "" {
+		if msg.Content == "" && len(msg.ContentParts) == 0 {
+			// §4.3: skip only a genuinely empty invocation. A non-text (image/file) input
+			// has empty Content but valid ContentParts — it must NOT be dropped here.
 			log.Debugf("[runEventLoop:%s] empty message after merge, skipping", ta.name)
-			ta.clearTurnDurableInbound()
-			ta.finishDurableBatch(events) // cold-eyes Warning 2：同上，防 envelope 僵尸化
+			cm.turnEcho = nil
+			ta.finishDurableBatch(ctx, received, events, completedOutcome()) // §4.1: ack the full consumed set (同上, 防僵尸)
 			continue
 		}
-		// Recovery one-shot tail notice (3.10): appended to the request TAIL —
-		// never into the fact chain, never mutating the historical prefix
-		// (prefix-cache safe). Empty for the healthy path.
-		if notice := cm.TakeRecoveryNotice(); notice != "" {
-			msg.Content += "\n\n" + notice
-			log.Infof("[runEventLoop:%s] recovery notice attached to first request", ta.name)
+		// §4.4 (design 决策4): this turn's durable facts are committed. Install the batch
+		// echo spec ONLY when there are committed facts (durable claims) — RunFlow then
+		// mints a per-attempt credential so MemoryPlugin skips exactly THIS merged echo
+		// (root invocation, author=user, content==merged), never every user event. A
+		// volatile batch (no claims) installs nothing → the plugin stores normally.
+		if keys := durableCommittedKeys(events); len(keys) > 0 {
+			cm.turnEcho = &echoSpec{
+				agent:         cm.name,
+				session:       cm.sessionID,
+				mergedMessage: msg.Content,
+				committedKeys: keys,
+			}
 		}
+		// Recovery one-shot notice is NOT appended here (F9 fix): in durable mode
+		// the invocation content is pre-persisted per-message and the notice is
+		// silently dropped by assembleRequest's projection-only rebuild; in volatile
+		// mode it would enter the fact chain as a user input, polluting history.
+		// The notice is instead injected at the request TAIL inside assembleRequest,
+		// where it reaches the model without being stored (D6 design).
 
 		// Determine trigger source from batch events for deterministic
 		// consumer-side dispatch. The source is attached to outputCh
@@ -161,6 +224,16 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				}
 			}
 			if err := cm.RunFlow(spanCtx, msg); err != nil {
+				// §5.1: a mid-turn shutdown cancellation is now surfaced as an error
+				// with a cancelled outcome (it used to return nil and fall through to
+				// the ACK below, dropping a turn that reached no terminal state). No
+				// completion is formed and the claim is retained for the next process
+				// (spec L90/L130) — stop without finishDurableBatch.
+				if cm.LastTurnOutcome().status == turnCancelled {
+					endTurnSpan(turnSpan, retriedDegenerate)
+					log.Infof("[runEventLoop:%s] §5.1 turn cancelled mid-stream — claim retained, NOT acked", ta.name)
+					return
+				}
 				lastErr = err
 				log.Errorf("[runEventLoop:%s] RunFlow failed (attempt %d/%d): %v", ta.name, attempt+1, maxRetries+1, err)
 				if attempt < maxRetries {
@@ -179,6 +252,16 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				log.Errorf("[runEventLoop:%s] RunFlow exhausted %d retries: %v", ta.name, maxRetries, lastErr)
 			} else {
 				lastErr = nil
+				// §5.1: a response-internal model/framework error arrives with a nil
+				// transport return (the framework carries it as an event's
+				// Response.Error, not as RunFlow's error). The old code reported
+				// success and ACKed such a turn; it now reduces to a definite failed
+				// result — no success report, and it is NOT retried on the transport
+				// budget (this is a terminal model outcome, not transient I/O).
+				if oc := cm.LastTurnOutcome(); oc.status == turnFailed {
+					log.Errorf("[runEventLoop:%s] §5.1 turn failed with response error %q — recorded failed, not success", ta.name, oc.err)
+					break
+				}
 				// T-G: model 依赖成功上报（degraded→recovering→normal 恢复路径）。
 				if ta.degradation != nil {
 					ta.degradation.ReportSuccess(reliability.DepModel)
@@ -203,12 +286,37 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 		// T-B: 关闭 turn span（退化重试标记为属性，同一 turn 不另开 root span）。
 		endTurnSpan(turnSpan, retriedDegenerate)
 
+		// §5.1: reduce the retried attempts into one explicit batch terminal state
+		// for this turn. A transport/start error that spent the whole retry budget
+		// is a definite failed result; otherwise the last attempt's reduced outcome
+		// (completed or failed) stands. A cancellation never reaches here — it
+		// returned above with the claim retained. This batchOutcome is the value the
+		// completion freeze (§5.2/§5.3) persists; the loop no longer treats "RunFlow
+		// returned nil" as the only definition of done.
+		batchOutcome := cm.LastTurnOutcome()
+		if lastErr != nil {
+			batchOutcome = failedOutcome(lastErr.Error())
+		}
+		cm.setLastBatchOutcome(batchOutcome)
+		log.Infof("[runEventLoop:%s] §5.1 turn reduced to %s (batch outcome)", ta.name, batchOutcome.status)
+
 		// Durable inbox confirmation (3.4/3.5): the consuming turn finished —
 		// write the fact-chain receipt event (dedup window truth source) and
 		// only then receipt+ack the envelope. Store failure keeps the claim
 		// on disk; the next process replays it.
-		ta.clearTurnDurableInbound() // cold-eyes Major 1: turn-scoped provenance ends here
-		ta.finishDurableBatch(events)
+		// §4.5: fail-closed if this durable turn's execution credential was never
+		// verified at the model entry — the framework fed back a non-matching/absent input,
+		// or a swallowed plugin error (a store failure the framework logs and continues
+		// past) downgraded it. The model-entry gate blocks the real call in that state, so
+		// the committed inputs were NOT confirmed as what ran: do NOT ack (claims stay for
+		// replay) and stop auto-consuming rather than cross the commit gate (§4.2 pattern).
+		if installed, verified := cm.turnEchoVerified(); installed && !verified {
+			cm.turnEcho = nil
+			log.Errorf("[runEventLoop:%s] §4.5 execution credential unverified at model entry — fail-closed, NOT acking, STOPPING auto-consumption", ta.name)
+			return
+		}
+		cm.turnEcho = nil                                              // §4.4: per-attempt echo credential scope ends at turn end
+		ta.finishDurableBatch(spanCtx, received, events, batchOutcome) // §5.3: freeze completion → fixed-key receipt → receipt+ack over the frozen consumed set
 
 		// Idle-gate anchor (meditation-gate-split): every turn end counts as
 		// activity, regardless of trigger source or success — lineage-agnostic
@@ -320,11 +428,9 @@ func extractTriggerSource(events []*AgentEvent) string {
 var controlMetaKeys = map[string]bool{
 	"settle_status": true, "task_id": true, "lineage_absent": true,
 	"detached_at_ms": true,
-	// cold-eyes R2 S-1: inbox control metadata must never leak into Origin
-	// baggage (filesystem paths downstream; stale inbox_path misleading the
-	// receipt path when such an event re-enters a batch).
-	"inbox_path": true, "inbox_request_id": true, "inbox_dedup_key": true,
-	"inbox_dedup_keys": true,
+	// The v1 inbox control keys (inbox_path/inbox_request_id/inbox_dedup_key)
+	// are gone: durable provenance is now a typed, non-JSON claim (F1/F4), so
+	// there is nothing to leak into Origin baggage.
 }
 
 func extractRootMetadata(events []*AgentEvent) map[string]string {

@@ -217,7 +217,7 @@ func TestTaskChain_InlineSettleIsRecordOnly(t *testing.T) {
 	// Registry-only inline record is present and flagged.
 	inlineRec := false
 	for _, e := range h.records(tagentevent.TypeExternalInput) {
-		if e.Metadata["task_id"] == id && e.Metadata["task_inline_record"] == "true" && e.Metadata["settle_status"] == "completed" {
+		if e.Metadata["task_id"] == id && e.Metadata[tagentevent.MetaKeyTaskInlineRecord] == "true" && e.Metadata["settle_status"] == "completed" {
 			inlineRec = true
 		}
 	}

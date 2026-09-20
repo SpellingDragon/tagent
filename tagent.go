@@ -117,34 +117,62 @@ type runtimeConfig struct {
 	// 用户消息出向投递断链。New() 构造 entry 后回填。
 	entryMemStore   memory.MemoryStore
 	entrySessionSvc session.Service
+
+	// storeBarriers（§5.8 组合根汇总屏障）：本次 build 已登记的共享 store 屏障集。
+	// store 登记时 dedup-Begin（buildAgentDFS），buildAgent 顶层统一 End——覆盖
+	// 「清点→Protect→§5.7 核对」全窗口；多 owner 同 store 的登记间隙不再有遗忘
+	// 扫描插缝（design L140-141/L234：不靠注册顺序或宽限计时碰巧）。
+	storeBarriers   map[memory.RetentionHoldable]struct{}
+	storeBarriersMu sync.Mutex
 }
 
-// namedMemStores provides shared InMemoryStore instances by path.
-// When two agents configure memory type: memory with the same path,
-// they share the same store — so recall can read tagent's partition even in-memory.
-// path empty = isolated store (default behavior).
-var (
-	namedMemMu     sync.Mutex
-	namedMemStores = map[string]*memory.InMemoryStore{}
+// raiseStoreBarrier §5.8：对带恢复租约的共享 store 升登记屏障（幂等 dedup，
+// 同一 build 多次登记同一 store 只 Begin 一次）。无租约 store（纯内存，
+// 无破坏性扫描）无屏障可升，静默跳过。
+func (rc *runtimeConfig) raiseStoreBarrier(store memory.MemoryStore) {
+	if rc == nil {
+		return
+	}
+	h, ok := store.(memory.RetentionHoldable)
+	if !ok {
+		return
+	}
+	rc.storeBarriersMu.Lock()
+	defer rc.storeBarriersMu.Unlock()
+	if rc.storeBarriers == nil {
+		rc.storeBarriers = map[memory.RetentionHoldable]struct{}{}
+	}
+	if _, held := rc.storeBarriers[h]; held {
+		return
+	}
+	rc.storeBarriers[h] = struct{}{}
+	h.BeginHold()
+}
 
-	// namedFileStores provides shared FileSegmentStore instances by path.
-	// When two agents configure memory type: localfile with the same path,
-	// they share the same FileSegmentStore — so recall can read tagent's partition.
-	namedFileMu     sync.Mutex
-	namedFileStores = map[string]*memory.FileSegmentStore{}
+// releaseStoreBarriers §5.8：释放本 build 持有的全部 store 登记屏障（遗忘
+// 恢复放行；lease 层对多余 End 幂等，不会受损）。先摘清集合再锁外 End，
+// 避免与扫描器唤醒互锁。可重入：热更壳重建下一轮重新 raise。
+func (rc *runtimeConfig) releaseStoreBarriers() {
+	if rc == nil {
+		return
+	}
+	rc.storeBarriersMu.Lock()
+	held := make([]memory.RetentionHoldable, 0, len(rc.storeBarriers))
+	for h := range rc.storeBarriers {
+		held = append(held, h)
+	}
+	rc.storeBarriers = nil
+	rc.storeBarriersMu.Unlock()
+	for _, h := range held {
+		h.EndHold()
+	}
+}
 
-	// namedRVStores provides shared rustviking-backed FileSegmentStore instances
-	// by path（M-1，四审）：type: file 与 memory/localfile 同构——同 path 必须同实例，否则跨
-	// agent read_namespaces 下 InMemRelationStore 内存图分歧（因果链断链）+ 双 Compactor
-	// 基于独立视图并发覆盖同一 KV 键 + 双 LifecycleManager 重复扫描。
-	namedRVMu     sync.Mutex
-	namedRVStores = map[string]*memory.FileSegmentStore{}
-
-	// namedEngines 按 path 共享记忆引擎（与 namedMemStores/namedFileStores 同键），
-	// 使共享 store 的引擎也共享——保跨 agent 语义召回一致（T-A）。空 path = 每 agent 独立引擎。
-	namedEngineMu sync.Mutex
-	namedEngines  = map[string]memory.MemoryEngine{}
-)
+// Shared persistent stores and their memory engines are owned by the
+// RuntimeResources registry (resources.go): one entry per canonical path holds
+// the backend store and its same-generation engine, with a lease per consumer
+// and the last release closing both. Isolated stores (empty path) bypass the
+// registry and are owned exclusively by their agent.
 
 // WithModel sets the resolved model instance (required).
 // This is the default model; individual agents can override via AgentConfig.Model.
@@ -319,10 +347,11 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		a.SetResidentTable(agentCache)
 	}
 
-	// Register TrajectoryRecorder for graceful shutdown and session info
+	// Set the TrajectoryRecorder for session wiring. §6.2: it is deliberately
+	// NOT also a plain closer — closeOnce owns its flush-after-runner stop, so
+	// registering it twice would double-own (and pre-runner-close) the writeLoop.
 	if rc.trajectoryRecorder != nil {
 		entryAgent.SetTrajectoryRecorder(rc.trajectoryRecorder)
-		entryAgent.RegisterCloser(rc.trajectoryRecorder)
 	}
 
 	// Register the MCP registry for graceful shutdown — closes all MCP
@@ -357,8 +386,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		// 只改子 agent keep_recent_tasks 时该子 agent 压缩器 MUST 收到新值）。
 		// 4.7（desired/effective 全量语义）：hotParamsFor 输出**全量 desired**——
 		// 显式配置生效，字段删除回落解析默认（entry 8000 / 子 4096；阈值 0.8；
-		// keepRecent 2；task 2m/1h/关）。ApplyOrgHotParams 的零值保护对正默认
-		// 透明；「显式 0/负」仍可表达（StaleAfter/JobDeadline 支持负语义）。
+		// keepRecent 2；task terminal 2m / defaultTTL 10m）。ApplyOrgHotParams 的零值
+		// 保护对正默认透明；TTL reaper 恒开（无负值/禁用哨兵，缺省回落 10m 地板）。
 		hotParamsFor := func(aname string, ac *AgentConfig) agent.OrgHotParams {
 			isEntry := aname == cfg.Entry
 			defMax := 4096
@@ -368,9 +397,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			p := agent.OrgHotParams{
 				ThresholdPct:    compress.DefaultCompressThreshold,
 				MaxTokens:       defMax,
-				KeepRecentTasks: 2,               // agent-layer parsed default (agent/agent.go)
-				TaskTerminalTTL: 2 * time.Minute, // task.defaultTerminalTTL (agent/task)
-				TaskStaleAfter:  time.Hour,       // task.defaultStaleAfter (agent/task)
+				KeepRecentTasks: 2,                // agent-layer parsed default (agent/agent.go)
+				TaskTerminalTTL: 2 * time.Minute,  // task.defaultTerminalTTL (agent/task)
+				TaskDefaultTTL:  10 * time.Minute, // task.defaultManagerTTL (agent/task)
 			}
 			if ac == nil {
 				return p
@@ -387,11 +416,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			if ttl, perr := time.ParseDuration(ac.TaskTerminalTTL); perr == nil && ttl > 0 {
 				p.TaskTerminalTTL = ttl
 			}
-			if sa, saerr := time.ParseDuration(ac.TaskStaleAfter); saerr == nil && ac.TaskStaleAfter != "" {
-				p.TaskStaleAfter = sa // 显式负值 = 关闭观测（语义保留）
-			}
-			if jd, jderr := time.ParseDuration(ac.TaskJobDeadline); jderr == nil && ac.TaskJobDeadline != "" {
-				p.TaskJobDeadline = jd
+			if d, derr := time.ParseDuration(ac.TaskDefaultTTL); derr == nil && ac.TaskDefaultTTL != "" && d > 0 {
+				p.TaskDefaultTTL = d
 			}
 			return p
 		}
@@ -403,8 +429,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				src := freshCfg.Agents[aname] // 值类型：hotParamsFor 取址安全（map 内元素不可寻址，拷贝后取）
 				p := hotParamsFor(aname, &src)
 				a.ApplyOrgHotParams(p)
-				log.Infof("[org-hotreload] agent %q hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s staleAfter=%s jobDeadline=%s",
-					aname, p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskStaleAfter, p.TaskJobDeadline)
+				log.Infof("[org-hotreload] agent %q hot params applied: threshold=%.2f maxTokens=%d keepRecent=%d terminalTTL=%s defaultTTL=%s",
+					aname, p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks, p.TaskTerminalTTL, p.TaskDefaultTTL)
 			}
 		}
 		if fp, err := computeOrgFingerprint(&cfg); err == nil {

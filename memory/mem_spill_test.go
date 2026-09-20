@@ -26,6 +26,12 @@ type failStore struct {
 
 func (f *failStore) StoreEvent(int64, FullEvent) error { return errors.New("still failing") }
 
+// ReplayEvent overrides the inherited InMemoryStore.ReplayEvent (D4 canonical path)
+// to maintain the "always fails" invariant for both the old StoreEvent and new ReplayEvent paths.
+func (f *failStore) ReplayEvent(_ int64, ev FullEvent) (ReplayResult, FullEvent, error) {
+	return ReplayNew, ev, errors.New("still failing")
+}
+
 // falseNegativeStore 模拟 W1 假阴性：首次 StoreEvent 实际写入成功但返回 error（如 KV 已写但
 // rustviking CLI 响应解析失败），且拒绝重复 key 重写（同 FileSegmentStore "already exists" 守卫）。
 type falseNegativeStore struct {

@@ -18,7 +18,6 @@ const (
 	TaskRunning       TaskStatus = "running"        // in flight, no settle yet
 	TaskStable        TaskStatus = "stable"         // output stable, process alive (usable, maybe waiting)
 	TaskAliveDetached TaskStatus = "alive_detached" // service-type: settled once, still alive (Phase 2)
-	TaskStale         TaskStatus = "stale"          // hardening-review-batch2 2.5: job detached past stale_after — observed, NOT terminal (probe/reconcile still govern it)
 	TaskCompleted     TaskStatus = "completed"      // finished successfully
 	TaskFailed        TaskStatus = "failed"         // finished with error
 	TaskSuspect       TaskStatus = "suspect"        // quiet too long — likely hung
@@ -200,6 +199,15 @@ type TaskSpec struct {
 	// time: callers may set only closures (legacy path); when set, Spawn
 	// persists it via OnSpawn so RebuildTaskRegistry can replay the task.
 	Declarative *Declarative
+
+	// TTL is the resolved ABSOLUTE lifetime for this task (async-task-lifetime
+	// 10.2). The unified reaper (§10.3) terminates the backing process and retires
+	// the task this long after its lifetime anchor — spawn time, refreshed by a
+	// reentrant send/resume (§10.4). It is set at spawn from the `ttl` arg or the
+	// configured default and is always > 0 (no task is unbounded). Zero means the
+	// caller left it unset (legacy/restore); the reaper then falls back to its own
+	// default rather than treating 0 as "no limit".
+	TTL time.Duration
 }
 
 // Task is a unit of async work tracked by the TaskManager.
@@ -219,7 +227,7 @@ type Task struct {
 	windowClosed  bool              // true once the sync-wait window ended (inline settle OR timeout)
 	aliveDetached bool              // true once a service task's first stable "ready" was emitted (D4)
 	detachedAt    time.Time         // when aliveDetached was set — stale/deadline observation anchor
-	staleNoted    bool              // one-time stale observation notice already emitted
+	ttlRenewedAt  time.Time         // last reentrant refresh of the TTL anchor (§10.4); zero = never
 	watchDone     chan struct{}     // closed to retire the current watch goroutine (resume re-arms it)
 }
 
@@ -253,6 +261,39 @@ func (t *Task) setDetachedAtMilli(ms int64) {
 // the replay; runtime transitions must use emitBackground instead).
 func (t *Task) SetDetachedAtMilli(ms int64) { t.setDetachedAtMilli(ms) }
 
+// ttlAnchor returns the absolute-lifetime anchor for the unified reaper: the last
+// reentrant refresh (send/resume, §10.4) if any, else the immutable spawn time.
+// Callers must hold t.mu while reading ttlRenewedAt (reconcileTTL does; StartedAt
+// is set once at spawn and never mutated afterwards).
+func (t *Task) ttlAnchor() time.Time {
+	if !t.ttlRenewedAt.IsZero() {
+		return t.ttlRenewedAt
+	}
+	return t.StartedAt
+}
+
+// remainingLifetime returns how long until the unified reaper would retire the
+// task, given the manager's fallback TTL, and whether it is bounded at all. It
+// mirrors reconcileTTL's effective-TTL + ttlAnchor so the board NEVER shows a
+// number the reaper would not honor (async-task-lifetime 10.6). Callers must not
+// already hold t.mu (this acquires it).
+func (t *Task) remainingLifetime(now time.Time, defaultTTL time.Duration) (time.Duration, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ttl := t.Spec.TTL
+	if ttl <= 0 {
+		ttl = defaultTTL
+	}
+	if ttl <= 0 {
+		return 0, false // unbounded — only a test manager without a floor reaches here
+	}
+	anchor := t.ttlAnchor()
+	if anchor.IsZero() {
+		return 0, false
+	}
+	return ttl - now.Sub(anchor), true
+}
+
 // Result returns the latest captured output (thread-safe snapshot).
 func (t *Task) Result() string { t.mu.Lock(); defer t.mu.Unlock(); return t.result }
 
@@ -261,7 +302,7 @@ func (t *Task) isActive() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch t.status {
-	case TaskRunning, TaskStable, TaskAliveDetached, TaskStale, TaskSuspect:
+	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
 		return true
 	default:
 		return false
@@ -287,7 +328,7 @@ func (t *Task) isTerminalExpired(now time.Time, ttl time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch t.status {
-	case TaskRunning, TaskStable, TaskAliveDetached, TaskStale, TaskSuspect:
+	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
 		return false
 	}
 	if t.settledAt.IsZero() {
@@ -326,6 +367,13 @@ type TaskController interface {
 	Cancel(id string) bool
 	Relaunch(id string) (SpawnResult, error)
 	Resume(id string, input string) (SpawnResult, error)
+	// RenewTTLBySession resets the unified-reaper anchor for the ACTIVE task bound
+	// to the given backing session (async-task-lifetime 10.4). Driven by a
+	// write-type reentry (exec op=send); returns true if a live task was renewed.
+	RenewTTLBySession(sessionID string) bool
+	// DefaultTTL reports the unified reaper's fallback lifetime, so the board can
+	// render the same effective remaining time reconcileTTL honors (10.6).
+	DefaultTTL() time.Duration
 }
 
 var _ TaskController = (*TaskManager)(nil)
@@ -425,19 +473,15 @@ type TaskManagerConfig struct {
 	// nil-probe subagents alike; tracked sessions and probe-carrying tasks
 	// are never touched. Zero -> defaultOrphanGrace.
 	OrphanGrace time.Duration
-	// StaleAfter is the stale-observation threshold (hardening-review-batch2
-	// 2.5): a JOB-kind task alive_detached longer than this is marked TaskStale
-	// (observed, one-time notice) — it is NOT terminated: age+alive never
-	// prove a hang, and 7080753's force-fail mislabeled healthy services.
-	// Service-kind tasks are never marked. Zero -> defaultStaleAfter; negative
-	// disables observation entirely.
-	StaleAfter time.Duration
-	// JobDeadline is the OPTIONAL termination policy (2.6): a job-kind task
-	// detached longer than this is cancelled by its owner (detector.Cancel)
-	// and finalized failed — the one honest way to retire a suspected
-	// dead-pipe zombie (cancel → confirmed exit → single settlement). Zero
-	// (default) disables termination; negative is treated as zero.
-	JobDeadline time.Duration
+	// DefaultTTL is the unified reaper's fallback absolute lifetime (§10.3) for
+	// tasks whose spec carries no explicit TTL — e.g. restored (previous-life) and
+	// subagent tasks. When >0, reconcileTTL terminates+retires any ACTIVE task
+	// (ALL states incl. suspect/undetached, ALL lifetime classes incl.
+	// resident/interactive) once `now - anchor >= DefaultTTL` (or the task's own
+	// spec.TTL when larger). When <=0 the manager-level reaper is OFF and only a
+	// per-task spec.TTL bounds its task — preserving the pre-TTL "no wall unless
+	// configured" behavior for callers not yet on TTL (§10.5 flips this always-on).
+	DefaultTTL time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via
 	// SetSessionTracker (build_agent owns the ActionTool; TaskManager must
@@ -453,10 +497,10 @@ type TaskManagerConfig struct {
 // window for terminal subagent tasks).
 const defaultTerminalTTL = 2 * time.Minute
 
-// defaultStaleAfter bounds how long a job-kind detached task stays unnoticed
-// before the stale observation fires (2.5). Observation only — see
-// TaskManagerConfig.StaleAfter / JobDeadline.
-const defaultStaleAfter = time.Hour
+// defaultManagerTTL is the unified reaper's floor applied when neither the
+// task spec nor the operator config supplies a TTL, so no task is ever immortal
+// (async-task-lifetime 10.5). The reaper is always on; there is no disable path.
+const defaultManagerTTL = 10 * time.Minute
 
 type TaskManager struct {
 	mu               sync.Mutex
@@ -473,8 +517,7 @@ type TaskManager struct {
 	now              func() time.Time // injectable clock (tests); defaults to time.Now
 	zombieGrace      time.Duration
 	orphanGrace      time.Duration
-	staleAfter       time.Duration // stale observation threshold; 0 = disabled (configured negative)
-	jobDeadline      time.Duration // optional job termination policy; 0 = disabled
+	defaultTTL       time.Duration // unified reaper fallback lifetime; floored to defaultManagerTTL, never 0
 	isSessionTracked func(sessionID string) bool
 }
 
@@ -491,33 +534,19 @@ func (tm *TaskManager) SetTerminalTTL(d time.Duration) {
 	tm.mu.Unlock()
 }
 
-// SetStaleAfter hot-updates the stale-observation threshold (full-hot-config
-// Phase 1). Positive d sets the threshold; negative d disables observation;
-// zero keeps the current value. Same lock protocol as SetTerminalTTL.
-func (tm *TaskManager) SetStaleAfter(d time.Duration) {
+// SetDefaultTTL hot-updates the unified reaper's fallback lifetime (§10.3).
+// Positive d enables/changes it; zero keeps the current value; a negative
+// (disable attempt) is floored to the manager default — age reclaim cannot be
+// turned off (async-task-lifetime 10.5). Same lock protocol as SetTerminalTTL.
+func (tm *TaskManager) SetDefaultTTL(d time.Duration) {
 	if tm == nil || d == 0 {
 		return
 	}
 	tm.mu.Lock()
 	if d > 0 {
-		tm.staleAfter = d
+		tm.defaultTTL = d
 	} else {
-		tm.staleAfter = 0 // explicit disable
-	}
-	tm.mu.Unlock()
-}
-
-// SetJobDeadline hot-updates the OPTIONAL job termination policy. Positive d
-// enables; zero keeps; negative disables termination entirely.
-func (tm *TaskManager) SetJobDeadline(d time.Duration) {
-	if tm == nil || d == 0 {
-		return
-	}
-	tm.mu.Lock()
-	if d > 0 {
-		tm.jobDeadline = d
-	} else {
-		tm.jobDeadline = 0 // explicit disable
+		tm.defaultTTL = defaultManagerTTL // disabling is not permitted — fall back to the floor
 	}
 	tm.mu.Unlock()
 }
@@ -535,18 +564,11 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if og <= 0 {
 		og = defaultOrphanGrace
 	}
-	// StaleAfter tri-state: 0 → default threshold, negative → disabled,
-	// positive → explicit value. JobDeadline: non-positive → disabled.
-	sa := cfg.StaleAfter
-	switch {
-	case sa == 0:
-		sa = defaultStaleAfter
-	case sa < 0:
-		sa = 0
-	}
-	jd := cfg.JobDeadline
-	if jd < 0 {
-		jd = 0
+	// DefaultTTL is floored so the unified reaper is ALWAYS on (10.5): zero or a
+	// disable attempt → the manager default. No task class may opt out of age reclaim.
+	dttl := cfg.DefaultTTL
+	if dttl <= 0 {
+		dttl = defaultManagerTTL
 	}
 	return &TaskManager{
 		tasks:            make(map[string]*Task),
@@ -560,8 +582,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		terminalTTL:      ttl,
 		zombieGrace:      zg,
 		orphanGrace:      og,
-		staleAfter:       sa,
-		jobDeadline:      jd,
+		defaultTTL:       dttl,
 		isSessionTracked: cfg.SessionTracker,
 		now:              time.Now,
 	}
@@ -801,7 +822,7 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 		// subsequent output change; emitBackground keeps it alive-detached.
 		// hardening-review-batch2 cold-eyes P1-1：stale 是观测事实，输出再变化
 		// 不回滚（回滚即进入第三种僵尸轨道——治理面三不管）。
-		if task.status != TaskAliveDetached && task.status != TaskStale {
+		if task.status != TaskAliveDetached {
 			task.status = TaskStable
 		}
 	case SettleSuspect:
@@ -909,6 +930,56 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 	return t, ok
 }
 
+// reconcileTTL is the unified absolute-lifetime reaper (async-task-lifetime
+// 10.3). It is the ONLY age-based termination that reaches EVERY active state —
+// including suspect and never-detached tasks — and every lifetime class (job AND
+// resident/interactive), against an absolute anchor (spawn, refreshed by a
+// reentrant send/resume in §10.4). It closes the production blind spot where the
+// old detached-gated walls (markStaleDetached / enforceJobDeadline, removed in
+// §10.5) never fired for a task that went quiet without detaching (56bf24c3,
+// stuck on the board 23h). Effective lifetime = the task's own spec.TTL when >0,
+// else the manager DefaultTTL; when both are <=0 the reaper is OFF for that task
+// (transitional — callers not yet on TTL keep the old "no wall unless
+// configured" semantics until §10.5). On expiry it cancels the backing work via
+// the owner's detector.Cancel (kills the tmux session / goroutine) OUTSIDE the
+// lock, then retires the task failed ONCE through finalizeRetired (SettleFailed),
+// so it leaves the board. finalize's terminal fence makes concurrent/repeat
+// reconciliation a no-op — no double settlement.
+func (tm *TaskManager) reconcileTTL() {
+	tm.mu.Lock()
+	var victims []*Task
+	var detectors []SettleDetector
+	now := tm.now()
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		ttl := t.Spec.TTL
+		if ttl <= 0 {
+			ttl = tm.defaultTTL
+		}
+		age := now.Sub(t.ttlAnchor())
+		// A task with no known birth anchor (zero StartedAt) cannot be dated, so it
+		// must not be reclaimed on an astronomically-large computed age. Production
+		// Spawn/RestoreTask always set StartedAt; this guards only undated artifacts.
+		expired := ttl > 0 && !isTerminalStatus(t.status) && !t.ttlAnchor().IsZero() && age >= ttl
+		var det SettleDetector
+		if expired {
+			det = t.detector
+		}
+		t.mu.Unlock()
+		if expired {
+			victims = append(victims, t)
+			detectors = append(detectors, det)
+		}
+	}
+	tm.mu.Unlock()
+	for i, t := range victims {
+		if det := detectors[i]; det != nil {
+			det.Cancel()
+		}
+		tm.finalizeRetired(t, "(ttl-expired: task exceeded its absolute lifetime - cancelled by owner and retired)", nil)
+	}
+}
+
 // reconcileDetached retires alive_detached tasks whose liveness probe
 // (Spec.Alive) reports the backing session gone - e.g. a tmux session
 // killed out-of-band after the task had already settled once into
@@ -920,12 +991,21 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 // unchanged. Probe calls run outside tm.mu (they shell out to tmux); the
 // re-check under t.mu makes double-retire impossible.
 func (tm *TaskManager) reconcileDetached() {
+	// 10.7: unify the bus-side collapse across EVERY retirement source — the unified
+	// TTL reaper, the probe-gone reclaim below, and the nested zombie/orphan
+	// reconciles — so a wave of retirements (e.g. many tasks past TTL after a
+	// restart) is delivered as ONE N→1 summary, not N settle notices. Nested-safe:
+	// the inner beginBatchRetire calls in reconcileZombies/RetireOrphans reuse this
+	// collector and only the outermost finish delivers.
+	finishBatch := tm.beginBatchRetire()
+	defer finishBatch()
+	tm.reconcileTTL()
 	tm.reconcileZombies()
 	tm.mu.Lock()
 	var candidates []*Task
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		need := (t.status == TaskAliveDetached || t.status == TaskStale) && t.Spec.Alive != nil
+		need := t.status == TaskAliveDetached && t.Spec.Alive != nil
 		t.mu.Unlock()
 		if need {
 			candidates = append(candidates, t)
@@ -934,20 +1014,18 @@ func (tm *TaskManager) reconcileDetached() {
 	tm.mu.Unlock()
 	for _, t := range candidates {
 		t.mu.Lock()
-		if t.status != TaskAliveDetached && t.status != TaskStale {
+		if t.status != TaskAliveDetached {
 			t.mu.Unlock()
 			continue
 		}
 		probe := t.Spec.Alive
 		t.mu.Unlock()
 		if probe() {
-			tm.markStaleDetached(t)
-			tm.enforceJobDeadline(t)
-			continue // backing session still alive - nothing more to do
+			continue // backing session still alive; the unified TTL reaper governs its lifetime
 		}
 		out := "(backing session gone - auto-retired by liveness reconcile)"
 		t.mu.Lock()
-		if t.status == TaskAliveDetached || t.status == TaskStale {
+		if t.status == TaskAliveDetached {
 			t.mu.Unlock()
 			tm.finalize(t, SettleCompleted, out, nil)
 		} else {
@@ -1015,10 +1093,14 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 }
 
 func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
+	// Guard the Origin mutation with t.mu: delivery-side readers take the lock, and
+	// the reaper now calls this for every expired active task (2nd-review ③).
+	t.mu.Lock()
 	if t.Spec.Origin == nil {
 		t.Spec.Origin = map[string]string{}
 	}
 	t.Spec.Origin[event.MetaKeyTriggerSource] = "task-retired"
+	t.mu.Unlock()
 	tm.finalize(t, SettleFailed, output, err)
 }
 
@@ -1069,86 +1151,20 @@ func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err err
 	}
 }
 
-// markStaleDetached observes a job-kind alive_detached task whose detached
-// stay exceeded StaleAfter: it flips the task to TaskStale (one-time notice)
-// WITHOUT touching the process — age plus a live probe never prove a hang,
-// and 7080753's force-fail mislabeled healthy services as failed.
-// enforceJobDeadline (below) is the only age-based termination, and only
-// when the host explicitly configures one.
-// Called from reconcileDetached's probe-alive branch — tm.mu is NOT held
-// here (probe may shell out); tm state is snapshotted before taking t.mu to
-// keep the tm.mu→t.mu lock order.
-func (tm *TaskManager) markStaleDetached(t *Task) {
-	tm.mu.Lock()
-	staleAfter, now := tm.staleAfter, tm.now()
-	tm.mu.Unlock()
-	if staleAfter <= 0 {
-		return
-	}
-	t.mu.Lock()
-	if (t.status != TaskAliveDetached && t.status != TaskStale) || t.detachedAt.IsZero() {
-		t.mu.Unlock()
-		return
-	}
-	if LifetimeOf(t.Spec) != LifetimeJob {
-		t.mu.Unlock()
-		return // service/display: long stay is by design — never staled
-	}
-	if now.Sub(t.detachedAt) < staleAfter || t.staleNoted {
-		t.mu.Unlock()
-		return
-	}
-	t.staleNoted = true
-	t.status = TaskStale
-	note := "(stale-detached: job-kind task detached past the observation threshold — suspected dead-pipe zombie; configure task_job_deadline to terminate)"
-	t.mu.Unlock()
-	log.Warnf("[task] stale-detached observation: task=%s note=%s", t.ID, note)
-	if tm.onSettle != nil {
-		// One-time notice (Watch = non-terminal notification semantics).
-		tm.onSettle(t, SettleSignal{Kind: SettleWatch, Output: note})
-	}
-}
-
-// enforceJobDeadline is the explicit termination policy (2.6): a job-kind
-// task detached past JobDeadline is cancelled by its owner (detector.Cancel
-// — which kills the backing session) and finalized failed ONCE. Service-kind
-// tasks are never age-terminated. A disabled policy (<=0) is a no-op.
-func (tm *TaskManager) enforceJobDeadline(t *Task) {
-	tm.mu.Lock()
-	deadline, now := tm.jobDeadline, tm.now()
-	tm.mu.Unlock()
-	if deadline <= 0 {
-		return
-	}
-	t.mu.Lock()
-	if (t.status != TaskAliveDetached && t.status != TaskStale) || t.detachedAt.IsZero() {
-		t.mu.Unlock()
-		return
-	}
-	if LifetimeOf(t.Spec) != LifetimeJob {
-		t.mu.Unlock()
-		return
-	}
-	if now.Sub(t.detachedAt) < deadline {
-		t.mu.Unlock()
-		return
-	}
-	detector := t.detector
-	t.mu.Unlock()
-	// Owner terminates the backing work OUTSIDE any lock (Cancel kills the
-	// tmux session / goroutine), then a single failed settlement.
-	if detector != nil {
-		detector.Cancel()
-	}
-	out := "(job-deadline-exceeded: job-kind task detached past the configured deadline - cancelled by owner and retired)"
-	tm.finalizeRetired(t, out, nil)
-}
-
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
 func (tm *TaskManager) sessionTrackerFn() func(sessionID string) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return tm.isSessionTracked
+}
+
+// DefaultTTL reports the unified reaper's current fallback lifetime (the manager
+// floor used when a task's spec carries no explicit TTL). Exposed so board
+// rendering shows exactly what reconcileTTL will honor (async-task-lifetime 10.6).
+func (tm *TaskManager) DefaultTTL() time.Duration {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.defaultTTL
 }
 
 // RetireOrphans adjudicates reincarnation-orphan suspect tasks (§7 双通道回收):
@@ -1327,6 +1343,33 @@ func (tm *TaskManager) Cancel(id string) bool {
 	return true
 }
 
+// RenewTTLBySession resets the TTL anchor for the ACTIVE task whose backing
+// session matches sessionID (async-task-lifetime 10.4). A write-type reentry
+// (exec op=send) extends the task's absolute lifetime by moving the anchor to
+// now, so the reaper measures ttl from this refresh rather than the original
+// spawn. Read-only touches (op=peek) MUST NOT call this. Best-effort: a session
+// with no matching active task (already reaped, or untracked) returns false.
+func (tm *TaskManager) RenewTTLBySession(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	now := tm.now()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		match := !isTerminalStatus(t.status) && t.Spec.Declarative != nil && t.Spec.Declarative.TaskID == sessionID
+		if match {
+			t.ttlRenewedAt = now
+		}
+		t.mu.Unlock()
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 // Relaunch re-spawns an equivalent task from the original task's spec. It runs
 // the spec's Relaunch closure (set by the tool that spawned it — e.g. ActionTool
 // re-runs the command in a fresh session). Returns an error if the task is
@@ -1419,6 +1462,9 @@ func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
 	task.firstSettle = make(chan SettleSignal, 1)
 	task.windowClosed = false
 	task.aliveDetached = false
+	// §10.4: a resume is a write-type reentry — reset the TTL anchor to now so the
+	// reaper measures the task's lifetime from this round, not the original spawn.
+	task.ttlRenewedAt = tm.now()
 	done := task.watchDone
 	task.mu.Unlock()
 

@@ -104,7 +104,7 @@ func (cm *ContextManager) deliverEvent(ctx context.Context, evt *event.Event) bo
 		// is skipped too — the file is the durable record either way.
 		// R3（backlog-final-closeout）：溢出登记事件——recall 可达（票据只到 UI，
 		// agent 侧凭本事件知道全文在哪、怎么取）。尽力而为：写失败仅日志。
-		cm.persistBusEvent(&AgentEvent{
+		_ = cm.persistBusEvent(&AgentEvent{
 			ID:        fmt.Sprintf("overflow-%d", time.Now().UnixNano()),
 			Type:      "external_input",
 			Timestamp: time.Now(),

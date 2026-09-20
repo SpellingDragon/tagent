@@ -46,12 +46,17 @@ type EventReference struct {
 // accessible via MemoryStore.RelationStore() method (if the store implements RelationStoreProvider).
 // This separates immutable event content from mutable relationships.
 type FullEvent struct {
-	EventKey     int64                  `json:"event_key"`         // Snowflake int64 unique identifier
-	PartitionID  int                    `json:"partition_id"`      // Storage partition key
-	EventType    string                 `json:"event_type"`        // Event type
-	EventSummary string                 `json:"event_summary"`     // Brief summary (for LLM context)
-	Timestamp    int64                  `json:"timestamp"`         // Unix timestamp (ms)
-	Content      string                 `json:"content"`           // Event content/text
+	EventKey     int64  `json:"event_key"`     // Snowflake int64 unique identifier
+	PartitionID  int    `json:"partition_id"`  // Storage partition key
+	EventType    string `json:"event_type"`    // Event type
+	EventSummary string `json:"event_summary"` // Brief summary (for LLM context)
+	Timestamp    int64  `json:"timestamp"`     // Unix timestamp (ms)
+	Content      string `json:"content"`       // Event content/text
+	// ContentParts carries multimodal parts (image/file/audio) for an input whose
+	// textual Content is empty. §4.3: a valid non-text input must survive into BOTH
+	// the fact chain and the actual request. Additive + omitempty so events stored
+	// before this field decode unchanged (backward compatible).
+	ContentParts []model.ContentPart    `json:"content_parts,omitempty"`
 	ToolCalls    []model.ToolCall       `json:"tool_calls"`        // Tool calls (if any)
 	ToolID       string                 `json:"tool_id,omitempty"` // For a tool-result event: the tool_call id it answers (preserves pairing across store→resolve)
 	ToolResults  map[string]interface{} `json:"tool_results"`      // Tool execution results
@@ -164,6 +169,88 @@ type StoreStats struct {
 	CountsKnown bool `json:"counts_known"`
 }
 
+// ReplayResult classifies the outcome of an EventReplayer.ReplayEvent call (D4 design).
+type ReplayResult int
+
+const (
+	// ReplayNew: the event was not previously present; it has been committed fresh.
+	// The live-count was incremented.
+	ReplayNew ReplayResult = iota
+	// ReplayRepaired: a half-written orphan was completed (evt slot was missing,
+	// or meta absent, but idx existed). The commit barrier was re-run; the event
+	// is now fully durable. The live-count was incremented exactly once.
+	ReplayRepaired
+	// ReplayAlreadyCommitted: the event was found fully committed (canonical fact
+	// byte-identical and the key is in the publication cache). The call is
+	// idempotent — no live-count increment.
+	ReplayAlreadyCommitted
+)
+
+// EventReplayer is an optional capability interface for stores that support
+// canonical content-checked replay (D4 design, fix F3/F8).
+//
+// Unlike the public StoreEvent, which rejects any already-present EventKey as
+// a duplicate (including byte-identical content), ReplayEvent:
+//  1. Verifies the stored fact is byte-identical before completing a partial
+//     write (missing evt slot, missing meta) and re-running the commit barrier.
+//  2. Returns a ReplayResult that distinguishes new-commit, orphan-repair, and
+//     already-committed, so callers can decide whether to increment counters
+//     or trigger side-effects exactly once.
+//  3. Refuses different content under the same EventKey as a collision (D15),
+//     never overwriting an existing fact.
+//
+// The reliable inbox (inbox-v2) and mem_spill recovery paths MUST use this
+// interface rather than the public StoreEvent to make the commit vs. replay
+// distinction explicit. Callers that hold no typed claim should continue to
+// use StoreEvent.
+//
+// Implementations: FileSegmentStore, InMemoryStore, and decorator chain
+// (engineBridge, ErrorTrackingStore) pass through transparently.
+type EventReplayer interface {
+	// ReplayEvent commits canonicalFact under key using the internal replay
+	// path. It returns the classification of what happened and the canonical
+	// fact as actually stored (which may differ from the input in non-content
+	// fields if it was already committed). Returns a non-nil error when the
+	// commit barrier fails or a content conflict is detected.
+	ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error)
+}
+
+// RetentionGuard is the optional "材料保留" recovery capability (§2.8, spec L89:
+// 显式重放 / 材料保留 / 底层屏障 三能力之一). The recovery owner (reliable inbox /
+// spill) registers the durable originals of unacked material so the store's TTL
+// expiry, capacity eviction and tombstone final-cleanup do not destroy them until
+// they are safely released (ack dir-synced or spill removed). FileSegmentStore owns
+// the lease; the engine/error-tracking wrapper chain recurses the capability through
+// to it. A backend without durable recovery simply does not implement it.
+type RetentionGuard interface {
+	// ProtectKey registers a holder for a key (ref-counted; idempotent).
+	ProtectKey(key int64)
+	// ReleaseKey drops one holder; the key resumes normal age-based handling once
+	// the last holder is gone (its ORIGINAL timestamp is never re-stamped).
+	ReleaseKey(key int64)
+	// ArmRetention signals that the recovery owner has finished rebuilding the lease
+	// from existing unacked material, releasing the store's first destructive scan
+	// (the restart-race gate). Idempotent; a store with no lease ignores it.
+	ArmRetention()
+	// BeginHold/EndHold raise and release the §5.8 registration barrier: while any
+	// owner holds it, the lifecycle scanner pauses forgetting passes (unconditionally,
+	// no grace escape) so a composition-root aggregate inventory or a late-attaching
+	// shared recovery dir can protect its material before any destructive pass
+	// lands. Pair every Begin with an End; nested/concurrent owners are ref-counted.
+	BeginHold()
+	EndHold()
+}
+
+// RetentionHoldable is the §5.8 registration-barrier surface alone (raised by a
+// composition-root build gate or a late-attaching recovery owner to pause
+// forgetting while its inventories land). *FileSegmentStore satisfies it through
+// its lease; stores without a lease (no destructive scanner) do not, and callers
+// treat the missing capability as "nothing to pause".
+type RetentionHoldable interface {
+	BeginHold()
+	EndHold()
+}
+
 // Event type constants are defined in the event package (event.Type*).
 // This is the single source of truth for event classification.
 // See: github.com/SpellingDragon/tagent/event/types.go
@@ -246,6 +333,34 @@ func NewSnowflakeEventKey(partitionID int, nowMs int64) int64 {
 	return (int64(partitionID&partitionIDMask) << partitionIDShift) |
 		((ts & timestampMask) << timestampShift) |
 		(int64(seq&sequenceMask) << sequenceShift)
+}
+
+// RaiseSnowflakeFloor seeds the per-partition monotonicity guard from a
+// DURABLE observation: the highest event key already issued on disk. A new
+// process generation inherits the fact chain, not the in-memory counters —
+// without this, a restart inside the same second re-issues keys that collide
+// with committed facts (the §8.5 30-restart cadence proved the surface real:
+// every colliding commit CONFLICTs and, with the frozen-key replay rule,
+// conflicts FOREVER). The floor is one-way: only a strictly higher observed
+// key raises it; a lower or equal one is a no-op.
+func RaiseSnowflakeFloor(partitionID int, highestIssuedKey int64) {
+	if highestIssuedKey <= 0 {
+		return
+	}
+	ts := (highestIssuedKey >> timestampShift) & timestampMask
+	seq := (highestIssuedKey >> sequenceShift) & sequenceMask
+	snowflakeSeqMu.Lock()
+	defer snowflakeSeqMu.Unlock()
+	if ts > snowflakeSeqLast[partitionID] ||
+		(ts == snowflakeSeqLast[partitionID] && int64(seq) >= int64(snowflakeSeqCnt[partitionID])) {
+		seq++
+		if seq > sequenceMask { // same-second floor exhausted: pin one second ahead
+			ts++
+			seq = 0
+		}
+		snowflakeSeqLast[partitionID] = ts
+		snowflakeSeqCnt[partitionID] = int(seq)
+	}
 }
 
 // PartitionIDFromEventKey extracts the PartitionID from a Snowflake EventKey.

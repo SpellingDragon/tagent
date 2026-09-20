@@ -64,6 +64,11 @@ func buildAgent(
 	mode buildMode,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (*agent.TagentAgent, error) {
+	// §5.8 组合根汇总屏障：本次 build 触及的每个共享 store，从资源登记起直到
+	// build（全部 agent 构造 + §5.7 核对）返回，持有遗忘屏障；per-bus Arm 的
+	// hold 嵌套其内——后到的共享 owner 不会在登记间隙被一次插缝扫描丢掉材料
+	// （不靠注册顺序/宽限计时碰巧，design L234）。
+	defer rc.releaseStoreBarriers()
 	return buildAgentDFS(name, acfg, cfg, rc, loader, cache, mode, map[string]bool{}, subagentCollectors...)
 }
 
@@ -104,7 +109,7 @@ func buildAgentDFS(
 	var memStore memory.MemoryStore
 	var hintTracker *ConsolidationHintTracker
 	var err error
-	var memStoreRelease func()
+	var memStoreRelease func() error
 	if mode.isExecutorShell() {
 		// 4.5（resident-readiness-plan）：热更壳子树按 **agent 身份**借用其常驻
 		// 资源（store 取自身份绑定表），绝不全部复用 entryMemStore——否则子
@@ -121,7 +126,8 @@ func buildAgentDFS(
 		// hintTracker 不接线（丢弃壳无消费循环）。
 	} else {
 		var underlying memory.MemoryStore
-		underlying, memStoreRelease, err = resolveMemoryStore(acfg.Memory)
+		var sharedEngine memory.MemoryEngine
+		underlying, sharedEngine, memStoreRelease, err = resolveMemoryStore(acfg.Memory)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: create memory store: %w", name, err)
 		}
@@ -129,10 +135,15 @@ func buildAgentDFS(
 		// 4.4：以「装饰前」的底层 store 指针登记 owner（bridge 包装会让指针身份失效）。
 		if err := rc.registerStoreOwner(name, underlying); err != nil {
 			if memStoreRelease != nil {
-				memStoreRelease()
+				if rerr := memStoreRelease(); rerr != nil {
+					log.Warnf("[tagent] release after owner-registration failure: %v", rerr)
+				}
 			}
 			return nil, err
 		}
+		// §5.8：登记即升屏障（dedup 幂等）——本 build 的 release 在顶层统一完成，
+		// 覆盖此后该 store 上所有 bus 的 Arm/核对窗口。
+		rc.raiseStoreBarrier(underlying)
 		// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
 		// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
 		hintTracker = newConsolidationHintTracker(acfg)
@@ -140,7 +151,7 @@ func buildAgentDFS(
 		if hintTracker != nil {
 			trackFn = hintTracker.Track
 		}
-		memStore, err = wireMemoryEngine(memStore, acfg.Memory, trackFn)
+		memStore, err = wireMemoryEngine(memStore, sharedEngine, acfg.Memory, trackFn)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: wire memory engine: %w", name, err)
 		}
@@ -194,7 +205,9 @@ func buildAgentDFS(
 	buildOK := false
 	defer func() {
 		if !buildOK && memStoreRelease != nil {
-			memStoreRelease()
+			if rerr := memStoreRelease(); rerr != nil {
+				log.Warnf("[tagent] release after build failure: %v", rerr)
+			}
 		}
 	}()
 
@@ -418,6 +431,9 @@ func buildAgentDFS(
 		MemoryStore: memStore,
 		// 4.2：租约释放绑定本 agent 的 Close（registry 归零才真关共享 store）。
 		MemStoreRelease: memStoreRelease,
+		// §6.3/review M-2：执行壳只借用常驻 store，既不持租约也非独享 owner——
+		// Close 对共享状态零权限（直关 fallback 绝不触发）。
+		MemStoreBorrowed: mode.isExecutorShell(),
 		// R4（review 🔴1 + 终审🟠）：executorOnly 壳的 SessionSvc 策略——
 		// **仅 entry 壳**复用常驻 sessionSvc（AppendEventHook→常驻 outputCh 接线
 		// 不断、session 记录续写同一 session）；子代理壳保持 nil 自建——若也复用，
@@ -461,33 +477,15 @@ func buildAgentDFS(
 			log.Warnf("[tagent] agent %q: invalid task_terminal_ttl %q, using default", name, acfg.TaskTerminalTTL)
 		}
 	}
-	// task_stale_after: duration string → time.Duration. Empty falls back to
-	// the task package default (1h); NEGATIVE ("-1s") disables observation.
-	if acfg.TaskStaleAfter != "" {
-		if sa, err := time.ParseDuration(acfg.TaskStaleAfter); err == nil {
-			agentCfg.TaskStaleAfter = sa
+	// task_default_ttl: unified reaper fallback absolute lifetime. Empty/invalid
+	// → 0, which the task package floors to its 10m default (async-task-lifetime
+	// 10.5 — there is no disable semantics; the old task_stale_after /
+	// task_job_deadline / task_max_detached_age walls are retired).
+	if acfg.TaskDefaultTTL != "" {
+		if d, err := time.ParseDuration(acfg.TaskDefaultTTL); err == nil && d > 0 {
+			agentCfg.TaskDefaultTTL = d
 		} else {
-			log.Warnf("[tagent] agent %q: invalid task_stale_after %q, using default", name, acfg.TaskStaleAfter)
-		}
-	}
-	// task_job_deadline: optional termination policy. Empty → disabled.
-	if acfg.TaskJobDeadline != "" {
-		if jd, err := time.ParseDuration(acfg.TaskJobDeadline); err == nil {
-			agentCfg.TaskJobDeadline = jd
-		} else {
-			log.Warnf("[tagent] agent %q: invalid task_job_deadline %q, ignored", name, acfg.TaskJobDeadline)
-		}
-	}
-	// Deprecated task_max_detached_age: remap to stale_after with a warning
-	// (the old force-fail semantics were redesignated observation-only, 2.5).
-	if acfg.TaskMaxDetachedAge != "" {
-		if sa, err := time.ParseDuration(acfg.TaskMaxDetachedAge); err == nil {
-			if agentCfg.TaskStaleAfter == 0 {
-				agentCfg.TaskStaleAfter = sa
-				log.Warnf("[tagent] agent %q: task_max_detached_age is deprecated — remapped to task_stale_after (observation-only; use task_job_deadline to terminate)", name)
-			}
-		} else {
-			log.Warnf("[tagent] agent %q: invalid task_max_detached_age %q, ignored", name, acfg.TaskMaxDetachedAge)
+			log.Warnf("[tagent] agent %q: invalid task_default_ttl %q, using default", name, acfg.TaskDefaultTTL)
 		}
 	}
 	if summaryRef := rc.resolveModelRef(acfg.Compress.Summary, name, acfg, cfg); summaryRef != nil {
@@ -562,6 +560,11 @@ func buildAgentDFS(
 		if cfg.ResidentMetaDir != "" {
 			actionTool.SetResidentMetaDir(cfg.ResidentMetaDir)
 		}
+		// async-task-lifetime 10.5: the operator's task_default_ttl slot is the single
+		// DEFAULT absolute TTL for spawns that omit `ttl`. Empty (0) keeps the
+		// 10-minute floor inside SetDefaultTaskTTL; the old detached-gated
+		// task_job_deadline enforcement is retired — this slot has one meaning.
+		actionTool.SetDefaultTaskTTL(agentCfg.TaskDefaultTTL)
 	}
 
 	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
@@ -605,7 +608,13 @@ func buildAgentDFS(
 	if mode.ownsPersistentState() {
 		ta.SetReadyCh(make(chan struct{}))
 		ta.RebuildProjectionFromWAL()
-		ta.ReconcileDurableReceipts() // cold-eyes Major 2: receipt→ack crash-window bridge
+		// §5.7: startup direct reconcile — inventory every outstanding envelope and
+		// check ITS OWN fixed receipt key (never a list harvested from the scan
+		// above); prepared-only continues input, completion-only re-submits only the
+		// frozen receipt, matches clean up, contradictions quarantine, I/O blocks.
+		if _, rerr := ta.ReconcileOutstanding(); rerr != nil {
+			log.Errorf("[recovery] §5.7 outstanding reconcile aborted on inventory failure — nothing disposed, retry next boot: %v", rerr)
+		}
 	} else {
 		ta.SetReadyCh(make(chan struct{}))
 		close(ta.ReadyCh()) // shell builds: no cold-start work, ready now
@@ -654,7 +663,7 @@ func buildAgentDFS(
 					continue
 				}
 				st := tk.Status()
-				if st != task.TaskSuspect && st != task.TaskAliveDetached && st != task.TaskStale {
+				if st != task.TaskSuspect && st != task.TaskAliveDetached {
 					continue
 				}
 				if actionTool.IsTrackedSession(tk.Spec.Declarative.TaskID) {
@@ -700,13 +709,13 @@ func buildAgentDFS(
 		ta.RegisterCloser(actionTool)
 	}
 
-	// Register the memory store for graceful shutdown — file-backed stores
-	// (FileSegmentStore over LocalFileKV/RustViking) perform their final
-	// durability flush in Close. Same-path shared instances are safe: Close
-	// is idempotent (closeOnce) and only invoked at process exit.
-	if c, ok := memStore.(agent.Closer); ok {
-		ta.RegisterCloser(c)
-	}
+	// §6.2: the memory store is deliberately NOT registered as a plain closer.
+	// Its only close owners are the lifecycle tail — the registry lease release
+	// (last lease closes store + engine) or, for an unleased isolated store, the
+	// direct fallback Close — both AFTER the runner stopped. Listing it here too
+	// would double-own the shared resource and close it before the lease
+	// semantics could protect other holders (spec: 资源不能既列普通 closers 又由
+	// owner 重复关闭).
 
 	// Wire parentProjection to AgentToolWrapper instances for auto-inject fallback.
 	// This must happen after TagentAgent creation (projection is created inside NewTagentAgent).

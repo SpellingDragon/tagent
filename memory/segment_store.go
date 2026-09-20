@@ -107,10 +107,21 @@ func (c *simpleLRU) Len() int {
 
 // PartitionState holds per-partition state for FileSegmentStore.
 type PartitionState struct {
+	// mutationMu serializes the ENTIRE mutation of this partition end to end —
+	// seq/window alloc, identity/collision probe, evt+idx+meta writes, the
+	// durability barrier, and cache/count publication — so a concurrent writer,
+	// the async compactor, a delete, or a seal can never interleave into a torn
+	// idx/evt or a double-counted live set (async-task-lifetime 2.2). It is the
+	// OUTER lock; mu below stays the inner counter/window lock (M-order:
+	// mutationMu → mu). Cross-partition work stays parallel (no global lock is
+	// ever held across I/O), and store reverse-callbacks (vecRemover/Notify) run
+	// outside it.
+	mutationMu    sync.Mutex
 	mu            sync.Mutex
 	currentWindow int64 // Current active window timestamp
 	seqCounter    int   // Sequence counter within current window
 	eventCount    int64 // Total events in this partition
+	countKnown    bool  // 2.5: eventCount is authoritative (post-scan); false pauses capacity eviction for THIS partition only
 }
 
 // SegmentMeta holds metadata for a segment.
@@ -140,6 +151,12 @@ type FileSegmentStore struct {
 	lifecycle *LifecycleManager
 	compactor *Compactor
 	closeOnce sync.Once
+
+	// retention is the optional §2.8 unacked-recovery retention lease, owned by the
+	// shared resource (set via SetRetentionLease after recovery rebuild). While a key
+	// is protected, TTL/capacity/tombstone-final-cleanup must not destroy its original
+	// and DeleteEvent returns ErrEventProtected. nil = no protection (inert).
+	retention *RetentionLease
 
 	// vecRemover 是可选向量移除回调（VectorRemover，atomic 存）：遗忘物理删除事件时
 	// （Compactor.finalizeTombstones）回调，使记忆引擎同步移除向量（内存索引 + KV
@@ -220,36 +237,98 @@ func (s *FileSegmentStore) RebuildLiveCounts() error {
 		return fmt.Errorf("kv backend has no ListPartitionIDs capability")
 	}
 	for _, pid := range lister.ListPartitionIDs() {
-		live := make(map[int64]struct{})
-		windows, err := s.ListSegments(pid)
+		live, maxKey, err := s.scanLiveKeys(pid)
 		if err != nil {
-			return fmt.Errorf("list segments pid=%d: %w", pid, err)
+			s.markPartitionUnknown(pid)
+			return err
 		}
-		for _, windowTS := range windows {
-			pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, windowTS), 0)
-			if err != nil {
-				return fmt.Errorf("scan window pid=%d window=%d: %w", pid, windowTS, err)
-			}
-			for _, pair := range pairs {
-				var evt struct {
-					EventKey int64 `json:"event_key"`
-				}
-				if json.Unmarshal([]byte(pair.Value), &evt) != nil || evt.EventKey == 0 {
-					continue
-				}
-				if s.tombstones != nil && s.tombstones.IsTombstone(evt.EventKey) {
-					continue // logically dead — not part of the live count
-				}
-				live[evt.EventKey] = struct{}{} // dedup across crash-window layers
-			}
-		}
+		// Same full scan also raises the snowflake floor for this partition:
+		// the new process generation may never re-issue a key already on the
+		// chain (§8.5 restart-collision guard; see RaiseSnowflakeFloor).
+		RaiseSnowflakeFloor(pid, maxKey)
 		state := s.getPartitionState(pid)
 		state.mu.Lock()
-		state.eventCount = int64(len(live))
+		state.eventCount = int64(live)
+		state.countKnown = true
 		state.mu.Unlock()
 	}
 	s.countsKnown.Store(true)
 	return nil
+}
+
+// scanLiveKeys returns the deduped, tombstone-excluded count of COMPLETE live
+// records in one partition, read straight from the fact chain. It is the ONLY
+// authoritative count oracle (2.5): the cache, replay classification and engine
+// callbacks are all explicitly disqualified as count sources (spec event-segment-store).
+func (s *FileSegmentStore) scanLiveKeys(pid int) (liveCount int, maxKey int64, err error) {
+	live := make(map[int64]struct{})
+	windows, err := s.ListSegments(pid)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list segments pid=%d: %w", pid, err)
+	}
+	for _, windowTS := range windows {
+		pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, windowTS), 0)
+		if err != nil {
+			return 0, 0, fmt.Errorf("scan window pid=%d window=%d: %w", pid, windowTS, err)
+		}
+		for _, pair := range pairs {
+			var evt struct {
+				EventKey int64 `json:"event_key"`
+			}
+			if json.Unmarshal([]byte(pair.Value), &evt) != nil || evt.EventKey == 0 {
+				continue
+			}
+			if s.tombstones != nil && s.tombstones.IsTombstone(evt.EventKey) {
+				continue // logically dead — not part of the live count
+			}
+			live[evt.EventKey] = struct{}{} // dedup across crash-window layers
+			if evt.EventKey > maxKey {
+				maxKey = evt.EventKey
+			}
+		}
+	}
+	return len(live), maxKey, nil
+}
+
+// recomputePartition makes pid's live count authoritative from a full-record scan
+// and marks it known (2.5). Callers completing a repair or clearing an uncertain
+// commit invoke it while holding pid's mutationMu. A scan failure leaves the
+// partition unknown — never a guessed value.
+func (s *FileSegmentStore) recomputePartition(pid int) error {
+	live, maxKey, err := s.scanLiveKeys(pid)
+	if err == nil {
+		RaiseSnowflakeFloor(pid, maxKey) // same repair-time seed (§8.5)
+	}
+	if err != nil {
+		s.markPartitionUnknown(pid)
+		return err
+	}
+	state := s.getPartitionState(pid)
+	state.mu.Lock()
+	state.eventCount = int64(live)
+	state.countKnown = true
+	state.mu.Unlock()
+	return nil
+}
+
+// markPartitionUnknown flags a partition whose live count can no longer be trusted
+// (a durability/barrier failure that may have partially persisted, or a failed scan)
+// so capacity eviction pauses for THIS partition only — other partitions keep
+// evicting, and this one is never evicted on a guessed number (2.5).
+func (s *FileSegmentStore) markPartitionUnknown(pid int) {
+	state := s.getPartitionState(pid)
+	state.mu.Lock()
+	state.countKnown = false
+	state.mu.Unlock()
+}
+
+// PartitionCountKnown reports whether pid's live count is authoritative; capacity
+// eviction skips a partition when it is false (2.5).
+func (s *FileSegmentStore) PartitionCountKnown(pid int) bool {
+	state := s.getPartitionState(pid)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.countKnown
 }
 
 // getPartitionState returns (or creates) the PartitionState for a given partition ID.
@@ -285,6 +364,11 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	windowTS := WindowTimestamp(tsSec, DefaultWindowSize)
 
 	state := s.getPartitionState(pid)
+	// 2.2: hold the partition mutation lock across the whole commit (see the
+	// PartitionState.mutationMu doc). All writes/probes/barrier/publish below run
+	// serialized against every other mutation of this partition.
+	state.mutationMu.Lock()
+	defer state.mutationMu.Unlock()
 	state.mu.Lock()
 
 	// Check if we've moved to a new time window
@@ -344,12 +428,14 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	// rejected write must not leave a ghost.
 	idxKVKey := IndexKeyStr(pid, key)
 	if _, err := s.kv.KVGet(idxKVKey); err == nil {
-		// The identity already has a slot. Deterministic replay (2.6): if the
-		// stored content is byte-identical to what we are writing, this is an
-		// uncommitted orphan from a failed barrier — complete the commit
-		// idempotently (re-run the barrier, republish cache, count once).
-		// Any DIFFERENT content under the same identity stays refused (D15).
-		return s.completeOrphanCommit(pid, key, idxKVKey, event, eventJSON, state)
+		// Public-path duplicate policy (resident- reliability-protocol 2.1): an
+		// EventKey IS the event's identity, so a public StoreEvent retry landing on
+		// an existing slot is REFUSED — the public path NEVER silently completes an
+		// orphan. Orphan / half-orphan completion belongs exclusively to the
+		// internal ReplayEvent path (durable-inbox claim, mem_spill canonical
+		// recovery). This makes FileSegmentStore's public contract identical to
+		// InMemoryStore.StoreEvent, which already refuses any existing key (2.7).
+		return fmt.Errorf("event key %d already exists (public StoreEvent refuses duplicates; orphan completion is ReplayEvent-only): %w", key, ErrDuplicateEventKey)
 	} else if !errors.Is(err, ErrKeyNotFound) {
 		return fmt.Errorf("collision probe for event %d failed: %w", key, err)
 	}
@@ -365,55 +451,279 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 	return s.finishCommit(pid, key, idxKVKey, idxValue, windowTS, seq, event, state)
 }
 
+// ReplayEvent implements EventReplayer (D4 design): canonical content-checked
+// replay that classifies the outcome (new / repaired / already-committed) rather
+// than rejecting all duplicates like the public StoreEvent. This allows the
+// reliable inbox and mem_spill paths to safely retry without double-incrementing
+// live-count or treating a completed repair as a failure.
+func (s *FileSegmentStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error) {
+	if key == 0 {
+		return ReplayNew, canonicalFact, fmt.Errorf("event key cannot be zero")
+	}
+	keyPid := PartitionIDFromEventKey(key)
+	// 2.4: the EventKey encodes its partition authoritatively. A fact declaring a
+	// DIFFERENT non-zero partition is an identity conflict (错分区/错身份) — refused, never
+	// silently re-stamped onto the key's partition. PartitionID 0 means "derive from key".
+	if declared := canonicalFact.PartitionID; declared != 0 && declared != keyPid {
+		return ReplayNew, canonicalFact, fmt.Errorf(
+			"event key %d maps to partition %d but the fact declares partition %d (identity conflict): %w",
+			key, keyPid, declared, ErrDuplicateEventKey)
+	}
+	pid := keyPid
+	canonicalFact.EventKey = key
+	canonicalFact.PartitionID = pid
+
+	// 2.4: a legal tombstone means the fact was deliberately deleted — a replay MUST
+	// NOT resurrect it. Refuse before any seq allocation or write; the caller holds the
+	// recovery material (treats it like a conflict: not acked).
+	if s.tombstones != nil && s.tombstones.IsTombstone(key) {
+		return ReplayNew, canonicalFact, fmt.Errorf("replay of tombstoned event %d refused: %w", key, ErrEventForgotten)
+	}
+
+	tsSec := TimestampFromEventKey(key)
+	windowTS := WindowTimestamp(tsSec, DefaultWindowSize)
+
+	state := s.getPartitionState(pid)
+	// 2.2: serialize the replay commit under the partition mutation lock, exactly
+	// like StoreEvent (identity probe → evt write → finish/completeOrphan publish).
+	state.mutationMu.Lock()
+	defer state.mutationMu.Unlock()
+	state.mu.Lock()
+	if state.currentWindow != windowTS {
+		state.currentWindow = windowTS
+		state.seqCounter = 0
+	}
+	if state.seqCounter == 0 {
+		recovered, recErr := s.recoverWindowSeqLocked(pid, windowTS)
+		if recErr != nil {
+			state.mu.Unlock()
+			return ReplayNew, canonicalFact, fmt.Errorf("seq recovery failed for window %d: %w", windowTS, recErr)
+		}
+		state.seqCounter = recovered
+	}
+	seq := state.seqCounter
+	state.seqCounter++
+	state.mu.Unlock()
+
+	eventJSON, err := json.Marshal(canonicalFact)
+	if err != nil {
+		return ReplayNew, canonicalFact, fmt.Errorf("failed to marshal event %d: %w", key, err)
+	}
+
+	idxKVKey := IndexKeyStr(pid, key)
+	if _, probeErr := s.kv.KVGet(idxKVKey); probeErr == nil {
+		// Identity slot exists: classify via the orphan/already-committed path.
+		result, commitErr := s.completeOrphanCommit(pid, key, idxKVKey, canonicalFact, eventJSON)
+		if commitErr != nil {
+			return ReplayNew, canonicalFact, commitErr
+		}
+		return result, canonicalFact, nil
+	} else if !errors.Is(probeErr, ErrKeyNotFound) {
+		return ReplayNew, canonicalFact, fmt.Errorf("collision probe for event %d failed: %w", key, probeErr)
+	}
+
+	// Identity index absent. Before committing a FRESH copy, check for an orphaned evt
+	// slot already holding this key — the half-write a crash leaves between the evt
+	// write and the idx write (2.3 class "evt 有/idx 缺"). If found, REUSE the original
+	// slot: publish only the idx pointer at it, never a second copy of the fact.
+	if w, sq, ok, lerr := s.locateOrphanEvtSlot(pid, windowTS, key); lerr != nil {
+		return ReplayNew, canonicalFact, lerr
+	} else if ok {
+		origKVKey := EventKeyStr(pid, w, sq)
+		raw, rerr := s.kv.KVGet(origKVKey)
+		if rerr != nil {
+			return ReplayNew, canonicalFact, fmt.Errorf("orphan-evt reuse read for key %d: %w", key, rerr)
+		}
+		if raw != string(eventJSON) {
+			// Same identity, different content → refused collision (D15), never reuse.
+			return ReplayNew, canonicalFact, fmt.Errorf("event key %d exists (no index) with DIFFERENT content: %w", key, ErrDuplicateEventKey)
+		}
+		if _, merr := s.ensureWindowMeta(pid, w); merr != nil {
+			return ReplayNew, canonicalFact, fmt.Errorf("orphan-evt reuse meta for key %d: %w", key, merr)
+		}
+		// The fact is already durable in that slot — publish idx→original, barrier, cache,
+		// and a single live-count (the reused slot was never counted, its idx was missing).
+		reuseIdxValue := fmt.Sprintf("%d:%d", w, sq)
+		if err := s.kv.KVPut(idxKVKey, reuseIdxValue); err != nil {
+			return ReplayNew, canonicalFact, fmt.Errorf("reuse index for event %d: %w", key, err)
+		}
+		if syncer, sok := s.kv.(interface{ Sync() error }); sok {
+			if serr := syncer.Sync(); serr != nil {
+				s.markPartitionUnknown(pid) // durability uncertain after a failed barrier (2.5)
+				return ReplayNew, canonicalFact, fmt.Errorf("durability barrier for reused event %d: %w", key, serr)
+			}
+		}
+		reused := cloneFullEvent(canonicalFact)
+		s.cache.Add(key, &reused)
+		// 2.4/2.5: the reused slot is a durable record that was never counted (its idx
+		// was missing); make the live count authoritative from the fact chain rather than
+		// a hand ++ that could diverge from the truth.
+		if rerr := s.recomputePartition(pid); rerr != nil {
+			return ReplayNew, canonicalFact, fmt.Errorf("recompute partition %d after reuse of %d: %w", pid, key, rerr)
+		}
+		return ReplayRepaired, canonicalFact, nil
+	}
+
+	// Genuinely new key: normal fresh-commit path.
+	evtKVKey := EventKeyStr(pid, windowTS, seq)
+	if err := s.kv.KVPut(evtKVKey, string(eventJSON)); err != nil {
+		return ReplayNew, canonicalFact, fmt.Errorf("failed to store event key %d: %w", key, err)
+	}
+	idxValue := fmt.Sprintf("%d:%d", windowTS, seq)
+	if err := s.finishCommit(pid, key, idxKVKey, idxValue, windowTS, seq, canonicalFact, state); err != nil {
+		return ReplayNew, canonicalFact, err
+	}
+	return ReplayNew, canonicalFact, nil
+}
+
 // completeOrphanCommit finishes an UNCOMMITTED write found under the same
-// EventKey (2.6): the evt/idx pair exists but a failed barrier means the
-// event never committed (no cache, no count, caller errored). When the
-// stored slot content is byte-identical to the retry, complete the commit
-// idempotently — same EventKey, same content, one count. Different content
-// under the same identity remains a refused collision (D15): an EventKey IS
-// the event's identity.
+// EventKey (2.6). Two sub-cases are handled:
+//
+//  1. evt slot MISSING while idx exists (half-orphan): write the actual event
+//     before running the commit barrier. Without this (F3), the retry reports
+//     success but the fact remains unreadable after cache eviction.
+//  2. evt slot EXISTS with byte-identical content: the record was already durable.
+//     The live count is NOT decided from the cache (2.4: the cache is disqualified as a
+//     commit oracle) — after re-running the barrier the partition's count is recomputed
+//     from the fact chain, idempotent for an already-counted event (net +0) and picking
+//     up a durable-but-never-counted C′. Returns already-committed when nothing had to
+//     be written, repaired otherwise.
+//
+// Different content under the same identity remains a refused collision (D15).
 func (s *FileSegmentStore) completeOrphanCommit(
-	pid int, key int64, idxKVKey string, event FullEvent, eventJSON []byte, state *PartitionState,
-) error {
+	pid int, key int64, idxKVKey string, event FullEvent, eventJSON []byte,
+) (ReplayResult, error) {
 	idxValue, err := s.kv.KVGet(idxKVKey)
 	if err != nil {
-		return fmt.Errorf("orphan probe for event %d failed: %w", key, err)
+		return ReplayNew, fmt.Errorf("orphan probe for event %d failed: %w", key, err)
 	}
 	var windowTS, seq int64
 	if _, err := fmt.Sscanf(idxValue, "%d:%d", &windowTS, &seq); err != nil {
-		return fmt.Errorf("orphan index for event %d unreadable (%q): %w", key, idxValue, err)
+		return ReplayNew, fmt.Errorf("orphan index for event %d unreadable (%q): %w", key, idxValue, err)
 	}
 	evtKVKey := EventKeyStr(pid, windowTS, int(seq))
 	stored, err := s.kv.KVGet(evtKVKey)
-	if err != nil {
-		// evt slot missing while idx exists (half-orphans included): the
-		// retry content becomes the slot of record — same identity, so this
-		// is a completion, not an overwrite of a DIFFERENT fact.
-		if !errors.Is(err, ErrKeyNotFound) {
-			return fmt.Errorf("orphan slot read for event %d failed: %w", key, err)
-		}
-	} else if stored != string(eventJSON) {
-		return fmt.Errorf("event key %d already exists with DIFFERENT content (snowflake collision?): %w",
+	// Classify the evt slot state: missing vs. present-with-right/wrong content.
+	evtWasMissing := errors.Is(err, ErrKeyNotFound)
+	if err != nil && !evtWasMissing {
+		return ReplayNew, fmt.Errorf("orphan slot read for event %d failed: %w", key, err)
+	}
+	if !evtWasMissing && stored != string(eventJSON) {
+		return ReplayNew, fmt.Errorf("event key %d already exists with DIFFERENT content (snowflake collision?): %w",
 			key, ErrDuplicateEventKey)
 	}
-	if seq == 0 {
-		meta := SegmentMeta{PartitionID: pid, WindowTS: windowTS, Layer: 1, Sealed: false}
-		metaJSON, _ := json.Marshal(meta)
-		if err := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(metaJSON)); err != nil {
-			return fmt.Errorf("failed to store segment meta for event %d: %w", key, err)
+	if evtWasMissing {
+		// F3 half-orphan (idx exists, evt slot missing): write the event at its original
+		// slot so the fact stays readable after cache eviction.
+		if writeErr := s.kv.KVPut(evtKVKey, string(eventJSON)); writeErr != nil {
+			return ReplayNew, fmt.Errorf("repair event slot for key %d: %w", key, writeErr)
 		}
 	}
+	// 2.3 class "meta 缺": repair a missing segment meta REGARDLESS of seq (writes only
+	// when absent; never resets an existing segment's layer/sealed).
+	metaRepaired, mErr := s.ensureWindowMeta(pid, windowTS)
+	if mErr != nil {
+		return ReplayNew, fmt.Errorf("repair segment meta for event %d: %w", key, mErr)
+	}
+	// wasComplete: the durable record already existed before this call (evt byte-
+	// identical AND meta present) → an already-committed fact on the chain; anything we
+	// had to write (the evt or the meta) makes this a repair. Decided from the fact
+	// chain, never the cache (2.4).
+	wasComplete := !evtWasMissing && !metaRepaired
+	// 2.4: an already-committed same-content replay STILL re-runs the real barrier.
 	if syncer, ok := s.kv.(interface{ Sync() error }); ok {
 		if err := syncer.Sync(); err != nil {
-			return fmt.Errorf("durability barrier for event %d failed: %w", key, err)
+			s.markPartitionUnknown(pid) // durability uncertain after a failed barrier (2.5)
+			return ReplayNew, fmt.Errorf("durability barrier for event %d failed: %w", key, err)
 		}
 	}
+	// Re-warm the read cache (harmless if present); NOT a commit oracle.
 	storedClone := cloneFullEvent(event)
 	s.cache.Add(key, &storedClone)
-	state.mu.Lock()
-	state.eventCount++
-	state.mu.Unlock()
-	return nil
+	// Authoritative live count from the fact chain (2.4/2.5), never a per-event ++.
+	if rerr := s.recomputePartition(pid); rerr != nil {
+		return ReplayNew, fmt.Errorf("recompute partition %d after replay of %d: %w", pid, key, rerr)
+	}
+	if wasComplete {
+		return ReplayAlreadyCommitted, nil
+	}
+	return ReplayRepaired, nil
+}
+
+// ensureWindowMeta repairs a MISSING segment meta for a window without ever
+// resetting an existing one (2.3 class "meta 缺"): a window that lost its meta key
+// is invisible to segment discovery (ListSegments scans meta), so an event committed
+// there — at seq 0 OR seq>0 — would be unfindable. When meta is genuinely absent we
+// write a conservative L1 / unsealed record (unsealed → always scanned, never pruned,
+// so a conservative envelope can never hide the event) and report repaired=true. When
+// meta already exists it is left byte-for-byte intact (repaired=false): a compaction-
+// promoted (L2/L3) or sealed segment's layer / sealed flags MUST NOT be unconditionally
+// demoted during a replay repair.
+func (s *FileSegmentStore) ensureWindowMeta(pid int, windowTS int64) (bool, error) {
+	_, err := s.kv.KVGet(MetaKeyStr(pid, windowTS))
+	if err == nil {
+		return false, nil // present: never reset an existing segment's layer/sealed state
+	}
+	if !errors.Is(err, ErrKeyNotFound) {
+		return false, fmt.Errorf("segment meta probe failed for pid=%d window=%d: %w", pid, windowTS, err)
+	}
+	meta := SegmentMeta{PartitionID: pid, WindowTS: windowTS, Layer: 1, Sealed: false}
+	metaJSON, mErr := json.Marshal(meta)
+	if mErr != nil {
+		return false, fmt.Errorf("marshal repaired segment meta pid=%d window=%d: %w", pid, windowTS, mErr)
+	}
+	if pErr := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(metaJSON)); pErr != nil {
+		return false, fmt.Errorf("failed to store repaired segment meta for pid=%d window=%d: %w", pid, windowTS, pErr)
+	}
+	return true, nil
+}
+
+// locateOrphanEvtSlot finds an EXISTING event slot already holding `key` when the
+// identity index is absent — the half-write a crash leaves between the evt write and
+// the idx write (2.3 class "evt 有/idx 缺"). It scans the key's placement window plus
+// every registered segment of THIS partition (bounded to one key's partition, not a
+// full-history scan), and if the same key lives on more than one layer (a stale L1
+// copy beside a compacted L2/L3 copy) it returns the HIGHEST-layer slot so the reused
+// idx points at the segment that will survive compaction. A KVScan error fails loud:
+// an incomplete scan cannot prove absence, and treating "unknown" as "not found"
+// would commit a duplicate second copy of the fact.
+func (s *FileSegmentStore) locateOrphanEvtSlot(pid int, hintWindow int64, key int64) (int64, int, bool, error) {
+	candidates := map[int64]bool{hintWindow: true}
+	if ws, err := s.ListSegments(pid); err == nil {
+		for _, w := range ws {
+			candidates[w] = true
+		}
+	}
+	var (
+		bestW     int64
+		bestSeq   int
+		bestLayer int64 = -1
+		found     bool
+	)
+	for w := range candidates {
+		pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, w), 0)
+		if err != nil {
+			return 0, 0, false, fmt.Errorf("orphan-evt locate scan failed pid=%d window=%d: %w", pid, w, err)
+		}
+		layer := int64(1)
+		if m, mErr := s.GetSegmentMeta(pid, w); mErr == nil && m != nil {
+			layer = int64(m.Layer)
+		}
+		for _, p := range pairs {
+			var e FullEvent
+			if json.Unmarshal([]byte(p.Value), &e) != nil || e.EventKey != key {
+				continue
+			}
+			if !found || layer > bestLayer {
+				pk, pErr := ParseKey(p.Key)
+				if pErr != nil {
+					return 0, 0, false, fmt.Errorf("orphan-evt locate parse failed for %q: %w", p.Key, pErr)
+				}
+				found, bestW, bestSeq, bestLayer = true, w, pk.Seq, layer
+			}
+		}
+	}
+	return bestW, bestSeq, found, nil
 }
 
 // finishCommit performs the tail of the commit protocol shared by fresh
@@ -424,6 +734,7 @@ func (s *FileSegmentStore) finishCommit(
 	event FullEvent, state *PartitionState,
 ) error {
 	if err := s.kv.KVPut(idxKVKey, idxValue); err != nil {
+		s.markPartitionUnknown(pid) // a partial write leaves the partition count untrusted (2.5)
 		return fmt.Errorf("failed to store index for event %d: %w", key, err)
 	}
 
@@ -441,6 +752,7 @@ func (s *FileSegmentStore) finishCommit(
 		metaJSON, _ := json.Marshal(meta)
 		metaKVKey := MetaKeyStr(pid, windowTS)
 		if err := s.kv.KVPut(metaKVKey, string(metaJSON)); err != nil {
+			s.markPartitionUnknown(pid) // partial write: count untrusted until a re-scan (2.5)
 			return fmt.Errorf("failed to store segment meta for event %d: %w", key, err)
 		}
 	}
@@ -450,6 +762,7 @@ func (s *FileSegmentStore) finishCommit(
 	// without a Sync capability keep flush-level semantics (documented).
 	if syncer, ok := s.kv.(interface{ Sync() error }); ok {
 		if err := syncer.Sync(); err != nil {
+			s.markPartitionUnknown(pid) // durability uncertain: pause eviction for this partition (2.5)
 			return fmt.Errorf("durability barrier for event %d failed: %w", key, err)
 		}
 	}
@@ -924,8 +1237,21 @@ func (s *FileSegmentStore) DeleteEvent(key int64) error {
 	if s.tombstones != nil && s.tombstones.IsTombstone(key) {
 		return nil // logically dead already: deletion is idempotent, no re-decrement
 	}
+	// §2.8: an explicit delete of a still-retained (unacked recovery) original is refused
+	// WITHOUT destroying the durable record — the shared-resource recovery owner holds a
+	// live lease. Lossless relocation is unaffected (only this destruction path checks).
+	if s.retention.IsProtected(key) {
+		return fmt.Errorf("%w: key=%d", ErrEventProtected, key)
+	}
 
 	pid := PartitionIDFromEventKey(key)
+	// 2.2: a delete is a partition mutation — serialize it under the same
+	// mutationMu as commits/compaction/seal so it can never interleave with a
+	// writer or the compactor republishing this pid (lost or resurrected event).
+	// decrementEventCount below takes the inner state.mu (M-order).
+	delState := s.getPartitionState(pid)
+	delState.mutationMu.Lock()
+	defer delState.mutationMu.Unlock()
 	idxKVKey := IndexKeyStr(pid, key)
 
 	// Get the event key to determine the full KV key to delete. A genuinely
@@ -1040,6 +1366,11 @@ func (s *FileSegmentStore) SupportsVectorSearch() bool {
 // Updates segment metadata in KV to mark it as L1 (sealed).
 func (s *FileSegmentStore) SealCurrent(pid int) error {
 	state := s.getPartitionState(pid)
+	// 2.2: seal publishes the current window's immutable meta and must serialize
+	// with writer commits to that window — a concurrent append after the envelope
+	// scan would make the recorded MinTime/MaxTime lie or re-open a sealing segment.
+	state.mutationMu.Lock()
+	defer state.mutationMu.Unlock()
 	state.mu.Lock()
 	windowTS := state.currentWindow
 	seqCount := state.seqCounter
@@ -1150,6 +1481,47 @@ func (s *FileSegmentStore) SetCompactor(c *Compactor) {
 	s.compactor = c
 }
 
+// SetRetentionLease injects the §2.8 unacked-recovery retention lease. It MUST be
+// called during recovery rebuild, BEFORE the lifecycle/compaction producers start,
+// so a scanner can never destroy a retained original before its lease is registered
+// (spec restart-race scenario). Passing nil clears protection.
+func (s *FileSegmentStore) SetRetentionLease(l *RetentionLease) {
+	s.retention = l
+}
+
+// RetentionLease returns the shared-resource retention lease (nil when unwired).
+func (s *FileSegmentStore) RetentionLease() *RetentionLease { return s.retention }
+
+// IsKeyProtected reports whether a key is under a live §2.8 retention lease. The TTL
+// scanner, capacity evictor and compactor final-cleanup consult this so a protected
+// original survives until its recovery owner releases the lease. nil-safe.
+func (s *FileSegmentStore) IsKeyProtected(key int64) bool { return s.retention.IsProtected(key) }
+
+// ProtectKey registers a holder for a key under the shared retention lease (§2.8). It
+// is used by the recovery owner (inbox envelope / spill) before the first durable fact
+// commit so the material cannot be evicted out from under an in-flight prepare.
+func (s *FileSegmentStore) ProtectKey(key int64) { s.retention.Protect(key) }
+
+// ReleaseKey drops one holder for a key (§2.8); the original becomes eligible for
+// normal age-based destruction once the last holder is gone. Called after ack dir-sync
+// success or spill safe-removal. Restores the key's ORIGINAL TTL window (no re-stamping).
+func (s *FileSegmentStore) ReleaseKey(key int64) { s.retention.Release(key) }
+
+// ArmRetention releases the store's first destructive scan once the recovery owner has
+// finished rebuilding the lease from existing unacked material (the §2.8 restart-race
+// gate, paired with the scanner's Lease.Ready() wait). Idempotent; a store with no lease
+// (nil retention) ignores it. Implements memory.RetentionGuard.
+func (s *FileSegmentStore) ArmRetention() { s.retention.MarkReady() }
+
+// BeginHold/EndHold expose the §5.8 registration barrier of the store's lease
+// (composition-root aggregate inventory + late attach pause forgetting while
+// any owner is mid-registration). nil-safe via the lease itself.
+func (s *FileSegmentStore) BeginHold() { s.retention.BeginHold() }
+func (s *FileSegmentStore) EndHold()   { s.retention.EndHold() }
+
+// FileSegmentStore owns the shared retention lease (the durable "材料保留" capability).
+var _ RetentionGuard = (*FileSegmentStore)(nil)
+
 // Compactor returns the injected background compactor (nil when the store
 // runs without one). Harness hook for synchronous compaction triggering
 // (resident-remaining-hardening 3.1 soak subprocess).
@@ -1169,19 +1541,31 @@ type closer interface {
 	Close() error
 }
 
+// StopProducers halts the background forgetting producers (compactor +
+// lifecycle scanner) WITHOUT touching the relation/KV backend. D5 close order
+// requires the producers to stop BEFORE the engine worker, because they call
+// the engine's vector remover while sweeping — yet the engine's own drain still
+// writes the KV, so the KV must close AFTER the engine. Both Stop methods are
+// idempotent, so a subsequent Close re-stops them as a no-op.
+func (s *FileSegmentStore) StopProducers() {
+	// Stop Compactor first (it may be writing segments)
+	if s.compactor != nil {
+		s.compactor.Stop()
+	}
+	// Stop LifecycleManager (it may be marking tombstones)
+	if s.lifecycle != nil {
+		s.lifecycle.Stop()
+	}
+}
+
 // Close stops all background components (Compactor, LifecycleManager) and
 // closes the RelationStore if it supports closing. Idempotent via sync.Once.
 func (s *FileSegmentStore) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
-		// Stop Compactor first (it may be writing segments)
-		if s.compactor != nil {
-			s.compactor.Stop()
-		}
-		// Stop LifecycleManager (it may be marking tombstones)
-		if s.lifecycle != nil {
-			s.lifecycle.Stop()
-		}
+		// Producers first (idempotent: a no-op if closeResource already stopped
+		// them before the engine worker).
+		s.StopProducers()
 		// Close RelationStore if it supports closing (e.g., InMemRelationStore flushes WAL)
 		if c, ok := s.rel.(closer); ok {
 			if e := c.Close(); e != nil {

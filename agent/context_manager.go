@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -39,11 +40,17 @@ import (
 //   - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
 //   - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
 type ContextManager struct {
-	// turnDurableInbound (cold-eyes Major 1): the CURRENT turn's claimed
-	// envelope provenance — set by runEventLoop before the runner runs, read
-	// via RunFlow's ctx injection so the MemoryPlugin fact path participates
-	// in replay dedup. Single-consumer event loop → no locking needed.
-	turnDurableInbound plugin.DurableInbound
+	// turnEcho (§4.4, design 决策4): the batch echo spec runEventLoop installs
+	// before the model runs, ONLY when this turn's durable input facts are already
+	// committed. RunFlow stamps a FRESH per-attempt plugin.EchoCredential from it
+	// (unique request token per runner attempt; no whole-turn / "first envelope"
+	// state — the old DurableInbound framing). nil → no pre-committed echo this turn.
+	turnEcho   *echoSpec
+	attemptSeq atomic.Int64
+	// lastEchoCred is the credential RunFlow minted for the most recent attempt; the
+	// event loop consults it after RunFlow to fail-closed (§4.5) when a durable turn's
+	// echo was never verified at the model entry.
+	lastEchoCred *plugin.EchoCredential
 
 	// recovery* (resident-readiness-plan 3.8): cold-start rebuild outcome and
 	// the one-shot model-facing notice; written once at rebuild, read-only after.
@@ -120,6 +127,21 @@ type ContextManager struct {
 	// only on the loop goroutine that drives RunFlow.
 	turnProductive bool
 
+	// lastTurnOutcome is the §5.1 reduced terminal state of the most recent
+	// RunFlow attempt (completed / failed / cancelled), observed from BOTH the
+	// transport return AND the event stream (a Response.Error event, a mid-drain
+	// ctx cancellation). The old loop trusted only the nil transport return and
+	// ACKed failed/cancelled turns as success. Written and read only on the loop
+	// goroutine that drives RunFlow; the persistent loop reduces it across the
+	// retry budget into batchOutcome.
+	lastTurnOutcome turnOutcome
+
+	// lastBatchOutcome holds the §5.1 loop-level reduction of the retry attempts
+	// for the most recent turn (completed or failed; a cancellation returns before
+	// it is ever set). §5.2/§5.3 freeze the completion from this value; set on the
+	// loop goroutine only.
+	lastBatchOutcome turnOutcome
+
 	// currentMetadata holds arbitrary metadata from the source event of the
 	// current RunFlow. Set by runEventLoop before calling RunFlow.
 	// Propagated to derived events via StateDelta["meta_*"] in onEvent.
@@ -145,8 +167,7 @@ type OrgHotParams struct {
 	MaxTokens       int
 	KeepRecentTasks int
 	TaskTerminalTTL time.Duration
-	TaskStaleAfter  time.Duration // >0 set observation threshold / <0 disable / 0 keep
-	TaskJobDeadline time.Duration // >0 enable termination policy / <0 disable / 0 keep
+	TaskDefaultTTL  time.Duration // >0 set unified-reaper fallback lifetime / 0 keep (no disable)
 }
 
 // ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
@@ -307,54 +328,11 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		)
 	}
 
-	cb := cm.buildModelCallbacks(cfg.SystemPromptSource)
-
-	// Build LLMAgent.
-	maxIters := cfg.MaxToolIters
-	if maxIters <= 0 {
-		maxIters = DefaultMaxToolIterations
-	}
-	agentOpts := []llmagent.Option{
-		llmagent.WithModel(cfg.Model),
-		llmagent.WithModelCallbacks(cb),
-		llmagent.WithMaxToolIterations(maxIters),
-		// Parallel tool execution: a single turn's multiple tool_calls run
-		// concurrently. Required by the async task model so parallel command
-		// spawns each wait their own sync-wait window (blocking ≈ max, not sum;
-		// D2). Safe here because tagent's tools are stateless / mutex-guarded.
-		llmagent.WithEnableParallelTools(true),
-	}
-	if cfg.SystemPrompt != "" {
-		agentOpts = append(agentOpts, llmagent.WithInstruction(cfg.SystemPrompt))
-	}
-	if len(cfg.Tools) > 0 {
-		agentOpts = append(agentOpts, llmagent.WithTools(cfg.Tools))
-	}
-
-	// Build GenerationConfig from config fields
-	genConfig := model.GenerationConfig{}
-	if cfg.Temperature > 0 {
-		temp := cfg.Temperature
-		genConfig.Temperature = &temp
-	}
-	if cfg.ThinkingEnabled != nil {
-		genConfig.ThinkingEnabled = cfg.ThinkingEnabled
-	}
-	if cfg.ThinkingTokens != nil {
-		genConfig.ThinkingTokens = cfg.ThinkingTokens
-	}
-	if cfg.ReasoningEffort != nil {
-		genConfig.ReasoningEffort = cfg.ReasoningEffort
-	}
-	if genConfig.Temperature != nil || genConfig.ThinkingEnabled != nil ||
-		genConfig.ThinkingTokens != nil || genConfig.ReasoningEffort != nil {
-		agentOpts = append(agentOpts, llmagent.WithGenerationConfig(genConfig))
-	}
-	// ReasoningContentMode controls how reasoning_content is handled in history
-	if cfg.ReasoningContentMode != "" {
-		agentOpts = append(agentOpts, llmagent.WithReasoningContentMode(cfg.ReasoningContentMode))
-	}
-
+	// NOTE: the LLMAgent construction lives ONLY in buildLLMAgent below — the
+	// sole fwAgent path, gated by the execution model (§4.5). An earlier
+	// inline option block here was dead residue of the hotswap-fix 5.7
+	// extraction and misleading (it built a NON-gated option list that no
+	// consumer ever used). §7.5: assembly must mirror the executed surface.
 	// hotswap-fix 5.7：快照完整 cfg（执行面+状态面），供 RebuildExecutor 复用。
 	cm.execCfg = cfg
 	cm.memPlugin = cfg.MemPlugin
@@ -465,8 +443,16 @@ func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMA
 	if maxIters <= 0 {
 		maxIters = DefaultMaxToolIterations
 	}
+	// §4.5: wrap the model with the execution-credential gate (block the real model call
+	// when a durable turn's echo credential is unverified) + recovery-notice deferral to
+	// actual invocation. buildLLMAgent is the sole fwAgent construction → covers cold start
+	// and RebuildExecutor. nil-safe (some constructions carry no model).
+	gatedModel := cfg.Model
+	if gatedModel != nil {
+		gatedModel = newExecutionGateModel(cfg.Model, cm)
+	}
 	agentOpts := []llmagent.Option{
-		llmagent.WithModel(cfg.Model),
+		llmagent.WithModel(gatedModel),
 		llmagent.WithModelCallbacks(cb),
 		llmagent.WithMaxToolIterations(maxIters),
 		llmagent.WithEnableParallelTools(true),
@@ -671,19 +657,29 @@ func (cm *ContextManager) currentRunner() runner.Runner {
 // BuildInvocation merges a batch of AgentEvents into a single model.Message.
 func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 	var contents []string
+	var parts []model.ContentPart
 	for _, evt := range batch {
 		if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
 			continue
 		}
-		contents = append(contents, evt.Message.Content)
+		if evt.Message.Content != "" {
+			contents = append(contents, evt.Message.Content)
+		}
+		// §4.3: a valid non-text (image/file) payload has empty Content but must still
+		// reach the request — collect its parts so an image-only input is never dropped.
+		parts = append(parts, evt.Message.ContentParts...)
 	}
-	if len(contents) == 0 {
+	if len(contents) == 0 && len(parts) == 0 {
 		return model.NewUserMessage("")
 	}
-	if len(contents) == 1 {
-		return model.Message{Role: model.RoleUser, Content: contents[0]}
+	msg := model.Message{Role: model.RoleUser, ContentParts: parts}
+	switch {
+	case len(contents) == 1:
+		msg.Content = contents[0]
+	case len(contents) > 1:
+		msg.Content = strings.Join(contents, "\n\n---\n\n")
 	}
-	return model.Message{Role: model.RoleUser, Content: strings.Join(contents, "\n\n---\n\n")}
+	return msg
 }
 
 // assembleRequest builds the final message list sent to the model:
@@ -696,20 +692,11 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 // projection through the event-plugin pipeline or persistBusEvent, so the
 // data flow across the framework boundary is strictly one-way.
 func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.BeforeModelArgs) {
-	// Drain pending bus events (task_settled, monitor, meditation … arriving
-	// mid-turn) into the projection so this iteration can see them.
-	if cm.bus != nil {
-		events := cm.bus.TryPull()
-		if len(events) > 0 {
-			log.Infof("[BeforeModel] TryPull returned %d events, persisting to projection", len(events))
-		}
-		for _, evt := range events {
-			if evt == nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
-				continue
-			}
-			cm.persistBusEvent(evt)
-		}
-	}
+	// F5 (D1 design): BeforeModel SHALL NOT claim bus events mid-turn.
+	// The persistent event loop is the sole bus consumer; new arrivals wait
+	// for the next Pull at the turn boundary. The previous TryPull block here
+	// caused claimed durable envelopes to bypass the turn-completion protocol
+	// (F5: inputs claimed here never reached finishDurableBatch).
 
 	// Resolve projection → (possibly compressed) historical messages.
 	refs := cm.projection.GetAll()
@@ -751,6 +738,11 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 			"[context-guard] 会话状态异常（上下文为空）。请向用户如实说明当前对话上下文不可用，请其重发上一条消息。"))
 	}
 
+	// F9 (D6) recovery notice is NO LONGER consumed here: §4.5C moved it to the
+	// execution gate (executionGateModel), injected at the ACTUAL model invocation so a
+	// created-but-never-iterated lazy iterator does not consume the one-shot notice. The
+	// gate runs after this rebuild and appends the notice at the same request tail (still
+	// never persisted), preserving D6.
 	args.Request.Messages = rebuilt
 }
 
@@ -921,10 +913,10 @@ func (cm *ContextManager) EmitTaskCancelledRecord(tk *task.Task) {
 		return
 	}
 	md := map[string]string{
-		tagentevent.MetaKeyAgentName: cm.name,
-		"task_id":                    tk.ID,
-		"settle_status":              "cancelled",
-		"task_inline_record":         "true",
+		tagentevent.MetaKeyAgentName:        cm.name,
+		"task_id":                           tk.ID,
+		"settle_status":                     "cancelled",
+		tagentevent.MetaKeyTaskInlineRecord: "true",
 	}
 	if cm.sessionID != "" {
 		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
@@ -959,10 +951,10 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 		status = "alive-detached"
 	}
 	md := map[string]string{
-		tagentevent.MetaKeyAgentName: cm.name,
-		"task_id":                    tk.ID,
-		"settle_status":              status,
-		"task_inline_record":         "true",
+		tagentevent.MetaKeyAgentName:        cm.name,
+		"task_id":                           tk.ID,
+		"settle_status":                     status,
+		tagentevent.MetaKeyTaskInlineRecord: "true",
 	}
 	if cm.sessionID != "" {
 		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
@@ -976,58 +968,27 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 	})
 }
 
-// persistBusEvent persists an EventBus event to MemoryStore and appends it
-// to the compress.SessionProjection immediately. This ensures that all messages
-// visible to the LLM are also tracked in the projection — eliminating the
-// "visible but not projected" state that caused ordering bugs.
-//
-// The event is stored as a FullEvent with:
-//   - EventKey: Snowflake-generated (using ContextManager's partitionID)
-//   - EventType: inferred from message role
-//   - Content/EventSummary: from the AgentEvent's Message payload
-func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
+// buildBusFact builds the CANONICAL FullEvent for one bus event: the same
+// role-normalization, event-type inference, summary, fresh Snowflake key and
+// attribution stamps (agent_name / trigger_source / rollout_id / bundle_id /
+// task settle keys) persistBusEvent would otherwise derive inline. Both the
+// write-before prepare barrier (which freezes this bytes as prepared_fact) and
+// the volatile/claim-less commit path call it, so a durable fact's canonical
+// form is decided ONCE and never re-derived on replay.
+func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
+	// Defense-in-depth for §3.1: the receive boundary rejects an external_input with a
+	// nil Message, so a nil here means a non-input or a caller bug. Returning a zero
+	// fact (EventKey==0) lets the §3.5 completeness gate drop it rather than panic.
 	if evt == nil || evt.Message == nil {
-		return
+		return memory.FullEvent{}
 	}
-
 	msg := *evt.Message
-	// Convert RoleSystem → RoleUser: system-injected messages (e.g.,
-	// [action_tool_result]) should be treated as external input by the LLM.
 	if msg.Role == model.RoleSystem {
 		msg.Role = model.RoleUser
 	}
-
-	// Inbox-replay dedup (resident-readiness-plan 3.4): a replayed durable
-	// event carries inbox_dedup_keys — the fact keys already committed by the
-	// first (crashed) execution. Reuse the SAME key: StoreEvent is skipped
-	// (with a GetEvent guard falling back to the idempotent completion path),
-	// and the projection Append dedupes by key — the fact and its projection
-	// are NOT duplicated across the at-least-once replay.
-	// cold-eyes Major 3：优先单数 inbox_dedup_key（消息序号对齐的单条 key），
-	// 复数 joined 形式仅为旧事件兼容（取第一个）。
-	dedupKeyHex := ""
-	if v, ok := evt.Metadata["inbox_dedup_key"].(string); ok {
-		dedupKeyHex = strings.TrimSpace(v)
-	} else if v, ok := evt.Metadata["inbox_dedup_keys"].(string); ok {
-		for _, part := range strings.Split(v, ",") {
-			if part = strings.TrimSpace(part); part != "" {
-				dedupKeyHex = part
-				break
-			}
-		}
-	}
-	eventKey := int64(0)
-	if dedupKeyHex != "" {
-		if k, perr := tagentevent.ParseEventKey(dedupKeyHex); perr == nil {
-			eventKey = k
-		}
-	}
-	if eventKey == 0 {
-		eventKey = memory.NewSnowflakeEventKey(cm.partitionID, 0)
-	}
+	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
 	eventType := tagentevent.ExtractEventType(msg)
 	eventSummary := tagentevent.GenerateEventSummary(msg, eventType, tagentevent.DefaultOptionsForLLMContext())
-
 	fullEvent := memory.FullEvent{
 		EventKey:     eventKey,
 		PartitionID:  cm.partitionID,
@@ -1035,6 +996,14 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 		EventSummary: eventSummary,
 		Timestamp:    evt.Timestamp.UnixMilli(),
 		Content:      msg.Content,
+		// §4.3 / §3.4-deferred: freeze multimodal parts so an image-only (empty-text)
+		// input is retained losslessly in the fact chain and re-rendered to the request.
+		ContentParts: msg.ContentParts,
+		// §3.4: freeze the message's tool fields onto the canonical fact via the
+		// existing FullEvent payload fields — previously only Content was kept, so
+		// a tool-bearing input fact lost its calls and could not be rebuilt.
+		ToolCalls: msg.ToolCalls,
+		ToolID:    msg.ToolID,
 	}
 	// 归因盖章（TC0，路径2/2）：与插件管线 onEvent 同盖，避免归因盲区（报告 R5）。
 	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 属会话级
@@ -1050,9 +1019,9 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	}
 	// R2（resident-continuity-r2-r4 1.5）：task 来源事件的结构化 settle 键拷入
 	// FullEvent.Metadata——事实链 settle 记录可被 RebuildTaskRegistry 机器辨读
-	// （task_id/settle_status；task_inline_record 标记内联终态记录，投影重建跳过）。
+	// （task_id/settle_status；task_inline_record 标记内联终态记录，event 包非投影判定排除）。
 	if evt.Source == SourceTask {
-		for _, k := range []string{"task_id", "settle_status", "task_inline_record"} {
+		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -1066,6 +1035,132 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 			fullEvent.Metadata[tagentevent.MetaKeyBundleID] = bid
 		}
 	}
+	// Durable-input identity (fix-resident-reliability-boundaries D2 L67, task 4.0a):
+	// a claim-bearing event freezes its batch identity onto the canonical fact so
+	// the fact chain is SELF-identifying. buildBusFact is called by both the write-
+	// before prepare barrier (prepareBatchFacts freezes this as prepared_fact)
+	// and the volatile path; the claim is only set on the durable path, so these
+	// keys land on the frozen fact and survive a restart. This is the prerequisite
+	// for 4.6's startup reconcile to check a fact directly by receipt_key without
+	// a projection/tail scan. The slot index is never compacted (F4), so (request
+	// id, slot) uniquely names one input fact.
+	if evt.claim != nil {
+		fullEvent.Metadata[tagentevent.MetaKeyInboxRequestID] = evt.claim.RequestID
+		fullEvent.Metadata[tagentevent.MetaKeyInboxSlot] = fmt.Sprintf("%d", evt.claim.Slot)
+		if evt.ID != "" {
+			fullEvent.Metadata[tagentevent.MetaKeySourceEventID] = evt.ID
+		}
+	}
+	// §3.4: freeze the ORIGINAL source and the complete business Metadata as an
+	// exact JSON snapshot under one reserved control key (event.MetaKeySourceSnapshot).
+	// This preserves the input's provenance back to its host (chat_id, task
+	// genealogy, ...) across a restart WITHOUT spreading arbitrary business keys
+	// across the trusted control namespace — they live wholly inside this snapshot.
+	if snap, err := tagentevent.EncodeSourceSnapshot(evt.Source, evt.Metadata); err != nil {
+		log.Warnf("[buildBusFact] source snapshot encode failed src=%s: %v", evt.Source, err)
+	} else if snap != "" {
+		fullEvent.Metadata[tagentevent.MetaKeySourceSnapshot] = snap
+	}
+	return fullEvent
+}
+
+// isCompletePreparedFact checks the one invariant that unambiguously separates a
+// genuinely-prepared canonical fact from corrupt/truncated material (§3.5, design
+// 决策2「完整准备校验」): a fixed non-zero Snowflake identity key. buildBusFact
+// always stamps a real key and never 0, so a decoded fact with EventKey == 0 is
+// not a real prepared fact and persistBusEvent gates the store rather than minting
+// a fresh key. Summary/attribution are intentionally NOT re-checked at decode: they
+// are guaranteed at construction, and re-checking them here would risk false-gating
+// legitimate durable facts (e.g. an unnamed ContextManager in fixtures).
+func isCompletePreparedFact(f *memory.FullEvent) bool {
+	return f != nil && f.EventKey != 0
+}
+
+// persistBusEvent persists an EventBus event to MemoryStore and appends it
+// to the compress.SessionProjection immediately. This ensures that all messages
+// visible to the LLM are also tracked in the projection — eliminating the
+// "visible but not projected" state that caused ordering bugs.
+//
+// The event is stored as a FullEvent with:
+//   - EventKey: Snowflake-generated (using ContextManager's partitionID)
+//   - EventType: inferred from message role
+//   - Content/EventSummary: from the AgentEvent's Message payload
+//
+// F2 fix: returns true when the fact is stored OR was already stored (replay
+// dedup path). Returns false only when StoreEvent failed and projection append
+// was gated. The §4.2 submit gate maps a false to submitTransient (no model, claims
+// requeued), so §4.4's cm.turnEcho — and thus the MemoryPlugin echo skip — is installed
+// ONLY once every selected fact is committed; otherwise the plugin would skip an input
+// that was never durably stored and the input would be lost.
+func (cm *ContextManager) persistBusEvent(evt *AgentEvent) bool {
+	ok, _ := cm.persistBusEventCommitted(evt)
+	return ok
+}
+
+// persistBusEventCommitted is the classified form of the commit step. The
+// second result reports a DETERMINISTIC conflict — the typed same-key
+// different-content collision or a forgotten tomb — which the commit protocol
+// must ISOLATE rather than retry: a frozen key that collides with different
+// content (cross-process snowflake collision included) conflicts on EVERY
+// replay, so retrying it forever is a livelock. §8.5's 30-restart cadence
+// proved the surface real; the leaf comment 「dispositioning is layered on by
+// the commit protocol» is layered on HERE.
+func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, deterministic bool) {
+	if evt == nil || evt.Message == nil {
+		return false, false
+	}
+
+	msg := *evt.Message
+	// Convert RoleSystem → RoleUser: system-injected messages (e.g.,
+	// [action_tool_result]) should be treated as external input by the LLM.
+	if msg.Role == model.RoleSystem {
+		msg.Role = model.RoleUser
+	}
+
+	// Resolve the canonical fact for this event (fix-resident-reliability-
+	// boundaries D2/D3 + task 3.5):
+	//   - Durable claim WITH a frozen prepared_fact (normal reliable path):
+	//     reuse it VERBATIM. Its EventKey, summary and attribution were frozen
+	//     by the write-before prepare barrier on the first claim, so a replay
+	//     never re-stamps time/rollout/bundle or double-writes the fact (F1/F4).
+	//     If those bytes are undecodable OR incomplete it is current-format
+	//     corruption: the store is GATED (return false) and surfaces — the
+	//     regenerate-key weak fallback is DELETED (§3.5「删除重新生成 key 的
+	//     恢复分支」); minting a fresh key would silently double-write the input
+	//     under a new identity. The claim stays and replays.
+	//   - Durable claim but NO prepared_fact: the barrier did not succeed for
+	//     this envelope, so per D2「准备失败不调用 StoreEvent」we write NOTHING and
+	//     return false — the claim stays and replays; a half-prepared input
+	//     never silently enters the fact chain.
+	//   - No claim (volatile path / direct test call): build a fresh canonical
+	//     fact, exactly as before.
+	var fullEvent memory.FullEvent
+	switch {
+	case evt.claim != nil && len(evt.claim.PreparedFact) > 0:
+		if err := json.Unmarshal(evt.claim.PreparedFact, &fullEvent); err != nil {
+			log.Errorf("[persistBusEvent] durable prepared_fact undecodable rid=%s slot=%d — store gated, no restamp: %v",
+				evt.claim.RequestID, evt.claim.Slot, err)
+			return false, false
+		}
+		if !isCompletePreparedFact(&fullEvent) {
+			log.Errorf("[persistBusEvent] durable prepared_fact incomplete (no fixed non-zero identity key) rid=%s slot=%d — store gated, no restamp",
+				evt.claim.RequestID, evt.claim.Slot)
+			return false, false
+		}
+	case evt.claim != nil:
+		log.Warnf("[persistBusEvent] durable fact not prepared (barrier failed) rid=%s slot=%d — store gated, claim will replay",
+			evt.claim.RequestID, evt.claim.Slot)
+		return false, false
+	default:
+		fullEvent = cm.buildBusFact(evt)
+	}
+	eventKey := fullEvent.EventKey
+	eventType := fullEvent.EventType
+	// §4.6 (event-sourced-projection L7): the projection ref is built from the CANONICAL
+	// fact the store holds/returned — never the current event's time, a re-derived summary,
+	// or the original call object. Default to the freshly built fullEvent (volatile path);
+	// the durable branch overwrites it with the canonical ReplayEvent returned.
+	refCanonical := fullEvent
 
 	// Stored-gate (event-sourced-projection D2, fresh-eyes E①): a failed
 	// StoreEvent must NOT append to the projection — otherwise the projection
@@ -1074,47 +1169,102 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 	// ReplaySpilled dual-write) re-stores AND re-appends this event on
 	// recovery, restoring the same-point semantics. nil store (test/bypass
 	// scenarios) keeps the previous always-append behavior.
-	stored := true
-	if cm.memStore != nil {
-		alreadyStored := false
-		if dedupKeyHex != "" {
-			// Replay path: verify the dedup evidence before trusting it — a
-			// missing slot falls through to a normal store (same key + same
-			// content = deterministic completion, never a different fact).
-			if existing, gerr := cm.memStore.GetEvent(eventKey); gerr == nil && existing != nil {
-				alreadyStored = true
-			}
+	stored = true /* named returns */
+	// replayed marks a durable claim whose frozen canonical fact is ALREADY fully
+	// committed on the chain (the pre-crash pass stored it, or the startup rebuild
+	// restored it). Such a claim is a no-op: neither re-store NOR re-append NOR
+	// re-feedback — otherwise the projection would hold a ref the fact chain counts
+	// once and drift from it (F4「投影=事实链折叠」invariant) and the settle feedback
+	// would duplicate (D3 step3). It is classified from the ReplayResult, NOT a
+	// GetEvent probe: D4 forbids the weak "GetEvent success ⇒ done" degradation,
+	// and the 3.5 gate guarantees a durable store is an EventReplayer.
+	// A fresh volatile key is unique, so replayed stays false on the volatile path.
+	replayed := false
+	switch {
+	case cm.memStore == nil:
+		// Test/bypass scenario (nil store): keep the historical always-append behavior.
+	case evt.claim != nil:
+		// Durable commit path (fix-resident-reliability-boundaries D3 step1 / D4):
+		// go through the internal replay interface, which content-checks the frozen
+		// fact and distinguishes fresh commit / half-orphan repair / idempotent
+		// already-committed / typed same-key-different-content conflict.
+		replayer, ok := cm.memStore.(memory.EventReplayer)
+		if !ok {
+			stored = false
+			log.Errorf("[persistBusEvent] durable store %T is not replay-capable rid=%s slot=%d — commit gated, claim will replay",
+				cm.memStore, evt.claim.RequestID, evt.claim.Slot)
+			break
 		}
-		if !alreadyStored {
-			if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-				stored = false
-				log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
-			}
+		result, canonicalOut, err := replayer.ReplayEvent(eventKey, fullEvent)
+		if err == nil {
+			// Authoritative stored bytes (fresh OR already-committed): the projection-ref source.
+			refCanonical = canonicalOut
 		}
-	}
-	// Committed-fact writeback (3.4): after a successful store under inbox
-	// provenance, record the fact key ON the claimed envelope so a crash
-	// before the receipt replays with inbox_dedup_keys (no double write).
-	if stored && cm.bus != nil {
-		if rid, _ := evt.Metadata["inbox_request_id"].(string); rid != "" {
-			if path, _ := evt.Metadata["inbox_path"].(string); path != "" {
-				cm.bus.AppendDurableEventKeys(path, []string{tagentevent.FormatEventKey(eventKey)})
-			}
+		switch {
+		case err == nil && result == memory.ReplayAlreadyCommitted:
+			replayed = true
+		case err == nil:
+			// ReplayNew / ReplayRepaired: fact now durable under the frozen key.
+		case memory.IsDuplicateEventKey(err):
+			// Typed conflict — same key, DIFFERENT content. Never swallow it as a
+			// replay (D2 L68): hold the claim, do not ack, surface it. Dispositioning
+			// (isolate / completion=failed) is layered on by the commit protocol.
+			stored = false
+			deterministic = true
+			log.Errorf("[persistBusEvent] CONFLICT rid=%s slot=%d key=%d (same key, different content) — claim held, envelope not acked: %v",
+				evt.claim.RequestID, evt.claim.Slot, eventKey, err)
+		case memory.IsEventForgotten(err):
+			// 2.4: the fact is legally tombstoned — a replay MUST NOT resurrect it.
+			// Hold the claim (never ack, never re-project) and surface it, exactly like a
+			// conflict; the commit protocol dispositions it (isolate / completion=failed).
+			stored = false
+			deterministic = true
+			log.Errorf("[persistBusEvent] FORGOTTEN rid=%s slot=%d key=%d (legally tombstoned) — claim held, not re-projected: %v",
+				evt.claim.RequestID, evt.claim.Slot, eventKey, err)
+		default:
+			// Transient I/O / barrier failure: fact NOT durable this turn.
+			stored = false
+			log.Errorf("[persistBusEvent] ReplayEvent failed key=%d (append gated, replay will retry): %v", eventKey, err)
+		}
+	default:
+		// Volatile path (no claim): unchanged — a fresh snowflake key is unique.
+		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
+			stored = false
+			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
 		}
 	}
 
+	// §4.6: the projection ref comes from the returned/written canonical — role derived
+	// from the canonical EventType via the SAME fold rule the cold-start rebuild uses
+	// (removing the old runtime-vs-rebuild role deviation), time from the frozen canonical,
+	// never the current event's arrival time or the original message object.
 	ref := memory.EventReference{
 		EventKey:     eventKey,
 		PartitionID:  cm.partitionID,
-		EventType:    eventType,
-		EventSummary: eventSummary,
-		Timestamp:    evt.Timestamp.UnixMilli(),
-		Role:         string(msg.Role),
+		EventType:    refCanonical.EventType,
+		EventSummary: refCanonical.EventSummary,
+		Timestamp:    refCanonical.Timestamp,
+		Role:         string(tagentevent.EventTypeRole(refCanonical.EventType)),
 	}
 	// R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
 	// 裸 cm 时不崩溃（零值鲁棒性；主路径恒有投影，行为不变）。
-	if stored && cm.projection != nil {
+	// §4.6 (scenario「已有事实不等于当前请求已包含」): a SELECTED outstanding input whose
+	// frozen fact is already committed (replayed) STILL must be present in the projection
+	// before execution — the cold-start snapshot/tail scan may not have restored its older
+	// key. SessionProjection.Append is EventKey-idempotent, so re-asserting a rebuild-restored
+	// ref is a no-op while a missing one is backfilled; scoping to this function's callers
+	// (the selected batch only) keeps it from re-appending unrelated historical keys. The
+	// never-store-fails-append invariant holds: a store failure (stored=false, !replayed) skips.
+	// §5.5: the same event-package predicate the spill-replay and cold-start paths use
+	// guards the normal commit append — an internal record (receipt/registry/inline
+	// settle/compaction body) must never occupy the projection even if it reaches here.
+	if cm.projection != nil && (stored || replayed) && !tagentevent.IsNonProjectionRecord(refCanonical.EventType, refCanonical.Metadata) {
 		cm.projection.Append(ref)
+	}
+	if replayed {
+		log.Infof("[persistBusEvent] replay dedup rid=%s slot=%d key=%d already on chain — ref ensured, re-store+feedback skipped",
+			evt.claim.RequestID, evt.claim.Slot, eventKey)
+		return true, false
 	}
 
 	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
@@ -1130,12 +1280,47 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) {
 
 	log.Infof("[persistBusEvent] persisted bus event key=%d type=%s source=%s content=%s",
 		eventKey, eventType, evt.Source, truncateForLog(msg.Content, 80))
+	return stored, deterministic // F2: caller gates the submit outcome (no §4.4 echo credential on failure)
+}
+
+// commitReceiptFact durably submits a frozen inbox-receipt fact under its RESERVED
+// key (§5.3, design 决策5 L63/L122). Unlike the old persistInboxReceipt — which
+// minted a FRESH snowflake key and stamped time.Now() on every call, so a retry or
+// restart produced a DIFFERENT, non-idempotent receipt — this commits the exact
+// frozen bytes the completion carries through the explicit replay interface, so a
+// re-submit of an already-committed receipt converges to ReplayAlreadyCommitted
+// (never a second receipt event) and a same-key/different-content collision
+// surfaces as an error. The receipt is an internal processing record: it is
+// deliberately NOT appended to the projection (it never feeds model context),
+// matching the old receipt path and §5.5's non-projection classification.
+// §5.7: it returns the TYPED error (nil = committed OR already-committed, both
+// verify) so the startup reconcile can discriminate a deterministic contradiction
+// (same-key-different-content, legally-forgotten receipt) — quarantine material —
+// from transient I/O, which must block conservatively instead.
+func (cm *ContextManager) commitReceiptFact(receipt memory.FullEvent) error {
+	if cm.memStore == nil {
+		return errors.New("commitReceiptFact: no store configured")
+	}
+	replayer, ok := cm.memStore.(memory.EventReplayer)
+	if !ok {
+		return fmt.Errorf("commitReceiptFact: store %T is not replay-capable key=%d — receipt not committed, claim held", cm.memStore, receipt.EventKey)
+	}
+	if _, _, err := replayer.ReplayEvent(receipt.EventKey, receipt); err != nil {
+		return fmt.Errorf("commitReceiptFact: ReplayEvent key=%d failed — receipt not committed, claim held for replay: %w", receipt.EventKey, err)
+	}
+	return nil
 }
 
 // writeSettleFeedback（2.3 design-report-closeout）把确定性任务裁决写为 feedback
 // 事件（因果边指向 task_settled 事件）。completed→positive / failed→negative；
 // suspect/alive-detached/未知状态不写（只记确定性裁决，防噪声污染 guardrail）。
 // 失败仅记日志（反馈是旁路产物，不阻塞主链路）。
+//
+// §2.7④ 不变量：feedback **不是** durable 提交/ack 凭据。本函数仅在 `stored` 已为 true
+// （事实链已 durable）且投影已 append 之后运行，位于 ack 下游；BindFeedback 失败不撤销
+// 提交、不影响 `stored` 返回值（F2：caller 据此决定 ack / §4.4 echo 凭据安装），也不影响可靠
+// inbox 的 durable 判定（其凭据是 PublishReceipt.Durable，与 feedback 无关）。guardrail 的
+// negative_feedback_rate 只作行为信号，绝不作输入确认/重放凭据。
 func (cm *ContextManager) writeSettleFeedback(settledKey int64, md map[string]any) {
 	if cm.memStore == nil || md == nil {
 		return
@@ -1198,6 +1383,44 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 // RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
+// echoSpec is the turn-level, immutable template runEventLoop installs when this
+// turn's durable input facts are already committed (§4.4). RunFlow clones it into a
+// fresh per-attempt plugin.EchoCredential (unique token), so there is no shared mutable
+// whole-turn state — the derived credential owns its own bind state. No mutex here.
+type echoSpec struct {
+	agent         string
+	session       string
+	mergedMessage string
+	committedKeys []int64
+}
+
+// newAttemptEchoCredential stamps a unique per-runner-attempt credential from the
+// turn's echo spec (§4.4). A retry of the same business turn calls this again → a new
+// AttemptToken reusing the same committed facts; the prior attempt's credential is
+// released as its ctx ends.
+func (cm *ContextManager) newAttemptEchoCredential() *plugin.EchoCredential {
+	return &plugin.EchoCredential{
+		AttemptToken:  fmt.Sprintf("%s#attempt-%d", cm.name, cm.attemptSeq.Add(1)),
+		Agent:         cm.turnEcho.agent,
+		Session:       cm.turnEcho.session,
+		MergedMessage: cm.turnEcho.mergedMessage,
+		CommittedKeys: cm.turnEcho.committedKeys,
+	}
+}
+
+// turnEchoVerified reports the §4.5 execution-credential outcome of the most recent
+// attempt as (installed, verified). installed=true means this turn had durable committed
+// inputs expecting an echo; verified=false while installed means the model ran (or was
+// gated) on UNverified input — the echo was never bound or a plugin error downgraded it,
+// so the loop MUST NOT ack. When not installed (volatile / no durable commit) it reports
+// (false, true) — normal ack.
+func (cm *ContextManager) turnEchoVerified() (installed, verified bool) {
+	if cm.turnEcho == nil {
+		return false, true
+	}
+	return true, cm.lastEchoCred != nil && cm.lastEchoCred.Verified()
+}
+
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
 	// Runner lifecycle accounting (implementation-hardening 5.1): this turn
 	// holds a runner reference — the counter gates retired-runner sweeps so a
@@ -1211,10 +1434,17 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	// Bind this invocation's projection as the pipeline projection sink:
 	// MemoryPlugin projects each stored event at the same synchronous point
 	// (write unification, unified-event-projection D1).
-	if cm.turnDurableInbound.Path != "" {
-		// cold-eyes Major 1: expose the claimed envelope provenance to the
-		// plugin fact path (dedup on replay + key writeback on first exec).
-		ctx = plugin.WithDurableInbound(ctx, cm.turnDurableInbound)
+	if cm.turnEcho != nil {
+		// §4.4: mint a fresh per-attempt echo credential (unique request token) so the
+		// MemoryPlugin identifies THIS attempt's input echo precisely — root invocation,
+		// author=user, and the exact committed merged message — instead of skipping every
+		// user event in a whole-turn "first envelope" mode. Released when this ctx ends.
+		// §4.5: also retained on cm so the loop can fail-closed if the model-entry gate
+		// never saw a verified echo (framework fed a non-matching/absent input, or a
+		// swallowed plugin error downgraded it).
+		cred := cm.newAttemptEchoCredential()
+		cm.lastEchoCred = cred
+		ctx = plugin.WithEchoCredential(ctx, cred)
 	}
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
@@ -1263,10 +1493,21 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	}
 	eventCh, err := cm.currentRunner().Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
-		return fmt.Errorf("runner.Run: %w", err)
+		// §5.1: a runner start/transport error is a definite failure of THIS
+		// attempt. Record it so the loop can tell a real failure from a nil return
+		// even on the last retry, rather than falling through to "completed".
+		startErr := fmt.Errorf("runner.Run: %w", err)
+		cm.lastTurnOutcome = reduceTurnOutcome(startErr, "", false)
+		return startErr
 	}
 
 	cm.turnProductive = false
+	// §5.1: response-internal error captured from the stream. The framework
+	// surfaces a model/API failure as an event carrying Response.Error (it does
+	// NOT make RunFlow return an error), so the old code — which never inspected
+	// Response.Error — mistook such a turn for success and ACKed its durable
+	// inputs. Capture the first such error to reduce the attempt honestly.
+	var respErr string
 	for fwEvt := range eventCh {
 		if fwEvt == nil {
 			continue
@@ -1292,6 +1533,12 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 				cm.turnProductive = true
 			}
 		}
+		// §5.1: a response-internal model/framework error arrives with a nil
+		// transport return; capture it once (bounded) so the turn reduces to
+		// failed rather than being mistaken for completion.
+		if evt.Response != nil && evt.Response.Error != nil && respErr == "" {
+			respErr = fmt.Sprintf("%s: %s", evt.Response.Error.Type, evt.Response.Error.Message)
+		}
 		if cm.onEvent != nil {
 			cm.onEvent(evt)
 		}
@@ -1299,12 +1546,37 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 			// F2 (design-report-closeout): 2s grace → persist + ticket, never
 			// block the loop on a stalled consumer.
 			if !cm.deliverEvent(ctx, evt) && ctx.Err() != nil {
-				return nil
+				// §5.1: a mid-drain shutdown cancellation previously returned nil,
+				// which the loop read as "completed" and then ACKed — dropping the
+				// claims of a turn that reached no terminal state. Classify it as
+				// cancelled (spec L90/L130: no completion, claim retained) and
+				// surface the ctx error so the loop stops rather than acking.
+				cm.lastTurnOutcome = reduceTurnOutcome(ctx.Err(), respErr, true)
+				return ctx.Err()
 			}
 		}
 	}
+	cm.lastTurnOutcome = reduceTurnOutcome(nil, respErr, false)
 	return nil
 }
+
+// LastTurnOutcome returns the §5.1 reduced terminal state of the most recent
+// RunFlow attempt. The persistent loop uses it to distinguish a genuinely
+// completed turn from a response-error failure or a shutdown cancellation that
+// the nil transport return used to hide.
+func (cm *ContextManager) LastTurnOutcome() turnOutcome {
+	return cm.lastTurnOutcome
+}
+
+// setLastBatchOutcome records the loop's §5.1 reduced terminal state for the
+// most recent turn (called only on the loop goroutine after the retry budget).
+func (cm *ContextManager) setLastBatchOutcome(o turnOutcome) { cm.lastBatchOutcome = o }
+
+// LastBatchOutcome returns the §5.1 reduced turn result the persistent loop
+// computed for the most recent durable batch, prior to §5.2/§5.3 freezing it
+// into the completion. Completed/failed only — a cancelled turn returns from the
+// loop without reaching the freeze, so no completion is ever formed for it.
+func (cm *ContextManager) LastBatchOutcome() turnOutcome { return cm.lastBatchOutcome }
 
 // LastTurnDegenerate reports whether the most recent RunFlow turn produced
 // nothing: no tool call and no non-empty final. The persistent loop uses it
@@ -1340,7 +1612,7 @@ func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	if cm.taskController == nil {
 		return
 	}
-	if board := task.RenderBoard(cm.taskController.List()); board != "" {
+	if board := task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL()); board != "" {
 		args.Request.Messages = task.InjectBoard(args.Request.Messages, board)
 	}
 }
@@ -1365,6 +1637,22 @@ func (cm *ContextManager) Close() error {
 		return r.Close()
 	}
 	return nil
+}
+
+// WaitForInFlight blocks until every runner turn currently streaming (resident
+// loop turns AND one-shot/sub-call turns — all enter via RunFlow, which
+// counts runnerInFlight) has drained, or the timeout passes; false means turns
+// were still active. The §6.2 close sequence uses it so the output channel is
+// never settled while a turn may still send to it (review M-1).
+func (cm *ContextManager) WaitForInFlight(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for cm.runnerInFlight.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

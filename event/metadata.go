@@ -7,6 +7,7 @@
 package event
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,12 @@ const (
 	MetaKeyEventType     = "event_type"
 	MetaKeyEventSummary  = "event_summary"
 	MetaKeyTriggerSource = "trigger_source"
+
+	// MetaKeyTaskInlineRecord marks a fact-chain record that is registry-only
+	// inline settle data (§5.5 non-projection classification): the result was
+	// already returned in-turn as a tool result, so projecting it again would
+	// double-render. Consumed exclusively through IsNonProjectionRecord.
+	MetaKeyTaskInlineRecord = "task_inline_record"
 
 	// 归因章键（TC0/T-EVO）：写入 FullEvent.Metadata，使产出事件可回溯到生效版本。
 	// 与上述 StateDelta 存储标识不同——这些经 plugin.Attribution ctx 载体盖章。
@@ -51,7 +58,63 @@ const (
 
 	// MetaPrefix marks passthrough metadata keys (meta_chat_id, meta_user_name, …).
 	MetaPrefix = "meta_"
+
+	// Inbox fact-identity keys (fix-resident-reliability-boundaries D2, 3.3).
+	// These are the ONLY authoritative names for the durable-input identity
+	// written onto a FullEvent.Metadata / receipt fact — the inbox file is not
+	// a permanent provenance source, so the identity lives in the fact chain.
+	// They replaced the v1 untyped AgentEvent.Metadata control keys
+	// (inbox_path/inbox_request_id/inbox_dedup_key), which leaked runtime
+	// claim state into business Metadata, Origin baggage, the model context and
+	// host delivery fields. The runtime claim is now a typed, non-JSON field
+	// (agent.durableClaim); only these identity keys cross into persisted facts.
+	MetaKeyInboxRequestID = "inbox_request_id" // envelope request id (batch identity)
+	MetaKeyInboxSlot      = "inbox_slot"       // fixed message slot index (never compacted)
+	MetaKeySourceEventID  = "source_event_id"  // original AgentEvent id (lossless replay)
+
+	// MetaKeySourceSnapshot holds an EXACT JSON snapshot of the source event's
+	// {source, business metadata} frozen onto a canonical fact (task 3.4). The
+	// complete business Metadata is preserved losslessly under this ONE reserved
+	// control key so a durable input can be reconciled back to its host
+	// (chat_id, task genealogy, ...) across a restart — instead of spreading
+	// arbitrary business keys across the trusted control namespace (which they
+	// must NOT enter) or dropping them. Consumers parse via DecodeSourceSnapshot.
+	MetaKeySourceSnapshot = "source_snapshot"
 )
+
+// SourceSnapshot is the frozen provenance of a durable input: its original
+// producer source and the complete business Metadata carried on the source
+// event. Stored as exact JSON under MetaKeySourceSnapshot.
+type SourceSnapshot struct {
+	Source   string         `json:"source"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// EncodeSourceSnapshot renders a SourceSnapshot as the JSON stored under
+// MetaKeySourceSnapshot. An empty source with nil/empty metadata yields "".
+func EncodeSourceSnapshot(source string, metadata map[string]any) (string, error) {
+	if source == "" && len(metadata) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(SourceSnapshot{Source: source, Metadata: metadata})
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// DecodeSourceSnapshot parses the JSON stored under MetaKeySourceSnapshot back
+// into a SourceSnapshot. An empty string yields the zero value.
+func DecodeSourceSnapshot(raw string) (SourceSnapshot, error) {
+	if raw == "" {
+		return SourceSnapshot{}, nil
+	}
+	var s SourceSnapshot
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		return SourceSnapshot{}, err
+	}
+	return s, nil
+}
 
 // FormatEventKey renders an EventKey in its CANONICAL string form: lowercase
 // hexadecimal (negative summary-reference keys keep a leading '-'). This is

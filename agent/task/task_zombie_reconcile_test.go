@@ -41,11 +41,12 @@ func TestReconcileZombies_RunningDeadSessionRetired(t *testing.T) {
 	d.Done()
 }
 
-// TestReconcileZombies_AliveProbeProtectsQuietRunner: a quiet long-runner
-// with a live backing session is never retired, regardless of age; flip the
-// probe and it retires on the next sweep.
+// TestReconcileZombies_AliveProbeProtectsQuietRunner: a quiet long-runner with a
+// live backing session is never retired by the ZOMBIE/probe path regardless of
+// quiet time; flip the probe and it retires on the next sweep. (Total-lifetime age
+// reclaim is the SEPARATE TTL reaper — isolated here with a huge DefaultTTL.)
 func TestReconcileZombies_AliveProbeProtectsQuietRunner(t *testing.T) {
-	tm := NewTaskManager(TaskManagerConfig{ZombieGrace: time.Minute})
+	tm := NewTaskManager(TaskManagerConfig{ZombieGrace: time.Minute, DefaultTTL: 1000 * 24 * time.Hour})
 	alive := true
 	d := NewManualDetectorDetach(20 * time.Millisecond)
 	res := tm.Spawn(TaskSpec{Kind: "service", Desc: "quiet long-runner",
@@ -69,10 +70,13 @@ func TestReconcileZombies_AliveProbeProtectsQuietRunner(t *testing.T) {
 	d.Done()
 }
 
-// TestReconcileZombies_NilProbeSkipped: subagent tasks (no Alive probe) are
-// never reconciled away, no matter how old.
+// TestReconcileZombies_NilProbeSkipped: the ZOMBIE/probe reconcile skips nil-probe
+// tasks (it needs a probe to adjudicate), so a 24h-old subagent stays running under
+// the probe path. (Its total-lifetime bound is the SEPARATE TTL reaper — isolated
+// here with a huge DefaultTTL; the §10.5 restored-floor test asserts "no task is
+// immortal".)
 func TestReconcileZombies_NilProbeSkipped(t *testing.T) {
-	tm := NewTaskManager(TaskManagerConfig{})
+	tm := NewTaskManager(TaskManagerConfig{DefaultTTL: 1000 * 24 * time.Hour})
 	d := NewManualDetectorDetach(20 * time.Millisecond)
 	res := tm.Spawn(TaskSpec{Kind: "subagent", Desc: "plan"}, d)
 	res.Task.StartedAt = time.Now().Add(-24 * time.Hour)

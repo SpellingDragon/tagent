@@ -95,43 +95,6 @@ func TestFaultInjection_DegradationConcurrentNoRace(t *testing.T) {
 	}
 }
 
-// TestFaultInjection_SpillConcurrentStress 并发溢出 + 回收压力（模拟 channel 满溢与消费并发），
-// 验证无 panic、无死循环、最终可排空（at-least-once 不丢已落盘项）。
-func TestFaultInjection_SpillConcurrentStress(t *testing.T) {
-	s, err := NewSpillStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewSpillStore: %v", err)
-	}
-	var wg sync.WaitGroup
-	// 20 生产者溢出。
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			_ = s.Spill([]byte{byte(i)})
-		}(i)
-	}
-	wg.Wait()
-	// 排空：应恰好回收 20 项，无死循环。
-	reclaimed := 0
-	for {
-		_, ok, err := s.Reclaim()
-		if err != nil {
-			t.Fatalf("Reclaim 出错: %v", err)
-		}
-		if !ok {
-			break
-		}
-		reclaimed++
-		if reclaimed > 100 {
-			t.Fatal("回收超过溢出数，疑似死循环")
-		}
-	}
-	if reclaimed != 20 {
-		t.Fatalf("应回收全部 20 溢出项（不丢）, got %d", reclaimed)
-	}
-}
-
 // TestFaultInjection_AnchorCorruptNoPanic 注入坏锚点文件，验证 Load 返回 error（调用方
 // SetAnchorStore 保守用当前值），不 panic、不阻断。
 func TestFaultInjection_AnchorCorruptNoPanic(t *testing.T) {

@@ -16,6 +16,15 @@ import (
 // 超过 capacity_threshold 时，经 onHint 发一条 consolidation_hint 渗透消息——建议式，
 // 执行权仍在 LLM + memory_consolidate 工具（D2 核心主张）。snooze 窗内不重复打扰
 // （内存态；重启后重新积累——最多多提示一次，可接受）。
+//
+// §2.7③ 不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示，
+// MUST NOT 驱动容量淘汰——淘汰执行权的唯一真源是 store 的 §2.5 绝对 per-partition
+// eventCount（`recomputePartition` 由完整记录链得出，unknown 分区不淘汰，见
+// memory/lifecycle.go::checkCapacity）。因此本 delta 重启归零、巩固后随提示复位（Track 触发
+// onHint 即将 counts[pid]=0），与绝对真源分叉不构成淘汰误删风险（既有
+// TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；§2.5 锁定淘汰读绝对）。
+// repaired/already 重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过
+// capacityHook（见 engine_bridge_idempotency_test.go）。
 
 // ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。
 type ConsolidationHintTracker struct {

@@ -2,10 +2,11 @@ package agent
 
 import (
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/task"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // mkDigestTask builds a task.Task in a specific status for digest tests (white-box:
@@ -29,6 +30,10 @@ func (f *fakeTaskController) Relaunch(string) (task.SpawnResult, error) {
 func (f *fakeTaskController) Resume(string, string) (task.SpawnResult, error) {
 	return task.SpawnResult{}, nil
 }
+
+func (f *fakeTaskController) RenewTTLBySession(string) bool { return false }
+
+func (f *fakeTaskController) DefaultTTL() time.Duration { return 0 }
 
 func TestRenderSelfStateDigest_EmptyDegrades(t *testing.T) {
 	if got := renderSelfStateDigest(nil, time.Hour); got != "" {

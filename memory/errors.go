@@ -21,6 +21,20 @@ var (
 	// already committed. An EventKey IS the event's identity (collision
 	// guard D15): overwriting is refused, never silently applied.
 	ErrDuplicateEventKey = errors.New("event key already exists")
+
+	// ErrEventForgotten is returned by the internal replay path when the EventKey
+	// is under a legal tombstone: the fact was deliberately deleted, so a replay
+	// MUST NOT resurrect it (2.4). It is distinct from a duplicate/conflict (a same
+	// key with wrong content) and from I/O — callers should hold the recovery
+	// material and not ack, exactly as they would for a conflict.
+	ErrEventForgotten = errors.New("event was legally forgotten (tombstoned); replay refused")
+
+	// ErrEventProtected is returned by DeleteEvent when the EventKey is under a live
+	// §2.8 retention lease: the shared-resource recovery owner still needs the durable
+	// original to finish acking/replaying an unacked envelope or spill entry, so an
+	// explicit delete is refused WITHOUT destroying the record (lossless relocation is
+	// still allowed; only destruction is refused). Callers must retry after release.
+	ErrEventProtected = errors.New("event is retained by an unacked-recovery lease; delete refused")
 )
 
 // KeyNotFound wraps err (when non-nil) into a typed missing error carrying
@@ -65,4 +79,17 @@ func cloneFullEvent(e FullEvent) FullEvent {
 // (cold-eyes Major 1: the replay path treats duplicates as idempotent success).
 func IsDuplicateEventKey(err error) bool {
 	return errors.Is(err, ErrDuplicateEventKey)
+}
+
+// IsEventForgotten reports whether err is the typed tombstone/forgotten error — a
+// legal deletion a replay must not resurrect (2.4).
+func IsEventForgotten(err error) bool {
+	return errors.Is(err, ErrEventForgotten)
+}
+
+// IsEventProtected reports whether err is the typed §2.8 retention-lease refusal — an
+// explicit delete of a still-retained unacked-recovery original that must be retried
+// after the lease is released.
+func IsEventProtected(err error) bool {
+	return errors.Is(err, ErrEventProtected)
 }

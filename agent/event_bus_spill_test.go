@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -55,13 +56,22 @@ func TestReliableEventBus_AllInputsDurableNoDrop(t *testing.T) {
 			t.Fatal("仍有 pending 却 Pull 为空")
 		}
 		for _, e := range batch {
-			if _, ok := e.Metadata["inbox_path"]; !ok {
-				t.Fatal("durable 事件必须携带 inbox 溯源元数据")
+			if e.claim == nil {
+				t.Fatal("durable 事件必须携带 typed durable claim（D2 溯源，非 Metadata 控制键）")
 			}
 			got++
 		}
 		for _, pr := range bus.DurableProvenance(batch) {
-			if err := bus.ConfirmDurable(pr[0]); err != nil {
+			// §5.4: confirm follows the full two-phase protocol — reservation,
+			// durable completion, then the credential matching the reserved key.
+			key := "rk-" + pr[0]
+			if err := bus.PrepareEnvelope(pr[0], key, []json.RawMessage{json.RawMessage(`{"event_key":1}`)}); err != nil {
+				t.Fatalf("prepare: %v", err)
+			}
+			if err := bus.RecordCompletion(pr[0], json.RawMessage(`{"completion_version":1}`)); err != nil {
+				t.Fatalf("completion: %v", err)
+			}
+			if err := bus.ConfirmDurable(pr[0], reliability.ReceiptCredential{ReceiptKey: key}); err != nil {
 				t.Fatalf("confirm: %v", err)
 			}
 		} // receipt+ack：处理完成的输入确认
@@ -124,16 +134,25 @@ func TestReliableEventBus_RecoverAfterReopen(t *testing.T) {
 	}
 }
 
-// TestReliableEventBus_LegacySpillRefused 验证旧 .spill 未排空时拒绝启动
-// （fail-loud 迁移指引，绝不静默忽略未完成消息）。
-func TestReliableEventBus_LegacySpillRefused(t *testing.T) {
+// TestReliableEventBus_LegacySpillInertNotBlocking 验证 §3.7（决策10）：旧 .spill
+// 过渡数据不再阻止启动——可靠总线以当前格式打开，legacy 项被分类为惰性
+// 过渡数据（不读取、不消费），仅显式受管重置才清除。
+func TestReliableEventBus_LegacySpillInertNotBlocking(t *testing.T) {
 	dir := t.TempDir()
 	if err := osWriteFile(dir+"/00000000000000000009.spill", []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewReliableEventBus(dir)
-	if !errors.Is(err, reliability.ErrLegacySpillNotDrained) {
-		t.Fatalf("want ErrLegacySpillNotDrained, got %v", err)
+	bus, err := NewReliableEventBus(dir)
+	if err != nil {
+		t.Fatalf("§3.7: legacy .spill must not block boot: %v", err)
+	}
+	if spill, _ := bus.TransitionalData(); len(spill) != 1 {
+		t.Fatalf("stray .spill must be classified as transitional, got %v", spill)
+	}
+	// 当前格式仍可正常使用（legacy 未被吞入也不影响 v2 接收）。
+	publishN(bus, 2, "user")
+	if got := bus.DurablePending(); got != 2 {
+		t.Fatalf("v2 接收应正常, pending=%d want 2", got)
 	}
 }
 

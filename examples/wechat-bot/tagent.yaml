@@ -114,9 +114,7 @@ agents:
     compress_threshold: 0.8
     keep_recent_tasks: 1
     task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
-    task_stale_after: "1h"               # 僵死观测阈值(默认 1h):job 型 alive_detached 超龄 → stale 观测态+一次性告警,不终止
-                                         # (af4aa4c7 案 8h40m 死管道假活;generic 服务型不受限;"-1s" 关闭观测)
-    task_job_deadline: "8h"              # 可选终止策略(默认关):job 型 detached 超此时长 → owner Cancel + failed 终态;service 永不因年龄终止
+    task_default_ttl: "8h"               # 统一 TTL reaper 对无 `ttl` 入参任务的兜底绝对寿命(缺省 10min):到期经 owner Cancel → failed 终态 → 移出看板。无禁用哨兵、无按 mode 豁免——常驻/长任务须显式加大命令 ttl 或经 op=send/resume 续命(合并并删除旧 task_stale_after 观测态与 task_job_deadline 双墙)
     compress:
       summary_model: glm-5.3-flash      # L3 滚动综述 + 卡片浓缩(无模型/失败降级纯工程)
       summary_provider: zhipu

@@ -285,85 +285,105 @@ func (c *Compactor) getSegmentMeta(pid int, windowTS int64) (*SegmentMeta, error
 // ==================== L1→L2 Compaction ====================
 
 // CompactL1ToL2 compacts L1 hourly segments into a single L2 daily segment for a partition.
+// lockPartition takes the owning store's per-partition mutation lock for the
+// compactor's durable publish, serializing it against writer commits, deletes and
+// seals on the same partition (2.2). It returns the unlock closure. When the
+// compactor has no owning store (standalone over a bare KV — e.g. a unit test)
+// there is no shared mutation to coordinate against, so it is a no-op.
+func (c *Compactor) lockPartition(pid int) func() {
+	if c.store == nil {
+		return func() {}
+	}
+	st := c.store.getPartitionState(pid)
+	st.mutationMu.Lock()
+	return func() { st.mutationMu.Unlock() }
+}
+
 func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	if len(windowTSs) == 0 {
 		return nil
 	}
+	// 2.2: the durable publish (merge → rewrite idx → delete source segments) runs
+	// under the partition mutation lock so it can never interleave with a concurrent
+	// writer commit or any other mutation of the same pid — which would delete or
+	// miss a just-written event (torn idx / lost event). The tombstone finalize below
+	// calls the store's engine reverse-callback (removeVector) and is therefore run
+	// OUTSIDE the lock (M-lock-ordering: side callbacks never fire under mutationMu).
+	dead, err := func() ([]int64, error) {
+		defer c.lockPartition(pid)()
 
-	// 1. Merge: read all events from source segments in timestamp order
-	events, err := c.mergeEvents(pid, windowTSs)
-	if err != nil {
-		return fmt.Errorf("merge failed: %w", err)
-	}
-	if len(events) == 0 {
-		return nil
-	}
-
-	// 2. Filter: remove tombstoned events
-	events, dead := c.filterTombstoned(events)
-
-	// 3. Repair: fix dangling parent references
-	events, err = c.repairDanglingRefs(events)
-	if err != nil {
-		return fmt.Errorf("repair failed: %w", err)
-	}
-
-	// 4. Build target L2 meta
-	// MinTime/MaxTime are the segment's TRUTHFUL time envelope: the nominal
-	// window (named after the earliest source window, day-aligned) understates
-	// the real coverage whenever the sources span more than a day, and query
-	// pruning/early-stop depend on a truthful upper bound. mergeEvents already
-	// sorted ascending by Timestamp, so first/last suffice — no extra scan.
-	l2WindowTS := computeDailyWindow(windowTSs[0])
-	meta := SegmentMeta{
-		PartitionID: pid,
-		WindowTS:    l2WindowTS,
-		Layer:       2,
-		EventCount:  len(events),
-		MinTime:     events[0].Timestamp,
-		MaxTime:     events[len(events)-1].Timestamp,
-		Sealed:      true,
-	}
-
-	// 5. Write L2 events to KV store
-	batchOps := make([]KVOp, 0, len(events)*2)
-	for seq, evt := range events {
-		evtKVKey := EventKeyStr(pid, l2WindowTS, seq)
-		evtJSON, _ := json.Marshal(evt)
-		batchOps = append(batchOps, KVOp{Type: "put", Key: evtKVKey, Value: string(evtJSON)})
-
-		idxKVKey := IndexKeyStr(pid, evt.EventKey)
-		idxValue := fmt.Sprintf("%d:%d", l2WindowTS, seq)
-		batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
-	}
-
-	// Write L2 meta
-	metaJSON, _ := json.Marshal(meta)
-	metaKVKey := MetaKeyStr(pid, l2WindowTS)
-	batchOps = append(batchOps, KVOp{Type: "put", Key: metaKVKey, Value: string(metaJSON)})
-
-	if err := c.kv.KVBatch(batchOps); err != nil {
-		return fmt.Errorf("failed to write L2 segment: %w", err)
-	}
-
-	// 6. Cleanup: delete source L1 segments (only after L2 is fully written = crash-safe).
-	// Collision guard (code-review P1): when the earliest source window is
-	// day-aligned, l2WindowTS EQUALS that source window — the target prefix
-	// we just wrote IS a source prefix. Deleting it would erase the freshly
-	// compacted segment (data loss), so it must be excluded.
-	var cleanupWindows []int64
-	for _, w := range windowTSs {
-		if w != l2WindowTS {
-			cleanupWindows = append(cleanupWindows, w)
+		// 1. Merge: read all events from source segments in timestamp order
+		events, err := c.mergeEvents(pid, windowTSs)
+		if err != nil {
+			return nil, fmt.Errorf("merge failed: %w", err)
 		}
-	}
-	if err := c.deleteSegments(pid, cleanupWindows); err != nil {
-		return fmt.Errorf("cleanup failed: %w", err)
-	}
+		if len(events) == 0 {
+			return nil, nil
+		}
 
-	// 7. Finalize tombstones: the dead events are physically gone now.
+		// 2. Filter: remove tombstoned events
+		events, dead := c.filterTombstoned(events)
+
+		// 3. Repair: fix dangling parent references
+		events, err = c.repairDanglingRefs(events)
+		if err != nil {
+			return nil, fmt.Errorf("repair failed: %w", err)
+		}
+
+		// 4. Build target L2 meta. MinTime/MaxTime are the segment's TRUTHFUL time
+		// envelope: mergeEvents already sorted ascending by Timestamp, so first/last
+		// suffice — query pruning/early-stop depend on a truthful upper bound.
+		l2WindowTS := computeDailyWindow(windowTSs[0])
+		meta := SegmentMeta{
+			PartitionID: pid,
+			WindowTS:    l2WindowTS,
+			Layer:       2,
+			EventCount:  len(events),
+			MinTime:     events[0].Timestamp,
+			MaxTime:     events[len(events)-1].Timestamp,
+			Sealed:      true,
+		}
+
+		// 5. Write L2 events, index and meta to KV store
+		batchOps := make([]KVOp, 0, len(events)*2)
+		for seq, evt := range events {
+			evtKVKey := EventKeyStr(pid, l2WindowTS, seq)
+			evtJSON, _ := json.Marshal(evt)
+			batchOps = append(batchOps, KVOp{Type: "put", Key: evtKVKey, Value: string(evtJSON)})
+
+			idxKVKey := IndexKeyStr(pid, evt.EventKey)
+			idxValue := fmt.Sprintf("%d:%d", l2WindowTS, seq)
+			batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
+		}
+		metaJSON, _ := json.Marshal(meta)
+		metaKVKey := MetaKeyStr(pid, l2WindowTS)
+		batchOps = append(batchOps, KVOp{Type: "put", Key: metaKVKey, Value: string(metaJSON)})
+
+		if err := c.kv.KVBatch(batchOps); err != nil {
+			return nil, fmt.Errorf("failed to write L2 segment: %w", err)
+		}
+
+		// 6. Cleanup: delete source L1 segments (only after L2 is fully written =
+		// crash-safe). Collision guard (code-review P1): a day-aligned earliest
+		// source window equals l2WindowTS — deleting it would erase the freshly
+		// compacted segment, so it must be excluded.
+		var cleanupWindows []int64
+		for _, w := range windowTSs {
+			if w != l2WindowTS {
+				cleanupWindows = append(cleanupWindows, w)
+			}
+		}
+		if err := c.deleteSegments(pid, cleanupWindows); err != nil {
+			return nil, fmt.Errorf("cleanup failed: %w", err)
+		}
+		return dead, nil
+	}()
+	if err != nil {
+		return err
+	}
+	// 7. Finalize tombstones: the dead events are physically gone now — run after
+	// the mutation lock is released (removeVector is a store→engine callback).
 	c.finalizeTombstones(pid, dead)
-
 	return nil
 }
 
@@ -424,6 +444,23 @@ func (c *Compactor) filterTombstoned(events []FullEvent) ([]FullEvent, []int64) 
 func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	if len(dead) == 0 {
 		return
+	}
+	// §2.8: a tombstoned key still under an unacked-recovery lease must NOT have its
+	// original physically destroyed — keep it (and its tombstone) until release. This is
+	// belt-and-suspenders for a key already tombstoned before its lease was registered;
+	// the TTL/evict gates normally stop protected keys from ever reaching `dead`.
+	if c.store != nil {
+		kept := make([]int64, 0, len(dead))
+		for _, key := range dead {
+			if c.store.IsKeyProtected(key) {
+				continue
+			}
+			kept = append(kept, key)
+		}
+		dead = kept
+		if len(dead) == 0 {
+			return
+		}
 	}
 	batchOps := make([]KVOp, 0, len(dead))
 	for _, key := range dead {
@@ -544,77 +581,86 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	if len(windowTSs) == 0 {
 		return nil
 	}
+	// 2.2: same partition mutation-lock discipline as CompactL1ToL2 — the durable
+	// publish runs under mutationMu; finalizeTombstones (the removeVector callback)
+	// runs outside it.
+	dead, err := func() ([]int64, error) {
+		defer c.lockPartition(pid)()
 
-	// Same flow as L1→L2
-	events, err := c.mergeEvents(pid, windowTSs)
-	if err != nil {
-		return fmt.Errorf("merge failed: %w", err)
-	}
-	if len(events) == 0 {
-		return nil
-	}
-
-	events, dead := c.filterTombstoned(events)
-	events, err = c.repairDanglingRefs(events)
-	if err != nil {
-		return fmt.Errorf("repair failed: %w", err)
-	}
-
-	// Summarize low-value events for L3
-	for i, evt := range events {
-		if LowValueEventTypes[evt.EventType] {
-			events[i].Content = ""
-			events[i].ToolCalls = nil
+		// Same flow as L1→L2
+		events, err := c.mergeEvents(pid, windowTSs)
+		if err != nil {
+			return nil, fmt.Errorf("merge failed: %w", err)
 		}
-	}
-
-	l3WindowTS := computeWeeklyWindow(windowTSs[0])
-	// Truthful time envelope (see CompactL1ToL2): events stay sorted ascending
-	// through filter/repair/summarize, so first/last are the real bounds.
-	meta := SegmentMeta{
-		PartitionID: pid,
-		WindowTS:    l3WindowTS,
-		Layer:       3,
-		EventCount:  len(events),
-		MinTime:     events[0].Timestamp,
-		MaxTime:     events[len(events)-1].Timestamp,
-		Sealed:      true,
-	}
-
-	batchOps := make([]KVOp, 0, len(events)*2)
-	for seq, evt := range events {
-		evtKVKey := EventKeyStr(pid, l3WindowTS, seq)
-		evtJSON, _ := json.Marshal(evt)
-		batchOps = append(batchOps, KVOp{Type: "put", Key: evtKVKey, Value: string(evtJSON)})
-
-		idxKVKey := IndexKeyStr(pid, evt.EventKey)
-		idxValue := fmt.Sprintf("%d:%d", l3WindowTS, seq)
-		batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
-	}
-
-	metaJSON, _ := json.Marshal(meta)
-	metaKVKey := MetaKeyStr(pid, l3WindowTS)
-	batchOps = append(batchOps, KVOp{Type: "put", Key: metaKVKey, Value: string(metaJSON)})
-
-	if err := c.kv.KVBatch(batchOps); err != nil {
-		return fmt.Errorf("failed to write L3 segment: %w", err)
-	}
-
-	// Cleanup (with the same collision guard as CompactL1ToL2: a week-aligned
-	// earliest source window equals l3WindowTS and must not be deleted).
-	var l3CleanupWindows []int64
-	for _, w := range windowTSs {
-		if w != l3WindowTS {
-			l3CleanupWindows = append(l3CleanupWindows, w)
+		if len(events) == 0 {
+			return nil, nil
 		}
-	}
-	if err := c.deleteSegments(pid, l3CleanupWindows); err != nil {
-		return fmt.Errorf("cleanup failed: %w", err)
-	}
 
-	// Finalize tombstones: dead events are physically gone from L3 too.
+		events, dead := c.filterTombstoned(events)
+		events, err = c.repairDanglingRefs(events)
+		if err != nil {
+			return nil, fmt.Errorf("repair failed: %w", err)
+		}
+
+		// Summarize low-value events for L3
+		for i, evt := range events {
+			if LowValueEventTypes[evt.EventType] {
+				events[i].Content = ""
+				events[i].ToolCalls = nil
+			}
+		}
+
+		l3WindowTS := computeWeeklyWindow(windowTSs[0])
+		// Truthful time envelope (see CompactL1ToL2): events stay sorted ascending
+		// through filter/repair/summarize, so first/last are the real bounds.
+		meta := SegmentMeta{
+			PartitionID: pid,
+			WindowTS:    l3WindowTS,
+			Layer:       3,
+			EventCount:  len(events),
+			MinTime:     events[0].Timestamp,
+			MaxTime:     events[len(events)-1].Timestamp,
+			Sealed:      true,
+		}
+
+		batchOps := make([]KVOp, 0, len(events)*2)
+		for seq, evt := range events {
+			evtKVKey := EventKeyStr(pid, l3WindowTS, seq)
+			evtJSON, _ := json.Marshal(evt)
+			batchOps = append(batchOps, KVOp{Type: "put", Key: evtKVKey, Value: string(evtJSON)})
+
+			idxKVKey := IndexKeyStr(pid, evt.EventKey)
+			idxValue := fmt.Sprintf("%d:%d", l3WindowTS, seq)
+			batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
+		}
+
+		metaJSON, _ := json.Marshal(meta)
+		metaKVKey := MetaKeyStr(pid, l3WindowTS)
+		batchOps = append(batchOps, KVOp{Type: "put", Key: metaKVKey, Value: string(metaJSON)})
+
+		if err := c.kv.KVBatch(batchOps); err != nil {
+			return nil, fmt.Errorf("failed to write L3 segment: %w", err)
+		}
+
+		// Cleanup (with the same collision guard as CompactL1ToL2: a week-aligned
+		// earliest source window equals l3WindowTS and must not be deleted).
+		var l3CleanupWindows []int64
+		for _, w := range windowTSs {
+			if w != l3WindowTS {
+				l3CleanupWindows = append(l3CleanupWindows, w)
+			}
+		}
+		if err := c.deleteSegments(pid, l3CleanupWindows); err != nil {
+			return nil, fmt.Errorf("cleanup failed: %w", err)
+		}
+		return dead, nil
+	}()
+	if err != nil {
+		return err
+	}
+	// Finalize tombstones: dead events are physically gone from L3 too; run after
+	// the mutation lock is released (removeVector is a store→engine callback).
 	c.finalizeTombstones(pid, dead)
-
 	return nil
 }
 

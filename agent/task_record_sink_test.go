@@ -46,7 +46,7 @@ func storeSettle(t *testing.T, store *memory.InMemoryStore, taskID, status strin
 	t.Helper()
 	md := map[string]string{"task_id": taskID, "settle_status": status}
 	if inline {
-		md["task_inline_record"] = "true"
+		md[tagentevent.MetaKeyTaskInlineRecord] = "true"
 	}
 	if err := store.StoreEvent(rb2Key(ms), memory.FullEvent{
 		EventKey:     rb2Key(ms),

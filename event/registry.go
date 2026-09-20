@@ -68,6 +68,13 @@ type EventTypeSpec struct {
 	// Recallable 标记是否可被 recall 取回原文（票据有效）。内置类型均可召回。
 	// 消费方：tool/recall（票据取回路径）。归属同 Embeddable（声明在 C1，策略在 recall 域）。
 	Recallable bool
+
+	// NonProjection 标记「事实链内部记录，永不作为投影 ref」——内部账目/审计/
+	// 快照类事件（inbox_receipt、task_spawned、resident_session、compaction 事件
+	// 本体）。§5.5 单一判定源：正常提交、在线 spill 回补、冷启动重建三条 append
+	// 路径共用 IsNonProjectionRecord，排除声明在此一处，不再各写各的类型枚举。
+	// 默认 false（含未知类型，经 specOrDefault）：保守进投影，与既有行为等价。
+	NonProjection bool
 }
 
 var (
@@ -182,6 +189,27 @@ func IsSkeletonEventType(name string) bool {
 	return specOrDefault(name).Skeleton
 }
 
+// IsNonProjectionEventType 报告类型是否事实链内部记录（永不进投影）。委托
+// 注册表；未知类型回退 defaultSpec.NonProjection=false（保守进投影，与历史
+// 「排除白名单」语义等价）。
+func IsNonProjectionEventType(name string) bool {
+	return specOrDefault(name).NonProjection
+}
+
+// IsNonProjectionRecord 是非投影判定的**唯一入口**（§5.5）：类型维度经注册表
+// NonProjection 声明，外加携带 MetaKeyTaskInlineRecord 标记的事件（终态 settle
+// 在回合内已作为 tool result 返回，进投影即双呈现）。正常提交（persistBusEvent）、
+// 在线 spill 回补（ReplayProjectionHandler）、冷启动重建（tail/fallback replay）
+// 三条路径必须共同使用本谓词，不得再私设类型/标记枚举。历史快照/旧元数据的
+// 兼容排除分支已按受管重置裁決删除（旧数据只经 §3.7 清点+显式 reset 处置，
+// 运行时只认当前格式）。
+func IsNonProjectionRecord(eventType string, metadata map[string]string) bool {
+	if IsNonProjectionEventType(eventType) {
+		return true
+	}
+	return metadata[MetaKeyTaskInlineRecord] != ""
+}
+
 // RegisteredEventTypes 返回全部已注册类型名（诊断/测试用）。
 func RegisteredEventTypes() []string {
 	registryMu.RLock()
@@ -204,7 +232,9 @@ func init() {
 		{Name: TypeThinkingRecall, Role: model.RoleUser, Skeleton: true, Recallable: true},
 		{Name: TypeThinkingKnowledge, Role: model.RoleUser, Skeleton: true, Embeddable: true, Recallable: true},
 		// 策展固化物：长期记忆，TTL 豁免（-1）；正 key 真实存储事件。
-		{Name: TypeContextCompressSummary, Role: model.RoleUser, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},
+		// 策展固化物：长期记忆，TTL 豁免（-1）；正 key 真实事件。compaction 事件本体是事实链
+		// 记录：投影综述由 RebuildProjectionFromWAL 从载荷重建，本体进投影即双表示。
+		{Name: TypeContextCompressSummary, Role: model.RoleUser, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true, NonProjection: true},
 		// 滚动摘要 ref：合成负 key；低价值；TTL 3 天。
 		{Name: TypeContextCompress, Role: model.RoleUser, Skeleton: true, LowValue: true, TTLDays: 3, Synthetic: true, Recallable: true},
 		// 工具链折叠 ref：合成负 key。
@@ -214,9 +244,9 @@ func init() {
 		{Name: TypeSettleFold, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
 		// 任务 spawn 记录（R2）：registry 重建数据源；事实链记录不进投影；TTL 与
 		// external_input 对齐（30d，超期常驻服务由 R3 重挂+TaskID 桥兜底）。
-		{Name: TypeTaskSpawned, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true},
+		{Name: TypeTaskSpawned, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true, NonProjection: true},
 		// 常驻会话生命周期记录（R3）：spawn 全参/终态结局；事实链审计记录不进投影。
-		{Name: TypeResidentSession, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true},
+		{Name: TypeResidentSession, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true, NonProjection: true},
 		// 证据门控巩固产物（T-D）：长期记忆 TTL 豁免(-1)；正 key 真实事件；骨架保留、
 		// 可嵌入、可召回。一处注册即全链路（摘要/骨架/TTL/角色/嵌入/召回）生效。
 		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},

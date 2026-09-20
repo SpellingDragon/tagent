@@ -70,6 +70,21 @@ func resolveTriggerSource(raw string) (source string, deliverable bool) {
 	}
 }
 
+// resolveDeliveryTarget is the single chat-target rule of the delivery
+// switch (§8.2): the stamped meta_chat_id — carried verbatim from the
+// receiving turn through to the send — wins; a deliverable output without a
+// stamp (settled task reclaimed into a turn) falls back to the most recent
+// active user chat; nothing known is HELD, never broadcast, never guessed.
+func resolveDeliveryTarget(metaChatID, lastActive string) (target string, ok bool) {
+	if metaChatID != "" {
+		return metaChatID, true
+	}
+	if lastActive != "" {
+		return lastActive, true
+	}
+	return "", false
+}
+
 func main() {
 	// 1. Load single config file (tagent.yaml)
 	configPath := "tagent.yaml"
@@ -525,14 +540,15 @@ func main() {
 					if chatID == "" {
 						// Async settled-task turns may lack meta_chat_id; fall back to the
 						// most recent active user session instead of dropping the reply.
-						if v, ok := lastActiveChat.Load("latest"); ok {
-							chatID = v.(string)
-							log.Infof("[Agent][task] 无 meta_chat_id，回退最近活跃会话 %s", chatID)
+						raw, _ := lastActiveChat.Load("latest")
+						lastActive, _ := raw.(string)
+						target, hasTarget := resolveDeliveryTarget(chatID, lastActive)
+						if !hasTarget {
+							log.Warnf("[Agent][%s] 无 meta_chat_id，无可回退会话，扣留: %s", triggerSource, truncateLog(content))
+							continue
 						}
-					}
-					if chatID == "" {
-						log.Warnf("[Agent][%s] 无 meta_chat_id，无法发送: %s", triggerSource, truncateLog(content))
-						continue
+						log.Infof("[Agent][%s] 无 meta_chat_id，回退最近活跃会话 %s", triggerSource, target)
+						chatID = target
 					}
 					// Stop typing indicator for this user
 					if startTime, ok := typingActive.Load(chatID); ok {

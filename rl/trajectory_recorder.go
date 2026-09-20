@@ -144,6 +144,32 @@ func (tr *TrajectoryRecorder) GenerateContent(ctx context.Context, request *mode
 	return tr.recordGenerateContent(ctx, tr.inner, request)
 }
 
+// GenerateContentIter (§4.5B) exposes the iterator entry point so a flow that prefers
+// model.IterModel is not downgraded by this decorator. It reuses recordGenerateContent
+// (which allocates the batch slot, holds the gcWg lease, and records on stream end) but
+// invokes it only when the caller actually starts iterating — so CREATING the iterator
+// neither consumes a batch index nor fires the model (lazy, §4.5C-consistent). A recorder
+// must observe every response, so it inherently intercepts (its recording goroutine is the
+// same one the channel path uses); this preserves the iterator CONTRACT and capability
+// surface, not merely hiding it behind GenerateContent.
+func (tr *TrajectoryRecorder) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
+	return func(yield func(*model.Response) bool) {
+		ch, err := tr.recordGenerateContent(ctx, tr.inner, request)
+		if err != nil || ch == nil {
+			return
+		}
+		for resp := range ch {
+			if !yield(resp) {
+				go func() {
+					for range ch {
+					}
+				}() // let the recorder drain and write its record; do not wedge it
+				return
+			}
+		}
+	}, nil
+}
+
 // Info implements model.Model.
 func (tr *TrajectoryRecorder) Info() model.Info {
 	return tr.inner.Info()
@@ -392,6 +418,27 @@ func NewTrajectoryRecorderModelWrapper(inner model.Model, tr *TrajectoryRecorder
 
 func (w *TrajectoryRecorderModelWrapper) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
 	return w.tr.recordGenerateContent(ctx, w.inner, request)
+}
+
+// GenerateContentIter (§4.5B) mirrors TrajectoryRecorder.GenerateContentIter: expose the
+// iterator entry point (reusing the shared record path lazily) so a sub-agent model
+// wrapped here does not hide an underlying IterModel capability from the flow.
+func (w *TrajectoryRecorderModelWrapper) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
+	return func(yield func(*model.Response) bool) {
+		ch, err := w.tr.recordGenerateContent(ctx, w.inner, request)
+		if err != nil || ch == nil {
+			return
+		}
+		for resp := range ch {
+			if !yield(resp) {
+				go func() {
+					for range ch {
+					}
+				}()
+				return
+			}
+		}
+	}, nil
 }
 
 func (w *TrajectoryRecorderModelWrapper) Info() model.Info {

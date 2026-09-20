@@ -44,8 +44,12 @@ type ErrorTrackingStore struct {
 	replayProjection func(FullEvent)
 }
 
-// 编译期锁定 ErrorTrackingStore 是 MemoryStore。
-var _ MemoryStore = (*ErrorTrackingStore)(nil)
+// 编译期锁定 ErrorTrackingStore 是 MemoryStore + EventReplayer + RetentionGuard（D4/§2.8 透传链完整）。
+var (
+	_ MemoryStore    = (*ErrorTrackingStore)(nil)
+	_ EventReplayer  = (*ErrorTrackingStore)(nil)
+	_ RetentionGuard = (*ErrorTrackingStore)(nil)
+)
 
 // NewErrorTrackingStore 包裹 inner 做错误追踪。sink 为 nil 则纯透传（不上报）。返回具体类型
 // 以支持 SetMemSpill/ReplaySpilled（步4 兜底），仍满足 MemoryStore 接口。
@@ -57,6 +61,18 @@ func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTracki
 // 恢复后经 ReplaySpilled 重放（事件不丢，at-least-once 延伸到存储层）。path 空则禁用。
 func (s *ErrorTrackingStore) SetMemSpill(path string) {
 	s.spill = NewMemSpill(path)
+	// §2.8: wire the store's retention guard into the spill so each pending key's durable
+	// original is protected until replayed, and rebuild the lease from any pre-existing
+	// (prior-run) spill before the scanner is released. Silent no-op if the backend has
+	// no lease (non-durable / degradation-off custom store).
+	if s.spill != nil {
+		if g, ok := s.inner.(RetentionGuard); ok {
+			s.spill.SetGuard(g)
+			if err := s.spill.ProtectAllPending(); err != nil {
+				log.Warnf("[ErrorTrackingStore] spill retention rebuild failed (pending keys may not be protected): %v", err)
+			}
+		}
+	}
 }
 
 // SetReplayProjection 注册重放双写回调（design-report-closeout 5.5）：每条重放成功的
@@ -86,6 +102,40 @@ func (s *ErrorTrackingStore) WalQuarantined() int64 {
 		return q.WalQuarantined()
 	}
 	return 0
+}
+
+// RetentionGuard 递归透传（§2.8/§2.6「材料保留」）：恢复 owner 经最外层装饰链保护/
+// 释放未确认原文并 arm 首扫门控。内层无租约则 no-op。
+func (s *ErrorTrackingStore) ProtectKey(key int64) {
+	if g, ok := s.inner.(RetentionGuard); ok {
+		g.ProtectKey(key)
+	}
+}
+
+func (s *ErrorTrackingStore) ReleaseKey(key int64) {
+	if g, ok := s.inner.(RetentionGuard); ok {
+		g.ReleaseKey(key)
+	}
+}
+
+func (s *ErrorTrackingStore) ArmRetention() {
+	if g, ok := s.inner.(RetentionGuard); ok {
+		g.ArmRetention()
+	}
+}
+
+// BeginHold/EndHold 透传 §5.8 登记屏障（装饰链完整：屏障语义由底层 lease 持有，
+// 无屏障能力的底层静默跳过）。
+func (s *ErrorTrackingStore) BeginHold() {
+	if h, ok := s.inner.(RetentionHoldable); ok {
+		h.BeginHold()
+	}
+}
+
+func (s *ErrorTrackingStore) EndHold() {
+	if h, ok := s.inner.(RetentionHoldable); ok {
+		h.EndHold()
+	}
 }
 
 // MemSpillLen 返回当前兜底待重放事件数（诊断/背压信号）。
@@ -143,6 +193,14 @@ func (s *ErrorTrackingStore) report(dep string, err error) {
 func (s *ErrorTrackingStore) StoreEvent(key int64, event FullEvent) error {
 	err := s.inner.StoreEvent(key, event)
 	if err != nil {
+		if IsDuplicateEventKey(err) {
+			// A public duplicate is a caller contract conflict (§2.1), NOT a
+			// memory-dependency failure: pass it through untouched — no failure
+			// report (would pollute the degradation matrix) and no spill (would
+			// re-deliver a fact the store already has). Precedent: the
+			// ErrVectorSearchNotSupported short-circuit on SearchByEmbedding.
+			return err
+		}
 		s.report(classifyStoreErr(err), err)
 		s.spillEvent(key, event) // 步4：memory 退化事件兜底落盘（不丢，恢复后重放）
 	} else {
@@ -154,12 +212,36 @@ func (s *ErrorTrackingStore) StoreEvent(key int64, event FullEvent) error {
 func (s *ErrorTrackingStore) StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error {
 	err := s.inner.StoreEventWithEmbedding(key, event, embedding)
 	if err != nil {
+		if IsDuplicateEventKey(err) {
+			return err // 同 StoreEvent：§2.1 公共重复为契约冲突，不上报、不落盘
+		}
 		s.report(classifyStoreErr(err), err)
 		s.spillEvent(key, event) // 步4：兜底落盘（embedding 不重放，重放走 StoreEvent 文本路径重嵌入）
 	} else {
 		s.reportStoreHealthy()
 	}
 	return err
+}
+
+// ReplayEvent implements EventReplayer (D4 design): canonical replay passthrough with
+// error tracking. Unlike StoreEvent, a failed ReplayEvent does NOT trigger mem_spill—the
+// reliable-inbox path owns retry/backoff for events it has already durably received;
+// double-spilling would create a duplicate entry in the spill file.
+func (s *ErrorTrackingStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error) {
+	replayer, ok := s.inner.(EventReplayer)
+	if !ok {
+		return ReplayNew, canonicalFact,
+			errors.New("ErrorTrackingStore: inner store does not implement EventReplayer")
+	}
+	result, stored, err := replayer.ReplayEvent(key, canonicalFact)
+	if err != nil {
+		// D4: report the failure for degradation tracking, but do NOT spillEvent.
+		// The reliable-inbox caller manages its own at-least-once retry semantics.
+		s.report(classifyStoreErr(err), err)
+		return result, stored, err
+	}
+	s.reportStoreHealthy()
+	return result, stored, nil
 }
 
 // reportStoreHealthy 写成功时上报存储栈三依赖恢复（M2：写成功证明 memory + disk + rustviking

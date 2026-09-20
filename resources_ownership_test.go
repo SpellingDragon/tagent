@@ -1,8 +1,10 @@
 package tagent
 
 import (
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/kv"
@@ -136,7 +138,7 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 
 	const n = 8
 	stores := make([]memory.MemoryStore, n)
-	releases := make([]func(), n)
+	releases := make([]func() error, n)
 	var startWG, doneWG sync.WaitGroup
 	startWG.Add(n)
 	for i := 0; i < n; i++ {
@@ -145,8 +147,8 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 		doneWG.Add(1)
 		go func(i int) {
 			defer doneWG.Done()
-			store, release, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (memory.MemoryStore, error) {
-				return memory.NewInMemoryStore(), nil
+			store, _, release, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (openedResource, error) {
+				return openedResource{store: memory.NewInMemoryStore()}, nil
 			})
 			if err != nil {
 				t.Errorf("acquire %d: %v", i, err)
@@ -170,12 +172,369 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 		releases[i]()
 	}
 	// Full release closes the entry — a subsequent acquire must reopen cleanly.
-	store2, release2, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (memory.MemoryStore, error) {
-		return memory.NewInMemoryStore(), nil
+	store2, _, release2, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (openedResource, error) {
+		return openedResource{store: memory.NewInMemoryStore()}, nil
 	})
 	if err != nil {
 		t.Fatalf("reopen after concurrent release: %v", err)
 	}
 	release2()
 	_ = store2
+}
+
+// F6: a release closure must be idempotent — calling it twice from the same
+// consumer (e.g. a second agent.Close()) must NOT over-decrement the lease
+// count of the entry and must NOT affect a different generation at the same path.
+func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
+	dir := t.TempDir()
+	rr := NewRuntimeResources()
+	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+	openFn := func() (openedResource, error) {
+		k, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
+		if err != nil {
+			return openedResource{}, err
+		}
+		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
+		return openedResource{store: s}, err
+	}
+	// Two acquirers share the same entry (two leases).
+	storeA, _, releaseA, err := rr.acquire("localfile", dir, fp, openFn)
+	require.NoError(t, err)
+	storeB, _, releaseB, err := rr.acquire("localfile", dir, fp, openFn)
+	require.NoError(t, err)
+	require.Same(t, storeA, storeB, "same path must share one instance")
+
+	// A releases TWICE (simulates two agent.Close() calls): must be idempotent.
+	releaseA()
+	releaseA() // second call: must NOT decrement B's lease
+
+	// B's store must still be writable (entry is not closed yet).
+	pid := memory.PartitionIDFromName("test")
+	key := memory.NewSnowflakeEventKey(pid, 0)
+	require.NoError(t, storeB.StoreEvent(key, memory.FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		Content: "after-A-double-close", Timestamp: 1700000000000,
+	}), "F6: survivor store must remain writable after sibling double-Close")
+
+	// Now B releases: entry should close cleanly (lease count reaches zero).
+	releaseB()
+}
+
+// F6: a stale release closure must NOT decrement a NEW generation of an entry
+// that reused the same path.
+func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
+	dir := t.TempDir()
+	rr := NewRuntimeResources()
+	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+	openFn := func() (openedResource, error) {
+		k, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
+		if err != nil {
+			return openedResource{}, err
+		}
+		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
+		return openedResource{store: s}, err
+	}
+	// First entry: acquire and release (entry is closed, generation is gone).
+	_, _, staleRelease, err := rr.acquire("localfile", dir, fp, openFn)
+	require.NoError(t, err)
+	staleRelease() // release → entry closed
+
+	// New entry at same path: acquire fresh (new generation).
+	newStore, _, newRelease, err := rr.acquire("localfile", dir, fp, openFn)
+	require.NoError(t, err)
+
+	// Stale release from the old generation must NOT affect the new entry.
+	staleRelease() // already released once; second call is a no-op via Once
+
+	// newStore must still be usable (not closed by the stale release).
+	pid := memory.PartitionIDFromName("stale")
+	key := memory.NewSnowflakeEventKey(pid, 0)
+	require.NoError(t, newStore.StoreEvent(key, memory.FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		Content: "after-stale", Timestamp: 1700000000000,
+	}), "F6: stale release must not close the new generation entry")
+
+	newRelease()
+}
+
+// TestEngineOwnership_SharedReopenGetsFreshEngine 锁定 F7/D5 核心不变量：共享
+// engine 随 registry entry 同代拥有——同路径消费者共用同一活引擎实例；单个消费者
+// 释放绝不拆掉存活者所用的共享引擎；最后释放关闭引擎（回收后台 worker，此即
+// namedEngines 造成的泄漏）；reopen（新代）必须拿到绑定新 backend 的全新引擎，
+// 绝不复用陈旧的已关引擎。用 type:memory + mock 引擎（无 KV 重建）使 Ready()
+// 只反映关闭态，关闭判定确定化。
+func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
+	dir := t.TempDir()
+	rr := NewRuntimeResources()
+	mc := MemoryConfig{
+		Type: "memory", Path: dir,
+		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 32}},
+	}
+	fp := fingerprintMemory(mc)
+	openFn := func() (openedResource, error) {
+		s := memory.NewInMemoryStore()
+		return openedResource{store: s, engine: buildSharedEngine(s, mc)}, nil
+	}
+
+	store1, eng1, rel1, err := rr.acquire("mem", dir, fp, openFn)
+	require.NoError(t, err)
+	require.NotNil(t, eng1, "engine-configured shared path must have an entry-owned engine")
+	require.True(t, eng1.Ready(), "freshly built engine must be live")
+
+	// Second consumer on the same path borrows the SAME live engine instance.
+	_, eng2, rel2, err := rr.acquire("mem", dir, fp, openFn)
+	require.NoError(t, err)
+	require.Same(t, eng1, eng2, "one generation shares exactly one engine instance")
+
+	// A single consumer releasing must NOT close the shared engine: the survivor
+	// store keeps working through it.
+	rel1()
+	require.True(t, eng1.Ready(), "sibling release must not close the shared engine")
+	require.NoError(t, store1.StoreEvent(
+		memory.NewSnowflakeEventKey(1, 0),
+		memory.FullEvent{EventKey: memory.NewSnowflakeEventKey(1, 0), PartitionID: 1,
+			EventType: "external_input", Content: "survivor", Timestamp: 1700000000000}))
+
+	// The LAST release closes the engine (reclaims its background worker).
+	rel2()
+	require.False(t, eng1.Ready(), "F7: last lease release must close the shared engine")
+
+	// Reopen (new generation) must build a FRESH engine, never reuse the stale one.
+	_, eng3, rel3, err := rr.acquire("mem", dir, fp, openFn)
+	require.NoError(t, err)
+	require.NotNil(t, eng3)
+	require.NotSame(t, eng1, eng3, "F7/D5: reopen must get a fresh engine bound to a fresh backend")
+	require.True(t, eng3.Ready())
+	rel3()
+}
+
+// --- D5 close-order + error-reachability test doubles (task 6.4) ---
+
+// seqStore wraps a memory.MemoryStore, records the teardown sequence, lets the
+// test force Close to fail, and exposes StopProducers so closeResource stops
+// the forgetting producers BEFORE the engine worker (D5 close order).
+type seqStore struct {
+	memory.MemoryStore
+	seq *[]string
+	err error
+}
+
+func (s *seqStore) StopProducers() { *s.seq = append(*s.seq, "producers") }
+func (s *seqStore) Close() error {
+	*s.seq = append(*s.seq, "store")
+	return s.err
+}
+
+// seqEngine wraps a memory.MemoryEngine; Close records the step and can fail.
+// Only Close is exercised (closeResource never calls the promoted methods).
+type seqEngine struct {
+	memory.MemoryEngine
+	seq *[]string
+	err error
+}
+
+func (e *seqEngine) Close() error {
+	*e.seq = append(*e.seq, "engine")
+	return e.err
+}
+
+// TestCloseOrder_ProducersEngineBackendAndErrorReach locks the D5 close order
+// (producers → engine → backend flush) and its error contract: a close error
+// must reach the release caller (never a silent "safe close"), an UNCONFIRMED
+// engine worker stop holds the writer lock so a reopen is refused (never two
+// writers), and a confirmed stop releases the lock for a genuine reopen.
+func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
+	t.Run("engine error reaches release and holds lock", func(t *testing.T) {
+		dir := t.TempDir()
+		rr := NewRuntimeResources()
+		var seq []string
+		engErr := errors.New("engine worker stuck")
+		fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+		openFn := func() (openedResource, error) {
+			s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq}
+			e := &seqEngine{seq: &seq, err: engErr}
+			return openedResource{store: s, engine: e}, nil
+		}
+		_, _, rel, err := rr.acquire("localfile", dir, fp, openFn)
+		require.NoError(t, err)
+		rerr := rel()
+		require.ErrorIs(t, rerr, engErr, "engine close error must reach the release caller")
+		require.Equal(t, []string{"producers", "engine"}, seq,
+			"backend must NOT be flushed after an unconfirmed engine stop (stale worker may still write)")
+		_, _, _, err2 := rr.acquire("localfile", dir, fp, openFn)
+		require.ErrorIs(t, err2, ErrResourcePoisoned, "unconfirmed worker stop must SEAL the path via an explicit poisoned entry (§6.4), not a silent fd leak")
+	})
+
+	t.Run("store error reaches release and frees lock", func(t *testing.T) {
+		dir := t.TempDir()
+		rr := NewRuntimeResources()
+		var seq []string
+		storeErr := errors.New("backend flush failed")
+		fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+		openFn := func() (openedResource, error) {
+			s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq, err: storeErr}
+			e := &seqEngine{seq: &seq}
+			return openedResource{store: s, engine: e}, nil
+		}
+		_, _, rel, err := rr.acquire("localfile", dir, fp, openFn)
+		require.NoError(t, err)
+		rerr := rel()
+		require.ErrorIs(t, rerr, storeErr, "store close error must reach the release caller")
+		require.Equal(t, []string{"producers", "engine", "store"}, seq,
+			"D5 close order: producers → engine → backend flush")
+		// Confirmed engine stop → lock released → genuine reopen succeeds.
+		_, _, rel2, err2 := rr.acquire("localfile", dir, fp, openFn)
+		require.NoError(t, err2, "confirmed stop must release the writer lock for reopen")
+		_ = rel2() // same mock store still errors on Close — cleanup only, lock already proven free
+	})
+}
+
+// blockCloseStore wraps a memory.MemoryStore whose Close blocks until unblocked,
+// simulating a slow backend flush so the test can observe whether a same-path
+// reopen wrongly races ahead of (or deadlocks against) the in-progress close.
+type blockCloseStore struct {
+	memory.MemoryStore
+	entered chan struct{} // receives once when Close begins
+	unblock chan struct{} // Close returns after this is signalled
+}
+
+func (s *blockCloseStore) Close() error {
+	s.entered <- struct{}{}
+	<-s.unblock
+	return nil
+}
+
+// TestReleaseCoordination_SamePathReopenWaitsForClose locks D5 line 115: a
+// same-path acquire and the final release share ONE per-key mutex, so a reopen
+// WAITS for the previous generation to finish closing (rather than mis-reading
+// the freed registry slot against a still-held flock and returning
+// ErrStoreLocked), while an unrelated path is never blocked behind the slow
+// flush (the registry global lock is not held across I/O).
+func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	rr := NewRuntimeResources()
+	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+
+	entered := make(chan struct{}, 1)
+	unblock := make(chan struct{})
+	bs := &blockCloseStore{MemoryStore: memory.NewInMemoryStore(), entered: entered, unblock: unblock}
+	_, _, rel, err := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
+		return openedResource{store: bs}, nil
+	})
+	require.NoError(t, err)
+
+	// Last-lease release runs a slow close (blocks inside store.Close, flock held).
+	relDone := make(chan error, 1)
+	go func() { relDone <- rel() }()
+	<-bs.entered // close is now in progress
+
+	// Same-path reopen must block on the per-key mutex — not return ErrStoreLocked.
+	type outcome struct {
+		store memory.MemoryStore
+		rel   func() error
+		err   error
+	}
+	reopen := make(chan outcome, 1)
+	go func() {
+		s, _, r2, e := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
+			return openedResource{store: memory.NewInMemoryStore()}, nil
+		})
+		reopen <- outcome{store: s, rel: r2, err: e}
+	}()
+
+	// An unrelated path must complete during the slow flush (proves the global
+	// registry lock is not held across I/O).
+	dfp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
+	otherDone := make(chan error, 1)
+	go func() {
+		_, _, r3, e := rr.acquire("localfile", other, dfp, func() (openedResource, error) {
+			return openedResource{store: memory.NewInMemoryStore()}, nil
+		})
+		if e == nil {
+			_ = r3()
+		}
+		otherDone <- e
+	}()
+	select {
+	case e := <-otherDone:
+		require.NoError(t, e, "unrelated path must not block behind a slow close")
+	case <-time.After(3 * time.Second):
+		t.Fatal("unrelated path blocked behind slow close — registry global lock held across I/O")
+	}
+
+	// The reopen must still be waiting (the old generation has not finished).
+	select {
+	case got := <-reopen:
+		t.Fatalf("reopen proceeded before close finished (err=%v) — per-key coordination missing", got.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Let the close finish; the reopen must then SUCCEED (fresh instance), not
+	// ErrStoreLocked.
+	bs.unblock <- struct{}{}
+	require.NoError(t, <-relDone)
+
+	select {
+	case got := <-reopen:
+		require.NoError(t, got.err, "D5: reopen after the old generation closed must succeed, not ErrStoreLocked")
+		require.NotNil(t, got.store)
+		_ = got.rel()
+	case <-time.After(3 * time.Second):
+		t.Fatal("reopen never proceeded after the close finished")
+	}
+}
+
+// TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly locks the D5
+// degraded path on a SHARED store: an embedding provider that fails to build
+// must leave the entry-owned engine nil (never a dangling engine cached), still
+// publish + close the backend as one generation, and let each borrowing agent
+// keep an INDEPENDENT capacity hook with keyword-only retrieval (8.10). A later
+// reopen (new generation) must get a fresh backend store AND, once the provider
+// works, a real live engine — proving the stale generation is fully isolated.
+func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) {
+	dir := t.TempDir()
+	rr := NewRuntimeResources()
+	bad := MemoryConfig{
+		Type: "memory", Path: dir,
+		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "no-such-provider", Dimensions: 8}},
+	}
+	openBad := func() (openedResource, error) {
+		s := memory.NewInMemoryStore()
+		return openedResource{store: s, engine: buildSharedEngine(s, bad)}, nil
+	}
+	store1, eng1, rel1, err := rr.acquire("mem", dir, fingerprintMemory(bad), openBad)
+	require.NoError(t, err)
+	require.Nil(t, eng1, "failing embedding provider must degrade the entry engine to nil (no dangling engine)")
+
+	// The degraded shared store still gives each consumer an INDEPENDENT
+	// capacity hook and keeps keyword-only retrieval — the borrow bridge carries
+	// NO engine (capacity-only wrapper), so no vector indexing happens.
+	var hooked int
+	borrow1, berr := wireMemoryEngine(store1, eng1 /*nil*/, bad, func(int64, int, string) { hooked++ })
+	require.NoError(t, berr)
+	if ep, ok := borrow1.(memory.MemoryEngineProvider); ok {
+		require.Nil(t, ep.MemoryEngine(), "degraded shared borrow must be capacity-only (nil engine)")
+	}
+	key := memory.NewSnowflakeEventKey(1, 0)
+	require.NoError(t, borrow1.StoreEvent(key, memory.FullEvent{
+		EventKey: key, PartitionID: 1, EventType: "external_input", Content: "deg", Timestamp: 1700000000000}))
+	require.Equal(t, 1, hooked, "capacity hook must still fire on the degraded capacity-only borrow path")
+
+	require.NoError(t, rel1(), "a degraded entry (engine nil) must still close cleanly")
+
+	// Reopen (new generation, working provider) → fresh isolated store + live engine.
+	good := MemoryConfig{
+		Type: "memory", Path: dir,
+		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 8}},
+	}
+	store2, eng2, rel2, err := rr.acquire("mem", dir, fingerprintMemory(good), func() (openedResource, error) {
+		s := memory.NewInMemoryStore()
+		return openedResource{store: s, engine: buildSharedEngine(s, good)}, nil
+	})
+	require.NoError(t, err)
+	require.NotSame(t, store1, store2, "reopen must get a fresh backend store (old generation isolated)")
+	require.NotNil(t, eng2, "reopen with a valid provider must build a real engine")
+	require.True(t, eng2.Ready())
+	require.NoError(t, rel2())
 }

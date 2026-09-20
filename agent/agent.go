@@ -99,7 +99,13 @@ type TagentAgent struct {
 	// memStoreRelease (resident-readiness-plan 4.2): lease release bound to
 	// THIS agent's lifecycle — executed from Close; nil for borrowed/shell
 	// agents and for isolated stores the agent fully owns via its own Close.
-	memStoreRelease func()
+	// Returns the release's close error (last-lease close reaches Close, D5).
+	memStoreRelease func() error
+	// memStoreOwned (§6.3/review M-2): this agent is the SOLE close owner of
+	// memStore (isolated build) — the direct-Close fallback may fire when no
+	// lease exists. Borrowed shells and leased holders are false: shared state
+	// exits only through the lease release, never through them.
+	memStoreOwned bool
 
 	// residentNames (4.5/4.6 introspection): the resident topology binding
 	// table this agent belongs to (entry + sub-agents), set at New().
@@ -132,16 +138,22 @@ type TagentAgent struct {
 	// Set via SetTrajectoryRecorder. StartLoop calls SetSessionInfo on it.
 	trajectoryRecorder *rl.TrajectoryRecorder
 
-	// Persistent Event Loop — 持久事件循环（StartLoop 模式）。生命周期一次性：
-	// StopLoop 后实例终结（loopTerminated），二次 StartLoop 显式报错——输出通道
-	// 在循环 goroutine 退出时恰好关闭一次（消费者 range 语义的终态信号），
-	// 复用已关通道即生产 panic（V15，2026-09-14 修复）。
-	outputCh       chan *event.Event  // 持久输出 channel（循环 goroutine 退出时恰好关闭一次）
-	loopCtx        context.Context    // Loop context（StopLoop 取消）
-	loopCancel     context.CancelFunc // Loop cancel
-	loopActive     atomic.Bool        // Loop 是否运行中
-	loopTerminated atomic.Bool        // Loop 已终结（StopLoop 后不可再 Start）
-	loopWg         sync.WaitGroup     // 等待 Loop goroutine 退出
+	// Persistent Event Loop — 持久事件循环（StartLoop 模式）。§6.1：Start/Stop/Close
+	// 由同一显式状态机协调（loopIdle→loopRunning→loopStopping→loopClosed），
+	// 首次关闭执行、其余等待同一完成结果（不因标志已翻跳过等待）；在途计数
+	// （loopWg.Add）先于发布 running 登记；输出通道在循环 goroutine 退出（含
+	// panic 路径）时恰好关闭一次，从未启动则由 Close 落定终态（V15 终结语义不变）。
+	outputCh     chan *event.Event  // 持久输出 channel（经 settleOutput 恰关闭一次）
+	loopCtx      context.Context    // Loop context（StopLoop 取消）
+	loopCancel   context.CancelFunc // Loop cancel
+	loopState    atomic.Int32       // §6.1 生命周期状态机（loopIdle/Running/Stopping/Closed）
+	loopDone     chan struct{}      // 循环终态：由 settleOutput 与 outputCh 同批关闭；Stop/Close 等同一终态
+	loopWg       sync.WaitGroup     // 等待 Loop goroutine 退出
+	outputSettle sync.Once          // review C-1/M-1：outputCh+loopDone 的结算唯一入口（结构上恰一次）
+	closeMu      sync.Mutex         // §6.1 关闭协调：首次 Close 执行，并发者等待同一结果
+	closeStarted bool
+	closeDone    chan struct{}
+	closeErr     error
 
 	// residentReady closes once the cold-start rebuild sequence (R1
 	// projection + R2 task registry + R3 orphan adjudication) completes —
@@ -170,9 +182,14 @@ type TagentConfig struct {
 	MemoryStore memory.MemoryStore // Optional: external MemoryStore (default: InMemoryStore)
 	// MemStoreRelease (resident-readiness-plan 4.2): lease release for the
 	// provided MemoryStore; executed exactly once from Close. nil = the agent
-	// does not own a registry lease (borrowed/shell agents; isolated stores
-	// closed via the normal Close path).
-	MemStoreRelease    func()
+	// does not own a registry lease.
+	MemStoreRelease func() error
+	// MemStoreBorrowed (§6.3/review M-2) marks an executor shell that BORROWS
+	// the resident shared store without a lease: it holds no close right over
+	// shared state at all — the direct-Close fallback must not fire. Default
+	// false = the agent owns its (isolated) store exclusively and Close flushes
+	// it via the fallback tail.
+	MemStoreBorrowed   bool
 	SessionSvc         session.Service // R4（review 🔴1）：外部 SessionSvc 注入（executorOnly 热重建壳复用常驻实例；nil=内部新建）
 	SystemPrompt       string          // System prompt loaded from AGENTS.md/SOUL.md/USER.md/TOOLS.md
 	SystemPromptSource prompt.Getter   // Hot-reloadable system prompt (optional, overrides SystemPrompt); Getter 接口（文件即真源，mtime 热重载）
@@ -192,14 +209,10 @@ type TagentConfig struct {
 	// falls back to the task package default (2m).
 	TaskTerminalTTL time.Duration
 
-	// TaskStaleAfter is the stale-observation threshold: job-kind tasks
-	// alive_detached past it are marked stale (one-time notice) — observation
-	// only, no termination (2.5). Zero → task default (1h); negative disables.
-	TaskStaleAfter time.Duration
-	// TaskJobDeadline is the OPTIONAL termination policy: job-kind tasks
-	// detached past it are cancelled by owner and finalized failed (2.6).
-	// Zero (default) disables termination; negative disables explicitly.
-	TaskJobDeadline time.Duration
+	// TaskDefaultTTL is the unified reaper's fallback absolute lifetime for
+	// spawns whose model-side `ttl` is unset (async-task-lifetime 10.5). Zero →
+	// task package default (10m). There is no disable path — no task is immortal.
+	TaskDefaultTTL time.Duration
 
 	// Thinking/reasoning controls (merged into model.GenerationConfig)
 	ThinkingEnabled      *bool
@@ -381,6 +394,29 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if busErr != nil {
 		return nil, fmt.Errorf("agent %q: durable inbox init failed: %w", name, busErr)
 	}
+	// T-3.5（fix-resident-reliability-boundaries D4）：可靠模式要求事实链支持显式
+	// 幂等重放（memory.EventReplayer）——durable inbox 的 prepared_fact 重放依赖
+	// ReplayEvent 的 commit-vs-replay 语义才能既不双写也不漂移地收敛。配置了 durable
+	// bus 却接入无重放能力的 store 会让「至少一次投递」静默退化为可能的双写，必须
+	// fail-loud，绝不降级为 volatile。
+	if bus.Durable() {
+		if _, ok := memStore.(memory.EventReplayer); !ok {
+			return nil, fmt.Errorf("agent %q: durable inbox requires a replay-capable MemoryStore (%T does not implement memory.EventReplayer); refusing to degrade durability", name, memStore)
+		}
+		// §2.8: wire the store's retention guard and rebuild+arm the lease from existing
+		// unacked envelopes BEFORE serving. The durable store's lifecycle scanner has been
+		// gated on Lease.Ready() since open (restart race); arming here releases it only once
+		// the durable originals of unacked material are protected. §5.8: a failed inventory
+		// is NOT swallowed — the bus holds the registration barrier (forgetting blocked on
+		// the incomplete view) and this build REFUSES to open ingest, reporting the block
+		// instead of serving durable inputs a later pass could destroy unguarded.
+		if g, ok := memStore.(memory.RetentionGuard); ok {
+			bus.SetRetentionGuard(g)
+			if aerr := bus.ArmRetentionFromInbox(); aerr != nil {
+				return nil, fmt.Errorf("agent %q: recovery inventory unreadable — ingest refused, forgetting barrier held (explicit block, no silent proceed): %w", name, aerr)
+			}
+		}
+	}
 	projection := compress.NewSessionProjection()
 
 	// Task layer: tools spawn long-running work via the injected task.TaskSpawner;
@@ -415,10 +451,11 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// Zero → task package default (2m). Bounds the resume window for
 		// terminal tasks; wired from YAML task_terminal_ttl.
 		TerminalTTL: cfg.TaskTerminalTTL,
-		// Zero → task package default (1h); negative disables observation.
-		StaleAfter: cfg.TaskStaleAfter,
-		// Optional job termination policy; zero (default) = disabled.
-		JobDeadline: cfg.TaskJobDeadline,
+		// §10.5: unified reaper fallback lifetime for tasks whose spec has no
+		// explicit TTL (restored/subagent). Wired from the operator task_default_ttl
+		// slot; zero → the task package floors it to 10m. The reaper is always on —
+		// the old StaleAfter/JobDeadline knobs are retired.
+		DefaultTTL: cfg.TaskDefaultTTL,
 		// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
 		// 进行中任务的 settle/轮询不受影响）。默认关（DiskBlockSpawn=false 或
 		// Degradation 未接线 → gate 为 nil）。
@@ -495,6 +532,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
 		memStoreRelease:     cfg.MemStoreRelease,
+		memStoreOwned:       !cfg.MemStoreBorrowed,
 		memPlugin:           memPlugin,
 		config:              cfg,
 		sessionSvc:          sessionSvc,

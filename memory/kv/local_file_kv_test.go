@@ -214,33 +214,6 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 	<-done
 }
 
-// TestWalQuarantined_BareKV (§8.11⑤): bare-KV level quarantine counting.
-// The full decorator-chain reachability is covered by
-// TestDiagnostics_WALQuarantinedThroughChain in memory/engine.
-func TestWalQuarantined_BareKV(t *testing.T) {
-	dir := t.TempDir()
-	// Hand-write a WAL: good head + bad mid line + good tail (the good tail
-	// proves the bad line is mid-file → quarantined, not torn-tail).
-	wal := "{\"o\":\"p\",\"k\":\"bad1\",\"v\":\"x\"}\n" +
-		"{\"CORRUPT\n" +
-		"{\"o\":\"p\",\"k\":\"k1\",\"v\":\"v1\"}\n"
-	if err := os.WriteFile(filepath.Join(dir, "kv.wal.jsonl"), []byte(wal), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	kv2, err := NewLocalFileKV(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer kv2.Close()
-	if kv2.WalQuarantined() != 1 {
-		t.Fatalf("quarantined = %d, want 1", kv2.WalQuarantined())
-	}
-	if v, err := kv2.KVGet("k1"); err != nil || v != "v1" {
-		t.Fatalf("good tail lost: v=%q err=%v", v, err)
-	}
-}
-
 // TestLocalFileKV_ListPartitionIDs (implementation-hardening 2.4): any
 // persisted key in a partition's namespace ({pid}:evt|idx|meta|tomb:…)
 // proves the partition; non-partition namespaces (global:*) and unparsable

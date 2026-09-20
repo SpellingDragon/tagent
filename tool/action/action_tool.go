@@ -43,7 +43,8 @@ type ActionTool struct {
 	outputDir     string // oversized-output save dir (scratch), separate from command cwd
 	runAsUser     string
 	runAsGroup    string
-	description   string // Configurable tool description
+	description   string        // Configurable tool description
+	defaultTTL    time.Duration // resolved absolute lifetime for spawns that omit `ttl` (async-task-lifetime 10.2)
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig // Optional: override default monitor config
@@ -172,6 +173,7 @@ func (ct *ActionTool) SetResidentMetaDir(dir string) {
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
 		description: "Execute a shell command via tmux and wait for it to stabilize. Returns the final status and captured output.",
+		defaultTTL:  defaultTaskTTL,
 	}
 
 	for _, opt := range opts {
@@ -215,6 +217,34 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	}
 
 	return ct
+}
+
+// defaultTaskTTL is the absolute lifetime applied when neither an explicit `ttl`
+// arg nor a configured default is present (async-task-lifetime 10.2: every task
+// is bounded; there is no "unlimited" default).
+const defaultTaskTTL = 10 * time.Minute
+
+// SetDefaultTaskTTL overrides the default absolute lifetime used for spawns that
+// omit `ttl`. build_agent reuses the operator's task_job_deadline slot as this
+// default (§10.5 folds the old detached-gated mechanism away). Non-positive
+// values are ignored so the 10-minute floor always holds.
+func (ct *ActionTool) SetDefaultTaskTTL(d time.Duration) {
+	if d > 0 {
+		ct.defaultTTL = d
+	}
+}
+
+// resolveTTL returns the effective absolute lifetime for a spawn: explicit ttl
+// seconds when > 0, else the configured default, else the 10-minute floor. A
+// negative ttl is rejected in Call before this runs; 0 means "omit → default".
+func (ct *ActionTool) resolveTTL(args ActionArgs) time.Duration {
+	if args.TTL > 0 {
+		return time.Duration(args.TTL) * time.Second
+	}
+	if ct.defaultTTL > 0 {
+		return ct.defaultTTL
+	}
+	return defaultTaskTTL
 }
 
 // Close stops the TmuxMonitor and reaps all sessions this instance still
@@ -264,7 +294,11 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 				},
 				"quiet_timeout": {
 					Type:        "integer",
-					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds.",
+					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds. NOTE: this only detects SILENCE and never bounds total lifetime — that is `ttl`'s job. A legitimate build slower than your `ttl` (default 10m) is still reaped, so for long-running work raise `ttl` alongside `quiet_timeout`.",
+				},
+				"ttl": {
+					Type:        "integer",
+					Description: "ABSOLUTE lifetime of this session in seconds. The reaper terminates the backing process and retires the task this long after its last reentrant refresh (op=send / resume reset it; op=peek does not). 0 or omitted = configured default (10 minutes if unset). There is NO way to disable the reaper and NO age exemption by mode: 'resident'/'interactive' services are NOT immortal — pass a large ttl for long-lived services, or re-enter to extend. Orthogonal to quiet_timeout (which only detects silence, never bounds total lifetime).",
 				},
 				"mode": {
 					Type:        "string",
@@ -355,6 +389,14 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 	}
 
+	// ttl validation (async-task-lifetime 10.2): a finite absolute lifetime is
+	// ALWAYS in force — 0/omitted falls back to the configured default, so the only
+	// invalid input is a negative value. There is intentionally no sentinel meaning
+	// "disabled"/"unlimited".
+	if args.TTL < 0 {
+		return nil, fmt.Errorf("action: ttl must be >= 0 (0 = configured default; there is no 'unlimited'), got %d", args.TTL)
+	}
+
 	// mode validation + normalization (B1). Empty = oneshot.
 	switch args.Mode {
 	case "", string(ModeOneshot):
@@ -403,6 +445,7 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			Relaunch:    ct.relaunchClosure(spawner, args),
 			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
 			Alive:       ct.sessionAliveClosure(sessionID),
+			TTL:         ct.resolveTTL(args),
 		}, detector)
 		if res.Blocked != "" {
 			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以 result
@@ -511,6 +554,7 @@ func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs)
 			Relaunch:    ct.relaunchClosure(spawner, args),
 			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
 			Alive:       ct.sessionAliveClosure(sessionID),
+			TTL:         ct.resolveTTL(args),
 		}, detector), nil
 	}
 }
@@ -681,6 +725,14 @@ type ActionArgs struct {
 	// waits) produce no output while working; the default 150s threshold kills
 	// them. 0 = use global default. Values < StableDuration are rejected in Call.
 	QuietTimeout int `json:"quiet_timeout,omitempty"`
+	// TTL is the requested ABSOLUTE lifetime (seconds) for a spawned session: the
+	// unified reaper terminates its backing process and retires the task this long
+	// after its last reentrant refresh (op=send/resume reset it; op=peek does not).
+	// 0/omitted = the configured default TTL (empty config → 10 minutes). There is
+	// NO disable sentinel and NO age exemption by mode: resident/interactive must
+	// pass a large ttl or re-enter to stay alive. Orthogonal to QuietTimeout, which
+	// only detects silence and never bounds total lifetime (async-task-lifetime).
+	TTL int `json:"ttl,omitempty"`
 	// Mode selects session liveness semantics (2026-09-11 B1):
 	//   "oneshot" (default) — command; settles on real exit; 60s quiet reports
 	//   stable (never kills).
@@ -884,7 +936,16 @@ func (ct *ActionTool) callSessionOp(ctx context.Context, args *ActionArgs) (any,
 	case "peek":
 		return ct.opPeek(args, target)
 	case "send":
-		return ct.opSend(args, target)
+		res, err := ct.opSend(args, target)
+		if err == nil {
+			// §10.4: a write-type reentry extends the task's absolute TTL — reset the
+			// reaper anchor to now so the task is measured from this send. op=peek
+			// (read-only) deliberately never calls this, and op=stop is terminal.
+			if tc, ok := task.TaskControllerFromContext(ctx); ok {
+				tc.RenewTTLBySession(target)
+			}
+		}
+		return res, err
 	case "stop":
 		return ct.opStop(args, target)
 	default:

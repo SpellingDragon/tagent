@@ -22,7 +22,7 @@ func TestRenderTaskBoard_ActiveOnly(t *testing.T) {
 		mkBoardTask("fail-44444444", "bad cmd", TaskFailed),    // aged out
 		mkBoardTask("susp-55555555", "stuck proc", TaskSuspect),
 	}
-	board := RenderBoard(tasks)
+	board := RenderBoard(tasks, 10*time.Minute)
 	if board == "" {
 		t.Fatal("expected non-empty board")
 	}
@@ -38,6 +38,26 @@ func TestRenderTaskBoard_ActiveOnly(t *testing.T) {
 	}
 }
 
+// TestRenderTaskBoard_ShowsRemainingLifetime locks the 10.6 behavior: each row
+// shows the effective remaining lifetime to the reaper, so the model can decide
+// once from a single read. Uses the same effective-TTL + anchor math reconcileTTL
+// honors: spec.TTL wins; otherwise the passed defaultTTL floor applies.
+func TestRenderTaskBoard_ShowsRemainingLifetime(t *testing.T) {
+	// Explicit 30m TTL, started 10m ago → 20m remaining.
+	bounded := &Task{ID: "job-aaaaaaaa", Spec: TaskSpec{Desc: "big build", TTL: 30 * time.Minute}, status: TaskRunning, StartedAt: time.Now().Add(-10 * time.Minute)}
+	board := RenderBoard([]*Task{bounded}, time.Hour) // defaultTTL irrelevant when spec.TTL is set
+	if !strings.Contains(board, "剩余 20m") {
+		t.Errorf("explicit 30m TTL 10m into life must render ~20m remaining; got:\n%s", board)
+	}
+
+	// No explicit TTL → falls back to the manager floor: 10m floor, started 1m ago → 9m.
+	floored := &Task{ID: "svc-bbbbbbbb", Spec: TaskSpec{Desc: "dev server"}, status: TaskRunning, StartedAt: time.Now().Add(-1 * time.Minute)}
+	board2 := RenderBoard([]*Task{floored}, 10*time.Minute)
+	if !strings.Contains(board2, "剩余 9m") {
+		t.Errorf("unset TTL must render remaining vs the 10m floor (~9m at 1m in); got:\n%s", board2)
+	}
+}
+
 // TestRenderTaskBoard_EmptyWhenNoActive: all-terminal registry → empty board
 // (nothing injected).
 func TestRenderTaskBoard_EmptyWhenNoActive(t *testing.T) {
@@ -45,7 +65,7 @@ func TestRenderTaskBoard_EmptyWhenNoActive(t *testing.T) {
 		mkBoardTask("d", "x", TaskCompleted),
 		mkBoardTask("c", "y", TaskCancelled),
 	}
-	if got := RenderBoard(tasks); got != "" {
+	if got := RenderBoard(tasks, 10*time.Minute); got != "" {
 		t.Errorf("expected empty board, got %q", got)
 	}
 }
@@ -110,7 +130,7 @@ func TestInjectTaskBoard_NoUserAppends(t *testing.T) {
 // with the fixed wait-guidance line (end-turn, no sleep spin); when there are
 // no active tasks the board is empty and no guidance appears.
 func TestRenderTaskBoard_WaitGuidanceLine(t *testing.T) {
-	board := RenderBoard([]*Task{mkBoardTask("r-11111111", "long job", TaskRunning)})
+	board := RenderBoard([]*Task{mkBoardTask("r-11111111", "long job", TaskRunning)}, 10*time.Minute)
 	if board == "" {
 		t.Fatal("expected non-empty board")
 	}
@@ -119,7 +139,7 @@ func TestRenderTaskBoard_WaitGuidanceLine(t *testing.T) {
 			t.Errorf("board guidance line missing %q:\n%s", want, board)
 		}
 	}
-	if got := RenderBoard([]*Task{mkBoardTask("d", "x", TaskCompleted)}); got != "" {
+	if got := RenderBoard([]*Task{mkBoardTask("d", "x", TaskCompleted)}, 10*time.Minute); got != "" {
 		t.Errorf("no-active board must be empty (no dangling guidance), got %q", got)
 	}
 }

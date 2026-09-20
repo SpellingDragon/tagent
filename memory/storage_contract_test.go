@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -67,10 +68,15 @@ func TestBackendParity_DuplicateRejected(t *testing.T) {
 		err := s.StoreEvent(key, clash)
 		require.Error(t, err, name)
 		require.True(t, errors.Is(err, ErrDuplicateEventKey), "%s: want typed duplicate, got %v", name, err)
+		// (2.1) A SAME-content public duplicate must ALSO be refused on both
+		// backends — orphan/already-committed completion belongs to ReplayEvent
+		// only, so the public path never accepts a re-write of an existing key.
+		sameErr := s.StoreEvent(key, evt)
+		require.True(t, errors.Is(sameErr, ErrDuplicateEventKey),
+			"%s: 2.1 same-content public duplicate must be refused, got %v", name, sameErr)
 	}
-	// file 后端的提交协议（2.6）额外保证：同键同内容是未提交孤儿的幂等补齐
-	// （见 TestOrphanCommit_IdempotentCompletion）；memory 是测试/原型后端，
-	// 无提交协议，简单拒绝（已文档化差异）。
+	// 2.1 公共契约一致：两端 StoreEvent 对任意已存 EventKey 都拒（同内容或异内容
+	// 均返回 typed duplicate）。孤儿/半孤儿的幂等补齐只属内部 ReplayEvent 路径。
 }
 
 func TestBackendParity_NoPartitionQueryIsEmpty(t *testing.T) {
@@ -268,16 +274,196 @@ func TestBarrierFailure_FailsCommitAndSparesCountThroughDecorations(t *testing.T
 		"a failed commit must not touch the live count")
 
 	// 孤儿边界（D1.3 已声明）：屏障失败时 evt/idx 可能已落 KV 层并被查询
-	// 看到——「未提交」绝不解释为「保证不存在」；收敛靠下方同内容幂等补齐。
-	// The heal path (2.6): retrying the SAME event completes the orphan
-	// commit — exactly one count, exactly one visible fact, no duplicate.
-	failing.healed.Store(true)
-	require.NoError(t, decorated.StoreEvent(key, FullEvent{
+	// 看到——「未提交」绝不解释为「保证不存在」。
+	// (2.1) A public StoreEvent retry is now REFUSED (both backends reject public
+	// duplicates); the durable recovery path completes the orphan via the internal
+	// ReplayEvent — exactly one count, exactly one visible fact, no duplicate.
+	require.True(t, IsDuplicateEventKey(decorated.StoreEvent(key, FullEvent{
 		EventKey: key, PartitionID: pid, EventType: "external_input",
 		EventSummary: "x", Content: "x", Timestamp: 1,
-	}))
+	})), "2.1: public StoreEvent must refuse the orphan retry")
+	failing.healed.Store(true)
+	res, _, herr := decorated.ReplayEvent(key, FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		EventSummary: "x", Content: "x", Timestamp: 1,
+	})
+	require.NoError(t, herr, "replay-based orphan completion must succeed once the barrier heals")
+	// 2.4: the barrier-failed commit still left idx+evt+meta durable in the KV, and this
+	// replay re-runs the barrier successfully, so the record is a COMPLETE durable fact
+	// classified AlreadyCommitted FROM THE FACT CHAIN — not from the cache (which §2.4
+	// disqualifies as the oracle). Nothing had to be written this call (evt+meta were
+	// both present), so it is not a Repair; the live count is made authoritative by the
+	// partition recompute (before+1 below), and exactly one fact is visible (refs len 1
+	// below). Pre-§2.4 the LRU-oracle returned Repaired for this cold/uncertain case.
+	require.Equal(t, ReplayAlreadyCommitted, res, "2.4: a durable-complete replay classifies from the fact chain, not the cache")
 	require.Equal(t, before+1, base.GetStats().TotalEvents)
 	refs, qerr := base.QueryEvents(QueryOptions{PartitionIDs: []int{pid}})
 	require.NoError(t, qerr)
 	require.Len(t, refs, 1, "orphan completion must not duplicate the fact")
+}
+
+// ReplayEvent interface parity tests (D4 design, F3/F8 fix):
+// FileSegmentStore must satisfy EventReplayer at compile time.
+var _ EventReplayer = (*FileSegmentStore)(nil)
+
+// TestReplayEvent_Classification verifies the three ReplayResult values.
+func TestReplayEvent_Classification(t *testing.T) {
+	kv := newMockKV()
+	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	pid := 1
+	key := NewSnowflakeEventKey(pid, 0)
+	evt := FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		EventSummary: "replay-test", Content: "replay-content", Timestamp: 1700000000000,
+	}
+
+	// 1. First commit → ReplayNew.
+	result, got, err := store.ReplayEvent(key, evt)
+	require.NoError(t, err)
+	require.Equal(t, ReplayNew, result, "first commit must be ReplayNew")
+	require.Equal(t, key, got.EventKey)
+
+	// 2. Same key, same content → ReplayAlreadyCommitted (key is now in cache).
+	result2, _, err2 := store.ReplayEvent(key, evt)
+	require.NoError(t, err2, "already-committed replay must return nil error")
+	require.Equal(t, ReplayAlreadyCommitted, result2,
+		"replay of already-committed event must be ReplayAlreadyCommitted (F8)")
+
+	// 3. Live-count must be 1 (not 2) after two replays.
+	require.EqualValues(t, 1, store.GetStats().TotalEvents,
+		"ReplayAlreadyCommitted must NOT increment live-count (F8 fix)")
+}
+
+// TestReplayEvent_HalfOrphanRepair verifies that when the evt KV slot is
+// missing but idx exists, ReplayEvent writes the missing slot and returns
+// ReplayRepaired (F3 fix). The repaired fact must be readable from KV even
+// after cache eviction.
+func TestReplayEvent_HalfOrphanRepair(t *testing.T) {
+	kv := newMockKV()
+	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	pid := 1
+	key := NewSnowflakeEventKey(pid, 0)
+	evt := FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		EventSummary: "half-orphan", Content: "half-orphan-replay", Timestamp: 1700000000000,
+	}
+	// Normal commit first (writes idx+evt to KV).
+	require.NoError(t, store.StoreEvent(key, evt))
+
+	// Simulate half-orphan: delete only the evt KV slot.
+	idxKey := IndexKeyStr(pid, key)
+	idxVal, err := kv.KVGet(idxKey)
+	require.NoError(t, err)
+	var windowTS, seq int64
+	_, perr := fmt.Sscanf(idxVal, "%d:%d", &windowTS, &seq)
+	require.NoError(t, perr)
+	require.NoError(t, kv.KVDelete(EventKeyStr(pid, windowTS, int(seq))))
+	store.cache.Remove(key) // simulate restart: cache is cold
+
+	// ReplayEvent must detect the missing evt, write it, and classify as Repaired.
+	result, _, err := store.ReplayEvent(key, evt)
+	require.NoError(t, err, "F3: ReplayEvent must return nil after repairing half-orphan")
+	require.Equal(t, ReplayRepaired, result,
+		"F3: half-orphan repair must be classified as ReplayRepaired")
+
+	// Verify: the evt KV slot was actually written (not just cached).
+	store.cache.Remove(key)
+	got, err := store.GetEvent(key)
+	require.NoError(t, err, "F3: after ReplayRepaired, GetEvent must succeed via KV path")
+	require.Equal(t, "half-orphan-replay", got.Content)
+}
+
+// F3: half-orphan repair (idx exists, evt KV slot missing) must actually write
+// the event content. Without the fix (832f43e8), completeOrphanCommit returned
+// nil while the evt KV slot remained missing — the success was cache-only and
+// was lost after eviction/reopen.
+func TestHalfOrphan_RepairWritesMissingEvtSlot(t *testing.T) {
+	kv := newMockKV()
+	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	pid := 1
+	key := NewSnowflakeEventKey(pid, 0)
+	evt := FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		EventSummary: "s", Content: "half-orphan-f3", Timestamp: 1700000000000,
+	}
+	// Normal first commit: writes idx+evt+meta to KV.
+	require.NoError(t, store.StoreEvent(key, evt))
+
+	// Simulate half-orphan: delete ONLY the evt KV slot, keep idx intact.
+	// Parse idx to find the exact evt key that was written.
+	idxKey := IndexKeyStr(pid, key)
+	idxVal, err := kv.KVGet(idxKey)
+	require.NoError(t, err)
+	var windowTS, seq int64
+	_, perr := fmt.Sscanf(idxVal, "%d:%d", &windowTS, &seq)
+	require.NoError(t, perr)
+	evtKVKey := EventKeyStr(pid, windowTS, int(seq))
+	require.NoError(t, kv.KVDelete(evtKVKey), "setup: must delete evt slot only")
+
+	// Evict from cache: simulates restart after cache eviction.
+	store.cache.Remove(key)
+
+	// (2.1) A public StoreEvent must NOT repair an orphan: the identity's idx
+	// already exists → the public path refuses and leaves the evt slot missing.
+	// Orphan repair is the internal ReplayEvent path's job.
+	err = store.StoreEvent(key, evt)
+	require.True(t, IsDuplicateEventKey(err),
+		"2.1: public StoreEvent must refuse (not repair) a half-orphan, got %v", err)
+	_, kvGetErr := kv.KVGet(evtKVKey)
+	require.True(t, errors.Is(kvGetErr, ErrKeyNotFound),
+		"2.1: the public path must not write the missing evt slot")
+
+	// ReplayEvent then repairs the same half-orphan (F3): evt slot written, readable.
+	res, _, rerr := store.ReplayEvent(key, evt)
+	require.NoError(t, rerr)
+	require.Equal(t, ReplayRepaired, res, "F3: ReplayEvent must repair the half-orphan")
+	_, kvGetErr = kv.KVGet(evtKVKey)
+	require.NoError(t, kvGetErr, "F3: after ReplayEvent repair the evt slot is readable from KV")
+	store.cache.Remove(key)
+	got, err := store.GetEvent(key)
+	require.NoError(t, err, "F3: after cache eviction, GetEvent must read from the repaired KV entry")
+	require.Equal(t, "half-orphan-f3", got.Content)
+}
+
+// F8: calling StoreEvent with an already-committed EventKey and byte-identical
+// content must NOT increment the live-count. Without the fix (832f43e8), every
+// such retry went through completeOrphanCommit which unconditionally called
+// eventCount++, causing the count to grow without bound and driving premature
+// capacity eviction of real events.
+func TestAlreadyCommitted_RetryDoesNotIncrementLiveCount(t *testing.T) {
+	kv := newMockKV()
+	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	pid := 1
+	key := NewSnowflakeEventKey(pid, 0)
+	evt := FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		EventSummary: "s", Content: "same-content", Timestamp: 1700000000000,
+	}
+	// First commit via the public path: count 0→1.
+	require.NoError(t, store.StoreEvent(key, evt))
+	countAfterFirst := store.GetStats().TotalEvents
+	require.EqualValues(t, 1, countAfterFirst, "first commit must increment count to 1")
+
+	// (2.1) A public StoreEvent retry with the SAME key+content is now REFUSED
+	// (both backends reject public duplicates) and must not touch the count.
+	require.True(t, IsDuplicateEventKey(store.StoreEvent(key, evt)),
+		"2.1: public StoreEvent must refuse a same-content duplicate")
+	require.Equal(t, countAfterFirst, store.GetStats().TotalEvents,
+		"2.1: a refused public duplicate must not increment the live count")
+
+	// F8 idempotency lives on the internal ReplayEvent path: replaying the
+	// already-committed fact is a no-op that never re-increments the live count.
+	res, _, rerr := store.ReplayEvent(key, evt)
+	require.NoError(t, rerr)
+	require.Equal(t, ReplayAlreadyCommitted, res)
+	require.Equal(t, countAfterFirst, store.GetStats().TotalEvents,
+		"F8: ReplayEvent of an already-committed event must NOT increment the live-count")
 }
