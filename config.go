@@ -419,12 +419,13 @@ type MemoryConfig struct {
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
-	// FSync (localfile type only; implementation-hardening D1): durability
-	// switch for the local-file KV — when enabled (default), every WAL append
-	// is fsynced and snapshot renames are directory-synced, so acknowledged
-	// writes survive power loss. Pointer semantics: nil = default (enabled);
-	// explicit false trades durability for throughput (a downgrade warning is
-	// logged at startup).
+	// FSync (localfile type only) is ACCEPTED AND IGNORED since the
+	// localfile-minimization ruling (complete-resident-reliability-protocol
+	// §9.2): the backend has no WAL/fsync machinery — Sync() is a full
+	// snapshot atomic tmp+rename whose durability claim stops at "visible to
+	// a fresh process after a successful barrier", NOT power-loss survival.
+	// The key stays only so existing configs load unchanged; production
+	// durability tiers are a rustviking-stage decision (evidence §9.5).
 	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent

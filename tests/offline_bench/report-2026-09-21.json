@@ -1,0 +1,525 @@
+{
+  "compression": [
+    {
+      "allocs_bytes_per_round": 2903.312,
+      "compressed": true,
+      "duration_ms": 2,
+      "go_mem_runtime": {
+        "heap_inuse_mib": 3.766,
+        "sys_mib": 637.38
+      },
+      "refs": 1000,
+      "retained_refs": 29
+    },
+    {
+      "allocs_bytes_per_round": 3085.406,
+      "compressed": true,
+      "duration_ms": 22,
+      "go_mem_runtime": {
+        "heap_inuse_mib": 15.734,
+        "sys_mib": 637.38
+      },
+      "refs": 10000,
+      "retained_refs": 29
+    },
+    {
+      "allocs_bytes_per_round": 3223.859,
+      "compressed": true,
+      "duration_ms": 230,
+      "go_mem_runtime": {
+        "heap_inuse_mib": 106.781,
+        "sys_mib": 637.38
+      },
+      "refs": 100000,
+      "retained_refs": 29
+    }
+  ],
+  "env": {
+    "cgo_executable": "offline_bench.test",
+    "go_version": "go1.24.1",
+    "goarch": "arm64",
+    "goos": "darwin",
+    "host": "WEIYEPENG-MC0",
+    "memory_stats_kind": "Go runtime MemStats only — deliberately NOT OS RSS (no OS sampler is used; see go_mem_* fields)",
+    "num_cpu": 12,
+    "probe_conurrencies": [
+      1,
+      10,
+      100
+    ],
+    "probe_per_worker": 10,
+    "storage_sample_cap": 20000,
+    "storage_scales": [
+      1000,
+      10000,
+      100000
+    ]
+  },
+  "generated": "2026-09-21T02:41:34+08:00",
+  "storage": {
+    "cells": [
+      {
+        "allocs_bytes_per_write": 977364.448,
+        "commit_summary": {
+          "dirty_tmp_orphans": 0,
+          "kv_batches": 0,
+          "kv_deletes": 0,
+          "kv_gets": 1001,
+          "kv_puts": 2001,
+          "kv_ranges": 0,
+          "kv_scans": 1,
+          "kv_snapshot_bytes": 1340917,
+          "partitions_discoverable": 1,
+          "segments_on_disk": 1,
+          "sync_barriers": 1000,
+          "sync_barriers_per_write": 1
+        },
+        "go_mem_runtime": {
+          "heap_inuse_mib": 6.547,
+          "sys_mib": 63.892
+        },
+        "probes": {
+          "1": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 0.001,
+                "mean_ms": 0,
+                "n": 10,
+                "p50_ms": 0,
+                "p95_ms": 0.001
+              },
+              "probes": 10,
+              "throughput_ps": 1678697.331
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 5.544,
+                "mean_ms": 5.287,
+                "n": 10,
+                "p50_ms": 5.341,
+                "p95_ms": 5.544
+              },
+              "probes": 10,
+              "throughput_ps": 189.132
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 0.053
+          },
+          "10": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 0.018,
+                "mean_ms": 0.001,
+                "n": 100,
+                "p50_ms": 0,
+                "p95_ms": 0.002
+              },
+              "probes": 100,
+              "throughput_ps": 966921.612
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 16.74,
+                "mean_ms": 10.801,
+                "n": 100,
+                "p50_ms": 10.882,
+                "p95_ms": 13.859
+              },
+              "probes": 100,
+              "throughput_ps": 92.583
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 0.116
+          },
+          "100": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 1.228,
+                "mean_ms": 0.002,
+                "n": 1000,
+                "p50_ms": 0,
+                "p95_ms": 0.001
+              },
+              "probes": 1000,
+              "throughput_ps": 452599.482
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 194.775,
+                "mean_ms": 91.408,
+                "n": 1000,
+                "p50_ms": 91.566,
+                "p95_ms": 131.317
+              },
+              "probes": 1000,
+              "throughput_ps": 10.94
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 0.976
+          }
+        },
+        "requested_scale_full": 1000,
+        "sampled": false,
+        "scale": 1000,
+        "write": {
+          "max_ms": 14.816,
+          "mean_ms": 2.666,
+          "n": 1000,
+          "p50_ms": 2.621,
+          "p95_ms": 4.449
+        },
+        "write_thr": 374.923,
+        "written": 1000
+      },
+      {
+        "allocs_bytes_per_write": 13991375.643,
+        "commit_summary": {
+          "dirty_tmp_orphans": 0,
+          "kv_batches": 0,
+          "kv_deletes": 0,
+          "kv_gets": 10001,
+          "kv_puts": 20001,
+          "kv_ranges": 0,
+          "kv_scans": 1,
+          "kv_snapshot_bytes": 13427917,
+          "partitions_discoverable": 1,
+          "segments_on_disk": 1,
+          "sync_barriers": 10000,
+          "sync_barriers_per_write": 1
+        },
+        "go_mem_runtime": {
+          "heap_inuse_mib": 39.922,
+          "sys_mib": 452.634
+        },
+        "probes": {
+          "1": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 2,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 0.042,
+                "mean_ms": 0.022,
+                "n": 10,
+                "p50_ms": 0.02,
+                "p95_ms": 0.042
+              },
+              "probes": 10,
+              "throughput_ps": 44676.364
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 76.929,
+                "mean_ms": 56.532,
+                "n": 10,
+                "p50_ms": 52.824,
+                "p95_ms": 76.929
+              },
+              "probes": 10,
+              "throughput_ps": 17.689
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 0.566
+          },
+          "10": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 1.66,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 10.81,
+                "mean_ms": 1.751,
+                "n": 100,
+                "p50_ms": 0.035,
+                "p95_ms": 8.947
+              },
+              "probes": 100,
+              "throughput_ps": 571.082
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 114.186,
+                "mean_ms": 91.682,
+                "n": 100,
+                "p50_ms": 91.376,
+                "p95_ms": 104.5
+              },
+              "probes": 100,
+              "throughput_ps": 10.907
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 0.959
+          },
+          "100": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 1.622,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 976.637,
+                "mean_ms": 199.232,
+                "n": 1000,
+                "p50_ms": 194.081,
+                "p95_ms": 489.503
+              },
+              "probes": 1000,
+              "throughput_ps": 5.019
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 1899.04,
+                "mean_ms": 646.911,
+                "n": 1000,
+                "p50_ms": 624.634,
+                "p95_ms": 1152.269
+              },
+              "probes": 1000,
+              "throughput_ps": 1.546
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 9.268
+          }
+        },
+        "requested_scale_full": 10000,
+        "sampled": false,
+        "scale": 10000,
+        "write": {
+          "max_ms": 77.305,
+          "mean_ms": 12.386,
+          "n": 10000,
+          "p50_ms": 12.43,
+          "p95_ms": 22.166
+        },
+        "write_thr": 80.728,
+        "written": 10000
+      },
+      {
+        "allocs_bytes_per_write": 27405794.535,
+        "commit_summary": {
+          "dirty_tmp_orphans": 0,
+          "kv_batches": 0,
+          "kv_deletes": 0,
+          "kv_gets": 20001,
+          "kv_puts": 40001,
+          "kv_ranges": 0,
+          "kv_scans": 1,
+          "kv_snapshot_bytes": 26877917,
+          "partitions_discoverable": 1,
+          "segments_on_disk": 1,
+          "sync_barriers": 20000,
+          "sync_barriers_per_write": 1
+        },
+        "go_mem_runtime": {
+          "heap_inuse_mib": 76.188,
+          "sys_mib": 637.38
+        },
+        "probes": {
+          "1": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 2,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 0.039,
+                "mean_ms": 0.02,
+                "n": 10,
+                "p50_ms": 0.018,
+                "p95_ms": 0.039
+              },
+              "probes": 10,
+              "throughput_ps": 48425.681
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 108.125,
+                "mean_ms": 104.696,
+                "n": 10,
+                "p50_ms": 104.512,
+                "p95_ms": 108.125
+              },
+              "probes": 10,
+              "throughput_ps": 9.551
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 1.047
+          },
+          "10": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 1.7,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 27.829,
+                "mean_ms": 3.414,
+                "n": 100,
+                "p50_ms": 1.305,
+                "p95_ms": 17.66
+              },
+              "probes": 100,
+              "throughput_ps": 292.848
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 213.961,
+                "mean_ms": 183.205,
+                "n": 100,
+                "p50_ms": 183.774,
+                "p95_ms": 202.043
+              },
+              "probes": 100,
+              "throughput_ps": 5.458
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 1.895
+          },
+          "100": {
+            "get_point_read": {
+              "kv_ops_per_probe": {
+                "point_get": 1.72,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 1447.098,
+                "mean_ms": 399.185,
+                "n": 1000,
+                "p50_ms": 431.786,
+                "p95_ms": 867.428
+              },
+              "probes": 1000,
+              "throughput_ps": 2.505
+            },
+            "query_window": {
+              "kv_ops_per_probe": {
+                "point_get": 0,
+                "range": 0,
+                "scan": 2
+              },
+              "latency": {
+                "max_ms": 3457.264,
+                "mean_ms": 1329.129,
+                "n": 1000,
+                "p50_ms": 1298.191,
+                "p95_ms": 2077.738
+              },
+              "probes": 1000,
+              "throughput_ps": 0.752
+            },
+            "sync_barriers": 0,
+            "total_wall_s": 18.547
+          }
+        },
+        "requested_scale_full": 100000,
+        "sampled": true,
+        "scale": 100000,
+        "write": {
+          "max_ms": 147.248,
+          "mean_ms": 22.938,
+          "n": 20000,
+          "p50_ms": 23.006,
+          "p95_ms": 41.667
+        },
+        "write_thr": 43.591,
+        "written": 20000
+      }
+    ],
+    "note": "fork/s is not exercised by this memory/compress workload (tmux probes live in the action domain)"
+  },
+  "token_estimator": {
+    "code": {
+      "abs_err_pct_p50": 68.317,
+      "abs_err_pct_p90": 68.317,
+      "est_over_ref_p50": 1.683,
+      "est_over_ref_p90": 1.683,
+      "samples": 50
+    },
+    "en": {
+      "abs_err_pct_p50": 140.741,
+      "abs_err_pct_p90": 142.857,
+      "est_over_ref_p50": 2.407,
+      "est_over_ref_p90": 2.429,
+      "samples": 50
+    },
+    "json": {
+      "abs_err_pct_p50": 50.769,
+      "abs_err_pct_p90": 50.769,
+      "est_over_ref_p50": 1.508,
+      "est_over_ref_p90": 1.508,
+      "samples": 50
+    },
+    "reference": "tiktoken cl100k_base",
+    "tiktoken_version": "0.14.0",
+    "zh": {
+      "abs_err_pct_p50": 31.148,
+      "abs_err_pct_p90": 32.258,
+      "est_over_ref_p50": 0.695,
+      "est_over_ref_p90": 0.855,
+      "samples": 50
+    }
+  }
+}

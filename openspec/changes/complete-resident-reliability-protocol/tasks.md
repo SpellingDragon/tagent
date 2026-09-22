@@ -90,13 +90,13 @@
 
 ## 9. 同语义性能、文档与交付
 
-- [ ] 9.1 基准包装器改为真实含Sync的底层契约，透传枚举/计数/错误，删除no-op能力回退；编译断言和错误spy覆盖。
-- [ ] 9.2 运行包装后单事件无Close退出的独立进程读回测试，fsync-on/flush-only两模式均有实际屏障次数与原文/索引证据。**【降级（localfile 最小化裁决）：localfile 已无 fsync/WAL 机。收敛为：单事件无 Close 独立进程读回（flush-only 语义）验证 Sync 屏障确实原子落盘、新进程可读到原文/索引；不再宣称掉电耐久、不再有 fsync-on 模式认证。生产耐久/fsync 两模式证据推迟至 rustviking 阶段。】**
-- [ ] 9.3 分报Get/Query，增加actual written/sample/Sync次数/commit+dirty摘要/实际环境配置，Go内存统计不冒称OS RSS。
-- [ ] 9.4 在阶段8通过后后台运行并等待完整矩阵：RUN_OFFLINE_BENCH=1 BENCH_REPORT=<新报告路径> go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v；任何cell失败不算完成。**【降级（localfile 最小化裁决）：localfile 为临时验证后端，不对其跑完整 ×fsync on/off 生产耐久矩阵（该维度已随最小化移除）。本阶段仅保留功能正确性组合门；完整同语义性能/耐久基准推迟至接线专用存储引擎后。】**
-- [ ] 9.5 保留旧JSON，更新既有REPORT.md撤销无屏障耐久解释，标明20k采样；用新同语义基线建立回归比较，不虚构压缩/tokenizer重测。
-- [ ] 9.6 更新现有架构/操作文档和本变更evidence.md：逐场景列最终实现/测试/命令/结果，删除被替代的旧分支及误导注释；运行严格OpenSpec校验，在副本核对六项delta与重复旧角色条款的替代结果，不提前同步主规格。
-- [ ] 9.7 交付本地结果及明确待验清单：72h长跑、真实模型/渠道、真实掉电、生产升级和发布前独立审查；缺授权不执行，不提交/推送、不自动archive，不把本地完成等同发布通过。
+- [x] 9.1 基准包装器改为真实含Sync的底层契约，透传枚举/计数/错误，删除no-op能力回退；编译断言和错误spy覆盖。
+- [x] 9.2 运行包装后单事件无Close退出的独立进程读回测试，fsync-on/flush-only两模式均有实际屏障次数与原文/索引证据。**【降级（localfile 最小化裁决）：localfile 已无 fsync/WAL 机。收敛为：单事件无 Close 独立进程读回（flush-only 语义）验证 Sync 屏障确实原子落盘、新进程可读到原文/索引；不再宣称掉电耐久、不再有 fsync-on 模式认证。生产耐久/fsync 两模式证据推迟至 rustviking 阶段。】**
+- [x] 9.3 分报Get/Query，增加actual written/sample/Sync次数/commit+dirty摘要/实际环境配置，Go内存统计不冒称OS RSS。
+- [x] 9.4 在阶段8通过后后台运行并等待完整矩阵：RUN_OFFLINE_BENCH=1 BENCH_REPORT=<新报告路径> go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v；任何cell失败不算完成。**【降级（localfile 最小化裁决）：localfile 为临时验证后端，不对其跑完整 ×fsync on/off 生产耐久矩阵（该维度已随最小化移除）。本阶段仅保留功能正确性组合门；完整同语义性能/耐久基准推迟至接线专用存储引擎后。】**
+- [x] 9.5 保留旧JSON，更新既有REPORT.md撤销无屏障耐久解释，标明20k采样；用新同语义基线建立回归比较，不虚构压缩/tokenizer重测。
+- [x] 9.6 更新现有架构/操作文档和本变更evidence.md：逐场景列最终实现/测试/命令/结果，删除被替代的旧分支及误导注释；运行严格OpenSpec校验，在副本核对六项delta与重复旧角色条款的替代结果，不提前同步主规格。
+- [x] 9.7 交付本地结果及明确待验清单：72h长跑、真实模型/渠道、真实掉电、生产升级和发布前独立审查；缺授权不执行，不提交/推送、不自动archive，不把本地完成等同发布通过。
 
 ## 10. 异步任务 TTL 回收与结算折叠
 

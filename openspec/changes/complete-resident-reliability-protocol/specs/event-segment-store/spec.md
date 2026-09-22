@@ -88,7 +88,7 @@ KV/事件接口 SHALL 区分 typed not-found、duplicate/conflict、forgotten �
 
 内置后端及 engine/error-tracking 包装链 SHALL 递归验证并透传显式重放、材料保留和底层真实屏障能力。成功返回的 canonical fact SHALL 为下游消费对象，不能以传入副本代替。错误到达恢复 owner，不得降级为 GetEvent 成功即删除恢复材料；不支持能力明确拒绝并保留 pending。
 
-可靠 inbox 拥有的输入/receipt 重放错误 SHALL NOT 再进入 mem_spill；普通写入原有 spill 保留，但 spill 重放也必须采用相同 canonical 契约。索引更新按 key 幂等，容量提示依据已知绝对计数，不能将 repaired/already 直接做新增增量。
+可靠 inbox 拥有的输入/receipt 重放错误 SHALL NOT 再进入 mem_spill；普通写入原有 spill 保留，但 spill 重放也必须采用相同 canonical 契约。索引更新按 key 幂等。容量提示仅为建议性增量（相对观察，不作删除依据）；淘汰的计数真源是已知绝对计数，repaired/already 对绝对计数贡献 0，不得被当作新增增量抬升（裁决 B）。
 
 #### Scenario: 包装后输入失败
 - **WHEN** 最内层提交屏障失败而外层具有重放方法
@@ -125,3 +125,13 @@ KV/事件接口 SHALL 区分 typed not-found、duplicate/conflict、forgotten �
 #### Scenario: 保留与删除并发
 - **WHEN** 注册/释放保留与 TTL/显式删除并发
 - **THEN** 通过同一分区协调决定次序，受保护项不被删除，已合法删除项不能补写复活
+
+## REMOVED Requirements
+
+### Requirement: WAL 中间坏行容错
+**Reason**: localfile 最小化裁决删除 WAL 追加机制（`replayWAL`/`wal_quarantined` 不复存在），损坏容错语义由快照 fail-fast（读失败即报错、不静默）与信封层 quarantine 四态归类承接（persistent-event-loop 能力准入与 §5.7 直接核对条款）。
+**Evidence**: `memory/kv/local_file_kv.go` 无 WAL 路径；`TestQuarantineCorruptionStillBlocksDespiteTransitional` 等隔离测覆盖替代语义。
+
+### Requirement: LocalFileKV 写路径 fsync 耐久
+**Reason**: fsync 可配置两档与掉电耐久宣称随机制移除（`WithFSync` accepted-and-ignored，见 evidence §9.2/§9.5 撤销段）。屏障语义收敛为：`Sync()` = 全量快照 atomic tmp+rename，成功后新进程可读回；生产级 fsync 耐久认证推迟至 rustviking 阶段。提交前必须过屏障、失败不得报 durable 成功的契约由本 delta「恢复能力经过包装层真实透传」与 persistent-event-loop 能力准入条款承接，不在此重复。
+**Evidence**: `TestBenchWrapperBarrierDurableWithoutClose`（单屏障档无 Close 跨进程读回）；REPORT.md 撤销段。

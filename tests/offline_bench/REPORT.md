@@ -1,46 +1,52 @@
-# 离线性能基准报告（resident-remaining-hardening 2.5 / 2.6）
+# 离线基准报告（当前基线 2026-09-21 / 历史 2026-09-18）
 
-> 本机基线（macOS 笔记本，APFS，Go darwin/arm64），运行于 2026-09-18，**含 2.6 的 curateCards O(n²) 定因修复后复测**。
-> 复现：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=<绝对路径>/report.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v`
-> 原始数据：[`report-2026-09-18.json`](report-2026-09-18.json)；profile 复现：`RUN_OFFLINE_BENCH=1 go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -cpuprofile <绝对路径>/bench.cpu.prof`，`go tool pprof -top -cum bench.cpu.prof`（产物不入库，可再生）。
-> 后续改动按 D7 对照：相同机器/数据集/配置，固定场景 **p95 与 allocs 退化 >20% 须解释并重新批准**；耐久（fsync=true）开销单列，不与 fsync=false 混用。
+> 本机（macOS 笔记本，APFS，go1.24.1 darwin/arm64，见报告 env 头）。
+> 复现：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=<包内相对或绝对路径>.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v`（注意 `go test` 工作目录是包目录）。
+> 原始数据：当前 [`report-2026-09-21.json`](report-2026-09-21.json)；历史 [`report-2026-09-18.json`](report-2026-09-18.json)（**保留不删**，作为旧实现的历史证据）。
 
-## 支持规模（FileSegmentStore + LocalFileKV 实测记录，不虚构通用吞吐目标）
+## ⚠️ 2026-09-18 报告「耐久」解释撤销（complete-resident-reliability-protocol §9.5）
 
-| 维度 | 1k 事件 | 10k 事件 | 100k 事件 |
-|------|---------|----------|-----------|
-| 写 p50 / p95（fsync=on）ms | 0.005 / 0.030 | 0.014 / 0.050 | 0.013 / 0.052（20k 采样外推） |
-| 写吞吐（fsync=on）ev/s | 3520 | 3430 | 3496 |
-| 写 p50 / p95（fsync=off）ms | 0.002 / 0.015 | 0.003 / 0.012 | 0.003 / 0.012 |
-| 写吞吐（fsync=off）ev/s | 22043 | 24778 | 12038 |
-| 探测 p50（conc=1：Get+1min 时间窗查询均值）ms | 5.5 | 54.3 | 106.4（fsync on）/ 533.1（off 全量 100k） |
-| 探测 p95（conc=100）ms | 131–138 | ~1000–1060 | 1959（on）/ 7173（off） |
-| 单轮全量压缩 ms / allocs B·ref⁻¹ | 2 / 2.9k | 21 / 3.1k | 213 / 3.2k |
-| RSS HeapInuse MiB | 9–12 | 40–59 | 113–502 |
+09-18 报告建立在 localfile 的 WAL + `WithFSync` 双档机制上，其「fsync 成本经批量摊付」「无 fsync 时 WAL 驻留增长」「耐久（fsync=true）开销单列」以及一切隐含**掉电耐久**的表述，随该机制被最小化裁决移除而**全部撤销**：现 LocalFileKV 无 fsync/WAL 机（`WithFSync` accepted-and-ignored），`Sync()` = 全量快照 atomic tmp+rename，语义只到「**屏障成功后新进程可见**」（跨进程原子可见），不宣称掉电耐久；生产耐久认证推迟至接线 rustviking 等专用引擎的阶段。旧 JSON 数值本身是其当时实现的真实测量，保留为历史证据，但**不得再被读作当前后端的能力**。
 
-**耐久开销单列**：fsync=on 写吞吐 ~3.5k/s，为 off（12k–25k/s）的 ~1/4–1/7；per-op p50 0.005–0.014 ms（fsync 成本经批量摊付，尾部 p95 ≤0.052 ms）。100k off 档 alloc 64KB/w、RSS 502MiB 偏高（无 fsync 时 WAL 驻留增长），fsync=on 档 18KB/w、113MiB。
+## 当前基线（2026-09-21，单 Sync 屏障档，同语义全矩阵实跑 PASS 619s）
 
-## 悬崖定因（D7：超合理量级先 profile 定位，不调阈值掩盖）
+> 100k 档为 **20k 采样**（`written=20000, sampled=true`，呈现于每个消费面）；内存列为 **Go runtime 堆统计，非 OS RSS**（env.memory_stats_kind 明示）；Get（点读）与 Query（1min 窗查）**分报**——旧「探测均值」混合分布中点读实为微秒级（p50≈0），5ms+ 的旧数值全部由窗查主导，分报后各归其位。
 
-1. **curateCards 下沉循环 O(n²)——已修复（本轮 2.6 内，同语义最小修）**。基线首跑 profile：`buildRetainedRefs → curateCards` 23.17s CPU（sink 循环每弹出一行重算一次 `strings.Join`）。修复＝长度增量维护（`joint -= len(line)+1`），下沉选择与计数逐字节不变（现有 `TestCurateCards_SinkWithoutModel` 断言守住语义）。前后对照（同机同数据）：100k refs 单轮压缩 **62.8s → 0.213s（~295×）**，allocs **5.34MB/ref → 3.2KB/ref（~1658×）**，1k/10k 亦 11→2 / 646→21 ms。
-2. **时间窗查询线性扫段 + 全段 `json.Unmarshal`——未修，另立 change**。修复后 profile 热点依旧是 `QueryEvents → scanPartition → json.Unmarshal`（62% CPU）。每探测固定 1 次 KVScan：延迟随事件量近线性（5ms@1k → ~53ms@10k → 106–533ms@100k），conc=100 时 100k 档 p95 达 2–7.2s。候选方向（段级时间戳剪枝、段解码惰性化）属结构优化，遵守 6.6 约束不自动引入。
-3. **fork/s**：本基准为 memory/compress 负载，无 fork 行为；tmux 探测 fork 速率属 action 域既有观测面。
+| 维度（conc=1） | 1k | 10k | 100k(20k 样) |
+|---|---|---|---|
+| 写 p50 / p95 ms | 2.6 / 4.4 | 12.4 / 22.2 | 23.0 / 41.7 |
+| 写吞吐 ev/s | 375 | 81 | 44 |
+| 每次写 Sync 屏障数 | **1.0** | **1.0** | **1.0** |
+| dirty tmp 孤儿 | 0 | 0 | 0 |
+| 点读 Get p50/p95 ms | ≈0 / 0.001 | 0.02 / 0.042 | 0.018 / 0.039 |
+| 窗查 Query p50/p95 ms | 5.3 / 5.5 | 52.8 / 76.9 | 104.5 / 108.1 |
+| Query p95 @conc=100 ms | 131 | 1152 | 2078 |
+| Go heap HeapInuse MiB | 6.5 | 39.9 | 76.2 |
+| 压缩单轮 ms / allocs B·ref⁻¹ | 2 / 2.9k | 22 / 3.1k | 230 / 3.2k |
 
-## token 估算误差（fixture：tiktoken cl100k_base 0.14.0，版本入档）
+### D7 退化门解释（>20% 必须归因，本处即归因）
 
-`DefaultTokenCounter`（2.0 chars/token + 10/message）对参考 tokenizer：
+写路径相对 09-18 两档均退化 ~10²–10³×（p50 2.6–23ms vs 0.002–0.014ms）。**归因＝机制变更而非代码回归**：最小化后的唯一 `Sync()` 语义是**全量快照重写**（json.Marshal 整个 map + tmp + rename），每次事件提交重写全部已提交数据 → 写成本 O(数据集大小)/次、总成本 O(N²)。09-18 的低写延迟由 WAL 增量 append 路径达成，该路径已随裁决删除。快照设计正是「最小临时后端」的选择（换取零 WAL 状态机与简单恢复），其性能上限由 rustviking 阶段解决；**本阶段不为其回添 WAL**（那将复活被撤销的机制）。读侧无退化（点读微秒级不变；窗查线性扫段量级不变——段扫描未修登记仍有效）。
 
-| 语料 | \|误差\| p50 | \|误差\| p90 | est/ref p50 |
-|------|-----------|-----------|-------------|
-| 中文 | **31.1%** | 32.3% | **0.70（低估）** |
-| 英文 | 140.7% | 142.9% | 2.41（高估） |
-| 代码 | 68.3% | 68.3% | 1.68（高估） |
-| JSON | 50.8% | 50.8% | 1.51（高估） |
+## 悬崖定因（09-18 结论，09-21 复测维持）
 
-**方向性风险**：中文被低估 ~30%（cl100k 参照；deepseek tokenizer 中文效率更高，真实幅度以远端 24h 基线测量为准 → 任务 1.6）。低估方向＝触发过晚、有溢出风险；英文/代码/JSON 为保守高估（提前压缩，安全）。分型系数候选属另立优化。
+1. **curateCards O(n²)**：已修复（2.6）。09-21 复测压缩 2/22/230ms vs 基线 2/21/213ms、allocs ~3.2KB/ref——**同一实现的复跑吻合**（修复保持），非新宣称。
+2. **时间窗查询线性扫段 + 全段 `json.Unmarshal`**：未修、另立 change。09-21 分报后斜率证据更清晰（Query p50 随数据量近线性 5.3→52.8→104.5ms；Get 平坦 ≈0）。
+3. **fork/s**：本基准无 fork 行为（memory/compress 负载），tmux 探测属 action 域。
 
-## 准出结论（2.6）
+## token 估算误差（09-21 复跑，fixture tiktoken cl100k_base 0.14.0）
 
-- 本报告即基线：此前无同机同数据集对照，D7 退化门（p95/allocs >20% 须解释）自本报告生效；复现命令与 fixture 版本均已固定。
-- 已实施：curateCards O(n²) profile 定因 + 同语义线性化修复（收益实测 295×/1658×，非主动结构优化）。
-- 登记不动：查询段扫描、压缩 alloc 常数、中文 chars/token 分型——全部**另立 change**，本期不实施（6.6 约束：不自动引入 ANN/BM25/数据库替换）。
+| 语料 | \|误差\| p50 | est/ref p50 | 方向 |
+|---|---|---|---|
+| 中文 | 31.1% | 0.70 | 低估（触发过晚风险） |
+| 英文 | 140.7% | 2.41 | 高估（保守，安全） |
+| 代码 | 68.3% | 1.68 | 高估 |
+| JSON | 50.8% | 1.51 | 高估 |
+
+与 09-18 逐值吻合（同 fixture 复跑，非重测宣称新结论）；中文低估方向性风险的后续处置（远端 tokenizer 基线）不变。
+
+## 回归比较口径（自 09-21 生效）
+
+- 比较仅在**同机制**内成立：当前单屏障快照档 ↔ 未来的同语义档；09-18 的 fsync 双档已随机制退役，不参与跨机制门。
+- 固定场景 p95/allocs 退化 >20% 须解释并重新批准（上文写路径条目即首个登记例）。
+- `sync_barriers_per_write`、`dirty_tmp_orphans`、`sampled`、env 头为**必备口径字段**（§9.3），缺失或异动的报告不可用于门判。

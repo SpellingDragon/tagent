@@ -1249,3 +1249,109 @@ CodeReview 子代理评审结论：**无必须修项，可作发布候选**；�
 **新发现（评审外，由 drill 全包 race 暴露并登记为第 4 先存签名）**：`steer.(*Queue).Close(steer.go:74) × cloneStateReflectValue(invocation.go:1658)`——v1.10.0 框架把带 mutex 的 Queue 附入 invocation state 并被 reflect 浅拷贝，runner 收尾 defer Close 与在飞 View clone 无外方可 synchronise。归因证据链：双栈 accessor 全框架帧；产品代码 `steer.`/`GetStateValue` 零引用（grep=0）；**变更前 HEAD a16fdce root -race 6 轮零出现**（旧 HEAD 无多轮 boot/Close 测试形态）→ 缺陷在框架、触发面由本变更测试扩大；生产单代优雅 Close 同样可撞（真实 latent 风险，非测试伪影）。处置：①tri 三态与 drill LEG e 改**独立子进程 boot**（证据层级升级+共享 `runRaceExemptChild`）；②分类器按**族签名配对**豁免（steerFamily/sessionFamily 成对帧命中才免；未知形态 accessor 含 tagent 帧仍硬否决；FAIL 块仅许 race verdict 行，真实断言失败绝不后藏）；③`TestTriRaceOnlyFrameworkClassifier` 五形态自测钉死分类器语义。fail-before 旁证：分类器旧判据（裸 accessor 扫描）把带 wrapper 调用链的族块否决→tri 精确红——签名配对修正后绿。
 **验证**：root `-race` 4/4 稳定 ok（此前 1/3–2/3 FAIL）；`./... -short` 全绿；wechat-bot short ok；TEMP 零残留。
 **后续行动登记**：上游缺陷报告 trpc-agent-go（steer Queue 入 state 的生命周期竞态）+ 框架升级评估归独立变更，修复前本族签名按 §9.5 发布证据逐出现核验。
+
+## §9.1 基准包装器真实契约（2026-09-21）
+
+任务：基准包装器改为真实含 Sync 的底层契约，透传枚举/计数/错误，删除 no-op 能力回退；编译断言和错误 spy 覆盖。
+
+**落地**（tests/offline_bench/offline_bench_test.go）：
+- 新增 `durableKV` 接口（KVStore+Sync+ListPartitionIDs）= 包装器**要求**的底层真实契约；`newCountingKV` 构造期断言失败即 **panic 明示**（旧 `if ok … return nil` no-op 分支与 `return nil` 枚举兜底**物理删除**——能力缺失从"静默测 flush 延迟却上报 durable commit"变为接线期响亮失败）。
+- `Sync()`/`ListPartitionIDs()` 直穿缓存的 `durable` 字段（计数/错误透传语义保持）；编译锁升级为 `var _ durableKV = (*countingKV)(nil)`（全契约，非两条款可选）。
+- spy 矩阵：既有 `TestCountingKVSyncErrorPropagates`（错误透传+失败仍计数）保持；新增 `plainKV`（刻意缺契约）+ `TestNewCountingKVRequiresDurableBackend`（构造拒绝钉死）。LocalFileKV 天然满足契约（Sync=atomic tmp+rename、L87/L130 源码核验），三处调用点全量迁移。
+- fail-before：TEMP 把构造门禁改宽容（`if false && !ok`+nil durable 回退）→ 拒绝测精确红（无 panic 即 t.Fatal）→ 恢复绿；TEMP 零残留。
+
+## §9.2 无 Close 独立进程读回（降级收敛，2026-09-21）
+
+任务（降级口径）：localfile 已无 fsync/WAL 机——收敛为单事件无 Close 独立进程读回（flush-only 语义）验证 Sync 屏障原子落盘、新进程可读原文/索引；不宣称掉电耐久、不再有 fsync-on 模式认证。
+
+**现状核验**：主体早已由 D7 时代 `TestBenchWrapperBarrierDurableWithoutClose` 覆盖（子进程 StoreEvent→记录 syncs delta→`os.Exit(0)` 无 Close；父进程全新无包装栈重开：QueryEvents 索引+GetEvent 原文+Metadata 逐字）。**但存在与降级裁决矛盾的残留**：fsync-on/flush-only 双 cell 跑的是**同一实现**（`WithFSync` accepted-and-ignored 源码坐实）= 两个名字认证同一份字节，假双轴覆盖。
+**收敛**：删 fsync-on cell（单 cell `sync-barrier-atomic-rename`）、child 去 `kv.WithFSync` 传参、删 WAL 时代误导注释（"f.Sync() on the WAL"）与孤儿 `b2i`；doc 注释改写为诚实声明（认证的是**原子 rename 跨进程可见 + 无 Close 脏退出**，掉电耐久明确不宣称、推迟 rustviking 阶段——与 L31 后端自身注释对齐）。
+**fail-before**：TEMP 让 child 绕过包装直连 inner → 父进程 `syncs=0` 甄别精确红（"benchmark path diverges from production"）→ 恢复绿；TEMP 零残留。
+**验证（两任务合并）**：offline_bench 全包 short ok；vet/gofmt 净；未提交（待用户指令）。
+
+## §9.3 报告分报与诚实口径（2026-09-21）
+
+任务：分报 Get/Query，增加 actual written/sample/Sync 次数/commit+dirty 摘要/实际环境配置，Go 内存统计不冒称 OS RSS。
+
+**落地**（tests/offline_bench/offline_bench_test.go）：
+1. **Get/Query 分报**：点读 `GetEvent` 与窗查 `QueryEvents` 延迟池物理分离（此前混入同一分布，混合 p95 对两种读形态都不诚实），各出 `get_point_read`/`query_window`（probes/latency/吞吐[线程内实测窗口]/kv_ops），并新增 `sync_barriers` 差值——实证**读路径零重刷**（探针各并发下 sync=0，写路径 =1000/1000 写 恰一屏障）。
+2. **actual written/sample**：`written`（实写）+`requested_scale_full`+`sampled`——100k cell 截 20k 明确标样（§9.5 的 20k 采样标注来源）；fsync 轴整体删除（`"fsync"` 报告字段 0 命中——与 §9.2 假双轴同源收口，文件头注释同步改）。
+3. **Sync 次数**：`snapshot()` 6→7 元组纳入 syncs；写阶段 `commit_summary.sync_barriers(_per_write)`。
+4. **commit+dirty 摘要**：kv 六操作真实计数 + 盘上 segment 数 + `dirty_tmp_orphans`（全 0 实证）+ kv.json 字节数 + 可发现分区数。
+5. **实际环境配置**：报告头 `env`（go_version/goos/goarch/num_cpu/host/测试二进制名 + 生效的 scales/cap/concurrency 参数）——数字永远带着它的机器走。
+6. **不冒称 OS RSS**：`rss()`→`goMem()`，字段 `go_mem_runtime`，env 内 `memory_stats_kind` 明示"Go runtime MemStats only — deliberately NOT OS RSS"；compressionSweep 的 `rss` 字段同步改名。
+
+**验证**：`RUN_OFFLINE_BENCH=1` 全矩阵实跑 **PASS（614s）**，报告逐字段 grep 核验（上文括号为实测值）；`-short` 包门 ok；vet/gofmt 净；TEMP 零残留；未提交。口径类任务以实跑输出为验收证据（报告结构即断言）。
+
+## §9.4 组合功能门（降级口径，2026-09-21）
+
+任务（降级后）：阶段 8 通过后后台运行并等待完整矩阵，新报告路径；任何 cell 失败不算完成。×fsync on/off 生产耐久矩阵已随 localfile 最小化裁决移出本阶段（推迟至专用存储引擎接线后）。
+
+**后台矩阵等待**：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=report-2026-09-21.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v` → **PASS 619.5s**，报告 14KB 落盘 [report-2026-09-21.json](file:///Users/pengweiye/Documents/codes/tagent/tests/offline_bench/report-2026-09-21.json)。cell 核验（JSON 解析逐格）：
+
+| scale | written | sampled | sync_barriers | per_write | tmp 孤儿 |
+|---|---|---|---|---|---|
+| 1k | 1000 | false | 1000 | **1.0** | 0 |
+| 10k | 10000 | false | 10000 | **1.0** | 0 |
+| 100k | 20000 | **true（20k 标样）** | 20000 | **1.0** | 0 |
+
+env 头（go1.24.1/scales/cap 实录）+ compression 3 格 + token_estimator（code/en/json/reference）+ `"fsync"` 字段 0 命中。
+
+**首次运行失败如实记录（非 cell 失败，未以重跑掩盖）**：BENCH_REPORT 传仓库相对路径，而 `go test` 包工作目录=包目录 → `open ...: no such file or directory` 唯报告写失败（矩阵 cell 全数通过、报告完整打印于日志）；改包内相对路径重跑 PASS。属确定性配置错误修正。
+
+**功能正确性组合门（本轮实跑）**：定向 race — agent 75.4s / reliability 15.8s / memory / event / tool/action 36.2s / root 9.2s 全 ok；`tests -race` = 已登记先存框架族（`TestInjectBusInputs_DuringReAct`，§8.8 豁免三元组内，本轮复现口径一致）；root 全包 short 零 FAIL；wechat-bot 独立模块 build/vet/short OK。
+**验证**：TEMP 零残留；未提交；矩阵与门全绿后方勾选。
+
+## §9.5 旧 JSON 保留与 REPORT.md 撤销/新基线（2026-09-21）
+
+任务：保留旧 JSON，更新既有 REPORT.md 撤销无屏障耐久解释，标明 20k 采样；用新同语义基线建立回归比较，不虚构压缩/tokenizer 重测。
+
+- **旧 JSON 保留**：`report-2026-09-18.json` 一字未动（历史证据）。
+- **[REPORT.md](file:///Users/pengweiye/Documents/codes/tagent/tests/offline_bench/REPORT.md) 撤销段**：09-18 的「fsync 摊付/WAL 驻留/耐久开销单列」及一切掉电耐久暗示**明文撤销**（机制已随最小化裁决移除，`WithFSync` accepted-and-ignored），并声明旧数值"是其当时实现的真实测量、不得再被读作当前后端能力"。
+- **新同语义基线（09-21 实测）**：单屏障档全表 + `sync_barriers_per_write=1.0` + tmp 孤儿 0 + **20k 采样逐处标注** + Go heap ≠ OS RSS 标注 + **Get/Query 分报**（揭示旧混合"探测 5.5ms"实为窗查独担、点读微秒级——分报价值直接可见）。
+- **诚实执行 D7 退化门**：抓到写路径 10²–10³× 退化（p50 2.6–23ms vs 旧 0.002–0.014ms），**归因机制变更非代码回归**——快照全量重写 O(数据集)/次 vs 已删除的 WAL 增量 append；登记为首个跨机制比较例外，本阶段不回添 WAL（将复活被撤销机制），性能上限交 rustviking 阶段。读侧确认无退化。
+- **不虚构重测**：压缩（2/22/230ms vs 基线 2/21/213ms）与 token 误差（四语料逐值吻合）明确标注为"同实现/同 fixture 复跑吻合、非新宣称"；curateCards 修复保持由此实证。
+- 回归比较口径三条入档（同机制才可比 / >20% 须解释重新批准 / 口径字段必备），复现命令补 `go test` 包目录陷阱注记（§9.4 首跑教训）。
+
+## §9.6 文档收口与严格校验（2026-09-21）
+
+任务：更新现有架构/操作文档和本变更 evidence.md（逐场景列实现/测试/命令/结果），删除被替代旧分支及误导注释；运行严格 OpenSpec 校验，在副本核对六项 delta 与重复旧角色条款的替代结果，不提前同步主规格。
+
+- **design.md 补记决策14**（挂账清偿）：跨代键地板（RaiseSnowflakeFloor 单向+同秒进位、seed 挂冷启动必经扫描零额外 I/O）/确定性冲突归类（CONFLICT/FORGOTTEN=确定性 vs 瞬态 I/O——旧 bool 混谈即活锁成因）/协议隔离层（quarantine 与"损坏保证据"同构，隔离≠丢弃）+ 未采用方案（位布局改动触碰冻结键磁盘不变量；双活 writer 归 flock 前提；充分解归 rustviking）。
+- **逐场景矩阵**：evidence.md §2–§9 各任务节即"实现/测试/命令/结果"四元组（含 fail-before 输出与验证计时），本节不重复；docs/wiki 三份架构文档本变更期内已随各段更新（agent-architecture/platform-subsystems/behavior-matrix），此轮为**误导残留清扫**。
+- **误导残留清扫（三处）**：①`config.go` FSync 注释宣称"WAL append fsynced…survive power loss"——机制已物理移除，改写为 accepted-and-ignored + 耐久语义边界（只到屏障后跨进程可见）；②`platform-subsystems.md` LocalFileKV 行"fsync 默认开/WAL 追加/降级留痕"整段过期→最小化裁决事实；③`agent-behavior-matrix.md` "排空 ReliableBus"——drain 语义已被规格否定（drain-free），改为精确关闭序（进行中 turn 跑完/claim 保留/CloseDurable 清理已回执+盘点）。`docs/.dev/*` 为冻结历史思考记录（非承诺文档），不动；"drain-free"用词（正确当前术语）保留。
+- **严格校验**：`openspec validate --strict` **valid**（决策14/REMOVED 增补后复跑仍 valid）。
+- **副本核对（真库主规格零改动，"不提前同步"）**：`/tmp/opsx-copy` 沙盒按 Requirement 名集合机械对账 7 项 delta（任务说"六项"，实扫 7——async-task-lifetime 为 main=0 纯新增）：MODIFIED/REMOVED 目标全部存在于 main、ADDED 零同名碰撞；**残留扫描揪出两条真·旧角色条款未被 delta 承接**——main `event-segment-store`「WAL 中间坏行容错」「LocalFileKV 写路径 fsync 耐久」（机制已删、REPORT.md 已撤销解释，主规格却无移除动作）→ delta 补 `## REMOVED Requirements`（Reason+Evidence+替代归属指向能力准入/§5.7/隔离条款，不重复契约），复跑对账 **NO CLAUSE-LEVEL ISSUES**（merged 18：20−2）；`RebuildProjectionFromWAL` 命中为**假阳性**（现行实现接口名，投影重建条款是当前机制），不处理并如实记录。
+- **验证**：`go build` ok、受影响面测绿、gofmt 净、TEMP 零残留；未提交。
+
+---
+
+## §9.7 交付：本地结果与待验清单（2026-09-21，本变更最后一任务）
+
+### A. 本地已达成（分层结果清单）
+
+| 层 | 结果 | 证据位置 |
+|---|---|---|
+| 协议核心（§2–§5） | inbox-v2 接收/准备/提交/两阶段完成/quarantine/§5.7 直接核对/§5.8 屏障全闭环；spill 旧机制物理删除 | evidence §2–§5 各节（实现+fail-before+race） |
+| 生命周期（§6） | loopState 状态机、关闭序、末 owner、poisoned 密封、回收矩阵全门 | §6.1–6.6 |
+| 呈现边界（§7） | 提示单次携带四通路、事实/回执/重启零污染 | §7.1–7.5 |
+| 验收矩阵（§8） | 五端对账 e2e、宿主 seam、崩溃窗矩阵（接收 5 窗+完成 4 窗，独立子进程）、30 轮重启终门（逮住并三层修复跨代键活锁）、受管重置八腿、淘汰静态零遗留+三态启动 | §8.1–8.8 + §8.9 评审修复 |
+| 产品缺陷修复 | 雪花键跨代冲突（RaiseSnowflakeFloor+冷启动 seed+确定性冲突隔离）= 本变更最高价值发现 | §8.5/§8.9，design.md 决策14 |
+| 性能与证据口径（§9.1–9.5） | 包装器真实契约（no-op 回退删）、无 Close 跨进程读回（假双轴撤销）、Get/Query 分报+env+Sync 计数+非 RSS 标注、09-21 新基线报告（per_write=1.0/孤儿 0/20k 标样）、REPORT.md 撤销段+D7 退化归因（机制变更非回归） | §9.1–9.5 + REPORT.md |
+| 文档与规格（§9.6） | 三处误导表述清扫、决策14 补记、strict valid、副本对账揪出并补齐 2 条未承接 REMOVED 条款 | §9.6 |
+
+**版本状态**：`7677c07`（协议主体，CodeReview 无必须修项）+ `9c785ba`（评审修复轮）；**未提交 10 项** = §9.1–9.6 产物（config.go 注释/两份 wiki/openspec 四件/bench 四件）——提交与归档动作留待用户决定。
+**最终确认快照（2026-09-21）**：双模块 build/vet OK；root/tests/offline_bench/agent/memory/event short 全 ok；wechat-bot ok；全包 race 近期 4/4 稳定。
+
+### B. 待验清单（缺授权/环境不执行，本地完成 ≠ 发布通过）
+
+| # | 待验项 | 本地未覆盖的原因 | 通过判据 |
+|---|---|---|---|
+| 1 | **72h 长跑** | 本机不具备连续 72h 受控运行条件；soak 骨架已子进程化（8ef6b01）可复用 | 长跑期间零未归类终态、restart/reconcile 计数恒等式成立、无泄漏增长趋势 |
+| 2 | **真实模型/渠道** | 全部验收为 mock 模型+模拟投递（规格允许的最小验证面）；wechat-bot 仅到宿主决定层 | 真实渠道 202/回执↔模型请求↔用户可见消息三方对账；重试/限流/断连语义实网复验 |
+| 3 | **真实掉电** | localfile 明示不宣称掉电耐久（§9.5 撤销段）；需物理机/PDU 注入 | 仅在 rustviking 等耐久后端上执行；已 ack 写入零丢失或有可处置的显式缺口分类 |
+| 4 | **生产升级** | 受管重置仅在临时受管目录演练（§8.6 纪律：不操作真实目录） | 真实部署数据指纹→演练副本重置/启动对账→回滚预案演练通过后方可上生产 |
+| 5 | **发布前独立审查** | `9c785ba` 之后（§9 全部 10 项未提交产物）未经独立 review | 人工审阅 §9 diff + 本 evidence 全节；race 豁免四签名逐出现复核 |
+
+**登记不遮蔽**：先存框架 race 族（trpc-agent-go@v1.10.0，4 签名，§8.1/8.8/8.9 三元组）修复归框架升级独立变更；上游缺陷报告为待办行动。
+**纪律收口**：本变更不自动 archive、不推送、不把本地全绿等同发布通过——准出 = 上表 1–5 按授权逐项闭环。

@@ -224,7 +224,7 @@ stateDiagram-v2
 | 场景 | 行为 |
 |------|------|
 | 进程崩溃/异常退出 | `Restart=always` → 5s 后自愈重启;重启触发 §3.4 全套恢复 |
-| `systemctl stop` / 部署重启 | `KillSignal=SIGTERM` 直达二进制 → 优雅关闭(排空 ReliableBus、flush 轨迹、关 tmux);30s 超时才 SIGKILL |
+| `systemctl stop` / 部署重启 | `KillSignal=SIGTERM` 直达二进制 → 优雅关闭(停事件循环——进行中 turn 跑完、未确认 claim 保留不丢；bus `CloseDurable` 清理已回执材料与屏障盘点；flush 轨迹、关 tmux);30s 超时才 SIGKILL |
 | 内存超 `MemoryMax=1G` | OOM-kill → Restart 自愈(按机器内存可调 unit) |
 | exec 派生进程失控 | `TasksMax=256` 上限拦截(防 fork 炸弹) |
 | 改 `mcp_servers` 段 | **热同步**(mtime 惰性检查),增删 MCP server **免重启** |
