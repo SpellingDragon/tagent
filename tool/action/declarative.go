@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -204,6 +205,15 @@ func SubagentSpecFromDeclarative(redispatch func(agentName, body string) (task.S
 		Desc:        decl.Desc,
 		Key:         decl.Key,
 		Declarative: &decl,
+	}
+	// Replay the model's self-set sub-agent lifetime (resident-review-fixes 4.1)
+	// so the rebuilt task keeps its reaper anchor across a restart instead of
+	// collapsing to the default floor. Absent/pre-ttl record → 0 → the manager's
+	// configured default / 10m floor governs (three-level chain preserved).
+	if s := decl.Params["ttl"]; s != "" {
+		if secs, err := strconv.ParseInt(s, 10, 64); err == nil && secs > 0 {
+			spec.TTL = time.Duration(secs) * time.Second
+		}
 	}
 	if redispatch != nil && decl.AgentName != "" {
 		body := decl.MessageBody

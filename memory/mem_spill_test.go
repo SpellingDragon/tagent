@@ -181,3 +181,31 @@ func TestErrorTrackingStore_NoSpillConfigured(t *testing.T) {
 		t.Fatal("未配 mem_spill 时 ReplaySpilled 应 0")
 	}
 }
+
+// guardStore 同时是 MemoryStore 与 RetentionGuard（满足 ErrorTrackingStore
+// SetMemSpill 的 inner.(RetentionGuard) 能力检查，使其走进 ProtectAllPending 重建腿）。
+type guardStore struct {
+	*InMemoryStore
+}
+
+func (s *guardStore) ProtectKey(int64) {}
+func (s *guardStore) ReleaseKey(int64) {}
+func (s *guardStore) ArmRetention()    {}
+func (s *guardStore) BeginHold()       {}
+func (s *guardStore) EndHold()         {}
+
+// TestErrorTrackingStore_SetMemSpill_PropagatesRetentionFailure（C1 1.1 fail-before）：
+// spill 路径指向一个目录 → readAll 扫描失败（EISDIR）→ ProtectAllPending 报错。
+// 旧行为 Warnf 吞错、返回 void（造出“热更成功 + 悬空遗忘屏障”）；修复后 SetMemSpill
+// 必须上抛错误供调用方 fail-closed。干净（不存在）路径则正常 arm、返回 nil。
+func TestErrorTrackingStore_SetMemSpill_PropagatesRetentionFailure(t *testing.T) {
+	inner := &guardStore{InMemoryStore: NewInMemoryStore()}
+	ets := NewErrorTrackingStore(inner, nil)
+	if err := ets.SetMemSpill(t.TempDir()); err == nil {
+		t.Fatal("spill 保留重建读失败必须上抛（fail-closed），绝不吞错")
+	}
+	ets2 := NewErrorTrackingStore(&guardStore{InMemoryStore: NewInMemoryStore()}, nil)
+	if err := ets2.SetMemSpill(filepath.Join(t.TempDir(), "fresh.jsonl")); err != nil {
+		t.Fatalf("空 spill 路径应正常 arm 并返回 nil, got %v", err)
+	}
+}

@@ -118,6 +118,14 @@ func TestCompletionValidate_ExactlyOneDispositionPerSlot(t *testing.T) {
 	skipBadReason.Slots[1].Reason = "i_felt_like_it"
 	require.Error(t, skipBadReason.validate(), "skip reason must be from the closed enum set")
 
+	// the retired "empty_input" enum is no longer a valid skip reason (closed set
+	// is two values; an empty input is committed as a processed fact, never
+	// skipped) — resident-review-fixes 5.2. fail-before: keeping it in
+	// validSkipReason would make this validate cleanly.
+	deadEmpty := validCompletion(t)
+	deadEmpty.Slots[1].Reason = "empty_input"
+	require.Error(t, deadEmpty.validate(), "empty_input must no longer be a valid skip reason")
+
 	// skipped carrying a fact key
 	skipWithKey := validCompletion(t)
 	skipWithKey.Slots[1].FactKey = "cafe"

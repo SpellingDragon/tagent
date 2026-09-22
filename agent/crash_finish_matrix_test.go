@@ -67,7 +67,7 @@ func childFinishCrash(root, spec string) {
 	// partial-progress disk states a crash can leave, without any seam):
 	paths, byPath := groupClaimsByPath(batch)
 	path := paths[0]
-	completion, raw, err := buildEnvelopeCompletion(byPath[path], selectedKeySet(batch),
+	_, raw, err := buildEnvelopeCompletion(byPath[path], selectedKeySet(batch),
 		completedOutcome(), ta.name, cm.partitionID, time.Now().UnixMilli(), cm.buildTurnAttribution(context.Background()))
 	if err != nil {
 		childFatal("completion build: " + err.Error())
@@ -88,7 +88,6 @@ func childFinishCrash(root, spec string) {
 	if err != nil {
 		childFatal("second leaf: " + err.Error())
 	}
-	_ = completion
 	if err := in2.RecordReceipt(path, cred); err != nil {
 		childFatal("record receipt: " + err.Error())
 	}

@@ -787,11 +787,25 @@ func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) err
 
 // QuarantineEnvelope isolates a deterministic-conflict envelope (kept on disk for
 // inspection, capacity freed). See Inbox.QuarantineEnvelope (§4.2).
+//
+// §2.8 (resident-review-fixes 2.2): quarantine is a terminal disposition just like
+// Ack, so it MUST release the envelope's retention holders — otherwise an isolated
+// envelope's originals stay leased forever and can never be TTL/capacity-evicted
+// (a lease hang). The leaf has no store handle, so the wrapper reads the material
+// BEFORE the move (the rename relocates the file) and releases it after a confirmed
+// isolation. releaseRetention is nil-safe; an envelope that was never armed releases
+// nothing. The rename's atomicity is the dir barrier — no separate cleanup is owed.
 func (b *EventBus) QuarantineEnvelope(path, reason string) {
 	if b == nil || b.inbox == nil {
 		return
 	}
-	b.inbox.QuarantineEnvelope(path, reason)
+	m, ok, merr := b.inbox.MaterialOfPath(path)
+	if merr != nil {
+		log.Warnf("[ReliableBus] quarantine retention material read %s failed: %v", path, merr)
+	}
+	if b.inbox.QuarantineEnvelope(path, reason) && ok {
+		b.releaseRetention(m) // isolated (terminal) → release (§2.8), symmetric with the Ack path
+	}
 }
 
 // ReleaseClaim returns a claimed envelope to pending for ordered re-claim on a

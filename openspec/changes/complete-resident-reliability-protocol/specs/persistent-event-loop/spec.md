@@ -133,9 +133,10 @@ turn 终态 SHALL 区分 completed、failed 和取消未完成；必须观察响
 - **WHEN** 模型已结束，首次 completion 写入失败
 - **THEN** 同进程保存该结果并只重试结果提交；崩溃前尚未形成耐久 completion 才允许重做
 
-#### Scenario: 全跳过批次
-- **WHEN** 原批次只有合法空输入或按规则跳过的消息
-- **THEN** 不调用模型、不提交输入事实，仍形成全部槽位有原因的 completion 并按协议清理
+#### Scenario: 全 skipped 批次
+- **WHEN** 原批次全部槽位按规则被跳过（mixed-batch meditation 让路、present-but-not-selected），无任何提交的输入事实
+- **THEN** 不调用模型，仍形成逐槽 skipped（原因属闭合集 `{meditation_yield, not_selected}`）的 completion 并按协议清理
+- **AND** 合法空输入不属此列——提交门为其落一条事实并标 processed，绝非 skipped（“empty_input”为死枚举，无任何槽位携带过它，已在实现中删除；resident-review-fixes 5.2 将措辞与实现语义收敛）
 
 ## ADDED Requirements
 

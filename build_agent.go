@@ -193,8 +193,15 @@ func buildAgentDFS(
 			}
 		})
 		ets := memory.NewErrorTrackingStore(memStore, reliability.MemorySink{Mgr: degradationMgr})
-		if cfg.Reliability.MemSpillDir != "" {
-			ets.SetMemSpill(filepath.Join(cfg.Reliability.MemSpillDir, name+".jsonl"))
+		// C1（resident-review-fixes 1.1）：热重建壳不接 mem_spill——壳的 memStore 借用自
+		// 常驻 owner，SetMemSpill 的 ProtectAllPending 会在共享 store 上重复登记恢复租约
+		// （releaseRetention 只在常驻 bus 的 Ack 路径触发 → 壳登记永不释放 = 租约泄漏）。
+		// 恢复登记回归常驻 owner 独占（runtime-resource-ownership 既有条款的实现符合化）。
+		// spill 腿失败 fail-closed（构建失败，旧 runner 继续服务），不再吞错。
+		if cfg.Reliability.MemSpillDir != "" && !mode.isExecutorShell() {
+			if serr := ets.SetMemSpill(filepath.Join(cfg.Reliability.MemSpillDir, name+".jsonl")); serr != nil {
+				return nil, fmt.Errorf("agent %q: mem_spill retention: %w", name, serr)
+			}
 		}
 		etsHolder = ets
 		memStore = ets
@@ -463,7 +470,11 @@ func buildAgentDFS(
 	}
 	// T-G ReliableBus：per-agent 溢出子目录（<BusSpillDir>/<agentName> 隔离，防多 agent 事件串）。
 	// 全局 BusSpillDir 空则保持空（NewReliableEventBus 回退纯 channel bus，现状零变化）。
-	if cfg.Reliability.BusSpillDir != "" {
+	// C1（resident-review-fixes 1.1）：热重建壳不建 durable bus——壳 memStore 借用自常驻
+	// owner，durable bus 构建会在 NewTagentAgent 里对共享 store 触发 ArmRetentionFromInbox
+	// 重复恢复登记（租约泄漏 + Arm 失败腿 BeginHold 无 EndHold 拉起遗忘屏障）。壳 bus 降级
+	// volatile（构建验证所需最小面），恢复登记回归常驻 owner 独占。
+	if cfg.Reliability.BusSpillDir != "" && !mode.isExecutorShell() {
 		agentCfg.BusSpillDir = filepath.Join(cfg.Reliability.BusSpillDir, name)
 	}
 	// T-G: DegradationManager 注入 agent（event_loop 据此上报 model 依赖退化；nil 若未启用）。
@@ -606,7 +617,6 @@ func buildAgentDFS(
 	// 代际标记的 compaction 事件时 no-op（首启/未折叠，维持现状行为）。
 	// R4 ownership 表：executorOnly 热重建跳过（投影属常驻实例，丢弃壳空跑）。
 	if mode.ownsPersistentState() {
-		ta.SetReadyCh(make(chan struct{}))
 		ta.RebuildProjectionFromWAL()
 		// §5.7: startup direct reconcile — inventory every outstanding envelope and
 		// check ITS OWN fixed receipt key (never a list harvested from the scan
@@ -615,9 +625,6 @@ func buildAgentDFS(
 		if _, rerr := ta.ReconcileOutstanding(); rerr != nil {
 			log.Errorf("[recovery] §5.7 outstanding reconcile aborted on inventory failure — nothing disposed, retry next boot: %v", rerr)
 		}
-	} else {
-		ta.SetReadyCh(make(chan struct{}))
-		close(ta.ReadyCh()) // shell builds: no cold-start work, ready now
 	}
 
 	// R2（resident-continuity-r2-r4 D1.3）：任务 registry 重建——同样从事实链
@@ -690,18 +697,6 @@ func buildAgentDFS(
 	// 的等价语义（Role 从事件类型派生）。
 	if etsHolder != nil {
 		etsHolder.SetReplayProjection(agent.ReplayProjectionHandler(ta))
-	}
-
-	// β-fix: cold-start rebuild sequence (R1→R2→R3 orphan) is now complete.
-	// Signal readiness to any host-side waiter — replaces fixed-sleep timing
-	// guesses (reincarnation notice, restart verdicts, healthz warm-up).
-	if mode.ownsPersistentState() && ta.ReadyCh() != nil {
-		select {
-		case <-ta.ReadyCh():
-			// already closed (e.g. double build) — idempotent
-		default:
-			close(ta.ReadyCh())
-		}
 	}
 
 	// Register ActionTool for cleanup on agent shutdown.

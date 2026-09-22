@@ -3,6 +3,8 @@ package action
 import (
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 )
 
 // TestSpecFromDeclarativeRestoresTTL covers §10.5(a): a restored command task must
@@ -40,6 +42,35 @@ func TestSpecFromDeclarativeRestoresTTL(t *testing.T) {
 		spec := ct.SpecFromDeclarative(nil, *decl)
 		if spec.TTL != 2*time.Hour {
 			t.Fatalf("a 7200s resident service must restore its exact 2h lifetime, got %s", spec.TTL)
+		}
+	})
+}
+
+// TestSubagentSpecFromDeclarativeRestoresTTL covers resident-review-fixes 4.1:
+// the sub-agent's self-set `ttl`, persisted in Declarative.Params by the wrapper,
+// must replay back into the rebuilt TaskSpec.TTL across a restart, so the reaper
+// keeps the model's chosen anchor instead of collapsing to the default floor.
+// A record without the key (pre-ttl) leaves TTL unset → the manager default governs.
+func TestSubagentSpecFromDeclarativeRestoresTTL(t *testing.T) {
+	t.Run("explicit ttl replays from the persisted projection", func(t *testing.T) {
+		decl := task.Declarative{Kind: "subagent", Desc: "plan: x", Key: "plan:x", AgentName: "plan", Params: map[string]string{"ttl": "90"}}
+		spec := SubagentSpecFromDeclarative(nil, decl)
+		if spec.TTL != 90*time.Second {
+			t.Fatalf("replayed subagent TTL = %s, want 90s", spec.TTL)
+		}
+	})
+	t.Run("absent ttl leaves the default floor", func(t *testing.T) {
+		decl := task.Declarative{Kind: "subagent", Desc: "plan: y", Key: "plan:y", AgentName: "plan"}
+		spec := SubagentSpecFromDeclarative(nil, decl)
+		if spec.TTL != 0 {
+			t.Fatalf("pre-ttl record must leave TTL unset (→ manager default), got %s", spec.TTL)
+		}
+	})
+	t.Run("malformed ttl value is ignored, not fatal", func(t *testing.T) {
+		decl := task.Declarative{Kind: "subagent", Key: "k", Params: map[string]string{"ttl": "soon"}}
+		spec := SubagentSpecFromDeclarative(nil, decl)
+		if spec.TTL != 0 {
+			t.Fatalf("a non-numeric ttl must be ignored (→ default), got %s", spec.TTL)
 		}
 	})
 }

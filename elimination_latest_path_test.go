@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,17 @@ func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 		{"loopActive ", "6.1: same"},
 		{"collectUnconfirmedReceipts", "5.7: old collect-chain replaced by direct envelope reconcile"},
 		{"persistInboxReceipt(", "5.3: fresh-key receipt minting deleted (reserved-key commit only)"},
+		// §8.7 / resident-review-fixes 5.3: the request-ID/weak-fallback confirm +
+		// receipt APIs and the legacy-spill drain gate are gone (reserved-key
+		// credential + direct-inventory reconcile replaced them); ReadyCh was a
+		// zero-consumer readiness signal (3.2). Locked against resurrection.
+		{"ConfirmDurableByRequestID", "5.4: bare request-ID confirm removed (verified receipt credential only)"},
+		{"ReconcileDurableReceipts", "5.7: harvest-style receipt reconcile removed (per-envelope fixed-key reconcile)"},
+		{"PathForReceiptKey", "5.7: receipt-key→path reverse index removed (envelopes carry their own fixed key)"},
+		{"ReceiptNote", "5.4: free-text receipt note replaced by reliability.ReceiptCredential"},
+		{"ErrLegacySpillNotDrained", "3.7: legacy drain-as-boot-precondition removed (inert transitional data)"},
+		{"checkUpgradeGates", "3.7: whole-tree upgrade gate removed (only current-format quarantine blocks reopen)"},
+		{"ReadyCh", "3.2: zero-consumer cold-start readiness signal removed"},
 	}
 	// RECURSIVE over the whole repo (review 7677c07 #1: top-level-only scans
 	// left agent/reliability etc. unguarded — the exact places old mechanisms
@@ -150,6 +162,12 @@ func triRaceOnlyFramework(out []byte) bool {
 	//   sessionFamily: Session.Clone snapshot read × session write
 	steerFamily := []string{"internal/state/steer.(*Queue).Close", "cloneState"}
 	sessionFamily := []string{"session.(*Session).Clone", "UpdateUserSession"}
+	// The family exemption is version-bound (resident-review-fixes 2.3): it
+	// applies ONLY while the linked trpc-agent-go equals the registered
+	// version. After a framework upgrade the exemption lapses and these
+	// families must be re-verified — a tagent accessor frame riding a
+	// previously-exempted block is then treated like any unknown race.
+	famOK := familyExemptionEnabled()
 	matchesAll := func(block string, sig []string) bool {
 		for _, fr := range sig {
 			if !strings.Contains(block, fr) {
@@ -160,7 +178,7 @@ func triRaceOnlyFramework(out []byte) bool {
 	}
 	for _, block := range strings.Split(text, "WARNING: DATA RACE")[1:] {
 		block, _, _ = strings.Cut(block, "==================")
-		if matchesAll(block, steerFamily) || matchesAll(block, sessionFamily) {
+		if famOK && (matchesAll(block, steerFamily) || matchesAll(block, sessionFamily)) {
 			continue // registered framework-owned object, exempt as a family
 		}
 		// Anything else: only the ACCESSOR sections may not carry a tagent
@@ -173,26 +191,88 @@ func triRaceOnlyFramework(out []byte) bool {
 		}
 	}
 	// (2) ...AND every FAIL detail block must contain NOTHING but the
-	// race-detector verdict — a real assertion failure must never hide
-	// behind a benign race in the same child log.
+	// race-detector verdict (and the race report's own origin-stack lines) — a
+	// real assertion failure or panic must never hide behind a benign race in
+	// the same child log. Non-indented lines no longer close the block: only a
+	// top-level boundary does, so a failure printed after a blank line (or a
+	// column-0 "panic:") is not skipped (resident-review-fixes 2.3(a)).
 	inFail := false
+	inOrigin := false
 	for _, ln := range strings.Split(text, "\n") {
-		if strings.HasPrefix(ln, "--- FAIL") {
-			inFail = true
+		switch {
+		case strings.HasPrefix(ln, "--- FAIL"):
+			inFail, inOrigin = true, false
+			continue
+		case ln == "FAIL", ln == "PASS", strings.HasPrefix(ln, "ok "), strings.HasPrefix(ln, "--- PASS"), strings.HasPrefix(ln, "=== "):
+			inFail, inOrigin = false, false
 			continue
 		}
 		if !inFail {
 			continue
 		}
-		if !strings.HasPrefix(ln, "    ") {
-			inFail = false
+		if strings.HasPrefix(ln, "panic:") || strings.HasPrefix(ln, "fatal error:") {
+			return false // a crash is never exempt
+		}
+		if t := strings.TrimSpace(ln); t == "" {
+			continue // a blank line does NOT close the block (fixes the 穿透)
+		}
+		if strings.Contains(ln, "created at:") {
+			inOrigin = true // the race report's goroutine origin follows
 			continue
 		}
-		if t := strings.TrimSpace(ln); t != "" && !strings.Contains(t, "race detected during execution of test") {
+		if inOrigin && strings.HasPrefix(ln, "  ") {
+			continue // an origin-stack frame — ancestor test frames do not veto
+		}
+		if t := strings.TrimSpace(ln); !strings.Contains(t, "race detected during execution of test") {
 			return false
 		}
 	}
 	return true
+}
+
+// registeredFamilyVersion is the trpc-agent-go release the exempted framework
+// race families (steer.Queue.Close × invocation-state clone; session.Clone) were
+// verified against (evidence §8.1/§8.8/§8.9). The exemption is bound to it so a
+// framework upgrade can never silently widen or mislabel the exempt set: bump
+// go.mod and the family exemption lapses until the races are re-registered here.
+const registeredFamilyVersion = "v1.10.0"
+
+// familyExemptionEnabled gates the registered-race-family exemption on the linked
+// framework version. A var so the classifier self-test deterministically
+// exercises the upgrade (mismatch) path.
+var familyExemptionEnabled = func() bool {
+	return trpcAgentVersion() == registeredFamilyVersion
+}
+
+// trpcAgentVersion reports the linked trpc-agent-go module version, preferring
+// build info and falling back to the go.mod require (the deterministic pin) when
+// the test binary carries no dependency list. "" only when neither is readable.
+func trpcAgentVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		for _, d := range bi.Deps {
+			if d.Path == "trpc.group/trpc-go/trpc-agent-go" {
+				return d.Version
+			}
+		}
+	}
+	return trpcAgentVersionFromGoMod()
+}
+
+// trpcAgentVersionFromGoMod reads the exact base-module require line
+// ("trpc.group/trpc-go/trpc-agent-go vX") from go.mod, ignoring submodule
+// requires whose path extends the base (…/model/provider etc.).
+func trpcAgentVersionFromGoMod() string {
+	src, err := os.ReadFile("go.mod")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(src), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) == 2 && f[0] == "trpc.group/trpc-go/trpc-agent-go" {
+			return f[1]
+		}
+	}
+	return ""
 }
 
 func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
@@ -209,6 +289,28 @@ func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	assertion := strings.Replace(race, "testing.go:1: race detected during execution of test", "Error: Should be true", 1)
 	require.False(t, triRaceOnlyFramework([]byte(assertion)), "an assertion failure is never exempt")
 	require.False(t, triRaceOnlyFramework([]byte("--- FAIL: TestX\n    Error: boom\n")), "non-race failure not exempt")
+
+	// (2.3a) blank-line 穿透: a real assertion failure printed after a blank
+	// line must NOT hide behind the benign race. fail-before (old code reset the
+	// block on the non-indented blank line, skipping this failure → exempt/true).
+	blankHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n\n    main_test.go:99: Error: want 1 got 2\nFAIL\n"
+	require.False(t, triRaceOnlyFramework([]byte(blankHide)), "a failure after a blank line is never exempt")
+
+	// (2.3a) panic 逃逸: a column-0 panic after the race verdict must veto the
+	// exemption. fail-before (old code reset the block on the non-indented
+	// panic line, never inspecting it → exempt/true).
+	panicHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\npanic: runtime error: index out of range\n\tgx/y.go:1 +0x1\nexit status 2\n"
+	require.False(t, triRaceOnlyFramework([]byte(panicHide)), "a panic is never exempt behind a race")
+
+	// (2.3b) version binding: a tagent wrapper frame riding a REGISTERED family
+	// block is exempt only while the linked version matches the registration.
+	familyWithTagent := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
+	require.True(t, familyExemptionEnabled(), "linked trpc-agent-go must equal the registered family version for the exemption to hold")
+	require.True(t, triRaceOnlyFramework([]byte(familyWithTagent)), "at the registered version the family exemption covers the wrapper frame")
+	orig := familyExemptionEnabled
+	familyExemptionEnabled = func() bool { return false } // simulate a framework upgrade
+	defer func() { familyExemptionEnabled = orig }()
+	require.False(t, triRaceOnlyFramework([]byte(familyWithTagent)), "when the version no longer matches, the family exemption lapses and the wrapper frame vetoes")
 }
 
 // runRaceExemptChild executes a boot child process. The ONLY tolerated child

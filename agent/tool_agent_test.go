@@ -3,9 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
-	"github.com/SpellingDragon/tagent/agent/compress"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/agent/compress"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -83,9 +84,15 @@ func TestAgentToolWrapper_Declaration_NoExtraParams(t *testing.T) {
 
 	decl := wrapper.Declaration()
 
-	// Should only have request and event_keys
-	assert.Len(t, decl.InputSchema.Properties, 2,
-		"should only declare request and event_keys parameters")
+	// Should declare exactly the intended parameters: request, event_keys, and the
+	// subagent ttl lifetime channel (resident-review-fixes 4.1) — no irrelevant
+	// params such as tool_calls.
+	assert.Len(t, decl.InputSchema.Properties, 3,
+		"should declare request, event_keys and ttl parameters only")
+	assert.Contains(t, decl.InputSchema.Properties, "request")
+	assert.Contains(t, decl.InputSchema.Properties, "event_keys")
+	assert.Contains(t, decl.InputSchema.Properties, "ttl")
+	assert.NotContains(t, decl.InputSchema.Properties, "tool_calls")
 }
 
 // ============================================================================

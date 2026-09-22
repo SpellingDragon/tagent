@@ -89,7 +89,7 @@ func (m *e2eModel) latestText() string {
 
 func e2eAgent(t *testing.T, dir string, m *e2eModel) *agent.TagentAgent {
 	t.Helper()
-	// fsync stays at its DEFAULT (on); the compress budget is tiny on purpose
+	// the compress budget is tiny on purpose
 	// so 30 rounds genuinely trigger the compaction/anchor path.
 	ta, err := tagent.New(tagent.Config{
 		Entry: "tagent",

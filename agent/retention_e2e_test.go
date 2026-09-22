@@ -86,6 +86,59 @@ func TestRetention_ArmFromInboxAndReleaseOnAck(t *testing.T) {
 	require.False(t, store.IsKeyProtected(receiptKey), "ack must release the receipt original")
 }
 
+// TestRetention_QuarantineReleasesLease (resident-review-fixes 2.2): quarantine
+// is a terminal envelope disposition exactly like Ack, so it MUST release the
+// isolated envelope's retention holders. Before the fix, QuarantineEnvelope moved
+// the file away but never released — the fact/receipt originals stayed leased
+// forever (a lease hang) and could never be TTL/capacity-evicted. Fail-before:
+// removing the wrapper's releaseRetention keeps IsKeyProtected true after isolate.
+func TestRetention_QuarantineReleasesLease(t *testing.T) {
+	kvDir := t.TempDir()
+	kvStore, err := kv.NewLocalFileKV(kvDir)
+	require.NoError(t, err)
+	store, err := memory.NewFileSegmentStore(kvStore, nil, kvDir, 100)
+	require.NoError(t, err)
+	store.SetRetentionLease(memory.NewRetentionLease())
+
+	now := time.Now().UnixMilli()
+	factKey := memory.NewSnowflakeEventKey(1, now-10*24*3600*1000) // overdue original
+	receiptKey := memory.NewSnowflakeEventKey(1, now)
+	require.NoError(t, store.StoreEvent(factKey, memory.FullEvent{
+		EventKey: factKey, PartitionID: 1, EventType: "external_input",
+		EventSummary: "conflicting input", Timestamp: now - 10*24*3600*1000,
+	}))
+
+	inboxDir := t.TempDir()
+	in, err := reliability.NewInbox(inboxDir, 0)
+	require.NoError(t, err)
+	_, err = in.Enqueue(&reliability.Envelope{
+		RequestID: "rq", State: reliability.InboxStatePending,
+		Messages: []reliability.MessageSlot{{Slot: 0, SourceEvent: json.RawMessage(`{"id":"eq"}`)}},
+	})
+	require.NoError(t, err)
+	_, path, err := in.ClaimNext()
+	require.NoError(t, err)
+	require.NoError(t, in.PrepareFacts(path, tagentevent.FormatEventKey(receiptKey),
+		[]json.RawMessage{json.RawMessage(`{"event_key":` + itoa(factKey) + `}`)}))
+	require.NoError(t, in.Close())
+
+	bus, err := NewReliableEventBus(inboxDir)
+	require.NoError(t, err)
+	bus.SetRetentionGuard(store)
+	require.NoError(t, bus.ArmRetentionFromInbox())
+	require.True(t, store.IsKeyProtected(factKey), "armed fact original is protected")
+	require.True(t, store.IsKeyProtected(receiptKey), "armed receipt original is protected")
+
+	// Isolate the envelope as a terminal state.
+	bus.QuarantineEnvelope(path, "deterministic conflict (test)")
+	require.False(t, store.IsKeyProtected(factKey), "quarantine MUST release the fact original (§2.8, no lease hang)")
+	require.False(t, store.IsKeyProtected(receiptKey), "quarantine MUST release the receipt original")
+
+	// Once released the originals are destroyable again — TTL/capacity eviction
+	// (which skips IsKeyProtected keys) can now reclaim them.
+	require.NoError(t, store.DeleteEvent(factKey), "post-quarantine original must be evictable")
+}
+
 // itoa renders an int64 as JSON-number text for hand-building a prepared_fact payload.
 func itoa(v int64) string {
 	b, _ := json.Marshal(v)

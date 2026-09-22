@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -59,7 +60,11 @@ func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTracki
 
 // SetMemSpill 启用 memory 退化事件兜底（报告 D3 步4）：StoreEvent 失败时事件落 path 的 JSONL，
 // 恢复后经 ReplaySpilled 重放（事件不丢，at-least-once 延伸到存储层）。path 空则禁用。
-func (s *ErrorTrackingStore) SetMemSpill(path string) {
+//
+// C1（resident-review-fixes 1.1）：ProtectAllPending 失败不再 Warnf 吞错——吞错会造出
+// 「热更成功 + 悬空遗忘屏障」组合（pending 键未被保护，扫描器可能销毁 durable 原件）。
+// 改为上抛：调用方（build_agent.go 常驻 owner 构建路径）据此 fail-closed，旧 runner 继续服务。
+func (s *ErrorTrackingStore) SetMemSpill(path string) error {
 	s.spill = NewMemSpill(path)
 	// §2.8: wire the store's retention guard into the spill so each pending key's durable
 	// original is protected until replayed, and rebuild the lease from any pre-existing
@@ -69,10 +74,11 @@ func (s *ErrorTrackingStore) SetMemSpill(path string) {
 		if g, ok := s.inner.(RetentionGuard); ok {
 			s.spill.SetGuard(g)
 			if err := s.spill.ProtectAllPending(); err != nil {
-				log.Warnf("[ErrorTrackingStore] spill retention rebuild failed (pending keys may not be protected): %v", err)
+				return fmt.Errorf("spill retention rebuild failed (pending keys may not be protected): %w", err)
 			}
 		}
 	}
+	return nil
 }
 
 // SetReplayProjection 注册重放双写回调（design-report-closeout 5.5）：每条重放成功的

@@ -24,7 +24,7 @@ func TestStoreEventDurableWithoutClose(t *testing.T) {
 
 	if os.Getenv("TAGENT_BARRIER_SUBPROC") == "1" {
 		dir := os.Getenv("TAGENT_BARRIER_DIR")
-		k, err := kv.NewLocalFileKV(dir) // fsync default ON
+		k, err := kv.NewLocalFileKV(dir) // durability is Sync() at the commit barrier (this backend has no fsync)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "child: open kv:", err)
 			os.Exit(2)

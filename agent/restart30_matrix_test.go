@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,7 +185,7 @@ func TestRestart30_DeterministicIndependentRestarts(t *testing.T) {
 		return
 	}
 	root := t.TempDir()
-	totalInputs, totalReceipts := 0, 0
+	totalInputs, prevInputs, totalReceipts := 0, 0, 0
 
 	for round := 1; round <= r30Rounds; round++ {
 		mode, target := r30Plan(round)
@@ -211,12 +212,35 @@ func TestRestart30_DeterministicIndependentRestarts(t *testing.T) {
 			}
 		}
 		totalInputs += len(r30Contents(round, mode))
-		require.GreaterOrEqual(t, inputs, 1, "round %d: committed facts must be monotone", round)
+		// Real monotone identity vs the cumulative scheduled count — NOT a vacuous
+		// ">= 1": committed facts never vanish across a restart (non-decreasing) and
+		// can never exceed what was scheduled (a conflict round holds its claim and
+		// replays later, so on-disk may trail the schedule but never outrun it).
+		require.LessOrEqual(t, inputs, totalInputs, "round %d: committed inputs must never exceed the cumulative scheduled count (%d)", round, totalInputs)
+		require.GreaterOrEqual(t, inputs, prevInputs, "round %d: committed-input count is monotone across restarts (facts once laid are never lost)", round)
+		prevInputs = inputs
 		require.LessOrEqual(t, receipts, inputs, "receipts can never outrun committed inputs")
-		// Identities on disk are only ever OUR scheduled contents (no mismatch):
+		// Content provenance, not mere non-emptiness: any outstanding envelope must
+		// carry a scheduled round marker in its raw bytes. A round that dies BEFORE
+		// its ack barrier keeps its OWN envelope(s) on disk, so that round's exact
+		// marker must appear. A post-ack round has drained its own envelopes — the
+		// identity check is vacuous there, so the ledger makes NO identity claim for
+		// it (fail-before: the old code asserted only NotEmpty(Raw) every round).
 		envs := finishEnvelopes(t, root)
 		for _, e := range envs {
-			require.NotEmpty(t, e.Raw)
+			require.Regexp(t, `r30-\d\d-`, e.Raw, "an outstanding envelope must carry a scheduled round marker (provenance)")
+		}
+		if target != "post-ack" {
+			marker := fmt.Sprintf("r30-%02d-", round)
+			found := false
+			for _, e := range envs {
+				if strings.Contains(e.Raw, marker) {
+					found = true
+				}
+			}
+			require.True(t, found, "round %d (%s) left its own envelope(s) carrying marker %q on disk", round, target, marker)
+		} else if len(envs) == 0 {
+			t.Logf("round %d post-ack: inbox drained — no envelope identity claim made this round", round)
 		}
 		require.NoError(t, store.Close())
 	}

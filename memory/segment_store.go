@@ -278,13 +278,20 @@ func (s *FileSegmentStore) scanLiveKeys(pid int) (liveCount int, maxKey int64, e
 			if json.Unmarshal([]byte(pair.Value), &evt) != nil || evt.EventKey == 0 {
 				continue
 			}
+			// §8.5 key floor: every key ever written on the chain raises the snowflake
+			// floor — a tombstone is still an ALREADY-ISSUED key. The floor invariant
+			// ("a new generation never re-issues a key already on disk") is independent
+			// of liveness, so the maxKey update MUST run BEFORE the tombstone continue:
+			// a tombstoned highest key skipped here lets the next generation collide with
+			// it (ReplayEvent → deterministic ErrEventForgotten, downgrading a legitimate
+			// input to quarantine). Resident-review-fixes 2.1.
+			if evt.EventKey > maxKey {
+				maxKey = evt.EventKey
+			}
 			if s.tombstones != nil && s.tombstones.IsTombstone(evt.EventKey) {
 				continue // logically dead — not part of the live count
 			}
 			live[evt.EventKey] = struct{}{} // dedup across crash-window layers
-			if evt.EventKey > maxKey {
-				maxKey = evt.EventKey
-			}
 		}
 	}
 	return len(live), maxKey, nil

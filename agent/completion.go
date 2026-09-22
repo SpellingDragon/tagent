@@ -61,17 +61,18 @@ const (
 
 // Stable, closed skip reasons (design L54: unknown enum values are failures, so a
 // skipped slot must carry exactly one of these — never a free-form reason).
+// The former third value "empty_input" was a dead enum: an empty input slot is
+// NOT skipped — the commit gate still lays down a fact for it and marks it
+// processed (§4.3), so no slot ever carried this reason (resident-review-fixes 5.2).
 const (
 	skipReasonMeditationYield = "meditation_yield" // mixed-batch meditation stepped aside (§4.1)
 	skipReasonNotSelected     = "not_selected"     // present but not part of this turn's selected set
-	skipReasonEmptyInput      = "empty_input"      // valid-but-empty input, no facts written (§4.3)
 )
 
 // validSkipReason is the closed set enforced by validate.
 var validSkipReason = map[string]bool{
 	skipReasonMeditationYield: true,
 	skipReasonNotSelected:     true,
-	skipReasonEmptyInput:      true,
 }
 
 // completionSlot is one frozen slot disposition. SourceID is the originating

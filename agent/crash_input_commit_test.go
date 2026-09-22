@@ -137,9 +137,9 @@ func TestCrashWindow_InputCommit(t *testing.T) {
 	require.Equal(t, 2, receipts, "one receipt per accepted envelope after the crash replay — no duplicate, none lost")
 
 	// The frozen key of slot A really is the committed identity (not a re-stamp).
+	// After the ack barrier the envelope is gone; empty IS the assertion.
 	envs, err := openEnvelopesForTest(filepath.Join(root, "inbox"))
 	require.NoError(t, err)
-	_ = envs // after the ack barrier the envelope is gone; empty IS the assertion below
 	require.Empty(t, envs, "processed-cleaned: the acked envelope left the inbox")
 }
 

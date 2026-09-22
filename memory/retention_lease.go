@@ -151,3 +151,15 @@ func (l *RetentionLease) Len() int {
 	defer l.mu.RUnlock()
 	return len(l.refs)
 }
+
+// Holders 返回 key 当前的存活持有者数（诊断/测试：同一 key 可被 envelope owner
+// 与 spill owner 同时保护）。未保护＝ 0。nil-safe。C1（resident-review-fixes
+// 1.2）泄漏回归用它断言“一个壳构建不向共享租约加持有者”。
+func (l *RetentionLease) Holders(key int64) int {
+	if l == nil {
+		return 0
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.refs[key]
+}

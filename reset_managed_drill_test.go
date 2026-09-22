@@ -38,7 +38,6 @@ func (m *drillModel) GenerateContent(_ context.Context, req *model.Request) (<-c
 	copy(snap, req.Messages)
 	m.reqs = append(m.reqs, snap)
 	m.mu.Unlock()
-	_ = strings.TrimSpace
 	ch := make(chan *model.Response, 1)
 	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "drill-ack"}}}}
 	close(ch)

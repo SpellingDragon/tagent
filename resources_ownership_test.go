@@ -94,6 +94,7 @@ func TestOwnership_ReopenAfterLastClose(t *testing.T) {
 
 // TestOwnership_ConflictingConfigRejected（4.1 T3 / 4.2）：同物理路径的
 // 不兼容配置必须显式拒绝——绝不创建第二套 writer，也绝不静默沿用首配。
+// 用真实行为轴（engine）作冲突源——fsync 已裁决为零行为差异轴（下方负向锁）。
 func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 	dir := t.TempDir()
 	ta1, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
@@ -101,13 +102,49 @@ func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 	defer ta1.Close()
 
 	conflict := ownershipCfg(dir)
-	off := false
 	a := conflict.Agents["tagent"]
-	a.Memory.FSync = &off // 与默认（true）冲突
+	a.Memory.Engine = &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 64}} // real behavioral axis
 	conflict.Agents["tagent"] = a
 	_, err = New(conflict, WithModel(&stubModel{name: "m"}))
-	require.Error(t, err, "incompatible config on the same path must be rejected")
+	require.Error(t, err, "incompatible BEHAVIORAL config on the same path must be rejected")
 	require.Contains(t, err.Error(), "conflict")
+}
+
+// TestOwnership_FSyncAxisSharesNotConflicts（resident-review-fixes 3.1 / spec
+// 「零行为差异轴不制造假冲突」）：localfile 的 fsync 已被后端裁决为
+// accepted-and-ignored（两值行为恒同），因此 MUST NOT 制造共享假冲突。仅 fsync
+// 不同的两份配置共享同一活动实例——第二次装载被接受（而非拒绝），且两个
+// handle 写入互可见（同一 store，非重建）。fail-before：fsync 仍在指纹中时
+// 第二次 New 会因冲突报错。
+func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
+	dir := t.TempDir()
+	base := ownershipCfg(dir) // fsync default (nil → backend default)
+	ta1, err := New(base, WithModel(&stubModel{name: "m"}))
+	require.NoError(t, err)
+	defer ta1.Close()
+
+	other := ownershipCfg(dir)
+	off := false
+	a := other.Agents["tagent"]
+	a.Memory.FSync = &off
+	other.Agents["tagent"] = a
+
+	// Zero-behavior-difference axis must not join the fingerprint.
+	require.Equal(t,
+		fingerprintMemory(base.Agents["tagent"].Memory),
+		fingerprintMemory(other.Agents["tagent"].Memory),
+		"fsync-only configs must produce identical fingerprints")
+
+	ta2, err := New(other, WithModel(&stubModel{name: "m"}))
+	require.NoError(t, err, "fsync-only difference must share the instance, not reject (false conflict)")
+	defer ta2.Close()
+
+	// Same live instance: a write via ta2 reads back through ta1.
+	storeFact(t, ta2.MemStore(), "fsync-shared")
+	pid := memory.PartitionIDFromName("tagent")
+	refs, qerr := ta1.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "fsync-shared"})
+	require.NoError(t, qerr)
+	require.NotEmpty(t, refs, "the two handles share ONE live store (no rebuild on the fsync axis)")
 }
 
 // TestOwnership_MidBuildFailureReleasesLease（4.1 T4）：构建后续步骤失败时

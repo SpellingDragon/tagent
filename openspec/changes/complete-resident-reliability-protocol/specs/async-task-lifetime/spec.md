@@ -6,6 +6,12 @@
 
 常驻/交互服务不因类型被豁免，而由模型在 spawn 时设置足够大的 TTL 或经重入续命维持；模型未设即接受默认 10 分钟到期强杀，此为既定语义。
 
+该 `ttl` 自设通道 MUST 同样及于 subagent（AgentToolWrapper）：包装工具 schema 携带 `ttl`（可选整数秒，>0 生效、0/缺省回落配置默认、负值拒绝），透传至 TaskSpec.TTL 并持久化于 Declarative.Params，`SubagentSpecFromDeclarative` 回放时复原该锚点——使长时多轮委派不再只能撞 10 分钟地板强杀，与 command 类对称。
+
+#### Scenario: 模型为长时 subagent 自设 TTL
+- **WHEN** 模型 spawn 一个预计超过 10 分钟的多轮 subagent 委派并在工具调用里带上 `ttl`
+- **THEN** 该 ttl 成为其到期锚点（不再受 10 分钟地板强杀），看板呈现其剩余寿命；跨重启经声明式回放保持同一锚点
+
 #### Scenario: 未 detach 的 suspect 命令到期被回收
 - **WHEN** 一个换装/服务脚本转入 suspect（静默、从未 detach）且已超过其 TTL
 - **THEN** 唯一 reaper 终止其底层会话并写 failed 终态，任务从看板移除，不再逐回合重渲染
@@ -61,6 +67,14 @@
 #### Scenario: 结算通知可折叠回收
 - **WHEN** 历史中积累了多条 `[task settled]` 结算通知且上下文逼近预算
 - **THEN** 压缩可将其折叠为票据引用并回收正文，不再因 external_input 豁免而不可回收
+
+### Requirement: TTL 回收时机为下一次唤醒（懒触发，无后台计时器）
+
+回收器 SHALL 由活动唤醒驱动（看板渲染、冥想周期、冷启动清点），MUST NOT 为 TTL 到期引入一个独立常驻的后台 ticker。常驻 bot 在无输入的完全静默期没有任何回收需求方，ticker 只会回收无人观察的任务并空耗唤醒。因此到期任务的"从看板消失时刻"= 下一次唤醒；完全静默期内物理回收可滞后于 TTL 名义到期，一旦有输入/看板/冥想触发即收敛。此为既定语义（resident-review-fixes 3.4 明示），非缺陷，评审据此不引入 ticker。
+
+#### Scenario: 完全静默期到期任务滞后回收
+- **WHEN** 一个任务越过 TTL 但此后进程完全静默（无输入、无看板渲染、无冥想触发）
+- **THEN** 其物理回收滞后到下一次唤醒；下一次看板渲染时该任务已不在 active 集合中
 
 ### Requirement: 静默探测与 TTL 正交
 

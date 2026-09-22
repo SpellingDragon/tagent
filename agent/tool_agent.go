@@ -158,6 +158,12 @@ type AgentToolWrapper struct {
 // when LLM does not pass event_keys.
 const autoInjectMaxEvents = 5
 
+// subagentTTLParam is the Declarative.Params key under which a sub-agent's
+// self-set lifetime (seconds, as decimal text) is persisted so the task-registry
+// rebuild can replay the reaper anchor across a restart. It matches the command
+// tool's ttl param key (tool/action pTTL = "ttl").
+const subagentTTLParam = "ttl"
+
 // NewAgentToolWrapper creates a new AgentToolWrapper.
 //   - ag: the sub-agent to wrap (must implement agent.Agent — local TagentAgent or remote A2AAgent)
 //   - desc: tool description shown to parent agent's LLM
@@ -284,6 +290,16 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 		}
 	}
 
+	// Sub-agent lifetime self-service channel (resident-review-fixes 4.1),
+	// symmetric with the command tool's `ttl`: a long multi-round delegation is
+	// otherwise stuck on the 10-minute reaper floor. >0 sets this sub-agent
+	// task's absolute lifetime (seconds); 0/omitted → the manager's configured
+	// default (10m floor). A negative value is rejected in Call before spawning.
+	decl.InputSchema.Properties["ttl"] = &trpctool.Schema{
+		Type:        "integer",
+		Description: "ABSOLUTE lifetime of this sub-agent run in seconds. The unified reaper retires the task this long after spawn (fresh sub-agent runs are not reentrant, so this is not refreshed by later turns). 0 or omitted = configured default (10 minutes if unset); there is no way to disable the reaper. Raise it alongside the model's own pacing for long delegations.",
+	}
+
 	return decl
 }
 
@@ -326,6 +342,30 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 
 	// Extract request text
 	request, _ := args["request"].(string)
+
+	// Parse the optional self-set lifetime (seconds). json.Number preserves
+	// int64 precision. Semantics mirror the command tool's ttl: >0 effective,
+	// 0/omitted → configured default (reaper floor), negative → REJECTED here
+	// before any spawn (resident-review-fixes 4.1).
+	var ttlSeconds int64
+	if raw, ok := args["ttl"]; ok && raw != nil {
+		n, isNum := raw.(json.Number)
+		if !isNum {
+			if f, isFloat := raw.(float64); isFloat {
+				n = json.Number(strconv.FormatInt(int64(f), 10))
+			} else {
+				return nil, fmt.Errorf("agent tool %q: ttl must be an integer number of seconds", agentName)
+			}
+		}
+		v, perr := n.Int64()
+		if perr != nil {
+			return nil, fmt.Errorf("agent tool %q: ttl must be an integer number of seconds: %w", agentName, perr)
+		}
+		if v < 0 {
+			return nil, fmt.Errorf("agent tool %q: ttl must be >= 0 (0/omitted = configured default); got %d", agentName, v)
+		}
+		ttlSeconds = v
+	}
 
 	// Collect declared extra params present in this call and build the
 	// message body: with extra params → JSON {params..., request} so the
@@ -441,10 +481,21 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		if extraName != "" {
 			spawnKey = agentName + ":" + extraName
 		}
+		// Self-set lifetime → TaskSpec.TTL (explicit only; 0 defers to the manager's
+		// configured default / 10m floor, so the three-level chain is reused). The
+		// ttl is persisted in Declarative.Params so RebuildTaskRegistry replays the
+		// reaper anchor across a restart (SubagentSpecFromDeclarative reads it back).
+		var specTTL time.Duration
+		var declParams map[string]string
+		if ttlSeconds > 0 {
+			specTTL = time.Duration(ttlSeconds) * time.Second
+			declParams = map[string]string{subagentTTLParam: strconv.FormatInt(ttlSeconds, 10)}
+		}
 		res := spawner.Spawn(task.TaskSpec{
 			Kind: "subagent",
 			Desc: agentName + ": " + truncate(request, 60),
 			Key:  spawnKey,
+			TTL:  specTTL,
 			// R2（resident-continuity-r2-r4）：声明式投影——重启后 Relaunch 经 agents map
 			// 重投递（承诺表：subagent Resume 不可重建，rounds 无事件源）。
 			Declarative: &task.Declarative{
@@ -453,8 +504,9 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				Key:         spawnKey,
 				AgentName:   agentName,
 				MessageBody: request,
+				Params:      declParams,
 			},
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey, ttlSeconds),
 			ResumeFn: w.subagentResume(agentName, rounds),
 		}, detector)
 		if res.Blocked != "" {
@@ -583,25 +635,33 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 // relaunchable and keeps the SAME idempotency key as the original spawn
 // (name-based when a plan name was declared — D4 single-flight covers
 // relaunch rounds too, not just the first spawn).
-func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string) func() (task.SpawnResult, error) {
+func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64) func() (task.SpawnResult, error) {
 	return func() (task.SpawnResult, error) {
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			return w.runAndCollect(runCtx, inv, agentName)
 		}, w.asyncDenseDuration)
+		var specTTL time.Duration
+		var declParams map[string]string
+		if ttlSeconds > 0 {
+			specTTL = time.Duration(ttlSeconds) * time.Second
+			declParams = map[string]string{subagentTTLParam: strconv.FormatInt(ttlSeconds, 10)}
+		}
 		return spawner.Spawn(task.TaskSpec{
 			Kind: "subagent",
 			Desc: agentName + ": " + truncate(request, 60),
 			Key:  spawnKey,
+			TTL:  specTTL,
 			// R2（review 🟠8）：relaunch 产物同样携带声明式投影——否则该产物重启后
-			// 成幽灵（无 task_spawned 记录可回放）。
+			// 成幽灵（无 task_spawned 记录可回放）。ttl 一并持久化，保持锚点一致。
 			Declarative: &task.Declarative{
 				Kind:        "subagent",
 				Desc:        agentName + ": " + truncate(request, 60),
 				Key:         spawnKey,
 				AgentName:   agentName,
 				MessageBody: request,
+				Params:      declParams,
 			},
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey),
+			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey, ttlSeconds),
 		}, detector), nil
 	}
 }

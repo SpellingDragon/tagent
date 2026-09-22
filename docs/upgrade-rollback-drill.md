@@ -13,22 +13,22 @@
 | 本机结果（2026-09-18, darwin/arm64） | PASS（3 用例，无 sleep、无真实重启） |
 
 链式的三段序列演练（原子门另有归属，见下）：
-- `TestDrill_UpgradeDrainsLegacySpillThenAccepts`：旧 spill 拒绝 → 排空 → 接受 → 全 ack；
+- `TestDrill_UpgradeTreatsLegacySpillAsInertThenResets`：旧 spill 视为惰性 transitional（不阻断启动）→ 只读分类 → 受控 `ResetTransitional` 清除 → 当前协议全 ack；
 - `TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain`：崩溃遗留 outstanding → 拒绝降级 → 排空至零 → 放行；
 - `TestDrill_PartitionCollisionDiagnosisIsReadOnly`：鸽笼保证可检出（1200 名 / 1024 分区）→ 标记且**只读不改键**。
 
-## 1. 旧 spill 排空（升级前置门）
+## 1. 旧 spill / inbox-v1 遗留（§3.7：惰性 transitional 数据，非启动前置门）
 
-- **机制**：`reliability.NewInbox` 打开 `inbox-v1/` 前，扫描其父目录是否存在 `*.spill`（`.spillExt`）遗留；**存在即 fail-loud 拒绝启动**。旧格式条目必须由写它的旧版本排空，新版本绝不静默重解释。
-- **运维观测**：`reliability: legacy .spill items present; drain them with the previous binary before upgrading to inbox-v1: <文件名>`（`ErrLegacySpillNotDrained`）。
-- **纠正**：用**升级前的旧二进制**正常启动一次，让其把 channel/spill 溢出冲刷入库（旧版 `SpillStore` 语义），或确认目录内无 `*.spill` 后再启新二进制。**禁止手工删除**未排空的 `.spill`（即未消费输入）。
-- **佐证**：夹具 §0 第 1 段 + `agent/reliability/inbox_test.go:TestInbox_LegacySpillBlocksUpgrade`。
+- **机制**：`reliability.NewInbox` 打开时只装载当前格式（`inbox-v2/`）；前一格式遗留（`*.spill`、`inbox-v1/`）**不再阻断启动**，被分类为**惰性 transitional 数据**——绝不重解释、绝不当作 v2 输入吸收（不计入 `Pending()`）。旧的「用前一二进制排空方可升级」前置门与 `ErrLegacySpillNotDrained` 已删除（§3.7，design 决策10）。
+- **运维观测**：`Inbox.TransitionalData()` 只读列出被识别的遗留文件路径；这些文件不参与消费，仅供处置决策。
+- **纠正**：确需清除时，走**运维显式确认的托管复位** `Inbox.ResetTransitional(true)`——仅删除已枚举的 transitional 文件并返回删除计数，当前格式数据不受影响。不再有「旧二进制排空」步骤；处置前勿手工删除在册遗留。
+- **佐证**：夹具 §0 第 1 段 + `tests/upgrade_rollback_drill_test.go:TestDrill_UpgradeTreatsLegacySpillAsInertThenResets`（受控复位全序列另见 `reset_managed_drill_test.go`）。
 
 ## 2. inbox-v1 回滚条件（降级门）
 
 - **前提**：pre-inbox 二进制**不认识** `inbox-v1/` 目录布局（pending/claimed/receipted 三态信封），降级会静默丢弃其中未消费输入。
 - **只读判据（运维可观测）**：`inbox-v1/` 下信封文件数（`ls <dir>/inbox-v1/*.json | wc -l`——`Ack` 成功即删文件）；进程内等价量为 `Inbox.Pending()`（pending+claimed+receipted 未确认计数）。**判据 >0 ⇒ 拒绝降级**。
-- **安全降级序列**：用**当前 inbox-aware 二进制**正常启动一次并等其排空——它会消费 pending 信封；启动期 `ReconcileDurableReceipts` 自动经 `ConfirmDurableByRequestID` 把「事实链已回执但 inbox 未 ack」的信封收敛删除（内部机制，无需人工调用）。观察到 `inbox-v1/` 无遗留信封后方可换回旧二进制。
+- **安全降级序列**：用**当前 inbox-aware 二进制**正常启动一次并等其排空——它会消费 pending 信封；启动期 `ReconcileOutstanding` 按每信封固定键收敛「事实链已回执但 inbox 未 ack」的信封，经 `ConfirmDurable(path, cred)`（凭证与预留一致方放行）删除（内部机制，无需人工调用；旧的 harvest 式 `ReconcileDurableReceipts`/`ConfirmDurableByRequestID` 已删除）。观察到 `Pending()==0` 后方可换回旧二进制。
 - **崩溃窗口**：claim 与 receipt 之间崩溃 → 重启时 claimed 回 pending、`Attempts++`，仍计入未确认（即「宁可重放，不可丢」，见 `NewInbox` reopen 分支）。
 - **佐证**：夹具 §0 第 2 段 + `agent/reliability/inbox_test.go:TestInbox_Reopen_RequeuesClaimed_KeepsReceipted`。
 
@@ -68,8 +68,8 @@
 
 ```mermaid
 flowchart TD
-    A[升级前备份 store 目录] --> B{无 *.spill 遗留?}
-    B -- 有 --> C[用旧二进制排空 spill] --> B
+    A[升级前备份 store 目录] --> B{有 *.spill / inbox-v1 遗留?}
+    B -- 有 --> C[不阻断启动; 需要时运维 ResetTransitional 清除] --> D
     B -- 无 --> D{候选名集合分区冲突只读预检通过?}
     D -- 冲突 --> E[重命名冲突 agent 后重放] --> D
     D -- 通过 --> F{确认 allowlist/限额配置就绪}
@@ -78,7 +78,7 @@ flowchart TD
     H --> I{ErrStoreLocked / ErrResourceConflict?}
     I -- 是 --> J[排查双开/指纹不兼容] --> G
     I -- 否 --> K[升级完成]
-    K -.回滚须先.-> L[Pending==0 且 inbox-v1 排空方可降级]
+    K -.回滚须先.-> L[Pending==0 方可降级]
 ```
 
 - 回滚方向：先走 §2（排空 inbox-v1 至 `Pending()==0`）再换旧二进制；旧二进制对 `inbox-v1/` 无感，遗留在册信封会被静默丢弃。

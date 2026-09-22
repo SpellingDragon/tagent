@@ -386,6 +386,14 @@ func closeResource(res openedResource) (workerStopped bool, err error) {
 		ps.StopProducers()
 	}
 	if res.engine != nil {
+		// POISON primary trigger leg: a failed engine stop reports workerStopped
+		// == false, so the caller seals the path with a poisoned entry (never two
+		// writers on an unconfirmed stop). NOTE (resident-review-fixes 3.3): the
+		// current InMemoryEngine.Close returns nil unconditionally, so this MAIN
+		// trigger leg is UNREACHABLE with today's engine — the seal is still
+		// reachable via unlock/reclaim failures (§6.4). The mechanism is kept as a
+		// FORWARD CONTRACT for a future engine whose Close can fail; no un-seal
+		// (de-poison) exit is built — restart recovery is acceptable when it fires.
 		if e := res.engine.Close(); e != nil {
 			return false, fmt.Errorf("close memory engine: %w", e)
 		}
@@ -443,13 +451,12 @@ func flockExclusive(f *os.File) error {
 }
 
 // fingerprintMemory renders the conflict-relevant subset of MemoryConfig as a
-// canonical string. Fields NOT here (e.g. read_namespaces) are per-agent view
-// config and may differ across sharers.
+// canonical string. Fields NOT here are per-agent view config (e.g.
+// read_namespaces) or accepted-and-ignored axes with ZERO behavioral difference
+// (localfile fsync) — the latter MUST NOT join the fingerprint, or two configs
+// that behave identically would be rejected as a false conflict (resident-review-
+// fixes 3.1; runtime-resource-ownership「零行为差异轴不制造假冲突」).
 func fingerprintMemory(mc MemoryConfig) string {
-	fsync := "true"
-	if mc.FSync != nil {
-		fsync = fmt.Sprintf("%v", *mc.FSync)
-	}
 	lifecycle := "default"
 	if mc.Lifecycle != nil {
 		if b, err := json.Marshal(mc.Lifecycle); err == nil {
@@ -462,6 +469,6 @@ func fingerprintMemory(mc MemoryConfig) string {
 			engine = string(b)
 		}
 	}
-	return strings.Join([]string{"v1", mc.Type, mc.Path, "fsync=" + fsync,
+	return strings.Join([]string{"v1", mc.Type, mc.Path,
 		"lifecycle=" + lifecycle, "engine=" + engine, "rvbin=" + mc.RustVikingBinary}, "|")
 }

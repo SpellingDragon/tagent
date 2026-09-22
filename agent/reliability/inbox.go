@@ -195,7 +195,12 @@ type Envelope struct {
 	RequestID string `json:"request_id"`
 	Source    string `json:"source"`
 	State     string `json:"state"`
-	Attempts  int    `json:"attempts,omitempty"`
+	// Attempts counts re-claims of this envelope (requeue + claim each count
+	// one). It is a PERSISTENT AUDIT field only: the behavioural consumer (a
+	// max-attempts quarantine gate) is NOT wired, and the diagnostics
+	// aggregation surface over it is deferred (resident-review-fixes 5.3,
+	// design 决策 7). Kept for retry forensics, not read to drive behaviour.
+	Attempts int `json:"attempts,omitempty"`
 	// ReceiptKey is the processing-receipt EventKey (hex) reserved on FIRST
 	// prepare. It represents a RESERVED identity only, not completion (D2).
 	ReceiptKey string `json:"receipt_key,omitempty"`
@@ -604,18 +609,22 @@ func (in *Inbox) PrepareFacts(path, receiptKey string, facts []json.RawMessage) 
 // dir under the mutation lock and frees its unacked capacity. The bytes are kept
 // on disk for operator inspection (never destroyed). The §4.2 submit gate uses it
 // to isolate a deterministic-conflict input rather than silently retry or drop it.
-func (in *Inbox) QuarantineEnvelope(path, reason string) {
+// It reports whether an envelope was actually present and moved — the caller uses
+// the true result as the release point for the envelope's §2.8 retention holders
+// (an already-gone/unreadable envelope protects nothing and returns false).
+func (in *Inbox) QuarantineEnvelope(path, reason string) bool {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	env, err := readEnvelope(path)
 	if err != nil {
-		return // already gone or unreadable: nothing left to isolate
+		return false // already gone or unreadable: nothing left to isolate
 	}
 	in.quarantineFile(path, reason)
 	if env.RequestID != "" {
 		delete(in.pathsByRequestID, env.RequestID)
 	}
 	in.pending.Add(-1)
+	return true
 }
 
 // ReleaseClaim returns a claimed envelope to pending so a later Pull re-claims it

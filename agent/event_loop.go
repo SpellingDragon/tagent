@@ -151,12 +151,12 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 				committedKeys: keys,
 			}
 		}
-		// Recovery one-shot notice is NOT appended here (F9 fix): in durable mode
-		// the invocation content is pre-persisted per-message and the notice is
-		// silently dropped by assembleRequest's projection-only rebuild; in volatile
-		// mode it would enter the fact chain as a user input, polluting history.
-		// The notice is instead injected at the request TAIL inside assembleRequest,
-		// where it reaches the model without being stored (D6 design).
+		// The one-shot cold-start recovery notice is deliberately NOT appended to
+		// `msg` here (F9 fix): that would route it through the invocation store,
+		// where it would enter the fact chain as a user input and pollute history.
+		// It is instead consumed at the ACTUAL model call by executionGateModel's
+		// withRecoveryNotice (cm.TakeRecoveryNotice), which appends it to a copy of
+		// the request tail so it reaches the model without ever being stored (§4.5C/D6).
 
 		// Determine trigger source from batch events for deterministic
 		// consumer-side dispatch. The source is attached to outputCh
