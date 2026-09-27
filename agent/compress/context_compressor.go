@@ -55,12 +55,26 @@ type ContextCompressor struct {
 	compressor   *SmartCompressor // Reuses L0-L3 / value-driven strategy
 	memStore     memory.MemoryStore
 	tokenCounter TokenCounter
-	maxTokens    int
-	// thresholdPct is hot-reloadable (org-layer config hot reload): read via
-	// currentThreshold() (atomic), written only via UpdateThreshold (atomic
-	// store on bits). 0 bits = unset sentinel handled by currentThreshold().
+	// maxTokens / keepRecent are the CONSTRUCTION values (§6.4 pull, S-E): after
+	// the push face was deleted they are written exactly once, here, and only
+	// consulted as the fallback when no hot source is installed. The live numbers
+	// come from hotSource per boundary, so an in-flight turn can never observe a
+	// half-applied hot rotation.
+	maxTokens atomic.Int64
+	// thresholdBits holds the construction threshold as atomic bits; 0 bits =
+	// unset sentinel handled by currentThreshold(). Written only by
+	// seedThreshold (constructor). The live threshold resolves through
+	// liveNums: hot source when installed, these bits otherwise.
 	thresholdBits atomic.Uint64
-	keepRecent    int
+	keepRecent    atomic.Int64
+
+	// hotSource is the §6.4 pull side (introduce-durable-workflow-engine S-E):
+	// when installed, every consumption boundary (BudgetLine/Threshold/
+	// KeepRecentValue/Compress) resolves the FULL numeric group from it, and the
+	// atomics above retire to the construction fallback. Push paths may still
+	// write the atomics during the transition; a wired source wins per field, so
+	// there is never a second authority on the read side.
+	hotSource atomic.Pointer[func() HotNumbers]
 
 	// recentFullCount is the full-window size ANCHORED at each compaction
 	// round (stable-context-compaction D3): the most recent recentFullCount
@@ -138,71 +152,97 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 	}
 }
 
-// MarkMeditationKey records that the given event key is a meditation-turn
-// output; its index card line will carry the ★ highlight.
-// UpdateThreshold hot-swaps the compression threshold percentage (org-layer
-// config hot reload, design D3 incremental A). Safe for concurrent use:
-// readers go through currentThreshold(); non-positive or NaN/Inf values are
-// rejected (keep the current value).
-// ApplyHotParams applies the org hot numeric bundle at ONE point
-// (full-hot-config Phase 1, 2026-09-16): threshold first (budget line =
-// maxTokens × threshold recomputes at the next Compress), then the budget
-// base and keep-recent count. Zero/negative values keep current settings.
-// hardening-review-batch2 5.3（参数同代）：trigger budget 与 maxTokens/keepRecent
-// 一起换装到内层 SmartCompressor——外层触发线与内层压缩目标必须来自同一代；
-// 旧实现只动外层，内层保持冷构造值（缩窗→no-op 压缩，扩窗→过度压缩）。
-// TriggerBudget 取 maxTokens×threshold（与冷构造 agent.go 对齐公式一致）。
-func (cc *ContextCompressor) ApplyHotParams(thresholdPct float64, maxTokens, keepRecent int) {
-	cc.UpdateThreshold(thresholdPct)
-	cc.UpdateMaxTokens(maxTokens)
-	cc.UpdateKeepRecent(keepRecent)
-	// 同代同步内层：triggerBudget = 同一 effective maxTokens × 同一 threshold。
-	if maxTokens > 0 {
-		cc.compressor.ApplyParams(maxTokens, cc.BudgetLine(), keepRecent)
+// HotNumbers is the full numeric hot bundle consumed at compression
+// boundaries (§6.4 pull model, introduce-durable-workflow-engine S-E). One
+// source read yields ALL three values, so the outer trigger line and the inner
+// compression target always come from ONE generation — the torn window the old
+// per-field atomic pushes left (hardening-review-batch2 5.3 patched it by
+// re-pushing both sides) is closed structurally instead of synchronized.
+// Zero/invalid fields fall back to the construction values (standalone/bare
+// edge: an owner with no record yet must still compute a sane budget).
+type HotNumbers struct {
+	ThresholdPct float64
+	MaxTokens    int
+	KeepRecent   int
+}
+
+// WithHotSource installs the pull source read at EVERY consumption boundary
+// (BudgetLine/Threshold/KeepRecentValue/Compress). While installed the source
+// wins per field; unset/invalid fields fall back to the construction atomics.
+func WithHotSource(src func() HotNumbers) ContextCompressorOption {
+	return func(cc *ContextCompressor) {
+		if src != nil {
+			cc.hotSource.Store(&src)
+		}
 	}
 }
+
+// SetHotSource installs (or replaces) the pull source after construction — the
+// owner's hot view is only reachable once the agent wiring exists (resident CM
+// is built before its TagentAgent fields finish wiring, §6.4).
+func (cc *ContextCompressor) SetHotSource(src func() HotNumbers) {
+	if src == nil {
+		return
+	}
+	cc.hotSource.Store(&src)
+}
+
+// liveNums resolves the effective numeric group at THIS boundary: installed
+// source per field (>0 / valid wins), else the construction atomics. Each
+// boundary takes exactly one source read, so a concurrent rotation can never
+// be observed half-applied (threshold from one generation, maxTokens from
+// another).
+func (cc *ContextCompressor) liveNums() (threshold float64, maxTokens, keepRecent int) {
+	threshold, maxTokens, keepRecent = cc.currentThreshold(), int(cc.maxTokens.Load()), int(cc.keepRecent.Load())
+	src := cc.hotSource.Load()
+	if src == nil {
+		return
+	}
+	h := (*src)()
+	if h.ThresholdPct > 0 && !math.IsNaN(h.ThresholdPct) && !math.IsInf(h.ThresholdPct, 0) {
+		threshold = h.ThresholdPct
+	}
+	if h.MaxTokens > 0 {
+		maxTokens = h.MaxTokens
+	}
+	if h.KeepRecent > 0 {
+		keepRecent = h.KeepRecent
+	}
+	return
+}
+
+// MarkMeditationKey records that the given event key is a meditation-turn
+// output; its index card line will carry the ★ highlight.
+// ApplyHotParams / UpdateMaxTokens / UpdateKeepRecent / SeedKeepRecent are GONE
+// (§6.4 pull, S-E). They were the push face: the org reloader re-wrote the three
+// atomics and re-armed the inner SmartCompressor target at each commit, and
+// hardening-review-batch2 5.3 had to patch them into one generation by hand
+// because the outer trigger line and the inner compression target could otherwise
+// be observed from different generations. With the hot source installed, every
+// boundary resolves the whole group in a single read (liveNums), so the push
+// face has no caller and no reason to exist.
 
 // BudgetLine exposes the effective compression trigger line
 // (maxTokens × currentThreshold) for introspection and tests — the number
-// the "under budget (x <= y)" log prints.
+// the "under budget (x <= y)" log prints. Resolved per boundary from the
+// installed hot source (§6.4 pull); construction atomics when no source.
 func (cc *ContextCompressor) BudgetLine() int {
-	return int(float64(cc.maxTokens) * cc.currentThreshold())
+	thr, maxTokens, _ := cc.liveNums()
+	return int(float64(maxTokens) * thr)
 }
 
-// UpdateMaxTokens hot-updates the compression budget base — the C-defect fix
-// (full-hot-config Phase 1): maxTokens was construction-frozen, so yaml
-// window changes never reached the resident cm's budget line.
-func (cc *ContextCompressor) UpdateMaxTokens(n int) {
-	if n > 0 {
-		cc.maxTokens = n
-	}
-}
-
-// UpdateKeepRecent hot-updates the keep-recent task count on both the
-// per-call override default and the grading ladder input.
-// SeedKeepRecent aligns the compressor-level keepRecent with the startup
-// config (4.7 introspection truth source): WithKeepRecentTasks feeds the
-// inner SmartCompressor; this seeds the ContextCompressor's own field so
-// hot-reload reads back the EFFECTIVE startup value.
-func (cc *ContextCompressor) SeedKeepRecent(n int) {
-	if n > 0 {
-		cc.keepRecent = n
-	}
-}
-
-// KeepRecentValue returns the live keepRecent (introspection, 4.6).
+// KeepRecentValue returns the live keepRecent (introspection, 4.6) — hot
+// source when installed (§6.4 pull), construction atomics otherwise.
 func (cc *ContextCompressor) KeepRecentValue() int {
-	return cc.keepRecent
+	_, _, keepRecent := cc.liveNums()
+	return keepRecent
 }
 
-func (cc *ContextCompressor) UpdateKeepRecent(n int) {
-	if n > 0 {
-		cc.keepRecent = n
-		cc.compressor.KeepRecentTasks = n
-	}
-}
-
-func (cc *ContextCompressor) UpdateThreshold(pct float64) {
+// seedThreshold records the construction threshold as atomic bits (the read side
+// is currentThreshold/liveNums). Unexported on purpose: after §6.4 there is no
+// hot write to it — the only authority that can change the effective threshold
+// is the hot source.
+func (cc *ContextCompressor) seedThreshold(pct float64) {
 	if pct <= 0 || math.IsNaN(pct) || math.IsInf(pct, 0) {
 		return
 	}
@@ -217,6 +257,16 @@ func (cc *ContextCompressor) currentThreshold() float64 {
 		return DefaultCompressThreshold
 	}
 	return math.Float64frombits(bits)
+}
+
+// Threshold reports the live compression threshold (the authoritative consumer
+// value) for introspection/ops callers. OrgThreshold reads through here so
+// ContextManager needs no separate non-atomic mirror (D4/M-3 single source;
+// also removes a background-write vs read data race on the mirror). Resolved
+// from the hot source when installed (§6.4 pull).
+func (cc *ContextCompressor) Threshold() float64 {
+	thr, _, _ := cc.liveNums()
+	return thr
 }
 
 func (cc *ContextCompressor) MarkMeditationKey(key int64) {
@@ -282,20 +332,22 @@ func NewContextCompressor(
 		compressor:   sc,
 		memStore:     memStore,
 		tokenCounter: tokenCounter,
-		maxTokens:    maxTokens,
-		keepRecent:   keepRecent,
 		// listedKeysCap / cardMaxChars start at 0 (sentinel = "not explicitly
 		// set") and are derived from the primary knobs below (D3) unless an
 		// option overrides them.
 		listedKeysCap: 0,
 		cardMaxChars:  0,
 	}
+	// maxTokens / keepRecent are atomic since D3 §2.3 (background hot-apply vs
+	// in-flight turn reads); seed them after construction.
+	cc.maxTokens.Store(int64(maxTokens))
+	cc.keepRecent.Store(int64(keepRecent))
 	for _, opt := range opts {
 		opt(cc)
 	}
 	// Org-layer hot reload (D3): threshold stored as atomic bits; constructor
 	// parameter seeds the initial value (already default-normalized above).
-	cc.UpdateThreshold(thresholdPct)
+	cc.seedThreshold(thresholdPct)
 	// D3 (rolling-summary-anchor): formula defaults from the primary knobs
 	// max_tokens (M) and keep_recent_tasks (k), so users only tune those two.
 	// card_max_chars scales with the context budget (~5%); compact_keys_listed
@@ -369,7 +421,11 @@ func (cc *ContextCompressor) Compress(
 	resolved := cc.resolveRefs(ctx, refs)
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
-	threshold := int(float64(cc.maxTokens) * cc.currentThreshold())
+	// One boundary = one generation view (§6.4 pull): the trigger line and the
+	// inner compression target below are computed from the SAME liveNums read,
+	// so a concurrent hot rotation can never be half-applied to this pass.
+	thr, maxTokens, keepRecent := cc.liveNums()
+	threshold := int(float64(maxTokens) * thr)
 
 	// Capacity-gated compaction (stable-context-compaction D2): the token
 	// budget is the ONLY trigger. Between compactions the projection is
@@ -403,9 +459,16 @@ func (cc *ContextCompressor) Compress(
 	log.Infof("[ContextCompressor] compressing (tokens %d vs %d; folded render %d tokens), %d messages from %d refs",
 		usedTokens, threshold, cc.tokenCounter.Estimate(resolved), len(resolved), len(refs))
 
-	// Per-call keepRecent override (no shared-field mutation — the old
+	// Per-call override (no shared-field mutation — the old
 	// stash-rewrite-restore dance was a data race under concurrent compress).
-	compressedMsgs := cc.compressor.CompressWithOptions(ctx, resolved, CompressOptions{KeepRecentTasks: cc.keepRecent})
+	// The whole numeric group travels with the call (§6.4 pull): inner batch
+	// size / aging target / keep window all come from this boundary's generation,
+	// so nothing hot needs to be pushed into the shared SmartCompressor.
+	compressedMsgs := cc.compressor.CompressWithOptions(ctx, resolved, CompressOptions{
+		KeepRecentTasks: keepRecent,
+		MaxTokens:       maxTokens,
+		TriggerBudget:   threshold,
+	})
 	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)

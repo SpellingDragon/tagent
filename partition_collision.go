@@ -1,11 +1,32 @@
 package tagent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"
 )
+
+// agentMemoryFingerprint hashes ONE agent's memory section (§4.3, D7). The
+// reloader compares it across generations to decide whether a re-added name
+// keeps its original storage owner (same path/backend → reuse) or would open a
+// second writer on the same partition (changed → refuse the candidate).
+// Unmarshal-free by design: only the memory subtree participates.
+func agentMemoryFingerprint(acfg *AgentConfig) string {
+	if acfg == nil {
+		return ""
+	}
+	b, err := json.Marshal(acfg.Memory)
+	if err != nil {
+		return "unmarshal-error" // never silently equal to another agent's fp
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // registerStoreOwner (resident-readiness-plan 4.4): within one shared
 // MemoryStore instance, two DIFFERENT agent names mapping to the same 10-bit
@@ -41,7 +62,87 @@ func (rc *runtimeConfig) registerStoreOwner(name string, memStore memory.MemoryS
 	return nil
 }
 
+// unRegisterStoreOwner removes every partition-id entry held by `name` (used when a
+// hot-add is rolled back: the refused agent's store is closed, so leaving its pid
+// registered would let a LATER agent that happens to reuse the recycled heap address
+// of that store be refused by a stale entry — a false-positive collision).
+// Cold-path only (candidate refusal / owner retirement).
+func (rc *runtimeConfig) unRegisterStoreOwner(name string) {
+	if rc == nil {
+		return
+	}
+	rc.storeOwnersMu.Lock()
+	defer rc.storeOwnersMu.Unlock()
+	for storeID, byPID := range rc.storeOwners {
+		for pid, owner := range byPID {
+			if owner == name {
+				delete(byPID, pid)
+			}
+		}
+		if len(byPID) == 0 {
+			delete(rc.storeOwners, storeID)
+		}
+	}
+}
+
+// ownedAgentNames returns the set of agent names that currently hold a store-owner
+// registration. The candidate transaction (introduce-durable-workflow-engine §2.3,
+// R01) snapshots this before building and diffs after, so a refused candidate's
+// rollback can revoke EVERY owner it registered — including a parent that failed
+// late and therefore never reached the build cache and is invisible to the added
+// set. Diagnostic read-only; returns a fresh set.
+func (rc *runtimeConfig) ownedAgentNames() map[string]bool {
+	if rc == nil {
+		return map[string]bool{}
+	}
+	rc.storeOwnersMu.Lock()
+	defer rc.storeOwnersMu.Unlock()
+	out := make(map[string]bool)
+	for _, byPID := range rc.storeOwners {
+		for _, owner := range byPID {
+			out[owner] = true
+		}
+	}
+	return out
+}
+
 var _ = agent.TagentAgent{} // keep the agent import for MemStore-typed helpers
+
+// changedMemoryAgents (§4.3, refining R4 3.1's global memory pre-check) returns
+// the sorted names whose memory section differs from the one their existing
+// storage owner was built with. The judgment domain is **existing owner ∩ what the
+// new generation will actually route to** (routable): only those get built, so only
+// those can migrate a live store.
+//
+// Two non-obvious exclusions, both reviewed findings:
+//   - a name absent from fresh.Agents (removed together with its definition) — no
+//     definition to compare;
+//   - a name still DEFINED but no longer reachable from the entry (delegating tool
+//     removed while the definition stays). Refusing the whole reload for it would
+//     freeze orchestration hot-reload permanently over an object the new generation
+//     never constructs — there is no second writer to prevent.
+//
+// Stickiness is NOT weakened: when such a name becomes reachable again (re-entry),
+// it is inside the domain, residentMemFP still holds its original fingerprint, and a
+// switched storage is refused then (D7: 禁止第二 writer).
+func changedMemoryAgents(fresh *Config, ownerFP map[string]string, routable map[string]bool) []string {
+	var out []string
+	for name, want := range ownerFP {
+		ac, ok := fresh.Agents[name]
+		if !ok {
+			continue // definition gone: unrouted, owner retained — nothing to migrate
+		}
+		if !routable[name] {
+			continue // defined but not reachable this generation — it will not be built
+		}
+		cfg := ac
+		if got := agentMemoryFingerprint(&cfg); got != want {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // reachableAgents (resident-readiness-plan 4.5): the set of agent names the
 // entry actually pulls in via tools references (transitively) — the true
@@ -69,4 +170,39 @@ func reachableAgents(cfg *Config, entry string) map[string]bool {
 	}
 	walk(entry)
 	return out
+}
+
+// remoteDeclarationOnly reports whether `name` is pulled in by `next` SOLELY as a
+// remote agent reference and has no local definition. Such a name's declaration IS
+// its definition: config validation accepts it through ToolRef.isRemoteRef (§5.44's
+// single shared predicate — validation and build domains read the same fact), and
+// build_agent resolves its wrapper as a remote target and builds NO executor for
+// it. It therefore has no resident owner to construct and no generation to publish,
+// so the owner-building loops must skip it rather than fail the whole publication
+// closed.
+//
+// Mixed reachability is deliberately refused: if any non-remote reference also
+// points at the name, that reference needs a real local owner, and a name defined
+// nowhere must still fail closed — the gate's original purpose (§5.11) stays intact.
+func remoteDeclarationOnly(next *Config, name string) bool {
+	if next == nil || name == "" {
+		return false
+	}
+	if _, defined := next.Agents[name]; defined {
+		return false
+	}
+	remote, local := false, false
+	for _, ac := range next.Agents {
+		for _, tr := range ac.Tools {
+			if !(tr.Kind == ToolKindAgent || (tr.Kind == "" && tr.AgentID != "")) || tr.AgentID != name {
+				continue
+			}
+			if tr.isRemoteRef() {
+				remote = true
+			} else {
+				local = true
+			}
+		}
+	}
+	return remote && !local
 }

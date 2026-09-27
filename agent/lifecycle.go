@@ -21,11 +21,6 @@ func (ta *TagentAgent) RegisterCloser(c Closer) {
 	ta.closers = append(ta.closers, c)
 }
 
-// ApplyOrgParams hot-swaps org-layer numeric parameters onto the live agent
-// without rebuilding the topology (agent-config-hot-reload, incremental A).
-// Currently migratable: compress_threshold. Structural changes (tools,
-// sub-agents, prompts wiring) require the snapshot-level rebuild path and
-// are NOT handled here.
 // CheckOrgReload runs the armed org-config hot-reload check once (ops/test
 // entry point; production arms it per-LLM-call via SetOrgReloader). No-op when
 // no reloader is armed (config path unknown).
@@ -36,27 +31,36 @@ func (ta *TagentAgent) CheckOrgReload() {
 }
 
 // OrgThreshold returns the live compression threshold (introspection for
-// tests/ops; the authoritative consumer is the compressor's atomic threshold).
+// tests/ops). It reads the compressor's resolved boundary value — no
+// ContextManager mirror (D4/M-3 single source; the mirror was also a
+// background-write vs read data race after hot-apply moved to the rebuild goroutine).
 func (ta *TagentAgent) OrgThreshold() float64 {
-	if ta.contextManager == nil {
+	if ta == nil || ta.contextManager == nil || ta.contextManager.contextCompressor == nil {
 		return 0
 	}
-	return ta.contextManager.thresholdPct
-}
-
-func (ta *TagentAgent) ApplyOrgParams(thresholdPct float64) {
-	if ta.contextManager != nil {
-		ta.contextManager.ApplyOrgParams(thresholdPct)
-	}
+	return ta.contextManager.contextCompressor.Threshold()
 }
 
 // SetOrgReloader arms a lazy org-config check invoked before each LLM call
 // (agent-config-hot-reload, incremental A). The tagent layer wires this
 // when a config path is known (WithConfigPath). fn must be cheap when
 // nothing changed and must never fail the calling path.
+//
+// D3 (§2.3): production arms a NON-BLOCKING trigger here (schedule a merged
+// background rebuild); the synchronous ops path is SetOrgReloadSyncCheck.
 func (ta *TagentAgent) SetOrgReloader(fn func()) {
 	if ta.contextManager != nil {
 		ta.contextManager.SetOrgReloader(fn)
+	}
+}
+
+// SetOrgReloadSyncCheck arms the synchronous org-reload entry used by ops
+// (CheckOrgReload / Rollback semantics): it blocks until the request's build or
+// rejection is settled, while business turns keep the non-blocking lazy trigger
+// (D3 §2.3, swappable-executor「手动检查同步等待但不封住业务获取」).
+func (ta *TagentAgent) SetOrgReloadSyncCheck(fn func()) {
+	if ta.contextManager != nil {
+		ta.contextManager.SetOrgReloadSyncCheck(fn)
 	}
 }
 
@@ -94,6 +98,37 @@ func (ta *TagentAgent) loopTerminatedNow() bool {
 // turnDrainTimeout bounds the wait for in-flight runner turns during close.
 // var (not const) so tests can shorten it.
 var turnDrainTimeout = 30 * time.Second
+
+// cleanerStopGrace bounds the wait for the workspace cleaner goroutine to return
+// after its context was cancelled. It waits on a channel close, so the grace is
+// a hang guard, not a polling interval. var so tests can shorten it.
+var cleanerStopGrace = 2 * time.Second
+
+// CloseStarted reports whether this instance's close sequence has begun. The
+// first Close wins the CAS and later callers wait on its result, so "started"
+// means a terminal close owns this instance. Introspection for §4.3/R02's
+// witnesses: an org Close must be observable in every resident owner, not just
+// the entry.
+func (ta *TagentAgent) CloseStarted() bool {
+	ta.closeMu.Lock()
+	defer ta.closeMu.Unlock()
+	return ta.closeStarted
+}
+
+// CleanerStopped reports whether this instance's workspace cleaner goroutine has
+// returned. Only meaningful together with CloseStarted (the close cancels it);
+// the spec asks whether the maintenance producer really converged.
+func (ta *TagentAgent) CleanerStopped() bool {
+	if ta.cleanupDone == nil {
+		return true // no cleaner was ever started on this instance
+	}
+	select {
+	case <-ta.cleanupDone:
+		return true
+	default:
+		return false
+	}
+}
 
 // settleOutput closes the output channel and the loop terminal signal EXACTLY
 // ONCE per instance (review C-1: structurally, not by state-machine
@@ -204,9 +239,19 @@ func (ta *TagentAgent) closeOnce() error {
 		}
 	}
 
-	// Stop the workspace cleaner goroutine (background maintenance producer).
+	// Stop the workspace cleaner goroutine (background maintenance producer) and
+	// WAIT for it to return: cancelling is a request, and §4.3/R02 asks whether the
+	// owner's maintenance goroutine actually converged. A goroutine that ignores
+	// its cancellation is reported, never silently counted as stopped.
 	if ta.cleanupCancel != nil {
 		ta.cleanupCancel()
+	}
+	if ta.cleanupDone != nil {
+		select {
+		case <-ta.cleanupDone:
+		case <-time.After(cleanerStopGrace):
+			errs = append(errs, fmt.Errorf("workspace cleaner still running after %v", cleanerStopGrace))
+		}
 	}
 
 	if settledIdle {
@@ -216,21 +261,50 @@ func (ta *TagentAgent) closeOnce() error {
 		ta.settleOutput()
 	}
 
-	// Close registered closers (e.g., ActionTool stops the TmuxMonitor, MCP
-	// connections) — AFTER in-flight calls drained, BEFORE the runner: these
-	// are tools/connections the runner still uses until it closes.
-	for _, c := range ta.closers {
-		if err := c.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close resource: %w", err))
+	// §4.1: a resource a still-live execution could touch is never torn down
+	// BEFORE the convergence verdict exists. So the verdict is asked first: with
+	// work outstanding, the tool closers (ActionTool's monitor, MCP connections)
+	// and everything after them move to the tail. With nothing outstanding this
+	// is exactly the §6.2 order the converged path always used (closers → runner
+	// → lease last), so no converged instance changes behaviour.
+	liveWork := ta.contextManager != nil && ta.contextManager.OutstandingRefs() > 0
+	if !liveWork {
+		// Close registered closers (e.g., ActionTool stops the TmuxMonitor, MCP
+		// connections) — AFTER in-flight calls drained, BEFORE the runner: these
+		// are tools/connections the runner still uses until it closes.
+		for _, c := range ta.closers {
+			if err := c.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close resource: %w", err))
+			}
 		}
 	}
 
 	// Close the runner (unified Runner under ContextManager) — no new turns
-	// can start after this point.
+	// can start after this point. The close is BOUNDED: an execution whose
+	// producer never confirmed a stop is reported, not force-closed (§4.1), and
+	// the flag below is what keeps its shared store out of reach of that zombie.
+	var unconverged bool
 	if ta.contextManager != nil {
 		if err := ta.contextManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close context manager: %w", err))
+			unconverged = errors.Is(err, ErrExecUnconverged)
 		}
+	}
+
+	if liveWork || unconverged {
+		// §4.1's terminal half: the bounded return reported what it could not
+		// finish, but the responsibility does not end there. The remaining exit
+		// (tool closers that a live execution still uses, the recorder, the store
+		// lease and its owner registration) is carried by ONE continuation, armed
+		// on the manager's own reclaim event, and runs when the producer actually
+		// stops — no new business request, no second Close, no timer, no retry
+		// queue. The first report stays visible; the final outcome is recorded
+		// separately (DeferredCloseOutcome).
+		ta.deferFinalExit(liveWork)
+		if len(errs) > 0 {
+			return fmt.Errorf("close errors: %w", errors.Join(errs...))
+		}
+		return nil
 	}
 
 	// Close TrajectoryRecorder AFTER the runner stopped (§6.2): the writeLoop
@@ -247,22 +321,119 @@ func (ta *TagentAgent) closeOnce() error {
 	// that OWNS its isolated store may direct-close); leased holders exit only
 	// through their release. The release's close error reaches this first Close
 	// (D5: never claim a safe close silently).
-	if ta.memStoreRelease != nil {
-		if err := ta.memStoreRelease(); err != nil {
-			errs = append(errs, fmt.Errorf("release memory store: %w", err))
-		}
-	} else if ta.memStoreOwned {
-		if c, ok := ta.memStore.(interface{ Close() error }); ok {
-			if err := c.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close memory store: %w", err))
-			}
-		}
+	if err := ta.exitMemoryStore(); err != nil {
+		errs = append(errs, err)
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %v", errs)
+		// Join, never %v on the slice: §4.1's caller must be able to ASK whether
+		// the close left an unconverged execution (errors.Is) so it can act on it.
+		// A flattened string message makes the classification — and therefore the
+		// honest「未确认停止」handling — unavailable to the host.
+		return fmt.Errorf("close errors: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+// exitMemoryStore takes the store's single exit: through the lease release when
+// one exists (the registry's last-owner semantics decide the real close), or a
+// direct close only for an instance that OWNS an isolated store with no closer
+// elsewhere. Taking the exit also revokes this owner's store-owner registration,
+// so a later reuse of the same storage identity is not refused by a stale entry.
+func (ta *TagentAgent) exitMemoryStore() error {
+	if ta.memStoreRelease != nil {
+		if err := ta.memStoreRelease(); err != nil {
+			return fmt.Errorf("release memory store: %w", err)
+		}
+		ta.revokeStoreOwner() // §4.3: the exit was really taken, so the assembly may forget this owner
+		return nil
+	}
+	if ta.memStoreOwned {
+		if c, ok := ta.memStore.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				return fmt.Errorf("close memory store: %w", err)
+			}
+			ta.revokeStoreOwner()
+			return nil
+		}
+		ta.revokeStoreOwner() // no closer to run: nothing is left open under this owner
+	}
+	return nil
+}
+
+// deferFinalExit arms the one continuation that carries what this bounded Close
+// could not honestly finish. `carryClosers` marks the case where tool closers
+// were deliberately NOT run because an execution was still live; the recorder
+// and the store exit always move here. The arm runs the tail immediately if the
+// manager is already quiet, so a race between this decision and the last reclaim
+// can never strand the responsibility.
+func (ta *TagentAgent) deferFinalExit(carryClosers bool) {
+	log.Warnf("[Close] bounded return with execution(s) still unconfirmed — tool/recorder/store exit deferred to the real stop (final exit will be taken exactly once by this owner's tail)")
+	ta.closeMu.Lock()
+	if ta.closeTail != nil {
+		ta.closeMu.Unlock()
+		return // a continuation is already armed; at most one per owner
+	}
+	ta.closeTail = func() {
+		ta.closeTailOnce.Do(func() {
+			var errs []error
+			if carryClosers {
+				for _, c := range ta.closers {
+					if err := c.Close(); err != nil {
+						errs = append(errs, fmt.Errorf("close resource: %w", err))
+					}
+				}
+			}
+			if ta.trajectoryRecorder != nil {
+				if err := ta.trajectoryRecorder.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("close trajectory recorder: %w", err))
+				}
+			}
+			if err := ta.exitMemoryStore(); err != nil {
+				errs = append(errs, err)
+			}
+			ta.closeMu.Lock()
+			ta.closeTailDone = true
+			ta.closeTailErr = errors.Join(errs...)
+			ta.closeMu.Unlock()
+			if ta.closeTailErr != nil {
+				log.Errorf("[Close] deferred final exit reported: %v — the first report stays visible too", ta.closeTailErr)
+				return
+			}
+			log.Infof("[Close] deferred final exit completed exactly once after the executions actually stopped")
+		})
+	}
+	ta.closeMu.Unlock()
+
+	if ta.contextManager != nil {
+		ta.contextManager.armFullyDrained(func() {
+			ta.closeMu.Lock()
+			tail := ta.closeTail
+			ta.closeMu.Unlock()
+			if tail != nil {
+				go tail() // off the reclaim path: a tool Close may block on its own I/O
+			}
+		})
+	}
+}
+
+// DeferredCloseOutcome reports the §4.1 terminal tail's result separately from
+// the first bounded report: done=false until the deferred exit has run (or the
+// close completed inline and never deferred anything). The first Close's error
+// is deliberately NOT rewritten by it — 「初次错误保持可见」.
+func (ta *TagentAgent) DeferredCloseOutcome() (done bool, err error) {
+	// Read the manager's accounting BEFORE taking closeMu: nothing here holds a
+	// ContextManager lock while acquiring closeMu, so the reclaim path (which
+	// takes closeMu to record the outcome) can never invert the order.
+	quiet := ta.contextManager == nil || ta.contextManager.OutstandingRefs() == 0
+	ta.closeMu.Lock()
+	defer ta.closeMu.Unlock()
+	if quiet && ta.closeTail == nil {
+		// Nothing was ever deferred: an inline close that took every exit has no
+		// tail to wait for, and reporting it as "not done" would be a lie.
+		return true, nil
+	}
+	return ta.closeTailDone, ta.closeTailErr
 }
 
 // SetBundleIDProvider wires the active-bundle lookup used by both event

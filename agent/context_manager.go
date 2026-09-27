@@ -60,30 +60,50 @@ type ContextManager struct {
 
 	contextCompressor *compress.ContextCompressor
 
-	// hotswap-fix 5.7：executor 重建所需的状态面引用与执行面快照。
-	// NewContextManager 时从 cfg 快照；RebuildExecutor 重建时执行面取调用方
-	// 覆盖值、状态面复用快照实例（cfg 零值不可信）。
+	// hotswap-fix 5.7 / introduce-durable-workflow-engine §2.1：executor 装配所需
+	// 的状态面引用与**已发布执行面快照**。NewContextManager 从 cfg 快照；每次
+	// PublishExecutor 更新为该代真实执行面——快照即「当前生效绑定」，供诊断与
+	// 「原样重发同一执行面」使用，不再是候选构造的隐式回落源（旧 RebuildExecutor
+	// 的零值合并会把清空字段退回上一份，属主换代后旧绑定残留）。
 	memPlugin    *plugin.MemoryPlugin
 	sessionSvc   session.Service
-	execCfg      ContextManagerConfig // 冷启动 cfg 快照（含全部字段）
+	execCfg      ContextManagerConfig // 已发布执行面快照（含全部字段）
 	tokenCounter compress.TokenCounter
 	memStore     memory.MemoryStore
-	maxTokens    int
-	thresholdPct float64
+	// Neither maxTokens nor thresholdPct is stored on ContextManager: the real
+	// consumer is compress.ContextCompressor, which resolves both at every
+	// Compress/BudgetLine boundary via liveNums — the hot SOURCE (this manager's
+	// owner record view) wins and the atomics answer only as the construction
+	// fallback (§6.4 pull; the ApplyHotParams push and its hot-update path are
+	// gone). Earlier construction-only mirror fields were never read (maxTokens)
+	// or were a background-write vs read race once hot-apply moved to the rebuild
+	// goroutine (thresholdPct) — both removed under §2.4/D4 M-3 「修到实际消费者」.
 
 	// Framework integration
 	runner     runner.Runner
-	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——SwapExecutor（写）vs RunFlow per-turn RLock（读）
+	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——发布（写：PublishExecutor / ActivateExecutor）vs RunFlow per-turn RLock（读）
 
-	// Retired-runner recycling (implementation-hardening 5.1): swapped-out
-	// runners wait here until no in-flight turn references any of them, then
-	// get an idempotent io.Closer Close. See RetireRunner / sweepRetiredRunners.
-	retireMu       sync.Mutex
-	retiredRunners []retiredRunner
-	runnerInFlight atomic.Int64
-	name           string
-	userID         string
-	sessionID      string
+	// Per-generation execution leases (§3.2/§4.1, design D6). `active` is the
+	// binding of the runner currently in force; every retired binding that still
+	// has references stays in retiredBindings until its OWN count drops (never a
+	// shared aggregate gate). Guarded by executorMu, except each binding's own
+	// reference set, which is guarded by the binding. See agent/exec_lease.go.
+	active          *execBinding
+	retiredMu       sync.Mutex
+	retiredBindings map[*execBinding]struct{}
+	bindingSeq      atomic.Int64
+	// retirementPoke is the §4.3 drain-forward notification armed by the
+	// composition root (see SetRetirementPoke); nil = standalone agent.
+	retirementPoke atomic.Pointer[func()]
+	// drainedHook/drainedOnce carry §4.1's deferred final exit: armed by an
+	// owner whose bounded Close could not finish because an execution never
+	// confirmed a stop, fired at most once when the last held generation is
+	// reclaimed with nothing referencing it (see armFullyDrained).
+	drainedHook atomic.Pointer[func()]
+	drainedOnce sync.Once
+	name        string
+	userID      string
+	sessionID   string
 
 	// Event routing
 	outputCh   chan *event.Event
@@ -101,7 +121,20 @@ type ContextManager struct {
 	// by the tagent layer when a config path is known (WithConfigPath).
 	// Must be cheap when nothing changed (single stat) and never fail the
 	// LLM call (log-and-degrade inside the closure).
+	//
+	// D3 (§2.3 调度裁决): in production this is the NON-BLOCKING business-turn
+	// trigger — it only merges/schedules a background rebuild and returns; it
+	// MUST NOT run the long build/Close on the turn's thread. Ops who need the
+	// result synchronously call orgReloadSync (see CheckOrgReload).
 	orgReloader func()
+
+	// orgReloadSync is the synchronous ops entry: the tagent layer arms it with
+	// the same reload that runs on the background builder, so CheckOrgReload /
+	// Rollback block until this request's build/reject result is settled while
+	// business turns keep the non-blocking orgReloader path (no second effective
+	// route — both drive the ONE coordinator/reload). nil → ops falls back to
+	// orgReloader (tests that arm only a lazy stub stay synchronous).
+	orgReloadSync func()
 
 	// bundleIDFn returns the currently active evolution bundle id (empty when
 	// evolution is disabled or no bundle is active). Both persistence paths
@@ -115,6 +148,13 @@ type ContextManager struct {
 	// is used to render the live task board at BeforeModel. nil → tools fall
 	// back to synchronous execution and no board is rendered.
 	taskController task.TaskController
+
+	// settleSinks is the owner agent's per-invocation settle routing table, wired
+	// only on a sub-call's private ContextManager (Run). It lets the Origin-stamp
+	// site install a countingSpawner so background tasks this turn spawns are
+	// booked into the delivery-accounting barrier the M2 loop consumes. nil on the
+	// resident/entry CM → no countingSpawner → behavior unchanged (S3m-a bus).
+	settleSinks *settleSinkRegistry
 
 	// triggerSource identifies what triggered the current RunFlow
 	// (e.g., "user", "meditation", "async_result"). Set by runEventLoop
@@ -170,38 +210,46 @@ type OrgHotParams struct {
 	TaskDefaultTTL  time.Duration // >0 set unified-reaper fallback lifetime / 0 keep (no disable)
 }
 
-// ApplyOrgParams hot-swaps the org-layer numeric parameters that can be
-// migrated onto the live ContextManager without rebuilding the agent
-// topology (design: incremental A of agent-config-hot-reload).
-//
-// Currently migratable: compress_threshold (via the live
-// compress.ContextCompressor's atomic UpdateThreshold). cm.thresholdPct is
-// kept in sync for introspection consistency; the authoritative consumer is
-// the compressor.
-//
-// Structural fields (tools, sub-agents, prompts wiring, memStore) are NOT
-// touched here — they belong to snapshot-level rebuild (incremental B).
-func (cm *ContextManager) ApplyOrgParams(thresholdPct float64) {
-	cm.ApplyOrgHotParams(OrgHotParams{ThresholdPct: thresholdPct})
+// ApplyOrgParams / ApplyOrgHotParams are GONE (§6.4 pull, S-E). They were the
+// push entries that hot-swapped the org numeric bundle into this manager's
+// compressor. Their successor is the compressor's own hot source
+// (ContextManagerConfig.HotNumbersSource, wired to the owner's live view), read
+// at every consumption boundary — so a manager needs no write at all to stay
+// current, and a manager constructed mid-flight cannot fall behind a generation.
+// OrgBudgetLine / OrgKeepRecent below stay as the read face.
+
+// OrgBudgetLine returns this manager's compressor effective trigger line
+// (maxTokens × threshold) — valid for BOTH the resident manager and an
+// invocation-private one (§6.4 acceptance reads live calls through it).
+// 0 when no compressor is wired.
+func (cm *ContextManager) OrgBudgetLine() int {
+	if cm == nil || cm.contextCompressor == nil {
+		return 0
+	}
+	return cm.contextCompressor.BudgetLine()
 }
 
-// ApplyOrgHotParams applies the full hot numeric bundle at one point
-// (full-hot-config Phase 1): the C-defect fix — maxTokens joins threshold in
-// the hot face, so a yaml window change reaches the resident cm WITHOUT a
-// process restart.
-func (cm *ContextManager) ApplyOrgHotParams(p OrgHotParams) {
-	if p.ThresholdPct > 0 {
-		cm.thresholdPct = p.ThresholdPct
+// OrgKeepRecent returns this manager's live keepRecent value (§6.4, same
+// rationale as OrgBudgetLine).
+func (cm *ContextManager) OrgKeepRecent() int {
+	if cm == nil || cm.contextCompressor == nil {
+		return 0
 	}
-	if cm.contextCompressor != nil {
-		cm.contextCompressor.ApplyHotParams(p.ThresholdPct, p.MaxTokens, p.KeepRecentTasks)
-	}
+	return cm.contextCompressor.KeepRecentValue()
 }
 
-// SetOrgReloader arms the lazy org-config check (see orgReloader field).
-// CheckOrgReload invokes the armed lazy org-config check once (ops/test hook;
-// the production path fires it in the BeforeModel callback).
+// CheckOrgReload runs the org-config hot-reload check and WAITS for its result
+// (ops/test entry point). It drives the synchronous reload path (orgReloadSync)
+// when armed, so the caller observes the build/reject outcome on return; business
+// turns instead use the non-blocking lazy trigger via BeginTurn (D3 §2.3). There
+// is no second route by which a configuration becomes effective — both reach the
+// same reload/coordinator. Falls back to the lazy trigger when no sync variant
+// is armed (tests that only set SetOrgReloader keep their synchronous behavior).
 func (cm *ContextManager) CheckOrgReload() {
+	if cm.orgReloadSync != nil {
+		cm.orgReloadSync()
+		return
+	}
 	if cm.orgReloader != nil {
 		cm.orgReloader()
 	}
@@ -211,13 +259,91 @@ func (cm *ContextManager) SetOrgReloader(fn func()) {
 	cm.orgReloader = fn
 }
 
-// RunOrgReloader explicitly invokes the armed reloader if present. The lazy
-// path fires it before each LLM call; this exported entry point lets tests and
-// operators trigger the identical check deterministically (the closure itself
-// is single-flight and mtime-guarded, so redundant calls are cheap no-ops).
-func (cm *ContextManager) RunOrgReloader() {
+// SetOrgReloadSyncCheck arms the synchronous ops reload entry (D3 §2.3). The
+// tagent layer wires it to the same reload the background builder runs, so ops
+// blocks for its result while turns stay non-blocking.
+func (cm *ContextManager) SetOrgReloadSyncCheck(fn func()) {
+	cm.orgReloadSync = fn
+}
+
+// BeginTurn is the ONE place a business turn takes its organization execution
+// binding (introduce-durable-workflow-engine §3.1/§3.2, spec
+// swappable-executor「触发时机与观测」): the armed org-config check runs first
+// (same entry the ops hook CheckOrgReload uses — one publish path, no second
+// effective route), then the executor in force is handed to the turn to pin.
+//
+// Call it after the input batch is frozen and OUTSIDE the transport-retry loop:
+// every attempt, model iteration and tool round of that turn then runs on the
+// returned runner (RunFlowWithExecutor), so a publication happening mid-turn
+// cannot split the turn across generations. Sub-agent invocations do not call
+// this: their instances, executor and delegation tree were constructed inside
+// the generation that published them.
+//
+// The returned release MUST run when the turn ends (the loop folds it into its
+// per-turn cleanup alongside endTurnSpan). §2.3「acquire 后立即登记」: the
+// in-flight reference is registered BEFORE the executor is handed out, so a
+// publish and its retire-sweep landing in the gap between handing out the
+// executor and entering the run body cannot close the very runner this turn is
+// about to run. §4.1 removed the second, aggregate counter RunFlow used to keep:
+// a business turn is now registered EXACTLY ONCE, on its own generation.
+func (cm *ContextManager) BeginTurn() (runner.Runner, func()) {
+	lease := cm.BeginTurnLease()
+	return lease.Runner(), lease.Release
+}
+
+// BeginTurnLease is BeginTurn with the reference handle exposed, so the turn can
+// publish its lease into the call-chain context and every derived execution
+// (nested delegation, transport retry, post-ACK background run) adds its own
+// reference on the SAME generation instead of re-reading whatever is published
+// later (§3.2「子 Run 与重试继承」, D5).
+func (cm *ContextManager) BeginTurnLease() *ExecLease {
+	// D3 (§2.3): the business turn fires the NON-BLOCKING lazy trigger only. It
+	// merges/schedules a background rebuild and returns immediately; this turn
+	// then pins whatever generation is already published. A long parse/build/Close
+	// therefore never runs on the turn's thread, and a turn that merely witnessed a
+	// config edit keeps serving on the old effective until a LATER turn starts
+	// after the publish (spec swappable-executor「懒检测不等待候选构建」).
 	if cm.orgReloader != nil {
 		cm.orgReloader()
+	}
+	// §2.3「acquire 后立即登记」: the reference is taken on the generation BEFORE it
+	// is handed to the caller, so a publish plus its reclaim landing in the gap
+	// cannot close the runner this turn is about to run.
+	return cm.AcquireLease(LeaseTurn)
+}
+
+// AcquireLease pins the generation NEW work starts on. The pin is retried when the
+// generation read here turns out to be retired (§4.2 re-entry with no initiating
+// call, and every business turn, both arrive through here): reading the active
+// binding and taking the reference cannot be one atomic step, because
+// PublishExecutor retires the superseded generation after releasing executorMu.
+//
+// A retired binding with a SUCCESSOR means the publish won the race and the caller
+// must re-pin the generation actually in force. A retired binding with no successor
+// is the terminal Close that retired the active binding itself — there is nothing
+// newer to move to, so the reference is taken as it always was and the close's
+// bounded drain reports it (ErrExecUnconverged) instead of pretending the shutdown
+// was clean. Retrying that case could never make progress, hence the identity test
+// rather than an open-ended loop.
+func (cm *ContextManager) AcquireLease(kind LeaseKind) *ExecLease {
+	b := cm.activeBinding()
+	for {
+		if l, ok := b.tryAcquireActive(kind); ok {
+			return l
+		}
+		next := cm.activeBinding()
+		if next == b {
+			// No successor. While a terminal close is still draining, the reference IS
+			// registered so that close surfaces ErrExecUnconverged rather than reporting a
+			// clean shutdown it did not achieve. Once it has CONVERGED there is nothing left
+			// to wait for: registering would re-open an obligation nobody holds and hand the
+			// caller a closed runner, so new work is refused (§3.2).
+			if b.isClosed() {
+				return &ExecLease{b: b, kind: leaseKindNoop, refused: ErrExecClosed}
+			}
+			return b.acquire(kind)
+		}
+		b = next
 	}
 }
 
@@ -275,6 +401,12 @@ type ContextManagerConfig struct {
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
 
+	// HotNumbersSource is the §6.4 pull contract: when set, the compressor reads
+	// the owner's live hot view at every consumption boundary (BudgetLine/
+	// Compress) instead of relying on pushed construction values. MaxTokens/
+	// ThresholdPct above stay as the construction fallback (no-source path).
+	HotNumbersSource func() compress.HotNumbers
+
 	// CompactKeysListed / RecentFullCount configure compress.ContextCompressor
 	// constraints (0 = package defaults; RecentFullCount derives from
 	// keepRecent × compress.DefaultRefsPerTurn when unset, D6).
@@ -298,8 +430,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 	cm := &ContextManager{
 		tokenCounter:       cfg.TokenCounter,
 		memStore:           cfg.MemStore,
-		maxTokens:          cfg.MaxTokens,
-		thresholdPct:       cfg.ThresholdPct,
 		runner:             nil,
 		name:               cfg.Name,
 		userID:             cfg.UserID,
@@ -325,28 +455,34 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			compress.WithCompactKeysListed(cfg.CompactKeysListed),
 			compress.WithRecentFullCount(cfg.RecentFullCount),
 			compress.WithCardMaxChars(cfg.CardMaxChars),
+			compress.WithHotSource(cfg.HotNumbersSource),
 		)
 	}
 
-	// NOTE: the LLMAgent construction lives ONLY in buildLLMAgent below — the
-	// sole fwAgent path, gated by the execution model (§4.5). An earlier
-	// inline option block here was dead residue of the hotswap-fix 5.7
+	// NOTE: the LLMAgent construction lives ONLY in buildExecutor/buildLLMAgent
+	// below — the sole fwAgent path, gated by the execution model (§4.5). An
+	// earlier inline option block here was dead residue of the hotswap-fix 5.7
 	// extraction and misleading (it built a NON-gated option list that no
 	// consumer ever used). §7.5: assembly must mirror the executed surface.
-	// hotswap-fix 5.7：快照完整 cfg（执行面+状态面），供 RebuildExecutor 复用。
+	// hotswap-fix 5.7：快照完整 cfg（执行面+状态面）。introduce-durable-workflow-engine
+	// §2.1：冷启动与热更换装共用 buildExecutor 这唯一一条装配路径。
 	cm.execCfg = cfg
 	cm.memPlugin = cfg.MemPlugin
 	cm.sessionSvc = cfg.SessionSvc
 
-	fwAgent := cm.buildLLMAgent(cfg)
-	cm.runner = buildRunner(cfg, fwAgent)
+	cm.runner = cm.buildExecutor(cfg)
+	// §3.2: the cold-start executor IS generation 1 — a business turn must be able
+	// to hold a reference on it from the first request, so the binding exists at
+	// construction rather than being invented lazily on the first swap.
+	cm.active = cm.newBinding(cm.runner)
 
 	return cm
 }
 
 // buildModelCallbacks（hotswap-fix 5.7）：回调链构造抽为 cm 方法——闭包捕获
-// 同一个 cm（装配/热载/任务板/诊断全部同源）。冷启动与 RebuildExecutor 共用，
-// 保证换装后 BeforeModel 闭包仍指向常驻状态面（修复空投影装配事故）。
+// 同一个 cm（装配/热载/任务板/诊断全部同源）。冷启动与候选构造
+// （buildExecutor）共用，保证换装后 BeforeModel 闭包仍指向常驻状态面
+// （修复空投影装配事故）。
 func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callbacks {
 	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
@@ -386,9 +522,11 @@ func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callb
 	// pipeline or persistBusEvent, so the boundary is strictly one-way.
 	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			if cm.orgReloader != nil {
-				cm.orgReloader() // lazy org-config hot-reload check (incr. A)
-			}
+			// introduce-durable-workflow-engine §3.1: the org-config check used to run
+			// HERE — i.e. before EVERY LLM iteration — so a config edit could change the
+			// executor in the middle of a turn (multi-iteration ReAct loops crossed
+			// generations). The check now belongs to the turn boundary (BeginTurn),
+			// outside the transport-retry loop; a turn never re-reads the active version.
 			cm.assembleRequest(ctx, args)
 			return nil, nil
 		})
@@ -435,8 +573,8 @@ func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callb
 }
 
 // buildLLMAgent（hotswap-fix 5.7）：从 ContextManagerConfig 构造 fwAgent 的
-// 纯函数段（依赖仅 cfg）。冷启动与 RebuildExecutor 共用，保证两条路径构造的
-// fwAgent 行为学一致（model/tools/prompt/genConfig/并行工具开关）。
+// 纯函数段（依赖仅 cfg）。冷启动与候选构造共用（都经 buildExecutor），保证
+// 两条路径构造的 fwAgent 行为学一致（model/tools/prompt/genConfig/并行工具开关）。
 func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMAgent {
 	cb := cm.buildModelCallbacks(cfg.SystemPromptSource)
 	maxIters := cfg.MaxToolIters
@@ -446,7 +584,7 @@ func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMA
 	// §4.5: wrap the model with the execution-credential gate (block the real model call
 	// when a durable turn's echo credential is unverified) + recovery-notice deferral to
 	// actual invocation. buildLLMAgent is the sole fwAgent construction → covers cold start
-	// and RebuildExecutor. nil-safe (some constructions carry no model).
+	// and the hot candidate path. nil-safe (some constructions carry no model).
 	gatedModel := cfg.Model
 	if gatedModel != nil {
 		gatedModel = newExecutionGateModel(cfg.Model, cm)
@@ -488,7 +626,7 @@ func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMA
 }
 
 // buildRunner（R4 3.3/3.5 抽取）：fwAgent+runner 装配为纯函数段（依赖仅
-// cfg）——冷启动与 SwapExecutor 热重建共用同一装配路径（行为学一致）。
+// cfg）——冷启动与热重建共用同一装配路径（行为学一致）。
 func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Runner {
 	// Create unified Runner: LLMAgent + MemoryPlugin + SummaryPlugin + SessionService.
 	runnerOpts := []runner.Option{}
@@ -504,146 +642,517 @@ func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Ru
 	return runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
 }
 
-// SwapExecutor（R4 3.3）：原子换入新 runner（含其 tools/prompt 装配——随
-// runner 一并构建完成）。drain-free turn 级：进行中 turn 已持有的旧 runner
-// 引用跑完，下一 turn 起用新。返回被换下的旧 runner（调用方决定处置）。
-func (cm *ContextManager) SwapExecutor(newRunner runner.Runner) runner.Runner {
-	if cm == nil || newRunner == nil {
+// SwapExecutor was withdrawn with introduce-durable-workflow-engine §5.1: it
+// installed a runner WITHOUT recording the face that runner was built from, so a
+// published generation could end up executing one runner while resolving re-entry,
+// compressor configuration and tool declarations from another (§2.1/§3.2 leave
+// exactly one linearization point per owner: PublishExecutor for a single owner,
+// StageExecutor→ActivateExecutor for an org, and both assign runner and face under
+// the same executorMu write section). It had no production caller when removed;
+// the turn-level drain-free, concurrent-read and resident-invariant semantics it
+// pinned are re-pointed at PublishExecutor in agent/executor_publish_seam_test.go.
+
+// publishActiveLocked is the ONE linearization body of an executor switch. It
+// records `face` as the published execution configuration, then installs the
+// generation running `r` as the active one, and returns the binding that becomes
+// retired — which the caller MUST retire once it has dropped executorMu, so a slow
+// runner Close never happens under the executor lock.
+//
+// `prepared` is the binding a staged generation already wired (declaration holds,
+// face snapshot). It is non-nil only on the org path, where the binding had to
+// exist and be wired BEFORE any owner made it visible; a single-owner publish has
+// no such pre-condition and passes nil, so the binding is snapshotted here from
+// the face just recorded.
+//
+// Re-publishing the same executor object is deliberately NOT a new generation: one
+// runner object gets exactly one close, so a redundant publish (a rollback landing
+// on the same face, a caller re-submitting the current candidate) must not create a
+// second identity for it. The recorded face still advances — the binding keeps the
+// face it was BUILT from, so advancing what is *recorded* never rewrites what this
+// generation actually routes. (§5.3 merged the org activation path onto this same
+// body, removing the second copy that used to skip the face advance.)
+func (cm *ContextManager) publishActiveLocked(face ContextManagerConfig, r runner.Runner, prepared *execBinding) *execBinding {
+	cm.execCfg = face.isolatedCopy() // R06: never alias the caller's or the staged face
+	if cm.active != nil && cm.active.run == r {
+		return nil
+	}
+	if cm.active == nil && cm.runner == r {
+		// The runner set at construction is being published for the first time:
+		// adopting it IS installing it. Minting a second binding for the same object
+		// would hand that same runner to retireBinding — closing the executor the
+		// next turn is about to run — so no predecessor may be produced here.
+		// (§5.3 handed this corner to §5.4 to guard explicitly rather than leave it
+		// to callers avoiding the shape.)
+		cm.active = cm.newBinding(r)
+		return nil
+	}
+	prev := cm.active
+	if prev == nil && cm.runner != nil {
+		// Adopt a runner that was set directly on the struct (hand-built cm, test
+		// shell) as generation 1, so its in-flight users can still be counted.
+		prev = cm.newBinding(cm.runner)
+	}
+	next := prepared
+	if next == nil {
+		next = cm.newBinding(r)
+	}
+	cm.active = next
+	cm.runner = r
+	return prev
+}
+
+// isolatedCopy returns a snapshot whose mutable configuration surface cannot be
+// written through to the source (R06, D2「不可变执行配置与受限运行句柄」). It
+// copies the struct, allocates a fresh Tools container (the element handles are
+// reused by identity — real tools are runtime resources, not serialisable
+// config, so they MUST NOT be blindly deep-copied), and independently allocates
+// the thinking/reasoning value pointers so a deref-write on the copy cannot
+// reach the live config. Runtime handles (model/store/session/plugin/bus/
+// projection/callbacks) stay shared as-is. Both the getter and the publish
+// entry use it, so neither a returned snapshot nor the caller's input face is
+// ever an alias of the online executor configuration.
+func (c ContextManagerConfig) isolatedCopy() ContextManagerConfig {
+	out := c
+	if c.Tools != nil {
+		out.Tools = make([]trpctool.Tool, len(c.Tools))
+		copy(out.Tools, c.Tools)
+	}
+	if c.ThinkingEnabled != nil {
+		v := *c.ThinkingEnabled
+		out.ThinkingEnabled = &v
+	}
+	if c.ThinkingTokens != nil {
+		v := *c.ThinkingTokens
+		out.ThinkingTokens = &v
+	}
+	if c.ReasoningEffort != nil {
+		v := *c.ReasoningEffort
+		out.ReasoningEffort = &v
+	}
+	return out
+}
+
+// ExecutorConfig returns the published execution-face snapshot (model/tools/
+// prompt/genConfig actually in force). Read under the executor lock: a
+// candidate being built elsewhere cannot be observed as "current". The returned
+// face is a private copy (R06): mutating its Tools container or deref-writing
+// its value pointers must not write through to the online executor.
+func (cm *ContextManager) ExecutorConfig() ContextManagerConfig {
+	if cm == nil {
+		return ContextManagerConfig{}
+	}
+	cm.executorMu.RLock()
+	defer cm.executorMu.RUnlock()
+	return cm.execCfg.isolatedCopy()
+}
+
+// SubagentWrapper resolves a delegation target **against the effective executor
+// face** (§4.2, task-registry-rebuild「恢复与显式重投按当前编排绑定」) — the very
+// same version source that serves ordinary delegation, so there is no second
+// routing truth. A name a later generation removed is gone from the face and the
+// caller gets nil, which is how an explicit relaunch refuses to revive a retired
+// binding instead of silently running on the generation that spawned it.
+func (cm *ContextManager) SubagentWrapper(name string) *AgentToolWrapper {
+	if cm == nil || name == "" {
+		return nil
+	}
+	cm.executorMu.RLock()
+	defer cm.executorMu.RUnlock()
+	return subagentWrapperIn(cm.execCfg.Tools, name)
+}
+
+// subagentWrapperIn is the ONE delegation-target scan: the effective face and a
+// pinned generation's face are both a tool list, and both go through here. A
+// second lookup (a name→wrapper registry, or a closure-captured wrapper) would be
+// a routing truth that outlives the version it came from — §4.2 (R03) is exactly
+// the failure that produces.
+func subagentWrapperIn(tools []trpctool.Tool, name string) *AgentToolWrapper {
+	if name == "" {
+		return nil
+	}
+	for _, tl := range tools {
+		if w := unwrapAgentToolWrapper(tl); w != nil && w.DeclaredAgentName() == name {
+			return w
+		}
+	}
+	return nil
+}
+
+// unwrapAgentToolWrapper peels transparent pass-through wrappers (notably
+// OutputLimitTool, which agent.New applies to every tool) to reach the
+// delegation AgentToolWrapper underneath. It returns nil if no AgentToolWrapper
+// lies in the chain, so non-delegation tools simply don't match. The published
+// face stays the SINGLE routing truth (§4.2): the peeled wrapper is the very
+// instance ordinary delegation runs on this generation, because the runner is
+// built from these same face tools. A parallel name→wrapper registry would be a
+// second source with a lazy cache — explicitly rejected here.
+func unwrapAgentToolWrapper(t trpctool.Tool) *AgentToolWrapper {
+	for t != nil {
+		if w, ok := t.(*AgentToolWrapper); ok {
+			return w
+		}
+		uw, ok := t.(interface{ Unwrap() trpctool.Tool })
+		if !ok {
+			return nil
+		}
+		t = uw.Unwrap()
+	}
+	return nil
+}
+
+// buildExecutor is the SINGLE executor assembly path (cold start + hot candidate).
+// The execution face comes from exec ONLY — no fallback to the previously
+// published snapshot, so a field the new config clears really disappears
+// (introduce-durable-workflow-engine D3/§2.1: 「不以非零 merge 保留旧绑定」).
+// The state face (memory plugin, session service, projection the sub-agent
+// wrappers auto-inject from) is always taken from this cm: swapping executors
+// never moves shared state (hotswap-fix 5.7: the 2026-09-13 n=1-system-only
+// incident came from a shell's own empty projection being carried in).
+// hardening-review-batch2 6.1 wired candidate wrappers here — §6.5/D2 removed
+// that rebinding: delegation wrappers live in the owner's config.Tools and are
+// therefore SHARED by the resident cm, every candidate cm and every
+// invocation-private cm. Writing this cm's projection into them was a
+// construction-time side effect on published objects (design D5 forbids
+// rebinding a published wrapper) and let concurrent calls of one agent read
+// each other's projection. The projection is call-scoped data now and reaches
+// tools through the flow context (withCallProjection); the only publish of a
+// wrapper binding is the cold-start SetToolParentProjection.
+func (cm *ContextManager) buildExecutor(exec ContextManagerConfig) runner.Runner {
+	exec.MemPlugin = cm.memPlugin
+	exec.SessionSvc = cm.sessionSvc
+	return buildRunner(exec, cm.buildLLMAgent(exec))
+}
+
+// NewExecutorCandidate constructs the next generation's executor WITHOUT
+// touching the live one (introduce-durable-workflow-engine §2.1): no swap, no
+// snapshot update, no state-face change — the caller may still abandon it.
+// Construction is side-effect free on the resident cm beyond reading it; the
+// only mutation is on the candidate's own tool wrappers.
+func (cm *ContextManager) NewExecutorCandidate(exec ContextManagerConfig) runner.Runner {
+	if cm == nil {
+		return nil
+	}
+	// 执行面完全由 exec 决定（零值即「本代就是空/默认」）；状态面恒取 cm。
+	return cm.buildExecutor(exec)
+}
+
+// PublishExecutor is the ONE linearization point of an organization version
+// switch: install the candidate, record it as the published execution face,
+// then retire the superseded runner. Drain-free at turn granularity — an
+// in-flight turn keeps the old runner reference and finishes on it; the next
+// turn picks up the new one (spec swappable-executor「整份编排执行绑定发布」).
+// Returns the runner now in force.
+func (cm *ContextManager) PublishExecutor(candidate runner.Runner, exec ContextManagerConfig) runner.Runner {
+	if cm == nil || candidate == nil {
+		return cm.currentRunner()
+	}
+	// The binding is created inside the shared body from the face recorded in that
+	// same critical section, so a reader can never observe a runner without its
+	// face (§4.2 re-entry resolution depends on it).
+	cm.executorMu.Lock()
+	prev := cm.publishActiveLocked(exec, candidate, nil)
+	cm.executorMu.Unlock()
+	cm.retireBinding(prev)
+	return cm.currentRunner()
+}
+
+// RebuildExecutor was withdrawn with introduce-durable-workflow-engine §2.1:
+// it fused construction and swap, and merged the caller's zero fields onto the
+// previous face (a cleared binding survived). Its two halves live on as
+// NewExecutorCandidate (abandonable) and PublishExecutor (the one linearization
+// point); agent/executor_publish_test.go pins both, plus the "cleared tool
+// really disappears" contract that the merge used to violate.
+
+// StagedGeneration is a prepared-but-not-installed execution generation (3.2
+// trunk). Staging exists so a MULTI-OWNER publish can wire the generation-level
+// declaration holds (and stamp each face's wrappers with their declared target
+// bindings) BEFORE any owner's generation becomes visible — the same
+// build-then-publish discipline the entry used to have alone, extended to every
+// routable owner. A staged generation nobody activates is not reachable by any
+// execution path; Discard closes its candidate and releases the holds it
+// recorded, so a failed candidate leaves nothing behind.
+type StagedGeneration struct {
+	cm        *ContextManager
+	candidate runner.Runner
+	face      ContextManagerConfig
+	// runCfg is this generation's assembled TagentConfig — the per-generation
+	// execution description a DECLARED invocation assembles its per-call context
+	// manager from (3.2 trunk: 「不按陈旧 ta.config 先造后补」). It is the same
+	// shape the owner's construction config had, so every downstream derivation
+	// (fresh per-invocation compressor, overflow dir, …) behaves identically.
+	runCfg    *TagentConfig
+	binding   *execBinding
+	discarded bool
+}
+
+// StageExecutor opens the next generation record for `cand` WITHOUT installing
+// it. The binding snapshots the given face (isolated), so the wiring pass can
+// stamp the face's wrappers against exactly this generation.
+func (cm *ContextManager) StageExecutor(cand runner.Runner, face ContextManagerConfig, runCfg *TagentConfig) *StagedGeneration {
+	if cm == nil || cand == nil {
 		return nil
 	}
 	cm.executorMu.Lock()
 	defer cm.executorMu.Unlock()
-	old := cm.runner
-	cm.runner = newRunner
-	return old
+	face = face.isolatedCopy()
+	b := newExecBinding(cm, cm.bindingSeq.Add(1), cand, face)
+	b.runCfg = runCfg
+	return &StagedGeneration{
+		cm:        cm,
+		candidate: cand,
+		face:      face,
+		runCfg:    runCfg,
+		binding:   b,
+	}
 }
 
-// RebuildExecutor（hotswap-fix 5.7）：在**同一 cm** 上重建 executor——
-// 新 fwAgent（新 model/tools/prompt/genConfig）+ 新 runner，但 projection/bus/
-// compressor/sessionSvc/BeforeModel 回调闭包全部保留。修复 2026-09-13 21:5x
-// 事故根因：旧换装路径把「新壳自己的 runner」换进常驻 cm，而新壳 fwAgent 的
-// BeforeModel 闭包捕获新壳自己的空 cm → 换装后所有 turn 的请求装配被接到空
-// 投影上（n=1 system-only → provider 400/1214 ×3）。本方法保证装配闭包与
-// 状态永远同源（都来自这个 cm），换装只换「模型+工具+提示词」这个纯执行面。
-// cfg：沿用冷启动同构的 ContextManagerConfig（调用方从 fresh 配置装配）；
-// 装配逻辑与 NewContextManager 尾段一致（fwAgent 构造 + buildRunner）。
-func (cm *ContextManager) RebuildExecutor(cfg ContextManagerConfig) runner.Runner {
-	if cm == nil {
-		return nil
+// ActivateExecutor installs a staged generation — the same linearization
+// PublishExecutor performs (face first, then the binding, then retire the
+// superseded one; drain-free at turn granularity). Splitting it from staging is
+// what lets the composition root wire every owner of one publish before ANY of
+// them goes live.
+func (cm *ContextManager) ActivateExecutor(s *StagedGeneration) runner.Runner {
+	if cm == nil || s == nil || s.cm != cm || s.discarded {
+		return cm.currentRunner()
 	}
-	// 执行面取调用方覆盖（零值字段回落到冷启动快照 execCfg）；状态面强制
-	// 复用 cm 快照实例——换装新配置只提供执行面差异，状态面永不换。
-	merged := cm.execCfg
-	if cfg.Model != nil {
-		merged.Model = cfg.Model
-	}
-	if len(cfg.Tools) > 0 {
-		merged.Tools = cfg.Tools
-	}
-	if cfg.SystemPrompt != "" {
-		merged.SystemPrompt = cfg.SystemPrompt
-	}
-	if cfg.SystemPromptSource != nil {
-		merged.SystemPromptSource = cfg.SystemPromptSource
-	}
-	if cfg.Temperature > 0 {
-		merged.Temperature = cfg.Temperature
-	}
-	if cfg.MaxToolIters > 0 {
-		merged.MaxToolIters = cfg.MaxToolIters
-	}
-	if cfg.ThinkingEnabled != nil {
-		merged.ThinkingEnabled = cfg.ThinkingEnabled
-	}
-	if cfg.ThinkingTokens != nil {
-		merged.ThinkingTokens = cfg.ThinkingTokens
-	}
-	if cfg.ReasoningEffort != nil {
-		merged.ReasoningEffort = cfg.ReasoningEffort
-	}
-	if cfg.ReasoningContentMode != "" {
-		merged.ReasoningContentMode = cfg.ReasoningContentMode
-	}
-	execCfg := merged
-	execCfg.MemPlugin = cm.memPlugin
-	execCfg.SessionSvc = cm.sessionSvc
-	// hardening-review-batch2 6.1（执行代绑定）：换入前把新代工具 wrapper 的
-	// parentProjection 重绑到常驻投影——新壳构建路径的 SetToolParentProjection
-	// 绑的是新壳空投影（其 projection 为 nil/空），换入后子 agent 自动上下文
-	// 注入会读到空（event_keys 省略时 nil）。
-	for _, t := range execCfg.Tools {
-		if w, ok := t.(*AgentToolWrapper); ok {
-			w.SetParentProjection(cm.projection)
-		}
-	}
-	// 6.2：生效代快照更新——本代 system prompt source 即 execCfg 所带；
-	// （cm.systemPromptSource 保持冷启动值，供诊断/回退对照，不参与新代
-	// callback——callback 已按代捕获。）
-	fwAgent := cm.buildLLMAgent(execCfg)
-	if old := cm.SwapExecutor(buildRunner(execCfg, fwAgent)); old != nil {
-		cm.RetireRunner(old)
-	}
+	cm.executorMu.Lock()
+	// §5.3: the SAME body a single-owner publish uses, with the already-wired
+	// staged binding installed instead of a fresh snapshot. The same-runner case
+	// advances the recorded face and creates no second generation, identically to
+	// PublishExecutor — previously the two paths diverged on exactly that point.
+	prev := cm.publishActiveLocked(s.face, s.candidate, s.binding)
+	cm.executorMu.Unlock()
+	cm.retireBinding(prev)
 	return cm.currentRunner()
 }
 
-// retiredRunner pairs a swapped-out runner with its retirement time (the
-// leak-alarm input: a retiree still gated by in-flight turns after
-// retiredLeakAfter is flagged loudly instead of silently leaking).
-type retiredRunner struct {
-	r  runner.Runner
-	at time.Time
+// Discard abandons a staged generation that was never activated: release the
+// declaration holds it recorded during wiring and close the never-installed
+// candidate. Idempotent.
+func (s *StagedGeneration) Discard() {
+	if s == nil || s.discarded {
+		return
+	}
+	s.discarded = true
+	for _, child := range s.binding.heldBindings() {
+		child.dropDeclaredHold()
+	}
+	if s.candidate != nil {
+		_ = s.candidate.Close()
+	}
 }
 
-// retiredLeakAfter gates the leak alarm: past this age a retiree that still
-// cannot be closed is almost certainly a leak (see sweepRetiredRunners).
+// retiredLeakAfter gates the leak alarm: past this age a retired generation that
+// still cannot be closed is almost certainly a leak (see noteUnconverged).
 const retiredLeakAfter = 10 * time.Minute
 
-// RetireRunner queues a swapped-out runner for delayed Close (implementation-
-// hardening 5.1): closed by the next sweep that observes zero in-flight turns
-// (the persistent loop is a single consumer, so quiescence arrives at every
-// turn boundary — a sustained-load fallback timer is unnecessary), or by
-// Close. Rollback does NOT reuse old runners (it rebuilds from the ring-2
-// config snapshot), so every retired runner is pure garbage. Close is part
-// of the upstream Runner interface and documented idempotent.
-func (cm *ContextManager) RetireRunner(old runner.Runner) {
-	if cm == nil || old == nil {
-		return
+// activeBinding returns the generation currently in force, lazily wrapping the
+// runner field so a hand-built ContextManager (tests, shells that only set
+// `runner`) still has one coherent generation to be referenced through.
+func (cm *ContextManager) activeBinding() *execBinding {
+	cm.executorMu.RLock()
+	b := cm.active
+	cm.executorMu.RUnlock()
+	if b != nil {
+		return b
 	}
-	cm.retireMu.Lock()
-	cm.retiredRunners = append(cm.retiredRunners, retiredRunner{r: old, at: time.Now()})
-	cm.retireMu.Unlock()
-	cm.sweepRetiredRunners()
+	cm.executorMu.Lock()
+	defer cm.executorMu.Unlock()
+	if cm.active == nil {
+		cm.active = cm.newBinding(cm.runner)
+	}
+	return cm.active
 }
 
-// sweepRetiredRunners closes retired runners when no turn is in flight.
-// Callers: RunFlow exit (counter drop), RetireRunner, Close.
-func (cm *ContextManager) sweepRetiredRunners() {
-	if cm.runnerInFlight.Load() != 0 {
-		// Leak alarm (review P2-3): in-flight turns gate the close — correct
-		// for drain-free, but a retiree stuck past retiredLeakAfter means the
-		// gate never opens (sustained concurrent flows). Say so loudly;
-		// force-closing here would break the in-flight turns instead.
-		cm.retireMu.Lock()
-		for _, e := range cm.retiredRunners {
-			if time.Since(e.at) > retiredLeakAfter {
-				log.Warnf("[ContextManager] retired runner pending >%s under sustained in-flight load — possible leak, investigate RunFlow concurrency", retiredLeakAfter)
-				break // one alarm per sweep
-			}
-		}
-		cm.retireMu.Unlock()
+// newBinding opens a generation record (caller holds executorMu when it wants a
+// deterministic id order; the lazy path above does). The generation snapshots the
+// face currently in force — PublishExecutor assigns the new face BEFORE installing
+// the binding, so the snapshot is the face THIS runner was built from (§4.2).
+func (cm *ContextManager) newBinding(r runner.Runner) *execBinding {
+	return newExecBinding(cm, cm.bindingSeq.Add(1), r, cm.execCfg)
+}
+
+// retireBinding marks `b` superseded and keeps it on the unconverged list until
+// its own reference count drops. Close happens in ExecLease.Release, per
+// generation — an unrelated in-flight turn cannot hold it open (§4.1).
+func (cm *ContextManager) retireBinding(b *execBinding) {
+	if cm == nil || b == nil {
 		return
 	}
-	cm.retireMu.Lock()
-	defer cm.retireMu.Unlock()
-	if cm.runnerInFlight.Load() != 0 { // re-check under lock (inc may have raced in)
+	b.retire()
+	cm.retiredMu.Lock()
+	if cm.retiredBindings == nil {
+		cm.retiredBindings = map[*execBinding]struct{}{}
+	}
+	cm.retiredBindings[b] = struct{}{}
+	cm.retiredMu.Unlock()
+	// No reference may exist yet (a publish with nobody pinned on the old
+	// generation is the common case), so try the reclaim right away.
+	b.release(leaseKindNoop)
+}
+
+// forgetBinding drops a closed generation from the unconverged list so the
+// bookkeeping stays bounded across endless hot swaps (§5.3「资源量按当前路由和真实
+// 活引用计，不按历史发布次数计」).
+func (cm *ContextManager) forgetBinding(b *execBinding) {
+	if cm == nil || b == nil {
 		return
 	}
-	for _, e := range cm.retiredRunners {
-		if err := e.r.Close(); err != nil { // upstream documents Close as idempotent
-			log.Warnf("[ContextManager] retired runner Close: %v", err)
+	cm.retiredMu.Lock()
+	delete(cm.retiredBindings, b)
+	cm.retiredMu.Unlock()
+	// A reclaim is the event §4.1's deferred tail waits on: it means one more
+	// execution actually stopped, so the owner's final exit may now be complete.
+	cm.fireFullyDrainedIfQuiet()
+}
+
+// armFullyDrained registers a one-shot continuation run when the last held
+// generation has been reclaimed and nothing references any generation anymore —
+// §4.1's「同一尾部保有责任并等真实停止后继续」. The notification comes from the
+// reclaim path itself (a producer finally stopping), so it adds no timer, no
+// polling loop and no second lifecycle framework. If the manager is ALREADY
+// quiet, the continuation runs before this call returns: arming can never strand
+// a tail, which is the failure mode the deferred exit must not become.
+func (cm *ContextManager) armFullyDrained(fn func()) {
+	if cm == nil || fn == nil {
+		return
+	}
+	cm.drainedHook.Store(&fn)
+	cm.fireFullyDrainedIfQuiet()
+}
+
+// fireFullyDrainedIfQuiet invokes the armed continuation at most once, and only
+// when no retired generation is still held AND no reference is outstanding.
+func (cm *ContextManager) fireFullyDrainedIfQuiet() {
+	if cm == nil || cm.drainedHook.Load() == nil {
+		return
+	}
+	cm.retiredMu.Lock()
+	held := len(cm.retiredBindings)
+	cm.retiredMu.Unlock()
+	if held > 0 || cm.totalRefs() != 0 {
+		return
+	}
+	hook := cm.drainedHook.Load()
+	if hook == nil {
+		return
+	}
+	cm.drainedOnce.Do(func() { (*hook)() })
+}
+
+// pokeRetirementDrain carries a pending retirement forward after the event that
+// unblocked it (§4.3: 「释放使用权/任务收尾经原生命周期轻量通知继续退役，不必须再来
+// 一个业务 turn」). It only invokes the composition root's lazy check — the same
+// single-flight, non-blocking path a business turn rides — so it adds no timer and
+// never runs a drain inline under the caller's locks. Nil for a standalone agent.
+func (cm *ContextManager) pokeRetirementDrain() {
+	if cm == nil {
+		return
+	}
+	if poke := cm.retirementPoke.Load(); poke != nil && *poke != nil {
+		(*poke)()
+	}
+}
+
+// SetRetirementPoke arms the composition root's lazy drain check (§4.3) on this
+// manager. It is called once per owner at assembly time, is nil for a standalone
+// agent (no org, nothing to retire), and is only ever invoked from a generation's
+// own release path — it schedules work and must not run the drain inline.
+func (cm *ContextManager) SetRetirementPoke(fn func()) {
+	if cm == nil || fn == nil {
+		return
+	}
+	cm.retirementPoke.Store(&fn)
+}
+
+// ExecutorRefs 是执行器引用面的诊断快照（D9：退役引用与未收敛 owner 可见；
+// §5.1：业务 turn／子调用／后台执行分报，不再是一个模糊总数）。
+// 只读：无任何执行路径据它分支（回收时机由各代自己的引用数决定），因此它不会
+// 成为第二真源。
+type ExecutorRefs struct {
+	InFlightTurns   int64            `json:"inFlightTurns"`   // 业务 turn 引用（LeaseTurn）
+	SubCalls        int              `json:"subCalls"`        // 继承的在途子调用引用
+	BackgroundRuns  int              `json:"backgroundRuns"`  // ACK 后后台执行引用
+	PendingRetirees int              `json:"pendingRetirees"` // 已退役但尚未 Close 的代（未收敛）
+	OldestPending   time.Duration    `json:"oldestPending"`   // 等最久的退役代年龄
+	LeakThreshold   time.Duration    `json:"leakThreshold"`   // 超过该年龄会开告警
+	Generations     []GenerationRefs `json:"generations"`     // 逐代引用（含当前代）
+}
+
+func (cm *ContextManager) ExecutorRefs() ExecutorRefs {
+	if cm == nil {
+		return ExecutorRefs{}
+	}
+	refs := ExecutorRefs{LeakThreshold: retiredLeakAfter}
+	seen := map[*execBinding]bool{}
+	var gens []GenerationRefs
+
+	cm.executorMu.RLock()
+	if active := cm.active; active != nil {
+		seen[active] = true
+		gens = append(gens, active.snapshot())
+	}
+	cm.executorMu.RUnlock()
+
+	cm.retiredMu.Lock()
+	for b := range cm.retiredBindings {
+		if seen[b] {
+			continue
+		}
+		gens = append(gens, b.snapshot())
+	}
+	refs.PendingRetirees = len(cm.retiredBindings)
+	for b := range cm.retiredBindings {
+		if age := time.Since(b.retiredAt); age > refs.OldestPending {
+			refs.OldestPending = age
 		}
 	}
-	cm.retiredRunners = nil
+	cm.retiredMu.Unlock()
+
+	for _, g := range gens {
+		refs.InFlightTurns += int64(g.Refs[LeaseTurn.String()])
+		refs.SubCalls += g.Refs[LeaseSubCall.String()]
+		refs.BackgroundRuns += g.Refs[LeaseBackground.String()]
+	}
+	refs.Generations = gens
+	return refs
+}
+
+// UnconvergedRefs lists the retired generations still held by a live reference
+// (§4.1: a bounded Close must be able to say WHO is still running instead of
+// force-closing to satisfy a count). The active generation is never listed.
+func (cm *ContextManager) UnconvergedRefs() []UnconvergedRef {
+	if cm == nil {
+		return nil
+	}
+	cm.retiredMu.Lock()
+	defer cm.retiredMu.Unlock()
+	var out []UnconvergedRef
+	for b := range cm.retiredBindings {
+		g := b.snapshot()
+		if g.Closed || g.Total == 0 {
+			continue
+		}
+		out = append(out, UnconvergedRef{
+			Generation: g.Generation,
+			Owner:      g.Owner,
+			HeldFor:    time.Since(b.retiredAt),
+			Refs:       g.Refs,
+		})
+	}
+	return out
+}
+
+// noteUnconverged keeps the historical leak alarm on the audit surface: a
+// retiree still referenced past retiredLeakAfter is reported, never force-closed.
+func (cm *ContextManager) noteUnconverged() {
+	for _, u := range cm.UnconvergedRefs() {
+		if u.HeldFor > retiredLeakAfter {
+			log.Warnf("[ContextManager] generation %d of owner %q retired >%s ago but still holds %v references — investigate the execution that never stopped",
+				u.Generation, u.Owner, retiredLeakAfter, u.Refs)
+			return // one alarm per call
+		}
+	}
 }
 
 // currentRunner（R4 3.3）：RunFlow per-turn 取引用（RLock 即放——不持锁跑
@@ -1422,15 +1931,43 @@ func (cm *ContextManager) turnEchoVerified() (installed, verified bool) {
 }
 
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
-	// Runner lifecycle accounting (implementation-hardening 5.1): this turn
-	// holds a runner reference — the counter gates retired-runner sweeps so a
-	// swapped-out runner is only closed after the last turn holding it ends
-	// (drain-free swap semantics: “切” must be paired with “尾”).
-	cm.runnerInFlight.Add(1)
-	defer func() {
-		cm.runnerInFlight.Add(-1)
-		cm.sweepRetiredRunners()
-	}()
+	return cm.RunFlowWithExecutor(ctx, msg, nil)
+}
+
+// RunFlowWithExecutor runs one business turn on the executor pinned at the turn
+// boundary (§3.2). pinned MUST come from BeginTurn of the same turn; when it is
+// nil the executor is resolved here instead — the correct behavior for paths
+// that have no turn boundary of their own (one-shot/sub-agent invocations, whose
+// TagentAgent instance and executor were already constructed inside one
+// generation and are never republished in place).
+func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Message, pinned runner.Runner) error {
+	// §3.2/§4.1: a turn runs under EXACTLY ONE reference on ONE generation. Three
+	// shapes decide who holds it:
+	//  1. the context already carries a lease — the persistent loop's BeginTurn
+	//     lease, or an ancestor invocation's inherited one → join it. Taking a
+	//     second count here is the historical BeginTurn+RunFlow double registration
+	//     that made one business turn look multiplied (§5.1);
+	//  2. no lease, but the caller pinned an executor → the reference belongs to
+	//     whoever holds the pin (contract below: it came from BeginTurn of this
+	//     turn). Acquiring here would count the generation active NOW, which is not
+	//     the one being run — a multiplied count AND a misreported one;
+	//  3. neither → standalone flow: resolve the current generation, hold its own
+	//     reference and release it when the turn's tail is done, which — thanks to
+	//     the §6.3 producer-done credential — means the framework producer exited,
+	//     not merely that the processed stream closed.
+	lease, inherited := execLeaseFromContext(ctx)
+	if !inherited && pinned == nil {
+		lease = cm.AcquireLease(LeaseTurn)
+		defer lease.Release()
+		ctx = lease.WithContext(ctx)
+		pinned = lease.Runner()
+	}
+	if err := lease.Err(); err != nil {
+		// The turn's own reference was declined — either taken here against a converged
+		// generation or inherited from an ancestor whose lease the gate refused. Either
+		// way: do not start, and never run on a closed executor.
+		return fmt.Errorf("%w: agent %q turn", err, cm.name)
+	}
 	// Bind this invocation's projection as the pipeline projection sink:
 	// MemoryPlugin projects each stored event at the same synchronous point
 	// (write unification, unified-event-projection D1).
@@ -1448,6 +1985,11 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 	}
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
+		// §6.5/D2: this call's projection also rides the context as the auto-inject
+		// source for any delegation invoked by the flow. Delegation wrappers are
+		// shared published objects (they live in the owner's config.Tools), so the
+		// per-call value must never be written into them — see withCallProjection.
+		ctx = withCallProjection(ctx, cm.projection)
 		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
 		// → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
 		// 双向互链（指令2「一套数据模式、多场景投影、保一致性」）。空归因不注入。
@@ -1475,8 +2017,14 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 		// (e2195fc) never fires: meditation-spawned tasks settle as bare "task"
 		// triggers and their outputs leak to lastActiveChat.
 		ts := cm.triggerSource
-		if len(md) > 0 || traceID != "" || ts != "" {
-			cp := make(map[string]string, len(md)+3)
+		// S2m (introduce-durable-workflow-engine): the delegation's correlation handle
+		// rides the same Origin→Metadata courier, so a越窗 task_settled carries the
+		// invocation id S3m routes the late result back by. invocation_id is a CONTROL
+		// key, so the reclaim turn's extractRootMetadata filters it from meta_*/model —
+		// routing data the framework reads, never model-visible (D4).
+		invID, _ := invocationIDFromContext(ctx)
+		if len(md) > 0 || traceID != "" || ts != "" || invID != "" {
+			cp := make(map[string]string, len(md)+4)
 			for k, v := range md {
 				cp[k] = v
 			}
@@ -1487,11 +2035,24 @@ func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error 
 			if ts != "" {
 				cp[tagentevent.MetaKeyTriggerSource] = ts
 			}
+			if invID != "" {
+				cp[metaKeyInvocationID] = invID
+			}
 			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
+			// S3m-b: on a sub-call turn (invID present + owner sinks wired), book
+			// background spawns into the delivery-accounting barrier so the M2 loop
+			// knows when every越窗 task this call started has settled+been delivered.
+			if invID != "" && cm.settleSinks != nil {
+				spawner = &countingSpawner{inner: spawner, sinks: cm.settleSinks, id: invID}
+			}
 		}
 		ctx = task.WithTaskSpawner(ctx, spawner)
 	}
-	eventCh, err := cm.currentRunner().Run(ctx, cm.userID, cm.sessionID, msg)
+	exec := pinned
+	if exec == nil {
+		exec = cm.currentRunner()
+	}
+	eventCh, err := exec.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
 		// §5.1: a runner start/transport error is a definite failure of THIS
 		// attempt. Record it so the loop can tell a real failure from a nil return
@@ -1572,12 +2133,6 @@ func (cm *ContextManager) LastTurnOutcome() turnOutcome {
 // most recent turn (called only on the loop goroutine after the retry budget).
 func (cm *ContextManager) setLastBatchOutcome(o turnOutcome) { cm.lastBatchOutcome = o }
 
-// LastBatchOutcome returns the §5.1 reduced turn result the persistent loop
-// computed for the most recent durable batch, prior to §5.2/§5.3 freezing it
-// into the completion. Completed/failed only — a cancelled turn returns from the
-// loop without reaching the freeze, so no completion is ever formed for it.
-func (cm *ContextManager) LastBatchOutcome() turnOutcome { return cm.lastBatchOutcome }
-
 // LastTurnDegenerate reports whether the most recent RunFlow turn produced
 // nothing: no tool call and no non-empty final. The persistent loop uses it
 // to retry such a turn once (an occasional model hiccup would otherwise
@@ -1623,31 +2178,91 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 	cm.sessionID = sessionID
 }
 
-// Close releases the runner resources.
-func (cm *ContextManager) Close() error {
-	// Terminal: drain retired runners unconditionally — no new turns will run
-	// after Close, so the in-flight gate no longer applies.
-	cm.retireMu.Lock()
-	for _, e := range cm.retiredRunners {
-		_ = e.r.Close() // upstream documents Close as idempotent
+// allBindings returns the active generation plus every retiree still on the
+// unconverged list (dedicated snapshot: callers must not mutate it).
+func (cm *ContextManager) allBindings() []*execBinding {
+	var out []*execBinding
+	cm.executorMu.RLock()
+	if cm.active != nil {
+		out = append(out, cm.active)
 	}
-	cm.retiredRunners = nil
-	cm.retireMu.Unlock()
-	if r, ok := cm.currentRunner().(interface{ Close() error }); ok {
-		return r.Close()
+	cm.executorMu.RUnlock()
+	cm.retiredMu.Lock()
+	for b := range cm.retiredBindings {
+		out = append(out, b)
 	}
-	return nil
+	cm.retiredMu.Unlock()
+	return out
 }
 
-// WaitForInFlight blocks until every runner turn currently streaming (resident
-// loop turns AND one-shot/sub-call turns — all enter via RunFlow, which
-// counts runnerInFlight) has drained, or the timeout passes; false means turns
-// were still active. The §6.2 close sequence uses it so the output channel is
-// never settled while a turn may still send to it (review M-1).
+// OutstandingRefs reports how many execution references this manager's generations
+// currently hold. Owner-level decisions above the agent layer (§4.3 retirement) ask
+// "is any execution still in flight" through this, so they read the SAME accounting
+// the reclaim path acts on instead of maintaining a parallel notion of busy.
+func (cm *ContextManager) OutstandingRefs() int { return cm.totalRefs() }
+
+// totalRefs is the sum of outstanding references over all generations of this
+// manager — the quantity a bounded drain waits for (§4.1: it covers background
+// executions and inherited sub-calls, not just business turns).
+func (cm *ContextManager) totalRefs() int {
+	total := 0
+	for _, b := range cm.allBindings() {
+		b.mu.Lock()
+		total += b.total
+		b.mu.Unlock()
+	}
+	return total
+}
+
+// execCloseGrace is the last-chance convergence window a Close grants the
+// generations it retires. The enclosing shutdown already had its own bounded
+// drain (waitForTurns), so this is a grace for work landing in the gap — not a
+// second full timeout. A var so tests can shrink it.
+var execCloseGrace = 2 * time.Second
+
+// retireActiveBinding retires the generation currently in force, so a terminal
+// Close cannot leave the current executor unaccounted for: from here on it is an
+// ordinary retiree — closed by its own last reference, reported while it still
+// has one.
+func (cm *ContextManager) retireActiveBinding() {
+	cm.retireBinding(cm.activeBinding())
+}
+
+// Close is the terminal drain, bounded. It retires the generation in force, waits
+// a grace for every generation's OWN references to converge (each then closes
+// itself exactly once on the ordinary reclaim path) and returns. Generations
+// whose producers never confirmed a stop are NOT force-closed: closing an executor
+// under a live writer is exactly the failure spec runtime-resource-ownership
+// forbids (「未确认停止者继续显式持有…不无限等待或强关」). They stay explicitly
+// held, remain readable through UnconvergedRefs, and are reported as
+// ErrExecUnconverged so no caller can claim a clean close. The holder acts on it
+// by keeping the shared resources they ride on (see agent.Close).
+func (cm *ContextManager) Close() error {
+	cm.retireActiveBinding()
+	cm.WaitForInFlight(execCloseGrace)
+	held := cm.UnconvergedRefs()
+	if len(held) == 0 {
+		cm.retiredMu.Lock()
+		cm.retiredBindings = nil
+		cm.retiredMu.Unlock()
+		return nil
+	}
+	log.Warnf("[ContextManager] bounded close left %d unconverged generation(s): %+v — their executors are HELD, not force-closed; investigate the execution that never confirmed a stop",
+		len(held), held)
+	return fmt.Errorf("%w: %d generation(s) still referenced: %+v", ErrExecUnconverged, len(held), held)
+}
+
+// WaitForInFlight blocks until every outstanding execution reference (resident
+// loop turns, one-shot/sub-call turns AND post-ACK background runs — all of them
+// registered on their generation) has drained, or the timeout passes; false means
+// work was still active, and the caller can name it with UnconvergedRefs. The §6.2
+// close sequence uses it so the output channel is never settled while a turn may
+// still send to it (review M-1).
 func (cm *ContextManager) WaitForInFlight(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
-	for cm.runnerInFlight.Load() > 0 {
+	for cm.totalRefs() > 0 {
 		if time.Now().After(deadline) {
+			cm.noteUnconverged()
 			return false
 		}
 		time.Sleep(time.Millisecond)
@@ -1658,20 +2273,6 @@ func (cm *ContextManager) WaitForInFlight(timeout time.Duration) bool {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-func ensureUserPrompt(messages []model.Message) []model.Message {
-	for _, msg := range messages {
-		if msg.Role == model.RoleUser {
-			return messages
-		}
-	}
-	// No user message found — add a neutral prompt to trigger model response.
-	// Don't say "如果有新任务" which misleads the LLM into thinking previous tasks are done.
-	return append(messages, model.Message{
-		Role:    model.RoleUser,
-		Content: "请基于以上上下文继续处理。",
-	})
-}
 
 func isFinalResponse(evt *event.Event) bool {
 	if evt == nil || evt.Response == nil || len(evt.Response.Choices) == 0 {

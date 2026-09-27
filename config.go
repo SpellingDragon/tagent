@@ -638,6 +638,18 @@ type RemoteConfig struct {
 	URL string `json:"url" yaml:"url"`
 }
 
+// isRemoteRef reports whether this reference resolves OUTSIDE the local agents
+// map — i.e. whether the construction domain (buildAgentToolRef) takes its A2A
+// branch. §3.3「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
+// predicate both domains use. Two separate spellings of "is this remote" is
+// exactly how validation came to demand a local definition that construction
+// never asks for — rejecting a deployment whose sub-agent lives in another
+// service — while a Remote block with a blank URL sailed through validation and
+// was then quietly built as a LOCAL agent, contrary to what it declared.
+func (tr ToolRef) isRemoteRef() bool {
+	return tr.Remote != nil && strings.TrimSpace(tr.Remote.URL) != ""
+}
+
 // PromptConfig is an alias for prompt.CompositeConfig, providing bootstrap-style
 // prompt loading aligned with nanobot's pattern (AGENTS.md, SOUL.md, USER.md, TOOLS.md).
 //
@@ -843,7 +855,7 @@ func (c *Config) Validate() error {
 	// Validate tool agent references
 	for name, ac := range c.Agents {
 		for i, tr := range ac.Tools {
-			if tr.Kind == ToolKindAgent && tr.AgentID != "" {
+			if tr.Kind == ToolKindAgent && tr.AgentID != "" && !tr.isRemoteRef() {
 				if _, ok := c.Agents[tr.AgentID]; !ok {
 					return fmt.Errorf("tagent config: agent %q tool[%d] references unknown agent %q",
 						name, i, tr.AgentID)
@@ -869,6 +881,13 @@ func (ac *AgentConfig) validate(name string) error {
 		if tr.Kind == ToolKindAgent {
 			if tr.AgentID == "" {
 				return fmt.Errorf("agent %q: tools[%d] agent kind requires agent id", name, i)
+			}
+			// A remote block without an endpoint is not "remote with a default" —
+			// construction would fall through to the LOCAL path and build a
+			// different runtime than the config declares. Refuse it here so the
+			// declaration and the built object cannot diverge (§3.3).
+			if tr.Remote != nil && !tr.isRemoteRef() {
+				return fmt.Errorf("agent %q: tool agent %q declares remote but requires a url", name, tr.AgentID)
 			}
 			if tr.Description == "" && tr.DescriptionFile == "" {
 				return fmt.Errorf("agent %q: tool agent %q requires description or description_file", name, tr.AgentID)

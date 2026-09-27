@@ -171,6 +171,56 @@ func TestGetEffectiveTTL_ArtifactExemption(t *testing.T) {
 	assert.Equal(t, 7, ttl)
 }
 
+// TestWFPassiveExclusionDoesNotShortenHistoryTTL (R05/6.2): registering wf.*
+// for passive projection exclusion must NOT add a 30-day type TTL. Under the
+// pre-existing 90-day global policy, a 31-day-old wf record is still within
+// retention and must survive the expiry scan. A 31-day external_input, which
+// carries a genuine explicit 30-day type TTL, must still be tombstoned — the
+// control that proves the scan actually runs and that the difference is the
+// wf registration, not a disabled checker. fail-before: the extra wf TTL made
+// the 31-day wf record expire at 30 days.
+func TestWFPassiveExclusionDoesNotShortenHistoryTTL(t *testing.T) {
+	cfg := DefaultLifecycleConfig()
+	cfg.GlobalTTLDays = 90
+
+	// Root cause: the type dimension must inherit global, never override it.
+	if _, present := cfg.TypeTTL[event.TypeWFReceived]; present {
+		t.Fatalf("wf.received leaked a type TTL (%d); passive exclusion must add none", cfg.TypeTTL[event.TypeWFReceived])
+	}
+	lmOnly := &LifecycleManager{config: cfg}
+	ttl, err := lmOnly.getEffectiveTTL(event.TypeWFReceived)
+	require.NoError(t, err)
+	assert.Equal(t, 90, ttl, "wf.received must inherit the 90-day global TTL")
+
+	rel := newSimpleInMemRelationStore()
+	mockKV := newMockKV()
+	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
+	require.NoError(t, err)
+	ts := NewTombstoneSet(rel, mockKV, 1)
+	store.tombstones = ts
+	lm := NewLifecycleManager(store, ts, cfg)
+
+	now := time.Now().UnixMilli()
+	age31 := int64(31 * 24 * 3600 * 1000)
+	wfKey := NewSnowflakeEventKey(1, now-age31)
+	require.NoError(t, store.StoreEvent(wfKey, FullEvent{
+		EventKey: wfKey, PartitionID: 1, EventType: event.TypeWFReceived,
+		EventSummary: "historical wf fact", Timestamp: now - age31,
+	}))
+	ctrlKey := NewSnowflakeEventKey(1, now-age31+1)
+	require.NoError(t, store.StoreEvent(ctrlKey, FullEvent{
+		EventKey: ctrlKey, PartitionID: 1, EventType: event.TypeExternalInput,
+		EventSummary: "same-age external_input", Timestamp: now - age31,
+	}))
+
+	lm.checkTTL()
+
+	assert.False(t, ts.IsTombstone(wfKey),
+		"a 31-day wf record must NOT be evicted under the 90-day global policy (no added wf TTL)")
+	assert.True(t, ts.IsTombstone(ctrlKey),
+		"control: a 31-day external_input (explicit 30-day type TTL) must still be evicted — the scan is active")
+}
+
 func TestLifecycleManager_StartStop(t *testing.T) {
 	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)

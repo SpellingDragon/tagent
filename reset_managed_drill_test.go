@@ -206,11 +206,10 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.DirExists(t, filepath.Dir(evidence))
 
 	// LEG e — post-reset boot ONLY knows the current path. Runs as an
-	// independent process (boot evidence layer + the registered framework
-	// race family can hit any main-process runner boot/Close; the child
-	// asserts everything below and the parent classifier fails hard on any
-	// non-family failure).
-	runRaceExemptChild(t, append(os.Environ(),
+	// independent process (boot evidence layer). §6.6: the acceptance keeps no
+	// race exemption — the child must boot with zero data races and a clean
+	// exit; any race or non-zero exit fails hard with the full log.
+	runBootChild(t, append(os.Environ(),
 		"TAGENT_DRILL_STORE="+storeDir,
 		"TAGENT_DRILL_SPILL="+spillDir,
 		"TAGENT_DRILL_ANCHOR="+anchorDir),

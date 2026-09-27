@@ -4,11 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/SpellingDragon/tagent/agent"
 )
 
-// Agent organization-layer hot reload: fingerprint and normalized snapshot.
+// Agent organization-layer hot reload: fingerprint, normalized snapshot and the
+// single version coordinator.
 //
 // Design: examples/wechat-bot/openspec/changes/tagent-agent-hot-reload/design.md
 // (D1 org-level atomic snapshot, D2 drain-free in-flight events, D3
@@ -19,14 +28,368 @@ import (
 // agents.*.memory.*) are excluded on purpose — changing them at runtime cannot
 // migrate resources and must go through a restart.
 
-// reloadSnapshot（R4，resident-continuity-r2-r4 3.8）：ring 2 上一代配置
-// 摘要（Rollback 数据源；换代时覆盖更早代）。orgSnapshot/builtAgent 原
-// 「整代原子快照」intent 已被第六轮 fresh-eyes 证伪（常驻 loop 形态下无
-// drain-free 可立）——按 roadmap D5 原案落地为 cm.runner 级 SwapExecutor
-// （tagent.go 懒检查编排；本文件保留 fingerprint/检测面）。
-type reloadSnapshot struct {
-	fp  string
-	cfg *Config
+// appliedAgent is ONE agent's entry in the appliedRecord (S-C/2.3): the full
+// desired hot bundle in force for it at this commit, plus whether the
+// generation still ROUTES it. A Draining entry carries the agent's LAST
+// effective values (J8: a removed owner is never re-parameterized to defaults)
+// and exists so readers of the record can observe "present but draining"
+// without a second lookup.
+type appliedAgent struct {
+	Name     string
+	Hot      agent.OrgHotParams
+	Draining bool
+}
+
+// orgGeneration is one published organization version: the effective content
+// fingerprint, the full config it was built from, the monotonic sequence
+// number assigned at publish time, and (S-C) the per-agent applied record —
+// the ONE committed source owner hot-param reads resolve against.
+type orgGeneration struct {
+	seq         int
+	fingerprint string
+	cfg         *Config
+	applied     []appliedAgent
+}
+
+// orgCoordinator is tagent's SINGLE organization-version bookkeeper for one
+// resident entry agent (introduce-durable-workflow-engine 第二轮收敛：取代
+// reloader 闭包内 lastFP/execGen/prevKeep/prevSnapshot 的分散状态，以及已
+// 撤回的 Releases→OrgPublisher→OrgVersionEntry 三层原型）。它拥有：
+//   - 有效内容指纹（desired/effective 比较基准）；
+//   - 单调发布序号（发布身份——回滚同内容仍前进序号，内容指纹不得冒充）；
+//   - ring-2 上一代配置（Rollback 数据源）；
+//   - 最近一次被拒候选（诊断用 desired/effective 分歧，§5.1）。
+//
+// 它不构造也不换入 runner——候选构造/发布接 §2/§3。历史注：原「整代原子
+// 快照」intent 曾因“常驻 loop 形态下无 drain-free 可立”而落地为 cm.runner
+// 级 SwapExecutor；第二轮重定向确认 turn 级引用语义下 drain-free 成立
+// （进行中 turn 持旧引用跑完），本协调器即整代版本簿记的单一真源。
+type orgCoordinator struct {
+	mu        sync.Mutex
+	current   *orgGeneration
+	prev      *orgGeneration
+	lastFail  *OrgFailure     // 最近一次被拒绝的候选（nil = 自上次成功发布以来无新失败）
+	lastOKAt  time.Time       // 最近一次成功应用的时间（含 numeric-only，D9 lastAppliedAt）
+	lastPubAt time.Time       // 最近一次结构发布／回滚的时间（D9 lastPublishedAt）
+	lastApply []OrgAgentApply // 最近一轮逐 agent 回执（整块替换）
+	candFP    string          // 本轮检查看到的 desired 指纹（解析/指纹失败时为空）
+	seq       int             // 结构代（generation）——仅结构发布/回滚前进
+	revision  int             // 完整应用计数（含 numeric-only），仅观测/提交，不作第二路由源
+	applySig  string          // 最近一次完整应用的热参数摘要，用于「语义完全相同不轮转」（D9）
+
+	// appliedView is the LOCK-FREE read face of the committed application record
+	// (introduce-durable-workflow-engine S-E, design §2「atomic.Pointer 无锁化留
+	// S-E 与 compressor 侧同源做」). S-C's lock-held read assumed hot params are
+	// consumed rarely; once the compressor resolves its numeric group from the
+	// record at every boundary of every live CM, that assumption puts the commit
+	// critical section on the compression read path — contention at best, and a
+	// re-entrancy trap the moment any commit-time code reads an owner's hot view.
+	// Rotated ONLY together with `current` at the three commit points below, always
+	// as one whole immutable snapshot, so readers see a complete generation and
+	// never a half-rotation (the S-C 锚2 no-half-commit contract).
+	appliedView atomic.Pointer[[]appliedAgent]
+}
+
+// publishViewLocked hands the record's lock-free read face a private copy of the
+// just-committed applied record. Called from within the commit critical section
+// (callers hold c.mu), and the copy is what makes the store safe: the reload path
+// reuses its own slice across commits, and readers must never observe a slice
+// being rewritten under them.
+func (c *orgCoordinator) publishViewLocked(applied []appliedAgent) {
+	view := make([]appliedAgent, len(applied))
+	copy(view, applied)
+	c.appliedView.Store(&view)
+}
+
+// OrgFailure / OrgStatus 是代际诊断的有界形状（D9：成功与失败给同一语义检查的
+// 明确可诊断结果，不新增抓取协议、不新增历史）。
+//
+// Fingerprint/Desired 只能当**不透明诊断标签**：按 resident-continuity 的声明，
+// 指纹/序号不是应用可见 identity，任何执行路径不得据它选版（本仓也无这样的
+// 读取点）。Desired 是“磁盘上那份配置算出来的指纹”：它与 Fingerprint 不等才是
+// 运维真正要看到的事实（“我改了，为什么没生效”）；解析/指纹本身失败时为空。
+type OrgFailure struct {
+	Generation int       `json:"generation"` // 失败时所在代（候选被拒，代不前进）
+	Desired    string    `json:"desired"`    // 被拒候选的 desired 指纹前缀（可为空）
+	Error      string    `json:"error"`
+	At         time.Time `json:"at"`
+}
+
+type OrgStatus struct {
+	Generation    int64           `json:"generation"`
+	Revision      int64           `json:"revision"` // 完整应用计数（含 numeric-only），非路由源
+	Fingerprint   string          `json:"fingerprint"`
+	Desired       string          `json:"desired"`
+	LastApplied   time.Time       `json:"lastAppliedAt"`   // 完整配置最近成功应用时间（含 numeric-only）
+	LastPublished time.Time       `json:"lastPublishedAt"` // 最近结构发布／回滚时间
+	LastFailure   *OrgFailure     `json:"lastFailure,omitempty"`
+	Agents        []OrgAgentApply `json:"agents"` // 本轮逐 agent 回执（整块替换，无历史）
+}
+
+// OrgAgentApply 是一个 agent 在本轮数值热更中的回执（D9：日志/现有诊断呈现
+// “逐 agent 应用结果”）。Outcome 只有两种真实结果：
+//
+//	applied  —— 它属于本代可路由拓扑，参数已下发到它的真实对象；
+//	draining —— 本代不再路由它（被移除或已降级为旧 owner），故**不碰它**，
+//	           数值字段保持零值（含义：本轮未评估，不是“零配”）。
+//
+// 回执只保留最近一轮，按拓扑大小限界，不累积历史（architecture-guardrails）。
+// OrgLiveDebt is the LIVE half of the diagnostics payload (§5.1). Unlike
+// OrgStatus — which one `coord.status()` call produces as one atomic read — the
+// figures below are read off the running reference accounting AT THE MOMENT the
+// payload was asked for, so they describe "debt right now", not "what the
+// committed record says". They are therefore grouped apart from the record
+// fields and carry their own capture instant, which is what lets a reader tell
+// the two kinds apart instead of mistaking a stitched-together view for an
+// atomic success snapshot. No execution path reads any of it.
+type OrgLiveDebt struct {
+	CapturedAt         time.Time          `json:"capturedAt"`
+	Executors          agent.ExecutorRefs `json:"executors"`
+	PendingRetirements []map[string]any   `json:"pendingRetirements"`
+}
+
+// OrgCloseState keeps 「关闭已发起」and「资源已退出」as the two distinct facts they
+// are (§4.1's bounded return, reported by §5.1). Initiated flips on the first
+// Close call; ResourcesExited turns true only once every deferred exit has run
+// — or immediately when nothing was ever deferred (an inline close that took
+// every exit is not "incomplete"). Collapsing the two would let a bounded return
+// be read as a finished teardown, which is exactly the misreading §4.1 refused.
+type OrgCloseState struct {
+	Initiated       bool `json:"initiated"`
+	ResourcesExited bool `json:"resourcesExited"`
+}
+
+type OrgAgentApply struct {
+	Name            string  `json:"name"`
+	Outcome         string  `json:"outcome"`
+	ThresholdPct    float64 `json:"thresholdPct,omitempty"`
+	MaxTokens       int     `json:"maxTokens,omitempty"`
+	KeepRecentTasks int     `json:"keepRecentTasks,omitempty"`
+}
+
+func newOrgCoordinator() *orgCoordinator { return &orgCoordinator{} }
+
+// init records the startup generation. The sequence stays 0 so the first swap
+// publishes generation 1（与历史 execGen 日志语义一致）。
+func (c *orgCoordinator) init(fp string, cfg *Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.current = &orgGeneration{seq: 0, fingerprint: fp, cfg: cfg}
+	c.candFP = fp // 启动：desired 即 effective，无待决差异
+	c.applySig = hotSignature(cfg)
+}
+
+// sameAsCurrent reports whether fp equals the effective fingerprint（组织内容
+// 未变：数值热参分支）。无current时视同空指纹（启动指纹失败的既有语义）。
+func (c *orgCoordinator) sameAsCurrent(fp string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.current == nil {
+		return fp == ""
+	}
+	return c.current.fingerprint == fp
+}
+
+// sameFullAsCurrent reports whether a candidate is semantically identical to the
+// effective generation on BOTH axes — same structural fingerprint AND same hot
+// signature. Rollback uses it (not a fingerprint-only check) to decide whether
+// there is anything to restore: a numeric-only application leaves the structure
+// fingerprint equal but the five hot params different, so an fp-only short
+// circuit would wrongly refuse to roll the numbers back (§2.4/L-3).
+func (c *orgCoordinator) sameFullAsCurrent(fp string, cfg *Config) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.current != nil && c.current.fingerprint == fp && c.applySig == hotSignature(cfg)
+}
+
+// swap records a successful whole-org (STRUCTURAL) replacement and returns
+// (oldFP, newGen). The superseded current becomes the ring-2 rollback source.
+// A structural publish advances the generation, the full-apply revision, and
+// BOTH success timestamps (D9: lastAppliedAt ⊇ lastPublishedAt).
+func (c *orgCoordinator) swap(fp string, cfg *Config, applied []appliedAgent) (string, *orgGeneration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	oldFP := ""
+	if c.current != nil {
+		oldFP = c.current.fingerprint
+	}
+	c.seq++
+	c.revision++
+	now := time.Now()
+	gen := &orgGeneration{seq: c.seq, fingerprint: fp, cfg: cfg, applied: applied}
+	c.prev = c.current
+	c.current = gen
+	c.publishViewLocked(applied) // 记录读面与版本同临界区轮转（无半提交）
+	c.candFP = fp                // 发布成功：desired 收敛到 effective，不留陈旧差异
+	c.applySig = hotSignature(cfg)
+	c.lastFail = nil
+	c.lastOKAt = now
+	c.lastPubAt = now
+	return oldFP, gen
+}
+
+// recordHotApply records a SUCCESSFUL numeric-only full application (org
+// structure unchanged). Per D9 (L-3): every successful apply — numeric-only
+// included — rotates the coordinator's full effective config and its previous
+// copy, so a later rollback can restore the pre-edit numeric values, and
+// advances lastAppliedAt. It does NOT advance the structural generation (seq)
+// nor lastPublishedAt (no structure moved); it only bumps the independent
+// revision used for full-commit bookkeeping and observation (never a routing
+// source). A semantically identical re-apply (same hot signature) does NOT
+// rotate or advance anything and returns false, per 「语义完全相同的应用不轮转」;
+// a real change rotates the ring, bumps revision, advances lastAppliedAt (never
+// lastPublishedAt) and returns true.
+func (c *orgCoordinator) recordHotApply(cfg *Config, applied []appliedAgent) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sig := hotSignature(cfg)
+	if sig == c.applySig {
+		return false // identical numeric apply — leave the ring, revision and time untouched
+	}
+	if c.current != nil {
+		c.prev = c.current
+		c.current = &orgGeneration{seq: c.current.seq, fingerprint: c.current.fingerprint, cfg: cfg, applied: applied}
+		c.publishViewLocked(applied) // 数值-only 提交同样轮转读面（S-C 锚2 闸门）
+	}
+	c.applySig = sig
+	c.revision++
+	c.lastOKAt = time.Now()
+	return true
+}
+
+// spawnerTTLSource binds an ActionTool's spawn-time default lifetime (the TTL a
+// spawn gets when the model omits `ttl`) to an owner's LIVE hot view (§6.4, the
+// spawner axis of 6.4): the committed application record is the authority, so a
+// numeric-only rotation reaches every later spawn without anyone pushing a
+// number into the tool. A nil owner or a record with no entry for it reads zero,
+// which the tool resolves to its construction default.
+func spawnerTTLSource(a *agent.TagentAgent) func() time.Duration {
+	if a == nil {
+		return nil
+	}
+	return func() time.Duration {
+		hp, ok := a.HotSnapshot()
+		if !ok {
+			return 0
+		}
+		return hp.TaskDefaultTTL
+	}
+}
+
+// currentHotFor reads ONE agent's applied hot bundle from the committed record
+// (S-C): the read-side of the single application record. Draining entries carry
+// the agent's LAST effective values (J8). ok=false when no record exists yet or
+// the name is absent (standalone/never-routed) — callers fall back to their
+// construction snapshot.
+//
+// S-E (design §2): LOCK-FREE. The compressor resolves its numeric group through
+// this read at every consumption boundary of every live CM, so the record's read
+// face must never take c.mu — a lock-held read would put the commit critical
+// section on the compression path. It loads the atomic snapshot the commit points
+// publish together with the generation, so it is both race-free and rotation-free.
+func (c *orgCoordinator) currentHotFor(name string) (agent.OrgHotParams, bool) {
+	if c == nil {
+		return agent.OrgHotParams{}, false
+	}
+	view := c.appliedView.Load()
+	if view == nil {
+		return agent.OrgHotParams{}, false
+	}
+	for i := range *view {
+		if (*view)[i].Name == name {
+			return (*view)[i].Hot, true
+		}
+	}
+	return agent.OrgHotParams{}, false
+}
+
+// rollbackSource returns the ring-2 generation, or nil when nothing to roll
+// back to（首代未换过）。
+func (c *orgCoordinator) rollbackSource() *orgGeneration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.prev
+}
+
+// recordRollback republishes the rolled-back generation as a NEW sequence,
+// restoring BOTH structure and the five hot params (the caller rebuilds the
+// executor AND re-applies the numeric bundle from `cfg`, which is the previous
+// full effective config). Ring 保持不变（与历史行为一致：连续回滚仍面向同一
+// prev）。A rollback is a structural publish: it advances generation, revision
+// and lastPublishedAt (D9). Storing the restored `cfg` (not only when
+// prev.fingerprint == fp) keeps the rollback ring's full-config truth exact even
+// after a numeric-only application made the fingerprints diverge.
+func (c *orgCoordinator) recordRollback(fp string, cfg *Config, applied []appliedAgent) *orgGeneration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq++
+	c.revision++
+	gen := &orgGeneration{seq: c.seq, fingerprint: fp, cfg: cfg, applied: applied}
+	c.current = gen
+	c.publishViewLocked(applied) // 回滚亦是提交：读面随恢复代一起轮转，不留旧记录
+	c.candFP = fp
+	c.applySig = hotSignature(cfg)
+	c.lastFail = nil
+	now := time.Now()
+	c.lastOKAt = now
+	c.lastPubAt = now
+	return gen
+}
+
+// noteDesired 记录本轮检查看到的 desired 指纹，所以下一次 recordFailure 能说出
+// “被拒的是哪一份”。由重载器在每次进入时置空、算出指纹后赋值。
+func (c *orgCoordinator) noteDesired(fp string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.candFP = fp
+}
+
+// recordApply 保存最近一轮的逐 agent 应用回执（D9）。它不改变任何版本语义：
+// 仅把“谁真的收到了新参数、谁被故意没碰”从只会流进日志的副产物变成可诊断形状。
+func (c *orgCoordinator) recordApply(rs []OrgAgentApply) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastApply = append([]OrgAgentApply(nil), rs...)
+}
+
+// recordFailure stores the most recent rejected candidate reason（解析/指纹/
+// 拓扑/构建失败）供诊断；不改变 effective，也不前进序号。
+func (c *orgCoordinator) recordFailure(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastFail = &OrgFailure{
+		Generation: c.seq,
+		Desired:    short(c.candFP),
+		Error:      err.Error(),
+		At:         time.Now(),
+	}
+}
+
+// lastFailure returns the most recent rejected candidate, or nil.
+func (c *orgCoordinator) lastFailure() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastFail == nil {
+		return nil
+	}
+	return errors.New(c.lastFail.Error)
+}
+
+// status 给出有界代际诊断快照（D4）。它与 swap/record* 同锁，所以读者看到的总是
+// “已发布代 + 它的时间 + 最后一次失败”的一致组合；无历史、无队列。
+func (c *orgCoordinator) status() OrgStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st := OrgStatus{Generation: int64(c.seq), Revision: int64(c.revision), LastApplied: c.lastOKAt, LastPublished: c.lastPubAt, Desired: short(c.candFP)}
+	if c.current != nil {
+		st.Fingerprint = short(c.current.fingerprint)
+	}
+	if c.lastFail != nil {
+		fail := *c.lastFail
+		st.LastFailure = &fail
+	}
+	st.Agents = append([]OrgAgentApply(nil), c.lastApply...)
+	return st
 }
 
 // short truncates a fingerprint for compact logs.
@@ -35,6 +398,78 @@ func short(s string) string {
 		return s[:8]
 	}
 	return s
+}
+
+// hotSignature digests the five hot-applicable numeric params over the agent set
+// (raw AgentConfig fields, entry included) to a stable hex string. It backs
+// D9's 「语义完全相同的应用不轮转」 on the numeric-only path: an identical re-save
+// must not rotate the rollback ring or advance revision/lastAppliedAt. This is
+// pure change-detection bookkeeping — NOT a routing source and NOT the
+// structural fingerprint (which deliberately excludes these fields, see
+// agentSubset). An edge exists: two configs differing only in "unset vs
+// explicit parsed default" hash apart here and would rotate — harmless, since
+// the applied effective values are equal, only a redundant revision bump.
+func hotSignature(cfg *Config) string {
+	if cfg == nil {
+		return ""
+	}
+	names := make([]string, 0, len(cfg.Agents))
+	for n := range cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString(cfg.Entry)
+	b.WriteByte('#')
+	for _, n := range names {
+		ac := cfg.Agents[n]
+		b.WriteString(n)
+		b.WriteByte(':')
+		b.WriteString(strconv.FormatFloat(ac.CompressThreshold, 'f', -1, 64))
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(ac.MaxTokens))
+		b.WriteByte('|')
+		b.WriteString(strconv.Itoa(ac.KeepRecentTasks))
+		b.WriteByte('|')
+		b.WriteString(ac.TaskTerminalTTL)
+		b.WriteByte('|')
+		b.WriteString(ac.TaskDefaultTTL)
+		b.WriteByte(';')
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+// Clone returns a private deep copy of the configuration. A published
+// generation owns its config snapshot (design D2: 「配置 map/slice/参数深拷贝
+// 并私有保存」) — the rollback ring must not alias the live map a later build
+// could touch, and a republished face must not observe edits made after it was
+// recorded.
+//
+// It round-trips through JSON because Config is pure data with symmetric
+// json/yaml tags: a future nested field is copied automatically instead of
+// silently staying shared (an explicit field-by-field copy would rot on the
+// first addition). Two documented deviations:
+//   - ConfigPath is json:"-" (process-level, excluded from the fingerprint) and
+//     is re-attached by hand.
+//   - an empty-but-non-nil slice/map with omitempty comes back nil. That is a
+//     no-op for configuration resolution (range/len/index treat both alike),
+//     and the fingerprint is computed over the same canonical form, so
+//     desired/effective comparison is unaffected.
+func (c *Config) Clone() (*Config, error) {
+	if c == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("config clone: marshal: %w", err)
+	}
+	out := &Config{}
+	if err := json.Unmarshal(b, out); err != nil {
+		return nil, fmt.Errorf("config clone: unmarshal: %w", err)
+	}
+	out.ConfigPath = c.ConfigPath
+	return out, nil
 }
 
 // orgSubset is the canonical in-memory representation of the fingerprinted
@@ -76,30 +511,6 @@ func computeOrgFingerprint(cfg *Config) (string, error) {
 	b, err := json.Marshal(sub)
 	if err != nil {
 		return "", fmt.Errorf("org fingerprint: canonical marshal: %w", err)
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-// computeMemoryFingerprint（R4，resident-continuity-r2-r4 3.1 修 🔴5）：
-// agents.*.Memory 段的独立 canonical 指纹。memory 被 org 指纹白名单排除（运行
-// 时不可迁移存储资源），若不先检则仅改 memory 时 org 指纹不变→静默走
-// ApplyOrgParams 分支→变更不生效也不告警。懒检查先序：mtime 变→先比
-// memory 指纹（命中=ERROR+须重启+return，检测可达）→再比 org 指纹。
-// MemoryConfig 含 Lifecycle/Engine 指针字段——用 JSON canonical 而非 ==。
-func computeMemoryFingerprint(cfg *Config) (string, error) {
-	type memEntry struct {
-		Name   string       `json:"name"`
-		Memory MemoryConfig `json:"memory"`
-	}
-	entries := make([]memEntry, 0, len(cfg.Agents))
-	for name, ac := range cfg.Agents {
-		entries = append(entries, memEntry{Name: name, Memory: ac.Memory})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	b, err := json.Marshal(entries)
-	if err != nil {
-		return "", fmt.Errorf("memory fingerprint: canonical marshal: %w", err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
@@ -157,9 +568,11 @@ type agentSubset struct {
 	Temperature       float64      `json:"temperature,omitempty"`
 	// CompressThreshold / MaxTokens / KeepRecentTasks / TaskTerminalTTL /
 	// TaskDefaultTTL are intentionally EXCLUDED from the fingerprint
-	// (full-hot-config Phase 1, 2026-09-16): all are hot-applicable via
-	// ApplyOrgHotParams (compressor atomic threshold+budget swap, task
-	// manager TTL reaper setters), so per the D3 criterion
+	// (full-hot-config Phase 1, 2026-09-16): all are hot-applicable WITHOUT a
+	// rebuild — §6.4 turned
+	// them into reads at the consumer's safe boundary (compressor per-compression
+	// liveNums, task manager TTL at read, ActionTool at spawn), fed by the single
+	// committed application record. So per the D3 criterion
 	// ("only fields whose change requires rebuilding agent instances
 	// fingerprint") they must NOT force a rebuild. The unchanged-fingerprint
 	// branch in the tagent.New reloader hot-applies them.

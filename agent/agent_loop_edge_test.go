@@ -20,10 +20,6 @@ func strPtr(s string) *string { return &s }
 // ============================================================================
 
 func TestRunEventLoop_EmptyContent_ReasoningFallback(t *testing.T) {
-	if raceEnabled {
-		t.Skip("upstream trpc-agent-go internal race (LEDGER 红色耦合台账 U2/U3) — exemption per implementation-hardening 8.1")
-	}
-
 	reasoningText := "I found a skill called url-fetcher."
 	resp := &model.Response{
 		ID:   "resp-1",
@@ -59,10 +55,6 @@ func TestRunEventLoop_EmptyContent_ReasoningFallback(t *testing.T) {
 // ============================================================================
 
 func TestRunEventLoop_TrulyEmptyResponse_DoesNotHang(t *testing.T) {
-	if raceEnabled {
-		t.Skip("upstream trpc-agent-go internal race (LEDGER 红色耦合台账 U2/U3) — exemption per implementation-hardening 8.1")
-	}
-
 	resp := &model.Response{
 		ID:   "resp-1",
 		Done: true,
@@ -96,10 +88,6 @@ func TestRunEventLoop_TrulyEmptyResponse_DoesNotHang(t *testing.T) {
 // ============================================================================
 
 func TestTagentAgent_Run_InjectMessageRoutesToSubAgentBus(t *testing.T) {
-	if raceEnabled {
-		t.Skip("upstream trpc-agent-go internal race (LEDGER 红色耦合台账 U2/U3) — exemption per implementation-hardening 8.1")
-	}
-
 	firstResp := &model.Response{
 		ID:   "resp-tc",
 		Done: true,
@@ -159,7 +147,12 @@ func TestTagentAgent_Run_EmptyFinalResponseCompletes(t *testing.T) {
 		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: ""}}},
 	}
 
-	mockModel := &loopMockModel{responses: []*model.Response{emptyResp}}
+	// Unified retry budget (S3m-c): an empty final is a degenerate turn that the
+	// shared shell now self-heals with ONE retry, so the mock must answer the retry
+	// too (loopMockModel otherwise blocks on ctx when its responses run out). Two
+	// empty finals → the degenerate guard breaks after the one retry and the turn
+	// completes: the sub-call still closes its channel with ≥1 event, contract held.
+	mockModel := &loopMockModel{responses: []*model.Response{emptyResp, emptyResp}}
 
 	persistentBus2 := NewEventBus()
 	ta := &TagentAgent{

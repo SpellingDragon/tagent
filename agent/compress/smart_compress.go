@@ -26,9 +26,12 @@ import (
 // This is a "view transformation" — it modifies the messages sent to the LLM,
 // but does NOT modify the Session or Projection.
 type SmartCompressor struct {
-	// paramMu guards the hot-swappable numeric bundle (cold-eyes P2-2):
-	// ApplyParams writes from the reloader goroutine race concurrent
-	// Compress reads of maxTokens/triggerBudget/KeepRecentTasks.
+	// paramMu guarded the runtime-swapped numeric bundle (cold-eyes P2-2, when
+	// ApplyParams wrote from the reloader goroutine). §6.4 removed every runtime
+	// writer — the live group now travels per-call via CompressOptions — so this
+	// mutex only serialises reads of the construction fallback. It is a removal
+	// candidate once the pull model has proven itself stable (no writer left to
+	// guard); kept for now because budget() is on the hot path.
 	paramMu         sync.Mutex
 	summaryModel    model.Model  // Optional: used for index-card condensation (condenseCardLines)
 	summaryEffort   *string      // Optional: reasoning_effort for summary calls (tagent-unify-model-call-config)
@@ -88,27 +91,6 @@ func WithTriggerBudget(n int) SmartCompressorOption {
 	return func(sc *SmartCompressor) { sc.triggerBudget = n }
 }
 
-// ApplyParams hot-swaps the compression parameter set as ONE generation
-// (hardening-review-batch2 5.3): maxTokens, triggerBudget and keepRecent move
-// together so the trigger line (ContextCompressor) and the compression target
-// (SmartCompressor) never disagree — the 86ed494 hot-params gap left the
-// inner target at its cold-construction value, so a shrunken window kept
-// no-op-compressing and an enlarged window over-compressed.
-// Caller (ContextCompressor.ApplyHotParams) owns the lock discipline.
-func (sc *SmartCompressor) ApplyParams(maxTokens, triggerBudget, keepRecent int) {
-	sc.paramMu.Lock()
-	defer sc.paramMu.Unlock()
-	if maxTokens > 0 {
-		sc.maxTokens = maxTokens
-	}
-	if triggerBudget > 0 {
-		sc.triggerBudget = triggerBudget
-	}
-	if keepRecent > 0 {
-		sc.KeepRecentTasks = keepRecent
-	}
-}
-
 // budget returns the effective post-compression target budget.
 func (sc *SmartCompressor) budget() int {
 	sc.paramMu.Lock()
@@ -150,6 +132,26 @@ type CompressOptions struct {
 	// field: the stash-rewrite-restore dance was a data race under concurrent
 	// compress — correctness is now structural, not single-goroutine-discipline.
 	KeepRecentTasks int
+	// MaxTokens / TriggerBudget carry the caller's live numeric generation
+	// (§6.4 pull, set by ContextCompressor.Compress from its boundary read).
+	// When they travel with the call, the shared hot fields are never consulted,
+	// so a concurrent hot rotation cannot tear this pass (outer trigger line and
+	// inner aging target from one source read). <=0 → configured fallback.
+	MaxTokens     int
+	TriggerBudget int
+}
+
+// budget resolves the effective post-compression target for THIS call: the
+// per-call pair when present (same rule as SmartCompressor.budget — a positive
+// trigger below the window wins), else the construction fields.
+func (o CompressOptions) budget(sc *SmartCompressor) int {
+	if o.TriggerBudget > 0 && (o.MaxTokens <= 0 || o.TriggerBudget < o.MaxTokens) {
+		return o.TriggerBudget
+	}
+	if o.MaxTokens > 0 {
+		return o.MaxTokens
+	}
+	return sc.budget()
 }
 
 // Compress implements budget-aware compression via the skeleton pipeline
@@ -160,7 +162,7 @@ func (sc *SmartCompressor) Compress(
 	ctx context.Context,
 	messages []model.Message,
 ) []model.Message {
-	return sc.compressSkeleton(ctx, messages, 0)
+	return sc.compressSkeleton(ctx, messages, CompressOptions{})
 }
 
 // CompressWithOptions is Compress with per-call overrides (see CompressOptions).
@@ -169,7 +171,7 @@ func (sc *SmartCompressor) CompressWithOptions(
 	messages []model.Message,
 	opts CompressOptions,
 ) []model.Message {
-	return sc.compressSkeleton(ctx, messages, opts.KeepRecentTasks)
+	return sc.compressSkeleton(ctx, messages, opts)
 }
 
 // deterministicLevel assigns a base compression level to a task segment by
@@ -257,7 +259,7 @@ func applySegmentLevel(seg *TaskSegment, level int) []model.Message {
 	}
 }
 
-func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message, keepRecentOverride int) []model.Message {
+func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.Message, opts CompressOptions) []model.Message {
 	startTime := time.Now()
 	systemMsg, rest := SplitSystemMessage(messages)
 	// Extract the rolling summary so it never rides inside segment 0 (which is
@@ -266,12 +268,16 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	rollingMsg, rest := splitRollingSummaryMessage(rest)
 	segments := SegmentMessages(rest)
 
-	sc.paramMu.Lock()
-	keepRecent := sc.KeepRecentTasks
-	sc.paramMu.Unlock()
-	if keepRecentOverride > 0 {
-		keepRecent = keepRecentOverride // per-call override; shared field untouched (race-free by construction)
+	// Per-call live generation (§6.4 pull): when the caller carries the numeric
+	// group, the shared hot fields are never consulted — a concurrent hot
+	// rotation cannot tear this pass. Construction fields are the fallback.
+	keepRecent := opts.KeepRecentTasks
+	if keepRecent <= 0 {
+		sc.paramMu.Lock()
+		keepRecent = sc.KeepRecentTasks
+		sc.paramMu.Unlock()
 	}
+	budget := opts.budget(sc)
 	if keepRecent < 1 {
 		keepRecent = 1
 	}
@@ -281,7 +287,7 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 	// archival (the old `completeCount <= keepRecent` guard let many-segment
 	// histories lossy-compress with budget to spare — an implicit second
 	// trigger violating the single-dimension-trigger spec).
-	if beforeTokens <= sc.budget() {
+	if beforeTokens <= budget {
 		return messages
 	}
 
@@ -323,18 +329,18 @@ func (sc *SmartCompressor) compressSkeleton(_ context.Context, messages []model.
 		total -= cost[i][levels[i]] - cost[i][lvl]
 		levels[i] = lvl
 	}
-	if total > sc.budget() {
+	if total > budget {
 		for i, seg := range segments {
 			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 2 {
 				escalate(i, 2)
 			}
 		}
 	}
-	if total > sc.budget() {
+	if total > budget {
 		for i, seg := range segments {
 			if age := len(segments) - 1 - i; seg.IsComplete && age >= keepRecent && levels[i] < 3 {
 				escalate(i, 3)
-				if total <= sc.budget() {
+				if total <= budget {
 					break
 				}
 			}

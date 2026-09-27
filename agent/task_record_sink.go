@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
-	"trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
 // TaskManager exposes the org-level resident task registry (R2: rebuilt
@@ -42,30 +42,57 @@ func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	return RebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuildClosures)
 }
 
-// SubagentRedispatcher（R2，resident-continuity-r2-r4 D1.2）：跨重启 subagent
-// Relaunch 的重投递器——镜像 subagentRelaunch 的 detector 形状（RedispatchAsync
-// 同步跑在 detector 的 watch goroutine 内，Spawn 的 sync-wait 窗口语义保持；
-// spawnKey=agentName+":"+body 与无 extraName 的原 spawn 键一致→幂等去重覆盖）。
-func SubagentRedispatcher(wrappers map[string]*AgentToolWrapper, tm *task.TaskManager) func(agentName, body string) (task.SpawnResult, error) {
-	var redispatch func(agentName, body string) (task.SpawnResult, error)
-	redispatch = func(agentName, body string) (task.SpawnResult, error) {
-		w, ok := wrappers[agentName]
-		if !ok || tm == nil {
-			return task.SpawnResult{}, fmt.Errorf("subagent %q not available in the current org — cannot relaunch cross-restart", agentName)
+// SubagentRedispatcher（R2，resident-continuity-r2-r4 D1.2；§4.2 收口）：跨重启
+// subagent Relaunch 的重投递器——镜像 subagentRelaunch 的 detector 形状
+// （RedispatchAsync 同步跑在 detector 的 watch goroutine 内，Spawn 的 sync-wait
+// 窗口语义保持；spawnKey=agentName+":"+body 与无 extraName 的原 spawn 键一致→幂等去重覆盖）。
+//
+// resolve 是**每次重投时**对目标所属调用绑定的一次解析，而不是启动时冻结的
+// wrapper 快照：否则一个被后续代移除的目标仍会在这里被旧代 wrapper 静默复活（跑
+// 的是已退役的声明与目标），而当时的拒绝文案又声称“current org”——两者均与
+// task-registry-rebuild 的「不复活已退役执行器或静默改投」相逆。调用方应传入
+// 「按有效执行面解析」的闭包（见 ContextManager.SubagentWrapper），这就让显式
+// 重投与普通委派共用同一个版本真源。
+// resolve is the SAME version source ordinary delegation and §4.2's re-entry use
+// (see ResolveReentryDelegation): the initiating call's binding when the re-entry
+// rides one, the effective face otherwise. Freezing a wrapper snapshot here — or
+// resolving against the effective face while an initiator holds an older binding —
+// would let a target a later generation removed be silently revived by a stored
+// task, which is precisely what task-registry-rebuild「不复活已退役执行器或静默改投」
+// and §4.2 (R03) forbid.
+func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string) (task.SpawnResult, error) {
+	var redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error)
+	redispatch = func(ctx context.Context, agentName, body string) (task.SpawnResult, error) {
+		var w *AgentToolWrapper
+		var lease *ExecLease
+		if resolve != nil {
+			target, l, err := resolve(ctx, agentName)
+			if err != nil {
+				return task.SpawnResult{}, err
+			}
+			w, lease = target, l
+		}
+		if w == nil || tm == nil {
+			if lease != nil {
+				lease.Release()
+			}
+			return task.SpawnResult{}, fmt.Errorf(
+				"subagent %q is not a target of the EFFECTIVE orchestration generation — relaunch refused (a retired binding is not revived, and the task chain context is kept untouched)", agentName)
 		}
 		desc := agentName + ": " + body
 		if len(desc) > 72 {
 			desc = desc[:72]
 		}
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			out, err := w.RedispatchAsync(runCtx, body)
+			defer lease.Release() // §4.1: the producer closure owns the release on every exit
+			out, err := w.RedispatchAsync(lease.WithContext(runCtx), body)
 			if err != nil {
 				return "", err
 			}
 			s, _ := out.(string)
 			return s, nil
 		}, w.DenseDuration())
-		return tm.Spawn(task.TaskSpec{
+		res := tm.Spawn(task.TaskSpec{
 			Kind: "subagent",
 			Desc: desc,
 			Key:  agentName + ":" + body,
@@ -73,8 +100,15 @@ func SubagentRedispatcher(wrappers map[string]*AgentToolWrapper, tm *task.TaskMa
 				Kind: "subagent", Desc: desc, Key: agentName + ":" + body,
 				AgentName: agentName, MessageBody: body,
 			},
-			Relaunch: func() (task.SpawnResult, error) { return redispatch(agentName, body) },
-		}, detector), nil
+			Relaunch: func(ctx context.Context) (task.SpawnResult, error) { return redispatch(ctx, agentName, body) },
+		}, detector)
+		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
+			// §4.1: the producer started before the task layer refused to adopt it,
+			// so its derived reference stays held until it really stops (bounded by
+			// the initiating call — see waitForUnadoptedStop).
+			waitForUnadoptedStop(ctx, detector)
+		}
+		return res, nil
 	}
 	return redispatch
 }
@@ -103,71 +137,197 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 	})
 }
 
-// SwapExecutor atomically swaps the executor runner (R4 3.3/3.5；drain-free
-// turn 级——进行中 turn 用旧 runner 跑完)。cm/bus/loop/projection/TaskManager
-// 等常驻不换（宿主入口零变化）。Runner() 取当前代已在 helpers.go。
-// RebuildExecutorOn（hotswap-fix 5.7）：把**本 TA 冷启动时的执行面配置**
-// （model/tools/prompt/genConfig——构建验证已通过的产物）应用到**目标 cm**
-// 上重建 executor。org 热更换装专用：target=常驻 entry cm，其 projection/
-// bus/sessionSvc/回调闭包全部保留——修复旧路径整壳换入导致请求装配被接到
-// 新壳空投影的事故（n=1 system-only → provider 400/1214）。newTA 在此仅作
-// 执行面配置载体；其自身的 cm/runner 构建产物即弃。
-func (ta *TagentAgent) RebuildExecutorOn(target *ContextManager) runner.Runner {
-	if ta == nil || target == nil || ta.contextManager == nil {
-		return nil
+// ExecutorConfig returns THIS agent's assembled execution face (model/tools/
+// prompt/genConfig — the product of the build that already passed validation).
+// introduce-durable-workflow-engine §2.1: the hot-reload path builds a candidate
+// shell, reads its face here, constructs the candidate executor on the
+// RESIDENT ContextManager and only then publishes it. The face is returned by
+// value; the caller owns the copy (mutating Tools must not disturb this agent).
+//
+// It replaces RebuildExecutorOn (hotswap-fix 5.7), which fused construction and
+// swap and therefore could not be abandoned after construction. The incident it
+// fixed still holds: the candidate is constructed ON the resident cm, so its
+// BeforeModel closures read the resident projection/bus — never the shell's own
+// empty one.
+func (ta *TagentAgent) ExecutorConfig() ContextManagerConfig {
+	if ta == nil || ta.contextManager == nil {
+		return ContextManagerConfig{}
 	}
-	return target.RebuildExecutor(ta.contextManager.execCfg)
+	return ta.contextManager.ExecutorConfig()
 }
 
-// 返回被换下的旧 runner（调用方应交 RetireRunner 退役——延迟 Close，5.1）。
-func (ta *TagentAgent) SwapExecutor(r runner.Runner) runner.Runner {
-	if ta == nil || ta.contextManager == nil {
-		return nil
+// taskTTLs adapts the owner's hot view to the TaskManager's §6.4 TTL pull
+// contract (design §4): the reaper and the board resolve both manager-level
+// lifetimes from the committed record at their NEXT sweep/read, so a rotation
+// needs no write into the manager. A cold read yields zeros, which the manager
+// guards to its construction values — the same no-op guard the retired
+// SetTerminalTTL/SetDefaultTTL pushes carried.
+func (ta *TagentAgent) taskTTLs() (terminal, defaultTTL time.Duration) {
+	hp, ok := ta.HotSnapshot()
+	if !ok {
+		return 0, 0
 	}
-	return ta.contextManager.SwapExecutor(r)
+	return hp.TaskTerminalTTL, hp.TaskDefaultTTL
 }
 
-// RetireRunner 退役被换下的旧 runner（implementation-hardening 5.1）：排入
-// retired 队列，待无 in-flight turn 引用时幂等 Close（drain-free 的「尾」）。
-func (ta *TagentAgent) RetireRunner(old runner.Runner) {
-	if ta == nil || ta.contextManager == nil {
+// staticHotSource wraps a construction bundle as the owner's hot-param source,
+// so an agent is NEVER source-less (§6.4 end state, design §2「NewTagentAgent
+// 恒装源（记录绑定或静态），不存在无源状态」). The composition root replaces it
+// with the record-backed source at the first commit; until then (and forever for
+// a standalone agent that never joins an org) the construction bundle answers
+// every read.
+func staticHotSource(p OrgHotParams) func() (OrgHotParams, bool) {
+	return func() (OrgHotParams, bool) { return p, true }
+}
+
+// SetHotSource installs the owner's RECORD-BACKED hot-param source (S-C/2.3):
+// a closure reading the single committed application record (injected once by
+// the composition root after the coordinator exists; it always reads the
+// LATEST record, so every commit — swap/recordHotApply/recordRollback — is the
+// single writer by construction). While installed, HotSnapshot resolves
+// through it; the construction-seeded snapshot cache remains only as the
+// fallback for standalone/bare-constructed agents with no record to read.
+func (ta *TagentAgent) SetHotSource(src func() (OrgHotParams, bool)) {
+	if ta == nil {
 		return
 	}
-	ta.contextManager.RetireRunner(old)
+	ta.hotSource.Store(&src)
 }
 
-// ApplyOrgHotParams applies the hot numeric bundle to the resident cm and
-// task manager (full-hot-config Phase 1): threshold/maxTokens/keepRecent on
-// the compressor, terminal TTL on the task registry.
-func (ta *TagentAgent) ApplyOrgHotParams(p OrgHotParams) {
-	if ta == nil || ta.contextManager == nil {
+// HotSnapshot returns the owner's CURRENT effective hot bundle — resolved solely
+// through the installed source (§6.4 end state: the committed application record
+// after the first commit, the construction bundle before it / for a standalone
+// agent; NewTagentAgent always installs one, so ok=false only guards a
+// hand-built agent). The second authority this replaces was the reloader-pushed
+// hotSnapshot cache, whose rotation had to be kept in step with the record by
+// hand at every commit point.
+func (ta *TagentAgent) HotSnapshot() (OrgHotParams, bool) {
+	if ta == nil {
+		return OrgHotParams{}, false
+	}
+	if src := ta.hotSource.Load(); src != nil && *src != nil {
+		return (*src)()
+	}
+	return OrgHotParams{}, false
+}
+
+// liveHotNumbers adapts the owner's hot view to the compressor's §6.4 pull
+// contract: every compression boundary reads the owner's CURRENT effective
+// bundle (record source first, construction snapshot fallback). A cold owner
+// (no snapshot yet) yields the zero group, which the compressor resolves to its
+// own construction values — the no-source boundary stays sane.
+func (ta *TagentAgent) liveHotNumbers() compress.HotNumbers {
+	hp, ok := ta.HotSnapshot()
+	if !ok {
+		return compress.HotNumbers{}
+	}
+	return compress.HotNumbers{
+		ThresholdPct: hp.ThresholdPct,
+		MaxTokens:    hp.MaxTokens,
+		KeepRecent:   hp.KeepRecentTasks,
+	}
+}
+
+// registerLiveCM adds an in-flight invocation-private CM to this owner's live
+// set (§6.4). Bound to the invocation lifecycle: session.Run defers
+// unregisterLiveCM alongside invCM.Close, so the set is bounded by concurrent
+// calls, never a history list.
+func (ta *TagentAgent) registerLiveCM(cm *ContextManager) {
+	if ta == nil || cm == nil {
 		return
 	}
-	ta.contextManager.ApplyOrgHotParams(p)
-	if p.TaskTerminalTTL > 0 && ta.taskManager != nil {
-		ta.taskManager.SetTerminalTTL(p.TaskTerminalTTL)
+	ta.liveCMsMu.Lock()
+	if ta.liveCMs == nil {
+		ta.liveCMs = make(map[*ContextManager]struct{})
 	}
-	if p.TaskDefaultTTL != 0 && ta.taskManager != nil {
-		// §10.5: hot-reload the unified reaper's fallback lifetime (no stale/deadline knobs remain).
-		ta.taskManager.SetDefaultTTL(p.TaskDefaultTTL)
+	ta.liveCMs[cm] = struct{}{}
+	ta.liveCMsMu.Unlock()
+}
+
+// unregisterLiveCM removes a finished invocation-private CM from the live set.
+func (ta *TagentAgent) unregisterLiveCM(cm *ContextManager) {
+	if ta == nil || cm == nil {
+		return
 	}
+	ta.liveCMsMu.Lock()
+	delete(ta.liveCMs, cm)
+	ta.liveCMsMu.Unlock()
+}
+
+// LiveCMCount reports the number of registered in-flight invocation-private
+// CMs (test seam for §6.4's bounded-registration acceptance).
+func (ta *TagentAgent) LiveCMCount() int {
+	if ta == nil {
+		return 0
+	}
+	ta.liveCMsMu.Lock()
+	defer ta.liveCMsMu.Unlock()
+	return len(ta.liveCMs)
+}
+
+// snapshotLiveCMs returns a snapshot of the registered in-flight invocation-private
+// CMs (test-only introspection for §6.4 acceptance: seeded values at
+// construction, hot-applied values mid-call). No execution path reads it.
+func (ta *TagentAgent) snapshotLiveCMs() []*ContextManager {
+	if ta == nil {
+		return nil
+	}
+	ta.liveCMsMu.Lock()
+	defer ta.liveCMsMu.Unlock()
+	out := make([]*ContextManager, 0, len(ta.liveCMs))
+	for cm := range ta.liveCMs {
+		out = append(out, cm)
+	}
+	return out
 }
 
 // SetRollbackFn wires the rollback hook (R4 3.8；tagent 包懒检查闭包注入——按
-// ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。
+// ring 2 上一代配置重建并 Swap 回；宿主/运维可调 Rollback())。可安全地从发布
+// goroutine 重复调用：字段是 atomic.Pointer，Rollback 读到的是完整闭包指针。
+// fn == nil 意为“摘钩”：必须存 **空指针**而不是“指向 nil func 的指针”——否则
+// Rollback 的 nil 判定会骗过它并解引用空 func（这一条由 e2e 测的
+// “SetRollbackFn(nil) 后 Rollback() 应 no-op” 钉住）。
 func (ta *TagentAgent) SetRollbackFn(fn func()) {
 	if ta == nil {
 		return
 	}
-	ta.orgRollback = fn
+	if fn == nil {
+		ta.orgRollback.Store(nil)
+		return
+	}
+	ta.orgRollback.Store(&fn)
 }
 
 // Rollback triggers the wired rollback hook (R4 3.8；no-op if unset)。
 func (ta *TagentAgent) Rollback() {
-	if ta == nil || ta.orgRollback == nil {
+	if ta == nil {
 		return
 	}
-	ta.orgRollback()
+	fn := ta.orgRollback.Load()
+	if fn == nil {
+		return
+	}
+	(*fn)()
+}
+
+// SetOrgDiagnostics registers the orchestration-generation diagnostic provider
+// （§5.1，D9）。由装配层（tagent 包）在**启动期一次性**注入：它拥有 payload 形状，
+// 本包不知道指纹/序号的含义。与 SetRollbackFn 不同规——后者每次发布重写（故用
+// atomic），而本字段运行期只读，所以必须是启动期注入；在 reloader 里调它就错了。
+func (ta *TagentAgent) SetOrgDiagnostics(fn func() map[string]any) {
+	if ta == nil {
+		return
+	}
+	ta.orgDiags = fn
+}
+
+// OrgDiagnostics returns the current orchestration-generation diagnostic payload
+// (nil when unset). Read-only by design: no execution path may branch on it.
+func (ta *TagentAgent) OrgDiagnostics() map[string]any {
+	if ta == nil || ta.orgDiags == nil {
+		return nil
+	}
+	return ta.orgDiags()
 }
 
 // taskRecordSink（R2，resident-continuity-r2-r4 1.6）：TaskManager 的

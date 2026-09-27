@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -134,6 +135,14 @@ type AgentToolWrapper struct {
 	parentStore      memory.MemoryStore          // Parent agent's MemStore for resolving event_key
 	parentProjection *compress.SessionProjection // Parent agent's projection for auto-inject fallback
 
+	// parentCM is the RESIDENT owner's context manager — the handle a re-entry
+	// (Resume/Relaunch of a stored task) reads the CURRENT effective orchestration
+	// face from when no initiating call holds a binding (§4.2/D5). It is wired at
+	// cold start alongside parentProjection and is deliberately the owner's cm, not
+	// a generation: the cm outlives every executor it publishes, so storing it in a
+	// long-lived task closure pins no retired executor.
+	parentCM *ContextManager
+
 	// asyncDisabled forces synchronous execution even when a task spawner is
 	// available in the invocation context. Default (false) = async-by-default:
 	// long sub-agent runs that exceed the sync-wait window return an ack and
@@ -152,6 +161,30 @@ type AgentToolWrapper struct {
 	// (plan-interaction-contract D2). Empty → plain-text request messages,
 	// behavior unchanged.
 	extraParams []ExtraParam
+
+	// declared is the child generation this wrapper's face declared at publish
+	// time (3.2 trunk, armed by WireOrgGeneration). Non-nil → Call resolves the
+	// target through THAT generation's own execution view — pinning it for the
+	// call subtree — instead of whatever is currently effective on the child.
+	// Atomic because the retroactive wiring of the OUTGOING generation may stamp
+	// a wrapper while an in-flight call on that very face is reading it; a stamp
+	// only ever goes nil→binding (idempotent per publish), so a reader sees
+	// either the wired target or the pre-wiring fallback, never a torn one.
+	declared atomic.Pointer[execBinding]
+}
+
+// setDeclared arms the wrapper's declared-generation target (publish wiring
+// only; never a hot path).
+func (w *AgentToolWrapper) setDeclared(b *execBinding) {
+	if w == nil || b == nil {
+		return
+	}
+	w.declared.Store(b)
+}
+
+// declaredSet reports whether this wrapper was wired to a declared generation.
+func (w *AgentToolWrapper) declaredSet() bool {
+	return w != nil && w.declared.Load() != nil
 }
 
 // autoInjectMaxEvents is the maximum number of recent events to auto-inject
@@ -183,11 +216,23 @@ func NewAgentToolWrapper(
 	}
 }
 
-// SetParentProjection sets the parent agent's compress.SessionProjection for auto-inject fallback.
-// When LLM does not pass event_keys, the wrapper auto-injects the most recent
-// autoInjectMaxEvents EventKeys from the parent projection.
+// SetParentProjection sets the PUBLISHED parentProjection used as the
+// auto-inject fallback when a call runs outside any flow. It is a
+// construction/publish-time wire (cold start, new generation) — §6.5/D2: an
+// in-flight invocation never re-binds it, because one wrapper instance is shared
+// by every concurrent call of its owner. While a flow is running, the flow's own
+// projection wins (see projectionForCall).
 func (w *AgentToolWrapper) SetParentProjection(p *compress.SessionProjection) {
 	w.parentProjection = p
+}
+
+// SetParentCM wires the RESIDENT owner's context manager into a freshly built
+// delegation wrapper (cold start, same point as SetParentProjection — §6.5/D2's
+// allowed exception: a not-yet-published object is configured, a published one is
+// never rewritten). It is what lets a stored task's re-entry resolve its target
+// against the effective face instead of the instance that spawned it (§4.2).
+func (w *AgentToolWrapper) SetParentCM(cm *ContextManager) {
+	w.parentCM = cm
 }
 
 // SetAsyncDisabled forces this sub-agent to always run synchronously (the
@@ -328,6 +373,25 @@ func isRemoteAgent(ag agent.Agent) bool {
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
+	// 3.2 trunk: this wrapper's face was wired at publish time with the child
+	// generation it DECLARES. Resolve the target through that generation's own
+	// execution view: pin it for this call subtree (D5 — a mid-call publish
+	// cannot split the call tree across generations), hand it to Run as the
+	// inherited lease so the callee assembles from THAT generation's face, and
+	// let the background producer derive from the same pin. Unwired (standalone,
+	// pre-wiring fallback) keeps the legacy behavior unchanged. A reclaimed
+	// declared generation is refused by name — the honest failure when no
+	// declarer kept it alive (ErrExecClosed), never a silent re-route onto the
+	// child's current face.
+	if d := w.declared.Load(); d != nil {
+		dl, derr := d.acquireDeclared(LeaseSubCall)
+		if derr != nil {
+			return nil, fmt.Errorf("agent tool %q: declared generation unavailable: %w", agentName, derr)
+		}
+		ctx = dl.WithContext(ctx)
+		defer dl.Release() // Run's derived reference releases at its own tail; this one covers the window before it
+	}
+
 	// Parse args using json.Number to preserve int64 precision for Snowflake
 	// event keys. Default json.Unmarshal parses numbers as float64, which
 	// loses precision for keys larger than 2^53 (e.g., 1297371431025250304).
@@ -415,12 +479,16 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			}
 		}
 
-		// Auto-inject: if LLM did not pass event_keys and we have a parentProjection,
-		// automatically inject the most recent N event keys as fallback context.
-		if len(keys) == 0 && w.parentProjection != nil && w.hasEventKeysParam() {
-			keys = w.autoInjectEventKeys()
-			if len(keys) > 0 {
-				log.Infof("[AgentToolWrapper] auto-injected %d event_keys for agent %q", len(keys), agentName)
+		// Auto-inject: if LLM did not pass event_keys, automatically inject the
+		// most recent N event keys as fallback context — resolved against THIS
+		// call's projection (§6.5/D2), never against a field another concurrent
+		// call of the same agent may have written.
+		if len(keys) == 0 && w.hasEventKeysParam() {
+			if proj := w.projectionForCall(ctx); proj != nil {
+				keys = autoInjectEventKeys(proj)
+				if len(keys) > 0 {
+					log.Infof("[AgentToolWrapper] auto-injected %d event_keys for agent %q", len(keys), agentName)
+				}
 			}
 		}
 
@@ -466,8 +534,22 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		// this task's — context-scoping). Shared across relaunch/resume rounds
 		// via the closure.
 		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
+		// §4.1 (design D6): the background run is a DERIVED execution. Its reference
+		// on the generation it was spawned from is taken BEFORE the producer starts
+		// and released only when that producer returns — an ACK, a settle record or
+		// a cancel notice is not a stop credential. The same closure owns the
+		// release on every exit (settle, error, early stop, cancellation, and the
+		// rejected/deduped paths where the task layer never adopted the work), so a
+		// reference can neither leak nor drop early.
+		callerLease, _ := execLeaseFromContext(ctx)
+		bgLease := callerLease.Derive(LeaseBackground)
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			out, err := w.runAndCollect(runCtx, inv, agentName)
+			defer bgLease.Release()
+			// The lease goes into the run context as well: holding the reference on the
+			// initiating generation while resolving nested targets against whatever is
+			// published NOW would split the execution across two generations (D5「ACK 后
+			// 后台调用 → 继承发起调用租约」). Same shape as the relaunch/resume producers.
+			out, err := w.runAndCollect(bgLease.WithContext(runCtx), inv, agentName)
 			if err == nil {
 				rounds.add(messageBody, out)
 			}
@@ -506,12 +588,15 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				MessageBody: request,
 				Params:      declParams,
 			},
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey, ttlSeconds),
-			ResumeFn: w.subagentResume(agentName, rounds),
+			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds),
+			ResumeFn: subagentResumeClosure(w.parentCM, agentName, rounds),
 		}, detector)
 		if res.Blocked != "" {
 			// 5.4（design-report-closeout）+ §8.1：子 agent 在 Spawn 前已开跑，gate 拒绝
 			// = 不纳入任务层（Spawn 已 Cancel detector 防失控）——文案必须如实。
+			// §4.1: Cancel is a notification, so wait for the producer's real stop
+			// before returning (the derived reference stays held meanwhile either way).
+			waitForUnadoptedStop(ctx, detector)
 			return "子任务未被任务层纳管（已启动的后台运行已被取消跟踪，结果不会回写）：" + res.Blocked + "。可稍后重发。", nil
 		}
 		if res.Deduped {
@@ -519,6 +604,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			// compaction D5) — the existing task is necessarily in-flight
 			// (dedup only matches active tasks); no tool-name teaching here,
 			// lifecycle guidance lives in the plan tool description.
+			waitForUnadoptedStop(ctx, detector) // §4.1: this call's own detector ran
 			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果，不要重复发起同名调用。",
 				res.Task.ID), nil
 		}
@@ -540,6 +626,24 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	return out, nil
 }
 
+// waitForUnadoptedStop honours §4.1 for a detector whose producer had ALREADY
+// started when the task layer refused to adopt it (spawn gate blocked, or a
+// same-key dedup hit). Cancel is only a notification, so the derived execution
+// reference this call created must not be dropped until the producer really
+// returns. The wait is bounded by the caller's own context — and if that deadline
+// arrives first, the reference stays held (the producer closure still owns its
+// release), which is the safe-retention outcome, never a premature reclaim.
+func waitForUnadoptedStop(ctx context.Context, d task.SettleDetector) {
+	if d == nil {
+		return
+	}
+	select {
+	case <-d.Stopped():
+	case <-ctx.Done():
+		log.Warnf("[AgentToolWrapper] un-adopted sub-run still active at the caller's deadline; its generation reference stays held until the producer stops")
+	}
+}
+
 // runAndCollect runs the sub-agent for the given invocation and collects its
 // final output from the event stream. Shared by the synchronous path and the
 // async task detector. Isolation is preserved by Run (fresh bus/CM/projection
@@ -555,8 +659,12 @@ func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string) 
 	return w.Call(ctx, args)
 }
 
-// DeclaredAgentName reports the wrapped sub-agent's name (registry key for
-// the cross-restart redispatch table).
+// DeclaredAgentName reports the wrapped sub-agent's name. It is the SAME string
+// the spawn path persists into a task's Declarative.AgentName (Call derives that
+// field from `w.agent.Info().Name`), so it is the one key that both the effective-
+// generation routing table and a cross-restart relaunch can resolve against —
+// deliberately not Declaration().Name, which may re-read a description source.
+// Cheap, and safe to call while holding executor locks.
 func (w *AgentToolWrapper) DeclaredAgentName() string {
 	return w.agent.Info().Name
 }
@@ -567,10 +675,49 @@ func (w *AgentToolWrapper) DenseDuration() time.Duration {
 	return w.asyncDenseDuration
 }
 
+// remoteRetryBackoff is the wait before the single retry of a failed REMOTE
+// delegation. Local targets are never retried: their failure is a defect in this
+// process, and re-running it only hides it.
+const remoteRetryBackoff = 500 * time.Millisecond
+
+// runAndCollect runs one delegation and collects its result, retrying a failed
+// REMOTE attempt exactly once (§3.3 传输重试 for the A2A shape).
+//
+// The retry wraps the WHOLE attempt — send plus drain — because that is where a
+// transport failure actually surfaces: the A2A client reports a failed request as
+// an event carrying Response.Error while Run itself returns a channel and a nil
+// error. The earlier branch inside runWithTimeout, which retried only when Run
+// returned an error, therefore never fired on the shape it was written for (a 503
+// failed the parent call outright) — see a2a_delegation_test.go.
+//
+// Both attempts use the SAME invocation and the SAME wrapper instance, i.e. the
+// target the initiating call was bound to (D5「传输重试：继承发起调用租约」) — no
+// re-resolution against whatever generation is published by then.
 func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
+	out, err := w.collectAttempt(ctx, inv, agentName)
+	if err == nil || !isRemoteAgent(w.agent) {
+		return out, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller is being cancelled (shutdown): retrying would race the teardown
+		// and the transport error above is the informative one.
+		return out, err
+	}
+	log.Warnf("[AgentToolWrapper] remote agent %q attempt failed (%v), retrying once in %v",
+		agentName, err, remoteRetryBackoff)
+	select {
+	case <-time.After(remoteRetryBackoff):
+	case <-ctx.Done():
+		return out, err // keep the original transport cause; the cancel is in the log
+	}
+	return w.collectAttempt(ctx, inv, agentName)
+}
+
+// collectAttempt is ONE send-and-drain attempt of a sub-agent delegation.
+func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	startTime := time.Now()
 
-	eventCh, err := w.runWithTimeoutAndRetry(ctx, inv, agentName)
+	eventCh, err := w.runWithTimeout(ctx, inv, agentName)
 	if err != nil {
 		return "", fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
 	}
@@ -630,23 +777,39 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 	return finalOutput, nil
 }
 
-// subagentRelaunch returns a closure that re-runs the sub-agent with the same
-// invocation (used by relaunch_task). The re-spawned task is itself
-// relaunchable and keeps the SAME idempotency key as the original spawn
-// (name-based when a plan name was declared — D4 single-flight covers
-// relaunch rounds too, not just the first spawn).
-func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64) func() (task.SpawnResult, error) {
-	return func() (task.SpawnResult, error) {
+// subagentRelaunchClosure builds the relaunch closure of a subagent task. It is a
+// free function on purpose (introduce-durable-workflow-engine §4.2, R03): its
+// captured environment holds a RESIDENT owner handle plus plain data, never an
+// executable wrapper. A stored task can be re-entered long after the generation
+// that spawned it was superseded, and running the spawn-time instance would revive
+// a retired routing decision (with its stale declaration parameters) while the
+// operator believes the current orchestration is in force. The target is therefore
+// resolved at re-entry time — see ResolveReentryDelegation.
+//
+// The re-spawned task is itself relaunchable and keeps the SAME idempotency key as
+// the original spawn (name-based when a plan name was declared — D4 single-flight
+// covers relaunch rounds too, not just the first spawn).
+func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64) func(context.Context) (task.SpawnResult, error) {
+	return func(ctx context.Context) (task.SpawnResult, error) {
+		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
+		if err != nil {
+			return task.SpawnResult{}, err
+		}
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			return w.runAndCollect(runCtx, inv, agentName)
-		}, w.asyncDenseDuration)
+			defer lease.Release() // §4.1: the producer closure owns the release on every exit
+			return target.runAndCollect(lease.WithContext(runCtx), inv, agentName)
+			// The dense window is read from the RESOLVED target, not from anything this
+			// closure captured at spawn time: like the resume rounds, it is a declaration
+			// parameter of the generation actually serving the re-entry (§4.2「不沿用退役代
+			// 的声明参数」), and the settle point is host-visible.
+		}, target.DenseDuration())
 		var specTTL time.Duration
 		var declParams map[string]string
 		if ttlSeconds > 0 {
 			specTTL = time.Duration(ttlSeconds) * time.Second
 			declParams = map[string]string{subagentTTLParam: strconv.FormatInt(ttlSeconds, 10)}
 		}
-		return spawner.Spawn(task.TaskSpec{
+		res := spawner.Spawn(task.TaskSpec{
 			Kind: "subagent",
 			Desc: agentName + ": " + truncate(request, 60),
 			Key:  spawnKey,
@@ -661,9 +824,62 @@ func (w *AgentToolWrapper) subagentRelaunch(spawner task.TaskSpawner, inv *agent
 				MessageBody: request,
 				Params:      declParams,
 			},
-			Relaunch: w.subagentRelaunch(spawner, inv, agentName, request, spawnKey, ttlSeconds),
-		}, detector), nil
+			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds),
+		}, detector)
+		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
+			// §4.1: the producer for THIS re-entry already started, so its derived
+			// reference stays held until it really stops even though the task layer
+			// adopted nothing. The wait rides the initiator's own deadline; with no
+			// initiator there is nothing to bound it (a sub-agent run may last the
+			// whole 600s timeout), so the reference simply stays held.
+			waitForUnadoptedStop(ctx, detector)
+		}
+		return res, nil
 	}
+}
+
+// ResolveReentryDelegation picks the delegation target a Resume/Relaunch re-entry
+// runs on, per design D5 row 4: a re-entry riding an initiating call inherits THAT
+// call's binding (its own generation's face and its resource reference), while a
+// re-entry with no initiator (console/WAL/ops path) acquires the current effective
+// generation. A target the selected version does not route is REFUSED, never
+// silently re-routed onto another generation and never revived from the instance
+// the task happened to be spawned by.
+//
+// The returned lease is the reference taken on the selected generation BEFORE the
+// re-entered work starts (D6「派生前获取」); the caller owns exactly one Release.
+// hasInitiator reports a re-entry that rides a live call — the same predicate
+// ResolveReentryDelegation uses to pick the version source, so "who vouches for
+// this re-entry" is answered one way everywhere.
+func hasInitiator(ctx context.Context) bool {
+	_, ok := execLeaseFromContext(ctx)
+	return ok
+}
+
+func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error) {
+	if l, ok := execLeaseFromContext(ctx); ok && l != nil {
+		if t := l.SubagentWrapper(agentName); t != nil {
+			return t, l.Derive(LeaseSubCall), nil
+		}
+		return nil, nil, fmt.Errorf(
+			"subagent %q is not a target of generation %d (the orchestration version the initiating call holds) — relaunch refused, and the newer face is not substituted for it",
+			agentName, l.Generation())
+	}
+	if owner == nil {
+		return nil, nil, fmt.Errorf(
+			"subagent %q cannot be resolved for re-entry: this delegation carries no resident owner to read the effective orchestration from — relaunch refused", agentName)
+	}
+	l := owner.AcquireLease(LeaseSubCall)
+	if err := l.Err(); err != nil {
+		return nil, nil, fmt.Errorf(
+			"subagent %q re-entry refused: its owner generation already converged shut: %w", agentName, err)
+	}
+	if t := l.SubagentWrapper(agentName); t != nil {
+		return t, l, nil
+	}
+	l.Release() // the reference was taken to READ the face; a refusal must not pin anything
+	return nil, nil, fmt.Errorf(
+		"subagent %q is not a target of the EFFECTIVE orchestration generation — relaunch refused (a retired binding is not revived, and the task chain context is kept untouched)", agentName)
 }
 
 // subagentRounds is the task-local round chain: the {input, output} pairs of
@@ -705,21 +921,33 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 	return append([]subagentRound(nil), r.rounds[len(r.rounds)-n:]...)
 }
 
-// subagentResume returns the subagent-specific resume implementation (task-
-// chain restorer): a NEW single-turn Run whose external_context carries this
+// subagentResumeClosure builds the resume (送输入) closure of a subagent task.
+// Like the relaunch closure it captures no executable wrapper (§4.2, R03): the
+// target and the target's OWN declaration parameters (restoration cap, dense
+// window) come from the generation the re-entry selected, so a stored task cannot
+// keep replaying a retired generation's parameters. The refusal happens BEFORE the
+// round chain is read or written, so a rejected re-entry leaves the chain
+// untouched (「所选代无目标则拒绝且不改任务链」).
+//
+// The closure returns a NEW single-turn Run whose external_context carries this
 // task's prior rounds — the last settle result foremost — and nothing from
-// unrelated tasks (context-scoping). No process resurrection: the sub agent
-// stays a single-turn primitive; restoration is the framework's engineering
-// feed, not sub-agent statefulness.
+// unrelated tasks (context-scoping). No process resurrection: the sub agent stays
+// a single-turn primitive; restoration is the framework's engineering feed, not
+// sub-agent statefulness.
 //
 // NOTE(curation): once settle results carry their archived event key (a
 // resultRef bridge), the restorer can additionally walk RelationStore
 // for curated artifacts on this task's causal chain; the injection slot is
 // already here.
-func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRounds) func(string) (task.SettleDetector, error) {
-	return func(input string) (task.SettleDetector, error) {
-		prior := rounds.recent(w.effectiveResumeRounds())
+func subagentResumeClosure(owner *ContextManager, agentName string, rounds *subagentRounds) func(context.Context, string) (task.SettleDetector, error) {
+	return func(ctx context.Context, input string) (task.SettleDetector, error) {
+		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
+		if err != nil {
+			return nil, err
+		}
+		prior := rounds.recent(target.effectiveResumeRounds())
 		if len(prior) == 0 {
+			lease.Release() // nothing to resume: the reference taken to read the face goes back
 			return nil, fmt.Errorf("subagent task has no settled round to resume from — use relaunch_task or a fresh call")
 		}
 
@@ -736,6 +964,7 @@ func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRoun
 		}
 		serialized, err := serializeExternalContext(restored)
 		if err != nil {
+			lease.Release()
 			return nil, fmt.Errorf("serialize task-chain context: %w", err)
 		}
 		runOpts := agent.RunOptions{RuntimeState: map[string]any{
@@ -746,17 +975,18 @@ func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRoun
 			agent.WithInvocationRunOptions(runOpts),
 		)
 		return task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			out, err := w.runAndCollect(runCtx, inv, agentName)
+			defer lease.Release()
+			out, err := target.runAndCollect(lease.WithContext(runCtx), inv, agentName)
 			if err == nil {
 				rounds.add(input, out)
 			}
 			return out, err
-		}, w.asyncDenseDuration), nil
+		}, target.DenseDuration()), nil
 	}
 }
 
-// runWithTimeoutAndRetry wraps agent.Run with a context timeout and,
-// for remote A2A agents, retries once on failure with 500ms backoff.
+// runWithTimeout starts ONE sub-agent run under a context timeout and keeps the
+// context alive for the whole consumption of the returned stream.
 //
 // IMPORTANT: agent.Run is async — it returns an event channel immediately and
 // the sub-agent produces events in a background goroutine. The cancel function
@@ -764,43 +994,17 @@ func (w *AgentToolWrapper) subagentResume(agentName string, rounds *subagentRoun
 // this function returns (before the caller finishes consuming the channel).
 // Instead, we wrap the returned channel in a goroutine that calls cancel after
 // the channel is closed.
-func (w *AgentToolWrapper) runWithTimeoutAndRetry(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
-	remote := isRemoteAgent(w.agent)
-
+//
+// Retry policy lives one level up, in runAndCollect: a remote transport failure
+// normally arrives as an error EVENT (Run returns nil + channel), so an error
+// branch here could never cover the shape it was written for.
+func (w *AgentToolWrapper) runWithTimeout(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
 	runCtx, cancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
 
 	eventCh, err := w.agent.Run(runCtx, inv)
 	if err != nil {
 		cancel()
-		if !remote {
-			// Local failure — no retry
-			return nil, err
-		}
-
-		// Remote A2A failure — retry once after 500ms
-		log.Warnf("[AgentToolWrapper] remote agent %q failed (%v), retrying in 500ms", agentName, err)
-		select {
-		case <-time.After(500 * time.Millisecond):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-
-		retryCtx, retryCancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
-		retryCh, retryErr := w.agent.Run(retryCtx, inv)
-		if retryErr != nil {
-			retryCancel()
-			return nil, retryErr
-		}
-		// Wrap retry channel: cancel context after consumption
-		wrapped := make(chan *event.Event, cap(retryCh))
-		go func() {
-			defer retryCancel()
-			defer close(wrapped)
-			for evt := range retryCh {
-				wrapped <- evt
-			}
-		}()
-		return wrapped, nil
+		return nil, err
 	}
 
 	// Wrap channel: cancel context after consumption to enforce timeout
@@ -825,13 +1029,27 @@ func (w *AgentToolWrapper) hasEventKeysParam() bool {
 	return false
 }
 
-// autoInjectEventKeys returns the most recent N EventKeys from parentProjection.
-// Skips EventKey == 0. Returns nil if projection is empty or nil.
-func (w *AgentToolWrapper) autoInjectEventKeys() []int64 {
-	if w.parentProjection == nil {
+// projectionForCall resolves the projection this delegation auto-injects from.
+// §6.5/D2: the enclosing call's own projection (bound by RunFlow onto the
+// call-chain context) is authoritative, because the wrapper itself is a SHARED
+// published object — the same instance serves every concurrent invocation of
+// its owner, so its published binding can never be call-correct on its own.
+// Outside a flow (direct tool call, legacy callers) the construction-time
+// binding set by SetToolParentProjection remains the fallback.
+func (w *AgentToolWrapper) projectionForCall(ctx context.Context) *compress.SessionProjection {
+	if p, ok := callProjectionFromContext(ctx); ok {
+		return p
+	}
+	return w.parentProjection
+}
+
+// autoInjectEventKeys returns the most recent N EventKeys from proj.
+// Skips EventKey == 0. Returns nil if proj is nil or empty.
+func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
+	if proj == nil {
 		return nil
 	}
-	refs := w.parentProjection.GetAll()
+	refs := proj.GetAll()
 	if len(refs) == 0 {
 		return nil
 	}
@@ -859,12 +1077,29 @@ func (w *AgentToolWrapper) autoInjectEventKeys() []int64 {
 // agents is via the Agents map in Config. The factory registry supports
 // programmatic registration of custom tool agents by ID.
 
-// ToolAgentFactory creates a tool agent (TagentAgent) from the given config.
-// The returned TagentAgent will be wrapped via AgentToolWrapper by the caller
-// to become a CallableTool for the parent agent.
-type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentAgent, error)
+// ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from the
+// given inputs. It must NOT construct the agent itself: the org owns the single
+// birth path (wireAgent assembles every real owner — store-lease slot, drain
+// wiring, task-domain recovery included), and the single publish path
+// (stageOrgGenerations advances one face per owner per generation). A factory
+// that returned a finished *TagentAgent would be a second owner-birth mechanism
+// outside both: it could never advance through the face path, so every publish
+// had to rebuild the whole agent (an orphan nobody closed) and every pinned
+// delegation kept reading the stale construction config (design D1「避免用返回
+// 完整临时 agent 的方式隐式制造第二 owner」; contract migrated round 91 with
+// user approval — evidence §5.47).
+//
+// The returned *TagentConfig is adopted verbatim where it is meaningful:
+//   - Name: the factory's choice is respected (the old contract's「产物整只
+//     使用」promise); empty falls back to the registered id.
+//   - MemoryStore: the org's store borrowed for this name fills a nil — a
+//     factory that opens its OWN store must not also be handed the org lease.
+//   - MemStoreRelease: always the org's, filled by the assembly after this call
+//     returns — a factory neither keeps nor invents a release for it.
+type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
 
-// ToolAgentFactoryConfig provides everything a factory needs to create a TagentAgent.
+// ToolAgentFactoryConfig provides everything a factory needs to produce the agent's
+// configuration declaration (it does NOT construct a TagentAgent — see ToolAgentFactory).
 //
 // In the new architecture, each tool agent has its own isolated MemStore.
 // The parent agent's MemStore is NOT passed here — context is delivered via

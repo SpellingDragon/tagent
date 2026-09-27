@@ -266,7 +266,7 @@ func TestTaskChain_ResumeRebindsUnderSameID(t *testing.T) {
 		Kind: "command", Desc: "long svc", Key: "chain-resume",
 		Origin:      map[string]string{"trigger_source": "user"},
 		Declarative: &task.Declarative{Kind: "command", Desc: "long svc", TaskID: "s-r"},
-		ResumeFn: func(string) (task.SettleDetector, error) {
+		ResumeFn: func(context.Context, string) (task.SettleDetector, error) {
 			return round2, nil // re-bind to a fresh round's detector
 		},
 	}
@@ -285,7 +285,7 @@ func TestTaskChain_ResumeRebindsUnderSameID(t *testing.T) {
 	require.Equal(t, task.TaskAliveDetached, svcTask.Status())
 
 	// Resume under the same id with the fresh detector.
-	rr, err := h.tm.Resume(id, "continue please")
+	rr, err := h.tm.Resume(context.Background(), id, "continue please")
 	require.NoError(t, err)
 	require.NotNil(t, rr.Task)
 	require.Equal(t, id, rr.Task.ID, "resume must rebind the round under the SAME task id")

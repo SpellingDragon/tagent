@@ -28,7 +28,7 @@ func (m *factoryMockModel) Info() model.Info { return model.Info{Name: "factory-
 func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
 	// Register a factory that would produce an agent named "factory-built".
 	factoryRegistered := false
-	agent.RegisterToolAgent("*", func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentAgent, error) {
+	agent.RegisterToolAgent("*", func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
 		factoryRegistered = true
 		return nil, assert.AnError
 	})
@@ -65,16 +65,19 @@ func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
 }
 
 // TestBuildAgent_AllowsCustomAgentFactory verifies that non-builtin agent names
-// can still be built via a registered ToolAgentFactory.
+// can still be built via a registered ToolAgentFactory — and that the factory's
+// chosen identity survives: the migrated (round-91) contract delivers a
+// DECLARATION whose Name the org respects verbatim, exactly as the old contract
+// used to use the returned instance verbatim.
 func TestBuildAgent_AllowsCustomAgentFactory(t *testing.T) {
 	customName := "custom_agent"
-	agent.RegisterToolAgent(customName, func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentAgent, error) {
-		// Return a TagentAgent built from a minimal config so it satisfies the type.
-		return agent.NewTagentAgent(&agent.TagentConfig{
+	agent.RegisterToolAgent(customName, func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
+		// What a factory does now: describe the agent; the org constructs it.
+		return &agent.TagentConfig{
 			Name:         "factory-built",
 			Model:        cfg.Model,
 			SystemPrompt: "factory-built prompt",
-		})
+		}, nil
 	})
 
 	cfg := Config{

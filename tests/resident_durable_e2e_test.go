@@ -148,11 +148,21 @@ func TestResidentDurableE2E_FiveSurfaceReconciliation(t *testing.T) {
 
 	// Cleanup end: the inbox-v2 envelope store is fully drained (every accepted
 	// item ended its lifecycle as processed-cleaned, nothing silently lost).
+	//
+	// Bounded wait, deliberately: the ack path records the receipt and ONLY THEN
+	// unlinks the envelope (event_bus.go: RecordReceipt → Ack → release), so the
+	// receipt being visible above does not imply the unlink landed. Polling the
+	// outstanding set checks the same contract ("after ack every envelope is
+	// unlinked") at its own completion point instead of racing it — not a weaker
+	// claim: an envelope that never drains still fails the test.
 	inbox, err := reliability.NewInbox(filepath.Join(spillDir, "tagent"), 0)
 	require.NoError(t, err)
-	outstanding, err := inbox.Outstanding()
-	require.NoError(t, err)
-	require.Empty(t, outstanding, "after ack every envelope is unlinked — accepted IDs are all in the processed-cleaned state")
+	var outstanding []reliability.OutstandingEnvelope
+	require.Eventually(t, func() bool {
+		outstanding, err = inbox.Outstanding()
+		return err == nil && len(outstanding) == 0
+	}, 20*time.Second, 20*time.Millisecond,
+		"after ack every envelope is unlinked — accepted IDs are all in the processed-cleaned state")
 	entries, err := os.ReadDir(filepath.Join(spillDir, "tagent"))
 	require.NoError(t, err)
 	envLeft := 0

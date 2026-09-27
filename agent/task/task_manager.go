@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
@@ -97,6 +98,12 @@ type SettleDetector interface {
 	Detached() <-chan struct{}
 	// Cancel stops the underlying work.
 	Cancel()
+	// Stopped returns a channel closed once the detector's underlying producer has
+	// RETURNED — not merely been notified to cancel. §4.1 (design D6) requires it of
+	// every path that adopts no task (spawn rejected, dedup hit): the caller may
+	// only let go of the execution reference it derived for that work after the
+	// producer actually stopped, because Cancel is a signal, not a credential.
+	Stopped() <-chan struct{}
 }
 
 // defaultDenseDuration is the default dense-phase length (≈ the retired
@@ -168,14 +175,20 @@ type TaskSpec struct {
 	// Relaunch, when non-nil, re-spawns an equivalent task from scratch (used by
 	// relaunch(id)). For command tasks it re-runs the original command in a
 	// fresh session. Nil → the task is not relaunchable.
-	Relaunch func() (SpawnResult, error)
+	//
+	// It receives the INITIATING call's context (§4.2): a re-entry riding a live
+	// business turn resolves its delegation target on THAT turn's orchestration
+	// generation, while a re-entry with no initiating call (console/WAL/ops) gets
+	// the effective one. The task layer itself never interprets the context — it
+	// forwards the caller's, which is the only version source the re-entry may use.
+	Relaunch func(ctx context.Context) (SpawnResult, error)
 	// ResumeFn, when non-nil, feeds new input into the task's LIVE session
 	// (resume_task): tmux tasks SendKeys into the existing session, subagent
 	// tasks start a new Run with framework-restored task-chain context. It
 	// returns a fresh SettleDetector for the resumed round; the task then
 	// re-enters the standard dense→ACK→settle lifecycle under the SAME task id.
-	// Nil → the task is not resumable.
-	ResumeFn func(input string) (SettleDetector, error)
+	// Nil → the task is not resumable. Same initiating-context contract as Relaunch.
+	ResumeFn func(ctx context.Context, input string) (SettleDetector, error)
 	// Alive, when non-nil, is a liveness probe for service-type tasks. After a
 	// task settles into alive_detached, List() consults the probe lazily: a
 	// false answer retires the task through the normal completion path, so
@@ -297,16 +310,24 @@ func (t *Task) remainingLifetime(now time.Time, defaultTTL time.Duration) (time.
 // Result returns the latest captured output (thread-safe snapshot).
 func (t *Task) Result() string { t.mu.Lock(); defer t.mu.Unlock(); return t.result }
 
-// isActive reports whether the task is still live (dedup targets these).
-func (t *Task) isActive() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	switch t.status {
+// Live reports whether s is still a live state (work outstanding, or a session
+// another part of the system may still be using). Exported so the same question can
+// be asked from outside this package with the same answer the board's own dedup
+// gives (isActive below), rather than each caller re-listing the states from memory.
+func (s TaskStatus) Live() bool {
+	switch s {
 	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
 		return true
 	default:
 		return false
 	}
+}
+
+// isActive reports whether the task is still live (dedup targets these).
+func (t *Task) isActive() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status.Live()
 }
 
 // isTerminalStatus reports whether s is an exited state (pruneTerminal
@@ -365,8 +386,8 @@ type TaskController interface {
 	List() []*Task
 	Get(id string) (*Task, bool)
 	Cancel(id string) bool
-	Relaunch(id string) (SpawnResult, error)
-	Resume(id string, input string) (SpawnResult, error)
+	Relaunch(ctx context.Context, id string) (SpawnResult, error)
+	Resume(ctx context.Context, id string, input string) (SpawnResult, error)
 	// RenewTTLBySession resets the unified-reaper anchor for the ACTIVE task bound
 	// to the given backing session (async-task-lifetime 10.4). Driven by a
 	// write-type reentry (exec op=send); returns true if a live task was renewed.
@@ -519,36 +540,56 @@ type TaskManager struct {
 	orphanGrace      time.Duration
 	defaultTTL       time.Duration // unified reaper fallback lifetime; floored to defaultManagerTTL, never 0
 	isSessionTracked func(sessionID string) bool
+	// ttlSource is the §6.4 pull side for both manager-level TTL axes (design
+	// §4): installed by the composition root with the owner's committed-record
+	// view, so a rotation reaches the reaper at its NEXT sweep/board read instead
+	// of being pushed. nil → construction values only (standalone/direct-built
+	// managers keep working).
+	ttlSource atomic.Pointer[func() (terminal, defaultTTL time.Duration)]
 }
 
 // NewTaskManager creates a TaskManager.
-// SetTerminalTTL hot-updates the terminal grace period (full-hot-config
-// Phase 1). Reads happen under tm.mu in pruneTerminal — same lock here.
-// d <= 0 keeps the current value.
-func (tm *TaskManager) SetTerminalTTL(d time.Duration) {
-	if tm == nil || d <= 0 {
+// SetTTLSource installs the §6.4 pull source for both manager-level TTL axes
+// (terminal grace / unified-reaper fallback) — the replacement for the retired
+// SetTerminalTTL/SetDefaultTTL pushes. The composition root injects the owner's
+// committed-record view, so a hot rotation reaches the reaper at its NEXT sweep
+// or board read with no per-manager write and no second authority.
+func (tm *TaskManager) SetTTLSource(src func() (terminal, defaultTTL time.Duration)) {
+	if tm == nil || src == nil {
 		return
 	}
-	tm.mu.Lock()
-	tm.terminalTTL = d
-	tm.mu.Unlock()
+	tm.ttlSource.Store(&src)
 }
 
-// SetDefaultTTL hot-updates the unified reaper's fallback lifetime (§10.3).
-// Positive d enables/changes it; zero keeps the current value; a negative
-// (disable attempt) is floored to the manager default — age reclaim cannot be
-// turned off (async-task-lifetime 10.5). Same lock protocol as SetTerminalTTL.
-func (tm *TaskManager) SetDefaultTTL(d time.Duration) {
-	if tm == nil || d == 0 {
-		return
+// effTerminalTTL resolves the terminal grace period: the source wins when it
+// carries a positive reading, otherwise the construction value is kept (the
+// guard the retired setter had — a zero/absent record never resets a live
+// grace period). Callers hold tm.mu; only the source load is lock-free.
+func (tm *TaskManager) effTerminalTTL() time.Duration {
+	if src := tm.ttlSource.Load(); src != nil {
+		if d, _ := (*src)(); d > 0 {
+			return d
+		}
 	}
-	tm.mu.Lock()
-	if d > 0 {
-		tm.defaultTTL = d
-	} else {
-		tm.defaultTTL = defaultManagerTTL // disabling is not permitted — fall back to the floor
+	return tm.terminalTTL
+}
+
+// effDefaultTTL resolves the unified reaper's fallback lifetime. A positive
+// source reading wins; a negative one is floored to defaultManagerTTL (age
+// reclaim cannot be turned off, async-task-lifetime 10.5); zero means the
+// record carries no opinion → construction value. Same lock discipline as
+// effTerminalTTL.
+func (tm *TaskManager) effDefaultTTL() time.Duration {
+	if src := tm.ttlSource.Load(); src != nil {
+		_, d := (*src)()
+		if d > 0 {
+			return d
+		}
+		if d < 0 {
+			return defaultManagerTTL
+		}
 	}
-	tm.mu.Unlock()
+	return tm.defaultTTL
 }
 
 func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
@@ -954,7 +995,7 @@ func (tm *TaskManager) reconcileTTL() {
 		t.mu.Lock()
 		ttl := t.Spec.TTL
 		if ttl <= 0 {
-			ttl = tm.defaultTTL
+			ttl = tm.effDefaultTTL() // §6.4 pull: resolved at the sweep, not a pushed cache
 		}
 		age := now.Sub(t.ttlAnchor())
 		// A task with no known birth anchor (zero StartedAt) cannot be dated, so it
@@ -1158,13 +1199,27 @@ func (tm *TaskManager) sessionTrackerFn() func(sessionID string) bool {
 	return tm.isSessionTracked
 }
 
+// TerminalTTL reports the live terminal grace period (introspection; §6.4 makes
+// it a READ of the same resolution the reaper uses — the owner's record source
+// when installed, else the construction value. introduce-durable-workflow-engine
+// §2.4/L-3 rollback tests read this, not the config field). Same tm.mu lock as
+// the reaper paths, so what a test sees is what pruneTerminal applied.
+func (tm *TaskManager) TerminalTTL() time.Duration {
+	if tm == nil {
+		return 0
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.effTerminalTTL()
+}
+
 // DefaultTTL reports the unified reaper's current fallback lifetime (the manager
 // floor used when a task's spec carries no explicit TTL). Exposed so board
 // rendering shows exactly what reconcileTTL will honor (async-task-lifetime 10.6).
 func (tm *TaskManager) DefaultTTL() time.Duration {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	return tm.defaultTTL
+	return tm.effDefaultTTL()
 }
 
 // RetireOrphans adjudicates reincarnation-orphan suspect tasks (§7 双通道回收):
@@ -1281,7 +1336,7 @@ func (tm *TaskManager) pruneTerminal() {
 	tm.mu.Lock()
 	var victims []*Task
 	for id, t := range tm.tasks {
-		if t.isTerminalExpired(now, tm.terminalTTL) {
+		if t.isTerminalExpired(now, tm.effTerminalTTL()) {
 			victims = append(victims, t)
 			delete(tm.tasks, id)
 			if t.Spec.Key != "" && tm.byKey[t.Spec.Key] == id {
@@ -1373,8 +1428,10 @@ func (tm *TaskManager) RenewTTLBySession(sessionID string) bool {
 // Relaunch re-spawns an equivalent task from the original task's spec. It runs
 // the spec's Relaunch closure (set by the tool that spawned it — e.g. ActionTool
 // re-runs the command in a fresh session). Returns an error if the task is
-// unknown or not relaunchable.
-func (tm *TaskManager) Relaunch(id string) (SpawnResult, error) {
+// unknown or not relaunchable. ctx is the INITIATING call's context, forwarded
+// verbatim to the closure so a re-entry can resolve its target on the version that
+// call holds (§4.2); pass context.Background() when there is no initiator.
+func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, error) {
 	tm.mu.Lock()
 	t, ok := tm.tasks[id]
 	tm.mu.Unlock()
@@ -1384,7 +1441,7 @@ func (tm *TaskManager) Relaunch(id string) (SpawnResult, error) {
 	if t.Spec.Relaunch == nil {
 		return SpawnResult{}, fmt.Errorf("task %s is not relaunchable", id)
 	}
-	return t.Spec.Relaunch()
+	return t.Spec.Relaunch(ctx)
 }
 
 // Resume feeds new input into a task and re-enters the standard
@@ -1402,8 +1459,10 @@ func (tm *TaskManager) Relaunch(id string) (SpawnResult, error) {
 // retry) and cancelled (session killed — relaunch or start fresh). Concurrency:
 // the claim transitions to running under task.mu BEFORE ResumeFn runs, so
 // parallel resumes (parallel tool execution is enabled) single-win; the loser
-// is told the task is running.
-func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
+// is told the task is running. ctx is the INITIATING call's context, forwarded to
+// ResumeFn so the resumed round can resolve its target on the version that call
+// holds (§4.2); a refusal there rolls the claim back unchanged.
+func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (SpawnResult, error) {
 	tm.mu.Lock()
 	task, ok := tm.tasks[id]
 	tm.mu.Unlock()
@@ -1434,7 +1493,7 @@ func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
 	task.status = TaskRunning
 	task.mu.Unlock()
 
-	detector, err := task.Spec.ResumeFn(input)
+	detector, err := task.Spec.ResumeFn(ctx, input)
 	if err != nil {
 		// Roll back the claim; the session was not touched by us.
 		task.mu.Lock()
@@ -1494,9 +1553,10 @@ func (tm *TaskManager) Resume(id string, input string) (SpawnResult, error) {
 // a single settle signal when fn returns (Completed on success, Completed+Err on
 // failure), then closes. It doubles as the "generic goroutine task" detector.
 type funcSettleDetector struct {
-	ch     chan SettleSignal
-	cancel context.CancelFunc
-	detach <-chan struct{}
+	ch      chan SettleSignal
+	cancel  context.CancelFunc
+	detach  <-chan struct{}
+	stopped chan struct{} // closed when fn RETURNS (the producer's real stop)
 }
 
 // NewFuncSettleDetector runs fn under a cancelable context and settles on return.
@@ -1504,13 +1564,17 @@ type funcSettleDetector struct {
 // has not returned, the detector signals detach (→ async ack).
 func NewFuncSettleDetector(ctx context.Context, fn func(context.Context) (string, error), denseDuration ...time.Duration) SettleDetector {
 	cctx, cancel := context.WithCancel(ctx)
-	d := &funcSettleDetector{ch: make(chan SettleSignal, 1), cancel: cancel}
+	d := &funcSettleDetector{ch: make(chan SettleSignal, 1), cancel: cancel, stopped: make(chan struct{})}
 	dd := defaultDenseDuration
 	if len(denseDuration) > 0 && denseDuration[0] > 0 {
 		dd = denseDuration[0]
 	}
 	d.detach = DetachAfter(dd, cctx.Done())
 	go func() {
+		// §4.1: `stopped` closes AFTER fn returns — a caller that was told its work
+		// is unmanaged (rejected / deduped) waits on this, never on Cancel, because
+		// fn is the actual producer of the run being tracked.
+		defer close(d.stopped)
 		out, err := fn(cctx)
 		d.ch <- SettleSignal{Kind: SettleCompleted, Output: out, Err: err}
 		close(d.ch)
@@ -1521,4 +1585,5 @@ func NewFuncSettleDetector(ctx context.Context, fn func(context.Context) (string
 
 func (d *funcSettleDetector) Settled() <-chan SettleSignal { return d.ch }
 func (d *funcSettleDetector) Detached() <-chan struct{}    { return d.detach }
+func (d *funcSettleDetector) Stopped() <-chan struct{}     { return d.stopped }
 func (d *funcSettleDetector) Cancel()                      { d.cancel() }

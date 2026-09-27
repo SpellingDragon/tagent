@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -100,7 +101,7 @@ func TestCrossRestartResume_RealProvisioning(t *testing.T) {
 	})
 	require.NotNil(t, spec.ResumeFn)
 	// 未重挂：TouchSession 失败 → relaunch 引导（与旧路径同文案）。
-	_, err := spec.ResumeFn("print(1)")
+	_, err := spec.ResumeFn(context.Background(), "print(1)")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "relaunch")
 	require.True(t, strings.Contains(err.Error(), "no longer monitored"),

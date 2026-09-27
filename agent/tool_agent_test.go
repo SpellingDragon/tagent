@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -280,9 +283,9 @@ func TestAgentToolWrapper_Call_InvalidJSON(t *testing.T) {
 
 func TestRegisterAndGetToolAgentFactory(t *testing.T) {
 	called := false
-	RegisterToolAgent("test-factory", func(cfg ToolAgentFactoryConfig) (*TagentAgent, error) {
+	RegisterToolAgent("test-factory", func(cfg ToolAgentFactoryConfig) (*TagentConfig, error) {
 		called = true
-		return &TagentAgent{name: cfg.ID}, nil
+		return &TagentConfig{Name: cfg.ID}, nil
 	})
 	defer func() {
 		toolAgentFactoriesMu.Lock()
@@ -293,16 +296,16 @@ func TestRegisterAndGetToolAgentFactory(t *testing.T) {
 	factory, ok := GetToolAgentFactory("test-factory")
 	require.True(t, ok, "factory should be registered")
 
-	agent, err := factory(ToolAgentFactoryConfig{ID: "test-factory"})
+	agentCfg, err := factory(ToolAgentFactoryConfig{ID: "test-factory"})
 	require.NoError(t, err)
-	require.NotNil(t, agent)
-	assert.Equal(t, "test-factory", agent.name)
+	require.NotNil(t, agentCfg, "the contract delivers a declaration, not an instance")
+	assert.Equal(t, "test-factory", agentCfg.Name)
 	assert.True(t, called, "factory function should have been called")
 }
 
 func TestRegisterToolAgent_Duplicate(t *testing.T) {
-	RegisterToolAgent("dup-factory", func(cfg ToolAgentFactoryConfig) (*TagentAgent, error) {
-		return &TagentAgent{}, nil
+	RegisterToolAgent("dup-factory", func(cfg ToolAgentFactoryConfig) (*TagentConfig, error) {
+		return &TagentConfig{}, nil
 	})
 	defer func() {
 		toolAgentFactoriesMu.Lock()
@@ -311,8 +314,8 @@ func TestRegisterToolAgent_Duplicate(t *testing.T) {
 	}()
 
 	assert.Panics(t, func() {
-		RegisterToolAgent("dup-factory", func(cfg ToolAgentFactoryConfig) (*TagentAgent, error) {
-			return &TagentAgent{}, nil
+		RegisterToolAgent("dup-factory", func(cfg ToolAgentFactoryConfig) (*TagentConfig, error) {
+			return &TagentConfig{}, nil
 		})
 	}, "duplicate registration should panic")
 }
@@ -805,4 +808,35 @@ func TestSubagentRun_ClosesInvCM(t *testing.T) {
 
 	// After channel closes, invCM.Close() should have been called
 	// (verified by no goroutine leak — if invCM wasn't closed, Runner goroutines would leak)
+}
+
+// startFailAgent records how many times its Run was started and always fails at
+// start — the shape a LOCAL sub-agent defect takes.
+type startFailAgent struct {
+	name    string
+	started atomic.Int64
+}
+
+func (a *startFailAgent) Run(context.Context, *agent.Invocation) (<-chan *event.Event, error) {
+	a.started.Add(1)
+	return nil, errors.New("local start failure")
+}
+func (a *startFailAgent) Tools() []trpctool.Tool          { return nil }
+func (a *startFailAgent) Info() agent.Info                { return agent.Info{Name: a.name} }
+func (a *startFailAgent) SubAgents() []agent.Agent        { return nil }
+func (a *startFailAgent) FindSubAgent(string) agent.Agent { return nil }
+
+// TestLocalDelegationIsNotRetried pins the deliberate half of the retry policy: a
+// LOCAL failure is this process's own defect, so it must surface on the first
+// attempt. Silently retrying local runs would mask it (and double any side effect
+// the sub-agent already performed). The remote branch is covered by
+// a2a_delegation_test.go in the root module.
+func TestLocalDelegationIsNotRetried(t *testing.T) {
+	ag := &startFailAgent{name: "localfailing"}
+	w := NewAgentToolWrapper(ag, "do", nil, nil)
+	raw, _ := json.Marshal(map[string]string{"request": "work"})
+
+	_, err := w.Call(context.Background(), raw)
+	require.Error(t, err, "the local start failure must surface")
+	require.Equal(t, int64(1), ag.started.Load(), "a local delegation is attempted exactly once")
 }

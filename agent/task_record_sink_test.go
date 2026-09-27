@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -129,7 +130,7 @@ func TestRebuildTaskRegistry_SubagentResumeGuidance(t *testing.T) {
 	}, now-60_000)
 
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
-	redispatch := func(agentName, body string) (task.SpawnResult, error) {
+	redispatch := func(_ context.Context, agentName, body string) (task.SpawnResult, error) {
 		t.Logf("redispatch %s", agentName)
 		return task.SpawnResult{}, nil
 	}
@@ -143,7 +144,7 @@ func TestRebuildTaskRegistry_SubagentResumeGuidance(t *testing.T) {
 	if got.Spec.ResumeFn == nil {
 		t.Fatal("ResumeFn must exist (guidance error, not nil)")
 	}
-	if _, err := got.Spec.ResumeFn("继续"); err == nil || !strings.Contains(err.Error(), "relaunch") {
+	if _, err := got.Spec.ResumeFn(context.Background(), "继续"); err == nil || !strings.Contains(err.Error(), "relaunch") {
 		t.Errorf("cross-restart subagent resume must return relaunch guidance, got err=%v", err)
 	}
 	if got.Spec.Relaunch == nil {

@@ -85,14 +85,57 @@ type TagentAgent struct {
 	persistentBus  *EventBus
 	contextManager *ContextManager
 
+	// hotSource (§6.4/2.3)：owner 热参的**唯一**读源闭包。构造期由 NewTagentAgent
+	// 恒装静态源（design §2「不存在无源状态」）；组合根在协调器就绪后换成记录绑定
+	// 源（读唯一已提交应用记录），此后每次提交点轮转记录即单写者生效。
+	// compressor / taskManager / 私有 CM 全部经它现读——不再有第二份可写缓存。
+	hotSource atomic.Pointer[func() (OrgHotParams, bool)]
+
+	// liveCMs (§6.4/D4)：随调用生命周期注册/注销的**存活调用私有 CM**集合
+	// （绝非历史对象列表）。§6.4 pull 反转后提交点不再向它扇出任何值——私有 CM
+	// 的压缩器绑本 agent 的热参源，在下一次压缩/预算读取边界现读记录。本集合目前
+	// **无生产读取方**（只有注册/注销与 LiveCMCount／snapshotLiveCMs 读面，后者已按
+	// §5.1 收为包内——向外暴露内部 CM 切片没有生产价值）：其存续理由
+	// 待 S-D 按 D4「若保留只服务取消/完成等待，归唯一 owner」裁定。有界：调用结束即注销。
+	liveCMsMu sync.Mutex
+	liveCMs   map[*ContextManager]struct{}
+
 	// taskManager owns async task lifecycle. Tools spawn via the injected
 	// task.TaskSpawner; background settles are published back to persistentBus as
 	// task_settled events by its OnSettle hook.
 	taskManager *task.TaskManager
 
+	// settleSinks (S3m-a, M2越窗 routing): per-invocation settle sinks keyed by the
+	// delegation invocation_id (S2m Origin handle). The OnSettle hook routes a
+	// background task_settled to the owning sub-invocation loop's sink when one is
+	// registered; with no sink (entry owner + every pre-S3m-b path) it falls back
+	// to persistentBus, so this is behavior-neutral until S3m-b registers a sink.
+	settleSinks *settleSinkRegistry
+
 	// orgRollback（R4，resident-continuity-r2-r4 3.8）：热更回滚钩子（tagent
-	// 包懒检查闭包注入；Rollback() 触发）。
-	orgRollback func()
+	// 包懒检查闭包注入；Rollback() 触发）。它**每次成功发布都被重写**（运行期写），
+	// 而宿主/运维可从另一个 goroutine 调 Rollback()——故用 atomic.Pointer，
+	// 不得换成裸字段。
+	orgRollback atomic.Pointer[func()]
+
+	// orgDiags（D9，introduce-durable-workflow-engine 5.1）：装配层注入的编排代际
+	// 诊断提供者。形状由装配层拥有（本包只见 map[string]any），**仅诊断面读取**——
+	// 无任何执行路径据它选版（resident-continuity：指纹/序号不是应用可见 identity）。
+	// 与 orgRollback **不同规**：它只在启动期注入一次（tagent.go 的 configPath 接线块），
+	// 运行期只读，所以普通字段就够；不要拿 orgRollback 当参照。
+	orgDiags func() map[string]any
+
+	// storeOwnerSnapshot (§2.3/R01):装配层注入的「当前持有 store owner 登记的 agent
+	// 名集」只读探针。候选事务回退须撤销本候选登记的每个 owner（含失败父），该探针
+	// 让宿主/测试能确定性地观测在线拓扑之外的 owner 归属；纯内省，无执行路径读它。
+	// 与 orgDiags 同规：启动期注入一次，运行期只读。
+	storeOwnerSnapshot func() map[string]bool
+
+	// storeOwnerRevoke (§4.3/R02): the assembly hook that drops THIS agent's
+	// store-owner registration. Called by closeOnce only after the store exit was
+	// really taken; an unconverged close keeps the registration (the holder may
+	// still write). Set at build time, read-only afterwards.
+	storeOwnerRevoke func()
 
 	// Framework integration
 	memStore memory.MemoryStore
@@ -107,15 +150,14 @@ type TagentAgent struct {
 	// exits only through the lease release, never through them.
 	memStoreOwned bool
 
-	// residentNames (4.5/4.6 introspection): the resident topology binding
-	// table this agent belongs to (entry + sub-agents), set at New().
-	residentNames map[string]bool
-	// residentTable (4.5): name → resident agent instance — the binding table
-	// the hot-reload shells borrow per-agent resources from.
-	residentTable map[string]*TagentAgent
-	memPlugin     *plugin.MemoryPlugin // registered on ContextManager's Runner
-	config        *TagentConfig
-	sessionSvc    session.Service
+	// resident (4.5, §4.3): the SHARED immutable-snapshot binding table —
+	// name → resident agent instance, which the hot-reload shells borrow
+	// per-agent resources from and which hot ADD publishes into. Held by
+	// pointer so one publish reaches every agent; readers never see a torn map.
+	resident   *ResidentTopology
+	memPlugin  *plugin.MemoryPlugin // registered on ContextManager's Runner
+	config     *TagentConfig
+	sessionSvc session.Service
 
 	// Agent identity (for agent.Agent interface)
 	name        string
@@ -126,8 +168,12 @@ type TagentAgent struct {
 	lastUserID    string
 	lastSessionID string
 
-	// External events pending ingestion (set before Run)
-	// These are converted to internal context messages at the start of the next run.
+	// External events pending ingestion (legacy direct-Ingest API single-handoff
+	// slot): set via IngestExternalEvents, drained atomically by the next Run at
+	// entry (§7.1 D2). It is NOT a history buffer and the primary delegation path
+	// (RuntimeState) never writes it; the mutex keeps a concurrent Run's drain from
+	// tearing against a set.
+	externalEventsMu      sync.Mutex
 	pendingExternalEvents []memory.FullEvent
 
 	// Resource closers — components like ActionTool that need cleanup on shutdown.
@@ -154,6 +200,15 @@ type TagentAgent struct {
 	closeStarted bool
 	closeDone    chan struct{}
 	closeErr     error
+	// §4.1 terminal tail: a bounded Close that could not honestly finish carries
+	// the remainder (still-used tool closers, recorder, store exit and its owner
+	// registration) in exactly ONE continuation, armed on the manager's own
+	// reclaim event and run when the executions actually stop. Guarded by closeMu;
+	// closeTailOnce makes the exit itself exactly-once.
+	closeTail     func()
+	closeTailOnce sync.Once
+	closeTailDone bool
+	closeTailErr  error
 
 	// Meditation manager — started/stopped with the persistent event loop.
 	meditationMgr *MeditationManager
@@ -164,6 +219,10 @@ type TagentAgent struct {
 
 	// cleanupCancel stops the workspace cleaner goroutine (started in NewTagentAgent).
 	cleanupCancel context.CancelFunc
+	// cleanupDone closes when the cleaner goroutine has returned. Cancelling is
+	// only a request; this is the confirmation the close sequence waits on
+	// (§4.3/R02: a retired owner must not leave its maintenance producer running).
+	cleanupDone chan struct{}
 
 	// projection is the lightweight, bounded Session projection (EventReference[])
 	// shared by onEvent and Preprocessor. It is created per TagentAgent and
@@ -297,6 +356,19 @@ type CompressConfig struct {
 	SummaryMaxTokens int
 }
 
+// constructedTagents counts every successful NewTagentAgent entry in this
+// process (S-A/2.3 + 5.3): the de-shell contract asserts a hot reload that only
+// MODIFIES existing agents constructs ZERO new TagentAgents (shells are the
+// duplication D1 removes), and the complexity report counts constructions per
+// cold/reload/rollback. Diagnostics/test introspection only — no execution path
+// reads it.
+var constructedTagents atomic.Int64
+
+// TagentAgentsConstructed reports the process-wide count of TagentAgent
+// constructions (see constructedTagents). Callers assert DELTAS around an
+// operation, never absolute values (tests share the process).
+func TagentAgentsConstructed() int64 { return constructedTagents.Load() }
+
 // NewTagentAgent creates a new TagentAgent with the given configuration.
 //
 // In the event-driven architecture, NewTagentAgent:
@@ -315,6 +387,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg.Model == nil {
 		return nil, fmt.Errorf("model is required")
 	}
+	constructedTagents.Add(1)
 
 	// Apply defaults
 	if cfg.MaxToolIterations <= 0 {
@@ -364,10 +437,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 4. Wrap all tools with OutputLimitTool
 	// A6：封顶 MaxTokens/2*4 派生——保留小 budget 的比例语义，但封顶 toolOutputCapChars，
 	// 防长上下文配置（128K budget → 256K 字符）下溢出保护形同不存在。
-	maxOutputChars := cfg.MaxTokens / 2 * 4
-	if maxOutputChars <= 0 || maxOutputChars > toolOutputCapChars {
-		maxOutputChars = toolOutputCapChars
-	}
+	maxOutputChars := outputCapForMaxTokens(cfg.MaxTokens)
 	outputWorkspace := workspace.ToolOutputPath(cfg.WorkspaceRoot)
 	if maxOutputChars > 0 && len(cfg.Tools) > 0 {
 		wrapped := make([]tool.Tool, len(cfg.Tools))
@@ -424,9 +494,15 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 写事实链记录（task_spawned 载 Declarative / inline settle 终态记录——registry
 	// 重建数据源，记录-only 不发 bus 不进投影）。cm 在下方创建后才绑定。
 	taskRecords := &taskRecordSink{}
+	sinkReg := newSettleSinkRegistry()
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			bus.Publish(newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace))
+			evt := newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace)
+			// S3m-a: route to the owning sub-invocation loop's sink when one is
+			// registered for this task's delegation id (S2m Origin); else fall back
+			// to persistentBus — the entry owner and every pre-S3m-b path keep the
+			// current single-consumer behavior exactly.
+			deliverTaskSettled(sinkReg, bus, tk, evt)
 		},
 		OnSpawn:        taskRecords.onSpawn,
 		OnInlineSettle: taskRecords.onInlineSettle,
@@ -524,6 +600,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	ta := &TagentAgent{
 		persistentBus:       bus,
 		activeBus:           bus,
+		settleSinks:         sinkReg,
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
 		memStoreRelease:     cfg.MemStoreRelease,
@@ -542,10 +619,21 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 8. Create onEvent callback and ContextManager.
 	onEvent := ta.makeOnEventCallback()
 	onEventRef = onEvent // Wire the hook's callback.
-	cm := newContextManagerFromConfig(cfg, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
+	cm := newContextManagerFromConfig(cfg, nil, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	taskRecords.cm = cm // R2: bind the record sink (late — hooks are best-effort nil-safe before this)
 	ta.contextManager = cm
+	ta.liveCMs = make(map[*ContextManager]struct{})
+	// §6.4 恒装源（design §2「不存在无源状态」）：构造期即以解析后的完整 desired
+	// 装上 owner 热参源；组合根在首个提交点把它换成记录绑定源，此后每次提交轮转
+	// 记录即单写者生效——不再有需要与记录手动对齐的第二份快照通路。
+	ta.SetHotSource(staticHotSource(initialHotParams(cfg)))
+	// §6.4 pull: the resident compressor and the task registry resolve their
+	// numeric group from the owner's live hot view at every consumption boundary
+	// (compression boundary / TTL sweep & board read). The reloader owns the single
+	// commit point; nothing is pushed into either consumer.
+	cm.contextCompressor.SetHotSource(ta.liveHotNumbers)
 	ta.taskManager = taskManager
+	taskManager.SetTTLSource(ta.taskTTLs)
 	cm.taskController = taskManager
 
 	// Initialize meditation manager if enabled.
@@ -571,7 +659,12 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// count would delete live-task outputs.
 	cleanCtx, cleanCancel := context.WithCancel(context.Background())
 	ta.cleanupCancel = cleanCancel
-	workspace.NewCleaner(workspace.ToolOutputPath(cfg.WorkspaceRoot), cfg.WorkspaceCleanupInterval, cfg.WorkspaceCleanupMaxAge, cfg.WorkspaceCleanupMaxFiles).Start(cleanCtx)
+	ta.cleanupDone = make(chan struct{})
+	cleaner := workspace.NewCleaner(workspace.ToolOutputPath(cfg.WorkspaceRoot), cfg.WorkspaceCleanupInterval, cfg.WorkspaceCleanupMaxAge, cfg.WorkspaceCleanupMaxFiles)
+	go func() {
+		defer close(ta.cleanupDone)
+		cleaner.Run(cleanCtx)
+	}()
 
 	return ta, nil
 }
@@ -607,41 +700,93 @@ func buildCompressorOpts(cfg *TagentConfig) []compress.SmartCompressorOption {
 	return opts
 }
 
+// ownerHotNumbersSource returns the §6.4 pull source for an invocation-private
+// compressor (the owner's live hot view), or nil for the resident CM — which
+// installs its own source after the agent fields are wired (NewTagentAgent).
+func ownerHotNumbersSource(owner *TagentAgent) func() compress.HotNumbers {
+	if owner == nil {
+		return nil
+	}
+	return owner.liveHotNumbers
+}
+
+// hotOverlayConfig is GONE (§6.4 pull, S-E): seeding an invocation-private CM
+// from the owner's snapshot at construction existed to make fresh calls start
+// effective. Its successor is weaker and stronger at once — the private CM binds
+// the owner's LIVE source instead, so it is effective at its NEXT boundary (no
+// stale-generation window) and there is no second copy of the numbers to keep in
+// step. Construction config values remain only as the no-source fallback.
+
+// initialHotParams derives the construction-time hot bundle from an already
+// parsed config (the root package's parse layer fills unset TTLs with the task
+// defaults). The threshold fallback mirrors buildCompressorOpts's 0.8, so the
+// seeded snapshot and the seeded compressor always agree.
+func initialHotParams(cfg *TagentConfig) OrgHotParams {
+	th := cfg.CompressThreshold
+	if th <= 0 || th > 1 {
+		th = 0.8
+	}
+	return OrgHotParams{
+		ThresholdPct:    th,
+		MaxTokens:       cfg.MaxTokens,
+		KeepRecentTasks: cfg.KeepRecentTasks,
+		TaskTerminalTTL: cfg.TaskTerminalTTL,
+		TaskDefaultTTL:  cfg.TaskDefaultTTL,
+	}
+}
+
 // newContextManagerFromConfig creates a ContextManager from TagentConfig.
-// Shared by NewTagentAgent and Run().
-func newContextManagerFromConfig(cfg *TagentConfig, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *compress.SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
-	copts := buildCompressorOpts(cfg)
+// Shared by NewTagentAgent and Run(). owner is non-nil only for
+// invocation-private CMs built inside sub-agent Run(): the CM is seeded from
+// the owner's effective hot snapshot (§6.4/D4 — fresh calls start effective,
+// never from construction-frozen config); session.Run then registers it into
+// the owner's live set so in-flight calls apply later hot updates at their
+// next compression/budget boundary. The resident CM passes owner == nil and
+// installs its own source in NewTagentAgent once the agent fields exist.
+func newContextManagerFromConfig(cfg *TagentConfig, owner *TagentAgent, memPlugin *plugin.MemoryPlugin, sessionSvc session.Service, bus *EventBus, outputCh chan *event.Event, projection *compress.SessionProjection, onEvent func(evt *event.Event)) *ContextManager {
+	// §6.4 pull (S-E): no construction-time seeding anymore — the private CM
+	// below binds the owner's live hot source, so a later rotation still reaches
+	// it at its next boundary. cfg's own values remain as the no-source fallback.
+	eff := cfg
+	copts := buildCompressorOpts(eff)
 	copts = append(copts, compress.WithTokenCounter(compress.NewDefaultTokenCounter()))
 	compressor := compress.NewSmartCompressor(copts...)
 	// Use system prompt from config (framework details are in AGENTS.md)
 	systemPrompt := cfg.SystemPrompt
 
 	cm := NewContextManager(ContextManagerConfig{
-		Name:                 cfg.Name,
-		Model:                cfg.Model,
-		Tools:                cfg.Tools,
+		Name:                 eff.Name,
+		Model:                eff.Model,
+		Tools:                eff.Tools,
 		SystemPrompt:         systemPrompt,
-		SystemPromptSource:   cfg.SystemPromptSource,
-		Temperature:          cfg.Temperature,
-		MaxToolIters:         cfg.MaxToolIterations,
-		ThinkingEnabled:      cfg.ThinkingEnabled,
-		ThinkingTokens:       cfg.ThinkingTokens,
-		ReasoningEffort:      cfg.ReasoningEffort,
-		ReasoningContentMode: cfg.ReasoningContentMode,
+		SystemPromptSource:   eff.SystemPromptSource,
+		Temperature:          eff.Temperature,
+		MaxToolIters:         eff.MaxToolIterations,
+		ThinkingEnabled:      eff.ThinkingEnabled,
+		ThinkingTokens:       eff.ThinkingTokens,
+		ReasoningEffort:      eff.ReasoningEffort,
+		ReasoningContentMode: eff.ReasoningContentMode,
 		Compressor:           compressor,
 		TokenCounter:         compress.NewDefaultTokenCounter(),
-		MaxTokens:            cfg.MaxTokens,
-		ThresholdPct:         cfg.CompressThreshold,
-		CompactKeysListed:    cfg.Compress.CompactKeysListed,
-		RecentFullCount:      cfg.Compress.RecentFullCount,
-		CardMaxChars:         cfg.Compress.CardMaxChars,
-		MemStore:             cfg.MemoryStore,
-		MemPlugin:            memPlugin,
-		SessionSvc:           sessionSvc,
-		OutputCh:             outputCh,
-		Bus:                  bus,
-		Projection:           projection,
-		OnEvent:              onEvent,
+		MaxTokens:            eff.MaxTokens,
+		ThresholdPct:         eff.CompressThreshold,
+		// §6.4 pull: an invocation-private compressor binds the OWNER's live hot
+		// view, so a rotation made effective after this CM was constructed
+		// reaches it at its NEXT boundary instead of requiring a per-CM push
+		// fan-out; the overlay-seeded values above remain the no-source fallback
+		// only (a nil owner leaves the source unset — the resident path wires
+		// its own source once the agent exists).
+		HotNumbersSource:  ownerHotNumbersSource(owner),
+		CompactKeysListed: eff.Compress.CompactKeysListed,
+		RecentFullCount:   eff.Compress.RecentFullCount,
+		CardMaxChars:      eff.Compress.CardMaxChars,
+		MemStore:          eff.MemoryStore,
+		MemPlugin:         memPlugin,
+		SessionSvc:        sessionSvc,
+		OutputCh:          outputCh,
+		Bus:               bus,
+		Projection:        projection,
+		OnEvent:           onEvent,
 	})
 	// F2 (design-report-closeout): stalled-consumer overflow persists under
 	// <workspace>/tool-output/output-overflow (workspace.Root applies the

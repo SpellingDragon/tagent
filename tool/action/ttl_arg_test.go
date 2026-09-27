@@ -19,8 +19,11 @@ func TestResolveTTL(t *testing.T) {
 	if got := ct.resolveTTL(ActionArgs{TTL: 45}); got != 45*time.Second {
 		t.Fatalf("explicit ttl = %v, want 45s", got)
 	}
-	// A configured default applies only when ttl is omitted (0).
-	ct.SetDefaultTaskTTL(2 * time.Hour)
+	// A configured default applies only when ttl is omitted (0). §6.4 (6.4
+	// spawner axis): it now arrives as a LIVE source reading (the owner's
+	// committed record), not a number pushed into the tool.
+	cur := 2 * time.Hour
+	ct.SetDefaultTTLSource(func() time.Duration { return cur })
 	if got := ct.resolveTTL(ActionArgs{}); got != 2*time.Hour {
 		t.Fatalf("configured default (ttl omitted) = %v, want 2h", got)
 	}
@@ -28,11 +31,13 @@ func TestResolveTTL(t *testing.T) {
 	if got := ct.resolveTTL(ActionArgs{TTL: 30}); got != 30*time.Second {
 		t.Fatalf("explicit ttl over configured default = %v, want 30s", got)
 	}
-	// A non-positive default is ignored: the previously set default (and the floor)
-	// survive — there is no "0 = unlimited" interpretation.
-	ct.SetDefaultTaskTTL(0)
-	if got := ct.resolveTTL(ActionArgs{}); got != 2*time.Hour {
-		t.Fatalf("SetDefaultTaskTTL(0) must not clear the default, got %v", got)
+	// A zero source reading means the record has no opinion → the construction
+	// default answers; "0 = unlimited" is not an interpretation either way. (The
+	// retired setter instead kept the last pushed value; that stickiness died with
+	// it because the record is now the single authority.)
+	cur = 0
+	if got := ct.resolveTTL(ActionArgs{}); got != 10*time.Minute {
+		t.Fatalf("zero source reading must fall back to the construction default, got %v", got)
 	}
 }
 

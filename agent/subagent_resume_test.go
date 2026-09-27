@@ -1,12 +1,29 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+// ownerRouting builds the RESIDENT owner cm whose effective face routes name→w.
+// §4.2: every re-entry resolves its target against a real version source (the
+// initiator's binding, or this effective face), so a bare wrapper can no longer
+// stand on its own — it has no owner to resolve through.
+func ownerRouting(t *testing.T, name string, w *AgentToolWrapper) *ContextManager {
+	t.Helper()
+	cm := newTestContextManager("reentry-owner", &requestCapturingModel{resp: gateOKResp()},
+		[]trpctool.Tool{w}, make(chan *event.Event, 8), nil)
+	if cm.SubagentWrapper(name) == nil {
+		t.Fatalf("harness: the owner face must route %q", name)
+	}
+	return cm
+}
 
 // TestSubagentRounds_RecentBounded: the task-local round chain keeps rounds
 // in order and bounds the restored window.
@@ -25,11 +42,10 @@ func TestSubagentRounds_RecentBounded(t *testing.T) {
 // prior rounds (last settle result foremost) and nothing else; a task with no
 // settled round refuses resume with guidance.
 func TestSubagentResume_RestoresOwnChainOnly(t *testing.T) {
-	w := &AgentToolWrapper{}
-
 	// No settled round → actionable refusal.
 	empty := &subagentRounds{}
-	if _, err := w.subagentResume("plan", empty)("继续"); err == nil ||
+	resumer := subagentResumeClosure(ownerRouting(t, "plan", relaunchWrapper("plan")), "plan", empty)
+	if _, err := resumer(context.Background(), "继续"); err == nil ||
 		!strings.Contains(err.Error(), "relaunch_task") {
 		t.Errorf("resume without settled rounds must refuse with guidance, got %v", err)
 	}
@@ -56,7 +72,7 @@ func TestSubagentResume_RestoresOwnChainOnly(t *testing.T) {
 // actually received (captured by the mockAgent).
 func runResume(t *testing.T, w *AgentToolWrapper, rounds *subagentRounds, input string) *agent.Invocation {
 	t.Helper()
-	detector, err := w.subagentResume("plan", rounds)(input)
+	detector, err := subagentResumeClosure(ownerRouting(t, "plan", w), "plan", rounds)(context.Background(), input)
 	if err != nil {
 		t.Fatalf("resume must succeed for a task with a settled round: %v", err)
 	}

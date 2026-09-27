@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -169,8 +170,11 @@ func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.De
 // 下 reattachOne 的原 detector 归属 monitor 回调链，此处新 detector 服务本轮
 // resume 的 settle 检测（watch 兕底仍由 reattach detector 承担）。R3 重挂前
 // （未跟踪）返回与旧路径同款的 relaunch 引导。
-func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(string) (task.SettleDetector, error) {
-	return func(input string) (task.SettleDetector, error) {
+//
+// The initiating context (§4.2) is accepted and ignored: like every command
+// re-entry this feeds a tmux session, which is not bound to a generation.
+func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(context.Context, string) (task.SettleDetector, error) {
+	return func(_ context.Context, input string) (task.SettleDetector, error) {
 		if isTUI {
 			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
 		}
@@ -199,7 +203,7 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(st
 // SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
 // Relaunch✅ via redispatch through the resident agents map; Resume❌ — the
 // rounds chain has no event source, cross-restart resume returns guidance).
-func SubagentSpecFromDeclarative(redispatch func(agentName, body string) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec {
+func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec {
 	spec := task.TaskSpec{
 		Kind:        "subagent",
 		Desc:        decl.Desc,
@@ -217,11 +221,13 @@ func SubagentSpecFromDeclarative(redispatch func(agentName, body string) (task.S
 	}
 	if redispatch != nil && decl.AgentName != "" {
 		body := decl.MessageBody
-		spec.Relaunch = func() (task.SpawnResult, error) {
-			return redispatch(decl.AgentName, body)
+		spec.Relaunch = func(ctx context.Context) (task.SpawnResult, error) {
+			// The initiating context rides through to the resolver: a re-entry
+			// started by a live call keeps THAT call's binding (§4.2).
+			return redispatch(ctx, decl.AgentName, body)
 		}
 	}
-	spec.ResumeFn = func(string) (task.SettleDetector, error) {
+	spec.ResumeFn = func(_ context.Context, _ string) (task.SettleDetector, error) {
 		return nil, fmt.Errorf("跨重启的子 agent 会话上下文（多轮链）无事件源、不可恢复——请 relaunch_task 重新发起（rounds 事件化另立变更）")
 	}
 	return spec

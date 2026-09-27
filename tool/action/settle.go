@@ -145,6 +145,14 @@ func (d *TmuxSettleDetector) Settled() <-chan task.SettleSignal { return d.ch }
 // Cancel). Sidecar loops (probe) select on it to exit.
 func (d *TmuxSettleDetector) Done() <-chan struct{} { return d.stop }
 
+// Stopped implements task.SettleDetector (§4.1). For a tmux-backed run the
+// producer is an external session, so its stop credential is the same event that
+// closes the detector: Cancel reaps the session synchronously (kill + drop
+// monitor tracking) and then closes this channel; a terminal status closes it
+// after the last settle was emitted. Either way nothing behind the detector can
+// still touch shared state once it fires.
+func (d *TmuxSettleDetector) Stopped() <-chan struct{} { return d.stop }
+
 // Cancel implements task.SettleDetector: reaps the session and closes the
 // settle stream.
 func (d *TmuxSettleDetector) Cancel() {

@@ -201,7 +201,11 @@ func TestNotice_HotRebuild_StateContinues(t *testing.T) {
 	capture := &requestCapturingModel{resp: gateOKResp()}
 	cm := newTestContextManager("nt-hot", capture, nil, make(chan *event.Event, 16), nil)
 
-	r2 := cm.RebuildExecutor(ContextManagerConfig{}) // zero override → exec-snapshot fallback
+	// §2.1 migration: the old call passed a ZERO ContextManagerConfig and relied
+	// on RebuildExecutor merging it onto the previous snapshot. Merging is
+	// withdrawn — a cleared field now means a cleared binding — so the face to
+	// republish is handed over explicitly.
+	r2 := cm.PublishExecutor(cm.NewExecutorCandidate(cm.ExecutorConfig()), cm.ExecutorConfig())
 	require.NotNil(t, r2)
 	setNotice(cm, "[recovery] survives hot rebuild")
 

@@ -52,6 +52,43 @@ func TestValidate_AgentReferences(t *testing.T) {
 			errContains: "unknown agent",
 		},
 		{
+			// §3.3「校验域与构建域一致，远端引用不误要求本地定义」：buildAgentToolRef
+			// 对 Remote 引用走 A2A 分支，从不查本地 agents 表；校验域若仍要求本地定义，
+			// 一个纯远端委派（服务在别处的 agent）会在加载期被误判为引用不存在。
+			name: "remote a2a reference needs no local definition",
+			cfg: Config{
+				Entry: "tagent",
+				Agents: map[string]AgentConfig{
+					"tagent": {
+						Tools: []ToolRef{
+							{Kind: ToolKindAgent, AgentID: "knowledge", Description: "k",
+								Remote: &RemoteConfig{URL: "http://knowledge-service:8088"}},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			// 反向：声明了 remote 却没端点，构建域会当本地引用处理——那是「按声明意图
+			// 远端、按构建实际本地」的域偏离，必须在加载期明确拒绝而非静默降级。
+			name: "remote declaration without url is refused",
+			cfg: Config{
+				Entry: "tagent",
+				Agents: map[string]AgentConfig{
+					"tagent": {
+						Tools: []ToolRef{
+							{Kind: ToolKindAgent, AgentID: "knowledge", Description: "k",
+								Remote: &RemoteConfig{URL: "   "}},
+						},
+					},
+					"knowledge": {},
+				},
+			},
+			wantErr:     true,
+			errContains: "requires a url",
+		},
+		{
 			name: "plain tool with valid id",
 			cfg: Config{
 				Entry: "tagent",

@@ -80,3 +80,39 @@ func TestPartitionCollision_IsolatedStoresNoFalsePositive(t *testing.T) {
 }
 
 var _ model.Model = (*stubModel)(nil)
+
+// TestRemoteDeclarationOnlyKeepsTheGate guards the skip that lets a remote-only
+// reference survive a hot reload: it must apply ONLY where no owner can ever
+// exist. §5.11's gate exists to refuse a genuinely missing definition, so a name
+// that is also reached non-remotely — or that IS defined locally — must still be
+// refused, not silently published without an owner.
+func TestRemoteDeclarationOnlyKeepsTheGate(t *testing.T) {
+	remoteRef := ToolRef{Kind: ToolKindAgent, AgentID: "ghost", Remote: &RemoteConfig{URL: "http://127.0.0.1:1"}}
+	localRef := ToolRef{Kind: ToolKindAgent, AgentID: "ghost"}
+
+	onlyRemote := &Config{Entry: "a", Agents: map[string]AgentConfig{
+		"a": {Tools: []ToolRef{remoteRef}},
+	}}
+	require.True(t, remoteDeclarationOnly(onlyRemote, "ghost"),
+		"a name reached solely as a remote reference has no owner to build")
+
+	mixed := &Config{Entry: "a", Agents: map[string]AgentConfig{
+		"a": {Tools: []ToolRef{remoteRef}},
+		"b": {Tools: []ToolRef{localRef}},
+	}}
+	require.False(t, remoteDeclarationOnly(mixed, "ghost"),
+		"a non-remote reference to the same name needs a real owner: the gate must still fail closed")
+
+	defined := &Config{Entry: "a", Agents: map[string]AgentConfig{
+		"a":     {Tools: []ToolRef{remoteRef}},
+		"ghost": {},
+	}}
+	require.False(t, remoteDeclarationOnly(defined, "ghost"),
+		"a locally defined agent is never treated as declaration-only")
+
+	blankURL := &Config{Entry: "a", Agents: map[string]AgentConfig{
+		"a": {Tools: []ToolRef{{Kind: ToolKindAgent, AgentID: "ghost", Remote: &RemoteConfig{}}}},
+	}}
+	require.False(t, remoteDeclarationOnly(blankURL, "ghost"),
+		"a remote block without a URL is the mismatch §5.44 refuses at validation — it must not be skipped here either")
+}

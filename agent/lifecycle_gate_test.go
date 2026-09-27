@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,6 +249,124 @@ func TestLifecycle_BorrowedShellNeverClosesSharedStore(t *testing.T) {
 	assert.Equal(t, 0, sp.closeCalls(), "a leased holder never direct-closes the shared store")
 }
 
+// TestLifecycle_UnconvergedExecutionHoldsStoreLease — §4.1's other half of the
+// same scenario (spec 取消后生产者尚未退出): when an execution's producer never
+// confirms a stop, Close returns the unconverged report AND the store exit is NOT
+// taken while that writer may still be live. Releasing the lease under a
+// possibly-live writer is what would turn a stuck turn into a torn-down shared
+// store, so the honest outcome is an error plus an explicit hold.
+//
+// 〔轮九十三显式修订（§4.1 收口，evidence §5.49）〕this test used to close with
+// `assert.Zero(released)` after the barrier lifted — "the already-returned Close
+// does not retroactively exit the store". That half is WITHDRAWN: §4.1 makes the
+// same owner carry the remainder to the real stop and take it exactly once, so a
+// permanently-zero exit is the abandonment, not the contract. The completion is
+// asserted by TestLifecycle41_BoundedReturnThenExactlyOneFinalExit; what stays
+// here is what this test actually names — the HOLD while live, plus the honest
+// report. `released` is atomic because the deferred tail now runs off the
+// reclaim goroutine (measured: a real data race while this test still read a
+// plain int after the lift).
+func TestLifecycle_UnconvergedExecutionHoldsStoreLease(t *testing.T) {
+	drain, grace := turnDrainTimeout, execCloseGrace
+	turnDrainTimeout, execCloseGrace = 50*time.Millisecond, 50*time.Millisecond
+	defer func() { turnDrainTimeout, execCloseGrace = drain, grace }()
+
+	zombie := &countingRunner{}
+	cm := &ContextManager{name: "zombie-owner", runner: zombie}
+	var released atomic.Int32
+	ta := &TagentAgent{
+		outputCh:       make(chan *event.Event, 1),
+		contextManager: cm,
+		memStore:       memory.NewInMemoryStore(),
+		memStoreRelease: func() error {
+			released.Add(1)
+			return nil
+		},
+	}
+	stuck := cm.AcquireLease(LeaseTurn) // a producer that never comes back
+
+	err := ta.Close()
+	require.ErrorIs(t, err, ErrExecUnconverged, "a stuck execution must reach the host, not be normalised")
+	assert.Zero(t, released.Load(), "the store lease stays HELD while its writer may still be live")
+	assert.Zero(t, zombie.closed.Load(), "and the executor it runs on is not force-closed")
+
+	stuck.Release() // barrier lifts — the ordinary reclaim path takes over
+	assert.Equal(t, int64(1), zombie.closed.Load(), "the generation is reclaimed exactly once, after the stop")
+}
+
+// TestLifecycle41_BoundedReturnThenExactlyOneFinalExit is §4.1's terminal
+// contract. A bounded Close that reports an unconverged execution must not stop
+// being responsible for what it could not finish: when that producer ACTUALLY
+// stops, the SAME owner takes the final exit exactly once — with no new business
+// request, no second Close and no polling timer — and the resources a live
+// execution could still touch (its tool closers, the recorder, the store lease)
+// are not torn down before convergence is known.
+//
+// 〔轮九十三显式修订旧断言并记原因〕the predecessor here
+// (TestLifecycle_UnconvergedExecutionHoldsStoreLease) asserted
+// `released == 0` AFTER the barrier lifted, with the message "the already-
+// returned Close does not retroactively exit the store". That encoded exactly
+// the abandonment §4.1 removes: holding while live is right, but never finishing
+// leaves the writer slot and the owner registration held forever. The
+// still-holds-while-live half is kept in that test; the "never finishes" half is
+// superseded by this one.
+func TestLifecycle41_BoundedReturnThenExactlyOneFinalExit(t *testing.T) {
+	drain, grace := turnDrainTimeout, execCloseGrace
+	turnDrainTimeout, execCloseGrace = 50*time.Millisecond, 50*time.Millisecond
+	defer func() { turnDrainTimeout, execCloseGrace = drain, grace }()
+
+	zombie := &countingRunner{}
+	cm := &ContextManager{name: "tail-owner", runner: zombie}
+	var released atomic.Int32
+	var revoked atomic.Int32
+	closer := &slowErrCloser{}
+	ta := &TagentAgent{
+		outputCh:       make(chan *event.Event, 1),
+		contextManager: cm,
+		memStore:       memory.NewInMemoryStore(),
+		memStoreRelease: func() error {
+			released.Add(1)
+			return nil
+		},
+		// The assembly's owner registration — §4.1's third thing the tail owes:
+		// runner, store lease, AND this registration each exit exactly once.
+		storeOwnerRevoke: func() { revoked.Add(1) },
+	}
+	ta.RegisterCloser(closer)
+
+	stuck := cm.AcquireLease(LeaseTurn) // a producer that never confirms a stop
+
+	err := ta.Close()
+	require.ErrorIs(t, err, ErrExecUnconverged, "the first Close reports the unconverged list honestly")
+	assert.Equal(t, 0, closer.callsNow(),
+		"§4.1: while an execution may still be live, its still-used tool closers are not run before convergence is known")
+	assert.Zero(t, zombie.closed.Load(), "and its executor is held, never force-closed")
+	assert.Zero(t, released.Load(), "the store writer slot stays with the possibly-live writer")
+	assert.Zero(t, revoked.Load(), "and the owner registration is not dropped while the exit is unfinished")
+
+	// The barrier lifts. Nothing else happens: no new request, no second Close.
+	stuck.Release()
+
+	require.Eventually(t, func() bool { return released.Load() == 1 }, 2*time.Second, 10*time.Millisecond,
+		"§4.1: the same tail must take the store exit EXACTLY ONCE after the real stop")
+	assert.Equal(t, int64(1), zombie.closed.Load(), "the generation was reclaimed exactly once")
+	assert.Equal(t, 1, closer.callsNow(), "the deferred tool closer ran in the tail, exactly once")
+	// The registration follows the release inside the same tail step; wait rather
+	// than assume the two counters land in the same instant.
+	require.Eventually(t, func() bool { return revoked.Load() == 1 }, 2*time.Second, 10*time.Millisecond,
+		"§4.1: and this owner's registration was revoked by that same tail, once")
+
+	done, tailErr := ta.DeferredCloseOutcome()
+	require.True(t, done, "the final completion is recorded separately from the first report")
+	require.NoError(t, tailErr)
+
+	// The first error stays visible to the host, and a replayed Close re-runs
+	// nothing (并发/重复 Close 不重做清理).
+	require.ErrorIs(t, ta.Close(), ErrExecUnconverged, "the first bounded report is not rewritten")
+	assert.Equal(t, 1, closer.callsNow(), "the replay must not redo any cleanup")
+	assert.Equal(t, int32(1), released.Load(), "the store exit is exactly-once, not per-Close")
+}
+
 // TestLifecycle_ExecutorShellNeverClosesSharedStore — review M-2's REAL shell
 // shape: memStore points at the SHARED resident store and the shell holds NO
 // lease (release nil) and owns nothing — Close must leave the shared store
@@ -279,7 +398,7 @@ func TestLifecycle_IdleCloseSettlesOutputAfterInFlightTurns(t *testing.T) {
 	// One turn in flight when Close begins; it records whether the output was
 	// ALREADY closed while it was still streaming.
 	closedWhileInFlight := make(chan bool, 1)
-	cm.runnerInFlight.Add(1)
+	turnLease := cm.AcquireLease(LeaseTurn)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		select {
@@ -288,7 +407,7 @@ func TestLifecycle_IdleCloseSettlesOutputAfterInFlightTurns(t *testing.T) {
 		default:
 			closedWhileInFlight <- false // still open at the turn's tail — correct
 		}
-		cm.runnerInFlight.Add(-1)
+		turnLease.Release()
 	}()
 
 	require.NoError(t, ta.Close())

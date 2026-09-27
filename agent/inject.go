@@ -191,28 +191,38 @@ func (ta *TagentAgent) armMeditationNoveltyGate(source string) {
 	}
 }
 
-// IngestExternalEvents stores external events for later injection into
-// the agent's context. These events are typically from a parent agent
-// or external system.
+// IngestExternalEvents stores external events for the NEXT Run on this agent
+// (legacy direct API). It is a single-handoff slot, not a history buffer, and is
+// guarded so a concurrent Run's drain and this set never tear (§7.1 D2). The
+// primary delegation path delivers context via the invocation's RuntimeState and
+// never touches this shared slot.
 func (ta *TagentAgent) IngestExternalEvents(events []memory.FullEvent) {
+	ta.externalEventsMu.Lock()
 	ta.pendingExternalEvents = events
+	ta.externalEventsMu.Unlock()
 }
 
-// injectExternalContext converts pending external events into a context message
-// prepended to the user message. After injection, the pending events are cleared.
-//
-// Only EventSummary is injected — NOT the full Content. This keeps external context
-// compact so sub-agents stay within their token budget. The sub-agent retrieves full
-// event details via its own memory tools (memory_get, memory_query) if needed.
-func (ta *TagentAgent) injectExternalContext(msg model.Message) model.Message {
+// drainPendingExternalEvents atomically takes and clears the single-handoff slot
+// for the Run about to start, so the legacy direct-Ingest caller's events fold
+// into THAT call's local context and cannot carry into a second, concurrent Run.
+func (ta *TagentAgent) drainPendingExternalEvents() []memory.FullEvent {
+	ta.externalEventsMu.Lock()
+	defer ta.externalEventsMu.Unlock()
 	events := ta.pendingExternalEvents
-	ta.pendingExternalEvents = nil // Clear after consumption
+	ta.pendingExternalEvents = nil
+	return events
+}
 
+// applyExternalContext folds external events into the driving message as a
+// compact EventSummary prelude (never the full Content — external context stays
+// compact so sub-agents stay within their token budget; the sub-agent retrieves
+// full details via its own memory tools, memory_get/memory_query, if needed).
+// It is a pure function of (msg, events) — no shared `ta` state.
+func applyExternalContext(msg model.Message, events []memory.FullEvent) model.Message {
 	if len(events) == 0 {
 		return msg
 	}
 
-	// Build external context summary (EventSummary only — compact, no full Content)
 	var contextBuilder string
 	contextBuilder = "[External Context from Parent Agent]\n\n"
 	for i, evt := range events {

@@ -109,9 +109,9 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 		TypeResidentSession:        30, // R3 追加（resident-continuity-r2-r4）：常驻会话生命周期事实链记录，同上对齐
 		TypeInboxReceipt:           30, // RRP 3.4/3.5 追加：durable 输入的 fact-chain receipt，30 天即 request-id 去重窗口
 	}
-	for _, wfType := range WFExcludedTypes() { // durable-workflow-engine D4 追加：wf.* 内部事实默认 30 天
-		wantTTL[wfType] = 30
-	}
+	// wf.* 只为被动排除而注册，MUST NOT 进入类型 TTL 表（R05/6.2：曾经的 30 天
+	// override 会覆盖既有全局/显式保留，把历史记录提前淘汰）。此处显式钉住它们
+	// 缺席——新增排除家族不得顺带改变数据保留策略。
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)
 	}

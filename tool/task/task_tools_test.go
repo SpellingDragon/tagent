@@ -72,7 +72,7 @@ func TestRelaunchTaskTool(t *testing.T) {
 	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
 	relaunched := make(chan struct{}, 1)
 	spec := task.TaskSpec{Kind: "command", Desc: "cmd R"}
-	spec.Relaunch = func() (task.SpawnResult, error) {
+	spec.Relaunch = func(context.Context) (task.SpawnResult, error) {
 		relaunched <- struct{}{}
 		return task.SpawnResult{}, nil
 	}

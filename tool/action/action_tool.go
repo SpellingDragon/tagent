@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -39,12 +40,14 @@ type ActionTool struct {
 	reattachMu    sync.Mutex
 	reattachedMap map[string]task.SettleDetector
 
-	workspace     string
-	outputDir     string // oversized-output save dir (scratch), separate from command cwd
-	runAsUser     string
-	runAsGroup    string
-	description   string        // Configurable tool description
-	defaultTTL    time.Duration // resolved absolute lifetime for spawns that omit `ttl` (async-task-lifetime 10.2)
+	workspace   string
+	outputDir   string // oversized-output save dir (scratch), separate from command cwd
+	runAsUser   string
+	runAsGroup  string
+	description string        // Configurable tool description
+	defaultTTL  time.Duration // construction default for spawns that omit `ttl` (async-task-lifetime 10.2); the fallback when no ttlSource is installed / it reads zero
+	// ttlSource is the §6.4 live read face for that knob (see SetDefaultTTLSource).
+	ttlSource     atomic.Pointer[func() time.Duration]
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig // Optional: override default monitor config
@@ -224,22 +227,33 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 // is bounded; there is no "unlimited" default).
 const defaultTaskTTL = 10 * time.Minute
 
-// SetDefaultTaskTTL overrides the default absolute lifetime used for spawns that
-// omit `ttl`. build_agent reuses the operator's task_job_deadline slot as this
-// default (§10.5 folds the old detached-gated mechanism away). Non-positive
-// values are ignored so the 10-minute floor always holds.
-func (ct *ActionTool) SetDefaultTaskTTL(d time.Duration) {
-	if d > 0 {
-		ct.defaultTTL = d
+// SetDefaultTTLSource installs the §6.4 pull source for the spawn-time default
+// lifetime (introduce-durable-workflow-engine 6.4, spawner axis): the
+// composition root binds it to the owner's committed application record, so a
+// numeric-only rotation reaches every subsequent spawn without anyone pushing a
+// number into this tool. It replaces SetDefaultTaskTTL, which kept a second,
+// mutable copy of the same knob (and was a plain field: written on the reload
+// goroutine, read by business turns).
+func (ct *ActionTool) SetDefaultTTLSource(src func() time.Duration) {
+	if src == nil {
+		return
 	}
+	ct.ttlSource.Store(&src)
 }
 
 // resolveTTL returns the effective absolute lifetime for a spawn: explicit ttl
-// seconds when > 0, else the configured default, else the 10-minute floor. A
-// negative ttl is rejected in Call before this runs; 0 means "omit → default".
+// seconds when > 0, else the live source (a record reading that has no opinion —
+// zero/negative — falls through), else the configured default, else the
+// 10-minute floor. A negative ttl is rejected in Call before this runs; 0 means
+// "omit → default".
 func (ct *ActionTool) resolveTTL(args ActionArgs) time.Duration {
 	if args.TTL > 0 {
 		return time.Duration(args.TTL) * time.Second
+	}
+	if src := ct.ttlSource.Load(); src != nil {
+		if d := (*src)(); d > 0 {
+			return d
+		}
 	}
 	if ct.defaultTTL > 0 {
 		return ct.defaultTTL
@@ -539,8 +553,12 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 // (used by relaunch(id)). It starts a new session in a background context (the
 // original turn ctx may be gone) and re-spawns via the same task spawner; the
 // re-spawned task is itself relaunchable.
-func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func() (task.SpawnResult, error) {
-	return func() (task.SpawnResult, error) {
+//
+// The initiating context (§4.2) is accepted and ignored: a command re-run targets
+// a tmux session, not an orchestration generation, so there is no version to
+// resolve against.
+func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func(context.Context) (task.SpawnResult, error) {
+	return func(_ context.Context) (task.SpawnResult, error) {
 		sessionID, detector, err := ct.startSession(context.Background(), args)
 		if err != nil {
 			return task.SpawnResult{}, err
@@ -575,8 +593,10 @@ func (ct *ActionTool) sessionAliveClosure(sessionID string) func() bool {
 // watch never change hands, so there is no rebinding, no ordering discipline,
 // and no stale-signal risk. TUI sessions refuse resume (send-keys would
 // corrupt the screen). Returned to the task layer as TaskSpec.ResumeFn.
-func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(string) (task.SettleDetector, error) {
-	return func(input string) (task.SettleDetector, error) {
+//
+// The initiating context (§4.2) is accepted and ignored — see relaunchClosure.
+func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(context.Context, string) (task.SettleDetector, error) {
+	return func(_ context.Context, input string) (task.SettleDetector, error) {
 		if isTUI {
 			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
 		}

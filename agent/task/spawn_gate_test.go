@@ -16,6 +16,10 @@ func (neverSettleDetector) Detached() <-chan struct{} {
 }                                   // detach immediately: spawn returns ack
 func (neverSettleDetector) Cancel() {}
 
+// Stopped never fires: this stub has no producer at all (the gate test only
+// checks adoption bookkeeping, never a real stop credential).
+func (neverSettleDetector) Stopped() <-chan struct{} { return make(chan struct{}) }
+
 // TestSpawnGate (5.4, design-report-closeout): the disk-degradation spawn gate
 // rejects NEW spawns with a readable reason while disabled by default (nil
 // gate = zero behavior change). In-flight tasks are never gated.

@@ -58,25 +58,29 @@ func NewCleaner(root string, interval, maxAge time.Duration, maxFiles int) *Clea
 	return &Cleaner{root: Root(root), interval: interval, maxAge: maxAge, maxFiles: maxFiles, now: time.Now}
 }
 
-// Start runs the cleaner on a ticker until ctx is cancelled. It performs an
-// immediate pass, then one per interval.
-func (c *Cleaner) Start(ctx context.Context) {
+// Start runs the cleaner on a ticker until ctx is cancelled, in its own
+// goroutine. Use Run when the caller must observe the goroutine's exit.
+func (c *Cleaner) Start(ctx context.Context) { go c.Run(ctx) }
+
+// Run is Start's blocking form: it returns once ctx is cancelled and the ticker
+// is released. The agent's close sequence waits on it, so "the maintenance
+// producer stopped" is a fact the host can confirm rather than an assumption
+// about a goroutine it cannot see.
+func (c *Cleaner) Run(ctx context.Context) {
 	if c.interval <= 0 {
 		return
 	}
-	go func() {
-		c.RunOnce()
-		ticker := time.NewTicker(c.interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				c.RunOnce()
-			}
+	c.RunOnce()
+	ticker := time.NewTicker(c.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.RunOnce()
 		}
-	}()
+	}
 }
 
 // RunOnce performs a single cleanup pass (exported for tests / manual trigger).

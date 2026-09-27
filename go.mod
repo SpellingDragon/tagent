@@ -6,8 +6,8 @@ require (
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.38.0
 	gopkg.in/yaml.v3 v3.0.1
-	trpc.group/trpc-go/trpc-a2a-go v0.2.5
-	trpc.group/trpc-go/trpc-agent-go v1.10.0
+	trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb
+	trpc.group/trpc-go/trpc-agent-go v1.11.2
 	trpc.group/trpc-go/trpc-agent-go/model/provider v1.10.0
 )
 
@@ -22,6 +22,9 @@ require (
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.29.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.29.0 // indirect
+	go.opentelemetry.io/otel/sdk/metric v1.38.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	trpc.group/trpc-go/trpc-mcp-go v0.0.10 // indirect
 )
@@ -95,3 +98,8 @@ require (
 	trpc.group/trpc-go/trpc-agent-go/model/gemini v1.10.0 // indirect
 	trpc.group/trpc-go/trpc-agent-go/model/ollama v1.10.0 // indirect
 )
+
+// R1 (design D6): the producer-done fix is pinned to the published fork tag
+// (v1.11.2 + the 4 stream-close-contract commits), so nothing here depends on an
+// out-of-tree local checkout any more. Upstream PR #2637 carries the same commits.
+replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1

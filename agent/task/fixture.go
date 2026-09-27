@@ -21,10 +21,16 @@ type ManualDetector struct {
 	can        bool
 	det        chan struct{}
 	detachOnce sync.Once
+	stopped    chan struct{}
+	stopOnce   sync.Once
 }
 
 func NewManualDetector() *ManualDetector {
-	return &ManualDetector{ch: make(chan SettleSignal, 4), det: make(chan struct{})}
+	return &ManualDetector{
+		ch:      make(chan SettleSignal, 4),
+		det:     make(chan struct{}),
+		stopped: make(chan struct{}),
+	}
 }
 
 // NewManualDetectorDetach returns a detector that auto-detaches after `after`,
@@ -40,10 +46,19 @@ func NewManualDetectorDetach(after time.Duration) *ManualDetector {
 }
 func (m *ManualDetector) Settled() <-chan SettleSignal { return m.ch }
 func (m *ManualDetector) Detached() <-chan struct{}    { return m.det }
+
+// Stopped mirrors the production contract (the real detector closes it when its
+// producer goroutine returns). A fixture has no producer, so Cancel — the signal
+// that its simulated work is over — closes it; FireStop drives it explicitly when
+// a test needs the "cancelled but not yet stopped" window.
+func (m *ManualDetector) Stopped() <-chan struct{} { return m.stopped }
+func (m *ManualDetector) FireStop()                { m.stopOnce.Do(func() { close(m.stopped) }) }
+
 func (m *ManualDetector) Cancel() {
 	m.mu.Lock()
 	m.can = true
 	m.mu.Unlock()
+	m.FireStop()
 }
 func (m *ManualDetector) Cancelled() bool       { m.mu.Lock(); defer m.mu.Unlock(); return m.can }
 func (m *ManualDetector) Emit(sig SettleSignal) { m.ch <- sig }

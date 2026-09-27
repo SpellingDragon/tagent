@@ -9,7 +9,9 @@ package tagent
 // consumed-not, and wiped-not.
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -114,7 +116,7 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 		"TAGENT_TRI_SPILL="+filepath.Join(root, "spill"),
 		"TAGENT_TRI_ANCHOR="+filepath.Join(root, "anchor"))
 	runChild := func(phase string) {
-		runRaceExemptChild(t, env, triPhaseEnv+"="+phase, "TestLatestPathOnly_ThreeBootStates$")
+		runBootChild(t, env, triPhaseEnv+"="+phase, "TestLatestPathOnly_ThreeBootStates$")
 	}
 
 	// STATE 1 — brand-new dirs (child process): boot + one real durable turn.
@@ -144,10 +146,12 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 	runChild("3")
 }
 
-// triRaceOnlyFramework reports a child failure whose EVERY DATA RACE block
-// involves zero tagent frames — the pre-existing trpc-agent-go lifecycle
-// family. Deliberately conservative: one tagent frame anywhere vetoes the
-// exemption and the run fails with the full log.
+// triRaceOnlyFramework CLASSIFIES a child failure whose EVERY DATA RACE block
+// involves zero tagent frames — the pre-existing trpc-agent-go lifecycle family.
+// Since §6.6 it is a DIAGNOSTIC LABEL ONLY: it names a known upstream family for
+// triage, but it NEVER suppresses a child failure. `runBootChild` fails acceptance
+// on ANY DATA RACE regardless of this verdict. Deliberately conservative: one
+// tagent frame anywhere, or any assertion/panic, yields false.
 func triRaceOnlyFramework(out []byte) bool {
 	text := string(out)
 	if !strings.Contains(text, "DATA RACE") || !strings.Contains(text, "--- FAIL") {
@@ -235,6 +239,10 @@ func triRaceOnlyFramework(out []byte) bool {
 // verified against (evidence §8.1/§8.8/§8.9). The exemption is bound to it so a
 // framework upgrade can never silently widen or mislabel the exempt set: bump
 // go.mod and the family exemption lapses until the races are re-registered here.
+// 2026-09-23: both families are FIXED upstream in v1.11.2 (steer: #1926/#2165/
+// #2462; session: EventMu widened over UpdatedAt) — the registration stays at
+// v1.10.0 deliberately, so on the upgraded link the exemption stays LAPSED and
+// any reappearance fails as an unknown (new) race.
 const registeredFamilyVersion = "v1.10.0"
 
 // familyExemptionEnabled gates the registered-race-family exemption on the linked
@@ -275,17 +283,22 @@ func trpcAgentVersionFromGoMod() string {
 	return ""
 }
 
+// TestTriRaceOnlyFrameworkClassifier exercises the DIAGNOSTIC classifier only —
+// it names a known upstream family vs. an unknown/tagent/assertion/panic shape.
+// It does NOT describe acceptance: since §6.6 no recognized family is exempt
+// (see TestBootChildVerdictNoExemption for the acceptance decision).
 func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	race := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
-	require.True(t, triRaceOnlyFramework([]byte(race)), "pure framework race is exempt")
+	require.True(t, triRaceOnlyFramework([]byte(race)), "pure framework race is classified as the upstream family")
 	tagentFrame := strings.Replace(race, "trpc.group/x/runner.Close()", "github.com/SpellingDragon/tagent/agent.go:1 x()", 1)
 	origin := strings.Replace(race, "FAIL\n", "Goroutine 1 (running) created at:\n  github.com/SpellingDragon/tagent/test.go:1 t()\nFAIL\n", 1)
-	require.True(t, triRaceOnlyFramework([]byte(origin)), "created-at ancestor test frames do not veto the framework family")
-	require.False(t, triRaceOnlyFramework([]byte(tagentFrame)), "an unknown race with a tagent frame is never exempt")
-	// The steer family IS exempt even when our model wrapper rides the call
-	// chain — the raced object is framework-private and product-free.
+	require.True(t, triRaceOnlyFramework([]byte(origin)), "created-at ancestor test frames do not change the framework-family classification")
+	require.False(t, triRaceOnlyFramework([]byte(tagentFrame)), "an unknown race with a tagent frame is never classified as framework-only")
+	// The steer family is CLASSIFIED even when our model wrapper rides the call
+	// chain — the raced object is framework-private and product-free. (Label only;
+	// acceptance still fails it — TestBootChildVerdictNoExemption.)
 	fam := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n==================\nRead at 0x1:\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
-	require.True(t, triRaceOnlyFramework([]byte(fam)), "family signature + wrapper frame stays exempt")
+	require.True(t, triRaceOnlyFramework([]byte(fam)), "family signature + wrapper frame is classified as framework (when the family is registered)")
 	assertion := strings.Replace(race, "testing.go:1: race detected during execution of test", "Error: Should be true", 1)
 	require.False(t, triRaceOnlyFramework([]byte(assertion)), "an assertion failure is never exempt")
 	require.False(t, triRaceOnlyFramework([]byte("--- FAIL: TestX\n    Error: boom\n")), "non-race failure not exempt")
@@ -305,30 +318,82 @@ func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	// (2.3b) version binding: a tagent wrapper frame riding a REGISTERED family
 	// block is exempt only while the linked version matches the registration.
 	familyWithTagent := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
-	require.True(t, familyExemptionEnabled(), "linked trpc-agent-go must equal the registered family version for the exemption to hold")
-	require.True(t, triRaceOnlyFramework([]byte(familyWithTagent)), "at the registered version the family exemption covers the wrapper frame")
+	// Since the v1.11.2 upgrade BOTH registered families are fixed upstream
+	// (steer: #1926 queue cancel signal + #2165/#2462 clone elimination; session:
+	// UpdateUserSession's EventMu widened over UpdatedAt), so a linked version
+	// that differs from the v1.10.0 registration MUST leave the exemption lapsed
+	// — any reappearance is a NEW race and must fail as unknown.
+	require.False(t, familyExemptionEnabled(), "linked trpc-agent-go must NOT equal the v1.10.0 registration after the upgrade: both families are fixed upstream, so the classifier's family branch is lapsed and a reappearance is labeled unknown")
 	orig := familyExemptionEnabled
+	t.Cleanup(func() { familyExemptionEnabled = orig })  // reliable restore even if an assertion below panics (§6.6 global-stub cleanup)
+	familyExemptionEnabled = func() bool { return true } // simulate the registered link
+	require.True(t, triRaceOnlyFramework([]byte(familyWithTagent)), "at the registered version the classifier recognizes the family + wrapper frame")
 	familyExemptionEnabled = func() bool { return false } // simulate a framework upgrade
-	defer func() { familyExemptionEnabled = orig }()
-	require.False(t, triRaceOnlyFramework([]byte(familyWithTagent)), "when the version no longer matches, the family exemption lapses and the wrapper frame vetoes")
+	require.False(t, triRaceOnlyFramework([]byte(familyWithTagent)), "when the version no longer matches, the classifier stops recognizing the family + wrapper frame")
 }
 
-// runRaceExemptChild executes a boot child process. The ONLY tolerated child
-// failure is the registered pre-existing framework race family (v1.10.0
-// steer.Queue.Close × invocation-state clone, evidence §8.1/§8.8/§8.9) whose
-// accessor stacks are framework-internal; any assertion failure, panic or
-// race with a tagent accessor frame fails hard with the full log.
-func runRaceExemptChild(t *testing.T, baseEnv []string, kv string, testFilter string) {
+// TestBootChildVerdictNoExemption is the §6.6 acceptance fail-before: the boot-child
+// verdict must REJECT every race shape, including the pure-upstream family the old
+// `runRaceExemptChild` swallowed via triRaceOnlyFramework. Before §6.6 a pure-
+// framework race and the created-at ancestor-frame variant yielded ok=true (exempt);
+// now both yield ok=false. The classifier still LABELS the family, but the label no
+// longer changes the verdict.
+func TestBootChildVerdictNoExemption(t *testing.T) {
+	exit := errors.New("exit status 1")
+	frameworkRace := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
+	// Classifier still recognizes the family (diagnostic)...
+	require.True(t, triRaceOnlyFramework([]byte(frameworkRace)), "classifier labels the pure-upstream family")
+	// ...but acceptance no longer exempts it.
+	ok, _ := childOutcome([]byte(frameworkRace), exit)
+	require.False(t, ok, "§6.6: a pure-upstream race must FAIL acceptance (the old exempt path returned true)")
+
+	originRace := strings.Replace(frameworkRace, "FAIL\n", "Goroutine 1 (running) created at:\n  github.com/SpellingDragon/tagent/test.go:1 t()\nFAIL\n", 1)
+	ok, _ = childOutcome([]byte(originRace), exit)
+	require.False(t, ok, "created-at ancestor tagent frames do not rescue a race from failing")
+
+	tagentRace := strings.Replace(frameworkRace, "trpc.group/x/runner.Close()", "github.com/SpellingDragon/tagent/agent.go:1 x()", 1)
+	ok, _ = childOutcome([]byte(tagentRace), exit)
+	require.False(t, ok, "a race with a tagent accessor frame fails")
+
+	assertionOnly := "--- FAIL: TestX\n    main_test.go:9: Error: want 1 got 2\nFAIL\n"
+	ok, _ = childOutcome([]byte(assertionOnly), exit)
+	require.False(t, ok, "a non-race child failure still fails")
+
+	clean := "=== RUN   TestX\n--- PASS: TestX (0.00s)\nPASS\nok  \tgithub.com/SpellingDragon/tagent\t0.01s\n"
+	ok, note := childOutcome([]byte(clean), nil)
+	require.True(t, ok, "a clean child passes: "+note)
+}
+
+// childOutcome decides a boot child's acceptance (§6.6「关闭全部 race 豁免」). NO
+// data race — pure-upstream family included — may pass; every DATA RACE fails.
+// triRaceOnlyFramework is consulted ONLY to label a sighting for triage; it does
+// not change the verdict. Non-race non-zero exits also fail.
+func childOutcome(out []byte, err error) (ok bool, note string) {
+	if bytes.Contains(out, []byte("DATA RACE")) {
+		if triRaceOnlyFramework(out) {
+			return false, "known upstream framework race family (diagnostic label only; §6.6: any race still fails acceptance)"
+		}
+		return false, "unclassified data race"
+	}
+	if err != nil {
+		return false, "child exited non-zero without a race"
+	}
+	return true, ""
+}
+
+// runBootChild executes a boot child process and requires a CLEAN run: zero data
+// races and a zero exit. Since §6.6 the acceptance path keeps NO race exemption —
+// a race of any stack shape fails with the full log. (The v1.11.2 upgrade fixed the
+// old steer/session families this harness once had to tolerate; §6.3 established
+// that producer-done is not a stream-close, so tagent must not paper over lifecycle
+// races either.)
+func runBootChild(t *testing.T, baseEnv []string, kv string, testFilter string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run", testFilter, "-test.timeout", "120s")
 	cmd.Env = append(baseEnv, kv)
 	out, err := cmd.CombinedOutput()
-	if err != nil && triRaceOnlyFramework(out) {
-		t.Log("registered framework-internal race family sighted in child (exempt per evidence)")
-		return
-	}
-	require.NoErrorf(t, err, "child failed:\n%s", out)
-	require.NotContains(t, string(out), "DATA RACE", "child hit an unregistered data race:\n%s", out)
+	ok, note := childOutcome(out, err)
+	require.Truef(t, ok, "boot child must pass with ZERO races (§6.6: no exemption) — %s:\n%s", note, out)
 }
 
 // triChildPhase runs one boot state inside its own process.

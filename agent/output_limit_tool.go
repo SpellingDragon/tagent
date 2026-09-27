@@ -17,6 +17,23 @@ import (
 // 长上下文下溢出保护形同不存在（与 event_bus.go settleInlineCapChars 移除"无主公式意外"自洽）。
 const toolOutputCapChars = 60_000
 
+// outputCapForMaxTokens derives an OutputLimitTool's max-chars from a
+// construction-time MaxTokens budget (A6 ratio MaxTokens/2*4, floored/capped to
+// toolOutputCapChars). It is called ONLY when agent.New wraps tools — never from
+// the hot-reload path (§2.4/D4 M-3): the output cap is a construction-derived
+// boundary, intentionally NOT one of the five independent hot axes, so a
+// hot `max_tokens` change must NOT silently resize an already-published tool's
+// cap (that would re-introduce the "fold every number into the hot face /
+// fingerprint" fallacy D4 rejects). Re-derivation happens on the next structural
+// rebuild from the current effective config.
+func outputCapForMaxTokens(maxTokens int) int {
+	derived := maxTokens / 2 * 4
+	if derived <= 0 || derived > toolOutputCapChars {
+		return toolOutputCapChars
+	}
+	return derived
+}
+
 // OutputLimitTool wraps a CallableTool and handles output that exceeds
 // maxChars. When the serialized result exceeds the limit, the full output
 // is saved to a file and a summary with the file path is returned instead.
@@ -47,6 +64,18 @@ func (t *OutputLimitTool) SetWorkspace(dir string) {
 // Declaration returns the inner tool's declaration unchanged.
 func (t *OutputLimitTool) Declaration() *trpctool.Declaration {
 	return t.inner.Declaration()
+}
+
+// Unwrap exposes the wrapped tool so a caller that must identify a specific
+// inner tool can see through this transparent pass-through layer. agent.New
+// wraps EVERY tool — including sub-agent delegation wrappers — in an
+// OutputLimitTool, so a published execution face holds
+// OutputLimitTool(*AgentToolWrapper), never the bare wrapper. Because
+// OutputLimitTool preserves the inner declaration unchanged, peeling it never
+// changes which target a name resolves to (introduce-durable-workflow-engine
+// §4.2: resolving a relaunch target against the effective face).
+func (t *OutputLimitTool) Unwrap() trpctool.Tool {
+	return t.inner
 }
 
 // Call executes the inner tool and intercepts the output if it exceeds maxChars.

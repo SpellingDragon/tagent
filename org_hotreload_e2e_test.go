@@ -86,7 +86,7 @@ func TestOrgHotShift_EndToEnd(t *testing.T) {
 }
 
 // TestOrgHotReload_ExecutorSwapEndToEnd（R4，resident-continuity-r2-r4 roadmap 4.5）：
-// 结构变更（fingerprint 变化）→ executorOnly 重建壳 → SwapExecutor 换入 →
+// 结构变更（fingerprint 变化）→ executorOnly 面装配 → PublishExecutor 换入 →
 // 非重启换代生效且常驻不变量原封。与 TestOrgHotShift_EndToEnd（incremental A
 // 全链路懒检查）互补：本测聚焦 B 面（换缝）缝合点。
 // fail-before 对照：不 Swap（旧「RESTART required」方案）时 Runner 引用永不变化。
@@ -135,8 +135,10 @@ func TestOrgHotReload_ExecutorSwapEndToEnd(t *testing.T) {
 	// 3) fail-before 对照：不 Swap 时（旧「RESTART required」方案）结构变更不可见。
 	require.Same(t, oldRunner, resident.Runner(), "pre-swap: runner unchanged (structural change invisible)")
 
-	// 4) SwapExecutor：非重启换代生效（下一 turn 起新 runner）。
-	resident.SwapExecutor(newRunner)
+	// 4) 非重启换代生效（下一 turn 起新 runner）——走 CM 级发布入口；
+	// `TagentAgent.SwapExecutor` 那层纯转发已按 §5.1 删除（它自己的文档就把
+	// 编排换代指向 CM 级入口，且无生产调用方）。
+	resident.ContextManager().PublishExecutor(newRunner, resident.ContextManager().ExecutorConfig())
 	require.Same(t, newRunner, resident.Runner(), "post-swap: next turn sees the new runner")
 
 	// 5) 常驻不变量：org 级基础设施原封（状态⊥执行器）。

@@ -1,6 +1,7 @@
 package tagent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -113,9 +114,10 @@ func buildAgentDFS(
 	if mode.isExecutorShell() {
 		// 4.5（resident-readiness-plan）：热更壳子树按 **agent 身份**借用其常驻
 		// 资源（store 取自身份绑定表），绝不全部复用 entryMemStore——否则子
-		// agent 的存储归属随代际漂移（F06）。拓扑增减已在 reloader 拒绝，故
-		// 此处必能命中；未命中（防御）回落 entry store。租约归常驻层，壳不 acquire。
-		if ra := rc.residentAgents[name]; ra != nil {
+		// agent 的存储归属随代际漂移（F06）。§4.3 起新增 agent 在候选发布前已
+		// 并入此表，故此处对全拓扑必能命中；未命中（防御）回落 entry store。
+		// 租约归常驻层，壳不 acquire。
+		if ra := rc.resident.Get(name); ra != nil {
 			memStore = ra.MemStore()
 		} else {
 			memStore = rc.entryMemStore
@@ -218,6 +220,52 @@ func buildAgentDFS(
 		}
 	}()
 
+	// S-A/2.3 构造拆分：中段（prompt/model/tools/decorators→TagentConfig）与
+	// 尾段（NewTagentAgent＋全部 post 接线）各自成函数——face 路径（buildAgentFace）
+	// 复用中段为已存在 agent 装配换代 face 而**不构造** TagentAgent（D1 去壳）。
+	// 失败时 store 半的 buildOK defer 仍释放租约（此处提前 return 保持 false）。
+	assembled, aerr := assembleAgentConfig(name, acfg, cfg, rc, loader, memStore, degradationMgr, hintTracker, cache, mode, stack, subagentCollectors)
+	if aerr != nil {
+		return nil, aerr
+	}
+	// 工厂产物也是配置（轮九十一合同）：与 config-driven 同走唯一构造尾段，
+	// store 租约进 TagentConfig.MemStoreRelease 同一退出槽。
+	ta, werr := wireAgent(name, cfg, rc, assembled, memStore, memStoreRelease, etsHolder, hintTracker, mode, cache)
+	if werr != nil {
+		return nil, werr
+	}
+	buildOK = true
+	return ta, nil
+}
+
+// assembledAgent is buildAgentDFS 的中段（S-A/2.3 构造拆分）：装配完成的
+// TagentConfig＋其 ActionTool 句柄。ToolAgentFactory 分支同样只产配置（轮九十一
+// 合同），face/runCfg/构造路径与 config-driven 完全同轨——不存在「无法去壳」的
+// 第二 owner 形态。
+type assembledAgent struct {
+	cfg        *agent.TagentConfig
+	actionTool *action.ActionTool
+}
+
+// assembleAgentConfig is buildAgentDFS 的中段（S-A/2.3 构造拆分）：system
+// prompt/model/tools/decorators/治理包裹/meditation/TTL 解析 → TagentConfig。
+// 相对 agent 构造纯净——buildAgentFace 复用它为已存在 agent 装配换代 face
+// 而不 NewTagentAgent。store 半的产物（memStore/degradationMgr/hintTracker）
+// 是它的输入。
+func assembleAgentConfig(
+	name string,
+	acfg AgentConfig,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	memStore memory.MemoryStore,
+	degradationMgr *reliability.DegradationManager,
+	hintTracker *ConsolidationHintTracker,
+	cache map[string]*agent.TagentAgent,
+	mode buildMode,
+	stack map[string]bool,
+	subagentCollectors []func(name string, w *agent.AgentToolWrapper),
+) (*assembledAgent, error) {
 	// 2. Resolve system prompt
 	systemPrompt, err := loader.LoadComposite(
 		acfg.SystemPrompt.Inline,
@@ -316,13 +364,29 @@ func buildAgentDFS(
 				factoryCfg.MCPRegistry = rc.mcpRegistry
 			}
 
-			ta, err := factory(factoryCfg)
+			fcfg, err := factory(factoryCfg)
 			if err != nil {
 				return nil, fmt.Errorf("agent %q: factory failed: %w", name, err)
 			}
-
-			cache[name] = ta
-			return ta, nil
+			if fcfg == nil {
+				// The wrapped shape stays the fail-closed match surface (§5.45); a
+				// nil declaration is a factory bug, reported as one, never a silent
+				// fall-through to the config path (that would serve a different
+				// agent than the operator registered).
+				return nil, fmt.Errorf("agent %q: factory failed: produced no configuration", name)
+			}
+			// 合同（轮九十一）：工厂只交声明，构造归唯一 wireAgent 尾段——
+			// store 租约因此走与配置路径同一退出槽（最后一步、未收敛不归还），
+			// 工厂分支不再有「无人接手的租约」这整类缺陷（§5.45 的泄漏是它的症状）。
+			// 身份兜底：Name 尊重工厂所设（既有承诺），空回落注册名；store 由
+			// 装配兜底（工厂自开 store 时不得再塞组织租约）。
+			if fcfg.Name == "" {
+				fcfg.Name = name
+			}
+			if fcfg.MemoryStore == nil {
+				fcfg.MemoryStore = memStore
+			}
+			return &assembledAgent{cfg: fcfg}, nil
 		}
 	}
 
@@ -331,8 +395,6 @@ func buildAgentDFS(
 	var actionTool *action.ActionTool
 	// R2：本 agent 工具面里的 subagent wrapper 表（冷启动 registry 重建的
 	// redispatch 数据源；与 subagentCollectors 变参收集同点位）。
-	localSubagentWrappers := map[string]*agent.AgentToolWrapper{}
-
 	for _, tr := range acfg.Tools {
 		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), mode, stack, subagentCollectors...)
 		if err != nil {
@@ -344,8 +406,6 @@ func buildAgentDFS(
 			if acfg.ResumeContextRounds > 0 {
 				w.SetResumeContextRounds(acfg.ResumeContextRounds)
 			}
-			// R2：收集 wrapper 供冷启动 registry 重建的 subagent redispatch 表。
-			localSubagentWrappers[w.DeclaredAgentName()] = w
 			for _, collect := range subagentCollectors {
 				collect(w.DeclaredAgentName(), w)
 			}
@@ -436,8 +496,7 @@ func buildAgentDFS(
 		Name:        name,
 		Model:       agentModel,
 		MemoryStore: memStore,
-		// 4.2：租约释放绑定本 agent 的 Close（registry 归零才真关共享 store）。
-		MemStoreRelease: memStoreRelease,
+		// MemStoreRelease 由 wireAgent 注入（store 半产物；face 路径无租约）。
 		// §6.3/review M-2：执行壳只借用常驻 store，既不持租约也非独享 owner——
 		// Close 对共享状态零权限（直关 fallback 绝不触发）。
 		MemStoreBorrowed: mode.isExecutorShell(),
@@ -559,6 +618,29 @@ func buildAgentDFS(
 		}
 	}
 
+	return &assembledAgent{cfg: agentCfg, actionTool: actionTool}, nil
+}
+
+// wireAgent is buildAgentDFS 的尾段（S-A/2.3 构造拆分）：NewTagentAgent＋全部
+// post 构造接线（resident-session sink、evolution/governance 通道、WAL 重建、
+// wrapper owner 挂载、closer 登记、缓存写入）。只有本段构造 TagentAgent；
+// face 路径（buildAgentFace）到中段为止。memStoreRelease/etsHolder 属 store
+// 半产物，在此注入 cfg/重放接线。
+func wireAgent(
+	name string,
+	cfg Config,
+	rc *runtimeConfig,
+	assembled *assembledAgent,
+	memStore memory.MemoryStore,
+	memStoreRelease func() error,
+	etsHolder *memory.ErrorTrackingStore,
+	hintTracker *ConsolidationHintTracker,
+	mode buildMode,
+	cache map[string]*agent.TagentAgent,
+) (*agent.TagentAgent, error) {
+	agentCfg := assembled.cfg
+	agentCfg.MemStoreRelease = memStoreRelease
+	actionTool := assembled.actionTool
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
@@ -572,10 +654,17 @@ func buildAgentDFS(
 			actionTool.SetResidentMetaDir(cfg.ResidentMetaDir)
 		}
 		// async-task-lifetime 10.5: the operator's task_default_ttl slot is the single
-		// DEFAULT absolute TTL for spawns that omit `ttl`. Empty (0) keeps the
-		// 10-minute floor inside SetDefaultTaskTTL; the old detached-gated
-		// task_job_deadline enforcement is retired — this slot has one meaning.
-		actionTool.SetDefaultTaskTTL(agentCfg.TaskDefaultTTL)
+		// DEFAULT absolute lifetime for spawns that omit `ttl`. It reaches the tool as
+		// a live source now (§6.4), so a numeric-only apply needs no re-push; a zero
+		// reading keeps the 10-minute floor inside the tool.
+		actionTool.SetDefaultTTLSource(spawnerTTLSource(ta)) // §6.4 spawner axis: live record, not a re-pushed number
+	}
+
+	// §4.3: owners that come through here AFTER assembly was armed (hot-add,
+	// rollback re-acquisition) self-arm the drain-forward check from the assembly
+	// bag, so no owner ever needs a business turn to finish retiring one it holds.
+	if fn := rc.retirementPoke.Load(); fn != nil {
+		ta.ContextManager().SetRetirementPoke(*fn)
 	}
 
 	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
@@ -641,7 +730,14 @@ func buildAgentDFS(
 		tm.SetSessionTracker(actionTool.IsTrackedSession)
 	}
 	if tm := ta.TaskManager(); tm != nil && mode.ownsPersistentState() {
-		redispatch := agent.SubagentRedispatcher(localSubagentWrappers, tm)
+		// §4.2（task-registry-rebuild）：重投递按**当前有效执行面**解析目标，而不是
+		// 冻结此刻的 wrapper 表——本块只在常驻构建里跑（热更壳不进 ownsPersistentState），
+		// 若传快照，后续代移除的目标仍会被旧代绑定静默复活。现在与普通委派同源。
+		redispatch := agent.SubagentRedispatcher(func(ctx context.Context, name string) (*agent.AgentToolWrapper, *agent.ExecLease, error) {
+			// §4.2: one resolution rule for every re-entry — the initiating call's
+			// binding when there is one, the effective face otherwise.
+			return agent.ResolveReentryDelegation(ctx, ta.ContextManager(), name)
+		}, tm)
 		rebuildClosures := func(decl task.Declarative) task.TaskSpec {
 			switch decl.Kind {
 			case "command":
@@ -716,9 +812,80 @@ func buildAgentDFS(
 	// This must happen after TagentAgent creation (projection is created inside NewTagentAgent).
 	ta.SetToolParentProjection()
 
+	// §4.2 (R03): give every delegation wrapper the handle a stored task's re-entry
+	// reads the EFFECTIVE face from — and it must be the RESIDENT owner's cm. A
+	// candidate shell is discarded right after its runner is published, so binding
+	// `ta`'s cm here would freeze a dead face and re-entries would route off it
+	// forever (the same class of defect as borrowing a shell's projection). New
+	// agents are merged into the resident table before the candidate builds (§4.3),
+	// so a miss here is defensive: nil owner ⇒ the re-entry refuses with a reason
+	// rather than guessing a face.
+	ownerCM := ta.ContextManager()
+	if !mode.ownsPersistentState() {
+		ownerCM = nil
+		if ra := rc.resident.Get(name); ra != nil {
+			ownerCM = ra.ContextManager()
+		}
+	}
+	ta.SetDelegationOwnerCM(ownerCM)
+
+	// §4.3/R02: whoever registered the store-owner entry is the one that revokes
+	// it, and only after its OWN store exit was really taken (closeOnce calls this
+	// hook). An executor shell borrows the resident store and must never revoke the
+	// resident owner's registration — that would reopen the partition to a second
+	// writer while the real owner is still serving.
+	if !mode.isExecutorShell() {
+		ownerName := name
+		ta.SetStoreOwnerRevoker(func() { rc.unRegisterStoreOwner(ownerName) })
+	}
+
 	cache[name] = ta
-	buildOK = true // 构建成功：取消失败回收 defer（审查 Nit5）
 	return ta, nil
+}
+
+// buildAgentFace assembles an EXISTING agent's next-generation execution face
+// WITHOUT constructing a TagentAgent (S-A/2.3 去壳，D1「热更换代不复制 agent 状态」）:
+// shell-semantics store borrowing + the SAME assembleAgentConfig middle, then
+// agent.BuildExecutionFace. Refs resolve from cache — the caller supplies the
+// candidate domain (resident snapshot ∪ this round's hot-adds; the transitional
+// shell died with S-D/3.2 round 90), so EVERY owner — changed or not, factory-
+// declared or config-driven — contributes ZERO constructions; only a genuine
+// cache miss recurses into buildAgentDFS (via buildToolFromRef).
+//
+// Deliberately NOT built here (dead weight the discarded shell carried): the
+// degradation manager — the face has no Degradation field, and event-loop
+// degradation reporting reads the RESIDENT ta; hint tracker/ETS spill wiring —
+// face-owned tools get the raw borrowed store (no generation-local retention
+// leases on a shared store, C1).
+//
+// A ToolAgentFactory owner takes this SAME path (round-91 contract): the factory
+// returns a declaration, BuildExecutionFace derives its face, and the assembled
+// config rides the staged generation as runCfg — no second owner-birth shape.
+func buildAgentFace(
+	name string,
+	acfg AgentConfig,
+	cfg Config,
+	rc *runtimeConfig,
+	loader *prompt.Loader,
+	cache map[string]*agent.TagentAgent,
+) (agent.ContextManagerConfig, *assembledAgent, error) {
+	// store half, shell semantics: borrow the RESIDENT owner's store by identity
+	// (never blanket entryMemStore — F06); nil (defensive) falls back the same
+	// way the shell path did.
+	var memStore memory.MemoryStore
+	if ra := rc.resident.Get(name); ra != nil {
+		memStore = ra.MemStore()
+	} else {
+		memStore = rc.entryMemStore
+	}
+	if memStore == nil {
+		memStore = memory.NewInMemoryStore()
+	}
+	parts, aerr := assembleAgentConfig(name, acfg, cfg, rc, loader, memStore, nil, nil, cache, buildModeExecutorShell, map[string]bool{}, nil)
+	if aerr != nil {
+		return agent.ContextManagerConfig{}, nil, aerr
+	}
+	return agent.BuildExecutionFace(parts.cfg), parts, nil
 }
 
 // buildToolFromRef creates a tool from a ToolRef entry.
@@ -767,8 +934,11 @@ func buildAgentToolRef(
 	stack map[string]bool,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
-	// Remote path: create A2AAgent that communicates via trpc-a2a-go
-	if tr.Remote != nil && tr.Remote.URL != "" {
+	// Remote path: create A2AAgent that communicates via trpc-a2a-go. The
+	// predicate is config.go's isRemoteRef — the single spelling shared with
+	// Config.Validate, so the two domains can never disagree about whether a
+	// reference needs a local definition (§3.3).
+	if tr.isRemoteRef() {
 		a2aAgent, err := a2aagent.New(
 			a2aagent.WithName(tr.AgentID),
 			a2aagent.WithDescription(desc),

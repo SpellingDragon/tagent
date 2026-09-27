@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -24,10 +25,10 @@ func (f *fakeTaskController) Spawn(task.TaskSpec, task.SettleDetector) task.Spaw
 func (f *fakeTaskController) List() []*task.Task            { return f.tasks }
 func (f *fakeTaskController) Get(string) (*task.Task, bool) { return nil, false }
 func (f *fakeTaskController) Cancel(string) bool            { return false }
-func (f *fakeTaskController) Relaunch(string) (task.SpawnResult, error) {
+func (f *fakeTaskController) Relaunch(context.Context, string) (task.SpawnResult, error) {
 	return task.SpawnResult{}, nil
 }
-func (f *fakeTaskController) Resume(string, string) (task.SpawnResult, error) {
+func (f *fakeTaskController) Resume(context.Context, string, string) (task.SpawnResult, error) {
 	return task.SpawnResult{}, nil
 }
 

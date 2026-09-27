@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // Recovery observability (resident-readiness-plan 3.8–3.10): the rebuild
@@ -63,31 +64,168 @@ func (ta *TagentAgent) RecoveryResult() *RecoveryResult {
 
 var _ = sync.Mutex{} // recoveryMu lives on ContextManager (see struct)
 
-// SetResidentNames installs the topology binding table (4.5/4.6) — called by
-// the composition root after the resident build; introspection for tests and
-// diagnostics.
-func (ta *TagentAgent) SetResidentNames(names map[string]bool) {
-	if ta == nil {
-		return
-	}
-	ta.residentNames = names
+// ResidentTopology is the process-wide name → resident agent binding, shared by
+// pointer with every built agent (4.5).
+//
+// Why the indirection (§4.3, D7): hot reload may ADD agents to the resident
+// topology while other goroutines read the table (delegation identity checks,
+// diagnostics, the next shell build). Publishing a NEW immutable map through an
+// atomic pointer swap keeps those readers race-free; mutating the published map
+// in place would be a data race on a live map.
+type ResidentTopology struct {
+	pub sync.Mutex                              // serializes publishers
+	cur atomic.Pointer[map[string]*TagentAgent] // immutable snapshot; never mutated after publish
 }
 
-// ResidentAgentNames returns a copy of the resident topology names.
-func (ta *TagentAgent) ResidentAgentNames() []string {
-	if ta == nil || ta.residentNames == nil {
+// NewResidentTopology takes ownership of the initial (startup) binding table.
+// The caller must not mutate the map afterwards — publish changes through Add.
+func NewResidentTopology(initial map[string]*TagentAgent) *ResidentTopology {
+	rt := &ResidentTopology{}
+	if initial == nil {
+		initial = map[string]*TagentAgent{}
+	}
+	rt.cur.Store(&initial)
+	return rt
+}
+
+func (rt *ResidentTopology) load() map[string]*TagentAgent {
+	if rt == nil {
 		return nil
 	}
-	out := make([]string, 0, len(ta.residentNames))
-	for n := range ta.residentNames {
+	p := rt.cur.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// Get returns the resident instance for name, or nil when not resident (§4.3:
+// “is this agent already built and owned?” is exactly the hot-add question).
+func (rt *ResidentTopology) Get(name string) *TagentAgent { return rt.load()[name] }
+
+// Names returns the resident topology names.
+func (rt *ResidentTopology) Names() []string {
+	m := rt.load()
+	out := make([]string, 0, len(m))
+	for n := range m {
 		out = append(out, n)
 	}
 	return out
 }
 
+// Snapshot returns a copy of the binding table (iteration / build seeding).
+func (rt *ResidentTopology) Snapshot() map[string]*TagentAgent {
+	m := rt.load()
+	out := make(map[string]*TagentAgent, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// publish copies the current snapshot, applies mutate, and swaps in the new map.
+func (rt *ResidentTopology) publish(mutate func(map[string]*TagentAgent)) {
+	if rt == nil {
+		return
+	}
+	rt.pub.Lock()
+	defer rt.pub.Unlock()
+	next := rt.Snapshot()
+	mutate(next)
+	rt.cur.Store(&next)
+}
+
+// Add publishes newly resident agents (hot add, §4.3). An existing name is never
+// overwritten — the original owner keeps the binding (D7: 同名重入复用原存储
+// owner，禁止第二 writer).
+func (rt *ResidentTopology) Add(adds map[string]*TagentAgent) {
+	rt.publish(func(m map[string]*TagentAgent) {
+		for n, a := range adds {
+			if _, seen := m[n]; !seen {
+				m[n] = a
+			}
+		}
+	})
+}
+
+// Unpublish drops names (rollback of a REFUSED candidate's adds: a merged
+// identity whose generation never published must not be borrowable later).
+func (rt *ResidentTopology) Unpublish(names []string) {
+	rt.publish(func(m map[string]*TagentAgent) {
+		for _, n := range names {
+			delete(m, n)
+		}
+	})
+}
+
+// SetResidentTable installs the shared binding table (4.5); the hot-reload shell
+// borrows per-agent resources through it.
+func (ta *TagentAgent) SetResidentTable(rt *ResidentTopology) {
+	if ta == nil {
+		return
+	}
+	ta.resident = rt
+}
+
+// ResidentTable returns the binding table copy (introspection, 4.6).
+func (ta *TagentAgent) ResidentTable() map[string]*TagentAgent {
+	if ta == nil || ta.resident == nil {
+		return nil
+	}
+	return ta.resident.Snapshot()
+}
+
+// ResidentAgentNames returns the resident topology names.
+func (ta *TagentAgent) ResidentAgentNames() []string {
+	if ta == nil || ta.resident == nil {
+		return nil
+	}
+	return ta.resident.Names()
+}
+
+// SetStoreOwnerSnapshot installs the store-owner introspection probe (§2.3/R01).
+// Startup-injected once (like SetOrgDiagnostics); runtime read-only.
+func (ta *TagentAgent) SetStoreOwnerSnapshot(fn func() map[string]bool) {
+	if ta == nil {
+		return
+	}
+	ta.storeOwnerSnapshot = fn
+}
+
+// StoreOwnerSnapshot returns the set of agent names currently holding a store-owner
+// registration, or nil when no probe is wired. Introspection only — candidate
+// rollback observability (R01); no execution path reads it.
+func (ta *TagentAgent) StoreOwnerSnapshot() map[string]bool {
+	if ta == nil || ta.storeOwnerSnapshot == nil {
+		return nil
+	}
+	return ta.storeOwnerSnapshot()
+}
+
+// SetStoreOwnerRevoker installs the assembly's store-owner deregistration hook
+// (§4.3/R02). The registration lives in the assembly's collision registry, so
+// the agent cannot revoke it alone: the hook is injected where the owner was
+// registered and closeOnce calls it ONLY after this instance really took its
+// store exit. An unconverged close keeps the registration — a holder whose stop
+// was never confirmed may still write, and forgetting it would let a second
+// owner be accepted for the same partition.
+func (ta *TagentAgent) SetStoreOwnerRevoker(fn func()) {
+	if ta == nil {
+		return
+	}
+	ta.storeOwnerRevoke = fn
+}
+
+// revokeStoreOwner drops this agent's registration, if the assembly wired one.
+func (ta *TagentAgent) revokeStoreOwner() {
+	if ta.storeOwnerRevoke != nil {
+		ta.storeOwnerRevoke()
+	}
+}
+
 // IsResidentAgent reports whether name is in the resident topology table.
 func (ta *TagentAgent) IsResidentAgent(name string) bool {
-	return ta != nil && ta.residentNames != nil && ta.residentNames[name]
+	return ta != nil && ta.resident != nil && ta.resident.Get(name) != nil
 }
 
 // OrgKeepRecent returns the live keepRecent value (introspection, 4.6).
@@ -98,23 +236,14 @@ func (ta *TagentAgent) OrgKeepRecent() int {
 	return ta.contextManager.contextCompressor.KeepRecentValue()
 }
 
-// SetResidentTable installs the name → resident agent binding (4.5); the
-// hot-reload shell borrows per-agent resources through it.
-func (ta *TagentAgent) SetResidentTable(table map[string]*TagentAgent) {
-	if ta == nil {
-		return
+// OrgBudgetLine returns the compressor's effective compression trigger line
+// (maxTokens × current threshold) — the REAL sub-model budget consumer, not the
+// resident config field (introduce-durable-workflow-engine §2.4/L-3: hot-param
+// and rollback tests must assert what the compressor actually uses). 0 when no
+// compressor is wired.
+func (ta *TagentAgent) OrgBudgetLine() int {
+	if ta == nil || ta.contextManager == nil || ta.contextManager.contextCompressor == nil {
+		return 0
 	}
-	ta.residentTable = table
-}
-
-// ResidentTable returns the binding table copy (introspection, 4.6).
-func (ta *TagentAgent) ResidentTable() map[string]*TagentAgent {
-	if ta == nil || ta.residentTable == nil {
-		return nil
-	}
-	out := make(map[string]*TagentAgent, len(ta.residentTable))
-	for k, v := range ta.residentTable {
-		out[k] = v
-	}
-	return out
+	return ta.contextManager.contextCompressor.BudgetLine()
 }

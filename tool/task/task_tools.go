@@ -182,7 +182,7 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if tk.Status() == task.TaskSuspect {
 		ctrl.Cancel(tk.ID)
 	}
-	res, err := ctrl.Relaunch(tk.ID)
+	res, err := ctrl.Relaunch(ctx, tk.ID)
 	if err != nil {
 		return fmt.Sprintf("重跑任务 %s 失败：%v", tk.ID, err), nil
 	}
@@ -249,7 +249,7 @@ func (t *ResumeTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	if !ok {
 		return fmt.Sprintf("未找到任务 %q。", args.TaskID), nil
 	}
-	res, err := ctrl.Resume(tk.ID, args.Input)
+	res, err := ctrl.Resume(ctx, tk.ID, args.Input)
 	if err != nil {
 		return fmt.Sprintf("重入任务 %s 失败：%v", tk.ID, err), nil
 	}

@@ -213,7 +213,9 @@ func TestRelaunchKeepsNameKey(t *testing.T) {
 	wrapper.SetExtraParams(planExtraParams())
 
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
-	ctx := task.WithTaskSpawner(context.Background(), tm)
+	// §4.2: the stored task's relaunch resolves its target on the owner's face, so
+	// the wrapper has to live on one (a bare wrapper has no version source to run on).
+	ctx := task.WithTaskSpawner(ownerRouting(t, "plan", wrapper).AcquireLease(LeaseTurn).WithContext(context.Background()), tm)
 
 	_, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"keyed-plan","request":"第一轮"}`))
 	require.NoError(t, err)
@@ -224,7 +226,7 @@ func TestRelaunchKeepsNameKey(t *testing.T) {
 	assert.Equal(t, "plan:keyed-plan", orig.Spec.Key, "initial spawn keys by name")
 	require.NotNil(t, orig.Spec.Relaunch, "subagent task must be relaunchable")
 
-	res, err := tm.Relaunch(orig.ID)
+	res, err := tm.Relaunch(ctx, orig.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "plan:keyed-plan", res.Task.Spec.Key,
 		"relaunched task must keep the name-based key, not fall back to request text")

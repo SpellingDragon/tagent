@@ -17,7 +17,7 @@
 | `tool/memoryx/` | memory_consolidate、memory_health |
 | `event/`（增量） | EventTypeSpec 注册表（类型元数据单点） |
 | `agent/`（增量） | turn root span、trace.go、plugin/attribution.go |
-| 根包（R4 热更） | `org_hotreload.go`（org 白名单子集指纹 + canonical 化）、`tagent.go`（WithConfigPath 懒检查接线 + Reload 编排 + ring 2 代际快照）、`build_agent.go`（buildMode 三谓词：isExecutorShell/ownsPersistentState/bindsProcessShared——build ownership 契约类型化）、`build_agent.go` 内 `buildRunner` 纯函数段（冷启动与热重建共用同一装配路径） |
+| 根包（R4 热更） | `org_hotreload.go`（org 白名单子集指纹 + canonical 化）、`tagent.go`（WithConfigPath 懒检查接线 + Reload 编排 + ring 2 代际快照）、`build_agent.go`（buildMode 三谓词：isExecutorShell/ownsPersistentState/bindsProcessShared——build ownership 契约类型化）、`build_agent.go` 内 `buildRunner` 纯函数段（冷启动与热重建共用同一装配路径）、`org_hotreload.go` 的 `orgCoordinator`（版本簿记单一真源：current/prev ring-2 + `OrgStatus`/`OrgAgentApply`/`OrgFailure` 有界诊断快照）、`partition_collision.go` 的 `agentMemoryFingerprint`/`changedMemoryAgents`（逐 owner memory 先检）、`agent.ResidentTopology`（copy-on-write 不可变快照的常驻绑定表，热增删写入点）、`ContextManager.NewExecutorCandidate`/`PublishExecutor`/`BeginTurn`/`ExecutorRefs`（候选构造与发布分离 + turn 起点获取 + 引用面诊断） |
 
 ## 三、组件关系总览
 
@@ -87,14 +87,15 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 
 ## 六·A、配置热重载（R4，非重启）
 
-与上述 opt-in 子系统不同，R4 是运行机制层：`WithConfigPath` 记录配置来源后，每次 LLM 调用前（BeforeModel 顶部）触发懒检查（单次 stat，未变更零成本）——
+与上述 opt-in 子系统不同，R4 是运行机制层。版本获取点是**业务 turn 起点**（`ContextManager.BeginTurn`：先做一次配置检查，再取本 turn 钉定的执行器），**不再每次 LLM 迭代重编配置**；ops 入口 `CheckOrgReload` 与生产懒检查、回滚共用同一协调器入口。流程：
 
-1. **memory 先检**（computeMemoryFingerprint，JSON canonical）：`memory.*` 变更**拒绝**并明示须重启（事实链/引擎接线属常驻态，不可热换）；
-2. **org 指纹对比**（computeOrgFingerprint 白名单子集：model/providers/tools/prompt wiring 等结构字段；数值参数 `compress_threshold` 经 `ApplyOrgParams` 原子热切换，不触发重建）；
-3. **结构变更 → build-validate-then-swap**：以 `buildModeExecutorShell` 重建 entry（复用常驻 memStore/SessionSvc，跳过共享绑定与状态重建——三谓词见 `build_agent.go`），构建失败 **fail-closed** 旧 runner 原样服务；成功则 `SwapExecutor` 原子换入（cm 内 executorMu RWMutex：写换/读运行，drain-free turn 级——进行中 turn 用旧 runner 跑完）；
-4. **代际日志 + ring 2 回滚**（`Rollback()` 按上一代配置重建换回）。
+1. **memory 先检（逐 owner）**：`agentMemoryFingerprint` 对每个 agent 的 `memory.*` 段取指纹；`changedMemoryAgents` 的判定域是**已有 owner ∩ 本代可路由**——命中即 **拒绝** 并明示须重启（事实链/引擎接线不可热换）。两处排除：新 agent 自带 memory 段属全新 owner，不因此被误拒（否则热增删不可达）；「定义仍在 `agents:` 里但已被摘路由」的名字不进本代构造、无第二 writer 可防，也**不判**（否则一次无关的存储编辑会永久冻结整条热更路，审阅 H-1）。粘性未削：同名重入时它回到判定域、旧 fp 仍作基准，换存储照旧被拒。
+2. **org 指纹对比**（`computeOrgFingerprint` 白名单子集：model/providers/tools/prompt wiring 等结构字段；数值参数经 `ApplyOrgHotParams` 原子热切换，不触发重建；`desired ≠ fingerprint` 是“改了没生效”的直接诊断（充分不必要：memory 轴被拒时二者相等，只有 `lastFailure` 说真话））；
+3. **结构变更 → candidate-then-publish**：先 `fresh.Clone()` 取私有快照 → `buildModeExecutorShell` 重建 entry 壳（`NewExecutorCandidate`，逐身份借用常驻 `ResidentTopology` 的 store，不 Swap、不改在线执行器）→ 任一步失败 fail-closed 弃候选 → 成功才在常驻 cm 上 `PublishExecutor`（executorMu 写换入 + 退役旧 runner）。drain-free：进行中 turn 用旧 runner 跑完；
+4. **子树热增删**（取代原「拓扑增减须重启」）：新增走 `buildModeResident`（原资源/恢复协议：自有 store + owner 登记 + 屏障 + 投影/registry 重建），以常驻表为构建缓存（同名依赖命中既有实例，绝不建第二 owner），`ResidentTopology.Add` 只并入新名后**随候选发布**；移除只摘除新代可路由集合与工具声明，原 owner **保留不提前退役**（旧代执行/后台任务仍可访问，也是同名重入复用的手段）；
+5. **代际诊断 + ring 2 回滚**：`orgCoordinator` 是版本簿记单一真源（`OrgStatus{generation, fingerprint, desired, lastAppliedAt, lastFailure, agents[]}` 经 `OrgDiagnostics` 呈现，`ExecutorRefs{inFlightTurns, pendingRetirees}` 呈现退役引用/未收敛 owner；均只读，执行路径不依赖）；`Rollback()` 走 Clone→候选→发布同一回滚路径，发布为新序号。
 
-两级边界：数值参数热切换（incremental A）⊂ 结构变更重建换执行器（R4）⊂ `memory.*` 明确拒绝（阶段性取舍，非终态）。
+边界：数值参数热切换 ⊂ 结构变更重建换执行器 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝（阶段性取舍）。序号/指纹为不透明诊断标签，非应用可见 identity；无界历史被禁（常驻表/回执随拓扑定形，ring 仅两槽）。
 
 ## 七、可观测（默认 noop 零开销）
 

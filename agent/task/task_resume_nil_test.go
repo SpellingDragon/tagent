@@ -1,6 +1,7 @@
 package task
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -19,13 +20,13 @@ func TestResume_RestoredTaskNilWatchDone(t *testing.T) {
 	if got := tm.RestoreTask("t-restored", TaskSpec{
 		Kind: "service",
 		Desc: "restored nightly probe",
-		ResumeFn: func(input string) (SettleDetector, error) {
+		ResumeFn: func(_ context.Context, input string) (SettleDetector, error) {
 			return d2, nil
 		},
 	}, time.Now(), TaskStable); got == nil {
 		t.Fatal("RestoreTask returned nil")
 	}
-	res, err := tm.Resume("t-restored", "go on")
+	res, err := tm.Resume(context.Background(), "t-restored", "go on")
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
