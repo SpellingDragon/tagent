@@ -395,7 +395,14 @@ func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error)
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
 		pairs, err := c.kv.KVScan(eventPrefix, 0)
 		if err != nil {
-			continue
+			// Fail loud (deep-review P1): an incomplete scan cannot prove the
+			// window empty. Skipping here would merge a partial set and then
+			// deleteSegments would destroy the unreadable source (silent,
+			// unrecoverable fact loss — the same discipline
+			// recoverWindowSeqLocked and locateOrphanEvtSlot already enforce).
+			// Aborting lets the scheduler retry this idempotent compaction
+			// after the backend recovers.
+			return nil, fmt.Errorf("merge scan failed pid=%d window=%d: %w", pid, windowTS, err)
 		}
 		for _, pair := range pairs {
 			var evt FullEvent

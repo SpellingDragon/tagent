@@ -237,11 +237,6 @@ type Inbox struct {
 	closeOnce sync.Once
 	closed    bool // authoritative close flag guarded by mu; Enqueue refuses once set (§3.3)
 
-	// pathsByRequestID: requestID → envelope path for the envelopes still on
-	// disk — the receipt-reconcile bridge looks up the envelope a fact-chain
-	// receipt belongs to.
-	pathsByRequestID map[string]string
-
 	// cleanupOwed is the independent cleanup account (§3.6, spec L96): paths whose
 	// envelope file was unlinked by Ack but whose directory-sync barrier failed,
 	// so the removal is not yet durable. Capacity (pending) and the retention lease
@@ -257,12 +252,11 @@ type Inbox struct {
 	transitional transitionalData
 }
 
-// owedCleanup records what a completed-but-unsynced Ack removal still owes: the
-// request id (to drop the path mapping) and the protected material (so the caller
-// releases the retention lease once, when the barrier finally syncs).
+// owedCleanup records what a completed-but-unsynced Ack removal still owes:
+// the protected material (so the caller releases the retention lease once,
+// when the barrier finally syncs).
 type owedCleanup struct {
-	requestID string
-	material  UnackedMaterial
+	material UnackedMaterial
 }
 
 // NewInbox opens (or creates) an inbox-v2 at dir. On reopen: claimed items
@@ -302,7 +296,7 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 		return nil, err
 	}
 	transitional := classifyTransitional(filepath.Dir(envDir))
-	in := &Inbox{dir: envDir, max: maxPending, dead: make(chan struct{}), pathsByRequestID: map[string]string{}, cleanupOwed: map[string]owedCleanup{}, transitional: transitional}
+	in := &Inbox{dir: envDir, max: maxPending, dead: make(chan struct{}), cleanupOwed: map[string]owedCleanup{}, transitional: transitional}
 
 	entries, err := os.ReadDir(envDir)
 	if err != nil {
@@ -331,9 +325,6 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 			// never counted. v1 or corrupt items are never consumed.
 			in.quarantineFile(filepath.Join(envDir, name), "unreadable envelope: "+rerr.Error())
 			continue
-		}
-		if env.RequestID != "" {
-			in.pathsByRequestID[env.RequestID] = filepath.Join(envDir, name)
 		}
 		switch env.State {
 		case InboxStateClaimed:
@@ -518,9 +509,6 @@ func (in *Inbox) Enqueue(env *Envelope) (int64, error) {
 		// Rename landed: keep the durable original AND reserve its capacity, but
 		// report the receive as uncertain (never durable-accepted); reopen owns it.
 		in.pending.Add(1)
-		if env.RequestID != "" {
-			in.pathsByRequestID[env.RequestID] = path
-		}
 		return 0, fmt.Errorf("%w: sequence %d retained: %v", ErrReceiveUncertain, n, werr)
 	}
 	if oc != outcomeDurable {
@@ -529,9 +517,6 @@ func (in *Inbox) Enqueue(env *Envelope) (int64, error) {
 		return 0, werr
 	}
 	in.pending.Add(1)
-	if env.RequestID != "" {
-		in.pathsByRequestID[env.RequestID] = path
-	}
 	return n, nil
 }
 
@@ -615,14 +600,10 @@ func (in *Inbox) PrepareFacts(path, receiptKey string, facts []json.RawMessage) 
 func (in *Inbox) QuarantineEnvelope(path, reason string) bool {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	env, err := readEnvelope(path)
-	if err != nil {
+	if _, err := readEnvelope(path); err != nil {
 		return false // already gone or unreadable: nothing left to isolate
 	}
 	in.quarantineFile(path, reason)
-	if env.RequestID != "" {
-		delete(in.pathsByRequestID, env.RequestID)
-	}
 	in.pending.Add(-1)
 	return true
 }
@@ -756,11 +737,11 @@ func (in *Inbox) Ack(path string) error {
 			// prior uncertain ack left an owed account (L96: "文件不存在的重试仍完成
 			// 目录屏障"). Otherwise it was fully acked before — nothing owed, no
 			// second capacity release.
-			if oc, ok := in.cleanupOwed[path]; ok {
+			if _, ok := in.cleanupOwed[path]; ok {
 				if sderr := syncDirFunc(filepath.Dir(path)); sderr != nil {
 					return fmt.Errorf("reliability: ack dir sync (owed %s): %w", path, sderr)
 				}
-				in.finalizeCleanup(path, oc)
+				in.finalizeCleanup(path)
 			}
 			return nil // already acked
 		}
@@ -775,7 +756,7 @@ func (in *Inbox) Ack(path string) error {
 	if len(env.Completion) == 0 {
 		return fmt.Errorf("reliability: ack refused — envelope %s marked receipted without a durable completion (contradiction, kept for inspection)", path)
 	}
-	oc := owedCleanup{requestID: env.RequestID, material: MaterialOf(env)}
+	oc := owedCleanup{material: MaterialOf(env)}
 	// §5.6: the independent cleanup account is registered BEFORE the unlink —
 	// from this point any failure at or after removal keeps the owed entry (the
 	// dir-sync branch below), so an uncertain removal is never unaccounted.
@@ -792,18 +773,15 @@ func (in *Inbox) Ack(path string) error {
 		// finish the barrier and release exactly once (§3.6). Never report completion.
 		return fmt.Errorf("reliability: ack dir sync: %w", sderr)
 	}
-	in.finalizeCleanup(path, oc)
+	in.finalizeCleanup(path)
 	return nil
 }
 
-// finalizeCleanup releases the unacked capacity + request-id mapping for one
-// envelope whose removal barrier is now durable, and drops its owed account so the
-// release happens EXACTLY ONCE (L110). Callers hold in.mu.
-func (in *Inbox) finalizeCleanup(path string, oc owedCleanup) {
+// finalizeCleanup releases the unacked capacity for one envelope whose removal
+// barrier is now durable, and drops its owed account so the release happens
+// EXACTLY ONCE (L110). Callers hold in.mu.
+func (in *Inbox) finalizeCleanup(path string) {
 	delete(in.cleanupOwed, path)
-	if oc.requestID != "" {
-		delete(in.pathsByRequestID, oc.requestID)
-	}
 	in.pending.Add(-1)
 }
 
@@ -821,7 +799,7 @@ func (in *Inbox) DrainCleanups() []UnackedMaterial {
 			continue // still uncertain; keep the account and retry on the next drain
 		}
 		released = append(released, oc.material)
-		in.finalizeCleanup(path, oc)
+		in.finalizeCleanup(path)
 	}
 	return released
 }

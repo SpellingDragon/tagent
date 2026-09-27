@@ -398,21 +398,7 @@ func (s *FileSegmentStore) StoreEvent(key int64, event FullEvent) error {
 			return fmt.Errorf("seq recovery failed for window %d: %w", windowTS, recErr)
 		}
 		state.seqCounter = recovered
-
-		// Revisit of a SEALED window (m5): its recorded MinTime/MaxTime no
-		// longer covers what we are about to add, so demote it back to
-		// memtable semantics (Sealed=false → always scanned, never pruned).
-		if rawMeta, metaErr := s.kv.KVGet(MetaKeyStr(pid, windowTS)); metaErr == nil {
-			var oldMeta SegmentMeta
-			if jsonErr := json.Unmarshal([]byte(rawMeta), &oldMeta); jsonErr == nil && oldMeta.Sealed {
-				oldMeta.Sealed = false
-				if patched, mErr := json.Marshal(oldMeta); mErr == nil {
-					if pErr := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(patched)); pErr != nil {
-						log.Warnf("[SegmentStore] failed to demote sealed window pid=%d window=%d: %v", pid, windowTS, pErr)
-					}
-				}
-			}
-		}
+		s.maybeDemoteSealedWindow(pid, windowTS)
 	}
 	seq := state.seqCounter
 	state.seqCounter++
@@ -507,6 +493,10 @@ func (s *FileSegmentStore) ReplayEvent(key int64, canonicalFact FullEvent) (Repl
 			return ReplayNew, canonicalFact, fmt.Errorf("seq recovery failed for window %d: %w", windowTS, recErr)
 		}
 		state.seqCounter = recovered
+		// Same sealed-window demotion as StoreEvent (deep-review P3-3): a fresh
+		// replay fact may postdate the sealed envelope and would otherwise stay
+		// invisible to time-range queries until the next compaction.
+		s.maybeDemoteSealedWindow(pid, windowTS)
 	}
 	seq := state.seqCounter
 	state.seqCounter++
@@ -783,6 +773,29 @@ func (s *FileSegmentStore) finishCommit(
 	state.mu.Unlock()
 
 	return nil
+}
+
+// maybeDemoteSealedWindow returns a SEALED window to memtable semantics
+// (m5, shared by StoreEvent and ReplayEvent — one implementation, no drift):
+// its recorded MinTime/MaxTime envelope can no longer cover a fact we are
+// about to add, and a sealed segment's bounds feed query pruning — so the
+// window must become always-scanned, never-pruned, or the new fact stays
+// invisible to time-range queries until the next compaction rebuilds bounds.
+// Caller holds the partition state lock.
+func (s *FileSegmentStore) maybeDemoteSealedWindow(pid int, windowTS int64) {
+	rawMeta, metaErr := s.kv.KVGet(MetaKeyStr(pid, windowTS))
+	if metaErr != nil {
+		return
+	}
+	var oldMeta SegmentMeta
+	if jsonErr := json.Unmarshal([]byte(rawMeta), &oldMeta); jsonErr == nil && oldMeta.Sealed {
+		oldMeta.Sealed = false
+		if patched, mErr := json.Marshal(oldMeta); mErr == nil {
+			if pErr := s.kv.KVPut(MetaKeyStr(pid, windowTS), string(patched)); pErr != nil {
+				log.Warnf("[SegmentStore] failed to demote sealed window pid=%d window=%d: %v", pid, windowTS, pErr)
+			}
+		}
+	}
 }
 
 // recoverWindowSeqLocked returns the next free seq for a window by scanning

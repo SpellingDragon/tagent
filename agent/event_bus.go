@@ -690,15 +690,18 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 			}
 			continue
 		}
+		// Envelope-level collection point (deep-review P2-2): a slot decode
+		// failure quarantines the WHOLE envelope, so everything gathered for
+		// THIS envelope so far is dropped — nothing of it was committed, so
+		// dropping is safe and the failure is loud via the quarantine record.
+		startIdx := len(batch)
+		badSlot := -1
+		var badErr error
 		for _, m := range env.Messages {
 			evt, derr := decodeSourceEvent(m.SourceEvent)
 			if derr != nil {
-				// The leaf already quarantines unreadable envelopes; a slot
-				// that still fails here is an anomaly. Keep the envelope
-				// claimed (never silently ack a slot we could not restore) and
-				// skip this slot so a re-claim retries.
-				log.Errorf("[ReliableBus] undecodable source_event at %s slot %d (kept for retry): %v", path, m.Slot, derr)
-				continue
+				badSlot, badErr = m.Slot, derr
+				break
 			}
 			evt.claim = &durableClaim{
 				Path:         path,
@@ -708,6 +711,21 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 				PreparedFact: m.PreparedFact,
 			}
 			batch = append(batch, evt)
+		}
+		if badErr != nil {
+			// The leaf already quarantines unreadable envelopes; a slot that
+			// still fails here is an anomaly. Quarantine the whole envelope
+			// (fail-closed, same disposition as unreadable envelopes): leaving
+			// it claimed zombied a fully-corrupt envelope across every restart,
+			// and partially-cloning the decodable slots into a completion would
+			// ACK-destroy the undecodable input — both are silent loss. The
+			// wrapper releases the §2.8 retention holders on a confirmed move;
+			// the quarantine keeps the original bytes inspectable. Either way
+			// THIS claim pass drops everything gathered for the envelope.
+			log.Errorf("[ReliableBus] undecodable source_event at %s slot %d — envelope quarantined: %v", path, badSlot, badErr)
+			b.QuarantineEnvelope(path, fmt.Sprintf("undecodable source_event slot %d: %v", badSlot, badErr))
+			batch = batch[:startIdx]
+			continue
 		}
 	}
 	return batch

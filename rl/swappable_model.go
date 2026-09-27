@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -184,6 +185,10 @@ func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model
 		if it, ok := inner.(model.IterModel); ok {
 			seq, err := it.GenerateContentIter(ctx, request)
 			if err != nil {
+				// deep-review P3-2: never a silent empty-iterator "success" —
+				// the channel-shaped GenerateContent returns this error, so
+				// the iter path must at least surface it.
+				log.Errorf("[SwappableModel] inner GenerateContentIter failed: %v", err)
 				return
 			}
 			seq(yield)
@@ -192,6 +197,7 @@ func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model
 
 		ch, err := inner.GenerateContent(ctx, request)
 		if err != nil || ch == nil {
+			log.Errorf("[SwappableModel] inner GenerateContent failed for iter bridge (nil channel: %v): %v", ch == nil, err)
 			return
 		}
 		for {

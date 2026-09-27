@@ -96,22 +96,22 @@ func TestReliableBus_UnencodableEventRefused(t *testing.T) {
 	require.Equal(t, int64(0), bus.DurablePending(), "a refused input leaves no durable item")
 }
 
-// TestReliableBus_FixedSlotsNotCompacted (F4, 3.6「序号不压紧」): when one slot
-// in a multi-slot envelope is undecodable, the claim skips it but keeps its
-// siblings at their FIXED indices — a failed slot never compacts or renumbers
-// the others, and never drops them.
+// TestReliableBus_FixedSlotsNotCompacted (F4, 3.6「序号不压紧」): claim carries
+// every slot at its FIXED index — a claim pass never compacts or renumbers the
+// multi-slot layout. (deep-review P2-2 sync: the undecodable-slot shape this
+// test previously used NO LONGER lets siblings survive — a corrupt slot
+// quarantines the whole envelope — so the index-stability contract is pinned
+// on the healthy multi-slot form; the quarantining sibling behavior is owned
+// by TestUndecodableOneSlotQuarantinesWholeEnvelope.)
 func TestReliableBus_FixedSlotsNotCompacted(t *testing.T) {
 	bus, err := NewReliableEventBus(t.TempDir())
 	require.NoError(t, err)
 
-	// slot 1 is valid JSON (passes the leaf's snapshot write) but undecodable as
-	// an AgentEvent (Message.Content is an object, not a string).
-	bad, _ := json.Marshal(map[string]any{"id": "b", "message": map[string]any{"content": map[string]any{"x": 1}}})
 	env := &reliability.Envelope{
 		RequestID: "batch", Source: "user",
 		Messages: []reliability.MessageSlot{
 			{SourceEvent: snap("a", "c-a")},
-			{SourceEvent: bad},
+			{SourceEvent: snap("b", "c-b")},
 			{SourceEvent: snap("c", "c-c")},
 		},
 	}
@@ -119,11 +119,12 @@ func TestReliableBus_FixedSlotsNotCompacted(t *testing.T) {
 	require.NoError(t, err)
 
 	batch := bus.TryPull()
-	require.Len(t, batch, 2, "the undecodable slot is skipped; its siblings survive")
+	require.Len(t, batch, 3)
 	require.Equal(t, 0, batch[0].claim.Slot)
-	require.Equal(t, 2, batch[1].claim.Slot, "slot indices are never compacted (F4)")
+	require.Equal(t, 1, batch[1].claim.Slot)
+	require.Equal(t, 2, batch[2].claim.Slot, "slot indices are carried verbatim, never compacted (F4)")
 	require.Equal(t, "c-a", batch[0].Message.Content)
-	require.Equal(t, "c-c", batch[1].Message.Content)
+	require.Equal(t, "c-c", batch[2].Message.Content)
 }
 
 // TestPersistBusEvent_SystemRoleNotMutatedInPlace (3.6「system role 不被原地修

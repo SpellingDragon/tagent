@@ -201,9 +201,14 @@ func (ta *TagentAgent) unbindSettleBus(id string) {
 // in the BACKGROUND are booked into the delivery-accounting barrier. The booking
 // runs BEFORE the inner spawn, so the expectation is recorded before the task can
 // possibly settle — an early route can never decrement a counter that has not been
-// incremented yet. If the spawn instead settles INLINE (res.Settled), no
-// OnSettle/route will ever fire for it, so the booking is voided immediately. A
-// background spawn thus leaves exactly one pending unit that its eventual settle
+// incremented yet. Three return shapes mean THIS call owns no future settle and
+// the booking is voided immediately (deep-review P2-3): an INLINE settle
+// (OnSettle/route never fires), a DEDUP hit (the matched task settles under its
+// ORIGINAL invocation's booking), and a gate BLOCK (no task was adopted). Without
+// the dedup/block void the barrier leaks one pending unit per refused call —
+// awaiting() stays true forever and the invocation loop can only exit via the
+// caller's hard timeout (plan single-flight makes dedup a hot path, not an edge).
+// A background spawn leaves exactly one pending unit that its eventual settle
 // route decrements: the invariant quiescent depends on.
 //
 // It is installed only when the turn carries an invocation_id AND its ContextManager
@@ -218,7 +223,7 @@ type countingSpawner struct {
 func (c *countingSpawner) Spawn(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
 	c.sinks.noteSpawn(c.id)
 	res := c.inner.Spawn(spec, detector)
-	if res.Settled {
+	if res.Settled || res.Deduped || res.Blocked != "" {
 		c.sinks.voidSpawn(c.id)
 	}
 	return res

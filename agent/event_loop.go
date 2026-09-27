@@ -223,7 +223,11 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		// Backoff budget spent, batch still uncommitted: requeue claims to pending
 		// (oldest re-claimed first, order preserved) and skip the model — never pull a
 		// next batch ahead of the stuck one, never model with missing inputs (§4.2).
-		ta.releaseBatchClaims(events)
+		// received-scope (deep-review P2-1, completing §4.1's symmetry): the yield
+		// filter only drops meditation from MODEL INPUT, not from claim provenance —
+		// a yielding meditation's claim must be requeued too or it stays claimed
+		// forever (nextClaimable skips claimed; the input zombied until restart).
+		ta.releaseBatchClaims(received)
 		cm.turnEcho = nil
 		log.Warnf("[runEventLoop:%s] transient submit failure after backoff — claims requeued, model NOT called, next batch NOT taken", ta.name)
 		return turnContinue
@@ -252,6 +256,13 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 			mergedMessage: msg.Content,
 			committedKeys: keys,
 		}
+		// deep-review P3-1: the echo credential scope ends when THIS processTurn
+		// returns — on every exit, the retry-loop turnStop early-outs included.
+		// Deferred at the installation point (not inside endTurn: the §4.5
+		// verify read and finishDurableBatch both run after the last endTurn,
+		// and must still see the spec) so a new early return can never forget
+		// the cleanup it used to scatter across five exits.
+		defer func() { cm.turnEcho = nil }()
 	}
 	// The one-shot cold-start recovery notice is deliberately NOT appended to
 	// `msg` here (F9 fix): that would route it through the invocation store,

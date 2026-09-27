@@ -206,6 +206,9 @@ func (lm *LifecycleManager) checkTTL() {
 			eventPrefix := SegmentEventPrefix(pid, windowTS)
 			pairs, err := lm.store.kv.KVScan(eventPrefix, 0)
 			if err != nil {
+				// Safe direction: skipping defers forgetting (no data destroyed)
+				// and the next sweep retries — but never silent (deep-review note).
+				log.Warnf("[Lifecycle] TTL scan failed pid=%d window=%d: %v (skipped this round, retried next sweep)", pid, windowTS, err)
 				continue
 			}
 
