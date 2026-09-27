@@ -69,6 +69,12 @@ type MeditationManager struct {
 	// (graceful degradation when no task layer is wired).
 	taskController task.TaskController
 
+	// auditLine, when set, appends the behavior-audit trajectory line to the
+	// self-state digest (attention-budget-architecture: time-series
+	// self-observation lives in the reflection layer, not the resident
+	// context). nil → section omitted.
+	auditLine func() string
+
 	// lastUserInput is the novelty-gate anchor (Unix ms): the most recent
 	// injection with source == "user". Updated only at the injection points
 	// (inject.go) — input-side source is ground truth and cannot be laundered
@@ -111,6 +117,13 @@ func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *Medit
 // (digest is omitted — meditation behavior unchanged).
 func (m *MeditationManager) SetTaskController(tc task.TaskController) {
 	m.taskController = tc
+}
+
+// SetAuditLine wires the behavior-audit digest generator (see auditLine).
+// Safe to leave unset; set at assembly before the loop starts, same
+// discipline as SetTaskController.
+func (m *MeditationManager) SetAuditLine(fn func() string) {
+	m.auditLine = fn
 }
 
 // SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复三锚点——跨重启保留冥想
@@ -288,6 +301,16 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 				}
 				digest += extra
 			}
+		}
+	}
+	// Behavior-audit trajectory line (attention-budget-architecture: time-series
+	// self-observation belongs to the reflection layer).
+	if m.auditLine != nil {
+		if line := m.auditLine(); line != "" {
+			if digest != "" {
+				digest += "\n"
+			}
+			digest += line
 		}
 	}
 

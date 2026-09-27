@@ -104,6 +104,10 @@ type TagentAgent struct {
 	// task.TaskSpawner; background settles are published back to persistentBus as
 	// task_settled events by its OnSettle hook.
 	taskManager *task.TaskManager
+	// selfAudit is the behavior-audit dimension of the attention-budget
+	// architecture (self-telemetry-audit): it observes settle/input traffic,
+	// escalates the L1/L2/L3 ladder and feeds the task layer's AuditGate.
+	selfAudit *SelfTelemetryAuditor
 
 	// settleSinks (S3m-a, M2越窗 routing): per-invocation settle sinks keyed by the
 	// delegation invocation_id (S2m Origin handle). The OnSettle hook routes a
@@ -495,6 +499,22 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// 重建数据源，记录-only 不发 bus 不进投影）。cm 在下方创建后才绑定。
 	taskRecords := &taskRecordSink{}
 	sinkReg := newSettleSinkRegistry()
+	// Behavior audit (self-telemetry-audit): the L1 alert enters the bus as an
+	// ordinary external_input (unconsumed level → full delivery, and its
+	// reclaim turn persists the fact-chain record via the normal store path —
+	// no parallel recording machinery). Level transitions only, so the alert
+	// cannot itself feed a new alert loop.
+	var lastAlertLevel int32
+	selfAudit := NewSelfTelemetryAuditor(func(level int, ratio float64, samples int, frozen bool) {
+		if int(atomic.SwapInt32(&lastAlertLevel, int32(level))) == level {
+			return
+		}
+		if level >= 1 {
+			bus.Publish(NewExternalInputEvent("system", model.NewUserMessage(
+				fmt.Sprintf("[self-telemetry-audit] 空转审计级别 L%d：自管遥测占比 %.0f%%（窗口样本 %d，冻结=%v）。"+
+					"L2 起拒绝自管新任务纳管，L3 冻结非保护类 spawn（保护类豁免）。", level, ratio*100, samples, frozen))))
+		}
+	})
 	taskManager := task.NewTaskManager(task.TaskManagerConfig{
 		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
 			evt := newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace)
@@ -502,6 +522,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 			// registered for this task's delegation id (S2m Origin); else fall back
 			// to persistentBus — the entry owner and every pre-S3m-b path keep the
 			// current single-consumer behavior exactly.
+			selfAudit.ObserveSettle(evt.Metadata)
 			deliverTaskSettled(sinkReg, bus, tk, evt)
 		},
 		OnSpawn:        taskRecords.onSpawn,
@@ -531,6 +552,11 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		// 进行中任务的 settle/轮询不受影响）。默认关（DiskBlockSpawn=false 或
 		// Degradation 未接线 → gate 为 nil）。
 		SpawnGate: buildSpawnGate(cfg),
+		// self-telemetry-audit: the behavior-audit gate (L2 refuses
+		// self-managed spawns, L3 freezes non-protected ones). Composes AFTER
+		// the disk gate; protected specs exempt — durability never yields to
+		// attention governance.
+		AuditGate: selfAudit.GateReason,
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
@@ -633,6 +659,10 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	// commit point; nothing is pushed into either consumer.
 	cm.contextCompressor.SetHotSource(ta.liveHotNumbers)
 	ta.taskManager = taskManager
+	ta.selfAudit = selfAudit
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.SetAuditLine(selfAudit.DigestLine)
+	}
 	taskManager.SetTTLSource(ta.taskTTLs)
 	cm.taskController = taskManager
 

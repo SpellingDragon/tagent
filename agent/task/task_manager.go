@@ -168,6 +168,12 @@ type Declarative struct {
 type TaskSpec struct {
 	Kind string // "command" | "subagent" | "generic"
 	Desc string // human-readable (board + logs)
+	// Protected marks a durability/repair-class task (self-telemetry-audit
+	// exemption whitelist): the AUDIT freeze gate passes it through, while the
+	// global disk gate still applies. Set at construction by the owning
+	// subsystem — never by model-facing arguments (a runtime self-label would
+	// defeat the whitelist).
+	Protected bool
 	// Key is the idempotency key: while a task with this Key is active, a
 	// repeat Spawn returns the existing task instead of creating a duplicate.
 	// Empty Key disables dedup.
@@ -483,6 +489,12 @@ type TaskManagerConfig struct {
 	// readable reason to REJECT a new spawn (e.g. disk degraded). In-flight
 	// tasks are never gated — a gate, not a wall. May be nil.
 	SpawnGate func() string
+	// AuditGate (self-telemetry-audit): optional per-spec gate consulted AFTER
+	// SpawnGate — the behavioral-audit freeze source. Unlike the disk gate it
+	// EXEMPTS protected specs (TaskSpec.Protected): the durability defense is
+	// never withdrawn for attention governance (specs: 保护性任务豁免白名单).
+	// May be nil.
+	AuditGate func(spec TaskSpec) string
 	// ZombieGrace is the minimum age a running/suspect task must reach before
 	// the liveness reconcile may retire it as a zombie (reconcileZombies:
 	// no settle + probe-dead backing session). Zero -> defaultZombieGrace.
@@ -534,6 +546,7 @@ type TaskManager struct {
 	onInlineSettle   func(task *Task, sig SettleSignal)
 	onCancel         func(task *Task)
 	spawnGate        func() string
+	auditGate        func(spec TaskSpec) string
 	terminalTTL      time.Duration
 	now              func() time.Time // injectable clock (tests); defaults to time.Now
 	zombieGrace      time.Duration
@@ -620,6 +633,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		onInlineSettle:   cfg.OnInlineSettle,
 		onCancel:         cfg.OnCancel,
 		spawnGate:        cfg.SpawnGate,
+		auditGate:        cfg.AuditGate,
 		terminalTTL:      ttl,
 		zombieGrace:      zg,
 		orphanGrace:      og,
@@ -661,6 +675,18 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 			tm.mu.Unlock()
 			if detector != nil {
 				detector.Cancel() // block adoption, not the work itself (already running)
+			}
+			return SpawnResult{Blocked: reason}
+		}
+	}
+	// self-telemetry-audit: second gate source (per-spec — protected specs
+	// pass through it, unlike the global disk gate). Same block-adoption
+	// semantics: cancel the detector, in-flight work untouched.
+	if tm.auditGate != nil {
+		if reason := tm.auditGate(spec); reason != "" {
+			tm.mu.Unlock()
+			if detector != nil {
+				detector.Cancel()
 			}
 			return SpawnResult{Blocked: reason}
 		}

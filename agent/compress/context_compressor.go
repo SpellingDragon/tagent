@@ -450,10 +450,14 @@ func (cc *ContextCompressor) Compress(
 	// from their EventSummary (bounded, byte-stable) instead of mutating the
 	// projection every round.
 	refs = cc.foldToolRuns(refs)
-	// Settle-notice runs fold into ticket cards on every compaction act,
-	// regardless of segment age (1.3): skeleton levels keep external_input
-	// verbatim, so without this the settle storm survives L0–L2 intact.
-	refs = cc.foldSettleRuns(refs)
+	// Telemetry channel (attention-budget-architecture): consumption
+	// dispositions are computed per compaction act over the frozen refs —
+	// between acts the render stays byte-stable (R6), while the exit UNIT
+	// becomes consumption state instead of adjacency: a consumed-and-
+	// externalized notice demotes on the very next act regardless of run
+	// length or segment age.
+	dispositions := TelemetryDispositions(ctx, cc.memStore, refs, keepRecent)
+	refs = cc.foldSettleRuns(refs, dispositions)
 	resolved = cc.resolveRefs(ctx, refs)
 
 	log.Infof("[ContextCompressor] compressing (tokens %d vs %d; folded render %d tokens), %d messages from %d refs",
@@ -474,7 +478,7 @@ func (cc *ContextCompressor) Compress(
 		usedTokens, newTokens, threshold)
 
 	// Build retained refs.
-	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx)
+	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx, dispositions)
 
 	// Anchor the full-render window at this compaction point (D3 render
 	// freeze): between compactions, refs at/after the anchor resolve full and
@@ -788,7 +792,7 @@ func isSettleNoticeRef(ref memory.EventReference) bool {
 // settle_fold ref is not an external_input, so cards are never re-folded; a
 // card adjacent to newly-arrived settles stays a separate card (each fold
 // act is one bounded card — no unbounded card growth across rounds).
-func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference) []memory.EventReference {
+func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispositions map[int64]int8) []memory.EventReference {
 	result := make([]memory.EventReference, 0, len(refs))
 	for i := 0; i < len(refs); {
 		if !isSettleNoticeRef(refs[i]) {
@@ -801,9 +805,25 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference) []memo
 			j++
 		}
 		run := refs[i:j]
-		if len(run) >= 2 {
+		switch {
+		case len(run) >= 2:
+			// Storm shape (1.3): maximal runs fold as before.
 			result = append(result, buildSettleFoldRef(run))
-		} else {
+		case dispositions[run[0].EventKey] == TelemDemote:
+			// Consumed-and-externalized (or aged internal): single fold to a
+			// ticket row — consumption, not adjacency, is the exit unit. The
+			// single form carries NO roll-up header (the header exists to be
+			// shared by a run; alone it is pure overhead — real-trajectory
+			// replay: 156 singles × header ≈ 27K chars of nothing).
+			result = append(result, memory.EventReference{
+				EventKey:     -run[0].Timestamp,
+				EventType:    tagentevent.TypeSettleFold,
+				EventSummary: "- " + settleFoldLine(run[0]),
+				Timestamp:    run[0].Timestamp,
+				Role:         "user",
+			})
+		default:
+			// Active (unconsumed) and young-internal notices stay verbatim.
 			result = append(result, run...)
 		}
 		i = j
@@ -861,6 +881,13 @@ func settleFoldLine(ref memory.EventReference) string {
 		// rune-axis truncate (cold-eyes m-1): byte-axis cutting mid-CJK would
 		// emit invalid UTF-8 into every downstream JSON render.
 		rest = truncate(rest, settleFoldRowMaxChars)
+	}
+	if marker == "✗" {
+		// failed-polarity cards carry ★ (attention-budget-architecture L2):
+		// the existing reflection-anchor rendering gives failures a durable
+		// trace through the rolling summary after the verbatim notice is
+		// demoted — content-level convention, zero new code paths.
+		return fmt.Sprintf("★ %s [%s] %s", marker, tagentevent.FormatEventKey(ref.EventKey), rest)
 	}
 	return fmt.Sprintf("%s [%s] %s", marker, tagentevent.FormatEventKey(ref.EventKey), rest)
 }
@@ -1455,6 +1482,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 	originalRefs []memory.EventReference,
 	compressedMsgs []model.Message,
 	ctx context.Context,
+	dispositions map[int64]int8,
 ) []memory.EventReference {
 	if len(originalRefs) == 0 {
 		return nil
@@ -1569,6 +1597,15 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			continue
 		}
 		if retainedKeys[ref.EventKey] {
+			retained = append(retained, ref)
+		} else if dispositions != nil && isSettleNoticeRef(ref) && dispositions[ref.EventKey] == TelemActive {
+			// compaction 豁免（attention-budget-architecture 决策 5）: a
+			// NOT-YET-CONSUMED telemetry notice must not be absorbed by the
+			// budget verdict — its ref stays verbatim in the projection and
+			// re-renders next round until a reclaim turn consumes it.
+			// Guarded to settle notices with an explicit disposition:
+			// TelemActive is the zero value, so a nil/absent entry must
+			// never exempt ordinary conversational refs.
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))

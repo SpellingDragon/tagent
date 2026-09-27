@@ -32,6 +32,10 @@ func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, 
 	// Meditation novelty gate (meditation-gate-split): armed HERE at the
 	// input-side injection point — ground truth, unchanged.
 	ta.armMeditationNoveltyGate(source)
+	// Behavior audit sample (self-telemetry-audit): injection traffic is the
+	// denominator's external side; internal-lineage sources count as
+	// self-managed.
+	ta.selfAudit.ObserveInputFor(source)
 	bus := ta.persistentBus
 	if bus == nil {
 		ta.activeBusMu.Lock()

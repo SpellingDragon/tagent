@@ -209,6 +209,8 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **跨重启连续**：冷启动序 = 投影重建 → registry 重建 → 常驻会话重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
   - **进程重启 vs 整机重启（证据边界）**：常驻重挂以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
 
+- **遥测通道与消费降级（attention-budget-architecture）**：结算通知是机器遥测而非对话输入——其保留由**消费状态**决定（确定性推导：回收 turn 的产出与 outputCh 投递记录），不由相邻关系或段龄决定。compaction act 时：已消费且外显的通知降级为票据卡（settle_fold 单条折叠，原文 recall 可达；failed 卡片行带 ★ 进反思通道）；内部性（冥想派生/退役结算/无世系）保一行摘要 keepRecent 轮后降级；**未消费通知保持完整且被 L3 豁免**（至少一次在通道层的延伸）。看板是任务状态的唯一常驻呈现，通知只承载"事件到达"。行为审计（self-telemetry-audit）滚动统计自管遥测占比，L2 拒绝自管来源的新 spawn、L3 冻结非保护类（保护类由构造声明豁免，磁盘闸仍适用）——与 disk block spawn 同闸不同源。
+
 **一个 tmux 命令的一生**（把上面的零件串成一条线）：
 
 ```mermaid
