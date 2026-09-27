@@ -60,6 +60,9 @@ log "preflight ok: pid alive and holds :8089"
 # 1. env snapshot (contains secrets -> chmod 600, removed after success)
 tr '\0' '\n' < "/proc/$OLD_PID/environ" > "$SNAP" || { log "FATAL: env snapshot failed"; exit 1; }
 chmod 600 "$SNAP"
+# breaking-change env (RL endpoint policy, required since 0a31e46 2026-09-27)
+grep -q '^TAGENT_RL_ALLOW_LLM_REDIRECT=' "$SNAP" || echo 'TAGENT_RL_ALLOW_LLM_REDIRECT=1' >> "$SNAP"
+grep -q '^TAGENT_RL_ENDPOINT_ALLOWLIST=' "$SNAP" || echo 'TAGENT_RL_ENDPOINT_ALLOWLIST=open.bigmodel.cn,api.deepseek.com,api.moonshot.cn,api.lkeap.cloud.tencent.com,tokenhub.tencentmaas.com' >> "$SNAP"
 log "env snapshot: $(wc -l < "$SNAP") vars"
 
 # 2. build (old service stays up meanwhile)
