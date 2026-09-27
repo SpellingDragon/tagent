@@ -31,12 +31,12 @@
 | `lifecycle.go` | TTL 生命周期管理（过期墓碑标记；TypeTTL 派生自 `event/registry.go` EventTypeSpec；consolidation/governance 与固化物同享豁免） |
 | `tombstone.go` | 墓碑集管理（标记已删除事件） |
 | `engine.go` | MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover；**契约与数据类型居核心包——缝属于被缝两侧的公共依赖**） |
-| `engine/`（子包，2026-09-06 分包） | **引擎适配器专区**：`engine/engine_bridge.go` 装饰器（StoreEvent 旁路索引；向量方法委托引擎，失败退回 inner）、`engine/engine_inmemory.go` MVP 内存引擎（异步嵌入队列 + hybrid RRF(k=60) + 分区过滤 + 向量 KV 持久化与启动重建）、`engine/engine_persist.go`（向量 KV 序列化）、`engine/diagnostics.go`（维度锚定诊断）。**新增引擎后端只进此子包** |
-| `embedder/`（子包，2026-09-08 分包） | **嵌入供应商专区**：`embedder/mock.go`（确定性哈希向量）、`embedder/zhipu.go`（embedding-3，openai 兼容）、`embedder/traced.go`（GenAI semconv span+metric 装饰器）。契约 `Embedder` **居核心 `memory/embedder.go`**（接入指南见该文件注释——新增供应商三步：子包实现+组合根 case+无 key 优雅降级） |
+| `engine/`（子包） | **引擎适配器专区**：`engine/engine_bridge.go` 装饰器（StoreEvent 旁路索引；向量方法委托引擎，失败退回 inner）、`engine/engine_inmemory.go` MVP 内存引擎（异步嵌入队列 + hybrid RRF(k=60) + 分区过滤 + 向量 KV 持久化与启动重建）、`engine/engine_persist.go`（向量 KV 序列化）、`engine/diagnostics.go`（维度锚定诊断）。**新增引擎后端只进此子包** |
+| `embedder/`（子包） | **嵌入供应商专区**：`embedder/mock.go`（确定性哈希向量）、`embedder/zhipu.go`（embedding-3，openai 兼容）、`embedder/traced.go`（GenAI semconv span+metric 装饰器）。契约 `Embedder` **居核心 `memory/embedder.go`**（接入指南见该文件注释——新增供应商三步：子包实现+组合根 case+无 key 优雅降级） |
 | `consolidation.go` | 证据门控巩固：服务端 SHA1 收据指纹（LLM 不可伪造）+ 回放验证 |
 | `error_tracking.go` | ErrorTrackingStore 最外层装饰：存储失败归因（memory/disk/rustviking）上报 DegradationManager |
 | `mem_spill.go` | StoreEvent 失败兜底：事件落 JSONL，恢复后重放（GetEvent 预检幂等） |
-| `kv/`（子包，2026-09-06 分包） | **KV 存储后端专区**：`kv/rustviking_client.go`（rustviking CLI 客户端，kv/index 真实契约，VectorInsert 预留）、`kv/local_file_kv.go`（JSON 文件 KV + WAL/快照）。**新增持久化后端只进此子包** |
+| `kv/`（子包） | **KV 存储后端专区**：`kv/rustviking_client.go`（rustviking CLI 客户端，kv/index 真实契约，VectorInsert 预留）、`kv/local_file_kv.go`（JSON 文件 KV + WAL/快照）。**新增持久化后端只进此子包** |
 | `kv.go` | KVStore 契约（KVPair/KVOp）+ 「接入新的记忆引擎」两路径指南（见 §二点五） |
 | `key_schema.go` | 键空间模式契约（evt/idx/meta/tomb + `tagent:vec:` 向量前缀）——格式属于核心与各后端的公共词汇 |
 | `query_keyword.go` | 关键词检索（term-split 匹配，hybrid 的关键词侧） |
@@ -554,7 +554,7 @@ rustviking 原生 `index insert/search/delete` CLI 为预留后端（VectorInser
 
 ---
 
-## 附：回执-反馈绑定（feedback，design-report-closeout §2）
+## 附：回执-反馈绑定（feedback）
 
 `feedback` 事件类型（EventTypeSpec 注册：正 key、Role=system、TTL 默认 30 天、可召回、
 不可嵌入）把「评价」绑定到具体产出事件：
@@ -943,7 +943,7 @@ func resolvePartitions(query QueryOptions) []int {
 
 > **事件类型元数据单点**：类型曲线（Role/低价值/骨架/TTL/可嵌入/可召回）唯一权威源为 `event/registry.go` 的 EventTypeSpec 注册表——`lifecycle` TypeTTL、compaction 低价值清空、嵌入选择性生成全委托/派生自它（"加一个类型只改注册表一处即全链路生效"）。内置 11 类，新增 consolidation（策展）/governance（治理）均为 TTL 豁免（-1）。
 
-### 证据门控巩固（consolidation，2026-09 T-D）
+### 证据门控巩固（consolidation）
 
 冥想/工具触发的巩固是**建议式**：执行权与质量门在 LLM + 工具硬校验。`memory_consolidate` 工具在**服务端**计算源事件收据 SHA1 指纹（LLM 不可伪造——指纹不进 prompt，回放时 `VerifyConsolidation` 重算比对）；consolidation 事件经注册表注册（TTL 豁免）；源事件后续墓碑 = 诚实衰减（不阻止，追溯留痕）。诊断（`memory_health`）读实时引擎状态而非死计数器。详见 [platform 篇](../platform/platform-subsystems.md)。
 
@@ -953,7 +953,7 @@ graph LR
     C -->|"超 card_max_chars,卡片浓缩 condenseCardLines"| D["浓缩卡片<br/>(保任务骨架+key引用)"]
 ```
 
-成本律：定级与票据层纯工程零 LLM，开销 O(新增段) 与历史总量无关；LLM 仅两处低频叠加——L3 滚动综述 `synthesizeRollingNarrative`（每轮折叠 1 次，单行 `〔历史综述〕`，编译期常量限长）与卡片超限浓缩（`condenseCardLines`），均无模型/失败时降级纯工程。旧 legacy 管线的 L3 LLM 段摘要/`context_compress_summary` 固化物已移除（context-efficiency-and-trajectory）：存量固化物保留 TTL 豁免（`getEffectiveTTL` 负值语义 + evict 跳过）与读路径容错、自然清退，但不再产生新固化物；记忆召回改经卡片行 `[evt_key]` 票据 → recall 精确回补。
+成本律：定级与票据层纯工程零 LLM，开销 O(新增段) 与历史总量无关；LLM 仅两处低频叠加——L3 滚动综述 `synthesizeRollingNarrative`（每轮折叠 1 次，单行 `〔历史综述〕`，编译期常量限长）与卡片超限浓缩（`condenseCardLines`），均无模型/失败时降级纯工程。`context_compress_summary` 固化物仅存量存在：保留 TTL 豁免（`getEffectiveTTL` 负值语义 + evict 跳过）与读路径容错、自然清退，不再产生新固化物；记忆召回经卡片行 `[evt_key]` 票据 → recall 精确回补。
 
 ### 卡片序列（压缩历史的唯一表示）
 

@@ -86,7 +86,7 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 
 ## 二、自进化行为(Evolution · git 原生)
 
-> self-evolution-git-native(2026-09-07 设计返工):bundle/发布道退役——文件即真源+git 版本层+建议式评估。
+> 自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。
 
 `refine` 工具(**仅 entry agent**)三 op(`evolution/refine.go`);冥想产物落盘后经 register 登记开评估保护。
 
@@ -178,7 +178,7 @@ stateDiagram-v2
 | 对话上下文(R1) | 事实链(compaction+尾部回放) | 投影逐字节复原,prefix-cache 复用 |
 | 任务板(R2) | 事实链(task_spawned − 终态 settle) | active 任务重建(running→suspect 交探测裁决;inline-settled 不重建无幽灵);relaunch 跨重启可用,subagent resume 返回引导 |
 | 常驻会话(R3) | meta 文件+tmux 存活真相源 | 重挂唯一挂载点重建跟踪(watch/probe);TaskID 桥把存活会话的任务提升回 running;探测三态+加闸(连续 3 次 unknown 才判死) |
-| 配置结构变更(R4) | 懒检查(memory 先检→fingerprint) | **非重启**换执行器(runner 级 SwapExecutor,drain-free turn 级);memory 变更拒绝并明示须重启;失败 fail-closed 旧 runner 原样;ring 2 支持回滚 |
+| 配置结构变更 | 懒检查(entry 身份→memory 先检→指纹) | **非重启**换代：已存在 agent 只换执行面（drain-free turn 级，在途用旧代跑完），热增 agent 完整常驻构造；memory 变更拒绝并明示须重启；失败 fail-closed 旧代原样；回滚（双槽环）与热更共用同一候选事务 |
 
 ---
 

@@ -234,7 +234,7 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 }
 ```
 
-> **可选文件语义（2026-09 起）**：磁盘上不存在的文件（且内嵌回退 FS 也无）**跳过而非硬失败**——USER.md/HEARTBEAT.md/MEMORY.md 等个人/可选上下文遵循 LoadBootstrap 的 skip-missing 契约；此前缺失即硬失败，致干净检出因配置引用 git-ignored 文件而无法启动。仅容忍 not-exist；真实读错误照常传播。
+> **可选文件语义**：磁盘上不存在的文件（且内嵌回退 FS 也无）**跳过而非硬失败**——USER.md/HEARTBEAT.md/MEMORY.md 等个人/可选上下文遵循 LoadBootstrap 的 skip-missing 契约。仅容忍 not-exist；真实读错误照常传播。
 
 **与 LoadFromDir 的区别**：
 | 对比 | `LoadFiles` | `LoadFromDir` |

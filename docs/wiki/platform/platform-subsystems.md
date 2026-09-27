@@ -2,7 +2,7 @@
 
 ## 一、模块定位
 
-本篇覆盖 2026-09 大迭代新增的六个横切子系统。共同设计纪律：**全部配置门控、默认关闭 = 与既有行为逐字节一致**；不触碰任何工具 Declaration（prefix-cache 稳定）；失败以 result 渗透不中断 loop；观测点全部位于 Engine 侧。
+本篇覆盖六个横切子系统与配置热重载。共同设计纪律：**全部配置门控、默认关闭 = 与既有行为逐字节一致**；不触碰任何工具 Declaration（prefix-cache 稳定）；失败以 result 渗透不中断 loop；观测点全部位于 Engine 侧。
 
 ## 二、文件清单
 
@@ -12,12 +12,12 @@
 | `tool/govx/` | 治理面工具五件套（goal_declare/goal_list/goal_resolve/denial_query/approval_list）——**entry only**（与 refine 同槽位，先于治理包裹追加）；只登记/查询，批准权始终在人 |
 | `agent/reliability/` | DegradationManager（五依赖退化状态机）、SpillStore/ReliableBus（磁盘溢出全序）、AnchorStore（冥想锚点跨重启） |
 | `evolution/` | GitEvolution 装配单元（NewGitEvolution+BindRuntime 延迟绑定）、gitrefine 纯函数集（git exec+段匹配）、refine 工具（register/status/rollback）、improvement/evaluation 事件、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估，劣化只出建议） |
-| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南；**LocalFileKV 最小化裁决**（complete-resident-reliability-protocol §9.2：无 WAL/fsync 机——`Sync()`=全量快照 atomic tmp+rename，屏障成功后新进程可读回；`memory.fsync` 配置 accepted-and-ignored 仅兼容装载；掉电耐久不宣称，生产耐久档推迟 rustviking））、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单，snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
+| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南；**LocalFileKV 最小化裁决**（无 WAL/fsync 机——`Sync()`=全量快照 atomic tmp+rename，屏障成功后新进程可读回；`memory.fsync` 配置 accepted-and-ignored 仅兼容装载；掉电耐久不宣称，生产耐久档推迟 rustviking））、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单，snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
 | `tool/mcp/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报） |
 | `tool/memoryx/` | memory_consolidate、memory_health |
 | `event/`（增量） | EventTypeSpec 注册表（类型元数据单点） |
 | `agent/`（增量） | turn root span、trace.go、plugin/attribution.go |
-| 根包（R4 热更） | `org_hotreload.go`（org 白名单子集指纹 + canonical 化）、`tagent.go`（WithConfigPath 懒检查接线 + Reload 编排 + ring 2 代际快照）、`build_agent.go`（buildMode 三谓词：isExecutorShell/ownsPersistentState/bindsProcessShared——build ownership 契约类型化）、`build_agent.go` 内 `buildRunner` 纯函数段（冷启动与热重建共用同一装配路径）、`org_hotreload.go` 的 `orgCoordinator`（版本簿记单一真源：current/prev ring-2 + `OrgStatus`/`OrgAgentApply`/`OrgFailure` 有界诊断快照）、`partition_collision.go` 的 `agentMemoryFingerprint`/`changedMemoryAgents`（逐 owner memory 先检）、`agent.ResidentTopology`（copy-on-write 不可变快照的常驻绑定表，热增删写入点）、`ContextManager.NewExecutorCandidate`/`PublishExecutor`/`BeginTurn`/`ExecutorRefs`（候选构造与发布分离 + turn 起点获取 + 引用面诊断） |
+| 根包（组织编排与热更） | `org_hotreload.go`（org 白名单子集指纹 canonical 化 + `orgCoordinator` 版本簿记单一真源：current/prev 双槽回滚环 + 有界诊断快照）、`tagent.go`（WithConfigPath 懒检查接线 + reload/rollback 编排 + 唯一已提交应用记录 `appliedRecord` 的发布事务）、`org_candidate_overlay.go`/`org_candidate_txn.go`（候选私有 overlay 与有序责任表——reload/rollback 共用一次候选事务，失败逆序回收）、`owner_retirement.go`（owner 义务轴与退役账：诊断与回收判据的数据源）、`build_agent.go`（常驻构建纯函数段——冷启动/热新增/换代共用同一装配路径）、`partition_collision.go` 的 `agentMemoryFingerprint`/`changedMemoryAgents`（逐 owner memory 先检）、`agent.ResidentTopology`（copy-on-write 常驻绑定表，热增删写入点）、`agent` 侧 `NewExecutorCandidate`/`StageExecutor`/`ActivateExecutor`/`PublishExecutor`/`BeginTurnLease`/`ExecutorRefs`（候选构造与发布分离、组织纳管、turn 起点取代、引用面诊断）、`event/wf_facts.go`（工作流事实与被动排除） |
 
 ## 三、组件关系总览
 
@@ -47,8 +47,7 @@ graph TB
 
 ## 五、自进化（evolution · git 原生）
 
-> self-evolution-git-native（设计返工，2026-09-07）：bundle 快照/发布道已退役——违反哲学四原则
-> （文件即真源/复用 git/默认自迭代/信号建议式）。
+> 自进化不采用 bundle 快照/发布道——违反哲学四原则（文件即真源/复用 git/默认自迭代/信号建议式）。
 
 自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。
 refine 三 op：**register**（产物落盘后登记：`[self-improve]` 标记 commit（仅 add 显式受控路径，
@@ -67,13 +66,13 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 四项各自独立的开关（全部空/false = 现状零行为变化）：
 
 - **ReliableBus**（开关 `bus_spill_dir` 非空）：channel 满则事件溢出落盘（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复），at-least-once 不丢事件；
-- **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（design-report-closeout 5.4，三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
+- **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
 - **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
 
 ### 六.1 投递四态边界（volatile → durable → processed → delivered）
 
-契约见 `persistent-event-loop` spec「输入处理确认与幂等」；四态**互不等价**，逐态诚实标注，绝不把前态冒充后态：
+契约见 `openspec/specs/persistent-event-loop`「输入处理确认与幂等」；四态**互不等价**，逐态诚实标注，绝不把前态冒充后态：
 
 | 态 | 含义 | 代码锚点 | 崩溃存活 | 承诺边界 |
 |----|------|---------|---------|---------|
@@ -85,17 +84,21 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 > 未启用可靠模式（`bus_spill_dir` 空）= 纯 volatile：无 durable inbox，行为与旧 channel 逐字节一致（向后兼容）。
 
 
-## 六·A、配置热重载（R4，非重启）
+## 六·A、配置热重载（非重启）
 
-与上述 opt-in 子系统不同，R4 是运行机制层。版本获取点是**业务 turn 起点**（`ContextManager.BeginTurn`：先做一次配置检查，再取本 turn 钉定的执行器），**不再每次 LLM 迭代重编配置**；ops 入口 `CheckOrgReload` 与生产懒检查、回滚共用同一协调器入口。流程：
+与上述 opt-in 子系统不同，热重载是运行机制层，默认启用。版本获取点是**业务 turn 起点**（`ContextManager.BeginTurnLease`：先做一次非阻塞配置检查，再钉定本 turn 的执行代），不在每次 LLM 迭代重编配置；ops 入口 `CheckOrgReload` 与生产懒检查、回滚共用同一协调器入口，不形成第二生效路径。reload 与 rollback 只是配置来源不同，共用**一次候选事务**（取私有快照 → 候选构造 → 单闸门提交；任一步失败按责任表获取逆序回收，fail-closed 服务旧代）。
 
-1. **memory 先检（逐 owner）**：`agentMemoryFingerprint` 对每个 agent 的 `memory.*` 段取指纹；`changedMemoryAgents` 的判定域是**已有 owner ∩ 本代可路由**——命中即 **拒绝** 并明示须重启（事实链/引擎接线不可热换）。两处排除：新 agent 自带 memory 段属全新 owner，不因此被误拒（否则热增删不可达）；「定义仍在 `agents:` 里但已被摘路由」的名字不进本代构造、无第二 writer 可防，也**不判**（否则一次无关的存储编辑会永久冻结整条热更路，审阅 H-1）。粘性未削：同名重入时它回到判定域、旧 fp 仍作基准，换存储照旧被拒。
-2. **org 指纹对比**（`computeOrgFingerprint` 白名单子集：model/providers/tools/prompt wiring 等结构字段；数值参数经 `ApplyOrgHotParams` 原子热切换，不触发重建；`desired ≠ fingerprint` 是“改了没生效”的直接诊断（充分不必要：memory 轴被拒时二者相等，只有 `lastFailure` 说真话））；
-3. **结构变更 → candidate-then-publish**：先 `fresh.Clone()` 取私有快照 → `buildModeExecutorShell` 重建 entry 壳（`NewExecutorCandidate`，逐身份借用常驻 `ResidentTopology` 的 store，不 Swap、不改在线执行器）→ 任一步失败 fail-closed 弃候选 → 成功才在常驻 cm 上 `PublishExecutor`（executorMu 写换入 + 退役旧 runner）。drain-free：进行中 turn 用旧 runner 跑完；
-4. **子树热增删**（取代原「拓扑增减须重启」）：新增走 `buildModeResident`（原资源/恢复协议：自有 store + owner 登记 + 屏障 + 投影/registry 重建），以常驻表为构建缓存（同名依赖命中既有实例，绝不建第二 owner），`ResidentTopology.Add` 只并入新名后**随候选发布**；移除只摘除新代可路由集合与工具声明，原 owner **保留不提前退役**（旧代执行/后台任务仍可访问，也是同名重入复用的手段）；
-5. **代际诊断 + ring 2 回滚**：`orgCoordinator` 是版本簿记单一真源（`OrgStatus{generation, fingerprint, desired, lastAppliedAt, lastFailure, agents[]}` 经 `OrgDiagnostics` 呈现，`ExecutorRefs{inFlightTurns, pendingRetirees}` 呈现退役引用/未收敛 owner；均只读，执行路径不依赖）；`Rollback()` 走 Clone→候选→发布同一回滚路径，发布为新序号。
+流程与门（按序）：
 
-边界：数值参数热切换 ⊂ 结构变更重建换执行器 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝（阶段性取舍）。序号/指纹为不透明诊断标签，非应用可见 identity；无界历史被禁（常驻表/回执随拓扑定形，ring 仅两槽）。
+1. **entry 身份先拒**：常驻入口改名在任何候选资源构建之前拒绝并明示须重启——后续解析一律以启动时 `cfg.Entry` 为基准；
+2. **memory 先检（逐 owner）**：`agentMemoryFingerprint` 对每个 agent 的 `memory.*` 段取指纹；`changedMemoryAgents` 的判定域是**已有 owner ∩ 本代可路由**——命中即拒绝并明示须重启（运行时存储不可热迁）。新 agent 自带 memory 段属全新 owner，不因此被误拒；「定义仍在 `agents:` 里但已被摘路由」的名字不进本代构造，也不判（无第二 writer 可防）。粘性保留：同名重入回到判定域，旧指纹仍作基准；
+3. **退役中同名重入先拒**：本代想要的名字若其 owner 已开始关闭，则在构建前拒绝（复用不可能、新 owner 会开第二 writer）；
+4. **org 指纹对比**（`computeOrgFingerprint` 白名单子集：model/providers/tools/prompt wiring 等结构字段）。指纹不变＝数值热更：五个热参（压缩阈值/预算/保留数/任务 TTL 两值）随唯一已提交应用记录轮转，**消费边界现读**，无 push、无逐实例广播；`desired ≠ effective` 是「改了没生效」的直接诊断（memory 轴被拒时二者相等，`lastFailure` 说真话）；
+5. **结构变更 → 候选事务**：候选解析域＝在线 owner 快照＋本候选新增者（remote-only 引用不创建本地 owner，混合可达仍显式失败）→ 已存在 agent 只换执行面（`NewExecutorCandidate` 装配 → `StageExecutor` 纳管声明持有与工具接线），热新增 agent 完整常驻构造（自有 store/owner 登记/投影与 registry 重建）→ 单闸门提交：换 runner、发布执行面、轮转应用记录、激活各 owner 代并重接任务监视（tracker 重挂与激活同一时机）→ 失败逆序回收。drain-free：进行中 turn 持旧代跑完；
+6. **移除≠退役**：摘除只去掉新代可路由集合与工具声明；原 owner 保留至其义务（在途引用、自有任务、结果回流）清零后由排空面退役，存储身份基准不因实例退役丢弃（同名重入按基准拒绝换存储）；
+7. **代际诊断与回滚**：`orgCoordinator` 是版本簿记单一真源——`OrgStatus{generation, fingerprint, desired, lastAppliedAt, lastFailure, agents[]}`、实时引用债（在途执行器引用/待退役列表）与关闭相位（已发起/资源已退出）经 `OrgDiagnostics` 分组呈现，均只读、执行路径不依赖；`Rollback()` 取回滚环（双槽）里的上一份完整有效配置，走同一候选事务发布为新序号（仅影响之后开始的调用）。
+
+边界：数值热更 ⊂ 结构变更换代 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝。序号/指纹为不透明诊断标签；无界历史被禁（常驻表/回执随拓扑定形，回滚环仅双槽）。
 
 ## 七、可观测（默认 noop 零开销）
 
@@ -117,8 +120,8 @@ C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现；engine
 
 ## 已知缺口与演进方向
 
-- ~~治理审计事件尚无来源 agent 字段~~ **已修**：`DenialRecord.AgentName`（json `agent,omitempty`）经 `GateDeps.AgentName` 由组合根按 agent 名注入 → 写事件 `metadata["agent"]`（omitempty，单 entry 场景不写噪声空键）→ `rebuildFromStore` 回读；多子 agent 共享同一 Ledger 时治理审计可按来源区分；
-- 慢道 replay/shadow 门为预留（nil 通过 + 审批门已实装默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点；
+- 治理审计带来源 agent 字段：`DenialRecord.AgentName`（json `agent,omitempty`）经 `GateDeps.AgentName` 由组合根按 agent 名注入 → 写事件 `metadata["agent"]` → `rebuildFromStore` 回读；多子 agent 共享同一 Ledger 时审计可按来源区分；
+- 慢道 replay/shadow 门为预留（nil 通过 + 审批门默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点；
 - Jaeger OTLP 实录与 AReaL reward 消费格式核对为环境实装项（非代码缺口）；
 - **启用后 agent 在各复杂场景的行为反应**:见 [agent-behavior-matrix.md](./agent-behavior-matrix.md)(分场景分类,溯源代码);
 - 完整裁决与修复账本：`openspec/changes/LEDGER.md`、`openspec/changes/tagent-evolution-roadmap/execution-dag.md`；行为契约：`openspec/specs/`（mcp-*、semantic-search、recall-hybrid-fusion、turn-tracing、trajectory-trace-correlation 等）。

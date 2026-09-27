@@ -474,7 +474,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
-## 附：治理面工具五件套（tool/govx，design-report-closeout §5.1）
+## 附：治理面工具五件套（tool/govx）
 
 `goal_declare` / `goal_list` / `goal_resolve` / `denial_query` / `approval_list`——
 有界自治的**治理面入口**（entry only，与 refine 同槽位由 buildAgent 追加，先于治理包裹；
@@ -736,7 +736,7 @@ const (
 )
 ```
 
-### 9.3 detectSessionState — 状态检测逻辑（R3 三态化）
+### 9.3 detectSessionState — 状态检测逻辑（三态化）
 
 探测单源化：`SessionAlive3(sessionID) (alive, known bool)`（list-sessions 单源）。`has-session` 的 exit code 无法区分 dead/unknown（实测 tmux 3.6a 同为非零），故改用 list-sessions 输出判定；命令不可辨时返回 `known=false`：
 
@@ -753,7 +753,7 @@ if !known {
 session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 ```
 
-R3 前的 `ProcessExists/IsPaneDead(err→assume dead)` 双探针已退役——探测失败即屠杀是独立成立过的真 bug（监控层 fail-dead），三态化 + 加闸是双层防线。
+探测失败不直接判死：命令不可辨返回 unknown，连续达阈（默认 3 次）才按 dead 处理——三态化与加闸构成双层防线。
 
 ### 9.4 FakeAlive / FakeDead 处理
 

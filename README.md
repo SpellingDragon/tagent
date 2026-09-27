@@ -38,7 +38,7 @@
 
 > 用户改了配置：模型从 A 换成 B，另加一个 MCP 工具。
 >
-> 下一个回合起我已用新模型、新工具工作——保存时校验通过才切换，失败则旧执行器原样服务；我进行中的回合用旧模型跑完，可回滚；连子 Agent 的增减也不重启——新增的那位按原恢复协议建起来、自己持有存储，随同一候选一起生效；被撤掉的那位只是不再被路由，它的存储留给还在跑的老回合收尾 **（非重启热更）**。大任务我拆给本地或远程（A2A）子 Agent 并行，事件按 key 精确传接 **（子 Agent 编排）**；我的每次 LLM 调用都被记录为轨迹，可直连 AReaL 训练 **（RL 集成）**。
+> 下一个回合起我已用新模型、新工具工作——保存时校验通过才切换，失败则旧执行器原样服务；我进行中的回合用旧模型跑完，可回滚；连子 Agent 的增减也不重启——新增的那位按原恢复协议建起来、自己持有存储，随同一候选一起生效；被撤掉的那位只是不再被路由，它的存储留给还在跑的老回合收尾 **（非重启热更）**。大任务我拆给本地或远程（A2A）子 Agent 并行——它们与我**同构**：各有事件总线与自己的任务域，能再委派自己的子任务，差别只是输出交回给谁；晚到的子任务结算经绑定路由回发起调用，续写同一轮 **（子 Agent 同构协作）**。我的每次 LLM 调用都被记录为轨迹，可直连 AReaL 训练 **（RL 集成）**。
 
 ## 🎬 一个长期运行的日常
 
@@ -229,7 +229,7 @@ graph TB
 
 | 模块 | 职责 |
 |------|------|
-| `agent/` | 事件驱动引擎：EventBus、runEventLoop、ContextManager（粘合层）、冥想、子 Agent 封装 |
+| `agent/` | 事件驱动引擎：EventBus、统一事件管线（入口循环与被调方调用环共用同一壳与 turn 原语）、ContextManager（粘合层 + 执行代构造/纳管/发布）、冥想、子 Agent 封装 |
 | `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
 | `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |
 | `memory/` + `memory/engine/` + `memory/embedder/` + `memory/kv/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期；C6/KVStore/Embedder 契约居核心，语义引擎适配器（bridge/hybrid RRF/诊断）、嵌入供应商（zhipu/mock/traced）、KV 存储后端（localfile/rustviking）各居独立子包——新增引擎/嵌入供应商/后端只进对应子包，接入指南见 `memory/kv.go` 与 `memory/embedder.go` |
@@ -242,9 +242,11 @@ graph TB
 | `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
 | `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
 | `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
-| `tagent.go` + `build_agent.go` + `wiring.go` + `config.go` | 组合根（类型/Option/New · agent 装配族 · resolve+wire 族）与声明式配置 |
+| `tagent.go` + `build_agent.go` + `wiring.go` + `config.go` + `org_hotreload.go` + `org_candidate_{overlay,txn}.go` + `owner_retirement.go` | 组合根（类型/Option/New · agent 装配族 · resolve+wire 族）、声明式配置，与组织编排热更（候选事务、唯一已提交应用记录、owner 义务与退役账） |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
+
+**同构协作**：入口与被调方是同一种 tagent——一个 turn 原语、一条事件管线、一份已提交应用记录、一个（每 agent 自有的）任务域；「入口／子」只是连接关系，不是两种 agent 类型。一次输入进入某 loop 起，其衍生任务结算与输出的目的地即已确定（调用绑定表），运行期只查绑定、不猜；取消一路委派不关闭被调 agent、不影响其无关任务。
 
 ## 📐 设计哲学
 

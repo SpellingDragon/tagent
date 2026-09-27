@@ -57,9 +57,9 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 
 - `NewTagentAgent(cfg)` — 构造，创建 ContextManager（含统一 Runner）
 - `StartLoop(userID, sessionID)` — 启动持久事件循环，返回 outputCh
-- `Run(ctx, inv)` — 子 agent 单轮调用，创建临时 ContextManager + 临时 EventBus，直调一次 `RunFlow`
+- `Run(ctx, inv)` — 被调方执行入口：为本次调用运行有界事件环（调用作用域总线 + 请求级隔离的 CM/投影），输出交本次调用的通道（见 §七）
 - `InjectMessage(msg)` — 向 activeBus 发布 external_input
-- `StopLoop()` — 停止持久循环并**终结实例**（输出通道恰关一次；二次 `StartLoop` 显式报错——V15，重启语义=新建 agent 实例）
+- `StopLoop()` — 停止持久循环并**终结实例**（输出通道恰关一次；二次 `StartLoop` 显式报错（重启语义=新建 agent 实例））
 - `Close()` — 关闭 ContextManager（释放 Runner）
 
 ### 2.2 runEventLoop（事件循环）
@@ -124,7 +124,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 
 `StartLoop` 在 goroutine 中调用 `runEventLoop`（使用 persistentBus + ContextManager），持续 `for { Pull; RunFlow }` 直到 `StopLoop`（终结态，不可重启——输出通道在循环退出时恰好关闭一次，二次关闭会 panic，故二次 Start 显式拒绝）。
 
-`Run()`（子 Agent 调用路径）**不使用 `runEventLoop`**：它创建临时 EventBus + ContextManager 后，先将驱动请求 `persistBusEvent` 写入临时 `SessionProjection`（保证请求位于时间线首条），再在 goroutine 中**直接调用一次 `RunFlow`**。Turn 边界即 `RunFlow` 的自然返回——`RunFlow` 内部由框架跑完完整 ReAct 工具循环（多轮）直到最终 assistant 响应才返回，随后 `close(invOutputCh)` 通知调用方结束。子 Agent 与持久循环**共享同一个 turn 原语 `RunFlow`**，区别仅在于是否包裹 `for { Pull }` 守护循环；不再依赖「事件流探测 + drain 定时器 + 强制 cancel」判断 turn 结束。
+`Run()`（被调方路径）**复用同一共享壳**：入口的 `runEventLoop` 与被调方的 `runAgentLoop` 是同一条管线在各自总线上的消费者——同一 turn 原语（`processTurn` 内完成一次完整 RunFlow ReAct 循环）、同一重试预算；不存在绕过事件消费的直调快路径，也不依赖「事件流探测 + drain 定时器 + 强制 cancel」判断 turn 结束（终止＝投递对账，见 §七）。并发调用互不串投影：隔离由调用作用域总线与请求级投影承担。
 
 ### 2.3 ContextManager（粘合层：消息构建 + Flow 执行）
 
@@ -173,7 +173,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 **文件**：`compress/projection.go`（随压缩域——"Compact 只修改投影"，投影即压缩域对象）+ `projection_sink.go`（plugin 包）
 **原型对应**：`inputs []string`
 
-`SessionProjection` 是有界的 `EventReference[]`，线程安全、EventKey 幂等去重。写入统一在事件插件管线：RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，MemoryPlugin 在 store 成功后同点 `Append`（unified-event-projection D1）。
+`SessionProjection` 是有界的 `EventReference[]`，线程安全、EventKey 幂等去重。写入统一在事件插件管线：RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，MemoryPlugin 在 store 成功后同点 `Append`。
 
 ### 2.8 EventBus
 
@@ -187,7 +187,7 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 **文件**：`tool_agent.go`
 **原型对应**：`tools map` + `RegisterTool`
 
-将子 agent 包装为 `CallableTool`，处理 event_key 参数解析和外部上下文注入。子 agent 调用**默认异步**：经上下文注入的 `TaskSpawner` 纳入任务层执行，dense 阶段内返回则内联、越窗则 ack（`asyncDisabled` 可回退为同步）。每次子 agent Task 仍持有独立 EventBus / SessionProjection / ContextManager 的并发隔离契约。
+将子 agent 包装为 `CallableTool`，处理 event_key 参数解析和外部上下文注入。子 agent 调用**默认异步**：经上下文注入的 `TaskSpawner` 纳入任务层执行，dense 阶段内返回则内联、越窗则 ack（`asyncDisabled` 可回退为同步）。并发调用不串投影/接收者：隔离由调用作用域总线与请求级隔离投影承担（同一管线，见 §七）；本地目标借用唯一常驻 owner 实例，其执行配置随组织代统一推进。
 
 ### 2.10 TaskManager（异步任务层）
 
@@ -199,15 +199,15 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
 - **settle 五档 + 唯一终态入口**：`completed` / `stable` / `suspect` / `watch`（命中通知，非终态）/ `failed`（reconcile 回收），探测器只做确定性分类；终态转换**只经 `finalize`**（内存状态、信号 Kind、WAL settle_status、反馈极性四端一致——失败必带失败语义，未知 Kind 映射 unknown 告警不落 completed）；终态后迟到信号被 fencing 丢弃（不得复活/重复结算）。
 - **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
-- **Origin 信使行李**：TaskSpec.Origin 携带 spawn turn 的调用元数据（chat_id 等 + trace_id/span_id 锚点），任务层只透传不解读；task_settled 回流的新 turn 据锚点建 OTel span link，连接 spawn/settle 两棵 trace（C9 跨 turn 闭环）。
-- **registry = 事实链 fold（R2）**：spawn 伴随 `task_spawned` 一等事件（载 Declarative 声明式投影）；**inline settle 也补发终态记录**（`task_inline_record` 标记）+ 后台 settle 携结构化 `task_id/settle_status` Metadata——重启经 `RebuildTaskRegistry` 纯全量回放重建 active 态（running→suspect 交存活探测裁决，终端不重建），闭包按 Kind 承诺表由工厂重建（command 全套；subagent 仅 Relaunch、跨重启 Resume 返回引导；generic 展示）。TaskManager 为 org 级单例（换执行器代不丢任务板）。
+- **Origin 信使行李**：TaskSpec.Origin 携带 spawn turn 的调用元数据（chat_id 等 + trace_id/span_id 锚点），任务层只透传不解读；task_settled 回流的新 turn 据锚点建 OTel span link，连接 spawn/settle 两棵 trace（跨 turn 闭环）。
+- **registry = 事实链 fold**：spawn 伴随 `task_spawned` 一等事件（载 Declarative 声明式投影）；**inline settle 也补发终态记录**（`task_inline_record` 标记）+ 后台 settle 携结构化 `task_id/settle_status` Metadata——重启经 `RebuildTaskRegistry` 纯全量回放重建 active 态（running→suspect 交存活探测裁决，终端不重建），闭包按 Kind 承诺表由工厂重建（command 全套；subagent 仅 Relaunch、跨重启 Resume 返回引导；generic 展示）。TaskManager 归属每个 agent 自身——一个 tagent 生命周期内唯一，换执行器代不丢任务板；父的委派任务与子的内部任务分属各自任务域，不合并为全局表。
 - **看板 + 工具**：`BeforeModel` 每次调用从 registry 重渲染 live 看板（不参与压缩，**追加在消息列表末尾**——看板字节逐次变化，置于尾部使前缀缓存仅损失看板自身，等待指引行同时是模型读到的最后内容）；`list_tasks` / `cancel` / `relaunch` / `resume_task` 为即时同步工具（结果消费不走专用工具：小结果随 settle 通知内联，大结果转储文件经 read_file 分页）。
 - **resume_task 重入**：合法源状态 {alive-detached, stable, completed, failed}；tmux 经 detector `Rearm`（绑会话非轮次，零换绑），subagent 经新 Run + 任务链还原器。详见 [tool 架构文档「任务重入」章](../tool/tool-architecture.md)。
 - **会话回收闭环（ADOPT-FIRST）**：运行时 completed/error 即回收；优雅退出 `Close()` 收编存活会话；启动**先收养后清扫**——每个重挂/已跟踪会话刷新 `LastAdoptedAt`（收养即 freshness 锚），Sweep 只收割「无人收养且距最后收养超 TTL」的孤儿，**spawn 年龄不构成清理依据**（长驻会话不因 24h 生日被误杀）。探测三态化：`SessionAlive3`（list-sessions 单源：在列表=活/不在=死/命令不可辨=unknown），monitor 连续 N 次（默认 3）unknown 才按 dead 处理（fail-dead 加闸，tmux 抖动不再误杀常驻会话）。
-- **统一 TTL 回收（假活治理，async-task-lifetime 10.5）**：命令在 spawn 时确定有限 `ttl`（模型入参；否则取 `task_default_ttl`，缺省 10min），到期由**唯一** reaper 经 owner `detector.Cancel` 真实终止 → failed 终态 → reap → 移出看板。准入覆盖全部 active 态（running/stable/alive_detached/suspect）与全部寿命类（含常驻/交互服务，**无按 mode 豁免、无禁用哨兵**），堵死旧双墙「gate 在 alive_detached/stale + detachedAt、漏掉未 detach 的 suspect」的盲区。`op=send`/`resume_task` 续命重置锚点，`op=peek` 只读不续；restored 任务经声明式投影恢复其 `ttl`。旧 `task_stale_after` 观测态、`task_job_deadline` 独立墙、`TaskMaxDetachedAge` 别名**已全部删除**，年龄回收仅 TTL 一条路径。detachedAt 仍入事实链供观测，但不再作为终止判据。
+- **统一 TTL 回收（假活治理）**：命令在 spawn 时确定有限 `ttl`（模型入参；否则取 `task_default_ttl`，缺省 10min），到期由**唯一** reaper 经 owner `detector.Cancel` 真实终止 → failed 终态 → reap → 移出看板。准入覆盖全部 active 态（running/stable/alive_detached/suspect）与全部寿命类（含常驻/交互服务，**无按 mode 豁免、无禁用哨兵**），堵死旧双墙「gate 在 alive_detached/stale + detachedAt、漏掉未 detach 的 suspect」的盲区。`op=send`/`resume_task` 续命重置锚点，`op=peek` 只读不续；restored 任务经声明式投影恢复其 `ttl`。年龄回收仅 TTL 一条路径，无按 mode 豁免、无禁用哨兵。detachedAt 仍入事实链供观测，但不再作为终止判据。
 - **世系跨重启保真**：`Spec.Origin` 深拷贝入 `task_spawned`，恢复时身份字段以持久层为准（恢复闭包只补执行能力，不得整体覆盖）；无世系历史恢复为 `unknown`，宿主对 unknown 与内部来源同等扣留——内部任务（如冥想派生）跨重启不再退化为可投递来源。`settle_status/task_id/lineage_absent/detached_at_ms` 为框架控制键，不进后续任务的 Origin baggage。
-- **跨重启连续（R2/R3）**：冷启动序 = R1 投影重建 → R2 registry 重建 → R3 重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
-  - **进程重启 vs 整机重启（证据边界）**：R3 以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
+- **跨重启连续**：冷启动序 = 投影重建 → registry 重建 → 常驻会话重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
+  - **进程重启 vs 整机重启（证据边界）**：常驻重挂以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
 
 **一个 tmux 命令的一生**（把上面的零件串成一条线）：
 
@@ -246,14 +246,15 @@ buildAgent 对**所有 agent** 的非 wrapper leaf 工具经 GovernanceTool 过�
 
 每 turn 一棵 trace（`tagent.turn` root span，属性含 trigger_source/chat_id/event_sources；退化重试记为属性不另开 span；ctx 早退补 End；task_settled 据 Origin 锚建 span link）——事件 Metadata / RL 轨迹 / OTel span 三投影由 trace_id 互链，noop provider 零开销。详见 [platform 篇](../platform/platform-subsystems.md)。
 
-### 2.13 执行器热换与 build ownership（R4）
+### 2.13 执行代与发布（executor generations）
 
-ContextManager 的 runner 是**可换缝**：
+ContextManager 的 runner 是**可换代缝**，换代由「构造 → 纳管 → 激活」三段与一条唯一线性化承载：
 
-- **executorMu RWMutex**：`SwapExecutor`（写）与 RunFlow per-turn RLock（读）互斥——换入原子、drain-free turn 级（进行中 turn 用旧 runner 跑完）；
-- **buildRunner 纯函数段**：fwAgent+runner 装配抽取为纯函数（依赖仅 cfg）——冷启动与热重建共用同一装配路径（行为学一致，防双路径漂移）；
-- **buildMode 三谓词**（`build_agent.go`，ownership 契约类型化）：`isExecutorShell`（壳专属：复用常驻 memStore/SessionSvc、tmux 强制重挂）/ `ownsPersistentState`（R1/R2 状态重建属常驻构建）/ `bindsProcessShared`（evoGit/govLedger/BundleID/Approval 等进程级 once 绑定仅常驻 entry 有权）——原先散落在签名注释与布尔判断间的 ownership 规则收敛为类型语义，编译期防误传；
-- **懒检查**：`SetOrgReloader` 闭包在 BeforeModel 顶部触发（单次 stat，未变更零成本）；`compress_threshold` 数值参数经 `ApplyOrgParams` 热切换不重建；结构变更经指纹对比触发 build-validate-then-swap（fail-closed + ring 2 回滚）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
+- **构造与发布分离**：`NewExecutorCandidate(face)` 只装配新 runner 与执行面（模型/工具/装饰器；装配是纯函数——冷启动与换代共用同一路径，防双路径漂移）。单 owner 的发布入口是 `PublishExecutor(candidate, face)`；组织路径经 `StageExecutor`（候选私有 overlay + 有序责任表，纳管期完成声明持有与工具接线）→ `ActivateExecutor`（安装纳管好的绑定）。两条入口共用**同一条线性化** `publishActiveLocked`：记录执行面 → 装代 → 换 runner → 在锁外交出待退役绑定（慢 Close 不占执行锁）。同一 runner 重发不产生第二代（一个 runner 对象恰好一次 Close）；执行面记录推进、绑定保持其建成时快照。
+- **turn 取代点**：`BeginTurnLease()` 是业务 turn 取得执行绑定的唯一位置——先触发非阻塞懒检查，再钉定当时已发布的 effective；lease 可发布进调用链上下文，派生执行（嵌套委派、传输重试、ACK 后后台续写）在**同一代**上累加引用，不因新发布改路由。`BeginTurn` 是其便利形态。
+- **drain-free 换代**：进行中 turn 持旧代引用跑完；退役判定 = 已退役 ∧ 在途引用归零 ∧ 声明持有归零（一个代为其面内声明的子 owner 持有使用权，声明方存活期间被声明代不回收）。
+- **热参数读取**：五个数值热参（压缩阈值/预算/保留数/任务 TTL 两值）不随换代推送——各 owner 从唯一已提交应用记录在**消费边界现读**（压缩器经注入的热参源拉取、任务 spawn 经 TTL 源读取），结构代与数值轴分离，无第二份可独立修改的真值。
+- **懒检查**：`SetOrgReloader` 闭包在业务 turn 起点触发（单次 stat，未变更零成本）；结构变更经指纹对比触发 candidate-then-publish（fail-closed + 双槽回滚环）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
 
 ## 三、包与文件结构（分包后）
 
@@ -296,12 +297,12 @@ graph TB
 |------|------|---------|
 | `agent.go` | 顶层装配 + TagentConfig；OutputLimitTool 包裹全部工具（封顶 `toolOutputCapChars`=60K，与 MaxTokens 解耦——防长 budget 下 MaxTokens/2×4 派生形同虚设；超限全量存 `<workspace>/tool-output`，返回带路径摘要） | `BaseTAgent.New()` |
 | `event_loop.go` / `event_bus.go` | 持久循环（turn span + model 退化上报 + 退化重试）+ 事件队列（可选 ReliableBus 溢出） | `DefaultRun` / `eventBus chan` |
-| `trace.go` | turn root span（`tagent.turn`）开/关与属性（trigger_source/chat_id/event_sources）；task_settled span link | 无（2026-09） |
+| `trace.go` | turn root span（`tagent.turn`）开/关与属性（trigger_source/chat_id/event_sources）；task_settled span link | 无（生产扩展） |
 | `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner + Attribution/OriginSpawner 绑定 | `OnEvents` + `ModelCompletion` |
 | `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
 | `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest（PromptSource 为 prompt.Getter） | 无（生产扩展） |
-| `governance/` | GovernanceGate 决策管线（classify→critical 批准→goal→budget→记账）、GovernanceTool leaf 装饰器、BudgetManager、ApprovalManager、DenialLedger、RiskClassifier | 无（2026-09，默认关） |
-| `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、SpillStore（ReliableBus 磁盘溢出）、AnchorStore（冥想锚点跨重启） | 无（2026-09，默认关） |
+| `governance/` | GovernanceGate 决策管线（classify→critical 批准→goal→budget→记账）、GovernanceTool leaf 装饰器、BudgetManager、ApprovalManager、DenialLedger、RiskClassifier | 无（生产扩展，默认关） |
+| `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、SpillStore（ReliableBus 磁盘溢出）、AnchorStore（冥想锚点跨重启） | 无（生产扩展，默认关） |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go）；Origin 携带 trace 锚 | 无（生产扩展） |
 | `rl/`（独立顶级包） | TrajectoryRecorder（含 trace 关联字段）+ HTTPAPI（**token 认证 + loopback fail-closed**：`TAGENT_RL_AUTH_TOKEN`/`ValidateListenAddr`，实施加固 3.x）+ SwappableModel（retired model 延迟回收，5.2） | 无（生产扩展） |
@@ -377,7 +378,7 @@ SmartCompressor 由 ContextCompressor 在 BeforeModel 装配回调中调用，�
 - 保留消息原样携带 `[evt_KEY|type]` 前缀，衔接存活 ref 判定
 - **仅修改发给 LLM 的消息视图，不修改 SessionProjection 或 MemoryStore**（纯视图变换，遵守不变量 2；投影替换由 ContextCompressor 的 RetainedRefs 返回值驱动）
 
-压缩参数通过 YAML `compress` 段配置（`summary_model`/`card_max_chars`/`compact_keys_listed`/`recent_full_count`/`summary_max_tokens`）。旧 user 切段 legacy 管线与逐段 LLM 摘要/归档缓存已移除（context-efficiency-and-trajectory）：骨架管线为唯一压缩路径，其中 LLM 文摘恰有两处低频叠加层——L3 滚动综述 `synthesizeRollingNarrative` 与卡片浓缩 `condenseCardLines`，均无模型时降级为纯工程形态。
+压缩参数通过 YAML `compress` 段配置（`summary_model`/`card_max_chars`/`compact_keys_listed`/`recent_full_count`/`summary_max_tokens`）。骨架管线为唯一压缩路径，其中 LLM 文摘恰有两处低频叠加层——L3 滚动综述 `synthesizeRollingNarrative` 与卡片浓缩 `condenseCardLines`，均无模型时降级为纯工程形态。
 
 ### 6.1.1 时间线渲染红线（外部分析常见误判点）
 
@@ -431,16 +432,18 @@ tools:
         max_interval: 60s       # 稀疏轮询上限
 ```
 
-## 七、子 Agent 调用
+## 七、子 Agent 调用（同构调用环）
 
-`TagentAgent.Run(ctx, inv)` 是子 agent 单轮调用路径（与 2.2 节一致：**不使用 runEventLoop**）：
-1. 从 `inv.RunOptions.RuntimeState["external_context"]` 读取父 Agent 传入的上下文（A2A 兼容路径；resume 时由任务链还原器自动注入本任务前序轮次）
-2. 创建临时 EventBus + SessionProjection + ContextManager（含临时 Runner）——并发隔离契约
-3. 将驱动请求 `persistBusEvent` 写入临时投影（保证请求位于时间线首条）
-4. goroutine 中直调一次 `RunFlow`，turn 边界即其自然返回
-5. 消费 outputCh 直到 final response，`close(invOutputCh)` 通知结束
+`TagentAgent.Run(ctx, inv)` 是被调方的执行入口。**被调方与入口是同一种 tagent**——同一共享壳、同一 turn 原语、同一重试预算，自有事件总线与任务域；差别只在输出交给谁：
 
-子 agent 的 MaxToolIterations 取 `min(父配置, 10)`，默认不超过 10；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
+1. 输入（含 `RuntimeState["external_context"]` 的事件上下文与关联信息；resume 时由任务链还原器自动注入本任务前序轮次）转换为初始事件，**发布进本次调用的作用域总线**；
+2. `invID→bus` 绑定表在入口注册——本次输入衍生的任务 settle 与 agent 输出的目的地在**输入时即确定**，运行期只查绑定、不猜；
+3. 共享壳 `runAgentLoop` 消费该总线：每次迭代是一次完整 turn（`processTurn`，与入口同一原语）；请求级隔离的 CM/投影接本 agent 自己的服务（含任务控制器）；
+4. 本 agent 任务域发起的后台任务，其 `task_settled` 按绑定路由回**本次调用的总线**——环持续消费，晚到结算触发续写轮（首答与续写同环、同一重试预算）；
+5. 输出恒发往本次调用的通道：同步关联结果按原语义作为 tool result 返回发起 turn；父 turn 已结束的越窗输出按通知形态送达绑定接收者，不对同一 tool_call 重复结算；
+6. 终止＝**投递对账**：绑定总线上无待达结算且无更多注入时环排空退出（调用方 ctx 为硬上限），不靠首条 assistant 消息、drain 定时器或文本探测关闭 agent。
+
+被调用不构成第二套架构：本地目标借用唯一常驻 owner 实例（身份/存储/治理随组织代统一推进，不因角色变化缺能力）；远程 A2A 目标走同一 `agent.Agent` 接口。取消/超时只终结该调用环与通道，不 Close 被 agent、不级联其无关任务。子 agent 的 MaxToolIterations 取 `min(父配置, 10)`；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
 
 
 ---

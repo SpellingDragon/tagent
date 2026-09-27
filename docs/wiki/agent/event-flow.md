@@ -22,7 +22,7 @@ graph TD
     OutCh -.->|isFinalResponse| Bus
 ```
 
-> **task_settled 结构化语义（hardening-review-batch2）**：`settle_status` 五值 `completed/failed/alive-detached/suspect|watch/unknown`——failed 显式携带（`SettleFailed` 或 Err），**未知 Kind 映射 unknown 并告警**，不再默认 completed；反馈按 status 极性落库。Origin 缺失的任务结算打 `lineage_absent` 标记，回收 turn 降级 `task-unstamped`（宿主 fail-closed 扣留）；控制键（settle_status/task_id/lineage_absent/detached_at_ms）不进 Origin baggage。
+> **task_settled 结构化语义**：`settle_status` 五值 `completed/failed/alive-detached/suspect|watch/unknown`——failed 显式携带（`SettleFailed` 或 Err），**未知 Kind 映射 unknown 并告警**，不再默认 completed；反馈按 status 极性落库。Origin 缺失的任务结算打 `lineage_absent` 标记，回收 turn 降级 `task-unstamped`（宿主 fail-closed 扣留）；控制键（settle_status/task_id/lineage_absent/detached_at_ms）不进 Origin baggage。
 
 > **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link，跨 turn 闭环（见 [platform 篇](../platform/platform-subsystems.md)）。详见 `agent-architecture.md` §2.10 任务层。
 
@@ -30,12 +30,12 @@ graph TD
 
 持久循环启动前，build 路径按固定顺序从事实链重建三层状态（均一次、进空态、无据则 no-op）：
 
-1. **R1 投影重建**（`RebuildProjectionFromWAL`）：最新 compaction 事件作 snapshot + `MinEventKey` 写序尾部回放，逐字节复原上下文（prefix-cache 复用）；先于 spill 重放接线；
-2. **R2 任务 registry 重建**（`RebuildTaskRegistryFromWAL`）：`task_spawned` − 终态 settle 纯全量回放，running→suspect 交存活探测裁决；
-3. **R3 常驻会话重挂**（`ReattachResidentSessions`）：tmux list 对账 ResidentMeta → 存活会话重挂 → TaskID 桥把 suspect 任务提升回 running；
+1. **投影重建**（`RebuildProjectionFromWAL`）：最新 compaction 事件作 snapshot + `MinEventKey` 写序尾部回放，逐字节复原上下文（prefix-cache 复用）；先于 spill 重放接线；
+2. **任务 registry 重建**（`RebuildTaskRegistryFromWAL`）：`task_spawned` − 终态 settle 纯全量回放，running→suspect 交存活探测裁决；
+3. **常驻会话重挂**（`ReattachResidentSessions`）：tmux list 对账 ResidentMeta → 存活会话重挂 → TaskID 桥把 suspect 任务提升回 running；
 4. **spill 重放双写**（mem_spill 兜底路径）：重放成功事件补投影，恢复「存储⇔投影同点」在退化路径的等价语义。
 
-R4 热重建壳（`buildModeExecutorShell`）跳过上述全部状态重建与共享绑定（ownership 谓词见 `build_agent.go`）——壳仅取 runner 原子换入常驻实例，状态原封流过。
+三层重建只发生在**常驻构建**（冷启动与热新增 agent）：已存在 agent 的执行换代只换执行面（模型/工具/声明），不重建投影、registry 与会话绑定——状态原封流过，在途 turn 持旧代跑完（见 [agent 篇 §2.13](agent-architecture.md)）。
 
 ## 二、Runner 内部流转
 
@@ -56,7 +56,7 @@ graph TD
 
 ## 三、BeforeModel 回调链
 
-当前实现将上下文重建收敛为**一个统一的 BeforeModel 装配回调**（另有任务看板注入与诊断日志回调）。投影是**唯一装配源**（unified-event-projection D2）：除 system 消息外，不读取框架 `Request.Messages` 的任何内容。
+当前实现将上下文重建收敛为**一个统一的 BeforeModel 装配回调**（另有任务看板注入与诊断日志回调）。投影是**唯一装配源**：除 system 消息外，不读取框架 `Request.Messages` 的任何内容。
 
 ```mermaid
 graph TD
@@ -71,7 +71,7 @@ graph TD
 
 **无读回、无当前轮抽取**：所有事件（驱动请求、ReAct 内部的 assistant/tool 步骤、final）均在事件插件管线内同步写入投影（见 §四），框架对工具结果事件的 completion-wait 保证下一次 BeforeModel 时投影必已完整（构造保证，非时序碰巧）。旧版的 `extractCurrentTurnMessages`/`filterUser` 读回启发式已删除。
 
-**原生时间线渲染（D3 v2）**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点**双向**保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留）；反向地，结果不在渲染序列中的 assistant tool_calls 被剥离（骨架模型下 L1 常态丢弃 `action_command`，无此规则会每轮发出悬空调用）。因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
+**原生时间线渲染**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点**双向**保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留）；反向地，结果不在渲染序列中的 assistant tool_calls 被剥离（骨架模型下 L1 常态丢弃 `action_command`，无此规则会每轮发出悬空调用）。因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
 
 ## 四、事件插件管线：存储 + 投影同点原子（含 nil-Response / partial 过滤）
 
@@ -82,7 +82,7 @@ graph TD
     N -- no --> P{Response 为空<br/>或 Choices 为空 ?}
     P -- yes --> R2["return evt（同步类事件，跳过）"]
     P -- no --> PT{IsPartial ?}
-    PT -- yes --> R4["return evt（流式增量，仅聚合事件入库/入投影）"]
+    PT -- yes --> SKIP["return evt（流式增量，仅聚合事件入库/入投影）"]
     PT -- no --> H1{退化空 agent_output ?}
     H1 -- yes --> R5["return evt（空 final 不存储、不投影）"]
     H1 -- no --> K["生成 Snowflake EventKey"]
@@ -132,11 +132,11 @@ graph TD
 - **段 = 一次任务回合** `[external_input, (thinking_plan|action_command)*, agent_output]`，由最终回复闭合（`SegmentMessages`）。识别优先经 `[evt_KEY|type]` 前缀（`ParseEventKeyAndType`），缺前缀时退回启发式（assistant 且无 tool_calls）。
 - **连续 `external_input`**（用户连发、agent 未回）归入同一进行中段；无 `agent_output` 的尾部为**进行中段**（`IsComplete=false`），永不压缩。
 - **段内二分**为事件类型纯函数（`IsSkeletonMessage`，不读内容）：骨架 = `external_input` + `agent_output`；中间事件 = `action_command` / `thinking_plan`。
-- 骨架管线为唯一压缩路径（定级/丢弃纯工程）；旧 user 切段 legacy 管线已移除（context-efficiency-and-trajectory）。LLM 文摘恰有两处低频叠加：L3 滚动综述 `synthesizeRollingNarrative`（可选，失败降级）与卡片浓缩 `condenseCardLines`。
+- 骨架管线为唯一压缩路径（定级/丢弃纯工程）；LLM 文摘恰有两处低频叠加：L3 滚动综述 `synthesizeRollingNarrative`（可选，失败降级）与卡片浓缩 `condenseCardLines`。
 
 ### 6.2 定级：agent_output 段龄纯函数（deterministicLevel）
 
-`age = totalSegs - 1 - segIdx`（0 = 最新段），`keepRecent` 默认 2；`HasUserInput` 判据已废弃：
+`age = totalSegs - 1 - segIdx`（0 = 最新段），`keepRecent` 默认 2：
 
 | 级别 | 触发 | 段内保留 | 段内丢弃 |
 |------|------|---------|---------|
@@ -149,7 +149,7 @@ graph TD
 
 ### 6.3 多段压缩归档出口（L3）
 
-L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件（`external_input`/`agent_output`）生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，解开旧模型"每段含 user → 恒 L2 → L3 死代码 → 段数单调膨胀"的死锁（生产实证 `L2: 12→61`）。
+L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件（`external_input`/`agent_output`）生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，不随时间线单调膨胀。
 
 ## 七、一次完整请求的端到端时序
 
@@ -186,7 +186,7 @@ sequenceDiagram
     EL->>EL: endTurnSpan
 ```
 
-> 无 bus echo：final 响应仅经 outputCh 投递，循环靠 `Pull` 阻塞等待下一个外部/任务事件（unified-event-projection D5）。
+> 无 bus echo：final 响应仅经 outputCh 投递，循环靠 `Pull` 阻塞等待下一个外部/任务事件。
 
 ## 八、压缩前后投影变化示例
 
