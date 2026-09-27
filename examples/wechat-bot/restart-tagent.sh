@@ -63,6 +63,7 @@ chmod 600 "$SNAP"
 # breaking-change env (RL endpoint policy, required since 0a31e46 2026-09-27)
 grep -q '^TAGENT_RL_ALLOW_LLM_REDIRECT=' "$SNAP" || echo 'TAGENT_RL_ALLOW_LLM_REDIRECT=1' >> "$SNAP"
 grep -q '^TAGENT_RL_ENDPOINT_ALLOWLIST=' "$SNAP" || echo 'TAGENT_RL_ENDPOINT_ALLOWLIST=open.bigmodel.cn,api.deepseek.com,api.moonshot.cn,api.lkeap.cloud.tencent.com,tokenhub.tencentmaas.com' >> "$SNAP"
+OLD_TRAJ_BYTES="$(stat -c %s data/trajectories/wechat-session.jsonl 2>/dev/null || echo 0)"
 log "env snapshot: $(wc -l < "$SNAP") vars"
 
 # 2. build (old service stays up meanwhile)
@@ -155,6 +156,28 @@ for i in $(seq 1 90); do
             continue
         fi
         echo "${LISTEN_PID:-$NEW_PID}" > "$DONEF"  # handshake: insurance baseline = real listening pid
+        # trajectory generation archive (host order 2026-09-28 00:35): split
+        # and compress pre-restart bytes per generation, keep rolling window 5
+        TRAJ="data/trajectories/wechat-session.jsonl"
+        if [ -f "$TRAJ" ]; then
+            TRAJ_DIR="$(dirname "$TRAJ")/archive"; mkdir -p "$TRAJ_DIR"
+            PRE_BYTES="$OLD_TRAJ_BYTES"
+            CUR_BYTES="$(stat -c %s "$TRAJ" 2>/dev/null || echo 0)"
+            if [ "${PRE_BYTES:-0}" -gt 0 ] && [ "$PRE_BYTES" -le "$CUR_BYTES" ]; then
+                SPLIT_F="$TRAJ_DIR/wechat-session-$(date +%Y%m%d_%H%M%S).jsonl"
+                head -c "$PRE_BYTES" "$TRAJ" > "$SPLIT_F"
+                SPLIT_SZ="$(stat -c %s "$SPLIT_F" 2>/dev/null || echo 0)"
+                if [ "$SPLIT_SZ" = "$PRE_BYTES" ]; then
+                    gzip -f "$SPLIT_F" && log "trajectory archived: $(basename "$SPLIT_F").gz ($PRE_BYTES bytes)"
+                    tail -c +"$((PRE_BYTES + 1))" "$TRAJ" > "$TRAJ.tmp" && cat "$TRAJ.tmp" > "$TRAJ" && rm -f "$TRAJ.tmp"
+                else
+                    rm -f "$SPLIT_F"; log "trajectory archive byte-mismatch ($SPLIT_SZ != $PRE_BYTES) - skip rotation"
+                fi
+            else
+                log "trajectory: no pre-restart offset (PRE=${PRE_BYTES:-0}), skip"
+            fi
+            ls -1t "$TRAJ_DIR"/wechat-session-*.jsonl.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+        fi
         touch /tmp/tagent_restart.done; log "RESTART OK: healthz=$(cat /tmp/tagent_healthz.json) new_pid=${LISTEN_PID:-?} after ~$((i*2))s"
         # archive env snapshot for the next reincarnation (same fallback as insurance v2)
         if [ "$SNAP" != "$DONEDIR/env.snapshot" ]; then
