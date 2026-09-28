@@ -4,12 +4,20 @@
 //
 // Usage:
 //
-//	comment_policy [-report] [dir...]
+//	comment_policy [-baseline F] [-update-baseline] [-strict] [-no-baseline] [dir...]
 //
-// Without -report any violation exits non-zero; -report prints the same findings
-// and exits 0, which is how the gates are introduced before they become blocking.
+// A run that consults the ratchet exits non-zero on any count above the baseline; -v
+// prints every finding rather than only the regressions. -strict additionally requires
+// the converged end state: zero findings.
+//
 // A directory argument is scanned recursively, skipping subdirectories that carry
-// their own go.mod.
+// their own go.mod — which is why the ratchet refuses to run over a set that leaves
+// a nested module ungated, or a set other than the one the baseline was written over.
+// -no-baseline measures a scope without consulting the ratchet at all.
+//
+// scripts/lint.sh owns the canonical directory set, so a batch author and CI scan the
+// same tree; read and lower the baseline through it rather than invoking this command
+// with an ad-hoc scope.
 //
 // Rules are named in the output and documented on the matcher table below. Length
 // never decides compliance: a long contract comment is legal and a short piece of
@@ -26,6 +34,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -87,11 +96,16 @@ var (
 // CI enforces "no new violations" without any extra flags.
 const defaultBaseline = "scripts/comment_policy/baseline.json"
 
-// baseline stores per-rule violation totals: the ratchet a batch may only lower,
-// never raise. A blocking gate over a large legacy backlog would be switched
-// off within a day; a ratchet bites on the first new violation and stays on.
+// baseline stores per-rule violation totals and the scan set they were generated
+// over: the ratchet a batch may only lower, never raise. A blocking gate over a
+// large legacy backlog would be switched off within a day; a ratchet bites on the
+// first new violation and stays on.
 type baseline struct {
 	Counts map[string]int `json:"counts"`
+	// Dirs is the scan set the counts were generated over. collectGoFiles does not
+	// descend into a nested module, so a run over a smaller set reports a smaller
+	// total for every rule — indistinguishable from a batch that lowered the ratchet.
+	Dirs []string `json:"dirs"`
 }
 
 func main() {
@@ -100,9 +114,10 @@ func main() {
 		update       = flag.Bool("update-baseline", false, "write the current counts as the baseline and exit")
 		strict       = flag.Bool("strict", false, "require an empty baseline (the converged end state)")
 		verbose      = flag.Bool("v", false, "print every finding, not only regressions")
+		noRatchet    = flag.Bool("no-baseline", false, "measure a scope only: never read or write the ratchet, so a partial scan cannot lower it by accident")
 	)
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: comment_policy [-baseline F] [-update-baseline] [-strict] [-v] [dir...]")
+		fmt.Fprintln(os.Stderr, "usage: comment_policy [-baseline F] [-update-baseline] [-strict] [-no-baseline] [-v] [dir...]")
 	}
 	flag.Parse()
 	dirs := flag.Args()
@@ -138,6 +153,20 @@ func main() {
 		counts[f.Key()]++
 	}
 
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	if *noRatchet {
+		if *verbose {
+			for _, f := range all {
+				fmt.Println(f.String())
+			}
+		}
+		fmt.Printf("comment_policy: %d finding(s) over %v (measured only, ratchet not consulted)\n", total, canonicalDirs(dirs))
+		return
+	}
+
 	path := *baselinePath
 	if path == "" {
 		if _, err := os.Stat(defaultBaseline); err == nil {
@@ -148,11 +177,15 @@ func main() {
 		if path == "" {
 			path = defaultBaseline
 		}
-		if err := writeBaseline(path, counts); err != nil {
+		if err := checkScanCoverage(".", dirs); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("comment_policy: baseline written to %s (%d entries, %d findings)\n", path, len(counts), len(all))
+		if err := writeBaseline(path, counts, dirs); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("comment_policy: baseline written to %s over %v (%d entries, %d findings)\n", path, canonicalDirs(dirs), len(counts), len(all))
 		return
 	}
 
@@ -173,7 +206,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
 		os.Exit(1)
 	}
-	regressions, improvements := compareRatchet(counts, base)
+	if err := checkScanSet(".", base.Dirs, dirs); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
+		os.Exit(1)
+	}
+	regressions, improvements := compareRatchet(counts, base.Counts)
 	// Name every regressed rule with its delta, and show one example finding so a
 	// CI log is actionable: a bare count would hide which rule and where.
 	type sample struct{ text string }
@@ -189,13 +226,9 @@ func main() {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if counts[k] > base[k] {
-			fmt.Printf("REGRESSION %s: baseline %d -> %d (+%d)\n   e.g. %s\n", k, base[k], counts[k], counts[k]-base[k], one[k].text)
+		if counts[k] > base.Counts[k] {
+			fmt.Printf("REGRESSION %s: baseline %d -> %d (+%d)\n   e.g. %s\n", k, base.Counts[k], counts[k], counts[k]-base.Counts[k], one[k].text)
 		}
-	}
-	total := 0
-	for _, n := range counts {
-		total += n
 	}
 	fmt.Printf("comment_policy: %d finding(s); %d beyond baseline; %d ratchet slot(s) can be lowered\n",
 		total, regressions, improvements)
@@ -216,32 +249,145 @@ func main() {
 // narrative text is written, which is what the gate exists to stop.
 func (f finding) Key() string { return f.Rule }
 
-// readBaseline loads per-slot counts; a missing file means "expect zero".
-func readBaseline(path string) (map[string]int, error) {
+// readBaseline loads per-slot counts and the scan set they belong to; a missing file
+// means "expect zero".
+func readBaseline(path string) (baseline, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return baseline{}, err
 	}
 	var parsed baseline
 	if err := json.Unmarshal(b, &parsed); err != nil {
-		return nil, err
+		return baseline{}, err
 	}
 	if parsed.Counts == nil {
 		parsed.Counts = map[string]int{}
 	}
-	return parsed.Counts, nil
+	return parsed, nil
 }
 
-// writeBaseline records the current counts, sorted for a stable diff.
-func writeBaseline(path string, counts map[string]int) error {
+// canonicalDirs cleans, deduplicates and sorts a scan set so that a spelling or
+// ordering difference cannot be mistaken for a different scope.
+func canonicalDirs(dirs []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range dirs {
+		c := filepath.Clean(d)
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// allGoFiles collects every Go file under root, descending into nested modules. It is
+// the counterpart of collectGoFiles, whose skip rule is what the coverage half of the
+// guard exists to catch.
+func allGoFiles(root string) (map[string]bool, error) {
+	out := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); name != root && (name == "vendor" || name == ".git" || name == "node_modules" || name == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") {
+			rel, e := filepath.Rel(root, path)
+			if e != nil {
+				return e
+			}
+			out[filepath.Clean(rel)] = true
+		}
+		return nil
+	})
+	return out, err
+}
+
+// checkScanCoverage verifies the scan set against the tree: every nested module must be
+// named (its files are otherwise skipped in silence), and no two scan dirs may cover
+// the same file (that would inflate a rule's total).
+//
+// The write path checks this alone: rewriting restamps the scan set deliberately, so a
+// changed set is allowed while a set that leaves part of the tree ungated is not — that
+// is exactly how a module would drop out of the ratchet with every total still falling.
+func checkScanCoverage(root string, effective []string) error {
+	all, err := allGoFiles(root)
+	if err != nil {
+		return err
+	}
+	count := map[string]int{}
+	for _, d := range effective {
+		files, err := collectGoFiles(filepath.Join(root, d))
+		if err != nil {
+			return err
+		}
+		for _, f := range files {
+			rel, e := filepath.Rel(root, f)
+			if e != nil {
+				return e
+			}
+			count[filepath.Clean(rel)]++
+		}
+	}
+	var doubled []string
+	for f, n := range count {
+		if n > 1 {
+			doubled = append(doubled, f)
+		}
+	}
+	if len(doubled) > 0 {
+		sort.Strings(doubled)
+		return fmt.Errorf("scan set %v counts %d Go file(s) twice (e.g. %s) — a nested directory inside the same module inflates every rule it touches", effective, len(doubled), doubled[0])
+	}
+	var missing []string
+	for f := range all {
+		if count[f] == 0 {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("scan set %v leaves %d Go file(s) ungated (e.g. %s): a directory with its own go.mod is skipped, so it must be listed explicitly", effective, len(missing), missing[0])
+	}
+	return nil
+}
+
+// checkScanSet is the guard a ratchet run must pass before any count is read as a
+// verdict: counts are comparable only when the same tree was scanned, so the set in use
+// must equal the one the baseline was generated over, and that set must cover the tree.
+// The failure shape being prevented is a partial scan reporting "N slots can be lowered"
+// and a following -update-baseline deleting the budget of whatever it skipped.
+func checkScanSet(root string, recorded, effective []string) error {
+	eff := canonicalDirs(effective)
+	rec := canonicalDirs(recorded)
+	if len(rec) > 0 && !reflect.DeepEqual(eff, rec) {
+		return fmt.Errorf("scan set %v differs from the set the baseline was generated over %v — read or rewrite it through `bash scripts/lint.sh`, or regenerate deliberately with --update-baseline", eff, rec)
+	}
+	return checkScanCoverage(root, eff)
+}
+
+// writeBaseline records the current counts and their scan set, sorted for a stable diff.
+func writeBaseline(path string, counts map[string]int, dirs []string) error {
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	var b strings.Builder
-	b.WriteString("{\n  \"_comment\": \"Per (file|rule) violation counts. A batch may only LOWER these numbers\",\n")
-	b.WriteString("  \"_regenerate\": \"go run ./scripts/comment_policy -update-baseline\",\n")
+	b.WriteString("{\n  \"_comment\": \"Per-rule violation counts over the dirs listed in \\\"dirs\\\". A batch may only LOWER these numbers\",\n")
+	b.WriteString("  \"_regenerate\": \"bash scripts/lint.sh --update-baseline\",\n")
+	buf, err := json.Marshal(canonicalDirs(dirs))
+	if err != nil {
+		return err
+	}
+	b.WriteString("  \"dirs\": " + string(buf) + ",\n")
 	b.WriteString("  \"counts\": {\n")
 	for i, k := range keys {
 		sep := ","

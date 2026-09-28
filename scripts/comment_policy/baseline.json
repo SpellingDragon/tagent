@@ -1,6 +1,7 @@
 {
-  "_comment": "Per (file|rule) violation counts. A batch may only LOWER these numbers",
-  "_regenerate": "go run ./scripts/comment_policy -update-baseline",
+  "_comment": "Per-rule violation counts over the dirs listed in \"dirs\". A batch may only LOWER these numbers",
+  "_regenerate": "bash scripts/lint.sh --update-baseline",
+  "dirs": [".","examples/wechat-bot"],
   "counts": {
     "audit-marker": 275,
     "doc-not-name-prefixed": 39,

@@ -74,8 +74,10 @@ def files_in(scope, skip):
 
 
 def scan(scope, rule):
+    # -no-baseline: these tools measure one scope at a time, which the ratchet guard
+    # rejects on purpose — a smaller scope would read as a lowered baseline.
     hits = []
-    for l in sh(['go', 'run', './scripts/comment_policy', '-v', scope]).split('\n'):
+    for l in sh(['go', 'run', './scripts/comment_policy', '-v', '-no-baseline', scope]).split('\n'):
         m = re.match(r'(\S+):(\d+): %s: (.*?)(?: \| (\S+))?$' % rule, l.strip())
         if m:
             hits.append((m.group(1), int(m.group(2)), (m.group(4) or '').strip()))
@@ -325,8 +327,13 @@ def do_name_refs(scope, skip, run, names_file):
 
 
 def rule_counts(paths):
-    """Count findings per rule by asking the gate itself."""
-    out = subprocess.run(['go', 'run', './scripts/comment_policy', '-v'] + list(paths),
+    """Count findings per rule by asking the gate itself.
+
+    -no-baseline keeps this a measurement: the axis check compares two trees over the
+    same scope, and consulting the ratchet here would confuse a snapshot scan with a
+    real gate run.
+    """
+    out = subprocess.run(['go', 'run', './scripts/comment_policy', '-v', '-no-baseline'] + list(paths),
                          capture_output=True).stdout.decode('utf-8', 'replace')
     counts = {}
     for line in out.split('\n'):

@@ -136,14 +136,16 @@ func TestRatchetBlocksIncreasesAndAllowsKnownCounts(t *testing.T) {
 func TestBaselineRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
 	counts := map[string]int{
-		"x_test.go|free-standing": 7,
-		"y.go|missing-symbol-doc": 1,
-		"z.go|unindexed-path-ref": 12,
+		"free-standing":      7,
+		"missing-symbol-doc": 1,
+		"unindexed-path-ref": 12,
 	}
-	require.NoError(t, writeBaseline(path, counts))
+	dirs := []string{".", "examples/wechat-bot"}
+	require.NoError(t, writeBaseline(path, counts, dirs))
 	got, err := readBaseline(path)
 	require.NoError(t, err)
-	require.Equal(t, counts, got)
+	require.Equal(t, counts, got.Counts)
+	require.Equal(t, dirs, got.Dirs)
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -377,4 +379,84 @@ func TestExternalCoordExemptsIndexLinesAndPlainProse(t *testing.T) {
 	src := "package p\n\n// Foo 钉住 契约甲，判定见注册表。\n// 契约: docs/wiki/agent/task-lifecycle.md#status-machine\nfunc Foo() {}\n"
 	require.Empty(t, ruleHits(scanSource(t, "a.go", src), "external-coord-ref"),
 		"index lines carry paths and plain prose must not trip the coordinate check")
+}
+
+// writeTree lays out a fixture repo under root: each key is a path, each value its body.
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for p, body := range files {
+		full := filepath.Join(root, p)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o644))
+	}
+}
+
+// TestBaselineRoundTripStampsItsScanSet pins that a baseline carries the directory set it was generated over.
+// - the set must survive the round trip, otherwise a changed scope cannot be detected at all;
+// - the regenerate hint must name `bash scripts/lint.sh --update-baseline`: a bare scope is how a nested module drops out of the gate.
+func TestBaselineRoundTripStampsItsScanSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	counts := map[string]int{"free-standing": 3, "audit-marker": 2}
+	require.NoError(t, writeBaseline(path, counts, []string{".", "examples/wechat-bot"}))
+
+	got, err := readBaseline(path)
+	require.NoError(t, err)
+	require.Equal(t, counts, got.Counts)
+	require.Equal(t, []string{".", "examples/wechat-bot"}, got.Dirs,
+		"the scan set must survive the round trip, otherwise a mismatch cannot be detected")
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "bash scripts/lint.sh --update-baseline",
+		"the regenerate hint must not teach the partial invocation")
+}
+
+// TestScopeGuardRefusesMismatchedScanSet pins that a run may neither read nor write the ratchet over another scope.
+// - scanning less tree lowers every rule's total, which looks exactly like a batch that cleaned findings;
+// - the error must name the recorded set so the caller knows where to retarget.
+func TestScopeGuardRefusesMismatchedScanSet(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"a.go":     "package p\n",
+		"m/go.mod": "module m\n",
+		"m/b.go":   "package m\n",
+	})
+	err := checkScanSet(root, []string{".", "m"}, []string{"."})
+	require.Error(t, err, "a run that scans a subset must not get to read or write the ratchet")
+	require.Contains(t, err.Error(), "generated over [. m]",
+		"the error must name the recorded set so the caller can retarget")
+}
+
+// TestScopeGuardRefusesUncoveredNestedModule pins that agreeing with the recorded set is not sufficient.
+// - a recorded set that itself omits a module in the tree stays a hole and must still be refused;
+// - the error must name the uncovered module directory.
+func TestScopeGuardRefusesUncoveredNestedModule(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"a.go":     "package p\n",
+		"m/go.mod": "module m\n",
+		"m/b.go":   "package m\n",
+	})
+	err := checkScanSet(root, []string{"."}, []string{"."})
+	require.Error(t, err, "a nested module left out of the scan set must be an error, not a smaller baseline")
+	require.Contains(t, err.Error(), "m", "the error must name the uncovered module")
+}
+
+// TestScopeGuardAcceptsCompleteSetAndIgnoresOrder pins both directions of the scope comparison.
+// - ordering and spelling noise must not look like a different scan set, or the canonical entry point gets refused;
+// - listing a directory together with its own module parent counts those files twice and inflates every rule they touch.
+func TestScopeGuardAcceptsCompleteSetAndIgnoresOrder(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"a.go":     "package p\n",
+		"m/go.mod": "module m\n",
+		"m/b.go":   "package m\n",
+	})
+	require.NoError(t, checkScanSet(root, []string{".", "m"}, []string{"m", "."}),
+		"ordering and spelling noise must not look like a different scope")
+
+	writeTree(t, root, map[string]string{"sub/c.go": "package sub\n"})
+	err := checkScanSet(root, []string{".", "sub"}, []string{".", "sub"})
+	require.Error(t, err, "sub lives in the root module, so listing both counts sub/c.go twice")
+	require.Contains(t, strings.ToLower(err.Error()), "twice")
 }

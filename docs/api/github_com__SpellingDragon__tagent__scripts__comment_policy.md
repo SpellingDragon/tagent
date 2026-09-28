@@ -4,12 +4,21 @@ longer-lived documentation must use the index form.
 
 Usage:
 
-    comment_policy [-report] [dir...]
+    comment_policy [-baseline F] [-update-baseline] [-strict] [-no-baseline] [dir...]
 
-Without -report any violation exits non-zero; -report prints the same findings
-and exits 0, which is how the gates are introduced before they become blocking.
+A run that consults the ratchet exits non-zero on any count above the baseline;
+-v prints every finding rather than only the regressions. -strict additionally
+requires the converged end state: zero findings.
+
 A directory argument is scanned recursively, skipping subdirectories that carry
-their own go.mod.
+their own go.mod — which is why the ratchet refuses to run over a set that
+leaves a nested module ungated, or a set other than the one the baseline was
+written over. -no-baseline measures a scope without consulting the ratchet at
+all.
+
+scripts/lint.sh owns the canonical directory set, so a batch author and CI scan
+the same tree; read and lower the baseline through it rather than invoking this
+command with an ad-hoc scope.
 
 Rules are named in the output and documented on the matcher table below. Length
 never decides compliance: a long contract comment is legal and a short piece of
