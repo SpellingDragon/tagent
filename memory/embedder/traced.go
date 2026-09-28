@@ -12,27 +12,25 @@ import (
 	semconv "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 )
 
-// ==================== TracedEmbedder（T-A 组8 · 向量链路可观测）====================
-//
-// 装饰任意 Embedder，为 Embed 调用产生 span（对齐上游 GenAI 语义约定：gen_ai.embeddings.
-// dimension.count / gen_ai.request.model）+ 记录 embedding 调用数/文本条数/维度分布 metric。
-//
-// 组8.3 声明区守卫：全部可观测位于 embedder 内部（Worker/store 侧），MCP/recall 工具的
-// Declaration 零触碰——prefix-cache 稳定性不变量不受影响。noop 安全：未设
-// OTEL_EXPORTER_OTLP_ENDPOINT 时 otel 全局为 noop provider，span/metric 零开销、
-// Embed 行为逐字节不变（仅透传 inner）。
-
 const (
 	embedMeterName = "github.com/SpellingDragon/tagent/memory"
 	embedSpanName  = "tagent.embeddings"
 )
 
-// TracedEmbedder 是带 span/metric 的 Embedder 装饰器（实现 Embedder 接口）。
+// TracedEmbedder 装饰任意 Embedder，为每次嵌入产生 span（对齐上游 GenAI 语义约定）并记录
+// 调用数／文本条数／维度分布。两条不变量：可观测只在装饰器内部产生，工具与引擎的 Declaration
+// 零触碰（否则每次加可观测都会扰动模型可见声明、破坏 prefix-cache 稳定性）；未配置导出时全局
+// provider 为 noop，本装饰器仅透传、行为逐字不变。属性只带元数据，嵌入内容不入 span。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 type TracedEmbedder struct {
 	inner memory.Embedder
-	calls metric.Int64Counter   // embedding API 调用数
-	texts metric.Int64Counter   // 嵌入文本总条数
-	dims  metric.Int64Histogram // 向量维度分布
+	// calls 计嵌入 API 调用次数。
+	calls metric.Int64Counter
+	// texts 计嵌入文本总条数。
+	texts metric.Int64Counter
+	// dims 记向量维度分布。
+	dims metric.Int64Histogram
 }
 
 // NewTracedEmbedder 包裹 inner 加向量链路可观测。inner 为 nil 返回 nil。metric 创建失败
@@ -78,5 +76,4 @@ func (t *TracedEmbedder) Dimension() int { return t.inner.Dimension() }
 // ModelID 透传 inner（索引指纹比对不受装饰影响）。
 func (t *TracedEmbedder) ModelID() string { return t.inner.ModelID() }
 
-// 编译期确认 TracedEmbedder 实现 memory.Embedder 接口。
 var _ memory.Embedder = (*TracedEmbedder)(nil)

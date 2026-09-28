@@ -24,9 +24,9 @@ func (fakeLoop) StartLoop(string, string) (<-chan *event.Event, error) {
 func (fakeLoop) StopLoop()          {}
 func (fakeLoop) IsLoopActive() bool { return true }
 
-// Tests for the bearer-token enforcement + loopback fail-closed guard
-// (implementation-hardening 3.1/3.2).
-
+// TestHTTPAPI_Auth_401WithoutOrWrongToken 钉住鉴权单点：无 token 或 token 不符一律 401，只读端点也无豁免。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#http-api
 func TestHTTPAPI_Auth_401WithoutOrWrongToken(t *testing.T) {
 	api := NewHTTPAPI(nil)
 	api.SetAuthToken("secret")
@@ -78,6 +78,7 @@ func TestHTTPAPI_Auth_HealthzNotExempt(t *testing.T) {
 	}
 }
 
+// TestValidateListenAddr 钉住 loopback fail-closed：无 token 时非回环地址拒绝启动且错误列出出路。
 func TestValidateListenAddr(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -104,6 +105,7 @@ func TestValidateListenAddr(t *testing.T) {
 	}
 }
 
+// TestAuthTokenFromEnv 钉住 token 的环境变量读取通路。
 func TestAuthTokenFromEnv(t *testing.T) {
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "env-tok")
 	if got := AuthTokenFromEnv(); got != "env-tok" {

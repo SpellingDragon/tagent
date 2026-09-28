@@ -1,10 +1,5 @@
 package main
 
-// Unit tests for the reincarnation notice feature — pure filesystem logic,
-// no network, no WeChat (design R6). Covers: D1 freshness/PID quadrants,
-// D3 metadata parse + missing-archive degradation, D8 WAL tail + breakpoint
-// marker + degraded scene block, D5 rename idempotency.
-
 import (
 	"os"
 	"path/filepath"
@@ -79,7 +74,7 @@ func TestReadNoticeMetadata(t *testing.T) {
 type fakeStore struct {
 	refs      []memory.EventReference
 	err       error
-	lastQuery memory.QueryOptions // captured: partition-contract assertions
+	lastQuery memory.QueryOptions
 }
 
 func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference, error) {
@@ -99,9 +94,6 @@ func TestFetchWALTail(t *testing.T) {
 	if err != nil || len(got) != 2 {
 		t.Fatalf("tail query failed: %v %v", got, err)
 	}
-	// Partition contract (2026-09-12 production find): resolvePartitions returns
-	// nil for a query without PartitionIDs -> zero partitions scanned -> empty
-	// result. The tail query MUST target the agent's own namespace partition.
 	wantPID := memory.PartitionIDFromName("tagent")
 	if len(store.lastQuery.PartitionIDs) != 1 || store.lastQuery.PartitionIDs[0] != wantPID {
 		t.Fatalf("query must pass PartitionIDs=[%d] (agent namespace), got %v", wantPID, store.lastQuery.PartitionIDs)
@@ -176,12 +168,10 @@ func TestHasOpenBreakpoint(t *testing.T) {
 func TestWaitNoticeAppearance(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "REINCARNATION_NOTICE")
 
-	// Never appears → false after the (short) budget.
 	if waitNoticeAppearance(p, 150*time.Millisecond, 50*time.Millisecond) {
 		t.Fatal("waitNoticeAppearance = true for a file that never appears")
 	}
 
-	// Appears 200ms in → found within the budget.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		if err := os.WriteFile(p, []byte("k: v"), 0o644); err != nil {

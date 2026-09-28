@@ -52,6 +52,14 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
+      # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
+      # totals in scripts/comment_policy/baseline.json but never raise one. Slots are
+      # keyed by rule alone, not by (file, rule), so moving comment text between files
+      # can neither look clean nor look dirty. The same script runs locally, so CI and
+      # the batch author cannot mean different things by "lint passed".
+      - name: Lint (gofmt · build · vet · comment ratchet · docs/api freshness · name/doc/proc refs)
+        run: bash scripts/lint.sh
+
   race:
     runs-on: ubuntu-latest
     steps:

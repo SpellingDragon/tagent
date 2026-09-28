@@ -5,14 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/model/openai"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
-
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/testutil"
 	"github.com/SpellingDragon/tagent/tool/action"
 	tasktool "github.com/SpellingDragon/tagent/tool/task"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/model/openai"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // TestRealLLM_AsyncTask_EndToEnd exercises the full async loop with a real model
@@ -73,8 +72,6 @@ func TestRealLLM_AsyncTask_EndToEnd(t *testing.T) {
 	}
 
 	const marker = "BUILD_DONE_7788"
-	// sleep 16 > sync_wait (10s) → dispatched async (ack ~10s), settles ~16-19s
-	// later (monitor poll 3s) → task_settled → reclaim turn ~18-20s.
 	start := time.Now()
 	ag.InjectMessage(model.NewUserMessage(
 		"请用 action 工具在后台运行这个命令：sleep 16 && echo " + marker +

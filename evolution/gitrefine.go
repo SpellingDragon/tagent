@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-// ==================== git 原生改进通道（self-evolution-git-native）====================
-//
-// 纯函数集（无状态、无生命周期）：git exec 包装 + 受控路径段匹配。
-// 哲学四原则（design §0）：文件即真源（P2）/ 复用 git（P3）/ 零自建版本库。
-
 // selfImproveTag 是改进 commit 的 message 行首标记——register 生成、LogFiltered
 // 过滤、RevertSafe 校验，三处共享。行首锚定天然排除 revert 生成的
 // `Revert "[self-improve] ..."`（K5）。
@@ -52,8 +47,6 @@ func GitAddCommit(dir string, paths []string, note string) (sha string, err erro
 		return "", err
 	}
 	msg := selfImproveTag + " " + note
-	// M3(独立评审):--only 限定 pathspec——裸 commit 会提交整个 index,卷入用户
-	// 手工暂存内容或上次失败遗留的暂存文件(revert 时连带回滚用户工作)。
 	commitArgs := append([]string{"commit", "--only", "-m", msg, "--"}, paths...)
 	if _, err := gitCmd(dir, commitArgs...); err != nil {
 		if strings.Contains(err.Error(), "nothing to commit") ||
@@ -74,9 +67,10 @@ var ErrNothingToCommit = fmt.Errorf("nothing-to-commit")
 
 // GitCommitInfo 是一条改进 commit 的摘要。
 type GitCommitInfo struct {
-	Sha     string
-	Note    string
-	Time    string // git 默认本地格式（status 展示用，不参与排序）
+	Sha  string
+	Note string
+	// Time git 默认本地格式（status 展示用，不参与排序）
+	Time    string
 	Subject string
 }
 
@@ -86,7 +80,6 @@ func GitLogFiltered(dir string, limit int) ([]GitCommitInfo, error) {
 		limit = 20
 	}
 	out, err := gitCmd(dir, "log", "-n", fmt.Sprint(limit),
-		// 正则转义：[self-improve] 的方括号不转义会被当字符类（"init" 行首 'i' 即误命中）。
 		"--grep=^\\[self-improve\\]", "--format=%H%x09%ad%x09%s", "--date=short")
 	if err != nil {
 		return nil, err
@@ -137,8 +130,6 @@ func GitRevertSafe(dir, sha string) (string, error) {
 	return out, nil
 }
 
-// ==================== 受控路径段匹配（N5：path.Match 不支持 **）====================
-
 // MatchProtectedPaths 校验 paths（相对运行 cwd 归一后）全部落在 patterns 内。
 // 返回 (ok, 越界路径列表)。pattern 按 / 分段：`**` 匹配任意段序列，`*` 段内通配。
 func MatchProtectedPaths(cwd string, paths, patterns []string) (bool, []string) {
@@ -175,7 +166,6 @@ func matchSegments(pat, seg []string) bool {
 		return len(seg) == 0
 	}
 	if pat[0] == "**" {
-		// `**` 匹配 0..n 段
 		for i := 0; i <= len(seg); i++ {
 			if matchSegments(pat[1:], seg[i:]) {
 				return true

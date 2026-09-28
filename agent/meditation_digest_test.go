@@ -1,3 +1,6 @@
+// 本文件负责自我状态摘要的有界呈现：需关注项限条数、描述按 rune 截断（CJK 安全）、被裁数量
+// 显式报出，无控制器时整段缺席而非空壳。
+// 契约: docs/wiki/agent/compression-and-telemetry.md#self-state-digest
 package agent
 
 import (
@@ -59,7 +62,6 @@ func TestRenderSelfStateDigest_CountsAndAttention(t *testing.T) {
 			t.Errorf("digest missing %q:\n%s", want, got)
 		}
 	}
-	// Healthy tasks are counted but not listed as attention detail.
 	if strings.Contains(got, "run a") {
 		t.Errorf("running task should not appear in attention detail:\n%s", got)
 	}
@@ -89,8 +91,7 @@ func TestRenderSelfStateDigest_TruncatesLongDesc(t *testing.T) {
 	}
 }
 
-// TestMeditation_DigestPresentBeforePrompt: with a task controller, the
-// meditation message carries the digest before the prompt (task 4.1).
+// TestMeditation_DigestPresentBeforePrompt 钉住 with a task controller, the meditation message carries the digest before the prompt (task 4.1).
 func TestMeditation_DigestPresentBeforePrompt(t *testing.T) {
 	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
 	mgr.SetTaskController(&fakeTaskController{tasks: []*task.Task{
@@ -107,8 +108,7 @@ func TestMeditation_DigestPresentBeforePrompt(t *testing.T) {
 	}
 }
 
-// TestMeditation_NoDigestWhenNoController: without a task controller, behavior
-// is unchanged — no digest section, prompt intact (task 4.1 / graceful degrade).
+// TestMeditation_NoDigestWhenNoController 钉住 without a task controller, behavior is unchanged — no digest section, prompt intact (task 4.1 / graceful degrade).
 func TestMeditation_NoDigestWhenNoController(t *testing.T) {
 	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
 

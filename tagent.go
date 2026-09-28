@@ -65,7 +65,7 @@ type runtimeConfig struct {
 	// mutations never touch agent tool declarations.
 	mcpRegistry *toolmcp.Registry
 
-	// reliability 是根配置可靠性段副本（5.4 design-report-closeout）：
+	// reliability 是根配置可靠性段副本：
 	// buildPlainToolRef 据此注入 MCPProbeEvery（降级行为配置，per-agent 工具共用）。
 	reliability ReliabilityConfig
 
@@ -93,7 +93,7 @@ type runtimeConfig struct {
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *rl.TrajectoryRecorder
 
-	// evolution (self-evolution-git-native)：git 原生自进化装配单元（配置门控，默认关）。
+	// evolution：git 原生自进化装配单元（配置门控，默认关）。
 	// 文件即真源（热重载直生效）+ git 版本层（commit/revert/log）+ 建议式评估（judge/guardrail
 	// 只产 evaluation 事件，P4 框架不动手）。judge/guard 在 buildAgent 经 BindRuntime 延迟绑定。
 	evoGit *evolution.GitEvolution
@@ -101,12 +101,12 @@ type runtimeConfig struct {
 	// approvalChannels（R5）：外部审批送达通道（WithApprovalChannel 注入，govGate 构造后注册）。
 	approvalChannels []governance.ApprovalChannel
 
-	// storeOwners（resident-readiness-plan 4.4）：底层 store 指针 → pid → 首个
+	// storeOwners：底层 store 指针 → pid → 首个
 	// 占名 agent——共享 store 内不同名同 pid 的冲突在构建期 fail-closed。
 	storeOwners   map[string]map[int]string
 	storeOwnersMu sync.Mutex
 
-	// resident（resident-readiness-plan 4.5 + §4.3）：常驻构建后的 name → agent
+	// resident：常驻构建后的 name → agent
 	// 绑定表——热更壳子树按 agent 身份借用其常驻资源（store 等），绝不全部复用
 	// entryMemStore（防子 agent 存储漂移）。§4.3 起热新增**写入**此表：故它是
 	// 共享的 copy-on-write 快照（agent.ResidentTopology），不是可原地改的裸 map。
@@ -193,7 +193,7 @@ func WithModel(m model.Model) Option {
 	return func(rc *runtimeConfig) { rc.model = m }
 }
 
-// WithApprovalChannel 注入外部审批送达通道（R5 backlog-final-closeout）——审批请求经
+// WithApprovalChannel 注入外部审批送达通道——审批请求经
 // Deliver 渠道直投（如微信 SendTextToUser），不依赖 agent 转述。evolution/governance
 // 未启用时为 no-op。可多次调用（多通道尽力投递）。
 func WithApprovalChannel(ch governance.ApprovalChannel) Option {
@@ -306,7 +306,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s", cfg.TrajectoryDir)
 	}
 
-	// evolution (self-evolution-git-native)：git 原生自进化（配置门控，默认关 → 零行为变化）。
+	// evolution：git 原生自进化（配置门控，默认关 → 零行为变化）。
 	// 文件即真源+git 版本层；启动自检 git 仓（Warn 不阻断——非仓下改文件仍生效，无留痕/评估）。
 	if cfg.Evolution.Enabled {
 		rc.evoGit = evolution.NewGitEvolution(evolution.GitEvolutionConfig{
@@ -422,7 +422,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			// decisions read only this, never a file some candidate was rejected for.
 			publishedReach map[string]bool
 		)
-		// 第二轮收敛（introduce-durable-workflow-engine §1.3）：org 版本簿记
+		// 第二轮收敛：org 版本簿记
 		// （effective 指纹/发布序号/ring-2 回滚快照/最近拒绝原因）集中到单一
 		// 协调器，取代此前 lastFP/execGen/prevKeep/prevSnapshot 散点状态。
 		coord := newOrgCoordinator()

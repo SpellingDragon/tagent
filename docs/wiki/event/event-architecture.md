@@ -1,5 +1,6 @@
 # tagent/event 模块架构文档
 
+<a id="overview"></a>
 ## 一、模块定位
 
 `tagent/event` 是 tagent 的**事件类型与元数据契约**包，为 `MemoryPlugin` 和 `SummaryPlugin` 提供统一的事件分类、`event_summary` 视图生成与事件元数据单点保障。
@@ -56,6 +57,7 @@ graph TB
 
 ## 四、事件类型常量
 
+<a id="const-list"></a>
 ### 4.1 完整常量列表
 
 ```go
@@ -540,6 +542,89 @@ RunFlow:
 - `agent/event_bus.go` 提供**事件传输机制**（EventBus + AgentEvent 结构体）
 - `agent/context_manager.go` 使用 `tagent/event` 的类型常量进行事件处理（`BuildInvocation` 合并触发源；所有拉取到的事件均驱动 turn，无预过滤）
 - `agent/event_bus.go` 使用 `NewExternalInputEvent` / `NewToolUseEvent` 构造事件
+
+
+---
+
+## 十二、类型注册表与投影、保留契约
+
+<a id="registry-authority"></a>
+### 12.1 `EventTypeSpec` 是事件类型静态属性的唯一权威源
+
+`event/registry.go` 的注册表承担一个事件类型的全部静态属性：渲染角色、是否原文优先、摘要形态、是否压缩骨架、是否低价值、类型级 TTL、是否合成投影引用、是否纳入向量索引、是否可召回、是否永不进投影。**新增一个类型只需注册一条 spec**，摘要/骨架/TTL/低价值/角色/嵌入/召回全链路自动生效；既有函数（`IsSpecialEventType`、`GenerateEventSummary`、`EventTypeToRole`、`IsSkeletonMessage`）与跨包变量（`memory.LowValueEventTypes`、lifecycle 的 `TypeTTL` 默认）一律委托或派生自它，不再各自维护枚举表。未注册类型经 `specOrDefault` 回退到 `defaultSpec`（角色 user、非 special、骨架保守 `true`、TTL 继承、可召回），与引入注册表前对未知类型的处理完全一致。
+
+字段语义中的关键约定：
+
+| 字段 | 零值含义 | 消费方 |
+|---|---|---|
+| `TTLDays` | `0` 继承全局默认；`-1` 豁免遗忘；`>0` 显式天数 | memory 生命周期 |
+| `Synthetic` | 合成投影引用，使用负 `EventKey`，非落库真实事件 | 存储、召回、渲染据正负 key 区分语义 |
+| `Embeddable` / `Recallable` | 是否进入向量索引 / 票据能否取回原文 | 分别在 memory 与 tool/recall 消费，**声明归属注册表**（否则新增类型要改两个包） |
+| `NonProjection` | 事实链内部记录，永不作为投影引用 | 经 `IsNonProjectionRecord` 统一判定 |
+
+### 12.2 非投影判定的单一入口
+
+`IsNonProjectionRecord(eventType, metadata)` 是"某事件能否进投影"的**唯一判定源**：类型维度取注册表的 `NonProjection`，外加携带 `task_inline_record` 标记的事件（终态 settle 已在回合内作为 tool result 返回，再进投影即双呈现）。**正常提交、在线 spill 回补、冷启动重建三条 append 路径必须共用它**，不得再各写类型或标记枚举——历史上各写各的，正是投影与事实链漂移的来源。未知类型保守进投影（`defaultSpec.NonProjection = false`）。旧数据的兼容排除分支已随受管重置裁决删除：运行时只认当前格式，旧数据须经清点与显式 reset 处置。
+
+<a id="timeline-prefix"></a>
+### 12.3 时间线前缀是写读同包的一处契约
+
+每条历史行的前缀形如 `[evt_<KEY>|<type>]`，`KEY` 用规范小写十六进制（负 key 保留前导 `-`）。**写入端 `FormatEventPrefix` 与读取端 `ParseEventKeyAndType` 同在 `event/timeline.go`**：生产方（时间线渲染）与消费方（压缩、保留引用扫描、召回取回）因此不可能各自演化出不同格式。`ParseEventKey` 还容忍模型回显票据时常见的形态（`0x` 前缀、`evt_` 前缀、完整的 `[evt_HEX|type]`、尾随 `|type` 或 `]`），并把无法解析者作为普通文本处理。
+
+<a id="internal-retention"></a>
+### 12.4 内部记录类型的保留不得被缩短
+
+两类事件注册的目的**只是被动排除**，不是活跃功能：
+
+- **`wf.*` 家族**（`event/wf_facts.go`）：事实链是 workflow 运行时状态的唯一真源，包括信号在内的状态都必须先落为事实才产生效果；durable workflow 引擎已撤回，这些类型现存唯一作用是让历史 `wf.*` 记录继续被投影/召回/嵌入排除。因此其 `TTLDays` **必须保持 0**：写成正数会在 `DefaultTypeTTL` 里新增条目，**静默缩短**那些按全局/显式策略写入的历史记录的保留期。
+- **`inbox_receipt`**（`event/inbox_receipt.go`）：一条输入信封被确认消费的记账事实，真源是事实链而非 inbox 文件。它的 TTL 就是 request-id 的 **30 天去重窗口**——过期后同一 request-id 重投**不保证**幂等，这是明确边界而非缺陷。
+
+### 12.5 溯源快照集中在一个保留键下
+
+`source_snapshot` 用一条 JSON 承载 durable 输入的原始 `source` 与**完整业务 Metadata**。这样做的原因是：业务键不得进入受控控制命名空间（否则运行时声明状态会泄漏进模型上下文与宿主投递字段），而跨重启对账又必须能还原到宿主身份（`chat_id`、任务世系等）。运行时 claim 状态改由类型化非 JSON 字段承载，只有这些**身份键**跨入持久化事实。
+
+- **召回键解析**另有原生 fuzz 目标：`go test ./event/ -run FuzzParseEventKey -fuzz FuzzParseEventKey -fuzztime=30s`。确定性有界往返与全函数性断言在常规 `go test` 中执行，fuzz 只用于深挖，不作为门禁。
+
+<a id="metadata-keys"></a>
+### 12.6 元数据键的归属与注入点
+
+事件元数据是**框架职责**：每个键在 `event` 包定义一次，注入点引用常量，消费方经 `ParseEventMeta` 解析而不直接读 `StateDelta` 原始串。键按来源分三类：
+
+| 类别 | 键 | 写入方 |
+|---|---|---|
+| 存储标识 | `event_key`（`MetaKeyEventKey`）、`partition_id`（`MetaKeyPartitionID`）、`event_type`（`MetaKeyEventType`）、`event_summary`（`MetaKeyEventSummary`） | 事件持久化插件在落库时写 |
+| 分发锚点 | `trigger_source` | 每回合由运行流程设在所有转发事件上，供消费方确定性分派 |
+| 透传业务 | `meta_` 前缀（如 `meta_chat_id`） | 从 invocation 根元数据传播到投递出的事件 |
+
+归因与可观测键（`agent_name`、`bundle_id`、`rollout_id`、`trace_id`、`span_id`）写在 `FullEvent.Metadata` 上，使产出事件可回溯到生效版本并与 trace 双向互链；`trace_id`/`span_id` 与 turn span 同源，故事件溯源、轨迹记录与遥测三个投影共用一个锚点。
+
+治理子类型键 `subtype`（`denial`/`goal`/`approval`/`degraded`/`audit`）的权威定义也在本包：治理账本写、进化取证读同一常量。**跨包复制字面量会静默漂移**，一旦漂移取证侧的拒绝计数归零，快道回滚防线随之失效——这类漂移没有编译期信号，只能靠"单一声明处"避免。
+
+<a id="type-rationale"></a>
+### 12.7 每个内置类型的存在理由
+
+| 类型 | 为什么单独存在 |
+|---|---|
+| `context_compress` | 滚动摘要的合成引用（负 key），是"当前综述"的持续视图 |
+| `tool_chain` | 一组完整工具对折叠成一条合成引用（负 key）。与 `context_compress` 分开，是为了让"保留引用"扫描不把工具链折叠计入综述数量 |
+| `settle_fold` | 连续多条结算通知折叠成一张票据卡片（合成负 key）：只影响投影视图，底层结算事件仍在事实链中，可按卡片行内 key 逐条召回 |
+| `context_compress_summary` | 策展固化的段落摘要产物，属长期记忆：豁免 TTL 与驱逐 |
+| `task_spawned` | 任务派生的事实链记录，是跨重启重建活动任务集的**唯一**数据源；永不进投影（任务板按内存注册表现算）|
+| `resident_session` | 常驻会话生命周期（全参派生／终态结局）的注册与审计记录；不进投影 |
+| `consolidation` | 证据门控的巩固产物：携带源事件 key 收据列表与服务端计算的指纹，可回放验证并**防止模型自造记忆**；正 key、豁免 TTL |
+| `governance` | 治理记录采用**单类型＋`subtype`** 而非五个类型：注册有成本，而审计查询天然按单类型过滤 |
+| `feedback` | 反馈/评分/任务成败经因果边绑定到具体产出事件，**零新索引**；`subtype` 区分来源 |
+| `inbox_receipt`、`wf.*` | 见 12.4：为被动排除与记账而注册 |
+
+<a id="summary-naming"></a>
+### 12.8 摘要与命名的两处澄清
+
+- `GenerateEventSummary` produces 的是 `event_summary` **元数据视图**，不是内容摘要：多数类型是原文逐字视图，`action_command` 是一行机械工具调用行。内容级压缩/综述属压缩与策展管线。历史函数名容易误读，故在此固定语义。
+- **严禁内容截断**：超出上下文的内容由多轮压缩处理，任何非设计的信息折损都会污染压缩质量（见「严格拒绝非设计折损」一节）。
+- 纯工具调用的 `thinking_plan`（无正文、有调用）其视图取"调用 <工具名>"，使老化渲染仍带工具身份而非空占位，也让工具链折叠能直接从摘要取到名字，无需回读全文。
+- 工具结果若是 JSON，摘要提取 `status`/`session`/`count`/`message`/`error` 与前若干条目名，避免把大段 JSON 原样存进摘要——否则召回把摘要再序列化进响应会造成嵌套 JSON 转义。非 JSON 结果原样返回。
+
+
 
 
 ---

@@ -1,8 +1,3 @@
-// Package agent provides an optional HTTP API for RL integration (AReaL bridge).
-//
-// The HTTP API exposes tagent's persistent event loop to external callers
-// (e.g., AReaL's Python adapter). It is optional — only needed when tagent
-// is used as an RL rollout agent.
 package rl
 
 import (
@@ -35,19 +30,23 @@ import (
 // without changing the event mechanism.
 type ModelUpdateFn func(baseURL string)
 
-// HTTPAPI exposes tagent's persistent loop via HTTP.
-// It enables external callers (e.g., AReaL Python adapter) to submit tasks.
+// HTTPAPI 经 HTTP 暴露常驻事件循环，使外部调用方（如 AReaL 的 Python 适配器）可提交任务。
+// 它是可选组件，且构成一张能操纵 agent 的攻击面 —— 鉴权、loopback 守卫、单点上限与端点
+// 策略四道防线都是结构性的，详见文档。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#http-api
 type HTTPAPI struct {
-	agent         AgentLoop
-	modelUpdateFn ModelUpdateFn // optional: set by main.go for AReaL proxy support
+	agent AgentLoop
+	// modelUpdateFn optional: set by main.go for AReaL proxy support
+	modelUpdateFn ModelUpdateFn
 	// modelUpdateFnE (5.3): error-returning variant — a failed endpoint rebuild
 	// must reject the WHOLE /task request (fail-closed), not fire-and-forget.
 	modelUpdateFnE func(baseURL string) error
-	// endpointPolicy (5.3): dynamic llm_base_url redirect is DISABLED by
+	// endpointEnabled endpointPolicy (5.3): dynamic llm_base_url redirect is DISABLED by
 	// default; when enabled, hosts must be allowlisted (exact host, any port).
 	endpointEnabled   bool
 	endpointAllowlist map[string]bool
-	// authToken (implementation-hardening 3.1): when non-empty, every request
+	// authToken: when non-empty, every request
 	// MUST carry `Authorization: Bearer <token>` — enforced at the top of
 	// ServeHTTP, before routing, so no endpoint (including /healthz) executes
 	// any side effect unauthenticated. Set via SetAuthToken / AuthTokenFromEnv.
@@ -55,24 +54,30 @@ type HTTPAPI struct {
 	feedbackStore memory.MemoryStore
 	diagnosticsFn func() any
 
-	// fbMu/fbPending/fbNotify（3.3 backlog-final-closeout）：long-poll 反馈通道——
+	// fbMu/fbPending/fbNotify：long-poll 反馈通道——
 	// POST /feedback 成功后入队+通知；GET /feedback/wait 阻塞至超时或新事件。
 	// 内存态重启清空=接受丢失（C7）；wait 是增量通知，全量靠事件库。
 	fbMu      sync.Mutex
 	fbPending []map[string]any
 	fbNotify  chan struct{}
-	fbDropped atomic.Int64 // 5.4: oldest-first overflow counter, surfaced in /feedback/wait
+	// fbDropped 5.4: oldest-first overflow counter, surfaced in /feedback/wait
+	fbDropped atomic.Int64
 
-	limits HTTPAPILimits // 5.1: single-point validation bounds
+	// limits 5.1: single-point validation bounds
+	limits HTTPAPILimits
 }
 
 // HTTPAPILimits (5.1): single-point request validation bounds. Zero fields
 // use the documented defaults; negative values are rejected by SetLimits.
 type HTTPAPILimits struct {
-	MaxBodyBytes     int64 // request body cap (default 1 MiB)
-	MaxMessages      int   // /task messages array cap (default 32)
-	MaxContentBytes  int   // per-message content cap (default 256 KiB)
-	MaxFeedbackQueue int   // feedback long-poll queue cap (default 1024)
+	// MaxBodyBytes request body cap (default 1 MiB)
+	MaxBodyBytes int64
+	// MaxMessages /task messages array cap (default 32)
+	MaxMessages int
+	// MaxContentBytes per-message content cap (default 256 KiB)
+	MaxContentBytes int
+	// MaxFeedbackQueue feedback long-poll queue cap (default 1024)
+	MaxFeedbackQueue int
 }
 
 // DefaultHTTPAPILimits returns the documented defaults.
@@ -87,8 +92,6 @@ func DefaultHTTPAPILimits() HTTPAPILimits {
 
 // NewHTTPAPI creates a new HTTPAPI for the given agent.
 func NewHTTPAPI(agent AgentLoop) *HTTPAPI {
-	// F1（哲学审查）：fbNotify 必须 make——nil channel 接收恒阻塞，long-poll
-	// 唤醒通路会是死代码（等待者只能等满 30s）。
 	return &HTTPAPI{agent: agent, fbNotify: make(chan struct{}, 1), limits: DefaultHTTPAPILimits()}
 }
 
@@ -161,14 +164,14 @@ func (h *HTTPAPI) SetDiagnosticsFn(fn func() any) {
 	h.diagnosticsFn = fn
 }
 
-// SetFeedbackStore enables POST /feedback (D1 design-report-closeout): the
+// SetFeedbackStore enables POST /feedback: the
 // store receives feedback events bound to produced events by hex event_key.
 func (h *HTTPAPI) SetFeedbackStore(store memory.MemoryStore) {
 	h.feedbackStore = store
 }
 
 // SetAuthToken enables bearer-token authentication for every endpoint
-// (implementation-hardening 3.1). With a token set, requests without a
+// . With a token set, requests without a
 // matching `Authorization: Bearer` header get 401 before any routing or side
 // effect. Pair with ValidateListenAddr for the loopback fail-closed guard.
 func (h *HTTPAPI) SetAuthToken(token string) { h.authToken = token }
@@ -178,8 +181,8 @@ func (h *HTTPAPI) SetAuthToken(token string) { h.authToken = token }
 // listen address and token provisioning belong to the host app).
 func AuthTokenFromEnv() string { return os.Getenv("TAGENT_RL_AUTH_TOKEN") }
 
-// ValidateListenAddr is the loopback fail-closed guard (implementation-hardening
-// 3.2): WITHOUT a token, the API must only listen on loopback — any reachable
+// ValidateListenAddr is the loopback fail-closed guard
+// : WITHOUT a token, the API must only listen on loopback — any reachable
 // caller could otherwise InjectMessage (steer the agent) or redirect the LLM
 // endpoint via llm_base_url (full prompt exfiltration). Hosts MUST call this
 // before ListenAndServe; a non-loopback address without a token returns an
@@ -193,7 +196,7 @@ func ValidateListenAddr(addr, token string) error {
 		host = h
 	}
 	if host == "" {
-		host = "0.0.0.0" // ":8089" binds all interfaces
+		host = "0.0.0.0"
 	}
 	if host == "localhost" {
 		return nil
@@ -225,10 +228,6 @@ func (h *HTTPAPI) authorized(r *http.Request) bool {
 func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Single auth enforcement point (implementation-hardening 3.1): before
-	// routing, so no endpoint — /task, /feedback, /diagnostics, /healthz —
-	// executes any side effect unauthenticated (fail-closed consistency; no
-	// exemptions by design).
 	if h.authToken != "" && !h.authorized(r) {
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid Authorization: Bearer header")
 		return
@@ -244,8 +243,6 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, h.diagnosticsFn())
 	case r.Method == http.MethodGet && r.URL.Path == "/feedback/wait":
-		// 3.3（backlog-final-closeout）：long-poll——阻塞至超时或新 feedback。
-		// 内存态队列重启清空=接受丢失（C7）；wait 是增量通知，全量靠事件库。
 		timeout := 30 * time.Second
 		if v := r.URL.Query().Get("timeout"); v != "" {
 			if secs, err := strconv.Atoi(v); err == nil && secs > 0 && secs <= 30 {
@@ -255,7 +252,7 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-h.fbNotify:
 		case <-time.After(timeout):
-		case <-r.Context().Done(): // 5.5: client cancel must not hold the handler
+		case <-r.Context().Done():
 			return
 		}
 		h.fbMu.Lock()
@@ -268,11 +265,8 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"items":         pending,
-			"dropped_count": dropped, // 5.4: evicted since last wait
-			// cold-eyes R2 Minor 8: ANY eviction means this response is
-			// incomplete — the trainer must do a full re-query, whether or
-			// not newer items were also delivered.
-			"partial": dropped > 0,
+			"dropped_count": dropped,
+			"partial":       dropped > 0,
 		})
 	case r.Method == http.MethodPost && r.URL.Path == "/feedback":
 		h.handlePostFeedback(w, r)
@@ -285,22 +279,22 @@ func (h *HTTPAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // feedbackRequest is the body for POST /feedback.
 type feedbackRequest struct {
-	EventKey string  `json:"event_key"` // hex event key of the produced event to bind
-	Verdict  string  `json:"verdict"`   // positive / negative / neutral
-	Note     string  `json:"note,omitempty"`
-	Rating   float64 `json:"rating,omitempty"`
+	// EventKey hex event key of the produced event to bind
+	EventKey string `json:"event_key"`
+	// Verdict positive / negative / neutral
+	Verdict string  `json:"verdict"`
+	Note    string  `json:"note,omitempty"`
+	Rating  float64 `json:"rating,omitempty"`
 }
 
 // handlePostFeedback binds an external verdict to a produced event
-// (D1 design-report-closeout 2.4). Missing parent → explicit 404 (no
+// . Missing parent → explicit 404 (no
 // feedback on hallucinated keys); disabled → 503.
 func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 	if h.feedbackStore == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "feedback_disabled", "no feedback store wired")
 		return
 	}
-	// cold-eyes Major 4：/feedback 与 /task 同受 limits 单点约束——大 body
-	// 直接 413，不允许持有 token 的客户端以单个请求撑爆进程内存。
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.limits.MaxBodyBytes+1))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "read_body_error", err.Error())
@@ -329,9 +323,6 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 		Verdict: req.Verdict, Rating: req.Rating, Note: req.Note, Source: "api",
 	})
 	if err != nil {
-		// 8.5（review §8）：按 sentinel 分类——parent-miss=确定性 404（勿重试）；
-		// edge-partial=事件已落库仅因果边失败 → 201+warning（重试会写重复 feedback）；
-		// 其余=500。
 		switch {
 		case errors.Is(err, memory.ErrFeedbackParentNotFound):
 			writeJSONError(w, http.StatusNotFound, "parent_not_found", err.Error())
@@ -341,7 +332,6 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 				"status": "bound_with_warning", "feedback_key": tagentevent.FormatEventKey(fbKey),
 				"warning": err.Error(),
 			})
-			// F2（哲学审查）：事件已落库即入队通知——与「POST 成功后入队」语义一致。
 			h.fbEnqueue(map[string]any{
 				"feedback_key": tagentevent.FormatEventKey(fbKey),
 				"parent":       req.EventKey, "verdict": req.Verdict, "source": "api", "warning": err.Error(),
@@ -357,7 +347,6 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 		"status":       "bound",
 		"feedback_key": tagentevent.FormatEventKey(fbKey),
 	})
-	// 3.3（backlog-final-closeout）：成功登记 → 通知 long-poll 等待者并入队。
 	h.fbEnqueue(map[string]any{
 		"feedback_key": tagentevent.FormatEventKey(fbKey),
 		"parent":       req.EventKey, "verdict": req.Verdict, "source": "api",
@@ -368,9 +357,6 @@ func (h *HTTPAPI) handlePostFeedback(w http.ResponseWriter, r *http.Request) {
 func (h *HTTPAPI) fbEnqueue(item map[string]any) {
 	h.fbMu.Lock()
 	h.fbPending = append(h.fbPending, item)
-	// 5.4: oldest-first overflow — a slow trainer must not make the bot lose
-	// newer verdicts silently; eviction is counted and surfaced via
-	// dropped_count in /feedback/wait.
 	for len(h.fbPending) > h.limits.MaxFeedbackQueue {
 		h.fbPending = h.fbPending[1:]
 		h.fbDropped.Add(1)
@@ -382,7 +368,7 @@ func (h *HTTPAPI) fbEnqueue(item map[string]any) {
 	}
 }
 
-// taskRequest is the body for POST /task.
+// taskResponse taskRequest is the body for POST /task.
 // taskResponse (5.2): 202 carries the batch's stable identity and durability
 // so the caller can correlate feedback and detect volatile fallback.
 type taskResponse struct {
@@ -392,10 +378,11 @@ type taskResponse struct {
 }
 
 type taskRequest struct {
-	Messages   []taskMessage `json:"messages"`
-	UserID     string        `json:"user_id"`
-	SessionID  string        `json:"session_id"`
-	LLMBaseURL string        `json:"llm_base_url,omitempty"` // AReaL proxy URL (dynamic port)
+	Messages  []taskMessage `json:"messages"`
+	UserID    string        `json:"user_id"`
+	SessionID string        `json:"session_id"`
+	// LLMBaseURL AReaL proxy URL (dynamic port)
+	LLMBaseURL string `json:"llm_base_url,omitempty"`
 }
 
 type taskMessage struct {
@@ -403,7 +390,7 @@ type taskMessage struct {
 	Content string `json:"content"`
 }
 
-// handlePostTask submits a task to tagent's persistent event loop via InjectMessage.
+// endpointMu handlePostTask submits a task to tagent's persistent event loop via InjectMessage.
 // Returns 202 Accepted immediately — the adapter waits separately for processing
 // to complete (AReaL proxy captures all LLM interactions during the wait).
 //
@@ -440,8 +427,7 @@ func (h *HTTPAPI) validateEndpointURL(raw string) error {
 	return nil
 }
 
-// applyEndpointUpdate (5.3): prefer the error-returning callback; the legacy
-// void callback is wrapped as always-success for compatibility.
+// applyEndpointUpdate 优先用带 error 的回调；遗留的无返回值回调被包成"永远成功"以兼容。
 func (h *HTTPAPI) applyEndpointUpdate(baseURL string) error {
 	if h.modelUpdateFnE != nil {
 		return h.modelUpdateFnE(baseURL)
@@ -505,9 +491,6 @@ func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5.3: endpoint update and acceptance share the mutex — a rejected
-	// endpoint rebuild rejects the whole batch (fail-closed), and an accepted
-	// batch can never straddle two endpoint generations.
 	endpointMu.Lock()
 	defer endpointMu.Unlock()
 	if req.LLMBaseURL != "" {
@@ -526,18 +509,15 @@ func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
 				"endpoint rebuild failed; previous endpoint keeps serving: "+err.Error())
 			return
 		}
-		// cold-eyes Minor 4: URL may embed credentials — log host:port only.
 		if u, perr := url.Parse(req.LLMBaseURL); perr == nil {
 			log.Infof("[HTTPAPI] LLM base URL updated to %s://%s", u.Scheme, u.Host)
 		}
 	}
 
-	// 5.2: the WHOLE batch is one acceptance unit — single envelope receipt.
 	injector, ok := h.agent.(interface {
 		InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (string, bool, error)
 	})
 	if !ok {
-		// Legacy agents without envelope support: per-message fallback.
 		for _, m := range req.Messages {
 			role := model.Role(m.Role)
 			if role == "" {

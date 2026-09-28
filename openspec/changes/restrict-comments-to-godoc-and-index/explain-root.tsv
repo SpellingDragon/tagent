@@ -1,0 +1,30 @@
+# Declared differences allowed by the merge gate for the root package (`.`).
+# Reproduce (both files are versioned next to this one):
+#   git archive HEAD | tar -x -C $BASE
+#   codetools merge-check --base-root $BASE --head-root . \
+#     --map rename-map-root.tsv --explain explain-root.tsv .   → 1 package(s) intact
+# An empty explain file (must be a zero-byte file created fresh, not a reused path)
+# reports 13, and removing any one row here brings that row back — so the set is both
+# sufficient and minimal. A previous "minimal 3 rows" trim here was derived from a
+# contaminated input (a supposedly-empty explain file that still held 10 names) and is
+# reverted by that check.
+#
+# Class A — a subprocess `-run` filter string must follow the declared rename of the
+# test it selects; leaving the old text makes the child match no test and pass
+# vacuously (exactly what runBootChild now asserts against).
+wal42Filter      # "TestWAL42_RelaunchAfterRestartResolvesOnTheCurrentFace$" follows the test rename
+wal42PhaseEnv    # reuses the wal42 filter constant
+wal42YamlEnv     # reuses the wal42 filter constant
+wal42Child       # reuses the wal42 filter constant
+mon33Filter      # "TestMonitor33_LiveSessionStaysWatchedAcrossToolGeneration$" follows the test rename
+mon33Child       # reuses the mon33 filter constant
+mon33Command     # reuses the mon33 filter constant
+mon33PhaseEnv    # reuses the mon33 filter constant
+mon33YamlEnv     # reuses the mon33 filter constant
+# Class B — a fixture value named after a helper, changed only to follow the rename.
+mon33SvcName     # "mon33svc" → "sessionWatchsvc": fixture text follows the helper rename
+# Class C — deliberate strengthening (assertion count may only grow, body necessarily differs).
+runBootChild     # added the assertion that a -run filter must match at least one test
+# Class D — method text of a renamed fixture type (receiver renamed with the type).
+wal42Model.Info  # receiver wal42Model → walReentryModel
+mon33Model.Info  # receiver mon33Model → sessionWatchModel

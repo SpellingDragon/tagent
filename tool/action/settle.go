@@ -31,10 +31,10 @@ func trimToLineOffset(s string, n int) string {
 // settles. The detector only makes the deterministic classification here; the
 // LLM interprets ambiguous kinds (stable vs suspect) downstream.
 //
-//	completed → SettleCompleted   (process exited — definitely done)
-//	error     → SettleCompleted   (settled with failure; caller attaches Err)
-//	stable    → SettleStable      (output stable, process alive — usable/waiting)
-//	timed_out → SettleSuspect     (quiet beyond fake-dead threshold — likely hung)
+//	completed → SettleCompleted (process exited — definitely done)
+//	error → SettleCompleted (settled with failure; caller attaches Err)
+//	stable → SettleStable (output stable, process alive — usable/waiting)
+//	timed_out → SettleSuspect (quiet beyond fake-dead threshold — likely hung)
 func StatusToSettle(s SessionStatus) (task.SettleKind, bool) {
 	switch s {
 	case SessionCompleted, SessionError:
@@ -43,7 +43,7 @@ func StatusToSettle(s SessionStatus) (task.SettleKind, bool) {
 		return task.SettleStable, true
 	case SessionTimedOut:
 		return task.SettleSuspect, true
-	default: // SessionRunning, SessionFakeDead, SessionFakeAlive
+	default:
 		return "", false
 	}
 }
@@ -76,14 +76,14 @@ type TmuxSettleDetector struct {
 	cancelFn  func()
 	closeOnce sync.Once
 	reapOnce  sync.Once
-	stop      chan struct{} // closed on close(): stops the detach timer
-	denseDur  time.Duration // dense phase per round (spawn and each resume)
+	stop      chan struct{}
+	denseDur  time.Duration
 
-	mu       sync.Mutex      // guards detach + baseline (round state)
-	detach   <-chan struct{} // fires at the dense→sparse boundary (sync→async)
-	baseline int             // output lines before the current round's input
+	mu       sync.Mutex
+	detach   <-chan struct{}
+	baseline int
 
-	// Watch (2026-09-11 C1): pattern-triggered wakeups for resident sessions.
+	// watchRe Watch: pattern-triggered wakeups for resident sessions.
 	// OnWatchOutput receives the WHOLE visible pane buffer each refresh (same
 	// semantics as OnStateChange); the hit count is diffed against the last
 	// snapshot, so pane scrolling/truncation degrades to "missed hits" rather
@@ -96,8 +96,8 @@ type TmuxSettleDetector struct {
 	watchHits   int
 	watchLast   time.Time
 
-	probeMu     sync.Mutex // guards probe failure bookkeeping (C2)
-	probeFailed bool       // a failure signal is outstanding (no repeat until a success resets)
+	probeMu     sync.Mutex
+	probeFailed bool
 }
 
 // NewTmuxSettleDetector creates a detector for the given session. cancelFn, when
@@ -145,7 +145,7 @@ func (d *TmuxSettleDetector) Settled() <-chan task.SettleSignal { return d.ch }
 // Cancel). Sidecar loops (probe) select on it to exit.
 func (d *TmuxSettleDetector) Done() <-chan struct{} { return d.stop }
 
-// Stopped implements task.SettleDetector (§4.1). For a tmux-backed run the
+// Stopped implements task.SettleDetector. For a tmux-backed run the
 // producer is an external session, so its stop credential is the same event that
 // closes the detector: Cancel reaps the session synchronously (kill + drop
 // monitor tracking) and then closes this channel; a terminal status closes it
@@ -188,14 +188,10 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 	}
 	select {
 	case d.ch <- task.SettleSignal{Kind: kind, Output: output, Err: err}:
-	default: // stream buffer full — drop extra (LLM already has recent signal)
+	default:
 	}
 	if isTerminalStatus(newStatus) {
 		d.close()
-		// Reap the tmux session when the process actually ended (its pane is
-		// dead), so completed/errored command sessions don't accumulate — the
-		// output is already captured in the emitted signal. A merely-quiet
-		// timed-out session may still be alive, so it is NOT auto-reaped.
 		if newStatus == SessionCompleted || newStatus == SessionError {
 			d.reap()
 		}
@@ -204,12 +200,12 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 
 func (d *TmuxSettleDetector) close() {
 	d.closeOnce.Do(func() {
-		close(d.stop) // stop the detach timer — the session settled/terminated
+		close(d.stop)
 		close(d.ch)
 	})
 }
 
-// SetWatch attaches a pattern-triggered wakeup to the detector (2026-09-11
+// SetWatch attaches a pattern-triggered wakeup to the detector (
 // C1). The regex is matched against INCREMENTAL output fed via
 // OnWatchOutput; hits inside window are merged (one pending signal max),
 // with the cumulative hit count in the signal output — a log flood of 50
@@ -245,7 +241,7 @@ func (d *TmuxSettleDetector) OnWatchOutput(output string) {
 	hitsNow := len(re.FindAllString(output, -1))
 	delta := hitsNow - d.watchSeen
 	if delta < 0 {
-		delta = 0 // pane scrolled/truncated — lost lines, never fake hits
+		delta = 0
 	}
 	d.watchSeen = hitsNow
 	if delta == 0 {
@@ -256,8 +252,6 @@ func (d *TmuxSettleDetector) OnWatchOutput(output string) {
 	total := d.watchHits
 	last := d.watchLast
 	now := time.Now()
-	// Merge window: rapid successive hits fold into the pending signal; the
-	// NEXT emit carries the updated cumulative count.
 	if !last.IsZero() && now.Sub(last) < d.watchWindow {
 		d.watchMu.Unlock()
 		return
@@ -271,11 +265,11 @@ func (d *TmuxSettleDetector) OnWatchOutput(output string) {
 		Output: fmt.Sprintf("watch pattern %q hit x%d (cumulative)", re.String(), delta),
 		Err:    fmt.Errorf("%d matches", total),
 	}:
-	default: // buffer full — the agent already has a pending signal
+	default:
 	}
 }
 
-// EmitProbeResult reports a liveness-probe outcome (2026-09-11 C2). A failure
+// EmitProbeResult reports a liveness-probe outcome. A failure
 // emits a watch-kind signal ONCE; repeated failures stay silent until a
 // success resets the latch. This is the resident-session "service died"
 // wakeup: the agent learns within one probe interval, not when a human notices.
@@ -288,7 +282,7 @@ func (d *TmuxSettleDetector) EmitProbeResult(ok bool, detail string) {
 	}
 	if d.probeFailed {
 		d.probeMu.Unlock()
-		return // already reported; wait for a success before re-reporting
+		return
 	}
 	d.probeFailed = true
 	d.probeMu.Unlock()

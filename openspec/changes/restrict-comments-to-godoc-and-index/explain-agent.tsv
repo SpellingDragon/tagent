@@ -1,0 +1,9 @@
+# Declared differences allowed by the merge gate for the `agent` package.
+# Reproduce with:
+#   codetools merge-check --base-root <HEAD tree> --head-root . \
+#     --map rename-map-agent.tsv --explain explain-agent.tsv agent
+# Remaining violations after this file are the user's concurrent edits (new
+# untracked test files) and are deliberately NOT explained away here.
+TestI1ConcurrentDelegationsEndToEnd              # task 11.4: budgets reclassified (leak guard 6s→90s, observation 5s→30s / 7s→60s) and assertion text de-archived
+TestSettleSinkRegistry_ConcurrentPerInvocationIsolation  # task 11.4: assertion text lost the archive-only `I1:` prefix
+TestRestart30_DeterministicIndependentRestarts   # fixture filter/name strings follow the declared de-numbering renames in this family

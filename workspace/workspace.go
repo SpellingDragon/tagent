@@ -23,16 +23,15 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// DefaultRoot is the default unified workspace root (relative to the process
-// working directory).
+// DefaultRoot 是默认的工作区根目录（相对进程工作目录）。
 const DefaultRoot = ".tagent-workspace"
 
-// Subdirectories under the root.
+// ToolOutputDir 是根目录下存放超大工具输出的子目录名。
 const (
-	ToolOutputDir = "tool-output" // oversized tool outputs
+	ToolOutputDir = "tool-output"
 )
 
-// Root normalizes a workspace root, falling back to DefaultRoot when empty.
+// Root 归一化工作区根目录：为空时回落到 DefaultRoot。
 func Root(root string) string {
 	if root == "" {
 		return DefaultRoot
@@ -40,26 +39,25 @@ func Root(root string) string {
 	return root
 }
 
-// ToolOutputPath returns the directory for oversized tool outputs.
+// ToolOutputPath 返回超大工具输出的目录。
 func ToolOutputPath(root string) string { return filepath.Join(Root(root), ToolOutputDir) }
 
-// Cleaner periodically bounds the files under a workspace root by age and count.
+// Cleaner 周期性把工作区根目录下的文件按「年龄 ＋ 数量」两个维度限幅。
 type Cleaner struct {
 	root     string
 	interval time.Duration
 	maxAge   time.Duration
 	maxFiles int
-	now      func() time.Time // injectable clock (tests); defaults to time.Now
+	// now 是可注入时钟（测试用），为零时取 time.Now。
+	now func() time.Time
 }
 
-// NewCleaner creates a Cleaner. Non-positive interval/maxAge disable the
-// corresponding dimension; maxFiles<=0 disables the count cap.
+// NewCleaner 构造 Cleaner。interval/maxAge 非正表示关掉对应维度，maxFiles<=0 关掉数量上限。
 func NewCleaner(root string, interval, maxAge time.Duration, maxFiles int) *Cleaner {
 	return &Cleaner{root: Root(root), interval: interval, maxAge: maxAge, maxFiles: maxFiles, now: time.Now}
 }
 
-// Start runs the cleaner on a ticker until ctx is cancelled, in its own
-// goroutine. Use Run when the caller must observe the goroutine's exit.
+// Start 在自己的 goroutine 里按 ticker 清理，直到 ctx 取消；需要观察协程退出的调用方用 Run。
 func (c *Cleaner) Start(ctx context.Context) { go c.Run(ctx) }
 
 // Run is Start's blocking form: it returns once ctx is cancelled and the ticker
@@ -111,7 +109,6 @@ func (c *Cleaner) RunOnce() {
 		abs, err := filepath.Abs(path)
 		return err == nil && strings.HasPrefix(abs, absRoot+string(os.PathSeparator))
 	}
-	// 1. Age-based removal.
 	if c.maxAge > 0 {
 		cutoff := now().Add(-c.maxAge)
 		kept := files[:0]
@@ -126,7 +123,6 @@ func (c *Cleaner) RunOnce() {
 		}
 		files = kept
 	}
-	// 2. Count-based removal (newest first; drop the oldest beyond the cap).
 	if c.maxFiles > 0 && len(files) > c.maxFiles {
 		sort.Slice(files, func(i, j int) bool { return files[i].modTime.After(files[j].modTime) })
 		for _, f := range files[c.maxFiles:] {

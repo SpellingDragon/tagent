@@ -21,13 +21,13 @@ import "context"
 type Op string
 
 const (
-	OpInit         Op = "init"         // ensure the spec workspace exists (idempotent)
-	OpNew          Op = "new"          // create a new change/plan by name
-	OpStatus       Op = "status"       // query a change's artifact status
-	OpValidate     Op = "validate"     // validate a change (strict)
-	OpArchive      Op = "archive"      // archive a completed change
-	OpInstructions Op = "instructions" // fetch the template for an artifact
-	OpList         Op = "list"         // list existing changes
+	OpInit         Op = "init"
+	OpNew          Op = "new"
+	OpStatus       Op = "status"
+	OpValidate     Op = "validate"
+	OpArchive      Op = "archive"
+	OpInstructions Op = "instructions"
+	OpList         Op = "list"
 )
 
 // validOps is the dispatch whitelist.
@@ -40,22 +40,22 @@ var validOps = map[Op]bool{
 // documents which it consumes.
 type Request struct {
 	Op       Op     `json:"op"`
-	Name     string `json:"name,omitempty"`     // change/plan name (kebab-case)
-	Artifact string `json:"artifact,omitempty"` // for OpInstructions: proposal/specs/design/tasks
-	JSON     bool   `json:"json,omitempty"`     // request machine-readable output where supported
+	Name     string `json:"name,omitempty"`
+	Artifact string `json:"artifact,omitempty"`
+	JSON     bool   `json:"json,omitempty"`
 }
 
 // Result is the outcome of a spec operation.
 type Result struct {
 	Op       Op     `json:"op"`
-	ExitCode int    `json:"exit_code"`      // underlying process exit code (0 = success)
-	Output   string `json:"output"`         // combined stdout/stderr text
-	OK       bool   `json:"ok"`             // convenience: ExitCode == 0
-	Hint     string `json:"hint,omitempty"` // actionable guidance on failure
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output"`
+	OK       bool   `json:"ok"`
+	Hint     string `json:"hint,omitempty"`
 }
 
 // Backend abstracts a spec-management system. The current implementation is
-// openspecBackend (shelling out to the openspec CLI); swapping the plan format
+// openspecBackend; swapping the plan format
 // means providing another Backend — the tool and the model never change.
 type Backend interface {
 	// Run executes one spec operation. Implementations must never run

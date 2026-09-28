@@ -100,6 +100,21 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 
 边界：数值热更 ⊂ 结构变更换代 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝。序号/指纹为不透明诊断标签；无界历史被禁（常驻表/回执随拓扑定形，回滚环仅双槽）。
 
+<a id="strict-decode"></a>
+## 六·B、配置解码的严格度契约（internal/strictyaml）
+
+**所有配置入口共用同一个严格解码实现**：未知字段一律让加载**明确失败**，而不是静默忽略一个拼错的关键字。新增配置入口必须走这个包，不得另立第二套严格度——多套严格度迟早出现"某条路径静默接受拼错的键"，那类缺陷的表现是配置看起来生效了而实际没有。
+
+| 输入 | 行为 | 为什么 |
+|---|---|---|
+| 未知字段 | 失败，并在错误里点名该字段 | 拼错的键若被忽略，用户会以为改动了行为 |
+| YAML 首个文档之后的**尾随文档** | 失败 | 静默忽略第二个文档会让用户以为其中配置已生效 |
+| JSON 首个值之后的**尾随内容** | 失败 | 同上：拼接两份配置绝不可能是用户意图 |
+| 完全空的文档 | 成功，解出零值 | "没写"与"写错"必须区分；空配置是合法的默认起点 |
+| 票据的 `0x` 前缀形式 | 正常解析 | 这是模型复述标识符的合法形式（宽容是设计，不是巧合） |
+
+同一处还守护工具面的**路由白名单**：未列入白名单的操作名一律显式拒绝——已退役的旧操作名重新出现时，宁可报错也不静默接管。
+
 ## 七、可观测（默认 noop 零开销）
 
 turn root span（`tagent.turn`，含 EventKey/trigger_source 属性）为根，框架层 span（trpc llmflow/functioncall 自动埋点）挂为子树；trace_id/span_id 经 attribution 在**构造时**注入事件 Metadata（先于 StoreEvent，事件不可变保持）、写入 TrajectoryRecorder 的 LLMCallRecord（omitempty 向后兼容）、经 task Origin→settle Metadata 管道建立跨 turn span link。设 `OTEL_EXPORTER_OTLP_ENDPOINT` 导出。
@@ -124,4 +139,4 @@ C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现；engine
 - 慢道 replay/shadow 门为预留（nil 通过 + 审批门默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点；
 - Jaeger OTLP 实录与 AReaL reward 消费格式核对为环境实装项（非代码缺口）；
 - **启用后 agent 在各复杂场景的行为反应**:见 [agent-behavior-matrix.md](./agent-behavior-matrix.md)(分场景分类,溯源代码);
-- 完整裁决与修复账本：`openspec/changes/LEDGER.md`、`openspec/changes/tagent-evolution-roadmap/execution-dag.md`；行为契约：`openspec/specs/`（mcp-*、semantic-search、recall-hybrid-fusion、turn-tracing、trajectory-trace-correlation 等）。
+- 完整裁决与修复账本：`openspec/changes/LEDGER.md`、`openspec/changes/archive/2026-09-06-tagent-evolution-roadmap/execution-dag.md`；行为契约：`openspec/specs/`（mcp-*、semantic-search、recall-hybrid-fusion、turn-tracing、trajectory-trace-correlation 等）。

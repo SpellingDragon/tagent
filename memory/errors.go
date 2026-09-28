@@ -7,10 +7,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// Typed storage-contract errors (resident-readiness-plan 2.5): callers must
-// be able to distinguish "the key genuinely does not exist" from "storage
-// I/O failed" — collapsing the two silently turns storage outages into
-// empty recall results and failed recovery into fake empty chains.
+// ErrKeyNotFound 等类型化存储契约错误：调用方必须能区分"键确实不存在"与"存储 I/O 失败"。把两者塌缩成一个，
+// 等于把一次故障伪装成空召回、把一次恢复失败伪装成"这条链本来就没有"——它们静默产生错答案
+// 而不是响亮报错。四类错误各自的处理义务见文档。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#typed-errors
 var (
 	// ErrKeyNotFound is wrapped by KV backends when a key genuinely does not
 	// exist. Any other error from a KVGet/KVScan is storage I/O and must
@@ -19,21 +20,19 @@ var (
 
 	// ErrDuplicateEventKey is returned by StoreEvent when the EventKey is
 	// already committed. An EventKey IS the event's identity (collision
-	// guard D15): overwriting is refused, never silently applied.
+	// guard ): overwriting is refused, never silently applied.
 	ErrDuplicateEventKey = errors.New("event key already exists")
 
 	// ErrEventForgotten is returned by the internal replay path when the EventKey
 	// is under a legal tombstone: the fact was deliberately deleted, so a replay
-	// MUST NOT resurrect it (2.4). It is distinct from a duplicate/conflict (a same
+	// MUST NOT resurrect it . It is distinct from a duplicate/conflict (a same
 	// key with wrong content) and from I/O — callers should hold the recovery
 	// material and not ack, exactly as they would for a conflict.
 	ErrEventForgotten = errors.New("event was legally forgotten (tombstoned); replay refused")
 
-	// ErrEventProtected is returned by DeleteEvent when the EventKey is under a live
-	// §2.8 retention lease: the shared-resource recovery owner still needs the durable
-	// original to finish acking/replaying an unacked envelope or spill entry, so an
-	// explicit delete is refused WITHOUT destroying the record (lossless relocation is
-	// still allowed; only destruction is refused). Callers must retry after release.
+	// ErrEventProtected 由 DeleteEvent 在键仍受保留租约保护时返回：共享资源的恢复归属方还需要
+	// 持久原文来完成 ack/回放未确认的信封或落盘项，因此显式删除被拒且**不销毁记录**（无损搬迁
+	// 仍允许，只有销毁被拒）。调用方须在租约释放后重试。
 	ErrEventProtected = errors.New("event is retained by an unacked-recovery lease; delete refused")
 )
 
@@ -76,20 +75,19 @@ func cloneFullEvent(e FullEvent) FullEvent {
 }
 
 // IsDuplicateEventKey reports whether err is the typed duplicate-key error
-// (cold-eyes Major 1: the replay path treats duplicates as idempotent success).
+// ( Major 1: the replay path treats duplicates as idempotent success).
 func IsDuplicateEventKey(err error) bool {
 	return errors.Is(err, ErrDuplicateEventKey)
 }
 
 // IsEventForgotten reports whether err is the typed tombstone/forgotten error — a
-// legal deletion a replay must not resurrect (2.4).
+// legal deletion a replay must not resurrect .
 func IsEventForgotten(err error) bool {
 	return errors.Is(err, ErrEventForgotten)
 }
 
-// IsEventProtected reports whether err is the typed §2.8 retention-lease refusal — an
-// explicit delete of a still-retained unacked-recovery original that must be retried
-// after the lease is released.
+// IsEventProtected 判断 err 是否为类型化的保留租约拒删——仍被未确认恢复所保留的原文上的显式
+// 删除请求，需在租约释放后重试。
 func IsEventProtected(err error) bool {
 	return errors.Is(err, ErrEventProtected)
 }

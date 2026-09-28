@@ -2,6 +2,7 @@
 
 > 本文档用 Mermaid 图说明 tagent 事件驱动的完整流转：从外部消息进入、经 Runner 处理、MemoryPlugin 持久化、SessionProjection 维护、到 BeforeModel 回调链（ContextCompressor 统一压缩）最终调用 LLM 的全过程。
 
+<a id="event-stream-overview"></a>
 ## 一、整体事件流
 
 ```mermaid
@@ -37,6 +38,7 @@ graph TD
 
 三层重建只发生在**常驻构建**（冷启动与热新增 agent）：已存在 agent 的执行换代只换执行面（模型/工具/声明），不重建投影、registry 与会话绑定——状态原封流过，在途 turn 持旧代跑完（见 [agent 篇 §2.13](agent-architecture.md)）。
 
+<a id="runner-flow"></a>
 ## 二、Runner 内部流转
 
 ```mermaid
@@ -73,6 +75,7 @@ graph TD
 
 **原生时间线渲染**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，系统永不生成文本调用语法，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点**双向**保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留）；反向地，结果不在渲染序列中的 assistant tool_calls 被剥离（骨架模型下 L1 常态丢弃 `action_command`，无此规则会每轮发出悬空调用）。因此压缩任意切窗仍产生合法原生序列。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 的字符串形态统一为 16 进制（`FormatEventKey/ParseEventKey`）。
 
+<a id="event-pipeline-atomic"></a>
 ## 四、事件插件管线：存储 + 投影同点原子（含 nil-Response / partial 过滤）
 
 ```mermaid
@@ -97,6 +100,7 @@ graph TD
 
 > 投影写入位于插件管线（而非消费 goroutine）：框架对工具结果事件的 completion-wait 覆盖插件处理，使“BeforeModel 时投影完整”成为构造保证。RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，主循环与子 agent 天然隔离。
 
+<a id="projection-lifecycle"></a>
 ## 五、SessionProjection 生命周期
 
 ```mermaid
@@ -110,6 +114,7 @@ graph TD
     COMPRESS --> REP["projection.Replace(retainedRefs)<br/>旧 refs 替换为新摘要 + 保留近期（重建 seen）"]
 ```
 
+<a id="unified-compression"></a>
 ## 六、ContextCompressor 统一压缩
 
 ```mermaid
@@ -151,6 +156,7 @@ graph TD
 
 L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件（`external_input`/`agent_output`）生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，不随时间线单调膨胀。
 
+<a id="e2e-turn-sequence"></a>
 ## 七、一次完整请求的端到端时序
 
 ```mermaid
@@ -200,6 +206,11 @@ sequenceDiagram
 
 
 ---
+
+<a id="trace-anchor"></a>
+## 九、trace 锚点：span 与轨迹两条投影必须互链，且不得造假
+
+事件携带 trace 锚点，使读者能从一条事实跳到对应 span。三条底线：noop span（没有真实 SpanContext）一律**降级为空值**而不是伪造 ID；无效 SpanContext 不得产出可用 ID；link 为空就**不建 link**——用假链掩盖断链，比断链本身更难查。
 
 ## 已知缺口
 

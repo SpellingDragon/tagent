@@ -13,18 +13,17 @@ import (
 )
 
 // TestNewWebSearchTool_Declaration verifies the web_search tool's Declaration.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#websearch-backend
 func TestNewWebSearchTool_Declaration(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	require.NotNil(t, searchTool)
 
-	// NewWebSearchTool already returns tool.CallableTool (S1040 removed the
-	// redundant same-type assertion) — declare via the concrete return type.
 	callable := searchTool
 
 	decl := callable.Declaration()
 	require.NotNil(t, decl, "Declaration should not be nil")
 
-	// Basic identity
 	assert.Equal(t, "web_search", decl.Name)
 	assert.Contains(t, decl.Description, "Search the web")
 	assert.Contains(t, decl.Description, "Zhipu")
@@ -37,14 +36,12 @@ func TestNewWebSearchTool_InputSchema_QueryParameter(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	decl := searchTool.Declaration()
 
-	// Check that InputSchema has "query" property
 	require.NotNil(t, decl.InputSchema)
 	querySchema, ok := decl.InputSchema.Properties["query"]
 	require.True(t, ok, "input schema should have 'query' property")
 	assert.Equal(t, "string", querySchema.Type)
 	assert.Contains(t, querySchema.Description, "search query")
 
-	// "query" should be in the required list
 	assert.Contains(t, decl.InputSchema.Required, "query",
 		"query should be a required parameter")
 }
@@ -55,7 +52,6 @@ func TestNewWebSearchTool_InputSchema_NoExtraParams(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	decl := searchTool.Declaration()
 
-	// Only "query" should be in properties
 	assert.Len(t, decl.InputSchema.Properties, 1,
 		"input schema should only have 'query' property")
 }
@@ -91,20 +87,17 @@ func TestWebSearch_ZhipuCall(t *testing.T) {
 	resp, err := wt.search(context.Background(), searchRequest{Query: "测试查询"})
 	require.NoError(t, err)
 
-	// Request assertions.
 	assert.Equal(t, "Bearer sk-test", gotAuth)
 	assert.Equal(t, "测试查询", gotBody.SearchQuery)
 	assert.Equal(t, "search_std", gotBody.SearchEngine)
 	assert.Equal(t, 10, gotBody.Count)
 
-	// Response mapping assertions.
 	require.Len(t, resp.Results, 2)
 	assert.Equal(t, "页面一", resp.Results[0].Title)
 	assert.Equal(t, "https://a.example/1", resp.Results[0].URL)
 	assert.Equal(t, "媒体甲", resp.Results[0].Source)
 	assert.Contains(t, resp.Results[0].Description, "摘要一")
 	assert.Contains(t, resp.Results[0].Description, "2025-05-23")
-	// Empty media falls back to "zhipu".
 	assert.Equal(t, "zhipu", resp.Results[1].Source)
 	assert.Equal(t, "zhipu", resp.Engine)
 }

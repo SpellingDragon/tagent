@@ -12,18 +12,18 @@ import (
 // ErrExecutionCredentialUnverified is returned by the execution gate when a durable
 // turn installed an echo credential (its input facts were committed) but the credential
 // was never verified — the framework never fed back the exact committed input, or a
-// swallowed plugin error downgraded it. §4.5: this MUST block the real model call so the
+// swallowed plugin error downgraded it. : this MUST block the real model call so the
 // turn cannot cross the commit gate on unverified input.
 var ErrExecutionCredentialUnverified = errors.New("agent: execution credential not verified at model entry (§4.5)")
 
-// executionGateModel wraps the agent's model to enforce §4.5: an execution-credential
+// executionGateModel wraps the agent's model to enforce : an execution-credential
 // verify at the ACTUAL model entry (not just a plugin return value, which the framework
 // logs and continues past), plus deferral of the cold-start recovery notice to the real
-// invocation. It preserves the wrapped model's capabilities (§4.5B): Model + IterModel +
+// invocation. It preserves the wrapped model's capabilities: Model + IterModel +
 // Info + close ownership.
 type executionGateModel struct {
 	inner model.Model
-	cm    *ContextManager // consulted for the one-shot recovery notice (§4.5C)
+	cm    *ContextManager
 }
 
 func newExecutionGateModel(inner model.Model, cm *ContextManager) *executionGateModel {
@@ -62,15 +62,13 @@ func (g *executionGateModel) GenerateContent(ctx context.Context, request *model
 	return g.inner.GenerateContent(ctx, g.withRecoveryNotice(request))
 }
 
-// GenerateContentIter keeps the iterator capability (§4.5B) AND the laziness §4.5C
+// GenerateContentIter keeps the iterator capability AND the laziness C
 // requires: creating the returned Seq performs NO verification, notice consumption, or
 // base call — all of that happens only when the caller actually starts iterating, so a
 // created-then-cancelled iterator neither blocks nor consumes the recovery notice.
 func (g *executionGateModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
 		if err := g.verify(ctx); err != nil {
-			// Block = produce nothing. The credential STATE (not this) is the
-			// authoritative signal the loop consults to fail-closed (§4.5).
 			log.Errorf("[executionGate:%s] §4.5 BLOCKING model iterator — execution credential unverified", g.cm.name)
 			return
 		}
@@ -99,10 +97,10 @@ func (g *executionGateModel) GenerateContentIter(ctx context.Context, request *m
 	}, nil
 }
 
-// Info preserves the inner model's Info (§4.5B).
+// Info preserves the inner model's Info.
 func (g *executionGateModel) Info() model.Info { return g.inner.Info() }
 
-// Close preserves the inner model's close ownership (§4.5B): delegate if the inner is a
+// Close preserves the inner model's close ownership: delegate if the inner is a
 // Closer, otherwise a no-op.
 func (g *executionGateModel) Close() error {
 	if c, ok := g.inner.(interface{ Close() error }); ok {

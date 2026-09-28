@@ -21,7 +21,6 @@ func TestToolsConstruct(t *testing.T) {
 	if NewHealthTool(eng, store) == nil {
 		t.Fatal("memory_health 工具构造失败")
 	}
-	// nil 源也不 panic（诊断工具容忍无引擎）。
 	if NewHealthTool(nil, nil) == nil {
 		t.Fatal("memory_health 应容忍 nil 源")
 	}

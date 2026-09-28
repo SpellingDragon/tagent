@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-// ==================== Scenario Regression Tests ====================
-
 // testSessionRecorder captures all state transitions and system messages.
 type testSessionRecorder struct {
 	t          *testing.T
@@ -74,8 +72,6 @@ func (r *testSessionRecorder) dumpSummary() {
 	}
 }
 
-// ==================== Scenario A: Normal command lifecycle ====================
-
 func TestScenarioA_NormalLifecycle(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available")
@@ -93,11 +89,9 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 	)
 	rec := newRecorder(t, monitor)
 
-	// Keeper to keep tmux server alive
 	keeper, _ := executor.CreateSession(context.Background(), TmuxCreateOptions{Command: "sleep 120"})
 	defer executor.KillSession(keeper.ID)
 
-	// Create a normal session: short script that produces output then exits
 	scriptPath := filepath.Join(t.TempDir(), "scenario_a.sh")
 	os.WriteFile(scriptPath, []byte("#!/bin/bash\necho 'step1: init'\nsleep 0.3\necho 'step2: processing'\nsleep 0.3\necho 'step3: done'\n"), 0755)
 
@@ -120,7 +114,6 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 	}
 	monitor.AddSession(session)
 
-	// Poll until completed (max 10s)
 	deadline := time.Now().Add(10 * time.Second)
 	completed := false
 	for time.Now().Before(deadline) {
@@ -146,14 +139,12 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 		t.Error("Session did not complete!")
 	}
 
-	// Verify: output should be captured
 	if session.LastOutput == "" {
 		t.Error("Final output not captured")
 	} else {
 		t.Logf("Final output (%d bytes): %q", len(session.LastOutput), session.LastOutput)
 	}
 
-	// Verify key transitions happened
 	hasRunningToStable := false
 	hasToCompleted := false
 	for _, evt := range rec.events {
@@ -174,8 +165,6 @@ func TestScenarioA_NormalLifecycle(t *testing.T) {
 		len(rec.events), hasRunningToStable, hasToCompleted)
 }
 
-// ==================== Scenario B: TUI idle → Stable → timeout → Running ====================
-
 func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available")
@@ -187,7 +176,7 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 		WithMonitorConfig(MonitorConfig{
 			Interval:         300 * time.Millisecond,
 			StableDuration:   0,
-			FakeDeadDuration: 1200 * time.Millisecond, // Low to trigger quickly
+			FakeDeadDuration: 1200 * time.Millisecond,
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -195,7 +184,6 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	keeper, _ := executor.CreateSession(context.Background(), TmuxCreateOptions{Command: "sleep 120"})
 	defer executor.KillSession(keeper.ID)
 
-	// TUI simulation: prints a static screen (output never changes)
 	scriptPath := filepath.Join(t.TempDir(), "tui_idle.sh")
 	os.WriteFile(scriptPath, []byte("#!/bin/bash\necho '╔══════════════════╗'\necho '║  TUI IDLE SCREEN  ║'\necho '║  Waiting...       ║'\necho '╚══════════════════╝'\nwhile true; do sleep 10; done\n"), 0755)
 
@@ -214,19 +202,15 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	t.Log("=== SCENARIO B: TUI idle → Stable → fakeDead timeout → Running (no heartbeat) ===")
 	t.Log("Expect: running→stable [stableSince set] → stable→running [stableSince preserved]")
 
-	// Run checks for enough cycles to pass fakeDeadThreshold
 	for i := 0; i < 12; i++ {
-		// Artificially set status to trigger callbacks properly
 		oldStatus := tuiMon.Status
 		newStatus := monitor.detectSessionState(tuiMon)
 		if newStatus != oldStatus {
-			// Simulate checkSession behavior: fire callback, update status
 			oldOutput := tuiMon.LastOutput
 			tuiMon.Status = newStatus
 			if monitor.StateChangeCallback != nil {
 				monitor.StateChangeCallback(tuiMon.ID, oldStatus, newStatus, oldOutput)
 			}
-			// Manually handle special states (TUI just gets Running)
 			switch newStatus {
 			case SessionCompleted, SessionError:
 				monitor.RemoveSession(tuiMon.ID)
@@ -237,14 +221,12 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 
 	rec.dumpSummary()
 
-	// Check StableSince was preserved through timeout
 	if tuiMon.StableSince.IsZero() {
 		t.Error("StableSince should be set (session reached Stable)")
 	} else {
 		t.Logf("StableSince: %v ago", time.Since(tuiMon.StableSince).Round(time.Second))
 	}
 
-	// Count transitions
 	stableCount := 0
 	runningCount := 0
 	for _, evt := range rec.events {
@@ -258,13 +240,10 @@ func TestScenarioB_TUI_IdleTimeout(t *testing.T) {
 	t.Logf("Scenario B: %d events, →stable=%d, →running=%d",
 		len(rec.events), stableCount, runningCount)
 
-	// TUI should NOT reach completed/fake_dead — should stay alive
 	if _, exists := monitor.GetSession(tuiMon.ID); !exists {
 		t.Error("TUI session should still be alive (not removed)!")
 	}
 }
-
-// ==================== Scenario C: Multi-turn interactions ====================
 
 func TestScenarioC_MultiTurn(t *testing.T) {
 	if !IsTmuxAvailable() {
@@ -277,7 +256,7 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 		WithMonitorConfig(MonitorConfig{
 			Interval:         300 * time.Millisecond,
 			StableDuration:   0,
-			FakeDeadDuration: 30 * time.Second, // Disable fakeDead for this test
+			FakeDeadDuration: 30 * time.Second,
 		}),
 	)
 	rec := newRecorder(t, monitor)
@@ -285,7 +264,6 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 	keeper, _ := executor.CreateSession(context.Background(), TmuxCreateOptions{Command: "sleep 120"})
 	defer executor.KillSession(keeper.ID)
 
-	// Long-running session that accumulates output
 	scriptPath := filepath.Join(t.TempDir(), "multiturn.sh")
 	os.WriteFile(scriptPath, []byte("#!/bin/bash\necho 'turn1: init'\nsleep 0.5\necho 'turn1: processing'\nsleep 1\necho 'turn1: done'\nsleep 2\necho 'turn2: starting'\nsleep 0.5\necho 'turn2: complete'\nsleep 3\necho 'FINAL'\n"), 0755)
 
@@ -304,7 +282,6 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 	t.Log("=== SCENARIO C: Multi-turn (output changes → stable → changes → stable → completed) ===")
 	t.Log("Expect: running→stable [turn1], stable→running [turn2], running→stable [turn2], stable→completed")
 
-	// Poll until completed
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		oldStatus := monSess.Status
@@ -324,7 +301,6 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 
 	rec.dumpSummary()
 
-	// Verify at least one stable→running (output changes after stable)
 	hasStableToRunning := false
 	hasRunningToStable := false
 	for _, evt := range rec.events {
@@ -342,8 +318,6 @@ func TestScenarioC_MultiTurn(t *testing.T) {
 		t.Error("Missing stable→running (output should have changed during turn2)")
 	}
 }
-
-// ==================== Scenario D: TUI + Normal side-by-side ====================
 
 func TestScenarioD_TUIPlusNormal(t *testing.T) {
 	if !IsTmuxAvailable() {
@@ -364,14 +338,12 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 	keeper, _ := executor.CreateSession(context.Background(), TmuxCreateOptions{Command: "sleep 120"})
 	defer executor.KillSession(keeper.ID)
 
-	// TUI: static screen (idle)
 	tuiScript := filepath.Join(t.TempDir(), "tui_scenario_d.sh")
 	os.WriteFile(tuiScript, []byte("#!/bin/bash\necho '╔══════╗'\necho '║ TUI  ║'\necho '╚══════╝'\nwhile true; do sleep 10; done\n"), 0755)
 
 	tuiSess, _ := executor.CreateSession(context.Background(), TmuxCreateOptions{Command: "bash " + tuiScript})
 	defer executor.KillSession(tuiSess.ID)
 
-	// Normal: short command
 	normalScript := filepath.Join(t.TempDir(), "normal_scenario_d.sh")
 	os.WriteFile(normalScript, []byte("#!/bin/bash\necho 'normal_start'\nsleep 0.5\necho 'normal_done'\n"), 0755)
 
@@ -393,7 +365,6 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 
 	for time.Now().Before(deadline) {
-		// Check TUI
 		tuiOld := tuiMon.Status
 		tuiNew := monitor.detectSessionState(tuiMon)
 		if tuiNew != tuiOld {
@@ -404,7 +375,6 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 			}
 		}
 
-		// Check Normal
 		normOld := normalMon.Status
 		normNew := monitor.detectSessionState(normalMon)
 		if normNew != normOld {
@@ -418,7 +388,6 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 			}
 		}
 
-		// Check TUI still alive
 		if _, exists := monitor.GetSession(tuiMon.ID); !exists {
 			t.Logf("TUI was removed unexpectedly at status=%s", tuiMon.Status)
 			tuiAlive = false
@@ -426,7 +395,6 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 		}
 
 		if normalDone {
-			// Continue a few more cycles to observe TUI timeout
 			time.Sleep(500 * time.Millisecond)
 			break
 		}
@@ -455,8 +423,6 @@ func TestScenarioD_TUIPlusNormal(t *testing.T) {
 	}
 }
 
-// ==================== Send-Keys Interference Test ====================
-
 // tuiSimScript returns the path to the simulated TUI script.
 func tuiSimScript(t *testing.T) string {
 	t.Helper()
@@ -478,8 +444,7 @@ done
 	return scriptPath
 }
 
-// TestTUI_SendKeysInterference demonstrates that send-keys injects text into TUI.
-// This is why heartbeat must NOT use send-keys for TUI sessions.
+// TestTUI_SendKeysInterference 钉住 demonstrates that send-keys injects text into TUI.
 func TestTUI_SendKeysInterference(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available")

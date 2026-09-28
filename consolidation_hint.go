@@ -110,7 +110,7 @@ func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventT
 	fn(partitionID, count)
 }
 
-// CandidatesText（4.3 design-report-closeout）渲染该分区的可巩固候选段（冥想 digest
+// CandidatesText渲染该分区的可巩固候选段（冥想 digest
 // 附加）。无候选返回空串（digest 不变）。建议式：仅列 key 与计数，执行权在 LLM。
 func (t *ConsolidationHintTracker) CandidatesText(partitionID int) string {
 	if t == nil {

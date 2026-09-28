@@ -13,20 +13,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ---------------------------------------------------------------------------
-// TrajectoryRecorder — 记录 LLM 调用轨迹的 model.Model 包装器
-//
-// 在任何运行模式（智谱AI / AReaL proxy）下，包装内部 model.Model，
-// 异步将每次 LLM 调用的 request/response 记录为 JSONL 文件。
-// 与 SwappableModel 可组合：TrajectoryRecorder(SwappableModel(model))。
-//
-// 设计要点：
-//   - 实现 model.Model 接口，不侵入 runner/llmagent 内部逻辑
-//   - 异步写入：buffered channel + 后台 goroutine，不阻塞 LLM 调用
-//   - channel 满时丢弃记录并打 warning log
-//   - 按 session 组织文件：{trajectory_dir}/{session_id}.jsonl
-// ---------------------------------------------------------------------------
-
 // TrajectoryRecord 是 JSONL 文件中每行的 JSON 结构。
 type TrajectoryRecord struct {
 	Timestamp  string             `json:"timestamp"`
@@ -41,9 +27,8 @@ type TrajectoryRecord struct {
 type LLMCallRecord struct {
 	Request  LLMRequestRecord  `json:"request"`
 	Response LLMResponseRecord `json:"response"`
-	// T-B 统一可观测数据模型：关联 turn span 的 trace_id/span_id（omitempty → noop/未
-	// 启用 OTLP 时省略，旧 RL 消费者向后兼容）。使 trajectory（RL 训练投影）与 OTel span
-	// 树（运维投影）由同一锚点双向互链（指令2「一套数据模式、多场景投影、保一致性」）。
+	// TraceID 关联产生这次调用的 turn span（取自 ctx，未启用导出时为空）；omitempty ⇒
+	// 旧 RL 消费者向后兼容，RL 训练投影与 OTel 运维投影共用同一锚点互链。
 	TraceID string `json:"trace_id,omitempty"`
 	SpanID  string `json:"span_id,omitempty"`
 }
@@ -78,8 +63,9 @@ type TrajectoryMetadata struct {
 	ModelEndpoint string `json:"model_endpoint"`
 }
 
-// TrajectoryRecorder wraps a model.Model and records every LLM call
-// to a JSONL file asynchronously.
+// TrajectoryRecorder 包装 model.Model，把每次 LLM 调用异步落成 JSONL 记录。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 type TrajectoryRecorder struct {
 	mu         sync.Mutex
 	inner      model.Model
@@ -90,10 +76,12 @@ type TrajectoryRecorder struct {
 	endpoint   string
 
 	recordCh chan *TrajectoryRecord
-	wg       sync.WaitGroup // writeLoop goroutine
-	gcWg     sync.WaitGroup // in-flight GenerateContent goroutines
-	closed   bool
-	closeMu  sync.Mutex
+	// wg 等后台写协程退出。
+	wg sync.WaitGroup
+	// gcWg 是在途 GenerateContent 协程组：Close 先等它归零，才不会漏掉仍在写的记录。
+	gcWg    sync.WaitGroup
+	closed  bool
+	closeMu sync.Mutex
 }
 
 // channelBufferSize controls how many records can be buffered before dropping.
@@ -144,14 +132,10 @@ func (tr *TrajectoryRecorder) GenerateContent(ctx context.Context, request *mode
 	return tr.recordGenerateContent(ctx, tr.inner, request)
 }
 
-// GenerateContentIter (§4.5B) exposes the iterator entry point so a flow that prefers
-// model.IterModel is not downgraded by this decorator. It reuses recordGenerateContent
-// (which allocates the batch slot, holds the gcWg lease, and records on stream end) but
-// invokes it only when the caller actually starts iterating — so CREATING the iterator
-// neither consumes a batch index nor fires the model (lazy, §4.5C-consistent). A recorder
-// must observe every response, so it inherently intercepts (its recording goroutine is the
-// same one the channel path uses); this preserves the iterator CONTRACT and capability
-// surface, not merely hiding it behind GenerateContent.
+// GenerateContentIter 暴露迭代入口，使偏好 model.IterModel 的流程不被本装饰器降级。它复用
+// recordGenerateContent（分配批次号、持 gcWg 租约、流结束时落记录），但只在调用方真正开始
+// 迭代时才触发：构造迭代器既不占批次号也不调用模型。录制器本要观察每条响应，因此保留的是
+// 迭代的契约与能力面，而非把它们藏在 GenerateContent 之后。
 func (tr *TrajectoryRecorder) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
 		ch, err := tr.recordGenerateContent(ctx, tr.inner, request)
@@ -163,7 +147,7 @@ func (tr *TrajectoryRecorder) GenerateContentIter(ctx context.Context, request *
 				go func() {
 					for range ch {
 					}
-				}() // let the recorder drain and write its record; do not wedge it
+				}()
 				return
 			}
 		}
@@ -186,15 +170,13 @@ func (tr *TrajectoryRecorder) Close() error {
 		return nil
 	}
 	tr.closed = true
-	// Send flush sentinel before closing channel so writeLoop syncs files.
-	// Non-blocking: if channel is full, writeLoop will drain + sync on close.
 	select {
 	case tr.recordCh <- nil:
 	default:
 	}
 	close(tr.recordCh)
 	tr.closeMu.Unlock()
-	tr.wg.Wait() // writeLoop drains all records, syncs, and closes files
+	tr.wg.Wait()
 	return nil
 }
 
@@ -212,8 +194,6 @@ func (tr *TrajectoryRecorder) Flush() {
 		return
 	}
 
-	// Send a flush sentinel (nil record). writeLoop handles nil as a flush signal.
-	// Use non-blocking send; if channel is full, records are already being processed.
 	select {
 	case tr.recordCh <- nil:
 	default:
@@ -249,7 +229,7 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 	tr.mu.Unlock()
 
 	modelName := inner.Info().Name
-	traceID, spanID := traceIDsFromCtx(ctx) // T-B: 关联 turn span（noop/未启用 OTLP 时空）
+	traceID, spanID := traceIDsFromCtx(ctx)
 
 	respCh, err := inner.GenerateContent(ctx, request)
 	if err != nil {
@@ -323,9 +303,6 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 		}
 
 		record.Metadata.DurationMs = time.Since(start).Milliseconds()
-		// 5.4 guard: provider returned no error but zero choices (observed 11/2072
-		// on plan glm-5.3, deep-thinking + long context). Surface loudly at the
-		// observability layer; retry semantics live in the agent loop (edge tests).
 		if lastResp != nil && lastResp.Error == nil && len(lastResp.Choices) == 0 {
 			log.Errorf("[trajectory] EMPTY-CHOICES response: model=%s n_msgs=%d duration_ms=%d -- provider served 200 with no choices",
 				modelName, len(request.Messages), record.Metadata.DurationMs)
@@ -363,7 +340,6 @@ func (tr *TrajectoryRecorder) writeLoop() {
 	}
 
 	for r := range tr.recordCh {
-		// nil record is a flush sentinel — sync all open files
 		if r == nil {
 			fileMu.Lock()
 			for _, f := range openFiles {
@@ -390,9 +366,6 @@ func (tr *TrajectoryRecorder) writeLoop() {
 		}
 	}
 
-	// S-1（四审，C1 文档谎言实例）：对齐 Close doc 的"drain + sync on close"承诺——channel
-	// 满（256 积压）时 sentinel 被 non-blocking 丢弃、writeLoop 仅 drain 退出，此前此处只
-	// Close 不 Sync。补 final Sync 兜底（Go os.File 直写 syscall 无用户态缓冲，掉电才可能丢）。
 	fileMu.Lock()
 	for _, f := range openFiles {
 		if err := f.Sync(); err != nil {
@@ -403,26 +376,25 @@ func (tr *TrajectoryRecorder) writeLoop() {
 	fileMu.Unlock()
 }
 
-// TrajectoryRecorderModelWrapper wraps a different model.Model instance
-// but shares the same TrajectoryRecorder's record channel and writeLoop.
-// Used to wrap sub-agent models (e.g., knowledge agent's glm-4.7) so
-// their LLM calls are also recorded for RL training data.
+// TrajectoryRecorderModelWrapper 包装另一个 model.Model 实例，但共用同一 TrajectoryRecorder
+// 的 record 通道与写协程：用于包住子 agent 的模型，使其调用同样进入 RL 训练数据。
 type TrajectoryRecorderModelWrapper struct {
 	inner model.Model
 	tr    *TrajectoryRecorder
 }
 
+// NewTrajectoryRecorderModelWrapper 构造共享同一录制器的模型包装器。
 func NewTrajectoryRecorderModelWrapper(inner model.Model, tr *TrajectoryRecorder) *TrajectoryRecorderModelWrapper {
 	return &TrajectoryRecorderModelWrapper{inner: inner, tr: tr}
 }
 
+// GenerateContent 委托内层模型，并经共享的录制路径落一条记录。
 func (w *TrajectoryRecorderModelWrapper) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
 	return w.tr.recordGenerateContent(ctx, w.inner, request)
 }
 
-// GenerateContentIter (§4.5B) mirrors TrajectoryRecorder.GenerateContentIter: expose the
-// iterator entry point (reusing the shared record path lazily) so a sub-agent model
-// wrapped here does not hide an underlying IterModel capability from the flow.
+// GenerateContentIter 与 TrajectoryRecorder.GenerateContentIter 同构：暴露惰性的迭代入口，
+// 使被子 agent 包装的内层 IterModel 能力不对流程隐藏。
 func (w *TrajectoryRecorderModelWrapper) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
 		ch, err := w.tr.recordGenerateContent(ctx, w.inner, request)
@@ -441,6 +413,7 @@ func (w *TrajectoryRecorderModelWrapper) GenerateContentIter(ctx context.Context
 	}, nil
 }
 
+// Info 委托内层模型。
 func (w *TrajectoryRecorderModelWrapper) Info() model.Info {
 	return w.inner.Info()
 }

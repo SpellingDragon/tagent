@@ -1,17 +1,7 @@
+// 本文件负责自身遥测的可见性阶梯：按窗口样本分档升降，只统计自管谱系，与投递门共用同一份
+// 负例清单——既不"看一眼就永久外显"，也不"长期沉默无人察觉"。
+// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
 package compress
-
-// Telemetry-channel regressions (change: attention-budget-architecture,
-// specs/telemetry-channel). Pinned semantics:
-//   - disposition is a deterministic fold over ref order + settle metadata:
-//     unconsumed = Active (never demoted, never L3-absorbed), consumed with
-//     deliverable lineage = Demote (exit at next act), internal = keep for
-//     keepRecent turns then Demote; undecidable → internal (conservative);
-//   - single settled notices fold via the EXISTING settle_fold card
-//     machinery — consumption, not adjacency, is the exit unit;
-//   - nil dispositions keeps pre-change behavior byte-for-byte (single runs
-//     stay, ≥2 folds as before);
-//   - buildRetainedRefs must only exempt explicit Active settle refs —
-//     TelemActive being the zero value may never exempt conversational refs.
 
 import (
 	"context"
@@ -56,11 +46,10 @@ func userRef(key int64, ts int64) memory.EventReference {
 
 func TestTelemetryDispositions_Structural(t *testing.T) {
 	refs := []memory.EventReference{
-		settleRef(11, 1), outputRef(12, 2), // consumed, store nil → internal (young)
-		outputRef(13, 3), outputRef(14, 4), // two more turns → #11 aged internal→demote
-		settleRef(21, 5), // never consumed → active
+		settleRef(11, 1), outputRef(12, 2),
+		outputRef(13, 3), outputRef(14, 4),
+		settleRef(21, 5),
 	}
-	// Re-evaluate #11 with two following outputs (aged out of keepRecent=2):
 	d := TelemetryDispositions(context.Background(), nil, refs[:4], 2)
 	if d[11] != TelemDemote {
 		t.Fatalf("internal notice aged past keepRecent=2 must demote, got %d", d[11])
@@ -73,7 +62,6 @@ func TestTelemetryDispositions_Structural(t *testing.T) {
 	if d3[21] != TelemActive {
 		t.Fatalf("unconsumed notice must stay Active, got %d", d3[21])
 	}
-	// Conversational refs get no entry at all.
 	if _, ok := d3[12]; ok {
 		t.Fatal("agent_output must not carry a telemetry disposition")
 	}
@@ -87,10 +75,10 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk(31, map[string]string{"meta_trigger_source": "user"})       // deliverable lineage
-	mk(32, map[string]string{"meta_trigger_source": "meditation"}) // internal gate holds it
-	mk(33, map[string]string{"lineage_absent": "true"})            // unknown → withhold → internal
-	mk(34, map[string]string{})                                    // no lineage → internal (conservative)
+	mk(31, map[string]string{"meta_trigger_source": "user"})
+	mk(32, map[string]string{"meta_trigger_source": "meditation"})
+	mk(33, map[string]string{"lineage_absent": "true"})
+	mk(34, map[string]string{})
 	refs := []memory.EventReference{
 		settleRef(31, 1), outputRef(41, 2),
 	}
@@ -98,8 +86,6 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 	if d[31] != TelemDemote {
 		t.Fatalf("user-lineage consumed notice must demote (externalized), got %d", d[31])
 	}
-	// Internal/unknown/absent lineage: each evaluated with its OWN single
-	// consuming output (no aged-out ambiguity) → internal reminder window.
 	for _, k := range []int64{32, 33, 34} {
 		solo := []memory.EventReference{settleRef(k, 1), outputRef(k+10, 2)}
 		dk := TelemetryDispositions(context.Background(), store, solo, 2)
@@ -112,20 +98,16 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 func TestFoldSettleRuns_ConsumptionDemotesSingle(t *testing.T) {
 	cc := newFoldCC(2)
 	single := []memory.EventReference{userRef(50, 100), settleRef(51, 101)}
-	// Active: untouched (不可丢级).
 	if got := cc.foldSettleRuns(single, map[int64]int8{51: TelemActive}); len(got) != 2 {
 		t.Fatalf("Active single notice must stay verbatim, got %d refs", len(got))
 	}
-	// Internal young: untouched.
 	if got := cc.foldSettleRuns(single, map[int64]int8{51: TelemInternal}); len(got) != 2 {
 		t.Fatalf("internal notice must keep its reminder window, got %d refs", len(got))
 	}
-	// Demote: single folds to the ticket card (reuses settle_fold machinery).
 	got := cc.foldSettleRuns(single, map[int64]int8{51: TelemDemote})
 	if len(got) != 2 || got[1].EventType != tagentevent.TypeSettleFold {
 		t.Fatalf("demoted single notice must fold to a settle_fold card, got %+v", got)
 	}
-	// Cards never re-fold (idempotence across acts).
 	again := cc.foldSettleRuns(got, map[int64]int8{got[1].EventKey: TelemDemote})
 	if len(again) != 2 || again[1].EventKey != got[1].EventKey {
 		t.Fatalf("folded card must not re-fold, got %+v", again)
@@ -149,7 +131,6 @@ func TestBuildRetainedRefs_OnlyActiveExempted(t *testing.T) {
 	active := settleRef(61, 200)
 	internal := settleRef(62, 201)
 	dropped := []memory.EventReference{userRef(60, 199), active, internal}
-	// Empty compressed messages → nothing survived → all would be absorbed.
 	retained := cc.buildRetainedRefs(dropped, nil, context.Background(), map[int64]int8{
 		61: TelemActive,
 		62: TelemInternal,
@@ -169,7 +150,6 @@ func TestBuildRetainedRefs_OnlyActiveExempted(t *testing.T) {
 	if sawInternal {
 		t.Fatal("consumed internal ref is budget-eligible: it must fold into the rolling summary")
 	}
-	// A conversational ref must never be exempted via the zero value.
 	conv := cc.buildRetainedRefs([]memory.EventReference{userRef(70, 300)}, nil, context.Background(), map[int64]int8{})
 	for _, r := range conv {
 		if r.EventKey == 70 {
@@ -178,10 +158,8 @@ func TestBuildRetainedRefs_OnlyActiveExempted(t *testing.T) {
 	}
 }
 
-// TestCompress_TelemetryChannelIntegration runs the real Compress path with
-// an over-budget workload: an externalized consumed notice must arrive in
-// RetainedRefs as a settle_fold card (dispositions wired through Compress),
-// while an unconsumed notice stays verbatim (compaction 豁免).
+// TestCompress_TelemetryChannelIntegration 钉住 超预算的真实压缩路径下，已被消费的外显通告要以折叠卡片进入保留引用。
+// - 未被消费的通告保持原样：它属压实豁免对象，不得被改写或被折进摘要。
 func TestCompress_TelemetryChannelIntegration(t *testing.T) {
 	memStore := memory.NewInMemoryStore()
 	mustStore := func(key int64, evtType, content string, meta map[string]string) {
@@ -200,9 +178,6 @@ func TestCompress_TelemetryChannelIntegration(t *testing.T) {
 		{EventKey: 63, EventType: tagentevent.TypeExternalInput, EventSummary: "[task settled] ✓ watchdog (id=b2) completed", Timestamp: 2003, Role: "user"},
 	}
 	sc := NewSmartCompressor(WithKeepRecentTasks(1), WithMaxTokens(100))
-	// Production-sized card budget: at the tiny default the pre-existing
-	// curateCards SINKING (earlier-N) drops even demotion tickets — that loss
-	// is an existing observation item, orthogonal to this change.
 	cc := NewContextCompressor(sc, memStore, NewDefaultTokenCounter(), 100, 0.8, 1,
 		WithCardMaxChars(6000))
 	res := cc.Compress(context.Background(), refs)
@@ -220,9 +195,6 @@ func TestCompress_TelemetryChannelIntegration(t *testing.T) {
 			sawTicket = true
 		}
 	}
-	// Demotion occurred at the real Compress path: the externalized notice
-	// left the verbatim form, while its recall ticket survived (lossless exit
-	// — card or rolling-summary row, bounded by nothing less than both).
 	require.False(t, stillVerbatim61, "externalized consumed notice must not remain a verbatim ref")
 	require.True(t, sawTicket, "demoted notice must keep its recall ticket in the card/summary")
 	require.True(t, keptActive, "unconsumed notice stays verbatim (compaction 豁免)")
@@ -245,13 +217,7 @@ func TestSettleFoldLine_FailedCarriesStar(t *testing.T) {
 	}
 }
 
-// TestTelemetryReplay_RealTrajectory (attention-budget-architecture tasks 5.1):
-// the REAL remote trajectory (batch 123, 831 messages → 447 refs incl. 159
-// settle notices, 477K chars, heartbeat-shaped Sx1 interleave with 17×22K
-// legacy-cap monsters) replayed through the production disposition + fold
-// rules. Regression gate against the review-finding class "verified on
-// synthetic forms, broken on production forms" — the fixture is EXTRACTED
-// from traj-30m-raw.jsonl, never hand-written.
+// TestTelemetryReplay_RealTrajectory 钉住
 func TestTelemetryReplay_RealTrajectory(t *testing.T) {
 	raw, err := os.ReadFile("testdata/telemetry_replay_fixture.json")
 	require.NoError(t, err)
@@ -277,8 +243,6 @@ func TestTelemetryReplay_RealTrajectory(t *testing.T) {
 	require.Equal(t, 159, countSettleRefs(refs), "fixture must carry the 159 real settle notices")
 	require.Greater(t, settleChars, 400_000, "fixture must carry the real volume incl. the 22K legacy monsters")
 
-	// Production rules over the real shape (msgs carry no metadata → the
-	// conservative internal lineage口径, exactly the review replay's).
 	d := TelemetryDispositions(context.Background(), nil, refs, 2)
 	var active, internal, demote int
 	for _, v := range d {
@@ -294,9 +258,6 @@ func TestTelemetryReplay_RealTrajectory(t *testing.T) {
 	require.GreaterOrEqual(t, demote, 156, "≥156/159 consumed-and-aged notices must demote on the real shape")
 	require.LessOrEqual(t, active+internal, 3, "only the head-of-stream notices may stay verbatim")
 
-	// Fold: measure the REAL post-fold telemetry volume — verbatim settle
-	// bodies plus settle_fold card summaries (each single fold carries a
-	// ~50-char header + one ~90-char ticket row) — and require ≥95% reclaim.
 	cc := newFoldCC(2)
 	folded := cc.foldSettleRuns(refs, d)
 	after := 0
@@ -321,11 +282,8 @@ func countSettleRefs(refs []memory.EventReference) int {
 	return n
 }
 
-// TestRecallStagingNeverResident (tasks 5.2): a recall tool result renders as
-// an action_command (tool) message — the skeleton pipeline drops it at L1 by
-// design, so recalled detail NEVER becomes resident through any skeleton
-// preservation. Pins the telemetry-channel "召回闭环" requirement against a
-// future change that would accidentally skeletonize tool output.
+// TestRecallStagingNeverResident 钉住 召回工具结果以工具消息呈现，骨架管线按设计在这一层丢弃它。
+// - 召回的细节绝不因任何骨架保留而常驻；这条钉住召回闭环，防止将来把工具输出也骨架化。
 func TestRecallStagingNeverResident(t *testing.T) {
 	recallMsg := model.Message{Role: model.RoleTool, Content: "[evt_123|action_command] memory_recall: 9K 详情原文……"}
 	require.False(t, IsSkeletonMessage(&recallMsg),
@@ -336,17 +294,15 @@ func TestRecallStagingNeverResident(t *testing.T) {
 		{Role: model.RoleAssistant, Content: "[evt_111|agent_output] 详情是……"},
 	})
 	require.Len(t, seg, 1)
-	dropped := applySegmentLevel(seg[0], 1) // L1: tool first out
+	dropped := applySegmentLevel(seg[0], 1)
 	for _, m := range dropped {
 		require.NotContains(t, m.Content, "memory_recall",
 			"L1 must have dropped the recalled detail from the resident view")
 	}
 }
 
-// TestDispositionRebuildDeterminism (tasks 5.3): restart-replay equivalence —
-// dispositions are a pure fold over (fact order + metadata), so deriving them
-// again over the WAL-rebuilt refs yields the same map as before shutdown,
-// regardless of any intermediate fold that the pre-restart projection held.
+// TestDispositionRebuildDeterminism 钉住 重启重放的等价性：处置是"事实顺序加元数据"上的纯折叠。
+// - 对重建后的引用再推导一次必须得到关停前同一张映射，与重启前投影曾持有何种中间折叠无关。
 func TestDispositionRebuildDeterminism(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	mk := func(key int64, evtType string, meta map[string]string) {
@@ -354,7 +310,7 @@ func TestDispositionRebuildDeterminism(t *testing.T) {
 	}
 	mk(71, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "user"})
 	mk(72, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "meditation"})
-	mk(73, tagentevent.TypeExternalInput, nil) // lineage_absent-class: no metadata
+	mk(73, tagentevent.TypeExternalInput, nil)
 	original := []memory.EventReference{
 		{EventKey: 71, EventType: tagentevent.TypeExternalInput, EventSummary: "[task settled] ✓ a completed", Timestamp: 1, Role: "user"},
 		{EventKey: 80, EventType: tagentevent.TypeAgentOutput, EventSummary: "out", Timestamp: 2, Role: "assistant"},
@@ -364,8 +320,6 @@ func TestDispositionRebuildDeterminism(t *testing.T) {
 		{EventKey: 73, EventType: tagentevent.TypeExternalInput, EventSummary: "[task settled] ✓ c completed", Timestamp: 6, Role: "user"},
 	}
 	before := TelemetryDispositions(context.Background(), store, original, 2)
-	// Simulated restart: WAL rebuild re-yields the ORIGINAL refs (the fold was
-	// a projection-only operation); the derivation must reproduce the map.
 	rebuilt := append([]memory.EventReference(nil), original...)
 	after := TelemetryDispositions(context.Background(), store, rebuilt, 2)
 	require.Equal(t, before, after,

@@ -4,21 +4,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/SpellingDragon/tagent/event"
 )
 
 func TestTombstoneSet_MarkAndCheck(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 	ts := NewTombstoneSet(rel, nil, 1)
 
-	// Mark tombstone
 	err := ts.MarkTombstone(100)
 	require.NoError(t, err)
 
-	// Verify
 	assert.True(t, ts.IsTombstone(100))
 	assert.False(t, ts.IsTombstone(101))
 }
@@ -69,11 +66,9 @@ func TestTombstoneSet_SnapshotRestore(t *testing.T) {
 	ts.MarkTombstone(100)
 	ts.MarkTombstone(200)
 
-	// Snapshot
 	snap, err := ts.Snapshot()
 	require.NoError(t, err)
 
-	// New tombstone set, load snapshot
 	ts2 := NewTombstoneSet(rel, nil, 1)
 	err = ts2.LoadSnapshot(snap)
 	require.NoError(t, err)
@@ -90,11 +85,9 @@ func TestTombstoneSet_JSONRoundTrip(t *testing.T) {
 	ts.MarkTombstone(100)
 	ts.MarkTombstone(200)
 
-	// Marshal
 	data, err := ts.MarshalJSON()
 	require.NoError(t, err)
 
-	// Unmarshal into new set
 	ts2 := NewTombstoneSet(rel, nil, 1)
 	err = ts2.UnmarshalJSON(data)
 	require.NoError(t, err)
@@ -107,16 +100,13 @@ func TestTombstoneSet_JSONRoundTrip(t *testing.T) {
 func TestTombstoneSet_CascadingParentRepair(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 
-	// Create chain: 3 → 2 → 1
 	rel.SetParent(3, 2)
 	rel.SetParent(2, 1)
 
-	// Mark 2 as tombstone - this should repair 3's parent to 1
 	ts := NewTombstoneSet(rel, nil, 1)
 	err := ts.MarkTombstone(2)
 	require.NoError(t, err)
 
-	// Verify 3's parent is now 1 (skipped over 2)
 	parent, err := rel.GetParent(3)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), parent)
@@ -125,22 +115,18 @@ func TestTombstoneSet_CascadingParentRepair(t *testing.T) {
 func TestTombstoneSet_ChildrenRepairedOnTombstone(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 
-	// Chain: 4 → 3 → 2 → 1
 	rel.SetParent(2, 1)
 	rel.SetParent(3, 2)
 	rel.SetParent(4, 3)
 
 	ts := NewTombstoneSet(rel, nil, 1)
 
-	// Tombstone middle of chain
 	err := ts.MarkTombstone(2)
 	require.NoError(t, err)
 
-	// 3's parent should skip 2 and go to 1
 	p3, _ := rel.GetParent(3)
 	assert.Equal(t, int64(1), p3)
 
-	// 4's parent should still be 3
 	p4, _ := rel.GetParent(4)
 	assert.Equal(t, int64(3), p4)
 }
@@ -151,39 +137,30 @@ func TestLifecycleConfig_Defaults(t *testing.T) {
 	assert.Equal(t, time.Hour, cfg.CheckInterval)
 	assert.Equal(t, 3, cfg.TypeTTL[event.TypeContextCompress])
 	assert.Equal(t, 30, cfg.TypeTTL[event.TypeExternalInput])
-	// Curated artifacts are exempt from TTL (raw events may be forgotten,
-	// artifacts persist — index cards point at these keys).
 	assert.Equal(t, -1, cfg.TypeTTL["context_compress_summary"])
 }
 
-// TestGetEffectiveTTL_ArtifactExemption: a negative type TTL means exempt —
-// getEffectiveTTL returns 0 and the expiry scan skips the type entirely
-// (must NOT fall back to the global TTL).
+// TestGetEffectiveTTL_ArtifactExemption 钉住 a negative type TTL means exempt
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 func TestGetEffectiveTTL_ArtifactExemption(t *testing.T) {
 	lm := &LifecycleManager{config: DefaultLifecycleConfig()}
 	ttl, err := lm.getEffectiveTTL("context_compress_summary")
 	assert.NoError(t, err)
 	assert.Equal(t, 0, ttl, "negative TypeTTL must yield 0 (exempt), not global fallback")
 
-	// Unknown types still fall back to the global TTL.
 	ttl, err = lm.getEffectiveTTL("some_unknown_type")
 	assert.NoError(t, err)
 	assert.Equal(t, 7, ttl)
 }
 
-// TestWFPassiveExclusionDoesNotShortenHistoryTTL (R05/6.2): registering wf.*
-// for passive projection exclusion must NOT add a 30-day type TTL. Under the
-// pre-existing 90-day global policy, a 31-day-old wf record is still within
-// retention and must survive the expiry scan. A 31-day external_input, which
-// carries a genuine explicit 30-day type TTL, must still be tombstoned — the
-// control that proves the scan actually runs and that the difference is the
-// wf registration, not a disabled checker. fail-before: the extra wf TTL made
-// the 31-day wf record expire at 30 days.
+// TestWFPassiveExclusionDoesNotShortenHistoryTTL 钉住 registering wf.*
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 func TestWFPassiveExclusionDoesNotShortenHistoryTTL(t *testing.T) {
 	cfg := DefaultLifecycleConfig()
 	cfg.GlobalTTLDays = 90
 
-	// Root cause: the type dimension must inherit global, never override it.
 	if _, present := cfg.TypeTTL[event.TypeWFReceived]; present {
 		t.Fatalf("wf.received leaked a type TTL (%d); passive exclusion must add none", cfg.TypeTTL[event.TypeWFReceived])
 	}
@@ -230,11 +207,9 @@ func TestLifecycleManager_StartStop(t *testing.T) {
 	ts := NewTombstoneSet(rel, mockKV, 1)
 	lm := NewLifecycleManager(store, ts, DefaultLifecycleConfig())
 
-	// Start and stop
 	lm.Start()
 	lm.Stop()
 
-	// Can start again
 	lm.Start()
 	lm.Stop()
 }
@@ -245,11 +220,9 @@ func TestLifecycleTombstoneIntegration(t *testing.T) {
 	store, err := NewFileSegmentStore(mockKV, rel, ":memory:", 100)
 	require.NoError(t, err)
 
-	// Create tombstone set and wire to store
 	ts := NewTombstoneSet(rel, mockKV, 1)
 	store.tombstones = ts
 
-	// Store an event
 	key := NewSnowflakeEventKey(1, 1710678000000)
 	err = store.StoreEvent(key, FullEvent{
 		PartitionID:  1,
@@ -259,26 +232,21 @@ func TestLifecycleTombstoneIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// GetEvent should succeed
 	evt, err := store.GetEvent(key)
 	require.NoError(t, err)
 	require.NotNil(t, evt)
 
-	// Mark as tombstone
 	err = ts.MarkTombstone(key)
 	require.NoError(t, err)
 
-	// GetEvent should return "not found"
 	_, err = store.GetEvent(key)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "tombstoned")
 }
 
-// TestCheckTTL_MarksExpiredEvents (I3): the whole point of TTL. Writing an
-// event older than its type TTL must yield a tombstone after checkTTL — for
-// months this silently did nothing because EventKey was read from the KV key
-// (always zero), so `EventKey == 0 → continue` swallowed every event
-// (production: 0 tombstones, 1034 overdue thinking_plan events still live).
+// TestCheckTTL_MarksExpiredEvents 钉住 whole point of TTL. Writing an
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 	mockKV := newMockKV()
@@ -289,17 +257,17 @@ func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
 	lm := NewLifecycleManager(store, ts, DefaultLifecycleConfig())
 
 	now := time.Now().UnixMilli()
-	overdue := NewSnowflakeEventKey(1, now-10*24*3600*1000) // 10 days old
+	overdue := NewSnowflakeEventKey(1, now-10*24*3600*1000)
 	require.NoError(t, store.StoreEvent(overdue, FullEvent{
 		EventKey: overdue, PartitionID: 1, EventType: "thinking_plan",
 		EventSummary: "old thinking", Timestamp: now - 10*24*3600*1000,
 	}))
-	fresh := NewSnowflakeEventKey(1, now-1000) // 1s old
+	fresh := NewSnowflakeEventKey(1, now-1000)
 	require.NoError(t, store.StoreEvent(fresh, FullEvent{
 		EventKey: fresh, PartitionID: 1, EventType: "thinking_plan",
 		EventSummary: "fresh thinking", Timestamp: now - 1000,
 	}))
-	artifact := NewSnowflakeEventKey(1, now-40*24*3600*1000) // 40 days old but exempt
+	artifact := NewSnowflakeEventKey(1, now-40*24*3600*1000)
 	require.NoError(t, store.StoreEvent(artifact, FullEvent{
 		EventKey: artifact, PartitionID: 1, EventType: "context_compress_summary",
 		EventSummary: "curated artifact", Timestamp: now - 40*24*3600*1000,
@@ -314,16 +282,15 @@ func TestCheckTTL_MarksExpiredEvents(t *testing.T) {
 	assert.False(t, ts.IsTombstone(artifact),
 		"curated artifacts (context_compress_summary) are exempt")
 
-	// Tombstoned events are invisible to precise recall (the honest-miss path).
 	_, err = store.GetEvent(overdue)
 	assert.Error(t, err, "GetEvent must report tombstoned events as missing")
 	_, err = store.GetEvent(fresh)
 	assert.NoError(t, err)
 }
 
-// TestNegativeGlobalTTLDisablesTTL (B1): a NEGATIVE GlobalTTLDays means
-// "disable TTL forgetting entirely" — it must survive NewLifecycleManager
-// (the zero value alone falls back to the default 7).
+// TestNegativeGlobalTTLDisablesTTL 钉住 a NEGATIVE GlobalTTLDays means
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 	mockKV := newMockKV()
@@ -333,7 +300,7 @@ func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
 	store.tombstones = ts
 
 	cfg := DefaultLifecycleConfig()
-	cfg.GlobalTTLDays = -1 // explicit off
+	cfg.GlobalTTLDays = -1
 	lm := NewLifecycleManager(store, ts, cfg)
 
 	now := time.Now().UnixMilli()
@@ -348,10 +315,9 @@ func TestNegativeGlobalTTLDisablesTTL(t *testing.T) {
 		"GlobalTTLDays=-1 must disable TTL entirely (B1: must not be clamped to 7)")
 }
 
-// TestEvictionDecrementsLiveCount (M4): tombstoning must decrement the
-// logically-live counter. Without it, an over-capacity partition would evict
-// another excess+10 LIVE events every cycle — a ratchet that never stops
-// until compaction physically removes the tombstones.
+// TestEvictionDecrementsLiveCount 钉住 tombstoning must decrement the
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 func TestEvictionDecrementsLiveCount(t *testing.T) {
 	rel := newSimpleInMemRelationStore()
 	mockKV := newMockKV()
@@ -375,23 +341,137 @@ func TestEvictionDecrementsLiveCount(t *testing.T) {
 	before := store.GetStats().TotalEvents
 	require.Equal(t, 6, before)
 
-	// 2.8 契约：counts unknown（mockKV 无枚举）时 checkCapacity 必须整体
-	// 短路——未知计数不得驱动淘汰，也不得被当成 0。
 	lm.checkCapacity()
 	require.Equal(t, before, store.GetStats().TotalEvents,
 		"unknown counts must pause capacity eviction")
 	require.False(t, store.LivesCountKnown())
 
-	// 直调 evictOldest 验证 M4/防重减语义：每轮只把「存活」事件标墓碑并
-	// 递减一次；已墓碑的旧事件被 IsTombstone 跳过，绝不二次递减。
 	lm.evictOldest(1, 3)
 	after := store.GetStats().TotalEvents
 	assert.Less(t, after, before,
 		"eviction must decrement the live counter, or the next cycle re-evicts live events")
 
-	// 第二轮：跳过已墓碑 3 个、只对存活 3 个墓碑化并各减一次——若重复递减
-	// 已死事件，这里会击穿 0 并继续误减存活事件。
 	lm.evictOldest(1, 3)
 	assert.Equal(t, 0, store.GetStats().TotalEvents,
 		"second pass must skip already-tombstoned events (no double decrement)")
+}
+
+// TestProductionWiring_LifecycleAndCompactorStarted 钉住 verifies that after wiring
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
+func TestProductionWiring_LifecycleAndCompactorStarted(t *testing.T) {
+	mockKV := newMockKV()
+	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	rel := store.RelationStore()
+	tombstone := NewTombstoneSet(rel, mockKV, 0)
+	store.SetTombstoneSet(tombstone)
+
+	lm := NewLifecycleManager(store, tombstone, DefaultLifecycleConfig())
+	lm.Start()
+	store.SetLifecycleManager(lm)
+
+	compactor := NewCompactor(store, mockKV, rel, tombstone, DefaultCompactionConfig())
+	compactor.Start()
+	store.SetCompactor(compactor)
+
+	assert.True(t, lm.running, "LifecycleManager should be running")
+	assert.True(t, compactor.running, "Compactor should be running")
+
+	err = store.Close()
+	require.NoError(t, err)
+}
+
+// TestProductionWiring_CloseStopsAll 钉住 verifies that Close stops both
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
+func TestProductionWiring_CloseStopsAll(t *testing.T) {
+	mockKV := newMockKV()
+	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	rel := store.RelationStore()
+	tombstone := NewTombstoneSet(rel, mockKV, 0)
+	store.SetTombstoneSet(tombstone)
+
+	lm := NewLifecycleManager(store, tombstone, DefaultLifecycleConfig())
+	lm.Start()
+	store.SetLifecycleManager(lm)
+
+	compactor := NewCompactor(store, mockKV, rel, tombstone, DefaultCompactionConfig())
+	compactor.Start()
+	store.SetCompactor(compactor)
+
+	require.True(t, lm.running)
+	require.True(t, compactor.running)
+
+	err = store.Close()
+	require.NoError(t, err)
+
+	assert.False(t, lm.running, "LifecycleManager should be stopped after Close")
+	assert.False(t, compactor.running, "Compactor should be stopped after Close")
+}
+
+// TestProductionWiring_CloseIdempotent 钉住 verifies that calling Close multiple times
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
+func TestProductionWiring_CloseIdempotent(t *testing.T) {
+	mockKV := newMockKV()
+	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	rel := store.RelationStore()
+	tombstone := NewTombstoneSet(rel, mockKV, 0)
+	store.SetTombstoneSet(tombstone)
+
+	lm := NewLifecycleManager(store, tombstone, DefaultLifecycleConfig())
+	lm.Start()
+	store.SetLifecycleManager(lm)
+
+	compactor := NewCompactor(store, mockKV, rel, tombstone, DefaultCompactionConfig())
+	compactor.Start()
+	store.SetCompactor(compactor)
+
+	err = store.Close()
+	require.NoError(t, err)
+
+	err = store.Close()
+	require.NoError(t, err)
+
+	err = store.Close()
+	require.NoError(t, err)
+}
+
+// TestProductionWiring_TombstoneFilterActive 钉住 verifies that after wiring,
+//
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
+func TestProductionWiring_TombstoneFilterActive(t *testing.T) {
+	mockKV := newMockKV()
+	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 100)
+	require.NoError(t, err)
+
+	rel := store.RelationStore()
+	tombstone := NewTombstoneSet(rel, mockKV, 0)
+	store.SetTombstoneSet(tombstone)
+
+	key := NewSnowflakeEventKey(1, 0)
+	err = store.StoreEvent(key, FullEvent{
+		PartitionID:  1,
+		EventType:    "test_event",
+		EventSummary: "test",
+		Content:      "test content",
+		Timestamp:    1,
+	})
+	require.NoError(t, err)
+
+	evt, err := store.GetEvent(key)
+	require.NoError(t, err)
+	assert.NotNil(t, evt)
+
+	err = tombstone.MarkTombstone(key)
+	require.NoError(t, err)
+
+	_, err = store.GetEvent(key)
+	assert.Error(t, err, "tombstoned event should not be retrievable")
 }

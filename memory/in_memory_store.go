@@ -15,8 +15,8 @@ import (
 // parent/child relationship queries via GetParent/GetChildren.
 type InMemoryStore struct {
 	mu     sync.RWMutex
-	events map[int]map[int64]FullEvent // PartitionID → EventKey → FullEvent
-	rel    RelationStore               // Causal relationship graph
+	events map[int]map[int64]FullEvent
+	rel    RelationStore
 }
 
 // NewInMemoryStore creates a new InMemoryStore.
@@ -24,7 +24,6 @@ func NewInMemoryStore() *InMemoryStore {
 	return NewInMemoryStoreWithRelation(nil)
 }
 
-// compile-time: InMemoryStore implements EventReplayer (D4 chain completeness for tests).
 var _ EventReplayer = (*InMemoryStore)(nil)
 
 // NewInMemoryStoreWithRelation creates a new InMemoryStore with a RelationStore.
@@ -41,7 +40,7 @@ func NewInMemoryStoreWithRelation(rel RelationStore) *InMemoryStore {
 
 // StoreEvent stores a single event.
 //
-// Contract parity with FileSegmentStore (resident-readiness-plan 2.7): a
+// Contract parity with FileSegmentStore : a
 // duplicate EventKey is REFUSED (an EventKey is the event's identity, never
 // silently overwritten) and the stored event is a defensive clone, so the
 // caller mutating its input afterwards cannot corrupt stored facts.
@@ -54,7 +53,6 @@ func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 
 	pid := event.PartitionID
 	if pid == 0 {
-		// Fallback: extract from key
 		pid = PartitionIDFromEventKey(key)
 		event.PartitionID = pid
 	}
@@ -70,10 +68,10 @@ func (s *InMemoryStore) StoreEvent(key int64, event FullEvent) error {
 	return nil
 }
 
-// ReplayEvent implements EventReplayer (D4 design): canonical content-checked replay.
+// ReplayEvent implements EventReplayer : canonical content-checked replay.
 // InMemoryStore has no orphan/half-orphan states (no segment file layer), so only two
 // outcomes exist: new commit (ReplayNew) or already-committed (ReplayAlreadyCommitted).
-// Different content under the same identity is a hard collision error (D15 parity).
+// Different content under the same identity is a hard collision error .
 func (s *InMemoryStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error) {
 	if key == 0 {
 		return ReplayNew, canonicalFact, fmt.Errorf("event key cannot be zero")
@@ -113,7 +111,7 @@ func (s *InMemoryStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayR
 }
 
 // GetEvent retrieves a single event by its EventKey. The returned event is
-// a defensive clone — caller mutations must not corrupt stored facts (2.7).
+// a defensive clone — caller mutations must not corrupt stored facts .
 func (s *InMemoryStore) GetEvent(key int64) (*FullEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -132,7 +130,7 @@ func (s *InMemoryStore) GetEvent(key int64) (*FullEvent, error) {
 }
 
 // GetEvents retrieves multiple events by their EventKeys. Returned events
-// are defensive clones (2.7).
+// are defensive clones .
 func (s *InMemoryStore) GetEvents(keys []int64) ([]FullEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -154,7 +152,6 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Determine which partitions to search
 	partitions := s.resolvePartitions(query)
 
 	var matched []FullEvent
@@ -171,9 +168,6 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 		}
 	}
 
-	// Sort by the total order (Timestamp, EventKey) — tie-break keeps
-	// same-millisecond events deterministic and behaviorally aligned with
-	// FileSegmentStore (segment-query-recency contract).
 	desc := query.OrderBy == "timestamp_desc"
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].Timestamp != matched[j].Timestamp {
@@ -188,9 +182,6 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 		return matched[i].EventKey < matched[j].EventKey
 	})
 
-	// Apply offset and limit. Limit <= 0 defaults to 100 — the same as
-	// FileSegmentStore, so the two implementations stay behaviorally
-	// identical under the parity contract (code-review m3).
 	limit := query.Limit
 	if limit <= 0 {
 		limit = 100
@@ -207,7 +198,6 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 		matched = matched[:limit]
 	}
 
-	// Convert to EventReference
 	results := make([]EventReference, 0, len(matched))
 	for _, event := range matched {
 		results = append(results, EventReference{
@@ -223,7 +213,7 @@ func (s *InMemoryStore) QueryEvents(query QueryOptions) ([]EventReference, error
 
 // resolvePartitions determines which partitions to search based on query.
 //
-// Contract parity with FileSegmentStore (2.7): with no explicit partition
+// Contract parity with FileSegmentStore : with no explicit partition
 // filter the result is EMPTY — cross-partition reads require explicit
 // authorization (event-segment-store isolation); "scan everything" remains
 // available only through the explicit debug helpers (AllEvents*).
@@ -234,13 +224,11 @@ func (s *InMemoryStore) resolvePartitions(query QueryOptions) []int {
 	if query.PartitionID > 0 {
 		return []int{query.PartitionID}
 	}
-	// No partition filter — scan nothing (isolation, same as FileSegmentStore).
 	return nil
 }
 
 // matchesQuery checks if an event matches the query filters.
 func (s *InMemoryStore) matchesQuery(event FullEvent, query QueryOptions) bool {
-	// Filter by event types
 	if len(query.EventTypes) > 0 {
 		found := false
 		for _, et := range query.EventTypes {
@@ -253,21 +241,15 @@ func (s *InMemoryStore) matchesQuery(event FullEvent, query QueryOptions) bool {
 			return false
 		}
 	}
-	// Filter by time range
 	if query.StartTime > 0 && event.Timestamp < query.StartTime {
 		return false
 	}
 	if query.EndTime > 0 && event.Timestamp > query.EndTime {
 		return false
 	}
-	// Filter by write-order key bound (strictly greater; see QueryOptions.
-	// MinEventKey — write axis, never a semantic-time approximation).
 	if query.MinEventKey != 0 && event.EventKey <= query.MinEventKey {
 		return false
 	}
-	// Filter by keyword: term-split ANY-match (see matchesKeyword) — a
-	// literal whole-string match silently returns zero for the space-
-	// separated keyword lists and sentences models actually send.
 	if query.Keyword != "" {
 		if !matchesKeyword(event.EventSummary, query.Keyword) &&
 			!matchesKeyword(event.Content, query.Keyword) {
@@ -404,8 +386,6 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
-
-// ==================== simpleInMemRelationStore（内存关系存储，无持久化） ====================
 
 // simpleInMemRelationStore 是一个内存关系存储实现，用于 InMemoryStore 默认场景。
 // 相比 InMemRelationStore，它不提供 WAL journal、快照和崩溃恢复，仅用于测试和原型开发。

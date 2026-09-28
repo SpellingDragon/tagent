@@ -1,18 +1,5 @@
 package main
 
-// Reincarnation notice — openspec/changes/wechat-bot-reincarnation-notice.
-//
-// After an insurance-chain self-replacement the NEW process detects the fresh
-// REINCARNATION_NOTICE marker at startup (D1) and injects a "转世通报" into its own
-// event stream via the meditation source (D2), so the agent's first turn knows:
-//   - it was reincarnated (metadata archive REINCARNATION_NOTICE, D3)
-//   - what it was doing when the old process died (WAL tail scene block, D8)
-//   - where the last turn broke off (breakpoint marker, D8)
-//
-// Consumption is marked by renaming REINCARNATION_NOTICE → *.notified (D5).
-// Degradation is never silent: every downgrade path is stated in the notice
-// text itself and logged by the caller.
-
 import (
 	"fmt"
 	"os"
@@ -27,36 +14,33 @@ import (
 )
 
 const (
-	// restartDoneFreshWindow: D1 freshness gate. the NOTICE must be younger
-	// than this for the startup to count as a reincarnation (not cold start).
+	// restartDoneFreshWindow 是新鲜度窗：标记文件新于此窗内的启动才算转世，否则按冷启动处理。
 	restartDoneFreshWindow = 10 * time.Minute
 
-	// walTailEventLimit: how many newest events the scene block carries (D8
-	// token discipline ~2-4K tokens: key+type+summary only, no full content).
-	walTailEventLimit = 12
-
-	// walTailSummaryMaxChars caps each event summary line in the scene block.
+	// walTailEventLimit 与 walTailSummaryMaxChars 是通报的令牌预算：尾现场块只取最新的有限条、每条
+	// 摘要截断，绝不带事件全文（全文可由票据水合）——通报要进上下文，不是日志。
+	walTailEventLimit      = 12
 	walTailSummaryMaxChars = 160
 
-	// noticeConsumedSuffix: D5 rename target.
+	// noticeConsumedSuffix 是消费标记的重命名后缀。
 	noticeConsumedSuffix = ".notified"
 )
 
 // noticeInjector is the minimal surface of *agent.TagentAgent this feature
 // needs (satisfied by the tagent.New return value used in main.go).
+// 本文件承载换装后的转世通报：检测、组装、注入与记消费。
+//
+// 契约: docs/wiki/platform/reincarnation-notice.md#overview
+// noticeInjector 是本特性用到的最小接口面（只声明注入与读存储两件事）。
 type noticeInjector interface {
 	InjectMessageWithSource(source string, msg model.Message)
 	MemStore() memory.MemoryStore
 }
 
-// detectReincarnation implements D1 (execution-period revision): the
-// insurance chain stages REINCARNATION_NOTICE BEFORE spawning the new
-// process — no race, nobody rewrites it — so a fresh NOTICE file IS the
-// reincarnation signal. restart.done is NOT used for detection: the health
-// gate writes it only AFTER spawn and it always carries a live PID (the new
-// PID = self), which made PID-based detection a race we could lose.
-// run.sh cold start never stages a NOTICE → never false-positives. A parse
-// failure degrades the notice TEXT, never the DETECTION (existence suffices).
+// detectReincarnation 判定本次启动是否为转世：只看换装标记是否存在且足够新鲜。标记由保险链在
+// 派生新进程之前写好，故无竞态；不以"重启完成"文件为据——它在派生之后才写且总带活 PID（即本进程
+// 自己），按 PID 判定是我们会输的竞态。冷启动从不产生标记，故不会假阳性。标记内容解析失败只降级
+// 通报正文，不影响检测：存在即可判定。
 func detectReincarnation(noticePath string, now time.Time) bool {
 	st, err := os.Stat(noticePath)
 	if err != nil {
@@ -65,9 +49,7 @@ func detectReincarnation(noticePath string, now time.Time) bool {
 	return now.Sub(st.ModTime()) <= restartDoneFreshWindow
 }
 
-// readNoticeMetadata parses run/REINCARNATION_NOTICE "key: value" lines (D3).
-// Missing/unreadable file → nil map; the caller's notice text will carry the
-// degraded marker (never silent).
+// readNoticeMetadata 解析标记的键值档案；缺失或读不到返回 nil，由通报正文显式标注降级（不静默）。
 func readNoticeMetadata(path string) map[string]string {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -90,53 +72,40 @@ func readNoticeMetadata(path string) map[string]string {
 	return meta
 }
 
-// tailQuerier is the narrow interface fetchWALTail actually needs (Go idiom:
-// accept what you use). The full memory.MemoryStore satisfies it, and so do
-// test fakes without implementing dozens of unrelated store methods.
+// tailQuerier 只声明取尾事件真正用到的能力：完整存储与测试替身都无需实现一堆无关方法即可满足。
 type tailQuerier interface {
 	QueryEvents(memory.QueryOptions) ([]memory.EventReference, error)
 }
 
-// fetchWALTail queries the newest events time-desc, limited (D8). Errors are
-// returned for logged degradation — D8 forbids swallowing them.
+// fetchWALTail 按时间倒序取该 agent 最新的有限条事件；查询错误一律上抛以走显式降级，不得吞掉。
 func fetchWALTail(store tailQuerier, agentName string, limit int) ([]memory.EventReference, error) {
 	if store == nil {
 		return nil, fmt.Errorf("memstore unavailable")
 	}
-	// Partitioned store contract (segment_store.go resolvePartitions): a query
-	// without PartitionIDs scans zero partitions and silently returns empty.
-	// The agent's own events live in PartitionIDFromName(agentName) — same
-	// derivation as build_agent.go wiring — so pass it explicitly.
 	pid := memory.PartitionIDFromName(agentName)
 	return store.QueryEvents(memory.QueryOptions{
 		PartitionIDs: []int{pid},
 		Limit:        limit,
-		OrderBy:      "timestamp_desc", // segment_store.go: valid value
+		OrderBy:      "timestamp_desc",
 	})
 }
 
-// hasOpenBreakpoint reports whether the last turn was cut off mid-flight (D8):
-// events arrive newest-first; chronologically, the turn is "open" when the
-// newest event is a thinking_plan (or similar in-flight marker) with no
-// agent_output after it. A trailing agent_output means the turn closed.
+// hasOpenBreakpoint 判断上一世是否中断于回合中途：事件按新到旧取回，最新一条即最后动作——它是
+// 思考中或工具调用中且无收尾输出，判为中断；最后一条已是收尾输出则判为回合已闭环。
 func hasOpenBreakpoint(refs []memory.EventReference) bool {
 	if len(refs) == 0 {
 		return false
 	}
-	// refs[0] is the newest event (timestamp_desc).
 	switch refs[0].EventType {
 	case "thinking_plan", "action_command":
-		return true // died thinking or mid-tool, no closing output
+		return true
 	default:
 		return false
 	}
 }
 
-// buildNoticeText composes the full notice (D3 metadata + D8 scene block +
-// breakpoint marker). Degradation ladder, each rung explicit:
-//  1. meta present + WAL ok        → full notice
-//  2. meta nil                     → "NOTICE 档案缺失" marker
-//  3. walErr != nil / empty refs   → "现场块不可用" marker (with reason)
+// buildNoticeText 组装通报三段：元数据、尾现场块、断点判定。降级阶梯每一级都必须在正文里显式写出
+// （档案缺失／现场块不可用及其原因／事件为空），不得用一份看起来完整的通报掩盖数据缺失。
 func buildNoticeText(meta map[string]string, refs []memory.EventReference, walErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[转世通报] 检测到保险链自替换换装（D1 命中：REINCARNATION_NOTICE 新鲜；PID 详情见元数据段）\n\n")
@@ -180,18 +149,14 @@ func buildNoticeText(meta map[string]string, refs []memory.EventReference, walEr
 	return b.String()
 }
 
-// noticeWaitMax caps how long startup polls for the NOTICE file to appear
-// (implementation-hardening B-fix): the insurance-chain script writes it
-// around restart, and a single check after a fixed sleep silently missed
-// slow writers (the s67 absent-notice incident). Poll until it shows up or
-// the budget expires — freshness is still gated by restartDoneFreshWindow.
+// noticeWaitMax 与 noticePollStep 是等待标记出现的预算：必须轮询而非固定 sleep 一次——单次检查会
+// 静默错过慢写入者，错过一次等于整世失忆且无人报错。新鲜度仍由窗口单独把关。
 const (
 	noticeWaitMax  = 60 * time.Second
 	noticePollStep = 500 * time.Millisecond
 )
 
-// waitNoticeAppearance polls for the NOTICE file until it exists or maxWait
-// elapses. Returns whether it was seen (freshness is checked by the caller).
+// waitNoticeAppearance 轮询标记直至出现或预算用尽，返回是否见到（新鲜度由调用方判）。
 func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
 	deadline := time.Now().Add(maxWait)
 	for {
@@ -205,16 +170,10 @@ func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
 	}
 }
 
-// maybeInjectReincarnationNotice is the one-shot startup hook (D4): poll for
-// the NOTICE file (D1, polling instead of the fixed 5s sleep that raced slow
-// insurance-chain writers — the s67 absent-notice incident), detect
-// freshness, compose (D3+D8), inject via the dedicated "reincarnation"
-// source (B-fix: the old "meditation" stamp got withheld by the delivery
-// gate's internal-source policy), then rename the marker (D5). Every step is
-// logged; nothing here is allowed to crash the bot.
+// maybeInjectReincarnationNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、注入、记消费。
+// 每一步都记日志，任何一步都不允许让机器人起不来。
 func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir string, noticeWait time.Duration) {
 	if !filepath.IsAbs(runDir) {
-		// cwd can drift across launchers; anchors resolve relative to the binary.
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
 		}
@@ -222,10 +181,10 @@ func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir 
 	noticePath := filepath.Join(runDir, "REINCARNATION_NOTICE")
 
 	if !waitNoticeAppearance(noticePath, noticeWait, noticePollStep) {
-		return // no NOTICE within budget: cold start / stale / consumed — silent no-op
+		return
 	}
 	if !detectReincarnation(noticePath, time.Now()) {
-		return // appeared but stale (outside fresh window): cold start
+		return
 	}
 	log.Infof("[reincarnation] D1 hit: fresh REINCARNATION_NOTICE at %s", noticePath)
 
@@ -239,16 +198,12 @@ func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir 
 	}
 
 	text := buildNoticeText(meta, refs, walErr)
-	// B-fix: dedicated source. The delivery gate routes "reincarnation" to
-	// the user chat (main.go switch) — the notice exists to be seen.
 	ta.InjectMessageWithSource("reincarnation", model.Message{
 		Role:    model.RoleUser,
 		Content: text,
 	})
 	log.Infof("[reincarnation] notice injected via reincarnation source (%d WAL events, meta=%v)", len(refs), meta != nil)
 
-	// D5: mark consumed. Failure to rename is logged and non-fatal; a duplicate
-	// notice next boot is acceptable, a crash here is not.
 	if err := os.Rename(noticePath, noticePath+noticeConsumedSuffix); err != nil {
 		log.Warnf("[reincarnation] consume-marker rename failed (re-notice on next boot): %v", err)
 	} else {

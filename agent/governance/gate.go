@@ -4,50 +4,39 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== GovernanceGate（T-G · 治理决策管线）====================
-//
-// 把 RiskClassifier(C5) + BudgetManager + GoalRegistry + ApprovalManager + DenialLedger
-// 串成一条决策管线：classify → critical 批准门 → goal 检查 → 预算闸 → 记账/放行。
-// GovernanceTool 装饰器（工具执行路径）消费本管线的裁决。（注：evolution 后验评估
-//（guardrail/judge）独立于本管线——评估对象是改进窗口证据，非工具调用风险。）
-//
-// 治理关闭（Enabled=false，默认）时全放行——现状零行为变化。「闸不是墙」：默认
-// enforcement=warn（记账放行 + 提示），strict 才拒绝；critical 恒走异步批准（不阻塞 loop）。
-
 // Enforcement 是 goal/预算违规的处置模式。
 type Enforcement string
 
 const (
-	EnforcementWarn   Enforcement = "warn"   // 记账放行 + 提示（默认，先收集数据）
-	EnforcementStrict Enforcement = "strict" // 拒绝
+	// EnforcementWarn 只告警：违规被记账并暴露，但不阻断执行。缺省即此值。
+	EnforcementWarn Enforcement = "warn"
+	// EnforcementStrict 严格执行：违规判为拒绝。是否真的 denied 只由此档决定。
+	EnforcementStrict Enforcement = "strict"
 )
 
 // GateConfig 配置治理门。
 type GateConfig struct {
-	Enabled         bool        // 总开关（默认 false = 全放行，现状）
-	Enforcement     Enforcement // warn/strict（默认 warn）
-	GoalRequiredFor []string    // 须挂 goal 的 trigger source（默认 meditation/task）
+	Enabled         bool
+	Enforcement     Enforcement
+	GoalRequiredFor []string
 }
 
 func (c GateConfig) withDefaults() GateConfig {
 	if c.Enforcement == "" {
 		c.Enforcement = EnforcementWarn
 	}
-	// GoalRequiredFor 默认空 = 不启用 goal 门（A7 注：goal_declare 已交付——§5.1 govx 五件套；
-	// [meditation,task] 则 strict 模式下 high+ 自治操作恒拒且 agent 无自纠路径 → 反复撞墙）。
-	// 待 goal_declare/goal_close 工具交付后，由配置显式启用。
 	return c
 }
 
 // Decision 是一次治理裁决。
 type Decision struct {
-	Disposition Disposition // allow/record/hold
+	Disposition Disposition
 	Level       RiskLevel
 	RuleID      string
 	Reason      string
-	ApprovalID  string // hold 时的批准请求 id（外部审批者据此决策）
-	Denied      bool   // 是否拒绝执行（strict 违规 / 预算耗尽 / critical 未批准且 strict）
-	DenyReason  string // 拒绝理由（返回给模型的自纠材料——失败以 result 渗透）
+	ApprovalID  string
+	Denied      bool
+	DenyReason  string
 }
 
 // GovernanceGate 是治理决策管线（并发安全：各组件自身并发安全，Gate 无额外可变状态）。
@@ -58,7 +47,7 @@ type GovernanceGate struct {
 	ledger     *DenialLedger
 	goals      *GoalRegistry
 	cfg        GateConfig
-	// agentName 是本 gate 服务的 agent 名（§8.1）：治理记录写事件时标注来源 agent——W3 后
+	// agentName 是本 gate 服务的 agent 名：治理记录写事件时标注来源 agent——W3 后
 	// 所有 agent 共享同一 entry Ledger，无此字段则多 agent 治理事件无法区分来源。
 	agentName string
 }
@@ -71,7 +60,7 @@ type GateDeps struct {
 	Ledger     *DenialLedger
 	Goals      *GoalRegistry
 	Config     GateConfig
-	// AgentName 是本 gate 服务的 agent 名（§8.1）：治理记录写事件时标注来源 agent。W3 后所有
+	// AgentName 是本 gate 服务的 agent 名：治理记录写事件时标注来源 agent。W3 后所有
 	// agent 共享同一 entry Ledger，无此字段则多 agent 治理事件无法区分来源。
 	AgentName string
 }
@@ -91,7 +80,7 @@ func NewGovernanceGate(deps GateDeps) *GovernanceGate {
 		g.classifier = NewRiskClassifier(nil, 0)
 	}
 	if g.ledger == nil {
-		g.ledger = NewDenialLedger(nil, 0) // 纯内存账本
+		g.ledger = NewDenialLedger(nil, 0)
 	}
 	return g
 }
@@ -99,7 +88,7 @@ func NewGovernanceGate(deps GateDeps) *GovernanceGate {
 // Enabled 报告治理是否开启。
 func (g *GovernanceGate) Enabled() bool { return g != nil && g.cfg.Enabled }
 
-// Approval 暴露审批管理器（W2，§8.3）：供消息/CLI 审批通道调 Decide（批准/拒绝 pending）与
+// Approval 暴露审批管理器：供消息/CLI 审批通道调 Decide（批准/拒绝 pending）与
 // Pending（展示待批）。审批送达形态（用户裁决）= **文件为主 + 预留微信接口**：外部审批者直接
 // 写 <dir>/approvals/<id>.json（人工 digest 落盘）经 Check 节流重扫可见；微信交互通道则调本
 // 访问器 Decide(id, status, by) 回写。此前 Gate 不暴露 Approval → Decide 全仓无调用方 →
@@ -121,6 +110,7 @@ func (g *GovernanceGate) Classifier() *RiskClassifier {
 	return g.classifier
 }
 
+// Goals 交出目标登记表；门为 nil 时返回 nil，调用方据此跳过目标判定。
 func (g *GovernanceGate) Goals() *GoalRegistry {
 	if g == nil {
 		return nil
@@ -128,6 +118,7 @@ func (g *GovernanceGate) Goals() *GoalRegistry {
 	return g.goals
 }
 
+// Config 交出当前治理门配置；门为 nil 时返回零值配置（即未启用），而不是 panic。
 func (g *GovernanceGate) Config() GateConfig {
 	if g == nil {
 		return GateConfig{}
@@ -144,10 +135,8 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 	disp := DispositionFor(level)
 	digest := ArgsDigest(ctx.ArgsJSON)
 
-	// ① critical → 异步批准门（不阻塞 loop：未批准则挂起 + 登记请求）。
 	if level == RiskCritical {
 		if g.approval == nil {
-			// 无批准机制：critical 无法获批 → 拒绝（绝不放行不可逆操作，防治理绕过）。
 			g.record(SubtypeDenial, ctx, level, ruleID, "critical 无批准机制", digest, "")
 			return Decision{Disposition: DispositionHold, Level: level, RuleID: ruleID, Reason: reason,
 				Denied: true, DenyReason: "critical 操作需人工批准，但运行时未配置批准机制（ApprovalManager）"}
@@ -158,8 +147,6 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 		}
 		req, reqErr := g.approval.Request(ctx.ToolName, ctx.ArgsJSON, ctx.ArgsJSON, level.String(), ruleID, reason, "")
 		if reqErr != nil {
-			// M11（§8.4）：approval Request 失败（写 pending 文件错误）不得静默吞掉——否则
-			// critical 挂起却无 pending 文件，运维无从知晓审批通道故障（磁盘满/权限）。
 			log.Warnf("[governance] approval Request failed for tool %q: %v", ctx.ToolName, reqErr)
 		}
 		approvalID := ""
@@ -179,17 +166,14 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 		}
 	}
 
-	// ② goal 检查（high+ 且 trigger 须挂 goal）。
 	if level >= RiskHigh && g.goalRequired(ctx.TriggerSource) && g.goals != nil && !g.goals.HasActive() {
 		g.record(SubtypeDenial, ctx, level, ruleID, "缺 goal 登记", digest, "")
 		if g.cfg.Enforcement == EnforcementStrict {
 			return Decision{Disposition: disp, Level: level, RuleID: ruleID, Reason: reason,
 				Denied: true, DenyReason: "high+ 自治操作须挂 goal——请先用 goal_declare 工具登记自治目标，或由运维清空 goal_required_for（A7；goal_declare 属 entry 治理面工具）"}
 		}
-		// warn：记账放行（在工具结果附提醒由装饰器处理）。
 	}
 
-	// ③ 预算闸（high/medium）。
 	if g.budget != nil {
 		if err := g.budget.Admit(level); err != nil {
 			g.record(SubtypeDenial, ctx, level, ruleID, "预算耗尽", digest, "")
@@ -198,7 +182,6 @@ func (g *GovernanceGate) Evaluate(ctx RiskContext) Decision {
 		}
 	}
 
-	// ④ 记账放行（high/medium）或直接放行（low）。
 	if disp == DispositionRecord {
 		g.record(SubtypeAudit, ctx, level, ruleID, reason, digest, "")
 	}
@@ -221,7 +204,7 @@ func (g *GovernanceGate) record(subtype string, ctx RiskContext, level RiskLevel
 	g.ledger.Record(DenialRecord{
 		Subtype: subtype, ToolName: ctx.ToolName, Level: level,
 		RuleID: ruleID, Reason: reason, ArgsDigest: digest, GoalID: goalID,
-		AgentName: g.agentName, // §8.1：标注来源 agent（共享 Ledger 下多 agent 治理事件可区分）
+		AgentName: g.agentName,
 	})
 }
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/SpellingDragon/tagent/agent/reliability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -109,7 +111,6 @@ func TestCallTool_EmptyRegistry(t *testing.T) {
 	_, out := callJSON(t, ct, `{"server":"a","tool":"b"}`)
 	assert.Contains(t, out, "no MCP servers are registered")
 
-	// Nil registry falls back to the empty stub (factory must not fail).
 	ctNil := NewCallTool(nil)
 	_, out = callJSON(t, ctNil, `{"server":"a","tool":"b"}`)
 	assert.Contains(t, out, "no MCP servers are registered")
@@ -139,4 +140,50 @@ func TestCallTool_DeclarationConstantAcrossRegistryMutations(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(before), string(after),
 		"mcp_call declaration must not change with registry content (prefix-cache invariant)")
+}
+
+// TestMCPCall_CircuitBreak: while DepMCP is
+// degraded and probeEvery=N>0, every call but the Nth short-circuits with a
+// readable result (failure permeates as result, never error). Default off
+// (probeEvery=0 → real calls).
+func TestMCPCall_CircuitBreak(t *testing.T) {
+	reg := NewRegistry()
+	ct := NewCallTool(reg)
+	mgr := reliability.NewDegradationManager(nil)
+	ct.SetDegradation(mgr)
+	ct.SetMCPProbeEvery(2)
+
+	for i := 0; i < 6; i++ {
+		mgr.ReportFailure(reliability.DepMCP, context.DeadlineExceeded)
+	}
+	if !mgr.IsDegraded(reliability.DepMCP) {
+		t.Fatal("setup: DepMCP should be degraded")
+	}
+
+	call := func() string {
+		res, err := ct.Call(context.Background(), []byte(`{"server":"x","tool":"y","args":{}}`))
+		if err != nil {
+			t.Fatalf("breaker must not error: %v", err)
+		}
+		r, _ := res.(callErrorResult)
+		return r.Error
+	}
+	first := call()
+	second := call()
+	if !strings.Contains(first, "熔断") {
+		t.Fatalf("first call should be circuit-broken, got %q", first)
+	}
+	if strings.Contains(second, "熔断") {
+		t.Fatalf("second call (probe) must pass through, got %q", second)
+	}
+
+	ct2 := NewCallTool(reg)
+	ct2.SetDegradation(mgr)
+	for i := 0; i < 6; i++ {
+		mgr.ReportFailure(reliability.DepMCP, context.DeadlineExceeded)
+	}
+	res, _ := ct2.Call(context.Background(), []byte(`{"server":"x","tool":"y","args":{}}`))
+	if strings.Contains(res.(callErrorResult).Error, "熔断") {
+		t.Fatal("probeEvery=0 must disable the breaker (zero behavior change)")
+	}
 }

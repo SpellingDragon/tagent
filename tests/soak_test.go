@@ -1,24 +1,5 @@
 //go:build soak
 
-// SOAK TEST — subprocess-per-phase continuity evidence (resident-remaining-
-// hardening 3.1, archived 7.1). Refactored away from the old in-process
-// skeleton: every write and verify phase now runs in a FRESH OS process
-// (re-execing this very test binary), so "restart" is a real process
-// death + reopen — no shared registry, no shared caches, no goroutine
-// inheritance between rounds. Durability is the default setting (real
-// localfile + fsync on), and every write phase forces at least one REAL
-// segment compaction (seal → L1→L2 sweep via the harness hook) whose
-// artifacts the next verify process must read through.
-//
-// The parent additionally checks that every phase ran under a DIFFERENT pid
-// (process identity crossing is the evidence that recovery instances are
-// genuinely fresh, not the same heap re-entered).
-//
-// Not part of the default suite: build with `-tags soak`; CI runs via manual
-// dispatch:
-//
-//	go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 \
-//	  -args -rounds=50 -events-per-round=30
 package tagent_test
 
 import (
@@ -48,8 +29,6 @@ const (
 	soakOrigin = "round-0-origin-marker"
 	soakPidTag = "SOAK_PID="
 )
-
-// --- parent orchestration ---------------------------------------------------
 
 func TestSoak_Continuity(t *testing.T) {
 	rounds := *soakRounds
@@ -117,8 +96,6 @@ func soakChild(t *testing.T, dir, mode string, round int) int {
 	return pid
 }
 
-// --- child phase (selected via SOAK_CHILD + -test.run=TestSoakChildPhase) ----
-
 func TestSoakChildPhase(t *testing.T) {
 	if os.Getenv("SOAK_CHILD") != "1" {
 		t.Skip("soak child phase: only runs when re-executed by TestSoak_Continuity")
@@ -142,14 +119,11 @@ func TestSoakChildPhase(t *testing.T) {
 	default:
 		t.Fatalf("unknown SOAK_MODE %q", mode)
 	}
-	require.NoError(t, ta.Close()) // final flush = durability barrier
+	require.NoError(t, ta.Close())
 }
 
 func soakAgent(t *testing.T, dir string) *agent.TagentAgent {
 	t.Helper()
-	// Durability defaults are NOT relaxed (3.1): real localfile, fsync default
-	// (on). The old skeleton's FSync=false throughput knob is retired — the
-	// point of soak is the durable path.
 	ta, err := tagent.New(tagent.Config{
 		Entry: "tagent",
 		Agents: map[string]tagent.AgentConfig{
@@ -180,8 +154,6 @@ func soakWritePhase(t *testing.T, ta *agent.TagentAgent, round, events int) {
 		ta.InjectMessage(model.Message{Role: model.RoleUser, Content: body})
 	}
 
-	// Wait until every round event is STORED (the persistent loop + plugin
-	// pipeline are asynchronous — the barrier is the store, not the inject).
 	pid := memory.PartitionIDFromName("tagent")
 	deadline := time.Now().Add(60 * time.Second)
 	for {
@@ -195,12 +167,8 @@ func soakWritePhase(t *testing.T, ta *agent.TagentAgent, round, events int) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	ta.StopLoop() // quiesce the loop before sealing (Close is the flush barrier)
+	ta.StopLoop()
 
-	// Force at least ONE real compaction before this process dies: seal the
-	// active segment, retune thresholds (harness hook — a soak run never
-	// accumulates 24 hourly segments), run the synchronous sweep. Then prove
-	// in-process that the merged segment still answers the tail query.
 	fs, ok := ta.MemStore().(*memory.FileSegmentStore)
 	require.True(t, ok, "soak must run on the bare FileSegmentStore (no engine decorator) to reach the compactor")
 	require.NotNil(t, fs.Compactor(), "wiring must inject the background compactor")
@@ -238,8 +206,6 @@ func soakVerifyPhase(t *testing.T, ta *agent.TagentAgent, round int) {
 	require.Contains(t, got.String(), soakOrigin,
 		"memory loss after %d rounds + fresh-process restarts — the headline promise broke", round)
 
-	// The reopen must ALSO read through the compaction artifacts the previous
-	// write process left (L2+ segments exist and serve the origin recall).
 	fs, ok := ta.MemStore().(*memory.FileSegmentStore)
 	require.True(t, ok)
 	windows, err := fs.ListSegments(pid)

@@ -6,85 +6,42 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ==================== 事件类型注册表（REG · 契约 C1）====================
+// EventTypeSpec 声明一个事件类型的全链路静态属性：角色、是否原文优先、摘要形态、
+// 是否压缩骨架、是否低价值、类型级 TTL、是否合成投影引用、是否可嵌入、是否可召回、
+// 是否永不进投影。未注册类型回退 defaultSpec，与引入注册表前对未知类型的处理一致。
 //
-// 目的：把「新增一个事件类型要改约 10 处」收敛为「注册一条 EventTypeSpec」。
-// 注册表是事件类型声明式元数据的**唯一权威源**；既有函数（IsSpecialEventType /
-// GenerateEventSummary / EventTypeToRole / IsSkeletonMessage）与既有变量
-// （memory.LowValueEventTypes / lifecycle TypeTTL 默认）全部**委托/派生**自本注册表。
-//
-// 等价验收线：注册表复现全部 9 个内置类型的现有行为，既有测试零修改通过。
-//
-// 新增类型（consolidation/governance/feedback/...）只需在 init() 或调用方
-// RegisterEventType 一条 spec，全链路（摘要/骨架/TTL/低价值/角色/可嵌入/可召回）
-// 自动生效——这是 T-D/T-G/T-EVO 引入新类型的共同前置。
-//
-// 冻结纪律：EventTypeSpec 字段集即契约 C1。变更须走 execution-dag.md §4.2 ESCALATE。
-
-// EventTypeSpec 声明一个事件类型的全链路元数据。
-// 零值语义见各字段注释；未注册类型经 specOrDefault 回退到 defaultSpec，
-// 精确复现既有函数对未知类型的 fallback 行为。
+// 契约: docs/wiki/event/event-architecture.md#registry-authority
 type EventTypeSpec struct {
-	// Name 是类型常量值（如 "external_input"），注册表主键。
 	Name string
 
-	// Role 是时间线渲染角色（EventTypeToRole）。未知类型回退 RoleUser。
 	Role model.Role
 
-	// Special 标记「原文优先」类型（IsSpecialEventType）：external_input /
-	// agent_output / thinking_plan。决定 GenerateEventSummary 走原文分支的优先级。
 	Special bool
 
-	// ToolLineSummary 标记摘要用「工具调用行」而非原文（仅 action_command）。
 	ToolLineSummary bool
 
-	// Skeleton 标记压缩骨架节点（IsSkeletonMessage）。false 仅 action_command /
-	// thinking_plan（可丢弃中间事件）；其余（含未知类型）保守为 true，永不段内丢弃。
 	Skeleton bool
 
-	// LowValue 标记 L3 可丢弃 Content/ToolCalls 的类型（memory.LowValueEventTypes）：
-	// thinking_plan / context_compress。
 	LowValue bool
 
-	// TTLDays 是类型级 TTL（天），派生 memory.lifecycle 的 TypeTTL 默认：
-	//   0  = 继承全局默认（不进 TypeTTL map）
-	//   -1 = 豁免遗忘（长期记忆，如 context_compress_summary）
-	//   >0 = 显式天数
 	TTLDays int
 
-	// Synthetic 标记「合成投影引用」类型（负 EventKey，非落库真实事件）：
-	// context_compress（滚动摘要 ref）/ tool_chain（工具链折叠 ref）/
-	// settle_fold（结算票据卡片 ref）。
-	// 供存储/召回/渲染区分正负 key 语义（不变量：正负 key）。
 	Synthetic bool
 
-	// Embeddable 标记是否纳入向量索引（T-A 选择性生成）。默认仅
-	// external_input / agent_output / thinking_knowledge / context_compress_summary。
-	// 归属澄清（C5）：策略消费方在 memory 域（engine_inmemory.go 的 IsEmbeddableType 决定
-	// 是否 embed），但声明归属 C1——本注册表是事件类型全部静态属性的单一权威源；新增类型时
-	// 在此一并决定 Embeddable，避免"新增事件类型需改两个包"（TTL 字段同理，被 lifecycle 消费）。
 	Embeddable bool
 
-	// Recallable 标记是否可被 recall 取回原文（票据有效）。内置类型均可召回。
-	// 消费方：tool/recall（票据取回路径）。归属同 Embeddable（声明在 C1，策略在 recall 域）。
 	Recallable bool
 
-	// NonProjection 标记「事实链内部记录，永不作为投影 ref」——内部账目/审计/
-	// 快照类事件（inbox_receipt、task_spawned、resident_session、compaction 事件
-	// 本体）。§5.5 单一判定源：正常提交、在线 spill 回补、冷启动重建三条 append
-	// 路径共用 IsNonProjectionRecord，排除声明在此一处，不再各写各的类型枚举。
-	// 默认 false（含未知类型，经 specOrDefault）：保守进投影，与既有行为等价。
 	NonProjection bool
 }
 
+// registryMu defaultSpec 是未注册类型的回退：角色 user、非 special、非工具行、骨架保守 true、
+// 非低价值、TTL 继承全局、非合成、不可嵌入、可召回、进投影。
 var (
-	registryMu sync.RWMutex
-	// eventTypeRegistry 是类型名 → spec 的注册表。
+	registryMu        sync.RWMutex
 	eventTypeRegistry = make(map[string]EventTypeSpec)
 )
 
-// defaultSpec 复现既有函数对**未知类型**的 fallback：
-// Role=user、非 special、非 tool-line、骨架保守 true、非低价值、TTL 继承、非合成。
 var defaultSpec = EventTypeSpec{
 	Role:            model.RoleUser,
 	Special:         false,
@@ -97,10 +54,8 @@ var defaultSpec = EventTypeSpec{
 	Recallable:      true,
 }
 
-// RegisterEventType 注册（或覆盖）一个事件类型 spec。
-// 内置类型在 init() 注册；新类型（consolidation/governance/feedback）可由
-// 各自子系统在 init() 注册，实现「一处注册、全链路生效」。
-// 幂等：同名覆盖（允许子系统显式重声明）。
+// RegisterEventType 注册或覆盖一个类型 spec（同名覆盖，供子系统显式重声明）。
+// 空 Name 被忽略。全链路属性由这一处声明派生。
 func RegisterEventType(spec EventTypeSpec) {
 	if spec.Name == "" {
 		return
@@ -110,7 +65,7 @@ func RegisterEventType(spec EventTypeSpec) {
 	eventTypeRegistry[spec.Name] = spec
 }
 
-// LookupEventType 返回类型 spec 与是否存在。
+// LookupEventType 返回类型 spec 及是否已注册。
 func LookupEventType(name string) (EventTypeSpec, bool) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -118,7 +73,7 @@ func LookupEventType(name string) (EventTypeSpec, bool) {
 	return spec, ok
 }
 
-// specOrDefault 返回类型 spec；未注册则回退 defaultSpec（复现未知类型 fallback）。
+// specOrDefault 返回类型 spec，未注册时回退 defaultSpec。
 func specOrDefault(name string) EventTypeSpec {
 	if spec, ok := LookupEventType(name); ok {
 		return spec
@@ -126,21 +81,17 @@ func specOrDefault(name string) EventTypeSpec {
 	return defaultSpec
 }
 
-// ==================== 派生访问器（既有函数/变量委托这些）====================
-
-// EventTypeRole 返回类型的渲染角色（委托注册表；未知类型回退 RoleUser）。
-// 供 agent/compress.EventTypeToRole 委托。
+// EventTypeRole 返回类型的渲染角色。
 func EventTypeRole(name string) model.Role {
 	return specOrDefault(name).Role
 }
 
-// IsLowValueType 报告类型是否 L3 可丢弃内容（委托注册表）。
+// IsLowValueType 报告类型内容是否可在深层压缩中丢弃。
 func IsLowValueType(name string) bool {
 	return specOrDefault(name).LowValue
 }
 
-// LowValueTypes 返回全部低价值类型集合，供 memory.LowValueEventTypes 派生。
-// 返回新 map（调用方持有，不与注册表共享可变状态）。
+// LowValueTypes 返回全部低价值类型名（新 map，调用方可自行持有）。
 func LowValueTypes() map[string]bool {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -153,9 +104,7 @@ func LowValueTypes() map[string]bool {
 	return out
 }
 
-// DefaultTypeTTL 返回全部显式 TTLDays（非 0）的类型 → 天数映射，
-// 供 memory.lifecycle DefaultLifecycleConfig 的 TypeTTL 派生。
-// 含 -1（豁免）。返回新 map。
+// DefaultTypeTTL 返回全部显式声明 TTLDays（非 0，含 -1 豁免）的类型→天数映射（新 map）。
 func DefaultTypeTTL() map[string]int {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -168,41 +117,34 @@ func DefaultTypeTTL() map[string]int {
 	return out
 }
 
-// IsSyntheticEventType 报告类型是否为合成投影引用（负 key）。
+// IsSyntheticEventType 报告类型是否为使用负 EventKey 的合成投影引用。
 func IsSyntheticEventType(name string) bool {
 	return specOrDefault(name).Synthetic
 }
 
-// IsEmbeddableType 报告类型是否纳入向量索引（T-A 选择性生成）。
+// IsEmbeddableType 报告类型是否纳入向量索引。
 func IsEmbeddableType(name string) bool {
 	return specOrDefault(name).Embeddable
 }
 
-// IsRecallableType 报告类型是否可被 recall 取回。
+// IsRecallableType 报告类型的原文票据能否被取回。
 func IsRecallableType(name string) bool {
 	return specOrDefault(name).Recallable
 }
 
-// IsSkeletonEventType 报告类型是否压缩骨架节点（委托注册表）。
-// 供 agent/compress.IsSkeletonMessage 委托（未知类型保守 true）。
+// IsSkeletonEventType 报告类型是否为压缩骨架节点（未知类型保守为 true）。
 func IsSkeletonEventType(name string) bool {
 	return specOrDefault(name).Skeleton
 }
 
-// IsNonProjectionEventType 报告类型是否事实链内部记录（永不进投影）。委托
-// 注册表；未知类型回退 defaultSpec.NonProjection=false（保守进投影，与历史
-// 「排除白名单」语义等价）。
+// IsNonProjectionEventType 报告类型是否事实链内部记录（永不进投影）。
 func IsNonProjectionEventType(name string) bool {
 	return specOrDefault(name).NonProjection
 }
 
-// IsNonProjectionRecord 是非投影判定的**唯一入口**（§5.5）：类型维度经注册表
-// NonProjection 声明，外加携带 MetaKeyTaskInlineRecord 标记的事件（终态 settle
-// 在回合内已作为 tool result 返回，进投影即双呈现）。正常提交（persistBusEvent）、
-// 在线 spill 回补（ReplayProjectionHandler）、冷启动重建（tail/fallback replay）
-// 三条路径必须共同使用本谓词，不得再私设类型/标记枚举。历史快照/旧元数据的
-// 兼容排除分支已按受管重置裁決删除（旧数据只经 §3.7 清点+显式 reset 处置，
-// 运行时只认当前格式）。
+// IsNonProjectionRecord 是「可否进投影」的唯一判定源：类型维度取注册表，外加携带
+// task_inline_record 标记的事件（终态 settle 已在回合内返回，再进投影即双呈现）。
+// 所有 append 路径必须共用本谓词。
 func IsNonProjectionRecord(eventType string, metadata map[string]string) bool {
 	if IsNonProjectionEventType(eventType) {
 		return true
@@ -210,7 +152,7 @@ func IsNonProjectionRecord(eventType string, metadata map[string]string) bool {
 	return metadata[MetaKeyTaskInlineRecord] != ""
 }
 
-// RegisteredEventTypes 返回全部已注册类型名（诊断/测试用）。
+// RegisteredEventTypes 返回全部已注册类型名，供诊断与守卫断言使用。
 func RegisteredEventTypes() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -221,8 +163,7 @@ func RegisteredEventTypes() []string {
 	return out
 }
 
-// ==================== 内置 9 类型注册（复现现有行为，等价验收线）====================
-
+// init 内置类型在包初始化时注册；跨重启与恢复期的行为差异见文档的类型理由表。
 func init() {
 	builtin := []EventTypeSpec{
 		{Name: TypeExternalInput, Role: model.RoleUser, Special: true, Skeleton: true, TTLDays: 30, Embeddable: true, Recallable: true},
@@ -231,33 +172,14 @@ func init() {
 		{Name: TypeThinkingPlan, Role: model.RoleAssistant, Special: true, Skeleton: false, LowValue: true, TTLDays: 3, Recallable: true},
 		{Name: TypeThinkingRecall, Role: model.RoleUser, Skeleton: true, Recallable: true},
 		{Name: TypeThinkingKnowledge, Role: model.RoleUser, Skeleton: true, Embeddable: true, Recallable: true},
-		// 策展固化物：长期记忆，TTL 豁免（-1）；正 key 真实存储事件。
-		// 策展固化物：长期记忆，TTL 豁免（-1）；正 key 真实事件。compaction 事件本体是事实链
-		// 记录：投影综述由 RebuildProjectionFromWAL 从载荷重建，本体进投影即双表示。
 		{Name: TypeContextCompressSummary, Role: model.RoleUser, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true, NonProjection: true},
-		// 滚动摘要 ref：合成负 key；低价值；TTL 3 天。
 		{Name: TypeContextCompress, Role: model.RoleUser, Skeleton: true, LowValue: true, TTLDays: 3, Synthetic: true, Recallable: true},
-		// 工具链折叠 ref：合成负 key。
 		{Name: TypeToolChain, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
-		// 结算通知折叠卡片 ref：合成负 key（resident-remaining-hardening 1.3）。
-		// 骨架保留（卡片不被段内丢弃）；卡片行的 evt_key 票据指向正 key 原文。
 		{Name: TypeSettleFold, Role: model.RoleUser, Skeleton: true, Synthetic: true, Recallable: true},
-		// 任务 spawn 记录（R2）：registry 重建数据源；事实链记录不进投影；TTL 与
-		// external_input 对齐（30d，超期常驻服务由 R3 重挂+TaskID 桥兜底）。
 		{Name: TypeTaskSpawned, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true, NonProjection: true},
-		// 常驻会话生命周期记录（R3）：spawn 全参/终态结局；事实链审计记录不进投影。
 		{Name: TypeResidentSession, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Recallable: true, NonProjection: true},
-		// 证据门控巩固产物（T-D）：长期记忆 TTL 豁免(-1)；正 key 真实事件；骨架保留、
-		// 可嵌入、可召回。一处注册即全链路（摘要/骨架/TTL/角色/嵌入/召回）生效。
 		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},
-		// 治理记录（T-G）：永久 TTL(-1)；正 key 真实事件；**非骨架**（design-report-closeout
-		// §5.3：否决/批准/goal/退化全文保留供审计与 goal 重建回放，不折叠骨架行）；
-		// 可召回（审计查询）；不可嵌入（治理记录非语义记忆）。subtype 经 Metadata 区分
-		// denial/goal/approval/degraded/audit。
 		{Name: TypeGovernance, Role: model.RoleSystem, Skeleton: false, TTLDays: -1, Embeddable: false, Recallable: true},
-		// 回执-反馈（D1 design-report-closeout）：正 key 真实事件；Role=system；
-		// TTL 默认 30 天（治理数据）；可召回；不可嵌入（verdict 非语义文本）；
-		// 非低价值。subtype 经 Metadata 区分 user/task_settle/api。
 		{Name: TypeFeedback, Role: model.RoleSystem, Skeleton: true, TTLDays: 30, Embeddable: false, Recallable: true},
 	}
 	for _, spec := range builtin {

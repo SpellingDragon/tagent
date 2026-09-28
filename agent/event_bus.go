@@ -20,19 +20,16 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// AgentEvent is the unified event type for the agent's persistent event bus
-// (turn-间事件邮箱). Every event flowing through the bus is an AgentEvent.
+// AgentEvent is the unified event type for the agent persistent event bus
+// (the mailbox between turns). Every event flowing through the bus is an
+// AgentEvent, and exactly one type serves as a bus trigger: TypeExternalInput
+// (user, tmux, meditation, task settle). agent_output does not enter the bus —
+// it is emitted straight to outputCh.
 //
-// Exactly one event type serves as a bus trigger:
-//   - TypeExternalInput: external input (user, tmux, meditation, task settle)
-//
-// agent_output does NOT enter the bus — it is emitted directly to outputCh.
-// Honest scope note: the bus coordinates TURNS; the turn-INTERNAL tool loop
-// remains the upstream framework's synchronous ReAct (runner.Run). The old
-// "tool_use bus trigger" abstraction had no producer and no consumer and is
-// gone as ghost code (implementation-hardening 4.1; resident-remaining-
-// hardening 4.4 removed the dangling const its own note had already declared
-// deleted).
+// Scope: the bus coordinates turns. The tool loop inside a turn remains the
+// upstream synchronous ReAct (runner.Run), so no tool-use event is ever a bus
+// trigger.
+// 契约: docs/wiki/agent/event-flow.md#event-stream-overview
 type AgentEvent struct {
 	// ID is a unique identifier for this event.
 	ID string `json:"id"`
@@ -56,7 +53,7 @@ type AgentEvent struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 
 	// claim is the runtime reference to the durable inbox envelope a claimed
-	// event came from (fix-resident-reliability-boundaries D2/3.3). It is NOT
+	// event came from. It is NOT
 	// serialized (json:"-"), never travels in business Metadata/Origin/model
 	// context, and is set only by claimDurable on the consumer side. Nil for
 	// volatile events and for events not yet claimed.
@@ -71,11 +68,11 @@ type AgentEvent struct {
 // (D2 write-before barrier) so a replay reuses the exact key and never
 // re-stamps time/attribution/summary.
 type durableClaim struct {
-	Path         string          // inbox envelope file path (durable location)
-	RequestID    string          // envelope request id (batch identity)
-	Slot         int             // fixed message slot within the envelope
-	ReceiptKey   string          // reserved receipt EventKey (hex); "" until prepared
-	PreparedFact json.RawMessage // frozen canonical FullEvent for THIS slot; "" until prepared
+	Path         string
+	RequestID    string
+	Slot         int
+	ReceiptKey   string
+	PreparedFact json.RawMessage
 }
 
 // NewExternalInputEvent creates an external_input event with the given source and message payload.
@@ -99,13 +96,10 @@ const SourceTask = "task"
 // notice (aligned with ActionTool's tail view).
 const settleInlineTail = 2000
 
-// settleInlineCapChars is the compile-time inline-result cap for task_settled
-// notices (context-efficiency-and-trajectory D2/D3): results at/below this stay
-// inline (newlines escaped to ␤ for the single-line trajectory form); larger
-// results spill to the tool-output dir with a tail preview. It is a named
-// constant, NOT a config knob — the derivation `MaxTokens/2*4` that previously
-// fed this path (~256K chars at a 128K budget, an unowned formula accident) is
-// removed.
+// settleInlineCapChars 是 task_settled 通知的编译期内联结果上限：不超过它的原文内联
+// （换行转义为 ␤ 以保持单行轨迹形态），超过的溢出到工具输出目录并留尾预览。
+// 它是命名常量、不是配置项：内联上限与 token 预算解耦——按 `MaxTokens/2*4` 派生会在
+// 128K 预算下给出约 256K 字符，那是无人负责的公式后果。
 const settleInlineCapChars = 600
 
 // settleDescMaxChars caps the task desc rendered in the single-line form.
@@ -120,15 +114,8 @@ const settleErrMaxChars = 200
 func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	switch {
 	case sig.Kind == task.SettleWatch:
-		// R2（review 🔴2）：watch 命中是**通知**而非终态——信号恒带哨兵 Err
-		//（"%d matches"），若落入下方 Err 判定则记为 failed 终态，RebuildTaskRegistry
-		// 按「spawned−终态」折叠后，仍在运行的 watch 型服务任务重启即消失。
-		// 记为非终态词汇 "watch"（不在终态集合 {completed,failed,cancelled,dead}，
-		// 不抵消 spawned；通知正文照发不变）。
 		return "◈", "watch"
 	case sig.Kind == task.SettleFailed:
-		// hardening-review-batch2 1.6：reconcile 回收（zombie/orphan/wall）的
-		// 失败信号——此前无 Err 时落 default=completed，WAL/反馈错记成功。
 		return "✗", "failed"
 	case sig.Err != nil:
 		return "✗", "failed"
@@ -139,9 +126,6 @@ func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	case sig.Kind == task.SettleCompleted:
 		return "✓", "completed"
 	default:
-		// hardening-review-batch2 1.6：未知 Kind 显式化——不默认 completed
-		//（那会把调用方 bug 写成成功事实）。unknown 不在终态集合，不抵消
-		// spawned；告警由调用侧记。
 		log.Warnf("[task_settled] unknown settle kind %q — mapped to unknown (not completed)", sig.Kind)
 		return "?", "unknown"
 	}
@@ -153,10 +137,11 @@ func escapeNewlines(s string) string {
 	return strings.NewReplacer("\r\n", "␤", "\n", "␤", "\r", "␤").Replace(s)
 }
 
-// newBatchRetiredSummaryEvent (resident-remaining-hardening 1.2): ONE
-// external_input carrying N per-task settled lines — the 6.7① storm collapse.
-// Line format mirrors newTaskSettledEvent's header (retire outputs are short
-// machine verdicts; no spill needed). Empty batch returns nil.
+// newBatchRetiredSummaryEvent emits ONE external_input carrying N per-task
+// settled lines, collapsing a retirement storm into a single notification.
+// The line format mirrors newTaskSettledEvent header: retire outputs are
+// short machine verdicts, so no spill is needed. An empty batch returns nil.
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
 func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	if len(batch) == 0 {
 		return nil
@@ -184,7 +169,7 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 // newTaskSettledEvent builds a self-contained external_input event describing a
 // background task that has settled, so the persistent loop reclaims it into a
 // new turn. The event body is a COMPACT SINGLE-LINE trajectory form
-// (context-efficiency-and-trajectory D2): `[task settled] <marker> <desc>
+// : `[task settled] <marker> <desc>
 // (id=<short>) <status> → 结果: <inline|spill>` — dense, append-only friendly,
 // and information-lossless (task_id / desc / status / error / result-or-spill
 // ticket all present; only layout redundancy is dropped). Result bounding keeps
@@ -231,51 +216,27 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 	if result != "" {
 		if spillPath != "" {
-			// result already carries the spill ticket + escaped tail
 			fmt.Fprintf(&b, " → %s", result)
 		} else {
 			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(result))
 		}
 	}
 	evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
-	// Carry the originating turn's opaque routing baggage (chat_id, ...) captured
-	// at spawn time, so the reclaim turn's output can be delivered back to the
-	// originating session. Reuses the existing extractRootMetadata → meta_*
-	// pipeline. (async-result-delivery.)
 	for k, v := range tk.Spec.Origin {
 		evt.Metadata[k] = v
 	}
-	// hardening-review-batch2 1.3（unknown 保守扣留）：Origin 缺失（旧版本记录
-	// /框架外 spawn）的任务，其结算事件无世系——下游 extractTriggerSource 会
-	// 机械兜底为 "task" 并被宿主白名单放投。源头打标，让下游显式降级为
-	// task-unstamped（宿主扣留），未知不得升级为可投递来源。
 	if len(tk.Spec.Origin) == 0 {
 		evt.Metadata["lineage_absent"] = "true"
 	}
-	// hardening-review-batch2 2.4：alive-detached 转变时刻随事件持久化——
-	// 恢复侧据它还原 detachedAt（沿用真实脱离时长，不以恢复时间替代）。
-	// cold-eyes P1-2：stale 一次性通知（Watch）同样携带——否则 watch 的
-	// settle_status 会覆盖 alive-detached 成为末次记录，恢复侧 detachedAt
-	// 与 detached 语义双双丢失。
 	if sig.Kind == task.SettleStable || sig.Kind == task.SettleWatch {
 		if ms := tk.DetachedAtMilli(); ms > 0 {
 			evt.Metadata["detached_at_ms"] = fmt.Sprintf("%d", ms)
 		}
 	}
-	// 2.3（design-report-closeout）：结构化 settle 状态随事件携带——persistBusEvent
-	// 落库后据此自动写 task_settle feedback（completed→positive / failed→negative；
-	// suspect/alive-detached 不写，只记确定性裁决）。
 	evt.Metadata["settle_status"] = statusWord
-	// R2（resident-continuity-r2-r4）：全量 task_id（UUID）随事件携带——事实链
-	// settle 记录的结构化关联键（RebuildTaskRegistry 按此归并 spawned/settled，
-	// 不解析正文；ShortID 仅人类可读）。
 	evt.Metadata["task_id"] = tk.ID
 	return evt
 }
-
-// ---------------------------------------------------------------------------
-// EventBus
-// ---------------------------------------------------------------------------
 
 // EventBus is a per-agent ordered event queue.
 //
@@ -294,7 +255,7 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 // receipt — the channel carries only wake-ups, never the durable truth. Each
 // message slot keeps a lossless JSON snapshot of the original AgentEvent
 // (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
-// restores everything inbox-v1 dropped (F1). Durable envelopes are consumed
+// restores everything inbox-v1 dropped . Durable envelopes are consumed
 // strictly in enqueue order (zero-padded seq); volatile channel events are
 // best-effort by definition. Receipted items replaying after a crash are
 // Ack-skipped without re-execution.
@@ -304,24 +265,23 @@ type EventBus struct {
 	// inbox 是可选的 durable 输入信箱（inbox-v2）。nil = 纯 channel 轻量模式。
 	inbox *reliability.Inbox
 
-	// retention 是可选的 §2.8 材料保留能力（memory.RetentionGuard 的结构性投影，
+	// retention 是可选的  材料保留能力（memory.RetentionGuard 的结构性投影，
 	// 避免此处 import memory）。durable inbox 下由 agent 装配注入，用于从现有未确认
 	// envelope 重建保留租约并在 ack 后释放。nil = 未接线（不 arm、不释放）。
 	retention retentionGuard
 
-	// publishDropped counts events the LEGACY void Publish could not accept
-	// (timeout/closed) — the void entry never fails loudly by contract, but
-	// the rejection must stay observable (3.1).
+	// publishDropped 统计 void Publish（兼容入口）未能接受的事件（超时/已关闭）——
+	// 该入口按契约不显式失败，但拒绝必须保持可观测。
 	publishDropped atomic.Int64
 }
 
 // PublishReceipt is the decidable result of a context-aware acceptance (3.1).
 type PublishReceipt struct {
-	RequestID string // stable identity of THIS acceptance (uuid of the event)
-	Durable   bool   // true = persisted through the inbox barrier
+	RequestID string
+	Durable   bool
 }
 
-// Publish errors — callers of PublishContext can branch on these; the void
+// ErrPublishTimeout Publish errors — callers of PublishContext can branch on these; the void
 // Publish only logs and counts them.
 var (
 	ErrPublishTimeout = fmt.Errorf("eventbus: publish timed out (queue full)")
@@ -337,12 +297,9 @@ func NewEventBus() *EventBus {
 	}
 }
 
-// NewReliableEventBus opens the durable inbox under spillDir/inbox-v2
-// (resident-readiness-plan 3.2). Legacy *.spill leftovers or an undrained
-// inbox-v1 tree REFUSE the upgrade (fail-loud with migration guidance) — the
-// previous binary must drain them; v2 never guess-migrates (task 3.5).
-// All errors are returned: reliability requested by config must never
-// silently degrade to volatile.
+// NewReliableEventBus 在 spillDir/inbox-v2 打开持久收件箱。存在旧的 *.spill 残留或未排空的
+// inbox-v1 树时拒绝升级（fail-loud 并给出迁移指引）：必须由前一个二进制排空，v2 从不猜测式
+// 迁移。所有错误一律返回——配置要求可靠性时，绝不静默降级为易失。
 func NewReliableEventBus(spillDir string) (*EventBus, error) {
 	b := NewEventBus()
 	if spillDir == "" {
@@ -382,7 +339,7 @@ func (b *EventBus) Durable() bool {
 	return b != nil && b.inbox != nil
 }
 
-// retentionGuard is the §2.8 材料保留 capability surface the bus needs from the store
+// retentionGuard is the  材料保留 capability surface the bus needs from the store
 // (structurally mirrors memory.RetentionGuard to avoid importing memory here). The
 // recovery owner protects the durable originals of unacked envelopes until they are
 // acked (dir-synced) and released, so TTL/capacity/compaction cannot destroy material
@@ -391,7 +348,7 @@ type retentionGuard interface {
 	ProtectKey(key int64)
 	ReleaseKey(key int64)
 	ArmRetention()
-	// BeginHold/EndHold raise/release the §5.8 registration barrier (structurally
+	// BeginHold/EndHold raise/release the  registration barrier (structurally
 	// mirrors memory.RetentionGuard): forgetting pauses while an owner inventories.
 	BeginHold()
 	EndHold()
@@ -420,7 +377,7 @@ func materialKeys(m reliability.UnackedMaterial) []int64 {
 }
 
 // ArmRetentionFromInbox rebuilds the store's retention lease from existing unacked
-// envelopes (§2.8 restart recovery) and then arms it, releasing the lifecycle scanner's
+// envelopes and then arms it, releasing the lifecycle scanner's
 // first destructive pass. Called once at agent-open after SetRetentionGuard. A durable
 // inbox with no material still arms (empty protect) so the scanner is not gated on an
 // inbox that never registers. A failed enumeration does NOT arm (never under-protect on
@@ -429,16 +386,9 @@ func (b *EventBus) ArmRetentionFromInbox() error {
 	if b == nil || b.inbox == nil || b.retention == nil {
 		return nil
 	}
-	// §5.8: raise the registration barrier BEFORE touching the dir — on an already
-	// running store (late attach) or a fresh one, no forgetting pass may land
-	// between "inventory started" and "keys protected".
 	b.retention.BeginHold()
 	mats, err := b.inbox.UnackedMaterial()
 	if err != nil {
-		// The dir cannot be inventoried: HOLD the barrier (显式阻断). Forgetting
-		// stays gated indefinitely — surviving material must not be destroyed on an
-		// incomplete view. The caller refuses ingest (agent build fails), so the
-		// block is reported, never silently swept.
 		log.Errorf("[ReliableBus] recovery inventory FAILED — retention barrier HELD, forgetting stays blocked: %v", err)
 		return err
 	}
@@ -455,7 +405,7 @@ func (b *EventBus) ArmRetentionFromInbox() error {
 
 // releaseRetention drops the lease holders for an acked envelope's originals so they
 // resume normal age-based handling. The caller MUST read the material BEFORE Ack (which
-// removes the file) and pass it here; releasing after dir-sync is the §2.8 release point.
+// removes the file) and pass it here; releasing after dir-sync is the  release point.
 func (b *EventBus) releaseRetention(m reliability.UnackedMaterial) {
 	if b == nil || b.retention == nil {
 		return
@@ -465,12 +415,9 @@ func (b *EventBus) releaseRetention(m reliability.UnackedMaterial) {
 	}
 }
 
-// DrainRetentionCleanups finalizes deferred ack-cleanup barriers (§3.6/L96): for
-// every envelope whose unlink landed but whose dir-sync previously failed, it
-// completes the outstanding barrier and, once durable, releases the retention lease
-// for its protected material — exactly once (L110). Driven from the consume loop
-// each turn so an uncertain ack converges to a single capacity+lease release
-// without re-executing the input. Returns the number of accounts finalized.
+// DrainRetentionCleanups 收尾延迟的 ack-清理屏障：对每个 unlink 已落地、但目录同步尚未成功的
+// 信封，补齐所欠屏障，并在持久化确定后为其受保护材料释放保留租约——恰好一次。由消费循环
+// 每轮驱动，使一次不确定的 ack 收敛为"容量＋租约各释放一次"，且不重跑输入。返回收尾的账数。
 func (b *EventBus) DrainRetentionCleanups() int {
 	if b == nil || b.inbox == nil {
 		return 0
@@ -483,7 +430,7 @@ func (b *EventBus) DrainRetentionCleanups() int {
 }
 
 // TransitionalData reports previous-format (inbox-v1 / .spill) items the inbox found
-// at open (§3.7). They are inert — never read or consumed — and the agent bootstraps
+// at open. They are inert — never read or consumed — and the agent bootstraps
 // may surface them to the operator. Safe to call on a nil/volatile bus (returns
 // nils). A managed reset (ResetTransitional) is the only thing that clears them.
 func (b *EventBus) TransitionalData() (spill, v1 []string) {
@@ -494,7 +441,7 @@ func (b *EventBus) TransitionalData() (spill, v1 []string) {
 }
 
 // ResetTransitional is the operator-invoked managed reset of previous-format data
-// for this bus's inbox (§3.7). It is destructive and requires an explicit confirm;
+// for this bus's inbox. It is destructive and requires an explicit confirm;
 // it never runs automatically and never clears current-format corruption (which
 // must surface, not be wiped). See reliability.Inbox.ResetTransitional.
 func (b *EventBus) ResetTransitional(confirm bool) (int, error) {
@@ -504,7 +451,7 @@ func (b *EventBus) ResetTransitional(confirm bool) (int, error) {
 	return b.inbox.ResetTransitional(confirm)
 }
 
-// PublishDropped counts rejections made through the legacy void entry (3.1).
+// PublishDropped 统计经由 void 兼容入口发生的拒绝。
 func (b *EventBus) PublishDropped() int64 {
 	if b == nil {
 		return 0
@@ -512,20 +459,14 @@ func (b *EventBus) PublishDropped() int64 {
 	return b.publishDropped.Load()
 }
 
-// PublishContext is the decidable acceptance entry (3.1): it returns a
-// receipt on success (volatile or durable) or an error — full/timeout/closed
-// are NEVER reported as accepted. The legacy void Publish wraps this.
+// PublishContext 是可判定的受理入口：成功返回凭据（易失或持久），否则返回错误——
+// 满/超时/已关闭 绝不报成已受理。void Publish 是包装本函数的兼容入口。
 func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (PublishReceipt, error) {
 	if event == nil {
 		return PublishReceipt{}, ErrNilEvent
 	}
 	receipt := PublishReceipt{RequestID: event.ID}
 
-	// Durable mode: EVERY event goes through the inbox barrier first, stored as
-	// a lossless JSON snapshot of the whole AgentEvent (3.2). An event that
-	// cannot be JSON-encoded is REFUSED at acceptance — never silently stripped
-	// of the offending field. After the snapshot is written the caller may keep
-	// mutating the in-memory event without affecting the durable payload.
 	if b.inbox != nil {
 		src, merr := json.Marshal(event)
 		if merr != nil {
@@ -540,10 +481,6 @@ func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (Publi
 			return receipt, fmt.Errorf("eventbus: durable enqueue rejected: %w", err)
 		}
 		receipt.Durable = true
-		// Wake the consumer with a DEDICATED sentinel (never the event itself
-		// — the event lives in the inbox and must not ALSO travel the channel,
-		// or consumers would see it twice). Full channel: harmless, the next
-		// Pull drains the inbox regardless.
 		select {
 		case b.ch <- wakeEvent():
 		default:
@@ -551,7 +488,6 @@ func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (Publi
 		return receipt, nil
 	}
 
-	// Volatile mode: bounded channel + timeout, then an explicit error.
 	select {
 	case b.ch <- event:
 		return receipt, nil
@@ -580,7 +516,7 @@ func wakeEvent() *AgentEvent {
 func isInboxWake(e *AgentEvent) bool { return e != nil && e.Type == inboxWakeType }
 
 // PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope
-// (resident-readiness-plan 3.3/5.2): every message keeps its own identity in
+// : every message keeps its own identity in
 // the envelope, and the batch is durable (or rejected) as a unit — never
 // partially accepted. Volatile mode falls back to per-message PublishContext.
 func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message) (PublishReceipt, error) {
@@ -591,10 +527,6 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 	receipt := PublishReceipt{RequestID: requestID}
 
 	if b.inbox != nil {
-		// Build every slot's lossless snapshot FIRST: an unencodable message
-		// rejects the whole batch before anything is written (never a partially
-		// accepted envelope). Each message becomes its own AgentEvent so its
-		// per-message identity (id/timestamp) survives the round-trip.
 		env := reliability.Envelope{RequestID: requestID, Source: source}
 		for _, m := range msgs {
 			evt := NewExternalInputEvent(source, m)
@@ -614,7 +546,6 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 		}
 		return receipt, nil
 	}
-	// Volatile: per-message acceptance; first failure rejects the batch.
 	for _, m := range msgs {
 		evt := NewExternalInputEvent(source, m)
 		select {
@@ -634,17 +565,15 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 	return receipt, nil
 }
 
-// Publish enqueues an event (legacy void entry, 3.1 compatibility): it wraps
-// PublishContext, logging and counting rejections instead of failing. New
-// callers — HTTP, hosts, anything that reports acceptance to a user — MUST
-// use PublishContext/InjectMessageContext.
+// Publish 是 void 兼容入口：包装 PublishContext，把拒绝记日志并计数而非失败。
+// 新调用方（HTTP、宿主，以及任何要向用户报告是否受理的路径）必须使用
+// PublishContext／InjectMessageContext。
 func (b *EventBus) Publish(event *AgentEvent) {
 	if event == nil {
 		log.Warnf("[EventBus] Publish nil event, skipped")
 		return
 	}
 	if _, err := b.PublishContext(context.Background(), event); err != nil {
-		// PublishContext already counted the rejection — log only.
 		log.Warnf("[EventBus] Publish rejected: %v (type=%s source=%s)", err, event.Type, event.Source)
 	}
 }
@@ -681,19 +610,14 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 			return batch
 		}
 		if env.State == reliability.InboxStateReceipted {
-			// 处理完成 receipt 已持久：只补 Ack，不重执行（2.4 幂等）。
-			m := reliability.MaterialOf(env) // §2.8: capture originals before Ack removes the file
+			m := reliability.MaterialOf(env)
 			if aerr := b.inbox.Ack(path); aerr != nil {
 				log.Warnf("[ReliableBus] ack of receipted %s deferred: %v", env.RequestID, aerr)
 			} else {
-				b.releaseRetention(m) // Ack dir-synced → release the lease holders (§2.8)
+				b.releaseRetention(m)
 			}
 			continue
 		}
-		// Envelope-level collection point (deep-review P2-2): a slot decode
-		// failure quarantines the WHOLE envelope, so everything gathered for
-		// THIS envelope so far is dropped — nothing of it was committed, so
-		// dropping is safe and the failure is loud via the quarantine record.
 		startIdx := len(batch)
 		badSlot := -1
 		var badErr error
@@ -713,15 +637,6 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 			batch = append(batch, evt)
 		}
 		if badErr != nil {
-			// The leaf already quarantines unreadable envelopes; a slot that
-			// still fails here is an anomaly. Quarantine the whole envelope
-			// (fail-closed, same disposition as unreadable envelopes): leaving
-			// it claimed zombied a fully-corrupt envelope across every restart,
-			// and partially-cloning the decodable slots into a completion would
-			// ACK-destroy the undecodable input — both are silent loss. The
-			// wrapper releases the §2.8 retention holders on a confirmed move;
-			// the quarantine keeps the original bytes inspectable. Either way
-			// THIS claim pass drops everything gathered for the envelope.
 			log.Errorf("[ReliableBus] undecodable source_event at %s slot %d — envelope quarantined: %v", path, badSlot, badErr)
 			b.QuarantineEnvelope(path, fmt.Sprintf("undecodable source_event slot %d: %v", badSlot, badErr))
 			batch = batch[:startIdx]
@@ -733,7 +648,7 @@ func (b *EventBus) claimDurable() []*AgentEvent {
 
 // decodeSourceEvent restores the lossless AgentEvent snapshot persisted at
 // acceptance. ID/Type/Source/Timestamp/full Message/business Metadata all come
-// back intact (F1) — nothing is re-stamped or dropped. The restored event's
+// back intact  — nothing is re-stamped or dropped. The restored event's
 // claim is nil (json:"-"); the caller attaches the typed claim.
 func decodeSourceEvent(raw json.RawMessage) (*AgentEvent, error) {
 	var evt AgentEvent
@@ -775,7 +690,7 @@ func (b *EventBus) DurableProvenance(events []*AgentEvent) [][2]string {
 // already-durable receipt_key must match (a different one is a conflict). The
 // caller MUST treat a returned error as "write nothing this turn" — the claim
 // stays and replays. This replaces v1's post-hoc AppendDurableEventKeys/
-// RecordEventKeys writeback (F4).
+// RecordEventKeys writeback .
 func (b *EventBus) PrepareEnvelope(path, receiptKey string, facts []json.RawMessage) error {
 	if b.inbox == nil {
 		return errors.New("eventbus: no durable inbox configured")
@@ -787,12 +702,12 @@ func (b *EventBus) PrepareEnvelope(path, receiptKey string, facts []json.RawMess
 }
 
 // RecordCompletion durably freezes a turn's completion payload onto the envelope
-// at path BEFORE its receipt is submitted (§5.3, D3 step 7). Idempotent on an
+// at path BEFORE its receipt is submitted. Idempotent on an
 // identical payload; a differing payload on an already-frozen envelope is a
 // conflict (reliability.ErrCompletionConflict) — the frozen completion is
 // authoritative and the caller must NOT overwrite it. The caller treats an error
 // as "receipt not yet safe": the claim stays and the completion write is retried
-// in-process without re-running the model (design 决策5 L62).
+// in-process without re-running the model.
 func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) error {
 	if b.inbox == nil {
 		return errors.New("eventbus: no durable inbox configured")
@@ -804,9 +719,9 @@ func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) err
 }
 
 // QuarantineEnvelope isolates a deterministic-conflict envelope (kept on disk for
-// inspection, capacity freed). See Inbox.QuarantineEnvelope (§4.2).
+// inspection, capacity freed). See Inbox.QuarantineEnvelope.
 //
-// §2.8 (resident-review-fixes 2.2): quarantine is a terminal disposition just like
+// : quarantine is a terminal disposition just like
 // Ack, so it MUST release the envelope's retention holders — otherwise an isolated
 // envelope's originals stay leased forever and can never be TTL/capacity-evicted
 // (a lease hang). The leaf has no store handle, so the wrapper reads the material
@@ -822,12 +737,12 @@ func (b *EventBus) QuarantineEnvelope(path, reason string) {
 		log.Warnf("[ReliableBus] quarantine retention material read %s failed: %v", path, merr)
 	}
 	if b.inbox.QuarantineEnvelope(path, reason) && ok {
-		b.releaseRetention(m) // isolated (terminal) → release (§2.8), symmetric with the Ack path
+		b.releaseRetention(m)
 	}
 }
 
 // ReleaseClaim returns a claimed envelope to pending for ordered re-claim on a
-// transient submit failure (§4.2). See Inbox.ReleaseClaim.
+// transient submit failure. See Inbox.ReleaseClaim.
 func (b *EventBus) ReleaseClaim(path string) error {
 	if b == nil || b.inbox == nil {
 		return nil
@@ -835,7 +750,7 @@ func (b *EventBus) ReleaseClaim(path string) error {
 	return b.inbox.ReleaseClaim(path)
 }
 
-// ConfirmDurable records the processing receipt then Acks. §5.4: the caller
+// ConfirmDurable records the processing receipt then Acks. : the caller
 // must present the verified receipt credential issued from a legal durable
 // completion (ContextManager.verifyReceiptCredential) — RecordReceipt refuses
 // without it, so no bare description string or request id can confirm an
@@ -844,8 +759,6 @@ func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredentia
 	if b.inbox == nil {
 		return nil
 	}
-	// §2.8: read the envelope's originals BEFORE Ack removes the file, so the lease
-	// holders can be released once the ack is dir-synced (the release point).
 	m, ok, merr := b.inbox.MaterialOfPath(path)
 	if merr != nil {
 		log.Warnf("[ReliableBus] retention material read %s failed: %v", path, merr)
@@ -857,7 +770,7 @@ func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredentia
 		return err
 	}
 	if ok {
-		b.releaseRetention(m) // Ack dir-synced → release (§2.8)
+		b.releaseRetention(m)
 	}
 	return nil
 }
@@ -867,15 +780,12 @@ func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredentia
 // Returns the batch and nil error on success.
 // Returns nil and ctx.Err() when ctx is cancelled before any event arrives.
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
-	// 回收顺序：channel 内 volatile 事件先（尽力而为），随后按 seq 严格序
-	// claim durable envelope。批量上限防巨型 LLM 消息。
 	for {
 		batch := b.drainChannelNonWake()
 		batch = append(batch, b.claimDurable()...)
 		if len(batch) > 0 {
 			return batch, nil
 		}
-		// 皆空：阻塞等 channel 首个事件（volatile 输入或 durable 唤醒哨兵）。
 		select {
 		case evt := <-b.ch:
 			if !isInboxWake(evt) {
@@ -886,7 +796,7 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 			if len(batch) > 0 {
 				return batch, nil
 			}
-			continue // 仅哨兵：重新阻塞等待
+			continue
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -930,8 +840,7 @@ func (b *EventBus) drainChannel() []*AgentEvent {
 // Returns an empty (non-nil) slice if no events are pending.
 // Unlike Pull, this does not block — it immediately returns if the channel is empty.
 func (b *EventBus) TryPull() []*AgentEvent {
-	// 回收顺序与 Pull 一致：channel volatile 先，durable 按 seq 严格序。
-	batch := b.drainChannelNonWake() // cold-eyes Minor 1: wake sentinels never leak into pulls
+	batch := b.drainChannelNonWake()
 	batch = append(batch, b.claimDurable()...)
 	if batch == nil {
 		batch = []*AgentEvent{}

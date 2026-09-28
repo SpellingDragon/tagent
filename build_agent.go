@@ -26,8 +26,8 @@ import (
 	"github.com/SpellingDragon/tagent/tool/plan"
 )
 
-// buildMode 类型化 R4 的 build ownership 契约（resident-continuity-r2-r4
-// 3.4/3.5），替代散落在签名与注释间的裸 bool：调用点自描述（常驻 vs 壳），
+// buildMode 类型化 R4 的 build ownership 契约
+// ，替代散落在签名与注释间的裸 bool：调用点自描述（常驻 vs 壳），
 // ownership 规则集中为谓词（本类型即唯一真源），编译期防误传。
 type buildMode uint8
 
@@ -86,7 +86,7 @@ func buildAgentDFS(
 	rc *runtimeConfig,
 	loader *prompt.Loader,
 	cache map[string]*agent.TagentAgent,
-	// mode（R4，resident-continuity-r2-r4 3.4/3.5）：build ownership 契约，
+	// mode：build ownership 契约，
 	// 语义与谓词见 buildMode——壳仅取 runner，共享绑定与状态重建按谓词跳过。
 	mode buildMode,
 	// stack：当前装配路径上的 agent 名（环检测）。
@@ -112,7 +112,7 @@ func buildAgentDFS(
 	var err error
 	var memStoreRelease func() error
 	if mode.isExecutorShell() {
-		// 4.5（resident-readiness-plan）：热更壳子树按 **agent 身份**借用其常驻
+		// 4.5：热更壳子树按 **agent 身份**借用其常驻
 		// 资源（store 取自身份绑定表），绝不全部复用 entryMemStore——否则子
 		// agent 的存储归属随代际漂移（F06）。§4.3 起新增 agent 在候选发布前已
 		// 并入此表，故此处对全拓扑必能命中；未命中（防御）回落 entry store。
@@ -147,7 +147,7 @@ func buildAgentDFS(
 		// 覆盖此后该 store 上所有 bus 的 Arm/核对窗口。
 		rc.raiseStoreBarrier(underlying)
 		// 1.5 按配置包裹记忆引擎（T-A 解耦缝）：未配置则原样返回（行为逐字节不变）。
-		// 4.2（design-report-closeout）：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
+		// 4.2：巩固容量触发器（配置门控；threshold<=0 → nil=关闭）。
 		hintTracker = newConsolidationHintTracker(acfg)
 		var trackFn func(int64, int, string)
 		if hintTracker != nil {
@@ -164,7 +164,7 @@ func buildAgentDFS(
 	// onChange→写事件」递归。未启用则 degradationMgr=nil、memStore 不包裹（现状零变化）。
 	var degradationMgr *reliability.DegradationManager
 	// etsHolder 延迟引用（函数级）：onChange 触发重放（步4）与 NewTagentAgent 后的
-	// 重放投影双写回填（5.5, design-report-closeout）都晚于 ErrorTrackingStore 构造。
+	// 重放投影双写回填都晚于 ErrorTrackingStore 构造。
 	var etsHolder *memory.ErrorTrackingStore
 	if cfg.Reliability.DegradationEnabled {
 		baseStore := memStore
@@ -195,7 +195,7 @@ func buildAgentDFS(
 			}
 		})
 		ets := memory.NewErrorTrackingStore(memStore, reliability.MemorySink{Mgr: degradationMgr})
-		// C1（resident-review-fixes 1.1）：热重建壳不接 mem_spill——壳的 memStore 借用自
+		// C1：热重建壳不接 mem_spill——壳的 memStore 借用自
 		// 常驻 owner，SetMemSpill 的 ProtectAllPending 会在共享 store 上重复登记恢复租约
 		// （releaseRetention 只在常驻 bus 的 Ack 路径触发 → 壳登记永不释放 = 租约泄漏）。
 		// 恢复登记回归常驻 owner 独占（runtime-resource-ownership 既有条款的实现符合化）。
@@ -280,7 +280,7 @@ func assembleAgentConfig(
 	if !acfg.SystemPrompt.IsEmpty() {
 		systemPromptSource = prompt.NewSource(loader, acfg.SystemPrompt)
 	}
-	// evolution (self-evolution-git-native)：**系统提示词回归文件直读（mtime 热重载）**——
+	// evolution：**系统提示词回归文件直读（mtime 热重载）**——
 	// bundle 快照遮蔽层（VersionedSource）已随发布道退役（P2：文件即真源）。
 	// 后验评估闭环：judge+guardrail 经 BindRuntime 绑定到 GitEvolution（同点位换接，
 	// memStore 就绪时序保持——S3）；评估窗口锚=register 时刻（improvement 事件，W4 迁移），
@@ -429,7 +429,7 @@ func assembleAgentConfig(
 		tools = append(tools, evolution.NewRefineTool(rc.evoGit))
 	}
 
-	// 5.1（design-report-closeout）：治理面工具五件套（goal_declare/goal_list/
+	// 5.1：治理面工具五件套（goal_declare/goal_list/
 	// goal_resolve/denial_query/approval_list）——仅 entry agent 且治理启用时追加
 	// （治理面收敛主循环，与 refine 同级）；先于治理包裹追加（goal 工具自身也过闸，
 	// classify 判 low 直接放行）。工具只做登记/查询——批准权始终在人（approval_list
@@ -474,7 +474,7 @@ func assembleAgentConfig(
 			// N2：entry memStore 就绪 → 延迟绑定共享账本的持久 store（此后所有 agent gate 的
 			// 治理记录写 entry governance 分区，重启可 recall）。替代原 agentGate.BindLedger。
 			rc.govLedger.BindStore(memStore, memory.PartitionIDFromName(name))
-			// 5.2（design-report-closeout）：goal 声明持久化——同 entry 分区（治理审计
+			// 5.2：goal 声明持久化——同 entry 分区（治理审计
 			// 单区）；Declare/Resolve 双写 governance 事件，重启经回放重建。
 			rc.govGate.Goals().BindStore(memStore, memory.PartitionIDFromName(name))
 		}
@@ -529,7 +529,7 @@ func assembleAgentConfig(
 	}
 	// T-G ReliableBus：per-agent 溢出子目录（<BusSpillDir>/<agentName> 隔离，防多 agent 事件串）。
 	// 全局 BusSpillDir 空则保持空（NewReliableEventBus 回退纯 channel bus，现状零变化）。
-	// C1（resident-review-fixes 1.1）：热重建壳不建 durable bus——壳 memStore 借用自常驻
+	// C1：热重建壳不建 durable bus——壳 memStore 借用自常驻
 	// owner，durable bus 构建会在 NewTagentAgent 里对共享 store 触发 ArmRetentionFromInbox
 	// 重复恢复登记（租约泄漏 + Arm 失败腿 BeginHold 无 EndHold 拉起遗忘屏障）。壳 bus 降级
 	// volatile（构建验证所需最小面），恢复登记回归常驻 owner 独占。
@@ -601,7 +601,7 @@ func assembleAgentConfig(
 			PromptSource: meditationPromptSource,
 			AnchorPath:   meditationAnchorPath,
 		}
-		// 4.3（design-report-closeout）：巩固候选清单注入冥想 digest（建议式——
+		// 4.3：巩固候选清单注入冥想 digest（建议式——
 		// 列 key 与计数，执行权在 LLM + memory_consolidate）。tracker nil 时不注入。
 		if hintTracker != nil {
 			tracker := hintTracker
@@ -646,7 +646,7 @@ func wireAgent(
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
 	}
 
-	// R3（resident-continuity-r2-r4 2.5/2.6）：常驻会话事实链 sink + meta 目录
+	// R3：常驻会话事实链 sink + meta 目录
 	// late-bind（ActionTool 在工厂层构造、先于 ta/cm；ta 就绪后接线）。
 	if actionTool != nil {
 		actionTool.SetResidentRecordSink(ta.RecordResidentSession)
@@ -667,7 +667,7 @@ func wireAgent(
 		ta.ContextManager().SetRetirementPoke(*fn)
 	}
 
-	// D1-B（design-report-closeout）/git-native 4.4：entry agent 双持久化路径盖版本章——
+	// D1-B/git-native 4.4：entry agent 双持久化路径盖版本章——
 	// 事件归属精确到**最新 improvement 的 commit sha**（guardrail/feedback join 键；键名
 	// MetaKeyBundleID 保留，8.4 继承机制不变）。无改进事件时返回空串不盖章（退化时间窗 join）。
 	if rc.evoGit != nil && name == cfg.Entry && mode.bindsProcessShared() {
@@ -677,7 +677,7 @@ func wireAgent(
 		ta.RegisterCloser(stopCloser(evoGit.Stop))
 	}
 
-	// 3.3（design-report-closeout）：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
+	// 3.3：审批请求经消息通道渗透（entry 事件循环 → 渠道侧
 	// 送达用户）。Deliver 失败不阻塞门——pending 文件已落盘，CLI/文件批准始终可用。
 	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil && mode.bindsProcessShared() {
 		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
@@ -687,7 +687,7 @@ func wireAgent(
 		}
 	}
 
-	// 4.2（design-report-closeout）：容量 hint 回填——渗透消息进事件循环（建议式：
+	// 4.2：容量 hint 回填——渗透消息进事件循环（建议式：
 	// 执行权在 LLM + memory_consolidate；source=consolidation_hint 供消费端识别）。
 	if hintTracker != nil {
 		hintTracker.SetOnHint(func(pid, count int) {
@@ -716,7 +716,7 @@ func wireAgent(
 		}
 	}
 
-	// R2（resident-continuity-r2-r4 D1.3）：任务 registry 重建——同样从事实链
+	// R2：任务 registry 重建——同样从事实链
 	// 纯全量回放（task_spawned − 终态 settle；running→suspect 交 R3 探测裁决），
 	// 填入常驻 ta.taskManager（D3 裁决：TagentAgent 常驻，TaskManager 即 org 级
 	// 单例，换执行器代不丢任务板）。无任务事件时 no-op。闭包工厂按承诺表：
@@ -788,7 +788,7 @@ func wireAgent(
 		}
 	}
 
-	// 5.5（design-report-closeout）：mem_spill 重放双写——重放成功的每条事件补投影
+	// 5.5：mem_spill 重放双写——重放成功的每条事件补投影
 	// （projection 此时已由 NewTagentAgent 创建），恢复「存储⇔投影同点」在退化路径
 	// 的等价语义（Role 从事件类型派生）。
 	if etsHolder != nil {

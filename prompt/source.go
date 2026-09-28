@@ -9,27 +9,20 @@ import (
 	"time"
 )
 
-// Source is a hot-reloadable prompt reference.
-// It stores the loader and file paths, and re-reads from disk when files
-// are modified. Thread-safe for concurrent access.
+// Source 是一组提示词文件的运行期视图：按配置读取并拼接文件，文件更新后自动重读。
+// 可并发使用；未配置文件时内容固定不变。
 //
-// Usage:
-//
-//	src := NewSource(loader, CompositeConfig{Files: []string{"AGENTS.md", "SOUL.md"}})
-//	content, err := src.Get() // reads from disk, caches result
-//	// ... later, after file is modified ...
-//	content, err = src.Get() // detects mtime change, re-reads
+// 契约: docs/wiki/prompt/prompt-architecture.md#source-hotreload
 type Source struct {
 	loader *Loader
 	config CompositeConfig
 
 	mu      sync.RWMutex
 	cached  string
-	modTime time.Time // latest mtime among all source files at last load
+	modTime time.Time
 }
 
-// NewSource creates a hot-reloadable prompt source.
-// If the config has no files (inline-only), the content is loaded once and cached.
+// NewSource 返回监听 config 所列文件的提示词源。config 不含文件时内容只加载一次。
 func NewSource(loader *Loader, config CompositeConfig) *Source {
 	return &Source{
 		loader: loader,
@@ -37,30 +30,29 @@ func NewSource(loader *Loader, config CompositeConfig) *Source {
 	}
 }
 
-// NewStaticSource creates a prompt source with a fixed string (no file watching).
+// NewStaticSource 返回内容固定的提示词源：不监听文件，不做重读。
 func NewStaticSource(content string) *Source {
 	return &Source{
 		cached: content,
 	}
 }
 
-// Get returns the current prompt content.
-// For file-based sources, it checks file modification times and re-reads
-// if any file has changed since the last load.
-// For static sources, returns the cached content directly.
+// Get 返回当前生效的提示词内容。
+//
+// 所有配置文件的 mtime 均不晚于上次成功载入时刻时命中缓存，不重读磁盘；任一文件更晚
+// 则重读并刷新缓存。静态源（loader 为 nil）直接返回固定内容。
+// stat 或重读失败时返回既有缓存（若存在），无缓存才返回错误。
+// nil 接收者返回空内容。
 func (s *Source) Get() (string, error) {
 	if s == nil {
-		return "", nil // nil-receiver 安全：typed-nil *Source 装入 prompt.Getter 接口时不 panic（TC0 迁移）
+		return "", nil
 	}
 	if s.loader == nil {
-		// Static source — no file watching
 		return s.cached, nil
 	}
 
-	// Check if any source file has been modified
 	latestMod, changed, err := s.checkModTimes()
 	if err != nil {
-		// On error, return cached content (graceful degradation)
 		s.mu.RLock()
 		cached := s.cached
 		s.mu.RUnlock()
@@ -77,10 +69,8 @@ func (s *Source) Get() (string, error) {
 		return cached, nil
 	}
 
-	// Files changed — re-read
 	content, err := s.loader.LoadComposite(s.config.Inline, s.config.Files, s.config.Dir)
 	if err != nil {
-		// On read error, return cached content (graceful degradation)
 		s.mu.RLock()
 		cached := s.cached
 		s.mu.RUnlock()
@@ -98,7 +88,7 @@ func (s *Source) Get() (string, error) {
 	return content, nil
 }
 
-// IsEmpty returns true if no prompt source is configured.
+// IsEmpty 报告是否未配置任何提示词内容或文件。nil 接收者视为空。
 func (s *Source) IsEmpty() bool {
 	if s == nil {
 		return true
@@ -109,14 +99,13 @@ func (s *Source) IsEmpty() bool {
 	return s.config.IsEmpty()
 }
 
-// checkModTimes checks if any source file has been modified since the last load.
-// Returns the latest mtime, whether any file changed, and any error.
+// checkModTimes 返回配置文件中最新的 mtime、是否有文件晚于上次成功载入时刻，以及首个 stat 错误。
+// 配置了 Dir 时，该目录下的 .md 一并纳入比较。
 func (s *Source) checkModTimes() (latestMod time.Time, changed bool, err error) {
 	s.mu.RLock()
 	lastMod := s.modTime
 	s.mu.RUnlock()
 
-	// Collect all file paths
 	var paths []string
 	for _, f := range s.config.Files {
 		if f == "" {
@@ -128,7 +117,6 @@ func (s *Source) checkModTimes() (latestMod time.Time, changed bool, err error) 
 		paths = append(paths, f)
 	}
 
-	// Also scan directory if configured
 	if s.config.Dir != "" {
 		dir := s.config.Dir
 		if !filepath.IsAbs(dir) && s.loader.BaseDir != "" {
@@ -145,18 +133,16 @@ func (s *Source) checkModTimes() (latestMod time.Time, changed bool, err error) 
 	}
 
 	if len(paths) == 0 {
-		// No files to check — treat as unchanged
 		return lastMod, false, nil
 	}
 
-	// Check modification times
 	for _, path := range paths {
 		info, statErr := os.Stat(path)
 		if statErr != nil {
 			return latestMod, false, fmt.Errorf("stat %s: %w", path, statErr)
 		}
 		mt := info.ModTime()
-		if mt.After(latestMod) {
+		if mt.After(lastMod) {
 			changed = true
 		}
 		if mt.After(latestMod) {

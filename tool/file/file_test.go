@@ -26,10 +26,8 @@ func TestRegisterTools_CreatesCallableTools(t *testing.T) {
 func TestMakeFileToolFactory_ReadFileAndSaveFile(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Register tools (idempotent)
 	RegisterTools()
 
-	// Get save_file factory and save a file.
 	saveFactory, ok := agent.GetPlainToolFactory("save_file")
 	require.True(t, ok)
 	saveTool, err := saveFactory(agent.PlainToolFactoryConfig{
@@ -52,7 +50,6 @@ func TestMakeFileToolFactory_ReadFileAndSaveFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", string(content))
 
-	// Get read_file factory and read the file back.
 	readFactory, ok := agent.GetPlainToolFactory("read_file")
 	require.True(t, ok)
 	readTool, err := readFactory(agent.PlainToolFactoryConfig{
@@ -68,24 +65,20 @@ func TestMakeFileToolFactory_ReadFileAndSaveFile(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, raw)
 
-	// Verify the file was written correctly via save_file and can be read back.
 	content, err = os.ReadFile(filepath.Join(tempDir, "hello.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", string(content))
 }
 
 func TestResolveBaseDir(t *testing.T) {
-	// 无 WorkingDir:base_dir 缺省 → "."(进程 cwd,现状逐字节不变)
 	assert.Equal(t, ".", resolveBaseDir(nil, ""))
 	assert.Equal(t, ".", resolveBaseDir(map[string]any{}, ""))
 	assert.Equal(t, "/tmp", resolveBaseDir(map[string]any{"base_dir": "/tmp"}, ""))
 	assert.Equal(t, ".", resolveBaseDir(map[string]any{"base_dir": ""}, ""))
 	assert.Equal(t, ".", resolveBaseDir(map[string]any{"base_dir": 123}, ""))
-	// WorkingDir 作为 base_dir 缺省时的回退(config.working_dir / TAGENT_WORKING_DIR)
 	assert.Equal(t, "/codes", resolveBaseDir(nil, "/codes"))
 	assert.Equal(t, "/codes", resolveBaseDir(map[string]any{}, "/codes"))
 	assert.Equal(t, "/codes", resolveBaseDir(map[string]any{"base_dir": ""}, "/codes"))
-	// 显式 base_dir 优先于 WorkingDir
 	assert.Equal(t, "/tmp", resolveBaseDir(map[string]any{"base_dir": "/tmp"}, "/codes"))
 }
 
@@ -98,19 +91,16 @@ func TestMakeFileToolFactory_WorkingDirAsBaseDir(t *testing.T) {
 
 	saveFactory, ok := agent.GetPlainToolFactory("save_file")
 	require.True(t, ok)
-	// 仅设 WorkingDir(无 properties.base_dir)→ base_dir 应回退 WorkingDir
 	saveTool, err := saveFactory(agent.PlainToolFactoryConfig{ID: "save_file", WorkingDir: workingDir})
 	require.NoError(t, err)
 
 	args, _ := json.Marshal(map[string]any{"file_name": "wd.txt", "contents": "via WorkingDir", "overwrite": true})
 	_, err = saveTool.Call(context.Background(), args)
 	require.NoError(t, err)
-	// 文件落在 workingDir(证明 base_dir=WorkingDir,而非进程 cwd ".")
 	content, err := os.ReadFile(filepath.Join(workingDir, "wd.txt"))
 	require.NoError(t, err, "save_file 应以 cfg.WorkingDir 为 base_dir 落盘")
 	assert.Equal(t, "via WorkingDir", string(content))
 
-	// 显式 base_dir 优先于 WorkingDir
 	explicit := t.TempDir()
 	saveTool2, err := saveFactory(agent.PlainToolFactoryConfig{
 		ID:         "save_file",

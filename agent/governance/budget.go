@@ -8,19 +8,12 @@ import (
 	"time"
 )
 
-// ==================== BudgetManager（T-G · 有界自治：操作预算）====================
-//
-// 滑动窗口预算（桶化实现）：窗口内 high/medium 级操作上限，critical 一律走批准不占预算。
-// 关键设计（报告 D3 §4.6.2）：预算状态持久化且窗口起点用墙钟 epoch——重启不重置计数
-// （防「重启刷预算」绕过闸）。选滑动窗口桶化而非令牌桶：预算是「上限闸」非「速率整形」。
-
 // BudgetConfig 配置预算窗口与各级上限。
 type BudgetConfig struct {
-	Window        time.Duration // 滑动窗口（默认 1h）
-	BucketCount   int           // 桶数（默认 6，即 10m/桶）
-	MaxHighRisk   int           // 窗口内 high 级上限（默认 20）
-	MaxMediumRisk int           // 窗口内 medium 级上限（默认 200）
-	// critical 不占预算（一律走 ApprovalManager）。low 不计。
+	Window        time.Duration
+	BucketCount   int
+	MaxHighRisk   int
+	MaxMediumRisk int
 }
 
 func (c BudgetConfig) withDefaults() BudgetConfig {
@@ -51,11 +44,11 @@ func (budgetExhaustedError) Error() string {
 // BudgetManager 是滑动窗口预算闸（并发安全，持久化 epoch 防重启刷预算）。
 type BudgetManager struct {
 	cfg  BudgetConfig
-	path string // <dir>/budget.json（空 = 不持久化，仅内存）
+	path string
 
 	mu      sync.Mutex
-	buckets map[RiskLevel][]int64 // 每级每桶计数（桶按 epoch 轮转）
-	epoch   int64                 // 窗口起点（墙钟秒，持久化）
+	buckets map[RiskLevel][]int64
+	epoch   int64
 }
 
 // NewBudgetManager 构建预算闸。dir 非空时持久化到 <dir>/budget.json 并恢复 epoch。
@@ -77,7 +70,7 @@ func NewBudgetManager(cfg BudgetConfig, dir string) *BudgetManager {
 // high/medium 超限返回 ErrBudgetExhausted。
 func (b *BudgetManager) Admit(level RiskLevel) error {
 	if level != RiskHigh && level != RiskMedium {
-		return nil // critical 走批准，low 不计
+		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -95,7 +88,6 @@ func (b *BudgetManager) Admit(level RiskLevel) error {
 	if total >= int64(limit) {
 		return ErrBudgetExhausted
 	}
-	// 计入当前桶（最后一个）。
 	idx := b.currentBucket()
 	buckets[idx]++
 	b.buckets[level] = buckets
@@ -121,7 +113,6 @@ func (b *BudgetManager) roll() {
 	bucketSecs := b.bucketSeconds()
 	elapsed := now - b.epoch
 	if elapsed < 0 {
-		// 时钟回拨：重置 epoch 到 now（保守，不因回拨累积预算）。
 		b.epoch = now
 		elapsed = 0
 	}
@@ -131,13 +122,11 @@ func (b *BudgetManager) roll() {
 		return
 	}
 	if advanced >= b.cfg.BucketCount {
-		// 整窗过期：清空。
 		b.epoch = now
 		b.buckets = make(map[RiskLevel][]int64)
 		b.ensureBuckets()
 		return
 	}
-	// 部分推进：左移丢弃最旧的 advanced 个桶。
 	b.epoch += int64(advanced) * bucketSecs
 	for _, level := range []RiskLevel{RiskHigh, RiskMedium} {
 		bs := b.buckets[level]

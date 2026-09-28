@@ -1,17 +1,17 @@
 //go:build ignore
 
-// verify_large_file.go — SDK 大文件真链路一次性人工验收（design.md D8 / add-sdk-transfer-safeguards 7.1）。
+// verify_large_file.go — SDK 大文件真链路一次性人工验收。
 //
 // 用途：wechat-robot-go 的 CDN 下载/上传路径对大文件（数十 MB）未经实际验证，
 // 该风险无法用 mock 覆盖。本脚本复用 .weixin-token.json 登录态做真链路验收：
 //
-//  1. 运行: go run scripts/verify_large_file.go   （在 examples/wechat-bot 目录下）
+//  1. 运行: go run scripts/verify_large_file.go （在 examples/wechat-bot 目录下）
 //  2. 用微信向 bot 发送一个大文件（建议 ~40MB）
 //  3. 脚本先用新流式 API（DownloadFileFromItemTo）落盘，再用旧 []byte API 下载，
-//     对比两者的耗时与内存增量（验证流式路径内存峰值显著低于全量路径）
+//
+// 对比两者的耗时与内存增量（验证流式路径内存峰值显著低于全量路径）
 //  4. 校验字节数 + md5（与 FileItem 元数据比对）
 //  5. 反向 SendFileFromPath 回传同一文件，验证出站链路
-//  6. 实测结果记录到 openspec/changes/add-sdk-transfer-safeguards/design.md
 //
 // 本脚本不进入常规构建（go:build ignore）与 CI，仅作上线前验收与 SDK 升级回归。
 package main
@@ -71,7 +71,6 @@ func main() {
 		fmt.Printf("\n收到文件: %s (声明大小 %s 字节, DeclaredSize=%d, 声明 md5 %s)\n",
 			file.FileName, file.Length, file.DeclaredSize(), file.MD5)
 
-		// ---- 新流式 API：边下边解密边写盘 + MaxSize 防线 ----
 		path := filepath.Join(outDir, filepath.Base(file.FileName))
 		f, err := os.Create(path)
 		if err != nil {
@@ -105,7 +104,6 @@ func main() {
 			float64(m1.TotalAlloc-m0.TotalAlloc)/1024/1024, float64(m1.HeapInuse)/1024/1024)
 		fmt.Printf("  落盘: %s\n", path)
 
-		// ---- 旧 []byte API：全量载入内存，对照组 ----
 		m2 := memSnapshot()
 		start = time.Now()
 		data, err := bot.DownloadFileFromItem(ctx, file, cdn)

@@ -20,7 +20,7 @@ const toolOutputCapChars = 60_000
 // outputCapForMaxTokens derives an OutputLimitTool's max-chars from a
 // construction-time MaxTokens budget (A6 ratio MaxTokens/2*4, floored/capped to
 // toolOutputCapChars). It is called ONLY when agent.New wraps tools — never from
-// the hot-reload path (§2.4/D4 M-3): the output cap is a construction-derived
+// the hot-reload path: the output cap is a construction-derived
 // boundary, intentionally NOT one of the five independent hot axes, so a
 // hot `max_tokens` change must NOT silently resize an already-published tool's
 // cap (that would re-introduce the "fold every number into the hot face /
@@ -67,13 +67,13 @@ func (t *OutputLimitTool) Declaration() *trpctool.Declaration {
 }
 
 // Unwrap exposes the wrapped tool so a caller that must identify a specific
-// inner tool can see through this transparent pass-through layer. agent.New
+// inner tool can see through this transparent pass-through layer. Construction
 // wraps EVERY tool — including sub-agent delegation wrappers — in an
 // OutputLimitTool, so a published execution face holds
 // OutputLimitTool(*AgentToolWrapper), never the bare wrapper. Because
 // OutputLimitTool preserves the inner declaration unchanged, peeling it never
-// changes which target a name resolves to (introduce-durable-workflow-engine
-// §4.2: resolving a relaunch target against the effective face).
+// changes which target a name resolves to.
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func (t *OutputLimitTool) Unwrap() trpctool.Tool {
 	return t.inner
 }
@@ -94,7 +94,6 @@ func (t *OutputLimitTool) Call(ctx context.Context, jsonArgs []byte) (any, error
 		return nil, nil
 	}
 
-	// Serialize result to check size.
 	data, marshalErr := json.Marshal(result)
 	if marshalErr != nil {
 		return result, nil
@@ -104,7 +103,6 @@ func (t *OutputLimitTool) Call(ctx context.Context, jsonArgs []byte) (any, error
 		return result, nil
 	}
 
-	// Output exceeds limit: save full output to file, return summary.
 	outputFile := t.saveToFile(data)
 
 	log.Infof("[OutputLimit] output %d chars > %d limit, saved to %s",

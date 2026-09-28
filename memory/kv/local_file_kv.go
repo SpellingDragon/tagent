@@ -36,8 +36,9 @@ type LocalFileKV struct {
 	mu       sync.Mutex
 	data     map[string]string
 	snapPath string
-	dirty    bool // unsynced changes pending
-	closed   bool
+	// dirty unsynced changes pending
+	dirty  bool
+	closed bool
 }
 
 // LocalFileKVOption is retained purely for call-site compatibility (wiring
@@ -64,7 +65,6 @@ func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, er
 	for _, opt := range opts {
 		opt(kv)
 	}
-	// Clean up a leftover tmp from a process killed mid-rename.
 	if err := os.Remove(kv.snapPath + ".tmp"); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("cleanup kv tmp file: %w", err)
 	}

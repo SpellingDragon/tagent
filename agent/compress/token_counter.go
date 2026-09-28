@@ -15,13 +15,14 @@ type DefaultTokenCounter struct {
 	CharsPerToken float64
 }
 
+// NewDefaultTokenCounter 构造默认计量器，字符/token 比值取 2.0（中英混排的保守近似）。
 func NewDefaultTokenCounter() *DefaultTokenCounter {
 	return &DefaultTokenCounter{CharsPerToken: 2.0}
 }
 
+// Estimate 按"字符数/比值 ＋ 每条固定开销"累加估算 token 用量。空消息集返回 0，**不计**任何
+// 每条开销——否则空集合会被估出正成本，压缩判定会误以为还有内容要处理。
 func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
-	// An empty set costs nothing — without this, every L3-compacted segment
-	// would carry a spurious +1 token in budget escalation.
 	if len(messages) == 0 {
 		return 0
 	}
@@ -40,8 +41,6 @@ func (c *DefaultTokenCounter) Estimate(messages []model.Message) int {
 	return total
 }
 
-// ---------------------------------------------------------------------------
-
 // truncateString truncates s to at most n characters, appending "..." if truncated.
 func truncateString(s string, n int) string {
 	if len(s) <= n {
@@ -50,18 +49,17 @@ func truncateString(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// ---------------------------------------------------------------------------
-
 // EventTypeToRole maps an event type to its pairing-free timeline role
-// (unified-event-projection D3):
+// :
 //
 //	external_input → user
-//	agent_output   → assistant
+//	agent_output → assistant
 //	action_command → user (tool results are input events, never role=tool)
 //	thinking_plan  → assistant
-//	(default)      → user (safe degradation)
+//	(default) → user (safe degradation)
+//
+// 角色映射的唯一权威源是 event 包的注册表，本函数只委托。
 func EventTypeToRole(eventType string) model.Role {
-	// 委托事件类型注册表（唯一权威源）。未知类型回退 RoleUser（安全降级）。
 	return tagentevent.EventTypeRole(eventType)
 }
 

@@ -2,46 +2,45 @@ package engine
 
 import "github.com/SpellingDragon/tagent/memory"
 
-// ==================== 维度锚定诊断（T-D · 记忆健康度）====================
-//
-// 借鉴 MemoHarness「维度锚定诊断」：记忆健康度按维度度量（向量索引健康、召回能力、
-// 巩固收据完整性、存储规模），可查询（memory_health 工具 / 可观测投影）。
-//
-// 设计：读引擎 + store 的**实时状态**（非平行计数器，避免与真实状态分叉）——引擎的
-// Stats（indexed/dropped/embedErr/vectorCount/dimMismatch）+ Capabilities + store 的
-// GetStats。派生健康率供 LLM/运维判断记忆子系统是否退化。
-
 // DiagnosticsSnapshot 是记忆健康度的维度快照（JSON 可序列化，供工具/可观测消费）。
 type DiagnosticsSnapshot struct {
-	// 向量索引维度
-	VectorIndexed     int64 `json:"vector_indexed"`      // 成功索引的向量数
-	VectorCount       int64 `json:"vector_count"`        // 当前索引中的向量数
-	VectorDropped     int64 `json:"vector_dropped"`      // 队列满/API 失败丢弃数
-	VectorEmbedErr    int64 `json:"vector_embed_err"`    // 嵌入错误数
-	VectorDimMismatch int64 `json:"vector_dim_mismatch"` // 维度不匹配跳过数（换模型信号）
+	// VectorIndexed 向量索引维度
+	// 成功索引的向量数
+	VectorIndexed int64 `json:"vector_indexed"`
+	// VectorCount 当前索引中的向量数
+	VectorCount int64 `json:"vector_count"`
+	// VectorDropped 队列满/API 失败丢弃数
+	VectorDropped int64 `json:"vector_dropped"`
+	// VectorEmbedErr 嵌入错误数
+	VectorEmbedErr int64 `json:"vector_embed_err"`
+	// VectorDimMismatch 维度不匹配跳过数（换模型信号）
+	VectorDimMismatch int64 `json:"vector_dim_mismatch"`
 
-	// 检索能力维度
+	// CapKeyword 检索能力维度
 	CapKeyword  bool `json:"cap_keyword"`
 	CapVector   bool `json:"cap_vector"`
 	CapHybrid   bool `json:"cap_hybrid"`
 	EngineReady bool `json:"engine_ready"`
 
-	// 存储规模维度
+	// TotalEvents 存储规模维度
 	TotalEvents int    `json:"total_events"`
 	StorageSize int64  `json:"storage_size"`
 	DataDir     string `json:"data_dir,omitempty"`
-	// WALQuarantined（§8.11⑤）：LocalFileKV 启动重放隔离的中间坏行数（F3 可观测
+	// WALQuarantined：LocalFileKV 启动重放隔离的中间坏行数（F3 可观测
 	// 闭环——此前 WalQuarantined 仅定义无消费方）。0 = 无隔离。
 	WALQuarantined int64 `json:"wal_quarantined,omitempty"`
 
-	// 派生健康率
-	IndexHealth float64 `json:"index_health"` // indexed / (indexed + dropped + embedErr)，1.0 = 无丢失
+	// IndexHealth 派生健康率
+	// indexed / (indexed + dropped + embedErr)，1.0 = 无丢失
+	IndexHealth float64 `json:"index_health"`
 }
 
 // MemoryDiagnostics 维度锚定记忆诊断器（读引擎 + store 实时态）。
 type MemoryDiagnostics struct {
-	engine memory.MemoryEngine // 可选（nil = 无向量维度）
-	store  memory.MemoryStore  // 可选（nil = 无存储维度）
+	// engine 可选（nil = 无向量维度）
+	engine memory.MemoryEngine
+	// store 可选（nil = 无存储维度）
+	store memory.MemoryStore
 }
 
 // NewMemoryDiagnostics 构建诊断器。engine/store 可为 nil（对应维度省略）。
@@ -61,8 +60,6 @@ func (d *MemoryDiagnostics) Snapshot() DiagnosticsSnapshot {
 		snap.CapVector = caps.Vector
 		snap.CapHybrid = caps.Hybrid
 		snap.EngineReady = d.engine.Ready()
-		// 引擎若实现 StatsProvider（具名可选契约，S4），一次断言读全部向量维度指标——
-		// 替代此前两处匿名接口断言（4返回值 Stats + 单独 DimMismatch），签名漂移现为编译错误。
 		if st, ok := d.engine.(StatsProvider); ok {
 			s := st.Stats()
 			snap.VectorIndexed = s.Indexed
@@ -78,7 +75,6 @@ func (d *MemoryDiagnostics) Snapshot() DiagnosticsSnapshot {
 		snap.TotalEvents = st.TotalEvents
 		snap.StorageSize = st.StorageSize
 		snap.DataDir = st.DataDir
-		// §8.11⑤：store 底层（经装饰链）若暴露 WAL quarantine 计数则采集。
 		if q, ok := d.store.(interface{ WalQuarantined() int64 }); ok {
 			snap.WALQuarantined = q.WalQuarantined()
 		}

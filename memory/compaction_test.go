@@ -5,10 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/SpellingDragon/tagent/event"
 )
 
 // newTestCompactor creates a Compactor with a mock KV store for testing.
@@ -24,11 +23,9 @@ func newTestCompactor(t *testing.T) (*FileSegmentStore, *Compactor) {
 func TestCompactor_StartStop(t *testing.T) {
 	_, compactor := newTestCompactor(t)
 
-	// Start and immediately stop
 	compactor.Start()
 	compactor.Stop()
 
-	// Should be able to start again
 	compactor.Start()
 	compactor.Stop()
 }
@@ -36,8 +33,7 @@ func TestCompactor_StartStop(t *testing.T) {
 func TestCompactor_SealCurrent(t *testing.T) {
 	store, _ := newTestCompactor(t)
 
-	// Store events in current window
-	ts := int64(1710678000000) // 2024-03-17 07:00:00 UTC
+	ts := int64(1710678000000)
 	for i := 0; i < 3; i++ {
 		key := NewSnowflakeEventKey(1, ts+int64(i)*1000)
 		err := store.StoreEvent(key, FullEvent{
@@ -49,11 +45,9 @@ func TestCompactor_SealCurrent(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Seal the current segment
 	err := store.SealCurrent(1)
 	require.NoError(t, err)
 
-	// Verify segment meta exists
 	windowTS := WindowTimestamp(TimestampFromEventKey(NewSnowflakeEventKey(1, ts)), DefaultWindowSize)
 	meta, err := store.GetSegmentMeta(1, windowTS)
 	require.NoError(t, err)
@@ -64,8 +58,7 @@ func TestCompactor_SealCurrent(t *testing.T) {
 func TestCompactor_L1ToL2(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 
-	// Store events in 3 different hourly windows
-	baseTS := int64(1710666000000) // 2024-03-17 05:00:00 UTC
+	baseTS := int64(1710666000000)
 	for hour := 0; hour < 3; hour++ {
 		hourTS := baseTS + int64(hour)*3600000
 		for i := 0; i < 2; i++ {
@@ -78,21 +71,17 @@ func TestCompactor_L1ToL2(t *testing.T) {
 			})
 			require.NoError(t, err)
 		}
-		// Seal each hour
 		err := store.SealCurrent(1)
 		require.NoError(t, err)
 	}
 
-	// List segments
 	windows, err := store.ListSegments(1)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(windows), 1)
 
-	// Run L1→L2 compaction on discovered windows
 	err = compactor.CompactL1ToL2(1, windows)
 	require.NoError(t, err)
 
-	// Verify L2 meta exists
 	l2WindowTS := computeDailyWindow(windows[0])
 	l2Meta, err := store.GetSegmentMeta(1, l2WindowTS)
 	require.NoError(t, err)
@@ -103,8 +92,7 @@ func TestCompactor_L1ToL2(t *testing.T) {
 func TestCompactor_L2ToL3(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 
-	// Store events for L2
-	baseTS := int64(1710604800000) // 2024-03-16 16:00:00 UTC (a daily boundary)
+	baseTS := int64(1710604800000)
 	key := NewSnowflakeEventKey(1, baseTS)
 	err := store.StoreEvent(key, FullEvent{
 		PartitionID:  1,
@@ -125,18 +113,15 @@ func TestCompactor_L2ToL3(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Seal
 	err = store.SealCurrent(1)
 	require.NoError(t, err)
 
 	windows, err := store.ListSegments(1)
 	require.NoError(t, err)
 
-	// First compact to L2
 	err = compactor.CompactL1ToL2(1, windows)
 	require.NoError(t, err)
 
-	// Now compact L2 to L3
 	l2Windows, err := store.ListSegments(1)
 	require.NoError(t, err)
 	// Filter to only L2 windows
@@ -152,7 +137,6 @@ func TestCompactor_L2ToL3(t *testing.T) {
 		err = compactor.CompactL2ToL3(1, l2Only)
 		require.NoError(t, err)
 
-		// Verify L3 has summarization for low-value events
 		l3WindowTS := computeWeeklyWindow(l2Only[0])
 		l3Meta, err := store.GetSegmentMeta(1, l3WindowTS)
 		if err == nil {
@@ -164,7 +148,6 @@ func TestCompactor_L2ToL3(t *testing.T) {
 func TestCompactor_DanglingRefRepair(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 
-	// Create a chain: key3 (child) → key2 (parent) → key1 (grandparent)
 	baseTS := int64(1710678000000)
 	key1 := NewSnowflakeEventKey(1, baseTS)
 	key2 := NewSnowflakeEventKey(1, baseTS+1000)
@@ -174,33 +157,26 @@ func TestCompactor_DanglingRefRepair(t *testing.T) {
 	store.StoreEvent(key2, FullEvent{PartitionID: 1, EventType: "parent", Timestamp: baseTS + 1000})
 	store.StoreEvent(key3, FullEvent{PartitionID: 1, EventType: "child", Timestamp: baseTS + 2000})
 
-	// Set parent relationships
 	store.RelationStore().SetParent(key2, key1)
 	store.RelationStore().SetParent(key3, key2)
 
-	// Seal
 	store.SealCurrent(1)
 
-	// Get segments
 	windows, _ := store.ListSegments(1)
 
-	// Run L1→L2 compaction - should repair if any parent is missing
 	err := compactor.CompactL1ToL2(1, windows)
 	require.NoError(t, err)
 
-	// key3 should still have key2 as parent (both are alive)
 	parent, _ := store.RelationStore().GetParent(key3)
 	assert.Equal(t, key2, parent)
 }
 
 func TestCompactor_ComputeWindows(t *testing.T) {
-	// Test daily window computation
-	hourly := int64(1710676800) // 2024-03-17 07:00:00 UTC
+	hourly := int64(1710676800)
 	daily := computeDailyWindow(hourly)
 	expectedDaily := (hourly / 86400) * 86400
 	assert.Equal(t, expectedDaily, daily)
 
-	// Test weekly window computation
 	weekly := computeWeeklyWindow(daily)
 	expectedWeekly := (daily / 604800) * 604800
 	assert.Equal(t, expectedWeekly, weekly)
@@ -242,9 +218,9 @@ func TestCompactor_ZeroConfig(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, compactor.config.CheckInterval)
 }
 
-// TestCompaction_FinalizesTombstones: after compaction physically removes a
-// tombstoned event, its tombstone entry (memory+KV) and dangling idx key are
-// finalized — otherwise every deleted event leaks three traces forever.
+// TestCompaction_FinalizesTombstones 钉住 after compaction physically removes a
+//
+// 契约: docs/wiki/memory/memory-architecture.md#compaction-integrity
 func TestCompaction_FinalizesTombstones(t *testing.T) {
 	kv := newMockKV()
 	defer kv.Close()
@@ -253,7 +229,6 @@ func TestCompaction_FinalizesTombstones(t *testing.T) {
 	ts := NewTombstoneSet(rel, kv, 7)
 	c := NewCompactor(nil, kv, rel, ts, DefaultCompactionConfig())
 
-	// Two L1 events in one hourly window; tombstone the second.
 	window := WindowTimestamp(1704067200, DefaultWindowSize)
 	keyAlive := NewSnowflakeEventKey(7, 1704067200*1000)
 	keyDead := NewSnowflakeEventKey(7, 1704067201*1000)
@@ -288,14 +263,13 @@ func TestCompaction_FinalizesTombstones(t *testing.T) {
 	}
 }
 
-// TestCompaction_DayAlignedSourceSurvives (P1): when the earliest L1 source
-// window is day-aligned, computeDailyWindow(w0) == w0 — the L2 target prefix
-// IS a source prefix. Cleanup must skip it, or the freshly written L2 events
-// are deleted right after being written (silent data loss).
+// TestCompaction_DayAlignedSourceSurvives 钉住 when the earliest L1 source
+//
+// 契约: docs/wiki/memory/memory-architecture.md#compaction-integrity
 func TestCompaction_DayAlignedSourceSurvives(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 
-	dayAligned := (int64(1710666000) / 86400) * 86400 // exact day boundary
+	dayAligned := (int64(1710666000) / 86400) * 86400
 	var keys []int64
 	for i := 0; i < 2; i++ {
 		k := NewSnowflakeEventKey(1, (dayAligned+int64(i))*1000)
@@ -307,7 +281,6 @@ func TestCompaction_DayAlignedSourceSurvives(t *testing.T) {
 	}
 	require.NoError(t, store.SealCurrent(1))
 
-	// A second, later-day window so the compaction has more than the target.
 	require.NoError(t, store.StoreEvent(NewSnowflakeEventKey(1, (dayAligned+86400+3600)*1000), FullEvent{
 		PartitionID: 1, EventType: "test", EventSummary: "next day",
 		Timestamp: (dayAligned + 86400 + 3600) * 1000,
@@ -320,15 +293,15 @@ func TestCompaction_DayAlignedSourceSurvives(t *testing.T) {
 		"fixture must place the target ON a source window")
 	require.NoError(t, compactor.CompactL1ToL2(1, windows))
 
-	// The compacted events must still be retrievable (not deleted by cleanup).
 	for _, k := range keys {
 		_, err := store.GetEvent(k)
 		assert.NoError(t, err, "compacted event must survive the name collision")
 	}
 }
 
-// TestCompaction_SkipsUnsealedSegments (P2): an active (unsealed) segment is
-// still taking writes — it must never be merged as a compaction source.
+// TestCompaction_SkipsUnsealedSegments 钉住 an active (unsealed) segment is
+//
+// 契约: docs/wiki/memory/memory-architecture.md#compaction-integrity
 func TestCompaction_SkipsUnsealedSegments(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 
@@ -336,7 +309,6 @@ func TestCompaction_SkipsUnsealedSegments(t *testing.T) {
 		PartitionID: 1, EventType: "test", EventSummary: "active",
 		Timestamp: 1710666000000,
 	}))
-	// No seal: the window stays Sealed=false.
 
 	windows, err := store.ListSegments(1)
 	require.NoError(t, err)
@@ -345,8 +317,6 @@ func TestCompaction_SkipsUnsealedSegments(t *testing.T) {
 	evt, err := store.GetEvent(NewSnowflakeEventKey(1, 1710666000000))
 	_ = evt
 	_ = err
-	// (primary assertion is that the active segment was not deleted; the
-	// event must remain retrievable regardless of the compaction call)
 	windows2, _ := store.ListSegments(1)
 	assert.NotEmpty(t, windows2, "unsealed segment must not be compacted away")
 }

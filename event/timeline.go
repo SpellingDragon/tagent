@@ -5,14 +5,10 @@ import (
 	"strings"
 )
 
-// Timeline prefix contract: every rendered history line carries a
-// "[evt_<KEY>|<type>] " prefix (KEY in canonical hex). The WRITE side
-// (FormatEventPrefix) and READ side (ParseEventKeyAndType) live together in
-// this package — the contract has exactly one home, so producers (timeline
-// rendering) and consumers (compression, retained-ref scanning, tests) can
-// never drift apart.
-
-// FormatEventPrefix renders the canonical timeline prefix for an event.
+// FormatEventPrefix 渲染时间线行的规范前缀 `[evt_<KEY>|<type>] `，KEY 用十六进制。
+// 写入端与本文件的读取端 ParseEventKeyAndType 同处一包，渲染与解析不会各自演化。
+//
+// 契约: docs/wiki/event/event-architecture.md#timeline-prefix
 func FormatEventPrefix(key int64, eventType string) string {
 	return fmt.Sprintf("[evt_%s|%s]", FormatEventKey(key), eventType)
 }
@@ -30,12 +26,10 @@ func ParseEventKeyAndType(content string) (key int64, eventType string, remainde
 	if !strings.HasPrefix(content, prefix) {
 		return 0, "unknown", content
 	}
-	// Find the closing bracket
 	closePos := strings.IndexByte(content, ']')
 	if closePos < 0 {
 		return 0, "unknown", content
 	}
-	// Content between "[evt_" and "]" is "KEY|type"
 	inner := content[len(prefix):closePos]
 	barPos := strings.IndexByte(inner, '|')
 	if barPos < 0 {
@@ -47,7 +41,6 @@ func ParseEventKeyAndType(content string) (key int64, eventType string, remainde
 	if err != nil {
 		return 0, "unknown", content
 	}
-	// Remainder is everything after "] "
 	remainder = strings.TrimSpace(content[closePos+1:])
 	return k, eventType, remainder
 }

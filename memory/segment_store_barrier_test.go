@@ -10,21 +10,15 @@ import (
 	"github.com/SpellingDragon/tagent/memory/kv"
 )
 
-// TestStoreEventDurableWithoutClose proves the EVENT-LEVEL durability barrier
-// (resident-readiness-plan 2.1, delta spec event-segment-store「事件级成功不早
-// 于屏障」): a single StoreEvent below the WAL flush threshold must be readable
-// by a FRESH process even when the writer process terminates without Close.
+// TestStoreEventDurableWithoutClose 钉住 proves the EVENT-LEVEL durability barrier
 //
-// Child mode (env guard) writes one event and exits WITHOUT Close — the
-// deferred-flush window (50 writes / 2s) means the pre-barrier implementation
-// loses it; the parent then fails. With the StoreEvent barrier in place the
-// child's acknowledged write is on disk and the parent reads it back.
+// 契约: docs/wiki/memory/memory-architecture.md#tombstone
 func TestStoreEventDurableWithoutClose(t *testing.T) {
 	const marker = "barrier-durable-marker"
 
 	if os.Getenv("TAGENT_BARRIER_SUBPROC") == "1" {
 		dir := os.Getenv("TAGENT_BARRIER_DIR")
-		k, err := kv.NewLocalFileKV(dir) // durability is Sync() at the commit barrier (this backend has no fsync)
+		k, err := kv.NewLocalFileKV(dir)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "child: open kv:", err)
 			os.Exit(2)
@@ -49,8 +43,6 @@ func TestStoreEventDurableWithoutClose(t *testing.T) {
 			fmt.Fprintln(os.Stderr, "child: StoreEvent:", err)
 			os.Exit(3)
 		}
-		// Acknowledged → terminate WITHOUT Close. No flush-tick, no final
-		// flush: only a real barrier inside StoreEvent can persist this.
 		os.Exit(0)
 	}
 
@@ -64,8 +56,6 @@ func TestStoreEventDurableWithoutClose(t *testing.T) {
 		t.Fatalf("child did not acknowledge the write (err=%v): %s", err, out)
 	}
 
-	// Fresh store over the same directory: the acknowledged event must be
-	// readable with content AND index (GetEvent goes through the idx key).
 	k, err := kv.NewLocalFileKV(dir)
 	if err != nil {
 		t.Fatalf("reopen kv: %v", err)

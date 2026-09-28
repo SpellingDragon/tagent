@@ -1,6 +1,3 @@
-// Package event provides event type constants and summary utilities for tagent.
-// These are the unified event definitions that extend trpc-agent-go's event system
-// with trpcclaw's event classification philosophy.
 package event
 
 import (
@@ -11,101 +8,42 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// Event type constants.
-// All external inputs (user, API, system-injected) use TypeExternalInput.
-// This ensures consistent treatment: any role that is NOT agent_output/action_command
-// is classified as external_input. For content that exceeds context limits,
-// SmartCompress handles it through multiple compression rounds.
+// TypeExternalInput 事件类型常量。除 agent_output 与 action_command 外的一切角色都归为
+// external_input；超出上下文的内容由多轮压缩处理，不做截断。
 const (
-	// TypeExternalInput represents all external input events.
-	// Includes user messages, API calls, and system-injected messages (RoleSystem).
-	// All external inputs are treated uniformly as user role input.
 	TypeExternalInput = "external_input"
 
-	// TypeAgentOutput represents final agent output events.
-	// Used for Agent's final response to user.
 	TypeAgentOutput = "agent_output"
 
-	// TypeActionCommand represents action/command execution events.
-	// Used when Agent executes tools or commands.
 	TypeActionCommand = "action_command"
 
-	// TypeThinkingPlan indicates planning-related events.
 	TypeThinkingPlan = "thinking_plan"
 
-	// TypeThinkingRecall indicates memory recall events.
 	TypeThinkingRecall = "thinking_recall"
 
-	// TypeThinkingKnowledge indicates knowledge retrieval events.
 	TypeThinkingKnowledge = "thinking_knowledge"
 
-	// TypeContextCompressSummary represents curated segment-summary artifacts
-	// (L3 archive output). Long-term memory: exempt from TTL and eviction.
 	TypeContextCompressSummary = "context_compress_summary"
 
-	// TypeContextCompress represents context compression events.
-	// Used when Agent performs context window management.
 	TypeContextCompress = "context_compress"
 
-	// TypeToolChain represents a consolidated tool-run synthetic reference
-	// (tool-chain-consolidation D2): a run of aged complete tool pairs
-	// (thinking_plan + action_command) folded into one compact line. It is a
-	// synthetic projection ref (negative key, like the rolling summary) that
-	// renders as "- 工具链: name1→name2→…（N步）[evt_first→evt_last]" and carries
-	// a recall ticket. Distinct from context_compress so buildRetainedRefs does
-	// NOT absorb it into the rolling-summary count.
 	TypeToolChain = "tool_chain"
 
-	// TypeSettleFold represents a folded run of task-settle notification
-	// external_inputs (resident-remaining-hardening 1.3 / design D2): N
-	// consecutive `[task settled]` refs merged into ONE synthetic projection
-	// ref (negative key) whose EventSummary is a ticket card — a header line
-	// plus per-event `✗/✓ [evt_key] 摘要行` rows. Only the projection view is
-	// affected: the underlying settle events stay in the fact chain and are
-	// recallable by their per-row evt_key tickets.
 	TypeSettleFold = "settle_fold"
 
-	// TypeTaskSpawned records a task spawn into the fact chain for the
-	// registry rebuild (R2, resident-continuity-r2-r4): it carries the
-	// Declarative spec so RebuildTaskRegistry can reconstruct the active task
-	// set cross-restart. It is a fact-chain record ONLY — never a projection
-	// ref (the board renders live from the in-memory registry; projection
-	// rebuild/replay skip this type like compaction events). TTL aligned with
-	// external_input (30d): a service running past that without any settle is
-	// re-registered by the R3 session reattach + TaskID bridge instead.
 	TypeTaskSpawned = "task_spawned"
 
-	// TypeResidentSession records a resident/interactive tmux session's
-	// lifecycle (spawn with full params / terminal outcome) into the fact
-	// chain (R3, resident-continuity-r2-r4 2.5). Registry/audit record ONLY —
-	// never a projection ref (projection rebuild/replay skip it like
-	// task_spawned). TTL aligned with external_input (30d).
 	TypeResidentSession = "resident_session"
 
-	// TypeConsolidation 是证据门控巩固产物（T-D 记忆策展）：冥想蒸馏/经验总结的事件，
-	// 携带源事件 EventKey 收据列表 + 服务端 SHA1 指纹（存于 Metadata），可回放验证、
-	// 防 LLM 伪造。正 key 真实事件、TTL 豁免（长期记忆，同 context_compress_summary 待遇）。
-	// 经 EventTypeSpec 注册表一处注册即全链路生效（REG 收敛「改 10 处」的兑现）。
 	TypeConsolidation = "consolidation"
 
-	// TypeGovernance 是治理记录事件（T-G 常驻可靠性+治理）：否决/goal/批准/退化/审计
-	// 五类（Metadata.subtype 区分），正 key、TTL 永久（-1 豁免）、可查询可审计。
-	// 单类型 + subtype 而非五个类型（每加类型有注册成本，审计查询天然单类型过滤）。
 	TypeGovernance = "governance"
 
-	// TypeFeedback 是回执-反馈事件（D1 design-report-closeout）：用户反馈/任务成败/
-	// API 评分绑定到具体产出事件（经 RelationStore 因果边，零新索引）。正 key、
-	// Role=system、TTL 默认 30 天（治理数据，可配置）、可召回；subtype 经 Metadata
-	// 区分 user/task_settle/api。Content 为结构化 JSON（verdict/rating/note/source）。
 	TypeFeedback = "feedback"
 )
 
-// ExtractEventType determines the event type from a model.Message.
-// This is the canonical way to classify events by role.
-// Note: System prompt is NOT part of the event stream — it is injected by
-// InstructionProcessor at initialization and preserved through compression.
-// RoleSystem may appear in the event stream (e.g., TmuxMonitor state notifications)
-// and is classified as external_input.
+// ExtractEventType 按消息角色判定事件类型。RoleSystem 会出现在事件流中
+// （如常驻监控注入的状态通知）并归为 external_input；系统提示词本身不属于事件流。
 func ExtractEventType(msg model.Message) string {
 	switch msg.Role {
 	case model.RoleUser:
@@ -118,77 +56,54 @@ func ExtractEventType(msg model.Message) string {
 	case model.RoleTool:
 		return TypeActionCommand
 	case model.RoleSystem:
-		// RoleSystem appears in event stream via TmuxMonitor injections,
-		// classified as external_input. System prompt is separate (see above).
 		return TypeExternalInput
 	default:
 		return TypeExternalInput
 	}
 }
 
-// IsSpecialEventType checks if an event type should use original content as summary.
-// Special events (external_input, agent_output, thinking_plan) contain the full original content.
-// Most events (action_command, context_compress) only contain a summary.
+// IsSpecialEventType 报告该类型是否原文优先。集合由事件类型注册表定义。
 func IsSpecialEventType(eventType string) bool {
-	// 委托事件类型注册表（唯一权威源）：Special = external_input/agent_output/thinking_plan。
 	return specOrDefault(eventType).Special
 }
 
-// EventSummaryOptions configures how to generate event summary.
-// IMPORTANT: Content truncation is STRICTLY PROHIBITED. Content exceeding context
-// limits must be handled through multiple SmartCompress rounds, not truncation.
-// Any non-design information loss (e.g., truncation) corrupts compression quality.
+// EventSummaryOptions 配置 event_summary 视图的呈现形态。
+// 内容截断被严格禁止：超量内容交由多轮压缩处理，任何非设计的信息折损都会污染压缩质量。
 type EventSummaryOptions struct {
-	// StructuredFormat enables multi-line format (true) or single-line (false)
 	StructuredFormat bool
 }
 
-// DefaultOptionsForLLMContext is optimized for LLM context (frequent calls).
-// No truncation - EventSummary must be complete.
+// DefaultOptionsForLLMContext 面向 LLM 上下文：单行以省 token，不截断。
 func DefaultOptionsForLLMContext() EventSummaryOptions {
 	return EventSummaryOptions{
-		StructuredFormat: false, // Single-line to save tokens
+		StructuredFormat: false,
 	}
 }
 
-// DefaultOptionsForCompression is optimized for SmartCompress (infrequent calls).
-// No truncation - preserve all information for compression.
+// DefaultOptionsForCompression 面向压缩：多行以保信息完整，不截断。
 func DefaultOptionsForCompression() EventSummaryOptions {
 	return EventSummaryOptions{
-		StructuredFormat: true, // Multi-line for clarity
+		StructuredFormat: true,
 	}
 }
 
-// GenerateEventSummary generates the `event_summary` metadata view for an
-// event. NOTE: despite the historical name, this is NOT content
-// summarization — it is a verbatim-content view (original content for most
-// types, a mechanical tool-call line for action_command). Content-level
-// summarization lives in the compression/curation pipeline.
-// IMPORTANT: No truncation - content exceeding context is handled by SmartCompress.
+// GenerateEventSummary 生成事件的 event_summary 元数据视图：多数类型是原文逐字视图，
+// action_command 是一行机械工具调用行。内容级摘要属压缩与策展管线，不在此处。
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string {
 	spec := specOrDefault(eventType)
-	// Pure tool-call thinking_plan (empty prose, has tool calls): summarize as
-	// "调用 <names>" so aged rendering carries the tool names instead of an
-	// empty-summary placeholder, and tool-chain consolidation can read the
-	// names from EventSummary without refetching full content
-	// (tool-chain-consolidation D1).
 	if eventType == TypeThinkingPlan && msg.Content == "" && len(msg.ToolCalls) > 0 {
 		return formatToolNames(msg.ToolCalls)
 	}
-	// Special events: Summary = Original content (no truncation, no prefix).
 	if spec.Special {
 		return msg.Content
 	}
-	// Tool-line types (action_command): mechanical tool-call summary (registry-driven).
 	if spec.ToolLineSummary {
 		return formatToolCallSummary(msg, opts)
 	}
-	// Default: original content (verbatim view).
 	return msg.Content
 }
 
-// FormatEventDescription formats a complete event description for SmartCompress.
-// This generates structured multi-line text preserving all information.
+// FormatEventDescription 为压缩生成保留全部信息的结构化多行描述。
 func FormatEventDescription(index int, msg model.Message) string {
 	var desc strings.Builder
 	desc.WriteString(fmt.Sprintf("[%d] %s", index, msg.Role))
@@ -208,15 +123,12 @@ func FormatEventDescription(index int, msg model.Message) string {
 	return desc.String()
 }
 
-// EstimateTokens estimates the number of tokens in text.
-// Simple heuristic: ~3 characters per token.
+// EstimateTokens 以约 3 字符一 token 估算文本 token 数。
 func EstimateTokens(text string) int {
 	return len([]rune(text)) / 3
 }
 
-// formatToolNames summarizes a set of tool calls as "调用 name1、name2"
-// (names only, no args) — the compact "what tools were called" view used for
-// aged pure-tool-call thinking_plans and tool-chain consolidation.
+// formatToolNames 返回「调用 名1、名2」形式的工具名视图（只含名字，不含参数）。
 func formatToolNames(toolCalls []model.ToolCall) string {
 	names := make([]string, 0, len(toolCalls))
 	for _, tc := range toolCalls {
@@ -229,7 +141,7 @@ func formatToolNames(toolCalls []model.ToolCall) string {
 	return "调用 " + strings.Join(names, "、")
 }
 
-// formatToolCallSummary generates a tool call summary.
+// formatToolCallSummary 生成工具调用行摘要。
 func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
 	if len(msg.ToolCalls) == 0 {
 		if msg.Role == model.RoleTool {
@@ -247,32 +159,21 @@ func formatToolCallSummary(msg model.Message, opts EventSummaryOptions) string {
 	return fmt.Sprintf("调用工具: %s(%s)", toolName, args)
 }
 
-// summarizeToolResult generates a readable text summary from a tool result.
-// If the content is valid JSON, it extracts key fields (type, title, status,
-// session_id, count, results) to produce a concise human-readable summary.
-// If the content is not JSON, it returns the original text.
-//
-// This prevents large JSON tool results from being stored verbatim as
-// EventSummary, which causes nested JSON escaping when recall serializes
-// summaries into its response.
+// summarizeToolResult 为工具结果生成可读摘要：JSON 结果提取关键字段，非 JSON 原样返回。
 func summarizeToolResult(content string) string {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return ""
 	}
 
-	// Try to parse as JSON
 	var raw any
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		// Not JSON — return as-is (plain text result)
 		return content
 	}
 
-	// Extract key fields for a readable summary
 	var summaryParts []string
 
 	if m, ok := raw.(map[string]any); ok {
-		// Common fields in tool results
 		if v, ok := m["status"].(string); ok {
 			summaryParts = append(summaryParts, fmt.Sprintf("status=%s", v))
 		}
@@ -289,7 +190,6 @@ func summarizeToolResult(content string) string {
 			summaryParts = append(summaryParts, fmt.Sprintf("error=%s", v))
 		}
 
-		// Extract titles from results array (knowledge/recall tools)
 		if results, ok := m["results"].([]any); ok && len(results) > 0 {
 			var titles []string
 			for i, r := range results {
@@ -310,7 +210,6 @@ func summarizeToolResult(content string) string {
 			}
 		}
 
-		// Extract event count from recall results
 		if events, ok := m["events"].([]any); ok && len(events) > 0 {
 			summaryParts = append(summaryParts, fmt.Sprintf("events=%d", len(events)))
 		}
@@ -320,6 +219,5 @@ func summarizeToolResult(content string) string {
 		return strings.Join(summaryParts, "; ")
 	}
 
-	// JSON but no known fields — return type info
 	return fmt.Sprintf("[JSON object, %d chars]", len(content))
 }

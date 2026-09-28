@@ -16,14 +16,25 @@ import (
 type TaskStatus string
 
 const (
-	TaskRunning       TaskStatus = "running"        // in flight, no settle yet
-	TaskStable        TaskStatus = "stable"         // output stable, process alive (usable, maybe waiting)
-	TaskAliveDetached TaskStatus = "alive_detached" // service-type: settled once, still alive (Phase 2)
-	TaskCompleted     TaskStatus = "completed"      // finished successfully
-	TaskFailed        TaskStatus = "failed"         // finished with error
-	TaskSuspect       TaskStatus = "suspect"        // quiet too long — likely hung
-	TaskDead          TaskStatus = "dead"           // abandoned; spec retained for relaunch
-	TaskCancelled     TaskStatus = "cancelled"      // explicitly cancelled
+	// TaskRunning 表示工作仍在产出：前台可继续等待，回收只看探活不看年龄。
+	TaskRunning TaskStatus = "running"
+	// TaskStable 是一次"输出稳定"观测对应的状态。已脱离前台的任务不回退到此态。
+	TaskStable TaskStatus = "stable"
+	// TaskAliveDetached 表示已脱离前台等待但仍存活：结算与可疑信号在此后
+	// 被抑制，避免面板反复摆动与回收刷屏。
+	TaskAliveDetached TaskStatus = "alive_detached"
+	// TaskCompleted 是正常结束的终态（结算信号不带错误）。
+	TaskCompleted TaskStatus = "completed"
+	// TaskFailed 是异常结束的终态（结算信号带错误，或进程死亡）。
+	TaskFailed TaskStatus = "failed"
+	// TaskSuspect 表示静默超过可疑阈值：可能还活着，但久无输出。面板此时
+	// 展示统一回收器算出的剩余寿命，由模型判断继续等还是再派。
+	TaskSuspect TaskStatus = "suspect"
+	// TaskDead 属于终态集合。当前生产路径只在终态判定与冥想摘要里读取它，
+	// 没有写入点——保留意味着 "dead" 这个取值仍可能出现在外部数据里。
+	TaskDead TaskStatus = "dead"
+	// TaskCancelled 是被显式取消后的终态。
+	TaskCancelled TaskStatus = "cancelled"
 )
 
 // defaultZombieGrace is the minimum age a running/suspect task must reach
@@ -32,7 +43,7 @@ const (
 // windows and legitimately quiet long-runners.
 const defaultZombieGrace = 10 * time.Minute
 
-// defaultOrphanGrace bounds the reincarnation-orphan adjudication (§7):
+// defaultOrphanGrace bounds the reincarnation-orphan adjudication:
 // conservative enough to never kill a quiet but young this-life subagent,
 // large enough that restored multi-hour suspects (the actual target) qualify
 // immediately at rebuild.
@@ -43,14 +54,22 @@ const defaultOrphanGrace = 30 * time.Minute
 type SettleKind string
 
 const (
-	SettleCompleted SettleKind = "completed" // runnable exited — definitely done
-	SettleStable    SettleKind = "stable"    // output stable, still alive — usable but maybe waiting
-	SettleSuspect   SettleKind = "suspect"   // quiet beyond fake-dead threshold — likely hung
-	SettleWatch     SettleKind = "watch"     // output matched a watch pattern (C1); informational, no state change
-	SettleFailed    SettleKind = "failed"    // reconcile-retired: backing session provably gone (zombie sweep)
+	// SettleCompleted 表示一次工作正常结束；若同时带有错误，按失败处理。
+	SettleCompleted SettleKind = "completed"
+	// SettleStable 是"输出稳定"观测：在任务尚未脱离前台时把它置为 stable，
+	// 已脱离则抑制外发，避免面板反复摆动。
+	SettleStable SettleKind = "stable"
+	// SettleSuspect 是"静默到可疑阈值"观测：任务可能还活着，面板改展示剩余寿命
+	// 交给模型判断；已脱离前台时同样抑制。
+	SettleSuspect SettleKind = "suspect"
+	// SettleWatch 只作观察通知：不改变任务状态，仅把信号交给结算回调与事件总线。
+	SettleWatch SettleKind = "watch"
+	// SettleFailed 是失败结算：由僵尸/孤儿回收或携带错误的路径驱动；finalize 会把
+	// 带错误的完成信号规范化为它，且只结算一次。
+	SettleFailed SettleKind = "failed"
 )
 
-// Task lifecycle classes (hardening-review-batch2 2.4): jobs are one-round
+// LifetimeJob Task lifecycle classes: jobs are one-round
 // work units subject to stale observation and an optional deadline; services
 // are long-lived by design and are never age-terminated.
 const (
@@ -77,15 +96,15 @@ func LifetimeOf(spec TaskSpec) string {
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
 type SettleSignal struct {
 	Kind   SettleKind
-	Output string // captured result/output at settle time
-	Err    error  // non-nil when the task failed
+	Output string
+	Err    error
 }
 
 // SettleDetector observes a running task and emits SettleSignals. Different task
 // types provide different detectors:
-//   - tmux command → wraps TmuxMonitor (stable/completed/suspect)  [Phase 1]
-//   - sub-agent    → RunFlow returns                               [Phase 3]
-//   - generic      → goroutine returns                             [Phase 0]
+// - tmux command → wraps TmuxMonitor (stable/completed/suspect)  [Phase 1]
+// - sub-agent → RunFlow returns [Phase 3]
+// - generic → goroutine returns [Phase 0]
 //
 // Settled() MUST be closed when the detector will emit no further signals.
 type SettleDetector interface {
@@ -99,7 +118,7 @@ type SettleDetector interface {
 	// Cancel stops the underlying work.
 	Cancel()
 	// Stopped returns a channel closed once the detector's underlying producer has
-	// RETURNED — not merely been notified to cancel. §4.1 (design D6) requires it of
+	// RETURNED — not merely been notified to cancel.  requires it of
 	// every path that adopts no task (spawn rejected, dedup hit): the caller may
 	// only let go of the execution reference it derived for that work after the
 	// producer actually stopped, because Cancel is a signal, not a credential.
@@ -135,18 +154,18 @@ func DetachAfter(d time.Duration, stop <-chan struct{}) <-chan struct{} {
 // carry and what RebuildTaskRegistry replays (registry = fold of the fact
 // chain, resident-continuity-r2-r4 D1).
 type Declarative struct {
-	Kind    string `json:"kind"`              // "command" | "subagent" | "generic"
-	Desc    string `json:"desc"`              // board/logs
-	Key     string `json:"key,omitempty"`     // idempotency key
-	Command string `json:"command,omitempty"` // command Kind: original command line
-	// subagent Kind relaunch inputs (re-dispatch through the resident agents
+	Kind    string `json:"kind"`
+	Desc    string `json:"desc"`
+	Key     string `json:"key,omitempty"`
+	Command string `json:"command,omitempty"`
+	// AgentName subagent Kind relaunch inputs (re-dispatch through the resident agents
 	// map). Resume is NOT rebuildable for subagent (rounds has no event source
 	// — the factory returns a relaunch-guidance error, D1.2 promise table).
 	AgentName   string            `json:"agent_name,omitempty"`
 	MessageBody string            `json:"message_body,omitempty"`
 	EventKeys   []int64           `json:"event_keys,omitempty"`
-	Origin      map[string]string `json:"origin,omitempty"`  // routing baggage (courier)
-	TaskID      string            `json:"task_id,omitempty"` // tmux session binding (R3 bridge)
+	Origin      map[string]string `json:"origin,omitempty"`
+	TaskID      string            `json:"task_id,omitempty"`
 	// Lifetime declares the job/service lifecycle class (hardening-review-
 	// batch2 2.4): job tasks are subject to the stale-after observation and
 	// an optional job deadline; service tasks are never age-terminated.
@@ -161,13 +180,13 @@ type Declarative struct {
 	// Watch/Probe/ProbeIntervalSec/ProbeFailures/QuietTimeout/Timeout — encoded
 	// as strings; session-op fields excluded; conversion lives in tool/action).
 	Params         map[string]string `json:"params,omitempty"`
-	StartedAtMilli int64             `json:"started_at_ms"` // board age + zombie grace reseed
+	StartedAtMilli int64             `json:"started_at_ms"`
 }
 
 // TaskSpec captures enough to describe and (re)launch a task.
 type TaskSpec struct {
-	Kind string // "command" | "subagent" | "generic"
-	Desc string // human-readable (board + logs)
+	Kind string
+	Desc string
 	// Protected marks a durability/repair-class task (self-telemetry-audit
 	// exemption whitelist): the AUDIT freeze gate passes it through, while the
 	// global disk gate still applies. Set at construction by the owning
@@ -182,7 +201,7 @@ type TaskSpec struct {
 	// relaunch(id)). For command tasks it re-runs the original command in a
 	// fresh session. Nil → the task is not relaunchable.
 	//
-	// It receives the INITIATING call's context (§4.2): a re-entry riding a live
+	// It receives the INITIATING call's context: a re-entry riding a live
 	// business turn resolves its delegation target on THAT turn's orchestration
 	// generation, while a re-entry with no initiating call (console/WAL/ops) gets
 	// the effective one. The task layer itself never interprets the context — it
@@ -209,23 +228,19 @@ type TaskSpec struct {
 	// interprets it (courier, not router). Nil for tasks with no origin.
 	Origin map[string]string
 
-	// Lifetime declares the job/service class (hardening-review-batch2 2.4).
+	// Lifetime declares the job/service class.
 	// Empty → inferred from Kind (command/subagent → job, generic → service).
 	Lifetime string
 
-	// Declarative is the serializable projection of this spec for the fact-chain
-	// task_spawned record and cross-restart rebuild (R2). Optional at spawn
-	// time: callers may set only closures (legacy path); when set, Spawn
-	// persists it via OnSpawn so RebuildTaskRegistry can replay the task.
+	// Declarative 是本 spec 的可序列化投影，用于事实链的 task_spawned 记录与跨重启重建：
+	// 置位后 Spawn 经 OnSpawn 持久化它，使 RebuildTaskRegistry 能回放该任务。派生时可选——
+	// 调用方可以只提供闭包（不经事实链重建的那类用法）。
 	Declarative *Declarative
 
-	// TTL is the resolved ABSOLUTE lifetime for this task (async-task-lifetime
-	// 10.2). The unified reaper (§10.3) terminates the backing process and retires
-	// the task this long after its lifetime anchor — spawn time, refreshed by a
-	// reentrant send/resume (§10.4). It is set at spawn from the `ttl` arg or the
-	// configured default and is always > 0 (no task is unbounded). Zero means the
-	// caller left it unset (legacy/restore); the reaper then falls back to its own
-	// default rather than treating 0 as "no limit".
+	// TTL 是该任务解析后的绝对生命周期。统一的回收器在其生命周期锚点（派生时刻，重入发送/
+	// resume 会刷新）到期后终止底层进程并退役任务。它在派生时由 `ttl` 参数或配置默认值
+	// 设定，恒大于 0（不存在"不限量"的任务）。为 0 表示调用方未显式设置（例如恢复路径
+	// 未携带 TTL）；此时回收器退回自身默认值，而不是把 0 当成"不限量"。
 	TTL time.Duration
 }
 
@@ -242,12 +257,12 @@ type Task struct {
 	settledAt time.Time
 
 	detector      SettleDetector
-	firstSettle   chan SettleSignal // cap 1: carries the first settle into the sync-wait window
-	windowClosed  bool              // true once the sync-wait window ended (inline settle OR timeout)
-	aliveDetached bool              // true once a service task's first stable "ready" was emitted (D4)
-	detachedAt    time.Time         // when aliveDetached was set — stale/deadline observation anchor
-	ttlRenewedAt  time.Time         // last reentrant refresh of the TTL anchor (§10.4); zero = never
-	watchDone     chan struct{}     // closed to retire the current watch goroutine (resume re-arms it)
+	firstSettle   chan SettleSignal
+	windowClosed  bool
+	aliveDetached bool
+	detachedAt    time.Time
+	ttlRenewedAt  time.Time
+	watchDone     chan struct{}
 }
 
 // Status returns the task's current status (thread-safe snapshot).
@@ -281,7 +296,7 @@ func (t *Task) setDetachedAtMilli(ms int64) {
 func (t *Task) SetDetachedAtMilli(ms int64) { t.setDetachedAtMilli(ms) }
 
 // ttlAnchor returns the absolute-lifetime anchor for the unified reaper: the last
-// reentrant refresh (send/resume, §10.4) if any, else the immutable spawn time.
+// reentrant refresh if any, else the immutable spawn time.
 // Callers must hold t.mu while reading ttlRenewedAt (reconcileTTL does; StartedAt
 // is set once at spawn and never mutated afterwards).
 func (t *Task) ttlAnchor() time.Time {
@@ -304,7 +319,7 @@ func (t *Task) remainingLifetime(now time.Time, defaultTTL time.Duration) (time.
 		ttl = defaultTTL
 	}
 	if ttl <= 0 {
-		return 0, false // unbounded — only a test manager without a floor reaches here
+		return 0, false
 	}
 	anchor := t.ttlAnchor()
 	if anchor.IsZero() {
@@ -367,10 +382,10 @@ func (t *Task) isTerminalExpired(now time.Time, ttl time.Duration) bool {
 // SpawnResult is returned by Spawn.
 type SpawnResult struct {
 	Task    *Task
-	Settled bool         // true: settled within the sync-wait window (inline)
-	Signal  SettleSignal // valid when Settled
-	Deduped bool         // true: an equivalent active task already existed
-	Blocked string       // non-empty: spawn rejected (e.g. disk degraded, 5.4 design-report-closeout) — readable reason for the model
+	Settled bool
+	Signal  SettleSignal
+	Deduped bool
+	Blocked string
 }
 
 // TaskSpawner is the narrow interface tools (e.g. ActionTool) use to hand a
@@ -405,16 +420,18 @@ type TaskController interface {
 
 var _ TaskController = (*TaskManager)(nil)
 
-// originSpawner wraps a TaskController to stamp opaque origin baggage (the
+// OriginSpawner originSpawner wraps a TaskController to stamp opaque origin baggage (the
 // spawning turn's invocation metadata) onto each spawned task's spec — without
 // the task layer needing to know about routing. It embeds TaskController so the
 // full management surface (List/Get/Cancel/Relaunch) stays available to task
-// tools; only Spawn is augmented. (async-result-delivery.)
+// tools; only Spawn is augmented.
 type OriginSpawner struct {
 	TaskController
 	Origin map[string]string
 }
 
+// Spawn 在 spec 未自带 Origin 时，把本包装器携带的 origin 逐键复制一份填进去（复制而非共享：
+// 调用方随后改写自己的 map 不会串到任务上），再委托给内层控制器。
 func (o *OriginSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
 	if spec.Origin == nil && len(o.Origin) > 0 {
 		cp := make(map[string]string, len(o.Origin))
@@ -459,23 +476,21 @@ type TaskManagerConfig struct {
 	// May be nil.
 	OnSettle func(task *Task, sig SettleSignal)
 
-	// OnBatchRetire (resident-remaining-hardening 1.1): optional batch sink for
-	// reconcile/orphan retirements — per-task state transitions and record-only
-	// bookkeeping stay per-task, but the bus-side notification collapses to ONE
-	// summary event. Nil → legacy per-settle OnSettle behavior.
+	// OnBatchRetire 是可选的批量退役汇聚点：reconcile/孤儿退役走它——逐条的状态迁移与记账仍按
+	// 单任务进行，但 bus 侧通知折叠为一条汇总事件。未注册时按逐条 OnSettle 通知。
 	OnBatchRetire func(batch []BatchRetired)
-	// OnSpawn (R2, resident-continuity-r2-r4): invoked after a task registers
+	// OnSpawn: invoked after a task registers
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
 	OnSpawn func(task *Task)
-	// OnInlineSettle (R2): invoked when a task settles INSIDE its sync-wait
+	// OnInlineSettle : invoked when a task settles INSIDE its sync-wait
 	// window (inline). Historically inline settles emitted NO record — the
 	// result returns in-turn via the tool result — leaving fact-chain ghosts
 	// for the registry replay. This hook emits a minimal settle record
 	// (registry-only, never published to the bus — the LLM already saw the
 	// result inline). May be nil.
 	OnInlineSettle func(task *Task, sig SettleSignal)
-	// OnCancel (R2, review 终审🔴)：任务被 Cancel 置为 cancelled 终态后调用——
+	// OnCancel：任务被 Cancel 置为 cancelled 终态后调用——
 	// 写事实链 cancelled 终态记录。终审发现：Cancel 仅改内存态，回放折叠
 	// （spawned − 终态）下被取消的任务重启后以 suspect 复活（看板幽灵 +
 	// subagent 同 Key dedup 永久锁死）。May be nil。
@@ -485,7 +500,7 @@ type TaskManagerConfig struct {
 	// resources reclaimed. It bounds the resume_task re-entry window for
 	// terminal subagent tasks. Zero → defaultTerminalTTL.
 	TerminalTTL time.Duration
-	// SpawnGate (5.4, design-report-closeout): optional; returns a non-empty
+	// SpawnGate: optional; returns a non-empty
 	// readable reason to REJECT a new spawn (e.g. disk degraded). In-flight
 	// tasks are never gated — a gate, not a wall. May be nil.
 	SpawnGate func() string
@@ -506,14 +521,14 @@ type TaskManagerConfig struct {
 	// nil-probe subagents alike; tracked sessions and probe-carrying tasks
 	// are never touched. Zero -> defaultOrphanGrace.
 	OrphanGrace time.Duration
-	// DefaultTTL is the unified reaper's fallback absolute lifetime (§10.3) for
+	// DefaultTTL is the unified reaper's fallback absolute lifetime for
 	// tasks whose spec carries no explicit TTL — e.g. restored (previous-life) and
 	// subagent tasks. When >0, reconcileTTL terminates+retires any ACTIVE task
 	// (ALL states incl. suspect/undetached, ALL lifetime classes incl.
 	// resident/interactive) once `now - anchor >= DefaultTTL` (or the task's own
 	// spec.TTL when larger). When <=0 the manager-level reaper is OFF and only a
 	// per-task spec.TTL bounds its task — preserving the pre-TTL "no wall unless
-	// configured" behavior for callers not yet on TTL (§10.5 flips this always-on).
+	// configured" behavior for callers not yet on TTL.
 	DefaultTTL time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via
@@ -522,7 +537,7 @@ type TaskManagerConfig struct {
 	SessionTracker func(sessionID string) bool
 }
 
-// TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
+// defaultTerminalTTL TaskManager is a deterministic (non-LLM) registry + scheduler for async tasks.
 // The sync→async boundary is owned by each detector's detach signal (adaptive
 // poll schedule); TaskManager holds no sync_wait knob.
 // defaultTerminalTTL is the default grace period for retaining an exited task
@@ -535,34 +550,40 @@ const defaultTerminalTTL = 2 * time.Minute
 // (async-task-lifetime 10.5). The reaper is always on; there is no disable path.
 const defaultManagerTTL = 10 * time.Minute
 
+// TaskManager 是任务层的登记表与生命周期持有者：登记派生的任务、观察结算信号并驱动状态
+// 迁移、按统一 TTL 回收，同时实现 TaskController 供任务工具使用。
+//
+// 它持有回调而不是具体宿主：onSpawn/onSettle/onInlineSettle/onBatchRetire/onCancel 由
+// 接线方提供，把状态变化落到事实链与事件总线；spawnGate/auditGate 决定"能不能派"与
+// "派成什么"，因此委派策略留在宿主，任务层只管登记与回收。方法对 nil 接收者安全。
 type TaskManager struct {
 	mu               sync.Mutex
-	tasks            map[string]*Task // id → task
+	tasks            map[string]*Task
 	byKey            map[string]string
 	onSettle         func(task *Task, sig SettleSignal)
 	onBatchRetire    func(batch []BatchRetired)
-	batchCollect     *[]BatchRetired // set by retire loops; finalize appends instead of emitting
+	batchCollect     *[]BatchRetired
 	onSpawn          func(task *Task)
 	onInlineSettle   func(task *Task, sig SettleSignal)
 	onCancel         func(task *Task)
 	spawnGate        func() string
 	auditGate        func(spec TaskSpec) string
 	terminalTTL      time.Duration
-	now              func() time.Time // injectable clock (tests); defaults to time.Now
+	now              func() time.Time
 	zombieGrace      time.Duration
 	orphanGrace      time.Duration
-	defaultTTL       time.Duration // unified reaper fallback lifetime; floored to defaultManagerTTL, never 0
+	defaultTTL       time.Duration
 	isSessionTracked func(sessionID string) bool
-	// ttlSource is the §6.4 pull side for both manager-level TTL axes (design
-	// §4): installed by the composition root with the owner's committed-record
+	// ttlSource is the  pull side for both manager-level TTL axes (design
+	// ): installed by the composition root with the owner's committed-record
 	// view, so a rotation reaches the reaper at its NEXT sweep/board read instead
 	// of being pushed. nil → construction values only (standalone/direct-built
 	// managers keep working).
 	ttlSource atomic.Pointer[func() (terminal, defaultTTL time.Duration)]
 }
 
-// NewTaskManager creates a TaskManager.
-// SetTTLSource installs the §6.4 pull source for both manager-level TTL axes
+// SetTTLSource NewTaskManager creates a TaskManager.
+// SetTTLSource installs the  pull source for both manager-level TTL axes
 // (terminal grace / unified-reaper fallback) — the replacement for the retired
 // SetTerminalTTL/SetDefaultTTL pushes. The composition root injects the owner's
 // committed-record view, so a hot rotation reaches the reaper at its NEXT sweep
@@ -605,6 +626,9 @@ func (tm *TaskManager) effDefaultTTL() time.Duration {
 	return tm.defaultTTL
 }
 
+// NewTaskManager 按配置构造管理器：任何非正数的时长取值一律回落到本包命名的默认值（终态
+// 保留、僵尸宽限、孤儿宽限、默认 TTL）。0 在此是"未设置"而非"无限制"——若把它当作无限制，
+// 未配置的调用方会在无人察觉的情况下失去回收能力。
 func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	ttl := cfg.TerminalTTL
 	if ttl <= 0 {
@@ -618,8 +642,6 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 	if og <= 0 {
 		og = defaultOrphanGrace
 	}
-	// DefaultTTL is floored so the unified reaper is ALWAYS on (10.5): zero or a
-	// disable attempt → the manager default. No task class may opt out of age reclaim.
 	dttl := cfg.DefaultTTL
 	if dttl <= 0 {
 		dttl = defaultManagerTTL
@@ -644,44 +666,33 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 }
 
 // Spawn starts a task and blocks until the first of {settle, detach}.
-//   - Settle first  → SpawnResult{Settled: true, Signal} (inline).
-//   - Detach first  → SpawnResult{Settled: false} (ack; tracked in background).
-//   - Equivalent task active → SpawnResult{Deduped: true} (no new task).
+// - Settle first  → SpawnResult{Settled: true, Signal} (inline).
+// - Detach first  → SpawnResult{Settled: false} (ack; tracked in background).
+// - Equivalent task active → SpawnResult{Deduped: true} (no new task).
 //
 // Multiple concurrent Spawn calls each wait their own detector's window in
 // parallel (blocking ≈ the slowest, not the sum).
 func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
 	tm.pruneTerminal()
-	// Idempotent dedup: an active task with the same Key short-circuits.
-	// 8.6（review §8）：gate 在 dedup **之后**——同 Key 在飞任务命中 dedup 正常返回，
-	// 不被 gate 误报 Blocked（"进行中任务不受影响"承诺）。
 	tm.mu.Lock()
 	if spec.Key != "" {
 		if id, ok := tm.byKey[spec.Key]; ok {
 			if existing, ok := tm.tasks[id]; ok && existing.isActive() {
 				tm.mu.Unlock()
-				detector.Cancel() // never double-run
+				detector.Cancel()
 				return SpawnResult{Task: existing, Deduped: true}
 			}
 		}
 	}
-	// 5.4（design-report-closeout）：disk degraded 时拒绝新 spawn（闸不是墙——
-	// 进行中任务的 settle/轮询不受影响；nil gate = 不拒绝）。
-	// 8.1（review §8）：调用方在 Spawn 前已启动实际工作（tmux 会话/子 agent goroutine），
-	// gate 拒绝时 MUST detector.Cancel() 防孤儿会话/失控后台——Cancel 收敛在此单点，
-	// 调用方文案须如实告知"已执行但未纳入任务层管理"。
 	if tm.spawnGate != nil {
 		if reason := tm.spawnGate(); reason != "" {
 			tm.mu.Unlock()
 			if detector != nil {
-				detector.Cancel() // block adoption, not the work itself (already running)
+				detector.Cancel()
 			}
 			return SpawnResult{Blocked: reason}
 		}
 	}
-	// self-telemetry-audit: second gate source (per-spec — protected specs
-	// pass through it, unlike the global disk gate). Same block-adoption
-	// semantics: cancel the detector, in-flight work untouched.
 	if tm.auditGate != nil {
 		if reason := tm.auditGate(spec); reason != "" {
 			tm.mu.Unlock()
@@ -706,8 +717,6 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	}
 	tm.mu.Unlock()
 
-	// R2: best-effort fact-chain spawn record (never blocks the spawn path;
-	// the in-memory registry above is already authoritative for this process).
 	if tm.onSpawn != nil {
 		tm.onSpawn(task)
 	}
@@ -731,16 +740,13 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	}
 	select {
 	case sig := <-task.firstSettle:
-		tm.closeWindow(task, false) // settle closed the window; already consumed
-		// R2: inline settles emit a registry-only settle record (sixth-round
-		// fresh-eyes 🔴3: without it, the most common settle form leaves a
-		// spawned-without-settled ghost for the restart replay).
+		tm.closeWindow(task, false)
 		if tm.onInlineSettle != nil {
 			tm.onInlineSettle(task, sig)
 		}
 		return SpawnResult{Task: task, Settled: true, Signal: sig}
 	case <-detachCh:
-		tm.closeWindow(task, true) // detach closed the window; drain any boundary settle
+		tm.closeWindow(task, true)
 		return SpawnResult{Task: task, Settled: false}
 	}
 }
@@ -752,7 +758,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 // channel closes OR when the watch is retired (resume re-arms a fresh detector).
 func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan struct{}) {
 	if detector == nil {
-		return // nil detector: nothing to watch (pure-sync task settles via firstSettle)
+		return
 	}
 	for {
 		select {
@@ -762,10 +768,6 @@ func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan st
 			if !ok {
 				return
 			}
-			// hardening-review-batch2 1.7（fencing）：信号到达时任务已终态 →
-			// 丢弃整条信号（不得改状态/通知）。注意 fence 只能放信号入口——
-			// applyStatus→emitBackground 是同一信号的流水两段，emitBackground
-			// 入口不得拦截（否则合法完成通知被杀）。
 			task.mu.Lock()
 			terminal := isTerminalStatus(task.status)
 			st := task.status
@@ -781,10 +783,9 @@ func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan st
 				task.mu.Unlock()
 				tm.emitBackground(task, sig)
 			} else {
-				// Still inside the window: hand the first settle to Spawn.
 				select {
 				case task.firstSettle <- sig:
-				default: // buffer already holds one — ignore extras within window
+				default:
 				}
 				task.mu.Unlock()
 			}
@@ -818,22 +819,16 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 
 // emitBackground invokes the OnSettle hook for a settle that occurred after the
 // sync-wait window closed (a background/reclaim settle), applying alive-detached
-// semantics for service-type tasks (D4):
-//   - first stable → transition to alive-detached and emit the one-time "ready"
-//     notification;
-//   - once detached, subsequent stable/suspect signals (e.g. output changes, a
-//     quiet service) are suppressed to avoid reclaim spam / permanent board churn;
-//   - completion/failure (process death) always emits and ends the task.
+// semantics for service-type tasks :
+// - first stable → transition to alive-detached and emit the one-time "ready"
+// notification;
+// - once detached, subsequent stable/suspect signals (e.g. output changes, a
+// quiet service) are suppressed to avoid reclaim spam / permanent board churn;
+// - completion/failure (process death) always emits and ends the task.
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
-	// 注：fencing 在 watch 循环信号入口——本函数与 applyStatus 是同一信号的
-	// 两段流水，入口拦截会误杀合法完成通知（TestAliveDetached_CompletionEnds
-	// AndNotifies 回归教训）。closeWindow drain 路径的信号产生于非终态时刻，
-	// 同样不受 fence。
 	switch sig.Kind {
 	case SettleWatch:
-		// Watch hits are pure notifications: never change lifecycle state,
-		// never suppress — but DO respect merge at the detector level.
 		task.mu.Unlock()
 		if tm.onSettle != nil {
 			tm.onSettle(task, sig)
@@ -842,7 +837,7 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	case SettleStable:
 		if task.aliveDetached {
 			task.mu.Unlock()
-			return // already detached; suppress repeat "still alive" signals
+			return
 		}
 		task.aliveDetached = true
 		task.status = TaskAliveDetached
@@ -850,7 +845,7 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	case SettleSuspect:
 		if task.aliveDetached {
 			task.mu.Unlock()
-			return // a detached service going quiet is expected; do not spam
+			return
 		}
 	}
 	task.mu.Unlock()
@@ -867,8 +862,6 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	task.mu.Lock()
 	defer task.mu.Unlock()
-	// hardening-review-batch2 1.7（fencing）：终态后迟到的 detector 信号一律
-	// 丢弃——finalize 是唯一终态写入点，此处不得复活或重复结算。
 	if isTerminalStatus(task.status) {
 		return
 	}
@@ -877,7 +870,6 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	task.settledAt = tm.now()
 	switch sig.Kind {
 	case SettleWatch:
-		// Informational: keep lifecycle status as-is.
 	case SettleCompleted:
 		if sig.Err != nil {
 			task.status = TaskFailed
@@ -885,10 +877,6 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 			task.status = TaskCompleted
 		}
 	case SettleStable:
-		// Do not revert an already-detached service back to plain stable on a
-		// subsequent output change; emitBackground keeps it alive-detached.
-		// hardening-review-batch2 cold-eyes P1-1：stale 是观测事实，输出再变化
-		// 不回滚（回滚即进入第三种僵尸轨道——治理面三不管）。
 		if task.status != TaskAliveDetached {
 			task.status = TaskStable
 		}
@@ -899,7 +887,7 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 	}
 }
 
-// RestoreTask（R2，resident-continuity-r2-r4 D1.3）：冷启动回放重建一个跨重启
+// BindDetector RestoreTask：冷启动回放重建一个跨重启
 // 存续的任务——注册到 registry（复用原 id/Key 去重语义）但不启动 watch
 // goroutine（进程内探测器不可恢复：running 语义降级为 suspect 交 R3 存活探测
 // 裁决；alive-detached 原态恢复并置 aliveDetached 使 reconcileDetached 探针
@@ -935,6 +923,15 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	return nil
 }
 
+// RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与
+// 状态；状态为 alive_detached 时同时标记已脱离，使其继续享受"脱离后信号抑制"的语义。
+//
+// 三点关键行为：
+//   - 窗口标记为已关闭：重建出的任务不重启观察，因而不会因"重启后没人在看"被误判为静默或
+//     僵尸；终态判定与 TTL 回收照常生效；
+//   - 幂等且不覆盖：同一 id 已在表内时直接返回既有任务——在途的真实状态不被重建值改写；
+//     spec.Key 同样只在无人占用时登记；
+//   - 管理器为 nil 或 id 为空时返回 nil；startedAt 为零值时取当前时刻。
 func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task {
 	if tm == nil || id == "" {
 		return nil
@@ -947,22 +944,17 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		Spec:         spec,
 		StartedAt:    startedAt,
 		status:       status,
-		windowClosed: true, // sync-wait window is history — resume re-arms it
-		// Lifecycle channels are initialized here even though the detector is
-		// not: cross-restart detector state is unrecoverable (by design), but
-		// Resume re-arms the watch by close(task.watchDone) — a nil channel here
-		// panicked on the first post-restart resume (same crack family as the
-		// pruneTerminal nil-detector panic, fixed 2026-09-13).
-		watchDone:   make(chan struct{}),
-		firstSettle: make(chan SettleSignal, 1),
+		windowClosed: true,
+		watchDone:    make(chan struct{}),
+		firstSettle:  make(chan SettleSignal, 1),
 	}
 	if status == TaskAliveDetached {
-		tk.aliveDetached = true // suppress repeat "ready" notifications
+		tk.aliveDetached = true
 	}
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if _, exists := tm.tasks[id]; exists {
-		return tm.tasks[id] // idempotent restore (replay duplicates)
+		return tm.tasks[id]
 	}
 	tm.tasks[id] = tk
 	if spec.Key != "" {
@@ -1001,13 +993,13 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 // 10.3). It is the ONLY age-based termination that reaches EVERY active state —
 // including suspect and never-detached tasks — and every lifetime class (job AND
 // resident/interactive), against an absolute anchor (spawn, refreshed by a
-// reentrant send/resume in §10.4). It closes the production blind spot where the
+// reentrant send/resume in ). It closes the production blind spot where the
 // old detached-gated walls (markStaleDetached / enforceJobDeadline, removed in
-// §10.5) never fired for a task that went quiet without detaching (56bf24c3,
+// ) never fired for a task that went quiet without detaching (56bf24c3,
 // stuck on the board 23h). Effective lifetime = the task's own spec.TTL when >0,
 // else the manager DefaultTTL; when both are <=0 the reaper is OFF for that task
 // (transitional — callers not yet on TTL keep the old "no wall unless
-// configured" semantics until §10.5). On expiry it cancels the backing work via
+// configured" semantics until ). On expiry it cancels the backing work via
 // the owner's detector.Cancel (kills the tmux session / goroutine) OUTSIDE the
 // lock, then retires the task failed ONCE through finalizeRetired (SettleFailed),
 // so it leaves the board. finalize's terminal fence makes concurrent/repeat
@@ -1021,12 +1013,9 @@ func (tm *TaskManager) reconcileTTL() {
 		t.mu.Lock()
 		ttl := t.Spec.TTL
 		if ttl <= 0 {
-			ttl = tm.effDefaultTTL() // §6.4 pull: resolved at the sweep, not a pushed cache
+			ttl = tm.effDefaultTTL()
 		}
 		age := now.Sub(t.ttlAnchor())
-		// A task with no known birth anchor (zero StartedAt) cannot be dated, so it
-		// must not be reclaimed on an astronomically-large computed age. Production
-		// Spawn/RestoreTask always set StartedAt; this guards only undated artifacts.
 		expired := ttl > 0 && !isTerminalStatus(t.status) && !t.ttlAnchor().IsZero() && age >= ttl
 		var det SettleDetector
 		if expired {
@@ -1058,12 +1047,6 @@ func (tm *TaskManager) reconcileTTL() {
 // unchanged. Probe calls run outside tm.mu (they shell out to tmux); the
 // re-check under t.mu makes double-retire impossible.
 func (tm *TaskManager) reconcileDetached() {
-	// 10.7: unify the bus-side collapse across EVERY retirement source — the unified
-	// TTL reaper, the probe-gone reclaim below, and the nested zombie/orphan
-	// reconciles — so a wave of retirements (e.g. many tasks past TTL after a
-	// restart) is delivered as ONE N→1 summary, not N settle notices. Nested-safe:
-	// the inner beginBatchRetire calls in reconcileZombies/RetireOrphans reuse this
-	// collector and only the outermost finish delivers.
 	finishBatch := tm.beginBatchRetire()
 	defer finishBatch()
 	tm.reconcileTTL()
@@ -1088,7 +1071,7 @@ func (tm *TaskManager) reconcileDetached() {
 		probe := t.Spec.Alive
 		t.mu.Unlock()
 		if probe() {
-			continue // backing session still alive; the unified TTL reaper governs its lifetime
+			continue
 		}
 		out := "(backing session gone - auto-retired by liveness reconcile)"
 		t.mu.Lock()
@@ -1109,7 +1092,7 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 	tm.isSessionTracked = fn
 }
 
-// finalize is the SINGLE terminal-transition entry point (hardening-review-
+// BatchRetired finalize is the SINGLE terminal-transition entry point (hardening-review-
 // batch2 1.5): it stamps status/result/settledAt from one kind+err pair so the
 // in-memory state, the SettleSignal kind, the WAL settle_status (mapper), and
 // the feedback polarity cannot diverge — the 7080753 wall stamped TaskFailed
@@ -1121,10 +1104,10 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 // finalizeRetired is the retirement-path finalize (zombie/orphan/stale-deadline):
 // the settle signal must NOT inherit the task's original trigger lineage (a
 // user-spawned task retired by bookkeeping would otherwise be delivered back
-// to the user as if it were the user's awaited result — leak, 2026-09-17).
+// to the user as if it were the user's awaited result — leak, ).
 // Lineage is downgraded to the dedicated "task-retired" stamp, which the
 // fail-closed delivery gate holds by default.
-// BatchRetired is one task settled inside a batch retirement (6.7①): the
+// BatchRetired is one task settled inside a batch retirement: the
 // per-task fact (record-only chain entry + registry fold) stays per-task; only
 // the bus-side notification is collapsed.
 type BatchRetired struct {
@@ -1138,11 +1121,11 @@ type BatchRetired struct {
 // a no-op; only the outermost finish delivers the batch to OnBatchRetire.
 func (tm *TaskManager) beginBatchRetire() (finish func()) {
 	tm.mu.Lock()
-	if tm.batchCollect != nil { // nested: outer loop owns delivery
+	if tm.batchCollect != nil {
 		tm.mu.Unlock()
 		return func() {}
 	}
-	if tm.onBatchRetire == nil { // legacy host: keep per-settle OnSettle emission
+	if tm.onBatchRetire == nil {
 		tm.mu.Unlock()
 		return func() {}
 	}
@@ -1160,8 +1143,6 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 }
 
 func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
-	// Guard the Origin mutation with t.mu: delivery-side readers take the lock, and
-	// the reaper now calls this for every expired active task (2nd-review ③).
 	t.mu.Lock()
 	if t.Spec.Origin == nil {
 		t.Spec.Origin = map[string]string{}
@@ -1173,25 +1154,19 @@ func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
 
 func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err error) {
 	t.mu.Lock()
-	// TOCTOU guard: candidates were collected outside the lock; another
-	// reconciler may have finalized first. First terminal wins. Terminality
-	// is judged by STATUS (not settledAt): resume legally restarts from
-	// completed/failed and leaves the old settledAt in place.
 	if isTerminalStatus(t.status) {
 		t.mu.Unlock()
 		return
 	}
 	t.result = output
 	t.err = err
-	t.settledAt = tm.now() // verdict time (aligns with applyStatus)
+	t.settledAt = tm.now()
 	switch {
 	case kind == SettleFailed || err != nil:
 		t.status = TaskFailed
 	case kind == SettleCompleted:
 		t.status = TaskCompleted
 	default:
-		// Reconcile retirement is always terminal failed/completed; anything
-		// else is a caller bug — fail closed rather than guessing.
 		t.status = TaskFailed
 		kind = SettleFailed
 		if err == nil {
@@ -1201,13 +1176,6 @@ func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err err
 	t.mu.Unlock()
 	tm.mu.Lock()
 	if tm.batchCollect != nil {
-		// Batch mode (6.7①): state transition done above; the bus-side
-		// notification is collected and delivered once by the outermost
-		// beginBatchRetire finish. The append is taken UNDER tm.mu: batchCollect
-		// is a shared TaskManager field and concurrent reconciles (turn
-		// renderBoard + background meditation + tool List()) can reach finalize
-		// at once. The previous read-under-lock/append-outside-lock raced the
-		// collector slice and could drop a settle (3.9 independent review 🟠#1).
 		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: output, Err: err}})
 		tm.mu.Unlock()
 		return
@@ -1225,10 +1193,10 @@ func (tm *TaskManager) sessionTrackerFn() func(sessionID string) bool {
 	return tm.isSessionTracked
 }
 
-// TerminalTTL reports the live terminal grace period (introspection; §6.4 makes
+// TerminalTTL reports the live terminal grace period (introspection;  makes
 // it a READ of the same resolution the reaper uses — the owner's record source
 // when installed, else the construction value. introduce-durable-workflow-engine
-// §2.4/L-3 rollback tests read this, not the config field). Same tm.mu lock as
+// /L-3 rollback tests read this, not the config field). Same tm.mu lock as
 // the reaper paths, so what a test sees is what pruneTerminal applied.
 func (tm *TaskManager) TerminalTTL() time.Duration {
 	if tm == nil {
@@ -1248,7 +1216,7 @@ func (tm *TaskManager) DefaultTTL() time.Duration {
 	return tm.effDefaultTTL()
 }
 
-// RetireOrphans adjudicates reincarnation-orphan suspect tasks (§7 双通道回收):
+// RetireOrphans adjudicates reincarnation-orphan suspect tasks:
 // nil-probe (Spec.Alive == nil) + declared (Declarative != nil) + backing
 // session untracked + age >= orphanGrace → terminal failed via the same
 // settle-once path as zombie retirement. Restored previous-life suspects
@@ -1276,7 +1244,7 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 	tm.mu.Unlock()
 
 	retired := 0
-	finishBatch := tm.beginBatchRetire() // 6.7①: bus 侧通知折叠为一条汇总
+	finishBatch := tm.beginBatchRetire()
 	for _, t := range candidates {
 		t.mu.Lock()
 		taskID := ""
@@ -1307,8 +1275,6 @@ func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int 
 // are never touched; a live probe protects a quiet long-runner at any age.
 func (tm *TaskManager) reconcileZombies() {
 	now := tm.now()
-	// §7 通道 2（运行期兜底）：同款孤儿判据随每次 reconcile 复评——覆盖
-	// 重建后新产生的 nil-probe 孤儿（如 subagent 会话被销毁后未 settle）。
 	if fn := tm.sessionTrackerFn(); fn != nil {
 		tm.RetireOrphans(fn)
 	}
@@ -1325,7 +1291,7 @@ func (tm *TaskManager) reconcileZombies() {
 		}
 	}
 	tm.mu.Unlock()
-	finishBatch := tm.beginBatchRetire() // 6.7①: zombie 侧同折叠（嵌套安全）
+	finishBatch := tm.beginBatchRetire()
 	for _, t := range candidates {
 		t.mu.Lock()
 		st := t.status
@@ -1336,7 +1302,7 @@ func (tm *TaskManager) reconcileZombies() {
 		probe := t.Spec.Alive
 		t.mu.Unlock()
 		if probe() {
-			continue // backing session alive - quiet, not dead
+			continue
 		}
 		out := "(zombie retired: no settle and backing session gone beyond grace - auto-retired by liveness reconcile)"
 		t.mu.Lock()
@@ -1372,8 +1338,6 @@ func (tm *TaskManager) pruneTerminal() {
 	}
 	tm.mu.Unlock()
 	for _, t := range victims {
-		// detector 可为 nil：RestoreTask 重建的任务（跨重启不可复原，设计使然）。
-		// 与 Cancel()/Spawn() 的守卫风格一致；锁内拷出避免与 resume 换 detector 竞态。
 		t.mu.Lock()
 		detector := t.detector
 		t.mu.Unlock()
@@ -1416,8 +1380,6 @@ func (tm *TaskManager) Cancel(id string) bool {
 		t.settledAt = tm.now()
 	}
 	t.mu.Unlock()
-	// R2（review 终审🔴）：cancelled 终态入事实链（回放折叠的终态集合成员——
-	// 不写则重启后以 suspect 复活）。
 	if tm.onCancel != nil {
 		tm.onCancel(t)
 	}
@@ -1456,7 +1418,7 @@ func (tm *TaskManager) RenewTTLBySession(sessionID string) bool {
 // re-runs the command in a fresh session). Returns an error if the task is
 // unknown or not relaunchable. ctx is the INITIATING call's context, forwarded
 // verbatim to the closure so a re-entry can resolve its target on the version that
-// call holds (§4.2); pass context.Background() when there is no initiator.
+// call holds; pass context.Background() when there is no initiator.
 func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, error) {
 	tm.mu.Lock()
 	t, ok := tm.tasks[id]
@@ -1474,12 +1436,12 @@ func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, er
 // dense→ACK→settle lifecycle under the SAME task id.
 //
 // Legal source states:
-//   - alive_detached / stable — the session is alive; tmux resume feeds
-//     SendKeys into it (service/repl reentry).
-//   - completed / failed — the previous round ended; for executor kinds that
-//     are round-based (subagent: new Run + task-chain restorer), resume is the
-//     natural continuation. tmux resume on a dead session fails cleanly at
-//     SendKeys with an actionable error.
+// - alive_detached / stable — the session is alive; tmux resume feeds
+// SendKeys into it (service/repl reentry).
+// - completed / failed — the previous round ended; for executor kinds that
+// are round-based (subagent: new Run + task-chain restorer), resume is the
+// natural continuation. tmux resume on a dead session fails cleanly at
+// SendKeys with an actionable error.
 //
 // Illegal source states: running / suspect (a round is in flight — wait and
 // retry) and cancelled (session killed — relaunch or start fresh). Concurrency:
@@ -1487,7 +1449,7 @@ func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, er
 // parallel resumes (parallel tool execution is enabled) single-win; the loser
 // is told the task is running. ctx is the INITIATING call's context, forwarded to
 // ResumeFn so the resumed round can resolve its target on the version that call
-// holds (§4.2); a refusal there rolls the claim back unchanged.
+// holds; a refusal there rolls the claim back unchanged.
 func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (SpawnResult, error) {
 	tm.mu.Lock()
 	task, ok := tm.tasks[id]
@@ -1500,7 +1462,6 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 	prevStatus := task.status
 	switch prevStatus {
 	case TaskAliveDetached, TaskStable, TaskCompleted, TaskFailed:
-		// legal source states (see doc comment)
 	case TaskRunning, TaskSuspect:
 		task.mu.Unlock()
 		return SpawnResult{}, fmt.Errorf("task %s is %s — a round is in flight (or a concurrent resume); wait for it to settle and retry", id, prevStatus)
@@ -1515,29 +1476,18 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 		task.mu.Unlock()
 		return SpawnResult{}, fmt.Errorf("task %s does not support resume", id)
 	}
-	// Claim the task: running under lock so a concurrent resume loses the race.
 	task.status = TaskRunning
 	task.mu.Unlock()
 
 	detector, err := task.Spec.ResumeFn(ctx, input)
 	if err != nil {
-		// Roll back the claim; the session was not touched by us.
 		task.mu.Lock()
 		task.status = prevStatus
 		task.mu.Unlock()
 		return SpawnResult{}, fmt.Errorf("task %s resume: %w", id, err)
 	}
 
-	// Re-arm the task for a fresh round. Two shapes:
-	//   - SAME detector returned (tmux Rearm: session-bound detector, round
-	//     state reset internally) → the running watch keeps consuming the same
-	//     Settled channel; only the sync-wait window is reopened.
-	//   - NEW detector (subagent: each round is a new Run) → retire the old
-	//     watch via watchDone and start a fresh one.
 	task.mu.Lock()
-	// Watch generation: a restored task has detector == nil (cross-restart,
-	// unrecoverable) — that always counts as a new watch so the re-arm below
-	// never closes a channel from a previous life.
 	newWatch := task.detector == nil || detector != task.detector
 	if newWatch {
 		close(task.watchDone)
@@ -1547,8 +1497,6 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 	task.firstSettle = make(chan SettleSignal, 1)
 	task.windowClosed = false
 	task.aliveDetached = false
-	// §10.4: a resume is a write-type reentry — reset the TTL anchor to now so the
-	// reaper measures the task's lifetime from this round, not the original spawn.
 	task.ttlRenewedAt = tm.now()
 	done := task.watchDone
 	task.mu.Unlock()
@@ -1582,7 +1530,7 @@ type funcSettleDetector struct {
 	ch      chan SettleSignal
 	cancel  context.CancelFunc
 	detach  <-chan struct{}
-	stopped chan struct{} // closed when fn RETURNS (the producer's real stop)
+	stopped chan struct{}
 }
 
 // NewFuncSettleDetector runs fn under a cancelable context and settles on return.
@@ -1597,14 +1545,11 @@ func NewFuncSettleDetector(ctx context.Context, fn func(context.Context) (string
 	}
 	d.detach = DetachAfter(dd, cctx.Done())
 	go func() {
-		// §4.1: `stopped` closes AFTER fn returns — a caller that was told its work
-		// is unmanaged (rejected / deduped) waits on this, never on Cancel, because
-		// fn is the actual producer of the run being tracked.
 		defer close(d.stopped)
 		out, err := fn(cctx)
 		d.ch <- SettleSignal{Kind: SettleCompleted, Output: out, Err: err}
 		close(d.ch)
-		cancel() // stop the detach timer — the task settled
+		cancel()
 	}()
 	return d
 }

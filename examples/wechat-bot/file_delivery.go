@@ -26,7 +26,7 @@ type FileSender interface {
 var _ FileSender = (*wechat.Bot)(nil)
 
 // executableExts 为拒绝发送的可执行文件扩展名（与权限位检查互补）。
-// 硬性规则，不可配置（见 design.md D7）。
+// 硬性规则，不可配置。
 var executableExts = map[string]bool{
 	".exe": true, ".dll": true, ".bat": true, ".cmd": true, ".sh": true,
 	".bin": true, ".out": true, ".app": true, ".msi": true, ".com": true, ".run": true,
@@ -36,7 +36,7 @@ var executableExts = map[string]bool{
 // 字符类使用 \p{L}（任意 Unicode 字母，含中文/日文/韩文等）与 \p{N}（任意 Unicode 数字），
 // 以正确识别中文等非 ASCII 文件名（如 彭伟业_面试备战文档.md）；原仅 ASCII 的字符类会导致
 // 中文路径被静默截断、文件投递失败。具体是否为真实文件由 os.Stat 二次校验，故误匹配
-// （如版本号 v1.2、域名 example.com）会被过滤；无目录信息的裸文件名（如 report.pdf）
+// （如版本号 v1.2、域名 example.com）会被过滤；无目录信息的裸文件名
 // 因不含 '/' 也不视为路径。'-' 置于字符类末尾以避免被当作范围操作符。
 var pathCandidateRE = regexp.MustCompile(`[\p{L}\p{N}_./-]+\.[\p{L}\p{N}-]{1,10}`)
 
@@ -47,7 +47,8 @@ var pathCandidateRE = regexp.MustCompile(`[\p{L}\p{N}_./-]+\.[\p{L}\p{N}-]{1,10}
 //  2. 排除以 '://' 开头的 URL（http/https/ftp 等）。
 //  3. 候选必须以文件扩展名结尾（正则已保证）。
 //  4. 必须通过 os.Stat 确认存在且为普通文件；相对路径先按 workspaceDir 解析为绝对路径
-//     （workspaceDir 为空则跳过相对路径）。
+//
+// （workspaceDir 为空则跳过相对路径）。
 //  5. 硬性排除可执行文件（具有任意可执行权限位或扩展名在拒绝列表中）。
 //  6. 结果去重并保持首次出现顺序。
 func ExtractFilePaths(text, workspaceDir string) []string {
@@ -55,19 +56,19 @@ func ExtractFilePaths(text, workspaceDir string) []string {
 	var result []string
 	for _, cand := range pathCandidateRE.FindAllString(text, -1) {
 		if strings.Contains(cand, "://") {
-			continue // 排除 URL
+			continue
 		}
 		var abs string
 		switch {
 		case strings.HasPrefix(cand, "/"):
-			abs = cand // 绝对路径
+			abs = cand
 		case strings.HasPrefix(cand, "./"), strings.HasPrefix(cand, "../"), strings.Contains(cand, "/"):
 			if workspaceDir == "" {
-				continue // 未配置工作区，跳过相对路径
+				continue
 			}
 			abs = filepath.Join(workspaceDir, cand)
 		default:
-			continue // 无目录信息的裸文件名不视为路径
+			continue
 		}
 		info, err := os.Stat(abs)
 		if err != nil {
@@ -77,7 +78,7 @@ func ExtractFilePaths(text, workspaceDir string) []string {
 			continue
 		}
 		if isExecutable(info, abs) {
-			continue // 硬性排除可执行文件
+			continue
 		}
 		if seen[abs] {
 			continue

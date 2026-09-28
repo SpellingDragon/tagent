@@ -1,19 +1,19 @@
-// recall: the UNIFIED recall entry (stable-context-compaction D7).
+// recall: the UNIFIED recall entry.
 //
 // One tool — parameters ARE the router. Deterministic shapes never touch an
 // LLM:
 //
-//	orchestrate: true     → explicit opt-in for the RecallAgent LLM
-//	                        orchestration engine (checked first); when the
-//	                        engine is not wired it returns explicit guidance,
-//	                        never silently falling back to a deterministic path
-//	items: [{key, hint?}] → engineering recall: batch GetEvent, original
-//	                        order, zero hallucination, misses reported
-//	turn_key              → causal-chain turn reconstruction: walk back to
-//	                        the turn's external_input (recovers HOW a past
-//	                        task was executed, incl. compressed tool steps)
-//	query + filters       → retrieval-layer recall: QueryOptions keyword
-//	                        search (may evolve to vector; protocol unchanged)
+// orchestrate: true → explicit opt-in for the RecallAgent LLM
+// orchestration engine (checked first); when the
+// engine is not wired it returns explicit guidance,
+// never silently falling back to a deterministic path
+// items: [{key, hint?}] → engineering recall: batch GetEvent, original
+// order, zero hallucination, misses reported
+// turn_key → causal-chain turn reconstruction: walk back to
+// the turn's external_input (recovers HOW a past
+// task was executed, incl. compressed tool steps)
+// query + filters → retrieval-layer recall: QueryOptions keyword
+// search (may evolve to vector; protocol unchanged)
 //
 // Supersedes the retired memory_recall / memory_turn tool names — the model
 // side sees one tool; the output protocol ({key, type, summary, content,
@@ -52,17 +52,15 @@ type recallArgs struct {
 	Limit      int      `json:"limit,omitempty" jsonschema:"description=返回条数上限(默认 10);按时间新→旧返回"`
 }
 
-// NewRecallTool creates the unified recall entry (deterministic shapes are
-// pure functions; orchestrate is the explicit LLM-orchestration opt-in).
+// NewRecallTool 构造统一召回入口：确定性形态是纯函数，orchestrate 是显式的 LLM 编排 opt-in。
+// 未接线的 orchestrate 必须显式回报并给出确定性迭代路径，不得静默降级，见文档。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func NewRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args recallArgs) (memoryRecallResult, error) {
 			switch {
 			case args.Orchestrate:
-				// Reserved orchestration form (D7): the RecallAgent engine is
-				// not wired into this entry yet — report that honestly with
-				// deterministic iteration guidance instead of silently
-				// degrading to a single shape.
 				return memoryRecallResult{
 					Mode: "orchestrate",
 					Message: "LLM 多跳编排引擎暂未接线本入口。请用确定性形态自行迭代完成多跳检索：" +

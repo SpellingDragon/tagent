@@ -653,7 +653,7 @@ func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
 	return "", nil
 }
 
-// buildDegradationBehaviors (5.4, design-report-closeout) maps ReliabilityConfig
+// buildDegradationBehaviors maps ReliabilityConfig
 // behavior fields into the agent-side struct. Invalid duration → zero (behavior
 // off, warn logged once at load time by config Validate).
 func buildDegradationBehaviors(rc ReliabilityConfig) agent.DegradationBehaviors {
@@ -668,7 +668,7 @@ func buildDegradationBehaviors(rc ReliabilityConfig) agent.DegradationBehaviors 
 	return behaviors
 }
 
-// consolidationMinSources（4.4 design-report-closeout）提取该 agent 的
+// consolidationMinSources提取该 agent 的
 // memory.engine.consolidation.min_source_events（nil 链安全，缺省 0=不校验）。
 func consolidationMinSources(acfg AgentConfig) int {
 	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
@@ -684,7 +684,7 @@ func consolidationMinSources(acfg AgentConfig) int {
 	return c.MinSourceEvents
 }
 
-// newConsolidationHintTracker（4.2 design-report-closeout）从 agent 配置构造容量
+// newConsolidationHintTracker从 agent 配置构造容量
 // 触发器；配置缺失/非法/threshold<=0 返回 nil（关闭，零行为变化）。
 func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
 	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
@@ -704,7 +704,7 @@ func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
 	return NewConsolidationHintTracker(c.CapacityThreshold, snooze)
 }
 
-// approvalInjectChannel（3.3 design-report-closeout）把 pending 审批请求渗透为
+// approvalInjectChannel把 pending 审批请求渗透为
 // external_input 消息（source=approval）进 entry 事件循环——渠道层（微信等）随
 // 普通回复送达用户；用户回复 approve/reject <digest> 由渠道侧 listener 经
 // governance.ParseApprovalReply + governance.RespondFile 落盘生效。
@@ -732,7 +732,7 @@ func (c *approvalInjectChannel) Deliver(req *governance.ApprovalRequest) error {
 	return nil
 }
 
-// wrapCapacityOnly（4.2/8.10 design-report-closeout）包一层无引擎的 bridge：
+// wrapCapacityOnly包一层无引擎的 bridge：
 // 仅提供 capacityHook 写入旁路计数点（Index 跳过、向量方法退 inner）。hook 为 nil
 // 时原样返回（零装饰）。
 func wrapCapacityOnly(store memory.MemoryStore, onStoreEvent func(int64, int, string)) memory.MemoryStore {

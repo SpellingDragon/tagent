@@ -1,22 +1,18 @@
 package engine
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
-	membed "github.com/SpellingDragon/tagent/memory/embedder"
-
 	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
 )
 
-// testBaseMs 是测试用基准时间戳（毫秒），须晚于 snowflakeEpoch(2024-01-01) 以产生
-// 正 key；各事件用 +1000ms 递增保证秒级唯一 → Snowflake key 唯一且分区编码一致。
+// testBaseMs 是测试用基准时间戳（毫秒），必须晚于 Snowflake 纪元以产生正 key；
+// 各事件以一秒递增，保证 key 秒级唯一且分区编码一致。
 const testBaseMs = int64(1750000000000)
-
-// ---------------------------------------------------------------------------
-// 测试替身与助手
-// ---------------------------------------------------------------------------
 
 // blockingEmbedder 首次 Embed 时关闭 started 并阻塞至 ctx 取消——确定性地制造
 // 「worker 卡在嵌入、队列积压」场景。
@@ -82,10 +78,9 @@ func hitKeys(hits []memory.RetrievalHit) map[int64]bool {
 	return m
 }
 
-// ---------------------------------------------------------------------------
-// 单元测试：融合与相似度
-// ---------------------------------------------------------------------------
-
+// TestRRFFuse_BothListsRankTop TestRRFFuse 等覆盖融合与相似度：共同命中居首、去重、余弦边界、mock 嵌入器确定性。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#inmemory-retrieval
 func TestRRFFuse_BothListsRankTop(t *testing.T) {
 	listA := []int64{10, 20, 30}
 	listB := []int64{10, 40, 50}
@@ -144,10 +139,6 @@ func TestMockEmbedder_DeterministicNormalized(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 引擎行为测试
-// ---------------------------------------------------------------------------
-
 func TestInMemoryEngine_KeywordOnlyDegradation(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	k1 := seedEvent(t, store, 1, TypeExternalInputProbe, "部署服务失败 deploy error", testBaseMs)
@@ -191,7 +182,6 @@ func TestInMemoryEngine_HybridRecall(t *testing.T) {
 	if !eng.Capabilities().Hybrid {
 		t.Fatal("store+emb 就绪后应声明 Hybrid")
 	}
-	// 查询与 kDB 共享词元（database/error/报错）→ 关键词路与向量路都应命中，融合居首。
 	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: memory.ModeHybrid, Limit: 3})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
@@ -217,7 +207,6 @@ func TestInMemoryEngine_PartitionFilterNoLeak(t *testing.T) {
 	indexEvent(t, eng, k2, 2, TypeExternalInputProbe, "alpha shared token 共享词元", testBaseMs+1000)
 	waitForVectors(t, eng, 2, 2*time.Second)
 
-	// 仅查分区 1：k2（分区 2）MUST NOT 泄漏——跨分区泄漏防线（向量路 + 关键词路双重过滤）。
 	hits, _ := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "alpha shared", PartitionIDs: []int{1}, Mode: memory.ModeHybrid, Limit: 10})
 	keys := hitKeys(hits)
 	if keys[k2] {
@@ -234,13 +223,11 @@ func TestInMemoryEngine_SelectiveIndexSkipsNonEmbeddable(t *testing.T) {
 	defer eng.Close()
 
 	ctx := context.Background()
-	// action_command 非 Embeddable（注册表），Index 应跳过——不产生向量。
 	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: 100, PartitionID: 1, EventType: "action_command", Text: "some tool call", Timestamp: 100})
 	time.Sleep(50 * time.Millisecond)
 	if vc := eng.Stats().VectorCount; vc != 0 {
 		t.Fatalf("非 Embeddable 类型不应产生向量, got vectorCount=%d", vc)
 	}
-	// 负 key（合成投影引用）也不索引。
 	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: -5, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: 1})
 	time.Sleep(20 * time.Millisecond)
 	if vc := eng.Stats().VectorCount; vc != 0 {
@@ -255,7 +242,7 @@ func TestInMemoryEngine_IndexNonBlocking_QueueFullDrop(t *testing.T) {
 
 	ctx := context.Background()
 	_ = eng.Index(ctx, memory.IndexableEvent{EventKey: 1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "a", Timestamp: 1})
-	<-be.started // 确定 worker 已进入 Embed 阻塞
+	<-be.started
 	start := time.Now()
 	for i := 2; i <= 20; i++ {
 		_ = eng.Index(ctx, memory.IndexableEvent{EventKey: int64(i), PartitionID: 1, EventType: TypeExternalInputProbe, Text: "x", Timestamp: int64(i)})
@@ -292,7 +279,6 @@ func TestInMemoryEngine_EmptyQueryDegradesToKeyword(t *testing.T) {
 	eng := NewInMemoryEngine(store, emb, testEngineConfig())
 	defer eng.Close()
 
-	// 空查询 = 纯浏览/过滤，走关键词路（QueryEvents），不触发嵌入。
 	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{Query: "", PartitionIDs: []int{1}, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)

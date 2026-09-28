@@ -40,7 +40,6 @@ func (m *multiUserMockModel) Info() model.Info {
 // TestMultiUserDispatch verifies that concurrent messages from different users
 // are correctly routed to their respective chat_ids without cross-contamination.
 func TestMultiUserDispatch(t *testing.T) {
-	// Create a TagentAgent with mock dependencies
 	cfg := &agent.TagentConfig{
 		Model:     &multiUserMockModel{},
 		MaxTokens: 4096,
@@ -48,13 +47,12 @@ func TestMultiUserDispatch(t *testing.T) {
 	ta, err := agent.NewTagentAgent(cfg)
 	require.NoError(t, err)
 
-	// Start the event loop
 	outputCh, err := ta.StartLoop("test-user", "test-session")
 	require.NoError(t, err)
 
 	// Collect output events
 	var mu sync.Mutex
-	receivedEvents := make(map[string][]*event.Event) // chat_id -> events
+	receivedEvents := make(map[string][]*event.Event)
 
 	go func() {
 		for evt := range outputCh {
@@ -75,11 +73,9 @@ func TestMultiUserDispatch(t *testing.T) {
 		}
 	}()
 
-	// Simulate two users sending messages almost simultaneously (100ms apart)
 	userA := "user_A_123"
 	userB := "user_B_456"
 
-	// User A sends message
 	ta.InjectMessageWithMetadata("user", model.Message{
 		Role:    model.RoleUser,
 		Content: "Hello from User A",
@@ -90,7 +86,6 @@ func TestMultiUserDispatch(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	// User B sends message
 	ta.InjectMessageWithMetadata("user", model.Message{
 		Role:    model.RoleUser,
 		Content: "Hello from User B",
@@ -99,10 +94,8 @@ func TestMultiUserDispatch(t *testing.T) {
 		"user_name": "Bob",
 	})
 
-	// Wait for both responses
 	time.Sleep(2 * time.Second)
 
-	// Verify both users received their responses
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -112,7 +105,6 @@ func TestMultiUserDispatch(t *testing.T) {
 	assert.NotEmpty(t, eventsA, "User A should receive at least one event")
 	assert.NotEmpty(t, eventsB, "User B should receive at least one event")
 
-	// Verify no cross-contamination: User A's events should not contain User B's chat_id
 	for _, evt := range eventsA {
 		if evt.StateDelta != nil {
 			if cid, ok := evt.StateDelta["meta_chat_id"]; ok {

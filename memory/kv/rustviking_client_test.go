@@ -16,6 +16,8 @@ import (
 )
 
 // TestRustVikingClient_New tests client creation.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#rv-cli
 func TestRustVikingClient_New(t *testing.T) {
 	client := NewRustVikingClient("", "/tmp/test-rustviking/config.toml")
 	require.NotNil(t, client)
@@ -80,7 +82,6 @@ func TestMockRustVikingClient_Interface(t *testing.T) {
 	_, err = mock.KVGet("nonexistent")
 	assert.Error(t, err)
 
-	// KVScan with matching prefix
 	err = mock.KVPut("prefix:k1", "v1")
 	require.NoError(t, err)
 	err = mock.KVPut("prefix:k2", "v2")
@@ -90,19 +91,16 @@ func TestMockRustVikingClient_Interface(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
 
-	// KVRange
 	pairs, err = mock.KVRange("prefix:", "prefiy", 10)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
 
-	// KVBatch
 	err = mock.KVBatch([]memory.KVOp{
 		{Type: "put", Key: "bk1", Value: "bv1"},
 		{Type: "put", Key: "bk2", Value: "bv2"},
 	})
 	require.NoError(t, err)
 
-	// KVDelete
 	err = mock.KVDelete("testkey")
 	require.NoError(t, err)
 	_, err = mock.KVGet("testkey")
@@ -128,7 +126,6 @@ func TestMockRustVikingClient_Concurrency(t *testing.T) {
 
 // findRustVikingBinary 查找可用的 rustviking 二进制路径。
 func findRustVikingBinary() string {
-	// 按优先级查找
 	candidates := []string{
 		"/Users/pengweiye/Documents/codes/rustviking/target/release/rustviking",
 	}
@@ -161,14 +158,12 @@ plugin = "mock"
 }
 
 // TestRustVikingClient_Integration 测试 RustVikingClient 与实际 rustviking 二进制集成。
-// 若二进制不可用则跳过。
 func TestRustVikingClient_Integration(t *testing.T) {
 	binary := findRustVikingBinary()
 	if binary == "" {
 		t.Skip("rustviking binary not found, skipping integration test")
 	}
 
-	// Verify binary is executable
 	cmd := exec.Command(binary, "--help")
 	err := cmd.Run()
 	require.NoError(t, err, "rustviking binary must be executable")
@@ -237,7 +232,6 @@ func TestRustVikingClient_Integration(t *testing.T) {
 
 		pairs, err := client.KVRange("range:a", "range:c", 10)
 		require.NoError(t, err)
-		// Should include range:a, range:b but NOT range:c (exclusive end)
 		assert.Len(t, pairs, 2)
 	})
 }

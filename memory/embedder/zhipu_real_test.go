@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// TestZhipuEmbedder_RealEmbed 是 hybrid 5.1/5.3 前置实测：真实 zhipu embedding-3 调用（有
-// ZAI_API_KEY 才跑，无则 Skip——tests/ 惯例）。验证 GLM Coding Plan key 对 /embeddings 端点
-// 可用 + 返回维度符合请求（512/1024）+ ModelID/Dimension 探测正确。
+// TestZhipuEmbedder_RealEmbed 钉住真实端点可用、返回维度符合请求、ModelID/Dimension 探测正确（无密钥即 Skip）。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 func TestZhipuEmbedder_RealEmbed(t *testing.T) {
 	if os.Getenv("ZAI_API_KEY") == "" {
 		t.Skip("ZAI_API_KEY 未设置，跳过真实 embedder 实测")
@@ -43,9 +43,7 @@ func TestZhipuEmbedder_RealEmbed(t *testing.T) {
 	}
 }
 
-// TestSemanticRecall_RealEmbedderClosedLoop 是 hybrid 5.3 实测：真实 embedder 下「入库→语义
-// 召回→票据取回全文」端到端闭环（有 key 才跑）。验证真实 embedding-3 向量下，语义查询 top1
-// 命中语义最近事件（而非关键词匹配），票据可水合回全文。
+// TestSemanticRecall_RealEmbedderClosedLoop 钉住真实向量下语义查询 top1 命中语义最近事件（查询与目标无共同关键词，命中的只能是语义相似度）且票据可回全文。
 func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 	if os.Getenv("ZAI_API_KEY") == "" {
 		t.Skip("ZAI_API_KEY 未设置，跳过真实 embedder 闭环实测")
@@ -74,11 +72,8 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 			t.Fatalf("StoreEvent: %v", err)
 		}
 	}
-	// 等异步嵌入 worker 完成真实 API 调用 + 索引（InMemoryEngine 异步；3 事件一批 ≤16）。
 	time.Sleep(4 * time.Second)
 
-	// 语义召回：查询"服务器内存不足崩溃重启"与 OOMKilled 语义最近（无共同关键词"内存超限"
-	// vs"内存不足"、"崩溃重启"vs"OOMKilled 重启"），考验真实向量语义而非字面匹配。
 	hits, err := eng.Retrieve(context.Background(), memory.RetrievalQuery{
 		Query: "服务器内存不足导致进程崩溃并不断重启", PartitionIDs: []int{pid}, Limit: 3,
 	})
@@ -88,20 +83,17 @@ func TestSemanticRecall_RealEmbedderClosedLoop(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatal("真实语义召回应返回结果")
 	}
-	// 票据取回全文（两段式：hits[0].EventKey → store.GetEvent 水合）。
 	top, err := store.GetEvent(hits[0].EventKey)
 	if err != nil || top == nil {
-		t.Fatalf("5.3 票据取回全文失败: %v", err)
+		t.Fatalf("票据取回全文失败（两段式：排序票据 → GetEvent 水合）: %v", err)
 	}
 	t.Logf("真实语义召回 top1=%q (score=%.4f, hits=%d)", top.Content, hits[0].Score, len(hits))
 	if !strings.Contains(top.Content, "OOMKilled") {
-		t.Errorf("5.3: 语义召回 top1 应是 OOMKilled 事件(语义最近), got %q", top.Content)
+		t.Errorf("语义召回 top1 应是语义最近的 OOMKilled 事件, got %q", top.Content)
 	}
 }
 
-// TestDimensionComparison_Real 是 hybrid 5.1 实测（X2 决议）：512 vs 1024 维召回质量对比。
-// 用同批「语义相关对」与「语义不相关对」，对比两维度下 cosine 分离度（相关均值 - 不相关均值），
-// 为默认维度选择提供真实数据（有 key 才跑）。分离度越大 = 该维度判别力越强。
+// TestDimensionComparison_Real 对比 512 与 1024 维的相关/不相关 cosine 分离度，为默认维度选择提供真实数据（有密钥才跑）。
 func TestDimensionComparison_Real(t *testing.T) {
 	if os.Getenv("ZAI_API_KEY") == "" {
 		t.Skip("ZAI_API_KEY 未设置，跳过维度对比实测")
@@ -124,7 +116,7 @@ func TestDimensionComparison_Real(t *testing.T) {
 		relAvg := avgPairSim(t, emb, related)
 		unrelAvg := avgPairSim(t, emb, unrelated)
 		sep := relAvg - unrelAvg
-		t.Logf("5.1 dim=%d: 相关对均相似=%.4f, 不相关对均相似=%.4f, 分离度=%.4f", dim, relAvg, unrelAvg, sep)
+		t.Logf("维度判别力 dim=%d: 相关对均相似=%.4f, 不相关对均相似=%.4f, 分离度=%.4f", dim, relAvg, unrelAvg, sep)
 		if sep <= 0 {
 			t.Errorf("dim=%d: 相关对应比不相关对更相似(分离度>0), got sep=%.4f", dim, sep)
 		}

@@ -9,32 +9,19 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== engineBridge（T-A · 引擎接线装饰器）====================
-//
-// 记忆引擎的接线采用 memory.MemoryStore 装饰器（报告 D2 决策，契约 C2）：在
-// resolveMemoryStore 一处包裹，天然覆盖全部写入路径（插件管线 OnEvent +
-// persistBusEvent），无需逐路径显式 Index（易漏）。装饰器保证：未接线时 inner
-// 行为逐字节不变；接线后写入旁路索引、检索经引擎 hybrid。
-//
-// 契约 C2 装饰器顺序：ErrorTrackingStore( engineBridge( FileSegmentStore ) )——
-// 错误追踪（T-G）在最外层，引擎桥在中间，事件存储在内层。
-//
-// 边界接口（memory.MemoryEngineProvider/memory.KVProvider/memory.VectorRemover）定义在核心包 memory
-//（缝属于被缝两侧的公共依赖；segment_store/ErrorTrackingStore 在核心侧实现/透传）。
-
 // engineBridge 装饰 memory.MemoryStore，桥接「写入 → 引擎索引」并暴露引擎供检索。
 type engineBridge struct {
 	inner  memory.MemoryStore
 	engine memory.MemoryEngine
 
-	// capacityHook（4.2 design-report-closeout）：每次 StoreEvent 成功后旁路调用
+	// capacityHook：每次 StoreEvent 成功后旁路调用
 	// （partitionID, eventType）——巩固容量触发的计数点。不依赖引擎是否接线
 	// （engine 可为 nil，bridge 仍作为写入旁路装饰器存在）。非阻塞、失败无关。
 	// 接线纪律：仅在装配期（wireMemoryEngine）设置一次，运行期只读——无锁安全。
 	capacityHook func(eventKey int64, partitionID int, eventType string)
 }
 
-// KVBackend 实现 memory.KVProvider 透传（§8.11⑪）——capacity-only 包裹后外层
+// KVBackend 实现 memory.KVProvider 透传——capacity-only 包裹后外层
 // ErrorTrackingStore 等下游仍可取底层 KV（此前由可用变 nil 的能力丢失）。
 func (b *engineBridge) KVBackend() memory.KVStore {
 	if provider, ok := b.inner.(memory.KVProvider); ok {
@@ -43,7 +30,7 @@ func (b *engineBridge) KVBackend() memory.KVStore {
 	return nil
 }
 
-// WalQuarantined 透传底层 LocalFileKV 的隔离计数（§8.11⑤——诊断经装饰链可达）。
+// WalQuarantined 透传底层 LocalFileKV 的隔离计数。
 func (b *engineBridge) WalQuarantined() int64 {
 	if q, ok := b.inner.(interface{ WalQuarantined() int64 }); ok {
 		return q.WalQuarantined()
@@ -51,7 +38,7 @@ func (b *engineBridge) WalQuarantined() int64 {
 	return 0
 }
 
-// memory.RetentionGuard 递归透传（§2.8/§2.6 spec L89「材料保留」恢复能力）：恢复 owner
+// ProtectKey memory.RetentionGuard 递归透传：恢复 owner
 // 经装饰链保护/释放未确认原文并 arm 首扫门控。内层无租约（如非持久后端）则 no-op。
 func (b *engineBridge) ProtectKey(key int64) {
 	if g, ok := b.inner.(memory.RetentionGuard); ok {
@@ -71,7 +58,7 @@ func (b *engineBridge) ArmRetention() {
 	}
 }
 
-// BeginHold/EndHold 透传 §5.8 登记屏障（装饰链完整，无屏障能力的底层静默跳过）。
+// BeginHold/EndHold 透传 登记屏障（装饰链完整，无屏障能力的底层静默跳过）。
 func (b *engineBridge) BeginHold() {
 	if h, ok := b.inner.(memory.RetentionHoldable); ok {
 		h.BeginHold()
@@ -90,7 +77,7 @@ func (b *engineBridge) SetCapacityHook(fn func(eventKey int64, partitionID int, 
 	b.capacityHook = fn
 }
 
-// 编译期锁定：engineBridge 是 memory.MemoryStore + memory.MemoryEngineProvider（+ 尽力 memory.RelationStoreProvider）
+// _ 编译期锁定：engineBridge 是 memory.MemoryStore + memory.MemoryEngineProvider（+ 尽力 memory.RelationStoreProvider）
 // + memory.EventReplayer（D4 透传链完整）。
 var (
 	_ memory.MemoryStore          = (*engineBridge)(nil)
@@ -122,7 +109,6 @@ func (b *engineBridge) StoreEvent(key int64, event memory.FullEvent) error {
 			Text:        textForIndex(event),
 			Timestamp:   event.Timestamp,
 		}); err != nil {
-			// Index 契约上不失败主链路；此处仅记录（引擎内部已计数）。
 			log.Debugf("[engineBridge] index enqueue key=%d: %v", key, err)
 		}
 	}
@@ -130,7 +116,7 @@ func (b *engineBridge) StoreEvent(key int64, event memory.FullEvent) error {
 }
 
 // StoreEventWithEmbedding 调用方自带向量：委托 inner 存储。
-// 语义警示（审查 Nit9）：此路径**不经引擎索引**（MVP 引擎只索引经 StoreEvent 的文本嵌入，
+// 语义警示：此路径**不经引擎索引**（MVP 引擎只索引经 StoreEvent 的文本嵌入，
 // 保持嵌入模型一致性）——若调用方用它写可嵌入事件，该事件不会获得引擎向量。需要外部
 // 向量入索引时应扩展 IndexWithVector 接口（后续增强），当前保持透传语义。
 func (b *engineBridge) StoreEventWithEmbedding(key int64, event memory.FullEvent, embedding []float32) error {
@@ -152,9 +138,6 @@ func (b *engineBridge) ReplayEvent(key int64, canonicalFact memory.FullEvent) (m
 		return result, stored, err
 	}
 	if result == memory.ReplayAlreadyCommitted {
-		// D4/F8: already-committed replay — do not call capacityHook (would double-increment
-		// the consolidation counter) and do not re-index the engine (idempotent index is not
-		// guaranteed by the MemoryEngine contract).
 		return result, stored, nil
 	}
 	if b.capacityHook != nil {
@@ -185,7 +168,7 @@ func (b *engineBridge) DeleteEvent(key int64) error {
 
 // SearchByEmbedding 委托引擎的向量路（消灭 stub）：原始查询向量 → 引擎向量检索 →
 // 水合为 memory.EventReference。引擎不支持向量时退回 inner（现状 stub 行为）。
-// 语义警示（审查 S5）：本方法以 nil 分区白名单调用 SearchByVector，即**全库向量检索**
+// 语义警示：本方法以 nil 分区白名单调用 SearchByVector，即**全库向量检索**
 // （不按分区过滤）——因原始向量 API 不携带分区上下文。当前无生产调用方；若接入需按
 // 命名空间隔离，应由调用方改用 memory.Retriever.Retrieve（带 PartitionIDs）或在此注入分区集。
 func (b *engineBridge) SearchByEmbedding(query []float32, topK int) ([]memory.EventReference, error) {
@@ -226,11 +209,11 @@ func (b *engineBridge) SupportsVectorSearch() bool {
 	return b.engine != nil && b.engine.Capabilities().Vector
 }
 
-// memory.MemoryEngine 暴露引擎（memory.MemoryEngineProvider）。
+// MemoryEngine 暴露引擎（memory.MemoryEngineProvider）。
 func (b *engineBridge) MemoryEngine() memory.MemoryEngine { return b.engine }
 
 // RemoveVector 实现 memory.VectorRemover：转发引擎 Remove（遗忘物理删除时由 FileSegmentStore
-// 回调，同步移除内存索引 + KV 持久向量，审查 M2）。
+// 回调，同步移除内存索引 + KV 持久向量）。
 func (b *engineBridge) RemoveVector(eventKey int64) {
 	if b.engine != nil {
 		_ = b.engine.Remove(context.Background(), eventKey)
@@ -241,7 +224,7 @@ func (b *engineBridge) RemoveVector(eventKey int64) {
 // FileSegmentStore 的持久化 flush）。它是 store 关闭链的委托腿：独享（空 path）
 // 场景由 agent 的 Close 尾部（memStoreOwned fallback）触发；共享场景桥只是借面，
 // 真正回收的是 registry entry 经 closeResource 关闭同代 engine + base store
-// （§6.2/§6.3：借用壳/桥无共享释放权）。引擎自身 Close 幂等（内部 closeOnce）。
+// 。引擎自身 Close 幂等（内部 closeOnce）。
 func (b *engineBridge) Close() error {
 	var err error
 	if b.engine != nil {
@@ -255,8 +238,6 @@ func (b *engineBridge) Close() error {
 	return err
 }
 
-// === 只读/管理方法：全部委托 inner ===
-
 func (b *engineBridge) GetEvent(key int64) (*memory.FullEvent, error) { return b.inner.GetEvent(key) }
 func (b *engineBridge) GetEvents(keys []int64) ([]memory.FullEvent, error) {
 	return b.inner.GetEvents(keys)
@@ -266,7 +247,7 @@ func (b *engineBridge) QueryEvents(query memory.QueryOptions) ([]memory.EventRef
 }
 func (b *engineBridge) GetStats() memory.StoreStats { return b.inner.GetStats() }
 
-// memory.RelationStore 透传（保持 memory.RelationStoreProvider 能力，recall 因果链依赖）。
+// RelationStore 透传（保持 memory.RelationStoreProvider 能力，recall 因果链依赖）。
 func (b *engineBridge) RelationStore() memory.RelationStore {
 	if rsp, ok := b.inner.(memory.RelationStoreProvider); ok {
 		return rsp.RelationStore()

@@ -8,14 +8,14 @@ import (
 
 // settleSinkRegistry is the S3m-c routing table for the M2 per-invocation loop.
 //
-// It is deliberately ONLY two things after the pipeline convergence (design I-3):
+// It is deliberately ONLY two things after the pipeline convergence:
 //
-//   - a BINDING TABLE (invocation id → that invocation's own EventBus) — the I-1
-//     carrier: once an input event enters a loop, its derived task settles have a
-//     confirmed destination (the loop's bus) that routing simply looks up, never
-//     infers from the event; and
-//   - the D-b DELIVERY-ACCOUNTING BARRIER (pending = spawned − delivered per id) —
-//     the termination predicate that is immune to the terminal-before-delivery race.
+// - a BINDING TABLE (invocation id → that invocation's own EventBus) — the I-1
+// carrier: once an input event enters a loop, its derived task settles have a
+// confirmed destination (the loop's bus) that routing simply looks up, never
+// infers from the event; and
+// - the D-b DELIVERY-ACCOUNTING BARRIER (pending = spawned − delivered per id) —
+// the termination predicate that is immune to the terminal-before-delivery race.
 //
 // Before S3m-c this registry also owned a hand-rolled per-invocation queue
 // (append / notify / wait / drain / tryFinish) that re-implemented EventBus's own
@@ -30,8 +30,8 @@ import (
 // behavior-neutral for every path that never binds a bus.
 type settleSinkRegistry struct {
 	mu      sync.Mutex
-	byInv   map[string]*EventBus // invocation id → its own bus (destination confirmed at input)
-	pending map[string]int       // D-b barrier: spawned-but-settle-not-yet-delivered, per id
+	byInv   map[string]*EventBus
+	pending map[string]int
 }
 
 func newSettleSinkRegistry() *settleSinkRegistry {
@@ -202,7 +202,7 @@ func (ta *TagentAgent) unbindSettleBus(id string) {
 // runs BEFORE the inner spawn, so the expectation is recorded before the task can
 // possibly settle — an early route can never decrement a counter that has not been
 // incremented yet. Three return shapes mean THIS call owns no future settle and
-// the booking is voided immediately (deep-review P2-3): an INLINE settle
+// the booking is voided immediately: an INLINE settle
 // (OnSettle/route never fires), a DEDUP hit (the matched task settles under its
 // ORIGINAL invocation's booking), and a gate BLOCK (no task was adopted). Without
 // the dedup/block void the barrier leaks one pending unit per refused call —

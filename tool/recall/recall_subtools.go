@@ -29,7 +29,7 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 
 			opts := memory.QueryOptions{
 				Limit:   limit,
-				OrderBy: "timestamp_desc", // Latest first
+				OrderBy: "timestamp_desc",
 			}
 
 			if len(readPartitionIDs) > 0 {
@@ -40,12 +40,10 @@ func NewRecallQueryTool(accessor tagenttool.MemoryStoreAccessor, readPartitionID
 				opts.EventTypes = args.EventTypes
 			}
 
-			// Keyword filter: search EventSummary and Content (case-insensitive)
 			if args.Keyword != "" {
 				opts.Keyword = args.Keyword
 			}
 
-			// Time range filtering
 			if args.Since > 0 {
 				opts.StartTime = args.Since
 			}
@@ -118,7 +116,6 @@ func NewRecallGetTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 				result.ParentKey = tagentevent.FormatEventKey(parentKey)
 			}
 
-			// Optionally include parent event summary
 			if args.IncludeParent && parentKey != 0 {
 				if parent, err := accessor.GetEvent(parentKey); err == nil && parent != nil {
 					result.Parent = &parentEventInfo{
@@ -148,7 +145,7 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 				limit = 5
 			}
 			if limit > 20 {
-				limit = 20 // Cap at 20
+				limit = 20
 			}
 
 			opts := memory.QueryOptions{
@@ -160,7 +157,6 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 				opts.PartitionIDs = readPartitionIDs
 			}
 
-			// Time range filtering
 			if args.Since > 0 {
 				opts.StartTime = args.Since
 			}
@@ -171,7 +167,6 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 				return recallRecentResult{}, fmt.Errorf("invalid time range: since (%d) > until (%d)", args.Since, args.Until)
 			}
 
-			// Keyword filter
 			if args.Keyword != "" {
 				opts.Keyword = args.Keyword
 			}
@@ -202,21 +197,19 @@ func NewRecallRecentTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	)
 }
 
-// ==================== Recall Sub-tool Argument/Result Types ====================
-
 // recallQueryArgs represents a recall query request.
 type recallQueryArgs struct {
-	// Natural language query describing what to recall
+	// Query Natural language query describing what to recall
 	Query string `json:"query"`
-	// Filter by event types (optional)
+	// EventTypes Filter by event types (optional)
 	EventTypes []string `json:"event_types,omitempty"`
-	// Filter start time (Unix ms timestamp, optional)
+	// Since Filter start time (Unix ms timestamp, optional)
 	Since int64 `json:"since,omitempty"`
-	// Filter end time (Unix ms timestamp, optional)
+	// Until Filter end time (Unix ms timestamp, optional)
 	Until int64 `json:"until,omitempty"`
 	// Keyword filter: case-insensitive match on EventSummary and Content (optional)
 	Keyword string `json:"keyword,omitempty"`
-	// Maximum number of results (default: 10)
+	// Limit Maximum number of results (default: 10)
 	Limit int `json:"limit,omitempty"`
 }
 
@@ -228,9 +221,9 @@ type recallQueryResult struct {
 }
 
 type recallGetArgs struct {
-	// Event key to retrieve (canonical hex string, as shown in [evt_...] prefixes)
+	// Key Event key to retrieve (canonical hex string, as shown in [evt_...] prefixes)
 	Key string `json:"key"`
-	// If true, include parent event summary in result (optional)
+	// IncludeParent If true, include parent event summary in result (optional)
 	IncludeParent bool `json:"include_parent,omitempty"`
 }
 
@@ -245,11 +238,11 @@ type recallGetResult struct {
 }
 
 type recallRecentArgs struct {
-	// Number of recent events to retrieve (default: 5, max: 20)
+	// Limit Number of recent events to retrieve (default: 5, max: 20)
 	Limit int `json:"limit,omitempty"`
-	// Filter start time (Unix ms timestamp, optional)
+	// Since Filter start time (Unix ms timestamp, optional)
 	Since int64 `json:"since,omitempty"`
-	// Filter end time (Unix ms timestamp, optional)
+	// Until Filter end time (Unix ms timestamp, optional)
 	Until int64 `json:"until,omitempty"`
 	// Keyword filter: case-insensitive match on EventSummary and Content (optional)
 	Keyword string `json:"keyword,omitempty"`
@@ -261,11 +254,9 @@ type recallRecentResult struct {
 	Message string            `json:"message,omitempty"`
 }
 
-// truncationHint returns an honest-truncation notice when the result count
-// hit the limit — without it the LLM reads "returned N" as "only N exist"
-// and stops looking (the exact failure mode of the 2026-07-31 meditation
-// recall incident). Heuristic: count == limit may rarely equal the full set;
-// the false "maybe more" then just triggers one harmless narrowed retry.
+// truncationHint 在命中数等于 limit 时提示「可能还有更多」。缺了它，模型会把
+// "返回 N 条" 读成"只有 N 条"而停止检索。这是启发式：count == limit 偶尔确实就是全集，
+// 此时多一次收窄重试无害。
 func truncationHint(count, limit int) string {
 	if limit > 0 && count == limit {
 		return "; 已达 limit，更旧的匹配未返回——可缩小时间范围、加关键词或增大 limit 继续查询"
@@ -292,9 +283,9 @@ type parentEventInfo struct {
 
 // recallTraceArgs represents a causal chain trace request.
 type recallTraceArgs struct {
-	// Event key to start tracing from (canonical hex string)
+	// Key Event key to start tracing from (canonical hex string)
 	Key string `json:"key"`
-	// Maximum steps to trace backward (default: 10, max: 20)
+	// MaxSteps Maximum steps to trace backward (default: 10, max: 20)
 	MaxSteps int `json:"max_steps,omitempty"`
 }
 
@@ -316,9 +307,9 @@ type recallTraceItem struct {
 
 // memoryTurnArgs reconstructs a task turn's execution process.
 type memoryTurnArgs struct {
-	// Boundary event key to start from (canonical hex; usually an agent_output card key).
+	// Key Boundary event key to start from (canonical hex; usually an agent_output card key).
 	Key string `json:"key"`
-	// Maximum steps to walk backward (default: 20, max: 50).
+	// MaxSteps Maximum steps to walk backward (default: 20, max: 50).
 	MaxSteps int `json:"max_steps,omitempty"`
 }
 
@@ -377,7 +368,6 @@ func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 					if step == 0 {
 						return recallTraceResult{}, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
 					}
-					// Chain breaks at missing link
 					break
 				}
 
@@ -470,7 +460,7 @@ func NewMemoryTurnTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 // walkTurnChain walks the causal chain backward from startKey until the
 // turn's external_input (inclusive) and returns the events oldest → newest.
 // Shared by memory_turn and the unified recall tool's turn_key form
-// (stable-context-compaction D7).
+// .
 func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxSteps int) (chain []memoryTurnItem, complete, capped bool, err error) {
 	currentKey := startKey
 	reachedInput := false
@@ -480,16 +470,15 @@ func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxS
 			if step == 0 {
 				return nil, false, false, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
 			}
-			break // chain breaks at a missing link
+			break
 		}
 		chain = append(chain, memoryTurnItem{
 			Key:     tagentevent.FormatEventKey(evt.EventKey),
 			Type:    evt.EventType,
-			Summary: truncateTurnContent(evt.EventSummary), // external_input summary = full text; cap it like Content
+			Summary: truncateTurnContent(evt.EventSummary),
 			Content: truncateTurnContent(evt.Content),
 			Time:    formatTimestamp(evt.Timestamp),
 		})
-		// Stop after recording the turn's external_input (turn start).
 		if evt.EventType == tagentevent.TypeExternalInput {
 			reachedInput = true
 			break
@@ -506,7 +495,6 @@ func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxS
 		currentKey = parentKey
 	}
 
-	// Reverse to chronological order (oldest → newest).
 	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
 		chain[i], chain[j] = chain[j], chain[i]
 	}
@@ -526,26 +514,22 @@ func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	return tools
 }
 
-// ==================== Plain Tool Factory Registration ====================
-
 // RegisterSubTools registers all recall sub-tools as plain tools in the
 // global tool registry. Called by tagent.RegisterBuiltinTools().
 //
 // Registered tools:
-//   - recall: the UNIFIED recall entry (items tickets / turn_key causal chain /
-//     query semantic search / orchestrate reserved form) — supersedes the
-//     retired memory_recall and memory_turn tool names (stable-context-
-//     compaction D7)
-//   - recall_query / recall_get / recall_recent / recall_trace: RecallAgent
-//     orchestration sub-tools (internal to the orchestrate branch; not for
-//     direct top-level assembly)
+// - recall: the UNIFIED recall entry (items tickets / turn_key causal chain /
+// query semantic search / orchestrate reserved form) — supersedes the
+// retired memory_recall and memory_turn tool names (stable-context-
+// compaction D7)
+// - recall_query / recall_get / recall_recent / recall_trace: RecallAgent
+// orchestration sub-tools (internal to the orchestrate branch; not for
+// direct top-level assembly)
 func RegisterSubTools() {
 	agent.RegisterPlainTool("recall_query", recallQueryFactory)
 	agent.RegisterPlainTool("recall_get", recallGetFactory)
 	agent.RegisterPlainTool("recall_recent", recallRecentFactory)
 	agent.RegisterPlainTool("recall_trace", recallTraceFactory)
-	// recall: the unified entry (top-level agent, deterministic shapes are
-	// pure functions).
 	agent.RegisterPlainTool("recall", recallFactory)
 }
 

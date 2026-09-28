@@ -13,14 +13,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ==================== outputCh 溢出落盘（F2, design-report-closeout） ====================
-//
-// RunFlow 向 outputCh 发送事件设 2s 宽限；消费者停滞超限时把事件全文落盘到
-// <workspace>/tool-output/output-overflow/ 并非阻塞投递摘要票据（路径 + 首尾片段），
-// 绝不阻塞主循环、不静默丢弃——与 task_settled 大结果转储同构（票据可找回全文）。
-
 // outputSendGrace is how long RunFlow waits for a stalled consumer before
 // persisting the event to disk and moving on.
+//
+// 消费者停滞不会阻塞主循环；事件仍被完整持久化，票据携带头尾摘要，全文可从磁盘找回。
 const outputSendGrace = 2 * time.Second
 
 // overflowTicketHead/Tail bound the summary excerpt carried by the ticket event.
@@ -52,8 +48,6 @@ func dumpOverflowEvent(dir string, evt *event.Event) (string, error) {
 func overflowTicket(evt *event.Event, path string) *event.Event {
 	ticket := cloneEventForDelivery(evt)
 	if ticket.Response != nil && len(ticket.Response.Choices) > 0 {
-		// cloneEventForDelivery is shallow: copy Response + Choices so the
-		// excerpt never mutates the original event's message.
 		resp := *ticket.Response
 		resp.Choices = append([]model.Choice(nil), ticket.Response.Choices...)
 		ticket.Response = &resp
@@ -62,7 +56,6 @@ func overflowTicket(evt *event.Event, path string) *event.Event {
 		if len(c) > overflowTicketHead+overflowTicketTail {
 			msg.Content = c[:overflowTicketHead] + "\n...[output stalled, full content persisted]...\n" + c[len(c)-overflowTicketTail:]
 		}
-		// C4：票据自带取回指引——agent 见票据即知道全文位置与取回方式。
 		msg.Content += fmt.Sprintf("\n[全文已存 %s，可 exec cat 取回]", path)
 	}
 	ticket.StateDelta["output_overflow_path"] = []byte(path)
@@ -83,8 +76,6 @@ func (cm *ContextManager) deliverEvent(ctx context.Context, evt *event.Event) bo
 	case <-ctx.Done():
 		return false
 	case <-time.After(outputSendGrace):
-		// §8.11②：宽限到期瞬间 send 可能恰好就绪（select 多 case 就绪时随机择一）——
-		// 落盘前先非阻塞重试一次直接送达，避免不必要的落盘+票据化。
 		select {
 		case cm.outputCh <- evt:
 			return true
@@ -100,10 +91,6 @@ func (cm *ContextManager) deliverEvent(ctx context.Context, evt *event.Event) bo
 			return false
 		}
 		log.Warnf("[RunFlow] outputCh stalled >%s; full event persisted to %s (retrievable via read_file)", outputSendGrace, path)
-		// Non-blocking ticket: if the consumer is still stalled, the ticket
-		// is skipped too — the file is the durable record either way.
-		// R3（backlog-final-closeout）：溢出登记事件——recall 可达（票据只到 UI，
-		// agent 侧凭本事件知道全文在哪、怎么取）。尽力而为：写失败仅日志。
 		_ = cm.persistBusEvent(&AgentEvent{
 			ID:        fmt.Sprintf("overflow-%d", time.Now().UnixNano()),
 			Type:      "external_input",

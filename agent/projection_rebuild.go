@@ -10,21 +10,16 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// projection_rebuild.go — 冷启动投影重建（event-sourced-projection D2/D3）：
-// 投影是事实链的纯回放（运行期 Add 增量 / 本函数全量，同一 fold 的两个入口）。
-// 「加载 snapshot + 回放尾部」：snapshot = 最新代际标记的 compaction 事件；
-// tail = 其后事件（MinEventKey 写序过滤，分页取全，按 EventKey（写入序）Add）。
-
 // RecoveryResult is the structured outcome of a cold-start projection rebuild
-// (resident-readiness-plan 3.8): observable by the host (diagnostics) AND by
+// : observable by the host (diagnostics) AND by
 // the model (a one-shot tail notice on the first request) — a log line alone
 // never reached the actual consumers of the recovery.
 type RecoveryResult struct {
-	Mode          string   `json:"mode"`      // empty | snapshot | fallback
-	Status        string   `json:"status"`    // full | partial | failed
-	Scanned       int      `json:"scanned"`   // fact-chain events read
-	Projected     int      `json:"projected"` // refs restored
-	Truncated     int      `json:"truncated"` // VALID projection events dropped by the guardrail
+	Mode          string   `json:"mode"`
+	Status        string   `json:"status"`
+	Scanned       int      `json:"scanned"`
+	Projected     int      `json:"projected"`
+	Truncated     int      `json:"truncated"`
 	MissingKeys   []string `json:"missing_keys,omitempty"`
 	PagesFailed   int      `json:"pages_failed"`
 	BatchErrors   int      `json:"batch_errors"`
@@ -63,7 +58,9 @@ const tailPageSize = 500
 // cold start (build_agent wiring; runs BEFORE spill replay is armed).
 // Startup-only, once, into an EMPTY projection. No marker-tagged compaction
 // event in the chain → D1 fallback full replay (rebuildProjectionFallback;
-// 2026-09-13 spec change: WAL is the durable record — context must be
+//
+//	spec change: WAL is the durable record — context must be
+//
 // recoverable even without compaction; supersedes the old no-op).
 func (ta *TagentAgent) RebuildProjectionFromWAL() {
 	if ta == nil || ta.contextManager == nil {
@@ -77,17 +74,9 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	if cm == nil || cm.memStore == nil || cm.projection == nil || cm.contextCompressor == nil {
 		return
 	}
-	// Status starts EMPTY: the deferred verdict only fills an unset status so
-	// direct assignments ("failed", "skipped-nonempty") are never overridden
-	// (cold-eyes R2 Minor 3).
 	result := &RecoveryResult{Mode: "empty", Status: ""}
 	defer func() {
 		result.DurationMS = time.Since(rebuildStart).Milliseconds()
-		// cold-eyes R2 Minor 3: direct assignments inside the rebuild paths
-		// ("failed" = an error swallowed as an empty chain is a lie;
-		// "skipped-nonempty" = a real precondition skip) must not be silently
-		// overridden by the derived verdict — recoveryStatusOf may only fill
-		// an unset status.
 		if result.Status == "" {
 			result.Status = recoveryStatusOf(result)
 		}
@@ -98,9 +87,6 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	}()
 
 	if cm.projection.Len() > 0 {
-		// Non-empty projection at rebuild time (e.g. spill replay already
-		// appended): WARN, never silently skip — and never Replace a live
-		// projection (Replace-over-live is the dev-patch bug we removed).
 		result.Status = "skipped-nonempty"
 		log.Warnf("[rebuild-projection] projection non-empty (len=%d), skipping rebuild", cm.projection.Len())
 		return
@@ -108,8 +94,6 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 
 	snapKey := cm.latestCompactionKey()
 	if snapKey == 0 {
-		// D1 fallback (2026-09-13 spec change): WAL is the durable record —
-		// recover context even without any compaction anchor; supersedes no-op.
 		result.Mode = "fallback"
 		cm.rebuildProjectionFallback(result)
 		return
@@ -119,26 +103,20 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	if err != nil || snapEv == nil {
 		result.PayloadErrors++
 		log.Errorf("[rebuild-projection] compaction event %d unreadable: %v", snapKey, err)
-		return // failed
+		return
 	}
 	payload, err := compress.UnmarshalPayload(snapEv.Metadata[compress.CompactionPayloadMetaKey])
 	if err != nil {
 		result.PayloadErrors++
 		log.Errorf("[rebuild-projection] compaction payload invalid key=%d: %v", snapKey, err)
-		return // failed
+		return
 	}
 
-	// 1) Snapshot restore: synthetic refs verbatim (summary + tool_chain);
-	//    positive keys resolved via GetEvent (immutable store → byte-exact
-	//    ref). Missing/tombstoned keys degrade to a WARN + skip, never block.
 	ordered, posKeys, posIdx := payload.RestoreRefs()
 	lostKeys := 0
 	for i, k := range posKeys {
 		ev, err := cm.memStore.GetEvent(k)
 		if err != nil || ev == nil {
-			// S3 fix (systemic-α): each lost key is a fact-chain hole —
-			// Error (not Warn) + count, so trajectory-comparison tools and
-			// diagnostics can attribute byte-mismatch to known lost slots.
 			lostKeys++
 			result.MissingKeys = append(result.MissingKeys, formatKeys([]int64{k})[0])
 			log.Errorf("[rebuild-projection] retained key %d missing/tombstoned — SLOT LOST (count=%d): %v", k, lostKeys, err)
@@ -150,9 +128,6 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 			EventType: ev.EventType, EventSummary: ev.EventSummary,
 			Timestamp: ev.Timestamp, Role: string(tagentevent.EventTypeRole(ev.EventType)),
 		}
-		// Meditation reseed (snapshot side, event-sourced-projection D3 /
-		// fresh-eyes C): trigger_source now persists in agent_output Metadata
-		// (buildTurnAttribution) — unreadable before that stamp existed.
 		if ev.EventType == tagentevent.TypeAgentOutput &&
 			ev.Metadata[tagentevent.MetaKeyTriggerSource] == "meditation" {
 			cm.contextCompressor.MarkMeditationKey(ev.EventKey)
@@ -161,33 +136,18 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	result.Truncated += lostKeys
 	final := make([]memory.EventReference, 0, len(ordered))
 	for _, ref := range ordered {
-		if ref.EventKey != 0 { // dropped placeholders (invalid zero key)
+		if ref.EventKey != 0 {
 			final = append(final, ref)
 		}
 	}
 	result.Projected += len(final)
 	cm.projection.Replace(final)
 
-	// Seed fullBoundary from the payload — the exact runtime state at fold
-	// time (under-budget rounds never touch it), NOT a recompute over
-	// snapshot+tail (that would shift the recent window and change renders).
 	cm.contextCompressor.SetFullBoundary(payload.FullBoundary)
 
-	// 2) Tail replay: events written AFTER the compaction event. Three bans
-	//    (fresh-eyes A/B): no StartTime approximation (dual-time divergence),
-	//    no Timestamp-order replay (runtime append order ≡ EventKey write
-	//    order; stragglers invert), no silent truncation (paginated).
 	tail, _ := cm.fetchTailEvents(snapKey, result)
 	result.Scanned += len(tail)
 	for _, ev := range tail {
-		// §5.7: receipt confirmation is NEVER harvested from this scan — the startup
-		// reconcile inventories outstanding envelopes and checks each one's own
-		// fixed key directly; a key outside the snapshot/tail window must not be
-		// missed. Compaction events are fact-chain records, never projection refs (the
-		// double-representation guard) alongside registry data and inline tool
-		// records — §5.5: the classification is the event package's single
-		// predicate, shared verbatim by the normal-commit, spill-replay and
-		// cold-start paths.
 		if tagentevent.IsNonProjectionRecord(ev.EventType, ev.Metadata) {
 			continue
 		}
@@ -199,16 +159,9 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 		snapKey, result.Mode, len(final), len(tail), payload.FullBoundary, lostKeys, time.Since(rebuildStart))
 }
 
-// fallbackCap bounds the D1 fallback full replay: a chain without any
-// compaction anchor may be arbitrarily long, so keep the NEWEST fallbackCap
-// events and seed the truncation point as the full boundary (2026-09-13
-// user expectation: WAL is the durable record — recover even without
-// compaction).
-// DEPRECATED 2026-09-16 (host directive): full-replay cap removed. A chain
-// that fit before a restart must fit after it — dropping the oldest events on
-// rebuild is data loss, not memory hygiene. Long-chain bounding is the job of
-// compaction anchors, not an arbitrary replay cap. Symbol kept (referenced by
-// tests/legacy comments) but no longer applied as a truncation bound.
+// fallbackCap 是历史遗留符号，完整回放的上限取消：重建时丢掉最旧事件属于数据丢失，不是内存治理。
+// 约束长链是 compaction 锚点的职责。用户预期是「WAL 是持久记录——没有压缩锚点也要能复原」，
+// 因此重启前能容纳的链，重启后必须同样能容纳。该符号仍被测试与注释引用，但不作为截断上限生效。
 const fallbackCap = 0
 
 // appendProjectionRef appends ev to the projection as an EventReference,
@@ -225,26 +178,26 @@ func (cm *ContextManager) appendProjectionRef(ev memory.FullEvent) {
 	})
 }
 
-// rebuildProjectionFallback is the D1 fallback for chains WITHOUT any
-// compaction anchor (snapKey==0): full paginated replay, then FILTER non-
-// projection records FIRST, then keep the NEWEST fallbackCap VALID events
-// (resident-readiness-plan 3.9 — the old take-500-then-filter let registry/
-// receipt records crowd out real history). The oldest kept key is seeded as
-// fullBoundary so recent-window logic sees a consistent truncation marker.
-// Space stays bounded; scan cost stays O(history) — no second checkpoint.
+// rebuildProjectionFallback rebuilds chains WITHOUT any compaction anchor
+// (snapKey==0): full paginated replay, filter non-projection records FIRST, then
+// keep the NEWEST fallbackCap valid events — the order matters, see the wiki.
+// The oldest kept key is seeded as fullBoundary so recent-window logic sees a
+// consistent truncation marker. Space stays bounded and scan cost stays
+// O(history): there is no second checkpoint.
+// 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
 func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	all, _ := cm.fetchTailEvents(0, result)
 	result.Scanned += len(all)
 	valid := make([]memory.FullEvent, 0, len(all))
 	for i := range all {
 		if tagentevent.IsNonProjectionRecord(all[i].EventType, all[i].Metadata) {
-			continue // task/receipt/snapshot records never occupy the 500 slots
+			continue
 		}
 		valid = append(valid, all[i])
 	}
 	if len(valid) == 0 {
 		if result.PagesFailed > 0 || result.BatchErrors > 0 {
-			result.Status = "failed" // an error swallowed as "empty chain" is a lie
+			result.Status = "failed"
 			log.Errorf("[rebuild-projection] fallback: chain unreadable (not empty) — see error counters")
 			return
 		}
@@ -255,20 +208,17 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	if fallbackCap > 0 && len(all) > fallbackCap {
 		truncated = true
 	}
-	for i := range valid { // fetchTailEvents already returns EventKey-ascending
+	for i := range valid {
 		if tagentevent.IsNonProjectionRecord(valid[i].EventType, valid[i].Metadata) {
 			continue
 		}
 		cm.appendProjectionRef(valid[i])
 		result.Projected++
 	}
-	boundary := valid[0].EventKey // oldest kept event = truncation marker
+	boundary := valid[0].EventKey
 	cm.contextCompressor.SetFullBoundary(boundary)
 	log.Infof("[rebuild-projection] fallback rebuild: scanned=%d oldest_kept=%d boundary=%d truncated=%v (mode=fallback, no compaction anchor)",
 		result.Scanned, all[0].EventKey, boundary, truncated)
-	// hardening-review-batch2 7.1（partial 显式化）：截断必须可被调用方/日志
-	// 辨识——VERDICT 行统一两模式的完整性结论（snapshot 模式的对应结论在
-	// 主路径汇总行的 lostKeys 字段）。
 	if truncated || result.PagesFailed > 0 || result.BatchErrors > 0 {
 		log.Errorf("[rebuild-projection] VERDICT: PARTIAL (fallback truncated=%v to %d of %d events, fetchFailures=%v; no compaction anchor — run a compaction to bound future chains)", truncated, len(all), result.Scanned, result.PagesFailed+result.BatchErrors)
 	} else {
@@ -276,12 +226,12 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	}
 }
 
-// fetchTailEvents returns the events with EventKey strictly greater than
+// tailFetchStats fetchTailEvents returns the events with EventKey strictly greater than
 // afterKey (write axis), key-ascending. Pagination runs until a short page;
 // refs are key-sorted before the batched GetEvents (which preserves input
 // order and skips missing keys).
 //
-// KNOWN DEVIATION (review 🟡5): rebuilt refs derive Role from
+// KNOWN DEVIATION: rebuilt refs derive Role from
 // EventTypeRole (tool-result events → "user"), while the runtime path
 // appends the original message Role ("tool"). Rendering reads
 // ref.EventType exclusively (renderTimelineMessage), so the rendered
@@ -336,10 +286,7 @@ func (cm *ContextManager) fetchTailEvents(afterKey int64, result *RecoveryResult
 			result.BatchErrors++
 		}
 		log.Errorf("[rebuild-projection] tail batch GetEvents failed: %v", err)
-		// partial events are still usable — keep going with what we got
 	}
-	// Key-set reconciliation (3.8): a no-error short read is STILL a hole —
-	// request keys vs returned keys must match, else record the difference.
 	got := make(map[int64]bool, len(evs))
 	for _, ev := range evs {
 		got[ev.EventKey] = true

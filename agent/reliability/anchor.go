@@ -8,18 +8,13 @@ import (
 	"sync"
 )
 
-// ==================== AnchorStore（T-G · 冥想门控锚点持久化）====================
-//
-// MeditationManager 的三个门控锚点（novelty/idle/last-meditation）是内存 atomic，重启即丢失
-// → 重启后冥想门控「失忆」：可能立即误触发冥想（idle 锚点归零 → 认为已空闲很久），或错误
-// 计算 novelty（lastMeditation 归零 → 认为从未冥想）。AnchorStore 把它们持久化到单 JSON 文件
-// （原子写），启动时 Load 恢复，锚点更新时 Save——跨重启保留冥想门控连续性（常驻可靠性）。
-
 // MeditationAnchors 是冥想门控锚点的持久化快照（Unix ms）。
+//
+// 锚点跨重启持久；缺失即视为 0。
 type MeditationAnchors struct {
-	LastUserInput  int64 `json:"last_user_input"` // novelty gate 锚点
-	LastTurnEnd    int64 `json:"last_turn_end"`   // idle gate 锚点
-	LastMeditation int64 `json:"last_meditation"` // 最近有效冥想时刻
+	LastUserInput  int64 `json:"last_user_input"`
+	LastTurnEnd    int64 `json:"last_turn_end"`
+	LastMeditation int64 `json:"last_meditation"`
 }
 
 // AnchorStore 持久化冥想锚点（单 JSON 文件，tmp+rename 原子写）。并发安全。
@@ -53,7 +48,7 @@ func (s *AnchorStore) Load() (MeditationAnchors, error) {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return a, nil // 首次启动
+			return a, nil
 		}
 		return a, err
 	}

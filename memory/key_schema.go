@@ -6,41 +6,18 @@ import (
 	"strings"
 )
 
-// ==================== KV Key Schema ====================
-//
-// Key format (used with RustViking RocksDB KV store):
-//
-// Event content:
-//   {pid}:evt:{window_ts}:{seq}        → JSON FullEvent content
-//   // pid = PartitionID (0-2047)
-//   // window_ts = timestamp / windowSize * windowSize (hour-aligned epoch seconds)
-//   // seq = event sequence number within the segment (0, 1, 2, ...)
-//
-// Segment offset index:
-//   {pid}:idx:{event_key}              → {window_ts}:{seq} (points back to event key)
-//   // Used for O(1) lookup from EventKey → segment position
-//
-// Segment metadata:
-//   {pid}:meta:{window_ts}             → JSON segment metadata
-//
-// Tombstone marker:
-//   {pid}:tomb:{event_key}             → "" (key existence = tombstoned)
-//
-// Compacted segments (L2 daily, L3 weekly) REUSE the same key formats above
-// with a coarser window_ts (day/week aligned); the layer lives in the
-// segment metadata (SegmentMeta.Layer), not in the key.
-
 const (
-	// Key components
+	// keySep 是键各段之间的分隔符。四类键形与"压实段复用同一键形、层位记在段元数据"的
+	// 约定见文档。
 	keySep = ":"
 
-	// Key type prefixes
+	// keyPrefixEvt Key type prefixes
 	keyPrefixEvt  = "evt"
 	keyPrefixIdx  = "idx"
 	keyPrefixMeta = "meta"
 	keyPrefixTomb = "tomb"
 
-	// Default window size: 1 hour in seconds
+	// DefaultWindowSize Default window size: 1 hour in seconds
 	DefaultWindowSize int64 = 3600
 )
 
@@ -58,8 +35,6 @@ func WindowTimestampFromEventKey(eventKey int64, windowSize int64) int64 {
 	tsSec := TimestampFromEventKey(eventKey)
 	return WindowTimestamp(tsSec, windowSize)
 }
-
-// ==================== Key Builders ====================
 
 // EventKeyStr builds the RocksDB key for storing event content.
 // Format: {pid}:evt:{window_ts}:{seq}
@@ -85,15 +60,13 @@ func TombstoneKeyStr(pid int, eventKey int64) string {
 	return fmt.Sprintf("%d%s%s%s%d", pid, keySep, keyPrefixTomb, keySep, eventKey)
 }
 
-// ==================== Key Parsers ====================
-
 // ParsedKey contains the components extracted from a KV key.
 type ParsedKey struct {
 	PartitionID int
-	KeyType     string // "evt", "idx", "meta", "tomb"
-	WindowTS    int64  // meaningful for evt, meta keys
-	Seq         int    // meaningful for evt keys
-	EventKey    int64  // meaningful for idx, tomb keys
+	KeyType     string
+	WindowTS    int64
+	Seq         int
+	EventKey    int64
 }
 
 // ParseKey parses a KV key string into its components.
@@ -116,7 +89,6 @@ func ParseKey(key string) (*ParsedKey, error) {
 
 	switch pk.KeyType {
 	case keyPrefixEvt:
-		// {pid}:evt:{window_ts}:{seq}
 		if len(parts) < 4 {
 			return nil, fmt.Errorf("invalid event key format: %s", key)
 		}
@@ -130,7 +102,6 @@ func ParseKey(key string) (*ParsedKey, error) {
 		}
 
 	case keyPrefixIdx:
-		// {pid}:idx:{event_key}
 		if len(parts) < 3 {
 			return nil, fmt.Errorf("invalid index key format: %s", key)
 		}
@@ -140,7 +111,6 @@ func ParseKey(key string) (*ParsedKey, error) {
 		}
 
 	case keyPrefixMeta:
-		// {pid}:meta:{window_ts}
 		if len(parts) < 3 {
 			return nil, fmt.Errorf("invalid meta key format: %s", key)
 		}
@@ -150,7 +120,6 @@ func ParseKey(key string) (*ParsedKey, error) {
 		}
 
 	case keyPrefixTomb:
-		// {pid}:tomb:{event_key}
 		if len(parts) < 3 {
 			return nil, fmt.Errorf("invalid tombstone key format: %s", key)
 		}
@@ -165,8 +134,6 @@ func ParseKey(key string) (*ParsedKey, error) {
 
 	return pk, nil
 }
-
-// ==================== Prefix Scans ====================
 
 // PartitionPrefix returns the prefix for all keys in a partition.
 func PartitionPrefix(pid int) string {

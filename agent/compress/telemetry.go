@@ -1,14 +1,5 @@
 package compress
 
-// Telemetry channel (attention-budget-architecture L1/L2): task-settle
-// notifications are machine telemetry, not conversational input — their
-// retention is governed by CONSUMPTION STATE, not segment age or adjacency.
-// The dispositions here are a pure deterministic fold over (projection ref
-// order + settle fact metadata): the consuming turn is the first
-// agent_output after the notice; externalization is decided by the lineage
-// the Origin courier stamped on the notice. Zero new persistence, zero LLM
-// (specs/telemetry-channel: 消费状态决定遥测退出时点 / 跨重启消费状态重建).
-
 import (
 	"context"
 	"strings"
@@ -17,7 +8,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// Telemetry disposition values for settle-notice refs (keyed by EventKey).
+// TelemActive Telemetry disposition values for settle-notice refs (keyed by EventKey).
 const (
 	// TelemActive: not yet consumed (no reclaim turn produced after it).
 	// It must never be demoted or L3-archived — at-least-once reaches the
@@ -60,9 +51,9 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
 				continue
 			}
 			if consumer < 0 {
-				consumer = j // the reclaim turn that consumed this notice
+				consumer = j
 			} else {
-				outputsAfter++ // further turns have completed since
+				outputsAfter++
 			}
 		}
 		switch {
@@ -71,7 +62,7 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
 		case isExternalizedNotice(ctx, store, ref):
 			out[ref.EventKey] = TelemDemote
 		case outputsAfter >= keepRecent:
-			out[ref.EventKey] = TelemDemote // internal notice aged out of its reminder window
+			out[ref.EventKey] = TelemDemote
 		default:
 			out[ref.EventKey] = TelemInternal
 		}
@@ -101,7 +92,5 @@ func isExternalizedNotice(ctx context.Context, store memory.MemoryStore, ref mem
 	if ts == "" || internalLineageValues[ts] {
 		return false
 	}
-	// task-sourced notices spawned BY a user/external turn are deliverable
-	// back to that origin — the reclaim output externalizes the notice.
 	return true
 }

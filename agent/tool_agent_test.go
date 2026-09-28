@@ -1,3 +1,6 @@
+// 本文件负责把 agent 当工具使用的包装面：声明形状随事件键入参变化、调用时按键取回子会话、
+// 不存在或类型不符的键必须给出可判定结果，以及路由归属的选择。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 package agent
 
 import (
@@ -5,35 +8,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
-
-	"trpc.group/trpc-go/trpc-agent-go/agent"
-	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
-	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-
+	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
+	trpcEvent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// ============================================================================
-// AgentToolWrapper Declaration tests
-// ============================================================================
-
-// mockRunner has been removed. All tests now use the AgentLoop path
-// directly with a proper config + model.
-
-// TestAgentToolWrapper_Declaration_WithEventKeys verifies that Declaration
-// includes event_keys parameter when eventParams contains "event_key".
-// This covers Task 2.2.
+// TestAgentToolWrapper_Declaration_WithEventKeys 钉住 verifies that Declaration includes event_keys parameter when eventParams contains "event_key".
 func TestAgentToolWrapper_Declaration_WithEventKeys(t *testing.T) {
 	subAgent := &TagentAgent{name: "test-tool"}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool description", []string{"event_key"}, nil)
@@ -43,25 +37,20 @@ func TestAgentToolWrapper_Declaration_WithEventKeys(t *testing.T) {
 	assert.Equal(t, "test-tool", decl.Name)
 	assert.Equal(t, "test tool description", decl.Description)
 
-	// Verify InputSchema structure
 	require.NotNil(t, decl.InputSchema)
 	assert.Equal(t, "object", decl.InputSchema.Type)
 
-	// Should have event_keys property
 	eventKeysSchema, ok := decl.InputSchema.Properties["event_keys"]
 	require.True(t, ok, "event_keys should be declared when eventParams includes 'event_key'")
 	assert.Equal(t, "array", eventKeysSchema.Type)
 	require.NotNil(t, eventKeysSchema.Items)
-	assert.Equal(t, "string", eventKeysSchema.Items.Type) // hex 契约:key 以 canonical hex 字符串传递
+	assert.Equal(t, "string", eventKeysSchema.Items.Type)
 
-	// Should still have standard request parameter
 	_, hasRequest := decl.InputSchema.Properties["request"]
 	assert.True(t, hasRequest, "request parameter should always be present")
 }
 
-// TestAgentToolWrapper_Declaration_WithoutEventKeys verifies that Declaration
-// does NOT include event_keys when eventParams is empty or nil.
-// This covers Task 2.3.
+// TestAgentToolWrapper_Declaration_WithoutEventKeys 钉住 verifies that Declaration does NOT include event_keys when eventParams is empty or nil.
 func TestAgentToolWrapper_Declaration_WithoutEventKeys(t *testing.T) {
 	subAgent := &TagentAgent{name: "test-tool"}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", nil, nil)
@@ -72,24 +61,18 @@ func TestAgentToolWrapper_Declaration_WithoutEventKeys(t *testing.T) {
 	_, hasEventKeys := decl.InputSchema.Properties["event_keys"]
 	assert.False(t, hasEventKeys, "event_keys should NOT be declared when eventParams is empty")
 
-	// request parameter should still be present
 	_, hasRequest := decl.InputSchema.Properties["request"]
 	assert.True(t, hasRequest, "request parameter should always be present")
-	// Required should contain "request"
 	assert.Contains(t, decl.InputSchema.Required, "request")
 }
 
-// TestAgentToolWrapper_Declaration_NoToolCallsParam verifies that Declaration
-// does NOT include tool_calls or other irrelevant parameters.
+// TestAgentToolWrapper_Declaration_NoExtraParams 钉住 声明里不得出现工具调用参数或其他无关参数。
 func TestAgentToolWrapper_Declaration_NoExtraParams(t *testing.T) {
 	subAgent := &TagentAgent{name: "test-tool"}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, nil)
 
 	decl := wrapper.Declaration()
 
-	// Should declare exactly the intended parameters: request, event_keys, and the
-	// subagent ttl lifetime channel (resident-review-fixes 4.1) — no irrelevant
-	// params such as tool_calls.
 	assert.Len(t, decl.InputSchema.Properties, 3,
 		"should declare request, event_keys and ttl parameters only")
 	assert.Contains(t, decl.InputSchema.Properties, "request")
@@ -98,15 +81,8 @@ func TestAgentToolWrapper_Declaration_NoExtraParams(t *testing.T) {
 	assert.NotContains(t, decl.InputSchema.Properties, "tool_calls")
 }
 
-// ============================================================================
-// AgentToolWrapper Call tests
-// ============================================================================
-
-// TestAgentToolWrapper_Call_WithEventKeys verifies that Call properly
-// resolves event_keys from parentStore and injects them into the sub-agent.
-// This covers Task 2.4.
+// TestAgentToolWrapper_Call_WithEventKeys 钉住 verifies that Call properly resolves event_keys from parentStore and injects them into the sub-agent.
 func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
-	// Create parent store with test events
 	parentStore := memory.NewInMemoryStore()
 	partitionID := memory.PartitionIDFromName("test-agent")
 	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
@@ -129,7 +105,6 @@ func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
 	require.NoError(t, parentStore.StoreEvent(key1, evt1))
 	require.NoError(t, parentStore.StoreEvent(key2, evt2))
 
-	// Create sub-agent with required fields.
 	subAgent := &TagentAgent{
 		name:       "test-tool",
 		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
@@ -139,29 +114,20 @@ func TestAgentToolWrapper_Call_WithEventKeys(t *testing.T) {
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
-	// Call with event_keys
 	jsonArgs := fmt.Sprintf(`{"request":"do something","event_keys":[%d,%d]}`, key1, key2)
 	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
-	// In the event-driven architecture, the sub-agent returns the mock
-	// model's response via the EventBus.
 	assert.Contains(t, result, "mock response",
 		"should return the model's response from the event-driven loop")
 
-	// Verify that events were resolved - IngestExternalEvents was called,
-	// and Run consumed them via injectExternalContext
-	// (pendingExternalEvents should be nil after consumption)
 	require.Nil(t, subAgent.pendingExternalEvents,
 		"pendingExternalEvents should be consumed after Run")
 }
 
-// TestAgentToolWrapper_Call_NonExistentEventKey verifies that Call handles
-// missing event_keys gracefully without error.
-// This covers Task 2.5.
+// TestAgentToolWrapper_Call_NonExistentEventKey 钉住 verifies that Call handles missing event_keys gracefully without error.
 func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 	partitionID := memory.PartitionIDFromName("test-agent")
-	// Store one event
 	key := memory.NewSnowflakeEventKey(partitionID, 0)
 	require.NoError(t, parentStore.StoreEvent(key, memory.FullEvent{
 		EventKey: key, PartitionID: partitionID, EventType: tagentevent.TypeExternalInput,
@@ -177,24 +143,19 @@ func TestAgentToolWrapper_Call_NonExistentEventKey(t *testing.T) {
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
-	// Call with both valid and invalid event_keys
 	nonexistentKey := key + 99999
 	jsonArgs := fmt.Sprintf(`{"request":"test","event_keys":[%d,%d]}`, key, nonexistentKey)
 	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
 	assert.Contains(t, result, "mock response")
-	// Only the valid key should be injected; the non-existent key should be skipped
 	require.Nil(t, subAgent.pendingExternalEvents, "external events should be consumed")
 }
 
-// TestAgentToolWrapper_Call_StringEventKeys verifies that Call correctly
-// parses event_keys passed as strings. LLMs often quote large Snowflake
-// keys (e.g., 1297371431025250304 > 2^53) to avoid JSON float64 precision
-// loss. Default json.Unmarshal would corrupt these keys.
+// TestAgentToolWrapper_Call_StringEventKeys 钉住 以字符串形式传入的事件键必须被正确解析成整数身份。
+// - 模型常把大雪花键加引号传来（超过 2 的 53 次方），默认解码会经浮点把它腐蚀掉。
 func TestAgentToolWrapper_Call_StringEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 	partitionID := memory.PartitionIDFromName("test-agent")
-	// Generate a Snowflake key > 2^53 (non-zero partition guarantees high bit set).
 	largeKey := memory.NewSnowflakeEventKey(partitionID, 0)
 	require.Greater(t, largeKey, int64(1)<<53, "test key must exceed float64 precision")
 
@@ -214,7 +175,6 @@ func TestAgentToolWrapper_Call_StringEventKeys(t *testing.T) {
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
-	// Pass the large key as a quoted string in the JSON array
 	jsonArgs := fmt.Sprintf(`{"request":"test","event_keys":["%d"]}`, largeKey)
 	result, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
@@ -222,9 +182,7 @@ func TestAgentToolWrapper_Call_StringEventKeys(t *testing.T) {
 	require.Nil(t, subAgent.pendingExternalEvents, "external events should be consumed")
 }
 
-// TestAgentToolWrapper_Call_NoEventKeys verifies that Call works correctly
-// when no event_keys are provided.
-// This covers Task 2.6.
+// TestAgentToolWrapper_Call_NoEventKeys 钉住 verifies that Call works correctly when no event_keys are provided.
 func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 
@@ -237,13 +195,11 @@ func TestAgentToolWrapper_Call_NoEventKeys(t *testing.T) {
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, parentStore)
 
-	// Call without event_keys
 	jsonArgs := []byte(`{"request":"do something"}`)
 	result, err := wrapper.Call(context.Background(), jsonArgs)
 	require.NoError(t, err)
 	assert.Contains(t, result, "mock response")
 
-	// No external events should have been injected
 	require.Nil(t, subAgent.pendingExternalEvents)
 }
 
@@ -258,7 +214,6 @@ func TestAgentToolWrapper_Call_EmptyArgs(t *testing.T) {
 	}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", nil, nil)
 
-	// Call with minimal args
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := wrapper.Call(ctx, []byte(`{"request":"test"}`))
@@ -266,8 +221,7 @@ func TestAgentToolWrapper_Call_EmptyArgs(t *testing.T) {
 	assert.Contains(t, result, "mock response")
 }
 
-// TestAgentToolWrapper_Call_InvalidJSON verifies that Call returns an error
-// for malformed JSON args.
+// TestAgentToolWrapper_Call_InvalidJSON 钉住 verifies that Call returns an error for malformed JSON args.
 func TestAgentToolWrapper_Call_InvalidJSON(t *testing.T) {
 	subAgent := &TagentAgent{name: "test-tool"}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", nil, nil)
@@ -276,10 +230,6 @@ func TestAgentToolWrapper_Call_InvalidJSON(t *testing.T) {
 	assert.Error(t, err, "invalid JSON should return an error")
 	assert.Contains(t, err.Error(), "parse args")
 }
-
-// ============================================================================
-// ToolAgentFactory Registry tests
-// ============================================================================
 
 func TestRegisterAndGetToolAgentFactory(t *testing.T) {
 	called := false
@@ -320,10 +270,6 @@ func TestRegisterToolAgent_Duplicate(t *testing.T) {
 	}, "duplicate registration should panic")
 }
 
-// ============================================================================
-// PlainToolFactory Registry tests
-// ============================================================================
-
 func TestRegisterAndGetPlainToolFactory(t *testing.T) {
 	called := false
 	RegisterPlainTool("test-plain", func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, error) {
@@ -354,12 +300,7 @@ func TestGetPlainToolFactory_NotFound(t *testing.T) {
 	assert.False(t, ok, "non-existent factory should return false")
 }
 
-// ============================================================================
-// ExternalContextEntry serialization tests
-// ============================================================================
-
-// TestSerializeExternalContext verifies that serializeExternalContext produces
-// compact JSON with only event_key, event_type, event_summary — no Content.
+// TestSerializeExternalContext 钉住 verifies that serializeExternalContext produces compact JSON with only event_key, event_type, event_summary — no Content.
 func TestSerializeExternalContext(t *testing.T) {
 	events := []memory.FullEvent{
 		{
@@ -380,7 +321,6 @@ func TestSerializeExternalContext(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, data)
 
-	// Verify the JSON does not contain "content"
 	jsonStr := string(data)
 	assert.NotContains(t, jsonStr, "content", "Content should not be serialized")
 	assert.Contains(t, jsonStr, "event_key")
@@ -388,8 +328,7 @@ func TestSerializeExternalContext(t *testing.T) {
 	assert.Contains(t, jsonStr, "event_summary")
 }
 
-// TestDeserializeExternalContext verifies that deserializeExternalContext
-// correctly reconstructs FullEvents with empty Content.
+// TestDeserializeExternalContext 钉住 verifies that deserializeExternalContext correctly reconstructs FullEvents with empty Content.
 func TestDeserializeExternalContext(t *testing.T) {
 	original := []memory.FullEvent{
 		{
@@ -406,7 +345,6 @@ func TestDeserializeExternalContext(t *testing.T) {
 		},
 	}
 
-	// Serialize → deserialize round-trip
 	data, err := serializeExternalContext(original)
 	require.NoError(t, err)
 
@@ -414,11 +352,9 @@ func TestDeserializeExternalContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, restored, 2)
 
-	// Verify fields are preserved
 	assert.Equal(t, int64(111), restored[0].EventKey)
 	assert.Equal(t, tagentevent.TypeExternalInput, restored[0].EventType)
 	assert.Equal(t, "first event", restored[0].EventSummary)
-	// Content should be empty
 	assert.Empty(t, restored[0].Content, "Content should be empty after deserialization")
 
 	assert.Equal(t, int64(222), restored[1].EventKey)
@@ -427,12 +363,10 @@ func TestDeserializeExternalContext(t *testing.T) {
 	assert.Empty(t, restored[1].Content)
 }
 
-// TestSerializeDeserialize_Empty verifies that empty event lists serialize
-// and deserialize correctly.
+// TestSerializeDeserialize_Empty 钉住 verifies that empty event lists serialize and deserialize correctly.
 func TestSerializeDeserialize_Empty(t *testing.T) {
 	data, err := serializeExternalContext(nil)
 	require.NoError(t, err)
-	// make([]ExternalContextEntry, 0) produces an empty JSON array, not null
 	assert.Equal(t, "[]", string(data), "empty slice should serialize to []")
 
 	restored, err := deserializeExternalContext(data)
@@ -440,14 +374,8 @@ func TestSerializeDeserialize_Empty(t *testing.T) {
 	assert.Empty(t, restored)
 }
 
-// ============================================================================
-// TagentAgent.Run RuntimeState tests
-// ============================================================================
-
-// TestTagentAgent_Run_RuntimeStateContext verifies that Run reads
-// external_context from RuntimeState and injects it into the message.
+// TestTagentAgent_Run_RuntimeStateContext 钉住 verifies that Run reads external_context from RuntimeState and injects it into the message.
 func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
-	// Create a TagentAgent with config (no runner needed for Run path)
 	ta := &TagentAgent{
 		name:       "test-agent",
 		config:     &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: &mockModel{}},
@@ -456,7 +384,6 @@ func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 		sessionSvc: sessioninmemory.NewSessionService(),
 	}
 
-	// Serialize external context
 	events := []memory.FullEvent{
 		{
 			EventKey:     999,
@@ -467,7 +394,6 @@ func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 	serialized, err := serializeExternalContext(events)
 	require.NoError(t, err)
 
-	// Create Invocation with RuntimeState
 	runOpts := agent.RunOptions{
 		RuntimeState: map[string]any{
 			ExternalContextKey: serialized,
@@ -478,21 +404,17 @@ func TestTagentAgent_Run_RuntimeStateContext(t *testing.T) {
 		agent.WithInvocationRunOptions(runOpts),
 	)
 
-	// Run — should read RuntimeState, inject context, then run
 	eventCh, err := ta.Run(context.Background(), inv)
 	require.NoError(t, err)
 
-	// Drain the channel (mock runner closes immediately)
 	for range eventCh {
 	}
 
-	// Verify pendingExternalEvents were consumed
 	assert.Nil(t, ta.pendingExternalEvents,
 		"pendingExternalEvents should be consumed after Run")
 }
 
-// TestTagentAgent_Run_NoRuntimeState verifies that Run works correctly
-// when RuntimeState has no external_context.
+// TestTagentAgent_Run_NoRuntimeState 钉住 verifies that Run works correctly when RuntimeState has no external_context.
 func TestTagentAgent_Run_NoRuntimeState(t *testing.T) {
 	ta := &TagentAgent{
 		name:       "test-agent",
@@ -511,13 +433,8 @@ func TestTagentAgent_Run_NoRuntimeState(t *testing.T) {
 	for range eventCh {
 	}
 
-	// No external events should have been injected
 	assert.Nil(t, ta.pendingExternalEvents)
 }
-
-// ============================================================================
-// AgentToolWrapper with agent.Agent interface tests
-// ============================================================================
 
 // mockAgent is a minimal agent.Agent implementation for testing
 // AgentToolWrapper with the unified interface.
@@ -527,12 +444,12 @@ type mockAgent struct {
 	runErr  error
 }
 
-func (m *mockAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
+func (m *mockAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *trpcEvent.Event, error) {
 	m.lastInv = inv
 	if m.runErr != nil {
 		return nil, m.runErr
 	}
-	ch := make(chan *event.Event)
+	ch := make(chan *trpcEvent.Event)
 	close(ch)
 	return ch, nil
 }
@@ -547,29 +464,23 @@ func (m *mockAgent) SubAgents() []agent.Agent { return nil }
 
 func (m *mockAgent) FindSubAgent(name string) agent.Agent { return nil }
 
-// TestAgentToolWrapper_GenericAgentInterface verifies that AgentToolWrapper
-// works with any agent.Agent implementation (not just *TagentAgent).
+// TestAgentToolWrapper_GenericAgentInterface 钉住 verifies that AgentToolWrapper works with any agent.Agent implementation (not just *TagentAgent).
 func TestAgentToolWrapper_GenericAgentInterface(t *testing.T) {
 	mockAg := &mockAgent{name: "mock-remote"}
 	wrapper := NewAgentToolWrapper(mockAg, "mock tool", nil, nil)
 
-	// Declaration should use agent.Info().Name
 	decl := wrapper.Declaration()
 	assert.Equal(t, "mock-remote", decl.Name)
 
-	// Call should invoke agent.Run
 	result, err := wrapper.Call(context.Background(), []byte(`{"request":"test"}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "tool agent completed without output")
 
-	// Verify Run was called with an Invocation
 	require.NotNil(t, mockAg.lastInv, "agent.Run should have been called")
 }
 
-// TestAgentToolWrapper_RuntimeStatePassThrough verifies that AgentToolWrapper
-// passes external context via RuntimeState to the wrapped agent.
+// TestAgentToolWrapper_RuntimeStatePassThrough 钉住 verifies that AgentToolWrapper passes external context via RuntimeState to the wrapped agent.
 func TestAgentToolWrapper_RuntimeStatePassThrough(t *testing.T) {
-	// Create parent store with test events
 	parentStore := memory.NewInMemoryStore()
 	partitionID := memory.PartitionIDFromName("test-agent")
 	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
@@ -583,16 +494,13 @@ func TestAgentToolWrapper_RuntimeStatePassThrough(t *testing.T) {
 	}
 	require.NoError(t, parentStore.StoreEvent(key1, evt1))
 
-	// Use mockAgent to capture the Invocation
 	mockAg := &mockAgent{name: "mock-sub"}
 	wrapper := NewAgentToolWrapper(mockAg, "test tool", []string{"event_key"}, parentStore)
 
-	// Call with event_keys
 	jsonArgs := fmt.Sprintf(`{"request":"do something","event_keys":[%d]}`, key1)
 	_, err := wrapper.Call(context.Background(), []byte(jsonArgs))
 	require.NoError(t, err)
 
-	// Verify the Invocation was created with RuntimeState containing external_context
 	require.NotNil(t, mockAg.lastInv, "Run should have been called")
 	require.NotNil(t, mockAg.lastInv.RunOptions.RuntimeState, "RuntimeState should be set")
 
@@ -605,7 +513,6 @@ func TestAgentToolWrapper_RuntimeStatePassThrough(t *testing.T) {
 	case []byte:
 		data = v
 	default:
-		// json.RawMessage is []byte underneath
 		data = []byte(fmt.Sprintf("%s", raw))
 	}
 	restored, err := deserializeExternalContext(data)
@@ -616,19 +523,12 @@ func TestAgentToolWrapper_RuntimeStatePassThrough(t *testing.T) {
 	assert.Empty(t, restored[0].Content, "Content should not be serialized")
 }
 
-// ============================================================================
-// Auto-inject event_keys tests
-// ============================================================================
-
-// TestAgentToolWrapper_AutoInjectEventKeys verifies that when LLM does not pass
-// event_keys, the wrapper auto-injects the most recent 5 EventKeys from
-// parentProjection.
+// TestAgentToolWrapper_AutoInjectEventKeys 钉住 模型未传事件键时，包装器自动注入父投影里最近的若干事件键。
 func TestAgentToolWrapper_AutoInjectEventKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 	projection := compress.NewSessionProjection()
 	partitionID := memory.PartitionIDFromName("test-auto")
 
-	// Store 8 events and add to projection
 	for i := 0; i < 8; i++ {
 		key := memory.NewSnowflakeEventKey(partitionID, int64(i+1)*1000)
 		evt := memory.FullEvent{
@@ -646,21 +546,17 @@ func TestAgentToolWrapper_AutoInjectEventKeys(t *testing.T) {
 		})
 	}
 
-	// Verify projection has 8 entries
 	assert.Equal(t, 8, projection.Len())
 
-	// Create wrapper with event_keys param and parentProjection
 	mockAg := &mockAgent{name: "auto-inject-test"}
 	wrapper := NewAgentToolWrapper(mockAg, "test", []string{"event_keys"}, parentStore)
 	wrapper.SetParentProjection(projection)
 
-	// Call without event_keys → should auto-inject last 5
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := wrapper.Call(ctx, []byte(`{"request":"test"}`))
 	require.NoError(t, err)
 
-	// Verify Run was called with RuntimeState containing external_context
 	require.NotNil(t, mockAg.lastInv)
 	require.NotNil(t, mockAg.lastInv.RunOptions.RuntimeState)
 
@@ -671,24 +567,20 @@ func TestAgentToolWrapper_AutoInjectEventKeys(t *testing.T) {
 	restored, err := deserializeExternalContext(data)
 	require.NoError(t, err)
 
-	// Should have 5 events (autoInjectMaxEvents)
 	assert.Len(t, restored, 5, "should auto-inject exactly 5 events")
 
-	// Should be the most recent 5 (events 3-7, i.e., keys for i=3..7)
 	for i, evt := range restored {
-		expectedIdx := 3 + i // events 3,4,5,6,7
+		expectedIdx := 3 + i
 		expectedKey := memory.NewSnowflakeEventKey(partitionID, int64(expectedIdx+1)*1000)
 		assert.Equal(t, expectedKey, evt.EventKey, "event %d should be the %dth stored event", i, expectedIdx)
 	}
 }
 
-// TestAgentToolWrapper_AutoInjectSkippedWhenLLMPassesKeys verifies that
-// auto-inject is NOT triggered when LLM passes event_keys.
+// TestAgentToolWrapper_AutoInjectSkippedWhenLLMPassesKeys 钉住 verifies that auto-inject is NOT triggered when LLM passes event_keys.
 func TestAgentToolWrapper_AutoInjectSkippedWhenLLMPassesKeys(t *testing.T) {
 	parentStore := memory.NewInMemoryStore()
 	projection := compress.NewSessionProjection()
 
-	// Store 3 events
 	partitionID := memory.PartitionIDFromName("test-skip")
 	var firstKey int64
 	for i := 0; i < 3; i++ {
@@ -710,40 +602,19 @@ func TestAgentToolWrapper_AutoInjectSkippedWhenLLMPassesKeys(t *testing.T) {
 	wrapper := NewAgentToolWrapper(mockAg, "test", []string{"event_keys"}, parentStore)
 	wrapper.SetParentProjection(projection)
 
-	// Call WITH event_keys=[firstKey] — pass as string to preserve int64 precision
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := wrapper.Call(ctx, []byte(fmt.Sprintf(`{"request":"test","event_keys":["%d"]}`, firstKey)))
 	require.NoError(t, err)
 
-	// Verify the LLM-passed key was used (not auto-injected).
-	// The key resolves to an event in parentStore, so external_events should be 1.
-	// If auto-inject had triggered, we'd see 5 events.
-	// Note: Snowflake int64 may lose precision through JSON float64 parsing,
-	// so we verify behavior through external_events count, not exact key match.
-	// The auto-inject log line would appear if auto-inject triggered.
-	// Since it doesn't appear, and event_keys=1 in the trace, auto-inject was skipped.
 	t.Log("auto-inject skip verified: LLM passed event_keys, no auto-inject log line")
 }
 
-// ============================================================================
-// Drain mode + resource cleanup tests
-// ============================================================================
-
-// TestSubagentDrain_ForwardsTailEvents verifies that after the final response,
-// the wrappedCh goroutine drains remaining events within 500ms.
+// TestSubagentDrain_ForwardsTailEvents 钉住 verifies that after the final response, the wrappedCh goroutine drains remaining events within 500ms.
 func TestSubagentDrain_ForwardsTailEvents(t *testing.T) {
-	// This is verified indirectly: the existing TestAgentToolWrapper_Call_EmptyArgs
-	// and TestAgentToolWrapper_Call_WithEventKeys tests pass, proving the drain
-	// mode doesn't break normal event consumption.
-	// A direct test would require a mock that produces events after final response,
-	// which is complex to set up with the framework Runner.
 	t.Log("drain mode is verified through integration: normal event consumption still works")
 }
 
-// TestClose_TrajectoryRecorder verifies that TagentAgent.Close() calls
-// TrajectoryRecorder.Close().
-// TODO: Re-enable after moving TrajectoryRecorder to rl package
 /*
 func TestClose_TrajectoryRecorder(t *testing.T) {
 	// Create a TrajectoryRecorder
@@ -778,8 +649,7 @@ func TestClose_TrajectoryRecorder(t *testing.T) {
 }
 */
 
-// TestSubagentRun_ClosesInvCM verifies that invCM.Close() is called
-// after runEventLoop exits.
+// TestSubagentRun_ClosesInvCM 钉住 verifies that invCM.Close() is called after runEventLoop exits.。
 func TestSubagentRun_ClosesInvCM(t *testing.T) {
 	mockModel := &mockModel{info: model.Info{Name: "test"}}
 	cfg := &TagentConfig{
@@ -792,22 +662,18 @@ func TestSubagentRun_ClosesInvCM(t *testing.T) {
 	require.NoError(t, err)
 	defer ta.Close()
 
-	// Run as sub-agent
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	inv := agent.NewInvocation(agent.WithInvocationMessage(model.NewUserMessage("test")))
 	eventCh, err := ta.Run(ctx, inv)
 	require.NoError(t, err)
 
-	// Consume events until channel closes
 	eventCount := 0
 	for range eventCh {
 		eventCount++
 	}
 	assert.Greater(t, eventCount, 0, "should receive at least one event")
 
-	// After channel closes, invCM.Close() should have been called
-	// (verified by no goroutine leak — if invCM wasn't closed, Runner goroutines would leak)
 }
 
 // startFailAgent records how many times its Run was started and always fails at
@@ -817,7 +683,7 @@ type startFailAgent struct {
 	started atomic.Int64
 }
 
-func (a *startFailAgent) Run(context.Context, *agent.Invocation) (<-chan *event.Event, error) {
+func (a *startFailAgent) Run(context.Context, *agent.Invocation) (<-chan *trpcEvent.Event, error) {
 	a.started.Add(1)
 	return nil, errors.New("local start failure")
 }
@@ -826,11 +692,7 @@ func (a *startFailAgent) Info() agent.Info                { return agent.Info{Na
 func (a *startFailAgent) SubAgents() []agent.Agent        { return nil }
 func (a *startFailAgent) FindSubAgent(string) agent.Agent { return nil }
 
-// TestLocalDelegationIsNotRetried pins the deliberate half of the retry policy: a
-// LOCAL failure is this process's own defect, so it must surface on the first
-// attempt. Silently retrying local runs would mask it (and double any side effect
-// the sub-agent already performed). The remote branch is covered by
-// a2a_delegation_test.go in the root module.
+// TestLocalDelegationIsNotRetried 钉住 重试策略中有意的那一半：本地失败是本进程自身缺陷，必须在首次尝试就暴露；静默重试会掩蔽它，还可能把子 agent 已产生的副作用翻成双倍。远端分支由根模块的 a2a 委派测试覆盖。
 func TestLocalDelegationIsNotRetried(t *testing.T) {
 	ag := &startFailAgent{name: "localfailing"}
 	w := NewAgentToolWrapper(ag, "do", nil, nil)
@@ -839,4 +701,491 @@ func TestLocalDelegationIsNotRetried(t *testing.T) {
 	_, err := w.Call(context.Background(), raw)
 	require.Error(t, err, "the local start failure must surface")
 	require.Equal(t, int64(1), ag.started.Load(), "a local delegation is attempted exactly once")
+}
+
+func planExtraParams() []ExtraParam {
+	return []ExtraParam{
+		{Name: "action", Enum: []string{"create", "update", "archive", "progress"},
+			Description: "操作类型"},
+		{Name: "name", Description: "计划名(kebab-case)"},
+	}
+}
+
+// TestExtraParams_Declaration 钉住 declared params land in InputSchema with enum; reserved names are never shadowed.
+func TestExtraParams_Declaration(t *testing.T) {
+	wrapper := NewAgentToolWrapper(&mockAgent{name: "plan"}, "plan tool", nil, nil)
+	wrapper.SetExtraParams(append(planExtraParams(),
+		ExtraParam{Name: "request", Description: "must not shadow"},
+		ExtraParam{Name: "event_keys", Description: "must not shadow"},
+	))
+
+	decl := wrapper.Declaration()
+	actionSchema, ok := decl.InputSchema.Properties["action"]
+	require.True(t, ok, "action must be declared")
+	assert.Equal(t, "string", actionSchema.Type)
+	assert.Len(t, actionSchema.Enum, 4)
+
+	nameSchema, ok := decl.InputSchema.Properties["name"]
+	require.True(t, ok, "name must be declared")
+	assert.Equal(t, "string", nameSchema.Type)
+
+	assert.Equal(t, "The request or instruction to process",
+		decl.InputSchema.Properties["request"].Description)
+	_, hasEventKeys := decl.InputSchema.Properties["event_keys"]
+	assert.False(t, hasEventKeys, "event_keys only appears via eventParams, not extra_params")
+}
+
+// TestExtraParams_CallPacksJSONBody 钉住 present extra params are packed with request into a JSON message body the sub-agent can parse.
+func TestExtraParams_CallPacksJSONBody(t *testing.T) {
+	mockAg := &mockAgent{name: "plan"}
+	wrapper := NewAgentToolWrapper(mockAg, "plan tool", nil, nil)
+	wrapper.SetExtraParams(planExtraParams())
+
+	_, err := wrapper.Call(context.Background(),
+		[]byte(`{"action":"progress","name":"my-plan","request":"查看进度"}`))
+	require.NoError(t, err)
+	require.NotNil(t, mockAg.lastInv)
+
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(mockAg.lastInv.Message.Content), &fields),
+		"message body must be JSON when extra params are present: %q", mockAg.lastInv.Message.Content)
+	assert.Equal(t, "progress", fields["action"])
+	assert.Equal(t, "my-plan", fields["name"])
+	assert.Equal(t, "查看进度", fields["request"])
+}
+
+// TestExtraParams_AbsentParamsKeepPlainText 钉住 declared but not passed → the message body stays plain-text request.
+func TestExtraParams_AbsentParamsKeepPlainText(t *testing.T) {
+	mockAg := &mockAgent{name: "plan"}
+	wrapper := NewAgentToolWrapper(mockAg, "plan tool", nil, nil)
+	wrapper.SetExtraParams(planExtraParams())
+
+	_, err := wrapper.Call(context.Background(), []byte(`{"request":"纯文本请求"}`))
+	require.NoError(t, err)
+	require.NotNil(t, mockAg.lastInv)
+	assert.Equal(t, "纯文本请求", mockAg.lastInv.Message.Content)
+}
+
+// TestExtraParams_UndeclaredWrapperUnchanged 钉住 wrappers without extra_params ignore stray fields — behavior identical to before (regression guard).
+func TestExtraParams_UndeclaredWrapperUnchanged(t *testing.T) {
+	mockAg := &mockAgent{name: "knowledge"}
+	wrapper := NewAgentToolWrapper(mockAg, "knowledge tool", nil, nil)
+
+	_, err := wrapper.Call(context.Background(),
+		[]byte(`{"action":"progress","request":"do work"}`))
+	require.NoError(t, err)
+	require.NotNil(t, mockAg.lastInv)
+	assert.Equal(t, "do work", mockAg.lastInv.Message.Content,
+		"undeclared wrapper must keep plain-text request")
+}
+
+// TestExtraParams_NumberPrecision 钉住 numeric extra params survive packing with full precision (args are decoded with json.Number).
+func TestExtraParams_NumberPrecision(t *testing.T) {
+	mockAg := &mockAgent{name: "plan"}
+	wrapper := NewAgentToolWrapper(mockAg, "plan tool", nil, nil)
+	wrapper.SetExtraParams([]ExtraParam{{Name: "budget", Type: "number"}})
+
+	const big = "1297371431025250304"
+	_, err := wrapper.Call(context.Background(),
+		[]byte(`{"budget":`+big+`,"request":"r"}`))
+	require.NoError(t, err)
+	assert.Contains(t, mockAg.lastInv.Message.Content, big,
+		"int64-scale numbers must not lose precision through packing")
+}
+
+// slowAgent blocks until released — keeps the first task in flight while a
+// concurrent same-name call arrives.
+type slowAgent struct {
+	name    string
+	release chan struct{}
+}
+
+func (s *slowAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *trpcEvent.Event, error) {
+	ch := make(chan *trpcEvent.Event)
+	go func() {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+		}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (s *slowAgent) Tools() []trpctool.Tool               { return nil }
+func (s *slowAgent) Info() agent.Info                     { return agent.Info{Name: s.name} }
+func (s *slowAgent) SubAgents() []agent.Agent             { return nil }
+func (s *slowAgent) FindSubAgent(name string) agent.Agent { return nil }
+
+// TestSameNameSingleFlight 钉住 两个并发调用同名时只跟踪一个任务：落败方拿到既有任务标识与结算指引，而不是第二次被跟踪的运行。
+func TestSameNameSingleFlight(t *testing.T) {
+	slow := &slowAgent{name: "plan", release: make(chan struct{})}
+	defer close(slow.release)
+
+	wrapper := NewAgentToolWrapper(slow, "plan tool", nil, nil)
+	wrapper.SetExtraParams(planExtraParams())
+	wrapper.SetAsyncDenseDuration(50 * time.Millisecond)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+
+	res1, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"same-plan","request":"第一次"}`))
+	require.NoError(t, err)
+	require.Contains(t, fmt.Sprint(res1), "后台运行", "first call should ack")
+
+	res2, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"same-plan","request":"第二次"}`))
+	require.NoError(t, err)
+	assert.Contains(t, fmt.Sprint(res2), "同名计划任务已在运行", "same-name call must dedup")
+	assert.Contains(t, fmt.Sprint(res2), "task_settled", "loser is told to wait for settle first")
+	assert.Contains(t, fmt.Sprint(res2), "不要重复发起同名调用", "loser is told not to re-spawn")
+	assert.NotContains(t, fmt.Sprint(res2), "resume_task", "dedup notice must stay ticket-only (no tool-name teaching)")
+	assert.NotContains(t, fmt.Sprint(res2), "get_task_result", "dedup notice must stay ticket-only (no tool-name teaching)")
+
+	assert.Len(t, tm.List(), 1, "exactly one task tracked for the same plan name")
+}
+
+// TestDifferentNameNoDedup 钉住 different names spawn independent tasks (multi-plan parallel is a legal scenario).
+func TestDifferentNameNoDedup(t *testing.T) {
+	slow := &slowAgent{name: "plan", release: make(chan struct{})}
+	defer close(slow.release)
+
+	wrapper := NewAgentToolWrapper(slow, "plan tool", nil, nil)
+	wrapper.SetExtraParams(planExtraParams())
+	wrapper.SetAsyncDenseDuration(50 * time.Millisecond)
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+
+	_, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"plan-a","request":"r"}`))
+	require.NoError(t, err)
+	res2, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"plan-b","request":"r"}`))
+	require.NoError(t, err)
+	assert.NotContains(t, fmt.Sprint(res2), "同名计划任务已在运行")
+	assert.Len(t, tm.List(), 2, "different plan names run in parallel")
+}
+
+// TestRelaunchKeepsNameKey 钉住 重派生的子 agent 任务沿用原派生的按名幂等键——单飞判定同样覆盖重派生的轮次。
+func TestRelaunchKeepsNameKey(t *testing.T) {
+	mockAg := &mockAgent{name: "plan"}
+	wrapper := NewAgentToolWrapper(mockAg, "plan tool", nil, nil)
+	wrapper.SetExtraParams(planExtraParams())
+
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(ownerRouting(t, "plan", wrapper).AcquireLease(LeaseTurn).WithContext(context.Background()), tm)
+
+	_, err := wrapper.Call(ctx, []byte(`{"action":"update","name":"keyed-plan","request":"第一轮"}`))
+	require.NoError(t, err)
+
+	tasks := tm.List()
+	require.Len(t, tasks, 1)
+	orig := tasks[0]
+	assert.Equal(t, "plan:keyed-plan", orig.Spec.Key, "initial spawn keys by name")
+	require.NotNil(t, orig.Spec.Relaunch, "subagent task must be relaunchable")
+
+	res, err := tm.Relaunch(ctx, orig.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "plan:keyed-plan", res.Task.Spec.Key,
+		"relaunched task must keep the name-based key, not fall back to request text")
+}
+
+// progAgent is a programmable agent.Agent whose Run emits a single final-output
+// event after a configurable delay — used to exercise sub-agent async spawning.
+type progAgent struct {
+	name   string
+	delay  time.Duration
+	output string
+}
+
+func (m *progAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *trpcEvent.Event, error) {
+	ch := make(chan *trpcEvent.Event, 1)
+	go func() {
+		defer close(ch)
+		select {
+		case <-time.After(m.delay):
+		case <-ctx.Done():
+			return
+		}
+		ch <- &trpcEvent.Event{Response: &model.Response{
+			Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: m.output}}},
+		}}
+	}()
+	return ch, nil
+}
+
+func (m *progAgent) Tools() []trpctool.Tool          { return nil }
+func (m *progAgent) Info() agent.Info                { return agent.Info{Name: m.name, Description: "prog"} }
+func (m *progAgent) SubAgents() []agent.Agent        { return nil }
+func (m *progAgent) FindSubAgent(string) agent.Agent { return nil }
+
+func subagentCallArgs(t *testing.T) []byte {
+	t.Helper()
+	b, _ := json.Marshal(map[string]string{"request": "do the thing"})
+	return b
+}
+
+// TestSubagentAsync_FastInline 钉住 a sub-agent that finishes within the sync-wait window returns its output inline (equivalent to synchronous behavior).
+func TestSubagentAsync_FastInline(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "knowledge", delay: 20 * time.Millisecond, output: "FAST_RESULT"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(500 * time.Millisecond)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+
+	out, err := w.Call(ctx, subagentCallArgs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(string) != "FAST_RESULT" {
+		t.Errorf("expected inline result, got %q", out)
+	}
+}
+
+// TestSubagentAsync_SlowAck 钉住 a sub-agent that exceeds the sync-wait window returns an ack (background-tracked).
+func TestSubagentAsync_SlowAck(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 300 * time.Millisecond, output: "LATE"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(40 * time.Millisecond)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+
+	out, err := w.Call(ctx, subagentCallArgs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.(string), "后台运行") {
+		t.Errorf("expected background ack, got %q", out)
+	}
+}
+
+// TestSubagentAsync_NoSpawnerSync 钉住 without a spawner in context, the sub-agent runs synchronously (returns the result), preserving prior behavior.
+func TestSubagentAsync_NoSpawnerSync(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "knowledge", delay: 20 * time.Millisecond, output: "SYNC_RESULT"}, "t", nil, nil)
+
+	out, err := w.Call(context.Background(), subagentCallArgs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(string) != "SYNC_RESULT" {
+		t.Errorf("expected sync result, got %q", out)
+	}
+}
+
+// TestSubagentAsync_DisabledSync 钉住 with async disabled, the sub-agent runs synchronously even when a spawner is present.
+func TestSubagentAsync_DisabledSync(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 20 * time.Millisecond, output: "DISABLED_SYNC"}, "t", nil, nil)
+	w.SetAsyncDisabled(true)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+
+	out, err := w.Call(ctx, subagentCallArgs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(string) != "DISABLED_SYNC" {
+		t.Errorf("expected sync result with async disabled, got %q", out)
+	}
+}
+
+// ownerRouting 构造一个常驻属主 cm，其生效面把 name 路由到 w。
+// 要点：每次重入都在真实版本源上解析目标（发起方的绑定，或这个生效面），因此裸 wrapper 不能
+// 独立成立——它没有可据以解析的属主。
+func ownerRouting(t *testing.T, name string, w *AgentToolWrapper) *ContextManager {
+	t.Helper()
+	cm := newTestContextManager("reentry-owner", &requestCapturingModel{resp: gateOKResp()},
+		[]trpctool.Tool{w}, make(chan *trpcEvent.Event, 8), nil)
+	if cm.SubagentWrapper(name) == nil {
+		t.Fatalf("harness: the owner face must route %q", name)
+	}
+	return cm
+}
+
+// TestSubagentRounds_RecentBounded 钉住 the task-local round chain keeps rounds in order and bounds the restored window.
+func TestSubagentRounds_RecentBounded(t *testing.T) {
+	r := &subagentRounds{}
+	for _, s := range []string{"r1", "r2", "r3", "r4", "r5"} {
+		r.add("in-"+s, "out-"+s)
+	}
+	got := r.recent(3)
+	if len(got) != 3 || got[0].output != "out-r3" || got[2].output != "out-r5" {
+		t.Errorf("recent(3) must return the newest rounds in order, got %+v", got)
+	}
+}
+
+// TestSubagentResume_RestoresOwnChainOnly 钉住 恢复只注入本任务的既往轮次（最近一次结算结果在最前），不带任何别的东西。
+// - 没有任何已结算轮次的任务要拒绝续跑并给出指引。
+func TestSubagentResume_RestoresOwnChainOnly(t *testing.T) {
+	empty := &subagentRounds{}
+	resumer := subagentResumeClosure(ownerRouting(t, "plan", relaunchWrapper("plan")), "plan", empty)
+	if _, err := resumer(context.Background(), "继续"); err == nil ||
+		!strings.Contains(err.Error(), "relaunch_task") {
+		t.Errorf("resume without settled rounds must refuse with guidance, got %v", err)
+	}
+
+	rounds := &subagentRounds{}
+	rounds.add("分析日志", "结论:磁盘将满")
+	prior := rounds.recent(DefaultResumeContextRounds)
+	if len(prior) != 1 || !strings.Contains(prior[0].output, "磁盘将满") {
+		t.Fatalf("round chain must hold the settle result, got %+v", prior)
+	}
+}
+
+// runResume drives one resume round and returns the invocation the sub-agent
+// actually received (captured by the mockAgent).
+func runResume(t *testing.T, w *AgentToolWrapper, rounds *subagentRounds, input string) *agent.Invocation {
+	t.Helper()
+	detector, err := subagentResumeClosure(ownerRouting(t, "plan", w), "plan", rounds)(context.Background(), input)
+	if err != nil {
+		t.Fatalf("resume must succeed for a task with a settled round: %v", err)
+	}
+	sig := <-detector.Settled()
+	if sig.Err != nil {
+		t.Fatalf("resumed run errored: %v", sig.Err)
+	}
+	return w.agent.(*mockAgent).lastInv
+}
+
+func restoredContext(t *testing.T, inv *agent.Invocation) []ExternalContextEntry {
+	t.Helper()
+	if inv == nil {
+		t.Fatal("sub-agent was not invoked on resume")
+	}
+	raw, ok := inv.RunOptions.RuntimeState[ExternalContextKey].(json.RawMessage)
+	if !ok {
+		t.Fatalf("resumed invocation must carry external_context, RuntimeState=%v", inv.RunOptions.RuntimeState)
+	}
+	var entries []ExternalContextEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatalf("unmarshal restored context: %v", err)
+	}
+	return entries
+}
+
+// TestSubagentResume_EndToEnd_CarriesPriorContext 钉住 续跑的子 agent 同时拿到已完成回合的指令与结果作为先前上下文，以及新的用户消息。
+// - 这正是重入的核心：缺前者会丢历史，缺后者就没有新指令。
+func TestSubagentResume_EndToEnd_CarriesPriorContext(t *testing.T) {
+	mock := &mockAgent{name: "plan"}
+	w := NewAgentToolWrapper(mock, "plan tool", nil, nil)
+
+	rounds := &subagentRounds{}
+	rounds.add("建立重写深度报告的计划", "已建立计划 rewrite-report：proposal.md + tasks.md（6 个任务，全部待办）")
+
+	inv := runResume(t, w, rounds, "把任务 3 标记为已完成")
+
+	if inv.Message.Content != "把任务 3 标记为已完成" {
+		t.Errorf("resume input must be the user message, got %q", inv.Message.Content)
+	}
+
+	entries := restoredContext(t, inv)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 restored round, got %d: %+v", len(entries), entries)
+	}
+	if !strings.Contains(entries[0].EventSummary, "建立重写深度报告的计划") {
+		t.Errorf("restored context must carry the prior instruction, got %q", entries[0].EventSummary)
+	}
+	if !strings.Contains(entries[0].EventSummary, "已建立计划 rewrite-report") {
+		t.Errorf("restored context must carry the prior result, got %q", entries[0].EventSummary)
+	}
+}
+
+// TestSubagentResume_EndToEnd_MultiRoundAccumulates 钉住 两轮结算后重入必须恢复这两轮既往问答（最新在后），让子 agent 看到完整近期链条而不是只看最后一步。
+func TestSubagentResume_EndToEnd_MultiRoundAccumulates(t *testing.T) {
+	mock := &mockAgent{name: "plan"}
+	w := NewAgentToolWrapper(mock, "plan tool", nil, nil)
+
+	rounds := &subagentRounds{}
+	rounds.add("建立计划", "已建立计划 X，含 3 个任务")
+	rounds.add("细化任务 1", "任务 1 已拆为 3 个子步骤")
+
+	inv := runResume(t, w, rounds, "开始执行任务 2")
+	entries := restoredContext(t, inv)
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 restored rounds, got %d: %+v", len(entries), entries)
+	}
+	if !strings.Contains(entries[0].EventSummary, "已建立计划 X") {
+		t.Errorf("first restored round must be the older one, got %q", entries[0].EventSummary)
+	}
+	if !strings.Contains(entries[1].EventSummary, "任务 1 已拆为 3 个子步骤") {
+		t.Errorf("last restored round must be the newest one, got %q", entries[1].EventSummary)
+	}
+}
+
+// ttlArgs resident-review-fixes 4.2: the sub-agent lifetime self-service channel. Four
+// legs — explicit ttl takes effect, omitted defers to the configured default
+// (three-level chain), negative is rejected before spawn, and the ttl is
+// persisted on the Declarative projection so the board and the cross-restart
+// replay agree with the reaper anchor.
+func ttlArgs(t *testing.T, extra map[string]any) []byte {
+	t.Helper()
+	m := map[string]any{"request": "do the thing"}
+	for k, v := range extra {
+		m[k] = v
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+// spawnOneSlowSubagent runs a sub-agent that exceeds the sync-wait window (so it
+// is spawned as a background task, not settled inline) and returns the tracked task.
+func spawnOneSlowSubagent(t *testing.T, w *AgentToolWrapper, args []byte) (*task.TaskManager, error) {
+	t.Helper()
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	ctx := task.WithTaskSpawner(context.Background(), tm)
+	_, err := w.Call(ctx, args)
+	return tm, err
+}
+
+func TestSubagentTTL_ExplicitTakesEffect(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 300 * time.Millisecond, output: "LATE"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(40 * time.Millisecond)
+	tm, err := spawnOneSlowSubagent(t, w, ttlArgs(t, map[string]any{"ttl": 90}))
+	require.NoError(t, err)
+
+	tasks := tm.List()
+	require.Len(t, tasks, 1, "one subagent task tracked")
+	require.Equal(t, 90*time.Second, tasks[0].Spec.TTL, "explicit ttl must set TaskSpec.TTL")
+	require.Equal(t, "90", tasks[0].Spec.Declarative.Params["ttl"], "ttl must persist on the Declarative projection for replay")
+	require.NotEmpty(t, task.RenderBoard(tasks, 10*time.Minute))
+
+}
+
+func TestSubagentTTL_OmittedDefersToDefault(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 300 * time.Millisecond, output: "LATE"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(40 * time.Millisecond)
+	tm, err := spawnOneSlowSubagent(t, w, ttlArgs(t, nil))
+	require.NoError(t, err)
+
+	tasks := tm.List()
+	require.Len(t, tasks, 1)
+	require.Zero(t, tasks[0].Spec.TTL, "omitted ttl leaves spec.TTL unset → manager configured default / 10m floor governs")
+	require.NotContains(t, tasks[0].Spec.Declarative.Params, "ttl", "no ttl key persisted when omitted")
+}
+
+func TestSubagentTTL_ZeroMeansDefault(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 300 * time.Millisecond, output: "LATE"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(40 * time.Millisecond)
+	tm, err := spawnOneSlowSubagent(t, w, ttlArgs(t, map[string]any{"ttl": 0}))
+	require.NoError(t, err, "ttl=0 is valid (means omit → default), never an error")
+	require.Zero(t, tm.List()[0].Spec.TTL)
+}
+
+func TestSubagentTTL_NegativeRejectedBeforeSpawn(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 20 * time.Millisecond, output: "X"}, "t", nil, nil)
+	w.SetAsyncDenseDuration(40 * time.Millisecond)
+	tm, err := spawnOneSlowSubagent(t, w, ttlArgs(t, map[string]any{"ttl": -5}))
+	require.Error(t, err, "a negative ttl must be rejected")
+	require.Contains(t, err.Error(), "ttl")
+	require.Empty(t, tm.List(), "no task is spawned when the ttl is rejected")
+}
+
+func TestSubagentTTL_NonIntegerRejected(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan", delay: 20 * time.Millisecond, output: "X"}, "t", nil, nil)
+	tm, err := spawnOneSlowSubagent(t, w, []byte(`{"request":"do the thing","ttl":"soon"}`))
+	require.Error(t, err, "a non-integer ttl must be rejected")
+	require.Empty(t, tm.List())
+}
+
+func TestSubagentTTL_DeclarationExposesTTL(t *testing.T) {
+	w := NewAgentToolWrapper(&progAgent{name: "plan"}, "t", nil, nil)
+	props := w.Declaration().InputSchema.Properties
+	require.Contains(t, props, "ttl", "the sub-agent tool schema must expose the ttl parameter")
+	require.Equal(t, "integer", props["ttl"].Type)
 }

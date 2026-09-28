@@ -1,3 +1,7 @@
+// 本文件负责回合结果的三态归约（完成／失败／取消）与取消时的断点保留：已认领的输入在流中途
+// 取消时不得 ack。
+// 契约: docs/wiki/agent/execution-generations.md#turn-outcome
+// 契约: docs/wiki/platform/reincarnation-notice.md#breakpoint
 package agent
 
 import (
@@ -11,16 +15,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// §5.1 — turn-result reduction. The persistent loop used to treat "RunFlow
-// returned nil" as the sole definition of done, so a model/framework failure
-// carried as a stream event (Response.Error) and a mid-turn shutdown
-// cancellation (deliverEvent false with ctx done) BOTH fell through to the ACK
-// path. These tests lock the reduction of every observed channel into an
-// explicit completed / failed / cancelled result.
-
-// TestReduceTurnOutcome locks the pure decision table across all five channels
-// the design enumerates (start error, response error, cancellation, normal
-// end) and their precedence.
+// TestReduceTurnOutcome 钉住 纯判定表覆盖全部通道并锁住优先级：启动错误、响应错误、取消、正常结束。
 func TestReduceTurnOutcome(t *testing.T) {
 	t.Run("normal end is completed", func(t *testing.T) {
 		require.Equal(t, turnCompleted, reduceTurnOutcome(nil, "", false).status)
@@ -36,15 +31,11 @@ func TestReduceTurnOutcome(t *testing.T) {
 		require.Equal(t, "server_error: rate limited", oc.err)
 	})
 	t.Run("cancellation outranks errors and forms no completion", func(t *testing.T) {
-		// A turn cut short reached no terminal state: cancelled wins even when a
-		// transport error and a response error were already observed in the same
-		// drain, so the loop retains the claim rather than forming a completion.
 		oc := reduceTurnOutcome(context.Canceled, "server_error: partial", true)
 		require.Equal(t, turnCancelled, oc.status)
 		require.Empty(t, oc.err)
 	})
 	t.Run("start error outranks response error", func(t *testing.T) {
-		// A runner that failed to start produced no real response to classify.
 		oc := reduceTurnOutcome(context.DeadlineExceeded, "ignored", false)
 		require.Equal(t, turnFailed, oc.status)
 		require.Contains(t, oc.err, "deadline exceeded")
@@ -61,12 +52,7 @@ func TestReduceTurnOutcome(t *testing.T) {
 	})
 }
 
-// TestRunFlow_ResponseErrorReducesFailed proves the §5.1 core bug at the real
-// RunFlow drain: a model API failure arrives as an event carrying Response.Error
-// while RunFlow itself returns nil (transport OK). The old code never inspected
-// Response.Error, so the turn recorded nothing and the loop read "nil" as
-// success. Run synchronously on the test goroutine, so reading the recorded
-// outcome is race-free.
+// TestRunFlow_ResponseErrorReducesFailed 钉住 模型 API 失败以携带 Response.Error 的事件到达，而 RunFlow 自身返回 nil（传输层是好的）：装配侧必须读出该错误并记为失败，否则循环会把 nil 当成成功。同步跑在测试协程上，读结果无竞争。
 func TestRunFlow_ResponseErrorReducesFailed(t *testing.T) {
 	outputCh := make(chan *event.Event, 100)
 	m := &requestCapturingModel{resp: &model.Response{
@@ -83,9 +69,7 @@ func TestRunFlow_ResponseErrorReducesFailed(t *testing.T) {
 	require.Contains(t, oc.err, "upstream exploded", "the bounded summary is retained for the completion (§5.2)")
 }
 
-// TestRunFlow_NormalDrainCompleted is the pass-after companion: an ordinary
-// productive turn still reduces to completed (the reduction must not over-reach
-// into treating every turn as failed).
+// TestRunFlow_NormalDrainCompleted 钉住 普通有产出的回合仍归约为完成——归约不得扩大化，把每个回合都判成失败。
 func TestRunFlow_NormalDrainCompleted(t *testing.T) {
 	outputCh := make(chan *event.Event, 100)
 	m := &requestCapturingModel{resp: &model.Response{
@@ -99,15 +83,9 @@ func TestRunFlow_NormalDrainCompleted(t *testing.T) {
 	require.Equal(t, turnCompleted, cm.LastTurnOutcome().status)
 }
 
-// TestRunFlow_MidStreamCancelReducesCancelled is the deterministic §5.1 cancel
-// discriminator: a productive turn whose delivery is cut short by a shutdown
-// cancellation. The OLD RunFlow returned nil on that path (the loop then read
-// "success" and ACKed the durable inputs of a turn that reached no terminal
-// state). The §5.1 drain instead surfaces ctx.Canceled AND records a cancelled
-// outcome. Run synchronously (a goroutine cancels while delivery is blocked), so
-// unlike a full-loop drive there is no degenerate-retry path to mask the result.
+// TestRunFlow_MidStreamCancelReducesCancelled 钉住 有产出的回合被关停取消截断时的确定性判别：排水路径既要报出上下文取消，也要记录一条取消结局——只返回 nil 会让循环把一个没到终态的回合的持久输入 ack 掉。用协程在投递阻塞时取消来同步驱动，避免退化重试掩蔽结果。
 func TestRunFlow_MidStreamCancelReducesCancelled(t *testing.T) {
-	outputCh := make(chan *event.Event) // unbuffered, never read → deliverEvent blocks
+	outputCh := make(chan *event.Event)
 	m := &requestCapturingModel{resp: &model.Response{
 		ID:      "ok",
 		Done:    true,
@@ -118,7 +96,7 @@ func TestRunFlow_MidStreamCancelReducesCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		time.Sleep(50 * time.Millisecond) // let the drain reach the blocking delivery
+		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 
@@ -127,16 +105,10 @@ func TestRunFlow_MidStreamCancelReducesCancelled(t *testing.T) {
 	require.Equal(t, turnCancelled, cm.LastTurnOutcome().status, "a cut-short turn reduces to cancelled, never completed")
 }
 
-// TestRunEventLoop_MidStreamCancelRetainsClaim is the end-to-end regression
-// guard: a durable batch whose turn is cut short by a shutdown cancellation must
-// leave the claim UN-acked (retained for replay, spec L90/L130). The strict
-// §5.1 fail-before discriminator is TestRunFlow_MidStreamCancelReducesCancelled
-// above (synchronous, no retry path to mask it); this drives the full loop and
-// locks that the loop, on a cancelled outcome, returns before finishDurableBatch
-// rather than ACKing a turn that reached no terminal state.
+// TestRunEventLoop_MidStreamCancelRetainsClaim 钉住 端到端一步：回合被关停取消截断时，持久批次的领取必须保持未确认。
+// - 循环在取消结局上必须先返回，而不是先去批量收尾；
+// - 取消的归约本身由同步那条用例判定，这条只锁循环侧的先后次序。
 func TestRunEventLoop_MidStreamCancelRetainsClaim(t *testing.T) {
-	// A productive, error-free turn — the ONLY reason the envelope would be acked
-	// is the cancellation guard, not a store fault or an unverified credential.
 	m := &requestCapturingModel{resp: &model.Response{
 		ID:      "ok",
 		Done:    true,
@@ -144,8 +116,6 @@ func TestRunEventLoop_MidStreamCancelRetainsClaim(t *testing.T) {
 	}}
 	bus, err := NewReliableEventBus(t.TempDir())
 	require.NoError(t, err)
-	// Unbuffered outputCh with no reader → RunFlow's first forward blocks in
-	// deliverEvent, so a cancel there is observed as a mid-stream cancellation.
 	outputCh := make(chan *event.Event)
 	store := memory.NewInMemoryStore()
 	ta := newDurableAgentWithStore("cancel-retains", m, store, outputCh, bus)
@@ -156,8 +126,6 @@ func TestRunEventLoop_MidStreamCancelRetainsClaim(t *testing.T) {
 	defer cancel()
 	go ta.runEventLoop(ctx, bus, ta.contextManager)
 
-	// Wait until the batch committed and the model was reached once (submitOK →
-	// model), i.e. RunFlow is now draining the response into the stalled outputCh.
 	deadline := time.After(4 * time.Second)
 	for m.requestCount() < 1 {
 		select {
@@ -166,12 +134,8 @@ func TestRunEventLoop_MidStreamCancelRetainsClaim(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	// Cancel while RunFlow is blocked delivering the assistant event.
 	cancel()
 
-	// Give the cancellation a bounded window to unwind, then watch that the
-	// envelope is NOT acked. If the cancel path wrongly ACKed, DurablePending
-	// would reach 0 and stay there.
 	ackWatch := time.Now().Add(2 * time.Second)
 	for time.Now().Before(ackWatch) && bus.DurablePending() == 0 {
 		time.Sleep(10 * time.Millisecond)

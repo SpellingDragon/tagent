@@ -12,59 +12,55 @@ import (
 	"time"
 )
 
-// ==================== ApprovalManager（T-G · critical 异步人工批准）====================
-//
-// 关键设计（报告 D3 §4.6.3/§3.4-3）：critical 操作默认**异步**批准而非阻塞等待——工具
-// 调用在框架 ReAct 循环内同步执行，阻塞等待会卡死单消费者 runEventLoop 造成 bus 积压。
-// 故：Request 写 pending 文件 + 立即返回 PENDING_APPROVAL 让模型知悉；外部审批者（CLI/
-// 微信）写 approved 文件；批准后外部注入新事件触发重试，args_digest 匹配防「批准后换参数」。
-// 一请求一文件（<dir>/approvals/<id>.json），外部审批者直接写文件即可决策。
-
 // ApprovalStatus 是批准状态。
 type ApprovalStatus string
 
 const (
-	ApprovalPending  ApprovalStatus = "pending"
+	// ApprovalPending 等待外部批准者裁决；此时被治理的操作不会执行。
+	ApprovalPending ApprovalStatus = "pending"
+	// ApprovalApproved 已批准：允许继续执行该次操作。
 	ApprovalApproved ApprovalStatus = "approved"
-	ApprovalDenied   ApprovalStatus = "denied"
-	ApprovalExpired  ApprovalStatus = "expired"
+	// ApprovalDenied 已拒绝：操作终止并作为拒绝结果返回。
+	ApprovalDenied ApprovalStatus = "denied"
+	// ApprovalExpired 超过有效期未被裁决：按未获批准处理，不得事后凭旧请求继续执行。
+	ApprovalExpired ApprovalStatus = "expired"
 )
 
 // ApprovalRequest 是一次批准请求（一请求一文件，可被外部审批者读写）。
 type ApprovalRequest struct {
 	ID          string         `json:"id"`
 	ToolName    string         `json:"tool"`
-	ArgsDigest  string         `json:"args_digest"`  // sha256——批准绑定参数，防「批准后换参」
-	ArgsPreview string         `json:"args_preview"` // 截断的人类可读预览（审批者要看内容）
+	ArgsDigest  string         `json:"args_digest"`
+	ArgsPreview string         `json:"args_preview"`
 	RiskLevel   string         `json:"risk"`
 	RuleID      string         `json:"rule_id"`
 	Reason      string         `json:"reason"`
 	GoalID      string         `json:"goal_id,omitempty"`
 	CreatedMs   int64          `json:"created_ms"`
-	ExpiresMs   int64          `json:"expires_ms"` // 默认 created + TTL
+	ExpiresMs   int64          `json:"expires_ms"`
 	Status      ApprovalStatus `json:"status"`
 	DecidedBy   string         `json:"decided_by,omitempty"`
 }
 
 // ApprovalManager 管理异步批准请求（文件通道）。并发安全（内存索引 + 文件持久）。
 type ApprovalManager struct {
-	dir string        // <dir>/approvals/
-	ttl time.Duration // 请求过期时长（默认 30m）
+	dir string
+	ttl time.Duration
 
-	// channels（3.1 design-report-closeout）：审批请求送达通道（微信注入等，装配期
+	// channels：审批请求送达通道（微信注入等，装配期
 	// AddChannel 注册）。Deliver 失败不阻塞审批门——pending 文件已落盘，CLI/文件批准
 	// 始终可用（闸不是墙）。
 	channels []ApprovalChannel
 
 	// rescanInterval 是 Check 未命中后重扫 approvals 目录的最小间隔（W2 节流）。默认
-	// approvalRescanInterval（2s）；⑦（§9.2）：测试可注入小值 + 假时钟，消除对真实 wall-clock
+	// approvalRescanInterval（2s）；⑦：测试可注入小值 + 假时钟，消除对真实 wall-clock
 	// 的依赖（CI 重载 >2s 会致旧节流测假失败——窗内两次 Check 实际跨窗被误判为已重扫）。
 	rescanInterval time.Duration
 
 	mu    sync.RWMutex
-	index map[string]*ApprovalRequest // id → 请求（内存索引，启动从文件重建）
+	index map[string]*ApprovalRequest
 
-	lastRescan int64 // W2：上次重扫目录的纳秒时刻（Check 未命中时节流重扫，防高频重试反复 IO）
+	lastRescan int64
 
 	// now 是可注入时钟（默认 time.Now）。⑦：测试注入假时钟以确定性推进节流窗，无需真实 sleep。
 	now func() time.Time
@@ -113,12 +109,11 @@ func (a *ApprovalManager) Request(toolName, argsJSON, argsPreview, level, ruleID
 	}
 	a.mu.Lock()
 	a.index[req.ID] = req
-	snapshot := *req // 值拷贝：write 在锁外读副本，避免与并发访问竞争共享对象
+	snapshot := *req
 	a.mu.Unlock()
 	if err := a.write(&snapshot); err != nil {
 		return nil, err
 	}
-	// 3.1（design-report-closeout）：尽力送达全部通道（失败仅日志，门不依赖通道在线）。
 	a.deliverAll(&snapshot)
 	return req, nil
 }
@@ -128,7 +123,7 @@ const approvalRescanInterval = 2 * time.Second
 
 // Check 查找匹配 (toolName, argsDigest) 的、已批准且未过期的请求（批准放行判据）。
 // 精确匹配 digest → 防「批准后换参数」。无匹配返回 nil（调用方据此挂起/拒绝）。
-// W2（§8.3）：索引未命中时**节流重扫** approvals 目录——外部审批者（人工 digest 文件 / 微信
+// W2：索引未命中时**节流重扫** approvals 目录——外部审批者（人工 digest 文件 / 微信
 // 通道回写）在运行中落盘批准文件后须可见。否则 Check 只读构造时索引 → 运行中外部批准永不
 // 可见 → critical 恒 Hold、重试持续堆积 pending（治理审批闭环断路）。
 func (a *ApprovalManager) Check(toolName, argsDigest string) *ApprovalRequest {
@@ -136,7 +131,7 @@ func (a *ApprovalManager) Check(toolName, argsDigest string) *ApprovalRequest {
 		return req
 	}
 	if a.dir != "" && a.rescanDue() {
-		a.rebuild() // 加载运行中新落盘的批准文件
+		a.rebuild()
 		return a.checkIndex(toolName, argsDigest)
 	}
 	return nil
@@ -181,7 +176,7 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) er
 	}
 	req.Status = status
 	req.DecidedBy = by
-	snapshot := *req // 值拷贝：write 在锁外读副本，避免与并发 Check/Decide 竞争共享对象
+	snapshot := *req
 	a.mu.Unlock()
 	return a.write(&snapshot)
 }
@@ -205,7 +200,7 @@ func (a *ApprovalManager) path(id string) string { return filepath.Join(a.dir, i
 
 func (a *ApprovalManager) write(req *ApprovalRequest) error {
 	if a.dir == "" {
-		return nil // 纯内存模式（测试/无持久化）
+		return nil
 	}
 	raw, err := json.MarshalIndent(req, "", "  ")
 	if err != nil {
@@ -239,8 +234,6 @@ func (a *ApprovalManager) rebuild() {
 		if err := json.Unmarshal(raw, &req); err != nil || req.ID == "" {
 			continue
 		}
-		// Minor④（§8.9）：清理过期审批文件——decided/expired 请求永不清理会随运行时间无界堆积
-		// approvals 目录。过期（ExpiresMs < now）即删文件 + 移出索引（TTL 默认 30m）。
 		if req.ExpiresMs > 0 && req.ExpiresMs < now {
 			_ = os.Remove(path)
 			delete(a.index, req.ID)

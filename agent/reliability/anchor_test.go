@@ -1,3 +1,6 @@
+// 本文件负责门控锚点的跨重启持久性：缺失按 0 处理，以及静默保活——否则重启后无法把
+// "长期活着但没写入"与"真空闲"区分开。
+// 契约: docs/wiki/reliability/durable-delivery.md#anchor-persistence
 package reliability
 
 import (
@@ -11,12 +14,10 @@ func TestAnchorStore_SaveLoadRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAnchorStore: %v", err)
 	}
-	// 首次 Load（无文件）→ 零值 + nil（首次启动，冥想门控从头）。
 	a, err := s.Load()
 	if err != nil || a.LastTurnEnd != 0 {
 		t.Fatalf("首次 Load 应零值无错, got %+v err=%v", a, err)
 	}
-	// Save + Load roundtrip 保真。
 	want := MeditationAnchors{LastUserInput: 100, LastTurnEnd: 200, LastMeditation: 300}
 	if err := s.Save(want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -34,7 +35,6 @@ func TestAnchorStore_PersistAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "anchors.json")
 	s1, _ := NewAnchorStore(path)
 	_ = s1.Save(MeditationAnchors{LastUserInput: 1, LastTurnEnd: 2, LastMeditation: 3})
-	// 重开（模拟重启）：Load 恢复三锚点（跨重启冥想门控连续性）。
 	s2, _ := NewAnchorStore(path)
 	got, _ := s2.Load()
 	if got.LastUserInput != 1 || got.LastTurnEnd != 2 || got.LastMeditation != 3 {
@@ -67,7 +67,6 @@ func TestAnchorStore_CorruptFileErrors(t *testing.T) {
 		t.Fatalf("write corrupt: %v", err)
 	}
 	s, _ := NewAnchorStore(path)
-	// 坏文件 Load 应 error（调用方 SetAnchorStore 保守用当前值，不阻断启动）。
 	if _, err := s.Load(); err == nil {
 		t.Fatal("坏文件 Load 应 error")
 	}

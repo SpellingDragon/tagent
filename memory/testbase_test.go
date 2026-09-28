@@ -16,6 +16,9 @@ const TypeExternalInputProbe = "external_input"
 // mockKV 是核心包测试共用的内存 KVStore 假件（替代已迁至 memory/kv 的
 // LocalFileKV/RustVikingClient——白盒测试不得 import 子包）。分层/压实/TTL
 // 语义测试不依赖落盘细节；落盘持久化语义的测试位于 memory/kv 子包。
+// 本文件是记忆存储行为的测试执行体。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 type mockKV struct {
 	mu   sync.Mutex
 	data map[string]string
@@ -35,7 +38,7 @@ func (m *mockKV) KVGet(key string) (string, error) {
 	defer m.mu.Unlock()
 	v, ok := m.data[key]
 	if !ok {
-		return "", KeyNotFound(key, nil) // typed contract (2.5)
+		return "", KeyNotFound(key, nil)
 	}
 	return v, nil
 }
@@ -93,7 +96,7 @@ func (m *mockKV) KVBatch(ops []KVOp) error {
 }
 
 // ListPartitionIDs mirrors LocalFileKV's optional enumeration capability
-// (resident-readiness-plan 2.8): any persisted `{pid}:…` key proves the
+// : any persisted `{pid}:…` key proves the
 // partition exists, so live-count rebuild and capacity eviction are
 // exercisable against the in-package mock.
 func (m *mockKV) ListPartitionIDs() []int {
@@ -126,7 +129,7 @@ func (m *mockKV) ListPartitionIDs() []int {
 }
 
 // Sync gives the mock a no-op durability barrier so FileSegmentStore's
-// event-level barrier path is exercised identically (2.3).
+// event-level barrier path is exercised identically .
 func (m *mockKV) Sync() error { return nil }
 
 func (m *mockKV) Close() error { return nil }

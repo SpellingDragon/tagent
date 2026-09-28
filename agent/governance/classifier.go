@@ -17,9 +17,13 @@ import (
 type RiskLevel int
 
 const (
+	// RiskLow 低风险：默认放行，不额外要求批准。
 	RiskLow RiskLevel = iota
+	// RiskMedium 中风险：由规则决定是否只记账放行。
 	RiskMedium
+	// RiskHigh 高风险：需批准后方可执行。
 	RiskHigh
+	// RiskCritical 最高风险：恒走异步批准流程，绝不因放行策略而跳过。
 	RiskCritical
 )
 
@@ -43,9 +47,12 @@ func (l RiskLevel) String() string {
 type Disposition int
 
 const (
-	DispositionAllow  Disposition = iota // 放行（零开销）
-	DispositionRecord                    // 记账放行（governance 事件 subtype=audit）
-	DispositionHold                      // 挂起人工批准（critical，异步不阻塞 loop）
+	// DispositionAllow 放行内层工具，无额外留痕要求。
+	DispositionAllow Disposition = iota
+	// DispositionRecord 放行，但要求把这次执行记入审计账本。
+	DispositionRecord
+	// DispositionHold 拦下：交给批准流程，内层工具不执行；放行后才委托内层。
+	DispositionHold
 )
 
 // String 返回处置名。
@@ -64,17 +71,17 @@ func (d Disposition) String() string {
 
 // RiskContext 是分级输入（纯数据，无 IO）——GovernanceTool 装饰器从工具调用构造。
 type RiskContext struct {
-	ToolName      string // 工具名（exec/save_file/...）
-	ArgsJSON      string // 工具参数 JSON（规则做子串匹配，如 exec 的 command）
-	TriggerSource string // user/meditation/task/tmux/subagent/inject
+	ToolName      string
+	ArgsJSON      string
+	TriggerSource string
 }
 
 // Rule 是一条数据驱动的风险规则（纯函数匹配）。
 type Rule struct {
-	ID     string                     // 规则标识（记账/审计引用）
-	Level  RiskLevel                  // 命中时的风险级别
-	Reason string                     // 人类可读理由
-	Match  func(ctx RiskContext) bool // 匹配谓词（纯函数，无 IO 无随机）
+	ID     string
+	Level  RiskLevel
+	Reason string
+	Match  func(ctx RiskContext) bool
 }
 
 // RiskClassifier 是纯函数风险分级器（契约 C5）。规则按序匹配，首中即返回；
@@ -105,7 +112,7 @@ func (c *RiskClassifier) Classify(ctx RiskContext) (RiskLevel, string, string) {
 	return c.defaultLevel, "default", "无规则命中，保守默认分级"
 }
 
-// Disposition 由风险级别派生处置（默认策略；可被 Policy 覆盖）。
+// DispositionFor Disposition 由风险级别派生处置（默认策略；可被 Policy 覆盖）。
 // critical → 挂起批准；high/medium → 记账放行；low → 直接放行。
 func DispositionFor(level RiskLevel) Disposition {
 	switch level {
@@ -133,8 +140,6 @@ func argsContains(ctx RiskContext, substrs ...string) bool {
 // 设计：exec（shell）是主风险面，按命令内容分级；文件写/删中危；只读工具低危。
 func DefaultRules() []Rule {
 	return []Rule{
-		// === low：治理面工具（§8.11⑩——登记/查询无副作用，此前落 default medium
-		// 占预算，strict 且预算耗尽时 goal_declare 会自我拒绝，形成死锁） ===
 		{
 			ID: "govface.readonly", Level: RiskLow,
 			Reason: "治理面登记/查询工具（goal/denial/approval 只读或登记，无执行副作用）",
@@ -146,7 +151,6 @@ func DefaultRules() []Rule {
 				return false
 			},
 		},
-		// === critical：不可逆/系统级破坏 ===
 		{
 			ID: "exec.destructive", Level: RiskCritical,
 			Reason: "不可逆破坏性命令（rm -rf / mkfs / dd / fork炸弹 / 关机 / 下载并管道执行远程脚本）",
@@ -158,13 +162,9 @@ func DefaultRules() []Rule {
 					"rm -rf", "rm -fr", "rm -r -f", "rm -f -r", "rm --recursive", "mkfs", "dd if=", ":(){", "shutdown", "reboot",
 					"halt", "poweroff", "chmod -r 777", "> /dev/sda", "mv /* ",
 					"git push --force", "git push -f",
-					// G2（哲学审查补强）：git 历史毁灭性操作——reset --hard/checkout . /clean
-					// 会不可逆清除受控路径的未提交改进与工作区，与 rm -rf 同级。
 					"git reset --hard", "git checkout -- .", "git checkout .", "git clean -f", "git clean -fd") {
 					return true
 				}
-				// 下载并管道执行远程脚本（curl/wget ... | sh/bash）——精确检测，
-				// 避免 "| shasum" 之类误命中。
 				lower := strings.ToLower(c.ArgsJSON)
 				downloader := strings.Contains(lower, "curl") || strings.Contains(lower, "wget")
 				pipesToShell := strings.Contains(lower, "| sh") || strings.Contains(lower, "|sh") ||
@@ -181,7 +181,6 @@ func DefaultRules() []Rule {
 					"sudo passwd", "sudo useradd", "sudo userdel", "/etc/passwd", "/etc/shadow")
 			},
 		},
-		// === high：外部副作用/权限提升/数据删除 ===
 		{
 			ID: "exec.sudo", Level: RiskHigh,
 			Reason: "sudo 提权执行",
@@ -212,9 +211,6 @@ func DefaultRules() []Rule {
 				return c.ToolName == "delete_file" || c.ToolName == "remove_file"
 			},
 		},
-		// === medium：写入/修改（可逆但有副作用）===
-		// === git-native refine（self-evolution-git-native）：register/status 无副作用（low），
-		// rollback revert 受控产物（最高权限自我修改，保持 critical）。 ===
 		{
 			ID: "refine.rollback", Level: RiskCritical,
 			Reason: "refine rollback revert 改进 commit（直接修改受控产物，最高权限自我修改）",
@@ -254,7 +250,6 @@ func DefaultRules() []Rule {
 				return c.ToolName == "mcp_call"
 			},
 		},
-		// === low：只读/无副作用 ===
 		{
 			ID: "readonly", Level: RiskLow,
 			Reason: "只读工具（读文件/检索/召回/列目录），无副作用",

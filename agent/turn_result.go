@@ -1,7 +1,7 @@
 package agent
 
 // turnStatus is the reduced terminal state of a single RunFlow turn, observed
-// from every channel the framework reports through (§5.1, design 决策5 L120,
+// from every channel the framework reports through (, design 决策5 L120,
 // spec L94/L130).
 //
 // The old contract collapsed all of these into "RunFlow returned nil", which
@@ -22,7 +22,7 @@ const (
 	// turnFailed: a definite model/framework failure — a runner start error that
 	// spent the transport retry budget, or a response-internal error event. Per
 	// design L121 a full failure is a *processing result* (batch_result=failed),
-	// not a delivery proof; it still forms a completion (§5.2/§5.3).
+	// not a delivery proof; it still forms a completion.
 	turnFailed
 	// turnCancelled: the ctx was cancelled mid-turn with no terminal state. Per
 	// spec L90/L130 a shutdown cancellation forms NO completion and the claim
@@ -30,7 +30,7 @@ const (
 	turnCancelled
 )
 
-// String renders the status for logs and for the completion audit trail (§5.2).
+// String renders the status for logs and for the completion audit trail.
 func (s turnStatus) String() string {
 	switch s {
 	case turnCompleted:
@@ -45,8 +45,8 @@ func (s turnStatus) String() string {
 }
 
 // turnOutcome is a reduced turn result: its terminal status plus a bounded error
-// summary retained for a failed turn (spec L130 "保留错误摘要"). The completion
-// freeze in §5.2/§5.3 consumes the batch-level outcome; §5.1 is responsible only
+// summary retained for a failed turn. The completion
+// freeze in / consumes the batch-level outcome;  is responsible only
 // for producing an honest, fully-classified result.
 type turnOutcome struct {
 	status turnStatus

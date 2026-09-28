@@ -6,22 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/model"
-
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/compress"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
-
-// ============================================================================
-// Invariant Tests — 验证 prototype 的三个架构不变量
-//
-// 1. inputs 是投影：SessionProjection 只含 EventReference，不含 Content
-// 2. Compact 修改投影：Compactor 不修改 MemoryStore
-// 3. 工具结果回写 bus：action_command 经 onEvent 回流到 SessionProjection
-// ============================================================================
 
 type invariantMockModel struct {
 	mu        sync.Mutex
@@ -69,10 +60,6 @@ func makeToolCallResponse() *model.Response {
 func makeFinalResponse(content string) *model.Response {
 	return makeAssistantResponse(content)
 }
-
-// ============================================================================
-// Invariant 1: SessionProjection 只含 EventReference（无 Content）
-// ============================================================================
 
 func TestInvariant1_ProjectionOnlyContainsEventReferences(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()
@@ -124,10 +111,6 @@ func TestInvariant1_ProjectionOnlyContainsEventReferences(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// Invariant 2: ContextCompressor 不修改 MemoryStore
-// ============================================================================
-
 func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()
 
@@ -167,8 +150,6 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 	beforeEvents := memStore.AllEvents()
 	beforeCount := len(beforeEvents)
 
-	// Use ContextCompressor instead of the deleted Compactor.
-	// Set maxTokens=1 to force compression (threshold=0, any content exceeds it).
 	sc := compress.NewSmartCompressor(
 		compress.WithKeepRecentTasks(2),
 		compress.WithMaxTokens(1),
@@ -179,17 +160,11 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 	)
 	result := cc.Compress(context.Background(), refs)
 
-	// With no current messages the request is already under budget, so
-	// ContextCompressor pass-through is legitimate. The invariant here is
-	// that existing MemoryStore events are never modified, not that refs
-	// must always be reduced.
 	assert.LessOrEqual(t, len(result.RetainedRefs), len(refs), "Retained refs should not grow")
 
 	afterEvents := memStore.AllEvents()
 	afterCount := len(afterEvents)
 
-	// MemoryStore may have grown (L3 archive writes), but existing events
-	// must not be modified.
 	assert.GreaterOrEqual(t, afterCount, beforeCount, "MemoryStore event count must not decrease")
 
 	for i, beforeEvt := range beforeEvents {
@@ -200,10 +175,6 @@ func TestInvariant2_CompactorDoesNotModifyMemoryStore(t *testing.T) {
 		assert.Equal(t, beforeEvt.EventSummary, afterEvt.EventSummary, "EventSummary must match")
 	}
 }
-
-// ============================================================================
-// Invariant 3: 工具结果经 onEvent 回流到 SessionProjection
-// ============================================================================
 
 func TestInvariant3_ToolResultsFlowBackToProjection(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()

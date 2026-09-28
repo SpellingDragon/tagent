@@ -1,15 +1,15 @@
 // Package mcp provides the MCP server registry and the mcp_call gateway
 // tool implementing tagent's discovery-execution loop for MCP
-// (mcp-discovery-execution-loop):
+// :
 //
-//   - Registry: a concurrency-safe name → ToolSet table, declared via the
-//     top-level YAML mcp_servers section and mutable at runtime (Go API +
-//     config-file mtime hot-sync). Registry mutations never touch any
-//     agent's tool declaration set, so the prompt prefix (tools region)
-//     stays byte-stable and prefix caches are never invalidated by MCP
-//     changes.
-//   - mcp_call: a fixed-declaration gateway tool (server/tool/args) that
-//     resolves the target through the registry at call time.
+// - Registry: a concurrency-safe name → ToolSet table, declared via the
+// top-level YAML mcp_servers section and mutable at runtime (Go API +
+// config-file mtime hot-sync). Registry mutations never touch any
+// agent's tool declaration set, so the prompt prefix (tools region)
+// stays byte-stable and prefix caches are never invalidated by MCP
+// changes.
+// - mcp_call: a fixed-declaration gateway tool (server/tool/args) that
+// resolves the target through the registry at call time.
 //
 // Discovery (mcp_discover, in tool/knowledge) reads the same registry, so
 // runtime-registered servers become discoverable and callable immediately.
@@ -98,7 +98,6 @@ func newToolSet(name string, cfg ServerConfig) trpctool.ToolSet {
 			log.Warnf("[mcp] server %q: env %s is not set; requests will likely fail with an auth error", name, cfg.APIKeyEnv)
 		}
 	}
-	// Explicit headers win over the derived Authorization header.
 	for k, v := range cfg.Headers {
 		headers[k] = v
 	}

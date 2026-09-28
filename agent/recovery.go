@@ -6,11 +6,6 @@ import (
 	"sync/atomic"
 )
 
-// Recovery observability (resident-readiness-plan 3.8–3.10): the rebuild
-// result is stored once at cold start and served to BOTH consumers —
-// diagnostics (RecoveryResult) and the model (a one-shot tail notice consumed
-// by the first request). A log line alone never reached either of them.
-
 // recoveryNotice renders the model-facing one-shot notice. Empty status/full
 // → no notice at all (zero tokens for the healthy path — the tail-notice is
 // only for degraded recoveries).
@@ -62,19 +57,19 @@ func (ta *TagentAgent) RecoveryResult() *RecoveryResult {
 	return ta.contextManager.RecoveryResult()
 }
 
-var _ = sync.Mutex{} // recoveryMu lives on ContextManager (see struct)
+var _ = sync.Mutex{}
 
 // ResidentTopology is the process-wide name → resident agent binding, shared by
 // pointer with every built agent (4.5).
 //
-// Why the indirection (§4.3, D7): hot reload may ADD agents to the resident
+// Why the indirection: hot reload may ADD agents to the resident
 // topology while other goroutines read the table (delegation identity checks,
 // diagnostics, the next shell build). Publishing a NEW immutable map through an
 // atomic pointer swap keeps those readers race-free; mutating the published map
 // in place would be a data race on a live map.
 type ResidentTopology struct {
-	pub sync.Mutex                              // serializes publishers
-	cur atomic.Pointer[map[string]*TagentAgent] // immutable snapshot; never mutated after publish
+	pub sync.Mutex
+	cur atomic.Pointer[map[string]*TagentAgent]
 }
 
 // NewResidentTopology takes ownership of the initial (startup) binding table.
@@ -99,7 +94,7 @@ func (rt *ResidentTopology) load() map[string]*TagentAgent {
 	return *p
 }
 
-// Get returns the resident instance for name, or nil when not resident (§4.3:
+// Get returns the resident instance for name, or nil when not resident (:
 // “is this agent already built and owned?” is exactly the hot-add question).
 func (rt *ResidentTopology) Get(name string) *TagentAgent { return rt.load()[name] }
 
@@ -135,7 +130,7 @@ func (rt *ResidentTopology) publish(mutate func(map[string]*TagentAgent)) {
 	rt.cur.Store(&next)
 }
 
-// Add publishes newly resident agents (hot add, §4.3). An existing name is never
+// Add publishes newly resident agents. An existing name is never
 // overwritten — the original owner keeps the binding (D7: 同名重入复用原存储
 // owner，禁止第二 writer).
 func (rt *ResidentTopology) Add(adds map[string]*TagentAgent) {
@@ -183,7 +178,7 @@ func (ta *TagentAgent) ResidentAgentNames() []string {
 	return ta.resident.Names()
 }
 
-// SetStoreOwnerSnapshot installs the store-owner introspection probe (§2.3/R01).
+// SetStoreOwnerSnapshot installs the store-owner introspection probe.
 // Startup-injected once (like SetOrgDiagnostics); runtime read-only.
 func (ta *TagentAgent) SetStoreOwnerSnapshot(fn func() map[string]bool) {
 	if ta == nil {
@@ -194,7 +189,7 @@ func (ta *TagentAgent) SetStoreOwnerSnapshot(fn func() map[string]bool) {
 
 // StoreOwnerSnapshot returns the set of agent names currently holding a store-owner
 // registration, or nil when no probe is wired. Introspection only — candidate
-// rollback observability (R01); no execution path reads it.
+// rollback observability ; no execution path reads it.
 func (ta *TagentAgent) StoreOwnerSnapshot() map[string]bool {
 	if ta == nil || ta.storeOwnerSnapshot == nil {
 		return nil
@@ -203,7 +198,7 @@ func (ta *TagentAgent) StoreOwnerSnapshot() map[string]bool {
 }
 
 // SetStoreOwnerRevoker installs the assembly's store-owner deregistration hook
-// (§4.3/R02). The registration lives in the assembly's collision registry, so
+// . The registration lives in the assembly's collision registry, so
 // the agent cannot revoke it alone: the hook is injected where the owner was
 // registered and closeOnce calls it ONLY after this instance really took its
 // store exit. An unconverged close keeps the registration — a holder whose stop
@@ -236,11 +231,11 @@ func (ta *TagentAgent) OrgKeepRecent() int {
 	return ta.contextManager.contextCompressor.KeepRecentValue()
 }
 
-// OrgBudgetLine returns the compressor's effective compression trigger line
-// (maxTokens × current threshold) — the REAL sub-model budget consumer, not the
-// resident config field (introduce-durable-workflow-engine §2.4/L-3: hot-param
-// and rollback tests must assert what the compressor actually uses). 0 when no
-// compressor is wired.
+// OrgBudgetLine returns the compressor effective compression trigger line
+// (maxTokens times the current threshold) — the real sub-model budget consumer,
+// not the resident config field, so hot-param and rollback assertions read what
+// the compressor actually uses. 0 when no compressor is wired.
+// 契约: docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 func (ta *TagentAgent) OrgBudgetLine() int {
 	if ta == nil || ta.contextManager == nil || ta.contextManager.contextCompressor == nil {
 		return 0

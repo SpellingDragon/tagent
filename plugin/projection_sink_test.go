@@ -5,11 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
-
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	trpcEvent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // recordingSink captures projected refs for assertions.
@@ -19,8 +18,8 @@ type recordingSink struct {
 
 func (r *recordingSink) Append(ref memory.EventReference) { r.refs = append(r.refs, ref) }
 
-func newResponseEvent(role model.Role, content string, toolCalls []model.ToolCall) *event.Event {
-	evt := event.New("inv-1", "tagent")
+func newResponseEvent(role model.Role, content string, toolCalls []model.ToolCall) *trpcEvent.Event {
+	evt := trpcEvent.New("inv-1", "tagent")
 	evt.Timestamp = time.Now()
 	evt.Response = &model.Response{
 		Choices: []model.Choice{{Message: model.Message{Role: role, Content: content, ToolCalls: toolCalls}}},
@@ -28,10 +27,10 @@ func newResponseEvent(role model.Role, content string, toolCalls []model.ToolCal
 	return evt
 }
 
-// TestI1_PipelineStoreProjectsExactlyOnce: a stored event is projected at the
-// same synchronous point, exactly once, with the ref matching the StateDelta
-// identifiers (write unification, unified-event-projection D1).
-func TestI1_PipelineStoreProjectsExactlyOnce(t *testing.T) {
+// TestPipelineStoreProjectsExactlyOnce 钉住「写入即投影」的同一同步点：入库事件恰好投影一次，
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#skip-set
+func TestPipelineStoreProjectsExactlyOnce(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	p := NewMemoryPlugin(store)
 	sink := &recordingSink{}
@@ -42,8 +41,6 @@ func TestI1_PipelineStoreProjectsExactlyOnce(t *testing.T) {
 		t.Fatalf("OnEvent: %v", err)
 	}
 
-	// I2 (synchronous append): the ref must be visible the moment OnEvent
-	// returns — no goroutine hop, no timing dependence.
 	if len(sink.refs) != 1 {
 		t.Fatalf("expected exactly 1 projected ref, got %d", len(sink.refs))
 	}
@@ -58,15 +55,13 @@ func TestI1_PipelineStoreProjectsExactlyOnce(t *testing.T) {
 	if ref.EventType != "agent_output" || ref.Role != "assistant" {
 		t.Errorf("ref type/role mismatch: %+v", ref)
 	}
-	// stored ⟺ projected: the same key must be retrievable from the store.
 	if _, err := store.GetEvent(wantKey); err != nil {
 		t.Errorf("stored event not retrievable: %v", err)
 	}
 }
 
-// TestI1_NoSinkNoPanic: absent a sink in ctx the plugin stores without
-// projecting (standalone runner usage).
-func TestI1_NoSinkNoPanic(t *testing.T) {
+// TestProjectionNoSinkNoPanic 钉住 ctx 无投影接收端时仍正常入库、只是不投影（独立运行场景）。
+func TestProjectionNoSinkNoPanic(t *testing.T) {
 	p := NewMemoryPlugin(memory.NewInMemoryStore())
 	evt := newResponseEvent(model.RoleAssistant, "hi", nil)
 	if _, err := p.OnEvent(context.Background(), nil, evt); err != nil {
@@ -74,25 +69,20 @@ func TestI1_NoSinkNoPanic(t *testing.T) {
 	}
 }
 
-// TestI1_SkippedEventsNotProjected: events the plugin skips (nil response,
-// degenerate empty agent_output) must not reach the sink either — the
-// projection is a faithful index of the store.
-func TestI1_SkippedEventsNotProjected(t *testing.T) {
+// TestSkippedEventsNotProjected 钉住被跳过的四类事件同样不得进投影——投影必须是存储的忠实索引。
+func TestSkippedEventsNotProjected(t *testing.T) {
 	p := NewMemoryPlugin(memory.NewInMemoryStore())
 	sink := &recordingSink{}
 	ctx := WithProjectionSink(context.Background(), sink)
 
-	// nil-response barrier event
-	bare := event.New("inv-1", "tagent")
+	bare := trpcEvent.New("inv-1", "tagent")
 	if _, err := p.OnEvent(ctx, nil, bare); err != nil {
 		t.Fatalf("OnEvent(bare): %v", err)
 	}
-	// degenerate empty final (H1)
 	empty := newResponseEvent(model.RoleAssistant, "", nil)
 	if _, err := p.OnEvent(ctx, nil, empty); err != nil {
 		t.Fatalf("OnEvent(empty final): %v", err)
 	}
-	// streaming partial delta (D8)
 	partial := newResponseEvent(model.RoleAssistant, "partial chunk", nil)
 	partial.Response.IsPartial = true
 	if _, err := p.OnEvent(ctx, nil, partial); err != nil {
@@ -129,14 +119,13 @@ func TestSanitizeAssistantContent_StripsFabricatedPrefix(t *testing.T) {
 	}
 }
 
-// TestI1_ToolTurnProjectsAllSteps: assistant tool_call, tool result, and final
-// each project exactly one ref, in pipeline order.
-func TestI1_ToolTurnProjectsAllSteps(t *testing.T) {
+// TestToolTurnProjectsAllSteps 钉住一个工具回合的三步（助手发起调用、工具结果、最终回答）各投影一条、顺序不变。
+func TestToolTurnProjectsAllSteps(t *testing.T) {
 	p := NewMemoryPlugin(memory.NewInMemoryStore())
 	sink := &recordingSink{}
 	ctx := WithProjectionSink(context.Background(), sink)
 
-	steps := []*event.Event{
+	steps := []*trpcEvent.Event{
 		newResponseEvent(model.RoleAssistant, "", []model.ToolCall{{ID: "c1"}}),
 		newResponseEvent(model.RoleTool, `{"status":"completed"}`, nil),
 		newResponseEvent(model.RoleAssistant, "done", nil),

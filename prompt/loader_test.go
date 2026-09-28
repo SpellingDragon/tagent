@@ -1,15 +1,16 @@
 package prompt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 )
 
 func TestLoader_LoadFromFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create a test prompt file
 	promptPath := filepath.Join(dir, "command.md")
 	content := "你是一个命令执行助手"
 	err := os.WriteFile(promptPath, []byte(content), 0644)
@@ -17,7 +18,6 @@ func TestLoader_LoadFromFile(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Test loading file
 	loader := NewLoader(dir)
 	result, err := loader.LoadFromFile("command.md")
 	if err != nil {
@@ -27,7 +27,6 @@ func TestLoader_LoadFromFile(t *testing.T) {
 		t.Errorf("Expected %q, got %q", content, result)
 	}
 
-	// Test loading with absolute path
 	result, err = loader.LoadFromFile(promptPath)
 	if err != nil {
 		t.Fatalf("LoadFromFile with absolute path failed: %v", err)
@@ -36,13 +35,11 @@ func TestLoader_LoadFromFile(t *testing.T) {
 		t.Errorf("Expected %q, got %q", content, result)
 	}
 
-	// Test loading non-existent file
 	_, err = loader.LoadFromFile("nonexistent.md")
 	if err == nil {
 		t.Error("Expected error for non-existent file, got nil")
 	}
 
-	// Test loading empty path
 	_, err = loader.LoadFromFile("")
 	if err == nil {
 		t.Error("Expected error for empty path, got nil")
@@ -52,14 +49,12 @@ func TestLoader_LoadFromFile(t *testing.T) {
 func TestLoader_LoadFromDir(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create prompt directory
 	promptDir := filepath.Join(dir, "prompts")
 	err := os.MkdirAll(promptDir, 0755)
 	if err != nil {
 		t.Fatalf("Failed to create prompt dir: %v", err)
 	}
 
-	// Create multiple .md files
 	files := map[string]string{
 		"01_command.md":   "命令执行prompt",
 		"02_recall.md":    "回忆prompt",
@@ -75,25 +70,21 @@ func TestLoader_LoadFromDir(t *testing.T) {
 		}
 	}
 
-	// Load from directory
 	loader := NewLoader(dir)
 	result, err := loader.LoadFromDir("prompts")
 	if err != nil {
 		t.Fatalf("LoadFromDir failed: %v", err)
 	}
 
-	// Verify order (alphabetical) and content
 	expected := "命令执行prompt\n\n回忆prompt\n\n知识prompt"
 	if result != expected {
 		t.Errorf("Expected:\n%s\n\nGot:\n%s", expected, result)
 	}
 
-	// Verify .txt file was ignored
 	if result == "应该被忽略" {
 		t.Error("TXT file should have been ignored")
 	}
 
-	// Test non-existent directory
 	_, err = loader.LoadFromDir("nonexistent")
 	if err == nil {
 		t.Error("Expected error for non-existent directory, got nil")
@@ -103,7 +94,6 @@ func TestLoader_LoadFromDir(t *testing.T) {
 func TestLoader_LoadFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create multiple files
 	file1 := filepath.Join(dir, "prompt1.md")
 	file2 := filepath.Join(dir, "prompt2.md")
 	file3 := filepath.Join(dir, "empty.md")
@@ -123,7 +113,6 @@ func TestLoader_LoadFiles(t *testing.T) {
 		t.Fatalf("Failed to create file3: %v", err)
 	}
 
-	// Load multiple files
 	loader := NewLoader(dir)
 	result, err := loader.LoadFiles([]string{"prompt1.md", "prompt2.md"})
 	if err != nil {
@@ -135,7 +124,6 @@ func TestLoader_LoadFiles(t *testing.T) {
 		t.Errorf("Expected %q, got %q", expected, result)
 	}
 
-	// Test with empty file (should skip)
 	result, err = loader.LoadFiles([]string{"prompt1.md", "empty.md", "prompt2.md"})
 	if err != nil {
 		t.Fatalf("LoadFiles with empty file failed: %v", err)
@@ -145,7 +133,6 @@ func TestLoader_LoadFiles(t *testing.T) {
 		t.Errorf("Expected %q, got %q", expected, result)
 	}
 
-	// Test with empty paths (should skip)
 	result, err = loader.LoadFiles([]string{"", "prompt1.md", " ", "prompt2.md"})
 	if err != nil {
 		t.Fatalf("LoadFiles with empty paths failed: %v", err)
@@ -156,18 +143,12 @@ func TestLoader_LoadFiles(t *testing.T) {
 	}
 }
 
-// TestLoader_LoadFiles_SkipsAbsentOptionalFile verifies load-if-present semantics
-// for optional context files: a filename listed in system_prompt.files that is
-// absent on disk (e.g. USER.md on a clean checkout, where it is a git-ignored
-// personal file) is skipped without failing the whole load, while present files
-// still concatenate in order. Fail-before: without the os.ErrNotExist skip in
-// LoadFiles this returns an error, so a committed config referencing an optional
-// git-ignored file could not start from a clean checkout.
+// TestLoader_LoadFiles_SkipsAbsentOptionalFile 锁定"存在即加载"语义：清单中的文件在磁盘
+//
+// 契约: docs/wiki/prompt/prompt-architecture.md#load-files
 func TestLoader_LoadFiles_SkipsAbsentOptionalFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Present files; USER.md deliberately NOT created (simulates a clean checkout
-	// where the git-ignored personal file is absent).
 	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents ctx"), 0644); err != nil {
 		t.Fatalf("Failed to create AGENTS.md: %v", err)
 	}
@@ -176,7 +157,6 @@ func TestLoader_LoadFiles_SkipsAbsentOptionalFile(t *testing.T) {
 	}
 
 	loader := NewLoader(dir)
-	// USER.md is absent → skipped, not fatal; order of present files preserved.
 	result, err := loader.LoadFiles([]string{"AGENTS.md", "USER.md", "TOOLS.md"})
 	if err != nil {
 		t.Fatalf("LoadFiles should skip absent optional file, got error: %v", err)
@@ -186,7 +166,6 @@ func TestLoader_LoadFiles_SkipsAbsentOptionalFile(t *testing.T) {
 		t.Errorf("Expected %q, got %q", expected, result)
 	}
 
-	// All-absent list yields empty content and no error (degenerate but not fatal).
 	result, err = loader.LoadFiles([]string{"NOPE1.md", "NOPE2.md"})
 	if err != nil {
 		t.Fatalf("LoadFiles with all-absent files should not error: %v", err)
@@ -199,14 +178,12 @@ func TestLoader_LoadFiles_SkipsAbsentOptionalFile(t *testing.T) {
 func TestLoader_LoadComposite(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create files
 	file1 := filepath.Join(dir, "inline_file.md")
 	err := os.WriteFile(file1, []byte("inline file content"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create file: %v", err)
 	}
 
-	// Create directory
 	promptDir := filepath.Join(dir, "prompts")
 	err = os.MkdirAll(promptDir, 0755)
 	if err != nil {
@@ -223,7 +200,6 @@ func TestLoader_LoadComposite(t *testing.T) {
 		t.Fatalf("Failed to create file: %v", err)
 	}
 
-	// Test composite loading
 	loader := NewLoader(dir)
 	result, err := loader.LoadComposite(
 		"inline prompt",
@@ -239,7 +215,6 @@ func TestLoader_LoadComposite(t *testing.T) {
 		t.Errorf("Expected:\n%s\n\nGot:\n%s", expected, result)
 	}
 
-	// Test with empty inline
 	result, err = loader.LoadComposite("", []string{"inline_file.md"}, "")
 	if err != nil {
 		t.Fatalf("LoadComposite with empty inline failed: %v", err)
@@ -304,7 +279,6 @@ func TestLoader_LoadFromDir_SubdirsIgnored(t *testing.T) {
 	dir := t.TempDir()
 	promptDir := filepath.Join(dir, "prompts")
 
-	// Create subdirectory (should be ignored)
 	subdir := filepath.Join(promptDir, "subdir")
 	err := os.MkdirAll(subdir, 0755)
 	if err != nil {
@@ -316,7 +290,6 @@ func TestLoader_LoadFromDir_SubdirsIgnored(t *testing.T) {
 		t.Fatalf("Failed to create file in subdir: %v", err)
 	}
 
-	// Create valid file
 	err = os.WriteFile(filepath.Join(promptDir, "valid.md"), []byte("valid"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create valid file: %v", err)
@@ -352,7 +325,6 @@ func TestLoader_LoadBootstrap(t *testing.T) {
 		t.Fatalf("Failed to create bootstrap dir: %v", err)
 	}
 
-	// Create bootstrap files in load order
 	bootstrapFiles := map[string]string{
 		"AGENTS.md":    "Agent instructions",
 		"SOUL.md":      "Agent soul/personality",
@@ -370,20 +342,17 @@ func TestLoader_LoadBootstrap(t *testing.T) {
 		}
 	}
 
-	// Load bootstrap
 	loader := NewLoader(dir)
 	result, err := loader.LoadBootstrap("bootstrap")
 	if err != nil {
 		t.Fatalf("LoadBootstrap failed: %v", err)
 	}
 
-	// Verify order (should follow BootstrapLoadOrder)
 	expected := "Agent instructions\n\nAgent soul/personality\n\nUser information\n\nAvailable tools\n\nHeartbeat config\n\nMemory settings"
 	if result != expected {
 		t.Errorf("Expected:\n%s\n\nGot:\n%s", expected, result)
 	}
 
-	// Test with missing files (should skip)
 	err = os.Remove(filepath.Join(bootstrapDir, "SOUL.md"))
 	if err != nil {
 		t.Fatalf("Failed to remove file: %v", err)
@@ -394,12 +363,10 @@ func TestLoader_LoadBootstrap(t *testing.T) {
 		t.Fatalf("LoadBootstrap with missing file failed: %v", err)
 	}
 
-	// SOUL.md should be skipped
 	if result == "Agent soul/personality" {
 		t.Error("Missing file should be skipped")
 	}
 
-	// Test with non-existent directory
 	_, err = loader.LoadBootstrap("nonexistent")
 	if err == nil {
 		t.Error("Expected error for non-existent directory, got nil")
@@ -415,13 +382,11 @@ func TestLoader_LoadBootstrap_WithExtraFiles(t *testing.T) {
 		t.Fatalf("Failed to create bootstrap dir: %v", err)
 	}
 
-	// Create standard bootstrap files
 	err = os.WriteFile(filepath.Join(bootstrapDir, "AGENTS.md"), []byte("agents"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create AGENTS.md: %v", err)
 	}
 
-	// Create extra .md files (should be loaded after standard files)
 	err = os.WriteFile(filepath.Join(bootstrapDir, "custom.md"), []byte("custom"), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create custom.md: %v", err)
@@ -438,8 +403,93 @@ func TestLoader_LoadBootstrap_WithExtraFiles(t *testing.T) {
 		t.Fatalf("LoadBootstrap failed: %v", err)
 	}
 
-	// Should contain both standard and extra files
 	if result != "agents\n\ncustom\n\nextra" {
 		t.Errorf("Expected 'agents\\n\\ncustom\\n\\nextra', got %q", result)
+	}
+}
+
+func embeddedFallback() fstest.MapFS {
+	return fstest.MapFS{
+		"resources/prompts/shared.md":   {Data: []byte("EMBEDDED SHARED")},
+		"resources/prompts/bundle/a.md": {Data: []byte("A")},
+		"resources/prompts/bundle/b.md": {Data: []byte("B")},
+	}
+}
+
+// TestLoader_FallbackFile_DiskMissing disk missing → resolves from embedded fallback.
+func TestLoader_FallbackFile_DiskMissing(t *testing.T) {
+	l := NewLoader(t.TempDir(), WithFallback(embeddedFallback(), "resources/prompts"))
+	got, err := l.LoadFromFile("shared.md")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "EMBEDDED SHARED" {
+		t.Errorf("got %q, want embedded default", got)
+	}
+}
+
+// TestLoader_FallbackFile_DiskOverrides disk present → overrides embedded (disk wins).
+func TestLoader_FallbackFile_DiskOverrides(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shared.md"), []byte("DISK SHARED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoader(dir, WithFallback(embeddedFallback(), "resources/prompts"))
+	got, err := l.LoadFromFile("shared.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "DISK SHARED" {
+		t.Errorf("disk should override embedded, got %q", got)
+	}
+}
+
+// TestLoader_FallbackFile_AbsoluteNoFallback absolute path → never falls back.
+func TestLoader_FallbackFile_AbsoluteNoFallback(t *testing.T) {
+	dir := t.TempDir()
+	l := NewLoader(dir, WithFallback(embeddedFallback(), "resources/prompts"))
+	if _, err := l.LoadFromFile(filepath.Join(dir, "shared.md")); err == nil {
+		t.Error("absolute missing path must error, not fall back to embedded")
+	}
+}
+
+// TestLoader_NoFallback_MissingErrors no fallback configured → missing file errors as before (NotExist).
+func TestLoader_NoFallback_MissingErrors(t *testing.T) {
+	l := NewLoader(t.TempDir())
+	_, err := l.LoadFromFile("shared.md")
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("without fallback, missing file should be NotExist error, got %v", err)
+	}
+}
+
+// TestLoader_FallbackDir_DiskMissing dir missing on disk → scans embedded dir of same base name.
+func TestLoader_FallbackDir_DiskMissing(t *testing.T) {
+	l := NewLoader(t.TempDir(), WithFallback(embeddedFallback(), "resources/prompts"))
+	got, err := l.LoadFromDir("bundle")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "A\n\nB" {
+		t.Errorf("got %q, want %q from embedded dir", got, "A\n\nB")
+	}
+}
+
+// TestLoader_FallbackDir_DiskWinsNoMerge dir present on disk → disk wins, no per-file merge with embedded.
+func TestLoader_FallbackDir_DiskWinsNoMerge(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "bundle")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "only.md"), []byte("DISK ONLY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := NewLoader(dir, WithFallback(embeddedFallback(), "resources/prompts"))
+	got, err := l.LoadFromDir("bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "DISK ONLY" {
+		t.Errorf("disk dir should win with no merge, got %q", got)
 	}
 }

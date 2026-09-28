@@ -9,6 +9,9 @@ type tinyCfg struct {
 	Entry string `yaml:"entry"`
 }
 
+// TestDecodeYAML_RejectsUnknownField 钉住未知字段被拒且错误点名该字段（本文件是严格解码判据的执行体）。
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#strict-decode
 func TestDecodeYAML_RejectsUnknownField(t *testing.T) {
 	err := DecodeYAML([]byte("entry: a\nwroking_dir: /tmp\n"), &tinyCfg{})
 	if err == nil || !strings.Contains(err.Error(), "wroking_dir") {
@@ -17,9 +20,6 @@ func TestDecodeYAML_RejectsUnknownField(t *testing.T) {
 }
 
 func TestDecodeYAML_RejectsSecondDocument(t *testing.T) {
-	// Review P2-4: the old single-Decode silently ignored everything after
-	// the first `---` — a second document could carry config the user
-	// believes is live.
 	err := DecodeYAML([]byte("entry: a\n---\nentry: b\n"), &tinyCfg{})
 	if err == nil || !strings.Contains(err.Error(), "second document") {
 		t.Fatalf("err = %v, want trailing-document rejection", err)

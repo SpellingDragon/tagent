@@ -9,9 +9,11 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// MockEmbedder 用 FNV 哈希把文本映射到固定维度的确定性伪向量（实现 memory.Embedder）。
-// 语义：相同文本 → 相同向量；共享词元越多 → 余弦越高（弱语义）。
-// 仅用于验证机制（融合/过滤/降级），不承诺真实语义质量。
+// MockEmbedder 用文本哈希把内容映射到固定维度的确定性伪向量，实现 memory.Embedder。
+// 相同文本必得相同向量，共享词元越多余弦越高；仅用于验证机制（融合、过滤、降级），
+// 不承诺真实语义质量——以它通过的测试不能推断线上召回效果。零值实例仍可用。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 type MockEmbedder struct {
 	dim int
 }
@@ -26,7 +28,10 @@ func NewMockEmbedder(dim int) *MockEmbedder {
 	return &MockEmbedder{dim: dim}
 }
 
+// Dimension 返回构造时确定的维度。
 func (m *MockEmbedder) Dimension() int { return m.dim }
+
+// ModelID 返回含维度的标识，使换维度后的旧向量在重建时被跳过。
 func (m *MockEmbedder) ModelID() string {
 	return fmt.Sprintf("mock-embed-%d", m.dim)
 }
@@ -44,10 +49,9 @@ func (m *MockEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 func (m *MockEmbedder) embedOne(text string) []float32 {
 	dim := m.dim
 	if dim <= 0 {
-		dim = 64 // 零值 MockEmbedder{} 兜底，防除零 panic（审查 Nit8）
+		dim = 64
 	}
 	vec := make([]float32, dim)
-	// 词元哈希袋：按空白/标点粗切，每词元投到两个维度（增碰撞分辨）。
 	start := 0
 	for i := 0; i <= len(text); i++ {
 		if i == len(text) || isDelim(text[i]) {
@@ -66,11 +70,13 @@ func (m *MockEmbedder) embedOne(text string) []float32 {
 	return vec
 }
 
+// isDelim 判断字节是否为词元分隔符：ASCII 字母数字与 UTF-8 多字节序列（中文等）
+// 都算词元内容，按字节聚合而不切开。
 func isDelim(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
 		return false
-	case c >= 0x80: // UTF-8 多字节（中文等）：按字节聚合到词元，不切分
+	case c >= 0x80:
 		return false
 	default:
 		return true

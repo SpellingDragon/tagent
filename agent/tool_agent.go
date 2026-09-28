@@ -11,9 +11,9 @@
 //
 // AgentToolWrapper replaces the previous agenttool.NewTool() approach.
 // It handles:
-//   - Declaring event_key parameter in InputSchema (when EventParams includes it)
-//   - Resolving event_key → fetching full event from parent MemStore
-//   - Passing event data as external context to the sub-agent
+// - Declaring event_key parameter in InputSchema (when EventParams includes it)
+// - Resolving event_key → fetching full event from parent MemStore
+// - Passing event data as external context to the sub-agent
 package agent
 
 import (
@@ -41,17 +41,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
-
-// ==================== External Context Serialization ====================
-//
-// ExternalContextEntry is the wire format for passing external event context
-// across process boundaries (local → RuntimeState → A2A metadata → RuntimeState → remote).
-//
-// Only EventKey, EventType, and EventSummary are serialized — NOT the full Content.
-// This keeps the payload compact (suitable for A2A metadata size limits) while
-// preserving the information that injectExternalContext actually uses.
-// Remote sub-agents that need full event content can query their own MemoryStore
-// using the EventKey.
 
 // ExternalContextEntry is the serializable representation of an external event
 // for cross-process context passing via RuntimeState.
@@ -100,44 +89,32 @@ func deserializeExternalContext(data []byte) ([]memory.FullEvent, error) {
 	return events, nil
 }
 
-// ==================== AgentToolWrapper ====================
-//
-// AgentToolWrapper wraps an agent.Agent (local TagentAgent or remote A2AAgent)
-// as a plain CallableTool. It handles:
-//
-//   - InputSchema declares event_keys parameter (list of Snowflake EventKeys)
-//   - On Call: extracts event_keys from args, fetches full events from parent MemStore,
-//     serializes them into RuntimeState["external_context"], and calls agent.Run
-//   - The LLM selects relevant event_keys from its context and passes them to the tool,
-//     enabling the tool to retrieve full event details that were compressed away
-//   - This prevents the LLM from breaking context isolation — the LLM only outputs
-//     numeric keys, but the actual event content is resolved server-side
-//   - Context delivery is unified: RuntimeState works for both local (direct Run)
-//     and remote (A2A metadata auto-mapping) sub-agents
-
 // ExtraParam declares one additional routing-level parameter for an
-// agent-kind tool (plan-interaction-contract D2). Declared params are added
+// agent-kind tool. Declared params are added
 // to the tool's InputSchema and, when present in a call, packed together
 // with request into a JSON message body — a whitelist pass-through for small
 // routing fields (e.g. plan's action/name), NOT a general RPC channel.
 type ExtraParam struct {
 	Name        string   `json:"name" yaml:"name"`
-	Type        string   `json:"type,omitempty" yaml:"type,omitempty"` // default "string"
+	Type        string   `json:"type,omitempty" yaml:"type,omitempty"`
 	Enum        []string `json:"enum,omitempty" yaml:"enum,omitempty"`
 	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
+// AgentToolWrapper 把一个 agent 包装成工具：携带其描述（可由 prompt.Source 热更）、事件参数、
+// 父级存储与投影，以及属主的常驻 cm 句柄。常驻 cm 是**有意**存 cm 而非存某一代执行器——
+// cm 活得比它发布过的任何执行器都久，长寿命的任务闭包持有它不会钉住已退役的执行器。
 type AgentToolWrapper struct {
-	agent            agent.Agent // unified: *TagentAgent (local) or *a2aagent.A2AAgent (remote)
+	agent            agent.Agent
 	desc             string
-	descSource       *prompt.Source              // Hot-reloadable description source (optional)
-	eventParams      []string                    // Which event-derived params to declare (e.g., "event_key")
-	parentStore      memory.MemoryStore          // Parent agent's MemStore for resolving event_key
-	parentProjection *compress.SessionProjection // Parent agent's projection for auto-inject fallback
+	descSource       *prompt.Source
+	eventParams      []string
+	parentStore      memory.MemoryStore
+	parentProjection *compress.SessionProjection
 
 	// parentCM is the RESIDENT owner's context manager — the handle a re-entry
 	// (Resume/Relaunch of a stored task) reads the CURRENT effective orchestration
-	// face from when no initiating call holds a binding (§4.2/D5). It is wired at
+	// face from when no initiating call holds a binding. It is wired at
 	// cold start alongside parentProjection and is deliberately the owner's cm, not
 	// a generation: the cm outlives every executor it publishes, so storing it in a
 	// long-lived task closure pins no retired executor.
@@ -158,7 +135,7 @@ type AgentToolWrapper struct {
 	resumeContextRounds int
 
 	// extraParams are additional routing-level parameters declared via ToolRef
-	// (plan-interaction-contract D2). Empty → plain-text request messages,
+	//. Empty → plain-text request messages,
 	// behavior unchanged.
 	extraParams []ExtraParam
 
@@ -198,10 +175,10 @@ const autoInjectMaxEvents = 5
 const subagentTTLParam = "ttl"
 
 // NewAgentToolWrapper creates a new AgentToolWrapper.
-//   - ag: the sub-agent to wrap (must implement agent.Agent — local TagentAgent or remote A2AAgent)
-//   - desc: tool description shown to parent agent's LLM
-//   - eventParams: which event-derived parameters to declare and resolve
-//   - parentStore: parent agent's MemStore for resolving event_key to full event data
+// - ag: the sub-agent to wrap (must implement agent.Agent — local TagentAgent or remote A2AAgent)
+// - desc: tool description shown to parent agent's LLM
+// - eventParams: which event-derived parameters to declare and resolve
+// - parentStore: parent agent's MemStore for resolving event_key to full event data
 func NewAgentToolWrapper(
 	ag agent.Agent,
 	desc string,
@@ -218,7 +195,7 @@ func NewAgentToolWrapper(
 
 // SetParentProjection sets the PUBLISHED parentProjection used as the
 // auto-inject fallback when a call runs outside any flow. It is a
-// construction/publish-time wire (cold start, new generation) — §6.5/D2: an
+// construction/publish-time wire (cold start, new generation) — /D2: an
 // in-flight invocation never re-binds it, because one wrapper instance is shared
 // by every concurrent call of its owner. While a flow is running, the flow's own
 // projection wins (see projectionForCall).
@@ -227,10 +204,10 @@ func (w *AgentToolWrapper) SetParentProjection(p *compress.SessionProjection) {
 }
 
 // SetParentCM wires the RESIDENT owner's context manager into a freshly built
-// delegation wrapper (cold start, same point as SetParentProjection — §6.5/D2's
+// delegation wrapper (cold start, same point as SetParentProjection — /D2's
 // allowed exception: a not-yet-published object is configured, a published one is
 // never rewritten). It is what lets a stored task's re-entry resolve its target
-// against the effective face instead of the instance that spawned it (§4.2).
+// against the effective face instead of the instance that spawned it.
 func (w *AgentToolWrapper) SetParentCM(cm *ContextManager) {
 	w.parentCM = cm
 }
@@ -277,7 +254,6 @@ func (w *AgentToolWrapper) SetDescriptionSource(src *prompt.Source) {
 // Declaration implements trpctool.Tool.
 func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	desc := w.desc
-	// Hot-reload: if descSource is set, re-read from disk
 	if w.descSource != nil {
 		if loaded, err := w.descSource.Get(); err == nil && loaded != "" {
 			desc = loaded
@@ -294,16 +270,14 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 		},
 	}
 
-	// Standard request parameter
 	decl.InputSchema.Properties["request"] = &trpctool.Schema{
 		Type:        "string",
 		Description: "The request or instruction to process",
 	}
 
-	// Declared routing-level extra parameters (plan-interaction-contract D2).
 	for _, p := range w.extraParams {
 		if p.Name == "" || p.Name == "request" || p.Name == "event_keys" {
-			continue // never shadow the built-in parameters
+			continue
 		}
 		typ := p.Type
 		if typ == "" {
@@ -318,13 +292,9 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 		decl.InputSchema.Properties[p.Name] = schema
 	}
 
-	// Declare event-derived parameters
 	for _, param := range w.eventParams {
 		switch param {
 		case "event_key", "event_keys":
-			// Always expose as event_keys (array) for consistency.
-			// The LLM selects relevant event keys from its context and passes them
-			// as a list, enabling the tool to retrieve full event details.
 			decl.InputSchema.Properties["event_keys"] = &trpctool.Schema{
 				Type:        "array",
 				Description: "[LLM-selected] Array of event keys (canonical hex strings, exactly as shown in [evt_...] prefixes and archive cards) for related events from the conversation context. Pass them so the tool can retrieve full event details.",
@@ -335,11 +305,6 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 		}
 	}
 
-	// Sub-agent lifetime self-service channel (resident-review-fixes 4.1),
-	// symmetric with the command tool's `ttl`: a long multi-round delegation is
-	// otherwise stuck on the 10-minute reaper floor. >0 sets this sub-agent
-	// task's absolute lifetime (seconds); 0/omitted → the manager's configured
-	// default (10m floor). A negative value is rejected in Call before spawning.
 	decl.InputSchema.Properties["ttl"] = &trpctool.Schema{
 		Type:        "integer",
 		Description: "ABSOLUTE lifetime of this sub-agent run in seconds. The unified reaper retires the task this long after spawn (fresh sub-agent runs are not reentrant, so this is not refreshed by later turns). 0 or omitted = configured default (10 minutes if unset); there is no way to disable the reaper. Raise it alongside the model's own pacing for long delegations.",
@@ -373,23 +338,13 @@ func isRemoteAgent(ag agent.Agent) bool {
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
-	// 3.2 trunk: this wrapper's face was wired at publish time with the child
-	// generation it DECLARES. Resolve the target through that generation's own
-	// execution view: pin it for this call subtree (D5 — a mid-call publish
-	// cannot split the call tree across generations), hand it to Run as the
-	// inherited lease so the callee assembles from THAT generation's face, and
-	// let the background producer derive from the same pin. Unwired (standalone,
-	// pre-wiring fallback) keeps the legacy behavior unchanged. A reclaimed
-	// declared generation is refused by name — the honest failure when no
-	// declarer kept it alive (ErrExecClosed), never a silent re-route onto the
-	// child's current face.
 	if d := w.declared.Load(); d != nil {
 		dl, derr := d.acquireDeclared(LeaseSubCall)
 		if derr != nil {
 			return nil, fmt.Errorf("agent tool %q: declared generation unavailable: %w", agentName, derr)
 		}
 		ctx = dl.WithContext(ctx)
-		defer dl.Release() // Run's derived reference releases at its own tail; this one covers the window before it
+		defer dl.Release()
 	}
 
 	// Parse args using json.Number to preserve int64 precision for Snowflake
@@ -404,13 +359,12 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		}
 	}
 
-	// Extract request text
 	request, _ := args["request"].(string)
 
 	// Parse the optional self-set lifetime (seconds). json.Number preserves
 	// int64 precision. Semantics mirror the command tool's ttl: >0 effective,
 	// 0/omitted → configured default (reaper floor), negative → REJECTED here
-	// before any spawn (resident-review-fixes 4.1).
+	// before any spawn.
 	var ttlSeconds int64
 	if raw, ok := args["ttl"]; ok && raw != nil {
 		n, isNum := raw.(json.Number)
@@ -431,10 +385,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		ttlSeconds = v
 	}
 
-	// Collect declared extra params present in this call and build the
-	// message body: with extra params → JSON {params..., request} so the
-	// sub-agent (LLM and custom Run alike) sees the routing fields; without →
-	// plain-text request, behavior unchanged (D2).
 	messageBody := request
 	extraName := ""
 	if len(w.extraParams) > 0 {
@@ -463,7 +413,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	var keys []int64
 	var externalEvents []memory.FullEvent
 	if w.parentStore != nil {
-		// Collect all event keys from event_keys array (LLM-provided).
 		if eventKeysRaw, ok := args["event_keys"]; ok {
 			switch v := eventKeysRaw.(type) {
 			case []interface{}:
@@ -472,17 +421,13 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 						keys = append(keys, key)
 					}
 				}
-			case float64: // Single int passed directly
+			case float64:
 				if key := toInt64Key(v); key > 0 {
 					keys = append(keys, key)
 				}
 			}
 		}
 
-		// Auto-inject: if LLM did not pass event_keys, automatically inject the
-		// most recent N event keys as fallback context — resolved against THIS
-		// call's projection (§6.5/D2), never against a field another concurrent
-		// call of the same agent may have written.
 		if len(keys) == 0 && w.hasEventKeysParam() {
 			if proj := w.projectionForCall(ctx); proj != nil {
 				keys = autoInjectEventKeys(proj)
@@ -500,11 +445,9 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		}
 	}
 
-	// === Boundary log: tool INPUT ===
 	log.Infof("[TRACE] tool_enter agent=%s request_len=%d event_keys=%d external_events=%d",
 		agentName, len(request), len(keys), len(externalEvents))
 
-	// Build the Invocation with RuntimeState carrying external context.
 	runOpts := agent.RunOptions{}
 	if len(externalEvents) > 0 {
 		serialized, err := serializeExternalContext(externalEvents)
@@ -522,43 +465,18 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		agent.WithInvocationRunOptions(runOpts),
 	)
 
-	// Async path: when a task spawner is present (parent's RunFlow injected it)
-	// and async is not disabled, run the sub-agent as a task. Its settle = the
-	// run's final output. Short runs settle within the sync-wait window and
-	// return inline (equivalent to the prior synchronous behavior); long runs
-	// return an ack and emit task_settled when the run returns. The run uses a
-	// detached context so it can outlive the parent turn (cancel via the task).
 	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
-		// task.Task-local round chain: each settled round's {input, output} is
-		// recorded so a later resume can restore THIS task's context (and only
-		// this task's — context-scoping). Shared across relaunch/resume rounds
-		// via the closure.
 		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
-		// §4.1 (design D6): the background run is a DERIVED execution. Its reference
-		// on the generation it was spawned from is taken BEFORE the producer starts
-		// and released only when that producer returns — an ACK, a settle record or
-		// a cancel notice is not a stop credential. The same closure owns the
-		// release on every exit (settle, error, early stop, cancellation, and the
-		// rejected/deduped paths where the task layer never adopted the work), so a
-		// reference can neither leak nor drop early.
 		callerLease, _ := execLeaseFromContext(ctx)
 		bgLease := callerLease.Derive(LeaseBackground)
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			defer bgLease.Release()
-			// The lease goes into the run context as well: holding the reference on the
-			// initiating generation while resolving nested targets against whatever is
-			// published NOW would split the execution across two generations (D5「ACK 后
-			// 后台调用 → 继承发起调用租约」). Same shape as the relaunch/resume producers.
 			out, err := w.runAndCollect(bgLease.WithContext(runCtx), inv, agentName)
 			if err == nil {
 				rounds.add(messageBody, out)
 			}
 			return out, err
 		}, w.asyncDenseDuration)
-		// Idempotency key: a non-empty declared `name` (e.g. plan's change name)
-		// keys the task by identity, so concurrent calls on the SAME plan
-		// single-flight via task-layer dedup (plan-interaction-contract D4).
-		// Without a name, fall back to keying by request text.
 		spawnKey := agentName + ":" + request
 		if extraName != "" {
 			spawnKey = agentName + ":" + extraName
@@ -578,8 +496,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			Desc: agentName + ": " + truncate(request, 60),
 			Key:  spawnKey,
 			TTL:  specTTL,
-			// R2（resident-continuity-r2-r4）：声明式投影——重启后 Relaunch 经 agents map
-			// 重投递（承诺表：subagent Resume 不可重建，rounds 无事件源）。
 			Declarative: &task.Declarative{
 				Kind:        "subagent",
 				Desc:        agentName + ": " + truncate(request, 60),
@@ -592,19 +508,11 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			ResumeFn: subagentResumeClosure(w.parentCM, agentName, rounds),
 		}, detector)
 		if res.Blocked != "" {
-			// 5.4（design-report-closeout）+ §8.1：子 agent 在 Spawn 前已开跑，gate 拒绝
-			// = 不纳入任务层（Spawn 已 Cancel detector 防失控）——文案必须如实。
-			// §4.1: Cancel is a notification, so wait for the producer's real stop
-			// before returning (the derived reference stays held meanwhile either way).
 			waitForUnadoptedStop(ctx, detector)
 			return "子任务未被任务层纳管（已启动的后台运行已被取消跟踪，结果不会回写）：" + res.Blocked + "。可稍后重发。", nil
 		}
 		if res.Deduped {
-			// Same-name single-flight: factual ticket only (stable-context-
-			// compaction D5) — the existing task is necessarily in-flight
-			// (dedup only matches active tasks); no tool-name teaching here,
-			// lifecycle guidance lives in the plan tool description.
-			waitForUnadoptedStop(ctx, detector) // §4.1: this call's own detector ran
+			waitForUnadoptedStop(ctx, detector)
 			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果，不要重复发起同名调用。",
 				res.Task.ID), nil
 		}
@@ -618,7 +526,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			agentName, res.Task.ID), nil
 	}
 
-	// Synchronous fallback (no spawner / async disabled): current behavior.
 	out, err := w.runAndCollect(ctx, inv, agentName)
 	if err != nil {
 		return nil, err
@@ -626,7 +533,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	return out, nil
 }
 
-// waitForUnadoptedStop honours §4.1 for a detector whose producer had ALREADY
+// waitForUnadoptedStop honours  for a detector whose producer had ALREADY
 // started when the task layer refused to adopt it (spawn gate blocked, or a
 // same-key dedup hit). Cancel is only a notification, so the derived execution
 // reference this call created must not be dropped until the producer really
@@ -644,11 +551,11 @@ func waitForUnadoptedStop(ctx context.Context, d task.SettleDetector) {
 	}
 }
 
-// runAndCollect runs the sub-agent for the given invocation and collects its
+// RedispatchAsync runAndCollect runs the sub-agent for the given invocation and collects its
 // final output from the event stream. Shared by the synchronous path and the
 // async task detector. Isolation is preserved by Run (fresh bus/CM/projection
 // per invocation), so this is safe to run concurrently / in a background task.
-// RedispatchAsync（R2，resident-continuity-r2-r4 D1.2）：跨重启 subagent relaunch
+// RedispatchAsync：跨重启 subagent relaunch
 // 的重投递入口——以原 request 重新走 Call 的完整 spawn 路径（声明了 extra
 // params 时按无参调用降级：plan-name 等 extra 参数不跨重启保留，已知边界）。
 func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string) (any, error) {
@@ -681,7 +588,7 @@ func (w *AgentToolWrapper) DenseDuration() time.Duration {
 const remoteRetryBackoff = 500 * time.Millisecond
 
 // runAndCollect runs one delegation and collects its result, retrying a failed
-// REMOTE attempt exactly once (§3.3 传输重试 for the A2A shape).
+// REMOTE attempt exactly once.
 //
 // The retry wraps the WHOLE attempt — send plus drain — because that is where a
 // transport failure actually surfaces: the A2A client reports a failed request as
@@ -699,8 +606,6 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 		return out, err
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		// The caller is being cancelled (shutdown): retrying would race the teardown
-		// and the transport error above is the informative one.
 		return out, err
 	}
 	log.Warnf("[AgentToolWrapper] remote agent %q attempt failed (%v), retrying once in %v",
@@ -708,7 +613,7 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 	select {
 	case <-time.After(remoteRetryBackoff):
 	case <-ctx.Done():
-		return out, err // keep the original transport cause; the cancel is in the log
+		return out, err
 	}
 	return w.collectAttempt(ctx, inv, agentName)
 }
@@ -731,10 +636,6 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 		if evt.Response != nil {
 			resp = evt.Response.Clone()
 		}
-		// Surface upstream model-API errors instead of letting their message
-		// text masquerade as a normal final output — otherwise the parent
-		// agent (and the operator) only ever sees an opaque provider string
-		// with no error classification.
 		if resp != nil && resp.Error != nil {
 			lastErr = resp.Error
 			log.Warnf("[ToolAgent:%s] upstream model error: type=%s message=%s", agentName, resp.Error.Type, resp.Error.Message)
@@ -763,10 +664,6 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 	log.Infof("[TRACE] tool_exit agent=%s output_len=%d tool_calls=%d elapsed=%v",
 		agentName, len(finalOutput), toolCallCount, elapsed)
 
-	// A run that ended on an upstream error with no usable final output is a
-	// FAILURE: return err so the settle path classifies it (status=failed,
-	// 错误: ... in the task_settled notification) instead of storing the
-	// provider's opaque error text as if it were a result.
 	if finalOutput == "" && lastErr != nil {
 		return "", fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
 	}
@@ -778,7 +675,7 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 }
 
 // subagentRelaunchClosure builds the relaunch closure of a subagent task. It is a
-// free function on purpose (introduce-durable-workflow-engine §4.2, R03): its
+// free function on purpose: its
 // captured environment holds a RESIDENT owner handle plus plain data, never an
 // executable wrapper. A stored task can be re-entered long after the generation
 // that spawned it was superseded, and running the spawn-time instance would revive
@@ -796,12 +693,8 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 			return task.SpawnResult{}, err
 		}
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			defer lease.Release() // §4.1: the producer closure owns the release on every exit
+			defer lease.Release()
 			return target.runAndCollect(lease.WithContext(runCtx), inv, agentName)
-			// The dense window is read from the RESOLVED target, not from anything this
-			// closure captured at spawn time: like the resume rounds, it is a declaration
-			// parameter of the generation actually serving the re-entry (§4.2「不沿用退役代
-			// 的声明参数」), and the settle point is host-visible.
 		}, target.DenseDuration())
 		var specTTL time.Duration
 		var declParams map[string]string
@@ -814,8 +707,6 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 			Desc: agentName + ": " + truncate(request, 60),
 			Key:  spawnKey,
 			TTL:  specTTL,
-			// R2（review 🟠8）：relaunch 产物同样携带声明式投影——否则该产物重启后
-			// 成幽灵（无 task_spawned 记录可回放）。ttl 一并持久化，保持锚点一致。
 			Declarative: &task.Declarative{
 				Kind:        "subagent",
 				Desc:        agentName + ": " + truncate(request, 60),
@@ -827,18 +718,13 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds),
 		}, detector)
 		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
-			// §4.1: the producer for THIS re-entry already started, so its derived
-			// reference stays held until it really stops even though the task layer
-			// adopted nothing. The wait rides the initiator's own deadline; with no
-			// initiator there is nothing to bound it (a sub-agent run may last the
-			// whole 600s timeout), so the reference simply stays held.
 			waitForUnadoptedStop(ctx, detector)
 		}
 		return res, nil
 	}
 }
 
-// ResolveReentryDelegation picks the delegation target a Resume/Relaunch re-entry
+// hasInitiator ResolveReentryDelegation picks the delegation target a Resume/Relaunch re-entry
 // runs on, per design D5 row 4: a re-entry riding an initiating call inherits THAT
 // call's binding (its own generation's face and its resource reference), while a
 // re-entry with no initiator (console/WAL/ops path) acquires the current effective
@@ -856,6 +742,14 @@ func hasInitiator(ctx context.Context) bool {
 	return ok
 }
 
+// ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的
+// 子调用租约：
+//   - 上下文里有发起方租约时，按其**同一代**解析——目标不在该代的编排里就直接报错，绝不
+//     悄悄改投到当前生效代（重入必须留在自己那一代的语义里）；
+//   - 无租约时退回属主常驻面，在其当前生效代上取租约；若该代已收敛关闭则拒绝；
+//   - 解析不到目标时释放刚取的租约再报错，不留悬挂引用。
+//
+// 调用方拿到的租约必须由它负责释放。
 func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error) {
 	if l, ok := execLeaseFromContext(ctx); ok && l != nil {
 		if t := l.SubagentWrapper(agentName); t != nil {
@@ -877,7 +771,7 @@ func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentN
 	if t := l.SubagentWrapper(agentName); t != nil {
 		return t, l, nil
 	}
-	l.Release() // the reference was taken to READ the face; a refusal must not pin anything
+	l.Release()
 	return nil, nil, fmt.Errorf(
 		"subagent %q is not a target of the EFFECTIVE orchestration generation — relaunch refused (a retired binding is not revived, and the task chain context is kept untouched)", agentName)
 }
@@ -901,8 +795,6 @@ func (r *subagentRounds) add(input, output string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rounds = append(r.rounds, subagentRound{input: input, output: output, at: time.Now()})
-	// Bound the chain: only the newest cap rounds are ever restored, so older
-	// entries are dead weight on a long-lived resumable task.
 	limit := r.cap
 	if limit <= 0 {
 		limit = DefaultResumeContextRounds
@@ -922,7 +814,7 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 }
 
 // subagentResumeClosure builds the resume (送输入) closure of a subagent task.
-// Like the relaunch closure it captures no executable wrapper (§4.2, R03): the
+// Like the relaunch closure it captures no executable wrapper: the
 // target and the target's OWN declaration parameters (restoration cap, dense
 // window) come from the generation the re-entry selected, so a stored task cannot
 // keep replaying a retired generation's parameters. The refusal happens BEFORE the
@@ -947,12 +839,10 @@ func subagentResumeClosure(owner *ContextManager, agentName string, rounds *suba
 		}
 		prior := rounds.recent(target.effectiveResumeRounds())
 		if len(prior) == 0 {
-			lease.Release() // nothing to resume: the reference taken to read the face goes back
+			lease.Release()
 			return nil, fmt.Errorf("subagent task has no settled round to resume from — use relaunch_task or a fresh call")
 		}
 
-		// Restore the task chain as external context events (newest last; the
-		// last settle result is what the resumed run references first).
 		restored := make([]memory.FullEvent, 0, len(prior))
 		for _, rd := range prior {
 			restored = append(restored, memory.FullEvent{
@@ -1007,7 +897,6 @@ func (w *AgentToolWrapper) runWithTimeout(ctx context.Context, inv *agent.Invoca
 		return nil, err
 	}
 
-	// Wrap channel: cancel context after consumption to enforce timeout
 	wrapped := make(chan *event.Event, cap(eventCh))
 	go func() {
 		defer cancel()
@@ -1029,13 +918,11 @@ func (w *AgentToolWrapper) hasEventKeysParam() bool {
 	return false
 }
 
-// projectionForCall resolves the projection this delegation auto-injects from.
-// §6.5/D2: the enclosing call's own projection (bound by RunFlow onto the
-// call-chain context) is authoritative, because the wrapper itself is a SHARED
-// published object — the same instance serves every concurrent invocation of
-// its owner, so its published binding can never be call-correct on its own.
-// Outside a flow (direct tool call, legacy callers) the construction-time
-// binding set by SetToolParentProjection remains the fallback.
+// projectionForCall 解析本次委托自动注入所用的投影。
+//
+// 外层调用自己的投影（由 RunFlow 绑到调用链上下文上）才是权威：wrapper 本身是**共享的已发布
+// 对象**，同一实例服务其属主的每一次并发调用，因此它自己的发布绑定单凭自身不可能对调用正确。
+// 在流之外（直接工具调用或兼容入口）才退回 SetToolParentProjection 设置的构造期绑定。
 func (w *AgentToolWrapper) projectionForCall(ctx context.Context) *compress.SessionProjection {
 	if p, ok := callProjectionFromContext(ctx); ok {
 		return p
@@ -1053,7 +940,6 @@ func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
 	if len(refs) == 0 {
 		return nil
 	}
-	// Take the most recent N events
 	start := 0
 	if len(refs) > autoInjectMaxEvents {
 		start = len(refs) - autoInjectMaxEvents
@@ -1067,16 +953,6 @@ func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
 	return keys
 }
 
-// ==================== Tool Agent Factory Registry ====================
-//
-// The factory registry provides ID-based lookup for tool agent factories
-// (knowledge, recall). These factories create TagentAgent instances that
-// are then wrapped by AgentToolWrapper in tagent.New().
-//
-// In the agent-centric config model, the primary path for creating tool
-// agents is via the Agents map in Config. The factory registry supports
-// programmatic registration of custom tool agents by ID.
-
 // ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from the
 // given inputs. It must NOT construct the agent itself: the org owns the single
 // birth path (wireAgent assembles every real owner — store-lease slot, drain
@@ -1087,15 +963,15 @@ func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
 // had to rebuild the whole agent (an orphan nobody closed) and every pinned
 // delegation kept reading the stale construction config (design D1「避免用返回
 // 完整临时 agent 的方式隐式制造第二 owner」; contract migrated round 91 with
-// user approval — evidence §5.47).
+// user approval — evidence ).
 //
 // The returned *TagentConfig is adopted verbatim where it is meaningful:
-//   - Name: the factory's choice is respected (the old contract's「产物整只
-//     使用」promise); empty falls back to the registered id.
-//   - MemoryStore: the org's store borrowed for this name fills a nil — a
-//     factory that opens its OWN store must not also be handed the org lease.
-//   - MemStoreRelease: always the org's, filled by the assembly after this call
-//     returns — a factory neither keeps nor invents a release for it.
+// - Name: the factory's choice is respected (the old contract's「产物整只
+// 使用」promise); empty falls back to the registered id.
+// - MemoryStore: the org's store borrowed for this name fills a nil — a
+// factory that opens its OWN store must not also be handed the org lease.
+// - MemStoreRelease: always the org's, filled by the assembly after this call
+// returns — a factory neither keeps nor invents a release for it.
 type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
 
 // ToolAgentFactoryConfig provides everything a factory needs to produce the agent's
@@ -1133,19 +1009,19 @@ type ToolAgentFactoryConfig struct {
 	// SkillRepo is the skill repository for knowledge agent (optional).
 	SkillRepo tagenttool.SkillRepository
 
-	// MCPToolSets are MCP tool sources for tool discovery (optional, legacy).
+	// MCPToolSets 是用于工具发现的 MCP 工具来源（可选）。
 	MCPToolSets []trpctool.ToolSet
 
 	// MCPRegistry is the live MCP server registry (preferred over
 	// MCPToolSets): reads reflect runtime registration and config hot-sync.
 	MCPRegistry tagenttool.MCPRegistry
 
-	// Agent parameters
+	// MaxToolIterations Agent parameters
 	MaxToolIterations int
 	MaxTokens         int
 	Temperature       float64
 
-	// Thinking/reasoning controls
+	// ThinkingEnabled Thinking/reasoning controls
 	ThinkingEnabled      *bool
 	ThinkingTokens       *int
 	ReasoningEffort      *string
@@ -1177,8 +1053,6 @@ func GetToolAgentFactory(id string) (ToolAgentFactory, bool) {
 	return f, ok
 }
 
-// ==================== Plain Tool Factory Registry ====================
-
 // PlainToolFactory creates a plain tool (implements tool.CallableTool) from the given config.
 type PlainToolFactory func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, error)
 
@@ -1186,7 +1060,7 @@ type PlainToolFactory func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, e
 type PlainToolFactoryConfig struct {
 	ID          string
 	Description string
-	Properties  map[string]any // Tool-specific config, deserialized by each factory
+	Properties  map[string]any
 
 	// WorkspaceRoot is the unified on-disk scratch root (default: .tagent-workspace).
 	// Tools that need a working/output directory derive it from here (e.g. the
@@ -1198,26 +1072,26 @@ type PlainToolFactoryConfig struct {
 	// 共同根,优先级仍低于 ToolRef.properties 的显式 base_dir/workspace。由 config.WorkingDir 注入。
 	WorkingDir string
 
-	// Runtime dependencies (optional, injected by buildAgent).
+	// MemStore Runtime dependencies (optional, injected by buildAgent).
 	// Most plain tools (e.g., exec) ignore these fields.
 	// Sub-tools that need runtime objects (e.g., skill_search needs SkillRepo,
 	// memory_query needs MemStore) extract them from here.
-	MemStore         memory.MemoryStore         // For memory-dependent tools
-	SkillRepo        tagenttool.SkillRepository // For skill-dependent tools
-	MCPToolSets      []trpctool.ToolSet         // For MCP-dependent tools (legacy static slice)
-	MCPRegistry      tagenttool.MCPRegistry     // Live MCP server registry (preferred over MCPToolSets)
-	ReadPartitionIDs []int                      // For recall tools that query cross-namespace
+	MemStore         memory.MemoryStore
+	SkillRepo        tagenttool.SkillRepository
+	MCPToolSets      []trpctool.ToolSet
+	MCPRegistry      tagenttool.MCPRegistry
+	ReadPartitionIDs []int
 
 	// Degradation 是 per-agent 五依赖退化状态机（T-G，可选）。mcp_call 工具据此上报 DepMCP
 	// 退化（MCP server 连续失败→degraded，成功→恢复）。nil = 未启用退化追踪（现状）。
 	Degradation *reliability.DegradationManager
 
-	// MCPProbeEvery（5.4 design-report-closeout）：DepMCP degraded 时 mcp_call 的
+	// MCPProbeEvery：DepMCP degraded 时 mcp_call 的
 	// 熔断半开探测间隔（每 N 次放行 1 次）。0 = 关闭。由 buildPlainToolRef 从 agent
 	// DegradationBehaviors 注入。
 	MCPProbeEvery int
 
-	// ConsolidationMinSources（4.4 design-report-closeout）：memory_consolidate
+	// ConsolidationMinSources：memory_consolidate
 	// 的 min_source_events 硬门控（实际取回源不足即拒绝）。0 = 不校验。由
 	// buildPlainToolRef 从该 agent 的 memory.engine.consolidation 注入。
 	ConsolidationMinSources int
@@ -1262,12 +1136,10 @@ func toInt64Key(v interface{}) int64 {
 			return i
 		}
 	case string:
-		// Canonical: hex (possibly with evt_ prefix echoed by the model).
 		s := strings.TrimPrefix(strings.TrimSpace(val), "evt_")
 		if k, err := tagentevent.ParseEventKey(s); err == nil && k != 0 {
 			return k
 		}
-		// Legacy fallback: decimal strings from older transcripts.
 		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
 			return i
 		}

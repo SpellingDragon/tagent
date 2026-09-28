@@ -18,11 +18,16 @@ type PromptConfig = prompt.CompositeConfig
 
 // Config holds configuration for creating the Knowledge Agent.
 type Config struct {
-	Model       model.Model               // Required: LLM model
-	MemStore    memory.MemoryStore        // Optional: agent's own MemoryStore (if set, wired to MemoryPlugin + sub-tools)
-	SkillRepo   tagentpkg.SkillRepository // Optional: skill source
-	MCPToolSets []tagenttool.ToolSet      // Optional: MCP tool sources
-	PromptDir   string                    // Optional: base directory for prompt files (default: "resources/prompts")
+	// Model Required: LLM model
+	Model model.Model
+	// MemStore Optional: agent's own MemoryStore (if set, wired to MemoryPlugin + sub-tools)
+	MemStore memory.MemoryStore
+	// SkillRepo Optional: skill source
+	SkillRepo tagentpkg.SkillRepository
+	// MCPToolSets Optional: MCP tool sources
+	MCPToolSets []tagenttool.ToolSet
+	// PromptDir Optional: base directory for prompt files (default: "resources/prompts")
+	PromptDir string
 	// ReadPartitionIDs scopes partition-isolated queries (memory_query) to the
 	// agent's readable partitions (own namespace first + read_namespaces).
 	ReadPartitionIDs []int
@@ -33,16 +38,22 @@ type Config struct {
 	Tools []tagenttool.Tool
 
 	// Prompt loading (bootstrap style)
-	Prompt PromptConfig // Optional: overrides PromptDir + "knowledge_agent.md" if set
+	// Optional: overrides PromptDir + "knowledge_agent.md" if set
+	Prompt PromptConfig
 
-	// Tool description shown to the parent agent's LLM
-	Description     string // Optional: inline description (overrides default)
-	DescriptionFile string // Optional: description loaded from file (relative to PromptDir)
+	// Description Tool description shown to the parent agent's LLM
+	// Optional: inline description (overrides default)
+	Description string
+	// DescriptionFile Optional: description loaded from file (relative to PromptDir)
+	DescriptionFile string
 
-	// Optional overrides
-	MaxToolIterations int     // Default: 5 (knowledge acquisition needs few iterations)
-	MaxTokens         int     // Default: 4096
-	Temperature       float64 // Default: 0.3 (precision over creativity)
+	// MaxToolIterations Optional overrides
+	// Default: 5 (knowledge acquisition needs few iterations)
+	MaxToolIterations int
+	// MaxTokens Default: 4096
+	MaxTokens int
+	// Temperature Default: 0.3 (precision over creativity)
+	Temperature float64
 }
 
 // NewAgent creates a TagentAgent configured for knowledge acquisition & translation.
@@ -53,7 +64,6 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("knowledge agent: model is required")
 	}
 
-	// 1. Resolve prompt directory
 	promptDir := cfg.PromptDir
 	if promptDir == "" {
 		promptDir = "resources/prompts"
@@ -64,28 +74,22 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 	var systemPrompt string
 	var err error
 	if !cfg.Prompt.IsEmpty() {
-		// Use PromptConfig (bootstrap style) if configured
 		systemPrompt, err = loader.LoadComposite(cfg.Prompt.Inline, cfg.Prompt.Files, cfg.Prompt.Dir)
 		if err != nil {
 			return nil, fmt.Errorf("knowledge agent: load prompt: %w", err)
 		}
 	} else {
-		// Fallback: load single file
 		systemPrompt, err = loader.LoadFromFile("knowledge_agent.md")
 		if err != nil {
 			return nil, fmt.Errorf("knowledge agent: load prompt: %w", err)
 		}
 	}
 
-	// 3. Assemble sub-tools
-	// Config-driven path: tools are injected by buildAgent.
-	// Backward compat: if Tools is empty, build sub-tools internally.
 	subTools := cfg.Tools
 	if len(subTools) == 0 {
 		subTools = BuildSubTools(cfg)
 	}
 
-	// 4. Apply defaults
 	maxToolIter := cfg.MaxToolIterations
 	if maxToolIter <= 0 {
 		maxToolIter = 5
@@ -95,12 +99,11 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		maxTokens = 4096
 	}
 
-	// 5. Create TagentAgent instance (inherits all tagent core mechanisms)
 	agentCfg := &agent.TagentConfig{
 		Name:              "knowledge",
 		Description:       "Knowledge acquisition and translation agent. Discovers skills, MCP tools, and web resources; translates them into executable plans.",
 		Model:             cfg.Model,
-		MemoryStore:       cfg.MemStore, // Wire store so MemoryPlugin and sub-tools share the same store
+		MemoryStore:       cfg.MemStore,
 		SystemPrompt:      systemPrompt,
 		Tools:             subTools,
 		MaxToolIterations: maxToolIter,
@@ -130,13 +133,11 @@ func NewTool(cfg Config) (tagenttool.Tool, error) {
 		return nil, err
 	}
 
-	// Resolve tool description
 	desc, err := resolveDescription(cfg, "Knowledge acquisition and translation tool. Acquires knowledge needed to complete tasks and translates it into executable plans.")
 	if err != nil {
 		return nil, err
 	}
 
-	// Wrap as AgentToolWrapper (no event_key resolution in standalone mode)
 	return agent.NewAgentToolWrapper(knowledgeAgent, desc, nil, nil), nil
 }
 

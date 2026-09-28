@@ -59,7 +59,7 @@ func TestExtractName_AbsentOrPlainText(t *testing.T) {
 
 // TestExtractName_PlainTextFallback: the resume_task path delivers raw text
 // (bypasses wrapper packing); the contract form "progress name=<plan>" must
-// resolve the name (code-review Major-1 regression).
+// resolve the name.
 func TestExtractName_PlainTextFallback(t *testing.T) {
 	tests := []struct {
 		content string
@@ -68,7 +68,7 @@ func TestExtractName_PlainTextFallback(t *testing.T) {
 		{"progress name=my-plan", "my-plan"},
 		{"progress name=my-plan: 查看进度", "my-plan"},
 		{"update name=complete-oi-question-bank, 步骤 1.1 完成", "complete-oi-question-bank"},
-		{"Progress NAME=case-plan", "case-plan"}, // 前缀大小写宽容，值保留原样
+		{"Progress NAME=case-plan", "case-plan"},
 		{"progress name=", ""},
 	}
 	for _, tt := range tests {
@@ -104,7 +104,7 @@ func TestRunProgressQuery_ResumeTextPath(t *testing.T) {
 	assert.NotContains(t, content, "多个活跃", "named resume-text query must not bounce to the picker")
 }
 
-// TestBuildProgressSummary_NoActiveChanges tests with no openspec/changes/ directory.
+// TestBuildProgressSummary_NoActiveChanges 覆盖变更目录不存在时的进度摘要。
 func TestBuildProgressSummary_NoActiveChanges(t *testing.T) {
 	pa := NewPlanAgent(nil, "/nonexistent")
 	summary := pa.buildProgressSummary("")
@@ -133,7 +133,6 @@ func TestBuildProgressSummary_MultipleActiveChanges(t *testing.T) {
 
 	pa := NewPlanAgent(nil, tmpDir)
 	summary := pa.buildProgressSummary("")
-	// Never guess: list active plans with per-plan completion instead.
 	assert.Contains(t, summary, "多个活跃")
 	assert.Contains(t, summary, "change-1 (1/2 完成)")
 	assert.Contains(t, summary, "change-2 (0/1 完成)")
@@ -183,7 +182,7 @@ func TestRun_ProgressAction(t *testing.T) {
 	tmpDir := t.TempDir()
 	createChangeWithTasks(t, tmpDir, "test", "- [x] task\n")
 
-	pa := NewPlanAgent(nil, tmpDir) // TagentAgent is nil — progress path doesn't use it
+	pa := NewPlanAgent(nil, tmpDir)
 	inv := &agent.Invocation{
 		Message: model.Message{Content: `{"action":"progress"}`},
 	}
@@ -257,10 +256,8 @@ func TestBuildProgressEvent(t *testing.T) {
 	assert.Len(t, evt.Response.Choices, 1)
 	assert.Equal(t, model.RoleAssistant, evt.Response.Choices[0].Message.Role)
 	assert.Equal(t, "test summary", evt.Response.Choices[0].Message.Content)
-	assert.Len(t, evt.Response.Choices[0].Message.ToolCalls, 0) // No tool calls — final response
+	assert.Len(t, evt.Response.Choices[0].Message.ToolCalls, 0)
 }
-
-// === Helpers ===
 
 func createChangeWithTasks(t *testing.T, base, name, content string) {
 	t.Helper()

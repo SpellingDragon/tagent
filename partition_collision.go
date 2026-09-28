@@ -28,7 +28,7 @@ func agentMemoryFingerprint(acfg *AgentConfig) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// registerStoreOwner (resident-readiness-plan 4.4): within one shared
+// registerStoreOwner: within one shared
 // MemoryStore instance, two DIFFERENT agent names mapping to the same 10-bit
 // partition id would silently merge their memory namespaces (each writes the
 // other's timeline; recall crosses without authorization). Registered at
@@ -86,8 +86,10 @@ func (rc *runtimeConfig) unRegisterStoreOwner(name string) {
 }
 
 // ownedAgentNames returns the set of agent names that currently hold a store-owner
-// registration. The candidate transaction (introduce-durable-workflow-engine §2.3,
-// R01) snapshots this before building and diffs after, so a refused candidate's
+// registration. The candidate transaction
+//
+//	snapshots this before building and diffs after, so a refused candidate's
+//
 // rollback can revoke EVERY owner it registered — including a parent that failed
 // late and therefore never reached the build cache and is invisible to the added
 // set. Diagnostic read-only; returns a fresh set.
@@ -144,7 +146,7 @@ func changedMemoryAgents(fresh *Config, ownerFP map[string]string, routable map[
 	return out
 }
 
-// reachableAgents (resident-readiness-plan 4.5): the set of agent names the
+// reachableAgents: the set of agent names the
 // entry actually pulls in via tools references (transitively) — the true
 // built topology, not the whole Agents map (which may carry unreferenced
 // definitions).

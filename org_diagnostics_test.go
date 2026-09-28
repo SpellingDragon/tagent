@@ -1,14 +1,18 @@
 package tagent
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // §5.1（design D9）：代际诊断的有界可诊断结果。契约两层——
@@ -201,4 +205,407 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.NotEqual(t, st["fingerprint"], fail.Desired,
 		"desired ≠ effective is the direct evidence behind 「我改了为什么没生效」")
 	require.Equal(t, int64(1), st["generation"], "the refusal keeps serving generation 1")
+}
+
+// §5.1（design D9）：诊断必须反映**实际消费者**，不能只证明 resident setter 被调用。
+// 逐 agent 回执（payload["agents"]）今天回显的是**请求下发**的那组数值
+// （applyHotAll 里的 `p`），而不是从真实消费者读回。本测钉住这条 5.1 独有的、
+// 尚未被 §2.4/§6.4 覆盖的契约：一次 numeric-only 热更后，回执所报的
+// MaxTokens×ThresholdPct、KeepRecentTasks 必须与该 agent **真实 compressor 消费值**
+// 逐一对齐；TaskManager 终态 TTL 这一消费者必须在同一轮 numeric-only 后确实移动；
+// 被移除的 draining owner 回执不带 applied 值、且其真实消费者保持最后有效值不被改成默认。
+//
+// 与既存测的关系（避免重复冒充）：§2.4 已从 config 期望值断言真实预算/TTL；
+// §4.3 已从真实消费者断言 draining 的 keepRecent；§3.2/§4.1（d6_lease_test）已证
+// InFlightTurns 单计数。本测补齐的是「**回执 ↔ 真实消费者**」这一互证腿。
+
+// hotParamsYAML 渲染 main→sub1 的两 agent 拓扑。四行数值（keep/max/threshold/terminal）
+// 全部热可应用（不进 org 指纹），system_prompt 固定 → 只改数值即走 numeric-only 路径。
+func hotParamsYAML(keepMain, maxMain int, thrMain float64, termMain string, keepSub, maxSub int, thrSub float64) string {
+	return "entry: main\n" +
+		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key_env: TAGENT_TEST_API_KEY\n" +
+		"agents:\n  main:\n" +
+		"    system_prompt:\n      inline: \"diag entry\"\n" +
+		"    keep_recent_tasks: " + strconv.Itoa(keepMain) + "\n" +
+		"    max_tokens: " + strconv.Itoa(maxMain) + "\n" +
+		"    compress_threshold: " + strconv.FormatFloat(thrMain, 'f', -1, 64) + "\n" +
+		"    task_terminal_ttl: " + strconv.Quote(termMain) + "\n" +
+		"    tools:\n      - kind: agent\n        agent: sub1\n        description: \"sub1\"\n" +
+		"    memory:\n      type: memory\n" +
+		"  sub1:\n" +
+		"    system_prompt:\n      inline: \"sub1\"\n" +
+		"    keep_recent_tasks: " + strconv.Itoa(keepSub) + "\n" +
+		"    max_tokens: " + strconv.Itoa(maxSub) + "\n" +
+		"    compress_threshold: " + strconv.FormatFloat(thrSub, 'f', -1, 64) + "\n" +
+		"    memory:\n      type: memory\n"
+}
+
+// hotParamsYAMLNoSub renders main-only (sub1 dropped from BOTH the tool list and the
+// agents table). Removing a routed agent is a structural change; held by an
+// in-flight reference, sub1's owner stays resident → draining receipt (§4.3).
+func hotParamsYAMLNoSub(keepMain, maxMain int, thrMain float64, termMain string) string {
+	return "entry: main\n" +
+		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key_env: TAGENT_TEST_API_KEY\n" +
+		"agents:\n  main:\n" +
+		"    system_prompt:\n      inline: \"diag entry\"\n" +
+		"    keep_recent_tasks: " + strconv.Itoa(keepMain) + "\n" +
+		"    max_tokens: " + strconv.Itoa(maxMain) + "\n" +
+		"    compress_threshold: " + strconv.FormatFloat(thrMain, 'f', -1, 64) + "\n" +
+		"    task_terminal_ttl: " + strconv.Quote(termMain) + "\n" +
+		"    memory:\n      type: memory\n"
+}
+
+// budgetOf mirrors ContextCompressor.BudgetLine() exactly — int(float64(max)*thr)
+// — so the receipt↔consumer cross-validation compares like-for-like and is immune
+// to the float truncation of a non-exact threshold on either side.
+func budgetOf(max int, thr float64) int { return int(float64(max) * thr) }
+
+// diagnosticsReceipts reads the per-agent receipt set off the diagnostics payload.
+func diagnosticsReceipts(t *testing.T, d map[string]any) map[string]OrgAgentApply {
+	t.Helper()
+	rec, ok := d["agents"].([]OrgAgentApply)
+	require.True(t, ok, "per-agent receipts must be observable on the payload")
+	byName := map[string]OrgAgentApply{}
+	for _, r := range rec {
+		byName[r.Name] = r
+	}
+	return byName
+}
+
+// TestReceiptIsBackedByRealConsumers is the §5.1 core contract: after one
+// numeric-only reload of a routed multi-agent org, every applied agent's receipt
+// figures must reproduce what its OWN real compressor/TaskManager now uses — not
+// merely what the reloader asked for (the receipt today echoes the requested `p`).
+func TestReceiptIsBackedByRealConsumers(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	// Startup: main budget = 4000×0.5 = 2000 (exact), keep 2; sub1 budget = 8000×0.5 = 4000, keep 3.
+	write(hotParamsYAML(2, 4000, 0.5, "1m", 3, 8000, 0.5))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	require.Equal(t, 2000, entry.OrgBudgetLine())
+	require.Equal(t, 4000, residentCacheForTest(entry)["sub1"].OrgBudgetLine())
+
+	// One numeric-only apply. main: keep 2→7, max 4000→9000, thr stays 0.5 (budget 4500,
+	// exact), terminal 1m→5m. sub1: keep 3→5, max 8000→10000, thr 0.5→0.6 (inexact →
+	// validated via the mirrored formula, not a hardcoded number).
+	write(hotParamsYAML(7, 9000, 0.5, "5m", 5, 10000, 0.6))
+	entry.CheckOrgReload()
+
+	// It really took the numeric-only path: generation frozen, revision advanced.
+	d := entry.OrgDiagnostics()
+	require.EqualValues(t, 0, diagInt64(t, d, "generation"), "numeric-only must not bump the structural generation")
+	require.NotZero(t, diagInt64(t, d, "revision"), "numeric-only is a full apply")
+
+	byName := diagnosticsReceipts(t, d)
+	require.Equal(t, "applied", byName["main"].Outcome)
+	require.Equal(t, "applied", byName["sub1"].Outcome)
+
+	// === The §5.1 leg: the receipt's REPORTED figures must reproduce the REAL consumer. ===
+	// Entry — threshold stays exact, so both the number and the formula are pinned.
+	require.Equal(t, 9000, byName["main"].MaxTokens)
+	require.InDelta(t, 0.5, byName["main"].ThresholdPct, 1e-9)
+	require.Equal(t, 7, byName["main"].KeepRecentTasks)
+	require.Equal(t, 7, entry.OrgKeepRecent(), "receipt keep == live compressor keepRecent (real consumer)")
+	require.Equal(t, 4500, entry.OrgBudgetLine(), "live compressor moved to 9000×0.5")
+	require.Equal(t, budgetOf(byName["main"].MaxTokens, byName["main"].ThresholdPct), entry.OrgBudgetLine(),
+		"the receipt's own budget figures must reproduce what the compressor actually uses — 不只证明 setter 被调用")
+
+	// Sub-agent — same cross-validation against ITS OWN compressor (threshold 0.6 is
+	// float-inexact, so compare via the mirrored formula rather than a literal).
+	sub := residentCacheForTest(entry)["sub1"]
+	require.Equal(t, 10000, byName["sub1"].MaxTokens)
+	require.InDelta(t, 0.6, byName["sub1"].ThresholdPct, 1e-9)
+	require.Equal(t, 5, byName["sub1"].KeepRecentTasks)
+	require.Equal(t, 5, sub.OrgKeepRecent(), "sub receipt keep == sub live compressor keepRecent")
+	require.Equal(t, budgetOf(byName["sub1"].MaxTokens, byName["sub1"].ThresholdPct), sub.OrgBudgetLine(),
+		"a routed sub-agent's receipt budget must match its own compressor, not the entry's")
+	require.NotEqual(t, entry.OrgBudgetLine(), sub.OrgBudgetLine(),
+		"the two agents really did move to distinct values (guards against a shared/global consumer)")
+
+	// The fifth axis (terminal TTL) has no receipt slot by design (bounded D9 shape);
+	// §5.1 still requires it to have really moved at its consumer on this same apply.
+	require.Equal(t, 5*time.Minute, entry.TaskManager().TerminalTTL(),
+		"task_terminal_ttl reached its real consumer (TaskManager) on this numeric-only apply")
+}
+
+// TestDrainingReceiptTracksHeldConsumer proves the drain leg of the same
+// cross-validation: an owner this generation no longer routes keeps a receipt that
+// carries NO applied value AND its real consumer holds its last effective value
+// (not silently re-defaulted) while it drains.
+func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(hotParamsYAML(2, 4000, 0.5, "1m", 3, 8000, 0.5))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	sub := residentCacheForTest(entry)["sub1"]
+	heldKeep, heldBudget := sub.OrgKeepRecent(), sub.OrgBudgetLine()
+	require.Equal(t, 3, heldKeep)
+	require.Equal(t, 4000, heldBudget)
+
+	// Make the drain window real: hold an in-flight reference on sub1 so §4.3 keeps
+	// its owner resident after it stops being routed (otherwise it retires immediately).
+	draining := sub.ContextManager().AcquireLease(agent.LeaseSubCall)
+	defer draining.Release()
+
+	// Drop sub1 from the topology while raising main's numerics.
+	write(hotParamsYAMLNoSub(7, 9000, 0.5, "5m"))
+	entry.CheckOrgReload()
+
+	d := entry.OrgDiagnostics()
+	byName := diagnosticsReceipts(t, d)
+	require.Equal(t, "applied", byName["main"].Outcome)
+	require.Equal(t, 7, byName["main"].KeepRecentTasks)
+	require.Equal(t, 4500, entry.OrgBudgetLine(), "the still-routed entry really moved")
+
+	require.Equal(t, "draining", byName["sub1"].Outcome, "the unrouted owner reports a deliberate no-op")
+	require.Zero(t, byName["sub1"].MaxTokens, "a draining receipt carries no applied value")
+	require.Zero(t, byName["sub1"].KeepRecentTasks)
+	// Its real consumer must still hold the last effective values, not parsed defaults.
+	require.Equal(t, heldKeep, sub.OrgKeepRecent(), "draining owner keeps its live keepRecent (not defaulted)")
+	require.Equal(t, heldBudget, sub.OrgBudgetLine(), "draining owner keeps its live budget, not defaulted")
+}
+
+// 轮一百零三（evidence §5.59）：§5.1 剩下的两条腿。
+//
+//	②「热增／结构发布后的真实子调用预算与 TTL（非 getter 回声）」——
+//	  `TestReceiptIsBackedByRealConsumers` 钉的是**已路由**拓扑上的 numeric-only
+//	  应用；这里补的是**刚被结构发布新增的 owner**：它的回执数字必须等于它自己
+//	  真实消费者的值，且它**真实派生**的任务拿到的是**它自己**记录里的 TTL
+//	  （不是宿主的、不是默认值、也不是 setter 被调用的回声）。
+//	③「关闭已发起」与「资源已退出」必须可区分——§4.1 的有界返回不等于收尾完成。
+//	  用真实的在途引用（租约）造成该状态，而不是自造阻塞 closer。
+//
+// 两条都同时读**载荷形状**本身：`liveDebt`（自带采集时刻的实时债务组）与 `close`
+// （两态分离）是本轮按 §5.1 立的新契约，断言即钉住「不把多次无锁 getter 拼成
+// 原子成功快照」的正向表达。
+
+// routedSub2YAML renders main→(sub1,sub2) with sub2→leaf. sub2's own numeric knobs are
+// parameters so a structural publish can introduce it with values that differ from
+// the host's on every axis under test (budget inputs AND task TTL).
+func routedSub2YAML(routeSub2 bool, keepSub2, maxSub2 int, thrSub2 float64, ttlSub2 string, ttlMain string) string {
+	sub2Ref := ""
+	if routeSub2 {
+		sub2Ref = "      - kind: agent\n        agent: sub2\n        description: \"delegate-sub2\"\n"
+	}
+	sub2Def := ""
+	if routeSub2 {
+		sub2Def = "  sub2:\n" +
+			"    system_prompt:\n      inline: \"SUB2-DIAG\"\n" +
+			"    keep_recent_tasks: " + strconv.Itoa(keepSub2) + "\n" +
+			"    max_tokens: " + strconv.Itoa(maxSub2) + "\n" +
+			"    compress_threshold: " + strconv.FormatFloat(thrSub2, 'f', -1, 64) + "\n" +
+			"    task_default_ttl: " + strconv.Quote(ttlSub2) + "\n" +
+			"    memory:\n      type: memory\n" +
+			"    tools:\n      - kind: agent\n        agent: leaf\n        description: \"delegate-leaf\"\n"
+	}
+	return "entry: main\nagents:\n  main:\n" +
+		"    system_prompt:\n      inline: \"MAIN-DIAG\"\n" +
+		"    keep_recent_tasks: 2\n    max_tokens: 4000\n    compress_threshold: 0.5\n" +
+		"    task_default_ttl: " + strconv.Quote(ttlMain) + "\n" +
+		"    memory:\n      type: memory\n" +
+		"    tools:\n      - kind: agent\n        agent: sub1\n        description: \"delegate-sub1\"\n" + sub2Ref +
+		"  sub1:\n    system_prompt:\n      inline: \"SUB1-DIAG\"\n    memory:\n      type: memory\n" +
+		sub2Def +
+		"  leaf:\n    system_prompt:\n      inline: \"LEAF-DIAG\"\n    memory:\n      type: memory\n"
+}
+
+func writeRoutedConfig(t *testing.T, path, content string, tick *time.Time) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	*tick = tick.Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(path, *tick, *tick))
+}
+
+// liveDebtOf / closeOf read the two §5.1 groups off the payload.
+func liveDebtOf(t *testing.T, d map[string]any) OrgLiveDebt {
+	t.Helper()
+	debt, ok := d["liveDebt"].(OrgLiveDebt)
+	require.True(t, ok, "the live reference debt must be reported as its own group")
+	return debt
+}
+
+func closeOf(t *testing.T, d map[string]any) OrgCloseState {
+	t.Helper()
+	st, ok := d["close"].(OrgCloseState)
+	require.True(t, ok, "the close phase must be reported as its own group")
+	return st
+}
+
+// TestHotAddedOwnerReceiptMatchesRealConsumption pins leg ②: after a
+// STRUCTURAL publish that introduces a new owner, that owner's receipt figures
+// must reproduce (a) its own live compressor's budget line and (b) the TTL a task
+// it REALLY spawned received — the value the record says for THAT agent, not the
+// host's and not a default.
+func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+
+	writeRoutedConfig(t, yamlPath, routedSub2YAML(false, 0, 0, 0, "3m", "9m"), &tick)
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	m := &chainDelegModel{prefer: []string{"sub2", "sub1", "leaf"}}
+	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	require.Nil(t, residentCacheForTest(entry)["sub2"], "precondition: sub2 has no owner before it is routed")
+
+	// Structural publish: route sub2, giving it numbers distinct from the host on
+	// every axis under test (7×0.75=5 vs host 4000×0.5=2000; TTL 3m vs 9m).
+	writeRoutedConfig(t, yamlPath, routedSub2YAML(true, 7, 7000, 0.75, "3m", "9m"), &tick)
+	entry.CheckOrgReload()
+
+	d := entry.OrgDiagnostics()
+	require.NotZero(t, diagInt64(t, d, "generation"), "routing a new owner is structural: the generation advanced")
+
+	rec := diagnosticsReceipts(t, d)
+	sub2Rec, ok := rec["sub2"]
+	require.Truef(t, ok, "the newly added owner must carry its own receipt (got %v)", rec["sub2"])
+	require.Equal(t, "applied", sub2Rec.Outcome)
+	require.Equal(t, 7000, sub2Rec.MaxTokens)
+	require.Equal(t, 7, sub2Rec.KeepRecentTasks)
+
+	sub2 := residentCacheForTest(entry)["sub2"]
+	require.NotNil(t, sub2)
+	require.Equal(t, budgetOf(sub2Rec.MaxTokens, sub2Rec.ThresholdPct), sub2.OrgBudgetLine(),
+		"§5.1：回执报的预算必须等于新 owner **自己真实 compressor** 的消费值，而非请求下发值的回声")
+	require.Equal(t, 7, sub2.OrgKeepRecent(), "and the same for keepRecent at the live compressor")
+	require.NotEqual(t, entry.OrgBudgetLine(), sub2.OrgBudgetLine(),
+		"两个 agent 确实取到了不同的值（否则共享一个消费者也能通过本断言）")
+
+	// The TTL axis has no receipt slot by design (bounded D9 shape), so it is
+	// proven where it is actually consumed: a task sub2 really spawns.
+	out, err := entry.StartLoop("u", "d53-receipt-consumer")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range out {
+		}
+	}()
+	t.Cleanup(func() { <-done })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("do the work"))
+	require.NoError(t, err)
+	waitFor(t, "sub2 really delegated and adopted the run on its OWN board", func() bool {
+		for _, tk := range sub2.TaskManager().List() {
+			if tk.Spec.Kind == "subagent" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The spawned task carries no per-task override (TTL 0 = "inherit MY owner's
+	// manager default" by design), so its lifetime is governed by sub2's own
+	// resolved value — read it at that consumer's boundary.
+	var specTTL time.Duration
+	for _, tk := range sub2.TaskManager().List() {
+		if tk.Spec.Kind == "subagent" {
+			specTTL = tk.Spec.TTL
+			break
+		}
+	}
+	require.Zero(t, specTTL, "the subagent spawn inherits its owner's manager default by design (0 = no override)")
+	require.Equal(t, 3*time.Minute, sub2.TaskManager().DefaultTTL(),
+		"§5.1：热新增 owner 的 TTL 消费者必须解析到它自己的已提交记录（9m 是宿主的，10m 是内置默认）")
+
+	// Non-echo guard: the SAME publish installed leaf too, whose config sets no TTL
+	// at all — so a global setter broadcast could not have produced two different
+	// per-owner values in one round.
+	leaf := residentCacheForTest(entry)["leaf"]
+	require.NotNil(t, leaf)
+	require.Equal(t, 10*time.Minute, leaf.TaskManager().DefaultTTL(),
+		"the other new owner keeps the configured default — proving the values are per-owner, not a broadcast")
+	require.Equal(t, 9*time.Minute, entry.TaskManager().DefaultTTL(), "the host's own value is a third distinct figure")
+	require.Equal(t, budgetOf(7000, 0.75), sub2.OrgBudgetLine())
+
+	// And the live-debt group reports itself as live, not as part of the record.
+	debt := liveDebtOf(t, entry.OrgDiagnostics())
+	require.False(t, debt.CapturedAt.IsZero(), "实时债务组必须自带采集时刻")
+	require.GreaterOrEqual(t, debt.Executors.InFlightTurns, int64(0))
+}
+
+// TestCloseInitiatedIsDistinguishableFromResourcesExited pins leg ③: while a
+// reference is still held, Close returns BOUNDED (§4.1) — the payload must then
+// say "initiated, not exited", and only flip to exited once the deferred tail ran.
+// The unfinished work is a real in-flight reference (a lease), not a synthetic
+// blocking closer, so this exercises the same accounting the reclaim gate reads.
+func TestCloseInitiatedIsDistinguishableFromResourcesExited(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	writeRoutedConfig(t, yamlPath, routedSub2YAML(true, 5, 5000, 0.5, "4m", "9m"), &tick)
+
+	entry := bootForDiagnostics(t, yamlPath)
+
+	// BEFORE anything is outstanding: no close was ever issued, so the tail has
+	// nothing to wait for and the pair reads (false, true).
+	pristine := closeOf(t, entry.OrgDiagnostics())
+	require.False(t, pristine.Initiated, "precondition: nothing has been closed yet")
+	require.Truef(t, pristine.ResourcesExited,
+		"precondition: nothing was ever deferred, so an unclosed owner is trivially not-stuck (got %+v)", pristine)
+
+	// Hold a real reference on the entry's owner: Close must return before the
+	// resources are gone.
+	held := entry.ContextManager().AcquireLease(agent.LeaseBackground)
+	during := closeOf(t, entry.OrgDiagnostics())
+	require.False(t, during.Initiated, "a held reference is not a close")
+	require.Falsef(t, during.ResourcesExited,
+		"work is outstanding, so the teardown cannot be reported as done (got %+v)", during)
+
+	closed := make(chan error, 1)
+	go func() { closed <- entry.Close() }()
+
+	var mid OrgCloseState
+	waitFor(t, "Close has been initiated while the reference is still held", func() bool {
+		mid = closeOf(t, entry.OrgDiagnostics())
+		return mid.Initiated && !mid.ResourcesExited
+	})
+	require.Falsef(t, mid.ResourcesExited,
+		"§5.1：有界返回不得被读成收尾完成（已发起=%v 已退出=%v）", mid.Initiated, mid.ResourcesExited)
+
+	held.Release()
+	var fin OrgCloseState
+	waitFor(t, "the deferred tail took every remaining exit", func() bool {
+		fin = closeOf(t, entry.OrgDiagnostics())
+		return fin.Initiated && fin.ResourcesExited
+	})
+	require.NoError(t, <-closed)
+}
+
+func bootForDiagnostics(t *testing.T, yamlPath string) *agent.TagentAgent {
+	t.Helper()
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&chainDelegModel{prefer: []string{"sub2", "leaf"}}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	return entry
 }

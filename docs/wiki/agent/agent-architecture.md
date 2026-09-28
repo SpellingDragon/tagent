@@ -1,5 +1,6 @@
 # tagent/agent 模块架构文档
 
+<a id="module-position"></a>
 ## 一、模块定位
 
 `tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [prototype/agent.go](../../../prototype/agent.go) 的抽象实现，原型用可替换的函数字段定义了一个可扩展的框架骨架。
@@ -46,6 +47,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 - tagent 的 `makeOnEventCallback` 仅做 `projection.Append`（从 StateDelta 构建 EventReference，含 MemoryPlugin 生成的 `event_summary`）
 - LLM 在每次调用时都看到带 `[evt_KEY|type]` 前缀的 messages（由 Callback 0 统一注入）
 
+<a id="core-components"></a>
 ## 二、核心组件
 
 ### 2.1 TagentAgent（组合根）
@@ -258,6 +260,7 @@ ContextManager 的 runner 是**可换代缝**，换代由「构造 → 纳管 �
 - **热参数读取**：五个数值热参（压缩阈值/预算/保留数/任务 TTL 两值）不随换代推送——各 owner 从唯一已提交应用记录在**消费边界现读**（压缩器经注入的热参源拉取、任务 spawn 经 TTL 源读取），结构代与数值轴分离，无第二份可独立修改的真值。
 - **懒检查**：`SetOrgReloader` 闭包在业务 turn 起点触发（单次 stat，未变更零成本）；结构变更经指纹对比触发 candidate-then-publish（fail-closed + 双槽回滚环）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
 
+<a id="package-layout"></a>
 ## 三、包与文件结构（分包后）
 
 ```mermaid
@@ -311,6 +314,7 @@ graph TB
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖，新代码直接 import 子包。
 
+<a id="data-flow"></a>
 ## 四、数据流
 
 ```
@@ -349,6 +353,7 @@ TagentAgent.runEventLoop:
   ⑤ 回到 bus.Pull — 下一轮事件
 ```
 
+<a id="framework-boundary"></a>
 ## 五、tagent 与 trpc-agent-go 的边界
 
 **tagent 独有**：
@@ -369,6 +374,7 @@ TagentAgent.runEventLoop:
 - `event.Event`：事件结构
 - `tool.Tool` / `CallableTool`：工具接口
 
+<a id="context-management"></a>
 ## 六、上下文管理
 
 ### 6.1 压缩（SmartCompressor）
@@ -434,6 +440,7 @@ tools:
         max_interval: 60s       # 稀疏轮询上限
 ```
 
+<a id="subagent-loop"></a>
 ## 七、子 Agent 调用（同构调用环）
 
 `TagentAgent.Run(ctx, inv)` 是被调方的执行入口。**被调方与入口是同一种 tagent**——同一共享壳、同一 turn 原语、同一重试预算，自有事件总线与任务域；差别只在输出交给谁：
@@ -449,6 +456,13 @@ tools:
 
 
 ---
+
+<a id="test-support"></a>
+## 八、测试替身住在包内的非 _test 文件里
+
+包内测试共享的替身与构造器集中在 `agent/testsupport.go`（不是 `_test.go`）。原因是一条构建事实：内部测试（`package agent`）无法导入一个反向依赖 `agent` 的支撑包——Go 明确禁止测试里的导入环；而把那些内部测试改成外部测试包，又会牵出大量包内私有引用，属更大范围的重构。
+
+因此这些替身以非 `_test` 文件形态存在：文件名不受"测试文件须声明职责"这条判据约束，替身本身仍保持包内私有、只被测试引用。代价是它们会随库一起编译（不参与运行时行为）；若要消掉这一点，就得承担外部化改造的规模。
 
 ## 已知缺口与演进方向
 

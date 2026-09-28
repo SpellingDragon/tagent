@@ -8,20 +8,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// ==================== turn-as-trace（T-B · 统一可观测数据模型）====================
-//
-// 一个 turn = 一棵 trace：runEventLoop 每轮开 root span（tagent.turn），RunFlow 及其下
-// 框架自动 span（trpc-agent-go llmflow/functioncall）成为子树。tagent 自有层此前完全
-// 缺席 OTel（loopCtx=background），本文件补上 turn 骨架。
-//
-// 「一套数据模式、多场景投影」（指令2）的落点：turn span 的 trace_id/span_id 是唯一
-// 关联锚——① 经 TC0 的 attribution 载体注入 → 落 FullEvent.Metadata（事件溯源投影）；
-// ② 落 rl.TrajectoryRecorder 的 LLMCallRecord（RL 训练投影）；③ span 树本身（运维投影）。
-// 三个世界由同一 trace_id/span_id 双向互链，一致性由单一锚点保证。
-//
-// noop 安全：未设 OTEL_EXPORTER_OTLP_ENDPOINT 时，otel 全局 TracerProvider 为 noop，
-// tr.Start 返回 noop span（零分配、零导出、零行为变化）——现状语义逐字节保持。
-
 const (
 	// tagentTracerName 是 tagent 自有层 span 的 tracer instrumentation scope。
 	tagentTracerName = "github.com/SpellingDragon/tagent"
@@ -36,7 +22,7 @@ type turnSpanAttrs struct {
 	ChatID        string
 	UserID        string
 	BatchSize     int
-	EventSources  []string // 批内事件的 Source 值（user/tmux/task/meditation/...）
+	EventSources  []string
 
 	// LinkTraceID/LinkSpanID 是异步任务回流的因果链接（C9）：task_settled 事件携带其 spawn
 	// turn 的 trace 锚点（经 Origin→Metadata 管道），新 turn span 据此建 OTel span link，使
@@ -70,8 +56,6 @@ func startTurnSpan(ctx context.Context, a turnSpanAttrs) (context.Context, trace
 		attrs = append(attrs, attribute.StringSlice("tagent.turn.event_sources", a.EventSources))
 	}
 	opts := []trace.SpanStartOption{trace.WithAttributes(attrs...)}
-	// C9：异步任务回流因果链接——task_settled 带原 turn trace 锚点时建 span link（remote
-	// SpanContext）。hex 解析失败或空则跳过（noop 安全，不退化）。
 	if a.LinkTraceID != "" && a.LinkSpanID != "" {
 		if tid, err := trace.TraceIDFromHex(a.LinkTraceID); err == nil {
 			if sid, err := trace.SpanIDFromHex(a.LinkSpanID); err == nil {

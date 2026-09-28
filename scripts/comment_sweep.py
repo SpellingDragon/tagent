@@ -350,6 +350,12 @@ def do_axis(base, scopes):
             raise SystemExit('axis: scope %r is not a directory' % sc)
         if not os.path.isdir(os.path.join(base, sc)):
             raise SystemExit('axis: snapshot %s lacks scope %r' % (base, sc))
+        # A partial snapshot would compare a subtree against the whole tree and
+        # report every rule as risen, so require the file sets to match.
+        head_n, base_n = go_count(sc), go_count(os.path.join(base, sc))
+        if head_n != base_n:
+            raise SystemExit('axis: snapshot of scope %r is partial (%d of %d .go files)'
+                             % (sc, base_n, head_n))
     now, before = rule_counts(scopes), rule_counts([os.path.join(base, sc) for sc in scopes])
     if not before:
         raise SystemExit('axis: base scan produced no findings at all; refusing to compare')
@@ -397,6 +403,13 @@ def do_lint_lines(path):
                 break
     print('lint-lines: %d offending line(s)' % bad)
     return 1 if bad else 0
+
+
+def go_count(root):
+    n = 0
+    for _, _, fs in os.walk(root):
+        n += sum(1 for f in fs if f.endswith('.go'))
+    return n
 
 
 def main():

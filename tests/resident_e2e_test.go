@@ -1,19 +1,10 @@
 package tagent_test
 
-// RESIDENT 30-ROUND E2E (resident-remaining-hardening 3.2, archived 7.2):
-// per-accepted-ID reconciliation across the FULL chain
-//
-//	receipt → store → projection → actual model request → recall → host delivery
-//
-// plus the view-honesty surfaces: Content ≠ Summary rendering (a folded card
-// keeps only the first line — the tail survives ONLY through store recall),
-// no-anchor → anchor transition of the rolling summary, a REAL restart whose
-// rebuild outcome (full/partial) is asserted honestly, and TTL expiry made
-// invisible through a synchronous lifecycle sweep. Default suite, seconds.
-
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +12,8 @@ import (
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/reliability"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -89,8 +82,6 @@ func (m *e2eModel) latestText() string {
 
 func e2eAgent(t *testing.T, dir string, m *e2eModel) *agent.TagentAgent {
 	t.Helper()
-	// the compress budget is tiny on purpose
-	// so 30 rounds genuinely trigger the compaction/anchor path.
 	ta, err := tagent.New(tagent.Config{
 		Entry: "tagent",
 		Agents: map[string]tagent.AgentConfig{
@@ -142,12 +133,11 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 		}
 	}()
 
-	// ---- phase 1: 30 rounds, per-accepted-ID reconciliation ----------------
 	receiptIDs := make(map[string]bool, e2eRounds)
 	firstLines := make([]string, e2eRounds)
 	for r := 0; r < e2eRounds; r++ {
 		first := fmt.Sprintf("e2e-%02d first-segment %s", r, strings.Repeat("data", 30))
-		tail := fmt.Sprintf("e2e-%02d TAIL-SEGMENT-UNIQUE", r) // second line: dies out of the card view, lives in the store
+		tail := fmt.Sprintf("e2e-%02d TAIL-SEGMENT-UNIQUE", r)
 		firstLines[r] = first
 		body := first + "\n" + tail
 
@@ -157,10 +147,9 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 		require.False(t, receiptIDs[rec.RequestID], "duplicate accepted request id %q", rec.RequestID)
 		receiptIDs[rec.RequestID] = true
 
-		waitReq(t, m, r, first) // projection → ACTUAL model request (round r drives request #r; no bootstrap turn)
+		waitReq(t, m, r, first)
 	}
 
-	// ---- host delivery gate: every output carries user lineage --------------
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		mu.Lock()
@@ -180,7 +169,6 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// ---- view honesty: no-anchor first request vs anchored latest ----------
 	require.NotContains(t, func() string {
 		var b strings.Builder
 		for _, msg := range firstRequest(t, m) {
@@ -193,7 +181,6 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 	require.NotContains(t, latest, "e2e-00 TAIL-SEGMENT-UNIQUE",
 		"a folded card keeps ONLY its first line — the second line must leave the projection view")
 
-	// ---- store side: Content ≠ Summary, full text recallable by key --------
 	pid := memory.PartitionIDFromName("tagent")
 	refs, err := ta.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "e2e-00 TAIL-SEGMENT-UNIQUE", Limit: 10})
 	require.NoError(t, err)
@@ -203,10 +190,9 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 	require.Contains(t, evt.Content, "e2e-00 TAIL-SEGMENT-UNIQUE", "recall of the ORIGINAL event must return the full multi-line Content")
 	require.NotEqual(t, evt.Content, firstLines[0], "sanity: stored Content is the whole two-line body, not the card-visible first line")
 
-	require.NoError(t, ta.Close()) // StopLoop + flush barrier; closes the out channel
+	require.NoError(t, ta.Close())
 	<-consumerDone
 
-	// ---- phase 2: REAL restart → honest rebuild outcome --------------------
 	m2 := &e2eModel{}
 	ta2 := e2eAgent(t, dir, m2)
 	rec := ta2.RecoveryResult()
@@ -214,7 +200,6 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 	require.NotEqual(t, "failed", rec.Status, "rebuild must not swallow an unreadable chain: %+v", rec)
 	require.Contains(t, []string{"full", "partial"}, rec.Status, "status must be an honest verdict: %+v", rec)
 	if rec.Status == "partial" {
-		// partial must self-report WHERE it lost ground — never claim full.
 		require.Positive(t, rec.Truncated+len(rec.MissingKeys)+rec.PagesFailed+rec.BatchErrors+rec.PayloadErrors,
 			"partial without any loss counters would be a mislabeled full: %+v", rec)
 	}
@@ -230,16 +215,14 @@ func TestResidentE2E_30RoundDeliveryChain(t *testing.T) {
 	_, err = ta2.InjectMessageContext(context.Background(), "user", model.Message{Role: model.RoleUser, Content: "post-restart-round"})
 	require.NoError(t, err)
 	waitReq(t, m2, 0, "post-restart-round")
-	// The pre-restart chain is still recallable through the reopened store.
 	refs, err = ta2.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "e2e-15 first-segment", Limit: 10})
 	require.NoError(t, err)
 	require.NotEmpty(t, refs, "round-15 must survive the process restart in the fact chain")
 
-	// ---- phase 3: TTL expiry through the real lifecycle sweep --------------
 	fs, ok := ta2.MemStore().(*memory.FileSegmentStore)
 	require.True(t, ok, "e2e must reach the bare FileSegmentStore for the lifecycle hook")
 	require.NotNil(t, fs.Lifecycle(), "wiring must inject the lifecycle manager")
-	oldTs := time.Now().Add(-31 * 24 * time.Hour).UnixMilli() // external_input TTL = 30d
+	oldTs := time.Now().Add(-31 * 24 * time.Hour).UnixMilli()
 	oldKey := memory.NewSnowflakeEventKey(1, oldTs)
 	require.NoError(t, fs.StoreEvent(oldKey, memory.FullEvent{
 		EventKey: oldKey, PartitionID: pid, EventType: "external_input",
@@ -266,4 +249,141 @@ func firstRequest(t *testing.T, m *e2eModel) []model.Message {
 	defer m.mu.Unlock()
 	require.NotEmpty(t, m.reqs, "expected at least one request")
 	return m.reqs[0]
+}
+
+// durableE2EAgent wires the full composition root with BOTH durable surfaces
+// on: localfile store + reliable bus (inbox-v2 spill), entry name "tagent".
+func durableE2EAgent(t *testing.T, storeDir, spillDir string, m *e2eModel) *agent.TagentAgent {
+	t.Helper()
+	ta, err := tagent.New(tagent.Config{
+		Entry: "tagent",
+		Agents: map[string]tagent.AgentConfig{
+			"tagent": {
+				SystemPrompt:      tagent.PromptConfig{Inline: "durable e2e agent"},
+				MaxTokens:         4000,
+				CompressThreshold: 0.8,
+				Memory:            tagent.MemoryConfig{Type: "localfile", Path: storeDir},
+			},
+		},
+		Reliability: tagent.ReliabilityConfig{BusSpillDir: spillDir},
+	}, tagent.WithModel(m))
+	require.NoError(t, err)
+	return ta
+}
+
+func TestResidentDurableE2E_FiveSurfaceReconciliation(t *testing.T) {
+	root := t.TempDir()
+	storeDir, spillDir := filepath.Join(root, "store"), filepath.Join(root, "spill")
+	m := &e2eModel{}
+	ta := durableE2EAgent(t, storeDir, spillDir, m)
+
+	out, err := ta.StartLoop("du", "dur-session")
+	require.NoError(t, err)
+	var mu sync.Mutex
+	var sources []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for evt := range out {
+			mu.Lock()
+			if v, ok := evt.StateDelta["trigger_source"]; ok {
+				sources = append(sources, fmt.Sprintf("%s", v))
+			}
+			mu.Unlock()
+		}
+	}()
+
+	msgA := model.Message{Role: model.RoleUser, Content: "dur-A first line"}
+	msgB := model.Message{Role: model.RoleUser, Content: "dur-B second input"}
+	msgC := model.Message{Role: model.RoleUser, Content: "dur-C later single"}
+
+	reqAB, durableAB, err := ta.InjectEnvelope(context.Background(), "user", []model.Message{msgA, msgB})
+	require.NoError(t, err)
+	require.True(t, durableAB, "with BusSpillDir set, acceptance MUST be durable (inbox-v2)")
+	require.NotEmpty(t, reqAB)
+	waitReq(t, m, 0, "dur-A first line")
+	require.True(t, m.contains(0, "dur-B second input"),
+		"A+B must merge into ONE business turn (batch slots are not compacted away)")
+
+	recC, err := ta.InjectMessageContext(context.Background(), "user", msgC)
+	require.NoError(t, err)
+	require.True(t, recC.Durable)
+	require.NotEmpty(t, recC.RequestID)
+	require.NotEqual(t, reqAB, recC.RequestID, "each acceptance keeps its own stable identity")
+
+	waitReq(t, m, 1, "dur-C later single")
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		mu.Lock()
+		n := len(sources)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivery: only %d/2 turn outputs observed", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	for i, s := range sources[:2] {
+		require.Equal(t, "user", s, "output %d carries user lineage (sources=%v)", i, sources)
+	}
+	mu.Unlock()
+
+	pid := memory.PartitionIDFromName("tagent")
+	store := ta.MemStore()
+	for _, body := range []string{"dur-A first line", "dur-B second input", "dur-C later single"} {
+		refs, qerr := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: body, Limit: 10})
+		require.NoError(t, qerr)
+		require.NotEmpty(t, refs, "the ORIGINAL input %q must be recallable from the fact chain", body)
+		full, gerr := store.GetEvent(refs[0].EventKey)
+		require.NoError(t, gerr)
+		require.Equal(t, tagentevent.TypeExternalInput, full.EventType)
+		require.Contains(t, full.Content, body, "stored content is the original, not a digest")
+	}
+
+	receiptCount := func() int {
+		refs, qerr := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Limit: 200})
+		if qerr != nil {
+			return -1
+		}
+		n := 0
+		for _, r := range refs {
+			if r.EventType == tagentevent.TypeInboxReceipt {
+				n++
+			}
+		}
+		return n
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for receiptCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected 2 inbox receipts (A+B turn, C turn), got %d", receiptCount())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, 2, receiptCount(), "exactly one receipt per business turn — no per-envelope double receipt")
+
+	inbox, err := reliability.NewInbox(filepath.Join(spillDir, "tagent"), 0)
+	require.NoError(t, err)
+	var outstanding []reliability.OutstandingEnvelope
+	require.Eventually(t, func() bool {
+		outstanding, err = inbox.Outstanding()
+		return err == nil && len(outstanding) == 0
+	}, 20*time.Second, 20*time.Millisecond,
+		"after ack every envelope is unlinked — accepted IDs are all in the processed-cleaned state")
+	entries, err := os.ReadDir(filepath.Join(spillDir, "tagent"))
+	require.NoError(t, err)
+	envLeft := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			envLeft++
+		}
+	}
+	require.Equal(t, 0, envLeft, "no envelope residue in the inbox directory")
+
+	require.NoError(t, ta.Close())
+	<-done
 }

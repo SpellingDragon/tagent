@@ -27,8 +27,6 @@ type RelationStore interface {
 	// RemoveRelations 删除某事件的所有关联（逐出时调用）
 	RemoveRelations(key int64) error
 
-	// === 生命周期 ===
-
 	// Snapshot 创建全量快照
 	Snapshot() (map[int64]int64, error)
 
@@ -44,10 +42,10 @@ type RelationStore interface {
 
 // JournalEntry 表示一条 WAL 日志记录。
 type JournalEntry struct {
-	Op        string // "+1" = SetParent, "-1" = RemoveRelations
-	ChildKey  int64  // meaningful for SetParent
-	ParentKey int64  // meaningful for SetParent
-	EventKey  int64  // meaningful for RemoveRelations
+	Op        string
+	ChildKey  int64
+	ParentKey int64
+	EventKey  int64
 }
 
 // InMemRelationStore 实现了 RelationStore 接口。
@@ -55,13 +53,13 @@ type JournalEntry struct {
 type InMemRelationStore struct {
 	mu sync.RWMutex
 
-	// childKey → parentKey（正向，用于 GetParent / GetParents）
+	// childToParent childKey → parentKey（正向，用于 GetParent / GetParents）
 	childToParent map[int64]int64
 
-	// parentKey → []childKey（反向索引，用于 GetChildren）
+	// parentToChildren parentKey → []childKey（反向索引，用于 GetChildren）
 	parentToChildren map[int64][]int64
 
-	// WAL 相关
+	// dataDir WAL 相关
 	dataDir string
 	journal *os.File
 }
@@ -79,7 +77,6 @@ func NewInMemRelationStore(dataDir string) (*InMemRelationStore, error) {
 		dataDir:          dataDir,
 	}
 
-	// 打开或创建 journal 文件（append-only）
 	journalPath := filepath.Join(dataDir, "relations.journal")
 	f, err := os.OpenFile(journalPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -87,9 +84,7 @@ func NewInMemRelationStore(dataDir string) (*InMemRelationStore, error) {
 	}
 	rs.journal = f
 
-	// 尝试从快照 + journal 恢复
 	if err := rs.recover(); err != nil {
-		// 恢复失败时以空状态启动，打印错误日志但不阻止创建
 		fmt.Fprintf(os.Stderr, "[memory] relation store recovery warning: %v\n", err)
 	}
 
@@ -108,7 +103,6 @@ func (rs *InMemRelationStore) snapPath() string {
 
 // recover 尝试从 snapshot + journal 恢复。
 func (rs *InMemRelationStore) recover() error {
-	// 1. 加载 snapshot（如果存在）
 	snapFile := rs.snapPath()
 	if _, err := os.Stat(snapFile); err == nil {
 		data, err := os.ReadFile(snapFile)
@@ -124,7 +118,6 @@ func (rs *InMemRelationStore) recover() error {
 		}
 	}
 
-	// 2. 重放 journal 增量
 	journalPath := rs.journalPath()
 	if _, err := os.Stat(journalPath); err == nil {
 		f, err := os.Open(journalPath)
@@ -133,7 +126,6 @@ func (rs *InMemRelationStore) recover() error {
 		}
 		defer f.Close()
 
-		// 获取文件大小以确定是否有 snapshot 后的增量
 		info, _ := f.Stat()
 		if info.Size() == 0 {
 			return nil
@@ -148,7 +140,6 @@ func (rs *InMemRelationStore) recover() error {
 			}
 			entry, err := parseJournalLine(line)
 			if err != nil {
-				// 不完整行：journal 末尾可能因崩溃被截断，忽略最后一行
 				continue
 			}
 			entries = append(entries, entry)
@@ -169,26 +160,20 @@ func (rs *InMemRelationStore) SetParent(childKey, parentKey int64) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
-	// 获取旧的 parentKey（如果存在）
 	oldParent, hadOld := rs.childToParent[childKey]
 
-	// 如果父级相同，跳过（幂等）
 	if hadOld && oldParent == parentKey {
 		return nil
 	}
 
-	// 从旧的 parent 的 children 列表中移除
 	if hadOld {
 		rs.removeFromChildren(oldParent, childKey)
 	}
 
-	// 更新正向映射
 	rs.childToParent[childKey] = parentKey
 
-	// 更新反向映射
 	rs.parentToChildren[parentKey] = append(rs.parentToChildren[parentKey], childKey)
 
-	// 写入 journal
 	if err := rs.appendJournal(fmt.Sprintf("+1:%d:%d\n", childKey, parentKey)); err != nil {
 		return err
 	}
@@ -218,7 +203,6 @@ func (rs *InMemRelationStore) GetChildren(parentKey int64) ([]int64, error) {
 		return []int64{}, nil
 	}
 
-	// 返回副本，防止外部修改
 	result := make([]int64, len(children))
 	copy(result, children)
 	return result, nil
@@ -245,18 +229,14 @@ func (rs *InMemRelationStore) RemoveRelations(key int64) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
-	// 1. 从 parent 的 children 列表中移除
 	if parentKey, ok := rs.childToParent[key]; ok {
 		rs.removeFromChildren(parentKey, key)
 	}
 
-	// 2. 从 childToParent 中移除
 	delete(rs.childToParent, key)
 
-	// 3. 移除反向索引中作为 parent 的条目
 	delete(rs.parentToChildren, key)
 
-	// 4. 写入 journal
 	if err := rs.appendJournal(fmt.Sprintf("-1:%d\n", key)); err != nil {
 		return err
 	}
@@ -269,7 +249,6 @@ func (rs *InMemRelationStore) Snapshot() (map[int64]int64, error) {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
 
-	// 复制 childToParent map
 	snapshot := make(map[int64]int64, len(rs.childToParent))
 	for k, v := range rs.childToParent {
 		snapshot[k] = v
@@ -282,7 +261,6 @@ func (rs *InMemRelationStore) LoadSnapshot(data map[int64]int64) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
-	// 重置
 	rs.childToParent = make(map[int64]int64, len(data))
 	rs.parentToChildren = make(map[int64][]int64)
 
@@ -302,7 +280,6 @@ func (rs *InMemRelationStore) ReplayJournal(entries []JournalEntry) error {
 	for _, entry := range entries {
 		switch entry.Op {
 		case "+1":
-			// SetParent
 			oldParent, hadOld := rs.childToParent[entry.ChildKey]
 			if hadOld {
 				rs.removeFromChildren(oldParent, entry.ChildKey)
@@ -311,7 +288,6 @@ func (rs *InMemRelationStore) ReplayJournal(entries []JournalEntry) error {
 			rs.parentToChildren[entry.ParentKey] = append(rs.parentToChildren[entry.ParentKey], entry.ChildKey)
 
 		case "-1":
-			// RemoveRelations
 			if parentKey, ok := rs.childToParent[entry.EventKey]; ok {
 				rs.removeFromChildren(parentKey, entry.EventKey)
 			}
@@ -333,8 +309,6 @@ func (rs *InMemRelationStore) EventsCount() int {
 	return len(rs.childToParent)
 }
 
-// ==================== 内部方法 ====================
-
 // removeFromChildren 从 parent 的 children 列表中移除特定 child。
 // 必须在持有 mu.Lock 时调用。
 func (rs *InMemRelationStore) removeFromChildren(parentKey, childKey int64) {
@@ -348,7 +322,6 @@ func (rs *InMemRelationStore) removeFromChildren(parentKey, childKey int64) {
 			break
 		}
 	}
-	// 如果 children 列表为空，清理空条目
 	if len(rs.parentToChildren[parentKey]) == 0 {
 		delete(rs.parentToChildren, parentKey)
 	}
@@ -381,7 +354,6 @@ func (rs *InMemRelationStore) SaveSnapshotToFile() error {
 		return fmt.Errorf("failed to marshal snapshot: %w", err)
 	}
 
-	// 原子写入：先写临时文件再 rename
 	tmpPath := rs.snapPath() + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write snapshot temp: %w", err)
@@ -390,7 +362,6 @@ func (rs *InMemRelationStore) SaveSnapshotToFile() error {
 		return fmt.Errorf("failed to rename snapshot: %w", err)
 	}
 
-	// 截断 journal
 	if err := rs.truncateJournal(); err != nil {
 		return fmt.Errorf("failed to truncate journal: %w", err)
 	}
@@ -424,8 +395,6 @@ func (rs *InMemRelationStore) Close() error {
 	return nil
 }
 
-// ==================== Journal 解析 ====================
-
 // parseJournalLine 解析单行 journal 记录。
 // 格式: +1:childKey:parentKey 或 -1:eventKey
 func parseJournalLine(line string) (JournalEntry, error) {
@@ -434,7 +403,7 @@ func parseJournalLine(line string) (JournalEntry, error) {
 	}
 
 	op := line[:2]
-	rest := line[3:] // skip ":"
+	rest := line[3:]
 
 	switch op {
 	case "+1":

@@ -16,17 +16,6 @@ import (
 	"github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== InMemoryEngine（T-A · MVP 兜底引擎）====================
-//
-// memory.MemoryEngine 的轻量内存实现（契约 C6）：无外部依赖，供开发/测试/降级。
-//   - 关键词路：委托 store.QueryEvents（复用既有 term-split 分词 + 时间窗 + 分区）。
-//   - 向量路：自有内存余弦索引（eventKey→向量）；Index 经非阻塞队列后台异步嵌入。
-//   - 融合：RRF(k=60) 在引擎内闭环；分区/类型/时间过滤在融合前 applied（防跨分区泄漏）。
-//   - 降级：emb==nil 或向量未就绪 → 纯关键词（行为与现状一致，永不报错）。
-//
-// MVP 局限（有意）：向量索引内存态、不持久化，重启后旧事件向量丢失（关键词路仍工作，
-// 因 store 持久）。持久向量后端是 RustVikingEngine 的职责（T-A 后续件）。
-
 // EngineConfig 配置记忆引擎行为（零值取默认）。
 type EngineConfig struct {
 	// VectorTopK 向量路候选数（默认 20）。
@@ -104,9 +93,11 @@ type vectorMeta struct {
 
 // InMemoryEngine 是 memory.MemoryEngine 的内存 MVP 实现。
 type InMemoryEngine struct {
-	store memory.MemoryStore // 关键词路（可为 nil = 纯向量，无关键词）
-	emb   memory.Embedder    // 向量路（可为 nil = 纯关键词降级）
-	cfg   EngineConfig
+	// store 关键词路（可为 nil = 纯向量，无关键词）
+	store memory.MemoryStore
+	// emb 向量路（可为 nil = 纯关键词降级）
+	emb memory.Embedder
+	cfg EngineConfig
 
 	mu      sync.RWMutex
 	vectors map[int64][]float32
@@ -119,20 +110,24 @@ type InMemoryEngine struct {
 	closed    atomic.Bool
 	started   atomic.Bool
 
-	// KV 持久层（可选，见 engine_persist.go）。
+	// kv KV 持久层（可选，见 engine_persist.go）。
 	kv          memory.KVStore
 	vecPrefix   string
 	rebuildDone atomic.Bool
-	rebuildCh   chan struct{} // 重建完成信号（与 worker wg 分离，Close 有界等待，审查 S6）
+	// rebuildCh 重建完成信号（与 worker wg 分离，Close 有界等待，审查 S6）
+	rebuildCh chan struct{}
 
-	// 指标（可观测，T-B/组8 消费）。
-	indexedCount     atomic.Int64 // 成功写入向量数
-	droppedCount     atomic.Int64 // 队列满/API 失败丢弃数
-	embedErrCount    atomic.Int64
-	dimMismatchCount atomic.Int64 // 维度不匹配跳过数（换模型/维度后旧向量，审查 M3）
+	// indexedCount 指标（可观测，T-B/组8 消费）。
+	// 成功写入向量数
+	indexedCount atomic.Int64
+	// droppedCount 队列满/API 失败丢弃数
+	droppedCount  atomic.Int64
+	embedErrCount atomic.Int64
+	// dimMismatchCount 维度不匹配跳过数（换模型/维度后旧向量，审查 M3）
+	dimMismatchCount atomic.Int64
 }
 
-// 编译期锁定 C6。
+// _ 编译期锁定 C6。
 var _ memory.MemoryEngine = (*InMemoryEngine)(nil)
 
 // NewInMemoryEngine 构建并启动 MVP 引擎。store 供关键词路（可 nil），emb 供向量路
@@ -148,7 +143,7 @@ func NewInMemoryEngine(store memory.MemoryStore, emb memory.Embedder, cfg Engine
 		kv:        cfg.KV,
 		vecPrefix: cfg.VecKeyPrefix,
 	}
-	e.rebuildDone.Store(true) // 默认无重建
+	e.rebuildDone.Store(true)
 	e.rebuildCh = make(chan struct{})
 	if emb != nil {
 		e.queue = make(chan memory.IndexableEvent, e.cfg.QueueCap)
@@ -157,8 +152,6 @@ func NewInMemoryEngine(store memory.MemoryStore, emb memory.Embedder, cfg Engine
 		e.wg.Add(1)
 		go e.embedWorker(ctx)
 	}
-	// KV 持久层：启动异步重建（独立 goroutine，不入 worker wg——Close 有界等待，
-	// 防 KV 后端挂住永久阻塞 Close，审查 S6）。重建期 Ready=false → 检索退化关键词。
 	if e.kv != nil {
 		e.rebuildDone.Store(false)
 		go func() {
@@ -177,18 +170,18 @@ func NewInMemoryEngine(store memory.MemoryStore, emb memory.Embedder, cfg Engine
 // MUST NOT 阻塞或失败主链路——队列满则丢弃 + 计数。
 func (e *InMemoryEngine) Index(_ context.Context, evt memory.IndexableEvent) error {
 	if e.closed.Load() || e.emb == nil || e.queue == nil {
-		return nil // 纯关键词降级：无需向量索引
+		return nil
 	}
 	if evt.EventKey <= 0 {
-		return nil // 负 key（合成投影引用）不索引
+		return nil
 	}
 	if !event.IsEmbeddableType(evt.EventType) {
-		return nil // 选择性生成：仅注册表标记 Embeddable 的类型
+		return nil
 	}
 	select {
 	case e.queue <- evt:
 	default:
-		e.droppedCount.Add(1) // 队列满：丢弃 + 计数，不背压
+		e.droppedCount.Add(1)
 	}
 	return nil
 }
@@ -199,7 +192,7 @@ func (e *InMemoryEngine) Remove(_ context.Context, eventKey int64) error {
 	delete(e.vectors, eventKey)
 	delete(e.vmeta, eventKey)
 	e.mu.Unlock()
-	e.removePersisted(eventKey) // 同步删 KV 持久向量，防重建复活已删事件
+	e.removePersisted(eventKey)
 	return nil
 }
 
@@ -219,18 +212,15 @@ func (e *InMemoryEngine) Retrieve(ctx context.Context, q memory.RetrievalQuery) 
 		}
 	}
 
-	// 纯过滤/浏览（无查询词）或显式关键词：走 store 关键词路。
 	if q.Query == "" || mode == memory.ModeKeyword {
 		return e.keywordRetrieve(q, limit), nil
 	}
 
-	// 候选容量：超取补偿 ∪ 配置 topK 下限（审查 S1：vector_top_k/keyword_top_k 生效）。
 	kwCap := max(limit*e.cfg.Overfetch, e.cfg.KeywordTopK)
 	vecCap := max(limit*e.cfg.Overfetch, e.cfg.VectorTopK)
 
 	vecKeys := e.vectorKeys(ctx, q, vecCap)
 
-	// 显式向量模式：有结果则返回；无则按 C6 契约退化为关键词（审查 S2）。
 	if mode == memory.ModeVector {
 		if len(vecKeys) > 0 {
 			return e.toHits(vecKeys, limit), nil
@@ -238,7 +228,6 @@ func (e *InMemoryEngine) Retrieve(ctx context.Context, q memory.RetrievalQuery) 
 		return e.keywordRetrieve(q, limit), nil
 	}
 
-	// hybrid：向量零命中 → 纯关键词（不浪费关键词扫描）；否则 RRF 融合。
 	if len(vecKeys) == 0 {
 		return e.keywordRetrieve(q, limit), nil
 	}
@@ -270,9 +259,9 @@ func (e *InMemoryEngine) Close() error {
 	e.closeOnce.Do(func() {
 		e.closed.Store(true)
 		if e.cancel != nil {
-			e.cancel() // 通知 worker 进入排空
+			e.cancel()
 		}
-		e.wg.Wait() // 等 worker 排空退出（排空有 DrainTimeout 上界）
+		e.wg.Wait()
 		if e.rebuildCh != nil {
 			select {
 			case <-e.rebuildCh:
@@ -287,11 +276,16 @@ func (e *InMemoryEngine) Close() error {
 // EngineStats 是引擎内部计数快照（诊断/可观测读）。具名结构消除 diagnostics 匿名接口的
 // "N 个未命名 int64" 脆弱性（S4：签名漂移变编译错误，而非静默断言失败使诊断维度归零）。
 type EngineStats struct {
-	Indexed     int64 // 成功索引的向量数
-	Dropped     int64 // 队列满/API 失败丢弃数
-	EmbedErr    int64 // 嵌入错误数
-	VectorCount int64 // 当前索引中的向量数
-	DimMismatch int64 // 维度不匹配跳过数（换模型信号）
+	// Indexed 成功索引的向量数
+	Indexed int64
+	// Dropped 队列满/API 失败丢弃数
+	Dropped int64
+	// EmbedErr 嵌入错误数
+	EmbedErr int64
+	// VectorCount 当前索引中的向量数
+	VectorCount int64
+	// DimMismatch 维度不匹配跳过数（换模型信号）
+	DimMismatch int64
 }
 
 // StatsProvider 是可选能力接口：引擎暴露内部计数供诊断读取（与 memory.RawVectorSearcher 并列的
@@ -314,7 +308,7 @@ func (e *InMemoryEngine) Stats() EngineStats {
 	}
 }
 
-// 编译期确认 InMemoryEngine 实现 StatsProvider（S4：契约锁定）。
+// _ 编译期确认 InMemoryEngine 实现 StatsProvider（S4：契约锁定）。
 var _ StatsProvider = (*InMemoryEngine)(nil)
 
 // SearchByVector 实现 memory.RawVectorSearcher：用预计算查询向量做余弦 topK（分区过滤），
@@ -337,7 +331,7 @@ func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK
 			continue
 		}
 		if len(vec) != len(query) {
-			e.dimMismatchCount.Add(1) // 维度不匹配跳过（审查 M3）
+			e.dimMismatchCount.Add(1)
 			continue
 		}
 		cands = append(cands, scored{key: key, score: cosine(query, vec)})
@@ -355,12 +349,8 @@ func (e *InMemoryEngine) SearchByVector(_ context.Context, query []float32, topK
 	return hits, nil
 }
 
-// 编译期锁定可选能力。
+// _ 编译期锁定可选能力。
 var _ memory.RawVectorSearcher = (*InMemoryEngine)(nil)
-
-// ---------------------------------------------------------------------------
-// 内部：向量路
-// ---------------------------------------------------------------------------
 
 func (e *InMemoryEngine) vectorAvailable() bool {
 	if e.emb == nil || !e.Ready() {
@@ -405,7 +395,7 @@ func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 			}
 		}
 		e.mu.Unlock()
-		e.persistVectors(batch, vecs) // KV 持久层（kv==nil 时 no-op）
+		e.persistVectors(batch, vecs)
 		batch = batch[:0]
 	}
 
@@ -414,8 +404,6 @@ func (e *InMemoryEngine) embedWorker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// 排空剩余队列（审查 M1）：用独立、不继承取消、带超时的 ctx，否则合规
-			// 嵌入器（尊重 ctx 取消）在排空期必然失败，丢在途向量且不持久化。
 			drainCtx, cancelDrain := context.WithTimeout(context.WithoutCancel(ctx), e.cfg.DrainTimeout)
 			defer cancelDrain()
 			for {
@@ -457,7 +445,7 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q memory.RetrievalQuery
 	qvecs, err := e.emb.Embed(ctx, []string{e.textForIndex(q.Query)})
 	if err != nil || len(qvecs) == 0 || len(qvecs[0]) == 0 {
 		e.embedErrCount.Add(1)
-		return nil // 嵌入失败 → 向量路空，hybrid 退化为关键词（不报错）
+		return nil
 	}
 	qv := qvecs[0]
 
@@ -469,11 +457,11 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q memory.RetrievalQuery
 	cands := make([]scored, 0, len(e.vectors))
 	for key, vec := range e.vectors {
 		if key <= 0 {
-			continue // 负 key 防御
+			continue
 		}
 		meta := e.vmeta[key]
 		if !matchPartition(q.PartitionIDs, meta.partitionID) {
-			continue // 跨分区泄漏防线
+			continue
 		}
 		if !matchEventType(q.EventTypes, meta.eventType) {
 			continue
@@ -482,7 +470,7 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q memory.RetrievalQuery
 			continue
 		}
 		if len(vec) != len(qv) {
-			e.dimMismatchCount.Add(1) // 维度不匹配（换模型/维度后旧向量）：跳过，不收 0 分候选（审查 M3）
+			e.dimMismatchCount.Add(1)
 			continue
 		}
 		cands = append(cands, scored{key: key, score: cosine(qv, vec)})
@@ -499,10 +487,6 @@ func (e *InMemoryEngine) vectorKeys(ctx context.Context, q memory.RetrievalQuery
 	}
 	return keys
 }
-
-// ---------------------------------------------------------------------------
-// 内部：关键词路（委托 store.QueryEvents）
-// ---------------------------------------------------------------------------
 
 func (e *InMemoryEngine) keywordRetrieve(q memory.RetrievalQuery, limit int) []memory.RetrievalHit {
 	if e.store == nil {
@@ -532,11 +516,8 @@ func (e *InMemoryEngine) keywordKeys(ctx context.Context, q memory.RetrievalQuer
 	}
 	keys := make([]int64, 0, len(refs))
 	for _, r := range refs {
-		keys = append(keys, r.EventKey) // QueryEvents 已按 OrderBy（timestamp_desc）排序 = 关键词路排名
+		keys = append(keys, r.EventKey)
 	}
-	// 语义警示（审查 S3）：关键词腿按 timestamp_desc 排名（非相关度），故 RRF 融合结果
-	// 在关键词侧偏向新近事件。向量腿为余弦相关度秩。这是 MVP 的已知取舍——相关度重排
-	// （token 重叠/Jaccard）列为后续增强；当前融合仍优于纯关键词（向量腿提供语义信号）。
 	return keys
 }
 
@@ -563,10 +544,6 @@ func (e *InMemoryEngine) toHits(keys []int64, limit int) []memory.RetrievalHit {
 	return hits
 }
 
-// ---------------------------------------------------------------------------
-// 融合与过滤助手
-// ---------------------------------------------------------------------------
-
 // rrfFuse 倒数排名融合：score(d) = Σ_lists 1/(k + rank_d)，rank 从 1 起。
 // 返回按融合分降序的 EventKey（去重）。
 func rrfFuse(lists [][]int64, k int) []int64 {
@@ -591,7 +568,7 @@ func rrfFuse(lists [][]int64, k int) []int64 {
 		if out[i].score != out[j].score {
 			return out[i].score > out[j].score
 		}
-		return out[i].key > out[j].key // 同分决胜：新 key（Snowflake 时间有序）优先
+		return out[i].key > out[j].key
 	})
 	keys := make([]int64, len(out))
 	for i, e := range out {

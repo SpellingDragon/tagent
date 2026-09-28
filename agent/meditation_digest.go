@@ -27,7 +27,7 @@ var digestStatusOrder = []task.TaskStatus{
 // meditation event: task-layer health (per-status counts + attention tasks that
 // are suspect/dead/failed) and idle duration. It is a pure function over the
 // given snapshot — no LLM, no I/O. Returns "" when there are no tasks so the
-// meditation message degrades gracefully (task 1.2 / spec: graceful degradation).
+// meditation message degrades gracefully.
 func renderSelfStateDigest(tasks []*task.Task, idle time.Duration) string {
 	counts := make(map[task.TaskStatus]int)
 	var attention []*task.Task
@@ -42,7 +42,7 @@ func renderSelfStateDigest(tasks []*task.Task, idle time.Duration) string {
 		}
 	}
 	if len(counts) == 0 {
-		return "" // no tasks — omit the digest section entirely
+		return ""
 	}
 
 	var b strings.Builder
@@ -52,7 +52,6 @@ func renderSelfStateDigest(tasks []*task.Task, idle time.Duration) string {
 
 	if len(attention) > 0 {
 		b.WriteString(fmt.Sprintf("- 需关注（suspect/dead/failed，共 %d）：\n", len(attention)))
-		// Oldest first — the most likely stuck.
 		sort.Slice(attention, func(i, j int) bool {
 			return attention[i].StartedAt.Before(attention[j].StartedAt)
 		})

@@ -15,50 +15,50 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// ==================== GitEvolution（self-evolution-git-native 装配单元）====================
-//
-// 单一构造单元（S3）：git 纯函数 + improvement/evaluation 事件 + 评估定时 + 版本章缓存。
-// 事件即窗口（log.Record(sha, ts) 复用 eval.go 的 ActivationLog 作为通用时刻表——写入方
-// 从 ReleaseManager.SetActive 换为 register）；judge/guardrail 仅产 evaluation 事件
-// （建议式，P4——框架不动手）。
-
 // GitEvolutionConfig 是 git 原生自进化的运行参数（config.go EvolutionConfig 映射）。
 type GitEvolutionConfig struct {
-	WorkDir        string        // 运行目录（git 仓根=cwd；受控路径相对它归一）
-	ProtectedPaths []string      // 受控路径 patterns（默认三目录）
-	JudgeDelay     time.Duration // register 后评估延迟（0=立即）
+	// WorkDir 运行目录（git 仓根=cwd；受控路径相对它归一）
+	WorkDir string
+	// ProtectedPaths 受控路径 patterns（默认三目录）
+	ProtectedPaths []string
+	// JudgeDelay register 后评估延迟（0=立即）
+	JudgeDelay time.Duration
 }
 
 // GitEvolution 是装配单元：工具 + 生命周期。
 type GitEvolution struct {
-	cfg   GitEvolutionConfig
-	store memory.MemoryStore // improvement/evaluation 事件直写（feedback.go 模式，不经 governance 包）
-	pid   int                // 事件分区（entry）
+	cfg GitEvolutionConfig
+	// store improvement/evaluation 事件直写（feedback.go 模式，不经 governance 包）
+	store memory.MemoryStore
+	// pid 事件分区（entry）
+	pid int
 
-	judge Evaluator // 可 nil（仅 judge）
-	guard Guardrail // 可 nil（仅 guardrail）
+	// judge 可 nil（仅 judge）
+	judge Evaluator
+	// guard 可 nil（仅 guardrail）
+	guard Guardrail
 
-	signalsAvailable func() bool    // 治理信号可用性（7.3）：nil=未声明（遗留行为）
-	log              *ActivationLog // 窗口时刻表（sha→ts）
-	stopCh           chan struct{}  // M4：评估 goroutine 抢占通道（Stop 即时收敛）
-	mu               sync.Mutex     // M4：Register/Stop 并发下保护 wg.Add 与 stopped
-	wg               sync.WaitGroup
-	stopped          atomic.Bool
+	// signalsAvailable 治理信号可用性（7.3）：nil=未声明（遗留行为）
+	signalsAvailable func() bool
+	// log 窗口时刻表（sha→ts）
+	log *ActivationLog
+	// stopCh M4：评估 goroutine 抢占通道（Stop 即时收敛）
+	stopCh chan struct{}
+	// mu M4：Register/Stop 并发下保护 wg.Add 与 stopped
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	stopped atomic.Bool
 
-	latestSha atomic.Value // string——版本章缓存（S2：性能层，真源=improvement 事件）
-	recovered atomic.Bool  // 重启惰性恢复只做一次
+	// latestSha string——版本章缓存（S2：性能层，真源=improvement 事件）
+	latestSha atomic.Value
+	// recovered 重启惰性恢复只做一次
+	recovered atomic.Bool
 }
 
-// NewGitEvolution 构建装配单元。store/judge/guard 可为零值——buildAgent 阶段经
-// SetGovernanceSignalsAvailable declares whether the governance gate is
-// wired (implementation-hardening 7.3): MetricGuardrail's denial/critical
-// criteria feed on governance events — with governance off they are
-// structurally unavailable, and evaluate() says so explicitly instead of
-// letting zero-counts masquerade as healthy evidence. Nil setter state =
-// legacy behavior (no annotation).
-func (g *GitEvolution) SetGovernanceSignalsAvailable(fn func() bool) { g.signalsAvailable = fn }
-
-// BindRuntime 延迟绑定（memStore/model 就绪后，同旧 BindPosterior 时序——S3）。
+// NewGitEvolution 构建装配单元；store/judge/guard 可为零值，运行时依赖经 BindRuntime
+// 延迟绑定。
+//
+// 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states
 func NewGitEvolution(cfg GitEvolutionConfig) *GitEvolution {
 	if len(cfg.ProtectedPaths) == 0 {
 		cfg.ProtectedPaths = []string{"resources/prompts/**", "skills/**", "scripts/**"}
@@ -66,7 +66,7 @@ func NewGitEvolution(cfg GitEvolutionConfig) *GitEvolution {
 	return &GitEvolution{cfg: cfg, log: NewActivationLog(), stopCh: make(chan struct{})}
 }
 
-// BindRuntime 延迟绑定运行时依赖（entry memStore + 评估器对）。幂等。
+// BindRuntime 延迟绑定运行时依赖（入口 memStore ＋ 评估器对）。
 func (g *GitEvolution) BindRuntime(store memory.MemoryStore, pid int, judge Evaluator, guard Guardrail) {
 	g.store = store
 	g.pid = pid
@@ -74,14 +74,19 @@ func (g *GitEvolution) BindRuntime(store memory.MemoryStore, pid int, judge Eval
 	g.guard = guard
 }
 
-// IsRepo 启动自检（Warn 不阻断——非 git 仓下改文件仍生效，只是无留痕/评估）。
+// SetGovernanceSignalsAvailable 声明治理闸是否已接线：拒绝率与 critical 判据以治理事件
+// 为食，治理关闭时在结构上不可用，evaluate 必须显式说明而非让零计数冒充健康证据。
+// 未设置（nil）= 不加注解的遗留行为。
+func (g *GitEvolution) SetGovernanceSignalsAvailable(fn func() bool) { g.signalsAvailable = fn }
+
+// IsRepo 启动自检：非 git 仓下改文件仍然生效，只是没有留痕与评估保护（告警不阻断）。
 func (g *GitEvolution) IsRepo() bool { return GitIsRepo(g.cfg.WorkDir) }
 
 // Log 暴露窗口时刻表（装配层共享给 StoreEvidenceSource——W4 锚点接线）。
 func (g *GitEvolution) Log() *ActivationLog { return g.log }
 
-// Stop 收敛评估 goroutine（生命周期挂 TagentAgent——K4；M4：经 stopCh 抢占，
-// 不再等满 judge_delay）。
+// Stop 收敛评估 goroutine（挂在 agent 生命周期上）：经抢占通道即时收敛，无需等满
+// 评估延迟；被抢占的窗口不产生结论，如实降级而不伪造。
 func (g *GitEvolution) Stop() {
 	g.mu.Lock()
 	if !g.stopped.Load() {
@@ -115,7 +120,6 @@ func (g *GitEvolution) recoverLatest() string {
 		return ""
 	}
 	refs, err := g.store.QueryEvents(memory.QueryOptions{
-		// M2(独立评审):默认 asc 会取到最旧 improvement——必须倒序取最新。
 		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance},
 		OrderBy: "timestamp_desc", Limit: 50,
 	})
@@ -130,7 +134,6 @@ func (g *GitEvolution) recoverLatest() string {
 	if err != nil {
 		return ""
 	}
-	// GetEvents 保输入序（倒序 refs——QueryEvents desc），首条 register 即最新。
 	for _, e := range events {
 		var c improvementContent
 		if json.Unmarshal([]byte(e.Content), &c) == nil && c.Op == "register" && c.Sha != "" {
@@ -142,14 +145,18 @@ func (g *GitEvolution) recoverLatest() string {
 
 // improvementContent 是 improvement 事件 Content（控制面台账）。
 type improvementContent struct {
-	Op    string   `json:"op"`  // register / evaluation
-	Sha   string   `json:"sha"` // commit sha（register=revert 前新 commit；evaluation=被评估窗口）
+	// Op register / evaluation
+	Op string `json:"op"`
+	// Sha commit sha（register=revert 前新 commit；evaluation=被评估窗口）
+	Sha   string   `json:"sha"`
 	Paths []string `json:"paths,omitempty"`
 	Note  string   `json:"note,omitempty"`
-	// evaluation 侧
-	Verdict string `json:"verdict,omitempty"` // healthy / degraded / insufficient / pending
+	// Verdict evaluation 侧
+	// healthy / degraded / insufficient / pending
+	Verdict string `json:"verdict,omitempty"`
 	Reason  string `json:"reason,omitempty"`
-	Advice  string `json:"advice,omitempty"` // 建议文案（refine rollback <sha> 等）
+	// Advice 建议文案（refine rollback <sha> 等）
+	Advice string `json:"advice,omitempty"`
 }
 
 // writeEvent 直写 governance 事件（feedback.go 模式——evolution↛governance 红线）。
@@ -185,7 +192,7 @@ func (g *GitEvolution) Register(paths []string, note string) (string, string, er
 	}
 	ts := time.Now().UnixMilli()
 	g.writeEvent(improvementContent{Op: "register", Sha: sha, Paths: paths, Note: note}, ts)
-	g.log.Record(sha, ts) // 事件即窗口：时刻表与事件同键（评估窗口锚）
+	g.log.Record(sha, ts)
 	g.latestSha.Store(sha)
 	g.scheduleEvaluation(sha, ts)
 	return sha, fmt.Sprintf("已登记 %s（评估窗口已开，%s 后出结论；劣化将在下轮反思 digest 给出回滚建议）", shortSha(sha), g.cfg.JudgeDelay), nil
@@ -213,7 +220,7 @@ func (g *GitEvolution) scheduleEvaluation(sha string, ts int64) {
 			select {
 			case <-t.C:
 			case <-g.stopCh:
-				return // 抢占退出（评估未发生=窗口无结论，如实降级）
+				return
 			}
 		}
 		if g.stopped.Load() {
@@ -272,7 +279,6 @@ func (g *GitEvolution) Evaluations() map[string]improvementContent {
 		return out
 	}
 	refs, err := g.store.QueryEvents(memory.QueryOptions{
-		// M2:同上——倒序,否则近期评估被最旧 100 条挤出。
 		PartitionID: g.pid, EventTypes: []string{event.TypeGovernance},
 		OrderBy: "timestamp_desc", Limit: 100,
 	})
@@ -293,7 +299,7 @@ func (g *GitEvolution) Evaluations() map[string]improvementContent {
 		}
 		var ic improvementContent
 		if json.Unmarshal([]byte(e.Content), &ic) == nil && ic.Sha != "" {
-			out[ic.Sha] = ic // 后写覆盖前写（倒序遍历=先旧后新，终值最新）
+			out[ic.Sha] = ic
 		}
 	}
 	return out
@@ -312,7 +318,6 @@ func (g *GitEvolution) Unregistered() []string {
 			continue
 		}
 		p := strings.TrimSpace(line[3:])
-		// rename 行（R old -> new）取新路径。
 		if idx := strings.Index(p, " -> "); idx >= 0 {
 			p = p[idx+4:]
 		}

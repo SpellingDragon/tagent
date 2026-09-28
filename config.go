@@ -61,14 +61,14 @@ type Config struct {
 	// XAnchors is an extension-reserved key ("x-" convention): YAML anchors
 	// shared across the file are declared under it and ignored by the
 	// framework. Declared so strict parsing accepts the convention
-	// (implementation-hardening 6.1); the framework never reads it.
+	//; the framework never reads it.
 	XAnchors map[string]any `json:"x-anchors,omitempty" yaml:"x-anchors,omitempty"`
 
 	// Entry specifies which agent in the Agents map is the top-level agent.
 	// Defaults to "tagent" if empty.
 	Entry string `json:"entry" yaml:"entry"`
 
-	// ResidentMetaDir（R3，resident-continuity-r2-r4 2.5）：常驻会话元数据目录
+	// ResidentMetaDir：常驻会话元数据目录
 	//（默认 $TMPDIR/tagent-resident-meta；指向持久卷可跨机器重启审计/TTL sweep）。
 	ResidentMetaDir string `json:"resident_meta_dir" yaml:"resident_meta_dir"`
 
@@ -101,7 +101,7 @@ type Config struct {
 
 	// MCPServers maps server name → MCP connection declaration. Servers are
 	// loaded into the process-level MCP registry consumed by mcp_discover /
-	// mcp_call (mcp-discovery-execution-loop). Editing this section in the
+	// mcp_call. Editing this section in the
 	// config file hot-syncs the registry (lazy mtime check) — no restart,
 	// and no agent tool declaration changes (prompt prefix stays stable).
 	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
@@ -154,7 +154,7 @@ type Config struct {
 	// 现状零行为变化）。开启后经 GovernanceGate 对工具调用做风险分级 + 预算 + goal + critical 批准。
 	Governance GovernanceConfig `json:"governance,omitempty" yaml:"governance,omitempty"`
 
-	// Evolution 配置 git 原生自进化（self-evolution-git-native）。默认零值 = 关闭（现状）。
+	// Evolution 配置 git 原生自进化。默认零值 = 关闭（现状）。
 	// 开启后文件即真源（热重载直生效）+ refine register 登记（[self-improve] commit+评估窗口）。
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
 
@@ -224,7 +224,7 @@ type ReliabilityConfig struct {
 	// 默认 false = 不启用（ErrorTrackingStore 不包裹，现状逐字节零行为变化）。
 	DegradationEnabled bool `json:"degradation_enabled,omitempty" yaml:"degradation_enabled,omitempty"`
 
-	// DegradationModelBackoff（5.4 design-report-closeout）：model 依赖 degraded 时
+	// DegradationModelBackoff：model 依赖 degraded 时
 	// runEventLoop 在下一 turn 前的退避停顿（duration 字符串，如 "5s"）。空/非法 = 关闭
 	// （零行为变化）。警告级「闸不是墙」——退避只为免打已确认故障的端点，恢复即正常。
 	DegradationModelBackoff string `json:"degradation_model_backoff,omitempty" yaml:"degradation_model_backoff,omitempty"`
@@ -387,7 +387,7 @@ type CompressConfig struct {
 
 	// SummaryEffort is the legacy alias for summary.reasoning_effort
 	// (deprecated — folded by FoldModelRefAliases). The field must exist for
-	// strict parsing to accept the legacy key (implementation-hardening 6.1).
+	// strict parsing to accept the legacy key.
 	SummaryEffort string `json:"summary_effort,omitempty" yaml:"summary_effort,omitempty"`
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
@@ -420,8 +420,8 @@ type MemoryConfig struct {
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
 	// FSync (localfile type only) is ACCEPTED AND IGNORED since the
-	// localfile-minimization ruling (complete-resident-reliability-protocol
-	// §9.2): the backend has no WAL/fsync machinery — Sync() is a full
+	// localfile-minimization ruling
+	//: the backend has no WAL/fsync machinery — Sync() is a full
 	// snapshot atomic tmp+rename whose durability claim stops at "visible to
 	// a fresh process after a successful barrier", NOT power-loss survival.
 	// The key stays only so existing configs load unchanged; production
@@ -449,7 +449,7 @@ type MemoryConfig struct {
 	Engine *MemoryEngineConfig `json:"engine,omitempty" yaml:"engine,omitempty"`
 }
 
-// ConsolidationConfig（4.1 design-report-closeout）：巩固建议式触发 + 硬门控。
+// ConsolidationConfig：巩固建议式触发 + 硬门控。
 // 触发是建议（渗透/冥想 hint），执行权与质量门在 LLM + 工具硬校验（D2 核心主张）。
 type ConsolidationConfig struct {
 	// CapacityThreshold：分区未巩固边界事件计数超此值 → 发 consolidation_hint 渗透
@@ -463,7 +463,7 @@ type ConsolidationConfig struct {
 	Snooze string `json:"snooze,omitempty" yaml:"snooze,omitempty"`
 }
 
-// Validate 校验巩固配置（4.1 design-report-closeout）：负值非法；Snooze 非空
+// Validate 校验巩固配置：负值非法；Snooze 非空
 // 时必须是合法 duration。零值全部合法（= 触发关闭/不校验，现状行为）。
 func (c ConsolidationConfig) Validate() error {
 	if c.CapacityThreshold < 0 {
@@ -490,7 +490,7 @@ type MemoryEngineConfig struct {
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// Embedding 配置嵌入器。nil = 无向量，引擎不接线（行为同现状纯关键词）。
 	Embedding *EmbeddingConfig `json:"embedding,omitempty" yaml:"embedding,omitempty"`
-	// Consolidation 配置巩固的建议式触发与硬门控（4.1 design-report-closeout）。
+	// Consolidation 配置巩固的建议式触发与硬门控。
 	// 零值 = 触发关闭（纯 manual，现状行为不变）；MinSourceEvents>0 时
 	// memory_consolidate 对实际取回源数不足的调用显式拒绝。
 	Consolidation *ConsolidationConfig `json:"consolidation,omitempty" yaml:"consolidation,omitempty"`
@@ -580,7 +580,7 @@ type ToolRef struct {
 	EventParams []string `json:"event_params,omitempty" yaml:"event_params,omitempty"`
 
 	// ExtraParams declares additional routing-level parameters for agent-kind
-	// tools (plan-interaction-contract D2). Each declared parameter is added to
+	// tools. Each declared parameter is added to
 	// the tool's InputSchema and, when present in a call, packed together with
 	// request into a JSON message body passed to the sub-agent (e.g. plan's
 	// action/name). Tools without extra_params keep the plain-text request
@@ -922,7 +922,7 @@ func LoadConfig(path string) (*Config, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".yaml", ".yml", ".json":
-		// Strict decode (implementation-hardening 6.1): unknown fields fail
+		// Strict decode: unknown fields fail
 		// loading — a typo'd key must never be silently ignored. Dispatch by
 		// extension mirrors the format auto-detection.
 		if err := strictyaml.DecodeByExt(path, data, cfg); err != nil {

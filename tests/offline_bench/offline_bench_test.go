@@ -1,6 +1,6 @@
 // Package offline_bench holds the offline performance baseline for the
 // resident hardening program (resident-remaining-hardening 2.5, archived
-// design D6, §9.3 converged): event scale 1k/10k/100k (single Sync-barrier
+// design D6,  converged): event scale 1k/10k/100k (single Sync-barrier
 // setting — the minimal localfile backend has NO fsync axis anymore, a second
 // "fsync" column would measure the same bytes twice) × probe
 // concurrency 1/10/100, recording p50/p95, allocs, RSS, KV scan volume and
@@ -40,10 +40,10 @@ import (
 const (
 	envRun    = "RUN_OFFLINE_BENCH"
 	envReport = "BENCH_REPORT"
-	// fsyncSampleCap bounds per-op fsynced writes per cell (100k × fsync on a
+	// sampleCap fsyncSampleCap bounds per-op fsynced writes per cell (100k × fsync on a
 	// laptop would run past the point of signal); the report marks the cell
 	// "sampled" so no number is presented as a full-scale measurement.
-	// sampleCap bounds per-cell writes (§9.2/§9.3: the minimal backend has no
+	// sampleCap bounds per-cell writes (/: the minimal backend has no
 	// fsync axis; the cap remains to bound 100k-cell runtime; cells above it
 	// are marked sampled=true, never presented as full-scale).
 	sampleCap      = 20000
@@ -57,9 +57,6 @@ func TestOfflineBenchmark(t *testing.T) {
 		t.Skipf("offline benchmark: set %s=1 to run (see file header for the command)", envRun)
 	}
 	report := map[string]any{"generated": time.Now().Format(time.RFC3339)}
-	// §9.3: the ACTUAL environment the numbers were measured in — machine
-	// facts plus the effective bench configuration, so a report can never be
-	// read on a different box as if it described that box.
 	hostName, _ := os.Hostname()
 	report["env"] = map[string]any{
 		"go_version": runtime.Version(), "goos": runtime.GOOS, "goarch": runtime.GOARCH,
@@ -89,13 +86,9 @@ func TestOfflineBenchmark(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// storage matrix: scale × fsync × probe concurrency
-// ---------------------------------------------------------------------------
-
-// countingKV wraps a KVStore and counts operations per method.
+// durableKV countingKV wraps a KVStore and counts operations per method.
 //
-// F10 fix (fix-resident-reliability-boundaries D7, 8.1): FileSegmentStore
+// F10 fix: FileSegmentStore
 // consumes Sync and ListPartitionIDs via type assertion, not the memory.KVStore
 // interface (which declares neither). Embedding only memory.KVStore would let
 // those assertions fail on the wrapper, silently hiding the underlying
@@ -104,7 +97,7 @@ func TestOfflineBenchmark(t *testing.T) {
 // These methods forward both capabilities (and Sync errors) explicitly so the
 // benchmark crosses the SAME commit path as production.
 // durableKV is the REAL underlying contract the benchmark measures through
-// (§9.1): the durability barrier and cold-partition enumeration must exist on
+// : the durability barrier and cold-partition enumeration must exist on
 // the backend itself. No-op capability fallbacks are deleted — a wrapper that
 // quietly answers Sync()=nil when the backend lacks the barrier would report a
 // durable commit that never happened, exactly the false-green D7 forbids.
@@ -116,7 +109,7 @@ type durableKV interface {
 
 type countingKV struct {
 	memory.KVStore
-	durable                                     durableKV // resolved (and REQUIRED) at construction
+	durable                                     durableKV
 	gets, puts, scans, ranges, batches, deletes atomic.Int64
 	syncs                                       atomic.Int64
 }
@@ -147,8 +140,8 @@ func (c *countingKV) KVBatch(ops []memory.KVOp) error {
 	return c.KVStore.KVBatch(ops)
 }
 
-// Sync forwards the durability barrier to the underlying store (F10) and counts
-// the call — through the REQUIRED contract, never a swallowed no-op (§9.1):
+// Sync forwards the durability barrier to the underlying store  and counts
+// the call — through the REQUIRED contract, never a swallowed no-op:
 // without this the FileSegmentStore barrier assertion `s.kv.(interface{ Sync()
 // error })` fails and the event-level commit barrier is silently skipped,
 // measuring flush-only latency while reporting a durable commit.
@@ -158,10 +151,10 @@ func (c *countingKV) Sync() error {
 }
 
 // ListPartitionIDs forwards cold-partition enumeration so FileSegmentStore
-// Init() discovers partitions over the wrapper too (F10), with no nil fallback.
+// Init() discovers partitions over the wrapper too , with no nil fallback.
 func (c *countingKV) ListPartitionIDs() []int { return c.durable.ListPartitionIDs() }
 
-// Compile-time capability lock (D7 8.1 / §9.1): the wrapper implements the
+// Compile-time capability lock: the wrapper implements the
 // FULL durable contract, and the required underlying shape is explicit.
 var _ durableKV = (*countingKV)(nil)
 
@@ -175,11 +168,11 @@ type syncErrKV struct{ memory.KVStore }
 func (syncErrKV) Sync() error             { return errBarrierBoom }
 func (syncErrKV) ListPartitionIDs() []int { return nil }
 
-// plainKV deliberately LACKS the durable contract — used to prove the §9.1
+// plainKV deliberately LACKS the durable contract — used to prove the
 // construction gate refuses a no-op-capable backend loudly.
 type plainKV struct{ memory.KVStore }
 
-// TestNewCountingKVRequiresDurableBackend (§9.1): the deleted no-op fallback
+// TestNewCountingKVRequiresDurableBackend: the deleted no-op fallback
 // must come back as a LOUD failure at wiring time, never as a silent zero-
 // barrier benchmark cell.
 func TestNewCountingKVRequiresDurableBackend(t *testing.T) {
@@ -206,13 +199,13 @@ func TestCountingKVSyncErrorPropagates(t *testing.T) {
 	}
 }
 
-// snapshot: get, put, scan, range, batch, delete, sync — §9.3 adds the sync
+// snapshot: get, put, scan, range, batch, delete, sync —  adds the sync
 // barrier count so every cell can prove the durable-commit path ran.
 func (c *countingKV) snapshot() [7]int64 {
 	return [7]int64{c.gets.Load(), c.puts.Load(), c.scans.Load(), c.ranges.Load(), c.batches.Load(), c.deletes.Load(), c.syncs.Load()}
 }
 
-type latencies []float64 // milliseconds
+type latencies []float64
 
 func (l latencies) summarize() map[string]any {
 	if len(l) == 0 {
@@ -245,12 +238,12 @@ func diffSnap(after, before [7]int64) [7]int64 {
 func fileSize(t *testing.T, path string) int64 {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return -1 // absent is information, not a bench failure
+		return -1
 	}
 	return fi.Size()
 }
 
-// goMem reports GO RUNTIME heap statistics — explicitly not OS RSS (§9.3):
+// goMem reports GO RUNTIME heap statistics — explicitly not OS RSS:
 // runtime.MemStats cannot see RSS contributions outside the Go heap (page
 // tables, cgo, kernel buffers), so the field names say what they measure.
 func goMem() map[string]any {
@@ -262,7 +255,7 @@ func goMem() map[string]any {
 func storageMatrix(t *testing.T) map[string]any {
 	scales := []int{1_000, 10_000, 100_000}
 	cells := []map[string]any{}
-	content := strings.Repeat("压测事件内容，包含中英文 mixed content 与 payload。", 8) // ~200 chars
+	content := strings.Repeat("压测事件内容，包含中英文 mixed content 与 payload。", 8)
 
 	for _, scale := range scales {
 		{
@@ -309,16 +302,11 @@ func storageMatrix(t *testing.T) map[string]any {
 			segFiles, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 			tmpLeft, _ := filepath.Glob(filepath.Join(dir, "*.tmp"))
 			cell := map[string]any{
-				"scale": scale,
-				// §9.3 ACTUAL written + sample marking: a >cap scale cell is a
-				// sample, labeled so on every consumer surface.
+				"scale":   scale,
 				"written": writes, "requested_scale_full": scale, "sampled": sampled,
 				"write":                  wl.summarize(),
 				"write_thr":              round3(float64(writes) / time.Since(writeStart).Seconds()),
 				"allocs_bytes_per_write": round3(float64(memAfter.TotalAlloc-memBefore.TotalAlloc) / float64(writes)),
-				// Commit + dirty summary: what the durable path REALLY did per
-				// write (Sync barriers = atomic tmp+rename flushes), plus disk
-				// residue (dirty tmp orphans must be zero after clean commits).
 				"commit_summary": map[string]any{
 					"kv_gets": writeOps[0], "kv_puts": writeOps[1], "kv_scans": writeOps[2],
 					"kv_ranges": writeOps[3], "kv_batches": writeOps[4], "kv_deletes": writeOps[5],
@@ -329,10 +317,6 @@ func storageMatrix(t *testing.T) map[string]any {
 				},
 			}
 
-			// §9.3 SPLIT REPORT: point GetEvent and time-window QueryEvents are
-			// measured into SEPARATE pools (previously both latencies merged
-			// into one distribution — a p95 of the mix attributes neither read
-			// shape honestly). Concurrency 1/10/100, fixed probes per worker.
 			probeResults := map[string]any{}
 			for _, conc := range []int{1, 10, 100} {
 				var mu sync.Mutex
@@ -358,7 +342,7 @@ func storageMatrix(t *testing.T) map[string]any {
 							d0 := time.Since(t0)
 							lg = append(lg, float64(d0.Microseconds())/1000.0)
 							wg_ += int64(d0)
-							span := int64(60_000) // 1-minute window scan
+							span := int64(60_000)
 							st := base + int64(r.Intn(len(keys)))*10
 							t1 := time.Now()
 							if _, err := store.QueryEvents(memory.QueryOptions{
@@ -394,7 +378,7 @@ func storageMatrix(t *testing.T) map[string]any {
 				probeResults[fmt.Sprint(conc)] = map[string]any{
 					"get_point_read": one(getL, getWinNs, 0, 0),
 					"query_window":   one(queryL, queryWinNs, 1, 1),
-					"sync_barriers":  after[6] - before[6], // §9.3: probes must show whether reads re-flushed
+					"sync_barriers":  after[6] - before[6],
 					"total_wall_s":   round3(time.Since(pst).Seconds()),
 				}
 			}
@@ -406,10 +390,6 @@ func storageMatrix(t *testing.T) map[string]any {
 	}
 	return map[string]any{"cells": cells, "note": "fork/s is not exercised by this memory/compress workload (tmux probes live in the action domain)"}
 }
-
-// ---------------------------------------------------------------------------
-// compression sweep: Compress latency / allocs at ref scale
-// ---------------------------------------------------------------------------
 
 func compressionSweep(t *testing.T) []map[string]any {
 	out := []map[string]any{}
@@ -435,7 +415,6 @@ func compressionSweep(t *testing.T) []map[string]any {
 				t.Fatalf("StoreEvent: %v", err)
 			}
 		}
-		// Tiny budget so the compaction path always engages at every scale.
 		sc := compress.NewSmartCompressor(compress.WithKeepRecentTasks(2), compress.WithMaxTokens(4000))
 		cc := compress.NewContextCompressor(sc, store, compress.NewDefaultTokenCounter(), 4000, 0.8, 2)
 
@@ -451,15 +430,11 @@ func compressionSweep(t *testing.T) []map[string]any {
 			"allocs_bytes_per_round": round3(float64(after.TotalAlloc-before.TotalAlloc) / float64(scale)),
 			"retained_refs":          len(res.RetainedRefs),
 			"compressed":             res.Compressed,
-			"go_mem_runtime":        goMem(),
+			"go_mem_runtime":         goMem(),
 		})
 	}
 	return out
 }
-
-// ---------------------------------------------------------------------------
-// token estimator error vs pinned offline fixture
-// ---------------------------------------------------------------------------
 
 type tokenFixture struct {
 	Tokenizer       string `json:"tokenizer"`
@@ -482,7 +457,7 @@ func tokenEstimatorError(t *testing.T) map[string]any {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("parse fixture: %v", err)
 	}
-	tc := compress.NewDefaultTokenCounter() // CharsPerToken = 2.0
+	tc := compress.NewDefaultTokenCounter()
 	out := map[string]any{"reference": f.Tokenizer, "tiktoken_version": f.TiktokenVersion}
 	for name, corp := range f.Corpora {
 		errs := make([]float64, 0, len(corp.Samples))
@@ -506,16 +481,12 @@ func tokenEstimatorError(t *testing.T) map[string]any {
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// F10/D7 (8.2): benchmark wrapper barrier fidelity — single event, unclean exit
-// ---------------------------------------------------------------------------
-
 // benchBarrierMarker is the single event's content, read back by a fresh process.
 const benchBarrierMarker = "bench-wrapper-barrier-marker"
 
 // TestBenchWrapperBarrierDurableWithoutClose proves the offline benchmark wraps
 // the KV with the SAME event-level durability barrier production uses
-// (fix-resident-reliability-boundaries D7, 8.2). The benchmark stores every
+// . The benchmark stores every
 // event through countingKV; before the F10 fix countingKV exposed no Sync, so
 // FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion failed, the
 // commit barrier was skipped, and a single acknowledged write stayed in
@@ -530,7 +501,9 @@ const benchBarrierMarker = "bench-wrapper-barrier-marker"
 // so the benchmark and production cross the same event barrier.
 //
 // fsync boundary (D7「报告不混为掉电耐久」):
-// §9.2 (converged per the localfile-minimization ruling): the minimal backend
+//
+//	(converged per the localfile-minimization ruling): the minimal backend
+//
 // has NO fsync/WAL machinery — WithFSync is accepted-and-ignored, so an
 // "fsync-on" cell would attest the SAME bytes twice under two names (a false
 // two-axis claim, deleted). What IS certified here: the Sync barrier is a real
@@ -541,7 +514,7 @@ const benchBarrierMarker = "bench-wrapper-barrier-marker"
 func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 	if os.Getenv("TAGENT_BENCH_BARRIER_SUBPROC") == "1" {
 		runBenchBarrierChild()
-		return // unreachable: the child exits inside
+		return
 	}
 
 	cases := []struct {
@@ -565,7 +538,6 @@ func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 				t.Fatalf("child did not acknowledge the barrier write (err=%v): %s", err, out)
 			}
 
-			// (1) Fail-before discriminator: the wrapper must have been reached.
 			raw, err := os.ReadFile(syncsFile)
 			if err != nil {
 				t.Fatalf("read syncs marker: %v", err)
@@ -578,7 +550,6 @@ func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 				t.Fatalf("countingKV did not forward the event barrier (syncs=%d): benchmark path diverges from production", syncs)
 			}
 
-			// (2) Fresh, independent reader (no wrapper) over the same dir.
 			inner, err := kv.NewLocalFileKV(dir)
 			if err != nil {
 				t.Fatalf("reopen kv: %v", err)
@@ -618,7 +589,7 @@ func runBenchBarrierChild() {
 		fmt.Fprintln(os.Stderr, "child: open kv:", err)
 		os.Exit(2)
 	}
-	ckv := newCountingKV(inner) // EXACTLY the benchmark's wrapper (F10/§9.1).
+	ckv := newCountingKV(inner)
 	store, err := memory.NewFileSegmentStore(ckv, nil, dir, 1000)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "child: open store:", err)
@@ -645,6 +616,5 @@ func runBenchBarrierChild() {
 		fmt.Fprintln(os.Stderr, "child: write syncs marker:", err)
 		os.Exit(4)
 	}
-	// Acknowledged → terminate WITHOUT Close: no flush-tick, no final flush.
 	os.Exit(0)
 }

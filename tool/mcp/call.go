@@ -35,14 +35,14 @@ type CallTool struct {
 	// 失败→degraded，成功→恢复）。per-agent 视角追踪全局 MCP registry（各 agent 独立退化状态）。
 	degradation *reliability.DegradationManager
 
-	// probeEvery/probeCount（5.4 design-report-closeout）：DepMCP degraded 时的熔断
+	// mu probeEvery/probeCount：DepMCP degraded 时的熔断
 	// 半开探测——每 N 次放行 1 次真调用。N<=0 = 关闭。
 	mu         sync.Mutex
 	probeEvery int
 	probeCount int
 }
 
-// SetMCPProbeEvery（5.4 design-report-closeout）配置熔断半开探测间隔：DepMCP degraded 时
+// SetMCPProbeEvery配置熔断半开探测间隔：DepMCP degraded 时
 // 每 N 次调用放行 1 次真探测（其余直接返回熔断 result），探测成功经既有成功上报路径
 // 触发恢复。N<=0 = 关闭熔断（零行为变化）。
 func (t *CallTool) SetMCPProbeEvery(n int) {
@@ -106,14 +106,11 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("mcp_call: invalid args: %w", err)
 	}
 
-	// §8.11⑬：恢复后惰性归零探测计数——下次再退化时从头计数（无相位漂移）。
 	if t.degradation != nil && t.probeEvery > 0 && !t.degradation.IsDegraded(reliability.DepMCP) {
 		t.mu.Lock()
 		t.probeCount = 0
 		t.mu.Unlock()
 	}
-	// 5.4（design-report-closeout）：DepMCP degraded 熔断——每 N 次放行 1 次真探测
-	// （半开），其余快失败（自纠材料随 result 渗透，不 error）。零配置=关闭。
 	if t.degradation != nil && t.degradation.IsDegraded(reliability.DepMCP) {
 		t.mu.Lock()
 		n := t.probeEvery
@@ -165,9 +162,6 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	sort.Strings(toolNames)
 	if target == nil {
-		// S-1: server 枚举不出任何工具（toolNames 空）= server 不可达（最强的服务器级失败
-		// 信号）→ 上报 DepMCP 退化；toolNames 非空则是 tool 名错误（server 健康），不上报
-		// （避免名称错误误标 server 退化）。ctx 取消不计（与 M1 一致）。
 		if len(toolNames) == 0 && t.degradation != nil && ctx.Err() == nil {
 			t.degradation.ReportFailure(reliability.DepMCP, fmt.Errorf("mcp server %q unreachable (no tools enumerated)", a.Server))
 		}
@@ -183,9 +177,6 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	res, err := target.Call(ctx, args)
 	if err != nil {
-		// T-G: MCP 调用失败 → 上报 DepMCP 退化。ctx 取消（关机/中止）不计（与 event_loop
-		// DepModel 一致，M1）。注：err 含传输错误 + tool 级业务错误，MVP 均计入 DepMCP；仅对
-		// 传输/连接失败上报（区分需 trpc MCP 层错误类型）为进阶方向，见 review M1。
 		if t.degradation != nil && ctx.Err() == nil {
 			t.degradation.ReportFailure(reliability.DepMCP, err)
 		}
@@ -198,7 +189,6 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			InputSchema: schemaJSON,
 		}, nil
 	}
-	// T-G: MCP 调用成功 → 上报 DepMCP 恢复（degraded→recovering→normal）。
 	if t.degradation != nil {
 		t.degradation.ReportSuccess(reliability.DepMCP)
 	}
@@ -212,8 +202,8 @@ func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 func RegisterTool() {
 	agent.RegisterPlainTool(CallToolName, func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
 		ct := NewCallTool(cfg.MCPRegistry)
-		ct.SetDegradation(cfg.Degradation)     // T-G: mcp_call 上报 DepMCP 退化（per-agent，nil 则不上报）
-		ct.SetMCPProbeEvery(cfg.MCPProbeEvery) // 5.4: degraded 熔断半开探测（0=关）
+		ct.SetDegradation(cfg.Degradation)
+		ct.SetMCPProbeEvery(cfg.MCPProbeEvery)
 		return ct, nil
 	})
 }

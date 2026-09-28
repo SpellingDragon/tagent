@@ -1,8 +1,7 @@
+// 本文件负责自身遥测阶梯：档位驻留与释放、L2 收敛语义、保护期在冻结前豁免、谱系分类，以及
+// 任务门控接线会阻绝对象收养。
+// 契约: docs/wiki/agent/compression-and-telemetry.md#telemetry-ladder
 package agent
-
-// Self-telemetry-audit regressions (change: attention-budget-architecture,
-// spec: self-telemetry-audit). R4 discipline: the exemption-whitelist test
-// runs FIRST — the freeze must never withdraw the durability defense.
 
 import (
 	"context"
@@ -32,7 +31,6 @@ func feedExternal(a *SelfTelemetryAuditor, n int) {
 }
 
 func TestAudit_ProtectedExemptionBeforeFreeze(t *testing.T) {
-	// 2.1 (R4: whitelist first): a frozen auditor MUST pass protected specs.
 	clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	a := NewSelfTelemetryAuditor(nil)
 	a.now = clk.Now
@@ -54,38 +52,28 @@ func TestAudit_LadderDwellAndRelease(t *testing.T) {
 	a := NewSelfTelemetryAuditor(nil)
 	a.now = clk.Now
 
-	// Too few samples: no verdict regardless of ratio.
 	feedSelfManaged(a, 10)
 	require.Equal(t, 0, a.Level(), "below the minimum sample count the auditor must not act")
 
-	// Cross the threshold: L1 immediately.
 	feedSelfManaged(a, 20)
 	require.Equal(t, 1, a.Level())
-	// Inside the dwell it must NOT march forward.
 	clk.Advance(auditDwellPerStep - time.Minute)
 	feedSelfManaged(a, 1)
 	require.Equal(t, 1, a.Level(), "escalation requires the dwell between ladder steps")
-	// Dwell passed: L2.
 	clk.Advance(2 * time.Minute)
 	feedSelfManaged(a, 1)
 	require.Equal(t, 2, a.Level())
-	// Another dwell: L3 freeze.
 	clk.Advance(auditDwellPerStep + time.Minute)
 	feedSelfManaged(a, 1)
 	require.Equal(t, auditFreeze, a.Level())
 
-	// Recovery: sustained external traffic below the hysteresis line releases
-	// the freeze entirely (window pruning makes the borderline-hold shape a
-	// timing-micro test; the release semantics are what production relies on).
-	clk.Advance(time.Hour) // age out the self-managed samples of the window
+	clk.Advance(time.Hour)
 	feedExternal(a, 260)
 	require.Equal(t, 0, a.Level(), "sustained sub-hysteresis ratio releases the freeze")
 	require.Empty(t, a.GateReason(task.TaskSpec{Kind: "command"}), "released gate admits ordinary specs")
 }
 
-// TestAudit_L2ConvergeSemantics pins the middle ladder step in isolation:
-// converge refuses self-managed-origin spawns while user-derived and
-// protected specs pass.
+// TestAudit_L2ConvergeSemantics 钉住 中间档单独可判：收敛期拒绝自管来源的派生，用户来源与受保护声明照常放行。
 func TestAudit_L2ConvergeSemantics(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_650_000_000, 0)}
 	a := NewSelfTelemetryAuditor(nil)
@@ -107,14 +95,10 @@ func TestAudit_LineageClassification(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_600_000_000, 0)}
 	a := NewSelfTelemetryAuditor(nil)
 	a.now = clk.Now
-	// user-lineage settles are environment work, not self-managed: 40 of them
-	// must never trip the auditor (ratio 0).
 	for i := 0; i < 40; i++ {
 		a.ObserveSettle(map[string]any{"meta_trigger_source": "user"})
 	}
 	require.Equal(t, 0, a.Level())
-	// absent/unknown lineage counts as self-managed (conservative withhold
-	// philosophy): 40 more → 50% > 40% over 80 samples → L1.
 	for i := 0; i < 40; i++ {
 		a.ObserveSettle(map[string]any{"lineage_absent": "true"})
 	}
@@ -122,8 +106,6 @@ func TestAudit_LineageClassification(t *testing.T) {
 }
 
 func TestAudit_TaskGateWiringBlocksAdoption(t *testing.T) {
-	// End-to-end at the task layer: frozen auditor → Spawn returns Blocked,
-	// in-flight work unaffected (gate-not-wall semantics).
 	clk := &fakeClock{t: time.Unix(1_500_000_000, 0)}
 	a := NewSelfTelemetryAuditor(nil)
 	a.now = clk.Now
@@ -132,8 +114,6 @@ func TestAudit_TaskGateWiringBlocksAdoption(t *testing.T) {
 
 	res := tm.Spawn(task.TaskSpec{Kind: "generic", Desc: "chore"}, nil)
 	require.NotEmpty(t, res.Blocked, "ordinary spawn refused while frozen")
-	// The admitted protected spawn uses a real detector (a nil detector is the
-	// pure-sync contract: Spawn blocks until settle).
 	det := task.NewFuncSettleDetector(context.Background(), func(context.Context) (string, error) {
 		return "repaired", nil
 	})

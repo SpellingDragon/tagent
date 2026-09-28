@@ -1,16 +1,7 @@
+// 本文件负责派生计数的对账屏障：去重命中、被门阻止、内联结算三种情形都必须**作废记账**，
+// 去重还要让调用环保持静默（不得留下一个永远不会被结算的计数）。
+// 契约: docs/wiki/agent/task-lifecycle.md#spawn-dedup-origin
 package agent
-
-// Review-evidence reproduction (2026-09-27 deep review), for the finding:
-// countingSpawner leaks a delivery-accounting booking when the inner spawn is
-// BLOCKED (disk-degraded gate) or DEDUPED (same-key single-flight). In both
-// shapes no OnSettle/route will ever fire for THIS call's booking, so
-// pending[id] stays +1 forever, awaiting(id) is stuck true, and the
-// per-invocation consume loop (runAgentLoop's quiescence check) can never
-// exit on its own — the sub-agent call is dragged to the 600s
-// defaultSubAgentTimeout instead of quiescing after its last settle.
-//
-// This test FAILS while the defect is unfixed and becomes the regression test
-// for the fix (void the booking on Blocked/Deduped as well).
 
 import (
 	"testing"
@@ -36,9 +27,6 @@ func TestCountingSpawnerVoidsBookingOnDedup(t *testing.T) {
 	id := "review-inv-1"
 	sinks.bind(id, bus)
 
-	// The dedup shape: the task layer matched an ACTIVE same-key task. The
-	// matched task settles under ITS ORIGINAL invocation's booking — no
-	// route will decrement anything for THIS call.
 	cs := &countingSpawner{
 		inner: &reviewStubSpawner{res: task.SpawnResult{Task: &task.Task{}, Deduped: true}},
 		sinks: sinks,
@@ -46,9 +34,6 @@ func TestCountingSpawnerVoidsBookingOnDedup(t *testing.T) {
 	}
 	cs.Spawn(task.TaskSpec{}, nil)
 
-	// Correct behavior: a deduped call booked nothing it owns, so the barrier
-	// must be quiescent. UNFIXED the leaked booking pins awaiting() true and
-	// the invocation loop never quiesces on its own.
 	require.False(t, sinks.awaiting(id),
 		"review P2 evidence: deduped spawn leaked a delivery booking — pending stuck >0, loop cannot quiesce")
 }
@@ -59,8 +44,6 @@ func TestCountingSpawnerVoidsBookingOnBlock(t *testing.T) {
 	id := "review-inv-2"
 	sinks.bind(id, bus)
 
-	// The blocked shape: the disk-degraded spawn gate refused adoption. No task
-	// was registered, so no settle will ever route for this booking.
 	cs := &countingSpawner{
 		inner: &reviewStubSpawner{res: task.SpawnResult{Blocked: "disk degraded"}},
 		sinks: sinks,
@@ -72,8 +55,7 @@ func TestCountingSpawnerVoidsBookingOnBlock(t *testing.T) {
 		"review P2 evidence: blocked spawn leaked a delivery booking — pending stuck >0, loop cannot quiesce")
 }
 
-// TestCountingSpawnerVoidsBookingOnInlineSettle is the CONTROL: the existing
-// voidSpawn-on-Settled behavior is correct and must keep holding after any fix.
+// TestCountingSpawnerVoidsBookingOnInlineSettle 钉住 is the CONTROL: the existing voidSpawn-on-Settled behavior is correct and must keep holding after any fix.
 func TestCountingSpawnerVoidsBookingOnInlineSettle(t *testing.T) {
 	sinks := newSettleSinkRegistry()
 	bus := NewEventBus()
@@ -90,20 +72,14 @@ func TestCountingSpawnerVoidsBookingOnInlineSettle(t *testing.T) {
 	require.False(t, sinks.awaiting(id), "inline settle must void its booking (existing behavior)")
 }
 
-// TestDedupKeepsInvocationLoopQuiescent walks the FULL barrier chain of the
-// dedup shape (spawn background → same-key second call dedups → first task's
-// settle delivers): after the last real settle is published to the bound bus,
-// the shared shell's exit predicate (awaiting==false + drained bus) must hold.
-// UNFIXED the dedup's leaked booking kept awaiting stuck true even after every
-// real settle had been delivered, pinning the invocation loop open until the
-// caller's hard timeout.
+// TestDedupKeepsInvocationLoopQuiescent 钉住 去重形状下要走完整条屏障链：派生后台任务、同键第二次调用去重、首个任务结算送达。
+// - 最后一条真实结算发到绑定总线之后，共享壳的退出判据（无等待且总线已排空）必须成立。
 func TestDedupKeepsInvocationLoopQuiescent(t *testing.T) {
 	sinks := newSettleSinkRegistry()
 	invBus := NewEventBus()
 	id := "review-inv-4"
 	sinks.bind(id, invBus)
 
-	// Call 1: a real background spawn (settles later, out of the sync window).
 	bg := &countingSpawner{
 		inner: &reviewStubSpawner{res: task.SpawnResult{Task: &task.Task{}}},
 		sinks: sinks, id: id,
@@ -111,20 +87,15 @@ func TestDedupKeepsInvocationLoopQuiescent(t *testing.T) {
 	bg.Spawn(task.TaskSpec{}, nil)
 	require.True(t, sinks.awaiting(id), "background spawn must keep the tail alive")
 
-	// Call 2: same-key retry hits single-flight dedup → books nothing it owns.
 	dup := &countingSpawner{
 		inner: &reviewStubSpawner{res: task.SpawnResult{Task: &task.Task{}, Deduped: true}},
 		sinks: sinks, id: id,
 	}
 	dup.Spawn(task.TaskSpec{}, nil)
 
-	// The real task settles: deliver via the routing decision (publishes to the
-	// bound bus, decrements ITS booking).
 	settled := &task.Task{Spec: task.TaskSpec{Origin: map[string]string{metaKeyInvocationID: id}}}
 	deliverTaskSettled(sinks, nil, settled, &AgentEvent{ID: "settle-real", Source: SourceTask})
 
-	// Barrier quiesces: the shared shell's keep-alive predicate is false and
-	// the delivered settle is pullable — exactly the loop's exit condition.
 	require.False(t, sinks.awaiting(id), "after the last real settle is delivered the loop must be able to quiesce (P2-3 gate)")
 	var sawSettle bool
 	for _, e := range invBus.TryPull() {

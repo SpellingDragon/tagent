@@ -17,23 +17,36 @@ import (
 
 // KnowledgeResult represents a single piece of acquired knowledge.
 type KnowledgeResult struct {
-	Type          string         `json:"type"`                     // "skill", "skill_content", "web", "mcp_tool", "historical_memory"
-	Title         string         `json:"title"`                    // Human-readable title
-	Content       string         `json:"content"`                  // Knowledge content
-	Source        string         `json:"source,omitempty"`         // Source identifier
-	ExecutionPlan *ExecutionPlan `json:"execution_plan,omitempty"` // Translated executable plan
+	// Type "skill", "skill_content", "web", "mcp_tool", "historical_memory"
+	Type string `json:"type"`
+	// Title Human-readable title
+	Title string `json:"title"`
+	// Content Knowledge content
+	Content string `json:"content"`
+	// Source identifier
+	Source string `json:"source,omitempty"`
+	// ExecutionPlan Translated executable plan
+	ExecutionPlan *ExecutionPlan `json:"execution_plan,omitempty"`
 }
 
 // ExecutionPlan describes a physical execution plan that ActionTool can directly run.
 type ExecutionPlan struct {
-	Function    string            `json:"function"`              // "exec", "tmux_exec", "mcp_call"
-	Command     string            `json:"command,omitempty"`     // Command for exec/tmux_exec
-	MCPTool     string            `json:"mcp_tool,omitempty"`    // MCP tool name for mcp_call
-	MCPArgs     map[string]any    `json:"mcp_args,omitempty"`    // MCP tool arguments for mcp_call
-	Env         map[string]string `json:"env,omitempty"`         // Environment variables
-	Dir         string            `json:"dir,omitempty"`         // Working directory
-	Timeout     int               `json:"timeout,omitempty"`     // Timeout in seconds
-	Description string            `json:"description,omitempty"` // Human-readable description
+	// Function "exec", "tmux_exec", "mcp_call"
+	Function string `json:"function"`
+	// Command for exec/tmux_exec
+	Command string `json:"command,omitempty"`
+	// MCPTool MCP tool name for mcp_call
+	MCPTool string `json:"mcp_tool,omitempty"`
+	// MCPArgs MCP tool arguments for mcp_call
+	MCPArgs map[string]any `json:"mcp_args,omitempty"`
+	// Environment variables
+	Env map[string]string `json:"env,omitempty"`
+	// Dir Working directory
+	Dir string `json:"dir,omitempty"`
+	// Timeout in seconds
+	Timeout int `json:"timeout,omitempty"`
+	// Description Human-readable description
+	Description string `json:"description,omitempty"`
 }
 
 // BuildSubTools assembles the sub-tool set for the Knowledge Agent.
@@ -49,10 +62,7 @@ func BuildSubTools(cfg Config) []tool.Tool {
 		tools = append(tools, NewMCPDiscoverTool(cfg.MCPToolSets))
 	}
 
-	// Web search: always available via two complementary tools
-	// duckduckgo_search: Instant Answer API for factual/encyclopedic info (fast, structured)
 	tools = append(tools, duckduckgo.NewTool())
-	// web_search: HTML scraping for general web content (current events, tutorials, docs)
 	tools = append(tools, NewWebSearchTool())
 
 	if cfg.MemStore != nil {
@@ -61,8 +71,6 @@ func BuildSubTools(cfg Config) []tool.Tool {
 
 	return tools
 }
-
-// ==================== Sub-tool implementations ====================
 
 // NewSkillSearchTool creates a tool that searches the skill repository.
 func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool {
@@ -82,9 +90,9 @@ func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool {
 // NewSkillLoadTool creates a tool that loads skill content as a structured summary.
 //
 // Progressive disclosure design (following trpc-agent-go pattern):
-//   - Level 1 (skill_search): name + description from YAML front matter
-//   - Level 2 (skill_load): name + description + usage summary (up to ~2500 chars)
-//   - Level 3 (command): read full skill file when deeper detail is needed
+// - Level 1 (skill_search): name + description from YAML front matter
+// - Level 2 (skill_load): name + description + usage summary (up to ~2500 chars)
+// - Level 3 (command): read full skill file when deeper detail is needed
 //
 // The tool returns a compact, structured output suitable for the knowledge agent
 // to read and synthesize, avoiding the context explosion of dumping the full body.
@@ -98,9 +106,7 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 				return skillLoadResult{}, fmt.Errorf("skill not found: %s", args.SkillName)
 			}
 
-			// Get fully-qualified path for truncation note
 			skillFilePath := "skills/" + args.SkillName + "/SKILL.md"
-			// Try to use Path() from the framework repo if available
 			if pathProvider, ok := interface{}(repo).(interface{ Path(string) (string, error) }); ok {
 				if dir, err := pathProvider.Path(args.SkillName); err == nil && dir != "" {
 					skillFilePath = dir + "/SKILL.md"
@@ -109,7 +115,6 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 
 			var b strings.Builder
 
-			// 1. Summary (Name + Description) always at top
 			b.WriteString("**[Skill]** ")
 			b.WriteString(s.Summary.Name)
 			b.WriteString("\n")
@@ -119,12 +124,8 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 			}
 			b.WriteString("\n")
 
-			// 2. Body with section-aware truncation
 			body := s.Body
 			if len(body) > maxBodyChars {
-				// Find the last section heading (## ) within the limit to cut cleanly.
-				// Only consider headings in the second half of the limit to avoid
-				// cutting before the first real section.
 				cutoff := maxBodyChars
 				searchRange := body[:maxBodyChars]
 				if lastHeading := strings.LastIndex(searchRange, "\n## "); lastHeading > maxBodyChars/2 {
@@ -138,7 +139,6 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 				b.WriteString(body)
 			}
 
-			// 3. Docs listed by path only (no content to keep output compact)
 			if len(s.Docs) > 0 {
 				b.WriteString("\n**Docs** (")
 				b.WriteString(fmt.Sprintf("%d", len(s.Docs)))
@@ -219,8 +219,6 @@ func NewMemoryQueryTool(memStore tagenttool.MemoryStoreAccessor, readPartitionID
 	)
 }
 
-// ==================== Sub-tool argument/result types ====================
-
 type skillSearchArgs struct {
 	Query string `json:"query"`
 }
@@ -264,8 +262,6 @@ type memoryQueryResult struct {
 	Results []KnowledgeResult `json:"results"`
 	Count   int               `json:"count"`
 }
-
-// ==================== Shared search implementations ====================
 
 // searchSkills searches for matching skills in the repository.
 func searchSkills(repo tagenttool.SkillRepository, query string) []KnowledgeResult {
@@ -388,7 +384,7 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, readParti
 	opts := memory.QueryOptions{
 		Limit:   10,
 		OrderBy: "timestamp_desc",
-		Keyword: query, // Delegate filtering to MemoryStore (case-insensitive match on EventSummary/Content)
+		Keyword: query,
 	}
 	if len(readPartitionIDs) > 0 {
 		opts.PartitionIDs = readPartitionIDs
@@ -396,9 +392,6 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, readParti
 
 	events, err := memStore.QueryEvents(opts)
 	if err != nil {
-		// S-2（四审，信号倒置）：存储故障这一强信号不得静默塌缩为"无历史"（否则 agent 误判
-		// 无相关知识、转冗余搜索，且故障不可观测）——显式返回 query_error 结果项，与"确实
-		// 没有历史"可区分；对齐 recall 侧对同一查询的显式报错语义（memory_recall.go）。
 		return []KnowledgeResult{{
 			Type:    "historical_memory",
 			Title:   "query_error",
@@ -420,18 +413,16 @@ func queryHistoricalKnowledge(memStore tagenttool.MemoryStoreAccessor, readParti
 	return results
 }
 
-// ==================== Plain Tool Factory Registration ====================
-
 // RegisterSubTools registers all knowledge sub-tools as plain tools in the
 // global tool registry. Called by tagent.RegisterBuiltinTools().
 //
 // Registered tools:
-//   - skill_search: search local skill repository
-//   - skill_load: load skill content with section-aware truncation
-//   - mcp_discover: discover available MCP tools
-//   - web_search: HTML scraping for general web content
-//   - duckduckgo_search: Instant Answer API for factual info
-//   - memory_query: query historical knowledge from memory
+// - skill_search: search local skill repository
+// - skill_load: load skill content with section-aware truncation
+// - mcp_discover: discover available MCP tools
+// - web_search: HTML scraping for general web content
+// - duckduckgo_search: Instant Answer API for factual info
+// - memory_query: query historical knowledge from memory
 func RegisterSubTools() {
 	agent.RegisterPlainTool("skill_search", skillSearchFactory)
 	agent.RegisterPlainTool("skill_load", skillLoadFactory)
@@ -456,13 +447,10 @@ func skillLoadFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, erro
 }
 
 func mcpDiscoverFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-	// Live registry preferred: runtime-registered servers are discoverable
-	// immediately (mcp-discovery-execution-loop).
 	if cfg.MCPRegistry != nil {
 		return NewMCPDiscoverToolWithRegistry(cfg.MCPRegistry).(tool.CallableTool), nil
 	}
 	if len(cfg.MCPToolSets) == 0 {
-		// Return a stub tool that returns empty results when no MCP source is configured.
 		return NewMCPDiscoverTool(nil).(tool.CallableTool), nil
 	}
 	return NewMCPDiscoverTool(cfg.MCPToolSets).(tool.CallableTool), nil

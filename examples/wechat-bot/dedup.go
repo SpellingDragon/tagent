@@ -58,8 +58,6 @@ func (s *SeenStore) load() {
 	}
 	var m map[string]int64
 	if err := json.Unmarshal(data, &m); err != nil {
-		// Corrupted file: degrade to empty set, keep the bad file aside for
-		// post-mortem instead of silently overwriting it.
 		s.logger.Warn("[Dedup] seen.json corrupted, starting empty", "error", err)
 		_ = os.Rename(s.path, s.path+".corrupt")
 		return
@@ -81,7 +79,7 @@ func (s *SeenStore) CheckAndMark(key string) bool {
 	defer s.mu.Unlock()
 
 	if _, ok := s.seen[key]; ok {
-		s.seen[key] = time.Now().Unix() // sliding TTL refresh; duplicate either way
+		s.seen[key] = time.Now().Unix()
 		return false
 	}
 	s.seen[key] = time.Now().Unix()
@@ -110,7 +108,7 @@ func (s *SeenStore) persistLocked() {
 		for k, v := range s.seen {
 			list = append(list, kv{k, v})
 		}
-		sort.Slice(list, func(i, j int) bool { return list[i].v < list[j].v }) // oldest first
+		sort.Slice(list, func(i, j int) bool { return list[i].v < list[j].v })
 		for i := 0; i < len(list)-s.capacity; i++ {
 			delete(s.seen, list[i].k)
 		}

@@ -62,3 +62,6 @@ data/
 # 单元测试的 memory store 落点（经 testStore 已挪到系统临时目录；此处兜底防回归）
 /own-*/
 /hottest-*/
+
+# 就地构建的门禁二进制（门禁一律经 go run 调用，不入库）
+/codetools

@@ -7,10 +7,10 @@ import "time"
 // by a geometric backoff phase (sparse polling for long-running / alive-detached
 // tasks), capped at a maximum interval. It replaces a single fixed Interval.
 type PollSchedule struct {
-	DenseInterval time.Duration // poll cadence during the dense phase
-	DenseDuration time.Duration // how long the dense phase lasts
-	BackoffFactor float64       // interval growth per step after the dense phase (>= 1)
-	MaxInterval   time.Duration // upper cap on the interval
+	DenseInterval time.Duration
+	DenseDuration time.Duration
+	BackoffFactor float64
+	MaxInterval   time.Duration
 }
 
 // DefaultPollSchedule returns the default adaptive schedule. The dense phase
@@ -43,8 +43,6 @@ func (s PollSchedule) intervalForAge(age time.Duration) time.Duration {
 	}
 
 	interval := float64(s.DenseInterval)
-	// Walk the poll timeline from the end of the dense phase, growing the
-	// interval geometrically, until the cumulative time reaches age.
 	t := float64(s.DenseDuration)
 	for t < float64(age) {
 		interval *= factor

@@ -1,15 +1,7 @@
+// 本文件负责两条已发生的回归：瞬时重排必须覆盖让位的冥想产出；信封内任一槽位不可解码即
+// **整封隔离**（全部不可解码同样隔离），不得只丢那一条。
+// 契约: docs/wiki/reliability/durable-delivery.md#reopen-refusal
 package agent
-
-// Deep-review regression trio (change: deep-review-fixes, second edition after
-// the reject/replay cycle) — tasks 3.2 / 4.2 / 4.3. Pinned semantics:
-//   - the submitTransient EXIT ITSELF requeues over the full frozen received
-//     set (driven through the real processTurn gate with an injected store
-//     failure — not just the releaseBatchClaims function), so a meditation
-//     yielding to a mixed batch never zombies its durable envelope;
-//   - an undecodable source_event slot quarantines the WHOLE envelope (bytes
-//     kept for inspection) instead of staying claimed forever (all-bad) or
-//     letting the decodable siblings' completion ACK-destroy the corrupt
-//     input (half-bad).
 
 import (
 	"context"
@@ -47,7 +39,7 @@ func (f *flakyKV) KVPut(key, value string) error {
 	return f.KVStore.KVPut(key, value)
 }
 
-// Capability passthrough so the wrapper keeps the concrete backend's optional
+// Sync Capability passthrough so the wrapper keeps the concrete backend's optional
 // faces (RebuildLiveCounts probes ListPartitionIDs; the commit barrier probes
 // Sync) — embedding alone hides them from the type assertions.
 func (f *flakyKV) Sync() error { return f.KVStore.(interface{ Sync() error }).Sync() }
@@ -77,12 +69,9 @@ func flakyStack(t *testing.T, root string) (*flakyKV, *memory.FileSegmentStore, 
 	return fk, store, bus, ta
 }
 
-// TestTransientRequeueCoversYieldedMeditation drives the REAL submitTransient
-// branch: a mixed batch (user + yielding meditation) whose durable commit
-// keeps failing exhausts the gate's backoff, and the exit must requeue the
-// claims over the full RECEIVED set — both envelopes return to pending and
-// re-enter consumption order (P2-1: the unfixed exit requeued only the
-// selected subset, zombieing the meditation's claim until a restart).
+// TestTransientRequeueCoversYieldedMeditation 钉住 混合批次（用户输入加让出的冥想产出）的持久提交反复失败并耗尽退避后，必须按完整已受理集重新入队全部领取。
+// - 两个信封都回到待处理并重新进入消费次序；
+// - 只重投被选中的子集，会让未选中的那个停在已领取状态而成僵尸。
 func TestTransientRequeueCoversYieldedMeditation(t *testing.T) {
 	root := t.TempDir()
 	fk, store, bus, ta := flakyStack(t, root)
@@ -100,7 +89,7 @@ func TestTransientRequeueCoversYieldedMeditation(t *testing.T) {
 	selected := dropMeditationFromMixedBatch(received, "flaky")
 	require.Len(t, selected, 1, "precondition: meditation yielded from model input")
 
-	fk.failPut.Store(true) // every commit attempt fails → backoff exhausts → transient
+	fk.failPut.Store(true)
 	disp := ta.processTurn(context.Background(), ta.contextManager, received)
 	require.Equal(t, turnContinue, disp, "the transient exit keeps consuming; it must not stop or model")
 	fk.failPut.Store(false)
@@ -118,8 +107,7 @@ func TestTransientRequeueCoversYieldedMeditation(t *testing.T) {
 	require.True(t, sawUser && sawMed, "the yielding meditation's claim was requeued with the batch")
 }
 
-// TestUndecodableAllSlotsQuarantined pins the P2-2 all-bad branch: the envelope
-// is isolated (bytes kept) rather than stuck claimed across every restart.
+// TestUndecodableAllSlotsQuarantined 钉住 pins the P2-2 all-bad branch: the envelope is isolated (bytes kept) rather than stuck claimed across every restart.
 func TestUndecodableAllSlotsQuarantined(t *testing.T) {
 	root := t.TempDir()
 	store, bus, _ := r30Stack(root)
@@ -138,16 +126,11 @@ func TestUndecodableAllSlotsQuarantined(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, q, 1, "the envelope is quarantined (kept inspectable), not left claimed")
 
-	// Restart shape (the protocol's honest surface): reopen REFUSES while the
-	// quarantine holds undispositioned items — the corruption surfaces to the
-	// operator instead of the P2-2 defect's silent claimed-zombie loop.
 	require.NoError(t, bus.CloseDurable())
 	_, err = NewReliableEventBus(filepath.Join(root, "inbox"))
 	require.Error(t, err, "reopen must surface the undispositioned quarantine, never silently ignore it")
 	require.ErrorContains(t, err, "quarantine holds undispositioned items")
 
-	// After the operator dispositions the kept bytes, reopen succeeds and the
-	// disposed input is NOT resurrected for consumption.
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "inbox", "inbox-v2", "quarantine")))
 	bus2, err := NewReliableEventBus(filepath.Join(root, "inbox"))
 	require.NoError(t, err)
@@ -159,9 +142,8 @@ func TestUndecodableAllSlotsQuarantined(t *testing.T) {
 	require.Len(t, refs, 0, "quarantined input must leave no facts behind")
 }
 
-// TestUndecodableOneSlotQuarantinesWholeEnvelope pins the P2-2 half-bad branch:
-// a sibling slot's decode failure claims the whole envelope — the decodable
-// slot does NOT sail into a completion that would ACK-destroy its corrupt twin.
+// TestUndecodableOneSlotQuarantinesWholeEnvelope 钉住 兄弟槽位解码失败时，被认领的是整个信封。
+// - 可解码的那条不得继续进入一次会确认销毁其损坏孪生项的完成。
 func TestUndecodableOneSlotQuarantinesWholeEnvelope(t *testing.T) {
 	root := t.TempDir()
 	store, bus, _ := r30Stack(root)
@@ -170,8 +152,6 @@ func TestUndecodableOneSlotQuarantinesWholeEnvelope(t *testing.T) {
 	_, err := bus.PublishContext(context.Background(), durableMsg("healthy-input"))
 	require.NoError(t, err)
 
-	// Duplicate slot 0 as a second (healthy) slot, then corrupt slot 0 itself:
-	// one decodable, one undecodable inside ONE envelope.
 	tamperEnvelope(t, pendingEnvelopePath(t, root), func(env *reliability.Envelope) {
 		slot1 := env.Messages[0]
 		slot1.Slot = 1

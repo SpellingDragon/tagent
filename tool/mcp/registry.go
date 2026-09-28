@@ -209,8 +209,6 @@ func (r *Registry) maybeSyncLocked() []trpctool.ToolSet {
 	if !mt.After(r.lastMod) {
 		return nil
 	}
-	// Baseline first so a broken file is not re-parsed on every read; the
-	// fix bumps the mtime again and triggers a fresh sync.
 	r.lastMod = mt
 
 	desired, err := parseServersFile(r.configPath)
@@ -220,7 +218,6 @@ func (r *Registry) maybeSyncLocked() []trpctool.ToolSet {
 	}
 
 	var toClose []trpctool.ToolSet
-	// Remove config-origin entries no longer declared.
 	for name, e := range r.entries {
 		if !e.fromConfig {
 			continue
@@ -231,7 +228,6 @@ func (r *Registry) maybeSyncLocked() []trpctool.ToolSet {
 			log.Infof("[mcp] registry hot-sync: removed server %q", name)
 		}
 	}
-	// Add new entries and rebuild changed ones.
 	for name, spec := range desired {
 		if err := spec.Validate(name); err != nil {
 			log.Warnf("[mcp] registry hot-sync: skipping invalid server: %v", err)
@@ -239,7 +235,7 @@ func (r *Registry) maybeSyncLocked() []trpctool.ToolSet {
 		}
 		if e, ok := r.entries[name]; ok {
 			if e.fromConfig && reflect.DeepEqual(e.spec, spec) {
-				continue // unchanged — keep the live instance
+				continue
 			}
 			if !e.fromConfig {
 				log.Warnf("[mcp] registry hot-sync: config declaration %q replaces manually registered toolset", name)
@@ -278,7 +274,7 @@ func parseServersFile(path string) (map[string]ServerConfig, error) {
 		}
 		raw, ok := full["mcp_servers"]
 		if !ok {
-			return map[string]ServerConfig{}, nil // 无 MCP 段：空表（合法）
+			return map[string]ServerConfig{}, nil
 		}
 		// cold-eyes P1-3：子树本身即 servers 映射，直接严格解码到 map——
 		// 曾误用 configFileServers 包装（顶层 "alpha" 被判 unknown，任何带
@@ -307,7 +303,7 @@ func parseServersFile(path string) (map[string]ServerConfig, error) {
 		}
 	}
 	if subtree == nil {
-		return map[string]ServerConfig{}, nil // 无 MCP 段：空表（合法）
+		return map[string]ServerConfig{}, nil
 	}
 	// 子树本身即 servers 映射（非 configFileServers 包装）。
 	var servers map[string]ServerConfig

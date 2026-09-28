@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
+// TestAttributionCarrier_RoundTrip 钉住归因章 ctx 载体的往返：未注入取不到，注入后逐键一致。
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#attribution-carrier
 func TestAttributionCarrier_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	// 未注入 → 提取失败。
 	if _, ok := AttributionFrom(ctx); ok {
 		t.Fatal("空 ctx 不应有归因")
 	}
-	// 注入 → 提取一致。
 	ctx2 := WithAttribution(ctx, Attribution{"bundle_id": "v1", "rollout_id": "r-42"})
 	got, ok := AttributionFrom(ctx2)
 	if !ok {
@@ -22,9 +23,9 @@ func TestAttributionCarrier_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestAttributionCarrier_EmptyNotInjected 钉住空归因与 nil 归因都不写入 ctx（省一次分配），提取仍失败。
 func TestAttributionCarrier_EmptyNotInjected(t *testing.T) {
 	ctx := context.Background()
-	// 空归因不注入（省分配）——提取仍失败。
 	ctx2 := WithAttribution(ctx, Attribution{})
 	if _, ok := AttributionFrom(ctx2); ok {
 		t.Fatal("空归因不应被注入")
@@ -35,8 +36,8 @@ func TestAttributionCarrier_EmptyNotInjected(t *testing.T) {
 	}
 }
 
+// TestAttributionCarrier_Isolation 钉住绑定隔离：子 ctx 的归因不污染父 ctx。
 func TestAttributionCarrier_Isolation(t *testing.T) {
-	// 子 ctx 的归因不污染父 ctx（每回合绑定隔离，主循环与子 agent 天然分离）。
 	parent := context.Background()
 	child := WithAttribution(parent, Attribution{"bundle_id": "child-v"})
 	if _, ok := AttributionFrom(parent); ok {

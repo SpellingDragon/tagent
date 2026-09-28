@@ -15,7 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// RuntimeResources (resident-readiness-plan 4.2/4.3, design D4): the owner
+// RuntimeResources: the owner
 // registry for shared persistent stores. One entry per (kind, canonical
 // path); every consumer acquires a lease; the LAST lease release closes the
 // store and frees the directory lock — the next New gets a genuinely reopened
@@ -388,7 +388,7 @@ func closeResource(res openedResource) (workerStopped bool, err error) {
 	if res.engine != nil {
 		// POISON primary trigger leg: a failed engine stop reports workerStopped
 		// == false, so the caller seals the path with a poisoned entry (never two
-		// writers on an unconfirmed stop). NOTE (resident-review-fixes 3.3): the
+		// writers on an unconfirmed stop). NOTE: the
 		// current InMemoryEngine.Close returns nil unconditionally, so this MAIN
 		// trigger leg is UNREACHABLE with today's engine — the seal is still
 		// reachable via unlock/reclaim failures (§6.4). The mechanism is kept as a

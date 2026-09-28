@@ -1,4 +1,4 @@
-// Package govx provides the governance face tools (5.1, design-report-closeout):
+// Package govx provides the governance face tools:
 // goal declaration/query and audit query tools that make the bounded-autonomy
 // gate usable from the conversation. Entry-only (wired in tagent.go alongside
 // refine); all tools are advisory/record-keeping — the gate itself stays in
@@ -17,8 +17,6 @@ import (
 	"github.com/SpellingDragon/tagent/agent/governance"
 )
 
-// ==================== goal_declare ====================
-
 type goalDeclareArgs struct {
 	Statement  string `json:"statement" jsonschema:"required,description=目标陈述（一句话，说明本次自治边界内要达成什么）"`
 	CreatedBy  string `json:"created_by,omitempty" jsonschema:"description=声明者（user/agent，默认 agent）,enum=user,enum=agent"`
@@ -30,8 +28,6 @@ type goalDeclareResult struct {
 	GoalID string `json:"goal_id,omitempty"`
 	Note   string `json:"note,omitempty"`
 }
-
-// ==================== goal_list ====================
 
 type goalListArgs struct {
 	ActiveOnly bool `json:"active_only,omitempty" jsonschema:"description=仅列活跃目标（默认全部）"`
@@ -50,8 +46,6 @@ type goalItem struct {
 	Expires   string `json:"expires,omitempty"`
 }
 
-// ==================== goal_resolve ====================
-
 type goalResolveArgs struct {
 	GoalID string `json:"goal_id" jsonschema:"required,description=目标 ID（g-N）"`
 	Status string `json:"status" jsonschema:"required,description=终态,enum=achieved,enum=abandoned"`
@@ -61,8 +55,6 @@ type goalResolveResult struct {
 	OK   bool   `json:"ok"`
 	Note string `json:"note,omitempty"`
 }
-
-// ==================== denial_query ====================
 
 type denialQueryArgs struct {
 	Limit int `json:"limit,omitempty" jsonschema:"description=返回条数上限（默认 20）"`
@@ -80,8 +72,6 @@ type denialItem struct {
 	Agent     string `json:"agent,omitempty"`
 	Timestamp string `json:"timestamp"`
 }
-
-// ==================== approval_list ====================
 
 type approvalListArgs struct{}
 

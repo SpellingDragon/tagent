@@ -6,30 +6,22 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// ProjectionSink receives event references as they are persisted by the
-// event-plugin pipeline. The agent's SessionProjection implements it.
+// ProjectionSink 接收事件在持久化当刻产生的引用；agent 的 SessionProjection 实现它。
+// 它是「写入即投影」的唯一同步点，使投影完成先于 BeforeModel 由构造保证。
 //
-// Write unification (unified-event-projection D1): the pipeline is the SINGLE
-// synchronous point where a stored event is also projected. Because the
-// framework flow waits for pipeline completion on tool-result events
-// (RequiresCompletion + completion notice), "projection complete at
-// BeforeModel" becomes guaranteed by construction rather than by timing.
+// 契约: docs/wiki/plugin/plugin-architecture.md#skip-set
 type ProjectionSink interface {
 	Append(ref memory.EventReference)
 }
 
-// projectionSinkKey is the context key carrying the current invocation's
-// projection sink. Each RunFlow binds its own projection (persistent loop and
-// sub-agent invocations are isolated by their call-chain contexts).
 type projectionSinkKey struct{}
 
-// WithProjectionSink returns a context carrying the projection sink for the
-// current invocation.
+// WithProjectionSink 绑定本次调用的投影接收端；调用链 ctx 天然隔离主循环与子 agent。
 func WithProjectionSink(ctx context.Context, sink ProjectionSink) context.Context {
 	return context.WithValue(ctx, projectionSinkKey{}, sink)
 }
 
-// ProjectionSinkFrom extracts the projection sink from ctx, if any.
+// ProjectionSinkFrom 取回本调用的投影接收端；无则返回 (nil, false)。
 func ProjectionSinkFrom(ctx context.Context) (ProjectionSink, bool) {
 	sink, ok := ctx.Value(projectionSinkKey{}).(ProjectionSink)
 	return sink, ok && sink != nil

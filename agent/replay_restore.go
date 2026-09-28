@@ -1,12 +1,5 @@
 package agent
 
-// replay_restore.go — spill 重放双写回调（event-sourced-projection D2）：
-// append-only（幂等去重由投影侧保证）；build_agent 接线处
-// SetReplayProjection(ReplayProjectionHandler(ta))。
-// 投影的完整重建走启动期 RebuildProjectionFromWAL（见 projection_rebuild.go）——
-// 本重放路径只做「同点补投影」，绝不在活投影上 Replace（Replace-over-live
-// 已随 dev 快照补丁移除，spec: spill 恢复 SHALL 保持 append-only）。
-
 import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -21,12 +14,11 @@ func (ta *TagentAgent) MarkMeditationEvent(key int64) {
 	ta.contextManager.contextCompressor.MarkMeditationKey(key)
 }
 
-// ReplayProjectionHandler 返回重放双写回调。两分支：普通事件 → Append（冥想
-// agent_output 先派生 Mark）；非投影记录 → 跳过。§5.5：排除判定收敛到 event 包
-// 单一谓词 IsNonProjectionRecord，与正常提交（persistBusEvent）、冷启动重建共用
-// ——旧版本处理器自带类型枚举，漏排 inbox_receipt（spill 窗口回补会把内部回执
-// 注进投影，破坏「投影=事实链可回放折叠」不变量）；历史快照/旧标记兼容分支
-// 已删（运行时只认当前格式，旧数据走 §3.7 受管重置）。
+// ReplayProjectionHandler 返回重放双写回调。两分支：普通事件 → Append（冥想的
+// agent_output 先派生 Mark）；非投影记录 → 跳过。排除判定的唯一来源是 event 包的
+// 谓词 IsNonProjectionRecord，与正常提交（persistBusEvent）、冷启动重建共用同一处——
+// 若在此自带类型枚举，就会漏排 inbox_receipt，把内部回执注进投影，破坏
+// 「投影＝事实链可回放折叠」这条不变量。本路径只做同点补投影，绝不在活投影上整表 Replace。
 func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent) {
 	return func(ev memory.FullEvent) {
 		if tagentevent.IsNonProjectionRecord(ev.EventType, ev.Metadata) {

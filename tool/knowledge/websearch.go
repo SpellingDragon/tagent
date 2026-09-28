@@ -1,15 +1,11 @@
-// Package knowledge provides tools for the Knowledge Agent (skill search + web search + MCP discovery).
+// Package knowledge 提供知识获取子 agent 及其子工具：技能检索与加载、MCP 工具发现、
+// web 搜索、历史知识查询。
 //
-// websearch.go implements the web_search tool backed by the Zhipu Web Search
-// API (https://open.bigmodel.cn/api/paas/v4/web_search). Compared with the
-// former multi-engine HTML-scraping implementation, the API is purpose-built
-// for LLM consumption: it returns structured results (title / link / content /
-// media / publish_date) plus intent recognition, and is far more robust than
-// scraping engine HTML that changes without notice.
+// web_search 走结构化搜索 API：返回标题/链接/摘要/媒体/发布日期，而抓取引擎 HTML 会
+// 因对端改版而无声失效，故 API 是主用且更可靠的后端。API key 取自环境变量（变量名由
+// 工具 api_key_env 属性配置）。降级与失败回报语义见文档。
 //
-// Authentication: the API key is read from an environment variable
-// (configurable via the tool's `api_key_env` property, default ZAI_API_KEY —
-// the same key used by the zhipu model provider).
+// 契约: docs/wiki/tool/tool-architecture.md#websearch-backend
 package knowledge
 
 import (
@@ -35,7 +31,8 @@ type SearchResult struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
-	Source      string `json:"source"` // Media / source name (e.g. "搜狐")
+	// Source Media / source name (e.g. "搜狐")
+	Source string `json:"source"`
 }
 
 // SearchResponse represents the search response.
@@ -228,9 +225,6 @@ func (t *webSearchTool) callZhipu(ctx context.Context, query, apiKey string) ([]
 	}
 	defer resp.Body.Close()
 
-	// 无需在此限制读取大小：框架的 OutputLimitTool 已对所有工具的超大返回
-	// 输出自动转储为文件；且 Zhipu API 响应受 count≤50 约束、httpClient 30s
-	// 超时也已约束读取量。
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Sprintf("read response: %v", err), err

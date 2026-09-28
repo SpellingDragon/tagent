@@ -1,10 +1,16 @@
 package memory
 
-import "testing"
+import (
+	"sort"
+	"testing"
 
-// TestMatchesKeyword locks the term-split ANY-match semantics
-// (2026-08-26 wechat-bot incident: "最近对话 任务 讨论" returned zero on a
-// literal whole-string match while "任务" alone had hits).
+	"github.com/SpellingDragon/tagent/event"
+	"github.com/stretchr/testify/require"
+)
+
+// TestMatchesKeyword 钉住 locks the term-split ANY-match semantics
+//
+// 契约: docs/wiki/memory/memory-architecture.md#typed-errors
 func TestMatchesKeyword(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -32,8 +38,7 @@ func TestMatchesKeyword(t *testing.T) {
 	}
 }
 
-// TestQueryEvents_MultiTermKeyword is the store-level regression: a
-// space-separated keyword list must hit events containing any term.
+// TestQueryEvents_MultiTermKeyword 钉住 空格分隔的多关键词按"任一词命中"召回，而不是要求整串匹配。
 func TestQueryEvents_MultiTermKeyword(t *testing.T) {
 	s := NewInMemoryStore()
 	if err := s.StoreEvent(144, FullEvent{
@@ -52,5 +57,66 @@ func TestQueryEvents_MultiTermKeyword(t *testing.T) {
 	}
 	if len(evts) != 1 {
 		t.Fatalf("space-separated keyword list must hit via ANY term, got %d events", len(evts))
+	}
+}
+
+// TestQueryEvents_MinEventKey 钉住 写入序键下界在两种存储上都按 EventKey 生效（严格大于），故晚到但键更小的记录不会漏切。
+func TestQueryEvents_MinEventKey(t *testing.T) {
+	const pid = 7
+	base := int64(1_700_000_000_000)
+	keys := []int64{
+		NewSnowflakeEventKey(pid, base),
+		NewSnowflakeEventKey(pid, base+5_000),
+		NewSnowflakeEventKey(pid, base+10_000),
+		NewSnowflakeEventKey(pid, base+15_000),
+	}
+
+	stores := map[string]func(t *testing.T) MemoryStore{
+		"InMemoryStore": func(t *testing.T) MemoryStore { return NewInMemoryStore() },
+		"FileSegmentStore": func(t *testing.T) MemoryStore {
+			s, err := NewFileSegmentStore(newMockKV(), nil, ":memory:", 100)
+			require.NoError(t, err)
+			return s
+		},
+	}
+
+	keySet := func(refs []EventReference) []int64 {
+		out := make([]int64, 0, len(refs))
+		for _, r := range refs {
+			out = append(out, r.EventKey)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+		return out
+	}
+
+	for name, mk := range stores {
+		t.Run(name, func(t *testing.T) {
+			store := mk(t)
+			for i, k := range keys {
+				ts := base + int64(i)*1_000
+				if i == len(keys)-1 {
+					ts = base - 60_000
+				}
+				err := store.StoreEvent(k, FullEvent{
+					EventType:    event.TypeExternalInput,
+					EventSummary: "evt",
+					Timestamp:    ts,
+					Content:      "content",
+				})
+				require.NoError(t, err)
+			}
+
+			refs, err := store.QueryEvents(QueryOptions{PartitionID: pid, MinEventKey: keys[1]})
+			require.NoError(t, err)
+			require.Equal(t, keys[2:], keySet(refs), "MinEventKey must cut on EventKey (strictly greater), keeping the old-Timestamp straggler")
+
+			refs, err = store.QueryEvents(QueryOptions{PartitionID: pid})
+			require.NoError(t, err)
+			require.Equal(t, keys, keySet(refs), "MinEventKey=0 must not filter")
+
+			refs, err = store.QueryEvents(QueryOptions{PartitionID: pid, StartTime: base})
+			require.NoError(t, err)
+			require.Equal(t, keys[:3], keySet(refs), "semantic-time filter drops the straggler (why tails must not use StartTime)")
+		})
 	}
 }
