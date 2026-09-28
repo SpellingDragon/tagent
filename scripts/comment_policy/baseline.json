@@ -1,0 +1,17 @@
+{
+  "_comment": "Per (file|rule) violation counts. A batch may only LOWER these numbers",
+  "_regenerate": "go run ./scripts/comment_policy -update-baseline",
+  "counts": {
+    "audit-marker": 295,
+    "doc-not-name-prefixed": 40,
+    "external-coord-ref": 61,
+    "free-standing": 910,
+    "mechanism-narrative": 4,
+    "missing-package-doc": 19,
+    "missing-symbol-doc": 25,
+    "missing-test-responsibility": 62,
+    "test-doc-line-too-long": 73,
+    "test-doc-not-one-sentence": 272,
+    "unindexed-path-ref": 2
+  }
+}
