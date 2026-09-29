@@ -241,9 +241,11 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	require.NoError(t, r.Close())
 }
 
-// TestRegistry_HotSync_FullProjectConfigShape hardening-review-batch2 6.4：完整项目配置形态（entry/agents/providers 与
+// TestRegistry_HotSync_FullProjectConfigShape 钉住 完整项目配置形态（entry/agents/providers 与
 // mcp_servers 共存）热同步——严格解码只作用于 mcp_servers 子树，合法根字段
 // 不再被判 unknown 而静默保留旧表。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 func TestRegistry_HotSync_FullProjectConfigShape(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "tagent.yaml")

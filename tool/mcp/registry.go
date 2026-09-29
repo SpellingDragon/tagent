@@ -257,7 +257,7 @@ type configFileServers struct {
 
 // parseServersFile reads the mcp_servers section from a YAML or JSON
 // config file (extension-detected, mirroring tagent.LoadConfig).
-// hardening-review-batch2 6.4：registry 绑定的是**完整项目配置文件**（entry/
+// registry 绑定的是**完整项目配置文件**（entry/
 // agents/providers/mcp_servers 共存）——严格解码必须只作用于 mcp_servers 子树，
 // 否则其余合法根字段被判 unknown，热同步静默失败并永远保留旧 registry。
 // 两段式：宽松解析整文档定位子树 → 对子树严格解码（strict 校验不放松）。

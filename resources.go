@@ -15,30 +15,19 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// RuntimeResources: the owner
-// registry for shared persistent stores. One entry per (kind, canonical
-// path); every consumer acquires a lease; the LAST lease release closes the
-// store and frees the directory lock — the next New gets a genuinely reopened
-// instance. Incompatible fingerprints on the same path are REJECTED (never a
-// second writer, never silent first-config-wins). A cross-process flock on a
-// lockfile inside the directory enforces the single-writer invariant.
-//
-// Isolated stores (empty path) bypass the registry entirely — each New owns
-// its own instance exclusively.
-
 var (
-	// ErrResourceConflict: same path, incompatible fingerprint (4.1 T3).
+	// ErrResourceConflict reports the same path already open with an incompatible fingerprint.
 	ErrResourceConflict = errors.New("resource conflict: path already open with an incompatible config")
-	// ErrStoreLocked: another process holds the single-writer lock (4.3).
+	// ErrStoreLocked reports another process holding the directory's single-writer lock.
 	ErrStoreLocked = errors.New("store is locked by another process (single-writer)")
-	// ErrResourcePoisoned (§6.4, design 决策7): the previous generation at this
-	// path could not be CONFIRMED stopped (or its lock could not be confirmed
-	// released), so the registry keeps a poisoned entry sealing the path. The
+	// ErrResourcePoisoned reports that a generation at this path did not confirm
+	// its stop (or did not confirm its lock release), so the registry keeps a
+	// poisoned entry sealing the path. The
 	// seal is an explicit entry — holding the store/engine/lockfile strong
 	// references and the failure result — never the accidental leak of a handle
 	// nobody can observe.
 	ErrResourcePoisoned = errors.New("resource poisoned: previous generation on this path did not confirm a safe stop; path sealed against new generations")
-	// ErrReclaimUnconfirmed (§6.5, design 決策7): construction released a
+	// ErrReclaimUnconfirmed reports that construction released a
 	// partially-built resource WITHOUT a confirmed reclaim. The open closure
 	// wraps it so acquire must NOT free the writer lock — an unconfirmed
 	// reclaim seals the path exactly like an unconfirmed worker stop.
@@ -47,8 +36,10 @@ var (
 
 // resourceKey identifies one registry entry.
 type resourceKey struct {
-	kind string // localfile | rv | mem
-	path string // canonical
+	// kind is the store kind: "localfile", "rv" or "mem".
+	kind string
+	// path is the canonicalized store directory.
+	path string
 }
 
 // openedResource is what an acquire open closure builds: the shared backend
@@ -68,16 +59,17 @@ type resourceEntry struct {
 	// engine is the entry-owned memory engine (nil = degraded / no engine). It
 	// shares the store's generation: built in the same open() and closed by the
 	// last lease release, so a reopen always gets a fresh engine bound to a
-	// fresh backend — never a stale engine bound to an already-closed one (F7/D5).
+	// fresh backend — never a stale engine bound to an already-closed one.
 	engine      memory.MemoryEngine
 	fingerprint string
 	leases      int
-	lockFile    *os.File // cross-process single-writer flock
-	// generation uniquely identifies this entry so that a stale release
-	// closure (from a previously-closed entry at the same path) cannot
-	// decrement the lease count of a new entry that reused the path (F6).
+	// lockFile holds this directory's cross-process single-writer flock.
+	lockFile *os.File
+	// generation uniquely identifies this entry, so a release closure left
+	// behind by an older entry at the same path cannot decrement the lease
+	// count of the newer entry that reused that path.
 	generation uint64
-	// poisoned (§6.4): set when the final release could NOT confirm the
+	// poisoned: set when the final release could NOT confirm the
 	// engine/backend stopped (or could not confirm the writer lock released).
 	// The entry stays in the map holding store/engine/lockFile strong
 	// references and closeErr — every later same-path acquire fails explicitly
@@ -87,15 +79,22 @@ type resourceEntry struct {
 	closeErr error
 }
 
-// RuntimeResources is the lease registry (concurrency-safe).
+// RuntimeResources is the owner registry for shared persistent stores
+// (concurrency-safe). One entry per (kind, canonical path); every consumer
+// acquires a lease, and the LAST lease release closes the store and frees the
+// directory lock, so the next New gets a genuinely reopened instance.
+// Incompatible fingerprints on the same path are rejected — never a second
+// writer, never silent first-config-wins. A cross-process flock on a lockfile
+// inside the directory enforces single-writer. Isolated stores (empty path)
+// bypass the registry entirely: each New owns its instance exclusively.
 type RuntimeResources struct {
 	mu      sync.Mutex
 	entries map[resourceKey]*resourceEntry
-	// opening (cold-eyes Warning 1): per-key open mutexes — same-path reopen
-	// races serialize here while unrelated keys open concurrently.
+	// opening holds the per-key open mutexes: same-path reopen races serialize
+	// here while unrelated keys open concurrently.
 	opening map[resourceKey]*sync.Mutex
 	// genNext is a monotonically increasing counter that uniquely identifies
-	// each entry so stale release closures cannot affect a new entry (F6).
+	// each entry, so a stale release closure cannot affect a newer entry.
 	genNext uint64
 }
 
@@ -121,7 +120,6 @@ func canonicalize(path string) string {
 	if err != nil {
 		return filepath.Clean(path)
 	}
-	// Canonicalize the closest existing ancestor so symlinked parents match.
 	parent := filepath.Dir(abs)
 	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
 		return filepath.Join(resolvedParent, filepath.Base(abs))
@@ -131,9 +129,9 @@ func canonicalize(path string) string {
 
 // openingLock returns the per-key opening mutex, creating it on first use under
 // r.mu. Both acquire and the last-lease release (releaseGen) coordinate on this
-// one mutex: a same-path reopen therefore waits for the previous generation to
+// one mutex: a same-path reopen therefore waits for the older generation to
 // finish closing before it opens, while unrelated paths keep their own mutex
-// and never block behind a slow flush (D5 line 115).
+// and never block behind a slow flush.
 func (r *RuntimeResources) openingLock(key resourceKey) *sync.Mutex {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -150,16 +148,10 @@ func (r *RuntimeResources) openingLock(key resourceKey) *sync.Mutex {
 // MUST be called when the consumer shuts down; the last release closes the
 // engine and the store and frees the directory lock. The release is idempotent:
 // repeated calls (e.g. from a second agent Close) cannot over-decrement any
-// entry's lease count (F6), and a stale release cannot affect a different
-// generation of the entry that reused the same path (F6).
+// entry's lease count, and a stale release cannot affect a different
+// generation of the entry that reused the same path.
 func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func() (openedResource, error)) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
 	key := resourceKey{kind: kind, path: canonicalize(rawPath)}
-	// cold-eyes Warning 1: registry bookkeeping holds r.mu; the potentially
-	// slow open (RebuildLiveCounts scan) runs OUTSIDE it — a per-key opening
-	// mutex prevents same-path concurrent reopen races without blocking
-	// unrelated New() calls behind a slow disk. The LAST-lease release takes
-	// the SAME per-key mutex (releaseGen), so a same-path reopen waits for the
-	// old generation to finish closing before opening a new one (D5 line 115).
 	l := r.openingLock(key)
 	l.Lock()
 	defer l.Unlock()
@@ -184,13 +176,6 @@ func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func(
 	}
 	r.mu.Unlock()
 
-	// cold-eyes R2 W-2: flock BEFORE open — the opened store starts writable
-	// background workers (scanners/compactor), so taking the single-writer
-	// lock first closes the cross-process second-writer window that existed
-	// while open() ran unlocked.
-	// The lock file lives INSIDE the store directory, which the store itself
-	// would normally create during open — create it first so the lock precedes
-	// the writable store (MkdirAll is idempotent and cross-process safe).
 	if mkErr := os.MkdirAll(key.path, 0o755); mkErr != nil {
 		return nil, nil, nil, fmt.Errorf("create store dir %s: %w", key.path, mkErr)
 	}
@@ -201,12 +186,6 @@ func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func(
 	res, err := open()
 	if err != nil {
 		if errors.Is(err, ErrReclaimUnconfirmed) {
-			// §6.5：无法确认回收不得开放 writer — HOLD the flock and seal the
-			// path with a poisoned entry (no store/engine exists, only the lock
-			// and the failure), so no new generation can open alongside a
-			// possibly-half-live backend. Uniform error shape (review N-1): the
-			// sealed state is detectable via ErrResourcePoisoned while the
-			// original failure stays matched by errors.Is through the join.
 			r.mu.Lock()
 			r.genNext++
 			poisonGen := r.genNext
@@ -216,7 +195,6 @@ func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func(
 				fmt.Errorf("%w: %s %s sealed after unconfirmed reclaim", ErrResourcePoisoned, kind, key.path))
 		}
 		if uerr := unlockDirLock(lockFile); uerr != nil {
-			// Even the lock release is unconfirmed here — same discipline.
 			r.mu.Lock()
 			r.genNext++
 			uGen := r.genNext
@@ -227,22 +205,13 @@ func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func(
 		return nil, nil, nil, err
 	}
 	r.mu.Lock()
-	// Re-check under the registry lock: a racing acquirer (same key, same
-	// fingerprint) may have registered first while we were opening.
 	if e2, ok2 := r.entries[key]; ok2 && e2 != nil {
 		r.mu.Unlock()
-		// Discard the freshly-opened racing resource. Its writer lock is ours to
-		// release (we never published) — but only when the discard's own stop is
-		// CONFIRMED (review N-1: same discipline as every other teardown).
 		workerStopped, cerr := closeResource(res)
 		if cerr != nil {
 			log.Warnf("[tagent] discarding racing resource: %v", cerr)
 		}
 		if !workerStopped && lockFile != nil {
-			// Defensive leg (unreachable while acquires serialize on the per-key
-			// opening mutex): an unconfirmed discard must NOT free the lock; the
-			// live entry owns the map slot, so hold the lock and report the seal
-			// to this caller instead of overwriting anything.
 			return nil, nil, nil, fmt.Errorf("%w: %s %s: racing open could not confirm its discard stopped; its writer lock is held", ErrResourcePoisoned, kind, key.path)
 		}
 		_ = unlockDirLock(lockFile)
@@ -273,9 +242,9 @@ func (r *RuntimeResources) acquire(kind, rawPath, fingerprint string, open func(
 
 // onceRelease wraps fn so that repeated calls are idempotent — fn runs at most
 // once per acquired lease, and EVERY later call returns the first call's cached
-// result. This prevents double-release from a second agent Close from
-// over-decrementing the lease count (F6) and surfaces the first close error to
-// every caller rather than swallowing it (D5: a close error must reach Close).
+// result. A double release from a second agent Close therefore cannot
+// over-decrement the lease count, and the first close error reaches every
+// caller instead of being swallowed — a close error must surface to Close.
 func onceRelease(fn func() error) func() error {
 	var once sync.Once
 	var err error
@@ -286,19 +255,12 @@ func onceRelease(fn func() error) func() error {
 }
 
 // releaseGen drops one lease on the entry at (kind, path) only if its
-// generation matches gen. This prevents stale release closures (F6): a release
-// from a previously-closed entry cannot decrement a new entry that reused the
-// same path. When the last matching lease is released, the store is closed and
-// the registry entry removed, enabling a genuine reopen by the next New (4.1 T2).
+// generation matches gen. A release closure left behind by an older entry
+// therefore cannot decrement the count of the entry that reused the path.
+// When the last matching lease is released, the store is closed and the
+// registry entry removed, enabling a genuine reopen by the next New.
 func (r *RuntimeResources) releaseGen(kind, rawPath string, gen uint64) error {
 	key := resourceKey{kind: kind, path: canonicalize(rawPath)}
-	// Serialize with a same-path acquire on the shared per-key opening mutex.
-	// The whole detach→close→flock-unlock runs inside it, so a concurrent
-	// reopen cannot observe "entry gone but flock still held" and mis-report
-	// ErrStoreLocked — it WAITS for this generation to finish closing, then
-	// opens cleanly (D5 line 115). Lock order matches acquire (opening → r.mu);
-	// r.mu is still never held across the close, and unrelated paths use their
-	// own mutex and are not blocked behind this flush.
 	opening := r.openingLock(key)
 	opening.Lock()
 	defer opening.Unlock()
@@ -307,41 +269,28 @@ func (r *RuntimeResources) releaseGen(kind, rawPath string, gen uint64) error {
 	e, ok := r.entries[key]
 	if !ok || e == nil || e.generation != gen {
 		r.mu.Unlock()
-		return nil // stale release: entry gone or a different generation now owns the path
+		return nil
 	}
 	e.leases--
 	if e.leases > 0 {
 		r.mu.Unlock()
 		return nil
 	}
-	// Detach the entry under r.mu, then run the potentially slow close (engine
-	// drain + fsync flush) OUTSIDE r.mu — a sibling New() on a DIFFERENT path
-	// never queues behind it; a same-path New() waits on `opening` above (D5).
 	res := openedResource{store: e.store, engine: e.engine}
 	lockFile := e.lockFile
 	fingerprint := e.fingerprint
 	delete(r.entries, key)
 	r.mu.Unlock()
-	workerStopped, cerr := closeResource(res) // producers → engine → backend flush (D5 close order)
+	workerStopped, cerr := closeResource(res)
 	if workerStopped {
-		// Stop is CONFIRMED. A failing final flush still returns its error —
-		// never claim durable success (design 決策7) — but the path reopens.
 		if lockFile != nil {
 			if uerr := unlockDirLock(lockFile); uerr != nil {
-				// Lock release unconfirmed ⇒ the path cannot be safely reopened
-				// either: seal it with the same poisoned discipline (§6.4).
 				r.poison(key, res, lockFile, fingerprint, gen, fmt.Errorf("release writer lock: %w", uerr))
 				return errors.Join(cerr, fmt.Errorf("release writer lock: %w", uerr))
 			}
 		}
 		return cerr
 	}
-	// Could not confirm the engine worker stopped: a stale worker might still
-	// write the KV. §6.4/D5: KEEP an explicit poisoned entry — strong
-	// references to store/engine/lockfile (flock fd stays live AND observable
-	// to the registry, never a silently unreachable leak) plus the failure
-	// result — so every same-path acquire fails explicitly while unrelated
-	// paths keep working. A new generation must never open alongside it.
 	r.poison(key, res, lockFile, fingerprint, gen, cerr)
 	if cerr == nil {
 		cerr = errors.New("engine worker stop unconfirmed")
@@ -349,8 +298,8 @@ func (r *RuntimeResources) releaseGen(kind, rawPath string, gen uint64) error {
 	return cerr
 }
 
-// poison re-registers a failed final release as a sealed poisoned entry
-// (§6.4). It runs on the per-key opening mutex, so no acquire can have
+// poison re-registers a failed final release as a sealed poisoned entry.
+// It runs on the per-key opening mutex, so no acquire can have
 // published a new generation between the detach and this re-insert.
 func (r *RuntimeResources) poison(key resourceKey, res openedResource, lockFile *os.File, fingerprint string, gen uint64, cause error) {
 	r.mu.Lock()
@@ -381,19 +330,18 @@ func (r *RuntimeResources) poison(key resourceKey, res openedResource, lockFile 
 // are idempotent (closeOnce in engine and store), so a discard of a freshly
 // opened racing resource and a last-lease release share one path without
 // double-closing.
+//
+// The engine's stop reports failure on its own account: an indexing drain or a
+// vector flush that does not finish returns an error, so this leg is live with the
+// current engine. A path sealed after such an unconfirmed stop has no un-seal exit;
+// it stays refused for the whole life of the process, which is the per-path
+// fail-closed half of never running a second writer.
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func closeResource(res openedResource) (workerStopped bool, err error) {
 	if ps, ok := res.store.(interface{ StopProducers() }); ok {
 		ps.StopProducers()
 	}
 	if res.engine != nil {
-		// POISON primary trigger leg: a failed engine stop reports workerStopped
-		// == false, so the caller seals the path with a poisoned entry (never two
-		// writers on an unconfirmed stop). NOTE: the
-		// current InMemoryEngine.Close returns nil unconditionally, so this MAIN
-		// trigger leg is UNREACHABLE with today's engine — the seal is still
-		// reachable via unlock/reclaim failures (§6.4). The mechanism is kept as a
-		// FORWARD CONTRACT for a future engine whose Close can fail; no un-seal
-		// (de-poison) exit is built — restart recovery is acceptable when it fires.
 		if e := res.engine.Close(); e != nil {
 			return false, fmt.Errorf("close memory engine: %w", e)
 		}
@@ -454,8 +402,7 @@ func flockExclusive(f *os.File) error {
 // canonical string. Fields NOT here are per-agent view config (e.g.
 // read_namespaces) or accepted-and-ignored axes with ZERO behavioral difference
 // (localfile fsync) — the latter MUST NOT join the fingerprint, or two configs
-// that behave identically would be rejected as a false conflict (resident-review-
-// fixes 3.1; runtime-resource-ownership「零行为差异轴不制造假冲突」).
+// that behave identically would be rejected as a false conflict.
 func fingerprintMemory(mc MemoryConfig) string {
 	lifecycle := "default"
 	if mc.Lifecycle != nil {

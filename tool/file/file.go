@@ -49,11 +49,11 @@ var (
 	toolSetMu    sync.Mutex
 )
 
-// registerOnce RegisterTools registers all built-in file operation tools as plain tools.
-// Should be called once during tagent's built-in tool registration.
-// Uses sync.Once for idempotency — safe to call multiple times.
 var registerOnce sync.Once
 
+// RegisterTools registers all built-in file operation tools as plain tools.
+// Should be called once during tagent's built-in tool registration.
+// Uses sync.Once for idempotency — safe to call multiple times.
 func RegisterTools() {
 	registerOnce.Do(func() {
 		for _, name := range fileToolNames {

@@ -11,7 +11,7 @@ import (
 )
 
 // candidateOverlay is the private construction domain of ONE candidate — the
-// shape §2.3/S-B established for reload and §2.4 requires rollback to share
+// shape S-B that reload established and rollback is required to share
 // instead of keeping its own rebuild branch:
 //
 //   - owners a candidate needs but the online table lacks are built into the

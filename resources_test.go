@@ -39,10 +39,10 @@ func storeFact(t *testing.T, store memory.MemoryStore, marker string) {
 	}))
 }
 
+// readBack 绕开登记处，直接开目录读回：持久化与否的真源是磁盘上的落盘事实，
+// 而不是登记处交还的那份句柄——判据必须站在被观察者之外。
 func readBack(t *testing.T, dir, marker string) bool {
 	t.Helper()
-	// BYPASS the registry: open the directory fresh — the ground truth of
-	// what is durable on disk.
 	kvStore, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
 	require.NoError(t, err)
 	defer kvStore.Close()
@@ -54,9 +54,10 @@ func readBack(t *testing.T, dir, marker string) bool {
 	return len(refs) > 0
 }
 
-// TestOwnership_SurvivorKeepsWorkingAfterSiblingClose（4.1 T1 / 4.2）：
-// 两个根共享同一存储，其一 Close 后另一根必须继续可用且写入可持久——
-// 「最后租约释放才关闭」，绝不是第一个 Close 就拆掉共享地基。
+// TestOwnership_SurvivorKeepsWorkingAfterSiblingClose 钉住 两个根共用一个存储时，关闭其一不得在另一根之下拆掉共享地基。
+// - 租约未清到零，后端保持打开：幸存者的写入成功且可持久，维护生产者照常运行；
+// - 关闭由最后一个租约触发，不是第一个。
+// 契约: docs/wiki/platform/resource-ownership.md#last-lease-close
 func TestOwnership_SurvivorKeepsWorkingAfterSiblingClose(t *testing.T) {
 	dir := t.TempDir()
 	ta1, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
@@ -65,26 +66,26 @@ func TestOwnership_SurvivorKeepsWorkingAfterSiblingClose(t *testing.T) {
 	require.NoError(t, err)
 
 	storeFact(t, ta1.MemStore(), "before-close")
-	require.NoError(t, ta1.Close()) // 根租约 1 释放
+	require.NoError(t, ta1.Close())
 
-	// 幸存者继续工作：写入必须成功且可持久。
 	storeFact(t, ta2.MemStore(), "after-close")
-	require.NoError(t, ta2.Close()) // 最后租约 → 才真正关闭
+	require.NoError(t, ta2.Close())
 
 	require.True(t, readBack(t, dir, "before-close"), "pre-close fact must survive")
 	require.True(t, readBack(t, dir, "after-close"),
 		"survivor's post-sibling-close write must be durable (shared store must NOT have been closed by the first Close)")
 }
 
-// TestOwnership_ReopenAfterLastClose（4.1 T2 / 4.2）：最后租约释放后，同进程
-// 同路径再次 New 必须得到真正重开的新实例（读回持久化数据、后台生命周期全新），
-// 而不是复用已关闭的旧实例。
+// TestOwnership_ReopenAfterLastClose 钉住 最后租约关闭后，同进程同路径再次装载得到真正重开的活实例。
+// - 读得到上一代持久化的事实，自己的写入也可持久——拿回一个已关的对象会在这里露馅；
+// - 后台生命周期是全新的，不是先前那个实例的延续。
+// 契约: docs/wiki/platform/resource-ownership.md#last-lease-close
 func TestOwnership_ReopenAfterLastClose(t *testing.T) {
 	dir := t.TempDir()
 	ta1, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
 	require.NoError(t, err)
 	storeFact(t, ta1.MemStore(), "gen-1")
-	require.NoError(t, ta1.Close()) // 最后（唯一）租约 → 关闭 + 移除登记
+	require.NoError(t, ta1.Close())
 
 	ta2, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
 	require.NoError(t, err)
@@ -96,9 +97,10 @@ func TestOwnership_ReopenAfterLastClose(t *testing.T) {
 		"post-reopen writes must be durable (the registry must hand out a LIVE reopened store, not the closed one)")
 }
 
-// TestOwnership_ConflictingConfigRejected（4.1 T3 / 4.2）：同物理路径的
-// 不兼容配置必须显式拒绝——绝不创建第二套 writer，也绝不静默沿用首配。
-// 用真实行为轴（engine）作冲突源——fsync 已裁决为零行为差异轴（下方负向锁）。
+// TestOwnership_ConflictingConfigRejected 钉住 同一物理路径上的不兼容配置必须具名拒绝，既不建第二写者，也不静默沿用先到的配置。
+// - 冲突源取真实行为轴（引擎），而非被忽略的轴；
+// - 被拒的一方不得留下任何半个实例或登记。
+// 契约: docs/wiki/platform/resource-ownership.md#fingerprint-conflict
 func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 	dir := t.TempDir()
 	ta1, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
@@ -107,22 +109,20 @@ func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 
 	conflict := ownershipCfg(dir)
 	a := conflict.Agents["tagent"]
-	a.Memory.Engine = &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 64}} // real behavioral axis
+	a.Memory.Engine = &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 64}}
 	conflict.Agents["tagent"] = a
 	_, err = New(conflict, WithModel(&stubModel{name: "m"}))
 	require.Error(t, err, "incompatible BEHAVIORAL config on the same path must be rejected")
 	require.Contains(t, err.Error(), "conflict")
 }
 
-// TestOwnership_FSyncAxisSharesNotConflicts（resident-review-fixes 3.1 / spec
-// 「零行为差异轴不制造假冲突」）：localfile 的 fsync 已被后端裁决为
-// accepted-and-ignored（两值行为恒同），因此 MUST NOT 制造共享假冲突。仅 fsync
-// 不同的两份配置共享同一活动实例——第二次装载被接受（而非拒绝），且两个
-// handle 写入互可见（同一 store，非重建）。fail-before：fsync 仍在指纹中时
-// 第二次 New 会因冲突报错。
+// TestOwnership_FSyncAxisSharesNotConflicts 钉住 行为恒同的轴不进指纹，两份这样的配置共享同一个活实例而非被判成假冲突。
+// - 判别是双面的：指纹逐字相等，且第二次装载被接受（不是拒绝）；
+// - 两个句柄的写入互见——同一份 store 在服务，没有重建。
+// 契约: docs/wiki/platform/resource-ownership.md#fingerprint-conflict
 func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
 	dir := t.TempDir()
-	base := ownershipCfg(dir) // fsync default (nil → backend default)
+	base := ownershipCfg(dir)
 	ta1, err := New(base, WithModel(&stubModel{name: "m"}))
 	require.NoError(t, err)
 	defer ta1.Close()
@@ -133,7 +133,6 @@ func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
 	a.Memory.FSync = &off
 	other.Agents["tagent"] = a
 
-	// Zero-behavior-difference axis must not join the fingerprint.
 	require.Equal(t,
 		fingerprintMemory(base.Agents["tagent"].Memory),
 		fingerprintMemory(other.Agents["tagent"].Memory),
@@ -143,7 +142,6 @@ func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
 	require.NoError(t, err, "fsync-only difference must share the instance, not reject (false conflict)")
 	defer ta2.Close()
 
-	// Same live instance: a write via ta2 reads back through ta1.
 	storeFact(t, ta2.MemStore(), "fsync-shared")
 	pid := memory.PartitionIDFromName("tagent")
 	refs, qerr := ta1.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "fsync-shared"})
@@ -151,8 +149,10 @@ func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
 	require.NotEmpty(t, refs, "the two handles share ONE live store (no rebuild on the fsync axis)")
 }
 
-// TestOwnership_MidBuildFailureReleasesLease（4.1 T4）：构建后续步骤失败时
-// 已取得的租约必须被逆序释放（不泄漏 goroutine/句柄/登记项）。
+// TestOwnership_MidBuildFailureReleasesLease 钉住 构建在取得资源之后的步骤失败时，已取得的那份必须交还，路径仍可干净重试。
+// - 泄漏的登记会让下一次装载撞上冲突或锁死，本例正是要拦这个形状；
+// - 失败的构建不得留下任何可观察的事实残留。
+// 契约: docs/wiki/platform/resource-ownership.md#reverse-release
 func TestOwnership_MidBuildFailureReleasesLease(t *testing.T) {
 	dir := t.TempDir()
 	cfg := ownershipCfg(dir)
@@ -162,17 +162,16 @@ func TestOwnership_MidBuildFailureReleasesLease(t *testing.T) {
 	_, err := New(cfg, WithModel(&stubModel{name: "m"}))
 	require.Error(t, err)
 
-	// 租约已释放 → 再次 New 正常（不因泄漏的登记而冲突/锁死）。
 	ta2, err := New(ownershipCfg(dir), WithModel(&stubModel{name: "m"}))
 	require.NoError(t, err)
 	require.NoError(t, ta2.Close())
 	require.True(t, readBack(t, dir, "never-written") == false)
 }
 
-// TestOwnership_ConcurrentAcquireSamePath（cold-eyes R2 M-2 回归）：双
-// goroutine 同路径并发 acquire——per-key opening mutex 必须串行化 open；
-// 全部 acquire 完成后（barrier）各持有者必须是同一 store 实例（禁止双开
-// 双实例），全部 release 后可正常重开。
+// TestOwnership_ConcurrentAcquireSamePath 钉住 同一路径的并发获取串行开一次，全部持有者得到同一个实例。
+// - 双开双实例会在这里暴露为不同指针；
+// - 全部交还之后，同一路径可再次干净取得。
+// 契约: docs/wiki/platform/resource-ownership.md#per-key-coordination
 func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -212,7 +211,6 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 	for i := 0; i < n; i++ {
 		releases[i]()
 	}
-	// Full release closes the entry — a subsequent acquire must reopen cleanly.
 	store2, _, release2, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (openedResource, error) {
 		return openedResource{store: memory.NewInMemoryStore()}, nil
 	})
@@ -223,9 +221,10 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 	_ = store2
 }
 
-// F6: a release closure must be idempotent — calling it twice from the same
-// consumer (e.g. a second agent.Close()) must NOT over-decrement the lease
-// count of the entry and must NOT affect a different generation at the same path.
+// TestLeaseRelease_IdempotentDoesNotHarmSurvivor 钉住 同一份租约被重复释放时只生效一次，别人那一份不受伤害。
+// - 重复释放不得多减幸存者的计数：其 store 仍可写入、后端仍打开；
+// - 真到最后一份交还时才关闭。
+// 契约: docs/wiki/platform/resource-ownership.md#release-generation
 func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -238,18 +237,15 @@ func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
 		return openedResource{store: s}, err
 	}
-	// Two acquirers share the same entry (two leases).
 	storeA, _, releaseA, err := rr.acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 	storeB, _, releaseB, err := rr.acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 	require.Same(t, storeA, storeB, "same path must share one instance")
 
-	// A releases TWICE (simulates two agent.Close() calls): must be idempotent.
 	releaseA()
-	releaseA() // second call: must NOT decrement B's lease
+	releaseA()
 
-	// B's store must still be writable (entry is not closed yet).
 	pid := memory.PartitionIDFromName("test")
 	key := memory.NewSnowflakeEventKey(pid, 0)
 	require.NoError(t, storeB.StoreEvent(key, memory.FullEvent{
@@ -257,12 +253,12 @@ func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 		Content: "after-A-double-close", Timestamp: 1700000000000,
 	}), "F6: survivor store must remain writable after sibling double-Close")
 
-	// Now B releases: entry should close cleanly (lease count reaches zero).
 	releaseB()
 }
 
-// F6: a stale release closure must NOT decrement a NEW generation of an entry
-// that reused the same path.
+// TestLeaseRelease_StaleDoesNotAffectNewGeneration 钉住 上一代留下的释放闭包改不动已接手同一路径的新一代。
+// - 新一代的 store 必须仍可写入——被陈旧闭包关掉会在这里露馅。
+// 契约: docs/wiki/platform/resource-ownership.md#release-generation
 func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -275,19 +271,15 @@ func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
 		return openedResource{store: s}, err
 	}
-	// First entry: acquire and release (entry is closed, generation is gone).
 	_, _, staleRelease, err := rr.acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
-	staleRelease() // release → entry closed
+	staleRelease()
 
-	// New entry at same path: acquire fresh (new generation).
 	newStore, _, newRelease, err := rr.acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 
-	// Stale release from the old generation must NOT affect the new entry.
-	staleRelease() // already released once; second call is a no-op via Once
+	staleRelease()
 
-	// newStore must still be usable (not closed by the stale release).
 	pid := memory.PartitionIDFromName("stale")
 	key := memory.NewSnowflakeEventKey(pid, 0)
 	require.NoError(t, newStore.StoreEvent(key, memory.FullEvent{
@@ -298,12 +290,12 @@ func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 	newRelease()
 }
 
-// TestEngineOwnership_SharedReopenGetsFreshEngine 锁定 F7/D5 核心不变量：共享
-// engine 随 registry entry 同代拥有——同路径消费者共用同一活引擎实例；单个消费者
-// 释放绝不拆掉存活者所用的共享引擎；最后释放关闭引擎（回收后台 worker，此即
-// namedEngines 造成的泄漏）；reopen（新代）必须拿到绑定新 backend 的全新引擎，
-// 绝不复用陈旧的已关引擎。用 type:memory + mock 引擎（无 KV 重建）使 Ready()
-// 只反映关闭态，关闭判定确定化。
+// TestEngineOwnership_SharedReopenGetsFreshEngine 钉住 引擎与其后端同代拥有：一代之内共用同一个活引擎，重开必须拿到全新引擎。
+// - 单个借用者交还拆不掉共享引擎，幸存者的读写照常经过它；
+// - 最后一次交还把引擎一起关闭，连带回收其后台工作协程；
+// - 新一代拿到绑定新后端的全新引擎，绝不复用绑在已关后端上的那个；
+// - 关闭与否经引擎的活/死单轴观察：选用不触发 KV 重建的后端，那个轴才只反映关闭态。
+// 契约: docs/wiki/platform/resource-ownership.md#engine-generation
 func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -322,13 +314,10 @@ func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 	require.NotNil(t, eng1, "engine-configured shared path must have an entry-owned engine")
 	require.True(t, eng1.Ready(), "freshly built engine must be live")
 
-	// Second consumer on the same path borrows the SAME live engine instance.
 	_, eng2, rel2, err := rr.acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.Same(t, eng1, eng2, "one generation shares exactly one engine instance")
 
-	// A single consumer releasing must NOT close the shared engine: the survivor
-	// store keeps working through it.
 	rel1()
 	require.True(t, eng1.Ready(), "sibling release must not close the shared engine")
 	require.NoError(t, store1.StoreEvent(
@@ -336,11 +325,9 @@ func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 		memory.FullEvent{EventKey: memory.NewSnowflakeEventKey(1, 0), PartitionID: 1,
 			EventType: "external_input", Content: "survivor", Timestamp: 1700000000000}))
 
-	// The LAST release closes the engine (reclaims its background worker).
 	rel2()
 	require.False(t, eng1.Ready(), "F7: last lease release must close the shared engine")
 
-	// Reopen (new generation) must build a FRESH engine, never reuse the stale one.
 	_, eng3, rel3, err := rr.acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.NotNil(t, eng3)
@@ -349,11 +336,9 @@ func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 	rel3()
 }
 
-// --- D5 close-order + error-reachability test doubles (task 6.4) ---
-
 // seqStore wraps a memory.MemoryStore, records the teardown sequence, lets the
 // test force Close to fail, and exposes StopProducers so closeResource stops
-// the forgetting producers BEFORE the engine worker (D5 close order).
+// the forgetting producers BEFORE the engine worker.
 type seqStore struct {
 	memory.MemoryStore
 	seq *[]string
@@ -379,11 +364,11 @@ func (e *seqEngine) Close() error {
 	return e.err
 }
 
-// TestCloseOrder_ProducersEngineBackendAndErrorReach locks the D5 close order
-// (producers → engine → backend flush) and its error contract: a close error
-// must reach the release caller (never a silent "safe close"), an UNCONFIRMED
-// engine worker stop holds the writer lock so a reopen is refused (never two
-// writers), and a confirmed stop releases the lock for a genuine reopen.
+// TestCloseOrder_ProducersEngineBackendAndErrorReach 钉住 最终释放按依赖序拆除，且关闭错误必须回到释放的调用方。
+// - 引擎停止未确认时后端不得被 flush（陈旧工作者仍可能写），该路径随后被具名封住；
+// - 引擎已确认停止时，即便后端 flush 失败也照实返回错误并交还写权，重开得以成功。
+// 契约: docs/wiki/platform/resource-ownership.md#close-order
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
 	t.Run("engine error reaches release and holds lock", func(t *testing.T) {
 		dir := t.TempDir()
@@ -423,10 +408,9 @@ func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
 		require.ErrorIs(t, rerr, storeErr, "store close error must reach the release caller")
 		require.Equal(t, []string{"producers", "engine", "store"}, seq,
 			"D5 close order: producers → engine → backend flush")
-		// Confirmed engine stop → lock released → genuine reopen succeeds.
 		_, _, rel2, err2 := rr.acquire("localfile", dir, fp, openFn)
 		require.NoError(t, err2, "confirmed stop must release the writer lock for reopen")
-		_ = rel2() // same mock store still errors on Close — cleanup only, lock already proven free
+		_ = rel2()
 	})
 }
 
@@ -435,8 +419,10 @@ func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
 // reopen wrongly races ahead of (or deadlocks against) the in-progress close.
 type blockCloseStore struct {
 	memory.MemoryStore
-	entered chan struct{} // receives once when Close begins
-	unblock chan struct{} // Close returns after this is signalled
+	// entered receives exactly once when a Close begins.
+	entered chan struct{}
+	// unblock releases Close: the call returns only after it is signalled.
+	unblock chan struct{}
 }
 
 func (s *blockCloseStore) Close() error {
@@ -445,12 +431,10 @@ func (s *blockCloseStore) Close() error {
 	return nil
 }
 
-// TestReleaseCoordination_SamePathReopenWaitsForClose locks D5 line 115: a
-// same-path acquire and the final release share ONE per-key mutex, so a reopen
-// WAITS for the previous generation to finish closing (rather than mis-reading
-// the freed registry slot against a still-held flock and returning
-// ErrStoreLocked), while an unrelated path is never blocked behind the slow
-// flush (the registry global lock is not held across I/O).
+// TestReleaseCoordination_SamePathReopenWaitsForClose 钉住 同路径重开必须等上一代关完，不得撞上「登记已没了、写锁还在」的误报。
+// - 慢 flush 期间的无关路径照常完成——全局登记锁不跨 I/O 持有；
+// - 上一代关毕，重开成功拿到新实例，而不是具名报锁被占用。
+// 契约: docs/wiki/platform/resource-ownership.md#per-key-coordination
 func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()
@@ -465,12 +449,10 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Last-lease release runs a slow close (blocks inside store.Close, flock held).
 	relDone := make(chan error, 1)
 	go func() { relDone <- rel() }()
-	<-bs.entered // close is now in progress
+	<-bs.entered
 
-	// Same-path reopen must block on the per-key mutex — not return ErrStoreLocked.
 	type outcome struct {
 		store memory.MemoryStore
 		rel   func() error
@@ -484,8 +466,6 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 		reopen <- outcome{store: s, rel: r2, err: e}
 	}()
 
-	// An unrelated path must complete during the slow flush (proves the global
-	// registry lock is not held across I/O).
 	dfp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
 	otherDone := make(chan error, 1)
 	go func() {
@@ -504,15 +484,12 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 		t.Fatal("unrelated path blocked behind slow close — registry global lock held across I/O")
 	}
 
-	// The reopen must still be waiting (the old generation has not finished).
 	select {
 	case got := <-reopen:
 		t.Fatalf("reopen proceeded before close finished (err=%v) — per-key coordination missing", got.err)
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	// Let the close finish; the reopen must then SUCCEED (fresh instance), not
-	// ErrStoreLocked.
 	bs.unblock <- struct{}{}
 	require.NoError(t, <-relDone)
 
@@ -526,13 +503,11 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 	}
 }
 
-// TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly locks the D5
-// degraded path on a SHARED store: an embedding provider that fails to build
-// must leave the entry-owned engine nil (never a dangling engine cached), still
-// publish + close the backend as one generation, and let each borrowing agent
-// keep an INDEPENDENT capacity hook with keyword-only retrieval (8.10). A later
-// reopen (new generation) must get a fresh backend store AND, once the provider
-// works, a real live engine — proving the stale generation is fully isolated.
+// TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly 钉住 引擎构建失败只能降为仅容量，不得留下悬垂引擎对象。
+// - 条目的引擎为空，后端照常发布并干净关闭；
+// - 每个借用者仍得到各自独立的容量钩子，检索退化为关键词路径（不做向量索引）；
+// - 新一代重开同时拿到新后端与活引擎，以此证明陈旧一代被完全隔离。
+// 契约: docs/wiki/platform/resource-ownership.md#engine-generation
 func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -548,11 +523,8 @@ func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) 
 	require.NoError(t, err)
 	require.Nil(t, eng1, "failing embedding provider must degrade the entry engine to nil (no dangling engine)")
 
-	// The degraded shared store still gives each consumer an INDEPENDENT
-	// capacity hook and keeps keyword-only retrieval — the borrow bridge carries
-	// NO engine (capacity-only wrapper), so no vector indexing happens.
 	var hooked int
-	borrow1, berr := wireMemoryEngine(store1, eng1 /*nil*/, bad, func(int64, int, string) { hooked++ })
+	borrow1, berr := wireMemoryEngine(store1, eng1, bad, func(int64, int, string) { hooked++ })
 	require.NoError(t, berr)
 	if ep, ok := borrow1.(memory.MemoryEngineProvider); ok {
 		require.Nil(t, ep.MemoryEngine(), "degraded shared borrow must be capacity-only (nil engine)")
@@ -564,7 +536,6 @@ func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) 
 
 	require.NoError(t, rel1(), "a degraded entry (engine nil) must still close cleanly")
 
-	// Reopen (new generation, working provider) → fresh isolated store + live engine.
 	good := MemoryConfig{
 		Type: "memory", Path: dir,
 		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 8}},
@@ -580,14 +551,8 @@ func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) 
 	require.NoError(t, rel2())
 }
 
-// §6.5 — construction failure reclamation: every resource obtained during a
-// build is released in reverse order, AND a reclaim that cannot be CONFIRMED
-// must not leave the writer open (the path seals like an unconfirmed worker
-// stop), while a cleanly-released failed build stays freely retryable.
-
-// TestBuildFailure_CleanReclaimStaysRetryable: an open() failure whose
-// partially built resources were reclaimed successfully releases the writer
-// lock — the next acquire at the same path must be able to open fresh.
+// TestBuildFailure_CleanReclaimStaysRetryable 钉住 构建失败而回收已确认时，写权必须交还，同路径下一次获取能干净重开。
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func TestBuildFailure_CleanReclaimStaysRetryable(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -599,7 +564,6 @@ func TestBuildFailure_CleanReclaimStaysRetryable(t *testing.T) {
 	})
 	require.ErrorIs(t, err, buildErr)
 
-	// Lock freed → reopen succeeds.
 	_, _, rel, err2 := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
 		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
 	})
@@ -607,11 +571,10 @@ func TestBuildFailure_CleanReclaimStaysRetryable(t *testing.T) {
 	require.NoError(t, rel())
 }
 
-// TestBuildFailure_UnconfirmedReclaimSealsWriter: when the release of a
-// partially built resource itself fails (ErrReclaimUnconfirmed), the writer
-// lock is HELD and the path is sealed with a poisoned entry carrying the
-// cause — a new generation must never open alongside a possibly half-live
-// backend (design 决策7: 无法安全回收同样保持 poisoned).
+// TestBuildFailure_UnconfirmedReclaimSealsWriter 钉住 回收无法确认的构建失败必须保持写权并封住路径，绝不与半活后端并写。
+// - 原始失败原因仍要回到调用方，封路另用具名错误表达；
+// - 封住是显式条目在册，不止账面记录：探测同一路径撞上「已被占用」。
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func TestBuildFailure_UnconfirmedReclaimSealsWriter(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -638,23 +601,23 @@ func TestBuildFailure_UnconfirmedReclaimSealsWriter(t *testing.T) {
 	})
 	require.ErrorIs(t, err2, ErrResourcePoisoned)
 
-	// The writer lock stayed held — the seal is real, not bookkeeping only.
 	probe, perr := os.OpenFile(filepath.Join(canonicalize(dir), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	require.NoError(t, perr)
 	defer probe.Close()
 	require.Error(t, flockExclusive(probe), "an unconfirmed reclaim must keep holding the writer lock")
 }
 
-// TestWriterLock_ExclusiveAcrossHandles（4.3）：同目录的单 writer flock 互斥——
-// 第二个持有者（另一进程或另一 fd）非阻塞抢锁必须失败；释放后可重取。
-// 进程崩溃由 OS 自动释放 flock，不存在遗留锁永久锁死（delta spec「单 writer」）。
+// TestWriterLock_ExclusiveAcrossHandles 钉住 一个物理目录同时只允许一个写者，第二个持有者非阻塞抢锁必须失败。
+// - 交还后可重新取得；
+// - 进程崩溃由 OS 交还锁，不存在遗留标记把目录永久锁死。
+// 契约: docs/wiki/platform/resource-ownership.md#single-writer
 func TestWriterLock_ExclusiveAcrossHandles(t *testing.T) {
 	dir := t.TempDir()
 
 	f1, err := acquireDirLock(dir)
 	require.NoError(t, err)
 
-	_, err = acquireDirLock(dir) // second handle, same dir
+	_, err = acquireDirLock(dir)
 	require.True(t, errors.Is(err, ErrStoreLocked), "second writer must be rejected, got: %v", err)
 
 	require.NoError(t, unlockDirLock(f1))
@@ -664,13 +627,11 @@ func TestWriterLock_ExclusiveAcrossHandles(t *testing.T) {
 	require.NoError(t, unlockDirLock(f2))
 }
 
-// TestPoisoned_ExplicitEntrySealsPathAcrossGC — §6.4 (spec scenario「关闭失败
-// 后的垃圾回收」+ design 决策7): when the final release cannot confirm the
-// engine worker stopped, the registry keeps an EXPLICIT poisoned entry —
-// strong references to store/engine/lockfile plus the failure result — and
-// every same-path acquire fails with that recorded error, while unrelated
-// paths keep working. Holding the writer lock must never depend on an
-// unreachable fd that "GC happens not to reclaim".
+// TestPoisoned_ExplicitEntrySealsPathAcrossGC 钉住 未确认停止的路径由显式条目封住，强引用与失败原因都在册，主动 GC 削弱不了它。
+// - 同路径获取一律具名失败，并带上记录的那次失败；
+// - 封路优先于冲突记账：换另一份指纹报的仍是「被封住」；
+// - 无关路径不受影响，封的是一条路径而非整张登记簿。
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
 	dir := t.TempDir()
 	rr := NewRuntimeResources()
@@ -689,8 +650,6 @@ func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
 
 	require.ErrorIs(t, rel(), engErr, "the close failure must reach the releasing caller")
 
-	// The entry survives explicitly — poisoned, holding the ORIGINAL store
-	// and the live lockfile, with the failure recorded.
 	key := resourceKey{kind: "localfile", path: canonicalize(dir)}
 	rr.mu.Lock()
 	e := rr.entries[key]
@@ -701,7 +660,6 @@ func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
 	require.NotNil(t, e.lockFile, "entry keeps the lockfile reference")
 	require.ErrorIs(t, e.closeErr, engErr)
 
-	// GC must not weaken the seal in any way.
 	runtime.GC()
 	runtime.GC()
 
@@ -709,12 +667,9 @@ func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
 	require.ErrorIs(t, err2, ErrResourcePoisoned, "same-path acquire must fail EXPLICITLY (poisoned), not via a flock race or a resurrected generation")
 	require.ErrorContains(t, err2, engErr.Error(), "the sealing error carries the recorded failure to the caller")
 
-	// A different fingerprint on the same sealed path still reports poisoned
-	// (the seal outranks conflict bookkeeping).
 	_, _, _, err3 := rr.acquire("localfile", dir, "v1|other|fp", openFn)
 	require.ErrorIs(t, err3, ErrResourcePoisoned)
 
-	// Unrelated paths are unaffected.
 	other := t.TempDir()
 	fpOther := fingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
 	_, _, relOther, err4 := rr.acquire("localfile", other, fpOther, func() (openedResource, error) {
@@ -724,8 +679,6 @@ func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
 	require.NoError(t, err4, "poisoning one path must not seal the registry")
 	require.NoError(t, relOther())
 
-	// The flock is still held after GC — probe from a fresh handle (in-process
-	// flocks on distinct open file descriptions conflict, cf. TestWriterLock).
 	probe, perr := os.OpenFile(filepath.Join(canonicalize(dir), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	require.NoError(t, perr)
 	defer probe.Close()

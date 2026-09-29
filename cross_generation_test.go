@@ -19,22 +19,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// §3.4 production-entry cross-publication vertical acceptance. The hardest leg —
-// a SYNCHRONOUS in-flight delegation holding its G1 target across a G2 publish —
-// already lives in org_delegation_test.go (TestOrgDelegation_InFlightDelegation…).
-// This file closes the remaining clauses 3.4 names but no entry test yet proves:
-//   - a BACKGROUND (async-spawned) execution keeps its G1 target across the publish;
-//   - the retired generation FINALLY stops and its reference is reclaimed after the
-//     in-flight call lands (「旧执行最终停止／资源回收」);
-//   - an INPUT THAT QUEUED behind the parked turn executes on the NEW generation
-//     (「排队输入取执行时版本」), which two already-closed sequential turns cannot show;
-//   - when the model calls no tool, NEITHER the old nor the new target runs
-//     (「不调用工具时 B/C 都不执行」).
-//
-// Retry-across-publish and turn-boundary single-version acquisition are pinned at
-// the agent layer (agent/turn_binding_test.go) on the same pinned-executor path the
-// entry uses; they are not re-implemented here as redundant echo tests.
-
 // entryGeneration returns the entry cm's ACTIVE (non-retired) generation id, or -1.
 func entryGeneration(t *testing.T, entry *agent.TagentAgent) int64 {
 	t.Helper()
@@ -75,8 +59,6 @@ func TestOrgCrossPublish_BackgroundExecutionKeepsTargetAcrossPublish(t *testing.
 	yamlPath := filepath.Join(dir, "tagent.yaml")
 	tick := time.Now()
 
-	// async default (drop `async:false`) → the delegation is adopted by the task
-	// layer and runs as a background producer, exactly the path §3.4 must cover.
 	asyncB := strings.Replace(delegYAML("b"), "        async: false\n", "", 1)
 	require.NotContains(t, asyncB, "async:", "precondition: async left at default")
 	crossWrite(t, yamlPath, asyncB, &tick)
@@ -105,7 +87,6 @@ func TestOrgCrossPublish_BackgroundExecutionKeepsTargetAcrossPublish(t *testing.
 		return countServed(m.snapshot(), "SUB-B-PROMPT") == 1
 	})
 
-	// Publish the C-generation while the background producer holds the G1 target.
 	crossWrite(t, yamlPath, delegYAML("c"), &tick)
 	entry.CheckOrgReload()
 	require.Nil(t, entry.ContextManager().SubagentWrapper("b"), "precondition: b is unrouted in the new generation")
@@ -114,15 +95,11 @@ func TestOrgCrossPublish_BackgroundExecutionKeepsTargetAcrossPublish(t *testing.
 	require.Zero(t, countServed(mid, "SUB-C-PROMPT"), "a mid-call publication must not steal the in-flight background run")
 
 	close(bGate)
-	// B's answer must still surface to the requesting turn, from the target it began with.
 	waitFor(t, "the background run delivered B's answer back inline", func() bool {
 		return firstResultIndex(m.snapshot(), "served:SUB-B-PROMPT") >= 0
 	})
 	after := m.snapshot()
 	require.Equal(t, 1, countServed(after, "SUB-B-PROMPT"), "the background execution is served exactly once, by G1's target")
-	// C MAY run later (the publish itself raises a `[system-alert]` notice turn that
-	// delegates on the now-current face), but it must not have run WHILE the G1 call
-	// was in flight — so the only legal ordering is: B's answer first, then any C.
 	bReturned := firstResultIndex(after, "served:SUB-B-PROMPT")
 	cRan := firstServeIndex(after, "SUB-C-PROMPT")
 	require.True(t, cRan < 0 || cRan > bReturned,
@@ -165,7 +142,6 @@ func TestOrgCrossPublish_RetiredGenerationReclaimedAfterInFlight(t *testing.T) {
 	require.NoError(t, err)
 	waitFor(t, "B entered and parked mid-call", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") == 1 })
 
-	// Publish G2: the generation the in-flight turn rides becomes retired BUT held.
 	crossWrite(t, yamlPath, delegYAML("c"), &tick)
 	entry.CheckOrgReload()
 	g1row := func() *agent.GenerationRefs {
@@ -185,8 +161,6 @@ func TestOrgCrossPublish_RetiredGenerationReclaimedAfterInFlight(t *testing.T) {
 	close(bGate)
 	waitFor(t, "the in-flight turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
 
-	// After the call lands the reference releases; the retired generation is then
-	// reclaimed on its own accounting (row disappears from the reference view).
 	waitFor(t, "the retired G1 generation is reclaimed once nothing references it", func() bool {
 		return !hasGeneration(entry, g1)
 	})
@@ -221,20 +195,16 @@ func TestOrgCrossPublish_QueuedInputTakesNewGenerationAtExecution(t *testing.T) 
 	}()
 	t.Cleanup(func() { <-done })
 
-	// Turn 1 is now parked inside the B call (holding G1).
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
 	require.NoError(t, err)
 	waitFor(t, "turn 1 parked in B", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") == 1 })
 
-	// Queue a SECOND input while turn 1 is still in flight — it cannot execute yet.
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
 	require.NoError(t, err)
 
-	// Publish C while both the in-flight turn and the queued input are pending.
 	crossWrite(t, yamlPath, delegYAML("c"), &tick)
 	entry.CheckOrgReload()
 
-	// Release turn 1: it lands on B. The queued input then executes and must take C.
 	close(bGate)
 	waitFor(t, "the in-flight first turn was served by B", func() bool {
 		return firstResultIndex(m.snapshot(), "served:SUB-B-PROMPT") >= 0
@@ -331,24 +301,21 @@ func TestOrgCrossPublish_NoToolCallRunsNeitherTarget(t *testing.T) {
 
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("just talk"))
 	require.NoError(t, err)
-	// Precondition: the entry really was offered its delegation tool (else "never ran"
-	// would be vacuous) and really reached the model, but chose not to call it.
 	waitFor(t, "the entry turn ran", func() bool { return m.count("ENTRY-A-PROMPT") >= 1 })
 	require.Contains(t, m.offeredTools("ENTRY-A-PROMPT"), "b", "precondition: b is genuinely offered on the face")
 
-	// Neither the offered target (b) nor an unoffered one (c) may execute.
 	require.Zero(t, m.count("SUB-B-PROMPT"), "an offered-but-not-called target must not run")
 	require.Zero(t, m.count("SUB-C-PROMPT"), "a target not even offered must not run")
 }
 
-// ackSettleModel is the witness §3.4's hardest row needs and the shared mock
-// cannot provide: a detached run's result comes back as a USER-role
-// `[task settled] … 结果: …` notification (measured — not as a tool result, so
-// `delegServed.ToolResults` is blind to it). This model records, per ENTRY call,
-// which tools that call was offered and whether its request carried the settle
-// notification, so the row can be attributed by causality: the turn that holds
-// the background answer is the settle-driven turn, and the tool set offered to
-// IT is the generation that turn runs on.
+// ackSettleModel is the witness that the hardest cross-generation row needs and
+// the shared mock cannot provide: a detached run's result comes back as a
+// USER-role `[task settled] … 结果: …` notification (measured — not as a tool
+// result, so `delegServed.ToolResults` is blind to it). This model records, per
+// ENTRY call, which tools that call was offered and whether its request carried
+// the settle notification, so the row can be attributed by causality: the turn
+// that holds the background answer is the settle-driven turn, and the tool set
+// offered to IT is the generation that turn runs on.
 type ackSettleModel struct {
 	mu      sync.Mutex
 	calls   []ackEntryCall
@@ -358,7 +325,7 @@ type ackSettleModel struct {
 
 type ackEntryCall struct {
 	tools   []string
-	settled bool // its request contained the [task settled] notice carrying B's answer
+	settled bool
 }
 
 func (m *ackSettleModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
@@ -388,7 +355,7 @@ func (m *ackSettleModel) GenerateContent(_ context.Context, req *model.Request) 
 	g := m.gate
 	m.mu.Unlock()
 
-	if label == "SUB-B-PROMPT" && g != nil { // the producer parks: the parent must take the ack
+	if label == "SUB-B-PROMPT" && g != nil {
 		select {
 		case <-g:
 		case <-time.After(30 * time.Second):
@@ -461,7 +428,6 @@ func TestOrgCrossPublish_SettleTurnRunsOnTheNewGeneration(t *testing.T) {
 		return runs == 1
 	})
 
-	// THE ACK HALF: the parent turn ended, and it ended holding only the ack.
 	waitFor(t, "the parent turn closed on an ack", func() bool {
 		calls, _ := m.snapshot()
 		return len(calls) >= 2
@@ -472,13 +438,12 @@ func TestOrgCrossPublish_SettleTurnRunsOnTheNewGeneration(t *testing.T) {
 			"precondition: nothing may have settled yet — otherwise this is the inline shape the earlier anchors already pin")
 	}
 
-	// Publish the generation that un-routes b while the producer is still parked.
 	crossWrite(t, yamlPath, strings.ReplaceAll(delegYAMLSeq("c"), "        async: false\n", ""), &tick)
 	entry.CheckOrgReload()
 	require.Nil(t, entry.ContextManager().SubagentWrapper("b"),
 		"precondition: the published generation really stopped routing b")
 
-	close(bGate) // the producer stops only now: its settle raises the next entry turn
+	close(bGate)
 
 	var settleTurn *ackEntryCall
 	waitFor(t, "the settle re-entered as a fresh entry turn", func() bool {
@@ -501,18 +466,6 @@ func TestOrgCrossPublish_SettleTurnRunsOnTheNewGeneration(t *testing.T) {
 	require.Equal(t, 1, runs,
 		"the in-flight G1 run was neither re-run nor replaced by the publication")
 }
-
-// 轮一百零四（evidence §5.60）：§5.2 的差集。逐行核对「必测」九行后，只有两类在本
-// 变更此前零覆盖（映射表见 evidence）：
-//
-//	① **运行对象别名**——5.2 明令「不得只解释为 YAML legacy 键而漏运行对象别名」。
-//	   `org_config_alias_folding_test.go` 钉的是 `compress.summary_model` 这类**配置键**
-//	   别名；而 `kind:` 省略 ≡ `kind: agent` 这类**运行对象**别名只靠 ApplyDefaults
-//	   归一，此前无测。风险具体：可达性／退役／`remoteDeclarationOnly` 等判定同时接受
-//	   两种拼写，若日后有人「简化」成只认显式值，同一份配置的别名拼写就会走出不同拓扑
-//	   （§5.53 那个 remote-only 永拒缺陷正是这条判定错一次的产物）。
-//	② 热增 owner 的**记录源是否真接上了**——§5.59 修掉的次序缺陷需要一条持久守卫：
-//	   缺它时新 owner 在下一轮 numeric-only 之前完全读不到唯一记录。
 
 // plainTextPullModel answers every request with plain text: the tests below hold a call
 // open with a real LEASE, so nothing depends on model latency.
@@ -552,8 +505,8 @@ func aliasSpellingYAML(spelling string, keepMain int, withSub2 bool, keepSub2, m
 		sub2Def
 }
 
-// remoteSpellingYAML is a remote-only reference (legal with no local definition at all,
-// §5.44/§5.53) written with or without the explicit kind.
+// remoteSpellingYAML is a remote-only reference — legal with no local definition
+// at all — written with or without the explicit kind.
 func remoteSpellingYAML(spelling, endpoint string) string {
 	ref := "      - kind: agent\n        agent: knowledge\n        description: delegate-knowledge\n        async: false\n"
 	if spelling == "omitted" {
@@ -591,7 +544,6 @@ func TestRuntimeObjectAliasIsNotAStructuralChange(t *testing.T) {
 	sub1Before := residentCacheForTest(entry)["sub1"]
 	require.NotNil(t, sub1Before, "precondition: sub1 is a resident owner")
 
-	// Same orchestration, other spelling.
 	writeAliasConfig(t, yamlPath, aliasSpellingYAML("omitted", 2, false, 0, 0), &tick)
 	entry.CheckOrgReload()
 
@@ -627,7 +579,6 @@ func TestRemoteOnlyAliasSpellingStillPublishes(t *testing.T) {
 	require.NotNil(t, entry.ContextManager().SubagentWrapper("knowledge"),
 		"precondition: a remote-only ref with the kind omitted is still a legal declaration")
 
-	// Re-point the same name at another endpoint: structural, and it must publish.
 	writeAliasConfig(t, yamlPath, remoteSpellingYAML("explicit", svcB.srv.URL), &tick)
 	entry.CheckOrgReload()
 
@@ -654,23 +605,17 @@ func TestHotAddedOwnerPullsTheRecordAfterNumericOnly(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = entry.Close() }()
 
-	// Structural publish: sub2 joins through the hot path with its own numbers.
 	writeAliasConfig(t, yamlPath, aliasSpellingYAML("explicit", 2, true, 4, 6000), &tick)
 	entry.CheckOrgReload()
 	sub2 := residentCacheForTest(entry)["sub2"]
 	require.NotNil(t, sub2, "precondition: sub2 became a resident owner through the hot path")
 	require.Equal(t, 3000, sub2.OrgBudgetLine(), "6000×0.5 from the record it was built with")
 
-	// The §5.59 discriminator, asserted AT the structural publish: the owner this
-	// very publish installed must already be described by the receipt set and
-	// already wired to the committed record. (Before the ordering fix, applyHotAll
-	// ran before the candidate merge, so sub2 appeared in neither.)
 	recAtPublish := diagnosticsReceipts(t, entry.OrgDiagnostics())
 	require.Equalf(t, "applied", recAtPublish["sub2"].Outcome,
 		"§5.2/§5.59：结构发布当轮就必须描述新装上的消费源（实得 %+v）", recAtPublish["sub2"])
 	require.Equal(t, 6000, recAtPublish["sub2"].MaxTokens)
 
-	// Hold the new owner in flight across a purely numeric edit to IT.
 	held := sub2.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer held.Release()
 
@@ -687,17 +632,14 @@ func TestHotAddedOwnerPullsTheRecordAfterNumericOnly(t *testing.T) {
 	require.Equal(t, "applied", rec["sub2"].Outcome, "the receipt describes the installed consumer")
 	require.Equal(t, 8000, rec["sub2"].MaxTokens)
 
-	// Resolution is stable across the in-flight boundary, not only after release.
 	held.Release()
 	require.Equal(t, 4000, sub2.OrgBudgetLine())
 }
 
-// §5.2 交叉场景（配置形状）：删除最后一个工具、参数删除与结构变更同候选、以及
-// 候选后半段失败时已并入新增的回退。执行器层的并发/回收场景见
-// agent/org_cross_scenario_test.go。
-
-// TestCrossConfig_RemovingTheLastToolClearsTheDeclaration 删除最后一个工具：被清掉的
-// 委派绑定不得存活到下一代的模型请求里（这曾是旧 `RebuildExecutor` 零值合并的泄漏形态）。
+// TestCrossConfig_RemovingTheLastToolClearsTheDeclaration 钉住 删除最后一个工具必须清空委派声明，被清的绑定不得存活到下一代的模型请求里。
+// - 拓扑 delta 恰好发布一代；执行面只来自被发布的那一代，不回落进任何别的已发布快照（零值合并泄漏正是这一形状）；
+// - 被移除属主报 draining、参数不被静默重下发，却保留其常驻 owner 供旧代收尾。
+// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
 func TestCrossConfig_RemovingTheLastToolClearsTheDeclaration(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -717,13 +659,10 @@ func TestCrossConfig_RemovingTheLastToolClearsTheDeclaration(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	require.Equal(t, []string{"sub1"}, entryToolNames(entry), "baseline: exactly one delegation is offered")
-	// §4.3 migrated the tail assertion below: an unrouted owner is kept only while it
-	// is still needed, so the reference that makes it needed is taken here.
 	keepDraining := residentCacheForTest(entry)["sub1"].ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer keepDraining.Release()
 	genBefore := entry.OrgDiagnostics()["generation"]
 
-	// 移除唯一工具（entry 变成零工具组织）。
 	write(ownerYAML(t, nil, sub2MemDefault(t)))
 	entry.CheckOrgReload()
 
@@ -732,7 +671,6 @@ func TestCrossConfig_RemovingTheLastToolClearsTheDeclaration(t *testing.T) {
 	require.Equal(t, int64(1), entry.OrgDiagnostics()["generation"].(int64)-genBefore.(int64),
 		"the topology delta still publishes exactly one new generation")
 
-	// 唯一被路由的 agent 是 entry 本身；两位子 agent 应报 draining（不碰其参数）。
 	rec := entry.OrgDiagnostics()["agents"].([]OrgAgentApply)
 	outcomes := map[string]string{}
 	for _, r := range rec {
@@ -741,13 +679,13 @@ func TestCrossConfig_RemovingTheLastToolClearsTheDeclaration(t *testing.T) {
 	require.Equal(t, "applied", outcomes["main"])
 	require.Equal(t, "draining", outcomes["sub1"], "the removed owner is reported, not silently re-parameterized")
 
-	// 常驻 owner 保留（旧代收尾用），但已不在可路由集合。
 	require.NotNil(t, residentCacheForTest(entry)["sub1"], "the removed owner stays resident")
 }
 
-// TestCrossConfig_DeletedNumericFieldFallsBackWithinStructuralCandidate 把「参数删除
-// 回落解析默认」放在**同一个结构变更候选**里验：重建与回落必须一起生效——只验数值分
-// 支会漏掉「新壳按删除后的配置重建」这一半。
+// TestCrossConfig_DeletedNumericFieldFallsBackWithinStructuralCandidate 钉住 删除的数值字段在同一结构变更候选里回落解析默认。
+// - 重建与回落必须在一次候选里一起生效——只验数值分支会漏掉"新壳按删除后的配置重建"这一半；
+// - 未动的同属主保持其值：全期望应用逐 agent 生效，不是一刀切覆盖。
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
 func TestCrossConfig_DeletedNumericFieldFallsBackWithinStructuralCandidate(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -768,7 +706,6 @@ func TestCrossConfig_DeletedNumericFieldFallsBackWithinStructuralCandidate(t *te
 
 	require.Equal(t, 7, keepRecentOf(residentCacheForTest(entry)["sub1"]), "baseline configured value")
 
-	// 同一候选：sub1 的 keep_recent_tasks **删除** + entry 多一个工具（结构变更）。
 	write(hotYAML(t, 0, 7, true))
 	entry.CheckOrgReload()
 
@@ -779,9 +716,10 @@ func TestCrossConfig_DeletedNumericFieldFallsBackWithinStructuralCandidate(t *te
 		"the sibling whose field is untouched keeps its value (full-desired applies per agent, not blanket)")
 }
 
-// TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd 是「候选后半段失败」：同一轮里
-// 先成功并入一个新增 agent，随后另一个新增失败 → 已并入的身份必须解绑，且旧代原样
-// 服务；下一次合法新增仍要能用（不留半截 owner）。
+// TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd 钉住 候选后半段失败时，先前已并入的新增身份必须整体回退、旧代照常服务。
+// - 同一轮里一个新增已并入、另一个新增失败时，前者身份解绑、不留半截 owner；
+// - 下一次合法新增仍须能用。
+// 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 func TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -793,7 +731,6 @@ func TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd(t *testing.T) {
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
 	}
 
-	// 启动代：entry → sub1。
 	write(ownerYAML(t, []string{"sub1"}, sub2MemDefault(t)))
 	cfg, err := LoadConfig(yamlPath)
 	require.NoError(t, err)
@@ -802,9 +739,6 @@ func TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 	genAtStart := entry.OrgDiagnostics()["generation"]
 
-	// 候选：新增 okagent（可构造）+ badagent（构造必失败：system_prompt 指向不存在的文件）。
-	// 名字排序决定构建顺序：badagent 先失败时 okagent 尚未并入，测不到回退；因此用
-	// a-ok / z-bad 保证「先成功后失败」。
 	write(addTwoYAML(t, []string{"sub1"}, "a2okagent", "zzbadagent"))
 	entry.CheckOrgReload()
 
@@ -822,10 +756,8 @@ func TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd(t *testing.T) {
 		"a rolled-back identity must not be routable")
 	require.NotContains(t, table, "zzbadagent", "the failed add is obviously not resident")
 
-	// 旧代原样服务：sub1 仍是唯一的可路由目标。
 	require.Equal(t, []string{"sub1"}, entryToolNames(entry), "the retained generation keeps serving unchanged")
 
-	// 回退必须干净：随后单独新增 a2okagent 要能正常发布（若残留半截 owner 会撞车）。
 	write(addOneYAML(t, []string{"sub1"}, "a2okagent"))
 	entry.CheckOrgReload()
 	st = entry.OrgDiagnostics()
@@ -891,23 +823,11 @@ func badAgentDef(name string) string {
 	return "  " + name + ":\n    system_prompt:\n      inline: \"bad\"\n    memory:\n      type: localfile\n      path: \"/dev/null/" + name + "-store\"\n"
 }
 
-// 轮九十四（evidence §5.50）：§4.2 的**重估**——「A→B→C 中 B 重入 C」这个多级面
-// 究竟成不成立，用行为回答，不用读码回答（tasks 4.2 明写：禁止在重估前写新机制）。
-//
-// 重估问题的两面：
-//   ① 环存活期内 B 重入 C —— 有发起者分支：ctx 带 B 的在途租约，解析必须走
-//      **B 的该代面**（继承发起租约），既不能扫祖先工具表，也不能改用新代目标。
-//   ② B 环静默后 relaunch —— 无发起者分支：解析必须回退到 **B 常驻 owner 面**
-//      （实例常驻、未关），而不是 entry 面。
-// 另两态按 4.2 的验收子句一并钉：G2 删 C → 具名拒绝且不改链；G2 改 C → 无发起者
-// 重入必须打到**新代**的 C（这一态在 3.2 主干落地前是红的：未变父不推进 face，
-// 重入永远打在旧叶子上——见 §5.43/§5.46）。
-
 // chainDelegModel delegates to whichever offered tool names one of the agents in
 // `prefer` (priority order). The framework does not promise tool ordering, so a
 // mock that grabs tools[0] would assert an accident of slice order rather than the
-// orchestration (the lesson recorded in §6.20); naming the target makes each
-// level's delegation deterministic at every depth.
+// orchestration; naming the target makes each level's delegation deterministic at
+// every depth.
 type chainDelegModel struct {
 	mu      sync.Mutex
 	served  []delegServed
@@ -1019,7 +939,6 @@ func startReentryChain(t *testing.T, yamlPath string) (entry *agent.TagentAgent,
 
 	b = residentCacheForTest(entry)["b"]
 	require.NotNil(t, b, "b is a resident owner")
-	// b's OWN board holds the subagent task — the spawner-ownership contract (§7.2/D3).
 	var found *task.Task
 	for _, tk := range b.TaskManager().List() {
 		if tk.Spec.Kind == "subagent" {
@@ -1031,17 +950,11 @@ func startReentryChain(t *testing.T, yamlPath string) (entry *agent.TagentAgent,
 	return entry, b, found.ID, m
 }
 
-// TestWithinLoopInitiatorResolvesOnBsOwnFace pins ①: while a call on b
-// is alive, a re-entry it starts must resolve against b's DECLARED generation.
-//
-// The publish that removes c mid-flight is what makes this non-vacuous: without a
-// generation change both resolution branches answer the same way, so the test
-// would prove nothing about which face was read. With it, falling back to the
-// effective face (or to the entry's tool table, the pre-§4.2 failure) would
-// refuse, while the spec requires the legal G1 binding to survive
-// (resident-continuity「仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定」) —
-// and it survives only because §3.2's declaration holds keep the pinned
-// generation's child reachable.
+// TestWithinLoopInitiatorResolvesOnBsOwnFace 钉住 有在途发起调用时，它发起的重入按发起者声明的那一代解析。
+// - 途中发布停止路由 c 才使本测非空洞：无换代时两条解析分支同答，证不了读的是哪张面；
+// - 仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定，合法绑定能存活正因声明保持让被钉代的子仍可达；
+// - 退回 effective 面或入口工具表都会拒绝，规格要求 G1 绑定存活并在 b 的被钉面上服务重入。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestWithinLoopInitiatorResolvesOnBsOwnFace(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -1051,10 +964,9 @@ func TestWithinLoopInitiatorResolvesOnBsOwnFace(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	before := countServed(m.snapshot(), "SUB-C")
-	lease := b.ContextManager().AcquireLease(agent.LeaseSubCall) // b's live call is the initiator
+	lease := b.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer lease.Release()
 
-	// A newer generation stops routing c WHILE the initiating call is alive.
 	writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", true), tick)
 	entry.CheckOrgReload()
 	require.Nil(t, b.ContextManager().SubagentWrapper("c"),
@@ -1071,9 +983,9 @@ func TestWithinLoopInitiatorResolvesOnBsOwnFace(t *testing.T) {
 	})
 }
 
-// TestPostSilenceRelaunchUsesResidentOwnerFace pins ②: with b's loop
-// silent and NO initiating call, the re-entry must fall back to b's resident
-// owner face (the instance is resident and unclosed) — never to the entry's.
+// TestPostSilenceRelaunchUsesResidentOwnerFace 钉住 属主环路静默且无发起调用时，重入从该属主的常驻 owner 面解析。
+// - 实例常驻且未关闭，解析面是 b 自己的 owner 面，绝不从入口的面。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestPostSilenceRelaunchUsesResidentOwnerFace(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -1083,7 +995,7 @@ func TestPostSilenceRelaunchUsesResidentOwnerFace(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	before := countServed(m.snapshot(), "SUB-C")
-	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager()) // no lease: no initiator
+	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
 
 	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
 	require.NoError(t, err)
@@ -1093,10 +1005,10 @@ func TestPostSilenceRelaunchUsesResidentOwnerFace(t *testing.T) {
 	})
 }
 
-// TestGenerationThatRemovedTargetRefusesWithoutRerouting is the third
-// state: after a published generation stops routing c, a re-entry of the stored
-// task is refused by NAME with the version reason, and neither the removed target
-// nor a substitute runs.
+// TestGenerationThatRemovedTargetRefusesWithoutRerouting 钉住 新一代停止路由目标后，存量任务的重入被具名拒绝并附版本理由。
+// - 既不重跑被移除目标，也不静默改道替身；
+// - 拒绝作为答案返回（宿主看见哪个动作失败、理由是版本选择而非缺记录），不是传输错误。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestGenerationThatRemovedTargetRefusesWithoutRerouting(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -1123,10 +1035,10 @@ func TestGenerationThatRemovedTargetRefusesWithoutRerouting(t *testing.T) {
 		"§4.2：被拒重入不得把已移除目标再跑一次，也不得静默改道新目标")
 }
 
-// TestChangedTargetResolvesOnTheNewGeneration is the fourth state, and
-// the one that could not pass before §3.2's trunk: a generation that changed c
-// must be what a no-initiator re-entry reaches. b's own declaration is unchanged
-// here, so this is precisely the「未变父也随发布推进执行视图」leg at depth 2.
+// TestChangedTargetResolvesOnTheNewGeneration 钉住 改了目标的新一代是无发起者重入所达的那张面。
+// - b 自身声明未变，故这正是"未变父也随发布推进执行视图"在深度二上的落地；
+// - 仍被路由的目标须经新面重入，到达的是新 c。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -1150,14 +1062,14 @@ func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
 	})
 }
 
-// 轮九十九（evidence §5.55）：4.2 的最后一条腿——**WAL 重建入口的多级重入**。
+// 本测钉住 WAL 重建入口的多级重入。
 //
-// 轮九十四已证「生产 Spawn 入口」四态（§5.50），当时如实记：重启入口缺 org 级
+// 「生产 Spawn 入口」四态已有常驻测钉住，当时如实记：重启入口缺 org 级
 // harness。本测补的就是那一句：任务落在 **b 自己的 board** 上且**未终结**时进程
 // 结束（崩溃形状的 WAL：只有 task_spawned，没有终态 settle），随后由**独立进程**
 // 在同一批持久 store 上重启，再从 b 的重建 board 上重放 `relaunch_task`。
 //
-// 为什么必须是跨进程：一次 boot 只有真实进程启动才算证据（§8 xproc 纪律），
+// 为什么必须是跨进程：一次 boot 只有真实进程启动才算证据（常驻验收的 xproc 纪律），
 // 同进程内多轮 New/Close 翻动并不是生产路径。崩溃形状靠**不调用 Close 直接退出**
 // 得到——这正是「上次运行留下未终结任务」的物理形态，而不是我手搓一条记录。
 //
@@ -1191,8 +1103,8 @@ func walReentryYAML(root string, dropC bool) string {
 		"      - kind: tool\n        id: relaunch_task\n      - kind: tool\n        id: resume_task\n" + cDef
 }
 
-// walReentryModel delegates to a named target at every level (never tools[0], §6.20)
-// and can park c's FIRST call so the task is still unfinished when the process dies.
+// walReentryModel delegates to a named target at every level (never tools[0], whose order
+// the framework does not promise) and can park c's FIRST call so the task stays un-settled.
 type walReentryModel struct {
 	mu      sync.Mutex
 	served  []delegServed
@@ -1284,8 +1196,10 @@ func walReentryBoot(t *testing.T, yamlPath string, m *walReentryModel) *agent.Ta
 	return entry
 }
 
-// TestRelaunchAfterRestartResolvesOnTheCurrentFace is the parent: it hands
-// each boot to its own process and only orchestrates the durable state between them.
+// TestRelaunchAfterRestartResolvesOnTheCurrentFace 钉住 跨进程重启后，重入在当前面解析。
+// - 每段 boot 交给它自己的进程、只在其间编排持久状态——一次 boot 只有真实进程启动才算证据；
+// - 正负两腿各用独立持久根：负腿从崩溃状态本身重启，而非已被正腿结算过的 board。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 	if phase := os.Getenv(walReentryPhaseEnv); phase != "" {
 		walReentryChild(t, phase)
@@ -1306,14 +1220,10 @@ func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 		runBootChild(t, env, walReentryPhaseEnv+"=spawn", walReentryFilter)
 
 		if dropOnRestart {
-			// BOOT 2' — the operator removed c before the restart: the rebuilt task
-			// must be refused BY NAME, not resurrected through a snapshot of the old face.
 			require.NoError(t, os.WriteFile(yamlPath, []byte(walReentryYAML(dir, true)), 0o644))
 			runBootChild(t, env, walReentryPhaseEnv+"=restart_drop_c", walReentryFilter)
 			return
 		}
-		// BOOT 2 — restart over that WAL with c still routed: the rebuilt task must
-		// really re-run, resolving through b's rebuilt owner face at depth 2.
 		runBootChild(t, env, walReentryPhaseEnv+"=restart", walReentryFilter)
 	}
 	runScenario(false)
@@ -1363,8 +1273,6 @@ func walReentryChild(t *testing.T, phase string) {
 			"§4.2 WAL 重建入口：重启后 b 自己的 board 必须从事实链折回那个未终结的子 agent 任务（实得 board=%v）", len(b.TaskManager().List()))
 		before := countServed(m.snapshot(), "SUB-C")
 
-		// No initiating call exists after a restart: this is the 无发起者 branch,
-		// driven through the PRODUCTION relaunch tool against b's own controller.
 		ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
 		res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, tk.ID))
 		require.NoError(t, err)
@@ -1401,12 +1309,12 @@ func walReentryChild(t *testing.T, phase string) {
 	os.Exit(0)
 }
 
-// 轮一百（evidence §5.56）：3.3「有状态工具」的最后一腿——**org 级端到端锚**，
+// 「有状态工具」的最后一腿——**org 级端到端锚**，
 // 用真实 tmux 会话证明「已纳管任务不因工具换代失监视」。
 //
 // 为什么走重启而不是热更窗口：`quiet_timeout` 的下限被钉在稳定窗（60s，TUI 90s），
 // 也就是说热更之后再靠「静默→suspect」把任务推进裁决区，需要 60s 以上真实静默——
-// 那属既有负载敏感 tmux 族（§5.36/§5.40），钉成常驻锚只会变成偶发红灯。而重启入口
+// 那属既有负载敏感 tmux 族，钉成常驻锚只会变成偶发红灯。而重启入口
 // 有一个**确定**的同款裁决：`RestoreTask` 把 running 语义降级为 suspect，随后
 // `build_agent.go:761-787` 的 TaskID 桥先裁孤儿、再把「被当前 monitor 跟踪」的任务
 // 提升回 running——一个存活会话要被判「未跟踪」，等价于监视信号在某一代工具手里丢了。
@@ -1487,7 +1395,6 @@ func (m *sessionWatchModel) GenerateContent(_ context.Context, req *model.Reques
 	m.calls++
 	n := m.calls
 	offer := ""
-	// calls 1 and 3 each attempt a spawn under the SAME logical name
 	if n == 1 || n == 3 {
 		for _, t := range tools {
 			if t == "action" {
@@ -1502,15 +1409,6 @@ func (m *sessionWatchModel) GenerateContent(_ context.Context, req *model.Reques
 
 	ch := make(chan *model.Response, 1)
 	if offer != "" {
-		// `mode: resident` is what makes the session survive the restart at all:
-		// startup reaps prefix-matched LEFTOVER sessions (they would hold ptys
-		// forever), and only sessions recorded in the persisted resident metadata
-		// are re-attached afterwards (action_tool.go:201-219, D1). Using the
-		// default oneshot mode would have the second boot correctly kill it.
-		// `name` is what makes it addressable ACROSS the restart: a named session
-		// becomes `n-<logical>` and is spared by the startup orphan reap (only
-		// generated `prefix-<ts>` names are reaped), and the tool's own schema
-		// recommends exactly this pairing for mode=resident services.
 		args, err := json.Marshal(map[string]any{
 			"command": sessionWatchCommand, "ttl": 600, "mode": "resident", "name": sessionWatchSvcName,
 		})
@@ -1577,8 +1475,6 @@ func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
 	// the session name this scenario owns is fixed, so the phase log is traceable
 	runBootChild(t, env, sessionWatchPhaseEnv+"=spawn", sessionWatchFilter)
 
-	// BOOT 2 — a fresh process with a freshly assembled ActionTool must still watch
-	// that live session: adjudication first, then promotion of the tracked task.
 	runBootChild(t, env, sessionWatchPhaseEnv+"=restart", sessionWatchFilter)
 
 	// BOOT 3 — the HOT-RELOAD window, in its OWN durable root: everything happens
@@ -1636,7 +1532,7 @@ func sessionWatchChild(t *testing.T, phase string) {
 
 	case "hotreload":
 		require.NoError(t, os.WriteFile(yamlPath, []byte(sessionWatchYAML(root)), 0o644))
-		killOwnSession(t, "n-"+sessionWatchSvcName) // idempotent preflight, own name only
+		killOwnSession(t, "n-"+sessionWatchSvcName)
 		entry, m := sessionWatchBoot(t, yamlPath)
 		tick := time.Now().Add(2 * time.Second)
 		out, err := entry.StartLoop("u", "sessionWatch-hot")
@@ -1671,9 +1567,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 		require.NoError(t, err)
 		waitFor(t, "the second attempt was answered", func() bool { return m.count() > before+1 })
 
-		// Non-vacuity: the post-publish attempt must really have REACHED the tool
-		// (two spawns attempted), or the count check below would be satisfiable by
-		// a turn that never delegated at all.
 		require.Contains(t, m.offeredCalls(), 3,
 			"precondition: the current generation must really have been asked to spawn again")
 
@@ -1699,13 +1592,7 @@ func sessionWatchChild(t *testing.T, phase string) {
 		require.Truef(t, tmuxSessionAlive(session),
 			"precondition: session %s must still be alive for the monitoring claim to mean anything", session)
 
-		// The generation that just booted assembled a NEW ActionTool and reattached
-		// the live session BEFORE adjudication; the TaskID bridge therefore promotes
-		// the restored suspect back to running. A monitoring signal left on the
-		// superseded tool would instead report "untracked" and retire it as a
-		// reincarnation orphan (or at best leave it suspect forever).
-		//
-		// Bounded wait (2026-09-27 audit): under a full `go test ./...` run the
+		// Bounded wait: under a full `go test ./...` run the
 		// machine hosts every package binary at once and the boot's first tmux
 		// verification can miss the window; List() re-runs reconcileDetached, so
 		// re-fetching exercises the designed re-adjudication path rather than mere
@@ -1765,17 +1652,10 @@ func allLevelsChangedYAML() string {
 	).Replace(nestedYAML())
 }
 
-// TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf pins defect D-b of evidence
-// §5.44: when EVERY level changes, the transitional-carrier loop walked the changed set
-// in MAP order, so a parent's shell could be assembled before its child's — and the DFS
-// cache-hit the stale resident child, baking the old target into the new face. The outcome
-// therefore flipped run to run (measured: the new leaf was reached in 1 of 6 identical
-// publishes). Deterministic delivery is what a structural publish owes the caller: once a
-// generation is in force, the next turn must run that generation's declarations at EVERY
-// depth, not only where the build order happened to cooperate.
-//
-// Unlike the nested-hop contract above (which also needs D-a, the trunk), this case is
-// reachable today: the entry's own face is rebuilt on every publish.
+// TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf 钉住 每一层都改变时，结构发布必须在每个深度确定性地交付新声明。
+// - 非法形状是按 map 序走变更集，父壳早于子壳装配、DFS 命中旧常驻子而把旧目标烙进新面，使结果逐次翻覆；
+// - 一代生效后的下一回合必须在每个深度都跑它自己的新声明，面只来自被发布的那一代、不回落进旧快照。
+// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
 func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -1809,7 +1689,6 @@ func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
 	require.NoError(t, err)
 	waitFor(t, "the chain ran on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
 
-	// Every level changes: entry, the middle agent, and the leaf.
 	write(allLevelsChangedYAML())
 	entry.CheckOrgReload()
 
@@ -1821,23 +1700,11 @@ func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
 	})
 }
 
-// TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget is 3.2's acceptance row
-// 「A→B→C 各见本代自身声明」for the facet no existing anchor reaches: the NESTED hop
-// across a publication.
-//
-// Coverage so far: NestedLevelsServeFromTheirOwnBindings proves each LEVEL sees its own
-// declarations in steady state; InFlightDelegationKeepsItsOwnGenerationTarget proves a
-// pinned initiator keeps its generation's target at ONE hop. Neither exercises B — pinned
-// to G1 while parked — delegating DOWN to C after G2 replaced C.
-//
-// The pinned-face rule (resident-continuity「重试也不改路由」, subagent-turn-execution
-// 「仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定」, D5) says that hop must run
-// on the C that B's G1 face declared. The third turn must then run the new C — which is
-// what makes this anchor self-discriminating: if the publish never landed, the first
-// assertion would pass for the wrong reason.
+// TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget 钉住 跨发布时，停在途的 B 向下委派到 C 仍跑它被钉那一代声明的 C。
+// - 补齐别的锚到不了的这一面：稳定态各层见自身声明、单跳发起者持自身代都已证，唯独 B 停在途中、G2 换掉 C 后 B 向下到 C 没证；
+// - 第三条回合必须跑新 C，使本锚自判别——发布从未落地时第一条断言会因错误理由通过。
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T) {
-	// Round 90: UN-SKIPPED as the trunk DoD (user-approved holding expansion). Red was
-	// re-measured before implementation; it must be GREEN when the trunk lands.
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
 	tick := time.Now()
@@ -1866,12 +1733,10 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	}()
 	t.Cleanup(func() { <-done })
 
-	// Turn 1: the full chain runs on G1, C included.
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
 	require.NoError(t, err)
 	waitFor(t, "the leaf served on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
 
-	// Turn 2: park B mid-call, so its execution is pinned to G1 while G2 lands.
 	bGate := make(chan struct{})
 	m.armGate("SUB-B-PROMPT", bGate)
 	t.Cleanup(func() { disarmGate(bGate) })
@@ -1888,22 +1753,12 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	})
 
 	write(chainYAML("SUB-C-PROMPT-G2"))
-	entry.CheckOrgReload() // publish G2 while B is parked
+	entry.CheckOrgReload()
 
 	entriesBefore := countServed(m.snapshot(), "SUB-C-PROMPT")
 	g2Before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
 	disarmGate(bGate)
 
-	//〔轮九十断言迁移（显式，非静默改测）〕The previous formulation — "no
-	// SUB-C-PROMPT-G2 serve before the injected third turn" — conflated "the
-	// pinned hop is not re-routed" with "no fresh turn runs at all". The second
-	// half held only under the D-a defect, where NO fresh turn could reach the
-	// new C; with the trunk landed, the settle of this very delegation legitimately
-	// drives a fresh turn that takes the NEW generation (correct per D6: a
-	// task_settled re-entry uses the current effective face). So the assertion now
-	// pins the hop's own answer: wait for a NEW B post-tool record (turn 1 already
-	// produced one) and require ITS result to be the OLD C's answer, quoted-exact
-	// so the -G2 variant cannot match as a prefix.
 	bHopAnswers := func() []string {
 		var out []string
 		for _, s := range m.snapshot() {
@@ -1930,8 +1785,6 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	require.Greater(t, countServed(m.snapshot(), "SUB-C-PROMPT"), entriesBefore,
 		"the pinned hop really executed on the old C (its answer came from somewhere)")
 
-	// …and the NEW generation must really be reachable — otherwise the assertion
-	// above would only prove the publish never took effect.
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("third request"))
 	require.NoError(t, err)
 	waitFor(t, "a fresh turn serves the new C", func() bool {
@@ -1939,7 +1792,7 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	})
 }
 
-// §4.2 at the PRODUCTION task-action entry: the same `relaunch_task` /
+// At the PRODUCTION task-action entry: the same `relaunch_task` /
 // `resume_task` objects the LLM calls, driven against a generation published by
 // the real reload path. Two things only this level can prove: the refusal reaches
 // the host-visible tool answer (not just an internal error), and a wrapper built by
@@ -2053,11 +1906,11 @@ func relaunchArgs(t *testing.T, id string) []byte {
 	return b
 }
 
-// TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration is 4.2's
-// 「G2 删除 B 后的存量任务」at the entry: the delegation ran under G1, the operator
-// then published a generation that routes c instead, and the stored task's relaunch
-// — asked for through the production tool — must be REFUSED with the version reason,
-// must create no new execution, and must not run the removed target again.
+// TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration 钉住 生产入口上被发布移除目标的重放被版本拒绝且不新建执行。
+// - 入口被 Offer 的是它自己的委派加两个生产任务工具（relaunch/resume），board 项是生产 spawn 身份；
+// - 换代把 a 改路由 c、b 从有效面消失（其常驻 owner 仍在，正是复活风险面）；
+// - 被拒重入不得重跑那个目标，也不得静默改用替身跑新目标。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -2085,8 +1938,6 @@ func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *t
 	waitFor(t, "b served the delegation", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") > 0 })
 	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
 
-	// The declaration the model saw is the published face's own: the delegation and
-	// both production task tools, all three offered on the real request.
 	decls := entryDeclarations(m.snapshot())
 	require.NotEmpty(t, decls)
 	require.ElementsMatch(t, []string{"b", "relaunch_task", "resume_task"}, decls[0],
@@ -2095,7 +1946,6 @@ func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *t
 	tk := subagentTask(t, entry.TaskManager())
 	require.Equal(t, "b:work", tk.Spec.Key, "the board entry is the production spawn identity")
 
-	// 换代：a 改路由 c，B 从有效面上消失（b 的常驻 owner 仍在，正是 R03 的复活风险面）。
 	writeReentryYAML(t, yamlPath, reentryYAML("c", 2))
 	entry.CheckOrgReload()
 	require.Nil(t, entry.ContextManager().SubagentWrapper("b"),
@@ -2117,12 +1967,10 @@ func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *t
 		"and it must not silently substitute the new target either")
 }
 
-// TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget is the
-// other side of the same entry: the target is STILL routed after a structural
-// publish, so a re-entry that finds no initiating call must run it through the
-// NEWLY PUBLISHED face. A wrapper built by a candidate without a resident-owner
-// wire would fail closed here ("no resident owner") — which is exactly the
-// wiring this test exists to falsify.
+// TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget 钉住 目标经结构发布仍被路由时，无发起调用重入经新发布面运行它。
+// - 一次保持 a→b 的结构编辑（max_tool_iterations 进指纹）确实发布新一代并重建 wrapper；
+// - 缺常驻 owner 接线的候选会在此 fail-closed（"no resident owner"），正是本测要证伪的接线。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -2152,8 +2000,6 @@ func TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget(t *tes
 	tk := subagentTask(t, entry.TaskManager())
 
 	before := countServed(m.snapshot(), "SUB-B-PROMPT")
-	// A structural edit that KEEPS a→b: max_tool_iterations is fingerprinted, so
-	// this really publishes a new generation and rebuilds the wrapper.
 	writeReentryYAML(t, yamlPath, reentryYAML("b", 3))
 	entry.CheckOrgReload()
 	require.NotNil(t, entry.ContextManager().SubagentWrapper("b"), "the new generation still routes b")

@@ -146,6 +146,8 @@ func TestCallTool_DeclarationConstantAcrossRegistryMutations(t *testing.T) {
 // degraded and probeEvery=N>0, every call but the Nth short-circuits with a
 // readable result (failure permeates as result, never error). Default off
 // (probeEvery=0 → real calls).
+//
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 func TestMCPCall_CircuitBreak(t *testing.T) {
 	reg := NewRegistry()
 	ct := NewCallTool(reg)

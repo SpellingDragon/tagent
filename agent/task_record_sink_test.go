@@ -369,7 +369,7 @@ func TestPersistBusEvent_TaskMetadataCopied(t *testing.T) {
 	require.Equal(t, "completed", ev.Metadata["settle_status"])
 }
 
-// TestCancel_EmitsCancelledRecord_FailBefore 钉住 R2fail-before：Cancel 此前仅改内存态，事实链无 cancelled 终态记录 → 回放折叠以 suspect 复活（看板幽灵 + subagent 同 Key dedup 锁死）。
+// TestCancel_EmitsCancelledRecord_FailBefore 钉住 Cancel 此前仅改内存态，事实链无 cancelled 终态记录 → 回放折叠以 suspect 复活（看板幽灵 + subagent 同 Key dedup 锁死）。
 func TestCancel_EmitsCancelledRecord_FailBefore(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	tm := task.NewTaskManager(task.TaskManagerConfig{})

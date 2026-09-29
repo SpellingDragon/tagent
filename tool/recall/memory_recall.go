@@ -1,6 +1,6 @@
-// memory_recall: the recall PROTOCOL implementation (unified-memory-curation
-// D6), now internal — the model-facing entry is the unified `recall` tool
-// (recall.go, stable-context-compaction D7) which routes items/query through
+// memory_recall: the recall PROTOCOL implementation,
+// now internal — the model-facing entry is the unified `recall` tool
+// (recall.go) which routes items/query through
 // recallByItems/recallByQuery below.
 //
 // Index cards are recall tickets. PURE FUNCTION paths — no LLM in the

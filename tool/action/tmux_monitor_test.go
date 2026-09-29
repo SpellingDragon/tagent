@@ -1069,6 +1069,8 @@ func adaptiveTestMonitor(inspector *mockInspector) *TmuxMonitor {
 }
 
 // TestReschedule_DenseToBackoff 钉住 a young session reschedules at the dense interval; an old one backs off to a larger interval.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
 func TestReschedule_DenseToBackoff(t *testing.T) {
 	tm := adaptiveTestMonitor(&mockInspector{processExists: true})
 	now := time.Now()

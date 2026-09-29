@@ -158,7 +158,7 @@ func (h *HTTPAPI) SetEndpointPolicy(enabled bool, allowedHosts []string) {
 	}
 }
 
-// SetDiagnosticsFn 注入诊断快照构造器（R2 backlog-final-closeout：诊断快照获得消费
+// SetDiagnosticsFn 注入诊断快照构造器（R2：诊断快照获得消费
 // 面——GET /diagnostics 输出 JSON）。fn 为 nil 时不注册端点（404）。
 func (h *HTTPAPI) SetDiagnosticsFn(fn func() any) {
 	h.diagnosticsFn = fn

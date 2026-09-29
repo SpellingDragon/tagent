@@ -73,7 +73,7 @@ type Compactor struct {
 
 	// l1Threshold Live thresholds, seeded from config and retunable via SetThresholds
 	// (atomic so a soak/E2E harness can retune while the scheduler runs —
-	// resident-remaining-hardening 3.1 "至少一次 compaction").
+	// the "至少一次 compaction" harness requirement).
 	l1Threshold atomic.Int64
 	l2Threshold atomic.Int64
 
@@ -108,7 +108,7 @@ func NewCompactor(store *FileSegmentStore, kv KVStore, rel RelationStore, tombst
 }
 
 // SetThresholds retunes the compaction thresholds at runtime (harness hook —
-// resident-remaining-hardening 3.1: a soak subprocess must exercise the real
+// a soak subprocess must exercise the real
 // compaction path without producing 24 sealed hourly segments). Values <= 0
 // are ignored. Atomic against the background scheduler by construction.
 func (c *Compactor) SetThresholds(l1, l2 int) {

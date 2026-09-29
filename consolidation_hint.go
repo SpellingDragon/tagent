@@ -9,7 +9,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== 巩固容量触发（4.2 design-report-closeout） ====================
+// ==================== 巩固容量触发 ====================
 //
 // ConsolidationHintTracker 消费 engineBridge 的写入旁路计数（CapacityHookProvider）：
 // 每分区的**边界事件**（external_input / agent_output，即任务回合的意图与产出）计数
@@ -17,12 +17,12 @@ import (
 // 执行权仍在 LLM + memory_consolidate 工具（D2 核心主张）。snooze 窗内不重复打扰
 // （内存态；重启后重新积累——最多多提示一次，可接受）。
 //
-// §2.7③ 不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示，
-// MUST NOT 驱动容量淘汰——淘汰执行权的唯一真源是 store 的 §2.5 绝对 per-partition
+// 不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示，
+// MUST NOT 驱动容量淘汰——淘汰执行权的唯一真源是 store 的绝对 per-partition
 // eventCount（`recomputePartition` 由完整记录链得出，unknown 分区不淘汰，见
 // memory/lifecycle.go::checkCapacity）。因此本 delta 重启归零、巩固后随提示复位（Track 触发
 // onHint 即将 counts[pid]=0），与绝对真源分叉不构成淘汰误删风险（既有
-// TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；§2.5 锁定淘汰读绝对）。
+// TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；锁定淘汰读绝对）。
 // repaired/already 重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过
 // capacityHook（见 engine_bridge_idempotency_test.go）。
 
@@ -95,7 +95,7 @@ func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventT
 		t.mu.Unlock() // snooze 窗内：不打扰（计数保留，窗过期后的下一次边界事件再提示）
 		return
 	}
-	// §8.11⑨：sink 未就绪（SetOnHint 晚于 agent 构造的装配窗口）时**不清零不记 snooze**
+	// sink 未就绪（SetOnHint 晚于 agent 构造的装配窗口）时**不清零不记 snooze**
 	// ——保留计数，sink 接线后的下一条边界事件即触发（提示延迟不丢）。
 	fn := t.onHint
 	if fn == nil {

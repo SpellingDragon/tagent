@@ -77,18 +77,18 @@ const DefaultPromptsPrefix = "resources/prompts"
 VARIABLES
 
 var (
-	// ErrResourceConflict: same path, incompatible fingerprint (4.1 T3).
+	// ErrResourceConflict reports the same path already open with an incompatible fingerprint.
 	ErrResourceConflict = errors.New("resource conflict: path already open with an incompatible config")
-	// ErrStoreLocked: another process holds the single-writer lock (4.3).
+	// ErrStoreLocked reports another process holding the directory's single-writer lock.
 	ErrStoreLocked = errors.New("store is locked by another process (single-writer)")
-	// ErrResourcePoisoned (§6.4, design 决策7): the previous generation at this
-	// path could not be CONFIRMED stopped (or its lock could not be confirmed
-	// released), so the registry keeps a poisoned entry sealing the path. The
+	// ErrResourcePoisoned reports that a generation at this path did not confirm
+	// its stop (or did not confirm its lock release), so the registry keeps a
+	// poisoned entry sealing the path. The
 	// seal is an explicit entry — holding the store/engine/lockfile strong
 	// references and the failure result — never the accidental leak of a handle
 	// nobody can observe.
 	ErrResourcePoisoned = errors.New("resource poisoned: previous generation on this path did not confirm a safe stop; path sealed against new generations")
-	// ErrReclaimUnconfirmed (§6.5, design 決策7): construction released a
+	// ErrReclaimUnconfirmed reports that construction released a
 	// partially-built resource WITHOUT a confirmed reclaim. The open closure
 	// wraps it so acquire must NOT free the writer lock — an unconfirmed
 	// reclaim seals the path exactly like an unconfirmed worker stop.
@@ -103,7 +103,48 @@ func DefaultPromptsFS() embed.FS
     "resources/prompts/recall_tool_desc.md").
 
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
+    New creates a fully-wired TagentAgent from declarative Config + runtime
+    Options.
+
+    Config is declarative and serializable (loadable from YAML/JSON via
+    LoadConfig). Options inject runtime-only dependencies (model instances,
+    etc.).
+
+    New handles all cross-boundary wiring internally:
+      - Registers built-in tools (knowledge, recall, exec)
+      - Validates that all configured tools are registered
+      - Resolves the entry agent from Config.Agents map
+      - Creates a MemoryStore per agent (isolated, from MemoryConfig)
+      - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
+      - For agent-kind tools: creates the referenced agent and wraps it via
+        AgentToolWrapper which handles event_key → external context resolution
+      - For tool-kind tools: delegates to registered plain tool factories
+
+    契约: docs/wiki/platform/org-hot-reload.md#overview 契约:
+    docs/wiki/platform/org-hot-reload.md#trigger-timing 契约:
+    docs/wiki/platform/org-hot-reload.md#apply-record 契约:
+    docs/wiki/platform/org-hot-reload.md#owner-retirement 契约:
+    docs/wiki/platform/org-hot-reload.md#memory-preflight 契约:
+    docs/wiki/platform/org-hot-reload.md#close-drain 契约:
+    docs/wiki/tool/tool-architecture.md#mcp-live-registry 契约:
+    docs/wiki/tool/tool-architecture.md#declaration-stability 契约:
+    docs/wiki/platform/platform-subsystems.md#governance-gate 契约:
+    docs/wiki/platform/platform-subsystems.md#evolution-wiring
+
 func RegisterBuiltinTools() error
+    RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
+    Called once in tagent.New() before config validation. Uses sync.Once for
+    idempotency — safe to call multiple times.
+
+    Registered plain tools:
+      - exec: shell command executor (ActionTool via tmux)
+      - file sub-tools: read_file, save_file, list_file, search_file,
+        search_content, read_multiple_files, replace_content
+      - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search,
+        duckduckgo_search, memory_query
+      - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
+      - mcp_call: generic MCP execution gateway
+
 func TestingBuildAgent(
 	name string,
 	acfg AgentConfig,
@@ -488,7 +529,7 @@ type EvolutionConfig struct {
 	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
 
-	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
+	// 后验 LLM-judge 参数（零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
 	// Judge is the unified ModelRef for the evolution judge LLM. Zero value
 	// keeps the legacy behavior: fall back to the entry agent's model.
 	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
@@ -500,8 +541,7 @@ type EvolutionConfig struct {
 	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
 	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
 }
-    EvolutionConfig 是 git 原生自进化配置（self-evolution-git-native：bundle/发布道已退役，
-    文件即真源+git 版本层+建议式评估）。
+    EvolutionConfig 是 git 原生自进化配置（bundle/发布道已退役， 文件即真源+git 版本层+建议式评估）。
 
 type ExtraParam = agent.ExtraParam
     ExtraParam re-exports agent.ExtraParam for YAML/JSON config declaration
@@ -581,7 +621,7 @@ type MemoryConfig struct {
 	// snapshot atomic tmp+rename whose durability claim stops at "visible to
 	// a fresh process after a successful barrier", NOT power-loss survival.
 	// The key stays only so existing configs load unchanged; production
-	// durability tiers are a rustviking-stage decision (evidence §9.5).
+	// durability tiers are a rustviking-stage decision.
 	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent
@@ -800,11 +840,11 @@ type ReliabilityConfig struct {
 	// （零行为变化）。警告级「闸不是墙」——退避只为免打已确认故障的端点，恢复即正常。
 	DegradationModelBackoff string `json:"degradation_model_backoff,omitempty" yaml:"degradation_model_backoff,omitempty"`
 
-	// DegradationMCPProbeEvery（5.4）：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
+	// DegradationMCPProbeEvery：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
 	// 每 N 次调用放行 1 次真探测，其余直接返回熔断 result（含自纠材料）。0 = 关闭熔断。
 	DegradationMCPProbeEvery int `json:"degradation_mcp_probe_every,omitempty" yaml:"degradation_mcp_probe_every,omitempty"`
 
-	// DegradationDiskBlockSpawn（5.4）：DepDisk degraded 时拒绝新任务 spawn（返回可读
+	// DegradationDiskBlockSpawn：DepDisk degraded 时拒绝新任务 spawn（返回可读
 	// 原因；进行中任务的 settle/轮询不受影响）。默认 false = 不拒绝。
 	DegradationDiskBlockSpawn bool `json:"degradation_disk_block_spawn,omitempty" yaml:"degradation_disk_block_spawn,omitempty"`
 
@@ -827,7 +867,14 @@ type RemoteConfig struct {
 type RuntimeResources struct {
 	// Has unexported fields.
 }
-    RuntimeResources is the lease registry (concurrency-safe).
+    RuntimeResources is the owner registry for shared persistent stores
+    (concurrency-safe). One entry per (kind, canonical path); every consumer
+    acquires a lease, and the LAST lease release closes the store and frees
+    the directory lock, so the next New gets a genuinely reopened instance.
+    Incompatible fingerprints on the same path are rejected — never a second
+    writer, never silent first-config-wins. A cross-process flock on a lockfile
+    inside the directory enforces single-writer. Isolated stores (empty path)
+    bypass the registry entirely: each New owns its instance exclusively.
 
 func NewRuntimeResources() *RuntimeResources
     NewRuntimeResources creates an empty registry. The process-wide default is

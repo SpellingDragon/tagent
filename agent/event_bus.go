@@ -250,7 +250,7 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 // no ordering guarantees across consumers, and simple backpressure (channel
 // fills up → Publish blocks).
 //
-// Durable mode (resident-readiness-plan 3.2; lossless under D2): with an Inbox
+// Durable mode (lossless under D2): with an Inbox
 // configured, ALL inbound events are persisted to inbox-v2 BEFORE the durable
 // receipt — the channel carries only wake-ups, never the durable truth. Each
 // message slot keeps a lossless JSON snapshot of the original AgentEvent

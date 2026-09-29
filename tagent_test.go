@@ -19,12 +19,6 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// §5.8 composition-root aggregate barrier: a build raises ONE ref-counted
-// registration hold per shared store touched (dedup across agents) and the
-// top-level buildAgent releases every hold once all agents were constructed and
-// reconciled. Stores without a retention lease (no destructive scanner) are
-// skipped — the barrier only exists where forgetting exists.
-
 type countingHoldStore struct {
 	*memory.InMemoryStore
 	begins, ends int
@@ -33,52 +27,49 @@ type countingHoldStore struct {
 func (s *countingHoldStore) BeginHold() { s.begins++ }
 func (s *countingHoldStore) EndHold()   { s.ends++ }
 
+// TestRuntimeConfig_StoreBarrierAggregatesAndReleases 钉住 组合根的遗忘屏障按 store 聚合、由顶层构建一次放尽。
+// - 同一份共享 store 被两个 agent 触及只抬一层；
+// - 不带保留租约的 store 没有屏障可抬，静默跳过，不算错误；
+// - 重复释放不会多放一层；
+// - 后一次构建在同一份 store 上再抬一层，窗口按构建嵌套计数；
+// - 接收者为 nil 时抬与放都不触碰任何 store。
+// 契约: docs/wiki/platform/resource-ownership.md#composition-barrier
 func TestRuntimeConfig_StoreBarrierAggregatesAndReleases(t *testing.T) {
 	rc := &runtimeConfig{}
 	shared := &countingHoldStore{InMemoryStore: memory.NewInMemoryStore()}
-	plain := memory.NewInMemoryStore() // no lease → nothing to pause
+	plain := memory.NewInMemoryStore()
 
 	rc.raiseStoreBarrier(shared)
-	rc.raiseStoreBarrier(shared) // a second agent on the SAME store: deduped
-	rc.raiseStoreBarrier(plain)  // non-holdable: silently skipped, no panic
+	rc.raiseStoreBarrier(shared)
+	rc.raiseStoreBarrier(plain)
 	require.Equal(t, 1, shared.begins, "one registration window per store per build")
 
 	rc.releaseStoreBarriers()
 	require.Equal(t, 1, shared.ends, "the build top-level releases exactly what it raised")
 
-	rc.releaseStoreBarriers() // re-entrant release: no double End
+	rc.releaseStoreBarriers()
 	require.Equal(t, 1, shared.ends)
 
-	// A later build (hot-reload shell) re-raises on the same store: windows nest per build.
 	rc.raiseStoreBarrier(shared)
 	require.Equal(t, 2, shared.begins)
 	rc.releaseStoreBarriers()
 	require.Equal(t, 2, shared.ends)
 
-	// nil-receiver safety (defensive; rc is normally always constructed).
 	var nilRC *runtimeConfig
 	require.NotPanics(t, func() { nilRC.raiseStoreBarrier(shared); nilRC.releaseStoreBarriers() })
 	require.Equal(t, 2, shared.begins, "a nil rc never mutates the store's barrier")
 }
 
-// TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger 是 §8.2 + ③（§9.2/§9.1）+ §8.1 的
-// buildAgent 级集成回归——此前仓内仅 governance 包「模拟双 gate」单测（gate_w3_test 手动 New 两
-// gate），wire 测试只断言 New 成功，**没有**驱动真实 buildAgent 包裹路径证明「子 agent 的 exec
-// leaf 工具确实过闸」。本测走真实 buildAgent（entry + 子 agent 各持独立 gate，共享 rc.govLedger），
-// 经构建出的工具链驱动一次 critical exec，端到端断言三件事：
-//
-//	§8.2  两 agent 的 exec 均被治理闸拒绝（W3 前子 agent 主风险面绕闸）；
-//	③     两 agent 治理记录落**同一** rc.govLedger（N2 共享账本，行为证明同指针）；
-//	§8.1  记录按 AgentName 区分来源（共享 Ledger 下多 agent 事件可归因）。
+// TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger 钉住 过闸覆盖真实构建出的工具链，共享账本仍分得清来源。
+// - entry 与子 agent 各自的 exec 都被拒，结果里带显式拒绝标记；
+// - 两条拒绝记录落在同一份账本里，来源 agent 名各自在册；
+// - 观察对象是构建产物上的工具链，不是手工组装的闸——绕过构建就看不见包裹有没有真发生。
+// 契约: docs/wiki/platform/platform-subsystems.md#governance-gate
 func TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger(t *testing.T) {
-	// 注册一个「声明名为 exec」的 plain 工具——命中 classifier 的 exec.destructive(critical) 规则。
-	// 注册 ID 用独立名（test_gov_exec）避免与内建 exec 冲突；Declaration().Name="exec" 才是分级判据。
 	agent.RegisterPlainTool("test_gov_exec", func(_ agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
 		return &mockCallableTool{name: "exec"}, nil
 	})
 
-	// 镜像 New() 的治理接线（tagent.go:256-273）：共享 Ledger（nil store，entry build 时延迟绑定）
-	// + Enabled/strict gate。enforcement=strict 使 critical 确定性拒绝（result 渗透 [governance_denied]）。
 	rc := &runtimeConfig{model: &factoryMockModel{}}
 	rc.govLedger = governance.NewDenialLedger(nil, 0)
 	rc.govGate = governance.NewGovernanceGate(governance.GateDeps{
@@ -94,7 +85,6 @@ func TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger(t *testing.T) {
 				Memory:       MemoryConfig{Type: "memory"},
 				Tools:        []ToolRef{{Kind: ToolKindTool, ID: "test_gov_exec"}},
 			},
-			// 非内建名（worker）→ 无 ToolAgentFactory → 走 config-driven 工具构建 + 治理包裹路径。
 			"worker": {
 				SystemPrompt: PromptConfig{Inline: "worker prompt"},
 				Memory:       MemoryConfig{Type: "memory"},
@@ -112,13 +102,11 @@ func TestBuildAgent_GovernanceWrapsAllAgents_SharedLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, sub)
 
-	// §8.2：经**真实构建**的工具链驱动 critical exec——两 agent 均应被治理闸拒绝。
 	entryRes := callBuiltExec(t, entry)
 	subRes := callBuiltExec(t, sub)
 	assert.Contains(t, entryRes, "[governance_denied]", "entry exec 应过闸被拒（真实 buildAgent 包裹路径）")
 	assert.Contains(t, subRes, "[governance_denied]", "子 agent exec 应过闸被拒（W3 前子 agent 主风险面绕闸）")
 
-	// ③ + §8.1：两 agent 的治理记录落同一共享 Ledger（N2），且按 AgentName 区分来源。
 	recs := rc.govLedger.Query(-1)
 	var sawEntry, sawSub bool
 	for _, r := range recs {
@@ -154,11 +142,10 @@ func callBuiltExec(t *testing.T, ta *agent.TagentAgent) string {
 	return ""
 }
 
-// TestGoalTools_EntryOnly: the five governance
-// face tools are appended for the ENTRY agent only (governance enabled), and
-// are themselves wrapped by the gate (appended before the wrapping loop).
-// Sub-agents never get them — the governance surface converges on the main
-// loop, same as refine.
+// TestGoalTools_EntryOnly 钉住 治理面入口只挂 entry。
+// - entry 恰好拿到那五个治理面工具，一个不缺；
+// - 子 agent 一个也不能有——治理面出现在子 agent 的工具表里就是本测要拦的形状。
+// 契约: docs/wiki/tool/tool-architecture.md#govx-entry-only
 func TestGoalTools_EntryOnly(t *testing.T) {
 	rc := &runtimeConfig{model: &factoryMockModel{}}
 	rc.govLedger = governance.NewDenialLedger(nil, 0)
@@ -218,8 +205,10 @@ func (m *wiringToolSet) Tools(_ context.Context) []trpctool.Tool { return m.tool
 func (m *wiringToolSet) Close() error                            { return nil }
 func (m *wiringToolSet) Name() string                            { return m.name }
 
-// TestBuildPlainToolRef_MCPCallInjectsRegistry verifies buildPlainToolRef
-// wires rc.mcpRegistry into the mcp_call factory.
+// TestBuildPlainToolRef_MCPCallInjectsRegistry 钉住 网关工具看见的是装配根注入的那一份活注册表。
+// - 证据形态：调用一个不存在的 server，失败结果里必须列出注册表里真实存在的服务名；
+// - 注入没发生时清单为空，这一条当场失败。
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 func TestBuildPlainToolRef_MCPCallInjectsRegistry(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 
@@ -245,8 +234,10 @@ func TestBuildPlainToolRef_MCPCallInjectsRegistry(t *testing.T) {
 	assert.Contains(t, string(b), "mock", "error must list registry servers, proving injection")
 }
 
-// TestBuildPlainToolRef_MCPCallWithoutRegistry verifies the factory still
-// succeeds when no registry was wired (empty stub behavior).
+// TestBuildPlainToolRef_MCPCallWithoutRegistry 钉住 没有注册表可注入时网关照常构建，缺席只在调用结果里现形。
+// - 构建不报错，工具可调用；
+// - 失败以结果形态返回，内容显式说明没有任何服务被注册。
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 func TestBuildPlainToolRef_MCPCallWithoutRegistry(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 
@@ -264,8 +255,10 @@ func TestBuildPlainToolRef_MCPCallWithoutRegistry(t *testing.T) {
 	assert.Contains(t, string(b), "no MCP servers are registered")
 }
 
-// TestMCPDiscoverFactory_PrefersRegistry verifies the discover factory
-// consumes the injected live registry.
+// TestMCPDiscoverFactory_PrefersRegistry 钉住 发现工具读的是注入的活注册表，而且每次调用都重读。
+// - 工厂创建之后才注册的服务同样必须被发现——静态切片做不到这一点；
+// - 结果给出可照抄的调用方式，含 server 名与 tool 名。
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 func TestMCPDiscoverFactory_PrefersRegistry(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 
@@ -277,7 +270,6 @@ func TestMCPDiscoverFactory_PrefersRegistry(t *testing.T) {
 	ct, err := factory(agent.PlainToolFactoryConfig{ID: "mcp_discover", MCPRegistry: reg})
 	require.NoError(t, err)
 
-	// Registered AFTER factory creation — must still be discoverable (live reads).
 	reg.Add("web-search-prime", &wiringToolSet{
 		name:  "web-search-prime",
 		tools: []trpctool.Tool{&wiringTool{name: "webSearchPrime"}},
@@ -354,7 +346,6 @@ func TestConfigValidate_MCPServers(t *testing.T) {
 		})
 	}
 
-	// Valid declaration passes.
 	cfg := base()
 	cfg.MCPServers = map[string]MCPServerConfig{
 		"ok": {Transport: "streamable-http", URL: "https://example.com/mcp"},
@@ -363,8 +354,10 @@ func TestConfigValidate_MCPServers(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 }
 
-// TestWireMemoryEngine_NilEngineUnchanged 验证未配置 Engine 时 store 原样返回
-// （不包裹引擎）——保证 T-A 对现状零影响。
+// TestWireMemoryEngine_NilEngineUnchanged 钉住 未配置引擎时拿到的是内层 store 本体，不新增任何包裹。
+// - 判据是能力接口的缺席：它不得声称自己是引擎提供者；
+// - 只有"无引擎配置"与"无 store 事件回调"同时成立才走这条路。
+// 契约: docs/wiki/memory/memory-architecture.md#engine-wiring-gates
 func TestWireMemoryEngine_NilEngineUnchanged(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	got, err := wireMemoryEngine(store, nil, MemoryConfig{}, nil)
@@ -376,8 +369,9 @@ func TestWireMemoryEngine_NilEngineUnchanged(t *testing.T) {
 	}
 }
 
-// TestWireMemoryEngine_EmbeddingNilUnchanged 验证 Engine 配置但无 Embedding 时
-// 不接线（无向量能力 = 纯关键词 = 现状）。
+// TestWireMemoryEngine_EmbeddingNilUnchanged 钉住 只有引擎壳子而没有嵌入配置时同样不接引擎。
+// - 没有向量能力就没有语义检索，store 保持与未配置引擎同一形态。
+// 契约: docs/wiki/memory/memory-architecture.md#engine-wiring-gates
 func TestWireMemoryEngine_EmbeddingNilUnchanged(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	got, err := wireMemoryEngine(store, nil, MemoryConfig{Engine: &MemoryEngineConfig{}}, nil)
@@ -405,14 +399,17 @@ func TestWireMemoryEngine_MockEmbedderWraps(t *testing.T) {
 		t.Fatal("引擎不应为 nil")
 	}
 	if c, ok := got.(interface{ Close() error }); ok {
-		_ = c.Close() // 回收引擎 worker，防 goroutine 泄漏
+		_ = c.Close()
 	} else {
 		t.Fatal("包裹后的 store 应可 Close（agent.Closer）")
 	}
 }
 
-// TestWireMemoryEngine_ZhipuNoKeyDegrades 验证 zhipu 嵌入无 API key 时优雅降级：
-// 返回原 store（无引擎），不报错、不阻断 agent 构建（不变量：增强能力故障不传染主链路）。
+// TestWireMemoryEngine_ZhipuNoKeyDegrades 钉住 密钥未配时嵌入能力按"功能关闭"降级：不报错、不阻断构建。
+// - 拿回的 store 不得声称自己是引擎提供者；
+// - 缺 key 是配置事实，不构成调用方必须处理的错误。
+// 契约: docs/wiki/memory/memory-architecture.md#engine-wiring-gates
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 func TestWireMemoryEngine_ZhipuNoKeyDegrades(t *testing.T) {
 	t.Setenv("ZAI_API_KEY", "")
 	store := memory.NewInMemoryStore()
@@ -426,11 +423,13 @@ func TestWireMemoryEngine_ZhipuNoKeyDegrades(t *testing.T) {
 	}
 }
 
-// TestWireMemoryEngine_UnknownBackendErrors 验证未知 backend 报错（配置校验）。
+// TestWireMemoryEngine_UnknownBackendErrors 钉住 引擎 backend 名不认识时按"功能关闭"降级：不报错、不阻断构建。
+// - 拿回的 store 不得声称自己是引擎提供者，它已被降为仅容量包裹；
+// - 增强能力的故障只关掉增强本身，不构成调用方必须处理的错误。
+// 契约: docs/wiki/memory/memory-architecture.md#engine-wiring-gates
 func TestWireMemoryEngine_UnknownBackendErrors(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	mc := MemoryConfig{Engine: &MemoryEngineConfig{Backend: "bogus", Embedding: &EmbeddingConfig{Provider: "mock"}}}
-	// 未知 backend：buildMemoryEngine 报错 → wireMemoryEngine 优雅降级返回原 store（不阻断）。
 	got, err := wireMemoryEngine(store, nil, mc, nil)
 	if err != nil {
 		t.Fatalf("应优雅降级不报错, got %v", err)
@@ -468,9 +467,9 @@ func minimalConfig(_ string, evoEnabled bool) Config {
 	return cfg
 }
 
-// TestNew_EvolutionEnabled_GitNativeSmoke 验证 git-native evolution 接线：启用时 New 成功
-// 构造 GitEvolution 装配单元（refine 工具注册/章 provider/Stop closer 在 buildAgent 路径；
-// git 仓自检 Warn 不阻断）。深度行为在 evolution 包 tempdir git 仓测试覆盖（2.4/3.3）。
+// TestNew_EvolutionEnabled_GitNativeSmoke 钉住 启用自进化的配置能通过完整装配。
+// - 本测只观察"启用不等于起不来"；改进行为本身由 evolution 包在临时 git 仓里钉。
+// 契约: docs/wiki/platform/platform-subsystems.md#evolution-wiring
 func TestNew_EvolutionEnabled_GitNativeSmoke(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 	a, err := New(minimalConfig("", true), WithModel(fakeModel{}))
@@ -489,8 +488,9 @@ func TestNew_EvolutionDisabled_NoSideEffect(t *testing.T) {
 	require.NotNil(t, a)
 }
 
-// TestNew_GovernanceEnabled_Builds 验证 governance 接线：启用时 New 成功构建（govGate 构造 +
-// leaf 工具包裹路径执行）。配置门控——默认关闭则不构造。
+// TestNew_GovernanceEnabled_Builds 钉住 启用治理的配置能通过完整装配。
+// - 本测只观察"启用不等于起不来"；分级与处置语义由治理自身的测试钉。
+// 契约: docs/wiki/platform/platform-subsystems.md#governance-gate
 func TestNew_GovernanceEnabled_Builds(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
@@ -514,8 +514,9 @@ func TestNew_GovernanceDisabled_Default(t *testing.T) {
 	require.NotNil(t, a)
 }
 
-// TestNew_ReliableBusSpillDir 验证 ReliableBus 接线：配置 BusSpillDir 后 New 成功，且 entry
-// agent 的 per-agent 目录 <BusSpillDir>/<entry> 被创建（NewReliableEventBus→NewInbox 建其下 inbox-v2）。
+// TestNew_ReliableBusSpillDir 钉住 配了总线溢出根目录后，entry 得到属于自己的溢出目录。
+// - 目录形如 `<溢出根>/<entry>`，装配完成时已存在，不必等第一次溢出。
+// 契约: docs/wiki/platform/platform-subsystems.md#reliability-switches
 func TestNew_ReliableBusSpillDir(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 	spillRoot := filepath.Join(t.TempDir(), "bus-spill")
@@ -526,7 +527,6 @@ func TestNew_ReliableBusSpillDir(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, a)
 
-	// per-agent 溢出子目录应被创建（<spillRoot>/tagent）。
 	_, statErr := os.Stat(filepath.Join(spillRoot, cfg.Entry))
 	require.NoError(t, statErr, "per-agent 溢出子目录 <BusSpillDir>/<entry> 应被创建")
 }
@@ -542,9 +542,10 @@ func TestNew_ReliableBusDisabledDefault(t *testing.T) {
 	require.NotNil(t, a)
 }
 
-// TestNew_DegradationEnabled_Builds 验证 A2 接线：DegradationEnabled 时 New 成功构建
-// （DegradationManager 构造 + ErrorTrackingStore 最外层包裹 memStore + agentCfg.Degradation
-// 注入 + event_loop model 上报就绪）——补齐此前 DegradationManager 零接线的断点。
+// TestNew_DegradationEnabled_Builds 钉住 退化开关独立成立：治理段关闭时启用它照样装配成功。
+// - 本例的治理段是关的，只有退化开关为真；
+// - 装配得到可用 agent，退化状态机不与治理配置相互牵连。
+// 契约: docs/wiki/platform/platform-subsystems.md#reliability-switches
 func TestNew_DegradationEnabled_Builds(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)
@@ -555,9 +556,10 @@ func TestNew_DegradationEnabled_Builds(t *testing.T) {
 	require.NotNil(t, a)
 }
 
-// TestResolveMemoryStore_FileSamePathShared 是 M-1（四审）回归：type: file 同 path 必须返回
-// 同一实例（与 memory/localfile 同构）——否则跨 agent read_namespaces 下 InMemRelationStore
-// 内存图分歧（recall 因果链断链）+ 双 Compactor 基于独立视图并发覆盖同一 KV 键。
+// TestResolveMemoryStore_FileSamePathShared 钉住 `type: file` 的同一 path 得到同一个 store 实例，与 memory/localfile 同构。
+// - 判据是对象身份，不是内容相似；
+// - 两次解析各自领到释放钩子，两个都要交还。
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func TestResolveMemoryStore_FileSamePathShared(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "shared-mem")
 	s1, _, rel1, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
@@ -565,16 +567,17 @@ func TestResolveMemoryStore_FileSamePathShared(t *testing.T) {
 	s2, _, rel2, err := resolveMemoryStore(MemoryConfig{Type: "file", Path: path})
 	require.NoError(t, err)
 	require.Same(t, s1, s2, "file 后端同 path 必须共享同一实例（M-1：防因果链断链/双 Compactor 并发覆盖）")
-	// 4.2：测试收尾释放租约（两次 acquire → 两次 release，第二次才真关）。
 	rel1()
 	rel2()
 }
 
-// TestConfig_WorkingDir 验证 C 方案(框架级 working_dir)配置层:yaml 解析 + 空默认(现状零变化)
-// + TAGENT_WORKING_DIR env 覆盖(部署时免改 yaml 指定 clone 根)。
+// TestConfig_WorkingDir 钉住 工作根的三态取法：yaml 初值、环境变量非空覆盖、两者皆空保持空。
+// - 环境变量写空值等于没写，不触发覆盖；
+// - 空串不是 "." 的别名——它意味着 file 与 exec 各自继承进程工作目录。
+// 契约: docs/wiki/platform/agent-behavior-matrix.md#working-dir
 func TestConfig_WorkingDir(t *testing.T) {
 	t.Run("yaml 解析 working_dir", func(t *testing.T) {
-		t.Setenv("TAGENT_WORKING_DIR", "") // 隔离 env(空=不触发覆盖)
+		t.Setenv("TAGENT_WORKING_DIR", "")
 		var cfg Config
 		require.NoError(t, yaml.Unmarshal([]byte("working_dir: /home/user/codes\n"), &cfg))
 		cfg.ApplyDefaults()

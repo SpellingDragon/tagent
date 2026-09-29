@@ -31,6 +31,8 @@ func newEnv(id string) *reliability.Envelope {
 // the v2 binary opens the dir, classifies the legacy item as INERT transitional
 // data (never reinterpreted/absorbed), and an explicit managed ResetTransitional
 // clears it. The full durable lifecycle then runs on the current format.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#reopen-refusal
 func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "00000000000000000001.spill")

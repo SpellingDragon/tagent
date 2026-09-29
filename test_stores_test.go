@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var testStoreRoots sync.Map // testing.TB -> string
+
 // testStore 把单元测试的 memory store 路径挪出仓库工作树，并按**测试用例**隔离。
 //
 // 为什么必须显式挪：`resources.acquire` 在按 memory type 分派**之前**就无条件
@@ -30,8 +32,6 @@ import (
 //
 // 每用例只解析一次根：sync.Map 以 testing.TB（指针身份）为键；键被 map 强引用，故地址
 // 不会被后续用例回收复用，用例结束即删除条目。所有 testStore 调用都在单个用例内顺序发生。
-var testStoreRoots sync.Map // testing.TB -> string
-
 func testStore(t testing.TB, name string) string {
 	t.Helper()
 	if root, ok := testStoreRoots.Load(t); ok {
@@ -43,7 +43,7 @@ func testStore(t testing.TB, name string) string {
 	return filepath.Join(root, name)
 }
 
-// §6.7 隔离合同：不同用例绝不共享 store 根；同一用例同名 store 保持稳定（重启模拟与
+// TestTestStore_IsolatesPerCase 隔离合同：不同用例绝不共享 store 根；同一用例同名 store 保持稳定（重启模拟与
 // 多代渲染的身份前提）。旧的 PID+固定名字根会让两个用例落到同一目录、互相看见字节，
 // 此测先把该缺陷钉死再修复。
 func TestTestStore_IsolatesPerCase(t *testing.T) {

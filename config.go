@@ -177,7 +177,7 @@ type GovernanceConfig struct {
 	// 此前的 RequireApproval 是从未被读取的死字段(A5:全仓仅定义处出现),已删除。
 }
 
-// EvolutionConfig 是 git 原生自进化配置（self-evolution-git-native：bundle/发布道已退役，
+// EvolutionConfig 是 git 原生自进化配置（bundle/发布道已退役，
 // 文件即真源+git 版本层+建议式评估）。
 type EvolutionConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
@@ -193,7 +193,7 @@ type EvolutionConfig struct {
 	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
 
-	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
+	// 后验 LLM-judge 参数（零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
 	// Judge is the unified ModelRef for the evolution judge LLM. Zero value
 	// keeps the legacy behavior: fall back to the entry agent's model.
 	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
@@ -229,11 +229,11 @@ type ReliabilityConfig struct {
 	// （零行为变化）。警告级「闸不是墙」——退避只为免打已确认故障的端点，恢复即正常。
 	DegradationModelBackoff string `json:"degradation_model_backoff,omitempty" yaml:"degradation_model_backoff,omitempty"`
 
-	// DegradationMCPProbeEvery（5.4）：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
+	// DegradationMCPProbeEvery：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
 	// 每 N 次调用放行 1 次真探测，其余直接返回熔断 result（含自纠材料）。0 = 关闭熔断。
 	DegradationMCPProbeEvery int `json:"degradation_mcp_probe_every,omitempty" yaml:"degradation_mcp_probe_every,omitempty"`
 
-	// DegradationDiskBlockSpawn（5.4）：DepDisk degraded 时拒绝新任务 spawn（返回可读
+	// DegradationDiskBlockSpawn：DepDisk degraded 时拒绝新任务 spawn（返回可读
 	// 原因；进行中任务的 settle/轮询不受影响）。默认 false = 不拒绝。
 	DegradationDiskBlockSpawn bool `json:"degradation_disk_block_spawn,omitempty" yaml:"degradation_disk_block_spawn,omitempty"`
 
@@ -425,7 +425,7 @@ type MemoryConfig struct {
 	// snapshot atomic tmp+rename whose durability claim stops at "visible to
 	// a fresh process after a successful barrier", NOT power-loss survival.
 	// The key stays only so existing configs load unchanged; production
-	// durability tiers are a rustviking-stage decision (evidence §9.5).
+	// durability tiers are a rustviking-stage decision.
 	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent
@@ -640,7 +640,7 @@ type RemoteConfig struct {
 
 // isRemoteRef reports whether this reference resolves OUTSIDE the local agents
 // map — i.e. whether the construction domain (buildAgentToolRef) takes its A2A
-// branch. §3.3「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
+// branch.「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
 // predicate both domains use. Two separate spellings of "is this remote" is
 // exactly how validation came to demand a local definition that construction
 // never asks for — rejecting a deployment whose sub-agent lives in another
@@ -885,7 +885,7 @@ func (ac *AgentConfig) validate(name string) error {
 			// A remote block without an endpoint is not "remote with a default" —
 			// construction would fall through to the LOCAL path and build a
 			// different runtime than the config declares. Refuse it here so the
-			// declaration and the built object cannot diverge (§3.3).
+			// declaration and the built object cannot diverge.
 			if tr.Remote != nil && !tr.isRemoteRef() {
 				return fmt.Errorf("agent %q: tool agent %q declares remote but requires a url", name, tr.AgentID)
 			}

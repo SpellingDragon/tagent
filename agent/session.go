@@ -235,7 +235,7 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 }
 
 // makeOnEventCallback creates the onEvent callback for StartLoop and Run().
-// It is a pure DELIVERY-side callback (unified-event-projection D1): projection
+// It is a pure DELIVERY-side callback: projection
 // writes happen in the event-plugin pipeline (MemoryPlugin → ProjectionSink),
 // not here. This callback only:
 // 1. Propagates currentMetadata from ContextManager to event.StateDelta ("meta_" prefix)

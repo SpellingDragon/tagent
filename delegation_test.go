@@ -21,7 +21,7 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// §3.4 首个生产入口垂直验收（A→B / A→C）。断言对象全部是宿主可见行为：
+// 首个生产入口垂直验收（A→B / A→C）。断言对象全部是宿主可见行为：
 // 真实模型请求里声明的工具集合、实际被调起的子 agent，而非常量/指针/hash。
 
 // delegYAML renders entry "a" delegating to exactly one sub-agent.
@@ -30,7 +30,7 @@ func delegYAML(target string) string { return delegYAMLSeq(target) }
 // delegYAMLSeq renders entry "a" with the entry-reachable agent set held
 // constant (b and c are always both declared as tools) so only the ORDER of the
 // delegation tools differs between generations — the one shape of an A→B / A→C
-// switch that can publish before §4.3 (hot add/remove) lands. async:false keeps
+// switch that can publish without hot add/remove support. async:false keeps
 // the delegation inside the driving turn (no task-layer detour). No
 // model/providers section: the host-injected mock model (WithModel) serves every
 // agent, which is what makes the delegation observable at the model boundary.
@@ -207,10 +207,11 @@ func entryDeclarations(snaps []delegServed) [][]string {
 	return out
 }
 
-// TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals is the
-// change's headline acceptance: editing the EXISTING YAML (no new syntax) changes
-// which sub-agent the next request can actually call, while the entry runtime —
-// its store, session service and resident binding table — keeps its identity.
+// TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals 钉住 委派目标解析自已发布代的声明面，编辑既有配置即改变下一个请求真正可调的子 agent。
+// - 入口运行时——存储、会话服务、常驻绑定表——在一次真实发布前后按指针保持身份，不是"内容相同的新实例"；
+// - 第一代只被提供 b，未引用的 c 一次都不跑；结构发布让 A→B 变 A→C，新代既声明也确实服务 C；
+// - 被移除的 B 得不到任何新调用，却保留其常驻属主，使同名再入复用原存储属主。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -249,9 +250,9 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 	waitFor(t, "sub-agent b served the first delegation", func() bool {
 		return countServed(m.snapshot(), "SUB-B-PROMPT") > 0
 	})
-	// Turn 边界必须显式同步（审阅 M-4）：本 mock 的第 2 次 entry 调用才收尾本 turn，
+	// Turn 边界必须显式同步：本 mock 的第 2 次 entry 调用才收尾本 turn，
 	// 而 “b 被服务过” 在第 1 次调用就成立。若不等齐就取快照，第 2 次调用可能落进
-	// 第二代前缀，使“第二代声明严格等于 [c]”与“B 不再增长”两条断言因时序运气而假失败。
+	// 第二代前缀，使“第二代声明严格等于 [c]”与“B 停止增长”两条断言因时序运气而假失败。
 	waitFor(t, "turn 1 closed (entry made its second call)", func() bool {
 		return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2
 	})
@@ -266,7 +267,7 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 
 	// ---- structural reload: A→B becomes A→C ----
 	//
-	// §4.3 makes this shape publishable: C enters the entry-reachable topology
+	// Hot add/remove makes this shape publishable: C enters the entry-reachable topology
 	// (hot add, built under the original resource/recovery protocol) and B leaves
 	// it (hot remove). The published generation must BOTH OFFER and ACTUALLY SERVE
 	// C; B is unrouted but keeps its resident owner (never retired early), which is
@@ -302,11 +303,10 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 	require.NotNil(t, table["c"], "the hot-added agent is merged into the resident binding table")
 	require.NotSame(t, entry.MemStore(), table["c"].MemStore(),
 		"the hot-added agent owns its own store (no drift onto the entry store)")
-	// §4.3 migrated the claim from "unrouted, never retired" to what actually must
-	// hold across a real publish: the removed owner's identity never DRIFTS. It is
-	// either still resident as the very same instance (something still needs it), or
-	// it left by retirement — which must be an actual close, never a silent drop or a
-	// look-alike replacement.
+	// What must hold across a real publish for a removed owner: its identity never
+	// DRIFTS. It is either still resident as the very same instance (something still
+	// needs it), or it left by retirement — which must be an actual close, never a
+	// silent drop or a look-alike replacement.
 	bAfter, bStillHere := table["b"]
 	if bStillHere {
 		require.Same(t, tableBefore["b"], bAfter,
@@ -316,11 +316,6 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 			"a name that left the resident table did so by being retired, not silently dropped")
 	}
 }
-
-// 尚未纳入本例的第二形态（拓扑不变的 tools 顺序交换 → 实际委派目标随之改变）在
-// `-race` 下首轮委派不稳定（turn 1 未走到子 agent），已删除以免留闪测；其
-// 「声明与真实调用同代」断言已由上方 A→C 发布形态**部分覆盖**（拓扑变了的那一形态；「拓扑不变、仅 tools 顺序变化 → 实际目标改变」并未覆盖），顺序交换
-// 变体与 U-1（上游 session 竞态）同批重建。
 
 // firstServeIndex returns the index of the first recorded call made BY `system`,
 // or -1 when that agent never ran.
@@ -357,14 +352,11 @@ func firstResultIndex(snaps []delegServed, want string) int {
 	return firstResultIndexBy(snaps, "ENTRY-A-PROMPT", want)
 }
 
-// TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget is the
-// subagent-turn-execution scenario「进行中热更不改变子调用目标」at the production
-// entry: B's run is parked mid-call while the operator publishes the generation
-// that removes B and routes C instead. The in-flight turn must still be SERVED BY
-// B and hand B's answer back; C must not run until that call returned; and the
-// removed target must receive no new call afterwards. What this falsifies is a
-// delegation that re-reads the published face (or whose executor generation is
-// reclaimed) underneath a live call.
+// TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget 钉住 在途子调用跨一次发布仍由它开始那一代的目标服务。
+// - B 停在途中时发布移除 B、改路由 C 的新一代，该回合必须由 B 服务并把 B 的答案恰好回给发起回合一次；
+// - 新目标 C 在 B 返回之前不得抢跑——被证伪的形状是委派在活调用底下重读已发布面、或其执行代被回收；
+// - 换代影响止于本 turn：此后请求由 C 持续服务，被移除的 B 得不到新调用。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -426,7 +418,7 @@ func TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget(t *testing.
 		"the new target must not run while the old generation's call is in flight (B returned at %d, first C call at %d)",
 		bReturned, cRan)
 
-	// 换代的影响边界是 turn：此后不再有 B 的调用，新目标持续服务后续请求。
+	// 换代的影响边界是 turn：此后 B 无新调用，新目标持续服务后续请求。
 	cBefore := countServed(after, "SUB-C-PROMPT")
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
 	require.NoError(t, err)
@@ -472,11 +464,11 @@ agents:
 `
 }
 
-// TestOrgDelegation_NestedLevelsServeFromTheirOwnBindings is §3.3's 多级委派 row at
-// the production entry: every level's real model request must carry ITS OWN
-// generation declaration, and the deepest answer must surface, level by level,
-// back to the entry. A nested level that read a global agent table would show up
-// here as a missing/wrong tool declaration or a result that never arrives.
+// TestOrgDelegation_NestedLevelsServeFromTheirOwnBindings 钉住 多级委派每一层带它自己那代的声明、最深结果逐层回流。
+// - entry 的请求带 [b]、嵌套层 b 的请求带它自己的 [c] 而非 entry 的、叶 c 无委派可给；
+// - C 的答案先回到直接父 B、B 携 C 的工作回到 entry，叶在本 turn 恰好跑一次；
+// - 读全局 agent 表会在此暴露为缺失或错误的工具声明、或结果永不抵达。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_NestedLevelsServeFromTheirOwnBindings(t *testing.T) {
 	yamlPath := writeYAML(t, nestedYAML())
 	cfg, err := LoadConfig(yamlPath)
@@ -517,10 +509,10 @@ func TestOrgDelegation_NestedLevelsServeFromTheirOwnBindings(t *testing.T) {
 	require.Equal(t, 1, countServed(snaps, "SUB-C-PROMPT"), "the leaf ran exactly once for this turn")
 }
 
-// TestOrgDelegation_ManagedAsyncDelegationIsAdoptedByTheTaskLayer is §3.3's 受管异步
-// row at the production entry: with async left at its default, the delegation must
-// really be adopted by the task layer (a spawn record exists) and still deliver its
-// result inline to the requesting turn.
+// TestOrgDelegation_ManagedAsyncDelegationIsAdoptedByTheTaskLayer 钉住 async 取默认时委派确实被任务层收养并仍把结果 inline 交回请求回合。
+// - spawn 记录存在且键为 agent:request 形状，证明确实过了任务层而非同步旁路；
+// - 结算结果回到发起 turn，位于子 agent 被服务之后。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_ManagedAsyncDelegationIsAdoptedByTheTaskLayer(t *testing.T) {
 	asyncYAML := strings.Replace(delegYAML("b"), "        async: false\n", "", 1)
 	require.NotContains(t, asyncYAML, "async:", "precondition: async is left at its default")
@@ -570,8 +562,9 @@ func (p *probeFactoryTool) Declaration() *trpctool.Declaration {
 }
 func (p *probeFactoryTool) Call(_ context.Context, _ []byte) (any, error) { return p.marker, nil }
 
-// RegisterPlainTool panics on a duplicate id, so the probe factory is installed
-// once per process (the test is then re-runnable with -count=N).
+// registerProbeFactory guards the one-time tool registration: RegisterPlainTool
+// panics on a duplicate id, so the probe factory is installed once per process
+// (the test is then re-runnable with -count=N).
 var registerProbeFactory sync.Once
 
 func registerProbeToolFactory() {
@@ -582,10 +575,10 @@ func registerProbeToolFactory() {
 	})
 }
 
-// TestOrgDelegation_FactoryToolIsDeclaredCalledAndReturnedFromItsGeneration is
-// §3.3's 内置／工厂 row at the production entry: a kind:tool factory result must be
-// offered in the REAL model request, really executed, and its return must reach the
-// parent turn — from the instance the published face was built with.
+// TestOrgDelegation_FactoryToolIsDeclaredCalledAndReturnedFromItsGeneration 钉住 kind:tool 工厂产物在其所建之代被声明、被真实执行、返回值回到父回合。
+// - 工厂结果出现在真实模型请求的工具面里、被真正调用、其返回（只有那个被构建对象能产出的载荷）回到父 turn；
+// - 服务调用的正是已发布面构建时持有的那个实例。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_FactoryToolIsDeclaredCalledAndReturnedFromItsGeneration(t *testing.T) {
 	registerProbeToolFactory()
 
@@ -629,7 +622,7 @@ agents:
 		"the factory instance's own return must reach the parent turn")
 }
 
-// §3.3（A2A 路径）：远端委派必须以「真实声明 + 真实线上请求 + 真实工具返回」作证，
+// A2A 路径的远端委派必须以「真实声明 + 真实线上请求 + 真实工具返回」作证，
 // 不能只查 wrapper 字段。本文件同时钉住校验域与构建域一致——一个**只有 remote 端点、
 // 没有本地定义**的 agent 引用必须能加载并构建（构建域一直支持；校验域曾误要求本地
 // 定义，见 config.go 的 isRemoteRef 单一谓词）。
@@ -857,11 +850,11 @@ func driveOneTurn(t *testing.T, entry *agent.TagentAgent, m *wireModel) {
 		"the entry turn must close after the delegation returned")
 }
 
-// TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn is §3.3's A2A row at
-// the deployment level: a config whose ONLY sub-agent is remote (no local
-// definition anywhere) must load, expose the delegation in a real model request,
-// really reach the declared endpoint, and hand the remote answer back to the
-// parent turn as the tool result.
+// TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn 钉住 仅远程、无本地定义的子 agent 配置走通到部署级：真实声明、真实端点、真实返回。
+// - 配置加载且不因缺本地定义而失败，发布的模型面在真实请求里暴露该远端委派工具；
+// - 调用确实落到声明的 URL，远端答案作为 tool result 回到父 turn，本地没有任何东西能产出该串；
+// - 父请求原文随委派送出到端点。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn(t *testing.T) {
 	svc := newRemoteService(t)
 	yamlPath := writeYAML(t, remoteYAML(svc.srv.URL, ""))
@@ -902,10 +895,10 @@ func TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn(t *testing.T) {
 		"the delegated request text must ride to the endpoint")
 }
 
-// TestRemoteRefCarriesEventContextOverTheWire pins the parameter half of §3.3 for
-// the remote shape: an event_key resolved from the PARENT store must reach the
-// remote endpoint as transferred state, so the remote agent sees the same context
-// a local sub-agent would — the parent binding, not a fresh one, supplies it.
+// TestRemoteRefCarriesEventContextOverTheWire 钉住 远端委派把父存储解析出的 event_key 上下文作为 transferred state 跨线送达。
+// - 远程目标看到与本地子 agent 同等的上下文，供给来自父绑定而非新绑定；
+// - 上下文随跨线载荷到达端点，并按远程映射回读的那个 transferred-state 键携带。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteRefCarriesEventContextOverTheWire(t *testing.T) {
 	svc := newRemoteService(t)
 	yamlPath := writeYAML(t, remoteYAML(svc.srv.URL, "        event_params: [event_keys]\n"))
@@ -936,9 +929,9 @@ func TestRemoteRefCarriesEventContextOverTheWire(t *testing.T) {
 		"and it must travel under the transferred-state key the remote maps back")
 }
 
-// TestRemoteRefRejectsURLLessDeclaration pins the mirrored mismatch: a reference
-// that DECLARES remote but carries no endpoint must not be silently built as a
-// local agent — the build would then run a different runtime than the config says.
+// TestRemoteRefRejectsURLLessDeclaration 钉住 声明为远程却无 endpoint 的引用必须被拒绝，不得静默按本地构建。
+// - 按本地构建会运行一个与配置所述不同的运行时，加载期即报错并要求 url。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteRefRejectsURLLessDeclaration(t *testing.T) {
 	yamlPath := writeYAML(t, remoteYAML("", "")+"\n  knowledge:\n    system_prompt:\n      inline: \"SUB-K-PROMPT\"\n    memory:\n      type: memory\n")
 	_, err := LoadConfig(yamlPath)
@@ -946,12 +939,10 @@ func TestRemoteRefRejectsURLLessDeclaration(t *testing.T) {
 	require.Contains(t, err.Error(), "requires a url")
 }
 
-// TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget pins §3.3's transport-retry
-// row for the remote shape: a transport failure must be retried against the SAME
-// declared endpoint with the SAME delegation payload, and the parent must receive
-// the real answer rather than an error event. Re-resolving the target on retry is
-// what D5 forbids (「传输重试：继承发起调用租约」) — and what a global-table lookup
-// on the retry path would silently do.
+// TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget 钉住 远端传输失败必须对同一声明端点、同一委派载荷重试，父收到真实答案而非错误事件。
+// - 传输失败驱动远端重试分支（至少两次尝试），每次尝试携带同一委派载荷；
+// - 在重试路径重解析目标是被禁止的形状——全局表查询会静默做这件事。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget(t *testing.T) {
 	svc := newRemoteService(t)
 	svc.mu.Lock()
@@ -987,18 +978,10 @@ func TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget(t *testing.T) {
 	require.True(t, sawAnswer, "the retried attempt's answer must reach the parent turn")
 }
 
-// TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint is §3.4's「远端重试过程中
-// 发布」row at the production entry (D6/J10: transport retry fixes the endpoint
-// AND the payload; local turns do not retry). A G2 that re-points the SAME agent
-// name at a DIFFERENT endpoint is published synchronously inside the transient
-// 503 attempt, so by the time the client retries, the new generation is already
-// in force — the window is caused by the failure, not by a sleep.
-//
-// What would falsify the rule is a retry that re-resolves its target: it would
-// reach the successor endpoint. So the discriminator is causal and does not count
-// global totals: until the parent is handed the answer, the SUCCESSOR service must
-// not have been contacted at all, while every attempt recorded on the ORIGINAL
-// endpoint carries the same delegation payload.
+// TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint 钉住 重试过程中发布把同名 agent 指向不同端点时，重试仍锁在它开始声明的端点与载荷上。
+// - 判别是因果的、不数全局总量：父拿到答案之前，后继端点一次都不得被联系；
+// - 原端点上记录的每次尝试都携带同一委派载荷，传输重试固定端点与载荷、本地回合不重试。
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 	original := newRemoteService(t)
 	original.mu.Lock()

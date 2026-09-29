@@ -237,7 +237,7 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 // ref.EventType exclusively (renderTimelineMessage), so the rendered
 // prefix is byte-identical; only the ref field differs (debug logs).
 // Documented here rather than silently diverging.
-// tailFetchStats carries the hardening-review-batch2 7.2 observability
+// tailFetchStats carries the observability
 // counters: a partial (page/batch failure) fetch must be visible to the
 // caller so the rebuild verdict is PARTIAL, never silently short.
 type tailFetchStats struct {

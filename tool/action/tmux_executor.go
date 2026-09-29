@@ -326,6 +326,8 @@ func NamedSessionName(logical string) string {
 	return "n-" + logical
 }
 
+// GetSessionOutput 返回该会话当前可见的输出：优先读流式记录文件（pipe），文件缺失或
+// 为空时回落到 capture-pane 的最近 1000 行，该回落调用带 3s 超时。
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
 	pipeFile := te.pipeFilePath(sessionID)
 	if b, err := os.ReadFile(pipeFile); err == nil && len(b) > 0 {
@@ -472,7 +474,7 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 // (system-wide pty exhaustion was observed in the field). Best effort: a
 // missing tmux server means nothing to clean. Returns the number killed.
 //
-// R3（resident-continuity-r2-r4 2.1，orphan 语义重定义）：n- named 会话被排除——
+// R3（orphan 语义重定义）：named 会话被排除——
 // cleanup 在装配时先于 reattach 执行，若纳入 named 会话则会屠杀全部常驻会话
 // （修复前语义冲突：枚举双条件修复会让 cleanup 杀光 n-）。orphan=仅无主生成名
 // 会话；named 会话由 R3 重挂接管或由 ResidentMeta TTL sweep 兑现终局。

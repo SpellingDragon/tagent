@@ -136,7 +136,7 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 
 // ExecutorConfig returns THIS agent's assembled execution face (model/tools/
 // prompt/genConfig — the product of the build that already passed validation).
-// introduce-durable-workflow-engine : the hot-reload path builds a candidate
+// The hot-reload path builds a candidate
 // shell, reads its face here, constructs the candidate executor on the
 // RESIDENT ContextManager and only then publishes it. The face is returned by
 // value; the caller owns the copy (mutating Tools must not disturb this agent).

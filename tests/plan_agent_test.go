@@ -36,6 +36,8 @@ import (
 //
 // -run TestPlanAgentBug_AgentToolWrapper_SubAgentRun \
 // ./tests/ -timeout 180s
+//
+// 契约: docs/wiki/tool/tool-architecture.md#extra-params
 func TestPlanAgentBug_AgentToolWrapper_SubAgentRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

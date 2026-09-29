@@ -87,7 +87,7 @@ var _ model.Model = (*stubModel)(nil)
 
 // TestRemoteDeclarationOnlyKeepsTheGate guards the skip that lets a remote-only
 // reference survive a hot reload: it must apply ONLY where no owner can ever
-// exist. §5.11's gate exists to refuse a genuinely missing definition, so a name
+// exist. This gate exists to refuse a genuinely missing definition, so a name
 // that is also reached non-remotely — or that IS defined locally — must still be
 // refused, not silently published without an owner.
 func TestRemoteDeclarationOnlyKeepsTheGate(t *testing.T) {

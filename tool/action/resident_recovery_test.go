@@ -25,7 +25,9 @@ func newGateMonitor(t *testing.T, mock *mockInspector) (*TmuxMonitor, *TmuxSessi
 	return tm, sess
 }
 
-// TestProbeUnknownGate_ConsecutiveLimit err 1-2 次不屠杀、第 N 次才 dead（fail-before：旧路径 err→assume-dead 一次即杀）。
+// TestProbeUnknownGate_ConsecutiveLimit err 1-2 次不屠杀、第 N 次才 dead。
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 func TestProbeUnknownGate_ConsecutiveLimit(t *testing.T) {
 	mock := &mockInspector{}
 	mock.setProcess(true, false)

@@ -11,7 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// agentMemoryFingerprint hashes ONE agent's memory section (§4.3, D7). The
+// agentMemoryFingerprint hashes ONE agent's memory section (D7). The
 // reloader compares it across generations to decide whether a re-added name
 // keeps its original storage owner (same path/backend → reuse) or would open a
 // second writer on the same partition (changed → refuse the candidate).
@@ -176,7 +176,7 @@ func reachableAgents(cfg *Config, entry string) map[string]bool {
 
 // remoteDeclarationOnly reports whether `name` is pulled in by `next` SOLELY as a
 // remote agent reference and has no local definition. Such a name's declaration IS
-// its definition: config validation accepts it through ToolRef.isRemoteRef (§5.44's
+// its definition: config validation accepts it through ToolRef.isRemoteRef (the
 // single shared predicate — validation and build domains read the same fact), and
 // build_agent resolves its wrapper as a remote target and builds NO executor for
 // it. It therefore has no resident owner to construct and no generation to publish,
@@ -185,7 +185,7 @@ func reachableAgents(cfg *Config, entry string) map[string]bool {
 //
 // Mixed reachability is deliberately refused: if any non-remote reference also
 // points at the name, that reference needs a real local owner, and a name defined
-// nowhere must still fail closed — the gate's original purpose (§5.11) stays intact.
+// nowhere must still fail closed — the gate's original purpose stays intact.
 func remoteDeclarationOnly(next *Config, name string) bool {
 	if next == nil || name == "" {
 		return false

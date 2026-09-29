@@ -72,6 +72,8 @@ func declTool(name, desc string, props map[string]*tool.Schema, required ...stri
 // C2+C4 卡片票据契约：滚动摘要卡片行/归档通知里的 hex key，模型必须能
 // 原样抄给 recall(items)。
 // ---------------------------------------------------------------------------
+//
+// 契约: docs/wiki/platform/evaluation-suites.md#ticket-recall
 func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 	kDeploy := int64(0x1201bb20000001)
 	kSummary := int64(0x1201bb20000009)
@@ -126,7 +128,7 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 }
 
 // TestContract_TaskSettledTicket_ToMemoryRecall ---------------------------------------------------------------------------
-// C3 settle 票据契约（通知→召回，stable-context-compaction D1 修订/D7）：
+// C3 settle 票据契约（通知→召回，D1 修订/D7）：
 // task_settled 通知渲染形态带 [evt_KEY|external_input] 前缀票据，需要历史
 // 原文时模型必须能抄 evt key 给统一 recall 工具（get_task_result 已退役）。
 // ---------------------------------------------------------------------------

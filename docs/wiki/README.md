@@ -25,6 +25,7 @@
 | 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化(git 原生) · 常驻可靠性 · 配置热重载(候选事务/执行代) · 统一可观测 · 记忆引擎(解耦缝) · MCP 闭环（默认关闭项全部 opt-in） |
 | 转世通报（换装后首轮自我告知） | [platform/reincarnation-notice.md](platform/reincarnation-notice.md) |
 | 组织级热重载（换代、应用记录与无锁读面） | [platform/org-hot-reload.md](platform/org-hot-reload.md) |
+| 运行时资源所有权（租约、代际与封路） | [platform/resource-ownership.md](platform/resource-ownership.md) |
 | agent 行为矩阵 | [platform/agent-behavior-matrix.md](platform/agent-behavior-matrix.md) | 启用上述子系统后，agent 在治理/自进化/可靠性/语义召回/可观测/部署各复杂场景下的**实际反应**（逐条溯源到代码） |
 
 ## 撰写约定（新增或修订时遵循）

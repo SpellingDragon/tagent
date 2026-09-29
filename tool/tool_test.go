@@ -29,6 +29,8 @@ func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.
 }
 
 // TestRecallQueryTool_BasicQuery 钉住 memory_query 基本查询能按关键词命中已写入的事件。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestRecallQueryTool_BasicQuery(t *testing.T) {
 	partitionID := memory.PartitionIDFromName("test")
 	key1 := memory.NewSnowflakeEventKey(partitionID, 0)

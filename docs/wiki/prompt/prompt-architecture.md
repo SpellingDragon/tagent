@@ -514,6 +514,7 @@ if content == "" {
 
 ---
 
+<a id="embedded-fallback"></a>
 ## 十、内嵌 FS 回退（prompt-loader-fallback）
 
 `NewLoader(baseDir, WithFallback(fsys, prefix))` 注入内嵌 prompt FS：磁盘 `BaseDir` 下找不到文件/目录时回退到 embed FS（`prefix` 为 FS 内 prompt 根路径，如 `resources/prompts`）。**磁盘永远优先**——用户可覆盖任意内置 prompt，二进制单文件分发时又不缺省。`fallbackFile/fallbackDir` 在 `LoadFromFile/LoadFromDir` 的 miss 路径内生效，调用方无感知。

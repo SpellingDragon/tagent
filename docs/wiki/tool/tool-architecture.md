@@ -281,6 +281,8 @@ AgentToolWrapper.Call
 
 ---
 
+**父投影的兜底注入**：委派工具没带 `event_keys` 时，包装器要能用**父 agent 的投影**自行补上上下文，所以每个委派 wrapper 都必须持有父投影的引用；这条接线只能在 agent 构造完成之后做——投影是在构造内部才出现的，提前接会拿到空引用，兜底路径静默失效。
+
 ## 五、工具的 trpc-agent-go 集成
 
 ### 5.1 CallableTool 接口
@@ -311,6 +313,7 @@ type CallableTool interface {
 }
 ```
 
+<a id="tool-registry"></a>
 ### 5.2 工具注册机制（三阶段生命周期）
 
 tagent 采用**三阶段工具生命周期**：实现层指定 → 注册层注册 → 配置层组织。
@@ -431,6 +434,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 `PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPRegistry（live，优先）/MCPToolSets（legacy）、Degradation（per-agent 退化状态机，mcp_call 据此上报 DepMCP）、ReadPartitionIDs、WorkspaceRoot、Properties），由 `buildPlainToolRef` 从当前 agent 的上下文注入。
 
+<a id="extra-params"></a>
 ### 5.x 附加参数通道（ToolRef.extra_params）
 
 子 agent 工具默认只有 `request`（+ `event_keys`）两个参数。需要**路由级小参数**（如 plan 的 `action`/`name`）时，经 ToolRef 声明：
@@ -474,6 +478,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
+<a id="govx-entry-only"></a>
 ## 附：治理面工具五件套（tool/govx）
 
 `goal_declare` / `goal_list` / `goal_resolve` / `denial_query` / `approval_list`——
@@ -492,6 +497,7 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 
 ## 六、召回体系：recall（统一入口，参数即路由）+ RecallAgent（orchestrate 内部引擎）
 
+<a id="recall-unified-entry"></a>
 ### 6.0 recall — 统一召回入口（stable-context-compaction D7）
 
 **文件**：`tool/recall/recall.go`。模型侧单工具，**参数形态即路由**；确定性形态零 LLM：
@@ -504,6 +510,15 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 | `orchestrate: true` | LLM 多跳编排保留形态 | 未接线时返回明确指引，不静默降级；确定性形态永不进 LLM 路径 |
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
+
+<a id="declaration-stability"></a>
+### 声明区与向量能力隔离（前缀缓存稳定性）
+
+recall 一族工具对模型呈现的 `Declaration` 里**没有任何向量或嵌入参数**：四个工具（`recall_query`/`recall_get`/`recall_recent`/`memory_recall`）的声明在两次独立构造之间逐字节一致，与"这份部署有没有开向量"完全无关。
+
+是否做引擎融合在**运行期的召回路径**判定，判据是 accessor 暴露的引擎能力位 `MemoryEngine().Capabilities().Vector`（`tool/recall/memory_recall.go`）。注意存储侧另有一个 `SupportsVectorSearch()` 探测面（见[记忆架构](../memory/memory-architecture.md)的接口表），**召回路径不看它**——两者混淆会把"能力探测"错写成召回分支的前提。
+
+声明文本还不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。理由：声明是模型侧请求前缀的一部分，一旦随部署配置漂移，整段前缀缓存失效，且模型在两次会话里看到的是同一个工具的两种签名。
 
 ### 6.1 RecallAgent — orchestrate 分支的内部编排引擎（定位收窄）
 
@@ -618,6 +633,7 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 
 ---
 
+<a id="action-tool"></a>
 ## 八、ActionTool — 命令执行
 
 ### 8.1 执行模型（tmux + 任务层）
@@ -703,6 +719,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 
 > 历史注记：早期的 `MessageInjector` 闭环（ActionTool 直接向 EventBus 注入消息）与同步 `ActionExecutor`（`sh -c` 直接执行）已在任务层重构中移除，相应代码已删除；本文档不再保留其代码留存。
 
+<a id="tmux-monitor"></a>
 ## 九、TmuxMonitor — 状态监控
 
 ### 9.1 监控状态机
@@ -801,6 +818,7 @@ func DefaultMonitorConfig() MonitorConfig {
 
 - `ResidentMeta`（command/origin/task_id/…）持久化于 `resident_meta_dir`（可配，离 /tmp 的持久卷）；旧记录零值容错
 - spawn 全参 / 终态结局经 `SetResidentRecordSink` 写 `resident_session` 事件（**记录-only：不发 bus、不进投影**）
+- **汇接线归各 owner 自己**：换代时把该 sink 重挂到**所属 agent 自己**（早期形态只挂入口一处，其余 agent 的记录落不到自己的投影上），spawner 的 TTL 源因此读所属 agent 自己的记录投影，不到祖先。工厂分支只产配置、不产句柄，这条接线对它自然为空操作——同一条规则，无需特判
 
 ### 九·A.3 ReattachResidentSessions — 存活重挂
 
@@ -972,6 +990,12 @@ sequenceDiagram
 | 子工具配置 | 不可配置 | YAML 声明式 |
 | 扩展性 | 需修改 factory 代码 | 只需在 YAML 中添加 tool ref |
 
+工厂一旦被采用就必须交回声明：交回空声明**直接报错终止构建**，绝不静默回落到 config-driven 路径——回落会去服务另一个 agent，与操作者注册的并不是同一个，比构建失败更难发现。
+
+内置名（`knowledge`/`recall`/`action` 等）始终走 config-driven 路径：即便有人对内置名调用 `RegisterToolAgent`，装配也不采用该工厂——否则操作者在 YAML 里声明的 `Tools` 会被注册表**静默改写**，实际服务的 agent 与声明不一致。
+
+工厂分支不读取配置里的 `Tools`：工厂属主的工具面完全由它交回的声明决定，所以配置里写了不存在或被漏用的工具项，在这条分支上不会报错。两条分支的这一点差异必须由声明本身承载，不能指望工具表校验兜住。
+
 ### 13.3 为什么 tool 参数必须包含 event_keys？
 
 | 对比项 | 无 event_keys | 有 event_keys |
@@ -1082,6 +1106,8 @@ stateDiagram-v2
 ### 两种输入形态与优先级
 `items`（索引卡/时间线上的 `[evt_…]` hex 票据）优先于 `query`：手里有票据时精确回补，只有模糊线索时才走关键词/语义检索。两者皆缺时返回明确的用法错误，不做猜测试图。
 
+票据的**写法宽容**也是契约的一部分：索引卡上印的是 `[evt_HEX|type]`，模型会原样回显，也可能剥掉方括号写成 `evt_HEX`，或只给裸 `HEX`——三种形态都必须落到同一个事件（解析以 hex 为先，十进制转写仅作老兼容）。从卡片行里整段切出的字符串必须可直接当票据使用，不要求调用方再做任何清洗。
+
 ### 检索路径的分层与降级
 1. **引擎混合检索**（关键词 ∪ 向量，RRF 融合闭环在引擎内）：仅当查询词非空且 accessor 暴露记忆引擎且引擎声明支持向量时启用。协议与工具声明因此零变化，prefix-cache 不受影响。
 2. **纯关键词检索**：引擎不可用、引擎报错或引擎路径**零命中/全部悬挂**时降级到此，不向调用方报错，行为与未启用引擎时一致。
@@ -1118,10 +1144,11 @@ recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall`
 | `memory_recent` | 取最近的若干条，可加时间范围；条数有上限，超限即截断 |
 | `memory_trace` | 从给定 key 沿父链**回溯**，步数有上界 |
 
-**回溯与整轮重建的两条硬语义**：
+**回溯与整轮重建的三条硬语义**：
 
 1. **断链即止**：回溯途中遇到取不到的事件就停止并保持已取到的部分——首事件即取不到才报错。绝不跨过断点猜测父链，否则会把不相干的事件接成一条链。
 2. **整轮重建以 `external_input` 为界**：从回合内任一事件往回走，记录到该回合的 `external_input`（回合起点）即停，然后**反转为时间正序**输出；这条边界保证返回的是"这一轮"而不是跨轮拼贴。摘要与内容同样受长度裁剪（`external_input` 的摘要本身就是全文，必须与内容一起裁，否则单条就能撑爆上下文）。
+3. **上界截断与"完整"分家**：`max_steps` 用尽而尚未走到 `external_input` 时，`capped` 为真而 `complete` 必为假——已取到的部分照常返回，但绝不把被截断的回溯说成整轮；只给一步时结果就只剩锚点事件本身。
 
 ### `recall` 入口的两种形态
 
@@ -1152,6 +1179,24 @@ recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall`
 发现结果必须**如实给出调用方式**：内容里带 `mcp_call(server=..., tool=...)` 的确切形式与输入 schema，且**不得**给出 exec 命令式的假调用路径——那会让模型照着不存在的方式去调。
 
 匹配策略除子串包含外还有 **token-AND 回退**（按空格/下划线/连字符切词，逐词命中即可）：模型发出的查询几乎不会是精确子串，`web search` 必须能匹配 `web_search_prime` 或描述里词序不同的表达。
+
+<a id="mcp-gateway-injection"></a>
+### `mcp_call` 网关用的是注入的那一份活注册表
+
+`mcp_call` 从配置面取得注册表（`PlainToolFactoryConfig.MCPRegistry`，见 `agent/tool_agent.go`）后交给 `NewCallTool`，因此它看见的服务集合与装配根同一份——运行期新注册的服务对已经建好的 agent 立刻可用。没有注册表可注入时**仍然必须构建成功**：注册表缺席只改变调用结果，不改变 agent 能否建立。
+
+调用侧的失败一律**以结果形态返回，而不是 Go error**，且带足以自纠的清单（`tool/mcp/call.go`）：
+
+| 情形 | 返回 |
+|---|---|
+| 一个服务都没注册 | 显式空态，并提示两条来源（配置文件声明／运行期注册） |
+| server 名不认识 | 具名报错 **＋ 当前可用服务清单** |
+| tool 不在该 server 上 | 具名报错 **＋ 该 server 的工具名清单**（服务枚举为空时上报 MCP 依赖故障） |
+| 内层调用失败 | 具名报错 **＋ 输入 schema**，让模型改参数重试而不是重复同一个名字 |
+
+只有清单可列时才列：空清单不会伪装成"可用服务为空"的成功结果。
+
+注册表从配置面取用时有一条语言层面的坑必须防：把一个 **typed nil**（类型化空指针）赋给接口字段，接口本身**并不等于 nil**，于是工厂里「有注册表就启用」的判断会假判成立，直到调用期才炸。装配侧必须在赋值之前判空——宁可不注入，也不要塞一个带类型的空指针进去。
 
 <a id="memory-query-hard"></a>
 ### `memory_query` 的两条硬要求

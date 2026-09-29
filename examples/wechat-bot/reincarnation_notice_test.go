@@ -87,6 +87,8 @@ func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference,
 
 // TestFetchWALTail pins the D8 query contract: tail query with limit, error
 // propagation for logged degradation (never swallowed), nil-store unavailability.
+//
+// 契约: docs/wiki/platform/reincarnation-notice.md#breakpoint
 func TestFetchWALTail(t *testing.T) {
 	refs := []memory.EventReference{{EventKey: 1, EventType: "agent_output"}, {EventKey: 2, EventType: "thinking_plan"}}
 	store := &fakeStore{refs: refs}

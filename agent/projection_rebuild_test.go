@@ -564,7 +564,7 @@ func TestPersistBusEvent_ReCommitDoesNotDoubleProject(t *testing.T) {
 	require.Len(t, cm.projection.GetAll(), 1, "the same selected fact must project exactly once across re-commit")
 }
 
-// callProjection introduce-durable-workflow-engine  reopened gap (W-1 isolation half):
+// callProjection reopened gap (W-1 isolation half):
 // the delegation wrapper lives in ta.config.Tools and is therefore SHARED by
 // every invocation-private ContextManager that the same agent builds. Binding
 // that shared object per call (`buildExecutor` → SetParentProjection) both

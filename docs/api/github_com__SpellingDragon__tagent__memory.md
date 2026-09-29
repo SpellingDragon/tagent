@@ -217,9 +217,9 @@ func (c *Compactor) CompactOnce()
 
 func (c *Compactor) SetThresholds(l1, l2 int)
     SetThresholds retunes the compaction thresholds at runtime (harness hook —
-    resident-remaining-hardening 3.1: a soak subprocess must exercise the real
-    compaction path without producing 24 sealed hourly segments). Values <= 0
-    are ignored. Atomic against the background scheduler by construction.
+    a soak subprocess must exercise the real compaction path without producing
+    24 sealed hourly segments). Values <= 0 are ignored. Atomic against the
+    background scheduler by construction.
 
 func (c *Compactor) Start()
     Start starts the compaction scheduler in a background goroutine.

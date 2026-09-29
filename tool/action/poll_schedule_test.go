@@ -26,6 +26,8 @@ func TestPollSchedule_IntervalForAge(t *testing.T) {
 }
 
 // TestPollSchedule_MonotonicNonDecreasing 钉住 the interval never shrinks as age grows and never exceeds MaxInterval.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
 func TestPollSchedule_MonotonicNonDecreasing(t *testing.T) {
 	s := DefaultPollSchedule()
 	var prev time.Duration

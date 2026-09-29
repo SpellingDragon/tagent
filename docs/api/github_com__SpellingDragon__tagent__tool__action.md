@@ -1,5 +1,11 @@
 package action // import "github.com/SpellingDragon/tagent/tool/action"
 
+Package action 提供 exec 类动作工具及其 tmux 会话承载：动作的发起与执行、会话存活
+判定、完成裁决（settle）、状态跃迁通知、轮询调度、跨重启的常驻恢复，以及供跨重启 重建闭包的 Declarative
+投影。长期行为判据不在此复述，见下列契约。
+
+契约: docs/wiki/tool/tool-architecture.md#action-tool 契约:
+docs/wiki/tool/tmux-action.md#liveness-first
 
 FUNCTIONS
 
@@ -157,12 +163,11 @@ func (ct *ActionTool) ReattachResidentSessions() int
 
 func (ct *ActionTool) SetDefaultTTLSource(src func() time.Duration)
     SetDefaultTTLSource installs the pull source for the spawn-time default
-    lifetime (introduce-durable-workflow-engine 6.4, spawner axis): the
-    composition root binds it to the owner's committed application record, so a
-    numeric-only rotation reaches every subsequent spawn without anyone pushing
-    a number into this tool. It replaces SetDefaultTaskTTL, which kept a second,
-    mutable copy of the same knob (and was a plain field: written on the reload
-    goroutine, read by business turns).
+    lifetime (spawner axis): the composition root binds it to the owner's
+    committed application record, so a numeric-only rotation reaches every
+    subsequent spawn without anyone pushing a number into this tool. It replaces
+    SetDefaultTaskTTL, which kept a second, mutable copy of the same knob (and
+    was a plain field: written on the reload goroutine, read by business turns).
 
 func (ct *ActionTool) SetResidentMetaDir(dir string)
     SetResidentMetaDir overrides the ResidentMeta directory post-construction.
@@ -295,7 +300,7 @@ type ResidentMeta struct {
 	ProbeFailures    int    `json:"probe_failures,omitempty"`
 	SpawnedAt        string `json:"spawned_at"`
 	// LastAdoptedAt is the last time an agent instance adopted (reattached or
-	// found already-tracked) this session — hardening-review-batch2 2.1/2.2.
+	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
 	// long-running session re-adopted across restarts is not an orphan no
 	// matter how old it is. Empty → fall back to SpawnedAt (legacy meta).
@@ -378,9 +383,9 @@ func (te *TmuxExecutor) CleanupOrphanSessions() int
     a pty (system-wide pty exhaustion was observed in the field). Best effort:
     a missing tmux server means nothing to clean. Returns the number killed.
 
-    R3（resident-continuity-r2-r4 2.1，orphan 语义重定义）：n- named 会话被排除—— cleanup
-    在装配时先于 reattach 执行，若纳入 named 会话则会屠杀全部常驻会话 （修复前语义冲突：枚举双条件修复会让 cleanup 杀光
-    n-）。orphan=仅无主生成名 会话；named 会话由 R3 重挂接管或由 ResidentMeta TTL sweep 兑现终局。
+    R3（orphan 语义重定义）：named 会话被排除—— cleanup 在装配时先于 reattach 执行，若纳入 named
+    会话则会屠杀全部常驻会话 （修复前语义冲突：枚举双条件修复会让 cleanup 杀光 n-）。orphan=仅无主生成名 会话；named 会话由 R3
+    重挂接管或由 ResidentMeta TTL sweep 兑现终局。
 
 func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOptions) (*TmuxSession, error)
     CreateSession creates a new tmux session with the command
@@ -388,6 +393,8 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
     契约: docs/wiki/tool/tmux-action.md#named-session-singleton
 
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error)
+    GetSessionOutput 返回该会话当前可见的输出：优先读流式记录文件（pipe），文件缺失或 为空时回落到 capture-pane 的最近
+    1000 行，该回落调用带 3s 超时。
 
 func (te *TmuxExecutor) GetSessionPIDPublic(sessionID string) (int, error)
     GetSessionPIDPublic exposes the pane process PID lookup.

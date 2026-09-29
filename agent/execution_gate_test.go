@@ -136,7 +136,7 @@ func TestExecutionGate_BlocksUnverifiedOnIterator(t *testing.T) {
 // input still commits via the inherited ReplayEvent, and finishDurableBatch's inbox-receipt
 // StoreEvent still succeeds — so a credentialed turn's assistant store fails (→ MarkRejected)
 // while the ack path remains functional. This makes the  loop guard the SOLE reason the
-// envelope stays un-acked (a real fail-before/pass-after discriminator), unlike an
+// envelope stays un-acked, unlike an
 // always-failing store that would also break the receipt write.
 type credFaultStore struct{ *memory.InMemoryStore }
 

@@ -54,6 +54,8 @@ func (r *ToolRegistry) GetToolAgentFactory(id string) (agent.ToolAgentFactory, b
 	return agent.GetToolAgentFactory(id)
 }
 
+var registerOnce sync.Once
+
 // RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
 // Called once in tagent.New() before config validation.
 // Uses sync.Once for idempotency — safe to call multiple times.
@@ -64,8 +66,6 @@ func (r *ToolRegistry) GetToolAgentFactory(id string) (agent.ToolAgentFactory, b
 //   - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search, duckduckgo_search, memory_query
 //   - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
 //   - mcp_call: generic MCP execution gateway
-var registerOnce sync.Once
-
 func RegisterBuiltinTools() error {
 	registerOnce.Do(func() {
 		// exec: shell command executor

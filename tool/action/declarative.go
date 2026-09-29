@@ -154,7 +154,7 @@ func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.De
 	return spec
 }
 
-// rebuiltResumeClosure（R3 2.7④，跨重启 resume 真供能）：镜像 resumeClosure 主体
+// rebuiltResumeClosure（R3：跨重启 resume 真供能）：镜像 resumeClosure 主体
 // （TouchSession 校验→baseline→SendKeys→Rearm），但 detector 为新建——重挂场景
 // 下 reattachOne 的原 detector 归属 monitor 回调链，此处新 detector 服务本轮
 // resume 的 settle 检测（watch 兕底仍由 reattach detector 承担）。R3 重挂前

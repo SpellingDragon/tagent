@@ -14,6 +14,8 @@ import (
 )
 
 // TestExtractAction_JSON parses action from JSON message content.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#extra-params
 func TestExtractAction_JSON(t *testing.T) {
 	inv := &agent.Invocation{
 		Message: model.Message{Content: `{"action":"progress","request":"test"}`},

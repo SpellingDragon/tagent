@@ -25,10 +25,6 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// introduce-durable-workflow-engine §2.1/§2.2 契约测：候选快照私有性与
-// 组织指纹覆盖面。断言对象是「换代所用配置真的是新配置」与「执行配置变更
-// 必然换代」，不是日志编号。
-
 // populatedAgentConfig sets every AgentConfig field to a distinct non-zero
 // value so the fingerprint subset can be audited field by field.
 func populatedAgentConfig() AgentConfig {
@@ -107,8 +103,6 @@ func TestOrgFingerprint_AuditsEveryAgentConfigField(t *testing.T) {
 			"field %q is neither in the fingerprint subset nor in fingerprintExcludedFields — a change to it would not force a new generation", name)
 	}
 
-	// Reverse drift: the subset must not carry keys AgentConfig no longer has
-	// (a stale key would keep fingerprinting a dead field).
 	for key := range inSubset {
 		found := false
 		for i := 0; i < acType.NumField(); i++ {
@@ -142,7 +136,6 @@ func TestOrgFingerprint_CoversFullToolRef(t *testing.T) {
 	baseFP, err := computeOrgFingerprint(&base)
 	require.NoError(t, err)
 
-	// editMain replaces the (non-addressable) map value after mutating a copy.
 	editMain := func(c *Config, mutate func(*AgentConfig)) {
 		ac := c.Agents["main"]
 		mutate(&ac)
@@ -164,9 +157,6 @@ func TestOrgFingerprint_CoversFullToolRef(t *testing.T) {
 		{"last tool removed", func(a *AgentConfig) { a.Tools = nil }},
 	}
 	for _, m := range mutations {
-		// Per-case deep copy through the same Clone the runtime uses: a shallow
-		// struct copy would share Tools' backing array / Properties' map and let
-		// one case mutate the base fixture.
 		c2, cerr := base.Clone()
 		require.NoError(t, cerr)
 		editMain(c2, m.mutate)
@@ -206,7 +196,6 @@ func TestConfigClone_IsPrivateAndFingerprintNeutral(t *testing.T) {
 	require.Equal(t, mfp, clonedMemFP, "clone must be memory-fingerprint-neutral")
 	require.Equal(t, cfg.ConfigPath, clone.ConfigPath, "json:\"-\" field must survive the clone")
 
-	// Mutate every aliased container the clone could have shared.
 	clone.Agents["main"] = AgentConfig{Model: "mutated"}
 	clone.Agents["newagent"] = AgentConfig{Model: "x"}
 	delete(clone.Providers, "p1")
@@ -248,7 +237,6 @@ func TestOrgCoordinator_SameContentAndPublishIdentity(t *testing.T) {
 	require.False(t, c.sameAsCurrent("ffffffff"))
 	require.Nil(t, c.rollbackSource(), "nothing has been published yet — no rollback source")
 
-	// Structural change: swap reports the superseded fp and advances the sequence.
 	fpB := "bbbb1111"
 	oldFP, gen := c.swap(fpB, startup, nil)
 	require.Equal(t, fpA, oldFP, "the log/alert line names the superseded fingerprint")
@@ -257,8 +245,6 @@ func TestOrgCoordinator_SameContentAndPublishIdentity(t *testing.T) {
 	require.False(t, c.sameAsCurrent(fpA), "superseded content must not count as current")
 	require.True(t, c.sameAsCurrent(fpB), "a same-content reload short-circuits here — no swap, no rebuild")
 
-	// Rollback republishes the old CONTENT under a NEW sequence (D4: content hash
-	// is not a publish identity) and leaves the ring pointing at the same source.
 	rg := c.recordRollback(fpA, startup, nil)
 	require.Equal(t, 2, rg.seq)
 	require.Equal(t, fpA, c.current.fingerprint)
@@ -266,7 +252,6 @@ func TestOrgCoordinator_SameContentAndPublishIdentity(t *testing.T) {
 	require.Equal(t, fpA, c.rollbackSource().fingerprint)
 	require.NotNil(t, rg.cfg, "a rollback stores the restored full config, not a nil alias")
 
-	// Diagnostics: a rejection is visible until a publish succeeds.
 	c.recordFailure(errSentinel{})
 	require.EqualError(t, c.lastFailure(), "sentinel")
 	_, gen3 := c.swap("cccc2222", startup, nil)
@@ -277,21 +262,6 @@ func TestOrgCoordinator_SameContentAndPublishIdentity(t *testing.T) {
 type errSentinel struct{}
 
 func (errSentinel) Error() string { return "sentinel" }
-
-// R01／§2.3（design D3「事务式候选」）契约测。
-//
-// 缺陷：热增删里 `added`/`addedNames` 只在 `buildAgent` **成功返回后**由 seed 差集
-// 填充，且 `rc.resident.Add` 在循环内每轮就发布。于是：
-//   1. 父 agent 在 DFS 里递归建好依赖 Z（Z 已 registerStoreOwner + 持独有 store），
-//      随后父自身步骤失败时 `return` 早于 seed 差集 → Z 不进回退清单 → 幽灵 owner；
-//      失败父自身的 owner 登记也不被撤销（它不进 cache，外层无从枚举）。
-//   2. 第一个 top 的 Add 已换入在线面，若后续 top 失败才 Unpublish → 期间并发读
-//      可见未提交候选的新增者（半提交）。
-//
-// 本合同：一次被拒候选结束后，owner 归属必须与候选起点**逐名相等**（无净泄漏），
-// 序号不前进，在线面不变。用「父成功依赖子 + 父自身在递归之后才失败」这一确定
-// 时序触发：aaa_parent 引用 zzz_dep（合法、先建），随后 aaa_parent 因缺失的冥想
-// 提示词文件在其依赖建成之后才失败。
 
 const candTxnStartupYAML = `entry: main
 prompt_dir: resources/prompts
@@ -312,9 +282,9 @@ agents:
       inline: "keep"
 `
 
-// main delegates to keep AND aaa_parent; aaa_parent delegates to the valid
-// zzz_dep (built first via recursion) and THEN fails on a missing meditation
-// prompt file — after its dependency is already resident-registered.
+// candTxnRefusedYAML 让 main 同时委派 keep 与 aaa_parent，aaa_parent 再委派合法的 zzz_dep：
+// 依赖经递归先建成并登记属主，aaa_parent 随后因缺失冥想提示词文件、在它的依赖建成之后才失败，
+// 以此确定时序触发「被拒候选必须完全退场」。
 const candTxnRefusedYAML = `entry: main
 prompt_dir: resources/prompts
 model: test-model
@@ -370,7 +340,6 @@ func TestOrgHotAdd_RefusedCandidateLeaksNoOwner(t *testing.T) {
 	require.NotContains(t, owners0, "aaa_parent")
 	gen0 := ta.OrgDiagnostics()["generation"]
 
-	// Trigger the refused candidate (aaa_parent fails after zzz_dep is built).
 	write(candTxnRefusedYAML)
 	ta.CheckOrgReload()
 
@@ -379,15 +348,11 @@ func TestOrgHotAdd_RefusedCandidateLeaksNoOwner(t *testing.T) {
 	require.NotNil(t, st["lastFailure"], "and the refusal is diagnosable")
 
 	after := ta.StoreOwnerSnapshot()
-	// Nothing the candidate registered may survive it — the recursively-built
-	// dependency Z and the late-failed parent must both be revoked, leaving owner
-	// attribution exactly as at the candidate start.
 	require.Equal(t, owners0, after,
 		"a refused candidate must revoke EVERY owner it registered (recursive deps + failed parent): no orphan, no leak")
 	require.NotContains(t, after, "zzz_dep", "the recursively-built dependency's owner must be revoked")
 	require.NotContains(t, after, "aaa_parent", "the late-failed parent's owner must be revoked")
 
-	// The live topology is untouched (no half commit).
 	require.NotContains(t, residentCacheForTest(ta), "zzz_dep")
 	require.NotContains(t, residentCacheForTest(ta), "aaa_parent")
 	require.Equal(t, []string{"keep"}, entryToolNames(ta), "the still-effective generation keeps routing")
@@ -406,7 +371,6 @@ func TestOrgHotAdd_LegalSharedDependencyBuildsOnce(t *testing.T) {
 	ta := buildOwnerAgent(t, yamlPath)
 	gen0 := ta.OrgDiagnostics()["generation"]
 
-	// Two new parents sharing one dep, all valid → must hot-add all three once.
 	legalYAML := `entry: main
 prompt_dir: resources/prompts
 model: test-model
@@ -456,8 +420,6 @@ agents:
 	require.Contains(t, owners, "shared_dep")
 	require.Contains(t, owners, "p1")
 	require.Contains(t, owners, "p2")
-	// The dep behind both parents is one and the same instance — a second writer
-	// would have built a distinct agent for shared_dep under the second parent.
 	require.Equal(t, []string{"p1", "p2"}, entryToolNames(ta))
 }
 
@@ -541,14 +503,12 @@ func TestTxn_RefusedCandidateDiscardsInReverseAcquisitionOrder(t *testing.T) {
 	require.NoError(t, err, "New")
 	t.Cleanup(func() { _ = entry.Close() })
 
-	write(txnYAML(t, "model-a", true, true)) // hot-add aaa_probe + fail zzz_probe
+	write(txnYAML(t, "model-a", true, true))
 	entry.CheckOrgReload()
 
 	order := orgLastDiscardOrder()
 	require.NotEmpty(t, order,
 		"refused candidate must record its discard order (probe) — cleanup ran without the responsibility table")
-	// aaa_probe 是唯一完整建成的 owner（zzz 在 store 创建处失败，仅登记）；逆序
-	// 要求 zzz 的部分登记先于 aaa 的完整 Close 撤销。
 	require.Equal(t, []string{"zzz_probe", "aaa_probe"}, order,
 		"S-B: discard must unwind in REVERSE acquisition order (zzz partial first, then aaa)")
 }
@@ -583,8 +543,6 @@ func TestTxn_RefusedCandidateLeavesNoOwnerOrTableResidue(t *testing.T) {
 		"refused candidate must revoke every owner registration it made")
 }
 
-// orgLastDiscardOrder moved to its only consumer (2026-09-27 dead-code audit):
-// TEST-only introspection of the candidate transaction order.
 // orgLastDiscardOrder returns the most recent candidate-discard order (TEST
 // introspection only; nil before the first discard).
 func orgLastDiscardOrder() []string {
@@ -594,15 +552,8 @@ func orgLastDiscardOrder() []string {
 	return nil
 }
 
-// 回滚与正向热更共用同一条候选通路：私有候选 overlay → 唯一提交点 commit → 其后任何
-// 失败都由 defer 的 abandon 按获取逆序整体回退，所以后段失败不会半改在线拓扑。三行验收各钉一测：
-//
-//	(d) 回滚后段失败不半改：未发布的 owner 不得留在在线清册，其存储租约不得被持有
-//	(b) 热增 → 数值更新 → 真实在途调用 → 回滚：宿主结果与寿命都取该 agent 自己的消费者
-//	(c) 移除父项保留共享子项后回滚：共享子仍恰好一个 owner（二次获取会失败关闭）
-
 const (
-	g24Tool   = "g24_flaky_tool" // unique: RegisterPlainTool panics on a duplicate id
+	g24Tool   = "g24_flaky_tool"
 	g24Leaf   = "g24_leaf"
 	g24Mid    = "g24_mid"
 	g24B      = "g24_b"
@@ -614,10 +565,9 @@ const (
 // stageGate is the injected REAL failure: a plain-tool factory that cannot serve
 // past a call budget. Nothing in the product path knows about it.
 //
-// The registration is process-global and duplicate ids panic (§0 口径②), so the
-// gate is a package-level singleton armed once and RESET per run — which keeps
-// this file usable under a `-count>1` repetition gate instead of needing an
-// exemption.
+// The registration is process-global and a duplicate id panics, so the gate is a
+// package-level singleton armed once and RESET per run — which keeps this file
+// usable under a -count>1 repetition gate instead of needing an exemption.
 type stageGate struct {
 	limit atomic.Int64
 	calls atomic.Int64
@@ -689,7 +639,7 @@ agents:
 // - 预算取自实测的冷启动计数，因此度量的是回滚自身的次序，而不是猜出的常量。
 // 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 func TestLateStageFailureLeavesNoOwnerPublished(t *testing.T) {
-	gate := armStageGate(t) // cold start succeeds unconditionally; the budget is set below
+	gate := armStageGate(t)
 
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -705,24 +655,17 @@ func TestLateStageFailureLeavesNoOwnerPublished(t *testing.T) {
 	leafBefore := residentCacheForTest(entry)[g24Leaf]
 	require.NotNil(t, leafBefore, "precondition: leaf is resident on the startup generation")
 
-	// Let exactly ONE more tool construction succeed — the rollback's re-acquisition —
-	// and fail the face build that follows it.
 	coldCalls := gate.calls.Load()
 	gate.limit.Store(coldCalls + 1)
 
-	// Structural removal: leaf becomes unrouted and retires.
 	tick = writeGateConfig(t, yamlPath, leafYAML(false, store), tick)
 	entry.CheckOrgReload()
 	genAfterRemoval := diagInt64(t, entry.OrgDiagnostics(), "generation")
 	waitFor(t, "the unrouted leaf retired", func() bool {
 		return residentCacheForTest(entry)[g24Leaf] == nil
 	})
-	// The removal itself rebuilt no leaf tools; note the call count so the
-	// rollback's first tool construction is the re-acquisition.
 	gate.limit.Store(gate.calls.Load() + 1)
 
-	// Roll back to the generation routing leaf: re-acquisition succeeds, the face
-	// build fails — the last stage before publishing.
 	entry.Rollback()
 
 	require.Equal(t, genAfterRemoval, diagInt64(t, entry.OrgDiagnostics(), "generation"),
@@ -783,20 +726,16 @@ func TestRollbackOfHotAddNumericWithInFlightTurn(t *testing.T) {
 	}()
 	t.Cleanup(func() { <-done })
 
-	// (1) hot-add B → structural publish.
 	tick = writeGateConfig(t, yamlPath, ownerBYAML(true, 2, "1m"), tick)
 	entry.CheckOrgReload()
 	ownerB := residentCacheForTest(entry)[g24B]
 	require.NotNil(t, ownerB, "B became a resident owner")
 
-	// (2) numeric-only update on B (structure identical).
 	tick = writeGateConfig(t, yamlPath, ownerBYAML(true, 7, "5m"), tick)
 	entry.CheckOrgReload()
 	require.Equal(t, 7, ownerB.OrgKeepRecent(), "B's own compressor consumer took the update")
 	require.Equal(t, 5*time.Minute, ownerB.TaskManager().TerminalTTL(), "B's own manager took the update")
 
-	// (3) a real delegation across the rollback: park B mid-call, roll back,
-	// release; the pinned call must still be served.
 	bGate := make(chan struct{})
 	m.armGate("SUB-B", bGate)
 	t.Cleanup(func() { disarmGate(bGate) })
@@ -812,22 +751,18 @@ func TestRollbackOfHotAddNumericWithInFlightTurn(t *testing.T) {
 		return false
 	})
 
-	entry.Rollback() // publishes a new generation while B's call is in flight
+	entry.Rollback()
 	servedBefore := countServed(m.snapshot(), "SUB-B")
 	disarmGate(bGate)
 	waitFor(t, "the in-flight B call completed", func() bool {
 		return countServed(m.snapshot(), "SUB-B") > servedBefore
 	})
 
-	// (4) the rollback restored the ring source through the same record: B's OWN
-	// consumers moved back, and B is still exactly one owner instance.
 	require.Equal(t, 2, ownerB.OrgKeepRecent(), "§2.4(b)：回滚把 B 自身的 keepRecent 恢复到环源值")
 	require.Equal(t, time.Minute, ownerB.TaskManager().TerminalTTL(), "§2.4(b)：回滚把 B 自身的 terminal TTL 恢复到环源值")
 	require.Same(t, ownerB, residentCacheForTest(entry)[g24B],
 		"§2.4(b)：回滚推进执行面，不另造第二个 B owner（单一 owner＝实例与 store 身份不动）")
 
-	// (5) and a FRESH call after the rollback is served too (the new generation is
-	// live, not a half-published face).
 	if _, err := entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("after")); err != nil {
 		t.Fatal(err)
 	}
@@ -904,10 +839,8 @@ func TestRemovedParentRollbackKeepsSharedChildSingleOwner(t *testing.T) {
 		"§2.4(c)：共享子仍是同一个 owner，不因回滚被再造/重取")
 }
 
-// l3YAML renders a single-"main" org. `prompt` is FINGERPRINTED (system_prompt);
-// keep/max/threshold/terminal are hot-applicable (excluded from the org
-// fingerprint), so changing only those takes the numeric-only path and changing
-// prompt forces a structural swap — the two axes §2.4/L-3 keeps distinct.
+// l3YAML renders a single-entry org named main whose system_prompt participates in the
+// org fingerprint, while keep/max/threshold/terminal are hot-applicable numerics outside it.
 func l3YAML(prompt string, keep, max int, threshold float64, terminal string) string {
 	return "entry: main\n" +
 		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key_env: TAGENT_TEST_API_KEY\n" +
@@ -964,17 +897,14 @@ func TestFullConfigAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = entry.Close() }()
 
-	// Baseline: consumers seeded; startup is generation 0, revision 0, no publish.
 	require.Equal(t, 2, entry.OrgKeepRecent())
-	require.Equal(t, 2000, entry.OrgBudgetLine()) // 4000 × 0.5
+	require.Equal(t, 2000, entry.OrgBudgetLine())
 	d := entry.OrgDiagnostics()
 	require.EqualValues(t, 0, diagInt64(t, d, "generation"))
 	require.EqualValues(t, 0, diagInt64(t, d, "revision"))
 	_, hasPub := diagTime(t, d, "lastPublishedAt")
 	require.False(t, hasPub, "startup is not a structural publish")
 
-	// (1) First STRUCTURAL update (prompt A→B): generation 1, revision 1, a
-	// structural publish time appears, hot consumers unchanged (only prompt moved).
 	write(l3YAML("B", 2, 4000, 0.5, "1m"))
 	entry.CheckOrgReload()
 	d = entry.OrgDiagnostics()
@@ -984,9 +914,6 @@ func TestFullConfigAndRollback(t *testing.T) {
 	require.True(t, hasPub)
 	require.Equal(t, 2000, entry.OrgBudgetLine(), "prompt-only change leaves the budget")
 
-	// (2) NUMERIC-ONLY update (keep 2→7, max 4000→9000, terminal 1m→5m): the
-	// real consumers move, revision bumps, generation does NOT, lastPublishedAt
-	// stays frozen (no structure moved), lastAppliedAt advances.
 	lastApplied1, _ := diagTime(t, d, "lastAppliedAt")
 	write(l3YAML("B", 7, 9000, 0.5, "5m"))
 	entry.CheckOrgReload()
@@ -1001,16 +928,12 @@ func TestFullConfigAndRollback(t *testing.T) {
 	lastApplied2, _ := diagTime(t, d, "lastAppliedAt")
 	require.True(t, lastApplied2.After(lastApplied1), "lastAppliedAt advances on a numeric-only apply")
 
-	// (3) IDENTICAL re-save (same numerics, mtime bumped): must not rotate.
 	write(l3YAML("B", 7, 9000, 0.5, "5m"))
 	entry.CheckOrgReload()
 	d = entry.OrgDiagnostics()
 	require.EqualValues(t, 2, diagInt64(t, d, "revision"), "semantically identical apply must not rotate/advance (D9)")
 	require.EqualValues(t, 1, diagInt64(t, d, "generation"))
 
-	// (4) ROLLBACK restores the PRE-NUMERIC full config: keep/max/terminal revert
-	// (this is what numeric-only ring rotation bought), and it publishes a NEW
-	// generation + advances lastPublishedAt.
 	revBeforeRollback := diagInt64(t, d, "revision")
 	entry.Rollback()
 	d = entry.OrgDiagnostics()
@@ -1022,10 +945,6 @@ func TestFullConfigAndRollback(t *testing.T) {
 	pub3, _ := diagTime(t, d, "lastPublishedAt")
 	require.True(t, pub3.After(pub1), "rollback is a structural publish → lastPublishedAt advances")
 
-	// (5) CONSECUTIVE rollback: the ring faces the same source (documented
-	// ping-pong), so once the current generation already equals that source a
-	// further Rollback is a SAFE NO-OP — it must not half-swap, panic, or spin a
-	// new generation for identical content (sameFullAsCurrent short-circuit).
 	entry.Rollback()
 	d = entry.OrgDiagnostics()
 	require.EqualValues(t, 2, diagInt64(t, d, "generation"), "a rollback to identical content must not bump the generation")
@@ -1033,9 +952,6 @@ func TestFullConfigAndRollback(t *testing.T) {
 	require.Equal(t, 2000, entry.OrgBudgetLine())
 	require.Equal(t, time.Minute, entry.TaskManager().TerminalTTL())
 
-	// (6) A NEW numeric-only change followed by rollback still walks forward:
-	// generation advances to 3 and the fresh value is reverted, proving the ring
-	// is not permanently stuck after the (5) short-circuit.
 	write(l3YAML("B", 9, 4000, 0.5, "1m"))
 	entry.CheckOrgReload()
 	require.Equal(t, 9, entry.OrgKeepRecent())
@@ -1068,7 +984,6 @@ func TestRollbackHookSurvivesNumericOnlyFirstUpdate(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 	require.Equal(t, 2, entry.OrgKeepRecent())
 
-	// FIRST update is numeric-only: consumers move, ring rotates, no structure.
 	write(l3YAML("A", 7, 9000, 0.5, "5m"))
 	entry.CheckOrgReload()
 	d := entry.OrgDiagnostics()
@@ -1077,9 +992,6 @@ func TestRollbackHookSurvivesNumericOnlyFirstUpdate(t *testing.T) {
 	require.Equal(t, 7, entry.OrgKeepRecent())
 	require.Equal(t, 4500, entry.OrgBudgetLine())
 
-	// Rollback with NO structural publish ever must still restore the startup
-	// values through the real consumers and publish a new generation. Before
-	// the fix this was a silent no-op (hook never installed): keep stays 7.
 	entry.Rollback()
 	d = entry.OrgDiagnostics()
 	require.EqualValues(t, 1, diagInt64(t, d, "generation"), "rollback publishes a new generation")
@@ -1088,8 +1000,6 @@ func TestRollbackHookSurvivesNumericOnlyFirstUpdate(t *testing.T) {
 	require.Equal(t, 2000, entry.OrgBudgetLine(), "rollback restores the startup budget")
 	require.Equal(t, time.Minute, entry.TaskManager().TerminalTTL(), "rollback restores the startup terminal TTL")
 
-	// The ring walked forward: a second rollback faces identical content and is
-	// a safe no-op (values stay at the restored startup config).
 	entry.Rollback()
 	d = entry.OrgDiagnostics()
 	require.EqualValues(t, 1, diagInt64(t, d, "generation"), "a rollback to identical content must not spin a new generation")
@@ -1117,11 +1027,11 @@ func TestRejectedCandidateKeepsBothAxes(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = entry.Close() }()
 
-	write(l3YAML("A", 6, 8000, 0.6, "2m")) // numeric-only, applies
+	write(l3YAML("A", 6, 8000, 0.6, "2m"))
 	entry.CheckOrgReload()
 	before := entry.OrgDiagnostics()
 	require.Equal(t, 6, entry.OrgKeepRecent())
-	require.Equal(t, 4800, entry.OrgBudgetLine()) // 8000 × 0.6
+	require.Equal(t, 4800, entry.OrgBudgetLine())
 	genB, revB := diagInt64(t, before, "generation"), diagInt64(t, before, "revision")
 	appliedB, _ := diagTime(t, before, "lastAppliedAt")
 
@@ -1133,7 +1043,6 @@ func TestRejectedCandidateKeepsBothAxes(t *testing.T) {
 	appliedA, _ := diagTime(t, after, "lastAppliedAt")
 	require.True(t, appliedA.Equal(appliedB), "a rejection must not move lastAppliedAt")
 	require.NotNil(t, after["lastFailure"], "the rejection reason must be observable")
-	// Real consumers unchanged (no half-swap).
 	require.Equal(t, 6, entry.OrgKeepRecent())
 	require.Equal(t, 4800, entry.OrgBudgetLine())
 }
@@ -1152,20 +1061,16 @@ func TestCoordinatorHotApplyRevision(t *testing.T) {
 	require.EqualValues(t, 0, c.status().Revision)
 	require.Zero(t, c.status().LastPublished)
 
-	// Structural publish: gen 1, revision 1, publish time set.
 	c.swap(fp, base, nil)
 	require.EqualValues(t, 1, c.status().Generation)
 	require.EqualValues(t, 1, c.status().Revision)
 	require.False(t, c.status().LastPublished.IsZero())
 	pubAt := c.status().LastPublished
 
-	// Identical hot apply: no rotation, no advance.
 	require.False(t, c.recordHotApply(base, nil))
 	require.EqualValues(t, 1, c.status().Revision)
 	require.EqualValues(t, 1, c.status().Generation)
 
-	// Changed hot apply: rotates the ring + bumps revision + advances lastApplied,
-	// but leaves generation and lastPublishedAt frozen.
 	changed := &Config{Entry: "main", Agents: map[string]AgentConfig{
 		"main": {KeepRecentTasks: 7, MaxTokens: 9000, CompressThreshold: 0.5},
 	}}
@@ -1176,7 +1081,6 @@ func TestCoordinatorHotApplyRevision(t *testing.T) {
 	require.True(t, st.LastPublished.Equal(pubAt), "hot apply must not move lastPublishedAt")
 	require.False(t, st.LastApplied.Equal(st.LastPublished))
 
-	// The rollback source now holds the PRE-change full config.
 	src := c.rollbackSource()
 	require.NotNil(t, src)
 	require.NotNil(t, src.cfg)
@@ -1198,11 +1102,9 @@ func sdCloseYAML(t testing.TB, routed []string, storeOf func(name string) string
 	return "entry: main\nagents:\n  main:\n    system_prompt:\n      inline: \"MAIN\"\n    memory:\n      type: memory\n    tools:\n" + tools + defs
 }
 
-// assertStoreWriterFree proves the owner's store lease was ACTUALLY handed back:
-// the single-writer lock on that path can be taken exclusively by this test.
-// Releasing the lease is the resource-exit event §4.3/D8 demands on Close —
-// "之后恰一次释放组件、store lease 和登记，无需下个用户请求" — and a lock still
-// held would mean either a leak or a still-live writer.
+// assertStoreWriterFree proves that a store lease really was handed back: the
+// single-writer lock on that path must be acquirable by this test alone. A lock that
+// is still held means either a leak or a live writer, so the exit is checked here.
 func assertStoreWriterFree(t *testing.T, path string) {
 	t.Helper()
 	probe, err := os.OpenFile(filepath.Join(canonicalize(path), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
@@ -1234,21 +1136,17 @@ func TestOrgClose_CoversCandidatePublishedDuringDrain(t *testing.T) {
 	require.NoError(t, err)
 	entry, err := New(*cfg, WithModel(&stubModel{name: "m"}), WithConfigPath(yamlPath))
 	require.NoError(t, err)
-	// Belt for the failure path: a parked build must never survive a bail-out,
-	// or the deferred Close would hang the package (the round-76 lesson).
 	park := newBuildPark()
 	defer park.disarm()
 	t.Cleanup(func() { _ = entry.Close() })
 
-	// Structural hot-add; the next business acquire schedules the build, which
-	// parks while holding `mu`.
 	write(sdCloseYAML(t, []string{"sub1", "sub2"}, storeOf))
 	_ = acquireWithin(t, entry, 2*time.Second)
 	park.waitEntered(t)
 
 	closed := make(chan error, 1)
 	go func() { closed <- entry.Close() }()
-	time.Sleep(50 * time.Millisecond) // let Close reach its bounded drain
+	time.Sleep(50 * time.Millisecond)
 	park.letGo()
 
 	select {
@@ -1269,14 +1167,6 @@ func TestOrgClose_CoversCandidatePublishedDuringDrain(t *testing.T) {
 	assertStoreWriterFree(t, storeOf("sub1"))
 	assertStoreWriterFree(t, storeOf("sub2"))
 }
-
-// §4.3（D7）子树热增删的常驻所有权契约。委派行为面（新代的声明与实际调用目标随
-// 发布改变）由 TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals
-// 覆盖；本文件只管**所有权**：谁持有 store、移除后谁保留、同名重入复用谁、被拒
-// 候选的新增是否回退。
-//
-// 断言用实例/store 身份（require.Same / NotSame），因为「owner 有没有被复制或替换」
-// 就是这些指针本身；行为侧的真实路由证据已由委派测给出。
 
 // ownerYAML renders entry "main" delegating to `targets`（sub1/sub2 始终被定义，
 // 所以移除只改变可达性，不改变配置里存在什么）。sub2 的 memory 段作为参数，便于
@@ -1302,9 +1192,10 @@ func ownerYAML(t testing.TB, targets []string, sub2Mem string) string {
 	return head + toolLines + defs + sub2Mem + "\n"
 }
 
-// 每个 agent 一个独立 store 实例，才有可观察的身份。路径经 testStore 挪出工作树并
-// 按用例隔离——早先此处注释声称“type: memory 就不落盘”，是错的：resources.acquire 在
-// 按 type 分派之前无条件 MkdirAll + 取目录写锁，相对路径会在仓库根造出目录。
+// sub2MemDefault renders sub2 with its own store path: each agent needs a distinct store
+// to have observable identity. testStore moves the path out of the working tree and
+// isolates it per case, because acquire makes the directory and takes its flock before
+// dispatching on the store kind — a memory store still touches the filesystem.
 func sub2MemDefault(t testing.TB) string {
 	t.Helper()
 	return fmt.Sprintf("      type: memory\n      path: %q\n", testStore(t, "own-sub2"))
@@ -1367,14 +1258,9 @@ func TestOrgHotRemove_KeepsOwnerButStopsRouting(t *testing.T) {
 	require.NotNil(t, table["sub2"], "sub2 is resident at startup")
 	sub2Instance, sub2Store := table["sub2"], table["sub2"].MemStore()
 	require.NotSame(t, table["main"].MemStore(), sub2Store, "sub2 owns its own store")
-	// §4.3 migrated this case: an unrouted owner is kept while it is STILL NEEDED and
-	// retired once it is not. The claim under test ("unrouted, not retired early") is
-	// about the drain window, so the window now has a real reference in it — taken on
-	// the same accounting the reclaim gate reads.
 	drainRef := sub2Instance.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer drainRef.Release()
 
-	// 移除 sub2 的可路由性（其定义仍在配置里——可达集合才是拓扑真源）。
 	write(ownerYAML(t, []string{"sub1"}, sub2MemDefault(t)))
 	ta.CheckOrgReload()
 
@@ -1398,15 +1284,9 @@ func TestOrgHotAdd_ReentryReusesOriginalOwnerUnlessStorageChanged(t *testing.T) 
 	ta := buildOwnerAgent(t, yamlPath)
 	orig := residentCacheForTest(ta)["sub2"]
 	genAtStart := ta.OrgDiagnostics()["generation"]
-	// §4.3 migrated both cases below: they assert "same-name re-entry reuses the
-	// ORIGINAL owner" / "the refusal keeps the original owner in place", which is the
-	// semantics WHILE the owner is still live. An idle removed owner is now retired
-	// (TestRetire_*), so this test holds one reference to stay in its own subject.
 	heldOut := orig.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer heldOut.Release()
 
-	// 1) remove, then re-add with the SAME storage section → the original owner is
-	// reused: the same instance, the same store, and NOT a freshly built second one.
 	write(ownerYAML(t, []string{"sub1"}, sub2MemDefault(t)))
 	ta.CheckOrgReload()
 	write(ownerYAML(t, []string{"sub1", "sub2"}, sub2MemDefault(t)))
@@ -1418,8 +1298,6 @@ func TestOrgHotAdd_ReentryReusesOriginalOwnerUnlessStorageChanged(t *testing.T) 
 	require.Contains(t, entryToolNames(ta), "sub2", "…and is routable again")
 	require.Greater(t, ta.OrgDiagnostics()["generation"], genAtStart, "the re-add is a real publish")
 
-	// 2) re-entry with a CHANGED storage section → refused: the candidate would put
-	// a different store behind a name whose original owner still holds the old one.
 	write(ownerYAML(t, []string{"sub1"}, sub2MemDefault(t)))
 	ta.CheckOrgReload()
 	before := ta.OrgDiagnostics()["generation"]
@@ -1436,8 +1314,6 @@ func TestOrgHotAdd_ReentryReusesOriginalOwnerUnlessStorageChanged(t *testing.T) 
 		"the refusal keeps the ORIGINAL owner in place — the moved store was never adopted")
 	require.NotContains(t, entryToolNames(ta), "sub2", "and the refused candidate routes nowhere")
 
-	// 3) the refusal is sticky: re-checking the same un-effective storage change while
-	// editing an unrelated field still refuses (no bypass through a second check).
 	write(ownerYAML(t, []string{"sub1", "sub2"}, sub2MemMoved(t)))
 	ta.CheckOrgReload()
 	require.Equal(t, before, ta.OrgDiagnostics()["generation"], "the refusal does not lapse into acceptance")
@@ -1454,8 +1330,6 @@ func TestOrgHotAdd_NewAgentMayCarryItsOwnMemorySection(t *testing.T) {
 	ta := buildOwnerAgent(t, yamlPath)
 	require.NotContains(t, residentCacheForTest(ta), "sub2")
 
-	// sub2 comes back only as a NEW name relative to the reachable topology, with a
-	// memory section no existing owner holds.
 	write(ownerYAML(t, []string{"sub1", "sub2"}, sub2MemInMemory))
 	ta.CheckOrgReload()
 
@@ -1485,20 +1359,17 @@ func TestOrgHotAdd_UnroutedDefinitionChangeMustNotFreezeReload(t *testing.T) {
 	require.NotSame(t, entry.MemStore(), sub2Store, "precondition: sub2 owns its own store")
 	gen0 := entry.OrgDiagnostics()["generation"].(int64)
 
-	// ① 摘 sub2 路由 + 同时改它的路径：必须发布（不冻结）。
 	write(ownerYAML(t, []string{"sub1"}, sub2MemMoved(t)))
 	entry.CheckOrgReload()
 	require.Equal(t, gen0+1, entry.OrgDiagnostics()["generation"].(int64),
 		"a storage change on an UNROUTABLE-but-still-defined agent must not freeze orchestration hot-reload")
 	require.Nil(t, entry.OrgDiagnostics()["lastFailure"], "and nothing was refused")
 
-	// ② 一次与此无关的编排变更仍要生效（这才是 H-1 修前被永久冻住的形态）。
 	write(ownerYAMLWithModel(t, "test-model-x", []string{"sub1"}, sub2MemMoved(t)))
 	entry.CheckOrgReload()
 	require.Equal(t, gen0+2, entry.OrgDiagnostics()["generation"].(int64),
 		"later orchestration edits must still apply")
 
-	// ③ sub2 重入且存储与 owner 基准不符 → 仍拒（粘性），且原 owner/store 不被换掉。
 	write(ownerYAMLWithModel(t, "test-model-x", []string{"sub1", "sub2"}, sub2MemMoved(t)))
 	entry.CheckOrgReload()
 	st := entry.OrgDiagnostics()
@@ -1507,11 +1378,6 @@ func TestOrgHotAdd_UnroutedDefinitionChangeMustNotFreezeReload(t *testing.T) {
 	fail, ok := st["lastFailure"].(*OrgFailure)
 	require.True(t, ok, "and the refusal must be diagnosable")
 	require.Contains(t, fail.Error, "sub2")
-	// §4.3 migrated (and strengthened): by this point sub2 has been unrouted long
-	// enough to be retired, so "the original owner is still installed" is no longer
-	// the claim. What must survive is D7's real guarantee — the storage baseline is
-	// data (residentMemFP), so the re-entry is STILL refused, and the refused
-	// candidate must not have built any owner behind the name.
 	require.Nil(t, residentCacheForTest(entry)["sub2"],
 		"the original owner was retired while unrouted — no instance is held for a name nothing needs")
 	require.NotContains(t, entryToolNames(entry), "sub2",
@@ -1536,32 +1402,17 @@ func TestRelaunch_TargetResolvesAgainstPublishedGeneration(t *testing.T) {
 	cm := entry.ContextManager()
 	require.NotNil(t, cm.SubagentWrapper("sub1"), "the startup generation routes to sub1")
 
-	// 摘掉 sub1 的路由（定义保留——正是 §4.2 与 H-1 交界的形状）。
 	write(ownerYAML(t, []string{"sub2"}, sub2MemDefault(t)))
 	entry.CheckOrgReload()
 	require.Nil(t, cm.SubagentWrapper("sub1"),
 		"after a hot removal an explicit relaunch must NOT resolve sub1 — the retired binding may not be revived")
 	require.NotNil(t, cm.SubagentWrapper("sub2"), "the retained target keeps resolving (the face is not emptied by the removal)")
 
-	// 同名重入（存储未变）→ 必须重新可解析，且解析到的仍是**原 owner** 的绑定。
 	write(ownerYAML(t, []string{"sub1", "sub2"}, sub2MemDefault(t)))
 	entry.CheckOrgReload()
 	require.NotNil(t, cm.SubagentWrapper("sub1"), "re-entry makes it routable again")
 	require.Equal(t, int64(0), cm.ExecutorRefs().InFlightTurns, "sanity: a reload publishes a generation but pins no in-flight turn")
 }
-
-// §3.4「热增后真实数据归属——各给宿主返回与资源尾部证据」。
-//
-// 此前的热增证点全部停在**身份**上（`require.NotSame` 的两台 store），从未证明
-// 「热增 agent 的真实读写确实落在它自己的存储里」——身份不同不等于数据落对地方：
-// 一次把子 agent 回合写进宿主 store 的实现，在身份断言下照样全绿。本测把这条
-// 数据流走到底：真实委派 → 宿主拿到真实返回 → 子回合记录只出现在**子自己的**
-// store（宿主 store 里没有它）→ 真落盘字节可寻 → Close 后该数据的主人释放其
-// store 注册（资源尾部）。
-//
-// 判据刻意不用「宿主 store 完全找不到该文本」：委派返回本就以 action_command
-// 记录进宿主回合，那是正确行为而非泄漏。区分归属的是**记录种类**——子 agent
-// 自己回合的 agent_output 只能落在子自己的分区里。
 
 const (
 	hotAddReq  = "HOTADD-REQ-98"
@@ -1694,18 +1545,16 @@ func TestHotAddDataLandsInItsOwnStoreWithHostReturn(t *testing.T) {
 	yamlPath := filepath.Join(dir, "tagent.yaml")
 	write := ownerWriter(t, yamlPath)
 
-	// Cold: sub2 is DEFINED but unrouted, so it has no owner yet.
 	write(hotAddDataYAML(t, []string{"sub1"}))
 	cfg, err := LoadConfig(yamlPath)
 	require.NoError(t, err)
 	m := &hotAddDataModel{}
 	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
 	require.NoError(t, err)
-	defer func() { _ = entry.Close() }() // idempotent; the explicit Close below is the one under test
+	defer func() { _ = entry.Close() }()
 
 	require.Nil(t, residentCacheForTest(entry)["sub2"], "precondition: sub2 has no owner before it is routed")
 
-	// Hot-add: route sub2 — its owner is built on the hot path with its own store.
 	write(hotAddDataYAML(t, []string{"sub1", "sub2"}))
 	entry.CheckOrgReload()
 	sub2 := residentCacheForTest(entry)["sub2"]
@@ -1725,7 +1574,6 @@ func TestHotAddDataLandsInItsOwnStoreWithHostReturn(t *testing.T) {
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("start the hot-added work"))
 	require.NoError(t, err)
 
-	// (1) 宿主返回：the host turn really received the sub-agent's payload.
 	waitFor(t, "the hot-added owner served the delegation and the host got its answer", func() bool {
 		for _, req := range m.snapshot() {
 			for _, got := range toolResultsOf(req) {
@@ -1754,26 +1602,17 @@ func TestHotAddDataLandsInItsOwnStoreWithHostReturn(t *testing.T) {
 	require.GreaterOrEqual(t, countFacts(sub2Facts, "agent_output", hotAddAns), 1,
 		"§3.4：热增 owner 自己回合的产出必须落在它自己的 store 里（实测其记录集：%v）", sub2Facts)
 
-	// (3) 不串宿主：the host's store must not carry the sub-agent's own turn record.
-	// It legitimately carries the returned value as an action_command — that is the
-	// delegation result, not leakage; what must NOT appear there is a second owner's
-	// agent_output.
 	require.Zero(t, countFacts(entryFacts, "agent_output", hotAddAns),
 		"the hot-added owner's turn record must not be written into the host's store")
 
-	// (3b) 跨 owner 不可见：the host's store must not even hold a record under the
-	// sub-agent's partition — data does not migrate between owners' namespaces.
 	require.Empty(t, storeFacts(t, entry.MemStore(), "sub2", hotAddAns),
 		"the host store must carry no record under the hot-added owner's partition")
 
-	// (4) 真落盘：localfile means bytes on disk, so the attribution is physical.
 	storeDir := testStore(t, "hotadd-data-sub2")
 	waitFor(t, "the owner's data really persisted to its own store directory", func() bool {
 		return dirContains(t, storeDir, hotAddAns)
 	})
 
-	// (5) 资源尾部：the owner that held this data releases its store registration on
-	// the organization's Close.
 	require.Contains(t, entry.StoreOwnerSnapshot(), "sub2", "precondition: the hot-added owner registered its store")
 	require.NoError(t, entry.Close())
 	require.NotContains(t, entry.StoreOwnerSnapshot(), "sub2",
@@ -1797,22 +1636,6 @@ func dirContains(t *testing.T, root, marker string) bool {
 	})
 	return found
 }
-
-// 轮九十一（evidence §5.47）：② 工厂公开合同一次迁移的失败契约。
-//
-// 轮九十把发布改为「每个可达 owner 都 stage→wire→activate」，而旧合同的工厂产物是
-// **整只 agent**（装配中段不产配置，cfg 为 nil），于是暴露出两类工厂 owner 特有缺陷
-// ——这两条测在合同迁移前实测为红：
-//
-//	D-f1 每次结构发布，为工厂 owner 装配 face 时都会**再构造一个整只
-//	     TagentAgent**（旧合同要求工厂自己 NewTagentAgent），它只被用来抄
-//	     ExecutorConfig，随即成为无人 Close 的孤儿（bus/TaskManager/runner 全
-//	     新建）。违背 D1「修改 B 不复制它的 bus/TaskManager」与 2.3 准出。
-//	D-f2 staged 代的 runCfg 对工厂 owner 恒为 nil ⇒ 被钉的委派调用回退
-//	     `*ta.config`（**构造期**配置），工厂声明变了也永不到达——正是
-//	     「不按陈旧 ta.config 先造后补」在工厂分支的未兑现半。
-//
-// 合同迁移（工厂返回 *TagentConfig，构造归唯一 wireAgent 路径）后，两条都必须绿。
 
 // factoryTrunkYAML routes `leaf` from main with async:false (a sync delegation:
 // the witness is the call itself, not a settle-driven extra turn) and makes the
@@ -1853,9 +1676,8 @@ func writeFactoryTrunk(t *testing.T, path, content string, tick time.Time) time.
 // - 装配若走整件产品式的工厂，就会为取一份执行配置而建出无人关闭的整个 agent；
 // - 工厂交付声明时，同一发布走所有属主共用的那条面路径推进，且不构造任何东西。
 func TestFactoryReloadConstructsNoOrphanAgents(t *testing.T) {
-	const leaf = "g33_orphan_leaf" // unique: RegisterToolAgent panics on a duplicate id
+	const leaf = "g33_orphan_leaf"
 	agent.RegisterToolAgent(leaf, func(fc agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
-		// The migrated contract: a declaration, never a constructed agent.
 		return &agent.TagentConfig{
 			Name:        leaf,
 			Model:       fc.Model,
@@ -1889,8 +1711,6 @@ func TestFactoryReloadConstructsNoOrphanAgents(t *testing.T) {
 func TestFactoryConfigChangeReachesDelegations(t *testing.T) {
 	const leaf = "g33_stale_leaf"
 	agent.RegisterToolAgent(leaf, func(fc agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
-		// The factory's declaration is keyed to the iteration budget it is handed,
-		// so a structural publish that changes it changes the factory OUTPUT too.
 		return &agent.TagentConfig{
 			Name:         leaf,
 			Model:        fc.Model,
@@ -1908,8 +1728,6 @@ func TestFactoryConfigChangeReachesDelegations(t *testing.T) {
 	m := &delegModel{}
 	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
 	require.NoError(t, err)
-	// Close via DEFER (runs before t.Cleanup on a FailNow): if an assertion below
-	// fails mid-loop, StopLoop still happens first and the drain below cannot hang.
 	defer func() { _ = entry.Close() }()
 
 	out, err := entry.StartLoop("u", "factory-trunk-session")
@@ -1929,7 +1747,7 @@ func TestFactoryConfigChangeReachesDelegations(t *testing.T) {
 	})
 
 	tick = writeFactoryTrunk(t, yamlPath, factoryTrunkYAML(leaf, 3), tick)
-	entry.CheckOrgReload() // publish G2: the factory declaration changed with it
+	entry.CheckOrgReload()
 
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second"))
 	require.NoError(t, err)
@@ -1937,16 +1755,6 @@ func TestFactoryConfigChangeReachesDelegations(t *testing.T) {
 		return countServed(m.snapshot(), "FACTORY-3") >= 1
 	})
 }
-
-// 3.3 工厂前置能力门（evidence §5.45，合同迁移 §5.47）：ToolAgentFactory 在组织
-// 装配里只有一处生产消费点（build_agent.go 的 `registry.GetToolAgentFactory(name)`）。
-// 旧合同下其产物**整只返回**、跳过 wireAgent 尾段——轮八十九据此测出 store 租约永久
-// 泄漏并当场修复；轮九十一经用户裁决把合同一次迁移为「工厂交配置、组织负责构造」，
-// 该泄漏类从此**结构上不可能**（租约走 TagentConfig.MemStoreRelease 同一退出槽）。
-// 本文件因此双职：特征测继续钉住**迁移后也不得改变**的承诺（内置名保护、菱形单调用、
-// 失败包装形状、工厂自持声明不被 Tools 构建覆盖），并把租约规则留成回归臂——
-// 规则＝「store 只由 RuntimeResources 退出」，任何构造分支都不得留下一张没人接手、
-// 也无法归还的租约。
 
 // factoryLeafYAML routes `leafName` from main and gives it its OWN localfile store, so the
 // writer lock on that path is an outside-observable witness of whether the lease came back.
@@ -2011,9 +1819,8 @@ func TestFactoryConfigBuiltReleasesItsStoreLease(t *testing.T) {
 // - 可观察的见证是叶子自身路径上的 writer 锁：工厂分支不得从旁门再次取得属主责任。
 // 契约: docs/wiki/platform/org-hot-reload.md#close-drain
 func TestFactoryBuiltReleasesItsStoreLease(t *testing.T) {
-	const leafName = "g33_fact_leaf" // unique: RegisterToolAgent panics on a duplicate id
+	const leafName = "g33_fact_leaf"
 	agent.RegisterToolAgent(leafName, func(fc agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
-		// What real factories do now: describe the agent from what the config gives them.
 		return &agent.TagentConfig{
 			Name:         leafName,
 			Model:        fc.Model,
@@ -2058,9 +1865,7 @@ func TestFactoryCommittedBehavior(t *testing.T) {
 			name: {
 				SystemPrompt: PromptConfig{Inline: "declared prompt"},
 				Memory:       MemoryConfig{Type: "memory"},
-				// A tool id that does not exist: the config-driven branch would fail here,
-				// the factory branch never looks at it.
-				Tools: []ToolRef{{Kind: ToolKindTool, ID: "no-such-tool-id-g33"}},
+				Tools:        []ToolRef{{Kind: ToolKindTool, ID: "no-such-tool-id-g33"}},
 			},
 		}}
 		cache := map[string]*agent.TagentAgent{}
@@ -2109,22 +1914,11 @@ func TestFactoryCommittedBehavior(t *testing.T) {
 	})
 }
 
-// C1: the R4 executor-shell rebuild must never
-// re-register recovery retention on the SHARED durable store. A durable bus
-// build arms (ArmRetentionFromInbox) and a mem_spill attach arms
-// (ProtectAllPending) the un-acked originals held under the resident owner's
-// lease. The shell's own artifacts are discarded (its bus is never acked) and
-// releaseRetention only runs on the resident bus's Ack path — so any holder the
-// shell adds is a permanent lease leak, and an Arm-failure leg keeps a BeginHold
-// with no matching EndHold (forgetting barrier hangs forever). The gate
-// `!mode.isExecutorShell()` on agentCfg.BusSpillDir / ets.SetMemSpill restores
-// recovery registration to resident-owner-only.
-
 // seedUnackedEnvelope writes one claimed+prepared but un-acked durable envelope
 // into the inbox rooted at spillDir (spillDir/inbox-v2), whose prepared fact key
 // is factKey and reserved receipt key is receiptKey. A later
 // NewReliableEventBus(spillDir)+ArmRetentionFromInbox enumerates it and protects
-// exactly those keys — mirroring the §2.8 restart-recovery owner setup.
+// exactly those keys, the same way a restart-recovery owner does.
 func seedUnackedEnvelope(t *testing.T, spillDir string, factKey, receiptKey int64) {
 	t.Helper()
 	in, err := reliability.NewInbox(spillDir, 0)
@@ -2148,11 +1942,6 @@ func TestResidentShellBuild_DoesNotDoubleArmSharedLease(t *testing.T) {
 	spillRoot := filepath.Join(root, "spill")
 
 	mc := MemoryConfig{Type: "localfile", Path: storeDir}
-	// Pre-acquire the shared durable store so the test holds the SAME
-	// *FileSegmentStore (and its §2.8 retention lease) that the resident build
-	// will later borrow via the path registry — the lease is created in-process
-	// by buildSharedResource and is not reachable after the fact except through
-	// the shared instance.
 	rawStore, _, preRelease, err := defaultResources.acquire("localfile", storeDir, fingerprintMemory(mc), func() (openedResource, error) {
 		return openLocalFileStore(mc)
 	})
@@ -2163,10 +1952,9 @@ func TestResidentShellBuild_DoesNotDoubleArmSharedLease(t *testing.T) {
 	lease := fss.RetentionLease()
 	require.NotNil(t, lease, "buildSharedResource must wire the retention lease")
 
-	// One overdue un-acked envelope in the entry's durable inbox.
 	pid := memory.PartitionIDFromName("tagent")
 	now := time.Now().UnixMilli()
-	factKey := memory.NewSnowflakeEventKey(pid, now-10*24*3600*1000) // overdue fact original
+	factKey := memory.NewSnowflakeEventKey(pid, now-10*24*3600*1000)
 	receiptKey := memory.NewSnowflakeEventKey(pid, now)
 	seedUnackedEnvelope(t, filepath.Join(busRoot, "tagent"), factKey, receiptKey)
 
@@ -2187,8 +1975,6 @@ func TestResidentShellBuild_DoesNotDoubleArmSharedLease(t *testing.T) {
 	rc := &runtimeConfig{model: &factoryMockModel{}}
 	loader := prompt.NewLoader("")
 
-	// 1) Resident cold-start build: the durable bus arms recovery retention on
-	//    the shared store's lease — exactly one holder per material key.
 	resident, err := buildAgent("tagent", cfg.Agents["tagent"], cfg, rc, loader, make(map[string]*agent.TagentAgent), buildModeResident)
 	require.NoError(t, err)
 	rc.entryMemStore = resident.MemStore()
@@ -2196,18 +1982,11 @@ func TestResidentShellBuild_DoesNotDoubleArmSharedLease(t *testing.T) {
 	require.Equal(t, 1, lease.Holders(factKey), "resident arm protects the fact original")
 	require.Equal(t, 1, lease.Holders(receiptKey), "resident arm protects the receipt original")
 
-	// 2) Hot-reload executor-shell rebuild (structural change → new generation).
-	//    The shell borrows the resident store; with the C1 gate it builds a
-	//    volatile bus (no BusSpillDir) and no spill, so it adds NO holder.
 	gen2 := cfg.Agents["tagent"]
 	gen2.SystemPrompt = PromptConfig{Inline: "gen2"}
 	_, err = buildAgent("tagent", gen2, cfg, rc, loader, make(map[string]*agent.TagentAgent), buildModeExecutorShell)
 	require.NoError(t, err)
 
-	// fail-before: removing the `!mode.isExecutorShell()` gate on BusSpillDir /
-	// SetMemSpill makes the shell re-open the SAME durable inbox and re-arm the
-	// SAME keys → these become 2 (permanent leak, forgetting never resumes).
-	// With the gate: unchanged.
 	require.Equal(t, 1, lease.Holders(factKey), "executor shell must add NO holder to the shared fact lease (C1)")
 	require.Equal(t, 1, lease.Holders(receiptKey), "executor shell must add NO holder to the shared receipt lease (C1)")
 }

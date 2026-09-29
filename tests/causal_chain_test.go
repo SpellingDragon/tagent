@@ -102,6 +102,8 @@ func (echoTool) Call(ctx context.Context, args []byte) (any, error) {
 
 // TestCausalChain_EndToEnd verifies that a simple user -> assistant turn
 // produces two persisted FullEvents with a parent/child causal link.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestCausalChain_EndToEnd(t *testing.T) {
 	mockModel := newCausalMockModel(&model.Response{
 		ID:   "resp-final",

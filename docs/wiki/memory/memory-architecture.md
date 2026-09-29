@@ -831,6 +831,7 @@ tagent.yaml → ReadNamespaces: ["tagent"]
   → LLM 调用 recall_query({query: "部署"}) → 实际查询分区 144
 ```
 
+<a id="store-instance-sharing"></a>
 ### 13.0.1 MemoryStore 实例共享策略
 
 `resolveMemoryStore()`（定义在 `tagent.go`）根据 `MemoryConfig.Type` 选择存储实现：
@@ -838,6 +839,7 @@ tagent.yaml → ReadNamespaces: ["tagent"]
 - `type: memory` / 空：创建 `InMemoryStore`。非空 `path` 按 path 做注册表去重，同 path → 同实例；空 path 每次新建隔离实例。
 - `type: file`：创建 `FileSegmentStore`，底层使用 RustViking CLI 作为 KV 存储，并启动生命周期管理（tombstone、lifecycle、compactor）。同 path 会复用已注册的实例。
 - `type: localfile`：创建 `FileSegmentStore`，底层使用本地 JSON 文件作为 KV 存储（无外部二进制依赖），并启动生命周期管理。同 path 会复用已注册的实例。
+- **热重建壳按 agent 身份借用**：换代构造的执行壳不新建存储，而是从常驻身份绑定表取该 agent **自己**那一份；绝不整体改用入口的 store——那样子 agent 的存储归属会随代际漂移到入口身上。存储租约始终归常驻层，壳不获取也不释放；取不到身份项属防御路径，回落入口 store 而非报错
 
 ```go
 // tagent.go resolveMemoryStore 节选
@@ -870,6 +872,8 @@ case "localfile":
 | `type: file, path: "/X"` | 同 path → 同实例（namedRVStores 注册，与 localfile 同构） | RustViking KV + 文件系统 |
 | `type: localfile, path: "/X"` | 同 path → 同实例 | 本地 JSON 文件 |
 
+**为什么三类后端都必须共享**：同一份物理存储上各建实例，生命周期组件也会各起一套——两个 Compactor 基于各自视图并发写同一批 KV 键，关系图同样各自独立，跨 agent 的 `read_namespaces` 因此读到分歧的因果链。共享实例把"一份存储、一套生命周期"钉成事实。
+
 **装饰链（冻结契约 C2）**：`resolveMemoryStore → wireMemoryEngine`（配置 `memory.engine` 时包 engineBridge；引擎按 path+backend+model+dim 共享 namedEngines，保跨 agent 语义召回一致；未配置原样返回=零行为变化）`→ ErrorTrackingStore`（DegradationManager 启用时最外层包裹，内含 MemSpill）。MemoryEngine 解耦缝契约 C6（IndexBuilder/Retriever + 可选面 RawVectorSearcher/StatsProvider/KVProvider/VectorRemover）详见 `engine.go` 与 [platform 篇](../platform/platform-subsystems.md)。
 
 ### 13.0.2 path 字段的语义
@@ -890,6 +894,8 @@ case "localfile":
 |--------|------|-----------|------------------------------|
 | **按条件查询** | `QueryEvents`（RecallAgent 的 `recall_query`/`recall_recent`，见 §13.0） | `opts.PartitionIDs` 指定的分区集合 | ✅ 是——通过注入 `ReadPartitionIDs` 限定 |
 | **按 Key 直读** | `GetEvent(key)`（AgentToolWrapper/`recall_get`，见 §11.3） | 单个 Key 精确定位（Key 内含 PartitionID） | ❌ 否——按 Key 跨任意分区还原 |
+
+**自身命名空间恒排在首**：每个 agent 的事件写在 `PartitionIDFromName(agentName)` 里，所以读作用域必须自带自己那一份——没配 `read_namespaces` 时 `resolvePartitions` 把「无分区」当作「什么都不扫」，`FileSegmentStore` 上的按条件查询会**静默返回 0 条事件**（不报错、召回像是没历史）。`read_namespaces` 只能叠加跨命名空间可读，不替代自身那一份。
 
 **设计意图**：
 - **发现（查询）走隔离**：子 Agent 不应通过盲扫发现其他 Agent 的历史，故 `QueryEvents` 受 `read_namespaces` 限定分区。
@@ -936,6 +942,7 @@ func resolvePartitions(query QueryOptions) []int {
 
 **EventKey 自寻址**：雪花键内含 PartitionID+Timestamp，可直接定位分区与时间窗，无需全局索引。
 
+<a id="curation"></a>
 ## 十五、记忆策展
 
 ### 三原语与固化级联
@@ -1232,6 +1239,17 @@ stateDiagram-v2
 顺序是固定的：**错误追踪在最外层、引擎桥在中间、事件存储在最内层**。错误追踪必须在最外层，否则它看不见引擎与存储层抛出的失败。边界能力接口（引擎提供者、KV 提供者、向量移除器）定义在被缝合的两侧共同依赖的核心包中，而不是引擎包内——否则内层实现与外层消费者都要反向依赖引擎包。
 
 必须经装饰器**递归透传**的能力有：KV 后端、WAL 隔离计数、保留租约的保护/释放与 arm、登记屏障（begin/end hold）、关系存储、事件回放。任何一项不透传，都会在包裹链外形成"能力突然为 nil"的静默降级；内层若无该能力则这些调用是 no-op。
+
+<a id="engine-wiring-gates"></a>
+### 接线判定：三扇门决定包裹形态，全部在装配期闭合
+
+| 配置与回调 | 得到的 store | 可观察判据 |
+|---|---|---|
+| 无 `engine` 或无 `embedding`，且没有 store 事件回调 | **内层 store 本体**，一字未改 | 它不是引擎提供者 |
+| 有事件回调而无向量能力 | 仅容量包裹 | 事件照常被回灌，检索只有关键词路 |
+| 有向量能力但引擎构建失败（密钥未配、backend 名不认识） | **降为仅容量包裹，不报错** | 不再是引擎提供者；故障不阻断 agent 构建 |
+
+后一行是刻意的：增强能力的故障只关掉增强本身。既不"构建失败就把 agent 打死"，也不"静默留下一个每次调用都失败的引擎"——前者让故障传染主链路，后者让故障不可观测。共享 store 的情形另见[资源所有权](../platform/resource-ownership.md#engine-generation)：entry 构建降级时借用者同样只拿到仅容量钩子。
 
 <a id="bridge-write-replay"></a>
 ### 写入、回放与索引的关系
@@ -1545,6 +1563,10 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 - 兜底落盘本身失败（例如磁盘满）只告警：此时事件确实会丢，但退化状态已记录，属可观测的最后一搏，不再叠加重试。
 - 启用兜底落盘时必须把保留租约接进兜底文件，并在放行扫描器前按现存条目重建保留集；这一步失败**必须上抛**而非吞掉——吞错会造出"热更成功＋悬空遗忘屏障"的组合，待重放的持久原文可能被扫描器销毁。调用方据此 fail-closed，旧实例继续服务。
 - 重放成功路径支持注册投影补写回调，使"存储与投影同点提交"的等价语义在退化恢复路径上仍成立；回调失败或 panic 不影响重放——事件不丢优先，投影可后补。
+
+### 状态迁移上报不得写回被包裹的 store
+
+退化状态迁移本身要落一条 governance 事件。这条落笔必须写到**装饰链之前**的那份 store：写到包裹后的 store 会让写失败再次触发归因与上报，「写失败 → 上报 → 状态迁移 → 再写一次」成了自循环，每转一圈都在制造新的失败事件。因此构造装饰器时要向下游交出一个能落到真身的引用，上报路径始终用它，而不是用它刚包好的那层。
 
 ### 可选能力必须逐条透传
 

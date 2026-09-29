@@ -44,8 +44,9 @@ func seedStore(t *testing.T) memory.MemoryStore {
 	return store
 }
 
-// TestMemoryRecall_ItemsPrecise: tickets are resolved precisely, in order,
-//
+// TestMemoryRecall_ItemsPrecise 钉住 一批票据按给定顺序精确回补，命中不掺水。
+// - 两条票据各自取回自己的全文，输出顺序与入参一致；
+// - 随行的 hint 原样带回，一条未命中都不许出现。
 // 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_ItemsPrecise(t *testing.T) {
 	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
@@ -61,8 +62,10 @@ func TestMemoryRecall_ItemsPrecise(t *testing.T) {
 	}
 }
 
-// TestMemoryRecall_MissReported: unknown keys are explicitly marked miss,
-// never silently omitted.
+// TestMemoryRecall_MissReported 钉住 认不出的票据逐条标为未命中，绝不静默省略。
+// - 未知 key 带 miss 标记，且未命中计数为 1；
+// - 同批里那条真票据照常命中——一条失败不得把整批说空。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_MissReported(t *testing.T) {
 	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"dead"},{"key":"`+tagentevent.FormatEventKey(100)+`"}]}`)
@@ -75,8 +78,9 @@ func TestMemoryRecall_MissReported(t *testing.T) {
 	}
 }
 
-// TestMemoryRecall_QuerySemantic: free-text query goes through the retrieval
-// layer (keyword match).
+// TestMemoryRecall_QuerySemantic 钉住 自由文本走检索层，按关键词命中。
+// - 模式标记为 query，摘要含"部署"的事件被带回。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_QuerySemantic(t *testing.T) {
 	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"部署"}`)
@@ -86,10 +90,10 @@ func TestMemoryRecall_QuerySemantic(t *testing.T) {
 	}
 }
 
-// TestMemoryRecall_QueryZeroResultHonesty: a zero-result query must NOT return
-// a bare empty list (observed in production: the model concluded "the backend
-// has no history at all" from a silent count:0). It must carry a message
-// stating what was searched and steering toward items/turn_key.
+// TestMemoryRecall_QueryZeroResultHonesty 钉住 零结果不得伪装成"后端没有历史"。
+// - 计数为 0 时消息里必须写明检索范围（无可读分区内的匹配事件）；
+// - 同时给出下一步该走 items，免得模型拿空列表推断全局。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_QueryZeroResultHonesty(t *testing.T) {
 	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"不存在的关键词"}`)
@@ -104,8 +108,9 @@ func TestMemoryRecall_QueryZeroResultHonesty(t *testing.T) {
 	}
 }
 
-// TestMemoryRecall_ItemsPrecedence: when both items and query are provided,
-// items win (protocol rule).
+// TestMemoryRecall_ItemsPrecedence 钉住 items 与 query 同时给出时 items 取胜。
+// - 结果模式必须是 items——落进 query 分支就是协议被改。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_ItemsPrecedence(t *testing.T) {
 	tl := NewMemoryRecallTool(seedStore(t), seedPartitions())
 	out := callMemoryRecall(t, tl, `{"items":[{"key":"`+tagentevent.FormatEventKey(100)+`"}],"query":"部署"}`)
@@ -115,8 +120,9 @@ func TestMemoryRecall_ItemsPrecedence(t *testing.T) {
 	}
 }
 
-// TestMemoryRecall_TicketLosslessness: a rendered index-card line's [hex] key
-// can be cut out verbatim and used as a ticket.
+// TestMemoryRecall_TicketLosslessness 钉住 从索引卡行里切出的字符串原样就能当票据。
+// - 卡片行 `[hex]` 内那一段不加任何清洗直接提交，必须命中且不带 miss。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryRecall_TicketLosslessness(t *testing.T) {
 	cardLine := "- 03-09 17:20 [" + tagentevent.FormatEventKey(200) + "] 部署完成"
 	start := strings.IndexByte(cardLine, '[')
@@ -168,10 +174,10 @@ func callMemoryTurn(t *testing.T, store *memory.InMemoryStore, key string) memor
 	return res
 }
 
-// TestMemoryTurn_ReconstructsWholeTurn: anchoring on the agent_output key walks
-// the causal chain back to the external_input and returns the whole turn
-// (including the tool steps compression would drop), oldest → newest, stopping
-// at external_input.
+// TestMemoryTurn_ReconstructsWholeTurn 钉住 锚在回合末尾也能重建整轮，并按时间正序交回。
+// - 从 agent_output 回溯到 external_input，四件事一条不落，complete 为真；
+// - 顺序 oldest→newest，压缩会丢的工具步骤（action_command 全文）照样带回。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestMemoryTurn_ReconstructsWholeTurn(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	aoKey := buildChainedTurn(t, store)
@@ -200,8 +206,10 @@ func TestMemoryTurn_ReconstructsWholeTurn(t *testing.T) {
 	}
 }
 
-// TestMemoryTurn_StopsAtExternalInput: the walk must not cross into the
-// previous turn — it stops at the first external_input reached.
+// TestMemoryTurn_StopsAtExternalInput 钉住 回溯止于本回合的 external_input，不渗进上一回合。
+// - 前一回合的 agent_output 已挂在本回合起点之下，却不得出现在结果里；
+// - 首条必须是本轮的 external_input。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestMemoryTurn_StopsAtExternalInput(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	must := func(err error) {
@@ -228,8 +236,10 @@ func TestMemoryTurn_StopsAtExternalInput(t *testing.T) {
 	}
 }
 
-// TestMemoryTurn_Capped: when MaxSteps is hit before reaching external_input,
-// Capped is true and Complete is false — the model is told the walk was cut.
+// TestMemoryTurn_Capped 钉住 上界截断与"完整"分家：被切断的回溯绝不报 complete。
+// - 只给一步且尚未触及起点时 capped 为真、complete 为假；
+// - 结果只含锚点事件那一条。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestMemoryTurn_Capped(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	aoKey := buildChainedTurn(t, store)
@@ -255,9 +265,10 @@ func TestMemoryTurn_Capped(t *testing.T) {
 	}
 }
 
-// TestMemoryTurn_BrokenChainHonest: when the chain breaks mid-walk (a parent
-// event is missing from the store), the tool returns what it found with
-// Complete=false — honest degradation, not an error or a misleading full turn.
+// TestMemoryTurn_BrokenChainHonest 钉住 断链时如实交回找到的部分，不报错也不假装完整。
+// - 父事件不在库里：complete 必为假；
+// - 只返回锚点事件，绝不跨过断点去猜。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestMemoryTurn_BrokenChainHonest(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	must := func(err error) {
@@ -279,9 +290,9 @@ func TestMemoryTurn_BrokenChainHonest(t *testing.T) {
 	}
 }
 
-// TestMemoryTurn_EvtPrefixTolerance: models see keys rendered as [evt_HEX|type]
-// in the timeline and will echo "evt_HEX" or the bracketed form back as a
-// recall key. ParseEventKey must tolerate these forms.
+// TestMemoryTurn_EvtPrefixTolerance 钉住 三种回显形态都落到同一个事件。
+// - 裸 hex、带 `evt_` 前缀、时间线上的 `[evt_hex|type]` 整段——任何一种都不许查空。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestMemoryTurn_EvtPrefixTolerance(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	aoKey := buildChainedTurn(t, store)

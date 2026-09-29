@@ -44,6 +44,8 @@ func (m *mockCallableTool) Call(_ context.Context, _ []byte) (any, error) { retu
 // TestBuildPlainToolRef_InjectRuntimeDependencies verifies that buildPlainToolRef
 // correctly injects MemStore, SkillRepo, MCPToolSets, and ReadPartitionIDs into
 // the PlainToolFactoryConfig passed to the registered factory.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestBuildPlainToolRef_InjectRuntimeDependencies(t *testing.T) {
 	var captured agent.PlainToolFactoryConfig
 

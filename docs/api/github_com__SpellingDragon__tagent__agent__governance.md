@@ -132,6 +132,8 @@ type BudgetManager struct {
 
 func NewBudgetManager(cfg BudgetConfig, dir string) *BudgetManager
     NewBudgetManager 构建预算闸。dir 非空时持久化到 <dir>/budget.json 并恢复 epoch。
+    dir 为空即纯内存、绝不落盘。调用方要把 dir 原样交下来由本函数判断，不能先自行拼接目录片段： 空串参与拼接会得到相对路径（如
+    budget/name），预算被意外写进进程当前目录，违反「空 dir＝纯内存」。
 
 func (b *BudgetManager) Admit(level RiskLevel) error
     Admit 判定并（若放行）计入一次该级别操作。critical/low 直接放行（不占预算）； high/medium 超限返回

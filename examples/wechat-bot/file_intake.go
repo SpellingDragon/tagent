@@ -62,9 +62,13 @@ type IntakeOutcome struct {
 type InboundKind int
 
 const (
+	// InboundIgnore 文本为空且非媒体，不进入会话。
 	InboundIgnore InboundKind = iota
+	// InboundShortText 其余文本：未超过长文本阈值，或工作区未配置时的降级归类。
 	InboundShortText
+	// InboundLongText 文本 rune 数超过 longTextThreshold，且 workspaceConfigured 为真。
 	InboundLongText
+	// InboundMedia 消息含图片/语音/文件/视频之一。
 	InboundMedia
 )
 

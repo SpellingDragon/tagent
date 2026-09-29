@@ -176,9 +176,15 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 
 func RegisterPlainTool(id string, factory PlainToolFactory)
     RegisterPlainTool registers a factory for creating plain tools by ID.
+    Registering the same ID twice panics, so a caller that re-registers on every
+    run — a test under a -count>1 repetition gate, for example — must use a
+    unique ID or reset the registry.
 
 func RegisterToolAgent(id string, factory ToolAgentFactory)
     RegisterToolAgent registers a factory for creating tool agents by ID.
+    Registering the same ID twice panics, so a caller that re-registers on every
+    run — a test under a -count>1 repetition gate, for example — must use a
+    unique ID or reset the registry.
 
 func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent)
     ReplayProjectionHandler 返回重放双写回调。两分支：普通事件 → Append（冥想的
@@ -728,8 +734,8 @@ type EventBus struct {
     no ordering guarantees across consumers, and simple backpressure (channel
     fills up → Publish blocks).
 
-    Durable mode (resident-readiness-plan 3.2; lossless under D2): with an Inbox
-    configured, ALL inbound events are persisted to inbox-v2 BEFORE the durable
+    Durable mode (lossless under D2): with an Inbox configured,
+    ALL inbound events are persisted to inbox-v2 BEFORE the durable
     receipt — the channel carries only wake-ups, never the durable truth.
     Each message slot keeps a lossless JSON snapshot of the original AgentEvent
     (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
@@ -1261,8 +1267,8 @@ func NewSelfTelemetryAuditor(onAction func(level int, ratio float64, samples int
 
 func (a *SelfTelemetryAuditor) DigestLine() string
     DigestLine renders the deterministic self-state digest row (trajectory
-    statistics belong to the reflection layer, not the resident context —
-    attention-budget-architecture L5). Empty when the auditor has no samples.
+    statistics belong to the reflection layer, not the resident context).
+    Empty when the auditor has no samples.
 
 func (a *SelfTelemetryAuditor) GateReason(spec task.TaskSpec) string
     GateReason implements the task layer's AuditGate contract. L2 converge
@@ -1387,11 +1393,10 @@ func (ta *TagentAgent) EmitSystemAlert(alert string)
 func (ta *TagentAgent) ExecutorConfig() ContextManagerConfig
     ExecutorConfig returns THIS agent's assembled execution face (model/tools/
     prompt/genConfig — the product of the build that already passed validation).
-    introduce-durable-workflow-engine : the hot-reload path builds a candidate
-    shell, reads its face here, constructs the candidate executor on the
-    RESIDENT ContextManager and only then publishes it. The face is returned
-    by value; the caller owns the copy (mutating Tools must not disturb this
-    agent).
+    The hot-reload path builds a candidate shell, reads its face here,
+    constructs the candidate executor on the RESIDENT ContextManager and only
+    then publishes it. The face is returned by value; the caller owns the copy
+    (mutating Tools must not disturb this agent).
 
     It replaces RebuildExecutorOn (hotswap-fix 5.7), which fused construction
     and swap and therefore could not be abandoned after construction. The
@@ -1786,7 +1791,9 @@ type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
     the org's store borrowed for this name fills a nil — a factory that opens
     its OWN store must not also be handed the org lease. - MemStoreRelease:
     always the org's, filled by the assembly after this call returns — a factory
-    neither keeps nor invents a release for it.
+    neither keeps nor invents a release for it. The assembly re-invokes the
+    factory for each generation it builds and hands it that generation's values,
+    so a declaration derived from them moves with the config.
 
 func GetToolAgentFactory(id string) (ToolAgentFactory, bool)
     GetToolAgentFactory returns the factory for the given ID.

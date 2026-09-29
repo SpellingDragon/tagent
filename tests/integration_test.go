@@ -84,6 +84,8 @@ loop:
 }
 
 // TestIntegration_SmartCompress_WithRealLLM 钉住 两阶段上下文压缩在真实模型调用下至少产出一个事件。
+//
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestIntegration_SmartCompress_WithRealLLM(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -310,7 +312,7 @@ func (t *echoToolStruct) Call(ctx context.Context, jsonArgs []byte) (any, error)
 }
 
 // TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery tests knowledge agent with real LLM.
-// KnowledgeTool is now a TagentAgent wrapped as agent.Tool.
+// - KnowledgeTool is now a TagentAgent wrapped as agent.Tool.
 func TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

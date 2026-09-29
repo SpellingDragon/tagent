@@ -529,7 +529,6 @@ func isExempt(g *ast.CommentGroup) bool {
 	return false
 }
 
-// checkDocGroup applies content rules to one documentation comment.
 // externalCoord catches references that only make sense inside a change artifact:
 // a design-line pointer, a phase/step coordinate, or a red-green narrative. It is
 // merged with the change-name axis (externalCoordRef) so one rule owns the whole
@@ -609,6 +608,7 @@ func externalCoordRef(prose string) string {
 	return ""
 }
 
+// checkDocGroup applies content rules to one documentation comment.
 func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text string, isTest bool, declName string) []finding {
 	var out []finding
 	line := fset.Position(g.Pos()).Line
@@ -675,8 +675,6 @@ func hasAllowedRoot(target string) bool {
 	return false
 }
 
-// checkCoverage enforces package documentation, exported-symbol documentation and
-// the responsibility index a test file must declare.
 // dropRedundantPackageDocs removes missing-package-doc findings from files in a
 // package that does have a package doc somewhere: the package comment belongs to the
 // package, so requiring it in every file would force duplicate package docs (which the
@@ -714,6 +712,8 @@ func dropRedundantPackageDocs(all []finding) []finding {
 	return kept
 }
 
+// checkCoverage enforces package documentation, exported-symbol documentation and
+// the responsibility index a test file must declare.
 func checkCoverage(fset *token.FileSet, file *ast.File, path string, isTest bool) []finding {
 	var out []finding
 	if file.Doc == nil || strings.TrimSpace(file.Doc.Text()) == "" {
@@ -867,12 +867,12 @@ func compareRatchet(counts, base map[string]int) (regressions, improvements int)
 	return regressions, improvements
 }
 
-// docContentLines returns a doc group's substantive lines: blank separators,
-// index lines (契约:/规格:) and directives are not documentation prose.
 // testDocMaxLineRunes caps how much a single test-doc line may carry, so the
 // one-intent-line norm cannot be satisfied by cramming a paragraph into one line.
 const testDocMaxLineRunes = 160
 
+// docContentLines returns a doc group's substantive lines: blank separators,
+// index lines (契约:/规格:) and directives are not documentation prose.
 func docContentLines(g *ast.CommentGroup) []string {
 	if g == nil {
 		return nil

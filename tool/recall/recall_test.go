@@ -17,9 +17,13 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestUnifiedRecall_Routing: the unified entry
-//
-// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
+// TestUnifiedRecall_Routing 钉住 统一入口按参数形态选路，形态之间不得互相顶替。
+// - 给票据就是 items，给 `turn_key` 就是 turn（沿因果链回走），给自由文本就是 query；
+// - 只给时间范围也算 query 形态，按最新优先交回，两端与条数对得上；
+// - 只有 `since` 时取回其后的全部；
+// - `orchestrate: true` 如实回"未接线"并给出指引，条目必须为空，不得静默退成确定性形态；
+// - 什么形态都不给属于错误，不返回空结果。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-unified-entry
 func TestUnifiedRecall_Routing(t *testing.T) {
 	tl := NewRecallTool(seedUnifiedStore(t), []int{memory.PartitionIDFromEventKey(kIn)}).(tool.CallableTool)
 	call := func(args string) memoryRecallResult {
@@ -123,9 +127,10 @@ func seedAndIndex(t *testing.T, store *memory.InMemoryStore, eng memory.MemoryEn
 	return key
 }
 
-// TestRecallByQuery_HybridViaEngine 验证 recall query 路径经记忆引擎做 hybrid：
-// accessor 暴露 MemoryEngineProvider 且引擎向量就绪时，recallByQuery 走引擎融合，
-// 语义相近（共享词元）的事件被召回——协议输出不变（key/type/summary/time）。
+// TestRecallByQuery_HybridViaEngine 钉住 引擎带着向量能力在场时，query 路径照常产出结果。
+// - 向量就绪之后发起查询：命中非空，且那条语义相关的事件在其中；
+// - 本测不区分融合与关键词两条路（语料关键词本就重叠），只钉"引擎在场时查询有命中、目标事件在其中"。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestRecallByQuery_HybridViaEngine(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	emb := membed.NewMockEmbedder(128)
@@ -165,8 +170,9 @@ func TestRecallByQuery_HybridViaEngine(t *testing.T) {
 	}
 }
 
-// TestRecallByQuery_NoEngineKeywordOnly 验证未接线引擎时 recallByQuery 走纯关键词
-// （现状行为），不因 T-A 引入而改变。
+// TestRecallByQuery_NoEngineKeywordOnly 钉住 没有引擎时 query 退回纯关键词，与未启用增强能力时一致。
+// - 一个关键词命中一条，不多不少。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestRecallByQuery_NoEngineKeywordOnly(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	key := memory.NewSnowflakeEventKey(1, hybridTestBaseMs)
@@ -195,9 +201,10 @@ func (s *spyAccessor) GetEvent(key int64) (*memory.FullEvent, error) {
 	return &memory.FullEvent{EventKey: key, EventType: "external_input", Content: "x"}, nil
 }
 
-// TestRecallByItems_BoundedHydration: over the
-// cap only maxRecallItems tickets are hydrated; the truncation is reported in
-// Message with the dropped count — never silent.
+// TestRecallByItems_BoundedHydration 钉住 上界钳的是逐条取回的次数，不只是返回长度；截断必须报出丢弃数。
+// - 60 张票据只发起 `maxRecallItems` 次取回；
+// - 条目数等于上界，消息里写明丢弃了多少张。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestRecallByItems_BoundedHydration(t *testing.T) {
 	acc := &spyAccessor{}
 	items := make([]recallItem, 0, 60)
@@ -217,8 +224,9 @@ func TestRecallByItems_BoundedHydration(t *testing.T) {
 	}
 }
 
-// TestRecallByItems_UnderCap_NoTruncationNote: honesty cuts both ways — no
-// truncation, no message.
+// TestRecallByItems_UnderCap_NoTruncationNote 钉住 诚实是双向的：没截断就不许报截断。
+// - 三张票据全量取回，消息为空，取回次数恰好 3。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestRecallByItems_UnderCap_NoTruncationNote(t *testing.T) {
 	acc := &spyAccessor{}
 	items := make([]recallItem, 0, 3)
@@ -268,8 +276,9 @@ func TestTruncationHint_AtLimit(t *testing.T) {
 	}
 }
 
-// TestTruncationHint_BelowLimit: full result sets carry no notice (no false
-// "maybe more" when everything was returned).
+// TestTruncationHint_BelowLimit 钉住 结果已全量返回时不得给"也许还有"的暗示。
+// - 3 条结果配 10 的上界，提示一句都不许出现。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestTruncationHint_BelowLimit(t *testing.T) {
 	tl := NewMemoryRecallTool(seedManyStore(t, 3), seedManyPartitions())
 	out := callMemoryRecall(t, tl, `{"query":"部署","limit":10}`)
@@ -279,8 +288,10 @@ func TestTruncationHint_BelowLimit(t *testing.T) {
 	}
 }
 
-// TestTruncationHint_Unit covers the shared helper directly, including the
-// limit<=0 guard.
+// TestTruncationHint_Unit 钉住 截断提示的三态判定，含 `limit<=0` 守卫。
+// - 条数等于上界给提示，严格小于不给；
+// - 上界为非正数时一律不给。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func TestTruncationHint_Unit(t *testing.T) {
 	if got := truncationHint(10, 10); got == "" {
 		t.Error("count == limit must produce a hint")
@@ -293,10 +304,10 @@ func TestTruncationHint_Unit(t *testing.T) {
 	}
 }
 
-// TestRecallTools_DeclarationDeterministic 验证 tasks 4.2：recall 工具 Declaration 确定性——
-// 两次独立构造（模拟「配置开启向量前/后」）逐字节一致。结构性保证：recall 工具签名无向量
-// 参数，向量能力经 accessor.SupportsVectorSearch() 在**运行时召回路径**判定，绝不进声明区
-// → prefix-cache 稳定性不变量（声明区恒定，向量配置零触碰工具 Declaration）。
+// TestRecallTools_DeclarationDeterministic 钉住 四个 recall 工具的声明构造是确定的：两次独立构造逐字节一致。
+// - 四个工具一个都不能少；
+// - 两次构造用的是同一份配置，所以钉住的是"构造不引入随机性"；要钉"与向量配置无关"，需要再接一个引擎做对照。
+// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
 func TestRecallTools_DeclarationDeterministic(t *testing.T) {
 	parts := []int{1}
 	snapshot := func() map[string]string {
@@ -329,8 +340,9 @@ func TestRecallTools_DeclarationDeterministic(t *testing.T) {
 	}
 }
 
-// TestRecallTools_DeclarationVectorFree 验证声明区不泄漏向量/embedding 配置字样——向量是
-// 内部召回路径，工具对 LLM 呈现的声明与之无关（守 prefix-cache + 组8.3 声明区守卫）。
+// TestRecallTools_DeclarationVectorFree 钉住 声明文本里没有向量与嵌入的实现字样。
+// - `embedding`、`embed_`、向量存储、`hnsw`、`rrf` 任意一条出现都算泄漏。
+// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
 func TestRecallTools_DeclarationVectorFree(t *testing.T) {
 	accessor := memory.NewInMemoryStore()
 	tl := NewRecallQueryTool(accessor, []int{1})

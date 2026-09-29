@@ -34,6 +34,8 @@ func TestStatusToSettle_Mapping(t *testing.T) {
 }
 
 // TestTmuxSettleDetector_CompletedClosesStream 钉住 a completed transition emits one completed signal and closes the stream.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
 func TestTmuxSettleDetector_CompletedClosesStream(t *testing.T) {
 	d := NewTmuxSettleDetector("s1", nil)
 	d.OnStateChange(SessionRunning, "starting")

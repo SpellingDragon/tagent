@@ -150,7 +150,7 @@ type fakeGuard struct {
 func (f fakeGuard) Breach(string) (bool, string) { return f.breach, f.why }
 
 // TestGitEvolution_EvaluationEvent（4.2 核心）：劣化只产 evaluation 事件（建议式），
-// 不执行 git revert、无消息注入。fail-before：bundle 时代 Submit 内直接 rm.rollback。
+// 不执行 git revert、无消息注入。
 func TestGitEvolution_EvaluationEvent(t *testing.T) {
 	dir := initGitRepo(t)
 	writeFile(t, dir, "resources/prompts/SOUL.md", "v2")
@@ -178,7 +178,7 @@ func TestGitEvolution_EvaluationEvent(t *testing.T) {
 }
 
 // TestGitEvolution_LatestShaStamp（4.4）：章缓存——register 后 LatestSha 即新 sha；
-// 重启（新实例同 store）惰性恢复最新 improvement。
+// - 重启（新实例同 store）惰性恢复最新 improvement。
 func TestGitEvolution_LatestShaStamp(t *testing.T) {
 	dir := initGitRepo(t)
 	store := memory.NewInMemoryStore()
@@ -198,7 +198,7 @@ func TestGitEvolution_LatestShaStamp(t *testing.T) {
 }
 
 // TestGitEvolution_DigestSummary_SurfacesDegradation（M1 独立评审回归）：
-// 劣化结论与未登记产物必须出现在冥想 digest 摘要（被看见链路的三来源接线）。
+// - 劣化结论与未登记产物必须出现在冥想 digest 摘要（被看见链路的三来源接线）。
 func TestGitEvolution_DigestSummary_SurfacesDegradation(t *testing.T) {
 	dir := initGitRepo(t)
 	store := memory.NewInMemoryStore()

@@ -128,7 +128,7 @@ func (pa *PlanAgent) runProgressQuery(ctx context.Context, inv *trpcagent.Invoca
 }
 
 // buildProgressSummary returns a progress summary for the named change.
-// Location rule (multi-plan parallel, plan-interaction-contract): a non-empty
+// Location rule (multi-plan parallel): a non-empty
 // name targets that change directly; without a name, exactly one active
 // change is taken; otherwise the active list (with per-plan completion) is
 // returned for the caller to pick — never guess.

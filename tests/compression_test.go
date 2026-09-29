@@ -49,6 +49,8 @@ func (m *compressMockModel) Requests() []*model.Request {
 // TestCompression_FullHistory verifies that when the token budget is exceeded,
 // SmartCompress acts on the complete conversation history (not just the new
 // batch) and that session.Events remains unchanged.
+//
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestCompression_FullHistory(t *testing.T) {
 	mockModel := newCompressMockModel(&model.Response{
 		ID:   "resp-final",

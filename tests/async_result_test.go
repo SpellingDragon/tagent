@@ -32,7 +32,7 @@ type slowOpResult struct {
 // newSlowBackgroundTool returns a tool that delegates to the task layer: it
 // spawns a generic task that runs past the dense phase (so it detaches to the
 // background), then settles with a unique marker. This exercises the full
-// async-result-delivery path WITHOUT tmux:
+// path WITHOUT tmux:
 //
 //	tool call → spawn (background) → ack → settle → task_settled event → the
 //	persistent loop reclaims it into a new turn → the LLM reports the result.

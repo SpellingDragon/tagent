@@ -77,7 +77,7 @@ type Evidence struct {
 	DenialCount int `json:"denial_count"`
 	// CriticalCount critical 挂起数
 	CriticalCount int `json:"critical_count"`
-	// NegFeedback negative feedback 数（D1 design-report-closeout：任务成败/用户反馈负评）
+	// NegFeedback negative feedback 数（D1：任务成败/用户反馈负评）
 	NegFeedback int   `json:"neg_feedback"`
 	WindowMs    int64 `json:"window_ms"`
 }

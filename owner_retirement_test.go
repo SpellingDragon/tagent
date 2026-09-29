@@ -18,14 +18,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// §4.3 (R02) — retirement of an owner whose name left the routable set.
-//
-// Removal is the easy half and was already true: the published generation simply
-// stops offering the name. What was missing is the OTHER edge — an unrouted owner
-// must not stay resident forever, yet must not be closed while its own executions,
-// background work or accepted inputs still depend on it. These tests pin both
-// halves: the ledger holds what is still needed and releases exactly what is not.
-
 // retYAML renders entry "main" routing the given names. Every agent DEFINED in the
 // file may or may not be routed — routability, not presence in the file, is the
 // topology's truth source (see TestOrgHotRemove_KeepsOwnerButStopsRouting). Each
@@ -98,7 +90,7 @@ func TestRetire_RemovedIdleOwnerIsRetired(t *testing.T) {
 	require.NotNil(t, s3, "precondition: s3 is resident at startup")
 	require.Contains(t, entry.StoreOwnerSnapshot(), "s3")
 
-	write(retYAML(t, "b", "s1")) // 移除 s3（定义仍在文件里）
+	write(retYAML(t, "b", "s1"))
 	entry.CheckOrgReload()
 
 	require.NotContains(t, entryToolNames(entry), "s3", "the published generation must not route it")
@@ -122,7 +114,6 @@ func TestRetire_ObligationHoldsOwnerThenRetiresAtNextBoundary(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	s2 := residentCacheForTest(entry)["s2"]
-	// One execution still riding s2 (the same lease accounting the reclaim path uses).
 	lease := s2.ContextManager().AcquireLease(agent.LeaseSubCall)
 	require.Equal(t, 1, s2.Obligations().Executions, "precondition: the obligation probe sees the live execution")
 
@@ -135,10 +126,6 @@ func TestRetire_ObligationHoldsOwnerThenRetiresAtNextBoundary(t *testing.T) {
 	require.Contains(t, entry.StoreOwnerSnapshot(), "s2", "and keeps its store registration")
 
 	lease.Release()
-	// The next activity-driven boundary sweeps the ledger again.
-	// The next activity boundary drains it — no structural change needed, and none
-	// faked: the same content is rewritten (only its mtime moves), so retirement must
-	// not depend on this boundary also publishing something new.
 	write(retYAML(t, "b", "s1"))
 	entry.CheckOrgReload()
 
@@ -159,12 +146,12 @@ func TestRetire_ReenteredNameReusesOriginalOwner(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	s2 := residentCacheForTest(entry)["s2"]
-	lease := s2.ContextManager().AcquireLease(agent.LeaseSubCall) // hold it in the drain list
+	lease := s2.ContextManager().AcquireLease(agent.LeaseSubCall)
 	write(retYAML(t, "b", "s1"))
 	entry.CheckOrgReload()
 	require.False(t, s2.CloseStarted(), "precondition: still draining, not closed")
 
-	write(retYAML(t, "c", "s1", "s2")) // 同名重入
+	write(retYAML(t, "c", "s1", "s2"))
 	entry.CheckOrgReload()
 
 	require.Same(t, s2, residentCacheForTest(entry)["s2"],
@@ -190,11 +177,7 @@ func TestRetire_ReentryIntoClosingOwnerIsRefused(t *testing.T) {
 	lease := s2.ContextManager().AcquireLease(agent.LeaseSubCall)
 	write(retYAML(t, "b", "s1"))
 	entry.CheckOrgReload()
-	// The reference stays HELD on purpose. What this test must pin is the window
-	// where the owner has BEGUN closing but has not finally exited; since §4.3 made
-	// a release carry the retirement forward by itself, releasing here would leave
-	// nothing mid-close to refuse — the finally-exited case is the test below.
-	s2.Close() // host-driven begin: mid-close, still tracked
+	s2.Close()
 	t.Cleanup(func() { lease.Release() })
 
 	write(retYAML(t, "c", "s1", "s2"))
@@ -207,9 +190,6 @@ func TestRetire_ReentryIntoClosingOwnerIsRefused(t *testing.T) {
 		"the refused candidate must not have replaced the owner with a second writer")
 	require.Equal(t, before, entry.OrgDiagnostics()["generation"], "a refusal never advances the published sequence")
 
-	// Release now rather than only in cleanup: ExecLease.Release is idempotent, and
-	// dropping the reference before the deferred org Close keeps the refusal check
-	// itself (above) from being followed by a bounded drain the test never needed.
 	lease.Release()
 }
 
@@ -232,7 +212,7 @@ func TestRetire_ReentryAfterFinalExitRebuildsFreshOwner(t *testing.T) {
 	require.NotNil(t, residentCacheForTest(entry)["s2"],
 		"precondition: the in-flight reference keeps the unrouted owner resident")
 
-	lease.Release() // the release alone must finish the retirement (§4.3, no new turn)
+	lease.Release()
 	require.Eventually(t, func() bool {
 		return residentCacheForTest(entry)["s2"] == nil
 	}, 5*time.Second, 20*time.Millisecond, "final exit reached without any further traffic")
@@ -257,31 +237,26 @@ func TestRetire_NameChurnStaysBounded(t *testing.T) {
 	entry := buildRetireOrg(t, yamlPath)
 	defer func() { _ = entry.Close() }()
 
-	// Rotate the routed name through every definition, twice over.
 	for round := 0; round < 2; round++ {
 		for _, n := range retAllDefs {
 			write(retYAML(t, fmt.Sprintf("churn-%d-%s", round, n), "s1", n))
 			entry.CheckOrgReload()
 		}
 	}
-	// Last round routed s1+s3, so the bound is main plus those two — NOT every name
-	// that ever existed.
 	require.Len(t, residentCacheForTest(entry), 3,
 		"resident set must equal main + the currently routed names, not every name ever routed (got %v)",
 		residentNamesOf(entry))
 	require.Len(t, entry.StoreOwnerSnapshot(), 3, "and so must the store-owner registrations")
-	// §5.1 迁移（非静默）：债务键改为常驻呈现，「没有待退役」从此可由**空列表**
-	// 判定，而不是靠「键不存在」——缺键与零债务是两件事，前者无法与「诊断面没
-	// 接上」区分。
 	debt, ok := entry.OrgDiagnostics()["liveDebt"].(OrgLiveDebt)
 	require.True(t, ok, "the live debt group must always be present")
 	require.Empty(t, debt.PendingRetirements,
 		"nothing is left draining once every retired owner converged")
 }
 
-// TestRetire_SharedStoreSurvivesSiblingRetirement: two owners on ONE store. Retiring
-// one must not close the shared state under the other — the store is released by
-// lease accounting, so the survivor's last writer remains valid.
+// TestRetire_SharedStoreSurvivesSiblingRetirement 钉住 两个属主共用一个存储时，退役其一不得在另一属主之下关掉共享状态。
+// - 存储由租约记账决定何时消失，不由某个借用者的退出决定；
+// - 幸存属主仍从同一存储对象服务：没被关掉、维护生产者仍在跑、仍被路由。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestRetire_SharedStoreSurvivesSiblingRetirement(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -295,24 +270,21 @@ func TestRetire_SharedStoreSurvivesSiblingRetirement(t *testing.T) {
 	s1, s2 := owners["s1"], owners["s2"]
 	require.Same(t, s1.MemStore(), s2.MemStore(), "precondition: the two owners really share one store")
 
-	write(twoAgentsOneStore(t, shared, "s1")) // 移除 s2
+	write(twoAgentsOneStore(t, shared, "s1"))
 	entry.CheckOrgReload()
 	require.True(t, s2.CloseStarted(), "the unrouted sibling retired")
 	require.NotContains(t, residentCacheForTest(entry), "s2")
 
-	// The survivor keeps serving from the SAME store object: it is not closed, its
-	// maintenance producer is still running, and the store it shares with the
-	// retired sibling is still its own (lease accounting, not the sibling's exit,
-	// decides when the shared state goes away).
 	require.Same(t, s1.MemStore(), residentCacheForTest(entry)["s1"].MemStore())
 	require.False(t, s1.CloseStarted(), "the surviving owner must not be closed by its sibling's retirement")
 	require.False(t, s1.CleanerStopped(), "and its producers stay up")
 	require.Contains(t, entryToolNames(entry), "s1", "and it is still routed")
 }
 
-// TestRetire_RollbackRetiresDroppedOwner: a rollback is a publish too. The owners it
-// drops go down the same drain, and the config kept in the rollback ring is DATA —
-// never a reason to hold a running instance.
+// TestRetire_RollbackRetiresDroppedOwner 钉住 回滚也是一次发布，它丢掉的属主走同一条排水。
+// - 回滚环里保存的配置是数据，从来不是留住一个在跑实例的理由；
+// - 完全关闭的属主不被复活——名字获得一个全新属主，且不是那个已关实例。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestRetire_RollbackRetiresDroppedOwner(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -322,11 +294,11 @@ func TestRetire_RollbackRetiresDroppedOwner(t *testing.T) {
 	defer func() { _ = entry.Close() }()
 
 	s2 := residentCacheForTest(entry)["s2"]
-	write(retYAML(t, "b", "s1")) // G2: s2 gone
+	write(retYAML(t, "b", "s1"))
 	entry.CheckOrgReload()
 	require.NotContains(t, residentCacheForTest(entry), "s2", "precondition: G2 already retired it")
 
-	entry.Rollback() // back to G1's routing, which wants s2 again
+	entry.Rollback()
 	require.Contains(t, entryToolNames(entry), "s2", "the rollback really re-routed s2")
 	fresh := residentCacheForTest(entry)["s2"]
 	require.NotNil(t, fresh, "a fully-closed owner is not resurrected; the name gets a fresh owner")
@@ -334,17 +306,11 @@ func TestRetire_RollbackRetiresDroppedOwner(t *testing.T) {
 	require.False(t, fresh.CloseStarted(), "the fresh owner serves")
 }
 
-// TestOrgHotAdd_VisibleOnlyAtCommit is §4.3's FIRST clause (「新增只随候选提交可见」)
-// at the only point it can be observed: parked inside the commit critical section,
-// after the candidate's owners were built and before they are merged. Existing tests
-// cover the other half (a REFUSED candidate's adds are revoked); nothing pinned that
-// a staged add is invisible WHILE the build is still in flight — and a half-committed
-// topology is exactly what D3's single commit point exists to prevent.
-//
-// Note what is deliberately NOT asserted as invisible: the new owner's store-owner
-// registration. That is taken during the build on purpose (R01: the rollback must be
-// able to revoke EVERY owner this candidate registered), so claiming otherwise would
-// describe a different design.
+// TestOrgHotAdd_VisibleOnlyAtCommit 钉住 暂存的新增属主在唯一提交点之前对读者不可见，提交时一次性可见。
+// - 观察点必须落在提交临界区内：属主已建成、合并未发生。只在提交完成后断言可见，对"构建在途不得出现半提交拓扑"这一半是空洞的；
+// - 此刻常驻表取不到它、现效面不 offer 它、发布序号不前进；释放后三者同时成立且序号恰好推进一次。
+// - 刻意的例外是存储属主登记：它在构建期取得，被拒候选的回退要能撤销本候选登记过的每一个属主，把登记也说成不可见就描述了另一种设计。
+// 契约: docs/wiki/platform/org-hot-reload.md#staged-add-visibility
 func TestOrgHotAdd_VisibleOnlyAtCommit(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -367,7 +333,7 @@ func TestOrgHotAdd_VisibleOnlyAtCommit(t *testing.T) {
 	orgCommitBarrier.Store(&park)
 	t.Cleanup(func() { orgCommitBarrier.Store(nil) })
 
-	write(retYAML(t, "b", "s1", "s2")) // now route s2: a real hot add
+	write(retYAML(t, "b", "s1", "s2"))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -429,19 +395,10 @@ func retDiamondYAML(t testing.TB, routeS1, routeS2 bool) string {
 		fmt.Sprintf("  s3:\n    system_prompt:\n      inline: \"PROMPT-s3\"\n    memory:\n      type: memory\n      path: %q\n", testStore(t, "retire-diamond-s3"))
 }
 
-// TestRetire_DiamondSharedDependencyWaitsForAllBorrowers is §4.3's named
-// acceptance「菱形共享依赖」at RETIREMENT time (the build-side diamond is anchored
-// once in build_cycle_test): main → {s1, s2} → s3.
-//
-// What must hold when a generation drops BOTH entry routes:
-//  1. a branch with nothing left on it (s1) converges, while
-//  2. the shared leaf (s3) is NOT retired just because it has no work of its own —
-//     it is still inside the callable closure of s2's live generation, which has an
-//     execution in flight and may delegate at any moment (D8's usage right, §5.37);
-//     retiring it here would silently break a legal later call;
-//  3. once that last borrower drains, s3 exits on its own — no extra business turn
-//     (§5.38), and the cascade (s2 then s3) converges inside one drain pass instead
-//     of waiting for an event that may never come.
+// TestRetire_DiamondSharedDependencyWaitsForAllBorrowers 钉住 菱形共享依赖在退役时等所有借用者，形状为 main→{s1,s2}→s3。
+// - 无待决义务的分支 s1 收敛，共享叶子 s3 不因自己无活就退役——它仍在 s2 存活代的可调用闭包内、合法可委派；
+// - 最后借用者排空后 s3 自行退出、不需额外业务回合，级联 s2 再 s3 在同一次排空内收敛。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestRetire_DiamondSharedDependencyWaitsForAllBorrowers(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -456,12 +413,8 @@ func TestRetire_DiamondSharedDependencyWaitsForAllBorrowers(t *testing.T) {
 	require.NotNil(t, s1.ContextManager().SubagentWrapper("s3"), "both branches route s3…")
 	require.NotNil(t, s2.ContextManager().SubagentWrapper("s3"), "…from their own faces")
 
-	// s2 has an execution in flight; it has NOT delegated to s3 yet, but its
-	// generation legitimately may.
 	inFlight := s2.ContextManager().AcquireLease(agent.LeaseSubCall)
 
-	// One generation drops BOTH entry routes: s1, s2 and (transitively) s3 leave the
-	// reachable set.
 	write(retDiamondYAML(t, false, false))
 	entry.CheckOrgReload()
 
@@ -475,8 +428,6 @@ func TestRetire_DiamondSharedDependencyWaitsForAllBorrowers(t *testing.T) {
 		"§4.3 菱形锚：共享叶子被别的存活代保有时不得退役——它自己没有义务不代表可关")
 	require.False(t, s3.CloseStarted(), "and its close must not even have begun")
 
-	// The last borrower draining releases the leaf too; the cascade must converge
-	// without any further traffic.
 	inFlight.Release()
 	require.Eventually(t, func() bool {
 		o := residentCacheForTest(entry)
@@ -485,13 +436,10 @@ func TestRetire_DiamondSharedDependencyWaitsForAllBorrowers(t *testing.T) {
 		"最后借用者退出后，s2 与共享的 s3 须在同一个排空里依次收敛（不等待新 turn）")
 }
 
-// sealThePath produces a REAL sealed store, not a mocked error: it drives
-// RuntimeResources' own §6.5 rule (an unconfirmed reclaim must HOLD the writer
-// flock and seal the path), so afterwards a live single-writer lock genuinely
-// sits on that directory. Any org that later tries to open the same path must
-// therefore collide with a possibly-half-live backend — the exact condition
-// design D8 forbids papering over (「backend/锁退出失败继续原 poisoned 规则，
-// 不自动解封」), and the org-side half of §4.3's「真实 poisoned acquire」.
+// sealThePath produces a REAL sealed store rather than a mocked error: it drives the
+// unconfirmed-reclaim rule, so a live single-writer flock genuinely sits on the path and
+// any later opener of it collides with a possibly-half-live backend instead of succeeding.
+// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func sealThePath(t *testing.T, rr *RuntimeResources, path string) {
 	t.Helper()
 	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
@@ -530,11 +478,10 @@ func sdPoisonYAML(t testing.TB, routed []string, sealed string) string {
 		tools + sub1 + sub2
 }
 
-// TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing is §4.3's
-// 「真实 poisoned acquire」at the org boundary: a hot-add whose store path is
-// sealed by a live writer must be refused BEFORE any candidate is published, the
-// current generation must keep serving intact, and the refusal must not quietly
-// expire (no auto-unseal on a later apply).
+// TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing 钉住 热新增的存储路径被活写者封住时，必须在任何候选发布之前被拒。
+// - 当前代必须完整照常服务、序号不前进；
+// - 拒绝不得静默过期：poisoned 路径后续热更也不自动解封。
+// 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -562,7 +509,6 @@ func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 	require.NotNil(t, sub1Before, "baseline: sub1 serves")
 	genBefore := entry.OrgDiagnostics()["generation"]
 
-	// Hot-add sub2 on the SEALED path.
 	write(sdPoisonYAML(t, []string{"sub1", "sub2"}, sealed))
 	entry.CheckOrgReload()
 
@@ -586,27 +532,12 @@ func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 	require.Contains(t, fmt.Sprint(lf), "sub2", "记录须点出被封的那个名字")
 	require.Contains(t, fmt.Sprint(lf), sealed, "and name the path it collided with")
 
-	// 不自动解封：再一次 apply（另一处无关变更）仍须拒绝同一路径。
 	write(sdPoisonYAML(t, []string{"sub1", "sub2"}, sealed))
 	entry.CheckOrgReload()
 	require.Equal(t, genBefore, entry.OrgDiagnostics()["generation"],
 		"poisoned 规则不因后续热更自动解封")
 	require.Nil(t, residentCacheForTest(entry)["sub2"])
 }
-
-// §4.3 (R02) — the organization's final Close must reach EVERY owner it built,
-// not just the entry it returned. Before this task, Close was a single-instance
-// operation: the entry's own sequence ran, while each resident sub-owner kept
-// its context manager, its store-owner registration and its maintenance
-// goroutine behind. That is the defect R02 names (「被移除 owner 仍永久留在常驻表,
-// 正常退役与组织最终关闭没有完整闭环」) observed at its simplest boundary: a host
-// that does everything right — builds an org, serves nothing, calls Close — still
-// leaks every owned resource except the entry's.
-//
-// The witnesses below are the owner's own close state (CloseStarted), the state
-// its maintenance producer reached (CleanerStopped), and the assembly's
-// registration set (StoreOwnerSnapshot). Each is a fact about the owner, so a
-// sweep that merely closed the entry cannot satisfy them.
 
 // closeOwnerYAML renders entry "main" delegating to `targets`. sub1/sub2 are
 // always DEFINED — routability is the topology's truth source, not the file —
@@ -627,10 +558,10 @@ func buildCloseOrg(t *testing.T, yamlPath string) *agent.TagentAgent {
 	return entry
 }
 
-// TestOrgClose_CoversEveryResidentOwner: after the entry's Close returns, every
-// cold-built owner must report its own close, its cleaner goroutine must have
-// returned, and the assembly must hold NO store-owner registration left (each
-// revoked by the owner whose store exit it just took).
+// TestOrgClose_CoversEveryResidentOwner 钉住 组织最终关闭必须抵达它建出的每一个属主，而不只是交回的入口。
+// - 入口 Close 返回后，每个冷建属主都要报自己的关闭、维护协程已返回、装配不留任何存储属主登记；
+// - 见证取属主自身状态与装配登记表——只关了入口的清扫满足不了它们。
+// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
 func TestOrgClose_CoversEveryResidentOwner(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -659,10 +590,10 @@ func TestOrgClose_CoversEveryResidentOwner(t *testing.T) {
 		"a closed organization must leave no store-owner registration behind")
 }
 
-// TestOrgClose_CoversHotAddedOwner is spec scenario「组织关闭覆盖热新增 owner」:
-// an owner that joined through the hot path is owned by the organization just
-// like a cold one, so the same Close must reach it. The list is read at close
-// time, not captured at startup — that is the whole difference.
+// TestOrgClose_CoversHotAddedOwner 钉住 经热路径加入的属主与冷建的一样被组织拥有，同一次 Close 必须抵达它。
+// - 待关清单在关闭时读取、不在启动时定格，这正是全部差别；
+// - 热新增属主的关闭须已发起、维护生产者须已停、其存储属主登记须已撤销。
+// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
 func TestOrgClose_CoversHotAddedOwner(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -670,7 +601,6 @@ func TestOrgClose_CoversHotAddedOwner(t *testing.T) {
 	write(closeOwnerYAML(t, "sub1"))
 	entry := buildCloseOrg(t, yamlPath)
 
-	// 热新增 sub2：从只路由 sub1 改为同时路由 sub2。
 	write(closeOwnerYAML(t, "sub1", "sub2"))
 	entry.CheckOrgReload()
 	added := residentCacheForTest(entry)["sub2"]
@@ -686,10 +616,10 @@ func TestOrgClose_CoversHotAddedOwner(t *testing.T) {
 		"and its registration revoked")
 }
 
-// residentCacheForTest keyed by name must NOT be confused with the board a
-// closed org leaves: assert the table's owners are the same instances the tests
-// captured, so a sweep that rebuilt agents instead of closing them would show
-// up here as a false pass.
+// TestOrgClose_DoesNotReplaceOwners 钉住 关闭按名字取出的常驻属主，必须就是测试先前捕获的那些实例本身。
+// - 二次 Close（普通 t.Cleanup 跟进）必须幂等——属主自身序列恰好跑一次、不得复活；
+// - 清扫若是重建 agent 而非关闭它们，会在此暴露为假通过。
+// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
 func TestOrgClose_DoesNotReplaceOwners(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -706,25 +636,10 @@ func TestOrgClose_DoesNotReplaceOwners(t *testing.T) {
 	require.Same(t, sub1, residentCacheForTest(entry)["sub1"])
 }
 
-// TestOrgClose_SharedStoreWaitsForEveryBorrower is the last open acceptance item of
-// §4.3 (「共享组件等所有借用者」 at the org-Close boundary; design D8): two live
-// owners borrow ONE store, and the close sequence must hand the writer slot back
-// exactly once.
-//
-//	`TestRetire_SharedStoreSurvivesSiblingRetirement` already pins the retirement
-//
-// side's identity/liveness claims. This covers what Close can actually be shown to
-// guarantee, measured (evidence §5.41):
-//  1. no owner reports an error while the shared backend goes down, and
-//  2. the path ends up cleanly released — a leaked lease keeps the flock and a
-//     premature/doubled release would seal the path, so the reopen below fails in
-//     either case (proved by probe PC: skipping the last teardown → red here).
-//
-// What Close does NOT make observable: an early teardown while another borrower is
-// still alive stays invisible through this seam (probes PA/PB: tearing down on the
-// first release left `Close` clean and the path re-acquirable — the later release
-// just goes stale). That half is pinned where it IS observable, in
-// TestRetire_SharedComponentWaitsForEveryBorrower.
+// TestOrgClose_SharedStoreWaitsForEveryBorrower 钉住 关闭序列对共享一个存储的两个存活属主，恰好交还一次写者槽。
+// - 后端下沉期间任何属主都不得报错，路径最终干净释放——泄漏的租约持有 flock，过早或重复释放会封住路径，二者都让下面的重开失败；
+// - 恰一次释放经登记表自身规则观察，非破坏性，不用会接管所测锁的 flock 探针。
+// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
 func TestOrgClose_SharedStoreWaitsForEveryBorrower(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -745,8 +660,8 @@ func TestOrgClose_SharedStoreWaitsForEveryBorrower(t *testing.T) {
 
 	// Exactly-once release, observed through the registry's own rules (non-destructive
 	// by construction — unlike a flock probe, which would take over the very lock it
-	// measures; see evidence §5.40). Success proves: the flock is free (no leaked
-	// holder) AND the path is not poisoned (no premature/doubled release was sealed).
+	// measures). Success proves: the flock is free (no leaked holder) AND the path is
+	// not poisoned (no premature/doubled release was sealed).
 	fresh := NewRuntimeResources()
 	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
 	_, _, rel, err := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
@@ -757,13 +672,10 @@ func TestOrgClose_SharedStoreWaitsForEveryBorrower(t *testing.T) {
 	require.NoError(t, rel())
 }
 
-// TestRetire_SharedComponentWaitsForEveryBorrower pins the other half of the same
-// rule (design D8「共享组件等所有借用者」) where it is ACTUALLY observable: while a
-// borrower is still alive, the shared backend must not be torn down. A fresh
-// registry trying to take the path must collide with the survivor's live writer
-// lock — a failed LOCK_EX does not disturb the holder, so unlike a successful probe
-// this check is non-destructive (evidence §5.40). And only after the LAST borrower
-// exits may a new generation take over.
+// TestRetire_SharedComponentWaitsForEveryBorrower 钉住 借用者仍活着时共享后端不得被拆，这一半在别处不可观察、在这里才可证。
+// - 新代注册表试图接手该路径时必须撞上幸存者的活写者锁，失败的 LOCK_EX 不打扰持有者故非破坏；
+// - 只有最后一个借用者退出后，新代才可接手。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestRetire_SharedComponentWaitsForEveryBorrower(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -777,7 +689,7 @@ func TestRetire_SharedComponentWaitsForEveryBorrower(t *testing.T) {
 	s1, s2 := owners["s1"], owners["s2"]
 	require.Same(t, s1.MemStore(), s2.MemStore(), "precondition: both owners borrow one store")
 
-	write(twoAgentsOneStore(t, shared, "s1")) // 首个借用者退出
+	write(twoAgentsOneStore(t, shared, "s1"))
 	entry.CheckOrgReload()
 	require.True(t, s2.CloseStarted(), "precondition: s2 retired")
 	require.False(t, s1.CloseStarted(), "and s1 still borrows it")
@@ -792,7 +704,7 @@ func TestRetire_SharedComponentWaitsForEveryBorrower(t *testing.T) {
 		"§4.3/D8：仍有借用者时共享后端不得拆除（写锁必须还被存活者持有）")
 	require.NotErrorIs(t, err, ErrResourcePoisoned, "「仍被持有」不同于「回收未确认被封路」")
 
-	require.NoError(t, entry.Close()) // 最后一个借用者退出
+	require.NoError(t, entry.Close())
 	_, _, rel, err2 := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
 		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
 	})
@@ -828,18 +740,10 @@ agents:
 `, ref, testStore(t, "hottest-sd-usage"))
 }
 
-// TestSD_DeferredDelegationIsProtectedByUsageRight is the §3.2 red anchor named
-// in the task ("A 持 G1、尚未调用 B 时 G2 删 B，之后 G1 真调 B 仍成功"), per D8:
-// a version holds the usage rights of its locally-callable closure INCLUDING the
-// B it has not actually called yet, because G1 remains a legitimate caller until
-// its own references drain.
-//
-// Today's sweep asks only the owner about ITS obligations (executions /
-// invocations / live tasks). A never-called sub1 is Idle by that measure, so it
-// gets closed while G1 still routes to it — the deferred delegation then fails.
-// The usage right is not a second task domain (J7) and not a parallel routing
-// table: it is derived from the live bindings' own published faces, which are
-// already the single routing truth (§4.2).
+// TestSD_DeferredDelegationIsProtectedByUsageRight 钉住 没被调用过的子代理不得因本体度量空闲，就在别一代仍路由它时被关闭。
+// - 使用权由存活绑定各自已发布的面派生，不是第二套任务域、也不是平行路由表——那面已是唯一路由真源；
+// - 一代仍是合法调用方直到其自身引用排空，被推迟的委派那时必须还能落到被保有的子代理。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestSD_DeferredDelegationIsProtectedByUsageRight(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -864,13 +768,10 @@ func TestSD_DeferredDelegationIsProtectedByUsageRight(t *testing.T) {
 	require.NotNil(t, main, "G1：main 常驻")
 	require.NotNil(t, residentCacheForTest(entry)["sub1"], "G1：sub1 常驻")
 
-	// A request accepted on G1 — its business turn pins the generation while the
-	// model has NOT yet emitted the delegation to sub1.
 	lease := main.ContextManager().AcquireLease(agent.LeaseTurn)
 	g1Wrapper := lease.SubagentWrapper("sub1")
 	require.NotNil(t, g1Wrapper, "G1 自己的面上必须解析得出 sub1（同一版本真源）")
 
-	// G2 removes the route: sub1 becomes unrouted and enters the retirement ledger.
 	write(sdUsageYAML(t, false))
 	entry.CheckOrgReload()
 
@@ -879,14 +780,9 @@ func TestSD_DeferredDelegationIsProtectedByUsageRight(t *testing.T) {
 	require.NotNil(t, residentCacheForTest(entry)["sub1"],
 		"§3.2 红锚：G1 仍保有 sub1 使用权（尚未调用也受保护），sweep 不得提前退役")
 
-	// The deferred delegation itself must still work — host result, not a flag.
 	_, err = g1Wrapper.Call(context.Background(), []byte(`{"request":"deferred call from G1"}`))
 	require.NoError(t, err, "G1 在 G2 删除路由之后真调 sub1 仍须成功")
 
-	// Boundedness (§4.1/D8): a released usage right must not hold the owner
-	// forever. The release itself carries the drain forward — no extra business
-	// turn is required (TestSD_ReleaseContinuesRetirementWithoutAnotherTurn pins
-	// that without supplying any traffic at all).
 	lease.Release()
 	require.Eventually(t, func() bool {
 		return residentCacheForTest(entry)["sub1"] == nil
@@ -915,16 +811,10 @@ agents:
 `, routed, routed, routed, routed, store)
 }
 
-// TestSD_ReleaseContinuesRetirementWithoutAnotherTurn is the §4.3 requirement
-// the previous round left on the books: 「释放使用权/任务收尾经原生命周期轻量通知
-// 继续退役，不必须再来一个业务 turn」.
-//
-// A pending retirement that was held ONLY by a usage right gets unblocked by the
-// release itself. If the assembly waited for the next business turn to notice,
-// an idle org would keep a closed-in-principle owner resident indefinitely — the
-// very「invisible 持有」this change set out to remove. So after the last reference
-// on the holding generation drains, the owner must exit on its own, bounded, with
-// NO traffic of any kind supplied afterwards.
+// TestSD_ReleaseContinuesRetirementWithoutAnotherTurn 钉住 仅由使用权保有的待退役被释放本身解除阻塞，无新业务回合即退出。
+// - 最后一个引用排空后属主须自行有界退出——若装配等下一个业务回合才察觉，空闲组织会把本已可关的属主无限期常驻；
+// - 这正是"不可见的持有"要消除的对象。
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestSD_ReleaseContinuesRetirementWithoutAnotherTurn(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -947,15 +837,12 @@ func TestSD_ReleaseContinuesRetirementWithoutAnotherTurn(t *testing.T) {
 	main := residentCacheForTest(entry)["main"]
 	require.NotNil(t, main)
 
-	// One generation pinned by a single turn lease: it is the ONLY holder of sub1
-	// (which never gets called, so its own three obligation axes stay zero).
 	lease := main.ContextManager().AcquireLease(agent.LeaseTurn)
 	write(sdOneRouteYAML(t, "sub2", store))
 	entry.CheckOrgReload()
 	require.NotNil(t, residentCacheForTest(entry)["sub1"],
 		"前提：G1 持有使用权时 sub1 不得退役")
 
-	// Release, then supply NOTHING — no turn, no inject, no reload call.
 	lease.Release()
 	require.Eventually(t, func() bool {
 		return residentCacheForTest(entry)["sub1"] == nil
@@ -972,8 +859,6 @@ func deshellYAML(t testing.TB, mainModel, sub1Model, sub2Model string, sub3 bool
 	sub3Tool := ""
 	sub3Block := ""
 	if sub3 {
-		// sub3 must be REFERENCED from main's tools or reachableAgents excludes
-		// it — an unreferenced declaration is not a hot-add (and never builds).
 		sub3Tool = `      - kind: agent
         agent: sub3
         description: "sub3"
@@ -1072,11 +957,10 @@ func deshellReload(t *testing.T, entry *agent.TagentAgent, yamlPath, m1, s1b, s2
 	require.Greater(t, after, before, "structural reload did not publish — construction-count assertions below would be vacuous")
 }
 
-// TestDeshell_EntryRegenerationConstructsZeroAgents is the S-A red anchor: a
-// hot reload that only MODIFIES the entry (model swap; sub1/sub2 byte-identical)
-// must construct ZERO TagentAgents. The discarded entry shell was the entire
-// point of D1 去壳 — one full agent (bus/TaskManager/cleaner) per publish,
-// thrown away.
+// TestDeshell_EntryRegenerationConstructsZeroAgents 钉住 只改入口（换模型、兄弟逐字节相同）的热重载构造零个 agent。
+// - 每次发布造一整只壳（总线/TaskManager/cleaner）再丢弃，正是去壳要消灭的代价；
+// - 判别按对象寿命而非组织级计数：改既有 agent 须经面再生，不构造壳。
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestDeshell_EntryRegenerationConstructsZeroAgents(t *testing.T) {
 	entry, yamlPath := deshellHarness(t, "model-a", "sub-m1", "sub-m2", false)
 	before := agent.TagentAgentsConstructed()
@@ -1085,13 +969,9 @@ func TestDeshell_EntryRegenerationConstructsZeroAgents(t *testing.T) {
 		"S-A: modifying an existing agent must regenerate through the face, not construct shells")
 }
 
-// TestDeshell_ChangedSubAgentConstructsOneTransitional pinned the transitional
-// cost of S-A: modifying sub1 (entry untouched) constructed EXACTLY ONE agent —
-// sub1's transitional executor carrier.〔轮九十迁移（显式）〕S-D/3.2 has now
-// landed (user-approved holding expansion): every owner's execution view advances
-// through staged faces wired to stable resident instances, and the transitional
-// shell is DEAD — the terminal ZERO this anchor always named as its own end state.
-// The name keeps the history; the pinned number is the terminal one.
+// TestDeshell_ChangedSubAgentConstructsOneTransitional 钉住 改一个子代理（入口未动）经暂存面在稳定常驻实例上推进，构造零个 agent。
+// - 暂存执行载体已并入常驻实例，构造数恒为零。
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestDeshell_ChangedSubAgentConstructsOneTransitional(t *testing.T) {
 	entry, yamlPath := deshellHarness(t, "model-a", "sub-m1", "sub-m2", false)
 	before := agent.TagentAgentsConstructed()
@@ -1100,9 +980,9 @@ func TestDeshell_ChangedSubAgentConstructsOneTransitional(t *testing.T) {
 		"S-D terminal: a changed sub-agent advances through its staged face on the stable resident instance — the transitional carrier is gone")
 }
 
-// TestDeshell_HotAddConstructsExactlyTheNewAgent pins J2 (去壳≠去能力): a
-// hot-add builds the new agent fully (ONE construction) and — de-shelled — no
-// longer re-shells entry/unchanged siblings around it.
+// TestDeshell_HotAddConstructsExactlyTheNewAgent 钉住 热新增完整构造那一个新 agent（恰好一个），去壳后不得围绕它重造入口与未变兄弟。
+// - 去壳不等于去能力：新 agent 走完整常驻构造，入口与逐字节相同的兄弟不得再构造。
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestDeshell_HotAddConstructsExactlyTheNewAgent(t *testing.T) {
 	entry, yamlPath := deshellHarness(t, "model-a", "sub-m1", "sub-m2", false)
 	before := agent.TagentAgentsConstructed()
@@ -1111,9 +991,9 @@ func TestDeshell_HotAddConstructsExactlyTheNewAgent(t *testing.T) {
 		"J2: hot-add constructs exactly the new full agent; entry/unchanged siblings must not re-construct")
 }
 
-// TestDeshell_RollbackConstructsZeroForEntryOnlyChange extends the anchor to
-// the rollback path (same de-shelled treatment): rolling back an entry-only
-// structural change constructs ZERO agents.
+// TestDeshell_RollbackConstructsZeroForEntryOnlyChange 钉住 回滚一次仅入口的结构变更构造零个 agent，与正向热更同价。
+// - 入口级回滚须经面再生，不构造壳。
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestDeshell_RollbackConstructsZeroForEntryOnlyChange(t *testing.T) {
 	entry, yamlPath := deshellHarness(t, "model-a", "sub-m1", "sub-m2", false)
 	deshellReload(t, entry, yamlPath, "model-b", "sub-m1", "sub-m2", false)
@@ -1122,15 +1002,6 @@ func TestDeshell_RollbackConstructsZeroForEntryOnlyChange(t *testing.T) {
 	require.Zero(t, agent.TagentAgentsConstructed()-before,
 		"S-A rollback: entry-only rollback must regenerate through the face, not shells")
 }
-
-// §8.6 — MANAGED-ROOT RESET DRILL, run entirely inside temporary managed dirs
-// (never a real unspecified directory). Consistent recovery-unit reset: the
-// store, the inbox (v2 live tree + transitional legacy) and the meditation
-// anchor are ONE unit — a reset clears them all or nothing. Guards drilled
-// here: live-writer refusal (flock), explicit-confirm refusal, path-escape
-// safety (symlink victims survive), unmanaged content preserved, quarantine
-// evidence never auto-wiped (current corruption must be dispositioned by the
-// operator first), and a post-reset boot that only knows the current format.
 
 // drillModel records every real request it is shown and answers one turn.
 type drillModel struct {
@@ -1164,11 +1035,8 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 	if err != nil {
 		return nil, fmt.Errorf("drill reset: live writer on %s: %w", storeDir, err)
 	}
-	defer func() { _ = unlockDirLock(lockF) }() // unlock closes
+	defer func() { _ = unlockDirLock(lockF) }()
 
-	// Gate 2 — verify-and-enumerate before touching anything: an unreadable
-	// CURRENT backend (corruption / I/O trouble) is never treated as legacy
-	// data to sweep.
 	kvStore, err := kv.NewLocalFileKV(storeDir)
 	if err != nil {
 		return nil, fmt.Errorf("drill reset: store backend unreadable (current trouble, NOT transitional): %w", err)
@@ -1197,11 +1065,8 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 		m, _ := filepath.Glob(filepath.Join(storeDir, pat))
 		removals = append(removals, m...)
 	}
-	// Inbox unit: live-tree envelopes of the unit (quarantine/ NOT matched)
-	// plus leaf-classified transitional legacy via the leaf's own guarded API.
 	live, _ := filepath.Glob(filepath.Join(spillParent, agentName, "inbox-v2", "*.json"))
 	removals = append(removals, live...)
-	// Anchor unit: only <anchorDir>/<agent>.json.
 	removals = append(removals, filepath.Join(anchorDir, agentName+".json"))
 
 	// All gates passed — commit the unit reset.
@@ -1230,7 +1095,7 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 }
 
 func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
-	root := t.TempDir() // THE managed dir — the drill never touches real dirs
+	root := t.TempDir()
 	storeDir := filepath.Join(root, "store")
 	spillDir := filepath.Join(root, "spill")
 	anchorDir := filepath.Join(root, "anchor")
@@ -1240,18 +1105,14 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(spillDir, "tagent", "inbox-v2", "quarantine"), 0o755))
 	require.NoError(t, os.MkdirAll(anchorDir, 0o755))
 
-	// --- seed: legacy transitional material -------------------------------
 	legacyV1 := filepath.Join(spillDir, "tagent", "inbox-v1", "old-v1.json")
 	require.NoError(t, os.WriteFile(legacyV1, []byte(`{"version":1}`), 0o644))
 	legacySpill := filepath.Join(spillDir, "tagent", "job.spill")
 	require.NoError(t, os.WriteFile(legacySpill, []byte("spill"), 0o644))
-	// symlink-escape bait inside the legacy set: removing the LINK must never
-	// touch its outside victim.
 	victim := filepath.Join(root, "outside-victim.json")
 	require.NoError(t, os.WriteFile(victim, []byte("DO-NOT-DELETE"), 0o644))
 	require.NoError(t, os.Symlink(victim, filepath.Join(spillDir, "tagent", "inbox-v1", "escape.json")))
 
-	// --- seed: CURRENT-format unit data (store facts + live envelope + anchor)
 	kvStore, err := kv.NewLocalFileKV(storeDir)
 	require.NoError(t, err)
 	store, err := memory.NewFileSegmentStore(kvStore, nil, storeDir, 100)
@@ -1266,38 +1127,30 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.NoError(t, bus.CloseDurable())
 	require.NoError(t, os.WriteFile(filepath.Join(anchorDir, "tagent.json"), []byte("anchor"), 0o644))
 
-	// --- seed: UNMANAGED content + quarantine evidence (must survive) -----
 	unmanaged := filepath.Join(storeDir, "user-notes.txt")
 	require.NoError(t, os.WriteFile(unmanaged, []byte("mine"), 0o644))
 	evidence := filepath.Join(spillDir, "tagent", "inbox-v2", "quarantine", "evidence-1.json")
 	require.NoError(t, os.WriteFile(evidence, []byte(`{"corrupt":true}`), 0o644))
 
-	// LEG b1 — confirm gate: refusal, zero changes.
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", false)
 	require.Error(t, err)
 	require.FileExists(t, legacyV1)
 
-	// LEG b2 — quarantine evidence blocks the reset until the operator
-	// dispositions it: the CURRENT corruption is never swept as "legacy".
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", true)
 	require.Error(t, err, "undispositioned quarantine must refuse the unit reset")
 	require.FileExists(t, evidence, "quarantine evidence files are NEVER deleted by the reset")
 	require.FileExists(t, legacyV1, "refusal means ZERO changes")
 	require.FileExists(t, filepath.Join(storeDir, "kv.json"), "refusal means ZERO changes")
 
-	// Operator dispositions the evidence (moves it out — the human act).
 	require.NoError(t, os.Rename(evidence, filepath.Join(root, "dispositioned-1.json")))
 
-	// LEG c — live writer refuses: hold the store's flock, reset must refuse
-	// with zero changes, then succeed once the writer leaves.
 	held, err := acquireDirLock(storeDir)
 	require.NoError(t, err)
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", true)
 	require.ErrorIs(t, err, ErrStoreLocked, "a live writer must be refused")
 	require.FileExists(t, legacyV1)
-	require.NoError(t, unlockDirLock(held)) // unlockDirLock closes the file
+	require.NoError(t, unlockDirLock(held))
 
-	// LEG d — the consistent unit reset itself.
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", true)
 	require.NoError(t, err)
 	require.NoFileExists(t, legacyV1, "transitional v1 cleared")
@@ -1306,13 +1159,12 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(anchorDir, "tagent.json"), "anchor unit cleared")
 	liveLeft, _ := filepath.Glob(filepath.Join(spillDir, "tagent", "inbox-v2", "*.json"))
 	require.Empty(t, liveLeft, "live envelopes cleared with the store (no unit half-reset)")
-	// Survivors: unmanaged content, the symlink's victim, quarantine DIR.
 	require.FileExists(t, unmanaged, "unmanaged content is never removed")
 	require.FileExists(t, victim, "path escape removed at most the link, never the outside target")
 	require.DirExists(t, filepath.Dir(evidence))
 
 	// LEG e — post-reset boot ONLY knows the current path. Runs as an
-	// independent process (boot evidence layer). §6.6: the acceptance keeps no
+	// independent process (boot evidence layer). The acceptance keeps no
 	// race exemption — the child must boot with zero data races and a clean
 	// exit; any race or non-zero exit fails hard with the full log.
 	runBootChild(t, append(os.Environ(),
@@ -1322,7 +1174,7 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 		"TAGENT_DRILL_PHASE=boot-turn", "TestDrill_ManagedRootResetBootChild$")
 }
 
-// TestDrill_ManagedRootReset boot-phase child: drives one post-reset turn.
+// TestDrill_ManagedRootResetBootChild 钉住 单元复位之后的启动相只认当前格式的路径，并能完成一个真实回合。
 func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 	if os.Getenv("TAGENT_DRILL_PHASE") != "boot-turn" {
 		t.Skip("drill boot child")
@@ -1360,7 +1212,7 @@ func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 		for _, req := range m.reqs {
 			for _, msg := range req {
 				if strings.Contains(msg.Content, "post-reset-first-input") {
-					return true // Contains: the framework guard may decorate the input (§7.4 precedent)
+					return true // the framework guard may decorate the input
 				}
 			}
 		}

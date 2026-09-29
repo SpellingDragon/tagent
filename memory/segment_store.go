@@ -869,7 +869,7 @@ func sortRefsByTotalOrder(refs []EventReference, orderBy string) {
 const noUpperBoundMs int64 = math.MaxInt64
 
 // segmentBounds derives the segment's TRUTHFUL event-time envelope for query
-// pruning and early-stop (segment-query-recency — LSM key-range
+// pruning and early-stop (LSM key-range
 // metadata):
 //
 // - Sealed with MinTime/MaxTime → those bounds (event time, stable once

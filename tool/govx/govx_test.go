@@ -14,6 +14,8 @@ import (
 // TestGoalDeclare_PersistsEvent: goal_declare
 // registers the goal AND (with a bound store) persists a governance event —
 // audit trail and restart rebuild come from the same write.
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 func TestGoalDeclare_PersistsEvent(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	pid := memory.PartitionIDFromName("tagent")

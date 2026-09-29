@@ -12,6 +12,8 @@ import (
 // TestEmbeddedPrompts_ResolveViaFallback verifies the framework's shared prompts
 // are embedded and resolve through the loader fallback from an empty on-disk
 // dir — the mechanism that lets examples drop their duplicate copies.
+//
+// 契约: docs/wiki/prompt/prompt-architecture.md#embedded-fallback
 func TestEmbeddedPrompts_ResolveViaFallback(t *testing.T) {
 	l := prompt.NewLoader(t.TempDir(), prompt.WithFallback(defaultPromptsFS, DefaultPromptsPrefix))
 
@@ -34,8 +36,8 @@ func TestEmbeddedPrompts_ResolveViaFallback(t *testing.T) {
 	}
 }
 
-// TestPlanPromptContract locks the plan prompt invariants from
-// plan-interaction-contract (D3/D5): no phantom-tool escape hatches, dual
+// TestPlanPromptContract locks the plan prompt invariants
+// (D3/D5): no phantom-tool escape hatches, dual
 // path-base table present, level-based closing, and the parent-facing tool
 // description declares the output boundary and resume protocol.
 func TestPlanPromptContract(t *testing.T) {

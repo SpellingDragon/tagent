@@ -146,7 +146,7 @@ func TestStoreEvidenceSource_NilStore(t *testing.T) {
 	}
 }
 
-// TestStoreEvidenceSource_ActivationWindowStart 是 W4（§8.3）回归：Collect 以 bundle 激活时刻
+// TestStoreEvidenceSource_ActivationWindowStart 是 W4 回归：Collect 以 bundle 激活时刻
 // 为证据窗口起点——激活前的事件被 cutoff 排除。否则 CanaryHold=0「激活即评估」时固定回看窗
 // （默认 10m）全是旧 bundle 数据，judge 对新激活 bundle 无判别力，"劣化即回滚"形同虚设。
 func TestStoreEvidenceSource_ActivationWindowStart(t *testing.T) {
@@ -232,10 +232,10 @@ func TestEvidence_BundleJoin(t *testing.T) {
 	}
 }
 
-// TestGuardrail_NegativeFeedbackRollback (2.5, design-report-closeout): the
+// TestGuardrail_NegativeFeedbackRollback: the
 // negative-feedback rate criterion must breach the guardrail when the share
 // of negative feedback attributed to the canary bundle exceeds the
-// threshold. Fail-before: no such criterion existed.
+// threshold.
 func TestGuardrail_NegativeFeedbackRollback(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	pid := 1

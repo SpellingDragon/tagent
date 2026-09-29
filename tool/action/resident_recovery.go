@@ -32,7 +32,7 @@ type ResidentMeta struct {
 	ProbeFailures    int    `json:"probe_failures,omitempty"`
 	SpawnedAt        string `json:"spawned_at"`
 	// LastAdoptedAt is the last time an agent instance adopted (reattached or
-	// found already-tracked) this session — hardening-review-batch2 2.1/2.2.
+	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
 	// long-running session re-adopted across restarts is not an orphan no
 	// matter how old it is. Empty → fall back to SpawnedAt (legacy meta).
@@ -220,7 +220,7 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 }
 
 // residentTTL is how long a resident session may go WITHOUT ADOPTION before
-// the sweep reaps it (hardening-review-batch2 2.2 — was: raw age since spawn,
+// the sweep reaps it (was: raw age since spawn,
 // which killed healthy long-running sessions at their first post-24h restart).
 // Freshness is measured from LastAdoptedAt (fallback SpawnedAt for legacy
 // meta), and sessions still tracked by a live monitor are never swept.

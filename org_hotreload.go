@@ -69,7 +69,7 @@ type orgCoordinator struct {
 	applySig string
 
 	// appliedView is the LOCK-FREE read face of the committed application record
-	// (introduce-durable-workflow-engine S-E, design 「atomic.Pointer 无锁化留
+	// (S-E, design 「atomic.Pointer 无锁化留
 	// S-E 与 compressor 侧同源做」). S-C's lock-held read assumed hot params are
 	// consumed rarely; once the compressor resolves its numeric group from the
 	// record at every boundary of every live CM, that assumption puts the commit

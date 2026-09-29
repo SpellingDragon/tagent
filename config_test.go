@@ -52,7 +52,7 @@ func TestValidate_AgentReferences(t *testing.T) {
 			errContains: "unknown agent",
 		},
 		{
-			// §3.3「校验域与构建域一致，远端引用不误要求本地定义」：buildAgentToolRef
+			// 「校验域与构建域一致，远端引用不误要求本地定义」：buildAgentToolRef
 			// 对 Remote 引用走 A2A 分支，从不查本地 agents 表；校验域若仍要求本地定义，
 			// 一个纯远端委派（服务在别处的 agent）会在加载期被误判为引用不存在。
 			name: "remote a2a reference needs no local definition",
@@ -235,7 +235,7 @@ func TestDefaultConfig_MeditationConfig(t *testing.T) {
 		"DefaultConfig should not enable meditation by default")
 }
 
-// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类 BUG（报告 D4 §4.5.3）：
+// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类 BUG：
 // DefaultConfig 必须通过 ApplyDefaults + Validate + ValidateToolAccess 全链路，
 // 即 New(DefaultConfig()) 可构建。此前 DefaultConfig 引用 id:"action" 而注册表
 // 注册为 "exec"（registry.go），ValidateToolAccess 会失败——本测试锁死该回归。

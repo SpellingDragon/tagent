@@ -40,10 +40,9 @@
 
 ```go
 // 契约: docs/wiki/agent/agent-architecture.md#213-执行代与发布executor-generations
-// 规格: openspec/specs/swappable-executor
 ```
 
-允许目标仅 `docs/**` 与 `openspec/specs/**`。**禁止**指向 `openspec/changes/**`（含归档）与任何过程工件——那是迭代史，不是现态文档。索引不承载解释；一行只放一个锚点，多个锚点分行。
+允许目标仅 `docs/**`（机制文档树，含各模块 README）。**`openspec/specs/**` 不是合法索引目标**：代码索引要指向"解释这段代码的机制文档"，那份真源在 wiki；需求树是行为契约的规范面，不是代码的说明面（门 `indexTargetRoots` 据此只认 `docs/`，实测收紧前无一索引指向 specs）。**禁止**指向 `openspec/changes/**`（含归档）与任何过程工件——那是迭代史，不是现态文档。索引不承载解释；一行只放一个锚点，多个锚点分行。
 
 ### D3 机械豁免清单（穷举，新增须显式登记）
 

@@ -1,6 +1,6 @@
 // Package offline_bench holds the offline performance baseline for the
-// resident hardening program (resident-remaining-hardening 2.5, archived
-// design D6,  converged): event scale 1k/10k/100k (single Sync-barrier
+// resident hardening program (archived
+// design D6, converged): event scale 1k/10k/100k (single Sync-barrier
 // setting — the minimal localfile backend has NO fsync axis anymore, a second
 // "fsync" column would measure the same bytes twice) × probe
 // concurrency 1/10/100, recording p50/p95, allocs, RSS, KV scan volume and

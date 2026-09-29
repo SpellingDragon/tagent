@@ -21,13 +21,20 @@ import "context"
 type Op string
 
 const (
-	OpInit         Op = "init"
-	OpNew          Op = "new"
-	OpStatus       Op = "status"
-	OpValidate     Op = "validate"
-	OpArchive      Op = "archive"
+	// OpInit 初始化 spec 工作区（argv：init --tools none）。
+	OpInit Op = "init"
+	// OpNew 新建一个 change，Name 必填。
+	OpNew Op = "new"
+	// OpStatus 查询状态；Name 选填（限定单个 change），JSON 选填。
+	OpStatus Op = "status"
+	// OpValidate 以 --strict 校验指定 change，Name 必填。
+	OpValidate Op = "validate"
+	// OpArchive 归档指定 change，Name 必填。
+	OpArchive Op = "archive"
+	// OpInstructions 取某类产物的写作指引，Artifact 必填（proposal/specs/design/tasks），Name 选填。
 	OpInstructions Op = "instructions"
-	OpList         Op = "list"
+	// OpList 列出 change；JSON 选填。
+	OpList Op = "list"
 )
 
 // validOps is the dispatch whitelist.

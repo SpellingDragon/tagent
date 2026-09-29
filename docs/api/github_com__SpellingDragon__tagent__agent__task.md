@@ -136,12 +136,11 @@ type Declarative struct {
 	Params         map[string]string `json:"params,omitempty"`
 	StartedAtMilli int64             `json:"started_at_ms"`
 }
-    Declarative is the serializable projection of a TaskSpec — everything
-    needed to rebuild the closure trio (Relaunch/ResumeFn/Alive) cross-restart
-    via the tool/action closure factory. The in-process closures remain
-    authoritative while alive; Declarative is what task_spawned events carry
-    and what RebuildTaskRegistry replays (registry = fold of the fact chain,
-    resident-continuity-r2-r4 D1).
+    Declarative is the serializable projection of a TaskSpec — everything needed
+    to rebuild the closure trio (Relaunch/ResumeFn/Alive) cross-restart via the
+    tool/action closure factory. The in-process closures remain authoritative
+    while alive; Declarative is what task_spawned events carry and what
+    RebuildTaskRegistry replays (registry = fold of the fact chain).
 
 type ManualDetector struct {
 	// Has unexported fields.
@@ -447,12 +446,11 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
     parallel (blocking ≈ the slowest, not the sum).
 
 func (tm *TaskManager) TerminalTTL() time.Duration
-    TerminalTTL reports the live terminal grace period (introspection;
-    makes it a READ of the same resolution the reaper uses — the
-    owner's record source when installed, else the construction value.
-    introduce-durable-workflow-engine /L-3 rollback tests read this, not the
-    config field). Same tm.mu lock as the reaper paths, so what a test sees is
-    what pruneTerminal applied.
+    TerminalTTL reports the live terminal grace period (introspection; makes it
+    a READ of the same resolution the reaper uses — the owner's record source
+    when installed, else the construction value. rollback tests read this,
+    not the config field). Same tm.mu lock as the reaper paths, so what a test
+    sees is what pruneTerminal applied.
 
 type TaskManagerConfig struct {
 	// OnSettle is invoked when a task settles AFTER its window closed (detach) —

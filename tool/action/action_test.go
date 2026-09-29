@@ -21,6 +21,8 @@ func mustMarshal(t *testing.T, args map[string]interface{}) []byte {
 }
 
 // TestActionTool_TmuxExec 钉住 verifies that a simple tmux command runs to completion and returns a properly-shaped ActionToolResult with the captured output.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
 func TestActionTool_TmuxExec(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")

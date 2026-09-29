@@ -81,8 +81,8 @@ func (h *HTTPAPI) SetAuthToken(token string)
     the loopback fail-closed guard.
 
 func (h *HTTPAPI) SetDiagnosticsFn(fn func() any)
-    SetDiagnosticsFn 注入诊断快照构造器（R2 backlog-final-closeout：诊断快照获得消费 面——GET
-    /diagnostics 输出 JSON）。fn 为 nil 时不注册端点（404）。
+    SetDiagnosticsFn 注入诊断快照构造器（R2：诊断快照获得消费 面——GET /diagnostics 输出 JSON）。fn 为 nil
+    时不注册端点（404）。
 
 func (h *HTTPAPI) SetEndpointPolicy(enabled bool, allowedHosts []string)
     SetEndpointPolicy (5.3): dynamic endpoint redirect defaults to disabled;

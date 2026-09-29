@@ -257,6 +257,8 @@ func TestRotatePipeFile_CopyTruncate(t *testing.T) {
 
 // TestDetector_Watch_EmitsSettleWatch 钉住 观察模式在探测器上的接线：命中即发观察信号并携带累计计数。
 // - 合并窗口折叠密集命中；未配观察则不发任何信号。
+//
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestDetector_Watch_EmitsSettleWatch(t *testing.T) {
 	d := NewTmuxSettleDetector("w-test", nil, time.Hour)
 	defer d.close()

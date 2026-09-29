@@ -84,7 +84,6 @@ func TestResolveAgentModel_ResolvesFromProvider(t *testing.T) {
 
 	got := rc.resolveAgentModel("knowledge", cfg.Agents["knowledge"], cfg)
 	require.NotNil(t, got)
-	// Should NOT be the parent model — it should be resolved via provider.
 	assert.NotEqual(t, "parent", got.Info().Name)
 }
 
@@ -113,7 +112,6 @@ func TestResolveAgentModel_CachesResolvedModels(t *testing.T) {
 	got1 := rc.resolveAgentModel("knowledge", cfg.Agents["knowledge"], cfg)
 	got2 := rc.resolveAgentModel("recall", cfg.Agents["recall"], cfg)
 
-	// Both should resolve to the same cached instance.
 	assert.Same(t, got1, got2)
 }
 
@@ -215,8 +213,7 @@ entry: tagent
 	assert.Equal(t, "", cfg.Agents["knowledge"].Provider) // falls back to global
 }
 
-// TestTencentProvider_Hy3Model verifies that the tencent provider (OpenAI-compatible)
-// can successfully call the hy3 model. This test requires TENCENT_API_KEY env var.
+// TestTencentProvider_Hy3Model verifies that the tencent provider (OpenAI-compatible) can call the hy3 model.
 func TestTencentProvider_Hy3Model(t *testing.T) {
 	apiKey := os.Getenv("TENCENT_API_KEY")
 	if apiKey == "" {

@@ -1,3 +1,9 @@
+// Package action 提供 exec 类动作工具及其 tmux 会话承载：动作的发起与执行、会话存活
+// 判定、完成裁决（settle）、状态跃迁通知、轮询调度、跨重启的常驻恢复，以及供跨重启
+// 重建闭包的 Declarative 投影。长期行为判据不在此复述，见下列契约。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+// 契约: docs/wiki/tool/tmux-action.md#liveness-first
 package action
 
 import (
@@ -216,7 +222,7 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 const defaultTaskTTL = 10 * time.Minute
 
 // SetDefaultTTLSource installs the  pull source for the spawn-time default
-// lifetime (introduce-durable-workflow-engine 6.4, spawner axis): the
+// lifetime (spawner axis): the
 // composition root binds it to the owner's committed application record, so a
 // numeric-only rotation reaches every subsequent spawn without anyone pushing a
 // number into this tool. It replaces SetDefaultTaskTTL, which kept a second,

@@ -15,9 +15,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// §5.1（design D9）：代际诊断的有界可诊断结果。契约两层——
-// 协调器层（status 的一致快照 + 拷贝语义）与装配层（拒绝/成功都能经宿主持有的
-// agent 实例读到，无需重启、无需新抓取协议）。
+// 代际诊断的有界可诊断结果，契约分两层：协调器层（status 的一致快照与拷贝
+// 语义）与装配层（拒绝与成功都能经宿主持有的 agent 实例读到，无需重启）。
 
 // diagYAML renders an org whose entry delegates to `subs`（拓扑由 subs 决定，
 // 便于在同一测里做出“结构变更”与“memory 段变更”两种候选）。
@@ -25,8 +24,8 @@ func diagYAML(model string, subs ...string) string {
 	return diagYAMLMem(model, "      type: memory\n", subs...)
 }
 
-// diagYAMLMem additionally overrides the ENTRY agent's memory block (§4.3: an
-// owner-held agent changing its storage must stay refused).
+// diagYAMLMem additionally overrides the ENTRY agent's memory block: an
+// owner-held agent changing its storage must stay refused.
 func diagYAMLMem(model, mainMem string, subs ...string) string {
 	var b strings.Builder
 	b.WriteString("entry: main\n" +
@@ -44,9 +43,11 @@ func diagYAMLMem(model, mainMem string, subs ...string) string {
 	return b.String()
 }
 
-// TestOrgCoordinator_StatusIsConsistentCopy 钉 status 的三条簿记语义：
-// 失败记录带所在代且不清空 effective；成功发布清除失败记录并记时间；返回的是
-// 拷贝（调用方改不动内部状态）。
+// TestOrgCoordinator_StatusIsConsistentCopy 钉住 代际状态是一次一致快照，交出的是拷贝。
+// - 失败记录带所在代与其 desired；被拒不进序号、不清 effective，成功发布才清除失败记录并记时间；
+// - desired 与 fingerprint 分歧是运维可见信号，无新候选时失败记录报当前指纹，不造幻影缺口；
+// - 逐 agent 回执整块替换（只保留最近一轮），改返回拷贝改不动内部状态。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestOrgCoordinator_StatusIsConsistentCopy(t *testing.T) {
 	c := newOrgCoordinator()
 	c.init("fp0", &Config{})
@@ -66,7 +67,6 @@ func TestOrgCoordinator_StatusIsConsistentCopy(t *testing.T) {
 		"without a fresh candidate in this cycle the failure reports the current fingerprint — no phantom gap")
 	require.Equal(t, int64(0), st.Generation, "a rejection does not advance the generation")
 
-	// A rejection must be able to say WHICH candidate it refused (D9: desired fingerprint).
 	c.noteDesired("fp9")
 	c.recordFailure(errSentinel{})
 	st = c.status()
@@ -85,7 +85,6 @@ func TestOrgCoordinator_StatusIsConsistentCopy(t *testing.T) {
 	require.False(t, st.LastApplied.IsZero())
 	require.Equal(t, 1, gen.seq)
 
-	// 逐 agent 回执：整块替换（只保留最近一轮，无历史累积）且交出的是拷贝。
 	c.recordApply([]OrgAgentApply{{Name: "a", Outcome: "applied"}, {Name: "b", Outcome: "draining"}})
 	require.Len(t, c.status().Agents, 2)
 	c.recordApply([]OrgAgentApply{{Name: "a", Outcome: "applied"}})
@@ -95,8 +94,9 @@ func TestOrgCoordinator_StatusIsConsistentCopy(t *testing.T) {
 	require.Equal(t, "applied", c.status().Agents[0].Outcome, "status hands out a copy of the receipts too")
 }
 
-// shortFingerprintIsBounded 是 guardrail 的一部分：诊断标签被截断，够对齐“哪一次
-// 候选”，不够被误当业务键（resident-continuity：指纹不是应用可见 identity）。
+// TestOrgDiagnostics_FingerprintLabelIsBounded 钉住 指纹在诊断里只作截断标签，够对齐哪一次候选、不够当业务键。
+// - 执行路径不得据截断指纹选版：它不是应用可见的身份（resident-continuity）。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestOrgDiagnostics_FingerprintLabelIsBounded(t *testing.T) {
 	c := newOrgCoordinator()
 	long := strings.Repeat("a", 64)
@@ -104,9 +104,11 @@ func TestOrgDiagnostics_FingerprintLabelIsBounded(t *testing.T) {
 	require.Len(t, c.status().Fingerprint, 8, "diagnostic label is the truncated fingerprint")
 }
 
-// TestOrgDiagnostics_EndToEnd 通过生产入口（tagent.New + CheckOrgReload）验证：
-// 一次被拒的候选与一次成功的发布都在**同一个** agent 诊断访问器上可观测，且代际
-// 序号只随成功前进。
+// TestOrgDiagnostics_EndToEnd 钉住 被拒候选与成功发布都经同一诊断访问器可观测，序号只随成功前进。
+// - 载荷有界：字段是约定的固定集合，实时欠账组与关闭态各自成组、不冒充提交记录的原子快照；
+// - 拒绝可具名到被拒的那次候选（报其 desired、不前进序号），成功发布前进序号并清除失败记录；
+// - 逐 agent 回执与引用面就在同一载荷上，无需第二套抓取协议。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -134,10 +136,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 		require.NoError(t, err, "the payload must be diagnostic-serializable as-is")
 		for k := range p {
 			switch k {
-			// §5.1: the committed-record fields stay flat, while the LIVE
-			// reference debt and the close phase are their own groups — a reader
-			// must not be able to mistake an instantaneous read for part of the
-			// atomic status() snapshot.
 			case "generation", "revision", "fingerprint", "desired", "agents", "configPath", "lastAppliedAt", "lastPublishedAt", "lastFailure", "liveDebt", "close":
 			default:
 				t.Fatalf("unexpected diagnostics key %q — the payload is bounded by contract", k)
@@ -155,7 +153,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.NotEmpty(t, st["fingerprint"], "the first check records the effective fingerprint")
 	require.Nil(t, st["lastFailure"])
 
-	// 1) a rejected candidate is observable WITH its generation and reason.
 	write("entry: [broken")
 	entry.CheckOrgReload()
 	st = payload()
@@ -166,8 +163,7 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.Empty(t, fail.Desired, "a config that cannot be parsed has no desired fingerprint — no phantom claim")
 	require.Equal(t, int64(0), st["generation"], "a rejected candidate never advances the generation")
 
-	// 2) a successful publish clears the failure and moves to the next generation.
-	write(diagYAML("gpt-w", "helper")) // model is fingerprinted -> structural change
+	write(diagYAML("gpt-w", "helper"))
 	entry.CheckOrgReload()
 	st = payload()
 	require.Equal(t, int64(1), st["generation"], "the successful reload is generation 1")
@@ -176,7 +172,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.Equal(t, st["fingerprint"], st["desired"],
 		"after a successful publish there must be no leftover desired-vs-effective gap")
 
-	// 2b) 逐 agent 回执与引用面就在同一 payload 上（D9：不新增抓取协议）。
 	rec, ok := st["agents"].([]OrgAgentApply)
 	require.True(t, ok, "per-agent receipts must be observable")
 	outcomes := map[string]string{}
@@ -191,10 +186,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	refs := debt.Executors
 	require.Zero(t, refs.PendingRetirees, "nothing is in flight here, so the superseded runner is already reclaimed")
 
-	// 3) a candidate that BOTH hot-adds an agent and changes an owner-held agent's
-	// storage stays refused (memory migration), and the refusal is diagnosable.
-	// (Before §4.3 this step used “add an agent” as the refusal — that shape now
-	// publishes, so the refusal has to come from the rule that still holds.)
 	write(diagYAMLMem("gpt-w", "      type: localfile\n      path: diag-moved\n", "helper", "late"))
 	entry.CheckOrgReload()
 	st = payload()
@@ -207,16 +198,16 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.Equal(t, int64(1), st["generation"], "the refusal keeps serving generation 1")
 }
 
-// §5.1（design D9）：诊断必须反映**实际消费者**，不能只证明 resident setter 被调用。
+// 诊断必须反映**实际消费者**，不能只证明 resident setter 被调用。
 // 逐 agent 回执（payload["agents"]）今天回显的是**请求下发**的那组数值
-// （applyHotAll 里的 `p`），而不是从真实消费者读回。本测钉住这条 5.1 独有的、
-// 尚未被 §2.4/§6.4 覆盖的契约：一次 numeric-only 热更后，回执所报的
+// （applyHotAll 里的 `p`），而不是从真实消费者读回。本测钉住这条独有的、
+// 尚未被预算/TTL 与 draining 的既存断言覆盖的契约：一次 numeric-only 热更后，回执所报的
 // MaxTokens×ThresholdPct、KeepRecentTasks 必须与该 agent **真实 compressor 消费值**
 // 逐一对齐；TaskManager 终态 TTL 这一消费者必须在同一轮 numeric-only 后确实移动；
 // 被移除的 draining owner 回执不带 applied 值、且其真实消费者保持最后有效值不被改成默认。
 //
-// 与既存测的关系（避免重复冒充）：§2.4 已从 config 期望值断言真实预算/TTL；
-// §4.3 已从真实消费者断言 draining 的 keepRecent；§3.2/§4.1（d6_lease_test）已证
+// 与既存测的关系（避免重复冒充）：已有断言从 config 期望值出发钉住真实预算/TTL；
+// 已有断言从真实消费者侧核 draining 的 keepRecent；租约相关测试已证
 // InFlightTurns 单计数。本测补齐的是「**回执 ↔ 真实消费者**」这一互证腿。
 
 // hotParamsYAML 渲染 main→sub1 的两 agent 拓扑。四行数值（keep/max/threshold/terminal）
@@ -242,7 +233,7 @@ func hotParamsYAML(keepMain, maxMain int, thrMain float64, termMain string, keep
 
 // hotParamsYAMLNoSub renders main-only (sub1 dropped from BOTH the tool list and the
 // agents table). Removing a routed agent is a structural change; held by an
-// in-flight reference, sub1's owner stays resident → draining receipt (§4.3).
+// in-flight reference, sub1's owner stays resident → draining receipt.
 func hotParamsYAMLNoSub(keepMain, maxMain int, thrMain float64, termMain string) string {
 	return "entry: main\n" +
 		"providers:\n  p1:\n    provider: openai\n    api_endpoint: https://api.example.com\n    api_key_env: TAGENT_TEST_API_KEY\n" +
@@ -272,10 +263,11 @@ func diagnosticsReceipts(t *testing.T, d map[string]any) map[string]OrgAgentAppl
 	return byName
 }
 
-// TestReceiptIsBackedByRealConsumers is the §5.1 core contract: after one
-// numeric-only reload of a routed multi-agent org, every applied agent's receipt
-// figures must reproduce what its OWN real compressor/TaskManager now uses — not
-// merely what the reloader asked for (the receipt today echoes the requested `p`).
+// TestReceiptIsBackedByRealConsumers 钉住 数值热更后每个 applied 回执所报数字等于该 agent 真实消费者现用的值，而非请求下发值的回声。
+// - 预算线、keepRecent 逐一对齐其 live compressor 的实际消费；阈值非精确时用镜像公式比，不写死数字；
+// - 路由子用其自己的压缩器，两个 agent 取到不同值——共享一个消费者就会露馅；
+// - 无回执槽的轴（terminal TTL）在同一轮数值热更后于其消费者处证明确实移动。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -304,7 +296,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	write(hotParamsYAML(7, 9000, 0.5, "5m", 5, 10000, 0.6))
 	entry.CheckOrgReload()
 
-	// It really took the numeric-only path: generation frozen, revision advanced.
 	d := entry.OrgDiagnostics()
 	require.EqualValues(t, 0, diagInt64(t, d, "generation"), "numeric-only must not bump the structural generation")
 	require.NotZero(t, diagInt64(t, d, "revision"), "numeric-only is a full apply")
@@ -313,7 +304,7 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.Equal(t, "applied", byName["main"].Outcome)
 	require.Equal(t, "applied", byName["sub1"].Outcome)
 
-	// === The §5.1 leg: the receipt's REPORTED figures must reproduce the REAL consumer. ===
+	// === The cross-validation leg: the receipt's REPORTED figures must reproduce the REAL consumer. ===
 	// Entry — threshold stays exact, so both the number and the formula are pinned.
 	require.Equal(t, 9000, byName["main"].MaxTokens)
 	require.InDelta(t, 0.5, byName["main"].ThresholdPct, 1e-9)
@@ -335,16 +326,18 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.NotEqual(t, entry.OrgBudgetLine(), sub.OrgBudgetLine(),
 		"the two agents really did move to distinct values (guards against a shared/global consumer)")
 
-	// The fifth axis (terminal TTL) has no receipt slot by design (bounded D9 shape);
-	// §5.1 still requires it to have really moved at its consumer on this same apply.
+	// The fifth axis (terminal TTL) has no receipt slot by design; the
+	// cross-validation leg still requires it to have really moved at its consumer
+	// on this same apply.
 	require.Equal(t, 5*time.Minute, entry.TaskManager().TerminalTTL(),
 		"task_terminal_ttl reached its real consumer (TaskManager) on this numeric-only apply")
 }
 
-// TestDrainingReceiptTracksHeldConsumer proves the drain leg of the same
-// cross-validation: an owner this generation no longer routes keeps a receipt that
-// carries NO applied value AND its real consumer holds its last effective value
-// (not silently re-defaulted) while it drains.
+// TestDrainingReceiptTracksHeldConsumer 钉住 本代不路由的属主：回执为 draining 且数值字段为零，其真实消费者保持末次生效值。
+// - 用真实在途引用（租约）造成排水窗口，使其属主留驻；
+// - draining 回执不携带 applied 值，含义是本轮未评估，零配置是另一种事实；
+// - 该属主的 live keepRecent 与预算仍是末次生效值，不被重新默认。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -368,8 +361,9 @@ func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	require.Equal(t, 3, heldKeep)
 	require.Equal(t, 4000, heldBudget)
 
-	// Make the drain window real: hold an in-flight reference on sub1 so §4.3 keeps
-	// its owner resident after it stops being routed (otherwise it retires immediately).
+	// Make the drain window real: hold an in-flight reference on sub1 so the
+	// draining-owner rule keeps its owner resident after it stops being routed
+	// (otherwise it retires immediately).
 	draining := sub.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer draining.Release()
 
@@ -391,18 +385,18 @@ func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	require.Equal(t, heldBudget, sub.OrgBudgetLine(), "draining owner keeps its live budget, not defaulted")
 }
 
-// 轮一百零三（evidence §5.59）：§5.1 剩下的两条腿。
+// 两条尚未被覆盖的互补判据（回执 ↔ 真实消费者余下的两条腿）。
 //
 //	②「热增／结构发布后的真实子调用预算与 TTL（非 getter 回声）」——
 //	  `TestReceiptIsBackedByRealConsumers` 钉的是**已路由**拓扑上的 numeric-only
 //	  应用；这里补的是**刚被结构发布新增的 owner**：它的回执数字必须等于它自己
 //	  真实消费者的值，且它**真实派生**的任务拿到的是**它自己**记录里的 TTL
 //	  （不是宿主的、不是默认值、也不是 setter 被调用的回声）。
-//	③「关闭已发起」与「资源已退出」必须可区分——§4.1 的有界返回不等于收尾完成。
+//	③「关闭已发起」与「资源已退出」必须可区分——有界返回不等于收尾完成。
 //	  用真实的在途引用（租约）造成该状态，而不是自造阻塞 closer。
 //
 // 两条都同时读**载荷形状**本身：`liveDebt`（自带采集时刻的实时债务组）与 `close`
-// （两态分离）是本轮按 §5.1 立的新契约，断言即钉住「不把多次无锁 getter 拼成
+// （两态分离）是新立的契约，断言即钉住「不把多次无锁 getter 拼成
 // 原子成功快照」的正向表达。
 
 // routedSub2YAML renders main→(sub1,sub2) with sub2→leaf. sub2's own numeric knobs are
@@ -442,7 +436,7 @@ func writeRoutedConfig(t *testing.T, path, content string, tick *time.Time) {
 	require.NoError(t, os.Chtimes(path, *tick, *tick))
 }
 
-// liveDebtOf / closeOf read the two §5.1 groups off the payload.
+// liveDebtOf / closeOf read the two cross-validation groups off the payload.
 func liveDebtOf(t *testing.T, d map[string]any) OrgLiveDebt {
 	t.Helper()
 	debt, ok := d["liveDebt"].(OrgLiveDebt)
@@ -457,11 +451,11 @@ func closeOf(t *testing.T, d map[string]any) OrgCloseState {
 	return st
 }
 
-// TestHotAddedOwnerReceiptMatchesRealConsumption pins leg ②: after a
-// STRUCTURAL publish that introduces a new owner, that owner's receipt figures
-// must reproduce (a) its own live compressor's budget line and (b) the TTL a task
-// it REALLY spawned received — the value the record says for THAT agent, not the
-// host's and not a default.
+// TestHotAddedOwnerReceiptMatchesRealConsumption 钉住 结构发布新增的 owner：回执等于其自身真实消费者的值，TTL 取其自己记录里的解析。
+// - 回执预算对齐其 live compressor，且两个 agent 取到不同值（共享消费者会露馅）；
+// - 它真实派生的子任务收到的是它自己的 manager 默认 TTL——非宿主的、非内置默认、非 setter 回声；
+// - 同轮另一新增 owner 无 TTL 配置，取到第三个不同值，证明数值按属主分离而非广播。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")
@@ -553,11 +547,11 @@ func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 	require.GreaterOrEqual(t, debt.Executors.InFlightTurns, int64(0))
 }
 
-// TestCloseInitiatedIsDistinguishableFromResourcesExited pins leg ③: while a
-// reference is still held, Close returns BOUNDED (§4.1) — the payload must then
-// say "initiated, not exited", and only flip to exited once the deferred tail ran.
-// The unfinished work is a real in-flight reference (a lease), not a synthetic
-// blocking closer, so this exercises the same accounting the reclaim gate reads.
+// TestCloseInitiatedIsDistinguishableFromResourcesExited 钉住 「关闭已发起」与「资源已退出」两个事实必须可区分。
+// - 仍有引用持住时 Close 有界返回，载荷随即报 initiated、未 exited；
+// - 收尾的延后尾巴跑完才翻到 exited；未发起过时该对读作（未发起、已退出）；
+// - 造该状态用的是真实在途引用（租约），走的是回收门同一套账面。
+// 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestCloseInitiatedIsDistinguishableFromResourcesExited(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "tagent.yaml")

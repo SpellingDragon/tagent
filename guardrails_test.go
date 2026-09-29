@@ -18,20 +18,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// Dependency-layer assertions (implementation-hardening 7A.1; spec:
-// architecture-guardrails / 唯一编排发布权与中性契约). Per the revised
-// introduce-durable-workflow-engine (第二轮收敛 D10/D12), the organization
-// orchestration is realized on the EXISTING YAML hierarchy by the root package
-// alone: there is NO separate workflow/ graph-compiler package any more (the
-// standalone workflow/v1 DSL prototype was withdrawn as un-wired scaffolding).
-// The inner runtime keeps root → agent → plugin → memory (event a pure leaf);
-// agent must never depend on any workflow/* package (guard against
-// reintroducing a second organization representation or a durable engine), and
-// the module must not grow a parallel orchestration compiler directory again.
-// The Go compiler only rejects CYCLES — these tests reject LAYER VIOLATIONS
-// (a reverse/upward edge, or a resurrected second representation).
-//
-// module prefix
+// mod is the module path prefix that the layering assertions below expand into
+// concrete package paths. The Go compiler only rejects import cycles, so a reverse
+// or upward edge between our own packages needs these mechanical assertions.
 const mod = "github.com/SpellingDragon/tagent"
 
 // internalDeps returns the set of internal packages (module-scoped) that pkg
@@ -48,7 +37,7 @@ func internalDeps(t *testing.T, pkg string) map[string]bool {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == mod:
-			deps["."] = true // the ROOT package itself (agent must not import it)
+			deps["."] = true
 		case strings.HasPrefix(line, mod+"/"):
 			deps[strings.TrimPrefix(line, mod+"/")] = true
 		}
@@ -81,7 +70,7 @@ func assertNoDepsPrefix(t *testing.T, pkg string, deps map[string]bool, prefixes
 	}
 	for dep := range deps {
 		if dep == pkg || strings.HasPrefix(dep, pkg+"/") {
-			continue // the package's own subtree
+			continue
 		}
 		for _, p := range prefixes {
 			if dep == p || strings.HasPrefix(dep, p+"/") {
@@ -97,18 +86,15 @@ func TestArch_LayeredDependencyDirection(t *testing.T) {
 		t.Skip("go list -deps is not short-mode friendly")
 	}
 
-	// event: pure leaf — imports no internal package at all.
 	assertNoDeps(t, mod+"/event", internalDeps(t, mod+"/event"),
 		"agent", "plugin", "memory", "tool", "rl", "evolution")
 
-	// memory (+engine/kv/embedder): may depend on event only.
 	for _, pkg := range []string{mod + "/memory", mod + "/memory/kv", mod + "/memory/engine", mod + "/memory/embedder"} {
 		deps := internalDeps(t, pkg)
 		delete(deps, "event")
 		assertNoDeps(t, pkg, deps, "agent", "plugin", "tool", "rl", "evolution")
 	}
 
-	// plugin: may depend on event + memory; not agent/root/tool.
 	deps := internalDeps(t, mod+"/plugin")
 	delete(deps, "event")
 	delete(deps, "memory")
@@ -131,11 +117,7 @@ func TestArch_LayeredDependencyDirection(t *testing.T) {
 	}
 }
 
-// TestArch_NoSecondOrchestrationRepresentation guards the 第二轮收敛 outcome:
-// the withdrawn standalone graph-compiler must not resurrect (neither as a
-// package nor as an import anywhere in the module), and no gray dispatch keys
-// may reappear. Organization orchestration is composed by the ROOT over the
-// existing YAML hierarchy only (spec workflow-config-compilation「单一编排表示」).
+// TestArch_NoSecondOrchestrationRepresentation guards that no second orchestration representation, graph-compiler package or gray dispatch key ever reappears.
 func TestArch_NoSecondOrchestrationRepresentation(t *testing.T) {
 	if _, err := os.Stat("workflow"); err == nil {
 		t.Errorf("a top-level workflow/ package exists again: the standalone graph DSL was withdrawn (second-round scope) — orchestration must be composed by the root over the existing YAML hierarchy")
@@ -152,19 +134,14 @@ func TestArch_NoSecondOrchestrationRepresentation(t *testing.T) {
 	}
 }
 
-// §8.7 — the elimination list closes HERE with two jointly-sufficient proofs
-// (design 決策10 L189): (a) a STATIC dependency check that deleted legacy
-// mechanisms stay deleted (no "uncalled but present" residue), and (b) the
-// THREE BOOT STATES — brand-new dir, restart-over-current-state, boot after
-// the managed reset — each running one real turn on the CURRENT path, with
-// legacy markers planted beside the data proving they are read-NOT,
-// consumed-not, and wiped-not.
+// The elimination list closes HERE with two jointly-sufficient proofs: (a) a
+// STATIC dependency check that deleted mechanisms stay deleted (no
+// "uncalled but present" residue), and (b) the THREE BOOT STATES — brand-new
+// dir, restart-over-current-state, boot after the managed reset — each running
+// one real turn on the CURRENT path, with prior-format markers planted beside
+// the data proving they are read-NOT, consumed-not, and wiped-not.
 
-// TestEliminationList_ZeroLegacySymbols — static check over every NON-TEST
-// Go file: each pattern was a live mechanism before this change and its
-// removal was ordered by 決策10's list (old parsing/aliases/confirm APIs,
-// compatibility-only wrappers, weak fallbacks, duplicate owners, WAL/fsync
-// claims of the minimized localfile backend).
+// TestEliminationList_ZeroLegacySymbols statically checks that every mechanism on the elimination list stays absent from non-test Go files.
 func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 	banned := []struct{ pattern, why string }{
 		{"task_stale_after", "10.5: stale observation wall deleted; TTL is the only age path"},
@@ -176,10 +153,6 @@ func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 		{"loopActive ", "6.1: same"},
 		{"collectUnconfirmedReceipts", "5.7: old collect-chain replaced by direct envelope reconcile"},
 		{"persistInboxReceipt(", "5.3: fresh-key receipt minting deleted (reserved-key commit only)"},
-		// §8.7 / resident-review-fixes 5.3: the request-ID/weak-fallback confirm +
-		// receipt APIs and the legacy-spill drain gate are gone (reserved-key
-		// credential + direct-inventory reconcile replaced them); ReadyCh was a
-		// zero-consumer readiness signal (3.2). Locked against resurrection.
 		{"ConfirmDurableByRequestID", "5.4: bare request-ID confirm removed (verified receipt credential only)"},
 		{"ReconcileDurableReceipts", "5.7: harvest-style receipt reconcile removed (per-envelope fixed-key reconcile)"},
 		{"PathForReceiptKey", "5.7: receipt-key→path reverse index removed (envelopes carry their own fixed key)"},
@@ -269,7 +242,7 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 	runChild("2")
 	require.Equal(t, `{"version":1}`, readFile(t, legacyV1), "legacy v1 item stays inert across a real restart")
 
-	// Managed unit reset between processes (parent side, §8.6 orchestration).
+	// Managed unit reset between processes (parent side).
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "anchor"), 0o755))
 	_, err := drillResetManagedUnits(filepath.Join(root, "store"), spill, filepath.Join(root, "anchor"), "tagent", true)
 	require.NoError(t, err)
@@ -281,21 +254,21 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 }
 
 // triRaceOnlyFramework CLASSIFIES a child failure whose EVERY DATA RACE block
-// involves zero tagent frames — the pre-existing trpc-agent-go lifecycle family.
-// Since §6.6 it is a DIAGNOSTIC LABEL ONLY: it names a known upstream family for
-// triage, but it NEVER suppresses a child failure. `runBootChild` fails acceptance
-// on ANY DATA RACE regardless of this verdict. Deliberately conservative: one
-// tagent frame anywhere, or any assertion/panic, yields false.
+// involves zero tagent frames — a trpc-agent-go lifecycle race family known
+// from upstream. It is a DIAGNOSTIC LABEL ONLY: it names that family for
+// triage, but it NEVER suppresses a child failure. `runBootChild` fails
+// acceptance on ANY DATA RACE regardless of this verdict. Deliberately
+// conservative: one tagent frame anywhere, or any assertion/panic, yields false.
 func triRaceOnlyFramework(out []byte) bool {
 	text := string(out)
 	if !strings.Contains(text, "DATA RACE") || !strings.Contains(text, "--- FAIL") {
 		return false
 	}
 	// (1) every race block's stacks must be framework-internal...
-	// Registered framework-internal race signatures (evidence §8.1/§8.8/§8.9;
-	// product code holds ZERO references to steer or invocation state queues
-	// — grep-verified — so a wrapper frame merely riding the model-call chain
-	// of a matched block cannot own the raced object):
+	// Registered framework-internal race signatures (product code holds
+	// ZERO references to steer or invocation state queues — grep-verified —
+	// so a wrapper frame merely riding the model-call chain of a matched
+	// block cannot own the raced object):
 	//   steerFamily: v1.10.0 steer.(*Queue).Close × invocation-state clone
 	//   sessionFamily: Session.Clone snapshot read × session write
 	steerFamily := []string{"internal/state/steer.(*Queue).Close", "cloneState"}
@@ -303,8 +276,8 @@ func triRaceOnlyFramework(out []byte) bool {
 	// The family exemption is version-bound: it
 	// applies ONLY while the linked trpc-agent-go equals the registered
 	// version. After a framework upgrade the exemption lapses and these
-	// families must be re-verified — a tagent accessor frame riding a
-	// previously-exempted block is then treated like any unknown race.
+	// families must be re-verified — a tagent accessor frame riding a block
+	// exempted under the old version is then treated like any unknown race.
 	famOK := familyExemptionEnabled()
 	matchesAll := func(block string, sig []string) bool {
 		for _, fr := range sig {
@@ -331,7 +304,7 @@ func triRaceOnlyFramework(out []byte) bool {
 	// (2) ...AND every FAIL detail block must contain NOTHING but the
 	// race-detector verdict (and the race report's own origin-stack lines) — a
 	// real assertion failure or panic must never hide behind a benign race in
-	// the same child log. Non-indented lines no longer close the block: only a
+	// the same child log. A non-indented line does not close the block: only a
 	// top-level boundary does, so a failure printed after a blank line (or a
 	// column-0 "panic:") is not skipped ).
 	inFail := false
@@ -355,7 +328,7 @@ func triRaceOnlyFramework(out []byte) bool {
 			continue // a blank line does NOT close the block (fixes the 穿透)
 		}
 		if strings.Contains(ln, "created at:") {
-			inOrigin = true // the race report's goroutine origin follows
+			inOrigin = true
 			continue
 		}
 		if inOrigin && strings.HasPrefix(ln, "  ") {
@@ -370,13 +343,14 @@ func triRaceOnlyFramework(out []byte) bool {
 
 // registeredFamilyVersion is the trpc-agent-go release the exempted framework
 // race families (steer.Queue.Close × invocation-state clone; session.Clone) were
-// verified against (evidence §8.1/§8.8/§8.9). The exemption is bound to it so a
-// framework upgrade can never silently widen or mislabel the exempt set: bump
-// go.mod and the family exemption lapses until the races are re-registered here.
-// 2026-09-23: both families are FIXED upstream in v1.11.2 (steer: #1926/#2165/
-// #2462; session: EventMu widened over UpdatedAt) — the registration stays at
-// v1.10.0 deliberately, so on the upgraded link the exemption stays LAPSED and
-// any reappearance fails as an unknown (new) race.
+// verified against. The exemption is bound to it so a framework upgrade can
+// never silently widen or mislabel the exempt set: bump go.mod and the family
+// exemption lapses until the races are re-registered here. Both families are
+// FIXED upstream in v1.11.2 (steer: #1926 queue-cancel signal and #2165/#2462
+// clone elimination; session: UpdateUserSession's EventMu widened over
+// UpdatedAt) — the registration stays at v1.10.0 deliberately, so on the
+// upgraded link the exemption stays LAPSED and any reappearance fails as an
+// unknown (new) race.
 const registeredFamilyVersion = "v1.10.0"
 
 // familyExemptionEnabled gates the registered-race-family exemption on the linked
@@ -417,10 +391,7 @@ func trpcAgentVersionFromGoMod() string {
 	return ""
 }
 
-// TestTriRaceOnlyFrameworkClassifier exercises the DIAGNOSTIC classifier only —
-// it names a known upstream family vs. an unknown/tagent/assertion/panic shape.
-// It does NOT describe acceptance: since §6.6 no recognized family is exempt
-// (see TestBootChildVerdictNoExemption for the acceptance decision).
+// TestTriRaceOnlyFrameworkClassifier exercises the diagnostic label only; acceptance is decided by TestBootChildVerdictNoExemption.
 func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	race := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
 	require.True(t, triRaceOnlyFramework([]byte(race)), "pure framework race is classified as the upstream family")
@@ -437,47 +408,37 @@ func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	require.False(t, triRaceOnlyFramework([]byte(assertion)), "an assertion failure is never exempt")
 	require.False(t, triRaceOnlyFramework([]byte("--- FAIL: TestX\n    Error: boom\n")), "non-race failure not exempt")
 
-	// (2.3a) blank-line 穿透: a real assertion failure printed after a blank
-	// line must NOT hide behind the benign race. fail-before (old code reset the
-	// block on the non-indented blank line, skipping this failure → exempt/true).
+	// A real assertion failure printed after a blank line must NOT hide behind
+	// the benign race: the block scan may not reset on a non-indented blank line
+	// and thereby skip the failure, which would yield exempt/true.
 	blankHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n\n    main_test.go:99: Error: want 1 got 2\nFAIL\n"
 	require.False(t, triRaceOnlyFramework([]byte(blankHide)), "a failure after a blank line is never exempt")
 
-	// (2.3a) panic 逃逸: a column-0 panic after the race verdict must veto the
-	// exemption. fail-before (old code reset the block on the non-indented
-	// panic line, never inspecting it → exempt/true).
+	// A column-0 panic printed after the race verdict must veto the exemption: the
+	// block scan may not stop before inspecting a non-indented panic line, which
+	// would otherwise let the panic hide behind the benign race as exempt/true.
 	panicHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\npanic: runtime error: index out of range\n\tgx/y.go:1 +0x1\nexit status 2\n"
 	require.False(t, triRaceOnlyFramework([]byte(panicHide)), "a panic is never exempt behind a race")
 
 	// (2.3b) version binding: a tagent wrapper frame riding a REGISTERED family
 	// block is exempt only while the linked version matches the registration.
 	familyWithTagent := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
-	// Since the v1.11.2 upgrade BOTH registered families are fixed upstream
-	// (steer: #1926 queue cancel signal + #2165/#2462 clone elimination; session:
-	// UpdateUserSession's EventMu widened over UpdatedAt), so a linked version
-	// that differs from the v1.10.0 registration MUST leave the exemption lapsed
-	// — any reappearance is a NEW race and must fail as unknown.
 	require.False(t, familyExemptionEnabled(), "linked trpc-agent-go must NOT equal the v1.10.0 registration after the upgrade: both families are fixed upstream, so the classifier's family branch is lapsed and a reappearance is labeled unknown")
 	orig := familyExemptionEnabled
-	t.Cleanup(func() { familyExemptionEnabled = orig })  // reliable restore even if an assertion below panics (§6.6 global-stub cleanup)
+	t.Cleanup(func() { familyExemptionEnabled = orig })  // reliable restore even if an assertion below panics
 	familyExemptionEnabled = func() bool { return true } // simulate the registered link
 	require.True(t, triRaceOnlyFramework([]byte(familyWithTagent)), "at the registered version the classifier recognizes the family + wrapper frame")
 	familyExemptionEnabled = func() bool { return false } // simulate a framework upgrade
 	require.False(t, triRaceOnlyFramework([]byte(familyWithTagent)), "when the version no longer matches, the classifier stops recognizing the family + wrapper frame")
 }
 
-// TestBootChildVerdictNoExemption is the §6.6 acceptance fail-before: the boot-child
-// verdict must REJECT every race shape, including the pure-upstream family the old
-// `runRaceExemptChild` swallowed via triRaceOnlyFramework. Before §6.6 a pure-
-// framework race and the created-at ancestor-frame variant yielded ok=true (exempt);
-// now both yield ok=false. The classifier still LABELS the family, but the label no
-// longer changes the verdict.
+// TestBootChildVerdictNoExemption asserts the boot-child verdict rejects every data race shape, including the pure-upstream family.
 func TestBootChildVerdictNoExemption(t *testing.T) {
 	exit := errors.New("exit status 1")
 	frameworkRace := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
 	// Classifier still recognizes the family (diagnostic)...
 	require.True(t, triRaceOnlyFramework([]byte(frameworkRace)), "classifier labels the pure-upstream family")
-	// ...but acceptance no longer exempts it.
+	// ...but acceptance does not exempt it.
 	ok, _ := childOutcome([]byte(frameworkRace), exit)
 	require.False(t, ok, "§6.6: a pure-upstream race must FAIL acceptance (the old exempt path returned true)")
 
@@ -498,10 +459,10 @@ func TestBootChildVerdictNoExemption(t *testing.T) {
 	require.True(t, ok, "a clean child passes: "+note)
 }
 
-// childOutcome decides a boot child's acceptance (§6.6「关闭全部 race 豁免」). NO
-// data race — pure-upstream family included — may pass; every DATA RACE fails.
-// triRaceOnlyFramework is consulted ONLY to label a sighting for triage; it does
-// not change the verdict. Non-race non-zero exits also fail.
+// childOutcome decides a boot child's acceptance: NO data race — pure-upstream
+// family included — may pass; every DATA RACE fails. triRaceOnlyFramework is
+// consulted ONLY to label a sighting for triage; it does not change the verdict.
+// Non-race non-zero exits also fail.
 func childOutcome(out []byte, err error) (ok bool, note string) {
 	if bytes.Contains(out, []byte("DATA RACE")) {
 		if triRaceOnlyFramework(out) {
@@ -516,11 +477,10 @@ func childOutcome(out []byte, err error) (ok bool, note string) {
 }
 
 // runBootChild executes a boot child process and requires a CLEAN run: zero data
-// races and a zero exit. Since §6.6 the acceptance path keeps NO race exemption —
-// a race of any stack shape fails with the full log. (The v1.11.2 upgrade fixed the
-// old steer/session families this harness once had to tolerate; §6.3 established
-// that producer-done is not a stream-close, so tagent must not paper over lifecycle
-// races either.)
+// races and a zero exit. The acceptance path keeps NO race exemption — a race of
+// any stack shape fails with the full log. v1.11.2 fixed the steer/session
+// families upstream, and since producer-done is not a stream-close, tagent must
+// not paper over lifecycle races either.
 func runBootChild(t *testing.T, baseEnv []string, kv string, testFilter string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run", testFilter, "-test.timeout", "120s")

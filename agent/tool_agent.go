@@ -972,6 +972,8 @@ func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
 // factory that opens its OWN store must not also be handed the org lease.
 // - MemStoreRelease: always the org's, filled by the assembly after this call
 // returns — a factory neither keeps nor invents a release for it.
+// The assembly re-invokes the factory for each generation it builds and hands it that
+// generation's values, so a declaration derived from them moves with the config.
 type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
 
 // ToolAgentFactoryConfig provides everything a factory needs to produce the agent's
@@ -1033,7 +1035,9 @@ var (
 	toolAgentFactoriesMu sync.RWMutex
 )
 
-// RegisterToolAgent registers a factory for creating tool agents by ID.
+// RegisterToolAgent registers a factory for creating tool agents by ID. Registering the
+// same ID twice panics, so a caller that re-registers on every run — a test under a
+// -count>1 repetition gate, for example — must use a unique ID or reset the registry.
 func RegisterToolAgent(id string, factory ToolAgentFactory) {
 	toolAgentFactoriesMu.Lock()
 	defer toolAgentFactoriesMu.Unlock()
@@ -1102,7 +1106,9 @@ var (
 	plainToolFactoriesMu sync.RWMutex
 )
 
-// RegisterPlainTool registers a factory for creating plain tools by ID.
+// RegisterPlainTool registers a factory for creating plain tools by ID. Registering the
+// same ID twice panics, so a caller that re-registers on every run — a test under a
+// -count>1 repetition gate, for example — must use a unique ID or reset the registry.
 func RegisterPlainTool(id string, factory PlainToolFactory) {
 	plainToolFactoriesMu.Lock()
 	defer plainToolFactoriesMu.Unlock()
@@ -1125,7 +1131,7 @@ func GetPlainToolFactory(id string) (PlainToolFactory, bool) {
 // toInt64Key converts a JSON-parsed value to an int64 event key.
 // Handles:
 // toInt64Key converts an event-key argument to int64. Keys are canonically
-// HEX strings (the [evt_...] timeline form, unified-event-projection hex
+// HEX strings (the [evt_...] timeline-form hex
 // contract) — parsed via event.ParseEventKey. Numeric forms are kept for
 // backward compatibility with models that echo keys as numbers.
 func toInt64Key(v interface{}) int64 {

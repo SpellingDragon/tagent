@@ -1108,7 +1108,7 @@ func TestSubagentResume_EndToEnd_MultiRoundAccumulates(t *testing.T) {
 	}
 }
 
-// ttlArgs resident-review-fixes 4.2: the sub-agent lifetime self-service channel. Four
+// ttlArgs: the sub-agent lifetime self-service channel. Four
 // legs — explicit ttl takes effect, omitted defers to the configured default
 // (three-level chain), negative is rejected before spawn, and the ttl is
 // persisted on the Declarative projection so the board and the cross-restart

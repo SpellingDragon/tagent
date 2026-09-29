@@ -33,6 +33,8 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 // TestListTasksTool lists all tracked tasks.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestListTasksTool(t *testing.T) {
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	r1 := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd A"}, blockingDetector())

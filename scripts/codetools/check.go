@@ -253,8 +253,6 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 	return out
 }
 
-// packageDecls collects every top-level declaration from the test files found in
-// root, keyed by declaration name (with file as tie-breaker suffix).
 // foldLayout collapses every run of whitespace to a single space.
 func foldLayout(text string) string {
 	return strings.Join(strings.Fields(text), " ")
@@ -355,6 +353,8 @@ func renameRE(name string) *regexp.Regexp {
 	return regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
 }
 
+// packageDecls collects every top-level declaration from the test files found in
+// root, keyed by declaration name (with file as tie-breaker suffix).
 func packageDecls(root, dir string, renames map[string]string) (map[string]decl, error) {
 	fis, err := os.ReadDir(root)
 	if err != nil {

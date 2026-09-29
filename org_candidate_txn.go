@@ -12,7 +12,7 @@ import (
 // (S-B/2.3「事务」)：每次资源 acquire／owner 登记／agent 构成后**立即**入表
 // （先记后判错——失败父的登记也在册可回退），早于下一个可失败动作；discard
 // 按获取**逆序**展开（部分登记撤销→建成者 Close→指纹复位），清理顺序来自实际
-// 获取证据而非 ownedAgentNames 差集推断或 map 遍历序（design 核心簇 §7：废除
+// 获取证据而非 ownedAgentNames 差集推断或 map 遍历序（design 核心簇：废除
 // 差集推断与 map 顺序假设）。reload 与 rollback 共用同一结构。
 type candidateTxn struct {
 	rc     *runtimeConfig

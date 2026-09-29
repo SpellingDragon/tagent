@@ -11,6 +11,8 @@ import (
 // 工厂式注册接入 agent 工具装配链，工厂从 PlainToolFactoryConfig.MemStore 产出 CallableTool。
 // 此前构造注入式（NewConsolidateTool(store,pid)）在全局 RegisterBuiltinTools 时刻无法满足
 // agent 上下文 → 工具从未注册、agent 不可达（T-D 交付链断裂）。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#curation
 func TestRegisterSubTools_RegistersFactories(t *testing.T) {
 	RegisterSubTools()
 	for _, id := range []string{"memory_consolidate", "memory_health"} {

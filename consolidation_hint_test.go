@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// TestCapacityHint_TriggerAndSnooze (4.2, design-report-closeout): boundary
+// TestCapacityHint_TriggerAndSnooze: boundary
 // events accumulate per partition; crossing the threshold fires exactly one
 // hint and resets the counter; the snooze window suppresses repeats; after
 // the window expires the next threshold crossing fires again. Non-boundary
-// event types never count. Fail-before: no trigger mechanism existed
+// event types never count. No trigger mechanism existed
 // (consolidation was manual-only).
 func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 	var mu sync.Mutex
@@ -88,6 +88,8 @@ func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 // tracker renders a consolidation-candidates section (count + recent hex keys)
 // for the meditation digest injection; empty when nothing accumulated; nil
 // tracker renders empty (zero behavior change).
+//
+// 契约: docs/wiki/memory/memory-architecture.md#curation
 func TestMeditationDigest_IncludesCandidates(t *testing.T) {
 	var nilTracker *ConsolidationHintTracker
 	if nilTracker.CandidatesText(1) != "" {

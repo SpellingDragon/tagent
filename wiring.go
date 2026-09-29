@@ -387,7 +387,7 @@ func openRVStore(mc MemoryConfig) (openedResource, error) {
 // FileSegmentStore took ownership of it (once owned, store.Close flushes it).
 // No-op for backends without an explicit Close (e.g. RustVikingClient). A
 // failed Close is reported so the caller can mark the reclaim UNCONFIRMED —
-// §6.5: an unconfirmed reclaim must never leave the writer open.
+// an unconfirmed reclaim must never leave the writer open.
 func closeKV(k memory.KVStore) error {
 	if c, ok := k.(interface{ Close() error }); ok {
 		return c.Close()
@@ -422,7 +422,7 @@ func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore,
 	}
 	// 2. Engine + vector-remover callback (base-store forget → engine.Remove).
 	eng := buildSharedEngine(store, mc)
-	// 2.5 §2.8: attach the shared retention lease (un-armed) BEFORE producers start, so the
+	// Attach the shared retention lease (un-armed) BEFORE producers start, so the
 	// lifecycle scanner's first destructive pass gates on Lease.Ready() (restart race). The
 	// durable recovery owner (the agent's reliable inbox / mem_spill) arms it at agent-open
 	// after rebuilding from on-disk unacked material; a startup grace (memory.lifecycle armGrace)

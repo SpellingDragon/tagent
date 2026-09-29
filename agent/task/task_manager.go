@@ -152,7 +152,7 @@ func DetachAfter(d time.Duration, stop <-chan struct{}) <-chan struct{} {
 // cross-restart via the tool/action closure factory. The in-process closures
 // remain authoritative while alive; Declarative is what task_spawned events
 // carry and what RebuildTaskRegistry replays (registry = fold of the fact
-// chain, resident-continuity-r2-r4 D1).
+// chain).
 type Declarative struct {
 	Kind    string `json:"kind"`
 	Desc    string `json:"desc"`
@@ -1195,8 +1195,8 @@ func (tm *TaskManager) sessionTrackerFn() func(sessionID string) bool {
 
 // TerminalTTL reports the live terminal grace period (introspection;  makes
 // it a READ of the same resolution the reaper uses — the owner's record source
-// when installed, else the construction value. introduce-durable-workflow-engine
-// /L-3 rollback tests read this, not the config field). Same tm.mu lock as
+// when installed, else the construction value.
+// rollback tests read this, not the config field). Same tm.mu lock as
 // the reaper paths, so what a test sees is what pruneTerminal applied.
 func (tm *TaskManager) TerminalTTL() time.Duration {
 	if tm == nil {

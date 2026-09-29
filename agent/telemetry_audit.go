@@ -183,8 +183,8 @@ func (a *SelfTelemetryAuditor) Snapshot() (level int, ratio float64, samples int
 }
 
 // DigestLine renders the deterministic self-state digest row (trajectory
-// statistics belong to the reflection layer, not the resident context —
-// attention-budget-architecture L5). Empty when the auditor has no samples.
+// statistics belong to the reflection layer, not the resident context).
+// Empty when the auditor has no samples.
 func (a *SelfTelemetryAuditor) DigestLine() string {
 	level, ratio, samples := a.Snapshot()
 	if samples == 0 {
