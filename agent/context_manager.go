@@ -1463,7 +1463,7 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 	eventType := fullEvent.EventType
 	refCanonical := fullEvent
 
-	stored = true /* named returns */
+	stored = true
 	replayed := false
 	switch {
 	case cm.memStore == nil:

@@ -48,7 +48,7 @@ func buildCandidateOwners(
 ) (*candidateOverlay, bool) {
 	ov := &candidateOverlay{
 		rc:    rc,
-		cache: rc.resident.Snapshot(), // shared across every top: a common dependency is built once, never a second writer
+		cache: rc.resident.Snapshot(),
 		added: map[string]*agent.TagentAgent{},
 		txn:   newCandidateTxn(rc),
 	}
@@ -58,11 +58,11 @@ func buildCandidateOwners(
 			newNames = append(newNames, aname)
 		}
 	}
-	sort.Strings(newNames) // deterministic build order: responsibility order == acquisition order
+	sort.Strings(newNames)
 
 	for _, aname := range newNames {
 		if remoteDeclarationOnly(next, aname) {
-			continue // remote-only reference: no owner exists or can be built for it
+			continue
 		}
 		acfg, defined := next.Agents[aname]
 		if !defined {
@@ -70,20 +70,13 @@ func buildCandidateOwners(
 			fail(fmt.Sprintf("NEW agent %q is referenced but not defined", aname), nil)
 			return nil, false
 		}
-		// Same-name storage/backend moves are still refused (D7) by the memory
-		// pre-check at each caller. The candidate-private cache is the build
-		// cache: an already-resident or earlier-built dependency resolves to the
-		// existing instance, so one name never gets a second owner.
 		_, berr := buildAgent(aname, acfg, *next, rc, loader, ov.cache, buildModeResident)
-		// Record recursive acquisitions immediately, before judging the error:
-		// even if aname itself failed, the dependencies it completed are on the
-		// table and unwindable (the R01 core).
 		for n, a := range ov.cache {
 			if a == nil || rc.resident.Get(n) != nil {
-				continue // already online (not this candidate's addition)
+				continue
 			}
 			if _, dup := ov.added[n]; dup {
-				continue // recorded by an earlier top's recursion
+				continue
 			}
 			ov.added[n] = a
 			ov.addedNames = append(ov.addedNames, n)
@@ -92,9 +85,6 @@ func buildCandidateOwners(
 			rc.residentMemFP[n] = agentMemoryFingerprint(&mc)
 		}
 		if berr != nil {
-			// Failed parent: registered with no agent object to Close (its store
-			// lease was already released by buildAgentDFS's own buildOK defer) —
-			// the table records nil so discard revokes the registration only.
 			ov.txn.acquire(aname, nil)
 			ov.abandon()
 			fail(fmt.Sprintf("build for %q FAILED", aname), berr)
@@ -144,7 +134,7 @@ func (o *candidateOverlay) abandon() {
 		return
 	}
 	o.discarded = true
-	o.rc.resident.Unpublish(o.addedNames) // never merged: defensive no-op
+	o.rc.resident.Unpublish(o.addedNames)
 	order := o.txn.discard()
 	if len(order) > 0 {
 		log.Warnf("[org-hotreload] refused candidate: unwound %d responsibility(ies) in reverse acquisition order %v; online topology untouched", len(order), order)

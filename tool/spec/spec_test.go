@@ -9,6 +9,8 @@ import (
 // TestBuildArgv_NoShellInterpolation: each op maps to a fixed argv whose
 // structure the model cannot influence — name/artifact are discrete entries,
 // never interpolated into a shell string. This is the core safety property.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestBuildArgv_NoShellInterpolation(t *testing.T) {
 	b := &openspecBackend{bin: "openspec"}
 	cases := []struct {

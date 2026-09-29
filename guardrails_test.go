@@ -81,6 +81,12 @@ func assertNoDepsPrefix(t *testing.T, pkg string, deps map[string]bool, prefixes
 	}
 }
 
+// TestArch_LayeredDependencyDirection asserts the layering mechanically: each package must not import the families its assertion lists.
+// - The agent family is the inner runtime: it must not reach the root package nor import any workflow/* package.
+// - Reception, completion, task and recovery stay inside the original protocols.
+// - The org version reaches them only through the minimal injection contract owned by the root, never through an imported orchestration layer.
+//
+// 契约: docs/wiki/agent/agent-architecture.md#package-layout
 func TestArch_LayeredDependencyDirection(t *testing.T) {
 	if testing.Short() {
 		t.Skip("go list -deps is not short-mode friendly")
@@ -100,13 +106,6 @@ func TestArch_LayeredDependencyDirection(t *testing.T) {
 	delete(deps, "memory")
 	assertNoDeps(t, mod+"/plugin", deps, "agent", "tool", "rl", "evolution")
 
-	// agent (+task/compress/governance/reliability): the inner runtime. It must
-	// NOT reach the root package (review P1-1: the empty-string forbidden made
-	// this a no-op — root is collected as "."), and — per the revised
-	// architecture-guardrails — it must NOT depend on ANY workflow/* package:
-	// reception/completion/task/recovery stay inside the original protocols, and
-	// the org version reaches them only through the minimal injection contract
-	// owned by the root, never through an imported orchestration layer.
 	for _, pkg := range []string{mod + "/agent", mod + "/agent/task", mod + "/agent/compress", mod + "/agent/governance", mod + "/agent/reliability"} {
 		deps := internalDeps(t, pkg)
 		delete(deps, "event")
@@ -134,14 +133,10 @@ func TestArch_NoSecondOrchestrationRepresentation(t *testing.T) {
 	}
 }
 
-// The elimination list closes HERE with two jointly-sufficient proofs: (a) a
-// STATIC dependency check that deleted mechanisms stay deleted (no
-// "uncalled but present" residue), and (b) the THREE BOOT STATES — brand-new
-// dir, restart-over-current-state, boot after the managed reset — each running
-// one real turn on the CURRENT path, with prior-format markers planted beside
-// the data proving they are read-NOT, consumed-not, and wiped-not.
-
 // TestEliminationList_ZeroLegacySymbols statically checks that every mechanism on the elimination list stays absent from non-test Go files.
+// - The list governs live code: a comment may record that a symbol is gone, so only non-comment lines are scanned.
+// - The elimination list closes with two jointly-sufficient proofs: this static check and the three-boot-state dynamic test.
+// - The static half catches deleted mechanisms left uncalled but present; the dynamic half proves prior-format data is read-not, consumed-not, wiped-not.
 func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 	banned := []struct{ pattern, why string }{
 		{"task_stale_after", "10.5: stale observation wall deleted; TTL is the only age path"},
@@ -186,9 +181,6 @@ func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 		for _, f := range files {
 			src, err := os.ReadFile(f)
 			require.NoError(t, err)
-			// Comments legitimately RECORD the deletion ("the old
-			// task_stale_after is gone"); the elimination list governs LIVE
-			// code, so scan only non-comment lines.
 			for i, line := range strings.Split(string(src), "\n") {
 				if strings.HasPrefix(strings.TrimSpace(line), "//") {
 					continue
@@ -201,17 +193,14 @@ func TestEliminationList_ZeroLegacySymbols(t *testing.T) {
 	}
 }
 
-// TestLatestPathOnly_ThreeBootStates runs the dynamic half: fresh boot,
-// current-state restart, and post-reset boot — one real durable turn each,
-// with legacy markers that must remain untouched inert.
-// The three boot states run as THREE INDEPENDENT PROCESSES (xproc pattern,
-// §8 discipline: a boot is only evidenced by a real process start, and
-// same-process multi-generation runner boot/Close churn happens to trigger a
-// framework-internal state-lifecycle race that no production path performs).
-// Parent orchestrates dirs, marker planting and the managed reset in between.
-
 const triPhaseEnv = "TAGENT_TRI_PHASE"
 
+// TestLatestPathOnly_ThreeBootStates runs the dynamic half: three independent boots, each driving one real durable turn.
+// - The three states (fresh, restart over the current state, post-reset) run as independent processes: a boot is only evidenced by a real process start.
+// - Same-process multi-generation runner boot/Close churn is avoided: it triggers a framework-internal state-lifecycle race.
+// - No production path performs that churn, so running each state in its own process costs no coverage.
+// - Prior-format markers are planted only after the first child exited, so no live writer can consume them.
+// - The parent orchestrates dirs, marker planting and the managed reset between the children.
 func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 	if phase := os.Getenv(triPhaseEnv); phase != "" {
 		triChildPhase(t, phase)
@@ -226,30 +215,22 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 		runBootChild(t, env, triPhaseEnv+"="+phase, "TestLatestPathOnly_ThreeBootStates$")
 	}
 
-	// STATE 1 — brand-new dirs (child process): boot + one real durable turn.
 	runChild("1")
 
-	// Plant LEGACY markers while the writer is gone.
 	spill := filepath.Join(root, "spill")
 	legacyV1 := filepath.Join(spill, "tagent", "inbox-v1", "old-v1.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(legacyV1), 0o755))
 	require.NoError(t, os.WriteFile(legacyV1, []byte(`{"version":1}`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(spill, "tagent", "job.spill"), []byte("spill"), 0o644))
 
-	// STATE 2 — independent process restarting over the CURRENT state with
-	// legacy markers alongside (child asserts: prior fact in projection,
-	// markers byte-identical).
 	runChild("2")
 	require.Equal(t, `{"version":1}`, readFile(t, legacyV1), "legacy v1 item stays inert across a real restart")
 
-	// Managed unit reset between processes (parent side).
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "anchor"), 0o755))
 	_, err := drillResetManagedUnits(filepath.Join(root, "store"), spill, filepath.Join(root, "anchor"), "tagent", true)
 	require.NoError(t, err)
 	require.NoFileExists(t, legacyV1, "the authorized reset cleared the legacy set")
 
-	// STATE 3 — independent process booting post-reset (child asserts:
-	// reconcile empty, new turn works, NO pre-reset input resurfaces).
 	runChild("3")
 }
 
@@ -259,25 +240,25 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 // triage, but it NEVER suppresses a child failure. `runBootChild` fails
 // acceptance on ANY DATA RACE regardless of this verdict. Deliberately
 // conservative: one tagent frame anywhere, or any assertion/panic, yields false.
+//
+// Condition one: every race block's stacks must be framework-internal. The two registered
+// families (steerFamily and sessionFamily, matched below) are exempt as a family because
+// product code holds zero references to the raced queues (grep-verified), so a tagent
+// wrapper frame merely riding the model-call chain cannot own the raced object. Only the
+// accessor sections are scanned for tagent frames: the trailing "created at:" origin
+// stacks inevitably name ancestor test frames and must not veto.
+//
+// Condition two: every FAIL detail block must contain nothing but the race-detector verdict.
+// A crash or an assertion line is never exempt; a blank line does not close the block and
+// origin-stack frames are skipped, so a failure printed after a blank line, or a column-0
+// panic after the verdict, cannot hide behind a benign race.
 func triRaceOnlyFramework(out []byte) bool {
 	text := string(out)
 	if !strings.Contains(text, "DATA RACE") || !strings.Contains(text, "--- FAIL") {
 		return false
 	}
-	// (1) every race block's stacks must be framework-internal...
-	// Registered framework-internal race signatures (product code holds
-	// ZERO references to steer or invocation state queues — grep-verified —
-	// so a wrapper frame merely riding the model-call chain of a matched
-	// block cannot own the raced object):
-	//   steerFamily: v1.10.0 steer.(*Queue).Close × invocation-state clone
-	//   sessionFamily: Session.Clone snapshot read × session write
 	steerFamily := []string{"internal/state/steer.(*Queue).Close", "cloneState"}
 	sessionFamily := []string{"session.(*Session).Clone", "UpdateUserSession"}
-	// The family exemption is version-bound: it
-	// applies ONLY while the linked trpc-agent-go equals the registered
-	// version. After a framework upgrade the exemption lapses and these
-	// families must be re-verified — a tagent accessor frame riding a block
-	// exempted under the old version is then treated like any unknown race.
 	famOK := familyExemptionEnabled()
 	matchesAll := func(block string, sig []string) bool {
 		for _, fr := range sig {
@@ -290,10 +271,8 @@ func triRaceOnlyFramework(out []byte) bool {
 	for _, block := range strings.Split(text, "WARNING: DATA RACE")[1:] {
 		block, _, _ = strings.Cut(block, "==================")
 		if famOK && (matchesAll(block, steerFamily) || matchesAll(block, sessionFamily)) {
-			continue // registered framework-owned object, exempt as a family
+			continue
 		}
-		// Anything else: only the ACCESSOR sections may not carry a tagent
-		// frame (the trailing "created at:" origin stacks inevitably do).
 		if i := strings.Index(block, "created at:"); i >= 0 {
 			block = block[:i]
 		}
@@ -301,12 +280,6 @@ func triRaceOnlyFramework(out []byte) bool {
 			return false
 		}
 	}
-	// (2) ...AND every FAIL detail block must contain NOTHING but the
-	// race-detector verdict (and the race report's own origin-stack lines) — a
-	// real assertion failure or panic must never hide behind a benign race in
-	// the same child log. A non-indented line does not close the block: only a
-	// top-level boundary does, so a failure printed after a blank line (or a
-	// column-0 "panic:") is not skipped ).
 	inFail := false
 	inOrigin := false
 	for _, ln := range strings.Split(text, "\n") {
@@ -322,17 +295,17 @@ func triRaceOnlyFramework(out []byte) bool {
 			continue
 		}
 		if strings.HasPrefix(ln, "panic:") || strings.HasPrefix(ln, "fatal error:") {
-			return false // a crash is never exempt
+			return false
 		}
 		if t := strings.TrimSpace(ln); t == "" {
-			continue // a blank line does NOT close the block (fixes the 穿透)
+			continue
 		}
 		if strings.Contains(ln, "created at:") {
 			inOrigin = true
 			continue
 		}
 		if inOrigin && strings.HasPrefix(ln, "  ") {
-			continue // an origin-stack frame — ancestor test frames do not veto
+			continue
 		}
 		if t := strings.TrimSpace(ln); !strings.Contains(t, "race detected during execution of test") {
 			return false
@@ -392,6 +365,8 @@ func trpcAgentVersionFromGoMod() string {
 }
 
 // TestTriRaceOnlyFrameworkClassifier exercises the diagnostic label only; acceptance is decided by TestBootChildVerdictNoExemption.
+// - The family exemption is version-bound: it lapses once the linked trpc-agent-go differs from the registered release.
+// - The exemption predicate is stubbed here and restored via t.Cleanup, so a panicking assertion cannot leak the stub.
 func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	race := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
 	require.True(t, triRaceOnlyFramework([]byte(race)), "pure framework race is classified as the upstream family")
@@ -399,36 +374,25 @@ func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 	origin := strings.Replace(race, "FAIL\n", "Goroutine 1 (running) created at:\n  github.com/SpellingDragon/tagent/test.go:1 t()\nFAIL\n", 1)
 	require.True(t, triRaceOnlyFramework([]byte(origin)), "created-at ancestor test frames do not change the framework-family classification")
 	require.False(t, triRaceOnlyFramework([]byte(tagentFrame)), "an unknown race with a tagent frame is never classified as framework-only")
-	// The steer family is CLASSIFIED even when our model wrapper rides the call
-	// chain — the raced object is framework-private and product-free. (Label only;
-	// acceptance still fails it — TestBootChildVerdictNoExemption.)
 	fam := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n==================\nRead at 0x1:\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
 	require.True(t, triRaceOnlyFramework([]byte(fam)), "family signature + wrapper frame is classified as framework (when the family is registered)")
 	assertion := strings.Replace(race, "testing.go:1: race detected during execution of test", "Error: Should be true", 1)
 	require.False(t, triRaceOnlyFramework([]byte(assertion)), "an assertion failure is never exempt")
 	require.False(t, triRaceOnlyFramework([]byte("--- FAIL: TestX\n    Error: boom\n")), "non-race failure not exempt")
 
-	// A real assertion failure printed after a blank line must NOT hide behind
-	// the benign race: the block scan may not reset on a non-indented blank line
-	// and thereby skip the failure, which would yield exempt/true.
 	blankHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n\n    main_test.go:99: Error: want 1 got 2\nFAIL\n"
 	require.False(t, triRaceOnlyFramework([]byte(blankHide)), "a failure after a blank line is never exempt")
 
-	// A column-0 panic printed after the race verdict must veto the exemption: the
-	// block scan may not stop before inspecting a non-indented panic line, which
-	// would otherwise let the panic hide behind the benign race as exempt/true.
 	panicHide := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\npanic: runtime error: index out of range\n\tgx/y.go:1 +0x1\nexit status 2\n"
 	require.False(t, triRaceOnlyFramework([]byte(panicHide)), "a panic is never exempt behind a race")
 
-	// (2.3b) version binding: a tagent wrapper frame riding a REGISTERED family
-	// block is exempt only while the linked version matches the registration.
 	familyWithTagent := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/trpc-go/trpc-agent-go/internal/state/steer.(*Queue).Close()\n  trpc.group/x/agent.cloneStateReflectValue()\n  github.com/SpellingDragon/tagent/agent.executionGateModel.GenerateContentIter.func1()\n==================\n--- FAIL: TestX\n    testing.go:1: race detected during execution of test\n"
 	require.False(t, familyExemptionEnabled(), "linked trpc-agent-go must NOT equal the v1.10.0 registration after the upgrade: both families are fixed upstream, so the classifier's family branch is lapsed and a reappearance is labeled unknown")
 	orig := familyExemptionEnabled
-	t.Cleanup(func() { familyExemptionEnabled = orig })  // reliable restore even if an assertion below panics
-	familyExemptionEnabled = func() bool { return true } // simulate the registered link
+	t.Cleanup(func() { familyExemptionEnabled = orig })
+	familyExemptionEnabled = func() bool { return true }
 	require.True(t, triRaceOnlyFramework([]byte(familyWithTagent)), "at the registered version the classifier recognizes the family + wrapper frame")
-	familyExemptionEnabled = func() bool { return false } // simulate a framework upgrade
+	familyExemptionEnabled = func() bool { return false }
 	require.False(t, triRaceOnlyFramework([]byte(familyWithTagent)), "when the version no longer matches, the classifier stops recognizing the family + wrapper frame")
 }
 
@@ -436,9 +400,7 @@ func TestTriRaceOnlyFrameworkClassifier(t *testing.T) {
 func TestBootChildVerdictNoExemption(t *testing.T) {
 	exit := errors.New("exit status 1")
 	frameworkRace := "WARNING: DATA RACE\nWrite at 0x1:\n  trpc.group/x/runner.Close()\n==================\n--- FAIL: TestX (0.1s)\n    testing.go:1: race detected during execution of test\nFAIL\n"
-	// Classifier still recognizes the family (diagnostic)...
 	require.True(t, triRaceOnlyFramework([]byte(frameworkRace)), "classifier labels the pure-upstream family")
-	// ...but acceptance does not exempt it.
 	ok, _ := childOutcome([]byte(frameworkRace), exit)
 	require.False(t, ok, "§6.6: a pure-upstream race must FAIL acceptance (the old exempt path returned true)")
 
@@ -486,8 +448,6 @@ func runBootChild(t *testing.T, baseEnv []string, kv string, testFilter string) 
 	cmd := exec.Command(os.Args[0], "-test.run", testFilter, "-test.timeout", "120s")
 	cmd.Env = append(baseEnv, kv)
 	out, err := cmd.CombinedOutput()
-	// A filter that matches nothing exits 0 ("no tests to run"), which would turn
-	// every boot-child assertion into a pass over nothing.
 	require.NotContainsf(t, string(out), "no tests to run",
 		"boot child filter %q matched no test — the gate would pass vacuously:\n%s", testFilter, out)
 	ok, note := childOutcome(out, err)
@@ -495,6 +455,10 @@ func runBootChild(t *testing.T, baseEnv []string, kv string, testFilter string) 
 }
 
 // triChildPhase runs one boot state inside its own process.
+//
+// driveTurn is local: it starts the loop, injects and waits for the model sighting, and
+// returns a wait that drains the output reader — the caller must Close the agent before
+// calling it. The child finishes by returning, so the test binary exits normally.
 func triChildPhase(t *testing.T, phase string) {
 	storeDir := os.Getenv("TAGENT_TRI_STORE")
 	spillDir := os.Getenv("TAGENT_TRI_SPILL")
@@ -512,8 +476,6 @@ func triChildPhase(t *testing.T, phase string) {
 		require.NoError(t, err)
 		return ta
 	}
-	// driveTurn starts the loop, injects and waits for the model sighting;
-	// the returned wait drains the output reader after the caller Closes.
 	driveTurn := func(ta *agent.TagentAgent, m *drillModel, tag string) func() {
 		out, err := ta.StartLoop("u", "tri-session")
 		require.NoError(t, err)
@@ -530,13 +492,13 @@ func triChildPhase(t *testing.T, phase string) {
 		return func() { <-drop }
 	}
 	switch phase {
-	case "1": // brand-new dirs
+	case "1":
 		m := &drillModel{}
 		ta := boot(m)
 		wait := driveTurn(ta, m, "tri-fresh-turn")
 		require.NoError(t, ta.Close())
 		wait()
-	case "2": // restart over the current state, legacy markers planted outside
+	case "2":
 		m := &drillModel{}
 		ta := boot(m)
 		wait := driveTurn(ta, m, "tri-restart-turn")
@@ -545,7 +507,7 @@ func triChildPhase(t *testing.T, phase string) {
 		wait()
 		legacy := filepath.Join(spillDir, "tagent", "inbox-v1", "old-v1.json")
 		require.Equal(t, `{"version":1}`, readFile(t, legacy), "legacy v1 item is inert: never read, rewritten or removed")
-	case "3": // boot after the managed unit reset
+	case "3":
 		m := &drillModel{}
 		ta := boot(m)
 		s, err := ta.ReconcileOutstanding()
@@ -559,7 +521,6 @@ func triChildPhase(t *testing.T, phase string) {
 	default:
 		t.Fatalf("unknown phase %q", phase)
 	}
-	// Child processes finish by exiting the test binary normally.
 	os.Exit(0)
 }
 

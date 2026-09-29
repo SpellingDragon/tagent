@@ -44,8 +44,7 @@ func TestExtractAction_Unknown(t *testing.T) {
 	assert.Equal(t, "", extractAction(inv))
 }
 
-// TestExtractName_JSON parses name from JSON message content (packed by
-// AgentToolWrapper extra_params).
+// TestExtractName_JSON parses name from JSON message content (packed by AgentToolWrapper extra_params).
 func TestExtractName_JSON(t *testing.T) {
 	inv := &agent.Invocation{
 		Message: model.Message{Content: `{"action":"progress","name":"my-plan","request":"查看进度"}`},
@@ -59,9 +58,9 @@ func TestExtractName_AbsentOrPlainText(t *testing.T) {
 	assert.Empty(t, extractName(&agent.Invocation{Message: model.Message{Content: ""}}))
 }
 
-// TestExtractName_PlainTextFallback: the resume_task path delivers raw text
-// (bypasses wrapper packing); the contract form "progress name=<plan>" must
-// resolve the name.
+// TestExtractName_PlainTextFallback pins name resolution on the resume_task raw-text path.
+// - That path delivers raw text and bypasses wrapper packing, so the packed form is not available here.
+// - The contract form "progress name=<plan>" must resolve the plan name.
 func TestExtractName_PlainTextFallback(t *testing.T) {
 	tests := []struct {
 		content string
@@ -81,9 +80,9 @@ func TestExtractName_PlainTextFallback(t *testing.T) {
 	}
 }
 
-// TestRunProgressQuery_ResumeTextPath: end-to-end over the resume-style raw
-// text input — multiple active changes, name in text → targeted summary, no
-// "please specify" bounce.
+// TestRunProgressQuery_ResumeTextPath runs end-to-end over resume-style raw text input.
+// - Multiple active changes plus a name carried in the text must yield the targeted summary.
+// - No "please specify" bounce is expected: the text already names the change.
 func TestRunProgressQuery_ResumeTextPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	createChangeWithTasks(t, tmpDir, "plan-a", "- [x] 1.1 done\n")
@@ -140,8 +139,7 @@ func TestBuildProgressSummary_MultipleActiveChanges(t *testing.T) {
 	assert.Contains(t, summary, "change-2 (0/1 完成)")
 }
 
-// TestBuildProgressSummary_NamedTarget: a non-empty name targets that change
-// directly even when multiple changes are active (multi-plan parallel).
+// TestBuildProgressSummary_NamedTarget: a non-empty name targets that change directly even when multiple changes are active (multi-plan parallel).
 func TestBuildProgressSummary_NamedTarget(t *testing.T) {
 	tmpDir := t.TempDir()
 	createChangeWithTasks(t, tmpDir, "plan-a", "- [x] 1.1 a done\n")
@@ -154,8 +152,7 @@ func TestBuildProgressSummary_NamedTarget(t *testing.T) {
 	assert.NotContains(t, summary, "多个活跃")
 }
 
-// TestRunProgressQuery verifies that progress query returns an event with
-// the summary as content, without calling LLM.
+// TestRunProgressQuery verifies that progress query returns an event with the summary as content, without calling LLM.
 func TestRunProgressQuery(t *testing.T) {
 	tmpDir := t.TempDir()
 	createChangeWithTasks(t, tmpDir, "test-plan", "- [x] 1.1 Done\n- [ ] 1.2 Pending\n")

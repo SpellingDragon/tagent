@@ -481,6 +481,8 @@ func sdPoisonYAML(t testing.TB, routed []string, sealed string) string {
 // TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing 钉住 热新增的存储路径被活写者封住时，必须在任何候选发布之前被拒。
 // - 当前代必须完整照常服务、序号不前进；
 // - 拒绝不得静默过期：poisoned 路径后续热更也不自动解封。
+// - 封住动作放在自己的登记表里：它是该路径单写锁的另一个活持有者，用同进程构造出跨进程争用的形状。
+// - 正向证据（lastFailure 具名到被拒的那次热新增）不可省：若换代根本没走到热新增分支，上面每条断言都会空洞地通过。
 // 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 	dir := t.TempDir()
@@ -494,8 +496,6 @@ func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
 	}
 
-	// The seal lives in its own registry (a different live holder of the path's
-	// single-writer lock — cross-process contention modelled in-process).
 	sealer := NewRuntimeResources()
 	sealThePath(t, sealer, sealed)
 	t.Cleanup(func() { assertPathStillSealed(t, sealer, sealed) })
@@ -524,9 +524,6 @@ func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 	require.False(t, sub1Before.CloseStarted(), "旧代 owner 不能被失败的回退牵连关闭")
 	assertPathStillSealed(t, sealer, sealed)
 
-	// Positive proof the check actually ran and was refused on the way to building
-	// sub2 — without this, every assertion above would pass vacuously if the reload
-	// had simply not reached the hot-add branch at all.
 	lf, ok := entry.OrgDiagnostics()["lastFailure"]
 	require.True(t, ok && lf != nil, "被拒的热增必须留下可见失败记录（不是静默无操作）")
 	require.Contains(t, fmt.Sprint(lf), "sub2", "记录须点出被封的那个名字")
@@ -630,8 +627,6 @@ func TestOrgClose_DoesNotReplaceOwners(t *testing.T) {
 	sub1 := residentCacheForTest(entry)["sub1"]
 	require.NoError(t, entry.Close())
 	require.True(t, sub1.CloseStarted())
-	// A second Close is the ordinary t.Cleanup follow-up: it must be idempotent
-	// (the owner's own sequence runs exactly once) and must not resurrect it.
 	require.NoError(t, entry.Close())
 	require.Same(t, sub1, residentCacheForTest(entry)["sub1"])
 }
@@ -658,10 +653,6 @@ func TestOrgClose_SharedStoreWaitsForEveryBorrower(t *testing.T) {
 		"§4.3/D8：共享 store 必须等所有借用者退出——关闭序列中任一 owner 报错都说明后端被提前拆走")
 	require.True(t, s1.CloseStarted() && s2.CloseStarted(), "both borrowers must have gone down")
 
-	// Exactly-once release, observed through the registry's own rules (non-destructive
-	// by construction — unlike a flock probe, which would take over the very lock it
-	// measures). Success proves: the flock is free (no leaked holder) AND the path is
-	// not poisoned (no premature/doubled release was sealed).
 	fresh := NewRuntimeResources()
 	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
 	_, _, rel, err := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
@@ -714,6 +705,10 @@ func TestRetire_SharedComponentWaitsForEveryBorrower(t *testing.T) {
 
 // sdUsageYAML renders the G1/G2 pair for the deferred-delegation anchor: G1
 // routes main → sub1, G2 drops that route (making sub1 unrouted).
+//
+// The rendered config carries no model/providers section on purpose: the host-injected
+// mock serves every agent, which is what lets a real delegation turn run without a
+// live endpoint.
 func sdUsageYAML(t testing.TB, routeSub1 bool) string {
 	t.Helper()
 	ref := ""
@@ -723,8 +718,6 @@ func sdUsageYAML(t testing.TB, routeSub1 bool) string {
         description: "sub1"
 `
 	}
-	// No model/providers section: the host-injected mock serves every agent, which
-	// is what lets a real delegation turn run without a live endpoint.
 	return fmt.Sprintf(`entry: main
 agents:
   main:
@@ -743,6 +736,7 @@ agents:
 // TestSD_DeferredDelegationIsProtectedByUsageRight 钉住 没被调用过的子代理不得因本体度量空闲，就在别一代仍路由它时被关闭。
 // - 使用权由存活绑定各自已发布的面派生，不是第二套任务域、也不是平行路由表——那面已是唯一路由真源；
 // - 一代仍是合法调用方直到其自身引用排空，被推迟的委派那时必须还能落到被保有的子代理。
+// - 注入的 mock 对无工具的 agent 直接给最终答复，因此 sub1 内的真实委派回合会自行收尾，而不是伸手要活的 endpoint。
 // 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 func TestSD_DeferredDelegationIsProtectedByUsageRight(t *testing.T) {
 	dir := t.TempDir()
@@ -758,8 +752,6 @@ func TestSD_DeferredDelegationIsProtectedByUsageRight(t *testing.T) {
 	write(sdUsageYAML(t, true))
 	cfg, err := LoadConfig(yamlPath)
 	require.NoError(t, err)
-	// delegModel serves a toolless agent with a plain final answer, so a real
-	// delegation turn inside sub1 completes instead of reaching a live endpoint.
 	entry, err := New(*cfg, WithModel(&delegModel{}), WithConfigPath(yamlPath))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = entry.Close() })
@@ -1025,12 +1017,20 @@ func (m *drillModel) Info() model.Info { return model.Info{Name: "drill-model"} 
 
 // drillResetManagedUnits is the operator-side orchestration: probe every gate
 // FIRST (all-or-nothing), then remove only managed-layout files.
+//
+// Gate one is live writers: the store's cross-process single-writer flock must be
+// acquirable, so an in-flight owner is refused with zero changes. Gate two is the
+// leaf's guarded ledger — probe.CloseDurable() there is verification only (the leaf
+// reopens after removal), and that sweep runs on a FRESH instance so its unacked
+// ledger matches the post-removal disk, which is the point of a unit reset.
+//
+// Removal covers the exact managed layout only: kv.json plus its single kv.json.tmp
+// for the store unit; envelope-style tmps live under the inbox unit and are matched
+// there by pattern.
 func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, confirm bool) ([]string, error) {
 	if !confirm {
 		return nil, fmt.Errorf("drill reset: requires explicit confirmation (destructive operator act)")
 	}
-	// Gate 1 — live writers: the store's cross-process single-writer flock
-	// must be acquirable (in-flight owner ⇒ refuse with zero changes).
 	lockF, err := acquireDirLock(storeDir)
 	if err != nil {
 		return nil, fmt.Errorf("drill reset: live writer on %s: %w", storeDir, err)
@@ -1054,13 +1054,9 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 	if err != nil {
 		return nil, fmt.Errorf("drill reset: inbox undisposable/quarantine undispositioned: %w", err)
 	}
-	_ = probe.CloseDurable() // verification only — the leaf reopens post-removal
+	_ = probe.CloseDurable()
 
 	var removals []string
-	// Store unit: only the managed layout (kv snapshot + its tmp).
-	// Exact managed layout names (review 7677c07 #2): LocalFileKV writes
-	// "kv.json" + its single "kv.json.tmp"; envelope-style tmps live under
-	// the inbox unit and are matched there by pattern.
 	for _, pat := range []string{"kv.json", "kv.json.tmp"} {
 		m, _ := filepath.Glob(filepath.Join(storeDir, pat))
 		removals = append(removals, m...)
@@ -1079,8 +1075,6 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 			removed = append(removed, p)
 		}
 	}
-	// The leaf's guarded transitional sweep runs on a FRESH instance so its
-	// unacked ledger matches the post-removal disk (the point of a unit reset).
 	leaf, err := agent.NewReliableEventBus(filepath.Join(spillParent, agentName))
 	if err != nil {
 		return removed, fmt.Errorf("drill reset reopen: %w", err)
@@ -1094,6 +1088,9 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 	return append(removed, fmt.Sprintf("%d transitional file(s)", n)), nil
 }
 
+// TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals 钉住 托管根单元复位：任一 gate 不过就零改动拒绝，只清托管布局。
+// - 拒绝即零改动：quarantine 未处置与活写者持锁（ErrStoreLocked）都不得留下部分清理；非托管内容与软链的外部目标永不被删。
+// - 复位后的启动相由独立进程完成（一次 boot 只有真实进程启动才算证据），该子进程不设任何竞态豁免：出现竞态或非零退出即硬失败并附全日志。
 func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	root := t.TempDir()
 	storeDir := filepath.Join(root, "store")
@@ -1163,10 +1160,6 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.FileExists(t, victim, "path escape removed at most the link, never the outside target")
 	require.DirExists(t, filepath.Dir(evidence))
 
-	// LEG e — post-reset boot ONLY knows the current path. Runs as an
-	// independent process (boot evidence layer). The acceptance keeps no
-	// race exemption — the child must boot with zero data races and a clean
-	// exit; any race or non-zero exit fails hard with the full log.
 	runBootChild(t, append(os.Environ(),
 		"TAGENT_DRILL_STORE="+storeDir,
 		"TAGENT_DRILL_SPILL="+spillDir,
@@ -1175,6 +1168,7 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 }
 
 // TestDrill_ManagedRootResetBootChild 钉住 单元复位之后的启动相只认当前格式的路径，并能完成一个真实回合。
+// - 判据按包含而非相等：框架守卫可能在用户输入上添加装饰。
 func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 	if os.Getenv("TAGENT_DRILL_PHASE") != "boot-turn" {
 		t.Skip("drill boot child")
@@ -1212,7 +1206,7 @@ func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 		for _, req := range m.reqs {
 			for _, msg := range req {
 				if strings.Contains(msg.Content, "post-reset-first-input") {
-					return true // the framework guard may decorate the input
+					return true
 				}
 			}
 		}

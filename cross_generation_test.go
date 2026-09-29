@@ -1114,6 +1114,9 @@ type walReentryModel struct {
 	gated   bool
 }
 
+// GenerateContent is the WAL-reentry mock. It holds the producer open while a gate
+// is armed: the delegated task must NOT reach a terminal settle during that window, so
+// the board the next boot folds really still carries it.
 func (m *walReentryModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
 	label := delegLabel(delegSystemOf(req))
 	tools := delegToolNames(req)
@@ -1147,7 +1150,7 @@ func (m *walReentryModel) GenerateContent(_ context.Context, req *model.Request)
 	m.served = append(m.served, delegServed{System: label, Tools: tools, Answered: offer})
 	m.mu.Unlock()
 
-	if park != nil { // hold the producer open: the task must NOT reach a terminal settle
+	if park != nil {
 		select {
 		case <-park:
 		case <-time.After(60 * time.Second):
@@ -1206,17 +1209,11 @@ func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 		return
 	}
 
-	// Each scenario gets its OWN durable root: the negative leg must restart over
-	// the crash state itself, not over a board the positive leg already settled
-	// (a settled task correctly folds to nothing — sharing a root would have tested
-	// that instead of the intended refusal).
 	runScenario := func(dropOnRestart bool) {
 		dir := t.TempDir()
 		yamlPath := filepath.Join(dir, "tagent.yaml")
 		env := append(os.Environ(), walReentryYamlEnv+"="+yamlPath)
 
-		// BOOT 1 — leave an UNFINISHED subagent task on b's board, then die abruptly
-		// (no Close): the crash-shaped fact chain the next boot has to fold.
 		runBootChild(t, env, walReentryPhaseEnv+"=spawn", walReentryFilter)
 
 		if dropOnRestart {
@@ -1230,6 +1227,11 @@ func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 	runScenario(true)
 }
 
+// walReentryChild runs one boot of the WAL-reentry scenario as its own process.
+//
+// The spawn phase gives the record time to reach the durable path, then exits WITHOUT
+// Close. The task must be left un-settled — that is the whole state under test, and it
+// is the physical shape of a crash rather than a hand-written record.
 func walReentryChild(t *testing.T, phase string) {
 	yamlPath := os.Getenv(walReentryYamlEnv)
 	require.NotEmpty(t, yamlPath, "the parent must hand the shared config path through the env")
@@ -1256,8 +1258,6 @@ func walReentryChild(t *testing.T, phase string) {
 		require.NotNil(t, b, "b is a resident owner")
 		require.NotNil(t, firstSubagentTask(b),
 			"precondition: the unfinished subagent task sits on b's OWN board")
-		// Give the spawn record time to reach the durable path, then exit WITHOUT
-		// Close. The task must be left un-settled — that is the whole state under test.
 		time.Sleep(2 * time.Second)
 		os.Exit(0)
 
@@ -1461,6 +1461,8 @@ func killOwnSession(t *testing.T, session string) {
 	}
 }
 
+// TestLiveSessionStaysWatchedAcrossToolGeneration 钉住 工具换代后仍存活的真实会话必须继续被当前代跟踪。
+// - 三条 boot 各用独立持久根：热更窗口那条全程发生在单进程内（spawn → publish → re-attempt），复用前一根会拿到会话早已死亡的遗留任务（实测）。
 func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
 	if phase := os.Getenv(sessionWatchPhaseEnv); phase != "" {
 		sessionWatchChild(t, phase)
@@ -1470,16 +1472,10 @@ func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
 	yamlPath := filepath.Join(root, "tagent.yaml")
 	env := append(os.Environ(), sessionWatchYamlEnv+"="+yamlPath)
 
-	// BOOT 1 — start a real session and die WITHOUT Close: the task stays un-settled
-	// in the durable chain while its tmux session lives on in the server.
-	// the session name this scenario owns is fixed, so the phase log is traceable
 	runBootChild(t, env, sessionWatchPhaseEnv+"=spawn", sessionWatchFilter)
 
 	runBootChild(t, env, sessionWatchPhaseEnv+"=restart", sessionWatchFilter)
 
-	// BOOT 3 — the HOT-RELOAD window, in its OWN durable root: everything happens
-	// inside one process (spawn → publish → re-attempt), and reusing the root above
-	// would hand it a leftover task whose session is long dead (measured).
 	hotRoot := t.TempDir()
 	hotYaml := filepath.Join(hotRoot, "tagent.yaml")
 	runBootChild(t, append(os.Environ(), sessionWatchYamlEnv+"="+hotYaml), sessionWatchPhaseEnv+"=hotreload", sessionWatchFilter)
@@ -1495,6 +1491,25 @@ func sessionWatchBoot(t *testing.T, yamlPath string) (*agent.TagentAgent, *sessi
 	return entry, m
 }
 
+// sessionWatchChild runs one boot of the live-session anchor as its own process.
+//
+// The spawn phase owns one fixed session name so phase logs stay attributable, and
+// kills any session of that name first: a named session survives a CRASHED earlier run
+// of this test the same way it survives a restart, while the tool refuses a duplicate
+// name — without that preflight the anchor stops being re-runnable after a failed run.
+// It then lets the record reach the durable path and leaves WITHOUT Close, so nothing
+// reaps the session and the task never settles.
+//
+// The publish phase writes a NEW generation, which re-assembles the owner's ActionTool.
+// The current generation must still own the live session: asking for the same logical
+// name has to be refused as a duplicate, not answered by a second session nobody was
+// tracking.
+//
+// The final wait is bounded because a full test run hosts every package binary at once
+// and the boot's first tmux verification can miss the window. List() re-runs
+// reconcileDetached, so re-fetching exercises the designed re-adjudication path rather
+// than mere patience: alone or whole-package the promotion lands before the first
+// fetch, and a session that never promotes still fails with the same message.
 func sessionWatchChild(t *testing.T, phase string) {
 	yamlPath := os.Getenv(sessionWatchYamlEnv)
 	require.NotEmpty(t, yamlPath)
@@ -1503,10 +1518,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 	switch phase {
 	case "spawn":
 		require.NoError(t, os.WriteFile(yamlPath, []byte(sessionWatchYAML(root)), 0o644))
-		// Idempotent preflight: a named session survives a CRASHED earlier run of
-		// this test the same way it survives a restart, and the tool refuses a
-		// duplicate name — without this the anchor would stop being re-runnable
-		// after any failed run (observed while probing). Only ever our own name.
 		killOwnSession(t, "n-"+sessionWatchSvcName)
 		entry, _ := sessionWatchBoot(t, yamlPath)
 		out, err := entry.StartLoop("u", "sessionWatch-spawn")
@@ -1525,8 +1536,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 		})
 		require.Truef(t, tmuxSessionAlive(session),
 			"precondition: the tmux server must really be running session %s", session)
-		// Let the spawn record reach the durable path, then leave WITHOUT Close so
-		// nothing reaps the session and the task never settles.
 		time.Sleep(2 * time.Second)
 		os.Exit(0)
 
@@ -1551,7 +1560,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 		})
 		require.Truef(t, tmuxSessionAlive(session), "precondition: %s must be live", session)
 
-		// Publish a NEW generation: the owner's ActionTool is re-assembled.
 		require.NoError(t, os.WriteFile(yamlPath, []byte(sessionWatchYAMLAfterPublish(root)), 0o644))
 		tick = tick.Add(2 * time.Second)
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
@@ -1560,9 +1568,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 		require.Greater(t, diagInt64(t, entry.OrgDiagnostics(), "generation"), int64(0),
 			"precondition: the publish really advanced the generation")
 
-		// The CURRENT generation must still own the live session: asking for the
-		// same logical name has to be refused as a duplicate, not answered by a
-		// second session nobody was tracking.
 		_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("start it again"))
 		require.NoError(t, err)
 		waitFor(t, "the second attempt was answered", func() bool { return m.count() > before+1 })
@@ -1592,12 +1597,6 @@ func sessionWatchChild(t *testing.T, phase string) {
 		require.Truef(t, tmuxSessionAlive(session),
 			"precondition: session %s must still be alive for the monitoring claim to mean anything", session)
 
-		// Bounded wait: under a full `go test ./...` run the
-		// machine hosts every package binary at once and the boot's first tmux
-		// verification can miss the window; List() re-runs reconcileDetached, so
-		// re-fetching exercises the designed re-adjudication path rather than mere
-		// patience. Alone / whole-package the promotion lands before the first
-		// fetch; a session that never promotes still fails with the same message.
 		deadline := time.Now().Add(30 * time.Second)
 		for tk.Status() != task.TaskRunning && time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
@@ -1703,6 +1702,7 @@ func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
 // TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget 钉住 跨发布时，停在途的 B 向下委派到 C 仍跑它被钉那一代声明的 C。
 // - 补齐别的锚到不了的这一面：稳定态各层见自身声明、单跳发起者持自身代都已证，唯独 B 停在途中、G2 换掉 C 后 B 向下到 C 没证；
 // - 第三条回合必须跑新 C，使本锚自判别——发布从未落地时第一条断言会因错误理由通过。
+// - 见证按序号取而非取最新：只有本次委派自身的 settle 能产出下一条记录，而它不可能早于该跳生产者返回——两跳落在两次轮询之间时见证才不会漂。
 // 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T) {
 	dir := t.TempDir()
@@ -1773,10 +1773,6 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 		return len(bHopAnswers()) > hopsBefore
 	})
 	answers := bHopAnswers()
-	// The (hopsBefore+1)-th B-with-results record IS the pinned hop's: the only
-	// later source of another one is the settle of this very delegation, which
-	// cannot fire before the hop's producer returned — so indexing (not "latest")
-	// keeps the witness on the hop even when both land between two polls.
 	pinned := answers[hopsBefore]
 	require.Contains(t, pinned, `"served:SUB-C-PROMPT"`,
 		"§3.2：被钉跳的回执必须是 G1 之 C 的回答（D5「派生前继承发起调用租约」）")
@@ -1846,7 +1842,7 @@ func writeReentryYAML(t *testing.T, path string, content string) {
 // was told to prefer, when that tool is really on the face it was offered.
 type namedDelegModel struct {
 	delegModel
-	pick string // the delegation tool this caller asks for
+	pick string
 }
 
 func (m *namedDelegModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {

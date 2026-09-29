@@ -10,8 +10,8 @@ import "embed"
 //go:embed resources/prompts
 var defaultPromptsFS embed.FS
 
-// DefaultPromptsFS returns the embedded framework default prompts. The tree is
-// rooted at "resources/prompts" (e.g. "resources/prompts/recall_tool_desc.md").
+// DefaultPromptsFS returns the embedded framework default prompts. The tree is rooted
+// at DefaultPromptsPrefix (a prompt file is e.g. recall_tool_desc.md).
 func DefaultPromptsFS() embed.FS { return defaultPromptsFS }
 
 // DefaultPromptsPrefix is the path prefix under which the embedded defaults live.

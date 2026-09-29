@@ -52,9 +52,6 @@ func TestValidate_AgentReferences(t *testing.T) {
 			errContains: "unknown agent",
 		},
 		{
-			// 「校验域与构建域一致，远端引用不误要求本地定义」：buildAgentToolRef
-			// 对 Remote 引用走 A2A 分支，从不查本地 agents 表；校验域若仍要求本地定义，
-			// 一个纯远端委派（服务在别处的 agent）会在加载期被误判为引用不存在。
 			name: "remote a2a reference needs no local definition",
 			cfg: Config{
 				Entry: "tagent",
@@ -70,8 +67,6 @@ func TestValidate_AgentReferences(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			// 反向：声明了 remote 却没端点，构建域会当本地引用处理——那是「按声明意图
-			// 远端、按构建实际本地」的域偏离，必须在加载期明确拒绝而非静默降级。
 			name: "remote declaration without url is refused",
 			cfg: Config{
 				Entry: "tagent",
@@ -214,7 +209,6 @@ func TestDefaultConfig_TagentTools(t *testing.T) {
 	tagentAgent, ok := cfg.Agents["tagent"]
 	require.True(t, ok, "tagent agent should exist in DefaultConfig")
 
-	// tagent should have 3 tools: knowledge (agent), recall (agent), exec (tool)
 	require.Len(t, tagentAgent.Tools, 3, "tagent should have 3 tools")
 
 	assert.Equal(t, ToolKindAgent, tagentAgent.Tools[0].Kind)
@@ -235,10 +229,9 @@ func TestDefaultConfig_MeditationConfig(t *testing.T) {
 		"DefaultConfig should not enable meditation by default")
 }
 
-// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类 BUG：
-// DefaultConfig 必须通过 ApplyDefaults + Validate + ValidateToolAccess 全链路，
-// 即 New(DefaultConfig()) 可构建。此前 DefaultConfig 引用 id:"action" 而注册表
-// 注册为 "exec"（registry.go），ValidateToolAccess 会失败——本测试锁死该回归。
+// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类缺陷：DefaultConfig 必须通过 ApplyDefaults + Validate + ValidateToolAccess 全链路，即 New(DefaultConfig()) 可构建。
+// - 锁死的形状：DefaultConfig 引用 id:"action" 而注册表注册为 "exec"（registry.go），此时 ValidateToolAccess 必然失败。
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestDefaultConfigBuildable(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 
@@ -263,7 +256,6 @@ func TestToolRegistry_RegisterAndQuery(t *testing.T) {
 	err := RegisterBuiltinTools()
 	require.NoError(t, err)
 
-	// Verify all registered plain tools
 	plainTools := []string{
 		"exec",
 		"read_file", "save_file", "list_file", "search_file",
@@ -281,7 +273,6 @@ func TestToolRegistry_RegisterAndQuery(t *testing.T) {
 }
 
 func TestToolRegistry_ValidateToolAccess(t *testing.T) {
-	// Ensure builtins are registered
 	RegisterBuiltinTools()
 
 	registry := GetRegistry()
@@ -346,15 +337,12 @@ func TestToolRegistry_ValidateToolAccess(t *testing.T) {
 }
 
 func TestRegisterBuiltinTools_Idempotent(t *testing.T) {
-	// First call should succeed
 	err := RegisterBuiltinTools()
 	require.NoError(t, err)
 
-	// Second call should also succeed (idempotent via sync.Once)
 	err = RegisterBuiltinTools()
 	require.NoError(t, err)
 
-	// Verify tools are still accessible after multiple calls
 	registry := GetRegistry()
 	_, ok := registry.GetPlainToolFactory("exec")
 	assert.True(t, ok, "exec should still be registered after idempotent call")
@@ -398,9 +386,8 @@ func TestLoadConfig_ExampleYAML(t *testing.T) {
 	assert.NotContains(t, cfg.Agents, "write")
 }
 
-// TestAgentConfig_TaskTerminalTTL: the task_terminal_ttl YAML field parses as
-// a duration string and flows to agent.TagentConfig (bounds the resume_task
-// window for terminal subagent tasks).
+// TestAgentConfig_TaskTerminalTTL pins that the task_terminal_ttl YAML field parses as a duration string and flows through to agent.TagentConfig.
+// - It bounds the resume_task window for terminal subagent tasks; an unset field stays empty instead of gaining an implicit default.
 func TestAgentConfig_TaskTerminalTTL(t *testing.T) {
 	var acfg AgentConfig
 	require.NoError(t, yaml.Unmarshal([]byte("task_terminal_ttl: \"30m\"\n"), &acfg))
@@ -417,16 +404,14 @@ func TestAgentConfig_TaskTerminalTTL(t *testing.T) {
 	assert.Empty(t, empty.TaskTerminalTTL)
 }
 
-// TestResolveLifecycleConfig (D11): YAML-declared lifecycle fields override
-// the built-in defaults; unset fields fall back; negative global TTL disables
-// TTL-based forgetting entirely.
+// TestResolveLifecycleConfig pins how YAML-declared lifecycle fields merge with the built-in defaults.
+// - Declared fields override, unset fields fall back, and a negative global TTL disables TTL-based forgetting entirely.
+// - Unspecified TypeTTL entries keep the built-in table; an invalid check interval keeps the 1h default.
 func TestResolveLifecycleConfig(t *testing.T) {
-	// Nil → pure defaults.
 	cfg := resolveLifecycleConfig(nil)
 	assert.Equal(t, 7, cfg.GlobalTTLDays)
 	assert.Equal(t, 0, cfg.MaxEventsPerPartition)
 
-	// Full override.
 	ttl, maxEv := 30, 50000
 	cfg = resolveLifecycleConfig(&LifecycleConfig{
 		GlobalTTLDays:         &ttl,
@@ -440,7 +425,6 @@ func TestResolveLifecycleConfig(t *testing.T) {
 	assert.Equal(t, 50000, cfg.MaxEventsPerPartition)
 	assert.Equal(t, int64(15*60), int64(cfg.CheckInterval.Seconds()))
 
-	// Negative global TTL disables TTL; invalid interval falls back.
 	off := -1
 	cfg = resolveLifecycleConfig(&LifecycleConfig{
 		GlobalTTLDays: &off,
@@ -450,8 +434,8 @@ func TestResolveLifecycleConfig(t *testing.T) {
 	assert.Equal(t, int64(3600), int64(cfg.CheckInterval.Seconds()), "invalid interval keeps 1h default")
 }
 
-// TestLifecycleConfigYAML: the lifecycle block parses from YAML into
-// MemoryConfig (field names are the contract users write in tagent.yaml).
+// TestLifecycleConfigYAML pins that the lifecycle block parses from YAML into MemoryConfig.
+// - The YAML field names are the contract users write in tagent.yaml, so optionality is asserted through pointers, not only through values.
 func TestLifecycleConfigYAML(t *testing.T) {
 	yamlSrc := `
 entry: a

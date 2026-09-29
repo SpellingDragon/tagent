@@ -35,7 +35,7 @@ type ResidentMeta struct {
 	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
 	// long-running session re-adopted across restarts is not an orphan no
-	// matter how old it is. Empty → fall back to SpawnedAt (legacy meta).
+	// matter how old it is. Empty → fall back to SpawnedAt (metadata without an adoption timestamp).
 	LastAdoptedAt string            `json:"last_adopted_at,omitempty"`
 	Command       string            `json:"command,omitempty"`
 	TaskID        string            `json:"task_id,omitempty"`
@@ -219,11 +219,10 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 	log.Infof("[ActionTool] recovery: %s alive (mode=%s watch=%q probe=%q) — tracking rebuilt; agent notified on next watch/probe hit or peek", sessionID, m.Mode, m.Watch, m.Probe)
 }
 
-// residentTTL is how long a resident session may go WITHOUT ADOPTION before
-// the sweep reaps it (was: raw age since spawn,
-// which killed healthy long-running sessions at their first post-24h restart).
-// Freshness is measured from LastAdoptedAt (fallback SpawnedAt for legacy
-// meta), and sessions still tracked by a live monitor are never swept.
+// residentTTL is how long a resident session may go without a recent adoption before
+// the sweep reaps it. Freshness is measured from LastAdoptedAt (fallback SpawnedAt for
+// metadata without an adoption timestamp), and sessions still tracked by a live monitor
+// are never swept.
 var residentTTL = 24 * time.Hour
 
 // maxResidentSessions caps concurrent resident sessions per agent instance

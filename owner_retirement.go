@@ -20,9 +20,11 @@ import (
 // re-routed before its drain finished (that owner is simply reused, which is also
 // why a re-add can never produce a second writer for a live store).
 type retirementLedger struct {
-	mu      sync.Mutex
-	pending map[string]*agent.TagentAgent // name → unrouted owner awaiting quiescence
-	held    map[string]error              // name → the close error that keeps it listed
+	mu sync.Mutex
+	// pending maps a retired name to the owner still awaiting quiescence.
+	pending map[string]*agent.TagentAgent
+	// held maps a name to the close error that keeps it listed.
+	held map[string]error
 	// usageOf reports how many live execution generations still hold a USAGE RIGHT
 	// on a name: a version that routed B may legitimately call B until
 	// its own references drain, even if it never called B and even if the current
@@ -128,7 +130,9 @@ func (l *retirementLedger) closingIn(reach map[string]bool) []string {
 
 // diagnostics reports what is still held and why — pending retirement is a real
 // state the host must be able to see (an owner kept alive by its own unfinished
-// work is legitimate; an owner kept alive invisibly is not).
+// work is legitimate; an owner kept alive invisibly is not). The usage axis is
+// derived by walking live bindings, so it is read only after the ledger lock is
+// released: a diagnostics path must never invert the ledger → agent lock order.
 func (l *retirementLedger) diagnostics() []map[string]any {
 	l.mu.Lock()
 	if len(l.pending) == 0 {
@@ -155,9 +159,6 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 	}
 	l.mu.Unlock()
 
-	// The usage axis is derived by walking live bindings, so it is read only after
-	// the ledger lock is dropped: a diagnostics path must never invert the order
-	// (ledger → agent locks) the sweep itself relies on.
 	out := make([]map[string]any, 0, len(recs))
 	for _, r := range recs {
 		entry := map[string]any{"name": r.name, "obligations": r.ob}
@@ -209,7 +210,10 @@ type retireDecision struct {
 
 // sweep evaluates every pending owner once: still routable (release), still
 // obliged (keep), or idle (close, then retire). Called with the reload's `mu`
-// held, so it can never race a publish's track/release for the same name.
+// held, so it can never race a publish's track/release for the same name. An owner is held either by its own unfinished work or by another
+// generation’s still-valid usage right (deferred delegation); that second term
+// is derived from live bindings, so a holder cannot slip through the way a
+// hand-maintained registration would let one slip.
 func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 	var decisions []retireDecision
 	for name, owner := range l.snapshot() {
@@ -222,10 +226,6 @@ func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 			decisions = append(decisions, retireDecision{Name: name, Why: "re-routed before drain finished — original owner reused"})
 			continue
 		}
-		// An owner is held either by its OWN unfinished work or by another
-		// generation's still-valid usage right (deferred delegation). The second term
-		// is derived from live bindings, so no holder can be forgotten the way a
-		// hand-maintained registration would be.
 		holders := l.usageHolders(name)
 		if ob := owner.Obligations(); !ob.Idle() || holders > 0 {
 			why := "obligations remain: " + ob.String()

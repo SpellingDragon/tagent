@@ -98,9 +98,8 @@ var (
 FUNCTIONS
 
 func DefaultPromptsFS() embed.FS
-    DefaultPromptsFS returns the embedded framework default
-    prompts. The tree is rooted at "resources/prompts" (e.g.
-    "resources/prompts/recall_tool_desc.md").
+    DefaultPromptsFS returns the embedded framework default prompts. The tree is
+    rooted at DefaultPromptsPrefix (a prompt file is e.g. recall_tool_desc.md).
 
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
     New creates a fully-wired TagentAgent from declarative Config + runtime
@@ -144,6 +143,12 @@ func RegisterBuiltinTools() error
         duckduckgo_search, memory_query
       - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
       - mcp_call: generic MCP execution gateway
+      - memory curation sub-tools: memory_consolidate (evidence-gated
+        consolidation), memory_health (dimension-anchored diagnosis); both
+        are factory-registered and take their dependencies from the per-agent
+        MemStore.
+      - task sub-tools: list_tasks, cancel_task, relaunch_task, resume_task
+      - spec: typed spec/plan management (no shell; openspec backend)
 
 func TestingBuildAgent(
 	name string,
@@ -253,9 +258,9 @@ type CompressConfig struct {
 	// summary size but never below this floor.
 	SummaryMaxTokens int `json:"summary_max_tokens,omitempty" yaml:"summary_max_tokens,omitempty"`
 
-	// SummaryEffort is the legacy alias for summary.reasoning_effort
+	// SummaryEffort is the flat alias for summary.reasoning_effort
 	// (deprecated — folded by FoldModelRefAliases). The field must exist for
-	// strict parsing to accept the legacy key.
+	// strict parsing to accept the alias key.
 	SummaryEffort string `json:"summary_effort,omitempty" yaml:"summary_effort,omitempty"`
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
@@ -267,7 +272,7 @@ type CompressConfig struct {
 	SummaryProvider string `json:"summary_provider,omitempty" yaml:"summary_provider,omitempty"`
 	// Summary is the unified ModelRef declaration for the summary call site
 	// (model + generation knobs incl. reasoning_effort). When both this and
-	// the legacy flat fields are present, Summary wins per-field at fold time.
+	// the flat alias fields are present, Summary wins per-field at fold time.
 	Summary ModelRef `json:"summary,omitempty" yaml:"summary,omitempty"`
 }
     CompressConfig configures SmartCompressor parameters.
@@ -452,9 +457,11 @@ func (c *Config) Clone() (*Config, error)
     so desired/effective comparison is unaffected.
 
 func (c *Config) FoldModelRefAliases()
-    FoldModelRefAliases merges legacy flat knob declarations into their unified
-    ModelRef holders. Explicit ModelRef fields win per-field; legacy values only
-    fill fields the ModelRef leaves unset. (tagent-unify-model-call-config.)
+    FoldModelRefAliases folds each agent's deprecated flat compress.summary_*
+    knobs into its unified ModelRef holders: an explicit ModelRef field wins per
+    field, and a flat knob only fills what the ModelRef leaves unset. Every fold
+    logs a warning naming both configuration keys, so a mixed declaration stays
+    visible in the startup log instead of being silently resolved.
 
 func (c *Config) ResolveAgentProvider(agentName string) (endpoint, apiKeyEnv string, err error)
     ResolveAgentProvider returns the resolved API endpoint and API key
@@ -485,7 +492,19 @@ func (c ConsolidationConfig) Validate() error
 type ConsolidationHintTracker struct {
 	// Has unexported fields.
 }
-    ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。
+    ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。 消费 engineBridge
+    的写入旁路计数（CapacityHookProvider）： 每分区的**边界事件**（external_input /
+    agent_output，即任务回合的意图与产出）计数 超过 capacity_threshold 时，经 onHint 发一条
+    consolidation_hint 渗透消息——建议式， 执行权仍在 LLM + memory_consolidate 工具。snooze
+    窗内不重复打扰 （内存态；重启后重新积累——最多多提示一次，可接受）。
+
+    不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示， MUST NOT
+    驱动容量淘汰——淘汰执行权的唯一真源是 store 的绝对 per-partition eventCount（`recomputePartition`
+    由完整记录链得出，unknown 分区不淘汰，见 memory/lifecycle.go::checkCapacity）。因此本 delta
+    重启归零、巩固后随提示复位（Track 触发 onHint 即将 counts[pid]=0），与绝对真源分叉不构成淘汰误删风险（既有
+    TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；锁定淘汰读绝对）。 repaired/already
+    重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过 capacityHook（见
+    engine_bridge_idempotency_test.go）。
 
 func NewConsolidationHintTracker(threshold int, snooze time.Duration) *ConsolidationHintTracker
     NewConsolidationHintTracker 构造触发器。threshold<=0 返回 nil（关闭，零行为变化）。 onHint
@@ -500,6 +519,12 @@ func (t *ConsolidationHintTracker) SetOnHint(fn func(partitionID, count int))
 
 func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventType string)
     Track 是写入旁路计数入口（engineBridge capacityHook 签名）。仅边界事件计数； 非阻塞、永不失败（旁路产物）。
+    Within the snooze window the count is kept, so the next boundary event
+    after the window expires hints again. While onHint is unset (the assembly
+    window between construction and SetOnHint) nothing is reset and no snooze
+    is recorded: the count survives, and the first boundary event after wiring
+    emits the delayed hint. On a hint, counts and recent reset together so the
+    candidate list stays aligned.
 
 type EmbeddingConfig struct {
 	// Provider："zhipu"（默认，openai 兼容 HTTP）或 "mock"（确定性哈希，测试/离线）。
@@ -529,17 +554,17 @@ type EvolutionConfig struct {
 	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
 
-	// 后验 LLM-judge 参数（零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
-	// Judge is the unified ModelRef for the evolution judge LLM. Zero value
-	// keeps the legacy behavior: fall back to the entry agent's model.
+	// Judge is the unified ModelRef for the evolution judge LLM; a zero value falls back
+	// to the entry agent’s model. The judge’s judgment knobs and their zero-value
+	// defaults are the constructor’s contract (evolution.NewLLMJudgeEvaluator).
 	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
-	// Deprecated legacy flat judge knobs (compat aliases, folded into Judge):
+	// Deprecated flat judge knobs (compat aliases, folded into Judge):
 	JudgeModel           string  `json:"judge_model,omitempty" yaml:"judge_model,omitempty"`
 	JudgeProvider        string  `json:"judge_provider,omitempty" yaml:"judge_provider,omitempty"`
 	JudgeReasoningEffort string  `json:"judge_reasoning_effort,omitempty" yaml:"judge_reasoning_effort,omitempty"`
-	JudgeMinSamples      int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
-	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
-	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
+	JudgeMinSamples      int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`
+	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`
+	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"`
 }
     EvolutionConfig 是 git 原生自进化配置（bundle/发布道已退役， 文件即真源+git 版本层+建议式评估）。
 
@@ -549,15 +574,16 @@ type ExtraParam = agent.ExtraParam
 
 type GovernanceConfig struct {
 	Enabled     bool   `json:"enabled" yaml:"enabled"`
-	Enforcement string `json:"enforcement,omitempty" yaml:"enforcement,omitempty"` // warn(默认,记账放行)|strict(拒绝)
-	Dir         string `json:"dir,omitempty" yaml:"dir,omitempty"`                 // budget/approval 持久化目录(空=纯内存)
+	Enforcement string `json:"enforcement,omitempty" yaml:"enforcement,omitempty"`
+	// Dir 是 budget 与 approval 记录的持久化目录；空 = 纯内存（进程重启即失）。
+	Dir string `json:"dir,omitempty" yaml:"dir,omitempty"`
 
-	BudgetWindowMinutes int `json:"budget_window_minutes,omitempty" yaml:"budget_window_minutes,omitempty"` // 滑动窗口(默认60)
-	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`                 // 窗口内 high 上限(默认20)
-	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`             // 窗口内 medium 上限(默认200)
+	BudgetWindowMinutes int `json:"budget_window_minutes,omitempty" yaml:"budget_window_minutes,omitempty"`
+	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`
+	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`
 
-	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"` // 须挂 goal 的 trigger source(默认空=不启用 goal 门;待 goal_declare 工具交付后再配,见 gate.go A7)
-
+	// GoalRequiredFor 列出必须挂 active goal 才允许执行的 trigger source；空 = 不启用该门。
+	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"`
 }
     GovernanceConfig 是 T-G 治理子系统的配置（映射到 governance.GateConfig + 各管理器）。
 
@@ -801,7 +827,8 @@ type ProviderConfig struct {
 	// Most domestic models (GLM, DeepSeek, Moonshot, etc.) use OpenAI-compatible protocol,
 	// so this field should be "openai" with different api_endpoint to distinguish providers.
 	// Defaults to the provider registry key name if not specified.
-	// e.g., "openai" for OpenAI-compatible APIs (OpenAI/ZhiPu/DeepSeek/Moonshot/Baichuan/Qwen),
+	// e.g., "openai" for OpenAI-compatible APIs (OpenAI, ZhiPu, DeepSeek, Moonshot,
+	//       Baichuan, Qwen, Tencent TokenHub),
 	//       "anthropic" for Anthropic Claude,
 	//       "gemini" for Google Gemini.
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
@@ -953,12 +980,15 @@ type ToolRef struct {
 	//   - trpc Go options: communication details (A2A protocol, TransferStateKey) — internal
 	Remote *RemoteConfig `json:"remote,omitempty" yaml:"remote,omitempty"`
 
-	// Extension: custom factory path (for non-builtin tools/agents)
+	// Factory is the custom factory path for non-builtin tools and agents.
 	Factory string `json:"factory,omitempty" yaml:"factory,omitempty"`
 }
     ToolRef declares a tool that an agent uses. For agent-kind tools,
     the AgentID field references another AgentConfig in the Agents map.
     For tool-kind tools, the ID field identifies the plain tool factory.
+    It declares only the reference relationship: an agent's runtime parameters
+    (max_tool_iterations, max_tokens, temperature) live on its own AgentConfig
+    entry.
 
 type ToolRegistry struct{}
     ToolRegistry is a facade over the agent package's global tool registration

@@ -79,7 +79,7 @@ type ActionArgs struct {
 	// Name: deterministic logical name for the session
 	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
 	// later calls (restart/exists checks); duplicate spawn under the same
-	// name is refused. Empty = auto-generated unique name (legacy).
+	// name is refused. Empty = an auto-generated unique name.
 	Name string `json:"name,omitempty"`
 	// Op Session-operations. When Op != "" the call addresses an
 	// existing session instead of spawning a new one:
@@ -303,7 +303,7 @@ type ResidentMeta struct {
 	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
 	// long-running session re-adopted across restarts is not an orphan no
-	// matter how old it is. Empty → fall back to SpawnedAt (legacy meta).
+	// matter how old it is. Empty → fall back to SpawnedAt (metadata without an adoption timestamp).
 	LastAdoptedAt string            `json:"last_adopted_at,omitempty"`
 	Command       string            `json:"command,omitempty"`
 	TaskID        string            `json:"task_id,omitempty"`
@@ -315,41 +315,44 @@ type ResidentMeta struct {
     （真相源在 task_spawned 事件，meta 侧预留零值兼容）。旧记录缺新字段：零值容错。
 
 type SessionMode string
-    SessionMode classifies how a session's liveness should be interpreted by the
-    monitor and the settle stream.
-
-        ModeOneshot (default) command semantics: settle on exit; a
-
-    60s-quiet alive session reports Stable (never Completed — see
-    detectSessionState), and quiet_timeout (if set) is a hard kill deadline.
-
-        ModeResident long-lived services (dev servers, tunnels, training):
-
-    silence is HEALTHY — no stable settle, no fake-dead kill, no auto-reap.
-    Only unexpected death (Completed/Error) settles. Pair with watch/probe to
-    hear from it.
-
-        ModeInteractive long-running conversational sessions (REPL, coding
-
-    agents): stable settle + resume/send-keys semantics, heartbeat-based
-    fake-dead detection (unchanged legacy).
+    SessionMode classifies how a session's liveness is interpreted by the
+    monitor and the settle stream. Each mode's semantics are documented on its
+    constant.
 
 const (
-	ModeOneshot     SessionMode = "oneshot"
-	ModeResident    SessionMode = "resident"
+	// ModeOneshot is the default command semantics: settle on exit; a 60s-quiet alive
+	// session reports Stable (never Completed — see detectSessionState), and quiet_timeout
+	// (if set) is a hard kill deadline.
+	ModeOneshot SessionMode = "oneshot"
+	// ModeResident is for long-lived services (dev servers, tunnels, training): silence
+	// is HEALTHY — no stable settle, no fake-dead kill, no auto-reap. Only unexpected death
+	// (Completed/Error) settles; pair with watch/probe to hear from it.
+	ModeResident SessionMode = "resident"
+	// ModeInteractive is for long-running conversational sessions (REPL, coding agents):
+	// stable settle plus resume/send-keys semantics, with heartbeat-based fake-dead
+	// detection.
 	ModeInteractive SessionMode = "interactive"
 )
 type SessionStatus string
     SessionStatus represents the state of a tmux session
 
 const (
-	SessionRunning   SessionStatus = "running"
-	SessionStable    SessionStatus = "stable"
+	// SessionRunning 进程存活且输出未达稳定阈值的进行中态；探测不可辨且未达连续上限时也保持该态。
+	SessionRunning SessionStatus = "running"
+	// SessionStable 输出已稳定但进程存活、且未显式声明静默超时的判定；不视为死亡，按调度上限继续轮询。
+	SessionStable SessionStatus = "stable"
+	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
 	SessionCompleted SessionStatus = "completed"
-	SessionError     SessionStatus = "error"
-	SessionFakeDead  SessionStatus = "fake_dead"
+	// SessionError 探测器未装配（executor 为 nil）时的终态：随即移出监控。
+	SessionError SessionStatus = "error"
+	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
+	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
+	SessionFakeDead SessionStatus = "fake_dead"
+	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
+	// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 	SessionFakeAlive SessionStatus = "fake_alive"
-	SessionTimedOut  SessionStatus = "timed_out"
+	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
+	SessionTimedOut SessionStatus = "timed_out"
 )
 type TmuxCreateOptions struct {
 	Command       string
@@ -359,7 +362,7 @@ type TmuxCreateOptions struct {
 	Mode SessionMode
 	Env  map[string]string
 	// Name: request a deterministic session name instead of
-	// the generated prefix-timestamp. Empty = auto-generate (legacy). Non-empty
+	// the generated prefix-timestamp. Empty = auto-generated. Non-empty
 	// names must be DNS-label-safe ([a-zA-Z0-9-]{1,64}, enforced in Call) and
 	// are prefixed to avoid colliding with generated names. Use-case: named
 	// resident/interactive services so later calls can address them
@@ -503,9 +506,9 @@ func (tm *TmuxMonitor) Stop()
 
 func (tm *TmuxMonitor) TouchSession(sessionID string) bool
     TouchSession re-enters dense polling for a LIVE session (resume path:
-    a resumed round wants quick settle detection, exactly like a fresh spawn)
-    by resetting the session's age and marking it due. Returns false if the
-    session is no longer monitored (reaped) so the caller can surface the error.
+    a resumed round wants quick settle detection, exactly like a fresh spawn) by
+    resetting the session's age and marking it due. Returns false if the session
+    has already been reaped (not monitored) so the caller can surface the error.
     The per-session callback is NOT touched — the detector is bound to the
     session for its whole lifetime (see TmuxSettleDetector.Rearm).
 

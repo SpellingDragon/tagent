@@ -274,7 +274,7 @@ func (tm *TmuxMonitor) SessionIDs() []string {
 // TouchSession re-enters dense polling for a LIVE session (resume path: a
 // resumed round wants quick settle detection, exactly like a fresh spawn) by
 // resetting the session's age and marking it due. Returns false if the
-// session is no longer monitored (reaped) so the caller can surface the
+// session has already been reaped (not monitored) so the caller can surface the
 // error. The per-session callback is NOT touched — the detector is bound to
 // the session for its whole lifetime (see TmuxSettleDetector.Rearm).
 func (tm *TmuxMonitor) TouchSession(sessionID string) bool {

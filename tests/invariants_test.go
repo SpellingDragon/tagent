@@ -61,6 +61,9 @@ func makeFinalResponse(content string) *model.Response {
 	return makeAssistantResponse(content)
 }
 
+// TestInvariant1_ProjectionOnlyContainsEventReferences 钉住投影条目只能是对事件的引用
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func TestInvariant1_ProjectionOnlyContainsEventReferences(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()
 

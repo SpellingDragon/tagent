@@ -41,9 +41,8 @@ func (m *mockCallableTool) Declaration() *trpctool.Declaration {
 }
 func (m *mockCallableTool) Call(_ context.Context, _ []byte) (any, error) { return nil, nil }
 
-// TestBuildPlainToolRef_InjectRuntimeDependencies verifies that buildPlainToolRef
-// correctly injects MemStore, SkillRepo, MCPToolSets, and ReadPartitionIDs into
-// the PlainToolFactoryConfig passed to the registered factory.
+// TestBuildPlainToolRef_InjectRuntimeDependencies pins what the registry injects into a plain tool factory.
+// - MemStore, SkillRepo, MCPToolSets and ReadPartitionIDs must all reach the PlainToolFactoryConfig handed to the registered factory.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestBuildPlainToolRef_InjectRuntimeDependencies(t *testing.T) {
@@ -85,8 +84,7 @@ func TestBuildPlainToolRef_InjectRuntimeDependencies(t *testing.T) {
 	assert.Equal(t, readPartitionIDs, captured.ReadPartitionIDs)
 }
 
-// TestBuildPlainToolRef_UnregisteredID verifies that buildPlainToolRef returns
-// an error when the plain tool id is not registered.
+// TestBuildPlainToolRef_UnregisteredID verifies that buildPlainToolRef returns an error when the plain tool id is not registered.
 func TestBuildPlainToolRef_UnregisteredID(t *testing.T) {
 	memStore := memory.NewInMemoryStore()
 	rc := &runtimeConfig{}
@@ -102,10 +100,8 @@ func TestBuildPlainToolRef_UnregisteredID(t *testing.T) {
 	assert.Nil(t, callable)
 }
 
-// TestBuildPlainToolRef_ActionToolIsMarked verifies that buildPlainToolRef returns
-// isAction=true when the factory produces an *action.ActionTool.
+// TestBuildPlainToolRef_ActionToolIsMarked verifies that buildPlainToolRef returns isAction=true when the factory produces an *action.ActionTool.
 func TestBuildPlainToolRef_ActionToolIsMarked(t *testing.T) {
-	// The builtin "exec" factory is registered by RegisterBuiltinTools.
 	require.NoError(t, RegisterBuiltinTools())
 
 	memStore := memory.NewInMemoryStore()
@@ -188,7 +184,6 @@ func TestActionFactory_Properties(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, callable)
 
-			// Verify it is an ActionTool.
 			at, ok := callable.(*action.ActionTool)
 			require.True(t, ok, "factory should return *action.ActionTool")
 			assert.NotNil(t, at)
@@ -201,7 +196,6 @@ func TestActionFactory_ReturnsCallableTool(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, callable)
 
-	// Declaration should be non-nil.
 	decl := callable.Declaration()
 	require.NotNil(t, decl)
 	assert.Equal(t, "action", decl.Name)
@@ -218,11 +212,9 @@ func (m *factoryMockModel) GenerateContent(_ context.Context, _ *model.Request) 
 }
 func (m *factoryMockModel) Info() model.Info { return model.Info{Name: "factory-mock-model"} }
 
-// TestBuildAgent_ProtectsBuiltinAgentNames verifies that all builtin agent names
-// are built via the config-driven path even when a ToolAgentFactory is registered
-// for them.
+// TestBuildAgent_ProtectsBuiltinAgentNames pins that a registered factory cannot take over a builtin agent name.
+// - Builtin names must still be built through the config-driven path even when a ToolAgentFactory is registered for them.
 func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
-	// Register a factory that would produce an agent named "factory-built".
 	factoryRegistered := false
 	agent.RegisterToolAgent("*", func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
 		factoryRegistered = true
@@ -260,15 +252,12 @@ func TestBuildAgent_ProtectsBuiltinAgentNames(t *testing.T) {
 	}
 }
 
-// TestBuildAgent_AllowsCustomAgentFactory verifies that non-builtin agent names
-// can still be built via a registered ToolAgentFactory — and that the factory's
-// chosen identity survives: the migrated (round-91) contract delivers a
-// DECLARATION whose Name the org respects verbatim, exactly as the old contract
-// used to use the returned instance verbatim.
+// TestBuildAgent_AllowsCustomAgentFactory pins that a non-builtin name may still be built by a registered ToolAgentFactory.
+// - What a factory does now: describe the agent; the org constructs it.
+// - The chosen identity must survive: the org respects the DECLARATION Name verbatim.
 func TestBuildAgent_AllowsCustomAgentFactory(t *testing.T) {
 	customName := "custom_agent"
 	agent.RegisterToolAgent(customName, func(cfg agent.ToolAgentFactoryConfig) (*agent.TagentConfig, error) {
-		// What a factory does now: describe the agent; the org constructs it.
 		return &agent.TagentConfig{
 			Name:         "factory-built",
 			Model:        cfg.Model,

@@ -3,12 +3,10 @@
   "_regenerate": "bash scripts/lint.sh --update-baseline",
   "dirs": [".","examples/wechat-bot"],
   "counts": {
-    "audit-marker": 43,
-    "doc-not-name-prefixed": 19,
-    "free-standing": 313,
-    "missing-symbol-doc": 10,
-    "missing-test-responsibility": 27,
-    "test-doc-not-one-sentence": 108,
-    "unindexed-path-ref": 2
+    "audit-marker": 9,
+    "doc-not-name-prefixed": 16,
+    "free-standing": 17,
+    "missing-test-responsibility": 23,
+    "test-doc-not-one-sentence": 61
   }
 }

@@ -150,9 +150,6 @@ func clearComments(file *ast.File) {
 	file.Comments = keep
 	file.Doc = nil
 	ast.Inspect(file, func(n ast.Node) bool {
-		// Trailing comments live in their own slot (`Comment`, not `Doc`): a note on a
-		// struct field or a const must be stripped as thoroughly as a leading one, or
-		// editing it would read as a code change.
 		switch v := n.(type) {
 		case *ast.GenDecl:
 			v.Doc = nil
@@ -189,15 +186,19 @@ func runStrip(path string) error {
 
 // decl is one JSON line produced by the decls subcommand.
 type decl struct {
-	File     string `json:"file"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Test     bool   `json:"test"`
-	Hash     string `json:"hash"`
+	File string `json:"file"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Test bool   `json:"test"`
+	Hash string `json:"hash"`
+	// raw is the comment-free rendering, kept so the head side can normalize declared
+	// renames before hashing.
 	raw      string
-	Asserts  int    `json:"asserts"`
-	Parallel int    `json:"parallel"`
-	norm     string // comment-free, qualifier-blinded, rename-normalized text
+	Asserts  int `json:"asserts"`
+	Parallel int `json:"parallel"`
+	// norm is raw after qualifier blinding and declared-rename normalization; the body
+	// hash is taken over it.
+	norm string
 }
 
 func runDecls(path string) ([]decl, error) {

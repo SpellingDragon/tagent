@@ -716,7 +716,7 @@ type ActionArgs struct {
 	// Name: deterministic logical name for the session
 	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
 	// later calls (restart/exists checks); duplicate spawn under the same
-	// name is refused. Empty = auto-generated unique name (legacy).
+	// name is refused. Empty = an auto-generated unique name.
 	Name string `json:"name,omitempty"`
 	// Op Session-operations. When Op != "" the call addresses an
 	// existing session instead of spawning a new one:
@@ -749,7 +749,7 @@ type ActionArgs struct {
 }
 
 // validSessionName validates a caller-supplied logical session name.
-// Empty is legal (legacy auto-naming). Returns nil when valid.
+// Empty is legal (auto-naming). Returns nil when valid.
 func validSessionName(name string) error {
 	if name == "" {
 		return nil

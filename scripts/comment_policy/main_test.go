@@ -31,15 +31,13 @@ func rulesIn(t *testing.T, path string) map[string]int {
 	return counts
 }
 
-// TestCleanFixtureIsNotFlagged guards the false-positive side: a compliant file
-// must produce nothing, otherwise batches will drown in exemptions.
+// TestCleanFixtureIsNotFlagged guards the false-positive side: a compliant file must produce nothing, otherwise batches will drown in exemptions.
 func TestCleanFixtureIsNotFlagged(t *testing.T) {
 	chdirToRepoRoot(t)
 	require.Empty(t, rulesIn(t, "scripts/comment_policy/testdata/clean.go"))
 }
 
-// TestEachRuleFires proves every documented rule actually catches its planted
-// case, so a passing gate means compliance rather than a broken matcher.
+// TestEachRuleFires proves every documented rule actually catches its planted case, so a passing gate means compliance rather than a broken matcher.
 func TestEachRuleFires(t *testing.T) {
 	chdirToRepoRoot(t)
 	got := rulesIn(t, "scripts/comment_policy/testdata/violations.go")
@@ -51,8 +49,7 @@ func TestEachRuleFires(t *testing.T) {
 	}
 }
 
-// TestIndexRulesAcceptLiveTargetAndRejectDeadOrProcessPaths pins both directions
-// of the documentation-index rule.
+// TestIndexRulesAcceptLiveTargetAndRejectDeadOrProcessPaths pins both directions of the documentation-index rule.
 func TestIndexRulesAcceptLiveTargetAndRejectDeadOrProcessPaths(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -95,8 +92,7 @@ func TestIndexRulesAcceptLiveTargetAndRejectDeadOrProcessPaths(t *testing.T) {
 	}
 }
 
-// TestTestFileMustDeclareResponsibility pins the layout rule a consolidation batch
-// relies on: a test file names the production responsibility it covers.
+// TestTestFileMustDeclareResponsibility pins the layout rule a consolidation batch relies on: a test file names the production responsibility it covers.
 func TestTestFileMustDeclareResponsibility(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -109,9 +105,8 @@ func TestTestFileMustDeclareResponsibility(t *testing.T) {
 	require.Equal(t, 0, rulesIn(t, indexed)["missing-test-responsibility"])
 }
 
-// TestRatchetBlocksIncreasesAndAllowsKnownCounts pins the direction of the gate:
-// an increase is always a failure, a known level passes, and a decrease is reported
-// so the baseline can be lowered rather than silently drifting.
+// TestRatchetBlocksIncreasesAndAllowsKnownCounts pins the direction of the ratchet.
+// - An increase is always a failure, a known level passes, and a decrease is reported so the baseline can be lowered rather than silently drifting.
 func TestRatchetBlocksIncreasesAndAllowsKnownCounts(t *testing.T) {
 	base := map[string]int{"free-standing": 2}
 
@@ -131,8 +126,7 @@ func TestRatchetBlocksIncreasesAndAllowsKnownCounts(t *testing.T) {
 	require.Equal(t, 1, reg, "an unrecorded rule must count from zero")
 }
 
-// TestBaselineRoundTrip guards the hand-rolled writer: unreadable JSON would turn
-// every CI run into a hard error or, worse, an empty baseline.
+// TestBaselineRoundTrip guards the hand-rolled writer: unreadable JSON would turn every CI run into a hard error or, worse, an empty baseline.
 func TestBaselineRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
 	counts := map[string]int{
@@ -185,21 +179,18 @@ func countRule(fs2 []finding, rule string) int {
 	return n
 }
 
+// TestDocPathRefIgnoresRuntimeAssetNames pins the boundary of the path-reference rule: a prompt asset file named in prose is data, not a citation.
+// - Only path-shaped documentation references must use the index form; runtime asset names inside a sentence stay free.
 func TestDocPathRefIgnoresRuntimeAssetNames(t *testing.T) {
-	// A prompt asset file named in prose (recall_agent.md) is data, not a
-	// documentation citation; only path-shaped documentation references need the
-	// index form.
 	require.False(t, docPathRef.MatchString(`// Prompt loading: overrides PromptDir + "recall_agent.md" if set`),
 		"runtime asset names must not be treated as doc citations")
 	require.True(t, docPathRef.MatchString(`// see docs/wiki/tool/tool-architecture.md for details`),
 		"path-shaped documentation references must still be caught")
 }
 
-// TestDeclaredNameIsNotItselfResidue pins the precision of the content rules: a
-// declared identifier may legitimately contain a residue word (…Legacy…), and
-// quoting that name at the head of its own doc comment must not be reported.
-// Residue in the prose next to it still is — the rule is about narration, not
-// about which characters appear inside a Go identifier.
+// TestDeclaredNameIsNotItselfResidue pins the precision of the content rules: a declared identifier may legitimately contain a residue word.
+// - Quoting that identifier at the head of its own doc comment must not be reported.
+// - Residue narration in the prose around it still is: the rule targets narration, not which characters appear inside a Go identifier.
 func TestDeclaredNameIsNotItselfResidue(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -221,9 +212,8 @@ func TestDeclaredNameIsNotItselfResidue(t *testing.T) {
 		"residue in prose must still be reported")
 }
 
-// TestUsedToRequiresWordBoundaries pins that residue words match as whole words, not
-// as substrings: "refused to adopt" and "still-used tool closers" contain "used to" by
-// accident and must not be reported, while an unambiguous residue word still is.
+// TestUsedToRequiresWordBoundaries pins that residue words match as whole words, not as substrings.
+// - "refused to adopt" and "still-used tool closers" contain the phrase by accident and must not be reported, while an unambiguous residue word still is.
 func TestUsedToRequiresWordBoundaries(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -245,10 +235,9 @@ func TestUsedToRequiresWordBoundaries(t *testing.T) {
 		"an unambiguous residue word must still be reported")
 }
 
-// TestUsedToIsNotAResidueWord pins the D-22 decision: "used to" cannot be
-// distinguished lexically from the purpose clause "used to pass/render" (= 用于),
-// so it no longer marks change residue. Unambiguous words still do, and English
-// alternatives must match as whole words, not as substrings of other words.
+// TestUsedToIsNotAResidueWord pins that the phrase "used to" is not a residue marker.
+// - It cannot be distinguished lexically from the purpose clause "used to pass/render"（用于）, so matching it would report compliance prose.
+// - Unambiguous residue words still match, and English alternatives must match as whole words rather than as substrings.
 func TestUsedToIsNotAResidueWord(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -271,9 +260,8 @@ func TestUsedToIsNotAResidueWord(t *testing.T) {
 		"`previously` is unambiguous and must still be reported")
 }
 
-// TestAuditMarkerReportsMatchedToken pins that the finding names the residue word it
-// matched. Without it, an operator facing dozens of findings must open every comment
-// group by hand to find which word tripped the rule.
+// TestAuditMarkerReportsMatchedToken pins that the finding names the residue word it matched.
+// - Without the token, an operator facing dozens of findings must open every comment group by hand to find which word tripped the rule.
 func TestAuditMarkerReportsMatchedToken(t *testing.T) {
 	chdirToRepoRoot(t)
 	dir := t.TempDir()
@@ -313,10 +301,9 @@ func scanSource(t *testing.T, name, src string) []finding {
 	return fs
 }
 
+// TestDocMustStartWithDeclaredName pins that a doc comment starts with the identifier it documents.
+// - A mechanically moved trailing comment above a struct field satisfies the slot rule but not this one, so the scanner must catch it.
 func TestDocMustStartWithDeclaredName(t *testing.T) {
-	// Spec: a doc comment SHALL start with the identifier it documents. A
-	// mechanically moved trailing comment ("// count of things" above field n)
-	// satisfies the slot rule but not this one, so the scanner must catch it.
 	src := "package p\n\nvar X int\n\ntype T struct {\n\t// count of things\n\tn int\n}\n\n// Foo does the thing.\nfunc Foo() {}\n"
 	fs := scanSource(t, "a.go", src)
 	require.Contains(t, ruleHits(fs, "doc-not-name-prefixed"), "n",
@@ -325,9 +312,9 @@ func TestDocMustStartWithDeclaredName(t *testing.T) {
 		"a name-prefixed function doc must pass")
 }
 
+// TestTestFileDocIsOneIntentLinePlusIndex pins that a test doc slot holds exactly one intent line plus the index.
+// - Argument and pitfall narration belongs in assertion messages or in the wiki, not in the doc slot.
 func TestTestFileDocIsOneIntentLinePlusIndex(t *testing.T) {
-	// Spec: a test doc slot holds exactly one intent line plus the index; the
-	// argument and pitfall narration belong in assertion messages or in wiki.
 	ok := "package p\n\nimport \"testing\"\n\n// TestX 验证契约甲。\n//\n// 契约: docs/wiki/a.md\nfunc TestX(t *testing.T) {}\n"
 	bad := "package p\n\nimport \"testing\"\n\n// TestX 验证契约甲：\n// 没有这条就会形同虚设，因为某机制如何如何。\n//\n// 契约: docs/wiki/a.md\nfunc TestX(t *testing.T) {}\n"
 	require.Empty(t, ruleHits(scanSource(t, "ok_test.go", ok), "test-doc-not-one-sentence"))
@@ -335,9 +322,9 @@ func TestTestFileDocIsOneIntentLinePlusIndex(t *testing.T) {
 		"a multi-line test doc must be flagged")
 }
 
+// TestTestDocAllowsWrappedBulletList pins that the intent line may wrap as a bullet list of parallel points.
+// - Only prose continuation is a shape violation, and index lines never count toward the shape.
 func TestTestDocAllowsWrappedBulletList(t *testing.T) {
-	// Norm D-26: the intent line may wrap as a bullet list of parallel points;
-	// only prose continuation is a shape violation. Index lines never count.
 	src := "package p\n\nimport \"testing\"\n\n// TestX 钉住 契约甲。\n// 契约: docs/wiki/a.md#x\n// - 要点一\n// - 要点二\nfunc TestX(t *testing.T) {}\n"
 	require.Empty(t, ruleHits(scanSource(t, "a_test.go", src), "test-doc-not-one-sentence"),
 		"a wrapped bullet list must be an acceptable multi-line test doc shape")
@@ -362,9 +349,9 @@ func TestTestDocIndexLineIsExemptFromLengthCap(t *testing.T) {
 		"index lines carry paths and are exempt from the length cap")
 }
 
+// TestExternalCoordReferenceIsFlagged pins that a comment must not cite a change name or a planning coordinate.
+// - Those references only make sense inside a change artifact, where the plan they point at actually lives.
 func TestExternalCoordReferenceIsFlagged(t *testing.T) {
-	// D-28 merged with D-25: a comment MUST NOT cite a change name or a planning
-	// coordinate — those only make sense inside a change artifact.
 	for _, src := range []string{
 		"package p\n\n// Foo 钉住 design line 169 的判定。\nfunc Foo() {}\n",
 		"package p\n\n// Foo 见 restrict-comments-to-godoc-and-index 的处理。\nfunc Foo() {}\n",

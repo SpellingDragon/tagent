@@ -9,12 +9,11 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== 巩固容量触发 ====================
-//
-// ConsolidationHintTracker 消费 engineBridge 的写入旁路计数（CapacityHookProvider）：
+// ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。
+// 消费 engineBridge 的写入旁路计数（CapacityHookProvider）：
 // 每分区的**边界事件**（external_input / agent_output，即任务回合的意图与产出）计数
 // 超过 capacity_threshold 时，经 onHint 发一条 consolidation_hint 渗透消息——建议式，
-// 执行权仍在 LLM + memory_consolidate 工具（D2 核心主张）。snooze 窗内不重复打扰
+// 执行权仍在 LLM + memory_consolidate 工具。snooze 窗内不重复打扰
 // （内存态；重启后重新积累——最多多提示一次，可接受）。
 //
 // 不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示，
@@ -25,18 +24,18 @@ import (
 // TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；锁定淘汰读绝对）。
 // repaired/already 重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过
 // capacityHook（见 engine_bridge_idempotency_test.go）。
-
-// ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。
 type ConsolidationHintTracker struct {
 	threshold int
 	snooze    time.Duration
 
-	mu       sync.Mutex
-	counts   map[int]int
-	recent   map[int][]int64 // per-partition 最近边界事件 key（环形，容量=threshold；4.3 候选清单）
+	mu     sync.Mutex
+	counts map[int]int
+	// recent 保存每分区最近的边界事件 key（环形，容量 threshold），供冥想 digest 取候选清单。
+	recent   map[int][]int64
 	lastHint map[int]time.Time
 	onHint   func(partitionID, count int)
-	now      func() time.Time // 可注入（测试）
+	// now 为时钟源，测试可注入。
+	now func() time.Time
 }
 
 // NewConsolidationHintTracker 构造触发器。threshold<=0 返回 nil（关闭，零行为变化）。
@@ -67,17 +66,20 @@ func (t *ConsolidationHintTracker) SetOnHint(fn func(partitionID, count int)) {
 
 // Track 是写入旁路计数入口（engineBridge capacityHook 签名）。仅边界事件计数；
 // 非阻塞、永不失败（旁路产物）。
+// Within the snooze window the count is kept, so the next boundary event after the
+// window expires hints again. While onHint is unset (the assembly window between
+// construction and SetOnHint) nothing is reset and no snooze is recorded: the count
+// survives, and the first boundary event after wiring emits the delayed hint. On a
+// hint, counts and recent reset together so the candidate list stays aligned.
 func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventType string) {
 	if t == nil {
 		return
 	}
-	// 边界事件 = 任务回合的意图与产出（与压缩段模型同源语义）。
 	if eventType != tagentevent.TypeExternalInput && eventType != tagentevent.TypeAgentOutput {
 		return
 	}
 	t.mu.Lock()
 	t.counts[partitionID]++
-	// 4.3：记录最近边界事件 key（环形，容量=threshold）供冥想 digest 候选清单。
 	if eventKey > 0 {
 		keys := append(t.recent[partitionID], eventKey)
 		if len(keys) > t.threshold {
@@ -92,17 +94,14 @@ func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventT
 	}
 	now := t.now()
 	if last, ok := t.lastHint[partitionID]; ok && t.snooze > 0 && now.Sub(last) < t.snooze {
-		t.mu.Unlock() // snooze 窗内：不打扰（计数保留，窗过期后的下一次边界事件再提示）
+		t.mu.Unlock()
 		return
 	}
-	// sink 未就绪（SetOnHint 晚于 agent 构造的装配窗口）时**不清零不记 snooze**
-	// ——保留计数，sink 接线后的下一条边界事件即触发（提示延迟不丢）。
 	fn := t.onHint
 	if fn == nil {
 		t.mu.Unlock()
 		return
 	}
-	// 触发：清零重新积累（counts 与 recent 同步——候选清单口径一致）+ 记 hint 时刻。
 	t.counts[partitionID] = 0
 	t.recent[partitionID] = nil
 	t.lastHint[partitionID] = now

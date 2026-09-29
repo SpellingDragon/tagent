@@ -51,7 +51,7 @@ func TestResolveAgentModel_NoModelField_UsesParent(t *testing.T) {
 	cfg := Config{
 		Provider: "openai",
 		Agents: map[string]AgentConfig{
-			"recall": {}, // no Model field
+			"recall": {},
 		},
 	}
 
@@ -59,8 +59,9 @@ func TestResolveAgentModel_NoModelField_UsesParent(t *testing.T) {
 	assert.Equal(t, "parent", got.Info().Name)
 }
 
+// TestResolveAgentModel_ResolvesFromProvider 验证 agent 只给出 provider 名时，按注册表解析出模型实例。
+// - 模型构造要求 API key 非空（即便本次不发请求），故用假 key 占位。
 func TestResolveAgentModel_ResolvesFromProvider(t *testing.T) {
-	// Set a dummy API key so the provider can create a model.
 	os.Setenv("TEST_API_KEY", "test-key-123")
 	defer os.Unsetenv("TEST_API_KEY")
 
@@ -87,6 +88,8 @@ func TestResolveAgentModel_ResolvesFromProvider(t *testing.T) {
 	assert.NotEqual(t, "parent", got.Info().Name)
 }
 
+// TestResolveAgentModel_CachesResolvedModels 验证解析结果按模型复用，同名模型不会构造出多个实例。
+// - 两个 agent 故意共用同一 model 名；去掉这份重复会让本测失去意义。
 func TestResolveAgentModel_CachesResolvedModels(t *testing.T) {
 	os.Setenv("TEST_API_KEY", "test-key-456")
 	defer os.Unsetenv("TEST_API_KEY")
@@ -105,7 +108,7 @@ func TestResolveAgentModel_CachesResolvedModels(t *testing.T) {
 		},
 		Agents: map[string]AgentConfig{
 			"knowledge": {Model: "gpt-4"},
-			"recall":    {Model: "gpt-4"}, // same model → should reuse cached instance
+			"recall":    {Model: "gpt-4"},
 		},
 	}
 
@@ -126,7 +129,7 @@ func TestResolveAgentModel_AgentProviderOverridesGlobal(t *testing.T) {
 	}
 
 	cfg := Config{
-		Provider: "openai", // global default
+		Provider: "openai",
 		Providers: map[string]ProviderConfig{
 			"openai": {
 				APIEndpoint: "https://api-a.example.com/v1",
@@ -140,14 +143,13 @@ func TestResolveAgentModel_AgentProviderOverridesGlobal(t *testing.T) {
 		Agents: map[string]AgentConfig{
 			"knowledge": {
 				Model:    "claude-3",
-				Provider: "anthropic", // override global provider
+				Provider: "anthropic",
 			},
 		},
 	}
 
 	got := rc.resolveAgentModel("knowledge", cfg.Agents["knowledge"], cfg)
 	require.NotNil(t, got)
-	// Should use anthropic provider, not openai.
 	assert.NotEqual(t, "parent", got.Info().Name)
 }
 
@@ -164,13 +166,8 @@ func TestResolveAgentModel_FallsBackOnProviderError(t *testing.T) {
 	}
 
 	got := rc.resolveAgentModel("knowledge", cfg.Agents["knowledge"], cfg)
-	// Should fall back to parent model on error.
 	assert.Equal(t, "parent", got.Info().Name)
 }
-
-// ============================================================================
-// Config Provider fields tests
-// ============================================================================
 
 func TestConfig_ApplyDefaults_SetsProvider(t *testing.T) {
 	cfg := Config{
@@ -210,7 +207,7 @@ entry: tagent
 	assert.Equal(t, "https://api.anthropic.com", cfg.Providers["anthropic"].APIEndpoint)
 	assert.Equal(t, "ANTHROPIC_API_KEY", cfg.Providers["anthropic"].APIKeyEnv)
 	assert.Equal(t, "anthropic", cfg.Agents["tagent"].Provider)
-	assert.Equal(t, "", cfg.Agents["knowledge"].Provider) // falls back to global
+	assert.Equal(t, "", cfg.Agents["knowledge"].Provider)
 }
 
 // TestTencentProvider_Hy3Model verifies that the tencent provider (OpenAI-compatible) can call the hy3 model.
@@ -224,7 +221,7 @@ func TestTencentProvider_Hy3Model(t *testing.T) {
 		Provider: "tencent",
 		Providers: map[string]ProviderConfig{
 			"tencent": {
-				Provider:    "openai", // tencent uses OpenAI-compatible protocol
+				Provider:    "openai",
 				APIEndpoint: "https://tokenhub.tencentmaas.com/v1",
 				APIKeyEnv:   "TENCENT_API_KEY",
 			},
@@ -242,7 +239,6 @@ func TestTencentProvider_Hy3Model(t *testing.T) {
 	resolvedModel := rc.resolveAgentModel("test", cfg.Agents["test"], cfg)
 	require.NotNil(t, resolvedModel, "model should be resolved")
 
-	// Test actual model call
 	ctx := context.Background()
 	req := &model.Request{
 		Messages: []model.Message{
@@ -297,26 +293,21 @@ entry: tagent
 	require.NoError(t, err)
 	cfg.ApplyDefaults()
 
-	// Verify provider field parsing
 	assert.Equal(t, "zhipu", cfg.Provider)
 	assert.Len(t, cfg.Providers, 3)
 
-	// Verify zhipu provider (OpenAI-compatible)
 	assert.Equal(t, "openai", cfg.Providers["zhipu"].Provider)
 	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", cfg.Providers["zhipu"].APIEndpoint)
 	assert.Equal(t, "ZAI_API_KEY", cfg.Providers["zhipu"].APIKeyEnv)
 
-	// Verify deepseek provider (OpenAI-compatible)
 	assert.Equal(t, "openai", cfg.Providers["deepseek"].Provider)
 	assert.Equal(t, "https://api.deepseek.com/v1", cfg.Providers["deepseek"].APIEndpoint)
 	assert.Equal(t, "DEEPSEEK_API_KEY", cfg.Providers["deepseek"].APIKeyEnv)
 
-	// Verify anthropic provider (native protocol)
 	assert.Equal(t, "anthropic", cfg.Providers["anthropic"].Provider)
 	assert.Equal(t, "https://api.anthropic.com", cfg.Providers["anthropic"].APIEndpoint)
 	assert.Equal(t, "ANTHROPIC_API_KEY", cfg.Providers["anthropic"].APIKeyEnv)
 
-	// Verify agent provider references
 	assert.Equal(t, "zhipu", cfg.Agents["tagent"].Provider)
 	assert.Equal(t, "deepseek", cfg.Agents["knowledge"].Provider)
 	assert.Equal(t, "anthropic", cfg.Agents["action"].Provider)
@@ -348,42 +339,24 @@ entry: tagent
 	require.NoError(t, err)
 	cfg.ApplyDefaults()
 
-	// Entry agent has explicit provider: tencent
 	endpoint, apiKeyEnv, err := cfg.ResolveAgentProvider("tagent")
 	require.NoError(t, err)
 	assert.Equal(t, "https://tokenhub.tencentmaas.com/v1", endpoint)
 	assert.Equal(t, "TENCENT_API_KEY", apiKeyEnv)
 
-	// Agent without explicit provider falls back to global (zhipu)
 	endpoint, apiKeyEnv, err = cfg.ResolveAgentProvider("knowledge")
 	require.NoError(t, err)
 	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", endpoint)
 	assert.Equal(t, "ZAI_API_KEY", apiKeyEnv)
 
-	// Empty agentName resolves the global provider (zhipu)
 	endpoint, apiKeyEnv, err = cfg.ResolveAgentProvider("")
 	require.NoError(t, err)
 	assert.Equal(t, "https://open.bigmodel.cn/api/paas/v4", endpoint)
 	assert.Equal(t, "ZAI_API_KEY", apiKeyEnv)
 
-	// Unknown agent returns error
 	_, _, err = cfg.ResolveAgentProvider("nonexistent")
 	require.Error(t, err)
 }
-
-// 3.8 真实模型契约矩阵（限定预算样本）。
-//
-// 目的：用真实远端 endpoint 验证 tagent 的 ReAct/常驻管线所依赖的模型协议契约是否成立，
-// 而不是仅测 mock。矩阵覆盖：文本生成 / usage 记账 / 流式 / 原生 tool_calls / 工具结果回环 /
-// reasoning_content 透传。
-//
-// 授权门：DEEPSEEK_API_KEY 未设 → 整组 t.Skip（**明确 SKIP，绝不记 PASS**，符合 tasks 3.8 要求）。
-// 预算门：全程仅 3 次真实调用（文本、强制 tool_call、工具结果回环），每次 MaxTokens≤128、prompt 极短；
-// usage/流式/reasoning 三项复用这 3 次调用的观测，不额外计费。
-//
-// 判定纪律：核心契约（非空文本、usage>0、tool_calls 且参数为合法 JSON）用 require 硬断言——
-// 若真实模型不满足即 FAIL，作为真实发现上报，不粉饰。模型特定能力（是否分块流式、是否返回
-// reasoning）按观测记录：不具备只记 SKIP/note，不冒充 PASS，也不误判 FAIL。
 
 // declTool 是仅用于契约矩阵声明的最小 tool.Tool（只满足 Declaration()）。
 type declTool struct{ d trpctool.Declaration }
@@ -400,10 +373,14 @@ type contractObservation struct {
 	complTokens  int
 	toolCalls    []model.ToolCall
 	finishReason string
-	apiErr       string // resp.Error（API 级，非函数级）——诊断 tool_choice 被拒等
+	// apiErr 承载 resp.Error：API 级错误（如 tool_choice 被拒），区别于 GenerateContent 返回的函数级错误（连接/鉴权）。
+	apiErr string
 }
 
 // chatOnce 用真实模型跑一次请求并收集观测。调用方负责预算控制（MaxTokens/prompt 长度）。
+//
+// 内容增量在流式下位于 Delta，非流式或终块位于 Message；部分适配器只在终块 Message 给全
+// 文本，故两处都取且以较长者为准。tool_calls 与 reasoning 同样双取。
 func chatOnce(t *testing.T, m model.Model, req *model.Request) (*contractObservation, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -440,10 +417,8 @@ func chatOnce(t *testing.T, m model.Model, req *model.Request) (*contractObserva
 		if c.FinishReason != nil && *c.FinishReason != "" {
 			obs.finishReason = *c.FinishReason
 		}
-		// 流式下增量在 Delta，非流式/终块在 Message；两处都取以免漏。
 		obs.content += c.Delta.Content
 		if c.Message.Content != "" && !resp.IsPartial {
-			// 某些适配器把完整文本放在终块 Message 而非 Delta。
 			if c.Message.Content != obs.content && len(c.Message.Content) > len(obs.content) {
 				obs.content = c.Message.Content
 			}
@@ -477,7 +452,7 @@ func newDeepSeekModel(t *testing.T) model.Model {
 		Provider: "deepseek",
 		Providers: map[string]ProviderConfig{
 			"deepseek": {
-				Provider:    "openai", // DeepSeek 走 OpenAI 兼容协议
+				Provider:    "openai",
 				APIEndpoint: "https://api.deepseek.com/v1",
 				APIKeyEnv:   "DEEPSEEK_API_KEY",
 			},
@@ -494,11 +469,16 @@ func newDeepSeekModel(t *testing.T) model.Model {
 	return m
 }
 
+// TestModelContractMatrix_DeepSeek 用真实远端 endpoint 验证 ReAct 与常驻管线所依赖的模型协议契约，六个观测面各对应一个同名子测。
+// - 授权门：DEEPSEEK_API_KEY 未设则整组 t.Skip，明确记 SKIP，绝不记 PASS。
+// - 预算门：三次真实调用（文本、强制 tool_call、工具结果回环），每次 MaxTokens≤128、prompt 极短；usage、流式、reasoning 复用第一次调用的观测。
+// - 判定纪律：非空文本、usage>0、tool_calls 参数为合法 JSON 属核心契约，真实模型不满足即 FAIL 并作为发现上报。
+// - 模型特定能力（分块流式、reasoning_content）按观测记录：不具备只记 SKIP/note，既不冒充 PASS 也不误判 FAIL。
+// - 端点参数差异由 apiErr 承接：deepseek-flash 的 thinking 模式不接受强制 tool_choice（实测 400），故请求侧显式关思考并指名工具。
 func TestModelContractMatrix_DeepSeek(t *testing.T) {
 	m := newDeepSeekModel(t)
 	mt := 128
 
-	// ── 调用 1：文本生成 + usage 记账 + 流式 + reasoning（观测复用）────────────
 	obs1, err := chatOnce(t, m, &model.Request{
 		Messages: []model.Message{
 			{Role: model.RoleSystem, Content: "你是简洁的助手，用一句话回答。"},
@@ -535,7 +515,6 @@ func TestModelContractMatrix_DeepSeek(t *testing.T) {
 		t.Logf("reasoning 透传确认：len=%d（且未破坏 content 解析）", len(obs1.reasoning))
 	})
 
-	// ── 调用 2：原生 tool_calls（强制 tool_choice=required 使判定确定化）────────
 	weatherTool := declTool{d: trpctool.Declaration{
 		Name:        "get_weather",
 		Description: "查询指定城市当前天气",
@@ -553,16 +532,12 @@ func TestModelContractMatrix_DeepSeek(t *testing.T) {
 		},
 		GenerationConfig: model.GenerationConfig{MaxTokens: &mt, Temperature: ptrF(0)},
 		Tools:            map[string]trpctool.Tool{"get_weather": weatherTool},
-		// deepseek-flash 默认 thinking 模式**不支持强制 tool_choice**（实测 400：
-		// "Thinking mode does not support this tool_choice"）。故本例显式关思考后指名工具，
-		// 以确定化验证「序列化 tools + 解析 tool_calls」这条 ReAct 硬契约；仍不支持则 apiErr→SKIP。
 		ExtraFields: map[string]any{
 			"thinking":    map[string]any{"type": "disabled"},
 			"tool_choice": "required",
 		},
 	})
 	if err != nil {
-		// 鉴权/连接之外的 400（如不支持 tool_choice）也走此路——诚实记为契约发现。
 		t.Fatalf("tool_calls 请求函数级错误（真实契约发现）: %v", err)
 	}
 
@@ -587,7 +562,6 @@ func TestModelContractMatrix_DeepSeek(t *testing.T) {
 		t.Logf("tool_call: name=%s args=%s", called.Function.Name, string(called.Function.Arguments))
 	})
 
-	// ── 调用 3：工具结果回环（多轮）——把 assistant 的 tool_call + tool 结果送回，应得续答 ──
 	if called.Function.Name == "" {
 		t.Skip("无可用 tool_call，跳过工具结果回环（依赖调用 2 的产物，不凭空构造）")
 	}

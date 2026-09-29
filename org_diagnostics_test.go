@@ -1,3 +1,5 @@
+// 代际诊断的有界可诊断结果，契约分两层：协调器层（status 的一致快照与拷贝
+// 语义）与装配层（拒绝与成功都能经宿主持有的 agent 实例读到，无需重启）。
 package tagent
 
 import (
@@ -14,9 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
-
-// 代际诊断的有界可诊断结果，契约分两层：协调器层（status 的一致快照与拷贝
-// 语义）与装配层（拒绝与成功都能经宿主持有的 agent 实例读到，无需重启）。
 
 // diagYAML renders an org whose entry delegates to `subs`（拓扑由 subs 决定，
 // 便于在同一测里做出“结构变更”与“memory 段变更”两种候选）。
@@ -108,6 +107,7 @@ func TestOrgDiagnostics_FingerprintLabelIsBounded(t *testing.T) {
 // - 载荷有界：字段是约定的固定集合，实时欠账组与关闭态各自成组、不冒充提交记录的原子快照；
 // - 拒绝可具名到被拒的那次候选（报其 desired、不前进序号），成功发布前进序号并清除失败记录；
 // - 逐 agent 回执与引用面就在同一载荷上，无需第二套抓取协议。
+// - 每次写入都把 mtime 显式推进 2s：文件系统时间戳粒度会吞掉快速连续写入，不严格变新则换代不会发生。
 // 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	dir := t.TempDir()
@@ -116,7 +116,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	write := func(content string) {
 		t.Helper()
 		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
-		// Strictly increasing mtime: FS granularity can swallow rapid writes.
 		tick = tick.Add(2 * time.Second)
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
 	}
@@ -144,7 +143,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 		return p
 	}
 
-	// 0) before any check the coordinator has no recorded generation.
 	require.Equal(t, int64(0), payload()["generation"])
 
 	entry.CheckOrgReload()
@@ -279,7 +277,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
 	}
 
-	// Startup: main budget = 4000×0.5 = 2000 (exact), keep 2; sub1 budget = 8000×0.5 = 4000, keep 3.
 	write(hotParamsYAML(2, 4000, 0.5, "1m", 3, 8000, 0.5))
 	cfg, err := LoadConfig(yamlPath)
 	require.NoError(t, err)
@@ -290,9 +287,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.Equal(t, 2000, entry.OrgBudgetLine())
 	require.Equal(t, 4000, residentCacheForTest(entry)["sub1"].OrgBudgetLine())
 
-	// One numeric-only apply. main: keep 2→7, max 4000→9000, thr stays 0.5 (budget 4500,
-	// exact), terminal 1m→5m. sub1: keep 3→5, max 8000→10000, thr 0.5→0.6 (inexact →
-	// validated via the mirrored formula, not a hardcoded number).
 	write(hotParamsYAML(7, 9000, 0.5, "5m", 5, 10000, 0.6))
 	entry.CheckOrgReload()
 
@@ -304,8 +298,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.Equal(t, "applied", byName["main"].Outcome)
 	require.Equal(t, "applied", byName["sub1"].Outcome)
 
-	// === The cross-validation leg: the receipt's REPORTED figures must reproduce the REAL consumer. ===
-	// Entry — threshold stays exact, so both the number and the formula are pinned.
 	require.Equal(t, 9000, byName["main"].MaxTokens)
 	require.InDelta(t, 0.5, byName["main"].ThresholdPct, 1e-9)
 	require.Equal(t, 7, byName["main"].KeepRecentTasks)
@@ -314,8 +306,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.Equal(t, budgetOf(byName["main"].MaxTokens, byName["main"].ThresholdPct), entry.OrgBudgetLine(),
 		"the receipt's own budget figures must reproduce what the compressor actually uses — 不只证明 setter 被调用")
 
-	// Sub-agent — same cross-validation against ITS OWN compressor (threshold 0.6 is
-	// float-inexact, so compare via the mirrored formula rather than a literal).
 	sub := residentCacheForTest(entry)["sub1"]
 	require.Equal(t, 10000, byName["sub1"].MaxTokens)
 	require.InDelta(t, 0.6, byName["sub1"].ThresholdPct, 1e-9)
@@ -326,9 +316,6 @@ func TestReceiptIsBackedByRealConsumers(t *testing.T) {
 	require.NotEqual(t, entry.OrgBudgetLine(), sub.OrgBudgetLine(),
 		"the two agents really did move to distinct values (guards against a shared/global consumer)")
 
-	// The fifth axis (terminal TTL) has no receipt slot by design; the
-	// cross-validation leg still requires it to have really moved at its consumer
-	// on this same apply.
 	require.Equal(t, 5*time.Minute, entry.TaskManager().TerminalTTL(),
 		"task_terminal_ttl reached its real consumer (TaskManager) on this numeric-only apply")
 }
@@ -361,13 +348,9 @@ func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	require.Equal(t, 3, heldKeep)
 	require.Equal(t, 4000, heldBudget)
 
-	// Make the drain window real: hold an in-flight reference on sub1 so the
-	// draining-owner rule keeps its owner resident after it stops being routed
-	// (otherwise it retires immediately).
 	draining := sub.ContextManager().AcquireLease(agent.LeaseSubCall)
 	defer draining.Release()
 
-	// Drop sub1 from the topology while raising main's numerics.
 	write(hotParamsYAMLNoSub(7, 9000, 0.5, "5m"))
 	entry.CheckOrgReload()
 
@@ -380,7 +363,6 @@ func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	require.Equal(t, "draining", byName["sub1"].Outcome, "the unrouted owner reports a deliberate no-op")
 	require.Zero(t, byName["sub1"].MaxTokens, "a draining receipt carries no applied value")
 	require.Zero(t, byName["sub1"].KeepRecentTasks)
-	// Its real consumer must still hold the last effective values, not parsed defaults.
 	require.Equal(t, heldKeep, sub.OrgKeepRecent(), "draining owner keeps its live keepRecent (not defaulted)")
 	require.Equal(t, heldBudget, sub.OrgBudgetLine(), "draining owner keeps its live budget, not defaulted")
 }
@@ -471,8 +453,6 @@ func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 
 	require.Nil(t, residentCacheForTest(entry)["sub2"], "precondition: sub2 has no owner before it is routed")
 
-	// Structural publish: route sub2, giving it numbers distinct from the host on
-	// every axis under test (7×0.75=5 vs host 4000×0.5=2000; TTL 3m vs 9m).
 	writeRoutedConfig(t, yamlPath, routedSub2YAML(true, 7, 7000, 0.75, "3m", "9m"), &tick)
 	entry.CheckOrgReload()
 
@@ -494,8 +474,6 @@ func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 	require.NotEqual(t, entry.OrgBudgetLine(), sub2.OrgBudgetLine(),
 		"两个 agent 确实取到了不同的值（否则共享一个消费者也能通过本断言）")
 
-	// The TTL axis has no receipt slot by design (bounded D9 shape), so it is
-	// proven where it is actually consumed: a task sub2 really spawns.
 	out, err := entry.StartLoop("u", "d53-receipt-consumer")
 	require.NoError(t, err)
 	done := make(chan struct{})
@@ -531,9 +509,6 @@ func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 	require.Equal(t, 3*time.Minute, sub2.TaskManager().DefaultTTL(),
 		"§5.1：热新增 owner 的 TTL 消费者必须解析到它自己的已提交记录（9m 是宿主的，10m 是内置默认）")
 
-	// Non-echo guard: the SAME publish installed leaf too, whose config sets no TTL
-	// at all — so a global setter broadcast could not have produced two different
-	// per-owner values in one round.
 	leaf := residentCacheForTest(entry)["leaf"]
 	require.NotNil(t, leaf)
 	require.Equal(t, 10*time.Minute, leaf.TaskManager().DefaultTTL(),
@@ -541,7 +516,6 @@ func TestHotAddedOwnerReceiptMatchesRealConsumption(t *testing.T) {
 	require.Equal(t, 9*time.Minute, entry.TaskManager().DefaultTTL(), "the host's own value is a third distinct figure")
 	require.Equal(t, budgetOf(7000, 0.75), sub2.OrgBudgetLine())
 
-	// And the live-debt group reports itself as live, not as part of the record.
 	debt := liveDebtOf(t, entry.OrgDiagnostics())
 	require.False(t, debt.CapturedAt.IsZero(), "实时债务组必须自带采集时刻")
 	require.GreaterOrEqual(t, debt.Executors.InFlightTurns, int64(0))
@@ -560,15 +534,11 @@ func TestCloseInitiatedIsDistinguishableFromResourcesExited(t *testing.T) {
 
 	entry := bootForDiagnostics(t, yamlPath)
 
-	// BEFORE anything is outstanding: no close was ever issued, so the tail has
-	// nothing to wait for and the pair reads (false, true).
 	pristine := closeOf(t, entry.OrgDiagnostics())
 	require.False(t, pristine.Initiated, "precondition: nothing has been closed yet")
 	require.Truef(t, pristine.ResourcesExited,
 		"precondition: nothing was ever deferred, so an unclosed owner is trivially not-stuck (got %+v)", pristine)
 
-	// Hold a real reference on the entry's owner: Close must return before the
-	// resources are gone.
 	held := entry.ContextManager().AcquireLease(agent.LeaseBackground)
 	during := closeOf(t, entry.OrgDiagnostics())
 	require.False(t, during.Initiated, "a held reference is not a close")

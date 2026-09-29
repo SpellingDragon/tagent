@@ -105,7 +105,8 @@ func (agent *BaseTAgent) RegisterTool(name string, tool func(inputs []string) st
     appended to SessionProjection by the onEvent callback.
 
 type Event struct {
-	EventType int // 1: input, 2: execute, 3: output
+	// EventType is the kind of event carried by the struct: 1 input, 2 execute, 3 output.
+	EventType int
 	EventData string
 }
     Event is the unit of work on the event bus.

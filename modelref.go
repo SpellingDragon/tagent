@@ -4,9 +4,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// FoldModelRefAliases merges legacy flat knob declarations into their unified
-// ModelRef holders. Explicit ModelRef fields win per-field; legacy values only
-// fill fields the ModelRef leaves unset. (tagent-unify-model-call-config.)
+// FoldModelRefAliases folds each agent's deprecated flat compress.summary_*
+// knobs into its unified ModelRef holders: an explicit ModelRef field wins per
+// field, and a flat knob only fills what the ModelRef leaves unset. Every fold
+// logs a warning naming both configuration keys, so a mixed declaration stays
+// visible in the startup log instead of being silently resolved.
 func (c *Config) FoldModelRefAliases() {
 	for name, ac := range c.Agents {
 		changed := false

@@ -68,10 +68,7 @@ func declTool(name, desc string, props map[string]*tool.Schema, required ...stri
 	}}
 }
 
-// TestContract_CardTicket_ToMemoryRecall ---------------------------------------------------------------------------
-// C2+C4 卡片票据契约：滚动摘要卡片行/归档通知里的 hex key，模型必须能
-// 原样抄给 recall(items)。
-// ---------------------------------------------------------------------------
+// TestContract_CardTicket_ToMemoryRecall 钉住 卡片票据契约：滚动摘要卡片行与归档通知里的 hex key，模型必须能原样抄给 recall(items)。
 //
 // 契约: docs/wiki/platform/evaluation-suites.md#ticket-recall
 func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
@@ -127,11 +124,8 @@ func TestContract_CardTicket_ToMemoryRecall(t *testing.T) {
 	}
 }
 
-// TestContract_TaskSettledTicket_ToMemoryRecall ---------------------------------------------------------------------------
-// C3 settle 票据契约（通知→召回，D1 修订/D7）：
-// task_settled 通知渲染形态带 [evt_KEY|external_input] 前缀票据，需要历史
-// 原文时模型必须能抄 evt key 给统一 recall 工具（get_task_result 已退役）。
-// ---------------------------------------------------------------------------
+// TestContract_TaskSettledTicket_ToMemoryRecall 钉住 settle 票据契约：task_settled 通知带 [evt_KEY|external_input] 前缀票据，需要历史原文时模型必须能抄该 evt key 给统一 recall 工具。
+// - 票据因此是唯一入口：历史原文只能经统一 recall 取回。
 func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
 	kSettle := int64(0x1201bb20000abc)
 	notice := "[evt_" + tagentevent.FormatEventKey(kSettle) + "|external_input] [task settled] ✓ make build (id=a3f8c2d1) completed → 结果: ...build ok 输出..."
@@ -171,10 +165,7 @@ func TestContract_TaskSettledTicket_ToMemoryRecall(t *testing.T) {
 	}
 }
 
-// TestContract_AckTaskID_ToResumeTask ---------------------------------------------------------------------------
-// C7 task id 契约（ACK→重入）：ACK 文案里的 task id，模型必须能抄给
-// resume_task 并附上续跑指令。
-// ---------------------------------------------------------------------------
+// TestContract_AckTaskID_ToResumeTask 钉住 task id 契约：ACK 文案里的 task id，模型必须能抄给 resume_task 并附上续跑指令。
 func TestContract_AckTaskID_ToResumeTask(t *testing.T) {
 	taskID := "5d2e91c4-8b7a-4f3d-a1c6-e9b8d7f6a542"
 	ack := "子 agent \"plan\" 已在后台运行 (task " + taskID + ")；完成后其结果会作为 task_settled 回写。"
@@ -210,10 +201,8 @@ func TestContract_AckTaskID_ToResumeTask(t *testing.T) {
 	}
 }
 
-// TestContract_NoTextualToolCallImitation ---------------------------------------------------------------------------
-// C5 伪调用防线：面对原生 tool-call 多轮历史，模型的文本部分不得出现
-// 文本化调用语法（当初实机两次踩坑：文本调用语法会被模仿成执行不了的伪调用）。
-// ---------------------------------------------------------------------------
+// TestContract_NoTextualToolCallImitation 钉住 伪调用防线：面对原生 tool-call 多轮历史，模型文本部分不得出现文本化调用语法。
+// - 文本调用语法会被模仿成执行不了的伪调用，所以这条是防线而非风格偏好。
 func TestContract_NoTextualToolCallImitation(t *testing.T) {
 	actionTool := declTool("action", "执行 shell 命令。",
 		map[string]*tool.Schema{"command": {Type: "string"}}, "command")
@@ -243,11 +232,8 @@ func TestContract_NoTextualToolCallImitation(t *testing.T) {
 	}
 }
 
-// TestContract_ActionCwdFreshShell ---------------------------------------------------------------------------
-// C8 cwd 契约：action 每次调用都是 workspace 根的全新 shell（cd 不跨调用
-// 保持）。模型面对"上一轮 cd 过子目录"的历史，仍必须按根路径出命令——
-// 实机事故：模型误信 shell 持久，相对路径嵌套导致误删失败后靠绝对路径自救。
-// ---------------------------------------------------------------------------
+// TestContract_ActionCwdFreshShell 钉住 cwd 契约：action 每次调用都是 workspace 根的全新 shell，cd 不跨调用保持。
+// - 模型面对“先前调用里 cd 过子目录”的历史仍必须按根路径出命令：误信 shell 持久会让相对路径嵌套，绝对路径才自救得回。
 func TestContract_ActionCwdFreshShell(t *testing.T) {
 	desc := "执行 shell 命令。每次调用都在【工作区根目录】的全新 shell 中运行,cd 不跨调用保持;子目录操作请单次调用内 `cd sub && …` 链式,或使用相对工作区根的路径。"
 	actionTool := declTool("action", desc,
@@ -285,12 +271,9 @@ func TestContract_ActionCwdFreshShell(t *testing.T) {
 	}
 }
 
-// TestContract_PlanWriteBoundary ---------------------------------------------------------------------------
-// C9 plan 写入边界契约：save_file 沙箱基准=openspec/ 根（工具级硬约束），
-// prompt 明令禁写他处。面对"把分析写进 knowledge_base"的诱导，模型必须
-// 把产出收敛进 openspec 相对路径（不带 openspec/ 前缀、无 ../ 逃逸、
-// 不落他处）——实机事故：plan 越界写 knowledge_base/articles。
-// ---------------------------------------------------------------------------
+// TestContract_PlanWriteBoundary 钉住 plan 写入边界契约：save_file 沙箱基准是 openspec/ 根（工具级硬约束），prompt 明令禁写他处。
+// - 面对“把分析写进 knowledge_base”的诱导，产出必须收敛进 openspec 相对路径：不带 openspec/ 前缀、无 ../ 逃逸、不落他处。
+// - 越界写 knowledge_base/articles 正是这条契约要防的实机失效形态。
 func TestContract_PlanWriteBoundary(t *testing.T) {
 	saveTool := declTool("save_file",
 		"写文件。沙箱基准=openspec/ 根:路径写相对形式(如 changes/<plan>/design.md,不带 openspec/ 前缀);../ 与绝对路径会被拒绝。",
@@ -329,12 +312,8 @@ func TestContract_PlanWriteBoundary(t *testing.T) {
 	}
 }
 
-// TestContract_WaitScenario_NoSleepSpin ---------------------------------------------------------------------------
-// C10 反自旋等待契约：仅剩一个后台任务
-// 在跑、无其他独立事项时，模型必须结束回合（简短回复），不得用 exec 执行
-// sleep/wait 类命令轮询等待——实机事故：模型发明 exec(sleep N) 自旋 6 轮，
-// 每轮携带 ~86K 上下文。守护对象是 ack/看板等待教学文案的行为效果。
-// ---------------------------------------------------------------------------
+// TestContract_WaitScenario_NoSleepSpin 钉住 反自旋等待契约：仅剩一个后台任务在跑且无其他独立事项时，模型必须结束回合，不得用 exec 执行 sleep/wait 类命令轮询等待。
+// - 自旋的代价是每回合都携带完整上下文（实机观测到 6 次、每次约 86K）；守护对象是 ack/看板等待教学文案的行为效果。
 func TestContract_WaitScenario_NoSleepSpin(t *testing.T) {
 	actionTool := declTool("action",
 		"执行 shell 命令（tmux 异步）。",
@@ -368,14 +347,9 @@ func isSleepWait(cmd string) bool {
 	return strings.HasPrefix(c, "sleep") || strings.HasPrefix(c, "wait")
 }
 
-// TestRealLLM_ModelCopiesHexEventKeys answers the live-behavior half of the
-// event_keys question: given a timeline rendered with [evt_HEX|type] prefixes
-// and a tool whose schema asks for hex-string event keys, does a real model
-// actually copy the RIGHT keys into the tool call?
-//
-// (The engineering half — parse/resolve round-trip — is locked by
-// agent/event_keys_contract_test.go; this test covers the model-side seam
-// that no unit test can.)
+// TestRealLLM_ModelCopiesHexEventKeys pins the model-side half of the event-keys contract.
+// - Given a timeline rendered with [evt_HEX|type] prefixes and a schema asking for hex event keys, a real model must copy the RIGHT keys into the call.
+// - The parse/resolve round-trip half is out of scope here: this test exists for the seam no unit test can cover.
 func TestRealLLM_ModelCopiesHexEventKeys(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-LLM test; skipped in -short")
@@ -617,8 +591,7 @@ func (r *recordingMCPCallTool) snapshot() []mcpCallRecord {
 	return append([]mcpCallRecord(nil), r.calls...)
 }
 
-// TestRealLLM_KnowledgeMCPSearchFlow 验证 LLM 层:真实 knowledge_agent.md
-// 驱动下,模型将联网搜索请求正确路由到 mcp_call(server/tool/args 均正确)。
+// TestRealLLM_KnowledgeMCPSearchFlow 验证 LLM 层:真实 knowledge_agent.md 驱动下,模型将联网搜索请求正确路由到 mcp_call(server/tool/args 均正确)。
 func TestRealLLM_KnowledgeMCPSearchFlow(t *testing.T) {
 	reg := newLiveMCPRegistry(t)
 	cfg, err := testutil.LoadConfig()
@@ -729,13 +702,10 @@ func truncStr(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// TestRealLLM_PlanReentry_ClarificationLoop verifies the plan re-entry
-// capability is a CLARIFICATION LOOP, not mere continuation: when the task is
-// underspecified, plan must ASK the caller for the missing information (not
-// fabricate a plan); when the caller supplies it via a resumed round, plan
-// refines using exactly that information. This is the "缺乏信息时向顶层询问、
-// 持续交互完善" behavior — the model-side complement to the white-box wiring
-// test (agent/subagent_resume_test.go).
+// TestRealLLM_PlanReentry_ClarificationLoop pins that plan re-entry is a CLARIFICATION LOOP, not mere continuation.
+// - 任务信息不足时 plan 必须向调用方索取缺失信息，而不是自行编造一份计划。
+// - 调用方在续跑回合补上信息后，plan 必须恰用这些信息完善——即“缺乏信息时向顶层询问、持续交互完善”。
+// - 白盒接线另有独立测覆盖，这里只钉模型侧行为。
 func TestRealLLM_PlanReentry_ClarificationLoop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real-LLM test; skipped in -short")

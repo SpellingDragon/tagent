@@ -29,6 +29,8 @@ import (
 
 // runCommentCheck reports files whose comment-stripped code differs between the
 // two roots, which is the witness that a batch changed documentation only.
+// Layout is not code: dropping a comment can merge an alignment group and change nothing
+// but spacing, so the comparison is over the token stream (see foldLayout).
 func runCommentCheck(args []string) int {
 	fs := flag.NewFlagSet("comment-check", flag.ExitOnError)
 	base := fs.String("base-root", "", "root holding the baseline revision")
@@ -64,8 +66,6 @@ func runCommentCheck(args []string) int {
 			fail++
 			continue
 		}
-		// Layout (padding tabs, line breaks) is not code: dropping a comment can merge an
-		// alignment group and change nothing but spacing, so compare the token stream.
 		if foldLayout(sb) != foldLayout(sh) {
 			fmt.Printf("CODE-CHANGED %s\n", rel)
 			fail++
@@ -88,9 +88,6 @@ func stripText(name, src string) (string, error) {
 	}
 	return printNoComments(fset, file)
 }
-
-// raw keeps the comment-free rendering so the head side can normalize declared
-// renames before hashing.
 
 type mergeViolation struct {
 	Pkg  string `json:"pkg"`
@@ -199,6 +196,10 @@ func sanitize(name string) string {
 }
 
 // diffDecls compares two packages' declaration sets under the rename map.
+// A declared rename must not stop a function from being a test — losing the Test prefix is
+// coverage silently turned into dead code — and assertion counts are monotone like the
+// policy ratchet: they may only grow, so a merge cannot weaken coverage while claiming to
+// be a move.
 func diffDecls(dir string, b, h map[string]decl, renames map[string]string, explained map[string]bool) []mergeViolation {
 	var out []mergeViolation
 	matched := map[string]bool{}
@@ -215,9 +216,6 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 		}
 		matched[name] = true
 		if bd.Test && !hd.Test {
-			// A declared rename must not stop the function from being a test: dropping
-			// the Test/Benchmark prefix turns coverage into dead code that `go test`
-			// still reports as success and the body hash still calls intact.
 			out = append(out, mergeViolation{Pkg: dir, Kind: "test-name-mangled", Name: oldName,
 				Note: fmt.Sprintf("renamed to %q, which is no longer a test function", name)})
 		}
@@ -230,8 +228,6 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 		case bd.Hash != hd.Hash:
 			out = append(out, mergeViolation{Pkg: dir, Kind: "body-changed", Name: oldName, Note: "comment-free body differs"})
 		case hd.Asserts < bd.Asserts:
-			// Monotone like the policy ratchet: assertions may only be added, never
-			// dropped, so a merge cannot quietly weaken coverage while claiming a move.
 			out = append(out, mergeViolation{Pkg: dir, Kind: "assert-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Asserts, hd.Asserts)})
 		case bd.Parallel != hd.Parallel:
 			out = append(out, mergeViolation{Pkg: dir, Kind: "parallel-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Parallel, hd.Parallel)})
@@ -355,6 +351,9 @@ func renameRE(name string) *regexp.Regexp {
 
 // packageDecls collects every top-level declaration from the test files found in
 // root, keyed by declaration name (with file as tie-breaker suffix).
+// Blank identifiers are skipped: they carry no identity, so keying on them would turn a
+// file move into a spurious missing/extra pair. An empty raw never overwrites a real hash,
+// which would silently disable the body check.
 func packageDecls(root, dir string, renames map[string]string) (map[string]decl, error) {
 	fis, err := os.ReadDir(root)
 	if err != nil {
@@ -374,19 +373,10 @@ func packageDecls(root, dir string, renames map[string]string) (map[string]decl,
 		}
 		for _, d := range ds {
 			if d.Name == "_" {
-				// Blank identifiers carry no identity: keying on them would report a
-				// merge as missing/extra helpers purely because the file name moved.
 				continue
 			}
 			if d.raw != "" {
-				// Normalize the baseline rendering before hashing: qualifier prefixes are
-				// blinded (alias choice is per-file in a consolidation batch) and declared
-				// renames are applied. An empty raw never overwrites a real hash — that
-				// would silently disable the body check.
 				d.norm = qualifierBlind(applyRenames(d.raw, renames))
-				// The witness is the token stream, not the layout: a longer replacement
-				// name can reflow a body (one-line becoming three) without changing a
-				// single token, and that must not read as a body change.
 				d.Hash = hashString(foldLayout(d.norm))
 			}
 			key := d.Name
@@ -504,11 +494,12 @@ func hashView(d ast.Decl) ast.Node {
 	return &masked
 }
 
-// runMapLint checks a rename table against the declarations that actually exist in
-// a package's baseline. A rename row whose left-hand side is not a declared name is
-// an alias or a stray entry from another domain: applying it rewrites arbitrary
-// text (including qualifiers) and manufactures violations. This is the guard that
-// would have caught the agent alias rows leaking into the root table.
+// runMapLint checks a rename table against the package's baseline. A row is legitimate
+// when its name is a declaration or merely appears in the baseline text — renaming a local
+// identifier inside a body is equally valid. A name present nowhere is a stray or foreign
+// row, and one equal to an imported package name is an alias: applying either rewrites
+// arbitrary text and manufactures violations. This is the guard that would have caught the
+// agent alias rows leaking into the root table.
 func runMapLint(args []string) int {
 	fs := flag.NewFlagSet("map-lint", flag.ExitOnError)
 	base := fs.String("base-root", "", "root holding the baseline revision")
@@ -531,11 +522,6 @@ func runMapLint(args []string) int {
 		for _, d := range decls {
 			decls_[d.Name] = true
 		}
-		// A row is legitimate when the name is either a declaration or appears in the
-		// baseline text (renaming a local identifier inside a body is equally valid).
-		// It is a stray/foreign row only when it appears nowhere at all, and it is an
-		// alias row when it equals an imported package's name — the shape that leaked
-		// agent-domain alias renames into the root table once.
 		blob, imports := packageText(filepath.Join(*base, dir))
 		var stray, alias []string
 		for old := range renames {
@@ -604,13 +590,6 @@ func packageText(root string) (string, map[string]bool) {
 func wordPresent(blob, name string) bool {
 	return regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(blob)
 }
-
-// --- name-check: iteration numbers must not leak into identifiers -----------
-//
-// The guardrail spec forbids test identifiers that carry batch/round numbering.
-// A bare digit test would fire on domain vocabulary (Int64, L1/L2/L3 tiers,
-// V2 format, MD5, HTTP 401, 30Round soak), so the pattern is anchored to the
-// shapes a batch label actually takes and the vocabulary is whitelisted.
 
 var (
 	// segPattern matches a leading capital-plus-digits label inside a segment.
@@ -701,14 +680,6 @@ func runNameCheck(args []string) int {
 	return code
 }
 
-// --- doc-refs: documentation must not cite files that no longer exist --------
-//
-// Docs cite source files as evidence (the D-8 drift class). When a file is
-// renamed or merged away, the citation silently keeps pointing at nothing, and
-// no comment-level gate can see it. Only path-like citations are checked: a
-// token must be backticked, contain a separator and carry a known extension,
-// so generic names (SKILL.md), placeholders ({pid}:evt) and URLs are not noise.
-
 var (
 	docRefPattern = regexp.MustCompile("`([A-Za-z0-9_./{}*+-]+\\.(?:go|md|sh|json|ya?ml|toml|py))`")
 	docRefSkip    = regexp.MustCompile(`[{}*]|https?://|^\./\$|TODO`)
@@ -721,7 +692,12 @@ var (
 	}
 )
 
-// docDanglingRefs returns path-like citations in doc that resolve to nothing.
+// docDanglingRefs returns path-like citations in doc that resolve to nothing. A renamed or
+// merged-away file leaves a citation pointing at nothing and no comment-level gate can see
+// that, so markdown is scanned for it. Only path-like tokens count (backticked, with a
+// separator and a known extension), and only when the first segment is a top-level dir of
+// this repository — otherwise upstream paths, placeholders and bare filenames (which name a
+// convention rather than one file) would be reported as drift they never were.
 func docDanglingRefs(doc, root string) []string {
 	raw, err := os.ReadFile(doc)
 	if err != nil {
@@ -736,12 +712,8 @@ func docDanglingRefs(doc, root string) []string {
 			continue
 		}
 		if !strings.Contains(tok, "/") {
-			continue // bare filenames are conventions, not citations to one file
+			continue
 		}
-		// Only check citations that claim to live in this repository: the first
-		// segment must be a lowercase top-level dir we actually have. Otherwise
-		// upstream paths (trpc-agent-go/...) and placeholders (PromptDir/...) are
-		// reported as drift when they are simply not ours.
 		head := tok[:strings.Index(tok, "/")]
 		head = strings.TrimPrefix(head, "./")
 		if !knownTopDirs[head] {
@@ -794,14 +766,6 @@ func runDocRefs(args []string) int {
 	}
 	return code
 }
-
-// --- proc-refs: scripts and CI must not cite change artifacts ---------------
-//
-// Long-lived instructions (build scripts, CI jobs) that point at
-// Long-lived instructions (build scripts, CI jobs) that point at a change
-// teach readers to look for truth in process documents. The exemption list is
-// deliberate: the scanners that implement this rule necessarily mention the
-// path pattern, and that is not a citation.
 
 // procRefSkip names the files that *implement* these checks. A definition or a
 // test fixture that spells out the path pattern is not a citation, so the gate

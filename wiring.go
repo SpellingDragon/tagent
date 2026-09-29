@@ -21,14 +21,23 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 )
 
+// resolveAgentModel returns the model instance one agent’s LLM calls use and
+// caches it per provider+model pair. Resolution order: a per-name instance from
+// rc.modelOverrides; otherwise the agent’s own model, looked up under the
+// agent's provider or, when the agent names none, under the global cfg.Provider;
+// otherwise the global default model; and finally the WithModel-injected rc.model.
+//
+// A TrajectoryRecorder, when enabled, wraps every instance it returns,
+// including override hits: the wrapper sits outside the SwappableModel so the
+// recorder observes post-swap traffic, and it is built per buildAgent call, so
+// repeated resolves never stack wrappers on one instance.
+//
+// The global default is resolved through the provider registry, so a yaml-only
+// change to the global provider or model takes effect in a hot-reload rebuild;
+// the injected rc.model is fixed at boot and is returned only when the config
+// names no resolvable global provider. The protocol implementation may differ
+// from the registry key — see ProviderConfig.Provider.
 func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Config) model.Model {
-	// 1. Check overrides (SwappableModel for entry agent, etc.).
-	// 5.2 observation-blinding fix: overrides used to early-return WITHOUT the
-	// TrajectoryRecorder wrapper, leaving entry-agent LLM calls invisible in
-	// the trajectory dump. Wrap here too — OUTSIDE the SwappableModel so the
-	// recorder observes post-swap traffic (recorder(Swappable) order); the
-	// wrapper is created per buildAgent call, so repeated resolves never
-	// stack wrappers on the same instance.
 	if rc.modelOverrides != nil {
 		if m, ok := rc.modelOverrides[name]; ok {
 			if rc.trajectoryRecorder != nil {
@@ -38,13 +47,6 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		}
 	}
 
-	// 2. If agent has no model override, resolve the GLOBAL default model
-	// (cfg.Provider+cfg.Model) through the provider registry — same factory
-	// path as explicit agent models — so yaml-only changes to the global
-	// default take effect in hot-reload rebuilds (the WithModel-injected
-	// instance is frozen at boot). Falls back to the injected rc.model when
-	// the config carries no resolvable global provider (tests/minimal
-	// configs): behavior-preserving.
 	if acfg.Model == "" {
 		if m := rc.resolveGlobalDefaultModel(cfg); m != nil {
 			return m
@@ -52,7 +54,6 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		return rc.model
 	}
 
-	// 3. Resolve provider+model from config
 	providerName := acfg.Provider
 	if providerName == "" {
 		providerName = cfg.Provider
@@ -62,11 +63,9 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		return m
 	}
 
-	// 4. Look up provider connection info and determine protocol implementation
 	var opts []provider.Option
-	protocolName := providerName // default to registry key name
+	protocolName := providerName
 	if pcfg, ok := cfg.Providers[providerName]; ok {
-		// If ProviderConfig specifies a protocol, use it (e.g., "zhipu" -> "openai")
 		if pcfg.Provider != "" {
 			protocolName = pcfg.Provider
 		}
@@ -87,8 +86,6 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 		return rc.model
 	}
 
-	// Wrap with TrajectoryRecorder if enabled, so sub-agent LLM calls
-	// are also recorded for RL training data.
 	if rc.trajectoryRecorder != nil {
 		m = rl.NewTrajectoryRecorderModelWrapper(m, rc.trajectoryRecorder)
 		log.Debugf("[tagent] agent %q: wrapped model %q with TrajectoryRecorder", name, acfg.Model)
@@ -105,10 +102,12 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 // resolveGlobalDefaultModel resolves cfg.Provider+cfg.Model via the provider
 // registry (identical resolution to explicit agent models) and caches the
 // instance under a reserved key. Returns nil when the config has no global
-// provider/model to resolve — the caller then falls back to the
-// WithModel-injected instance (rc.model), preserving legacy behavior for
-// minimal configs and tests. Resolve failures return nil WITHOUT caching so
-// a later hot-reload rebuild can retry (e.g. after env/API key appears).
+// provider/model to resolve — the caller then falls back to the injected
+// rc.model, which keeps minimal configs and tests working. A resolve failure
+// returns nil WITHOUT caching so a later hot-reload rebuild can retry
+// (for example once the API-key environment variable appears). The cache key
+// includes the resolved endpoint, so changing api_endpoint for a same-name
+// provider cannot hit a stale cached instance.
 func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
 	if cfg.Model == "" || cfg.Provider == "" {
 		return nil
@@ -130,8 +129,6 @@ func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
 			}
 		}
 	}
-	// Cache key includes the resolved endpoint: a same-name provider whose
-	// api_endpoint changed in yaml must NOT hit the old-instance cache.
 	cacheKey := "@@global:" + cfg.Provider + ":" + cfg.Model + ":" + endpoint
 	if m, ok := rc.resolvedModels[cacheKey]; ok {
 		return m
@@ -152,12 +149,6 @@ func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
 	return m
 }
 
-// resolveSummaryModel resolves the summary model for a specific agent.
-// Resolution order:
-//  1. If agent has SummaryModel field in YAML → resolve via provider (SummaryProvider or agent's Provider)
-//  2. If rc.summaryModel is set via Go option → use that
-//  3. Otherwise → nil (no summary model)
-//
 // resolvedModelRef is the outcome of resolving a direct call site's ModelRef:
 // the resolved model plus the generation knobs that ride on the request.
 type resolvedModelRef struct {
@@ -167,9 +158,7 @@ type resolvedModelRef struct {
 
 // resolveModelRef is the single three-tier resolution chain for direct call
 // sites (summary compression, evolution judge): explicit ModelRef → owning
-// agent's provider/model → global provider/model. Previously only the summary
-// site had a fallback chain and the judge was hard-wired to the entry model.
-// (tagent-unify-model-call-config.)
+// agent’s provider/model → global provider/model.
 func (rc *runtimeConfig) resolveModelRef(ref ModelRef, name string, acfg AgentConfig, cfg Config) *resolvedModelRef {
 	out := &resolvedModelRef{effort: ref.ReasoningEffort}
 
@@ -228,8 +217,7 @@ func (rc *runtimeConfig) resolveModelRef(ref ModelRef, name string, acfg AgentCo
 }
 
 // judgeModel resolves the evolution judge's model: explicit evolution.judge
-// ModelRef wins; zero value falls back to the entry agent's model (legacy
-// hard-wire behavior). (tagent-unify-model-call-config.)
+// ModelRef wins; a zero value falls back to the entry agent’s model.
 func (rc *runtimeConfig) judgeModel(name string, cfg Config) model.Model {
 	entry, ok := cfg.Agents[cfg.Entry]
 	if !ok {
@@ -301,11 +289,8 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 	switch mc.Type {
 	case "memory", "":
 		if mc.Path == "" {
-			// Isolated store — no sharing needed; engine wired per-agent later.
 			return memory.NewInMemoryStore(), nil, nil, nil
 		}
-		// Shared by path → registry lease（4.2：租约化，最后释放才关闭）。open 闭包
-		// 同代构造共享 engine（D5：engine 随 entry 拥有/关闭），不再经 namedEngines。
 		return defaultResources.acquire("mem", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
 			store := memory.NewInMemoryStore()
 			return openedResource{store: store, engine: buildSharedEngine(store, mc)}, nil
@@ -314,8 +299,6 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 		if mc.Path == "" {
 			return nil, nil, nil, fmt.Errorf("file memory store requires path")
 		}
-		// Shared by path（M-1，四审）→ registry lease（4.2/4.3）。open 闭包按 D5
-		// 构造顺序恢复→引擎/回调→生产者（见 openRVStore / buildSharedResource）。
 		return defaultResources.acquire("rv", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
 			return openRVStore(mc)
 		})
@@ -350,7 +333,6 @@ func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 	}
 	store, err := memory.NewFileSegmentStore(kvStore, rel, mc.Path, 1000)
 	if err != nil {
-		// store did not take ownership: release the KV before the flock does.
 		if cerr := closeKV(kvStore); cerr != nil {
 			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
 		}
@@ -374,7 +356,6 @@ func openRVStore(mc MemoryConfig) (openedResource, error) {
 	kvClient := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
 	store, err := memory.NewFileSegmentStore(kvClient, rel, mc.Path, 1000)
 	if err != nil {
-		// store did not take ownership: release the KV before the flock does.
 		if cerr := closeKV(kvClient); cerr != nil {
 			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
 		}
@@ -414,21 +395,19 @@ func tombstoneOf(store *memory.FileSegmentStore, rel memory.RelationStore, kvSto
 // engine==nil signals embedding degradation (keyword-only + capacity hook
 // retained, 8.10), never a hard failure — a degraded entry is still published
 // and closed as one generation.
+//
+// The shared retention lease is attached un-armed before producers start, so the
+// lifecycle scanner's first destructive pass gates on Lease.Ready() (restart race). The
+// durable recovery owner (the agent's reliable inbox / mem_spill) arms it at agent-open
+// after rebuilding from on-disk unacked material; a startup grace (memory.lifecycle armGrace)
+// backstops a durable backend that never registers a recovery owner so it cannot starve.
 func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, mc MemoryConfig) openedResource {
-	// 1. Recovery: tombstones, then logical live counts.
 	tombstone := tombstoneOf(store, rel, kvStore, 0)
 	if err := store.RebuildLiveCounts(); err != nil {
 		log.Warnf("[tagent] live-count rebuild failed — capacity eviction paused (counts unknown): %v", err)
 	}
-	// 2. Engine + vector-remover callback (base-store forget → engine.Remove).
 	eng := buildSharedEngine(store, mc)
-	// Attach the shared retention lease (un-armed) BEFORE producers start, so the
-	// lifecycle scanner's first destructive pass gates on Lease.Ready() (restart race). The
-	// durable recovery owner (the agent's reliable inbox / mem_spill) arms it at agent-open
-	// after rebuilding from on-disk unacked material; a startup grace (memory.lifecycle armGrace)
-	// backstops a durable backend that never registers a recovery owner so it cannot starve.
 	store.SetRetentionLease(memory.NewRetentionLease())
-	// 3. Background producers LAST — they invoke the engine's remover.
 	startStoreProducers(store, kvStore, rel, tombstone, resolveLifecycleConfig(mc.Lifecycle))
 	return openedResource{store: store, engine: eng}
 }
@@ -463,19 +442,13 @@ func wireMemoryEngine(store memory.MemoryStore, sharedEngine memory.MemoryEngine
 		return wrapCapacityOnly(store, onStoreEvent), nil
 	}
 	if mc.Path != "" {
-		// 共享：引擎随 entry 拥有（sharedEngine 由 resolveMemoryStore 传入），
-		// base store 的向量移除器已在 buildSharedEngine 接到该引擎。本 agent
-		// 只建借桥（独立 capacityHook），绝不关闭共享引擎。
 		if sharedEngine == nil {
-			// entry 构建降级（无 embedding key 等）→ 只保留 capacityHook（8.10）。
 			return wrapCapacityOnly(store, onStoreEvent), nil
 		}
 		return newEngineBridgeBorrow(store, sharedEngine, onStoreEvent), nil
 	}
-	// 独享（空 path）：per-agent 引擎由本 agent 拥有并关闭。
 	eng, err := buildMemoryEngine(store, *mc.Engine)
 	if err != nil {
-		// 8.10：降级路径保 capacityHook。
 		log.Warnf("[tagent] memory engine disabled (build failed): %v", err)
 		return wrapCapacityOnly(store, onStoreEvent), nil
 	}
@@ -514,12 +487,12 @@ func (r sharedEngineRemover) RemoveVector(eventKey int64) {
 
 // newEngineBridgeWithRemover 创建 engineBridge 并把向量移除回调接到 base store（若支持
 // SetVectorRemover）——使 TTL/容量遗忘物理删除事件时同步移除向量（内存索引 + KV 持久键），
-// 消除 engine.Remove 死代码、防死键堆积与重启复活（审查 M2）。
+// 消除 engine.Remove 死代码、防死键堆积与重启复活（审查 M2）。onStoreEvent 非空时，容量触发计数即由该处接入 bridge（唯一计数点）。
 func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngine, onStoreEvent func(eventKey int64, partitionID int, eventType string)) memory.MemoryStore {
 	bridge := engine.NewEngineBridge(store, eng)
 	if onStoreEvent != nil {
 		if provider, ok := bridge.(memory.CapacityHookProvider); ok {
-			provider.SetCapacityHook(onStoreEvent) // 4.2: 容量触发计数点
+			provider.SetCapacityHook(onStoreEvent)
 		}
 	}
 	if setter, ok := store.(interface{ SetVectorRemover(memory.VectorRemover) }); ok {
@@ -554,20 +527,13 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 		KeywordTopK: ec.KeywordTopK,
 		RRFK:        ec.RRFK,
 	}
-	// 持久化：store 若提供底层 KV（FileSegmentStore over rustviking/LocalFileKV），
-	// 引擎向量序列化入 KV + 启动重建——跨重启恢复语义召回。纯内存 store 无 KV → 不持久。
 	if kvp, ok := store.(memory.KVProvider); ok {
 		ecfg.KV = kvp.KVBackend()
 	}
 	switch ec.Backend {
 	case "", "memory":
-		// MVP 内存向量索引 + 可选 KV 持久化。
 		return engine.NewInMemoryEngine(store, emb, ecfg), nil
 	case "rustviking":
-		// S1: rustviking 后端在 MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化
-		// 向量 + 启动重建，依据 F1 报告：rustviking 原生 index CLI 进程内易失）。**显式告警**
-		// 避免"配了 rustviking 却静默得到 memory 引擎"的假自由度错觉；原生 HNSW/IVF 索引持久化
-		// （接入 ivf_persist）为 rustviking backlog。
 		log.Warnf("[tagent] memory engine backend=rustviking → MVP 阶段等价 memory 引擎（内存向量索引 + rustviking KV 持久化）；原生 HNSW/IVF 索引持久化为 rustviking backlog（见 f1-rustviking-capability-report.md）")
 		return engine.NewInMemoryEngine(store, emb, ecfg), nil
 	default:
@@ -576,6 +542,7 @@ func buildMemoryEngine(store memory.MemoryStore, ec MemoryEngineConfig) (memory.
 }
 
 // buildEmbedder 按配置构建嵌入器。zhipu 无 key 时返回 error（调用方优雅降级）。
+// 返回值一律由 TracedEmbedder 包裹（可观测与 noop 语义见该类型 doc，不在此重述）。
 func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
 	var inner memory.Embedder
 	switch ec.Provider {
@@ -599,26 +566,21 @@ func buildEmbedder(ec EmbeddingConfig) (memory.Embedder, error) {
 	default:
 		return nil, fmt.Errorf("unknown embedding provider %q", ec.Provider)
 	}
-	// 组8 向量链路可观测：TracedEmbedder 统一包裹（embedding span + GenAI 属性 + counter/
-	// histogram）。noop 安全——未设 OTLP 时零开销、Embed 行为逐字节不变。
 	return membed.NewTracedEmbedder(inner), nil
 }
 
 // ensureRustVikingConfig writes a rustviking config.toml to the data directory
 // and returns the config file path. If the file already exists, it is reused.
 func ensureRustVikingConfig(binary, dataDir string) (string, error) {
-	// Ensure data directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", dataDir, err)
 	}
 	configPath := filepath.Join(dataDir, "rustviking.toml")
 
-	// Check if config already exists
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath, nil
 	}
 
-	// Write default config
 	config := fmt.Sprintf(`[storage]
 path = "%s"
 create_if_missing = true
@@ -637,6 +599,8 @@ plugin = "mock"
 }
 
 // resolveToolDescription resolves the tool description from inline text or file.
+// An empty result is not an error: a kind=tool entry with neither inline text nor
+// description_file keeps the built-in description it ships with (from trpc-agent-go).
 func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
 	if tr.Description != "" {
 		return tr.Description, nil
@@ -648,8 +612,6 @@ func resolveToolDescription(tr ToolRef, loader *prompt.Loader) (string, error) {
 		}
 		return desc, nil
 	}
-	// For tool-kind tools, description is optional — the tool's built-in
-	// description from trpc-agent-go will be used if not provided.
 	return "", nil
 }
 
@@ -670,13 +632,13 @@ func buildDegradationBehaviors(rc ReliabilityConfig) agent.DegradationBehaviors 
 
 // consolidationMinSources提取该 agent 的
 // memory.engine.consolidation.min_source_events（nil 链安全，缺省 0=不校验）。
+// A negative value disables this gate and is logged; each consolidation field is
+// judged on its own, so an invalid sibling field never switches this gate off.
 func consolidationMinSources(acfg AgentConfig) int {
 	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
 		return 0
 	}
 	c := *acfg.Memory.Engine.Consolidation
-	// 8.9（review §8）：min_source 硬门控只依赖自己的字段——其余字段非法独立降级
-	//（此前整体 Validate 一票否决：snooze 拼错即静默关闭安全门）。
 	if c.MinSourceEvents < 0 {
 		log.Warnf("[tagent] consolidation.min_source_events < 0; min_source gate disabled")
 		return 0

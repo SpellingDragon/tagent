@@ -39,7 +39,8 @@ import (
 // carries typed payloads (external_input, tool_use, etc.) instead of a single
 // int-based EventType.
 type Event struct {
-	EventType int // 1: input, 2: execute, 3: output
+	// EventType is the kind of event carried by the struct: 1 input, 2 execute, 3 output.
+	EventType int
 	EventData string
 }
 

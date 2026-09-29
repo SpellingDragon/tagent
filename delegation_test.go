@@ -1,3 +1,5 @@
+// 本文件负责生产入口委派的垂直验收（A→B / A→C）：断言对象全部是宿主可见行为——
+// 真实模型请求里声明的工具集合、实际被调起的子 agent，而非常量、指针或 hash。
 package tagent
 
 import (
@@ -20,9 +22,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
-
-// 首个生产入口垂直验收（A→B / A→C）。断言对象全部是宿主可见行为：
-// 真实模型请求里声明的工具集合、实际被调起的子 agent，而非常量/指针/hash。
 
 // delegYAML renders entry "a" delegating to exactly one sub-agent.
 func delegYAML(target string) string { return delegYAMLSeq(target) }
@@ -125,6 +124,13 @@ func delegLabel(sys string) string {
 	return sys
 }
 
+// GenerateContent is the delegation mock's whole script: every agent's first call of a
+// turn delegates to the tool it was offered, and its second call (after the tool
+// result) closes that turn — so a nested A→B→C is served by the same script at each
+// level, against the declaration THAT level was given.
+//
+// A call parks first when the test armed a gate for that agent: the parked window is
+// the in-flight span across which a generation may be published.
 func (m *delegModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
 	label := delegLabel(delegSystemOf(req))
 	tools := delegToolNames(req)
@@ -141,10 +147,6 @@ func (m *delegModel) GenerateContent(ctx context.Context, req *model.Request) (<
 	}
 	m.perCall[label]++
 	n := m.perCall[label]
-	// Every agent's first call of a turn delegates to the tool it was offered;
-	// its second call (after the tool result) closes that turn — so a nested
-	// delegation (A→B→C) is served by the same script, at each level, against the
-	// declaration THAT level was given.
 	offer := ""
 	if n%2 == 1 && len(tools) > 0 {
 		offer = tools[0]
@@ -152,8 +154,6 @@ func (m *delegModel) GenerateContent(ctx context.Context, req *model.Request) (<
 	m.recordLocked(delegServed{System: label, Tools: tools, Answered: offer, ToolResults: toolResults})
 	m.mu.Unlock()
 
-	// Park this agent's call if the test armed a gate for it: this is the in-flight
-	// window across which a generation may be published.
 	if g := m.gateFor(label); g != nil {
 		select {
 		case <-g:
@@ -211,6 +211,7 @@ func entryDeclarations(snaps []delegServed) [][]string {
 // - 入口运行时——存储、会话服务、常驻绑定表——在一次真实发布前后按指针保持身份，不是"内容相同的新实例"；
 // - 第一代只被提供 b，未引用的 c 一次都不跑；结构发布让 A→B 变 A→C，新代既声明也确实服务 C；
 // - 被移除的 B 得不到任何新调用，却保留其常驻属主，使同名再入复用原存储属主。
+// - turn 边界必须显式等到 entry 的第二次调用：不等齐，第二次调用可能落进第二代前缀，使声明与停止增长两条断言因时序运气假失败。
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *testing.T) {
 	dir := t.TempDir()
@@ -240,19 +241,14 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 		}
 	}()
 
-	// resident identity BEFORE the generation switch (spec: 热更不破坏常驻身份).
 	storeBefore := entry.MemStore()
 	tableBefore := residentCacheForTest(entry)
 
-	// ---- turn 1: the published generation offers B ----
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
 	require.NoError(t, err)
 	waitFor(t, "sub-agent b served the first delegation", func() bool {
 		return countServed(m.snapshot(), "SUB-B-PROMPT") > 0
 	})
-	// Turn 边界必须显式同步：本 mock 的第 2 次 entry 调用才收尾本 turn，
-	// 而 “b 被服务过” 在第 1 次调用就成立。若不等齐就取快照，第 2 次调用可能落进
-	// 第二代前缀，使“第二代声明严格等于 [c]”与“B 停止增长”两条断言因时序运气而假失败。
 	waitFor(t, "turn 1 closed (entry made its second call)", func() bool {
 		return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2
 	})
@@ -265,15 +261,8 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 	}
 	require.Zero(t, countServed(snaps, "SUB-C-PROMPT"), "an agent the config does not reference must never run")
 
-	// ---- structural reload: A→B becomes A→C ----
-	//
-	// Hot add/remove makes this shape publishable: C enters the entry-reachable topology
-	// (hot add, built under the original resource/recovery protocol) and B leaves
-	// it (hot remove). The published generation must BOTH OFFER and ACTUALLY SERVE
-	// C; B is unrouted but keeps its resident owner (never retired early), which is
-	// what makes a later same-name re-entry reuse the original storage owner.
 	write(delegYAML("c"))
-	entry.CheckOrgReload() // ops entry; production reaches the same path via BeginTurn
+	entry.CheckOrgReload()
 
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
 	require.NoError(t, err)
@@ -295,18 +284,12 @@ func TestOrgDelegation_TargetFollowsPublishedGenerationNotMutableGlobals(t *test
 	require.Equal(t, countServed(snaps, "SUB-B-PROMPT"), countServed(after, "SUB-B-PROMPT"),
 		"the removed agent must stop receiving calls once the new generation is published")
 
-	// ---- resident identity across a REAL publish ----
-	// 身份不漂用 Same（指针），不用 DeepEqual：换成“内容相同的新实例”正是本变更要拦的形态。
 	require.Same(t, storeBefore, entry.MemStore(), "the entry store identity must not drift on a reload")
 	table := residentCacheForTest(entry)
 	require.Nil(t, tableBefore["c"], "c was not resident before the add — the add is real, not a pre-existing identity")
 	require.NotNil(t, table["c"], "the hot-added agent is merged into the resident binding table")
 	require.NotSame(t, entry.MemStore(), table["c"].MemStore(),
 		"the hot-added agent owns its own store (no drift onto the entry store)")
-	// What must hold across a real publish for a removed owner: its identity never
-	// DRIFTS. It is either still resident as the very same instance (something still
-	// needs it), or it left by retirement — which must be an actual close, never a
-	// silent drop or a look-alike replacement.
 	bAfter, bStillHere := table["b"]
 	if bStillHere {
 		require.Same(t, tableBefore["b"], bAfter,
@@ -393,7 +376,6 @@ func TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget(t *testing.
 		return countServed(m.snapshot(), "SUB-B-PROMPT") == 1
 	})
 
-	// 换代发生在 B 仍持租约的这一瞬间（ops 同步入口与业务 turn 共用同一条发布通路）。
 	write(delegYAML("c"))
 	entry.CheckOrgReload()
 	require.Nil(t, entry.ContextManager().SubagentWrapper("b"),
@@ -418,7 +400,6 @@ func TestOrgDelegation_InFlightDelegationKeepsItsOwnGenerationTarget(t *testing.
 		"the new target must not run while the old generation's call is in flight (B returned at %d, first C call at %d)",
 		bReturned, cRan)
 
-	// 换代的影响边界是 turn：此后 B 无新调用，新目标持续服务后续请求。
 	cBefore := countServed(after, "SUB-C-PROMPT")
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
 	require.NoError(t, err)
@@ -494,14 +475,12 @@ func TestOrgDelegation_NestedLevelsServeFromTheirOwnBindings(t *testing.T) {
 	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
 
 	snaps := m.snapshot()
-	// 每一层看到的是它自己的声明：entry→[b]，b→[c]，c 无工具。
 	require.Equal(t, []string{"b"}, snaps[firstServeIndex(snaps, "ENTRY-A-PROMPT")].Tools,
 		"the entry delegates on its own binding")
 	require.Equal(t, []string{"c"}, snaps[firstServeIndex(snaps, "SUB-B-PROMPT")].Tools,
 		"the nested level delegates on ITS own binding, not the entry's")
 	require.Empty(t, snaps[firstServeIndex(snaps, "SUB-C-PROMPT")].Tools,
 		"the leaf has no delegation to offer")
-	// 结果逐层回流。
 	require.Greater(t, firstResultIndexBy(snaps, "SUB-B-PROMPT", "served:SUB-C-PROMPT"), firstServeIndex(snaps, "SUB-C-PROMPT"),
 		"C's answer must reach its direct parent B")
 	require.Greater(t, firstResultIndex(snaps, "served:SUB-B-PROMPT"), firstServeIndex(snaps, "SUB-B-PROMPT"),
@@ -622,11 +601,6 @@ agents:
 		"the factory instance's own return must reach the parent turn")
 }
 
-// A2A 路径的远端委派必须以「真实声明 + 真实线上请求 + 真实工具返回」作证，
-// 不能只查 wrapper 字段。本文件同时钉住校验域与构建域一致——一个**只有 remote 端点、
-// 没有本地定义**的 agent 引用必须能加载并构建（构建域一直支持；校验域曾误要求本地
-// 定义，见 config.go 的 isRemoteRef 单一谓词）。
-
 // remoteAnswer is the distinctive payload the stand-in service returns. Finding it
 // back in the parent's tool-result message proves the delegation really crossed
 // the wire and came back — nothing local could have produced this string.
@@ -650,6 +624,13 @@ type remoteService struct {
 	srv       *httptest.Server
 }
 
+// newRemoteService stands in for a remote A2A peer: it serves the agent card, counts
+// RPCs, and fails the first failFirstRPC requests at transport level.
+//
+// A transport failure must surface from the client Run instead of being answered
+// silently — that error is the trigger the remote retry branch waits for. The failure
+// hook fires while the in-flight attempt is being retried, so a publish can be timed
+// to exactly that window.
 func newRemoteService(t *testing.T) *remoteService {
 	t.Helper()
 	r := &remoteService{}
@@ -685,10 +666,8 @@ func newRemoteService(t *testing.T) *remoteService {
 		transient := n <= r.failFirstRPC
 		r.mu.Unlock()
 		if transient {
-			// Transport-level failure: the client's Run must surface it (that is
-			// the trigger the remote retry branch waits for), not a silent answer.
 			if hook := r.failureHook(); hook != nil {
-				hook() // publish while THIS attempt is being retried
+				hook()
 			}
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
@@ -870,11 +849,9 @@ func TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn(t *testing.T) {
 
 	driveOneTurn(t, entry, m)
 
-	// 真实声明：entry 的模型请求里出现的就是这个远端委派工具。
 	require.Contains(t, offeredToolNames(m.snapshot()[0]), "knowledge",
 		"the published face must offer the remote delegation to the model")
 
-	// 真实端点：调用确实落到声明的 URL 上。
 	require.Eventually(t, func() bool { return svc.rpcCount() >= 1 }, 20*time.Second, 20*time.Millisecond,
 		"the delegation must actually reach the declared endpoint")
 
@@ -889,7 +866,6 @@ func TestRemoteRefDelegatesWithRealDeclarationEndpointAndReturn(t *testing.T) {
 	}
 	require.True(t, sawAnswer, "the remote answer must come back as the parent's tool result")
 
-	// 参数一致：父请求的原文确实随委派送出。
 	body, _ := json.Marshal(svc.snapshotRPCs()[0])
 	require.Contains(t, string(body), "what does the remote know?",
 		"the delegated request text must ride to the endpoint")
@@ -981,6 +957,8 @@ func TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget(t *testing.T) {
 // TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint 钉住 重试过程中发布把同名 agent 指向不同端点时，重试仍锁在它开始声明的端点与载荷上。
 // - 判别是因果的、不数全局总量：父拿到答案之前，后继端点一次都不得被联系；
 // - 原端点上记录的每次尝试都携带同一委派载荷，传输重试固定端点与载荷、本地回合不重试。
+// - 换代依赖 mtime 严格变新：不晚于上次成功载入则懒检测命中缓存、发布成为 no-op，故显式把 mtime 设到 +90s 而非依赖系统时钟。
+// - 在途代必须在发布之前捕获（此处在重试钩子能发布之前取值），否则被断言回收的代就不是被打断的那一代。
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 	original := newRemoteService(t)
@@ -1006,8 +984,6 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 	original.mu.Lock()
 	original.onFailure = func() {
 		published.Do(func() {
-			// Well beyond the initial write's +2s bump: an mtime that is not strictly
-			// newer would make CheckOrgReload return early and the publish be a no-op.
 			hookTick := time.Now().Add(90 * time.Second)
 			require.NoError(t, os.WriteFile(yamlPath, []byte(remoteYAML(successor.srv.URL, "")), 0o644))
 			require.NoError(t, os.Chtimes(yamlPath, hookTick, hookTick))
@@ -1016,8 +992,6 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 	}
 	original.mu.Unlock()
 
-	// The generation in flight is the one live BEFORE the publication (captured here,
-	// which runs before the retry hook can publish).
 	inflightGen := entryGeneration(t, entry)
 	require.GreaterOrEqual(t, inflightGen, int64(0), "precondition: the entry has an active generation")
 
@@ -1054,16 +1028,11 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 	}
 	require.True(t, answered, "the retried attempt's real answer must reach the parent turn")
 
-	// 资源尾部（同一条调用链内，不由 agent 层见证拼凑）：the generation that carried
-	// this in-flight remote call is retired by the publication mid-retry and must be
-	// reclaimed once the call lands — the row it occupies disappears from the books.
 	require.Eventuallyf(t, func() bool { return !hasGeneration(entry, inflightGen) },
 		20*time.Second, 20*time.Millisecond,
 		"the superseded generation %d that held the in-flight remote call must be reclaimed after the call lands: %+v",
 		inflightGen, entry.ContextManager().ExecutorRefs().Generations)
 
-	// The publication really happened (otherwise the row above is vacuous), and
-	// both attempts went to the ORIGINAL endpoint with the SAME payload.
 	require.Greater(t, diagInt64(t, entry.OrgDiagnostics(), "generation"), int64(0),
 		"precondition: a new generation was published during the retry")
 	require.GreaterOrEqual(t, original.rpcCount(), 2,

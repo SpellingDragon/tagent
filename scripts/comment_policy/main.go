@@ -98,7 +98,7 @@ const defaultBaseline = "scripts/comment_policy/baseline.json"
 
 // baseline stores per-rule violation totals and the scan set they were generated
 // over: the ratchet a batch may only lower, never raise. A blocking gate over a
-// large legacy backlog would be switched off within a day; a ratchet bites on the
+// large pre-existing backlog would be switched off within a day; a ratchet bites on the
 // first new violation and stays on.
 type baseline struct {
 	Counts map[string]int `json:"counts"`
@@ -545,6 +545,8 @@ var changeNames []string
 
 // loadChangeNames 从 openspec 目录枚举变更名（命令由仓根运行；测试从包目录运行，
 // 故向上查找）。
+// 归档目录名带日期前缀（形如 YYYY-MM-DD-name），剥去该前缀后才是变更名；变更名是
+// kebab 标识符，故要求含连字符且足够长，普通散文不会误命中。
 func loadChangeNames() {
 	names := map[string]bool{}
 	root := "."
@@ -564,11 +566,9 @@ func loadChangeNames() {
 				continue
 			}
 			n := e.Name()
-			if len(n) > 11 && n[4] == '-' && n[7] == '-' { // 2006-01-02-<name>
+			if len(n) > 11 && n[4] == '-' && n[7] == '-' {
 				n = n[11:]
 			}
-			// A change name is a kebab identifier; require a dash and enough length
-			// so ordinary prose never trips this check.
 			if len(n) >= 8 && strings.Contains(n, "-") {
 				names[n] = true
 			}
@@ -609,15 +609,15 @@ func externalCoordRef(prose string) string {
 }
 
 // checkDocGroup applies content rules to one documentation comment.
+// A declared identifier may itself embed a residue word, and quoting that name at the
+// head of its own doc is the symbol being documented rather than change narration, so
+// the residue rules run over the text with the declared name masked out.
 func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text string, isTest bool, declName string) []finding {
 	var out []finding
 	line := fset.Position(g.Pos()).Line
 	add := func(rule, note string) {
 		out = append(out, finding{Path: path, Line: line, Rule: rule, Note: note, Text: firstLine(text)})
 	}
-	// A Go identifier may itself contain a residue word (a test named …Legacy…).
-	// Quoting that declared name at the head of its own doc comment is not change
-	// narration, so the residue rules see the prose with the name masked out.
 	prose := text
 	if declName != "" && declName != "_" {
 		prose = strings.ReplaceAll(prose, declName, "____")
@@ -681,7 +681,6 @@ func hasAllowedRoot(target string) bool {
 // go tool itself rejects) and produce near-duplicate findings per file.
 func dropRedundantPackageDocs(all []finding) []finding {
 	pkgsWithDoc := map[string]bool{}
-	// Parse the directories involved once; a package doc marks the whole package covered.
 	dirs := map[string]bool{}
 	for _, f := range all {
 		if f.Rule == "missing-package-doc" {
@@ -714,6 +713,8 @@ func dropRedundantPackageDocs(all []finding) []finding {
 
 // checkCoverage enforces package documentation, exported-symbol documentation and
 // the responsibility index a test file must declare.
+// A method on an unexported receiver is not part of the rendered API surface, so it
+// carries no public documentation obligation.
 func checkCoverage(fset *token.FileSet, file *ast.File, path string, isTest bool) []finding {
 	var out []finding
 	if file.Doc == nil || strings.TrimSpace(file.Doc.Text()) == "" {
@@ -740,8 +741,6 @@ func checkCoverage(fset *token.FileSet, file *ast.File, path string, isTest bool
 		if fd.Recv != nil {
 			recv := recvName(fd)
 			if !exportedName.MatchString(recv) {
-				// A method on an unexported type is not part of the rendered API
-				// surface, so it carries no public documentation obligation.
 				continue
 			}
 			label = recv + "." + fd.Name.Name
@@ -893,6 +892,7 @@ func docContentLines(g *ast.CommentGroup) []string {
 // stays a single intent line (argument and pitfall narration belong in
 // assertion messages or in the wiki). Without these, mechanically moving a
 // trailing comment above a field would "pass" while teaching nothing.
+// The length cap is there so that "one line" cannot quietly become a paragraph.
 func checkDocForm(fset *token.FileSet, file *ast.File, path string, isTest bool) []finding {
 	var out []finding
 	name := func(pos token.Pos, ident, rule, note string) {
@@ -912,10 +912,6 @@ func checkDocForm(fset *token.FileSet, file *ast.File, path string, isTest bool)
 		case *ast.FuncDecl:
 			must(decl.Pos(), decl.Name.Name, decl.Doc)
 			if isTest && strings.HasPrefix(decl.Name.Name, "Test") {
-				// Shape norm (D-26): one intent line, optionally wrapped as a bullet
-				// list of parallel points, plus index lines. Prose continuation means
-				// the argument belongs in an assertion message or in docs/wiki; the
-				// length cap exists so "one line" never turns into a 200-rune wall.
 				lines := docContentLines(decl.Doc)
 				for i, l := range lines {
 					if i > 0 && !strings.HasPrefix(l, "- ") {

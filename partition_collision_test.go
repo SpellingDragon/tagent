@@ -30,9 +30,8 @@ func findCollisionPair(t *testing.T) (string, string) {
 	return "", ""
 }
 
-// TestPartitionCollision_FailsClosed：共享同一
-// 持久 store 的两个 agent 名哈希到同一 pid → 构造期 fail-closed，绝不静默合并
-// 记忆命名空间，绝不自动迁移历史。
+// TestPartitionCollision_FailsClosed：共享同一持久 store 的两个 agent 名哈希到同一 pid → 构造期 fail-closed，绝不静默合并记忆命名空间，绝不自动迁移历史。
+// - nameB 必须经引用被递归构建，它的 store owner 才会登记，"同一 store 上的 pid 冲突"这一前提方成立。
 func TestPartitionCollision_FailsClosed(t *testing.T) {
 	nameA, nameB := findCollisionPair(t)
 	dir := t.TempDir()
@@ -46,13 +45,13 @@ func TestPartitionCollision_FailsClosed(t *testing.T) {
 			nameA: {
 				SystemPrompt: PromptConfig{Inline: "a"},
 				Memory:       MemoryConfig{Type: "localfile", Path: dir},
-				Tools: []ToolRef{ // 引用 nameB → 递归构建并登记其 store owner
+				Tools: []ToolRef{
 					{Kind: "agent", AgentID: nameB, Description: "b"},
 				},
 			},
 			nameB: {
 				SystemPrompt: PromptConfig{Inline: "b"},
-				Memory:       MemoryConfig{Type: "localfile", Path: dir}, // SAME shared store
+				Memory:       MemoryConfig{Type: "localfile", Path: dir},
 			},
 		},
 	}
@@ -63,8 +62,7 @@ func TestPartitionCollision_FailsClosed(t *testing.T) {
 	require.Contains(t, err.Error(), nameB)
 }
 
-// TestPartitionCollision_IsolatedStoresNoFalsePositive：同 pid 但各自隔离
-// store（空 path）互不影响 → 构造成功。
+// TestPartitionCollision_IsolatedStoresNoFalsePositive：同 pid 但各自隔离 store（空 path）互不影响 → 构造成功，守卫不得误报。
 func TestPartitionCollision_IsolatedStoresNoFalsePositive(t *testing.T) {
 	nameA, nameB := findCollisionPair(t)
 
@@ -74,7 +72,7 @@ func TestPartitionCollision_IsolatedStoresNoFalsePositive(t *testing.T) {
 			"openai": {APIEndpoint: "http://localhost:1"},
 		},
 		Agents: map[string]AgentConfig{
-			nameA: {SystemPrompt: PromptConfig{Inline: "a"}}, // isolated (no path)
+			nameA: {SystemPrompt: PromptConfig{Inline: "a"}},
 			nameB: {SystemPrompt: PromptConfig{Inline: "b"}},
 		},
 	}
@@ -85,11 +83,9 @@ func TestPartitionCollision_IsolatedStoresNoFalsePositive(t *testing.T) {
 
 var _ model.Model = (*stubModel)(nil)
 
-// TestRemoteDeclarationOnlyKeepsTheGate guards the skip that lets a remote-only
-// reference survive a hot reload: it must apply ONLY where no owner can ever
-// exist. This gate exists to refuse a genuinely missing definition, so a name
-// that is also reached non-remotely — or that IS defined locally — must still be
-// refused, not silently published without an owner.
+// TestRemoteDeclarationOnlyKeepsTheGate pins that the remote-declaration-only skip applies only where no owner can ever exist.
+// - The gate exists to refuse a genuinely missing definition: a name reached non-remotely as well must still be refused.
+// - A locally defined name is never declaration-only, and a remote block without a URL must not be skipped here.
 func TestRemoteDeclarationOnlyKeepsTheGate(t *testing.T) {
 	remoteRef := ToolRef{Kind: ToolKindAgent, AgentID: "ghost", Remote: &RemoteConfig{URL: "http://127.0.0.1:1"}}
 	localRef := ToolRef{Kind: ToolKindAgent, AgentID: "ghost"}
@@ -121,16 +117,7 @@ func TestRemoteDeclarationOnlyKeepsTheGate(t *testing.T) {
 		"a remote block without a URL is the mismatch §5.44 refuses at validation — it must not be skipped here either")
 }
 
-// TestBuildAgent_ReadPartitionsIncludeOwnNamespace is the regression test for
-// the silent-empty timeline recall incident (2026-08-25 wechat-bot):
-//
-// Events are written to PartitionIDFromName(agentName), but readPartitionIDs
-// used to contain ONLY read_namespaces partitions. For an agent without
-// read_namespaces (the main agent), query-mode recall on FileSegmentStore
-// therefore scanned ZERO partitions (resolvePartitions treats "no partitions"
-// as "scan nothing" per event-segment-store isolation) and silently returned
-// count=0 for every query — the model then wrongly concluded the backend had
-// no history. The fix: the agent's OWN namespace partition always comes first.
+// TestBuildAgent_ReadPartitionsIncludeOwnNamespace pins that a built agent read scope always carries its OWN namespace partition first.
 func TestBuildAgent_ReadPartitionsIncludeOwnNamespace(t *testing.T) {
 	var captured agent.PlainToolFactoryConfig
 	agent.RegisterPlainTool("test_read_partitions", func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {

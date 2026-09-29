@@ -15,14 +15,16 @@ import (
 // reloader compares it across generations to decide whether a re-added name
 // keeps its original storage owner (same path/backend → reuse) or would open a
 // second writer on the same partition (changed → refuse the candidate).
-// Unmarshal-free by design: only the memory subtree participates.
+// Unmarshal-free by design: only the memory subtree participates. A marshal
+// failure returns the sentinel "unmarshal-error", which cannot equal any real
+// fingerprint, so a failure never silently matches another agent’s stored value.
 func agentMemoryFingerprint(acfg *AgentConfig) string {
 	if acfg == nil {
 		return ""
 	}
 	b, err := json.Marshal(acfg.Memory)
 	if err != nil {
-		return "unmarshal-error" // never silently equal to another agent's fp
+		return "unmarshal-error"
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -38,16 +40,18 @@ func agentMemoryFingerprint(acfg *AgentConfig) string {
 // migrate history (delta spec「agent 身份隔离」).
 //
 // Isolated stores (empty path) are their own instance — no cross-agent risk.
-// Same-name re-registration (executor-shell rebuild of the entry) is safe.
+// Same-name re-registration (executor-shell rebuild of the entry) is safe.  A nil receiver and a nil owner map both occur for callers that build an
+// is initialised on first use.
+// agent directly instead of through New(): the receiver records nothing, the map
 func (rc *runtimeConfig) registerStoreOwner(name string, memStore memory.MemoryStore) error {
 	if rc == nil {
-		return nil // direct buildAgent callers in tests bypass New()
+		return nil
 	}
 	storeID := fmt.Sprintf("%p", memStore)
 	pid := memory.PartitionIDFromName(name)
 	rc.storeOwnersMu.Lock()
 	defer rc.storeOwnersMu.Unlock()
-	if rc.storeOwners == nil { // direct buildAgent callers in tests bypass New()
+	if rc.storeOwners == nil {
 		rc.storeOwners = make(map[string]map[int]string)
 	}
 	if rc.storeOwners[storeID] == nil {
@@ -110,32 +114,32 @@ func (rc *runtimeConfig) ownedAgentNames() map[string]bool {
 
 var _ = agent.TagentAgent{} // keep the agent import for MemStore-typed helpers
 
-// changedMemoryAgents (§4.3, refining R4 3.1's global memory pre-check) returns
-// the sorted names whose memory section differs from the one their existing
-// storage owner was built with. The judgment domain is **existing owner ∩ what the
-// new generation will actually route to** (routable): only those get built, so only
-// those can migrate a live store.
+// changedMemoryAgents returns the sorted names whose memory section differs from
+// the one their existing storage owner was built with. The judgment domain is
+// **existing owner ∩ what the new generation will actually route to**: only those
+// get built, so only those can migrate a live store.
 //
-// Two non-obvious exclusions, both reviewed findings:
-//   - a name absent from fresh.Agents (removed together with its definition) — no
-//     definition to compare;
-//   - a name still DEFINED but no longer reachable from the entry (delegating tool
-//     removed while the definition stays). Refusing the whole reload for it would
-//     freeze orchestration hot-reload permanently over an object the new generation
-//     never constructs — there is no second writer to prevent.
+// Two names are excluded, and both exclusions are load-bearing:
+//   - absent from fresh.Agents (its route and definition are gone together) —
+//     there is no definition to compare against;
+//   - defined but not reachable from the entry this generation (its delegating
+//     tool is gone while the definition stays). Refusing the whole reload over
+//     such a name would freeze orchestration hot-reload permanently for an
+//     object the new generation never constructs: there is no second writer to
+//     prevent.
 //
-// Stickiness is NOT weakened: when such a name becomes reachable again (re-entry),
-// it is inside the domain, residentMemFP still holds its original fingerprint, and a
-// switched storage is refused then (D7: 禁止第二 writer).
+// Stickiness is not weakened. When such a name becomes reachable again it is
+// inside the domain, residentMemFP still holds its original fingerprint, and a
+// switched storage is refused then.
 func changedMemoryAgents(fresh *Config, ownerFP map[string]string, routable map[string]bool) []string {
 	var out []string
 	for name, want := range ownerFP {
 		ac, ok := fresh.Agents[name]
 		if !ok {
-			continue // definition gone: unrouted, owner retained — nothing to migrate
+			continue
 		}
 		if !routable[name] {
-			continue // defined but not reachable this generation — it will not be built
+			continue
 		}
 		cfg := ac
 		if got := agentMemoryFingerprint(&cfg); got != want {

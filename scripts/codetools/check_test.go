@@ -55,10 +55,9 @@ const baseTestsFile = "package p\n\n" +
 	"func TestAlpha(t *testing.T) {\n\tt.Parallel()\n\trequire.Equal(t, 1, 1)\n\tassert.True(t, true)\n}\n\n" +
 	"// helper builds a fixture.\nfunc helper() int { return 1 }\n"
 
-// TestCommentCheckIgnoresDocsButNotCodeOrDirectives pins both directions of the
-// comment gate: documentation text is invisible, code and compiler directives are
-// not. A gate that only ever passed would prove nothing, so every violation case
-// asserts the failing exit code and the reported kind.
+// TestCommentCheckIgnoresDocsButNotCodeOrDirectives pins both directions of the comment gate.
+// - Documentation text is invisible; code and compiler directives are not.
+// - A gate that only ever passed would prove nothing, so every violation case asserts the failing exit code and the reported kind.
 func TestCommentCheckIgnoresDocsButNotCodeOrDirectives(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -122,9 +121,8 @@ func TestCommentCheckIgnoresDocsButNotCodeOrDirectives(t *testing.T) {
 	}
 }
 
-// TestMergeCheckGuardsTheTestSurface pins each invariant a test-file consolidation
-// batch must preserve, including the two escape hatches (rename map, explain list)
-// and the rule that they are required — a move without them is a violation.
+// TestMergeCheckGuardsTheTestSurface pins each invariant a test-file consolidation batch must preserve.
+// - Both escape hatches are covered (rename map, explain list), and they are required: a move without them is a violation.
 func TestMergeCheckGuardsTheTestSurface(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -214,8 +212,8 @@ func TestMergeCheckGuardsTheTestSurface(t *testing.T) {
 	}
 }
 
-// TestMergeCheckComparesCodeNotComments proves a moved test survives a rewrite of
-// its documentation, so the two batches stay independent.
+// TestMergeCheckComparesCodeNotComments proves a moved test survives a rewrite of its documentation.
+// - That independence is what lets the comment batch and the consolidation batch land separately.
 func TestMergeCheckComparesCodeNotComments(t *testing.T) {
 	b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
 	head := "package p\n\nimport \"testing\"\n\n// TestAlpha now carries a rewritten contract comment.\nfunc TestAlpha(t *testing.T) {\n\tt.Parallel()\n\trequire.Equal(t, 1, 1)\n\tassert.True(t, true)\n}\n\nfunc helper() int { return 1 }\n"
@@ -227,9 +225,8 @@ func TestMergeCheckComparesCodeNotComments(t *testing.T) {
 	require.True(t, strings.Contains(out, "1 package(s) intact"), out)
 }
 
-// TestMergeCheckRenameNormalizationStaysBlindToNothing guards the failure mode the
-// normalizer can introduce: if declared renames were applied so broadly that every
-// body hashed to the same value, the gate would report "intact" forever.
+// TestMergeCheckRenameNormalizationStaysBlindToNothing guards the failure mode the normalizer can introduce.
+// - If declared renames were applied so broadly that every body hashed to the same value, the gate would report "intact" forever.
 func TestMergeCheckRenameNormalizationStaysBlindToNothing(t *testing.T) {
 	const base = "package p\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n\trequire.Equal(t, 1, 1)\n\tassert.True(t, true)\n}\n\nfunc helper() int { return 1 }\n"
 	// Renamed test whose body also lost an assertion: the rename must not excuse it.
@@ -259,8 +256,8 @@ func TestMergeCheckRenameNormalizationStaysBlindToNothing(t *testing.T) {
 	require.Equalf(t, 0, code, "renaming a test and an identifier it calls is a pure rename:\n%s", out)
 }
 
-// TestMergeCheckAllowsStrengtheningOnly pins the monotone direction: adding an
-// assertion to a moved test is welcome, removing one is not.
+// TestMergeCheckAllowsStrengtheningOnly pins the monotone direction of a moved test.
+// - Adding an assertion is welcome, removing one is not.
 func TestMergeCheckAllowsStrengtheningOnly(t *testing.T) {
 	base := "package p\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n\trequire.Equal(t, 1, 1)\n}\n"
 	stronger := "package p\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n\trequire.Equal(t, 1, 1)\n\trequire.NotNil(t, 1)\n}\n"
@@ -273,9 +270,9 @@ func TestMergeCheckAllowsStrengtheningOnly(t *testing.T) {
 	require.Contains(t, out, `"kind":"body-changed"`)
 }
 
+// TestMergeCheckRejectsRenameThatStopsBeingATest pins that a rename dropping the Test prefix is a violation.
+// - Such a body turns into dead code: go test reports success and the body hash reports intact, so only the gate can see it.
 func TestMergeCheckRejectsRenameThatStopsBeingATest(t *testing.T) {
-	// A rename that drops the Test prefix turns coverage into dead code: `go test`
-	// reports success and the body hash reports intact, so only the gate can see it.
 	base := "package p\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n\trequire.Equal(t, 1, 1)\n}\n"
 	mangled := "package p\n\nimport \"testing\"\n\nfunc alpha(t *testing.T) {\n\trequire.Equal(t, 1, 1)\n}\n"
 	mapFile := filepath.Join(t.TempDir(), "map.tsv")
@@ -289,10 +286,9 @@ func TestMergeCheckRejectsRenameThatStopsBeingATest(t *testing.T) {
 	require.Contains(t, out, `"kind":"test-name-mangled"`)
 }
 
+// TestApplyRenamesIgnoresStringLiterals pins that a rename describes identifiers, never string data.
+// - A fixture holding the old name as text (a YAML key, a log substring) must stay untouched, or the gate manufactures differences no rename declared.
 func TestApplyRenamesIgnoresStringLiterals(t *testing.T) {
-	// A rename describes identifiers. A fixture that happens to contain the old name as
-	// text (a YAML key, a log substring) must not be rewritten, otherwise the gate
-	// manufactures differences that no rename declared.
 	src := "func f() {\n\tyaml := \"kind: agent\\n  agent: sub1\\n\"\n\tcall(agent, yaml)\n}\n"
 	got := applyRenames(src, map[string]string{"agent": "trpcagent"})
 	require.Contains(t, got, `"kind: agent\n  agent: sub1\n"`, "string literal must survive untouched")
@@ -308,8 +304,8 @@ func TestApplyRenamesHandlesRawAndRuneLiterals(t *testing.T) {
 	require.Contains(t, got, "trpcagent.Field")
 }
 
+// TestMergeCheckFollowsReceiverTypeRename pins that renaming a fixture type does not surface each of its methods as a body change.
 func TestMergeCheckFollowsReceiverTypeRename(t *testing.T) {
-	// Renaming a fixture type must not surface each of its methods as a body change.
 	base := "package p\n\nfunc (oldType) Do() int { return 1 }\n"
 	head := "package p\n\nfunc (newType) Do() int { return 1 }\n"
 	mapFile := filepath.Join(t.TempDir(), "map.tsv")
@@ -322,9 +318,9 @@ func TestMergeCheckFollowsReceiverTypeRename(t *testing.T) {
 	require.Equalf(t, 0, code, "a receiver rename is a declared rename, not a body change:\n%s", out)
 }
 
+// TestMergeCheckIgnoresRenameInducedReflow pins that rename-induced gofmt reflow is layout, not a semantic change.
+// - A longer replacement name can push a one-line body past gofmt width and make it expand; the witness must not see that.
 func TestMergeCheckIgnoresRenameInducedReflow(t *testing.T) {
-	// A longer replacement name can push a one-line body past gofmt's width and make it
-	// expand. That is layout, not a semantic change, so the witness must not see it.
 	base := "package p\n\nfunc f() int {\n\treturn 1\n}\n"
 	head := "package p\n\nfunc f() int { return 1 }\n"
 	b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": base})
@@ -335,9 +331,9 @@ func TestMergeCheckIgnoresRenameInducedReflow(t *testing.T) {
 	require.Equalf(t, 0, code, "same tokens in different layout must not be a body change:\n%s", out)
 }
 
+// TestCommentCheckStripsFieldComments pins that the comment-stripping step clears field documentation too.
+// - A comment on a struct field is still a comment, so changing one must not read as a code change.
 func TestCommentCheckStripsFieldComments(t *testing.T) {
-	// A comment on a struct field is still a comment: changing one must not read as a
-	// code change, so the stripping step has to clear field documentation too.
 	base := "package p\n\ntype T struct {\n\tA int // first field\n}\n"
 	rewritten := "package p\n\ntype T struct {\n\tA int // second wording for the same field\n}\n"
 	b := writeFileTree(t, "base", map[string]string{"pkg/a.go": base})
@@ -348,10 +344,9 @@ func TestCommentCheckStripsFieldComments(t *testing.T) {
 	require.Equalf(t, 0, code, "only a field comment differs, so the change is comment-only:\n%s", out)
 }
 
+// TestFoldLayoutCollapsesPaddingOnlyDifferences pins why the witness is token-based rather than text-based.
+// - The printer pads alignment groups with tabs whose count depends on neighbouring lines, so identical code can render differently once a comment merges groups.
 func TestFoldLayoutCollapsesPaddingOnlyDifferences(t *testing.T) {
-	// The printer pads alignment groups with tabs whose count depends on neighbouring
-	// lines, so identical code can render differently once a comment merges two groups.
-	// foldLayout is what makes the witness token-based rather than text-based.
 	a := "func f() int {\n\treturn 1\n}"
 	b := "func f() int {\n\treturn\t\t1\n}"
 	require.NotEqual(t, a, b, "the raw text must actually differ, else the test proves nothing")
@@ -360,10 +355,9 @@ func TestFoldLayoutCollapsesPaddingOnlyDifferences(t *testing.T) {
 		"a real token change must survive folding")
 }
 
+// TestNameCheckFlagsIterationNumbers pins the naming guardrail: test identifiers must not carry iteration numbers.
+// - Domain vocabulary that happens to contain digits must not be caught, or the check becomes noise nobody keeps enabled.
 func TestNameCheckFlagsIterationNumbers(t *testing.T) {
-	// Guardrail spec: test identifiers must not carry iteration numbers. Domain
-	// vocabulary that happens to contain digits must not be caught, or the check
-	// becomes noise nobody keeps enabled.
 	dir := t.TempDir()
 	src := `package p
 
@@ -396,9 +390,9 @@ func TestMD5And401Handling(t *testing.T) {}
 
 func writeFileForTest(path, src string) error { return os.WriteFile(path, []byte(src), 0o644) }
 
+// TestDocRefsDetectsDanglingFileCitations pins that docs citing code files as evidence stay resolvable.
+// - A citation whose target path is absent from the tree is drift the comment-shape gates cannot see.
 func TestDocRefsDetectsDanglingFileCitations(t *testing.T) {
-	// Guardrail: docs cite code files as evidence (the D-8 drift class). A citation
-	// to a path that no longer exists is drift the comment gates cannot see.
 	dir := t.TempDir()
 	doc := filepath.Join(dir, "docs", "d.md")
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs"), 0o755))
@@ -411,11 +405,10 @@ func TestDocRefsDetectsDanglingFileCitations(t *testing.T) {
 		"only path-like citations that no longer exist may be reported")
 }
 
+// TestProcRefsIgnoresScannerSelfReferences pins both sides of the process-reference rule.
+// - Instructions sending readers to process artifacts must be caught.
+// - The scanners implementing it must name the pattern without tripping it: without that exemption the gate is noise and gets switched off.
 func TestProcRefsIgnoresScannerSelfReferences(t *testing.T) {
-	// The rule must catch instructions that send readers to process artifacts,
-	// while not firing on the scanners that implement it (they have to name the
-	// pattern). Both sides are load-bearing: without the exemption the gate is
-	// noise and would be turned off.
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "scripts"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "scripts", "build.sh"),

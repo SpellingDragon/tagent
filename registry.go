@@ -66,33 +66,27 @@ var registerOnce sync.Once
 //   - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search, duckduckgo_search, memory_query
 //   - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
 //   - mcp_call: generic MCP execution gateway
+//   - memory curation sub-tools: memory_consolidate (evidence-gated consolidation),
+//     memory_health (dimension-anchored diagnosis); both are factory-registered and
+//     take their dependencies from the per-agent MemStore.
+//   - task sub-tools: list_tasks, cancel_task, relaunch_task, resume_task
+//   - spec: typed spec/plan management (no shell; openspec backend)
 func RegisterBuiltinTools() error {
 	registerOnce.Do(func() {
-		// exec: shell command executor
 		agent.RegisterPlainTool("exec", actionFactory)
 
-		// file sub-tools (7 plain tools)
 		file.RegisterTools()
 
-		// knowledge sub-tools (6 plain tools)
 		knowledge.RegisterSubTools()
 
-		// recall sub-tools (4 plain tools)
 		recall.RegisterSubTools()
 
-		// memory curation sub-tools (T-D): memory_consolidate（证据门控巩固）、
-		// memory_health（维度锚定诊断）。工厂式注册，从 per-agent MemStore 取依赖。
 		memoryx.RegisterSubTools()
 
-		// task sub-tools: list_tasks, cancel_task,
-		// relaunch_task, resume_task
 		task.RegisterSubTools()
 
-		// spec: typed spec/plan management (no shell; openspec backend)
 		spec.RegisterTool()
 
-		// mcp_call: generic MCP execution gateway — constant declaration,
-		// resolves server/tool through the live MCP registry at call time
 		toolmcp.RegisterTool()
 	})
 	return nil
