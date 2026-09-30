@@ -10,10 +10,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ============================================================================
-// Config Validation tests
-// ============================================================================
-
 func TestValidate_AgentReferences(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -158,10 +154,6 @@ func TestValidate_ArchitectureHierarchy(t *testing.T) {
 	require.NoError(t, err, "valid architecture should not produce error")
 }
 
-// ============================================================================
-// DefaultConfig tests
-// ============================================================================
-
 func TestDefaultConfig_KnowledgeTools(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -244,10 +236,6 @@ func TestDefaultConfigBuildable(t *testing.T) {
 		t.Fatalf("DefaultConfig 工具引用与注册表漂移（id:\"action\" vs \"exec\" 类 BUG）: %v", err)
 	}
 }
-
-// ============================================================================
-// ToolRegistry tests
-// ============================================================================
 
 func TestToolRegistry_RegisterAndQuery(t *testing.T) {
 	registry := GetRegistry()
@@ -347,10 +335,6 @@ func TestRegisterBuiltinTools_Idempotent(t *testing.T) {
 	_, ok := registry.GetPlainToolFactory("exec")
 	assert.True(t, ok, "exec should still be registered after idempotent call")
 }
-
-// ============================================================================
-// MeditationConfig parsing test
-// ============================================================================
 
 func TestMeditationConfig_Fields(t *testing.T) {
 	mc := MeditationConfig{

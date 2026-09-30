@@ -153,10 +153,9 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 }
 
 // HotNumbers is the full numeric hot bundle consumed at compression boundaries.
-// A single read yields every field, so the outer trigger line and the inner
-// compression target always come from one and the same generation; zero or
-// invalid fields fall back to the construction values, so an owner without any
-// record yet still computes a sane budget.
+// It must be taken with a single read (why a per-field read is unsafe is specified
+// in the document below); zero or invalid fields fall back to the construction
+// values, so an owner without any record yet still computes a sane budget.
 // 契约: docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 type HotNumbers struct {
 	ThresholdPct float64

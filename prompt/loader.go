@@ -64,6 +64,7 @@ func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
 
 // LoadFromFile 读取单个提示词文件；相对路径按 BaseDir 解析。
 // 空文件返回空串而非错误；磁盘未命中且配置了内嵌 FS 时由该 FS 补齐，绝对路径不回退。
+// 读失败时以 %w 包裹 os 错误，调用方可用 errors.Is 判别 os.ErrNotExist。
 func (l *Loader) LoadFromFile(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("prompt file path is empty")
@@ -287,7 +288,7 @@ func SplitCSV(s string) []string {
 }
 
 // LoadBootstrap 按 BootstrapLoadOrder 给定的顺序装配目录中的文档，顺序表之外的 .md
-// 追加在末尾；缺失的文件跳过，目录不存在时报错。
+// 追加在末尾；条目不存在时跳过该条，目录不存在或其他读取失败整体中止并返回该错误。
 func (l *Loader) LoadBootstrap(dir string) (string, error) {
 	if dir == "" {
 		return "", errors.New("bootstrap directory is empty")
@@ -307,10 +308,7 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 		path := filepath.Join(dir, filename)
 		content, err := l.LoadFromFile(path)
 		if err != nil {
-			if errors.Unwrap(err) != nil && errors.Is(errors.Unwrap(err), os.ErrNotExist) {
-				continue
-			}
-			if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "file does not exist") {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return "", err

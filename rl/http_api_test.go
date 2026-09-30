@@ -1,18 +1,7 @@
 package rl
 
-// TODO: Rewrite tests to use mockAgentLoop instead of TagentAgent
-// The HTTPAPI now uses the AgentLoop interface, so tests need to be updated.
-/*
-package rl
-
-// Original test content moved to comment block below
-
-// package rl
-
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,311 +10,137 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"trpc.group/trpc-go/trpc-agent-go/agent"
-	"trpc.group/trpc-go/trpc-agent-go/event"
+	trpcEvent "trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-type mockHTTPRunner struct {
+// messageRecordingLoop 是 AgentLoop 的测试替身：不实现信封注入契约，逐条记录收到的消息。
+type messageRecordingLoop struct {
 	mu       sync.Mutex
-	calls    int
-	messages []model.Message
+	injected []model.Message
+	active   bool
 }
 
-func (m *mockHTTPRunner) Run(ctx context.Context, userID string, sessionID string, message model.Message, opts ...agent.RunOption) (<-chan *event.Event, error) {
-	m.mu.Lock()
-	m.calls++
-	m.messages = append(m.messages, message)
-	m.mu.Unlock()
-
-	ch := make(chan *event.Event, 2)
-	rsp := &model.Response{
-		ID:    "comp-test",
-		Model: "test-model",
-		Done:  true,
-		Choices: []model.Choice{{
-			Message: model.Message{
-				Role:    model.RoleAssistant,
-				Content: "task completed successfully",
-			},
-		}},
-		Usage: &model.Usage{
-			PromptTokens:     10,
-			CompletionTokens: 20,
-		},
-	}
-	ch <- event.NewResponseEvent("inv", "author", rsp)
-	close(ch)
-	return ch, nil
+func (l *messageRecordingLoop) InjectMessage(msg model.Message) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.injected = append(l.injected, msg)
 }
 
-func (m *mockHTTPRunner) Close() error { return nil }
+func (l *messageRecordingLoop) InjectMessageWithSource(_ string, msg model.Message) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.injected = append(l.injected, msg)
+}
 
-func createTestAgent(t *testing.T) *TagentAgent {
+func (l *messageRecordingLoop) StartLoop(string, string) (<-chan *trpcEvent.Event, error) {
+	return nil, nil
+}
+
+func (l *messageRecordingLoop) StopLoop()          {}
+func (l *messageRecordingLoop) IsLoopActive() bool { return l.active }
+
+func (l *messageRecordingLoop) snapshot() []model.Message {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]model.Message(nil), l.injected...)
+}
+
+func sendTask(t *testing.T, h *HTTPAPI, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	bus := NewEventBus()
-	outputCh := make(chan *event.Event, 100)
-	cm := newTestContextManager("test", &mockModel{}, nil, outputCh, bus)
-	return &TagentAgent{
-		persistentBus:  bus,
-		activeBus:      bus,
-		contextManager: cm,
-		config:         &TagentConfig{},
-		outputCh:       outputCh,
-		name:           "test",
-		description:    "test",
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(body)))
+	return rec
+}
+
+func errorType(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	return body["error"]
+}
+
+// TestHTTPAPI_Healthz_ReportsLoopState 钉住 GET /healthz 的回报形状：status 恒为 ok，loop_active 镜像 IsLoopActive。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#http-api
+func TestHTTPAPI_Healthz_ReportsLoopState(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		h := NewHTTPAPI(&messageRecordingLoop{active: active})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		require.Equal(t, http.StatusOK, rec.Code, "active=%v", active)
+
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "ok", body["status"], "active=%v", active)
+		assert.Equal(t, active, body["loop_active"], "loop_active must mirror IsLoopActive")
 	}
 }
 
-// startTestLoop sets up loop state and starts the runEventLoop goroutine
-// for tests that need an active loop. Returns a cleanup function.
-func startTestLoop(ta *TagentAgent) func() {
-	ta.loopCtx, ta.loopCancel = context.WithCancel(context.Background())
-	ta.loopState.Store(1) // loopRunning (agent 包 §6.1 状态机)
-	ta.loopWg.Add(1)
-	go func() {
-		defer ta.loopWg.Done()
-		ta.runEventLoop(ta.loopCtx, ta.persistentBus, ta.contextManager)
-	}()
-	return func() {
-		ta.loopCancel()
-		ta.loopWg.Wait()
-	}
-}
-
-// ---------------------------------------------------------------------------
-// HTTP API tests
-// ---------------------------------------------------------------------------
-
-func TestHTTPAPI_Healthz_LoopInactive(t *testing.T) {
-	ta := createTestAgent(t)
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, body := doRequest(t, srv, http.MethodGet, "/healthz", nil)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var result map[string]any
-	json.Unmarshal(body, &result)
-	assert.Equal(t, "ok", result["status"])
-	assert.Equal(t, false, result["loop_active"])
-}
-
-func TestHTTPAPI_Healthz_LoopActive(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
-
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, body := doRequest(t, srv, http.MethodGet, "/healthz", nil)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var result map[string]any
-	json.Unmarshal(body, &result)
-	assert.Equal(t, true, result["loop_active"])
-}
-
+// TestHTTPAPI_PostTask_LoopInactive 钉住循环未激活时 POST /task 拒绝为 503 loop_not_active，且不得注入任何消息。
 func TestHTTPAPI_PostTask_LoopInactive(t *testing.T) {
-	ta := createTestAgent(t)
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodPost, "/task", map[string]any{
-		"messages": []map[string]string{{"role": "user", "content": "hello"}},
-	})
-	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	l := &messageRecordingLoop{active: false}
+	rec := sendTask(t, NewHTTPAPI(l), `{"messages":[{"role":"user","content":"hi"}]}`)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "loop_not_active", errorType(t, rec))
+	assert.Empty(t, l.snapshot(), "rejected request must not inject")
 }
 
-func TestHTTPAPI_PostTask_Success(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
-
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodPost, "/task", map[string]any{
-		"messages": []map[string]string{{"role": "user", "content": "do something"}},
-	})
-	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+// TestHTTPAPI_PostTask_EmptyMessages 钉住 messages 数组为空是请求错误 400，不与超限的 413 混用状态码。
+func TestHTTPAPI_PostTask_EmptyMessages(t *testing.T) {
+	l := &messageRecordingLoop{active: true}
+	rec := sendTask(t, NewHTTPAPI(l), `{"messages":[]}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "request_rejected", errorType(t, rec))
+	assert.Empty(t, l.snapshot())
 }
 
-func TestHTTPAPI_PostTask_NoMessages(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
-
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodPost, "/task", map[string]any{
-		"messages": []map[string]string{},
-	})
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+// TestHTTPAPI_PostTask_MalformedBody 钉住请求体不是合法 JSON 时返回 400，不泄漏为 5xx。
+func TestHTTPAPI_PostTask_MalformedBody(t *testing.T) {
+	l := &messageRecordingLoop{active: true}
+	rec := sendTask(t, NewHTTPAPI(l), "not json")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "request_rejected", errorType(t, rec))
+	assert.Empty(t, l.snapshot())
 }
 
-func TestHTTPAPI_PostTask_WithLLMBaseURL(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
+// TestHTTPAPI_PostTask_WithoutEnvelopeSupport 钉住未实现信封注入的 AgentLoop 走逐条注入通路：整批按序到达、空 role 归一为 user、回执不含批次身份。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#http-api
+func TestHTTPAPI_PostTask_WithoutEnvelopeSupport(t *testing.T) {
+	l := &messageRecordingLoop{active: true}
+	rec := sendTask(t, NewHTTPAPI(l), `{"messages":[{"role":"system","content":"s"},{"content":"u"}]}`)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 
-	api := NewHTTPAPI(ta)
-	var updatedURL string
-	api.SetModelUpdateFn(func(baseURL string) {
-		updatedURL = baseURL
-	})
+	got := l.snapshot()
+	require.Len(t, got, 2, "every message in the batch must be injected")
+	assert.Equal(t, model.RoleSystem, got[0].Role)
+	assert.Equal(t, "s", got[0].Content)
+	assert.Equal(t, model.RoleUser, got[1].Role, "empty role must normalize to user")
+	assert.Equal(t, "u", got[1].Content)
 
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodPost, "/task", map[string]any{
-		"messages":     []map[string]string{{"role": "user", "content": "rl task"}},
-		"llm_base_url": "http://localhost:12345/v1",
-	})
-	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
-	assert.Equal(t, "http://localhost:12345/v1", updatedURL)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "accepted", body["status"])
+	assert.NotContains(t, rec.Body.String(), "request_id", "per-message path has no batch identity")
 }
 
-func TestHTTPAPI_PostTask_NoCallback_NoError(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
-
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodPost, "/task", map[string]any{
-		"messages":     []map[string]string{{"role": "user", "content": "task"}},
-		"llm_base_url": "http://localhost:9999/v1",
-	})
-	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
-}
-
-func TestHTTPAPI_PostTask_InvalidJSON(t *testing.T) {
-	ta := createTestAgent(t)
-	cleanup := startTestLoop(ta)
-	defer cleanup()
-
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequestRaw(t, srv, http.MethodPost, "/task", "not json")
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-}
-
-func TestHTTPAPI_NotFound(t *testing.T) {
-	ta := createTestAgent(t)
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodGet, "/unknown", nil)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-}
-
-func TestHTTPAPI_TrajectoryEndpoints_Removed(t *testing.T) {
-	ta := createTestAgent(t)
-	api := NewHTTPAPI(ta)
-	srv := httptest.NewServer(api)
-	defer srv.Close()
-
-	resp, _ := doRequest(t, srv, http.MethodGet, "/trajectories", nil)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-
-	resp, _ = doRequest(t, srv, http.MethodGet, "/trajectory/test", nil)
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-}
-
-// ---------------------------------------------------------------------------
-// SwappableModel tests
-// ---------------------------------------------------------------------------
-
-type mockModel struct {
-	info model.Info
-}
-
-func (m *mockModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
-	ch := make(chan *model.Response, 1)
-	ch <- &model.Response{
-		ID:    "test",
-		Model: m.info.Name,
-		Done:  true,
-		Choices: []model.Choice{{
-			Message: model.Message{Role: model.RoleAssistant, Content: "mock response"},
-		}},
+// TestHTTPAPI_UnregisteredRoutes 钉住未注册的路由与方法一律 404 not_found；轨迹读取路径 /trajectories 与 /trajectory/{key} 不提供服务。
+func TestHTTPAPI_UnregisteredRoutes(t *testing.T) {
+	h := NewHTTPAPI(&messageRecordingLoop{active: true})
+	cases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/unknown"},
+		{http.MethodGet, "/trajectories"},
+		{http.MethodGet, "/trajectory/some-key"},
+		{http.MethodDelete, "/task"},
 	}
-	close(ch)
-	return ch, nil
-}
-
-func (m *mockModel) Info() model.Info { return m.info }
-
-func TestSwappableModel_Swap(t *testing.T) {
-	original := &mockModel{info: model.Info{Name: "original-model"}}
-	swapped := &mockModel{info: model.Info{Name: "swapped-model"}}
-
-	sm := NewSwappableModel(original)
-	assert.Equal(t, "original-model", sm.Info().Name)
-
-	sm.Swap(swapped)
-	assert.Equal(t, "swapped-model", sm.Info().Name)
-
-	sm.Swap(original)
-	assert.Equal(t, "original-model", sm.Info().Name)
-}
-
-func TestSwappableModel_GenerateContent(t *testing.T) {
-	m := &mockModel{info: model.Info{Name: "test-model"}}
-	sm := NewSwappableModel(m)
-
-	ctx := context.Background()
-	req := &model.Request{}
-	ch, err := sm.GenerateContent(ctx, req)
-	require.NoError(t, err)
-
-	resp := <-ch
-	assert.Equal(t, "test-model", resp.Model)
-}
-
-// ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
-
-func doRequest(t *testing.T, srv *httptest.Server, method, path string, body any) (*http.Response, []byte) {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		bodyBytes, _ = json.Marshal(body)
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s", tc.method, tc.path)
+		assert.Equal(t, "not_found", errorType(t, rec), "%s %s", tc.method, tc.path)
 	}
-	return doRequestRaw(t, srv, method, path, string(bodyBytes))
 }
-
-func doRequestRaw(t *testing.T, srv *httptest.Server, method, path, body string) (*http.Response, []byte) {
-	t.Helper()
-	req, err := http.NewRequest(method, srv.URL+path, nil)
-	if body != "" {
-		req.Body = io.NopCloser(strings.NewReader(body))
-	}
-	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	return resp, respBody
-}
-
-*/

@@ -149,8 +149,8 @@ type fakeGuard struct {
 
 func (f fakeGuard) Breach(string) (bool, string) { return f.breach, f.why }
 
-// TestGitEvolution_EvaluationEvent（4.2 核心）：劣化只产 evaluation 事件（建议式），
-// 不执行 git revert、无消息注入。
+// TestGitEvolution_EvaluationEvent pins that a detected regression only yields an advisory evaluation event.
+// - No git revert is executed and no message is injected.
 func TestGitEvolution_EvaluationEvent(t *testing.T) {
 	dir := initGitRepo(t)
 	writeFile(t, dir, "resources/prompts/SOUL.md", "v2")

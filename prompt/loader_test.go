@@ -373,6 +373,44 @@ func TestLoader_LoadBootstrap(t *testing.T) {
 	}
 }
 
+// TestLoader_LoadBootstrap_OrderFileMissingSkipsOtherFailureAborts 钉住顺序表条目读失败时的两种去向：不存在才跳过并继续装配其余条目，其他读失败必须整体中止。
+//
+// - SOUL.md 缺失：结果不含该篇内容，其余五篇逐篇仍在
+// - SOUL.md 是目录：读失败但不属于 os.ErrNotExist，LoadBootstrap 返回错误而不是被静默跳过
+func TestLoader_LoadBootstrap_OrderFileMissingSkipsOtherFailureAborts(t *testing.T) {
+	dir := t.TempDir()
+	bootstrapDir := filepath.Join(dir, "bootstrap")
+	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll bootstrap dir: %v", err)
+	}
+	for _, name := range BootstrapLoadOrder {
+		if name == "SOUL.md" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(bootstrapDir, name), []byte("body of "+name), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
+	loader := NewLoader(dir)
+
+	result, err := loader.LoadBootstrap("bootstrap")
+	if err != nil {
+		t.Fatalf("a missing order file must be skipped, got error: %v", err)
+	}
+	expected := "body of AGENTS.md\n\nbody of USER.md\n\nbody of TOOLS.md\n\nbody of HEARTBEAT.md\n\nbody of MEMORY.md"
+	if result != expected {
+		t.Errorf("assembled result mismatch\n want: %q\n  got: %q", expected, result)
+	}
+
+	if err := os.Mkdir(filepath.Join(bootstrapDir, "SOUL.md"), 0o755); err != nil {
+		t.Fatalf("Mkdir SOUL.md: %v", err)
+	}
+	if _, err := loader.LoadBootstrap("bootstrap"); err == nil {
+		t.Error("a read failure that is not os.ErrNotExist must abort assembly, got nil error")
+	}
+}
+
 func TestLoader_LoadBootstrap_WithExtraFiles(t *testing.T) {
 	dir := t.TempDir()
 	bootstrapDir := filepath.Join(dir, "bootstrap")

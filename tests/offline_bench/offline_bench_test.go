@@ -1,16 +1,14 @@
-// Package offline_bench holds the offline performance baseline for the
-// resident hardening program (archived
-// design D6, converged): event scale 1k/10k/100k (single Sync-barrier
-// setting — the minimal localfile backend has NO fsync axis anymore, a second
-// "fsync" column would measure the same bytes twice) × probe
-// concurrency 1/10/100, recording p50/p95, allocs, RSS, KV scan volume and
-// the chars/token estimator error against the pinned offline tokenizer
-// fixture. It is NOT part of CI: run explicitly with
+// Package offline_bench holds the offline performance baseline for the resident
+// hardening program: event scale 1k/10k/100k (single Sync-barrier setting — the
+// minimal localfile backend has no fsync axis, so a second "fsync" column would
+// measure the same bytes twice) × probe concurrency 1/10/100, recording p50/p95,
+// allocs, RSS, KV scan volume and the chars/token estimator error against the
+// pinned offline tokenizer fixture. It is NOT part of CI: run explicitly with
 //
 //	RUN_OFFLINE_BENCH=1 go test ./tests/offline_bench/ -run TestOfflineBenchmark -v -timeout 60m
 //
-// and point BENCH_REPORT=<path> to persist the JSON report for the 2.6
-// regression comparison.
+// and point BENCH_REPORT=<path> to persist the JSON report for regression
+// comparison.
 package offline_bench
 
 import (
@@ -172,9 +170,9 @@ func (syncErrKV) ListPartitionIDs() []int { return nil }
 // construction gate refuses a no-op-capable backend loudly.
 type plainKV struct{ memory.KVStore }
 
-// TestNewCountingKVRequiresDurableBackend: the deleted no-op fallback
-// must come back as a LOUD failure at wiring time, never as a silent zero-
-// barrier benchmark cell.
+// TestNewCountingKVRequiresDurableBackend refuses a backend lacking the durable contract.
+// - newCountingKV panics at wiring time instead of yielding a silent zero-barrier benchmark cell.
+// - A no-op-capable backend would measure flush-only latency while reporting a durable commit.
 func TestNewCountingKVRequiresDurableBackend(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -185,10 +183,11 @@ func TestNewCountingKVRequiresDurableBackend(t *testing.T) {
 	newCountingKV(plainKV{})
 }
 
-// TestCountingKVSyncErrorPropagates proves the wrapper forwards the underlying
-// Sync error rather than swallowing it (F10/D7「禁止 no-op 假能力」): a no-op
-// Sync would let the benchmark report a durability barrier that never happened.
-// It also proves the call is counted even on failure.
+// TestCountingKVSyncErrorPropagates pins the wrapper to the no-op-forbidding contract.
+// - Sync forwards the underlying error rather than swallowing it; a no-op Sync would report a barrier that never happened.
+// - The call is counted even when it fails.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestCountingKVSyncErrorPropagates(t *testing.T) {
 	ckv := newCountingKV(syncErrKV{})
 	if err := ckv.Sync(); !errors.Is(err, errBarrierBoom) {
@@ -484,33 +483,17 @@ func tokenEstimatorError(t *testing.T) map[string]any {
 // benchBarrierMarker is the single event's content, read back by a fresh process.
 const benchBarrierMarker = "bench-wrapper-barrier-marker"
 
-// TestBenchWrapperBarrierDurableWithoutClose proves the offline benchmark wraps
-// the KV with the SAME event-level durability barrier production uses
-// . The benchmark stores every
-// event through countingKV; before the F10 fix countingKV exposed no Sync, so
-// FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion failed, the
-// commit barrier was skipped, and a single acknowledged write stayed in
-// LocalFileKV's in-memory pending buffer (KVPut is async acceptance) — lost on
-// an unclean exit.
-//
-// The child replicates the benchmark's exact wrapping (countingKV over
-// LocalFileKV), stores ONE event, records the countingKV.syncs delta, then
-// terminates WITHOUT Close. The parent asserts (1) the wrapper's Sync was
-// reached (delta >= 1: the barrier ran through the wrapper, not around it) and
-// (2) a fresh, independent store over the same directory reads the event back —
-// so the benchmark and production cross the same event barrier.
-//
-// fsync boundary (D7「报告不混为掉电耐久」):
-//
-//	(converged per the localfile-minimization ruling): the minimal backend
-//
-// has NO fsync/WAL machinery — WithFSync is accepted-and-ignored, so an
-// "fsync-on" cell would attest the SAME bytes twice under two names (a false
-// two-axis claim, deleted). What IS certified here: the Sync barrier is a real
-// atomic tmp+rename durable commit — visible to a fresh, independent process
-// after an UNCLEAN exit (no Close, no flush tick), with the actual barrier
-// count and original-text/index evidence. NO power-loss durability is claimed;
-// that dimension is deferred to the rustviking-backed stage.
+// TestBenchWrapperBarrierDurableWithoutClose proves the offline benchmark wraps the KV with the SAME event-level durability barrier production uses.
+// - Without Sync on the wrapper, FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion fails and the commit barrier is skipped.
+// - An acknowledged write then stays in LocalFileKV's in-memory pending buffer (KVPut accepts asynchronously) and is lost on an unclean exit.
+// - The child replicates the benchmark wrapping (countingKV over LocalFileKV), stores ONE event, records the syncs delta, exits WITHOUT Close.
+// - The parent asserts the wrapper Sync was reached (delta >= 1: through the wrapper, not around it).
+// - The parent also asserts a fresh independent store over the same directory reads the event back.
+// - Certified: the Sync barrier is a real atomic tmp+rename durable commit, visible after an unclean exit (no Close, no flush tick).
+// - Certified with the actual barrier count and original-text/index evidence.
+// - Not certified: power-loss durability — the minimal backend has no fsync/WAL machinery (WithFSync is accepted-and-ignored).
+// - An "fsync-on" cell would attest the same bytes twice under two names, so the report keeps a single barrier axis.
+// - That dimension belongs to the rustviking-backed stage.
 func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 	if os.Getenv("TAGENT_BENCH_BARRIER_SUBPROC") == "1" {
 		runBenchBarrierChild()

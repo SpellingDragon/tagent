@@ -32,6 +32,8 @@ func findCollisionPair(t *testing.T) (string, string) {
 
 // TestPartitionCollision_FailsClosed：共享同一持久 store 的两个 agent 名哈希到同一 pid → 构造期 fail-closed，绝不静默合并记忆命名空间，绝不自动迁移历史。
 // - nameB 必须经引用被递归构建，它的 store owner 才会登记，"同一 store 上的 pid 冲突"这一前提方成立。
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#memory-preflight
 func TestPartitionCollision_FailsClosed(t *testing.T) {
 	nameA, nameB := findCollisionPair(t)
 	dir := t.TempDir()

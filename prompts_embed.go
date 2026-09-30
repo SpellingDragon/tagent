@@ -5,7 +5,7 @@ import "embed"
 // defaultPromptsFS embeds the framework's default prompt set so it ships with
 // the binary as a location-independent fallback. Consumers override individual
 // prompts on disk (via prompt_dir); anything they don't provide resolves from
-// here. See prompt.WithFallback / the prompt-loader-fallback capability.
+// here; prompt.WithFallback is the consumer-side entry for that override.
 //
 //go:embed resources/prompts
 var defaultPromptsFS embed.FS

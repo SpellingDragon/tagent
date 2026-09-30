@@ -2,9 +2,12 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -135,7 +138,7 @@ func TestBaselineRoundTrip(t *testing.T) {
 		"unindexed-path-ref": 12,
 	}
 	dirs := []string{".", "examples/wechat-bot"}
-	require.NoError(t, writeBaseline(path, counts, dirs))
+	require.NoError(t, writeBaseline(path, counts, dirs, false))
 	got, err := readBaseline(path)
 	require.NoError(t, err)
 	require.Equal(t, counts, got.Counts)
@@ -384,7 +387,7 @@ func writeTree(t *testing.T, root string, files map[string]string) {
 func TestBaselineRoundTripStampsItsScanSet(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
 	counts := map[string]int{"free-standing": 3, "audit-marker": 2}
-	require.NoError(t, writeBaseline(path, counts, []string{".", "examples/wechat-bot"}))
+	require.NoError(t, writeBaseline(path, counts, []string{".", "examples/wechat-bot"}, false))
 
 	got, err := readBaseline(path)
 	require.NoError(t, err)
@@ -446,4 +449,220 @@ func TestScopeGuardAcceptsCompleteSetAndIgnoresOrder(t *testing.T) {
 	err := checkScanSet(root, []string{".", "sub"}, []string{".", "sub"})
 	require.Error(t, err, "sub lives in the root module, so listing both counts sub/c.go twice")
 	require.Contains(t, strings.ToLower(err.Error()), "twice")
+}
+
+// TestIgnoredGoFilesOutsideGitRepoIsEmpty pins the fallback that keeps a scan outside a work tree behaving as it did before.
+// - No git work tree means no exclusions, so the counts still cover every Go file on disk.
+func TestIgnoredGoFilesOutsideGitRepoIsEmpty(t *testing.T) {
+	require.Empty(t, ignoredGoFiles(t.TempDir()))
+}
+
+// TestIgnoredGoFilesReportsGitIgnoredSources pins what the ratchet must refuse to count.
+// - A git-ignored source is absent from a checkout, so a baseline holding its findings is not reproducible.
+// - Scope is decided relative to the scan root, and nested modules are covered like the root module.
+// - The run is skipped when git is unavailable, because the contract is git's own exclusion scope.
+func TestIgnoredGoFilesReportsGitIgnoredSources(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required to exercise the repository-scope filter")
+	}
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gitignore":       "wip.go\nvendored/\n",
+		"kept.go":          "package p\n",
+		"wip.go":           "package p\n",
+		"m/go.mod":         "module m\n",
+		"m/wip.go":         "package m\n",
+		"vendored/deep.go": "package p\n",
+	})
+	require.NoError(t, exec.Command("git", "init", "-q", root).Run())
+	got := ignoredGoFiles(root)
+	require.True(t, isIgnored(got, "wip.go"), "an ignored source must leave the ratchet")
+	require.True(t, isIgnored(got, filepath.Join("m", "wip.go")), "a nested module must be covered too")
+	require.False(t, isIgnored(got, "kept.go"), "a source git does not ignore stays gated")
+	files, err := repoGoFiles(root, root, got)
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(root, "kept.go")}, files,
+		"a wholly ignored directory must take the sources inside it out of the scan")
+}
+
+// TestRepoGoFilesDropsIgnoredSources pins the seam the scan loop uses.
+// - An ignored file leaves the list, while an empty ignored set leaves the walk untouched.
+// - A directory key takes everything beneath it out of the scan.
+func TestRepoGoFilesDropsIgnoredSources(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"kept.go": "package p\n", "sub/deep.go": "package sub\n", "gen/ib.go": "package gen\n"})
+	files, err := repoGoFiles(root, root, map[string]bool{filepath.Join("sub", "deep.go"): true, "gen": true})
+	require.NoError(t, err)
+	require.Equal(t, []string{filepath.Join(root, "kept.go")}, files)
+	all, err := repoGoFiles(root, root, map[string]bool{})
+	require.NoError(t, err)
+	require.Len(t, all, 3, "an empty ignored set must leave the walk untouched")
+}
+
+// TestLicenseHeaderIsNotFreeStanding pins that a license header is not a violation.
+// - A header above the package clause is not a documentation slot, so the ratchet may not call it free-standing.
+func TestLicenseHeaderIsNotFreeStanding(t *testing.T) {
+	chdirToRepoRoot(t)
+	p := filepath.Join(t.TempDir(), "head.go")
+	require.NoError(t, os.WriteFile(p, []byte(
+		"// Copyright 2025 tagent authors. All rights reserved.\n"+
+			"// Use of this source code is governed by a BSD-style license.\n"+
+			"\n"+
+			"// Package p does things.\n"+
+			"package p\n"), 0o644))
+	require.Zero(t, rulesIn(t, p)["free-standing"], "a license header must stay outside the violation set")
+}
+
+// TestBlankIdentifierGroupNeedsNoNamePrefix pins that compile-time assertions escape the name check.
+// - A doc for `var _ Iface = (*T)(nil)` cannot start with the blank identifier, so the requirement is unsatisfiable.
+func TestBlankIdentifierGroupNeedsNoNamePrefix(t *testing.T) {
+	chdirToRepoRoot(t)
+	p := filepath.Join(t.TempDir(), "assert.go")
+	require.NoError(t, os.WriteFile(p, []byte(
+		"package p\n\nimport \"io\"\n\n"+
+			"// compile-time assertion: T implements io.Closer.\n"+
+			"var _ io.Closer = (*T)(nil)\n\n"+
+			"type T struct{}\n\n"+
+			"func (T) Close() error { return nil }\n"), 0o644))
+	require.Zero(t, rulesIn(t, p)["doc-not-name-prefixed"], "the blank identifier must not be demanded as a doc prefix")
+}
+
+// TestFindingTextTruncationKeepsValidUTF8 pins that shortening a finding never splits a rune.
+// - Chinese comment text is the norm here, so a byte cut mid-rune yields unreadable output.
+func TestFindingTextTruncationKeepsValidUTF8(t *testing.T) {
+	chdirToRepoRoot(t)
+	long := strings.Repeat("记忆", 100)
+	got := firstLine(long)
+	require.True(t, utf8.ValidString(got), "truncated finding text must stay valid UTF-8")
+	require.LessOrEqual(t, utf8.RuneCountInString(got), 121)
+}
+
+// TestIndexRootNoteNamesOnlyLegalRoots pins that the note cannot advertise an illegal root.
+// - The note once advertised a root the whitelist rejects, so following it loops back to the same rejection.
+func TestIndexRootNoteNamesOnlyLegalRoots(t *testing.T) {
+	chdirToRepoRoot(t)
+	p := filepath.Join(t.TempDir(), "idx.go")
+	require.NoError(t, os.WriteFile(p, []byte(
+		"package p\n\n"+
+			"// Foo does things.\n"+
+			"// 契约: openspec/specs/x.md\n"+
+			"func Foo() {}\n"), 0o644))
+	fs, err := checkFile(p)
+	require.NoError(t, err)
+	var hit []string
+	for _, f := range fs {
+		if f.Rule == "index-root" {
+			hit = append(hit, f.Note)
+		}
+	}
+	require.NotEmpty(t, hit, "an index outside the allowed roots must still be reported")
+	for _, n := range hit {
+		roots := strings.SplitN(strings.TrimPrefix(n, "index target must live under "), ": ", 2)[0]
+		require.NotContains(t, roots, "openspec", "the roots clause may not advertise a root the whitelist rejects")
+		require.Contains(t, roots, "docs/", "the roots clause must name the real whitelist")
+	}
+}
+
+// TestIndexTargetResolvesAgainstRepoRootNotCWD pins that index checks are location-independent.
+// - A target is repo-root relative by convention, so running from a package directory may not invent missing-file findings.
+func TestIndexTargetResolvesAgainstRepoRootNotCWD(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "openspec", "changes"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "pkg"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "x.md"), []byte("# X\n\nsome text\n"), 0o644))
+	p := filepath.Join(root, "pkg", "a.go")
+	require.NoError(t, os.WriteFile(p, []byte(
+		"package pkg\n\n"+
+			"// A does things.\n"+
+			"// 契约: docs/x.md\n"+
+			"func A() {}\n"), 0o644))
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(filepath.Join(root, "pkg")))
+	defer func() { require.NoError(t, os.Chdir(wd)) }()
+	require.Zero(t, rulesIn(t, p)["index-target-missing"], "a target that exists at the repo root must not read as missing")
+}
+
+// TestWriteBaselineRefusesToRaiseCounts pins that the ratchet may only be lowered.
+// - A raise must be named and refused unless the caller passes an explicit allow-raise.
+func TestWriteBaselineRefusesToRaiseCounts(t *testing.T) {
+	chdirToRepoRoot(t)
+	p := filepath.Join(t.TempDir(), "baseline.json")
+	require.NoError(t, writeBaseline(p, map[string]int{"free-standing": 1}, []string{"."}, false))
+	err := writeBaseline(p, map[string]int{"free-standing": 2}, []string{"."}, false)
+	require.Error(t, err, "raising a slot may not pass silently")
+	require.Contains(t, err.Error(), "free-standing")
+	require.NoError(t, writeBaseline(p, map[string]int{"free-standing": 2}, []string{"."}, true))
+	require.NoError(t, writeBaseline(p, map[string]int{"free-standing": 0}, []string{"."}, false), "lowering stays allowed")
+}
+
+// TestDirectiveLineDoesNotExemptProseInSameGroup pins that a directive cannot shield its neighbours.
+// - One //nolint line once exempted the whole group, turning any content rule off with a single comment.
+func TestDirectiveLineDoesNotExemptProseInSameGroup(t *testing.T) {
+	chdirToRepoRoot(t)
+	p := filepath.Join(t.TempDir(), "mix.go")
+	require.NoError(t, os.WriteFile(p, []byte(
+		"package p\n\n"+
+			"// Foo keeps the legacy path available for callers.\n"+
+			"//nolint:gocritic\n"+
+			"func Foo() {}\n"), 0o644))
+	require.NotZero(t, rulesIn(t, p)["audit-marker"], "prose in a group holding a directive must still be checked")
+}
+
+// TestChangeNamesReportsAMissingTree pins that a failed enumeration is visible, not silent.
+// - Without openspec the change-name axis of external-coord simply stops applying, which must be said out loud.
+func TestChangeNamesReportsAMissingTree(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.Chdir(dir))
+	defer func() { require.NoError(t, os.Chdir(wd)) }()
+	changeNames = nil
+	loadChangeNames()
+	require.Empty(t, changeNames, "a tree without openspec yields no change names")
+	require.False(t, changeNamesFound, "the enumeration must report that it found no openspec tree")
+	changeNamesOnce = sync.Once{}
+	changeNames = nil
+	changeNamesFound = false
+}
+
+// TestBlindSpotIsAnnouncedBeforeTheWalk pins that a dropped axis is reported in every mode.
+// - A measure-only run returns before the ratchet is consulted, so an announcement placed after the walk never reaches it.
+// - With the openspec tree present the announcement must stay silent, or a clean run reads as a gap.
+func TestBlindSpotIsAnnouncedBeforeTheWalk(t *testing.T) {
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	reset := func() {
+		changeNamesOnce = sync.Once{}
+		changeNames = nil
+		changeNamesFound = false
+	}
+	defer reset()
+	logged := func(t *testing.T) string {
+		t.Helper()
+		f, err := os.CreateTemp(t.TempDir(), "stderr")
+		require.NoError(t, err)
+		orig := os.Stderr
+		os.Stderr = f
+		announceScanBlindSpots()
+		require.NoError(t, f.Sync())
+		os.Stderr = orig
+		require.NoError(t, f.Close())
+		b, err := os.ReadFile(f.Name())
+		require.NoError(t, err)
+		return string(b)
+	}
+
+	reset()
+	require.NoError(t, os.Chdir(t.TempDir()))
+	out := logged(t)
+	require.NoError(t, os.Chdir(wd))
+	require.False(t, changeNamesFound, "the announcement must report the enumeration it just ran")
+	require.Contains(t, out, "change-name axis", "a run without the openspec tree must name the axis it dropped")
+
+	reset()
+	out = logged(t)
+	require.True(t, changeNamesFound, "a run from the repository must locate the tree")
+	require.NotContains(t, out, "change-name axis", "a run that located the tree must not warn")
 }

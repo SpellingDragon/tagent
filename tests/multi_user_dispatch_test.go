@@ -37,8 +37,7 @@ func (m *multiUserMockModel) Info() model.Info {
 	return model.Info{Name: "mock-model"}
 }
 
-// TestMultiUserDispatch verifies that concurrent messages from different users
-// are correctly routed to their respective chat_ids without cross-contamination.
+// TestMultiUserDispatch verifies that concurrent messages from different users route to their own chat_id without cross-contamination.
 func TestMultiUserDispatch(t *testing.T) {
 	cfg := &agent.TagentConfig{
 		Model:     &multiUserMockModel{},

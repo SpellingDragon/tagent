@@ -9,7 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var testStoreRoots sync.Map // testing.TB -> string
+// testStoreRoots maps a testing.TB to its store root, keyed by the TB pointer identity.
+var testStoreRoots sync.Map
 
 // testStore 把单元测试的 memory store 路径挪出仓库工作树，并按**测试用例**隔离。
 //
@@ -43,9 +44,10 @@ func testStore(t testing.TB, name string) string {
 	return filepath.Join(root, name)
 }
 
-// TestTestStore_IsolatesPerCase 隔离合同：不同用例绝不共享 store 根；同一用例同名 store 保持稳定（重启模拟与
-// 多代渲染的身份前提）。旧的 PID+固定名字根会让两个用例落到同一目录、互相看见字节，
-// 此测先把该缺陷钉死再修复。
+// TestTestStore_IsolatesPerCase pins the isolation contract of the test-store helper.
+// - Different cases never share a store root, while one case keeps a stable path for the same store name.
+// - That stability is the identity premise for restart simulation and multi-generation rendering.
+// - A root shared by PID plus a fixed name would land two cases in one directory where they see each other's bytes.
 func TestTestStore_IsolatesPerCase(t *testing.T) {
 	var aPath string
 	t.Run("caseA_writes", func(t *testing.T) {

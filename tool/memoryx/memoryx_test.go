@@ -8,8 +8,8 @@ import (
 	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
-// TestToolsConstruct 验证两个策展工具可构造（薄封装；核心逻辑 BuildConsolidationEvent/
-// VerifyConsolidation/Diagnostics 已在 memory 包充分测试）。
+// TestToolsConstruct pins that both curation tools are constructible as thin wrappers.
+// - The core logic BuildConsolidationEvent, VerifyConsolidation and Diagnostics is exercised in the memory package.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#curation
 func TestToolsConstruct(t *testing.T) {

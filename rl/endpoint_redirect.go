@@ -12,14 +12,10 @@ import (
 // 环路上界，故该上界必须在此显式重新施加。
 const maxRedirectHops = 10
 
-// EndpointRedirectPolicy 构造 http.Client 的 CheckRedirect：对 30x 链的**每一跳**都要求
-// 目标 host 在allowlist 内（精确 host、任意端口，与初始 URL 校验同一套语义）。空allowlist
-// 拒绝任何一跳，即"动态重定向关闭"的部署语义。
-//
-// allowlist 若只约束初始 llm_base_url，被放行的端点仍可用 30x 把 LLM 客户端带到任意主机
-// ——通往元数据服务的 SSRF 桥，因此判定必须按跳执行；allowlist 内的主机互相 ping-pong 时
-// 必须显式失败（见 maxRedirectHops），不得把这一回合挂到 ctx 取消为止。allowlist 判定留在
-// rl 包内、不引入 provider SDK 依赖，宿主经传输层注入口装上守卫。
+// EndpointRedirectPolicy 构造 http.Client 的 CheckRedirect，对 30x 链按跳校验目标
+// host 是否在 allowlist 内。匹配粒度、空 allowlist 的部署语义、跳数上界（见
+// maxRedirectHops）与主机名归一，均以文档为唯一真源。判定留在 rl 包内、不引入
+// provider SDK 依赖，宿主经传输层注入口装上守卫。
 //
 // 契约: docs/wiki/rl/rl-architecture.md#redirect-policy
 func EndpointRedirectPolicy(allowedHosts []string) func(*http.Request, []*http.Request) error {

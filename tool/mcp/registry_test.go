@@ -241,9 +241,9 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	require.NoError(t, r.Close())
 }
 
-// TestRegistry_HotSync_FullProjectConfigShape 钉住 完整项目配置形态（entry/agents/providers 与
-// mcp_servers 共存）热同步——严格解码只作用于 mcp_servers 子树，合法根字段
-// 不再被判 unknown 而静默保留旧表。
+// TestRegistry_HotSync_FullProjectConfigShape pins hot sync for the full project configuration shape.
+// - Entry, agents and providers coexist with mcp_servers, and strict decoding applies only to the mcp_servers subtree.
+// - Legitimate root fields are not judged unknown, so an updated table replaces the old one instead of being silently kept.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 func TestRegistry_HotSync_FullProjectConfigShape(t *testing.T) {
@@ -283,8 +283,9 @@ mcp_servers:
 	require.True(t, ok)
 }
 
-// TestRegistry_HotSync_JSONFullConfigShape cold-eyes P1-3：JSON 完整配置形态（子树即 servers 映射，非 configFileServers
-// 包装）——曾必然解析失败（"alpha" 被判 unknown）。
+// TestRegistry_HotSync_JSONFullConfigShape pins the same hot sync for the JSON configuration shape.
+// - In JSON the document root is the servers mapping itself, not wrapped in configFileServers.
+// - Reading the root through the wrapper would reject a bare mapping, which is the shape under test.
 func TestRegistry_HotSync_JSONFullConfigShape(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "tagent.json")

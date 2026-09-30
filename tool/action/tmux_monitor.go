@@ -74,12 +74,18 @@ var _ sessionInspector = (*TmuxExecutor)(nil)
 
 // MonitorConfig holds configuration for TmuxMonitor
 type MonitorConfig struct {
-	Interval                  time.Duration
-	StableDuration            time.Duration
+	// Interval 基础轮询节奏（自适应调度下的上限见 MaxInterval）。
+	Interval time.Duration
+	// StableDuration 输出稳定判定阈值。
+	StableDuration time.Duration
+	// InteractiveStableDuration TUI 会话的稳定判定阈值。
 	InteractiveStableDuration time.Duration
-	FakeDeadDuration          time.Duration
-	HeartbeatCommand          string
-	HeartbeatTimeout          time.Duration
+	// FakeDeadDuration 假死判定阈值。
+	FakeDeadDuration time.Duration
+	// HeartbeatCommand 探活所用命令。
+	HeartbeatCommand string
+	// HeartbeatTimeout 探活命令的超时。
+	HeartbeatTimeout time.Duration
 
 	// DenseInterval Adaptive poll schedule (optional; unset fields fall back to defaults, with
 	// DenseInterval derived from Interval). See PollSchedule.
@@ -678,12 +684,10 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	return SessionRunning
 }
 
-// handleFakeAlive handles fake alive state (process stuck but responsive).
-// Attempts to restart the session under its ORIGINAL session ID so the monitor
-// continues tracking it. On success, resets stability metadata; the next
-// detectSessionState will see the fresh session and naturally transition
-// FakeAlive → Running. On failure, leaves Status untouched so the next cycle
-// re-evaluates — the session may complete naturally or reach fakeDead.
+// handleFakeAlive attempts to recover a session judged fake-alive; on failure it
+// leaves Status untouched. The recovery strategy — which identity is preserved, how
+// stability metadata is reset, and where the state machine is expected to move
+// afterwards — is specified in the document below.
 //
 // 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {

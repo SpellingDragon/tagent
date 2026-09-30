@@ -184,9 +184,9 @@ func (c *ctxStrictEmbedder) Embed(ctx context.Context, texts []string) ([][]floa
 func (c *ctxStrictEmbedder) Dimension() int  { return c.dim }
 func (c *ctxStrictEmbedder) ModelID() string { return "ctx-strict" }
 
-// TestInMemoryEngine_CloseDrainPersistsInFlight 验证审查 M1：Close 排空在途批用独立
-// 不取消的 ctx（context.WithoutCancel + DrainTimeout），合规嵌入器仍成功嵌入 + 持久化，
-// 不丢在途向量。修复前排空用已取消的 ctx → 合规嵌入器必失败 → 向量丢失且不持久化。
+// TestInMemoryEngine_CloseDrainPersistsInFlight pins that Close drains in-flight batches on an un-cancelled context.
+// - The drain uses context.WithoutCancel plus DrainTimeout, so a compliant embedder still finishes and persists those vectors.
+// - Draining on the already cancelled context would fail the embedder and lose the vectors without persisting them.
 func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
 	kv := kv.NewMockRustVikingClient()
 	emb := &ctxStrictEmbedder{dim: 8}
@@ -211,8 +211,8 @@ func TestInMemoryEngine_CloseDrainPersistsInFlight(t *testing.T) {
 	}
 }
 
-// TestInMemoryEngine_DimensionMismatchSkipped 验证审查 M3：查询向量维度与索引向量
-// 不一致时跳过（不收 0 分候选），避免返回不确定顺序的垃圾票据。
+// TestInMemoryEngine_DimensionMismatchSkipped pins that a query vector of a different dimension is skipped.
+// - It is not accepted as a zero-score candidate, so no ticket with an indeterminate order is returned.
 func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
 	emb := membed.NewMockEmbedder(8)
 	e := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
@@ -230,8 +230,8 @@ func TestInMemoryEngine_DimensionMismatchSkipped(t *testing.T) {
 	}
 }
 
-// TestInMemoryEngine_RebuildSkipsStaleModel 验证审查 M3：换嵌入模型后重启，
-// 重建跳过旧模型指纹的向量（防跨模型语义混用）。
+// TestInMemoryEngine_RebuildSkipsStaleModel pins that a restart rebuild skips vectors carrying another embedding model fingerprint.
+// - Vectors from a different model span an incompatible semantic space, so they stay out of the rebuilt index.
 func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 	kv := kv.NewMockRustVikingClient()
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "model:vec:"}
@@ -253,8 +253,8 @@ func TestInMemoryEngine_RebuildSkipsStaleModel(t *testing.T) {
 	}
 }
 
-// TestEngineBridge_RemoveVectorForwards 验证审查 M2：engineBridge 作为 memory.VectorRemover，
-// RemoveVector 转发引擎 Remove（遗忘物理删除时同步移除向量，消除 Remove 死代码）。
+// TestEngineBridge_RemoveVectorForwards pins that engineBridge satisfies memory.VectorRemover by forwarding to engine Remove.
+// - Forgetting physically deletes the event, so its vector must go with it rather than linger in the index.
 func TestEngineBridge_RemoveVectorForwards(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	emb := membed.NewMockEmbedder(64)

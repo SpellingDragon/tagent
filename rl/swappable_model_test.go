@@ -304,3 +304,15 @@ func TestSwappableModel_InFlightGatesRecycle(t *testing.T) {
 		t.Fatalf("retired model closed = %d, want 1 after quiescence", first.closed)
 	}
 }
+
+// TestSwappableModel_InfoTracksCurrentInner 钉住 Info 委托给当前内层模型：每次 Swap 之后身份随之改变，不存在缓存的旧身份。
+func TestSwappableModel_InfoTracksCurrentInner(t *testing.T) {
+	sm := NewSwappableModel(&mockModel{info: model.Info{Name: "first"}})
+	require.Equal(t, "first", sm.Info().Name)
+
+	sm.Swap(&mockModel{info: model.Info{Name: "second"}})
+	require.Equal(t, "second", sm.Info().Name)
+
+	sm.Swap(&mockModel{info: model.Info{Name: "third"}})
+	require.Equal(t, "third", sm.Info().Name)
+}

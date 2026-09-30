@@ -115,9 +115,7 @@ func TestTrajectoryRecorder_CloseFlush(t *testing.T) {
 	}
 }
 
-/*
-本用例整体停用（复活或删除待定，见 doc-drift-ledger.md D-13）：它把 SwappableModel 与记录器
-组合装配，而该组合的前置条件——两者同处 rl 包——现已满足。
+// TestTrajectoryRecorder_WithSwappableModel 钉住 记录器套在 SwappableModel 外层时每条记录冻结当次的模型端点：Swap 与 SetModelEndpoint 之后的新记录用新端点，先前那条不被改写。
 func TestTrajectoryRecorder_WithSwappableModel(t *testing.T) {
 	tmpDir := t.TempDir()
 	original := &mockModel{info: model.Info{Name: "original-model"}}
@@ -162,7 +160,6 @@ func TestTrajectoryRecorder_WithSwappableModel(t *testing.T) {
 	assert.Equal(t, "https://original.example.com/v1", rec0.Metadata.ModelEndpoint)
 	assert.Equal(t, "https://swapped.example.com/v1", rec1.Metadata.ModelEndpoint)
 }
-*/
 
 func TestTrajectoryRecorder_Info(t *testing.T) {
 	tmpDir := t.TempDir()

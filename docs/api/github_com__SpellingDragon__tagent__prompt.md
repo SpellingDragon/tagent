@@ -65,7 +65,7 @@ func NewLoader(baseDir string, opts ...LoaderOption) *Loader
 
 func (l *Loader) LoadBootstrap(dir string) (string, error)
     LoadBootstrap 按 BootstrapLoadOrder 给定的顺序装配目录中的文档，顺序表之外的 .md
-    追加在末尾；缺失的文件跳过，目录不存在时报错。
+    追加在末尾；条目不存在时跳过该条，目录不存在或其他读取失败整体中止并返回该错误。
 
 func (l *Loader) LoadComposite(inline string, files []string, dir string) (string, error)
     LoadComposite 按 inline → files → dir 的顺序加载各来源并以空行拼接；缺省的来源跳过。
@@ -81,7 +81,7 @@ func (l *Loader) LoadFromDir(dir string) (string, error)
 
 func (l *Loader) LoadFromFile(path string) (string, error)
     LoadFromFile 读取单个提示词文件；相对路径按 BaseDir 解析。 空文件返回空串而非错误；磁盘未命中且配置了内嵌 FS 时由该 FS
-    补齐，绝对路径不回退。
+    补齐，绝对路径不回退。 读失败时以 %w 包裹 os 错误，调用方可用 errors.Is 判别 os.ErrNotExist。
 
 type LoaderOption func(*Loader)
     LoaderOption configures a Loader.

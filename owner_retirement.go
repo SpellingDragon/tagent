@@ -246,4 +246,4 @@ func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 	return decisions
 }
 
-var _ = fmt.Sprintf // keep fmt for future message formatting
+var _ = fmt.Sprintf

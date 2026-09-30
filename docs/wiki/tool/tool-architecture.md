@@ -734,24 +734,16 @@ stateDiagram-v2
     FakeAlive --> FakeDead: 重启失败
     FakeDead --> [*]: 强制清理
     Stable --> Completed: pane 已死或进程退出
+    Stable --> TimedOut: TUI 会话静默越过假死阈（不探测假死/假活）
     Stable --> [*]: 清理
+    TimedOut --> [*]: 移出监控
     Completed --> [*]
     Error --> [*]
 ```
 
 ### 9.2 状态常量
 
-```go
-// action/tmux_executor.go
-const (
-    SessionRunning   SessionStatus = "running"
-    SessionStable    SessionStatus = "stable"
-    SessionCompleted SessionStatus = "completed"
-    SessionError     SessionStatus = "error"
-    SessionFakeDead  SessionStatus = "fake_dead"
-    SessionFakeAlive SessionStatus = "fake_alive"
-)
-```
+状态取值与各态的语义以**码面常量 `SessionStatus` 的 go doc 为唯一真源**（`tool/action/tmux_executor.go`，7 个态各带一行说明），本页只描述跃迁关系、不复制枚举清单——复制一份枚举就必然随着码面增删而失真。
 
 ### 9.3 detectSessionState — 状态检测逻辑（三态化）
 
@@ -781,22 +773,12 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 ### 9.5 配置参数
 
-```go
-// action/tmux_monitor.go
-func DefaultMonitorConfig() MonitorConfig {
-    return MonitorConfig{
-        Interval:                  3 * time.Second,   // 基础轮询节奏（自适应调度基础上限见 poll_schedule）
-        StableDuration:            60 * time.Second,  // 输出稳定判定
-        InteractiveStableDuration: 90 * time.Second,  // TUI 会话稳定判定
-        FakeDeadDuration:          150 * time.Second, // 假死判定
-        HeartbeatCommand:          "echo ping",
-        HeartbeatTimeout:          5 * time.Second,
-    }
-}
+取值与逐项语义以**码面为唯一真源**，本页不复制数值清单，也不另存一份常数：基础六项
+见 `tool/action/tmux_monitor.go` 的 `DefaultMonitorConfig`（各字段的一行语义就在
+`MonitorConfig` 的字段 doc 上），自适应叠加四项（dense 阶段与退避上限）见
+`tool/action/poll_schedule.go` 的 `DefaultPollSchedule` 与 `PollSchedule`。
 
-// 自适应轮询叠加参数（poll_schedule.go）：DenseInterval 1s / DenseDuration 10s /
-// BackoffFactor 2 / MaxInterval 60s——dense→sparse 边界即同步→异步 ack 点。
-```
+需要在此记住的只有一条语义：**dense→sparse 的边界，就是同步等待转异步 ack 的点**。
 
 ---
 

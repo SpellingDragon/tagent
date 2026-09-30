@@ -271,6 +271,9 @@ func durableE2EAgent(t *testing.T, storeDir, spillDir string, m *e2eModel) *agen
 	return ta
 }
 
+// TestResidentDurableE2E_FiveSurfaceReconciliation 钉住 同一输入在受理态、请求身份、输出血统、事实链可召回与事件类型五个面互相对账，绝不以前态冒充后态。
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#reliability-switches
 func TestResidentDurableE2E_FiveSurfaceReconciliation(t *testing.T) {
 	root := t.TempDir()
 	storeDir, spillDir := filepath.Join(root, "store"), filepath.Join(root, "spill")

@@ -16,6 +16,10 @@ leaves a nested module ungated, or a set other than the one the baseline was
 written over. -no-baseline measures a scope without consulting the ratchet at
 all.
 
+The scope is the repository, not the working tree: a Go file git ignores is
+dropped from the counts, because a checkout would not contain it and a baseline
+holding its findings would not be reproducible. See ignoredGoFiles.
+
 scripts/lint.sh owns the canonical directory set, so a batch author and CI scan
 the same tree; read and lower the baseline through it rather than invoking this
 command with an ad-hoc scope.

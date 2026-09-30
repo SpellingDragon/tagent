@@ -100,8 +100,9 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
-// TestParseJudgeVerdict_MissingScoreConservative 是 Major 回归：合法 JSON 但缺 score（或
-// null/大小写不符）→ 保守 score=1.0 通过，绝不因零值 0 误判劣化触发回滚。
+// TestParseJudgeVerdict_MissingScoreConservative pins the conservative verdict on an unusable score.
+// - Valid JSON with a missing, null or case-mismatched score passes with score=1.0.
+// - A zero value must not be read as a regression, since that would trigger a rollback no model verdict justified.
 func TestParseJudgeVerdict_MissingScoreConservative(t *testing.T) {
 	if v := parseJudgeVerdict(`{"reason":"证据不足"}`); v.Score != 1.0 {
 		t.Fatalf("缺 score 应保守 1.0（不误回滚）, got %f", v.Score)

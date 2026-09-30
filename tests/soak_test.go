@@ -30,6 +30,11 @@ const (
 	soakPidTag = "SOAK_PID="
 )
 
+// TestSoak_Continuity 钉住浸泡连续性：多轮「写入 → 换新进程重启 → 校验」之后最早写入的事件仍可达，压实不破坏召回。
+// - 每一轮都在全新进程里跑：进程号不得复用，也不得在编排进程内执行
+// - 压实后必须仍留有 L2 以上层位的段，且本轮尾事件在进程内与重开存储后都可查询
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func TestSoak_Continuity(t *testing.T) {
 	rounds := *soakRounds
 	require.GreaterOrEqual(t, rounds, 2, "soak needs >= 2 rounds (write + survive-restart)")
@@ -96,6 +101,7 @@ func soakChild(t *testing.T, dir, mode string, round int) int {
 	return pid
 }
 
+// TestSoakChildPhase 钉住子进程的单相位执行：按 SOAK_MODE 分派写入相位或校验相位，并回报自身进程号供连续性核对。
 func TestSoakChildPhase(t *testing.T) {
 	if os.Getenv("SOAK_CHILD") != "1" {
 		t.Skip("soak child phase: only runs when re-executed by TestSoak_Continuity")

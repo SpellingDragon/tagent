@@ -142,10 +142,10 @@ func TestCallTool_DeclarationConstantAcrossRegistryMutations(t *testing.T) {
 		"mcp_call declaration must not change with registry content (prefix-cache invariant)")
 }
 
-// TestMCPCall_CircuitBreak: while DepMCP is
-// degraded and probeEvery=N>0, every call but the Nth short-circuits with a
-// readable result (failure permeates as result, never error). Default off
-// (probeEvery=0 → real calls).
+// TestMCPCall_CircuitBreak pins the degraded-MCP short-circuit and its probe cadence.
+// - While DepMCP is degraded with probeEvery=N>0, every call but the Nth short-circuits with a readable result.
+// - The failure permeates as a result rather than an error, so the agent turn survives a dead upstream.
+// - The breaker is off by default: probeEvery=0 lets every call through.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 func TestMCPCall_CircuitBreak(t *testing.T) {

@@ -196,18 +196,6 @@ func TestOrgDiagnostics_EndToEnd(t *testing.T) {
 	require.Equal(t, int64(1), st["generation"], "the refusal keeps serving generation 1")
 }
 
-// 诊断必须反映**实际消费者**，不能只证明 resident setter 被调用。
-// 逐 agent 回执（payload["agents"]）今天回显的是**请求下发**的那组数值
-// （applyHotAll 里的 `p`），而不是从真实消费者读回。本测钉住这条独有的、
-// 尚未被预算/TTL 与 draining 的既存断言覆盖的契约：一次 numeric-only 热更后，回执所报的
-// MaxTokens×ThresholdPct、KeepRecentTasks 必须与该 agent **真实 compressor 消费值**
-// 逐一对齐；TaskManager 终态 TTL 这一消费者必须在同一轮 numeric-only 后确实移动；
-// 被移除的 draining owner 回执不带 applied 值、且其真实消费者保持最后有效值不被改成默认。
-//
-// 与既存测的关系（避免重复冒充）：已有断言从 config 期望值出发钉住真实预算/TTL；
-// 已有断言从真实消费者侧核 draining 的 keepRecent；租约相关测试已证
-// InFlightTurns 单计数。本测补齐的是「**回执 ↔ 真实消费者**」这一互证腿。
-
 // hotParamsYAML 渲染 main→sub1 的两 agent 拓扑。四行数值（keep/max/threshold/terminal）
 // 全部热可应用（不进 org 指纹），system_prompt 固定 → 只改数值即走 numeric-only 路径。
 func hotParamsYAML(keepMain, maxMain int, thrMain float64, termMain string, keepSub, maxSub int, thrSub float64) string {
@@ -367,20 +355,6 @@ func TestDrainingReceiptTracksHeldConsumer(t *testing.T) {
 	require.Equal(t, heldBudget, sub.OrgBudgetLine(), "draining owner keeps its live budget, not defaulted")
 }
 
-// 两条尚未被覆盖的互补判据（回执 ↔ 真实消费者余下的两条腿）。
-//
-//	②「热增／结构发布后的真实子调用预算与 TTL（非 getter 回声）」——
-//	  `TestReceiptIsBackedByRealConsumers` 钉的是**已路由**拓扑上的 numeric-only
-//	  应用；这里补的是**刚被结构发布新增的 owner**：它的回执数字必须等于它自己
-//	  真实消费者的值，且它**真实派生**的任务拿到的是**它自己**记录里的 TTL
-//	  （不是宿主的、不是默认值、也不是 setter 被调用的回声）。
-//	③「关闭已发起」与「资源已退出」必须可区分——有界返回不等于收尾完成。
-//	  用真实的在途引用（租约）造成该状态，而不是自造阻塞 closer。
-//
-// 两条都同时读**载荷形状**本身：`liveDebt`（自带采集时刻的实时债务组）与 `close`
-// （两态分离）是新立的契约，断言即钉住「不把多次无锁 getter 拼成
-// 原子成功快照」的正向表达。
-
 // routedSub2YAML renders main→(sub1,sub2) with sub2→leaf. sub2's own numeric knobs are
 // parameters so a structural publish can introduce it with values that differ from
 // the host's on every axis under test (budget inputs AND task TTL).
@@ -418,7 +392,8 @@ func writeRoutedConfig(t *testing.T, path, content string, tick *time.Time) {
 	require.NoError(t, os.Chtimes(path, *tick, *tick))
 }
 
-// liveDebtOf / closeOf read the two cross-validation groups off the payload.
+// liveDebtOf / closeOf read the two cross-validation groups off the payload: each
+// group carries its own collection instant, so a reading is never a snapshot stitched from several unlocked getters.
 func liveDebtOf(t *testing.T, d map[string]any) OrgLiveDebt {
 	t.Helper()
 	debt, ok := d["liveDebt"].(OrgLiveDebt)

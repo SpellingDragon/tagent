@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestBuildArgv_NoShellInterpolation: each op maps to a fixed argv whose
-// structure the model cannot influence — name/artifact are discrete entries,
-// never interpolated into a shell string. This is the core safety property.
+// TestBuildArgv_NoShellInterpolation pins that each op maps to a fixed argv whose structure the model cannot influence.
+// - name and artifact are discrete entries, never interpolated into a shell string; this is the core safety property.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestBuildArgv_NoShellInterpolation(t *testing.T) {
@@ -49,8 +48,7 @@ func TestBuildArgv_MissingRequired(t *testing.T) {
 	}
 }
 
-// TestRun_UnknownOpRejected: the dispatch whitelist blocks unknown ops before
-// any process is spawned.
+// TestRun_UnknownOpRejected: the dispatch whitelist rejects unknown ops before any process is spawned.
 func TestRun_UnknownOpRejected(t *testing.T) {
 	b := NewOpenSpecBackend()
 	_, err := b.Run(context.Background(), Request{Op: Op("rm -rf /")})
@@ -59,8 +57,8 @@ func TestRun_UnknownOpRejected(t *testing.T) {
 	}
 }
 
-// TestRun_MissingBinary: a non-existent binary yields an actionable error
-// (the model has no shell to self-install), not a panic or hang.
+// TestRun_MissingBinary pins that a missing binary produces an actionable error.
+// - Neither a panic nor a hang, because the model has no shell to self-install the tool.
 func TestRun_MissingBinary(t *testing.T) {
 	b := NewOpenSpecBackend(WithOpenSpecBin("definitely-not-a-real-binary-xyz"))
 	_, err := b.Run(context.Background(), Request{Op: OpList})

@@ -72,8 +72,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	}
 }
 
-// TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删 KV 持久向量，
-// 重建后不复活已删事件。
+// TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删除 KV 中的持久向量，重建后已删事件不复活。
 func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
 	kv := kv.NewMockRustVikingClient()
 	emb := membed.NewMockEmbedder(64)

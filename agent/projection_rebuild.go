@@ -178,12 +178,12 @@ func (cm *ContextManager) appendProjectionRef(ev memory.FullEvent) {
 	})
 }
 
-// rebuildProjectionFallback rebuilds chains WITHOUT any compaction anchor
-// (snapKey==0): full paginated replay, filter non-projection records FIRST, then
-// keep the NEWEST fallbackCap valid events — the order matters, see the wiki.
-// The oldest kept key is seeded as fullBoundary so recent-window logic sees a
-// consistent truncation marker. Space stays bounded and scan cost stays
-// O(history): there is no second checkpoint.
+// rebuildProjectionFallback rebuilds chains without any compaction anchor
+// (snapKey==0) by full paginated replay. The required order of the two steps and
+// why it must not be inverted are specified in the document below. The oldest kept
+// key is seeded as fullBoundary so recent-window logic sees a consistent
+// truncation marker; space stays bounded and scan cost stays O(history): there is
+// no second checkpoint.
 // 契约: docs/wiki/agent/compression-and-telemetry.md#projection-fold
 func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	all, _ := cm.fetchTailEvents(0, result)

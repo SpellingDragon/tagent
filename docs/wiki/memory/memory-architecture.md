@@ -886,7 +886,8 @@ case "localfile":
 
 > `path` 在三种类型下均表示"存储定位符"。`file`/`localfile` 通过文件系统 + 注册表保证同路径→同存储；`memory` 通过注册表显式保证。
 
-### 13.1 两条读路径与 opt-in 隔离语义
+<a id="read-paths"></a>
+### 13.1 两条读路径与分区作用域
 
 记忆层对外暴露**两条语义不同的读路径**，二者分工实现了「Agent 间隔离」与「顶层可跨界还原」的共存：
 
@@ -901,18 +902,9 @@ case "localfile":
 - **发现（查询）走隔离**：子 Agent 不应通过盲扫发现其他 Agent 的历史，故 `QueryEvents` 受 `read_namespaces` 限定分区。
 - **还原（按 Key）走全库**：顶层 Agent 已通过自身上下文/召回持有 `event_key`，需要精确还原完整 `FullEvent` 喂给子 Agent，此时按 Key 直读不受分区限制。这正是「子写、顶读、顶编排」模式的技术基础。
 
-**⚠️ 隔离是 opt-in，非 default-deny**：`resolvePartitions` 在查询未显式指定分区时**回退为全部分区**：
+**⚠️ 查询层作用是 default-nothing，不是"回退全库"**：`FileSegmentStore.resolvePartitions` 与 `InMemoryStore.resolvePartitions` 同形——`PartitionIDs` 与 `PartitionID` 两个字段都未指定时返回**空列表**；`QueryEvents` 逐个扫描该列表里的分区，列表为空 ⇒ **一个分区都不扫、返回 0 条且不报错**。
 
-```go
-// in_memory_store.go / segment_store.go resolvePartitions 语义
-func resolvePartitions(query QueryOptions) []int {
-    if len(query.PartitionIDs) > 0 { return query.PartitionIDs } // 指定则限定
-    if query.PartitionID > 0 { return []int{query.PartitionID} }
-    return allPartitions // 未指定 → 全部分区（无隔离）
-}
-```
-
-因此隔离边界**依赖 RecallAgent 显式配置 `read_namespaces`** 才成立。为挂载了 recall 类工具的 Agent 新增配置时，若遗漏 `read_namespaces`，该 Agent 的条件查询将扫描全库——这是新增 Agent 时需重点核对的一项。
+所以"能看见谁的分区"完全由注入的 `ReadPartitionIDs` 决定：`buildAgent` 恒以自身分区起步、`read_namespaces` 只做追加，缺省态是「只看得见自己」——这是隔离的默认值而非漏洞。运维风险的方向与直觉相反：**新增挂载 recall 类工具的 Agent 时漏配 `read_namespaces`，表现是跨命名空间召回静默为空（"像是没有历史"），而不是越权扫全库**。诊断此类失忆，第一步核对该 Agent 的工具工厂是否把 `ReadPartitionIDs` 传进了构造函数。
 
 ---
 

@@ -61,6 +61,8 @@ func TestResolveAgentModel_NoModelField_UsesParent(t *testing.T) {
 
 // TestResolveAgentModel_ResolvesFromProvider 验证 agent 只给出 provider 名时，按注册表解析出模型实例。
 // - 模型构造要求 API key 非空（即便本次不发请求），故用假 key 占位。
+//
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestResolveAgentModel_ResolvesFromProvider(t *testing.T) {
 	os.Setenv("TEST_API_KEY", "test-key-123")
 	defer os.Unsetenv("TEST_API_KEY")

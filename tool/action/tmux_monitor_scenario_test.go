@@ -445,6 +445,8 @@ done
 }
 
 // TestTUI_SendKeysInterference 钉住 demonstrates that send-keys injects text into TUI.
+//
+// 契约: docs/wiki/tool/tmux-action.md#liveness-first
 func TestTUI_SendKeysInterference(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux not available")

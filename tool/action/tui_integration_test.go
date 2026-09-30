@@ -92,6 +92,11 @@ func sessionHasTimedOut(transitions []string) bool {
 	return false
 }
 
+// TestTUIIntegration_QoderCLI_Lifecycle 钉住真机 TUI 会话的完整状态旅程：可达稳定、输入可回到运行中、静默越阈走 TimedOut。
+// - TUI 会话全程不进入 FakeDead 与 FakeAlive
+// - 判为 TimedOut 之后会话从监控中消失
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
 func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -186,6 +191,7 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	t.Logf("Lifecycle complete. Transitions: %v", transitions)
 }
 
+// TestTUIIntegration_QoderCLI_Cleanup 钉住 TUI 会话静默越阈后的清理：会话被移出监控，不留半清理状态。
 func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -231,6 +237,7 @@ func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 	t.Logf("qodercli TUI session properly cleaned up from monitor")
 }
 
+// TestTUIIntegration_NonTUI_NotTimedOut 钉住非 TUI 会话的默认判定：输出稳定后长期静默只记 Stable，不进入 TimedOut。
 func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -288,6 +295,7 @@ func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 	t.Logf("non-TUI session transitions: %v (no TimedOut — correct)", transitions)
 }
 
+// TestTUIIntegration_QoderCLI_MultiSession 钉住多个 TUI 会话各自独立判定：各自到达 Stable、各自静默越阈移出，互不牵连。
 func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 	skipIfNotIntegration(t)
 

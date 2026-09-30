@@ -103,11 +103,9 @@ const (
 	// TypeWFSafeRemoved 是受保护材料已完成移除的证据事实；保留租约只在**已完成**的移除上释放，而非已发起。
 	TypeWFSafeRemoved = "wf.safe_removed"
 )
-    TypeWFReceived wf.* 是 workflow 运行时的事实链记录类型：接收、活动意图、活动结果、信号、
-    转移（检查点）、终态、安全移除证据。事实链是这些状态的唯一真源，检查点适配器、 活动索引、任务板等视图都由它折叠而来。
-
-    引擎已撤回，这些类型现存的唯一作用是让历史 wf.* 记录继续被投影、召回与嵌入排除； 因此注册必须保持 TTLDays 为 0 ——
-    任何正值都会静默缩短既有记录的保留期。
+    TypeWFReceived 等 wf.* 是 workflow 运行时事实链的记录类型（逐项含义见各常量自己的
+    doc）。引擎已撤回，此处注册的唯一作用是让历史 wf.* 记录继续被投影、召回与嵌入 排除，因此注册时 **TTLDays 必须保持 0** ——
+    任何正值都会静默缩短既有记录的保留期。 事实链语义与由它折叠出的各视图以文档为唯一真源。
 
     契约: docs/wiki/event/event-architecture.md#internal-retention
 

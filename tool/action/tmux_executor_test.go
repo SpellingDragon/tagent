@@ -185,6 +185,8 @@ func TestIsTmuxAvailable_TrueWhenOnPath(t *testing.T) {
 }
 
 // TestActionTool_TmuxComplexOutput 钉住 复杂多行输出被完整捕获：调用阻塞到会话稳定，并把最终输出作为工具结果返回。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
 func TestActionTool_TmuxComplexOutput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real tmux (slow, blocks on monitor stability); skip in -short")

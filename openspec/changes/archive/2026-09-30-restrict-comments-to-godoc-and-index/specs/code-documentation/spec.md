@@ -30,7 +30,7 @@ doc 注释 SHALL 以所依附标识符名开头，内容限于该 API 的契约�
 
 ### Requirement: 文档索引语法与目标限制
 
-代码内文档索引 SHALL 使用固定语法 `// 契约: <路径>[#锚点]` 或 `// 规格: <路径>`，一行一个锚点，且 MUST NOT 承载解释。允许目标仅 `docs/**` 与 `openspec/specs/**`；MUST NOT 指向 `openspec/changes/**`（含归档）或任何过程工件。
+代码内文档索引 SHALL 使用固定语法 `// 契约: <路径>[#锚点]` 或 `// 规格: <路径>`，一行一个锚点，且 MUST NOT 承载解释。允许目标仅 `docs/**`（终裁：初稿曾并列 `openspec/specs/**`，因门实现 `index-root` 只认 `docs/` 且与 design 冲突而剔除——specs 承载已接受的需求，代码契约由 go doc 自持）；MUST NOT 指向 `openspec/specs/**`、`openspec/changes/**`（含归档）或任何过程工件。
 
 注释正文 MUST NOT 出现**外部文档坐标**——变更名（含已归档变更）与计划内坐标（`design line N`、`N.M①` 之类的阶段/验收标准编号、`Red→green`、`Fail-before` 一类过程叙述）。这类引用与"不得指向变更工件路径"是同一条契约的两种写法：读者在代码里看到 `resident-continuity-r2-r4 3.8` 时，无任何长期文档可解析它，等价于把注释的语义外包给一份会被清理的过程工件。判据由 `external-coord-ref` 强制，变更名集合从 `openspec/changes/` 与其 `archive/` 运行时枚举（不维护硬编码名单）；索引行豁免，因为路径是它的合法载荷。
 

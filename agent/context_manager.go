@@ -698,17 +698,11 @@ func unwrapAgentToolWrapper(t trpctool.Tool) *AgentToolWrapper {
 	return nil
 }
 
-// buildExecutor is the single executor assembly path (cold start and hot
-// candidate). The execution face comes from exec only — no fallback to any
-// other published snapshot, so a field the new config clears really
-// disappears. The state face (memory plugin, session service, projection that
-// the sub-agent wrappers auto-inject from) always comes from this cm: swapping
-// executors never moves shared state. Delegation wrappers live in the owner
-// config.Tools and are therefore shared by the resident cm, every candidate cm
-// and every invocation-private cm, so construction must not write call-scoped
-// data into them; the projection reaches tools through the flow context
-// (withCallProjection), and the only publish of a wrapper binding is the
-// cold-start SetToolParentProjection.
+// buildExecutor is the single executor assembly path, used by both cold start and
+// hot candidate construction. Inputs split into the execution face (taken from
+// exec) and the state face (taken from this cm); the no-fallback rule and the
+// constraints on writing call-scoped data into already-published delegation
+// wrappers during construction are specified in the document below.
 // 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
 func (cm *ContextManager) buildExecutor(exec ContextManagerConfig) runner.Runner {
 	exec.MemPlugin = cm.memPlugin

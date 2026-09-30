@@ -15,6 +15,10 @@
 // a nested module ungated, or a set other than the one the baseline was written over.
 // -no-baseline measures a scope without consulting the ratchet at all.
 //
+// The scope is the repository, not the working tree: a Go file git ignores is dropped
+// from the counts, because a checkout would not contain it and a baseline holding its
+// findings would not be reproducible. See ignoredGoFiles.
+//
 // scripts/lint.sh owns the canonical directory set, so a batch author and CI scan the
 // same tree; read and lower the baseline through it rather than invoking this command
 // with an ad-hoc scope.
@@ -33,6 +37,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -80,9 +85,10 @@ var changeArtifactRef = regexp.MustCompile(`openspec/changes/`)
 var indexLine = regexp.MustCompile(`^\s*(契约|规格):\s+\S+\s*$`)
 
 // indexTargetRoots are the roots a documentation index may point at. The requirement
-// tree is deliberately NOT a legal target: a code comment indexes the mechanism
-// documentation that explains the code, and that single source is the wiki tree (plus
-// each module's README). Measured before tightening: no index pointed there at all.
+// tree is not a legal target: a code comment indexes the mechanism documentation that
+// explains the code, and that single source is the wiki tree. A module README outside
+// these roots is not a target either — an index must resolve inside the mechanism tree,
+// or the proposition it names has no durable home.
 var indexTargetRoots = []string{"docs/"}
 
 // directivePrefixes and todoLine are the mechanically exempt comment shapes.
@@ -114,6 +120,7 @@ func main() {
 		update       = flag.Bool("update-baseline", false, "write the current counts as the baseline and exit")
 		strict       = flag.Bool("strict", false, "require an empty baseline (the converged end state)")
 		verbose      = flag.Bool("v", false, "print every finding, not only regressions")
+		forceRaise   = flag.Bool("force-raise", false, "deliberately re-scope the ratchet upward, naming the slots it raises")
 		noRatchet    = flag.Bool("no-baseline", false, "measure a scope only: never read or write the ratchet, so a partial scan cannot lower it by accident")
 	)
 	flag.Usage = func() {
@@ -126,8 +133,18 @@ func main() {
 	}
 
 	var all []finding
+	announceScanBlindSpots()
+	ignored := ignoredGoFiles(".")
+	if n := len(ignored); n > 0 {
+		names := make([]string, 0, n)
+		for f := range ignored {
+			names = append(names, f)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(os.Stderr, "comment_policy: %d git-ignored Go file(s) are outside the ratchet, absent from any checkout: %s\n", n, strings.Join(names, " "))
+	}
 	for _, d := range dirs {
-		files, err := collectGoFiles(d)
+		files, err := repoGoFiles(".", d, ignored)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", d, err)
 			os.Exit(1)
@@ -181,7 +198,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-		if err := writeBaseline(path, counts, dirs); err != nil {
+		if err := writeBaseline(path, counts, dirs, *forceRaise); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
@@ -374,7 +391,19 @@ func checkScanSet(root string, recorded, effective []string) error {
 }
 
 // writeBaseline records the current counts and their scan set, sorted for a stable diff.
-func writeBaseline(path string, counts map[string]int, dirs []string) error {
+func writeBaseline(path string, counts map[string]int, dirs []string, allowRaise bool) error {
+	if prior, err := readBaseline(path); err == nil {
+		var raised []string
+		for rule, now := range counts {
+			if was, seen := prior.Counts[rule]; seen && now > was {
+				raised = append(raised, fmt.Sprintf("%s %d→%d", rule, was, now))
+			}
+		}
+		if len(raised) > 0 && !allowRaise {
+			sort.Strings(raised)
+			return fmt.Errorf("baseline may only lower counts; refusing to raise %s (pass -force-raise to re-scope deliberately)", strings.Join(raised, ", "))
+		}
+	}
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
@@ -449,7 +478,7 @@ func checkFile(path string) ([]finding, error) {
 		}
 		line := fset.Position(g.Pos()).Line
 		declName, isSlot := docSlots[g]
-		if !isSlot {
+		if !isSlot && !licenseHeader(g, file) {
 			out = append(out, finding{Path: path, Line: line, Rule: "free-standing", Note: "comment is not in a documentation slot", Text: firstLine(text)})
 			out = append(out, checkDocGroup(path, fset, g, text, isTest, "")...)
 			continue
@@ -514,19 +543,46 @@ func collectDocSlots(file *ast.File, into map[*ast.CommentGroup]string) {
 }
 
 // isExempt reports mechanical directives and single-line actionable TODOs.
+// Exemption is decided per group but only when every line is a directive: one
+// //nolint line must not shield the prose beside it, or a single comment would turn
+// the whole content-rule set off. CommentGroup.Text drops directive lines, so the
+// prose that remains is still checked.
 func isExempt(g *ast.CommentGroup) bool {
+	if len(g.List) == 0 {
+		return false
+	}
+	directives := 0
 	for _, c := range g.List {
 		t := strings.TrimSpace(c.Text)
 		for _, pre := range directivePrefixes {
 			if strings.HasPrefix(t, pre) {
-				return true
+				directives++
+				break
 			}
 		}
+	}
+	if directives == len(g.List) {
+		return true
 	}
 	if len(g.List) == 1 && todoLine.MatchString(strings.TrimPrefix(g.List[0].Text, "//")) {
 		return true
 	}
 	return false
+}
+
+// licenseHeaderLine opens a file's licence block.
+var licenseHeaderLine = regexp.MustCompile(`(?i)^\s*copyright\b`)
+
+// licenseHeader reports the licence block above the package clause. Go attaches only
+// the last comment group before the clause as the file's documentation, so a header is
+// never a documentation slot; treating it as a stray comment would push a batch to
+// delete the header in order to go green.
+func licenseHeader(g *ast.CommentGroup, file *ast.File) bool {
+	if g.Pos() >= file.Package || len(g.List) == 0 {
+		return false
+	}
+	text := strings.TrimPrefix(strings.TrimSpace(g.List[0].Text), "//")
+	return licenseHeaderLine.MatchString(strings.TrimSpace(text))
 }
 
 // externalCoord catches references that only make sense inside a change artifact:
@@ -543,15 +599,22 @@ var changeNamesOnce sync.Once
 // name, not the directory.
 var changeNames []string
 
+// changeNamesFound records whether the enumeration located an openspec tree. Without
+// the tree the change-name axis stops applying, and a silent gap reads as a clean run,
+// so the caller says it out loud.
+var changeNamesFound bool
+
 // loadChangeNames 从 openspec 目录枚举变更名（命令由仓根运行；测试从包目录运行，
 // 故向上查找）。
 // 归档目录名带日期前缀（形如 YYYY-MM-DD-name），剥去该前缀后才是变更名；变更名是
 // kebab 标识符，故要求含连字符且足够长，普通散文不会误命中。
 func loadChangeNames() {
 	names := map[string]bool{}
+	changeNamesFound = false
 	root := "."
 	for i := 0; i < 6; i++ {
 		if _, err := os.Stat(filepath.Join(root, "openspec", "changes")); err == nil {
+			changeNamesFound = true
 			break
 		}
 		root = filepath.Join(root, "..")
@@ -582,6 +645,16 @@ func loadChangeNames() {
 	sort.Strings(changeNames)
 }
 
+// announceScanBlindSpots states every axis the scan will not apply, before the walk
+// starts. A measure-only run prints a bare count, so a gap discovered after the walk
+// would be too late to report: the reading a batch closes on would already look clean.
+func announceScanBlindSpots() {
+	changeNamesOnce.Do(loadChangeNames)
+	if !changeNamesFound {
+		fmt.Fprintln(os.Stderr, "comment_policy: no openspec/changes tree above the working directory; the change-name axis of external-coord-ref is not applied")
+	}
+}
+
 // nonIndexProse drops index lines: they carry paths by design, so a change name or
 // a docs path inside an index line is the sanctioned form, not a citation.
 func nonIndexProse(text string) string {
@@ -606,6 +679,73 @@ func externalCoordRef(prose string) string {
 		}
 	}
 	return ""
+}
+
+// ignoredGoFiles reports the Go sources under root that git treats as ignored, keyed by
+// path relative to root. A key may name a directory: git collapses a wholly ignored
+// subtree to its directory path, and it only does so when nothing inside is tracked, so
+// the directory key excludes everything beneath it.
+//
+// The ratchet may not count any of them: an ignored source is absent from a checkout, so
+// a baseline carrying its findings records a budget no clone can reproduce, and a
+// lowering batch would be measured against counts that exist only in one working tree.
+//
+// Outside a work tree, or without git, the set is empty and the scan covers every Go file
+// on disk. A query that fails for any other reason is reported rather than swallowed: a
+// broken invocation must not masquerade as "nothing is ignored".
+func ignoredGoFiles(root string) map[string]bool {
+	out := map[string]bool{}
+	cmd := exec.Command("git", "-C", root, "ls-files", "-i", "-o", "--exclude-standard", "--", "*.go")
+	buf, err := cmd.Output()
+	if err != nil {
+		msg := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		if msg != "" && !strings.Contains(msg, "not a git repository") {
+			fmt.Fprintf(os.Stderr, "comment_policy: git ignored-file query failed (%s); counting every Go file on disk instead\n", msg)
+		}
+		return out
+	}
+	for _, line := range strings.Split(string(buf), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out[filepath.Clean(line)] = true
+		}
+	}
+	return out
+}
+
+// repoGoFiles is collectGoFiles narrowed to the repository scope: an entry is dropped
+// only when its path relative to root is in ignored. A path that cannot be made
+// relative to root is kept, so this filter can remove git-ignored files and can never
+// silently drop a file the ratchet is meant to gate.
+func repoGoFiles(root, dir string, ignored map[string]bool) ([]string, error) {
+	files, err := collectGoFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(ignored) == 0 {
+		return files, nil
+	}
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		rel, e := filepath.Rel(root, f)
+		if e != nil || !isIgnored(ignored, filepath.Clean(rel)) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// isIgnored reports a path the repository scope excludes: the path itself is a key, or an
+// ancestor directory of it is. See ignoredGoFiles for why a directory may be a key.
+func isIgnored(ignored map[string]bool, rel string) bool {
+	for p := rel; p != "" && p != "." && p != string(filepath.Separator); p = filepath.Dir(p) {
+		if ignored[p] {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDocGroup applies content rules to one documentation comment.
@@ -645,8 +785,8 @@ func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text s
 		if indexLine.MatchString(trimmed) {
 			target := strings.TrimSpace(trimmed[strings.Index(trimmed, ":")+1:])
 			if !hasAllowedRoot(target) {
-				out = append(out, finding{Path: path, Line: fset.Position(g.Pos()).Line, Rule: "index-root", Note: "index target must live under docs/ or openspec/specs/: " + target, Text: trimmed})
-			} else if _, err := os.Stat(strings.SplitN(target, "#", 2)[0]); err != nil {
+				out = append(out, finding{Path: path, Line: fset.Position(g.Pos()).Line, Rule: "index-root", Note: "index target must live under " + strings.Join(indexTargetRoots, " or ") + ": " + target, Text: trimmed})
+			} else if _, err := os.Stat(resolveIndexTarget(strings.SplitN(target, "#", 2)[0])); err != nil {
 				out = append(out, finding{Path: path, Line: fset.Position(g.Pos()).Line, Rule: "index-target-missing", Note: "index target does not exist: " + target, Text: trimmed})
 			} else if rule := indexAnchor(target); rule != "" {
 				note := "anchor resolves to no section in the target document"
@@ -783,6 +923,41 @@ func checkCoverage(fset *token.FileSet, file *ast.File, path string, isTest bool
 // name the section.
 const anchorRequiredAbove = 200
 
+// repoRoot is the directory index targets are relative to: a target names a path from
+// the repository root, so a run started inside a package directory must resolve it the
+// same way. The walk looks for the openspec tree, then for the git directory.
+func repoRoot() string {
+	dir := "."
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "openspec", "changes")); err == nil {
+			return dir
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Join(dir, "..")
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return "."
+}
+
+// resolveIndexTarget maps an index target to a path the ratchet can test on disk. The
+// working directory is tried first so a run from the repository root behaves unchanged;
+// a target that exists nowhere stays as given and is still reported missing.
+func resolveIndexTarget(file string) string {
+	if _, err := os.Stat(file); err == nil {
+		return file
+	}
+	cand := filepath.Join(repoRoot(), file)
+	if _, err := os.Stat(cand); err == nil {
+		return cand
+	}
+	return file
+}
+
 // indexAnchor checks that an index either carries no anchor or carries one that
 // resolves (explicit <a id="x"> or a heading containing the anchor text), and
 // that a large target document is referenced with an anchor at all.
@@ -791,7 +966,7 @@ func indexAnchor(target string) string {
 	if i := strings.Index(target, "#"); i >= 0 {
 		file, frag = target[:i], target[i+1:]
 	}
-	raw, err := os.ReadFile(file)
+	raw, err := os.ReadFile(resolveIndexTarget(file))
 	if err != nil {
 		return ""
 	}
@@ -825,11 +1000,13 @@ func indexLineText(g *ast.CommentGroup) string {
 	return ""
 }
 
-// firstLine shortens a finding's text for display.
+// firstLine shortens a finding's text for display. The cut is taken by rune: the
+// comment corpus is Chinese, and a byte cut lands inside a rune, yielding text no
+// terminal can decode.
 func firstLine(text string) string {
 	l := strings.SplitN(strings.TrimSpace(text), "\n", 2)[0]
-	if len(l) > 120 {
-		l = l[:120] + "…"
+	if r := []rune(l); utf8.RuneCountInString(l) > 120 {
+		l = string(r[:120]) + "…"
 	}
 	return l
 }
@@ -937,6 +1114,9 @@ func checkDocForm(fset *token.FileSet, file *ast.File, path string, isTest bool)
 					must(spec.Pos(), spec.Name.Name, spec.Doc)
 				case *ast.ValueSpec:
 					for _, id := range spec.Names {
+						if id.Name == "_" {
+							continue
+						}
 						groupNames = append(groupNames, id.Name)
 					}
 					if len(spec.Names) == 1 {

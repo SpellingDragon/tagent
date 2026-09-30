@@ -61,6 +61,9 @@ func TestTUI_SessionTimedOut_RemovedFromMonitoring(t *testing.T) {
 	}
 }
 
+// TestNonTUI_QuietAlive_NoExplicitTimeout_StaysStable 钉住 未声明静默超时的静默存活会话判为 Stable、零击杀、且继续被监视——静默不等于假死。
+//
+// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 func TestNonTUI_QuietAlive_NoExplicitTimeout_StaysStable(t *testing.T) {
 	mock := &mockInspector{
 		processExists: true,

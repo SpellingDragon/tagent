@@ -1062,21 +1062,6 @@ func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
 	})
 }
 
-// 本测钉住 WAL 重建入口的多级重入。
-//
-// 「生产 Spawn 入口」四态已有常驻测钉住，当时如实记：重启入口缺 org 级
-// harness。本测补的就是那一句：任务落在 **b 自己的 board** 上且**未终结**时进程
-// 结束（崩溃形状的 WAL：只有 task_spawned，没有终态 settle），随后由**独立进程**
-// 在同一批持久 store 上重启，再从 b 的重建 board 上重放 `relaunch_task`。
-//
-// 为什么必须是跨进程：一次 boot 只有真实进程启动才算证据（常驻验收的 xproc 纪律），
-// 同进程内多轮 New/Close 翻动并不是生产路径。崩溃形状靠**不调用 Close 直接退出**
-// 得到——这正是「上次运行留下未终结任务」的物理形态，而不是我手搓一条记录。
-//
-// 判定的锋利处在负面子进程：重启后把 c 从拓扑里摘掉，重建出的存量任务必须**按名
-// 拒绝**而不是被旧代绑定静默复活——wireAgent 的 redispatch 注释点名的就是这件事
-// （「若传快照，后续代移除的目标仍会被旧代绑定静默复活」）。
-
 const (
 	walReentryPhaseEnv = "TAGENT_WAL42_PHASE"
 	walReentryYamlEnv  = "TAGENT_WAL42_YAML"
@@ -1202,6 +1187,8 @@ func walReentryBoot(t *testing.T, yamlPath string, m *walReentryModel) *agent.Ta
 // TestRelaunchAfterRestartResolvesOnTheCurrentFace 钉住 跨进程重启后，重入在当前面解析。
 // - 每段 boot 交给它自己的进程、只在其间编排持久状态——一次 boot 只有真实进程启动才算证据；
 // - 正负两腿各用独立持久根：负腿从崩溃状态本身重启，而非已被正腿结算过的 board。
+// - 崩溃形状＝任务落在 b 自己的 board 上、只有 task_spawned 而无终态 settle 时进程结束（靠不调 Close 直接退出得到，而非手搓一条记录）；
+// - 重启后从 b 的重建 board 重放 relaunch_task：摘掉目标 c 的负腿必须按名拒绝，不得被旧代绑定静默复活。
 // 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 	if phase := os.Getenv(walReentryPhaseEnv); phase != "" {
@@ -1308,22 +1295,6 @@ func walReentryChild(t *testing.T, phase string) {
 	}
 	os.Exit(0)
 }
-
-// 「有状态工具」的最后一腿——**org 级端到端锚**，
-// 用真实 tmux 会话证明「已纳管任务不因工具换代失监视」。
-//
-// 为什么走重启而不是热更窗口：`quiet_timeout` 的下限被钉在稳定窗（60s，TUI 90s），
-// 也就是说热更之后再靠「静默→suspect」把任务推进裁决区，需要 60s 以上真实静默——
-// 那属既有负载敏感 tmux 族，钉成常驻锚只会变成偶发红灯。而重启入口
-// 有一个**确定**的同款裁决：`RestoreTask` 把 running 语义降级为 suspect，随后
-// `build_agent.go:761-787` 的 TaskID 桥先裁孤儿、再把「被当前 monitor 跟踪」的任务
-// 提升回 running——一个存活会话要被判「未跟踪」，等价于监视信号在某一代工具手里丢了。
-// 这条链与热更窗口检验的是**同一处 seam**（换代装配新工具后，管理器读的必须是当前代
-// 的 monitor），且它顺带把本子句另一句「声明构造与恢复重挂/monitor 激活分离」钉住：
-// 重挂必须先于裁决与提升，否则合法活会话会被自己裁成 reincarnation orphan。
-//
-// 崩溃形状与轮九十九同法：spawn 子进程起一个真实长命令会话，等记录过 durable 路径后
-// **不调 Close 直接退出**——tmux 会话属于 server 不属于本进程，因此它活到下一次 boot。
 
 const (
 	sessionWatchPhaseEnv = "TAGENT_MON33_PHASE"
@@ -1463,6 +1434,9 @@ func killOwnSession(t *testing.T, session string) {
 
 // TestLiveSessionStaysWatchedAcrossToolGeneration 钉住 工具换代后仍存活的真实会话必须继续被当前代跟踪。
 // - 三条 boot 各用独立持久根：热更窗口那条全程发生在单进程内（spawn → publish → re-attempt），复用前一根会拿到会话早已死亡的遗留任务（实测）。
+// - 以重启为锚而非热更窗口：热更后要进入裁决区需一次真实静默，其下限被钉在稳定窗（非 TUI 60s／TUI 90s），钉成常驻锚只会变成负载敏感的偶发红灯；
+// - 重启入口有确定裁决：RestoreTask 把 running 降级 suspect，TaskID 桥先裁孤儿、再把被当前 monitor 跟踪的任务提升回 running；
+// - 一条存活会话被判「未跟踪」，等价于监视信号在某一代工具手里丢失——该链与热更窗口检验的是同一处 seam。
 func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
 	if phase := os.Getenv(sessionWatchPhaseEnv); phase != "" {
 		sessionWatchChild(t, phase)
@@ -1787,13 +1761,6 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 		return countServed(m.snapshot(), "SUB-C-PROMPT-G2") > g2Before
 	})
 }
-
-// At the PRODUCTION task-action entry: the same `relaunch_task` /
-// `resume_task` objects the LLM calls, driven against a generation published by
-// the real reload path. Two things only this level can prove: the refusal reaches
-// the host-visible tool answer (not just an internal error), and a wrapper built by
-// a CANDIDATE carries a usable resident owner — without that wire every re-entry
-// after the first hot update would fail closed.
 
 // reentryYAML renders entry "a" delegating to `target` with relaunch_task and
 // resume_task on the same face. `maxIters` is a fingerprint field, so changing it

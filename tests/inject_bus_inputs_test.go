@@ -36,15 +36,9 @@ func (m *mockEchoTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	return `{"status":"ok","output":"echo result"}`, nil
 }
 
-// TestInjectBusInputs_DuringReAct verifies that user messages injected via
-// InjectMessage during a multi-round ReAct (with tool calls) are picked up
-// by the InjectBusInputs BeforeModel callback and appended to the LLM request.
-//
-// Flow:
-//  1. User sends message A → LLM → tool_call(action)
-//  2. During tool execution (simulated delay), user sends message B
-//  3. Tool returns → next LLM call → InjectBusInputs TryPulls message B
-//  4. LLM sees both the tool result AND message B → produces final response
+// TestInjectBusInputs_DuringReAct verifies that a message injected mid-ReAct reaches the next LLM request.
+// - InjectMessage adds the message while a tool call runs; the InjectBusInputs BeforeModel callback pulls it into the request.
+// - The next call therefore carries both the tool result and the injected message before the final response.
 func TestInjectBusInputs_DuringReAct(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()
 

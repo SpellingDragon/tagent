@@ -19,9 +19,7 @@ func TestNewWebSearchTool_Declaration(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	require.NotNil(t, searchTool)
 
-	callable := searchTool
-
-	decl := callable.Declaration()
+	decl := searchTool.Declaration()
 	require.NotNil(t, decl, "Declaration should not be nil")
 
 	assert.Equal(t, "web_search", decl.Name)
@@ -30,8 +28,7 @@ func TestNewWebSearchTool_Declaration(t *testing.T) {
 	assert.Equal(t, "object", decl.InputSchema.Type)
 }
 
-// TestNewWebSearchTool_InputSchema_QueryParameter verifies the input schema
-// includes the required "query" parameter.
+// TestNewWebSearchTool_InputSchema_QueryParameter verifies the input schema includes the required "query" parameter.
 func TestNewWebSearchTool_InputSchema_QueryParameter(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	decl := searchTool.Declaration()
@@ -46,8 +43,7 @@ func TestNewWebSearchTool_InputSchema_QueryParameter(t *testing.T) {
 		"query should be a required parameter")
 }
 
-// TestNewWebSearchTool_InputSchema_NoExtraParams verifies the input schema
-// only contains expected parameters (query only).
+// TestNewWebSearchTool_InputSchema_NoExtraParams verifies the input schema only contains expected parameters (query only).
 func TestNewWebSearchTool_InputSchema_NoExtraParams(t *testing.T) {
 	searchTool := NewWebSearchTool()
 	decl := searchTool.Declaration()
@@ -56,9 +52,9 @@ func TestNewWebSearchTool_InputSchema_NoExtraParams(t *testing.T) {
 		"input schema should only have 'query' property")
 }
 
-// TestWebSearch_ZhipuCall verifies the tool posts a well-formed request to
-// the Zhipu Web Search API (Bearer auth + expected body fields) and maps the
-// search_result array into SearchResult entries.
+// TestWebSearch_ZhipuCall verifies the tool request against the Zhipu Web Search API and its response mapping.
+// - The request carries Bearer auth and the body fields the API expects.
+// - The search_result array maps into SearchResult entries.
 func TestWebSearch_ZhipuCall(t *testing.T) {
 	var gotAuth string
 	var gotBody zhipuSearchRequest
@@ -102,8 +98,7 @@ func TestWebSearch_ZhipuCall(t *testing.T) {
 	assert.Equal(t, "zhipu", resp.Engine)
 }
 
-// TestWebSearch_MissingAPIKey verifies a missing API key yields an informative
-// message rather than an error.
+// TestWebSearch_MissingAPIKey verifies a missing API key yields an informative message rather than an error.
 func TestWebSearch_MissingAPIKey(t *testing.T) {
 	cfg := DefaultWebSearchConfig()
 	cfg.APIKeyEnv = "DEFINITELY_UNSET_ENV_VAR_XYZ"

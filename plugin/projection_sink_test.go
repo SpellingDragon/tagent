@@ -94,9 +94,8 @@ func TestSkippedEventsNotProjected(t *testing.T) {
 	}
 }
 
-// TestSanitizeAssistantContent_StripsFabricatedPrefix: a model-imitated
-// [evt_...] prefix must be stripped at the storage boundary — fake keys would
-// poison prefixEventKey skipping and retained-ref scanning downstream.
+// TestSanitizeAssistantContent_StripsFabricatedPrefix pins that a model-imitated [evt_...] prefix is stripped at the storage boundary.
+// - A fake key left in storage would poison prefixEventKey skipping and the retained-ref scan downstream.
 func TestSanitizeAssistantContent_StripsFabricatedPrefix(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	p := NewMemoryPlugin(store)

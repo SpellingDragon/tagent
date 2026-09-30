@@ -180,10 +180,8 @@ func TestMemoryPlugin_OnEvent_NoRelationStoreProvider(t *testing.T) {
 	assert.Equal(t, 1, stats.TotalEvents, "event should still be stored")
 }
 
-// TestMemoryPlugin_LastEventKeysBounded: the
-// causal-chain map evicts oldest-by-event-key entries once over the cap —
-// newest chains survive, oldest chains go first (event keys are
-// time-monotonic within a partition).
+// TestMemoryPlugin_LastEventKeysBounded pins that the causal-chain map evicts oldest-by-event-key entries once over the cap.
+// - Newest chains survive and oldest go first, because event keys are time-monotonic within a partition.
 func TestMemoryPlugin_LastEventKeysBounded(t *testing.T) {
 	p := &MemoryPlugin{lastEventKeys: make(map[string]int64)}
 	total := maxLastEventKeys + 100
@@ -467,10 +465,8 @@ func TestLastEventKeys_EvictionCausalSemantics(t *testing.T) {
 	}
 }
 
-// TestLastEventKeys_BoundedFuzz drives a randomized interleaving of updates to
-// a small session space with strictly increasing keys and asserts the core
-// invariant every step: the map is capped, and each present key maps to the
-// last value written under THAT key (never a foreign value).
+// TestLastEventKeys_BoundedFuzz drives randomized interleaved updates over a small session space with strictly increasing keys.
+// - The invariant is asserted every step: the map stays capped, and each present key maps to the last value written under that key.
 func TestLastEventKeys_BoundedFuzz(t *testing.T) {
 	rng := rand.New(rand.NewSource(0xcafe5))
 	p := &MemoryPlugin{lastEventKeys: make(map[string]int64)}

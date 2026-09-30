@@ -27,10 +27,10 @@ func newEnv(id string) *reliability.Envelope {
 	}
 }
 
-// TestDrill_UpgradeTreatsLegacySpillAsInertThenResets 1. Upgrade path: pre-migration *.spill no longer blocks boot —
-// the v2 binary opens the dir, classifies the legacy item as INERT transitional
-// data (never reinterpreted/absorbed), and an explicit managed ResetTransitional
-// clears it. The full durable lifecycle then runs on the current format.
+// TestDrill_UpgradeTreatsLegacySpillAsInertThenResets pins the upgrade path for pre-migration spill files.
+// - A prior-format *.spill does not block boot: the binary opens the directory and classifies the item as inert transitional data.
+// - The item is never reinterpreted nor absorbed; an explicit managed ResetTransitional clears it.
+// - The full durable lifecycle then runs on the current format.
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#reopen-refusal
 func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
@@ -62,9 +62,9 @@ func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	require.EqualValues(t, 0, in.Pending(), "acked envelope leaves nothing outstanding")
 }
 
-// TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain 2. Rollback condition: a pre-inbox binary ignores inbox-v1, so downgrading
-// while unacked envelopes exist would silently drop them. The operator's
-// read-only gate is Pending()>0 → refuse; drain-to-zero → safe.
+// TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain pins when a downgrade is safe.
+// - A pre-inbox binary ignores inbox-v1, so downgrading while unacked envelopes exist would silently drop them.
+// - The operator gate is read-only: Pending()>0 → refuse, drain-to-zero → safe.
 func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	dir := t.TempDir()
 	in, err := reliability.NewInbox(dir, 10)
@@ -96,9 +96,9 @@ func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	require.EqualValues(t, 0, in2.Pending(), "drained → rollback to pre-inbox binary is now data-safe")
 }
 
-// TestDrill_PartitionCollisionDiagnosisIsReadOnly 3. Read-only partition-collision diagnosis. Pigeonhole guarantees detection:
-// 1200 distinct names over a 10-bit (1024) pid space MUST collide, independent
-// of hash distribution. The scan flags collisions and mutates nothing.
+// TestDrill_PartitionCollisionDiagnosisIsReadOnly pins that the collision scan is read-only.
+// - Pigeonhole guarantees detection: 1200 distinct names over a 10-bit (1024) pid space MUST collide, independent of hash distribution.
+// - The scan flags collisions and mutates nothing.
 func TestDrill_PartitionCollisionDiagnosisIsReadOnly(t *testing.T) {
 	names := make([]string, 0, 1200)
 	for i := 0; i < 1200; i++ {

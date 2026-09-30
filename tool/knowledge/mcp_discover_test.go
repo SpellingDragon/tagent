@@ -75,8 +75,8 @@ func TestMCPDiscover_Registry_LiveAddRemove(t *testing.T) {
 	assert.Equal(t, 0, out.Count)
 }
 
-// TestMCPDiscover_TruthfulInvocationGuidance verifies the content carries
-// the real mcp_call invocation + input schema and no exec-based lie.
+// TestMCPDiscover_TruthfulInvocationGuidance verifies the content carries the real mcp_call invocation and input schema.
+// - Nothing in it may claim an exec-based route that the tool does not have.
 func TestMCPDiscover_TruthfulInvocationGuidance(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
@@ -95,9 +95,8 @@ func TestMCPDiscover_TruthfulInvocationGuidance(t *testing.T) {
 	assert.NotContains(t, content, `command(mode="exec"`)
 }
 
-// TestMCPDiscover_NaturalLanguageQuery verifies token-AND fallback: a
-// space-separated natural query matches underscore-named tools and
-// reordered description words (the shape LLMs actually issue).
+// TestMCPDiscover_NaturalLanguageQuery verifies the token-AND fallback for natural-language queries.
+// - A space-separated query matches underscore-named tools and reordered description words, which is the shape LLMs actually issue.
 func TestMCPDiscover_NaturalLanguageQuery(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
@@ -118,9 +117,8 @@ func TestMCPDiscover_NaturalLanguageQuery(t *testing.T) {
 	assert.Equal(t, 0, out.Count)
 }
 
-// TestMCPDiscover_OneEmptyServerDoesNotBlockOthers approximates a failing
-// server (trpc swallows connection errors and yields no tools) alongside a
-// healthy one.
+// TestMCPDiscover_OneEmptyServerDoesNotBlockOthers pins that an empty server does not starve a healthy one.
+// - The fixture approximates a failing server, since trpc swallows connection errors and yields no tools.
 func TestMCPDiscover_OneEmptyServerDoesNotBlockOthers(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })

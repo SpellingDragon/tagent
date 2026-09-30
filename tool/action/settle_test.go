@@ -212,9 +212,8 @@ func mustTmuxSession(t *testing.T, command string) (*TmuxExecutor, string) {
 	return exec, sess.ID
 }
 
-// TestTmuxSettleDetector_CancelReapsRealSession: Cancel() reaps the underlying
-// tmux session, and is idempotent (a second Cancel does not error/panic). This
-// is the reap primitive that prune relies on for session-resource reclaim.
+// TestTmuxSettleDetector_CancelReapsRealSession pins that Cancel reaps the underlying tmux session and is idempotent.
+// - A second Cancel neither errors nor panics, and this reap is the primitive prune relies on for session-resource reclaim.
 func TestTmuxSettleDetector_CancelReapsRealSession(t *testing.T) {
 	exec, id := mustTmuxSession(t, "sleep 30")
 	defer func() { _ = exec.KillSession(id) }()

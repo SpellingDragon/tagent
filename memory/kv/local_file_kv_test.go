@@ -190,10 +190,9 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 	<-done
 }
 
-// TestLocalFileKV_ListPartitionIDs: any
-// persisted key in a partition's namespace ({pid}:evt|idx|meta|tomb:…)
-// proves the partition; non-partition namespaces (global:*) and unparsable
-// prefixes are ignored.
+// TestLocalFileKV_ListPartitionIDs pins how partition ids are derived from persisted keys.
+// - Any key in a partition namespace ({pid}:evt|idx|meta|tomb) proves that partition.
+// - Non-partition namespaces such as global:* and unparsable prefixes are ignored.
 func TestLocalFileKV_ListPartitionIDs(t *testing.T) {
 	dir := t.TempDir()
 	kv, err := NewLocalFileKV(dir)

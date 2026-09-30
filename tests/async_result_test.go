@@ -68,12 +68,10 @@ func newSlowBackgroundTool(marker string) tool.Tool {
 	)
 }
 
-// TestRealLLM_AsyncResultDelivery_EndToEnd is the end-to-end integration test
-// that unit tests structurally cannot provide (and whose absence let the
-// board-injection bug ship): it runs a REAL agent + REAL LLM through the full
-// assembled loop and asserts a background task's settle result flows back to
-// the user via the reclaim turn — with no hang and no empty reply. No tmux
-// required (the slow work is a timer-based generic task).
+// TestRealLLM_AsyncResultDelivery_EndToEnd runs a real agent and a real LLM through the fully assembled loop.
+// - It asserts a background task's settle result flows back to the user through the reclaim turn, with no hang and no empty reply.
+// - This is coverage unit tests structurally cannot provide: the board-injection bug shipped while it was missing.
+// - No tmux is needed, because the slow work is a timer-based generic task.
 func TestRealLLM_AsyncResultDelivery_EndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-LLM integration test in short mode")
@@ -215,8 +213,9 @@ func (m *asyncMockModel) Info() model.Info {
 	return model.Info{Name: "async-mock-model"}
 }
 
-// TestAsyncResultRouting verifies that async tool results are correctly
-// routed to the original user who triggered the command.
+// TestAsyncResultRouting verifies that async tool results route back to the user who triggered the command.
+//
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestAsyncResultRouting(t *testing.T) {
 	cfg := &tagentagent.TagentConfig{
 		Model:     &asyncMockModel{},

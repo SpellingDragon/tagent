@@ -100,8 +100,8 @@ func (echoTool) Call(ctx context.Context, args []byte) (any, error) {
 	return `{"echo":` + string(args) + `}`, nil
 }
 
-// TestCausalChain_EndToEnd verifies that a simple user -> assistant turn
-// produces two persisted FullEvents with a parent/child causal link.
+// TestCausalChain_EndToEnd verifies that a simple user and assistant turn produces two persisted FullEvents.
+// - The two events carry a parent/child causal link.
 //
 // 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestCausalChain_EndToEnd(t *testing.T) {
@@ -179,11 +179,8 @@ loop:
 	assert.NotEqual(t, asstKey, parent, "parent should not be self")
 }
 
-// TestCausalChain_WithToolCall verifies a 4-event tool-call chain:
-//
-//	user -> assistant(tool_calls) -> tool_result -> assistant(final)
-//
-// and checks that each persisted event has the expected causal parent.
+// TestCausalChain_WithToolCall verifies a four-event tool-call chain: user, assistant(tool_calls), tool_result, assistant(final).
+// - Each persisted event carries the expected causal parent.
 func TestCausalChain_WithToolCall(t *testing.T) {
 	mockModel := newSequenceModel([]*model.Response{
 		{

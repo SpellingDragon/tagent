@@ -82,9 +82,9 @@ func TestResolveBaseDir(t *testing.T) {
 	assert.Equal(t, "/tmp", resolveBaseDir(map[string]any{"base_dir": "/tmp"}, "/codes"))
 }
 
-// TestMakeFileToolFactory_WorkingDirAsBaseDir 是 C 方案(框架级 working_dir)端到端回归:
-// cfg.WorkingDir(config.working_dir / TAGENT_WORKING_DIR 注入)在无显式 base_dir 时作为 file
-// 工具的根目录 —— save_file 落盘到 WorkingDir 而非进程 cwd;显式 base_dir 仍优先。
+// TestMakeFileToolFactory_WorkingDirAsBaseDir pins the framework-level working_dir as the file tools' root.
+// - cfg.WorkingDir (config.working_dir, TAGENT_WORKING_DIR) is the root when no explicit base_dir is given.
+// - save_file therefore lands inside WorkingDir rather than the process cwd, and an explicit base_dir still wins.
 //
 // 契约: docs/wiki/platform/agent-behavior-matrix.md#working-dir
 func TestMakeFileToolFactory_WorkingDirAsBaseDir(t *testing.T) {

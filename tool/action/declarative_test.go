@@ -7,12 +7,10 @@ import (
 	"github.com/SpellingDragon/tagent/agent/task"
 )
 
-// TestSpecFromDeclarativeRestoresTTL covers (a): a restored command task must
-// carry the model's explicit `ttl` (persisted in Declarative.Params at spawn and
-// recovered by SpecFromDeclarative on rebuild) so the reaper stays bound across
-// restarts — this is the 56bf24c3 fix (a restored long-running service that used
-// to linger on the board forever because restore dropped its lifetime). Pre-TTL
-// records (no `ttl` key) fall back to the 10m floor rather than becoming immortal.
+// TestSpecFromDeclarativeRestoresTTL pins that a restored command task keeps the model explicit ttl.
+// - The ttl is persisted in Declarative.Params at spawn and recovered by SpecFromDeclarative on rebuild, so the reaper stays bound across restarts.
+// - Without a lifetime a restored long-running service would sit on the board forever, which is the behaviour this test guards.
+// - Records written before the ttl key existed fall back to the 10m floor rather than becoming immortal.
 func TestSpecFromDeclarativeRestoresTTL(t *testing.T) {
 	ct := &ActionTool{}
 

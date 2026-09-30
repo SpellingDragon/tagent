@@ -17,25 +17,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestPlanAgentBug_AgentToolWrapper_SubAgentRun 用 AgentToolWrapper.Call()
-// 触发 sub-agent 路径（这才是 wechat-bot 中 plan agent 的真实调用路径）。
-//
-// wechat-bot 日志中失败的场景是主 agent 调 tool "plan"，
-// 而 AgentToolWrapper.Call() 内部用 agent.Run() 触发 plan agent。
-//
-// 假设根因：
-//
-//	AgentToolWrapper.Run() 创建临时 invBus + 新 ContextManager + 新 session，
-//	user message 作为 external_input 发到 invBus；旧实现中当前轮抽取启发式
-//	可能把 unprefixed user message 过滤掉。现在 user 消息经插件管线同步
-//	投影，装配仅从投影渲染，该类丢失不再可能。
-//
-// 运行方式：
-//
-//	TRPC_CLAW_MODEL_NAME=glm-5.2 go test -v \
-//
-// -run TestPlanAgentBug_AgentToolWrapper_SubAgentRun \
-// ./tests/ -timeout 180s
+// TestPlanAgentBug_AgentToolWrapper_SubAgentRun drives the sub-agent path the way wechat-bot actually uses it.
+// - The live path is the main agent calling tool "plan", so the test enters through AgentToolWrapper.Call() rather than running the plan agent directly.
+// - It pins that a user message survives wrapper-to-sub-agent assembly: the plugin pipeline projects the message and assembly renders from that projection.
+// - Needs a real model and is skipped in short mode; run it with -run naming this test and TRPC_CLAW_MODEL_NAME=<model>.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#extra-params
 func TestPlanAgentBug_AgentToolWrapper_SubAgentRun(t *testing.T) {
@@ -228,14 +213,9 @@ func (t *recordingSaveFileTool) snapshot() map[string]string {
 	return out
 }
 
-// TestPlanAgentCreateBehavior_RealPrompt 用真实的 plan_agent.md 系统提示词 +
-// 记录型 mock 工具，实际调用真实
-// LLM，观察 plan agent 在收到 create 请求时到底发起了哪些操作——特别是是否
-// 经 spec(op="new") 建 change、产出合规 artifact（proposal.md + tasks.md）、
-// 并以 spec(op="status") 结构自检收尾。
-//
-// 契约随 plan_agent.md 的 spec 工具流演进（原 shell openspec CLI 契约已废弃：
-// plan 无 shell 能力，spec 工具是唯一计划管理入口）。
+// TestPlanAgentCreateBehavior_RealPrompt runs the real plan_agent.md prompt against a recording mock tool set.
+// - It observes which operations the model issues for a create request: whether it opens a change with spec(op="new") and emits proposal.md plus tasks.md.
+// - The run must close with a spec(op="status") self-check, the only plan-management entry the prompt can reach given plan has no shell capability.
 func TestPlanAgentCreateBehavior_RealPrompt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

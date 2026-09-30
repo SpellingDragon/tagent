@@ -85,8 +85,9 @@ func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference,
 	return f.refs, nil
 }
 
-// TestFetchWALTail pins the D8 query contract: tail query with limit, error
-// propagation for logged degradation (never swallowed), nil-store unavailability.
+// TestFetchWALTail pins the write-ahead-log tail query contract.
+// - The tail query honours its limit and propagates errors, so logged degradation stays visible instead of being swallowed.
+// - A nil store reports unavailability rather than panicking.
 //
 // 契约: docs/wiki/platform/reincarnation-notice.md#breakpoint
 func TestFetchWALTail(t *testing.T) {
@@ -165,8 +166,8 @@ func TestHasOpenBreakpoint(t *testing.T) {
 	}
 }
 
-// TestWaitNoticeAppearance (B-fix): polling replaces the fixed 5s sleep that
-// silently missed slow insurance-chain writers (s67 absent-notice incident).
+// TestWaitNoticeAppearance pins that the notice is awaited by polling rather than one fixed sleep.
+// - A fixed delay misses writers on the slow insurance chain, so the test bounds a poll until the appearance shows up.
 func TestWaitNoticeAppearance(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "REINCARNATION_NOTICE")
 

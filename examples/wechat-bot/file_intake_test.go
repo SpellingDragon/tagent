@@ -244,7 +244,7 @@ func TestSaveInboundFileConcurrentCollision(t *testing.T) {
 	}
 }
 
-// TestIntakeMediaAcceptsUnknownSizeFileAndVideo 钉住 元数据缺失（DeclaredSize=0）的文件/视频正常接收：内存风险已由 SDK 流式 MaxSize 闸门兜底，不再以"缺少大小信息"拒收。
+// TestIntakeMediaAcceptsUnknownSizeFileAndVideo 钉住 元数据缺失（DeclaredSize=0）的文件/视频正常接收：内存风险已由 SDK 流式 MaxSize 闸门兜底，不会因"缺少大小信息"拒收。
 func TestIntakeMediaAcceptsUnknownSizeFileAndVideo(t *testing.T) {
 	ws := t.TempDir()
 	dl := &mockDownloader{fileData: []byte("x"), videoData: []byte("y")}

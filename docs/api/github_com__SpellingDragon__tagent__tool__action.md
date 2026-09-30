@@ -251,12 +251,18 @@ type ActionToolResult struct {
     and rendered by the framework as a role=tool message.
 
 type MonitorConfig struct {
-	Interval                  time.Duration
-	StableDuration            time.Duration
+	// Interval 基础轮询节奏（自适应调度下的上限见 MaxInterval）。
+	Interval time.Duration
+	// StableDuration 输出稳定判定阈值。
+	StableDuration time.Duration
+	// InteractiveStableDuration TUI 会话的稳定判定阈值。
 	InteractiveStableDuration time.Duration
-	FakeDeadDuration          time.Duration
-	HeartbeatCommand          string
-	HeartbeatTimeout          time.Duration
+	// FakeDeadDuration 假死判定阈值。
+	FakeDeadDuration time.Duration
+	// HeartbeatCommand 探活所用命令。
+	HeartbeatCommand string
+	// HeartbeatTimeout 探活命令的超时。
+	HeartbeatTimeout time.Duration
 
 	// DenseInterval Adaptive poll schedule (optional; unset fields fall back to defaults, with
 	// DenseInterval derived from Interval). See PollSchedule.

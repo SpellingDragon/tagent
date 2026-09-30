@@ -112,7 +112,9 @@ func (rc *runtimeConfig) ownedAgentNames() map[string]bool {
 	return out
 }
 
-var _ = agent.TagentAgent{} // keep the agent import for MemStore-typed helpers
+// The blank reference is this file's only use of the agent import: dropping it
+// means dropping the import in the same step.
+var _ = agent.TagentAgent{}
 
 // changedMemoryAgents returns the sorted names whose memory section differs from
 // the one their existing storage owner was built with. The judgment domain is

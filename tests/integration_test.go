@@ -370,8 +370,7 @@ func TestIntegration_KnowledgeTool_WithRealLLM_BasicQuery(t *testing.T) {
 	}
 }
 
-// TestIntegration_EndToEnd_FullWorkflow 测试 12.1: 完整工作流
-// 用户输入 → TagentAgent → LLM → tool_calls → 最终响应
+// TestIntegration_EndToEnd_FullWorkflow 走完整工作流：用户输入 → TagentAgent → LLM → tool_calls → 最终响应。
 func TestIntegration_EndToEnd_FullWorkflow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

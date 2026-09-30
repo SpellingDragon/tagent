@@ -15,7 +15,7 @@
 | 7 | 每个**包**有 package 注释 | `missing-package-doc`（按包判定，非按文件） | 机器 ✓ |
 | 8 | 每个**导出符号**有 doc | `missing-symbol-doc`：导出函数/方法/类型/常量/变量 | 机器（部分，见 G-1） |
 | 9 | 索引固定语法 `// 契约: <路径>[#锚点]`，一行一个、不承载解释 | `index-root`、`index-line` 形状 | 机器 ✓ |
-| 10 | 目标只允许 `docs/**`、`openspec/specs/**` | `index-root` | 机器 ✓ |
+| 10 | 目标只允许 `docs/**`（终裁剔除 `openspec/specs/**`，与门 `indexTargetRoots` 一致） | `index-root` | 机器 ✓ |
 | 11 | MUST NOT 指向 `openspec/changes/**` 或过程工件 | `process-artifact-ref`、`unindexed-path-ref` | 机器 ✓ |
 | 12 | 索引必须落到具体章节（大文档带锚点） | `index-anchor-required`（>200 行）、`index-anchor-unknown`（锚点不解析） | 机器 ✓ |
 | 13 | 测试文件 doc 槽＝一行意图＋可选要点列表＋索引，单行有长度上限 | `test-doc-not-one-sentence`、`test-doc-line-too-long`、`missing-test-responsibility` | 机器 ✓ |

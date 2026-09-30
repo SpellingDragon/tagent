@@ -39,12 +39,11 @@ type orgGeneration struct {
 }
 
 // orgCoordinator 是一个常驻入口 agent 的**单一**组织版本簿记者，取代把状态散在
-// 重载闭包里的做法。它拥有：有效内容指纹（desired/effective 比较基准）、单调发布
-// 序号（发布身份——回滚同一内容仍前进序号，内容指纹不得冒充身份）、ring-2 上一代
-// 配置（回滚数据源）、最近一次被拒候选（诊断 desired/effective 分歧）、本轮逐 agent
-// 回执与两个时间戳，以及应用记录的无锁读面。
+// 重载闭包里的做法。它拥有：有效内容指纹、发布序号、ring-2 上一代配置、最近一次
+// 被拒候选、本轮逐 agent 回执与两个时间戳，以及应用记录的无锁读面。各量的含义、
+// 前进时机与身份语义（序号与内容指纹之别）均以文档为唯一真源。
 //
-// 它不构造也不换入 runner：候选构造与发布由重载入口按本文的代际语义接入。
+// 它不构造也不换入 runner：候选构造与发布由重载入口接入。
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 type orgCoordinator struct {
@@ -156,7 +155,7 @@ type OrgCloseState struct {
 //	draining —— 本代不路由它（被移除或已降级为旧 owner），故不碰它，数值字段保持零值
 //	           （含义：本轮未评估，而不是"零配置"）。
 //
-// 回执只保留最近一轮，按拓扑大小限界，不累积历史。
+// 回执的保留轮数与限界见文档。
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 type OrgAgentApply struct {

@@ -67,7 +67,8 @@ const (
 	DefaultAgentMaxTokens   = 4096
 	DefaultAgentTemp        = 0.3
 )
-    Default values
+    DefaultEntry 等常量是 DefaultConfig 采用的缺省值：入口名、prompt 目录， 以及主 agent 与子 agent
+    各自的迭代/令牌/温度/压缩阈值上限。
 
 const DefaultPromptsPrefix = "resources/prompts"
     DefaultPromptsPrefix is the path prefix under which the embedded defaults
@@ -189,7 +190,8 @@ type AgentConfig struct {
 	// Tools can reference other agents (agent kind) or plain tools (tool kind).
 	Tools []ToolRef `json:"tools" yaml:"tools"`
 
-	// Agent parameters
+	// MaxToolIterations 是该 agent 单轮允许的工具迭代上限；同组的 MaxTokens、Temperature、
+	// CompressThreshold、KeepRecentTasks 一并构成该 agent 自身的运行参数。
 	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
 	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
 	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
@@ -212,8 +214,8 @@ type AgentConfig struct {
 	ResumeContextRounds int            `json:"resume_context_rounds,omitempty" yaml:"resume_context_rounds,omitempty"`
 	Compress            CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
-	// Generation controls thinking/reasoning mode for the LLM.
-	// When set, these fields are merged into model.GenerationConfig.
+	// ThinkingEnabled 与同组的 ThinkingTokens、ReasoningEffort 控制思考/推理模式：
+	// 任一被设置时并入 model.GenerationConfig。
 	ThinkingEnabled *bool   `json:"thinking_enabled,omitempty"  yaml:"thinking_enabled,omitempty"`
 	ThinkingTokens  *int    `json:"thinking_tokens,omitempty"   yaml:"thinking_tokens,omitempty"`
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"  yaml:"reasoning_effort,omitempty"`
@@ -545,11 +547,11 @@ type EvolutionConfig struct {
 	// ProtectedPaths 是 refine register 的受控路径 patterns（段匹配：`**` 任意段序列/`*` 段内通配）。
 	// 默认三目录：resources/prompts/**, skills/**, scripts/**（scripts 缺失则冥想脚本产物断链）。
 	ProtectedPaths []string `json:"protected_paths,omitempty" yaml:"protected_paths,omitempty"`
-	// JudgeDelaySeconds 是 register 后到评估的延迟窗（原 canary_hold 语义，W4 迁移；0=立即）。
+	// JudgeDelaySeconds 是 register 后到评估的延迟窗，承接 canary_hold 的语义（0=立即评估）。
 	JudgeDelaySeconds int `json:"judge_delay_seconds,omitempty" yaml:"judge_delay_seconds,omitempty"`
 
-	// Guardrail 三阈值（Minor①独立评审：每门独立可配置）。零值走 GuardrailConfig 默认；
-	// MaxNegFBRate 负值=显式禁用负反馈判据。
+	// MaxDenialRate 与同组的 MaxCriticalRate、MaxNegFBRate 是 Guardrail 的三道独立阈值：
+	// 每门单独可配，零值走 GuardrailConfig 默认，MaxNegFBRate 取负值表示显式禁用负反馈判据。
 	MaxDenialRate   float64 `json:"max_denial_rate,omitempty" yaml:"max_denial_rate,omitempty"`
 	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
@@ -558,7 +560,9 @@ type EvolutionConfig struct {
 	// to the entry agent’s model. The judge’s judgment knobs and their zero-value
 	// defaults are the constructor’s contract (evolution.NewLLMJudgeEvaluator).
 	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
-	// Deprecated flat judge knobs (compat aliases, folded into Judge):
+	// JudgeModel 与同组五项平面判官参数（JudgeProvider、JudgeReasoningEffort、JudgeMinSamples、
+	// JudgePassThreshold、JudgeTimeoutSeconds）是 Judge 的兼容别名，取值折入 Judge。
+	// Deprecated: 平面字段只保留读取兼容。
 	JudgeModel           string  `json:"judge_model,omitempty" yaml:"judge_model,omitempty"`
 	JudgeProvider        string  `json:"judge_provider,omitempty" yaml:"judge_provider,omitempty"`
 	JudgeReasoningEffort string  `json:"judge_reasoning_effort,omitempty" yaml:"judge_reasoning_effort,omitempty"`
@@ -641,13 +645,10 @@ type MemoryConfig struct {
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
-	// FSync (localfile type only) is ACCEPTED AND IGNORED since the
-	// localfile-minimization ruling
-	// : the backend has no WAL/fsync machinery — Sync() is a full
-	// snapshot atomic tmp+rename whose durability claim stops at "visible to
-	// a fresh process after a successful barrier", NOT power-loss survival.
-	// The key stays only so existing configs load unchanged; production
-	// durability tiers are a rustviking-stage decision.
+	// FSync（仅 localfile 类型）被接受但不产生任何效果：该后端没有 fsync 机制。
+	// 该键只为让既有配置原样加载而保留；持久性语义与分级见文档。
+	//
+	// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent
@@ -756,7 +757,7 @@ type OrgAgentApply struct {
         draining —— 本代不路由它（被移除或已降级为旧 owner），故不碰它，数值字段保持零值
                    （含义：本轮未评估，而不是"零配置"）。
 
-    回执只保留最近一轮，按拓扑大小限界，不累积历史。
+    回执的保留轮数与限界见文档。
 
     契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 
@@ -930,7 +931,8 @@ type ToolRef struct {
 	// ID is the tool identifier for plain tools (kind=tool).
 	ID string `json:"id,omitempty" yaml:"id,omitempty"`
 
-	// Tool description: inline or from file (relative to prompt_dir)
+	// Description 是工具描述正文（inline 形态）；文件形态见同组的 DescriptionFile，
+	// 其路径相对 prompt_dir。
 	Description     string `json:"description,omitempty"      yaml:"description,omitempty"`
 	DescriptionFile string `json:"description_file,omitempty" yaml:"description_file,omitempty"`
 

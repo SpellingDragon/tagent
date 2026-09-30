@@ -44,8 +44,7 @@ func TestBuildAgent_SelfReferenceDetected(t *testing.T) {
 	require.Contains(t, err.Error(), "reference cycle")
 }
 
-// TestStrictDecode_RejectsUnknownField: a
-// typo'd top-level key fails config loading with the unknown key named.
+// TestStrictDecode_RejectsUnknownField: a typo'd top-level key fails config loading with the unknown key named.
 func TestStrictDecode_RejectsUnknownField(t *testing.T) {
 	data := []byte("entry: tagent\nwroking_dir: /tmp\n")
 	var cfg Config
@@ -54,11 +53,10 @@ func TestStrictDecode_RejectsUnknownField(t *testing.T) {
 	require.Contains(t, err.Error(), "wroking_dir")
 }
 
-// TestBuildAgent_DiamondBuildsOnce (review test-blind-spot #3): A→{B,C},
-// B→D, C→D — the stack is path-scoped, so the diamond is legal and D is
-// built exactly once via the cache. Locks the other half of the cycle-check
-// contract: a regression that stops deleting stack entries on exit would
-// make this legal shape report a false cycle.
+// TestBuildAgent_DiamondBuildsOnce pins that a diamond build graph is legal and builds D exactly once.
+// - A to {B,C}, B to D, C to D: the cycle stack is path-scoped, so reaching D again through a second parent is not a cycle.
+// - D comes from the cache once, which is the other half of the cycle-check contract.
+// - If leaving a path stopped deleting its stack entry, this legal shape would report a false cycle.
 func TestBuildAgent_DiamondBuildsOnce(t *testing.T) {
 	cfg := Config{
 		Entry: "a",

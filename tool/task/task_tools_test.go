@@ -104,8 +104,7 @@ func TestResolveTask_Prefix(t *testing.T) {
 	}
 }
 
-// TestTools_NoController: without an injected controller, tools return a clear
-// message rather than erroring.
+// TestTools_NoController: without an injected controller, tools return a clear message rather than erroring.
 func TestTools_NoController(t *testing.T) {
 	ctx := context.Background()
 	out, err := NewListTasksTool().Call(ctx, nil)

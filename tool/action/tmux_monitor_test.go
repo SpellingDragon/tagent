@@ -1196,7 +1196,7 @@ func TestAddSessionWithCallback_FiresWithoutGlobal(t *testing.T) {
 	}
 }
 
-// TestAddSessionWithCallback_RemovedOnRemoveSession 钉住 RemoveSession drops the per-session callback so it no longer fires.
+// TestAddSessionWithCallback_RemovedOnRemoveSession 钉住 RemoveSession drops the per-session callback so it does not fire afterwards.
 func TestAddSessionWithCallback_RemovedOnRemoveSession(t *testing.T) {
 	inspector := &mockInspector{processExists: true}
 	tm := newTestMonitor(inspector)

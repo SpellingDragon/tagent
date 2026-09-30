@@ -317,25 +317,16 @@ func (r *RuntimeResources) poison(key resourceKey, res openedResource, lockFile 
 	log.Warnf("[tagent] path %s SEALED poisoned: %v (entry holds store/engine/lockfile strong references)", key.path, cause)
 }
 
-// closeResource tears down a resource in the D5 close order: stop the
-// forgetting producers FIRST (the compactor/lifecycle scanners call the
-// engine's vector remover while sweeping), THEN stop and wait for the engine
-// worker (whose drain still persists to the live KV), THEN flush and close the
-// backend store (relation + KV final durability flush).
-//
-// It reports whether the engine worker was CONFIRMED stopped. A false return
-// means a stale worker might still write the KV, so the caller must NOT release
-// the writer lock / reopen the path (D5: never two writers). It also returns the
-// first close diagnostic — close errors are surfaced, not swallowed. All steps
-// are idempotent (closeOnce in engine and store), so a discard of a freshly
-// opened racing resource and a last-lease release share one path without
-// double-closing.
-//
-// The engine's stop reports failure on its own account: an indexing drain or a
-// vector flush that does not finish returns an error, so this leg is live with the
-// current engine. A path sealed after such an unconfirmed stop has no un-seal exit;
-// it stays refused for the whole life of the process, which is the per-path
-// fail-closed half of never running a second writer.
+// closeResource tears down one resource and reports whether the engine worker was
+// CONFIRMED stopped, together with the first close diagnostic — close errors are
+// surfaced, never swallowed. A false workerStopped means a stale worker might still
+// write the KV, so the caller must NOT release the writer lock or reopen the path.
+// Every step is idempotent, so discarding a freshly opened racing resource and
+// releasing the last lease share one path without double-closing.
+// The teardown order, why the engine's stop can fail on its own account, and the
+// sealing rule that follows such an unconfirmed stop are specified in the documents
+// below.
+// 契约: docs/wiki/platform/resource-ownership.md#close-order
 // 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
 func closeResource(res openedResource) (workerStopped bool, err error) {
 	if ps, ok := res.store.(interface{ StopProducers() }); ok {

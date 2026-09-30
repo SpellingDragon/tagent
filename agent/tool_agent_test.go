@@ -615,40 +615,6 @@ func TestSubagentDrain_ForwardsTailEvents(t *testing.T) {
 	t.Log("drain mode is verified through integration: normal event consumption still works")
 }
 
-/*
-func TestClose_TrajectoryRecorder(t *testing.T) {
-	// Create a TrajectoryRecorder
-	dir := t.TempDir()
-	mockModel := &mockModel{info: model.Info{Name: "test"}}
-	tr, err := NewTrajectoryRecorder(mockModel, dir, "test-endpoint")
-	require.NoError(t, err)
-
-	// Create a TagentAgent and set the recorder
-	cfg := &TagentConfig{
-		Model:             mockModel,
-		MemoryStore:       memory.NewInMemoryStore(),
-		MaxToolIterations: 1,
-		MaxTokens:         1000,
-	}
-	ta, err := NewTagentAgent(cfg)
-	require.NoError(t, err)
-	ta.SetTrajectoryRecorder(tr)
-
-	// Close the agent — should close TrajectoryRecorder too
-	err = ta.Close()
-	require.NoError(t, err)
-
-	// Verify the recorder is closed by trying to record (should be no-op)
-	// After Close, recordCh is closed; record() checks tr.closed and returns early
-	tr.record(&TrajectoryRecord{
-		Timestamp: "2026-07-06T14:00:00Z",
-		SessionID: "test",
-	})
-	// If Close() wasn't called, this would panic on send to closed channel
-	// But since record() checks tr.closed, it just returns early
-}
-*/
-
 // TestSubagentRun_ClosesInvCM 钉住 verifies that invCM.Close() is called after runEventLoop exits.。
 func TestSubagentRun_ClosesInvCM(t *testing.T) {
 	mockModel := &mockModel{info: model.Info{Name: "test"}}
