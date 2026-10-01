@@ -156,7 +156,7 @@ func callProjectionFromContext(ctx context.Context) (*compress.SessionProjection
 // late task_settled therefore carries the id (Origin to Metadata verbatim)
 // that the per-invocation loop uses to route that settle back to THIS
 // invocation.
-// 契约: docs/wiki/platform/reincarnation-notice.md#delivery
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 type invocationIDCtxKey struct{}
 
 // withInvocationID binds id as the turn's delegation correlation handle. An

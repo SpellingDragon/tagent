@@ -941,7 +941,7 @@ case "localfile":
 
 记忆只有三个原语：**store**（事件入库，不可变）、**compress**（总结+自然遗忘，同一动作两面）、**recall**（回忆）。没有独立"总结引擎"——内容级总结只在压缩固化时刻发生。
 
-> **事件类型元数据单点**：类型曲线（Role/低价值/骨架/TTL/可嵌入/可召回）唯一权威源为 `event/registry.go` 的 EventTypeSpec 注册表——`lifecycle` TypeTTL、compaction 低价值清空、嵌入选择性生成全委托/派生自它（"加一个类型只改注册表一处即全链路生效"）。内置 11 类，新增 consolidation（策展）/governance（治理）均为 TTL 豁免（-1）。
+> **事件类型元数据单点**：类型曲线（Role/低价值/骨架/TTL/可嵌入/可召回）唯一权威源为 `event/registry.go` 的 EventTypeSpec 注册表——`lifecycle` TypeTTL、compaction 低价值清空、嵌入选择性生成全委托/派生自它（"加一个类型只改注册表一处即全链路生效"）。类型名目与数量以该注册表为准，本页不复述；策展与治理两类记录按注册表声明豁免遗忘，逐类理由见[事件篇 12.7](../event/event-architecture.md#type-rationale)。
 
 ### 证据门控巩固（consolidation）
 
@@ -1606,7 +1606,7 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
 | **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达——依赖模型主动召回。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `recall(turn_key=…)` 因果链召回**（卡片“含 N 步”提示引导） | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
-| **压缩触发 token 估值偏乐观（大上下文溢出风险）** | §16.10 触发线 `usedTokens > compress_threshold × max_tokens` 的 `usedTokens` 由 `DefaultTokenCounter`（`CharsPerToken=2.0`，仅计 `msg.Content` 字符串）估算，对**中英混排+代码**长上下文实测**低估 ~15%**（远端语料 ≥8k tok 段 est/real p50=0.846、83% 低估）→ 压缩**晚于** provider 真实上限触发 → **provider 400 溢出风险**；且该估值不含 tools-schema 每请求开销（适配器 `estimateToolsTokens` 另计，压缩器预算线未纳入）。注意：与 §16.7「占位符低估致永不触发」是**两回事**（那已根治，此为估值器对真实分布的固有偏差）。防线：溢出即显式报错（非静默、非「丢最新记忆」级） | 见 `resident-remaining-hardening` 归档 1.6 与 `TRAJECTORY-BASELINE.md`（复现 `rl/trajectory_analyze.py [estimator-bias]`）；候选（**另案立项待授权**，本 change 未改核心 estimator）：预算线预留 ~15% 余量（最廉止血）、tools-schema 开销入模（主因候选，先解耦）、内容分型/自适应系数 |
+| **压缩触发 token 估值偏乐观（大上下文溢出风险）** | §16.10 触发线 `usedTokens > compress_threshold × max_tokens` 的 `usedTokens` 由 `DefaultTokenCounter`（`CharsPerToken=2.0`，仅计 `msg.Content` 字符串）估算，对**中英混排+代码**长上下文实测**低估 ~15%**（远端语料 ≥8k tok 段 est/real p50=0.846、83% 低估）→ 压缩**晚于** provider 真实上限触发 → **provider 400 溢出风险**；且该估值不含 tools-schema 每请求开销（适配器 `estimateToolsTokens` 另计，压缩器预算线未纳入）。注意：与 §16.7「占位符低估致永不触发」是**两回事**（那已根治，此为估值器对真实分布的固有偏差）。防线：溢出即显式报错（非静默、非「丢最新记忆」级） | 复现：`rl/trajectory_analyze.py [estimator-bias]`；候选方向：预算线预留 ~15% 余量（最廉止血）、tools-schema 开销入模（主因候选，先解耦）、内容分型/自适应系数 |
 | **rustviking 原生向量 CLI 未接线** | 引擎 MVP 走内存索引+KV 序列化持久化；rustviking `index insert/search/delete` CLI 为预留后端（VectorInsert 无调用方，level 语义待实测） | 实测后迁移同库向量后端（引擎侧适配，协议不变） |
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |

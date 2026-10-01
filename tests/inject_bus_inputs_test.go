@@ -39,6 +39,8 @@ func (m *mockEchoTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // TestInjectBusInputs_DuringReAct verifies that a message injected mid-ReAct reaches the next LLM request.
 // - InjectMessage adds the message while a tool call runs; the InjectBusInputs BeforeModel callback pulls it into the request.
 // - The next call therefore carries both the tool result and the injected message before the final response.
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestInjectBusInputs_DuringReAct(t *testing.T) {
 	memStore := tagentmemory.NewInMemoryStore()
 

@@ -22,10 +22,10 @@
 
 | 文件 | 职责 |
 |------|------|
-| `types.go` | 事件类型常量（types.go 内 15 个，含 settle_fold/consolidation/governance/feedback/task_spawned/resident_session；`inbox_receipt` 另于 `inbox_receipt.go` 自注册，注册表合计 16 类）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
+| `types.go` | 事件类型常量的内置族集中声明处（`inbox_receipt` 与 `wf.*` 各在自身文件声明并自注册）、类型推断（委托注册表 spec）、event_summary 视图、Token 估算 |
 | `metadata.go` | 元数据契约：`MetaKey*` 常量（含归因键 agent_name/bundle_id/rollout_id/trace_id/span_id 与 governance subtype 单源常量）、`ParseEventMeta`、`FormatEventKey/ParseEventKey`（hex 单点）、`meta_*` 业务元数据前缀、trigger_source |
 | `registry.go` | EventTypeSpec 注册表：类型元数据唯一权威源（Name/Role/Special/Skeleton/LowValue/TTLDays/Embeddable/Recallable 等），既有函数/变量委托派生 |
-| `timeline.go` | 时间线前缀契约：`FormatEventPrefix/ParseEventKeyAndType/HasEventPrefix/StripEventKeyPrefix`（`[evt_KEY|type]` 读写同点） |
+| `timeline.go` | 时间线前缀契约：`FormatEventPrefix/ParseEventKeyAndType/HasEventPrefix/StripEventKeyPrefix`（`[evt_KEY\|type]` 读写同点） |
 
 ---
 
@@ -58,82 +58,20 @@ graph TB
 ## 四、事件类型常量
 
 <a id="const-list"></a>
-### 4.1 完整常量列表
+### 4.1 类型的声明处与本页的职责
 
-```go
-// event/types.go
-const (
-    // 所有外部输入（用户消息、API 调用、系统注入消息、后台任务结算 task_settled）
-    TypeExternalInput   = "external_input"
+事件类型的**名目、取值与静态属性都不在本页维护**。文档面一旦复制常量的声明形态，就再造出一份读起来像权威的列表，而新增类型必然漏项：`event/wf_facts.go` 的 `wf.*` 家族与 `event/inbox_receipt.go` 的回执类型都不在 `event/types.go`，任何"照抄一个文件"的做法都会漏掉它们。本页承担的是类型之间的关系与机制。
 
-    // Agent 最终回复
-    TypeAgentOutput     = "agent_output"
+| 想知道 | 唯一真源 |
+|---|---|
+| 有哪些事件类型、字符串取值 | `event/types.go` 的内置族常量、`event/wf_facts.go` 的 `wf.*` 家族、`event/inbox_receipt.go` 的回执类型；三处都在各自文件 `init()` 自注册 |
+| 每类型的渲染角色、是否原文优先、摘要形态、是否压缩骨架、是否低价值、TTL、是否合成投影引用（负 key）、是否嵌入、是否可召回、是否进投影 | `EventTypeSpec` 注册表，见 12.1 |
+| 每个类型**为什么单独存在**、与哪个相邻类型必须区分 | 见 12.7；`wf.*` 与 `inbox_receipt` 的保留约束见 12.4 |
+| 正负 key 的票据形状、回补原文的路径 | 见 12.3 的时间线前缀契约与 12.1 的 `Recallable` 行 |
 
-    // 工具/命令执行
-    TypeActionCommand   = "action_command"
+按消息角色推断类型属于本页，见 4.2 与 4.3；新增一个类型**不需要改本页**——注册一条 `EventTypeSpec` 即全链路生效（12.1）。
 
-    // 规划相关
-    TypeThinkingPlan    = "thinking_plan"
-
-    // 记忆召回
-    TypeThinkingRecall  = "thinking_recall"
-
-    // 知识检索
-    TypeThinkingKnowledge = "thinking_knowledge"
-
-    // 策展固化物：L3 归档产物（正 key 真实事件，长期记忆，TTL 与容量淘汰双豁免）
-    TypeContextCompressSummary = "context_compress_summary"
-
-    // 上下文压缩：滚动摘要 ref（负 key 合成投影引用，不落库）
-    TypeContextCompress = "context_compress"
-
-    // 工具链折叠 ref：一串老化的完整工具对（thinking_plan + action_command）折叠为
-    // 单行紧凑引用（负 key 合成投影，携召回票据；与 context_compress 区分，
-    // 使 buildRetainedRefs 不把它吸收进滚动摘要计数）
-    TypeToolChain = "tool_chain"
-
-    // 结算通知折叠卡片 ref（resident-remaining-hardening 1.3 / design D2）：N 条连续
-    // `[task settled]` external_input ref 合并为一张合成投影卡片（负 key，EventSummary
-    // 为 `✗/✓ [evt_key] 摘要行` 票据行）。仅影响投影视图——底层 settle 原文仍留在事实链，
-    // 按各行 evt_key 票据可 recall；骨架保留、可召回、TTL 继承默认
-    TypeSettleFold = "settle_fold"
-
-    // 记忆策展：证据门控巩固产物（携源事件 EventKey 收据 + 服务端 SHA1 指纹，
-    // 可回放验证、防 LLM 伪造；正 key，TTL 豁免）
-    TypeConsolidation = "consolidation"
-
-    // 治理记录：否决/goal/批准/退化/审计五类经 Metadata.subtype 区分
-    // （单类型 + subtype 而非五个类型：审计查询天然单类型过滤；正 key，TTL 永久豁免）
-    TypeGovernance = "governance"
-
-    // 回执-反馈：用户反馈/任务成败/API 评分绑定到具体产出事件（经 RelationStore
-    // 因果边，零新索引；正 key，Role=system，TTL 默认 30 天，subtype 区分
-    // user/task_settle/api，Content 为结构化 JSON）
-    TypeFeedback = "feedback"
-
-    // 任务 spawn 记录（R2）：registry 重建数据源，载 Declarative 声明式投影；
-    // 事实链记录**不进投影**；TTL 与 external_input 对齐（30d）
-    TypeTaskSpawned = "task_spawned"
-
-    // 常驻会话生命周期记录（R3）：spawn 全参/终态结局；事实链审计记录**不进投影**；TTL 30d
-    TypeResidentSession = "resident_session"
-
-    // 输入处理回执（resident-readiness-plan 3.4）：一条被消费的 durable inbox envelope
-    // 的确认记录，真源在事实链而非 inbox 文件；TTL 30d 即 request-id 幂等去重窗口——
-    // 超期后同 request-id 重投不保证幂等（诚实边界，见 `persistent-event-loop` spec「输入处理确认与幂等」）；
-    // 非投影、不可嵌入、**不可召回**（verdict 非语义文本）。
-    // 注：此常量声明于 `event/inbox_receipt.go`（非 types.go），随该文件 init() 自注册。
-    TypeInboxReceipt = "inbox_receipt"
-)
-```
-
-**两类 key 语义务必区分**（决定是否落库、是否可召回）：
-
-| 类别 | 类型 | key | 是否经 `StoreEvent` 落库 |
-|------|------|-----|------------------------|
-| 真实事件 | `external_input`/`agent_output`/`action_command`/`thinking_*`/`context_compress_summary`/`consolidation`/`governance`/`feedback`/`task_spawned`/`resident_session` | 正 key（Snowflake） | 是 |
-| 合成投影引用 | `context_compress`（滚动摘要）/`tool_chain`（工具链折叠）/`settle_fold`（结算折叠卡片） | 负 key | 否——只存在于 SessionProjection，是压缩产物的渲染载体，携 `[hex]` 票据供 recall 回补原文 |
-| 事实链记录但不进投影 | `task_spawned`/`resident_session`/`inbox_receipt`/`context_compress_summary`（compaction 事件） | 正 key | 是；投影重建/回放按类型跳过——看板由 registry 每轮渲染，追加即双重表示（`inbox_receipt` 额外**不可召回**，verdict 非语义文本） |
+一条既不属于推断规则、也不属于注册表字段的事实须在文档面固定：`external_input` 收纳一切"非 Agent 回复、非工具结果"的输入——用户消息、宿主 API 注入、系统状态通知，以及后台任务结算通知。**结算通知靠 `[task settled]` 文本前缀识别**（`agent/compress` 的 `settleNoticePrefix`），它不是事件类型名；连续结算通知折叠成票据卡片的规则见 12.7 的 `settle_fold` 行。
 
 ### 4.2 类型分类逻辑
 
@@ -271,7 +209,7 @@ func GenerateEventSummary(msg model.Message, eventType string, opts EventSummary
 }
 ```
 
-> 事件类型常量现为 **14 个**（在早期七个之外新增 `context_compress_summary`、`tool_chain`、`consolidation`、`governance`、`feedback`、`task_spawned`、`resident_session`）。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
+> 类型的名目与数量以码面声明为唯一真源（归属见 4.1），本页不复述计数。注意：退化上报不是独立类型——是 governance 事件的 subtype=`degraded`。类型元数据（TTL/角色/骨架/可嵌入/可召回）唯一权威源见 `registry.go` EventTypeSpec：`IsSpecialEventType`/`IsSkeletonMessage`/`GenerateEventSummary` 及 memory 的 `LowValueEventTypes`、lifecycle `TypeTTL` 默认均委托/派生（「加一个类型只改注册表一处即全链路生效」）。归因双路径：插件管线经 `plugin.WithAttribution` 注 rollout_id/trace_id/span_id；persistBusEvent 盖 agent_name/trigger_source/rollout_id、不注 turn 锚=设计边界。
 
 ### 7.3 formatToolCallSummary — 工具调用摘要
 
@@ -490,7 +428,7 @@ Tool result ────┤
 | `agent_output`（不进 bus） | 直发 outputCh 投递（RunFlow 注释明示 no bus echo） | `BuildInvocation` 按 `Type != external_input` 过滤，无 Source 判断 |
 | `tool_use` | 当前实现中**不实际产生**到 Bus | `BuildInvocation` 只处理 `TypeExternalInput`，tool_use 会被忽略 |
 
-> **注意**：历史上曾有一个 `TypeToolUse = "tool_use"` 的 Bus 触发器抽象，但它无生产者也无消费者——`runEventLoop` 从不消费 `tool_use`，工具执行始终由框架 Runner 在 `RunFlow` 内部同步完成。该幽灵常量已作为死代码移除（resident-remaining-hardening 4.4）。上表 `tool_use` 行仅保留为“曾经的抽象、当前不产生”的诚实说明，不代表仍存在该事件类型。
+> **注意**：`TypeToolUse = "tool_use"` 的 Bus 触发器抽象无生产者也无消费者——`runEventLoop` 从不消费 `tool_use`，工具执行始终由框架 Runner 在 `RunFlow` 内部同步完成。该常量已作为死代码移除。上表 `tool_use` 行仅保留为"曾经的抽象、当前不产生"的诚实说明，不代表仍存在该事件类型。
 
 ### 11.4 onEvent 回调与 Session 投影维护
 

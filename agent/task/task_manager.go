@@ -70,8 +70,9 @@ const (
 )
 
 // LifetimeJob Task lifecycle classes: jobs are one-round
-// work units subject to stale observation and an optional deadline; services
-// are long-lived by design and are never age-terminated.
+// work units; services are long-lived by design. The class only
+// decides orchestration semantics — the unified TTL reaper
+// covers both classes equally, with no age exemption.
 const (
 	LifetimeJob     = "job"
 	LifetimeService = "service"
@@ -79,8 +80,8 @@ const (
 
 // LifetimeOf resolves the effective lifecycle class: an explicit declaration
 // wins; otherwise Kind is the proxy (command/subagent behave as jobs — one
-// round then exit; generic/unknown default to service — the conservative
-// class that the stale wall never terminates).
+// round then exit; generic/unknown default to service — long-lived but
+// still bounded by the unified TTL, never an age exemption).
 func LifetimeOf(spec TaskSpec) string {
 	if spec.Lifetime == LifetimeJob || spec.Lifetime == LifetimeService {
 		return spec.Lifetime
@@ -166,10 +167,10 @@ type Declarative struct {
 	EventKeys   []int64           `json:"event_keys,omitempty"`
 	Origin      map[string]string `json:"origin,omitempty"`
 	TaskID      string            `json:"task_id,omitempty"`
-	// Lifetime declares the job/service lifecycle class (hardening-review-
-	// batch2 2.4): job tasks are subject to the stale-after observation and
-	// an optional job deadline; service tasks are never age-terminated.
-	// Persisted so restores re-derive the same class.
+	// Lifetime declares the job/service lifecycle class: it decides
+	// orchestration semantics only — both classes fall under the
+	// unified TTL reaper with no age exemption. Persisted so
+	// restores re-derive the same class.
 	Lifetime string `json:"lifetime,omitempty"`
 	// DetachedAtMilli persists the alive-detached transition time so a
 	// restored task keeps its REAL detached age (restore time must never
@@ -1101,7 +1102,7 @@ func (tm *TaskManager) SetSessionTracker(fn func(sessionID string) bool) {
 // (takes it briefly); onSettle fires outside the lock, same as all emitters.
 // Only reconcile-class terminals route through here; the sync-wait window's
 // normal settle path (applyStatus) is unchanged.
-// finalizeRetired is the retirement-path finalize (zombie/orphan/stale-deadline):
+// finalizeRetired is the retirement-path finalize (zombie/orphan/TTL-expired):
 // the settle signal must NOT inherit the task's original trigger lineage (a
 // user-spawned task retired by bookkeeping would otherwise be delivered back
 // to the user as if it were the user's awaited result — leak, ).
