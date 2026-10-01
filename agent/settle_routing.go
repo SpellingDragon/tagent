@@ -125,33 +125,35 @@ func (r *settleSinkRegistry) awaiting(id string) bool {
 	return r.pending[id] > 0
 }
 
-// route delivers evt to the bus bound for invocation id by PUBLISHING it there,
-// then decrementing the accounting barrier. It returns true when a binding took
-// the event; false only when NO bus is bound (entry owner / post-unbind late
-// settle), in which case the caller falls back to the shared bus.
+// route delivers evt to the bus bound for invocation id by PUBLISHING it there and
+// decrementing the accounting barrier. It returns true when a binding took the
+// event; false only when NO bus is bound (entry owner / post-unbind late settle),
+// in which case the caller falls back to the shared bus.
 //
-// Ordering matters for termination: the publish happens BEFORE the decrement, so
-// by the time pending reaches 0 (quiescent true) every delivered settle is
-// already pullable on the bus. The shared shell relies on this when it checks
-// quiescent-then-TryPull to decide the越窗 tail has truly drained. The lock is
-// released before Publish so a momentarily-full bus never serializes against a
-// concurrent noteSpawn/quiescent from the consuming loop.
+// Ordering and atomicity both govern termination. Publish precedes decrement, so
+// when pending reaches 0 every delivered settle is already pullable on the bus —
+// the shared shell's quiescent-then-TryPull drain check depends on this. Both run
+// under ONE lock acquisition because the consuming shell reads awaiting (the pending
+// count) under that same lock before it elects to block on Pull: pending > 0 then
+// always means "some route has yet to publish its settle", so the blocked shell is
+// guaranteed a wake-up. Were the publish to happen outside the lock, a shell could
+// drain a settle, re-read a decrement-not-yet-landed count, block on Pull, and lose
+// its wakeup with nothing left to wake it. The invocation bus is buffered and its
+// sole consumer drains continuously, so the in-lock publish never blocks in practice.
 func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
 	if r == nil || id == "" {
 		return false
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	bus := r.byInv[id]
-	r.mu.Unlock()
 	if bus == nil {
 		return false
 	}
 	bus.Publish(evt)
-	r.mu.Lock()
 	if r.pending[id] > 0 {
 		r.pending[id]--
 	}
-	r.mu.Unlock()
 	return true
 }
 
@@ -177,6 +179,21 @@ func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task,
 	}
 	if bus != nil && evt != nil {
 		bus.Publish(evt)
+	}
+}
+
+// drainSettleBusTo forwards every event left on an invocation bus to the shared
+// persistent bus. It runs after unbind at loop exit: between loop exit and the
+// unbind itself the binding is still live, so route() can publish a settle here
+// with no consumer left. Forwarding closes the window the registry comment
+// promises ("a safe drop, never a send on a dead sink" — a drop is only safe
+// when it is actually visible on the fallback bus).
+func drainSettleBusTo(inv *EventBus, persistent *EventBus) {
+	if inv == nil || persistent == nil {
+		return
+	}
+	for _, ev := range inv.TryPull() {
+		persistent.Publish(ev)
 	}
 }
 

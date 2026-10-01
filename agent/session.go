@@ -101,7 +101,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invCfg.Name = ta.name
 	}
 	invCM := newContextManagerFromConfig(&invCfg, ta, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
-	ta.registerLiveCM(invCM)
 	invCM.SetUserIDSessionID(userID, sessionID)
 	if ta.taskManager != nil {
 		invCM.taskController = ta.taskManager
@@ -117,8 +116,15 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invLease = ta.contextManager.AcquireLease(LeaseSubCall)
 	}
 	if err := invLease.Err(); err != nil {
+		// Refusal happens before this invocation ever counts as live: close the
+		// private CM and leave it unregistered. Registering it here (as an
+		// earlier revision did) leaked the entry permanently — the cleanup
+		// goroutine below never runs, so LiveCMCount stayed non-zero, owner
+		// Obligations never reached zero and retirement drain hung.
+		invCM.Close()
 		return nil, fmt.Errorf("subagent %q invocation refused: %w", ta.name, err)
 	}
+	ta.registerLiveCM(invCM)
 
 	inputEvent := newDelegationEvent(inv, message)
 	go func() {
@@ -131,6 +137,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			invID = inv.InvocationID
 		}
 		ta.bindSettleBus(invID, invBus)
+		// Deferred BEFORE unbind (runs AFTER it under LIFO): the terminal drain
+		// forwards settles that landed during the loop-exit-to-unbind window to
+		// the shared bus, closing the window route()'s comment promises.
+		defer drainSettleBusTo(invBus, ta.persistentBus)
 		defer ta.unbindSettleBus(invID)
 		firstCtx := withInvocationID(ctx, invID)
 		invBus.Publish(inputEvent)

@@ -66,23 +66,39 @@ func (g *executionGateModel) GenerateContent(ctx context.Context, request *model
 // requires: creating the returned Seq performs NO verification, notice consumption, or
 // base call — all of that happens only when the caller actually starts iterating, so a
 // created-then-cancelled iterator neither blocks nor consumes the recovery notice.
+//
+// Every failure inside the Seq must surface as a Response carrying Error: the
+// framework reduces a turn from the event stream, and a zero-output stream would be
+// read as a completed turn — acking the durable input with no output at all. This
+// mirrors the channel contract (create-failure returns error, in-stream failures are
+// encoded into Response.Error) on the iterator path.
 func (g *executionGateModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
 		if err := g.verify(ctx); err != nil {
 			log.Errorf("[executionGate:%s] §4.5 BLOCKING model iterator — execution credential unverified", g.cm.name)
+			yield(gateFailureResponse(err.Error()))
 			return
 		}
 		req := g.withRecoveryNotice(request)
 		if it, ok := g.inner.(model.IterModel); ok {
 			seq, err := it.GenerateContentIter(ctx, req)
 			if err != nil {
+				log.Errorf("[executionGate:%s] inner iterator creation failed: %v", g.cm.name, err)
+				yield(gateFailureResponse(err.Error()))
 				return
 			}
 			seq(yield)
 			return
 		}
 		ch, err := g.inner.GenerateContent(ctx, req)
-		if err != nil || ch == nil {
+		if err != nil {
+			log.Errorf("[executionGate:%s] inner GenerateContent failed: %v", g.cm.name, err)
+			yield(gateFailureResponse(err.Error()))
+			return
+		}
+		if ch == nil {
+			log.Errorf("[executionGate:%s] inner GenerateContent returned a nil channel", g.cm.name)
+			yield(gateFailureResponse("execution gate: inner model returned nil stream"))
 			return
 		}
 		for resp := range ch {
@@ -95,6 +111,15 @@ func (g *executionGateModel) GenerateContentIter(ctx context.Context, request *m
 			}
 		}
 	}, nil
+}
+
+// gateFailureResponse encodes a model-entry failure as a terminal error response
+// so the owning turn reduces to failed instead of a silent completion.
+func gateFailureResponse(reason string) *model.Response {
+	return &model.Response{
+		Done:  true,
+		Error: &model.ResponseError{Type: "model_error", Message: reason},
+	}
 }
 
 // Info preserves the inner model's Info.

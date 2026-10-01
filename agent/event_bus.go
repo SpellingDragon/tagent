@@ -748,19 +748,17 @@ func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) err
 // : quarantine is a terminal disposition just like
 // Ack, so it MUST release the envelope's retention holders — otherwise an isolated
 // envelope's originals stay leased forever and can never be TTL/capacity-evicted
-// (a lease hang). The leaf has no store handle, so the wrapper reads the material
-// BEFORE the move (the rename relocates the file) and releases it after a confirmed
-// isolation. releaseRetention is nil-safe; an envelope that was never armed releases
-// nothing. The rename's atomicity is the dir barrier — no separate cleanup is owed.
+// (a lease hang). The leaf reads the envelope ONCE under the mutation lock and
+// hands back its material together with the moved flag, so "isolated ⇒ released"
+// holds without a second read that could disagree (a transient material-read error
+// between two reads used to quarantine the file and strand its lease).
+// releaseRetention is nil-safe; an envelope that was never armed releases nothing.
+// The rename's atomicity is the dir barrier — no separate cleanup is owed.
 func (b *EventBus) QuarantineEnvelope(path, reason string) {
 	if b == nil || b.inbox == nil {
 		return
 	}
-	m, ok, merr := b.inbox.MaterialOfPath(path)
-	if merr != nil {
-		log.Warnf("[ReliableBus] quarantine retention material read %s failed: %v", path, merr)
-	}
-	if b.inbox.QuarantineEnvelope(path, reason) && ok {
+	if m, moved := b.inbox.QuarantineEnvelope(path, reason); moved {
 		b.releaseRetention(m)
 	}
 }

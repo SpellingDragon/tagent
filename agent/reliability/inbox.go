@@ -527,18 +527,25 @@ func (in *Inbox) PrepareFacts(path, receiptKey string, facts []json.RawMessage) 
 // dir under the mutation lock and frees its unacked capacity. The bytes are kept
 // on disk for operator inspection (never destroyed). The  submit gate uses it
 // to isolate a deterministic-conflict input rather than silently retry or drop it.
-// It reports whether an envelope was actually present and moved — the caller uses
-// the true result as the release point for the envelope's  retention holders
-// (an already-gone/unreadable envelope protects nothing and returns false).
-func (in *Inbox) QuarantineEnvelope(path, reason string) bool {
+//
+// It returns the isolated envelope's retention material together with the moved
+// flag: quarantine is a terminal disposition like Ack, so the caller MUST release
+// the returned material's holders whenever moved is true. Reading the material
+// from the SAME pre-move read (rather than a separate pre-read) is what makes
+// "isolated ⇔ releasable" atomic — a second read that could disagree with this
+// one (transient I/O error between the two) would strand the lease forever.
+// An already-gone/unreadable envelope quarantines nothing, protects nothing,
+// and returns (zero, false).
+func (in *Inbox) QuarantineEnvelope(path, reason string) (UnackedMaterial, bool) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if _, err := readEnvelope(path); err != nil {
-		return false
+	env, err := readEnvelope(path)
+	if err != nil {
+		return UnackedMaterial{}, false
 	}
 	in.quarantineFile(path, reason)
 	in.pending.Add(-1)
-	return true
+	return MaterialOf(env), true
 }
 
 // ReleaseClaim 把已领取的信封退回 pending，使后续 Pull 能按严格序号重新领取它。提交门用它

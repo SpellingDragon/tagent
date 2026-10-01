@@ -452,11 +452,15 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	}
 	if bus.Durable() {
 		if _, ok := memStore.(memory.EventReplayer); !ok {
+			// The inbox was opened above; on refusal nobody else holds the
+			// handle, so close it here (the construction error is the primary).
+			_ = bus.CloseDurable()
 			return nil, fmt.Errorf("agent %q: durable inbox requires a replay-capable MemoryStore (%T does not implement memory.EventReplayer); refusing to degrade durability", name, memStore)
 		}
 		if g, ok := memStore.(memory.RetentionGuard); ok {
 			bus.SetRetentionGuard(g)
 			if aerr := bus.ArmRetentionFromInbox(); aerr != nil {
+				_ = bus.CloseDurable()
 				return nil, fmt.Errorf("agent %q: recovery inventory unreadable — ingest refused, forgetting barrier held (explicit block, no silent proceed): %w", name, aerr)
 			}
 		}
@@ -587,15 +591,16 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	cm.contextCompressor.SetHotSource(ta.liveHotNumbers)
 	ta.taskManager = taskManager
 	ta.selfAudit = selfAudit
-	if ta.meditationMgr != nil {
-		ta.meditationMgr.SetAuditLine(selfAudit.DigestLine)
-	}
 	taskManager.SetTTLSource(ta.taskTTLs)
 	cm.taskController = taskManager
 
 	if cfg.Meditation.Enabled {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
 		ta.meditationMgr.SetTaskController(taskManager)
+		// The audit digest line is reflection feedback: it must reach the
+		// meditation message whenever meditation runs, so wire it after the
+		// manager exists (wiring it before construction was a silent no-op).
+		ta.meditationMgr.SetAuditLine(selfAudit.DigestLine)
 		if cfg.Meditation.AnchorPath != "" {
 			if as, aerr := reliability.NewAnchorStore(cfg.Meditation.AnchorPath); aerr == nil {
 				ta.meditationMgr.SetAnchorStore(as)

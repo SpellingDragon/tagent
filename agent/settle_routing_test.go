@@ -82,6 +82,28 @@ func TestDeliverTaskSettledDecision(t *testing.T) {
 	require.NotContains(t, drainIDs(bus), "s1", "routed settle must NOT also hit the shared bus")
 }
 
+// TestDrainSettleBusTo 钉住 循环退出终态排空：unbind 之前窗口内 route() 已发布到调用总线、
+// 却没有消费者剩下的 settle，必须被转发到共享总线而非静默丢弃——registry 注释承诺的
+// "safe drop" 只有在回落总线上真的可见时才成立。nil 任一侧安全、空总线无副作用。
+func TestDrainSettleBusTo(t *testing.T) {
+	inv := NewEventBus()
+	shared := NewEventBus()
+
+	inv.Publish(&AgentEvent{ID: "window-1", Source: SourceTask})
+	inv.Publish(&AgentEvent{ID: "window-2", Source: SourceTask})
+	drainSettleBusTo(inv, shared)
+	ids := drainIDs(shared)
+	require.Contains(t, ids, "window-1", "windowed settle must surface on the persistent bus")
+	require.Contains(t, ids, "window-2", "every residual event is forwarded, not just the first")
+	require.Empty(t, inv.TryPull(), "the drain empties the invocation bus")
+
+	drainSettleBusTo(inv, shared)
+	require.Empty(t, drainIDs(shared), "draining an already-empty inv bus has no effect")
+
+	drainSettleBusTo(nil, shared)
+	drainSettleBusTo(inv, nil)
+}
+
 // TestBackgroundSettleRoutesToBoundBus 钉住 真实后台结算经绑定了投递回调的任务管理器时，必须到达该调用所绑定的总线。
 // - 只落到共享总线，等待中的那次调用就拿不到结果。
 func TestBackgroundSettleRoutesToBoundBus(t *testing.T) {

@@ -118,7 +118,9 @@ func TestExecutionGate_IteratorLazilyConsumesNotice(t *testing.T) {
 	require.Equal(t, "[recovery] lazy one-shot", got[len(got)-1].Content, "notice injected at actual iteration")
 }
 
-// TestExecutionGate_BlocksUnverifiedOnIterator 钉住 (A) for the iterator path: an unverified credential blocks iteration (yields nothing, model not called).
+// TestExecutionGate_BlocksUnverifiedOnIterator 钉住 (A) for the iterator path: an unverified credential blocks the
+// model call AND surfaces the block as one error response — a silent zero-output stream would
+// be reduced as a completed turn and ack the durable input (see persistent-event-loop 模型入口错误极性).
 func TestExecutionGate_BlocksUnverifiedOnIterator(t *testing.T) {
 	g, inner, _ := newGate(t)
 	cred := &plugin.EchoCredential{MergedMessage: "hi"}
@@ -126,10 +128,82 @@ func TestExecutionGate_BlocksUnverifiedOnIterator(t *testing.T) {
 
 	seq, err := g.GenerateContentIter(ctx, plainReq())
 	require.NoError(t, err)
-	called := false
-	seq(func(*model.Response) bool { called = true; return true })
-	require.False(t, called, "unverified iterator must yield nothing (blocked)")
-	require.Equal(t, 0, inner.requestCount(), "blocked iterator must not call the model")
+	var got []*model.Response
+	seq(func(r *model.Response) bool { got = append(got, r); return true })
+	require.Len(t, got, 1, "a blocked iterator must surface exactly one error response, never silence")
+	require.NotNil(t, got[0].Error, "the block must carry Response.Error so the turn reduces to failed")
+	require.EqualValues(t, 0, inner.requestCount(), "blocked iterator must not call the model")
+}
+
+// iterErrInner implements model.IterModel but fails iterator creation — the
+// preparation/failover-candidate failure shape the gate must not swallow.
+type iterErrInner struct{ calls int }
+
+func (m *iterErrInner) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	m.calls++
+	ch := make(chan *model.Response, 1)
+	ch <- gateOKResp()
+	close(ch)
+	return ch, nil
+}
+
+func (m *iterErrInner) GenerateContentIter(context.Context, *model.Request) (model.Seq[*model.Response], error) {
+	m.calls++
+	return nil, errors.New("iterator creation failed")
+}
+
+func (m *iterErrInner) Info() model.Info { return model.Info{Name: "iter-err"} }
+
+// nilChInner is a channel-only model that returns (nil, nil) — the shape
+// SwappableModel legitimately passes through, which must not hang or fake success.
+type nilChInner struct{ calls int }
+
+func (m *nilChInner) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	m.calls++
+	return nil, nil
+}
+
+func (m *nilChInner) Info() model.Info { return model.Info{Name: "nil-ch"} }
+
+// TestExecutionGate_IteratorCreationErrorSurfacesAsFailure 钉住 inner 迭代器创建失败必须以错误响应呈现。
+// - 静默零产出会被归约为 completed 并 ack 持久输入——正是本门要消灭的谬误。
+func TestExecutionGate_IteratorCreationErrorSurfacesAsFailure(t *testing.T) {
+	cm := newTestContextManager("gate", &loopMockModel{}, nil, nil, nil)
+	inner := &iterErrInner{}
+	g := newExecutionGateModel(inner, cm)
+
+	seq, err := g.GenerateContentIter(context.Background(), plainReq())
+	require.NoError(t, err)
+	var got []*model.Response
+	seq(func(r *model.Response) bool { got = append(got, r); return true })
+	require.Len(t, got, 1, "inner iterator-creation error must yield exactly one error response")
+	require.NotNil(t, got[0].Error)
+	require.Contains(t, got[0].Error.Message, "iterator creation failed")
+	require.True(t, got[0].Done, "the error response terminates the stream")
+}
+
+// TestExecutionGate_NilChannelSurfacesAsFailure 钉住 inner 返回 (nil, nil) 时迭代路径以错误响应呈现、不挂死。
+func TestExecutionGate_NilChannelSurfacesAsFailure(t *testing.T) {
+	cm := newTestContextManager("gate", &loopMockModel{}, nil, nil, nil)
+	inner := &nilChInner{}
+	g := newExecutionGateModel(inner, cm)
+
+	seq, err := g.GenerateContentIter(context.Background(), plainReq())
+	require.NoError(t, err)
+	done := make(chan struct{})
+	var got []*model.Response
+	go func() {
+		seq(func(r *model.Response) bool { got = append(got, r); return true })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nil channel must terminate the iterator, not block forever")
+	}
+	require.Len(t, got, 1, "a nil stream must surface exactly one error response")
+	require.NotNil(t, got[0].Error)
+	require.Contains(t, got[0].Error.Message, "nil stream")
 }
 
 // credFaultStore fails StoreEvent for assistant `agent_output` events only. The durable

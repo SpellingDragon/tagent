@@ -10,7 +10,7 @@
 ## 0. CU-0 执行基线（防跑偏基建）
 
 - [x] 0.1 建立执行日志骨架 `.git/review-notes/03-execution-log.md`（每 CU 一节：开始时间/改动文件/验证命令与结果/偏离记录）
-- [ ] 0.2 基线快照：`go build ./... && go vet ./... && go test ./... 2>&1 | tee` 记录到日志——区分"本来就 fail"的既有失败（后续验证以此为准，不背锅）
+- [x] 0.2 基线快照：`go build ./... && go vet ./... && go test ./... 2>&1 | tee` 记录到日志——区分"本来就 fail"的既有失败（后续验证以此为准，不背锅）
 - [ ] 0.3 确认工作区干净、`openspec status` 为 4/4、tasks 全未勾
 
 ## 1. CU-1 规格对齐 〔G-P0-1/G-P0-2〕
@@ -18,7 +18,7 @@
 - [x] 1.1 主 spec `event-sourced-projection`：以 delta MODIFIED 块整块替换"无锚恢复不静默截断"Requirement（含两个 Scenario）
 - [x] 1.2 主 spec `event-segment-store`：删除"WAL 中间坏行容错"与"LocalFileKV 写路径 fsync 耐久"两个 Requirement 块；在原位插入 delta ADDED"LocalFileKV Sync 为原子快照屏障"块
 - [x] 1.3 验证：`openspec validate` 通过；`grep -n "500 个有效事件\|replayWAL\|默认开启" openspec/specs/event-sourced-projection/spec.md openspec/specs/event-segment-store/spec.md` 零命中
-- [ ] 1.4 提交（spec/docs 组）：`docs(openspec): P0 规格对齐——无锚全量复原与 KV 快照屏障真契约`
+- [x] 1.4 提交（spec/docs 组）：`docs(openspec): P0 规格对齐——无锚全量复原与 KV 快照屏障真契约`
 
 ## 2. CU-2 agent 核心运行时 〔A-P1-1/A-P1-2/A-P1-3/A-P2-3/A-P2-4〕
 

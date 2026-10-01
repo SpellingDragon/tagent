@@ -57,8 +57,6 @@ func (ta *TagentAgent) RecoveryResult() *RecoveryResult {
 	return ta.contextManager.RecoveryResult()
 }
 
-var _ = sync.Mutex{}
-
 // ResidentTopology is the process-wide name → resident agent binding, shared by
 // pointer with every built agent (4.5).
 //

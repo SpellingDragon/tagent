@@ -1110,18 +1110,12 @@ func TestSettleSinkRegistry_ConcurrentSameNameDistinctHandles(t *testing.T) {
 type echoModel struct{}
 
 func (m *echoModel) GenerateContent(_ context.Context, request *model.Request) (<-chan *model.Response, error) {
-	nonSystem := 0
-	for _, msg := range request.Messages {
-		if msg.Role != model.RoleSystem {
-			nonSystem++
-		}
-	}
 	last := ""
 	if n := len(request.Messages); n > 0 {
 		last = request.Messages[n-1].Content
 	}
 	var resp *model.Response
-	if nonSystem <= 1 {
+	if !hasAssistantToolCall(request.Messages) {
 		resp = toolCallResponse("spawn", "go")
 	} else {
 		resp = finalTextResponse("echo", "answer:"+last)
@@ -1130,6 +1124,19 @@ func (m *echoModel) GenerateContent(_ context.Context, request *model.Request) (
 	ch <- resp
 	close(ch)
 	return ch, nil
+}
+
+// hasAssistantToolCall reports whether the conversation already contains an
+// assistant message that issued a tool call — the representation-stable signal
+// that the tool step has run, independent of how many extra context messages
+// (recalled memory, external events) the assembler folded into the request.
+func hasAssistantToolCall(msgs []model.Message) bool {
+	for _, msg := range msgs {
+		if msg.Role == model.RoleAssistant && len(msg.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *echoModel) Info() model.Info { return model.Info{Name: "echo"} }
