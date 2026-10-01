@@ -540,12 +540,14 @@ type TaskManagerConfig struct {
 	OrphanGrace time.Duration
 	// DefaultTTL is the unified reaper's fallback absolute lifetime for
 	// tasks whose spec carries no explicit TTL — e.g. restored (previous-life) and
-	// subagent tasks. When >0, reconcileTTL terminates+retires any ACTIVE task
+	// subagent tasks. reconcileTTL terminates+retires any ACTIVE task
 	// (ALL states incl. suspect/undetached, ALL lifetime classes incl.
 	// resident/interactive) once `now - anchor >= DefaultTTL` (or the task's own
-	// spec.TTL when larger). When <=0 the manager-level reaper is OFF and only a
-	// per-task spec.TTL bounds its task — preserving the pre-TTL "no wall unless
-	// configured" behavior for callers not yet on TTL.
+	// spec.TTL when larger). The reaper is ALWAYS ON — there is no disable path:
+	// any non-positive value (config or per-source) falls back to the package
+	// 10-minute floor (async-task-lifetime 10.5), because "no wall" was never an
+	// intended operating mode and an unconfigured caller silently loses its only
+	// reclaim.
 	DefaultTTL time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via
@@ -1056,10 +1058,28 @@ func (tm *TaskManager) reconcileTTL() {
 	}
 	tm.mu.Unlock()
 	for i, t := range victims {
+		out := "(ttl-expired: task exceeded its absolute lifetime - cancelled by owner and retired)"
 		if det := detectors[i]; det != nil {
 			det.Cancel()
+		} else {
+			//  Silent-leak block: a restored (previous-life) task carries no
+			// detector, so TTL retirement has no Cancel entry into its backing
+			// session (a tmux window keeps running with nobody reaping it).
+			// The warning rides the retire settle's OWN output — one observable
+			// event per victim, batch collapse stays exclusive (no extra
+			// per-task notify through the collect mode), and session-level
+			// reclaim itself stays future work.
+			t.mu.Lock()
+			taskID := ""
+			if t.Spec.Declarative != nil {
+				taskID = t.Spec.Declarative.TaskID
+			}
+			t.mu.Unlock()
+			if taskID != "" {
+				out = fmt.Sprintf("%s ⚠恢复任务无结算探测器可取消，后台会话 %q 可能仍在运行且无人回收", out, taskID)
+			}
 		}
-		tm.finalizeRetired(t, "(ttl-expired: task exceeded its absolute lifetime - cancelled by owner and retired)", nil)
+		tm.finalizeRetired(t, out, nil)
 	}
 }
 

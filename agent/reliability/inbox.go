@@ -266,7 +266,9 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 		}
 		n, perr := parseInboxSeq(name)
 		if perr != nil {
-			in.quarantineFile(filepath.Join(envDir, name), "bad name: "+name)
+			if _, qerr := in.quarantineFile(filepath.Join(envDir, name), "bad name: "+name); qerr != nil {
+				return nil, qerr
+			}
 			continue
 		}
 		if n > maxSeq {
@@ -274,7 +276,9 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 		}
 		env, rerr := readEnvelope(filepath.Join(envDir, name))
 		if rerr != nil {
-			in.quarantineFile(filepath.Join(envDir, name), "unreadable envelope: "+rerr.Error())
+			if _, qerr := in.quarantineFile(filepath.Join(envDir, name), "unreadable envelope: "+rerr.Error()); qerr != nil {
+				return nil, qerr
+			}
 			continue
 		}
 		switch env.State {
@@ -466,6 +470,13 @@ func (in *Inbox) ClaimNext() (*Envelope, string, error) {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
+	// Re-check under the lock, symmetric with Enqueue: Close publishes
+	// closed=true inside the same lock the fast check raced against, so a
+	// claim that passed the lock-free check must still refuse to hand out a
+	// new claim on a closed inbox.
+	if in.closed {
+		return nil, "", fmt.Errorf("reliability: inbox closed")
+	}
 	path, env, err := in.nextClaimable()
 	if err != nil || env == nil {
 		return nil, "", err
@@ -543,7 +554,13 @@ func (in *Inbox) QuarantineEnvelope(path, reason string) (UnackedMaterial, bool)
 	if err != nil {
 		return UnackedMaterial{}, false
 	}
-	in.quarantineFile(path, reason)
+	moved, qerr := in.quarantineFile(path, reason)
+	if qerr != nil {
+		logWarnf("reliability: quarantine of %s incomplete: %v", path, qerr)
+	}
+	if !moved {
+		return UnackedMaterial{}, false
+	}
 	in.pending.Add(-1)
 	return MaterialOf(env), true
 }
@@ -904,8 +921,13 @@ func (in *Inbox) nextClaimable() (string, *Envelope, error) {
 		path := filepath.Join(in.dir, name)
 		env, rerr := readEnvelope(path)
 		if rerr != nil {
-			in.quarantineFile(path, "unreadable during claim: "+rerr.Error())
-			in.pending.Add(-1)
+			moved, qerr := in.quarantineFile(path, "unreadable during claim: "+rerr.Error())
+			if qerr != nil {
+				return "", nil, qerr
+			}
+			if moved {
+				in.pending.Add(-1)
+			}
 			continue
 		}
 		switch env.State {
@@ -920,10 +942,38 @@ func (in *Inbox) nextClaimable() (string, *Envelope, error) {
 	return "", nil, nil
 }
 
-func (in *Inbox) quarantineFile(path, reason string) {
-	dst := filepath.Join(in.dir, inboxQuarantine, filepath.Base(path))
-	_ = os.Rename(path, dst)
+// quarantineFile moves one inbox item into the quarantine dir. It reports
+// whether the file actually moved and surfaces every failure:
+//   - already absent (a prior attempt moved it): (false, nil) — the caller may
+//     treat the disposition as complete (idempotent re-entry);
+//   - rename failed: (false, err) — nothing moved, capacity MUST stay booked;
+//   - moved but the dir barrier failed: (true, err) — the item is out of the
+//     claim path; a power-loss rollback may resurrect it, and the next scan
+//     re-quarantines (ENOENT → already absent) or the tombstone refuses the
+//     revival, so the leak self-heals; the error still surfaces because the
+//     rename is not yet durable.
+//
+// Callers must bind capacity decrements to moved==true, never to the bare
+// call (a silent rename failure used to drop pending and lose the item's
+// accounting while its bytes stayed in the claim dir).
+func (in *Inbox) quarantineFile(path, reason string) (bool, error) {
+	qdir := filepath.Join(in.dir, inboxQuarantine)
+	dst := filepath.Join(qdir, filepath.Base(path))
+	if err := os.Rename(path, dst); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reliability: quarantine rename %s: %w", path, err)
+	}
+	serr := syncDirFunc(in.dir)
+	if derr := syncDirFunc(qdir); serr == nil {
+		serr = derr
+	}
 	logWarnf("reliability: quarantined inbox item %s (%s) — kept for inspection, not silently destroyed", dst, reason)
+	if serr != nil {
+		return true, fmt.Errorf("reliability: quarantine dir-sync after moving %s: %w", path, serr)
+	}
+	return true, nil
 }
 
 func parseInboxSeq(name string) (int64, error) {

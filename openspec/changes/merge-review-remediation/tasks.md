@@ -59,14 +59,14 @@
 
 ## 5. CU-5 inbox 与 TTL 加固 〔C-P2-1/C-P2-2/C-P2-3/C-P2-4〕
 
-- [ ] 5.1 `reliability/inbox.go` quarantineFile：返回 error + 成功后 syncDir；调用点 `nextClaimable` 仅隔离成功才 `pending.Add(-1)`，失败跳过该文件并返回错误
-- [ ] 5.2 `ClaimNext` 持锁后补 `in.closed` 复查（与 Enqueue 对称）
-- [ ] 5.3 新测试：隔离 rename 失败（注入坏路径）→ pending 不穿透、错误上抛；Close 后并发 claim 拒绝
-- [ ] 5.4 `task_manager.go` DefaultTTL 字段注释改为"永开无禁用路径，<=0 一律 10min 地板（async-task-lifetime 10.5）"
-- [ ] 5.5 `reconcileTTL`：detector==nil 且有 Declarative.TaskID 的受害者，退役前发"会话仍在运行"告警事件（会话级回收留给后续，本步只堵静默）
-- [ ] 5.6 新测试：恢复任务被 TTL 退役 → 产生告警事件可观测
-- [ ] 5.7 验证：`go test ./agent/reliability/... ./agent/task/... -count=1` 全绿
-- [ ] 5.8 提交：`fix(reliability,task): quarantine 屏障与容量扣减绑定/ClaimNext 关闭复查/TTL 静默面可观测`
+- [x] 5.1 `reliability/inbox.go` quarantineFile：返回 error + 成功后 syncDir；调用点 `nextClaimable` 仅隔离成功才 `pending.Add(-1)`，失败跳过该文件并返回错误
+- [x] 5.2 `ClaimNext` 持锁后补 `in.closed` 复查（与 Enqueue 对称）
+- [x] 5.3 新测试：隔离 rename 失败（注入坏路径）→ pending 不穿透、错误上抛；Close 后并发 claim 拒绝
+- [x] 5.4 `task_manager.go` DefaultTTL 字段注释改为"永开无禁用路径，<=0 一律 10min 地板（async-task-lifetime 10.5）"
+- [x] 5.5 `reconcileTTL`：detector==nil 且有 Declarative.TaskID 的受害者，退役前发"会话仍在运行"告警事件（会话级回收留给后续，本步只堵静默）
+- [x] 5.6 新测试：恢复任务被 TTL 退役 → 产生告警事件可观测
+- [x] 5.7 验证：`go test ./agent/reliability/... ./agent/task/... -count=1` 全绿
+- [x] 5.8 提交：`fix(reliability,task): quarantine 屏障与容量扣减绑定/ClaimNext 关闭复查/TTL 静默面可观测`
 
 ## 6. CU-6 识别与谱系同源化 〔B-P2-3/B-P2-2，BREAKING〕
 
