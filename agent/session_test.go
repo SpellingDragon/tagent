@@ -1098,24 +1098,33 @@ func TestSettleSinkRegistry_ConcurrentSameNameDistinctHandles(t *testing.T) {
 
 // echoModel is a STATELESS, content-derived model — safe for concurrent delegation
 // tests because it holds no per-agent counter that two racing Runs could interleave
-// (the shared sequenceMockModel's flaw). Its rule, a pure function of the request:
-// - the history has no assistant tool-call yet → emit ONE tool call (spawns a bg task)
-// - an assistant tool-call already exists → emit a final that echoes the LAST message
+// (the shared sequenceMockModel's flaw). Its rule, a pure function of the request
+// counting only CONVERSATIONAL messages (system and the re-rendered task-board
+// snapshot excluded):
+// - no conversational turn beyond the input → emit ONE tool call (spawns a bg task)
+// - the tool step already ran → emit a final that echoes the LAST conversational message
 //
 // So each invocation: turn1 first call → tool call; thereafter → "answer:<last>" (the
 // initial answer after the tool result, and the continuation echoing the settle event
-// whose rendered content carries the settle Output "SETTLE-<k>"). Detecting on the
-// assistant tool-call (not on tool-role messages) is representation-stable. That echo
-// lets a test correlate which background settle reached which caller.
+// whose rendered content carries the settle Output "SETTLE-<k>"). The task-board
+// snapshot is a transient observation (it lists the SHARED manager's in-flight tasks,
+// a concurrent sibling's among them) and is excluded so it cannot masquerade as prior
+// history and short-circuit the first tool call. That echo lets a test correlate which
+// background settle reached which caller.
 type echoModel struct{}
 
 func (m *echoModel) GenerateContent(_ context.Context, request *model.Request) (<-chan *model.Response, error) {
+	turns := 0
 	last := ""
-	if n := len(request.Messages); n > 0 {
-		last = request.Messages[n-1].Content
+	for _, msg := range request.Messages {
+		if msg.Role == model.RoleSystem || isTaskBoardMessage(msg.Content) {
+			continue
+		}
+		turns++
+		last = msg.Content
 	}
 	var resp *model.Response
-	if !hasAssistantToolCall(request.Messages) {
+	if turns <= 1 {
 		resp = toolCallResponse("spawn", "go")
 	} else {
 		resp = finalTextResponse("echo", "answer:"+last)
@@ -1126,17 +1135,16 @@ func (m *echoModel) GenerateContent(_ context.Context, request *model.Request) (
 	return ch, nil
 }
 
-// hasAssistantToolCall reports whether the conversation already contains an
-// assistant message that issued a tool call — the representation-stable signal
-// that the tool step has run, independent of how many extra context messages
-// (recalled memory, external events) the assembler folded into the request.
-func hasAssistantToolCall(msgs []model.Message) bool {
-	for _, msg := range msgs {
-		if msg.Role == model.RoleAssistant && len(msg.ToolCalls) > 0 {
-			return true
-		}
-	}
-	return false
+// isTaskBoardMessage reports whether content is the injected live-task-board
+// virtual event. The runtime renders it as a role=user observation snapshot that
+// it declares non-user, non-history and re-computes every turn (it is absent from
+// the projection and the store), and whose presence depends on tasks the SHARED
+// task manager happens to hold — including a concurrent sibling's. It is not
+// conversation content, so the heuristic model must skip it when deciding whether
+// this is the first turn; otherwise a sibling's spawned task would look like prior
+// history and short-circuit the very first tool call.
+func isTaskBoardMessage(content string) bool {
+	return strings.HasPrefix(content, "[后台任务看板]")
 }
 
 func (m *echoModel) Info() model.Info { return model.Info{Name: "echo"} }

@@ -197,6 +197,58 @@ type TmuxCreateOptions struct {
 	Name string
 }
 
+// tmuxCreateRetries bounds the retries applied to a transient tmux server failure
+// when creating a session, recovering a cold start or a session-count-dropped-to-
+// zero race with a sibling teardown.
+const tmuxCreateRetries = 3
+
+// tmuxCreateRetryDelay is the backoff between tmux session-creation retry attempts.
+const tmuxCreateRetryDelay = 150 * time.Millisecond
+
+// isTransientTmuxServerFailure reports whether a tmux create failure is a race the
+// server recovers from on retry — it died or lost its connection as the session was
+// being spawned — rather than a durable error such as a missing binary or a
+// duplicate session name.
+func isTransientTmuxServerFailure(err error, detail string) bool {
+	msg := err.Error() + " " + detail
+	return strings.Contains(msg, "server exited unexpectedly") ||
+		strings.Contains(msg, "lost server connection") ||
+		strings.Contains(msg, "server is not running")
+}
+
+// runTmuxCreate executes a tmux new-session invocation, re-issuing it a bounded
+// number of times when the server fails transiently. It returns a nil error on
+// success or when a retry reveals the session already present (a prior attempt
+// created it despite reporting failure); otherwise it returns the last error with
+// its stderr so the caller can classify fatal versus post-create-non-fatal. A
+// durable failure (duplicate name, missing binary) returns immediately, never
+// retried.
+func (te *TmuxExecutor) runTmuxCreate(ctx context.Context, cmdName string, cmdArgs []string, sessionName string) (string, error) {
+	var runErr error
+	var detail string
+	for attempt := 0; ; attempt++ {
+		cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+		detail = strings.TrimSpace(stderr.String())
+		if runErr == nil || !isTransientTmuxServerFailure(runErr, detail) {
+			return detail, runErr
+		}
+		if te.SessionExists(sessionName) {
+			return "", nil
+		}
+		if attempt >= tmuxCreateRetries {
+			return detail, runErr
+		}
+		select {
+		case <-ctx.Done():
+			return detail, runErr
+		case <-time.After(tmuxCreateRetryDelay):
+		}
+	}
+}
+
 // CreateSession creates a new tmux session with the command
 //
 // 契约: docs/wiki/tool/tmux-action.md#named-session-singleton
@@ -235,17 +287,12 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 	args = append(args, ";", "pipe-pane", "-o", "-t", sessionName, "cat >> "+pipeFile)
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
-	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		detail := strings.TrimSpace(stderr.String())
+	if detail, runErr := te.runTmuxCreate(ctx, cmdName, cmdArgs, sessionName); runErr != nil {
 		if !te.SessionExists(sessionName) {
-			return nil, fmt.Errorf("failed to create tmux session: %w: %s", err, detail)
+			return nil, fmt.Errorf("failed to create tmux session: %w: %s", runErr, detail)
 		}
 		log.Warnf("[tmux] session %s created, but a post-create option failed (non-fatal): %v: %s",
-			sessionName, err, detail)
+			sessionName, runErr, detail)
 	}
 
 	te.setSessionEnv(ctx, sessionName, opts.Env)
