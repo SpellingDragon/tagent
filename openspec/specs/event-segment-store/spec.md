@@ -250,32 +250,16 @@ QueryEvents SHALL 在单次查询内按 EventKey 去重：压实"先写目标层
 - **WHEN** `FileSegmentStore.Close()` is called more than once
 - **THEN** subsequent calls SHALL be no-ops (idempotent)
 
-### Requirement: WAL 中间坏行容错
+### Requirement: LocalFileKV Sync 为原子快照屏障
 
-LocalFileKV.replayWAL 遇**中间**坏行时 MUST 跳过该行并计入 quarantine 计数（log warn + Stats 暴露 + 装饰链透传至 DiagnosticsSnapshot.wal_quarantined），继续重放后续行；**尾部**坏行保持截断语义；kv.json 快照本体损坏仍启动失败（fail-fast）。
+LocalFileKV 的 `Sync()` SHALL 将全部键值整序列化并以临时文件写入加原子 rename 落盘；快照 SHALL 按分区分片（每分区独立文件），`Sync()` 只重写自上次屏障以来变更过的分区——单次提交的屏障成本 SHALL 与其触碰的分区成正比，MUST NOT 与全库键数成正比。`Sync()` 返回成功后，独立新进程 SHALL 能读回该快照代表的全部键值。快照文件本体损坏 SHALL 启动失败（fail-fast）。FileSegmentStore.StoreEvent 的提交屏障契约不变：evt/idx/必需 meta 写完且 `Sync()` 成功后才发布缓存、计数与成功结果；屏障未完成 MUST NOT 报告 durable 成功，调用方 MUST 在成功后才投影。
 
-#### Scenario: 单比特翻转不致记忆全失
-- **WHEN** WAL 中部一行因位翻转损坏而其余行完好
-- **THEN** 启动成功，坏行被隔离计数（可观测），其余事件全部恢复
+#### Scenario: 屏障后跨进程读回
+- **WHEN** StoreEvent 提交且 `Sync()` 返回成功，进程随即终止而不经 Close
+- **THEN** 独立新进程可经 EventKey 取回原文及索引
 
-### Requirement: LocalFileKV 写路径 fsync 耐久
-
-LocalFileKV 的 WAL 追加 SHALL 在每批 ops Flush 后执行文件 Sync（fsync）；snapshot 重命名和首次 WAL 创建 SHALL 对目录执行 Sync。平台不支持目录同步时 SHALL 留痕并报告降级能力，其他 I/O 错误 SHALL 传播。fsync SHALL 可配置关闭且默认开启。直接 KVPut 为异步接收，Sync 成功才是其耐久屏障；localfile 的 FileSegmentStore.StoreEvent SHALL 在 evt/idx/必需 meta 写完且 Sync 成功后才发布缓存、计数、成功结果。调用方 SHALL 在成功后才投影。不能完成屏障 SHALL NOT 报告 durable 成功。
-
-#### Scenario: 掉电窗口内的已确认写入
-- **WHEN** KVPut 后 Sync 已返回，子进程随即终止而不经 Close
-- **THEN** 新进程可读回该键值；测试报告区分进程终止与真实掉电证据
-
-#### Scenario: 显式关闭 fsync
-- **WHEN** memory.fsync=false
-- **THEN** 保持 Flush 级行为，日志与 diagnostics 明示不具掉电耐久保证
-
-#### Scenario: 事件级成功不早于屏障
-- **WHEN** StoreEvent 写入不足周期 flush 阈值的单个事件后返回成功，进程立即终止
-- **THEN** 独立新进程仍可经 EventKey 取回原文及索引
-
-#### Scenario: 屏障失败
-- **WHEN** 事件提交遇写失败、fsync 失败或非“不支持”的目录 Sync 错误
+#### Scenario: 屏障失败不报 durable 成功
+- **WHEN** 事件提交遇快照写入或 rename 失败
 - **THEN** 返回非 nil error、保留故障证据，投影不追加，消费者不收到 durable 成功
 
 ### Requirement: 后端不可变与隔离一致性
