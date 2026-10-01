@@ -23,6 +23,7 @@
 - [x] 1.5 compaction 豁免：L3 预算升级跳过含未消费遥测的段；全部候选被豁免时如实报告
 - [x] 1.6 召回闭环：recall 暂存 ref 入投影+来源标记，消费后按遥测规则退出
 - [x] 1.7 判据：新增回归族全绿——①已外显 settle 下轮装配不含全文 ②内部性 N 轮（keepRecent 热更跟随）③未消费经重启重建后仍完整 ④豁免段不被 L3 ⑤稳定前缀字节稳定（对话+反思区在遥测降级前后逐字节一致）⑥骨架红线既有测试零回归
+- [x] 1.8 依赖确认（2026-10-01 新增，**依赖已由 `failure-polarity-passthrough` 满足**）：failed ★ 约定依赖命令失败极性接通。**2026-10-01 复评：fp 已实现**——`detectSessionState` 死亡/probe 失明/kill 逃逸三类路径产 `SessionError`，`SettleSignal.Err` 经 `settleMarkerAndStatus` 映射 ✗/failed，非零退出（含信号死 `exit_code=-N`）现产生失败极性结算。★ 不再只覆盖框架内部回收路径，命令非零退出亦触发——原「其落地前」限定条件解除，验收判据可假设命令失败产 ★
 
 ## 2. 行为审计（第二结构代：L4）
 
