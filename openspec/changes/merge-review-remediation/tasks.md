@@ -22,19 +22,19 @@
 
 ## 2. CU-2 agent 核心运行时 〔A-P1-1/A-P1-2/A-P1-3/A-P2-3/A-P2-4〕
 
-- [ ] 2.1 `agent/agent.go`：SetAuditLine 调用移入 `cfg.Meditation.Enabled` 块内（597 行构造之后）
-- [ ] 2.2 新测试 `TestMeditationAuditLineWired`：Meditation 启用时冥想消息含 self-audit 审计行（修前恒缺失）
-- [ ] 2.3 `execution_gate_model.go`：verify 失败分支（71-74）改为 yield `Response.Error` 失败响应后 return（保留日志）
-- [ ] 2.4 `execution_gate_model.go`：迭代器创建 err 分支（77-80）同改；`GenerateContent` 通道分支（60-63）与 iter 的通道分支（84-87）对 err/nil 同改
-- [ ] 2.5 新测试三场景：迭代器创建 err → failed turn；inner 返回 (nil,nil) → 失败响应不挂死；verify 拒绝 → 失败可观测——断言持久输入不以 completed 口径 ack
-- [ ] 2.6 `agent/session.go`：104 行 registerLiveCM 移至 119 行 Err() 检查通过之后
-- [ ] 2.7 新测试：owner 关闭后到达的委托调用被拒 → LiveCMCount 与 Obligations.Invocations 归零
-- [ ] 2.8 `settle_routing.go`：Run 的 defer unbindSettleBus 之后追加 invBus 终态排空（TryPull 循环转发 persistentBus）
-- [ ] 2.9 新测试：unbind 与循环退出窗口内发布的 settle 事件仍到达 persistentBus
-- [ ] 2.10 `event_bus.go`：QuarantineEnvelope 材料读失败路径补 releaseRetention（隔离副本重读材料键或 DrainRetentionCleanups 兜底）；`agent.go:453-462` 两个构造失败分支补 `bus.CloseDurable()`
-- [ ] 2.11 删除 `agent/recovery.go:60` 死残留
-- [ ] 2.12 验证：`go test ./agent/ -run 'Meditation|ExecutionGate|LiveCM|SettleRoute|Quarantine' -count=1` 全绿 + `go vet ./agent`
-- [ ] 2.13 提交：`fix(agent): 模型入口失败显式呈现/settle 路由排空/租约兜底/审计接线归位`
+- [x] 2.1 `agent/agent.go`：SetAuditLine 调用移入 `cfg.Meditation.Enabled` 块内（597 行构造之后）
+- [x] 2.2 新测试 `TestMeditationAuditLineWired`：Meditation 启用时冥想消息含 self-audit 审计行（修前恒缺失）
+- [x] 2.3 `execution_gate_model.go`：verify 失败分支（71-74）改为 yield `Response.Error` 失败响应后 return（保留日志）
+- [x] 2.4 `execution_gate_model.go`：迭代器创建 err 分支（77-80）同改；`GenerateContent` 通道分支（60-63）与 iter 的通道分支（84-87）对 err/nil 同改
+- [x] 2.5 新测试三场景：迭代器创建 err → failed turn；inner 返回 (nil,nil) → 失败响应不挂死；verify 拒绝 → 失败可观测——断言持久输入不以 completed 口径 ack
+- [x] 2.6 `agent/session.go`：104 行 registerLiveCM 移至 119 行 Err() 检查通过之后
+- [x] 2.7 新测试：owner 关闭后到达的委托调用被拒 → LiveCMCount 与 Obligations.Invocations 归零
+- [x] 2.8 `settle_routing.go`：Run 的 defer unbindSettleBus 之后追加 invBus 终态排空（TryPull 循环转发 persistentBus）
+- [x] 2.9 新测试：unbind 与循环退出窗口内发布的 settle 事件仍到达 persistentBus
+- [x] 2.10 `event_bus.go`：QuarantineEnvelope 材料读失败路径补 releaseRetention（隔离副本重读材料键或 DrainRetentionCleanups 兜底）；`agent.go:453-462` 两个构造失败分支补 `bus.CloseDurable()`
+- [x] 2.11 删除 `agent/recovery.go:60` 死残留
+- [x] 2.12 验证：`go test ./agent/ -run 'Meditation|ExecutionGate|LiveCM|SettleRoute|Quarantine' -count=1` 全绿 + `go vet ./agent`
+- [x] 2.13 提交：`fix(agent): 模型入口失败显式呈现/settle 路由排空/租约兜底/审计接线归位`
 
 ## 3. CU-3 谱系信号化 〔C-P1-1/C-P1-2〕（依赖：无）
 
