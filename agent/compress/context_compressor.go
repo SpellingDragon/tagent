@@ -697,14 +697,27 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispos
 		}
 		run := refs[i:j]
 		switch {
+		case len(run) >= 2 && runHasActiveMember(run, dispositions):
+			// run 级豁免：一个 run 是同一批相邻通知，消费判定按 run 整体成立——
+			// 任一成员尚未被消费（Active，不可丢级），整 run 原样保留。折叠是
+			// run 级动作，豁免也必须是 run 级的：逐条豁免会把未消费的通知截断
+			// 进卡，违背 Active 不可丢的通道层契约。
+			result = append(result, run...)
 		case len(run) >= 2:
 			result = append(result, buildSettleFoldRef(run))
 		case dispositions[run[0].EventKey] == TelemDemote:
+			// 单条降级票据与 buildSettleFoldRef 同形：合成负 key 需要一个非零
+			// 时间戳，Timestamp==0 时回落 1，否则 EventKey=0 会被 buildRetainedRefs
+			// 当无效键静默丢弃（观测丢失）。
+			ts := run[0].Timestamp
+			if ts == 0 {
+				ts = 1
+			}
 			result = append(result, memory.EventReference{
-				EventKey:     -run[0].Timestamp,
+				EventKey:     -ts,
 				EventType:    tagentevent.TypeSettleFold,
 				EventSummary: "- " + settleFoldLine(run[0]),
-				Timestamp:    run[0].Timestamp,
+				Timestamp:    ts,
 				Role:         "user",
 			})
 		default:
@@ -713,6 +726,17 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispos
 		i = j
 	}
 	return result
+}
+
+// runHasActiveMember reports whether any ref in the run carries the
+// TelemActive disposition (unconsumed: must reach the model view intact).
+func runHasActiveMember(run []memory.EventReference, dispositions map[int64]int8) bool {
+	for _, r := range run {
+		if d, ok := dispositions[r.EventKey]; ok && d == TelemActive {
+			return true
+		}
+	}
+	return false
 }
 
 // settleFoldRowMaxChars bounds one ticket-card row's summary text — the same

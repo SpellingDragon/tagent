@@ -83,11 +83,11 @@
 
 ## 7. CU-7 折叠豁免 run 级化 〔B-P1-1/B-P2-1〕（依赖：CU-6 的标记识别先行）
 
-- [ ] 7.1 `foldSettleRuns`：进入折叠前对 run 查 dispositions，任一成员为 TelemActive → 整 run 走原样保留（append run...）
-- [ ] 7.2 单条票据分支补 `ts==0 → 1` 防护（与 buildSettleFoldRef 对齐）
-- [ ] 7.3 新测试：批量相邻 Active（≥2，模拟首压缩轮）→ 整 run 不折叠不截断；全 Demote run → 正常折叠；单条 Timestamp=0 → 不丢观测
-- [ ] 7.4 验证：`go test ./agent/compress/... -run 'Fold|Telemetry|Settle' -count=1` 全绿
-- [ ] 7.5 提交：`fix(compress): 折叠豁免 run 级化——未消费通知整 run 不可折叠`
+- [x] 7.1 `foldSettleRuns`：进入折叠前对 run 查 dispositions，任一成员为 TelemActive → 整 run 走原样保留（append run...）
+- [x] 7.2 单条票据分支补 `ts==0 → 1` 防护（与 buildSettleFoldRef 对齐）
+- [x] 7.3 新测试：批量相邻 Active（≥2，模拟首压缩轮）→ 整 run 不折叠不截断；全 Demote run → 正常折叠；单条 Timestamp=0 → 不丢观测
+- [x] 7.4 验证：`go test ./agent/compress/... -run 'Fold|Telemetry|Settle' -count=1` 全绿
+- [x] 7.5 提交：`fix(compress): 折叠豁免 run 级化——未消费通知整 run 不可折叠`
 - [ ] 7.6 **中点检查点**：对照 design.md"机制完善三原则"复审 CU-2~CU-7 全部 diff——每项修复特设路径净减少？（记入日志，不过关项返工）
 
 ## 8. CU-8 租约与静默错误清零 〔E-P1-1/E-P2-2/E-P2-3/E-P2-4/E-P2-7〕
