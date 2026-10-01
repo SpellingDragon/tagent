@@ -7,11 +7,14 @@
 // the head root (merge-check); the shell wrappers materialize the baseline with
 // git archive. Both exit non-zero when a violation is printed.
 //
-// --map and --explain each hold ONE file, for the package being checked: a repeated
-// flag keeps only the last value and silently drops the earlier tables. Rename and
-// explain tables are per-package by construction (a cross-package table applies one
-// domain's normalization to another's baseline text and manufactures violations), so
-// a multi-package run must invoke merge-check once per package with its own pair.
+// --map and --explain each hold ONE file, for the package being checked: repeating
+// either flag is a usage error, an --explain entry that exempts no declaration in
+// the run is rejected, and a table file that cannot be read fails the call instead of
+// loading as empty. A shadowed table, a waiver that applies to nothing, and a silently
+// empty table all let a reading pass that the gate never actually earned. Tables are
+// per-package by construction (a cross-package table applies one domain's normalization
+// to another's baseline text and manufactures violations), so a multi-package run
+// invokes merge-check once per package with its own pair.
 package main
 
 import (
@@ -107,7 +110,9 @@ type mergeViolation struct {
 // first table and its renames then surface as violations blamed on the batch.
 const mergeCheckUsage = "usage: codetools merge-check --base-root DIR --head-root DIR [--map F] [--explain F] dir...\n" +
 	"  --map and --explain each take ONE file; repeating either flag is a usage error.\n" +
+	"  A --map/--explain file that cannot be read fails the run; an empty table is never assumed.\n" +
 	"  --explain exempts only non-test declarations; a missing-test is never waivable.\n" +
+	"  An --explain entry that exempts nothing is a usage error, so a stale waiver fails the run.\n" +
 	"  Tables are per package, so run one invocation per package with its own --map and --explain.\n"
 
 // onceString accepts exactly one flag occurrence: a repeat is a usage error,
@@ -139,7 +144,7 @@ func runMergeCheck(args []string) int {
 	base := fs.String("base-root", "", "root holding the baseline revision")
 	head := fs.String("head-root", "", "root holding the working tree")
 	fs.Var(&mapFile, "map", "ONE TSV of old-name<TAB>new-name renames for the packages being checked; repeating this flag is a usage error")
-	fs.Var(&explain, "explain", "ONE file listing non-test declarations allowed to differ; it cannot exempt a test; repeating this flag is a usage error")
+	fs.Var(&explain, "explain", "ONE file listing non-test declarations allowed to differ; it cannot exempt a test; repeating it, or listing an entry that exempts nothing, is a usage error")
 	diffOut := fs.String("diff-out", "", "directory to write normalized base/head text for each body-changed declaration")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -151,8 +156,15 @@ func runMergeCheck(args []string) int {
 		fmt.Fprint(os.Stderr, mergeCheckUsage)
 		return 2
 	}
+	for _, table := range []string{mapFile.value, explain.value} {
+		if err := requireReadable(table); err != nil {
+			fmt.Fprintln(os.Stderr, "merge-check:", err)
+			return 2
+		}
+	}
 	renames := loadRenames(mapFile.value)
 	explained := loadSet(explain.value)
+	consumed := map[string]bool{}
 
 	var out []mergeViolation
 	for _, dir := range fs.Args() {
@@ -166,7 +178,7 @@ func runMergeCheck(args []string) int {
 			out = append(out, mergeViolation{Pkg: dir, Kind: "read", Name: "-", Note: err.Error()})
 			continue
 		}
-		vs := diffDecls(dir, b, h, renames, explained)
+		vs := diffDecls(dir, b, h, renames, explained, consumed)
 		if *diffOut != "" {
 			if err := writeDiffs(*diffOut, dir, b, h, renames, vs); err != nil {
 				fmt.Fprintln(os.Stderr, "diff-out:", err)
@@ -175,16 +187,39 @@ func runMergeCheck(args []string) int {
 		}
 		out = append(out, vs...)
 	}
+	enc := json.NewEncoder(os.Stdout)
+	for _, v := range out {
+		_ = enc.Encode(v)
+	}
 	if len(out) > 0 {
-		enc := json.NewEncoder(os.Stdout)
-		for _, v := range out {
-			_ = enc.Encode(v)
-		}
 		fmt.Printf("merge-check: %d violation(s)\n", len(out))
+	}
+	if dead := deadExplained(explained, consumed); len(dead) > 0 {
+		for _, n := range dead {
+			fmt.Fprintf(os.Stderr, "DEAD-EXPLAIN %s: --explain entry exempted nothing this run\n", n)
+		}
+		return 2
+	}
+	if len(out) > 0 {
 		return 1
 	}
 	fmt.Printf("merge-check: %d package(s) intact\n", fs.NArg())
 	return 0
+}
+
+// deadExplained lists --explain entries that exempted no declaration during the run.
+// An entry is live only when it suppressed a report that would otherwise have been
+// made; a name present-and-unchanged on both sides, a rename that never fires, or a
+// test (never waivable) all leave the entry with no effect.
+func deadExplained(explained, consumed map[string]bool) []string {
+	var dead []string
+	for name := range explained {
+		if !consumed[name] {
+			dead = append(dead, name)
+		}
+	}
+	sort.Strings(dead)
+	return dead
 }
 
 // writeDiffs dumps the normalized text of both sides for every body-changed
@@ -237,17 +272,21 @@ func sanitize(name string) string {
 // A declared rename must not stop a function from being a test — losing the Test prefix is
 // coverage silently turned into dead code — and assertion counts are monotone like the
 // policy ratchet: they may only grow, so a merge cannot weaken coverage while claiming to
-// be a move.
-func diffDecls(dir string, b, h map[string]decl, renames map[string]string, explained map[string]bool) []mergeViolation {
+// be a move. Every exemption an --explain entry grants is recorded in consumed, so a
+// caller can tell a live waiver from one that was never exercised.
+func diffDecls(dir string, b, h map[string]decl, renames map[string]string, explained, consumed map[string]bool) []mergeViolation {
 	var out []mergeViolation
 	matched := map[string]bool{}
 	for oldName, bd := range b {
 		name := applyRenames(oldName, renames)
 		hd, ok := h[name]
 		if !ok {
-			if bd.Test {
+			switch {
+			case bd.Test:
 				out = append(out, mergeViolation{Pkg: dir, Kind: "missing-test", Name: oldName, Note: "no counterpart after merge/rename"})
-			} else if !explained[oldName] && !explained[name] {
+			case explained[oldName] || explained[name]:
+				markConsumed(consumed, explained, oldName, name)
+			default:
 				out = append(out, mergeViolation{Pkg: dir, Kind: "missing-helper", Name: oldName, Note: "not in explain list"})
 			}
 			continue
@@ -257,19 +296,26 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 			out = append(out, mergeViolation{Pkg: dir, Kind: "test-name-mangled", Name: oldName,
 				Note: fmt.Sprintf("renamed to %q, which is no longer a test function", name)})
 		}
-		if !bd.Test {
-			if explained[oldName] || explained[name] {
-				continue
-			}
-		}
+		// Work out the report this pair earns with NO exemption first, so an --explain
+		// entry is credited only when it actually suppressed something: waiving an
+		// unchanged declaration is not an exemption at all.
+		var vio *mergeViolation
 		switch {
 		case bd.Hash != hd.Hash:
-			out = append(out, mergeViolation{Pkg: dir, Kind: "body-changed", Name: oldName, Note: "comment-free body differs"})
+			vio = &mergeViolation{Pkg: dir, Kind: "body-changed", Name: oldName, Note: "comment-free body differs"}
 		case hd.Asserts < bd.Asserts:
-			out = append(out, mergeViolation{Pkg: dir, Kind: "assert-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Asserts, hd.Asserts)})
+			vio = &mergeViolation{Pkg: dir, Kind: "assert-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Asserts, hd.Asserts)}
 		case bd.Parallel != hd.Parallel:
-			out = append(out, mergeViolation{Pkg: dir, Kind: "parallel-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Parallel, hd.Parallel)})
+			vio = &mergeViolation{Pkg: dir, Kind: "parallel-count", Name: oldName, Note: fmt.Sprintf("base %d head %d", bd.Parallel, hd.Parallel)}
 		}
+		if vio == nil {
+			continue
+		}
+		if !bd.Test && (explained[oldName] || explained[name]) {
+			markConsumed(consumed, explained, oldName, name)
+			continue
+		}
+		out = append(out, *vio)
 	}
 	for name, hd := range h {
 		if matched[name] {
@@ -278,13 +324,26 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 		if _, isRenamed := renames[name]; isRenamed {
 			continue
 		}
-		if hd.Test {
+		switch {
+		case hd.Test:
 			out = append(out, mergeViolation{Pkg: dir, Kind: "extra-test", Name: name, Note: "present only in head"})
-		} else if !explained[name] {
+		case explained[name]:
+			markConsumed(consumed, explained, name)
+		default:
 			out = append(out, mergeViolation{Pkg: dir, Kind: "extra-helper", Name: name, Note: "not in explain list"})
 		}
 	}
 	return out
+}
+
+// markConsumed credits each candidate name that is in the explain set with having
+// suppressed a report, distinguishing a live waiver from a dead entry.
+func markConsumed(consumed, explained map[string]bool, names ...string) {
+	for _, n := range names {
+		if explained[n] {
+			consumed[n] = true
+		}
+	}
 }
 
 // foldLayout collapses runs of whitespace to a single space outside string literals.
@@ -486,6 +545,25 @@ func runDeclsFor(path string) ([]decl, error) {
 		}
 	}
 	return out, nil
+}
+
+// requireReadable refuses a table path that cannot be opened as a file: an
+// explicitly passed --map/--explain that silently loads as empty wipes the whole
+// exemption surface or kills the rename catalog, which is the bluntest form of a
+// zero-effect table. An empty path (flag not passed) is not a table and passes.
+func requireReadable(path string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", path, err)
+	}
+	defer f.Close()
+	if fi, statErr := f.Stat(); statErr == nil && fi.IsDir() {
+		return fmt.Errorf("%s is a directory, not a table file", path)
+	}
+	return nil
 }
 
 // loadRenames reads an optional old<TAB>new TSV.

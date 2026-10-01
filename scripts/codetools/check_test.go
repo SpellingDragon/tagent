@@ -621,3 +621,82 @@ func TestMergeCheckRepeatedFlagFails(t *testing.T) {
 	})
 	require.Equal(t, 2, code2, "repeated --explain must be a usage error, not silent last-wins")
 }
+
+// writeExplain lays out an --explain list file and returns its path.
+func writeExplain(t *testing.T, body string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "explain.txt")
+	require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+	return p
+}
+
+// TestMergeCheckDeadExplainFails pins that an --explain entry exempting nothing in the run is a hard error, not harmless cruft.
+// - A stale or over-broad waiver lets a wrong mapping table read as reviewed, because it conceals a difference it never excused.
+// - A waiver that suppresses a real report stays accepted, so the guard cannot be dodged by emptying --explain.
+func TestMergeCheckDeadExplainFails(t *testing.T) {
+	const headNoHelper = "package p\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {\n\tt.Parallel()\n\trequire.Equal(t, 1, 1)\n\tassert.True(t, true)\n}\n"
+
+	t.Run("entry naming nothing at all is refused", func(t *testing.T) {
+		b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+		h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": baseTestsFile})
+		ef := writeExplain(t, "ghostHelper\n")
+		code, out := captureStderr(t, func() int {
+			return runMergeCheck([]string{"--base-root", b, "--head-root", h, "--explain", ef, "pkg"})
+		})
+		require.Equalf(t, 2, code, "an entry that exempted nothing must fail the run:\n%s", out)
+		require.Contains(t, out, "DEAD-EXPLAIN ghostHelper")
+	})
+
+	t.Run("entry naming an unchanged declaration is refused", func(t *testing.T) {
+		b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+		h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": baseTestsFile})
+		ef := writeExplain(t, "helper\n")
+		code, out := captureStderr(t, func() int {
+			return runMergeCheck([]string{"--base-root", b, "--head-root", h, "--explain", ef, "pkg"})
+		})
+		require.Equalf(t, 2, code, "helper is present and identical on both sides, so no exemption was needed:\n%s", out)
+		require.Contains(t, out, "DEAD-EXPLAIN helper")
+	})
+
+	t.Run("entry naming a test is refused since tests are never exemptible", func(t *testing.T) {
+		b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+		h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": baseTestsFile})
+		ef := writeExplain(t, "TestAlpha\n")
+		code, out := captureStderr(t, func() int {
+			return runMergeCheck([]string{"--base-root", b, "--head-root", h, "--explain", ef, "pkg"})
+		})
+		require.Equalf(t, 2, code, "a test can never be waived, so registering one is a dead entry:\n%s", out)
+		require.Contains(t, out, "DEAD-EXPLAIN TestAlpha")
+	})
+
+	t.Run("entry that suppresses a real helper deletion stays live", func(t *testing.T) {
+		b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+		h := writeFileTree(t, "head", map[string]string{"pkg/z_test.go": headNoHelper})
+		ef := writeExplain(t, "helper\n")
+		code, out := captureStderr(t, func() int {
+			return runMergeCheck([]string{"--base-root", b, "--head-root", h, "--explain", ef, "pkg"})
+		})
+		require.Equalf(t, 0, code, "the deletion was exempted by the entry, so it is live:\n%s", out)
+		require.NotContains(t, out, "DEAD-EXPLAIN")
+	})
+}
+
+// TestMergeCheckUnreadableTableFails pins that an explicitly passed table that cannot be read is refused, never treated as empty.
+// - A typo'd --explain path loading as an empty set wipes the whole exemption surface, the exact form the dead-entry guard exists to prevent.
+// - --map shares the hole and fails later as misleading missing-test attributions, so both flags are covered.
+func TestMergeCheckUnreadableTableFails(t *testing.T) {
+	b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+	h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": baseTestsFile})
+	code, out := captureStderr(t, func() int {
+		return runMergeCheck([]string{"--base-root", b, "--head-root", h,
+			"--explain", filepath.Join(t.TempDir(), "missing.txt"), "pkg"})
+	})
+	require.Equalf(t, 2, code, "an unreadable --explain must fail the run, not act as an empty table:\n%s", out)
+	require.Contains(t, out, "cannot read")
+	code2, out2 := captureStderr(t, func() int {
+		return runMergeCheck([]string{"--base-root", b, "--head-root", h,
+			"--map", filepath.Join(t.TempDir(), "missing.tsv"), "pkg"})
+	})
+	require.Equalf(t, 2, code2, "an unreadable --map must fail the run, not act as an empty catalog:\n%s", out2)
+	require.Contains(t, out2, "cannot read")
+}

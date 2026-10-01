@@ -7,8 +7,10 @@
 #
 # --map and --explain each carry ONE table. A rename table belongs to one package:
 # applying another domain's table to it invents violations. So either pass a single
-# dir with its own pair, or call this script once per package — never several tables
-# in one run, because a repeated flag keeps only the last value.
+# dir with its own pair, or call this script once per package. Repeating a flag is
+# refused, an unreadable table file fails the run (an empty table is never assumed),
+# and an --explain entry that exempts nothing fails the run: a stale waiver must not
+# pass as a reviewed exception.
 set -euo pipefail
 
 base_ref="${1:?usage: check_test_merge.sh <baseline-ref> <dir>... [--map F] [--explain F]}"
