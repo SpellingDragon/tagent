@@ -332,3 +332,52 @@ FileSegmentStore 的 ReplayEvent 在窗口重入（seqCounter 从零恢复）时
 - **THEN** 窗口 meta 的 Sealed 被降级为 false，随后的时间范围查询（覆盖该事实时间戳）能在结果中看到该事实
 - **THEN** GetEvent 对该事实保持可达（idx 直达不受剪枝影响）
 
+### Requirement: 未确认恢复材料的有限保留租约
+
+未确认 inbox envelope 的 prepared fact key 与 receipt key、以及普通 spill 的待重放 key SHALL 由恢复 owner 注册进共享存储层的保留租约（内存守护集）；持有者是共享资源 owner，不是任一 agent。租约 MUST 在启动时由现有未确认材料重建，MUST NOT 引入第二张持久保留表或全历史去重集合。同一 key 可同时被多个 owner 保护：释放按引用计数递减、归零才解除，MUST 幂等，且未接线租约的 store 表现为无保护而非报错。
+
+保护期内 TTL 过期、容量淘汰、内容降分辨率与墓碑最终清理 MUST NOT 物理销毁所需原文——只拒销毁，无损搬迁（压实复制原文到高层段）允许。显式删除受保护 key MUST 返回可判定的 protected 错误，MUST NOT 静默销毁。遗忘扫描的首轮破坏性动作 MUST 等待租约武装与登记屏障解除；无耐久恢复 owner 登记时该等待 MUST 有界（宽限值见 `memory/lifecycle.go` 的 `armGrace`），使租约缺位不会变成永久停止遗忘。envelope 安全清理（ack 目录同步成功或 spill 安全移除）后释放该 key，其后按原类型的年龄窗口、以其原有时间戳恢复参与淘汰，MUST NOT 重新盖时间。单个 agent 关闭 MUST NOT 释放共享存储仍然需要的 outstanding 保护。合法墓碑 MUST 被拒绝重放；恢复材料与墓碑皆已清除后的任意手工历史重放不属于自动恢复保证，MUST NOT 为此新增永久去重库。
+
+#### Scenario: 未确认材料越过普通 TTL
+
+- **WHEN** prepared 输入与 receipt 已超过其类型的年龄窗口，而 envelope 尚未清理
+- **THEN** 原文与确认依据保留，恢复仍能得到正确结论；envelope 清理并释放后，该 key 按其原有时间戳恢复参与年龄淘汰
+
+#### Scenario: 重启时登记先于淘汰
+
+- **WHEN** 后端打开时待恢复 key 名义上已过 TTL
+- **THEN** 租约重建先于首轮破坏性扫描，扫描器不得"先淘汰再登记"
+
+#### Scenario: 显式删除撞上受保护材料
+
+- **WHEN** 删除一个仍被未确认恢复租约保护的 key
+- **THEN** 调用返回 protected 错误，原文未被销毁
+
+#### Scenario: 共享存储下的单 agent 关闭
+
+- **WHEN** 一个 agent 关闭但仍有未确认材料，另一 agent 继续共享同一存储
+- **THEN** outstanding 保护仍由资源 owner 持有，运行中的扫描器不得清理它
+
+### Requirement: 恢复能力经过包装层真实透传
+
+内置后端及 engine／error-tracking 包装链 SHALL **递归**核验并透传显式重放、材料保留与登记屏障能力：包装层按接口断言逐层向内传递（`ProtectKey`／`ReleaseKey`／`ArmRetention`／`BeginHold`／`EndHold`），内层不具备该能力时**屏障类为空操作**（不误抬屏障），而**重放类必须返回错误**明确拒绝（`ErrorTrackingStore.ReplayEvent` 在内层未实现 `EventReplayer` 时直接报错），MUST NOT 以外层满足接口代替内层能力，也不得以普通读写的存在作为重放能力的弱回退。
+
+重放成功时 SHALL 把**内层返回的 canonical fact** 交给下游消费，MUST NOT 以传入副本代替。重放错误 MUST 到达恢复 owner：可靠收件箱已自持这些事件的 at-least-once 重试，因此重放失败**不得**再落一份 mem_spill 兜底（那会在兜底文件里造出重复条目）；普通写入原有的 spill 行为不变。spill 重建出的保留租约若失败，MUST 以错误上抛由调用方 fail-closed，旧实例继续服务。
+
+绝对事件计数只在真实提交路径递增；重放判定为"已修复"或"已提交"的分支 MUST NOT 递增（否则一次幂等重放会被当作新增抬高淘汰压力），容量提示因此至多是建议性观察，不作删除依据。
+
+#### Scenario: 最内层屏障失败而外层具备重放方法
+
+- **WHEN** 内层提交屏障返回错误，外层包装器自身有重放方法
+- **THEN** 同一错误到达 inbox owner，不投影、不确认、不产生第二份输入 spill
+
+#### Scenario: 内层实际不具备重放能力
+
+- **WHEN** 包装器的内层未实现显式重放接口
+- **THEN** 能力检查以错误失败返回；待恢复材料保留，不静默按普通写路径吞掉
+
+#### Scenario: 幂等重放不抬高计数
+
+- **WHEN** 同一 key 先被判定为已修复、再被判定为已提交
+- **THEN** 绝对计数不因这两次重放变化，逻辑索引亦无重复项
+

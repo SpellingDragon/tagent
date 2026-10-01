@@ -136,16 +136,19 @@ settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)�
 - **WHEN** 任务已 finalize 为 failed，其旧 detector 随后发出 SettleStable
 - **THEN** 该信号 MUST 被丢弃并记 Warn，任务状态与结算事实 MUST 保持不变
 
-### Requirement: 任务超龄治理为观测优先、终止显式
-超龄 detached 任务默认 MUST 仅标记 stale 观测态（非终态、进程不动、一次性告警通知）；仅当任务生命周期为 job 且宿主显式配置 job deadline 时，超 deadline 才由 owner（detector.Cancel）执行终止并一次结算为 failed。service 型任务 MUST NEVER 因年龄被终止；任务生命周期 MUST 显式声明（TaskSpec.Lifetime，默认按 Kind 推断：command/subagent→job、generic→service）。
+### Requirement: 生命周期类只决定编排语义，不决定是否受年龄约束
 
-#### Scenario: 默认配置下超龄
-- **WHEN** job 型任务 detached 超过 task_stale_after 且未配置 job deadline
-- **THEN** 任务 MUST 转为 stale 观测态并发出一次性告警，进程与任务 MUST NOT 被强制终结
+任务生命周期 MUST 显式声明（`TaskSpec.Lifetime`：job／service），缺省 SHALL 按 Kind 推断（command／subagent→job、generic→service），并作为任务声明的一部分持久化以便回放复原。该类别只界定编排语义，MUST NOT 界定任务是否受年龄墙约束：超龄治理的唯一来源是统一 TTL 回收器，它覆盖全部 active 态与全部寿命类，无常驻豁免，也无与 TTL 并存的观测墙或第二条 deadline 墙（回收、续期、呈现与通知形态见 `async-task-lifetime` 能力）。
 
-#### Scenario: 配置 deadline 后超龄
-- **WHEN** job 型任务配置了 task_job_deadline 且 detached 超过 deadline
-- **THEN** owner MUST 执行 Cancel 确认退出，任务一次结算为 failed，终态事实四端一致
+#### Scenario: 生命周期类按 Kind 推断并随声明复原
+
+- **WHEN** 派生声明未显式给出生命周期类
+- **THEN** 依 Kind 解析为 job 或 service，该类别随声明持久化并在重建时保持同一值
+
+#### Scenario: 类别不改变年龄约束
+
+- **WHEN** 一个常驻 service 任务与一个一次性 job 任务各自越过生效 TTL
+- **THEN** 二者经同一回收器、同一退役通路被回收，service 不因类别获得豁免
 
 ### Requirement: 后台执行保留编排引用至实际停止
 
