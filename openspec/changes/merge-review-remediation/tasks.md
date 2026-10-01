@@ -134,11 +134,11 @@
 
 ## 12. CU-12 tool 注释与护栏 〔D-P2-1/D-P2-2/D-P2-3〕
 
-- [ ] 12.1 `smuggle_hint.go` 正则改 `(?:^|[^&])&\s*(?:disown\b)?`；新测试：`nohup make 2>&1 | tee log && echo done` 与 `curl 'http://x?a=1&b=2'` 不告警，`cmd &` 与 `nohup cmd & disown` 仍告警
-- [ ] 12.2 `tmux_executor.go` SessionError Godoc 改为失败极性主载体语义（非零/信号死/失明超限/强拆/未装配）
-- [ ] 12.3 逐处校正 7 处错乱前缀：action_tool.go:55,840 / settle.go:86 / tmux_executor.go:117 / tmux_monitor.go:93,493 / declarative.go:14 / mcp/call.go:38
-- [ ] 12.4 验证：`go test ./tool/... -count=1` + `scripts/gen_godoc.sh --check`（若 CI 有 doc 门则跑 lint.sh）
-- [ ] 12.5 提交：`fix(tool): 走私正则排除&&误报/注释面前缀校正/Godoc 对齐`
+- [x] 12.1 `smuggle_hint.go` 正则改 `(?:^|[^&])&\s*(?:disown\b)?`；新测试：`nohup make 2>&1 | tee log && echo done` 与 `curl 'http://x?a=1&b=2'` 不告警，`cmd &` 与 `nohup cmd & disown` 仍告警
+- [x] 12.2 `tmux_executor.go` SessionError Godoc 改为失败极性主载体语义（非零/信号死/失明超限/强拆/未装配）
+- [x] 12.3 逐处校正 7 处错乱前缀：action_tool.go:55,840 / settle.go:86 / tmux_executor.go:117 / tmux_monitor.go:93,493 / declarative.go:14 / mcp/call.go:38
+- [x] 12.4 验证：`go test ./tool/... -count=1` + `scripts/gen_godoc.sh --check`（若 CI 有 doc 门则跑 lint.sh）
+- [x] 12.5 提交：`fix(tool): 走私正则排除&&误报/注释面前缀校正/Godoc 对齐`
 
 ## 13. CU-13 工程化 〔F-P1-1/F-P2-1/F-P2-2/D14〕
 
