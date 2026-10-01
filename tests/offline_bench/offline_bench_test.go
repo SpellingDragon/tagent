@@ -311,7 +311,10 @@ func storageMatrix(t *testing.T) map[string]any {
 					"kv_ranges": writeOps[3], "kv_batches": writeOps[4], "kv_deletes": writeOps[5],
 					"sync_barriers": writeOps[6], "sync_barriers_per_write": round3(float64(writeOps[6]) / float64(writes)),
 					"segments_on_disk": len(segFiles), "dirty_tmp_orphans": len(tmpLeft),
-					"kv_snapshot_bytes":       fileSize(t, filepath.Join(dir, "kv.json")),
+					//  布局：快照按分区分片，Sync 只重写脏桶——聚合字节仍可比，
+					// per-partition 维度直接呈现"单分区提交成本 ∝ 分区键数、与全库解耦"。
+					"kv_snapshot_bytes":       kvSnapshotTotalBytes(t, dir),
+					"kv_snapshot_per_partition": kvSnapshotBytesByPartition(t, dir),
 					"partitions_discoverable": len(ckv.ListPartitionIDs()),
 				},
 			}
@@ -600,4 +603,30 @@ func runBenchBarrierChild() {
 		os.Exit(4)
 	}
 	os.Exit(0)
+}
+
+// kvSnapshotTotalBytes sums every kv-*.json snapshot in the store dir
+//  per-partition layout).
+func kvSnapshotTotalBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(dir, "kv-*.json"))
+	var total int64
+	for _, f := range files {
+		total += fileSize(t, f)
+	}
+	return total
+}
+
+// kvSnapshotBytesByPartition reports each partition snapshot's size — the
+// write-amplification witness: a commit touching one partition rewrites only
+// that partition's file, so its cost stays bounded by that partition's key
+// count instead of the whole library.
+func kvSnapshotBytesByPartition(t *testing.T, dir string) map[string]int64 {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(dir, "kv-*.json"))
+	out := map[string]int64{}
+	for _, f := range files {
+		out[strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "kv-"), ".json")] = fileSize(t, f)
+	}
+	return out
 }

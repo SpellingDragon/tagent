@@ -105,13 +105,13 @@
 
 ## 9. CU-9 分区快照 〔E-P2-5，BREAKING〕（依赖：CU-8 后 memory 包稳定）
 
-- [ ] 9.1 `local_file_kv.go`：内部 map 改按分区桶（`map[int]map[string]string`）；快照文件 `kv-<pid>.json` 每分区一个，dirty 集合记录变更分区
-- [ ] 9.2 `Sync()`：只序列化+tmp+rename dirty 分区并清空 dirty；全量语义保持（成功=新进程可读回全部键值）
-- [ ] 9.3 启动装载：扫 `kv-*.json` 装载全部分区；`ListPartitionIDs` 改读分片文件名；旧 `kv.json` 不迁移（存在即忽略，日志提示冷启动重建）
-- [ ] 9.4 新测试：多分区写入 → 仅 dirty 分片 mtime 变化；跨进程（子进程 Sync 后退出）新进程读回全部键值
-- [ ] 9.5 offline bench 适配：新布局断言 + 写放大对比（单分区提交成本 ∝ 分区键数，与全库键数解耦）
-- [ ] 9.6 验证：`go test ./memory/... ./tests/ -run 'Bench|KV|Snapshot' -count=1` 全绿
-- [ ] 9.7 提交：`refactor!(memory/kv): 快照按分区分片+dirty 屏障（BREAKING：旧 kv.json 不迁移）`
+- [x] 9.1 `local_file_kv.go`：内部 map 改按分区桶（`map[int]map[string]string`）；快照文件 `kv-<pid>.json` 每分区一个，dirty 集合记录变更分区
+- [x] 9.2 `Sync()`：只序列化+tmp+rename dirty 分区并清空 dirty；全量语义保持（成功=新进程可读回全部键值）
+- [x] 9.3 启动装载：扫 `kv-*.json` 装载全部分区；`ListPartitionIDs` 改读分片文件名；旧 `kv.json` 不迁移（存在即忽略，日志提示冷启动重建）
+- [x] 9.4 新测试：多分区写入 → 仅 dirty 分片 mtime 变化；跨进程（子进程 Sync 后退出）新进程读回全部键值
+- [x] 9.5 offline bench 适配：新布局断言 + 写放大对比（单分区提交成本 ∝ 分区键数，与全库键数解耦）
+- [x] 9.6 验证：`go test ./memory/... ./tests/ -run 'Bench|KV|Snapshot' -count=1` 全绿
+- [x] 9.7 提交：`refactor!(memory/kv): 快照按分区分片+dirty 屏障（BREAKING：旧 kv.json 不迁移）`
 
 ## 10. CU-10 死面清理 〔G-P2-3 + fsync 死旋钮，BREAKING〕
 

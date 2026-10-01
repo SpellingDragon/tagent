@@ -1024,7 +1024,8 @@ func (m *drillModel) Info() model.Info { return model.Info{Name: "drill-model"} 
 // reopens after removal), and that sweep runs on a FRESH instance so its unacked
 // ledger matches the post-removal disk, which is the point of a unit reset.
 //
-// Removal covers the exact managed layout only: kv.json plus its single kv.json.tmp
+// Removal covers the exact managed layout only: the per-partition kv-*.json
+// snapshots ( + legacy kv.json shapes) and their tmp residue
 // for the store unit; envelope-style tmps live under the inbox unit and are matched
 // there by pattern.
 func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, confirm bool) ([]string, error) {
@@ -1057,7 +1058,7 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 	_ = probe.CloseDurable()
 
 	var removals []string
-	for _, pat := range []string{"kv.json", "kv.json.tmp"} {
+	for _, pat := range []string{"kv.json", "kv.json.tmp", "kv-*.json", "kv-*.json.tmp"} {
 		m, _ := filepath.Glob(filepath.Join(storeDir, pat))
 		removals = append(removals, m...)
 	}
@@ -1137,7 +1138,7 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.Error(t, err, "undispositioned quarantine must refuse the unit reset")
 	require.FileExists(t, evidence, "quarantine evidence files are NEVER deleted by the reset")
 	require.FileExists(t, legacyV1, "refusal means ZERO changes")
-	require.FileExists(t, filepath.Join(storeDir, "kv.json"), "refusal means ZERO changes")
+	require.NotEmpty(t, kvSnapshotsIn(storeDir), "refusal means ZERO changes (a partition snapshot is on disk)")
 
 	require.NoError(t, os.Rename(evidence, filepath.Join(root, "dispositioned-1.json")))
 
@@ -1152,7 +1153,7 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	require.NoError(t, err)
 	require.NoFileExists(t, legacyV1, "transitional v1 cleared")
 	require.NoFileExists(t, legacySpill, "legacy spill cleared")
-	require.NoFileExists(t, filepath.Join(storeDir, "kv.json"), "store unit cleared — consistency")
+	require.Empty(t, kvSnapshotsIn(storeDir), "store unit cleared — consistency (every kv-*.json gone)")
 	require.NoFileExists(t, filepath.Join(anchorDir, "tagent.json"), "anchor unit cleared")
 	liveLeft, _ := filepath.Glob(filepath.Join(spillDir, "tagent", "inbox-v2", "*.json"))
 	require.Empty(t, liveLeft, "live envelopes cleared with the store (no unit half-reset)")
@@ -1214,4 +1215,12 @@ func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 	}, 15*time.Second, 20*time.Millisecond, "post-reset boot must reach the model on the CURRENT path")
 	require.NoError(t, ta.Close())
 	<-drop
+}
+
+// kvSnapshotsIn lists the KV store unit's snapshot files (partition layout:
+// kv-<label>.json; legacy single kv.json counted for the ZERO-change proof).
+func kvSnapshotsIn(storeDir string) []string {
+	partitions, _ := filepath.Glob(filepath.Join(storeDir, "kv-*.json"))
+	legacy, _ := filepath.Glob(filepath.Join(storeDir, "kv.json"))
+	return append(partitions, legacy...)
 }
