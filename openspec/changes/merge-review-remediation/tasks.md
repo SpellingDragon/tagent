@@ -38,14 +38,14 @@
 
 ## 3. CU-3 谱系信号化 〔C-P1-1/C-P1-2〕（依赖：无）
 
-- [ ] 3.1 `task/task_manager.go`：SettleSignal 增 `Lineage string` 字段，Godoc 注明"信号级、不持久化、恢复任务重新裁决"（对照 ExitCode 先例）
-- [ ] 3.2 `finalizeRetired`（1162-1170）：删除 `t.Spec.Origin` 改写三行，改设 `SettleSignal.Lineage = LineageRetired`（新常量 `"task-retired"`）
-- [ ] 3.3 `newTaskSettledEvent`（event_bus.go）：trigger_source 取值改 `sigLineage 非空 ? sigLineage : Origin[MetaKeyTriggerSource]`
-- [ ] 3.4 消费点核对：按 review-notes/02 的 Q1 清单逐处确认读事件 Metadata 零改动正确；grep `MetaKeyTriggerSource` 非测试 11 处复核
-- [ ] 3.5 新测试 `TestRetireNeverMutatesOrigin`：retire×watch 并发（-race），断言 Origin 无写、结算事件谱系为 task-retired
-- [ ] 3.6 新测试 `TestResumeSettleKeepsOriginalLineage`：退役终态 Resume 后再结算，事件谱系为原值、投递门外投
-- [ ] 3.7 验证：`go test -race ./agent/... -run 'Retire|Resume|Lineage|BatchRetire' -count=1` 全绿
-- [ ] 3.8 提交：`fix(task): 退役谱系改挂结算信号——Spec.Origin 恢复 spawn 后不可变`
+- [x] 3.1 `task/task_manager.go`：SettleSignal 增 `Lineage string` 字段，Godoc 注明"信号级、不持久化、恢复任务重新裁决"（对照 ExitCode 先例）
+- [x] 3.2 `finalizeRetired`（1162-1170）：删除 `t.Spec.Origin` 改写三行，改设 `SettleSignal.Lineage = LineageRetired`（新常量 `"task-retired"`）
+- [x] 3.3 `newTaskSettledEvent`（event_bus.go）：trigger_source 取值改 `sigLineage 非空 ? sigLineage : Origin[MetaKeyTriggerSource]`
+- [x] 3.4 消费点核对：按 review-notes/02 的 Q1 清单逐处确认读事件 Metadata 零改动正确；grep `MetaKeyTriggerSource` 非测试 11 处复核
+- [x] 3.5 新测试 `TestRetireNeverMutatesOrigin`：retire×watch 并发（-race），断言 Origin 无写、结算事件谱系为 task-retired
+- [x] 3.6 新测试 `TestResumeSettleKeepsOriginalLineage`：退役终态 Resume 后再结算，事件谱系为原值、投递门外投
+- [x] 3.7 验证：`go test -race ./agent/... -run 'Retire|Resume|Lineage|BatchRetire' -count=1` 全绿
+- [x] 3.8 提交：`fix(task): 退役谱系改挂结算信号——Spec.Origin 恢复 spawn 后不可变`
 
 ## 4. CU-4 批量折叠产生侧分流 〔C-P1-3〕（依赖：CU-3，onSettle 须先正确处理信号谱系）
 

@@ -252,6 +252,12 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	if len(tk.Spec.Origin) == 0 {
 		evt.Metadata["lineage_absent"] = "true"
 	}
+	// Signal-level lineage outranks the spawn-time Origin: retirement stamps
+	// task-retired on the settle signal, never on Origin itself — Origin stays
+	// immutable so a resumed task's later settles keep their original value.
+	if sig.Lineage != "" {
+		evt.Metadata[tagentevent.MetaKeyTriggerSource] = sig.Lineage
+	}
 	if sig.Kind == task.SettleStable || sig.Kind == task.SettleWatch {
 		if ms := tk.DetachedAtMilli(); ms > 0 {
 			evt.Metadata["detached_at_ms"] = fmt.Sprintf("%d", ms)

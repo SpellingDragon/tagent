@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
 	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -105,7 +104,18 @@ type SettleSignal struct {
 	// it is only meaningful alongside a known process death; it is NOT persisted
 	// (restored tasks re-adjudicate via liveness probe).
 	ExitCode int
+	// Lineage overrides the settled EVENT's trigger_source attribution for this
+	// one settle (retirement stamps LineageRetired). Signal-level like ExitCode:
+	// it is never written back into Spec.Origin — Origin is the spawn-time
+	// provenance identity and stays immutable after birth — and it is not
+	// persisted, so a restored task re-adjudicates its own lineage rather than
+	// replaying a stale retirement mark.
+	Lineage string
 }
+
+// LineageRetired is the settle-signal lineage stamped by TTL/liveness
+// retirement onto the resulting settlement event's trigger_source.
+const LineageRetired = "task-retired"
 
 // SettleDetector observes a running task and emits SettleSignals. Different task
 // types provide different detectors:
@@ -1160,46 +1170,47 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 }
 
 func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
-	t.mu.Lock()
-	if t.Spec.Origin == nil {
-		t.Spec.Origin = map[string]string{}
-	}
-	t.Spec.Origin[event.MetaKeyTriggerSource] = "task-retired"
-	t.mu.Unlock()
-	tm.finalize(t, SettleFailed, output, err)
+	// Retirement attributes on the SIGNAL, never on Spec.Origin: Origin is the
+	// spawn-time provenance identity; writing it here raced concurrent readers
+	// and permanently poisoned a resumed task's later settles.
+	tm.finalizeWithSignal(t, SettleSignal{Kind: SettleFailed, Output: output, Err: err, Lineage: LineageRetired})
 }
 
 func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err error) {
+	tm.finalizeWithSignal(t, SettleSignal{Kind: kind, Output: output, Err: err})
+}
+
+func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 	t.mu.Lock()
 	if isTerminalStatus(t.status) {
 		t.mu.Unlock()
 		return
 	}
-	t.result = output
-	t.err = err
+	t.result = sig.Output
+	t.err = sig.Err
 	t.settledAt = tm.now()
 	switch {
-	case kind == SettleFailed || err != nil:
+	case sig.Kind == SettleFailed || sig.Err != nil:
 		t.status = TaskFailed
-	case kind == SettleCompleted:
+	case sig.Kind == SettleCompleted:
 		t.status = TaskCompleted
 	default:
 		t.status = TaskFailed
-		kind = SettleFailed
-		if err == nil {
-			err = fmt.Errorf("finalize: non-terminal reconcile kind %q coerced to failed", kind)
+		sig.Kind = SettleFailed
+		if sig.Err == nil {
+			sig.Err = fmt.Errorf("finalize: non-terminal reconcile kind %q coerced to failed", sig.Kind)
 		}
 	}
 	t.mu.Unlock()
 	tm.mu.Lock()
 	if tm.batchCollect != nil {
-		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: output, Err: err}})
+		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: sig})
 		tm.mu.Unlock()
 		return
 	}
 	tm.mu.Unlock()
 	if tm.onSettle != nil {
-		tm.onSettle(t, SettleSignal{Kind: kind, Output: output, Err: err})
+		tm.onSettle(t, sig)
 	}
 }
 

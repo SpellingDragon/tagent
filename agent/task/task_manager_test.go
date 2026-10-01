@@ -578,15 +578,17 @@ func tkStatus(tm *TaskManager, id string) TaskStatus {
 
 // TestFinalizeRetired_DowngradesLineage 钉住 退役路径的结算不得沿用任务原有的用户触发谱系。
 // - 否则一次记账性退役会被当作"用户等待的结果"投递回去；谱系必须降级为退役类别。
+// - 降级盖在结算信号（Lineage）上而非回写 Spec.Origin：Origin 是 spawn 时身份，
+//   回写既与无锁读者竞争，又让 resume 后的再结算永久继承污染谱系。
 func TestFinalizeRetired_DowngradesLineage(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
 	var gotKind SettleKind
+	var gotLineage string
 	var gotOrigin string
 	tm.onSettle = func(tk *Task, sig SettleSignal) {
 		gotKind = sig.Kind
-		if b, ok := tk.Spec.Origin[event.MetaKeyTriggerSource]; ok {
-			gotOrigin = string(b)
-		}
+		gotLineage = sig.Lineage
+		gotOrigin = tk.Spec.Origin[event.MetaKeyTriggerSource]
 	}
 	tk := &Task{Spec: TaskSpec{Kind: "command", Desc: "test"}}
 	tk.Spec.Origin = map[string]string{event.MetaKeyTriggerSource: "user"}
@@ -596,8 +598,11 @@ func TestFinalizeRetired_DowngradesLineage(t *testing.T) {
 	if gotKind != SettleFailed {
 		t.Fatalf("kind = %v, want failed", gotKind)
 	}
-	if gotOrigin != "task-retired" {
-		t.Fatalf("lineage = %q, want task-retired (downgraded, not user)", gotOrigin)
+	if gotLineage != LineageRetired {
+		t.Fatalf("signal lineage = %q, want %q (downgraded on the signal)", gotLineage, LineageRetired)
+	}
+	if gotOrigin != "user" {
+		t.Fatalf("Origin must stay the spawn-time provenance, got %q", gotOrigin)
 	}
 	if tk.status != TaskFailed {
 		t.Fatalf("status = %v, want failed", tk.status)
