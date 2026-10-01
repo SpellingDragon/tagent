@@ -49,13 +49,13 @@
 
 ## 4. CU-4 批量折叠产生侧分流 〔C-P1-3〕（依赖：CU-3，onSettle 须先正确处理信号谱系）
 
-- [ ] 4.1 先 grep `OnBatchRetire\|BatchRetired\|batchCollect` 全部测试断言，列出受影响清单入日志
-- [ ] 4.2 `finalize`（task_manager.go:1194-1198）：batchCollect 分支前判 `t.Spec.Origin[event.MetaKeyInvocationID] != ""` → 有归属走正常 onSettle 路径（不进批）
-- [ ] 4.3 新测试：有归属条目被 TTL 批量退役 → 不进汇总、按 per-invocation 路由递减记账、父循环静止退出（带超时上限断言，非依赖硬超时）
-- [ ] 4.4 新测试：无归属条目行为不变（单条汇总）；嵌套批回归（TestBatchRetire_NestedNoDoubleDelivery 必须仍绿）
-- [ ] 4.5 按 4.1 清单同步既有断言
-- [ ] 4.6 验证：`go test ./agent/... -run 'BatchRetire|RetireOrphans|Reconcile' -count=1` 全绿
-- [ ] 4.7 提交：`fix(task): 批量折叠产生侧分流——有 invocation 归属的退役条目不进批`
+- [x] 4.1 先 grep `OnBatchRetire\|BatchRetired\|batchCollect` 全部测试断言，列出受影响清单入日志
+- [x] 4.2 `finalize`（task_manager.go:1194-1198）：batchCollect 分支前判 `t.Spec.Origin[event.MetaKeyInvocationID] != ""` → 有归属走正常 onSettle 路径（不进批）
+- [x] 4.3 新测试：有归属条目被 TTL 批量退役 → 不进汇总、按 per-invocation 路由递减记账、父循环静止退出（带超时上限断言，非依赖硬超时）
+- [x] 4.4 新测试：无归属条目行为不变（单条汇总）；嵌套批回归（TestBatchRetire_NestedNoDoubleDelivery 必须仍绿）
+- [x] 4.5 按 4.1 清单同步既有断言
+- [x] 4.6 验证：`go test ./agent/... -run 'BatchRetire|RetireOrphans|Reconcile' -count=1` 全绿
+- [x] 4.7 提交：`fix(task): 批量折叠产生侧分流——有 invocation 归属的退役条目不进批`
 
 ## 5. CU-5 inbox 与 TTL 加固 〔C-P2-1/C-P2-2/C-P2-3/C-P2-4〕
 

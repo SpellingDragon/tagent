@@ -1142,6 +1142,12 @@ type BatchRetired struct {
 	Sig  SettleSignal
 }
 
+// originKeyInvocationID is the Spec.Origin key carrying the delegation
+// invocation a task was spawned under. Same wire key as
+// agent.metaKeyInvocationID (the task layer must not import the agent layer);
+// the batch split reads it to tell attributed retires from unattributed ones.
+const originKeyInvocationID = "invocation_id"
+
 // beginBatchRetire switches finalize into collect mode for the duration of a
 // reconcile/orphan loop. NESTED-SAFE: reconcileZombies internally calls
 // RetireOrphans — an inner begin reuses the outer collector and its finish is
@@ -1202,8 +1208,15 @@ func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 		}
 	}
 	t.mu.Unlock()
+	// : production-side split. A retire of a task attributed to a delegation
+	// invocation must NOT be collapsed into the batch summary: the summary is
+	// published to the shared bus only, so the owning invocation loop would
+	// never see its settle and the delivery-accounting barrier could never
+	// reach quiescence. Attributed settles keep the per-task onSettle path
+	// (which routes onto the bound invocation bus). Spec.Origin is immutable
+	// after spawn (), so this lock-free read races with nothing.
 	tm.mu.Lock()
-	if tm.batchCollect != nil {
+	if tm.batchCollect != nil && t.Spec.Origin[originKeyInvocationID] == "" {
 		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: sig})
 		tm.mu.Unlock()
 		return
