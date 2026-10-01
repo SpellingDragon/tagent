@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/evolution"
@@ -57,15 +58,18 @@ type assetSnapshot struct {
 // report 为 nil 时仅日志（降级安全）。并发约定：scanAndReport 由 ticker 与启动
 // 路径先后调用，内部以 mu 串行化快照读写。
 type AssetAuditor struct {
-	wd       string
-	extra    []string // 主配置 yaml 等清单外必查文件
-	paths    []string // 目录前缀清单（pattern 去 /** 后的目录段）
-	snap     string   // 快照文件路径
-	interval time.Duration
-	report   func([]AssetChange)
-	stop     chan struct{}
-	mu       sync.Mutex
-	once     sync.Once
+	wd        string
+	extra     []string // 主配置 yaml 等清单外必查文件
+	paths     []string // 目录前缀清单（pattern 去 /** 后的目录段）
+	snap      string   // 快照文件路径
+	interval  time.Duration
+	report    func([]AssetChange)
+	stop      chan struct{}
+	done      chan struct{} // 后台 goroutine 退出时关闭；Close 据此同步等待
+	mu        sync.Mutex
+	once      sync.Once
+	startOnce sync.Once
+	started   atomic.Bool // Start 是否真正拉起过后台 goroutine
 }
 
 // NewAssetAuditor 构造审计器。wd 为空回退进程 cwd；patterns 为受控清单
@@ -81,6 +85,7 @@ func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]Ass
 		interval: assetAuditInterval,
 		report:   report,
 		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	for _, pat := range patterns {
 		// 受控清单默认形态是 `dir/**`：目录前缀即枚举边界。非 `/**` 结尾的
@@ -100,17 +105,39 @@ func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]Ass
 // agent 构造路径（文件哈希是有界 I/O，不该串进装配关键路径）。返回 error 仅用于
 // 保留签名兼容（当前不产生）。
 func (a *AssetAuditor) Start() error {
-	go func() {
-		a.scanAndReport(true)
-		a.loop()
-	}()
+	a.startOnce.Do(func() {
+		a.started.Store(true)
+		go func() {
+			defer close(a.done)
+			// 若 Close 先于初写到达，直接退出：生命周期契约要求 Close 返回后不得再有写入。
+			if a.stopped() {
+				return
+			}
+			a.scanAndReport(true)
+			a.loop()
+		}()
+	})
 	return nil
 }
 
-// Close 停止 ticker（对齐 monitor Stop 模式；幂等）。
+// Close 停止后台循环并**同步等待其完全退出**（幂等）：Close 返回即保证不再有
+// 任何快照写入——否则 t.TempDir 等调用方的清理会与尾随写竞态（"directory not empty"）。
 func (a *AssetAuditor) Close() error {
 	a.once.Do(func() { close(a.stop) })
+	if a.started.Load() {
+		<-a.done
+	}
 	return nil
+}
+
+// stopped 报告 stop 是否已关闭（非阻塞）。
+func (a *AssetAuditor) stopped() bool {
+	select {
+	case <-a.stop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *AssetAuditor) loop() {
