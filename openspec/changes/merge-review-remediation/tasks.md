@@ -142,12 +142,12 @@
 
 ## 13. CU-13 工程化 〔F-P1-1/F-P2-1/F-P2-2/D14〕
 
-- [ ] 13.1 `check_comment_only.sh` 重写收集循环：删除侧（base 有 head 无）直传 codetools；仅全批纯新增才 exit 0；数组+引号化
-- [ ] 13.2 构造性验证三例（记入日志）：删除 .go 批次 exit≠0 且输出 MISSING-HEAD；纯新增批次 exit 0；混合批次删除文件被拒
-- [ ] 13.3 `lint.sh`："lint: ok" echo 移至 proc-refs 块之后
-- [ ] 13.4 `ci.yml`：soak job 加 `-timeout 45m`（-args 之前）；新增 step `go mod verify`
-- [ ] 13.5 验证：`bash -n scripts/check_comment_only.sh scripts/lint.sh` + 13.2 三例 + `actionlint` 或 yaml lint（可用）
-- [ ] 13.6 提交：`fix(scripts,ci): comment-only 门禁防线归位/lint 信号诚实/soak 超时/go mod verify`
+- [x] 13.1 `check_comment_only.sh` 重写收集循环：删除侧（base 有 head 无）直传 codetools；仅全批纯新增才 exit 0；数组+引号化
+- [x] 13.2 构造性验证三例（记入日志）：删除 .go 批次 exit≠0 且输出 MISSING-HEAD；纯新增批次 exit 0；混合批次删除文件被拒
+- [x] 13.3 `lint.sh`："lint: ok" echo 移至 proc-refs 块之后
+- [x] 13.4 `ci.yml`：soak job 加 `-timeout 45m`（-args 之前）；新增 step `go mod verify`
+- [x] 13.5 验证：`bash -n scripts/check_comment_only.sh scripts/lint.sh` + 13.2 三例 + `actionlint` 或 yaml lint（可用）
+- [x] 13.6 提交：`fix(scripts,ci): comment-only 门禁防线归位/lint 信号诚实/soak 超时/go mod verify`
 
 ## 14. CU-14 文档与 spec 卫生 〔G-P1-1..5/G-P2-1/G-P2-2〕
 

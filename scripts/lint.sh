@@ -64,8 +64,6 @@ if [ -z "$only" ] || [ "$only" = "policy" ]; then
   run go run "${args[@]}" "${POLICY_DIRS[@]}"
 fi
 
-echo "lint: ok"
-
 # 标识不承载迭代编号（specs/architecture-guardrails：测试标识不承载迭代编号）
 if ! go run ./scripts/codetools name-check . examples/wechat-bot; then
   echo "lint: test identifiers carry batch/round numbering (rename them; keep domain vocabulary like Int64/L1/V2)"
@@ -89,3 +87,5 @@ if ! go run ./scripts/codetools proc-refs scripts .github/workflows; then
   echo "lint: scripts or CI cite change artifacts — state the contract in docs/wiki or specs instead"
   exit 1
 fi
+
+echo "lint: ok"
