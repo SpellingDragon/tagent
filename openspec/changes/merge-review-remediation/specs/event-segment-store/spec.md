@@ -12,7 +12,7 @@
 
 ### Requirement: LocalFileKV Sync 为原子快照屏障
 
-LocalFileKV 的 `Sync()` SHALL 将全部键值整序列化为单文件快照，以临时文件写入加原子 rename 落盘；`Sync()` 返回成功后，独立新进程 SHALL 能读回该快照代表的全部键值。`WithFSync` 选项 SHALL 被接受但不改变该行为（配置面兼容残留）。快照文件本体损坏 SHALL 启动失败（fail-fast）。FileSegmentStore.StoreEvent 的提交屏障契约不变：evt/idx/必需 meta 写完且 `Sync()` 成功后才发布缓存、计数与成功结果；屏障未完成 MUST NOT 报告 durable 成功，调用方 MUST 在成功后才投影。
+LocalFileKV 的 `Sync()` SHALL 将全部键值整序列化并以临时文件写入加原子 rename 落盘；快照 SHALL 按分区分片（每分区独立文件），`Sync()` 只重写自上次屏障以来变更过的分区——单次提交的屏障成本 SHALL 与其触碰的分区成正比，MUST NOT 与全库键数成正比。`Sync()` 返回成功后，独立新进程 SHALL 能读回该快照代表的全部键值。`WithFSync` 选项 SHALL 被接受但不改变该行为（配置面兼容残留）。快照文件本体损坏 SHALL 启动失败（fail-fast）。FileSegmentStore.StoreEvent 的提交屏障契约不变：evt/idx/必需 meta 写完且 `Sync()` 成功后才发布缓存、计数与成功结果；屏障未完成 MUST NOT 报告 durable 成功，调用方 MUST 在成功后才投影。
 
 #### Scenario: 屏障后跨进程读回
 

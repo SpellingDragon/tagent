@@ -1,22 +1,30 @@
 ## Why
 
-dev（43 提交）合入 origin/main 前的分主题并行评审发现 2 项 P0（主规格与实现相反）与 14 项 P1（数据竞争、静默成功、租约泄漏、门禁绕过等）。这些问题一部分是实现违反既有 spec，一部分是 spec 未跟上已裁决的行为变更；不修复合入 main 会把数据完整性缺口与误导性规格一并固化。
+dev（43 提交）合入 origin/main 前的分主题并行评审发现 2 项 P0（主规格与实现相反）与 14 项 P1、29 项 P2。合入目标不是"修到可接受"，而是**让 main 达到干净的理想形态**：全部已知发现一次清零、specs 与实现零矛盾、谱系判定与通知识别收敛为单一真源。项目处于 pre-release（无外部消费者），允许破坏性变更；不承诺对旧盘上数据的兼容迁移——新代码冷启动从事实链干净重建即视为合格。
 
 ## What Changes
 
 **规格对齐（P0×2）**
-- `event-sourced-projection` 主 spec 的"无锚恢复截断至 500 条/partial/truncated_events"条款按现行实现（fallbackCap=0，b871d30 裁决）重写为全量复原语义。
-- `event-segment-store` 主 spec 移除两条已被归档 delta 声明 REMOVED 的条款（WAL 中间坏行容错、WAL-fsync 耐久），按现行实现落"KV Sync=原子快照屏障"真契约。
+- `event-sourced-projection` 主 spec 无锚恢复条款按现行实现（fallbackCap=0，b871d30 裁决）重写为全量复原语义。
+- `event-segment-store` 主 spec 移除两条已被归档 delta 声明 REMOVED 的 WAL 系条款，落"KV Sync=原子快照屏障"真契约（含分区快照语义）。
 
-**实现修复（P1，评审证据见提交说明）**
-- agent 核心运行时：SetAuditLine 死接线归位；execution gate 模型入口错误以失败响应呈现（不得静默零产出成功并 ack）；subagent 调用拒绝路径补 liveCM 注销。
-- 常驻可靠性：退役谱系戳改挂结算信号（消除 Spec.Origin 并发写与 Resume 恢复轮谱系污染）；OnBatchRetire 补 per-invocation 结算路由与记账释放。
-- compress：foldSettleRuns 批量折叠前按 dispositions 剔除 TelemActive 成员（兑现"未消费不可丢"契约）。
-- memory：spill 重放的租约释放绑定"行已落盘移除"；RetentionLease.Release 注释与实现对齐。
-- 工程化：check_comment_only wrapper 停止预过滤删除侧文件（让 codetools MISSING-HEAD 硬拒可达）；顺带两处一行级 P2（recovery.go 死残留删除、lint.sh 成功打印移到全部门之后）。
+**实现修复——机制完善型（P1 主体 + P2 补齐）**
+- agent 核心运行时：SetAuditLine 死接线归位；execution gate 三个失败点以失败 Response 呈现；subagent 拒绝路径补 liveCM 注销；settle 路由 teardown 窗口补终态排空；QuarantineEnvelope 材料读失败补租约释放兜底；构造失败路径补 CloseDurable。
+- 常驻可靠性：退役谱系改挂结算信号（Spec.Origin 恢复 spawn 后不可变）；批量折叠改为**产生侧分流**（有 invocation 归属的条目不进批，批内天然只剩无主结算，宿主回调零改动）；quarantine rename 补 dirsync 与错误传播、容量扣减与隔离成败绑定；ClaimNext 补锁内 closed 复查；DefaultTTL 注释对齐"永开无禁用"哲学；reconcileTTL 对恢复任务（detector=nil）补会话回收路径。
+- compress：折叠豁免推广为 run 级（run 含 Active 成员整 run 原样保留）；单条票据分支补 Timestamp==0 防护。
+- memory：spill 租约释放绑定"行已落盘移除"；finalizeTombstones 在 idx 删除失败时保留墓碑；deleteSegments 清理失败聚合上报；locateOrphanEvtSlot 对 ListSegments 失败 fail-loud；store 构建失败路径补 relation store 释放。
+- rl/周边：swappable sweepRetired 陈旧读归位（current 读入写锁内）；trajectory 通道路径补 (nil,nil) 防护；resume 新建 detector 重注册 monitor 回调；restart 脚本归档截断移至新旧进程交接窗口。
 
-**文档修复（P1 文档面）**
-- README"零必填配置"表述纠正（D1 依赖显式 working_dir）；rl-architecture"已知缺口"自相矛盾段修正；compression-and-telemetry 截断语义表述更新；storage-durability-positioning"码面事实"纠正；归档 evidence.md 个人绝对路径脱敏。
+**实现修复——语义收敛型（BREAKING，方向=更彻底的既有哲学）**
+- **谱系判定白名单同源化**：投递门扣留判定与 compress 外显判定收敛为同一 deliverable 白名单（白名单外一律内部，fail-closed），消除双负清单手工同步（`internalLineageValues` 与投递门清单）这一熵增源。
+- **结算通知结构化识别**：事件源头写入 `settle_notice` 结构化标记，投影侧识别只认标记；无标记的旧事件不折叠（原样保留，方向安全）。正文前缀 `[task settled` 启发式退役。
+- **LocalFileKV 分区快照**：快照按分区分片，Sync 屏障只重写 dirty 分区——事件级屏障语义不变，写放大从 O(全库) 降为 O(分区)。旧单文件 kv.json 不迁移，冷启动空库重建。
+- **诊断面清理**：`DiagnosticsSnapshot.WALQuarantined` 字段及其测试桩直接删除（WAL 语义已移除）。
+
+**工程化与文档**
+- comment-only wrapper 放行删除侧给 codetools 硬拒（防线回工具层单点）；lint.sh 成功打印移到全部门后；soak 父进程显式 timeout。
+- 文档全量对齐：README"零必填配置"纠正、rl-architecture 自相矛盾段、compression-and-telemetry 截断表述、storage-durability-positioning"码面事实"、归档 evidence.md 个人绝对路径脱敏、wiki 索引重复段清除、全部 TBD Purpose 回填。
+- 注释卫生：7+ 处批量重写错乱前缀人工校正、SessionError Godoc 对齐失败极性主载体语义。
 
 ## Capabilities
 
@@ -26,14 +34,16 @@ dev（43 提交）合入 origin/main 前的分主题并行评审发现 2 项 P0�
 
 ### Modified Capabilities
 
-- `event-sourced-projection`: 无锚恢复 Requirement 从"分页扫描后保留最新 500 条有效事件（partial/truncated_events）"改为"过滤后全量复原、无截断上限，truncated 仅在快照槽丢失/读失败时非零"。
-- `event-segment-store`: REMOVED 两条 WAL 系条款（中间坏行容错、WAL-fsync 耐久）；ADDED 一条反映现行 LocalFileKV 的 KV Sync 原子快照屏障契约。
-- `async-task-lifetime`: 批量退役 Requirement 显性化两条不变量——有 invocation 绑定的退役条目仍须完成结算路由与记账释放；Resume 恢复轮的外发信号按恢复语境取谱系（不继承 task-retired）。
-- `persistent-event-loop`: ADDED 模型入口错误极性条款——迭代器/流创建失败、verify 拒绝必须以携带错误信息的失败响应呈现并归约 failed turn，MUST NOT 静默零产出且以 completed 冻结 ack。
+- `event-sourced-projection`: 无锚恢复 Requirement 从"保留最新 500 条（partial/truncated_events）"改为"过滤后全量复原、无截断上限"。
+- `event-segment-store`: REMOVED 两条 WAL 系条款；ADDED"LocalFileKV Sync 为原子快照屏障"条款（含分区分片语义）。
+- `async-task-lifetime`: 批量退役 Requirement 显性化——折叠域为产生侧定义（有 invocation 归属的退役条目不进批、仍走逐条路由与记账释放）；谱系戳挂结算信号、不写任务 Origin；Resume 恢复轮按恢复语境取谱系。
+- `persistent-event-loop`: ADDED 模型入口错误极性条款（迭代器/通道创建失败、verify 拒绝必须以失败响应呈现并归约 failed turn）。
+- `telemetry-channel`: ADDED 两条——结算通知识别 SHALL 依据结构化标记（正文前缀启发式退役）；外显判定 SHALL 与宿主投递门同源（单一 deliverable 白名单，白名单外一律内部）。
 
 ## Impact
 
-- 代码：`agent/agent.go`、`agent/execution_gate_model.go`、`agent/session.go`、`agent/recovery.go`、`agent/settle_routing.go`、`agent/task/task_manager.go`、`agent/compress/context_compressor.go`、`memory/mem_spill.go`、`memory/retention_lease.go`、`scripts/check_comment_only.sh`、`scripts/lint.sh`
-- 文档：`README.md`、`docs/storage-durability-positioning.md`、`docs/wiki/rl/rl-architecture.md`、`docs/wiki/agent/compression-and-telemetry.md`、`openspec/changes/archive/**/evidence.md`（路径脱敏）
-- 无 API/序列化/协议破坏；所有修复保持既有默认行为语义（修复方向均为"实现回归 spec"或"spec 对齐已裁决实现"）
-- 评审全量证据与交叉验证记录：`.git/review-notes/01-findings.md`（P0×2/P1×14/P2×29 完整清单）
+- 代码：`agent/`（agent.go、execution_gate_model.go、session.go、settle_routing.go、event_bus.go、recovery.go、telemetry_audit.go）、`agent/task/`、`agent/compress/`、`agent/reliability/`、`memory/`（mem_spill、retention_lease、compaction、segment_store、kv/local_file_kv、engine/diagnostics）、`rl/`、`tool/action/`、`scripts/`（check_comment_only.sh、lint.sh）、`.github/workflows/ci.yml`、`examples/wechat-bot/restart-tagent.sh`
+- 文档：README、docs/storage-durability-positioning.md、docs/wiki/**、openspec/specs/**（Purpose 回填）、openspec/changes/archive/**（路径脱敏）
+- **BREAKING**：诊断字段删除、谱系白名单化、通知识别标记化、KV 快照分片（旧 kv.json 不迁移）——均为 pre-release 定位下的有意变更，CHANGELOG 显式标注
+- 唯一外部依赖项（非本地可消除）：go.mod replace 指向个人 fork（上游 PR #2637 未合）——保留 + CI `go mod verify` 防护 + 合入后摘除的跟踪任务
+- 评审全量证据：`.git/review-notes/01-findings.md`（45 项逐项闭环为验收标准）
