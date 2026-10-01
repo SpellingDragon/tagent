@@ -1,7 +1,7 @@
 # failure-polarity Specification
 
 ## Purpose
-TBD - created by archiving change failure-polarity-passthrough. Update Purpose after archive.
+失败极性透传：进程死亡按 pane_dead_status 退出码分流结算，非零即失败送达，不得猜测成功。
 ## Requirements
 ### Requirement: 进程死亡按退出码分流极性
 

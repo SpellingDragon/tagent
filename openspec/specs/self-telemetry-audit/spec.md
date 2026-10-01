@@ -1,7 +1,7 @@
 # self-telemetry-audit Specification
 
 ## Purpose
-TBD - created by archiving change attention-budget-architecture. Update Purpose after archive.
+自管遥测审计：滚动窗口占比指标驱动告警、收敛、冻结三级动作，指标与每次动作写入事实链供 recall 审计，判定为确定性计算、零 LLM 参与。
 ## Requirements
 ### Requirement: 自管遥测占比指标与分级动作
 

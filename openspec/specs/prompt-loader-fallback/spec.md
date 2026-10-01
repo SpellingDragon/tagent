@@ -1,7 +1,7 @@
 # prompt-loader-fallback Specification
 
 ## Purpose
-TBD - created by archiving change prompt-loader-fallback. Update Purpose after archive.
+框架默认 prompt 随二进制嵌入并带装载回退链：消费方不依赖任何磁盘相对路径即可获得默认提示集合，装载失败可辨且不静默。
 ## Requirements
 ### Requirement: 框架默认 prompt 随二进制嵌入
 

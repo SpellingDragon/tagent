@@ -151,14 +151,14 @@
 
 ## 14. CU-14 文档与 spec 卫生 〔G-P1-1..5/G-P2-1/G-P2-2〕
 
-- [ ] 14.1 `README.md:339`：认知资产防线表述改"D1 漂移审计需显式 working_dir，未设时跳过"
-- [ ] 14.2 `rl-architecture.md:118-120`："已知缺口"段改真实缺口三条（守卫可枚举输出/键集重算成本/遥测参数标定）
-- [ ] 14.3 `compression-and-telemetry.md:26`：截断表述改全量复原；`storage-durability-positioning.md:11-19`："fsync 默认开启"改"旋钮存在但无效果；屏障=快照原子 rename"，"行为仍在"限定快照屏障
-- [ ] 14.4 归档脱敏：`grep -rln "file:///Users/" openspec/changes/archive/` 全部替换为仓库相对路径（8+ 处）
-- [ ] 14.5 `docs/wiki/README.md:31-38`：删除重复引用块一份
-- [ ] 14.6 全部 TBD Purpose 回填：`grep -rln "TBD - created by archiving" openspec/specs/` 逐文件一句话能力陈述
-- [ ] 14.7 验证：`scripts/lint.sh` 的 doc-refs 门 + `grep -rn "file:///Users/\|TBD - created" openspec/ | wc -l` 为 0
-- [ ] 14.8 提交：`docs: doc-truth 全量对齐——README/wiki/positioning/归档脱敏/Purpose 回填`
+- [x] 14.1 `README.md:339`：认知资产防线表述改"D1 漂移审计需显式 working_dir，未设时跳过"
+- [x] 14.2 `rl-architecture.md:118-120`："已知缺口"段改真实缺口三条（守卫可枚举输出/键集重算成本/遥测参数标定）
+- [x] 14.3 `compression-and-telemetry.md:26`：截断表述改全量复原；`storage-durability-positioning.md:11-19`："fsync 默认开启"改"旋钮存在但无效果；屏障=快照原子 rename"，"行为仍在"限定快照屏障
+- [x] 14.4 归档脱敏：`grep -rln "file:///Users/" openspec/changes/archive/` 全部替换为仓库相对路径（8+ 处）
+- [x] 14.5 `docs/wiki/README.md:31-38`：删除重复引用块一份
+- [x] 14.6 全部 TBD Purpose 回填：`grep -rln "TBD - created by archiving" openspec/specs/` 逐文件一句话能力陈述
+- [x] 14.7 验证：`scripts/lint.sh` 的 doc-refs 门 + `grep -rn "file:///Users/\|TBD - created" openspec/ | wc -l` 为 0
+- [x] 14.8 提交：`docs: doc-truth 全量对齐——README/wiki/positioning/归档脱敏/Purpose 回填`
 - [ ] 14.9 **预收口检查点**：产出 45 项映射勾验表（见下方映射节），逐项对照 01-findings.md 勾验并附证据行号；缺项回补，不得进入收口
 
 ## 15. CU-15 全量回归与 MR 收口

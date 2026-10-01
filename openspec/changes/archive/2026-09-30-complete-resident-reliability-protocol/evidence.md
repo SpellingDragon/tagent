@@ -1084,7 +1084,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 
 任务：建立 inbox-v2+localfile+真实 runner/plugin 常驻集成场景，模型 mock/渠道，对账原始接收/事实/请求/结果/清理各端。
 
-**落地**：新文件 [tests/resident_durable_e2e_test.go](file:///Users/pengweiye/Documents/codes/tagent/tests/resident_durable_e2e_test.go)——`tagent.New` 完整组合根（Memory localfile + Reliability.BusSpillDir，mock 模型经 WithModel）+ `TestResidentDurableE2E_FiveSurfaceReconciliation`：
+**落地**：新文件 [tests/resident_durable_e2e_test.go](tests/resident_durable_e2e_test.go)——`tagent.New` 完整组合根（Memory localfile + Reliability.BusSpillDir，mock 模型经 WithModel）+ `TestResidentDurableE2E_FiveSurfaceReconciliation`：
 
 | 端 | 断言 |
 |---|---|
@@ -1110,7 +1110,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 
 **落地**：
 1. **seam 抽取**：main.go 新增 `resolveDeliveryTarget(metaChatID, lastActive)`（世系投递唯一目标规则：stamp 原样直通 > 最近活跃回退 > 扣留），循环体内联两段 if 迁移至 seam（顺带修掉 `v.(string)` 无保护断言的 panic 风险；回退观测日志保留并泛化到 triggerSource）。
-2. **新测** [main_delivery_target_test.go](file:///Users/pengweiye/Documents/codes/tagent/examples/wechat-bot/main_delivery_target_test.go) 六支，全在真实 meta 契约（`ParseEventMeta` 读 `meta_chat_id` StateDelta）+ fakeSender 记录器上：接收 chat-77 → 模拟发送目标 **逐字=chat-77**（非回退值）；task 无 stamp → 回退最近活跃；双空 → 扣留且 sender 零调用；`persist→fresh map→seed` 重启续存腿；**guard 测**把「禁连真实渠道」变成可执行检查（扫描全部 _test.go 禁 wechat.NewBot/SendLongText/http 构造，模式串拼接防自匹配）。
+2. **新测** [main_delivery_target_test.go](examples/wechat-bot/main_delivery_target_test.go) 六支，全在真实 meta 契约（`ParseEventMeta` 读 `meta_chat_id` StateDelta）+ fakeSender 记录器上：接收 chat-77 → 模拟发送目标 **逐字=chat-77**（非回退值）；task 无 stamp → 回退最近活跃；双空 → 扣留且 sender 零调用；`persist→fresh map→seed` 重启续存腿；**guard 测**把「禁连真实渠道」变成可执行检查（扫描全部 _test.go 禁 wechat.NewBot/SendLongText/http 构造，模式串拼接防自匹配）。
 3. 缺世系扣留源层五测（resolveTriggerSource fail-closed 白名单，含 task-unstamped 降级扣留）先存，本轮引用不重复。
 
 **fail-before**：TEMP 令 seam「忽略 stamp 恒用 lastActive」（发送目标被改写 violation）→ Stamped 测精确红 → 恢复全模块绿，TEMP 零残留。
@@ -1123,7 +1123,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 
 **生产 seam（最小测试钩子，与 testGateHook 同型）**：inbox.go 新增 `testWriteStageHook(stage)`——writeEnvelopeFile 在 **tmp 落成后**（fsync+close 完成）与 **rename 落地后（dirsync 前）** 各触发一次；Enqueue/claim/prepare 重写全部流经 writeEnvelopeFile，一个 seam 覆盖三步骤×两阶段。生产恒 nil 零开销。
 
-**reliability 矩阵**（新 [inbox_receivecrash_matrix_test.go](file:///Users/pengweiye/Documents/codes/tagent/agent/reliability/inbox_receivecrash_matrix_test.go)）：child `-test.run` 自调用 + env `TAGENT_CRASH_AT=<call>:<stage>`，hook 内 `os.Exit(0)`（无 Close 无 defer=真崩溃）；parent **全新 Inbox 实例** reopen 断言四窗口：
+**reliability 矩阵**（新 [inbox_receivecrash_matrix_test.go](agent/reliability/inbox_receivecrash_matrix_test.go)）：child `-test.run` 自调用 + env `TAGENT_CRASH_AT=<call>:<stage>`，hook 内 `os.Exit(0)`（无 Close 无 defer=真崩溃）；parent **全新 Inbox 实例** reopen 断言四窗口：
 
 | 窗口 | 断言（独立读回） |
 |---|---|
@@ -1132,7 +1132,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 | claim | 落地 claimed/Attempts=1 → open **requeue 回 pending/Attempts=2**（§5.7 恢复语义：崩溃 claim 永不静默丢） |
 | prepare | 冻结键+双 slot prepared **跨 requeue 完整存续**（replay 必复用不重铸——§5.3 幂等核心） |
 
-**每条输入提交窗口**（agent 包，新 [crash_input_commit_test.go](file:///Users/pengweiye/Documents/codes/tagent/agent/crash_input_commit_test.go)）：child publish A,B→Pull 并批→prepare OK→**persist(A) 后、persist(B) 前死**。parent 双独立 reopen（fresh FileSegmentStore+fresh bus）：计数恰 1 输入事实、A 的 key=冻结 prepared 键（身份）、B 原文无损在信封（未确认材料）→ replay 整批 → **重 persist A 幂等不双写（计数 2）** → finish → 每信封恰一回执（2）→ ack 后信封目录清空（processed-cleaned 终态）。
+**每条输入提交窗口**（agent 包，新 [crash_input_commit_test.go](agent/crash_input_commit_test.go)）：child publish A,B→Pull 并批→prepare OK→**persist(A) 后、persist(B) 前死**。parent 双独立 reopen（fresh FileSegmentStore+fresh bus）：计数恰 1 输入事实、A 的 key=冻结 prepared 键（身份）、B 原文无损在信封（未确认材料）→ replay 整批 → **重 persist A 幂等不双写（计数 2）** → finish → 每信封恰一回执（2）→ ack 后信封目录清空（processed-cleaned 终态）。
 
 **两次诚实记录**：
 1. **文件名陷阱**：初版命名 `*_windows_test.go` 被 Go 的 `_windows` GOOS 后缀规则静默排除（darwin 下 0 tests to run）→ 改名 `receivecrash_matrix`。教训入档。
@@ -1147,7 +1147,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 
 **形态决策**：完成侧窗口以**步间崩溃**（子进程在真实协议步骤之间 `os.Exit(0)`，磁盘态与进程内崩溃等价且更确定）而非 write-envelope hook——免跨包 seam（`testWriteStageHook` 包内私有，agent 不可见；export_test 亦不跨包，放弃注入式方案）。unlink→dirsync **进程内失败**形态由先存 `TestAck_UncertainDirSyncRetainsCapacityThenRetryCompletesBarrier`/`TestAck_OwedBarrierStillFailingKeepsCapacityAndLease` 钉住（引用）；掉电级 dirsync 缺失属 §9.2 已降级维度。
 
-**新文件** [crash_finish_matrix_test.go](file:///Users/pengweiye/Documents/codes/tagent/agent/crash_finish_matrix_test.go)，child 走真实序列（publish→pull→prepare→persist→[finish 各相位]），parent **全表面独立 reopen**（fresh leaf+store+lease+guard）驱动真实 `ReconcileOutstanding`：
+**新文件** [crash_finish_matrix_test.go](agent/crash_finish_matrix_test.go)，child 走真实序列（publish→pull→prepare→persist→[finish 各相位]），parent **全表面独立 reopen**（fresh leaf+store+lease+guard）驱动真实 `ReconcileOutstanding`：
 
 | 窗口 | 断言（全绿） |
 |---|---|
@@ -1168,7 +1168,7 @@ CodeReview（§6.1–§6.5）发现 1C+4M+2N，全部确认成立并闭环：
 
 任务：完成30轮确定性独立进程重启及A+B/C组合对账，不用sleep、旧内存投影或优雅Close代替；覆盖共享关闭与故障恢复交错。
 
-**落地** [restart30_matrix_test.go](file:///Users/pengweiye/Documents/codes/tagent/agent/restart30_matrix_test.go)：单耐久根上 30 个**真子进程**轮替（每轮独立 spawn，`os.Exit` 死点、无 Close），确定性日程 `mode=ab|c`（r%2）× `target=post-persist|post-completion|post-receipted|post-ack`（r%4；round29 强制 post-receipted 给终门留 receipted-unacked 交错料）。每轮 child：**真实 §5.7 ReconcileOutstanding 开场**（RECON 行强制）→ 预置批注入（AB 两信封并一 Pull turn、C 单信封=两种接收模式覆盖）→ 逐信封 per-envelope completion/receipt 相位推进至死点。每轮之间 parent **全新实例**原始盘审计（重复键=0、回执≤输入、身份∈日程集）。终门：排空重放收敛（`DurablePending` 界，非 sleep）→ **45 输入全落+45 回执逐信封恰一+内容全可召回**（独立新 store 实例读回）→ 共享关闭（bus.CloseDurable+store.Close 真实关面）→ **再独立 reopen** 验证关后状态稳定幂等（reconcile 全零+链长不变+无 tmp 孤儿）。5.19s 全绿。
+**落地** [restart30_matrix_test.go](agent/restart30_matrix_test.go)：单耐久根上 30 个**真子进程**轮替（每轮独立 spawn，`os.Exit` 死点、无 Close），确定性日程 `mode=ab|c`（r%2）× `target=post-persist|post-completion|post-receipted|post-ack`（r%4；round29 强制 post-receipted 给终门留 receipted-unacked 交错料）。每轮 child：**真实 §5.7 ReconcileOutstanding 开场**（RECON 行强制）→ 预置批注入（AB 两信封并一 Pull turn、C 单信封=两种接收模式覆盖）→ 逐信封 per-envelope completion/receipt 相位推进至死点。每轮之间 parent **全新实例**原始盘审计（重复键=0、回执≤输入、身份∈日程集）。终门：排空重放收敛（`DurablePending` 界，非 sleep）→ **45 输入全落+45 回执逐信封恰一+内容全可召回**（独立新 store 实例读回）→ 共享关闭（bus.CloseDurable+store.Close 真实关面）→ **再独立 reopen** 验证关后状态稳定幂等（reconcile 全零+链长不变+无 tmp 孤儿）。5.19s 全绿。
 
 **真发现（本测试的核心价值）**：轮2 child `CONFLICT (same key, different content)`——**雪花键=秒粒度+进程内 seq，跨进程代重启同秒必撞**（r30 节奏实测多轮同秒）；且冻结键 replay **永远**再冲突 → 原协议把 store 冲突全归 transient = **活锁**；leaf 注释承诺的 disposition 层（「isolate/completion=failed 由 commit 协议叠加」）**从未落地**。三层修复（均在本变更 spec 授权内：persistent-event-loop 四态「隔离」条款 + §8.5 对账收敛要求）：
 1. `memory.RaiseSnowflakeFloor(pid, maxKey)`（types.go 导出，单向、同秒 seq 耗尽进位下一秒）；
@@ -1184,7 +1184,7 @@ r30 child 顺带修正为**逐信封**相位完成（backlog 混批=协议正常
 
 任务：在临时受管目录演练不兼容旧数据直接重置及一致恢复单元清理；覆盖路径越界/非受管内容/存活writer拒绝、证据文件不删除、当前格式损坏不误清理，不操作未指定的真实目录。
 
-**决策**：不新增公共生产 API——管理面编排放 tests 侧（与先存 `TestDrill_UpgradeTreatsLegacySpillAsInertThenResets` 同模式，修改范围最小）；安全护栏复用既有原语（`acquireDirLock` flock、leaf `ResetTransitional` 的 confirm/pending/underDir/quarantine 守卫）。新文件 [reset_managed_drill_test.go](file:///Users/pengweiye/Documents/codes/tagent/reset_managed_drill_test.go)（root 包 in-package）。
+**决策**：不新增公共生产 API——管理面编排放 tests 侧（与先存 `TestDrill_UpgradeTreatsLegacySpillAsInertThenResets` 同模式，修改范围最小）；安全护栏复用既有原语（`acquireDirLock` flock、leaf `ResetTransitional` 的 confirm/pending/underDir/quarantine 守卫）。新文件 [reset_managed_drill_test.go](reset_managed_drill_test.go)（root 包 in-package）。
 
 **编排 `drillResetManagedUnits`（全或无）**：Gate0 confirm → Gate1 store flock live-writer 探针 → Gate2 **验证先行**（kv+store open+RebuildLiveCounts 当前故障拒绝、bus open 的 quarantine-undispositioned 阻断）→ 只删受管 pattern（kv.json+tmp、inbox-v2 直属 *.json（quarantine/ 不匹配）、anchor/<agent>.json）→ **磁盘一致新实例**跑 leaf transitional sweep → 各单元同步清空（禁半重置）。
 
@@ -1209,7 +1209,7 @@ r30 child 顺带修正为**逐信封**相位完成（backlog 混批=协议正常
 
 任务：按淘汰清单删除本次全部过时/兼容/过渡实现与孤立测试并更新真实调用方；静态依赖检查与全新启动/当前状态重启/重置后启动共同证明仅最新路径生效，不以"不再调用"代替删除。
 
-**静态审计（先于测试编写）**：逐类核验生产代码——旧协议解析/v1 消费（0，仅 classify 只读枚举）、旧确认接口（0，RecordReceipt 唯凭据形态）、SpillStore 实现体（0，文件即惰性 transitional）、loopTerminated/loopActive 旧 bool（0）、collectUnconfirmedReceipts 旧收集链（0）、persistInboxReceipt 新键铸造（0）、10.5 旧配置键（0 活代码）、重复 owner（§6.2 已清）。**新文件** [elimination_latest_path_test.go](file:///Users/pengweiye/Documents/codes/tagent/elimination_latest_path_test.go)：
+**静态审计（先于测试编写）**：逐类核验生产代码——旧协议解析/v1 消费（0，仅 classify 只读枚举）、旧确认接口（0，RecordReceipt 唯凭据形态）、SpillStore 实现体（0，文件即惰性 transitional）、loopTerminated/loopActive 旧 bool（0）、collectUnconfirmedReceipts 旧收集链（0）、persistInboxReceipt 新键铸造（0）、10.5 旧配置键（0 活代码）、重复 owner（§6.2 已清）。**新文件** [elimination_latest_path_test.go](elimination_latest_path_test.go)：
 - `TestEliminationList_ZeroLegacySymbols`：9 项被禁符号 × 全部非测试 Go 文件（root/agent/memory/event/tool 顶层）**活代码行**扫描（注释行豁免——注释记录删除历史是合法的，首轮扫描即被 build_agent.go 的删除注记红出，据此加入豁免并把语义写进测试注释）。
 - `TestLatestPathOnly_ThreeBootStates`（0.33s 全绿）：STATE1 全新目录 boot+真实 durable turn 达模型；STATE2 当前状态重启——前态事实**进投影**（tri-fresh-turn 可见）+ **旧标记惰性正证**（v1/*.spill 植入后逐字节不变：不读、不迁、不删）；STATE3 复用 §8.6 编排重置后 boot——reconcile 全零 + 新 turn 成功 + **重置前输入绝不复活**（清旧不冒称已处理）+ 重置同时清掉 legacy 集。
 
@@ -1287,7 +1287,7 @@ CodeReview 子代理评审结论：**无必须修项，可作发布候选**；�
 
 任务（降级后）：阶段 8 通过后后台运行并等待完整矩阵，新报告路径；任何 cell 失败不算完成。×fsync on/off 生产耐久矩阵已随 localfile 最小化裁决移出本阶段（推迟至专用存储引擎接线后）。
 
-**后台矩阵等待**：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=report-2026-09-21.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v` → **PASS 619.5s**，报告 14KB 落盘 [report-2026-09-21.json](file:///Users/pengweiye/Documents/codes/tagent/tests/offline_bench/report-2026-09-21.json)。cell 核验（JSON 解析逐格）：
+**后台矩阵等待**：`RUN_OFFLINE_BENCH=1 BENCH_REPORT=report-2026-09-21.json go test ./tests/offline_bench/ -run TestOfflineBenchmark -timeout 60m -v` → **PASS 619.5s**，报告 14KB 落盘 [report-2026-09-21.json](tests/offline_bench/report-2026-09-21.json)。cell 核验（JSON 解析逐格）：
 
 | scale | written | sampled | sync_barriers | per_write | tmp 孤儿 |
 |---|---|---|---|---|---|
@@ -1307,7 +1307,7 @@ env 头（go1.24.1/scales/cap 实录）+ compression 3 格 + token_estimator（c
 任务：保留旧 JSON，更新既有 REPORT.md 撤销无屏障耐久解释，标明 20k 采样；用新同语义基线建立回归比较，不虚构压缩/tokenizer 重测。
 
 - **旧 JSON 保留**：`report-2026-09-18.json` 一字未动（历史证据）。
-- **[REPORT.md](file:///Users/pengweiye/Documents/codes/tagent/tests/offline_bench/REPORT.md) 撤销段**：09-18 的「fsync 摊付/WAL 驻留/耐久开销单列」及一切掉电耐久暗示**明文撤销**（机制已随最小化裁决移除，`WithFSync` accepted-and-ignored），并声明旧数值"是其当时实现的真实测量、不得再被读作当前后端能力"。
+- **[REPORT.md](tests/offline_bench/REPORT.md) 撤销段**：09-18 的「fsync 摊付/WAL 驻留/耐久开销单列」及一切掉电耐久暗示**明文撤销**（机制已随最小化裁决移除，`WithFSync` accepted-and-ignored），并声明旧数值"是其当时实现的真实测量、不得再被读作当前后端能力"。
 - **新同语义基线（09-21 实测）**：单屏障档全表 + `sync_barriers_per_write=1.0` + tmp 孤儿 0 + **20k 采样逐处标注** + Go heap ≠ OS RSS 标注 + **Get/Query 分报**（揭示旧混合"探测 5.5ms"实为窗查独担、点读微秒级——分报价值直接可见）。
 - **诚实执行 D7 退化门**：抓到写路径 10²–10³× 退化（p50 2.6–23ms vs 旧 0.002–0.014ms），**归因机制变更非代码回归**——快照全量重写 O(数据集)/次 vs 已删除的 WAL 增量 append；登记为首个跨机制比较例外，本阶段不回添 WAL（将复活被撤销机制），性能上限交 rustviking 阶段。读侧确认无退化。
 - **不虚构重测**：压缩（2/22/230ms vs 基线 2/21/213ms）与 token 误差（四语料逐值吻合）明确标注为"同实现/同 fixture 复跑吻合、非新宣称"；curateCards 修复保持由此实证。

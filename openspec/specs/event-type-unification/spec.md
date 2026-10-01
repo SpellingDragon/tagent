@@ -1,7 +1,7 @@
 # event-type-unification Specification
 
 ## Purpose
-TBD - created by archiving change production-readiness-fix. Update Purpose after archive.
+事件类型常量单一来源：全部事件类型只在 event 包定义并被跨包引用，memory 包不再持有平行常量，杜绝两套字面量随演化分叉。
 ## Requirements
 ### Requirement: 事件类型常量单一来源
 

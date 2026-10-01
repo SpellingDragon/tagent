@@ -1,7 +1,7 @@
 # cognitive-asset-guard Specification
 
 ## Purpose
-TBD - created by archiving change cognitive-asset-guard. Update Purpose after archive.
+认知资产防线：启动 hash 快照与跨代周期漂移审计、资产写审批规则与权限域分离终态，任何写入方（含绕过其他防线的改法）都不得逃避捕获。
 ## Requirements
 ### Requirement: 认知资产漂移审计（终态）
 

@@ -1,7 +1,7 @@
 # runtime-resource-ownership Specification
 
 ## Purpose
-TBD - created by archiving change resident-readiness-plan. Update Purpose after archive.
+运行时资源所有权：持久 store/engine 经租约登记共享，不兼容配置拒绝、借用者不关闭、失败逆序释放。
 ## Requirements
 ### Requirement: 运行时资源租约与关闭
 

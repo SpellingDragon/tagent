@@ -1,7 +1,7 @@
 # conversation-self-heal Specification
 
 ## Purpose
-TBD - created by archiving change conversation-self-heal. Update Purpose after archive.
+会话投影自愈：投影按 EventKey 幂等追加、压缩替换与键集一致，重复来源可见且不再撕裂上下文。
 ## Requirements
 ### Requirement: 投影按 EventKey 幂等追加
 

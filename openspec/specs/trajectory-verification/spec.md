@@ -1,7 +1,7 @@
 # trajectory-verification Specification
 
 ## Purpose
-TBD - created by archiving change hardening-review-batch2. Update Purpose after archive.
+轨迹重启验证器：以 (agent, session) 身份配对重启前后记录，锚定死亡前最后一条请求做保真核对。
 ## Requirements
 ### Requirement: 重启点身份配对
 前缀验证器 MUST 以 (agent, session) 身份配对重启前后记录，并以同身份死亡前**最后一条**请求作为 Before 锚点；MUST NOT 向前搜索更早的请求来获得匹配。

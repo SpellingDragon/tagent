@@ -1,7 +1,7 @@
 # meditation-self-state-digest Specification
 
 ## Purpose
-TBD - created by archiving change meditation-introspection-digest. Update Purpose after archive.
+冥想自我状态 digest：有效冥想触发时在 prompt 前前置确定性运行态快照，零 LLM、不阻塞。
 ## Requirements
 ### Requirement: 冥想事件携带自我状态 digest
 

@@ -1,7 +1,7 @@
 # compression-user-message Specification
 
 ## Purpose
-TBD - created by archiving change production-readiness-fix. Update Purpose after archive.
+压缩保留未完成驱动：替换旧段后保留最后 agent_output 之后的 user message，任务链不因压缩断供。
 ## Requirements
 ### Requirement: 压缩后保留未完成的 User message
 

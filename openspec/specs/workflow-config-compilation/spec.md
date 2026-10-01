@@ -1,7 +1,7 @@
 # workflow-config-compilation Specification
 
 ## Purpose
-TBD - created by archiving change introduce-durable-workflow-engine. Update Purpose after archive.
+工作流配置编译：组合根把 YAML 解析为一次可执行的编排绑定，候选私有深拷贝、声明集变更真实反映。
 ## Requirements
 ### Requirement: 既有配置构造为真实执行绑定
 

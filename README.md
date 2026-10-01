@@ -335,7 +335,7 @@ graph TB
 
 完整字段与行为矩阵见 [docs/wiki/platform/](docs/wiki/platform/platform-subsystems.md)。
 
-> **例外——认知资产防线（cognitive-asset-guard）**：漂移审计（D1）与走私引导（D4）**默认开启、零必填配置**（纯附加行为：事件+日志+提示行，无拦截、无网络上报）；资产写审批规则（D2）随 governance `DefaultRules` 存在，仅 governance enabled 时被评估。终态方向为**权限域分离**（D3：资产目录对 exec 物理只读，实现属独立运维变更）。见 [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md)。
+> **例外——认知资产防线（cognitive-asset-guard）**：漂移审计（D1）与走私引导（D4）**默认开启、零必填配置**（纯附加行为：事件+日志+提示行，无拦截、无网络上报）；**D1 漂移审计例外——需显式 `working_dir`，未设时跳过审计**；资产写审批规则（D2）随 governance `DefaultRules` 存在，仅 governance enabled 时被评估。终态方向为**权限域分离**（D3：资产目录对 exec 物理只读，实现属独立运维变更）。见 [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md)。
 
 ## 📚 深入阅读
 

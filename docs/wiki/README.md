@@ -34,10 +34,6 @@
 > `openspec/specs/architecture-guardrails` 为准；本目录只承载长期事实，不记录迭代过程。
 
 
-> 注释与文档的分工、以及代码内 `// 契约:` 索引的写法，以 `openspec/specs/code-documentation` 与
-> `openspec/specs/architecture-guardrails` 为准；本目录只承载长期事实，不记录迭代过程。
-
-
 **标准章节骨架**（各篇按此顺序组织，机制章节数量自定）：
 
 1. `## 一、模块定位` — 一句话定位 + 核心职责 + 设计原则

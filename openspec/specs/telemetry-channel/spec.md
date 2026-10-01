@@ -1,7 +1,7 @@
 # telemetry-channel Specification
 
 ## Purpose
-TBD - created by archiving change attention-budget-architecture. Update Purpose after archive.
+遥测通知通道身份：task_settled 以卡片化遥测成员参与装配而非对话时间线全文，详情经事实链票据保持可达。
 ## Requirements
 ### Requirement: 遥测通知的通道身份与卡片形态
 

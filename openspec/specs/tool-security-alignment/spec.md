@@ -1,7 +1,7 @@
 # tool-security-alignment Specification
 
 ## Purpose
-TBD - created by archiving change production-readiness-fix. Update Purpose after archive.
+工具安全配置对齐：tmux_exec 把 runAsUser/runAsGroup/workspace 传达到执行底层，使部署级隔离真实生效。
 ## Requirements
 ### Requirement: tmux_exec 模式接收并使用安全配置
 

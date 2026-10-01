@@ -1,7 +1,7 @@
 # resident-release-evidence Specification
 
 ## Purpose
-TBD - created by archiving change resident-readiness-plan. Update Purpose after archive.
+发布证据工具对底层失败保真：包装器不得把编译/超时/断言失败粉饰为绿色，race 豁免仅限登记签名。
 ## Requirements
 ### Requirement: 验证工具必须对底层失败保真
 

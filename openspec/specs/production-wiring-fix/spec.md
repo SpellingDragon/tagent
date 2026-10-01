@@ -1,7 +1,7 @@
 # production-wiring-fix Specification
 
 ## Purpose
-TBD - created by archiving change production-readiness-fix. Update Purpose after archive.
+生产入口的存储生命周期装配：file 型记忆在返回 store 前完成墓碑集、遗忘管理器与压实器的创建与启动。
 ## Requirements
 ### Requirement: 生产入口创建并启动生命周期组件
 
