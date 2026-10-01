@@ -77,21 +77,10 @@ const (
 
 func kvFileName(label string) string { return kvFilePrefix + label + kvFileSuffix }
 
-// LocalFileKVOption is retained purely for call-site compatibility (wiring
-// passes WithFSync from MemoryConfig). In the minimal model it is a no-op.
-type LocalFileKVOption func(*LocalFileKV)
-
-// WithFSync is accepted but IGNORED by the minimal verification backend (there
-// is no fsync either way). It remains only so existing config plumbing stays
-// stable until a real storage engine gives durability modes meaning again.
-func WithFSync(enabled bool) LocalFileKVOption {
-	return func(*LocalFileKV) {}
-}
-
 // NewLocalFileKV opens (creating if needed) the directory and loads every
 // per-partition snapshot (kv-*.json) found there. The legacy single kv.json is
 // NOT loaded or migrated — cold rebuild is the declared stance.
-func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, error) {
+func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
 	}
@@ -100,9 +89,6 @@ func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, er
 		global:    make(map[string]string),
 		dataDir:   dataDir,
 		dirtyPids: make(map[string]bool),
-	}
-	for _, opt := range opts {
-		opt(kv)
 	}
 	// Clear crash residue: interrupted syncs leave *.json.tmp behind.
 	tmps, err := filepath.Glob(filepath.Join(dataDir, kvFilePrefix+"*"+kvTmpSuffix))

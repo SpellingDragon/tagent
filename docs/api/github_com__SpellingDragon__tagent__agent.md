@@ -841,11 +841,13 @@ func (b *EventBus) QuarantineEnvelope(path, reason string)
     : quarantine is a terminal disposition just like Ack, so it MUST release the
     envelope's retention holders — otherwise an isolated envelope's originals
     stay leased forever and can never be TTL/capacity-evicted (a lease hang).
-    The leaf has no store handle, so the wrapper reads the material BEFORE
-    the move (the rename relocates the file) and releases it after a confirmed
-    isolation. releaseRetention is nil-safe; an envelope that was never armed
-    releases nothing. The rename's atomicity is the dir barrier — no separate
-    cleanup is owed.
+    The leaf reads the envelope ONCE under the mutation lock and hands back
+    its material together with the moved flag, so "isolated ⇒ released" holds
+    without a second read that could disagree (a transient material-read
+    error between two reads used to quarantine the file and strand its lease).
+    releaseRetention is nil-safe; an envelope that was never armed releases
+    nothing. The rename's atomicity is the dir barrier — no separate cleanup is
+    owed.
 
 func (b *EventBus) RecordCompletion(path string, completion json.RawMessage) error
     RecordCompletion durably freezes a turn's completion payload onto the
@@ -1269,7 +1271,8 @@ type SelfTelemetryAuditor struct {
 }
     SelfTelemetryAuditor 按滑动窗口样本判定自身遥测的可见性该升到哪一档：窗口时长、
     负例占比、最少样本数与每档驻留时间都是命名常量，避免"看一眼就永久外显"或"长期沉默
-    无人察觉"。它只统计自管谱系（冥想、任务退役、未知）——这些产出不是用户发起的交互， 与投递门使用同一份负例清单。
+    无人察觉"。它只统计自管谱系（event.SelfManagedLineage：投递门白名单之外 ∧ 冥想）
+    ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，不再有私有清单。
 
 func NewSelfTelemetryAuditor(onAction func(level int, ratio float64, samples int, frozen bool)) *SelfTelemetryAuditor
     NewSelfTelemetryAuditor creates an auditor; onAction receives every level

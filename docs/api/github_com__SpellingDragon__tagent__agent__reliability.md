@@ -251,15 +251,21 @@ func (in *Inbox) PrepareFacts(path, receiptKey string, facts []json.RawMessage) 
     leaves that slot's existing prepared_fact unchanged (partial prepare across
     a retry is allowed).
 
-func (in *Inbox) QuarantineEnvelope(path, reason string) bool
+func (in *Inbox) QuarantineEnvelope(path, reason string) (UnackedMaterial, bool)
     QuarantineEnvelope isolates one specific envelope (by path) into the
     quarantine dir under the mutation lock and frees its unacked capacity.
     The bytes are kept on disk for operator inspection (never destroyed).
     The submit gate uses it to isolate a deterministic-conflict input rather
-    than silently retry or drop it. It reports whether an envelope was actually
-    present and moved — the caller uses the true result as the release point
-    for the envelope's retention holders (an already-gone/unreadable envelope
-    protects nothing and returns false).
+    than silently retry or drop it.
+
+    It returns the isolated envelope's retention material together with the
+    moved flag: quarantine is a terminal disposition like Ack, so the caller
+    MUST release the returned material's holders whenever moved is true. Reading
+    the material from the SAME pre-move read (rather than a separate pre-read)
+    is what makes "isolated ⇔ releasable" atomic — a second read that could
+    disagree with this one (transient I/O error between the two) would strand
+    the lease forever. An already-gone/unreadable envelope quarantines nothing,
+    protects nothing, and returns (zero, false).
 
 func (in *Inbox) RecordCompletion(path string, completion json.RawMessage) error
     RecordCompletion durably freezes the post-turn completion payload (per-slot

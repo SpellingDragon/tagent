@@ -26,9 +26,6 @@ type DiagnosticsSnapshot struct {
 	TotalEvents int    `json:"total_events"`
 	StorageSize int64  `json:"storage_size"`
 	DataDir     string `json:"data_dir,omitempty"`
-	// WALQuarantined：LocalFileKV 启动重放隔离的中间坏行数（F3 可观测
-	// 闭环——此前 WalQuarantined 仅定义无消费方）。0 = 无隔离。
-	WALQuarantined int64 `json:"wal_quarantined,omitempty"`
 
 	// IndexHealth 派生健康率
 	// indexed / (indexed + dropped + embedErr)，1.0 = 无丢失
@@ -75,9 +72,6 @@ func (d *MemoryDiagnostics) Snapshot() DiagnosticsSnapshot {
 		snap.TotalEvents = st.TotalEvents
 		snap.StorageSize = st.StorageSize
 		snap.DataDir = st.DataDir
-		if q, ok := d.store.(interface{ WalQuarantined() int64 }); ok {
-			snap.WALQuarantined = q.WalQuarantined()
-		}
 	}
 	return snap
 }

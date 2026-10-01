@@ -32,14 +32,14 @@ func TestDiagnostics_WiredAndNotWired(t *testing.T) {
 
 	h2 := NewHTTPAPI(nil)
 	h2.SetDiagnosticsFn(func() any {
-		return map[string]any{"wal_quarantined": int64(0), "engine_ready": false}
+		return map[string]any{"engine_ready": false}
 	})
 	rec2 := httptest.NewRecorder()
 	h2.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/diagnostics", nil))
 	require.Equal(t, http.StatusOK, rec2.Code)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &body))
-	require.Contains(t, body, "wal_quarantined")
+	require.Contains(t, body, "engine_ready")
 }
 
 // TestFeedbackWait_ImmediateWake 钉住：入队后 wait 立即返回而不等满超时（通知通道若为 nil 这条通路就是死代码）。

@@ -102,9 +102,11 @@ func SplitSystemMessage(messages []model.Message) (*model.Message, []model.Messa
 
 func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs []memory.EventReference, keepRecent int) map[int64]int8
     TelemetryDispositions folds the projection refs into a per-settle-key
-    disposition map. store may be nil (pure structural mode: externalization
-    undecidable → treated internal, conservative per the unknown-withhold
-    philosophy). keepRecent bounds the internal reminder window.
+    disposition map. store may be nil (pure structural mode: the
+    authoritative mark cannot be verified, candidates are treated as notices
+    but externalization is undecidable → internal, conservative per the
+    unknown-withhold philosophy). keepRecent bounds the internal reminder
+    window.
 
 
 TYPES

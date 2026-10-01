@@ -43,7 +43,7 @@ func storeFact(t *testing.T, store memory.MemoryStore, marker string) {
 // 而不是登记处交还的那份句柄——判据必须站在被观察者之外。
 func readBack(t *testing.T, dir, marker string) bool {
 	t.Helper()
-	kvStore, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
+	kvStore, err := kv.NewLocalFileKV(dir)
 	require.NoError(t, err)
 	defer kvStore.Close()
 	store, err := memory.NewFileSegmentStore(kvStore, nil, dir, 100)
@@ -116,11 +116,12 @@ func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "conflict")
 }
 
-// TestOwnership_FSyncAxisSharesNotConflicts 钉住 行为恒同的轴不进指纹，两份这样的配置共享同一个活实例而非被判成假冲突。
+// TestOwnership_EquivalentConfigsShareNotConflict 钉住 行为恒同的配置不进冲突判定，
+// 两份等价装载共享同一个活实例而非被判成假冲突。
 // - 判别是双面的：指纹逐字相等，且第二次装载被接受（不是拒绝）；
 // - 两个句柄的写入互见——同一份 store 在服务，没有重建。
 // 契约: docs/wiki/platform/resource-ownership.md#fingerprint-conflict
-func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
+func TestOwnership_EquivalentConfigsShareNotConflict(t *testing.T) {
 	dir := t.TempDir()
 	base := ownershipCfg(dir)
 	ta1, err := New(base, WithModel(&stubModel{name: "m"}))
@@ -128,25 +129,20 @@ func TestOwnership_FSyncAxisSharesNotConflicts(t *testing.T) {
 	defer ta1.Close()
 
 	other := ownershipCfg(dir)
-	off := false
-	a := other.Agents["tagent"]
-	a.Memory.FSync = &off
-	other.Agents["tagent"] = a
-
 	require.Equal(t,
 		fingerprintMemory(base.Agents["tagent"].Memory),
 		fingerprintMemory(other.Agents["tagent"].Memory),
-		"fsync-only configs must produce identical fingerprints")
+		"behaviorally identical configs must produce identical fingerprints")
 
 	ta2, err := New(other, WithModel(&stubModel{name: "m"}))
-	require.NoError(t, err, "fsync-only difference must share the instance, not reject (false conflict)")
+	require.NoError(t, err, "an identical config must share the instance, not reject (false conflict)")
 	defer ta2.Close()
 
-	storeFact(t, ta2.MemStore(), "fsync-shared")
+	storeFact(t, ta2.MemStore(), "shared-instance")
 	pid := memory.PartitionIDFromName("tagent")
-	refs, qerr := ta1.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "fsync-shared"})
+	refs, qerr := ta1.MemStore().QueryEvents(memory.QueryOptions{PartitionIDs: []int{pid}, Keyword: "shared-instance"})
 	require.NoError(t, qerr)
-	require.NotEmpty(t, refs, "the two handles share ONE live store (no rebuild on the fsync axis)")
+	require.NotEmpty(t, refs, "the two handles share ONE live store (no rebuild on an equivalent config)")
 }
 
 // TestOwnership_MidBuildFailureReleasesLease 钉住 构建在取得资源之后的步骤失败时，已取得的那份必须交还，路径仍可干净重试。
@@ -230,7 +226,7 @@ func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 	rr := NewRuntimeResources()
 	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
 	openFn := func() (openedResource, error) {
-		k, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
+		k, err := kv.NewLocalFileKV(dir)
 		if err != nil {
 			return openedResource{}, err
 		}
@@ -264,7 +260,7 @@ func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 	rr := NewRuntimeResources()
 	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
 	openFn := func() (openedResource, error) {
-		k, err := kv.NewLocalFileKV(dir, kv.WithFSync(false))
+		k, err := kv.NewLocalFileKV(dir)
 		if err != nil {
 			return openedResource{}, err
 		}

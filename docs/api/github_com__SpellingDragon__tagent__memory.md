@@ -338,9 +338,6 @@ func (s *ErrorTrackingStore) StoreEventWithEmbedding(key int64, event FullEvent,
 func (s *ErrorTrackingStore) SupportsVectorSearch() bool
     SupportsVectorSearch 纯透传，无错误语义。
 
-func (s *ErrorTrackingStore) WalQuarantined() int64
-    WalQuarantined 透传底层 WAL 隔离计数，保证诊断面在最外层仍可达（内层无此能力则报 0）。
-
 type EventReference struct {
 	EventKey     int64  `json:"event_key"`
 	PartitionID  int    `json:"partition_id,omitempty"`
@@ -570,9 +567,6 @@ func (s *FileSegmentStore) StoreEventWithEmbedding(key int64, event FullEvent, e
 func (s *FileSegmentStore) SupportsVectorSearch() bool
     SupportsVectorSearch returns false.
 
-func (s *FileSegmentStore) WalQuarantined() int64
-    WalQuarantined 透传底层 KV 的 WAL 隔离计数（ ——此前装饰链在 FileSegmentStore 断裂，诊断恒采 0）。
-
 type FullEvent struct {
 	EventKey     int64  `json:"event_key"`
 	PartitionID  int    `json:"partition_id"`
@@ -609,7 +603,9 @@ func NewInMemRelationStore(dataDir string) (*InMemRelationStore, error)
     snapshot 文件。
 
 func (rs *InMemRelationStore) Close() error
-    Close 关闭 store，释放资源。
+    Close 落盘并释放 WAL journal 的 fd：持锁、句柄置 nil，重复 Close 为 no-op （幂等）。Journal 随每条追加已
+    sync，这里的最终 Sync 只是收尾保险。 FileSegmentStore.Close 经 closer 断言调用本方法；构造失败的半途路径同样
+    必须显式释放，否则 journal fd 随每次热重建累积。
 
 func (rs *InMemRelationStore) EventsCount() int
     EventsCount 返回当前记录的事件数。
@@ -1112,7 +1108,8 @@ func (l *RetentionLease) Ready() <-chan struct{}
     Ready 返回就绪信号通道（供扫描器 select 等待）；nil 租约返回已关闭通道（不阻塞）。
 
 func (l *RetentionLease) Release(key int64)
-    Release 移除一个持有者；归零才解除保护。幂等（重复释放多余的不动作）。
+    Release 按持有者释放一个引用；refs 归零才解除保护。注意：本计数器不记名单，
+    重复释放会递减他人持有的计数——"恰一次"由调用方保证（每持有者 acquire 一次即 release 一次）；释放不存在的 key 为 no-op。
 
 type RetrievalCaps struct {
 	Keyword bool

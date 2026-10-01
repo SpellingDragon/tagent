@@ -115,10 +115,10 @@
 
 ## 10. CU-10 死面清理 〔G-P2-3 + fsync 死旋钮，BREAKING〕
 
-- [ ] 10.1 删除 `DiagnosticsSnapshot.WALQuarantined` 字段与 `WalQuarantined()` 可选能力断言及 rl 测试桩（http_api_closeout_test.go:35,42 等）
-- [ ] 10.2 删除 `config.go:428` `FSync` 配置键与 `memory/kv/local_file_kv.go` `WithFSync` 选项（含构造传参与"被接受但无效"注释区）；同步删除 config 相关测试
-- [ ] 10.3 验证：`go build ./...` + `grep -rn "WALQuarantined\|wal_quarantined\|WithFSync\|memory.fsync" --include="*.go" --include="*.md" config.go memory/ agent/ rl/ docs/ openspec/specs/ | grep -v archive` 零命中
-- [ ] 10.4 提交：`refactor!(memory,config,rl): 死面清理——WAL 诊断字段与 fsync 死旋钮删除（BREAKING）`
+- [x] 10.1 删除 `DiagnosticsSnapshot.WALQuarantined` 字段与 `WalQuarantined()` 可选能力断言及 rl 测试桩（http_api_closeout_test.go:35,42 等）
+- [x] 10.2 删除 `config.go:428` `FSync` 配置键与 `memory/kv/local_file_kv.go` `WithFSync` 选项（含构造传参与"被接受但无效"注释区）；同步删除 config 相关测试
+- [x] 10.3 验证：`go build ./...` + `grep -rn "WALQuarantined\|wal_quarantined\|WithFSync\|memory.fsync" --include="*.go" --include="*.md" config.go memory/ agent/ rl/ docs/ openspec/specs/ | grep -v archive` 零命中
+- [x] 10.4 提交：`refactor!(memory,config,rl): 死面清理——WAL 诊断字段与 fsync 死旋钮删除（BREAKING）`
 
 ## 11. CU-11 rl 与周边 〔E-P2-1/E-P2-9/D-P2-4/E-P2-6〕
 

@@ -33,50 +33,61 @@ type LocalFileKV struct {
 	// Has unexported fields.
 }
     LocalFileKV is a MINIMAL file-backed memory.KVStore, used ONLY as the MVP
-    cross-process verification backend for the resident reliability protocol.
-    It is a deliberately temporary model: an in-memory map persisted as a single
-    JSON snapshot. It provides NO production durability, security, or long-term
+    cross-process verification backend for the resident reliability protocol. It
+    is a deliberately temporary model: in-memory maps persisted as per-partition
+    JSON snapshots. It provides NO production durability, security, or long-term
     availability/maintainability guarantees — those are deferred to a dedicated
     storage engine (e.g. rustviking) wired in a later phase.
 
-    Layout: kv.json — a full-map snapshot rewritten atomically (write tmp +
-    rename) on Sync/Close. A POSIX rename is atomic, so a process KILL can never
-    leave a torn snapshot: a reopen always sees the last successfully Synced
-    state.
+    Layout ( ): one snapshot file per key namespace — kv-<pid>.json for a
+    partition's `{pid}:evt|idx|meta|tomb:…` keys and kv-global.json for every
+    non-partition namespace. A Sync serializes ONLY the buckets touched
+    since the last barrier (a dirty set), so one partition commit's write
+    amplification is bounded by that partition's own key count — decoupled from
+    the whole-library size, which is the growth ceiling the old single kv.json
+    snapshot carried.
 
     Durability model (verification-grade only): writes update the in-memory
-    map immediately, so in-process reads are always consistent; Sync() is
-    the barrier that persists the map. A committed fact becomes visible to a
-    fresh process only after its commit barrier ran Sync() — which is exactly
-    what FileSegmentStore does. There is intentionally NO fsync: this backend
-    survives a process restart / reopen (the guarantee actually verified), NOT
-    an OS power loss. A write that was never Synced is lost on restart (honest
-    "flush-only" semantics). A later storage-engine backend replaces this whole
-    file.
+    maps immediately, so in-process reads are always consistent; Sync() is the
+    barrier that persists the dirty buckets. A committed fact becomes visible to
+    a fresh process only after its commit barrier ran Sync() — which is exactly
+    what FileSegmentStore does. Each bucket file is replaced by an atomic POSIX
+    rename of its tmp write, so a process KILL can never leave a torn snapshot:
+    a reopen always sees the last successfully Synced state per bucket. There
+    is intentionally NO fsync: this backend survives a process restart / reopen
+    (the guarantee actually verified), NOT an OS power loss. A write that was
+    never Synced is lost on restart (honest "flush-only" semantics).
 
-func NewLocalFileKV(dataDir string, opts ...LocalFileKVOption) (*LocalFileKV, error)
-    NewLocalFileKV opens (creating if needed) the directory and loads any
-    existing kv.json snapshot.
+    The old single kv.json snapshot is a DIFFERENT format and is deliberately
+    NOT migrated: a pre-release library cold-rebuilds (the change's declared
+    stance). A leftover kv.json is ignored and reported once at open.
+
+func NewLocalFileKV(dataDir string) (*LocalFileKV, error)
+    NewLocalFileKV opens (creating if needed) the directory and loads every
+    per-partition snapshot (kv-*.json) found there. The legacy single kv.json is
+    NOT loaded or migrated — cold rebuild is the declared stance.
 
 func (k *LocalFileKV) Close() error
     Close persists any pending changes so every acknowledged write is on disk
     before returning. Idempotent.
 
 func (k *LocalFileKV) KVBatch(ops []memory.KVOp) error
-    KVBatch applies a batch of put/delete operations to the in-memory map
+    KVBatch applies a batch of put/delete operations to the in-memory buckets
     (durable after the next Sync barrier).
 
 func (k *LocalFileKV) KVDelete(key string) error
-    KVDelete removes a key (durable after the next Sync barrier).
+    KVDelete removes a key from its bucket (durable after the next Sync barrier;
+    a bucket emptied by deletes has its snapshot file removed then).
 
 func (k *LocalFileKV) KVGet(key string) (string, error)
     KVGet retrieves the value for the key. A missing key returns an error
     wrapping memory.ErrKeyNotFound.
 
 func (k *LocalFileKV) KVPut(key, value string) error
-    KVPut stores a key-value pair in the in-memory map. In-process reads see it
-    immediately; it is durable to a fresh process only after a subsequent Sync()
-    barrier. A nil return is NOT a durability guarantee.
+    KVPut stores a key-value pair in the owning bucket's in-memory map.
+    In-process reads see it immediately; it is durable to a fresh process
+    only after a subsequent Sync() barrier. A nil return is NOT a durability
+    guarantee.
 
 func (k *LocalFileKV) KVRange(start, end string, limit int) ([]memory.KVPair, error)
     KVRange returns all key-value pairs whose keys fall in [start, end), sorted
@@ -88,26 +99,18 @@ func (k *LocalFileKV) KVScan(prefix string, limit int) ([]memory.KVPair, error)
     returned.
 
 func (k *LocalFileKV) ListPartitionIDs() []int
-    ListPartitionIDs enumerates persisted partition IDs from key namespaces
-    (`{pid}:evt|idx|meta|tomb:…`; any persisted key in a partition's
-    namespace proves the partition exists). Optional capability consumed
-    by FileSegmentStore via a type assertion for cold-partition discovery;
-    non-partition namespaces (e.g. `global:*`) are ignored.
+    ListPartitionIDs enumerates partition IDs known to the store: every bucket
+    loaded from a kv-<pid>.json plus partitions created by in-process writes.
+    Any key in a partition's namespace proves the partition exists (historical
+    semantics preserved — the routing maps are the same source a persisted
+    bucket loads into); non-partition namespaces never appear.
 
 func (k *LocalFileKV) Sync() error
-    Sync is the durability barrier: it persists the in-memory map to the
-    snapshot via an atomic tmp+rename. After a successful Sync the data is
-    visible to a fresh process. A no-op when nothing changed since the last
-    flush. Safe to call concurrently.
-
-type LocalFileKVOption func(*LocalFileKV)
-    LocalFileKVOption is retained purely for call-site compatibility (wiring
-    passes WithFSync from MemoryConfig). In the minimal model it is a no-op.
-
-func WithFSync(enabled bool) LocalFileKVOption
-    WithFSync is accepted but IGNORED by the minimal verification backend (there
-    is no fsync either way). It remains only so existing config plumbing stays
-    stable until a real storage engine gives durability modes meaning again.
+    Sync is the durability barrier: it persists ONLY the buckets changed since
+    the last barrier via per-bucket atomic tmp+rename. After a successful Sync
+    the data is visible to a fresh process. Empty-after-delete buckets have
+    their file removed (a partition with no keys must not present itself as
+    existing). Safe to call concurrently.
 
 type MockRustVikingClient struct {
 	// Has unexported fields.

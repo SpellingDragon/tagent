@@ -30,14 +30,6 @@ func (b *engineBridge) KVBackend() memory.KVStore {
 	return nil
 }
 
-// WalQuarantined 透传底层 LocalFileKV 的隔离计数。
-func (b *engineBridge) WalQuarantined() int64 {
-	if q, ok := b.inner.(interface{ WalQuarantined() int64 }); ok {
-		return q.WalQuarantined()
-	}
-	return 0
-}
-
 // ProtectKey memory.RetentionGuard 递归透传：恢复 owner
 // 经装饰链保护/释放未确认原文并 arm 首扫门控。内层无租约（如非持久后端）则 no-op。
 func (b *engineBridge) ProtectKey(key int64) {

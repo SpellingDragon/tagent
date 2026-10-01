@@ -12,7 +12,7 @@ tagent 侧零改动,只需为新框架写一个 adapter**(对照下表实现客�
 | `GET /healthz` | 框架→tagent | 存活探测 |
 | `POST /feedback` | 框架→tagent | 绑定外部 verdict 到产出事件(hex event_key + verdict;parent 缺失 404/部分成功 201+warning) |
 | `GET /feedback/wait?timeout=N` | 框架→tagent | long-poll 新 feedback 通知(≤30s;内存队列,重启清空=接受丢失) |
-| `GET /diagnostics` | 框架→tagent | 诊断快照 JSON(向量健康/存储规模/wal_quarantined) |
+| `GET /diagnostics` | 框架→tagent | 诊断快照 JSON(向量健康/存储规模) |
 
 ## 轨迹采集(框架拉取侧)
 

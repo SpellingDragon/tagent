@@ -391,9 +391,9 @@ func flockExclusive(f *os.File) error {
 
 // fingerprintMemory renders the conflict-relevant subset of MemoryConfig as a
 // canonical string. Fields NOT here are per-agent view config (e.g.
-// read_namespaces) or accepted-and-ignored axes with ZERO behavioral difference
-// (localfile fsync) — the latter MUST NOT join the fingerprint, or two configs
-// that behave identically would be rejected as a false conflict.
+// read_namespaces) or axes with ZERO behavioral difference — the latter MUST
+// NOT join the fingerprint, or two configs that behave identically would be
+// rejected as a false conflict.
 func fingerprintMemory(mc MemoryConfig) string {
 	lifecycle := "default"
 	if mc.Lifecycle != nil {

@@ -758,7 +758,6 @@ agents:
     memory:
       type: localfile
       path: %q
-      fsync: false
     keep_recent_tasks: 2
   sub2:
     system_prompt:

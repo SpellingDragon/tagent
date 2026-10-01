@@ -699,12 +699,6 @@ type MemoryConfig struct {
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 
-	// FSync（仅 localfile 类型）被接受但不产生任何效果：该后端没有 fsync 机制。
-	// 该键只为让既有配置原样加载而保留；持久性语义与分级见文档。
-	//
-	// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
-	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
-
 	// ReadNamespaces lists agent names whose storage partitions this agent
 	// is allowed to read. Each name is converted to a PartitionID at build time.
 	// For example, recall can read tagent's events by declaring:

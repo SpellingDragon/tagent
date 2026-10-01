@@ -16,7 +16,7 @@ TBD - created by archiving change resident-readiness-plan. Update Purpose after 
 - **THEN** 不返回原 dead store，新实例读取持久化数据并拥有新的后台生命周期
 
 #### Scenario: 冲突配置与构建失败
-- **WHEN** 同路径 fsync/lifecycle/engine 配置冲突，或构建后续步骤失败
+- **WHEN** 同路径 lifecycle/engine 等影响行为的配置冲突，或构建后续步骤失败
 - **THEN** 冲突明确拒绝，失败不泄漏已取得的租约、goroutine 和文件句柄
 
 ### Requirement: 持久目录单 writer

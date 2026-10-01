@@ -289,7 +289,6 @@ graph TB
 | `model` / `provider` | （继承全局） | LLM 模型与 provider |
 | `system_prompt.files` | `[]` | 加载的 prompt 文件 |
 | `memory.type` | `memory` | `memory`（进程内）/`file`（rustviking CLI 持久）/`localfile`（JSON 文件 KV 持久，零外部依赖） |
-| `memory.fsync` | `true` | localfile 专用耐久开关：WAL 追加/快照/目录三级 fsync，已确认写入抗掉电；`false` 换吞吐（启动留降级告警） |
 | `memory.path` | `""` | 存储路径/标识；`memory` 型下同 path 的 agent 共享同一实例，空 = 隔离存储 |
 | `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区（跨 agent 记忆访问须显式授权） |
 | `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，负值=关闭）/`type_ttl`/`check_interval`/`max_events_per_partition` |

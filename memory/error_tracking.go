@@ -90,14 +90,6 @@ func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
 	return s.spill.ReplayWithNotify(s.inner, fn)
 }
 
-// WalQuarantined 透传底层 WAL 隔离计数，保证诊断面在最外层仍可达（内层无此能力则报 0）。
-func (s *ErrorTrackingStore) WalQuarantined() int64 {
-	if q, ok := s.inner.(interface{ WalQuarantined() int64 }); ok {
-		return q.WalQuarantined()
-	}
-	return 0
-}
-
 // ProtectKey 把保留登记递归透传给内层租约；内层无租约则空操作。
 func (s *ErrorTrackingStore) ProtectKey(key int64) {
 	if g, ok := s.inner.(RetentionGuard); ok {

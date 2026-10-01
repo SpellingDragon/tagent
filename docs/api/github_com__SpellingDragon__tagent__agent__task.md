@@ -24,6 +24,10 @@ const (
     are long-lived by design. The class only decides orchestration semantics —
     the unified TTL reaper covers both classes equally, with no age exemption.
 
+const LineageRetired = "task-retired"
+    LineageRetired is the settle-signal lineage stamped by TTL/liveness
+    retirement onto the resulting settlement event's trigger_source.
+
 
 FUNCTIONS
 
@@ -262,6 +266,13 @@ type SettleSignal struct {
 	// it is only meaningful alongside a known process death; it is NOT persisted
 	// (restored tasks re-adjudicate via liveness probe).
 	ExitCode int
+	// Lineage overrides the settled EVENT's trigger_source attribution for this
+	// one settle (retirement stamps LineageRetired). Signal-level like ExitCode:
+	// it is never written back into Spec.Origin — Origin is the spawn-time
+	// provenance identity and stays immutable after birth — and it is not
+	// persisted, so a restored task re-adjudicates its own lineage rather than
+	// replaying a stale retirement mark.
+	Lineage string
 }
     SettleSignal is emitted by a SettleDetector when a task reaches a settle
     point.
@@ -511,12 +522,14 @@ type TaskManagerConfig struct {
 	OrphanGrace time.Duration
 	// DefaultTTL is the unified reaper's fallback absolute lifetime for
 	// tasks whose spec carries no explicit TTL — e.g. restored (previous-life) and
-	// subagent tasks. When >0, reconcileTTL terminates+retires any ACTIVE task
+	// subagent tasks. reconcileTTL terminates+retires any ACTIVE task
 	// (ALL states incl. suspect/undetached, ALL lifetime classes incl.
 	// resident/interactive) once `now - anchor >= DefaultTTL` (or the task's own
-	// spec.TTL when larger). When <=0 the manager-level reaper is OFF and only a
-	// per-task spec.TTL bounds its task — preserving the pre-TTL "no wall unless
-	// configured" behavior for callers not yet on TTL.
+	// spec.TTL when larger). The reaper is ALWAYS ON — there is no disable path:
+	// any non-positive value (config or per-source) falls back to the package
+	// 10-minute floor (async-task-lifetime 10.5), because "no wall" was never an
+	// intended operating mode and an unconfigured caller silently loses its only
+	// reclaim.
 	DefaultTTL time.Duration
 	// SessionTracker reports whether a task's Declarative.TaskID session is
 	// still tracked by a live monitor (tmux). Wired post-construction via

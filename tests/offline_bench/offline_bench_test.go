@@ -494,9 +494,9 @@ const benchBarrierMarker = "bench-wrapper-barrier-marker"
 // - The parent also asserts a fresh independent store over the same directory reads the event back.
 // - Certified: the Sync barrier is a real atomic tmp+rename durable commit, visible after an unclean exit (no Close, no flush tick).
 // - Certified with the actual barrier count and original-text/index evidence.
-// - Not certified: power-loss durability — the minimal backend has no fsync/WAL machinery (WithFSync is accepted-and-ignored).
-// - An "fsync-on" cell would attest the same bytes twice under two names, so the report keeps a single barrier axis.
-// - That dimension belongs to the rustviking-backed stage.
+// - Not certified: power-loss durability — the minimal backend has no fsync/WAL
+//   machinery; the barrier is the atomic snapshot rename only. That dimension
+//   belongs to the rustviking-backed stage.
 func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 	if os.Getenv("TAGENT_BENCH_BARRIER_SUBPROC") == "1" {
 		runBenchBarrierChild()
