@@ -291,8 +291,6 @@ func TestActionTool_TmuxExitCode(t *testing.T) {
 	resp := result.(*ActionToolResult)
 	t.Logf("Session=%s status=%q exit_code=%d output=%q", resp.SessionID, resp.Status, resp.ExitCode, resp.Output)
 
-	// 行为变更（failure-polarity-passthrough）：非零退出从旧的「completed + Pane is dead」
-	// 改为失败极性 + 退出码透传。旧断言按行为变更流程废弃。
 	if resp.Status != "error" {
 		t.Errorf("expected failure polarity (status=error) for exit 42, got %q", resp.Status)
 	}
@@ -307,8 +305,7 @@ func TestActionTool_TmuxExitCode(t *testing.T) {
 	}
 }
 
-// TestPaneDeadStatus 钉住 executor 退出码读取（D1）：干净/非零/信号死/活会话。
-// 真 tmux（skip short）。
+// TestPaneDeadStatus 钉住 executor 退出码读取：干净退出、非零、信号死、活会话各极性。
 func TestPaneDeadStatus(t *testing.T) {
 	if testing.Short() {
 		t.Skip("real tmux; skip in -short")
@@ -327,7 +324,6 @@ func TestPaneDeadStatus(t *testing.T) {
 		{"exit0", "exit 0", 0, true},
 		{"exit42", "exit 42", 42, true},
 	}
-	// createRetry 吸收并发 tmux server 启动竞态（"server exited unexpectedly"）。
 	createRetry := func(command string) (*TmuxSession, error) {
 		var lastErr error
 		for i := 0; i < 3; i++ {
@@ -346,7 +342,6 @@ func TestPaneDeadStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			// 等待 pane 死亡。
 			deadline := time.Now().Add(3 * time.Second)
 			for !te.IsPaneDead(sess.ID) && time.Now().Before(deadline) {
 				time.Sleep(100 * time.Millisecond)
@@ -358,7 +353,6 @@ func TestPaneDeadStatus(t *testing.T) {
 		})
 	}
 
-	// 活会话（sleep）→ known=false（pane 未死）。
 	sess, err := createRetry("sleep 30")
 	require.NoError(t, err)
 	code, known := te.PaneDeadStatus(sess.ID)

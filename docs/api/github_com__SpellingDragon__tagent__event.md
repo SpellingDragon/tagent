@@ -83,6 +83,8 @@ const (
 	TypeGovernance = "governance"
 
 	TypeFeedback = "feedback"
+
+	TypeCognitiveAssetChanged = "cognitive_asset_changed"
 )
     TypeExternalInput 事件类型常量。除 agent_output 与 action_command 外的一切角色都归为
     external_input；超出上下文的内容由多轮压缩处理，不做截断。

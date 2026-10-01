@@ -199,10 +199,6 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 	var err error
 	var exitCode int
 	if newStatus == SessionError {
-		// Pull the exit code at detection time (before reap, remain-on-exit keeps
-		// the pane). A concrete non-zero code carries failure polarity; an
-		// unresolvable status (probe失明 / kill-escaped) still errors — "framework
-		// blind ≠ task succeeded".
 		if d.paneStatusFn != nil {
 			code, known := d.paneStatusFn()
 			if known && code != 0 {

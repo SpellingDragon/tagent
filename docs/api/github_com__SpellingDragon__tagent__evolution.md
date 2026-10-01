@@ -7,6 +7,10 @@ Package evolution 实现 agent 的自我改进通道：改动默认即生效，�
 
 VARIABLES
 
+var DefaultProtectedPaths = []string{"resources/prompts/**", "skills/**", "scripts/**"}
+    DefaultProtectedPaths 是自改进受控清单的单一真源：evolution 的登记边界、认知资产
+    漂移审计的文件集与资产写审批规则共用本清单，消费方不得复制路径字面量。
+
 var ErrNothingToCommit = fmt.Errorf("nothing-to-commit")
     ErrNothingToCommit：受控文件无改动（N4）——调用方以 result 渗透，不按 error。
 

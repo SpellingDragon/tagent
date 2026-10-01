@@ -9,6 +9,7 @@ import (
 )
 
 // TestDetectSmuggleBackground 钉住后台化走私命中：nohup … &、nohup … & disown。
+// 契约: docs/wiki/platform/cognitive-asset-guard.md
 func TestDetectSmuggleBackground(t *testing.T) {
 	cases := []string{
 		"nohup ./longjob > log 2>&1 &",
@@ -39,9 +40,9 @@ func TestDetectSmuggleNormalCommandsUnaffected(t *testing.T) {
 		"echo hello",
 		"git commit -m 'fix bug'",
 		"go test ./...",
-		"tmux ls",                 // 只读子命令，非新建会话
-		"tmux attach -t existing", // attach 非 new
-		"cat nohup.out",           // 文件名含 nohup 但非 nohup 命令 + & 配对
+		"tmux ls",
+		"tmux attach -t existing",
+		"cat nohup.out",
 	}
 	for _, c := range cases {
 		require.Equal(t, smuggleNone, detectSmuggle(c), c)
@@ -49,15 +50,14 @@ func TestDetectSmuggleNormalCommandsUnaffected(t *testing.T) {
 	}
 }
 
-// TestDetectSmuggleEchoNoFalsePositive 钉住 echo 字符串含 "nohup" 但无 & 配对不误报。
+// TestDetectSmuggleEchoNoFalsePositive 钉住 echo 字符串含 nohup 但无 & 配对不误报。
 func TestDetectSmuggleEchoNoFalsePositive(t *testing.T) {
-	c := `echo "nohup is a command"` // nohup 出现但无后台化 &
+	c := `echo "nohup is a command"`
 	require.Equal(t, smuggleNone, detectSmuggle(c))
 	require.Empty(t, smuggleHintFor(c))
 }
 
-// TestSmuggleHintIdempotent 钉住检测纯函数幂等：同一命令重复检测/重建（relaunch
-// 从 args.Command 原文重建）产同一单行 hint，不随调用次数累积。
+// TestSmuggleHintIdempotent 钉住检测纯函数幂等：重复检测同一命令产同一单行 hint。
 func TestSmuggleHintIdempotent(t *testing.T) {
 	c := "nohup ./job & disown"
 	h1 := smuggleHintFor(c)
@@ -66,20 +66,17 @@ func TestSmuggleHintIdempotent(t *testing.T) {
 	require.Equal(t, 1, strings.Count(h1, "[框架提示]"), "hint 只有一行提示头")
 }
 
-// TestBuildAckResultNoteAppend 钉住 ack 出口追加逻辑：走私命令 Note 尾附引导行，
-// 正常命令 Note 逐字节不变（smuggleHintFor 为空串，+= 无副作用）。
+// TestBuildAckResultNoteAppend 钉住 ack 出口：走私命令 Note 尾附引导行，正常命令 Note 逐字节不变。
 func TestBuildAckResultNoteAppend(t *testing.T) {
 	ct := NewActionTool(WithOrphanCleanupDisabled())
 	defer ct.Close()
 
-	// 正常命令：hint 为空，Note 不变。
 	r := ct.buildAckResult("s1", "echo hi", &task.Task{ID: "t1"})
 	require.NotEmpty(t, r.Note)
 	base := r.Note
 	r.Note += smuggleHintFor("echo hi")
 	require.Equal(t, base, r.Note, "正常命令结果逐字节不变")
 
-	// 走私命令：Note 尾部追加引导行，原说明保留在前。
 	r2 := ct.buildAckResult("s2", "nohup ./x & disown", &task.Task{ID: "t2"})
 	origNote := r2.Note
 	r2.Note += smuggleHintFor("nohup ./x & disown")

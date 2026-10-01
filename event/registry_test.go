@@ -198,8 +198,7 @@ func TestIsNonProjectionEventType_Declarations(t *testing.T) {
 	require.False(t, IsNonProjectionEventType(TypeExternalInput))
 	require.False(t, IsNonProjectionEventType(TypeAgentOutput))
 	require.False(t, IsNonProjectionEventType(TypeActionCommand))
-	// cognitive_asset_changed 必须进投影——被看见是漂移审计的最低目标（D1 终态不变量）。
-	require.False(t, IsNonProjectionEventType(TypeCognitiveAssetChanged))
+	require.False(t, IsNonProjectionEventType(TypeCognitiveAssetChanged), "cognitive_asset_changed 必须进投影：被看见是漂移审计的最低目标")
 	spec, ok := LookupEventType(TypeCognitiveAssetChanged)
 	require.True(t, ok)
 	require.True(t, spec.Embeddable, "audit notes must be discoverable via recall")

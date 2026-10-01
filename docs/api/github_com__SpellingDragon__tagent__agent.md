@@ -390,6 +390,16 @@ type Closer interface {
     agent shutdown (e.g., ActionTool stops its TmuxMonitor). Using an interface
     avoids a direct dependency on tagent/tool.
 
+type CognitiveAssetChange struct {
+	File      string
+	OldHash   string
+	NewHash   string
+	Size      int64
+	Timestamp int64
+}
+    CognitiveAssetChange 是漂移审计事件载荷的最小契约（与根包 tagent.AssetChange 字段对齐；agent
+    包不反向依赖根包，以本类型解耦）。
+
 type CompressConfig struct {
 	// CompactKeysListed caps the number of keys listed in the rolling
 	// compaction summary (default 32); older events stay recallable.
@@ -1525,6 +1535,10 @@ func (ta *TagentAgent) ReconcileOutstanding() (ReconcileSummary, error)
     healthy ones. It must run after the retention lease is armed (/: protection
     registered before anything converges/cleans) and before the consume loop
     starts feeding producers that may forget.
+
+func (ta *TagentAgent) RecordCognitiveAssetChange(changes []CognitiveAssetChange)
+    RecordCognitiveAssetChange 是漂移审计批次事件的事实链写入入口——进投影（被看见 是审计的最低目标），不发
+    bus、不打断消息路由。
 
 func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail string)
     RecordResidentSession（R3 2.5）：常驻会话生命周期事件的事实链写入入口 （ActionTool residentSink 经

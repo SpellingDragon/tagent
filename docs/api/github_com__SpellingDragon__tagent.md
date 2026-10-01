@@ -98,6 +98,9 @@ var (
 
 FUNCTIONS
 
+func DefaultAssetPatterns() []string
+    DefaultAssetPatterns 返回漂移审计的受控清单（同源真源转发，wiring 唯一入口）。
+
 func DefaultPromptsFS() embed.FS
     DefaultPromptsFS returns the embedded framework default prompts. The tree is
     rooted at DefaultPromptsPrefix (a prompt file is e.g. recall_tool_desc.md).
@@ -249,6 +252,40 @@ type AgentConfig struct {
 }
     AgentConfig describes a single agent's configuration. Each agent only cares
     about itself and who it communicates with.
+
+type AssetAuditor struct {
+	// Has unexported fields.
+}
+    AssetAuditor 周期扫描认知资产并比对基线；漂移经 report 回调入事实链。 report 为 nil
+    时仅日志（降级安全）。并发约定：scanAndReport 由 ticker 与启动 路径先后调用，内部以 mu 串行化快照读写。
+
+func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]AssetChange)) *AssetAuditor
+    NewAssetAuditor 构造审计器。wd 为空回退进程 cwd；patterns 为受控清单
+    （evolution.DefaultProtectedPaths 同源传入）；extraFiles 是清单外补充文件 （主配置
+    ConfigPath，可空）。interval<=0 时使用 assetAuditInterval。
+
+func (a *AssetAuditor) Close() error
+    Close 停止后台循环并同步等待其完全退出（幂等）。Close 返回后保证无任何快照写入， 避免调用方的资源清理（如
+    t.TempDir）与尾随写竞态。
+
+func (a *AssetAuditor) Start() error
+    Start 起后台循环：先做一次启动比对（上一代快照 → 漂移事件 → 新基线；无历史 静默建基线），随后进入周期 ticker。初始比对放在
+    goroutine 内——审计不得阻塞 agent 构造路径（文件哈希是有界 I/O，不该串进装配关键路径）。返回 error 仅用于
+    保留签名兼容（当前不产生）。
+
+type AssetChange struct {
+	File      string
+	OldHash   string
+	NewHash   string
+	Size      int64
+	Timestamp int64
+}
+    AssetChange 是一次漂移的最小证据单元：旧/新内容指纹 + 检测时刻（unix ms）。 OldHash 为空表示新增，NewHash
+    为空表示删除。
+
+func DiffAssetSnapshots(prev, cur map[string]FileEntry) []AssetChange
+    DiffAssetSnapshots 是纯函数比对引擎：内容 hash 不同=变更；新增/删除文件也算 变更（OldHash/NewHash
+    留空表意）。顺序稳定（按文件名字典序），事件可复现。
 
 type CompressConfig struct {
 	// CompactKeysListed caps the keys listed in the rolling compaction
@@ -585,6 +622,13 @@ type EvolutionConfig struct {
 type ExtraParam = agent.ExtraParam
     ExtraParam re-exports agent.ExtraParam for YAML/JSON config declaration
     (ToolRef.extra_params).
+
+type FileEntry struct {
+	Hash  string `json:"hash"`
+	Size  int64  `json:"size"`
+	Mtime int64  `json:"mtime"`
+}
+    FileEntry 是单个资产文件的内容指纹。
 
 type GovernanceConfig struct {
 	Enabled     bool   `json:"enabled" yaml:"enabled"`

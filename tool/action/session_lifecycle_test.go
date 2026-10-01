@@ -114,7 +114,6 @@ func TestHandleFakeDead_KillRetry_SessionRetained(t *testing.T) {
 	if session.KillRetryCount != 3 {
 		t.Errorf("expected KillRetryCount=3, got %d", session.KillRetryCount)
 	}
-	// 三连败强拆 = 进程逃逸，框架无法确认结局 → 失败极性（failure-polarity passthrough D3）。
 	if session.Status != SessionError {
 		t.Errorf("expected status Error after force-remove of escaped process, got %s", session.Status)
 	}

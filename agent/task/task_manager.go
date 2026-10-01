@@ -832,6 +832,8 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 // - once detached, subsequent stable/suspect signals (e.g. output changes, a
 // quiet service) are suppressed to avoid reclaim spam / permanent board churn;
 // - completion/failure (process death) always emits and ends the task.
+// emitBackground 处理中间态结算信号：仅 service 型任务在首个 stable 转 alive-detached
+// 并发一次性就绪通知；job 型的静默 stable/suspect 既不转移也不通知（面板态由 applyStatus 管辖）。
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
 	switch sig.Kind {
@@ -842,10 +844,6 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		}
 		return
 	case SettleStable:
-		// alive-detached 语义仅属 service 型（failure-polarity passthrough D4·脚手架）：
-		// job 型的静默 stable 不转后台就绪、不发 ∞ 通知（面板 stable 由 applyStatus
-		// 照常置，本函数只管通知/转移）。终态见 design 信号发射矩阵——oneshot 不发射
-		// 中间态信号，届时 alive_detached 生产者归零、全链路随 settle-signal-matrix 拆除。
 		if LifetimeOf(task.Spec) != LifetimeService {
 			task.mu.Unlock()
 			return

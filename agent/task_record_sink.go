@@ -139,14 +139,14 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 // 字段对齐；agent 包不反向依赖根包，以本类型解耦）。
 type CognitiveAssetChange struct {
 	File      string
-	OldHash   string // 空=新增
-	NewHash   string // 空=删除
+	OldHash   string
+	NewHash   string
 	Size      int64
 	Timestamp int64
 }
 
-// RecordCognitiveAssetChange（cognitive-asset-guard D1）：漂移审计批次事件的
-// 事实链写入入口——进投影（被看见是审计的最低目标），不发 bus、不打断消息路由。
+// RecordCognitiveAssetChange 是漂移审计批次事件的事实链写入入口——进投影（被看见
+// 是审计的最低目标），不发 bus、不打断消息路由。
 func (ta *TagentAgent) RecordCognitiveAssetChange(changes []CognitiveAssetChange) {
 	if ta == nil || ta.contextManager == nil || len(changes) == 0 {
 		return

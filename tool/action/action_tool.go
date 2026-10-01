@@ -411,9 +411,6 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 
 	log.Infof("[ActionTool] executing cmd=%q", args.Command)
 
-	// 走私入舱引导（D4 脚手架）：Call 入口单点检测命令文本，命中即在结果尾部
-	// 追加一行。同步完成、ack、无 spawner 直取三个出口共用；relaunch 不经过 Call
-	// 故天然幂等（不重复追加）。纯提示：不改命令、零延迟、零拦截。
 	smuggleHint := smuggleHintFor(args.Command)
 
 	sessionID, detector, err := ct.startSession(ctx, args)

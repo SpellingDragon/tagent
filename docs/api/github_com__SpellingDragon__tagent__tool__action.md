@@ -245,6 +245,10 @@ type ActionToolResult struct {
 	Output     string `json:"output,omitempty"`
 	OutputFile string `json:"output_file,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// ExitCode carries the process exit status on failure polarity
+	// (failure-polarity passthrough D2): non-zero, or negative for a signal death.
+	// Omitted when zero (clean exit / not applicable) to avoid noise.
+	ExitCode int `json:"exit_code,omitempty"`
 }
     ActionToolResult represents the outcome of a tmux command execution after
     the session reaches a stable state. It is returned as the tool_call result
@@ -418,6 +422,19 @@ func (te *TmuxExecutor) KillSession(sessionID string) error
 
 func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error)
     ListSessions lists all tmux sessions with our prefix
+
+func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool)
+    PaneDeadStatus reads the exit status of a dead pane via tmux's
+    `#{pane_dead_status}`. It returns (code, known):
+      - pane dead → (exit code, true). tmux reports signal-death as a negative
+        value.
+      - pane still alive, session gone, or command failed → (0, false) — the
+        exit status is not resolvable, which the caller must treat as "unknown",
+        never as success. Framework-created sessions run with remain-on-exit,
+        so a dead pane is retained and its status remains readable at detection
+        time.
+
+    契约: docs/wiki/tool/tmux-action.md#failure-polarity
 
 func (te *TmuxExecutor) PipeFileFor(sessionID string) string
     PipeFileFor exposes the streaming-log path for a session.
@@ -625,6 +642,11 @@ func (d *TmuxSettleDetector) Rearm(baseline int)
     Rearm resets the detector for a resume round on the SAME session: a new
     output baseline (settle outputs become this round's increment) and a fresh
     dense→detach timer (the resumed round gets its own sync-wait window).
+
+func (d *TmuxSettleDetector) SetPaneStatusReader(fn func() (code int, known bool))
+    SetPaneStatusReader wires the exit-status pull used to enrich a terminal
+    SessionError signal with a concrete exit code. Called once at construction
+    by the ActionTool integration with a closure over the executor + session id.
 
 func (d *TmuxSettleDetector) SetWatch(pattern string, window time.Duration) error
     SetWatch attaches a pattern-triggered wakeup to the detector ( C1).

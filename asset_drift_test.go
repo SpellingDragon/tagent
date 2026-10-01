@@ -22,17 +22,17 @@ func newTestAuditor(t *testing.T, wd string, report func([]AssetChange)) *AssetA
 	return NewAssetAuditor(wd, patterns, nil, report)
 }
 
-// TestAssetDriftCatchesRunningEdit 钉住运行中直改→下个比对周期产变更（D1 主场景）。
+// TestAssetDriftCatchesRunningEdit 钉住运行中直改资产在下一个比对周期产出漂移事件。
+// 契约: docs/wiki/platform/cognitive-asset-guard.md
 func TestAssetDriftCatchesRunningEdit(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/action_tool_desc.md", "original")
 
 	var got [][]AssetChange
 	a := newTestAuditor(t, wd, func(c []AssetChange) { got = append(got, c) })
-	a.scanAndReport(true) // 建基线，无变更 → 零事件
+	a.scanAndReport(true)
 	require.Empty(t, got, "首次建基线不应产事件")
 
-	// 直改内容
 	writeAsset(t, wd, "resources/prompts/action_tool_desc.md", "poisoned methodology")
 	a.scanAndReport(false)
 
@@ -44,29 +44,27 @@ func TestAssetDriftCatchesRunningEdit(t *testing.T) {
 	require.NotEqual(t, got[0][0].OldHash, got[0][0].NewHash, "内容变则 hash 必变")
 }
 
-// TestAssetDriftCatchesShutdownWindowEdit 钉住停机窗口修改被启动比对捕获：
-// 上一代快照持久化 → 改文件 → 新实例启动比对即产漂移事件。
+// TestAssetDriftCatchesShutdownWindowEdit 钉住停机窗口的修改被下一实例的启动比对捕获。
 func TestAssetDriftCatchesShutdownWindowEdit(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "skills/foo/SKILL.md", "v1")
 
 	a1 := newTestAuditor(t, wd, nil)
-	a1.scanAndReport(true) // 建基线并落盘
+	a1.scanAndReport(true)
 	_, err := os.Stat(filepath.Join(wd, ".tagent", assetSnapshotName))
 	require.NoError(t, err, "快照必须跨重启持久化")
 
-	// 模拟"停机期间被改"
 	writeAsset(t, wd, "skills/foo/SKILL.md", "v2 tampered")
 
 	var got [][]AssetChange
 	a2 := newTestAuditor(t, wd, func(c []AssetChange) { got = append(got, c) })
-	a2.scanAndReport(true) // 启动比对：读上一代快照 → 发现漂移
+	a2.scanAndReport(true)
 
 	require.Len(t, got, 1, "启动比对必须捕获停机窗口修改")
 	require.Equal(t, "skills/foo/SKILL.md", got[0][0].File)
 }
 
-// TestAssetDriftNoChangeZeroNoise 钉住无变更零事件零噪声。
+// TestAssetDriftNoChangeZeroNoise 钉住无变更时零事件、零噪声。
 func TestAssetDriftNoChangeZeroNoise(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/a.md", "stable")
@@ -80,7 +78,7 @@ func TestAssetDriftNoChangeZeroNoise(t *testing.T) {
 	require.Empty(t, got, "内容未变必须零事件")
 }
 
-// TestAssetDriftAddAndDelete 钉住文件新增/删除都算变更。
+// TestAssetDriftAddAndDelete 钉住文件新增与删除都算作漂移变更。
 func TestAssetDriftAddAndDelete(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/keep.md", "keep")
@@ -90,7 +88,6 @@ func TestAssetDriftAddAndDelete(t *testing.T) {
 	a := newTestAuditor(t, wd, func(c []AssetChange) { got = append(got, c) })
 	a.scanAndReport(true)
 
-	// 删一个 + 增一个
 	require.NoError(t, os.Remove(filepath.Join(wd, "resources/prompts/doomed.md")))
 	writeAsset(t, wd, "resources/prompts/brand_new.md", "new")
 
@@ -107,8 +104,7 @@ func TestAssetDriftAddAndDelete(t *testing.T) {
 	require.NotContains(t, byFile, "resources/prompts/keep.md", "未变文件不产变更")
 }
 
-// TestAssetDriftCatchesBypassWrite 钉住不变量：绕过文本匹配规则的写入
-// （变量拼路径、base64 等对审批脚手架不可见的写法）仍被 hash 捕获。
+// TestAssetDriftCatchesBypassWrite 钉住绕过文本匹配规则的写入仍被内容指纹捕获。
 func TestAssetDriftCatchesBypassWrite(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/tool_desc.md", "clean")
@@ -117,7 +113,6 @@ func TestAssetDriftCatchesBypassWrite(t *testing.T) {
 	a := newTestAuditor(t, wd, func(c []AssetChange) { got = append(got, c) })
 	a.scanAndReport(true)
 
-	// 模拟"绕过审批规则"的写入：路径由变量拼接、内容经编码——审计不看文本，只看 hash。
 	p := filepath.Join(wd, "resources/prompts", "tool_desc.md")
 	require.NoError(t, os.WriteFile(p, []byte("\x00\x01encoded-payload"), 0o644))
 
@@ -133,7 +128,6 @@ func TestAssetDriftConcurrentNoCorruption(t *testing.T) {
 
 	var got [][]AssetChange
 	a := NewAssetAuditor(wd, []string{"skills/**"}, nil, func(c []AssetChange) {
-		// report 在 mu 保护内被调用，安全追加。
 		got = append(got, c)
 	})
 	a.scanAndReport(true)
@@ -150,23 +144,21 @@ func TestAssetDriftConcurrentNoCorruption(t *testing.T) {
 		a.scanAndReport(false)
 	}
 	<-done
-	// 至少应捕获到驻留的最后一次改动（并发写者最终态与基线不同）
 	require.NotEmpty(t, got, "并发下驻留变更不得漏报")
 }
 
-// TestAssetDriftStartStopLifecycle 钉住 Start 起后台 goroutine、Close 幂等停 ticker
-// （初始比对已移入 goroutine，不阻塞构造；Close 关通道，二次 Close 不 panic）。
+// TestAssetDriftStartStopLifecycle 钉住 Start 异步不阻塞、Close 同步停且幂等。
 func TestAssetDriftStartStopLifecycle(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/a.md", "x")
 	a := newTestAuditor(t, wd, nil)
 
-	require.NoError(t, a.Start()) // 异步：不阻塞
+	require.NoError(t, a.Start())
 	require.NoError(t, a.Close())
-	require.NoError(t, a.Close()) // 幂等
+	require.NoError(t, a.Close())
 }
 
-// TestDiffAssetSnapshotsPure 钉住比对引擎是纯函数且顺序稳定（字典序）。
+// TestDiffAssetSnapshotsPure 钉住比对引擎是纯函数且按文件名字典序稳定输出。
 func TestDiffAssetSnapshotsPure(t *testing.T) {
 	prev := map[string]FileEntry{
 		"b.md":    {Hash: "1", Size: 1},
@@ -174,22 +166,20 @@ func TestDiffAssetSnapshotsPure(t *testing.T) {
 		"gone.md": {Hash: "3", Size: 3},
 	}
 	cur := map[string]FileEntry{
-		"b.md":   {Hash: "1", Size: 1}, // 未变
-		"a.md":   {Hash: "9", Size: 9}, // 改
-		"new.md": {Hash: "5", Size: 5}, // 增
+		"b.md":   {Hash: "1", Size: 1},
+		"a.md":   {Hash: "9", Size: 9},
+		"new.md": {Hash: "5", Size: 5},
 	}
 	changes := DiffAssetSnapshots(prev, cur)
 	require.Len(t, changes, 3, "改 1 + 增 1 + 删 1")
 	require.Equal(t, []string{"a.md", "gone.md", "new.md"}, []string{changes[0].File, changes[1].File, changes[2].File},
 		"必须按文件名字典序稳定输出")
 
-	// 纯函数：同输入两次调用结果一致
 	same := DiffAssetSnapshots(prev, cur)
 	require.Equal(t, changes, same)
 }
 
-// TestAssetDriftCorruptSnapshotRebuilds 钉住损坏快照不整体失败：Warn 后重建基线，
-// 下个周期恢复正常比对。
+// TestAssetDriftCorruptSnapshotRebuilds 钉住损坏快照不整体失败，Warn 后重建基线并恢复比对。
 func TestAssetDriftCorruptSnapshotRebuilds(t *testing.T) {
 	wd := t.TempDir()
 	writeAsset(t, wd, "resources/prompts/a.md", "content")
@@ -198,10 +188,9 @@ func TestAssetDriftCorruptSnapshotRebuilds(t *testing.T) {
 
 	var got [][]AssetChange
 	a := newTestAuditor(t, wd, func(c []AssetChange) { got = append(got, c) })
-	a.scanAndReport(true) // 损坏快照 → 静默重建基线，不产全体漂移
+	a.scanAndReport(true)
 	require.Empty(t, got, "损坏快照不得误判为全体漂移")
 
-	// 基线已重建，正常比对恢复
 	writeAsset(t, wd, "resources/prompts/a.md", "changed")
 	a.scanAndReport(false)
 	require.Len(t, got, 1, "重建后必须恢复漂移捕获")

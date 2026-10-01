@@ -7,15 +7,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCognitiveAssetWriteRule 钉住 D2 写形态命中矩阵：写资产→critical，只读→不误伤。
+// TestCognitiveAssetWriteRule 钉住写形态命中矩阵：写资产判 critical，只读不误伤。
+// 契约: docs/wiki/platform/cognitive-asset-guard.md
 func TestCognitiveAssetWriteRule(t *testing.T) {
 	c := NewRiskClassifier(nil, 0)
 	cases := []struct {
 		name     string
 		argsJSON string
-		asset    bool // 期望命中 exec.cognitive-asset-write
+		asset    bool
 	}{
-		// 写形态（应命中）
 		{"重定向写 prompts", `{"command":"echo x > resources/prompts/action_tool_desc.md"}`, true},
 		{"追加写 skills", `{"command":"echo x >> skills/foo/SKILL.md"}`, true},
 		{"tee 写 scripts", `{"command":"echo x | tee scripts/deploy.sh"}`, true},
@@ -23,7 +23,6 @@ func TestCognitiveAssetWriteRule(t *testing.T) {
 		{"python open(w) 改 prompts", `{"command":"python3 -c \"open('resources/prompts/desc.md','w').write('poison')\""}`, true},
 		{"cp 覆盖 scripts", `{"command":"cp /tmp/new.sh scripts/run.sh"}`, true},
 		{"rm 删 prompts", `{"command":"rm resources/prompts/important.md"}`, true},
-		// 只读/写他处（不应命中资产写规则）
 		{"cat 只读 prompts", `{"command":"cat resources/prompts/desc.md"}`, false},
 		{"grep 只读 skills", `{"command":"grep -rn todo skills/"}`, false},
 		{"读资产重定向到 /tmp", `{"command":"cat resources/prompts/desc.md > /tmp/backup.txt"}`, false},
@@ -42,7 +41,7 @@ func TestCognitiveAssetWriteRule(t *testing.T) {
 	}
 }
 
-// TestCognitiveAssetWriteLevelCritical 钉住命中即 critical（走异步批准而非记账放行）。
+// TestCognitiveAssetWriteLevelCritical 钉住命中即 critical，走异步批准而非记账放行。
 func TestCognitiveAssetWriteLevelCritical(t *testing.T) {
 	c := NewRiskClassifier(nil, 0)
 	level, ruleID, reason := c.Classify(RiskContext{
@@ -53,8 +52,7 @@ func TestCognitiveAssetWriteLevelCritical(t *testing.T) {
 	require.NotEmpty(t, reason)
 }
 
-// TestCognitiveAssetWriteRefineNoExemption 钉住 refine/meditation 触发源不豁免：
-// 审批权在人，登记修改也须过 critical（规则不看 TriggerSource）。
+// TestCognitiveAssetWriteRefineNoExemption 钉住 refine/meditation 触发源不豁免，规则不看 TriggerSource。
 func TestCognitiveAssetWriteRefineNoExemption(t *testing.T) {
 	c := NewRiskClassifier(nil, 0)
 	for _, src := range []string{"user", "meditation", "evolution", "refine", ""} {
@@ -73,8 +71,7 @@ func TestCognitiveAssetWriteNonExecUnaffected(t *testing.T) {
 	require.NotEqual(t, "exec.cognitive-asset-write", ruleID)
 }
 
-// TestCognitiveAssetWriteGateHoldThenApprove 钉住端到端：governance strict 下写资产
-// 挂起待批，批准后同命令重试放行并审计（复用 critical 批准链，零 gate 改动）。
+// TestCognitiveAssetWriteGateHoldThenApprove 钉住 strict 下写资产挂起待批、批准后同命令重试放行。
 func TestCognitiveAssetWriteGateHoldThenApprove(t *testing.T) {
 	appr := NewApprovalManager("", time.Minute)
 	g := NewGovernanceGate(GateDeps{
@@ -96,8 +93,7 @@ func TestCognitiveAssetWriteGateHoldThenApprove(t *testing.T) {
 	require.Equal(t, DispositionRecord, d2.Disposition)
 }
 
-// TestCognitiveAssetWriteWarnModeHangsNotDenies 钉住 warn 模式：挂起待批但不拒绝
-// （异步登记，人工裁决后放行）——执行权在人。
+// TestCognitiveAssetWriteWarnModeHangsNotDenies 钉住 warn 模式挂起待批但不硬拒，执行权在人。
 func TestCognitiveAssetWriteWarnModeHangsNotDenies(t *testing.T) {
 	appr := NewApprovalManager("", time.Minute)
 	g := NewGovernanceGate(GateDeps{
@@ -112,8 +108,7 @@ func TestCognitiveAssetWriteWarnModeHangsNotDenies(t *testing.T) {
 	require.False(t, d.Denied, "warn 模式挂起但不硬拒")
 }
 
-// TestCognitiveAssetWriteGovernanceDisabledZeroChange 钉住 governance 关闭零行为变化：
-// 同类命令按既有语义放行，无挂起、无审批请求。
+// TestCognitiveAssetWriteGovernanceDisabledZeroChange 钉住 governance 关闭时同类命令零行为变化。
 func TestCognitiveAssetWriteGovernanceDisabledZeroChange(t *testing.T) {
 	g := NewGovernanceGate(GateDeps{
 		Classifier: NewRiskClassifier(DefaultRules(), RiskMedium),

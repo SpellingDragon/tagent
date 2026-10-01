@@ -1745,9 +1745,10 @@ func TestSettleWatch_NoStateChange(t *testing.T) {
 	}
 }
 
-// TestEmitBackground_JobStableNoNotify 钉住 D4 分流：job 型（command/subagent）的
-// SettleStable/SettleSuspect 不转 alive-detached、零 onSettle 通知；面板状态照常。
-// 终态见 design 信号发射矩阵（oneshot 不发射中间态信号）。
+// TestEmitBackground_JobStableNoNotify 钉住 job 型（command/subagent）的中间态信号被分流抑制。
+// - SettleStable/SettleSuspect 不转 alive-detached、零 onSettle 通知；面板状态照常置。
+// - 终态结算（SettleCompleted）照常通知，分流只针对中间态信号。
+// - 终态收敛后 oneshot 不发射中间态信号，本分支随之退化。
 func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 	var mu sync.Mutex
 	notified := 0
@@ -1755,16 +1756,15 @@ func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 		OnSettle: func(_ *Task, _ SettleSignal) { mu.Lock(); notified++; mu.Unlock() },
 	})
 
-	// job 型 stable：不转 alive-detached、不通知，但面板可见 TaskStable。
 	d := NewManualDetectorDetach(10 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "sleep 180"}, d) // command → job
+	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "sleep 180"}, d)
 	d.Emit(SettleSignal{Kind: SettleStable, Output: "quiet"})
 	waitUntil(t, time.Second, func() bool {
 		res.Task.mu.Lock()
 		defer res.Task.mu.Unlock()
-		return res.Task.status == TaskStable // applyStatus 置面板态
+		return res.Task.status == TaskStable
 	})
-	time.Sleep(50 * time.Millisecond) // 留 emitBackground 误通知的时间窗
+	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
 	if notified != 0 {
 		mu.Unlock()
@@ -1775,7 +1775,6 @@ func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 		t.Fatalf("job stable must not transition to alive_detached")
 	}
 
-	// job 型 suspect：同样静默。
 	d.Emit(SettleSignal{Kind: SettleSuspect, Output: "quiet2"})
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
@@ -1785,14 +1784,12 @@ func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// job 型终态结算：照常通知（分流只针对中间态信号）。
 	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
 	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return notified == 1 })
 	d.Done()
 }
 
-// TestEmitBackground_ServiceStableNotifies 钉住 service 型 stable 现状保持：转
-// alive-detached 且发一次性就绪通知。
+// TestEmitBackground_ServiceStableNotifies 钉住 service 型 stable 现状：转 alive-detached 并发一次性就绪通知。
 func TestEmitBackground_ServiceStableNotifies(t *testing.T) {
 	var mu sync.Mutex
 	notified := 0

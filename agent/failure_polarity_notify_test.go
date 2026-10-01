@@ -13,7 +13,8 @@ func fpTask(id, desc string) *task.Task {
 	return &task.Task{ID: id, Spec: task.TaskSpec{Kind: "command", Desc: desc}}
 }
 
-// TestSettleNotify_ExitCodePassthrough 钉住 D2：非零退出码透传到通知文本。
+// TestSettleNotify_ExitCodePassthrough 钉住非零退出码透传到通知文本，marker 为失败极性。
+// 契约: docs/wiki/tool/tmux-action.md
 func TestSettleNotify_ExitCodePassthrough(t *testing.T) {
 	evt := newTaskSettledEvent(fpTask("t42", "build"),
 		task.SettleSignal{Kind: task.SettleCompleted, Err: fmt.Errorf("tmux session x exited with code 42"), ExitCode: 42},
@@ -58,10 +59,8 @@ func TestSettleNotify_BlankPayloadDegradToTicket(t *testing.T) {
 		task.SettleSignal{Kind: task.SettleCompleted, Output: blank},
 		100000, t.TempDir())
 	content := evt.Message.Content
-	// 无空白正文：不应出现被转义的 ␤ 空白串（25 个换行 → ␤×25）。
 	require.NotContains(t, content, "␤␤", "空白正文必须降级，不得投递")
 	require.Contains(t, content, "（无输出）", "降级为单行无输出票据")
-	// 单行轨迹：不含真实换行（空白正文本会带来多行）。
 	require.NotContains(t, content, "\n", "票据保持单行")
 }
 

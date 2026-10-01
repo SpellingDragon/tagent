@@ -55,9 +55,8 @@ type GitEvolution struct {
 	recovered atomic.Bool
 }
 
-// DefaultProtectedPaths 是自改进受控清单的单一真源：evolution 的登记边界、
-// cognitive-asset-guard 的漂移审计文件集与资产写审批规则共用本清单（同源声明，
-// 不允许在消费方复制路径字面量）。
+// DefaultProtectedPaths 是自改进受控清单的单一真源：evolution 的登记边界、认知资产
+// 漂移审计的文件集与资产写审批规则共用本清单，消费方不得复制路径字面量。
 var DefaultProtectedPaths = []string{"resources/prompts/**", "skills/**", "scripts/**"}
 
 // NewGitEvolution 构建装配单元；store/judge/guard 可为零值，运行时依赖经 BindRuntime

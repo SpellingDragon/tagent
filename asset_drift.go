@@ -1,15 +1,5 @@
 package tagent
 
-// 认知资产漂移审计（cognitive-asset-guard D1·终态）：
-// 「内容变则 hash 变」是不变量观测——任何写入方（含绕过审批规则的变量拼接、
-// 编码、外力直改）都不可能逃避捕获。启动比对捕获停机窗口，周期比对覆盖运行期；
-// 变更产 cognitive_asset_changed 事件入事实链（进投影：被看见是审计的最低目标）
-// + Info 日志。默认开启、不依赖 governance、零新配置、不网络上报、不注入消息路由。
-//
-// 文件集清单与 evolution.DefaultProtectedPaths 同源（单一真源，禁止复制字面量），
-// 另含主配置 yaml。快照存 WorkingDir/.tagent/：resident meta 目录默认 $TMPDIR 会被
-// 系统清理、resident_meta_dir 多数部署未配，无法满足「跨重启保留」要求。
-
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -40,13 +30,14 @@ type FileEntry struct {
 	Mtime int64  `json:"mtime"`
 }
 
-// AssetChange 是一次漂移的最小证据单元：旧/新指纹 + 变更时刻。
+// AssetChange 是一次漂移的最小证据单元：旧/新内容指纹 + 检测时刻（unix ms）。
+// OldHash 为空表示新增，NewHash 为空表示删除。
 type AssetChange struct {
 	File      string
-	OldHash   string // 空=新增
-	NewHash   string // 空=删除
+	OldHash   string
+	NewHash   string
 	Size      int64
-	Timestamp int64 // 检测时刻（unix ms）
+	Timestamp int64
 }
 
 // assetSnapshot 是持久化的文件集指纹基线。
@@ -59,17 +50,17 @@ type assetSnapshot struct {
 // 路径先后调用，内部以 mu 串行化快照读写。
 type AssetAuditor struct {
 	wd        string
-	extra     []string // 主配置 yaml 等清单外必查文件
-	paths     []string // 目录前缀清单（pattern 去 /** 后的目录段）
-	snap      string   // 快照文件路径
+	extra     []string
+	paths     []string
+	snap      string
 	interval  time.Duration
 	report    func([]AssetChange)
 	stop      chan struct{}
-	done      chan struct{} // 后台 goroutine 退出时关闭；Close 据此同步等待
+	done      chan struct{}
 	mu        sync.Mutex
 	once      sync.Once
 	startOnce sync.Once
-	started   atomic.Bool // Start 是否真正拉起过后台 goroutine
+	started   atomic.Bool
 }
 
 // NewAssetAuditor 构造审计器。wd 为空回退进程 cwd；patterns 为受控清单
@@ -88,8 +79,6 @@ func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]Ass
 		done:     make(chan struct{}),
 	}
 	for _, pat := range patterns {
-		// 受控清单默认形态是 `dir/**`：目录前缀即枚举边界。非 `/**` 结尾的
-		// 精确文件路径直接入 extra 集。
 		if strings.HasSuffix(pat, "/**") {
 			a.paths = append(a.paths, strings.TrimSuffix(pat, "/**"))
 		} else if !strings.ContainsAny(pat, "*?") {
@@ -109,7 +98,6 @@ func (a *AssetAuditor) Start() error {
 		a.started.Store(true)
 		go func() {
 			defer close(a.done)
-			// 若 Close 先于初写到达，直接退出：生命周期契约要求 Close 返回后不得再有写入。
 			if a.stopped() {
 				return
 			}
@@ -120,8 +108,8 @@ func (a *AssetAuditor) Start() error {
 	return nil
 }
 
-// Close 停止后台循环并**同步等待其完全退出**（幂等）：Close 返回即保证不再有
-// 任何快照写入——否则 t.TempDir 等调用方的清理会与尾随写竞态（"directory not empty"）。
+// Close 停止后台循环并同步等待其完全退出（幂等）。Close 返回后保证无任何快照写入，
+// 避免调用方的资源清理（如 t.TempDir）与尾随写竞态。
 func (a *AssetAuditor) Close() error {
 	a.once.Do(func() { close(a.stop) })
 	if a.started.Load() {
@@ -165,7 +153,6 @@ func (a *AssetAuditor) scanAndReport(atStartup bool) {
 		if !atStartup {
 			return
 		}
-		// 首次部署无历史基线：静默建立，不产事件（避免开机刷屏）。
 		a.saveSnapshot(current)
 		return
 	}
@@ -213,7 +200,6 @@ func (a *AssetAuditor) scan() map[string]FileEntry {
 	out := map[string]FileEntry{}
 	for _, dir := range a.paths {
 		root := filepath.Join(a.wd, dir)
-		// 目录不存在=该类资产未使用，WalkDir 首错即返，静默。
 		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
 				return nil
@@ -230,7 +216,7 @@ func (a *AssetAuditor) scan() map[string]FileEntry {
 	}
 	for _, f := range a.extra {
 		if f == "" {
-			continue // 无 ConfigPath 的部署（代码内联配置）：清单外集为空
+			continue
 		}
 		p := f
 		if !filepath.IsAbs(p) {

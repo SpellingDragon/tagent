@@ -256,6 +256,12 @@ type SettleSignal struct {
 	Kind   SettleKind
 	Output string
 	Err    error
+	// ExitCode is the process exit status read at settle time (failure-polarity
+	// passthrough D2): non-zero (or negative for signal death) reports how a dead
+	// process exited. Zero is ambiguous between "clean exit 0" and "not read", so
+	// it is only meaningful alongside a known process death; it is NOT persisted
+	// (restored tasks re-adjudicate via liveness probe).
+	ExitCode int
 }
     SettleSignal is emitted by a SettleDetector when a task reaches a settle
     point.

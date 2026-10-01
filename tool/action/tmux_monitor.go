@@ -556,8 +556,6 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 		_ = processExists
 		_ = isPaneDead
-		// 探测连续不可辨 = 框架失明，不是任务成功：报失败极性（Err 文本由
-		// detector 拼「exit status unresolvable」）。
 		return SessionError
 	}
 	session.ProbeUnknownCount = 0
@@ -749,8 +747,6 @@ func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) bool {
 			return false
 		}
 		log.Warnf("[TmuxMonitor] session %s reached max kill retries, force-removing", session.ID)
-		// 三连败强拆：进程逃逸未被杀死，框架无法确认其结局——报失败极性，
-		// 绝不伪装成正常完成（D3「框架失明 ≠ 任务成功」）。
 		session.Status = SessionError
 		return true
 	}
