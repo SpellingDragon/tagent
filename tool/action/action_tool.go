@@ -52,7 +52,7 @@ type ActionTool struct {
 	runAsGroup  string
 	description string
 	defaultTTL  time.Duration
-	// ttlSource is the  live read face for that knob (see SetDefaultTTLSource).
+	// ttlSource is the live read face for defaultTTL (see SetDefaultTTLSource).
 	ttlSource     atomic.Pointer[func() time.Duration]
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
@@ -837,7 +837,7 @@ func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
 }
 
-// peekCursors peekCursor tracks the byte offset each session's incremental peek has
+// peekCursors holds the byte offsets each session's incremental peek has
 // consumed from its pipe log. Guarded by peekMu.
 type peekCursors struct {
 	mu      sync.Mutex

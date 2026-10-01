@@ -11,8 +11,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// pTimeout declarativeParams keys = ActionArgs 的 spawn 字段全集（session-op 字段
-// Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID 非 spawn 参数，排除；Command 单列）。
+// Spawn-parameter keys for the declarative round-trip = ActionArgs 的 spawn
+// 字段全集（session-op 字段 Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID 非
+// spawn 参数，排除；Command 单列）。
 const (
 	pTimeout    = "timeout"
 	pTTL        = "ttl"

@@ -90,8 +90,8 @@ type MonitorConfig struct {
 	// HeartbeatTimeout 探活命令的超时。
 	HeartbeatTimeout time.Duration
 
-	// DenseInterval Adaptive poll schedule (optional; unset fields fall back to defaults, with
-	// DenseInterval derived from Interval). See PollSchedule.
+	// DenseInterval 密集轮询相位间隔（0 → 由 Interval 派生）。以下四字段构成
+	// PollSchedule 的 dense→backoff 自适应节奏（见 tm.schedule）。
 	DenseInterval time.Duration
 	DenseDuration time.Duration
 	BackoffFactor float64

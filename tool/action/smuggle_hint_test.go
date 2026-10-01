@@ -83,3 +83,33 @@ func TestBuildAckResultNoteAppend(t *testing.T) {
 	require.Contains(t, r2.Note, "[框架提示]")
 	require.True(t, strings.HasPrefix(r2.Note, origNote), "原说明保留，hint 追加在尾部")
 }
+
+// TestDetectSmuggleChainAndUrlNoFalsePositive 钉住 D-P2-1 的两类误报清零：
+// `&&` 是命令链不是后台化（每个 & 前随另一个 &），URL query 的 `&` 紧跟参数名
+// （非空白、无 disown）同样不是作业控制语义——两者带 nohup 字样也不得告警。
+func TestDetectSmuggleChainAndUrlNoFalsePositive(t *testing.T) {
+	cases := []string{
+		"nohup make 2>&1 | tee log && echo done",
+		`curl 'http://x?a=1&b=2' -o out && nohup true`,
+		"nohup true && nohup false",
+	}
+	for _, c := range cases {
+		require.Equal(t, smuggleNone, detectSmuggle(c), c)
+	}
+}
+
+// TestDetectSmuggleRealBackgroundersStillCaught 钉住修正没有放过真走私：既有告警集
+// 的全部形态维持命中（nohup 配 &、& disown、重定向收尾 & 三条腿）。裸 `cmd &`
+// 无 nohup 从来不在告警集（nohup 配对判据，TestDetectSmuggleEchoNoFalsePositive
+// 同源），本修正不改变该边界——只清零 &&/URL 误报。
+func TestDetectSmuggleRealBackgroundersStillCaught(t *testing.T) {
+	cases := []string{
+		"nohup long_task.sh &",
+		"nohup ./job & disown",
+		"nohup ./longjob > log 2>&1 &",
+		"make -j8 > /tmp/build.log 2>&1 &",
+	}
+	for _, c := range cases {
+		require.Equal(t, smuggleBackground, detectSmuggle(c), c)
+	}
+}

@@ -35,8 +35,8 @@ type CallTool struct {
 	// 失败→degraded，成功→恢复）。per-agent 视角追踪全局 MCP registry（各 agent 独立退化状态）。
 	degradation *reliability.DegradationManager
 
-	// mu probeEvery/probeCount：DepMCP degraded 时的熔断
-	// 半开探测——每 N 次放行 1 次真调用。N<=0 = 关闭。
+	// mu 保护 probeEvery/probeCount：DepMCP degraded 时的熔断半开探测——
+	// 每 N 次放行 1 次真调用。N<=0 = 关闭。
 	mu         sync.Mutex
 	probeEvery int
 	probeCount int

@@ -83,7 +83,8 @@ type TmuxSettleDetector struct {
 	detach   <-chan struct{}
 	baseline int
 
-	// watchRe Watch: pattern-triggered wakeups for resident sessions.
+	// watchRe is the compiled watch pattern: pattern-triggered wakeups for
+	// resident sessions.
 	// OnWatchOutput receives the WHOLE visible pane buffer each refresh (same
 	// semantics as OnStateChange); the hit count is diffed against the last
 	// snapshot, so pane scrolling/truncation degrades to "missed hits" rather

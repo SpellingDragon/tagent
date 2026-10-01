@@ -114,8 +114,9 @@ type TmuxSession struct {
 	LastOutput    string
 	LastOutputMD5 string
 	StableSince   time.Time
-	// IsInteractive Used as the sole stability indicator: elapsed duration determines
-	// Stable / fakeDead thresholds, replacing count-based detection.
+	// IsInteractive marks an interactive (resident) session: elapsed duration
+	// is the sole stability indicator, determining the Stable / fakeDead
+	// thresholds and replacing count-based detection.
 	IsInteractive bool
 	IsTUI         bool
 	// Mode selects the liveness interpretation (zero value = ModeOneshot).
@@ -149,7 +150,9 @@ const (
 	SessionStable SessionStatus = "stable"
 	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
 	SessionCompleted SessionStatus = "completed"
-	// SessionError 探测器未装配（executor 为 nil）时的终态：随即移出监控。
+	// SessionError 失败极性的终态主载体（D1 透传）：已知非零退出码（含信号死）、
+	// 探测连续失明超限、强拆重试超限、探测器未装配——四类产源都以它把失败送达
+	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
 	SessionError SessionStatus = "error"
 	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
 	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead

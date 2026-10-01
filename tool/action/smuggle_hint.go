@@ -3,11 +3,31 @@ package action
 import "regexp"
 
 var (
-	smuggleNohup      = regexp.MustCompile(`\bnohup\b\s`)
-	smuggleAmpersand  = regexp.MustCompile(`&\s*(?:disown\b)?`)
-	smuggleRedirectBg = regexp.MustCompile(`>\s*\S+\s+2>&1\s*&`)
-	smuggleNestedTmux = regexp.MustCompile(`\btmux\s+(?:new-session\b|new\s+-s\b)`)
+	smuggleNohup = regexp.MustCompile(`\bnohup\b\s`)
+	// hasBackgroundAmp 判"存在作业控制语义的独立 &"。单靠一个正则不可达：
+	// && 链的第一个 & 前随常是非 &（" && " 前随空格），RE2 又无 lookahead；
+	// `2>&1` 的 & 后随数字，"可选 disown" 形态的正则会把两者都当候选。
+	// 判据分两层：候选词形要求 & 后紧跟空白、disown 或行尾（排除 >&1）；
+	// 位置层要求两侧邻居皆非 &（排除 &&）。
+	smuggleAmpCandidate = regexp.MustCompile(`&(?:\s|disown|$)`)
+	smuggleRedirectBg   = regexp.MustCompile(`>\s*\S+\s+2>&1\s*&(?:\s|$)`)
+	smuggleNestedTmux   = regexp.MustCompile(`\btmux\s+(?:new-session\b|new\s+-s\b)`)
 )
+
+// hasBackgroundAmp 报告命令里是否存在两侧邻居皆非 & 的 &（即独立后台符）。
+func hasBackgroundAmp(command string) bool {
+	for _, loc := range smuggleAmpCandidate.FindAllStringIndex(command, -1) {
+		ampAt := loc[0]
+		if ampAt > 0 && command[ampAt-1] == '&' {
+			continue // 双 & 的后腿
+		}
+		if ampAt+1 < len(command) && command[ampAt+1] == '&' {
+			continue // 双 & 的前腿
+		}
+		return true
+	}
+	return false
+}
 
 // smuggleCategory 标注命中的走私形态类别（供文案与测试区分）。
 type smuggleCategory string
@@ -24,7 +44,7 @@ func detectSmuggle(command string) smuggleCategory {
 	if smuggleNestedTmux.MatchString(command) {
 		return smuggleNestedTmuxC
 	}
-	if smuggleNohup.MatchString(command) && smuggleAmpersand.MatchString(command) {
+	if smuggleNohup.MatchString(command) && hasBackgroundAmp(command) {
 		return smuggleBackground
 	}
 	if smuggleRedirectBg.MatchString(command) {
