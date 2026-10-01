@@ -118,7 +118,10 @@ jobs:
         with:
           node-version: '20'
       - name: Install openspec
-        run: npm install -g openspec
+        # The CLI that validates these specs is @fission-ai/openspec (provides
+        # the `openspec` bin). The bare `openspec` npm package is a different
+        # tool and installs no `openspec` command, which broke the gate.
+        run: npm install -g @fission-ai/openspec
       - name: OpenSpec spec-hygiene gate
         run: ./scripts/check-openspec.sh
 
