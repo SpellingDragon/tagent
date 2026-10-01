@@ -190,6 +190,7 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 		ct.tmuxMonitor.RemoveSession(sessionID)
 		ct.removeResidentMeta(sessionID)
 	})
+	detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
 	if m.Watch != "" {
 		if err := detector.SetWatch(m.Watch, 5*time.Second); err != nil {
 			log.Warnf("[ActionTool] recovery watch %s: %v", sessionID, err)

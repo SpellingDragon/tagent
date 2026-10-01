@@ -60,6 +60,9 @@ type TmuxMonitor struct {
 type sessionInspector interface {
 	ProcessExists(sessionID string) bool
 	IsPaneDead(sessionID string) bool
+	// PaneDeadStatus（failure-polarity passthrough D1）：读死 pane 退出码；
+	// known=false 表示状态不可辨（pane 活/会话消失/命令失败），调用方按 unknown 处理。
+	PaneDeadStatus(sessionID string) (code int, known bool)
 	// SessionAlive3（R3）：三态探测——list-sessions 单源；known=false 表示命令
 	// 不可辨（monitor 计数加闸，不立即判死）。
 	SessionAlive3(sessionID string) (alive, known bool)
@@ -513,6 +516,19 @@ func (tm *TmuxMonitor) fakeDeadThreshold(session *TmuxSession) time.Duration {
 	return tm.fakeDeadDuration
 }
 
+// deathPolarity decides the settle status for a detected process death
+// (failure-polarity passthrough D1): a KNOWN non-zero exit code (including a
+// negative signal death) is reported as SessionError so the failure reaches the
+// notification; a clean exit (0) or an unresolvable status keeps the current
+// completed polarity. Reading the code is the single source of failure truth —
+// the monitor does not guess success.
+func (tm *TmuxMonitor) deathPolarity(sessionID string) SessionStatus {
+	if code, known := tm.executor.PaneDeadStatus(sessionID); known && code != 0 {
+		return SessionError
+	}
+	return SessionCompleted
+}
+
 // 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	if tm.executor == nil {
@@ -540,7 +556,9 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 		_ = processExists
 		_ = isPaneDead
-		return SessionCompleted
+		// 探测连续不可辨 = 框架失明，不是任务成功：报失败极性（Err 文本由
+		// detector 拼「exit status unresolvable」）。
+		return SessionError
 	}
 	session.ProbeUnknownCount = 0
 
@@ -607,7 +625,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			session.LastOutput = capture
 			session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte(capture)))
 		}
-		return SessionCompleted
+		return tm.deathPolarity(session.ID)
 	}
 
 	if !session.StableSince.IsZero() {
@@ -637,7 +655,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 				if tm.executor.IsPaneDead(session.ID) {
 					session.LastOutput = currentOutput
 					session.LastOutputMD5 = currentMD5
-					return SessionCompleted
+					return tm.deathPolarity(session.ID)
 				}
 				if session.QuietTimeout > 0 {
 					log.Infof("[TmuxMonitor] session %s quiet beyond declared quiet_timeout=%s, engaging fake-dead kill",
@@ -663,7 +681,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			if tm.executor.IsPaneDead(session.ID) {
 				session.LastOutput = currentOutput
 				session.LastOutputMD5 = currentMD5
-				return SessionCompleted
+				return tm.deathPolarity(session.ID)
 			}
 			return SessionFakeDead
 		}
@@ -731,6 +749,10 @@ func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) bool {
 			return false
 		}
 		log.Warnf("[TmuxMonitor] session %s reached max kill retries, force-removing", session.ID)
+		// 三连败强拆：进程逃逸未被杀死，框架无法确认其结局——报失败极性，
+		// 绝不伪装成正常完成（D3「框架失明 ≠ 任务成功」）。
+		session.Status = SessionError
+		return true
 	}
 
 	session.Status = SessionCompleted

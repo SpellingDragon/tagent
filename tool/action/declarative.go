@@ -177,6 +177,7 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(co
 			ct.tmuxMonitor.RemoveSession(sessionID)
 			ct.removeResidentMeta(sessionID)
 		})
+		detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
 		baseline := 0
 		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
 			baseline = strings.Count(out, "\n")

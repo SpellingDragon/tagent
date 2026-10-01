@@ -181,6 +181,7 @@ func init() {
 		{Name: TypeConsolidation, Role: model.RoleSystem, Skeleton: true, TTLDays: -1, Embeddable: true, Recallable: true},
 		{Name: TypeGovernance, Role: model.RoleSystem, Skeleton: false, TTLDays: -1, Embeddable: false, Recallable: true},
 		{Name: TypeFeedback, Role: model.RoleSystem, Skeleton: true, TTLDays: 30, Embeddable: false, Recallable: true},
+		{Name: TypeCognitiveAssetChanged, Role: model.RoleUser, Skeleton: true, TTLDays: 30, Embeddable: true, Recallable: true},
 	}
 	for _, spec := range builtin {
 		RegisterEventType(spec)

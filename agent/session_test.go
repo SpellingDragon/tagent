@@ -2311,7 +2311,7 @@ func TestTaskChain_ResumeRebindsUnderSameID(t *testing.T) {
 
 	round2 := task.NewManualDetectorDetach(time.Millisecond)
 	spec := task.TaskSpec{
-		Kind: "command", Desc: "long svc", Key: "chain-resume",
+		Kind: "command", Lifetime: task.LifetimeService, Desc: "long svc", Key: "chain-resume",
 		Origin:      map[string]string{"trigger_source": "user"},
 		Declarative: &task.Declarative{Kind: "command", Desc: "long svc", TaskID: "s-r"},
 		ResumeFn: func(context.Context, string) (task.SettleDetector, error) {

@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildTmuxCommand_WithRunAsUser(t *testing.T) {
@@ -286,14 +289,82 @@ func TestActionTool_TmuxExitCode(t *testing.T) {
 	}
 
 	resp := result.(*ActionToolResult)
-	t.Logf("Session=%s status=%q output=%q", resp.SessionID, resp.Status, resp.Output)
+	t.Logf("Session=%s status=%q exit_code=%d output=%q", resp.SessionID, resp.Status, resp.ExitCode, resp.Output)
 
+	// 行为变更（failure-polarity-passthrough）：非零退出从旧的「completed + Pane is dead」
+	// 改为失败极性 + 退出码透传。旧断言按行为变更流程废弃。
+	if resp.Status != "error" {
+		t.Errorf("expected failure polarity (status=error) for exit 42, got %q", resp.Status)
+	}
+	if resp.ExitCode != 42 {
+		t.Errorf("expected exit_code=42, got %d", resp.ExitCode)
+	}
 	if !strings.Contains(resp.Output, "before_error") {
 		t.Errorf("Expected 'before_error' in output, got %q", resp.Output)
 	}
 	if strings.Contains(resp.Output, "after_error") {
 		t.Errorf("Did not expect 'after_error' (exit 42 should prevent it)")
 	}
+}
+
+// TestPaneDeadStatus 钉住 executor 退出码读取（D1）：干净/非零/信号死/活会话。
+// 真 tmux（skip short）。
+func TestPaneDeadStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real tmux; skip in -short")
+	}
+	if !IsTmuxAvailable() {
+		t.Skip("tmux not available")
+	}
+	te := NewTmuxExecutor()
+
+	cases := []struct {
+		name      string
+		cmd       string
+		wantCode  int
+		wantKnown bool
+	}{
+		{"exit0", "exit 0", 0, true},
+		{"exit42", "exit 42", 42, true},
+	}
+	// createRetry 吸收并发 tmux server 启动竞态（"server exited unexpectedly"）。
+	createRetry := func(command string) (*TmuxSession, error) {
+		var lastErr error
+		for i := 0; i < 3; i++ {
+			s, err := te.CreateSession(context.Background(), TmuxCreateOptions{Command: command})
+			if err == nil {
+				return s, nil
+			}
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+		}
+		return nil, lastErr
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sess, err := createRetry(c.cmd)
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			// 等待 pane 死亡。
+			deadline := time.Now().Add(3 * time.Second)
+			for !te.IsPaneDead(sess.ID) && time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+			}
+			code, known := te.PaneDeadStatus(sess.ID)
+			require.True(t, known, "%s: status 应可读", c.name)
+			require.Equal(t, c.wantCode, code)
+			_ = te.KillSession(sess.ID)
+		})
+	}
+
+	// 活会话（sleep）→ known=false（pane 未死）。
+	sess, err := createRetry("sleep 30")
+	require.NoError(t, err)
+	code, known := te.PaneDeadStatus(sess.ID)
+	require.False(t, known, "活会话退出码不可辨")
+	require.Equal(t, 0, code)
+	_ = te.KillSession(sess.ID)
 }
 
 func TestValidSessionName(t *testing.T) {

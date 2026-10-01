@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -362,6 +363,35 @@ func (te *TmuxExecutor) IsPaneDead(sessionID string) bool {
 	}
 
 	return strings.TrimSpace(stdout.String()) == "1"
+}
+
+// PaneDeadStatus reads the exit status of a dead pane via tmux's
+// `#{pane_dead_status}`. It returns (code, known):
+//   - pane dead → (exit code, true). tmux reports signal-death as a negative value.
+//   - pane still alive, session gone, or command failed → (0, false) — the exit
+//     status is not resolvable, which the caller must treat as "unknown", never as
+//     success. Framework-created sessions run with remain-on-exit, so a dead pane
+//     is retained and its status remains readable at detection time.
+//
+// 契约: docs/wiki/tool/tmux-action.md#failure-polarity
+func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool) {
+	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_dead_status}"})
+	cmd := exec.Command(cmdName, cmdArgs...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return 0, false
+	}
+	trimmed := strings.TrimSpace(stdout.String())
+	if trimmed == "" {
+		return 0, false
+	}
+	status, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, false
+	}
+	return status, true
 }
 
 // SessionAlive3：三态存活探测——list-sessions

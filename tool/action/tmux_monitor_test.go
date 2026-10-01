@@ -20,11 +20,16 @@ type mockInspector struct {
 	// paneDeadOnRecheck: if >= 0, on the Nth call to IsPaneDead, returns true instead of isPaneDead.
 	// Used to simulate "pane died between initial check and post-heartbeat re-check".
 	paneDeadOnRecheck int
-	output            string
-	outputErr         error
-	heartbeatResp     string
-	killErr           error
-	restartErr        error
+	// paneExitCode/paneExitKnown program PaneDeadStatus (failure-polarity passthrough).
+	// Default known=false → unresolvable → deathPolarity keeps completed polarity, so
+	// tests that don't set it are unaffected.
+	paneExitCode  int
+	paneExitKnown bool
+	output        string
+	outputErr     error
+	heartbeatResp string
+	killErr       error
+	restartErr    error
 
 	// processExistsCalls Call tracking
 	processExistsCalls  int
@@ -83,6 +88,19 @@ func (m *mockInspector) IsPaneDead(sessionID string) bool {
 		return true
 	}
 	return m.isPaneDead
+}
+
+func (m *mockInspector) PaneDeadStatus(sessionID string) (int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.paneExitCode, m.paneExitKnown
+}
+
+// setPaneExit programs the dead-pane exit status for failure-polarity tests.
+func (m *mockInspector) setPaneExit(code int, known bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.paneExitCode, m.paneExitKnown = code, known
 }
 
 func (m *mockInspector) GetSessionOutput(sessionID string) (string, error) {

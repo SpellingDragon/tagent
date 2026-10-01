@@ -98,6 +98,20 @@ type TmuxSettleDetector struct {
 
 	probeMu     sync.Mutex
 	probeFailed bool
+
+	// paneStatusFn reads the dead pane's exit status on demand (failure-polarity
+	// passthrough D2, pull mode). Set via SetPaneStatusReader; nil means the
+	// detector cannot resolve exit codes (Err text degrades to "unresolvable").
+	// Pulled at OnStateChange time — before reap() — so remain-on-exit keeps the
+	// pane and its status readable.
+	paneStatusFn func() (code int, known bool)
+}
+
+// SetPaneStatusReader wires the exit-status pull used to enrich a terminal
+// SessionError signal with a concrete exit code. Called once at construction by
+// the ActionTool integration with a closure over the executor + session id.
+func (d *TmuxSettleDetector) SetPaneStatusReader(fn func() (code int, known bool)) {
+	d.paneStatusFn = fn
 }
 
 // NewTmuxSettleDetector creates a detector for the given session. cancelFn, when
@@ -183,11 +197,26 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 	d.mu.Unlock()
 	output = trimToLineOffset(output, baseline)
 	var err error
+	var exitCode int
 	if newStatus == SessionError {
-		err = fmt.Errorf("tmux session %s entered error state", d.sessionID)
+		// Pull the exit code at detection time (before reap, remain-on-exit keeps
+		// the pane). A concrete non-zero code carries failure polarity; an
+		// unresolvable status (probe失明 / kill-escaped) still errors — "framework
+		// blind ≠ task succeeded".
+		if d.paneStatusFn != nil {
+			code, known := d.paneStatusFn()
+			if known && code != 0 {
+				exitCode = code
+				err = fmt.Errorf("tmux session %s exited with code %d", d.sessionID, code)
+			} else {
+				err = fmt.Errorf("tmux session %s entered error state (exit status unresolvable)", d.sessionID)
+			}
+		} else {
+			err = fmt.Errorf("tmux session %s entered error state", d.sessionID)
+		}
 	}
 	select {
-	case d.ch <- task.SettleSignal{Kind: kind, Output: output, Err: err}:
+	case d.ch <- task.SettleSignal{Kind: kind, Output: output, Err: err, ExitCode: exitCode}:
 	default:
 	}
 	if isTerminalStatus(newStatus) {

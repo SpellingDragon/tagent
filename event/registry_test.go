@@ -30,6 +30,7 @@ func TestRegistryReproducesBuiltinBehavior(t *testing.T) {
 		{TypeContextCompressSummary, false, false, true, false, -1, model.RoleUser, false},
 		{TypeContextCompress, false, false, true, true, 3, model.RoleUser, true},
 		{TypeToolChain, false, false, true, false, 0, model.RoleUser, true},
+		{TypeCognitiveAssetChanged, false, false, true, false, 30, model.RoleUser, false},
 	}
 	for _, c := range cases {
 		spec, ok := LookupEventType(c.name)
@@ -110,6 +111,7 @@ func TestRegistryDerivedSetsMatchDeclaredTable(t *testing.T) {
 		TypeTaskSpawned:            30,
 		TypeResidentSession:        30,
 		TypeInboxReceipt:           30,
+		TypeCognitiveAssetChanged:  30,
 	}
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)
@@ -196,6 +198,12 @@ func TestIsNonProjectionEventType_Declarations(t *testing.T) {
 	require.False(t, IsNonProjectionEventType(TypeExternalInput))
 	require.False(t, IsNonProjectionEventType(TypeAgentOutput))
 	require.False(t, IsNonProjectionEventType(TypeActionCommand))
+	// cognitive_asset_changed 必须进投影——被看见是漂移审计的最低目标（D1 终态不变量）。
+	require.False(t, IsNonProjectionEventType(TypeCognitiveAssetChanged))
+	spec, ok := LookupEventType(TypeCognitiveAssetChanged)
+	require.True(t, ok)
+	require.True(t, spec.Embeddable, "audit notes must be discoverable via recall")
+	require.True(t, spec.Recallable)
 
 	require.False(t, IsNonProjectionEventType("some_future_business_type"))
 }

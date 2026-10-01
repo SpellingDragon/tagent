@@ -40,8 +40,8 @@ func TestProbeUnknownGate_ConsecutiveLimit(t *testing.T) {
 			"unknown #%d must keep the session (gate < limit 3)", i)
 		require.Equal(t, i, sess.ProbeUnknownCount)
 	}
-	require.Equal(t, SessionCompleted, tm.detectSessionState(sess),
-		"3rd consecutive unknown must be treated as dead")
+	require.Equal(t, SessionError, tm.detectSessionState(sess),
+		"3rd consecutive unknown = 框架失明，报失败极性而非伪装完成（failure-polarity passthrough D3）")
 }
 
 // TestProbeUnknownGate_DeterministicDeadImmediate 会话真死（list 成功不含）立即 dead，不吃加闸。

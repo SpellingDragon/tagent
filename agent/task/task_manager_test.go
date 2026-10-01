@@ -433,7 +433,7 @@ func TestBindDetector_SignalsReachManager(t *testing.T) {
 		mu.Unlock()
 	}})
 	tk := tm.RestoreTask("t-bind", TaskSpec{
-		Kind: "command", Desc: "restored",
+		Kind: "command", Lifetime: LifetimeService, Desc: "restored",
 		Alive:       func() bool { return true },
 		Declarative: &Declarative{Kind: "command", TaskID: "n-x"},
 	}, time.Now(), TaskSuspect)
@@ -687,7 +687,7 @@ func TestAliveDetached_ReadyOnceThenSuppress(t *testing.T) {
 		},
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "server :8080"}, d)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "server :8080"}, d)
 	if res.Settled {
 		t.Fatalf("expected ack (background) for a service task")
 	}
@@ -721,7 +721,7 @@ func TestAliveDetached_SuspectSuppressed(t *testing.T) {
 		OnSettle: func(_ *Task, _ SettleSignal) { mu.Lock(); count++; mu.Unlock() },
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	tm.Spawn(TaskSpec{Kind: "command", Desc: "svc"}, d)
+	tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc"}, d)
 
 	d.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return count == 1 })
@@ -748,7 +748,7 @@ func TestAliveDetached_CompletionEndsAndNotifies(t *testing.T) {
 		},
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc"}, d)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc"}, d)
 
 	d.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(settles) == 1 })
@@ -888,7 +888,7 @@ func TestReconcileDetached_GoneSessionRetired(t *testing.T) {
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
 	alive := false
-	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc", Alive: func() bool { return alive }}, d)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc", Alive: func() bool { return alive }}, d)
 	d.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitUntil(t, time.Second, func() bool { return res.Task.Status() == TaskAliveDetached })
 
@@ -935,7 +935,7 @@ func TestReconcileDetached_GoneSessionRetired(t *testing.T) {
 func TestReconcileDetached_NilProbeSkipped(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "subagent", Desc: "plan"}, d)
+	res := tm.Spawn(TaskSpec{Kind: "subagent", Lifetime: LifetimeService, Desc: "plan"}, d)
 	d.Emit(SettleSignal{Kind: SettleStable, Output: "working"})
 	waitUntil(t, time.Second, func() bool { return res.Task.Status() == TaskAliveDetached })
 	if got := len(tm.List()); got != 1 {
@@ -1207,7 +1207,7 @@ func TestResume_RestoredTaskNilWatchDone(t *testing.T) {
 func spawnAliveDetachedTask(t *testing.T, tm *TaskManager, resumeFn func(context.Context, string) (SettleDetector, error)) (*Task, *ManualDetector) {
 	t.Helper()
 	det := NewManualDetectorDetach(10 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc", ResumeFn: resumeFn}, det)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc", ResumeFn: resumeFn}, det)
 	if res.Settled {
 		t.Fatalf("expected ack (not settled) before detach")
 	}
@@ -1298,7 +1298,7 @@ func TestResume_IllegalStates(t *testing.T) {
 	}
 
 	det3 := NewManualDetectorDetach(10 * time.Millisecond)
-	res3 := tm.Spawn(TaskSpec{Kind: "command", Desc: "svc2"}, det3)
+	res3 := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc2"}, det3)
 	det3.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
 	waitStatus(t, res3.Task, TaskAliveDetached)
 	if _, err := tm.Resume(context.Background(), res3.Task.ID, "x"); err == nil || !strings.Contains(err.Error(), "does not support resume") {
@@ -1743,4 +1743,68 @@ func TestSettleWatch_NoStateChange(t *testing.T) {
 	if task.status != TaskAliveDetached {
 		t.Fatalf("status changed to %v, want alive-detached preserved", task.status)
 	}
+}
+
+// TestEmitBackground_JobStableNoNotify 钉住 D4 分流：job 型（command/subagent）的
+// SettleStable/SettleSuspect 不转 alive-detached、零 onSettle 通知；面板状态照常。
+// 终态见 design 信号发射矩阵（oneshot 不发射中间态信号）。
+func TestEmitBackground_JobStableNoNotify(t *testing.T) {
+	var mu sync.Mutex
+	notified := 0
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(_ *Task, _ SettleSignal) { mu.Lock(); notified++; mu.Unlock() },
+	})
+
+	// job 型 stable：不转 alive-detached、不通知，但面板可见 TaskStable。
+	d := NewManualDetectorDetach(10 * time.Millisecond)
+	res := tm.Spawn(TaskSpec{Kind: "command", Desc: "sleep 180"}, d) // command → job
+	d.Emit(SettleSignal{Kind: SettleStable, Output: "quiet"})
+	waitUntil(t, time.Second, func() bool {
+		res.Task.mu.Lock()
+		defer res.Task.mu.Unlock()
+		return res.Task.status == TaskStable // applyStatus 置面板态
+	})
+	time.Sleep(50 * time.Millisecond) // 留 emitBackground 误通知的时间窗
+	mu.Lock()
+	if notified != 0 {
+		mu.Unlock()
+		t.Fatalf("job stable should NOT notify; got %d", notified)
+	}
+	mu.Unlock()
+	if got := res.Task.Status(); got == TaskAliveDetached {
+		t.Fatalf("job stable must not transition to alive_detached")
+	}
+
+	// job 型 suspect：同样静默。
+	d.Emit(SettleSignal{Kind: SettleSuspect, Output: "quiet2"})
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	if notified != 0 {
+		mu.Unlock()
+		t.Fatalf("job suspect should NOT notify; got %d", notified)
+	}
+	mu.Unlock()
+
+	// job 型终态结算：照常通知（分流只针对中间态信号）。
+	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
+	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return notified == 1 })
+	d.Done()
+}
+
+// TestEmitBackground_ServiceStableNotifies 钉住 service 型 stable 现状保持：转
+// alive-detached 且发一次性就绪通知。
+func TestEmitBackground_ServiceStableNotifies(t *testing.T) {
+	var mu sync.Mutex
+	notified := 0
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(_ *Task, _ SettleSignal) { mu.Lock(); notified++; mu.Unlock() },
+	})
+	d := NewManualDetectorDetach(10 * time.Millisecond)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "dev-server"}, d)
+	d.Emit(SettleSignal{Kind: SettleStable, Output: "listening"})
+	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return notified == 1 })
+	if got := res.Task.Status(); got != TaskAliveDetached {
+		t.Fatalf("service stable should transition to alive_detached, got %s", got)
+	}
+	d.Done()
 }

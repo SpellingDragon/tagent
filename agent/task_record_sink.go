@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -132,6 +133,66 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 		Timestamp:    time.Now().UnixMilli(),
 		Metadata:     md,
 	})
+}
+
+// CognitiveAssetChange 是漂移审计事件载荷的最小契约（与根包 tagent.AssetChange
+// 字段对齐；agent 包不反向依赖根包，以本类型解耦）。
+type CognitiveAssetChange struct {
+	File      string
+	OldHash   string // 空=新增
+	NewHash   string // 空=删除
+	Size      int64
+	Timestamp int64
+}
+
+// RecordCognitiveAssetChange（cognitive-asset-guard D1）：漂移审计批次事件的
+// 事实链写入入口——进投影（被看见是审计的最低目标），不发 bus、不打断消息路由。
+func (ta *TagentAgent) RecordCognitiveAssetChange(changes []CognitiveAssetChange) {
+	if ta == nil || ta.contextManager == nil || len(changes) == 0 {
+		return
+	}
+	cm := ta.contextManager
+	var lines []string
+	files := make([]string, 0, len(changes))
+	for _, c := range changes {
+		old8, new8 := shortHash(c.OldHash), shortHash(c.NewHash)
+		if c.OldHash == "" {
+			old8 = "-"
+		}
+		if c.NewHash == "" {
+			new8 = "(deleted)"
+		}
+		ts := c.Timestamp
+		if ts == 0 {
+			ts = time.Now().UnixMilli()
+		}
+		lines = append(lines, fmt.Sprintf("%s %s->%s size=%d mtime=%s",
+			c.File, old8, new8, c.Size, time.UnixMilli(ts).Format(time.RFC3339)))
+		files = append(files, c.File)
+	}
+	md := map[string]string{
+		tagentevent.MetaKeyAgentName: cm.name,
+		"files":                      strings.Join(files, ","),
+	}
+	if cm.sessionID != "" {
+		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
+	}
+	content := strings.Join(lines, "\n")
+	cm.persistTaskRecord(memory.FullEvent{
+		EventType:    tagentevent.TypeCognitiveAssetChanged,
+		EventSummary: fmt.Sprintf("认知资产漂移: %d 处变更 [%s]", len(changes), strings.Join(files, ", ")),
+		Content:      content,
+		Timestamp:    time.Now().UnixMilli(),
+		Metadata:     md,
+	})
+}
+
+// shortHash 取指纹前 8 位（证据行展示用；空串原样返回）。
+func shortHash(h string) string {
+	if len(h) > 8 {
+		return h[:8]
+	}
+	return h
 }
 
 // ExecutorConfig returns THIS agent's assembled execution face (model/tools/

@@ -137,6 +137,30 @@ func escapeNewlines(s string) string {
 	return strings.NewReplacer("\r\n", "␤", "\n", "␤", "\r", "␤").Replace(s)
 }
 
+// formatExitCode renders a settle signal's exit code for the notification text
+// (failure-polarity passthrough D2). A negative code is a signal death and is
+// annotated; zero means no concrete code was resolved (unresolvable death) and
+// yields an empty fragment so no misleading "exit_code=0" is emitted.
+func formatExitCode(code int) string {
+	if code == 0 {
+		return ""
+	}
+	if code < 0 {
+		return fmt.Sprintf(" exit_code=%d (signal)", code)
+	}
+	return fmt.Sprintf(" exit_code=%d", code)
+}
+
+// settleResultSegment decides the `→ 结果:` tail of a settle notification. A
+// blank-only payload with no error degrades to a single-line "（无输出）" ticket
+// (D5): an all-whitespace body must not be injected as content.
+func settleResultSegment(result string, hasErr bool) string {
+	if !hasErr && strings.TrimSpace(result) == "" {
+		return "（无输出）"
+	}
+	return result
+}
+
 // newBatchRetiredSummaryEvent emits ONE external_input carrying N per-task
 // settled lines, collapsing a retirement storm into a single notification.
 // The line format mirrors newTaskSettledEvent header: retire outputs are
@@ -152,13 +176,13 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 		if i > 0 {
 			b.WriteString("\n\n---\n\n")
 		}
-		fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s",
-			marker, truncateRunes(r.Task.Spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord)
+		fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s%s",
+			marker, truncateRunes(r.Task.Spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord, formatExitCode(r.Sig.ExitCode))
 		if r.Sig.Err != nil {
 			fmt.Fprintf(&b, " 错误: %s", truncateRunes(r.Sig.Err.Error(), settleErrMaxChars))
 		}
-		if out := r.Sig.Output; out != "" {
-			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(out))
+		if seg := settleResultSegment(r.Sig.Output, r.Sig.Err != nil); seg != "" {
+			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(seg))
 		}
 	}
 	msg := model.Message{Role: model.RoleUser, Content: b.String()}
@@ -209,16 +233,16 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s",
-		marker, truncateRunes(tk.Spec.Desc, settleDescMaxChars), task.ShortID(tk.ID), statusWord)
+	fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s%s",
+		marker, truncateRunes(tk.Spec.Desc, settleDescMaxChars), task.ShortID(tk.ID), statusWord, formatExitCode(sig.ExitCode))
 	if sig.Err != nil {
 		fmt.Fprintf(&b, " 错误: %s", truncateRunes(sig.Err.Error(), settleErrMaxChars))
 	}
-	if result != "" {
+	if seg := settleResultSegment(result, sig.Err != nil); seg != "" {
 		if spillPath != "" {
-			fmt.Fprintf(&b, " → %s", result)
+			fmt.Fprintf(&b, " → %s", seg)
 		} else {
-			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(result))
+			fmt.Fprintf(&b, " → 结果: %s", escapeNewlines(seg))
 		}
 	}
 	evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})

@@ -530,6 +530,27 @@ func wireAgent(
 		ta.RegisterCloser(stopCloser(evoGit.Stop))
 	}
 
+	// 认知资产漂移审计（cognitive-asset-guard D1·终态）：默认开启、不依赖
+	// governance、零新配置——任何写入方（含绕过审批规则的写法）都过 hash 不变量。
+	// 仅 entry 装配，防多 agent 重复 ticker/重复事件（同一文件集是进程级事实）。
+	// 需显式 WorkingDir 作为资产相对路径基准：为空则无法可靠解析清单，跳过
+	// （绝不可回退进程 cwd——测试环境会把审计写进仓库根，污染工作树）。
+	if cfg.WorkingDir != "" && name == cfg.Entry && mode.bindsProcessShared() {
+		auditor := NewAssetAuditor(cfg.WorkingDir, DefaultAssetPatterns(),
+			[]string{cfg.ConfigPath}, func(changes []AssetChange) {
+				cs := make([]agent.CognitiveAssetChange, 0, len(changes))
+				for _, c := range changes {
+					cs = append(cs, agent.CognitiveAssetChange(c))
+				}
+				ta.RecordCognitiveAssetChange(cs)
+			})
+		if err := auditor.Start(); err == nil {
+			ta.RegisterCloser(auditor)
+		} else {
+			log.Errorf("[asset-drift-audit] start failed (audit disabled): %v", err)
+		}
+	}
+
 	if cfg.Governance.Enabled && rc.govGate != nil && name == cfg.Entry && rc.govGate.Approval() != nil && mode.bindsProcessShared() {
 		rc.govGate.Approval().AddChannel(&approvalInjectChannel{ta: ta})
 		for _, ch := range rc.approvalChannels {

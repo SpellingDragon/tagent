@@ -173,6 +173,11 @@ func DefaultRules() []Rule {
 			},
 		},
 		{
+			ID: "exec.cognitive-asset-write", Level: RiskCritical,
+			Reason: "写入认知资产真源（默认清单 resources/prompts、skills、scripts 命中重定向/tee/sed -i/cp/mv/rm/python open(w) 写形态）——执行权在人，须人工批准。refine 登记不豁免",
+			Match:  matchCognitiveAssetWrite,
+		},
+		{
 			ID: "exec.privilege", Level: RiskCritical,
 			Reason: "提权/系统配置改动（sudo 写系统路径、修改启动项）",
 			Match: func(c RiskContext) bool {

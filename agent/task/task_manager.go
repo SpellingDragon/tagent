@@ -99,6 +99,12 @@ type SettleSignal struct {
 	Kind   SettleKind
 	Output string
 	Err    error
+	// ExitCode is the process exit status read at settle time (failure-polarity
+	// passthrough D2): non-zero (or negative for signal death) reports how a dead
+	// process exited. Zero is ambiguous between "clean exit 0" and "not read", so
+	// it is only meaningful alongside a known process death; it is NOT persisted
+	// (restored tasks re-adjudicate via liveness probe).
+	ExitCode int
 }
 
 // SettleDetector observes a running task and emits SettleSignals. Different task
@@ -836,6 +842,14 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		}
 		return
 	case SettleStable:
+		// alive-detached 语义仅属 service 型（failure-polarity passthrough D4·脚手架）：
+		// job 型的静默 stable 不转后台就绪、不发 ∞ 通知（面板 stable 由 applyStatus
+		// 照常置，本函数只管通知/转移）。终态见 design 信号发射矩阵——oneshot 不发射
+		// 中间态信号，届时 alive_detached 生产者归零、全链路随 settle-signal-matrix 拆除。
+		if LifetimeOf(task.Spec) != LifetimeService {
+			task.mu.Unlock()
+			return
+		}
 		if task.aliveDetached {
 			task.mu.Unlock()
 			return
@@ -844,6 +858,10 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		task.status = TaskAliveDetached
 		task.detachedAt = tm.now()
 	case SettleSuspect:
+		if LifetimeOf(task.Spec) != LifetimeService {
+			task.mu.Unlock()
+			return
+		}
 		if task.aliveDetached {
 			task.mu.Unlock()
 			return

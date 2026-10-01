@@ -40,6 +40,8 @@ const (
 	TypeGovernance = "governance"
 
 	TypeFeedback = "feedback"
+
+	TypeCognitiveAssetChanged = "cognitive_asset_changed"
 )
 
 // ExtractEventType 按消息角色判定事件类型。RoleSystem 会出现在事件流中

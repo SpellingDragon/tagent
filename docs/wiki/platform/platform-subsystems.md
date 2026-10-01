@@ -50,6 +50,8 @@ graph TB
 
 **分级判据取工具声明名，不取注册 ID**：`GovernanceTool` 用内层工具 `Declaration().Name` 构造 `RiskContext`，注册时的装配别名（注册 ID）根本不进分级面——换个注册名逃不掉分级，声明叫什么就按什么分级。
 
+**认知资产写审批**：`DefaultRules` 含 `exec.cognitive-asset-write` → critical（写形态命中 `resources/prompts/`、`skills/`、`scripts/` 时人在环批准，refine 登记不豁免）。这是 cognitive-asset-guard 的**脚手架**（文本匹配可绕），其上有默认开启、不依赖 governance 的 **D1 hash 漂移审计**（不可绕兜底），终态方向是**权限域分离**（资产目录对 exec 物理只读）。全貌、拆除账本与同源清单见 [cognitive-asset-guard.md](./cognitive-asset-guard.md)。
+
 **拒绝以工具结果回给模型，而不是 Go error**：`warn` 放行只记账；`strict` 与批准挂起都返回一段以 `[governance_denied]` 开头的**结果文本**（带原因、风险级别、命中规则，并指引"调整操作或走批准/goal 登记后重试"），调用本身不执行、也不作为错误抛出。被拒的理由必须出现在模型读得到的地方，否则它既看不见为什么失败，也没有自纠的入口。
 
 <a id="evolution-wiring"></a>

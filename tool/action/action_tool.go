@@ -302,11 +302,11 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 				},
 				"quiet_timeout": {
 					Type:        "integer",
-					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds. NOTE: this only detects SILENCE and never bounds total lifetime — that is `ttl`'s job. A legitimate build slower than your `ttl` (default 10m) is still reaped, so for long-running work raise `ttl` alongside `quiet_timeout`.",
+					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds. NOTE: this only detects SILENCE and never bounds total lifetime — that is `ttl`'s job. A legitimate build slower than your `ttl` (default 10m) is still reaped, so for long-running work raise `ttl` alongside `quiet_timeout`. NOTE: the framework captures the process exit code (including signal deaths) and reports failure polarity on settle — let your command fail directly; do NOT mask it with `; echo \"EXIT=$?\"` (that swallows the code).",
 				},
 				"ttl": {
 					Type:        "integer",
-					Description: "ABSOLUTE lifetime of this session in seconds. The reaper terminates the backing process and retires the task this long after its last reentrant refresh (op=send / resume reset it; op=peek does not). 0 or omitted = configured default (10 minutes if unset). There is NO way to disable the reaper and NO age exemption by mode: 'resident'/'interactive' services are NOT immortal — pass a large ttl for long-lived services, or re-enter to extend. Orthogonal to quiet_timeout (which only detects silence, never bounds total lifetime).",
+					Description: "ABSOLUTE lifetime of this session in seconds. The reaper terminates the backing process and retires the task this long after its last reentrant refresh (op=send / resume reset it; op=peek does not). 0 or omitted = configured default (10 minutes if unset). There is NO way to disable the reaper and NO age exemption by mode: 'resident'/'interactive' services are NOT immortal — pass a large ttl for long-lived services, or re-enter to extend. Orthogonal to quiet_timeout (which only detects silence, never bounds total lifetime). NOTE: the framework captures the process exit code (including signal deaths) and reports failure polarity on settle — let your command fail directly; do NOT mask it with `; echo \"EXIT=$?\"` (that swallows the code).",
 				},
 				"mode": {
 					Type:        "string",
@@ -411,6 +411,11 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 
 	log.Infof("[ActionTool] executing cmd=%q", args.Command)
 
+	// 走私入舱引导（D4 脚手架）：Call 入口单点检测命令文本，命中即在结果尾部
+	// 追加一行。同步完成、ack、无 spawner 直取三个出口共用；relaunch 不经过 Call
+	// 故天然幂等（不重复追加）。纯提示：不改命令、零延迟、零拦截。
+	smuggleHint := smuggleHintFor(args.Command)
+
 	sessionID, detector, err := ct.startSession(ctx, args)
 	if err != nil {
 		log.Errorf("[ActionTool] tmux-level exception (framework/environment), cmd=%q: %v", args.Command, err)
@@ -432,9 +437,13 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			return ct.buildBlockedResult(res.Blocked), nil
 		}
 		if res.Settled {
-			return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal), nil
+			r := ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal)
+			r.Note += smuggleHint
+			return r, nil
 		}
-		return ct.buildAckResult(sessionID, args.Command, res.Task), nil
+		r := ct.buildAckResult(sessionID, args.Command, res.Task)
+		r.Note += smuggleHint
+		return r, nil
 	}
 
 	select {
@@ -442,7 +451,9 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("action: session %s ended without settling", sessionID)
 		}
-		return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, sig), nil
+		r := ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, sig)
+		r.Note += smuggleHint
+		return r, nil
 	case <-ctx.Done():
 		log.Warnf("[ActionTool] ctx cancelled while waiting for session %s: %v", sessionID, ctx.Err())
 		return nil, ctx.Err()
@@ -477,6 +488,7 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 		ct.tmuxMonitor.RemoveSession(sessionID)
 		ct.removeResidentMeta(sessionID)
 	})
+	detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
 	if args.Watch != "" {
 		if err := detector.SetWatch(args.Watch, 5*time.Second); err != nil {
 			return "", nil, err
@@ -682,6 +694,7 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 		Output:     output,
 		OutputFile: outputFile,
 		Note:       extraNote,
+		ExitCode:   sig.ExitCode,
 	}
 }
 
@@ -776,6 +789,10 @@ type ActionToolResult struct {
 	Output     string `json:"output,omitempty"`
 	OutputFile string `json:"output_file,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// ExitCode carries the process exit status on failure polarity
+	// (failure-polarity passthrough D2): non-zero, or negative for a signal death.
+	// Omitted when zero (clean exit / not applicable) to avoid noise.
+	ExitCode int `json:"exit_code,omitempty"`
 }
 
 // IsTmuxAvailable reports whether tmux is actually usable on this system —
