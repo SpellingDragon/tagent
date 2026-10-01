@@ -1672,6 +1672,19 @@ func TestParseNarrativeSection(t *testing.T) {
 	fmt.Println("narrative parser ok")
 }
 
+// verifiedNoticeSet 模拟 TelemetryDispositions 对"标记已核验"事件的输出：
+// 把 refs 里所有结算形状 ref 以给定档位收进成员集（折叠成员资格的测试替身，
+// 对应生产路径中经 GetEvent settle_notice 核验后的 dispositions map）。
+func verifiedNoticeSet(refs []memory.EventReference, disposition int8) map[int64]int8 {
+	d := map[int64]int8{}
+	for _, r := range refs {
+		if isSettleNoticeCandidate(r) {
+			d[r.EventKey] = disposition
+		}
+	}
+	return d
+}
+
 // settleRefs builds N settle-notification refs with realistic single-line
 // bodies (event_bus newTaskSettledEvent form): "[task settled] <marker> <desc>
 // (id=…) <status> → 结果: <result>". resultLen pads the inline result so the
@@ -1703,7 +1716,7 @@ func TestFoldSettleRuns_ConsecutiveRunFoldsToCard(t *testing.T) {
 	}, settleRefs(101, 3, 200)...)
 	refs = append(refs, toolRef(200, tagentevent.TypeAgentOutput, "完成", 99))
 
-	folded := cc.foldSettleRuns(refs, nil)
+	folded := cc.foldSettleRuns(refs, verifiedNoticeSet(refs, TelemInternal))
 
 	var cards []memory.EventReference
 	var settles int
@@ -1711,7 +1724,7 @@ func TestFoldSettleRuns_ConsecutiveRunFoldsToCard(t *testing.T) {
 		switch {
 		case r.EventType == tagentevent.TypeSettleFold:
 			cards = append(cards, r)
-		case isSettleNoticeRef(r):
+		case isSettleNoticeCandidate(r):
 			settles++
 		}
 	}
@@ -1754,7 +1767,7 @@ func TestFoldSettleRuns_SingleAndInterruptedNotFolded(t *testing.T) {
 		"single": single,
 		"broken": interrupted,
 	} {
-		if folded := cc.foldSettleRuns(refs, nil); hasSettleFold(folded) {
+		if folded := cc.foldSettleRuns(refs, verifiedNoticeSet(refs, TelemInternal)); hasSettleFold(folded) {
 			t.Errorf("%s: runs shorter than 2 (or interrupted) must not fold: %+v", name, folded)
 		}
 	}
@@ -1763,8 +1776,8 @@ func TestFoldSettleRuns_SingleAndInterruptedNotFolded(t *testing.T) {
 func TestFoldSettleRuns_Idempotent(t *testing.T) {
 	cc := newFoldCC(2)
 	refs := settleRefs(101, 4, 100)
-	once := cc.foldSettleRuns(refs, nil)
-	twice := cc.foldSettleRuns(once, nil)
+	once := cc.foldSettleRuns(refs, verifiedNoticeSet(refs, TelemInternal))
+	twice := cc.foldSettleRuns(once, verifiedNoticeSet(once, TelemInternal))
 	if len(once) != 1 || len(twice) != 1 {
 		t.Fatalf("folding must converge to one card, got %d then %d", len(once), len(twice))
 	}
@@ -1812,6 +1825,7 @@ func TestCompress_SettleStormFoldReclaims80Percent(t *testing.T) {
 		if err := store.StoreEvent(r.EventKey, memory.FullEvent{
 			EventKey: r.EventKey, EventType: r.EventType,
 			EventSummary: r.EventSummary, Content: r.EventSummary, Timestamp: r.Timestamp,
+			Metadata: map[string]string{"settle_notice": "true"},
 		}); err != nil {
 			t.Fatalf("StoreEvent %d: %v", r.EventKey, err)
 		}

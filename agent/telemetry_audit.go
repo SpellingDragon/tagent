@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
 const (
@@ -15,19 +16,10 @@ const (
 	auditDwellPerStep = 30 * time.Minute
 )
 
-// auditLineageInternal are the settle lineages that are agent-self-managed
-// (their reclaim output is not a user-originated interaction): the same
-// negative list the delivery gate withholds on.
-var auditLineageInternal = map[string]bool{
-	"meditation":   true,
-	"task-retired": true,
-	"unknown":      true,
-}
-
 // SelfTelemetryAuditor 按滑动窗口样本判定自身遥测的可见性该升到哪一档：窗口时长、
 // 负例占比、最少样本数与每档驻留时间都是命名常量，避免"看一眼就永久外显"或"长期沉默
-// 无人察觉"。它只统计自管谱系（冥想、任务退役、未知）——这些产出不是用户发起的交互，
-// 与投递门使用同一份负例清单。
+// 无人察觉"。它只统计自管谱系（event.SelfManagedLineage：投递门白名单之外 ∧ 冥想）
+// ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，不再有私有清单。
 type SelfTelemetryAuditor struct {
 	mu       sync.Mutex
 	samples  []auditSample
@@ -71,7 +63,7 @@ func (a *SelfTelemetryAuditor) ObserveSettle(metadata map[string]any) {
 	if ts == "" {
 		ts = str("trigger_source")
 	}
-	selfManaged := str("lineage_absent") == "true" || ts == "" || auditLineageInternal[ts]
+	selfManaged := str("lineage_absent") == "true" || tagentevent.SelfManagedLineage(ts)
 	a.observe(selfManaged)
 }
 
@@ -90,7 +82,7 @@ func (a *SelfTelemetryAuditor) ObserveInputFor(source string) {
 	if a == nil {
 		return
 	}
-	a.observe(auditLineageInternal[source])
+	a.observe(tagentevent.SelfManagedLineage(source))
 }
 
 func (a *SelfTelemetryAuditor) observe(selfManaged bool) {
@@ -210,7 +202,7 @@ func (a *SelfTelemetryAuditor) GateReason(spec task.TaskSpec) string {
 	case level >= auditFreeze && !spec.Protected:
 		return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）持续超阈且频率收敛无效 — 冻结新任务纳管（保护类豁免；在飞任务不受影响）", ratio*100, n)
 	case level == 2 && !spec.Protected:
-		if lineage := spec.Origin["meta_trigger_source"]; lineage == "" || auditLineageInternal[lineage] {
+		if lineage := spec.Origin["meta_trigger_source"]; tagentevent.SelfManagedLineage(lineage) {
 			return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）超阈 — 收敛自管任务频率（L2，用户派生与保护任务不受影响）", ratio*100, n)
 		}
 	}

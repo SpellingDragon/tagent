@@ -672,44 +672,27 @@ func extractToolNameFromSummary(summary string) string {
 	return strings.TrimPrefix(s, "调用 ")
 }
 
-// settleNoticePrefix matches task-settle notification bodies: "[task settled]"
-// (event_bus newTaskSettledEvent / newBatchRetiredSummaryEvent) and the inline
-// variant "[task settled inline]" (context_manager reclaim path). Detection
-// runs on the ref's EventSummary — external_input is a Special type, so the
-// summary is the verbatim single-line body.
-const settleNoticePrefix = "[task settled"
-
-// settleFoldRowMaxChars bounds one ticket-card row's summary text — the same
-// honesty bound extractCardLine applies to rolling-summary cards; the full
-// body (result inline/spill ticket) stays recallable via the row's evt_key.
-const settleFoldRowMaxChars = 80
-
-// isSettleNoticeRef reports whether a projection ref is a task-settle
-// notification external_input (fold-eligible regardless of segment age —
-// unlike tool runs, settle notices carry no pairing legality to protect).
-func isSettleNoticeRef(ref memory.EventReference) bool {
-	if ref.EventType != tagentevent.TypeExternalInput {
-		return false
-	}
-	s := strings.TrimSpace(tagentevent.StripEventKeyPrefix(ref.EventSummary))
-	return strings.HasPrefix(s, settleNoticePrefix)
-}
-
 // foldSettleRuns collapses maximal runs of ≥2 consecutive settle-notification
-// refs into one settle_fold ticket-card ref. Idempotent: a
+// refs into one settle_fold ticket-card ref. Notice membership is the
+// dispositions map — the mark-verified set produced by TelemetryDispositions —
+// never the body prefix, so a user message imitating the notice shape is kept
+// verbatim instead of folded. Idempotent: a
 // settle_fold ref is not an external_input, so cards are never re-folded; a
 // card adjacent to newly-arrived settles stays a separate card (each fold
 // act is one bounded card — no unbounded card growth across rounds).
 func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispositions map[int64]int8) []memory.EventReference {
 	result := make([]memory.EventReference, 0, len(refs))
 	for i := 0; i < len(refs); {
-		if !isSettleNoticeRef(refs[i]) {
+		if _, isNotice := dispositions[refs[i].EventKey]; !isNotice {
 			result = append(result, refs[i])
 			i++
 			continue
 		}
 		j := i
-		for j < len(refs) && isSettleNoticeRef(refs[j]) {
+		for j < len(refs) {
+			if _, ok := dispositions[refs[j].EventKey]; !ok {
+				break
+			}
 			j++
 		}
 		run := refs[i:j]
@@ -731,6 +714,11 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispos
 	}
 	return result
 }
+
+// settleFoldRowMaxChars bounds one ticket-card row's summary text — the same
+// honesty bound extractCardLine applies to rolling-summary cards; the full
+// body (result inline/spill ticket) stays recallable via the row's evt_key.
+const settleFoldRowMaxChars = 80
 
 // buildSettleFoldRef folds a settle run into one ticket-card synthetic ref.
 // The card is honest about what it drops: a header stating the fold count and
@@ -1405,7 +1393,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		}
 		if retainedKeys[ref.EventKey] {
 			retained = append(retained, ref)
-		} else if dispositions != nil && isSettleNoticeRef(ref) && dispositions[ref.EventKey] == TelemActive {
+		} else if d, isNotice := dispositions[ref.EventKey]; isNotice && d == TelemActive {
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))

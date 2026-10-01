@@ -70,16 +70,16 @@
 
 ## 6. CU-6 识别与谱系同源化 〔B-P2-3/B-P2-2，BREAKING〕
 
-- [ ] 6.1 枚举值域：grep 全部 trigger_source 赋值点（context_manager 的 cm.triggerSource 各来源 + event_loop 391/396 + user/wechat/host 等），产出外显值清单入日志
-- [ ] 6.2 据清单提炼 `event.DeliverableLineage(ts string) bool` 白名单函数（单一真源，event 包）
-- [ ] 6.3 投递门扣留判定改调该函数；`compress/telemetry.go` isExternalizedNotice 改调同函数
-- [ ] 6.4 删除 `internalLineageValues` 负名单与 telemetry_audit.go 的 `auditLineageInternal`（改调同函数）
-- [ ] 6.5 新测试：白名单外任意值（含 "task-unstamped"、随机串、空）→ 投递门扣留 ∧ 判内部（双向一致断言同一输入）
-- [ ] 6.6 回归：全部外显值的投递门既有测试逐值通过（漏配即红）
-- [ ] 6.7 `newTaskSettledEvent` 源头写 `Metadata["settle_notice"]=true`；`isSettleNoticeRef` 改只认标记（与 TelemetryDispositions 的 GetEvent **合并为一次读取**，同点取标记与 trigger_source，不新增查库），删除前缀常量 settleNoticePrefix
-- [ ] 6.8 新测试：用户消息以 `[task settled` 开头（无标记）→ 不折叠不票据化；标记通知正常折叠/降级；旧格式（无标记）事件原样保留
-- [ ] 6.9 验证：`go test ./agent/compress/... ./event/... -count=1` + 投递门相关测试全绿
-- [ ] 6.10 提交：`refactor!(event,compress): 谱系白名单同源化+结算通知结构化标记（BREAKING：旧前缀启发式退役）`
+- [x] 6.1 枚举值域：grep 全部 trigger_source 赋值点（context_manager 的 cm.triggerSource 各来源 + event_loop 391/396 + user/wechat/host 等），产出外显值清单入日志
+- [x] 6.2 据清单提炼 `event.DeliverableLineage(ts string) bool` 白名单函数（单一真源，event 包）
+- [x] 6.3 投递门扣留判定改调该函数；`compress/telemetry.go` isExternalizedNotice 改调同函数
+- [x] 6.4 删除 `internalLineageValues` 负名单与 telemetry_audit.go 的 `auditLineageInternal`（改调同函数）
+- [x] 6.5 新测试：白名单外任意值（含 "task-unstamped"、随机串、空）→ 投递门扣留 ∧ 判内部（双向一致断言同一输入）
+- [x] 6.6 回归：全部外显值的投递门既有测试逐值通过（漏配即红）
+- [x] 6.7 `newTaskSettledEvent` 源头写 `Metadata["settle_notice"]=true`；`isSettleNoticeRef` 改只认标记（与 TelemetryDispositions 的 GetEvent **合并为一次读取**，同点取标记与 trigger_source，不新增查库），删除前缀常量 settleNoticePrefix
+- [x] 6.8 新测试：用户消息以 `[task settled` 开头（无标记）→ 不折叠不票据化；标记通知正常折叠/降级；旧格式（无标记）事件原样保留
+- [x] 6.9 验证：`go test ./agent/compress/... ./event/... -count=1` + 投递门相关测试全绿
+- [x] 6.10 提交：`refactor!(event,compress): 谱系白名单同源化+结算通知结构化标记（BREAKING：旧前缀启发式退役）`
 
 ## 7. CU-7 折叠豁免 run 级化 〔B-P1-1/B-P2-1〕（依赖：CU-6 的标记识别先行）
 

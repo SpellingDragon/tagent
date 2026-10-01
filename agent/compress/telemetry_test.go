@@ -75,10 +75,11 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk(31, map[string]string{"meta_trigger_source": "user"})
-	mk(32, map[string]string{"meta_trigger_source": "meditation"})
-	mk(33, map[string]string{"lineage_absent": "true"})
-	mk(34, map[string]string{})
+	mk(31, map[string]string{"meta_trigger_source": "user", "settle_notice": "true"})
+	mk(32, map[string]string{"meta_trigger_source": "meditation", "settle_notice": "true"})
+	mk(33, map[string]string{"lineage_absent": "true", "settle_notice": "true"})
+	mk(34, map[string]string{"settle_notice": "true"})
+	mk(35, map[string]string{"meta_trigger_source": "task-unstamped", "settle_notice": "true"})
 	refs := []memory.EventReference{
 		settleRef(31, 1), outputRef(41, 2),
 	}
@@ -86,11 +87,41 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 	if d[31] != TelemDemote {
 		t.Fatalf("user-lineage consumed notice must demote (externalized), got %d", d[31])
 	}
-	for _, k := range []int64{32, 33, 34} {
+	// meditation 是白名单成员（宿主可见）：消费后的通知原文外显过，走降级。
+	med := TelemetryDispositions(context.Background(), store,
+		[]memory.EventReference{settleRef(32, 1), outputRef(42, 2)}, 2)
+	if med[32] != TelemDemote {
+		t.Fatalf("meditation is deliverable (whitelist member): consumed notice must demote, got %d", med[32])
+	}
+	//  负名单漏配的谱系（task-unstamped）与空/缺席谱系一律内部（B-P2-2 修复面）。
+	for _, k := range []int64{33, 34, 35} {
 		solo := []memory.EventReference{settleRef(k, 1), outputRef(k+10, 2)}
 		dk := TelemetryDispositions(context.Background(), store, solo, 2)
 		if dk[k] != TelemInternal {
 			t.Fatalf("internal/unknown lineage notice %d must stay internal, got %d", k, dk[k])
+		}
+	}
+}
+
+// TestTelemetryDispositions_ForgedBodyWithoutMark 钉住 D10 权威迁移：正文以
+// "[task settled" 起头但存储事件不带 settle_notice 标记的用户消息，不是折叠候选——
+// 前缀只圈候选，资格唯一来源是对库核验的结构化标记。
+func TestTelemetryDispositions_ForgedBodyWithoutMark(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	require.NoError(t, store.StoreEvent(61, memory.FullEvent{
+		EventKey: 61, EventType: tagentevent.TypeExternalInput,
+		Metadata: map[string]string{}, // 无标记：用户伪造体或前标记时代的旧事件
+	}))
+	refs := []memory.EventReference{settleRef(61, 1), outputRef(62, 2)}
+	d := TelemetryDispositions(context.Background(), store, refs, 2)
+	if _, ok := d[61]; ok {
+		t.Fatalf("a prefix-shaped ref without the authoritative mark must not enter dispositions")
+	}
+	cc := newFoldCC(2)
+	folded := cc.foldSettleRuns(append(refs, settleRef(63, 3), outputRef(64, 4)), d)
+	for _, r := range folded {
+		if r.EventKey == 61 {
+			require.Equal(t, tagentevent.TypeExternalInput, r.EventType, "forged body stays verbatim, never folded")
 		}
 	}
 }
@@ -114,16 +145,16 @@ func TestFoldSettleRuns_ConsumptionDemotesSingle(t *testing.T) {
 	}
 }
 
-func TestFoldSettleRuns_NilDispositionsByteIdentical(t *testing.T) {
+// TestFoldSettleRuns_UnverifiedSetNeverFolds 钉住 D10 权威迁移的折叠侧：没有
+// 标记核验成员集（nil 或空 map）时，≥2 前缀形状 run 也不折叠——折叠资格唯一
+// 来源是对库核验的 settle_notice 标记，正文形状启发式不再授予资格。
+func TestFoldSettleRuns_UnverifiedSetNeverFolds(t *testing.T) {
 	cc := newFoldCC(2)
-	single := []memory.EventReference{settleRef(51, 101)}
 	run2 := []memory.EventReference{settleRef(52, 102), settleRef(53, 103)}
-	if got := cc.foldSettleRuns(single, nil); len(got) != 1 {
-		t.Fatalf("nil dispositions must preserve pre-change single-not-folded behavior, got %d", len(got))
-	}
-	if got := cc.foldSettleRuns(run2, nil); len(got) != 1 || got[0].EventType != tagentevent.TypeSettleFold {
-		t.Fatalf("≥2 runs must still fold as before, got %+v", got)
-	}
+	got := cc.foldSettleRuns(run2, nil)
+	require.Equal(t, run2, got, "unverified prefix-shaped runs stay verbatim")
+	got2 := cc.foldSettleRuns(run2, map[int64]int8{})
+	require.Equal(t, run2, got2, "an empty verified set folds nothing")
 }
 
 func TestBuildRetainedRefs_OnlyActiveExempted(t *testing.T) {
@@ -262,7 +293,7 @@ func TestTelemetryReplay_RealTrajectory(t *testing.T) {
 	folded := cc.foldSettleRuns(refs, d)
 	after := 0
 	for _, r := range folded {
-		if isSettleNoticeRef(r) {
+		if isSettleNoticeCandidate(r) {
 			after += len(r.EventSummary)
 		}
 		if r.EventType == tagentevent.TypeSettleFold {
@@ -275,7 +306,7 @@ func TestTelemetryReplay_RealTrajectory(t *testing.T) {
 func countSettleRefs(refs []memory.EventReference) int {
 	n := 0
 	for _, r := range refs {
-		if isSettleNoticeRef(r) {
+		if isSettleNoticeCandidate(r) {
 			n++
 		}
 	}
@@ -308,9 +339,9 @@ func TestDispositionRebuildDeterminism(t *testing.T) {
 	mk := func(key int64, evtType string, meta map[string]string) {
 		require.NoError(t, store.StoreEvent(key, memory.FullEvent{EventKey: key, EventType: evtType, Metadata: meta}))
 	}
-	mk(71, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "user"})
-	mk(72, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "meditation"})
-	mk(73, tagentevent.TypeExternalInput, nil)
+	mk(71, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "user", "settle_notice": "true"})
+	mk(72, tagentevent.TypeExternalInput, map[string]string{"meta_trigger_source": "meditation", "settle_notice": "true"})
+	mk(73, tagentevent.TypeExternalInput, map[string]string{"settle_notice": "true"})
 	original := []memory.EventReference{
 		{EventKey: 71, EventType: tagentevent.TypeExternalInput, EventSummary: "[task settled] ✓ a completed", Timestamp: 1, Role: "user"},
 		{EventKey: 80, EventType: tagentevent.TypeAgentOutput, EventSummary: "out", Timestamp: 2, Role: "assistant"},
@@ -325,6 +356,6 @@ func TestDispositionRebuildDeterminism(t *testing.T) {
 	require.Equal(t, before, after,
 		"dispositions are a deterministic fold: restart rebuild must reproduce the pre-shutdown map")
 	require.Equal(t, TelemDemote, before[71], "user-lineage consumed → demote")
-	require.Equal(t, TelemInternal, before[72], "meditation-lineage consumed, one turn since → internal reminder")
+	require.Equal(t, TelemDemote, before[72], "meditation is whitelist-deliverable: consumed → externalized → demote")
 	require.Equal(t, TelemActive, before[73], "unconsumed → active (不可丢)")
 }

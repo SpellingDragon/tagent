@@ -187,6 +187,10 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	}
 	msg := model.Message{Role: model.RoleUser, Content: b.String()}
 	evt := NewExternalInputEvent("task-batch-retire", msg)
+	// The production-side recognition authority (D10): fold eligibility comes
+	// from this mark verified against the stored event, never from the body
+	// prefix — a user message imitating the notice shape stays unmarked.
+	evt.Metadata["settle_notice"] = "true"
 	return evt
 }
 
@@ -265,6 +269,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 	evt.Metadata["settle_status"] = statusWord
 	evt.Metadata["task_id"] = tk.ID
+	// The production-side recognition authority (D10): fold eligibility comes
+	// from this mark verified against the stored event, never from the body
+	// prefix — a user message imitating the notice shape stays unmarked.
+	evt.Metadata["settle_notice"] = "true"
 	return evt
 }
 

@@ -48,22 +48,20 @@ func endpointPolicyFromEnv() (enabled bool, allowlist []string) {
 
 // resolveTriggerSource applies the delivery-gate policy to a raw
 // trigger_source value read from an output event.
-// Policy is FAIL-CLOSED: an output event with NO stamped lineage is treated
-// as internal and must NOT reach the user chat. Every legitimate user-visible
-// turn stamps its own source at the RunFlow forwarding block
-// (agent/context_manager.go), so real user turns always carry "user" and are
-// unaffected. This closes the fail-open hole where unstamped events (e.g. a
-// task settled from a pre-lineage spawn) were coerced to "user" and delivered.
+// Policy is FAIL-CLOSED from the SINGLE-SOURCE whitelist
+// (event.DeliverableLineage — shared with the fold externalization check,
+// D9): an output event with NO stamped lineage, or with any lineage outside
+// the whitelist, is internal and must NOT reach the user chat. Every
+// legitimate user-visible turn stamps its own source at the RunFlow
+// forwarding block (agent/context_manager.go), so real user turns always
+// carry "user" and are unaffected. This closes the fail-open hole where
+// unstamped events (e.g. a task settled from a pre-lineage spawn) were
+// coerced to "user" and delivered.
 func resolveTriggerSource(raw string) (source string, deliverable bool) {
 	if raw == "" {
 		return "internal-unstamped", false
 	}
-	switch raw {
-	case "user", "task", "reincarnation", "system_alert", "meditation":
-		return raw, true
-	default:
-		return raw, false
-	}
+	return raw, tagentevent.DeliverableLineage(raw)
 }
 
 // resolveDeliveryTarget is the single chat-target rule of the delivery

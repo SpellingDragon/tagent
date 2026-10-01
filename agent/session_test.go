@@ -2496,13 +2496,17 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 // TestNewTaskSettledEvent_NoOriginSafe 钉住 无来源袋的任务所产事件不携带路由元数据，但三个确定性事实必须在场。
 // - 结算裁决供反馈路径读取；任务标识是机器可读的登记键，绝不从内容反解；
 // - 谱系缺失标记让宿主扣住回收产出，而不走机械的 task 兜底投递；三者都不是路由袋。
+// - settle_notice 是产源识别权威标记（折叠资格，D10），同样不属于路由袋。
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
 	for k := range evt.Metadata {
-		if k != "settle_status" && k != "task_id" && k != "lineage_absent" {
+		if k != "settle_status" && k != "task_id" && k != "lineage_absent" && k != "settle_notice" {
 			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
 		}
+	}
+	if evt.Metadata["settle_notice"] != "true" {
+		t.Errorf("settle_notice mark must be stamped at the producer (fold authority), got %v", evt.Metadata["settle_notice"])
 	}
 	if evt.Metadata["settle_status"] != "completed" {
 		t.Errorf("settle_status must always be carried (2.3 feedback path), got %v", evt.Metadata["settle_status"])
