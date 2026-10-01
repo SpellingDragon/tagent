@@ -347,3 +347,58 @@ func TestTouchAdopted_StampsLastAdoptedAt(t *testing.T) {
 		t.Fatalf("LastAdoptedAt not RFC3339: %v", err)
 	}
 }
+
+// TestCrossRestartResume_RebindsDetectorToMonitor 钉住 D-P2-4：跨重启 resume 新建的
+// detector 必须接管 monitor 的 per-session 回调——不重绑则状态迁移仍供给旧一代
+// detector（重启后 reattach 初绑的那条链），本轮被 task manager 轮询的新 detector
+// 永无 settle/ExitCode。判据三分：回调换人、新 detector 经回调收到迁移并出 settle、
+// 旧绑定 detector 保持静默（供给没有双写）。
+func TestCrossRestartResume_RebindsDetectorToMonitor(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not available — rebind wiring needs a live session for the resume path")
+	}
+	ct := NewActionTool(WithOrphanCleanupDisabled(), WithResidentMetaDir(t.TempDir()))
+	require.NotNil(t, ct.tmuxExecutor, "host has tmux: the executor must be wired")
+
+	sess, err := ct.tmuxExecutor.CreateSession(context.Background(), TmuxCreateOptions{
+		Command: "cat", Mode: ModeResident, Name: "cross-rebind",
+	})
+	if err != nil {
+		t.Skipf("cannot create tmux session: %v", err)
+	}
+	sessionID := sess.ID
+	defer func() { _ = ct.tmuxExecutor.KillSession(sessionID) }()
+
+	oldDetector := NewTmuxSettleDetector(sessionID, func() {})
+	// 模拟进程重启后 reattach 的初绑状态（resident_recovery.go:200 形态）。
+	ct.tmuxMonitor.AddSessionWithCallback(sess, func(_ string, _, newStatus SessionStatus, output string) {
+		oldDetector.OnWatchOutput(output)
+		oldDetector.OnStateChange(newStatus, output)
+	})
+
+	spec := ct.SpecFromDeclarative(nil, task.Declarative{
+		Kind: "command", Desc: "repl", Key: "repl", Command: "cat",
+		TaskID: sessionID, Params: map[string]string{"mode": "resident", "timeout": "0"},
+	})
+	require.NotNil(t, spec.ResumeFn)
+
+	newDetector, rerr := spec.ResumeFn(context.Background(), "echo hi")
+	require.NoError(t, rerr, "resume against the live session must complete the rebind+send path")
+
+	// 经 monitor 的 per-session 面驱动一次终态迁移——供给须落到新 detector。
+	cb := ct.tmuxMonitor.sessionCallbacks[sessionID]
+	require.NotNil(t, cb, "the resume round must own a per-session callback")
+	cb(sessionID, SessionRunning, SessionCompleted, "hi\n")
+
+	select {
+	case sig := <-newDetector.Settled():
+		require.Equal(t, task.SettleCompleted, sig.Kind, "the transition must surface as settle on the NEW detector")
+	case <-time.After(2 * time.Second):
+		t.Fatal("new detector never received the state change — rebind did not land")
+	}
+	select {
+	case sig := <-oldDetector.Settled():
+		t.Fatalf("stale pre-rebind detector received the transition: %+v", sig)
+	default:
+	}
+}

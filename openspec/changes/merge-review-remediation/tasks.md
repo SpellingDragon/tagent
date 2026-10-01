@@ -122,14 +122,14 @@
 
 ## 11. CU-11 rl 与周边 〔E-P2-1/E-P2-9/D-P2-4/E-P2-6〕
 
-- [ ] 11.1 `swappable_model.go` sweepRetired：`current := m.inner` 读移入写锁内（删 RLock 快照两行）
-- [ ] 11.2 新测试：Swap A→B→A（inFlight>0 期间）→ A 不被 Close、后续请求正常
-- [ ] 11.3 `trajectory_recorder.go` recordGenerateContent：`respCh == nil` 时记 error Response 并返回 (nil,nil)（与迭代路径对齐）
-- [ ] 11.4 新测试：inner 返回 (nil,nil) → 不阻塞、Close() 的 gcWg.Wait() 不死锁
-- [ ] 11.5 `tmux_monitor.go` 增 `RebindCallback(sessionID, cb)`；`declarative.go` rebuiltResumeClosure 恢复后重绑到新 detector
-- [ ] 11.6 新测试：跨重启 resume → 新 detector 收到状态迁移、settle/ExitCode 有供给
-- [ ] 11.7 `restart-tagent.sh`：归档+截断段移至旧进程 SIGTERM 确认退出之后、新进程 spawn 之前（OLD_TRAJ_BYTES 采集位置随行）；`bash -n` 校验
-- [ ] 11.8 验证：`go test ./rl/... ./tool/action/... -count=1` 全绿
+- [x] 11.1 `swappable_model.go` sweepRetired：`current := m.inner` 读移入写锁内（删 RLock 快照两行）
+- [x] 11.2 新测试：Swap A→B→A（inFlight>0 期间）→ A 不被 Close、后续请求正常
+- [x] 11.3 `trajectory_recorder.go` recordGenerateContent：`respCh == nil` 时记 error Response 并返回 (nil,nil)（与迭代路径对齐）
+- [x] 11.4 新测试：inner 返回 (nil,nil) → 不阻塞、Close() 的 gcWg.Wait() 不死锁
+- [x] 11.5 `tmux_monitor.go` 增 `RebindCallback(sessionID, cb)`；`declarative.go` rebuiltResumeClosure 恢复后重绑到新 detector
+- [x] 11.6 新测试：跨重启 resume → 新 detector 收到状态迁移、settle/ExitCode 有供给
+- [x] 11.7 `restart-tagent.sh`：归档+截断段移至旧进程 SIGTERM 确认退出之后、新进程 spawn 之前（OLD_TRAJ_BYTES 采集位置随行）；`bash -n` 校验
+- [x] 11.8 验证：`go test ./rl/... ./tool/action/... -count=1` 全绿
 - [ ] 11.9 提交：`fix(rl,action): 换模竞态/nil 流防护/resume 回调重绑/归档窗口移位`
 
 ## 12. CU-12 tool 注释与护栏 〔D-P2-1/D-P2-2/D-P2-3〕

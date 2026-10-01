@@ -178,6 +178,14 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(co
 			ct.removeResidentMeta(sessionID)
 		})
 		detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
+		// D-P2-4: this round's detector must own the state-change supply —
+		// without the rebind, monitor transitions keep feeding the previous
+		// generation's detector (or nothing) and settle/ExitCode never reach
+		// the detector the task manager polls.
+		ct.tmuxMonitor.RebindCallback(sessionID, func(_ string, _, newStatus SessionStatus, output string) {
+			detector.OnWatchOutput(output)
+			detector.OnStateChange(newStatus, output)
+		})
 		baseline := 0
 		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
 			baseline = strings.Count(out, "\n")

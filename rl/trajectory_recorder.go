@@ -232,7 +232,19 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 	traceID, spanID := traceIDsFromCtx(ctx)
 
 	respCh, err := inner.GenerateContent(ctx, request)
-	if err != nil {
+	// A nil channel with a nil error is a legal upstream shape (the trpc
+	// contract allows it; SwappableModel itself forwards (nil, nil)). Ranging
+	// over a nil channel would park the forwarder forever and hang Close's
+	// gcWg.Wait — record the anomaly and hand the nil channel straight back.
+	var nilChannel bool
+	if err == nil && respCh == nil {
+		nilChannel = true
+	}
+	if err != nil || nilChannel {
+		errText := "inner model returned nil channel with nil error"
+		if err != nil {
+			errText = err.Error()
+		}
 		tr.record(&TrajectoryRecord{
 			Timestamp:  time.Now().Format(time.RFC3339Nano),
 			SessionID:  sessionID,
@@ -244,7 +256,7 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 					Model:            modelName,
 					GenerationConfig: request.GenerationConfig,
 				},
-				Response: LLMResponseRecord{Error: err.Error()},
+				Response: LLMResponseRecord{Error: errText},
 				TraceID:  traceID,
 				SpanID:   spanID,
 			},

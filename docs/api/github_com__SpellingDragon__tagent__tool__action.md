@@ -514,6 +514,14 @@ func (tm *TmuxMonitor) IsRunning() bool
 func (tm *TmuxMonitor) ListSessions() []*TmuxSession
     ListSessions returns all monitored sessions
 
+func (tm *TmuxMonitor) RebindCallback(sessionID string, cb func(sessionID string, oldStatus, newStatus SessionStatus, output string)) bool
+    RebindCallback replaces the per-session callback of an ALREADY-MONITORED
+    session (cross-restart resume builds a fresh detector that must take over
+    the state-change supply; the old binding belongs to a detector from a
+    previous generation). Returns false when the session is not monitored —
+    rebinding never (re-)adds a session, that stays AddSessionWithCallback's
+    contract.
+
 func (tm *TmuxMonitor) RemoveSession(sessionID string)
     RemoveSession removes a session from monitoring
 

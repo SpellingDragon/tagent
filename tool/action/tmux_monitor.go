@@ -268,6 +268,25 @@ func (tm *TmuxMonitor) AddSessionWithCallback(session *TmuxSession, cb func(sess
 	log.Infof("[TmuxMonitor] added session %s (per-session callback)", session.ID)
 }
 
+// RebindCallback replaces the per-session callback of an ALREADY-MONITORED
+// session (cross-restart resume builds a fresh detector that must take over
+// the state-change supply; the old binding belongs to a detector from a
+// previous generation). Returns false when the session is not monitored —
+// rebinding never (re-)adds a session, that stays AddSessionWithCallback's
+// contract.
+func (tm *TmuxMonitor) RebindCallback(sessionID string, cb func(sessionID string, oldStatus, newStatus SessionStatus, output string)) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if _, ok := tm.sessions[sessionID]; !ok {
+		return false
+	}
+	if tm.sessionCallbacks == nil {
+		tm.sessionCallbacks = make(map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string))
+	}
+	tm.sessionCallbacks[sessionID] = cb
+	return true
+}
+
 // SessionIDs returns a snapshot of the currently monitored session IDs
 // (used by ActionTool.Close to reap live sessions on graceful shutdown).
 func (tm *TmuxMonitor) SessionIDs() []string {

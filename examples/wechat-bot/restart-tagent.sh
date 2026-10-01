@@ -98,6 +98,33 @@ fi
 kill -0 "$OLD_PID" 2>/dev/null && { log "FATAL: old process refuses to die"; exit 1; }
 log "old process down"
 
+# 4a. trajectory generation archive — MUST run in the handover window (old
+#     process confirmed down, new one not yet spawned). E-P2-6: the previous
+#     placement after healthz-OK raced the new process's O_APPEND writes —
+#     head -c could split a JSON line and the cat-over-truncate could silently
+#     overwrite records the new generation had already written, corrupting RL
+#     training data with no signal. Single-writer here is structural, not lucky.
+TRAJ="data/trajectories/wechat-session.jsonl"
+if [ -f "$TRAJ" ]; then
+    TRAJ_DIR="$(dirname "$TRAJ")/archive"; mkdir -p "$TRAJ_DIR"
+    PRE_BYTES="$OLD_TRAJ_BYTES"
+    CUR_BYTES="$(stat -c %s "$TRAJ" 2>/dev/null || echo 0)"
+    if [ "${PRE_BYTES:-0}" -gt 0 ] && [ "$PRE_BYTES" -le "$CUR_BYTES" ]; then
+        SPLIT_F="$TRAJ_DIR/wechat-session-$(date +%Y%m%d_%H%M%S).jsonl"
+        head -c "$PRE_BYTES" "$TRAJ" > "$SPLIT_F"
+        SPLIT_SZ="$(stat -c %s "$SPLIT_F" 2>/dev/null || echo 0)"
+        if [ "$SPLIT_SZ" = "$PRE_BYTES" ]; then
+            gzip -f "$SPLIT_F" && log "trajectory archived: $(basename "$SPLIT_F").gz ($PRE_BYTES bytes)"
+            tail -c +"$((PRE_BYTES + 1))" "$TRAJ" > "$TRAJ.tmp" && cat "$TRAJ.tmp" > "$TRAJ" && rm -f "$TRAJ.tmp"
+        else
+            rm -f "$SPLIT_F"; log "trajectory archive byte-mismatch ($SPLIT_SZ != $PRE_BYTES) - skip rotation"
+        fi
+    else
+        log "trajectory: no pre-restart offset (PRE=${PRE_BYTES:-0}), skip rotation"
+    fi
+    ls -1t "$TRAJ_DIR"/wechat-session-*.jsonl.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
+
 # 4b. reincarnation notice (staged pre-spawn: next process reads it on boot).
 #     Gap fixed 2026-09-11: manual hot-swap produced no scene block — the
 #     reincarnated agent booted blind and the old agent had to hand-stage one.
@@ -156,28 +183,6 @@ for i in $(seq 1 90); do
             continue
         fi
         echo "${LISTEN_PID:-$NEW_PID}" > "$DONEF"  # handshake: insurance baseline = real listening pid
-        # trajectory generation archive (host order 2026-09-28 00:35): split
-        # and compress pre-restart bytes per generation, keep rolling window 5
-        TRAJ="data/trajectories/wechat-session.jsonl"
-        if [ -f "$TRAJ" ]; then
-            TRAJ_DIR="$(dirname "$TRAJ")/archive"; mkdir -p "$TRAJ_DIR"
-            PRE_BYTES="$OLD_TRAJ_BYTES"
-            CUR_BYTES="$(stat -c %s "$TRAJ" 2>/dev/null || echo 0)"
-            if [ "${PRE_BYTES:-0}" -gt 0 ] && [ "$PRE_BYTES" -le "$CUR_BYTES" ]; then
-                SPLIT_F="$TRAJ_DIR/wechat-session-$(date +%Y%m%d_%H%M%S).jsonl"
-                head -c "$PRE_BYTES" "$TRAJ" > "$SPLIT_F"
-                SPLIT_SZ="$(stat -c %s "$SPLIT_F" 2>/dev/null || echo 0)"
-                if [ "$SPLIT_SZ" = "$PRE_BYTES" ]; then
-                    gzip -f "$SPLIT_F" && log "trajectory archived: $(basename "$SPLIT_F").gz ($PRE_BYTES bytes)"
-                    tail -c +"$((PRE_BYTES + 1))" "$TRAJ" > "$TRAJ.tmp" && cat "$TRAJ.tmp" > "$TRAJ" && rm -f "$TRAJ.tmp"
-                else
-                    rm -f "$SPLIT_F"; log "trajectory archive byte-mismatch ($SPLIT_SZ != $PRE_BYTES) - skip rotation"
-                fi
-            else
-                log "trajectory: no pre-restart offset (PRE=${PRE_BYTES:-0}), skip"
-            fi
-            ls -1t "$TRAJ_DIR"/wechat-session-*.jsonl.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
-        fi
         touch /tmp/tagent_restart.done; log "RESTART OK: healthz=$(cat /tmp/tagent_healthz.json) new_pid=${LISTEN_PID:-?} after ~$((i*2))s"
         # archive env snapshot for the next reincarnation (same fallback as insurance v2)
         if [ "$SNAP" != "$DONEDIR/env.snapshot" ]; then

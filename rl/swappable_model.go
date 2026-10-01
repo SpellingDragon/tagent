@@ -62,15 +62,16 @@ func (m *SwappableModel) sweepRetired() {
 	if m.inFlight.Load() != 0 {
 		return
 	}
-	m.mu.RLock()
-	current := m.inner
-	m.mu.RUnlock()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.inFlight.Load() != 0 {
 		return
 	}
+	// current is read UNDER the write lock: a Swap landing between an early
+	// snapshot and this loop could otherwise Close a model that just became
+	// the live inner again (A→B→A).
+	current := m.inner
 	keep := m.retired[:0]
 	for _, old := range m.retired {
 		if old == current {

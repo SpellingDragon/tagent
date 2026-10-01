@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -288,5 +289,42 @@ func TestLLMCallRecord_TraceFieldsBackwardCompat(t *testing.T) {
 	}
 	if decoded.TraceID != "" || decoded.SpanID != "" {
 		t.Fatal("旧格式应解析出空 trace 字段")
+	}
+}
+
+// nilChannelModel 是上游的畸形合法形态：nil error 伴 nil channel
+// （SwappableModel 对 inner 的 (nil,nil) 原样转发，见其 GenerateContent）。
+type nilChannelModel struct{}
+
+func (nilChannelModel) Info() model.Info { return model.Info{Name: "nil-chan"} }
+func (nilChannelModel) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	return nil, nil
+}
+
+// TestTrajectoryRecorder_NilChannelDoesNotHangClose 钉住 E-P2-9：inner 返回
+// (nil, nil) 时录制器不得起 range nil-channel 的转发协程——那会让 gcWg 永挂、
+// Close() 死锁。判据三分：调用即返回 nil channel、Close 限时完成、异常落了记录。
+func TestTrajectoryRecorder_NilChannelDoesNotHangClose(t *testing.T) {
+	tmpDir := t.TempDir()
+	tr, err := NewTrajectoryRecorder(nilChannelModel{}, tmpDir, "https://x/v1")
+	require.NoError(t, err)
+	tr.SetSessionInfo("u", "s")
+
+	ch, err := tr.GenerateContent(context.Background(), &model.Request{})
+	require.NoError(t, err, "the nil-error contract of the upstream shape is preserved")
+	require.Nil(t, ch, "a nil channel is handed straight back, never ranged over")
+
+	done := make(chan error, 1)
+	go func() { done <- tr.Close() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "Close must complete: no leaked gcWg lease")
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close deadlocked on the nil-channel forwarder — E-P2-9 regression")
+	}
+
+	raw, rerr := os.ReadFile(filepath.Join(tmpDir, "s.jsonl"))
+	if rerr == nil {
+		require.Contains(t, string(raw), "nil channel", "the anomaly must be visible in the trajectory, not swallowed")
 	}
 }

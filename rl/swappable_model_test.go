@@ -161,6 +161,7 @@ func (m *slowStreamModel) send(r *model.Response) {
 func (m *slowStreamModel) endStream() {
 	m.mu.Lock()
 	ch := m.ch
+	m.ch = nil
 	m.mu.Unlock()
 	if ch != nil {
 		close(ch)
@@ -315,4 +316,36 @@ func TestSwappableModel_InfoTracksCurrentInner(t *testing.T) {
 
 	sm.Swap(&mockModel{info: model.Info{Name: "third"}})
 	require.Equal(t, "third", sm.Info().Name)
+}
+
+// TestSwappableModel_ReuseDuringReleaseWindowNotClosed 钉住 A→B→A 的回收竞态窗口：
+// 旧实现在写锁**之前**快照 current——release 腿（sweep 开跑时 inner 仍是 B）与
+// Swap(A) reuse 落地交错时，锁内扫描拿着陈旧值 B 把刚回归现任的 A 关掉。
+// 确定性部分：reuse 与租约释放都完成后，终局 sweep 必须以锁内新鲜值保 A；
+// 交错窗口本身由下面的 Concurrency 压测例覆盖（-race 下高频命中）。
+func TestSwappableModel_ReuseDuringReleaseWindowNotClosed(t *testing.T) {
+	a := &slowStreamModel{}
+	b := &slowStreamModel{}
+	sm := NewSwappableModel(a)
+
+	ctx := context.Background()
+	chA, err := sm.GenerateContent(ctx, &model.Request{})
+	require.NoError(t, err)
+	require.NotNil(t, chA, "an open stream holds a lease")
+
+	sm.Swap(b) // retired=[A]，A 仍被在途流引用
+	sm.Swap(a) // A 回归现任；retired=[A,B]
+
+	a.endStream() // 租约释放，release 腿触发 sweep
+	require.Eventually(t, func() bool { return sm.inFlight.Load() == 0 }, time.Second, 10*time.Millisecond)
+
+	sm.sweepRetired() // 终局清扫：current 必须取锁内新鲜值（A），retired 中的 B 回收
+	require.Zero(t, a.closedCount(), "the reused current inner must never be closed by a sweep")
+	require.Equal(t, 1, b.closedCount(), "B (retired, no lease) gets recycled once")
+
+	_, err = sm.GenerateContent(ctx, &model.Request{})
+	require.NoError(t, err, "requests keep working on the reused model")
+	a.endStream()
+	require.Eventually(t, func() bool { return sm.inFlight.Load() == 0 }, time.Second, 10*time.Millisecond)
+	require.Zero(t, a.closedCount(), "quiescence must not close the current inner either")
 }
