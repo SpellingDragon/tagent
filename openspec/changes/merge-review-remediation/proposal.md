@@ -44,6 +44,6 @@ dev（43 提交）合入 origin/main 前的分主题并行评审发现 2 项 P0�
 
 - 代码：`agent/`（agent.go、execution_gate_model.go、session.go、settle_routing.go、event_bus.go、recovery.go、telemetry_audit.go）、`agent/task/`、`agent/compress/`、`agent/reliability/`、`memory/`（mem_spill、retention_lease、compaction、segment_store、kv/local_file_kv、engine/diagnostics）、`rl/`、`tool/action/`、`scripts/`（check_comment_only.sh、lint.sh）、`.github/workflows/ci.yml`、`examples/wechat-bot/restart-tagent.sh`
 - 文档：README、docs/storage-durability-positioning.md、docs/wiki/**、openspec/specs/**（Purpose 回填）、openspec/changes/archive/**（路径脱敏）
-- **BREAKING**：诊断字段删除、谱系白名单化、通知识别标记化、KV 快照分片（旧 kv.json 不迁移）——均为 pre-release 定位下的有意变更，CHANGELOG 显式标注
+- **BREAKING**：谱系白名单化、通知识别标记化、KV 快照分片（旧 kv.json 不迁移）、WAL 诊断字段删除、fsync 死旋钮删除——均为 pre-release 定位下的有意变更，CHANGELOG 显式标注；本变更**零新增配置项**，配置面净减少一项
 - 唯一外部依赖项（非本地可消除）：go.mod replace 指向个人 fork（上游 PR #2637 未合）——保留 + CI `go mod verify` 防护 + 合入后摘除的跟踪任务
 - 评审全量证据：`.git/review-notes/01-findings.md`（45 项逐项闭环为验收标准）
