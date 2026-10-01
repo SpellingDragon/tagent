@@ -118,7 +118,9 @@ func (l *RetentionLease) Protect(key int64) {
 	l.mu.Unlock()
 }
 
-// Release 移除一个持有者；归零才解除保护。幂等（重复释放多余的不动作）。
+// Release 按持有者释放一个引用；refs 归零才解除保护。注意：本计数器不记名单，
+// 重复释放会递减他人持有的计数——"恰一次"由调用方保证（每持有者 acquire 一次即
+// release 一次）；释放不存在的 key 为 no-op。
 func (l *RetentionLease) Release(key int64) {
 	if l == nil || key == 0 {
 		return

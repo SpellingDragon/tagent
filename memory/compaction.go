@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -435,6 +436,12 @@ func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	}
 	if err := c.kv.KVBatch(batchOps); err != nil {
 		log.Errorf("[Compaction] delete dangling idx failed pid=%d: %v", pid, err)
+		// The tombstone stays when the idx removal did not land: it is both the
+		// retry marker and the resurrection guard (ErrEventForgotten). Dropping
+		// it over a failed removal loses the evidence AND the guard; keeping it
+		// is safe — finalize is idempotent and the next compaction round
+		// retries the same key set.
+		return
 	}
 	if c.tombstone != nil {
 		if err := c.tombstone.RemoveTombstones(dead); err != nil {
@@ -501,11 +508,16 @@ func (c *Compactor) findAliveAncestor(key int64, alive map[int64]bool) int64 {
 // deleteSegments deletes all KV keys for the given segments (crash-safe cleanup).
 func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	var batchOps []KVOp
+	var scanErrs []error
 
 	for _, windowTS := range windowTSs {
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
 		pairs, err := c.kv.KVScan(eventPrefix, 0)
 		if err != nil {
+			//  a silent scan-skip leaves the window's rows in the
+			// store while the caller believes the window was deleted. Collect and
+			// surface: the delete act must be honest about what it removed.
+			scanErrs = append(scanErrs, fmt.Errorf("delete-segments scan pid=%d window=%d: %w", pid, windowTS, err))
 			continue
 		}
 		for _, pair := range pairs {
@@ -517,11 +529,11 @@ func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 
 	if len(batchOps) > 0 {
 		if err := c.kv.KVBatch(batchOps); err != nil {
-			return err
+			return errors.Join(append(scanErrs, err)...)
 		}
 	}
 
-	return nil
+	return errors.Join(scanErrs...)
 }
 
 // CompactL2ToL3 compacts L2 daily segments into a single L3 weekly segment.

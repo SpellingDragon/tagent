@@ -316,8 +316,9 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 
 // openLocalFileStore builds a localfile-backed shared resource in the
 // construction order (see buildSharedResource). It opens the backend only
-// (rel+kv+store); a backend step that fails releases the KV opened by the
-// prior step, so a half-built store never leaks a writer lock behind it.
+// (rel+kv+store); a backend step that fails releases the relation store AND
+// the KV opened by prior steps, so a half-built store never leaks a writer
+// lock or a journal fd behind it.
 func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 	rel, err := memory.NewInMemRelationStore(mc.Path)
 	if err != nil {
@@ -325,10 +326,12 @@ func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 	}
 	kvStore, err := kv.NewLocalFileKV(mc.Path)
 	if err != nil {
+		releaseRelOnFailure(rel)
 		return openedResource{}, fmt.Errorf("create local file kv: %w", err)
 	}
 	store, err := memory.NewFileSegmentStore(kvStore, rel, mc.Path, 1000)
 	if err != nil {
+		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvStore); cerr != nil {
 			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
 		}
@@ -347,17 +350,33 @@ func openRVStore(mc MemoryConfig) (openedResource, error) {
 	}
 	configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
 	if err != nil {
+		releaseRelOnFailure(rel)
 		return openedResource{}, fmt.Errorf("create rustviking config: %w", err)
 	}
 	kvClient := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
 	store, err := memory.NewFileSegmentStore(kvClient, rel, mc.Path, 1000)
 	if err != nil {
+		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvClient); cerr != nil {
 			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
 		}
 		return openedResource{}, fmt.Errorf("create file segment store: %w", err)
 	}
 	return buildSharedResource(store, kvClient, rel, mc), nil
+}
+
+// releaseRelOnFailure closes a relation store whose owning build failed.
+// Once construction returns an error nobody else holds the handle, so every
+// failed rebuild would strand one journal fd unless this path releases it
+// (hot-swap amplifies the leak per generation). A failed release is logged —
+// the construction error remains the primary.
+func releaseRelOnFailure(rel *memory.InMemRelationStore) {
+	if rel == nil {
+		return
+	}
+	if err := rel.Close(); err != nil {
+		log.Warnf("[tagent] relation store release on failed build: %v", err)
+	}
 }
 
 // closeKV releases a KV backend whose store construction failed BEFORE the

@@ -128,6 +128,7 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 		return 0, fmt.Errorf("mem_spill: store %T does not implement EventReplayer; replay refused and spill originals retained (§2.6: no GetEvent weak fallback)", store)
 	}
 	var failed []spilledEvent
+	var replayedKeys []int64
 	replayed := 0
 	notifySafe := func(ev FullEvent) {
 		if notify == nil {
@@ -148,13 +149,22 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 		}
 		_ = result
 		replayed++
-		if s.guard != nil {
-			s.guard.ReleaseKey(sp.Key)
-		}
+		replayedKeys = append(replayedKeys, sp.Key)
 		notifySafe(sp.Event)
 	}
 	if rerr := s.rewrite(failed); rerr != nil {
+		// The spill list on disk still carries the replayed originals: releasing
+		// their keys now would make the NEXT round's replay (AlreadyCommitted)
+		// a double release, decrementing other holders' leases (a ref leak).
+		// Book every release behind the durable removal — rewrite failure
+		// returns with all keys still held, and the retry path releases exactly
+		// once when the removal finally lands.
 		return replayed, rerr
+	}
+	if s.guard != nil {
+		for _, k := range replayedKeys {
+			s.guard.ReleaseKey(k)
+		}
 	}
 	return replayed, nil
 }

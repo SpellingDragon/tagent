@@ -88,19 +88,19 @@
 - [x] 7.3 新测试：批量相邻 Active（≥2，模拟首压缩轮）→ 整 run 不折叠不截断；全 Demote run → 正常折叠；单条 Timestamp=0 → 不丢观测
 - [x] 7.4 验证：`go test ./agent/compress/... -run 'Fold|Telemetry|Settle' -count=1` 全绿
 - [x] 7.5 提交：`fix(compress): 折叠豁免 run 级化——未消费通知整 run 不可折叠`
-- [ ] 7.6 **中点检查点**：对照 design.md"机制完善三原则"复审 CU-2~CU-7 全部 diff——每项修复特设路径净减少？（记入日志，不过关项返工）
+- [x] 7.6 **中点检查点**：对照 design.md"机制完善三原则"复审 CU-2~CU-7 全部 diff——每项修复特设路径净减少？（记入日志，不过关项返工）
 
 ## 8. CU-8 租约与静默错误清零 〔E-P1-1/E-P2-2/E-P2-3/E-P2-4/E-P2-7〕
 
-- [ ] 8.1 `mem_spill.go` ReplayWithNotify：循环内改记 `replayedKeys []int64`；rewrite 成功后循环 ReleaseKey；rewrite 失败直接返回不释放
-- [ ] 8.2 `retention_lease.go` Release Godoc 改"按持有者释放；归零解除；重复释放会递减他人计数，调用方须保证每持有者恰一次"
-- [ ] 8.3 新测试：rewrite 注入失败 → 同 key 两轮重放后 refs 不穿透；修复 rewrite 后下轮 AlreadyCommitted 路径释放可达
-- [ ] 8.4 `compaction.go` finalizeTombstones：KVBatch idx 删除失败 → 跳过本批 RemoveTombstones（注释：墓碑保留安全、finalize 幂等下轮重试）
-- [ ] 8.5 `compaction.go` deleteSegments：收集各窗口 KVScan 错误，函数尾聚合返回
-- [ ] 8.6 `segment_store.go` locateOrphanEvtSlot：ListSegments 失败 → 返回 `fmt.Errorf("orphan-evt segment list failed pid=%d: %w", ...)`（与内层 KVScan fail-loud 对齐）
-- [ ] 8.7 `wiring.go` openLocalFileStore/openRVStore：两个失败分支补 rel 释放（InMemRelationStore 无 Close 则补 snapshot+close 方法）
-- [ ] 8.8 新测试：压实 idx 删除失败 → 墓碑仍在、ErrEventForgotten 仍拒复活；store 构建失败 → journal fd 不泄漏（打开计数断言）
-- [ ] 8.9 验证：`go test ./memory/... -count=1` 全绿
+- [x] 8.1 `mem_spill.go` ReplayWithNotify：循环内改记 `replayedKeys []int64`；rewrite 成功后循环 ReleaseKey；rewrite 失败直接返回不释放
+- [x] 8.2 `retention_lease.go` Release Godoc 改"按持有者释放；归零解除；重复释放会递减他人计数，调用方须保证每持有者恰一次"
+- [x] 8.3 新测试：rewrite 注入失败 → 同 key 两轮重放后 refs 不穿透；修复 rewrite 后下轮 AlreadyCommitted 路径释放可达
+- [x] 8.4 `compaction.go` finalizeTombstones：KVBatch idx 删除失败 → 跳过本批 RemoveTombstones（注释：墓碑保留安全、finalize 幂等下轮重试）
+- [x] 8.5 `compaction.go` deleteSegments：收集各窗口 KVScan 错误，函数尾聚合返回
+- [x] 8.6 `segment_store.go` locateOrphanEvtSlot：ListSegments 失败 → 返回 `fmt.Errorf("orphan-evt segment list failed pid=%d: %w", ...)`（与内层 KVScan fail-loud 对齐）
+- [x] 8.7 `wiring.go` openLocalFileStore/openRVStore：两个失败分支补 rel 释放（InMemRelationStore 无 Close 则补 snapshot+close 方法）
+- [x] 8.8 新测试：压实 idx 删除失败 → 墓碑仍在、ErrEventForgotten 仍拒复活；store 构建失败 → journal fd 不泄漏（打开计数断言）
+- [x] 8.9 验证：`go test ./memory/... -count=1` 全绿
 - [ ] 8.10 提交：`fix(memory): spill 释放对齐落盘移除/静默错误清零/构建失败资源释放`
 
 ## 9. CU-9 分区快照 〔E-P2-5，BREAKING〕（依赖：CU-8 后 memory 包稳定）

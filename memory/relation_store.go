@@ -387,12 +387,24 @@ func (rs *InMemRelationStore) truncateJournal() error {
 	return nil
 }
 
-// Close 关闭 store，释放资源。
+// Close 落盘并释放 WAL journal 的 fd：持锁、句柄置 nil，重复 Close 为 no-op
+// （幂等）。Journal 随每条追加已 sync，这里的最终 Sync 只是收尾保险。
+// FileSegmentStore.Close 经 closer 断言调用本方法；构造失败的半途路径同样
+// 必须显式释放，否则 journal fd 随每次热重建累积。
 func (rs *InMemRelationStore) Close() error {
-	if rs.journal != nil {
-		return rs.journal.Close()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.journal == nil {
+		return nil
 	}
-	return nil
+	f := rs.journal
+	rs.journal = nil
+	serr := f.Sync()
+	cerr := f.Close()
+	if serr != nil {
+		return serr
+	}
+	return cerr
 }
 
 // parseJournalLine 解析单行 journal 记录。

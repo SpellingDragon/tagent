@@ -585,10 +585,15 @@ func (s *FileSegmentStore) ensureWindowMeta(pid int, windowTS int64) (bool, erro
 // would commit a duplicate second copy of the fact.
 func (s *FileSegmentStore) locateOrphanEvtSlot(pid int, hintWindow int64, key int64) (int64, int, bool, error) {
 	candidates := map[int64]bool{hintWindow: true}
-	if ws, err := s.ListSegments(pid); err == nil {
-		for _, w := range ws {
-			candidates[w] = true
-		}
+	ws, err := s.ListSegments(pid)
+	if err != nil {
+		// fail-loud, symmetric with the inner KVScan below: silently trusting
+		// the hint window alone can report "not found" for an orphan that lives
+		// in another segment.
+		return 0, 0, false, fmt.Errorf("orphan-evt segment list failed pid=%d: %w", pid, err)
+	}
+	for _, w := range ws {
+		candidates[w] = true
 	}
 	var (
 		bestW     int64
