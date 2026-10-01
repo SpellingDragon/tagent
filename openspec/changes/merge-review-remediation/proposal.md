@@ -19,7 +19,7 @@ dev（43 提交）合入 origin/main 前的分主题并行评审发现 2 项 P0�
 - **谱系判定白名单同源化**：投递门扣留判定与 compress 外显判定收敛为同一 deliverable 白名单（白名单外一律内部，fail-closed），消除双负清单手工同步（`internalLineageValues` 与投递门清单）这一熵增源。
 - **结算通知结构化识别**：事件源头写入 `settle_notice` 结构化标记，投影侧识别只认标记；无标记的旧事件不折叠（原样保留，方向安全）。正文前缀 `[task settled` 启发式退役。
 - **LocalFileKV 分区快照**：快照按分区分片，Sync 屏障只重写 dirty 分区——事件级屏障语义不变，写放大从 O(全库) 降为 O(分区)。旧单文件 kv.json 不迁移，冷启动空库重建。
-- **诊断面清理**：`DiagnosticsSnapshot.WALQuarantined` 字段及其测试桩直接删除（WAL 语义已移除）。
+- **死面清理**：`DiagnosticsSnapshot.WALQuarantined` 字段及其测试桩、`memory.fsync` 配置键与 `WithFSync` 选项（恒为 no-op 的死旋钮）直接删除——配置面不留谎言实体。
 
 **工程化与文档**
 - comment-only wrapper 放行删除侧给 codetools 硬拒（防线回工具层单点）；lint.sh 成功打印移到全部门后；soak 父进程显式 timeout。

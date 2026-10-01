@@ -58,20 +58,22 @@ A-P2-1 settle 路由 teardown 窗口：unbind 后对 invBus 终态排空转发 p
 **D9 谱系判定白名单同源化（B-P2-2 根治）**
 现状：`internalLineageValues` 负名单（compress）与投递门扣留清单两份手工同步——每新增内部谱系要记两处，`task-unstamped` 漏配即来。修复：提炼单一 `deliverable` 白名单（外显谱系值域），投递门与 `isExternalizedNotice` 同源消费；**白名单外一律内部（fail-closed）**——与 unknown-withhold 保守哲学同向且更彻底。破坏点：以前误判外显的未知值现正确判内部，行为更收敛无风险。
 
-**D10 结算通知结构化识别（B-P2-3 根治）**
-现状：`isSettleNoticeRef` 纯正文前缀 `[task settled` 判定，用户可伪造。修复：`newTaskSettledEvent` 源头写 `settle_notice=true` metadata，识别只认标记；无标记旧事件不折叠（原样保留——安全方向）。前缀启发式退役删除，不留回退分支（旧数据不迁移的定位已裁决）。
+**D10 结算通知结构化标记（B-P2-3 根治）**
+现状：`isSettleNoticeRef` 纯正文前缀 `[task settled` 判定，用户可伪造。修复：`newTaskSettledEvent` 源头写 `settle_notice=true` metadata，识别只认标记；无标记旧事件不折叠（原样保留——安全方向）。前缀启发式退役删除。**形态裁决（奥卡姆复审）**：专用事件类型方案否决——`TypeExternalInput` 是架构声明的唯一总线触发器（event_bus.go:25），且 R2 任务板重建按 `external_input + settle_status` 元数据查询结算（task_record_sink.go:480），改类型破坏两条既有约束；`Source==task` 复用次否决——ref 不携带且语义过宽。metadata 标记实现时与 TelemetryDispositions 的既有 GetEvent **合并为一次读取**（dispositions 本就对每条 notice 查库取 trigger_source，同点顺取标记，零新增查库成本）。
 
 **D11 LocalFileKV 分区快照（E-P2-5 根治）**
-现状：每事件提交触发全库 JSON 快照重写（O(n²) 写放大）。修复：快照按分区分片（每分区独立文件），`Sync()` 只重写 dirty 分区——**事件级屏障语义不变**（Sync 成功=新进程可读回该分区全部键值），写放大 O(全库)→O(分区)。与存储层"分区自治"（mutationMu 分区级、计数分区级、压实分区级）哲学同构。旧 kv.json 不迁移。
+现状：每事件提交触发全库 JSON 快照重写（O(n²) 写放大）。修复：快照按分区分片（每分区独立文件 `kv-<pid>.json`），`Sync()` 只重写本次触碰的分区文件——**分区文件本身就是屏障粒度，不引入独立 dirty 集合结构**（StoreEvent 调用链已携带分区身份）。事件级屏障语义不变（Sync 成功=新进程可读回该分区全部键值），写放大 O(全库)→O(分区)。与存储层"分区自治"（mutationMu 分区级、计数分区级、压实分区级）哲学同构。旧 kv.json 不迁移。
 
-**D12 诊断面清理（G-P2-3）**
-`DiagnosticsSnapshot.WALQuarantined` 字段与测试桩直接删除——WAL 语义已 REMOVED，omitempty 零值字段是死面。
+**D12 死面清理（G-P2-3 + fsync 死旋钮）**
+`DiagnosticsSnapshot.WALQuarantined` 字段与测试桩直接删除（WAL 语义已 REMOVED）。**`memory.fsync` 配置键与 `WithFSync` 选项一并删除**（BREAKING）——该旋钮恒为 no-op，"保留为兼容残留"是配置面上的谎言实体，人工维护成本为负收益；pre-release 无消费者，直接剃除，config.go 的"被接受但不产生任何效果"注释区整体消失。
 
 ### 丙组：卫生清零
 
 **D13 注释与文档卫生**：7+ 处错乱前缀人工校正（action_tool.go:55,840、settle.go:86、tmux_executor.go:117、tmux_monitor.go:93,493、declarative.go:14、mcp/call.go:38）；SessionError Godoc 对齐失败极性主载体；README/rl-architecture/compression-and-telemetry/storage-durability-positioning 文档对齐；归档 evidence.md 绝对路径脱敏；wiki 索引重复段删除；全部 specs Purpose TBD 回填；recovery.go 死残留删除；lint.sh 成功打印移位。
 
 **D14 上游依赖跟踪（唯一尾巴）**：go.mod replace 保留；CI 增 `go mod verify`；建摘除跟踪任务（PR #2637 合入后删 replace、升 a2a-go 正式 tag）。
+
+**D16 奥卡姆复审记录（2026-10-02 终审）**：剃除的候选实体——①结算通知专用事件类型（破坏唯一总线触发器与 R2 重建查询两条既有约束）；②独立 dirty 分区集合（分区文件即粒度）；③`memory.fsync`/`WithFSync"兼容保留"（死旋钮直接删除）；④任何新增配置项（本变更全部决策为零新配置，配置面净减少一项）。保留项均通过"复用既有模式"检验：信号级字段（ExitCode 先例）、产生侧分流（onSettle 既有兜底）、白名单（负名单同源收敛）、metadata 标记（既有 Metadata 通道）。
 
 ### 丁组：MR 形态
 

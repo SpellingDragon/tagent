@@ -76,7 +76,7 @@
 - [ ] 6.4 删除 `internalLineageValues` 负名单与 telemetry_audit.go 的 `auditLineageInternal`（改调同函数）
 - [ ] 6.5 新测试：白名单外任意值（含 "task-unstamped"、随机串、空）→ 投递门扣留 ∧ 判内部（双向一致断言同一输入）
 - [ ] 6.6 回归：全部外显值的投递门既有测试逐值通过（漏配即红）
-- [ ] 6.7 `newTaskSettledEvent` 源头写 `Metadata["settle_notice"]=true`；`isSettleNoticeRef` 改只认标记（EventKey→事件 Metadata 可得；若 ref 携带不足则经 store GetEvent），删除前缀常量 settleNoticePrefix
+- [ ] 6.7 `newTaskSettledEvent` 源头写 `Metadata["settle_notice"]=true`；`isSettleNoticeRef` 改只认标记（与 TelemetryDispositions 的 GetEvent **合并为一次读取**，同点取标记与 trigger_source，不新增查库），删除前缀常量 settleNoticePrefix
 - [ ] 6.8 新测试：用户消息以 `[task settled` 开头（无标记）→ 不折叠不票据化；标记通知正常折叠/降级；旧格式（无标记）事件原样保留
 - [ ] 6.9 验证：`go test ./agent/compress/... ./event/... -count=1` + 投递门相关测试全绿
 - [ ] 6.10 提交：`refactor!(event,compress): 谱系白名单同源化+结算通知结构化标记（BREAKING：旧前缀启发式退役）`
@@ -113,11 +113,12 @@
 - [ ] 9.6 验证：`go test ./memory/... ./tests/ -run 'Bench|KV|Snapshot' -count=1` 全绿
 - [ ] 9.7 提交：`refactor!(memory/kv): 快照按分区分片+dirty 屏障（BREAKING：旧 kv.json 不迁移）`
 
-## 10. CU-10 诊断清理 〔G-P2-3〕
+## 10. CU-10 死面清理 〔G-P2-3 + fsync 死旋钮，BREAKING〕
 
 - [ ] 10.1 删除 `DiagnosticsSnapshot.WALQuarantined` 字段与 `WalQuarantined()` 可选能力断言及 rl 测试桩（http_api_closeout_test.go:35,42 等）
-- [ ] 10.2 验证：全仓 `go build ./...` + `grep -rn "WALQuarantined\|wal_quarantined" --include="*.go"` 零命中
-- [ ] 10.3 提交：`refactor!(memory,rl): 删除 WAL 诊断残留字段（BREAKING）`
+- [ ] 10.2 删除 `config.go:428` `FSync` 配置键与 `memory/kv/local_file_kv.go` `WithFSync` 选项（含构造传参与"被接受但无效"注释区）；同步删除 config 相关测试
+- [ ] 10.3 验证：`go build ./...` + `grep -rn "WALQuarantined\|wal_quarantined\|WithFSync\|memory.fsync" --include="*.go" --include="*.md" config.go memory/ agent/ rl/ docs/ openspec/specs/ | grep -v archive` 零命中
+- [ ] 10.4 提交：`refactor!(memory,config,rl): 死面清理——WAL 诊断字段与 fsync 死旋钮删除（BREAKING）`
 
 ## 11. CU-11 rl 与周边 〔E-P2-1/E-P2-9/D-P2-4/E-P2-6〕
 
@@ -166,7 +167,7 @@
 - [ ] 15.2 race：`go test -race ./agent/... ./memory/... ./rl/... -count=1`（对照 0.2 基线，无新增失败）
 - [ ] 15.3 门禁：`scripts/lint.sh` 全套 + `scripts/check_test_merge.sh` + `openspec validate`
 - [ ] 15.4 soak（workflow_dispatch 或本地 `-tags soak` 一轮）+ offline bench 全绿
-- [ ] 15.5 CHANGELOG：Unreleased 段记 BREAKING×4（白名单/标记/分区快照/诊断字段）与全量修复摘要
+- [ ] 15.5 CHANGELOG：Unreleased 段记 BREAKING×5（白名单/标记/分区快照/诊断字段/fsync 旋钮删除）与全量修复摘要
 - [ ] 15.6 `openspec archive merge-review-remediation`（deltas 并入主 specs，含 CU-1 已先行对齐的两处不冲突）
 - [ ] 15.7 push origin dev；创建 dev→main PR（标题含 BREAKING 标识；描述含：评审摘要链接、45 项勾验表、BREAKING 清单与冷启动说明、go.mod 跟踪项）
 - [ ] 15.8 CI 绿后合并（merge commit 保留 CU 拓扑）；合并后建 go.mod 摘除跟踪任务（PR #2637）
