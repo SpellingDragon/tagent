@@ -102,13 +102,31 @@ type mergeViolation struct {
 	Note string `json:"note"`
 }
 
-// mergeCheckUsage states the flag shape the tool actually has, because the wrong
-// shape is silent: passing --map twice keeps the last file and drops the first, and
-// the dropped table's renames then surface as violations blamed on the batch.
+// mergeCheckUsage states the flag shape the tool actually has: a repeated
+// --map must fail loudly, because a silent last-wins override drops the
+// first table and its renames then surface as violations blamed on the batch.
 const mergeCheckUsage = "usage: codetools merge-check --base-root DIR --head-root DIR [--map F] [--explain F] dir...\n" +
-	"  --map and --explain each take ONE file; repeating a flag keeps only the last value.\n" +
+	"  --map and --explain each take ONE file; repeating either flag is a usage error.\n" +
 	"  --explain exempts only non-test declarations; a missing-test is never waivable.\n" +
 	"  Tables are per package, so run one invocation per package with its own --map and --explain.\n"
+
+// onceString accepts exactly one flag occurrence: a repeat is a usage error,
+// not a silent last-wins override (a repeated table silently shadows the
+// first, which is how a batch once shipped with a dead catalog argument).
+type onceString struct {
+	value string
+	seen  bool
+}
+
+func (o *onceString) String() string { return o.value }
+
+func (o *onceString) Set(v string) error {
+	if o.seen {
+		return fmt.Errorf("flag given more than once (already %q)", o.value)
+	}
+	o.seen, o.value = true, v
+	return nil
+}
 
 // runMergeCheck verifies a test-file consolidation kept every test entry intact:
 // same set of test/benchmark functions per package (after applying the rename
@@ -116,19 +134,25 @@ const mergeCheckUsage = "usage: codetools merge-check --base-root DIR --head-roo
 // identical t.Parallel count. Non-test declarations that moved or changed are
 // reported separately so the batch ledger must account for each one.
 func runMergeCheck(args []string) int {
-	fs := flag.NewFlagSet("merge-check", flag.ExitOnError)
+	fs := flag.NewFlagSet("merge-check", flag.ContinueOnError)
+	var mapFile, explain onceString
 	base := fs.String("base-root", "", "root holding the baseline revision")
 	head := fs.String("head-root", "", "root holding the working tree")
-	mapFile := fs.String("map", "", "ONE TSV of old-name<TAB>new-name renames for the packages being checked")
-	explain := fs.String("explain", "", "ONE file listing non-test declarations allowed to differ; it cannot exempt a test")
+	fs.Var(&mapFile, "map", "ONE TSV of old-name<TAB>new-name renames for the packages being checked; repeating this flag is a usage error")
+	fs.Var(&explain, "explain", "ONE file listing non-test declarations allowed to differ; it cannot exempt a test; repeating this flag is a usage error")
 	diffOut := fs.String("diff-out", "", "directory to write normalized base/head text for each body-changed declaration")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
 	if *base == "" || *head == "" || fs.NArg() == 0 {
 		fmt.Fprint(os.Stderr, mergeCheckUsage)
 		return 2
 	}
-	renames := loadRenames(*mapFile)
-	explained := loadSet(*explain)
+	renames := loadRenames(mapFile.value)
+	explained := loadSet(explain.value)
 
 	var out []mergeViolation
 	for _, dir := range fs.Args() {

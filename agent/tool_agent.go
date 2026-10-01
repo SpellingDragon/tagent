@@ -598,7 +598,8 @@ const remoteRetryBackoff = 500 * time.Millisecond
 // failed the parent call outright) — see a2a_delegation_test.go.
 //
 // Both attempts use the SAME invocation and the SAME wrapper instance, i.e. the
-// target the initiating call was bound to (D5「传输重试：继承发起调用租约」) — no
+// target the initiating call was bound to (lease inheritance: a retry rides
+// the initiating call's binding) — no
 // re-resolution against whatever generation is published by then.
 func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	out, err := w.collectAttempt(ctx, inv, agentName)
@@ -725,7 +726,7 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 }
 
 // hasInitiator ResolveReentryDelegation picks the delegation target a Resume/Relaunch re-entry
-// runs on, per design D5 row 4: a re-entry riding an initiating call inherits THAT
+// runs on: a re-entry riding an initiating call inherits THAT
 // call's binding (its own generation's face and its resource reference), while a
 // re-entry with no initiator (console/WAL/ops path) acquires the current effective
 // generation. A target the selected version does not route is REFUSED, never

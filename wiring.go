@@ -278,7 +278,7 @@ func resolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig {
 //
 // resolveMemoryStore returns the shared backend store, the entry-owned engine
 // (nil for isolated or degraded), and the release func. The engine is built
-// inside the acquire open closure so it shares the store's generation (D5): a
+// inside the acquire open closure so it shares the store's generation: a
 // reopen always gets a fresh engine bound to a fresh backend, never a stale
 // engine bound to an already-closed one.
 //
@@ -314,7 +314,7 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 	}
 }
 
-// openLocalFileStore builds a localfile-backed shared resource in the D5
+// openLocalFileStore builds a localfile-backed shared resource in the
 // construction order (see buildSharedResource). It opens the backend only
 // (rel+kv+store); a backend step that fails releases the KV opened by the
 // prior step, so a half-built store never leaks a writer lock behind it.
@@ -337,7 +337,7 @@ func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 	return buildSharedResource(store, kvStore, rel, mc), nil
 }
 
-// openRVStore builds a rustviking-backed shared resource in the D5
+// openRVStore builds a rustviking-backed shared resource in the
 // construction order (see buildSharedResource), with the same KV-leak guard as
 // openLocalFileStore on a mid-build failure.
 func openRVStore(mc MemoryConfig) (openedResource, error) {
@@ -382,8 +382,8 @@ func tombstoneOf(store *memory.FileSegmentStore, rel memory.RelationStore, kvSto
 	return tombstone
 }
 
-// buildSharedResource finishes a shared backend's wiring in the D5
-// construction order (design D5): recover tombstones → rebuild live counts →
+// buildSharedResource finishes a shared backend's wiring in the
+// construction order: recover tombstones → rebuild live counts →
 // build the entry-owned engine and attach its vector-remover callback to the
 // base store → start background producers LAST. Producers run after the
 // callback so the compactor/lifecycle scanners can never physically forget a
@@ -426,7 +426,7 @@ func startStoreProducers(store *memory.FileSegmentStore, kvStore memory.KVStore,
 // 未配置 Engine 或无 Embedding → 返回原 store（纯关键词，行为逐字节不变）。
 // 共享 store（path 非空）的引擎由 registry entry 拥有（resolveMemoryStore 的 open
 // 闭包同代构造，经 sharedEngine 传入）——本 agent 仅借桥获得独立能力钩子
-// （capacityHook），桥不拥有共享 engine 的关闭权（D5）。sharedEngine==nil 表 entry
+// （capacityHook），桥不拥有共享 engine 的关闭权。sharedEngine==nil 表 entry
 // 构建降级或无配置 → 只保留 capacityHook（向量能力降级，8.10 承诺不变）。
 // 空 path（独享）→ 本 agent 自建并拥有 per-agent 引擎（桥持有并关闭）。
 func wireMemoryEngine(store memory.MemoryStore, sharedEngine memory.MemoryEngine, mc MemoryConfig, onStoreEvent func(eventKey int64, partitionID int, eventType string)) (memory.MemoryStore, error) {
@@ -455,7 +455,7 @@ func wireMemoryEngine(store memory.MemoryStore, sharedEngine memory.MemoryEngine
 // store 的向量移除器接到该引擎——使 TTL/容量遗忘物理删除时移除 entry 引擎的向量
 // （而非某 agent 借桥的向量，消除「末位 bridge 覆盖」歧义）。未配置引擎或构建失败
 // （如无 embedding key）→ 返回 nil 并降级为纯关键词（调用方保 capacityHook），
-// 不缓存悬挂引擎；仅 reopen（新代）才重试构造（D5）。
+// 不缓存悬挂引擎；仅 reopen（新代）才重试构造。
 func buildSharedEngine(store memory.MemoryStore, mc MemoryConfig) memory.MemoryEngine {
 	if mc.Engine == nil || mc.Engine.Embedding == nil {
 		return nil
@@ -501,7 +501,7 @@ func newEngineBridgeWithRemover(store memory.MemoryStore, eng memory.MemoryEngin
 
 // newEngineBridgeBorrow 为共享 store 创建借用的 engineBridge：仅注册本 agent 独立的
 // capacityHook，不重设 base store 的向量移除器（该移除器已由 buildSharedEngine 接到
-// entry 拥有的共享引擎，D5——借桥不拥有共享引擎的关闭/移除权）。
+// entry 拥有的共享引擎——借桥不拥有共享引擎的关闭/移除权）。
 func newEngineBridgeBorrow(store memory.MemoryStore, eng memory.MemoryEngine, onStoreEvent func(eventKey int64, partitionID int, eventType string)) memory.MemoryStore {
 	bridge := engine.NewEngineBridge(store, eng)
 	if onStoreEvent != nil {

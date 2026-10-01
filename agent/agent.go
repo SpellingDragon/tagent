@@ -146,7 +146,7 @@ type TagentAgent struct {
 	// memStoreRelease: lease release bound to
 	// THIS agent's lifecycle — executed from Close; nil for borrowed/shell
 	// agents and for isolated stores the agent fully owns via its own Close.
-	// Returns the release's close error (last-lease close reaches Close, D5).
+	// Returns the release's close error (last-lease close reaches Close).
 	memStoreRelease func() error
 	// memStoreOwned: this agent is the SOLE close owner of
 	// memStore (isolated build) — the direct-Close fallback may fire when no

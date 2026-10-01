@@ -1749,7 +1749,7 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	answers := bHopAnswers()
 	pinned := answers[hopsBefore]
 	require.Contains(t, pinned, `"served:SUB-C-PROMPT"`,
-		"§3.2：被钉跳的回执必须是 G1 之 C 的回答（D5「派生前继承发起调用租约」）")
+		"被钉跳的回执必须是 G1 之 C 的回答（派生前继承发起调用租约）")
 	require.NotContains(t, pinned, `"served:SUB-C-PROMPT-G2"`,
 		"§3.2：B 的 G1 代执行不得因为 G2 换了 C 就被改道到新目标——被钉跳的回执不能来自新代目标")
 	require.Greater(t, countServed(m.snapshot(), "SUB-C-PROMPT"), entriesBefore,

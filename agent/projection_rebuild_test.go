@@ -569,9 +569,9 @@ func TestPersistBusEvent_ReCommitDoesNotDoubleProject(t *testing.T) {
 // every invocation-private ContextManager that the same agent builds. Binding
 // that shared object per call (`buildExecutor` → SetParentProjection) both
 // writes a field another in-flight call reads, and lets call A's event_keys
-// auto-inject resolve against call B's projection. Design D2 forbids a
-// call-private projection from being shared across calls; D5 forbids rebinding
-// an already-published wrapper. This test drives TWO barrier-synchronized real
+// auto-inject resolve against call B's projection. A call-private projection
+// must not be shared across calls; an already-published wrapper must not be
+// rebound. This test drives TWO barrier-synchronized real
 // concurrent invocations of one agent and requires each delegation to inject
 // only from its OWN call's projection.
 //

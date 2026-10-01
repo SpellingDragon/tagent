@@ -326,12 +326,12 @@ func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 			EventType: "external_input", Content: "survivor", Timestamp: 1700000000000}))
 
 	rel2()
-	require.False(t, eng1.Ready(), "F7: last lease release must close the shared engine")
+	require.False(t, eng1.Ready(), "last lease release must close the shared engine")
 
 	_, eng3, rel3, err := rr.acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.NotNil(t, eng3)
-	require.NotSame(t, eng1, eng3, "F7/D5: reopen must get a fresh engine bound to a fresh backend")
+	require.NotSame(t, eng1, eng3, "reopen must get a fresh engine bound to a fresh backend")
 	require.True(t, eng3.Ready())
 	rel3()
 }
@@ -407,7 +407,7 @@ func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
 		rerr := rel()
 		require.ErrorIs(t, rerr, storeErr, "store close error must reach the release caller")
 		require.Equal(t, []string{"producers", "engine", "store"}, seq,
-			"D5 close order: producers → engine → backend flush")
+			"close order: producers → engine → backend flush")
 		_, _, rel2, err2 := rr.acquire("localfile", dir, fp, openFn)
 		require.NoError(t, err2, "confirmed stop must release the writer lock for reopen")
 		_ = rel2()
@@ -495,7 +495,7 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 
 	select {
 	case got := <-reopen:
-		require.NoError(t, got.err, "D5: reopen after the old generation closed must succeed, not ErrStoreLocked")
+		require.NoError(t, got.err, "reopen after the old generation closed must succeed, not ErrStoreLocked")
 		require.NotNil(t, got.store)
 		_ = got.rel()
 	case <-time.After(3 * time.Second):

@@ -130,7 +130,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 // persistent loop that is the owner CM's current face; for a sub-call whose cm is
 // the PRIVATE invocation CM it is that CM's own construction-time binding (and a
 // private CM has no org-reloader, so none fires) — the same executor RunFlow used
-// before this unification. The caller's D5 lifetime reference is held separately
+// before this unification. The caller's lifetime reference is held separately
 // by the sub-call path (Run's own invLease defer), not through this function.
 //
 // The retry budget is UNIFIED (S3m-c): both the persistent loop and a derived

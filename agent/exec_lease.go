@@ -113,7 +113,7 @@ func newExecBinding(cm *ContextManager, id int64, r runner.Runner, face ContextM
 }
 
 // acquire 取一份指定种类的引用，返回其幂等的释放句柄。它是"继承式"取引用：
-// 在已退役但仍被持有的代上合法（派生子调用继承发起方的那一次钉住，见 D5）。
+// 在已退役但仍被持有的代上合法（派生子调用继承发起方的那一次钉住）。
 // 要启动新工作必须用 tryAcquireActive——它是唯一守住「已退役的代不接受新引用」的形式。
 func (b *execBinding) acquire(kind LeaseKind) *ExecLease {
 	b.mu.Lock()

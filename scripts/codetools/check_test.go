@@ -529,14 +529,14 @@ func TestMergeCheckReportsLiteralContentDifferences(t *testing.T) {
 }
 
 // TestMergeCheckUsageStatesTheFlagShape pins that the flag pitfall is stated where a caller meets it.
-// - Passing --map twice is silent (the last value wins), so the earlier table's renames surface as violations blamed on the batch.
+// - A repeated --map is a usage error, not a silent last-wins override that drops the first table's renames.
 // - The usage text is the only surface reachable before a reading is trusted, so it must carry the per-package pairing and the non-test limit of --explain.
 func TestMergeCheckUsageStatesTheFlagShape(t *testing.T) {
 	code, out := captureStderr(t, func() int {
 		return runMergeCheck(nil)
 	})
 	require.Equalf(t, 2, code, "a call with no roots must be refused:\n%s", out)
-	for _, want := range []string{"ONE file", "last value", "per package", "exempts only non-test"} {
+	for _, want := range []string{"ONE file", "usage error", "per package", "exempts only non-test"} {
 		require.Contains(t, out, want, "usage must state the flag shape")
 	}
 }
@@ -603,4 +603,21 @@ func TestProcRefsIgnoresScannerSelfReferences(t *testing.T) {
 		[]byte("# reports changes under openspec/changes/ but does not fail\n"), 0o644))
 	hits := procRefViolations(filepath.Join(dir, "scripts"))
 	require.Equal(t, []string{"scripts/build.sh:1"}, hits, "tooling self-reference must not be reported")
+}
+
+// TestMergeCheckRepeatedFlagFails pins the hard-fail contract for repeated single-value flags.
+// - A repeated --map silently shadowing the first table is how a batch once shipped with a dead catalog argument.
+func TestMergeCheckRepeatedFlagFails(t *testing.T) {
+	b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": baseTestsFile})
+	h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": baseTestsFile})
+	code, _ := captureStderr(t, func() int {
+		return runMergeCheck([]string{"--base-root", b, "--head-root", h,
+			"--map", "a.tsv", "--map", "b.tsv", "pkg"})
+	})
+	require.Equal(t, 2, code, "repeated --map must be a usage error, not silent last-wins")
+	code2, _ := captureStderr(t, func() int {
+		return runMergeCheck([]string{"--base-root", b, "--head-root", h,
+			"--explain", "a.txt", "--explain", "b.txt", "pkg"})
+	})
+	require.Equal(t, 2, code2, "repeated --explain must be a usage error, not silent last-wins")
 }
