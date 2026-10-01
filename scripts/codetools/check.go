@@ -1,11 +1,17 @@
 // check.go implements the two comparison modes the repository gates need:
 //
 //	codetools comment-check --base-root DIR --head-root DIR <file>...
-//	codetools merge-check   --base-root DIR --head-root DIR [--map FILE] <dir>...
+//	codetools merge-check   --base-root DIR --head-root DIR [--map FILE] [--explain FILE] <dir>...
 //
 // Paths are module-relative and must exist under both roots (comment-check) or in
 // the head root (merge-check); the shell wrappers materialize the baseline with
 // git archive. Both exit non-zero when a violation is printed.
+//
+// --map and --explain each hold ONE file, for the package being checked: a repeated
+// flag keeps only the last value and silently drops the earlier tables. Rename and
+// explain tables are per-package by construction (a cross-package table applies one
+// domain's normalization to another's baseline text and manufactures violations), so
+// a multi-package run must invoke merge-check once per package with its own pair.
 package main
 
 import (
@@ -96,6 +102,14 @@ type mergeViolation struct {
 	Note string `json:"note"`
 }
 
+// mergeCheckUsage states the flag shape the tool actually has, because the wrong
+// shape is silent: passing --map twice keeps the last file and drops the first, and
+// the dropped table's renames then surface as violations blamed on the batch.
+const mergeCheckUsage = "usage: codetools merge-check --base-root DIR --head-root DIR [--map F] [--explain F] dir...\n" +
+	"  --map and --explain each take ONE file; repeating a flag keeps only the last value.\n" +
+	"  --explain exempts only non-test declarations; a missing-test is never waivable.\n" +
+	"  Tables are per package, so run one invocation per package with its own --map and --explain.\n"
+
 // runMergeCheck verifies a test-file consolidation kept every test entry intact:
 // same set of test/benchmark functions per package (after applying the rename
 // map), each with an identical comment-free body, identical assertion count and
@@ -105,12 +119,12 @@ func runMergeCheck(args []string) int {
 	fs := flag.NewFlagSet("merge-check", flag.ExitOnError)
 	base := fs.String("base-root", "", "root holding the baseline revision")
 	head := fs.String("head-root", "", "root holding the working tree")
-	mapFile := fs.String("map", "", "TSV of old-name<TAB>new-name renames")
-	explain := fs.String("explain", "", "file listing non-test declarations allowed to differ")
+	mapFile := fs.String("map", "", "ONE TSV of old-name<TAB>new-name renames for the packages being checked")
+	explain := fs.String("explain", "", "ONE file listing non-test declarations allowed to differ; it cannot exempt a test")
 	diffOut := fs.String("diff-out", "", "directory to write normalized base/head text for each body-changed declaration")
 	_ = fs.Parse(args)
 	if *base == "" || *head == "" || fs.NArg() == 0 {
-		fmt.Fprintln(os.Stderr, "usage: codetools merge-check --base-root DIR --head-root DIR [--map F] [--explain F] dir...")
+		fmt.Fprint(os.Stderr, mergeCheckUsage)
 		return 2
 	}
 	renames := loadRenames(*mapFile)
@@ -249,9 +263,33 @@ func diffDecls(dir string, b, h map[string]decl, renames map[string]string, expl
 	return out
 }
 
-// foldLayout collapses every run of whitespace to a single space.
+// foldLayout collapses runs of whitespace to a single space outside string literals.
+//
+// Layout is what the printer re-flows when a comment disappears, so it must be
+// folded for the witness to mean "only comments changed". Literal content is not
+// layout: folding a fixture's padding would let a changed fixture pass as an
+// unchanged one, which is a false pass in the direction nobody can see.
 func foldLayout(text string) string {
-	return strings.Join(strings.Fields(text), " ")
+	return strings.TrimSpace(outsideLiterals(text, func(s string) string {
+		return spaceRunRE.ReplaceAllString(s, " ")
+	}))
+}
+
+var spaceRunRE = regexp.MustCompile(`\s+`)
+
+// outsideLiterals applies fn to every run of text that is not a string or rune
+// literal and copies literal content byte-for-byte. Every textual normalizer the
+// witness uses must go through it, or normalization reaches into fixture data.
+func outsideLiterals(text string, fn func(string) string) string {
+	var b strings.Builder
+	for _, seg := range splitOutsideLiterals(text) {
+		if seg.literal {
+			b.WriteString(seg.text)
+			continue
+		}
+		b.WriteString(fn(seg.text))
+	}
+	return b.String()
 }
 
 // qualifierBlind replaces every package qualifier prefix with a fixed marker.
@@ -261,8 +299,13 @@ func foldLayout(text string) string {
 // rewrites the same spelling two different ways, manufacturing false differences.
 // Blinding the qualifier keeps every selector name (and therefore the semantics of
 // each call) comparable while making alias choice irrelevant to the witness.
+//
+// Blinding is a code-level concern and stops at a literal's edge: a dotted path
+// inside a fixture is data, and blinding it would erase a real key change.
 func qualifierBlind(text string) string {
-	return qualifierRE.ReplaceAllString(text, "Q.")
+	return outsideLiterals(text, func(s string) string {
+		return qualifierRE.ReplaceAllString(s, "Q.")
+	})
 }
 
 var qualifierRE = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\.`)

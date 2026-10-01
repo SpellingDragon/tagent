@@ -4,6 +4,11 @@
 # comment-free body, assertion count and t.Parallel count (renames via map file).
 #
 # usage: check_test_merge.sh <baseline-ref> <dir>... [--map FILE] [--explain FILE]
+#
+# --map and --explain each carry ONE table. A rename table belongs to one package:
+# applying another domain's table to it invents violations. So either pass a single
+# dir with its own pair, or call this script once per package — never several tables
+# in one run, because a repeated flag keeps only the last value.
 set -euo pipefail
 
 base_ref="${1:?usage: check_test_merge.sh <baseline-ref> <dir>... [--map F] [--explain F]}"

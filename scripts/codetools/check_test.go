@@ -27,10 +27,24 @@ func writeFileTree(t *testing.T, base string, files map[string]string) string {
 // assert on the violation kinds the gate reports.
 func captureStdout(t *testing.T, fn func() int) (code int, out string) {
 	t.Helper()
+	return captureStream(t, &os.Stdout, fn)
+}
+
+// captureStderr runs fn while collecting what it writes to stderr, which is where
+// a usage line is stated.
+func captureStderr(t *testing.T, fn func() int) (code int, out string) {
+	t.Helper()
+	return captureStream(t, &os.Stderr, fn)
+}
+
+// captureStream redirects one standard stream while fn runs and returns its code
+// and everything written to that stream.
+func captureStream(t *testing.T, target **os.File, fn func() int) (code int, out string) {
+	t.Helper()
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	saved := os.Stdout
-	os.Stdout = w
+	saved := *target
+	*target = w
 	done := make(chan string, 1)
 	go func() {
 		b, _ := io.ReadAll(r)
@@ -38,7 +52,7 @@ func captureStdout(t *testing.T, fn func() int) (code int, out string) {
 	}()
 	code = fn()
 	require.NoError(t, w.Close())
-	os.Stdout = saved
+	*target = saved
 	select {
 	case out = <-done:
 	case <-time.After(5 * time.Second):
@@ -353,6 +367,178 @@ func TestFoldLayoutCollapsesPaddingOnlyDifferences(t *testing.T) {
 	require.Equal(t, foldLayout(a), foldLayout(b), "padding-only differences must fold away")
 	require.NotEqual(t, foldLayout(a), foldLayout("func f() int {\n\treturn 2\n}"),
 		"a real token change must survive folding")
+}
+
+// TestFoldLayoutKeepsWhitespaceInsideStringLiterals pins that layout folding stops at a literal's edge.
+// - Fixture text is content: folding its whitespace makes a changed fixture read as unchanged, the one false pass a witness must never allow.
+// - Layout outside literals must still fold, or rename-induced reflow returns as a phantom body change.
+func TestFoldLayoutKeepsWhitespaceInsideStringLiterals(t *testing.T) {
+	const padded = "var s = `line one\nline two   spaced`\nvar x = 1\n"
+	const plain = "var s = `line one\nline two spaced`\nvar x = 1\n"
+	require.NotEqual(t, padded, plain, "the raw text must actually differ, else the test proves nothing")
+	require.NotEqual(t, foldLayout(padded), foldLayout(plain),
+		"whitespace inside a literal is content and must survive folding")
+
+	const quotedPadded = "var s = \"a   b\"\nvar x = 1\n"
+	const quotedPlain = "var s = \"a b\"\nvar x = 1\n"
+	require.NotEqual(t, foldLayout(quotedPadded), foldLayout(quotedPlain),
+		"an interpreted string's spacing is content too")
+
+	const reflowA = "var x = 1\nvar y\t= 2\n"
+	const reflowB = "var x\t=  1\nvar y = 2\n"
+	require.NotEqual(t, reflowA, reflowB, "the raw text must actually differ")
+	require.Equal(t, foldLayout(reflowA), foldLayout(reflowB), "layout outside literals must still fold away")
+}
+
+// TestDropBlankLinesKeepsLiteralLines pins that blank-line and trailing-space removal stop at a literal's edge.
+// - A raw fixture's empty lines and padded lines are content; eating them turns a fixture edit into a no-op.
+// - Blank lines and trailing spaces outside literals remain layout and must still go.
+func TestDropBlankLinesKeepsLiteralLines(t *testing.T) {
+	const withBlank = "var s = `one\n\ntwo`\n\nvar x = 1\n"
+	const withoutBlank = "var s = `one\ntwo`\nvar x = 1\n"
+	require.NotEqual(t, dropBlankLines(withBlank), dropBlankLines(withoutBlank),
+		"a blank line inside a literal must survive")
+
+	const padded = "var s = `one   \ntwo`\nvar x = 1   \n"
+	require.Contains(t, dropBlankLines(padded), "`one   \ntwo`", "trailing spaces inside a literal must survive")
+	require.Contains(t, dropBlankLines(padded), "var x = 1\n", "trailing spaces outside a literal must be trimmed")
+
+	require.Equal(t, "var x = 1\nvar y = 2\n", dropBlankLines("var x = 1\n\nvar y = 2\n"),
+		"a blank line outside literals is still dropped")
+}
+
+// TestQualifierBlindKeepsLiteralContent pins that alias blinding stops at a literal's edge.
+// - Blinding a qualified path inside a fixture erases a real key change, so the blinding must be scoped to code.
+// - The blinding itself stays: an alias spelled differently outside a literal must remain comparable.
+func TestQualifierBlindKeepsLiteralContent(t *testing.T) {
+	require.NotEqual(t, qualifierBlind("var s = `agent.name: x`"), qualifierBlind("var s = `other.name: x`"),
+		"a qualified path inside a literal is content")
+	require.Equal(t, qualifierBlind("return require.Equal(t, 1)"), qualifierBlind("return assert.Equal(t, 1)"),
+		"alias choice outside literals must stay irrelevant to the witness")
+}
+
+// TestCommentCheckStripsTrailingCommentsOnEverySpecSlot pins each slot a trailing comment may occupy.
+// - A defined type or alias holds one in TypeSpec.Comment and an import spec in ImportSpec.Comment; an uncleared slot reads as CODE-CHANGED.
+// - Field and value slots were already cleared, so they are pinned here too: the rule is every comment slot, not the common ones.
+// - A body-level trailing comment reaches the output by another route than a spec slot, so it is pinned as well to keep the boundary explicit.
+func TestCommentCheckStripsTrailingCommentsOnEverySpecSlot(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		head string
+	}{
+		{name: "defined type", base: "package p\n\ntype Duration int64 // milliseconds\n", head: "package p\n\ntype Duration int64\n"},
+		{name: "type alias", base: "package p\n\ntype Millis = int64 // milliseconds\n", head: "package p\n\ntype Millis = int64\n"},
+		{
+			name: "import spec",
+			base: "package p\n\nimport (\n\t\"fmt\" // for printing\n)\n\nfunc f() { fmt.Println(\"x\") }\n",
+			head: "package p\n\nimport (\n\t\"fmt\"\n)\n\nfunc f() { fmt.Println(\"x\") }\n",
+		},
+		{name: "struct field", base: "package p\n\ntype S struct {\n\tA int // milliseconds\n}\n", head: "package p\n\ntype S struct {\n\tA int\n}\n"},
+		{name: "const spec", base: "package p\n\nconst (\n\tA = 1 // milliseconds\n)\n", head: "package p\n\nconst (\n\tA = 1\n)\n"},
+		{name: "statement label", base: "package p\n\nfunc f() int {\nloop: // why\n\tfor {\n\t\tbreak loop\n\t}\n\treturn 1\n}\n", head: "package p\n\nfunc f() int {\nloop:\n\tfor {\n\t\tbreak loop\n\t}\n\treturn 1\n}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotEqual(t, tc.base, tc.head, "the fixture pair must actually differ")
+			b := writeFileTree(t, "base", map[string]string{"pkg/a.go": tc.base})
+			h := writeFileTree(t, "head", map[string]string{"pkg/a.go": tc.head})
+			code, out := captureStdout(t, func() int {
+				return runCommentCheck([]string{"--base-root", b, "--head-root", h, "pkg/a.go"})
+			})
+			require.Equalf(t, 0, code, "only a trailing comment differs, so the batch is comment-only:\n%s", out)
+		})
+	}
+}
+
+// TestCommentCheckReportsLiteralContentDifferences pins the direction the whole-file witness was blind to.
+// - Whitespace-only edits inside a fixture are content edits, so a batch claiming "comments only" must fail on them.
+func TestCommentCheckReportsLiteralContentDifferences(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		head string
+	}{
+		{
+			name: "raw string padding",
+			base: "package p\n\nfunc f() string {\n\treturn `line one\nline two   spaced`\n}\n",
+			head: "package p\n\nfunc f() string {\n\treturn `line one\nline two spaced`\n}\n",
+		},
+		{
+			name: "interpreted string padding",
+			base: "package p\n\nfunc f() string {\n\treturn \"a   b\"\n}\n",
+			head: "package p\n\nfunc f() string {\n\treturn \"a b\"\n}\n",
+		},
+		{
+			name: "blank line inside a raw string",
+			base: "package p\n\nfunc f() string {\n\treturn `one\n\ntwo`\n}\n",
+			head: "package p\n\nfunc f() string {\n\treturn `one\ntwo`\n}\n",
+		},
+		{
+			name: "trailing spaces inside a raw string",
+			base: "package p\n\nfunc f() string {\n\treturn `one   \ntwo`\n}\n",
+			head: "package p\n\nfunc f() string {\n\treturn `one\ntwo`\n}\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotEqual(t, tc.base, tc.head, "the fixture pair must actually differ")
+			b := writeFileTree(t, "base", map[string]string{"pkg/a.go": tc.base})
+			h := writeFileTree(t, "head", map[string]string{"pkg/a.go": tc.head})
+			code, out := captureStdout(t, func() int {
+				return runCommentCheck([]string{"--base-root", b, "--head-root", h, "pkg/a.go"})
+			})
+			require.Equalf(t, 1, code, "a literal-content difference is a code change, not layout:\n%s", out)
+			require.Contains(t, out, "CODE-CHANGED")
+		})
+	}
+}
+
+// TestMergeCheckReportsLiteralContentDifferences pins that the per-declaration body hash sees fixtures.
+// - The body hash folds the same way as the whole-file witness, so a fixture edit inside a test must surface as body-changed.
+// - A fixture change must not be waivable: explain never exempts a test declaration.
+func TestMergeCheckReportsLiteralContentDifferences(t *testing.T) {
+	cases := []struct {
+		name string
+		base string
+		head string
+	}{
+		{
+			name: "whitespace inside a fixture",
+			base: "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tsrc := `a   b`\n\tt.Fatal(src)\n}\n",
+			head: "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tsrc := `a b`\n\tt.Fatal(src)\n}\n",
+		},
+		{
+			name: "qualified path inside a fixture",
+			base: "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tsrc := `agent.name: x`\n\tt.Fatal(src)\n}\n",
+			head: "package p\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tsrc := `other.name: x`\n\tt.Fatal(src)\n}\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotEqual(t, tc.base, tc.head, "the fixture pair must actually differ")
+			b := writeFileTree(t, "base", map[string]string{"pkg/a_test.go": tc.base})
+			h := writeFileTree(t, "head", map[string]string{"pkg/a_test.go": tc.head})
+			code, out := captureStdout(t, func() int {
+				return runMergeCheck([]string{"--base-root", b, "--head-root", h, "pkg"})
+			})
+			require.Equalf(t, 1, code, "a changed fixture is a changed body:\n%s", out)
+			require.Contains(t, out, `"kind":"body-changed"`)
+		})
+	}
+}
+
+// TestMergeCheckUsageStatesTheFlagShape pins that the flag pitfall is stated where a caller meets it.
+// - Passing --map twice is silent (the last value wins), so the earlier table's renames surface as violations blamed on the batch.
+// - The usage text is the only surface reachable before a reading is trusted, so it must carry the per-package pairing and the non-test limit of --explain.
+func TestMergeCheckUsageStatesTheFlagShape(t *testing.T) {
+	code, out := captureStderr(t, func() int {
+		return runMergeCheck(nil)
+	})
+	require.Equalf(t, 2, code, "a call with no roots must be refused:\n%s", out)
+	for _, want := range []string{"ONE file", "last value", "per package", "exempts only non-test"} {
+		require.Contains(t, out, want, "usage must state the flag shape")
+	}
 }
 
 // TestNameCheckFlagsIterationNumbers pins the naming guardrail: test identifiers must not carry iteration numbers.

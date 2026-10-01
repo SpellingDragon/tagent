@@ -1,11 +1,18 @@
 check.go implements the two comparison modes the repository gates need:
 
     codetools comment-check --base-root DIR --head-root DIR <file>...
-    codetools merge-check   --base-root DIR --head-root DIR [--map FILE] <dir>...
+    codetools merge-check   --base-root DIR --head-root DIR [--map FILE] [--explain FILE] <dir>...
 
 Paths are module-relative and must exist under both roots (comment-check) or in
 the head root (merge-check); the shell wrappers materialize the baseline with
 git archive. Both exit non-zero when a violation is printed.
+
+--map and --explain each hold ONE file, for the package being checked:
+a repeated flag keeps only the last value and silently drops the earlier tables.
+Rename and explain tables are per-package by construction (a cross-package table
+applies one domain's normalization to another's baseline text and manufactures
+violations), so a multi-package run must invoke merge-check once per package
+with its own pair.
 
 Command codetools emits the mechanical facts the repository's comment and
 test-file policies are checked against.

@@ -336,12 +336,15 @@ graph TB
 
 完整字段与行为矩阵见 [docs/wiki/platform/](docs/wiki/platform/platform-subsystems.md)。
 
+> **例外——认知资产防线（cognitive-asset-guard）**：漂移审计（D1）与走私引导（D4）**默认开启、零必填配置**（纯附加行为：事件+日志+提示行，无拦截、无网络上报）；资产写审批规则（D2）随 governance `DefaultRules` 存在，仅 governance enabled 时被评估。终态方向为**权限域分离**（D3：资产目录对 exec 物理只读，实现属独立运维变更）。见 [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md)。
+
 ## 📚 深入阅读
 
 | 主题 | 文档 |
 |------|------|
 | 记忆架构 / 策展 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
 | 平台子系统（治理 / 自进化 / 可靠性 / 可观测 / 记忆引擎 / MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
+| 认知资产防线（漂移审计 · 写审批 · 走私引导 · 权限域分离） | [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md) |
 | 启用子系统后 agent 在各复杂场景的行为反应 | [docs/wiki/platform/agent-behavior-matrix.md](docs/wiki/platform/agent-behavior-matrix.md) |
 | 工具架构 / 任务重入 / 会话回收 | [docs/wiki/tool/tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
@@ -371,7 +374,18 @@ cd examples/wechat-bot && go run .     # 运行示例
 | `TAGENT_RL_ALLOW_LLM_REDIRECT` | `1` 才允许 `/task` 携带 `llm_base_url` 动态重定向（默认禁用；LLM client 逐跳 CheckRedirect：30x 每一跳目标 host 必须 ∈ allowlist，未启用时任何跳转全拒） |
 | `TAGENT_RL_ENDPOINT_ALLOWLIST` | 逗号分隔 host allowlist（精确 host、任意端口），如 `proxy.example.com,proxy2.internal` |
 
-CI（GitHub Actions）在 push/PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `modelref_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。
+### 真机 tmux 测的本地跑法
+
+`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。这类抖动只污染本地全量跑，不进 CI：该族被两道闸门挡在门外——会话型测各自带 `testing.Short()` 守卫，重测族整文件挂 `//go:build integration`（实测 CI 的 `-short` 里剩下的只有两个 `exec.LookPath` 探针）。
+
+```bash
+go test -p 1 ./tool/action                        # 串行，避开互相收割
+go test -p 1 -tags integration ./tool/action      # 含 Scenario/TUI 重测族
+```
+
+判读规则：报 `server exited unexpectedly` 先按跑序问题处理，串行重跑；只有稳定复现的超时或断言不符才按缺陷追。跑该族前确认没有别处（含自己的 tmux 会话、其他 agent 进程）在同一默认服务器上建会话。
+
+CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `modelref_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
 
 ## License
 

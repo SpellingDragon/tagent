@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # dev takes direct pushes with no PR gate, so it must be built, vetted and
+    # tested by the same job as main. A branch that skips CI is a branch whose
+    # HEAD can be unbuildable, and every later reconciliation then reads against
+    # a baseline that was never verified.
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
