@@ -3,7 +3,6 @@
   "_regenerate": "bash scripts/lint.sh --update-baseline",
   "dirs": [".","examples/wechat-bot"],
   "counts": {
-    "missing-test-responsibility": 9,
-    "responsibility-fragmentation": 2
+    "missing-test-responsibility": 9
   }
 }
