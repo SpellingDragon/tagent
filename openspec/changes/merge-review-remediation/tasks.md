@@ -159,7 +159,7 @@
 - [x] 14.6 全部 TBD Purpose 回填：`grep -rln "TBD - created by archiving" openspec/specs/` 逐文件一句话能力陈述
 - [x] 14.7 验证：`scripts/lint.sh` 的 doc-refs 门 + `grep -rn "file:///Users/\|TBD - created" openspec/ | wc -l` 为 0
 - [x] 14.8 提交：`docs: doc-truth 全量对齐——README/wiki/positioning/归档脱敏/Purpose 回填`
-- [ ] 14.9 **预收口检查点**：产出 45 项映射勾验表（见下方映射节），逐项对照 01-findings.md 勾验并附证据行号；缺项回补，不得进入收口
+- [x] 14.9 **预收口检查点**：产出 45 项映射勾验表（见下方映射节），逐项对照 01-findings.md 勾验并附证据行号；缺项回补，不得进入收口
 
 ## 15. CU-15 全量回归与 MR 收口
 
