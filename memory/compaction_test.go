@@ -145,6 +145,81 @@ func TestCompactor_L1ToL2_SecondFoldMergesExistingDailyWindow(t *testing.T) {
 	require.Equal(t, 4, meta.EventCount, "the merged daily segment must hold both folds' events")
 }
 
+// TestCompactor_SecondFoldTombstoneDoesNotResurrect 钉住目标窗墓碑收缩不复活已遗忘事件。
+// - 同日二次折叠并入既存目标窗后，墓碑事件被剔除收缩 seq，旧尾段副本必须随发布同批删除。
+// - 否则 finalizeTombstones 移除墓碑守卫后，后续折叠扫入孤儿尾段，已遗忘事件带全文复活（ErrEventForgotten 契约破）。
+func TestCompactor_SecondFoldTombstoneDoesNotResurrect(t *testing.T) {
+	kv := newMockKV()
+	rel := newSimpleInMemRelationStore()
+	store, err := NewFileSegmentStore(kv, rel, ":memory:", 100)
+	require.NoError(t, err)
+	ts := NewTombstoneSet(rel, kv, 1)
+	store.tombstones = ts
+	compactor := NewCompactor(store, kv, rel, ts, CompactionConfig{})
+
+	baseTS := int64(1710666000000)
+	freshHours := func(fold, n int) []int64 {
+		before, err := store.ListSegments(1)
+		require.NoError(t, err)
+		for i := 0; i < n; i++ {
+			hourTS := baseTS + int64(fold*10+i)*3600000
+			key := NewSnowflakeEventKey(1, hourTS)
+			require.NoError(t, store.StoreEvent(key, FullEvent{
+				PartitionID:  1,
+				EventType:    "test",
+				EventSummary: "resurrect-fold-" + string(rune('0'+fold)) + "-" + string(rune('0'+i)),
+				Timestamp:    hourTS,
+			}))
+			require.NoError(t, store.SealCurrent(1))
+		}
+		after, err := store.ListSegments(1)
+		require.NoError(t, err)
+		var fresh []int64
+		for _, w := range after {
+			known := false
+			for _, b := range before {
+				if b == w {
+					known = true
+					break
+				}
+			}
+			if !known {
+				fresh = append(fresh, w)
+			}
+		}
+		return fresh
+	}
+
+	require.NoError(t, compactor.CompactL1ToL2(1, freshHours(0, 4)))
+
+	refs, err := store.QueryEvents(QueryOptions{PartitionIDs: []int{1}, Keyword: "resurrect-fold-0", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, refs, 4, "fold-0 published all four events")
+	var deadA, deadB int64
+	for _, r := range refs {
+		if r.EventSummary == "resurrect-fold-0-2" {
+			deadA = r.EventKey
+		}
+		if r.EventSummary == "resurrect-fold-0-3" {
+			deadB = r.EventKey
+		}
+	}
+	require.NotZero(t, deadA, "the soon-to-be-forgotten event A must exist")
+	require.NotZero(t, deadB, "the soon-to-be-forgotten event B must exist")
+	require.NoError(t, ts.MarkTombstone(deadA))
+	require.NoError(t, ts.MarkTombstone(deadB))
+
+	require.NoError(t, compactor.CompactL1ToL2(1, freshHours(1, 1)))
+
+	require.NoError(t, compactor.CompactL1ToL2(1, freshHours(2, 1)))
+
+	for _, forgotten := range []string{"resurrect-fold-0-2", "resurrect-fold-0-3"} {
+		refs, err = store.QueryEvents(QueryOptions{PartitionIDs: []int{1}, Keyword: forgotten, Limit: 10})
+		require.NoError(t, err)
+		require.Empty(t, refs, "a tombstoned-away event (%s) must not resurrect via the target-window orphan tail", forgotten)
+	}
+}
+
 func TestCompactor_L2ToL3(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 

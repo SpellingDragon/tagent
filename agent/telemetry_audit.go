@@ -202,7 +202,7 @@ func (a *SelfTelemetryAuditor) GateReason(spec task.TaskSpec) string {
 	case level >= auditFreeze && !spec.Protected:
 		return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）持续超阈且频率收敛无效 — 冻结新任务纳管（保护类豁免；在飞任务不受影响）", ratio*100, n)
 	case level == 2 && !spec.Protected:
-		if lineage := spec.Origin["meta_trigger_source"]; tagentevent.SelfManagedLineage(lineage) {
+		if lineage := spec.Origin[tagentevent.MetaKeyTriggerSource]; tagentevent.SelfManagedLineage(lineage) {
 			return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）超阈 — 收敛自管任务频率（L2，用户派生与保护任务不受影响）", ratio*100, n)
 		}
 	}

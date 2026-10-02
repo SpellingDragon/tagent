@@ -82,10 +82,10 @@ func TestAudit_L2ConvergeSemantics(t *testing.T) {
 	a.level = 2
 	a.mu.Unlock()
 	require.NotEmpty(t, a.GateReason(task.TaskSpec{Kind: "generic",
-		Origin: map[string]string{"meta_trigger_source": "meditation"}}),
+		Origin: map[string]string{"trigger_source": "meditation"}}),
 		"L2 must converge self-managed-origin spawns")
 	require.Empty(t, a.GateReason(task.TaskSpec{Kind: "generic",
-		Origin: map[string]string{"meta_trigger_source": "user"}}),
+		Origin: map[string]string{"trigger_source": "user"}}),
 		"L2 must not touch user-derived spawns")
 	require.Empty(t, a.GateReason(task.TaskSpec{Kind: "generic", Protected: true}),
 		"L2 passes protected specs too")

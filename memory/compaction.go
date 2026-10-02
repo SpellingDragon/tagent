@@ -292,7 +292,11 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 		defer c.lockPartition(pid)()
 
 		l2WindowTS := computeDailyWindow(windowTSs[0])
-		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l2WindowTS))
+		mergeSource, oldCount, err := c.mergeSourcesWithTarget(pid, windowTSs, l2WindowTS)
+		if err != nil {
+			return nil, fmt.Errorf("merge source resolution failed: %w", err)
+		}
+		events, err := c.mergeEvents(pid, mergeSource)
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -327,6 +331,7 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 			idxValue := fmt.Sprintf("%d:%d", l2WindowTS, seq)
 			batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
 		}
+		batchOps = appendTailCleanup(batchOps, pid, l2WindowTS, oldCount, len(events))
 		metaJSON, _ := json.Marshal(meta)
 		metaKVKey := MetaKeyStr(pid, l2WindowTS)
 		batchOps = append(batchOps, KVOp{Type: "put", Key: metaKVKey, Value: string(metaJSON)})
@@ -357,27 +362,48 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	return nil
 }
 
-// mergeSourcesWithTarget returns the read set for a fold: the selected source
-// windows plus the fold's target window when a segment already lives there. A
-// fold republishes (target, seq) keys from seq=0; without the merge-in, a
-// second fold landing on the same aged-out target (same day for L2, same week
-// for L3) would overwrite — silently lose — events an earlier fold published.
-// Windows already selected as sources are never re-added (under the
-// collision-guard shape the target is a read source already).
-// An unreadable target meta is treated as absent, the same convention the
-// layer-scan callers use (a real read failure still surfaces through the merge
-// scan, which is the durable path over the same keys).
-func (c *Compactor) mergeSourcesWithTarget(pid int, windowTSs []int64, targetTS int64) []int64 {
+// mergeSourcesWithTarget resolves the read set for a fold and the seq length
+// of the fold target's previous publication. A fold republishes (target, seq)
+// keys from seq=0; without the merge-in, a second fold landing on the same
+// aged-out target (same day for L2, same week for L3) would overwrite —
+// silently lose — events an earlier fold published. oldCount is 0 when no
+// segment lives at the target yet, or when the target is already among the
+// selected sources (the collision-guard shape, where cleanup excludes the
+// target and the fold rewrites it in place).
+// A target meta read that fails with anything other than ErrKeyNotFound
+// aborts the fold: treating a live-but-unreadable target as absent would
+// reopen the very overwrite this helper exists to close.
+func (c *Compactor) mergeSourcesWithTarget(pid int, windowTSs []int64, targetTS int64) ([]int64, int, error) {
 	for _, w := range windowTSs {
 		if w == targetTS {
-			return windowTSs
+			return windowTSs, 0, nil
 		}
 	}
 	meta, err := c.getSegmentMeta(pid, targetTS)
-	if err != nil || meta == nil {
-		return windowTSs
+	if err != nil {
+		if !errors.Is(err, ErrKeyNotFound) {
+			return nil, 0, fmt.Errorf("target meta pid=%d window=%d: %w", pid, targetTS, err)
+		}
+		return windowTSs, 0, nil
 	}
-	return append(append([]int64{}, windowTSs...), targetTS)
+	if meta == nil {
+		return windowTSs, 0, nil
+	}
+	return append(append([]int64{}, windowTSs...), targetTS), meta.EventCount, nil
+}
+
+// appendTailCleanup adds same-batch deletes for the previous publication's
+// seq tail beyond the new event count. When a target window participates in a
+// merge, tombstoned shrink can leave the old high-seq copies behind while
+// finalizeTombstones removes their guard — a later fold would rescan those
+// orphans past the (now-removed) tombstone and resurrect forgotten events,
+// breaking the ErrEventForgotten contract. Deleting the tail in the SAME batch
+// as the republish keeps the swap atomic across crashes.
+func appendTailCleanup(batchOps []KVOp, pid int, targetTS int64, oldCount, newCount int) []KVOp {
+	for seq := newCount; seq < oldCount; seq++ {
+		batchOps = append(batchOps, KVOp{Type: "delete", Key: EventKeyStr(pid, targetTS, seq)})
+	}
+	return batchOps
 }
 
 // mergeEvents reads all events from source segments and returns them sorted by
@@ -580,7 +606,11 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 		defer c.lockPartition(pid)()
 
 		l3WindowTS := computeWeeklyWindow(windowTSs[0])
-		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l3WindowTS))
+		mergeSource, oldCount, err := c.mergeSourcesWithTarget(pid, windowTSs, l3WindowTS)
+		if err != nil {
+			return nil, fmt.Errorf("merge source resolution failed: %w", err)
+		}
+		events, err := c.mergeEvents(pid, mergeSource)
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -621,6 +651,7 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 			idxValue := fmt.Sprintf("%d:%d", l3WindowTS, seq)
 			batchOps = append(batchOps, KVOp{Type: "put", Key: idxKVKey, Value: idxValue})
 		}
+		batchOps = appendTailCleanup(batchOps, pid, l3WindowTS, oldCount, len(events))
 
 		metaJSON, _ := json.Marshal(meta)
 		metaKVKey := MetaKeyStr(pid, l3WindowTS)
