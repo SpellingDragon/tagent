@@ -1,3 +1,4 @@
+// 契约: docs/wiki/reliability/durable-delivery.md#anchor-persistence
 package reliability
 
 import (

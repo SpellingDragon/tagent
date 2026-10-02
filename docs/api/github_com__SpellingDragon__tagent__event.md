@@ -3,8 +3,6 @@ package event // import "github.com/SpellingDragon/tagent/event"
 Package event 定义 tagent 的统一事件类型、事件元数据契约与时间线前缀契约：
 类型注册表是事件类型静态属性的唯一权威源，投影/召回/嵌入/TTL 均由它派生。
 
-谱系投递策略的单一真源：宿主投递门与折叠外显判定同源消费此白名单。
-
 CONSTANTS
 
 const (
@@ -120,10 +118,11 @@ const (
     消费方只经这些常量解析，不得使用字面量。
 
 const LineageMeditation = "meditation"
-    LineageMeditation is the self-initiated reflection turn's trigger source.
-    It is host-visible (its output may be delivered) yet remains self-managed
-    traffic for the telemetry audit — the two-layer meaning every consumer of
-    this package must keep.
+    LineageMeditation is the self-initiated reflection turn trigger source.
+
+    - It is host-visible, so its output may be delivered, yet remains
+    self-managed traffic for the telemetry audit: the two-layer meaning every
+    consumer of this package must keep.
 
 const TypeInboxReceipt = "inbox_receipt"
     TypeInboxReceipt 标记「一个输入信封已被确认消费」的记账事实：其真源是事实链而非 inbox 文件。它的 TTL 就是
@@ -135,17 +134,13 @@ func DefaultTypeTTL() map[string]int
     DefaultTypeTTL 返回全部显式声明 TTLDays（非 0，含 -1 豁免）的类型→天数映射（新 map）。
 
 func DeliverableLineage(ts string) bool
-    DeliverableLineage reports whether a trigger_source lineage is host-facing
-    (externally visible): a reclaim carrying it was (or can be) delivered to
-    the host, so its verbatim notice may age out. This whitelist is the SINGLE
-    SOURCE OF TRUTH shared by the host delivery gate and the settle-notice
-    externalization check — anything outside it is internal and FAIL-CLOSED
-    withheld (unknown values are never delivered), the same conservative
-    direction as the unknown-withhold philosophy.
+    DeliverableLineage reports whether a trigger_source lineage is host-facing,
+    i.e. a reclaim carrying it was or can be delivered to the host, so its
+    verbatim notice may age out.
 
-    Contract: adding an externally-visible lineage means adding it HERE and
-    nowhere else; consumers derive from this predicate, never from private
-    copies.
+    - Anything outside this whitelist is internal and fail-closed
+    withheld: unknown values are never delivered. - Adding an
+    externally-visible lineage means adding it here and nowhere else;
 
 func EncodeSourceSnapshot(source string, metadata map[string]any) (string, error)
     EncodeSourceSnapshot 渲染持久化用的快照 JSON；来源与元数据皆空时返回空串。

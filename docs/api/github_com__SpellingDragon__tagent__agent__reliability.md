@@ -1,8 +1,7 @@
 package reliability // import "github.com/SpellingDragon/tagent/agent/reliability"
 
 Package reliability 承载 tagent 的常驻可靠性子系统（T-G）：依赖失效的优雅退化、 可靠投递、冥想锚点持久化。核心理念（报告
-D3）：at-least-once 而非 exactly-once； 每个外部依赖失效有明确定义的「检测→降级→恢复」三段式路径，无静默丢失、无 panic、
-无死循环；失败是一等资产（退化状态可查询、可观测、入 governance 事件）。
+D3）：at-least-once 而非 exactly-once； 每个外部依赖失效有明确定义的「检测→降级→恢复」三段式路径，无静默丢失、无
 
 CONSTANTS
 
@@ -278,25 +277,11 @@ func (in *Inbox) RecordCompletion(path string, completion json.RawMessage) error
     — the frozen completion is authoritative.
 
 func (in *Inbox) RecordReceipt(path string, cred ReceiptCredential) error
-    RecordReceipt durably marks a claimed envelope as processed (claimed
-    → receipted) ONLY on valid evidence. Three gates, none of which is a
-    description string or a request id: ① a LEGAL completion is durably frozen —
-    present, valid JSON, and schema-
+    RecordReceipt durably marks a claimed envelope as processed (claimed to
+    receipted) only on valid evidence: frozen completion, an established
+    two-phase reservation, and a credential whose key matches that reservation.
 
-        consistent enough for this schema-agnostic leaf to trust (the agent layer
-        fully decodes/validates before issuing any credential, D2);
-
-    ② the two-phase reservation was actually established — the envelope carries
-    a
-
-        non-empty reserved receipt key from PrepareFacts;
-
-    ③ the caller presents a ReceiptCredential whose key matches that reservation
-
-        — the verified receipt identity, minted only after the fact-chain receipt
-        commit was confirmed. A refused receipt never advances the state: the claim
-        stays and replays rather than letting a bare transition stand in for
-        processing evidence. Crash before a successful call → the claim replays.
+    - A refused receipt never advances the state: the claim stays
 
 func (in *Inbox) ReleaseClaim(path string) error
     ReleaseClaim 把已领取的信封退回 pending，使后续 Pull 能按严格序号重新领取它。提交门用它 在瞬时 I/O 失败时退避——不
@@ -304,15 +289,9 @@ func (in *Inbox) ReleaseClaim(path string) error
     no-op。
 
 func (in *Inbox) ResetTransitional(confirm bool) (int, error)
-    ResetTransitional 是对前代格式数据的**一次性受管重置**，也是本可靠性叶子内唯一具破坏性的路径。
-    安全约束（不得被推导成"任意删除"的能力）：
-      - 必须显式 confirm：重置是运维动作，绝不自动发生；
-      - 只删除打开时枚举到的前代格式文件（散落的 *.spill 与 inbox-v1/*.json）——它们与 在用的 inbox-v2
-        树互不相交，且不被任何当前事实引用，因此清掉它们不留悬空引用 （恢复单元的一致性规则约束的是当前数据）；
-      - 绝不触碰 inbox-v2 及其隔离区（当前格式损坏必须暴露，而不是被抹掉），也不触碰本 叶子目录树之外的任何路径；
-      - 已关闭、或仍有信封未 ack（pending>0）时拒绝执行：受管重置需要独占写入权，而不是 在一个进行中的回合里插队。
+    ResetTransitional 是对前代格式数据的一次性受管重置，也是本可靠性叶子内唯一具破坏性的路径。
 
-    当前格式损坏与一般 I/O 失败都不属于"过渡数据"，这里绝不清理它们。返回被删除的 前代格式文件数。
+    - 只删除打开时枚举到的前代格式文件，它们与在用的 inbox-v2 树互不相交且不被任何当前事实引用。
 
 func (in *Inbox) TransitionalData() (spill, v1 []string)
     TransitionalData reports the previous-format items detected at open. They

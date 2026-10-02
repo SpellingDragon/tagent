@@ -25,8 +25,10 @@
 )均在 build 前拦截
 - [x] 3.9 agent 批二:9 指针(task_record_sink 的 #task-record-contract 不存在,改配实有节 #restore-rebuild)+tool_agent 六例削薄(90→33 行),新建 wiki 两节 #delegation-retry 与 #tool-agent-factory 承接取消归属/重试形状/工厂只装配配置,基线 29→20/54→48
 - [x] 3.9a 规程增补:**每次 --update-baseline 之后必须比对 counts 的键集合**,新出现的键一律视为本批自伤(本轮第三次踩同型旁路:tool_agent 自引 docs 路径成 unindexed-path-ref、"先释放…再报错"成 mechanism-narrative、map 陈旧锚成 index-anchor-unknown),必须改内容而非留槽（约 10 文件）
-- [x] 3.10a agent 根域归拢:10 例机制叙述入档(execution-generations 补 #generation-wiring-window 与锁外退役/同对象不新造一代/登记先于交付,agent-architecture#framework-boundary 补单向数据流,event-flow 补事实写入同点原子与 processTurn 单原语,memory#feedback-bind 补反馈非凭据),基线 48→38;新节序号重复已纠(九→十)
-- [ ] 3.10 其余小域归拢批（engine/reliability/task/tool/action 等残余）
+- [x] 3.10a agent 根域归拢：10 例机制叙述入档（execution-generations 补 #generation-wiring-window 与锁外退役/同对象不新造一代/登记先于交付，agent-architecture#framework-boundary 补单向数据流，event-flow 补事实写入同点原子与 processTurn 单原语，memory#feedback-bind 补反馈非凭据），基线 48→38；新节序号重复已纠（九→十）
+- [x] 3.10b agent 根域收尾：5 例入档（durable-delivery 补提交门四态分类表，agent-architecture#test-support 补真机探针取证判据；meditation 双闸门文档已有，属无损收缩），基线 38→33
+- [x] 3.10c agent/task：4 指针 + 5 例入档（task-lifecycle 新增 #resume-states 合法来源态表与面板不持久化段），基线 33→28 / 20→16
+- [x] 3.10d agent/reliability + event：6 指针 + 3 例入档（durable-delivery 新增 #lineage-visibility 白名单同源、#transitional-reset 受管重置边界表、#quarantine-disposition 三结果义务表，#envelope-states 补回执三门），基线 28→25 / 16→10；第 N 次 bullet 漏 `//` 前缀由 build 拦截
 - [ ] 3.11 examples/wechat-bot 批（5 文件，第二模块独立验证三连）
 
 ## 4. P4 归零切硬与 counts 归空（CI 固化终态）
