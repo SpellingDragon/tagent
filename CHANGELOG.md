@@ -26,7 +26,7 @@
 - **存储耐久与诊断**（E 组）：分区发现、墓碑保留重放防线、扫段/列表失败一律 fail-loud（对"实际删了什么"诚实）。
 - **rl 周边**（E-P2 组 4 项）：SwappableModel 换回竞态以锁内新鲜 current 判定；trajectory 对 (nil,nil) 返回不再起 nil-channel 转发协程（Close 死锁堵住）且落错误记录；restart 脚本的归档+截断移入交接窗。
 - **tool 护栏**（D 组 3 项）：smuggle 告警判据双层化（词形+位置），`&&` 链与 URL query 误报清零而既有告警集（nohup 配 &/disown/重定向收尾）不变。
-- **工程化**（F 组 4 项）：comment-only 门禁以 git status 分类重写（删除侧硬拒、未跟踪纳入、`--` pathspec 盲区堵死）；CI 补 mod verify 与 soak 超时；tmux 监控 RebindCallback 供跨重启 resume 换供。
+- **工程化**（F 组 4 项）：comment-only 门禁以 git status 分类重写（删除侧硬拒、未跟踪纳入、`--` pathspec 盲区堵死，另修 R 状态行取旧路径的盲区）；CI 补 mod verify 与 soak 超时；tmux 监控 RebindCallback 供跨重启 resume 换供；tmux CreateSession 改有界重试（3 次×150ms 退避，重试中发现会话已存在则幂等收敛为成功）——所有创建调用方的瞬态失败语义变化。
 - **文档卫生**（G 组）：主 specs 与码面背离清零（无锚恢复不静默截断条款对齐、WAL 死条款 REMOVED）、Purpose 回填、旧版整份残留删除、绝对路径脱敏、README/wiki 对齐耐久定位。
 - **投递门禁吞没宿主通报**（wechat-bot）：转世通报与 SYSTEM_ALERT 曾借用 "meditation" 章——fail-closed 门禁上线后其输出会被静默扣留；现改专用章（`reincarnation`/`system_alert`）并在门禁显式路由投递（B-fix）。
 - **转世通报时序竞态**（wechat-bot）：固定 5s 探测对慢写的保险链脚本静默错过（s67 通报缺席实证）；改为 60s 轮询等待 NOTICE 出现（新鲜度门不变）。

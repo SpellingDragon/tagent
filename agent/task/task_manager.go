@@ -1026,9 +1026,9 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 // old detached-gated walls (markStaleDetached / enforceJobDeadline, removed in
 // ) never fired for a task that went quiet without detaching (56bf24c3,
 // stuck on the board 23h). Effective lifetime = the task's own spec.TTL when >0,
-// else the manager DefaultTTL; when both are <=0 the reaper is OFF for that task
-// (transitional — callers not yet on TTL keep the old "no wall unless
-// configured" semantics until ). On expiry it cancels the backing work via
+// else the manager DefaultTTL (floored at defaultManagerTTL by NewTaskManager —
+// the reaper is ALWAYS ON; there is no configured-off state). On expiry it
+// cancels the backing work via
 // the owner's detector.Cancel (kills the tmux session / goroutine) OUTSIDE the
 // lock, then retires the task failed ONCE through finalizeRetired (SettleFailed),
 // so it leaves the board. finalize's terminal fence makes concurrent/repeat

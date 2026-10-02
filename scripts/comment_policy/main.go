@@ -133,6 +133,7 @@ func main() {
 	}
 
 	var all []finding
+	var facts []*fileFact
 	announceScanBlindSpots()
 	ignored := ignoredGoFiles(".")
 	if n := len(ignored); n > 0 {
@@ -156,8 +157,17 @@ func main() {
 				os.Exit(1)
 			}
 			all = append(all, fs2...)
+			fact, err := collectTestFact(f)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", f, err)
+				os.Exit(1)
+			}
+			if fact != nil {
+				facts = append(facts, fact)
+			}
 		}
 	}
+	all = append(all, checkResponsibilityCoLocation(facts)...)
 	all = dropRedundantPackageDocs(all)
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Path != all[j].Path {
@@ -488,6 +498,184 @@ func checkFile(path string) ([]finding, error) {
 	out = append(out, checkCoverage(fset, file, path, isTest)...)
 	out = append(out, checkDocForm(fset, file, path, isTest)...)
 	return out, nil
+}
+
+// fileFact is one test file's participation in the responsibility co-location rule:
+// which compilation unit it belongs to, which build universe inside that unit, which
+// responsibility it declares, how many top-level tests it holds, and whether it
+// mirrors a production file. Facts feed checkResponsibilityCoLocation, the gate's one
+// cross-file rule.
+type fileFact struct {
+	path       string
+	dir        string
+	pkg        string
+	tag        string
+	anchor     string
+	anchorLine int
+	tests      int
+	mirrors    bool
+}
+
+// stem is the test file's base name without the .go and _test extensions — the
+// spelling a production mirror must match.
+func (f *fileFact) stem() string {
+	base := strings.TrimSuffix(filepath.Base(f.path), ".go")
+	return strings.TrimSuffix(base, "_test")
+}
+
+// collectTestFact parses a test file into its co-location fact. Non-test files
+// yield nil, and are silently skipped because their shape is not the rule's subject.
+func collectTestFact(path string) (*fileFact, error) {
+	if !strings.HasSuffix(path, "_test.go") {
+		return nil, nil
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+	if err != nil {
+		return nil, err
+	}
+	anchor, anchorLine := responsibilityAnchor(fset, file)
+	return &fileFact{
+		path:       path,
+		dir:        filepath.Dir(path),
+		pkg:        file.Name.Name,
+		tag:        buildConstraints(file),
+		anchor:     anchor,
+		anchorLine: anchorLine,
+		tests:      testFuncCount(file),
+		mirrors:    mirrorsProduction(path),
+	}, nil
+}
+
+// buildConstraints joins the file's //go:build expressions in source order; the
+// result is the file's build universe, and "" is the default one. Files in different
+// universes cannot merge (a soak-tagged test may not live in a default-tagged file),
+// so the tag is part of the group key rather than an exemption table.
+func buildConstraints(file *ast.File) string {
+	var exprs []string
+	for _, g := range file.Comments {
+		for _, c := range g.List {
+			t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(c.Text), "//"))
+			t = strings.TrimSpace(t)
+			if rest, ok := strings.CutPrefix(t, "go:build "); ok {
+				exprs = append(exprs, strings.TrimSpace(rest))
+			}
+		}
+	}
+	return strings.Join(exprs, " && ")
+}
+
+// responsibilityAnchor returns the file's first index-line target and its line.
+// An undeclared file returns "" and is left to missing-test-responsibility, which
+// owns the declaration half of the same contract.
+func responsibilityAnchor(fset *token.FileSet, file *ast.File) (string, int) {
+	for _, g := range file.Comments {
+		line := indexLineText(g)
+		if line == "" {
+			continue
+		}
+		return strings.TrimSpace(line[strings.Index(line, ":")+1:]), fset.Position(g.Pos()).Line
+	}
+	return "", 0
+}
+
+// testFuncCount counts receiver-less top-level functions whose name starts with
+// Test. A file holding none is test-support (a stub, a base, a pure benchmark): it
+// declares the anchor to name what it supports, not to duplicate a test surface, so
+// it never participates in the co-location count.
+func testFuncCount(file *ast.File) int {
+	n := 0
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if ok && fd.Recv == nil && strings.HasPrefix(fd.Name.Name, "Test") {
+			n++
+		}
+	}
+	return n
+}
+
+// variantSuffixes is the frozen mirror-tolerance list: only the repository's existing
+// real-API variant suffix may mirror through a suffix. A new spelling would launder a
+// missing mirror, so growth here is a deliberate review, not a convenience.
+var variantSuffixes = []string{"_real"}
+
+// mirrorsProduction reports whether the test file mirrors a production file: the
+// exact <dir>/<stem>.go, or, for a frozen variant suffix, <dir>/<stem-minus-suffix>.go.
+// Prefix or containment matching is deliberately absent — exact spelling also aligns
+// the name, which is exit (2), and a fuzzy match would dissolve that pressure.
+func mirrorsProduction(path string) bool {
+	base := strings.TrimSuffix(filepath.Base(path), ".go")
+	stem := strings.TrimSuffix(base, "_test")
+	candidates := []string{stem}
+	for _, v := range variantSuffixes {
+		if s := strings.TrimSuffix(stem, v); s != stem {
+			candidates = append(candidates, s)
+		}
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), c+".go")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkResponsibilityCoLocation is the co-location gate: when two or more test files
+// in the same (directory, package, build universe, anchor) key declare the same
+// responsibility, each file without a production mirror is fragmented. The package
+// sits in the key because one directory may hold both the internal and the external
+// test package: they are separate compilation units, so a body cannot move between
+// them without requalifying identifiers — which the lossless contract forbids. Mirrored
+// files keep the test-family-to-production-family correspondence the same contract
+// demands, so the finding's exits are merge, rename, or docs-side anchor convergence —
+// never a forced merge of mirrors.
+func checkResponsibilityCoLocation(facts []*fileFact) []finding {
+	type groupKey struct{ dir, pkg, tag, anchor string }
+	groups := map[groupKey][]*fileFact{}
+	for _, f := range facts {
+		if f.tests == 0 || f.anchor == "" {
+			continue
+		}
+		k := groupKey{f.dir, f.pkg, f.tag, f.anchor}
+		groups[k] = append(groups[k], f)
+	}
+	var out []finding
+	for k, members := range groups {
+		if len(members) < 2 {
+			continue
+		}
+		var mirrors []string
+		for _, m := range members {
+			if m.mirrors {
+				mirrors = append(mirrors, m.stem()+"_test.go")
+			}
+		}
+		sort.Strings(mirrors)
+		for _, m := range members {
+			if m.mirrors {
+				continue
+			}
+			out = append(out, finding{
+				Path: m.path,
+				Line: m.anchorLine,
+				Rule: "responsibility-fragmentation",
+				Note: coLocationNote(m.stem(), mirrors),
+				Text: firstLine(k.anchor),
+			})
+		}
+	}
+	return out
+}
+
+// coLocationNote states the three exits with their concrete targets: the mirrored
+// file to merge into, the rename that would create a mirror, and the docs-side
+// convergence. Naming targets keeps the gate a triage aid rather than a bare count.
+func coLocationNote(stem string, mirrors []string) string {
+	landing := "no mirrored file in this group"
+	if len(mirrors) > 0 {
+		landing = strings.Join(mirrors, ", ")
+	}
+	return fmt.Sprintf("responsibility split across files without a production mirror; exits: (1) merge into %s, (2) rename %s_test.go to mirror its production file, (3) converge the anchor on the docs side", landing, stem)
 }
 
 // collectDocSlots records every comment group that sits in a documentation slot.

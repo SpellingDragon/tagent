@@ -18,7 +18,6 @@ for a in "$@"; do [ "$a" = "--" ] || paths+=("$a"); done
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 go build -o "$tmp/codetools" ./scripts/codetools
 
-files="$(git diff --name-only "$base_ref" -- "${paths[@]}" | grep -E '\.go$' || true)"
 # Untracked .go files are part of the batch: git diff ignores them unless the
 # caller declared intent-to-add, so declare it here (no content staging) and
 # re-collect. Without this, "git add" never sees a new file and the gate
@@ -42,7 +41,7 @@ git archive "$base_ref" | tar -x -C "$tmp/base"
 #   M/R/T/...     → compare baseline vs worktree under the tool
 statuses="$(git diff --name-status "$base_ref" -- "${paths[@]}" | grep -E '\.go($|[[:space:]])' || true)"
 deleted=$(echo "$statuses" | awk '$1 == "D" { print $2 }' || true)
-modified=$(echo "$statuses" | awk '$1 != "A" && $1 != "D" { print $2 }' || true)
+modified=$(echo "$statuses" | awk '$1 != "A" && $1 != "D" { if ($1 ~ /^R/ && NF >= 3) print $3; else print $2 }' || true)
 additions=$(echo "$statuses" | awk '$1 == "A" { print $2 }' || true)
 
 # git-side hard reject first: a deleted path must be rejected even when stale

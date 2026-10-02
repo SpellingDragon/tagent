@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/agent/task"
+	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // settleSinkRegistry is the S3m-c routing table for the M2 per-invocation loop.
@@ -139,7 +141,10 @@ func (r *settleSinkRegistry) awaiting(id string) bool {
 // guaranteed a wake-up. Were the publish to happen outside the lock, a shell could
 // drain a settle, re-read a decrement-not-yet-landed count, block on Pull, and lose
 // its wakeup with nothing left to wake it. The invocation bus is buffered and its
-// sole consumer drains continuously, so the in-lock publish never blocks in practice.
+// sole consumer drains continuously, so the in-lock publish completes without
+// waiting in practice; on a FULL bus it waits up to publishTimeout inside the
+// lock (bounded registry stall) and, on rejection, returns false after the
+// decrement — the caller's shared-bus fallback keeps the settle observable.
 func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
 	if r == nil || id == "" {
 		return false
@@ -150,9 +155,13 @@ func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
 	if bus == nil {
 		return false
 	}
-	bus.Publish(evt)
+	_, perr := bus.PublishContext(context.Background(), evt)
 	if r.pending[id] > 0 {
 		r.pending[id]--
+	}
+	if perr != nil {
+		log.Warnf("[settle-route] invocation bus rejected the settle (id=%s), falling back to the shared bus: %v", id, perr)
+		return false
 	}
 	return true
 }
@@ -169,10 +178,10 @@ func taskInvocationID(tk *task.Task) string {
 // deliverTaskSettled is the routing decision the agent's OnSettle hook calls:
 // hand a background task_settled to the owning sub-invocation loop's bus (keyed
 // by the task's S2m invocation_id), else fall back to the shared bus. The bus
-// fallback is the current single-consumer path (entry owner + every unbound
-// invocation), so with no binding behavior is unchanged. route's Publish never
-// blocks the emitting goroutine under normal drain, so a settle is never dropped
-// or deadlocked.
+// fallback serves the no-binding shape (entry owner + every unbound invocation)
+// AND the full-bus rejection escape: a settle rejected by a stalled invocation
+// bus is re-published to the shared bus, so the event stays observable and the
+// barrier still reaches quiescence.
 func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task, evt *AgentEvent) {
 	if sinks.route(taskInvocationID(tk), evt) {
 		return

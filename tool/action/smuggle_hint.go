@@ -17,6 +17,12 @@ var (
 // hasBackgroundAmp reports whether the command carries a background-& whose
 // neighbours on both sides are not & — an independent job-control ampersand,
 // rejecting either leg of a "&&" chain.
+// Known miss (accepted boundary): an unspaced real backgrounding form like
+// `nohup a &b` has the & followed by a non-space character, so the word-shape
+// pass never nominates it — the false-positive-free guarantee for `&&` chains
+// and URL query strings is bought with this deliberate narrowing. Backgrounding
+// with no redirect and no space is indistinguishable from a URL `&param` by
+// pure regex position, so the pair is kept on the safe side.
 func hasBackgroundAmp(command string) bool {
 	for _, loc := range smuggleAmpCandidate.FindAllStringIndex(command, -1) {
 		ampAt := loc[0]
