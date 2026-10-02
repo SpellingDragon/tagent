@@ -3,6 +3,7 @@
 // - Registry: a concurrency-safe name → ToolSet table; mutations never touch tool declarations, so the prompt prefix stays byte-stable.
 // - mcp_call: a fixed declaration (server/tool/args) resolved through the registry at call time.
 // - mcp_discover reads the same registry, so runtime registrations are immediately discoverable.
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 package mcp
 
 import (

@@ -6,7 +6,6 @@ Package mcp provides the MCP server registry and the mcp_call gateway tool.
 tool declarations, so the prompt prefix stays byte-stable. - mcp_call: a fixed
 declaration (server/tool/args) resolved through the registry at call time.
 - mcp_discover reads the same registry, so runtime registrations are immediately
-discoverable.
 
 CONSTANTS
 

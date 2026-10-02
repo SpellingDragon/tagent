@@ -3,6 +3,8 @@
 //   - Registering built-in tools (exec + knowledge/recall sub-tools)
 //   - Querying factories by ID
 //   - Validating that config-referenced tools are registered
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 package tagent
 
 import (
@@ -57,20 +59,9 @@ func (r *ToolRegistry) GetToolAgentFactory(id string) (agent.ToolAgentFactory, b
 var registerOnce sync.Once
 
 // RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
-// Called once in tagent.New() before config validation.
-// Uses sync.Once for idempotency — safe to call multiple times.
 //
-// Registered plain tools:
-//   - exec: shell command executor (ActionTool via tmux)
-//   - file sub-tools: read_file, save_file, list_file, search_file, search_content, read_multiple_files, replace_content
-//   - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search, duckduckgo_search, memory_query
-//   - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
-//   - mcp_call: generic MCP execution gateway
-//   - memory curation sub-tools: memory_consolidate (evidence-gated consolidation),
-//     memory_health (dimension-anchored diagnosis); both are factory-registered and
-//     take their dependencies from the per-agent MemStore.
-//   - task sub-tools: list_tasks, cancel_task, relaunch_task, resume_task
-//   - spec: typed spec/plan management (no shell; openspec backend)
+// - Called once before config validation; sync.Once makes repeated calls safe.
+// - Registered plain tools: exec; the file sub-tools (read_file, save_file, list_file, search_file, search_content, read_multiple_files, replace_content); the knowledge sub-tools (skill_search, skill_load, mcp_discover, web_search, duckduckgo_search, memory_query); the recall sub-tools (recall_query, recall_get, recall_recent, recall_trace); mcp_call; and the memory curation sub-tools memory_consolidate and memory_health, whose dependencies come from the per-agent MemStore.
 func RegisterBuiltinTools() error {
 	registerOnce.Do(func() {
 		agent.RegisterPlainTool("exec", actionFactory)

@@ -2,6 +2,7 @@
 // (create / status / validate / archive) without handing the agent a general shell.
 //
 // - The plan format sits behind the Backend interface, so the openspec implementation is swappable without changing the model-visible surface.
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 package spec
 
 import "context"

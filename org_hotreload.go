@@ -149,13 +149,10 @@ type OrgCloseState struct {
 	ResourcesExited bool `json:"resourcesExited"`
 }
 
-// OrgAgentApply 是一个 agent 在本轮数值热更中的回执。Outcome 只有两种真实结果：
+// OrgAgentApply 是一个 agent 在本轮数值热更中的回执，Outcome 只有两种真实结果。
 //
-//	applied  —— 它属于本代可路由拓扑，参数已下发到它的真实对象；
-//	draining —— 本代不路由它（被移除或已降级为旧 owner），故不碰它，数值字段保持零值
-//	           （含义：本轮未评估，而不是"零配置"）。
-//
-// 回执的保留轮数与限界见文档。
+// - applied：它属于本代可路由拓扑，参数已下发到它的真实对象。
+// - draining：本代不路由它（被移除或已降级为旧 owner），不碰它，数值字段保持零值，含义是本轮未评估。
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#diagnostics
 type OrgAgentApply struct {
@@ -439,22 +436,12 @@ func hotSignature(cfg *Config) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Clone returns a private deep copy of the configuration. A published
-// generation owns its config snapshot (design D2: 「配置 map/slice/参数深拷贝
-// 并私有保存」) — the rollback ring must not alias the live map a later build
-// could touch, and a republished face must not observe edits made after it was
-// recorded.
+// Clone returns a private deep copy of the configuration: a published generation
+// owns its config snapshot, so the rollback ring never aliases the live map.
 //
-// It round-trips through JSON because Config is pure data with symmetric
-// json/yaml tags: a future nested field is copied automatically instead of
-// silently staying shared (an explicit field-by-field copy would rot on the
-// first addition). Two documented deviations:
-// - ConfigPath is json:"-" (process-level, excluded from the fingerprint) and
-// is re-attached by hand.
-// - an empty-but-non-nil slice/map with omitempty comes back nil. That is a
-// no-op for configuration resolution (range/len/index treat both alike),
-// and the fingerprint is computed over the same canonical form, so
-// desired/effective comparison is unaffected.
+// - It round-trips through JSON because Config is pure data with symmetric tags; a future nested field is copied automatically.
+// - ConfigPath is excluded from the snapshot and re-attached by hand.
+// - An empty-but-non-nil slice or map with omitempty comes back nil.
 func (c *Config) Clone() (*Config, error) {
 	if c == nil {
 		return nil, nil

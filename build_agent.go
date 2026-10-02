@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
 package tagent
 
 import (
@@ -646,24 +647,10 @@ func wireAgent(
 	return ta, nil
 }
 
-// buildAgentFace assembles an EXISTING agent's next-generation execution face
-// WITHOUT constructing a TagentAgent（热更换代不复制 agent 状态）:
-// shell-semantics store borrowing + the SAME assembleAgentConfig middle, then
-// agent.BuildExecutionFace. Refs resolve from cache — the caller supplies the
-// candidate domain (resident snapshot ∪ this round's hot-adds), so EVERY
-// owner — changed or not, factory-
-// declared or config-driven — contributes ZERO constructions; only a genuine
-// cache miss recurses into buildAgentDFS (via buildToolFromRef).
+// buildAgentFace assembles an EXISTING agent next-generation execution face
+// without constructing a TagentAgent: shell-semantics store borrowing plus the same assembly middle, then agent.BuildExecutionFace.
 //
-// Deliberately NOT built here (a face-only build has no consumer for them): the
-// degradation manager — the face has no Degradation field, and event-loop
-// degradation reporting reads the RESIDENT ta; hint tracker/ETS spill wiring —
-// face-owned tools get the raw borrowed store (no generation-local retention
-// leases on a shared store).
-//
-// A ToolAgentFactory owner takes this SAME path: the factory
-// returns a declaration, BuildExecutionFace derives its face, and the assembled
-// config rides the staged generation as runCfg — no second owner-birth shape.
+// - Refs resolve from cache; the caller supplies the candidate domain (resident snapshot plus this round hot-adds), so every owner contributes zero constructions and only a genuine cache miss recurses.
 func buildAgentFace(
 	name string,
 	acfg AgentConfig,

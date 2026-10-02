@@ -1,15 +1,8 @@
-// Package tagent provides the top-level composition root for tagent applications.
+// Package tagent provides the top-level composition root for tagent applications:
+// it encapsulates agent instantiation and wires cross-boundary dependencies.
 //
-// The root package encapsulates the agent instantiation process, assembling
-// a TagentAgent with configured tools and wiring cross-boundary dependencies.
-//
-// Tool Registration:
-//
-// Built-in tools are registered via RegisterBuiltinTools() (see registry.go).
-// External tools can be registered via RegisterPlainTool() and RegisterToolAgent().
-// Only tools that are both registered AND configured for an agent can be used.
-//
-// This file contains factory functions for built-in plain tools.
+// - Tools are usable only when both registered and declared for the agent; this file holds the built-in plain tool factories.
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 package tagent
 
 import (

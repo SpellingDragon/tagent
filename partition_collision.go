@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#memory-preflight
 package tagent
 
 import (
@@ -89,14 +90,10 @@ func (rc *runtimeConfig) unRegisterStoreOwner(name string) {
 	}
 }
 
-// ownedAgentNames returns the set of agent names that currently hold a store-owner
-// registration. The candidate transaction
+// ownedAgentNames returns the set of agent names that currently hold a store-owner registration.
 //
-//	snapshots this before building and diffs after, so a refused candidate's
-//
-// rollback can revoke EVERY owner it registered — including a parent that failed
-// late and therefore never reached the build cache and is invisible to the added
-// set. Diagnostic read-only; returns a fresh set.
+// - The candidate transaction snapshots this before building and diffs after, so a refused candidate rollback revokes every owner it registered, including a parent that failed late.
+// - Diagnostic read-only; returns a fresh set.
 func (rc *runtimeConfig) ownedAgentNames() map[string]bool {
 	if rc == nil {
 		return map[string]bool{}
@@ -116,23 +113,12 @@ func (rc *runtimeConfig) ownedAgentNames() map[string]bool {
 // means dropping the import in the same step.
 var _ = agent.TagentAgent{}
 
-// changedMemoryAgents returns the sorted names whose memory section differs from
-// the one their existing storage owner was built with. The judgment domain is
-// **existing owner ∩ what the new generation will actually route to**: only those
-// get built, so only those can migrate a live store.
+// changedMemoryAgents returns the sorted names whose memory section differs from the one
+// their existing storage owner was built with.
 //
-// Two names are excluded, and both exclusions are load-bearing:
-//   - absent from fresh.Agents (its route and definition are gone together) —
-//     there is no definition to compare against;
-//   - defined but not reachable from the entry this generation (its delegating
-//     tool is gone while the definition stays). Refusing the whole reload over
-//     such a name would freeze orchestration hot-reload permanently for an
-//     object the new generation never constructs: there is no second writer to
-//     prevent.
-//
-// Stickiness is not weakened. When such a name becomes reachable again it is
-// inside the domain, residentMemFP still holds its original fingerprint, and a
-// switched storage is refused then.
+// - Judgment domain: existing owner intersect what the new generation will actually route to; only those can migrate a live store.
+// - Names absent from fresh.Agents are excluded: route and definition are gone together, no definition to compare.
+// - Names defined but unreachable this generation are excluded: refusing the whole reload over them would freeze orchestration hot-reload for an object the new generation never constructs.
 func changedMemoryAgents(fresh *Config, ownerFP map[string]string, routable map[string]bool) []string {
 	var out []string
 	for name, want := range ownerFP {

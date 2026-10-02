@@ -2,10 +2,8 @@
 // Use of this source code is governed by a BSD-style license.
 
 // testing.go provides exported helpers for integration tests in tests/.
-// These expose internal APIs for comprehensive testing. Do NOT rely on
-// them in production code — they may change without notice.
-//
-// Convention: all symbols use the "Testing" prefix.
+// They expose internal APIs for comprehensive testing; production code must not depend on them.
+// 契约: docs/wiki/platform/platform-subsystems.md#testing-helpers
 package tagent
 
 import (

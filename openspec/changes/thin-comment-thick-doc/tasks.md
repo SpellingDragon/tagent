@@ -17,8 +17,8 @@
 - [x] 3.1 evolution 批:三指针落位(#git-safety 裁决替兄弟锚 #test-facts,#verdict-states,#refine),0 削薄,基线 113→110
 - [x] 3.2 tool 域指针半:22 文件落位(3 新锚 resident-continuity/recall-agent/tool-accessor=文档加厚;govx 裁决替兄弟锚为 #govx-entry-only;mcp.go 配 #mcp-live-registry),基线 110→88;削薄半(13)拆出为 3.2b
 - [x] 3.3 memory 批:16 指针(三新锚 causal-chain/inmemory-store/file-segment-store+engine.go 改配 #engine-contract)+8 削薄(LocalFileKV 29→5;迁文两节 local-file-kv 落盘模型/error-tracking canonical replay,顺带校正陈旧句 kv.json→分桶),基线 mfr 88→72/bnb 86→78
-- [ ] 3.4 根包批一（约 7 文件，含 `config.go:Config` 41 行——最大迁文对象，单独裁决落点）
-- [ ] 3.5 根包批二（约 7 文件，含 `tagent.go:New` 22 行）
+- [x] 3.4 根包批一:13 指针+三新节(#composition-root/#config-surface 含 Config 的 YAML 示例迁文/#testing-helpers)+Config 44→4 等 14 例削薄,基线 mfr 59→56/bnb 78→65;自纠注:doc 块重写吞掉同组 契约: 行(builtin/testing/tool 三文件)已回补,后续批次改为"先改 doc 再插指针"次序
+- [x] 3.5 根包批二:并入 3.4 单批完成(Properties 字段例迁 #config-surface),域内双锚清零
 - [ ] 3.6 agent/governance 批（9 文件）
 - [ ] 3.7 agent/compress 批（8 文件）
 - [ ] 3.8 agent 批一（约 10 文件，批前工作树检查）

@@ -5,7 +5,6 @@ Package spec provides an LLM-facing tool for specification-driven work plans
 shell.
 
 - The plan format sits behind the Backend interface, so the openspec
-implementation is swappable without changing the model-visible surface.
 
 FUNCTIONS
 

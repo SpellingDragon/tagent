@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 package tagent
 
 import (
@@ -10,20 +11,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// candidateOverlay is the private construction domain of ONE candidate — the
-// shape S-B that reload established and rollback is required to share
-// instead of keeping its own rebuild branch:
+// candidateOverlay is the private construction domain of ONE candidate, the
+// shape reload established and rollback is required to share.
 //
-//   - owners a candidate needs but the online table lacks are built into the
-//     overlay's cache, NEVER into the resident table, so no concurrent reader
-//     can see a not-yet-published owner (「不提前公开新增 owner」);
-//   - each build/registration enters the ordered responsibility table
-//     immediately (recorded before the error is checked, so a failed parent is
-//     unwindable too);
-//   - commit() merges at the caller's single commit point, and abandon() unwinds
-//     everything in reverse acquisition order when the candidate never publishes
-//     — including a failure in the LAST stage (face build／activation), which is
-//     exactly what the rollback branch used to leave half-applied.
+// - Owners the online table lacks are built into the overlay cache, never into the resident table, so no concurrent reader sees a not-yet-published owner.
+// - Each build or registration enters the ordered responsibility table immediately, recorded before the error is checked, so a failed parent is unwindable.
+// - commit() merges at the caller single commit point; abandon() unwinds in reverse acquisition order whenever the candidate never publishes.
 type candidateOverlay struct {
 	rc         *runtimeConfig
 	cache      map[string]*agent.TagentAgent

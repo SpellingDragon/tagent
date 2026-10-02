@@ -2,6 +2,7 @@
 //
 // - read_file, save_file, list_file and friends register as plain tools for agent YAML.
 // - base_dir falls back to the agent working root, then ".", sharing one filesystem view with the exec tool.
+// 契约: docs/wiki/platform/agent-behavior-matrix.md#working-dir
 package file
 
 import (

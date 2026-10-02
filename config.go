@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
 package tagent
 
 import (
@@ -13,50 +14,10 @@ import (
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
-// Config is the top-level tagent configuration.
-// Declarative and serializable — loadable from YAML or JSON.
-// Runtime-only dependencies (model instances, memory stores, etc.) are injected via Option functions.
+// Config is the top-level tagent configuration: declarative, serializable
+// (YAML/JSON), with runtime-only dependencies injected via Option functions.
 //
-// The configuration follows an agent-centric design: each agent describes its own
-// settings (model, memory, tools) and its communication intent (which agents it calls).
-// The top-level Config holds a map of agent configs, keyed by agent name.
-//
-// Example YAML:
-//
-//	agents:
-//	  tagent:
-//	    model: glm-4-flash
-//	    prompt_dir: resources/prompts
-//	    system_prompt:
-//	      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
-//	    memory:
-//	      type: file
-//	      path: /data/tagent/events
-//	    tools:
-//	      - agent: knowledge
-//	        description_file: knowledge_tool_desc.md
-//	        event_params: [event_key]
-//	      - agent: recall
-//	        description_file: recall_tool_desc.md
-//	        event_params: [event_key]
-//	      - kind: tool
-//	        id: exec
-//	        description_file: action_tool_desc.md
-//	  knowledge:
-//	    model: glm-4-flash
-//	    prompt:
-//	      files: [knowledge_agent.md]
-//	    memory:
-//	      type: memory
-//	    max_tool_iterations: 5
-//	    max_tokens: 4096
-//	  recall:
-//	    model: glm-4-flash
-//	    prompt:
-//	      files: [recall_agent.md]
-//	    memory:
-//	      type: memory
-//	    max_tool_iterations: 5
+// - Agent-centric design: each agent describes its own settings (model, memory, tools) and its communication intent; the top level holds the table keyed by agent name.
 type Config struct {
 	// XAnchors is an extension-reserved key ("x-" convention): YAML anchors
 	// shared across the file are declared under it and ignored by the
@@ -591,15 +552,9 @@ type ToolRef struct {
 	Async *bool `json:"async,omitempty" yaml:"async,omitempty"`
 
 	// Properties holds tool-specific configuration that each tool factory
-	// deserializes into its own typed struct. This keeps ToolRef generic
-	// — no tool-specific fields pollute the shared structure.
+	// deserializes into its own typed struct, keeping ToolRef generic.
 	//
-	// Example (action tool):
-	//
-	//	properties:
-	//	  workspace: /tmp/tagent-workspace
-	//	  run_as_user: tagent-runner
-	//	  run_as_group: tagent-runner
+	// - Example keys of the exec tool: workspace, run_as_user, run_as_group.
 	Properties map[string]any `json:"properties,omitempty" yaml:"properties,omitempty"`
 
 	// Remote declares that this agent tool is a remote A2A agent.

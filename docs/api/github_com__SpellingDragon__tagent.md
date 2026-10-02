@@ -1,18 +1,9 @@
 package tagent // import "github.com/SpellingDragon/tagent"
 
-Package tagent provides the top-level composition root for tagent applications.
+Package tagent provides the top-level composition root for tagent applications:
+it encapsulates agent instantiation and wires cross-boundary dependencies.
 
-The root package encapsulates the agent instantiation process, assembling a
-TagentAgent with configured tools and wiring cross-boundary dependencies.
-
-Tool Registration:
-
-Built-in tools are registered via RegisterBuiltinTools() (see registry.go).
-External tools can be registered via RegisterPlainTool() and
-RegisterToolAgent(). Only tools that are both registered AND configured for an
-agent can be used.
-
-This file contains factory functions for built-in plain tools.
+- Tools are usable only when both registered and declared for
 
 Package tagent — ToolRegistry wraps the global tool registration maps from
 agent/tool_agent.go and provides a unified interface for:
@@ -47,11 +38,8 @@ Usage:
         tagent.WithModel(modelInstance),
     )
 
-testing.go provides exported helpers for integration tests in tests/.
-These expose internal APIs for comprehensive testing. Do NOT rely on them in
-production code — they may change without notice.
-
-Convention: all symbols use the "Testing" prefix.
+testing.go provides exported helpers for integration tests in tests/. They
+expose internal APIs for comprehensive testing; production code must not depend
 
 CONSTANTS
 
@@ -134,23 +122,15 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
 
 func RegisterBuiltinTools() error
     RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
-    Called once in tagent.New() before config validation. Uses sync.Once for
-    idempotency — safe to call multiple times.
 
-    Registered plain tools:
-      - exec: shell command executor (ActionTool via tmux)
-      - file sub-tools: read_file, save_file, list_file, search_file,
-        search_content, read_multiple_files, replace_content
-      - knowledge sub-tools: skill_search, skill_load, mcp_discover, web_search,
-        duckduckgo_search, memory_query
-      - recall sub-tools: recall_query, recall_get, recall_recent, recall_trace
-      - mcp_call: generic MCP execution gateway
-      - memory curation sub-tools: memory_consolidate (evidence-gated
-        consolidation), memory_health (dimension-anchored diagnosis); both
-        are factory-registered and take their dependencies from the per-agent
-        MemStore.
-      - task sub-tools: list_tasks, cancel_task, relaunch_task, resume_task
-      - spec: typed spec/plan management (no shell; openspec backend)
+    - Called once before config validation; sync.Once makes repeated calls
+    safe. - Registered plain tools: exec; the file sub-tools (read_file,
+    save_file, list_file, search_file, search_content, read_multiple_files,
+    replace_content); the knowledge sub-tools (skill_search, skill_load,
+    mcp_discover, web_search, duckduckgo_search, memory_query); the recall
+    sub-tools (recall_query, recall_get, recall_recent, recall_trace); mcp_call;
+    and the memory curation sub-tools memory_consolidate and memory_health,
+    whose dependencies come from the per-agent MemStore.
 
 func TestingBuildAgent(
 	name string,
@@ -415,51 +395,12 @@ type Config struct {
 	// Reliability 配置常驻可靠性（T-G）。默认零值 = 关闭（纯 channel bus，现状）。
 	Reliability ReliabilityConfig `json:"reliability,omitempty" yaml:"reliability,omitempty"`
 }
-    Config is the top-level tagent configuration. Declarative and serializable
-    — loadable from YAML or JSON. Runtime-only dependencies (model instances,
-    memory stores, etc.) are injected via Option functions.
+    Config is the top-level tagent configuration: declarative, serializable
+    (YAML/JSON), with runtime-only dependencies injected via Option functions.
 
-    The configuration follows an agent-centric design: each agent describes
-    its own settings (model, memory, tools) and its communication intent (which
-    agents it calls). The top-level Config holds a map of agent configs,
+    - Agent-centric design: each agent describes its own settings (model,
+    memory, tools) and its communication intent; the top level holds the table
     keyed by agent name.
-
-    Example YAML:
-
-        agents:
-          tagent:
-            model: glm-4-flash
-            prompt_dir: resources/prompts
-            system_prompt:
-              files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
-            memory:
-              type: file
-              path: /data/tagent/events
-            tools:
-              - agent: knowledge
-                description_file: knowledge_tool_desc.md
-                event_params: [event_key]
-              - agent: recall
-                description_file: recall_tool_desc.md
-                event_params: [event_key]
-              - kind: tool
-                id: exec
-                description_file: action_tool_desc.md
-          knowledge:
-            model: glm-4-flash
-            prompt:
-              files: [knowledge_agent.md]
-            memory:
-              type: memory
-            max_tool_iterations: 5
-            max_tokens: 4096
-          recall:
-            model: glm-4-flash
-            prompt:
-              files: [recall_agent.md]
-            memory:
-              type: memory
-            max_tool_iterations: 5
 
 func DefaultConfig() Config
     DefaultConfig returns a Config with sensible defaults and the three core
@@ -477,20 +418,14 @@ func (c *Config) ApplyDefaults()
     ApplyDefaults fills in zero/empty values with defaults.
 
 func (c *Config) Clone() (*Config, error)
-    Clone returns a private deep copy of the configuration. A published
-    generation owns its config snapshot (design D2: 「配置 map/slice/参数深拷贝 并私有保存」)
-    — the rollback ring must not alias the live map a later build could touch,
-    and a republished face must not observe edits made after it was recorded.
+    Clone returns a private deep copy of the configuration: a published
+    generation owns its config snapshot, so the rollback ring never aliases the
+    live map.
 
-    It round-trips through JSON because Config is pure data with symmetric
-    json/yaml tags: a future nested field is copied automatically instead of
-    silently staying shared (an explicit field-by-field copy would rot on
-    the first addition). Two documented deviations: - ConfigPath is json:"-"
-    (process-level, excluded from the fingerprint) and is re-attached by hand.
-    - an empty-but-non-nil slice/map with omitempty comes back nil.
-    That is a no-op for configuration resolution (range/len/index treat both
-    alike), and the fingerprint is computed over the same canonical form,
-    so desired/effective comparison is unaffected.
+    - It round-trips through JSON because Config is pure data with symmetric
+    tags; a future nested field is copied automatically. - ConfigPath is
+    excluded from the snapshot and re-attached by hand. - An empty-but-non-nil
+    slice or map with omitempty comes back nil.
 
 func (c *Config) FoldModelRefAliases()
     FoldModelRefAliases folds each agent's deprecated flat compress.summary_*
@@ -786,13 +721,10 @@ type OrgAgentApply struct {
 	MaxTokens       int     `json:"maxTokens,omitempty"`
 	KeepRecentTasks int     `json:"keepRecentTasks,omitempty"`
 }
-    OrgAgentApply 是一个 agent 在本轮数值热更中的回执。Outcome 只有两种真实结果：
+    OrgAgentApply 是一个 agent 在本轮数值热更中的回执，Outcome 只有两种真实结果。
 
-        applied  —— 它属于本代可路由拓扑，参数已下发到它的真实对象；
-        draining —— 本代不路由它（被移除或已降级为旧 owner），故不碰它，数值字段保持零值
-                   （含义：本轮未评估，而不是"零配置"）。
-
-    回执的保留轮数与限界见文档。
+    - applied：它属于本代可路由拓扑，参数已下发到它的真实对象。 - draining：本代不路由它（被移除或已降级为旧
+    owner），不碰它，数值字段保持零值，含义是本轮未评估。
 
 type OrgCloseState struct {
 	Initiated       bool `json:"initiated"`
@@ -993,15 +925,9 @@ type ToolRef struct {
 	Async *bool `json:"async,omitempty" yaml:"async,omitempty"`
 
 	// Properties holds tool-specific configuration that each tool factory
-	// deserializes into its own typed struct. This keeps ToolRef generic
-	// — no tool-specific fields pollute the shared structure.
+	// deserializes into its own typed struct, keeping ToolRef generic.
 	//
-	// Example (action tool):
-	//
-	//	properties:
-	//	  workspace: /tmp/tagent-workspace
-	//	  run_as_user: tagent-runner
-	//	  run_as_group: tagent-runner
+	// - Example keys of the exec tool: workspace, run_as_user, run_as_group.
 	Properties map[string]any `json:"properties,omitempty" yaml:"properties,omitempty"`
 
 	// Remote declares that this agent tool is a remote A2A agent.
