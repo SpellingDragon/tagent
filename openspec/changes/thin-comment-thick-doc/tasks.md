@@ -29,6 +29,7 @@
 - [x] 3.10b agent 根域收尾：5 例入档（durable-delivery 补提交门四态分类表，agent-architecture#test-support 补真机探针取证判据；meditation 双闸门文档已有，属无损收缩），基线 38→33
 - [x] 3.10c agent/task：4 指针 + 5 例入档（task-lifecycle 新增 #resume-states 合法来源态表与面板不持久化段），基线 33→28 / 20→16
 - [x] 3.10d agent/reliability + event：6 指针 + 3 例入档（durable-delivery 新增 #lineage-visibility 白名单同源、#transitional-reset 受管重置边界表、#quarantine-disposition 三结果义务表，#envelope-states 补回执三门），基线 28→25 / 16→10；第 N 次 bullet 漏 `//` 前缀由 build 拦截
+- [x] 3.10e agent 余量 + 根包 + rl/workspace/tests：11 例入档（agent-architecture#package-layout 补 50 文件五组职责表、#test-support 补测试存储必须挪出工作树的分派顺序根因，platform-subsystems#composition-root 补单向依赖与 New 接线步骤，execution-generations 补交付账本屏障，rl-architecture#http-api 补 IterModel 保真四不变量），基线 25→14 / mtr 9→8；根包 plain 首跑 FAIL 经复跑与 race（213s）定性为并发负载下既有 flake
 - [ ] 3.11 examples/wechat-bot 批（5 文件，第二模块独立验证三连）
 
 ## 4. P4 归零切硬与 counts 归空（CI 固化终态）

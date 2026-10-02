@@ -1,14 +1,8 @@
 // Package rl provides reinforcement learning utilities for tagent agents.
 //
-// 契约: docs/wiki/rl/rl-architecture.md
-//
-// This package contains components for:
-// - Recording agent trajectories for offline training
-// - Swapping model instances at runtime
-// - HTTP API for external RL systems (AReaL)
-//
-// The AgentLoop interface decouples rl/ from agent/, allowing HTTPAPI
-// to interact with TagentAgent without importing the agent package.
+// - Components: trajectory recording for offline training, runtime model swapping, and the HTTP API for external RL systems such as AReaL.
+// - The AgentLoop interface decouples rl from agent so the HTTP API can drive a TagentAgent without importing the agent package.
+// 契约: docs/wiki/rl/rl-architecture.md#http-api
 package rl
 
 import (

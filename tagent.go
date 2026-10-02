@@ -1,29 +1,9 @@
-// Package tagent provides the top-level composition root for tagent applications.
+// Package tagent provides the top-level composition root: it encapsulates agent
+// instantiation, assembles a TagentAgent from declarative Config and injects runtime
+// dependencies via Options.
 //
-// The root package encapsulates the agent instantiation process, assembling
-// a TagentAgent with configured tools and wiring cross-boundary dependencies.
-//
-// Dependency direction (all one-way, no cycles):
-//
-//	tagent (root) → agent → plugin → memory
-//	tagent (root) → tool/action → memory
-//	tagent (root) → tool/recall → memory
-//	tagent (root) → tool/knowledge → memory
-//	tagent (root) → tool/mcp → tool (MCPRegistry interface)
-//	tagent (root) → prompt
-//
-// Tool Registration:
-//
-// tagent uses a ToolRegistry to manage available tools. Built-in tools are
-// registered via RegisterBuiltinTools(). External tools can be registered via
-// RegisterPlainTool() and RegisterToolAgent(). Only tools that are both
-// registered and configured for an agent can be used by that agent.
-//
-// Usage:
-//
-//	ta, err := tagent.New(tagent.DefaultConfig(),
-//	    tagent.WithModel(modelInstance),
-//	)
+// - Dependency direction is one-way and cycle-free; the root points at agent, tool/action, tool/recall, tool/knowledge and tool/mcp.
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 package tagent
 
 import (
@@ -240,41 +220,10 @@ func closeResourcesExited(ta *agent.TagentAgent) bool {
 	return done
 }
 
-// New creates a fully-wired TagentAgent from declarative Config + runtime Options.
+// New creates a fully-wired TagentAgent from declarative Config plus runtime Options.
 //
-// Config is declarative and serializable (loadable from YAML/JSON via LoadConfig).
-// Options inject runtime-only dependencies (model instances, etc.).
-//
-// New handles all cross-boundary wiring internally:
-//   - Registers built-in tools (knowledge, recall, exec)
-//   - Validates that all configured tools are registered
-//   - Resolves the entry agent from Config.Agents map
-//   - Creates a MemoryStore per agent (isolated, from MemoryConfig)
-//   - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
-//   - For agent-kind tools: creates the referenced agent and wraps it via AgentToolWrapper
-//     which handles event_key → external context resolution
-//   - For tool-kind tools: delegates to registered plain tool factories
-//   - Seeds the process-level MCP tool registry from the configured servers
-//   - Constructs the governance gate when governance is enabled
-//   - Constructs the git-native evolution unit when evolution is enabled
-//   - Constructs the org coordinator, which owns the published generation, the
-//     per-agent apply record and the rollback ring
-//   - Wires the mtime-driven lazy reload check with single-flight coalescing
-//   - Refuses hot application of entry-identity and storage-section changes on
-//     owner-held agents before any candidate build (they require a restart)
-//   - Registers the entry agent's closers in the order retirement demands: reload
-//     stopper, then owner retirement, then the shared MCP registry last
-//
-// 契约: docs/wiki/platform/org-hot-reload.md#overview
-// 契约: docs/wiki/platform/org-hot-reload.md#trigger-timing
-// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
-// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
-// 契约: docs/wiki/platform/org-hot-reload.md#memory-preflight
-// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
-// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
-// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
-// 契约: docs/wiki/platform/platform-subsystems.md#governance-gate
-// 契约: docs/wiki/platform/platform-subsystems.md#evolution-wiring
+// - It handles every cross-boundary wiring internally: builtin tool registration, validation that configured tools are registered, entry-agent resolution, per-agent MemoryStore creation, per-agent buildAgent assembly, and the org-level task registry plus hot-parameter source.
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	if err := RegisterBuiltinTools(); err != nil {
 		return nil, fmt.Errorf("tagent: register builtin tools: %w", err)

@@ -12,28 +12,11 @@ import (
 // testStoreRoots maps a testing.TB to its store root, keyed by the TB pointer identity.
 var testStoreRoots sync.Map
 
-// testStore 把单元测试的 memory store 路径挪出仓库工作树，并按**测试用例**隔离。
+// testStore 把单元测试的 memory store 路径挪出仓库工作树，并按测试用例隔离。
 //
-// 为什么必须显式挪：`resources.acquire` 在按 memory type 分派**之前**就无条件
-// `os.MkdirAll(path)` 并取目录写锁（写 `.tagent-writer.lock`），`type: localfile`
-// 还会另建 `relations.journal`。所以「用 type: memory 加一个逻辑路径」并不等于
-// 不落盘——相对路径会在仓库根造出目录（`hottest-sub1/`、`own-sub1/` 里的 lock 与
-// journal 已被历史提交跟踪，即是明证）。
-//
-// 根目录按**单个测试用例／benchmark**唯一，交由 `t.TempDir()`／`b.TempDir()` 管理，
-// 用例结束自动回收：
-//   - 同一用例内同名 store 返回同一绝对路径——热更多代渲染「sub2 存储段字节不变」与
-//     重启模拟所依赖的身份前提由此成立；
-//   - 不同用例（含 `-count` 重复，每次是全新 `*testing.T`）落在不同根，互不串存储；
-//   - 根不跨用例共享：按 PID 加固定名字共用一个根，会把两个用例的存储接在同一路径上
-//     （`-count` 重复时是同一进程内的多次运行，尤其如此）；回收交由 `t.TempDir()` 负责，
-//     故临时目录里也不留下长期不被清理的测试根。
-//
-// 无工作树兜底：`t.TempDir()` 建不出目录会直接把用例判失败，绝不退回相对路径——那会
-// 重新引入本 helper 意在消除的仓库根 `hottest-*` / `own-*` 污染。
-//
-// 每用例只解析一次根：sync.Map 以 testing.TB（指针身份）为键；键被 map 强引用，故地址
-// 不会被后续用例回收复用，用例结束即删除条目。所有 testStore 调用都在单个用例内顺序发生。
+// - 必须显式挪出：resources.acquire 在按 type 分派之前就 MkdirAll 并取写锁，type localfile 还另建 relations.journal。
+// - 同一用例内同名 store 返回同一绝对路径；不同用例落在不同根，互不串存储。
+// 契约: docs/wiki/agent/agent-architecture.md#test-support
 func testStore(t testing.TB, name string) string {
 	t.Helper()
 	if root, ok := testStoreRoots.Load(t); ok {

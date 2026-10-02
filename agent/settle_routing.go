@@ -9,28 +9,13 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// settleSinkRegistry is the S3m-c routing table for the M2 per-invocation loop.
+// settleSinkRegistry is the routing table for the M2 per-invocation loop. It is
+// deliberately ONLY two things after the pipeline convergence: a binding table from
+// invocation id to that invocation own EventBus, and the delivery-accounting barrier
+// pending = spawned minus delivered per id.
 //
-// It is deliberately ONLY two things after the pipeline convergence:
-//
-// - a BINDING TABLE (invocation id → that invocation's own EventBus) — the I-1
-// carrier: once an input event enters a loop, its derived task settles have a
-// confirmed destination (the loop's bus) that routing simply looks up, never
-// infers from the event; and
-// - the D-b DELIVERY-ACCOUNTING BARRIER (pending = spawned − delivered per id) —
-// the termination predicate that is immune to the terminal-before-delivery race.
-//
-// Before S3m-c this registry also owned a hand-rolled per-invocation queue
-// (append / notify / wait / drain / tryFinish) that re-implemented EventBus's own
-// buffering. That bypass is gone: a越窗 settle is now delivered by PUBLISHING to
-// the bound bus, so the settle becomes an ordinary pullable event consumed by the
-// SAME shared shell (runAgentLoop) that consumes the entry owner's bus. "作为被调
-// 方" and "直连宿主" thus share one transport and one consume loop; the only
-// remaining difference is the output receiver.
-//
-// With no binding registered (the entry owner, and any late settle after a loop's
-// unbind) delivery falls back to the shared persistentBus, so the table is
-// behavior-neutral for every path that never binds a bus.
+// - A settle destination is looked up, never inferred from the event content.
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 type settleSinkRegistry struct {
 	mu      sync.Mutex
 	byInv   map[string]*EventBus

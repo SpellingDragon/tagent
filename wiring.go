@@ -22,22 +22,12 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 )
 
-// resolveAgentModel returns the model instance one agent’s LLM calls use and
-// caches it per provider+model pair. Resolution order: a per-name instance from
-// rc.modelOverrides; otherwise the agent’s own model, looked up under the
-// agent's provider or, when the agent names none, under the global cfg.Provider;
-// otherwise the global default model; and finally the WithModel-injected rc.model.
+// resolveAgentModel returns the model instance one agent LLM calls use and caches it
+// per provider plus model pair.
 //
-// A TrajectoryRecorder, when enabled, wraps every instance it returns,
-// including override hits: the wrapper sits outside the SwappableModel so the
-// recorder observes post-swap traffic, and it is built per buildAgent call, so
-// repeated resolves never stack wrappers on one instance.
-//
-// The global default is resolved through the provider registry, so a yaml-only
-// change to the global provider or model takes effect in a hot-reload rebuild;
-// the injected rc.model is fixed at boot and is returned only when the config
-// names no resolvable global provider. The protocol implementation may differ
-// from the registry key — see ProviderConfig.Provider.
+// - Resolution order: per-name override, then the agent own model, then the global default model, then the WithModel-injected instance.
+// - A TrajectoryRecorder, when enabled, wraps every returned instance including override hits, outside the SwappableModel so it observes post-swap traffic.
+// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
 func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Config) model.Model {
 	if rc.modelOverrides != nil {
 		if m, ok := rc.modelOverrides[name]; ok {
@@ -264,28 +254,9 @@ func resolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig {
 
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
 //
-// For type: file, creates a FileSegmentStore backed by RustViking CLI
-// and InMemRelationStore (WAL + snapshot persistence).
-//
-// For type: localfile, creates a FileSegmentStore backed by LocalFileKV
-// (JSON file persistence, no external binary dependency) and InMemRelationStore.
-//
-// Shared-path stores go through the RuntimeResources registry (4.2): same
-// path + same fingerprint → same instance + one lease per consumer; the LAST
-// release closes the store AND its entry-owned engine and frees the directory
-// writer-lock (4.3), and an incompatible fingerprint is REJECTED (4.1 T3).
-// Empty path = isolated store owned exclusively by that agent (engine wired
-// per-agent by wireMemoryEngine, not returned here).
-//
-// resolveMemoryStore returns the shared backend store, the entry-owned engine
-// (nil for isolated or degraded), and the release func. The engine is built
-// inside the acquire open closure so it shares the store's generation: a
-// reopen always gets a fresh engine bound to a fresh backend, never a stale
-// engine bound to an already-closed one.
-//
-// The returned release func is bound to the acquiring agent's lifecycle
-// (executed from TagentAgent.Close); executor shells do NOT acquire (they
-// borrow the resident entry's store).
+// - type file backs FileSegmentStore with the RustViking CLI; type localfile backs it with LocalFileKV, which has no external binary dependency; both pair with InMemRelationStore.
+// - Shared paths go through the RuntimeResources registry: same path plus same fingerprint yields the same instance with one lease per consumer.
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
 	switch mc.Type {
 	case "memory", "":

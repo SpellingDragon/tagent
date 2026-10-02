@@ -11,32 +11,11 @@ agent/tool_agent.go and provides a unified interface for:
   - Querying factories by ID
   - Validating that config-referenced tools are registered
 
-Package tagent provides the top-level composition root for tagent applications.
+Package tagent provides the top-level composition root: it encapsulates agent
+instantiation, assembles a TagentAgent from declarative Config and injects
+runtime dependencies via Options.
 
-The root package encapsulates the agent instantiation process, assembling a
-TagentAgent with configured tools and wiring cross-boundary dependencies.
-
-Dependency direction (all one-way, no cycles):
-
-    tagent (root) → agent → plugin → memory
-    tagent (root) → tool/action → memory
-    tagent (root) → tool/recall → memory
-    tagent (root) → tool/knowledge → memory
-    tagent (root) → tool/mcp → tool (MCPRegistry interface)
-    tagent (root) → prompt
-
-Tool Registration:
-
-tagent uses a ToolRegistry to manage available tools. Built-in tools are
-registered via RegisterBuiltinTools(). External tools can be registered via
-RegisterPlainTool() and RegisterToolAgent(). Only tools that are both registered
-and configured for an agent can be used by that agent.
-
-Usage:
-
-    ta, err := tagent.New(tagent.DefaultConfig(),
-        tagent.WithModel(modelInstance),
-    )
+- Dependency direction is one-way and cycle-free; the root points
 
 testing.go provides exported helpers for integration tests in tests/. They
 expose internal APIs for comprehensive testing; production code must not depend
@@ -93,32 +72,12 @@ func DefaultPromptsFS() embed.FS
     rooted at DefaultPromptsPrefix (a prompt file is e.g. recall_tool_desc.md).
 
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
-    New creates a fully-wired TagentAgent from declarative Config + runtime
+    New creates a fully-wired TagentAgent from declarative Config plus runtime
     Options.
 
-    Config is declarative and serializable (loadable from YAML/JSON via
-    LoadConfig). Options inject runtime-only dependencies (model instances,
-    etc.).
-
-    New handles all cross-boundary wiring internally:
-      - Registers built-in tools (knowledge, recall, exec)
-      - Validates that all configured tools are registered
-      - Resolves the entry agent from Config.Agents map
-      - Creates a MemoryStore per agent (isolated, from MemoryConfig)
-      - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
-      - For agent-kind tools: creates the referenced agent and wraps it via
-        AgentToolWrapper which handles event_key → external context resolution
-      - For tool-kind tools: delegates to registered plain tool factories
-      - Seeds the process-level MCP tool registry from the configured servers
-      - Constructs the governance gate when governance is enabled
-      - Constructs the git-native evolution unit when evolution is enabled
-      - Constructs the org coordinator, which owns the published generation,
-        the per-agent apply record and the rollback ring
-      - Wires the mtime-driven lazy reload check with single-flight coalescing
-      - Refuses hot application of entry-identity and storage-section changes on
-        owner-held agents before any candidate build (they require a restart)
-      - Registers the entry agent's closers in the order retirement demands:
-        reload stopper, then owner retirement, then the shared MCP registry last
+    - It handles every cross-boundary wiring internally: builtin tool
+    registration, validation that configured tools are registered, entry-agent
+    resolution, per-agent MemoryStore creation, per-agent buildAgent assembly,
 
 func RegisterBuiltinTools() error
     RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
