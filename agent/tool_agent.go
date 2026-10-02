@@ -154,6 +154,29 @@ func (w *AgentToolWrapper) declaredSet() bool {
 	return w != nil && w.declared.Load() != nil
 }
 
+// armDeclaredCall pins a sub-agent run to the execution view THIS wrapper's face
+// declared: the child binding it routes to, not the caller's own generation. Every
+// path that runs a child — Call and both re-entry closures — arms through here, so
+// the view a run executes on is always the one the delegation resolved. Without it
+// the child sees a lease that belongs to its owner, falls back to its birth config,
+// and silently serves retired prompts, models and tools while the operator believes
+// the current orchestration is in force.
+//
+// It returns the context carrying the declared-generation lease plus the release for
+// that one reference. A wrapper never wired to a declared generation returns the
+// context unchanged with a no-op release.
+func (w *AgentToolWrapper) armDeclaredCall(ctx context.Context, agentName string) (context.Context, func(), error) {
+	d := w.declared.Load()
+	if d == nil {
+		return ctx, func() {}, nil
+	}
+	dl, err := d.acquireDeclared(LeaseSubCall)
+	if err != nil {
+		return ctx, func() {}, fmt.Errorf("agent tool %q: declared generation unavailable: %w", agentName, err)
+	}
+	return dl.WithContext(ctx), dl.Release, nil
+}
+
 // autoInjectMaxEvents is the maximum number of recent events to auto-inject
 // when LLM does not pass event_keys.
 const autoInjectMaxEvents = 5
@@ -328,14 +351,12 @@ func isRemoteAgent(ag agent.Agent) bool {
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
-	if d := w.declared.Load(); d != nil {
-		dl, derr := d.acquireDeclared(LeaseSubCall)
-		if derr != nil {
-			return nil, fmt.Errorf("agent tool %q: declared generation unavailable: %w", agentName, derr)
-		}
-		ctx = dl.WithContext(ctx)
-		defer dl.Release()
+	armed, release, armErr := w.armDeclaredCall(ctx, agentName)
+	if armErr != nil {
+		return nil, armErr
 	}
+	defer release()
+	ctx = armed
 
 	// Parse args using json.Number to preserve int64 precision for Snowflake
 	// event keys. Default json.Unmarshal parses numbers as float64, which
@@ -668,6 +689,8 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 // The re-spawned task is itself relaunchable and keeps the SAME idempotency key as
 // the original spawn (name-based when a plan name was declared — D4 single-flight
 // covers relaunch rounds too, not just the first spawn).
+//
+//   - The owner-face lease accounts for the re-entry while armDeclaredCall selects the execution view it runs on, so a stored task cannot silently serve a retired generation's prompts, model or tools.
 func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64) func(context.Context) (task.SpawnResult, error) {
 	return func(ctx context.Context) (task.SpawnResult, error) {
 		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
@@ -676,7 +699,12 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 		}
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			defer lease.Release()
-			return target.runAndCollect(lease.WithContext(runCtx), inv, agentName)
+			callCtx, release, err := target.armDeclaredCall(lease.WithContext(runCtx), agentName)
+			if err != nil {
+				return "", err
+			}
+			defer release()
+			return target.runAndCollect(callCtx, inv, agentName)
 		}, target.DenseDuration())
 		var specTTL time.Duration
 		var declParams map[string]string
@@ -833,7 +861,12 @@ func subagentResumeClosure(owner *ContextManager, agentName string, rounds *suba
 		)
 		return task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			defer lease.Release()
-			out, err := target.runAndCollect(lease.WithContext(runCtx), inv, agentName)
+			callCtx, release, armErr := target.armDeclaredCall(lease.WithContext(runCtx), agentName)
+			if armErr != nil {
+				return "", armErr
+			}
+			defer release()
+			out, err := target.runAndCollect(callCtx, inv, agentName)
 			if err == nil {
 				rounds.add(input, out)
 			}

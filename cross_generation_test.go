@@ -1036,8 +1036,10 @@ func TestGenerationThatRemovedTargetRefusesWithoutRerouting(t *testing.T) {
 }
 
 // TestChangedTargetResolvesOnTheNewGeneration 钉住 改了目标的新一代是无发起者重入所达的那张面。
-// - b 自身声明未变，故这正是"未变父也随发布推进执行视图"在深度二上的落地；
-// - 仍被路由的目标须经新面重入，到达的是新 c。
+//   - b 自身声明未变，故这正是"未变父也随发布推进执行视图"在深度二上的落地；
+//   - 仍被路由的目标须经新面重入，到达的是新 c；
+//   - 归因由 noDelegation 守住：setup 之后模型不发起任何委派，告警轮到不了 c，SUB-C-G2 只能来自这次重入。
+//
 // 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
 	dir := t.TempDir()
@@ -1051,15 +1053,23 @@ func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
 	entry.CheckOrgReload()
 	require.NotNil(t, b.ContextManager().SubagentWrapper("c"), "c is still routed after the publish")
 
+	m.noDelegation()
+	newBefore := countServed(m.snapshot(), "SUB-C-G2")
 	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
 	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
 	require.NoError(t, err)
 	require.NotContains(t, res.(string), "失败", "仍被路由的目标须经新面重入：%v", res)
 
-	newBefore := countServed(m.snapshot(), "SUB-C-G2")
-	waitFor(t, "the re-entry served the NEW c (b's face advanced with the publish)", func() bool {
+	waitFor(t, "the re-entry itself served the NEW c (b's face advanced with the publish)", func() bool {
 		return countServed(m.snapshot(), "SUB-C-G2") > newBefore
 	})
+}
+
+// noDelegation 关掉本模型的一切委派，使断言只能被被测动作满足，不被无关轮次顺带达标。
+func (m *chainDelegModel) noDelegation() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.prefer = nil
 }
 
 const (
