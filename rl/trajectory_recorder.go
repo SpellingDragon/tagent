@@ -200,11 +200,14 @@ func (tr *TrajectoryRecorder) Flush() {
 	}
 }
 
-// record pushes a record to the async channel. Non-blocking; drops on full or closed.
+// record pushes a record to the async channel. Non-blocking; drops on full or
+// closed. Every drop is logged — a dropped record is lost RL evidence, so it
+// must never vanish silently.
 func (tr *TrajectoryRecorder) record(r *TrajectoryRecord) {
 	tr.closeMu.Lock()
 	defer tr.closeMu.Unlock()
 	if tr.closed {
+		log.Warnf("[TrajectoryRecorder] DROPPED record after close: session=%s batch=%d", r.SessionID, r.BatchIndex)
 		return
 	}
 	select {

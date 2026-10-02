@@ -3,6 +3,7 @@ package rl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,13 +108,30 @@ func TestTrajectoryRecorder_CloseFlush(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := splitJSONL(data)
-	assert.Len(t, lines, 5, "expected 5 JSONL lines after Close flush")
+	audit := recordAudit(lines)
+	assert.Len(t, lines, 5, "expected 5 JSONL lines after Close flush; lines=%s", audit)
 
 	for i, line := range lines {
 		var record TrajectoryRecord
 		require.NoError(t, json.Unmarshal(line, &record), "line %d", i)
-		assert.Equal(t, i, record.BatchIndex, "batch index %d", i)
+		assert.Equal(t, i, record.BatchIndex, "batch index %d; every line [batch,session,error]=%s", i, audit)
 	}
+}
+
+// recordAudit renders each JSONL line's discriminating triplet so an index
+// drift names its own mechanism (error-marked line, session mismatch) instead
+// of leaving the failure ambiguous.
+func recordAudit(lines [][]byte) string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		var r TrajectoryRecord
+		if err := json.Unmarshal(line, &r); err != nil {
+			out = append(out, "unparsable")
+			continue
+		}
+		out = append(out, fmt.Sprintf("[%d,%q,%q]", r.BatchIndex, r.SessionID, r.LLMCall.Response.Error))
+	}
+	return strings.Join(out, " ")
 }
 
 // TestTrajectoryRecorder_WithSwappableModel 钉住 记录器套在 SwappableModel 外层时每条记录冻结当次的模型端点：Swap 与 SetModelEndpoint 之后的新记录用新端点，先前那条不被改写。

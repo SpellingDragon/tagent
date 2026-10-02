@@ -11,7 +11,7 @@
 
 - [x] 0.1 建立执行日志骨架 `.git/review-notes/03-execution-log.md`（每 CU 一节：开始时间/改动文件/验证命令与结果/偏离记录）
 - [x] 0.2 基线快照：`go build ./... && go vet ./... && go test ./... 2>&1 | tee` 记录到日志——区分"本来就 fail"的既有失败（后续验证以此为准，不背锅）
-- [ ] 0.3 确认工作区干净、`openspec status` 为 4/4、tasks 全未勾
+- [x] 0.3 确认工作区干净、`openspec status` 为 4/4、tasks 全未勾（游离改动经 stray 处置后收敛，见执行日志 CU-0）
 
 ## 1. CU-1 规格对齐 〔G-P0-1/G-P0-2〕
 
@@ -101,7 +101,7 @@
 - [x] 8.7 `wiring.go` openLocalFileStore/openRVStore：两个失败分支补 rel 释放（InMemRelationStore 无 Close 则补 snapshot+close 方法）
 - [x] 8.8 新测试：压实 idx 删除失败 → 墓碑仍在、ErrEventForgotten 仍拒复活；store 构建失败 → journal fd 不泄漏（打开计数断言）
 - [x] 8.9 验证：`go test ./memory/... -count=1` 全绿
-- [ ] 8.10 提交：`fix(memory): spill 释放对齐落盘移除/静默错误清零/构建失败资源释放`
+- [x] 8.10 提交：`fix(memory): spill 释放对齐落盘移除/静默错误清零/构建失败资源释放`（实际落 5023bbe，主题同）
 
 ## 9. CU-9 分区快照 〔E-P2-5，BREAKING〕（依赖：CU-8 后 memory 包稳定）
 
@@ -130,7 +130,7 @@
 - [x] 11.6 新测试：跨重启 resume → 新 detector 收到状态迁移、settle/ExitCode 有供给
 - [x] 11.7 `restart-tagent.sh`：归档+截断段移至旧进程 SIGTERM 确认退出之后、新进程 spawn 之前（OLD_TRAJ_BYTES 采集位置随行）；`bash -n` 校验
 - [x] 11.8 验证：`go test ./rl/... ./tool/action/... -count=1` 全绿
-- [ ] 11.9 提交：`fix(rl,action): 换模竞态/nil 流防护/resume 回调重绑/归档窗口移位`
+- [x] 11.9 提交：`fix(rl,action): 换模竞态/nil 流防护/resume 回调重绑/归档窗口移位`（实际落 3fc00b2，主题同）
 
 ## 12. CU-12 tool 注释与护栏 〔D-P2-1/D-P2-2/D-P2-3〕
 
@@ -169,8 +169,8 @@
 - [x] 15.4 soak（workflow_dispatch 或本地 `-tags soak` 一轮）+ offline bench 全绿（暴露新发现 H-P1-1 压实覆盖丢历史，已随 CU-16 修复：目标窗并入 merge 源 + EventKey 去重，soak 30×30 绿）
 - [x] 15.5 CHANGELOG：Unreleased 段记 BREAKING×5（白名单/标记/分区快照/诊断字段/fsync 旋钮删除）与全量修复摘要（含 H-P1-1）
 - [x] 15.6 `openspec archive merge-review-remediation`（deltas 并入主 specs，含 CU-1 已先行对齐的两处不冲突：event-segment-store delta 已先行落地，archive 前转录为 no-op 并从 deltas 移除，追溯见执行日志/CHANGELOG）
-- [ ] 15.7 push origin dev；创建 dev→main PR（标题含 BREAKING 标识；描述含：评审摘要链接、45 项勾验表、BREAKING 清单与冷启动说明、go.mod 跟踪项）
-- [ ] 15.8 CI 绿后合并（merge commit 保留 CU 拓扑）；合并后建 go.mod 摘除跟踪任务（PR #2637）
+- [x] 15.7 push origin dev；创建 dev→main PR（标题含 BREAKING 标识；描述含：评审摘要链接、45 项勾验表、BREAKING 清单与冷启动说明、go.mod 跟踪项）→ PR https://github.com/SpellingDragon/tagent/pull/1
+- [x] 15.8 CI 绿后合并（merge commit 保留 CU 拓扑）；合并后建 go.mod 摘除跟踪任务 → 已合并（test 一次 flaky 红，rerun 同 SHA 绿入十检全绿；TestChangedTargetResolvesOnTheNewGeneration 入基线 flaky 集）；跟踪 issue https://github.com/SpellingDragon/tagent/issues/2
 
 ## 附：45 项发现 → CU 映射（闭环验收清单）
 
