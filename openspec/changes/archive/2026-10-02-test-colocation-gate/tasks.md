@@ -47,4 +47,4 @@
 - [x] 4.1 归零核对:`baseline-files.txt` 全部在册文件已销号,规则全仓输出 0 finding;从 `baseline.json` 移除槽位。验证:`go run ./scripts/comment_policy -v . examples/wechat-bot` 无该规则输出
 - [x] 4.2 硬门生效验证:临时造一个同锚点无镜像测试文件 → `lint.sh` 直接红(不再有基线预算);删除恢复绿;两运行留痕
 - [x] 4.3 归档与 specs 核对:`openspec archive`,delta 并入主 specs 后复验「测试文件族与职责同位」机检条款与 10 个场景完整、`openspec validate --specs --strict` 全绿
-- [ ] 4.4 终验:`bash scripts/lint.sh` + `go build ./...` + `go test ./... -short -count=1` + `examples/wechat-bot` 三连 + `./scripts/race_check.sh`(全包集)全绿;推送后 CI `test`/`race`/`validators`/`openspec` 四 job 绿。归档时 baseline 仅余 `missing-test-responsibility:9`——该槽清零与 counts 归空(全规则零容忍,即用户指令的“所有规则通过 CI 固化”终态)由后续变更 thin-comment-thick-doc 收口
+- [x] 4.4 终验:`bash scripts/lint.sh` + `go build ./...` + `go test ./... -short -count=1` + `examples/wechat-bot` 三连 + `./scripts/race_check.sh`(全包集)全绿;推送后 CI `test`/`race`/`validators`/`openspec` 四 job 绿。归档时 baseline 仅余 `missing-test-responsibility:9`——该槽清零与 counts 归空(全规则零容忍,即用户指令的“所有规则通过 CI 固化”终态)由后续变更 thin-comment-thick-doc 收口
