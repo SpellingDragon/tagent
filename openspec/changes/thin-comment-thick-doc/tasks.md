@@ -20,7 +20,7 @@
 - [x] 3.4 根包批一:13 指针+三新节(#composition-root/#config-surface 含 Config 的 YAML 示例迁文/#testing-helpers)+Config 44→4 等 14 例削薄,基线 mfr 59→56/bnb 78→65;自纠注:doc 块重写吞掉同组 契约: 行(builtin/testing/tool 三文件)已回补,后续批次改为"先改 doc 再插指针"次序
 - [x] 3.5 根包批二:并入 3.4 单批完成(Properties 字段例迁 #config-surface),域内双锚清零
 - [x] 3.6 agent/governance 批:9 指针(五域回退行改配 governance-enforcement 专节锚,tool.go 归 #governance-gate)+包注 9→7 要点化,基线 56→47/65→64;第三次 bullet 漏 // 前缀自纠
-- [ ] 3.7 agent/compress 批（8 文件）
+- [x] 3.7 agent/compress 批:8 指针(裸路径行改配 compression-and-telemetry 专节,64 行文档免锚要求)+6 例续行折要点,基线 47→39/64→58;两次自纠:bullet 漏 // 前缀、折行令 先…再… 首次命中 mechanism-narrative(跨行时逃过正则)——改述不开槽
 - [ ] 3.8 agent 批一（约 10 文件，批前工作树检查）
 - [ ] 3.9 agent 批二（约 10 文件）
 - [ ] 3.10 其余小域归拢批（engine/reliability/task/tool/action 等残余）

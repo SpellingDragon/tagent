@@ -37,20 +37,11 @@ type CompressResult struct {
 	Compressed bool
 }
 
-// ContextCompressor is the projection-only compression engine.
+// ContextCompressor is the projection-only compression engine: it reads EventReferences
+// from the SessionProjection, resolves them via MemoryStore, checks the token budget, and applies L0-L3 compression when over.
 //
-// It reads EventReferences from the SessionProjection, resolves them to
-// messages via MemoryStore, checks token budget, and applies value-driven
-// L0-L3 compression when over budget. Returns:
-// - Resolved/compressed messages (the historical timeline)
-// - Retained refs to update the projection
-// - Error notices for engineering awareness
-//
-// Design principle: Projection is the SINGLE source of truth for the
-// historical timeline. ContextCompressor does NOT reconcile against
-// framework ContentRequestProcessor output — there is no content-based
-// deduplication. The BeforeModel callback handles merging the compressed
-// history with current-turn messages.
+// - Returns the resolved/compressed timeline, the retained refs to update the projection, and error notices.
+// - The projection is the single source of truth for the historical timeline; there is no reconciliation against framework ContentRequestProcessor output.
 type ContextCompressor struct {
 	compressor   *SmartCompressor
 	memStore     memory.MemoryStore
@@ -347,21 +338,11 @@ func NewContextCompressor(
 	return cc
 }
 
-// Compress resolves all projection refs into messages, checks token budget,
-// and compresses if over threshold.
+// Compress resolves all projection refs into messages, checks the token budget and
+// compresses when over threshold.
 //
-// Input:
-// - ctx: context for LLM calls (used by SmartCompressor)
-// - refs: EventReferences from SessionProjection (the historical timeline)
-//
-// Output:
-// - Messages: resolved (and possibly compressed) message list
-// - RetainedRefs: updated refs (replaces projection)
-// - Notices: error/degradation notices
-//
-// The returned Messages do NOT include a system prompt — the caller
-// (BeforeModel callback) prepends system prompt and appends current-turn
-// messages after calling Compress.
+// - Input: ctx for LLM calls used by SmartCompressor, and refs from SessionProjection.
+// - Output: resolved or compressed messages, retained refs replacing the projection, and error or degradation notices.
 func (cc *ContextCompressor) Compress(
 	ctx context.Context,
 	refs []memory.EventReference,
@@ -878,15 +859,11 @@ func (cc *ContextCompressor) resolveRef(
 	return renderTimelineMessage(ref, content, toolCalls, toolID, contentParts)
 }
 
-// renderTimelineMessage renders one event in NATIVE protocol form (D3 v2):
-// - thinking_plan → role=assistant with native ToolCalls restored from the
-// stored event; content is prose only — the system NEVER generates textual
-// call syntax into assistant history (any such syntax is imitable and
-// leads models to fabricate tool calls in plain text)
-// - action_command → role=tool with its ToolID (pairing legality against
-// the rendered sequence is enforced by the caller, which demotes orphans
-// via demoteToInputNote)
-// - notifications and everything else → eventTypeToRole text
+// renderTimelineMessage renders one event in native protocol form (D3 v2).
+//
+// - thinking_plan → role=assistant with native ToolCalls restored from the stored event; content is prose only.
+// - The system never generates textual call syntax into assistant history: such syntax is imitable and leads models to fabricate tool calls in plain text.
+// - action_command → role=tool with its ToolID.
 func renderTimelineMessage(
 	ref memory.EventReference,
 	content string,

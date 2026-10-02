@@ -1,16 +1,13 @@
 package compress // import "github.com/SpellingDragon/tagent/agent/compress"
 
-Package compress 负责回合上下文的装配与压缩，是"预算怎么用"这一侧的全部机制：
+Package compress 负责回合上下文的装配与压缩：只决定保留哪些内容与如何折叠， 不决定回合的重试与执行面（那在 agent 与
+reliability 包）；所有阈值是命名常量，以免与热参源产生第二处真值。
 
-  - ContextCompressor／SmartCompressor：两阶段压缩——先按段级判定丢弃低价值消息， 仍不足时再折叠出综述卡片；
-  - SessionProjection：把事实链的事件引用折叠成本会话视图，Append 幂等，重建时按 当前引用整表重算；
-  - task_segmenter：按任务边界切分消息，使压缩不会把一段工作切成半截；
-  - token_counter：字符近似计量与事件类型到角色的映射（映射的唯一权威源在 event 包）；
-  - compaction_event／BuildCompactionPayload：把折叠产物作为一等事实落链，载荷携带 重建状态，可召回正文即叙事本身；
-  - telemetry：可见性票据与处置计数，供宿主与运维判断压缩是否被消费。
-
-本包只决定"保留哪些内容、如何折叠"，不决定回合的重试与执行面（那在 agent 与 reliability
-包）。所有阈值都是命名常量而非配置项，以免与热参源产生第二处真值。
+- ContextCompressor／SmartCompressor：两阶段压缩——段级判定丢弃低价值消息，预算仍不足时折叠出综述卡片。
+- SessionProjection：把事实链的事件引用折叠成本会话视图，Append
+幂等，重建时按当前引用整表重算。 - task_segmenter：按任务边界切分消息，使压缩不会把一段工作切成半截。
+- token_counter：字符近似计量与事件类型到角色的映射（映射的唯一权威源在 event 包）。 -
+compaction_event／BuildCompactionPayload：把折叠产物作为一等事实落链，载荷携带重建状态，可召回正文即叙事本身。
 
 CONSTANTS
 
@@ -72,15 +69,11 @@ const (
 FUNCTIONS
 
 func EventTypeToRole(eventType string) model.Role
-    EventTypeToRole maps an event type to its pairing-free timeline role :
+    EventTypeToRole maps an event type to its pairing-free timeline role.
 
-        external_input → user
-        agent_output → assistant
-        action_command → user (tool results are input events, never role=tool)
-        thinking_plan  → assistant
-        (default) → user (safe degradation)
-
-    角色映射的唯一权威源是 event 包的注册表，本函数只委托。
+    - external_input → user. - agent_output → assistant. - action_command →
+    user: tool results are input events, never role=tool. - thinking_plan →
+    assistant. - default → user as the safe degradation.
 
 func IsSkeletonMessage(msg *model.Message) bool
     IsSkeletonMessage reports whether a message is a task-skeleton node — a pure
@@ -185,19 +178,14 @@ type CompressResult struct {
 type ContextCompressor struct {
 	// Has unexported fields.
 }
-    ContextCompressor is the projection-only compression engine.
+    ContextCompressor is the projection-only compression engine: it reads
+    EventReferences from the SessionProjection, resolves them via MemoryStore,
+    checks the token budget, and applies L0-L3 compression when over.
 
-    It reads EventReferences from the SessionProjection, resolves them to
-    messages via MemoryStore, checks token budget, and applies value-driven
-    L0-L3 compression when over budget. Returns: - Resolved/compressed messages
-    (the historical timeline) - Retained refs to update the projection - Error
-    notices for engineering awareness
-
-    Design principle: Projection is the SINGLE source of truth for the
-    historical timeline. ContextCompressor does NOT reconcile against framework
-    ContentRequestProcessor output — there is no content-based deduplication.
-    The BeforeModel callback handles merging the compressed history with
-    current-turn messages.
+    - Returns the resolved/compressed timeline, the retained refs to update
+    the projection, and error notices. - The projection is the single source
+    of truth for the historical timeline; there is no reconciliation against
+    framework ContentRequestProcessor output.
 
 func NewContextCompressor(
 	sc *SmartCompressor,
@@ -226,19 +214,12 @@ func (cc *ContextCompressor) Compress(
 	ctx context.Context,
 	refs []memory.EventReference,
 ) CompressResult
-    Compress resolves all projection refs into messages, checks token budget,
-    and compresses if over threshold.
+    Compress resolves all projection refs into messages, checks the token budget
+    and compresses when over threshold.
 
-    Input: - ctx: context for LLM calls (used by SmartCompressor) - refs:
-    EventReferences from SessionProjection (the historical timeline)
-
-    Output: - Messages: resolved (and possibly compressed) message
-    list - RetainedRefs: updated refs (replaces projection) - Notices:
-    error/degradation notices
-
-    The returned Messages do NOT include a system prompt — the caller
-    (BeforeModel callback) prepends system prompt and appends current-turn
-    messages after calling Compress.
+    - Input: ctx for LLM calls used by SmartCompressor, and refs from
+    SessionProjection. - Output: resolved or compressed messages, retained refs
+    replacing the projection, and error or degradation notices.
 
 func (cc *ContextCompressor) CondensedTicketsLost() int64
     CondensedTicketsLost returns the cumulative count of recall tickets folded
@@ -369,18 +350,14 @@ type SmartCompressor struct {
 
 	// Has unexported fields.
 }
-    SmartCompressor performs deterministic context compression.
+    SmartCompressor performs deterministic context compression over
+    task-boundary segments.
 
-    Pipeline (skeleton model):
-     1. Segment messages into task turns bounded by agent_output.
-     2. Deterministic level per segment age (pure function).
-     3. Per-segment drop: L0 (keep) / L1 (drop tool) / L2 (skeleton only) /
-
-    L3 (multi-segment compaction — whole segment leaves the timeline).
-     4. Assemble chronologically; kept messages keep their event key prefixes.
-
-    This is a "view transformation" — it modifies the messages sent to the LLM,
-    but does NOT modify the Session or Projection.
+    - 1. Segment messages into task turns bounded by agent_output. - 2.
+    Deterministic level per segment age (pure function). - 3. Per-segment drop:
+    L0 keep, L1 drop tool, L2 skeleton only, L3 multi-segment compaction where
+    the whole segment leaves the timeline. - 4. Assemble chronologically;
+    kept messages keep their event key prefixes.
 
 func NewSmartCompressor(opts ...SmartCompressorOption) *SmartCompressor
     NewSmartCompressor creates a new SmartCompressor.
