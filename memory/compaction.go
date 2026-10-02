@@ -291,7 +291,8 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	dead, err := func() ([]int64, error) {
 		defer c.lockPartition(pid)()
 
-		events, err := c.mergeEvents(pid, windowTSs)
+		l2WindowTS := computeDailyWindow(windowTSs[0])
+		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l2WindowTS))
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -306,7 +307,6 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 			return nil, fmt.Errorf("repair failed: %w", err)
 		}
 
-		l2WindowTS := computeDailyWindow(windowTSs[0])
 		meta := SegmentMeta{
 			PartitionID: pid,
 			WindowTS:    l2WindowTS,
@@ -357,7 +357,34 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	return nil
 }
 
-// mergeEvents reads all events from source segments and returns them sorted by timestamp.
+// mergeSourcesWithTarget returns the read set for a fold: the selected source
+// windows plus the fold's target window when a segment already lives there. A
+// fold republishes (target, seq) keys from seq=0; without the merge-in, a
+// second fold landing on the same aged-out target (same day for L2, same week
+// for L3) would overwrite — silently lose — events an earlier fold published.
+// Windows already selected as sources are never re-added (under the
+// collision-guard shape the target is a read source already).
+// An unreadable target meta is treated as absent, the same convention the
+// layer-scan callers use (a real read failure still surfaces through the merge
+// scan, which is the durable path over the same keys).
+func (c *Compactor) mergeSourcesWithTarget(pid int, windowTSs []int64, targetTS int64) []int64 {
+	for _, w := range windowTSs {
+		if w == targetTS {
+			return windowTSs
+		}
+	}
+	meta, err := c.getSegmentMeta(pid, targetTS)
+	if err != nil || meta == nil {
+		return windowTSs
+	}
+	return append(append([]int64{}, windowTSs...), targetTS)
+}
+
+// mergeEvents reads all events from source segments and returns them sorted by
+// timestamp, deduped by EventKey: a fold interrupted between the target publish
+// and the source delete leaves the same committed events in both the source and
+// the target, so a retry merge overlaps. The fact chain is append-only (same
+// key ⇒ same event), so the first hit wins.
 func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error) {
 	var events []FullEvent
 
@@ -380,7 +407,16 @@ func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error)
 		return events[i].Timestamp < events[j].Timestamp
 	})
 
-	return events, nil
+	seen := make(map[int64]bool, len(events))
+	deduped := make([]FullEvent, 0, len(events))
+	for _, evt := range events {
+		if seen[evt.EventKey] {
+			continue
+		}
+		seen[evt.EventKey] = true
+		deduped = append(deduped, evt)
+	}
+	return deduped, nil
 }
 
 // filterTombstoned removes tombstoned events from the list, returning the
@@ -543,7 +579,8 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	dead, err := func() ([]int64, error) {
 		defer c.lockPartition(pid)()
 
-		events, err := c.mergeEvents(pid, windowTSs)
+		l3WindowTS := computeWeeklyWindow(windowTSs[0])
+		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l3WindowTS))
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -564,7 +601,6 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 			}
 		}
 
-		l3WindowTS := computeWeeklyWindow(windowTSs[0])
 		meta := SegmentMeta{
 			PartitionID: pid,
 			WindowTS:    l3WindowTS,

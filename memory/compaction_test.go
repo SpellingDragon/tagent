@@ -89,6 +89,62 @@ func TestCompactor_L1ToL2(t *testing.T) {
 	assert.Equal(t, 6, l2Meta.EventCount)
 }
 
+// TestCompactor_L1ToL2_SecondFoldMergesExistingDailyWindow 钉住跨折叠目标窗口不丢历史。
+// - 同一天两批 hourly 窗口先后各折一次：第二批压实必须并入 daily 目标窗既存事件（同键 seq 重排自覆盖会静默丢历史）。
+// - 两批事件压实后均可召回，meta.EventCount 等于合并后总数。
+func TestCompactor_L1ToL2_SecondFoldMergesExistingDailyWindow(t *testing.T) {
+	store, compactor := newTestCompactor(t)
+
+	baseTS := int64(1710666000000)
+	foldHours := func(fold int) []int64 {
+		before, err := store.ListSegments(1)
+		require.NoError(t, err)
+		for i := 0; i < 2; i++ {
+			hourTS := baseTS + int64(fold*2+i)*3600000
+			key := NewSnowflakeEventKey(1, hourTS)
+			require.NoError(t, store.StoreEvent(key, FullEvent{
+				PartitionID:  1,
+				EventType:    "test",
+				EventSummary: "marker-fold-" + string(rune('0'+fold)) + "-hour-" + string(rune('0'+i)),
+				Timestamp:    hourTS,
+			}))
+			require.NoError(t, store.SealCurrent(1))
+		}
+		after, err := store.ListSegments(1)
+		require.NoError(t, err)
+		var fresh []int64
+		for _, w := range after {
+			seen := false
+			for _, b := range before {
+				if b == w {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				fresh = append(fresh, w)
+			}
+		}
+		return fresh
+	}
+
+	fold0 := foldHours(0)
+	require.NoError(t, compactor.CompactL1ToL2(1, fold0))
+	require.NoError(t, compactor.CompactL1ToL2(1, foldHours(1)))
+
+	for _, fold := range []int{0, 1} {
+		marker := "marker-fold-" + string(rune('0'+fold))
+		refs, err := store.QueryEvents(QueryOptions{PartitionIDs: []int{1}, Keyword: marker, Limit: 10})
+		require.NoError(t, err)
+		require.NotEmpty(t, refs, "fold %d events must survive the second fold into the same daily window", fold)
+	}
+
+	daily := computeDailyWindow(fold0[0])
+	meta, err := store.GetSegmentMeta(1, daily)
+	require.NoError(t, err)
+	require.Equal(t, 4, meta.EventCount, "the merged daily segment must hold both folds' events")
+}
+
 func TestCompactor_L2ToL3(t *testing.T) {
 	store, compactor := newTestCompactor(t)
 

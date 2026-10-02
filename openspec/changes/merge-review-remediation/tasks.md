@@ -163,11 +163,11 @@
 
 ## 15. CU-15 全量回归与 MR 收口
 
-- [ ] 15.1 全量：`go build ./... && go vet ./... && go test ./... -count=1`；`cd test && go test ./...`（E2E 模块）
-- [ ] 15.2 race：`go test -race ./agent/... ./memory/... ./rl/... -count=1`（对照 0.2 基线，无新增失败）
-- [ ] 15.3 门禁：`scripts/lint.sh` 全套 + `scripts/check_test_merge.sh` + `openspec validate`
-- [ ] 15.4 soak（workflow_dispatch 或本地 `-tags soak` 一轮）+ offline bench 全绿
-- [ ] 15.5 CHANGELOG：Unreleased 段记 BREAKING×5（白名单/标记/分区快照/诊断字段/fsync 旋钮删除）与全量修复摘要
+- [x] 15.1 全量：`go build ./... && go vet ./... && go test ./... -count=1`；`cd test && go test ./...`（E2E 模块）
+- [x] 15.2 race：`go test -race ./agent/... ./memory/... ./rl/... -count=1`（对照 0.2 基线，无新增失败）
+- [x] 15.3 门禁：`scripts/lint.sh` 全套 + `scripts/check_test_merge.sh` + `openspec validate`
+- [x] 15.4 soak（workflow_dispatch 或本地 `-tags soak` 一轮）+ offline bench 全绿（暴露新发现 H-P1-1 压实覆盖丢历史，已随 CU-16 修复：目标窗并入 merge 源 + EventKey 去重，soak 30×30 绿）
+- [x] 15.5 CHANGELOG：Unreleased 段记 BREAKING×5（白名单/标记/分区快照/诊断字段/fsync 旋钮删除）与全量修复摘要（含 H-P1-1）
 - [ ] 15.6 `openspec archive merge-review-remediation`（deltas 并入主 specs，含 CU-1 已先行对齐的两处不冲突）
 - [ ] 15.7 push origin dev；创建 dev→main PR（标题含 BREAKING 标识；描述含：评审摘要链接、45 项勾验表、BREAKING 清单与冷启动说明、go.mod 跟踪项）
 - [ ] 15.8 CI 绿后合并（merge commit 保留 CU 拓扑）；合并后建 go.mod 摘除跟踪任务（PR #2637）
