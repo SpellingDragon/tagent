@@ -5,7 +5,6 @@ that bypasses the LLM for progress queries.
 
 Design: follows the prototype's "Run is replaceable" pattern. PlanAgent embeds
 *tagentagent.TagentAgent and overrides Run to intercept action=progress
-requests, handling them via direct file I/O instead of the full ReAct loop.
 
 TYPES
 

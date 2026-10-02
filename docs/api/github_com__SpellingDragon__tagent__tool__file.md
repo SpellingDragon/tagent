@@ -15,8 +15,7 @@ Example YAML:
 
     tools:
 
-- kind: tool id: read_file description_file: read_file_tool_desc.md properties:
-base_dir: "./workspace"
+- kind: tool id: read_file description_file:
 
 FUNCTIONS
 

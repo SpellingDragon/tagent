@@ -11,7 +11,6 @@ never invalidated by MCP changes. - mcp_call: a fixed-declaration gateway tool
 (server/tool/args) that resolves the target through the registry at call time.
 
 Discovery (mcp_discover, in tool/knowledge) reads the same registry,
-so runtime-registered servers become discoverable and callable immediately.
 
 CONSTANTS
 

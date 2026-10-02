@@ -18,6 +18,7 @@
 // description_file: read_file_tool_desc.md
 // properties:
 // base_dir: "./workspace"
+// 契约: docs/wiki/platform/agent-behavior-matrix.md#working-dir
 package file
 
 import (

@@ -511,6 +511,11 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
 
+### 工具自访问的抽象接口面（accessor）
+
+`tool/accessor.go` 定义 `MemoryStoreAccessor` 与 `SkillRepository`：工具经最小接口自访问记忆与技能，不耦合具体存储实现——这是“工具自访问”设计原则的落点，引擎能力位判定见 6.0 节。
+
+<a id="tool-accessor"></a>
 <a id="declaration-stability"></a>
 ### 声明区与向量能力隔离（前缀缓存稳定性）
 
@@ -520,6 +525,7 @@ recall 一族工具对模型呈现的 `Declaration` 里**没有任何向量或�
 
 声明文本还不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。理由：声明是模型侧请求前缀的一部分，一旦随部署配置漂移，整段前缀缓存失效，且模型在两次会话里看到的是同一个工具的两种签名。
 
+<a id="recall-agent"></a>
 ### 6.1 RecallAgent — orchestrate 分支的内部编排引擎（定位收窄）
 
 RecallAgent 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答——适用于多跳因果追溯（trace）、跨轮收窄等复杂场景；作为统一 `recall` 工具 `orchestrate` 分支的编排引擎（接线后），其子工具不再对主 agent 直接暴露；确定性召回经参数形态直达，不绕行编排。
@@ -782,6 +788,7 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 ---
 
+<a id="resident-continuity"></a>
 ## 九·A、跨重启连续（R2/R3，resident-continuity）— ActionTool 的声明式投影与重挂
 
 任务与常驻会话的跨重启语义在本模块落地（事实链 fold 的数据源与闭包工厂均在 `tool/action`）：

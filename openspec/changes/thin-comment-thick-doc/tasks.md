@@ -15,7 +15,7 @@
 ## 3. P3 分域战役（每批独立提交；域序：小域练流程，热区压后）
 
 - [x] 3.1 evolution 批:三指针落位(#git-safety 裁决替兄弟锚 #test-facts,#verdict-states,#refine),0 削薄,基线 113→110
-- [ ] 3.2 tool 小域批（tool/spec 等约 6 文件）
+- [x] 3.2 tool 域指针半:22 文件落位(3 新锚 resident-continuity/recall-agent/tool-accessor=文档加厚;govx 裁决替兄弟锚为 #govx-entry-only;mcp.go 配 #mcp-live-registry),基线 110→88;削薄半(13)拆出为 3.2b
 - [ ] 3.3 memory 批（11 文件，含 `LocalFileKV` 26 行削薄的迁文样本）
 - [ ] 3.4 根包批一（约 7 文件，含 `config.go:Config` 41 行——最大迁文对象，单独裁决落点）
 - [ ] 3.5 根包批二（约 7 文件，含 `tagent.go:New` 22 行）
@@ -33,3 +33,4 @@
 - [ ] 4.3 counts 归空断言：`baseline.json` counts 为空对象；负路径抽验——临时造一无索引生产文件与一 3 行段落 doc → `lint.sh` 双红 → 恢复绿，留痕 `hard-gate.log`
 - [ ] 4.4 归档：`openspec archive`，delta 并入 `code-documentation`，`openspec validate --specs --strict` 全绿
 - [ ] 4.5 终验与推送：`lint.sh`+`go build ./...`+`go test ./... -short -count=1`+bot 三连+`race_check.sh` 全绿 → push → CI 四 job 绿（test/race/validators/openspec）
+- [ ] 3.2b tool 域削薄半:13 声明(见 beyond-brief.txt tool 行),迁文优先→削薄,目标 doc-not-brief 99→86

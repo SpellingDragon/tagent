@@ -1,8 +1,7 @@
 package memoryx // import "github.com/SpellingDragon/tagent/tool/memoryx"
 
 Package memoryx 提供记忆策展工具（T-D）：memory_consolidate（证据门控巩固）与
-memory_health（维度锚定诊断）。二者是 agent 面向的记忆策展入口——巩固让 LLM 提交 {content, source_keys}
-由服务端算指纹入库（防伪造），诊断让 LLM 查询记忆健康度。
+memory_health（维度锚定诊断）。二者是 agent 面向的记忆策展入口——巩固让 LLM 提交
 
 FUNCTIONS
 

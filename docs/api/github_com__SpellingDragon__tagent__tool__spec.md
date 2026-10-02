@@ -10,9 +10,8 @@ spec management goes through this typed tool. There is deliberately NO exec
 in the plan agent's toolset — "only spec commands" is a structural fact,
 not a prompt-level hope.
 
-The actual plan format is abstracted behind the Backend interface so the current
-openspec implementation can be swapped for another spec system without changing
-the tool surface the model sees.
+The actual plan format is abstracted behind the Backend interface
+so the current openspec implementation can be swapped for another
 
 FUNCTIONS
 

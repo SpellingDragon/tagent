@@ -11,6 +11,7 @@
 // The actual plan format is abstracted behind the Backend interface so the
 // current openspec implementation can be swapped for another spec system
 // without changing the tool surface the model sees.
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 package spec
 
 import "context"

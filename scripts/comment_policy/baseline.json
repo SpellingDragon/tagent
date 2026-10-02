@@ -4,7 +4,7 @@
   "dirs": [".","examples/wechat-bot"],
   "counts": {
     "doc-not-brief": 99,
-    "missing-file-responsibility": 110,
+    "missing-file-responsibility": 88,
     "missing-test-responsibility": 9
   }
 }

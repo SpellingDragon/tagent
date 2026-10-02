@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 package recall
 
 import (

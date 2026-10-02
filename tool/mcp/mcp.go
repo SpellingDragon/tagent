@@ -13,6 +13,7 @@
 //
 // Discovery (mcp_discover, in tool/knowledge) reads the same registry, so
 // runtime-registered servers become discoverable and callable immediately.
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 package mcp
 
 import (
