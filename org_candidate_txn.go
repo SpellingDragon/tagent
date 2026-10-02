@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#candidate-refusal
 package tagent
 
 import (

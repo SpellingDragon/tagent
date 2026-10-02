@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
 package tagent
 
 import (

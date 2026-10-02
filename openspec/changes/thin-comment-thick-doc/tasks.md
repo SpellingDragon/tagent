@@ -10,7 +10,7 @@
 
 - [x] 2.1 `pointer-map.txt`：112 文件逐一裁决目标小节（存在/需新建/需扩写三态标注），存入本 change 目录冻结为对账锚。验证：每行 `文件<TAB>目标小节<TAB>三态`，与 finding 清单一一对应
 - [x] 2.2 `beyond-brief.txt`：形态规则权威输出逐声明冻结。验证：计数与 1.4 基线一致，偏差先回查规则再开工
-- [x] 2.3 战役批规程固化进本 tasks（迁文优先→削薄→补指针→`go test <pkg>`+`-race`+`gen_godoc --check`→降幅恰等于 N→pathspec 提交），并核对 `agent/` 热区文件当前占用。**pathspec 陷阱增补**：`git commit -- <paths>` 静默跳过 untracked 新文件（colocation 3.17 实证——新名合并落点的文件曾漏入库）；凡批次创建新文件，必须先 `git add <新文件>` 再 pathspec 提交
+- [x] 2.3 战役批规程固化进本 tasks（迁文优先→削薄→补指针→`go test <pkg>`+`-race`+`gen_godoc --check`→降幅恰等于 N→pathspec 提交），并核对 `agent/` 热区文件当前占用。**pathspec 陷阱增补**：`git commit -- <paths>` 静默跳过 untracked 新文件（colocation 3.17 实证——新名合并落点的文件曾漏入库）；凡批次创建新文件，必须先 `git add <新文件>` 再 pathspec 提交。**提交完整性对账**：批次提交后 `git status --short` 必须为空（3.4 实证漏网——pathspec 清单漏列已改文件，CI 树因此 +6 mfr +3 bnb 而红）
 
 ## 3. P3 分域战役（每批独立提交；域序：小域练流程，热区压后）
 

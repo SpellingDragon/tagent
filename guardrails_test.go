@@ -234,24 +234,13 @@ func TestLatestPathOnly_ThreeBootStates(t *testing.T) {
 	runChild("3")
 }
 
-// triRaceOnlyFramework CLASSIFIES a child failure whose EVERY DATA RACE block
-// involves zero tagent frames — a trpc-agent-go lifecycle race family known
-// from upstream. It is a DIAGNOSTIC LABEL ONLY: it names that family for
-// triage, but it NEVER suppresses a child failure. `runBootChild` fails
-// acceptance on ANY DATA RACE regardless of this verdict. Deliberately
-// conservative: one tagent frame anywhere, or any assertion/panic, yields false.
+// triRaceOnlyFramework CLASSIFIES a child failure whose EVERY DATA RACE block involves
+// zero tagent frames - a trpc-agent-go lifecycle race family known from upstream.
 //
-// Condition one: every race block's stacks must be framework-internal. The two registered
-// families (steerFamily and sessionFamily, matched below) are exempt as a family because
-// product code holds zero references to the raced queues (grep-verified), so a tagent
-// wrapper frame merely riding the model-call chain cannot own the raced object. Only the
-// accessor sections are scanned for tagent frames: the trailing "created at:" origin
-// stacks inevitably name ancestor test frames and must not veto.
-//
-// Condition two: every FAIL detail block must contain nothing but the race-detector verdict.
-// A crash or an assertion line is never exempt; a blank line does not close the block and
-// origin-stack frames are skipped, so a failure printed after a blank line, or a column-0
-// panic after the verdict, cannot hide behind a benign race.
+// - Diagnostic label only: it never suppresses a child failure; runBootChild fails acceptance on ANY DATA RACE regardless of this verdict.
+// - Deliberately conservative: one tagent frame anywhere, or any assertion or panic, yields false.
+// - Every race block stack must be framework-internal; the two registered families are exempt as a family because product code holds zero references to the raced queues.
+// - Only the accessor sections are scanned: the trailing created-at origin stacks inevitably name ancestor test frames and must not veto.
 func triRaceOnlyFramework(out []byte) bool {
 	text := string(out)
 	if !strings.Contains(text, "DATA RACE") || !strings.Contains(text, "--- FAIL") {

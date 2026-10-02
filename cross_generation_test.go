@@ -1467,23 +1467,9 @@ func sessionWatchBoot(t *testing.T, yamlPath string) (*agent.TagentAgent, *sessi
 
 // sessionWatchChild runs one boot of the live-session anchor as its own process.
 //
-// The spawn phase owns one fixed session name so phase logs stay attributable, and
-// kills any session of that name first: a named session survives a CRASHED earlier run
-// of this test the same way it survives a restart, while the tool refuses a duplicate
-// name — without that preflight the anchor stops being re-runnable after a failed run.
-// It then lets the record reach the durable path and leaves WITHOUT Close, so nothing
-// reaps the session and the task never settles.
-//
-// The publish phase writes a NEW generation, which re-assembles the owner's ActionTool.
-// The current generation must still own the live session: asking for the same logical
-// name has to be refused as a duplicate, not answered by a second session nobody was
-// tracking.
-//
-// The final wait is bounded because a full test run hosts every package binary at once
-// and the boot's first tmux verification can miss the window. List() re-runs
-// reconcileDetached, so re-fetching exercises the designed re-adjudication path rather
-// than mere patience: alone or whole-package the promotion lands before the first
-// fetch, and a session that never promotes still fails with the same message.
+// - Spawn phase owns one fixed session name and kills any session of that name first: a named session survives a crashed earlier run while the tool refuses a duplicate name, so the anchor stays re-runnable.
+// - It lets the record reach the durable path and leaves without Close, so nothing reaps the session and the task never settles.
+// - Publish phase writes a new generation that re-assembles the owner ActionTool; the current generation must still own the live session, and the same logical name is refused as a duplicate.
 func sessionWatchChild(t *testing.T, phase string) {
 	yamlPath := os.Getenv(sessionWatchYamlEnv)
 	require.NotEmpty(t, yamlPath)

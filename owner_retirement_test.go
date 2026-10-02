@@ -1015,19 +1015,12 @@ func (m *drillModel) GenerateContent(_ context.Context, req *model.Request) (<-c
 
 func (m *drillModel) Info() model.Info { return model.Info{Name: "drill-model"} }
 
-// drillResetManagedUnits is the operator-side orchestration: probe every gate
-// FIRST (all-or-nothing), then remove only managed-layout files.
+// drillResetManagedUnits is the operator-side orchestration: probe every gate FIRST
+// (all-or-nothing), then remove only managed-layout files.
 //
-// Gate one is live writers: the store's cross-process single-writer flock must be
-// acquirable, so an in-flight owner is refused with zero changes. Gate two is the
-// leaf's guarded ledger — probe.CloseDurable() there is verification only (the leaf
-// reopens after removal), and that sweep runs on a FRESH instance so its unacked
-// ledger matches the post-removal disk, which is the point of a unit reset.
-//
-// Removal covers the exact managed layout only: the per-partition kv-*.json
-// snapshots (plus the single-file kv.json shape) and their tmp residue
-// for the store unit; envelope-style tmps live under the inbox unit and are matched
-// there by pattern.
+// - Gate one is live writers: the cross-process single-writer flock must be acquirable, so an in-flight owner is refused with zero changes.
+// - Gate two is the leaf guarded ledger: probe.CloseDurable is verification only, and the sweep runs on a fresh instance so its unacked ledger matches the post-removal disk.
+// - Removal covers the exact managed layout only: per-partition kv-*.json snapshots plus the single-file shape and their tmp residue; envelope-style tmps live under the inbox unit.
 func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, confirm bool) ([]string, error) {
 	if !confirm {
 		return nil, fmt.Errorf("drill reset: requires explicit confirmation (destructive operator act)")
