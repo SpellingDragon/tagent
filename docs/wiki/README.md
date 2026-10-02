@@ -8,6 +8,7 @@
 |------|------|--------|
 | agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想 / 子 Agent 封装 |
 | 事件流 | [agent/event-flow.md](agent/event-flow.md) | 一条消息从注入到回复的完整旅程 |
+| 原型骨架 | [agent/prototype-skeleton.md](agent/prototype-skeleton.md) | 126 行六件套、到生产原语的映射、被继承的三条不变量 |
 | 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |
 | 事件契约 | [event/event-architecture.md](event/event-architecture.md) | 事件类型系统、元数据契约、时间线前缀（读写单点） |
 | 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | MemoryPlugin（持久化+因果+同点投影）、SummaryPlugin（元数据标注） |

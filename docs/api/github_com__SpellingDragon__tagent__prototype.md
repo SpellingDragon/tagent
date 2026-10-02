@@ -1,34 +1,11 @@
 package prototype // import "github.com/SpellingDragon/tagent/prototype"
 
-Package prototype contains the original 126-line tagent skeleton.
+Package prototype contains the original 126-line tagent skeleton: intentionally
+minimal and self-contained, it proves an agent can be built from an event bus,
+a bounded projection, a tool registry, one model tool, a persistent loop and a
+compact step.
 
-This file is intentionally minimal and self-contained. It defines the core
-abstraction that the production implementation in ../agent/ still follows:
-
-  - eventBus: an ordered event queue that decouples producers from the loop
-  - inputs: a bounded projection of the event flow (the "working memory")
-  - tools: callable functions whose outputs are fed back into the eventBus
-  - model: one of the tools, invoked when inputs is non-empty
-  - Run: the persistent event loop (Pull → OnEvents → model → publish)
-  - Compact: resetting the bounded projection without touching the event bus
-
-The prototype proves that an agent can be built from just these pieces.
-The production code maps these pieces to trpc-agent-go primitives while keeping
-the same semantics:
-
-    prototype eventBus          → agent.EventBus
-    prototype DefaultRun        → TagentAgent.runEventLoop
-    prototype OnEvents          → ContextManager.BuildInvocation + onEvent callback
-    prototype Compact           → agent.Compactor + SmartCompressor
-    prototype ModelCompletion   → framework runner.Run with llmagent
-    prototype tools["model"]    → framework LLM tool integrated by runner.Run
-    prototype tools[...]        → registered trpc-agent-go tools
-
-The three invariants documented in README.md are preserved in the production
-implementation:
- 1. inputs (SessionProjection) is a projection of the event flow
- 2. Compact only modifies the projection, never MemoryStore or EventBus
- 3. tool results and model outputs flow back through the event bus
+- The production implementation in ../agent/ still follows this abstraction;
 
 TYPES
 
@@ -39,18 +16,10 @@ type BaseTAgent struct {
 	OnEvents        func(event []Event) Event
 	// Has unexported fields.
 }
-    BaseTAgent is the prototype agent.
+    BaseTAgent is the prototype agent: the minimal state an event-driven agent
+    needs.
 
-    It demonstrates the minimal state needed for an event-driven agent:
-      - a mutex for serializing access to inputs
-      - an event bus for inbound and internal events
-      - a tool registry
-      - a bounded inputs slice (the projection)
-      - a model completion function
-      - lifecycle hooks: Run, ModelCompletion, Compact, OnEvents
-
-    The production TagentAgent keeps the same conceptual pieces but wires them
-    through trpc-agent-go interfaces and adds persistence/compression/A2A.
+    - The production TagentAgent keeps the same conceptual pieces, wired
 
 func (agent *BaseTAgent) DefaultCompact()
     DefaultCompact resets the bounded projection.

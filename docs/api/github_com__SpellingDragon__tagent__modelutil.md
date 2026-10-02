@@ -1,8 +1,7 @@
 package modelutil // import "github.com/SpellingDragon/tagent/modelutil"
 
-Package modelutil hosts the shared assembly for direct (non-agent) model call
-sites — summary compression and the evolution judge — so both speak the same
-ModelRef vocabulary as agents.
+Package modelutil hosts the shared assembly for direct (non-agent)
+model call sites — summary compression and the evolution judge
 
 FUNCTIONS
 

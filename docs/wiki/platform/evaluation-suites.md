@@ -34,3 +34,18 @@
 
 - **不需要 LLM 就能判红**：上述四类断言都可在 mock 下运行，因此能进 CI；把"是否可信"与"模型是否聪明"分开。
 - **套件清单与执行体分离**：`evals/suites/*.yaml` 与 `evals/cases/` 描述场景，`evals/evals_test.go` 承载执行体；两边不对齐时以断言失败暴露，而不是靠注释同步。
+
+<a id="offline-bench"></a>
+## 离线基准（`tests/offline_bench`）
+
+常驻加固计划的**性能基线**执行体，不在 CI 内，需显式运行：
+
+```
+RUN_OFFLINE_BENCH=1 go test ./tests/offline_bench/ -run TestOfflineBenchmark -v -timeout 60m
+```
+
+`BENCH_REPORT=<path>` 可落 JSON 报告供回归比对。
+
+测量矩阵是**事件规模 1k/10k/100k × 探测并发 1/10/100**，记录 p50/p95、allocs、RSS、KV 扫描量，以及 chars/token 估计器相对**钉住的离线分词 fixture** 的误差。
+
+只有一个 Sync 屏障档位是刻意的：最小 localfile 后端没有 fsync 轴，再加一列"fsync"只会把同一批字节测两遍。

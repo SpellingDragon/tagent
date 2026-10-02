@@ -30,7 +30,7 @@
 - [x] 3.10c agent/task：4 指针 + 5 例入档（task-lifecycle 新增 #resume-states 合法来源态表与面板不持久化段），基线 33→28 / 20→16
 - [x] 3.10d agent/reliability + event：6 指针 + 3 例入档（durable-delivery 新增 #lineage-visibility 白名单同源、#transitional-reset 受管重置边界表、#quarantine-disposition 三结果义务表，#envelope-states 补回执三门），基线 28→25 / 16→10；第 N 次 bullet 漏 `//` 前缀由 build 拦截
 - [x] 3.10e agent 余量 + 根包 + rl/workspace/tests：11 例入档（agent-architecture#package-layout 补 50 文件五组职责表、#test-support 补测试存储必须挪出工作树的分派顺序根因，platform-subsystems#composition-root 补单向依赖与 New 接线步骤，execution-generations 补交付账本屏障，rl-architecture#http-api 补 IterModel 保真四不变量），基线 25→14 / mtr 9→8；根包 plain 首跑 FAIL 经复跑与 race（213s）定性为并发负载下既有 flake
-- [ ] 3.11 examples/wechat-bot 批（5 文件，第二模块独立验证三连）
+- [x] 3.10f 门禁工具与小域：新建 docs/comment-gate-tooling.md（命令面/等值见证语义/表纪律/棘轮作用域四节）承接 codetools 与 comment_policy 的 7 段机制叙述；新建 docs/wiki/agent/prototype-skeleton.md（六件套/生产映射/三条继承不变量）并登记进 wiki 目录；evaluation-suites 补 #offline-bench；testutil/modelutil/prototype/offline_bench 落 4 索引，基线 14→4 / 10→6（5 文件，第二模块独立验证三连）
 
 ## 4. P4 归零切硬与 counts 归空（CI 固化终态）
 
