@@ -1,33 +1,19 @@
 package recall // import "github.com/SpellingDragon/tagent/tool/recall"
 
-memory_recall: the recall PROTOCOL implementation, now internal — the
-model-facing entry is the unified `recall` tool (recall.go) which routes
-items/query through recallByItems/recallByQuery below.
+memory_recall: the recall protocol implementation, internal to the unified
+recall entry.
 
-Index cards are recall tickets. PURE FUNCTION paths — no LLM in the
-deterministic route. Input-shape dispatch (items take precedence):
+- Pure deterministic paths with no LLM in the route; items take precedence over
+query. - Items resolve by batch GetEvent in original order; misses are reported,
+never hallucinated.
 
-items: [{key, hint?}] → engineering recall: batch GetEvent, original order, zero
-hallucination, misses reported query + filters → semantic recall: QueryOptions
-keyword search (the retrieval layer may evolve independently — keyword → vector
-— the entry protocol stays)
+recall: the unified recall entry — parameters are the router.
 
-recall: the UNIFIED recall entry.
-
-One tool — parameters ARE the router. Deterministic shapes never touch an LLM:
-
-orchestrate: true → explicit opt-in for the RecallAgent LLM orchestration engine
-(checked first); when the engine is not wired it returns explicit guidance,
-never silently falling back to a deterministic path items: [{key, hint?}] →
-engineering recall: batch GetEvent, original order, zero hallucination, misses
-reported turn_key → causal-chain turn reconstruction: walk back to the turn's
-external_input (recovers HOW a past task was executed, incl. compressed tool
-steps) query + filters → retrieval-layer recall: QueryOptions keyword search
-(may evolve to vector; protocol unchanged)
-
-Supersedes the retired memory_recall / memory_turn tool names — the model side
-sees one tool; the output protocol ({key, type, summary, content, time} entries)
-is unchanged across shapes.
+- orchestrate: true opts into the RecallAgent engine explicitly; an unwired
+engine returns guidance instead of a silent deterministic fallback. - items:
+batch GetEvent in original order, zero hallucination. - turn_key: causal-chain
+walk back to the turn's external_input. - query with filters: retrieval-layer
+search; the entry protocol stays when the layer evolves.
 
 FUNCTIONS
 
@@ -79,26 +65,21 @@ func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool
 
 func NewTool(cfg Config) (tagenttool.Tool, error)
     NewTool is a convenience function that creates a RecallAgent and wraps it as
-    a CallableTool ready for registration.
+    a CallableTool.
 
-    If cfg.Description is empty and cfg.DescriptionFile is set, the description
-    is loaded from the file (relative to cfg.PromptDir). If both are empty,
-    a hardcoded default is used for backward compatibility.
-
-    Note: This wraps with a simple AgentToolWrapper without event_key
-    resolution. For full event_key support, use tagent.New() which builds agents
-    from Config.
+    - An empty Description with DescriptionFile set loads the text relative to
+    PromptDir; both empty falls back to a built-in default. - The wrapper is a
+    plain AgentToolWrapper without event_key resolution; full support comes from
+    the root-package constructor.
 
 func RegisterSubTools()
     RegisterSubTools registers all recall sub-tools as plain tools in the global
-    tool registry. Called by tagent.RegisterBuiltinTools().
+    registry.
 
-    Registered tools: - recall: the UNIFIED recall entry (items tickets /
-    turn_key causal chain / query semantic search / orchestrate reserved
-    form) — supersedes the retired memory_recall and memory_turn tool names
-    (stable-context- compaction D7) - recall_query / recall_get / recall_recent
-    / recall_trace: RecallAgent orchestration sub-tools (internal to the
-    orchestrate branch; not for direct top-level assembly)
+    - recall is the unified entry for the deterministic route; memory_recall
+    and memory_turn are retired names outside the registry. - recall_query
+    / recall_get / recall_recent / recall_trace serve the RecallAgent
+    orchestration branch only.
 
 TYPES
 
@@ -139,13 +120,9 @@ type Config struct {
 }
     Config holds configuration for creating the Recall Agent.
 
-    RecallAgent is a TagentAgent instance configured for intelligent memory
-    recall. Unlike the simple RecallTool, RecallAgent uses an internal LLM
-    React loop to understand user queries and synthesize memory into coherent
-    responses.
-
-    Architecture: RecallAgent → TagentAgent (agent.Agent) → agent.Tool
-    (CallableTool)
+    - RecallAgent runs an internal LLM ReAct loop over the recall sub-tools and
+    synthesizes; the deterministic entry stays separate. - Assembly: RecallAgent
+    → TagentAgent → agent.Tool.
 
 type PromptConfig = prompt.CompositeConfig
     PromptConfig describes how to load a system prompt (bootstrap style).

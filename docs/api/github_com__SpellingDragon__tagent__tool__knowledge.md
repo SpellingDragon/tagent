@@ -37,29 +37,21 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool
     NewSkillLoadTool creates a tool that loads skill content as a structured
     summary.
 
-    Progressive disclosure design (following trpc-agent-go pattern): - Level
-    1 (skill_search): name + description from YAML front matter - Level 2
-    (skill_load): name + description + usage summary (up to ~2500 chars) - Level
-    3 (command): read full skill file when deeper detail is needed
-
-    The tool returns a compact, structured output suitable for the knowledge
-    agent to read and synthesize, avoiding the context explosion of dumping the
-    full body.
+    - Levels: skill_search (front matter), skill_load (summary up to ~2500
+    chars), command (full file). - Output stays compact and synthesizable;
+    the full body is never dumped.
 
 func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool
     NewSkillSearchTool creates a tool that searches the skill repository.
 
 func NewTool(cfg Config) (tagenttool.Tool, error)
     NewTool is a convenience function that creates a KnowledgeAgent and wraps it
-    as a CallableTool ready for registration.
+    as a CallableTool.
 
-    If cfg.Description is empty and cfg.DescriptionFile is set, the description
-    is loaded from the file (relative to cfg.PromptDir). If both are empty,
-    a hardcoded default is used for backward compatibility.
-
-    Note: This wraps with a simple AgentToolWrapper without event_key
-    resolution. For full event_key support, use tagent.New() which builds agents
-    from Config.
+    - An empty Description with DescriptionFile set loads the text relative to
+    PromptDir; both empty falls back to a built-in default. - The wrapper is a
+    plain AgentToolWrapper without event_key resolution; full support comes from
+    the root-package constructor.
 
 func NewWebSearchTool() tool.CallableTool
     NewWebSearchTool creates a web_search tool with the default configuration.

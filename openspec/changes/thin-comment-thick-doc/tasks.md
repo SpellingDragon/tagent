@@ -33,4 +33,4 @@
 - [ ] 4.3 counts 归空断言：`baseline.json` counts 为空对象；负路径抽验——临时造一无索引生产文件与一 3 行段落 doc → `lint.sh` 双红 → 恢复绿，留痕 `hard-gate.log`
 - [ ] 4.4 归档：`openspec archive`，delta 并入 `code-documentation`，`openspec validate --specs --strict` 全绿
 - [ ] 4.5 终验与推送：`lint.sh`+`go build ./...`+`go test ./... -short -count=1`+bot 三连+`race_check.sh` 全绿 → push → CI 四 job 绿（test/race/validators/openspec）
-- [ ] 3.2b tool 域削薄半:13 声明(见 beyond-brief.txt tool 行),迁文优先→削薄,目标 doc-not-brief 99→86
+- [x] 3.2b tool 域削薄半:13 例(迁文优先=role=tool 记录与 sudo 包装两 bullet 入 wiki;余者 wiki 已覆盖直删),基线 doc-not-brief 99→86;附带拦截并行会话三新文件(a2a/wiring/workspace)的 mfr raise——建 #model-wiring 与 #workspace-scratch 两节后补索引,mfr 回稳 88;自纠 recall_subtools 措辞触 audit-marker(“no longer”变更残留)

@@ -646,6 +646,8 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 
 ActionTool 是**无状态执行器**：`Call` 创建 tmux 会话与会话绑定的 `TmuxSettleDetector`，经调用上下文注入的 `TaskSpawner` spawn 为任务——dense 窗口内结算则内联返回，越窗返回 ACK（含 task id），后台结算经 `task_settled` 事件回收 turn。
 
+结算结果携带命令、会话 ID、终态与捕获输出，由框架记录为 `role=tool` 消息——执行痕迹进事实链，不留在工具返回值里。
+
 | 路径 | 条件 | 行为 |
 |------|------|------|
 | 任务层（主路径） | ctx 内有 TaskSpawner | spawn + settle-or-detach（见 `agent-architecture.md` §2.10） |
@@ -814,6 +816,8 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 冷启动/rebuild 壳显式重入（幂等，已跟踪会话跳过）：以 **tmux list 为 liveness 真源**对账 ResidentMeta 目录，逐会话 `reattachOne`（新 detector 入 monitor 回调链）→ 任务板 suspect 任务经 **TaskID 桥**（`IsTrackedSession`）确定性提升回 running。`CleanupOrphanSessions` 的 orphan 语义重定义：**仅无主生成名会话**——`n-` named 会话排除（否则 cleanup 先于 reattach 屠杀常驻）。
 
 ## 十、TmuxExecutor — Tmux Session 管理
+
+配置 `run_as_user` 时，全部 tmux 命令经 `sudo -n -u <user> [-g <group>] tmux` 包装：tmux server 与所有会话都跑在受限账号下，这是 OS 级用户隔离，不是沙箱。
 
 ### 10.1 核心操作
 

@@ -10,6 +10,7 @@
 // inherits the process working directory so its relative paths stay
 // consistent with the file tools' base directory (one coherent filesystem
 // view for the model).
+// 契约: docs/wiki/platform/platform-subsystems.md#workspace-scratch
 package workspace
 
 import (

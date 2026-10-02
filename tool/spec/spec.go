@@ -1,17 +1,7 @@
-// Package spec provides an LLM-facing tool for managing specification-driven
-// work plans (create / status / validate / archive / …) without handing the
-// agent a general shell.
+// Package spec provides an LLM-facing tool for specification-driven work plans
+// (create / status / validate / archive) without handing the agent a general shell.
 //
-// Design intent: the plan agent must only ever touch the spec workspace. File
-// reads/writes go through the sandboxed file tools (base_dir locked); spec
-// management goes through this typed tool. There is deliberately NO exec in
-// the plan agent's toolset — "only spec commands" is a structural fact, not a
-// prompt-level hope.
-//
-// The actual plan format is abstracted behind the Backend interface so the
-// current openspec implementation can be swapped for another spec system
-// without changing the tool surface the model sees.
-// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
+// - The plan format sits behind the Backend interface, so the openspec implementation is swappable without changing the model-visible surface.
 package spec
 
 import "context"

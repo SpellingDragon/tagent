@@ -28,15 +28,9 @@ func NamedSessionName(logical string) string
 func StatusToSettle(s SessionStatus) (task.SettleKind, bool)
     StatusToSettle maps a tmux SessionStatus to a task-layer settle kind.
 
-    It returns (kind, true) when the status is a settle point, or ("", false)
-    for intermediate/suppressed states (Running, FakeDead, FakeAlive) that are
-    NOT settles. The detector only makes the deterministic classification here;
-    the LLM interprets ambiguous kinds (stable vs suspect) downstream.
-
-        completed → SettleCompleted (process exited — definitely done)
-        error → SettleCompleted (settled with failure; caller attaches Err)
-        stable → SettleStable (output stable, process alive — usable/waiting)
-        timed_out → SettleSuspect (quiet beyond fake-dead threshold — likely hung)
+    - (kind, true) is returned only at settle points; Running, FakeDead and
+    FakeAlive are not. - Ambiguous kinds (stable vs suspect) are interpreted
+    downstream.
 
 func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec
     SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
@@ -111,16 +105,11 @@ type ActionArgs struct {
 type ActionTool struct {
 	// Has unexported fields.
 }
-    ActionTool is a shell command execution tool.
+    ActionTool is a shell command execution tool: every command runs in a tmux
+    session and Call blocks until the TmuxMonitor reports a settle state.
 
-    Every command runs in a tmux session and Call() blocks until the session
-    reaches a stable state (Stable/Completed/Error/TimedOut) as detected
-    by TmuxMonitor. The final tool result carries the command, session ID,
-    final status and captured output — so the framework records it as a proper
-    role=tool message.
-
-    Tool name is "action" — it represents performing behavioral actions on
-    real-world resources triggered by natural language descriptions.
+    - Tool name is action; the result carries command, session ID, final status
+    and captured output.
 
 func NewActionTool(opts ...ActionToolOption) *ActionTool
     NewActionTool creates a new ActionTool.

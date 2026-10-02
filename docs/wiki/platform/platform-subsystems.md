@@ -41,6 +41,16 @@ graph TB
     MREG --> MCALL["mcp_call / mcp_discover"]
 ```
 
+<a id="model-wiring"></a>
+### 模型解析与轨迹包裹
+
+`wiring.go` 的 `resolveAgentModel` 返回单个 agent 的 LLM 调用所用模型实例，按 provider+model 对缓存。解析顺序：`rc.modelOverrides` 的按名实例 → agent 自己的模型（按其 provider 查找，未声明时落全局 `cfg.Provider`）→ 全局默认模型 → `WithModel` 注入的 `rc.model`。启用时 `TrajectoryRecorder` 包裹每个返回实例（含 override 命中）：包裹位于 `SwappableModel` 之外，因此记录器观察换后流量；包裹按 `buildAgent` 调用构造，重复解析不会在同一实例上叠层。全局默认经 provider 注册表解析，纯 yaml 声明的模型同样可用。
+
+<a id="workspace-scratch"></a>
+### 工作区暂存与清理
+
+`workspace` 包集中管理磁盘暂存：`Root` 归一暂存根，`ToolOutputPath` 给出超限工具输出的落盘位置（`<root>/tool-output/`，服务 OutputLimitTool 与 ActionTool）。`Cleaner` 周期回收按年龄与文件数双重上界封顶累积。命令工作目录不属于暂存面：exec 继承进程工作目录，其相对路径语义与暂存根无关。
+
 <a id="governance-gate"></a>
 ## 四、治理闸（governance）
 

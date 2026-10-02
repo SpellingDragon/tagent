@@ -8,9 +8,8 @@ Layout (under Root):
 
     <root>/tool-output/   oversized tool outputs (OutputLimitTool, ActionTool)
 
-Command working directories are NOT part of the scratch space: exec inherits the
-process working directory so its relative paths stay consistent with the file
-tools' base directory (one coherent filesystem view for the model).
+Command working directories are NOT part of the scratch space: exec inherits
+the process working directory so its relative paths stay consistent with the
 
 CONSTANTS
 
