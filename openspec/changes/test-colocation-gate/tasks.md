@@ -14,7 +14,8 @@
 ## 3. P2 分域收敛(防跑偏协议见下;每任务一个独立提交)
 
 **批规程(每个 3.x 收敛任务必须同构执行,顺序固定,任一步失败即停,不得跳步):**
-①前置:该任务涉及文件的工作树干净、`baseline-files.txt` 中该文件仍在册;
+①前置:该任务涉及文件的工作树干净、`baseline-files.txt` 中该文件仍在册(清单已随包名入键修正重锚为 17 项;
+提交前须核 `git status` 确认并行会话未持有相同文件，且本批一律以 `git commit -- <paths>` 的 pathspec 形式提交，避免共享索引互卷(实发生于 c561672 的教训);
 ②单一动作:只做该任务声明的出口动作(①并入/②改名/③锚点收敛),不顺手改其他;
 ③无损校验:`check_test_merge.sh <本任务起点提交> <目录> [--map 表]` 通过;
 ④测试:`go test <涉及包> -count=1` 与 `go test -race <涉及包>` 全绿,若动 wiki 则 `gen_godoc.sh --check` 绿;
@@ -27,9 +28,9 @@
 - [x] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.7 memory 批之一:`compaction_safety_test.go` →①并入 `compaction_test.go`;N=1
-- [ ] 3.8 memory 批之二:`error_tracking_engine_test.go` →①并入 `error_tracking_test.go`;N=1
-- [ ] 3.9 memory 批之三:`mem_spill_notify_test.go` →①并入 `mem_spill_test.go`;N=1
-- [ ] 3.10 memory 批之四(B 型,含文档侧):`segment_store_barrier_test.go`+`segment_store_recovery_test.go` →①并入 `segment_store_test.go` 子测试,同批③ `#tombstone` 锚上收族锚(wiki 小节调整或工况并入族锚);`gen_godoc.sh --check` 同批绿;N=2
+- [ ] 3.8 memory 批之二(编译单元修正后重定):`error_tracking_engine_test.go` 与 `mem_spill_notify_test.go` 同属 `package memory_test`/#error-tracking——①互并为一文件，或③锚点名不副实(Notify 语义)重挂/细化锚;两方案等价合法,批内评决定取舍;N=2
+- [x] 3.9 memory 批之三(取消):包名入键修正后与 3.8 同键并已合入其动作对象,本项无独立对象文件
+- [x] 3.10 memory 批之四(取消):假阳性消除——`segment_store_barrier_test.go`(memory_test) 与 `segment_store_recovery_test.go`(memory) 属不同编译单元,分键后各自组内参与者不足 2,不再在册
 - [ ] 3.11 memory 批之五:`embedder/contract_test.go` →①并入 `traced_test.go`;N=1
 - [ ] 3.12 memory 批之六:`engine/engine_contract_test.go` →①并入 `engine_inmemory_test.go`;N=1
 - [ ] 3.13 memory 批之七:`kv/partition_snapshot_test.go` →①并入 `local_file_kv_test.go`;N=1

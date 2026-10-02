@@ -30,7 +30,7 @@
 
 ### D2 判定单位与参与者
 
-- **分组键**:`(目录, build-tag 集, 契约锚点)` 三元组。build-tag 进键,`soak`/`integration`/`race_enabled` 异组自动不可比,免显式豁免表。
+- **分组键**:`(目录, 包名, build-tag 集, 契约锚点)` 四元组。build-tag 进键,`soak`/`integration`/`race_enabled` 异组自动不可比,免显式豁免表。包名进键是 P2 实施揭示的修正:一个目录可同时持有内部测试包(`package memory`)与外部测试包(`package memory_test`),二者是独立编译单元,函数体跨包平移必改限定符、与无损前提冲突——原三元键在这类目录产生假阳性(实测 `memory/#tombstone`、`#error-tracking` 两组共 4 文件,修正后 −2)。
 - **参与者**:含 ≥1 个 `func Test` 声明的 `_test.go`。Test=0 者无论 Bench 有无(桩 `mock_model_test.go`、基座 `testbase_test.go`、纯 bench `segment_store_bench_test.go`)一律非参与者——它们声明锚点是标明支撑关系,不是重复测试面。
 - **违规**:同键参与者 ≥2 时,组内**无镜像**的每个文件计一条 finding。
 
@@ -54,7 +54,7 @@ finding 消息必须并列三条出口——门禁是**粒度对齐压力机**,�
 
 ### D6 升级路径:棘轮 → 硬门
 
-26 起步只降不升(shell 预演口径;含 `_real` 变体宽容后为 25,P1 实测落定权威值——仓库既有哲学:红门禁训练绕过,棘轮咬住第一个新增即不松口)。归零后从 `baseline.json` 移除该槽——按既有判定 `counts[k] > base.Counts[k]`,未登记规则基线视为 0,自动升级为与 `mechanism-narrative` 同级的零容忍,无需代码改动。
+26 起步只降不升(shell 预演口径;含 `_real` 变体宽容后为 25,包名入键修正后 P1 实测 25→逐步收敛)。归零后从 `baseline.json` 移除该槽——按既有判定 `counts[k] > base.Counts[k]`,未登记规则基线视为 0,自动升级为与 `mechanism-narrative` 同级的零容忍,无需代码改动。
 
 ### D7 `check_test_merge.sh` 接 pre-commit,不进 CI 常驻
 

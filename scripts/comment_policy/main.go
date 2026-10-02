@@ -501,12 +501,14 @@ func checkFile(path string) ([]finding, error) {
 }
 
 // fileFact is one test file's participation in the responsibility co-location rule:
-// where it lives, which build universe it belongs to, which responsibility it
-// declares, how many top-level tests it holds, and whether it mirrors a production
-// file. Facts feed checkResponsibilityCoLocation, the gate's one cross-file rule.
+// which compilation unit it belongs to, which build universe inside that unit, which
+// responsibility it declares, how many top-level tests it holds, and whether it
+// mirrors a production file. Facts feed checkResponsibilityCoLocation, the gate's one
+// cross-file rule.
 type fileFact struct {
 	path       string
 	dir        string
+	pkg        string
 	tag        string
 	anchor     string
 	anchorLine int
@@ -536,6 +538,7 @@ func collectTestFact(path string) (*fileFact, error) {
 	return &fileFact{
 		path:       path,
 		dir:        filepath.Dir(path),
+		pkg:        file.Name.Name,
 		tag:        buildConstraints(file),
 		anchor:     anchor,
 		anchorLine: anchorLine,
@@ -618,19 +621,22 @@ func mirrorsProduction(path string) bool {
 }
 
 // checkResponsibilityCoLocation is the co-location gate: when two or more test files
-// in the same (directory, build universe, anchor) key declare the same responsibility,
-// each file without a production mirror is fragmented. Mirrored files keep the
-// test-family-to-production-family correspondence the same contract demands, so the
-// finding's exits are merge, rename, or docs-side anchor convergence — never a forced
-// merge of mirrors.
+// in the same (directory, package, build universe, anchor) key declare the same
+// responsibility, each file without a production mirror is fragmented. The package
+// sits in the key because one directory may hold both the internal and the external
+// test package: they are separate compilation units, so a body cannot move between
+// them without requalifying identifiers — which the lossless contract forbids. Mirrored
+// files keep the test-family-to-production-family correspondence the same contract
+// demands, so the finding's exits are merge, rename, or docs-side anchor convergence —
+// never a forced merge of mirrors.
 func checkResponsibilityCoLocation(facts []*fileFact) []finding {
-	type groupKey struct{ dir, tag, anchor string }
+	type groupKey struct{ dir, pkg, tag, anchor string }
 	groups := map[groupKey][]*fileFact{}
 	for _, f := range facts {
 		if f.tests == 0 || f.anchor == "" {
 			continue
 		}
-		k := groupKey{f.dir, f.tag, f.anchor}
+		k := groupKey{f.dir, f.pkg, f.tag, f.anchor}
 		groups[k] = append(groups[k], f)
 	}
 	var out []finding
