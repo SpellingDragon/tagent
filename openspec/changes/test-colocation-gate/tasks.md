@@ -31,7 +31,7 @@
 - [x] 3.8 memory 批之二:裁决①互并——MemSpill 系 ErrorTrackingStore 装饰链内含物(wiki 冻结契约 C2),锚点副实;mem_spill_notify 并入 error_tracking_engine,基线 17→15
 - [x] 3.9 memory 批之三(取消):包名入键修正后与 3.8 同键并已合入其动作对象,本项无独立对象文件
 - [x] 3.10 memory 批之四(取消):假阳性消除——`segment_store_barrier_test.go`(memory_test) 与 `segment_store_recovery_test.go`(memory) 属不同编译单元,分键后各自组内参与者不足 2,不再在册
-- [ ] 3.11 memory 批之五:`embedder/contract_test.go` →①并入 `traced_test.go`;N=1
+- [x] 3.11 memory 批之五:裁决③锚点细化——Embedder 接口契约重挂 #embedder-contract 显式锚(1387 节本就承载契约叙述),contract 测试独处一组,基线 15→14
 - [ ] 3.12 memory 批之六:`engine/engine_contract_test.go` →①并入 `engine_inmemory_test.go`;N=1
 - [ ] 3.13 memory 批之七:`kv/partition_snapshot_test.go` →①并入 `local_file_kv_test.go`;N=1
 - [ ] 3.14 agent 批之一:`session_refusal_test.go` →①并入 `exec_lease_test.go`;N=1

@@ -1384,6 +1384,7 @@ tagent 记忆有两条相互独立的拓展路径，按需选一条或两条。�
 `KVStore`／`MemoryEngine`／`Embedder` 三个契约都定义在核心 `memory` 包，实现居子包（`memory/kv/`、`memory/engine/`、`memory/embedder/`）。理由：契约的两侧（消费方与实现方）都只依赖核心包，避免子包反向依赖导致成环；新增实现不需要改契约。
 
 <a id="embedder"></a>
+<a id="embedder-contract"></a>
 ### Embedder 接入与一条已裁决事项
 
 `Embedder` 是文本→向量抽象，三条约束：`Embed` 返回与输入**等长且顺序对应**的切片；`Dimension` 为 0 表示尚未探测；`ModelID` 用于索引指纹比对，以防换模型后新旧向量混用（见十七节跳旧机制）。实现必须尊重 ctx 取消/超时——排空与回收路径依赖它。未配置 key 时返回 error，调用方按"功能关闭"优雅降级为关键词检索。
