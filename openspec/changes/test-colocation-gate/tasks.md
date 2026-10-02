@@ -39,7 +39,7 @@
 - [x] 3.16 agent 批之三:session_projection 改名 projection_test 对齐镜像(②)+fold_run_exemption 四例并入(①),基线 10→8
 - [x] 3.17 agent 批之四:裁决①互并为新名 finalize_lineage_test.go(两测试各半语义,新名诚实覆盖),基线 8→6
 - [x] 3.18 agent 批之五:两件并入 task_manager_test 并补第 4 行 #finalize-lineage 声明(多锚先例,索引诚实),基线 6→4;agent 域清零
-- [ ] 3.19 tests 批之一(C 型):`async_result_test.go`+`async_task_e2e_test.go` →①合并为单一文件,锚点取其一;N=2
+- [x] 3.19 tests 批之一:async_result 并入 async_task_e2e_test(#subagent-loop 单文件化),基线 4→2;注:tests 包首跑现既有 tmux flake 一次,复跑×3+race 全绿且 merge-check 零变化
 - [ ] 3.20 tests 批之二(C 型,含文档侧):`compression_test.go`/`integration_test.go` →③重挂 e2e 级锚(落点语义写入提交信息;若评审判两文件确属同工况则辅①);N=2(实测 25 清单与 3.2-3.20 销号数逐一对账吻合)
 
 ## 4. P3 归零切硬与终验
