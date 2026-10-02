@@ -33,7 +33,7 @@
 - [x] 3.10 memory 批之四(取消):假阳性消除——`segment_store_barrier_test.go`(memory_test) 与 `segment_store_recovery_test.go`(memory) 属不同编译单元,分键后各自组内参与者不足 2,不再在册
 - [x] 3.11 memory 批之五:裁决③锚点细化——Embedder 接口契约重挂 #embedder-contract 显式锚(1387 节本就承载契约叙述),contract 测试独处一组,基线 15→14
 - [x] 3.12 memory 批之六:裁决③锚点细化——MemoryEngine 接口契约(C6 冻结契约:Ready 门控退化)重挂 #engine-contract 显式锚(二点五节表格 B 行),基线 14→13
-- [ ] 3.13 memory 批之七:`kv/partition_snapshot_test.go` →①并入 `local_file_kv_test.go`;N=1
+- [x] 3.13 memory 批之七:裁决①并入——4 测试皆 TestLocalFileKV_* 分片快照工况,并入镜像 local_file_kv_test,基线 13→12;memory 域清零
 - [ ] 3.14 agent 批之一:`session_refusal_test.go` →①并入 `exec_lease_test.go`;N=1
 - [ ] 3.15 agent 批之二:`reliability/quarantine_barrier_test.go` →①并入 `inbox_test.go`;N=1
 - [ ] 3.16 agent 批之三(②+①组合):`compress/session_projection_test.go` →②改名对齐 `projection.go`,随后 `fold_run_exemption_test.go` →①并入改名后文件;N=2
