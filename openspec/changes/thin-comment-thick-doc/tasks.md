@@ -19,7 +19,7 @@
 - [x] 3.3 memory 批:16 指针(三新锚 causal-chain/inmemory-store/file-segment-store+engine.go 改配 #engine-contract)+8 削薄(LocalFileKV 29→5;迁文两节 local-file-kv 落盘模型/error-tracking canonical replay,顺带校正陈旧句 kv.json→分桶),基线 mfr 88→72/bnb 86→78
 - [x] 3.4 根包批一:13 指针+三新节(#composition-root/#config-surface 含 Config 的 YAML 示例迁文/#testing-helpers)+Config 44→4 等 14 例削薄,基线 mfr 59→56/bnb 78→65;自纠注:doc 块重写吞掉同组 契约: 行(builtin/testing/tool 三文件)已回补,后续批次改为"先改 doc 再插指针"次序
 - [x] 3.5 根包批二:并入 3.4 单批完成(Properties 字段例迁 #config-surface),域内双锚清零
-- [ ] 3.6 agent/governance 批（9 文件）
+- [x] 3.6 agent/governance 批:9 指针(五域回退行改配 governance-enforcement 专节锚,tool.go 归 #governance-gate)+包注 9→7 要点化,基线 56→47/65→64;第三次 bullet 漏 // 前缀自纠
 - [ ] 3.7 agent/compress 批（8 文件）
 - [ ] 3.8 agent 批一（约 10 文件，批前工作树检查）
 - [ ] 3.9 agent 批二（约 10 文件）

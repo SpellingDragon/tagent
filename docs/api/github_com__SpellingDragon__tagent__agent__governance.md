@@ -1,14 +1,11 @@
 package governance // import "github.com/SpellingDragon/tagent/agent/governance"
 
-Package governance 承载 tagent 的有界自治与审计（T-G 常驻可靠性+治理）。
+Package governance 承载 tagent 的有界自治与审计：治理是闸不是墙，OS 降权仍是最后防线。
 
-核心理念（报告 D3）：治理是「闸不是墙」——风险分级 + 预算 + goal 登记 + critical 异步人工批准，OS 降权（sudo -n
--u）仍是最后防线。所有分级/裁决为纯函数（无 IO 无随机），规则表数据驱动，可表格测试；拒绝必记账（DenialLedger + governance
-事件）。
+- 风险分级 + 预算 + goal 登记 + critical 异步人工批准构成闸面；所有分级与裁决为纯函数（无 IO 无随机），规则表数据驱动，拒绝必记账。
 
-契约 C5：RiskClassifier.Classify(RiskContext) → (level, ruleID, reason)，纯函数。
-消费方：GovernanceGate（工具执行治理）。注：evolution 的后验评估（guardrail/judge）独立于本管线
-（评估对象是改进窗口的表现证据，非工具调用风险）。
+- 契约 C5：`RiskClassifier.Classify(RiskContext) → (level, ruleID, reason)`，消费方是
+GovernanceGate。
 
 CONSTANTS
 
