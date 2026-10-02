@@ -1966,24 +1966,12 @@ func TestEchoGrounding_PluginHookReceivesInput(t *testing.T) {
 	t.Logf("§4.4 GROUNDING: author=%q (predicate must key on fields that actually hold)", userEcho.author)
 }
 
-// callLog GROUNDING (test-only, zero product risk).  adds an execution-credential
-// verify at the ACTUAL model entry ("未绑定/不匹配的执行凭据 MUST 在实际模型入口阻断") and
-// requires model decorators to preserve the base IterModel capability. Both depend on
-// facts about the real framework that must not be guessed:
-//
-//	(A) ORDERING — does MemoryPlugin's user-echo OnEvent fire BEFORE the model is
-//
-// entered? A model-entry gate is only safe if the  credential is already bound
-// by then; otherwise every turn would false-block (catastrophic).
-//
-//	(B) ITERATOR PREFERENCE — when the base model implements model.IterModel, does the
-//
-// framework actually use GenerateContentIter (so decorators that omit it hide a
-// real capability) or fall back to the channel path?
-//
-// This harness runs a genuine turn with a model that implements BOTH entry points and
-// logs which is used, plus a plugin that logs when it sees the root user echo, and pins
-// their relative order.
+// callLog GROUNDING (test-only, zero product risk): the execution-credential verify runs at
+// the ACTUAL model entry and model decorators must preserve the base IterModel capability.
+// Both depend on real framework facts that must not be guessed:
+// - ORDERING: whether MemoryPlugin user-echo OnEvent fires before the model is entered, since a model-entry gate is only safe when the credential is already bound by then.
+// - ITERATOR PREFERENCE: whether the framework uses GenerateContentIter when the base model implements model.IterModel.
+// 契约: docs/wiki/agent/agent-architecture.md#test-support
 type callLog struct {
 	mu  sync.Mutex
 	seq []string

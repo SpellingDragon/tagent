@@ -12,23 +12,12 @@ import (
 // maxBoardTasks caps how many active tasks the live board renders.
 const maxBoardTasks = 20
 
-// RenderBoard renders a compact, LLM-friendly snapshot of currently ACTIVE
-// tasks (running/stable/alive-detached/suspect) from the registry. Terminal
-// tasks (completed/failed/cancelled/dead) are aged out — they were already
-// surfaced once via task_settled events, so keeping them on the board would be
-// stale noise.
+// RenderBoard renders a compact, LLM-friendly snapshot of currently ACTIVE tasks
+// (running/stable/alive-detached/suspect) from the registry.
 //
-// The board is regenerated fresh each turn at BeforeModel time and never
-// persisted, so it does NOT participate in context compression : it is a
-// live recency anchor of current async state. Returns "" when no active tasks
-// exist (the caller then injects nothing).
-//
-// Each row renders the task's effective REMAINING lifetime to the unified reaper
-// (async-task-lifetime 10.6) — the same value reconcileTTL honors — so the model
-// can decide once from a single read: every task is bounded and self-reclaiming,
-// so a quiet/suspect task needs no per-turn re-arbitration. defaultTTL is the
-// manager's reaper floor (TaskManager.DefaultTTL), used for tasks with no explicit
-// spec.TTL.
+// - Terminal tasks are aged out; the board is a live recency anchor that is never persisted and takes no part in compression.
+// - Returns "" when no active task exists, and the caller then injects nothing.
+// 契约: docs/wiki/agent/task-lifecycle.md#board-rendering
 func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 	active := make([]*Task, 0, len(tasks))
 	for _, t := range tasks {

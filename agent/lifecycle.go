@@ -512,21 +512,12 @@ type submitOutcome struct {
 	conflict string
 }
 
-// submitDurableBatch is the  durable submit gate. It first runs the write-before
-// prepare barrier for the WHOLE batch (freezing every claimed envelope's canonical
-// prepared facts + a reserved receipt_key) and only then stores each selected fact.
-// It returns a CLASSIFIED outcome instead of a bool, so a caller never treats "the
-// first input" as standing for the batch:
-// - submitOK: all selected prepared AND stored — the model may run.
-// - submitConflict: a deterministic identity/format conflict — the offending
-// envelope is isolated (quarantined); the caller stops auto-consumption.
-// - submitTransient: a retryable I/O failure — NOTHING was committed; the caller
-// re-attempts the same batch with bounded backoff.
-// - submitCancelled: context cancelled mid-submit; claims are retained.
+// submitDurableBatch is the durable submit gate: it runs the write-before prepare barrier
+// for the WHOLE batch and only then stores each selected fact, returning a classified
+// outcome so a caller never treats one input as standing for the batch.
 //
-// Batch all-or-nothing: no fact is stored unless EVERY envelope prepared,
-// so a partially-prepared input never enters the fact chain. Volatile (claim-less)
-// events are a no-op OK (their handling is unchanged).
+// - submitOK lets the model run; submitConflict isolates the offending envelope and stops auto-consumption; submitTransient committed nothing and is retried with bounded backoff; submitCancelled returns the claims.
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func (ta *TagentAgent) submitDurableBatch(ctx context.Context, received, selected []*AgentEvent) submitOutcome {
 	if ta.persistentBus == nil || ta.contextManager == nil {
 		return submitOutcome{status: submitOK}

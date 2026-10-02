@@ -54,14 +54,12 @@ func formatKeys(keys []int64) []string {
 // (fresh-eyes 🟡3) — pagination must run until a short page.
 const tailPageSize = 500
 
-// RebuildProjectionFromWAL rebuilds the projection from the fact chain at
-// cold start (build_agent wiring; runs BEFORE spill replay is armed).
-// Startup-only, once, into an EMPTY projection. No marker-tagged compaction
-// event in the chain → D1 fallback full replay (rebuildProjectionFallback;
+// RebuildProjectionFromWAL rebuilds the projection from the fact chain at cold start
+// (build_agent wiring), startup-only, once, into an EMPTY projection.
 //
-//	spec change: WAL is the durable record — context must be
-//
-// recoverable even without compaction; supersedes the old no-op).
+// - It runs BEFORE spill replay is armed.
+// - Without a marker-tagged compaction event in the chain it falls back to full replay: the WAL is the durable record, so context must be recoverable even without compaction.
+// 契约: docs/wiki/memory/memory-architecture.md#compaction-integrity
 func (ta *TagentAgent) RebuildProjectionFromWAL() {
 	if ta == nil || ta.contextManager == nil {
 		return

@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/agent-architecture.md#test-support
 package task
 
 import (

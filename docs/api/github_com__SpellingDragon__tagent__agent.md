@@ -957,17 +957,13 @@ type MeditationManager struct {
     into the event loop when the agent has been idle for at least MinGap AND
     there has been new user input since the last meditation.
 
-    Gating is split across two independent anchors: the idle gate is
-    lineage-AGNOSTIC (any turn end counts as busy), while the novelty gate is
-    INPUT-side anchored (only source=="user" injections arm it). This split
-    makes output-side lineage tracking unnecessary: activity derived from a
-    meditation turn (e.g. a spawned task settling as Source="task") can only
-    DELAY the next meditation via the idle gate, never re-arm the novelty gate —
-    which kills the self-feeding perpetual-motion loop.
-
-    The meditation event triggers the LLM to perform context cleanup,
-    deep analysis of recent memories, and skill accumulation — all guided by the
-    meditation prompt.
+    - The idle gate is lineage-agnostic (any turn end counts as busy); the
+    novelty gate is anchored on the input side (only source=="user" injections
+    arm it). - Meditation-derived activity can therefore only delay the next
+    meditation, never re-arm the novelty gate: the self-feeding perpetual-motion
+    loop of "nothing happened" summaries is structurally impossible. - The event
+    triggers the LLM to perform context cleanup and deep consolidation over the
+    session.
 
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager
     NewMeditationManager creates a MeditationManager. The injector is typically
@@ -1444,13 +1440,10 @@ func (ta *TagentAgent) OrgThreshold() float64
 
 func (ta *TagentAgent) RebuildProjectionFromWAL()
     RebuildProjectionFromWAL rebuilds the projection from the fact chain at cold
-    start (build_agent wiring; runs BEFORE spill replay is armed). Startup-only,
-    once, into an EMPTY projection. No marker-tagged compaction event in the
-    chain → D1 fallback full replay (rebuildProjectionFallback;
+    start (build_agent wiring), startup-only, once, into an EMPTY projection.
 
-        spec change: WAL is the durable record — context must be
-
-    recoverable even without compaction; supersedes the old no-op).
+    - It runs BEFORE spill replay is armed. - Without a marker-tagged compaction
+    event in the chain it falls back to full replay: the WAL is the durable
 
 func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	rebuildClosures func(decl task.Declarative) task.TaskSpec) int
