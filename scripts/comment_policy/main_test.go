@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -665,4 +666,161 @@ func TestBlindSpotIsAnnouncedBeforeTheWalk(t *testing.T) {
 	out = logged(t)
 	require.True(t, changeNamesFound, "a run from the repository must locate the tree")
 	require.NotContains(t, out, "change-name axis", "a run that located the tree must not warn")
+}
+
+// colocWrite writes one file into dir and returns its path.
+func colocWrite(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+	return path
+}
+
+// colocBody renders a test file with the given anchor and test count, optionally tagged.
+func colocBody(anchor, tag string, tests int) string {
+	var b strings.Builder
+	if tag != "" {
+		b.WriteString("//go:build " + tag + "\n\n")
+	}
+	b.WriteString("// Package p.\n// 契约: " + anchor + "\npackage p\n\nimport \"testing\"\n\n")
+	for i := 0; i < tests; i++ {
+		b.WriteString(fmt.Sprintf("func Test%d(t *testing.T) {}\n", i))
+	}
+	return b.String()
+}
+
+// colocFacts collects the co-location facts of every test file in dir.
+func colocFacts(t *testing.T, dir string) []*fileFact {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var facts []*fileFact
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		fact, err := collectTestFact(filepath.Join(dir, e.Name()))
+		require.NoError(t, err)
+		if fact != nil {
+			facts = append(facts, fact)
+		}
+	}
+	return facts
+}
+
+// TestCollectTestFactCapturesTheFourTuple pins the fact collector: build universe, first index target, test count and mirror verdict.
+func TestCollectTestFactCapturesTheFourTuple(t *testing.T) {
+	dir := t.TempDir()
+	betaPath := colocWrite(t, dir, "beta_test.go", "// Package p.\n// 契约: docs/wiki/a.md#first\n// 契约: docs/wiki/b.md#second\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\nfunc TestTwo(t *testing.T) {}\n")
+	soakPath := colocWrite(t, dir, "soak_test.go", colocBody("docs/wiki/a.md#first", "soak", 1))
+	otherPath := colocWrite(t, dir, "other_test.go", "// Package p.\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n")
+
+	beta, err := collectTestFact(betaPath)
+	require.NoError(t, err)
+	require.NotNil(t, beta)
+	require.Equal(t, "", beta.tag)
+	require.Equal(t, "docs/wiki/a.md#first", beta.anchor)
+	require.Equal(t, 2, beta.tests)
+	require.False(t, beta.mirrors)
+
+	soak, err := collectTestFact(soakPath)
+	require.NoError(t, err)
+	require.Equal(t, "soak", soak.tag)
+
+	other, err := collectTestFact(otherPath)
+	require.NoError(t, err)
+	require.Equal(t, "", other.anchor)
+}
+
+// TestCollectTestFactMirrorVerdict pins exact mirroring, the frozen _real tolerance and the deliberate non-tolerance of prefix similarity.
+func TestCollectTestFactMirrorVerdict(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "alpha.go", "package p\n")
+	colocWrite(t, dir, "zhipu.go", "package p\n")
+	colocWrite(t, dir, "action_tool.go", "package p\n")
+	exact := colocWrite(t, dir, "alpha_test.go", colocBody("docs/wiki/a.md#x", "", 1))
+	variant := colocWrite(t, dir, "zhipu_real_test.go", colocBody("docs/wiki/a.md#x", "", 1))
+	prefix := colocWrite(t, dir, "action_test.go", colocBody("docs/wiki/a.md#x", "", 1))
+
+	facts := map[string]bool{}
+	for _, p := range []string{exact, variant, prefix} {
+		f, err := collectTestFact(p)
+		require.NoError(t, err)
+		facts[f.stem()] = f.mirrors
+	}
+	require.True(t, facts["alpha"])
+	require.True(t, facts["zhipu_real"])
+	require.False(t, facts["action"], "prefix similarity must not launder a missing mirror")
+}
+
+// TestCoLocationSparesMirroredGroups pins the zero false-positive side: files that each mirror a production file share an anchor legally.
+func TestCoLocationSparesMirroredGroups(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "a.go", "package p\n")
+	colocWrite(t, dir, "b.go", "package p\n")
+	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	colocWrite(t, dir, "b_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)))
+}
+
+// TestCoLocationSeparatesBuildUniverses pins that a tagged file and a default file never share a group key.
+func TestCoLocationSeparatesBuildUniverses(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "p_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	colocWrite(t, dir, "q_test.go", colocBody("docs/wiki/x.md#y", "soak", 1))
+	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)))
+}
+
+// TestCoLocationDropsTestSupportFiles pins that a file holding no top-level Test function never participates and never reports.
+func TestCoLocationDropsTestSupportFiles(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "p_test.go", "// Package p.\n// 契约: docs/wiki/x.md#y\npackage p\n\nfunc Helper() {}\n")
+	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	colocWrite(t, dir, "b_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	got := checkResponsibilityCoLocation(colocFacts(t, dir))
+	require.Len(t, got, 2)
+	for _, f := range got {
+		require.NotContains(t, f.Path, "p_test.go")
+	}
+}
+
+// TestCoLocationFlagsFragmentedPair pins the core catch: the unmirrored member of a same-anchor pair is reported and the mirror is named as the merge target.
+func TestCoLocationFlagsFragmentedPair(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "a.go", "package p\n")
+	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	frag := colocWrite(t, dir, "frag_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	got := checkResponsibilityCoLocation(colocFacts(t, dir))
+	require.Len(t, got, 1)
+	require.Equal(t, frag, got[0].Path)
+	require.Equal(t, "responsibility-fragmentation", got[0].Rule)
+	require.Equal(t, "docs/wiki/x.md#y", got[0].Text)
+}
+
+// TestCoLocationNoteNamesThreeExits pins that every finding states the merge target, the rename exit and the docs-side exit.
+func TestCoLocationNoteNamesThreeExits(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "a.go", "package p\n")
+	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	colocWrite(t, dir, "frag_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	got := checkResponsibilityCoLocation(colocFacts(t, dir))
+	require.Len(t, got, 1)
+	require.Contains(t, got[0].Note, "(1) merge into a_test.go")
+	require.Contains(t, got[0].Note, "(2) rename frag_test.go")
+	require.Contains(t, got[0].Note, "(3) converge the anchor on the docs side")
+
+	colocWrite(t, dir, "lonely_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	got = checkResponsibilityCoLocation(colocFacts(t, dir))
+	require.Len(t, got, 2)
+	for _, f := range got {
+		require.Contains(t, f.Note, "(1) merge into")
+	}
+}
+
+// TestCoLocationIgnoresUndeclaredAnchors pins that declaration duty stays with missing-test-responsibility, not with this rule.
+func TestCoLocationIgnoresUndeclaredAnchors(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "p_test.go", "// Package p.\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n")
+	colocWrite(t, dir, "q_test.go", "// Package p.\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n")
+	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)))
 }
