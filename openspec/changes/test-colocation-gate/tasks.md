@@ -22,7 +22,7 @@
 
 - [x] 3.1 冻结对账锚:以 2.4 存档清单为准,把 3.2-3.20 各任务与在册文件一一绑定;发现清单与下述枚举有出入(多出/缺失文件)时,先回填 design 判例表再开工。验证:本 tasks 内每个收敛任务都能在清单中找到全部对象文件
 - [x] 3.2 evolution 试点(规程走通):`switch_combo_test.go` 工况→①并入 `judge_test.go` 子测试;N=1
-- [ ] 3.3 agent 试点(发起判例,小步验证 agent 包流程):`meditation_audit_test.go` →①并入 `telemetry_audit_test.go`;N=1
+- [x] 3.3 agent 试点(发起判例,小步验证 agent 包流程):`meditation_audit_test.go` →①并入 `telemetry_audit_test.go`;N=1
 - [ ] 3.4 tool/action 改名批:`action_test.go` →②改名 `action_tool_test.go`(映射表登记旧→新,同步脚本/文档引用);`tui_integration_test.go` 属 tag 异组、预期不在册,核对后记入对账说明;N=1
 - [x] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
