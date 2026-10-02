@@ -16,20 +16,13 @@ import (
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 )
 
-// ---------------------------------------------------------------------------
-// mock MediaDownloader（任务 4.1 / 6.1）
-//
-// 流式签名：按 item 类型把预置字节写入调用方 Writer，或注入失败/流中超限。
-// 全程不触发真实网络 / 微信登录 / CDN / LLM。
-// ---------------------------------------------------------------------------
-
 type mockDownloader struct {
 	imageData []byte
 	voiceData []byte
 	fileData  []byte
 	videoData []byte
 	failAll   bool
-	overLimit bool // 模拟流中超限：写入一半后返回 wechat.ErrMaxSizeExceeded
+	overLimit bool
 	calls     []string
 	lastOpts  wechat.DownloadOptions
 }
@@ -71,10 +64,6 @@ func fileMsg(name, length string) *wechat.Message {
 		{Type: wechat.ItemTypeFile, FileItem: &wechat.FileItem{FileName: name, Length: length}},
 	}}
 }
-
-// ---------------------------------------------------------------------------
-// 落盘、命名、多 item、注入文本（任务 4.1）
-// ---------------------------------------------------------------------------
 
 func TestIntakeMediaSavesFileWithRelativePath(t *testing.T) {
 	ws := t.TempDir()
@@ -144,10 +133,6 @@ func TestIntakeMediaDownloadFailure(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 安全用例（任务 4.2）
-// ---------------------------------------------------------------------------
-
 func TestIntakeMediaRejectsExecutableWithoutDownload(t *testing.T) {
 	ws := t.TempDir()
 	for _, name := range []string{"virus.exe", "run.sh", "tool.bin"} {
@@ -177,11 +162,9 @@ func TestIntakeMediaRejectsOversizeByMetadataWithoutDownload(t *testing.T) {
 
 func TestSaveInboundFileSizeBoundary(t *testing.T) {
 	ws := t.TempDir()
-	// 上限整 50MB 允许
 	if _, err := saveInboundFile(ws, "u", "exact.dat", bytes.Repeat([]byte("a"), maxInboundFileSize), testNow); err != nil {
 		t.Errorf("exact-limit file should be accepted: %v", err)
 	}
-	// 超 1 字节拒绝（元数据谎报小尺寸时的实际字节复核）
 	if _, err := saveInboundFile(ws, "u", "over.dat", bytes.Repeat([]byte("a"), maxInboundFileSize+1), testNow); err == nil {
 		t.Error("over-limit file should be rejected")
 	}
@@ -193,14 +176,13 @@ func TestBuildSavePathTraversalSafety(t *testing.T) {
 	for _, name := range []string{"../../etc/passwd", "..\\..\\win.ini", "a/b/c.txt", "....//x.txt", "/abs/path.txt"} {
 		path, err := buildSavePath(ws, "u", name, testNow)
 		if err != nil {
-			continue // 拒绝也算安全
+			continue
 		}
 		clean := filepath.Clean(path)
 		if !strings.HasPrefix(clean, base+string(filepath.Separator)) {
 			t.Errorf("name %q escaped uploads dir: %s", name, path)
 		}
 	}
-	// chatID 同样不可信
 	path, err := buildSavePath(ws, "../evil", "a.txt", testNow)
 	if err == nil && !strings.HasPrefix(filepath.Clean(path), base+string(filepath.Separator)) {
 		t.Errorf("chatID escaped uploads dir: %s", path)
@@ -228,7 +210,7 @@ func TestSaveInboundFileCollision(t *testing.T) {
 	}
 }
 
-// 并发同秒同名落盘：O_EXCL 原子创建保证互不覆盖、各得其所。
+// TestSaveInboundFileConcurrentCollision 并发同秒同名落盘：O_EXCL 原子创建保证互不覆盖、各得其所。
 func TestSaveInboundFileConcurrentCollision(t *testing.T) {
 	ws := t.TempDir()
 	const n = 8
@@ -262,8 +244,7 @@ func TestSaveInboundFileConcurrentCollision(t *testing.T) {
 	}
 }
 
-// 元数据缺失（DeclaredSize=0）的文件/视频正常接收：内存风险已由 SDK 流式
-// MaxSize 闸门兜底，不再以"缺少大小信息"拒收。
+// TestIntakeMediaAcceptsUnknownSizeFileAndVideo 钉住 元数据缺失（DeclaredSize=0）的文件/视频正常接收：内存风险已由 SDK 流式 MaxSize 闸门兜底，不会因"缺少大小信息"拒收。
 func TestIntakeMediaAcceptsUnknownSizeFileAndVideo(t *testing.T) {
 	ws := t.TempDir()
 	dl := &mockDownloader{fileData: []byte("x"), videoData: []byte("y")}
@@ -283,8 +264,7 @@ func TestIntakeMediaAcceptsUnknownSizeFileAndVideo(t *testing.T) {
 	}
 }
 
-// 流中超限（元数据缺失或谎报）：SDK 返回 ErrMaxSizeExceeded 后，
-// 残留的不完整文件被删除，用户收到超限文案而非通用失败文案。
+// TestIntakeMediaStreamOverLimitCleansResidue 钉住 流中超限（元数据缺失或谎报）：SDK 返回 ErrMaxSizeExceeded 后， 残留的不完整文件被删除，用户收到超限文案而非通用失败文案。
 func TestIntakeMediaStreamOverLimitCleansResidue(t *testing.T) {
 	ws := t.TempDir()
 	dl := &mockDownloader{fileData: []byte("0123456789"), overLimit: true}
@@ -298,7 +278,7 @@ func TestIntakeMediaStreamOverLimitCleansResidue(t *testing.T) {
 	assertNoResidue(t, ws)
 }
 
-// 下载失败同样不留残留文件。
+// TestIntakeMediaDownloadFailureCleansResidue 下载失败同样不留残留文件。
 func TestIntakeMediaDownloadFailureCleansResidue(t *testing.T) {
 	ws := t.TempDir()
 	dl := &mockDownloader{failAll: true}
@@ -323,10 +303,6 @@ func assertNoResidue(t *testing.T, ws string) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// 长文本用例（任务 4.3）
-// ---------------------------------------------------------------------------
-
 func TestClassifyInboundLongTextBoundary(t *testing.T) {
 	textMsg := func(n int) *wechat.Message {
 		return &wechat.Message{ItemList: []wechat.MessageItem{
@@ -338,7 +314,7 @@ func TestClassifyInboundLongTextBoundary(t *testing.T) {
 		want  InboundKind
 	}{
 		{999, InboundShortText},
-		{1000, InboundShortText}, // 阈值本身不转换（>1000 才转）
+		{1000, InboundShortText},
 		{1001, InboundLongText},
 	}
 	for _, c := range cases {
@@ -346,11 +322,9 @@ func TestClassifyInboundLongTextBoundary(t *testing.T) {
 			t.Errorf("runes=%d: got %v, want %v", c.runes, got, c.want)
 		}
 	}
-	// workspace 未配置时长文本降级为 ShortText
 	if got := ClassifyInbound(textMsg(5000), false); got != InboundShortText {
 		t.Errorf("without workspace: got %v, want InboundShortText", got)
 	}
-	// 空消息
 	if got := ClassifyInbound(&wechat.Message{}, true); got != InboundIgnore {
 		t.Errorf("empty message: got %v, want InboundIgnore", got)
 	}
@@ -358,7 +332,7 @@ func TestClassifyInboundLongTextBoundary(t *testing.T) {
 
 func TestSaveLongTextPreviewAndCount(t *testing.T) {
 	ws := t.TempDir()
-	text := strings.Repeat("汉", 1500) // 多字节字符，验证 rune 安全截断
+	text := strings.Repeat("汉", 1500)
 	saved, inject, err := SaveLongText(ws, "u", text, "input", testNow)
 	if err != nil {
 		t.Fatal(err)
@@ -380,10 +354,6 @@ func TestSaveLongTextPreviewAndCount(t *testing.T) {
 		t.Errorf("preview longer than %d runes", previewRunes)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// 语音用例（任务 4.4）
-// ---------------------------------------------------------------------------
 
 func voiceMsg(transcript string) *wechat.Message {
 	return &wechat.Message{ItemList: []wechat.MessageItem{
@@ -437,15 +407,11 @@ func TestIntakeVoiceWithoutTranscript(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 文件名清洗
-// ---------------------------------------------------------------------------
-
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"报告.pdf":         "_.pdf", // 中文清洗为 _（原名在注入文本中保留）
+		"报告.pdf":         "_.pdf",
 		"a b.txt":        "a_b.txt",
-		"../../etc/pass": "_._etc_pass", // 分隔符与 ".." 均已消除
+		"../../etc/pass": "_._etc_pass",
 		"...":            "file",
 		"":               "file",
 		"normal-1.2.txt": "normal-1.2.txt",

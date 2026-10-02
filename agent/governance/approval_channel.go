@@ -10,14 +10,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== 审批消息流（3.1/3.2/3.3 design-report-closeout） ====================
-//
-// 统一抽象：审批请求 → 渗透消息（Deliver）→ 人工响应（RespondFile 写回应）→ Check
-// 重扫落盘生效。状态机映射既有 ApprovalStatus：requested=pending、responded=
-// approved/denied、consumed=Check 命中放行（approved 且未过期）。
-// 通道投递失败永不阻塞审批门（闸不是墙）：pending 文件已落盘，人工仍可经
-// CLI/文件批准。
-
 // ApprovalChannel 是审批请求的送达通道（微信注入/邮件/IM 等由装配层实现）。
 // Deliver 失败仅记日志——审批门不依赖任何通道在线。
 type ApprovalChannel interface {
@@ -54,7 +46,7 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 	if approvalsDir == "" {
 		return "", fmt.Errorf("governance: approvals dir not configured")
 	}
-	digest = strings.ToLower(digest) // §8.11④：ArgsDigest 为小写 sha256 hex，输入归一
+	digest = strings.ToLower(digest)
 	if !isHexDigest(digest) {
 		return "", fmt.Errorf("governance: digest %q invalid (need >= 8 hex chars)", digest)
 	}
@@ -66,9 +58,9 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 	if approve {
 		status = ApprovalApproved
 	}
-	// §8.11③：两段式——先收集全部前缀匹配，pending 优先响应；已回应项不因字母序
-	// 遮蔽 pending（同前缀并存时旧实现按 ReadDir 顺序可能先撞上已回应文件返回
-	// 「幂等」而漏批 pending）。全部已回应 → 幂等说明；零匹配 → 显式错。
+	// 匹配为两段式：收集全部前缀匹配，pending 优先响应，已回应项不遮蔽 pending。
+	// 若取首个命中即返回（依赖目录序），同前缀并存时会把 pending 误报成"幂等"而漏批。
+	// 全部已回应 → 幂等说明；零匹配 → 显式错误。
 	type match struct {
 		path string
 		req  ApprovalRequest
@@ -97,7 +89,7 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 		}
 	}
 	if len(pending) > 0 {
-		m := pending[0] // digest 前缀 ≥8 位，多 pending 同前缀极罕见；取首个并提示歧义
+		m := pending[0]
 		if len(pending) > 1 {
 			log.Warnf("[governance] digest prefix %q matches %d pending requests; responding to %s", digest, len(pending), m.req.ID)
 		}
@@ -114,7 +106,6 @@ func RespondFile(approvalsDir, digest string, approve bool, by string) (string, 
 			m.req.ID, m.req.ToolName, status, by), nil
 	}
 	if len(responded) > 0 {
-		// 幂等：已回应不重复改写（重复 approve/reject 无副作用）。
 		return fmt.Sprintf("请求 %s 已是 %s 状态（幂等，未改写）", responded[0].req.ID, responded[0].req.Status), nil
 	}
 	return "", fmt.Errorf("governance: no approval request matches digest prefix %q", digest)
@@ -147,7 +138,7 @@ func ParseApprovalReply(text string) (digest string, approve bool, ok bool) {
 	return fields[0], verb == "approve " || verb == "批准 ", true
 }
 
-// isHexDigest（§8.11④）：digest 输入必须是 8-64 位十六进制——任意字符串此前可作
+// isHexDigest：digest 输入必须是 8-64 位十六进制——任意字符串此前可作
 // 前缀匹配输入（实际受 sha256 hex 约束无匹配风险，但输入面应收紧）。
 func isHexDigest(s string) bool {
 	if len(s) < 8 || len(s) > 64 {

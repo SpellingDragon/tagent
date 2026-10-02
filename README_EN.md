@@ -384,10 +384,33 @@ bash scripts/race_check.sh             # race gate (full local run)
 cd examples/wechat-bot && go run .     # run the example
 ```
 
-CI (GitHub Actions) runs on push/PR: build + vet + full short test suite + `-race` on the new
+### Running the real-tmux tests locally
+
+The session-based tmux tests in `tool/action` (`TestActionTool_Tmux*`, plus `TestScenario*` / `TestTUI_*`
+under `-tags integration`) share the machine's **default tmux server** — the executor opens no dedicated
+socket for them. Construction calls `CleanupOrphanSessions`, which reaps every listed session except
+`n-*` ones, so two processes running this family concurrently (or a session left over from an earlier
+run) reap each other's live sessions. The failure signature is `server exited unexpectedly`, not a
+timeout, and the victim rotates with run order. This flake pollutes local full runs only: CI never reaches
+the family, because the session tests carry their own `testing.Short()` guards and the heavy family sits
+behind a `//go:build integration` tag (measured: CI's `-short` run keeps only two `exec.LookPath` probes).
+
+```bash
+go test -p 1 ./tool/action                        # serialize: stops the mutual reaping
+go test -p 1 -tags integration ./tool/action      # includes the Scenario/TUI family
+```
+
+Triage rule: treat `server exited unexpectedly` as a run-order problem and rerun serialized; only a
+reliably reproducible timeout or assertion mismatch is a defect. Before running the family, make sure
+nothing else (your own tmux sessions included) is creating sessions on that same default server.
+
+CI (GitHub Actions) runs on push (both `main` and the `dev` branch) and on PR: build + vet + full short
+test suite + `-race` on the new
 subsystems (memory / governance / reliability / evolution / event / tool …). Real-LLM contract
 tests under `tests/` self-skip without credentials and never block CI; the root-package
 `model_contract_matrix_test.go` (provider-protocol matrix) likewise self-skips without `DEEPSEEK_API_KEY`.
+`dev` takes direct pushes with no PR gate, so it runs the same jobs as `main` — otherwise an unbuildable
+commit can land silently and every later reconciliation reads against an unverified baseline.
 
 ## License
 

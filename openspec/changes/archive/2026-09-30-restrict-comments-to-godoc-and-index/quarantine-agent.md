@@ -1,0 +1,1121 @@
+
+# `agent` 域隔离清单（机械清扫中摘除、命中判据词的行）
+
+## 分类与进度（85 轮）
+
+先用可证的探针把条目分级，而不是逐条凭感觉读：取每条里的标识符（≥4 字符，去英文虚词）与中文短语，回原文件查是否仍有痕迹。
+
+| 分级 | 条数 | 含义与处置 |
+|---|---|---|
+| 原文件仍留痕 | **1043** | 判据由代码/断言承载（这正是 `test-doc-not-one-line` 的意图）⇒ 视为已落地，抽检确认 |
+| 完全无痕迹 | **38** | 真内容缺口 ⇒ 逐条按语义重新定位后判定"归 doc 槽／归文档／与现实现不符故不还原" |
+
+38 条已处理 2 条，方法固定为**先定位后判断，绝不行号盲填**（行号已随删除漂移，探针也证实了这一点）：
+
+- ✅ `agent/reliability/anchor.go`：还原进 `MeditationAnchors` 的 doc（"为什么"两行）——重启后锚点归零 ⇒ 门控失忆，既可能立即误触发冥想（空闲被算成从 epoch 起），也可能把等待输入误判为刚有输入而长期压制。
+- ⛔ `agent/governance/classifier.go:163`「避免 `| shasum` 之类误命中」：与**现实现矛盾**——现行判据 `Contains("| sh")/("|sh")` 确实会命中 `| shasum`。两点结论：① **盲还原会把过期说法写成契约**（比删掉更糟）；② 该条指向**可能的真实回归**：`curl … | shasum`（下载后校验）会被判成"管道入壳"而遭拒。已立漂移项 **D-20** 待裁决；本变更只做注释/文档，**不改行为**。
+
+余 36 条（`exec_lease_test.go` 10、`context_manager_test.go` 3、`task/task_manager.go` 3 等）逐条处理；测试文件里那些按规则应落进**断言消息**（第三类批，须证断言计数不变）。
+
+
+- `agent/agent.go:202` outputSettle sync.Once          // review C-1/M-1：outputCh+loopDone 的结算唯一入口（结构上恰一次）
+- `agent/agent.go:438` // 防长上下文配置（128K budget → 256K 字符）下溢出保护形同不存在。
+- `agent/agent.go:452` // （磁盘不可写 / 旧 .spill 未排空）必须 fail-loud —— 可靠性绝不静默降级。
+- `agent/agent.go:455` // bus 却接入无重放能力的 store 会让「至少一次投递」静默退化为可能的双写，必须
+- `agent/agent.go:455` // fail-loud，绝不降级为 volatile。
+- `agent/agent.go:459` // instead of serving durable inputs a later pass could destroy unguarded.
+- `agent/agent.go:464` // gated on Lease.Ready() since open (restart race); arming here releases it only once
+- `agent/agent.go:468` // 重建数据源，记录-only 不发 bus 不进投影）。cm 在下方创建后才绑定。
+- `agent/agent.go:475` // §2.8: wire the store's retention guard and rebuild+arm the lease from existing
+- `agent/agent.go:521` // 记录仍逐条 record-only 落链（registry 归并数据源不变），bus 只发一条
+- `agent/agent.go:530` // the disk gate; protected specs exempt — durability never yields to
+- `agent/agent.go:551` // must never mutate the framework's shared event object.
+- `agent/agent.go:625` // 7. Create TagentAgent (without contextManager yet — wired after callback creation)
+- `agent/agent.go:651` // 立即误触发冥想、正确计算 novelty）。init 失败降级为内存锚点（可用性优先）。
+- `agent/agent.go:664` // step. Construction config values remain only as the no-source fallback.
+- `agent/agent.go:672` // Feed the read-only task controller so meditation carries a self-state
+- `agent/agent.go:682` // (threshold*MaxTokens) instead of MaxTokens. Kills the dead zone where
+- `agent/agent.go:686` // Start the workspace cleaner. Scope: tool-output only. The exec/ dir is a
+- `agent/agent.go:720` // only (a nil owner leaves the source unset — the resident path wires
+- `agent/agent.go:749` // reaches it at its NEXT boundary instead of requiring a per-CM push
+- `agent/agent_test.go:1213` // threshold 800) without the all-L3 escalation storm, so mid-aged turns
+- `agent/agent_test.go:1240` // 本测现在钉**正向契约**：processed 事件流关闭 ⟹ 生产者 goroutine 已退出。
+- `agent/agent_test.go:1329` // only complete via ctx cancellation — it never proves an upstream join.
+- `agent/agent_test.go:1360` producerDone atomic.Bool   // true only after the producer goroutine returns
+- `agent/agent_test.go:1361` releaseOnce  sync.Once     // guards the single close of hold
+- `agent/agent_test.go:1380` // NOT close. On a dependency without the producer-done contract (official
+- `agent/agent_test.go:1425` // THE GATE: while the producer is still parked, the processed stream must
+- `agent/agent_test.go:1437` // Once the producer actually exits, the stream must close — release-gated join.
+- `agent/agent_test.go:190` // (At minimum, there should be fewer messages than without compression)
+- `agent/agent_test.go:316` // InjectMessage without StartLoop should drop the message silently.
+- `agent/agent_test.go:562` // empty finals → the degenerate guard breaks after the one retry and the turn
+- `agent/agent_test.go:58` // Empty messages cost nothing (an L3-compacted segment must not carry a
+- `agent/agent_test.go:585` // shared shell now self-heals with ONE retry, so the mock must answer the retry
+- `agent/agent_test.go:872` // naive final-response wait would race ahead of call #2).
+- `agent/agent_test.go:884` // result event itself also reaches outputCh without tool_calls, so a
+- `agent/agent_test.go:901` // test is guarded with t.Skip("blocked-by §X") until the owning phase lands.
+- `agent/completion.go:13` // instead of rebuilding them from current time — the exact mistake the legacy
+- `agent/completion.go:154` // A failed batch must carry its bounded summary; a completed one must not.
+- `agent/compress/context_compressor.go:1002` // input still reaches the request (§4.3). Text-only inputs have nil parts → no-op.
+- `agent/compress/context_compressor.go:1030` // External/user-side input: carry multimodal parts so an image-only (empty-text)
+- `agent/compress/context_compressor.go:1051` // Without a cap the summary line grows without bound across a long-running
+- `agent/compress/context_compressor.go:1141` // silently dropped next round (or split into phantom cards).
+- `agent/compress/context_compressor.go:1146` // never grow unbounded) and make the state observable.
+- `agent/compress/context_compressor.go:1172` // budget-unrepresentable — keep the tickets (never silently drop them,
+- `agent/compress/context_compressor.go:1203` // EVERY ticket; if even the tickets-only form cannot fit, that is
+- `agent/compress/context_compressor.go:1213` // Ticket guard rejected the model text (lost head/tail/★ ticket,
+- `agent/compress/context_compressor.go:1426` // output, so its ref must be retired from the projection rather than
+- `agent/compress/context_compressor.go:1438` // never exempt ordinary conversational refs.
+- `agent/compress/context_compressor.go:1441` // projection (M2b) instead of accumulating it as a zombie — the full
+- `agent/compress/context_compressor.go:1449` // TelemActive is the zero value, so a nil/absent entry must
+- `agent/compress/context_compressor.go:1456` return prior // carry-over round or non-skeleton drops only: zero LLM cost
+- `agent/compress/context_compressor.go:1559` // NOT-YET-CONSUMED telemetry notice must not be absorbed by the
+- `agent/compress/context_compressor.go:1576` // settle_fold cards (1.3): kept only while their message survives the
+- `agent/compress/context_compressor.go:1587` // The folded settles were never counted as compacted when the
+- `agent/compress/context_compressor.go:1622` // Emit the rolling summary whenever there is anything compacted — this
+- `agent/compress/context_compressor.go:347` // max_tokens (M) and keep_recent_tasks (k), so users only tune those two.
+- `agent/compress/context_compressor.go:358` // would push the second-newest L0 turn into the summary-only zone and
+- `agent/compress/context_compressor.go:379` // stays legal without the compressor being pairing-aware globally.
+- `agent/compress/context_compressor.go:398` // post-compaction STATE parameters, never trigger parameters.
+- `agent/compress/context_compressor.go:410` // so a concurrent hot rotation can never be half-applied to this pass.
+- `agent/compress/context_compressor.go:416` // from their EventSummary (bounded, byte-stable) instead of mutating the
+- `agent/compress/context_compressor.go:425` // becomes consumption state instead of adjacency: a consumed-and-
+- `agent/compress/context_compressor.go:455` // stash-rewrite-restore dance was a data race under concurrent compress).
+- `agent/compress/context_compressor.go:509` // L1, or resolved summary-only past the full window. Without this,
+- `agent/compress/context_compressor.go:588` // converge to ONE chain instead of a new chain every round
+- `agent/compress/context_compressor.go:826` //   - not assistant: the LLM never said this; any system-generated format
+- `agent/compress/context_compressor.go:843` // trace through the rolling summary after the verbatim notice is
+- `agent/compress/context_compressor.go:895` // archival note (observation input), never role=system/assistant:
+- `agent/compress/context_compressor.go:951` //     (count + time lower bound carry over) — never silently dropped.
+- `agent/compress/context_compressor_test.go:1084` // stays stable, the tickets-only form is a fixed point, no unbounded growth.
+- `agent/compress/context_compressor_test.go:1112` WithCardMaxChars(15)) // too small even for the tickets-only form
+- `agent/compress/context_compressor_test.go:1125` // Serialize → parse back (projection round-trip) → re-curated: the guard
+- `agent/compress/context_compressor_test.go:1188` "[aaaa0001] [deadbeef] 模型编造的浓缩行", // curateCards → guard rejects
+- `agent/compress/context_compressor_test.go:1226` // One condensation ask + one narrative ask — the guard never re-asks the
+- `agent/compress/context_compressor_test.go:1264` //     without a restart) — same expected numbers as the push era, different
+- `agent/compress/context_compressor_test.go:1265` //   - the C-defect fix (a window change must reach the resident budget line
+- `agent/compress/context_compressor_test.go:1266` // consumption boundary. Two contracts these tests must keep honest:
+- `agent/compress/context_compressor_test.go:1486` // outer trigger line and the inner compression target can never disagree
+- `agent/compress/context_compressor_test.go:1558` // Rotate the SOURCE only — no push. One read yields the whole group, so the
+- `agent/compress/context_compressor_test.go:1604` {8, 2}, {9, 2}, {100, 2}, // still L2: the base ladder never reaches L3
+- `agent/compress/context_compressor_test.go:1611` // In-progress segment is never compressed.
+- `agent/compress/context_compressor_test.go:1631` Content:      "", // image-only: no text
+- `agent/compress/context_compressor_test.go:1705` // reply; round 2's prompt must carry it as the prior narrative.
+- `agent/compress/context_compressor_test.go:1749` // Material law: the synthesis prompt must contain the FULL stored content,
+- `agent/compress/context_compressor_test.go:1796` // continuation line must not be swallowed into cards either.
+- `agent/compress/context_compressor_test.go:1878` // Multi-line narratives never occur (scrubbed at synthesis) but a trailing
+- `agent/compress/context_compressor_test.go:200` // Key invariant: retained refs must not exceed original count.
+- `agent/compress/context_compressor_test.go:2012` // cold-eyes m-1: CJK truncation must stay on rune boundaries — a card
+- `agent/compress/context_compressor_test.go:2128` // listed card or sunk into the earlier-items counter — never lost count).
+- `agent/compress/context_compressor_test.go:2176` // field access): the pass-through branch must be taken — projection
+- `agent/compress/context_compressor_test.go:2229` // Old turns stay traceable via cards even many rounds later (either as a
+- `agent/compress/context_compressor_test.go:2261` // Round 1 — never compacted: everything renders full (boundary=0).
+- `agent/compress/context_compressor_test.go:230` // Recent refs (keep_recent=2) must survive compression.
+- `agent/compress/context_compressor_test.go:2383` // L3 is budget-escalation-only, never age-reachable).
+- `agent/compress/context_compressor_test.go:2637` // NO L3: every turn stays on the timeline (age never archives).
+- `agent/compress/context_compressor_test.go:2642` // L2 (turns 0-5, age 9-4): skeleton only.
+- `agent/compress/context_compressor_test.go:3006` // The recent tool events (5-8) must remain (not folded into a tool_chain).
+- `agent/compress/context_compressor_test.go:3057` // Model context must contain the tool-chain line, not an empty placeholder.
+- `agent/compress/context_compressor_test.go:3061` // archived), so the chain ref must be retired.
+- `agent/compress/context_compressor_test.go:3068` // RetainedRefs must carry the tool_chain ref forward.
+- `agent/compress/context_compressor_test.go:3085` cc := newFoldCC(2) // huge budget (1_000_000) → never triggers
+- `agent/compress/context_compressor_test.go:560` // pass through untouched — turn count alone never triggers (D2).
+- `agent/compress/context_compressor_test.go:567` // Compaction must have run: some refs folded away (RetainedRefs fewer
+- `agent/compress/context_compressor_test.go:580` // Counter-direction: the SAME turn count under a huge budget must
+- `agent/compress/context_compressor_test.go:692` // 0 (turn 1) age = 5-1-0 = 4 → L3. This is the key: segment 0 must ACTUALLY
+- `agent/compress/context_compressor_test.go:718` // and must be panic-total.
+- `agent/compress/context_compressor_test.go:718` // payload. Its load-bearing contract is ANTI-FABRICATION — it must never
+- `agent/compress/context_compressor_test.go:722` // guardCondensedCard is the machine ticket guard (design D6): it is the ONLY
+- `agent/compress/context_compressor_test.go:737` // The rolling summary message must survive in the model context.
+- `agent/compress/context_compressor_test.go:747` // It must sit right after the system message (index 1) if a system msg exists,
+- `agent/compress/context_compressor_test.go:754` // The rolling summary ref must still be rebuilt in RetainedRefs.
+- `agent/compress/context_compressor_test.go:788` // Every extracted ticket must be canonical-hex and appear verbatim
+- `agent/compress/context_compressor_test.go:821` continue // rejected: fine, the guard is allowed to reject anything.
+- `agent/compress/context_compressor_test.go:824` continue // "nothing to protect": acceptance without tickets is by design.
+- `agent/compress/context_compressor_test.go:850` // The legitimate condensation (subset of input) must be accepted.
+- `agent/compress/context_compressor_test.go:963` // counted, observable navigation loss — never silent.
+- `agent/compress/context_compressor_test.go:975` // --- 2.1 counterexamples: the pre-guard path accepted ALL of these ----------
+- `agent/compress/context_compressor_test.go:988` // surviving line must be verbatim from the input (model text never
+- `agent/compress/projection.go:37` // Idempotent: same event already projected. Skipping prevents the
+- `agent/compress/projection.go:58` // untracked. seen must mirror exactly the keys currently in refs.
+- `agent/compress/projection.go:60` // without this, compacted-out keys would linger forever (unbounded growth
+- `agent/compress/session_projection_test.go:41` // Mutating the returned slice must not affect the projection.
+- `agent/compress/smart_compress.go:192` return 0 // in-progress segment: pending input, never compressed
+- `agent/compress/smart_compress.go:197` // exists only on the budget-escalation path in compressSkeleton.
+- `agent/compress/smart_compress.go:210` return 2 // age >= k·2^1: skeleton; NOT L3 — aging never archives
+- `agent/compress/smart_compress.go:230` // Results are dropped, so declared calls must go too — a
+- `agent/compress/smart_compress.go:252` // Its event keys never appear in the output, so buildRetainedRefs
+- `agent/compress/smart_compress.go:265` // Extract the rolling summary so it never rides inside segment 0 (which is
+- `agent/compress/smart_compress.go:267` // group, the shared hot fields are never consulted — a concurrent hot
+- `agent/compress/smart_compress.go:275` // archival (the old `completeCount <= keepRecent` guard let many-segment
+- `agent/compress/smart_compress.go:293` // budget escalation below is O(1) incremental per step instead of
+- `agent/compress/smart_compress.go:308` // within keepRecent and in-progress segments are never escalated.
+- `agent/compress/smart_compress.go:401` // Same reasoning-model guard as the retired batch summarizer: reserve ample
+- `agent/compress/telemetry_test.go:128` // Cards never re-fold (idempotence across acts).
+- `agent/compress/telemetry_test.go:172` // A conversational ref must never be exempted via the zero value.
+- `agent/compress/telemetry_test.go:3` //     TelemActive being the zero value may never exempt conversational refs.
+- `agent/compress/telemetry_test.go:3` //     unconsumed = Active (never demoted, never L3-absorbed), consumed with
+- `agent/compress/telemetry_test.go:3` //   - buildRetainedRefs must only exempt explicit Active settle refs —
+- `agent/compress/telemetry_test.go:353` // a projection-only operation); the derivation must reproduce the map.
+- `agent/compress/telemetry_test.go:61` settleRef(21, 5), // never consumed → active
+- `agent/compress/token_counter.go:23` // An empty set costs nothing — without this, every L3-compacted segment
+- `agent/compress/token_counter.go:64` // 委托事件类型注册表（唯一权威源）。未知类型回退 RoleUser（安全降级）。
+- `agent/context_manager.go:1111` // (F5: inputs claimed here never reached finishDurableBatch).
+- `agent/context_manager.go:1116` // 「已折叠后的 under-budget 轮」，会每轮误发（写放大+违反 spec「未折叠不写」）。
+- `agent/context_manager.go:1140` // never persisted), preserving D6.
+- `agent/context_manager.go:1146` // reach the request — collect its parts so an image-only input is never dropped.
+- `agent/context_manager.go:1177` // §4.3: a valid non-text (image/file) payload has empty Content but must still
+- `agent/context_manager.go:1181` // created-but-never-iterated lazy iterator does not consume the one-shot notice. The
+- `agent/context_manager.go:1221` // 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
+- `agent/context_manager.go:1228` // Rebuild: [system] + render(projection). The system message is the only
+- `agent/context_manager.go:1242` // cross-agent, silently dropping that agent's rebuild snapshot.
+- `agent/context_manager.go:1296` Timestamp:    time.Now().UnixMilli(), // write time (D4), never the summary minTs
+- `agent/context_manager.go:1300` // FNV hash (collisions expected at ~38 agents) — without this check a
+- `agent/context_manager.go:1347` // 触发源，足够审计）；强加 turn span 锚反而会错误归属到无关 turn。
+- `agent/context_manager.go:1363` // 单一 turn span，故**不注入** turn trace 锚（trace_id/span_id 是 RunFlow 主路径经
+- `agent/context_manager.go:1367` // a projection/tail scan. The slot index is never compacted (F4), so (request
+- `agent/context_manager.go:1374` // for 4.6's startup reconcile to check a fact directly by receipt_key without
+- `agent/context_manager.go:1402` // and the volatile path; the claim is only set on the durable path, so these
+- `agent/context_manager.go:1465` // existing FullEvent payload fields — previously only Content was kept, so
+- `agent/context_manager.go:1508` // §4.3 / §3.4-deferred: freeze multimodal parts so an image-only (empty-text)
+- `agent/context_manager.go:1518` // guards the normal commit append — an internal record (receipt/registry/inline
+- `agent/context_manager.go:1518` // settle/compaction body) must never occupy the projection even if it reaches here.
+- `agent/context_manager.go:1522` // never-store-fails-append invariant holds: a store failure (stored=false, !replayed) skips.
+- `agent/context_manager.go:1527` // (the selected batch only) keeps it from re-appending unrelated historical keys. The
+- `agent/context_manager.go:1592` // never the current event's arrival time or the original message object.
+- `agent/context_manager.go:1601` // frozen fact is already committed (replayed) STILL must be present in the projection
+- `agent/context_manager.go:1616` // fact the store holds/returned — never the current event's time, a re-derived summary,
+- `agent/context_manager.go:1621` // StoreEvent must NOT append to the projection — otherwise the projection
+- `agent/context_manager.go:1666` // Hold the claim (never ack, never re-project) and surface it, exactly like a
+- `agent/context_manager.go:1745` // never saw a verified echo (framework fed a non-matching/absent input, or a
+- `agent/context_manager.go:1758` // R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
+- `agent/context_manager.go:1790` // (e2195fc) never fires: meditation-spawned tasks settle as bare "task"
+- `agent/context_manager.go:1793` // routing data the framework reads, never model-visible (D4).
+- `agent/context_manager.go:1811` // per-call value must never be written into them — see withCallProjection.
+- `agent/context_manager.go:1821` // task settle 回流的新 turn 可关联回原 trace（异步链路可追溯），复用现有 Origin 管道
+- `agent/context_manager.go:1842` // way: do not start, and never run on a closed executor.
+- `agent/context_manager.go:1847` // author=user, and the exact committed merged message — instead of skipping every
+- `agent/context_manager.go:1870` // 它的 turn 的 trace 锚点——指令2「一套数据模式多场景保一致性」延伸到异步任务链路：
+- `agent/context_manager.go:1876` // the shared object would be a data race. All tagent-side metadata
+- `agent/context_manager.go:1921` // → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
+- `agent/context_manager.go:1932` // (trace_id/span_id)。后者使异步 task_settled 事件经 Origin→Metadata 管道携带触发
+- `agent/context_manager.go:1993` // 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
+- `agent/context_manager.go:2006` // Origin baggage = invocation metadata (chat_id, ...) + T-B turn trace 锚点
+- `agent/context_manager.go:2088` // Track turn productivity: a turn that never calls a tool and ends in
+- `agent/context_manager.go:2107` // F2 (design-report-closeout): 2s grace → persist + ticket, never
+- `agent/context_manager.go:2196` // A tool RESULT (Role=tool) also has no tool_calls but must NOT be
+- `agent/context_manager.go:2282` // Only an assistant message without tool_calls is a final response.
+- `agent/context_manager.go:287` // therefore never runs on the turn's thread, and a turn that merely witnessed a
+- `agent/context_manager.go:300` // D3 (§2.3): the business turn fires the NON-BLOCKING lazy trigger only. It
+- `agent/context_manager.go:428` // §2.1：冷启动与热更换装共用 buildExecutor 这唯一一条装配路径。
+- `agent/context_manager.go:435` // consumer ever used). §7.5: assembly must mirror the executed surface.
+- `agent/context_manager.go:460` // This enables prompt tuning without restarting the agent process.
+- `agent/context_manager.go:474` // §3.2: the cold-start executor IS generation 1 — a business turn must be able
+- `agent/context_manager.go:480` // outside the transport-retry loop; a turn never re-reads the active version.
+- `agent/context_manager.go:501` return nil, nil // Graceful: keep existing system prompt
+- `agent/context_manager.go:518` // (append directly to messages, legacy behavior for tests without projection).
+- `agent/context_manager.go:522` // a recency anchor of async state that never enters projection/history, so
+- `agent/context_manager.go:611` // (§5.3 handed this corner to §5.4 to guard explicitly rather than leave it
+- `agent/context_manager.go:66` // gone). Earlier construction-only mirror fields were never read (maxTokens)
+- `agent/context_manager.go:66` // or were a background-write vs read race once hot-apply moved to the rebuild
+- `agent/context_manager.go:66` // owner record view) wins and the atomics answer only as the construction
+- `agent/context_manager.go:675` cm.execCfg = face.isolatedCopy() // R06: never alias the caller's or the staged face
+- `agent/context_manager.go:823` // same critical section, so a reader can never observe a runner without its
+- `agent/context_manager.go:891` // staged binding installed instead of a fresh snapshot. The same-runner case
+- `agent/context_manager_test.go:116` // Barrier lifts: the producer confirms its stop, and only now is the
+- `agent/context_manager_test.go:20` // manager happens to be zero, and never twice.
+- `agent/context_manager_test.go:219` // answers; the live threshold can never be clobbered to zero. (The retired
+- `agent/context_manager_test.go:268` cm := &ContextManager{}                                                     // no compressor → guarded no-op
+- `agent/context_manager_test.go:269` // 缺陷原型（轮二十五重开）：numeric-only applyHotAll 只达常驻 CM/TaskManager，
+- `agent/context_manager_test.go:272` // 在途私有 CM 必须随热更新的消费边界应用（注册/注销严格随调用生命周期）。
+- `agent/context_manager_test.go:280` // 子调用私有 CM 必须以 owner 的**有效热参快照**播种（新调用初始即有效），
+- `agent/context_manager_test.go:289` // introduce-durable-workflow-engine §6.4（D4 同身份热参源）契约测：
+- `agent/context_manager_test.go:413` // Snapshot-seed witness: the call opened AFTER the apply must carry 8100.
+- `agent/context_manager_test.go:65` // Idempotent release: the count must not drop twice and a second Close never
+- `agent/deep_review_regressions_test.go:139` // operator instead of the P2-2 defect's silent claimed-zombie loop.
+- `agent/deep_review_regressions_test.go:3` //     kept for inspection) instead of staying claimed forever (all-bad) or
+- `agent/deep_review_regressions_test.go:3` //     yielding to a mixed batch never zombies its durable envelope;
+- `agent/event_bus.go:236` // task-unstamped（宿主扣留），未知不得升级为可投递来源。
+- `agent/event_bus.go:244` // cold-eyes P1-2：stale 一次性通知（Watch）同样携带——否则 watch 的
+- `agent/event_bus.go:407` // block is reported, never silently swept.
+- `agent/event_bus.go:427` // stays gated indefinitely — surviving material must not be destroyed on an
+- `agent/event_bus.go:485` // mutating the in-memory event without affecting the durable payload.
+- `agent/event_bus.go:501` // cannot be JSON-encoded is REFUSED at acceptance — never silently stripped
+- `agent/event_bus.go:530` // — the event lives in the inbox and must not ALSO travel the channel,
+- `agent/event_bus.go:543` // Wake the consumer with a DEDICATED sentinel (never the event itself
+- `agent/event_bus.go:579` // rejects the whole batch before anything is written (never a partially
+- `agent/event_bus.go:647` // PublishContext already counted the rejection — log only.
+- `agent/event_bus.go:654` // ACK-destroy the undecodable input — both are silent loss. The
+- `agent/event_bus.go:848` // claim durable envelope。批量上限防巨型 LLM 消息。
+- `agent/event_bus.go:934` batch := b.drainChannelNonWake() // cold-eyes Minor 1: wake sentinels never leak into pulls
+- `agent/event_bus_test.go:458` // only to the copy that feeds eventType/summary).
+- `agent/event_bus_test.go:463` // Tool fields must be frozen onto the canonical fact (previously only Content
+- `agent/event_bus_test.go:475` // Arbitrary business keys must NOT be spread into the control namespace.
+- `agent/event_bus_test.go:479` // The source message's original role must be unchanged (normalization applies
+- `agent/event_bus_test.go:670` // Create ContextManager without metadata
+- `agent/event_bus_test.go:760` // Guard: persistBusEvent with nil projection must not panic (Append on
+- `agent/event_loop.go:156` // silently truncated (review S-5); if widened for real, grow retryDelays too.
+- `agent/event_loop.go:156` // still consumed-and-evidenced and never zombied by filtering (previously a
+- `agent/event_loop.go:157` // §4.1 (design 决策4 L106): the original consumed set is FROZEN and never
+- `agent/event_loop.go:164` // the batch was pulled — meditation's constitutional premise ("never
+- `agent/event_loop.go:177` // envelope prepared, so a half-prepared input never enters the fact chain.
+- `agent/event_loop.go:192` // a yielding meditation's claim must be requeued too or it stays claimed
+- `agent/event_loop.go:196` // filter only drops meditation from MODEL INPUT, not from claim provenance —
+- `agent/event_loop.go:197` // model. The gate returns a CLASSIFIED outcome (not a bool), so the loop never
+- `agent/event_loop.go:209` // next batch ahead of the stuck one, never model with missing inputs (§4.2).
+- `agent/event_loop.go:216` // (oldest re-claimed first, order preserved) and skip the model — never pull a
+- `agent/event_loop.go:218` // the request tail so it reaches the model without ever being stored (§4.5C/D6).
+- `agent/event_loop.go:220` // (root invocation, author=user, content==merged), never every user event. A
+- `agent/event_loop.go:221` // and must still see the spec) so a new early return can never forget
+- `agent/event_loop.go:231` // has empty Content but valid ContentParts — it must NOT be dropped here.
+- `agent/event_loop.go:238` // §2.3：获取即登记在途引用，故释放必须覆盖本 turn 的**每一条**退路。这里把它
+- `agent/event_loop.go:240` // §4.3: skip only a genuinely empty invocation. A non-text (image/file) input
+- `agent/event_loop.go:244` ta.finishDurableBatch(ctx, received, events, completedOutcome()) // §4.1: ack the full consumed set (同上, 防僵尸)
+- `agent/event_loop.go:268` // 为子树；turn 末显式 End（循环内禁用 defer，否则累积到函数退出）。noop 当未配 OTLP。
+- `agent/event_loop.go:272` // 发布通路）。取到引用必须在传输重试循环**之外**：本 turn 的全部 attempt、
+- `agent/event_loop.go:280` // post-ACK background run) references the SAME generation instead of
+- `agent/event_loop.go:281` // （meditation/task 触发的 high+ 操作须挂 goal；user 触发不需）。spanCtx 经 RunFlow
+- `agent/event_loop.go:283` // T-B: turn root span（一 turn 一 trace）。spanCtx 传给 RunFlow，框架自动 span 挂
+- `agent/event_loop.go:293` // C9：task_settled 回流的新 turn 携带原 spawn turn 的 trace 锚点（经 Origin→Metadata），
+- `agent/event_loop.go:295` // (spec L90/L130) — stop without finishDurableBatch.
+- `agent/event_loop.go:302` // rebuilt owner reprocesses the durable input instead of losing it.
+- `agent/event_loop.go:320` // returned nil" as the only definition of done.
+- `agent/event_loop.go:340` endTurn(retriedDegenerate) // M10（§8.4）：早退也 End span（防泄漏）
+- `agent/event_loop.go:349` endTurn(retriedDegenerate) // M10（§8.4）：早退也 End span（防泄漏）
+- `agent/event_loop.go:355` // §4.5: fail-closed if this durable turn's execution credential was never
+- `agent/event_loop.go:362` // (completed or failed) stands. A cancellation never reaches here — it
+- `agent/event_loop.go:376` // 3. Mechanical Source (pre-existing behavior for events without lineage).
+- `agent/event_loop.go:388` // meditation; only a user injection can re-arm the novelty gate.
+- `agent/event_loop.go:394` // Retries exhausted. Note: RunFlow only returns transport-level
+- `agent/event_loop.go:395` // only then receipt+ack the envelope. Store failure keeps the claim
+- `agent/event_loop.go:412` //    fanned out at settle). A task spawned during a meditation turn must
+- `agent/event_loop.go:433` // Single failure without retry (shouldn't happen with current logic, but defensive)
+- `agent/event_loop.go:87` // after the check can never miss one. The entry owner (empty id) has no barrier
+- `agent/event_loop.go:87` // is pending — OR the id is not bound at all (a loop whose registry never took
+- `agent/event_loop_test.go:114` // channel settles exactly once — including the never-started and panicking
+- `agent/event_loop_test.go:114` // completion result (never skipped because a flag already flipped), the
+- `agent/event_loop_test.go:223` _ = ok // drained or closed — either way the channel must not panic on later use
+- `agent/event_loop_test.go:379` stuck := cm.AcquireLease(LeaseTurn) // a producer that never comes back
+- `agent/event_loop_test.go:430` stuck := cm.AcquireLease(LeaseTurn) // a producer that never confirms a stop
+- `agent/event_loop_test.go:527` // publication fires even under panic (review M-3): without the defer the
+- `agent/event_loop_test.go:528` // The loop won: it must be terminal now, and the output settled.
+- `agent/event_loop_test.go:564` // call must NOT consume; entering the underlying call consumes exactly once
+- `agent/event_loop_test.go:564` case <-waiter: // publication reached — waiters are never stranded
+- `agent/event_loop_test.go:649` // model entry: the gate function is never invoked at all.
+- `agent/event_loop_test.go:725` // callback's material — the notice must sit AFTER it, proving the append
+- `agent/event_loop_test.go:742` // The assembled request on this bare session starts with the context-guard
+- `agent/exec_lease.go:13` // (§3.2「禁止指针进入持久记录」): a business turn acquires one, and every derived
+- `agent/exec_lease.go:13` // A lease travels through the call-chain context, never into a persisted record
+- `agent/exec_lease.go:13` // only when its own producer truly stops — the credential §6.3's fork supplies
+- `agent/exec_lease.go:196` // this a rare idle-moment event instead of hot-path noise.
+- `agent/exec_lease.go:235` _ = b.run.Close() // upstream documents Close as idempotent; never fatal
+- `agent/exec_lease.go:451` // never ran — that generation retires at this very publish, and its holds
+- `agent/exec_lease.go:460` // Outgoing generations: retro-wire wrappers that were never stamped (cold
+- `agent/exec_lease.go:577` // registers nothing, instead of resurrecting a reference on a closed generation.
+- `agent/exec_lease.go:77` cm      *ContextManager // for unconverged-list bookkeeping only; never serialized
+- `agent/exec_lease_test.go:1036` // 释放幂等：生产的 endTurn 可能被多条退路触达，重复释放不得把计数打成负数。
+- `agent/exec_lease_test.go:1229` // — because Spawn's Cancel is only a notification.
+- `agent/exec_lease_test.go:1271` // Turn over, ack returned — the producer is STILL the only thing that can free it.
+- `agent/exec_lease_test.go:1292` // returned, it must have stopped and released its reference exactly once.
+- `agent/exec_lease_test.go:1326` // Turn-path matrix (§4.1「正常、错误、早停、取消未完成…全路径恰一次」)
+- `agent/exec_lease_test.go:139` // Constructing a candidate must not have moved the live executor.
+- `agent/exec_lease_test.go:1418` // stream. The loop breaks out of the turn on it — the reference must still
+- `agent/exec_lease_test.go:1494` ta.StopLoop() // the unfinished turn's tail must still give its reference back
+- `agent/exec_lease_test.go:1557` // 目标要明确拒绝，不得复活它当时的绑定，也不得静默改投。
+- `agent/exec_lease_test.go:1586` // Resume/Relaunch 新建子 Run 时，目标必须按**当前有效代**解析——被后续代移除的
+- `agent/exec_lease_test.go:1589` // v1.10.0 的 session 并发读写竞态（台账 U-1），与本变更要验的发布/获取原子性无关，
+- `agent/exec_lease_test.go:1640` trpcagent.Agent // 余下方法本测不调用；若被调用会立刻 panic 而非静默
+- `agent/exec_lease_test.go:1675` // 回滚式重发布（换回含 drop 的面孔）必须立刻恢复可解析性：解析源没有惰性缓存。
+- `agent/exec_lease_test.go:1702` // 仍被当前代认得的目标必须真被投递（证明拒绝来自解析源，而非这条路径总是失败）。
+- `agent/exec_lease_test.go:1708` // 反证式收口：把名字从解析源里摘掉（模拟后续代移除了它），同一请求必须转为拒绝。
+- `agent/exec_lease_test.go:21` // The interleaving itself is not reproducible on demand (which is why the guard sits
+- `agent/exec_lease_test.go:21` // guard is responsible for: a retired generation refuses a NEW reference, and the
+- `agent/exec_lease_test.go:21` // may start on it. That used to be only a convention — `retire()` claimed "acquire
+- `agent/exec_lease_test.go:21` // only ever happens on the active binding" while `acquire()` checked nothing, and
+- `agent/exec_lease_test.go:221` // before that turn ends (drain-free) — and that state must be observable.
+- `agent/exec_lease_test.go:227` // Publish mid-turn: the superseded runner retires but must NOT be reclaimed
+- `agent/exec_lease_test.go:242` _ = <-done // 取消驱动的 turn 自带错误（上下文已撤）：本测只关心引用已收敛
+- `agent/exec_lease_test.go:317` // from the org path — guarded here rather than left to callers.)
+- `agent/exec_lease_test.go:326` // without going through NewContextManager's generation install, so a
+- `agent/exec_lease_test.go:498` // 纯构建不得改变在线执行器，也不得留下未回收的退役代。
+- `agent/exec_lease_test.go:513` b.StopTimer() // staging is the OTHER phase; it must not be billed here
+- `agent/exec_lease_test.go:641` // R06／§2.1（D2「不可变执行配置与受限运行句柄」）契约测。
+- `agent/exec_lease_test.go:661` // in org_d3_scheduling_test.go). Phase durations are logged as observations only.
+- `agent/exec_lease_test.go:664` // These are proven STRUCTURALLY (reference counts, closed flags), never by a wall-clock
+- `agent/exec_lease_test.go:670` // i.e. the retired set must honestly equal the number of LIVE references and never be
+- `agent/exec_lease_test.go:680` // publish — so the bench never showed that the commit does NOT carry the close, nor
+- `agent/exec_lease_test.go:859` // the callbacks must not re-check — pre-§3.1 this grew the counter by one per
+- `agent/exec_lease_test.go:862` // introduce-durable-workflow-engine §3.1/§3.2 契约测：一次业务 turn 只取一次
+- `agent/exec_lease_test.go:89` // introduce-durable-workflow-engine §2.1（候选构造与发布分离）契约测。
+- `agent/exec_lease_test.go:905` // 强化在途断言，实测触发上游 v1.10.0 的 session 竞态（inmemory.SessionService
+- `agent/exec_lease_test.go:980` // unreferenced G2 runner open, and a derived execution must keep the generation
+- `agent/exec_lease_test.go:981` // 必须被独立回收；第二代成为当前代。
+- `agent/exec_lease_test.go:985` // counter per context manager. So: one live G1 turn must not keep an
+- `agent/exec_lease_test.go:993` // (business turn / sub-call / background execution) — and never one aggregate
+- `agent/execution_gate_test.go:1107` // requeued envelope — B was never committed yet is NOT lost.
+- `agent/execution_gate_test.go:204` // StoreEvent fails only for the assistant `agent_output` (input commits via ReplayEvent,
+- `agent/execution_gate_test.go:219` // §4.5 guard were removed, finishDurableBatch would ack it here and we'd observe 0.
+- `agent/execution_gate_test.go:251` //   re-used, never re-stamped), and full CROSS-PROCESS recovery of the same
+- `agent/execution_gate_test.go:27` // (volatile turn). The blocked model must not be invoked at all.
+- `agent/execution_gate_test.go:360` // Fresh process: same durable backend, same inbox — nothing was graceful-closed.
+- `agent/execution_gate_test.go:425` mustX(in.RecordCompletion(path, raw)) // Phase A durable — Phase B never runs
+- `agent/execution_gate_test.go:488` // so re-submitting the receipt can never add a second event.
+- `agent/execution_gate_test.go:534` // processed without a fact key
+- `agent/execution_gate_test.go:539` // is two values; an empty input is committed as a processed fact, never
+- `agent/execution_gate_test.go:544` // skipped without a reason
+- `agent/execution_gate_test.go:577` // failed batch without a summary
+- `agent/execution_gate_test.go:724` // (explicit block) instead of releasing the gate on an incomplete view.
+- `agent/execution_gate_test.go:744` // has no model at all); a cancelled turn writes NO terminal state; without a
+- `agent/execution_gate_test.go:748` // semantics: a durable completion is never re-executed (the recovery process
+- `agent/execution_gate_test.go:752` // retention guard) and drives the real §5.7 ReconcileOutstanding. Pinned
+- `agent/execution_gate_test.go:764` // Missing prepared fact on a processed slot is a deterministic error (never a
+- `agent/execution_gate_test.go:801` // Inventory failure: the barrier is RAISED AND KEPT (begin without end) —
+- `agent/execution_gate_test.go:825` // partial-progress disk states a crash can leave, without any seam):
+- `agent/execution_gate_test.go:902` // completion — a dead turn never fakes one.
+- `agent/execution_gate_test.go:967` // the real finish path must write NOTHING terminal — claim kept, no
+- `agent/execution_gate_test.go:974` // and unconfirmed material (slot B was never committed — its original is
+- `agent/governance/approval.go:15` // 微信）写 approved 文件；批准后外部注入新事件触发重试，args_digest 匹配防「批准后换参数」。
+- `agent/governance/approval.go:37` ArgsDigest  string         `json:"args_digest"`  // sha256——批准绑定参数，防「批准后换参」
+- `agent/governance/approval.go:67` lastRescan int64 // W2：上次重扫目录的纳秒时刻（Check 未命中时节流重扫，防高频重试反复 IO）
+- `agent/governance/approval_test.go:159` // 精确 digest 匹配：错误 digest 不命中（防「批准后换参数」）。
+- `agent/governance/approval_test.go:199` // pending → nil（节流生效）。假时钟确定性推进，无真实 sleep、无 wall-clock 竞态。
+- `agent/governance/approval_test.go:200` // ⑦：注入假时钟（可确定性推进）+ 1s 节流间隔（远小于 ttl，避免 approved 被误判过期）。
+- `agent/governance/budget.go:11` // （防「重启刷预算」绕过闸）。选滑动窗口桶化而非令牌桶：预算是「上限闸」非「速率整形」。
+- `agent/governance/classifier.go:163` // 避免 "| shasum" 之类误命中。
+- `agent/governance/gate.go:150` // 无批准机制：critical 无法获批 → 拒绝（绝不放行不可逆操作，防治理绕过）。
+- `agent/governance/gate.go:161` // M11（§8.4）：approval Request 失败（写 pending 文件错误）不得静默吞掉——否则
+- `agent/governance/gate.go:182` // ② goal 检查（high+ 且 trigger 须挂 goal）。
+- `agent/governance/gate.go:29` GoalRequiredFor []string    // 须挂 goal 的 trigger source（默认 meditation/task）
+- `agent/governance/gate.go:7` //（guardrail/judge）独立于本管线——评估对象是改进窗口证据，非工具调用风险。）
+- `agent/governance/gate_test.go:132` // 换参数（digest 不同）→ Check 不命中（防「批准后换参」）。
+- `agent/governance/gate_test.go:316` // must NEVER reach execution without an explicit human approval, across every
+- `agent/governance/gate_test.go:361` // No approval mechanism at all → hard denial (never silently allowed).
+- `agent/governance/goal_persist.go:112` // 8.8（review §8）：不重排——QueryEvents 契约即 (Timestamp, EventKey) 全序
+- `agent/governance/goal_persist.go:14` // goal 声明是治理审计与 goal 门的一部分，重启不得丢失。模式对齐 DenialLedger：
+- `agent/governance/goal_test.go:103` // All churn goals were resolved → rebuild must show zero ACTIVE churn.
+- `agent/governance/goal_test.go:39` // id1 must exist post-rebuild (resolved status retained).
+- `agent/governance/goal_test.go:42` // seq aligned: new declare must not collide with g-1/g-2.
+- `agent/governance/ledger.go:12` // DenialLedger（报告 D3 §4.4.2）：拒绝必记原因，可审计可分析。账本 = 事件流子集——
+- `agent/governance/ledger.go:12` // GoalRegistry（报告 D3 §4.6.1）：自治须挂登记 goal。默认 enforcement=warn（记账放行 +
+- `agent/governance/ledger.go:86` // l.store 则与 BindStore 竞争（-race data race）。快照后锁外写事件，锁纪律一致。
+- `agent/governance/tool.go:10` // 是一等资产——模型据此自纠，而非 panic/静默），不执行内层工具；放行则委托内层。
+- `agent/governance/tool.go:76` // 拒绝或挂起（Hold=critical 待批准）均不执行内层——纵深防御：即便 Denied 标志未置，
+- `agent/helpers.go:69` // （PublishExecutor / ActivateExecutor 在 executorMu 写段内换 runner）构成 data race。
+- `agent/inject.go:155` // entry points are the single source of truth for input lineage.
+- `agent/inject.go:89` // is ground truth. Non-user sources (meditation/task/tmux) never arm it,
+- `agent/lifecycle.go:204` // output itself is NOT settled here: it settles only AFTER every in-flight
+- `agent/lifecycle.go:229` // its cancellation is reported, never silently counted as stopped.
+- `agent/lifecycle.go:232` // (1 cont.) Close the durable receive boundary only after intake has
+- `agent/lifecycle.go:258` // The never-started form must still wait its in-flight one-shot/sub
+- `agent/lifecycle.go:264` // §4.1: a resource a still-live execution could touch is never torn down
+- `agent/lifecycle.go:282` // (D5: never claim a safe close silently).
+- `agent/lifecycle.go:289` // that OWNS its isolated store may direct-close); leased holders exit only
+- `agent/lifecycle.go:297` // hold NO close right over shared state (§6.3/review M-2: only an agent
+- `agent/lifecycle.go:329` // Join, never %v on the slice: §4.1's caller must be able to ASK whether
+- `agent/lifecycle.go:400` // takes closeMu to record the outcome) can never invert the order.
+- `agent/lifecycle.go:428` // never be resurrected over a settled terminal (review C-1).
+- `agent/lifecycle.go:443` // Wait can never start before the Add (the race detector treats
+- `agent/lifecycle.go:455` // concurrent StopLoop can never observe running without the count, so its
+- `agent/lifecycle.go:461` // silent restart would hand consumers a dead channel and double-close it
+- `agent/lifecycle.go:468` // Use sessionMu to prevent concurrent StartLoop calls from racing
+- `agent/lifecycle.go:543` // reserved key so §5.3 can freeze a per-slot completion for it; only the SELECTED
+- `agent/lifecycle.go:551` return // never started: nothing to stop (Close settles the terminal)
+- `agent/lifecycle.go:586` // (yielding-meditation) slots keep their prepared fact on the envelope but are never
+- `agent/lifecycle.go:633` // Phase 2 — commit only the SELECTED facts. A store failure is transient I/O (the
+- `agent/lifecycle.go:640` // treats as "keep existing" — safe, and the envelope only converges once
+- `agent/lifecycle.go:692` // Slot count spans the max fixed slot index (slots are never compacted,
+- `agent/lifecycle.go:756` // the receipt on restart (no re-execution). A receipt failure never touches
+- `agent/lifecycle.go:792` // of the WRITE only (the model already ran; its result is in the completion).
+- `agent/lifecycle.go:798` // (idempotent-by-key, never a fresh key/time) and take the §5.4 credential.
+- `agent/lifecycle.go:85` loopIdle     int32 = iota // never started on this instance
+- `agent/meditation_test.go:134` // Silence — second check must skip.
+- `agent/meditation_test.go:305` // fail-closed 扣留），不得机械兜底 "task" 被白名单放投。无标记的 bare task
+- `agent/meditation_test.go:306` // 缺失——旧版本记录/框架外 spawn）必须降级为 task-unstamped（宿主
+- `agent/meditation_test.go:397` // The gate is INPUT-side — only source=="user" injections advance
+- `agent/meditation_test.go:398` // "无用户新颖性不自馈电": a meditation must never arm its own novelty gate.
+- `agent/meditation_test.go:412` // Switch-combination regression for the meditation self-feed guard
+- `agent/meditation_test.go:442` // lineage-agnostic gate) but supplies no new USER input → a re-check must
+- `agent/meditation_test.go:447` // The self-injection's source is "meditation", never "user" — so under the
+- `agent/meditation_test.go:465` // Genuine user input re-arms the gate; only then does the next fire happen.
+- `agent/meditation_test.go:577` // never to any single agent: closing one agent (its durable bus) must leave
+- `agent/meditation_test.go:635` // its envelope is still un-acked (a restart must still find it protected),
+- `agent/meditation_test.go:718` // 3. Bus over the same inbox dir, wired with the store guard. Before arming, the
+- `agent/meditation_test.go:808` // without one); the drain path freezes a stub payload at this leaf level.
+- `agent/meditation_test.go:842` // §5.4: receipt only follows a durable completion (the state machine refuses
+- `agent/output_limit_tool_test.go:191` // Loop NOT blocked past the grace period: pass.
+- `agent/output_overflow.go:16` // 绝不阻塞主循环、不静默丢弃——与 task_settled 大结果转储同构（票据可找回全文）。
+- `agent/output_overflow.go:54` // excerpt never mutates the original event's message.
+- `agent/poc_test.go:157` // Create BeforeModel callback that truncates messages to keep only the first 2
+- `agent/poc_test.go:390` // Small delay to avoid race conditions in the event loop
+- `agent/projection_rebuild.go:107` // recover context even without any compaction anchor; supersedes no-op.
+- `agent/projection_rebuild.go:121` //    ref). Missing/tombstoned keys degrade to a WARN + skip, never block.
+- `agent/projection_rebuild.go:150` //    order; stragglers invert), no silent truncation (paginated).
+- `agent/projection_rebuild.go:150` // double-representation guard) alongside registry data and inline tool
+- `agent/projection_rebuild.go:154` // missed. Compaction events are fact-chain records, never projection refs (the
+- `agent/projection_rebuild.go:163` // fixed key directly; a key outside the snapshot/tail window must not be
+- `agent/projection_rebuild.go:163` // time (under-budget rounds never touch it), NOT a recompute over
+- `agent/projection_rebuild.go:241` continue // task/receipt/snapshot records never occupy the 500 slots
+- `agent/projection_rebuild.go:269` // hardening-review-batch2 7.1（partial 显式化）：截断必须可被调用方/日志
+- `agent/projection_rebuild.go:27` Truncated     int      `json:"truncated"` // VALID projection events dropped by the guardrail
+- `agent/projection_rebuild.go:328` // request keys vs returned keys must match, else record the difference.
+- `agent/projection_rebuild.go:79` // direct assignments ("failed", "skipped-nonempty") are never overridden
+- `agent/projection_rebuild.go:80` // Status starts EMPTY: the deferred verdict only fills an unset status so
+- `agent/projection_rebuild.go:80` // overridden by the derived verdict — recoveryStatusOf may only fill
+- `agent/projection_rebuild.go:82` // "skipped-nonempty" = a real precondition skip) must not be silently
+- `agent/projection_rebuild.go:98` // appended): WARN, never silently skip — and never Replace a live
+- `agent/projection_rebuild_test.go:1002` // Model omits event_keys entirely → auto-inject must fire.
+- `agent/projection_rebuild_test.go:130` // assembleRequest parity: Replace THEN emit; failure notice must be nil.
+- `agent/projection_rebuild_test.go:189` // were folded into the summary/tool_chain, never deleted.
+- `agent/projection_rebuild_test.go:24` // must restore the projection, the rendered messages, fullBoundary and the
+- `agent/projection_rebuild_test.go:482` // restart must fit after it. 505 events (> legacy cap 500) must ALL recover.
+- `agent/projection_rebuild_test.go:541` // built from the CANONICAL fact the store holds/returned — never the current event's arrival
+- `agent/projection_rebuild_test.go:596` // evtWithPreparedClaim stamps Timestamp=time.Now(); arrival time must NOT leak into the ref.
+- `agent/projection_rebuild_test.go:818` // does. Everything after this point must leave that binding alone.
+- `agent/projection_rebuild_test.go:885` // --- release A first: its delegation must see kA and NEVER kB ---
+- `agent/projection_rebuild_test.go:94` // action_command answers via the SAME ToolID — without this
+- `agent/reconcile.go:108` // completion-only (or the receipt aged out of the 30d window): re-submit
+- `agent/reconcile.go:14` // Reconcile never re-executes the model: the durable completion IS the frozen
+- `agent/reconcile.go:14` // never guess); 任一矛盾身份或缺 completion 的 receipt → quarantine + report.
+- `agent/reconcile.go:14` // scan (an older receipt key outside the scan window would be silently missed
+- `agent/reconcile.go:14` // the confirmation list is never harvested from the projection snapshot/tail
+- `agent/reconcile.go:29` ReceiptsAdded int // completion-only: frozen receipt re-submitted, then receipt+ack
+- `agent/reconcile.go:30` Cleaned       int // matching receipt already on chain: cleanup only, no re-submit
+- `agent/reconcile.go:56` // conservative block — retain, surface, never guess a confirmation.
+- `agent/reconcile.go:62` // reconcile quarantines and reports it, it must NOT fall through to
+- `agent/reconcile.go:73` s.Continued++ // prepared-only / plain pending → continue input via Pull
+- `agent/reconcile.go:87` // key — a deterministic contradiction, never cleaned up by guessing.
+- `agent/reconcile.go:93` // Receipt on the chain under the reserved key: it must BE the frozen
+- `agent/recovery.go:77` cur atomic.Pointer[map[string]*TagentAgent] // immutable snapshot; never mutated after publish
+- `agent/recovery.go:9` // by the first request). A log line alone never reached either of them.
+- `agent/reliability/anchor.go:11` // → 重启后冥想门控「失忆」：可能立即误触发冥想（idle 锚点归零 → 认为已空闲很久），或错误
+- `agent/reliability/degradation_test.go:121` // 无静默丢失、无 panic、无死循环；依赖间退化相互独立；失败是一等资产（可查询、可恢复）。
+- `agent/reliability/degradation_test.go:203` // 无 panic、无 race（-race 检测）即通过；状态是确定的枚举之一。
+- `agent/reliability/inbox.go:1047` // silently consumed.
+- `agent/reliability/inbox.go:1060` // reader or silently consumed. A pending slot with no material (version 0,
+- `agent/reliability/inbox.go:1068` // corrupt state is quarantined by the caller, never defaulted to pending and
+- `agent/reliability/inbox.go:1082` // transitional data — reject so it is quarantined, never parsed by a legacy
+- `agent/reliability/inbox.go:1087` // write as absent (the enqueue/claim result is then untrustworthy, never a hole).
+- `agent/reliability/inbox.go:1095` // §3.1: the durable state must be one of the three legal ones — an illegal or
+- `agent/reliability/inbox.go:238` closed    bool // authoritative close flag guarded by mu; Enqueue refuses once set (§3.3)
+- `agent/reliability/inbox.go:274` // (fail-loud): counting and reconcile never run on a possibly-stale listing.
+- `agent/reliability/inbox.go:275` // transitional data (never read) and only an explicit managed reset clears them.
+- `agent/reliability/inbox.go:276` // mid-flight must be settled (present or gone) before anything is counted,
+- `agent/reliability/inbox.go:278` // blocks reopen — corruption must surface, never be silently wiped. Legacy
+- `agent/reliability/inbox.go:282` // Refusing must not mutate the tree — the previous binary owns draining.
+- `agent/reliability/inbox.go:314` // never counted. v1 or corrupt items are never consumed.
+- `agent/reliability/inbox.go:318` // (kept, alerted); it was never a confirmable envelope, so it
+- `agent/reliability/inbox.go:33` // Platform-unsupported dir fsync degrades silently here (the file
+- `agent/reliability/inbox.go:339` // Receipt is durable — stays; consumer Ack-skips without re-exec.
+- `agent/reliability/inbox.go:499` // report the receive as uncertain (never durable-accepted); reopen owns it.
+- `agent/reliability/inbox.go:500` env.Messages[i].Slot = i // fixed slot index, never compacted later
+- `agent/reliability/inbox.go:58` // a low-load durable input still lived only in the channel and died with the
+- `agent/reliability/inbox.go:58` // not just the overflow (the old SpillStore only caught channel overflow, so
+- `agent/reliability/inbox.go:58` // slot indices are never compacted (F4).
+- `agent/reliability/inbox.go:58` // unknown-format versions go to quarantine (kept, alerted) — never silently
+- `agent/reliability/inbox.go:627` return nil // only a live claim is released
+- `agent/reliability/inbox.go:628` // dir-sync still has its barrier completed — an idempotent retry must NOT
+- `agent/reliability/inbox.go:665` // PRESENCE and JSON legality only (D2 opaqueness).
+- `agent/reliability/inbox.go:690` // ① No receipt without a durable, structurally-legal completion. The
+- `agent/reliability/inbox.go:699` // ② A completion frozen without a reserved key means the prepare phase never
+- `agent/reliability/inbox.go:704` // ③ The credential must carry and match the reserved receipt identity.
+- `agent/reliability/inbox.go:726` // dir-sync branch below), so an uncertain removal is never unaccounted.
+- `agent/reliability/inbox.go:735` // a contradiction — deletion never keys off the status string alone. The original
+- `agent/reliability/inbox.go:745` // phantom owed entry must never claim removal of a file still on disk.
+- `agent/reliability/inbox.go:753` // §5.4 (spec L172-174): a receipted STATE without a matching durable completion is
+- `agent/reliability/inbox.go:765` // Cleanup never started (the original is intact): cancel the account, a
+- `agent/reliability/inbox.go:964` // one place. The leaf must NOT silently sweep it here: releaseRetention lives
+- `agent/reliability/inbox_test.go:1025` // JSON null == a nil Message (len 4, so the old empty-bytes guard missed it).
+- `agent/reliability/inbox_test.go:1091` // Nested + array positions must stay distinct too.
+- `agent/reliability/inbox_test.go:148` // It must come back unchanged: NOT re-claimed, NOT Attempts++, still on disk.
+- `agent/reliability/inbox_test.go:151` // b (receipted) is now RETURNED to the caller (not silently swept by the leaf) so
+- `agent/reliability/inbox_test.go:158` require.NoError(t, in2.Ack(pB2)) // caller acks the settled item; only then frees capacity
+- `agent/reliability/inbox_test.go:225` // A prepare rewrite must not disturb the slot numbers.
+- `agent/reliability/inbox_test.go:399` // ① No receipt without a durable completion; state untouched.
+- `agent/reliability/inbox_test.go:401` // then forge completion-loss. Ack must refuse deletion and KEEP the original.
+- `agent/reliability/inbox_test.go:411` // ③ Contradiction guard: drive a second envelope legitimately to receipted,
+- `agent/reliability/inbox_test.go:449` // ② Empty and ③ foreign keys are refused without advancing the state.
+- `agent/reliability/inbox_test.go:472` // Force the POST-RENAME dir sync to fail for the first enqueue only.
+- `agent/reliability/inbox_test.go:481` // The landed original must be retained and its capacity reserved.
+- `agent/reliability/inbox_test.go:489` // A subsequent successful enqueue must NOT reuse the failed sequence — it
+- `agent/reliability/inbox_test.go:503` // §3.6 (spec L96/L110): removal is durable only after BOTH unlink and its directory
+- `agent/reliability/inbox_test.go:541` // Barrier now succeeds: the retry on the already-missing file must still
+- `agent/reliability/inbox_test.go:547` // A further ack is a no-op — never a second release.
+- `agent/reliability/inbox_test.go:621` // never be replayed through a legacy parser — while a pending slot with no material
+- `agent/reliability/inbox_test.go:630` // Retry with the IDENTICAL payload: must re-run the barrier (dir-sync), not
+- `agent/reliability/inbox_test.go:632` // prepare version; recovery must only trust current-version material. Incompatible
+- `agent/reliability/inbox_test.go:769` // accepted above, and must remain visible for inspection.
+- `agent/reliability/inbox_test.go:779` // envelope bytes yet was never renamed — it must not be counted as
+- `agent/reliability/inbox_test.go:783` {"receive-renamed", "1:renamed", 1, 0, InboxStatePending, 0, false}, // landed, dir sync never confirmed
+- `agent/reliability/inbox_test.go:784` {"claim", "2:renamed", 1, 0, InboxStatePending, 2, false},           // claim landed → open REQUEUES it (never lost)
+- `agent/reliability/inbox_test.go:834` // §5.6 — the cleanup-account boundary: receipted items are never swept outside
+- `agent/reliability/inbox_test.go:866` // managed reset — and current-format corruption must surface, never be wiped.
+- `agent/reliability/inbox_test.go:889` require.NoError(t, os.Chmod(envDir, 0o500)) // unlink inside a read-only dir fails
+- `agent/reliability/inbox_test.go:899` // No phantom account: a drain must finalize nothing (capacity/lease untouched).
+- `agent/reliability/inbox_test.go:919` // Unconfirmed: refuse and delete nothing (a reset is never automatic).
+- `agent/reliability/inbox_test.go:940` mustEnqueue(t, in, env("r", "user")) // a live unacked envelope → pending>0
+- `agent/reliability/inbox_test.go:95` // envelope whose completion was never frozen, and one without a reserved key
+- `agent/replay_restore.go:3` // append-only（幂等去重由投影侧保证）；build_agent 接线处
+- `agent/replay_restore.go:3` // 已随 dev 快照补丁移除，spec: spill 恢复 SHALL 保持 append-only）。
+- `agent/replay_restore.go:3` // 本重放路径只做「同点补投影」，绝不在活投影上 Replace（Replace-over-live
+- `agent/restart_matrix_test.go:113` // in-process seq guard cannot span process generations). The store
+- `agent/restart_matrix_test.go:203` // it (fail-before: the old code asserted only NotEmpty(Raw) every round).
+- `agent/restart_matrix_test.go:203` // replays later, so on-disk may trail the schedule but never outrun it).
+- `agent/restart_matrix_test.go:207` // can never exceed what was scheduled (a conflict round holds its claim and
+- `agent/restart_matrix_test.go:208` // marker must appear. A post-ack round has drained its own envelopes — the
+- `agent/restart_matrix_test.go:212` // ">= 1": committed facts never vanish across a restart (non-decreasing) and
+- `agent/restart_matrix_test.go:226` // Content provenance, not mere non-emptiness: any outstanding envelope must
+- `agent/restart_matrix_test.go:240` // producers that never come).
+- `agent/restart_matrix_test.go:25` // and then hard-exits at its pre-scheduled window. No sleeps, no graceful
+- `agent/restart_matrix_test.go:288` // must leave NOTHING recoverable behind…
+- `agent/restart_matrix_test.go:353` // per-message facts persistBusEvent commits (the §4.4 echo must NOT double-write).
+- `agent/restart_matrix_test.go:363` // separate cm's store would only ever observe the pipeline's own writes, not the
+- `agent/restart_matrix_test.go:401` // finishDurableBatch file writes race t.TempDir()'s RemoveAll at cleanup.
+- `agent/restart_matrix_test.go:413` // LEGITIMATELY retained on cancel, so without this the loop goroutine's in-flight
+- `agent/restart_matrix_test.go:415` // root/user/merged-content echo skip exists to prevent — only the two
+- `agent/restart_matrix_test.go:417` // First model request must NOT contain C.
+- `agent/restart_matrix_test.go:427` // A and B facts must be in memStore (prepared + persisted by the durable path).
+- `agent/restart_matrix_test.go:475` // the two Publishes against Pull under -race (occasionally claiming only A), which
+- `agent/restart_matrix_test.go:476` // F5 fix: assembleRequest must NOT drain C from the bus.
+- `agent/restart_matrix_test.go:489` // claims both into one fixed batch. The prior loop-first-then-publish ordering raced
+- `agent/restart_matrix_test.go:538` // The FIRST model request must contain A+B but NOT C.
+- `agent/restart_matrix_test.go:589` // 1. The notice must appear as the last, user-role message.
+- `agent/restart_matrix_test.go:596` // 2. The notice must NOT be stored in the fact chain (the gate never persists).
+- `agent/restart_matrix_test.go:712` // The gate injects the notice into the model REQUEST only — never the projection.
+- `agent/restart_matrix_test.go:719` // The real fact is still in projection; the transient notice never entered it.
+- `agent/restart_matrix_test.go:74` // new process generation can never re-issue a committed key (§8.5).
+- `agent/session.go:102` // (compress.SmartCompressor has mutable state and must not be shared across
+- `agent/session.go:114` // `== nil` guards (injectLiveTaskBoard) and panics on List().
+- `agent/session.go:114` // derived call inherits the caller's version/source, never its task manager.
+- `agent/session.go:115` // per-call context manager from THAT generation's assembled config, never
+- `agent/session.go:123` // PARENT's task domain ("父 spawner 遮蔽"), silently degrading the callee to the
+- `agent/session.go:128` // reference is released only at the invocation tail, after the private
+- `agent/session.go:131` // invCM.Close 同 defer——注册面严格随调用生命周期回收，绝不留历史列表。
+- `agent/session.go:133` // and acks nothing (interpretation A: a derived sub-call is never a durable
+- `agent/session.go:148` //越窗 settles route back to THIS call's sink instead of the shared bus.
+- `agent/session.go:176` // gate declines the reference; the invocation must fail here rather than publish
+- `agent/session.go:258` // RunSimple is removed. Top-level usage must use StartLoop/InjectMessage/StopLoop.
+- `agent/session.go:41` // a sub-call must NOT stomp the shared ta.lastUserID/lastSessionID (family-3
+- `agent/session.go:49` // Content but valid ContentParts, which MUST be preserved (a media-only
+- `agent/session.go:50` // Normalize only a genuinely empty message: an image/file-only input has empty
+- `agent/session.go:85` // channel with zero events and no explanation, silently breaking the
+- `agent/session.go:96` // installed as the shared `ta.activeBus` (§7.1 D2: Run must not rewrite the
+- `agent/session_test.go:1039` // Caller hangs up without the task ever settling.
+- `agent/session_test.go:1044` for range ch { // must terminate purely on ctx cancel, not on a settle
+- `agent/session_test.go:1097` <-spawned // background task spawned, no settle → without a ctx bound the tail would park forever
+- `agent/session_test.go:1101` for range ch { // channel must close at the deadline, not hang on the unsettled task
+- `agent/session_test.go:1161` // Quiescence is reached only once every one of OUR spawns was delivered
+- `agent/session_test.go:1191` // reliable; message count is. Fresh = only the initial user input (≤1 non-system)
+- `agent/session_test.go:1293` // leak guard, not a speed assertion, and a contended machine must not trip it.
+- `agent/session_test.go:1334` // but a route that never closes must still be reported.
+- `agent/session_test.go:1404` // injected anything — so the loop had no event to Pull and the owner turn never
+- `agent/session_test.go:1409` // processTurn). The round-59 failure was that the test started the loop but never
+- `agent/session_test.go:1478` // The loop must consume its OWN task_settled and continue: a second answer whose
+- `agent/session_test.go:1545` // The routing decision is UNCHANGED (deliverTaskSettled), only its transport is:
+- `agent/session_test.go:1728` // TaskSpec.ResumeFn) and assert only host-visible outcomes: which instance served
+- `agent/session_test.go:1742` // initiator's binding when it rides a call, effective otherwise) — never against
+- `agent/session_test.go:1742` <-ctx.Done() // never returns on its own
+- `agent/session_test.go:1805` // §4.2 (R03): an EXISTING task's Resume/Relaunch re-entry must resolve its
+- `agent/session_test.go:2015` // keys). Adding each condition is only safe once we KNOW what the real framework
+- `agent/session_test.go:2076` // Bring the target back into the effective face: the chain must still carry
+- `agent/session_test.go:2093` // §4.4 GROUNDING HARNESS (test-only, zero product risk). MemoryPlugin must stop
+- `agent/session_test.go:2228` // empty gate). Both must now preserve the parts.
+- `agent/session_test.go:2234` // BuildInvocation read Content only (image-only merged to empty → dropped by the loop's
+- `agent/session_test.go:2244` // Lazy: only touch the "model" when the caller actually starts iterating.
+- `agent/session_test.go:2244` // buildBusFact froze only Content/ToolCalls (parts lost — the §3.4-deferred item) and
+- `agent/session_test.go:2268` // 为空跳过。An image-only input has empty Content but valid ContentParts. Pre-§4.3
+- `agent/session_test.go:2321` // §4.3 (design 决策4 L106): 有效非文本载荷必须留在事实与实际请求中，不能因驱动文本
+- `agent/session_test.go:2514` // No Origin on the spec → the settle event must be stamped lineage_absent.
+- `agent/session_test.go:2553` // Registry-only inline record is present and flagged.
+- `agent/session_test.go:2584` // Late duplicate after terminal — must be fenced (no second event).
+- `agent/session_test.go:2598` // Resume re-opens the sync-wait window, so the new round's detector must
+- `agent/session_test.go:409` //    the assistant/tool ReAct history. This is the core regression guard —
+- `agent/session_test.go:424` // There must be ReAct history (assistant steps) AFTER the request.
+- `agent/session_test.go:440` // `ta.pendingExternalEvents` read/write that two concurrent Runs used to race on
+- `agent/session_test.go:440` // unsynchronized across goroutines; the removed writes are the red, the guarded
+- `agent/session_test.go:444` // legacy direct-Ingest API must keep its single-handoff semantics without leaking
+- `agent/session_test.go:450` // §7.1 (D2 去隐式传参): external context must be assembled per-invocation and the
+- `agent/session_test.go:754` // sub-call's invocation_id via the Origin→Metadata copy must NOT re-propagate it.
+- `agent/session_test.go:763` // A non-external-input event must be ignored even if it carries the key.
+- `agent/session_test.go:894` for evt := range ch { // ch closes only after the tail quiesces
+- `agent/session_test.go:973` finalTextResponse("t2", "should never run"), // would only appear if the tail spuriously continued
+- `agent/settle_accounting_barrier_test.go:3` // defaultSubAgentTimeout instead of quiescing after its last settle.
+- `agent/settle_accounting_barrier_test.go:3` // per-invocation consume loop (runAgentLoop's quiescence check) can never
+- `agent/settle_accounting_barrier_test.go:45` // the invocation loop never quiesces on its own.
+- `agent/settle_accounting_barrier_test.go:47` // must be quiescent. UNFIXED the leaked booking pins awaiting() true and
+- `agent/settle_routing_test.go:1226` // A claim whose barrier did not freeze a fact must never enter the fact chain.
+- `agent/settle_routing_test.go:1259` // guards were previously per-site private enums — the spill handler carried
+- `agent/settle_routing_test.go:1303` // A 与 B 的事实都在链上（B 不得被 A 的证据误吞）。
+- `agent/settle_routing_test.go:1315` // guard must not trust the commit path to only ever see business events):
+- `agent/settle_routing_test.go:1374` // A business-typed frozen fact still appends (guard is exclusion, not a blanket block).
+- `agent/settle_routing_test.go:1498` // Ambiguous digits-only strings resolve as hex (canonical form wins);
+- `agent/settle_routing_test.go:198` r.noteSpawn("ghost") // must not create accounting for an unbound id
+- `agent/settle_routing_test.go:255` // Inline spawn → booked-then-voided → never strands.
+- `agent/settle_routing_test.go:261` // No bus for the id → decorator is a pure no-op (delegates, never books).
+- `agent/settle_routing_test.go:424` // ONLY the frozen receipt; matching receipt → clean up only; read I/O → block;
+- `agent/settle_routing_test.go:424` // any contradictory identity / receipt-without-completion → quarantine + report.
+- `agent/settle_routing_test.go:424` // receipt key; the confirmation list is never harvested from the projection
+- `agent/settle_routing_test.go:424` // scan. Dispositions: prepared-only → continue input; completion-only → re-submit
+- `agent/settle_routing_test.go:546` // receipt through the real verify path, but never ack.
+- `agent/settle_routing_test.go:671` // verifyReceiptCredential is the only issuer of credentials: it decodes +
+- `agent/settle_routing_test.go:674` // credential, and receipt failure / input failure never mask each other.
+- `agent/settle_routing_test.go:801` // chain holds ONLY the input fact): a deferred receipt never fakes evidence.
+- `agent/settle_routing_test.go:841` // never treats one input as the batch. These lock the three properties the delta spec
+- `agent/settle_routing_test.go:975` // which would silently double-write the input under a new identity. A complete
+- `agent/settle_routing_test.go:979` // damage) MUST gate the store and surface — never mint a fresh Snowflake key,
+- `agent/task/task_board.go:52` // tells the model this is something it RECEIVES, never a format it should
+- `agent/task/task_board.go:62` // Render the reaper's remaining lifetime instead of any non-terminal
+- `agent/task/task_board.go:78` // Fixed wait-guidance line: the only net copy addition in this change. It
+- `agent/task/task_manager.go:1001` // Spawn/RestoreTask always set StartedAt; this guards only undated artifacts.
+- `agent/task/task_manager.go:1013` // must not be reclaimed on an astronomically-large computed age. Production
+- `agent/task/task_manager.go:1017` // collector and only the outermost finish delivers.
+- `agent/task/task_manager.go:1147` // at once. The previous read-under-lock/append-outside-lock raced the
+- `agent/task/task_manager.go:1176` // TOCTOU guard: candidates were collected outside the lock; another
+- `agent/task/task_manager.go:1354` // 与 Cancel()/Spawn() 的守卫风格一致；锁内拷出避免与 resume 换 detector 竞态。
+- `agent/task/task_manager.go:1472` //     Settled channel; only the sync-wait window is reopened.
+- `agent/task/task_manager.go:1489` // never closes a channel from a previous life.
+- `agent/task/task_manager.go:1518` // Claim the task: running under lock so a concurrent resume loses the race.
+- `agent/task/task_manager.go:1571` // is unmanaged (rejected / deduped) waits on this, never on Cancel, because
+- `agent/task/task_manager.go:164` StartedAtMilli int64             `json:"started_at_ms"` // board age + zombie grace reseed
+- `agent/task/task_manager.go:249` ttlRenewedAt  time.Time         // last reentrant refresh of the TTL anchor (§10.4); zero = never
+- `agent/task/task_manager.go:307` return 0, false // unbounded — only a test manager without a floor reaches here
+- `agent/task/task_manager.go:544` batchCollect     *[]BatchRetired // set by retire loops; finalize appends instead of emitting
+- `agent/task/task_manager.go:554` defaultTTL       time.Duration // unified reaper fallback lifetime; floored to defaultManagerTTL, never 0
+- `agent/task/task_manager.go:653` // 不被 gate 误报 Blocked（"进行中任务不受影响"承诺）。
+- `agent/task/task_manager.go:663` // gate 拒绝时 MUST detector.Cancel() 防孤儿会话/失控后台——Cancel 收敛在此单点，
+- `agent/task/task_manager.go:663` // 调用方文案须如实告知"已执行但未纳入任务层管理"。
+- `agent/task/task_manager.go:663` detector.Cancel() // never double-run
+- `agent/task/task_manager.go:709` // R2: best-effort fact-chain spawn record (never blocks the spawn path;
+- `agent/task/task_manager.go:725` // spawned-without-settled ghost for the restart replay).
+- `agent/task/task_manager.go:730` // fresh-eyes 🔴3: without it, the most common settle form leaves a
+- `agent/task/task_manager.go:735` // R2: inline settles emit a registry-only settle record (sixth-round
+- `agent/task/task_manager.go:749` // 入口不得拦截（否则合法完成通知被杀）。
+- `agent/task/task_manager.go:759` // 丢弃整条信号（不得改状态/通知）。注意 fence 只能放信号入口——
+- `agent/task/task_manager.go:821` // 两段流水，入口拦截会误杀合法完成通知（TestAliveDetached_CompletionEnds
+- `agent/task/task_manager.go:826` // never suppress — but DO respect merge at the detector level.
+- `agent/task/task_manager.go:835` // Watch hits are pure notifications: never change lifecycle state,
+- `agent/task/task_manager.go:860` // 丢弃——finalize 是唯一终态写入点，此处不得复活或重复结算。
+- `agent/task/task_manager_test.go:1052` tm.now = func() time.Time { return base } // age = 2h >= defaultOrphanGrace(30m)
+- `agent/task/task_manager_test.go:1196` inner() // nested finish: must NOT deliver
+- `agent/task/task_manager_test.go:1233` tm.now = func() time.Time { return base.Add(2 * time.Minute) } // past grace
+- `agent/task/task_manager_test.go:1318` // Auto-detach quickly so Spawn returns an ack instead of blocking.
+- `agent/task/task_manager_test.go:137` // Every task must eventually reach Completed (applyStatus ran).
+- `agent/task/task_manager_test.go:1381` // Running task: resume with a never-settling detector that DOES detach,
+- `agent/task/task_manager_test.go:1522` time.Sleep(30 * time.Millisecond) // widen the race window
+- `agent/task/task_manager_test.go:1542` // 56bf24c3: a restart-tagent.sh job fell silent into SUSPECT, never detached, and
+- `agent/task/task_manager_test.go:1542` // green under -race). The 09-17 trajectory's floor 96–99% PREDATES that machinery;
+- `agent/task/task_manager_test.go:1583` // A stale signal on the OLD detector must NOT settle the new round.
+- `agent/task/task_manager_test.go:1594` // (never detached); only the unified reaper can.
+- `agent/task/task_manager_test.go:1645` // A job-kind task that fell silent into SUSPECT WITHOUT ever detaching, with a
+- `agent/task/task_manager_test.go:1699` // "more quiet" — only its absolute age crossed the line. The reaper fires
+- `agent/task/task_manager_test.go:1744` // Advance past the 4h TTL. The task is STILL probe-alive and never went
+- `agent/task/task_manager_test.go:1826` // Young task: grace protects the spawn window even with a dead probe.
+- `agent/task/task_manager_test.go:1834` // Past the grace: next List() retires it as failed.
+- `agent/task/task_manager_test.go:1878` // panic on the nil detector (fail-before: without the guard this
+- `agent/task/task_manager_test.go:1930` // Past the terminal TTL: the next List() must prune it cleanly — no
+- `agent/task/task_manager_test.go:228` tm.now = func() time.Time { return base.Add(2 * time.Minute) } // past grace
+- `agent/task/task_manager_test.go:272` tm.now = func() time.Time { return base.Add(10 * time.Second) } // within grace
+- `agent/task/task_manager_test.go:309` tm.pruneTerminal() // must not panic
+- `agent/task/task_manager_test.go:470` // 否则在 -race/并行负载下会撞进「状态已置、settles 未入账」窗口。
+- `agent/task/task_manager_test.go:472` // 同一信号的流水两段（batch2 1.7/N1）：观察终态后必须等通知到达再断言，
+- `agent/task/task_manager_test.go:497` // 内存状态与 Settle 信号 Kind 必须同语义。WAL settle_status / marker / 反馈
+- `agent/task/task_manager_test.go:530` // 过 zombieGrace（默认 10 分钟）才满足回收判据。
+- `agent/task/task_manager_test.go:760` // Subsequent stable signals (output changes) must be suppressed.
+- `agent/task/task_manager_test.go:812` // 本测在单个 batch 窗口内并发驱动 N 次 finalize，-race 下须干净且 N 条全部落账。
+- `agent/task/task_manager_test.go:818` // Process dies → completed settle must re-notify and end the task.
+- `agent/task_record_sink.go:442` // cold-eyes P1-2：watch 是通知非终态——不得覆盖既有
+- `agent/task_record_sink.go:474` // Origin，整体覆盖曾致内部世系丢失→宿主误投递）。
+- `agent/telemetry_audit.go:148` // Full release only below the hysteresis line (half the threshold),
+- `agent/telemetry_audit.go:3` //      telemetry notice (full, host-visible — the operator must see the
+- `agent/telemetry_audit.go:3` //      the durability defense is never withdrawn for attention governance.
+- `agent/telemetry_audit_test.go:102` // must never trip the auditor (ratio 0).
+- `agent/telemetry_audit_test.go:3` // runs FIRST — the freeze must never withdraw the durability defense.
+- `agent/telemetry_audit_test.go:64` // Inside the dwell it must NOT march forward.
+- `agent/tool_agent.go:306` continue // never shadow the built-in parameters
+- `agent/tool_agent.go:348` // declarer kept it alive (ErrExecClosed), never a silent re-route onto the
+- `agent/tool_agent.go:419` // sub-agent (LLM and custom Run alike) sees the routing fields; without →
+- `agent/tool_agent.go:464` // call's projection (§6.5/D2), never against a field another concurrent
+- `agent/tool_agent.go:489` // rejected/deduped paths where the task layer never adopted the work), so a
+- `agent/tool_agent.go:511` // and released only when that producer returns — an ACK, a settle record or
+- `agent/tool_agent.go:516` // recorded so a later resume can restore THIS task's context (and only
+- `agent/tool_agent.go:567` // (dedup only matches active tasks); no tool-name teaching here,
+- `agent/tool_agent.go:574` // = 不纳入任务层（Spawn 已 Cancel detector 防失控）——文案必须如实。
+- `agent/tool_agent.go:603` // Same-name single-flight: factual ticket only (stable-context-
+- `agent/tool_agent.go:693` // agent (and the operator) only ever sees an opaque provider string
+- `agent/tool_agent.go:702` // The caller is being cancelled (shutdown): retrying would race the teardown
+- `agent/tool_agent.go:723` // 错误: ... in the task_settled notification) instead of storing the
+- `agent/tool_agent.go:734` // Surface upstream model-API errors instead of letting their message
+- `agent/tool_agent.go:817` // R2（review 🟠8）：relaunch 产物同样携带声明式投影——否则该产物重启后
+- `agent/tool_agent.go:880` l.Release() // the reference was taken to READ the face; a refusal must not pin anything
+- `agent/tool_agent.go:904` // Bound the chain: only the newest cap rounds are ever restored, so older
+- `agent/tool_agent.go:92` //   - This prevents the LLM from breaking context isolation — the LLM only outputs
+- `agent/tool_agent_test.go:1343` // fail-before: without wiring ttlSeconds into the spawn, spec.TTL is 0 and the
+- `agent/tool_agent_test.go:240` // Call without event_keys
+- `agent/tool_agent_test.go:55` assert.Equal(t, "string", eventKeysSchema.Items.Type) // hex 契约:key 以 canonical hex 字符串传递
+- `agent/tool_agent_test.go:631` // Since it doesn't appear, and event_keys=1 in the trace, auto-inject was skipped.
+- `agent/tool_agent_test.go:657` // Call without event_keys → should auto-inject last 5
+- `agent/trace.go:11` // ==================== turn-as-trace（T-B · 统一可观测数据模型）====================
+- `agent/trace.go:11` // noop 安全：未设 OTEL_EXPORTER_OTLP_ENDPOINT 时，otel 全局 TracerProvider 为 noop，
+- `agent/trace.go:11` // 「一套数据模式、多场景投影」（指令2）的落点：turn span 的 trace_id/span_id 是唯一
+- `agent/trace.go:11` // 一个 turn = 一棵 trace：runEventLoop 每轮开 root span（tagent.turn），RunFlow 及其下
+- `agent/trace.go:11` // 三个世界由同一 trace_id/span_id 双向互链，一致性由单一锚点保证。
+- `agent/trace.go:73` // C9：异步任务回流因果链接——task_settled 带原 turn trace 锚点时建 span link（remote
+- `agent/trace_test.go:145` // trace 锚点与既有 origin baggage（chat_id 路由）共存，不互斥。
+- `agent/trace_test.go:29` // noop provider → span context 无效 → trace id 空。
+- `agent/trace_test.go:73` nil,              // nil 防御
+- `agent/trace_test.go:98` // 合法 hex（TraceID 32 chars / SpanID 16 chars）→ 建 link，不 panic。
+- `agent/turn_result_test.go:110` outputCh := make(chan *event.Event) // unbuffered, never read → deliverEvent blocks
+- `agent/turn_result_test.go:135` // is the cancellation guard, not a store fault or an unverified credential.
+
+## `agent` 第二批（84 轮 tdoc 压缩 436 处中命中判据词的 336 行）
+
+- `agent/agent_test.go:1240` // exited, and once it exits the stream must close.
+- `agent/agent_test.go:1240` // parked must NOT close the processed stream until the producer has actually
+- `agent/agent_test.go:683` // loop vs sub-agent) must each project only their own events — the ctx-bound
+- `agent/agent_test.go:683` // sink can never cross-write (design.md D1 risk coverage).
+- `agent/agent_test.go:729` // thinking_plan + action_command pair must yield a legal NATIVE rendering —
+- `agent/agent_test.go:755` // framework's message tail must not affect the assembled request — assembly
+- `agent/agent_test.go:755` // reads only the system message from args.
+- `agent/agent_test.go:822` // asynchronous, this test fails HERE — before the invariant silently breaks
+- `agent/agent_test.go:822` // upstream plugin pipeline must synchronously wait for tool-result event
+- `agent/agent_test.go:957` // and lets a half-prepared input silently enter the fact chain).
+- `agent/agent_test.go:957` // the claim, never fall back to buildBusFact (which re-stamps a fresh identity
+- `agent/agent_test.go:972` // report not-stored so the loop never treats it as pre-persisted / never advances
+- `agent/agent_test.go:990` // and every caller must observe a consistent terminal result. Guarded by a
+- `agent/compress/context_compressor_test.go:1027` // retry by the guard.
+- `agent/compress/context_compressor_test.go:1066` // layer — deliberately NOT ticket-guarded; scripted answers keep the two LLM
+- `agent/compress/context_compressor_test.go:1066` // ticket, the guard rejects it, and the CARD SEQUENCE carries only verbatim
+- `agent/compress/context_compressor_test.go:121` // engineering fallback never breaks.
+- `agent/compress/context_compressor_test.go:1301` // defect (a 512k window never reached the resident budget line): a complete turn
+- `agent/compress/context_compressor_test.go:1364` // push model made the atomics the authority reachable only through
+- `agent/compress/context_compressor_test.go:1376` // fall back to the construction values instead of zeroing the budget line.
+- `agent/compress/context_compressor_test.go:1384` // atomics — the pull contract must not require a source to exist.
+- `agent/compress/context_compressor_test.go:1393` // L2: L3 is budget-escalation-only, never age-reachable (single-dimension
+- `agent/compress/context_compressor_test.go:1393` // trigger: segment count must not archive segments).
+- `agent/compress/context_compressor_test.go:1418` // Content/ToolCalls, so an image-only fact fell through to summary-only rendering and
+- `agent/compress/context_compressor_test.go:1418` // carrying those parts. Pre- resolveRef's content-resolution branch keyed only on
+- `agent/compress/context_compressor_test.go:1418` // external_input (empty Content, non-empty ContentParts) must render to a message
+- `agent/compress/context_compressor_test.go:1418` // the parts never reached the model.
+- `agent/compress/context_compressor_test.go:1584` // is preserved and the ticket layer is intact — compaction never breaks.
+- `agent/compress/context_compressor_test.go:1919` // cards in the rolling summary — recall keys traceable, zero LLM, no
+- `agent/compress/context_compressor_test.go:1948` // with one new turn per round, the projection size stays bounded instead of
+- `agent/compress/context_compressor_test.go:2048` // whose result ref was compacted away must not be re-sent as a dangling call
+- `agent/compress/context_compressor_test.go:2126` // lands on L1 (tool dropped) — the final Messages must contain no dangling
+- `agent/compress/context_compressor_test.go:2150` // action_command key dropped by L1 must vanish from RetainedRefs AND show up
+- `agent/compress/context_compressor_test.go:2309` // L2 — and NO L3: the base ladder never archives. maxTokens is tuned so the
+- `agent/compress/context_compressor_test.go:2731` // part of the compaction act — an under-budget round passes through without
+- `agent/compress/context_compressor_test.go:2755` // is PROSE (think-then-call reasoning model, no "调用 " prefix) must NOT leak
+- `agent/compress/context_compressor_test.go:2786` // run merges into an existing trailing chain instead of creating a new chain.
+- `agent/compress/context_compressor_test.go:444` // multi-line output would silently drop continuation lines next round.
+- `agent/compress/context_compressor_test.go:612` // card must count ALL of the turn's tool steps, not just post-injection ones.
+- `agent/compress/context_compressor_test.go:612` // for task_settled etc.). The toolSteps counter must NOT reset on it — the
+- `agent/compress/context_compressor_test.go:652` // the rolling summary message must NOT be L3-dropped with segment 0. With the
+- `agent/compress/context_compressor_test.go:712` // property: whatever the guard ACCEPTS, its tickets must be a subset of the
+- `agent/compress/context_compressor_test.go:72` // for the unbounded-keys-list / silent-history-drop pair.
+- `agent/compress/context_compressor_test.go:72` // lower bound carries over — and the listed keys are capped. Regression guard
+- `agent/compress/context_compressor_test.go:742` // guard, the anti-fabrication property is broken.
+- `agent/compress/context_compressor_test.go:956` // carries every input ticket must not touch the loss counter.
+- `agent/compress/session_projection_test.go:207` // role heuristic — assistant without tool_calls closes the turn.
+- `agent/compress/session_projection_test.go:231` // function; content is never read.
+- `agent/compress/telemetry_test.go:162` // an over-budget workload: an externalized consumed notice must arrive in
+- `agent/compress/telemetry_test.go:223` // from traj-30m-raw.jsonl, never hand-written.
+- `agent/context_manager_test.go:112` // the current face, a redundant candidate) must not create a second generation
+- `agent/context_manager_test.go:130` // publication and terminal Close — the lock discipline must hold and no runner
+- `agent/context_manager_test.go:221` // hot path that re-derives or resizes it — re-derivation happens only on the next
+- `agent/context_manager_test.go:233` // no rival source after the construction-only cm.maxTokens field was removed.)
+- `agent/context_manager_test.go:334` // numeric-only apply, a NEW invocation-private CM must initialize at the
+- `agent/context_manager_test.go:364` // registry stays bounded by concurrent calls, never growing per call.
+- `agent/context_manager_test.go:397` // Compress, and each pass must read one coherent generation. History: this族
+- `agent/context_manager_test.go:397` // remains provable is that the read side stays race-free under concurrent apply.
+- `agent/context_manager_test.go:65` // at the mechanism level: holding G1 open must not keep an unreferenced G2 alive.
+- `agent/context_manager_test.go:84` // whose producer never confirmed a stop is EXPLICITLY HELD and reported — never
+- `agent/deep_review_regressions_test.go:75` // keeps failing exhausts the gate's backoff, and the exit must requeue the
+- `agent/deep_review_regressions_test.go:75` // re-enter consumption order (P2-1: the unfixed exit requeued only the
+- `agent/event_bus_test.go:319` // 超时后 PublishContext 返回错误（不再「丢弃即成功」），旧 void 入口计数可见。
+- `agent/event_bus_test.go:346` // E①): a failed StoreEvent must NOT append to the projection — the
+- `agent/event_bus_test.go:346` // projection may never hold a ref the fact chain lacks (rebuild invariant:
+- `agent/event_bus_test.go:389` // inbox wired to a store without explicit replay capability would silently
+- `agent/event_bus_test.go:389` // must fail loud. Without durability configured the same store is accepted —
+- `agent/event_bus_test.go:389` // the capability is required only when the inbox barrier is actually active.
+- `agent/event_bus_test.go:414` // key — without spreading arbitrary business keys across the trusted control
+- `agent/event_bus_test.go:414` // namespace, and without mutating the source message's original role.
+- `agent/event_bus_test.go:668` // condition Metadata[trigger_source]==meditation can never fire (previously
+- `agent/event_bus_test.go:668` // it only lived on the in-memory StateDelta).
+- `agent/event_bus_test.go:668` // must enter the turn attribution so MemoryPlugin persists it into
+- `agent/event_bus_test.go:688` // Attribution carrier (context_manager RunFlow assembly) — nil fn must not
+- `agent/event_loop_test.go:140` // Close 与执行交错」). Fail-before: without the once-coordination (pre-§6.1),
+- `agent/event_loop_test.go:160` // replays the first result instead of re-running anything.
+- `agent/event_loop_test.go:174` // never ran still closes its output channel exactly once and locks the
+- `agent/event_loop_test.go:190` // concurrent StopLoop calls must both observe the goroutine's terminal (the
+- `agent/event_loop_test.go:272` // Fail-before: with the pre-§6.2 order the trace shows store before runner
+- `agent/event_loop_test.go:297` // Close must not fire — pre-§6.2, the store additionally sat in the closers
+- `agent/event_loop_test.go:327` // reclaim goroutine (measured: a real data race while this test still read a
+- `agent/event_loop_test.go:327` // same scenario (spec 取消后生产者尚未退出): when an execution's producer never
+- `agent/event_loop_test.go:355` // contract. A bounded Close that reports an unconverged execution must not stop
+- `agent/event_loop_test.go:355` // still-holds-while-live half is kept in that test; the "never finishes" half is
+- `agent/event_loop_test.go:355` // the abandonment §4.1 removes: holding while live is right, but never finishing
+- `agent/event_loop_test.go:355` // 〔轮九十三显式修订旧断言并记原因〕the predecessor here
+- `agent/event_loop_test.go:394` // completely untouched (spec: 借用执行壳不得关闭共享状态).
+- `agent/event_loop_test.go:394` // lease (release nil) and owns nothing — Close must leave the shared store
+- `agent/event_loop_test.go:406` // never-started instance may STILL have one-shot/sub-call turns streaming to
+- `agent/event_loop_test.go:406` // the shared outputCh; the settle must wait them out, never close the channel
+- `agent/event_loop_test.go:436` // and never a loop resurrected over a settled terminal. Run with -race.
+- `agent/event_loop_test.go:436` // idle settle and StartLoop's publish race under one coordination; every
+- `agent/event_loop_test.go:436` // outcome must be “started then cleanly closed” or “refused”, never a
+- `agent/event_loop_test.go:453` // concurrent waiters receive a terminal answer instead of blocking on
+- `agent/event_loop_test.go:554` // a request that finished assembly but never reached the wrapped model (the
+- `agent/event_loop_test.go:554` // must leave the notice PENDING for the next real call — and nothing consumed
+- `agent/event_loop_test.go:570` // the provider then fails; diagnostics stay readable; later calls never repeat
+- `agent/event_loop_test.go:611` // visible exactly once, system head untouched, and the notice never survives
+- `agent/event_loop_test.go:638` // notice is carried exactly once through the NEW executor, never re-armed or
+- `agent/event_loop_test.go:665` // model sees carries the notice exactly once; the following turn never repeats
+- `agent/event_loop_test.go:686` // a cached read-back) — and an all-facts-passing chain that never reaches the
+- `agent/event_loop_test.go:686` // model leaves the notice pending (no consumption without a call).
+- `agent/exec_lease_test.go:1011` // publishing a new generation mid-call must not reclaim the caller's generation
+- `agent/exec_lease_test.go:1046` // only the producer's real return does.
+- `agent/exec_lease_test.go:1046` // 版本仍有后台执行」: returning an ack must NOT release the execution reference —
+- `agent/exec_lease_test.go:1073` // the reference must survive until that producer stops, and drop exactly once.
+- `agent/exec_lease_test.go:131` // and only PublishExecutor moves the seam and updates the face.
+- `agent/exec_lease_test.go:1338` // must equal, field by field over the execution surface, the initial face a
+- `agent/exec_lease_test.go:1432` // 重投解析不到当前代目标时，返回明确错误、不产出 SpawnResult，且**不写任务板**；
+- `agent/exec_lease_test.go:1520` // 所持有的模型**；同时引用计数必须回到零（获取/释放成对）。
+- `agent/exec_lease_test.go:157` // over the face it wants in force. Resident state must keep flowing through
+- `agent/exec_lease_test.go:1583` //   - 与它无关、无人引用的 gen2 必须立刻独立回收，不为一个不相干的在途 turn 陪绑
+- `agent/exec_lease_test.go:1583` //   - 这个 turn 真正引用的 gen1 在它结束前不得回收（安全半）；
+- `agent/exec_lease_test.go:1583` // turn 在 gen1 上起飞，途中先被 gen2 超代、又被回滚式重发布，该 turn 必须一路用
+- `agent/exec_lease_test.go:1621` // 回收恰一次」：连发 5 代（空闲态）后再发一台收尾，使 5 台全部被超代——每台必须被
+- `agent/exec_lease_test.go:176` // ——「退役引用与未收敛 owner」必须可从既有诊断面读到，而不是只活在日志里。
+- `agent/exec_lease_test.go:176` // 观察对象是真实引用计数：在途 turn 持引用 → 被超代的 runner 只能等待；turn 结束
+- `agent/exec_lease_test.go:216` // advanced the recorded face on one entry and silently skipped it on the other.
+- `agent/exec_lease_test.go:216` // one Close — a redundant publish must not mint a second generation), the recorded
+- `agent/exec_lease_test.go:264` // next turn is about to run, so both entries must leave the live runner untouched,
+- `agent/exec_lease_test.go:328` // 引用自洽（old 或 new，绝不为 nil/半换）。
+- `agent/exec_lease_test.go:651` // the commit. Only releasing the reference triggers 回收. Durations are logged, never
+- `agent/exec_lease_test.go:681` // live references — never zeroed by force-closing still-needed runners to pass a count
+- `agent/exec_lease_test.go:729` // cross generations mid-flight. It must now fire exactly once per business turn
+- `agent/exec_lease_test.go:835` //   - 安全半：被这次 turn 实际引用的那代，在释放前绝不被 sweep 关掉；
+- `agent/exec_lease_test.go:835` //   - 独立半：与它无关、无人引用的中间代，必须立刻独立回收。
+- `agent/exec_lease_test.go:835` // §3.2/§4.1（D6）之后，回收是**逐代**的，因此这条契约被拆成两半各自钉住：
+- `agent/exec_lease_test.go:835` // 的独立契约：获取版本这件事本身就必须在**交出执行器之前**登记在途引用，否则一次
+- `agent/exec_lease_test.go:835` // 迁移记录：本例原先断言 `PendingRetirees == 2`（「一次 sweep 不得关掉任何已交出但
+- `agent/exec_lease_test.go:98` // generation must stop declaring it. Under the withdrawn non-zero merge the
+- `agent/execution_gate_test.go:184` // && !verified { ... return }` guard makes finishDurableBatch ack the turn → DurablePending
+- `agent/execution_gate_test.go:219` // reuses the EXACT frozen merged message + committed fact keys — it can never re-pull or widen
+- `agent/execution_gate_test.go:235` // must still find it through the envelope's own reservation, re-submit only
+- `agent/execution_gate_test.go:235` // the frozen receipt, and never re-execute (spec Scenario「回执 key 早于压缩边
+- `agent/execution_gate_test.go:285` // sharing those directories, must register protection, reconcile directly from
+- `agent/execution_gate_test.go:409` // completion (ok==false) so the loop never freezes a non-terminal turn.
+- `agent/execution_gate_test.go:427` // The frozen receipt must instead carry the envelope's reserved key and the
+- `agent/execution_gate_test.go:465` // self-consistent. Deviations are deterministic errors, never silently repaired.
+- `agent/execution_gate_test.go:530` // identity through the completion: an EventKey above 2^53 must survive freeze →
+- `agent/execution_gate_test.go:559` // integration level: after a prepared+persisted durable turn, finishDurableBatch must
+- `agent/execution_gate_test.go:90` // only starting iteration does. This is the "created-then-cancelled iterator is not a model
+- `agent/meditation_digest_test.go:110` // is unchanged — no digest section, prompt intact (task 4.1 / graceful degrade).
+- `agent/meditation_test.go:144` // the idle anchor. Without new user input, meditation must never re-fire, no
+- `agent/meditation_test.go:256` // Origin baggage (Metadata). extractTriggerSource must honor that lineage so
+- `agent/meditation_test.go:438` // set — never left claimed (zombied) just because it was filtered out of the
+- `agent/meditation_test.go:483` // 冥想门控连续性（重启后不立即误触发冥想、正确计算 novelty）。
+- `agent/meditation_test.go:610` // lease since open; the agent wires the guard and arms the lease from existing unacked
+- `agent/meditation_test.go:610` // race), then releases them when the envelope is acked (dir-synced) so they resume
+- `agent/meditation_test.go:668` // forever (a lease hang) and could never be TTL/capacity-evicted. Fail-before:
+- `agent/meditation_test.go:668` // the file away but never released — the fact/receipt originals stayed leased
+- `agent/output_limit_tool_test.go:170` // the loop past the grace period: the full event is persisted under
+- `agent/output_limit_tool_test.go:170` // uses for every outputCh send. A consumer that never reads must not block
+- `agent/projection_rebuild_test.go:230` // NOT re-emit (RetainedRefs[0] stays negative — only result.Compressed
+- `agent/projection_rebuild_test.go:230` // projection carries a fold summary at its head, an under-budget round must
+- `agent/projection_rebuild_test.go:253` // one alive); legacy 固化物 (no marker) is never selected nor deleted;
+- `agent/projection_rebuild_test.go:303` // non-empty projection → WARN skip, never Replace-over-live.
+- `agent/projection_rebuild_test.go:320` // skipped (never double-represented as refs); meditation agent_output marks +
+- `agent/projection_rebuild_test.go:351` // a cold reopen (WAL replay + cold-partition discovery) must reproduce the
+- `agent/projection_rebuild_test.go:351` // recallability only). This closes that gap: identical fold + tail lifecycle
+- `agent/projection_rebuild_test.go:455` // 必须可复原），但过滤次序不变：task_spawned 等非投影记录永不占用投影槽位。
+- `agent/projection_rebuild_test.go:489` // current event's arrival time must project the CANONICAL time. Fail-before: the old ref used
+- `agent/projection_rebuild_test.go:516` // "already" classification must not drop the input. Fail-before: the old code returned on
+- `agent/projection_rebuild_test.go:542` // to exactly one ref (never a duplicate that a later compaction would have to fold twice).
+- `agent/projection_rebuild_test.go:719` // delegation wrapper) must each auto-inject only from their own call-private
+- `agent/projection_rebuild_test.go:874` // error) — the previous tests only asserted the pointer was set directly.
+- `agent/projection_rebuild_test.go:874` // events. This is exactly what a bare type-assertion wiring silently breaks (the
+- `agent/projection_rebuild_test.go:874` // tool call that OMITS event_keys must still auto-inject the parent projection
+- `agent/projection_rebuild_test.go:922` // never collected, so wiring a mixed list touches only the delegation wrappers.
+- `agent/projection_rebuild_test.go:947` // two projections do not cross-contaminate: each real call injects only from its
+- `agent/reliability/degradation_test.go:152` // 不因回拨累积错误状态。
+- `agent/reliability/degradation_test.go:174` // （-race）、无 panic（DegradationManager 的 mu 保护 + onChange 锁外调用）。
+- `agent/reliability/inbox_test.go:176` // is never consumed as a valid input — it is quarantined and alerted .
+- `agent/reliability/inbox_test.go:196` // assigns fixed, sequential slot indices; slots are never renumbered by later
+- `agent/reliability/inbox_test.go:221` // refused at acceptance — the inbox never accepts silently-lossy input .
+- `agent/reliability/inbox_test.go:263` // the current format, classifies legacy items as inert transitional data (never read
+- `agent/reliability/inbox_test.go:300` // prior run must be dispositioned by the operator before reopening — silently
+- `agent/reliability/inbox_test.go:313` // (only an explicit managed reset may). The legacy spill stays byte-identical.
+- `agent/reliability/inbox_test.go:313` // opening on the current format must NOT mutate or delete the leftover legacy item
+- `agent/reliability/inbox_test.go:360` // corrupt/legacy contradiction) must never be deleted on the status string alone —
+- `agent/reliability/inbox_test.go:360` // without touching the state (fail-before: pre- the leaf receipted anything,
+- `agent/reliability/inbox_test.go:360` // ① RecordReceipt refuses a claimed envelope whose completion was never frozen,
+- `agent/reliability/inbox_test.go:392` // never advances the state; only the matching credential converges.
+- `agent/reliability/inbox_test.go:392` // refuses ① an envelope whose two-phase reservation was never established, ② an
+- `agent/reliability/inbox_test.go:509` // Enqueue whose liveness fast-check raced a completed Close must NOT register a
+- `agent/reliability/inbox_test.go:594` // NOT silently consume it as if prepared. Before the version gate this read passed.
+- `agent/reliability/inbox_test.go:594` // incompatible transitional data: readEnvelope must reject it (→ quarantine),
+- `agent/reliability/inbox_test.go:734` // file gone and Pending already dropped without its barrier.
+- `agent/reliability/inbox_test.go:734` // 自删除 receipted 项」: a receipted-but-unacked envelope must survive repeated
+- `agent/reliability/inbox_test.go:760` // never removed (releasing capacity and the lease while the envelope still
+- `agent/reliability/inbox_test.go:854` // corrupt/tampered "state" must never be consumed as if it were pending.
+- `agent/reliability/inbox_test.go:865` // guard above is not over-broad).
+- `agent/reliability/inbox_test.go:895` // guard only rejected wholly-null/empty/unparseable payloads, so these slipped through
+- `agent/reliability/inbox_test.go:952` // is an adjacent big-int event key must be a CONFLICT, not silently accepted as
+- `agent/reliability_matrix_test.go:112` // external input, but must operate on a copy — the caller's Message is never
+- `agent/reliability_matrix_test.go:31` // never as a Metadata control key.
+- `agent/reliability_matrix_test.go:68` // never silently strips the offending field and durably accepts a lossy
+- `agent/reliability_matrix_test.go:90` // every slot at its FIXED index — a claim pass never compacts or renumbers the
+- `agent/restart_matrix_test.go:484` // recovery notice is appended to the actual model request tail (user-role), never
+- `agent/restart_matrix_test.go:533` // consumes the one-shot model notice, RecoveryResult() must still return the
+- `agent/restart_matrix_test.go:559` // a new user-role message; it must NOT modify the system prompt or any existing
+- `agent/restart_matrix_test.go:589` // a reopen from the fact chain never replays the transient runtime notice.
+- `agent/restart_matrix_test.go:589` // only into the runtime model request; it must not enter the projection so that
+- `agent/session_test.go:1046` // never counted or delivered under the other. (The "same-name" case that a shared
+- `agent/session_test.go:1146` // either one channel hanging (its settle was stolen → tail never quiesces) or one
+- `agent/session_test.go:1146` // never cross receivers (design line 169: "并发调用不串接收者"). Crossing shows up as
+- `agent/session_test.go:1146` // that settles late, must each (a) deliver the initial answer and (b) independently
+- `agent/session_test.go:1347` // invBus.TryPull never saw the settle.
+- `agent/session_test.go:1347` // → its bus) plus the delivery-accounting barrier; route's only job is to look up
+- `agent/session_test.go:1391` // barrier only reaches quiescence once every booked spawn's settle was DELIVERED
+- `agent/session_test.go:1461` // closing after only "second").
+- `agent/session_test.go:1461` // reach the SAME call channel, in order, and the channel must only close after
+- `agent/session_test.go:1461` // spawns B → B's late settle drives a FINAL continuation turn. Every answer must
+- `agent/session_test.go:1534` // dense duration, settle wins and detach never fires (timer cancelled).
+- `agent/session_test.go:166` // Bug behavior: only 1 tool call executed; sub-agent returns the tool result
+- `agent/session_test.go:166` // of call 1 and never reaches call 2/3.
+- `agent/session_test.go:1741` // spawned while the orchestration routed b must NOT revive that target once the
+- `agent/session_test.go:1754` // the one the spawn captured. Both generations route b; only the served instance
+- `agent/session_test.go:1783` // underneath it. R03's other half (a stored task must not decide routing) needs both
+- `agent/session_test.go:2214` // the sync-wait window) is registry-only: an inline settle record lands (so the
+- `agent/session_test.go:2243` // signal entry — exactly one notification, never a double settle/spam.
+- `agent/session_test.go:227` // `openspec init` (round 1), then stops — never reaching `openspec new change`.
+- `agent/session_test.go:2334` // ticket (the event body stays BOUNDED, so recalling it can never re-inject
+- `agent/session_test.go:2442` // (resident-continuity-r2-r4 1.5: machine-readable settle association, never
+- `agent/session_test.go:2442` // makes the host hold the reclaim output instead of letting the mechanical
+- `agent/session_test.go:2442` // with no routing metadata (regression guard). settle_status and task_id are
+- `agent/session_test.go:331` // across multiple ReAct iterations — instead of being buried at the end after
+- `agent/session_test.go:448` // observes a coherent snapshot or nothing, never a half-written slice. This is the
+- `agent/session_test.go:448` // regression guard for the removed unlocked `ta.pendingExternalEvents` access.
+- `agent/session_test.go:470` // delegation (empty Content, valid ContentParts) must not be flattened to empty before
+- `agent/session_test.go:470` // the event is built, and must therefore still reach the model rather than be skipped.
+- `agent/session_test.go:501` // neither content nor parts must fail loudly at the boundary, not silently close the
+- `agent/session_test.go:554` // B's OWN task manager — not the parent's. B's private invocation CM must carry
+- `agent/session_test.go:554` // injected the PARENT's spawner onto the context), a task B spawns must land in
+- `agent/session_test.go:554` // no taskController, the parent spawner leaked through, and B's work silently
+- `agent/session_test.go:611` // NEVER be extracted into invocation metadata (and therefore never forwarded as
+- `agent/session_test.go:611` // migration must preserve: the correlation handle is CONTROL metadata — it must
+- `agent/session_test.go:628` // task during that turn, the spawned task's opaque Origin must carry X. This is the
+- `agent/session_test.go:702` // different invocation ids must each attribute their spawned task to their own id —
+- `agent/session_test.go:702` // the value is read from the per-call ctx, never cached on shared manager state.
+- `agent/session_test.go:768` // and only then quiesce and close — delivering both the initial and the continuation
+- `agent/session_test.go:768` // turn spawns a BACKGROUND task must, after its initial answer, keep the SAME returned
+- `agent/session_test.go:837` // a sentinel then running a delegation must leave both shared fields untouched.
+- `agent/session_test.go:837` // sub-call Run derives its session context LOCALLY and must never overwrite the
+- `agent/session_test.go:901` // ONLY that call's loop and channel — it must NOT close the callee, must NOT
+- `agent/session_test.go:901` // after the sink was unregistered must fall back to the bus as a safe drop (no panic).
+- `agent/session_test.go:901` // tail already implements: the caller hanging up (ctx cancel/timeout) must terminate
+- `agent/session_test.go:951` // half of D-c and confirms the tail never outlives the caller's bounded ctx.
+- `agent/session_test.go:999` // (design line 169): concurrent delegations to the SAME callee must never cross
+- `agent/session_test.go:999` // foreign settle, no shared-counter corruption, no premature/never quiesce. Run
+- `agent/session_test.go:999` // under -race this also validates the registry's lock discipline (review W-3's
+- `agent/settle_accounting_barrier_test.go:57` // voidSpawn-on-Settled behavior is correct and must keep holding after any fix.
+- `agent/settle_accounting_barrier_test.go:79` // the shared shell's exit predicate (awaiting==false + drained bus) must hold.
+- `agent/settle_routing_test.go:1050` // receipt 事件提交失败 ⇒ 信封不被确认（绝不无凭据 ack）。prepare 冻结事实+预留 key
+- `agent/settle_routing_test.go:1105` // receipt+ack 后不得有任何一方丢失。
+- `agent/settle_routing_test.go:1105` // 到达时，两者的输入事实都必须落库、两个 envelope 都拿到自有回写证据，
+- `agent/settle_routing_test.go:1220` // the hex migration silently broke event_keys: each stage (timeline
+- `agent/settle_routing_test.go:1268` // auto-injects recent projection events instead of failing loudly. This is
+- `agent/settle_routing_test.go:1268` // model passes NO keys (or every key fails to parse), the wrapper silently
+- `agent/settle_routing_test.go:1268` // must stay documented as a masking layer for contract breaks.
+- `agent/settle_routing_test.go:1291` // migration gap where decimal-only parsing silently dropped every key the
+- `agent/settle_routing_test.go:1291` // strings (the [evt_...] timeline form). Regression guard for the hex-
+- `agent/settle_routing_test.go:150` // delegation quiesces only when every spawned task's settle has been DELIVERED
+- `agent/settle_routing_test.go:169` // and route falls back (returns false) without touching any counter.
+- `agent/settle_routing_test.go:178` // accounting) still delivers (route true) and the counter never dips below zero.
+- `agent/settle_routing_test.go:178` // bound but for which noteSpawn was never called (e.g. a settle arriving before
+- `agent/settle_routing_test.go:212` // clears; an INLINE spawn (res.Settled true) is booked-then-voided so it never leaves
+- `agent/settle_routing_test.go:255` // a task_settled event persisted through persistBusEvent must auto-bind a
+- `agent/settle_routing_test.go:255` // failed→negative; suspect/alive-detached write NOTHING (only deterministic
+- `agent/settle_routing_test.go:255` // verdicts, so guardrail is not polluted by ambiguous settles). Anchor: the
+- `agent/settle_routing_test.go:348` // must inject the current turn's trigger_source into the OriginSpawner so
+- `agent/settle_routing_test.go:369` // (zero-behavior change for turns without a resolved trigger source).
+- `agent/settle_routing_test.go:469` // code review left open: completion durable, receipt never landed. Reconcile
+- `agent/settle_routing_test.go:469` // completion and cleans up — NO model re-run (the input fact count never
+- `agent/settle_routing_test.go:491` // reconcile must CLEAN UP ONLY — no second receipt commit (Major#1's lease
+- `agent/settle_routing_test.go:510` // its bytes kept — never re-stamped, never cleaned up, never input-consumed.
+- `agent/settle_routing_test.go:599` // anything failing NOW is new I/O trouble — retain, report, never dispose).
+- `agent/settle_routing_test.go:638` // on already-committed (never a second receipt event).
+- `agent/settle_routing_test.go:671` // refused BEFORE any commit, so a foreign key can never slip onto the chain
+- `agent/settle_routing_test.go:686` // cannot be verified on the chain, RecordReceipt is never reached — the caller
+- `agent/settle_routing_test.go:686` // holds the claim (§5.7 re-submits the receipt without re-running the model).
+- `agent/settle_routing_test.go:732` // overwrite input evidence, and an input conflict must not produce a receipt.
+- `agent/settle_routing_test.go:732` // the claim (and the authoritative frozen bytes) stay. A receipt error must not
+- `agent/settle_routing_test.go:769` // the good input A must NOT be committed even though A prepared cleanly. Before §4.2
+- `agent/settle_routing_test.go:812` // strict order — the transient backpressure primitive that must NEVER drop or ack an
+- `agent/settle_routing_test.go:83` // would only ever reach the shared bus.
+- `agent/settle_routing_test.go:831` // DIFFERENT content can never succeed on replay (the key never changes), so
+- `agent/settle_routing_test.go:831` // the protocol must ISOLATE the envelope through the same quarantine exit the
+- `agent/settle_routing_test.go:973` // 同输入不重复入库、投影不重复追加（复用冻结键，绝不重盖 time/归因/摘要）。
+- `agent/task/task_board_test.go:70` // input — the byte-changing board must live strictly at the tail so the
+- `agent/task/task_manager_test.go:105` // settle must be accounted for exactly once (inline XOR background), never lost.
+- `agent/task/task_manager_test.go:1114` // pruning must skip Cancel but still reclaim the entry.
+- `agent/task/task_manager_test.go:1114` // t.detector.Cancel() unguarded, panicking every List()/Spawn() (i.e. every
+- `agent/task/task_manager_test.go:1139` // the guard tracks the actual rebuild shape.
+- `agent/task/task_manager_test.go:1328` // subagent resume was dead code since func detectors only emit completed).
+- `agent/task/task_manager_test.go:1470	//` regression: this asserts the reaper works; it must never regress to the
+- `agent/task/task_manager_test.go:1470` // detached-only gate.
+- `agent/task/task_manager_test.go:1470` // detachedAt, so a never-detached suspect lingered forever (production 56bf24c3,
+- `agent/task/task_manager_test.go:1470` // previously invisible to every age wall — reconcileDetached only enqueued
+- `agent/task/task_manager_test.go:1492` // its TTL): a 23h-old one is already reaped by the  floor and never reaches
+- `agent/task/task_manager_test.go:1529` // axes. quiet only feeds the SUSPECT status (settle.go: timed_out → SettleSuspect —
+- `agent/task/task_manager_test.go:1529` // flagged, never killed; see tool/action.TestQuietTimeout_SessionOverridePreventsKill
+- `agent/task/task_manager_test.go:1529` // not read any quiet/silence state, and quiet never extends or short-circuits it.
+- `agent/task/task_manager_test.go:1552` // layer; resume drives it inside Resume. op=peek (read-only) never renews —
+- `agent/task/task_manager_test.go:1605` // backing session is provably gone and whose age exceeds the grace period is
+- `agent/task/task_manager_test.go:1635` // live backing session is never retired by the ZOMBIE/probe path regardless of
+- `agent/task/task_manager_test.go:208` // live task is kept and never cancelled.
+- `agent/task/task_manager_test.go:233` // never pruned by TTL regardless of elapsed time — only cancel/death ends it.
+- `agent/task/task_manager_test.go:355` // gate = zero behavior change). In-flight tasks are never gated.
+- `agent/task/task_manager_test.go:395` // NOT Blocked — "in-flight tasks are never gated" holds), and (b) a NEW key
+- `agent/task/task_manager_test.go:422` // 任务后，watch/settle 信号必须真实到达 TaskManager（「tracked=true」不再
+- `agent/task/task_manager_test.go:471` // reconcile 回收路径的终态信号必须都是 SettleFailed（曾出现 wall 发
+- `agent/task/task_manager_test.go:525` // 信号不得改状态、不得重复结算（含 Watch 通知）。
+- `agent/task/task_manager_test.go:576	//` meditation fix). Lineage must be downgraded to "task-retired".
+- `agent/task/task_manager_test.go:623` // source consumed by the real reaper path, and it must NOT rewrite an existing
+- `agent/task/task_manager_test.go:658` // opinion and the CONSTRUCTION value answers — it can never wipe the live period
+- `agent/task/task_manager_test.go:864` // pruning applies. Repeated List() must not re-notify.
+- `agent/task/task_manager_test.go:918` // tasks) are never reconciled away.
+- `agent/task/task_manager_test.go:983` // are never touched.
+- `agent/task_record_sink_test.go:155` // 的 task_spawned 经 RebuildTaskRegistry 恢复后，恢复闭包工厂覆盖 spec 不得
+- `agent/task_record_sink_test.go:288` // stamp，声明式构造点不携带）——否则恢复后的任务退化为无世系、可被宿主
+- `agent/task_record_sink_test.go:288` // 误投递。已填 Origin 时以声明式为准（不覆盖）。
+- `agent/task_record_sink_test.go:394` // construction (agent.go), so the board callback must nil-check at CALL time,
+- `agent/task_record_sink_test.go:394` // not registration time. With a live task present, the board must inject.
+- `agent/tool_agent_test.go:127` // missing event_keys gracefully without error.
+- `agent/tool_agent_test.go:301` // compact JSON with only event_key, event_type, event_summary — no Content.
+- `agent/tool_agent_test.go:696` // LOCAL failure is this process's own defect, so it must surface on the first
+- `agent/tool_agent_test.go:712` // reserved names are never shadowed.
+- `agent/tool_agent_test.go:767` // ignore stray fields — behavior identical to before (regression guard).
+- `agent/tool_agent_test.go:827` // guidance instead of a second tracked run.
+- `agent/trace_test.go:122` // task Origin 含 trace_id/span_id（RunFlow 从 turn span 经 spanTraceIDs 捕获并盖章到
+- `agent/trace_test.go:122` // 使异步任务关联回触发它的 turn trace（指令2「一套数据模式」延伸到异步链路，零 task 包侵入）。
+- `agent/trace_test.go:140` // task_settled 事件正常构建（trace_id 缺省不报错，向后兼容）。
+- `agent/turn_result_test.go:113` // guard: a durable batch whose turn is cut short by a shutdown cancellation must
+- `agent/turn_result_test.go:57` // outcome is race-free.
+- `agent/turn_result_test.go:57` // while RunFlow itself returns nil (transport OK). The old code never inspected
+- `agent/turn_result_test.go:71` // productive turn still reduces to completed (the reduction must not over-reach
+
+## 探针口径更正（125 轮）——"无痕迹"包含**已改写还原**的项，不能等同于"内容丢失"
+
+85/123 用的探针是**文本 token 匹配**，它看不见同义改写。因此本次列出的"无痕迹 28 条（生产 14／测试 14）"里，有相当一部分其实**已经以中文不变量的形式落地**，例如逐条 grep 证实：
+
+| 被删原句 | 现落在 |
+|---|---|
+| `重启后冥想门控「失忆」…` | `agent/reliability/anchor.go`：**锚点跨重启持久；缺失即视为 0** |
+| `without this, compacted-out keys would linger forever` | `agent/agent.go`／`agent/compress/projection.go`：**唯一读源，不存在第二份可写缓存**／**重建按当前 refs 整表重算** |
+| `委托事件类型注册表（唯一权威源）…` | `agent/compress/token_counter.go`：**角色映射的唯一权威源是 event 包的注册表** |
+| `绝不阻塞主循环、不静默丢弃…` | `agent/output_overflow.go`：**消费者停滞不会阻塞主循环；事件仍被完整持久化** |
+| `本重放路径只做「同点补投影」…` | `agent/replay_restore.go`：**排除判定的唯一来源…只做同点补投影，绝不在活投影上整表 Replace** |
+| `避免 "| shasum" 之类误命中` | **不还原**（与现实现矛盾）⇒ 已立 **D-20** |
+
+⇒ 结论：**"无痕迹"这个数只能当筛查线索，不能当损失计数**。真正仍需处理的是测试文件那 14 条（它们要落进**断言消息**，属第三类批：须证断言计数不变）。这条口径限制也解释了为什么我不该把 1043/38 说成"1043 条已保住"——**保住与否要按语义核，不按 token 核**。

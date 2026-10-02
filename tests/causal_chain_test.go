@@ -7,19 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
-
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
-
-// ============================================================================
-// Mock model for causal-chain tests
-// ============================================================================
 
 // causalMockModel returns a fixed response on each call and records requests.
 type causalMockModel struct {
@@ -53,7 +48,7 @@ func (m *causalMockModel) LastRequest() *model.Request {
 	return m.lastRequest
 }
 
-// sequenceMockModel returns responses in order for multi-turn tests.
+// sequenceModel sequenceMockModel returns responses in order for multi-turn tests.
 type sequenceModel struct {
 	mu        sync.Mutex
 	responses []*model.Response
@@ -84,10 +79,6 @@ func (m *sequenceModel) GenerateContent(ctx context.Context, req *model.Request)
 
 func (m *sequenceModel) Info() model.Info { return model.Info{Name: "sequence-mock"} }
 
-// ============================================================================
-// Mock tool for causal-chain tests
-// ============================================================================
-
 // echoTool is a simple callable tool used to verify tool-call chains.
 type echoTool struct{}
 
@@ -109,12 +100,10 @@ func (echoTool) Call(ctx context.Context, args []byte) (any, error) {
 	return `{"echo":` + string(args) + `}`, nil
 }
 
-// ============================================================================
-// Causal chain tests
-// ============================================================================
-
-// TestCausalChain_EndToEnd verifies that a simple user -> assistant turn
-// produces two persisted FullEvents with a parent/child causal link.
+// TestCausalChain_EndToEnd verifies that a simple user and assistant turn produces two persisted FullEvents.
+// - The two events carry a parent/child causal link.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#overview
 func TestCausalChain_EndToEnd(t *testing.T) {
 	mockModel := newCausalMockModel(&model.Response{
 		ID:   "resp-final",
@@ -190,11 +179,8 @@ loop:
 	assert.NotEqual(t, asstKey, parent, "parent should not be self")
 }
 
-// TestCausalChain_WithToolCall verifies a 4-event tool-call chain:
-//
-//	user -> assistant(tool_calls) -> tool_result -> assistant(final)
-//
-// and checks that each persisted event has the expected causal parent.
+// TestCausalChain_WithToolCall verifies a four-event tool-call chain: user, assistant(tool_calls), tool_result, assistant(final).
+// - Each persisted event carries the expected causal parent.
 func TestCausalChain_WithToolCall(t *testing.T) {
 	mockModel := newSequenceModel([]*model.Response{
 		{
@@ -271,12 +257,10 @@ loop:
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(events), 4, "expected at least 4 FullEvents (user, assistant-tool, tool_result, assistant-final)")
 
-	// Sort events by timestamp to obtain causal order.
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].EventKey < events[j].EventKey
 	})
 
-	// Causal chain: each event's parent should be the previous event.
 	for i := 1; i < len(events); i++ {
 		parent, err := store.GetParent(events[i].EventKey)
 		require.NoError(t, err)

@@ -1,57 +1,30 @@
 package agent
 
-// SelfTelemetryAuditor — the behavior-audit dimension of the attention-budget
-// architecture (change: attention-budget-architecture, spec:
-// self-telemetry-audit). A long-running agent can spin its own telemetry:
-// self-spawned chores settle, each settle triggers a reclaim turn, which
-// spawns more chores — an attention tax with no external cause. The auditor
-// makes that loop observable and self-limiting with a deterministic, zero-LLM
-// ratio over a rolling window and three graded actions.
-//
-// Action ladder (spec: 分级动作):
-//   L1 alert event — emitted once per entry, delivered as an UNCONSUMED
-//      telemetry notice (full, host-visible — the operator must see the
-//      complete reason);
-//   L2 converge — self-managed spawn frequency is reduced (the auditor
-//      exposes the state; the assembly applies policy such as raising the
-//      meditation MinGap);
-//   L3 freeze  — new self-managed spawns are refused through the task
-//      layer's AuditGate (isomorphic to the disk block-spawn gate: in-flight
-//      work continues, adoption is refused). Protected specs pass through:
-//      the durability defense is never withdrawn for attention governance.
-//
-// Thresholds and the window are named compile-time constants, not config
-// (host ruling: zero new knobs; the same discipline as settleInlineCapChars).
-
 import (
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
 const (
-	auditWindow       = 2 * time.Hour    // rolling sample window
-	auditRatio        = 0.40             // self-managed share that triggers escalation
-	auditMinSamples   = 20               // below this the ratio is meaningless
-	auditDwellPerStep = 30 * time.Minute // L1→L2 and L2→L3 dwell before escalation
+	auditWindow       = 2 * time.Hour
+	auditRatio        = 0.40
+	auditMinSamples   = 20
+	auditDwellPerStep = 30 * time.Minute
 )
 
-// auditLineageInternal are the settle lineages that are agent-self-managed
-// (their reclaim output is not a user-originated interaction): the same
-// negative list the delivery gate withholds on.
-var auditLineageInternal = map[string]bool{
-	"meditation":   true,
-	"task-retired": true,
-	"unknown":      true,
-}
-
+// SelfTelemetryAuditor 按滑动窗口样本判定自身遥测的可见性该升到哪一档：窗口时长、
+// 负例占比、最少样本数与每档驻留时间都是命名常量，避免"看一眼就永久外显"或"长期沉默
+// 无人察觉"。它只统计自管谱系（event.SelfManagedLineage：投递门白名单之外 ∧ 冥想）
+// ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，没有私有清单。
 type SelfTelemetryAuditor struct {
 	mu       sync.Mutex
-	samples  []auditSample // (ts, selfManaged) within the rolling window
-	level    int           // 0 normal, 1 alert, 2 converge, 3 freeze
-	levelAt  time.Time     // when the current level was entered
+	samples  []auditSample
+	level    int
+	levelAt  time.Time
 	onAction func(level int, ratio float64, samples int, frozen bool)
 
 	// now is injectable for deterministic tests.
@@ -90,7 +63,7 @@ func (a *SelfTelemetryAuditor) ObserveSettle(metadata map[string]any) {
 	if ts == "" {
 		ts = str("trigger_source")
 	}
-	selfManaged := str("lineage_absent") == "true" || ts == "" || auditLineageInternal[ts]
+	selfManaged := str("lineage_absent") == "true" || tagentevent.SelfManagedLineage(ts)
 	a.observe(selfManaged)
 }
 
@@ -109,7 +82,7 @@ func (a *SelfTelemetryAuditor) ObserveInputFor(source string) {
 	if a == nil {
 		return
 	}
-	a.observe(auditLineageInternal[source])
+	a.observe(tagentevent.SelfManagedLineage(source))
 }
 
 func (a *SelfTelemetryAuditor) observe(selfManaged bool) {
@@ -135,33 +108,29 @@ func (a *SelfTelemetryAuditor) observe(selfManaged bool) {
 	}
 }
 
-const auditFreeze = 3 // top of the action ladder (1=alert, 2=converge, 3=freeze)
+const auditFreeze = 3
 
 // evaluateLocked escalates/de-escalates against the current window ratio.
 // Caller holds a.mu.
 func (a *SelfTelemetryAuditor) evaluateLocked(now time.Time) {
 	ratio, n := a.ratioLocked()
 	if n < auditMinSamples {
-		return // not enough samples to judge: no verdict, no action
+		return
 	}
 	if ratio < auditRatio {
-		// Full release only below the hysteresis line (half the threshold),
-		// so a borderline window cannot oscillate the gate open/closed.
 		if a.level > 0 && ratio < auditRatio/2 {
 			a.level = 0
 			a.levelAt = now
 		}
 		return
 	}
-	// Over threshold: enter L1 immediately; each further ladder step waits
-	// the dwell so a transient spike cannot march to freeze unopposed.
 	if a.level == 0 {
 		a.level = 1
 		a.levelAt = now
 		return
 	}
 	if now.Sub(a.levelAt) < auditDwellPerStep {
-		return // hold at the current level until the dwell passes
+		return
 	}
 	if a.level < auditFreeze {
 		a.level++
@@ -206,8 +175,8 @@ func (a *SelfTelemetryAuditor) Snapshot() (level int, ratio float64, samples int
 }
 
 // DigestLine renders the deterministic self-state digest row (trajectory
-// statistics belong to the reflection layer, not the resident context —
-// attention-budget-architecture L5). Empty when the auditor has no samples.
+// statistics belong to the reflection layer, not the resident context).
+// Empty when the auditor has no samples.
 func (a *SelfTelemetryAuditor) DigestLine() string {
 	level, ratio, samples := a.Snapshot()
 	if samples == 0 {
@@ -233,7 +202,7 @@ func (a *SelfTelemetryAuditor) GateReason(spec task.TaskSpec) string {
 	case level >= auditFreeze && !spec.Protected:
 		return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）持续超阈且频率收敛无效 — 冻结新任务纳管（保护类豁免；在飞任务不受影响）", ratio*100, n)
 	case level == 2 && !spec.Protected:
-		if lineage := spec.Origin["meta_trigger_source"]; lineage == "" || auditLineageInternal[lineage] {
+		if lineage := spec.Origin["meta_trigger_source"]; tagentevent.SelfManagedLineage(lineage) {
 			return fmt.Sprintf("自管遥测占比 %.0f%%（窗口样本 %d）超阈 — 收敛自管任务频率（L2，用户派生与保护任务不受影响）", ratio*100, n)
 		}
 	}

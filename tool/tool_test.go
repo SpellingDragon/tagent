@@ -13,8 +13,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory/kv"
 )
 
-// ==================== Helpers ====================
-
 // newTestMemoryStore creates a MemoryStore pre-populated with test events.
 func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.MemoryStore {
 	t.Helper()
@@ -30,10 +28,9 @@ func newTestMemoryStore(t *testing.T, events map[int64]memory.FullEvent) memory.
 	return store
 }
 
-// ==================== RecallAgent Subtool Tests ====================
-// 测试 RecallAgent 的子工具: memory_query, memory_get, memory_recent
-
-// Test 1: memory_query 基本查询
+// TestRecallQueryTool_BasicQuery 钉住 memory_query 基本查询能按关键词命中已写入的事件。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 func TestRecallQueryTool_BasicQuery(t *testing.T) {
 	partitionID := memory.PartitionIDFromName("test")
 	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
@@ -58,18 +55,15 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 		},
 	})
 
-	// 直接测试 MemoryStore.QueryEvents（子工具底层调用）
 	events, err := store.QueryEvents(memory.QueryOptions{Limit: 10, OrderBy: "timestamp_desc", PartitionIDs: []int{partitionID}})
 	if err != nil {
 		t.Fatalf("QueryEvents failed: %v", err)
 	}
 
-	// 验证: 返回相关事件
 	if len(events) == 0 {
 		t.Error("Expected events, got none")
 	}
 
-	// 验证: 事件应包含文件整理相关内容
 	found := false
 	for _, evt := range events {
 		if strings.Contains(evt.EventSummary, "整理") || strings.Contains(evt.EventSummary, "文件") {
@@ -84,7 +78,7 @@ func TestRecallQueryTool_BasicQuery(t *testing.T) {
 	t.Logf("BasicQuery: found %d events", len(events))
 }
 
-// Test 2: memory_get 获取完整事件
+// TestRecallGetTool_GetEvent 钉住 memory_get 按键取回完整事件，内容与键逐项相符。
 func TestRecallGetTool_GetEvent(t *testing.T) {
 	partitionID := memory.PartitionIDFromName("test")
 	key1 := memory.NewSnowflakeEventKey(partitionID, 0)
@@ -100,13 +94,11 @@ func TestRecallGetTool_GetEvent(t *testing.T) {
 		},
 	})
 
-	// 直接测试 MemoryStore.GetEvent（子工具底层调用）
 	event, err := store.GetEvent(key1)
 	if err != nil {
 		t.Fatalf("GetEvent failed: %v", err)
 	}
 
-	// 验证: 返回完整事件
 	if event.EventKey != key1 {
 		t.Errorf("Expected event key %d, got %d", key1, event.EventKey)
 	}
@@ -117,7 +109,7 @@ func TestRecallGetTool_GetEvent(t *testing.T) {
 	t.Logf("GetEvent: key=%d, content=%s", event.EventKey, event.Content)
 }
 
-// Test: MemoryStore 空查询应返回空列表
+// TestMemoryStore_EmptyQuery 钉住 空存储查询返回空列表且不得报错。
 func TestMemoryStore_EmptyQuery(t *testing.T) {
 	store := memory.NewInMemoryStore()
 
@@ -131,17 +123,15 @@ func TestMemoryStore_EmptyQuery(t *testing.T) {
 	}
 }
 
-// Test: MemoryStore 无事件时 GetEvent 应返回错误
+// TestMemoryStore_NoEventGet 钉住 取不存在的事件必须返回错误，不得返回空值冒充成功。
 func TestMemoryStore_NoEventGet(t *testing.T) {
 	store := memory.NewInMemoryStore()
 
-	_, err := store.GetEvent(0) // 0 is an invalid Snowflake key
+	_, err := store.GetEvent(0)
 	if err == nil {
 		t.Error("Expected error for nonexistent event key, got nil")
 	}
 }
-
-// ==================== Sub-tool Tests ====================
 
 // TestSubTool_SkillSearch tests the skill_search sub-tool.
 func TestSubTool_SkillSearch(t *testing.T) {
@@ -180,7 +170,7 @@ func (m *mockSkillRepo) Get(name string) (*skill.Skill, error) {
 	return nil, fmt.Errorf("skill not found: %s", name)
 }
 
-// searchSkills is a copy of the knowledge package implementation for testing.
+// knowledgeResult searchSkills is a copy of the knowledge package implementation for testing.
 // This is duplicated to avoid import cycles.
 type knowledgeResult struct {
 	Type    string

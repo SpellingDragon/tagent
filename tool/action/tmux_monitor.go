@@ -12,6 +12,8 @@ import (
 )
 
 // TmuxMonitor monitors tmux sessions and detects state changes.
+//
+// 契约: docs/wiki/tool/tmux-action.md#notify-gates
 type TmuxMonitor struct {
 	executor                  sessionInspector
 	interval                  time.Duration
@@ -58,6 +60,9 @@ type TmuxMonitor struct {
 type sessionInspector interface {
 	ProcessExists(sessionID string) bool
 	IsPaneDead(sessionID string) bool
+	// PaneDeadStatus（failure-polarity passthrough D1）：读死 pane 退出码；
+	// known=false 表示状态不可辨（pane 活/会话消失/命令失败），调用方按 unknown 处理。
+	PaneDeadStatus(sessionID string) (code int, known bool)
 	// SessionAlive3（R3）：三态探测——list-sessions 单源；known=false 表示命令
 	// 不可辨（monitor 计数加闸，不立即判死）。
 	SessionAlive3(sessionID string) (alive, known bool)
@@ -72,15 +77,21 @@ var _ sessionInspector = (*TmuxExecutor)(nil)
 
 // MonitorConfig holds configuration for TmuxMonitor
 type MonitorConfig struct {
-	Interval                  time.Duration
-	StableDuration            time.Duration
+	// Interval 基础轮询节奏（自适应调度下的上限见 MaxInterval）。
+	Interval time.Duration
+	// StableDuration 输出稳定判定阈值。
+	StableDuration time.Duration
+	// InteractiveStableDuration TUI 会话的稳定判定阈值。
 	InteractiveStableDuration time.Duration
-	FakeDeadDuration          time.Duration
-	HeartbeatCommand          string
-	HeartbeatTimeout          time.Duration
+	// FakeDeadDuration 假死判定阈值。
+	FakeDeadDuration time.Duration
+	// HeartbeatCommand 探活所用命令。
+	HeartbeatCommand string
+	// HeartbeatTimeout 探活命令的超时。
+	HeartbeatTimeout time.Duration
 
-	// Adaptive poll schedule (optional; unset fields fall back to defaults, with
-	// DenseInterval derived from Interval). See PollSchedule.
+	// DenseInterval 密集轮询相位间隔（0 → 由 Interval 派生）。以下四字段构成
+	// PollSchedule 的 dense→backoff 自适应节奏（见 tm.schedule）。
 	DenseInterval time.Duration
 	DenseDuration time.Duration
 	BackoffFactor float64
@@ -91,7 +102,7 @@ type MonitorConfig struct {
 	ProbeUnknownLimit int
 }
 
-// defaultProbeUnknownLimit is the fail-dead gate threshold (R3): how many
+// defaultProbeUnknownLimit is the fail-dead gate threshold : how many
 // consecutive UNKNOWN probes before a session is treated as dead.
 const defaultProbeUnknownLimit = 3
 
@@ -105,10 +116,6 @@ func (tm *TmuxMonitor) probeUnknownLimit() int {
 // DefaultMonitorConfig returns default monitor configuration
 func DefaultMonitorConfig() MonitorConfig {
 	return MonitorConfig{
-		// Interval is the poll cadence. Kept low so a finished command's
-		// completion is detected within a few seconds — this lets short
-		// commands settle INLINE within the task layer's sync-wait window,
-		// while genuinely long-running work exceeds the window and goes async.
 		Interval:                  3 * time.Second,
 		StableDuration:            60 * time.Second,
 		InteractiveStableDuration: 90 * time.Second,
@@ -132,9 +139,8 @@ func WithMonitorConfig(cfg MonitorConfig) TmuxMonitorOption {
 		tm.heartbeatCommand = cfg.HeartbeatCommand
 		tm.heartbeatTimeout = cfg.HeartbeatTimeout
 		if cfg.Interval > 0 {
-			tm.schedule.DenseInterval = cfg.Interval // dense cadence = configured interval
+			tm.schedule.DenseInterval = cfg.Interval
 		}
-		// Explicit schedule overrides (optional).
 		if cfg.DenseInterval > 0 {
 			tm.schedule.DenseInterval = cfg.DenseInterval
 		}
@@ -169,7 +175,7 @@ func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor {
 	defaultCfg := DefaultMonitorConfig()
 
 	sched := DefaultPollSchedule()
-	sched.DenseInterval = defaultCfg.Interval // preserve the tuned base cadence
+	sched.DenseInterval = defaultCfg.Interval
 
 	tm := &TmuxMonitor{
 		interval:                  defaultCfg.Interval,
@@ -262,6 +268,25 @@ func (tm *TmuxMonitor) AddSessionWithCallback(session *TmuxSession, cb func(sess
 	log.Infof("[TmuxMonitor] added session %s (per-session callback)", session.ID)
 }
 
+// RebindCallback replaces the per-session callback of an ALREADY-MONITORED
+// session (cross-restart resume builds a fresh detector that must take over
+// the state-change supply; the old binding belongs to a detector from a
+// previous generation). Returns false when the session is not monitored —
+// rebinding never (re-)adds a session, that stays AddSessionWithCallback's
+// contract.
+func (tm *TmuxMonitor) RebindCallback(sessionID string, cb func(sessionID string, oldStatus, newStatus SessionStatus, output string)) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if _, ok := tm.sessions[sessionID]; !ok {
+		return false
+	}
+	if tm.sessionCallbacks == nil {
+		tm.sessionCallbacks = make(map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string))
+	}
+	tm.sessionCallbacks[sessionID] = cb
+	return true
+}
+
 // SessionIDs returns a snapshot of the currently monitored session IDs
 // (used by ActionTool.Close to reap live sessions on graceful shutdown).
 func (tm *TmuxMonitor) SessionIDs() []string {
@@ -277,7 +302,7 @@ func (tm *TmuxMonitor) SessionIDs() []string {
 // TouchSession re-enters dense polling for a LIVE session (resume path: a
 // resumed round wants quick settle detection, exactly like a fresh spawn) by
 // resetting the session's age and marking it due. Returns false if the
-// session is no longer monitored (reaped) so the caller can surface the
+// session has already been reaped (not monitored) so the caller can surface the
 // error. The per-session callback is NOT touched — the detector is bound to
 // the session for its whole lifetime (see TmuxSettleDetector.Rearm).
 func (tm *TmuxMonitor) TouchSession(sessionID string) bool {
@@ -287,7 +312,7 @@ func (tm *TmuxMonitor) TouchSession(sessionID string) bool {
 	if !ok {
 		return false
 	}
-	session.CreatedAt = time.Now() // re-enter dense polling for the resumed round
+	session.CreatedAt = time.Now()
 	session.Status = SessionRunning
 	tm.markDueLocked(session)
 	log.Infof("[TmuxMonitor] touched session %s (resume round)", sessionID)
@@ -369,7 +394,7 @@ func (tm *TmuxMonitor) checkAllSessions() {
 	for id, s := range tm.sessions {
 		if adaptive {
 			if np, ok := tm.nextPoll[id]; ok && np.After(now) {
-				continue // not due yet (backoff)
+				continue
 			}
 		}
 		sessions = append(sessions, s)
@@ -386,7 +411,7 @@ func (tm *TmuxMonitor) checkAllSessions() {
 
 // rescheduleSession sets a session's next poll time by its age-derived interval
 // (dense→backoff). A stable (service-ready) session polls at the sparsest
-// cadence (D6). A removed (terminal) session drops its schedule.
+// cadence . A removed (terminal) session drops its schedule.
 func (tm *TmuxMonitor) rescheduleSession(s *TmuxSession, now time.Time) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
@@ -418,9 +443,6 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 		return
 	}
 
-	// detectSessionState updates session.LastOutput with current output on
-	// state transitions (e.g. SessionCompleted). Use the updated value for
-	// the callback so consumers receive the final output.
 	newOutput := session.LastOutput
 	session.Status = newStatus
 
@@ -448,10 +470,6 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	globalCb := tm.StateChangeCallback
 	sessCb := tm.sessionCallbacks[sessionID]
 
-	// Check if we should trigger a callback:
-	// 1. A callback (global or per-session) must be registered
-	// 2. Both old and new states must be meaningful (not FakeDead/FakeAlive)
-	// 3. New state must differ from the last notified state (prevent duplicates)
 	shouldCallback := false
 	if (globalCb != nil || sessCb != nil) &&
 		isMeaningfulState(oldStatus) && isMeaningfulState(newStatus) {
@@ -462,9 +480,6 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 		}
 	}
 
-	// If the session was removed above (terminal state), also drop its
-	// per-session callback and dedup state. sessCb is already captured for the
-	// final callback below, so the terminal transition still notifies.
 	if shouldRemove {
 		delete(tm.sessionCallbacks, sessionID)
 		delete(tm.lastNotifiedStatus, sessionID)
@@ -472,9 +487,6 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 
 	tm.mu.Unlock()
 
-	// Trigger callbacks outside the lock to avoid holding the lock during
-	// potentially slow callback execution. The global and per-session callbacks
-	// (if present) fire under the same meaningful-state + dedup gate.
 	if shouldCallback {
 		if globalCb != nil {
 			globalCb(sessionID, oldStatus, newStatus, newOutput)
@@ -497,7 +509,7 @@ func isMeaningfulState(s SessionStatus) bool {
 	}
 }
 
-// detectSessionState detects the current state of a session.
+// stableWindow detectSessionState detects the current state of a session.
 // All state detection is time-based, using StableSince as the sole indicator.
 // No stableCount — the elapsed duration since output first became unchanged
 // determines whether the session is Stable or fakeDead.
@@ -523,15 +535,25 @@ func (tm *TmuxMonitor) fakeDeadThreshold(session *TmuxSession) time.Duration {
 	return tm.fakeDeadDuration
 }
 
+// deathPolarity decides the settle status for a detected process death
+// (failure-polarity passthrough D1): a KNOWN non-zero exit code (including a
+// negative signal death) is reported as SessionError so the failure reaches the
+// notification; a clean exit (0) or an unresolvable status keeps the current
+// completed polarity. Reading the code is the single source of failure truth —
+// the monitor does not guess success.
+func (tm *TmuxMonitor) deathPolarity(sessionID string) SessionStatus {
+	if code, known := tm.executor.PaneDeadStatus(sessionID); known && code != 0 {
+		return SessionError
+	}
+	return SessionCompleted
+}
+
+// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	if tm.executor == nil {
 		return SessionError
 	}
 
-	// R3（resident-continuity-r2-r4 2.2，fail-dead 加闸）：三态探测先行。
-	// unknown（list-sessions 不可辨）不判死——保留会话并计数，连续 N 次
-	//（ProbeUnknownLimit，默认 3）才按 dead 处理（fail-before：旧路径 err→
-	// assume-dead→Completed→杀会话，tmux 抖动即误杀常驻会话）。
 	alive, known := tm.executor.SessionAlive3(session.ID)
 	if !known {
 		session.ProbeUnknownCount++
@@ -542,7 +564,6 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 		log.Errorf("[TmuxMonitor] probe UNKNOWN %d consecutive times for %s — treating as dead",
 			session.ProbeUnknownCount, session.ID)
-		// 连续超限：按 dead 处理（进入 Completed 路径）
 		processExists, isPaneDead := false, true
 		currentOutput, err := tm.executor.GetSessionOutput(session.ID)
 		if err != nil {
@@ -554,49 +575,33 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 		_ = processExists
 		_ = isPaneDead
-		return SessionCompleted
+		return SessionError
 	}
-	session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
+	session.ProbeUnknownCount = 0
 
-	// Check if session exists
 	processExists := tm.executor.ProcessExists(session.ID)
 	if !alive {
-		processExists = false // list-sessions 已确定性判死：不再被 display-message err 误导
+		processExists = false
 	}
 	isPaneDead := tm.executor.IsPaneDead(session.ID)
 
-	// Get current output
 	currentOutput, err := tm.executor.GetSessionOutput(session.ID)
 	if err != nil {
-		// GetSessionOutput failed — try to capture output anyway
-		// (pane may be dead but output still in buffer)
 		currentOutput = ""
 	}
 
-	// Calculate MD5 of output
 	currentMD5 := fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
 
-	// Track output stability using StableSince as the sole time-based indicator.
-	// StableSince records when output FIRST became unchanged (not when Stable was declared).
-	// This makes the time window accurately reflect "how long since last output change".
 	if processExists && !isPaneDead {
 		if currentMD5 == session.LastOutputMD5 {
-			// Output unchanged: record stable-since time if this is the first unchanged check
 			if session.StableSince.IsZero() {
 				session.StableSince = time.Now()
 			}
 		} else {
-			// Output changed: reset stable timer (new output cycle)
 			session.StableSince = time.Time{}
 		}
 	}
 
-	// Completion: process doesn't exist or pane dead.
-	// Race guard: with remain-on-exit, capture-pane can race the pane
-	// teardown and return empty/partial content. Retry briefly; if the
-	// capture still yields nothing usable, PRESERVE the previous
-	// LastOutput (the last Running-poll snapshot) instead of clobbering
-	// it — consumers must get the true final tail (e.g. END_MARKER).
 	if !processExists || isPaneDead {
 		capture := currentOutput
 		lastErr := err
@@ -610,23 +615,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 				lastErr = retryErr
 			}
 		}
-		// Convergence guard: a capture taken while tmux is still flushing
-		// the pane's final lines into history can be valid-looking yet
-		// TRUNCATED (missing the tail, e.g. END_MARKER). Re-capture once
-		// after a short settle; if it grew, the first was mid-write.
-		// NOTE: on tmux 3.4, capture-pane on a fully-dead pane can return EMPTY
-		// (no history) for a short window after process exit; the retry loop
-		// above (10x250ms) bridges that window. If still empty, keep last
-		// Running-poll snapshot (best effort).
 		if lastErr == nil && strings.TrimSpace(capture) != "" {
-			// Settle window: tmux may still be draining the pty into
-			// history after process exit; an early capture can be
-			// stable-but-STALE (byte-identical truncation observed
-			// across runs). Poll until content is identical twice in a
-			// row or the window expires; the LONGEST capture wins.
-			// Completed-path ONLY: interactive sessions (python REPL /
-			// coding agents) never reach this branch -- their live-poll
-			// reads and fake-dead MD5 detection are untouched.
 			best := capture
 			identical := 0
 			for i := 0; i < 12; i++ {
@@ -653,29 +642,19 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			session.LastOutput = capture
 			session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte(capture)))
 		}
-		return SessionCompleted
+		return tm.deathPolarity(session.ID)
 	}
 
-	// At this point: processExists && !isPaneDead (session is alive)
-	// Check fakeDead and Stable using elapsed time since output first became unchanged
 	if !session.StableSince.IsZero() {
 		stableDuration := time.Since(session.StableSince)
 
-		// (2026-09-11 async-action overhaul, B1) Resident sessions: silence
-		// is HEALTHY. A dev server / tunnel / trainer that prints nothing for
-		// an hour is doing its job — no stable settle, no fake-dead kill, no
-		// auto-reap. Only unexpected death settles (handled by the pane-dead
-		// branch above). Liveness refinement (C2 probe) attaches separately.
 		if session.Mode == ModeResident {
 			session.LastOutput = currentOutput
 			session.LastOutputMD5 = currentMD5
 			return SessionRunning
 		}
 
-		// Fake dead: stable for too long without output change
-		// Use strict greater-than so Stable fires BEFORE fakeDead on the same check
 		if stableDuration > tm.fakeDeadThreshold(session) {
-			// Log diagnostic info for fake_alive/fake_dead detection
 			outputPreview := currentOutput
 			if len(outputPreview) > 200 {
 				outputPreview = outputPreview[:200] + "..."
@@ -683,40 +662,19 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			log.Infof("[TmuxMonitor] session %s entering fake check: stableDuration=%s fakeDeadThreshold=%s command=%q isInteractive=%v isTUI=%v output(len=%d): %q",
 				session.ID, stableDuration, tm.fakeDeadThreshold(session), session.Command, session.IsInteractive, session.IsTUI, len(currentOutput), outputPreview)
 
-			// TUI sessions: skip heartbeat to avoid injecting text via send-keys.
-			// Return TimedOut so the session is removed from monitoring —
-			// the agent has already received the Stable event and can decide
-			// whether to restart or abandon the TUI session.
 			if session.IsTUI {
 				session.LastOutput = currentOutput
 				session.LastOutputMD5 = currentMD5
 				return SessionTimedOut
 			}
 
-			// (2026-09-11 async-action overhaul, A1-fakedead) Non-interactive
-			// sessions: silence is the NORMAL state of long workloads (a 54-min
-			// compile prints nothing for minutes at a time). The old path sent
-			// an `echo tmux_heartbeat` keystroke — which (a) pollutes the
-			// foreground process's stdin and (b) is never executed anyway (the
-			// foreground process is cargo/gcc, not a shell), so it always read
-			// no_response → FakeDead → handleFakeDead killed LEGAL long tasks
-			// at the default 150s. Liveness truth for non-interactive sessions
-			// is the process/pane state, not keystroke echo:
-			//   - pane dead   → real exit → SessionCompleted;
-			//   - alive + caller set an explicit quiet_timeout → honor the hard
-			//     timeout (FakeDead → kill) — the escape hatch, unchanged;
-			//   - alive + default → keep SessionStable, never auto-kill.
-			// (Kept the heartbeat path for interactive shells, where it works:
-			// the shell DOES consume and echo the injected input.)
 			if !session.IsInteractive {
 				if tm.executor.IsPaneDead(session.ID) {
 					session.LastOutput = currentOutput
 					session.LastOutputMD5 = currentMD5
-					return SessionCompleted
+					return tm.deathPolarity(session.ID)
 				}
 				if session.QuietTimeout > 0 {
-					// Caller-declared hard timeout: kill as before (skip the
-					// meaningless heartbeat — same outcome, no stdin pollution).
 					log.Infof("[TmuxMonitor] session %s quiet beyond declared quiet_timeout=%s, engaging fake-dead kill",
 						session.ID, session.QuietTimeout)
 					return SessionFakeDead
@@ -727,7 +685,6 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			}
 
 			heartbeatResult := tm.executor.SendHeartbeat(session.ID)
-			// Re-read output after heartbeat to see if heartbeat response is present
 			afterOutput, _ := tm.executor.GetSessionOutput(session.ID)
 			afterPreview := afterOutput
 			if len(afterPreview) > 200 {
@@ -736,39 +693,18 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 			log.Infof("[TmuxMonitor] session %s heartbeat result=%q (output before len=%d, after len=%d, after preview): %q",
 				session.ID, heartbeatResult, len(currentOutput), len(afterOutput), afterPreview)
 			if heartbeatResult == "ok" {
-				// Process responds to heartbeat, it's fake alive (process is stuck)
 				return SessionFakeAlive
 			}
-			// Heartbeat got no response.
-			// Re-check pane dead status: the pane may have died during our
-			// stable-period accumulation, in which case this is a normal
-			// completion, not a fake dead.
 			if tm.executor.IsPaneDead(session.ID) {
 				session.LastOutput = currentOutput
 				session.LastOutputMD5 = currentMD5
-				return SessionCompleted
+				return tm.deathPolarity(session.ID)
 			}
 			return SessionFakeDead
 		}
 
-		// Stable: output has been unchanged for sufficient time
 		threshold := tm.getStableDuration(session.IsInteractive)
 		if stableDuration >= threshold {
-			// (2026-09-11 async-action overhaul, A1) Stable NO LONGER maps to
-			// Completed for non-interactive sessions. The old branch returned
-			// SessionCompleted while processExists && !isPaneDead — killing
-			// long-silent-but-ALIVE workloads (compiles, downloads, resident
-			// servers) via the terminal-status reap, and starving the task
-			// layer's alive-detached semantics (D4), which never fired for
-			// tmux tasks. Now every alive+quiet session reports SessionStable;
-			// the task layer emits the one-time ∞ alive-detached notice and
-			// keeps tracking. Real completion is detected by the pane-death
-			// branch above (process actually exited → SessionCompleted).
-			// Long-silent-alive sessions later crossing the fake-dead
-			// threshold are handled by the heartbeat branch — which for
-			// non-interactive sessions now checks process liveness via
-			// pane/exit status FIRST instead of injecting keystrokes (a
-			// heartbeat 'echo' into a compiling process's stdin corrupts it).
 			session.LastOutput = currentOutput
 			session.LastOutputMD5 = currentMD5
 			log.Infof("[TmuxMonitor] session %s output stable for %s (process alive) — reporting stable, NOT completed",
@@ -777,24 +713,22 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 		}
 	}
 
-	// Default: still running
 	session.LastOutput = currentOutput
 	session.LastOutputMD5 = currentMD5
 
 	return SessionRunning
 }
 
-// handleFakeAlive handles fake alive state (process stuck but responsive).
-// Attempts to restart the session under its ORIGINAL session ID so the monitor
-// continues tracking it. On success, resets stability metadata; the next
-// detectSessionState will see the fresh session and naturally transition
-// FakeAlive → Running. On failure, leaves Status untouched so the next cycle
-// re-evaluates — the session may complete naturally or reach fakeDead.
+// handleFakeAlive attempts to recover a session judged fake-alive; on failure it
+// leaves Status untouched. The recovery strategy — which identity is preserved, how
+// stability metadata is reset, and where the state machine is expected to move
+// afterwards — is specified in the document below.
+//
+// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
 	log.Infof("[TmuxMonitor] session %s is fake alive (command=%q, isInteractive=%v, isTUI=%v), attempting restart",
 		session.ID, session.Command, session.IsInteractive, session.IsTUI)
 
-	// Try to restart
 	opts := TmuxCreateOptions{
 		Command:       session.Command,
 		WorkDir:       session.WorkDir,
@@ -807,7 +741,6 @@ func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
 		return
 	}
 
-	// Reset stability tracking so the next detectSessionState sees fresh state.
 	session.StableSince = time.Time{}
 	session.LastOutput = ""
 	session.LastOutputMD5 = ""
@@ -823,23 +756,20 @@ func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) bool {
 	log.Infof("[TmuxMonitor] session %s is fake dead, attempting kill (retry=%d)",
 		session.ID, session.KillRetryCount)
 
-	// Attempt to kill the session
 	if err := tm.executor.KillSession(session.ID); err != nil {
 		session.KillRetryCount++
 		log.Errorf("[TmuxMonitor] failed to kill session %s (retry=%d): %v",
 			session.ID, session.KillRetryCount, err)
 
 		if session.KillRetryCount < 3 {
-			// Revert status to Stable so the next detectSessionState cycle
-			// will re-detect FakeDead and trigger another kill attempt.
 			session.Status = SessionStable
-			return false // Keep session in monitoring map
+			return false
 		}
-		// Max retries reached: force remove even if kill failed
 		log.Warnf("[TmuxMonitor] session %s reached max kill retries, force-removing", session.ID)
+		session.Status = SessionError
+		return true
 	}
 
-	// Kill succeeded or max retries reached
 	session.Status = SessionCompleted
 	return true
 }

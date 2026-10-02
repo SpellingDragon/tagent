@@ -21,18 +21,12 @@ type MemoryStoreAccessor interface {
 	GetEvent(key int64) (*memory.FullEvent, error)
 }
 
-// ==================== Common Interfaces ====================
-
-// ==================== Skill Repository Adapter ====================
-
 // SkillRepository provides access to skill summaries and content.
 // This abstracts the skill source from the concrete file system implementation.
 type SkillRepository interface {
 	Summaries() []skill.Summary
 	Get(name string) (*skill.Skill, error)
 }
-
-// ==================== MCP Registry ====================
 
 // MCPRegistry provides read access to the live MCP server registry
 // (implemented by tool/mcp.Registry). Reads reflect the registry's CURRENT

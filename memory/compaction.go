@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -13,29 +14,21 @@ import (
 	"github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== Compactor ====================
-//
-// Compactor manages the data lifecycle through L0→L1→L2→L3 transitions.
-// In the KV store model:
-//   - L0 (hot): Current time window - events being written
-//   - L1 (warm): Sealed hourly segments (past 24 hours)
-//   - L2 (cold): Daily segments (1-7 days)
-//   - L3 (archive): Weekly segments (7+ days) - low-value types have their
-//     Content cleared (schema kept); no gzip / no LLM summarization happens
-//     at this layer (fossil-comment fix, implementation-hardening 7.2)
-//
-// Compaction flow: Merge → Filter → Repair → Compress → Cleanup
-
-// SegmentLayer represents the layer of a segment.
+// SegmentLayer 表示一个段所处的层。
 type SegmentLayer int
 
 const (
-	LayerL0 SegmentLayer = iota // Active (current window)
-	LayerL1                     // Sealed hourly
-	LayerL2                     // Compressed daily
-	LayerL3                     // Archived weekly
+	// LayerL0 是热层：当前时间窗，事件仍在写入。
+	LayerL0 SegmentLayer = iota
+	// LayerL1 L1 是第一层冷化目标。
+	LayerL1
+	// LayerL2 L2 是第二冷化层。
+	LayerL2
+	// LayerL3 L3 是最冷层。
+	LayerL3
 )
 
+// String 返回该层的可读名称。
 func (l SegmentLayer) String() string {
 	switch l {
 	case LayerL0:
@@ -57,9 +50,9 @@ var LowValueEventTypes = event.LowValueTypes()
 
 // CompactionConfig configures the compactor behavior.
 type CompactionConfig struct {
-	L1Threshold   int           // L1 segments before L1→L2 compaction (default: 24)
-	L2Threshold   int           // L2 segments before L2→L3 compaction (default: 7)
-	CheckInterval time.Duration // How often to check for compaction (default: 5min)
+	L1Threshold   int
+	L2Threshold   int
+	CheckInterval time.Duration
 }
 
 // DefaultCompactionConfig returns the default compaction configuration.
@@ -76,12 +69,12 @@ type Compactor struct {
 	store     *FileSegmentStore
 	kv        KVStore
 	rel       RelationStore
-	tombstone *TombstoneSet // For filtering tombstoned events during compaction
+	tombstone *TombstoneSet
 	config    CompactionConfig
 
-	// Live thresholds, seeded from config and retunable via SetThresholds
+	// l1Threshold Live thresholds, seeded from config and retunable via SetThresholds
 	// (atomic so a soak/E2E harness can retune while the scheduler runs —
-	// resident-remaining-hardening 3.1 "至少一次 compaction").
+	// the "至少一次 compaction" harness requirement).
 	l1Threshold atomic.Int64
 	l2Threshold atomic.Int64
 
@@ -116,7 +109,7 @@ func NewCompactor(store *FileSegmentStore, kv KVStore, rel RelationStore, tombst
 }
 
 // SetThresholds retunes the compaction thresholds at runtime (harness hook —
-// resident-remaining-hardening 3.1: a soak subprocess must exercise the real
+// a soak subprocess must exercise the real
 // compaction path without producing 24 sealed hourly segments). Values <= 0
 // are ignored. Atomic against the background scheduler by construction.
 func (c *Compactor) SetThresholds(l1, l2 int) {
@@ -165,7 +158,6 @@ func (c *Compactor) Stop() {
 func (c *Compactor) schedulerLoop() {
 	defer c.wg.Done()
 
-	// Run an initial check immediately
 	c.checkAndCompact()
 
 	ticker := time.NewTicker(c.config.CheckInterval)
@@ -202,7 +194,6 @@ func (c *Compactor) checkHourlySeal() {
 		state.mu.Unlock()
 
 		if lastWindow != 0 && lastWindow < currentHour {
-			// Active segment crossed hour boundary, seal it
 			_ = c.store.SealCurrent(pid)
 		}
 		return true
@@ -222,11 +213,6 @@ func (c *Compactor) checkL1ToL2Compaction() {
 			if err != nil || meta == nil {
 				continue
 			}
-			// Only sealed segments are compaction sources (code-review P2):
-			// an active (unsealed) segment is still taking writes — merging it
-			// and deleting the source would make subsequent writes invisible
-			// until the next seal, and its EventCount=0 meta would corrupt
-			// accounting.
 			if meta.Layer == 1 && meta.Sealed {
 				l1Windows = append(l1Windows, w)
 			}
@@ -282,12 +268,10 @@ func (c *Compactor) getSegmentMeta(pid int, windowTS int64) (*SegmentMeta, error
 	return &meta, nil
 }
 
-// ==================== L1→L2 Compaction ====================
-
-// CompactL1ToL2 compacts L1 hourly segments into a single L2 daily segment for a partition.
+// lockPartition CompactL1ToL2 compacts L1 hourly segments into a single L2 daily segment for a partition.
 // lockPartition takes the owning store's per-partition mutation lock for the
-// compactor's durable publish, serializing it against writer commits, deletes and
-// seals on the same partition (2.2). It returns the unlock closure. When the
+// lockPartition 把压实的持久发布串行化在写入方提交与同分区删除封存之间。
+// seals on the same partition . It returns the unlock closure. When the
 // compactor has no owning store (standalone over a bare KV — e.g. a unit test)
 // there is no shared mutation to coordinate against, so it is a no-op.
 func (c *Compactor) lockPartition(pid int) func() {
@@ -299,21 +283,16 @@ func (c *Compactor) lockPartition(pid int) func() {
 	return func() { st.mutationMu.Unlock() }
 }
 
+// CompactL1ToL2 把给定窗口集合从 L1 压实到 L2；窗口由调用方按老化策略选出。
 func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	if len(windowTSs) == 0 {
 		return nil
 	}
-	// 2.2: the durable publish (merge → rewrite idx → delete source segments) runs
-	// under the partition mutation lock so it can never interleave with a concurrent
-	// writer commit or any other mutation of the same pid — which would delete or
-	// miss a just-written event (torn idx / lost event). The tombstone finalize below
-	// calls the store's engine reverse-callback (removeVector) and is therefore run
-	// OUTSIDE the lock (M-lock-ordering: side callbacks never fire under mutationMu).
 	dead, err := func() ([]int64, error) {
 		defer c.lockPartition(pid)()
 
-		// 1. Merge: read all events from source segments in timestamp order
-		events, err := c.mergeEvents(pid, windowTSs)
+		l2WindowTS := computeDailyWindow(windowTSs[0])
+		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l2WindowTS))
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -321,19 +300,13 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 			return nil, nil
 		}
 
-		// 2. Filter: remove tombstoned events
 		events, dead := c.filterTombstoned(events)
 
-		// 3. Repair: fix dangling parent references
 		events, err = c.repairDanglingRefs(events)
 		if err != nil {
 			return nil, fmt.Errorf("repair failed: %w", err)
 		}
 
-		// 4. Build target L2 meta. MinTime/MaxTime are the segment's TRUTHFUL time
-		// envelope: mergeEvents already sorted ascending by Timestamp, so first/last
-		// suffice — query pruning/early-stop depend on a truthful upper bound.
-		l2WindowTS := computeDailyWindow(windowTSs[0])
 		meta := SegmentMeta{
 			PartitionID: pid,
 			WindowTS:    l2WindowTS,
@@ -344,7 +317,6 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 			Sealed:      true,
 		}
 
-		// 5. Write L2 events, index and meta to KV store
 		batchOps := make([]KVOp, 0, len(events)*2)
 		for seq, evt := range events {
 			evtKVKey := EventKeyStr(pid, l2WindowTS, seq)
@@ -364,7 +336,7 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 		}
 
 		// 6. Cleanup: delete source L1 segments (only after L2 is fully written =
-		// crash-safe). Collision guard (code-review P1): a day-aligned earliest
+		// crash-safe). Collision guard : a day-aligned earliest
 		// source window equals l2WindowTS — deleting it would erase the freshly
 		// compacted segment, so it must be excluded.
 		var cleanupWindows []int64
@@ -381,13 +353,38 @@ func (c *Compactor) CompactL1ToL2(pid int, windowTSs []int64) error {
 	if err != nil {
 		return err
 	}
-	// 7. Finalize tombstones: the dead events are physically gone now — run after
-	// the mutation lock is released (removeVector is a store→engine callback).
 	c.finalizeTombstones(pid, dead)
 	return nil
 }
 
-// mergeEvents reads all events from source segments and returns them sorted by timestamp.
+// mergeSourcesWithTarget returns the read set for a fold: the selected source
+// windows plus the fold's target window when a segment already lives there. A
+// fold republishes (target, seq) keys from seq=0; without the merge-in, a
+// second fold landing on the same aged-out target (same day for L2, same week
+// for L3) would overwrite — silently lose — events an earlier fold published.
+// Windows already selected as sources are never re-added (under the
+// collision-guard shape the target is a read source already).
+// An unreadable target meta is treated as absent, the same convention the
+// layer-scan callers use (a real read failure still surfaces through the merge
+// scan, which is the durable path over the same keys).
+func (c *Compactor) mergeSourcesWithTarget(pid int, windowTSs []int64, targetTS int64) []int64 {
+	for _, w := range windowTSs {
+		if w == targetTS {
+			return windowTSs
+		}
+	}
+	meta, err := c.getSegmentMeta(pid, targetTS)
+	if err != nil || meta == nil {
+		return windowTSs
+	}
+	return append(append([]int64{}, windowTSs...), targetTS)
+}
+
+// mergeEvents reads all events from source segments and returns them sorted by
+// timestamp, deduped by EventKey: a fold interrupted between the target publish
+// and the source delete leaves the same committed events in both the source and
+// the target, so a retry merge overlaps. The fact chain is append-only (same
+// key ⇒ same event), so the first hit wins.
 func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error) {
 	var events []FullEvent
 
@@ -395,13 +392,6 @@ func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error)
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
 		pairs, err := c.kv.KVScan(eventPrefix, 0)
 		if err != nil {
-			// Fail loud (deep-review P1): an incomplete scan cannot prove the
-			// window empty. Skipping here would merge a partial set and then
-			// deleteSegments would destroy the unreadable source (silent,
-			// unrecoverable fact loss — the same discipline
-			// recoverWindowSeqLocked and locateOrphanEvtSlot already enforce).
-			// Aborting lets the scheduler retry this idempotent compaction
-			// after the backend recovers.
 			return nil, fmt.Errorf("merge scan failed pid=%d window=%d: %w", pid, windowTS, err)
 		}
 		for _, pair := range pairs {
@@ -413,12 +403,20 @@ func (c *Compactor) mergeEvents(pid int, windowTSs []int64) ([]FullEvent, error)
 		}
 	}
 
-	// Sort by timestamp
 	sort.Slice(events, func(i, j int) bool {
 		return events[i].Timestamp < events[j].Timestamp
 	})
 
-	return events, nil
+	seen := make(map[int64]bool, len(events))
+	deduped := make([]FullEvent, 0, len(events))
+	for _, evt := range events {
+		if seen[evt.EventKey] {
+			continue
+		}
+		seen[evt.EventKey] = true
+		deduped = append(deduped, evt)
+	}
+	return deduped, nil
 }
 
 // filterTombstoned removes tombstoned events from the list, returning the
@@ -448,14 +446,14 @@ func (c *Compactor) filterTombstoned(events []FullEvent) ([]FullEvent, []int64) 
 // their dangling index keys and their tombstone entries (memory + KV).
 // Crash between segment cleanup and this step is benign — stale tombstones
 // are harmless and this finalization is idempotent.
+// When the idx removal batch fails, the tombstone stays: it is both the retry
+// marker and the resurrection guard (ErrEventForgotten). Dropping it over a
+// failed removal loses the evidence AND the guard; keeping it is safe because
+// finalize is idempotent and the next compaction round retries the same keys.
 func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	if len(dead) == 0 {
 		return
 	}
-	// §2.8: a tombstoned key still under an unacked-recovery lease must NOT have its
-	// original physically destroyed — keep it (and its tombstone) until release. This is
-	// belt-and-suspenders for a key already tombstoned before its lease was registered;
-	// the TTL/evict gates normally stop protected keys from ever reaching `dead`.
 	if c.store != nil {
 		kept := make([]int64, 0, len(dead))
 		for _, key := range dead {
@@ -473,11 +471,12 @@ func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	for _, key := range dead {
 		batchOps = append(batchOps, KVOp{Type: "delete", Key: IndexKeyStr(pid, key)})
 		if c.store != nil {
-			c.store.removeVector(key) // 同步移除向量（内存索引+KV），防死键复活（审查 M2）
+			c.store.removeVector(key)
 		}
 	}
 	if err := c.kv.KVBatch(batchOps); err != nil {
 		log.Errorf("[Compaction] delete dangling idx failed pid=%d: %v", pid, err)
+		return
 	}
 	if c.tombstone != nil {
 		if err := c.tombstone.RemoveTombstones(dead); err != nil {
@@ -489,14 +488,11 @@ func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 // repairDanglingRefs fixes parent references that point to tombstoned events.
 // Walks the causal chain to find the nearest alive ancestor.
 func (c *Compactor) repairDanglingRefs(events []FullEvent) ([]FullEvent, error) {
-	// Build set of alive event keys
 	alive := make(map[int64]bool, len(events))
 	for _, evt := range events {
 		alive[evt.EventKey] = true
 	}
 
-	// Check each event's parent - if parent is not in the alive set,
-	// walk the chain via RelationStore to find the nearest alive ancestor.
 	repaired := make([]FullEvent, len(events))
 	copy(repaired, events)
 
@@ -504,21 +500,18 @@ func (c *Compactor) repairDanglingRefs(events []FullEvent) ([]FullEvent, error) 
 		if evt.EventKey == 0 {
 			continue
 		}
-		// Get parent from RelationStore
 		parentKey, err := c.rel.GetParent(evt.EventKey)
 		if err != nil || parentKey == 0 {
-			continue // No parent or root event
+			continue
 		}
 
 		if alive[parentKey] {
-			continue // Parent is alive, no repair needed
+			continue
 		}
 
-		// Parent is dead (tombstoned), walk the chain to find alive ancestor
 		ancestor := c.findAliveAncestor(parentKey, alive)
 		if ancestor != parentKey {
 			repaired[i] = evt
-			// Update RelationStore
 			if err := c.rel.SetParent(evt.EventKey, ancestor); err != nil {
 				log.Errorf("[Compactor] repair SetParent failed key=%d ancestor=%d: %v", evt.EventKey, ancestor, err)
 			}
@@ -548,39 +541,34 @@ func (c *Compactor) findAliveAncestor(key int64, alive map[int64]bool) int64 {
 }
 
 // deleteSegments deletes all KV keys for the given segments (crash-safe cleanup).
+// A scan failure never silently skips a window: scan errors are collected and
+// surfaced, so the delete act stays honest about what it actually removed.
 func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	var batchOps []KVOp
+	var scanErrs []error
 
 	for _, windowTS := range windowTSs {
-		// Delete event keys
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
 		pairs, err := c.kv.KVScan(eventPrefix, 0)
 		if err != nil {
+			scanErrs = append(scanErrs, fmt.Errorf("delete-segments scan pid=%d window=%d: %w", pid, windowTS, err))
 			continue
 		}
 		for _, pair := range pairs {
 			batchOps = append(batchOps, KVOp{Type: "delete", Key: pair.Key})
 		}
-		// Delete meta keys
 		metaKVKey := MetaKeyStr(pid, windowTS)
 		batchOps = append(batchOps, KVOp{Type: "delete", Key: metaKVKey})
 	}
 
 	if len(batchOps) > 0 {
 		if err := c.kv.KVBatch(batchOps); err != nil {
-			return err
+			return errors.Join(append(scanErrs, err)...)
 		}
 	}
 
-	// NOTE (resident-readiness-plan 2.9): NO live-count decrement here.
-	// Events moved into the target layer are alive (net-zero for the move);
-	// events dropped as tombstoned were already decremented once at
-	// tombstone MARK time (lifecycle M4). Physically removing segments is a
-	// migration + cleanup, never a second logical death.
-	return nil
+	return errors.Join(scanErrs...)
 }
-
-// ==================== L2→L3 Deep Compaction ====================
 
 // CompactL2ToL3 compacts L2 daily segments into a single L3 weekly segment.
 // In addition to L1→L2 steps, it summarizes low-value events.
@@ -588,14 +576,11 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	if len(windowTSs) == 0 {
 		return nil
 	}
-	// 2.2: same partition mutation-lock discipline as CompactL1ToL2 — the durable
-	// publish runs under mutationMu; finalizeTombstones (the removeVector callback)
-	// runs outside it.
 	dead, err := func() ([]int64, error) {
 		defer c.lockPartition(pid)()
 
-		// Same flow as L1→L2
-		events, err := c.mergeEvents(pid, windowTSs)
+		l3WindowTS := computeWeeklyWindow(windowTSs[0])
+		events, err := c.mergeEvents(pid, c.mergeSourcesWithTarget(pid, windowTSs, l3WindowTS))
 		if err != nil {
 			return nil, fmt.Errorf("merge failed: %w", err)
 		}
@@ -609,7 +594,6 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 			return nil, fmt.Errorf("repair failed: %w", err)
 		}
 
-		// Summarize low-value events for L3
 		for i, evt := range events {
 			if LowValueEventTypes[evt.EventType] {
 				events[i].Content = ""
@@ -617,9 +601,6 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 			}
 		}
 
-		l3WindowTS := computeWeeklyWindow(windowTSs[0])
-		// Truthful time envelope (see CompactL1ToL2): events stay sorted ascending
-		// through filter/repair/summarize, so first/last are the real bounds.
 		meta := SegmentMeta{
 			PartitionID: pid,
 			WindowTS:    l3WindowTS,
@@ -665,22 +646,16 @@ func (c *Compactor) CompactL2ToL3(pid int, windowTSs []int64) error {
 	if err != nil {
 		return err
 	}
-	// Finalize tombstones: dead events are physically gone from L3 too; run after
-	// the mutation lock is released (removeVector is a store→engine callback).
 	c.finalizeTombstones(pid, dead)
 	return nil
 }
 
-// ==================== Utility ====================
-
 // computeDailyWindow computes the daily window timestamp from an hourly window.
 func computeDailyWindow(hourlyWindowTS int64) int64 {
-	// Daily window = floor(timestamp / 86400) * 86400
 	return (hourlyWindowTS / 86400) * 86400
 }
 
 // computeWeeklyWindow computes the weekly window timestamp from a daily window.
 func computeWeeklyWindow(dailyWindowTS int64) int64 {
-	// Weekly window = floor(timestamp / 604800) * 604800
 	return (dailyWindowTS / 604800) * 604800
 }

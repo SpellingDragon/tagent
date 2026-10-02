@@ -1,3 +1,9 @@
+// Package action 提供 exec 类动作工具及其 tmux 会话承载：动作的发起与执行、会话存活
+// 判定、完成裁决（settle）、状态跃迁通知、轮询调度、跨重启的常驻恢复，以及供跨重启
+// 重建闭包的 Declarative 投影。长期行为判据不在此复述，见下列契约。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+// 契约: docs/wiki/tool/tmux-action.md#liveness-first
 package action
 
 import (
@@ -34,35 +40,35 @@ var _ tool.CallableTool = (*ActionTool)(nil)
 // Tool name is "action" — it represents performing behavioral actions on
 // real-world resources triggered by natural language descriptions.
 type ActionTool struct {
-	// reattachedDetectors caches detectors built during startup reattach so
+	// reattachMu reattachedDetectors caches detectors built during startup reattach so
 	// the build path can BindDetector them to restored tasks AFTER the
-	// registry rebuild (reattach runs before it — hardening-review-batch2 3.1).
+	// registry rebuild.
 	reattachMu    sync.Mutex
 	reattachedMap map[string]task.SettleDetector
 
 	workspace   string
-	outputDir   string // oversized-output save dir (scratch), separate from command cwd
+	outputDir   string
 	runAsUser   string
 	runAsGroup  string
-	description string        // Configurable tool description
-	defaultTTL  time.Duration // construction default for spawns that omit `ttl` (async-task-lifetime 10.2); the fallback when no ttlSource is installed / it reads zero
-	// ttlSource is the §6.4 live read face for that knob (see SetDefaultTTLSource).
+	description string
+	defaultTTL  time.Duration
+	// ttlSource is the live read face for defaultTTL (see SetDefaultTTLSource).
 	ttlSource     atomic.Pointer[func() time.Duration]
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
-	monitorConfig *MonitorConfig // Optional: override default monitor config
+	monitorConfig *MonitorConfig
 	// orphanCleanupDisabled skips the startup reaping of prefix-matched
 	// leftover sessions (see WithOrphanCleanupDisabled).
 	orphanCleanupDisabled bool
 
-	// residentSink（R3，resident-continuity-r2-r4 2.5）：常驻会话生命周期事件
+	// residentSink：常驻会话生命周期事件
 	//（resident_session）的可选事实链写入槽——build 路径接线到 cm 的记录-only
 	// 持久化；nil=standalone 使用，跳过（best-effort）。
 	residentSink func(sessionID, kind, name, detail string)
 	// residentMetaDirOverride（R3 2.5）：ResidentMeta 目录覆盖（默认 $TMPDIR）。
 	residentMetaDirOverride string
 
-	// peeks tracks incremental peek cursors per session (B3 session ops).
+	// peeks tracks incremental peek cursors per session.
 	peeks peekCursors
 
 	closeOnce sync.Once
@@ -131,7 +137,7 @@ func WithActionMonitorConfig(cfg MonitorConfig) ActionToolOption {
 	}
 }
 
-// WithResidentRecordSink（R3，resident-continuity-r2-r4 2.5）：接线常驻会话
+// WithResidentRecordSink：接线常驻会话
 // 生命周期事件的事实链写入槽（build 路径→cm 记录-only 持久化）。best-effort。
 func WithResidentRecordSink(sink func(sessionID, kind, name, detail string)) ActionToolOption {
 	return func(ct *ActionTool) {
@@ -183,7 +189,6 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		opt(ct)
 	}
 
-	// Set up TmuxExecutor and TmuxMonitor if tmux is available
 	if IsTmuxAvailable() {
 		ct.tmuxExecutor = NewTmuxExecutor(
 			WithTmuxWorkspace(ct.workspace),
@@ -198,20 +203,9 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 			WithMonitorExecutor(ct.tmuxExecutor),
 			WithMonitorConfig(monCfg),
 		)
-		// Reap orphan sessions left by a previous instance (crash or stop
-		// while commands were running): nobody monitors them, they would
-		// never be killed, and each holds a pty. Disable via
-		// WithOrphanCleanupDisabled when running multiple instances that
-		// share a tmux server (use distinct prefixes instead).
 		if !ct.orphanCleanupDisabled {
 			ct.tmuxExecutor.CleanupOrphanSessions()
 		}
-		// D1: resident sessions survive agent restarts (tmux server keeps
-		// them + their pipe-pane loggers). Rebuild tracking from the
-		// persisted metadata so their watch/probe keep working.
-		// R3 2.6（唯一挂载点）：多 agent org 中仅首个实例执行重挂（重复重挂=
-		// 同会话 N 份 detector/probe 回调）。热重建壳（executorOnly）不走此处——
-		// 由 build 路径显式重入 ReattachResidentSessions（幂等）。
 		if residentReattachOnce.CompareAndSwap(false, true) {
 			ct.ReattachResidentSessions()
 		} else {
@@ -227,8 +221,8 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 // is bounded; there is no "unlimited" default).
 const defaultTaskTTL = 10 * time.Minute
 
-// SetDefaultTTLSource installs the §6.4 pull source for the spawn-time default
-// lifetime (introduce-durable-workflow-engine 6.4, spawner axis): the
+// SetDefaultTTLSource installs the  pull source for the spawn-time default
+// lifetime (spawner axis): the
 // composition root binds it to the owner's committed application record, so a
 // numeric-only rotation reaches every subsequent spawn without anyone pushing a
 // number into this tool. It replaces SetDefaultTaskTTL, which kept a second,
@@ -308,11 +302,11 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 				},
 				"quiet_timeout": {
 					Type:        "integer",
-					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds. NOTE: this only detects SILENCE and never bounds total lifetime — that is `ttl`'s job. A legitimate build slower than your `ttl` (default 10m) is still reaped, so for long-running work raise `ttl` alongside `quiet_timeout`.",
+					Description: "Per-session fake-dead threshold override in seconds. Silent-but-legal tasks (long downloads, compiles, model inference) produce no output while working; the default 150s kills them. 0 or omitted = default (150s). Must be >= the stability window (60s; TUI 90s) - shorter values are rejected. Recommended 600+ for installs and builds. NOTE: this only detects SILENCE and never bounds total lifetime — that is `ttl`'s job. A legitimate build slower than your `ttl` (default 10m) is still reaped, so for long-running work raise `ttl` alongside `quiet_timeout`. NOTE: the framework captures the process exit code (including signal deaths) and reports failure polarity on settle — let your command fail directly; do NOT mask it with `; echo \"EXIT=$?\"` (that swallows the code).",
 				},
 				"ttl": {
 					Type:        "integer",
-					Description: "ABSOLUTE lifetime of this session in seconds. The reaper terminates the backing process and retires the task this long after its last reentrant refresh (op=send / resume reset it; op=peek does not). 0 or omitted = configured default (10 minutes if unset). There is NO way to disable the reaper and NO age exemption by mode: 'resident'/'interactive' services are NOT immortal — pass a large ttl for long-lived services, or re-enter to extend. Orthogonal to quiet_timeout (which only detects silence, never bounds total lifetime).",
+					Description: "ABSOLUTE lifetime of this session in seconds. The reaper terminates the backing process and retires the task this long after its last reentrant refresh (op=send / resume reset it; op=peek does not). 0 or omitted = configured default (10 minutes if unset). There is NO way to disable the reaper and NO age exemption by mode: 'resident'/'interactive' services are NOT immortal — pass a large ttl for long-lived services, or re-enter to extend. Orthogonal to quiet_timeout (which only detects silence, never bounds total lifetime). NOTE: the framework captures the process exit code (including signal deaths) and reports failure polarity on settle — let your command fail directly; do NOT mask it with `; echo \"EXIT=$?\"` (that swallows the code).",
 				},
 				"mode": {
 					Type:        "string",
@@ -379,10 +373,6 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: tmux not available (install: brew install tmux)")
 	}
 
-	// Session-operations dispatch (2026-09-11 B3): when "op" is present the
-	// call addresses an EXISTING session (peek/send/stop) instead of spawning
-	// a new one. Command semantics (spawn) remain the default path. Dispatch
-	// precedes the command-required check: op calls carry no command.
 	if args.Op != "" {
 		return ct.callSessionOp(ctx, &args)
 	}
@@ -391,9 +381,6 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: command is required")
 	}
 
-	// quiet_timeout validation: must be either 0 (default) or >= the stability
-	// window, otherwise a session would be killed as fake-dead before it ever
-	// gets a chance to fire its Stable event.
 	if args.QuietTimeout < 0 {
 		return nil, fmt.Errorf("action: quiet_timeout must be >= 0, got %d", args.QuietTimeout)
 	}
@@ -403,15 +390,10 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 	}
 
-	// ttl validation (async-task-lifetime 10.2): a finite absolute lifetime is
-	// ALWAYS in force — 0/omitted falls back to the configured default, so the only
-	// invalid input is a negative value. There is intentionally no sentinel meaning
-	// "disabled"/"unlimited".
 	if args.TTL < 0 {
 		return nil, fmt.Errorf("action: ttl must be >= 0 (0 = configured default; there is no 'unlimited'), got %d", args.TTL)
 	}
 
-	// mode validation + normalization (B1). Empty = oneshot.
 	switch args.Mode {
 	case "", string(ModeOneshot):
 		args.Mode = string(ModeOneshot)
@@ -423,38 +405,25 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, fmt.Errorf("action: unknown mode %q (want oneshot | resident | interactive)", args.Mode)
 	}
 
-	// name validation (B2): DNS-label-safe, bounded, so the derived tmux
-	// session name is always a valid tmux target.
 	if err := validSessionName(args.Name); err != nil {
 		return nil, err
 	}
 
 	log.Infof("[ActionTool] executing cmd=%q", args.Command)
 
+	smuggleHint := smuggleHintFor(args.Command)
+
 	sessionID, detector, err := ct.startSession(ctx, args)
 	if err != nil {
-		// tmux-LEVEL exception: the session itself could not be created (e.g. no
-		// PTY in this runtime — "fork failed: Device not configured"), as opposed
-		// to a tmux-TASK error (a command that runs but exits non-zero, which is
-		// captured via the settle signal as a normal tool result). A tmux-level
-		// failure is a FRAMEWORK/environment exception — log it in full so it is
-		// diagnosable in the bot log, not silently returned as a plain tool error.
 		log.Errorf("[ActionTool] tmux-level exception (framework/environment), cmd=%q: %v", args.Command, err)
 		return nil, err
 	}
 
-	// Async path: hand the detector to the injected task spawner, which applies
-	// the sync-wait window — inline settle if it stabilizes within the window,
-	// otherwise an ack while it is tracked in the background. Absent a spawner
-	// (standalone use / no task layer) fall back to a synchronous wait that
-	// preserves the original blocking semantics.
 	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok {
 		res := spawner.Spawn(task.TaskSpec{
-			Kind: "command",
-			Desc: args.Command,
-			Key:  args.Command,
-			// R2（resident-continuity-r2-r4 1.2）：声明式投影随 spec 携带——OnSpawn
-			// 写入 task_spawned 事实链记录，重启后 RebuildTaskRegistry 回放重建。
+			Kind:        "command",
+			Desc:        args.Command,
+			Key:         args.Command,
 			Declarative: DeclarativeFromArgs(args, sessionID),
 			Relaunch:    ct.relaunchClosure(spawner, args),
 			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
@@ -462,24 +431,26 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 			TTL:         ct.resolveTTL(args),
 		}, detector)
 		if res.Blocked != "" {
-			// 5.4（design-report-closeout）：disk degraded 禁新 spawn——拒绝以 result
-			// 渗透（可读原因，模型可稍后重试或改同步小命令）。
 			return ct.buildBlockedResult(res.Blocked), nil
 		}
 		if res.Settled {
-			return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal), nil
+			r := ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal)
+			r.Note += smuggleHint
+			return r, nil
 		}
-		return ct.buildAckResult(sessionID, args.Command, res.Task), nil
+		r := ct.buildAckResult(sessionID, args.Command, res.Task)
+		r.Note += smuggleHint
+		return r, nil
 	}
 
-	// Synchronous fallback: block until the first settle or ctx cancellation.
-	// On cancellation the session keeps running under monitor control.
 	select {
 	case sig, ok := <-detector.Settled():
 		if !ok {
 			return nil, fmt.Errorf("action: session %s ended without settling", sessionID)
 		}
-		return ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, sig), nil
+		r := ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, sig)
+		r.Note += smuggleHint
+		return r, nil
 	case <-ctx.Done():
 		log.Warnf("[ActionTool] ctx cancelled while waiting for session %s: %v", sessionID, ctx.Err())
 		return nil, ctx.Err()
@@ -490,6 +461,8 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // detector (whose Cancel kills the session), registers it with the monitor via
 // a per-session callback, and ensures the monitor is running. Shared by Call
 // and the relaunch closure.
+//
+// 契约: docs/wiki/tool/tmux-action.md#error-visibility
 func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string, *TmuxSettleDetector, error) {
 	if (args.Mode == string(ModeResident) || args.Mode == string(ModeInteractive)) && !ct.CanSpawnResident() {
 		return "", nil, fmt.Errorf("action: resident session cap (%d) reached; stop an existing resident (op=stop) before spawning another", maxResidentSessions)
@@ -502,8 +475,6 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 		Name:    args.Name,
 	})
 	if err != nil {
-		// Do not re-wrap the "failed to create tmux session" prefix (CreateSession
-		// already carries it plus the captured stderr); just scope it to action.
 		return "", nil, fmt.Errorf("action: %w", err)
 	}
 	sessionID := session.ID
@@ -513,9 +484,8 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 		}
 		ct.tmuxMonitor.RemoveSession(sessionID)
 		ct.removeResidentMeta(sessionID)
-	}) // QuietTimeout >0 only: zero value must stay zero so the monitor falls
-	// back to its global default. relaunch reuses args, so the override
-	// semantics carry over to relaunched sessions automatically.
+	})
+	detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
 	if args.Watch != "" {
 		if err := detector.SetWatch(args.Watch, 5*time.Second); err != nil {
 			return "", nil, err
@@ -540,7 +510,7 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 		Mode:         SessionMode(args.Mode),
 		QuietTimeout: quietTimeout,
 	}, func(_ string, _, newStatus SessionStatus, output string) {
-		detector.OnWatchOutput(output) // C1: pattern watch on every refresh
+		detector.OnWatchOutput(output)
 		detector.OnStateChange(newStatus, output)
 	})
 	if !ct.tmuxMonitor.IsRunning() {
@@ -554,7 +524,7 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 // original turn ctx may be gone) and re-spawns via the same task spawner; the
 // re-spawned task is itself relaunchable.
 //
-// The initiating context (§4.2) is accepted and ignored: a command re-run targets
+// The initiating context is accepted and ignored: a command re-run targets
 // a tmux session, not an orchestration generation, so there is no version to
 // resolve against.
 func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func(context.Context) (task.SpawnResult, error) {
@@ -564,10 +534,9 @@ func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs)
 			return task.SpawnResult{}, err
 		}
 		return spawner.Spawn(task.TaskSpec{
-			Kind: "command",
-			Desc: args.Command,
-			Key:  args.Command,
-			// R2：relaunch 也携带声明式投影（重启后的 relaunch 产物同样可回放）。
+			Kind:        "command",
+			Desc:        args.Command,
+			Key:         args.Command,
 			Declarative: DeclarativeFromArgs(args, sessionID),
 			Relaunch:    ct.relaunchClosure(spawner, args),
 			ResumeFn:    ct.resumeClosure(sessionID, args.IsTUI, detector),
@@ -594,20 +563,15 @@ func (ct *ActionTool) sessionAliveClosure(sessionID string) func() bool {
 // and no stale-signal risk. TUI sessions refuse resume (send-keys would
 // corrupt the screen). Returned to the task layer as TaskSpec.ResumeFn.
 //
-// The initiating context (§4.2) is accepted and ignored — see relaunchClosure.
+// The initiating context is accepted and ignored — see relaunchClosure.
 func (ct *ActionTool) resumeClosure(sessionID string, isTUI bool, detector *TmuxSettleDetector) func(context.Context, string) (task.SettleDetector, error) {
 	return func(_ context.Context, input string) (task.SettleDetector, error) {
 		if isTUI {
 			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
 		}
-		// Re-enter dense polling for the resumed round; also verifies the
-		// session is still monitored (a dead session was reaped → relaunch).
 		if !ct.tmuxMonitor.TouchSession(sessionID) {
 			return nil, fmt.Errorf("session %s is no longer monitored — use relaunch_task instead", sessionID)
 		}
-		// Baseline before send: this round's settle output = capture minus
-		// the baseline line count (a shifted scrollback degrades to the full
-		// capture rather than losing output — see trimToLineOffset).
 		baseline := 0
 		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
 			baseline = strings.Count(out, "\n")
@@ -654,7 +618,7 @@ func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task)
 	}
 }
 
-// buildBlockedResult (5.4, design-report-closeout; §8.1 wording fix) renders a
+// buildBlockedResult renders a
 // spawn rejection (disk degraded) as a readable tool result — failure permeates
 // as result, never as error. NOTE: the command session was ALREADY started by
 // startSession before Spawn — the honest wording says "executed but unmanaged"
@@ -715,7 +679,6 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 			} else {
 				log.Infof("[ActionTool] full output saved to %s (%d chars)", path, len(output))
 				outputFile = path
-				// Truncate to last 2000 chars for the LLM view.
 				output = "..." + output[len(output)-2000:]
 			}
 		}
@@ -728,10 +691,9 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 		Output:     output,
 		OutputFile: outputFile,
 		Note:       extraNote,
+		ExitCode:   sig.ExitCode,
 	}
 }
-
-// ==================== Data Structures ====================
 
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
@@ -739,7 +701,7 @@ type ActionArgs struct {
 	Timeout int               `json:"timeout,omitempty"`
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
-	IsTUI   bool              `json:"is_tui,omitempty"` // Hint that this is a TUI application (different monitor strategy)
+	IsTUI   bool              `json:"is_tui,omitempty"`
 	// QuietTimeout overrides the fake-dead detection threshold for this session
 	// (seconds). Silent-but-legal tasks (long downloads, compiles, inference
 	// waits) produce no output while working; the default 150s threshold kills
@@ -753,27 +715,27 @@ type ActionArgs struct {
 	// pass a large ttl or re-enter to stay alive. Orthogonal to QuietTimeout, which
 	// only detects silence and never bounds total lifetime (async-task-lifetime).
 	TTL int `json:"ttl,omitempty"`
-	// Mode selects session liveness semantics (2026-09-11 B1):
-	//   "oneshot" (default) — command; settles on real exit; 60s quiet reports
-	//   stable (never kills).
-	//   "resident" — long-lived service (dev server / tunnel / trainer);
-	//   silence is healthy, no auto-kill, only unexpected death settles.
-	//   "interactive" — long conversational session (REPL); stable settle +
-	//   resume supported.
+	// Mode selects session liveness semantics:
+	// "oneshot" (default) — command; settles on real exit; 60s quiet reports
+	// stable (never kills).
+	// "resident" — long-lived service (dev server / tunnel / trainer);
+	// silence is healthy, no auto-kill, only unexpected death settles.
+	// "interactive" — long conversational session (REPL); stable settle +
+	// resume supported.
 	Mode string `json:"mode,omitempty"`
-	// Name (2026-09-11 B2): deterministic logical name for the session
+	// Name: deterministic logical name for the session
 	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
 	// later calls (restart/exists checks); duplicate spawn under the same
-	// name is refused. Empty = auto-generated unique name (legacy).
+	// name is refused. Empty = an auto-generated unique name.
 	Name string `json:"name,omitempty"`
-	// Session-operations (2026-09-11 B3). When Op != "" the call addresses an
+	// Op Session-operations. When Op != "" the call addresses an
 	// existing session instead of spawning a new one:
-	//   Op="peek" — read incremental output since the last peek cursor
-	//   (tail=N caps lines; ansi=true keeps escape sequences).
-	//   Op="send" — inject Keys into the session (append Enter unless
-	//   enter=false); the session must be non-TUI.
-	//   Op="stop" — graceful stop: SIGTERM the pane process (fallback
-	//   kill-session), grace seconds then SIGKILL.
+	// Op="peek" — read incremental output since the last peek cursor
+	// (tail=N caps lines; ansi=true keeps escape sequences).
+	// Op="send" — inject Keys into the session (append Enter unless
+	// enter=false); the session must be non-TUI.
+	// Op="stop" — graceful stop: SIGTERM the pane process (fallback
+	// kill-session), grace seconds then SIGKILL.
 	// Target: session_id (exact) or name (logical name → n-<name>).
 	Op        string `json:"op,omitempty"`
 	Keys      string `json:"keys,omitempty"`
@@ -782,12 +744,12 @@ type ActionArgs struct {
 	Ansi      bool   `json:"ansi,omitempty"`
 	GraceSec  int    `json:"grace,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
-	// Watch (2026-09-11 C1): pattern-triggered wakeups. While the session
+	// Watch: pattern-triggered wakeups. While the session
 	// runs, output matching this regex wakes the agent (merged within a
 	// 5s window; cumulative hit count reported). Primary use: resident
 	// sessions (watch "ERROR|panic|OOM" on a dev server / trainer log).
 	Watch string `json:"watch,omitempty"`
-	// Probe (2026-09-11 C2): liveness check for resident sessions. A shell
+	// Probe: liveness check for resident sessions. A shell
 	// command run every ProbeIntervalSec (default 30); after ProbeFailures
 	// (default 3) consecutive failures the agent is woken once. Example:
 	// "curl -sf http://localhost:8080/healthz".
@@ -796,8 +758,8 @@ type ActionArgs struct {
 	ProbeFailures    int    `json:"probe_failures,omitempty"`
 }
 
-// validSessionName validates a caller-supplied logical session name (B2).
-// Empty is legal (legacy auto-naming). Returns nil when valid.
+// validSessionName validates a caller-supplied logical session name.
+// Empty is legal (auto-naming). Returns nil when valid.
 func validSessionName(name string) error {
 	if name == "" {
 		return nil
@@ -824,10 +786,14 @@ type ActionToolResult struct {
 	Output     string `json:"output,omitempty"`
 	OutputFile string `json:"output_file,omitempty"`
 	Note       string `json:"note,omitempty"`
+	// ExitCode carries the process exit status on failure polarity
+	// (failure-polarity passthrough D2): non-zero, or negative for a signal death.
+	// Omitted when zero (clean exit / not applicable) to avoid noise.
+	ExitCode int `json:"exit_code,omitempty"`
 }
 
 // IsTmuxAvailable reports whether tmux is actually usable on this system —
-// a real PATH probe (implementation-hardening 4.3). The old implementation
+// a real PATH probe. The old implementation
 // returned NewTmuxExecutor() != nil, which was always true (the constructor
 // never returns nil), making the availability gate at the construction site
 // inert: no-tmux environments sailed through to first-execution failures.
@@ -844,7 +810,6 @@ func IsTmuxAvailable() bool {
 func cleanTmuxOutput(output string) string {
 	lines := strings.Split(output, "\n")
 
-	// Strip trailing blank lines
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
@@ -855,7 +820,7 @@ func cleanTmuxOutput(output string) string {
 	for _, line := range lines {
 		isBlank := strings.TrimSpace(line) == ""
 		if isBlank && prevBlank {
-			continue // skip consecutive blank lines beyond the first
+			continue
 		}
 		result = append(result, line)
 		prevBlank = isBlank
@@ -863,8 +828,6 @@ func cleanTmuxOutput(output string) string {
 
 	return strings.Join(result, "\n")
 }
-
-// ---- Session operations (2026-09-11 B3): peek / send / stop ----
 
 // ansiEscape matches ANSI/VT escape sequences (CSI, OSC, simple two-byte).
 var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
@@ -874,7 +837,7 @@ func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
 }
 
-// peekCursor tracks the byte offset each session's incremental peek has
+// peekCursors holds the byte offsets each session's incremental peek has
 // consumed from its pipe log. Guarded by peekMu.
 type peekCursors struct {
 	mu      sync.Mutex
@@ -914,10 +877,10 @@ func (ct *ActionTool) resolveTarget(args *ActionArgs) (string, error) {
 	return "", fmt.Errorf("action: op=%s requires session_id or name", args.Op)
 }
 
-// pipeRotateBytes is the pipe-log rotation threshold (2026-09-11 D3). Var,
+// pipeRotateBytes is the pipe-log rotation threshold. Var,
 // not const, so tests can shrink it. Long-resident sessions pipe megabytes
 // of log; without rotation both peek reads and inode size grow unbounded.
-var pipeRotateBytes int64 = 10 << 20 // 10MB
+var pipeRotateBytes int64 = 10 << 20
 
 // maybeRotatePipe opportunistically rotates an overgrown pipe log on peek.
 // COPYTRUNCATE semantics: copy current content to pf+".1", then truncate the
@@ -940,7 +903,7 @@ func rotatePipeFile(pf string) {
 		return
 	}
 	if err := os.WriteFile(pf+".1", b, 0o600); err != nil {
-		return // keep the live file; retry on next peek
+		return
 	}
 	_ = os.Truncate(pf, 0)
 	log.Infof("[ActionTool] rotated pipe log %s (%d bytes → .1)", pf, len(b))
@@ -958,9 +921,6 @@ func (ct *ActionTool) callSessionOp(ctx context.Context, args *ActionArgs) (any,
 	case "send":
 		res, err := ct.opSend(args, target)
 		if err == nil {
-			// §10.4: a write-type reentry extends the task's absolute TTL — reset the
-			// reaper anchor to now so the task is measured from this send. op=peek
-			// (read-only) deliberately never calls this, and op=stop is terminal.
 			if tc, ok := task.TaskControllerFromContext(ctx); ok {
 				tc.RenewTTLBySession(target)
 			}
@@ -982,7 +942,6 @@ func (ct *ActionTool) opPeek(args *ActionArgs, target string) (any, error) {
 	b, err := os.ReadFile(pf)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No pipe log: session predates pipe attach or died cleaned-up.
 			return map[string]any{
 				"session_id": target, "status": "no_output_log",
 				"note": "pipe log missing — session may have exited and been archived; use a fresh spawn or check archived pipes",
@@ -993,15 +952,11 @@ func (ct *ActionTool) opPeek(args *ActionArgs, target string) (any, error) {
 
 	from := ct.peeks.get(target)
 	if int64(len(b)) < from {
-		// Log was truncated/rotated underneath us — reset to whole file.
 		from = 0
 	}
 	fresh := b[from:]
 	ct.peeks.set(target, int64(len(b)))
 
-	// Trim ONE trailing newline so split doesn't produce a phantom empty
-	// last element (which would eat into the tail=N budget and surface as
-	// a stray blank line in the output).
 	text := string(fresh)
 	text = strings.TrimSuffix(text, "\n")
 	var lines []string
@@ -1067,7 +1022,6 @@ func (ct *ActionTool) opStop(args *ActionArgs, target string) (any, error) {
 	if args.GraceSec > 0 {
 		grace = args.GraceSec
 	}
-	// Graceful phase: SIGTERM the pane process (if resolvable).
 	if pid, err := ct.tmuxExecutor.GetSessionPIDPublic(target); err == nil && pid > 0 {
 		if p, findErr := os.FindProcess(pid); findErr == nil {
 			_ = p.Signal(syscall.SIGTERM)
@@ -1080,7 +1034,6 @@ func (ct *ActionTool) opStop(args *ActionArgs, target string) (any, error) {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	// Hard phase: kill the whole session.
 	if err := ct.tmuxExecutor.KillSession(target); err != nil {
 		return nil, fmt.Errorf("action: stop %s: %w", target, err)
 	}
@@ -1088,7 +1041,7 @@ func (ct *ActionTool) opStop(args *ActionArgs, target string) (any, error) {
 }
 
 // startProbeLoop launches the background liveness prober for a resident
-// session (2026-09-11 C2). Runs args.Probe via sh every interval; after
+// session. Runs args.Probe via sh every interval; after
 // `failures` consecutive failures it wakes the agent once via the detector
 // (EmitProbeResult latches until a success resets). The loop exits when the
 // session's detector is cancelled/reaped — the reaper closure stops it.

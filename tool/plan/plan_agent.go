@@ -25,13 +25,8 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
-// ---------------------------------------------------------------------------
-// PlanAgent — dual-mode agent wrapper
-// ---------------------------------------------------------------------------
-
-// PlanAgent wraps a TagentAgent with a custom Run method.
-// For action=="progress", it bypasses the LLM and directly reads
-// openspec/changes/ to return a progress summary.
+// PlanAgent 在 TagentAgent 之上加一个自定义 Run：action 为 progress 时绕开模型，直接扫描
+// 变更目录（由 openSpecDir 拼出）得出进度摘要。
 // For all other actions, it delegates to the standard TagentAgent.Run.
 type PlanAgent struct {
 	*tagentagent.TagentAgent
@@ -60,7 +55,6 @@ func (pa *PlanAgent) Run(ctx context.Context, inv *trpcagent.Invocation) (<-chan
 		return pa.runProgressQuery(ctx, inv)
 	}
 
-	// Standard ReAct path
 	return pa.TagentAgent.Run(ctx, inv)
 }
 
@@ -82,7 +76,6 @@ func extractAction(inv *trpcagent.Invocation) string {
 		}
 	}
 
-	// Fallback: check if content starts with a known action keyword
 	lower := strings.ToLower(strings.TrimSpace(content))
 	for _, a := range []string{"progress", "create", "update", "archive"} {
 		if strings.HasPrefix(lower, a) {
@@ -111,8 +104,6 @@ func extractName(inv *trpcagent.Invocation) string {
 		}
 		return ""
 	}
-	// Plain-text fallback: name=<token>, terminated by whitespace or common
-	// punctuation ("progress name=my-plan: 查看进度").
 	lower := strings.ToLower(content)
 	idx := strings.Index(lower, "name=")
 	if idx < 0 {
@@ -125,13 +116,8 @@ func extractName(inv *trpcagent.Invocation) string {
 	return strings.TrimSpace(rest)
 }
 
-// ---------------------------------------------------------------------------
-// Progress query — direct file I/O, no LLM
-// ---------------------------------------------------------------------------
-
-// runProgressQuery reads openspec/changes/ for the target change,
-// parses tasks.md checkboxes, and returns a progress summary event.
-// This does NOT create EventBus, does NOT start runEventLoop, does NOT call LLM.
+// runProgressQuery 读取目标变更目录下的任务清单勾选项，返回进度摘要事件。
+// 它不建事件总线、不启事件循环、也不调用模型——纯读本地状态。
 func (pa *PlanAgent) runProgressQuery(ctx context.Context, inv *trpcagent.Invocation) (<-chan *event.Event, error) {
 	summary := pa.buildProgressSummary(extractName(inv))
 
@@ -142,7 +128,7 @@ func (pa *PlanAgent) runProgressQuery(ctx context.Context, inv *trpcagent.Invoca
 }
 
 // buildProgressSummary returns a progress summary for the named change.
-// Location rule (multi-plan parallel, plan-interaction-contract): a non-empty
+// Location rule (multi-plan parallel): a non-empty
 // name targets that change directly; without a name, exactly one active
 // change is taken; otherwise the active list (with per-plan completion) is
 // returned for the caller to pick — never guess.
@@ -223,7 +209,7 @@ type TaskItem struct {
 	Done  bool
 }
 
-// scanActiveChanges scans openspec/changes/ (excluding archive/) for active directories.
+// scanActiveChanges 列出变更目录下的活跃变更（已归档的那一层目录不算）。
 func (pa *PlanAgent) scanActiveChanges() []string {
 	changesDir := filepath.Join(pa.openSpecDir, "openspec", "changes")
 	entries, err := os.ReadDir(changesDir)
@@ -271,7 +257,7 @@ func (pa *PlanAgent) parseTasksMd(changeName string) ([]TaskItem, error) {
 	return tasks, nil
 }
 
-// parseTaskID extracts a leading numeric ID (like "1.1", "2.3") from text.
+// taskIDRegex parseTaskID extracts a leading numeric ID (like "1.1", "2.3") from text.
 var taskIDRegex = regexp.MustCompile(`^(\d+(?:\.\d+)*)\s+(.+)$`)
 
 func parseTaskID(text string) (id, title string) {

@@ -1,17 +1,16 @@
 package tagent
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// TestCapacityHint_TriggerAndSnooze (4.2, design-report-closeout): boundary
-// events accumulate per partition; crossing the threshold fires exactly one
-// hint and resets the counter; the snooze window suppresses repeats; after
-// the window expires the next threshold crossing fires again. Non-boundary
-// event types never count. Fail-before: no trigger mechanism existed
-// (consolidation was manual-only).
+// TestCapacityHint_TriggerAndSnooze pins that boundary events accumulate per partition and crossing the threshold fires exactly one hint, resetting the counter.
+// - The snooze window suppresses repeats while the count is kept; after the window expires the next threshold crossing fires again.
+// - Non-boundary event types never count; threshold<=0 disables (nil tracker) and Track on a nil receiver must not panic.
+// - No trigger mechanism existed (consolidation was manual-only).
 func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 	var mu sync.Mutex
 	var hints []int
@@ -27,7 +26,6 @@ func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// Non-boundary types never count.
 	for i := 0; i < 5; i++ {
 		tr.Track(int64(0x1000+1*100), 1, "action_command")
 	}
@@ -35,7 +33,6 @@ func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 		t.Fatalf("non-boundary events must not trigger: %v", hints)
 	}
 
-	// 3 boundary events → exactly one hint.
 	tr.Track(int64(0x1000+1*100), 1, "external_input")
 	tr.Track(int64(0x1000+1*100), 1, "agent_output")
 	if len(hints) != 0 {
@@ -46,27 +43,23 @@ func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 		t.Fatalf("threshold crossing must fire once with count=3: %v", hints)
 	}
 
-	// Counter reset: 2 more events do not fire again.
 	tr.Track(int64(0x1000+1*100), 1, "agent_output")
 	tr.Track(int64(0x1000+1*100), 1, "external_input")
 	if len(hints) != 1 {
 		t.Fatalf("counter must reset after hint: %v", hints)
 	}
 
-	// Cross again inside snooze → suppressed.
 	tr.Track(int64(0x1000+1*100), 1, "agent_output")
 	if len(hints) != 1 {
 		t.Fatalf("snooze window must suppress: %v", hints)
 	}
 
-	// Advance past snooze → next crossing fires again.
 	clock = clock.Add(2 * time.Hour)
-	tr.Track(int64(0x1000+1*100), 1, "external_input") // 4th since reset → >= 3? counts: 2+1(suppressed)+1=4 ≥3
+	tr.Track(int64(0x1000+1*100), 1, "external_input")
 	if len(hints) != 2 {
 		t.Fatalf("after snooze expiry must fire again: %v", hints)
 	}
 
-	// Per-partition isolation: partition 2 unaffected.
 	if len(hints) != 2 {
 		t.Fatal("partition isolation violated")
 	}
@@ -75,10 +68,42 @@ func TestCapacityHint_TriggerAndSnooze(t *testing.T) {
 		t.Fatal("partition 2 below its own threshold must not fire")
 	}
 
-	// Disabled: threshold<=0 → nil tracker, Track on nil is a no-op.
 	if NewConsolidationHintTracker(0, 0) != nil {
 		t.Fatal("threshold=0 must disable (nil)")
 	}
 	var nilTracker *ConsolidationHintTracker
-	nilTracker.Track(1, 1, "external_input") // must not panic
+	nilTracker.Track(1, 1, "external_input")
+}
+
+// TestMeditationDigest_IncludesCandidates pins that the tracker renders a consolidation-candidates section (count + recent hex keys) for the digest injection.
+// - Empty when nothing accumulated; a nil tracker renders empty — zero behavior change.
+// 契约: docs/wiki/memory/memory-architecture.md#curation
+func TestMeditationDigest_IncludesCandidates(t *testing.T) {
+	var nilTracker *ConsolidationHintTracker
+	if nilTracker.CandidatesText(1) != "" {
+		t.Fatal("nil tracker must render empty")
+	}
+
+	tr := NewConsolidationHintTracker(3, time.Hour)
+	if got := tr.CandidatesText(1); got != "" {
+		t.Fatalf("no accumulation must render empty, got %q", got)
+	}
+	k1 := int64(0x1201aa10000001)
+	k2 := int64(0x1201aa10000002)
+	tr.Track(k1, 1, "external_input")
+	tr.Track(k2, 1, "agent_output")
+	got := tr.CandidatesText(1)
+	if !strings.Contains(got, "巩固候选") || !strings.Contains(got, "2 个边界事件") {
+		t.Fatalf("candidates text missing count: %q", got)
+	}
+	if !strings.Contains(got, "1201aa10000001") || !strings.Contains(got, "1201aa10000002") {
+		t.Fatalf("candidates text missing hex keys: %q", got)
+	}
+	if tr.CandidatesText(2) != "" {
+		t.Fatal("partition isolation violated in candidates")
+	}
+	tr.Track(int64(0x1201aa10000003), 2, "action_command")
+	if tr.CandidatesText(2) != "" {
+		t.Fatal("non-boundary event must not enter candidates")
+	}
 }

@@ -9,28 +9,20 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ---------------------------------------------------------------------------
-// SwappableModel — 可运行时替换的 model.Model 包装器
+// SwappableModel 是可在运行期替换内层实例的 model.Model 包装器：换模型不重建
+// LLMAgent / Runner，也不改事件机制（常驻循环、消息注入、输出通道都不动），只换最
+// 底下的模型实例；所有 GenerateContent / GenerateContentIter / Info 都委托当前内层。
 //
-// 用于 HTTPAPI 接收 AReaL adapter 传入的 llm_base_url 时，
-// 将 LLM 请求重定向到 AReaL proxy（端口动态分配）。
-// 不改变事件机制（persistent loop / InjectMessage / outputCh 不变），
-// 仅替换底层 model.Model 实例。
-// ---------------------------------------------------------------------------
-
-// SwappableModel wraps a model.Model, allowing the inner model to be
-// swapped at runtime without recreating the LLMAgent or Runner.
-// All GenerateContent/Info calls delegate to the current inner model.
+// 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 type SwappableModel struct {
 	mu    sync.RWMutex
 	inner model.Model
 
-	// Retired-model recycling (implementation-hardening 5.2): swapped-out
-	// models wait here until no in-flight GenerateContent call references any
-	// of them, then get an io.Closer Close (model.Model has no Close; most
-	// models are stateless clients — the mechanism guards stateful wrappers).
+	// inFlight 是在途租约计数：租约覆盖调用与**整条返回流**的生命周期，归零才允许回收。
 	inFlight atomic.Int64
-	retired  []model.Model
+	// retired 是换出待回收的模型：无在途租约引用、且不是当前 inner 时被 io.Closer 关闭
+	// 恰好一次（model.Model 无 Close，多数模型是无状态客户端，此机制保护有状态包装器）。
+	retired []model.Model
 }
 
 // NewSwappableModel creates a SwappableModel wrapping the given model.
@@ -52,7 +44,7 @@ func (m *SwappableModel) Swap(inner model.Model) {
 		dup := false
 		for _, r := range m.retired {
 			if r == old {
-				dup = true // re-retired after a A→B→A bounce: entry already queued
+				dup = true
 				break
 			}
 		}
@@ -66,23 +58,24 @@ func (m *SwappableModel) Swap(inner model.Model) {
 
 // sweepRetired closes retired models when no in-flight lease remains and the
 // model is not the current inner (A→B→A keeps the reselected instance alive).
+// current is read under the write lock: a Swap landing between an early
+// snapshot and this loop could otherwise Close a model that just became the
+// live inner again.
 func (m *SwappableModel) sweepRetired() {
 	if m.inFlight.Load() != 0 {
 		return
 	}
-	m.mu.RLock()
-	current := m.inner
-	m.mu.RUnlock()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.inFlight.Load() != 0 { // re-check under lock (a call may have started)
+	if m.inFlight.Load() != 0 {
 		return
 	}
+	current := m.inner
 	keep := m.retired[:0]
 	for _, old := range m.retired {
 		if old == current {
-			keep = append(keep, old) // still in use — never close the current inner
+			keep = append(keep, old)
 			continue
 		}
 		if c, ok := old.(interface{ Close() error }); ok {
@@ -99,14 +92,14 @@ func (m *SwappableModel) release() {
 }
 
 // GenerateContent delegates to the current inner model. The in-flight lease
-// now covers the FULL returned-stream lifecycle (resident-readiness-plan
-// 4.8): responses are forwarded to the caller until the upstream channel is
+// now covers the FULL returned-stream lifecycle
+// : responses are forwarded to the caller until the upstream channel is
 // closed (or context cancellation closes it) — only then is the lease
 // released and the model eligible for retirement Close. Error/nil streams
 // release immediately. A model that leaks its channel keeps the lease
 // (conservative: never close a possibly-live resource).
 func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
-	m.inFlight.Add(1) // lease acquired HERE — held until the stream fully ends
+	m.inFlight.Add(1)
 	m.mu.RLock()
 	inner := m.inner
 	m.mu.RUnlock()
@@ -124,11 +117,6 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 	go func() {
 		defer close(out)
 		defer m.release()
-		// cold-eyes R2 Warning 3: a caller that abandons `out` (upstream
-		// cancel without draining) must not wedge this goroutine on
-		// `out <- r` forever — the lease would never be released and the
-		// retired model never closed. On ctx cancel, drain the upstream to
-		// its close, then exit: the lease is ALWAYS eventually freed.
 		cancelled := false
 		for {
 			select {
@@ -137,7 +125,7 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 					return
 				}
 				if cancelled {
-					continue // keep draining upstream after cancel
+					continue
 				}
 				select {
 				case out <- r:
@@ -146,8 +134,6 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 				}
 			case <-ctx.Done():
 				if cancelled {
-					// ctx already fired before: keep draining via the range
-					// below so the upstream sender never blocks either.
 					for range ch {
 					}
 					return
@@ -159,23 +145,18 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 	return out, nil
 }
 
-// GenerateContentIter (§4.5B) preserves the inner model's real IterModel capability
-// instead of hiding it. When SwappableModel is passed to a flow that prefers
-// model.IterModel, a decorator that only implements GenerateContent would silently
-// downgrade an iterator-capable base to the channel+goroutine path. Here:
-//   - Lazy: creating the returned Seq does NOT acquire a lease or touch the inner
-//     (no call/goroutine/side-effect) until the caller starts iterating — "creating the
-//     iterator is not calling the model".
-//   - If the inner is an IterModel, delegate DIRECTLY to its GenerateContentIter (the
-//     real fast path, no channel bridge).
-//   - Otherwise bridge the inner's channel into the Seq.
+// GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来：只实现
+// GenerateContent 的装饰器会把具备迭代能力的底层模型**静默降级**成"通道＋协程"路径。
 //
-// The in-flight lease is held for the whole iteration (mirroring GenerateContent), so a
-// swapped-out model is never closed mid-stream; early-stop / ctx-cancel drain the
-// upstream so the producer never wedges and the lease is always eventually freed.
+//   - 惰性：构造返回的 Seq 不算调用——在调用方真正开始迭代前不加租约、不碰内层、不起协程。
+//   - 内层是 IterModel 时直接委托其迭代入口（真快路径，不做通道桥接）；否则才桥接。
+//   - 租约覆盖整个迭代（与 GenerateContent 同构），换出的模型不会在流中被关；提前停止或
+//     ctx 取消时排空上游，生产方不被卡住、租约最终必被释放。
+//   - 迭代路径不得把错误咽成"空迭代器的成功"：通道形态会把该错误返回给调用方，桥接侧
+//     至少必须记录，否则同一模型走两条路径会有一条静默失败。
 func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
-		m.inFlight.Add(1) // lease acquired at actual iteration, not at Seq creation
+		m.inFlight.Add(1)
 		defer m.release()
 
 		m.mu.RLock()
@@ -185,9 +166,6 @@ func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model
 		if it, ok := inner.(model.IterModel); ok {
 			seq, err := it.GenerateContentIter(ctx, request)
 			if err != nil {
-				// deep-review P3-2: never a silent empty-iterator "success" —
-				// the channel-shaped GenerateContent returns this error, so
-				// the iter path must at least surface it.
 				log.Errorf("[SwappableModel] inner GenerateContentIter failed: %v", err)
 				return
 			}
@@ -210,7 +188,7 @@ func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model
 					go func() {
 						for range ch {
 						}
-					}() // drain so the producer isn't wedged; lease freed by defer
+					}()
 					return
 				}
 			case <-ctx.Done():

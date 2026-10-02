@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # dev takes direct pushes with no PR gate, so it must be built, vetted and
+    # tested by the same job as main. A branch that skips CI is a branch whose
+    # HEAD can be unbuildable, and every later reconciliation then reads against
+    # a baseline that was never verified.
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
@@ -25,6 +29,12 @@ jobs:
       # guards with skip when absent, but install to keep the signal on CI).
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
+
+      # E-P2-8 guard: the build consumes a replace-pinned fork until upstream
+      # PR #2637 lands. Verify module checksums so a tampered cache fails here
+      # rather than in test output.
+      - name: Verify modules
+        run: go mod verify
 
       - name: Build
         run: go build ./...
@@ -51,6 +61,14 @@ jobs:
       - name: Test (bot module, short)
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
+
+      # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
+      # totals in scripts/comment_policy/baseline.json but never raise one. Slots are
+      # keyed by rule alone, not by (file, rule), so moving comment text between files
+      # can neither look clean nor look dirty. The same script runs locally, so CI and
+      # the batch author cannot mean different things by "lint passed".
+      - name: Lint (gofmt · build · vet · comment ratchet · docs/api freshness · name/doc/proc refs)
+        run: bash scripts/lint.sh
 
   race:
     runs-on: ubuntu-latest
@@ -106,7 +124,14 @@ jobs:
         with:
           node-version: '20'
       - name: Install openspec
-        run: npm install -g openspec
+        # The CLI that validates these specs is @fission-ai/openspec (provides
+        # the `openspec` bin); the bare `openspec` npm package is a different
+        # tool that installs no command. Pinned to the version this repo's main
+        # specs are authored/validated against (1.2.0, same as local). Newer
+        # openspec enforces extra hygiene the broader spec corpus has not yet
+        # adopted — bump deliberately in a dedicated spec-hygiene change, not
+        # implicitly via @latest, or the gate fails on unrelated pre-existing specs.
+        run: npm install -g @fission-ai/openspec@1.2.0
       - name: OpenSpec spec-hygiene gate
         run: ./scripts/check-openspec.sh
 
@@ -120,4 +145,4 @@ jobs:
         with:
           go-version: '1.24'
       - name: Soak (write→compress→recall→restart × N)
-        run: go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -args -rounds=30 -events-per-round=30
+        run: go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30

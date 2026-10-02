@@ -32,11 +32,6 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 	var opts []action.ActionToolOption
 
-	// Command working directory 优先级:显式 `workspace` property > agent 级 WorkingDir
-	// (config.working_dir / TAGENT_WORKING_DIR) > 继承进程工作目录。file tools 的 base_dir 走
-	// 同一优先级(resolveBaseDir),二者始终一致 —— 同一 base 让模型看到单一文件系统视图;若把
-	// exec 默认进 scratch dir 会分裂视图(list_file 见 ./x 而 exec 够不着)诱发路径幻觉。
-	// oversized 输出仍走统一 scratch(<root>/tool-output)。
 	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))
 	} else if cfg.WorkingDir != "" {
@@ -50,7 +45,6 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 		opts = append(opts, action.WithActionRunAsGroup(rg))
 	}
 
-	// Parse monitor config if provided
 	if monRaw, ok := properties["monitor"]; ok && monRaw != nil {
 		if monCfg := parseMonitorConfig(monRaw); monCfg != nil {
 			opts = append(opts, action.WithActionMonitorConfig(*monCfg))
@@ -63,6 +57,8 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 
 // parseMonitorConfig parses a monitor config from properties map.
 // Supports duration strings (e.g., "10s", "30s") via time.ParseDuration.
+// that fails to parse leaves its field unset. It returns nil when no field is set,
+// so the caller keeps the action package's own defaults.
 func parseMonitorConfig(raw any) *action.MonitorConfig {
 	m, ok := raw.(map[string]any)
 	if !ok {
@@ -89,7 +85,6 @@ func parseMonitorConfig(raw any) *action.MonitorConfig {
 			cfg.FakeDeadDuration = d
 		}
 	}
-	// Adaptive poll schedule (optional).
 	if v, ok := m["dense_interval"].(string); ok && v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.DenseInterval = d
@@ -108,7 +103,6 @@ func parseMonitorConfig(raw any) *action.MonitorConfig {
 	if v, ok := m["backoff_factor"].(float64); ok && v >= 1 {
 		cfg.BackoffFactor = v
 	}
-	// If no fields set, return nil to use defaults
 	if cfg.Interval == 0 && cfg.StableDuration == 0 && cfg.FakeDeadDuration == 0 &&
 		cfg.DenseInterval == 0 && cfg.DenseDuration == 0 && cfg.MaxInterval == 0 && cfg.BackoffFactor == 0 {
 		return nil

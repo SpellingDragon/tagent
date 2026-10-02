@@ -9,14 +9,6 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
-// mock FileSender（任务 5.1）
-//
-// 记录每个发送方法的调用（方法名、toUserID、path、duration），并支持对指定
-// 路径注入错误，用于验证"单文件失败不阻断其余文件"的隔离行为。
-// 全程不触发真实网络 / 微信登录 / CDN。
-// ---------------------------------------------------------------------------
-
 type fileCall struct {
 	method   string
 	toUserID string
@@ -27,7 +19,7 @@ type fileCall struct {
 type mockFileSender struct {
 	mu       sync.Mutex
 	calls    []fileCall
-	failPath string // 若某 Send* 命中此 path，返回错误
+	failPath string
 }
 
 func (m *mockFileSender) record(method, toUserID, path string, duration int) {
@@ -111,18 +103,14 @@ func writeTempFile(t *testing.T, dir, name string, mode os.FileMode) string {
 	return abs
 }
 
-// ---------------------------------------------------------------------------
-// 任务 5.2：ExtractFilePaths 单测
-// ---------------------------------------------------------------------------
-
 func TestExtractFilePaths(t *testing.T) {
 	ws := t.TempDir()
 	absPDF := writeTempFile(t, ws, "report.pdf", 0644)
-	_ = writeTempFile(t, ws, "data/out.png", 0644) // 相对 ws 的图片
+	_ = writeTempFile(t, ws, "data/out.png", 0644)
 	relPNG := filepath.Join(ws, "data/out.png")
 
-	execByPerm := writeTempFile(t, ws, "script.txt", 0755) // 权限位可执行
-	execByExt := writeTempFile(t, ws, "run.sh", 0644)      // 扩展名在拒绝列表
+	execByPerm := writeTempFile(t, ws, "script.txt", 0755)
+	execByExt := writeTempFile(t, ws, "run.sh", 0644)
 
 	tests := []struct {
 		name  string
@@ -207,15 +195,11 @@ func TestExtractFilePaths(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 任务 5.3：selectSendFn 单测（按扩展名映射发送接口）
-// ---------------------------------------------------------------------------
-
 func TestSelectSendFn(t *testing.T) {
 	cases := []struct {
 		ext          string
 		wantMethod   string
-		wantDuration int // 仅 voice 需要校验
+		wantDuration int
 	}{
 		{".png", "SendImageFromPath", 0},
 		{".jpg", "SendImageFromPath", 0},
@@ -223,7 +207,7 @@ func TestSelectSendFn(t *testing.T) {
 		{".gif", "SendImageFromPath", 0},
 		{".webp", "SendImageFromPath", 0},
 		{".bmp", "SendImageFromPath", 0},
-		{".PNG", "SendImageFromPath", 0}, // 大小写不敏感
+		{".PNG", "SendImageFromPath", 0},
 		{".mp3", "SendVoiceFromPath", 0},
 		{".wav", "SendVoiceFromPath", 0},
 		{".amr", "SendVoiceFromPath", 0},
@@ -259,10 +243,6 @@ func TestSelectSendFn(t *testing.T) {
 		})
 	}
 }
-
-// ---------------------------------------------------------------------------
-// 任务 5.4：DeliverFiles 集成式 mock 测试
-// ---------------------------------------------------------------------------
 
 func TestDeliverFiles(t *testing.T) {
 	ws := t.TempDir()
@@ -305,9 +285,7 @@ func TestDeliverFiles(t *testing.T) {
 	t.Run("某文件失败其余仍发送", func(t *testing.T) {
 		m := &mockFileSender{failPath: imgPath}
 		text := "图片 " + imgPath + " 文档 " + docPath
-		// DeliverFiles 不返回错误（单文件失败仅记日志），故此处不应 panic/返回错误
 		_ = DeliverFiles(m, context.Background(), "u1", text, "")
-		// 两个文件都应被尝试发送
 		if got := m.callsOf("SendImageFromPath"); len(got) != 1 {
 			t.Fatalf("期望图片仍被尝试 1 次，实际 %d", len(got))
 		}

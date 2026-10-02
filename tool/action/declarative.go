@@ -11,12 +11,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// declarative.go（R2，resident-continuity-r2-r4 1.2/1.3）：TaskSpec 的声明式投影
-// 与跨重启闭包工厂（承诺表，design D1.2）。进程内 spawn 站点直传闭包不变；
-// Declarative 是 task_spawned 记录的载荷与 RebuildTaskRegistry 的重建输入。
-
-// declarativeParams keys = ActionArgs 的 spawn 字段全集（session-op 字段
-// Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID 非 spawn 参数，排除；Command 单列）。
+// pTimeout et al. are the spawn-parameter keys for the declarative
+// round-trip — the full ActionArgs spawn field set (session-op fields
+// Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID are not spawn parameters and are
+// excluded; Command is handled separately).
 const (
 	pTimeout    = "timeout"
 	pTTL        = "ttl"
@@ -143,19 +141,12 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.Declarative) task.TaskSpec {
 	args, err := argsFromDeclarative(decl)
 	if err != nil {
-		// Unrecoverable projection: display-only task (no closures). Still bound the
-		// reaper to the floor so a restore that lost its params is not immortal.
 		return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, TTL: defaultTaskTTL, Declarative: &decl}
 	}
 	spec := task.TaskSpec{
-		Kind: "command",
-		Desc: args.Command,
-		Key:  args.Command,
-		// §10.5(a): rebuild the reaper binding on restore. The model's explicit
-		// `ttl` is persisted in Params and recovered here; absent (pre-TTL records)
-		// resolveTTL falls back to the configured default / 10m floor. This is what
-		// keeps a restored long-running task (the 56bf24c3 class) bounded across
-		// restarts instead of lingering on the board forever.
+		Kind:        "command",
+		Desc:        args.Command,
+		Key:         args.Command,
 		TTL:         ct.resolveTTL(args),
 		Relaunch:    ct.relaunchClosure(spawner, args),
 		ResumeFn:    ct.rebuiltResumeClosure(decl.TaskID, args.IsTUI),
@@ -165,13 +156,13 @@ func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.De
 	return spec
 }
 
-// rebuiltResumeClosure（R3 2.7④，跨重启 resume 真供能）：镜像 resumeClosure 主体
+// rebuiltResumeClosure（R3：跨重启 resume 真供能）：镜像 resumeClosure 主体
 // （TouchSession 校验→baseline→SendKeys→Rearm），但 detector 为新建——重挂场景
 // 下 reattachOne 的原 detector 归属 monitor 回调链，此处新 detector 服务本轮
 // resume 的 settle 检测（watch 兕底仍由 reattach detector 承担）。R3 重挂前
 // （未跟踪）返回与旧路径同款的 relaunch 引导。
 //
-// The initiating context (§4.2) is accepted and ignored: like every command
+// The initiating context is accepted and ignored: like every command
 // re-entry this feeds a tmux session, which is not bound to a generation.
 func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(context.Context, string) (task.SettleDetector, error) {
 	return func(_ context.Context, input string) (task.SettleDetector, error) {
@@ -187,6 +178,11 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(co
 			}
 			ct.tmuxMonitor.RemoveSession(sessionID)
 			ct.removeResidentMeta(sessionID)
+		})
+		detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
+		ct.tmuxMonitor.RebindCallback(sessionID, func(_ string, _, newStatus SessionStatus, output string) {
+			detector.OnWatchOutput(output)
+			detector.OnStateChange(newStatus, output)
 		})
 		baseline := 0
 		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
@@ -210,10 +206,6 @@ func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName,
 		Key:         decl.Key,
 		Declarative: &decl,
 	}
-	// Replay the model's self-set sub-agent lifetime (resident-review-fixes 4.1)
-	// so the rebuilt task keeps its reaper anchor across a restart instead of
-	// collapsing to the default floor. Absent/pre-ttl record → 0 → the manager's
-	// configured default / 10m floor governs (three-level chain preserved).
 	if s := decl.Params["ttl"]; s != "" {
 		if secs, err := strconv.ParseInt(s, 10, 64); err == nil && secs > 0 {
 			spec.TTL = time.Duration(secs) * time.Second
@@ -222,8 +214,6 @@ func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName,
 	if redispatch != nil && decl.AgentName != "" {
 		body := decl.MessageBody
 		spec.Relaunch = func(ctx context.Context) (task.SpawnResult, error) {
-			// The initiating context rides through to the resolver: a re-entry
-			// started by a live call keeps THAT call's binding (§4.2).
 			return redispatch(ctx, decl.AgentName, body)
 		}
 	}

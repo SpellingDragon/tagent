@@ -9,7 +9,7 @@ import (
 )
 
 // retirementLedger is the assembly's list of owners whose name left the routable
-// set (design D7 / task §4.3, R02). Removal itself is atomic and already done by
+// set (design D7, R02). Removal itself is atomic and already done by
 // the publish: the new generation simply does not route the name. What the
 // publish must NOT do is close the owner — its executions, background work and
 // accepted inputs may still depend on it — so the owner goes on this list and is
@@ -20,14 +20,16 @@ import (
 // re-routed before its drain finished (that owner is simply reused, which is also
 // why a re-add can never produce a second writer for a live store).
 type retirementLedger struct {
-	mu      sync.Mutex
-	pending map[string]*agent.TagentAgent // name → unrouted owner awaiting quiescence
-	held    map[string]error              // name → the close error that keeps it listed
+	mu sync.Mutex
+	// pending maps a retired name to the owner still awaiting quiescence.
+	pending map[string]*agent.TagentAgent
+	// held maps a name to the close error that keeps it listed.
+	held map[string]error
 	// usageOf reports how many live execution generations still hold a USAGE RIGHT
-	// on a name (§3.2/D8): a version that routed B may legitimately call B until
+	// on a name: a version that routed B may legitimately call B until
 	// its own references drain, even if it never called B and even if the current
 	// generation removed the route. The number is DERIVED by the agent layer from
-	// the bindings' own published faces (single routing truth, §4.2) — the ledger
+	// the bindings' own published faces (single routing truth) — the ledger
 	// only reads it and never registers anything. Nil means the axis is absent.
 	usageOf func(name string) int
 }
@@ -74,7 +76,7 @@ func (l *retirementLedger) drop(name string) {
 }
 
 // noteKeep records WHY the owner stays listed after a close attempt (an execution
-// that never confirmed a stop is held, not force-closed — §4.1's guarantee,
+// that never confirmed a stop is held, not force-closed — a guarantee
 // inherited here rather than flattened).
 func (l *retirementLedger) noteKeep(name string, err error) {
 	l.mu.Lock()
@@ -128,7 +130,9 @@ func (l *retirementLedger) closingIn(reach map[string]bool) []string {
 
 // diagnostics reports what is still held and why — pending retirement is a real
 // state the host must be able to see (an owner kept alive by its own unfinished
-// work is legitimate; an owner kept alive invisibly is not).
+// work is legitimate; an owner kept alive invisibly is not). The usage axis is
+// derived by walking live bindings, so it is read only after the ledger lock is
+// released: a diagnostics path must never invert the ledger → agent lock order.
 func (l *retirementLedger) diagnostics() []map[string]any {
 	l.mu.Lock()
 	if len(l.pending) == 0 {
@@ -155,9 +159,6 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 	}
 	l.mu.Unlock()
 
-	// The usage axis is derived by walking live bindings, so it is read only after
-	// the ledger lock is dropped: a diagnostics path must never invert the order
-	// (ledger → agent locks) the sweep itself relies on.
 	out := make([]map[string]any, 0, len(recs))
 	for _, r := range recs {
 		entry := map[string]any{"name": r.name, "obligations": r.ob}
@@ -178,7 +179,7 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 // a pass because a release that landed DURING that pass was merged away by the
 // assembly's single-flight gate: without this re-notice, a cascade (owner A exits →
 // the name A was holding becomes free) would stall until new traffic arrived, which
-// §4.3 forbids. Termination is structural: it can only answer true when a pass would
+// the retirement protocol forbids. Termination is structural: it can only answer true when a pass would
 // actually retire something, and every retirement shrinks the pending set.
 //
 // Called with the reload's `mu` held (publishedReach is `mu`'s state).
@@ -209,7 +210,10 @@ type retireDecision struct {
 
 // sweep evaluates every pending owner once: still routable (release), still
 // obliged (keep), or idle (close, then retire). Called with the reload's `mu`
-// held, so it can never race a publish's track/release for the same name.
+// held, so it can never race a publish's track/release for the same name. An owner is held either by its own unfinished work or by another
+// generation’s still-valid usage right (deferred delegation); that second term
+// is derived from live bindings, so a holder cannot slip through the way a
+// hand-maintained registration would let one slip.
 func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 	var decisions []retireDecision
 	for name, owner := range l.snapshot() {
@@ -222,10 +226,6 @@ func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 			decisions = append(decisions, retireDecision{Name: name, Why: "re-routed before drain finished — original owner reused"})
 			continue
 		}
-		// §3.2/D8: an owner is held either by its OWN unfinished work or by another
-		// generation's still-valid usage right (deferred delegation). The second term
-		// is derived from live bindings, so no holder can be forgotten the way a
-		// hand-maintained registration would be.
 		holders := l.usageHolders(name)
 		if ob := owner.Obligations(); !ob.Idle() || holders > 0 {
 			why := "obligations remain: " + ob.String()
@@ -246,4 +246,4 @@ func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
 	return decisions
 }
 
-var _ = fmt.Sprintf // keep fmt for future message formatting
+var _ = fmt.Sprintf

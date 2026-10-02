@@ -11,20 +11,13 @@ import (
 	event "github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== GoalRegistry 事件持久化（5.2 design-report-closeout） ====================
-//
-// goal 声明是治理审计与 goal 门的一部分，重启不得丢失。模式对齐 DenialLedger：
-// BindStore 延迟绑定（构造期 gate 先建、store 后就绪）+ 构造期单线程 rebuild +
-// Declare/Resolve 双写（内存态 + governance 事件）。事件 subtype=goal，操作经
-// Metadata["goal_op"]=declared/resolved 区分（不扩 event 包 subtype 枚举）。
-
 // goalEventPayload 是 goal governance 事件 Content 的结构化 JSON。
 type goalEventPayload struct {
 	GoalID    string `json:"goal_id"`
-	Op        string `json:"op"`                  // declared / resolved
-	Statement string `json:"statement,omitempty"` // declared 时携带
+	Op        string `json:"op"`
+	Statement string `json:"statement,omitempty"`
 	CreatedBy string `json:"created_by,omitempty"`
-	Status    string `json:"status,omitempty"` // resolved 时携带
+	Status    string `json:"status,omitempty"`
 	ExpiresMs int64  `json:"expires_ms,omitempty"`
 }
 
@@ -93,8 +86,6 @@ func (g *GoalRegistry) rebuildFromStore() {
 		log.Warnf("[governance] goal rebuild query failed: %v", err)
 		return
 	}
-	// §8.11⑦：refs 级预筛（EventSummary 前缀）——Limit 截断作用于全部 governance 事件
-	//（denial/degraded 占大头），不预筛会把 goal 事件挤出窗口。预筛后 GetEvents 只取 goal。
 	keys := make([]int64, 0, len(refs))
 	for _, r := range refs {
 		if strings.Contains(r.EventSummary, "[governance:goal]") {
@@ -109,8 +100,6 @@ func (g *GoalRegistry) rebuildFromStore() {
 		log.Warnf("[governance] goal rebuild fetch failed: %v", err)
 		return
 	}
-	// 8.8（review §8）：不重排——QueryEvents 契约即 (Timestamp, EventKey) 全序
-	//（声明式查询语义#3）；先前 sort.Slice 不稳定反而抹掉同毫秒 EventKey 兜底序。
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

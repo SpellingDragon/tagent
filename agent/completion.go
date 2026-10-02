@@ -10,22 +10,13 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// §5.2 — the frozen post-turn completion (design 决策5 L122, spec L94). This is
-// the payload stored in reliability.Envelope.Completion (an opaque json.RawMessage
-// to the reliability leaf; the agent layer owns its schema). It is frozen ONCE at
-// the turn's terminal state, BEFORE the receipt is submitted (§5.3), and carries
-// the COMPLETE receipt fact so a restart re-submits the frozen bytes verbatim
-// instead of rebuilding them from current time — the exact mistake the legacy
-// finishDurableBatch/persistInboxReceipt path made (fresh snowflake key + fresh
-// time.Now on every call, so a retry minted a different receipt).
-
 // completionVersion tags the frozen schema. There is deliberately no v0/v2 reader
-// (design 决策10: managed recovery-unit reset, not migration).
+// .
 const completionVersion = 1
 
 // batchResult is the turn-level outcome recorded in a completion. It is derived
-// from §5.1's reduced turnOutcome. Both a completed and a deterministically
-// failed turn form a completion ("完整失败是处理结果", design L121); a CANCELLED
+// from 's reduced turnOutcome. Both a completed and a deterministically
+// failed turn form a completion; a CANCELLED
 // turn forms NO completion at all, so "cancelled" never appears as a batch result.
 type batchResult string
 
@@ -34,7 +25,7 @@ const (
 	batchFailed    batchResult = "failed"
 )
 
-// batchResultFromOutcome maps a §5.1 reduced outcome to (result, errorSummary, ok).
+// batchResultFromOutcome maps a  reduced outcome to (result, errorSummary, ok).
 // ok==false means the turn reached no terminal state (cancelled) and must NOT form
 // a completion — the caller skips the freeze entirely and retains the claim.
 func batchResultFromOutcome(o turnOutcome) (batchResult, string, bool) {
@@ -43,15 +34,15 @@ func batchResultFromOutcome(o turnOutcome) (batchResult, string, bool) {
 		return batchCompleted, "", true
 	case turnFailed:
 		return batchFailed, o.err, true
-	default: // turnCancelled
+	default:
 		return "", "", false
 	}
 }
 
-// slotDisposition is one slot's processing outcome (§5.2 L122): EXACTLY one per
+// slotDisposition is one slot's processing outcome: EXACTLY one per
 // slot — processed (its canonical fact committed, FactKey set) or skipped (did not
 // enter the turn, a stable Reason set). A full-skipped batch is legal: every slot
-// skipped, no model, still per-slot evidence (spec L136-138).
+// skipped, no model, still per-slot evidence.
 type slotDisposition string
 
 const (
@@ -59,14 +50,14 @@ const (
 	slotSkipped   slotDisposition = "skipped"
 )
 
-// Stable, closed skip reasons (design L54: unknown enum values are failures, so a
+// skipReasonMeditationYield Stable, closed skip reasons (design L54: unknown enum values are failures, so a
 // skipped slot must carry exactly one of these — never a free-form reason).
 // The former third value "empty_input" was a dead enum: an empty input slot is
 // NOT skipped — the commit gate still lays down a fact for it and marks it
-// processed (§4.3), so no slot ever carried this reason (resident-review-fixes 5.2).
+// processed, so no slot ever carried this reason.
 const (
-	skipReasonMeditationYield = "meditation_yield" // mixed-batch meditation stepped aside (§4.1)
-	skipReasonNotSelected     = "not_selected"     // present but not part of this turn's selected set
+	skipReasonMeditationYield = "meditation_yield"
+	skipReasonNotSelected     = "not_selected"
 )
 
 // validSkipReason is the closed set enforced by validate.
@@ -133,7 +124,7 @@ func buildReceiptFact(receiptKeyHex string, partitionID int, requestID, agentNam
 	}, nil
 }
 
-// validate enforces the §5.2 invariants: schema version, a non-empty fixed receipt
+// validate enforces the  invariants: schema version, a non-empty fixed receipt
 // key, a batch result in the closed set, and EXACTLY one well-formed disposition
 // per slot with no duplicate slot index (processed ⟺ fact_key & no reason; skipped
 // ⟺ stable reason & no fact_key). Any deviation is a deterministic error — never
@@ -151,7 +142,6 @@ func (c completion) validate() error {
 	if c.BatchResult != batchCompleted && c.BatchResult != batchFailed {
 		return fmt.Errorf("completion: unknown batch_result %q", c.BatchResult)
 	}
-	// A failed batch must carry its bounded summary; a completed one must not.
 	if c.BatchResult == batchFailed && c.ErrorSummary == "" {
 		return fmt.Errorf("completion: failed batch without an error summary")
 	}
@@ -192,7 +182,7 @@ func (c completion) validate() error {
 // freezeCompletion validates then deterministically marshals a completion. It does
 // NOT read the clock or mint keys: the caller supplies the once-captured
 // completedAtMs and the frozen receipt fact, so re-invoking on identical inputs
-// yields byte-identical output (the property §5.3's idempotent RecordCompletion
+// yields byte-identical output (the property 's idempotent RecordCompletion
 // relies on).
 func freezeCompletion(c completion) (json.RawMessage, error) {
 	c.CompletionVersion = completionVersion
@@ -207,7 +197,7 @@ func freezeCompletion(c completion) (json.RawMessage, error) {
 }
 
 // decodeCompletion parses a frozen completion and re-validates it, so a restart
-// reconciling outstanding envelopes (spec L160+) reads a fully-formed, self-consistent
+// reconciling outstanding envelopes reads a fully-formed, self-consistent
 // record rather than trusting opaque bytes.
 func decodeCompletion(raw json.RawMessage) (completion, error) {
 	if len(raw) == 0 {
@@ -222,8 +212,6 @@ func decodeCompletion(raw json.RawMessage) (completion, error) {
 	}
 	return c, nil
 }
-
-// ==================== §5.3 freeze-from-received wiring ====================
 
 // slotKey is the (envelope path, fixed slot) identity used to mark which received
 // slots were committed this turn (selected) vs filtered out (skipped). The path is
@@ -282,8 +270,8 @@ func factKeyOfPrepared(prepared json.RawMessage) (string, error) {
 }
 
 // skipReasonFor classifies a non-committed slot with a closed-enum reason. A mixed
-// batch's yielding meditation (§4.1) is the recognized filter; anything else present
-// in received but not selected is not_selected. Empty-input handling (§4.3) is a
+// batch's yielding meditation is the recognized filter; anything else present
+// in received but not selected is not_selected. Empty-input handling is a
 // distinct path that never reaches a committed fact, so it is not produced here.
 func skipReasonFor(ev *AgentEvent) string {
 	if ev.Type == tagentevent.TypeExternalInput && ev.Source == "meditation" {
@@ -293,7 +281,7 @@ func skipReasonFor(ev *AgentEvent) string {
 }
 
 // buildEnvelopeCompletion freezes the completion for ONE envelope (a path group of
-// received events). It maps §5.1's batch outcome to batch_result (a cancelled turn
+// received events). It maps 's batch outcome to batch_result (a cancelled turn
 // yields ok=false and must never be frozen), marks each slot processed (fact key)
 // or skipped (reason) from the committed set, and stamps the receipt fact with the
 // envelope's reserved key + the once-captured completedAtMs/attribution so the freeze
@@ -343,18 +331,19 @@ func buildEnvelopeCompletion(group []*AgentEvent, committed map[string]bool, out
 	return c, b, nil
 }
 
-// verifyReceiptCredential (§5.4, design 决策 L126) turns the durable frozen
+// verifyReceiptCredential turns the durable frozen
 // completion into the receipt credential RecordReceipt demands. It is the ONLY
 // issuer of credentials in the agent layer: ① decode + re-validate the frozen
 // bytes — an illegal completion (wrong version, malformed dispositions, unknown
 // batch result) never yields a credential, closing the gap the schema-agnostic
-// leaf cannot check (D2); ② bind the receipt fact to its reserved identity — the
+// leaf cannot check ; ② bind the receipt fact to its reserved identity — the
 // fact's EventKey must BE the completion's receipt_key, an identity drift is a
 // contradiction, not a credential; ③ submit/verify the fact through the
 // idempotent replay interface — success means the chain now holds the receipt
 // under exactly that key (first commit or already-committed, both verify; a
 // commit failure is a definite error and yields NO receipt — the claim stays and
-// §5.7 re-submits only the receipt, never re-runs the input).
+//
+//	re-submits only the receipt, never re-runs the input).
 func (cm *ContextManager) verifyReceiptCredential(raw json.RawMessage) (reliability.ReceiptCredential, error) {
 	c, err := decodeCompletion(raw)
 	if err != nil {

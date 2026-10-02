@@ -7,11 +7,9 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// Compaction event metadata keys (event-sourced-projection D4/D6): the
-// generation marker scopes supersede/snapshot selection to compaction
-// events THIS system produced — legacy 固化物 (same event type, no marker,
-// TTL-immortal) is never deleted nor selected. The payload JSON carries the
-// rebuild state; the recall body stays the narrative itself.
+// CompactionMetaKey 约定 compaction 事件的元数据键。代际标记把 supersede 与快照选取
+// 限定在本系统产出的 compaction 事件上——无标记的既有固化数据（同类型、无标记、TTL 永久）
+// 既不删除也不被选中。载荷 JSON 承载重建状态；可召回正文即叙事本身。
 const (
 	CompactionMetaKey        = "compaction"
 	CompactionGenV1          = "v1"
@@ -32,7 +30,7 @@ type RetainedEntry struct {
 }
 
 // CompactionPayload is the wire form of one compression fold, persisted as
-// a context_compress_summary fact-chain event (event-sourced-projection D1).
+// a context_compress_summary fact-chain event.
 // It captures everything about the fold that is NOT recomputable: the
 // composed summary text, the summary ref identity, the ordered (interleaved)
 // retained list, and fullBoundary.
@@ -50,7 +48,7 @@ type CompactionPayload struct {
 // BuildCompactionPayload derives the persistable fold record from a fresh
 // fold's projection refs. ok=false when retained does not start with a
 // negative-key context_compress summary ref — i.e. no REAL fold happened
-// this round (under-budget rounds must not emit; spec: 未折叠不写).
+// this round.
 // Pure: no I/O, no LLM.
 func BuildCompactionPayload(retained []memory.EventReference, fullBoundary int64) (p *CompactionPayload, ok bool) {
 	if len(retained) == 0 {
@@ -92,7 +90,7 @@ func (p *CompactionPayload) RestoreRefs() (ordered []memory.EventReference, posK
 		if e.Key > 0 {
 			posIdx = append(posIdx, len(ordered))
 			posKeys = append(posKeys, e.Key)
-			ordered = append(ordered, memory.EventReference{}) // placeholder
+			ordered = append(ordered, memory.EventReference{})
 		} else if e.Ref != nil {
 			ordered = append(ordered, *e.Ref)
 		}

@@ -1,21 +1,5 @@
 package memory
 
-// Review-evidence reproductions (2026-09-27 deep review). These tests FAIL by
-// design while the defects below are unfixed; they are the executable evidence
-// for the findings and double as the regression tests for their fixes:
-//
-//   - TestMergeScanErrorMustAbortCompaction: compaction.go mergeEvents
-//     `continue`s on a KVScan error, so a transient scan failure on a source
-//     window silently drops that window's events from the merge while
-//     deleteSegments (whose scan recovered) still deletes the source — an
-//     unrecoverable, unlogged loss of facts. Reproduces with a fail-once KV.
-//
-//   - TestReplayEventSealedWindowDemotion: segment_store.go ReplayEvent
-//     lacks StoreEvent's sealed-window demotion, so a fresh replay committed
-//     into a sealed window whose (MinTime,MaxTime) envelope predates the fact
-//     is pruned from time-range queries until the next compaction rebuilds the
-//     bounds. GetEvent stays reachable — only QueryEvents misses.
-
 import (
 	"encoding/json"
 	"errors"
@@ -47,8 +31,7 @@ func TestMergeScanErrorMustAbortCompaction(t *testing.T) {
 	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
 	require.NoError(t, err)
 
-	// Two hourly windows, one event each.
-	baseTS := int64(1710666000000) // 2024-03-17 05:00:00 UTC
+	baseTS := int64(1710666000000)
 	keysByHour := map[int]int64{}
 	for hour := 0; hour < 2; hour++ {
 		hourTS := baseTS + int64(hour)*3600000
@@ -65,31 +48,17 @@ func TestMergeScanErrorMustAbortCompaction(t *testing.T) {
 
 	w0 := WindowTimestamp(TimestampFromEventKey(keysByHour[0]), DefaultWindowSize)
 
-	// Arm AFTER the writes: the next scan of window 0's event prefix fails —
-	// which is the merge read inside CompactL1ToL2 (the delete-side scan that
-	// follows has recovered, the transient-error shape under review).
 	kv.failPrefix = SegmentEventPrefix(1, w0)
 
-	// NewCompactor does not start its scheduler (Start does), so no background
-	// compaction can interfere with this deterministic repro.
 	compactor := NewCompactor(store, kv, store.rel, nil, DefaultCompactionConfig())
 
-	// Correct behavior (spec: compaction 源窗口读失败必须中止本轮): the failed
-	// source read aborts this compaction LOUD instead of silently migrating a
-	// partial set. (Evidence-phase note: this assertion was originally written
-	// to document the silent-success defect; corrected to the spec'd behavior
-	// at fix time — it is the regression gate now.)
 	err = compactor.CompactL1ToL2(1, []int64{w0, w0 + DefaultWindowSize})
 	require.Error(t, err, "compaction must abort when a source window cannot be read")
 	require.ErrorContains(t, err, "merge scan failed")
 
-	// The aborted compaction destroyed nothing: window 0's evt slot is intact.
 	_, evtErr := kv.KVGet(EventKeyStr(1, w0, 0))
 	require.NoError(t, evtErr, "source evt slot must survive the aborted compaction")
 
-	// Cold-cache read (a fresh store instance over the same KV, i.e. what a
-	// restart sees): both windows' facts are retrievable — the P1 defect lost
-	// window 0 silently behind a warm LRU.
 	cold, cerr := NewFileSegmentStore(kv, nil, ":memory:", 100)
 	require.NoError(t, cerr)
 	_, gerr := cold.GetEvent(keysByHour[0])
@@ -98,10 +67,9 @@ func TestMergeScanErrorMustAbortCompaction(t *testing.T) {
 	require.NoError(t, gerr1, "window-1 fact must remain readable")
 }
 
-// TestMergeScanErrorAbortsAndRetries is the scheduler-retry closure promised
-// by spec scenario "后续 scheduler 轮次重试同一 compaction": after an aborted
-// round the source segments stay intact, and the NEXT round (backend recovered)
-// completes the migration with every fact preserved.
+// TestMergeScanErrorAbortsAndRetries 钉住 scheduler-retry closure promised
+//
+// 契约: docs/wiki/memory/memory-architecture.md#compaction-integrity
 func TestMergeScanErrorAbortsAndRetries(t *testing.T) {
 	kv := &scanFailOnceKV{mockKV: newMockKV()}
 	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
@@ -123,13 +91,10 @@ func TestMergeScanErrorAbortsAndRetries(t *testing.T) {
 	kv.failPrefix = SegmentEventPrefix(1, w0)
 	compactor := NewCompactor(store, kv, store.rel, nil, DefaultCompactionConfig())
 
-	// Round 1: transient read failure → abort loud, source intact.
 	require.Error(t, compactor.CompactL1ToL2(1, windows), "aborted round must report the failure")
 	_, evtErr := kv.KVGet(EventKeyStr(1, w0, 0))
 	require.NoError(t, evtErr, "aborted round must not destroy the unreadable source")
 
-	// Round 2 (scheduler retry, backend recovered): migration completes and
-	// BOTH windows' facts survive on the cold path.
 	require.NoError(t, compactor.CompactL1ToL2(1, windows), "retry after recovery must succeed")
 	cold, cerr := NewFileSegmentStore(kv, nil, ":memory:", 100)
 	require.NoError(t, cerr)
@@ -144,7 +109,6 @@ func TestReplayEventSealedWindowDemotion(t *testing.T) {
 	store, err := NewFileSegmentStore(kv, nil, ":memory:", 100)
 	require.NoError(t, err)
 
-	// Two facts in window W with event times [T1, T2]...
 	ts := int64(1710678000000)
 	t1, t2 := ts, ts+60_000
 	for _, tt := range []int64{t1, t2} {
@@ -154,8 +118,6 @@ func TestReplayEventSealedWindowDemotion(t *testing.T) {
 	}
 	w := WindowTimestamp(TimestampFromEventKey(NewSnowflakeEventKey(1, ts)), DefaultWindowSize)
 
-	// ...then the segment gets sealed with that truthful envelope (this is the
-	// state an hourly seal or an L1→L2 promotion leaves behind).
 	meta, merr := store.GetSegmentMeta(1, w)
 	require.NoError(t, merr)
 	meta.Sealed = true
@@ -163,13 +125,7 @@ func TestReplayEventSealedWindowDemotion(t *testing.T) {
 	mj, _ := json.Marshal(meta)
 	require.NoError(t, kv.KVPut(MetaKeyStr(1, w), string(mj)))
 
-	// A recovery replay lands a FRESH fact in the same window whose event time
-	// (t3) postdates the sealed envelope — the shape StoreEvent defends against
-	// by demoting Sealed→false, and ReplayEvent currently does not. The replay
-	// runs on a COLD store instance, the real recovery shape (durable replay
-	// happens after a restart: the sealed window is not the fresh process's
-	// current window, so the seqCounter==0 revisit path is taken).
-	t3 := t2 + 1800_000 // +30min: same hour window, past the sealed envelope
+	t3 := t2 + 1800_000
 	key3 := NewSnowflakeEventKey(1, t3)
 	cold, cerr := NewFileSegmentStore(kv, nil, ":memory:", 100)
 	require.NoError(t, cerr)
@@ -179,13 +135,9 @@ func TestReplayEventSealedWindowDemotion(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, ReplayNew, res)
 
-	// GetEvent stays reachable (idx → slot direct)...
 	_, gerr := cold.GetEvent(key3)
 	require.NoError(t, gerr, "GetEvent must reach the replayed fact")
 
-	// ...but the time-range query [t2+1, t3+1] must ALSO see it. UNFIXED the
-	// sealed envelope (MaxTime=t2 < StartTime) prunes window w wholesale and
-	// the fact is invisible to recall until the next compaction rebuilds bounds.
 	refs, qerr := cold.QueryEvents(QueryOptions{
 		PartitionIDs: []int{1},
 		StartTime:    t2 + 1,

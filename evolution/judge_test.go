@@ -26,6 +26,9 @@ func (m judgeMockModel) GenerateContent(context.Context, *model.Request) (<-chan
 
 func (judgeMockModel) Info() model.Info { return model.Info{} }
 
+// TestLLMJudge_PassOnGoodScore TestLLMJudge*/TestParseJudgeVerdict/TestExtractJSON 系列覆盖 LLM 评审的打分通过线、四类保守
+//
+// 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states
 func TestLLMJudge_PassOnGoodScore(t *testing.T) {
 	src := mockEvidenceSource{ev: Evidence{TurnCount: 10, DenialCount: 0}}
 	e := NewLLMJudgeEvaluator(judgeMockModel{text: `{"score": 0.9, "reason": "表现良好"}`}, src, 5, 0.5, 0)
@@ -48,12 +51,10 @@ func TestLLMJudge_RollbackOnLowScore(t *testing.T) {
 }
 
 func TestLLMJudge_ConservativePaths(t *testing.T) {
-	// 样本不足 → 保守通过（不调 judge，即便 judge 会判劣化）。
 	eInsufficient := NewLLMJudgeEvaluator(judgeMockModel{text: `{"score": 0.1}`}, mockEvidenceSource{ev: Evidence{TurnCount: 2}}, 5, 0.5, 0)
 	if res, _ := eInsufficient.Evaluate(context.Background(), "b1"); !res.Pass {
 		t.Fatal("样本不足应保守通过")
 	}
-	// judge 调用错误 → 内部消化，保守通过（不抛 err）。
 	eErr := NewLLMJudgeEvaluator(judgeMockModel{err: fmt.Errorf("llm down")}, mockEvidenceSource{ev: Evidence{TurnCount: 10}}, 5, 0.5, 0)
 	res, err := eErr.Evaluate(context.Background(), "b1")
 	if err != nil {
@@ -62,12 +63,10 @@ func TestLLMJudge_ConservativePaths(t *testing.T) {
 	if !res.Pass {
 		t.Fatal("judge 调用失败应保守通过")
 	}
-	// nil judge → 保守通过。
 	eNil := NewLLMJudgeEvaluator(nil, mockEvidenceSource{ev: Evidence{TurnCount: 10}}, 5, 0.5, 0)
 	if res, _ := eNil.Evaluate(context.Background(), "b1"); !res.Pass {
 		t.Fatal("nil judge 应保守通过")
 	}
-	// 证据收集失败 → 保守通过。
 	eCollect := NewLLMJudgeEvaluator(judgeMockModel{text: `{"score":0.1}`}, mockEvidenceSource{err: fmt.Errorf("store down")}, 5, 0.5, 0)
 	if res, _ := eCollect.Evaluate(context.Background(), "b1"); !res.Pass {
 		t.Fatal("证据收集失败应保守通过")
@@ -75,19 +74,15 @@ func TestLLMJudge_ConservativePaths(t *testing.T) {
 }
 
 func TestParseJudgeVerdict(t *testing.T) {
-	// markdown fence 包裹。
 	if v := parseJudgeVerdict("```json\n{\"score\": 0.3, \"reason\": \"劣化\"}\n```"); v.Score != 0.3 {
 		t.Fatalf("应解析 fence JSON, got %+v", v)
 	}
-	// 前后缀文字中嵌入 JSON。
 	if v := parseJudgeVerdict("评审结果：{\"score\": 0.8, \"reason\": \"ok\"} 以上"); v.Score != 0.8 {
 		t.Fatalf("应提取嵌入 JSON, got %+v", v)
 	}
-	// 非法响应 → 保守 score=1.0。
 	if v := parseJudgeVerdict("我无法判断"); v.Score != 1.0 {
 		t.Fatalf("解析失败应保守 score=1.0, got %+v", v)
 	}
-	// score 越界夹取到 [0,1]。
 	if v := parseJudgeVerdict(`{"score": 5.0}`); v.Score != 1.0 {
 		t.Fatalf("score 应夹到 1.0, got %f", v.Score)
 	}
@@ -105,8 +100,9 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
-// TestParseJudgeVerdict_MissingScoreConservative 是 Major 回归：合法 JSON 但缺 score（或
-// null/大小写不符）→ 保守 score=1.0 通过，绝不因零值 0 误判劣化触发回滚。
+// TestParseJudgeVerdict_MissingScoreConservative pins the conservative verdict on an unusable score.
+// - Valid JSON with a missing, null or case-mismatched score passes with score=1.0.
+// - A zero value must not be read as a regression, since that would trigger a rollback no model verdict justified.
 func TestParseJudgeVerdict_MissingScoreConservative(t *testing.T) {
 	if v := parseJudgeVerdict(`{"reason":"证据不足"}`); v.Score != 1.0 {
 		t.Fatalf("缺 score 应保守 1.0（不误回滚）, got %f", v.Score)
@@ -114,8 +110,6 @@ func TestParseJudgeVerdict_MissingScoreConservative(t *testing.T) {
 	if v := parseJudgeVerdict(`{"score":null,"reason":"x"}`); v.Score != 1.0 {
 		t.Fatalf("score=null 应保守 1.0, got %f", v.Score)
 	}
-	// Go encoding/json 默认大小写不敏感：{"Score":0.9} 匹配 json:"score" → 正常解析 0.9
-	// （非缺失，不触发保守分支）——记录实际行为，大小写变体的 score 仍被采纳。
 	if v := parseJudgeVerdict(`{"Score":0.9}`); v.Score != 0.9 {
 		t.Fatalf("Go json 大小写不敏感，Score 应解析为 0.9, got %f", v.Score)
 	}

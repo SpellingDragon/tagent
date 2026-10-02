@@ -18,27 +18,19 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// MemoryPlugin syncs events to MemoryStore via OnEvent hook.
-// It implements plugin.Plugin and is registered on the Runner.
+// MemoryPlugin 把框架事件管线的输出同步写入 MemoryStore，并在同一同步点投影到本调用的
+// ProjectionSink。它按顺序跳过无载荷屏障事件、流式分片、退化空终态与本次尝试的精确输入回显；
+// 因果父子关系按 (partition, session) 独立维护并有上界，经 RelationStore 承载。
+// 存储标识与归因随事件写回 StateDelta 与 FullEvent.Metadata。
 //
-// Core responsibilities:
-//  1. Derive PartitionID from Invocation.AgentName (using FNV-1a hash)
-//  2. Generate Snowflake EventKey (int64, encoding PartitionID)
-//  3. Build FullEvent (parent relationship set via RelationStore.SetParent)
-//  4. Persist to MemoryStore
-//  5. Write back EventKey/PartitionID to Event.StateDelta
-//
-// Causal chain isolation: each (PartitionID, SessionID) pair maintains an independent
-// causal chain (lastEventKeys map). This prevents sub-agent events and cross-session
-// events from breaking each other's causal chains.
+// 契约: docs/wiki/plugin/plugin-architecture.md#memory-plugin
 type MemoryPlugin struct {
 	memStore      memory.MemoryStore
 	mu            sync.Mutex
-	lastEventKeys map[string]int64 // "partitionID:sessionID" → lastEventKey
-
+	lastEventKeys map[string]int64
 }
 
-// NewMemoryPlugin creates a new MemoryPlugin.
+// NewMemoryPlugin 创建一个把事件写入 store 并同步投影的插件；因果链状态初始为空。
 func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin {
 	return &MemoryPlugin{
 		memStore:      store,
@@ -46,19 +38,17 @@ func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin {
 	}
 }
 
-// Name implements plugin.Plugin.
+// Name 返回插件名 memory。
 func (p *MemoryPlugin) Name() string {
 	return "memory"
 }
 
-// Register implements plugin.Plugin.
+// Register 把本插件挂到框架的 OnEvent 钩子。
 func (p *MemoryPlugin) Register(r *plugin.Registry) {
 	r.OnEvent(p.onEvent)
 }
 
-// OnEvent is the exported wrapper around the internal onEvent hook. Production
-// invocation happens through the framework's plugin pipeline (Register →
-// r.OnEvent); the exported form exists for direct use in tests and tools.
+// OnEvent 是内部事件钩子的导出形式，供测试与工具直接调用；生产路径经 Register 注入。
 func (p *MemoryPlugin) OnEvent(
 	ctx context.Context,
 	inv *agent.Invocation,
@@ -67,7 +57,8 @@ func (p *MemoryPlugin) OnEvent(
 	return p.onEvent(ctx, inv, evt)
 }
 
-// onEvent is the EventHook that syncs events to MemoryStore.
+// onEvent 执行「筛选 → 分配 → 构造 → 持久化 → 投影 → 回写标识 → 更新因果链」的完整顺序；
+// 四道跳过闸在任何 key 分配与写入之前完成。
 func (p *MemoryPlugin) onEvent(
 	ctx context.Context,
 	inv *agent.Invocation,
@@ -77,62 +68,33 @@ func (p *MemoryPlugin) onEvent(
 		return nil, nil
 	}
 
-	// Skip events that carry no actual message payload. The runner/flow may
-	// emit synchronization events (start/wait/barrier) with a nil Response or
-	// no Choices. Without this guard, MemoryPlugin infers them as
-	// "external_input" with empty content, and they end up in the projection
-	// as misleading user-role placeholders that crowd out real context.
 	if evt.Response == nil || len(evt.Response.Choices) == 0 {
 		return evt, nil
 	}
 
-	// Skip streaming PARTIAL (delta) events: only aggregated events are stored
-	// and projected (unified-event-projection D8 invariant). A no-op for
-	// non-streaming deployments; for streaming, this keeps intermediate deltas
-	// (empty content, unaggregated tool_calls) out of the store and projection.
 	if evt.Response.IsPartial {
 		return evt, nil
 	}
 
-	// Skip degenerate empty final responses: an agent_output (assistant, no
-	// tool_calls) with empty content carries no information. Persisting it would
-	// pollute the projection/history with an empty assistant message and store a
-	// summary_len=0 record. This mirrors RunFlow's echo suppression and the
-	// consumer's drop, making "empty final = non-event" consistent at the storage
-	// layer too (async-result-delivery H1). Tool-call turns (empty content WITH
-	// tool_calls → thinking_plan) and non-empty finals are unaffected.
 	if m := evt.Response.Choices[0].Message; m.Content == "" && tagentevent.ExtractEventType(m) == tagentevent.TypeAgentOutput {
 		log.Debugf("[Memory] skip degenerate empty final (agent_output, no content/tool_calls)")
 		return evt, nil
 	}
 
-	// §4.4 (design 决策4): precise echo identification — BEFORE any key allocation or
-	// write. This attempt's EchoCredential (fresh per RunFlow; no whole-turn / "first
-	// envelope" state) names the exact merged input the event loop already committed.
-	// Skip ONLY when THIS event is that echo: root invocation (no parent), author=user,
-	// and normalized content equals the committed merged message. Sub-calls (parent≠nil),
-	// assistant/tool outputs, and any other user message fall through to the normal path.
 	if cred, ok := EchoCredentialFrom(ctx); ok && isExpectedInputEcho(inv, evt, cred) {
 		cred.Bind(evt.InvocationID)
-		log.Debugf("[Memory] §4.4: expected input echo (attempt=%s invocation=%s) already committed by the event loop — skipping store",
+		log.Debugf("[Memory] expected input echo (attempt=%s invocation=%s) already committed by the event loop — skipping store",
 			cred.AttemptToken, evt.InvocationID)
 		return evt, nil
 	}
 
-	// 1. Derive PartitionID from AgentName
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)
 
-	// 2. Generate Snowflake EventKey. (cold-eyes R2: durable replay dedup is
-	// owned by the event loop's persistBusEvent pre-persist — this pipeline
-	// skips pre-persisted user inputs entirely and NEVER consumes
-	// ErrDuplicateEventKey, whose semantics are a collision per D15.)
 	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
-	// 3. Infer event type and generate summary
 	eventType, eventSummary := p.inferEventInfo(evt)
 
-	// 4. Get parent key from independent causal chain (partitionID:sessionID)
 	sessionID := ""
 	if inv != nil && inv.Session != nil {
 		sessionID = inv.Session.ID
@@ -143,10 +105,8 @@ func (p *MemoryPlugin) onEvent(
 	parentKey := p.lastEventKeys[causalKey]
 	p.mu.Unlock()
 
-	// 5. Extract timestamp
 	timestamp := extractTimestamp(evt)
 
-	// 6. Build FullEvent (no ParentKey field — relationships via RelationStore)
 	fullEvent := memory.FullEvent{
 		EventKey:     eventKey,
 		PartitionID:  partitionID,
@@ -154,9 +114,6 @@ func (p *MemoryPlugin) onEvent(
 		EventSummary: eventSummary,
 		Timestamp:    timestamp,
 	}
-	// 归因盖章（TC0）：填充 FullEvent.Metadata——修复「Metadata 从未被填充」缺口
-	// （报告 §4.3 F1）。基线盖 agent_name（provenance，立即可用）；ctx 归因载体
-	// （WithAttribution）叠加 bundle_id/rollout_id（RunFlow 注入，T-EVO 版本归因）。
 	fullEvent.Metadata = make(map[string]string, 2)
 	if agentName != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyAgentName] = agentName
@@ -170,32 +127,18 @@ func (p *MemoryPlugin) onEvent(
 	if evt.Response != nil && len(evt.Response.Choices) > 0 {
 		msg := evt.Response.Choices[0].Message
 		fullEvent.Content = sanitizeAssistantContent(msg)
-		// §4.3: carry non-text parts on the PLUGIN store path too (parity with
-		// buildBusFact). Without this, volatile-mode user images and assistant/tool
-		// multimodal outputs stored via onEvent would lose their ContentParts, so a
-		// later compression/rebuild (which reads FullEvent.ContentParts) silently drops
-		// them — the plugin path must keep non-text alive as completely as durable.
-		// §4.3 all-chain parity with buildBusFact: carry non-text parts on the plugin store
-		// path so a later compression/rebuild (reads FullEvent.ContentParts) keeps the image.
 		fullEvent.ContentParts = msg.ContentParts
 		fullEvent.ToolCalls = msg.ToolCalls
 		fullEvent.ToolID = msg.ToolID
 		fullEvent.Response = evt.Response
 	}
 
-	// 7. Persist to MemoryStore, then project at the same synchronous point
-	// (write unification, unified-event-projection D1): the pipeline is the
-	// single place where a stored event also enters the invocation's
-	// projection. The projection's own EventKey idempotency (L1) makes
-	// re-delivery harmless. (§4.4: the durable input echo is already skipped
-	// earlier by the precise EchoCredential check — before any key allocation.)
 	stored := false
 	if p.memStore != nil {
 		if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
 			log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
 		} else {
 			stored = true
-			// Set parent relationship via RelationStoreProvider (content-relation separation)
 			if parentKey != 0 {
 				if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
 					if err := rsp.RelationStore().SetParent(eventKey, parentKey); err != nil {
@@ -207,11 +150,6 @@ func (p *MemoryPlugin) onEvent(
 				eventKey, partitionID, eventType, len(eventSummary))
 		}
 	}
-	// §4.5: the framework LOGS a plugin error and continues, so a swallowed store failure
-	// must NOT let the turn cross the durable commit gate. Downgrade this attempt's
-	// credential to non-verifiable; the model-entry gate / loop ack check then fail-closed.
-	// (Guarded on p.memStore != nil so a nil-store bypass scenario is not treated as an
-	// error.)
 	if !stored && p.memStore != nil {
 		if c, ok := EchoCredentialFrom(ctx); ok {
 			c.MarkRejected("memory store error during credentialed turn")
@@ -230,8 +168,6 @@ func (p *MemoryPlugin) onEvent(
 		}
 	}
 
-	// 8. Write back the storage identifiers to StateDelta (metadata contract:
-	// keys defined once in tagentevent, unified-event-projection D4)
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
@@ -240,13 +176,6 @@ func (p *MemoryPlugin) onEvent(
 	evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 	evt.StateDelta[tagentevent.MetaKeyEventSummary] = []byte(eventSummary)
 
-	// 9. Update independent causal chain (thread-safe). Bounded at
-	// maxLastEventKeys (implementation-hardening 5.3): the map is keyed by
-	// "partition:session" — long-running agents accumulate sessions, and an
-	// unbounded map leaks. Eviction drops the OLDEST entry by event key
-	// (int64 event keys are time-monotonic within a partition, so min-value
-	// = least-recently-updated causal chain — the one least likely to be a
-	// parent for future events).
 	p.mu.Lock()
 	p.lastEventKeys[causalKey] = eventKey
 	if len(p.lastEventKeys) > maxLastEventKeys {
@@ -257,13 +186,11 @@ func (p *MemoryPlugin) onEvent(
 	return evt, nil
 }
 
-// maxLastEventKeys bounds the causal-chain map (implementation-hardening 5.3):
-// long-running agents accumulate "partition:session" keys without bound.
+// maxLastEventKeys 是因果链 map 的上界：长寿命 agent 会持续累积 partition:session 键。
 const maxLastEventKeys = 4096
 
-// evictOldestLastEventKeysLocked drops oldest-by-event-key entries until the
-// map is back under the cap. Caller must hold p.mu. O(n) per overflow batch —
-// n ≤ cap(4096), amortized over thousands of inserts.
+// evictOldestLastEventKeysLocked 淘汰事件 key 最小（即最久未更新）的因果链直到回到上界；
+// 调用方必须持有 p.mu。每次溢出为 O(n)，n 不超过上界。
 func (p *MemoryPlugin) evictOldestLastEventKeysLocked() {
 	for len(p.lastEventKeys) > maxLastEventKeys {
 		oldestKey := ""
@@ -281,15 +208,9 @@ func (p *MemoryPlugin) evictOldestLastEventKeysLocked() {
 	}
 }
 
-// fakeEvtPrefixRe matches model-fabricated timeline prefixes at the start of
-// assistant output. The [evt_KEY|type] prefix is a SYSTEM-generated rendering
-// artifact; when a model imitates it, the fake key would poison prefixEventKey
-// (which skips already-prefixed content) and buildRetainedRefs' retained-key
-// scan. Strip it at the storage boundary.
 var fakeEvtPrefixRe = regexp.MustCompile(`^(\[evt_-?(0[xX])?[0-9a-fA-F]+\|[a-z_]+\]\s*)+`)
 
-// sanitizeAssistantContent strips fabricated [evt_...] prefixes from assistant
-// output before storage. Non-assistant content is stored verbatim.
+// sanitizeAssistantContent 只剥 assistant 正文里模型编造的 [evt_...] 前缀；其他角色逐字存储。
 func sanitizeAssistantContent(msg model.Message) string {
 	if msg.Role != model.RoleAssistant || msg.Content == "" {
 		return msg.Content
@@ -301,8 +222,7 @@ func sanitizeAssistantContent(msg model.Message) string {
 	return cleaned
 }
 
-// extractAgentName extracts the agent name from Invocation.
-// Falls back to "unknown" if not available, which maps to a default PartitionID.
+// extractAgentName 取 invocation 的 agent 名，缺失时回退 "unknown"（对应默认分区）。
 func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
 	if inv == nil {
 		return "unknown"
@@ -313,15 +233,10 @@ func (p *MemoryPlugin) extractAgentName(inv *agent.Invocation) string {
 	return "unknown"
 }
 
-// isExpectedInputEcho reports whether (inv, evt) is THIS attempt's expected merged
-// input echo. It requires, in order: a ROOT invocation (no parent — only the root
-// echoes the turn's input), author=="user", a user-role message, and content equal
-// (whitespace-normalized) to the merged message the event loop committed. Every
-// condition is verified to hold on the real framework echo (see
-// agent/echo_grounding_e2e_test.go), so requiring them cannot under-skip (which would
-// double-store the input); sub-calls / assistant / tool / other-user events fail it
-// and take the normal store path (§4.4). A nil credential-adjacent field is never a
-// match.
+// isExpectedInputEcho 判定 (inv, evt) 是否本次尝试期望的合并输入回显：要求根调用、
+// Author 为 user、消息角色为 user 且内容与凭据的合并输入在去空白后相等。
+// 每个条件都经真实框架回显验证成立，故不会少跳（少跳会双写）；子调用与助手/工具事件不满足条件，
+// 走正常存储路径。凭据或入参缺失时不算匹配。
 func isExpectedInputEcho(inv *agent.Invocation, evt *event.Event, cred *EchoCredential) bool {
 	if cred == nil || inv == nil || inv.GetParentInvocation() != nil {
 		return false
@@ -333,21 +248,13 @@ func isExpectedInputEcho(inv *agent.Invocation, evt *event.Event, cred *EchoCred
 	if m.Role != model.RoleUser {
 		return false
 	}
-	// Empty-mergedMessage tradeoff (§4.4, deliberate): an image-only durable input has
-	// empty Content, so this content-equality also matches a spurious empty user event.
-	// That is ACCEPTABLE and required: NOT skipping it would re-store the merged image
-	// echo the loop already committed (the exact §4.4 double-write this prevents), and
-	// the only over-skip is a genuinely content-less event that carries no information.
-	// Non-text echo identity (parts-aware) precision is validated in §4.7, not guessed
-	// here (an ungrounded parts-match would risk under-skip → double-store).
 	return normalizeEchoContent(m.Content) == normalizeEchoContent(cred.MergedMessage)
 }
 
-// normalizeEchoContent canonicalizes content for echo matching (trims surrounding
-// whitespace; the merged body itself is compared verbatim).
+// normalizeEchoContent 去除首尾空白，合并体本身逐字比较。
 func normalizeEchoContent(s string) string { return strings.TrimSpace(s) }
 
-// extractTimestamp extracts the timestamp from an Event.
+// extractTimestamp 返回事件的毫秒时间戳；nil 事件为 0。
 func extractTimestamp(evt *event.Event) int64 {
 	if evt == nil {
 		return 0
@@ -355,8 +262,7 @@ func extractTimestamp(evt *event.Event) int64 {
 	return evt.Timestamp.UnixMilli()
 }
 
-// inferEventInfo extracts event type and summary from an event using tagent/event package.
-// This uses the same unified classification as SummaryPlugin, ensuring consistency.
+// inferEventInfo 复用 tagent/event 的统一分类与摘要视图，与 SummaryPlugin 保持一致。
 func (p *MemoryPlugin) inferEventInfo(evt *event.Event) (string, string) {
 	if evt.Response == nil || len(evt.Response.Choices) == 0 {
 		return tagentevent.TypeExternalInput, ""

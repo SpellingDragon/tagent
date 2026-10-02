@@ -281,6 +281,8 @@ AgentToolWrapper.Call
 
 ---
 
+**父投影的兜底注入**：委派工具没带 `event_keys` 时，包装器要能用**父 agent 的投影**自行补上上下文，所以每个委派 wrapper 都必须持有父投影的引用；这条接线只能在 agent 构造完成之后做——投影是在构造内部才出现的，提前接会拿到空引用，兜底路径静默失效。
+
 ## 五、工具的 trpc-agent-go 集成
 
 ### 5.1 CallableTool 接口
@@ -311,6 +313,7 @@ type CallableTool interface {
 }
 ```
 
+<a id="tool-registry"></a>
 ### 5.2 工具注册机制（三阶段生命周期）
 
 tagent 采用**三阶段工具生命周期**：实现层指定 → 注册层注册 → 配置层组织。
@@ -431,6 +434,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 `PlainToolFactoryConfig` 携带运行时依赖（MemStore、SkillRepo、MCPRegistry（live，优先）/MCPToolSets（legacy）、Degradation（per-agent 退化状态机，mcp_call 据此上报 DepMCP）、ReadPartitionIDs、WorkspaceRoot、Properties），由 `buildPlainToolRef` 从当前 agent 的上下文注入。
 
+<a id="extra-params"></a>
 ### 5.x 附加参数通道（ToolRef.extra_params）
 
 子 agent 工具默认只有 `request`（+ `event_keys`）两个参数。需要**路由级小参数**（如 plan 的 `action`/`name`）时，经 ToolRef 声明：
@@ -474,6 +478,7 @@ ToolRef (kind=tool)  → buildPlainToolRef → ToolRegistry.GetPlainToolFactory(
 
 ---
 
+<a id="govx-entry-only"></a>
 ## 附：治理面工具五件套（tool/govx）
 
 `goal_declare` / `goal_list` / `goal_resolve` / `denial_query` / `approval_list`——
@@ -492,6 +497,7 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 
 ## 六、召回体系：recall（统一入口，参数即路由）+ RecallAgent（orchestrate 内部引擎）
 
+<a id="recall-unified-entry"></a>
 ### 6.0 recall — 统一召回入口（stable-context-compaction D7）
 
 **文件**：`tool/recall/recall.go`。模型侧单工具，**参数形态即路由**；确定性形态零 LLM：
@@ -504,6 +510,15 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 | `orchestrate: true` | LLM 多跳编排保留形态 | 未接线时返回明确指引，不静默降级；确定性形态永不进 LLM 路径 |
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
+
+<a id="declaration-stability"></a>
+### 声明区与向量能力隔离（前缀缓存稳定性）
+
+recall 一族工具对模型呈现的 `Declaration` 里**没有任何向量或嵌入参数**：四个工具（`recall_query`/`recall_get`/`recall_recent`/`memory_recall`）的声明在两次独立构造之间逐字节一致，与"这份部署有没有开向量"完全无关。
+
+是否做引擎融合在**运行期的召回路径**判定，判据是 accessor 暴露的引擎能力位 `MemoryEngine().Capabilities().Vector`（`tool/recall/memory_recall.go`）。注意存储侧另有一个 `SupportsVectorSearch()` 探测面（见[记忆架构](../memory/memory-architecture.md)的接口表），**召回路径不看它**——两者混淆会把"能力探测"错写成召回分支的前提。
+
+声明文本还不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。理由：声明是模型侧请求前缀的一部分，一旦随部署配置漂移，整段前缀缓存失效，且模型在两次会话里看到的是同一个工具的两种签名。
 
 ### 6.1 RecallAgent — orchestrate 分支的内部编排引擎（定位收窄）
 
@@ -618,6 +633,7 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 
 ---
 
+<a id="action-tool"></a>
 ## 八、ActionTool — 命令执行
 
 ### 8.1 执行模型（tmux + 任务层）
@@ -703,6 +719,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 
 > 历史注记：早期的 `MessageInjector` 闭环（ActionTool 直接向 EventBus 注入消息）与同步 `ActionExecutor`（`sh -c` 直接执行）已在任务层重构中移除，相应代码已删除；本文档不再保留其代码留存。
 
+<a id="tmux-monitor"></a>
 ## 九、TmuxMonitor — 状态监控
 
 ### 9.1 监控状态机
@@ -717,24 +734,16 @@ stateDiagram-v2
     FakeAlive --> FakeDead: 重启失败
     FakeDead --> [*]: 强制清理
     Stable --> Completed: pane 已死或进程退出
+    Stable --> TimedOut: TUI 会话静默越过假死阈（不探测假死/假活）
     Stable --> [*]: 清理
+    TimedOut --> [*]: 移出监控
     Completed --> [*]
     Error --> [*]
 ```
 
 ### 9.2 状态常量
 
-```go
-// action/tmux_executor.go
-const (
-    SessionRunning   SessionStatus = "running"
-    SessionStable    SessionStatus = "stable"
-    SessionCompleted SessionStatus = "completed"
-    SessionError     SessionStatus = "error"
-    SessionFakeDead  SessionStatus = "fake_dead"
-    SessionFakeAlive SessionStatus = "fake_alive"
-)
-```
+状态取值与各态的语义以**码面常量 `SessionStatus` 的 go doc 为唯一真源**（`tool/action/tmux_executor.go`，7 个态各带一行说明），本页只描述跃迁关系、不复制枚举清单——复制一份枚举就必然随着码面增删而失真。
 
 ### 9.3 detectSessionState — 状态检测逻辑（三态化）
 
@@ -764,22 +773,12 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 ### 9.5 配置参数
 
-```go
-// action/tmux_monitor.go
-func DefaultMonitorConfig() MonitorConfig {
-    return MonitorConfig{
-        Interval:                  3 * time.Second,   // 基础轮询节奏（自适应调度基础上限见 poll_schedule）
-        StableDuration:            60 * time.Second,  // 输出稳定判定
-        InteractiveStableDuration: 90 * time.Second,  // TUI 会话稳定判定
-        FakeDeadDuration:          150 * time.Second, // 假死判定
-        HeartbeatCommand:          "echo ping",
-        HeartbeatTimeout:          5 * time.Second,
-    }
-}
+取值与逐项语义以**码面为唯一真源**，本页不复制数值清单，也不另存一份常数：基础六项
+见 `tool/action/tmux_monitor.go` 的 `DefaultMonitorConfig`（各字段的一行语义就在
+`MonitorConfig` 的字段 doc 上），自适应叠加四项（dense 阶段与退避上限）见
+`tool/action/poll_schedule.go` 的 `DefaultPollSchedule` 与 `PollSchedule`。
 
-// 自适应轮询叠加参数（poll_schedule.go）：DenseInterval 1s / DenseDuration 10s /
-// BackoffFactor 2 / MaxInterval 60s——dense→sparse 边界即同步→异步 ack 点。
-```
+需要在此记住的只有一条语义：**dense→sparse 的边界，就是同步等待转异步 ack 的点**。
 
 ---
 
@@ -801,6 +800,7 @@ func DefaultMonitorConfig() MonitorConfig {
 
 - `ResidentMeta`（command/origin/task_id/…）持久化于 `resident_meta_dir`（可配，离 /tmp 的持久卷）；旧记录零值容错
 - spawn 全参 / 终态结局经 `SetResidentRecordSink` 写 `resident_session` 事件（**记录-only：不发 bus、不进投影**）
+- **汇接线归各 owner 自己**：换代时把该 sink 重挂到**所属 agent 自己**（早期形态只挂入口一处，其余 agent 的记录落不到自己的投影上），spawner 的 TTL 源因此读所属 agent 自己的记录投影，不到祖先。工厂分支只产配置、不产句柄，这条接线对它自然为空操作——同一条规则，无需特判
 
 ### 九·A.3 ReattachResidentSessions — 存活重挂
 
@@ -972,6 +972,12 @@ sequenceDiagram
 | 子工具配置 | 不可配置 | YAML 声明式 |
 | 扩展性 | 需修改 factory 代码 | 只需在 YAML 中添加 tool ref |
 
+工厂一旦被采用就必须交回声明：交回空声明**直接报错终止构建**，绝不静默回落到 config-driven 路径——回落会去服务另一个 agent，与操作者注册的并不是同一个，比构建失败更难发现。
+
+内置名（`knowledge`/`recall`/`action` 等）始终走 config-driven 路径：即便有人对内置名调用 `RegisterToolAgent`，装配也不采用该工厂——否则操作者在 YAML 里声明的 `Tools` 会被注册表**静默改写**，实际服务的 agent 与声明不一致。
+
+工厂分支不读取配置里的 `Tools`：工厂属主的工具面完全由它交回的声明决定，所以配置里写了不存在或被漏用的工具项，在这条分支上不会报错。两条分支的这一点差异必须由声明本身承载，不能指望工具表校验兜住。
+
 ### 13.3 为什么 tool 参数必须包含 event_keys？
 
 | 对比项 | 无 event_keys | 有 event_keys |
@@ -1075,6 +1081,135 @@ stateDiagram-v2
 
 
 ---
+
+<a id="recall-contract"></a>
+## 十六、`memory_recall` 的检索、降级与诚实回报契约
+
+### 两种输入形态与优先级
+`items`（索引卡/时间线上的 `[evt_…]` hex 票据）优先于 `query`：手里有票据时精确回补，只有模糊线索时才走关键词/语义检索。两者皆缺时返回明确的用法错误，不做猜测试图。
+
+票据的**写法宽容**也是契约的一部分：索引卡上印的是 `[evt_HEX|type]`，模型会原样回显，也可能剥掉方括号写成 `evt_HEX`，或只给裸 `HEX`——三种形态都必须落到同一个事件（解析以 hex 为先，十进制转写仅作老兼容）。从卡片行里整段切出的字符串必须可直接当票据使用，不要求调用方再做任何清洗。
+
+### 检索路径的分层与降级
+1. **引擎混合检索**（关键词 ∪ 向量，RRF 融合闭环在引擎内）：仅当查询词非空且 accessor 暴露记忆引擎且引擎声明支持向量时启用。协议与工具声明因此零变化，prefix-cache 不受影响。
+2. **纯关键词检索**：引擎不可用、引擎报错或引擎路径**零命中/全部悬挂**时降级到此，不向调用方报错，行为与未启用引擎时一致。
+
+两段式保持：引擎只返回排序票据（`EventKey`），全文再经批量水合取得；因此悬挂票据与已删除（墓碑）命中会**自然消失**，不会返回半条内容。
+
+### 三条放大与泄漏防线
+
+| 防线 | 规则 | 为什么 |
+|---|---|---|
+| 入参上界 | `limit` 钳到 `maxRecallLimit`(100)；`items` 水合条数钳到 `maxRecallItems`(50) | 模型一次投数百票据不得变成无界的 `GetEvent` 风暴 |
+| 超取补偿 | 引擎按 `limit*2` 返候选，水合过滤后再裁到 `limit` | 死键若占据 topK 会造成**静默少返回** |
+| 分区二次防线 | 水合前先按 `EventKey` 高位推出的分区过滤（`partitionAllowed`） | 分区 ID 是零成本可得的事实；持久化/重建链路一旦缺 pid，只靠存储侧过滤会**跨命名空间泄漏** |
+
+### 结果必须诚实，不得静默
+- 被上界丢弃的票据与命中数不足上限的截断，都写进 `Message` 报出（截断绝不静默）。
+- 未命中的票据逐条标记 `miss`，不静默省略——模型不能误以为自己"取到了"。
+- **零结果不等于"没有历史"**：空列表会让模型误判后端无记忆（生产环境实际观察到）。因此零结果时必须回报检索范围（本 agent 可读命名空间 = 自身 + `read_namespaces`）并给出确定性的下一步形态：改用 1~3 个更短关键词、加时间范围，或用手里的 `[evt_…]` 票据走 `items`。
+- 批量水合优先走 `GetEvents` 一次取回（文件段存储后端下避免 N 次 CLI 子进程），不支持批量时退化为逐键取回；水合保持入参顺序。
+- 可观测：`tagent.recall.query` 内部 span 只携带元数据（模式/分区数/查询长度/命中数），**查询内容零入 span**，避免敏感文本进入 trace 后端；未配置 OTLP 时零开销。
+
+### `orchestrate` 未接线时的回报
+`orchestrate` 形态是预留的多跳编排入口，其 LLM 编排引擎**尚未接线**本入口。此时必须显式回报"未接线"，并给出可自助完成的确定性迭代路径（`query` 取线索 → `items` 精确回补 → `turn_key` 重建整轮执行），**不得静默降级成单一形态**让模型误以为编排已执行。
+
+<a id="recall-subtools"></a>
+### 召回子工具的读回语义
+
+recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall` 共用同一套存储与协议：
+
+| 子工具 | 语义 |
+|---|---|
+| `memory_query` | 按时间范围（`since`/`until`，Unix 毫秒）与关键词过滤；**最新优先**返回；关键词是摘要与内容的**大小写无关子串匹配** |
+| `memory_get` | 按 key 取全文，可选 `include_parent` 一并带回父事件摘要（父关系存于关系存储，不占事件字段） |
+| `memory_recent` | 取最近的若干条，可加时间范围；条数有上限，超限即截断 |
+| `memory_trace` | 从给定 key 沿父链**回溯**，步数有上界 |
+
+**回溯与整轮重建的三条硬语义**：
+
+1. **断链即止**：回溯途中遇到取不到的事件就停止并保持已取到的部分——首事件即取不到才报错。绝不跨过断点猜测父链，否则会把不相干的事件接成一条链。
+2. **整轮重建以 `external_input` 为界**：从回合内任一事件往回走，记录到该回合的 `external_input`（回合起点）即停，然后**反转为时间正序**输出；这条边界保证返回的是"这一轮"而不是跨轮拼贴。摘要与内容同样受长度裁剪（`external_input` 的摘要本身就是全文，必须与内容一起裁，否则单条就能撑爆上下文）。
+3. **上界截断与"完整"分家**：`max_steps` 用尽而尚未走到 `external_input` 时，`capped` 为真而 `complete` 必为假——已取到的部分照常返回，但绝不把被截断的回溯说成整轮；只给一步时结果就只剩锚点事件本身。
+
+### `recall` 入口的两种形态
+
+顶层 `recall` 工具是确定性形态的入口（纯函数，不绕子 agent）；需要多跳编排时走 `orchestrate` 形态。其 LLM 编排引擎尚未接线该入口时的回报规则见「`memory_recall` 的检索、降级与诚实回报契约」。把 recall 作为**子 agent** 注册时，配置里的记忆存储必须与主 agent 同一个：写入由 `MemoryPlugin` 落在该存储，子工具也从该存储读，不同存储会让刚写入的事件召不回来。
+
+提示词与工具描述都是"文件优先、内嵌兜底"：解析顺序为 `PromptConfig` → `PromptDir` 下的 `recall_agent.md` → 内嵌默认提示词；描述同理取内联值 → 描述文件 → 内置默认。迭代与 token 上限有默认值，未显式配置即取默认（见 `Config` 字段注释）。
+
+<a id="knowledge-agent"></a>
+## 知识获取子 agent 的契约
+
+### 三层渐进披露（技能）
+
+技能内容**绝不整篇倾倒**，按需要的深度逐层给：
+
+| 层 | 工具 | 给什么 |
+|---|---|---|
+| 1 | `skill_search` | 名称＋描述（取自 YAML front matter） |
+| 2 | `skill_load` | 名称＋描述＋用法摘要（正文上限约 2500 字符，**按章节边界裁剪**） |
+| 3 | `command` | 需要更深细节时由调用方自己读技能文件 |
+
+裁剪只在限制区间的**后半段**里找最后一个 `## ` 章节标题下刀：否则会把正文在它第一个真实章节之前就切断。截断时必须把"原文总长＋完整文件路径＋如何继续读"一并回报，让调用方知道自己看到的是节选。文档清单只列路径不带内容，同样是为了不撑爆上下文。
+
+<a id="mcp-live-registry"></a>
+### MCP 工具发现读的是活注册表
+
+`mcp_discover` 在服务端集合来自**活注册表**时，是在**每次调用时**读取的：运行期新注册的服务立刻可被发现的，无需重建任何 agent；被移除的服务也立刻消失。静态 toolset 切片的变体只为兼容路径保留。一个服务工具为空（例如连接失败被框架吞掉而 yielded 无工具）**不得阻塞**其他服务的发现结果。
+
+发现结果必须**如实给出调用方式**：内容里带 `mcp_call(server=..., tool=...)` 的确切形式与输入 schema，且**不得**给出 exec 命令式的假调用路径——那会让模型照着不存在的方式去调。
+
+匹配策略除子串包含外还有 **token-AND 回退**（按空格/下划线/连字符切词，逐词命中即可）：模型发出的查询几乎不会是精确子串，`web search` 必须能匹配 `web_search_prime` 或描述里词序不同的表达。
+
+<a id="mcp-gateway-injection"></a>
+### `mcp_call` 网关用的是注入的那一份活注册表
+
+`mcp_call` 从配置面取得注册表（`PlainToolFactoryConfig.MCPRegistry`，见 `agent/tool_agent.go`）后交给 `NewCallTool`，因此它看见的服务集合与装配根同一份——运行期新注册的服务对已经建好的 agent 立刻可用。没有注册表可注入时**仍然必须构建成功**：注册表缺席只改变调用结果，不改变 agent 能否建立。
+
+调用侧的失败一律**以结果形态返回，而不是 Go error**，且带足以自纠的清单（`tool/mcp/call.go`）：
+
+| 情形 | 返回 |
+|---|---|
+| 一个服务都没注册 | 显式空态，并提示两条来源（配置文件声明／运行期注册） |
+| server 名不认识 | 具名报错 **＋ 当前可用服务清单** |
+| tool 不在该 server 上 | 具名报错 **＋ 该 server 的工具名清单**（服务枚举为空时上报 MCP 依赖故障） |
+| 内层调用失败 | 具名报错 **＋ 输入 schema**，让模型改参数重试而不是重复同一个名字 |
+
+只有清单可列时才列：空清单不会伪装成"可用服务为空"的成功结果。
+
+注册表从配置面取用时有一条语言层面的坑必须防：把一个 **typed nil**（类型化空指针）赋给接口字段，接口本身**并不等于 nil**，于是工厂里「有注册表就启用」的判断会假判成立，直到调用期才炸。装配侧必须在赋值之前判空——宁可不注入，也不要塞一个带类型的空指针进去。
+
+<a id="memory-query-hard"></a>
+### `memory_query` 的两条硬要求
+
+1. **必须注入可读分区**：在按分区隔离的存储上，空分区列表意味着**什么都不扫**。因此分区范围（自身命名空间优先 ＋ `read_namespaces`）必须在构造期注入。
+2. **存储故障不得塌缩成"没有历史"**：查询失败是强信号，若静默返回空集，agent 会误判"无相关知识"而去做冗余搜索，故障同时变得不可观测。因此失败时返回一条显式的 `query_error` 结果项，与"确实没有历史"可区分——这与召回侧对同一查询显式报错的语义对齐。
+
+### 两个 web 搜索工具是互补而非冗余
+
+`duckduckgo_search` 取即时答案类的事实/百科信息（快、结构化）；`web_search` 面向一般网页内容（时事、教程、文档），是**主用且最可靠**的那个。知识子 agent 默认同时挂上两者。
+
+### 子 agent 的装配默认与提示词解析
+
+知识获取只需很少迭代，故迭代上限默认 5；要的是准确而非创造性，故温度默认 0.3；输出上限默认 4096。提示词与工具描述都是文件优先、内嵌兜底（`PromptConfig` → `PromptDir/knowledge_agent.md` → 报错或内置默认）。记忆存储必须与主 agent 同源，否则刚写入的知识召不回。便捷包装 `NewTool` 用的是不含 `event_key` 解析的简单外壳；需要完整能力应走从 `Config` 构建 agent 的路径。
+
+<a id="websearch-backend"></a>
+### `web_search` 的后端与降级语义
+
+后端是**结构化搜索 API**（智谱 Web Search），取代早期"抓取多个搜索引擎 HTML"的实现：API 返回标题/链接/摘要/媒体/发布日期并自带意图识别，而引擎 HTML 随时会改版导致抓取无声失效。要点：
+
+| 情形 | 行为 |
+|---|---|
+| 未配置 API key | 返回带 `Message` 的空结果而**不报错**（缺配置不该中断 agent 回合）；key 取自环境变量，变量名由工具 `api_key_env` 属性配置，默认与模型 provider 共用 |
+| 空查询 | 直接返回 `Message: empty query`，不发请求 |
+| HTTP 非 200 或响应体带 API error 对象 | 组装成人类可读的 `Message` 返回，同样**不报错** |
+| 请求条数 | 钳进 1..50（API 上界） |
+| 响应条目 | 标题与链接都为空的条目丢弃；`media` 为空时来源回退为固定标签；发布日期追加进摘要 |
+| 响应体积 | **不做**读取大小限制：框架的输出限额工具会把超大返回自动转储成文件，且条数与 30s 超时已经约束了体积 |
+
+配置面（工具 `properties`）识别 `endpoint`、`api_key_env`、`search_engine`、`count` 四个键，未给的一律取默认。
+
 
 ## 已知缺口与演进方向
 

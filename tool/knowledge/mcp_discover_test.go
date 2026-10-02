@@ -50,18 +50,17 @@ func discoverCall(t *testing.T, discoverTool tool.Tool, query string) mcpDiscove
 }
 
 // TestMCPDiscover_Registry_LiveAddRemove verifies runtime registry
-// mutations are visible on the NEXT discover call without any rebuild.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 func TestMCPDiscover_Registry_LiveAddRemove(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
 
 	discover := NewMCPDiscoverToolWithRegistry(reg)
 
-	// Empty registry → empty result, no error.
 	out := discoverCall(t, discover, "webSearchPrime")
 	assert.Equal(t, 0, out.Count)
 
-	// Runtime-registered server becomes discoverable immediately.
 	reg.Add("web-search-prime", &discoverFakeToolSet{
 		name:  "web-search-prime",
 		tools: []tool.Tool{&discoverFakeTool{name: "webSearchPrime", desc: "Search the web"}},
@@ -71,14 +70,13 @@ func TestMCPDiscover_Registry_LiveAddRemove(t *testing.T) {
 	assert.Equal(t, "webSearchPrime", out.Tools[0].Name)
 	assert.Equal(t, "mcp:web-search-prime", out.Tools[0].Source)
 
-	// Removed server no longer appears.
 	reg.Remove("web-search-prime")
 	out = discoverCall(t, discover, "webSearchPrime")
 	assert.Equal(t, 0, out.Count)
 }
 
-// TestMCPDiscover_TruthfulInvocationGuidance verifies the content carries
-// the real mcp_call invocation + input schema and no exec-based lie.
+// TestMCPDiscover_TruthfulInvocationGuidance verifies the content carries the real mcp_call invocation and input schema.
+// - Nothing in it may claim an exec-based route that the tool does not have.
 func TestMCPDiscover_TruthfulInvocationGuidance(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
@@ -97,9 +95,8 @@ func TestMCPDiscover_TruthfulInvocationGuidance(t *testing.T) {
 	assert.NotContains(t, content, `command(mode="exec"`)
 }
 
-// TestMCPDiscover_NaturalLanguageQuery verifies token-AND fallback: a
-// space-separated natural query matches underscore-named tools and
-// reordered description words (the shape LLMs actually issue).
+// TestMCPDiscover_NaturalLanguageQuery verifies the token-AND fallback for natural-language queries.
+// - A space-separated query matches underscore-named tools and reordered description words, which is the shape LLMs actually issue.
 func TestMCPDiscover_NaturalLanguageQuery(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
@@ -112,23 +109,20 @@ func TestMCPDiscover_NaturalLanguageQuery(t *testing.T) {
 	})
 	discover := NewMCPDiscoverToolWithRegistry(reg)
 
-	// Natural language query (space-separated, reversed word order vs desc).
 	out := discoverCall(t, discover, "web search")
 	require.Equal(t, 1, out.Count, "token-AND fallback must match natural query")
 	assert.Equal(t, "web_search_prime", out.Tools[0].Name)
 
-	// Unrelated query still misses.
 	out = discoverCall(t, discover, "database migration")
 	assert.Equal(t, 0, out.Count)
 }
 
-// TestMCPDiscover_OneEmptyServerDoesNotBlockOthers approximates a failing
-// server (trpc swallows connection errors and yields no tools) alongside a
-// healthy one.
+// TestMCPDiscover_OneEmptyServerDoesNotBlockOthers pins that an empty server does not starve a healthy one.
+// - The fixture approximates a failing server, since trpc swallows connection errors and yields no tools.
 func TestMCPDiscover_OneEmptyServerDoesNotBlockOthers(t *testing.T) {
 	reg := toolmcp.NewRegistry()
 	t.Cleanup(func() { _ = reg.Close() })
-	reg.Add("dead", &discoverFakeToolSet{name: "dead"}) // no tools (unreachable)
+	reg.Add("dead", &discoverFakeToolSet{name: "dead"})
 	reg.Add("alive", &discoverFakeToolSet{
 		name:  "alive",
 		tools: []tool.Tool{&discoverFakeTool{name: "ping", desc: "ping tool"}},

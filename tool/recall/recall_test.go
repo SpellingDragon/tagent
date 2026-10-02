@@ -2,20 +2,28 @@ package recall
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
+	"time"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
+	"github.com/SpellingDragon/tagent/memory/engine"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestUnifiedRecall_Routing (stable-context-compaction D7): the unified entry
-// routes by parameter shape — items tickets / turn_key causal chain / query
-// semantic search / orchestrate reserved form.
+// TestUnifiedRecall_Routing 钉住 统一入口按参数形态选路，形态之间不得互相顶替。
+// - 给票据就是 items，给 `turn_key` 就是 turn（沿因果链回走），给自由文本就是 query；
+// - 只给时间范围也算 query 形态，按最新优先交回，两端与条数对得上；
+// - 只有 `since` 时取回其后的全部；
+// - `orchestrate: true` 如实回"未接线"并给出指引，条目必须为空，不得静默退成确定性形态；
+// - 什么形态都不给属于错误，不返回空结果。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-unified-entry
 func TestUnifiedRecall_Routing(t *testing.T) {
 	tl := NewRecallTool(seedUnifiedStore(t), []int{memory.PartitionIDFromEventKey(kIn)}).(tool.CallableTool)
 	call := func(args string) memoryRecallResult {
@@ -35,7 +43,6 @@ func TestUnifiedRecall_Routing(t *testing.T) {
 		res := call(`{"turn_key":"` + tagentevent.FormatEventKey(kOut) + `"}`)
 		assert.Equal(t, "turn", res.Mode)
 		require.NotEmpty(t, res.Entries)
-		// Oldest → newest, ending at the agent_output anchor.
 		last := res.Entries[len(res.Entries)-1]
 		assert.Equal(t, tagentevent.FormatEventKey(kOut), last.Key)
 	})
@@ -45,16 +52,10 @@ func TestUnifiedRecall_Routing(t *testing.T) {
 		assert.Equal(t, "query", res.Mode)
 	})
 
-	// Pure time-range recall: since/until WITHOUT any keyword — the primary
-	// shape for "recall recent history" requests (no keyword guessing). The
-	// retrieval layer matches all events inside the range. Seed timestamps are
-	// the hex key values (kIn < kTp < kAc < kOut < kA).
 	t.Run("pure time-range recall without keyword", func(t *testing.T) {
 		res := call(`{"since":` + fmt.Sprintf("%d", kIn) + `,"until":` + fmt.Sprintf("%d", kAc) + `}`)
 		assert.Equal(t, "query", res.Mode)
-		// Timestamp ∈ [kIn, kAc]: kIn, kTp, kAc; kOut/kA excluded.
 		require.Len(t, res.Entries, 3)
-		// Newest first.
 		assert.Equal(t, tagentevent.FormatEventKey(kAc), res.Entries[0].Key)
 		assert.Equal(t, tagentevent.FormatEventKey(kIn), res.Entries[2].Key)
 	})
@@ -77,7 +78,7 @@ func TestUnifiedRecall_Routing(t *testing.T) {
 	})
 }
 
-// Seed keys: input → thinking_plan → action_command → agent_output chain.
+// kIn Seed keys: input → thinking_plan → action_command → agent_output chain.
 var (
 	kIn  = int64(0x1201aa00000001)
 	kTp  = int64(0x1201aa00000002)
@@ -104,4 +105,275 @@ func seedUnifiedStore(t *testing.T) *memory.InMemoryStore {
 	require.NoError(t, rs.SetParent(kAc, kTp))
 	require.NoError(t, rs.SetParent(kOut, kAc))
 	return store
+}
+
+const hybridTestBaseMs = int64(1750000000000)
+
+// seedAndIndex 存事件到 store 并投递引擎索引。
+func seedAndIndex(t *testing.T, store *memory.InMemoryStore, eng memory.MemoryEngine, pid int, content string, ts int64) int64 {
+	t.Helper()
+	key := memory.NewSnowflakeEventKey(pid, ts)
+	if err := store.StoreEvent(key, memory.FullEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input",
+		Content: content, EventSummary: content, Timestamp: ts,
+	}); err != nil {
+		t.Fatalf("StoreEvent: %v", err)
+	}
+	if err := eng.Index(context.Background(), memory.IndexableEvent{
+		EventKey: key, PartitionID: pid, EventType: "external_input", Text: content, Timestamp: ts,
+	}); err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	return key
+}
+
+// TestRecallByQuery_HybridViaEngine 钉住 引擎带着向量能力在场时，query 路径照常产出结果。
+// - 向量就绪之后发起查询：命中非空，且那条语义相关的事件在其中；
+// - 本测不区分融合与关键词两条路（语料关键词本就重叠），只钉"引擎在场时查询有命中、目标事件在其中"。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestRecallByQuery_HybridViaEngine(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	emb := membed.NewMockEmbedder(128)
+	eng := engine.NewInMemoryEngine(store, emb, engine.EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
+	defer eng.Close()
+	accessor := engine.NewEngineBridge(store, eng)
+
+	kDB := seedAndIndex(t, store, eng, 1, "database connection error 数据库连接报错", hybridTestBaseMs)
+	seedAndIndex(t, store, eng, 1, "deploy service success 部署服务成功", hybridTestBaseMs+1000)
+	seedAndIndex(t, store, eng, 1, "weather sunny today 今天天气晴朗", hybridTestBaseMs+2000)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !accessor.SupportsVectorSearch() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !accessor.SupportsVectorSearch() {
+		t.Fatal("引擎向量应就绪")
+	}
+
+	res, err := recallByQuery(context.Background(), accessor, []int{1}, memoryRecallArgs{Query: "database error 报错", Limit: 3})
+	if err != nil {
+		t.Fatalf("recallByQuery: %v", err)
+	}
+	if res.Count == 0 {
+		t.Fatal("hybrid 应有命中")
+	}
+	hexDB := tagentevent.FormatEventKey(kDB)
+	found := false
+	for _, e := range res.Entries {
+		if e.Key == hexDB {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("database 事件应被 hybrid 召回, got %+v", res.Entries)
+	}
+}
+
+// TestRecallByQuery_NoEngineKeywordOnly 钉住 没有引擎时 query 退回纯关键词，与未启用增强能力时一致。
+// - 一个关键词命中一条，不多不少。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestRecallByQuery_NoEngineKeywordOnly(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	key := memory.NewSnowflakeEventKey(1, hybridTestBaseMs)
+	_ = store.StoreEvent(key, memory.FullEvent{
+		EventKey: key, PartitionID: 1, EventType: "external_input",
+		Content: "deploy failure", EventSummary: "deploy failure", Timestamp: hybridTestBaseMs,
+	})
+	res, err := recallByQuery(context.Background(), store, []int{1}, memoryRecallArgs{Query: "deploy", Limit: 5})
+	if err != nil {
+		t.Fatalf("recallByQuery: %v", err)
+	}
+	if res.Count != 1 {
+		t.Fatalf("纯关键词应召回 1 条, got %d", res.Count)
+	}
+}
+
+// spyAccessor records GetEvent calls — the cap must bound hydration cost,
+// not just the result length.
+type spyAccessor struct {
+	memory.MemoryStore
+	gets int
+}
+
+func (s *spyAccessor) GetEvent(key int64) (*memory.FullEvent, error) {
+	s.gets++
+	return &memory.FullEvent{EventKey: key, EventType: "external_input", Content: "x"}, nil
+}
+
+// TestRecallByItems_BoundedHydration 钉住 上界钳的是逐条取回的次数，不只是返回长度；截断必须报出丢弃数。
+// - 60 张票据只发起 `maxRecallItems` 次取回；
+// - 条目数等于上界，消息里写明丢弃了多少张。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestRecallByItems_BoundedHydration(t *testing.T) {
+	acc := &spyAccessor{}
+	items := make([]recallItem, 0, 60)
+	for i := 0; i < 60; i++ {
+		items = append(items, recallItem{Key: fmt.Sprintf("%x", i+1)})
+	}
+	res := recallByItems(acc, items)
+
+	if acc.gets != maxRecallItems {
+		t.Fatalf("GetEvent calls = %d, want %d (hydration must be bounded)", acc.gets, maxRecallItems)
+	}
+	if len(res.Entries) != maxRecallItems {
+		t.Fatalf("entries = %d, want %d", len(res.Entries), maxRecallItems)
+	}
+	if !strings.Contains(res.Message, "10 of 60 tickets dropped") {
+		t.Fatalf("Message must report the truncation, got: %q", res.Message)
+	}
+}
+
+// TestRecallByItems_UnderCap_NoTruncationNote 钉住 诚实是双向的：没截断就不许报截断。
+// - 三张票据全量取回，消息为空，取回次数恰好 3。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestRecallByItems_UnderCap_NoTruncationNote(t *testing.T) {
+	acc := &spyAccessor{}
+	items := make([]recallItem, 0, 3)
+	for i := 0; i < 3; i++ {
+		items = append(items, recallItem{Key: fmt.Sprintf("%x", i+1)})
+	}
+	res := recallByItems(acc, items)
+	if res.Message != "" {
+		t.Fatalf("under-cap Message = %q, want empty", res.Message)
+	}
+	if acc.gets != 3 {
+		t.Fatalf("GetEvent calls = %d, want 3", acc.gets)
+	}
+}
+
+// seedManyPartitions 同 memory_recall_test.seedPartitions：隔离契约下查询
+// 必须显式授权种子事件所在分区（2.7）。
+func seedManyPartitions() []int {
+	return []int{memory.PartitionIDFromEventKey(1000)}
+}
+
+func seedManyStore(t *testing.T, n int) memory.MemoryStore {
+	t.Helper()
+	store := memory.NewInMemoryStore()
+	for i := 0; i < n; i++ {
+		key := int64(1000 + i)
+		if err := store.StoreEvent(key, memory.FullEvent{
+			EventKey:     key,
+			EventType:    "agent_output",
+			EventSummary: "部署记录",
+			Content:      "部署记录内容",
+			Timestamp:    int64(1710000000000 + i*1000),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	return store
+}
+
+// TestTruncationHint_AtLimit: results hitting the limit carry the notice.
+func TestTruncationHint_AtLimit(t *testing.T) {
+	tl := NewMemoryRecallTool(seedManyStore(t, 20), seedManyPartitions())
+	out := callMemoryRecall(t, tl, `{"query":"部署","limit":5}`)
+
+	if !strings.Contains(out, "已达 limit") {
+		t.Errorf("hitting limit must warn about truncation, got: %s", out)
+	}
+}
+
+// TestTruncationHint_BelowLimit 钉住 结果已全量返回时不得给"也许还有"的暗示。
+// - 3 条结果配 10 的上界，提示一句都不许出现。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestTruncationHint_BelowLimit(t *testing.T) {
+	tl := NewMemoryRecallTool(seedManyStore(t, 3), seedManyPartitions())
+	out := callMemoryRecall(t, tl, `{"query":"部署","limit":10}`)
+
+	if strings.Contains(out, "已达 limit") {
+		t.Errorf("complete result set must not warn about truncation, got: %s", out)
+	}
+}
+
+// TestTruncationHint_Unit 钉住 截断提示的三态判定，含 `limit<=0` 守卫。
+// - 条数等于上界给提示，严格小于不给；
+// - 上界为非正数时一律不给。
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
+func TestTruncationHint_Unit(t *testing.T) {
+	if got := truncationHint(10, 10); got == "" {
+		t.Error("count == limit must produce a hint")
+	}
+	if got := truncationHint(9, 10); got != "" {
+		t.Errorf("count < limit must produce no hint, got %q", got)
+	}
+	if got := truncationHint(0, 0); got != "" {
+		t.Errorf("limit<=0 must produce no hint, got %q", got)
+	}
+}
+
+// TestRecallTools_DeclarationDeterministic 钉住 四个 recall 工具的声明构造是确定的：两次独立构造逐字节一致。
+// - 四个工具一个都不能少；
+// - 两次构造用的是同一份配置，所以钉住的是"构造不引入随机性"；要钉"与向量配置无关"，需要再接一个引擎做对照。
+// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
+func TestRecallTools_DeclarationDeterministic(t *testing.T) {
+	parts := []int{1}
+	snapshot := func() map[string]string {
+		accessor := memory.NewInMemoryStore()
+		tools := map[string]tool.Tool{
+			"recall_query":  NewRecallQueryTool(accessor, parts),
+			"recall_get":    NewRecallGetTool(accessor),
+			"recall_recent": NewRecallRecentTool(accessor, parts),
+			"memory_recall": NewMemoryRecallTool(accessor, parts),
+		}
+		out := make(map[string]string, len(tools))
+		for name, tl := range tools {
+			raw, err := json.Marshal(tl.Declaration())
+			if err != nil {
+				t.Fatalf("%s Declaration marshal: %v", name, err)
+			}
+			out[name] = string(raw)
+		}
+		return out
+	}
+
+	a, b := snapshot(), snapshot()
+	for name := range a {
+		if a[name] != b[name] {
+			t.Errorf("%s Declaration 非确定性（配置前后应逐字节一致）:\nA=%s\nB=%s", name, a[name], b[name])
+		}
+	}
+	if len(a) != 4 {
+		t.Fatalf("应覆盖 4 个 recall 工具, got %d", len(a))
+	}
+}
+
+// TestRecallTools_DeclarationVectorFree 钉住 声明文本里没有向量与嵌入的实现字样。
+// - `embedding`、`embed_`、向量存储、`hnsw`、`rrf` 任意一条出现都算泄漏。
+// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
+func TestRecallTools_DeclarationVectorFree(t *testing.T) {
+	accessor := memory.NewInMemoryStore()
+	tl := NewRecallQueryTool(accessor, []int{1})
+	raw, _ := json.Marshal(tl.Declaration())
+	lower := toLower(string(raw))
+	for _, leak := range []string{"embedding", "embed_", "vectorstore", "hnsw", "rrf"} {
+		if contains(lower, leak) {
+			t.Errorf("recall_query Declaration 泄漏向量实现字样 %q（声明区应与向量配置无关）: %s", leak, raw)
+		}
+	}
+}
+
+// toLower 本地小工具（避免为测试引入 strings，保持包内自足）。
+func toLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
+}
+
+func contains(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }

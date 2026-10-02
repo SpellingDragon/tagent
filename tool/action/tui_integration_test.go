@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// ==================== Task 9.1: 辅助函数 ====================
-
 // qodercliAvailable checks if qodercli binary is available on the system.
 func qodercliAvailable() bool {
 	_, err := exec.LookPath("qodercli")
@@ -94,8 +92,11 @@ func sessionHasTimedOut(transitions []string) bool {
 	return false
 }
 
-// ==================== Task 9.2: qodercli TUI 完整生命周期 ====================
-
+// TestTUIIntegration_QoderCLI_Lifecycle 钉住真机 TUI 会话的完整状态旅程：可达稳定、输入可回到运行中、静默越阈走 TimedOut。
+// - TUI 会话全程不进入 FakeDead 与 FakeAlive
+// - 判为 TimedOut 之后会话从监控中消失
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
 func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -111,7 +112,6 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 		transitions = append(transitions, fmt.Sprintf("%s→%s", oldS, newS))
 	}
 
-	// Create tmux session running qodercli
 	ctx := context.Background()
 	session, err := executor.CreateSession(ctx, TmuxCreateOptions{
 		Command: "qodercli",
@@ -120,19 +120,16 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 		t.Fatalf("failed to create tmux session: %v", err)
 	}
 
-	// Cleanup: stop monitor and kill session
 	t.Cleanup(func() {
 		monitor.Stop()
 		executor.KillSession(session.ID)
 	})
 
-	// Wait for qodercli to start and verify it's still running
 	time.Sleep(2 * time.Second)
 	if !executor.SessionExists(session.ID) {
 		t.Skip("qodercli exited immediately (likely missing config), skipping lifecycle test")
 	}
 
-	// Add to monitor as TUI session
 	monitor.AddSession(&TmuxSession{
 		ID:        session.ID,
 		Name:      session.Name,
@@ -143,7 +140,6 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	})
 	monitor.Start()
 
-	// Phase 1: Wait for Stable (qodercli TUI should stabilize after initial render)
 	if !waitForStatus(t, monitor, session.ID, SessionStable, 15*time.Second) {
 		mu.Lock()
 		tr := append([]string{}, transitions...)
@@ -152,15 +148,11 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	}
 	t.Logf("Phase 1: qodercli reached Stable")
 
-	// Phase 2: Send input to trigger Running
 	err = executor.SendKeys(session.ID, "a")
 	if err != nil {
 		t.Fatalf("failed to send keys: %v", err)
 	}
 
-	// Wait for Running (output should change after input)
-	// Note: This may not always trigger if qodercli doesn't echo input immediately.
-	// We log but don't fail if Running is not reached.
 	reachedRunning := waitForStatus(t, monitor, session.ID, SessionRunning, 5*time.Second)
 	if reachedRunning {
 		t.Logf("Phase 2: qodercli reached Running after input")
@@ -168,7 +160,6 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 		t.Logf("Phase 2: qodercli did not reach Running after input (may not echo single chars)")
 	}
 
-	// Phase 3: Wait for session removal (TUI sessions are removed right after TimedOut)
 	if !waitForSessionRemoved(t, monitor, session.ID, 15*time.Second) {
 		mu.Lock()
 		tr := append([]string{}, transitions...)
@@ -177,7 +168,6 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	}
 	t.Logf("Phase 3: qodercli TUI session removed after TimedOut")
 
-	// Verify TimedOut is in transitions
 	mu.Lock()
 	if !sessionHasTimedOut(transitions) {
 		mu.Unlock()
@@ -186,12 +176,10 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// Verify session is removed from monitor
 	if _, ok := monitor.GetSession(session.ID); ok {
 		t.Errorf("qodercli TUI session was not removed from monitor after TimedOut")
 	}
 
-	// Verify no FakeDead in transitions (TUI should skip heartbeat/kill path)
 	mu.Lock()
 	defer mu.Unlock()
 	for _, tr := range transitions {
@@ -203,8 +191,7 @@ func TestTUIIntegration_QoderCLI_Lifecycle(t *testing.T) {
 	t.Logf("Lifecycle complete. Transitions: %v", transitions)
 }
 
-// ==================== Task 9.3: qodercli 会话超时后 tmux session 被正确清理 ====================
-
+// TestTUIIntegration_QoderCLI_Cleanup 钉住 TUI 会话静默越阈后的清理：会话被移出监控，不留半清理状态。
 func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -224,13 +211,11 @@ func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 		executor.KillSession(session.ID)
 	})
 
-	// Verify qodercli is still running
 	time.Sleep(2 * time.Second)
 	if !executor.SessionExists(session.ID) {
 		t.Skip("qodercli exited immediately, skipping cleanup test")
 	}
 
-	// Add to monitor and start
 	monitor.AddSession(&TmuxSession{
 		ID:        session.ID,
 		Name:      session.Name,
@@ -241,21 +226,10 @@ func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 	})
 	monitor.Start()
 
-	// Wait for TimedOut and session removal
 	if !waitForSessionRemoved(t, monitor, session.ID, 25*time.Second) {
 		t.Fatal("qodercli TUI session was not removed from monitor within 25s")
 	}
 
-	// Verify the tmux session is killed (SessionExists returns false)
-	// The monitor removes the session from its map, but we need to verify
-	// the actual tmux session is also killed.
-	// Note: TUI sessions with SessionTimedOut are removed from the monitor map
-	// but the tmux session itself may still exist (TUI skips KillSession).
-	// The agent is expected to handle the TimedOut notification and decide
-	// whether to kill the session.
-	//
-	// For this test, we verify that the monitor no longer tracks the session,
-	// and we manually kill it in cleanup.
 	if _, ok := monitor.GetSession(session.ID); ok {
 		t.Errorf("session should have been removed from monitor after TimedOut")
 	}
@@ -263,8 +237,7 @@ func TestTUIIntegration_QoderCLI_Cleanup(t *testing.T) {
 	t.Logf("qodercli TUI session properly cleaned up from monitor")
 }
 
-// ==================== Task 9.4: 非 TUI 命令走 fakeDead 路径而非 TimedOut ====================
-
+// TestTUIIntegration_NonTUI_NotTimedOut 钉住非 TUI 会话的默认判定：输出稳定后长期静默只记 Stable，不进入 TimedOut。
 func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -292,18 +265,16 @@ func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 		executor.KillSession(session.ID)
 	})
 
-	// Add to monitor as NON-TUI session
 	monitor.AddSession(&TmuxSession{
 		ID:        session.ID,
 		Name:      session.Name,
 		Command:   "echo hello && sleep 30",
 		Status:    SessionRunning,
 		CreatedAt: time.Now(),
-		IsTUI:     false, // Non-TUI: should go through FakeDead, not TimedOut
+		IsTUI:     false,
 	})
 	monitor.Start()
 
-	// Wait for Stable (echo hello produces output, then sleep 30 has no new output)
 	if !waitForStatus(t, monitor, session.ID, SessionStable, 10*time.Second) {
 		mu.Lock()
 		tr := append([]string{}, transitions...)
@@ -312,11 +283,8 @@ func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 	}
 	t.Logf("non-TUI session reached Stable")
 
-	// Wait beyond fakeDeadDuration (3s) + buffer
-	// Non-TUI sessions should NOT get TimedOut
 	time.Sleep(8 * time.Second)
 
-	// Check transitions: verify no TimedOut
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -324,13 +292,10 @@ func TestTUIIntegration_NonTUI_NotTimedOut(t *testing.T) {
 		t.Errorf("non-TUI session should NOT get TimedOut. Transitions: %v", transitions)
 	}
 
-	// The session should have gone through FakeDead or FakeAlive (heartbeat path),
-	// but definitely NOT TimedOut.
 	t.Logf("non-TUI session transitions: %v (no TimedOut — correct)", transitions)
 }
 
-// ==================== Task 9.5: 多个 qodercli TUI 会话并发运行且独立超时 ====================
-
+// TestTUIIntegration_QoderCLI_MultiSession 钉住多个 TUI 会话各自独立判定：各自到达 Stable、各自静默越阈移出，互不牵连。
 func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 	skipIfNotIntegration(t)
 
@@ -339,7 +304,6 @@ func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create 2 qodercli sessions
 	session1, err := executor.CreateSession(ctx, TmuxCreateOptions{
 		Command: "qodercli",
 	})
@@ -361,14 +325,12 @@ func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 		executor.KillSession(session2.ID)
 	})
 
-	// Wait for qodercli instances to start
 	time.Sleep(2 * time.Second)
 
 	if !executor.SessionExists(session1.ID) || !executor.SessionExists(session2.ID) {
 		t.Skip("one or both qodercli instances exited immediately, skipping multi-session test")
 	}
 
-	// Add both to monitor as TUI sessions
 	monitor.AddSession(&TmuxSession{
 		ID:        session1.ID,
 		Name:      session1.Name,
@@ -387,7 +349,6 @@ func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 	})
 	monitor.Start()
 
-	// Wait for both to reach Stable
 	s1Stable := waitForStatus(t, monitor, session1.ID, SessionStable, 15*time.Second)
 	s2Stable := waitForStatus(t, monitor, session2.ID, SessionStable, 15*time.Second)
 
@@ -396,7 +357,6 @@ func TestTUIIntegration_QoderCLI_MultiSession(t *testing.T) {
 	}
 	t.Logf("both qodercli sessions reached Stable")
 
-	// Wait for both to be removed (TimedOut)
 	s1Removed := waitForSessionRemoved(t, monitor, session1.ID, 25*time.Second)
 	s2Removed := waitForSessionRemoved(t, monitor, session2.ID, 25*time.Second)
 

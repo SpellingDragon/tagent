@@ -1,13 +1,13 @@
 package engine
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
-	membed "github.com/SpellingDragon/tagent/memory/embedder"
-	"github.com/SpellingDragon/tagent/memory/kv"
-
 	"context"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/memory"
+	membed "github.com/SpellingDragon/tagent/memory/embedder"
+	"github.com/SpellingDragon/tagent/memory/kv"
 )
 
 func waitForKVKeys(t *testing.T, kv memory.KVStore, prefix string, want int, timeout time.Duration) {
@@ -24,11 +24,11 @@ func waitForKVKeys(t *testing.T, kv memory.KVStore, prefix string, want int, tim
 	t.Fatalf("等待 KV 向量持久化超时: got %d want >=%d", len(pairs), want)
 }
 
-// TestInMemoryEngine_KVPersistenceRebuild 验证 rustviking-backed 持久化闭环：
-// engine1 索引事件 → 向量序列化入 KV → 关闭；engine2 用同一 KV 启动 → 从 KV 重建
-// 内存索引 → 向量检索命中 engine1 索引的事件（跨"重启"语义召回恢复）。
+// TestInMemoryEngine_KVPersistenceRebuild 钉住持久化闭环：一个引擎索引并落 KV，另一个引擎
+//
+// 契约: docs/wiki/memory/memory-architecture.md#vector-persist
 func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
-	kv := kv.NewMockRustVikingClient() // 实现 memory.KVStore，模拟持久后端
+	kv := kv.NewMockRustVikingClient()
 	emb := membed.NewMockEmbedder(64)
 	cfg := EngineConfig{EmbedFlushInterval: 10 * time.Millisecond, KV: kv, VecKeyPrefix: "test:vec:"}
 	ctx := context.Background()
@@ -36,7 +36,6 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	k1 := memory.NewSnowflakeEventKey(1, testBaseMs)
 	k2 := memory.NewSnowflakeEventKey(1, testBaseMs+1000)
 
-	// engine1：索引 → 持久化到 KV。
 	e1 := NewInMemoryEngine(nil, emb, cfg)
 	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: k1, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "database connection error 数据库报错", Timestamp: testBaseMs})
 	_ = e1.Index(ctx, memory.IndexableEvent{EventKey: k2, PartitionID: 1, EventType: TypeExternalInputProbe, Text: "deploy service success 部署成功", Timestamp: testBaseMs + 1000})
@@ -45,7 +44,6 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 		t.Fatalf("e1.Close: %v", err)
 	}
 
-	// engine2：同一 KV 启动 → 异步重建。
 	e2 := NewInMemoryEngine(nil, emb, cfg)
 	defer e2.Close()
 	deadline := time.Now().Add(2 * time.Second)
@@ -59,7 +57,6 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 		t.Fatalf("重建后向量数应 >=2, got %d", vc)
 	}
 
-	// 向量检索命中 engine1 索引的事件（跨"重启"恢复）。
 	hits, err := e2.Retrieve(ctx, memory.RetrievalQuery{Query: "database error 报错", PartitionIDs: []int{1}, Mode: memory.ModeVector, Limit: 5})
 	if err != nil {
 		t.Fatalf("Retrieve: %v", err)
@@ -75,8 +72,7 @@ func TestInMemoryEngine_KVPersistenceRebuild(t *testing.T) {
 	}
 }
 
-// TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删 KV 持久向量，
-// 重建后不复活已删事件。
+// TestInMemoryEngine_RemoveDeletesPersisted 验证 Remove 同步删除 KV 中的持久向量，重建后已删事件不复活。
 func TestInMemoryEngine_RemoveDeletesPersisted(t *testing.T) {
 	kv := kv.NewMockRustVikingClient()
 	emb := membed.NewMockEmbedder(64)
@@ -103,7 +99,6 @@ func TestInMemoryEngine_NoKVPureInMemory(t *testing.T) {
 	emb := membed.NewMockEmbedder(64)
 	e := NewInMemoryEngine(nil, emb, EngineConfig{EmbedFlushInterval: 10 * time.Millisecond})
 	defer e.Close()
-	// 无 KV → rebuildDone 立即为真（无重建）。
 	if !e.RebuildDone() {
 		t.Fatal("无 KV 时 RebuildDone 应为真")
 	}

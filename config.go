@@ -61,14 +61,14 @@ type Config struct {
 	// XAnchors is an extension-reserved key ("x-" convention): YAML anchors
 	// shared across the file are declared under it and ignored by the
 	// framework. Declared so strict parsing accepts the convention
-	// (implementation-hardening 6.1); the framework never reads it.
+	//; the framework never reads it.
 	XAnchors map[string]any `json:"x-anchors,omitempty" yaml:"x-anchors,omitempty"`
 
 	// Entry specifies which agent in the Agents map is the top-level agent.
 	// Defaults to "tagent" if empty.
 	Entry string `json:"entry" yaml:"entry"`
 
-	// ResidentMetaDir（R3，resident-continuity-r2-r4 2.5）：常驻会话元数据目录
+	// ResidentMetaDir：常驻会话元数据目录
 	//（默认 $TMPDIR/tagent-resident-meta；指向持久卷可跨机器重启审计/TTL sweep）。
 	ResidentMetaDir string `json:"resident_meta_dir" yaml:"resident_meta_dir"`
 
@@ -101,12 +101,10 @@ type Config struct {
 
 	// MCPServers maps server name → MCP connection declaration. Servers are
 	// loaded into the process-level MCP registry consumed by mcp_discover /
-	// mcp_call (mcp-discovery-execution-loop). Editing this section in the
+	// mcp_call. Editing this section in the
 	// config file hot-syncs the registry (lazy mtime check) — no restart,
 	// and no agent tool declaration changes (prompt prefix stays stable).
 	MCPServers map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
-
-	// ===== Runtime configuration (was in config.yaml) =====
 
 	// APIEndpoint is the LLM API base URL (e.g., "https://open.bigmodel.cn/api/paas/v4").
 	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty"`
@@ -154,7 +152,7 @@ type Config struct {
 	// 现状零行为变化）。开启后经 GovernanceGate 对工具调用做风险分级 + 预算 + goal + critical 批准。
 	Governance GovernanceConfig `json:"governance,omitempty" yaml:"governance,omitempty"`
 
-	// Evolution 配置 git 原生自进化（self-evolution-git-native）。默认零值 = 关闭（现状）。
+	// Evolution 配置 git 原生自进化。默认零值 = 关闭（现状）。
 	// 开启后文件即真源（热重载直生效）+ refine register 登记（[self-improve] commit+评估窗口）。
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"evolution,omitempty"`
 
@@ -165,45 +163,47 @@ type Config struct {
 // GovernanceConfig 是 T-G 治理子系统的配置（映射到 governance.GateConfig + 各管理器）。
 type GovernanceConfig struct {
 	Enabled     bool   `json:"enabled" yaml:"enabled"`
-	Enforcement string `json:"enforcement,omitempty" yaml:"enforcement,omitempty"` // warn(默认,记账放行)|strict(拒绝)
-	Dir         string `json:"dir,omitempty" yaml:"dir,omitempty"`                 // budget/approval 持久化目录(空=纯内存)
+	Enforcement string `json:"enforcement,omitempty" yaml:"enforcement,omitempty"`
+	// Dir 是 budget 与 approval 记录的持久化目录；空 = 纯内存（进程重启即失）。
+	Dir string `json:"dir,omitempty" yaml:"dir,omitempty"`
 
-	BudgetWindowMinutes int `json:"budget_window_minutes,omitempty" yaml:"budget_window_minutes,omitempty"` // 滑动窗口(默认60)
-	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`                 // 窗口内 high 上限(默认20)
-	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`             // 窗口内 medium 上限(默认200)
+	BudgetWindowMinutes int `json:"budget_window_minutes,omitempty" yaml:"budget_window_minutes,omitempty"`
+	MaxHighRisk         int `json:"max_high_risk,omitempty" yaml:"max_high_risk,omitempty"`
+	MaxMediumRisk       int `json:"max_medium_risk,omitempty" yaml:"max_medium_risk,omitempty"`
 
-	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"` // 须挂 goal 的 trigger source(默认空=不启用 goal 门;待 goal_declare 工具交付后再配,见 gate.go A7)
-	// 注:critical 操作恒走 ApprovalManager 异步批准(gate.go critical 分支),无开关。
-	// 此前的 RequireApproval 是从未被读取的死字段(A5:全仓仅定义处出现),已删除。
+	// GoalRequiredFor 列出必须挂 active goal 才允许执行的 trigger source；空 = 不启用该门。
+	GoalRequiredFor []string `json:"goal_required_for,omitempty" yaml:"goal_required_for,omitempty"`
 }
 
-// EvolutionConfig 是 git 原生自进化配置（self-evolution-git-native：bundle/发布道已退役，
+// EvolutionConfig 是 git 原生自进化配置（bundle/发布道已退役，
 // 文件即真源+git 版本层+建议式评估）。
 type EvolutionConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
 	// ProtectedPaths 是 refine register 的受控路径 patterns（段匹配：`**` 任意段序列/`*` 段内通配）。
 	// 默认三目录：resources/prompts/**, skills/**, scripts/**（scripts 缺失则冥想脚本产物断链）。
 	ProtectedPaths []string `json:"protected_paths,omitempty" yaml:"protected_paths,omitempty"`
-	// JudgeDelaySeconds 是 register 后到评估的延迟窗（原 canary_hold 语义，W4 迁移；0=立即）。
+	// JudgeDelaySeconds 是 register 后到评估的延迟窗，承接 canary_hold 的语义（0=立即评估）。
 	JudgeDelaySeconds int `json:"judge_delay_seconds,omitempty" yaml:"judge_delay_seconds,omitempty"`
 
-	// Guardrail 三阈值（Minor①独立评审：每门独立可配置）。零值走 GuardrailConfig 默认；
-	// MaxNegFBRate 负值=显式禁用负反馈判据。
+	// MaxDenialRate 与同组的 MaxCriticalRate、MaxNegFBRate 是 Guardrail 的三道独立阈值：
+	// 每门单独可配，零值走 GuardrailConfig 默认，MaxNegFBRate 取负值表示显式禁用负反馈判据。
 	MaxDenialRate   float64 `json:"max_denial_rate,omitempty" yaml:"max_denial_rate,omitempty"`
 	MaxCriticalRate float64 `json:"max_critical_rate,omitempty" yaml:"max_critical_rate,omitempty"`
 	MaxNegFBRate    float64 `json:"max_neg_fb_rate,omitempty" yaml:"max_neg_fb_rate,omitempty"`
 
-	// 后验 LLM-judge 参数（M8 §8.4：零值走 judge 内部默认 minSamples=5/threshold=0.5/timeout=60s）。
-	// Judge is the unified ModelRef for the evolution judge LLM. Zero value
-	// keeps the legacy behavior: fall back to the entry agent's model.
+	// Judge is the unified ModelRef for the evolution judge LLM; a zero value falls back
+	// to the entry agent’s model. The judge’s judgment knobs and their zero-value
+	// defaults are the constructor’s contract (evolution.NewLLMJudgeEvaluator).
 	Judge ModelRef `json:"judge,omitempty" yaml:"judge,omitempty"`
-	// Deprecated legacy flat judge knobs (compat aliases, folded into Judge):
+	// JudgeModel 与同组五项平面判官参数（JudgeProvider、JudgeReasoningEffort、JudgeMinSamples、
+	// JudgePassThreshold、JudgeTimeoutSeconds）是 Judge 的兼容别名，取值折入 Judge。
+	// Deprecated: 平面字段只保留读取兼容。
 	JudgeModel           string  `json:"judge_model,omitempty" yaml:"judge_model,omitempty"`
 	JudgeProvider        string  `json:"judge_provider,omitempty" yaml:"judge_provider,omitempty"`
 	JudgeReasoningEffort string  `json:"judge_reasoning_effort,omitempty" yaml:"judge_reasoning_effort,omitempty"`
-	JudgeMinSamples      int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`         // 判定最小样本数(不足则保守通过)
-	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`   // 通过阈值(score<阈值判劣化建议)
-	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"` // judge LLM 调用超时秒
+	JudgeMinSamples      int     `json:"judge_min_samples,omitempty" yaml:"judge_min_samples,omitempty"`
+	JudgePassThreshold   float64 `json:"judge_pass_threshold,omitempty" yaml:"judge_pass_threshold,omitempty"`
+	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"`
 }
 
 // ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。
@@ -224,16 +224,16 @@ type ReliabilityConfig struct {
 	// 默认 false = 不启用（ErrorTrackingStore 不包裹，现状逐字节零行为变化）。
 	DegradationEnabled bool `json:"degradation_enabled,omitempty" yaml:"degradation_enabled,omitempty"`
 
-	// DegradationModelBackoff（5.4 design-report-closeout）：model 依赖 degraded 时
+	// DegradationModelBackoff：model 依赖 degraded 时
 	// runEventLoop 在下一 turn 前的退避停顿（duration 字符串，如 "5s"）。空/非法 = 关闭
 	// （零行为变化）。警告级「闸不是墙」——退避只为免打已确认故障的端点，恢复即正常。
 	DegradationModelBackoff string `json:"degradation_model_backoff,omitempty" yaml:"degradation_model_backoff,omitempty"`
 
-	// DegradationMCPProbeEvery（5.4）：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
+	// DegradationMCPProbeEvery：DepMCP degraded 时 mcp_call 的熔断半开探测间隔——
 	// 每 N 次调用放行 1 次真探测，其余直接返回熔断 result（含自纠材料）。0 = 关闭熔断。
 	DegradationMCPProbeEvery int `json:"degradation_mcp_probe_every,omitempty" yaml:"degradation_mcp_probe_every,omitempty"`
 
-	// DegradationDiskBlockSpawn（5.4）：DepDisk degraded 时拒绝新任务 spawn（返回可读
+	// DegradationDiskBlockSpawn：DepDisk degraded 时拒绝新任务 spawn（返回可读
 	// 原因；进行中任务的 settle/轮询不受影响）。默认 false = 不拒绝。
 	DegradationDiskBlockSpawn bool `json:"degradation_disk_block_spawn,omitempty" yaml:"degradation_disk_block_spawn,omitempty"`
 
@@ -255,7 +255,8 @@ type ProviderConfig struct {
 	// Most domestic models (GLM, DeepSeek, Moonshot, etc.) use OpenAI-compatible protocol,
 	// so this field should be "openai" with different api_endpoint to distinguish providers.
 	// Defaults to the provider registry key name if not specified.
-	// e.g., "openai" for OpenAI-compatible APIs (OpenAI/ZhiPu/DeepSeek/Moonshot/Baichuan/Qwen),
+	// e.g., "openai" for OpenAI-compatible APIs (OpenAI, ZhiPu, DeepSeek, Moonshot,
+	//       Baichuan, Qwen, Tencent TokenHub),
 	//       "anthropic" for Anthropic Claude,
 	//       "gemini" for Google Gemini.
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty"`
@@ -295,7 +296,8 @@ type AgentConfig struct {
 	// Tools can reference other agents (agent kind) or plain tools (tool kind).
 	Tools []ToolRef `json:"tools" yaml:"tools"`
 
-	// Agent parameters
+	// MaxToolIterations 是该 agent 单轮允许的工具迭代上限；同组的 MaxTokens、Temperature、
+	// CompressThreshold、KeepRecentTasks 一并构成该 agent 自身的运行参数。
 	MaxToolIterations int     `json:"max_tool_iterations,omitempty" yaml:"max_tool_iterations,omitempty"`
 	MaxTokens         int     `json:"max_tokens,omitempty"          yaml:"max_tokens,omitempty"`
 	Temperature       float64 `json:"temperature,omitempty"         yaml:"temperature,omitempty"`
@@ -318,8 +320,8 @@ type AgentConfig struct {
 	ResumeContextRounds int            `json:"resume_context_rounds,omitempty" yaml:"resume_context_rounds,omitempty"`
 	Compress            CompressConfig `json:"compress,omitempty" yaml:"compress,omitempty"`
 
-	// Generation controls thinking/reasoning mode for the LLM.
-	// When set, these fields are merged into model.GenerationConfig.
+	// ThinkingEnabled 与同组的 ThinkingTokens、ReasoningEffort 控制思考/推理模式：
+	// 任一被设置时并入 model.GenerationConfig。
 	ThinkingEnabled *bool   `json:"thinking_enabled,omitempty"  yaml:"thinking_enabled,omitempty"`
 	ThinkingTokens  *int    `json:"thinking_tokens,omitempty"   yaml:"thinking_tokens,omitempty"`
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"  yaml:"reasoning_effort,omitempty"`
@@ -385,9 +387,9 @@ type CompressConfig struct {
 	// summary size but never below this floor.
 	SummaryMaxTokens int `json:"summary_max_tokens,omitempty" yaml:"summary_max_tokens,omitempty"`
 
-	// SummaryEffort is the legacy alias for summary.reasoning_effort
+	// SummaryEffort is the flat alias for summary.reasoning_effort
 	// (deprecated — folded by FoldModelRefAliases). The field must exist for
-	// strict parsing to accept the legacy key (implementation-hardening 6.1).
+	// strict parsing to accept the alias key.
 	SummaryEffort string `json:"summary_effort,omitempty" yaml:"summary_effort,omitempty"`
 	// SummaryModel is the model name for LLM summary compression.
 	// Falls back to the agent's main model if empty.
@@ -399,7 +401,7 @@ type CompressConfig struct {
 	SummaryProvider string `json:"summary_provider,omitempty" yaml:"summary_provider,omitempty"`
 	// Summary is the unified ModelRef declaration for the summary call site
 	// (model + generation knobs incl. reasoning_effort). When both this and
-	// the legacy flat fields are present, Summary wins per-field at fold time.
+	// the flat alias fields are present, Summary wins per-field at fold time.
 	Summary ModelRef `json:"summary,omitempty" yaml:"summary,omitempty"`
 }
 
@@ -418,15 +420,6 @@ type MemoryConfig struct {
 	//     type: memory and same path share a single InMemoryStore instance
 	//   Empty value means an isolated store (no sharing).
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
-
-	// FSync (localfile type only) is ACCEPTED AND IGNORED since the
-	// localfile-minimization ruling (complete-resident-reliability-protocol
-	// §9.2): the backend has no WAL/fsync machinery — Sync() is a full
-	// snapshot atomic tmp+rename whose durability claim stops at "visible to
-	// a fresh process after a successful barrier", NOT power-loss survival.
-	// The key stays only so existing configs load unchanged; production
-	// durability tiers are a rustviking-stage decision (evidence §9.5).
-	FSync *bool `json:"fsync,omitempty" yaml:"fsync,omitempty"`
 
 	// ReadNamespaces lists agent names whose storage partitions this agent
 	// is allowed to read. Each name is converted to a PartitionID at build time.
@@ -449,7 +442,7 @@ type MemoryConfig struct {
 	Engine *MemoryEngineConfig `json:"engine,omitempty" yaml:"engine,omitempty"`
 }
 
-// ConsolidationConfig（4.1 design-report-closeout）：巩固建议式触发 + 硬门控。
+// ConsolidationConfig：巩固建议式触发 + 硬门控。
 // 触发是建议（渗透/冥想 hint），执行权与质量门在 LLM + 工具硬校验（D2 核心主张）。
 type ConsolidationConfig struct {
 	// CapacityThreshold：分区未巩固边界事件计数超此值 → 发 consolidation_hint 渗透
@@ -463,7 +456,7 @@ type ConsolidationConfig struct {
 	Snooze string `json:"snooze,omitempty" yaml:"snooze,omitempty"`
 }
 
-// Validate 校验巩固配置（4.1 design-report-closeout）：负值非法；Snooze 非空
+// Validate 校验巩固配置：负值非法；Snooze 非空
 // 时必须是合法 duration。零值全部合法（= 触发关闭/不校验，现状行为）。
 func (c ConsolidationConfig) Validate() error {
 	if c.CapacityThreshold < 0 {
@@ -490,7 +483,7 @@ type MemoryEngineConfig struct {
 	Backend string `json:"backend,omitempty" yaml:"backend,omitempty"`
 	// Embedding 配置嵌入器。nil = 无向量，引擎不接线（行为同现状纯关键词）。
 	Embedding *EmbeddingConfig `json:"embedding,omitempty" yaml:"embedding,omitempty"`
-	// Consolidation 配置巩固的建议式触发与硬门控（4.1 design-report-closeout）。
+	// Consolidation 配置巩固的建议式触发与硬门控。
 	// 零值 = 触发关闭（纯 manual，现状行为不变）；MinSourceEvents>0 时
 	// memory_consolidate 对实际取回源数不足的调用显式拒绝。
 	Consolidation *ConsolidationConfig `json:"consolidation,omitempty" yaml:"consolidation,omitempty"`
@@ -556,6 +549,8 @@ type ExtraParam = agent.ExtraParam
 // ToolRef declares a tool that an agent uses.
 // For agent-kind tools, the AgentID field references another AgentConfig in the Agents map.
 // For tool-kind tools, the ID field identifies the plain tool factory.
+// It declares only the reference relationship: an agent's runtime parameters
+// (max_tool_iterations, max_tokens, temperature) live on its own AgentConfig entry.
 type ToolRef struct {
 	// Kind distinguishes agent tools from plain tools. Defaults to "agent".
 	Kind ToolKind `json:"kind" yaml:"kind"`
@@ -567,7 +562,8 @@ type ToolRef struct {
 	// ID is the tool identifier for plain tools (kind=tool).
 	ID string `json:"id,omitempty" yaml:"id,omitempty"`
 
-	// Tool description: inline or from file (relative to prompt_dir)
+	// Description 是工具描述正文（inline 形态）；文件形态见同组的 DescriptionFile，
+	// 其路径相对 prompt_dir。
 	Description     string `json:"description,omitempty"      yaml:"description,omitempty"`
 	DescriptionFile string `json:"description_file,omitempty" yaml:"description_file,omitempty"`
 
@@ -580,7 +576,7 @@ type ToolRef struct {
 	EventParams []string `json:"event_params,omitempty" yaml:"event_params,omitempty"`
 
 	// ExtraParams declares additional routing-level parameters for agent-kind
-	// tools (plan-interaction-contract D2). Each declared parameter is added to
+	// tools. Each declared parameter is added to
 	// the tool's InputSchema and, when present in a call, packed together with
 	// request into a JSON message body passed to the sub-agent (e.g. plan's
 	// action/name). Tools without extra_params keep the plain-text request
@@ -593,14 +589,6 @@ type ToolRef struct {
 	// an operator knob to reduce cognitive load on weaker models that struggle
 	// with ack/notification semantics.
 	Async *bool `json:"async,omitempty" yaml:"async,omitempty"`
-
-	// NOTE: agent runtime parameters (max_tool_iterations, max_tokens,
-	// temperature) are configured ONLY on the referenced agent's own
-	// AgentConfig entry — a ToolRef declares the reference relationship, not
-	// the agent's behavior. Earlier versions declared those fields here too,
-	// but they were never wired into assembly (silently dead config that
-	// contradicted the AgentConfig values); they have been removed to keep a
-	// single configuration point per semantic.
 
 	// Properties holds tool-specific configuration that each tool factory
 	// deserializes into its own typed struct. This keeps ToolRef generic
@@ -625,7 +613,7 @@ type ToolRef struct {
 	//   - trpc Go options: communication details (A2A protocol, TransferStateKey) — internal
 	Remote *RemoteConfig `json:"remote,omitempty" yaml:"remote,omitempty"`
 
-	// Extension: custom factory path (for non-builtin tools/agents)
+	// Factory is the custom factory path for non-builtin tools and agents.
 	Factory string `json:"factory,omitempty" yaml:"factory,omitempty"`
 }
 
@@ -640,7 +628,7 @@ type RemoteConfig struct {
 
 // isRemoteRef reports whether this reference resolves OUTSIDE the local agents
 // map — i.e. whether the construction domain (buildAgentToolRef) takes its A2A
-// branch. §3.3「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
+// branch.「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
 // predicate both domains use. Two separate spellings of "is this remote" is
 // exactly how validation came to demand a local definition that construction
 // never asks for — rejecting a deployment whose sub-agent lives in another
@@ -669,7 +657,8 @@ const (
 	ToolKindTool ToolKind = "tool"
 )
 
-// Default values
+// DefaultEntry 等常量是 DefaultConfig 采用的缺省值：入口名、prompt 目录，
+// 以及主 agent 与子 agent 各自的迭代/令牌/温度/压缩阈值上限。
 const (
 	DefaultEntry          = "tagent"
 	DefaultPromptDir      = "resources/prompts"
@@ -774,13 +763,10 @@ func (c *Config) ApplyDefaults() {
 		c.Provider = "openai"
 	}
 
-	// LOG_LEVEL env var overrides config file
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
 
-	// TAGENT_WORKING_DIR env var overrides config file — deploy-time agent working root
-	// (e.g. project clone root). Lets systemd/.env set it without editing tagent.yaml.
 	if v := os.Getenv("TAGENT_WORKING_DIR"); v != "" {
 		c.WorkingDir = v
 	}
@@ -798,7 +784,6 @@ func (ac *AgentConfig) applyDefaults(name string, parent *Config) {
 		ac.PromptDir = parent.PromptDir
 	}
 	if ac.MaxToolIterations <= 0 {
-		// Entry agent uses larger defaults
 		if name == parent.Entry {
 			ac.MaxToolIterations = DefaultMaxToolIter
 		} else {
@@ -823,7 +808,7 @@ func (ac *AgentConfig) applyDefaults(name string, parent *Config) {
 		ac.CompressThreshold = DefaultCompressThresh
 	}
 	if ac.Memory.Type == "" {
-		ac.Memory.Type = "memory" // Default to in-memory store
+		ac.Memory.Type = "memory"
 	}
 
 	for i := range ac.Tools {
@@ -840,19 +825,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("tagent config: at least one agent is required")
 	}
 
-	// Validate entry agent exists
 	if _, ok := c.Agents[c.Entry]; !ok {
 		return fmt.Errorf("tagent config: entry agent %q not found in agents map", c.Entry)
 	}
 
-	// Validate each agent
 	for name, ac := range c.Agents {
 		if err := ac.validate(name); err != nil {
 			return err
 		}
 	}
 
-	// Validate tool agent references
 	for name, ac := range c.Agents {
 		for i, tr := range ac.Tools {
 			if tr.Kind == ToolKindAgent && tr.AgentID != "" && !tr.isRemoteRef() {
@@ -864,7 +846,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate MCP server declarations (transport-normalized field rules).
 	for name, sc := range c.MCPServers {
 		if err := sc.Validate(name); err != nil {
 			return fmt.Errorf("tagent config: %w", err)
@@ -882,10 +863,6 @@ func (ac *AgentConfig) validate(name string) error {
 			if tr.AgentID == "" {
 				return fmt.Errorf("agent %q: tools[%d] agent kind requires agent id", name, i)
 			}
-			// A remote block without an endpoint is not "remote with a default" —
-			// construction would fall through to the LOCAL path and build a
-			// different runtime than the config declares. Refuse it here so the
-			// declaration and the built object cannot diverge (§3.3).
 			if tr.Remote != nil && !tr.isRemoteRef() {
 				return fmt.Errorf("agent %q: tool agent %q declares remote but requires a url", name, tr.AgentID)
 			}
@@ -922,9 +899,6 @@ func LoadConfig(path string) (*Config, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".yaml", ".yml", ".json":
-		// Strict decode (implementation-hardening 6.1): unknown fields fail
-		// loading — a typo'd key must never be silently ignored. Dispatch by
-		// extension mirrors the format auto-detection.
 		if err := strictyaml.DecodeByExt(path, data, cfg); err != nil {
 			return nil, fmt.Errorf("parse config %s: %w", path, err)
 		}
@@ -932,8 +906,6 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("unsupported config file extension %q (use .yaml, .yml, or .json)", ext)
 	}
 
-	// Record the source path (absolute when resolvable) so the MCP registry
-	// can hot-sync the mcp_servers section on file changes.
 	if abs, err := filepath.Abs(path); err == nil {
 		cfg.ConfigPath = abs
 	} else {

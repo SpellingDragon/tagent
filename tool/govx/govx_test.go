@@ -11,9 +11,10 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// TestGoalDeclare_PersistsEvent (5.1, design-report-closeout): goal_declare
-// registers the goal AND (with a bound store) persists a governance event —
-// audit trail and restart rebuild come from the same write.
+// TestGoalDeclare_PersistsEvent pins that goal_declare registers the goal and persists a governance event.
+// - With a bound store the registration and the event come from the same write, so audit trail and restart rebuild share one source.
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#goal-registry
 func TestGoalDeclare_PersistsEvent(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	pid := memory.PartitionIDFromName("tagent")
@@ -49,11 +50,9 @@ func TestGoalDeclare_PersistsEvent(t *testing.T) {
 		t.Fatalf("bad result: %s (%v)", raw, err)
 	}
 
-	// Registry updated.
 	if !goals.HasActive() {
 		t.Fatal("goal not active after declare")
 	}
-	// Governance event persisted (subtype=goal).
 	refs, err := store.QueryEvents(memory.QueryOptions{
 		PartitionIDs: []int{pid}, EventTypes: []string{"governance"}, Limit: 10,
 	})

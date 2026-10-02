@@ -3,19 +3,21 @@ package event
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// TestRegistryReproducesBuiltinBehavior 是重构等价验收线的核心：
-// 注册表对 9 个内置类型的声明式元数据必须精确复现委托前各函数的行为。
+// TestRegistryReproducesBuiltinBehavior 钉住内置类型的注册表声明：每个类型的原文优先、
+//
+// 契约: docs/wiki/event/event-architecture.md#registry-authority
 func TestRegistryReproducesBuiltinBehavior(t *testing.T) {
 	cases := []struct {
 		name      string
-		special   bool // IsSpecialEventType
-		toolLine  bool // GenerateEventSummary 走工具行
-		skeleton  bool // IsSkeletonMessage
-		lowValue  bool // LowValueEventTypes
-		ttl       int  // TypeTTL（0=继承全局）
+		special   bool
+		toolLine  bool
+		skeleton  bool
+		lowValue  bool
+		ttl       int
 		role      model.Role
 		synthetic bool
 	}{
@@ -28,6 +30,7 @@ func TestRegistryReproducesBuiltinBehavior(t *testing.T) {
 		{TypeContextCompressSummary, false, false, true, false, -1, model.RoleUser, false},
 		{TypeContextCompress, false, false, true, true, 3, model.RoleUser, true},
 		{TypeToolChain, false, false, true, false, 0, model.RoleUser, true},
+		{TypeCognitiveAssetChanged, false, false, true, false, 30, model.RoleUser, false},
 	}
 	for _, c := range cases {
 		spec, ok := LookupEventType(c.name)
@@ -58,7 +61,7 @@ func TestRegistryReproducesBuiltinBehavior(t *testing.T) {
 	}
 }
 
-// TestRegistryUnknownTypeFallback 验证未知类型回退，精确复现委托前的 default 分支。
+// TestRegistryUnknownTypeFallback 钉住 未知类型的回退值：IsSpecial 为 false、Skeleton 保守为 true、LowValue 为 false。
 func TestRegistryUnknownTypeFallback(t *testing.T) {
 	const unknown = "some_future_type_xyz"
 	if IsSpecialEventType(unknown) {
@@ -81,8 +84,8 @@ func TestRegistryUnknownTypeFallback(t *testing.T) {
 	}
 }
 
-// TestRegistryDerivedSetsMatchLegacy 验证派生集合与委托前的字面量精确一致。
-func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
+// TestRegistryDerivedSetsMatchDeclaredTable 钉住 由注册表派生的跨包集合与声明表逐项相符：LowValueTypes 与 DefaultTypeTTL 的数量和取值都不得偏离。
+func TestRegistryDerivedSetsMatchDeclaredTable(t *testing.T) {
 	lowValue := LowValueTypes()
 	wantLow := map[string]bool{TypeThinkingPlan: true, TypeContextCompress: true}
 	if len(lowValue) != len(wantLow) {
@@ -102,16 +105,14 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 		TypeAgentOutput:            14,
 		TypeActionCommand:          14,
 		TypeContextCompressSummary: -1,
-		TypeConsolidation:          -1, // T-D 追加：巩固产物 TTL 豁免（长期记忆）
-		TypeGovernance:             -1, // T-G 追加：治理记录 TTL 永久（可审计）
-		TypeFeedback:               30, // D1 追加（design-report-closeout）：反馈是治理数据，默认 30 天
-		TypeTaskSpawned:            30, // R2 追加（resident-continuity-r2-r4）：任务 spawn 事实链记录，与 external_input 对齐
-		TypeResidentSession:        30, // R3 追加（resident-continuity-r2-r4）：常驻会话生命周期事实链记录，同上对齐
-		TypeInboxReceipt:           30, // RRP 3.4/3.5 追加：durable 输入的 fact-chain receipt，30 天即 request-id 去重窗口
+		TypeConsolidation:          -1,
+		TypeGovernance:             -1,
+		TypeFeedback:               30,
+		TypeTaskSpawned:            30,
+		TypeResidentSession:        30,
+		TypeInboxReceipt:           30,
+		TypeCognitiveAssetChanged:  30,
 	}
-	// wf.* 只为被动排除而注册，MUST NOT 进入类型 TTL 表（R05/6.2：曾经的 30 天
-	// override 会覆盖既有全局/显式保留，把历史记录提前淘汰）。此处显式钉住它们
-	// 缺席——新增排除家族不得顺带改变数据保留策略。
 	if len(ttl) != len(wantTTL) {
 		t.Fatalf("DefaultTypeTTL 数量=%d 期望 %d: %v", len(ttl), len(wantTTL), ttl)
 	}
@@ -122,9 +123,7 @@ func TestRegistryDerivedSetsMatchLegacy(t *testing.T) {
 	}
 }
 
-// TestRegistryOneRegistrationWholeChain 验证核心价值：注册一条新 spec，
-// 全链路访问器（摘要/骨架/TTL/低价值/角色/可嵌入/可召回）自动生效——
-// 收敛「改 10 处」为一处注册。
+// TestRegistryOneRegistrationWholeChain 钉住 注册表的单一声明性：注册一条新 spec 后，角色、TTL、可嵌入性等各面取值同时生效，无需再改第二处。
 func TestRegistryOneRegistrationWholeChain(t *testing.T) {
 	const newType = "consolidation_probe"
 	RegisterEventType(EventTypeSpec{
@@ -133,12 +132,11 @@ func TestRegistryOneRegistrationWholeChain(t *testing.T) {
 		Special:    false,
 		Skeleton:   true,
 		LowValue:   false,
-		TTLDays:    -1, // 豁免遗忘（长期记忆）
+		TTLDays:    -1,
 		Synthetic:  false,
 		Embeddable: true,
 		Recallable: true,
 	})
-	// 一处注册后，全链路自动生效：
 	if got := EventTypeRole(newType); got != model.RoleSystem {
 		t.Errorf("新类型 Role=%v 期望 RoleSystem", got)
 	}
@@ -156,5 +154,114 @@ func TestRegistryOneRegistrationWholeChain(t *testing.T) {
 	}
 	if IsLowValueType(newType) {
 		t.Error("新类型不应低价值")
+	}
+}
+
+// TestFeedbackEventRegistered 钉住 feedback 事件已注册：spec 取值正确、TTL 为 30 天，且出现在 RegisteredEventTypes 中。
+func TestFeedbackEventRegistered(t *testing.T) {
+	spec, ok := LookupEventType(TypeFeedback)
+	if !ok {
+		t.Fatal("feedback not registered")
+	}
+	if !spec.Recallable || spec.LowValue {
+		t.Fatalf("feedback spec wrong: %+v", spec)
+	}
+	if spec.TTLDays != 30 {
+		t.Fatalf("feedback TTL = %d, want 30", spec.TTLDays)
+	}
+	if found := false; !found {
+		for _, n := range RegisteredEventTypes() {
+			if n == TypeFeedback {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("feedback missing from RegisteredEventTypes")
+		}
+	}
+}
+
+// TestGovernanceNotSkeletonized 钉住 governance 事件不得被骨架化——审计与目标重建需要全文。
+func TestGovernanceNotSkeletonized(t *testing.T) {
+	if IsSkeletonEventType(TypeGovernance) {
+		t.Fatal("governance must not be skeletonized (audit/goal-rebuild needs full text)")
+	}
+}
+
+// TestIsNonProjectionEventType_Declarations 钉住 非投影声明集由注册表唯一提供：inbox receipt、task_spawned、resident_session 属内部或审计记录，compaction 事件正文由载荷重建。
+func TestIsNonProjectionEventType_Declarations(t *testing.T) {
+	require.True(t, IsNonProjectionEventType(TypeInboxReceipt), "inbox receipt is the current internal record class")
+	require.True(t, IsNonProjectionEventType(TypeTaskSpawned), "task_spawned is registry data")
+	require.True(t, IsNonProjectionEventType(TypeResidentSession), "resident_session is an audit record")
+	require.True(t, IsNonProjectionEventType(TypeContextCompressSummary), "the compaction event body is re-folded from its payload")
+
+	require.False(t, IsNonProjectionEventType(TypeExternalInput))
+	require.False(t, IsNonProjectionEventType(TypeAgentOutput))
+	require.False(t, IsNonProjectionEventType(TypeActionCommand))
+	require.False(t, IsNonProjectionEventType(TypeCognitiveAssetChanged), "cognitive_asset_changed 必须进投影：被看见是漂移审计的最低目标")
+	spec, ok := LookupEventType(TypeCognitiveAssetChanged)
+	require.True(t, ok)
+	require.True(t, spec.Embeddable, "audit notes must be discoverable via recall")
+	require.True(t, spec.Recallable)
+
+	require.False(t, IsNonProjectionEventType("some_future_business_type"))
+}
+
+func TestIsNonProjectionRecord_MetadataClause(t *testing.T) {
+	require.True(t, IsNonProjectionRecord(TypeAgentOutput, map[string]string{MetaKeyTaskInlineRecord: "true"}))
+	require.False(t, IsNonProjectionRecord(TypeAgentOutput, map[string]string{MetaKeyTaskInlineRecord: ""}))
+	require.False(t, IsNonProjectionRecord(TypeAgentOutput, nil))
+	require.False(t, IsNonProjectionRecord(TypeExternalInput, map[string]string{"unrelated": "x"}))
+}
+
+// TestWFFacts_NeverProjectionRecord 钉住 wf.* 内部事实在唯一判定源下永不被投影，而 external_input 保持可投影。
+func TestWFFacts_NeverProjectionRecord(t *testing.T) {
+	for _, name := range WFExcludedTypes() {
+		if IsNonProjectionRecord(name, map[string]string{}) {
+			continue
+		}
+		t.Errorf("IsNonProjectionRecord(%s) = false; wf.* internal facts must never project", name)
+	}
+	if IsNonProjectionRecord(TypeExternalInput, nil) {
+		t.Error("external_input must stay projectable")
+	}
+}
+
+// TestWFPrefixFamilyIsClosed 钉住 家族封闭性：任何 wf. 前缀类型都必须在排除清单内。
+func TestWFPrefixFamilyIsClosed(t *testing.T) {
+	inList := map[string]bool{}
+	for _, name := range WFExcludedTypes() {
+		inList[name] = true
+	}
+	for _, name := range RegisteredEventTypes() {
+		if len(name) > 3 && name[:3] == "wf." && !inList[name] {
+			t.Errorf("type %q uses the wf. prefix but is not in WFExcludedTypes()", name)
+		}
+	}
+}
+
+// TestWFFacts_PassiveExclusionIntroducesNoTTL 钉住 被动排除的边界：wf.* 仍须保持注册以供排除判定，但不得因此获得 TTL。
+func TestWFFacts_PassiveExclusionIntroducesNoTTL(t *testing.T) {
+	typeTTL := DefaultTypeTTL()
+	for _, name := range WFExcludedTypes() {
+		spec, ok := LookupEventType(name)
+		if !ok {
+			t.Fatalf("wf type %q must stay registered for passive exclusion", name)
+		}
+		if spec.TTLDays != 0 {
+			t.Errorf("wf type %q TTLDays = %d, want 0: passive exclusion must inherit the global TTL, never shorten history retention", name, spec.TTLDays)
+		}
+		if _, present := typeTTL[name]; present {
+			t.Errorf("wf type %q leaked into DefaultTypeTTL()=%d; a passive-exclusion registration must add no type TTL", name, typeTTL[name])
+		}
+		if !spec.NonProjection {
+			t.Errorf("wf type %q NonProjection = false; passive exclusion must be preserved", name)
+		}
+		if spec.Embeddable {
+			t.Errorf("wf type %q Embeddable = true; internal facts must never be embedded", name)
+		}
+		if spec.Recallable {
+			t.Errorf("wf type %q Recallable = true; internal facts must never be recalled", name)
+		}
 	}
 }

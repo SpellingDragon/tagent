@@ -12,12 +12,12 @@ import (
 // (S-B/2.3「事务」)：每次资源 acquire／owner 登记／agent 构成后**立即**入表
 // （先记后判错——失败父的登记也在册可回退），早于下一个可失败动作；discard
 // 按获取**逆序**展开（部分登记撤销→建成者 Close→指纹复位），清理顺序来自实际
-// 获取证据而非 ownedAgentNames 差集推断或 map 遍历序（design 核心簇 §7：废除
+// 获取证据而非 ownedAgentNames 差集推断或 map 遍历序（design 核心簇：废除
 // 差集推断与 map 顺序假设）。reload 与 rollback 共用同一结构。
 type candidateTxn struct {
 	rc     *runtimeConfig
-	order  []string                      // 责任表：获取序（append-only）
-	agents map[string]*agent.TagentAgent // name → 建成实例；nil = 仅登记未建成（失败父）
+	order  []string
+	agents map[string]*agent.TagentAgent
 }
 
 func newCandidateTxn(rc *runtimeConfig) *candidateTxn {
@@ -43,6 +43,9 @@ func (tx *candidateTxn) acquire(name string, a *agent.TagentAgent) {
 // Closed (its own Close releases the store lease; partial registrations have
 // no lease left to release). The published online face is never touched —
 // discard only ever runs before the single commit point.
+// Each entry revokes its store-owner registration whether or not an agent was
+// built: a leftover entry could later refuse an unrelated agent that recycled
+// the same heap address as a partition collision.
 func (tx *candidateTxn) discard() []string {
 	if tx == nil {
 		return nil
@@ -53,8 +56,6 @@ func (tx *candidateTxn) discard() []string {
 		order = append(order, n)
 		a := tx.agents[n]
 		delete(tx.rc.residentMemFP, n)
-		// store 将被关闭/已失败：留着 pid 登记会让日后复用同一回收堆地址的新
-		// agent 被陈旧条目假阳性拒绝为 partition collision。
 		tx.rc.unRegisterStoreOwner(n)
 		if a != nil {
 			if cerr := a.Close(); cerr != nil {
@@ -71,7 +72,8 @@ func (tx *candidateTxn) discard() []string {
 // contract (same introspection family as agent.TagentAgentsConstructed): no
 // production path reads it. Map-iteration cleanup order was UNOBSERVABLE —
 // which is exactly why it survived review — so the contract needs a witness.
-var lastDiscardOrder atomic.Value // []string
+// The probe payload is the discard order: []string, recorded by discard.
+var lastDiscardOrder atomic.Value
 
 func recordDiscardOrder(order []string) {
 	if len(order) == 0 {

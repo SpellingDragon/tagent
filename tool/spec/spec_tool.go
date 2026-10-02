@@ -40,11 +40,11 @@ func NewSpecTool(backend Backend) trpctool.Tool {
 	)
 }
 
-// RegisterTool registers the spec tool as a built-in plain tool ("spec"),
-// backed by the openspec CLI. Agents opt in via config (kind: tool, id: spec).
+// RegisterTool registers the spec tool as a built-in plain tool,
+// backed by the openspec CLI. Agents opt in via config.
 // Properties:
-//   - bin: openspec binary name/path (default "openspec")
-//   - work_dir: working directory containing openspec/ (default: process cwd)
+// - bin: openspec binary name/path
+// - work_dir: working directory containing openspec/ (default: process cwd)
 func RegisterTool() {
 	agent.RegisterPlainTool("spec", func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
 		var opts []OpenSpecOption

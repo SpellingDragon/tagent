@@ -30,7 +30,7 @@ import (
 )
 
 // endpointPolicyFromEnv reads the dynamic-endpoint redirect policy from the
-// environment (5.3 + resident-remaining-hardening 1.4): enable flag plus the
+// environment: enable flag plus the
 // exact-host allowlist (any port). Shared by the HTTPAPI endpoint policy and
 // the LLM client's per-hop CheckRedirect guard so the two can never drift.
 func endpointPolicyFromEnv() (enabled bool, allowlist []string) {
@@ -47,31 +47,25 @@ func endpointPolicyFromEnv() (enabled bool, allowlist []string) {
 }
 
 // resolveTriggerSource applies the delivery-gate policy to a raw
-// trigger_source value read from an output event (unified gate, 2026-09-15).
-// Policy is FAIL-CLOSED: an output event with NO stamped lineage is treated
-// as internal and must NOT reach the user chat. Every legitimate user-visible
-// turn stamps its own source at the RunFlow forwarding block
-// (agent/context_manager.go), so real user turns always carry "user" and are
-// unaffected. This closes the fail-open hole where unstamped events (e.g. a
-// task settled from a pre-lineage spawn) were coerced to "user" and delivered.
+// trigger_source value read from an output event.
+// Policy is FAIL-CLOSED from the SINGLE-SOURCE whitelist
+// (event.DeliverableLineage — shared with the fold externalization check,
+// D9): an output event with NO stamped lineage, or with any lineage outside
+// the whitelist, is internal and must NOT reach the user chat. Every
+// legitimate user-visible turn stamps its own source at the RunFlow
+// forwarding block (agent/context_manager.go), so real user turns always
+// carry "user" and are unaffected. This closes the fail-open hole where
+// unstamped events (e.g. a task settled from a pre-lineage spawn) were
+// coerced to "user" and delivered.
 func resolveTriggerSource(raw string) (source string, deliverable bool) {
 	if raw == "" {
 		return "internal-unstamped", false
 	}
-	// hardening-review-batch2 1.3：白名单化——仅认可来源可投递。框架对无世系
-	// task 结算降级的 "task-unstamped"（及其它未识别值）一律扣留：未知不得
-	// 升级为可投递来源。meditation 保持 passthrough（ok=true）：其投递决策
-	// 仍在 dispatch switch（log-only 扣留）——既有双层语义不变。
-	switch raw {
-	case "user", "task", "reincarnation", "system_alert", "meditation":
-		return raw, true
-	default:
-		return raw, false
-	}
+	return raw, tagentevent.DeliverableLineage(raw)
 }
 
 // resolveDeliveryTarget is the single chat-target rule of the delivery
-// switch (§8.2): the stamped meta_chat_id — carried verbatim from the
+// switch: the stamped meta_chat_id — carried verbatim from the
 // receiving turn through to the send — wins; a deliverable output without a
 // stamp (settled task reclaimed into a turn) falls back to the most recent
 // active user chat; nothing known is HELD, never broadcast, never guessed.
@@ -86,7 +80,6 @@ func resolveDeliveryTarget(metaChatID, lastActive string) (target string, ok boo
 }
 
 func main() {
-	// 1. Load single config file (tagent.yaml)
 	configPath := "tagent.yaml"
 	if envPath := os.Getenv("TAGENT_CONFIG"); envPath != "" {
 		configPath = envPath
@@ -98,9 +91,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3.2（design-report-closeout）：CLI 审批入口——`wechat-bot approve <digest>` /
-	// `wechat-bot reject <digest>`（零新服务器：直接对 approvals 目录的 pending 请求
-	// 写回应文件，运行中的 agent 下次 Check 重扫即生效）。
 	if len(os.Args) >= 3 && (os.Args[1] == "approve" || os.Args[1] == "reject") {
 		approvalsDir := filepath.Join(tagentCfg.Governance.Dir, "approvals")
 		if tagentCfg.Governance.Dir == "" {
@@ -116,20 +106,16 @@ func main() {
 		return
 	}
 
-	// Extract app-specific wechat config from tagent.yaml's app.wechat section
 	wechatCfg := loadWechatConfig(tagentCfg.App)
 	if err := wechatCfg.EnsureDirs(); err != nil {
 		fmt.Fprintf(os.Stderr, "Create dirs failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Message-level idempotency across restarts (dedup + persistence).
 	seenStore := NewSeenStore(wechatCfg.ConfigDir, slog.Default())
 
-	// Set framework log level
 	log.SetLevel(tagentCfg.LogLevel)
 
-	// Resolve entry agent's effective model name
 	entryCfg := tagentCfg.Agents[tagentCfg.Entry]
 	effectiveModel := entryCfg.Model
 	if effectiveModel == "" {
@@ -152,16 +138,6 @@ func main() {
 	fmt.Printf("  Config:      %s\n", configPath)
 	fmt.Println("===========================================")
 
-	// 2. Create LLM models
-	// tagent resolves provider endpoints/API keys from Config. The application only
-	// wires them into model instances and the SwappableModel used by AReaL/HTTPAPI.
-
-	// resident-remaining-hardening 1.4 (cold-eyes Major 5 closure): the LLM HTTP
-	// client enforces the endpoint allowlist on EVERY hop of a 30x chain, so an
-	// allowlisted llm_base_url cannot bridge out to arbitrary hosts (metadata
-	// SSRF). Dynamic redirect disabled → empty allowlist → all hops rejected
-	// (redirect-disabled semantics, cold-eyes W-2: the guard must fail CLOSED
-	// on the enable switch too, not just on list emptiness).
 	redirectEnabled, endpointAllowlist := endpointPolicyFromEnv()
 	if !redirectEnabled {
 		endpointAllowlist = nil
@@ -169,7 +145,6 @@ func main() {
 	guardedClient := rl.NewEndpointGuardedClient(endpointAllowlist)
 	modelHTTP := openai.WithOpenAIOptions(openaiopt.WithHTTPClient(guardedClient))
 
-	// 2a. Global fallback model (for sub-agents without explicit model/provider).
 	globalEndpoint, globalKeyEnv, err := tagentCfg.ResolveAgentProvider("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Resolve global provider failed: %v\n", err)
@@ -187,13 +162,11 @@ func main() {
 		modelHTTP,
 	)
 
-	// 2b. Entry agent model (SwappableModel for AReaL proxy support).
 	entryEndpoint, entryKeyEnv, err := tagentCfg.ResolveAgentProvider(tagentCfg.Entry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Resolve entry agent provider failed: %v\n", err)
 		os.Exit(1)
 	}
-	// TAGENT_API_ENDPOINT overrides config (e.g. AReaL proxy for RL training)
 	if envEndpoint := os.Getenv("TAGENT_API_ENDPOINT"); envEndpoint != "" {
 		entryEndpoint = envEndpoint
 	}
@@ -225,24 +198,18 @@ func main() {
 	// - WithModel: global fallback for agents without their own model declaration.
 	// - WithSummaryModel: fallback when an agent does not declare compress.summary_model.
 	// - WithModelOverrides: entry agent uses SwappableModel so AReaL/HTTPAPI can
-	//   swap the LLM endpoint at runtime.
+	// swap the LLM endpoint at runtime.
 	// Other agents with model/provider fields are resolved internally by tagent.New()
 	// via the provider.Model() factory (supports multi-vendor: openai/anthropic/gemini/etc).
 	var approvalCh *wechatApprovalChannel
 	opts := []tagent.Option{
 		tagent.WithModel(globalModel),
-		// WithSummaryModel removed (no-op orphan after ModelRef unification,
-		// cc21241): YAML compress.summary is the only summary path.
 		tagent.WithModelOverrides(map[string]model.Model{
 			tagentCfg.Entry: swappableModel,
 		}),
 		tagent.WithSkillRepo(skillRepo),
-		// 5.1: arm the org-config hot-reloader. Without this the lazy fp
-		// watcher is never installed (tagent.go: `if rc.configPath != ""`)
-		// and yaml-only model changes silently require a manual restart.
 		tagent.WithConfigPath(configPath),
 	}
-	// R5：审批直投通道（目标=首个 approver；未配置白名单则不装配——安全默认）。
 	if n := len(wechatCfg.Approvers); n > 0 {
 		approvalCh = &wechatApprovalChannel{to: wechatCfg.Approvers[0]}
 		opts = append(opts, tagent.WithApprovalChannel(approvalCh))
@@ -255,8 +222,6 @@ func main() {
 	}
 	defer ta.Close()
 
-	// 5. Start persistent event loop (the only execution mode for top-level tagent)
-	//    User/Session ID 可通过环境变量覆盖（AReaL adapter 通过 HTTPAPI /task 提交任务时使用）
 	loopUser := os.Getenv("TAGENT_USER_ID")
 	if loopUser == "" {
 		loopUser = "wechat-user"
@@ -271,34 +236,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5a-bis. Reincarnation notice (openspec/changes/wechat-bot-reincarnation-notice):
-	// after an insurance-chain self-replacement, tell the new process what it was
-	// doing when its predecessor died (D1 detect / D2 meditation source / D3+D8
-	// compose / D5 consume-marker). One-shot goroutine, never crashes the bot.
 	go maybeInjectReincarnationNotice(ta, tagentCfg.Entry, filepath.Join("run"), noticeWaitMax)
-	// 5a-ter. System-alert dead-man switch (5.8): consume run/SYSTEM_ALERT
-	// staged by restart scripts on FAIL (EXIT/TERM trap) so the agent learns
-	// about failed restart attempts instead of staying blind.
 	go maybeConsumeSystemAlert(ta, filepath.Join("run"), 5*time.Second)
 
-	// 5b. Start HTTPAPI for local observability and RL task submission.
-	//     Endpoints: GET /healthz, POST /task
 	httpPort := os.Getenv("TAGENT_HTTP_PORT")
 	if httpPort == "" {
 		httpPort = "8089"
 	}
 	httpAPI := rl.NewHTTPAPI(ta)
-	// 8.3（review §8）：接线 feedback 生产链路——entry memStore 供 POST /feedback
-	// 绑定外部 verdict（此前仅测试调用，端点恒 503，闭环未通）。
 	httpAPI.SetFeedbackStore(ta.MemStore())
-	// B1（哲学审查）：诊断快照消费面装配——GET /diagnostics 输出 DiagnosticsSnapshot
-	// JSON（含 wal_quarantined）。ta.MemStore() 为装饰链顶层（C3 验证），F3 隔离计数可达。
 	diagStore := ta.MemStore()
 	httpAPI.SetDiagnosticsFn(func() any {
 		return mengine.NewMemoryDiagnostics(nil, diagStore).Snapshot()
 	})
-	// Set model update callback: when AReaL adapter sends llm_base_url,
-	// create a new openai model with that URL and swap it in.
 	httpAPI.SetModelUpdateFn(func(baseURL string) {
 		newModel := openai.New(
 			effectiveModel,
@@ -307,18 +257,11 @@ func main() {
 			modelHTTP,
 		)
 		swappableModel.Swap(newModel)
-		// Update TrajectoryRecorder's endpoint to reflect the swap
 		if tr := ta.TrajectoryRecorder(); tr != nil {
 			tr.SetModelEndpoint(baseURL)
 		}
 		log.Infof("[HTTPAPI] LLM base URL updated to %s", baseURL)
 	})
-	// resident-readiness-plan 5.3：动态端点重定向默认禁用；RL 训练部署显式开启
-	//（TAGENT_RL_ALLOW_LLM_REDIRECT=1）并要求 allowlist（精确 host，任意端口）。
-	// 更新回调改用 error 版——重建失败整批拒绝（502），旧端点继续服务。
-	// Major 5 已闭环（resident-remaining-hardening 1.4）：allowlist 不再只约束
-	// 初始 URL——LLM client 携带逐跳 CheckRedirect（guardedClient），端点自身
-	// 30x 的每一跳目标 host 必须在 allowlist 内，越界跳转以明确错误终止。
 	if redirectEnabled {
 		httpAPI.SetEndpointPolicy(true, endpointAllowlist)
 		log.Infof("[HTTPAPI] dynamic llm_base_url redirect ENABLED (allowlist=%v, per-hop redirect guard ON)", endpointAllowlist)
@@ -326,36 +269,24 @@ func main() {
 		httpAPI.SetEndpointPolicy(false, nil)
 	}
 
-	// hardening-review-batch2 4.6（HTTP Server host-owned）：srv 由宿主持有，
-	// 重试循环受 stopHTTP 取消、SIGTERM 走 Shutdown 优雅等待——goroutine 不再
-	// 无控制永久循环（retry 间隔为线性递增封顶 60s，非指数退避）。
-	// fix(addr-regression 2026-09-16) + resident-readiness-plan 5.5：srv 用
-	// rl.NewHTTPServer 硬化构造——Addr 显式携带（空 Addr 静默绑 :80 事故）+
-	// Read/Write/Idle timeouts。
 	listenAddr := ":" + httpPort
 	srv := rl.NewHTTPServer(listenAddr, httpAPI)
 	stopHTTP := make(chan struct{})
 	httpDone := make(chan struct{})
 	go func() {
 		defer close(httpDone)
-		// Authentication + loopback fail-closed guard (implementation-hardening 3.3):
-		// the API can inject messages into the agent and redirect the LLM
-		// endpoint — without a token it must not be reachable from off-host.
 		rlToken := rl.AuthTokenFromEnv()
 		httpAPI.SetAuthToken(rlToken)
 		if err := rl.ValidateListenAddr(listenAddr, rlToken); err != nil {
 			listenAddr = "127.0.0.1:" + httpPort
-			srv.Addr = listenAddr // :80 事故教训：fallback 必须同步显式 Addr，绝不留空
+			srv.Addr = listenAddr
 			log.Warnf("%v — falling back to %s (LAN access requires the token)", err, listenAddr)
 		}
 		fmt.Printf("  HTTPAPI:     http://%s\n", listenAddr)
-		// S1 fix (systemic-α): a Warn-and-exit goroutine is a silent death —
-		// healthz/task/feedback all vanish. Retry instead; the restart
-		// script's healthz probe remains the outer watchdog.
 		for attempt := 1; ; attempt++ {
 			listenErr := srv.ListenAndServe()
 			if listenErr == nil || errors.Is(listenErr, http.ErrServerClosed) {
-				return // graceful shutdown or clean stop: don't retry
+				return
 			}
 			wait := time.Duration(attempt) * 5 * time.Second
 			if wait > 60*time.Second {
@@ -370,14 +301,9 @@ func main() {
 		}
 	}()
 
-	// 6. Setup signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// 6b. Manual rollback trigger surface (implementation-hardening 5.4):
-	// SIGUSR2 rolls the executor back to the ring-2 previous generation
-	// (core semantics covered by agent org-hotreload e2e; this is host wiring
-	// — the library never registers global signals itself).
 	usr2 := make(chan os.Signal, 1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	go func() {
@@ -387,9 +313,6 @@ func main() {
 		}
 	}()
 
-	// 7. OTLP telemetry — distributed tracing export (optional).
-	//    Set OTEL_EXPORTER_OTLP_ENDPOINT to enable (e.g., "localhost:4317" for Jaeger/Tempo).
-	//    Without this, the tracer is noop (zero overhead).
 	if otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); otlpEndpoint != "" {
 		otelCleanup, err := telemetrytrace.Start(ctx,
 			telemetrytrace.WithEndpoint(otlpEndpoint),
@@ -404,12 +327,9 @@ func main() {
 	}
 	fmt.Println("===========================================")
 
-	// 8. Create WeChat bot
 	slogLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	// Persist the getupdates polling cursor so message delivery resumes from
-	// where it left off across restarts (see wechat.CursorStore).
 	cursorStore := wechat.NewFileCursorStore(filepath.Join(wechatCfg.ConfigDir, "cursor.txt"))
 	bot := wechat.NewBot(
 		wechat.WithLogger(slogLogger),
@@ -419,7 +339,6 @@ func main() {
 		approvalCh.SetBot(bot)
 	}
 
-	// 9. Login
 	fmt.Println("Logging in to WeChat...")
 	err = bot.Login(ctx, func(qrCode string) {
 		fmt.Println("\nPlease scan the QR code with WeChat:")
@@ -437,25 +356,8 @@ func main() {
 	}
 	fmt.Println("Login successful!")
 
-	// 10. Start continuous event consumer goroutine.
-	//     The consumer reads all events from outputCh continuously,
-	//     dispatching by event type. This ensures outputCh never fills up
-	//     (runEventLoop blocks on writes until consumer reads).
-	//
-	//     Event dispatch (mirrors prototype's OnEvents switch on EventType):
-	//     - agent_output (final response): deliver to waiting user via responseCh
-	//     - thinking_plan (assistant + tool_calls): reply interim to user
-	//     - action_command (tool result): reply interim to user
-	//     - other events: log for visibility
-	//
-	//     Consumer uses metadata (chat_id, user_name) from StateDelta to route
-	//     responses to the correct user. This eliminates the need for replyTarget
-	//     and lastUser tracking, and fixes the responseCh deadlock bug.
-	typingActive := sync.Map{} // chat_id -> time.Time
-	// lastActiveChat 记录最近一次用户消息来源的会话（chat_id）。task 结算等异步
-	// 回合的事件可能不带 meta_chat_id，若无此回退锚点，其用户可见回复会被静默
-	// 丢弃（实测 2026-09-09 丢 ≥2 条）。仅作 task 来源的兜底路由。(async-result-delivery.)
-	lastActiveChat := sync.Map{} // "latest" -> chat_id
+	typingActive := sync.Map{}
+	lastActiveChat := sync.Map{}
 	seedLastActiveChat(&lastActiveChat, runDir())
 	go func() {
 		for evt := range outputCh {
@@ -463,7 +365,6 @@ func main() {
 				continue
 			}
 
-			// Debug: print full event content
 			deltaStr := ""
 			if evt.StateDelta != nil {
 				for k, v := range evt.StateDelta {
@@ -478,14 +379,8 @@ func main() {
 			log.Debugf("[Event] ID=%s Author=%s Tag=%s RequiresCompletion=%v StateDelta[%s] Response{%s}",
 				evt.ID, evt.Author, evt.Tag, evt.RequiresCompletion, deltaStr, respStr)
 
-			// Parse the event metadata contract (storage identifiers, trigger
-			// source, passthrough routing metadata) via the framework API —
-			// consumers never read raw StateDelta keys. (unified-event-projection D4)
 			meta := tagentevent.ParseEventMeta(evt)
 			eventType := meta.EventType
-			// Trigger source values: "user", "task" (delivered to originating
-			// session), "meditation" (internal, not delivered),
-			// "reincarnation"/"system_alert" (host notices — delivered).
 			triggerSource, deliverable := resolveTriggerSource(meta.TriggerSource)
 			chatID := meta.Meta["chat_id"]
 			if triggerSource == "user" && chatID != "" {
@@ -494,52 +389,29 @@ func main() {
 			}
 			userName := meta.Meta["user_name"]
 
-			// Check for final response (agent_output — no tool calls)
 			if evt.IsFinalResponse() && evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 				content := choice.Message.Content
-				// Surface the real execution error instead of the framework's
-				// generic fallback ("An error occurred during execution. Please
-				// contact the service provider."), which Runner substitutes when
-				// an event carries Response.Error but empty content. The
-				// structured Response.Error is left intact and holds the reason.
 				if evt.Response.Error != nil && evt.Response.Error.Message != "" {
 					content = fmt.Sprintf("执行出错：%s", evt.Response.Error.Message)
 				}
 				if content == "" {
-					// Degenerate empty final: nothing to deliver. Drop instead of
-					// fabricating "(empty response)". The framework already
-					// suppresses the empty agent_output echo; this is the
-					// consumer-side half. (async-result-delivery.)
 					log.Debugf("[Agent] 丢弃空 final 响应 (trigger=%s)", triggerSource)
 					continue
 				}
 
-				// FAIL-CLOSED gate (unified-event-delivery, 2026-09-15): unstamped
-				// output events are internal and must never reach the user chat.
-				// Every legitimate deliverable turn carries a stamped
-				// trigger_source from the RunFlow forwarding block.
 				if !deliverable {
 					log.Infof("[Agent][gate] 未盖章输出，内部消化 (source=%s): %s", triggerSource, truncateLog(content))
 					continue
 				}
 
-				// Single decision point: route based on trigger_source and chat_id
 				switch triggerSource {
 				case "meditation":
-					// Meditation: internal output, don't send to user.
 					log.Infof("[Agent][meditation] 冥想输出: %s", truncateLog(content))
 				case "error":
-					// Error: log only, don't send to user.
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
 				case "user", "task", "reincarnation", "system_alert":
-					// User input, or a background task result reclaimed into a
-					// turn: both deliver to the originating session (meta_chat_id).
-					// A settled task fulfilling the user's async request is a
-					// first-class user-visible reply. (async-result-delivery.)
 					if chatID == "" {
-						// Async settled-task turns may lack meta_chat_id; fall back to the
-						// most recent active user session instead of dropping the reply.
 						raw, _ := lastActiveChat.Load("latest")
 						lastActive, _ := raw.(string)
 						target, hasTarget := resolveDeliveryTarget(chatID, lastActive)
@@ -550,7 +422,6 @@ func main() {
 						log.Infof("[Agent][%s] 无 meta_chat_id，回退最近活跃会话 %s", triggerSource, target)
 						chatID = target
 					}
-					// Stop typing indicator for this user
 					if startTime, ok := typingActive.Load(chatID); ok {
 						if t, ok := startTime.(time.Time); ok && time.Since(t) < 60*time.Second {
 							_ = bot.StopTyping(ctx, chatID)
@@ -558,27 +429,21 @@ func main() {
 						typingActive.Delete(chatID)
 					}
 
-					// Log the response
 					userLabel := chatID
 					if userName != "" {
 						userLabel = fmt.Sprintf("%s(%s)", userName, chatID)
 					}
 					log.Infof("[Agent][%s->%s] %s", triggerSource, userLabel, truncateLog(content))
 
-					// 原始文本（用于文件解析，避免被长文本截断逻辑破坏路径）
 					originalContent := content
 
-					// Send reply — use SendTextToUser to get the latest context token
-					// (interim messages may have refreshed the token). Long text
-					// (>2000) is split / converted to file via SendLongText.
 					textSent := false
 					if len(content) > 2000 {
 						token, _ := bot.GetContextToken(chatID)
 						if token != "" {
 							if _, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token); err == nil {
-								textSent = true // 长文本已发送，跳过 SendTextToUser
+								textSent = true
 							} else {
-								// Fall through to SendTextToUser with truncated text
 								content = content[:2000] + "\n\n[Message truncated]"
 							}
 						} else {
@@ -591,21 +456,13 @@ func main() {
 						}
 					}
 
-					// Deliver any local files referenced in the original reply.
-					// Files are sent via WeChat using the persisted context_token,
-					// attaching to the correct conversation thread. Text sending is
-					// handled above; DeliverFiles only sends files. Per-file failures
-					// are logged and isolated inside DeliverFiles (non-fatal), so it
-					// always returns nil and needs no error check here.
 					DeliverFiles(bot, ctx, chatID, originalContent, wechatCfg.WorkspaceDir)
 				default:
-					// Unknown trigger source: log only
 					log.Warnf("[Agent][%s] 未知触发源，输出: %s", triggerSource, truncateLog(content))
 				}
 				continue
 			}
 
-			// Non-final events: dispatch by message role (mirrors prototype switch)
 			if evt.Response != nil && len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[len(evt.Response.Choices)-1]
 				msg := choice.Message
@@ -617,7 +474,6 @@ func main() {
 				switch msg.Role {
 				case "assistant":
 					if len(msg.ToolCalls) > 0 {
-						// thinking_plan: LLM decided to call tools
 						if msg.Content != "" {
 							log.Infof("[Agent][%s] 思考: %s", evtLabel, msg.Content)
 						}
@@ -628,7 +484,6 @@ func main() {
 						log.Infof("[Agent][%s] 回复: %s", evtLabel, msg.Content)
 					}
 				case "tool":
-					// action_command: tool execution result
 					if msg.Content != "" {
 						log.Infof("[Agent][%s] 工具结果: %s", evtLabel, msg.Content)
 					}
@@ -646,27 +501,12 @@ func main() {
 		log.Info("[Consumer] outputCh closed, consumer exiting")
 	}()
 
-	// 11. Register message handler
-	//     WeChat Poller processes messages serially — if handler A blocks
-	//     waiting for agent response, handler B won't execute until A returns.
-	//     To allow concurrent message processing (so user B's InjectMessage
-	//     reaches persistentBus while Agent is still processing A), we wrap
-	//     the handler to run in a goroutine.
-
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
-		// Dedup gate (design D3): drop replayed/duplicated deliveries before
-		// any stateful handling (approval replies, intake, agent injection).
 		if seenStore != nil && !seenStore.CheckAndMark(DedupKey(msg)) {
 			log.Warnf("[Dedup] duplicate message dropped (chat=%s)", msg.FromUserID)
 			return nil
 		}
-		// 3.3（design-report-closeout）：审批回复拦截——"approve/reject <digest>"（含中文
-		// 动词）由框架纯函数解析并写回应文件，不进 agent 对话（批准是人的动作，不是
-		// 对话内容；agent 无批准权）。非审批回复照常走 agent。
 		if digest, approve, ok := governance.ParseApprovalReply(msg.Text()); ok && tagentCfg.Governance.Dir != "" {
-			// 8.2（review §8）：审批人白名单——digest 随 approval_request 明文送达，
-			// 无白名单时任意外部用户可批准 critical。安全默认：未配置 approvers 时
-			// 消息通道批准关闭（仅 CLI 可批准）；配置后仅白名单用户生效。
 			if !wechatCfg.IsApprover(msg.FromUserID) {
 				_ = bot.SendTextToUser(ctx, msg.FromUserID,
 					"你没有审批权限（不在 app.wechat.approvers 白名单）。请由审批人经 CLI（wechat-bot approve <digest>）执行。")
@@ -686,11 +526,7 @@ func main() {
 			return nil
 		}
 
-		// Run handler in goroutine to avoid blocking Poller's serial loop.
-		// This allows subsequent user messages to be injected into persistentBus
-		// while the agent is still processing the current message.
 		go func() {
-			// Show typing indicator and track it by chat_id
 			_ = bot.SendTyping(ctx, msg.FromUserID)
 			typingActive.Store(msg.FromUserID, time.Now())
 
@@ -700,7 +536,6 @@ func main() {
 			switch kind {
 			case InboundMedia:
 				if wechatCfg.WorkspaceDir == "" {
-					// 未配置 workspace：附件降级为不支持，伴随文本仍按原样注入。
 					_ = bot.SendTextToUser(ctx, msg.FromUserID, "暂不支持附件接收（未配置 workspace）")
 				} else {
 					outcome := IntakeMedia(ctx, bot, bot.CDNBaseURL(), wechatCfg.WorkspaceDir, msg.FromUserID, msg, now)
@@ -713,47 +548,36 @@ func main() {
 				if _, inject, err := SaveLongText(wechatCfg.WorkspaceDir, msg.FromUserID, injectText, "input", now); err == nil {
 					injectText = inject
 				} else {
-					// 落盘失败降级为原样注入，不丢消息。
 					log.Errorf("[Intake] 长文本落盘失败 (chat=%s): %v", msg.FromUserID, err)
 				}
 			}
 
 			if injectText == "" {
-				// 全部被拒且无伴随文本：无事可注入，收回 typing。
 				_ = bot.StopTyping(ctx, msg.FromUserID)
 				typingActive.Delete(msg.FromUserID)
 				return
 			}
 
-			// Inject message with metadata into the persistent event loop.
-			// Metadata (chat_id, user_name) will be propagated through StateDelta
-			// and used by the consumer to route responses to the correct user.
 			ta.InjectMessageWithMetadata("user", model.Message{
 				Role:    model.RoleUser,
 				Content: injectText,
 			}, map[string]string{
 				"chat_id":   msg.FromUserID,
-				"user_name": msg.FromUserID, // Use FromUserID as user_name (no FromUserName field available)
+				"user_name": msg.FromUserID,
 			})
 
-			// Handler returns immediately — consumer will send response when ready.
-			// No need to wait for responseCh or manage typing indicator here.
 		}()
 
 		return nil
 	})
 
-	// 12. Run
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)
-		// 4.6：HTTP Server 是宿主持有资源——异常退出路径同样优雅关闭，
-		// 避免 goroutine 持有端口导致重启换装 bind 冲突。
 		close(stopHTTP)
 		_ = srv.Shutdown(context.Background())
 		os.Exit(1)
 	}
-	// 正常退出（SIGTERM/SIGINT）：优雅关闭 HTTP Server。
 	close(stopHTTP)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
@@ -764,8 +588,6 @@ func main() {
 	}
 	fmt.Println("Bot stopped gracefully.")
 }
-
-// truncateLog truncates a string for log output (max 120 chars).
 
 // runDir resolves the runtime state directory, anchored to the executable so
 // cwd drift across launchers cannot misplace the persistence file.
@@ -801,8 +623,8 @@ func persistLastActiveChat(chatID, dir string) {
 
 // seedLastActiveChat restores the last-active-chat anchor from disk at boot.
 // After a hot-swap/restart the in-memory anchor starts empty, so the first
-// post-reincarnation output (no meta_chat_id, e.g. a settled-task report)
-// would be silently dropped (observed 2026-09-13). Missing file is silent
+// post-reincarnation output
+// would be silently dropped. Missing file is silent
 // (cold start); unreadable/corrupt content warns and continues.
 // (fix-lastactive-chat-reincarnation-drop.)
 func seedLastActiveChat(m *sync.Map, dir string) {
@@ -837,7 +659,6 @@ func sendInterim(ch chan string, msg string) {
 	select {
 	case ch <- msg:
 	default:
-		// Channel full, skip — don't block the consumer
 	}
 }
 
@@ -847,14 +668,10 @@ func sendInterim(ch chan string, msg string) {
 func replyInterim(target *atomic.Pointer[string], bot *wechat.Bot, content string) {
 	userID := target.Load()
 	if userID == nil {
-		return // No user waiting
+		return
 	}
 	_ = bot.SendTextToUser(context.Background(), *userID, content)
 }
-
-// ---------------------------------------------------------------------------
-// WeChat config (minimal — extracted from tagent.yaml's app.wechat section)
-// ---------------------------------------------------------------------------
 
 // WechatAppConfig holds WeChat-specific configuration.
 type WechatAppConfig struct {
@@ -862,18 +679,18 @@ type WechatAppConfig struct {
 	TokenFile       string `json:"token_file"`
 	ContextTokenDir string `json:"context_token_dir"`
 	WorkspaceDir    string `json:"workspace_dir"`
-	// Approvers（8.2 review §8）：可经消息通道批准 critical 操作的用户 ID 白名单。
+	// Approvers：可经消息通道批准 critical 操作的用户 ID 白名单。
 	// 空 = 消息通道批准关闭（安全默认——digest 随请求明文送达，任意可达者可批准），
 	// 批准仅经 CLI（wechat-bot approve <digest>）。
 	Approvers []string `json:"approvers,omitempty"`
 }
 
-// wechatApprovalChannel（R5 backlog-final-closeout）：审批请求直投微信（不经 agent
+// wechatApprovalChannel：审批请求直投微信（不经 agent
 // 转述）。晚绑定 bot（构造时序：ta 先于 bot），SetBot 后可用。
 type wechatApprovalChannel struct {
 	mu  sync.Mutex
 	bot *wechat.Bot
-	to  string // 投递目标 = 首个 approver
+	to  string
 }
 
 func (c *wechatApprovalChannel) SetBot(b *wechat.Bot) {
@@ -889,8 +706,6 @@ func (c *wechatApprovalChannel) Deliver(req *governance.ApprovalRequest) error {
 	if b == nil {
 		return fmt.Errorf("wechat bot not ready")
 	}
-	// C1（哲学审查）：Deliver 同步于治理管线（deliverAll）——无超时的 Background 会让
-	// 微信 API 挂起时阻塞审批门。5s 超时使「失败不阻塞门」也覆盖「悬挂不阻塞」。
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	d := req.ArgsDigest
@@ -945,7 +760,6 @@ func loadWechatConfig(app map[string]any) WechatAppConfig {
 			cfg.WorkspaceDir = v
 		}
 	}
-	// 容器内根文件系统只读，tmpfs 挂载点与本地目录名不同，用环境变量覆盖。
 	if v := os.Getenv("TAGENT_WECHAT_WORKSPACE_DIR"); v != "" {
 		cfg.WorkspaceDir = v
 	}

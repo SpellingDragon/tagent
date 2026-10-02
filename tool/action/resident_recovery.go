@@ -18,24 +18,8 @@ import (
 // 重挂，后续实例跳过（cleanup 保持幂等：n- 已被 orphan 重定义排除）。
 var residentReattachOnce atomic.Bool
 
-// Resident-session recovery (2026-09-11 D1).
-//
-// PROBLEM: tmux sessions (and their pipe-pane loggers) live in the tmux
-// SERVER, which survives agent restarts. The agent's in-memory tracking
-// (TmuxMonitor entries + TmuxSettleDetector + resident metadata like
-// watch/probe) does not. Without recovery, a restart orphans every resident
-// session: it keeps running but nothing watches it, and its watch/probe
-// declaration is lost.
-//
-// SOLUTION: named sessions (B2, "n-" prefix) persist a small metadata record
-// at spawn (mode/watch/probe, metaDir/<id>.json). On ActionTool startup,
-// ReattachResidentSessions reconciles: tmux list (ground truth for liveness)
-// ∩ metadata (ground truth for parameters) → rebuild detector + monitor
-// entry, reusing the still-growing pipe file. Sessions without metadata
-// (legacy/oneshot leftovers) are left to the existing orphan cleanup.
-
 // ResidentMeta is the persisted parameter set needed to rebuild tracking.
-// R3（resident-continuity-r2-r4 2.5）补 Command/TaskID/Origin：Command 供人/LLM
+// R3补 Command/TaskID/Origin：Command 供人/LLM
 // 审计与重建描述；TaskID=会话 id 桥键（与 task_spawned 事件的 Declarative.TaskID
 // 同源——重挂时按此与重建 registry 的任务重关联）；Origin 为可选路由 baggage
 // （真相源在 task_spawned 事件，meta 侧预留零值兼容）。旧记录缺新字段：零值容错。
@@ -48,14 +32,14 @@ type ResidentMeta struct {
 	ProbeFailures    int    `json:"probe_failures,omitempty"`
 	SpawnedAt        string `json:"spawned_at"`
 	// LastAdoptedAt is the last time an agent instance adopted (reattached or
-	// found already-tracked) this session — hardening-review-batch2 2.1/2.2.
+	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
 	// long-running session re-adopted across restarts is not an orphan no
-	// matter how old it is. Empty → fall back to SpawnedAt (legacy meta).
+	// matter how old it is. Empty → fall back to SpawnedAt (metadata without an adoption timestamp).
 	LastAdoptedAt string            `json:"last_adopted_at,omitempty"`
-	Command       string            `json:"command,omitempty"` // R3：原命令行（审计/重建描述）
-	TaskID        string            `json:"task_id,omitempty"` // R3：桥键（=session id）
-	Origin        map[string]string `json:"origin,omitempty"`  // R3：预留（真相源=task_spawned 事件）
+	Command       string            `json:"command,omitempty"`
+	TaskID        string            `json:"task_id,omitempty"`
+	Origin        map[string]string `json:"origin,omitempty"`
 }
 
 // metaPath returns the metadata file for a session id.
@@ -65,16 +49,16 @@ func (ct *ActionTool) metaPath(sessionID string) string {
 
 func (ct *ActionTool) metaDir() string {
 	if ct.residentMetaDirOverride != "" {
-		return ct.residentMetaDirOverride // R3 2.5：resident_meta_dir 可配（离 /tmp 的持久卷）
+		return ct.residentMetaDirOverride
 	}
 	return filepath.Join(os.TempDir(), "tagent-resident-meta")
 }
 
-// saveResidentMeta persists spawn parameters for restart recovery (D1).
+// saveResidentMeta persists spawn parameters for restart recovery .
 // Called from startSession for named resident/interactive sessions.
 func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 	if args.Name == "" || args.Mode == string(ModeOneshot) || args.Mode == "" {
-		return // oneshot sessions die with the round; nothing to recover
+		return
 	}
 	m := ResidentMeta{
 		Name:             args.Name,
@@ -84,8 +68,8 @@ func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 		ProbeIntervalSec: args.ProbeIntervalSec,
 		ProbeFailures:    args.ProbeFailures,
 		SpawnedAt:        time.Now().Format(time.RFC3339),
-		Command:          args.Command, // R3：全参数入事实链/meta
-		TaskID:           sessionID,    // R3：桥键=会话 id（与 Declarative.TaskID 同源）
+		Command:          args.Command,
+		TaskID:           sessionID,
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -93,7 +77,6 @@ func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 	}
 	_ = os.MkdirAll(ct.metaDir(), 0o755)
 	_ = os.WriteFile(ct.metaPath(sessionID), b, 0o600)
-	// R3 2.5：spawn 全参入事实链（旁路 best-effort；真相源链=meta 文件+tmux 存活）。
 	ct.emitResidentSessionEvent(sessionID, m, false)
 }
 
@@ -121,7 +104,6 @@ func (ct *ActionTool) touchAdopted(sessionID string) {
 
 // removeResidentMeta drops the record when the session ends for any reason.
 func (ct *ActionTool) removeResidentMeta(sessionID string) {
-	// R3 2.5：终态结局入事实链（读 meta 组事件体；读不到则最小记录）。
 	if b, err := os.ReadFile(ct.metaPath(sessionID)); err == nil {
 		var m ResidentMeta
 		if json.Unmarshal(b, &m) == nil {
@@ -155,11 +137,6 @@ func (ct *ActionTool) ReattachResidentSessions() int {
 	if ct.tmuxExecutor == nil || ct.tmuxMonitor == nil {
 		return 0
 	}
-	// hardening-review-batch2 2.1：ADOPT FIRST, sweep last. The old order
-	// swept before adoption on raw SpawnedAt age, so a healthy long-running
-	// session was killed at the first restart after its 24h birthday. Adoption
-	// stamps LastAdoptedAt; the sweep that follows only reaps sessions nobody
-	// adopted and whose last adoption is past the TTL.
 	sessions, err := ct.tmuxExecutor.ListSessions()
 	if err != nil {
 		return 0
@@ -171,7 +148,7 @@ func (ct *ActionTool) ReattachResidentSessions() int {
 		}
 		b, err := os.ReadFile(ct.metaPath(s.ID))
 		if err != nil {
-			continue // no metadata: legacy or oneshot leftover — skip
+			continue
 		}
 		var m ResidentMeta
 		if err := json.Unmarshal(b, &m); err != nil {
@@ -182,8 +159,6 @@ func (ct *ActionTool) ReattachResidentSessions() int {
 			continue
 		}
 		if _, tracked := ct.tmuxMonitor.GetSession(s.ID); tracked {
-			// Already tracked (multi-instance share guard): still adopted —
-			// refresh the freshness anchor so the sweep never reaps it.
 			ct.touchAdopted(s.ID)
 			continue
 		}
@@ -205,6 +180,8 @@ func (ct *ActionTool) ReattachResidentSessions() int {
 // recovered session. The pipe file needs NO re-attachment: pipe-pane runs
 // inside the tmux server and kept appending through our restart; the new
 // detector just reads the same path from offset 0.
+//
+// 契约: docs/wiki/tool/tmux-action.md#restart-takeover
 func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 	detector := NewTmuxSettleDetector(sessionID, func() {
 		if err := ct.tmuxExecutor.KillSession(sessionID); err != nil {
@@ -213,6 +190,7 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 		ct.tmuxMonitor.RemoveSession(sessionID)
 		ct.removeResidentMeta(sessionID)
 	})
+	detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
 	if m.Watch != "" {
 		if err := detector.SetWatch(m.Watch, 5*time.Second); err != nil {
 			log.Warnf("[ActionTool] recovery watch %s: %v", sessionID, err)
@@ -238,17 +216,14 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 			ProbeFailures:    m.ProbeFailures,
 		}, detector)
 	}
-	// hardening-review-batch2 3.1：注册重挂 detector 供 build 侧绑定到
-	// registry 恢复的任务（重挂发生在 RebuildTaskRegistry 之前——时序桥）。
 	ct.rememberReattachedDetector(sessionID, detector)
 	log.Infof("[ActionTool] recovery: %s alive (mode=%s watch=%q probe=%q) — tracking rebuilt; agent notified on next watch/probe hit or peek", sessionID, m.Mode, m.Watch, m.Probe)
 }
 
-// residentTTL is how long a resident session may go WITHOUT ADOPTION before
-// the sweep reaps it (hardening-review-batch2 2.2 — was: raw age since spawn,
-// which killed healthy long-running sessions at their first post-24h restart).
-// Freshness is measured from LastAdoptedAt (fallback SpawnedAt for legacy
-// meta), and sessions still tracked by a live monitor are never swept.
+// residentTTL is how long a resident session may go without a recent adoption before
+// the sweep reaps it. Freshness is measured from LastAdoptedAt (fallback SpawnedAt for
+// metadata without an adoption timestamp), and sessions still tracked by a live monitor
+// are never swept.
 var residentTTL = 24 * time.Hour
 
 // maxResidentSessions caps concurrent resident sessions per agent instance
@@ -272,9 +247,6 @@ func (ct *ActionTool) SweepStaleResidents(now time.Time) int {
 			continue
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(e.Name(), "sess-"), ".json")
-		// Never reap a session the live monitor still tracks (multi-instance
-		// guard: another agent instance may have adopted it). nil monitor →
-		// no tracking info; proceed on freshness alone (zero-value tool).
 		if ct.tmuxMonitor != nil {
 			if _, tracked := ct.tmuxMonitor.GetSession(id); tracked {
 				continue
@@ -286,20 +258,17 @@ func (ct *ActionTool) SweepStaleResidents(now time.Time) int {
 		}
 		var m ResidentMeta
 		if err := json.Unmarshal(b, &m); err != nil {
-			continue // corrupt meta — leave the session alone
+			continue
 		}
 		freshness := m.LastAdoptedAt
 		if freshness == "" {
-			freshness = m.SpawnedAt // legacy meta: fall back to spawn time
+			freshness = m.SpawnedAt
 		}
 		stamped, err := time.Parse(time.RFC3339, freshness)
 		if err != nil {
 			continue
 		}
 		if now.Sub(stamped) > residentTTL {
-			// Un-adopted past TTL: orphan. Kill the session (when an executor
-			// is wired — tests may run record-only) and drop its record:
-			// the metadata is the leak we track.
 			if ct.tmuxExecutor != nil {
 				if err := ct.tmuxExecutor.KillSession(id); err == nil {
 					killed++

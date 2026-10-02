@@ -12,6 +12,8 @@ import (
 )
 
 // TestLocalFileKV_Interface verifies LocalFileKV satisfies the memory.KVStore interface.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 func TestLocalFileKV_Interface(t *testing.T) {
 	var _ memory.KVStore = (*LocalFileKV)(nil)
 }
@@ -22,24 +24,19 @@ func TestLocalFileKV_CRUD(t *testing.T) {
 	kv, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 
-	// Put
 	err = kv.KVPut("key1", "value1")
 	require.NoError(t, err)
 
-	// Get
 	val, err := kv.KVGet("key1")
 	require.NoError(t, err)
 	assert.Equal(t, "value1", val)
 
-	// Get non-existent
 	_, err = kv.KVGet("nonexistent")
 	assert.Error(t, err)
 
-	// Delete
 	err = kv.KVDelete("key1")
 	require.NoError(t, err)
 
-	// Verify deleted
 	_, err = kv.KVGet("key1")
 	assert.Error(t, err)
 }
@@ -50,27 +47,22 @@ func TestLocalFileKV_Scan(t *testing.T) {
 	kv, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 
-	// Insert keys with different prefixes
 	require.NoError(t, kv.KVPut("prefix:k3", "v3"))
 	require.NoError(t, kv.KVPut("prefix:k1", "v1"))
 	require.NoError(t, kv.KVPut("prefix:k2", "v2"))
 	require.NoError(t, kv.KVPut("other:k1", "ov1"))
 
-	// Scan prefix
 	pairs, err := kv.KVScan("prefix:", 0)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 3)
-	// Verify sorted
 	assert.Equal(t, "prefix:k1", pairs[0].Key)
 	assert.Equal(t, "prefix:k2", pairs[1].Key)
 	assert.Equal(t, "prefix:k3", pairs[2].Key)
 
-	// Scan with limit
 	pairs, err = kv.KVScan("prefix:", 2)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
 
-	// Scan with no matches
 	pairs, err = kv.KVScan("nomatch:", 0)
 	require.NoError(t, err)
 	assert.Empty(t, pairs)
@@ -87,14 +79,12 @@ func TestLocalFileKV_Range(t *testing.T) {
 	require.NoError(t, kv.KVPut("key:003", "v3"))
 	require.NoError(t, kv.KVPut("key:004", "v4"))
 
-	// Range [key:002, key:004) → should return key:002, key:003
 	pairs, err := kv.KVRange("key:002", "key:004", 0)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
 	assert.Equal(t, "key:002", pairs[0].Key)
 	assert.Equal(t, "key:003", pairs[1].Key)
 
-	// Range with limit
 	pairs, err = kv.KVRange("key:001", "key:004", 2)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
@@ -106,7 +96,6 @@ func TestLocalFileKV_Batch(t *testing.T) {
 	kv, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 
-	// Batch put
 	err = kv.KVBatch([]memory.KVOp{
 		{Type: "put", Key: "b1", Value: "v1"},
 		{Type: "put", Key: "b2", Value: "v2"},
@@ -114,23 +103,19 @@ func TestLocalFileKV_Batch(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify
 	val, err := kv.KVGet("b2")
 	require.NoError(t, err)
 	assert.Equal(t, "v2", val)
 
-	// Batch with delete
 	err = kv.KVBatch([]memory.KVOp{
 		{Type: "delete", Key: "b1"},
 		{Type: "put", Key: "b4", Value: "v4"},
 	})
 	require.NoError(t, err)
 
-	// Verify b1 deleted
 	_, err = kv.KVGet("b1")
 	assert.Error(t, err)
 
-	// Verify b4 added
 	val, err = kv.KVGet("b4")
 	require.NoError(t, err)
 	assert.Equal(t, "v4", val)
@@ -140,23 +125,19 @@ func TestLocalFileKV_Batch(t *testing.T) {
 func TestLocalFileKV_Persistence(t *testing.T) {
 	dir := t.TempDir()
 
-	// First instance: write data
 	kv1, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 	require.NoError(t, kv1.KVPut("persist:key1", "value1"))
 	require.NoError(t, kv1.KVPut("persist:key2", "value2"))
 
-	// Force flush to disk (deferred flush is async)
 	require.NoError(t, kv1.Sync())
 	require.NoError(t, kv1.Close())
 
-	// Verify on-disk persistence exists (snapshot or WAL — small write
-	// volumes legally live only in kv.wal.jsonl under the snapshot+WAL layout)
-	_, snapErr := os.Stat(filepath.Join(dir, "kv.json"))
-	_, walErr := os.Stat(filepath.Join(dir, "kv.wal.jsonl"))
-	require.True(t, snapErr == nil || walErr == nil, "neither snapshot nor WAL exists after Close")
+	_, snapErr := os.Stat(filepath.Join(dir, "kv-global.json"))
+	require.NoError(t, snapErr, "non-partition namespaces land in kv-global.json, one snapshot file per bucket")
+	_, legacyErr := os.Stat(filepath.Join(dir, "kv.json"))
+	require.True(t, os.IsNotExist(legacyErr), "the legacy single kv.json layout must not reappear")
 
-	// Second instance: should load existing data
 	kv2, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 	defer kv2.Close()
@@ -169,7 +150,6 @@ func TestLocalFileKV_Persistence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "value2", val)
 
-	// Verify scan works on restored data
 	pairs, err := kv2.KVScan("persist:", 0)
 	require.NoError(t, err)
 	assert.Len(t, pairs, 2)
@@ -184,7 +164,6 @@ func TestLocalFileKV_EmptyFile(t *testing.T) {
 	kv, err := NewLocalFileKV(dir)
 	require.NoError(t, err)
 
-	// Should be able to put and get normally
 	require.NoError(t, kv.KVPut("test", "value"))
 	val, err := kv.KVGet("test")
 	require.NoError(t, err)
@@ -198,7 +177,6 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 	require.NoError(t, err)
 
 	done := make(chan struct{})
-	// Writer goroutine
 	go func() {
 		defer close(done)
 		for i := 0; i < 100; i++ {
@@ -206,7 +184,6 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 		}
 	}()
 
-	// Reader goroutine (runs concurrently)
 	for i := 0; i < 100; i++ {
 		_, _ = kv.KVScan("concurrent", 0)
 	}
@@ -214,10 +191,9 @@ func TestLocalFileKV_Concurrent(t *testing.T) {
 	<-done
 }
 
-// TestLocalFileKV_ListPartitionIDs (implementation-hardening 2.4): any
-// persisted key in a partition's namespace ({pid}:evt|idx|meta|tomb:…)
-// proves the partition; non-partition namespaces (global:*) and unparsable
-// prefixes are ignored.
+// TestLocalFileKV_ListPartitionIDs pins how partition ids are derived from persisted keys.
+// - Any key in a partition namespace ({pid}:evt|idx|meta|tomb) proves that partition.
+// - Non-partition namespaces such as global:* and unparsable prefixes are ignored.
 func TestLocalFileKV_ListPartitionIDs(t *testing.T) {
 	dir := t.TempDir()
 	kv, err := NewLocalFileKV(dir)

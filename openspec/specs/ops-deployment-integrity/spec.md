@@ -1,7 +1,7 @@
 # ops-deployment-integrity Specification
 
 ## Purpose
-TBD - created by archiving change hardening-review-batch2. Update Purpose after archive.
+运维探针部署完整性：restart/maintenance/mail 从受控凭证源取 token 并区分 401/拒绝/200 响应类别，鉴权不豁免。
 ## Requirements
 ### Requirement: 运维探针认证集成
 restart / maintenance 健康探针与 mail poller MUST 从受控凭证源（环境变量或 rl 配置文件）读取认证 token 并随请求发送；`/healthz` 保持鉴权不豁免。探针 MUST 区分响应类别：401 → AUTH_FAIL（告警、不触发杀进程）、连接拒绝 → 等待窗口内正常状态、200 → 健康判定继续。

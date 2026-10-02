@@ -8,9 +8,9 @@ import (
 
 // RegisterSubTools registers the async task-management tools as built-in plain
 // tools, so agents can opt into them via config (kind: tool):
-//   - list_tasks       — list all tracked tasks
-//   - cancel_task      — cancel a running task by id
-//   - relaunch_task    — re-run a task from its original command by id
+// - list_tasks — list all tracked tasks
+// - cancel_task — cancel a running task by id
+// - relaunch_task — re-run a task from its original command by id
 //
 // The tools are stateless; they resolve the TaskController from the invocation
 // context at Call time, so a single registration works for any agent.

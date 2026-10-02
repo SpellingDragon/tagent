@@ -1,0 +1,8 @@
+agent	trpcagent
+event	tagentevent
+event	trpcEvent
+memory	tagentmemory
+tool	trpctool
+trgtool	trpctool
+trpcagent	trgagent
+upagent	trpcagent

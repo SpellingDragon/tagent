@@ -16,25 +16,17 @@ import (
 // acceptance here would strand the input forever (3.1).
 var ErrLoopTerminated = errors.New("agent: persistent loop already terminated — create a new agent for a fresh loop")
 
-// InjectMessageContext is the decidable injection entry (resident-readiness-
-// plan 3.1): it returns a receipt (volatile/durable accepted) or an error —
-// terminated loop, full queue, timeout and durable-write failure are NEVER
-// reported as accepted. Hosts and HTTP handlers MUST use this entry; the
-// legacy void wrappers keep working for internal producers only.
+// InjectMessageContext 是可判定的注入入口：成功返回凭据（易失或持久已受理），否则返回错误——
+// 回路已终止、队列满、超时、持久写失败 绝不报成已受理。宿主与 HTTP handler 必须用它；
+// void 包装入口只留给内部生产者使用。
 func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, msg model.Message) (PublishReceipt, error) {
 	if ta == nil {
 		return PublishReceipt{}, ErrNilEvent
 	}
-	// Terminal lifecycle check (V15): StopLoop is terminal on this instance.
 	if ta.loopTerminatedNow() {
 		return PublishReceipt{}, ErrLoopTerminated
 	}
-	// Meditation novelty gate (meditation-gate-split): armed HERE at the
-	// input-side injection point — ground truth, unchanged.
 	ta.armMeditationNoveltyGate(source)
-	// Behavior audit sample (self-telemetry-audit): injection traffic is the
-	// denominator's external side; internal-lineage sources count as
-	// self-managed.
 	ta.selfAudit.ObserveInputFor(source)
 	bus := ta.persistentBus
 	if bus == nil {
@@ -91,20 +83,11 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 // on the persistent ContextManager will TryPull these messages and inject them
 // into the next ReAct iteration.
 func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message) {
-	// Meditation novelty gate (meditation-gate-split): a source=="user"
-	// injection arms the gate HERE, at the injection point — input-side source
-	// is ground truth. Non-user sources (meditation/task/tmux) never arm it,
-	// and no output-side event ever does.
 	ta.armMeditationNoveltyGate(source)
-	// Always use persistentBus, not activeBus.
-	// activeBus may be invBus during sub-agent execution, but user messages
-	// should go to the persistent bus so the main runEventLoop's BeforeModel
-	// callback can pick them up.
 	if ta.persistentBus != nil {
 		ta.persistentBus.Publish(NewExternalInputEvent(source, msg))
 		return
 	}
-	// Fallback: if persistentBus is nil (shouldn't happen), use activeBus.
 	ta.activeBusMu.Lock()
 	bus := ta.activeBus
 	ta.activeBusMu.Unlock()
@@ -119,7 +102,7 @@ func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message)
 // reload failures/rollbacks, degraded fallbacks) onto the persistent bus so
 // the agent perceives infrastructure problems as events (external_input) on
 // its next iteration, instead of them being silently confined to log files.
-// 2026-09-14: motivated by the 03:52 incident -- the hot-reloader correctly
+// : motivated by the 03:52 incident -- the hot-reloader correctly
 // rejected a bad config ("parse FAILED - serving previous") but the agent
 // never saw it; the follow-up restart then cold-booted the same bad config.
 func (ta *TagentAgent) EmitSystemAlert(alert string) {
@@ -154,15 +137,12 @@ func (ta *TagentAgent) EmitSystemAlert(alert string) {
 // from this message via event.StateDelta with "meta_" prefix.
 //
 // Common metadata keys:
-//   - "chat_id": target user/session identifier for response routing
-//   - "user_name": human-readable user identifier for logs
-//   - "channel": communication channel (wechat, discord, etc.)
+// - "chat_id": target user/session identifier for response routing
+// - "user_name": human-readable user identifier for logs
+// - "channel": communication channel (wechat, discord, etc.)
 func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Message, metadata map[string]string) {
-	// Same novelty-gate arming as InjectMessageWithSource — both injection
-	// entry points are the single source of truth for input lineage.
 	ta.armMeditationNoveltyGate(source)
 	evt := NewExternalInputEvent(source, msg)
-	// 将 metadata 复制到 AgentEvent.Metadata
 	if evt.Metadata == nil {
 		evt.Metadata = make(map[string]any)
 	}
@@ -195,20 +175,17 @@ func (ta *TagentAgent) armMeditationNoveltyGate(source string) {
 	}
 }
 
-// IngestExternalEvents stores external events for the NEXT Run on this agent
-// (legacy direct API). It is a single-handoff slot, not a history buffer, and is
-// guarded so a concurrent Run's drain and this set never tear (§7.1 D2). The
-// primary delegation path delivers context via the invocation's RuntimeState and
-// never touches this shared slot.
+// IngestExternalEvents 把外部事件暂存，供本 agent 的下一次 Run 摄入（direct 兼容入口）。
+// 它是单槽交收而非历史缓冲，并有守卫使并发 Run 的取走与本次写入互不撕裂。
+// 主委托路径经调用的 RuntimeState 传递上下文，从不碰这个共享槽。
 func (ta *TagentAgent) IngestExternalEvents(events []memory.FullEvent) {
 	ta.externalEventsMu.Lock()
 	ta.pendingExternalEvents = events
 	ta.externalEventsMu.Unlock()
 }
 
-// drainPendingExternalEvents atomically takes and clears the single-handoff slot
-// for the Run about to start, so the legacy direct-Ingest caller's events fold
-// into THAT call's local context and cannot carry into a second, concurrent Run.
+// drainPendingExternalEvents 原子取走并清空单槽，交给即将开始的 Run——使 direct 兼容入口
+// 调用者的事件折进那一次调用的本地上下文，不会带进并发的第二个 Run。
 func (ta *TagentAgent) drainPendingExternalEvents() []memory.FullEvent {
 	ta.externalEventsMu.Lock()
 	defer ta.externalEventsMu.Unlock()
@@ -236,7 +213,6 @@ func applyExternalContext(msg model.Message, events []memory.FullEvent) model.Me
 
 	log.Infof("[InjectContext] injecting %d external events, context_len=%d", len(events), len(contextBuilder))
 
-	// Prepend external context to the user message
 	msg.Content = contextBuilder + msg.Content
 	return msg
 }

@@ -10,17 +10,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ==================== LLMJudgeEvaluator（T-EVO · 指令4「模型决策是否回滚」）====================
-//
-// 快道后验评估的「模型决策」环：把 canary 观察窗的表现证据（Evidence）喂给 judge model，
-// 让模型判断该 bundle 激活后是否劣化。与 MetricGuardrail（确定性阈值闸）互补——guardrail 快、
-// 廉价、抓明确违约；LLM-judge 慢、质性、抓阈值未覆盖的整体劣化。二者构成 release.go 的双回滚触发。
-//
-// 保守原则（防误回滚错杀）：judge 未配置 / 证据收集失败 / 样本不足 / judge 调用失败 / 响应解析
-// 失败 → 一律 Pass:true（保守通过，canary 保持）。**仅当模型明确判定劣化（score < 阈值）才
-// Pass:false 触发回滚**。评估器内部消化 model 错误（不向 release 抛 err），避免 judge 暂时
-// 不可用就回滚已激活的低风险变更（guardrail 仍是确定性防线）。
-
 const judgeSystemPrompt = `你是 agent 配置版本的质量评审官。给定某版本（bundle）激活后 canary 观察窗的表现证据，判断该版本是否导致表现劣化。
 只依据证据、保守判断：仅当证据明确显示劣化（如治理拒绝率显著升高、危险/critical 操作频发）才判劣化。
 必须只返回严格 JSON，无其他文字：{"score": <0.0到1.0的浮点数>, "reason": "<一句话依据>"}
@@ -68,7 +57,6 @@ func (e *LLMJudgeEvaluator) Evaluate(ctx context.Context, bundleID string) (Eval
 	}
 	ev, err := e.src.Collect(ctx, bundleID)
 	if err != nil {
-		// 证据收集失败：保守通过（不误回滚），记录原因。
 		return EvalResult{Pass: true, Score: 1.0, Reason: "证据收集失败，保守通过: " + err.Error()}, nil
 	}
 	if !ev.Sufficient(e.minSamples) {
@@ -80,7 +68,6 @@ func (e *LLMJudgeEvaluator) Evaluate(ctx context.Context, bundleID string) (Eval
 	defer cancel()
 	text, err := collectModelText(jctx, e.judge, e.buildRequest(ev, bundleID))
 	if err != nil {
-		// judge 调用失败：保守通过（judge 暂时不可用不应回滚已激活的低风险变更）。
 		return EvalResult{Pass: true, Score: 1.0, Reason: "judge 调用失败，保守通过: " + err.Error()}, nil
 	}
 	verdict := parseJudgeVerdict(text)
@@ -166,7 +153,6 @@ func parseJudgeVerdict(text string) judgeVerdict {
 		return conservative
 	}
 	v := judgeVerdict{Score: *raw.Score, Reason: raw.Reason}
-	// score 越界防御：夹到 [0,1]。
 	if v.Score < 0 {
 		v.Score = 0
 	}
@@ -182,7 +168,6 @@ func parseJudgeVerdict(text string) judgeVerdict {
 // extractJSON 从可能含 markdown fence 或前后缀文字的响应中提取首个 JSON 对象。
 func extractJSON(text string) string {
 	text = strings.TrimSpace(text)
-	// 去 markdown ```json ... ``` fence。
 	if i := strings.Index(text, "```"); i >= 0 {
 		rest := text[i+3:]
 		rest = strings.TrimPrefix(rest, "json")
@@ -191,7 +176,6 @@ func extractJSON(text string) string {
 		}
 		text = strings.TrimSpace(rest)
 	}
-	// 提取首个 { 到末个 } 的子串。
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start >= 0 && end > start {
@@ -200,5 +184,5 @@ func extractJSON(text string) string {
 	return ""
 }
 
-// 编译期确认 LLMJudgeEvaluator 满足 Evaluator 接口。
+// _ 编译期确认 LLMJudgeEvaluator 满足 Evaluator 接口。
 var _ Evaluator = (*LLMJudgeEvaluator)(nil)

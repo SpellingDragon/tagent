@@ -25,11 +25,11 @@ type consolidateArgs struct {
 
 // consolidateResult 是巩固结果（含服务端指纹与回放验证裁决）。
 type consolidateResult struct {
-	Key         string `json:"key"`         // 巩固事件 EventKey hex
-	Fingerprint string `json:"fingerprint"` // 服务端 SHA1 指纹（LLM 不可伪造）
-	Resolved    int    `json:"resolved"`    // 收据取回的源事件数
-	Tombstoned  int    `json:"tombstoned"`  // 已遗忘的源事件数（诚实衰减）
-	Verified    bool   `json:"verified"`    // 回放验证指纹是否匹配
+	Key         string `json:"key"`
+	Fingerprint string `json:"fingerprint"`
+	Resolved    int    `json:"resolved"`
+	Tombstoned  int    `json:"tombstoned"`
+	Verified    bool   `json:"verified"`
 	Message     string `json:"message"`
 }
 
@@ -41,7 +41,7 @@ func NewConsolidateTool(store memory.MemoryStore, partitionID int) tool.Tool {
 	return NewConsolidateToolWithGate(store, partitionID, 0)
 }
 
-// NewConsolidateToolWithGate（4.4 design-report-closeout）带 min_source_events
+// NewConsolidateToolWithGate带 min_source_events
 // 硬门控：实际取回源不足时 memory.BuildConsolidationEvent 显式拒绝。
 func NewConsolidateToolWithGate(store memory.MemoryStore, partitionID, minSources int) tool.Tool {
 	return function.NewFunctionTool(
@@ -53,7 +53,7 @@ func NewConsolidateToolWithGate(store memory.MemoryStore, partitionID, minSource
 			for _, hx := range args.SourceKeys {
 				k, err := event.ParseEventKey(strings.TrimSpace(hx))
 				if err != nil || k == 0 {
-					continue // 跳过非法票据（诚实：不伪造收据）
+					continue
 				}
 				keys = append(keys, k)
 			}

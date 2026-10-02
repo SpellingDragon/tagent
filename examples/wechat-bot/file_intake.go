@@ -17,14 +17,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// 入站文件接收（file intake）：file_delivery.go 的镜像方向。
-// 用户微信发来的附件/超长文本 → 落盘 workspace uploads 目录 → 以相对路径注入 agent。
-
 const (
 	uploadsSubdir = "uploads"
 
 	// maxInboundFileSize 为入站单文件上限。容器 workspace 为 256m tmpfs，
-	// 且 SDK 下载为全量 []byte，上限过大会同时威胁磁盘与内存（见 design.md D8）。
+	// 且 SDK 下载为全量 []byte，上限过大会同时威胁磁盘与内存。
 	maxInboundFileSize = 50 * 1024 * 1024
 
 	// longTextThreshold 超过该字符数（rune 计）的入站文本转存为 .txt 文件。
@@ -49,26 +46,30 @@ var _ MediaDownloader = (*wechat.Bot)(nil)
 
 // SavedFile 描述一个已落盘的入站文件。
 type SavedFile struct {
-	Path     string // workspace 相对路径（相对进程 cwd，agent 可直接读取）
-	OrigName string // 原始文件名（清洗前，供展示）
-	Size     int    // 明文字节数
+	Path     string
+	OrigName string
+	Size     int
 }
 
 // IntakeOutcome 是一条媒体消息的接收结果。
 type IntakeOutcome struct {
 	Saved      []SavedFile
-	Transcript string   // 语音服务端转写文本（如有）
-	Rejects    []string // 面向用户的拒绝/失败原因（不注入 agent）
+	Transcript string
+	Rejects    []string
 }
 
 // InboundKind 是入站消息的处理分类。
 type InboundKind int
 
 const (
-	InboundIgnore    InboundKind = iota // 无文本无媒体，丢弃
-	InboundShortText                    // 文本 ≤ 阈值，走既有直接注入路径
-	InboundLongText                     // 文本 > 阈值，转文件注入
-	InboundMedia                        // 含媒体 item
+	// InboundIgnore 文本为空且非媒体，不进入会话。
+	InboundIgnore InboundKind = iota
+	// InboundShortText 其余文本：未超过长文本阈值，或工作区未配置时的降级归类。
+	InboundShortText
+	// InboundLongText 文本 rune 数超过 longTextThreshold，且 workspaceConfigured 为真。
+	InboundLongText
+	// InboundMedia 消息含图片/语音/文件/视频之一。
+	InboundMedia
 )
 
 // ClassifyInbound 对入站消息分类。纯函数，便于单测。
@@ -159,7 +160,7 @@ func saveInboundFile(workspaceDir, chatID, origName string, data []byte, now tim
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		os.Remove(finalPath) // 清理不完整残留（如 tmpfs 写满 ENOSPC）
+		os.Remove(finalPath)
 		return SavedFile{}, fmt.Errorf("write upload file: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -220,11 +221,9 @@ func IntakeMedia(ctx context.Context, dl MediaDownloader, cdnBaseURL, workspaceD
 				return dl.DownloadVideoFromItemTo(ctx, video, cdnBaseURL, w, opts)
 			}
 		default:
-			continue // 文本 item 由调用方处理
+			continue
 		}
 
-		// 可执行扩展名在下载前拒绝（省流量）；声明大小超限免下载（体验优化，
-		// 元数据缺失 declared=0 时正常接收，SDK 流式限额兜底）。
 		if executableExts[strings.ToLower(filepath.Ext(origName))] {
 			out.Rejects = append(out.Rejects, fmt.Sprintf("已拒收可执行文件: %s", origName))
 			continue
@@ -258,7 +257,7 @@ func IntakeMedia(ctx context.Context, dl MediaDownloader, cdnBaseURL, workspaceD
 		<-downloadSem
 		if err != nil {
 			f.Close()
-			os.Remove(finalPath) // 中断/失败时清理不完整残留
+			os.Remove(finalPath)
 			if errors.Is(err, wechat.ErrMaxSizeExceeded) {
 				out.Rejects = append(out.Rejects, fmt.Sprintf("文件 %s 超过大小上限 %s，未接收",
 					origName, formatSize(maxInboundFileSize)))
@@ -280,7 +279,7 @@ func IntakeMedia(ctx context.Context, dl MediaDownloader, cdnBaseURL, workspaceD
 }
 
 // SaveLongText 将超长文本落盘为 .txt，返回保存结果与注入文本
-// （相对路径 + 前 previewRunes 字预览 + 总字数）。
+// 。
 func SaveLongText(workspaceDir, chatID, text, nameHint string, now time.Time) (SavedFile, string, error) {
 	if nameHint == "" {
 		nameHint = "input"

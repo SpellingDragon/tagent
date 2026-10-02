@@ -1,7 +1,7 @@
 # example-file-memory-wiring Specification
 
 ## Purpose
-TBD - created by archiving change wechat-bot-observability-rl. Update Purpose after archive.
+wechat-bot 示例的本地持久接线：tagent agent 使用 localfile 记忆后端，重启数据不丢且不依赖外部 CLI。
 ## Requirements
 ### Requirement: FileSegmentStore 作为 memory backend（使用 LocalFileKV）
 wechat-bot 示例的 tagent agent SHALL 使用 `type: localfile` memory store（FileSegmentStore + LocalFileKV），通过本地 JSON 文件持久化事件数据，重启后数据不丢失。不依赖 rustviking CLI。

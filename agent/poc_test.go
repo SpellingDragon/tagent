@@ -1,5 +1,7 @@
 //go:build poc
 
+// 本文件负责框架钩子能力的验证：BeforeModel 改写消息、OnEvent 改写事件、可调用工具、多钩子顺序保持。
+// 契约: docs/wiki/agent/agent-architecture.md#framework-boundary
 package agent
 
 import (
@@ -9,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -16,19 +20,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-// ============================================================================
-// Mock implementations for PoC tests
-// ============================================================================
-
-// mockModel records the request it receives and returns a preset response.
+// pocMockModel mockModel records the request it receives and returns a preset response.
 type pocMockModel struct {
 	mu          sync.Mutex
-	lastRequest *model.Request // captured request for verification
+	lastRequest *model.Request
 	response    *model.Response
 }
 
@@ -64,7 +61,7 @@ func (m *pocMockModel) GetLastRequest() *model.Request {
 
 // pocTestPlugin is a Plugin that modifies events via OnEvent hook.
 type pocTestPlugin struct {
-	tagAssigned string // Tag value to assign
+	tagAssigned string
 	stateDelta  map[string][]byte
 }
 
@@ -136,12 +133,7 @@ func (t *pocCallableTool) WasCalled() bool {
 	return t.called
 }
 
-// ============================================================================
-// PoC 0.1: BeforeModel can modify Request.Messages
-// ============================================================================
-
 func TestPoC_BeforeModel_ModifyMessages(t *testing.T) {
-	// Setup: mock model that returns a simple assistant response
 	mockModel := newPocMockModel(&model.Response{
 		ID:   "resp-1",
 		Done: true,
@@ -155,7 +147,6 @@ func TestPoC_BeforeModel_ModifyMessages(t *testing.T) {
 		},
 	})
 
-	// Create BeforeModel callback that truncates messages to keep only the first 2
 	cb := model.NewCallbacks()
 	cb.RegisterBeforeModel(func(
 		ctx context.Context,
@@ -167,7 +158,6 @@ func TestPoC_BeforeModel_ModifyMessages(t *testing.T) {
 		return nil, nil
 	})
 
-	// Create LLMAgent with the BeforeModel callback
 	agt := llmagent.New(
 		"poc-before-model",
 		llmagent.WithModel(mockModel),
@@ -175,7 +165,6 @@ func TestPoC_BeforeModel_ModifyMessages(t *testing.T) {
 		llmagent.WithInstruction("You are a test assistant."),
 	)
 
-	// Create Runner and run
 	r := runner.NewRunner("poc-app", agt)
 	defer r.Close()
 
@@ -186,30 +175,19 @@ func TestPoC_BeforeModel_ModifyMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, eventCh)
 
-	// Consume events
 	for range eventCh {
-		// drain channel
 	}
 
-	// Verify: the mock model should have received at most 2 messages
-	// (system instruction + user message = 2, which is within limit)
 	lastReq := mockModel.GetLastRequest()
 	require.NotNil(t, lastReq, "mock model should have received a request")
 
-	// The instruction is prepended, so messages should be: [instruction, user]
-	// With BeforeModel truncation to 2, we should have exactly 2 messages
 	assert.LessOrEqual(t, len(lastReq.Messages), 2,
 		"BeforeModel should have truncated messages to at most 2")
 
 	t.Logf("PoC 0.1 PASSED: BeforeModel successfully modified Request.Messages (got %d messages)", len(lastReq.Messages))
 }
 
-// ============================================================================
-// PoC 0.2: OnEvent Plugin can modify Event and write StateDelta
-// ============================================================================
-
 func TestPoC_OnEvent_ModifyEvent(t *testing.T) {
-	// Setup: mock model
 	mockModel := newPocMockModel(&model.Response{
 		ID:   "resp-1",
 		Done: true,
@@ -223,7 +201,6 @@ func TestPoC_OnEvent_ModifyEvent(t *testing.T) {
 		},
 	})
 
-	// Create Plugin that modifies event
 	testPlugin := &pocTestPlugin{
 		tagAssigned: "external_input",
 		stateDelta: map[string][]byte{
@@ -232,14 +209,12 @@ func TestPoC_OnEvent_ModifyEvent(t *testing.T) {
 		},
 	}
 
-	// Create LLMAgent
 	agt := llmagent.New(
 		"poc-onevent",
 		llmagent.WithModel(mockModel),
 		llmagent.WithInstruction("You are a test assistant."),
 	)
 
-	// Create Runner with Plugin
 	r := runner.NewRunner("poc-app", agt, runner.WithPlugins(testPlugin))
 	defer r.Close()
 
@@ -258,7 +233,6 @@ func TestPoC_OnEvent_ModifyEvent(t *testing.T) {
 
 	require.NotEmpty(t, events, "should have received events from Runner")
 
-	// Verify: at least one event has Tag and StateDelta modified by the plugin
 	foundTag := false
 	foundStateDelta := false
 	for _, evt := range events {
@@ -278,21 +252,14 @@ func TestPoC_OnEvent_ModifyEvent(t *testing.T) {
 	t.Logf("PoC 0.2 PASSED: OnEvent plugin successfully modified Event (Tag=%v, StateDelta=%v)", foundTag, foundStateDelta)
 }
 
-// ============================================================================
-// PoC 0.3: CallableTool can be correctly called by LLMAgent
-// ============================================================================
-
 func TestPoC_CallableTool(t *testing.T) {
-	// Setup: create a CallableTool
 	pocTool := newPocCallableTool("poc_tool", map[string]any{
 		"result": "tool execution successful",
 	})
 
-	// Setup: mock model that first returns a tool call, then a final response
 	callCount := 0
 	mockModel := &pocMultiCallModel{
 		responses: []*model.Response{
-			// First response: tool call
 			{
 				ID:   "resp-tool",
 				Done: true,
@@ -315,7 +282,6 @@ func TestPoC_CallableTool(t *testing.T) {
 					},
 				},
 			},
-			// Second response: final answer after tool result
 			{
 				ID:   "resp-final",
 				Done: true,
@@ -332,7 +298,6 @@ func TestPoC_CallableTool(t *testing.T) {
 		callCount: &callCount,
 	}
 
-	// Create LLMAgent with the tool
 	agt := llmagent.New(
 		"poc-callable-tool",
 		llmagent.WithModel(mockModel),
@@ -340,7 +305,6 @@ func TestPoC_CallableTool(t *testing.T) {
 		llmagent.WithInstruction("You are a test assistant that uses tools."),
 	)
 
-	// Create Runner
 	r := runner.NewRunner("poc-app", agt)
 	defer r.Close()
 
@@ -357,17 +321,12 @@ func TestPoC_CallableTool(t *testing.T) {
 		events = append(events, evt)
 	}
 
-	// Verify: the tool was called
 	assert.True(t, pocTool.WasCalled(), "CallableTool.Call() should have been invoked by LLMAgent")
 	assert.Equal(t, `{"input":"test input"}`, string(pocTool.lastArgs),
 		"CallableTool should have received the correct JSON arguments")
 
 	t.Logf("PoC 0.3 PASSED: CallableTool was correctly called by LLMAgent (events received: %d)", len(events))
 }
-
-// ============================================================================
-// Helper: pocMultiCallModel returns responses in sequence
-// ============================================================================
 
 type pocMultiCallModel struct {
 	responses []*model.Response
@@ -388,7 +347,6 @@ func (m *pocMultiCallModel) GenerateContent(
 	}
 	m.mu.Unlock()
 
-	// Small delay to avoid race conditions in the event loop
 	time.Sleep(10 * time.Millisecond)
 
 	ch := make(chan *model.Response, 1)
@@ -403,12 +361,7 @@ func (m *pocMultiCallModel) Info() model.Info {
 	return model.Info{Name: "poc-multi-call-model"}
 }
 
-// ============================================================================
-// PoC 0.4: Multiple BeforeModel callbacks execute in registration order
-// ============================================================================
-
 func TestPoC_MultipleBeforeModel_OrderPreserved(t *testing.T) {
-	// Setup: mock model that returns a simple final response.
 	mockModel := newPocMockModel(&model.Response{
 		ID:   "resp-order",
 		Done: true,
@@ -422,7 +375,6 @@ func TestPoC_MultipleBeforeModel_OrderPreserved(t *testing.T) {
 	var orderMu sync.Mutex
 
 	cb := model.NewCallbacks()
-	// Register callback 1: appends "[1]" to each message content.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		orderMu.Lock()
 		order = append(order, 1)
@@ -432,7 +384,6 @@ func TestPoC_MultipleBeforeModel_OrderPreserved(t *testing.T) {
 		}
 		return nil, nil
 	})
-	// Register callback 2: appends "[2]" to each message content.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		orderMu.Lock()
 		order = append(order, 2)
@@ -461,16 +412,12 @@ func TestPoC_MultipleBeforeModel_OrderPreserved(t *testing.T) {
 	for range eventCh {
 	}
 
-	// Verify callbacks executed in registration order: [1, 2]
 	require.Len(t, order, 2, "both BeforeModel callbacks should have been called")
 	assert.Equal(t, 1, order[0], "first callback should execute first")
 	assert.Equal(t, 2, order[1], "second callback should execute second")
 
-	// Verify the message content was modified by both callbacks in order.
 	lastReq := mockModel.GetLastRequest()
 	require.NotNil(t, lastReq)
-	// The instruction is prepended, so messages = [instruction, user].
-	// The user message should end with "[1][2]" (callback 1 first, then callback 2).
 	userMsg := lastReq.Messages[len(lastReq.Messages)-1]
 	assert.Contains(t, userMsg.Content, "[1][2]",
 		"callbacks should have appended in order: [1] then [2]")

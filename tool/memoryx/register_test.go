@@ -7,10 +7,12 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// TestRegisterSubTools_RegistersFactories 守卫 A1 回归：memory_consolidate/memory_health 经
-// 工厂式注册接入 agent 工具装配链，工厂从 PlainToolFactoryConfig.MemStore 产出 CallableTool。
-// 此前构造注入式（NewConsolidateTool(store,pid)）在全局 RegisterBuiltinTools 时刻无法满足
-// agent 上下文 → 工具从未注册、agent 不可达（T-D 交付链断裂）。
+// TestRegisterSubTools_RegistersFactories pins factory-style registration of the curation tools.
+// - memory_consolidate and memory_health are held in the global factory table, which is how they reach the agent tool assembly.
+// - Each factory produces a CallableTool from PlainToolFactoryConfig.MemStore at assembly time.
+// - Constructor-style registration could not satisfy the agent context at global RegisterBuiltinTools time, which left the tools unreachable to the agent.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#curation
 func TestRegisterSubTools_RegistersFactories(t *testing.T) {
 	RegisterSubTools()
 	for _, id := range []string{"memory_consolidate", "memory_health"} {
@@ -35,8 +37,7 @@ func TestConsolidateFactory_RequiresMemStore(t *testing.T) {
 	}
 }
 
-// TestHealthFactory_NoEngineDegrades 验证 memory_health 在 MemStore 无引擎时仍产出工具
-// （诊断省略向量维度、报告存储规模）——不因未配置语义检索而失败。
+// TestHealthFactory_NoEngineDegrades 验证 MemStore 无引擎时 memory_health 仍产出工具：诊断省略向量维度并报告存储规模。
 func TestHealthFactory_NoEngineDegrades(t *testing.T) {
 	ct, err := healthFactory(agent.PlainToolFactoryConfig{MemStore: memory.NewInMemoryStore()})
 	if err != nil || ct == nil {

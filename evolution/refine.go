@@ -8,13 +8,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
-// ==================== refine 工具（git 原生自我改进通道）====================
-//
-// 三操作（Q 系裁决）：register（登记：git commit+improvement 事件+开评估窗口）/
-// status（改进台账+窗口结论+未登记提醒）/ rollback（安全 git revert，终态不评估）。
-// diff 已删——exec git diff 可达。哲学：改文件即生效（P2），登记是评估与回滚保护的
-// 前提而非生效前提；劣化只出建议（P4）。
-
 // refineArgs 是 refine 工具入参。
 type refineArgs struct {
 	Op    string   `json:"op" jsonschema:"description=操作,enum=register,enum=status,enum=rollback"`
@@ -25,11 +18,12 @@ type refineArgs struct {
 
 // refineResult 是 refine 工具输出。
 type refineResult struct {
-	Op      string   `json:"op"`
-	OK      bool     `json:"ok"`
-	Message string   `json:"message"`
-	Sha     string   `json:"sha,omitempty"`
-	Items   []string `json:"items,omitempty"` // status: 台账行
+	Op      string `json:"op"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	Sha     string `json:"sha,omitempty"`
+	// Items status: 台账行
+	Items []string `json:"items,omitempty"`
 }
 
 // NewRefineTool 构建 git 原生 refine 工具（entry only，装配层先于治理包裹追加——A3）。
@@ -102,10 +96,8 @@ func refineRollback(g *GitEvolution, args refineArgs) (refineResult, error) {
 	}
 	out, err := GitRevertSafe(g.cfg.WorkDir, args.Sha)
 	if err != nil {
-		// 冲突/校验失败以 result 渗透详情（不 error 打断——失败渗透原则）
 		return refineResult{Op: "rollback", OK: false, Message: err.Error() + "｜git 输出:" + out}, nil
 	}
-	// 裁决 Q3：回滚是终态——不写事件、不开窗口（信任执行者）。
 	return refineResult{Op: "rollback", OK: true,
 		Message: "已回滚 " + shortSha(args.Sha) + "（revert commit 已生成；文件即真源，热重载即时生效）"}, nil
 }

@@ -1,16 +1,16 @@
-// memory_recall: the recall PROTOCOL implementation (unified-memory-curation
-// D6), now internal — the model-facing entry is the unified `recall` tool
-// (recall.go, stable-context-compaction D7) which routes items/query through
+// memory_recall: the recall PROTOCOL implementation,
+// now internal — the model-facing entry is the unified `recall` tool
+// (recall.go) which routes items/query through
 // recallByItems/recallByQuery below.
 //
 // Index cards are recall tickets. PURE FUNCTION paths — no LLM in the
 // deterministic route. Input-shape dispatch (items take precedence):
 //
-//	items: [{key, hint?}]  → engineering recall: batch GetEvent, original
-//	                          order, zero hallucination, misses reported
-//	query + filters        → semantic recall: QueryOptions keyword search
-//	                          (the retrieval layer may evolve independently —
-//	                          keyword → vector — the entry protocol stays)
+// items: [{key, hint?}]  → engineering recall: batch GetEvent, original
+// order, zero hallucination, misses reported
+// query + filters → semantic recall: QueryOptions keyword search
+// (the retrieval layer may evolve independently —
+// keyword → vector — the entry protocol stays)
 package recall
 
 import (
@@ -38,7 +38,7 @@ type memoryRecallArgs struct {
 	// Query is a free-text semantic recall (keyword match on
 	// EventSummary/Content, case-insensitive) used when no items are given.
 	Query string `json:"query,omitempty"`
-	// Filters for query mode.
+	// EventTypes Filters for query mode.
 	EventTypes []string `json:"event_types,omitempty"`
 	Since      int64    `json:"since,omitempty"`
 	Until      int64    `json:"until,omitempty"`
@@ -66,7 +66,7 @@ type memoryRecallEntry struct {
 }
 
 type memoryRecallResult struct {
-	Mode    string              `json:"mode"` // "items" or "query"
+	Mode    string              `json:"mode"`
 	Entries []memoryRecallEntry `json:"entries"`
 	Count   int                 `json:"count"`
 	Misses  int                 `json:"misses,omitempty"`
@@ -75,11 +75,13 @@ type memoryRecallResult struct {
 	Message string `json:"message,omitempty"`
 }
 
-// NewMemoryRecallTool creates the protocol recall tool (pure function).
+// NewMemoryRecallTool 构造协议级召回工具（纯函数，无子 agent 绕行）：items 票据形态优先于 query 形态。
+// 检索分层、降级与诚实回报的契约见文档。
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-contract
 func NewMemoryRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args memoryRecallArgs) (memoryRecallResult, error) {
-			// Input-shape dispatch: items (tickets) take precedence.
 			if len(args.Items) > 0 {
 				return recallByItems(accessor, args.Items), nil
 			}
@@ -93,13 +95,10 @@ func NewMemoryRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	)
 }
 
-// maxRecallItems bounds the items hydration path (implementation-hardening
-// 3.4): a model sending hundreds of tickets must not turn one recall call
-// into an unbounded GetEvent storm. Over-limit tickets are dropped and the
-// truncation is reported in Message — never silent (honesty contract).
+// maxRecallItems 是 items 水合条数上界：超量部分被丢弃并在 Message 中报出，截断绝不静默。
 const maxRecallItems = 50
 
-// recallByItems: engineering recall — batch precise readback, original order.
+// recallByItems 按给定顺序批量精确回补票据原文，未命中者逐条标 miss。
 func recallByItems(accessor tagenttool.MemoryStoreAccessor, items []recallItem) memoryRecallResult {
 	res := memoryRecallResult{Mode: "items"}
 	if len(items) > maxRecallItems {
@@ -135,15 +134,12 @@ func recallByItems(accessor tagenttool.MemoryStoreAccessor, items []recallItem) 
 	return res
 }
 
-// recallByQuery: semantic recall via the retrieval layer. T-A 起：accessor 暴露记忆
-// 引擎时走 关键词∪向量 RRF 融合（闭环在引擎内），否则纯关键词——协议与工具声明
-// 零变化（prefix-cache 不受影响）。
-// recallTracerName 是 recall 内部路径 span 的 tracer 名（T-B 5.1 内部轻量 span）。
+// recallTracerName 是 recall 内部路径 span 的 tracer 名；该 span 只携带元数据，查询内容零入 span。
 const recallTracerName = "github.com/SpellingDragon/tagent/tool/recall"
 
+// recallByQuery 走检索层：查询词非空且引擎支持向量时优先混合检索，引擎报错或零命中则降级到
+// 纯关键词路径（不向调用方报错）。零结果必须回报检索范围与确定性下一步形态，见文档。
 func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int, args memoryRecallArgs) (result memoryRecallResult, err error) {
-	// T-B 5.1 内部路径轻量 span：recall 查询实现层。属性仅元数据（mode/分区数/查询长度/
-	// 命中数），查询内容零入 span（防敏感内容泄漏到 trace 后端）。noop 安全：未设 OTLP 零开销。
 	ctx, span := otel.Tracer(recallTracerName).Start(ctx, "tagent.recall.query")
 	defer func() {
 		span.SetAttributes(
@@ -161,8 +157,6 @@ func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor,
 	if limit <= 0 {
 		limit = 10
 	}
-	// T-A hybrid 语义召回：查询词非空且引擎支持向量时优先走引擎融合；引擎报错或
-	// 零命中 → 优雅降级到下方纯关键词路径（不报错，行为与现状一致）。
 	if args.Query != "" {
 		if ep, ok := accessor.(memory.MemoryEngineProvider); ok {
 			if eng := ep.MemoryEngine(); eng != nil && eng.Capabilities().Vector {
@@ -204,9 +198,6 @@ func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor,
 	}
 	res.Count = len(res.Entries)
 	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
-	// Zero-result honesty: a bare empty list invites the wrong conclusion that
-	// the backend holds no history at all (observed in production). State what
-	// WAS searched and steer toward the deterministic shapes.
 	if res.Count == 0 {
 		res.Message = "无可读分区内的匹配事件：已检索本 agent 可读命名空间（自身 + read_namespaces）。" +
 			"query 是关键词子串匹配——请改用 1~3 个更短的关键词（勿整句提问）或加时间范围重试；若时间线里有 [evt_…] 票据，用 items 按票据精确回补更可靠"
@@ -214,18 +205,16 @@ func recallByQuery(ctx context.Context, accessor tagenttool.MemoryStoreAccessor,
 	return res, nil
 }
 
-// maxRecallLimit 钳制模型入参 limit，防批量水合放大（审查 Nit10）。
+// maxRecallLimit 钳制模型入参 limit，防止单次召回放大为大批水合。
 const maxRecallLimit = 100
 
-// recallViaEngine 经记忆引擎做 hybrid 检索并水合为统一协议条目（T-A）。
-// 返回 ok=false 表示应降级到纯关键词路径（引擎报错、零命中或全部悬挂）。
-// 两段式保持：引擎只返回排序票据（EventKey），全文经批量水合，悬挂/已删命中自然消失。
+// recallViaEngine 经引擎做混合检索并水合为统一协议条目。返回 ok=false 表示应降级到关键词路径
+// （引擎报错、零命中或水合后全部悬挂）。引擎只给排序票据、全文另取水合的两段式使悬挂与墓碑命中
+// 自然消失；引擎按 limit 的两倍返候选，过滤后再裁到 limit，避免死键占据 topK 造成静默少返回。
 func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []int, args memoryRecallArgs, limit int) (memoryRecallResult, bool) {
 	if limit > maxRecallLimit {
 		limit = maxRecallLimit
 	}
-	// 超取补偿悬挂/墓碑命中（审查 M2）：引擎返回 limit*2 候选，水合过滤后裁到 limit，
-	// 避免死键占据 topK 导致静默少返回。
 	hits, err := eng.Retrieve(ctx, memory.RetrievalQuery{
 		Query:        args.Query,
 		PartitionIDs: readPartitionIDs,
@@ -242,8 +231,6 @@ func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tage
 	if len(hits) == 0 {
 		return memoryRecallResult{}, false
 	}
-	// 第二道分区防线（审查 S4）：EventKey 高位即分区，水合前零成本过滤，
-	// 防持久化/重建链路 pid 缺失时跨命名空间泄漏。
 	keys := make([]int64, 0, len(hits))
 	for _, h := range hits {
 		if partitionAllowed(memory.PartitionIDFromEventKey(h.EventKey), readPartitionIDs) {
@@ -253,7 +240,7 @@ func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tage
 	if len(keys) == 0 {
 		return memoryRecallResult{}, false
 	}
-	events := hydrateKeys(accessor, keys) // 批量水合（保序、跳缺失，审查 Nit10）
+	events := hydrateKeys(accessor, keys)
 	res := memoryRecallResult{Mode: "query"}
 	for i := range events {
 		evt := &events[i]
@@ -264,18 +251,18 @@ func recallViaEngine(ctx context.Context, eng memory.MemoryEngine, accessor tage
 			Time:    formatTimestamp(evt.Timestamp),
 		})
 		if len(res.Entries) >= limit {
-			break // 裁到 limit
+			break
 		}
 	}
 	res.Count = len(res.Entries)
 	if res.Count == 0 {
-		return memoryRecallResult{}, false // 全部悬挂 → 降级关键词
+		return memoryRecallResult{}, false
 	}
 	res.Message = strings.TrimPrefix(truncationHint(res.Count, limit), "; ")
 	return res, true
 }
 
-// partitionAllowed 报告 pid 是否在白名单（空白名单 = 不限）。
+// partitionAllowed 报告 pid 是否在白名单（空白名单表示不限）。水合前过滤是分区泄漏的第二道防线。
 func partitionAllowed(pid int, whitelist []int) bool {
 	if len(whitelist) == 0 {
 		return true
@@ -288,9 +275,8 @@ func partitionAllowed(pid int, whitelist []int) bool {
 	return false
 }
 
-// hydrateKeys 批量取回事件全文，保持 keys 顺序、跳过缺失（悬挂/墓碑）。
-// 优先 GetEvents 批量（FileSegmentStore 后端下避免 N 次 CLI 子进程，审查 Nit10），
-// accessor 不支持批量时退化逐 key GetEvent。
+// hydrateKeys 批量取回事件全文，保持入参顺序、跳过缺失（悬挂与墓碑）。优先一次批量取回
+// （文件段存储后端下避免逐键子进程）；不支持批量的 accessor 退化为逐键取回。
 func hydrateKeys(accessor tagenttool.MemoryStoreAccessor, keys []int64) []memory.FullEvent {
 	if batcher, ok := accessor.(interface {
 		GetEvents([]int64) ([]memory.FullEvent, error)

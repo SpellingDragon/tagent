@@ -36,8 +36,6 @@ func (m *countingToolSet) closeCount() int {
 	return m.closed
 }
 
-// ==================== Transport normalization ====================
-
 func TestNormalizeTransport(t *testing.T) {
 	cases := map[string]string{
 		"streamable-http": "streamable",
@@ -49,7 +47,7 @@ func TestNormalizeTransport(t *testing.T) {
 		"sse":             "sse",
 		"stdio":           "stdio",
 		" sse ":           "sse",
-		"websocket":       "websocket", // passed through, rejected by Validate
+		"websocket":       "websocket",
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, NormalizeTransport(in), "input %q", in)
@@ -74,8 +72,6 @@ func TestServerConfigValidate(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported transport")
 }
 
-// ==================== Registry lifecycle ====================
-
 func TestRegistry_AddRemoveClose(t *testing.T) {
 	r := NewRegistry()
 	a := &countingToolSet{name: "a"}
@@ -93,27 +89,22 @@ func TestRegistry_AddRemoveClose(t *testing.T) {
 	require.True(t, ok)
 	assert.Same(t, a, got.(*countingToolSet))
 
-	// Remove closes the toolset.
 	require.True(t, r.Remove("a"))
 	assert.Equal(t, 1, a.closeCount())
 	_, ok = r.Get("a")
 	assert.False(t, ok)
 	assert.False(t, r.Remove("a"), "second remove returns false")
 
-	// Add-replace closes the old instance.
 	b2 := &countingToolSet{name: "b"}
 	r.Add("b", b2)
 	assert.Equal(t, 1, b.closeCount())
 
-	// Close closes everything and is idempotent.
 	require.NoError(t, r.Close())
 	assert.Equal(t, 1, b2.closeCount())
 	require.NoError(t, r.Close())
 	assert.Equal(t, 1, b2.closeCount(), "Close must be idempotent")
 	assert.Empty(t, r.Names())
 }
-
-// ==================== Config hot-sync ====================
 
 func writeConfig(t *testing.T, path, content string, mtime time.Time) {
 	t.Helper()
@@ -134,12 +125,10 @@ mcp_servers:
 `, base)
 
 	r := NewRegistry(WithConfigPath(cfgPath))
-	// First access lazily syncs the file (no Seed needed).
 	assert.Equal(t, []string{"alpha"}, r.Names())
 	p1, ok := r.Get("alpha")
 	require.True(t, ok)
 
-	// Same content, newer mtime → instance retained (spec unchanged).
 	writeConfig(t, cfgPath, `
 mcp_servers:
   alpha:
@@ -150,7 +139,6 @@ mcp_servers:
 	require.True(t, ok)
 	assert.Same(t, p1, p2, "unchanged spec must keep the live instance")
 
-	// Add beta + change alpha URL → beta added, alpha rebuilt.
 	writeConfig(t, cfgPath, `
 mcp_servers:
   alpha:
@@ -165,7 +153,6 @@ mcp_servers:
 	require.True(t, ok)
 	assert.NotSame(t, p1, p3, "changed spec must rebuild the toolset")
 
-	// Remove alpha → gone, beta stays.
 	writeConfig(t, cfgPath, `
 mcp_servers:
   beta:
@@ -174,11 +161,9 @@ mcp_servers:
 `, base.Add(6*time.Second))
 	assert.Equal(t, []string{"beta"}, r.Names())
 
-	// Broken YAML → keep current content.
 	writeConfig(t, cfgPath, "mcp_servers: [broken", base.Add(8*time.Second))
 	assert.Equal(t, []string{"beta"}, r.Names(), "parse failure must keep current servers")
 
-	// Invalid spec → skipped, valid ones applied.
 	writeConfig(t, cfgPath, `
 mcp_servers:
   beta:
@@ -202,7 +187,6 @@ func TestRegistry_HotSync_ManualEntriesSurvive(t *testing.T) {
 	manual := &countingToolSet{name: "manual"}
 	r.Add("manual", manual)
 
-	// Config change without the manual entry → manual survives.
 	writeConfig(t, cfgPath, `
 mcp_servers:
   alpha:
@@ -232,7 +216,6 @@ mcp_servers:
 	})
 	p1, ok := r.Get("alpha")
 	require.True(t, ok)
-	// Access right after Seed must not rebuild from the just-seeded file.
 	p2, _ := r.Get("alpha")
 	assert.Same(t, p1, p2)
 	require.NoError(t, r.Close())
@@ -258,9 +241,11 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 	require.NoError(t, r.Close())
 }
 
-// hardening-review-batch2 6.4：完整项目配置形态（entry/agents/providers 与
-// mcp_servers 共存）热同步——严格解码只作用于 mcp_servers 子树，合法根字段
-// 不再被判 unknown 而静默保留旧表。
+// TestRegistry_HotSync_FullProjectConfigShape pins hot sync for the full project configuration shape.
+// - Entry, agents and providers coexist with mcp_servers, and strict decoding applies only to the mcp_servers subtree.
+// - Legitimate root fields are not judged unknown, so an updated table replaces the old one instead of being silently kept.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 func TestRegistry_HotSync_FullProjectConfigShape(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "tagent.yaml")
@@ -282,7 +267,6 @@ mcp_servers:
 	r := NewRegistry(WithConfigPath(cfgPath))
 	assert.Equal(t, []string{"alpha"}, r.Names(), "full-shape config must hot-sync (root fields not 'unknown')")
 
-	// 热更：改 alpha URL。
 	writeConfig(t, cfgPath, `entry: tagent
 providers:
   zhipu:
@@ -299,8 +283,9 @@ mcp_servers:
 	require.True(t, ok)
 }
 
-// cold-eyes P1-3：JSON 完整配置形态（子树即 servers 映射，非 configFileServers
-// 包装）——曾必然解析失败（"alpha" 被判 unknown）。
+// TestRegistry_HotSync_JSONFullConfigShape pins the same hot sync for the JSON configuration shape.
+// - In JSON the document root is the servers mapping itself, not wrapped in configFileServers.
+// - Reading the root through the wrapper would reject a bare mapping, which is the shape under test.
 func TestRegistry_HotSync_JSONFullConfigShape(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "tagent.json")

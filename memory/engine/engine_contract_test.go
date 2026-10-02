@@ -1,14 +1,14 @@
 package engine
 
 import (
-	"github.com/SpellingDragon/tagent/memory"
-
 	"context"
 	"testing"
+
+	"github.com/SpellingDragon/tagent/memory"
 )
 
-// stubEngine 是 memory.MemoryEngine 的最小参考实现，用于编译期锁定契约 C6，
-// 并为 T-A 的 InMemoryEngine/RustVikingEngine 提供接口满足性基线。
+// stubEngine 是 memory.MemoryEngine 的最小参考实现：编译期锁定接口形状，并为各引擎实现
+// 提供接口满足性基线。
 type stubEngine struct {
 	indexed   int
 	removed   int
@@ -32,7 +32,6 @@ func (s *stubEngine) Remove(_ context.Context, _ int64) error {
 func (s *stubEngine) Retrieve(_ context.Context, q memory.RetrievalQuery) ([]memory.RetrievalHit, error) {
 	s.lastQuery = q
 	if !s.ready && (q.Mode == memory.ModeVector || q.Mode == memory.ModeHybrid || q.Mode == memory.ModeAuto) {
-		// 契约：索引未就绪时退化为关键词而非报错（此处 stub 返回空集表示退化）。
 		return nil, nil
 	}
 	return s.hits, nil
@@ -42,11 +41,12 @@ func (s *stubEngine) Capabilities() memory.RetrievalCaps { return s.caps }
 func (s *stubEngine) Ready() bool                        { return s.ready }
 func (s *stubEngine) Close() error                       { s.closed = true; return nil }
 
-// 编译期锁定 C6：stubEngine 必须满足 memory.MemoryEngine（memory.IndexBuilder + memory.Retriever + Closer）。
+// _ 编译期锁定：stubEngine 必须满足 memory.MemoryEngine（IndexBuilder + Retriever + Closer）。
 var _ memory.MemoryEngine = (*stubEngine)(nil)
 
-// TestMemoryEngineContractDegradation 验证契约的退化语义：
-// 索引未就绪时 Retrieve 对 Auto/Vector/Hybrid 退化（返回空、无错误），不 panic。
+// TestMemoryEngineContractDegradation 钉住契约的退化语义：索引未就绪时 Auto/Vector/Hybrid
+//
+// 契约: docs/wiki/memory/memory-architecture.md#inmemory-retrieval
 func TestMemoryEngineContractDegradation(t *testing.T) {
 	eng := &stubEngine{ready: false, caps: memory.RetrievalCaps{Keyword: true}}
 	for _, mode := range []memory.RetrievalMode{memory.ModeAuto, memory.ModeVector, memory.ModeHybrid} {
@@ -77,7 +77,6 @@ func TestMemoryEngineContractLifecycle(t *testing.T) {
 	if !eng.Capabilities().Hybrid {
 		t.Fatal("Capabilities 应声明 Hybrid")
 	}
-	// 就绪后 hybrid 返回预置命中，且透传分区白名单（跨分区泄漏防线由实现遵守）。
 	eng.hits = []memory.RetrievalHit{{EventKey: 42, Score: 1.5}}
 	hits, err := eng.Retrieve(ctx, memory.RetrievalQuery{Query: "q", PartitionIDs: []int{2}, Mode: memory.ModeHybrid, Limit: 5})
 	if err != nil {

@@ -10,15 +10,6 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== 向量 KV 持久层（T-A · rustviking-backed 持久化）====================
-//
-// 裁决依据 f1-rustviking-capability-report.md「追加发现」：rustviking `index` CLI 是
-// 进程内易失索引，不可作持久后端；改用 rustviking / LocalFile **KV**（持久）序列化向量
-// + 启动异步重建内存索引（= 原 hybrid 变更 D1-A 方案）。memory.KVStore 接口两后端
-// （RustVikingClient / LocalFileKV / MockRustVikingClient）皆可，引擎不感知具体后端。
-//
-// 优雅降级：KV 持久失败仅记日志 + 计数，绝不传染索引/检索主链路（向量是增强索引）。
-
 // rebuildScanLimit 是启动重建时 KV 前缀扫描的条数上限。取大值以覆盖 MVP 规模
 // （万级事件）；rustviking KV scan 需显式 -l（默认仅 100），故传大 limit。
 // 超大规模的分页重建依赖 rustviking R5 迭代器（backlog），此处以 limit 兜底。
@@ -27,11 +18,12 @@ const rebuildScanLimit = 200000
 // persistedVector 是向量 + 元数据的 KV 序列化形态（JSON，rustviking KV 接受 JSON value）。
 // 元数据（pid/type/ts）随向量持久，使重建无需回读事件即可恢复过滤维度。
 type persistedVector struct {
-	Vec         []float32 `json:"v"`
-	ModelID     string    `json:"m,omitempty"` // 嵌入模型指纹：换模型/维度后旧向量重建时跳过（审查 M3）
-	PartitionID int       `json:"pid"`
-	EventType   string    `json:"t"`
-	Timestamp   int64     `json:"ts"`
+	Vec []float32 `json:"v"`
+	// ModelID 嵌入模型指纹：换模型/维度后旧向量重建时跳过
+	ModelID     string `json:"m,omitempty"`
+	PartitionID int    `json:"pid"`
+	EventType   string `json:"t"`
+	Timestamp   int64  `json:"ts"`
 }
 
 // vecKVKey 构造向量的 KV 键：{prefix}{eventKey}。
@@ -114,7 +106,6 @@ func (e *InMemoryEngine) rebuildFromKV() {
 			corrupt++
 			continue
 		}
-		// 换模型/维度后的旧向量：跳过，防维度不匹配 0 分候选与语义混用（审查 M3）。
 		if curModel != "" && pv.ModelID != "" && pv.ModelID != curModel {
 			staleModel++
 			continue
@@ -124,7 +115,7 @@ func (e *InMemoryEngine) rebuildFromKV() {
 		loaded++
 	}
 	e.mu.Unlock()
-	e.indexedCount.Add(int64(loaded)) // 重建计入 indexed，与 vectorCount 语义一致（审查 Nit1）
+	e.indexedCount.Add(int64(loaded))
 	e.rebuildDone.Store(true)
 	log.Infof("[InMemoryEngine] rebuilt %d vectors from KV (prefix %q, corrupt=%d, staleModel=%d)", loaded, e.vecPrefix, corrupt, staleModel)
 }

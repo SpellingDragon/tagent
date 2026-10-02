@@ -49,10 +49,6 @@ func resolveTask(ctrl task.TaskController, id string) (*task.Task, bool) {
 	return nil, false
 }
 
-// ---------------------------------------------------------------------------
-// list_tasks
-// ---------------------------------------------------------------------------
-
 // ListTasksTool lists all tracked tasks (active + recently settled).
 type ListTasksTool struct{}
 
@@ -87,10 +83,6 @@ func (t *ListTasksTool) Call(ctx context.Context, _ []byte) (any, error) {
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
-
-// ---------------------------------------------------------------------------
-// cancel_task
-// ---------------------------------------------------------------------------
 
 // CancelTaskTool cancels a running task.
 type CancelTaskTool struct{}
@@ -135,10 +127,6 @@ func (t *CancelTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	return fmt.Sprintf("已取消任务 %s（%s）。", tk.ID, tk.Spec.Desc), nil
 }
 
-// ---------------------------------------------------------------------------
-// relaunch_task
-// ---------------------------------------------------------------------------
-
 // RelaunchTaskTool re-runs a task from its original spec.
 type RelaunchTaskTool struct{}
 
@@ -176,9 +164,6 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if !ok {
 		return fmt.Sprintf("未找到任务 %q。", args.TaskID), nil
 	}
-	// R2（review 🟠7）：恢复型 suspect（跨重启重建/进程内 fake-dead）占着 byKey——
-	// 直接 Relaunch 会命中 dedup 永久锁死（报「已重跑」实际什么都没跑）。用户显式
-	// relaunch 即选择重跑：先退役旧条目（写 cancelled 终态，事实链自洽），再重跑。
 	if tk.Status() == task.TaskSuspect {
 		ctrl.Cancel(tk.ID)
 	}
@@ -186,8 +171,6 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	if err != nil {
 		return fmt.Sprintf("重跑任务 %s 失败：%v", tk.ID, err), nil
 	}
-	// §8.1 第三调用点（review 第七轮）：gate 拒绝时如实告知——重跑的启动已执行但
-	// 未纳管（detector 已被 Spawn 取消），绝不能报「已重跑」。
 	if res.Blocked != "" {
 		return fmt.Sprintf("重跑未被任务层纳管（启动已执行但跟踪已取消，结果不会回写）：%s。可稍后重试。", res.Blocked), nil
 	}
@@ -196,10 +179,6 @@ func (t *RelaunchTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, erro
 	}
 	return fmt.Sprintf("已重跑任务 %s：%s", tk.ID, tk.Spec.Desc), nil
 }
-
-// ---------------------------------------------------------------------------
-// resume_task
-// ---------------------------------------------------------------------------
 
 // ResumeTaskTool feeds new input into an alive-detached task's live session
 // (the state machine's alive-detached → running edge). The resumed round

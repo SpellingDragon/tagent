@@ -1,9 +1,3 @@
-// Package-level event metadata contract (unified-event-projection D4).
-//
-// Injecting and parsing event metadata is a FRAMEWORK responsibility: every
-// key is defined once here, injection points reference these constants, and
-// consumers parse through ParseEventMeta instead of reading raw StateDelta
-// strings.
 package event
 
 import (
@@ -14,13 +8,10 @@ import (
 	frameworkevent "trpc.group/trpc-go/trpc-agent-go/event"
 )
 
-// StateDelta metadata keys. Injection points:
-//   - storage identifiers (MetaKeyEventKey/PartitionID/EventType/EventSummary):
-//     written by the event-plugin pipeline (MemoryPlugin) when an event is stored;
-//   - MetaKeyTriggerSource: set once per invocation by RunFlow on every
-//     forwarded event, for deterministic consumer dispatch;
-//   - MetaPrefix* passthrough metadata (e.g. chat routing): propagated onto
-//     delivered events from the invocation's root metadata.
+// MetaKeyEventKey StateDelta 与 FullEvent.Metadata 的键常量：每个键在此定义一次，注入点引用常量，
+// 消费方经 ParseEventMeta 解析。谁写谁读见文档的键归属表。
+//
+// 契约: docs/wiki/event/event-architecture.md#metadata-keys
 const (
 	MetaKeyEventKey      = "event_key"
 	MetaKeyPartitionID   = "partition_id"
@@ -28,70 +19,48 @@ const (
 	MetaKeyEventSummary  = "event_summary"
 	MetaKeyTriggerSource = "trigger_source"
 
-	// MetaKeyTaskInlineRecord marks a fact-chain record that is registry-only
-	// inline settle data (§5.5 non-projection classification): the result was
-	// already returned in-turn as a tool result, so projecting it again would
-	// double-render. Consumed exclusively through IsNonProjectionRecord.
+	// MetaKeyTaskInlineRecord 标记回合内已作为 tool result 返回的账目记录，仅经
+	// IsNonProjectionRecord 消费。
 	MetaKeyTaskInlineRecord = "task_inline_record"
 
-	// 归因章键（TC0/T-EVO）：写入 FullEvent.Metadata，使产出事件可回溯到生效版本。
-	// 与上述 StateDelta 存储标识不同——这些经 plugin.Attribution ctx 载体盖章。
-	MetaKeyAgentName = "agent_name" // 产生该事件的 agent（provenance 基线）
-	MetaKeyBundleID  = "bundle_id"  // 生效的 prompt/参数/模型 bundle 版本（T-EVO）
-	MetaKeyRolloutID = "rollout_id" // 回合/invocation 标识
+	// MetaKeyAgentName 归因章键：写入 FullEvent.Metadata，使产出事件可回溯到生效的 agent、bundle 与回合。
+	MetaKeyAgentName = "agent_name"
+	MetaKeyBundleID  = "bundle_id"
+	MetaKeyRolloutID = "rollout_id"
 
-	// trace 关联键（T-B 统一可观测数据模型）：turn span 的 trace_id/span_id 经 attribution
-	// 落此，使事件溯源 / trajectory / OTel span 三投影由同一锚点双向互链（指令2）。
+	// MetaKeyTraceID trace 关联键：使事件溯源、轨迹与遥测三个投影共用同一锚点双向互链。
 	MetaKeyTraceID = "trace_id"
 	MetaKeySpanID  = "span_id"
 
-	// governance 事件（TypeGovernance）子类型键与值（C3/C4：FullEvent.Metadata 键的权威源
-	// 统一在 event 包——governance.DenialLedger 写、evolution.StoreEvidenceSource 读同一常量，
-	// 消除跨包字面量复制的静默漂移；漂移会使 evidence 的 DenialCount 归零、废掉快道回滚防线）。
+	// MetaKeySubtype 是治理子类型的唯一权威键名：写入方与取证方共用本常量，
+	// 避免跨包字面量漂移（漂移会使取证侧拒绝计数归零，废掉快道回滚防线）。
 	MetaKeySubtype = "subtype"
 
-	SubtypeDenial   = "denial"   // 治理拒绝
-	SubtypeGoal     = "goal"     // goal 登记
-	SubtypeApproval = "approval" // critical 挂起待批准
-	SubtypeDegraded = "degraded" // 依赖退化
-	SubtypeAudit    = "audit"    // 审计放行
+	SubtypeDenial   = "denial"
+	SubtypeGoal     = "goal"
+	SubtypeApproval = "approval"
+	SubtypeDegraded = "degraded"
+	SubtypeAudit    = "audit"
 
-	// MetaPrefix marks passthrough metadata keys (meta_chat_id, meta_user_name, …).
+	// MetaPrefix 标记透传业务元数据键。
 	MetaPrefix = "meta_"
 
-	// Inbox fact-identity keys (fix-resident-reliability-boundaries D2, 3.3).
-	// These are the ONLY authoritative names for the durable-input identity
-	// written onto a FullEvent.Metadata / receipt fact — the inbox file is not
-	// a permanent provenance source, so the identity lives in the fact chain.
-	// They replaced the v1 untyped AgentEvent.Metadata control keys
-	// (inbox_path/inbox_request_id/inbox_dedup_key), which leaked runtime
-	// claim state into business Metadata, Origin baggage, the model context and
-	// host delivery fields. The runtime claim is now a typed, non-JSON field
-	// (agent.durableClaim); only these identity keys cross into persisted facts.
-	MetaKeyInboxRequestID = "inbox_request_id" // envelope request id (batch identity)
-	MetaKeyInboxSlot      = "inbox_slot"       // fixed message slot index (never compacted)
-	MetaKeySourceEventID  = "source_event_id"  // original AgentEvent id (lossless replay)
+	// MetaKeyInboxRequestID 输入身份键：durable 输入的身份以事实链为准（inbox 文件不是持久溯源源）；
+	// 运行时 claim 状态由类型化字段承载，不进入这些业务元数据。
+	MetaKeyInboxRequestID = "inbox_request_id"
+	MetaKeyInboxSlot      = "inbox_slot"
+	MetaKeySourceEventID  = "source_event_id"
 
-	// MetaKeySourceSnapshot holds an EXACT JSON snapshot of the source event's
-	// {source, business metadata} frozen onto a canonical fact (task 3.4). The
-	// complete business Metadata is preserved losslessly under this ONE reserved
-	// control key so a durable input can be reconciled back to its host
-	// (chat_id, task genealogy, ...) across a restart — instead of spreading
-	// arbitrary business keys across the trusted control namespace (which they
-	// must NOT enter) or dropping them. Consumers parse via DecodeSourceSnapshot.
 	MetaKeySourceSnapshot = "source_snapshot"
 )
 
-// SourceSnapshot is the frozen provenance of a durable input: its original
-// producer source and the complete business Metadata carried on the source
-// event. Stored as exact JSON under MetaKeySourceSnapshot.
+// SourceSnapshot 冻结 durable 输入的原始来源与完整业务 Metadata，以 JSON 存于 MetaKeySourceSnapshot。
 type SourceSnapshot struct {
 	Source   string         `json:"source"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// EncodeSourceSnapshot renders a SourceSnapshot as the JSON stored under
-// MetaKeySourceSnapshot. An empty source with nil/empty metadata yields "".
+// EncodeSourceSnapshot 渲染持久化用的快照 JSON；来源与元数据皆空时返回空串。
 func EncodeSourceSnapshot(source string, metadata map[string]any) (string, error) {
 	if source == "" && len(metadata) == 0 {
 		return "", nil
@@ -103,8 +72,7 @@ func EncodeSourceSnapshot(source string, metadata map[string]any) (string, error
 	return string(b), nil
 }
 
-// DecodeSourceSnapshot parses the JSON stored under MetaKeySourceSnapshot back
-// into a SourceSnapshot. An empty string yields the zero value.
+// DecodeSourceSnapshot 解析快照 JSON；空串得到零值。
 func DecodeSourceSnapshot(raw string) (SourceSnapshot, error) {
 	if raw == "" {
 		return SourceSnapshot{}, nil
@@ -116,12 +84,7 @@ func DecodeSourceSnapshot(raw string) (SourceSnapshot, error) {
 	return s, nil
 }
 
-// FormatEventKey renders an EventKey in its CANONICAL string form: lowercase
-// hexadecimal (negative summary-reference keys keep a leading '-'). This is
-// the single string representation used everywhere a key crosses a text
-// boundary — the [evt_KEY|type] timeline prefix, compaction key lists,
-// StateDelta metadata, and recall tool I/O. Hex keeps the 19-digit decimal
-// form down to ≤16 chars (token-cheaper, and visually an opaque identifier).
+// FormatEventKey 以规范小写十六进制渲染 EventKey（负 key 保留前导 -）。
 func FormatEventKey(key int64) string {
 	if key < 0 {
 		return "-" + strconv.FormatInt(-key, 16)
@@ -129,11 +92,8 @@ func FormatEventKey(key int64) string {
 	return strconv.FormatInt(key, 16)
 }
 
-// ParseEventKey parses the canonical hex string form back into an EventKey.
-// Tolerates the forms a model is likely to echo back as a recall key:
-// optional 0x/0X prefix, the timeline-rendered "evt_" prefix (every
-// [evt_HEX|type] timeline message shows the key this way), the bracketed
-// "[evt_HEX|type]" form, and a trailing "|type" or "]".
+// ParseEventKey 解析规范十六进制字符串，并容忍模型回显票据的常见形态：0x 前缀、
+// evt_ 前缀、完整 [evt_HEX|type]、尾随 |type 或 ]。
 func ParseEventKey(s string) (int64, error) {
 	neg := false
 	if strings.HasPrefix(s, "-") {
@@ -158,20 +118,17 @@ func ParseEventKey(s string) (int64, error) {
 	return v, nil
 }
 
-// EventMeta is the parsed metadata of a delivered event.
+// EventMeta 是投递事件元数据的解析结果。
 type EventMeta struct {
 	EventKey      int64
 	PartitionID   int
 	EventType     string
 	EventSummary  string
 	TriggerSource string
-	// Meta holds passthrough metadata with the "meta_" prefix stripped
-	// (e.g. "chat_id" → value of StateDelta["meta_chat_id"]).
-	Meta map[string]string
+	Meta          map[string]string
 }
 
-// ParseEventMeta extracts the metadata contract from a framework event.
-// Missing fields yield zero values; Meta is always non-nil.
+// ParseEventMeta 提取元数据契约；缺失字段留零值，Meta 恒非 nil。
 func ParseEventMeta(evt *frameworkevent.Event) EventMeta {
 	meta := EventMeta{Meta: map[string]string{}}
 	if evt == nil || evt.StateDelta == nil {

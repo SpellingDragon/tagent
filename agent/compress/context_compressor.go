@@ -42,9 +42,9 @@ type CompressResult struct {
 // It reads EventReferences from the SessionProjection, resolves them to
 // messages via MemoryStore, checks token budget, and applies value-driven
 // L0-L3 compression when over budget. Returns:
-//   - Resolved/compressed messages (the historical timeline)
-//   - Retained refs to update the projection
-//   - Error notices for engineering awareness
+// - Resolved/compressed messages (the historical timeline)
+// - Retained refs to update the projection
+// - Error notices for engineering awareness
 //
 // Design principle: Projection is the SINGLE source of truth for the
 // historical timeline. ContextCompressor does NOT reconcile against
@@ -52,10 +52,10 @@ type CompressResult struct {
 // deduplication. The BeforeModel callback handles merging the compressed
 // history with current-turn messages.
 type ContextCompressor struct {
-	compressor   *SmartCompressor // Reuses L0-L3 / value-driven strategy
+	compressor   *SmartCompressor
 	memStore     memory.MemoryStore
 	tokenCounter TokenCounter
-	// maxTokens / keepRecent are the CONSTRUCTION values (§6.4 pull, S-E): after
+	// maxTokens / keepRecent are the CONSTRUCTION values: after
 	// the push face was deleted they are written exactly once, here, and only
 	// consulted as the fallback when no hot source is installed. The live numbers
 	// come from hotSource per boundary, so an in-flight turn can never observe a
@@ -68,7 +68,7 @@ type ContextCompressor struct {
 	thresholdBits atomic.Uint64
 	keepRecent    atomic.Int64
 
-	// hotSource is the §6.4 pull side (introduce-durable-workflow-engine S-E):
+	// hotSource is the  pull side:
 	// when installed, every consumption boundary (BudgetLine/Threshold/
 	// KeepRecentValue/Compress) resolves the FULL numeric group from it, and the
 	// atomics above retire to the construction fallback. Push paths may still
@@ -77,11 +77,11 @@ type ContextCompressor struct {
 	hotSource atomic.Pointer[func() HotNumbers]
 
 	// recentFullCount is the full-window size ANCHORED at each compaction
-	// round (stable-context-compaction D3): the most recent recentFullCount
+	// round: the most recent recentFullCount
 	// retained refs resolve full, and that window stays FROZEN between
 	// compactions (append-only stable prefix). When not explicitly configured
 	// it derives from keepRecent × DefaultRefsPerTurn so the most recent
-	// keepRecent complete turns resolve full as a whole (D6).
+	// keepRecent complete turns resolve full as a whole .
 	recentFullCount int
 
 	// fullBoundary anchors the full-render window at the last compaction
@@ -112,7 +112,7 @@ type ContextCompressor struct {
 	// the oldest lines sink into an "earlier n items" counter (never breaks).
 	cardMaxChars int
 
-	// meditationKeys marks agent_output events produced by meditation turns so
+	// meditationMu meditationKeys marks agent_output events produced by meditation turns so
 	// their card lines get the ★ highlight (long-term reflection anchors).
 	// Written from the consumer goroutine, read at BeforeModel — mutex guarded.
 	meditationMu   sync.Mutex
@@ -152,14 +152,11 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 	}
 }
 
-// HotNumbers is the full numeric hot bundle consumed at compression
-// boundaries (§6.4 pull model, introduce-durable-workflow-engine S-E). One
-// source read yields ALL three values, so the outer trigger line and the inner
-// compression target always come from ONE generation — the torn window the old
-// per-field atomic pushes left (hardening-review-batch2 5.3 patched it by
-// re-pushing both sides) is closed structurally instead of synchronized.
-// Zero/invalid fields fall back to the construction values (standalone/bare
-// edge: an owner with no record yet must still compute a sane budget).
+// HotNumbers is the full numeric hot bundle consumed at compression boundaries.
+// It must be taken with a single read (why a per-field read is unsafe is specified
+// in the document below); zero or invalid fields fall back to the construction
+// values, so an owner without any record yet still computes a sane budget.
+// 契约: docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 type HotNumbers struct {
 	ThresholdPct float64
 	MaxTokens    int
@@ -179,7 +176,7 @@ func WithHotSource(src func() HotNumbers) ContextCompressorOption {
 
 // SetHotSource installs (or replaces) the pull source after construction — the
 // owner's hot view is only reachable once the agent wiring exists (resident CM
-// is built before its TagentAgent fields finish wiring, §6.4).
+// is built before its TagentAgent fields finish wiring, ).
 func (cc *ContextCompressor) SetHotSource(src func() HotNumbers) {
 	if src == nil {
 		return
@@ -211,35 +208,24 @@ func (cc *ContextCompressor) liveNums() (threshold float64, maxTokens, keepRecen
 	return
 }
 
-// MarkMeditationKey records that the given event key is a meditation-turn
-// output; its index card line will carry the ★ highlight.
-// ApplyHotParams / UpdateMaxTokens / UpdateKeepRecent / SeedKeepRecent are GONE
-// (§6.4 pull, S-E). They were the push face: the org reloader re-wrote the three
-// atomics and re-armed the inner SmartCompressor target at each commit, and
-// hardening-review-batch2 5.3 had to patch them into one generation by hand
-// because the outer trigger line and the inner compression target could otherwise
-// be observed from different generations. With the hot source installed, every
-// boundary resolves the whole group in a single read (liveNums), so the push
-// face has no caller and no reason to exist.
-
 // BudgetLine exposes the effective compression trigger line
 // (maxTokens × currentThreshold) for introspection and tests — the number
 // the "under budget (x <= y)" log prints. Resolved per boundary from the
-// installed hot source (§6.4 pull); construction atomics when no source.
+// installed hot source; construction atomics when no source.
 func (cc *ContextCompressor) BudgetLine() int {
 	thr, maxTokens, _ := cc.liveNums()
 	return int(float64(maxTokens) * thr)
 }
 
 // KeepRecentValue returns the live keepRecent (introspection, 4.6) — hot
-// source when installed (§6.4 pull), construction atomics otherwise.
+// source when installed, construction atomics otherwise.
 func (cc *ContextCompressor) KeepRecentValue() int {
 	_, _, keepRecent := cc.liveNums()
 	return keepRecent
 }
 
 // seedThreshold records the construction threshold as atomic bits (the read side
-// is currentThreshold/liveNums). Unexported on purpose: after §6.4 there is no
+// is currentThreshold/liveNums). Unexported on purpose: after  there is no
 // hot write to it — the only authority that can change the effective threshold
 // is the hot source.
 func (cc *ContextCompressor) seedThreshold(pct float64) {
@@ -263,12 +249,14 @@ func (cc *ContextCompressor) currentThreshold() float64 {
 // value) for introspection/ops callers. OrgThreshold reads through here so
 // ContextManager needs no separate non-atomic mirror (D4/M-3 single source;
 // also removes a background-write vs read data race on the mirror). Resolved
-// from the hot source when installed (§6.4 pull).
+// from the hot source when installed.
 func (cc *ContextCompressor) Threshold() float64 {
 	thr, _, _ := cc.liveNums()
 	return thr
 }
 
+// MarkMeditationKey 把该 EventKey 登记为冥想产出的锚点，供冥想身份的判定与重建时复用；
+// 键集按需分配，压缩器为 nil 或 key 为 0（无身份）时不记录。
 func (cc *ContextCompressor) MarkMeditationKey(key int64) {
 	if cc == nil || key == 0 {
 		return
@@ -290,7 +278,7 @@ func (cc *ContextCompressor) isMeditationKey(key int64) bool {
 // MeditationKeysSnapshot returns a sorted copy of the meditation protection
 // keys (lock-held snapshot; safe for the caller to hold/traverse).
 // Observability for the projection-rebuild reseed path and its tests
-// (event-sourced-projection D3); the old snapshot.go consumer is gone but
+// ; the old snapshot.go consumer is gone but
 // the read surface stays — ★ rendering correctness depends on these keys
 // surviving restarts.
 func (cc *ContextCompressor) MeditationKeysSnapshot() []int64 {
@@ -329,30 +317,18 @@ func NewContextCompressor(
 		keepRecent = 2
 	}
 	cc := &ContextCompressor{
-		compressor:   sc,
-		memStore:     memStore,
-		tokenCounter: tokenCounter,
-		// listedKeysCap / cardMaxChars start at 0 (sentinel = "not explicitly
-		// set") and are derived from the primary knobs below (D3) unless an
-		// option overrides them.
+		compressor:    sc,
+		memStore:      memStore,
+		tokenCounter:  tokenCounter,
 		listedKeysCap: 0,
 		cardMaxChars:  0,
 	}
-	// maxTokens / keepRecent are atomic since D3 §2.3 (background hot-apply vs
-	// in-flight turn reads); seed them after construction.
 	cc.maxTokens.Store(int64(maxTokens))
 	cc.keepRecent.Store(int64(keepRecent))
 	for _, opt := range opts {
 		opt(cc)
 	}
-	// Org-layer hot reload (D3): threshold stored as atomic bits; constructor
-	// parameter seeds the initial value (already default-normalized above).
 	cc.seedThreshold(thresholdPct)
-	// D3 (rolling-summary-anchor): formula defaults from the primary knobs
-	// max_tokens (M) and keep_recent_tasks (k), so users only tune those two.
-	// card_max_chars scales with the context budget (~5%); compact_keys_listed
-	// scales with the card budget (~one key per 200 chars). Explicit settings
-	// (via options above) always win.
 	if cc.cardMaxChars <= 0 {
 		cc.cardMaxChars = maxTokens / 20
 		if cc.cardMaxChars <= 0 {
@@ -365,11 +341,6 @@ func NewContextCompressor(
 			cc.listedKeysCap = DefaultCompactKeysListed
 		}
 	}
-	// D6: unless explicitly configured, the full-resolution window covers the
-	// most recent keepRecent complete turns as a whole — a fixed small count
-	// would push the second-newest L0 turn into the summary-only zone and
-	// demote its action_command results, weakening the L0 full-fidelity
-	// semantics.
 	if cc.recentFullCount <= 0 {
 		cc.recentFullCount = keepRecent * DefaultRefsPerTurn
 	}
@@ -380,13 +351,13 @@ func NewContextCompressor(
 // and compresses if over threshold.
 //
 // Input:
-//   - ctx: context for LLM calls (used by SmartCompressor)
-//   - refs: EventReferences from SessionProjection (the historical timeline)
+// - ctx: context for LLM calls (used by SmartCompressor)
+// - refs: EventReferences from SessionProjection (the historical timeline)
 //
 // Output:
-//   - Messages: resolved (and possibly compressed) message list
-//   - RetainedRefs: updated refs (replaces projection)
-//   - Notices: error/degradation notices
+// - Messages: resolved (and possibly compressed) message list
+// - RetainedRefs: updated refs (replaces projection)
+// - Notices: error/degradation notices
 //
 // The returned Messages do NOT include a system prompt — the caller
 // (BeforeModel callback) prepends system prompt and appends current-turn
@@ -404,36 +375,12 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// Resolve ALL refs from the projection into NATIVE timeline messages
-	// (D3 v2): assistant tool_calls and role=tool results keep protocol form —
-	// the model sees exactly its training distribution, leaving no textual
-	// call syntax to imitate. Pairing legality has TWO layers of ownership:
-	//   1. RENDER time (here): repairs pre-existing dangles in the projection
-	//      — results whose call is already gone (compacted in an earlier
-	//      round, or id lost) are demoted to user-side input notes, and
-	//      calls whose result is already gone are stripped below.
-	//   2. COMPRESS time (applySegmentLevel L1): when THIS round drops a
-	//      segment's action_command results, it strips the matching
-	//      tool_calls in the same pass — the output of one compression is
-	//      legal on its own.
-	// Content is preserved in both layers, so ANY compression window cut
-	// stays legal without the compressor being pairing-aware globally.
 	resolved := cc.resolveRefs(ctx, refs)
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
-	// One boundary = one generation view (§6.4 pull): the trigger line and the
-	// inner compression target below are computed from the SAME liveNums read,
-	// so a concurrent hot rotation can never be half-applied to this pass.
 	thr, maxTokens, keepRecent := cc.liveNums()
 	threshold := int(float64(maxTokens) * thr)
 
-	// Capacity-gated compaction (stable-context-compaction D2): the token
-	// budget is the ONLY trigger. Between compactions the projection is
-	// untouched (no folding, no level re-derivation, no ref rebuild), so the
-	// rendered prefix stays byte-stable for LLM prefix-cache reuse; the
-	// full-window anchor frozen at the last compaction keeps every round's
-	// render deterministic (D3). keep_recent_tasks / recent_full_count are
-	// post-compaction STATE parameters, never trigger parameters.
 	if usedTokens <= threshold {
 		log.Infof("[ContextCompressor] under budget (%d <= %d), %d refs, %d messages",
 			usedTokens, threshold, len(refs), len(resolved))
@@ -443,19 +390,7 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
-	// Compaction path: fold aged complete tool runs into compact tool_chain
-	// synthetic refs (tool-chain-consolidation D2 / stable-context-compaction
-	// D4) BEFORE resolving — folding is part of the compaction act, not a
-	// continuous maintenance, so between compactions aged tool pairs render
-	// from their EventSummary (bounded, byte-stable) instead of mutating the
-	// projection every round.
 	refs = cc.foldToolRuns(refs)
-	// Telemetry channel (attention-budget-architecture): consumption
-	// dispositions are computed per compaction act over the frozen refs —
-	// between acts the render stays byte-stable (R6), while the exit UNIT
-	// becomes consumption state instead of adjacency: a consumed-and-
-	// externalized notice demotes on the very next act regardless of run
-	// length or segment age.
 	dispositions := TelemetryDispositions(ctx, cc.memStore, refs, keepRecent)
 	refs = cc.foldSettleRuns(refs, dispositions)
 	resolved = cc.resolveRefs(ctx, refs)
@@ -463,11 +398,6 @@ func (cc *ContextCompressor) Compress(
 	log.Infof("[ContextCompressor] compressing (tokens %d vs %d; folded render %d tokens), %d messages from %d refs",
 		usedTokens, threshold, cc.tokenCounter.Estimate(resolved), len(resolved), len(refs))
 
-	// Per-call override (no shared-field mutation — the old
-	// stash-rewrite-restore dance was a data race under concurrent compress).
-	// The whole numeric group travels with the call (§6.4 pull): inner batch
-	// size / aging target / keep window all come from this boundary's generation,
-	// so nothing hot needs to be pushed into the shared SmartCompressor.
 	compressedMsgs := cc.compressor.CompressWithOptions(ctx, resolved, CompressOptions{
 		KeepRecentTasks: keepRecent,
 		MaxTokens:       maxTokens,
@@ -477,14 +407,8 @@ func (cc *ContextCompressor) Compress(
 	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
 		usedTokens, newTokens, threshold)
 
-	// Build retained refs.
 	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx, dispositions)
 
-	// Anchor the full-render window at this compaction point (D3 render
-	// freeze): between compactions, refs at/after the anchor resolve full and
-	// newer appends join them by monotonic keys (active frontier); everything
-	// older stays frozen on its EventSummary render — the rendered prefix is
-	// byte-stable across all under-budget rounds.
 	cc.fullBoundary = anchorFullBoundary(retainedRefs, cc.recentFullCount)
 
 	// Collect error notices.
@@ -506,7 +430,7 @@ func (cc *ContextCompressor) Compress(
 	}
 }
 
-// FullBoundary returns the current full-render window anchor (D3). Zero
+// FullBoundary returns the current full-render window anchor . Zero
 // means everything renders full (never compacted, or fewer retained refs
 // than the window).
 func (cc *ContextCompressor) FullBoundary() int64 { return cc.fullBoundary }
@@ -520,7 +444,7 @@ func (cc *ContextCompressor) SetFullBoundary(key int64) { cc.fullBoundary = key 
 // resolveRefs resolves projection refs into native timeline messages with
 // render-time pairing repair. Full resolution (MemoryStore content) applies to
 // refs at/after the full-window anchor frozen at the last compaction round
-// (D3); older refs render from their EventSummary — bounding each BeforeModel's
+// ; older refs render from their EventSummary — bounding each BeforeModel's
 // store-query volume to the window plus newer appends instead of O(refs).
 func (cc *ContextCompressor) resolveRefs(ctx context.Context, refs []memory.EventReference) []model.Message {
 	declared := make(map[string]bool)
@@ -544,13 +468,6 @@ func (cc *ContextCompressor) resolveRefs(ctx context.Context, refs []memory.Even
 		}
 		resolved = append(resolved, msg)
 	}
-	// Render-time legality for CALLS (layer 1, symmetric with
-	// demoteToInputNote): strip tool_calls whose result is not in the
-	// rendered sequence — the result ref was dropped by an EARLIER round's
-	// L1, or resolved summary-only past the full window. Without this,
-	// stale unanswered calls would be re-sent every round. The prose
-	// content (with its event prefix) is preserved. This-round drops are
-	// layer 2's job (applySegmentLevel L1 strips calls alongside results).
 	for i := range resolved {
 		msg := &resolved[i]
 		if msg.Role != model.RoleAssistant || len(msg.ToolCalls) == 0 {
@@ -568,7 +485,7 @@ func (cc *ContextCompressor) resolveRefs(ctx context.Context, refs []memory.Even
 }
 
 // anchorFullBoundary picks the full-window anchor after a compaction round
-// (D3): the oldest of the most recent recentFull positive-key retained refs.
+// : the oldest of the most recent recentFull positive-key retained refs.
 // Zero (fewer positive-key refs than the window) keeps everything full —
 // the small-session behavior: that round's retained set is tiny, so full
 // rendering is cheap and correct; if a later round re-anchors, prior frozen
@@ -598,13 +515,13 @@ func anchorFullBoundary(refs []memory.EventReference, recentFull int) int64 {
 func (cc *ContextCompressor) foldToolRuns(refs []memory.EventReference) []memory.EventReference {
 	fullFrom := len(refs) - cc.recentFullCount
 	if fullFrom <= 1 {
-		return refs // nothing aged to fold
+		return refs
 	}
 	result := make([]memory.EventReference, 0, len(refs))
 	i := 0
 	for i < len(refs) {
 		if i >= fullFrom {
-			result = append(result, refs[i:]...) // recent frontier: native
+			result = append(result, refs[i:]...)
 			break
 		}
 		if isToolEventRef(refs[i].EventType) {
@@ -614,11 +531,6 @@ func (cc *ContextCompressor) foldToolRuns(refs []memory.EventReference) []memory
 			}
 			run := refs[i:j]
 			if len(run) >= 2 {
-				// Merge into a trailing tool_chain ref when the new run is contiguous
-				// with it (no boundary event between), so one turn's aged tool events
-				// converge to ONE chain instead of a new chain every round
-				// (code-review M2a). A boundary event in between makes result's tail
-				// a non-chain ref, correctly starting a separate chain.
 				if n := len(result); n > 0 && result[n-1].EventType == tagentevent.TypeToolChain {
 					result[n-1] = mergeToolChainRef(result[n-1], run)
 				} else {
@@ -686,7 +598,7 @@ func buildToolChainRef(run []memory.EventReference) memory.EventReference {
 }
 
 // mergeToolChainRef extends an existing tool_chain ref with a contiguous
-// later run (code-review M2a): the tool-name sequence, step count, and the
+// later run: the tool-name sequence, step count, and the
 // ticket's last key are extended; the chain's key (its oldest timestamp) is
 // kept so the merged chain still sorts at the run's start.
 func mergeToolChainRef(existing memory.EventReference, run []memory.EventReference) memory.EventReference {
@@ -751,7 +663,7 @@ func parseToolChainSummary(summary string) (names string, steps int, first strin
 // whose EventSummary is PROSE (think-then-call reasoning models: content
 // non-empty, summary = verbatim prose) does NOT carry the "调用 " prefix, so
 // it yields "" — the prose must never leak into the tool-chain line as a fake
-// "tool name" (code-review M1).
+// "tool name".
 func extractToolNameFromSummary(summary string) string {
 	s := strings.TrimSpace(summary)
 	if !strings.HasPrefix(s, "调用 ") {
@@ -760,70 +672,55 @@ func extractToolNameFromSummary(summary string) string {
 	return strings.TrimPrefix(s, "调用 ")
 }
 
-// ---------------------------------------------------------------------------
-// Settle-notice ticket folding (resident-remaining-hardening 1.3 / design D2)
-// ---------------------------------------------------------------------------
-
-// settleNoticePrefix matches task-settle notification bodies: "[task settled]"
-// (event_bus newTaskSettledEvent / newBatchRetiredSummaryEvent) and the inline
-// variant "[task settled inline]" (context_manager reclaim path). Detection
-// runs on the ref's EventSummary — external_input is a Special type, so the
-// summary is the verbatim single-line body.
-const settleNoticePrefix = "[task settled"
-
-// settleFoldRowMaxChars bounds one ticket-card row's summary text — the same
-// honesty bound extractCardLine applies to rolling-summary cards; the full
-// body (result inline/spill ticket) stays recallable via the row's evt_key.
-const settleFoldRowMaxChars = 80
-
-// isSettleNoticeRef reports whether a projection ref is a task-settle
-// notification external_input (fold-eligible regardless of segment age —
-// unlike tool runs, settle notices carry no pairing legality to protect).
-func isSettleNoticeRef(ref memory.EventReference) bool {
-	if ref.EventType != tagentevent.TypeExternalInput {
-		return false
-	}
-	s := strings.TrimSpace(tagentevent.StripEventKeyPrefix(ref.EventSummary))
-	return strings.HasPrefix(s, settleNoticePrefix)
-}
-
 // foldSettleRuns collapses maximal runs of ≥2 consecutive settle-notification
-// refs into one settle_fold ticket-card ref (design D2). Idempotent: a
+// refs into one settle_fold ticket-card ref. Notice membership is the
+// dispositions map — the mark-verified set produced by TelemetryDispositions —
+// never the body prefix, so a user message imitating the notice shape is kept
+// verbatim instead of folded. Idempotent: a
 // settle_fold ref is not an external_input, so cards are never re-folded; a
 // card adjacent to newly-arrived settles stays a separate card (each fold
 // act is one bounded card — no unbounded card growth across rounds).
+// Exemption is run-level: a run is one batch of adjacent notices, so any
+// Active (unconsumed) member keeps the whole run verbatim — per-entry
+// exemption would truncate an unconsumed notice into a card, breaking the
+// Active-must-not-be-lost channel contract. A single demoted entry folds to
+// its own ticket shaped like buildSettleFoldRef; the synthetic negative key
+// needs a nonzero timestamp (Timestamp==0 falls back to 1) or EventKey=0 is
+// silently dropped by buildRetainedRefs as an invalid key.
 func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispositions map[int64]int8) []memory.EventReference {
 	result := make([]memory.EventReference, 0, len(refs))
 	for i := 0; i < len(refs); {
-		if !isSettleNoticeRef(refs[i]) {
+		if _, isNotice := dispositions[refs[i].EventKey]; !isNotice {
 			result = append(result, refs[i])
 			i++
 			continue
 		}
 		j := i
-		for j < len(refs) && isSettleNoticeRef(refs[j]) {
+		for j < len(refs) {
+			if _, ok := dispositions[refs[j].EventKey]; !ok {
+				break
+			}
 			j++
 		}
 		run := refs[i:j]
 		switch {
+		case len(run) >= 2 && runHasActiveMember(run, dispositions):
+			result = append(result, run...)
 		case len(run) >= 2:
-			// Storm shape (1.3): maximal runs fold as before.
 			result = append(result, buildSettleFoldRef(run))
 		case dispositions[run[0].EventKey] == TelemDemote:
-			// Consumed-and-externalized (or aged internal): single fold to a
-			// ticket row — consumption, not adjacency, is the exit unit. The
-			// single form carries NO roll-up header (the header exists to be
-			// shared by a run; alone it is pure overhead — real-trajectory
-			// replay: 156 singles × header ≈ 27K chars of nothing).
+			ts := run[0].Timestamp
+			if ts == 0 {
+				ts = 1
+			}
 			result = append(result, memory.EventReference{
-				EventKey:     -run[0].Timestamp,
+				EventKey:     -ts,
 				EventType:    tagentevent.TypeSettleFold,
 				EventSummary: "- " + settleFoldLine(run[0]),
-				Timestamp:    run[0].Timestamp,
+				Timestamp:    ts,
 				Role:         "user",
 			})
 		default:
-			// Active (unconsumed) and young-internal notices stay verbatim.
 			result = append(result, run...)
 		}
 		i = j
@@ -831,13 +728,27 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispos
 	return result
 }
 
+// runHasActiveMember reports whether any ref in the run carries the
+// TelemActive disposition (unconsumed: must reach the model view intact).
+func runHasActiveMember(run []memory.EventReference, dispositions map[int64]int8) bool {
+	for _, r := range run {
+		if d, ok := dispositions[r.EventKey]; ok && d == TelemActive {
+			return true
+		}
+	}
+	return false
+}
+
+// settleFoldRowMaxChars bounds one ticket-card row's summary text — the same
+// honesty bound extractCardLine applies to rolling-summary cards; the full
+// body (result inline/spill ticket) stays recallable via the row's evt_key.
+const settleFoldRowMaxChars = 80
+
 // buildSettleFoldRef folds a settle run into one ticket-card synthetic ref.
 // The card is honest about what it drops: a header stating the fold count and
 // the recall path, then one row per settle event carrying its evt_key ticket.
 func buildSettleFoldRef(run []memory.EventReference) memory.EventReference {
 	var b strings.Builder
-	// Counting honesty (cold-eyes m-2): a batch-retire summary event is ONE
-	// event carrying N task lines — it folds to one row, one count.
 	fmt.Fprintf(&b, "〔结算汇总〕%d 个结算通知事件已折叠为票据卡片（批量汇总事件计 1 条，批内多行共享其票据），原文可用 memory_recall 按卡片中的 [evt_key] 票据逐条取回：", len(run))
 	var minTs int64
 	for _, ref := range run {
@@ -868,8 +779,6 @@ func settleFoldLine(ref memory.EventReference) string {
 	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
 		line = line[:idx]
 	}
-	// Drop the "[task settled]" / "[task settled inline]" wrapper: content
-	// after its closing bracket carries the marker + trajectory text.
 	if idx := strings.IndexByte(line, ']'); idx >= 0 {
 		line = strings.TrimSpace(line[idx+1:])
 	}
@@ -878,15 +787,9 @@ func settleFoldLine(ref memory.EventReference) string {
 		marker, rest = line[:sp], strings.TrimSpace(line[sp+1:])
 	}
 	if utf8.RuneCountInString(rest) > settleFoldRowMaxChars {
-		// rune-axis truncate (cold-eyes m-1): byte-axis cutting mid-CJK would
-		// emit invalid UTF-8 into every downstream JSON render.
 		rest = truncate(rest, settleFoldRowMaxChars)
 	}
 	if marker == "✗" {
-		// failed-polarity cards carry ★ (attention-budget-architecture L2):
-		// the existing reflection-anchor rendering gives failures a durable
-		// trace through the rolling summary after the verbatim notice is
-		// demoted — content-level convention, zero new code paths.
 		return fmt.Sprintf("★ %s [%s] %s", marker, tagentevent.FormatEventKey(ref.EventKey), rest)
 	}
 	return fmt.Sprintf("%s [%s] %s", marker, tagentevent.FormatEventKey(ref.EventKey), rest)
@@ -916,36 +819,18 @@ func (cc *ContextCompressor) resolveRef(
 	ref memory.EventReference,
 	full bool,
 ) model.Message {
-	// context_compress refs are summary references — rendered as a USER-side
-	// archival note (observation input), never role=system/assistant:
-	//   - not system: the summary paraphrases user/tool content; system role
-	//     would elevate paraphrased external text to instruction authority
-	//     (prompt-injection amplifier) and sits outside training distribution
-	//     (mid-conversation system messages behave inconsistently across models)
-	//   - not assistant: the LLM never said this; any system-generated format
-	//     placed in assistant history becomes an imitation template
-	// Forgery is harmless by construction: real archive refs live in the
-	// projection (negative EventKey, metadata channel) — imitated text parses
-	// into nothing.
 	if ref.EventType == tagentevent.TypeContextCompress {
 		return model.Message{
 			Role:    model.RoleUser,
 			Content: prefixEventKey("〔历史归档〕系统生成的压缩摘要（非用户发言，勿模仿此格式）："+ref.EventSummary, ref),
 		}
 	}
-	// tool_chain refs are consolidated tool-run references (tool-chain-
-	// consolidation D2) — rendered as a USER-side observation line (the
-	// EventSummary already is "- 工具链: …"), same rationale as context_compress
-	// (observation input, not instruction/assistant).
 	if ref.EventType == tagentevent.TypeToolChain {
 		return model.Message{
 			Role:    model.RoleUser,
 			Content: prefixEventKey(ref.EventSummary, ref),
 		}
 	}
-	// settle_fold refs are folded settle-notice ticket cards (1.3) — rendered
-	// verbatim as USER-side observation input (same rationale as tool_chain;
-	// the card text is system-generated, not a user utterance).
 	if ref.EventType == tagentevent.TypeSettleFold {
 		return model.Message{
 			Role:    model.RoleUser,
@@ -965,10 +850,6 @@ func (cc *ContextCompressor) resolveRef(
 			toolID = evt.ToolID
 			contentParts = evt.ContentParts
 			switch {
-			// FullEvent.Content is the authoritative (sanitized-at-storage) text;
-			// prefer it over the raw Response message. A multimodal input has empty
-			// Content but non-empty ContentParts (§4.3) — resolve it as content, not
-			// summary, so the image reaches the request.
 			case evt.Content != "" || len(evt.ToolCalls) > 0 || len(evt.ContentParts) > 0:
 				content = evt.Content
 				resolved = true
@@ -998,14 +879,14 @@ func (cc *ContextCompressor) resolveRef(
 }
 
 // renderTimelineMessage renders one event in NATIVE protocol form (D3 v2):
-//   - thinking_plan → role=assistant with native ToolCalls restored from the
-//     stored event; content is prose only — the system NEVER generates textual
-//     call syntax into assistant history (any such syntax is imitable and
-//     leads models to fabricate tool calls in plain text)
-//   - action_command → role=tool with its ToolID (pairing legality against
-//     the rendered sequence is enforced by the caller, which demotes orphans
-//     via demoteToInputNote)
-//   - notifications and everything else → eventTypeToRole text
+// - thinking_plan → role=assistant with native ToolCalls restored from the
+// stored event; content is prose only — the system NEVER generates textual
+// call syntax into assistant history (any such syntax is imitable and
+// leads models to fabricate tool calls in plain text)
+// - action_command → role=tool with its ToolID (pairing legality against
+// the rendered sequence is enforced by the caller, which demotes orphans
+// via demoteToInputNote)
+// - notifications and everything else → eventTypeToRole text
 func renderTimelineMessage(
 	ref memory.EventReference,
 	content string,
@@ -1027,8 +908,6 @@ func renderTimelineMessage(
 			Content: prefixEventKey(content, ref),
 		}
 	default:
-		// External/user-side input: carry multimodal parts so an image-only (empty-text)
-		// input still reaches the request (§4.3). Text-only inputs have nil parts → no-op.
 		return model.Message{
 			Role:         EventTypeToRole(ref.EventType),
 			Content:      prefixEventKey(content, ref),
@@ -1068,23 +947,6 @@ func prefixEventKey(content string, ref memory.EventReference) string {
 	return tagentevent.FormatEventPrefix(ref.EventKey, eventType) + " " + content
 }
 
-// buildRetainedRefs determines which EventReferences should be kept in the
-// projection after compression.
-//
-// Strategy:
-//   - Refs whose event keys appear in the compressed messages → retained.
-//   - Refs whose event keys are NOT in the compressed messages → were compressed.
-//     These are replaced with a single ROLLING summary ref.
-//   - A prior summary ref (negative key) is absorbed into the new summary
-//     (count + time lower bound carry over) — never silently dropped.
-
-// maxListedCompactKeys — see WithCompactKeysListed / DefaultCompactKeysListed.
-// Without a cap the summary line grows without bound across a long-running
-// session (each key is ~17 hex chars; hundreds of compacted events would make
-// this single message kilobytes large). Older keys drop off the list but stay
-// retrievable via recall (time/semantic queries); the rolling total keeps the
-// count honest.
-
 // compactedCountRe extracts the rolling total from a prior summary reference
 // (single-point format: written and parsed only here). LINE-ANCHORED: card
 // lines carry user-controlled text (external_input summaries) — an unanchored
@@ -1099,11 +961,11 @@ var earlierItemsRe = regexp.MustCompile(`(?m)^\(earlier (\d+) items retrievable 
 // cardTimeLayout renders card-line timestamps compactly.
 const cardTimeLayout = "01-02 15:04"
 
-// Rolling-narrative caps (compile-time constants, not config knobs — the
+// rollingNarrativeCapChars Rolling-narrative caps (compile-time constants, not config knobs — the
 // compression knob diet applies here too):
-//   - rollingNarrativeCapChars bounds the narrative section itself;
-//   - narrativeSkeletonCapChars bounds each skeleton excerpt fed to synthesis;
-//   - narrativeEventCap bounds the number of excerpts per L3 round.
+// - rollingNarrativeCapChars bounds the narrative section itself;
+// - narrativeSkeletonCapChars bounds each skeleton excerpt fed to synthesis;
+// - narrativeEventCap bounds the number of excerpts per L3 round.
 const (
 	rollingNarrativeCapChars  = 1500
 	narrativeSkeletonCapChars = 800
@@ -1184,7 +1046,7 @@ func parseNarrativeSection(summary string) string {
 // curateCards enforces the card-section bound: when the joined lines exceed
 // cardMaxChars, OLD lines are LLM-condensed (material law: input = card
 // lines, layer-2 artifacts) — but ONLY after the machine ticket guard passes
-// (resident-remaining-hardening 2.1/2.2, archived design D6). A rejected or
+// . A rejected or
 // failed condensation falls through to deterministic sinking: without a
 // model, on error, or when the condensed text drops/forges recall tickets,
 // the oldest ORIGINAL lines sink into the earlier-items counter (engineering
@@ -1194,13 +1056,9 @@ func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, ea
 	if cc.cardMaxChars <= 0 || len(joined) <= cc.cardMaxChars {
 		return cards, earlier
 	}
-	// Try LLM condensation of the OLDER half (keep the newest lines verbatim).
 	half := len(cards) / 2
 	if half > 0 && cc.compressor != nil && cc.compressor.summaryModel != nil {
 		condensed, err := cc.condenseCardLines(ctx, cards[:half])
-		// Single-line scrub: the card section is parsed by "- "-prefixed
-		// lines; a multi-line LLM output would have its continuation lines
-		// silently dropped next round (or split into phantom cards).
 		condensed = strings.Join(strings.Fields(condensed), " ")
 		reject := ""
 		if err == nil && condensed != "" {
@@ -1210,36 +1068,24 @@ func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, ea
 		case err != nil:
 			log.Warnf("[ContextCompressor] card condensation failed (sinking instead): %v", err)
 		case reject != "":
-			// Ticket guard rejected the model text (lost head/tail/★ ticket,
-			// fabricated or unparseable ticket). Never a second LLM ask —
-			// deterministic sinking of the verbatim originals proceeds.
 			log.Warnf("[ContextCompressor] card condensation REJECTED by ticket guard (sinking instead): %s", reject)
 		case condensed == "":
-			// empty model text: deterministic sinking
 		default:
 			newCards := append([]string{"- " + condensed}, cards[half:]...)
 			if len(strings.Join(newCards, "\n")) <= cc.cardMaxChars {
 				cc.noteCondensedTicketsLost(condensed, cards[:half])
 				return newCards, earlier
 			}
-			cards = newCards // condensed but still over — fall through to sinking
+			cards = newCards
 		}
 	}
-	// Engineering fallback: sink oldest lines until under the cap. The joined
-	// length is tracked INCREMENTALLY — recomputing strings.Join inside the
-	// loop made eviction O(n²) per round (the 2.5 offline baseline profile put
-	// 23s of CPU in curateCards on a 25k-card drop; same semantics, linear now).
 	joint := len(strings.Join(cards, "\n"))
 	for len(cards) > 1 && joint > cc.cardMaxChars {
-		dropped := len(cards[0]) + 1 // line plus its separator
+		dropped := len(cards[0]) + 1
 		cards = cards[1:]
 		joint -= dropped
 		earlier++
 	}
-	// A single card left still over cap (6.3): bound it while preserving
-	// EVERY ticket; if even the tickets-only form cannot fit, that is
-	// budget-unrepresentable — keep the tickets (never silently drop them,
-	// never grow unbounded) and make the state observable.
 	if len(cards) == 1 && len(cards[0]) > cc.cardMaxChars {
 		fitted, representable := fitTicketCard(cards[0], cc.cardMaxChars)
 		cards[0] = fitted
@@ -1250,7 +1096,7 @@ func (cc *ContextCompressor) curateCards(ctx context.Context, cards []string, ea
 	return cards, earlier
 }
 
-// budgetUnrepresentable counts (observable, monotone per compressor) how
+// noteBudgetUnrepresentable budgetUnrepresentable counts (observable, monotone per compressor) how
 // often the card budget could not express even the tickets-only form of a
 // single over-cap card — an operator-tuning signal (card_max_chars scales
 // with max_tokens, so hitting it means the budget formula is under-sized).
@@ -1266,7 +1112,7 @@ func (cc *ContextCompressor) BudgetUnrepresentable() int64 {
 }
 
 // noteCondensedTicketsLost makes condensation's navigation trade observable
-// (cold-eyes W-3): the guard forces head/tail/★ ticket survival, every ticket
+// : the guard forces head/tail/★ ticket survival, every ticket
 // BEYOND those that the condensed prose swallows is a recall-address loss —
 // legitimate compression (the events stay recallable by time range), but a
 // counted and logged one. Silent ticket death is the failure mode this closes.
@@ -1296,7 +1142,7 @@ func (cc *ContextCompressor) noteCondensedTicketsLost(condensed string, input []
 }
 
 // CondensedTicketsLost returns the cumulative count of recall tickets folded
-// into prose by card condensation (diagnostics surface; cold-eyes W-3).
+// into prose by card condensation.
 func (cc *ContextCompressor) CondensedTicketsLost() int64 {
 	return cc.condensedTicketsLost.Load()
 }
@@ -1342,17 +1188,14 @@ func parseCardTickets(line string) []string {
 	return out
 }
 
-// guardCondensedCard machine-checks one scrubbed condensed card line against
-// the folded old-half input lines (archived design D6). It returns "" when
-// the text is safe to adopt, else a rejection reason. Requirements:
-//   - output tickets ⊆ input tickets (no fabrication — forged tickets would
-//     enter the compaction payload and poison every later recall),
-//   - head, tail and every ★ highlighted line's tickets all survive (the
-//     navigation anchors and long-term reflection conclusions),
-//   - input carrying tickets but output none = total ticket loss → reject.
+// guardCondensedCard 对一行清洗后的综述卡片做机器校验，比对的输入是折叠掉的那半输入行。
+// 可采纳时返回 ""，否则返回拒绝理由。要求：
+// - 输出票据 ⊆ 输入票据（不得伪造——伪造票据会进入 compaction 载荷并污染其后每一次召回）；
+// - 头、尾以及每个 ★ 高亮行的票据都必须存活（导航锚点与长期反思结论）；
+// - 输入含票据而输出一个都没有 = 票据全丢 ⇒ 拒绝。
 //
-// Input without parseable tickets (legacy/prose fixtures) is not rejected —
-// the guard only ever guards real tickets. Zero LLM calls, zero store reads.
+// 输入本身不含可解析票据（散文类 fixture）时不拒绝——本守卫只约束真实票据。
+// 零 LLM 调用、零存储读取。
 func guardCondensedCard(condensed string, input []string) string {
 	in := make(map[string]bool)
 	required := make(map[string]bool)
@@ -1366,7 +1209,7 @@ func guardCondensedCard(condensed string, input []string) string {
 		markAll(keys, in)
 	}
 	if len(in) == 0 {
-		return "" // nothing to protect
+		return ""
 	}
 	if len(input) > 0 {
 		markAll(parseCardTickets(input[0]), required)
@@ -1437,7 +1280,7 @@ func (cc *ContextCompressor) synthesizeRollingNarrative(ctx context.Context, pri
 		text := ref.EventSummary
 		if cc.memStore != nil && ref.EventKey > 0 {
 			if evt, err := cc.memStore.GetEvent(ref.EventKey); err == nil && evt != nil && evt.Content != "" {
-				text = evt.Content // material law: real stored text over summary
+				text = evt.Content
 			}
 		}
 		text = strings.Join(strings.Fields(text), " ")
@@ -1453,7 +1296,7 @@ func (cc *ContextCompressor) synthesizeRollingNarrative(ctx context.Context, pri
 		n++
 	}
 	if b.Len() == 0 {
-		return prior // carry-over round or non-skeleton drops only: zero LLM cost
+		return prior
 	}
 
 	var pb strings.Builder
@@ -1474,7 +1317,7 @@ func (cc *ContextCompressor) synthesizeRollingNarrative(ctx context.Context, pri
 		log.Warnf("[ContextCompressor] rolling narrative synthesis failed (engineering-only fallback): %v", err)
 		return prior
 	}
-	narrative := strings.Join(strings.Fields(out), " ") // single-line scrub
+	narrative := strings.Join(strings.Fields(out), " ")
 	return truncate(narrative, rollingNarrativeCapChars)
 }
 
@@ -1488,22 +1331,15 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		return nil
 	}
 
-	// Collect all event keys present in compressed messages.
 	retainedKeys := make(map[int64]bool)
 	retainedChainKeys := make(map[int64]bool)
 	retainedFoldKeys := make(map[int64]bool)
 	for _, msg := range compressedMsgs {
-		// Track tool_chain refs whose message actually survived this round (M2b):
-		// a chain whose segment reached L3 has its message dropped from the
-		// output, so its ref must be retired from the projection rather than
-		// kept as a zombie (its full chain stays retrievable via memory_turn on
-		// the turn's boundary-card key — the underlying events are in the store).
 		if MessageEventType(&msg) == tagentevent.TypeToolChain {
 			if k, _, _ := tagentevent.ParseEventKeyAndType(msg.Content); k < 0 {
 				retainedChainKeys[k] = true
 			}
 		}
-		// settle_fold cards follow the same survival rule (1.3).
 		if MessageEventType(&msg) == tagentevent.TypeSettleFold {
 			if k, _, _ := tagentevent.ParseEventKeyAndType(msg.Content); k < 0 {
 				retainedFoldKeys[k] = true
@@ -1560,35 +1396,18 @@ func (cc *ContextCompressor) buildRetainedRefs(
 			}
 			continue
 		}
-		// tool_chain synthetic refs (negative key, tool-chain-consolidation D2)
-		// are kept ONLY if their message survived this round's compression (the
-		// chain's segment was not L3-archived). A chain whose segment reached L3
-		// has its message dropped from the output, so we retire the ref from the
-		// projection (M2b) instead of accumulating it as a zombie — the full
-		// chain stays retrievable via memory_turn on the turn's boundary-card
-		// key (underlying events live in MemoryStore, I4).
 		if ref.EventKey < 0 && ref.EventType == tagentevent.TypeToolChain {
 			if retainedChainKeys[ref.EventKey] {
 				retained = append(retained, ref)
 			}
 			continue
 		}
-		// settle_fold cards (1.3): kept only while their message survives the
-		// round. A card retired by L3 does NOT vanish — its ticket rows move
-		// into the rolling-summary card sequence, so every folded settle keeps
-		// a visible evt_key recall ticket (lossless exit, same honesty bar as
-		// extractCardLine).
 		if ref.EventKey < 0 && ref.EventType == tagentevent.TypeSettleFold {
 			if retainedFoldKeys[ref.EventKey] {
 				retained = append(retained, ref)
 			} else {
 				rows := parseSettleFoldCardLines(ref.EventSummary)
 				newCards = append(newCards, rows...)
-				// The folded settles were never counted as compacted when the
-				// card absorbed them (folding happens before this scan); the
-				// card's retirement is when they genuinely leave the timeline —
-				// count them now and force summary emission even if nothing
-				// else compacted this round (lossless exit, honest rolling total).
 				foldedCardEvents += len(rows)
 				if minTs == 0 || ref.Timestamp < minTs {
 					minTs = ref.Timestamp
@@ -1598,14 +1417,7 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		}
 		if retainedKeys[ref.EventKey] {
 			retained = append(retained, ref)
-		} else if dispositions != nil && isSettleNoticeRef(ref) && dispositions[ref.EventKey] == TelemActive {
-			// compaction 豁免（attention-budget-architecture 决策 5）: a
-			// NOT-YET-CONSUMED telemetry notice must not be absorbed by the
-			// budget verdict — its ref stays verbatim in the projection and
-			// re-renders next round until a reclaim turn consumes it.
-			// Guarded to settle notices with an explicit disposition:
-			// TelemActive is the zero value, so a nil/absent entry must
-			// never exempt ordinary conversational refs.
+		} else if d, isNotice := dispositions[ref.EventKey]; isNotice && d == TelemActive {
 			retained = append(retained, ref)
 		} else if ref.EventKey > 0 {
 			compressedKeys = append(compressedKeys, tagentevent.FormatEventKey(ref.EventKey))
@@ -1619,11 +1431,6 @@ func (cc *ContextCompressor) buildRetainedRefs(
 		}
 	}
 
-	// Emit the rolling summary whenever there is anything compacted — this
-	// round, carried over from prior rounds, or a settle-fold card retiring
-	// its ticket rows (1.3). The summary carries the INDEX-CARD SEQUENCE:
-	// engineering-extracted task skeleton lines whose [hex] keys are recall
-	// tickets (memory_recall items).
 	if total := priorCount + len(compressedKeys) + foldedCardEvents; total > 0 {
 		if minTs == 0 {
 			minTs = time.Now().UnixMilli()
@@ -1633,9 +1440,6 @@ func (cc *ContextCompressor) buildRetainedRefs(
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "[Compacted %d historical events]", total)
-		// Rolling LLM narrative (optional layer): comprehension-level overview
-		// of the oldest history, synthesized incrementally at the L3 fold point.
-		// Below it, the engineering ticket layer keeps every fact recallable.
 		if narrative != "" {
 			b.WriteString("\n" + narrativePrefix + narrative)
 		}

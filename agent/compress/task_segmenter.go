@@ -5,12 +5,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// ---------------------------------------------------------------------------
-// TaskSegment
-// ---------------------------------------------------------------------------
-
 // TaskSegment is a group of messages delimited by task boundaries.
-// Under the skeleton model (task-skeleton-compression) a segment is one
+// Under the skeleton model  a segment is one
 // complete task turn `[external_input, (thinking_plan|action_command)*,
 // agent_output]`, closed by the final reply. A trailing segment without an
 // agent_output is in progress (IsComplete=false) and never compressed.
@@ -41,8 +37,6 @@ func isAgentOutputMessage(msg *model.Message) bool {
 // thinking_plan. Any other type (e.g. the rolling context_compress summary)
 // is conservatively treated as skeleton so it is never dropped in-segment.
 func IsSkeletonMessage(msg *model.Message) bool {
-	// 委托事件类型注册表：Skeleton=false 仅 action_command/thinking_plan，
-	// 其余（含未知类型）保守为 true，永不段内丢弃。
 	return tagentevent.IsSkeletonEventType(MessageEventType(msg))
 }
 

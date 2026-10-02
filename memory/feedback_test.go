@@ -8,10 +8,9 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
-// TestBindFeedback (2.2, design-report-closeout): feedback event lands in the
-// parent's partition with structured JSON content, subtype metadata, and the
-// causal edge feedback → parent via RelationStore. Parent-miss is an explicit
-// error (no feedback on hallucinated outputs).
+// TestBindFeedback 钉住 feedback event lands in the
+//
+// 契约: docs/wiki/memory/memory-architecture.md#feedback-bind
 func TestBindFeedback(t *testing.T) {
 	store := NewInMemoryStore()
 	pid := PartitionIDFromName("tagent")
@@ -54,7 +53,9 @@ func TestBindFeedback(t *testing.T) {
 	}
 }
 
-// TestBindFeedback_ParentMiss: explicit error, nothing written.
+// TestBindFeedback_ParentMiss 钉住 explicit error, nothing written.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#feedback-bind
 func TestBindFeedback_ParentMiss(t *testing.T) {
 	store := NewInMemoryStore()
 	ghost := NewSnowflakeEventKey(9, testBaseMs)
@@ -65,9 +66,9 @@ func TestBindFeedback_ParentMiss(t *testing.T) {
 	}
 }
 
-// TestBindFeedback_InheritsBundleID (8.4, review §8): the feedback event
-// inherits the parent's bundle_id stamp so the guardrail joins along the
-// causal edge to the producing bundle — not the fallback time window.
+// TestBindFeedback_InheritsBundleID 钉住 feedback event
+//
+// 契约: docs/wiki/memory/memory-architecture.md#feedback-bind
 func TestBindFeedback_InheritsBundleID(t *testing.T) {
 	store := NewInMemoryStore()
 	pid := PartitionIDFromName("tagent")

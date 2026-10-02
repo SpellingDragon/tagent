@@ -16,6 +16,7 @@
 
 ---
 
+<a id="file-layout"></a>
 ## 二、文件清单
 
 | 文件 | 职责 |
@@ -88,6 +89,7 @@ func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
 
 ---
 
+<a id="loader-methods"></a>
 ## 五、加载方法详解
 
 ### 5.1 LoadFromFile — 单文件加载
@@ -201,6 +203,7 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 - **严格错误处理**：任何文件加载失败都会中断整个目录加载
 - **整目录回退**：磁盘目录不存在时回退内嵌同名目录（`fallbackDir`，同样排序 + `\n\n` 拼接）；不与磁盘内容做逐文件合并——磁盘目录存在即完全以磁盘为准
 
+<a id="load-files"></a>
 ### 5.3 LoadFiles — 多文件加载（可选文件 load-if-present）
 
 ```go
@@ -243,6 +246,7 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 | 顺序 | 按 `paths` 参数顺序 | 按文件名排序 |
 | 失败行为 | 缺失文件跳过（load-if-present）；真实读错误中断 | 遇到错误中断（同样严格） |
 
+<a id="load-composite"></a>
 ### 5.4 LoadComposite — 组合加载
 
 ```go
@@ -510,10 +514,26 @@ if content == "" {
 
 ---
 
+<a id="embedded-fallback"></a>
 ## 十、内嵌 FS 回退（prompt-loader-fallback）
 
 `NewLoader(baseDir, WithFallback(fsys, prefix))` 注入内嵌 prompt FS：磁盘 `BaseDir` 下找不到文件/目录时回退到 embed FS（`prefix` 为 FS 内 prompt 根路径，如 `resources/prompts`）。**磁盘永远优先**——用户可覆盖任意内置 prompt，二进制单文件分发时又不缺省。`fallbackFile/fallbackDir` 在 `LoadFromFile/LoadFromDir` 的 miss 路径内生效，调用方无感知。
 
+**加载契约**（`Loader`）：
+
+| 入口 | 契约 |
+|---|---|
+| `LoadFromFile` | 相对路径按 `BaseDir` 解析；空文件返回空串而非错误；绝对路径**永不**走内嵌回退；仅在 `ErrNotExist` 时试回退 |
+| `LoadFiles` | 空路径与空内容跳过；**磁盘上不存在该文件也跳过**（见下）；真实读错误（权限、I/O）仍向上传播 |
+| `LoadFromDir` | 只取该目录一层的 `.md`，按文件名排序以保证顺序稳定；目录无 `.md` 时报错 |
+| `LoadComposite` | 组装顺序固定为 inline → `Files`（按给定顺序）→ `Dir`，各段以空行拼接 |
+| `LoadBootstrap` | 先按 `BootstrapLoadOrder` 固定顺序载入，再补充目录内其余 `.md`；缺失文件跳过 |
+
+**`LoadFiles` 为什么容忍缺文件**：装配清单指向的是可选上下文文件（如 `USER.md`、`HEARTBEAT.md`、`MEMORY.md`），干净的检出库合理地不含它们——若缺文件即致命错误，一份引用可选文件的已提交配置就无法从干净检出启动。因此"存在即加载"，缺失记 info 日志（**拼错必需文件名仍可见**，不被静默吞掉），只宽恕 `ErrNotExist`。
+
+`BootstrapLoadOrder` 是当前装配序列的唯一真源：`AGENTS.md`、`SOUL.md`、`USER.md`、`TOOLS.md`、`HEARTBEAT.md`、`MEMORY.md`。
+
+<a id="source-hotreload"></a>
 ## 十一、Source — 热重载 prompt 源
 
 ```go
@@ -526,10 +546,38 @@ content, _ = src.Get() // mtime 变化 → 自动重读
 
 用途：`AgentToolWrapper.SetDescriptionSource` 使工具描述**热更新**——`Declaration()` 每次经 Source 取描述，改 prompt 文件立即生效，无需重启进程。inline-only（无 files）配置只加载一次并缓存。
 
-**Getter 缝与热配置（TC0）**：`Source` 满足 `Getter`（两方法：`Get() (string, error)` / `IsEmpty() bool`）。ContextManager 的 `SystemPromptSource` 与 MeditationConfig 的 `PromptSource` 字段为 `prompt.Getter` 接口（C6 遗产缝）——git-native 后默认实现即 `*prompt.Source` 走 mtime 热载（**文件即真源**，改动即时生效）；改动经 `refine register` 登记纳入评估保护（见 [platform 篇](../platform/platform-subsystems.md)）。注意例外：工具描述路径未迁 Getter（`SetDescriptionSource(src *prompt.Source)` 仍具体类型）。
+**缓存与降级契约**（`Source.Get`）：
+
+| 情形 | 行为 |
+|---|---|
+| 所有配置文件 mtime 均不晚于上次成功载入时刻 | 命中缓存，不重读磁盘 |
+| 任一文件 mtime 晚于上次成功载入时刻 | 重读全部文件与 `Dir` 下的 `.md`，刷新缓存与 `modTime` |
+| `stat` 或重读失败且已有缓存 | 返回缓存内容且不报错（提示词读盘失败不应使该回合失败） |
+| `stat` 或重读失败且无缓存 | 返回错误 |
+| 静态源（`NewStaticSource`，`loader == nil`） | 返回固定内容，不监听文件 |
+| nil 接收者 `(*Source)(nil)` | `Get` 返回空内容、`IsEmpty` 返回 `true`，不 panic |
+
+比较基准必须是**上次成功载入的时刻**，不能是"当前遍历到的最大 mtime"：后者的初值是零时刻，会使任何非空文件列表都被判为已变更，缓存永不命中（每回合 `BeforeModel` 都要重读全部提示词文件）。
+
+**Getter 缝的存在理由**：`Source` 满足 `Getter`（两方法 `Get() (string, error)` / `IsEmpty() bool`）。`ContextManager` 的 `SystemPromptSource` 与 `MeditationConfig` 的 `PromptSource` 字段类型是 `prompt.Getter` 而非 `*prompt.Source`，使提示词源可在运行期被替换实现（文件热载、内存常量、测试替身）而不触及消费方；默认实现即 `*prompt.Source`，走 mtime 热载（**文件即真源**，改动即时生效，并经 `refine register` 登记纳入评估保护，见 [platform 篇](../platform/platform-subsystems.md)）。例外：工具描述路径 `SetDescriptionSource(src *prompt.Source)` 仍取具体类型。
 
 
 ---
+
+<a id="getter"></a>
+## 十二、Getter — 提示词源的运行期抽象
+
+`Getter` 只有一个方法：`Get() (string, error)`。消费方（工具描述、子 agent 装配、投影写入等）**依赖这个接口，而不依赖任何具体实现**。
+
+为什么要单独一层接口：
+
+| 动机 | 说明 |
+|---|---|
+| 消费方不知来源 | 同一消费点可能拿到静态字符串、热重载文件源或测试替身；来源变了不必改调用方 |
+| 降级路径单一 | 读取失败只需向上传一个 `error`，调用方统一决定"保留上一次好值/退回内嵌默认"，不必为每种来源写分支 |
+| 可测 | 测试注入常量 Getter 即可覆盖消费方逻辑，无需真读盘 |
+
+约束：`Get()` MUST NOT 在实现内部做业务级回退（回退属于调用方的降级策略），MUST NOT 返回带截断或加工过的内容——加工是 `Loader`/`CompositeConfig` 的职责。热重载语义（何时重读、缓存边界、失败时保留旧值）见「十一、Source」。
 
 ## 已知缺口与演进方向
 

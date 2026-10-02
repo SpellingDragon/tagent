@@ -33,8 +33,10 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 // TestListTasksTool lists all tracked tasks.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func TestListTasksTool(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	r1 := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd A"}, blockingDetector())
 	r2 := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "cmd B"}, blockingDetector())
 	defer tm.Cancel(r1.Task.ID)
@@ -52,7 +54,7 @@ func TestListTasksTool(t *testing.T) {
 
 // TestCancelTaskTool cancels a running task.
 func TestCancelTaskTool(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
 
 	out, err := NewCancelTaskTool().Call(ctxWithTM(tm), mustJSON(t, map[string]string{"task_id": res.Task.ID}))
@@ -69,7 +71,7 @@ func TestCancelTaskTool(t *testing.T) {
 
 // TestRelaunchTaskTool re-runs a task via its stored relaunch closure.
 func TestRelaunchTaskTool(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	relaunched := make(chan struct{}, 1)
 	spec := task.TaskSpec{Kind: "command", Desc: "cmd R"}
 	spec.Relaunch = func(context.Context) (task.SpawnResult, error) {
@@ -91,7 +93,7 @@ func TestRelaunchTaskTool(t *testing.T) {
 
 // TestResolveTask_Prefix resolves a task by a unique id prefix (board shows short ids).
 func TestResolveTask_Prefix(t *testing.T) {
-	tm := task.NewTaskManager(task.TaskManagerConfig{}) // detach window via blockingDetector
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, blockingDetector())
 	defer tm.Cancel(res.Task.ID)
 
@@ -102,10 +104,9 @@ func TestResolveTask_Prefix(t *testing.T) {
 	}
 }
 
-// TestTools_NoController: without an injected controller, tools return a clear
-// message rather than erroring.
+// TestTools_NoController: without an injected controller, tools return a clear message rather than erroring.
 func TestTools_NoController(t *testing.T) {
-	ctx := context.Background() // no controller injected
+	ctx := context.Background()
 	out, err := NewListTasksTool().Call(ctx, nil)
 	if err != nil {
 		t.Fatal(err)

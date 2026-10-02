@@ -13,28 +13,40 @@ import (
 type Dependency string
 
 const (
-	DepMemory     Dependency = "memory"     // MemoryStore 写失败
-	DepRustViking Dependency = "rustviking" // rustviking CLI fork 失败（file 型 store）
-	DepMCP        Dependency = "mcp"        // MCP server 连续失败
-	DepModel      Dependency = "model"      // RunFlow 连续失败
-	DepDisk       Dependency = "disk"       // ENOSPC 磁盘满
+	// DepMemory 是存储栈这一受监控依赖：写路径失败由最外层的错误追踪存储上报。
+	DepMemory Dependency = "memory"
+	// DepRustViking 是外部向量/存储后端依赖，与 DepMemory 分开计状态，
+	// 以便后端抖动只降级到它实际影响的能力，而不连带拖垮整条存储栈。
+	DepRustViking Dependency = "rustviking"
+	// DepMCP 是 MCP 工具来源依赖：处于 degraded 时对 mcp_call 熔断，按探测窗口放行。
+	DepMCP Dependency = "mcp"
+	// DepModel 是模型调用依赖：degraded 时回合之间按退避暂停，而不是把失败当作正常答复往下走。
+	DepModel Dependency = "model"
+	// DepDisk 是磁盘写入依赖：写入失败会影响需要落盘的委派路径，因此单独计状态。
+	DepDisk Dependency = "disk"
 )
 
 // DepState 是依赖健康状态（normal → degraded → recovering → normal）。
 type DepState string
 
 const (
-	StateNormal     DepState = "normal"
-	StateDegraded   DepState = "degraded"
+	// StateNormal 表示依赖可用：连续失败达到阈值才转入 degraded，并在此刻设起探测退避；
+	// 期间的成功只把失败计数清零（避免偶发抖动误判）。
+	StateNormal DepState = "normal"
+	// StateDegraded 表示依赖不可用，消费方须按各自策略绕行。此态下失败只加倍退避
+	// （封顶 BackoffMax）；一次成功即转入 recovering，探测窗口是否到由调用方把门。
+	StateDegraded DepState = "degraded"
+	// StateRecovering 是"正在确认恢复"的中间态：连续成功累计到 RecoverSuccesses 才回到
+	// normal；期间任何一次失败立即退回 degraded，并把退避加倍——恢复必须是可证伪的。
 	StateRecovering DepState = "recovering"
 )
 
 // DepConfig 是单依赖的退化参数。
 type DepConfig struct {
-	FailThreshold    int           // 连续失败 N 次 → degraded（默认 3）
-	RecoverSuccesses int           // recovering 中连续成功 M 次 → normal（默认 2）
-	ProbeBackoff     time.Duration // 探测退避基准（默认 30s，指数退避封顶 5m）
-	BackoffMax       time.Duration // 退避封顶（默认 5m）
+	FailThreshold    int
+	RecoverSuccesses int
+	ProbeBackoff     time.Duration
+	BackoffMax       time.Duration
 }
 
 func (c DepConfig) withDefaults() DepConfig {
@@ -58,7 +70,7 @@ type depEntry struct {
 	failCount    int
 	successCount int
 	cfg          DepConfig
-	since        time.Time // 进入当前状态的时刻
+	since        time.Time
 	backoff      time.Duration
 	lastProbe    time.Time
 }
@@ -69,7 +81,7 @@ type DegradationManager struct {
 	mu       sync.Mutex
 	states   map[Dependency]*depEntry
 	onChange func(dep Dependency, from, to DepState)
-	now      func() time.Time // 可注入时钟（测试）
+	now      func() time.Time
 }
 
 // NewDegradationManager 构建退化管理器。onChange 可为 nil（仅内部状态）。
@@ -105,13 +117,11 @@ func (d *DegradationManager) ReportFailure(dep Dependency, _ error) {
 			e.failCount = 0
 		}
 	case StateRecovering:
-		// 恢复中任一失败 → 退回 degraded，退避翻倍（指数）。
 		e.state = StateDegraded
 		e.since = d.now()
 		e.successCount = 0
 		e.backoff = d.minDuration(e.backoff*2, e.cfg.BackoffMax)
 	case StateDegraded:
-		// 已降级，仅刷新退避。
 		e.backoff = d.minDuration(e.backoff*2, e.cfg.BackoffMax)
 	}
 	to := e.state

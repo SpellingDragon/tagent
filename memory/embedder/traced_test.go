@@ -15,9 +15,9 @@ func (errEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 func (errEmbedder) Dimension() int  { return 0 }
 func (errEmbedder) ModelID() string { return "err-model" }
 
-// TestTracedEmbedder_PassthroughNoop 验证组8.3 声明区守卫的核心：未设 OTLP（noop provider）
-// 时 TracedEmbedder 透传 inner，Embed 结果逐字节一致、Dimension/ModelID 透传——向量链路
-// 可观测对全链路行为零影响（prefix-cache 不变量的 embedder 侧保证）。
+// TestTracedEmbedder_PassthroughNoop 钉住未配导出时装饰器逐字透传，可观测对链路行为零影响。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 func TestTracedEmbedder_PassthroughNoop(t *testing.T) {
 	inner := NewMockEmbedder(32)
 	traced := NewTracedEmbedder(inner)
@@ -66,13 +66,10 @@ func TestTracedEmbedder_ErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestTracedEmbedder_ContextCancelRespected 验证 ctx 取消透传 inner（Embedder 契约：MUST
-// 尊重 ctx）。用取消的 ctx + 检查 ctx 敏感的 inner。
+// TestTracedEmbedder_ContextCancelRespected 钉住 ctx 取消被透传给 inner（契约要求实现必须尊重 ctx）。
 func TestTracedEmbedder_ContextCancelRespected(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	// MockEmbedder 不检查 ctx（纯计算），此处仅验证 TracedEmbedder 把 ctx 透传给 inner
-	// 且不 panic；真实 ZhipuEmbedder 的 HTTP 调用会尊重 ctx 取消。
 	traced := NewTracedEmbedder(NewMockEmbedder(16))
 	if _, err := traced.Embed(ctx, []string{"x"}); err != nil {
 		t.Fatalf("mock inner 不因 ctx 取消报错（纯计算）: %v", err)

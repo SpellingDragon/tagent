@@ -137,11 +137,17 @@ compaction 事件 SHALL 保持 `context_compress_summary` 的 `Recallable:true`�
 
 ### Requirement: 无锚恢复不静默截断
 
-无锚回放 MUST 分页扫描并先过滤非投影事件，再保留最新 500 个有效事件，按 EventKey 渲染；中间内存 SHALL 有界。超护栏 MUST 返回 status=partial 和准确 truncated_events，日志、diagnostics、首次模型请求均可辨。被过滤的 task/receipt/快照记录 SHALL NOT 占用 500 的投影名额。
+无锚回放 MUST 分页扫描并先过滤非投影事件，有效投影事件全量复原、MUST NOT 施加数量截断上限（丢掉最旧有效事件属于数据丢失，不是内存治理）；中间内存 SHALL 有界（靠分页扫描约束，而非截断历史）。status=partial 与相应不完整计数（missing_keys、pages_failed、batch_errors、payload_errors）SHALL 仅源于扫描、载荷解析或水合的真实不完整，不源于数量护栏；partial/failed SHALL 进入 diagnostics 并可辨。被过滤的 task/receipt/快照记录 SHALL NOT 计入投影事件集。
 
-#### Scenario: 超护栏长链冷启动
+#### Scenario: 超护栏长链冷启动全量复原
+
 - **WHEN** 无 anchor 且有 600 条有效事件及 600 条非投影记录
-- **THEN** 保留最新 500 条有效事件，truncated_events=100，结果 partial，内部记录不挤掉有效上下文
+- **THEN** 600 条有效事件全量复原（status=full，无截断计数），内部记录不挤掉有效上下文
+
+#### Scenario: 不完整来源如实上报
+
+- **WHEN** 无锚回放中 tail 分页部分失败或快照槽读失败
+- **THEN** 结果 status=partial 且对应不完整计数非零并进入 diagnostics，不静默吞、不伪装 full
 
 ### Requirement: 恢复观测覆盖全误差面
 
@@ -162,4 +168,13 @@ compaction 事件 SHALL 保持 `context_compress_summary` 的 `Recallable:true`�
 #### Scenario: payload 无法解析
 - **WHEN** compaction 存在而 payload 无法解析
 - **THEN** payload_errors≥1，结果 failed，保留原始数据且对宿主可见
+
+### Requirement: 投影的通道分区与统一装配
+
+SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleRequest 仍为唯一装配源（不变量 1 不变），按 system + 反思综述 + 对话窗口 + 遥测卡片/看板 + 本轮新事件的次序统一装配。遥测分区的降级/退出操作 SHALL 仅作用于投影（「Compact 只改投影」红线延伸为「通道治理只改投影」）。召回暂存 ref 标记来源并受同一生命周期管理。
+
+#### Scenario: 稳定前缀的字节稳定性
+
+- **WHEN** 两轮装配之间遥测区发生降级、看板刷新
+- **THEN** 对话区与反思区的渲染字节保持稳定（prefix-cache 命中不受通道治理波及）
 

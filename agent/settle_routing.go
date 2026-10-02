@@ -8,14 +8,14 @@ import (
 
 // settleSinkRegistry is the S3m-c routing table for the M2 per-invocation loop.
 //
-// It is deliberately ONLY two things after the pipeline convergence (design I-3):
+// It is deliberately ONLY two things after the pipeline convergence:
 //
-//   - a BINDING TABLE (invocation id → that invocation's own EventBus) — the I-1
-//     carrier: once an input event enters a loop, its derived task settles have a
-//     confirmed destination (the loop's bus) that routing simply looks up, never
-//     infers from the event; and
-//   - the D-b DELIVERY-ACCOUNTING BARRIER (pending = spawned − delivered per id) —
-//     the termination predicate that is immune to the terminal-before-delivery race.
+// - a BINDING TABLE (invocation id → that invocation's own EventBus) — the I-1
+// carrier: once an input event enters a loop, its derived task settles have a
+// confirmed destination (the loop's bus) that routing simply looks up, never
+// infers from the event; and
+// - the D-b DELIVERY-ACCOUNTING BARRIER (pending = spawned − delivered per id) —
+// the termination predicate that is immune to the terminal-before-delivery race.
 //
 // Before S3m-c this registry also owned a hand-rolled per-invocation queue
 // (append / notify / wait / drain / tryFinish) that re-implemented EventBus's own
@@ -30,8 +30,8 @@ import (
 // behavior-neutral for every path that never binds a bus.
 type settleSinkRegistry struct {
 	mu      sync.Mutex
-	byInv   map[string]*EventBus // invocation id → its own bus (destination confirmed at input)
-	pending map[string]int       // D-b barrier: spawned-but-settle-not-yet-delivered, per id
+	byInv   map[string]*EventBus
+	pending map[string]int
 }
 
 func newSettleSinkRegistry() *settleSinkRegistry {
@@ -125,33 +125,35 @@ func (r *settleSinkRegistry) awaiting(id string) bool {
 	return r.pending[id] > 0
 }
 
-// route delivers evt to the bus bound for invocation id by PUBLISHING it there,
-// then decrementing the accounting barrier. It returns true when a binding took
-// the event; false only when NO bus is bound (entry owner / post-unbind late
-// settle), in which case the caller falls back to the shared bus.
+// route delivers evt to the bus bound for invocation id by PUBLISHING it there and
+// decrementing the accounting barrier. It returns true when a binding took the
+// event; false only when NO bus is bound (entry owner / post-unbind late settle),
+// in which case the caller falls back to the shared bus.
 //
-// Ordering matters for termination: the publish happens BEFORE the decrement, so
-// by the time pending reaches 0 (quiescent true) every delivered settle is
-// already pullable on the bus. The shared shell relies on this when it checks
-// quiescent-then-TryPull to decide the越窗 tail has truly drained. The lock is
-// released before Publish so a momentarily-full bus never serializes against a
-// concurrent noteSpawn/quiescent from the consuming loop.
+// Ordering and atomicity both govern termination. Publish precedes decrement, so
+// when pending reaches 0 every delivered settle is already pullable on the bus —
+// the shared shell's quiescent-then-TryPull drain check depends on this. Both run
+// under ONE lock acquisition because the consuming shell reads awaiting (the pending
+// count) under that same lock before it elects to block on Pull: pending > 0 then
+// always means "some route has yet to publish its settle", so the blocked shell is
+// guaranteed a wake-up. Were the publish to happen outside the lock, a shell could
+// drain a settle, re-read a decrement-not-yet-landed count, block on Pull, and lose
+// its wakeup with nothing left to wake it. The invocation bus is buffered and its
+// sole consumer drains continuously, so the in-lock publish never blocks in practice.
 func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
 	if r == nil || id == "" {
 		return false
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	bus := r.byInv[id]
-	r.mu.Unlock()
 	if bus == nil {
 		return false
 	}
 	bus.Publish(evt)
-	r.mu.Lock()
 	if r.pending[id] > 0 {
 		r.pending[id]--
 	}
-	r.mu.Unlock()
 	return true
 }
 
@@ -180,6 +182,21 @@ func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task,
 	}
 }
 
+// drainSettleBusTo forwards every event left on an invocation bus to the shared
+// persistent bus. It runs after unbind at loop exit: between loop exit and the
+// unbind itself the binding is still live, so route() can publish a settle here
+// with no consumer left. Forwarding closes the window the registry comment
+// promises ("a safe drop, never a send on a dead sink" — a drop is only safe
+// when it is actually visible on the fallback bus).
+func drainSettleBusTo(inv *EventBus, persistent *EventBus) {
+	if inv == nil || persistent == nil {
+		return
+	}
+	for _, ev := range inv.TryPull() {
+		persistent.Publish(ev)
+	}
+}
+
 // bindSettleBus records the bus a sub-invocation loop consumes, keyed by its
 // delegation invocation_id, so its越窗 settles route back to that bus. Used by
 // S3m-c; nil-safe and empty-id-safe for callers outside a delegation.
@@ -202,7 +219,7 @@ func (ta *TagentAgent) unbindSettleBus(id string) {
 // runs BEFORE the inner spawn, so the expectation is recorded before the task can
 // possibly settle — an early route can never decrement a counter that has not been
 // incremented yet. Three return shapes mean THIS call owns no future settle and
-// the booking is voided immediately (deep-review P2-3): an INLINE settle
+// the booking is voided immediately: an INLINE settle
 // (OnSettle/route never fires), a DEDUP hit (the matched task settles under its
 // ORIGINAL invocation's booking), and a gate BLOCK (no task was adopted). Without
 // the dedup/block void the barrier leaks one pending unit per refused call —

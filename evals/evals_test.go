@@ -11,11 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ==================== suite: ticket-recall（票据可召回率，D4 G 精简骨架）====================
-//
-// 组件级评估：构造事件 → FormatEventKey（压缩卡片上的召回票据）→ ParseEventKey →
-// GetEvent → 断言原文一致。全量 roundtrip（失败即 eval 红）——记忆命脉的量化。
-
 func seedEvents(t *testing.T, store memory.MemoryStore, pid, n int) []string {
 	t.Helper()
 	keys := make([]string, 0, n)
@@ -35,7 +30,9 @@ func seedEvents(t *testing.T, store memory.MemoryStore, pid, n int) []string {
 	return keys
 }
 
-// TestSuite_TicketRecall_Roundtrip：压缩后票据全量可召回——构造→票据化→取回→原文一致。
+// TestSuite_TicketRecall_Roundtrip 钉住票据零幻觉召回：构造→票据化→取回→原文一致（本文件是四个套件的执行体）。
+//
+// 契约: docs/wiki/platform/evaluation-suites.md
 func TestSuite_TicketRecall_Roundtrip(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	pid := memory.PartitionIDFromName("tagent")
@@ -52,22 +49,18 @@ func TestSuite_TicketRecall_Roundtrip(t *testing.T) {
 	}
 }
 
-// TestSuite_BadCase_HexBrokenKeyRejected：Bad Case 资产（tests/README「静默存活多日」
-// 教训）——非 hex 字符/空串 MUST 显式拒绝而非静默空结果。
-// 附带守护 0x 前缀容忍特性（ParseEventKey 设计内的 model 回显宽容形式）。
+// TestSuite_BadCase_HexBrokenKeyRejected 钉住畸形票据必须显式拒绝，且 0x 前缀作为设计内宽容形式仍被解析。
 func TestSuite_BadCase_HexBrokenKeyRejected(t *testing.T) {
 	for _, broken := range []string{"zzzz-broken", "", "  ", "key:1a2b", "evt_"} {
 		_, err := event.ParseEventKey(broken)
 		require.Error(t, err, "畸形 key %q 必须显式拒绝（防静默空结果的召回幻觉）", broken)
 	}
-	// 0x 前缀是设计内容回显形式（合法），作为特性回归。
 	v, err := event.ParseEventKey("0xdeadbeef")
 	require.NoError(t, err)
 	require.Equal(t, int64(0xdeadbeef), v)
 }
 
-// TestSuite_ToolChoice_OpWhitelist（tool-choice suite 执行体——op 路由白名单守护）：
-// 未知 op MUST 显式拒绝——工具面路由契约（漂移即红）。
+// TestSuite_ToolChoice_OpWhitelist 钉住未知 op 一律显式拒绝（工具面路由契约，漂移即红）。
 func TestSuite_ToolChoice_OpWhitelist(t *testing.T) {
 	g := evolution.NewGitEvolution(evolution.GitEvolutionConfig{WorkDir: t.TempDir()})
 	refineTool := evolution.NewRefineTool(g)
@@ -77,18 +70,15 @@ func TestSuite_ToolChoice_OpWhitelist(t *testing.T) {
 	require.True(t, ok, "refine 工具必须可调用（CallableTool 契约）")
 	ctx := context.Background()
 
-	// 合法 op 路由可达（非 git 仓下 status 显式报错——环境如实呈现）。
 	_, err := ct.Call(ctx, []byte(`{"op":"status"}`))
 	require.Error(t, err, "非 git 仓下 status 应显式报错（环境如实呈现）")
 
-	// 非法 op 拒绝。
 	_, err = ct.Call(ctx, []byte(`{"op":"activate"}`))
 	require.Error(t, err, "未白名单 op 必须拒绝（propose/activate 已随发布道退役）")
 	require.Contains(t, err.Error(), "白名单")
 }
 
-// TestSuite_ContractPresence（3.1 M1 契约守护）：handoff 四段契约写入子 Agent prompt——
-// 存在性断言（漂移即红），漂移守护不需 LLM。
+// TestSuite_ContractPresence 钉住子 agent 提示词里 handoff 四段契约的存在性（不需 LLM 即可判红）。
 func TestSuite_ContractPresence(t *testing.T) {
 	for _, f := range []string{"../resources/prompts/plan_agent.md", "../resources/prompts/knowledge_agent.md"} {
 		b, err := os.ReadFile(f)

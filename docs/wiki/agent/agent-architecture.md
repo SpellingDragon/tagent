@@ -1,5 +1,6 @@
 # tagent/agent 模块架构文档
 
+<a id="module-position"></a>
 ## 一、模块定位
 
 `tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [prototype/agent.go](../../../prototype/agent.go) 的抽象实现，原型用可替换的函数字段定义了一个可扩展的框架骨架。
@@ -46,6 +47,7 @@ trpc-agent-go 的 Runner 在 `runner.Run` 内部完成：
 - tagent 的 `makeOnEventCallback` 仅做 `projection.Append`（从 StateDelta 构建 EventReference，含 MemoryPlugin 生成的 `event_summary`）
 - LLM 在每次调用时都看到带 `[evt_KEY|type]` 前缀的 messages（由 Callback 0 统一注入）
 
+<a id="core-components"></a>
 ## 二、核心组件
 
 ### 2.1 TagentAgent（组合根）
@@ -207,9 +209,10 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 - **统一 TTL 回收（假活治理）**：命令在 spawn 时确定有限 `ttl`（模型入参；否则取 `task_default_ttl`，缺省 10min），到期由**唯一** reaper 经 owner `detector.Cancel` 真实终止 → failed 终态 → reap → 移出看板。准入覆盖全部 active 态（running/stable/alive_detached/suspect）与全部寿命类（含常驻/交互服务，**无按 mode 豁免、无禁用哨兵**），堵死旧双墙「gate 在 alive_detached/stale + detachedAt、漏掉未 detach 的 suspect」的盲区。`op=send`/`resume_task` 续命重置锚点，`op=peek` 只读不续；restored 任务经声明式投影恢复其 `ttl`。年龄回收仅 TTL 一条路径，无按 mode 豁免、无禁用哨兵。detachedAt 仍入事实链供观测，但不再作为终止判据。
 - **世系跨重启保真**：`Spec.Origin` 深拷贝入 `task_spawned`，恢复时身份字段以持久层为准（恢复闭包只补执行能力，不得整体覆盖）；无世系历史恢复为 `unknown`，宿主对 unknown 与内部来源同等扣留——内部任务（如冥想派生）跨重启不再退化为可投递来源。`settle_status/task_id/lineage_absent/detached_at_ms` 为框架控制键，不进后续任务的 Origin baggage。
 - **跨重启连续**：冷启动序 = 投影重建 → registry 重建 → 常驻会话重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
+  - 投影重建是**事实链的纯回放**：取最新的压缩快照，再把尾部事件重放出来，目标是逐字节复原换代前的上下文（同样的字节才谈得上复用前缀缓存）。只在启动期做一次、进的是空投影，并且排在兜底落盘的重放接线之前。事实链里没有带代际标记的压缩事件时（首次启动、或从未折叠）整步 no-op，维持现状行为；热重建的执行壳跳过这一步——投影属常驻实例，丢弃壳上重建是空跑。
   - **进程重启 vs 整机重启（证据边界）**：常驻重挂以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
 
-- **遥测通道与消费降级（attention-budget-architecture）**：结算通知是机器遥测而非对话输入——其保留由**消费状态**决定（确定性推导：回收 turn 的产出与 outputCh 投递记录），不由相邻关系或段龄决定。compaction act 时：已消费且外显的通知降级为票据卡（settle_fold 单条折叠，原文 recall 可达；failed 卡片行带 ★ 进反思通道）；内部性（冥想派生/退役结算/无世系）保一行摘要 keepRecent 轮后降级；**未消费通知保持完整且被 L3 豁免**（至少一次在通道层的延伸）。看板是任务状态的唯一常驻呈现，通知只承载"事件到达"。行为审计（self-telemetry-audit）滚动统计自管遥测占比，L2 拒绝自管来源的新 spawn、L3 冻结非保护类（保护类由构造声明豁免，磁盘闸仍适用）——与 disk block spawn 同闸不同源。
+- **遥测通道与消费降级**：结算通知是机器遥测而非对话输入——其保留由**消费状态**决定（确定性推导：回收 turn 的产出与 outputCh 投递记录），不由相邻关系或段龄决定。compaction act 时：已消费且外显的通知降级为票据卡（settle_fold 单条折叠，原文 recall 可达；failed 卡片行带 ★ 进反思通道）；内部性（冥想派生/退役结算/无世系）保一行摘要 keepRecent 轮后降级；**未消费通知保持完整且被 L3 豁免**（至少一次在通道层的延伸）。看板是任务状态的唯一常驻呈现，通知只承载"事件到达"。行为审计（self-telemetry-audit）滚动统计自管遥测占比，L2 拒绝自管来源的新 spawn、L3 冻结非保护类（保护类由构造声明豁免，磁盘闸仍适用）——与 disk block spawn 同闸不同源。
 
 **一个 tmux 命令的一生**（把上面的零件串成一条线）：
 
@@ -240,9 +243,13 @@ sequenceDiagram
 
 对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
 
+子任务登记在**提供 spawner 的那个 agent 自己的** TaskManager 看板上，而不是入口的看板：`TaskSpawner` 由所属 agent 注入，看板与 TaskManager 一一对应。因此"任务落在哪一级"由抬起它的那一级决定，跨级重放与退役判定都按这一归属解析。
+
 ### 2.11 治理与可靠性接线（本模块落点）
 
 buildAgent 对**所有 agent** 的非 wrapper leaf 工具经 GovernanceTool 过闸（包裹链 `OutputLimitTool(GovernanceTool(raw))`，per-agent 独立 BudgetManager + 共享 Ledger/Classifier/Approval/Goals；refine 工具仅 entry、先于治理包裹追加）；event_loop 上报 model 依赖退化、turn ctx 盖章 trigger source（goal 门消费）；ReliableBus/AnchorStore 为 opt-in（目录配置非空启用）。详见 [platform 篇](../platform/platform-subsystems.md)。
+
+**逐 agent 的模型解析**：调用方预解析好的覆盖实例优先（入口的 `SwappableModel` 就走这条）；该 agent 未声明模型时继承父模型；否则按它的 provider 与模型名从 provider 池解析；解析失败回落父模型并告警——一个次要 agent 的模型配错不该让整个构建失败。
 
 ### 2.12 turn-as-trace 可观测
 
@@ -258,6 +265,7 @@ ContextManager 的 runner 是**可换代缝**，换代由「构造 → 纳管 �
 - **热参数读取**：五个数值热参（压缩阈值/预算/保留数/任务 TTL 两值）不随换代推送——各 owner 从唯一已提交应用记录在**消费边界现读**（压缩器经注入的热参源拉取、任务 spawn 经 TTL 源读取），结构代与数值轴分离，无第二份可独立修改的真值。
 - **懒检查**：`SetOrgReloader` 闭包在业务 turn 起点触发（单次 stat，未变更零成本）；结构变更经指纹对比触发 candidate-then-publish（fail-closed + 双槽回滚环）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
 
+<a id="package-layout"></a>
 ## 三、包与文件结构（分包后）
 
 ```mermaid
@@ -311,6 +319,7 @@ graph TB
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖，新代码直接 import 子包。
 
+<a id="data-flow"></a>
 ## 四、数据流
 
 ```
@@ -349,6 +358,7 @@ TagentAgent.runEventLoop:
   ⑤ 回到 bus.Pull — 下一轮事件
 ```
 
+<a id="framework-boundary"></a>
 ## 五、tagent 与 trpc-agent-go 的边界
 
 **tagent 独有**：
@@ -369,6 +379,7 @@ TagentAgent.runEventLoop:
 - `event.Event`：事件结构
 - `tool.Tool` / `CallableTool`：工具接口
 
+<a id="context-management"></a>
 ## 六、上下文管理
 
 ### 6.1 压缩（SmartCompressor）
@@ -434,6 +445,7 @@ tools:
         max_interval: 60s       # 稀疏轮询上限
 ```
 
+<a id="subagent-loop"></a>
 ## 七、子 Agent 调用（同构调用环）
 
 `TagentAgent.Run(ctx, inv)` 是被调方的执行入口。**被调方与入口是同一种 tagent**——同一共享壳、同一 turn 原语、同一重试预算，自有事件总线与任务域；差别只在输出交给谁：
@@ -447,8 +459,24 @@ tools:
 
 被调用不构成第二套架构：本地目标借用唯一常驻 owner 实例（身份/存储/治理随组织代统一推进，不因角色变化缺能力）；远程 A2A 目标走同一 `agent.Agent` 接口。取消/超时只终结该调用环与通道，不 Close 被 agent、不级联其无关任务。子 agent 的 MaxToolIterations 取 `min(父配置, 10)`；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
 
+**委派目标的解析代**。委派目标只从**已发布代**的声明面解析，不读可变全局：编辑既有配置（不引入新语法）即改变下一个请求真正可调的子 agent，而入口运行时——存储、会话服务、常驻绑定表——在一次真实发布前后按**指针**保持身份（"换成内容相同的新实例"正是必须拦下的形态）。在途委派的代际边界是 turn：持租约的那一代把它服务完、答案恰好回给发起回合一次，新目标不得在其返回之前抢跑；换代的影响只对返回之后的请求生效。被移除的目标此后不再获得新调用，却保留其常驻属主，使同名再入复用原存储属主。
+
+**重入的目标解析同用一条规则**：已存储任务的重投递，有发起调用绑定就用那次调用的绑定，否则用**当前有效执行面**。重投递走的是常驻构建，绝不能把此刻的包装器表冻成快照传下去——热更换代后若仍照快照解析，已被移除的目标会被旧代绑定静默复活。这与普通委派同源，不另立第二套解析规则。
+句柄指向的必须是**常驻属主**的上下文管理器：候选壳在其运行器被发布后就丢弃，绑到壳上等于冻住一张死面，重入会永远从它路由出去。取不到常驻属主时按拒绝处理并说明理由，不猜一个面顶上。
+
+**逐层与逐形态**。每一层委派带它**自己那代**的声明（入口→[b]、嵌套层 b→[c]、叶无工具），最深结果逐层回流到直接父、再回流到入口；`async` 取默认时委派被任务层收养（spawn 记录为 `agent:request` 形状）且结果仍 inline 交回请求回合；`kind:tool` 工厂产物在其所建之代被声明、被真实执行、返回值回到父回合——服务调用的正是已发布面构建时持有的那个实例。读全局 agent 表而非本层绑定，会表现为缺失或错误的工具声明、或结果永不抵达。
+
+**远程 A2A 的线上传输契约**。除走同一 `agent.Agent` 接口外：只有远程引用、无任何本地定义的配置必须能加载，在真实模型请求里暴露该委派工具，确实落到声明的 URL，并把远端答案作为 tool result 回到父 turn（父请求原文随委派送出）；父存储解析出的 `event_key` 上下文以 transferred state 跨线送达远程，供给来自父绑定而非新绑定。声明为远程却缺 endpoint 必须在加载期拒绝，绝不静默按本地构建——那会运行一个与配置所述不同的运行时。传输重试固定**同一声明端点与同一委派载荷**（继承发起调用的租约），不在重试路径重解析目标；「重试过程中发布」把同名 agent 改指不同端点时，判别是因果的：父拿到答案之前后继端点一次都不得被联系，而原端点每次尝试都带同一载荷。本地回合不做这种传输重试。
+
 
 ---
+
+<a id="test-support"></a>
+## 八、测试替身住在包内的非 _test 文件里
+
+包内测试共享的替身与构造器集中在 `agent/testsupport.go`（不是 `_test.go`）。原因是一条构建事实：内部测试（`package agent`）无法导入一个反向依赖 `agent` 的支撑包——Go 明确禁止测试里的导入环；而把那些内部测试改成外部测试包，又会牵出大量包内私有引用，属更大范围的重构。
+
+因此这些替身以非 `_test` 文件形态存在：文件名不受"测试文件须声明职责"这条判据约束，替身本身仍保持包内私有、只被测试引用。代价是它们会随库一起编译（不参与运行时行为）；若要消掉这一点，就得承担外部化改造的规模。
 
 ## 已知缺口与演进方向
 

@@ -18,49 +18,38 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// Run implements agent.Agent interface.
+// Run 实现 agent.Agent 接口。
 //
-// In the event-driven architecture, Run is the sub-agent invocation path
-// (used by AgentToolWrapper for local sub-agent calls and A2A for remote calls).
-// Top-level usage must use StartLoop/InjectMessage/StopLoop instead.
+// 在事件驱动架构下，Run 是子 agent 调用路径（本地子调用由 AgentToolWrapper 使用，
+// 远程调用由 A2A 使用）；顶层使用必须走 StartLoop/InjectMessage/StopLoop。
 //
-// Run creates a fresh EventBus + AgentLoop for this invocation, publishes
-// the initial message as external_input, and returns the AgentLoop's
-// outputCh. The caller reads events until the channel closes (context
-// cancelled or agent_output produced).
+// Run 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，并返回
+// AgentLoop 的 outputCh；调用方持续读事件直到通道关闭（上下文取消，或产出 agent_output）。
 //
-// Context can arrive via two paths, BOTH assembled into this call's message
-// locally (never through shared `ta` state — §7.1 D2 removes the implicit
-// activeBus/pendingExternalEvents passing so concurrent Runs cannot cross-
-// inject):
-//  1. RuntimeState path (remote/wrapper): inv.RunOptions.RuntimeState["external_context"]
-//     contains serialized ExternalContextEntry JSON. This is the A2A-compatible path.
-//  2. Legacy direct API: events handed to IngestExternalEvents, drained atomically
-//     into this call at Run entry (single-handoff semantics preserved).
+// 上下文可经两条入口到达，且都在本次调用本地装配，绝不经过共享的 `ta` 状态——隐式的
+// activeBus/pendingExternalEvents 传递已取消，因此并发 Run 无法互相注入：
+//  1. RuntimeState 路径（远端/包装器，即 A2A 兼容那条）：
+//     inv.RunOptions.RuntimeState["external_context"] 内是序列化的 ExternalContextEntry JSON；
+//  2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用，
+//     保持单槽交收语义。
+//
+// 生命周期不变量：
+//   - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理
+//     goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
+//   - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内
+//     落地的 settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
-	// Per-call session context, derived from the Invocation. These stay LOCAL:
-	// a sub-call must NOT stomp the shared ta.lastUserID/lastSessionID (family-3
-	// 去共享写) — concurrent Runs, or a Run while the entry owner's StartLoop is
-	// live, would otherwise clobber the owner's idle session context. The private
-	// invocation CM below is given this call's context directly (not via shared ta state).
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)
 
 	message := inv.Message
-	// Normalize only a genuinely empty message: an image/file-only input has empty
-	// Content but valid ContentParts, which MUST be preserved (a media-only
-	// delegation is legitimate input — replacing it with NewUserMessage("") would
-	// drop the parts before the event is even built).
 	if message.Content == "" && len(message.ContentParts) == 0 {
 		message = model.NewUserMessage("")
 	}
 
-	// External context is assembled for THIS invocation only and never stashed on
-	// shared `ta` state (§7.1 D2 去隐式传参): two concurrent Run calls on one
-	// instance must not cross-inject. It reaches this call through either the
-	// RuntimeState path (remote/wrapper — the path AgentToolWrapper actually uses)
-	// or the legacy direct Ingest API, whose single-handoff semantics are preserved
-	// by draining it atomically into the same per-call slice.
+	// 外部上下文只为这一次调用装配，绝不暂存到共享的 `ta` 状态上：同一实例上的两次并发
+	// Run 不得互相注入。它经两条入口之一到达本次调用——RuntimeState 路径（远端/包装器，
+	// 即 AgentToolWrapper 实际所走的那条），或 direct 兼容入口；后者的单槽交收语义靠「原子排空进同一个逐调用切片」来保持。
 	var externalEvents []memory.FullEvent
 	if inv.RunOptions.RuntimeState != nil {
 		if raw, ok := inv.RunOptions.RuntimeState[ExternalContextKey]; ok {
@@ -90,28 +79,14 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		message = applyExternalContext(message, externalEvents)
 	}
 
-	// Reject a delegation that still has neither content nor media parts after
-	// external-context assembly. Because B-2 routes Run through the shared
-	// processTurn — whose durable batch semantics SKIP an empty invocation rather
-	// than call the model — an empty input would otherwise close the caller's
-	// channel with zero events and no explanation, silently breaking the
-	// request/response "one input, one turn, one result" contract. Fail explicitly
-	// at this boundary adapter instead (before any CM/lease/bus is created).
 	if message.Content == "" && len(message.ContentParts) == 0 {
 		return nil, fmt.Errorf("agent %q: delegation input is empty (no content and no media parts)", ta.name)
 	}
 
-	// Validate required fields before creating sub-agent AgentLoop.
 	if ta.config == nil || ta.config.Model == nil {
 		return nil, fmt.Errorf("agent %q: config or model is nil", ta.name)
 	}
 
-	// Create a fresh EventBus + AgentLoop for this invocation.
-	// Each sub-agent invocation gets its own isolated bus and compressor
-	// (compress.SmartCompressor has mutable state and must not be shared across
-	// concurrent goroutines). The bus rides the private CM (cm.bus) — it is NOT
-	// installed as the shared `ta.activeBus` (§7.1 D2: Run must not rewrite the
-	// callee's shared active bus, which a concurrent Run would then observe).
 	invBus := NewEventBus()
 
 	invOutputCh := make(chan *event.Event, 100)
@@ -121,13 +96,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	if maxToolIters <= 0 {
 		maxToolIters = DefaultSubAgentMaxToolIterations
 	}
-	// 3.2 trunk: a DECLARED invocation — the wrapper resolved this call on the
-	// generation ITS face declared and armed the lease below — assembles the
-	// per-call context manager from THAT generation's assembled config, never
-	// from the owner's construction-time config (which every later publish
-	// leaves stale; this is precisely what the transitional shell used to paper
-	// over by carrying a whole duplicate agent). Any other inherited lease (a
-	// caller's turn pin, tests) or a fresh external Run keeps the legacy source.
 	invCfg := *ta.config
 	if cl, hasLease := execLeaseFromContext(ctx); hasLease && cl != nil && cl.belongsToOwnerOf(ta.contextManager) {
 		if gen := cl.declaredRunConfig(); gen != nil {
@@ -139,41 +107,12 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invCfg.Name = ta.name
 	}
 	invCM := newContextManagerFromConfig(&invCfg, ta, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
-	// §6.4/D4：以 owner 的有效热参快照播种私有 compressor（新调用初始即有效），
-	// 并注册进存活集合（在途调用随下一次压缩/预算边界取热更新值）。注销与
-	// invCM.Close 同 defer——注册面严格随调用生命周期回收，绝不留历史列表。
-	ta.registerLiveCM(invCM)
 	invCM.SetUserIDSessionID(userID, sessionID)
-	// §7.2/D3.3 (本 agent 任务域闭环): the private invocation CM MUST carry THIS
-	// agent's own taskController. Without it, RunFlow's spawner injection
-	// (context_manager) is skipped and whatever spawner the CALLER left on the
-	// context leaks through — so a task the callee spawns would register in the
-	// PARENT's task domain ("父 spawner 遮蔽"), silently degrading the callee to the
-	// caller's manager. Wiring B's own manager makes the flow re-inject B's
-	// spawner, which overrides the inherited one for the whole call subtree: a
-	// derived call inherits the caller's version/source, never its task manager.
-	// B's taskManager is a per-agent singleton (agent.go New), so concurrent Runs
-	// correctly share B's one domain; settles route to B's own bus. Guard the
-	// concrete pointer before boxing: assigning a nil *TaskManager into the
-	// TaskController interface yields a typed-nil interface that slips past the
-	// `== nil` guards (injectLiveTaskBoard) and panics on List().
 	if ta.taskManager != nil {
 		invCM.taskController = ta.taskManager
 	}
-	// S3m-b: the private CM reaches the owner's settle-routing table so a
-	// delegation turn's background spawns are booked (countingSpawner) and their
-	//越窗 settles route back to THIS call's sink instead of the shared bus.
 	invCM.settleSinks = ta.settleSinks
 
-	// §3.2/§4.1 (D5): this invocation is a DERIVED execution. It takes an extra
-	// reference on the generation its caller is running under — before any work
-	// starts — so the pinned generation cannot be reclaimed while this call (or
-	// anything below it) is live, and a mid-call publication cannot split the
-	// call tree across generations. An external Run with no inherited lease is the
-	// other D5 row: it acquires the generation now in force. Either way the
-	// reference is released only at the invocation tail, after the private
-	// executor is closed — RunFlow's return plus the fork's producer-done
-	// credential is what makes "tail" mean "the producer actually stopped".
 	callerLease, inherited := execLeaseFromContext(ctx)
 	var invLease *ExecLease
 	switch {
@@ -183,54 +122,24 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invLease = ta.contextManager.AcquireLease(LeaseSubCall)
 	}
 	if err := invLease.Err(); err != nil {
-		// A stale wrapper may still name an owner whose generation converged shut. The
-		// gate declines the reference; the invocation must fail here rather than publish
-		// input into a dead pipeline (§3.2「关闭后的 … Inject … 被拒」).
+		invCM.Close()
 		return nil, fmt.Errorf("subagent %q invocation refused: %w", ta.name, err)
 	}
+	ta.registerLiveCM(invCM)
 
-	// Sub-agent invocation semantics: a tool call is request-response — one input,
-	// one result. §7.1 D2 / B-2 + S3m-c.2: the delegation input enters through the
-	// SAME pipeline the persistent loop consumes — it is PUBLISHED to this call's
-	// own bus and drained by the shared shell's first iteration (processTurn), NOT
-	// run on a direct fast-path call. So "作为被调方" and "直连宿主" share one
-	// transport, one consume loop, and one turn primitive; the first answer and every
-	//越窗 continuation are just successive iterations of ONE loop. The message
-	// (external context already applied above, per-call) is carried as a single
-	// volatile external_input event; the shell assembles it via BuildInvocation.
-	//
-	// The batch carries no durable claim, so processTurn's submit/finish gate commits
-	// and acks nothing (interpretation A: a derived sub-call is never a durable
-	// envelope) — yet it still binds projection / trigger source / metadata and runs
-	// RunFlow under the CALLER-PINNED lease (invLease), exactly like a top-level turn.
-	// invLease releases idempotently at endTurn; the tail defer below is the safety
-	// net for the pre-lease early returns (empty batch).
 	inputEvent := newDelegationEvent(inv, message)
 	go func() {
-		defer invLease.Release()         // §4.1: FIRST defer = LAST release; idempotent with processTurn's endTurn
-		defer close(invOutputCh)         // signals turn end to the caller — ONLY after the tail, so越窗 continuations still reach it
-		defer ta.unregisterLiveCM(invCM) // §6.4: registration bound to the call, not a history list
-		defer invCM.Close()              // release temporary Runner resources
-		// S3m-c (I-1): bind this call's OWN bus to its delegation id BEFORE any turn
-		// spawns, and unbind FIRST on return (LIFO, above the CM/ch defers) so a late
-		// settle after we stop consuming falls back to the shared bus rather than a
-		// dead binding.
+		defer invLease.Release()
+		defer close(invOutputCh)
+		defer ta.unregisterLiveCM(invCM)
+		defer invCM.Close()
 		invID := ""
 		if inv != nil {
 			invID = inv.InvocationID
 		}
 		ta.bindSettleBus(invID, invBus)
+		defer drainSettleBusTo(invBus, ta.persistentBus)
 		defer ta.unbindSettleBus(invID)
-		// S3m-c.2 (I-3 字面化): the input is published to invBus and consumed by the
-		// shared shell's FIRST iteration — no direct processTurn fast path. firstCtx
-		// carries the invocation id so the shell holds the delegation's identity for
-		// EVERY turn it runs (a越窗 continuation batch carries no extractable id after
-		// the W-2 gate, so re-deriving it from events would lose attribution on a
-		// continuation turn's own spawns). The shell quiesces when the delivery-
-		// accounting barrier drains: for a request/response sub-call that spawns no
-		// background task, pending stays 0 → after the first turn the shell's TryPull
-		// finds the bus empty → the channel closes exactly when the single turn ends
-		// (byte-for-byte the pre-S3m behavior).
 		firstCtx := withInvocationID(ctx, invID)
 		invBus.Publish(inputEvent)
 		ta.runAgentLoop(firstCtx, invBus, invCM, loopSpec{invocationID: invID})
@@ -240,8 +149,8 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 }
 
 // newDelegationEvent wraps a request/response sub-call's assembled message as a
-// single volatile external_input event (§7.1 D2 / B-2) and stamps the correlation
-// handle — this invocation's ID — as CONTROL metadata (§7.3 D4, S1 groundwork).
+// single volatile external_input event and stamps the correlation
+// handle — this invocation's ID — as CONTROL metadata.
 // The handle lets a resident owner route a background follow-up back to the right
 // waiting request later; because it is a controlMetaKeys entry it never reaches
 // model-visible text nor is forwarded as user meta_* the model could spoof. The
@@ -254,9 +163,6 @@ func newDelegationEvent(inv *agent.Invocation, message model.Message) *AgentEven
 	}
 	return evt
 }
-
-// RunSimple is removed. Top-level usage must use StartLoop/InjectMessage/StopLoop.
-// Sub-agent invocation goes through agent.Run() via AgentToolWrapper.Call().
 
 // Tools implements agent.Agent interface.
 func (ta *TagentAgent) Tools() []tool.Tool {
@@ -337,13 +243,13 @@ func (ta *TagentAgent) getOrCreateSession(sessionID ...string) *session.Session 
 }
 
 // makeOnEventCallback creates the onEvent callback for StartLoop and Run().
-// It is a pure DELIVERY-side callback (unified-event-projection D1): projection
+// It is a pure DELIVERY-side callback: projection
 // writes happen in the event-plugin pipeline (MemoryPlugin → ProjectionSink),
 // not here. This callback only:
 // 1. Propagates currentMetadata from ContextManager to event.StateDelta ("meta_" prefix)
 // 2. Marks meditation final outputs for ★-highlighted compaction cards
 //
-// Meditation gating is intentionally ABSENT here (meditation-gate-split):
+// Meditation gating is intentionally ABSENT here:
 // the idle anchor is updated by runEventLoop at turn end (lineage-agnostic),
 // and the novelty anchor at the injection points (input-side) — no
 // output-side lineage filtering is needed anymore.
@@ -352,7 +258,6 @@ func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 		if evt == nil {
 			return
 		}
-		// Propagate metadata from ContextManager to event.StateDelta
 		if ta.contextManager != nil {
 			md := ta.contextManager.GetInvocationMetadata()
 			if len(md) > 0 {
@@ -369,8 +274,6 @@ func (ta *TagentAgent) makeOnEventCallback() func(evt *event.Event) {
 			}
 		}
 
-		// Meditation outputs become ★-highlighted index cards when their
-		// events are later compacted (reflection anchors in long-term memory).
 		if ta.contextManager != nil && isFinalResponse(evt) &&
 			string(evt.StateDelta[tagentevent.MetaKeyTriggerSource]) == "meditation" {
 			meta := tagentevent.ParseEventMeta(evt)

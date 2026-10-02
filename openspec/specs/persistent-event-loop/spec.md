@@ -252,3 +252,61 @@ durable inbox 消费侧（claimDurable）恢复 envelope 的 source_event slot �
 - **WHEN** turn 在重试循环内因 ctx 取消或执行代关闭而 turnStop 早退
 - **THEN** turnEcho 已被置空，同一 ContextManager 上后续任何批次不会命中陈旧 echo spec 而跳过本应存储的用户输入
 
+### Requirement: 可靠模式的恢复能力与格式准入
+
+可靠总线（有 durable inbox）在构造 agent 时 SHALL 以**硬准入**核验后端的显式重放能力：内层（含包装链）未实现 `EventReplayer` 即**拒绝构造**并指明是哪个 store 类型缺失该能力，MUST NOT 静默降级为"有写路径就算 durable"。材料保留能力（`RetentionGuard`）按可用注入、不可用时不强制扩张后端主接口——未启用可靠模式的自定义后端不因缺该接口而被拒。
+
+格式准入：信封槽位编号不连续、source_event 非法、`prepared_fact` 携带非当前 `prepared_version`、completion 携带非当前 `completion_version` 时 MUST 报错拒绝，MUST NOT 猜测读取或自动迁移过渡数据。无准备材料的 pending 是当前合法的初始状态（不报错）。已有冻结材料但代际不符的数据不被自动读取——读错误与当前格式损坏 MUST NOT 被当作"旧数据"自动清空。
+
+#### Scenario: 后端不具备重放能力
+
+- **WHEN** 配置启用了可靠总线而所选 store 未实现显式重放接口
+- **THEN** agent 构造失败并指明该 store 类型，不以待降级形态启动
+
+#### Scenario: 冻结材料代际不符
+
+- **WHEN** 已有 prepared_fact 的 `prepared_version` 与当前版本不一致
+- **THEN** 读取以错误失败、材料保留原样，不被自动迁移也不被静默丢弃
+
+### Requirement: 启动直接核对未确认完成证据
+
+启动 SHALL 清点原始 outstanding 信封，对每一份以**其自身固定的 receipt key** 直接核对事实链，不依赖投影快照或尾部扫描顺带发现。核对内容含：request id、预留 receipt key、每个已处理槽位的 fact key 与写入前冻结的准备身份逐一对齐——任一漂移即为矛盾。
+
+处置按四支分路，且彼此独立（一份坏信封不得阻塞其余健康者）：材料已准备而无 completion → 继续输入；completion 在而链上 receipt 缺 → 校验凭据后补投回执；两者匹配 → 直接清理；链上 receipt 与冻结的 receipt fact 不符、或状态自称 receipted 却无 durable completion、或 completion 不可解码 → **隔离**（保留字节，不重盖、不静默消费原件）。单次读取 I/O 失败计为 blocked 并保留材料，MUST NOT 当作可清理；列举（inventory）整体失败 SHALL 中止本轮核对——绝不凭残缺视图核对。
+
+本核对 MUST 在恢复登记与保护租约武装**之后**、消费循环开始喂给可能遗忘的生产者**之前**执行。
+
+#### Scenario: 回执 key 早于压缩边界
+
+- **WHEN** 某 outstanding 项的 receipt key 落在已压缩的窗口内
+- **THEN** 仍按其固定 key 直接核对事实链，不因投影侧已折叠而误判为缺失
+
+#### Scenario: 身份漂移只隔离不改写
+
+- **WHEN** completion 的某槽位 fact key 与信封内冻结的准备身份不一致
+- **THEN** 该信封被隔离并报告原因，其余信封照常收敛，原件字节保留供检视
+
+#### Scenario: 列举失败不核对残缺视图
+
+- **WHEN** outstanding 目录列举本身返回错误
+- **THEN** 整轮核对中止并上抛，不基于部分清单做任何清理决定
+
+### Requirement: 模型入口错误以失败极性呈现
+
+回合执行中模型入口的任何失败——执行凭据校验拒绝、迭代器创建失败、流通道创建失败或返回 nil 流——MUST 以携带错误信息的失败 Response 在事件流中呈现，并使回合归约为 failed turn、形成 failed completion；MUST NOT 静默零产出使回合被归约为 completed、以 completed 口径冻结 completion 并 ack 持久输入。上游框架契约（迭代器创建失败可经 error 返回、流内错误编码进 Response.Error）SHALL 在所有模型包装层被同构兑现。
+
+#### Scenario: 迭代器创建失败归约 failed turn
+
+- **WHEN** 执行门包装的模型在迭代器创建时返回 error
+- **THEN** 事件流收到带 Response.Error 的失败响应，回合归约 turnFailed 并形成 failed completion，持久输入不被以 completed 口径 ack
+
+#### Scenario: nil 流不挂死不伪成功
+
+- **WHEN** inner 模型返回 (nil, nil)
+- **THEN** 同样以失败响应呈现并归约 failed turn，不永久阻塞、不归约 completed
+
+#### Scenario: 凭据校验拒绝可见
+
+- **WHEN** 执行凭据 verify 失败拒绝模型调用
+- **THEN** 失败以带错误信息的失败响应进入事件流（含日志），回合失败可观测
+

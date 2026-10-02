@@ -12,25 +12,17 @@ import (
 	"github.com/SpellingDragon/tagent/event"
 )
 
-// ==================== 证据门控巩固（T-D · 记忆策展）====================
-//
-// 巩固产物（冥想蒸馏/经验总结）必须携带源事件 EventKey 收据 + 服务端指纹，可回放验证。
-// 借鉴 OpenSquilla Memory Dream（可回放收据 + 指纹钉住）+ MemoHarness（双层经验库 E+G：
-// E 层=原始事件流可被 TTL 遗忘，G 层=consolidation 事件 TTL 豁免长存）。
-//
-// 防伪造核心：指纹只由服务端（BuildConsolidationEvent）计算——LLM 提交 {content, 源keys}，
-// 工具自己 GetEvents 拉源事件算 SHA1 后写入 Metadata。LLM 在 content 里手写任何
-// "fingerprint" 字符串都无意义（Metadata 由工具构造，非 LLM）。源事件不可变（事件溯源
-// 无 Update 路径），故指纹长期有效；源事件被 TTL 删除后收据进入 Tombstoned 状态——这是
-// 诚实的衰减信号而非错误（诊断维度 receipt_integrity 直接度量它）。
-
-// consolidation 事件的 Metadata 收据 schema 键（报告 D2 §4.4.1）。
 const (
-	MetaReceiptKeys          = "receipt_keys"          // 源事件 EventKey hex 逗号列表
-	MetaReceiptFingerprint   = "receipt_fingerprint"   // 服务端 SHA1 指纹
-	MetaConsolidationKind    = "consolidation_kind"    // meditation_digest/experience_distill/manual
-	MetaConsolidationTrigger = "consolidation_trigger" // capacity/value/meditation/manual
-	MetaSourceCount          = "source_count"          // 收据条数（冗余，便于诊断不解析列表）
+	// MetaReceiptKeys 等是 consolidation 事件的 Metadata 收据 schema 键（键名即存储字段）。
+	MetaReceiptKeys = "receipt_keys"
+	// MetaReceiptFingerprint 服务器侧算得的源内容指纹；客户端提交的同名值不参与校验。
+	MetaReceiptFingerprint = "receipt_fingerprint"
+	// MetaConsolidationKind 巩固产物种类：蒸馏或经验总结。
+	MetaConsolidationKind = "consolidation_kind"
+	// MetaConsolidationTrigger 触发来源，供审计回溯该产物为何产生。
+	MetaConsolidationTrigger = "consolidation_trigger"
+	// MetaSourceCount 声明的源事件条数，与收据实际条数互相校验。
+	MetaSourceCount = "source_count"
 )
 
 // ComputeReceiptFingerprint 服务端指纹：对排序后的 (key, type, content) 逐条滚动 SHA1。
@@ -50,12 +42,12 @@ func ComputeReceiptFingerprint(events []FullEvent) string {
 
 // ReceiptVerdict 是巩固事件收据的回放验证裁决。
 type ReceiptVerdict struct {
-	Total            int    // 收据条数
-	Resolved         int    // 成功取回的源事件数
-	Tombstoned       int    // 解析成功但已被 TTL/墓碑删除（诚实衰减，非错误）
-	Missing          int    // key 无法解析/从未存在
-	FingerprintMatch bool   // 全部 resolve 时重算指纹比对；有缺失则 false
-	Detail           string // 人类可读裁决（供工具返回）
+	Total            int
+	Resolved         int
+	Tombstoned       int
+	Missing          int
+	FingerprintMatch bool
+	Detail           string
 }
 
 // VerifyConsolidation 回放验证：解析收据 key → GetEvents 取源事件 → 重算指纹比对。
@@ -77,10 +69,9 @@ func VerifyConsolidation(store MemoryStore, evt FullEvent) ReceiptVerdict {
 		}
 		keys = append(keys, k)
 	}
-	found, _ := store.GetEvents(keys) // GetEvents 跳过缺失/墓碑
+	found, _ := store.GetEvents(keys)
 	v.Resolved = len(found)
 	v.Tombstoned = len(keys) - len(found)
-	// 指纹比对仅当全部收据都取回才有意义（否则重算集合不同）。
 	if v.Resolved == v.Total && v.Missing == 0 && v.Tombstoned == 0 {
 		v.FingerprintMatch = ComputeReceiptFingerprint(found) == evt.Metadata[MetaReceiptFingerprint]
 	}
@@ -97,7 +88,6 @@ func BuildConsolidationEvent(store MemoryStore, partitionID int, content, kind, 
 	if strings.TrimSpace(content) == "" {
 		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf("consolidation content is empty")
 	}
-	// 去重 + 排序源 key（确定性收据）。
 	uniq := make(map[int64]bool, len(sourceKeys))
 	dedup := make([]int64, 0, len(sourceKeys))
 	for _, k := range sourceKeys {
@@ -112,14 +102,11 @@ func BuildConsolidationEvent(store MemoryStore, partitionID int, content, kind, 
 	if err != nil {
 		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf("fetch source events: %w", err)
 	}
-	// 4.4（design-report-closeout）：min_source_events 硬门控——实际取回的源不足即拒绝，
-	// 防「证据缺失的记忆伪造」。0 = 不校验（现状兼容；宽松放行语义保留给默认零配置）。
 	if minSources > 0 && len(sources) < minSources {
 		return FullEvent{}, ReceiptVerdict{}, fmt.Errorf(
 			"consolidation rejected: only %d/%d source events resolved (min_source_events=%d) — refuse to fabricate memory from missing evidence",
 			len(sources), len(dedup), minSources)
 	}
-	// 收据 hex 列表基于**实际取回**的源事件（墓碑/缺失的不入收据，诚实）。
 	hexes := make([]string, 0, len(sources))
 	for _, s := range sources {
 		hexes = append(hexes, event.FormatEventKey(s.EventKey))

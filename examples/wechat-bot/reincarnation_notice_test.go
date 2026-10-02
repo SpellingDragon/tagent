@@ -1,10 +1,5 @@
 package main
 
-// Unit tests for the reincarnation notice feature — pure filesystem logic,
-// no network, no WeChat (design R6). Covers: D1 freshness/PID quadrants,
-// D3 metadata parse + missing-archive degradation, D8 WAL tail + breakpoint
-// marker + degraded scene block, D5 rename idempotency.
-
 import (
 	"os"
 	"path/filepath"
@@ -79,7 +74,7 @@ func TestReadNoticeMetadata(t *testing.T) {
 type fakeStore struct {
 	refs      []memory.EventReference
 	err       error
-	lastQuery memory.QueryOptions // captured: partition-contract assertions
+	lastQuery memory.QueryOptions
 }
 
 func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference, error) {
@@ -90,8 +85,11 @@ func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference,
 	return f.refs, nil
 }
 
-// TestFetchWALTail pins the D8 query contract: tail query with limit, error
-// propagation for logged degradation (never swallowed), nil-store unavailability.
+// TestFetchWALTail pins the write-ahead-log tail query contract.
+// - The tail query honours its limit and propagates errors, so logged degradation stays visible instead of being swallowed.
+// - A nil store reports unavailability rather than panicking.
+//
+// 契约: docs/wiki/platform/reincarnation-notice.md#breakpoint
 func TestFetchWALTail(t *testing.T) {
 	refs := []memory.EventReference{{EventKey: 1, EventType: "agent_output"}, {EventKey: 2, EventType: "thinking_plan"}}
 	store := &fakeStore{refs: refs}
@@ -99,9 +97,6 @@ func TestFetchWALTail(t *testing.T) {
 	if err != nil || len(got) != 2 {
 		t.Fatalf("tail query failed: %v %v", got, err)
 	}
-	// Partition contract (2026-09-12 production find): resolvePartitions returns
-	// nil for a query without PartitionIDs -> zero partitions scanned -> empty
-	// result. The tail query MUST target the agent's own namespace partition.
 	wantPID := memory.PartitionIDFromName("tagent")
 	if len(store.lastQuery.PartitionIDs) != 1 || store.lastQuery.PartitionIDs[0] != wantPID {
 		t.Fatalf("query must pass PartitionIDs=[%d] (agent namespace), got %v", wantPID, store.lastQuery.PartitionIDs)
@@ -171,17 +166,15 @@ func TestHasOpenBreakpoint(t *testing.T) {
 	}
 }
 
-// TestWaitNoticeAppearance (B-fix): polling replaces the fixed 5s sleep that
-// silently missed slow insurance-chain writers (s67 absent-notice incident).
+// TestWaitNoticeAppearance pins that the notice is awaited by polling rather than one fixed sleep.
+// - A fixed delay misses writers on the slow insurance chain, so the test bounds a poll until the appearance shows up.
 func TestWaitNoticeAppearance(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "REINCARNATION_NOTICE")
 
-	// Never appears → false after the (short) budget.
 	if waitNoticeAppearance(p, 150*time.Millisecond, 50*time.Millisecond) {
 		t.Fatal("waitNoticeAppearance = true for a file that never appears")
 	}
 
-	// Appears 200ms in → found within the budget.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
 		if err := os.WriteFile(p, []byte("k: v"), 0o644); err != nil {

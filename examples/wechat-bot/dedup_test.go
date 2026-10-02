@@ -38,7 +38,6 @@ func TestSeenStore_RestartRecovery(t *testing.T) {
 	s1 := NewSeenStore(dir, slog.Default())
 	s1.CheckAndMark("persist_me")
 
-	// Simulate restart: fresh store from the same dir.
 	s2 := NewSeenStore(dir, slog.Default())
 	if s2.CheckAndMark("persist_me") {
 		t.Errorf("after restart CheckAndMark(persist_me) = true, want false (restored)")
@@ -67,8 +66,6 @@ func TestSeenStore_CapacityEviction(t *testing.T) {
 	s := NewSeenStore(dir, slog.Default())
 	s.capacity = 5
 
-	// Seed 5 keys with strictly increasing timestamps (deterministic order
-	// for eviction; wall-clock seconds would tie within the same second).
 	base := time.Now().Add(-time.Hour).Unix()
 	s.mu.Lock()
 	for i, k := range []string{"a", "b", "c", "d", "e"} {
@@ -76,7 +73,6 @@ func TestSeenStore_CapacityEviction(t *testing.T) {
 	}
 	s.mu.Unlock()
 
-	// Marking a 6th key persists, which evicts down to capacity — oldest ("a") first.
 	if !s.CheckAndMark("f") {
 		t.Fatal("new key should be true")
 	}
@@ -106,7 +102,6 @@ func TestSeenStore_TTLExpiry(t *testing.T) {
 	s.seen["recent"] = time.Now().Unix()
 	s.mu.Unlock()
 
-	// Any CheckAndMark triggers persistence which prunes by TTL.
 	s.CheckAndMark("trigger")
 
 	s.mu.Lock()
@@ -124,7 +119,6 @@ func TestSeenStore_TTLExpiry(t *testing.T) {
 
 func TestSeenStore_TTLExpirySurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	// Hand-write a seen.json with an expired and a fresh entry.
 	m := map[string]int64{
 		"expired": time.Now().Add(-48 * time.Hour).Unix(),
 		"fresh":   time.Now().Unix(),
@@ -154,19 +148,16 @@ func TestDedupKey_FallbackHash(t *testing.T) {
 	msg := &wechat.Message{FromUserID: "u1"}
 	msg2 := &wechat.Message{FromUserID: "u1"}
 
-	// Same user, empty text: stable key.
 	if DedupKey(msg) != DedupKey(msg2) {
 		t.Errorf("identical messages should produce identical keys")
 	}
 
-	// Different users, same text: different keys.
 	m1 := &wechat.Message{FromUserID: "alice"}
 	m2 := &wechat.Message{FromUserID: "bob"}
 	if DedupKey(m1) == DedupKey(m2) {
 		t.Errorf("same text from different users must not collide")
 	}
 
-	// Expected format: uid:<user>#<16 hex chars>
 	sum := sha256.Sum256([]byte(""))
 	want := "uid:alice#" + hex.EncodeToString(sum[:8])
 	if got := DedupKey(m1); got != want {

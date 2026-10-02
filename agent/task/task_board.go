@@ -19,7 +19,7 @@ const maxBoardTasks = 20
 // stale noise.
 //
 // The board is regenerated fresh each turn at BeforeModel time and never
-// persisted, so it does NOT participate in context compression (D6): it is a
+// persisted, so it does NOT participate in context compression : it is a
 // live recency anchor of current async state. Returns "" when no active tasks
 // exist (the caller then injects nothing).
 //
@@ -40,7 +40,6 @@ func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 		return ""
 	}
 
-	// Most-recently-started first, capped for bounded size.
 	sort.Slice(active, func(i, j int) bool {
 		return active[i].StartedAt.After(active[j].StartedAt)
 	})
@@ -50,18 +49,10 @@ func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 
 	now := time.Now()
 	var b strings.Builder
-	// Virtual-event framing: the board is a SYSTEM-generated observation
-	// snapshot delivered as a standalone user-level input — the same category
-	// as any external observation. The explicit “系统注入的观察快照” marker
-	// tells the model this is something it RECEIVES, never a format it should
-	// produce or imitate in its own output.
 	fmt.Fprintf(&b, "[后台任务看板] 系统注入的观察快照（非用户发言，不入历史，勿在回复中模仿此格式）：当前 %d 个进行中\n", len(active))
 	for _, t := range active {
 		age := now.Sub(t.StartedAt).Round(time.Second)
 		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v", t.Status(), t.Spec.Desc, ShortID(t.ID), age)
-		// Render the reaper's remaining lifetime instead of any non-terminal
-		// “需确认” arbitration invitation: a bounded, self-reclaiming task is
-		// decided once by reading this number, not re-judged every turn (10.6).
 		if rem, ok := t.remainingLifetime(now, defaultTTL); ok {
 			if rem <= 0 {
 				b.WriteString(", 即将回收")
@@ -75,9 +66,6 @@ func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 		}
 		b.WriteString(")\n")
 	}
-	// Fixed wait-guidance line: the only net copy addition in this change. It
-	// teaches the model that ending its turn is the legal way to wait for
-	// background tasks (settle auto-wakes) and forbids sleep-style spin-waiting.
 	b.WriteString("以上任务无需轮询等待：直接给出简短回复并结束本回合即可，结算会自动唤醒你；不要用 sleep 等命令等待。\n")
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -94,7 +82,7 @@ func ShortID(id string) string {
 // the very END of the message list — after the current input and any pending
 // tool results.
 //
-// Cache rationale (2026-08-27 fix): the board is re-rendered before EVERY
+// Cache rationale: the board is re-rendered before EVERY
 // LLM call (task ages tick, tasks settle), so its bytes change call-to-call.
 // Injecting it before the last user message broke the prompt-cache prefix at
 // that point — every in-turn LLM call re-paid the whole active turn. At the

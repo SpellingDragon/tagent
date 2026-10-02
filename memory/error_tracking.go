@@ -9,67 +9,57 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== ErrorTrackingStore（T-G · 退化检测挂点，报告 D3 C2 契约最外层）====================
-//
-// 报告 D3 §4.2 冻结契约：resolveMemoryStore 装饰器串联 ErrorTrackingStore(engineBridge(FileSegmentStore))
-// ——错误追踪在最外层。本装饰器是 DegradationManager 的**统一错误输入源**：此前 DegradationManager
-// 状态机建成却零接线，根因正是这个报告设计的挂点缺失（仅 engine_bridge.go:16 注释引用它）。
-//
-// 设计原则（报告 line 1861「退化检测用装饰器而非改 plugin，避免两处分裂」）：非侵入透传 inner
-// 全部方法（含可选接口，防 recall hybrid/Close 能力丢失），仅在错误返回时按特征归因依赖并旁路
-// 上报，成功时上报恢复。MemoryPlugin 的错误处理（仅 log）不动。sink 为 nil 时纯透传——配置
-// 门控关闭 = 现状逐字节零行为变化。
-
-// DegradationSink 是错误上报目标（依赖倒置：memory 定义窄接口、用 string 依赖名，
-// reliability.DegradationManager 经适配器满足——memory 不 import reliability，无环）。
+// DegradationSink 是上报目标的窄接口：由记忆包定义、以字符串表依赖名，降级状态机经适
+// 配器满足它，故记忆包不依赖可靠性包、不成环。
 type DegradationSink interface {
+	// ReportFailure 上报某依赖的一次失败及原始错误。
 	ReportFailure(dep string, err error)
+	// ReportSuccess 上报某依赖恢复健康。
 	ReportSuccess(dep string)
 }
 
-// 依赖名常量（值与 reliability.Dependency 一致，经 sink 桥接；避免 memory import reliability）。
 const (
-	depMemory     = "memory"
+	// depMemory 是记忆存储依赖名（值与可靠性包的枚举一致，经上报接口桥接以免去包依赖）。
+	depMemory = "memory"
+	// depRustViking 与 depDisk 分别是向量后端与磁盘的依赖名。
 	depRustViking = "rustviking"
 	depDisk       = "disk"
 )
 
-// ErrorTrackingStore 装饰 MemoryStore 做退化检测（C2 契约最外层）。
+// ErrorTrackingStore 是存储装饰链的最外层：把失败按特征归因到依赖并旁路上报，构成降级状态机
+// 的唯一错误输入源；非侵入透传 inner 全部方法（含可选接口）。归因矩阵、三类"不算故障"的情况与
+// 恢复证明规则见文档。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#error-tracking
 type ErrorTrackingStore struct {
 	inner MemoryStore
-	sink  DegradationSink // nil = 纯透传不上报（配置门控关闭）
-	spill *MemSpill       // nil = 不落盘兜底；非 nil 时 StoreEvent 失败事件落 JSONL（步4，事件不丢）
+	// sink 为 nil 时纯透传、不上报——配置门控关闭即行为逐字节不变。
+	sink DegradationSink
+	// spill 为 nil 时不做兜底落盘；非 nil 时写入失败的事件落入 JSONL 待重放（事件不丢）。
+	spill *MemSpill
 
 	mu sync.RWMutex
-	// replayProjection（design-report-closeout 5.5）：重放成功的每条事件回调补投影。
+	// replayProjection 是重放成功后的补投影回调，使退化恢复路径仍满足"存储与投影同点"。
 	replayProjection func(FullEvent)
 }
 
-// 编译期锁定 ErrorTrackingStore 是 MemoryStore + EventReplayer + RetentionGuard（D4/§2.8 透传链完整）。
 var (
 	_ MemoryStore    = (*ErrorTrackingStore)(nil)
 	_ EventReplayer  = (*ErrorTrackingStore)(nil)
 	_ RetentionGuard = (*ErrorTrackingStore)(nil)
 )
 
-// NewErrorTrackingStore 包裹 inner 做错误追踪。sink 为 nil 则纯透传（不上报）。返回具体类型
-// 以支持 SetMemSpill/ReplaySpilled（步4 兜底），仍满足 MemoryStore 接口。
+// NewErrorTrackingStore 包裹 inner 做错误追踪；sink 为 nil 即纯透传、不上报。
 func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTrackingStore {
 	return &ErrorTrackingStore{inner: inner, sink: sink}
 }
 
-// SetMemSpill 启用 memory 退化事件兜底（报告 D3 步4）：StoreEvent 失败时事件落 path 的 JSONL，
-// 恢复后经 ReplaySpilled 重放（事件不丢，at-least-once 延伸到存储层）。path 空则禁用。
-//
-// C1（resident-review-fixes 1.1）：ProtectAllPending 失败不再 Warnf 吞错——吞错会造出
-// 「热更成功 + 悬空遗忘屏障」组合（pending 键未被保护，扫描器可能销毁 durable 原件）。
-// 改为上抛：调用方（build_agent.go 常驻 owner 构建路径）据此 fail-closed，旧 runner 继续服务。
+// SetMemSpill 启用写入失败事件的兜底落盘（path 为空即禁用），恢复后经 ReplaySpilled 重放，
+// 把 at-least-once 语义延伸到存储层。启用时必须把保留租约接进兜底文件，并在放行扫描器前按现存
+// 条目重建保留集；该步失败一律上抛而非吞错——吞错会造出"热更成功＋悬空遗忘屏障"，使待重放原文
+// 可能被销毁，调用方须据此 fail-closed、旧实例继续服务。
 func (s *ErrorTrackingStore) SetMemSpill(path string) error {
 	s.spill = NewMemSpill(path)
-	// §2.8: wire the store's retention guard into the spill so each pending key's durable
-	// original is protected until replayed, and rebuild the lease from any pre-existing
-	// (prior-run) spill before the scanner is released. Silent no-op if the backend has
-	// no lease (non-durable / degradation-off custom store).
 	if s.spill != nil {
 		if g, ok := s.inner.(RetentionGuard); ok {
 			s.spill.SetGuard(g)
@@ -81,17 +71,15 @@ func (s *ErrorTrackingStore) SetMemSpill(path string) error {
 	return nil
 }
 
-// SetReplayProjection 注册重放双写回调（design-report-closeout 5.5）：每条重放成功的
-// 事件经 fn 补投影（projection.Append），恢复「存储⇔投影同点」在退化路径的等价语义。
-// fn 失败/panic 不影响重放（事件不丢优先，投影可后补）。nil 清除。
+// SetReplayProjection 注册重放后的补投影回调（传 nil 清除）。回调失败或 panic 不影响重放——
+// 事件不丢优先，投影可后补。
 func (s *ErrorTrackingStore) SetReplayProjection(fn func(FullEvent)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.replayProjection = fn
 }
 
-// ReplaySpilled 重放兜底事件到 inner store（绕过自身防递归）。返回重放成功数。由 memory 依赖
-// 恢复（DegradationManager onChange）或探针/运维触发。
+// ReplaySpilled 把兜底事件重放进内层存储（直连内层以防递归再次落盘），返回成功条数。
 func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
 	if s.spill == nil {
 		return 0, nil
@@ -102,49 +90,42 @@ func (s *ErrorTrackingStore) ReplaySpilled() (int, error) {
 	return s.spill.ReplayWithNotify(s.inner, fn)
 }
 
-// WalQuarantined 透传底层 WAL 隔离计数（§8.11⑤——最外层装饰器保诊断可达）。
-func (s *ErrorTrackingStore) WalQuarantined() int64 {
-	if q, ok := s.inner.(interface{ WalQuarantined() int64 }); ok {
-		return q.WalQuarantined()
-	}
-	return 0
-}
-
-// RetentionGuard 递归透传（§2.8/§2.6「材料保留」）：恢复 owner 经最外层装饰链保护/
-// 释放未确认原文并 arm 首扫门控。内层无租约则 no-op。
+// ProtectKey 把保留登记递归透传给内层租约；内层无租约则空操作。
 func (s *ErrorTrackingStore) ProtectKey(key int64) {
 	if g, ok := s.inner.(RetentionGuard); ok {
 		g.ProtectKey(key)
 	}
 }
 
+// ReleaseKey 透传保留释放，语义同 ProtectKey。
 func (s *ErrorTrackingStore) ReleaseKey(key int64) {
 	if g, ok := s.inner.(RetentionGuard); ok {
 		g.ReleaseKey(key)
 	}
 }
 
+// ArmRetention 放行内层首次破坏性扫描的门控。
 func (s *ErrorTrackingStore) ArmRetention() {
 	if g, ok := s.inner.(RetentionGuard); ok {
 		g.ArmRetention()
 	}
 }
 
-// BeginHold/EndHold 透传 §5.8 登记屏障（装饰链完整：屏障语义由底层 lease 持有，
-// 无屏障能力的底层静默跳过）。
+// BeginHold 抬起登记屏障：屏障语义由底层租约持有，底层无此能力则静默跳过。
 func (s *ErrorTrackingStore) BeginHold() {
 	if h, ok := s.inner.(RetentionHoldable); ok {
 		h.BeginHold()
 	}
 }
 
+// EndHold 放下登记屏障，须与 BeginHold 成对。
 func (s *ErrorTrackingStore) EndHold() {
 	if h, ok := s.inner.(RetentionHoldable); ok {
 		h.EndHold()
 	}
 }
 
-// MemSpillLen 返回当前兜底待重放事件数（诊断/背压信号）。
+// MemSpillLen 返回当前待重放的兜底事件数，可作诊断与背压信号。
 func (s *ErrorTrackingStore) MemSpillLen() int {
 	if s.spill == nil {
 		return 0
@@ -152,8 +133,8 @@ func (s *ErrorTrackingStore) MemSpillLen() int {
 	return s.spill.Len()
 }
 
-// spillEvent 落盘 StoreEvent 失败的事件（步4 兜底，best-effort）。落盘失败仅告警——兜底也失败
-// （如磁盘满）则事件真丢，但已尽最后努力（DegradationManager 已记 disk/memory 退化，可观测）。
+// spillEvent 尽力落盘一条写入失败的事件。落盘本身失败只告警：此时事件确实会丢，但退化已被
+// 记录，属可观测范围内的最后一搏；重试由重放路径统一承担。
 func (s *ErrorTrackingStore) spillEvent(key int64, event FullEvent) {
 	if s.spill == nil {
 		return
@@ -163,10 +144,9 @@ func (s *ErrorTrackingStore) spillEvent(key int64, event FullEvent) {
 	}
 }
 
-// classifyStoreErr 按 error 特征归因依赖（报告 D3 §5.2 降级矩阵）。disk 先判（S3：rustviking
-// CLI 错误消息常内嵌 "rustviking"，若真因是 ENOSPC 会误归 rustviking 掩盖磁盘满，两者降级
-// 动作不同）；rustviking 收窄到 fork/exec 与二进制缺失（CLI fork 失败确证），不用泛 "rustviking"
-// 匹配（避免任何提及该词的业务错误都命中）；其余归 memory。
+// classifyStoreErr 按错误特征把一次失败归因到依赖。判定顺序与匹配面都是契约：磁盘先判，
+// 否则向量后端的错误文本内嵌其后端名会把磁盘满误归向量依赖（两者降级动作不同）；向量只认进程
+// 派生失败与二进制缺失，不用宽泛名字匹配；其余归记忆存储。
 func classifyStoreErr(err error) string {
 	if err == nil {
 		return depMemory
@@ -182,7 +162,7 @@ func classifyStoreErr(err error) string {
 	return depMemory
 }
 
-// report 旁路上报（sink nil 则 no-op）。err!=nil 上报失败归因，nil 上报该依赖成功恢复。
+// report 旁路上报一次结果：err 非空记为该依赖失败，为空记为其恢复健康；sink 为 nil 时空操作。
 func (s *ErrorTrackingStore) report(dep string, err error) {
 	if s.sink == nil {
 		return
@@ -194,45 +174,39 @@ func (s *ErrorTrackingStore) report(dep string, err error) {
 	}
 }
 
-// === 写路径：错误归因上报，成功上报 memory 恢复（写成功 = memory+disk 均健康）===
-
+// StoreEvent 透传写入并归因错误；写成功即证明三条写路径依赖皆通（见 reportStoreHealthy）。
+// 公共路径的重复键属调用方契约冲突，原样上抛而不上报失败、不落盘。
 func (s *ErrorTrackingStore) StoreEvent(key int64, event FullEvent) error {
 	err := s.inner.StoreEvent(key, event)
 	if err != nil {
 		if IsDuplicateEventKey(err) {
-			// A public duplicate is a caller contract conflict (§2.1), NOT a
-			// memory-dependency failure: pass it through untouched — no failure
-			// report (would pollute the degradation matrix) and no spill (would
-			// re-deliver a fact the store already has). Precedent: the
-			// ErrVectorSearchNotSupported short-circuit on SearchByEmbedding.
 			return err
 		}
 		s.report(classifyStoreErr(err), err)
-		s.spillEvent(key, event) // 步4：memory 退化事件兜底落盘（不丢，恢复后重放）
+		s.spillEvent(key, event)
 	} else {
 		s.reportStoreHealthy()
 	}
 	return err
 }
 
+// StoreEventWithEmbedding 的归因与兜底语义同 StoreEvent；兜底条目不携带向量，重放走文本路径重新嵌入。
 func (s *ErrorTrackingStore) StoreEventWithEmbedding(key int64, event FullEvent, embedding []float32) error {
 	err := s.inner.StoreEventWithEmbedding(key, event, embedding)
 	if err != nil {
 		if IsDuplicateEventKey(err) {
-			return err // 同 StoreEvent：§2.1 公共重复为契约冲突，不上报、不落盘
+			return err
 		}
 		s.report(classifyStoreErr(err), err)
-		s.spillEvent(key, event) // 步4：兜底落盘（embedding 不重放，重放走 StoreEvent 文本路径重嵌入）
+		s.spillEvent(key, event)
 	} else {
 		s.reportStoreHealthy()
 	}
 	return err
 }
 
-// ReplayEvent implements EventReplayer (D4 design): canonical replay passthrough with
-// error tracking. Unlike StoreEvent, a failed ReplayEvent does NOT trigger mem_spill—the
-// reliable-inbox path owns retry/backoff for events it has already durably received;
-// double-spilling would create a duplicate entry in the spill file.
+// ReplayEvent 透传内部回放并上报归因。与 StoreEvent 不同：回放失败不做兜底落盘——可靠收件箱
+// 已自持这些事件的 at-least-once 重试，再落一份会在兜底文件里造出重复条目。
 func (s *ErrorTrackingStore) ReplayEvent(key int64, canonicalFact FullEvent) (ReplayResult, FullEvent, error) {
 	replayer, ok := s.inner.(EventReplayer)
 	if !ok {
@@ -241,8 +215,6 @@ func (s *ErrorTrackingStore) ReplayEvent(key int64, canonicalFact FullEvent) (Re
 	}
 	result, stored, err := replayer.ReplayEvent(key, canonicalFact)
 	if err != nil {
-		// D4: report the failure for degradation tracking, but do NOT spillEvent.
-		// The reliable-inbox caller manages its own at-least-once retry semantics.
 		s.report(classifyStoreErr(err), err)
 		return result, stored, err
 	}
@@ -250,15 +222,16 @@ func (s *ErrorTrackingStore) ReplayEvent(key int64, canonicalFact FullEvent) (Re
 	return result, stored, nil
 }
 
-// reportStoreHealthy 写成功时上报存储栈三依赖恢复（M2：写成功证明 memory + disk + rustviking
-// 写路径均健康）。否则 disk/rustviking 一旦 degraded 无恢复信号，卡到重启，违背「检测→降级→
-// 恢复」三段式。ReportSuccess 对 normal 态依赖仅重置失败计数（无副作用），故对未退化依赖上报无害。
+// reportStoreHealthy 在写成功时把记忆、磁盘、向量一并报为健康：一次成功写入即证明三条写路径
+// 都通。缺这条，磁盘或向量一旦降级就再无恢复信号、只能等重启，违背"检测→降级→恢复"三段式。对
+// 已正常的依赖上报成功只重置失败计数，故三报无副作用。
 func (s *ErrorTrackingStore) reportStoreHealthy() {
 	s.report(depMemory, nil)
 	s.report(depDisk, nil)
 	s.report(depRustViking, nil)
 }
 
+// DeleteEvent 透传删除；失败按依赖归因上报，成功不报恢复（删除成功不证明写路径）。
 func (s *ErrorTrackingStore) DeleteEvent(key int64) error {
 	err := s.inner.DeleteEvent(key)
 	if err != nil {
@@ -267,22 +240,17 @@ func (s *ErrorTrackingStore) DeleteEvent(key int64) error {
 	return err
 }
 
-// === 向量检索：归因 rustviking（向量索引依赖）===
-
+// SearchByEmbedding 透传语义检索。"不支持向量"是能力声明而非依赖故障，故不上报——否则未配置
+// 语义检索的部署一调用就把向量依赖打成降级。真失败仍走归因，不无条件算给向量依赖。
 func (s *ErrorTrackingStore) SearchByEmbedding(query []float32, topK int) ([]EventReference, error) {
 	refs, err := s.inner.SearchByEmbedding(query, topK)
-	// S1: ErrVectorSearchNotSupported 是能力声明（未配引擎），非依赖失败——不上报（否则未配
-	// 语义检索的部署一调用即 rustviking degraded）。S2: 真失败按 classifyStoreErr 归因（引擎
-	// 路径失败已退回 inner，能到此的 error 多来自 GetEvents → memory/disk；MVP 向量索引进程内
-	// InMemoryEngine 与 rustviking 无关，不无条件归 rustviking）。
 	if err != nil && !errors.Is(err, ErrVectorSearchNotSupported) {
 		s.report(classifyStoreErr(err), err)
 	}
 	return refs, err
 }
 
-// === 读路径：错误归因上报（成功不上报——读成功不代表写依赖已恢复）===
-
+// GetEvent 透传单条读取；失败上报归因，成功不上报恢复（读通不代表写依赖已恢复）。
 func (s *ErrorTrackingStore) GetEvent(key int64) (*FullEvent, error) {
 	e, err := s.inner.GetEvent(key)
 	if err != nil {
@@ -291,6 +259,7 @@ func (s *ErrorTrackingStore) GetEvent(key int64) (*FullEvent, error) {
 	return e, err
 }
 
+// GetEvents 批量读取，错误处理语义同 GetEvent。
 func (s *ErrorTrackingStore) GetEvents(keys []int64) ([]FullEvent, error) {
 	events, err := s.inner.GetEvents(keys)
 	if err != nil {
@@ -299,6 +268,7 @@ func (s *ErrorTrackingStore) GetEvents(keys []int64) ([]FullEvent, error) {
 	return events, err
 }
 
+// QueryEvents 条件查询，错误处理语义同 GetEvent。
 func (s *ErrorTrackingStore) QueryEvents(query QueryOptions) ([]EventReference, error) {
 	refs, err := s.inner.QueryEvents(query)
 	if err != nil {
@@ -307,15 +277,13 @@ func (s *ErrorTrackingStore) QueryEvents(query QueryOptions) ([]EventReference, 
 	return refs, err
 }
 
-// === 无错误语义方法：纯透传 ===
-
+// SupportsVectorSearch 纯透传，无错误语义。
 func (s *ErrorTrackingStore) SupportsVectorSearch() bool { return s.inner.SupportsVectorSearch() }
-func (s *ErrorTrackingStore) GetStats() StoreStats       { return s.inner.GetStats() }
 
-// === 可选接口透传：保持 inner 能力，否则包裹后 recall hybrid(MemoryEngineProvider)/
-// 向量持久化(KVProvider)/遗忘移除(VectorRemover)/因果链(RelationStoreProvider)/引擎回收
-// (Closer) 全部丢失。inner 未实现则返回 nil/no-op（下游均已 nil-safe）===
+// GetStats 纯透传，无错误语义。
+func (s *ErrorTrackingStore) GetStats() StoreStats { return s.inner.GetStats() }
 
+// MemoryEngine 透传内层语义引擎（无则 nil）。
 func (s *ErrorTrackingStore) MemoryEngine() MemoryEngine {
 	if p, ok := s.inner.(MemoryEngineProvider); ok {
 		return p.MemoryEngine()
@@ -323,6 +291,7 @@ func (s *ErrorTrackingStore) MemoryEngine() MemoryEngine {
 	return nil
 }
 
+// KVBackend 透传内层 KV 底座（无则 nil）。
 func (s *ErrorTrackingStore) KVBackend() KVStore {
 	if p, ok := s.inner.(KVProvider); ok {
 		return p.KVBackend()
@@ -330,12 +299,14 @@ func (s *ErrorTrackingStore) KVBackend() KVStore {
 	return nil
 }
 
+// RemoveVector 把遗忘联动移除向量透传给内层（无该能力则空操作）。
 func (s *ErrorTrackingStore) RemoveVector(eventKey int64) {
 	if r, ok := s.inner.(VectorRemover); ok {
 		r.RemoveVector(eventKey)
 	}
 }
 
+// RelationStore 透传因果关系存储（无则 nil，调用方按"无关系能力"处理）。
 func (s *ErrorTrackingStore) RelationStore() RelationStore {
 	if p, ok := s.inner.(RelationStoreProvider); ok {
 		return p.RelationStore()
@@ -343,6 +314,7 @@ func (s *ErrorTrackingStore) RelationStore() RelationStore {
 	return nil
 }
 
+// Close 透传内层关闭以回收资源（内层无 Close 则返回 nil）。
 func (s *ErrorTrackingStore) Close() error {
 	if c, ok := s.inner.(interface{ Close() error }); ok {
 		return c.Close()

@@ -4,19 +4,20 @@
 // as plain tools so they can be referenced directly from agent YAML configs.
 //
 // Configuration (via ToolRef.Properties):
-//   - base_dir: root directory for file operations. Falls back to the agent-level
-//     working root (config.working_dir / $TAGENT_WORKING_DIR), then to the process
-//     working directory "." — the same precedence the exec tool uses for its command
-//     cwd, so both always share one base (a single filesystem view for the model).
+// - base_dir: root directory for file operations. Falls back to the agent-level
+// working root (config.working_dir / $TAGENT_WORKING_DIR), then to the process
+// working directory "." — the same precedence the exec tool uses for its command
+// cwd, so both always share one base (a single filesystem view for the model).
 //
 // Example YAML:
 //
 //	tools:
-//	  - kind: tool
-//	    id: read_file
-//	    description_file: read_file_tool_desc.md
-//	    properties:
-//	      base_dir: "./workspace"
+//
+// - kind: tool
+// id: read_file
+// description_file: read_file_tool_desc.md
+// properties:
+// base_dir: "./workspace"
 package file
 
 import (
@@ -48,11 +49,11 @@ var (
 	toolSetMu    sync.Mutex
 )
 
+var registerOnce sync.Once
+
 // RegisterTools registers all built-in file operation tools as plain tools.
 // Should be called once during tagent's built-in tool registration.
 // Uses sync.Once for idempotency — safe to call multiple times.
-var registerOnce sync.Once
-
 func RegisterTools() {
 	registerOnce.Do(func() {
 		for _, name := range fileToolNames {

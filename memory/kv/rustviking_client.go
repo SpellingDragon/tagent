@@ -13,15 +13,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// ==================== RustVikingClient ====================
-//
-// RustVikingClient 封装对 rustviking CLI 的调用。
-// 通过 exec.Cmd 执行 rustviking 二进制，传递 JSON 格式输入，解析 JSON 输出。
-//
-// CLI 接口约定（来自 RustViking）:
-//   - 统一 JSON 输出: {"success": true, "data": ...} 或 {"success": false, "error": ...}
-//   - 退出码: 0=成功, 1=用户错误, 2=系统错误
-
 // CLIResponse 表示 RustViking CLI 的统一 JSON 响应。
 type CLIResponse struct {
 	Success bool            `json:"success"`
@@ -29,24 +20,28 @@ type CLIResponse struct {
 	Error   string          `json:"error,omitempty"`
 }
 
-// memory.KVPair 表示一个键值对。
+// KVPair 表示一个键值对。
 type KVPair struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
-// memory.KVOp 表示一个批量操作。
+// KVOp 表示一个批量操作。
 type KVOp struct {
-	Type  string `json:"op"` // "put" or "delete"
+	// Type "put" or "delete"
+	Type  string `json:"op"`
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
 }
 
 // RustVikingClient 封装对 rustviking CLI 的调用。
 type RustVikingClient struct {
-	binaryPath string // rustviking 二进制路径（默认 "rustviking"）
-	configPath string // 配置文件路径
-	jsonOutput bool   // 是否启用 JSON 输出
+	// binaryPath rustviking 二进制路径（默认 "rustviking"）
+	binaryPath string
+	// configPath 配置文件路径
+	configPath string
+	// jsonOutput 是否启用 JSON 输出
+	jsonOutput bool
 }
 
 // NewRustVikingClient 创建 RustVikingClient。
@@ -83,7 +78,6 @@ func (c *RustVikingClient) run(args []string) (*CLIResponse, error) {
 	cmd := exec.Command(args[0], args[1:]...)
 	output, err := cmd.Output()
 	if err != nil {
-		// 尝试获取 stderr 以获取更多错误信息
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return nil, fmt.Errorf("rustviking CLI failed (exit %d): %s",
 				exitErr.ExitCode(), string(exitErr.Stderr))
@@ -128,8 +122,6 @@ func (c *RustVikingClient) runWithStdin(args []string, stdinData []byte) (*CLIRe
 	return &resp, nil
 }
 
-// ==================== KV 操作 ====================
-
 // KVPut 写入单个 KV。
 func (c *RustVikingClient) KVPut(key, value string) error {
 	args := c.buildArgs("kv put", "-k", key, "-v", value)
@@ -154,9 +146,6 @@ func (c *RustVikingClient) KVGet(key string) (string, error) {
 		return "", fmt.Errorf("failed to parse KV get response: %w", err)
 	}
 	if result.Value == nil {
-		// Typed missing (resident-readiness-plan 2.5): a null value means the
-		// key genuinely does not exist — callers must be able to
-		// errors.Is(ErrKeyNotFound) it apart from CLI/transport I/O errors.
 		return "", memory.KeyNotFound(key, nil)
 	}
 	return *result.Value, nil
@@ -193,10 +182,8 @@ func (c *RustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair, er
 // KVRange 范围扫描。
 // 注意: rustviking CLI 不直接支持 range 操作，使用 KVScan 扫描公共前缀后过滤。
 func (c *RustVikingClient) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
-	// 用 start 和 end 的最长公共前缀扫描
 	prefix := longestCommonPrefix(start, end)
 	if prefix == "" {
-		// 无公共前缀，回退到空前缀扫描（全量扫描，慎用）
 		return nil, fmt.Errorf("KVRange requires non-empty common prefix between start and end")
 	}
 	pairs, err := c.KVScan(prefix, 0)
@@ -241,16 +228,7 @@ func (c *RustVikingClient) KVBatch(ops []memory.KVOp) error {
 	return err
 }
 
-// ==================== 向量操作（rustviking index CLI · F1 实测契约）====================
-//
-// F1 核验（f1-rustviking-capability-report.md）：rustviking 真实向量命令是
-// `index insert/search/delete/info`（**非** `vector *`）；向量以逗号分隔 f32 传参
-// （clap value_delimiter=','）；`index search` 返回
-// `{query_dimension,k,count,results:[{id,score,level}]}`；`index delete` 真实存在。
-// 旧实现的 `vector insert`/`vector search`/`embed` 三命令均不存在（虚构契约，无调用
-// 方），是 SearchByEmbedding 永远为 stub 的根因，此处按真实 CLI 重写。
-
-// VectorResult 是向量检索的单条命中（id + 相似度分 + 层级）。
+// VectorResult 是向量检索的单条命中：rustviking 返回的 id、相似度分与索引层级。
 type VectorResult struct {
 	ID    uint64  `json:"id"`
 	Score float32 `json:"score"`
@@ -266,12 +244,12 @@ func formatVector(vec []float32) string {
 	return strings.Join(parts, ",")
 }
 
-// VectorInsert 插入/覆盖向量（index insert）。level 为 rustviking 索引层级参数
-// （语义以其实现为准，F1 标注待验证；默认传 0）。
-// M2（§8.4）：本方法当前**无生产调用方**（预留能力）——MVP 向量持久化走 KVPut 序列化 + 启动
-// 重建（rustviking 原生 index CLI 进程内易失，见 f1-report），原生 index insert 未接线。且显式
-// `-l 0` 偏离 rustviking 默认 level=1、语义未经真实 binary 验证——接入原生 index 持久化时须先
-// 实测 level 语义（0 vs 1 的索引结构差异）再定传参，勿沿用当前默认 0。
+// VectorInsert 插入或覆盖一条向量（index insert）。**当前无生产调用方**：MVP 的向量持久化走
+// KV 序列化＋启动重建，而原生 index 是进程内易失索引，两条路线互斥。level 的语义未经真实
+// 二进制验证，且显式传 0 会偏离 rustviking 默认 level=1；接线前须先实测 0/1 的索引结构差异
+// 再定传参。完整约束见文档。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#rv-vector-cmds
 func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8) error {
 	args := c.buildArgs("index insert",
 		"-i", strconv.FormatUint(id, 10),
@@ -309,8 +287,6 @@ func (c *RustVikingClient) VectorDelete(id uint64) error {
 	return err
 }
 
-// ==================== Mock Client（测试用） ====================
-
 // MockRustVikingClient 是 RustVikingClient 的内存 mock，用于开发和测试。
 type MockRustVikingClient struct {
 	mu   sync.Mutex
@@ -324,6 +300,7 @@ func NewMockRustVikingClient() *MockRustVikingClient {
 	}
 }
 
+// KVPut 写入一对键值。
 func (m *MockRustVikingClient) KVPut(key, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -331,16 +308,18 @@ func (m *MockRustVikingClient) KVPut(key, value string) error {
 	return nil
 }
 
+// KVGet 读取键值；键不存在时返回包装 memory.ErrKeyNotFound 的类型化错误。
 func (m *MockRustVikingClient) KVGet(key string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	value, ok := m.data[key]
 	if !ok {
-		return "", memory.KeyNotFound(key, nil) // typed contract (2.5)
+		return "", memory.KeyNotFound(key, nil)
 	}
 	return value, nil
 }
 
+// KVDelete 删除一个键。
 func (m *MockRustVikingClient) KVDelete(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -348,6 +327,7 @@ func (m *MockRustVikingClient) KVDelete(key string) error {
 	return nil
 }
 
+// KVScan 按前缀扫描，结果按字典序排序，limit 在排序后截断。
 func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -357,8 +337,6 @@ func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair
 			results = append(results, memory.KVPair{Key: k, Value: v})
 		}
 	}
-	// Lexicographic order to honor the memory.KVStore scan contract (RocksDB and
-	// LocalFileKV both return sorted results); limit applies after sorting.
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Key < results[j].Key
 	})
@@ -368,6 +346,7 @@ func (m *MockRustVikingClient) KVScan(prefix string, limit int) ([]memory.KVPair
 	return results, nil
 }
 
+// KVRange 返回 [start, end) 内的键值；由公共前缀扫描加客户端过滤模拟。
 func (m *MockRustVikingClient) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -383,6 +362,7 @@ func (m *MockRustVikingClient) KVRange(start, end string, limit int) ([]memory.K
 	return results, nil
 }
 
+// KVBatch 经 stdin 提交一批 put/delete 操作。
 func (m *MockRustVikingClient) KVBatch(ops []memory.KVOp) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

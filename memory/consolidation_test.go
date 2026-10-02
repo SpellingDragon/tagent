@@ -19,27 +19,29 @@ func seedSourceEvent(t *testing.T, s *InMemoryStore, pid int, content string, ts
 	return key
 }
 
-// TestComputeReceiptFingerprint_DeterministicOrderIndependent 验证指纹确定性且与输入顺序无关
-// （内部按 key 排序），且覆盖 content（改内容 → 指纹变，防漂移）。
+// TestComputeReceiptFingerprint_DeterministicOrderIndependent 钉住 指纹确定性且与输入顺序无关
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestComputeReceiptFingerprint_DeterministicOrderIndependent(t *testing.T) {
 	a := FullEvent{EventKey: 100, EventType: "external_input", Content: "alpha"}
 	b := FullEvent{EventKey: 200, EventType: "external_input", Content: "beta"}
 	fp1 := ComputeReceiptFingerprint([]FullEvent{a, b})
-	fp2 := ComputeReceiptFingerprint([]FullEvent{b, a}) // 乱序
+	fp2 := ComputeReceiptFingerprint([]FullEvent{b, a})
 	if fp1 != fp2 {
 		t.Fatalf("指纹应与顺序无关: %s vs %s", fp1, fp2)
 	}
 	if !strings.HasPrefix(fp1, "sha1:") {
 		t.Fatalf("指纹应 sha1: 前缀, got %s", fp1)
 	}
-	// 改 content → 指纹变（防篡改/漂移）。
 	b2 := FullEvent{EventKey: 200, EventType: "external_input", Content: "beta-TAMPERED"}
 	if ComputeReceiptFingerprint([]FullEvent{a, b2}) == fp1 {
 		t.Fatal("content 改变应改变指纹（防漂移）")
 	}
 }
 
-// TestBuildAndVerifyConsolidation 验证服务端构造 + 回放验证闭环：LLM 无法伪造指纹。
+// TestBuildAndVerifyConsolidation 钉住 服务端构造 + 回放验证闭环：LLM 无法伪造指纹。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestBuildAndVerifyConsolidation(t *testing.T) {
 	store := NewInMemoryStore()
 	k1 := seedSourceEvent(t, store, 1, "部署失败：数据库连接超时", 1750000000000)
@@ -56,12 +58,10 @@ func TestBuildAndVerifyConsolidation(t *testing.T) {
 	if verdict.Resolved != 2 || verdict.Tombstoned != 0 {
 		t.Fatalf("应取回 2 源事件, got %+v", verdict)
 	}
-	// 服务端指纹已写入 Metadata。
 	fp := evt.Metadata[MetaReceiptFingerprint]
 	if !strings.HasPrefix(fp, "sha1:") {
 		t.Fatalf("应有服务端指纹, got %q", fp)
 	}
-	// 存巩固事件后回放验证：指纹匹配。
 	if err := store.StoreEvent(evt.EventKey, evt); err != nil {
 		t.Fatalf("store consolidation: %v", err)
 	}
@@ -70,7 +70,6 @@ func TestBuildAndVerifyConsolidation(t *testing.T) {
 		t.Fatalf("回放验证应指纹匹配, got %+v", got)
 	}
 
-	// 防伪造：LLM 篡改 content 但保留原指纹 → 验证失败（指纹不匹配）。
 	forged := evt
 	forged.Content = "伪造的经验"
 	forged.Metadata = map[string]string{MetaReceiptKeys: evt.Metadata[MetaReceiptKeys], MetaReceiptFingerprint: "sha1:forged000"}
@@ -79,8 +78,9 @@ func TestBuildAndVerifyConsolidation(t *testing.T) {
 	}
 }
 
-// TestVerifyConsolidation_TombstonedIsHonestDecay 验证源事件被删后收据进入 Tombstoned
-// （诚实衰减信号，非错误），指纹不可判。
+// TestVerifyConsolidation_TombstonedIsHonestDecay 钉住 源事件被删后收据进入 Tombstoned
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestVerifyConsolidation_TombstonedIsHonestDecay(t *testing.T) {
 	store := NewInMemoryStore()
 	k1 := seedSourceEvent(t, store, 1, "源事件A", 1750000000000)
@@ -89,7 +89,6 @@ func TestVerifyConsolidation_TombstonedIsHonestDecay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	// 删除一个源事件（模拟 TTL 遗忘）。
 	if err := store.DeleteEvent(k1); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -102,8 +101,9 @@ func TestVerifyConsolidation_TombstonedIsHonestDecay(t *testing.T) {
 	}
 }
 
-// TestConsolidationRegisteredTTLExempt 验证 consolidation 经注册表一处注册即 TTL 豁免
-// （REG 收敛「改 10 处」的兑现：长期记忆不被遗忘）。
+// TestConsolidationRegisteredTTLExempt 钉住 consolidation 经注册表一处注册即 TTL 豁免
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestConsolidationRegisteredTTLExempt(t *testing.T) {
 	if ttl := event.DefaultTypeTTL()[event.TypeConsolidation]; ttl != -1 {
 		t.Fatalf("consolidation 应 TTL 豁免(-1), got %d", ttl)
@@ -122,7 +122,9 @@ func TestConsolidationRegisteredTTLExempt(t *testing.T) {
 	}
 }
 
-// TestBuildConsolidationEvent_EmptyContentRejected 验证空内容被拒（不产生空巩固）。
+// TestBuildConsolidationEvent_EmptyContentRejected 钉住 空内容被拒（不产生空巩固）。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestBuildConsolidationEvent_EmptyContentRejected(t *testing.T) {
 	store := NewInMemoryStore()
 	if _, _, err := BuildConsolidationEvent(store, 1, "   ", "manual", "manual", nil, 0); err == nil {
@@ -130,21 +132,17 @@ func TestBuildConsolidationEvent_EmptyContentRejected(t *testing.T) {
 	}
 }
 
-// TestConsolidate_MinSourcesReject (4.4, design-report-closeout): the
-// min_source_events hard gate rejects consolidation when fewer source events
-// actually resolve than required — refuse to fabricate memory from missing
-// evidence. Fail-before: lenient pass-through (only actually-resolved sources
-// entered the receipt, no floor). 0 keeps the legacy lenient behavior.
+// TestConsolidate_MinSourcesReject 钉住 the
+//
+// 契约: docs/wiki/memory/memory-architecture.md#consolidation
 func TestConsolidate_MinSourcesReject(t *testing.T) {
 	store := NewInMemoryStore()
 	k1 := seedSourceEvent(t, store, 1, "源一", 1750000000000)
-	ghost := NewSnowflakeEventKey(1, 1750000009000) // never stored → unresolvable
+	ghost := NewSnowflakeEventKey(1, 1750000009000)
 
-	// Gate off (0): lenient — consolidation succeeds with only k1 resolved.
 	if _, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, ghost}, 0); err != nil {
 		t.Fatalf("gate=0 must stay lenient: %v", err)
 	}
-	// Gate on (3): only 1 of 2 resolves → explicit rejection.
 	_, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, ghost}, 3)
 	if err == nil {
 		t.Fatal("min_source_events=3 with 1 resolved source must reject")
@@ -152,7 +150,6 @@ func TestConsolidate_MinSourcesReject(t *testing.T) {
 	if !strings.Contains(err.Error(), "min_source_events") {
 		t.Fatalf("rejection must name the gate: %v", err)
 	}
-	// Gate satisfied: both sources resolve → passes with floor 2.
 	k2 := seedSourceEvent(t, store, 1, "源二", 1750000001000)
 	if _, _, err := BuildConsolidationEvent(store, 1, "经验", "manual", "manual", []int64{k1, k2}, 2); err != nil {
 		t.Fatalf("floor satisfied must pass: %v", err)

@@ -9,14 +9,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// ==================== 工厂式注册（A1 修复：接入 agent 工具装配链）====================
-//
-// 遵循仓库既定的工厂式注册习语（对照 recall.RegisterSubTools）：工厂从
-// agent.PlainToolFactoryConfig 取 per-agent 的 MemStore/ReadPartitionIDs，而非构造注入。
-// 此前 NewConsolidateTool/NewHealthTool 是构造注入式（store/pid 参数），在
-// RegisterBuiltinTools()（全局、静态、无 agent 上下文）时刻无法满足 → 工具从未被注册、
-// agent 不可达。本文件补上工厂适配 + RegisterSubTools，由 registry.go 的 registerOnce 调用。
-
 // RegisterSubTools 注册记忆策展工具到全局注册表（memory_consolidate/memory_health）。
 func RegisterSubTools() {
 	agent.RegisterPlainTool("memory_consolidate", consolidateFactory)
@@ -29,7 +21,7 @@ func consolidateFactory(cfg agent.PlainToolFactoryConfig) (tool.CallableTool, er
 	}
 	pid := 0
 	if len(cfg.ReadPartitionIDs) > 0 {
-		pid = cfg.ReadPartitionIDs[0] // 首个 = agent 自身写分区（巩固事件写入处，见 tagent.go resolveReadPartitions）
+		pid = cfg.ReadPartitionIDs[0]
 	}
 	ct, ok := NewConsolidateToolWithGate(cfg.MemStore, pid, cfg.ConsolidationMinSources).(tool.CallableTool)
 	if !ok {

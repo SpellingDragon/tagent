@@ -1,22 +1,5 @@
 package tagent_test
 
-// UPGRADE / ROLLBACK DRILL (resident-remaining-hardening 4.6, 8.4):
-// an operator-shaped rehearsal of the durable-input upgrade/rollback gates,
-// chained as one lifecycle rather than as isolated atoms.
-//
-// Atom gates already live elsewhere — flock single-writer + fingerprint config
-// conflict (resources_lock_test.go), redirect allowlist (endpoint_redirect_test.go),
-// reopen requeue (inbox_test.go). This drill covers the three SEQUENCE surfaces
-// that had no cohesive coverage:
-//  1. upgrade: legacy *.spill sibling → refuse → drain → accept → full ack
-//  2. rollback condition: unacked (pending+claimed+receipted) > 0 blocks a
-//     downgrade to a pre-inbox binary; draining to zero unblocks it
-//  3. partition-collision READ-ONLY pre-upgrade diagnosis: flag two names that
-//     hash to the same 10-bit pid on one store, WITHOUT migrating/re-keying
-//     (registerStoreOwner fails closed at build; rename is the only fix)
-//
-// Runs by default (file ops + pure functions, no sleeps, no real restart).
-
 import (
 	"encoding/json"
 	"fmt"
@@ -44,10 +27,12 @@ func newEnv(id string) *reliability.Envelope {
 	}
 }
 
-// 1. Upgrade path (§3.7 reworked): pre-migration *.spill no longer blocks boot —
-// the v2 binary opens the dir, classifies the legacy item as INERT transitional
-// data (never reinterpreted/absorbed), and an explicit managed ResetTransitional
-// clears it. The full durable lifecycle then runs on the current format.
+// TestDrill_UpgradeTreatsLegacySpillAsInertThenResets pins the upgrade path for pre-migration spill files.
+// - A prior-format *.spill does not block boot: the binary opens the directory and classifies the item as inert transitional data.
+// - The item is never reinterpreted nor absorbed; an explicit managed ResetTransitional clears it.
+// - The full durable lifecycle then runs on the current format.
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#reopen-refusal
 func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	dir := t.TempDir()
 	legacy := filepath.Join(dir, "00000000000000000001.spill")
@@ -70,9 +55,6 @@ func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	env, path, err := in.ClaimNext()
 	require.NoError(t, err)
 	require.Equal(t, "req-1", env.RequestID)
-	// §5.4: the drain path follows the CURRENT protocol — reservation, then
-	// completion durable BEFORE a credentialed receipt (the state machine refuses
-	// a receipt without one, and without the credential matching the reservation).
 	require.NoError(t, in.PrepareFacts(path, "rk-req-1", []json.RawMessage{json.RawMessage(`{"event_key":11}`)}))
 	require.NoError(t, in.RecordCompletion(path, json.RawMessage(`{"completion_version":1}`)))
 	require.NoError(t, in.RecordReceipt(path, reliability.ReceiptCredential{ReceiptKey: "rk-req-1"}))
@@ -80,9 +62,9 @@ func TestDrill_UpgradeTreatsLegacySpillAsInertThenResets(t *testing.T) {
 	require.EqualValues(t, 0, in.Pending(), "acked envelope leaves nothing outstanding")
 }
 
-// 2. Rollback condition: a pre-inbox binary ignores inbox-v1, so downgrading
-// while unacked envelopes exist would silently drop them. The operator's
-// read-only gate is Pending()>0 → refuse; drain-to-zero → safe.
+// TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain pins when a downgrade is safe.
+// - A pre-inbox binary ignores inbox-v1, so downgrading while unacked envelopes exist would silently drop them.
+// - The operator gate is read-only: Pending()>0 → refuse, drain-to-zero → safe.
 func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	dir := t.TempDir()
 	in, err := reliability.NewInbox(dir, 10)
@@ -91,21 +73,16 @@ func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	require.NoError(t, func() error { _, e := in.Enqueue(newEnv("req-1")); return e }())
 	require.EqualValues(t, 2, in.Pending())
 
-	// Crash mid-processing: claim one, never receipt/ack, then close.
 	_, _, err = in.ClaimNext()
 	require.NoError(t, err)
 	require.NoError(t, in.Close())
 
-	// Reopen (next boot): the claimed item returns to pending; both still count
-	// as outstanding — the rollback gate must therefore refuse a downgrade.
 	in2, err := reliability.NewInbox(dir, 10)
 	require.NoError(t, err)
 	defer in2.Close()
 	require.EqualValues(t, 2, in2.Pending(), "crash leaves both envelopes outstanding after reopen")
 	require.Greater(t, in2.Pending(), int64(0), "outstanding>0 → MUST NOT downgrade to pre-inbox binary")
 
-	// Drain to zero (claim→prepare→completion→credentialed receipt→ack) before any
-	// downgrade is data-safe.
 	for in2.Pending() > 0 {
 		env, path, cerr := in2.ClaimNext()
 		require.NoError(t, cerr)
@@ -119,9 +96,9 @@ func TestDrill_RollbackRefusedWhileOutstandingThenSafeAfterDrain(t *testing.T) {
 	require.EqualValues(t, 0, in2.Pending(), "drained → rollback to pre-inbox binary is now data-safe")
 }
 
-// 3. Read-only partition-collision diagnosis. Pigeonhole guarantees detection:
-// 1200 distinct names over a 10-bit (1024) pid space MUST collide, independent
-// of hash distribution. The scan flags collisions and mutates nothing.
+// TestDrill_PartitionCollisionDiagnosisIsReadOnly pins that the collision scan is read-only.
+// - Pigeonhole guarantees detection: 1200 distinct names over a 10-bit (1024) pid space MUST collide, independent of hash distribution.
+// - The scan flags collisions and mutates nothing.
 func TestDrill_PartitionCollisionDiagnosisIsReadOnly(t *testing.T) {
 	names := make([]string, 0, 1200)
 	for i := 0; i < 1200; i++ {
@@ -141,7 +118,6 @@ func TestDrill_PartitionCollisionDiagnosisIsReadOnly(t *testing.T) {
 			require.Equal(t, pid, memory.PartitionIDFromName(n), "collision group members share one pid")
 		}
 	}
-	// Read-only: the diagnosis never re-keys — every pid mapping is unchanged.
 	for _, n := range names {
 		require.Equal(t, snapshot[n], memory.PartitionIDFromName(n), "diagnosis must not alter pid mapping")
 	}

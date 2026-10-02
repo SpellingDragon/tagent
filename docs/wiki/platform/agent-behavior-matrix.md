@@ -88,7 +88,9 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 
 > 自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。
 
-`refine` 工具(**仅 entry agent**)三 op(`evolution/refine.go`);冥想产物落盘后经 register 登记开评估保护。
+`refine` 工具(**仅 entry agent**)三 op(`evolution/refine.go`);冥想产物落盘后经 register 登记
+
+冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒。三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。开评估保护。
 
 ### 2.1 refine 三 op 行为
 
@@ -219,6 +221,7 @@ stateDiagram-v2
 
 ---
 
+<a id="working-dir"></a>
 ## 六、部署生命周期行为(裸机 systemd)
 
 | 场景 | 行为 |
@@ -233,6 +236,12 @@ stateDiagram-v2
 | 设了工作根(`TAGENT_WORKING_DIR`,如项目 clone 根) | agent 的 **file 工具 `base_dir` 与 exec 命令 cwd 同时**以它为基准(二者恒一致 → 模型看到单一文件系统视图),可读写该目录下所有仓库;tagent 自身的配置/资源/数据路径**不受影响**(仍相对部署目录) |
 | 工作根设在部署目录**外** | 需**两道放行**才可写:① 文件系统层 ACL(`./wizard.sh --perms` 给服务用户追加 `rwX`,含已有文件 + 默认 ACL 继承新建,不改原有 owner/group/mode);② systemd 沙箱层 `ReadWritePaths` 追加该绝对路径(`ProtectSystem=strict` 下缺此则只读失败) |
 | 工作根留空(默认) | file/exec 均继承进程工作目录(= 部署目录),行为与未引入该配置前逐字节一致 |
+
+工作根在配置层只有三条取法（`config.go` 的 `ApplyDefaults`）：
+
+> `working_dir`（yaml/json 字段）给出初值 → 环境变量 `TAGENT_WORKING_DIR` **非空时覆盖它** → 两者皆空则保持空串，由 file/exec 各自继承进程工作目录。
+
+环境变量只在**非空**时生效，所以部署面写一个空值等于没写；空串不是"."的别名，它意味着"不改变现状"。
 
 ---
 

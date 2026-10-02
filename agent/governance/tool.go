@@ -7,16 +7,6 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// ==================== GovernanceTool（T-G · 治理闸装饰器）====================
-//
-// 装饰一个 tool.Tool：Call 前经 GovernanceGate 裁决。拒绝则以 result 渗透治理理由（失败
-// 是一等资产——模型据此自纠，而非 panic/静默），不执行内层工具；放行则委托内层。
-// Declaration 透传内层（工具声明恒定 → prefix-cache 稳定性不变量：治理不改声明区）。
-//
-// 包裹顺序：OutputLimitTool(GovernanceTool(rawTool))——agent.go 随后包 OutputLimitTool，
-// 二者均实现 CallableTool，链式委托。sub-agent 包装器（*agent.AgentToolWrapper）不被包裹
-// （下游需按具体类型断言接 parentProjection），治理聚焦 leaf 工具（exec/file/mcp 主风险面）。
-
 // triggerSourceKeyType 是 ctx 中触发源的键类型（私有类型防冲突）。
 type triggerSourceKeyType struct{}
 
@@ -59,7 +49,6 @@ func (t *GovernanceTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 	if !ok {
 		return nil, fmt.Errorf("GovernanceTool: inner tool %T does not implement CallableTool", t.inner)
 	}
-	// 治理关闭 → 透传（零行为变化）。
 	if t.gate == nil || !t.gate.Enabled() {
 		return callable.Call(ctx, jsonArgs)
 	}
@@ -73,8 +62,6 @@ func (t *GovernanceTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 		ArgsJSON:      string(jsonArgs),
 		TriggerSource: TriggerSourceFrom(ctx),
 	})
-	// 拒绝或挂起（Hold=critical 待批准）均不执行内层——纵深防御：即便 Denied 标志未置，
-	// Hold 处置也意味着「不可现在执行」。以 result 渗透治理理由（模型自纠材料）。
 	if decision.Denied || decision.Disposition == DispositionHold {
 		reason := decision.DenyReason
 		if reason == "" {
@@ -84,6 +71,5 @@ func (t *GovernanceTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 			"请调整操作或走批准/goal 登记流程后重试。",
 			reason, decision.Level, decision.RuleID), nil
 	}
-	// 放行（allow / record / critical 已批准）：委托内层执行。
 	return callable.Call(ctx, jsonArgs)
 }

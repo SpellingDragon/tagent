@@ -20,16 +20,16 @@ import (
 // Converted from config.MeditationConfig (string durations) by tagent.go.
 type MeditationConfig struct {
 	Enabled    bool
-	Interval   time.Duration // Check interval (default: 30m)
-	MinGap     time.Duration // Minimum idle gap for valid meditation (default: 2h)
-	PromptText string        // Meditation prompt text (static, loaded once at init)
+	Interval   time.Duration
+	MinGap     time.Duration
+	PromptText string
 	// PromptSource 用 prompt.Getter 接口（而非具体 *prompt.Source）：保持冥想提示词可注入
 	// （Getter 缝，C6 遗产）；git-native 后冥想提示词同为文件即真源（mtime 热重载直生效），
 	// 改动经 refine register 登记纳入评估保护。
 	// *prompt.Source 满足 Getter，既有构造点零改动；Source.Get 有 nil-receiver 守卫。
-	PromptSource prompt.Getter // Hot-reloadable meditation prompt (optional, overrides PromptText)
+	PromptSource prompt.Getter
 
-	// DigestExtra（4.3 design-report-closeout）：可选的 digest 附加段生成器——
+	// DigestExtra：可选的 digest 附加段生成器——
 	// 冥想自我状态摘要末尾追加（如巩固候选清单）。nil = 无附加（现状）。
 	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
 	DigestExtra func() string
@@ -49,7 +49,7 @@ type messageInjector interface {
 // into the event loop when the agent has been idle for at least MinGap AND
 // there has been new user input since the last meditation.
 //
-// Gating is split across two independent anchors (meditation-gate-split):
+// Gating is split across two independent anchors:
 // the idle gate is lineage-AGNOSTIC (any turn end counts as busy), while the
 // novelty gate is INPUT-side anchored (only source=="user" injections arm it).
 // This split makes output-side lineage tracking unnecessary: activity derived
@@ -70,9 +70,9 @@ type MeditationManager struct {
 	taskController task.TaskController
 
 	// auditLine, when set, appends the behavior-audit trajectory line to the
-	// self-state digest (attention-budget-architecture: time-series
-	// self-observation lives in the reflection layer, not the resident
-	// context). nil → section omitted.
+	// self-state digest: time-series self-observation lives in the reflection
+	// layer, not in the resident context. nil omits the section.
+	// 契约: docs/wiki/agent/compression-and-telemetry.md#self-state-digest
 	auditLine func() string
 
 	// lastUserInput is the novelty-gate anchor (Unix ms): the most recent
@@ -209,7 +209,7 @@ func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
 
 // UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
 // Called unconditionally by runEventLoop after every RunFlow, regardless of
-// trigger source or success (lineage-agnostic by design).
+// trigger source or success.
 func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
 	m.anchorMu.Lock()
 	m.lastTurnEnd.Store(t.UnixMilli())
@@ -218,16 +218,18 @@ func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
 }
 
 // checkAndMeditate evaluates whether a meditation should fire.
-// Two independent gates must both pass (meditation-gate-split):
+// Two independent gates must both pass:
 //  1. novelty gate (input-side): there has been user input SINCE the last
-//     meditation. Injection-point source is ground truth, so activity
-//     laundered through the task layer (Source="task" settles of
-//     meditation-spawned work) can never re-arm this gate — this alone kills
-//     the perpetual-motion loop of "nothing happened" summaries.
+//
+// meditation. Injection-point source is ground truth, so activity
+// laundered through the task layer (Source="task" settles of
+// meditation-spawned work) can never re-arm this gate — this alone kills
+// the perpetual-motion loop of "nothing happened" summaries.
 //  2. idle gate (lineage-agnostic): gap since the last turn end >= MinGap.
-//     ANY turn counts as busy — meditation-derived turns merely delay the
-//     next meditation, which is harmless (and desirable while background
-//     work is still churning).
+//
+// ANY turn counts as busy — meditation-derived turns merely delay the
+// next meditation, which is harmless (and desirable while background
+// work is still churning).
 //
 // No fire-time anchor reset is needed: storing lastMeditation locks the
 // novelty gate (lastUserInput <= lastMeditation) until real user input.
@@ -236,11 +238,9 @@ func (m *MeditationManager) checkAndMeditate() {
 
 	lastUserMs := m.lastUserInput.Load()
 	if lastUserMs == 0 {
-		// No user input received yet — nothing to reflect on.
 		return
 	}
 
-	// Novelty gate: no user input since the previous meditation ⇒ skip.
 	if lm := m.lastMeditation.Load(); lm > 0 && lastUserMs <= lm {
 		log.Debugf("[Meditation] skipping: no new user input since last meditation")
 		return
@@ -248,7 +248,6 @@ func (m *MeditationManager) checkAndMeditate() {
 
 	lastTurnMs := m.lastTurnEnd.Load()
 	if lastTurnMs == 0 {
-		// No turn has completed yet (first turn may still be in flight) — skip.
 		return
 	}
 	idle := now.Sub(time.UnixMilli(lastTurnMs))
@@ -257,7 +256,6 @@ func (m *MeditationManager) checkAndMeditate() {
 		return
 	}
 
-	// Conditions met — inject meditation message.
 	msg := m.buildMeditationMessage(now, idle)
 	m.injector.InjectMessageWithSource("meditation", msg)
 	m.anchorMu.Lock()
@@ -279,7 +277,6 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 		lastMed = "首次冥想"
 	}
 
-	// Hot-reload: prefer PromptSource over static PromptText
 	promptText := m.cfg.PromptText
 	if m.cfg.PromptSource != nil {
 		if loaded, err := m.cfg.PromptSource.Get(); err == nil && loaded != "" {
@@ -293,7 +290,6 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 	var digest string
 	if m.taskController != nil {
 		digest = renderSelfStateDigest(m.taskController.List(), idle)
-		// 4.3（design-report-closeout）：巩固候选等附加段（装配层注入，nil 安全）。
 		if m.cfg.DigestExtra != nil {
 			if extra := m.cfg.DigestExtra(); extra != "" {
 				if digest != "" {
@@ -303,8 +299,6 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 			}
 		}
 	}
-	// Behavior-audit trajectory line (attention-budget-architecture: time-series
-	// self-observation belongs to the reflection layer).
 	if m.auditLine != nil {
 		if line := m.auditLine(); line != "" {
 			if digest != "" {

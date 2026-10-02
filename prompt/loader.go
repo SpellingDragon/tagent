@@ -12,41 +12,38 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// CompositeConfig describes how to load a prompt in bootstrap style.
-// Aligned with nanobot's BOOTSTRAP_FILES pattern (AGENTS.md, SOUL.md, USER.md, TOOLS.md).
+// CompositeConfig 描述一份提示词由哪些来源组成。组装顺序固定为 inline → Files（按给定
+// 顺序）→ Dir，各段以空行拼接。
 //
-// Prompt composition order: inline → files (in order) → directory scan.
-// All parts are joined with double newlines.
+// 契约: docs/wiki/prompt/prompt-architecture.md#load-composite
 type CompositeConfig struct {
-	Inline string   `json:"inline,omitempty" yaml:"inline,omitempty"` // Direct inline prompt text
-	Files  []string `json:"files,omitempty"  yaml:"files,omitempty"`  // Ordered file list (e.g., AGENTS.md, SOUL.md)
-	Dir    string   `json:"dir,omitempty"    yaml:"dir,omitempty"`    // Scan all .md files in directory
+	Inline string   `json:"inline,omitempty" yaml:"inline,omitempty"`
+	Files  []string `json:"files,omitempty"  yaml:"files,omitempty"`
+	Dir    string   `json:"dir,omitempty"    yaml:"dir,omitempty"`
 }
 
-// IsEmpty returns true if no prompt source is configured.
+// IsEmpty 报告是否未指定任何提示词来源。
 func (pc CompositeConfig) IsEmpty() bool {
 	return pc.Inline == "" && len(pc.Files) == 0 && pc.Dir == ""
 }
 
-// Loader loads prompt templates from files or directories.
+// Loader 从文件或目录读取提示词；配置了内嵌回退 FS 时，磁盘缺失者由该 FS 补齐。
+//
+// 契约: docs/wiki/prompt/prompt-architecture.md#loader-methods
 type Loader struct {
-	// BaseDir is the base directory for relative paths.
+	// BaseDir 是相对路径的解析基准目录，空串表示不做解析。
 	BaseDir string
 
-	// fallbackFS, when set, supplies embedded default prompts resolved when a
-	// file/dir is absent under BaseDir on disk. Disk always takes precedence.
+	// fallbackFS 为空表示不启用内嵌回退；非空时仅在磁盘未命中时读取。
 	fallbackFS fs.FS
-	// fallbackPrefix is the path prefix under which prompts live in fallbackFS
-	// (e.g. "resources/prompts"), forward-slash separated.
+	// fallbackPrefix 是提示词在 fallbackFS 内的根路径（正斜杠分隔）。
 	fallbackPrefix string
 }
 
 // LoaderOption configures a Loader.
 type LoaderOption func(*Loader)
 
-// WithFallback sets an embedded prompt FS used when a prompt file/dir is not
-// found on disk under BaseDir. prefix is the path under which prompts live in
-// fsys (e.g. "resources/prompts"). Disk entries always override the fallback.
+// WithFallback 指定内嵌提示词 FS 及其中的根路径：磁盘未命中时由它补齐，磁盘命中项始终优先。
 func WithFallback(fsys fs.FS, prefix string) LoaderOption {
 	return func(l *Loader) {
 		l.fallbackFS = fsys
@@ -54,9 +51,7 @@ func WithFallback(fsys fs.FS, prefix string) LoaderOption {
 	}
 }
 
-// NewLoader creates a new prompt loader. Pass WithFallback to enable resolving
-// missing prompts from an embedded default FS; with no options the loader reads
-// only from BaseDir on disk (unchanged behavior).
+// NewLoader 创建提示词加载器。不传选项时只读磁盘 `BaseDir`。
 func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
 	l := &Loader{
 		BaseDir: baseDir,
@@ -67,16 +62,16 @@ func NewLoader(baseDir string, opts ...LoaderOption) *Loader {
 	return l
 }
 
-// LoadFromFile loads a single prompt file.
-// Supports both absolute and relative paths.
+// LoadFromFile 读取单个提示词文件；相对路径按 BaseDir 解析。
+// 空文件返回空串而非错误；磁盘未命中且配置了内嵌 FS 时由该 FS 补齐，绝对路径不回退。
+// 读失败时以 %w 包裹 os 错误，调用方可用 errors.Is 判别 os.ErrNotExist。
 func (l *Loader) LoadFromFile(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("prompt file path is empty")
 	}
 
-	orig := path // preserve original for embedded fallback lookup by base name
+	orig := path
 
-	// If path is relative, resolve against BaseDir
 	if !filepath.IsAbs(path) && l.BaseDir != "" {
 		path = filepath.Join(l.BaseDir, path)
 	}
@@ -88,26 +83,22 @@ func (l *Loader) LoadFromFile(path string) (string, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		// Fall back to the embedded framework defaults when the disk file is
-		// absent and a fallback FS is configured (disk always takes precedence).
 		if content, ok := l.fallbackFile(orig, err); ok {
 			return content, nil
 		}
-		// Return original error (os.ErrNotExist etc.)
 		return "", fmt.Errorf("read prompt file %s: %w", path, err)
 	}
 
 	content := strings.TrimSpace(string(data))
 	if content == "" {
-		return "", nil // Return empty string instead of error for empty files
+		return "", nil
 	}
 
 	return content, nil
 }
 
-// fallbackFile resolves a prompt by base name from the embedded fallback FS when
-// the disk read failed with not-exist and a fallback is configured. Absolute
-// paths never fall back. Returns (content, true) on a hit.
+// fallbackFile 按文件名从内嵌 FS 取提示词，仅在磁盘返回 ErrNotExist 时生效；
+// 绝对路径不回退。命中时返回内容与 true。
 func (l *Loader) fallbackFile(orig string, diskErr error) (string, bool) {
 	if l.fallbackFS == nil || filepath.IsAbs(orig) || !errors.Is(diskErr, os.ErrNotExist) {
 		return "", false
@@ -121,9 +112,8 @@ func (l *Loader) fallbackFile(orig string, diskErr error) (string, bool) {
 	return strings.TrimSpace(string(data)), true
 }
 
-// fallbackDir scans the embedded fallback dir of the same base name when the
-// disk dir is absent and a fallback is configured. Returns concatenated .md
-// contents (sorted) and true on a hit. No per-file merge with disk.
+// fallbackDir 按同名目录整体扫描内嵌 FS，仅在磁盘目录不存在时生效，命中时返回按文件名
+// 排序拼接的内容与 true。不与磁盘目录做逐文件合并。
 func (l *Loader) fallbackDir(orig string, diskErr error) (string, bool) {
 	if l.fallbackFS == nil || filepath.IsAbs(orig) || !errors.Is(diskErr, os.ErrNotExist) {
 		return "", false
@@ -161,17 +151,15 @@ func (l *Loader) fallbackDir(orig string, diskErr error) (string, bool) {
 	return strings.Join(parts, "\n\n"), true
 }
 
-// LoadFromDir loads all .md prompt files from a directory.
-// Files are sorted alphabetically for deterministic order.
-// Subdirectories are skipped.
+// LoadFromDir 读取目录一层的 .md 提示词并按文件名排序，子目录跳过，非 .md 文件忽略。
+// 目录内无 .md 时返回错误。
 func (l *Loader) LoadFromDir(dir string) (string, error) {
 	if dir == "" {
 		return "", errors.New("prompt directory path is empty")
 	}
 
-	orig := dir // preserve original for embedded fallback lookup by base name
+	orig := dir
 
-	// If path is relative, resolve against BaseDir
 	if !filepath.IsAbs(dir) && l.BaseDir != "" {
 		dir = filepath.Join(l.BaseDir, dir)
 	}
@@ -183,15 +171,12 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		// Whole-directory fallback: if the disk dir is absent, scan the embedded
-		// default dir of the same base name (no per-file merge).
 		if content, ok := l.fallbackDir(orig, err); ok {
 			return content, nil
 		}
 		return "", fmt.Errorf("read prompt directory %s: %w", dir, err)
 	}
 
-	// Collect .md files
 	files := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -207,10 +192,8 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 		return "", fmt.Errorf("no .md prompt files in directory %s", dir)
 	}
 
-	// Sort for deterministic order
 	sort.Strings(files)
 
-	// Load and concatenate
 	parts := make([]string, 0, len(files))
 	for _, file := range files {
 		content, err := l.LoadFromFile(file)
@@ -225,16 +208,10 @@ func (l *Loader) LoadFromDir(dir string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
-// LoadFiles loads multiple prompt files and concatenates them.
-// Files are separated by double newlines.
-// Empty paths or empty content are skipped. A file absent on disk (and not
-// present in the fallback FS) is ALSO skipped rather than fatal: these are
-// optional context files following the nanobot bootstrap pattern (USER.md,
-// HEARTBEAT.md, MEMORY.md are personal/optional and a clean checkout legitimately
-// lacks them). This mirrors LoadBootstrap's skip-missing semantics — previously
-// LoadFiles hard-failed on any absent file, so a committed config referencing an
-// optional, git-ignored file (e.g. USER.md) could not start from a clean checkout.
-// Only not-exist is tolerated; real read errors (e.g. permission) still propagate.
+// LoadFiles 按序读取多个提示词文件并以空行拼接。空路径与空内容跳过；磁盘上不存在的文件
+// 也跳过（可选上下文文件在干净检出中合理地缺失），但真实读错误仍向上传播。
+//
+// 契约: docs/wiki/prompt/prompt-architecture.md#load-files
 func (l *Loader) LoadFiles(paths []string) (string, error) {
 	parts := make([]string, 0, len(paths))
 
@@ -246,11 +223,6 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 
 		content, err := l.LoadFromFile(path)
 		if err != nil {
-			// Optional-file semantics: skip an absent file (load-if-present), keeping
-			// the framework's own DefaultConfig/BootstrapLoadOrder contract that
-			// USER.md/HEARTBEAT.md/MEMORY.md may be absent. Logged at info so a
-			// misspelled required filename is still visible, not silently swallowed.
-			// Genuine read errors (permission, I/O) are not os.ErrNotExist → propagate.
 			if errors.Is(err, os.ErrNotExist) {
 				log.Infof("[prompt] optional file %q absent, skipping (load-if-present)", path)
 				continue
@@ -266,21 +238,14 @@ func (l *Loader) LoadFiles(paths []string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
-// LoadComposite loads prompts from multiple sources:
-// 1. Inline prompt (if not empty)
-// 2. Multiple files (if provided)
-// 3. Directory (if provided)
-//
-// All parts are joined with double newlines.
+// LoadComposite 按 inline → files → dir 的顺序加载各来源并以空行拼接；缺省的来源跳过。
 func (l *Loader) LoadComposite(inline string, files []string, dir string) (string, error) {
 	parts := make([]string, 0, 1+len(files))
 
-	// 1. Inline prompt
 	if v := strings.TrimSpace(inline); v != "" {
 		parts = append(parts, v)
 	}
 
-	// 2. Multiple files
 	if len(files) > 0 {
 		fileContent, err := l.LoadFiles(files)
 		if err != nil {
@@ -291,7 +256,6 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
 		}
 	}
 
-	// 3. Directory
 	dir = strings.TrimSpace(dir)
 	if dir != "" {
 		dirContent, err := l.LoadFromDir(dir)
@@ -306,8 +270,7 @@ func (l *Loader) LoadComposite(inline string, files []string, dir string) (strin
 	return strings.Join(parts, "\n\n"), nil
 }
 
-// SplitCSV splits a comma-separated string into a slice of strings.
-// Trims whitespace from each element.
+// SplitCSV 按逗号切分并去除各元素首尾空白，空元素丢弃；入参为空串时返回 nil。
 func SplitCSV(s string) []string {
 	if s == "" {
 		return nil
@@ -324,37 +287,28 @@ func SplitCSV(s string) []string {
 	return result
 }
 
-// LoadBootstrap loads bootstrap documents from a directory.
-// Bootstrap files are loaded in a specific order defined by BootstrapLoadOrder.
-// This is used for loading system prompts for agents.
+// LoadBootstrap 按 BootstrapLoadOrder 给定的顺序装配目录中的文档，顺序表之外的 .md
+// 追加在末尾；条目不存在时跳过该条，目录不存在或其他读取失败整体中止并返回该错误。
 func (l *Loader) LoadBootstrap(dir string) (string, error) {
 	if dir == "" {
 		return "", errors.New("bootstrap directory is empty")
 	}
 
-	// If path is relative, resolve against BaseDir
 	if !filepath.IsAbs(dir) && l.BaseDir != "" {
 		dir = filepath.Join(l.BaseDir, dir)
 	}
 
-	// Check if directory exists
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return "", fmt.Errorf("bootstrap directory %s does not exist", dir)
 	}
 
 	var results []string
 
-	// Load files in defined order
 	for _, filename := range BootstrapLoadOrder {
 		path := filepath.Join(dir, filename)
 		content, err := l.LoadFromFile(path)
 		if err != nil {
-			// Skip if file doesn't exist
-			if errors.Unwrap(err) != nil && errors.Is(errors.Unwrap(err), os.ErrNotExist) {
-				continue
-			}
-			// Also check the wrapped error
-			if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "file does not exist") {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return "", err
@@ -365,7 +319,6 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 		}
 	}
 
-	// Also load any remaining .md files in the directory
 	entries, err := os.ReadDir(dir)
 	if err == nil {
 		loaded := make(map[string]bool)
@@ -392,7 +345,7 @@ func (l *Loader) LoadBootstrap(dir string) (string, error) {
 	return strings.Join(results, "\n\n"), nil
 }
 
-// BootstrapLoadOrder defines the order in which bootstrap files are loaded.
+// BootstrapLoadOrder 是装配文档的加载顺序，也是该序列的唯一真源。
 var BootstrapLoadOrder = []string{
 	"AGENTS.md",
 	"SOUL.md",

@@ -9,18 +9,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// Switch-combination regression for the evolution verdict (K7: an
-// under-evidenced window must never masquerade as healthy)
-// (resident-remaining-hardening 3.4, archived 7.4).
-//
-// Two fail-closed invariants the release loop depends on:
-//
-//   - judge/evidence unavailable ⇒ Verdict "insufficient" (an explicit "I could
-//     not evaluate", never a silent "healthy");
-//   - governance signals disabled ⇒ even a healthy verdict carries an explicit
-//     "unavailable" note, so the reader knows denial/critical evidence was not
-//     consulted rather than being green by omission.
-
 type constJudge struct {
 	res EvalResult
 	err error
@@ -45,7 +33,9 @@ func newEvaluatedJudge(t *testing.T, judge Evaluator, signals func() bool) (stri
 	return sha, g
 }
 
-// Evidence/judge unavailable must degrade to an explicit "insufficient" verdict.
+// TestSwitchCombo_EvidenceUnavailableIsInsufficient Evidence/judge unavailable must degrade to an explicit "insufficient" verdict.
+//
+// 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states
 func TestSwitchCombo_EvidenceUnavailableIsInsufficient(t *testing.T) {
 	sha, g := newEvaluatedJudge(t, constJudge{err: errors.New("judge backend down")}, nil)
 	ev := g.Evaluations()[sha]
@@ -57,10 +47,8 @@ func TestSwitchCombo_EvidenceUnavailableIsInsufficient(t *testing.T) {
 	}
 }
 
-// Governance signals unavailable must be surfaced in the reason even when the
-// window is otherwise judged healthy — never a silent green.
+// TestSwitchCombo_GovernanceUnavailableIsExplicitNotSilent 钉住 治理信号不可用时，即便指标正常，也必须在结论理由里显式说明，不得静默略过。
 func TestSwitchCombo_GovernanceUnavailableIsExplicitNotSilent(t *testing.T) {
-	// Signals reported unavailable; judge passes.
 	sha, g := newEvaluatedJudge(t,
 		constJudge{res: EvalResult{Pass: true, Score: 1.0, Reason: "metrics look fine"}},
 		func() bool { return false })
@@ -73,9 +61,7 @@ func TestSwitchCombo_GovernanceUnavailableIsExplicitNotSilent(t *testing.T) {
 	}
 }
 
-// Control: signals available + passing judge → healthy with NO unavailability
-// caveat, so the "unavailable" note above is attributable to the switch, not a
-// constant string.
+// TestSwitchCombo_GovernanceAvailableOmitsCaveat 钉住 对照：信号可用且判定通过时给出健康结论，且不得附带"不可用"的免责说明。
 func TestSwitchCombo_GovernanceAvailableOmitsCaveat(t *testing.T) {
 	sha, g := newEvaluatedJudge(t,
 		constJudge{res: EvalResult{Pass: true, Score: 1.0, Reason: "metrics look fine"}},

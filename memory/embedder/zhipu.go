@@ -30,8 +30,10 @@ type ZhipuEmbedderConfig struct {
 	MaxBatch int
 }
 
-// ZhipuEmbedder 经 openai 兼容 /embeddings 端点生成向量（实现 memory.Embedder；
-// 复用 GLM Coding Plan 的 ZAI_API_KEY）。
+// ZhipuEmbedder 经 openai 兼容的 /embeddings 端点生成向量，实现 memory.Embedder（密钥默认
+// 复用 ZAI_API_KEY）。分批、重试分类与 index 还原契约见文档。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 type ZhipuEmbedder struct {
 	cfg    ZhipuEmbedderConfig
 	client *http.Client
@@ -69,7 +71,10 @@ func NewZhipuEmbedder(cfg ZhipuEmbedderConfig) (*ZhipuEmbedder, error) {
 	}, nil
 }
 
+// Dimension 返回请求维度；0 表示用模型默认维度（尚未探测）。
 func (z *ZhipuEmbedder) Dimension() int { return z.cfg.Dimensions }
+
+// ModelID 返回模型标识（含维度），供索引指纹比对以跳过旧向量。
 func (z *ZhipuEmbedder) ModelID() string {
 	if z.cfg.Dimensions > 0 {
 		return fmt.Sprintf("%s-%d", z.cfg.Model, z.cfg.Dimensions)
@@ -116,19 +121,18 @@ func (z *ZhipuEmbedder) Embed(ctx context.Context, texts []string) ([][]float32,
 
 func (z *ZhipuEmbedder) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ { // 重试 ≤1
+	for attempt := 0; attempt < 2; attempt++ {
 		vecs, retryable, err := z.doEmbedRequest(ctx, texts)
 		if err == nil {
 			return vecs, nil
 		}
 		lastErr = err
 		if ctx.Err() != nil {
-			return nil, ctx.Err() // ctx 取消不重试
+			return nil, ctx.Err()
 		}
 		if !retryable {
-			return nil, err // 4xx（非 429）等不可恢复错误不重试（审查 Nit4：省配额、快反馈）
+			return nil, err
 		}
-		// 可恢复（429/5xx/网络）：短退避后重试。
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -138,8 +142,10 @@ func (z *ZhipuEmbedder) embedBatch(ctx context.Context, texts []string) ([][]flo
 	return nil, lastErr
 }
 
-// doEmbedRequest 发一次嵌入请求。返回 (向量, 是否可重试, 错误)：
-// 网络错误/429/5xx 可重试；其余 4xx（密钥错、参数非法）与解析错误不可重试（审查 Nit4）。
+// doEmbedRequest 发一次嵌入请求，返回 (向量, 是否可重试, 错误)。网络错误、429、5xx 可重试；
+// 其余 4xx（密钥错、参数非法）与解析错误不可重试。分类理由见文档。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#embedder
 func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][]float32, bool, error) {
 	body, err := json.Marshal(embeddingsRequest{
 		Model:      z.cfg.Model,
@@ -158,7 +164,7 @@ func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][
 
 	resp, err := z.client.Do(req)
 	if err != nil {
-		return nil, true, fmt.Errorf("embeddings http: %w", err) // 网络错误可重试
+		return nil, true, fmt.Errorf("embeddings http: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
@@ -173,7 +179,6 @@ func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][
 	if parsed.Error != nil {
 		return nil, false, fmt.Errorf("embeddings api error: %s", parsed.Error.Message)
 	}
-	// 按 index 排序还原（端点可能乱序返回）。
 	out := make([][]float32, len(texts))
 	for _, d := range parsed.Data {
 		if d.Index >= 0 && d.Index < len(out) {
@@ -188,6 +193,7 @@ func (z *ZhipuEmbedder) doEmbedRequest(ctx context.Context, texts []string) ([][
 	return out, true, nil
 }
 
+// truncateForError 截断错误响应体，避免把整份响应写进日志与错误串。
 func truncateForError(s string) string {
 	const max = 300
 	if len(s) <= max {

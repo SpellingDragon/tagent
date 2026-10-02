@@ -17,16 +17,12 @@ func keywordSeparator(r rune) bool {
 	return false
 }
 
-// matchesKeyword reports whether a keyword query matches the text
-// (case-insensitive).
+// matchesKeyword 判断关键词查询是否命中文本（大小写无关）。单条词按整串子串匹配（沿用历史
+// 语义）；切出多条词时任一条命中即算命中——模型常把查询写成空格分隔的词列或整句自然语言，
+// 对其做整串字面匹配会静默返回零结果。分隔符集合刻意不含 - _ . @ # $，以免拆碎标识符、路径
+// 与 hex 票据。空关键词视为全部匹配。语义与事故形状见文档。
 //
-// Term semantics (recall-oriented, fixes the 2026-08-26 wechat-bot incident
-// where "最近对话 任务 讨论" returned zero while "任务" alone had hits):
-//   - Single term: literal substring match — unchanged legacy semantics.
-//   - Multiple terms (split on whitespace/punctuation): ANY term matching
-//     counts as a hit. Models routinely send space-separated keyword lists
-//     or full natural-language sentences; a literal whole-string match on
-//     those silently returns zero.
+// 契约: docs/wiki/memory/memory-architecture.md#typed-errors
 func matchesKeyword(text, keyword string) bool {
 	if keyword == "" {
 		return true

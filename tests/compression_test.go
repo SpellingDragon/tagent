@@ -6,18 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
-
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	tagentmemory "github.com/SpellingDragon/tagent/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
-
-// ============================================================================
-// Mock model for compression tests
-// ============================================================================
 
 // compressMockModel returns the configured response and records every request.
 type compressMockModel struct {
@@ -51,13 +46,10 @@ func (m *compressMockModel) Requests() []*model.Request {
 	return append([]*model.Request(nil), m.requests...)
 }
 
-// ============================================================================
-// Compression tests
-// ============================================================================
-
-// TestCompression_FullHistory verifies that when the token budget is exceeded,
-// SmartCompress acts on the complete conversation history (not just the new
-// batch) and that session.Events remains unchanged.
+// TestCompression_FullHistory verifies that SmartCompress acts on the complete conversation history once the token budget is exceeded.
+// - It is not limited to the new batch, and session.Events stays unchanged.
+//
+// 契约: docs/wiki/agent/event-flow.md#unified-compression
 func TestCompression_FullHistory(t *testing.T) {
 	mockModel := newCompressMockModel(&model.Response{
 		ID:   "resp-final",
@@ -75,8 +67,8 @@ func TestCompression_FullHistory(t *testing.T) {
 		Model:             mockModel,
 		MemoryStore:       store,
 		SystemPrompt:      "You are a test assistant.",
-		MaxTokens:         100, // Low budget to force compression
-		CompressThreshold: 0.5, // Trigger at 50%
+		MaxTokens:         100,
+		CompressThreshold: 0.5,
 	})
 	require.NoError(t, err)
 	defer ag.Close()
@@ -84,11 +76,9 @@ func TestCompression_FullHistory(t *testing.T) {
 	outputCh, err := ag.StartLoop("user-1", "session-compress")
 	require.NoError(t, err)
 
-	// First turn: short exchange to populate session history.
 	ag.InjectMessage(model.NewUserMessage("First message"))
 	waitForFinal(t, outputCh)
 
-	// Second turn: long repeated content to push total tokens over threshold.
 	longContent := "compress me "
 	for i := 0; i < 50; i++ {
 		longContent += "compress me "
@@ -98,21 +88,15 @@ func TestCompression_FullHistory(t *testing.T) {
 
 	ag.StopLoop()
 
-	// The model should have been called for both turns.
 	requests := mockModel.Requests()
 	require.GreaterOrEqual(t, len(requests), 2, "model should be called at least twice")
 
-	// On the second turn, the request messages must be fewer than the raw
-	// session history because compression ran on the full history.
 	secondTurn := requests[len(requests)-1]
 	require.NotEmpty(t, secondTurn.Messages)
 
-	// Compression should have reduced the message count below the raw
-	// accumulated history (user+assistant from turn 1 + user from turn 2 = 3+).
 	assert.Less(t, len(secondTurn.Messages), 20,
 		"compression should reduce messages sent to model")
 
-	// Session events should NOT be modified by compression.
 	partitionID := tagentmemory.PartitionIDFromName(ag.Info().Name)
 	events, err := store.QueryEvents(tagentmemory.QueryOptions{
 		PartitionID: partitionID,

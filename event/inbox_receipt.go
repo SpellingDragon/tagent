@@ -2,13 +2,11 @@ package event
 
 import "trpc.group/trpc-go/trpc-agent-go/model"
 
-// TypeInboxReceipt marks the durable-acknowledgement record of one consumed
-// inbox envelope (resident-readiness-plan 3.4): the receipt's truth source is
-// the FACT CHAIN, not the inbox file. Its TTL IS the 30-day request-id dedup
-// window — after expiry a client re-submitting the same request id is NOT
-// guaranteed idempotent (documented boundary, delta spec「输入处理确认与幂等」).
-// Registry-declared: non-projection (§5.5 single source — every append path
-// consults IsNonProjectionRecord), non-embeddable, non-recallable, TTL 30d.
+// TypeInboxReceipt 标记「一个输入信封已被确认消费」的记账事实：其真源是事实链而非
+// inbox 文件。它的 TTL 就是 request-id 的 30 天去重窗口，过期后同一 request-id 重投
+// 不保证幂等。注册为非投影、非嵌入、非召回。
+//
+// 契约: docs/wiki/event/event-architecture.md#internal-retention
 const TypeInboxReceipt = "inbox_receipt"
 
 func init() {

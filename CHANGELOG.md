@@ -5,10 +5,35 @@
 
 ## [Unreleased]
 
+### Breaking Changes（merge-review-remediation：dev→main 合并前评审修订，45 项发现全量落地；pre-release 姿态，无迁移承诺）
+
+- **谱系投递白名单改正向集合**（event.DeliverableLineage）：宿主可投递谱系（user/task/reincarnation/system_alert/meditation）之外一律 fail-closed 扣留，负名单时代漏配谱系（task-unstamped）与未知未来值不再可能被投递；旧前缀启发式退役。
+- **结算折叠资格唯一来源改为结构化标记**（settle_notice，D10）：正文形状启发式退役，无标记事件（含伪造体与标记前的旧事件）逐字保留；纯结构模式（无库可验）下通知一律按内部处理。
+- **LocalFileKV 快照按分区分片**（kv-<pid>.json / kv-global.json）：Sync 只重写脏桶，单分区提交成本与全库规模解耦；旧单文件 kv.json 不迁移、存在即忽略（报告一次），冷启动重建。
+- **诊断面死字段删除**：WalQuarantined 四层链（config/引擎桥/诊断/HTTP）与对应字段整体消失，消费方按 absent 处理。
+- **`memory.fsync` 旋钮与 fsync 写面整体删除**：诚实 flush-only 语义——Sync 屏障是原子 tmp+rename 快照提交，不声称抗掉电；配置含 `fsync:` 键将因严格装载拒启动（KnownFields）。
+
+### Added
+
+- 测试面 47 个新用例：worktree 隔离的门禁矩阵、活 tmux 全路径 rebind、分区快照脏桶隔离/跨进程读回/旧格式忽略、回收竞态终局语义、nil-channel 三分判据等。
+
 ### Fixed
 
+- **压实跨折叠覆盖丢历史**（memory，收口阶段 soak 回归暴露，基线同形红）：同日第二次 L1→L2（或同周 L2→L3）把选定窗从 seq=0 写入取整目标窗时不检查目标窗既存段，逐键覆盖前一批历史（盘上字节消失、meta 计数失真、idx 悬空指向他人内容）；fresh 进程重启召回为空即此断裂（soak 连续性 promise 自入档以来从未真通过）。现将既存目标窗并入 merge 读取源，merge 按 EventKey 去重封死 crash-retry 交叠；回归测例入 CI（非 soak tag），soak 30×30 全绿。
+- **agent 核心运行时**（A 组 7 项）：构造失败路径的 durable inbox 句柄关闭；租约拒绝先于 live 注册（私有 CM 不悬挂、owner 义务可归零）；终态 drain 的 defer 序关住 loop-exit 到 unbind 的窗口；事件总线投递与退役路由的静默面清零。
+- **谱系与结算链路**（B/C 组 9 项）：退役归因盖在信号 Lineage 上、Spec.Origin 保持 spawn 时不可变（消除与无锁读者的数据竞争与 resumed 任务谱系永久污染）；有归属退役绕开批折叠走 per-task 路由，父循环投递记账屏障可达静默退出；run 级折叠豁免（任一 Active 成员整 run 保留）。
+- **inbox/TTL/租约**（C-P2/E 组 9 项）：隔离 rename 失败不穿透容量记账；跨重启恢复任务 TTL 退役携带静默泄漏告警（单事件承载）；spill 键释放严格排在重写落盘之后恰好一次；journal 关闭幂等短路。
+- **存储耐久与诊断**（E 组）：分区发现、墓碑保留重放防线、扫段/列表失败一律 fail-loud（对"实际删了什么"诚实）。
+- **rl 周边**（E-P2 组 4 项）：SwappableModel 换回竞态以锁内新鲜 current 判定；trajectory 对 (nil,nil) 返回不再起 nil-channel 转发协程（Close 死锁堵住）且落错误记录；restart 脚本的归档+截断移入交接窗。
+- **tool 护栏**（D 组 3 项）：smuggle 告警判据双层化（词形+位置），`&&` 链与 URL query 误报清零而既有告警集（nohup 配 &/disown/重定向收尾）不变。
+- **工程化**（F 组 4 项）：comment-only 门禁以 git status 分类重写（删除侧硬拒、未跟踪纳入、`--` pathspec 盲区堵死）；CI 补 mod verify 与 soak 超时；tmux 监控 RebindCallback 供跨重启 resume 换供。
+- **文档卫生**（G 组）：主 specs 与码面背离清零（无锚恢复不静默截断条款对齐、WAL 死条款 REMOVED）、Purpose 回填、旧版整份残留删除、绝对路径脱敏、README/wiki 对齐耐久定位。
 - **投递门禁吞没宿主通报**（wechat-bot）：转世通报与 SYSTEM_ALERT 曾借用 "meditation" 章——fail-closed 门禁上线后其输出会被静默扣留；现改专用章（`reincarnation`/`system_alert`）并在门禁显式路由投递（B-fix）。
 - **转世通报时序竞态**（wechat-bot）：固定 5s 探测对慢写的保险链脚本静默错过（s67 通报缺席实证）；改为 60s 轮询等待 NOTICE 出现（新鲜度门不变）。
+- **等价对账仪器吞字面量内容**（scripts/codetools）：归一器（空白折叠／空行删除／行尾裁剪／别名致盲）不知字符串字面量边界，会把被改动的测试固件读成未改动——假阴且不可见；类型定义与 import 项的行尾注释未清则把纯注释修改误报为正文变化（假阳）。归一一律止步于字面量、注释剥离改按**槽位类型穷举**；严格化后对历史五批做 A/B 复跑，新增报项 0，唯一变化是一处历史误诊被纠正（"空白敏感"实为 TypeSpec 槽未清）。
+- **merge-check 三道静默通过收口为硬拒**（scripts/codetools）：重复传 `--map`/`--explain` 原静默取末值、丢弃前一张表（被丢的改名会反噬成批次违规）；登记了却在本批毫无豁免效力的 `--explain` 条目原样通过（不压制任何差异的豁免正是掩盖映射表错误的面）；表文件读不进时 warn 后按空表继续、干净包直接读作 intact。三者现均 rc=2 拒绝并指明原因——豁免只在**实际压下**一次本应报出的差异时才算生效，未传旗标与传了张读不进的表是两种调用。
+- **注释与规格背离码面现实**（docs/wiki, openspec/specs）：裸坐标 `D5`/`F7` 19 处清除（其唯一"定义"在被 gitignore 的设计稿且同号三义、引号形式引文在出处零命中）；wiki 三行变更名引用与"历史上曾有…已移除"过程叙述清除；`agent/task` 四处注释仍在描述已删除的双墙、与统一 TTL 契约正面矛盾，改为单一 TTL 陈述；主 specs 按现行码面补立 `async-task-lifetime` 能力并撤除符号已消失的死需求；localfile 耐久定位的两面张力另记 `docs/storage-durability-positioning.md` 待裁。
+- **CI 漏听 dev 分支**（.github/workflows）：dev 直推不经 PR 门，`0a31e46`（agent/compress 105 处重名不可编译）正是由此入库、后续一切对账读的都是未验证基线；触发分支补 `dev`。
 
 （冻结期维持：治理/自进化闭环需在真实部署连续运行一个月后方启动下一轮功能迭代；本节仅收缺陷修复。）
 

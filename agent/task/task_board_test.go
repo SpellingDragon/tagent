@@ -1,3 +1,6 @@
+// 本文件负责在途面板的呈现判据：只渲染在途任务、展示剩余寿命而不替模型仲裁、注入位置
+// 固定在工具结果之后、无用户消息时不追加。
+// 契约: docs/wiki/agent/task-lifecycle.md#board-rendering
 package task
 
 import (
@@ -12,14 +15,13 @@ func mkBoardTask(id, desc string, st TaskStatus) *Task {
 	return &Task{ID: id, Spec: TaskSpec{Desc: desc}, status: st, StartedAt: time.Now().Add(-5 * time.Second)}
 }
 
-// TestRenderTaskBoard_ActiveOnly: the board shows active tasks and ages out
-// terminal ones (completed/failed/cancelled).
+// TestRenderTaskBoard_ActiveOnly 钉住 the board shows active tasks and ages out terminal ones (completed/failed/cancelled).
 func TestRenderTaskBoard_ActiveOnly(t *testing.T) {
 	tasks := []*Task{
 		mkBoardTask("run-11111111", "npm run dev", TaskRunning),
 		mkBoardTask("stab-22222222", "server :8080", TaskStable),
-		mkBoardTask("done-33333333", "echo hi", TaskCompleted), // aged out
-		mkBoardTask("fail-44444444", "bad cmd", TaskFailed),    // aged out
+		mkBoardTask("done-33333333", "echo hi", TaskCompleted),
+		mkBoardTask("fail-44444444", "bad cmd", TaskFailed),
 		mkBoardTask("susp-55555555", "stuck proc", TaskSuspect),
 	}
 	board := RenderBoard(tasks, 10*time.Minute)
@@ -38,19 +40,15 @@ func TestRenderTaskBoard_ActiveOnly(t *testing.T) {
 	}
 }
 
-// TestRenderTaskBoard_ShowsRemainingLifetime locks the 10.6 behavior: each row
-// shows the effective remaining lifetime to the reaper, so the model can decide
-// once from a single read. Uses the same effective-TTL + anchor math reconcileTTL
-// honors: spec.TTL wins; otherwise the passed defaultTTL floor applies.
+// TestRenderTaskBoard_ShowsRemainingLifetime 钉住 每行展示回收器实际认定的剩余寿命，让模型读一次即可定夺。
+// - 计算与回收器所用一致：显式寿命优先，否则套用传入的默认下限。
 func TestRenderTaskBoard_ShowsRemainingLifetime(t *testing.T) {
-	// Explicit 30m TTL, started 10m ago → 20m remaining.
 	bounded := &Task{ID: "job-aaaaaaaa", Spec: TaskSpec{Desc: "big build", TTL: 30 * time.Minute}, status: TaskRunning, StartedAt: time.Now().Add(-10 * time.Minute)}
-	board := RenderBoard([]*Task{bounded}, time.Hour) // defaultTTL irrelevant when spec.TTL is set
+	board := RenderBoard([]*Task{bounded}, time.Hour)
 	if !strings.Contains(board, "剩余 20m") {
 		t.Errorf("explicit 30m TTL 10m into life must render ~20m remaining; got:\n%s", board)
 	}
 
-	// No explicit TTL → falls back to the manager floor: 10m floor, started 1m ago → 9m.
 	floored := &Task{ID: "svc-bbbbbbbb", Spec: TaskSpec{Desc: "dev server"}, status: TaskRunning, StartedAt: time.Now().Add(-1 * time.Minute)}
 	board2 := RenderBoard([]*Task{floored}, 10*time.Minute)
 	if !strings.Contains(board2, "剩余 9m") {
@@ -58,8 +56,7 @@ func TestRenderTaskBoard_ShowsRemainingLifetime(t *testing.T) {
 	}
 }
 
-// TestRenderTaskBoard_EmptyWhenNoActive: all-terminal registry → empty board
-// (nothing injected).
+// TestRenderTaskBoard_EmptyWhenNoActive 钉住 all-terminal registry → empty board (nothing injected).
 func TestRenderTaskBoard_EmptyWhenNoActive(t *testing.T) {
 	tasks := []*Task{
 		mkBoardTask("d", "x", TaskCompleted),
@@ -70,10 +67,8 @@ func TestRenderTaskBoard_EmptyWhenNoActive(t *testing.T) {
 	}
 }
 
-// TestInjectTaskBoard_AppendAtTail: the board is appended AFTER the current
-// input — the byte-changing board must live strictly at the tail so the
-// prompt-cache prefix stays intact (2026-08-27 fix; it used to insert before
-// the last user message, breaking in-turn caching at every LLM call).
+// TestInjectTaskBoard_AppendAtTail 钉住 面板追加在当前输入之后：字节会变的内容必须严格待在尾部。
+// - 若插在最后一条用户消息之前，每次模型调用都会打断回合内的缓存前缀。
 func TestInjectTaskBoard_AppendAtTail(t *testing.T) {
 	msgs := []model.Message{
 		model.NewSystemMessage("sys"),
@@ -88,7 +83,6 @@ func TestInjectTaskBoard_AppendAtTail(t *testing.T) {
 	if out[len(out)-1].Content != "BOARD" {
 		t.Errorf("board must be the LAST message (tail), got %q", out[len(out)-1].Content)
 	}
-	// Everything before the board is untouched, in order.
 	for i := range msgs {
 		if out[i].Role != msgs[i].Role || out[i].Content != msgs[i].Content {
 			t.Errorf("message %d must be unchanged, got (%s,%q) vs (%s,%q)",
@@ -97,9 +91,7 @@ func TestInjectTaskBoard_AppendAtTail(t *testing.T) {
 	}
 }
 
-// TestInjectTaskBoard_TailAfterToolResults: mid-turn views end with tool
-// results; the board still appends after them (tool-call pairing untouched,
-// cache prefix covers the whole in-turn exchange).
+// TestInjectTaskBoard_TailAfterToolResults 钉住 回合中视图以工具结果结尾，面板仍追加在其后：工具调用配对不变，缓存前缀覆盖整个回合内交换。
 func TestInjectTaskBoard_TailAfterToolResults(t *testing.T) {
 	msgs := []model.Message{
 		model.NewSystemMessage("sys"),
@@ -111,7 +103,6 @@ func TestInjectTaskBoard_TailAfterToolResults(t *testing.T) {
 	if out[len(out)-1].Role != model.RoleUser || out[len(out)-1].Content != "BOARD" {
 		t.Fatalf("board must be the last message, got %+v", out[len(out)-1])
 	}
-	// Tool result stays directly after its assistant tool_call message.
 	if out[2].Role != model.RoleAssistant || out[3].Role != model.RoleTool || out[3].ToolID != "t1" {
 		t.Errorf("tool-call pairing must be untouched, got %+v", out[2:4])
 	}
@@ -126,9 +117,8 @@ func TestInjectTaskBoard_NoUserAppends(t *testing.T) {
 	}
 }
 
-// TestRenderTaskBoard_WaitGuidanceLine: when active tasks exist the board ends
-// with the fixed wait-guidance line (end-turn, no sleep spin); when there are
-// no active tasks the board is empty and no guidance appears.
+// TestRenderTaskBoard_WaitGuidanceLine 钉住 有在途任务时，面板以固定的等待指引行结尾（结束回合，不去空转轮询）。
+// - 没有在途任务时面板为空，也不出现该指引。
 func TestRenderTaskBoard_WaitGuidanceLine(t *testing.T) {
 	board := RenderBoard([]*Task{mkBoardTask("r-11111111", "long job", TaskRunning)}, 10*time.Minute)
 	if board == "" {
@@ -143,7 +133,3 @@ func TestRenderTaskBoard_WaitGuidanceLine(t *testing.T) {
 		t.Errorf("no-active board must be empty (no dangling guidance), got %q", got)
 	}
 }
-
-// ============================================================================
-// Board injection wiring (async-result-delivery: task-board-injection-order fix)
-// ============================================================================

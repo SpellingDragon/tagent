@@ -5,27 +5,14 @@ import (
 	"sync"
 )
 
-// ==================== 归因章 ctx 载体（TC0 · 热配置/自进化地基）====================
+// Attribution 是回合级归因章（写入 FullEvent.Metadata），由 RunFlow 每回合经 ctx 绑定。
 //
-// Attribution 是回合级归因章，写入 FullEvent.Metadata，使任意产出事件可回溯到产生
-// 它时生效的版本上下文（bundle_id / rollout_id / agent）。这修复了「FullEvent.Metadata
-// 在生产代码中从未被填充」的事实缺口（报告 §4.3 F1）——归因盖章是 T-EVO 自我改进
-// （可归因/可回滚）与 T-B 可观测（事件维度切分）的共同地基。
-//
-// 载体模式仿 ProjectionSink（projection_sink.go）：RunFlow 每回合绑定，MemoryPlugin
-// 在存储同步点读取写入 Metadata。两条持久化路径（插件管线 onEvent + persistBusEvent）
-// 均须盖章，避免归因盲区（报告 R5）。
-//
-// 未注入归因时（AttributionFrom 返回 false），Metadata 仅含 MemoryPlugin 盖的基线
-// provenance（agent_name），行为向后兼容。
-
-// Attribution 是归因章键值对（写入 FullEvent.Metadata）。
+// 契约: docs/wiki/plugin/plugin-architecture.md#attribution-carrier
 type Attribution map[string]string
 
-// attributionKey 是 ctx 载体键（每回合绑定，主循环与子 agent 天然隔离）。
 type attributionKey struct{}
 
-// WithAttribution 返回携带归因章的 ctx（RunFlow 每回合绑定）。空归因不注入（省分配）。
+// WithAttribution 返回携带归因章的 ctx；空归因不写入，返回原 ctx。
 func WithAttribution(ctx context.Context, a Attribution) context.Context {
 	if len(a) == 0 {
 		return ctx
@@ -33,52 +20,40 @@ func WithAttribution(ctx context.Context, a Attribution) context.Context {
 	return context.WithValue(ctx, attributionKey{}, a)
 }
 
-// AttributionFrom 从 ctx 提取归因章（无则返回 nil,false）。
+// AttributionFrom 从 ctx 取回归因章；无有效归因时返回 (nil, false)。
 func AttributionFrom(ctx context.Context) (Attribution, bool) {
 	a, ok := ctx.Value(attributionKey{}).(Attribution)
 	return a, ok && len(a) > 0
 }
 
-// echoCredentialCtxKey is the context key for THIS attempt's echo credential.
-// §4.4 (design 决策4): replaces the old whole-turn DurableInbound "first envelope /
-// any user" flag. A fresh credential is minted per runner attempt (RunFlow) and
-// released when the call's ctx ends — no turn-global or "first envelope" state.
 type echoCredentialCtxKey struct{}
 
-// EchoCredential identifies THIS attempt's expected input echo so MemoryPlugin can
-// skip re-storing it precisely, instead of skipping every user event in a durable turn.
-// The event loop commits the batch's per-message facts before running the model; the
-// framework then echoes the merged input back through the plugin pipeline. Only the
-// exact echo matching this credential may skip storage — sub-calls, assistants, tools,
-// and any other user message take the normal path.
+// EchoCredential 标识本次尝试期望的输入回显，使 MemoryPlugin 精确跳过那一条的重复入库。
+// 它按每次 runner 尝试新建、随该调用的 ctx 结束而释放，不存在回合级或「首个信封」状态。
+// 绑定与拒绝状态由内部字段承载，判定粒度是根调用 id（框架事件不携带逐事件 id）。
 type EchoCredential struct {
-	AttemptToken  string  // unique per runner attempt (a retry mints a new one, reusing the same facts)
-	Agent         string  // expected agent name
-	Session       string  // expected session id
-	MergedMessage string  // the canonical merged input the loop built (normalized-match target)
-	CommittedKeys []int64 // fact keys already persisted for this batch (consumed by §4.5)
+	AttemptToken  string
+	Agent         string
+	Session       string
+	MergedMessage string
+	CommittedKeys []int64
 
 	mu       sync.Mutex
-	boundID  string // exact event invocation id bound on the first match
+	boundID  string
 	boundSet bool
-	rejected bool   // §4.5: a field-mismatch / plugin error downgraded this attempt
-	reason   string // why rejected (diagnostics)
+	rejected bool
+	reason   string
 }
 
-// Verified reports whether this attempt's expected echo was positively identified
-// (bound) AND not later rejected. The model-entry gate (§4.5) blocks the model when a
-// credential was installed for the turn but Verified() is false — the committed inputs
-// were never confirmed to be the ones the framework ran on.
+// Verified 报告期望回显是否已被正面确认（已绑定且未被降级）。装入了凭据而未 Verified 的回合，
+// 模型入口与 ack 决策都必须失败关闭。
 func (c *EchoCredential) Verified() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.boundSet && !c.rejected
 }
 
-// MarkRejected downgrades an already-installed credential to non-verifiable (§4.5:
-// "字段不匹配或插件记录错误 → 调用级凭据置为拒绝"). Sticky (first reason wins). The
-// model-entry gate and the loop's ack decision consult Verified(), so a swallowed
-// plugin error can no longer let the turn cross the commit gate.
+// MarkRejected 把已装入的凭据降级为不可验证并记录首个原因（粘滞）。
 func (c *EchoCredential) MarkRejected(reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -88,11 +63,7 @@ func (c *EchoCredential) MarkRejected(reason string) {
 	}
 }
 
-// Bind records the ROOT INVOCATION id of the first echo match (idempotent: later
-// matches within the same attempt don't overwrite). event.Event carries no per-event
-// ID (it embeds *model.Response + InvocationID), so the root invocation id is the
-// exact, stable identity of THIS attempt's input echo; §4.5's verify MUST assert at
-// this per-attempt granularity, not per-event. Audit / §4.5 hook.
+// Bind 记录首次匹配所在的根调用 id；同一尝试内的后续匹配不覆盖（幂等）。
 func (c *EchoCredential) Bind(invocationID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -102,14 +73,14 @@ func (c *EchoCredential) Bind(invocationID string) {
 	}
 }
 
-// BoundID returns the invocation id bound on the first echo match (empty until bound).
+// BoundID 返回首次匹配绑定的调用 id；未绑定时为空串。
 func (c *EchoCredential) BoundID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.boundID
 }
 
-// WithEchoCredential returns a context carrying this attempt's echo credential.
+// WithEchoCredential 让本次尝试的凭据经 ctx 传递；nil 不注入。
 func WithEchoCredential(ctx context.Context, c *EchoCredential) context.Context {
 	if c == nil {
 		return ctx
@@ -117,7 +88,7 @@ func WithEchoCredential(ctx context.Context, c *EchoCredential) context.Context 
 	return context.WithValue(ctx, echoCredentialCtxKey{}, c)
 }
 
-// EchoCredentialFrom extracts the attempt's echo credential, if any.
+// EchoCredentialFrom 取回本次尝试的凭据；不存在或为 nil 时返回 (nil, false)。
 func EchoCredentialFrom(ctx context.Context) (*EchoCredential, bool) {
 	if ctx == nil {
 		return nil, false

@@ -9,16 +9,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 )
 
-// ==================== DenialLedger + GoalRegistry（T-G · 审计与有界自治）====================
-//
-// DenialLedger（报告 D3 §4.4.2）：拒绝必记原因，可审计可分析。账本 = 事件流子集——
-// 单 `governance` 事件类型（Metadata.subtype 区分）走正常 StoreEvent 路径 + 内存索引
-// （启动从 QueryEvents 重建）。选单类型而非五类型：每加类型有注册成本，审计查询天然单类型过滤。
-//
-// GoalRegistry（报告 D3 §4.6.1）：自治须挂登记 goal。默认 enforcement=warn（记账放行 +
-// 提示），strict 才拒绝——强制 goal 声明增加模型负担，先 warn 收集数据再升 strict。
-
-// governance 事件的 subtype 值——权威源在 event 包（C3/C4：evolution.StoreEvidenceSource
+// SubtypeDenial governance 事件的 subtype 值——权威源在 event 包（C3/C4：evolution.StoreEvidenceSource
 // 也引用 event.Subtype*，消除跨包字面量复制的静默漂移）。此处别名保持 governance 内部引用不变。
 const (
 	SubtypeDenial   = event.SubtypeDenial
@@ -37,7 +28,7 @@ type DenialRecord struct {
 	Reason     string    `json:"reason"`
 	ArgsDigest string    `json:"args_digest,omitempty"`
 	GoalID     string    `json:"goal_id,omitempty"`
-	// AgentName 标注记录来源 agent（§8.1）：W3 后所有 agent 共享同一 entry Ledger，无此字段则
+	// AgentName 标注记录来源 agent：W3 后所有 agent 共享同一 entry Ledger，无此字段则
 	// 多 agent 治理事件无法区分来源。omitempty 保持单 entry 场景（历史事件无 agent）向后兼容。
 	AgentName string `json:"agent,omitempty"`
 	Timestamp int64  `json:"ts"`
@@ -45,7 +36,7 @@ type DenialRecord struct {
 
 // DenialLedger 是治理账本：内存索引 + governance 事件（可选持久化到 MemoryStore）。
 type DenialLedger struct {
-	store       memory.MemoryStore // 可选：nil = 纯内存（测试/无持久化）
+	store       memory.MemoryStore
 	partitionID int
 
 	mu      sync.RWMutex
@@ -61,7 +52,7 @@ func NewDenialLedger(store memory.MemoryStore, partitionID int) *DenialLedger {
 	return l
 }
 
-// BindStore 延迟绑定持久化 store（N2，§8.9）：所有 agent gate 共享同一 DenialLedger 实例，但
+// BindStore 延迟绑定持久化 store：所有 agent gate 共享同一 DenialLedger 实例，但
 // entry memStore 在子 agent 之后才就绪（entry 依赖子 agent，buildAgent 递归先构造子 agent），
 // 故 Ledger 先以 nil store 创建（纯内存），entry buildAgent 时经本方法绑定持久 store + rebuild。
 // 绑定后所有 gate（含子 agent 主风险面 exec/save_file/mcp_call）的治理记录写同一 entry
@@ -74,7 +65,7 @@ func (l *DenialLedger) BindStore(store memory.MemoryStore, partitionID int) {
 	l.store = store
 	l.partitionID = partitionID
 	l.mu.Unlock()
-	l.rebuildFromStore() // 加载已持久化治理事件（重启恢复审计）
+	l.rebuildFromStore()
 }
 
 // Record 记一条治理记录（内存索引 + governance 事件）。写事件失败不阻断（记账尽力）。
@@ -84,8 +75,6 @@ func (l *DenialLedger) Record(rec DenialRecord) {
 	}
 	l.mu.Lock()
 	l.records = append(l.records, rec)
-	// ①（§9.1）锁内快照 store/partitionID：BindStore 并发写这两字段（同锁保护），若在锁外读
-	// l.store 则与 BindStore 竞争（-race data race）。快照后锁外写事件，锁纪律一致。
 	store, pid := l.store, l.partitionID
 	l.mu.Unlock()
 
@@ -130,7 +119,6 @@ func (l *DenialLedger) writeGovernanceEvent(rec DenialRecord, store memory.Memor
 		"goal_id":            rec.GoalID,
 	}
 	if rec.AgentName != "" {
-		// §8.1：来源 agent（omitempty 语义——单 entry 场景不写噪声空键，历史事件也无此键）。
 		metadata["agent"] = rec.AgentName
 	}
 	evt := memory.FullEvent{
@@ -142,7 +130,6 @@ func (l *DenialLedger) writeGovernanceEvent(rec DenialRecord, store memory.Memor
 		Timestamp:    rec.Timestamp,
 		Metadata:     metadata,
 	}
-	// 尽力写入（治理账本失败不阻断主链路）。
 	_ = store.StoreEvent(evt.EventKey, evt)
 }
 
@@ -192,30 +179,32 @@ func parseRiskLevel(s string) RiskLevel {
 	}
 }
 
-// ==================== GoalRegistry ====================
-
 // GoalStatus 是 goal 生命周期状态。
 type GoalStatus string
 
 const (
-	GoalActive    GoalStatus = "active"
-	GoalAchieved  GoalStatus = "achieved"
+	// GoalActive 目标在途，仍占用治理预算并参与门禁判定。
+	GoalActive GoalStatus = "active"
+	// GoalAchieved 已达成：不计入在途目标。
+	GoalAchieved GoalStatus = "achieved"
+	// GoalAbandoned 被主动放弃（例如被更优路径取代或人工终止）。
 	GoalAbandoned GoalStatus = "abandoned"
-	GoalExpired   GoalStatus = "expired"
+	// GoalExpired 超出有效期未达成；与放弃区分，用于统计与预算归因。
+	GoalExpired GoalStatus = "expired"
 )
 
 // Goal 是一条自治目标声明。
 type Goal struct {
 	ID        string     `json:"id"`
 	Statement string     `json:"statement"`
-	CreatedBy string     `json:"created_by"` // "user"|"agent"
+	CreatedBy string     `json:"created_by"`
 	Status    GoalStatus `json:"status"`
 	CreatedMs int64      `json:"created_ms"`
-	ExpiresMs int64      `json:"expires_ms,omitempty"` // 0 = 不过期
+	ExpiresMs int64      `json:"expires_ms,omitempty"`
 }
 
 // GoalRegistry 管理 goal 声明（有界自治：high+ 操作须挂 goal）。并发安全。
-// store/partitionID（5.2 design-report-closeout）：BindStore 延迟绑定后
+// store/partitionID：BindStore 延迟绑定后
 // Declare/Resolve 双写 governance 事件，重启经事件回放重建。
 type GoalRegistry struct {
 	mu    sync.RWMutex
@@ -232,7 +221,7 @@ func NewGoalRegistry() *GoalRegistry {
 }
 
 // Declare 登记一个 goal，返回其 ID。BindStore 后同步写 governance 事件（5.2）。
-// 8.7（review §8）：事件 Timestamp/EventKey 在锁内分配——并发 Declare/Resolve 时
+// 8.7：事件 Timestamp/EventKey 在锁内分配——并发 Declare/Resolve 时
 // 事件的 (Timestamp, EventKey) 全序与内存操作序一致，rebuild 不会让已关闭 goal 复活。
 func (g *GoalRegistry) Declare(statement, createdBy string, expiresMs int64) string {
 	g.mu.Lock()

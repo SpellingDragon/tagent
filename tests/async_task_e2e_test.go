@@ -5,27 +5,22 @@ import (
 	"testing"
 	"time"
 
-	"trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/model/openai"
-	"trpc.group/trpc-go/trpc-agent-go/tool"
-
 	tagentagent "github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/testutil"
 	"github.com/SpellingDragon/tagent/tool/action"
 	tasktool "github.com/SpellingDragon/tagent/tool/task"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/model/openai"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestRealLLM_AsyncTask_EndToEnd exercises the full async loop with a real model
-// and real tmux (Phase 4 / task 5.1):
+// TestRealLLM_AsyncTask_EndToEnd exercises the full async loop with a real model and real tmux.
+// - The path covers spawn, the sync-wait window elapsing into a background ack, then the command finishing and task_settled firing.
+// - The persistent loop reclaims that event into a new turn, so the LLM sees the settle result and reports it back.
+// - Success signal: the unique marker printed by the long command surfaces in the assistant output.
+// - That proves the result flowed back with no hang and no empty reply.
 //
-//	user asks to run a long command → ActionTool spawns it → sync-wait window
-//	elapses → ack (background) → command finishes → task_settled event → the
-//	persistent loop reclaims it into a new turn → the LLM sees the settle result
-//	and reports it back.
-//
-// Success signal: the command's unique marker (printed by the long command)
-// surfaces in the assistant's output — proving the settle result flowed back
-// through task_settled → reclaim turn → LLM, with no hang or empty reply.
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestRealLLM_AsyncTask_EndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-LLM integration test in short mode")
@@ -73,8 +68,6 @@ func TestRealLLM_AsyncTask_EndToEnd(t *testing.T) {
 	}
 
 	const marker = "BUILD_DONE_7788"
-	// sleep 16 > sync_wait (10s) → dispatched async (ack ~10s), settles ~16-19s
-	// later (monitor poll 3s) → task_settled → reclaim turn ~18-20s.
 	start := time.Now()
 	ag.InjectMessage(model.NewUserMessage(
 		"请用 action 工具在后台运行这个命令：sleep 16 && echo " + marker +

@@ -1,5 +1,7 @@
 // Package rl provides reinforcement learning utilities for tagent agents.
 //
+// 契约: docs/wiki/rl/rl-architecture.md
+//
 // This package contains components for:
 // - Recording agent trajectories for offline training
 // - Swapping model instances at runtime

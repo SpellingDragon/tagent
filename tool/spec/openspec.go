@@ -9,12 +9,12 @@ import (
 )
 
 // openspecBackend implements Backend on top of the openspec CLI
-// (npm package @fission-ai/openspec). Every operation maps to a fixed
+// . Every operation maps to a fixed
 // `openspec <subcommand> [args…]` invocation; the model never controls the
 // program or the argument structure, only the typed fields of Request.
 type openspecBackend struct {
-	bin string // CLI binary (default "openspec")
-	dir string // working directory (must contain openspec/)
+	bin string
+	dir string
 }
 
 // OpenSpecOption configures an openspec backend.
@@ -66,7 +66,7 @@ func (b *openspecBackend) Run(ctx context.Context, req Request) (Result, error) 
 	}
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	cmd.Stderr = &out // merge so the model sees errors in context
+	cmd.Stderr = &out
 
 	runErr := cmd.Run()
 	res := Result{Op: req.Op, Output: strings.TrimSpace(out.String())}
@@ -75,7 +75,6 @@ func (b *openspecBackend) Run(ctx context.Context, req Request) (Result, error) 
 	}
 	res.OK = res.ExitCode == 0 && runErr == nil
 
-	// Exec-level failure (binary missing) is distinct from a non-zero exit.
 	if runErr != nil && cmd.ProcessState == nil {
 		return res, fmt.Errorf("spec: cannot run %q: %w (is the openspec CLI installed? provision it in the deployment image or have the upper layer install it — the plan agent has no shell to self-install)", b.bin, runErr)
 	}
@@ -90,8 +89,6 @@ func (b *openspecBackend) Run(ctx context.Context, req Request) (Result, error) 
 func (b *openspecBackend) buildArgv(req Request) ([]string, error) {
 	switch req.Op {
 	case OpInit:
-		// --tools none: only create core dirs (tagent isn't in openspec's
-		// supported tool list). Idempotent.
 		return []string{"init", "--tools", "none"}, nil
 	case OpNew:
 		if req.Name == "" {
@@ -147,10 +144,6 @@ func hintFor(op Op, output string) string {
 	case strings.Contains(low, "already exists"):
 		return "the change already exists; use status to inspect it or pick a new name"
 	case op == OpValidate && strings.Contains(low, "at least one delta"):
-		// A-level plans (proposal+tasks only) can NEVER pass validate — it
-		// requires specs deltas by design. Route the model to the correct
-		// closing step instead of letting it retry into a dead end
-		// (plan-interaction-contract D3).
 		return "无 specs deltas 的 A 级计划不应调用 validate（结构上必然失败）——改用 status(json=true) 确认 proposal 与 tasks 均为 done 即合规；仅 B 级（含 specs/design）以 validate 收尾"
 	case op == OpInstructions && strings.Contains(low, "artifact"):
 		return "instructions requires an artifact argument: proposal, specs, design, or tasks"

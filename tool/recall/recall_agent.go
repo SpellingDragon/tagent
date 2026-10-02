@@ -23,9 +23,11 @@ type PromptConfig = prompt.CompositeConfig
 //
 // Architecture: RecallAgent → TagentAgent (agent.Agent) → agent.Tool (CallableTool)
 type Config struct {
-	Model model.Model // Required: LLM model for the internal React loop
+	// Model Required: LLM model for the internal React loop
+	Model model.Model
 
-	MemStore memory.MemoryStore // Required: agent's own MemoryStore (writes via MemoryPlugin, reads via sub-tools)
+	// MemStore Required: agent's own MemoryStore (writes via MemoryPlugin, reads via sub-tools)
+	MemStore memory.MemoryStore
 
 	// ReadPartitionIDs lists PartitionIDs this agent is allowed to read in addition
 	// to its own namespace. Injected from ToolAgentFactoryConfig.ReadPartitionIDs.
@@ -36,18 +38,24 @@ type Config struct {
 	// config tools list. If empty, buildRecallSubTools is called for backward compatibility.
 	Tools []tagenttool.Tool
 
-	PromptDir string // Optional: base directory for prompt files (default: "resources/prompts")
+	// PromptDir Optional: base directory for prompt files (default: "resources/prompts")
+	PromptDir string
 
 	// Prompt loading (bootstrap style)
-	Prompt PromptConfig // Optional: overrides PromptDir + "recall_agent.md" if set
+	// Optional: overrides PromptDir + "recall_agent.md" if set
+	Prompt PromptConfig
 
-	// Tool description shown to the parent agent's LLM
-	Description     string // Optional: inline description (overrides default)
-	DescriptionFile string // Optional: description loaded from file (relative to PromptDir)
+	// Description Tool description shown to the parent agent's LLM
+	// Optional: inline description (overrides default)
+	Description string
+	// DescriptionFile Optional: description loaded from file (relative to PromptDir)
+	DescriptionFile string
 
-	// Optional overrides
-	MaxToolIterations int // Default: 5
-	MaxTokens         int // Default: 4096
+	// MaxToolIterations Optional overrides
+	// Default: 5
+	MaxToolIterations int
+	// MaxTokens Default: 4096
+	MaxTokens int
 }
 
 // NewAgent creates a TagentAgent configured for intelligent memory recall.
@@ -61,7 +69,6 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		return nil, fmt.Errorf("recall agent: memStore is required")
 	}
 
-	// 1. Resolve prompt directory
 	promptDir := cfg.PromptDir
 	if promptDir == "" {
 		promptDir = "resources/prompts"
@@ -72,29 +79,22 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 	var systemPrompt string
 	var err error
 	if !cfg.Prompt.IsEmpty() {
-		// Use PromptConfig (bootstrap style) if configured
 		systemPrompt, err = loader.LoadComposite(cfg.Prompt.Inline, cfg.Prompt.Files, cfg.Prompt.Dir)
 		if err != nil {
 			return nil, fmt.Errorf("recall agent: load prompt: %w", err)
 		}
 	} else {
-		// Fallback: load single file
 		systemPrompt, err = loader.LoadFromFile("recall_agent.md")
 		if err != nil {
-			// Fallback to embedded prompt if file not found
 			systemPrompt = getDefaultRecallPrompt()
 		}
 	}
 
-	// 3. Assemble sub-tools
-	// Config-driven path: tools are injected by buildAgent.
-	// Backward compat: if Tools is empty, build sub-tools internally.
 	subTools := cfg.Tools
 	if len(subTools) == 0 {
 		subTools = buildRecallSubTools(cfg.MemStore, cfg.ReadPartitionIDs)
 	}
 
-	// 4. Apply defaults
 	maxToolIter := cfg.MaxToolIterations
 	if maxToolIter <= 0 {
 		maxToolIter = 5
@@ -104,12 +104,11 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 		maxTokens = 4096
 	}
 
-	// 5. Create TagentAgent instance (inherits all tagent core mechanisms)
 	agentCfg := &agent.TagentConfig{
 		Name:              "recall",
 		Description:       "Intelligent memory recall agent. Queries historical events and synthesizes memories into coherent responses.",
 		Model:             cfg.Model,
-		MemoryStore:       cfg.MemStore, // MUST be same store: MemoryPlugin writes here, sub-tools read here
+		MemoryStore:       cfg.MemStore,
 		SystemPrompt:      systemPrompt,
 		Tools:             subTools,
 		MaxToolIterations: maxToolIter,
@@ -139,13 +138,11 @@ func NewTool(cfg Config) (tagenttool.Tool, error) {
 		return nil, err
 	}
 
-	// Resolve tool description
 	desc, err := resolveDescription(cfg, "Intelligent memory recall tool. Queries historical events and synthesizes memories into coherent responses.")
 	if err != nil {
 		return nil, err
 	}
 
-	// Wrap as AgentToolWrapper (no event_key resolution in standalone mode)
 	return agent.NewAgentToolWrapper(recallAgent, desc, nil, nil), nil
 }
 

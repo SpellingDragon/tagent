@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,11 +113,12 @@ type TmuxSession struct {
 	CreatedAt     time.Time
 	LastOutput    string
 	LastOutputMD5 string
-	StableSince   time.Time // When output first became unchanged (zero if output changed in last check).
-	// Used as the sole stability indicator: elapsed duration determines
-	// Stable / fakeDead thresholds, replacing count-based detection.
+	StableSince   time.Time
+	// IsInteractive marks an interactive (resident) session: elapsed duration
+	// is the sole stability indicator, determining the Stable / fakeDead
+	// thresholds and replacing count-based detection.
 	IsInteractive bool
-	IsTUI         bool // TUI apps skip heartbeat (send-keys injection) at fakeDead threshold
+	IsTUI         bool
 	// Mode selects the liveness interpretation (zero value = ModeOneshot).
 	// See SessionMode docs. Derived: IsTUI → ModeInteractive-like handling
 	// remains via IsTUI checks; Mode only extends, never overrides IsTUI.
@@ -131,8 +133,8 @@ type TmuxSession struct {
 	// COMPLETE even after the pane dies (unlike capture-pane, which reads the
 	// pane grid and can freeze a stale truncation frame on dead panes).
 	PipeFile       string
-	KillRetryCount int // Number of failed KillSession attempts (used by handleFakeDead retry logic)
-	// ProbeUnknownCount（R3，resident-continuity-r2-r4 2.2）：连续不可辨探测
+	KillRetryCount int
+	// ProbeUnknownCount：连续不可辨探测
 	//（list-sessions err）计数——加闸达到 ProbeUnknownLimit 才按 dead 处理；
 	// 任一可辨探测（alive/dead）清零。会话级字段（非包级），重启清零可接受。
 	ProbeUnknownCount int
@@ -142,34 +144,42 @@ type TmuxSession struct {
 type SessionStatus string
 
 const (
-	SessionRunning   SessionStatus = "running"
-	SessionStable    SessionStatus = "stable"
+	// SessionRunning 进程存活且输出未达稳定阈值的进行中态；探测不可辨且未达连续上限时也保持该态。
+	SessionRunning SessionStatus = "running"
+	// SessionStable 输出已稳定但进程存活、且未显式声明静默超时的判定；不视为死亡，按调度上限继续轮询。
+	SessionStable SessionStatus = "stable"
+	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
 	SessionCompleted SessionStatus = "completed"
-	SessionError     SessionStatus = "error"
-	SessionFakeDead  SessionStatus = "fake_dead"
+	// SessionError 失败极性的终态主载体（D1 透传）：已知非零退出码（含信号死）、
+	// 探测连续失明超限、强拆重试超限、探测器未装配——四类产源都以它把失败送达
+	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
+	SessionError SessionStatus = "error"
+	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
+	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
+	SessionFakeDead SessionStatus = "fake_dead"
+	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
+	// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 	SessionFakeAlive SessionStatus = "fake_alive"
-	SessionTimedOut  SessionStatus = "timed_out" // TUI session exceeded fakeDeadDuration without output change
+	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
+	SessionTimedOut SessionStatus = "timed_out"
 )
 
-// SessionMode classifies how a session's liveness should be interpreted by the
-// monitor and the settle stream (2026-09-11 async-action overhaul, B1).
-//
-//	ModeOneshot     (default) command semantics: settle on exit; a
-//	                60s-quiet alive session reports Stable (never Completed —
-//	                see detectSessionState), and quiet_timeout (if set) is a
-//	                hard kill deadline.
-//	ModeResident    long-lived services (dev servers, tunnels, training):
-//	                silence is HEALTHY — no stable settle, no fake-dead kill,
-//	                no auto-reap. Only unexpected death (Completed/Error)
-//	                settles. Pair with watch/probe to hear from it.
-//	ModeInteractive long-running conversational sessions (REPL, coding
-//	                agents): stable settle + resume/send-keys semantics,
-//	                heartbeat-based fake-dead detection (unchanged legacy).
+// SessionMode classifies how a session's liveness is interpreted by the monitor
+// and the settle stream. Each mode's semantics are documented on its constant.
 type SessionMode string
 
 const (
-	ModeOneshot     SessionMode = "oneshot"
-	ModeResident    SessionMode = "resident"
+	// ModeOneshot is the default command semantics: settle on exit; a 60s-quiet alive
+	// session reports Stable (never Completed — see detectSessionState), and quiet_timeout
+	// (if set) is a hard kill deadline.
+	ModeOneshot SessionMode = "oneshot"
+	// ModeResident is for long-lived services (dev servers, tunnels, training): silence
+	// is HEALTHY — no stable settle, no fake-dead kill, no auto-reap. Only unexpected death
+	// (Completed/Error) settles; pair with watch/probe to hear from it.
+	ModeResident SessionMode = "resident"
+	// ModeInteractive is for long-running conversational sessions (REPL, coding agents):
+	// stable settle plus resume/send-keys semantics, with heartbeat-based fake-dead
+	// detection.
 	ModeInteractive SessionMode = "interactive"
 )
 
@@ -181,8 +191,8 @@ type TmuxCreateOptions struct {
 	// Mode selects the liveness interpretation (zero value = ModeOneshot).
 	Mode SessionMode
 	Env  map[string]string
-	// Name (2026-09-11 B2): request a deterministic session name instead of
-	// the generated prefix-timestamp. Empty = auto-generate (legacy). Non-empty
+	// Name: request a deterministic session name instead of
+	// the generated prefix-timestamp. Empty = auto-generated. Non-empty
 	// names must be DNS-label-safe ([a-zA-Z0-9-]{1,64}, enforced in Call) and
 	// are prefixed to avoid colliding with generated names. Use-case: named
 	// resident/interactive services so later calls can address them
@@ -190,93 +200,109 @@ type TmuxCreateOptions struct {
 	Name string
 }
 
+// tmuxCreateRetries bounds the retries applied to a transient tmux server failure
+// when creating a session, recovering a cold start or a session-count-dropped-to-
+// zero race with a sibling teardown.
+const tmuxCreateRetries = 3
+
+// tmuxCreateRetryDelay is the backoff between tmux session-creation retry attempts.
+const tmuxCreateRetryDelay = 150 * time.Millisecond
+
+// isTransientTmuxServerFailure reports whether a tmux create failure is a race the
+// server recovers from on retry — it died or lost its connection as the session was
+// being spawned — rather than a durable error such as a missing binary or a
+// duplicate session name.
+func isTransientTmuxServerFailure(err error, detail string) bool {
+	msg := err.Error() + " " + detail
+	return strings.Contains(msg, "server exited unexpectedly") ||
+		strings.Contains(msg, "lost server connection") ||
+		strings.Contains(msg, "server is not running")
+}
+
+// runTmuxCreate executes a tmux new-session invocation, re-issuing it a bounded
+// number of times when the server fails transiently. It returns a nil error on
+// success or when a retry reveals the session already present (a prior attempt
+// created it despite reporting failure); otherwise it returns the last error with
+// its stderr so the caller can classify fatal versus post-create-non-fatal. A
+// durable failure (duplicate name, missing binary) returns immediately, never
+// retried.
+func (te *TmuxExecutor) runTmuxCreate(ctx context.Context, cmdName string, cmdArgs []string, sessionName string) (string, error) {
+	var runErr error
+	var detail string
+	for attempt := 0; ; attempt++ {
+		cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+		detail = strings.TrimSpace(stderr.String())
+		if runErr == nil || !isTransientTmuxServerFailure(runErr, detail) {
+			return detail, runErr
+		}
+		if te.SessionExists(sessionName) {
+			return "", nil
+		}
+		if attempt >= tmuxCreateRetries {
+			return detail, runErr
+		}
+		select {
+		case <-ctx.Done():
+			return detail, runErr
+		case <-time.After(tmuxCreateRetryDelay):
+		}
+	}
+}
+
 // CreateSession creates a new tmux session with the command
+//
+// 契约: docs/wiki/tool/tmux-action.md#named-session-singleton
 func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOptions) (*TmuxSession, error) {
-	// Session name: caller-requested deterministic name (B2) or generated.
 	sessionName := fmt.Sprintf("%s-%d", te.prefix, time.Now().UnixNano())
 	if opts.Name != "" {
 		sessionName = NamedSessionName(opts.Name)
-		// Duplicate protection: a named session must be explicitly restarted
-		// or stopped, never silently double-spawned (two dev servers on one
-		// port is the classic footgun this guard exists for).
 		if te.SessionExists(sessionName) {
 			return nil, fmt.Errorf("action: session %q already exists (stop it first or use resume); duplicate spawn refused", sessionName)
 		}
 	}
 
-	// Build tmux command.
-	// Use tmux's ';' separator to set remain-on-exit inline during session
-	// creation. This is critical: if the command exits quickly (e.g., `exit 42`),
-	// a separate `set-option` call after new-session would fail because the
-	// session/pane is already gone. Setting it inline ensures the pane persists
-	// regardless of how fast the command completes.
 	args := []string{
 		"new-session",
-		"-d", // detached
+		"-d",
 		"-s", sessionName,
 	}
 
-	// Set working directory
 	workDir := opts.WorkDir
 	if workDir == "" {
 		workDir = te.workspace
 	}
 	if workDir != "" {
-		// Ensure the working directory exists — tmux new-session with `-c` to a
-		// non-existent directory fails with a bare "exit status 1". Creating it
-		// (best-effort) removes a common, hard-to-diagnose failure mode.
 		if err := os.MkdirAll(workDir, 0o755); err != nil {
 			log.Warnf("[tmux] workDir %q ensure failed (continuing): %v", workDir, err)
 		}
 		args = append(args, "-c", workDir)
 	}
 
-	// Add command
 	args = append(args, opts.Command)
 
-	// Inline remain-on-exit: set immediately after the command starts so the
-	// pane persists after the command exits. Using ";" (tmux command separator)
-	// ensures this runs atomically with session creation.
 	args = append(args, ";", "set-option", "remain-on-exit", "on")
 
-	// Inline pipe-pane attach: same rationale as remain-on-exit -- the three
-	// tmux commands execute back-to-back inside the tmux server, shrinking the
-	// mount race from a cross-process RTT to <1ms. The pipe log records raw
-	// pty bytes as they arrive and stays complete after pane death (the pane
-	// grid can freeze a stale truncation frame on tmux 3.4). Worst case if a
-	// hyper-fast command still outruns the mount: the log is missing the
-	// HEAD of the stream, never the tail -- and consumers assert on tails.
 	pipeFile := te.pipeFilePath(sessionName)
-	os.WriteFile(pipeFile, nil, 0o600) // pre-create so fallback checks are deterministic
+	os.WriteFile(pipeFile, nil, 0o600)
 	args = append(args, ";", "pipe-pane", "-o", "-t", sessionName, "cat >> "+pipeFile)
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
-	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		// The combined "new-session ; set-option" invocation returns the exit
-		// code of the LAST command, so a trailing set-option that fails on some
-		// tmux versions (e.g. remain-on-exit option scope) surfaces as a generic
-		// failure even though the session was created. Only treat it as fatal
-		// when the session does not actually exist; otherwise proceed and log
-		// the captured stderr so the real cause is never hidden as "exit status 1".
-		detail := strings.TrimSpace(stderr.String())
+	if detail, runErr := te.runTmuxCreate(ctx, cmdName, cmdArgs, sessionName); runErr != nil {
 		if !te.SessionExists(sessionName) {
-			return nil, fmt.Errorf("failed to create tmux session: %w: %s", err, detail)
+			return nil, fmt.Errorf("failed to create tmux session: %w: %s", runErr, detail)
 		}
 		log.Warnf("[tmux] session %s created, but a post-create option failed (non-fatal): %v: %s",
-			sessionName, err, detail)
+			sessionName, runErr, detail)
 	}
 
-	// Set environment variables on the session
 	te.setSessionEnv(ctx, sessionName, opts.Env)
 
-	// Get session PID
 	pid, err := te.getSessionPID(sessionName)
 	if err != nil {
-		pid = 0 // Non-fatal
+		pid = 0
 	}
 
 	session := &TmuxSession{
@@ -295,15 +321,12 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 }
 
 // KillSession kills a tmux session
+//
+// 契约: docs/wiki/tool/tmux-action.md#pipe-log
 func (te *TmuxExecutor) KillSession(sessionID string) error {
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"kill-session", "-t", sessionID})
 	cmd := exec.Command(cmdName, cmdArgs...)
 	err := cmd.Run()
-	// (2026-09-11 async-action overhaul, A3) Preserve the forensic pipe log
-	// instead of deleting it: it is the only complete record of what the
-	// session actually printed (capture-pane freezes a stale truncation frame
-	// on dead panes). Archive under the tool-output dir; the workspace cleaner
-	// bounds growth. A missing pipe file (never attached) is fine.
 	if pf := te.pipeFilePath(sessionID); true {
 		if _, statErr := os.Stat(pf); statErr == nil {
 			dest := filepath.Join(os.TempDir(), "tagent-archived-pipes")
@@ -311,7 +334,7 @@ func (te *TmuxExecutor) KillSession(sessionID string) error {
 				archived := filepath.Join(dest, filepath.Base(pf))
 				if renErr := os.Rename(pf, archived); renErr != nil {
 					log.Warnf("[tmux] archive pipe log %s failed: %v", pf, renErr)
-					os.Remove(pf) // fall back to the old delete semantics
+					os.Remove(pf)
 				}
 			} else {
 				log.Warnf("[tmux] archive dir %s create failed: %v", dest, mkErr)
@@ -329,24 +352,24 @@ func (te *TmuxExecutor) SessionExists(sessionID string) bool {
 	return cmd.Run() == nil
 }
 
-// GetSessionOutput gets the current output of a tmux session
+// pipeFilePath GetSessionOutput gets the current output of a tmux session
 // pipeFilePath returns the conventional streaming-log path for a session.
 func (te *TmuxExecutor) pipeFilePath(sessionID string) string {
 	return filepath.Join(os.TempDir(), "tagent-pipe-"+sessionID+".log")
 }
 
-// PipeFileFor exposes the streaming-log path for a session (B3 peek).
+// PipeFileFor exposes the streaming-log path for a session.
 func (te *TmuxExecutor) PipeFileFor(sessionID string) string {
 	return te.pipeFilePath(sessionID)
 }
 
-// GetSessionPIDPublic exposes the pane process PID lookup (B3 stop).
+// GetSessionPIDPublic exposes the pane process PID lookup.
 func (te *TmuxExecutor) GetSessionPIDPublic(sessionID string) (int, error) {
 	return te.getSessionPID(sessionID)
 }
 
 // NamedSessionName maps a caller-supplied logical name to the deterministic
-// tmux session name (2026-09-11 B2). The "n-" prefix segment keeps named
+// tmux session name. The "n-" prefix segment keeps named
 // sessions visually and syntactically distinct from generated
 // prefix-timestamp names. Callers validate the logical name first
 // (validSessionName in action_tool.go); this function is the single place
@@ -355,21 +378,13 @@ func NamedSessionName(logical string) string {
 	return "n-" + logical
 }
 
+// GetSessionOutput 返回该会话当前可见的输出：优先读流式记录文件（pipe），文件缺失或
+// 为空时回落到 capture-pane 的最近 1000 行，该回落调用带 3s 超时。
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
-	// Prefer the pipe-pane streaming log: it records raw pty bytes as they
-	// arrive and remains complete after pane death. capture-pane reads the
-	// pane grid, which on a dead pane can be frozen at a stale truncation
-	// frame (the root cause of missing END_MARKER tails).
 	pipeFile := te.pipeFilePath(sessionID)
 	if b, err := os.ReadFile(pipeFile); err == nil && len(b) > 0 {
 		return string(b), nil
 	}
-	// Fallback: capture-pane (sessions created before this change, or when
-	// pipe-pane attach failed at creation).
-	// Use -S -1000 to capture full scrollback history, not just visible pane.
-	// This ensures we get output from commands that finished quickly and
-	// whose output may have scrolled past the visible area (especially when
-	// tmux appends "Pane is dead" messages after remain-on-exit).
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"capture-pane", "-p", "-S", "-1000", "-t", sessionID})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -394,17 +409,42 @@ func (te *TmuxExecutor) IsPaneDead(sessionID string) bool {
 
 	err := cmd.Run()
 	if err != nil {
-		// R3（resident-continuity-r2-r4 2.2，三态化）：探测 err ≠ 死——不再
-		// assume dead（旧路径 err→true→detectSessionState 判 Completed→杀会话）。
-		// 不可辨返回 false（alive 倾向），确定性由 SessionAlive3 的 list-sessions
-		// 单源判定+monitor 连续 unknown 加闸兑观。
 		return false
 	}
 
 	return strings.TrimSpace(stdout.String()) == "1"
 }
 
-// SessionAlive3（R3，resident-continuity-r2-r4 2.2）：三态存活探测——list-sessions
+// PaneDeadStatus reads the exit status of a dead pane via tmux's
+// `#{pane_dead_status}`. It returns (code, known):
+//   - pane dead → (exit code, true). tmux reports signal-death as a negative value.
+//   - pane still alive, session gone, or command failed → (0, false) — the exit
+//     status is not resolvable, which the caller must treat as "unknown", never as
+//     success. Framework-created sessions run with remain-on-exit, so a dead pane
+//     is retained and its status remains readable at detection time.
+//
+// 契约: docs/wiki/tool/tmux-action.md#failure-polarity
+func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool) {
+	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_dead_status}"})
+	cmd := exec.Command(cmdName, cmdArgs...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return 0, false
+	}
+	trimmed := strings.TrimSpace(stdout.String())
+	if trimmed == "" {
+		return 0, false
+	}
+	status, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, false
+	}
+	return status, true
+}
+
+// SessionAlive3：三态存活探测——list-sessions
 // 单源（会话在列表=活；不在=确定性死；命令 err=不可辨）。known=false 时调用方
 // （monitor）计入 ProbeUnknownCount 连续加闸，不立即判死。
 func (te *TmuxExecutor) SessionAlive3(sessionID string) (alive, known bool) {
@@ -413,19 +453,18 @@ func (te *TmuxExecutor) SessionAlive3(sessionID string) (alive, known bool) {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
-		return false, false // tmux server 不可达/命令失败 — unknown
+		return false, false
 	}
 	for _, line := range strings.Split(stdout.String(), "\n") {
 		if strings.TrimSpace(line) == sessionID {
 			return true, true
 		}
 	}
-	return false, true // 列表可靠且不含 — dead
+	return false, true
 }
 
 // ProcessExists checks if the main process of a tmux session is still running
 func (te *TmuxExecutor) ProcessExists(sessionID string) bool {
-	// Get pane PID
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_pid}"})
 	cmd := exec.Command(cmdName, cmdArgs...)
 	var stdout bytes.Buffer
@@ -447,7 +486,6 @@ func (te *TmuxExecutor) ProcessExists(sessionID string) bool {
 		return false
 	}
 
-	// kill -0 checks if process exists without sending a signal
 	killCmd := exec.Command("kill", "-0", fmt.Sprintf("%d", pid))
 	return killCmd.Run() == nil
 }
@@ -461,13 +499,11 @@ func (te *TmuxExecutor) SendKeys(sessionID string, keys string) error {
 
 // SendHeartbeat sends a heartbeat command to detect if session is alive
 func (te *TmuxExecutor) SendHeartbeat(sessionID string) string {
-	// Send echo command and check response
 	err := te.SendKeys(sessionID, "echo tmux_heartbeat\n")
 	if err != nil {
 		return "error"
 	}
 
-	// Wait briefly for output
 	time.Sleep(500 * time.Millisecond)
 
 	output, err := te.GetSessionOutput(sessionID)
@@ -502,9 +538,6 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 			continue
 		}
 
-		// R3（resident-continuity-r2-r4 2.1）：双条件收录——默认 prefix（历史语义）
-		// ∨ named 会话（n- 前缀，本工具创建的常驻/交互会话）。修复枚举死代码：
-		// 修复前 ReattachResidentSessions 的 n- 检查与 prefix 过滤不相交、重挂恒空。
 		if strings.HasPrefix(line, te.prefix) || strings.HasPrefix(line, "n-") {
 			sessions = append(sessions, &TmuxSession{
 				ID:   line,
@@ -522,19 +555,19 @@ func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error) {
 // (system-wide pty exhaustion was observed in the field). Best effort: a
 // missing tmux server means nothing to clean. Returns the number killed.
 //
-// R3（resident-continuity-r2-r4 2.1，orphan 语义重定义）：n- named 会话被排除——
+// R3（orphan 语义重定义）：named 会话被排除——
 // cleanup 在装配时先于 reattach 执行，若纳入 named 会话则会屠杀全部常驻会话
 // （修复前语义冲突：枚举双条件修复会让 cleanup 杀光 n-）。orphan=仅无主生成名
 // 会话；named 会话由 R3 重挂接管或由 ResidentMeta TTL sweep 兑现终局。
 func (te *TmuxExecutor) CleanupOrphanSessions() int {
 	sessions, err := te.ListSessions()
 	if err != nil {
-		return 0 // no server / no sessions — nothing to clean
+		return 0
 	}
 	killed := 0
 	for _, s := range sessions {
 		if strings.HasPrefix(s.ID, "n-") {
-			continue // named sessions are owned (reattach/TTL sweep), never orphans
+			continue
 		}
 		if err := te.KillSession(s.ID); err != nil {
 			log.Warnf("[TmuxExecutor] orphan cleanup: kill %s failed: %v", s.ID, err)
@@ -573,10 +606,8 @@ func (te *TmuxExecutor) getSessionPID(sessionID string) (int, error) {
 // This ensures the restarted session continues to be tracked by TmuxMonitor
 // under its original ID — no state chain breakage.
 func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions) error {
-	// Kill existing session (best-effort: the session may already be dead)
 	te.KillSession(sessionID)
 
-	// Re-create under the SAME session name so the monitor keeps tracking it.
 	args := []string{"new-session", "-d", "-s", sessionID}
 
 	workDir := opts.WorkDir
@@ -589,8 +620,6 @@ func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions)
 
 	args = append(args, opts.Command)
 
-	// Inline remain-on-exit so a quickly exiting command does not destroy the
-	// pane before TmuxMonitor can capture its output. This mirrors CreateSession.
 	args = append(args, ";", "set-option", "remain-on-exit", "on")
 
 	cmdName, cmdArgs := te.buildTmuxCommand(args)
@@ -599,7 +628,6 @@ func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions)
 		return err
 	}
 
-	// Set environment variables on the restarted session
 	te.setSessionEnv(context.TODO(), sessionID, opts.Env)
 
 	return nil

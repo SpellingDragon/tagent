@@ -10,25 +10,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
-// Execution leases (introduce-durable-workflow-engine §3.2＋§4.1, design D6).
-//
-// Every published execution generation of an owner owns one execBinding. A
-// binding counts the references that are actually USING it, split by kind, and
-// it is closed the moment it is both retired and unreferenced. The old model —
-// one per-manager aggregate counter gating a shared retiree list — let a single
-// live G1 turn keep every unrelated generation open (and double-counted business
-// turns), which D6 explicitly rejects: 「一个 G1 未停止调用只阻挡其实际使用资源，
-// 不阻挡无关联的 G2/G3 退役」。
-//
-// A lease travels through the call-chain context, never into a persisted record
-// (§3.2「禁止指针进入持久记录」): a business turn acquires one, and every derived
-// execution (nested delegation, transport retry, post-ACK background run) takes
-// an additional reference on the SAME binding before it starts and releases it
-// only when its own producer truly stops — the credential §6.3's fork supplies
-// (processed-stream close now implies producer-done).
-
 // LeaseKind names the usage a reference stands for, so diagnostics can report
-// business turns, sub-calls and background executions separately (§5.1「后台／流／
+// business turns, sub-calls and background executions separately (「后台／流／
 // owner 引用分报」) instead of one blurred total.
 type LeaseKind int
 
@@ -74,18 +57,18 @@ type execBinding struct {
 	id      int64
 	run     runner.Runner
 	owner   string
-	cm      *ContextManager // for unconverged-list bookkeeping only; never serialized
+	cm      *ContextManager
 	created time.Time
 
 	// face is the execution configuration this generation was published WITH.
-	// §4.2 needs it: a re-entry (Resume/Relaunch of an existing task) initiated
+	//  needs it: a re-entry (Resume/Relaunch of an existing task) initiated
 	// by a call that still holds THIS generation must resolve its delegation
 	// target against the face in force when that call started — reading the
 	// current effective face instead would silently re-route a legal G1 call to
 	// G2's targets (spec resident-continuity「重试也不改路由」, subagent-turn-execution
 	// 「仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定」).
 	// It dies with the binding: a retired generation is forgotten as soon as its
-	// own references drain, so no historical face is retained indefinitely (§4.3).
+	// own references drain, so no historical face is retained indefinitely.
 	face ContextManagerConfig
 
 	// holds/heldBy carry the generation-level declaration right (3.2 trunk, D8 as
@@ -100,12 +83,9 @@ type execBinding struct {
 	holds  []*execBinding
 	heldBy int
 
-	// runCfg is this generation's assembled TagentConfig (3.2 trunk), set at
-	// STAGING time by the composition root and immutable once the generation is
-	// activated. A declared invocation reads it through its lease — the
-	// per-generation execution description, in place of the owner's
-	// construction-time config. Lazily materialized generations (cold start,
-	// hand-built test cms) have none: the legacy source stands.
+	// runCfg 是本代装配好的 TagentConfig：在装配期（STAGING）设置，代际激活后不可变。
+	// 声明式调用经自己的租约读它——它是逐代的执行描述，取代属主构造期的配置。
+	// 惰性物化的代际（冷启动、手搭的测试 cm）没有它：此时沿用构造期配置源。
 	runCfg *TagentConfig
 
 	mu        sync.Mutex
@@ -132,11 +112,9 @@ func newExecBinding(cm *ContextManager, id int64, r runner.Runner, face ContextM
 	}
 }
 
-// acquire takes one reference of the given kind and returns its idempotent
-// release handle. It is the INHERITANCE form of taking a reference: legal on a
-// generation that is already retired but still held (a sub-call derived from an
-// execution that pinned it — D5「派生前继承发起调用租约」). For starting NEW work
-// use tryAcquireActive, which is the only form that upholds「退役代不再接受新引用」.
+// acquire 取一份指定种类的引用，返回其幂等的释放句柄。它是"继承式"取引用：
+// 在已退役但仍被持有的代上合法（派生子调用继承发起方的那一次钉住）。
+// 要启动新工作必须用 tryAcquireActive——它是唯一守住「已退役的代不接受新引用」的形式。
 func (b *execBinding) acquire(kind LeaseKind) *ExecLease {
 	b.mu.Lock()
 	b.refs[kind]++
@@ -197,11 +175,6 @@ func (b *execBinding) release(kind LeaseKind) {
 		}
 	}
 	doClose := b.reclaimableLocked()
-	// The transition to zero references is what a pending retirement waits on,
-	// whether or not this generation is also being forgotten: an unrouted owner is
-	// usually blocked by a reference on its still-ACTIVE generation (§4.3's「释放
-	// 使用权…继续退役」). Notifying on the transition — not on every release — keeps
-	// this a rare idle-moment event instead of hot-path noise.
 	drained := b.total == 0
 	if doClose {
 		b.closed = true
@@ -227,15 +200,13 @@ func (b *execBinding) reclaimableLocked() bool {
 
 // finishReclaim performs the terminal cleanup of one reclaimed generation:
 // close the runner (idempotent upstream), drop it from the unconverged list so
-// the bookkeeping tracks live debt (§5.3), and release every declaration hold
+// the bookkeeping tracks live debt, and release every declaration hold
 // it recorded — a hold dies with its declarer, cascading the same check down
 // the call graph (acyclic by construction: the DFS refuses declaration cycles).
 func (b *execBinding) finishReclaim() {
 	if b.run != nil {
-		_ = b.run.Close() // upstream documents Close as idempotent; never fatal
+		_ = b.run.Close()
 	}
-	// Reclaimed: leave the unconverged list so its size tracks live debt, not
-	// the number of generations ever published (§5.3 boundedness).
 	b.cm.forgetBinding(b)
 	for _, child := range b.heldBindings() {
 		child.dropDeclaredHold()
@@ -324,9 +295,9 @@ var ErrExecUnconverged = errors.New("execution generations unconverged: held, no
 // reported clean, nothing left to wait for. It is deliberately distinct from the
 // mid-close case: while a close is still draining, AcquireLease DOES register the
 // reference so the bounded drain surfaces ErrExecUnconverged instead of pretending
-// the shutdown was clean (§4.3). After convergence, handing out the closed executor
+// the shutdown was clean. After convergence, handing out the closed executor
 // would be precisely the failure tryAcquireActive exists to prevent (「running a turn
-// on a closed executor」), so new work is refused instead — §3.2's
+// on a closed executor」), so new work is refused instead — 's
 // 「关闭后的 Run/Inject/Acquire 真正再进一次且被拒」.
 var ErrExecClosed = errors.New("execution generation already closed: new work refused")
 
@@ -363,7 +334,7 @@ func (b *execBinding) snapshot() GenerationRefs {
 // subagentWrapper resolves a delegation target on THIS generation's own face.
 // Sharing one scan (`subagentWrapperIn`) with ContextManager.SubagentWrapper is
 // what keeps the effective face and a pinned generation's face from being two
-// different routing truths (§4.2: 同一版本真源).
+// different routing truths.
 func (b *execBinding) subagentWrapper(name string) *AgentToolWrapper {
 	if b == nil {
 		return nil
@@ -386,8 +357,8 @@ func (b *execBinding) holdsUsage() bool {
 
 // BindingHolders counts the live execution generations across `agents` whose OWN
 // published face still declares a callable wrapper for `owner` — the usage right
-// of §3.2/D8. It is deliberately DERIVED rather than registered: the binding's
-// face is already the single routing truth (§4.2), so there is no second table to
+// of /D8. It is deliberately DERIVED rather than registered: the binding's
+// face is already the single routing truth, so there is no second table to
 // drift and no parallel notion of who may call whom; the caller supplies only the
 // roster (who exists), which is the composition root's own fact, never the
 // retirement decision.
@@ -401,7 +372,7 @@ func BindingHolders(owner string, agents []*TagentAgent) int {
 	holders := 0
 	for _, a := range agents {
 		if a == nil || a.name == owner {
-			continue // an owner's own generations are not a usage right on itself
+			continue
 		}
 		cm := a.ContextManager()
 		if cm == nil {
@@ -421,25 +392,24 @@ func BindingHolders(owner string, agents []*TagentAgent) int {
 // of the publish has STAGED its next generation and before ANY of them is
 // activated, so no execution path can observe a half-wired generation:
 //
-//   - INCOMING: each staged face's wrappers are stamped with the STAGED child
-//     binding they declare, and the declaring generation records a hold on it.
-//     A call through that wrapper therefore resolves the child through the
-//     declaring generation's own execution view — never the child's "current"
-//     face, never a captured instance.
+// - INCOMING: each staged face's wrappers are stamped with the STAGED child
+// binding they declare, and the declaring generation records a hold on it.
+// A call through that wrapper therefore resolves the child through the
+// declaring generation's own execution view — never the child's "current"
+// face, never a captured instance.
 //
-//   - OUTGOING (retroactive): the previous generations' faces were wired when
-//     THEY were staged — except a cold-start owner whose binding was created
-//     lazily and never wired. Those wrappers are stamped against the
-//     still-active child bindings now, with the same holds, so an in-flight
-//     caller on the outgoing generation keeps reaching ITS generation's
-//     targets after this publish retires them. Stamps are idempotent: a
-//     wrapper already wired by an earlier publish keeps its (still correct)
-//     target.
+// - OUTGOING (retroactive): the previous generations' faces were wired when
+// THEY were staged — except a cold-start owner whose binding was created
+// lazily and never wired. Those wrappers are stamped against the
+// still-active child bindings now, with the same holds, so an in-flight
+// caller on the outgoing generation keeps reaching ITS generation's
+// targets after this publish retires them. Stamps are idempotent: a
+// wrapper already wired by an earlier publish keeps its (still correct)
+// target.
 //
 // The holds never enter the obligation axes (J7/J8); they only gate the
 // binding-level reclaim (retired ∧ refs==0 ∧ heldBy==0).
 func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*StagedGeneration) {
-	// Incoming generation: stamp + hold against the staged children.
 	for name, s := range staged {
 		if s == nil {
 			continue
@@ -451,17 +421,12 @@ func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*Sta
 			}
 			child, ok := staged[target]
 			if !ok || child == nil {
-				continue // remote target, or a name this publish does not stage
+				continue
 			}
 			w.setDeclared(child.binding)
 			s.binding.addDeclaredHold(child.binding)
 		}
 	}
-	// Outgoing generations: retro-wire wrappers that were never stamped (cold
-	// start's lazily materialized generation) against the still-ACTIVE child
-	// bindings. activeBinding() may materialize a generation for an owner that
-	// never ran — that generation retires at this very publish, and its holds
-	// then cascade correctly.
 	for name, cm := range owners {
 		if cm == nil {
 			continue
@@ -472,7 +437,7 @@ func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*Sta
 		}
 		for _, w := range collectAgentToolWrappers(b.face.Tools) {
 			if w.declaredSet() {
-				continue // wired by the publish that built this face
+				continue
 			}
 			target := w.DeclaredAgentName()
 			if target == "" || target == name {
@@ -500,7 +465,7 @@ type ExecLease struct {
 	kind    LeaseKind
 	once    sync.Once
 	closed  atomic.Bool
-	refused error // non-nil → the gate declined this reference (ErrExecClosed)
+	refused error
 }
 
 // Err reports why this lease carries no execution authority. It is nil for a live
@@ -514,7 +479,7 @@ func (l *ExecLease) Err() error {
 }
 
 // SubagentWrapper resolves a delegation target against the face of the generation
-// this lease pins — the version the holder's work was selected on. §4.2's re-entry
+// this lease pins — the version the holder's work was selected on. 's re-entry
 // rule uses it so an initiator keeps ITS OWN generation's targets instead of
 // whatever is published by then.
 func (l *ExecLease) SubagentWrapper(name string) *AgentToolWrapper {
@@ -552,9 +517,8 @@ func (l *ExecLease) belongsToOwnerOf(cm *ContextManager) bool {
 	return l.b.cm == cm
 }
 
-// declaredRunConfig returns the assembled TagentConfig of the generation this
-// lease pins, or nil when that generation predates staging (lazy/hand-built) —
-// the caller then keeps the legacy construction-config source.
+// declaredRunConfig 返回该租约所钉住代际的装配配置；代际未经装配期物化（惰性或手搭）
+// 时返回 nil，调用方此时沿用构造期配置源。
 func (l *ExecLease) declaredRunConfig() *TagentConfig {
 	if l == nil || l.b == nil {
 		return nil
@@ -579,8 +543,6 @@ func (l *ExecLease) Derive(kind LeaseKind) *ExecLease {
 		return nil
 	}
 	if l.refused != nil {
-		// Work derived under a refused lease inherits the refusal: it stays inert and
-		// registers nothing, instead of resurrecting a reference on a closed generation.
 		return l
 	}
 	return l.b.acquire(kind)
@@ -596,7 +558,7 @@ func (l *ExecLease) WithContext(ctx context.Context) context.Context {
 }
 
 // Release drops the reference. Idempotent: the first call wins, so a turn that
-// both returns normally and hits a cleanup defer cannot double-count (§4.1
+// both returns normally and hits a cleanup defer cannot double-count (
 // 「全路径恰一次」).
 func (l *ExecLease) Release() {
 	if l == nil {
@@ -605,7 +567,7 @@ func (l *ExecLease) Release() {
 	l.once.Do(func() {
 		l.closed.Store(true)
 		if l.refused != nil {
-			return // the gate registered nothing, so there is nothing to drop
+			return
 		}
 		l.b.release(l.kind)
 	})
@@ -634,7 +596,7 @@ type GenerationRefs struct {
 }
 
 // UnconvergedRef names a generation that is still held when a bounded close
-// gives up (§4.1「Close 有界返回未收敛清单并安全持有」). It is a report, not a
+// gives up. It is a report, not a
 // force-close: the resources stay held until their producer confirms the stop.
 type UnconvergedRef struct {
 	Generation int64          `json:"generation"`

@@ -79,7 +79,7 @@ func parseEventKeyFromPrefix(content string) int64 {
 
 ### Decision 3: `buildEventMessageIndex` 清理
 
-该方法（[context_intervention.go:220-232](file:///Users/pengweiye/Documents/codes/tagent/agent/context_intervention.go#L220-L232)）仅在 `applyEventView` 中使用，而 `applyEventView` 仅用于事件视图前缀设置。压缩事件 key 收集切换到前缀解析后，不再需要任何基于 Session.Events 的索引。清理范围：
+该方法（[context_intervention.go:220-232](agent/context_intervention.go#L220-L232)）仅在 `applyEventView` 中使用，而 `applyEventView` 仅用于事件视图前缀设置。压缩事件 key 收集切换到前缀解析后，不再需要任何基于 Session.Events 的索引。清理范围：
 - 删除 `buildEventMessageIndex` 函数
 - 删除 `applyEventView` 中对 `evtMsgIndex` 的调用
 - `applyEventView` 重建为更简单的逐消息匹配逻辑
@@ -94,6 +94,6 @@ func parseEventKeyFromPrefix(content string) int64 {
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| 前缀格式未来变更导致解析失效 | 低 | 前缀格式在 [context_intervention.go:214](file:///Users/pengweiye/Documents/codes/tagent/agent/context_intervention.go#L214) 单点定义；两处共享同一个 agent 包，变更加单元测试覆盖 |
+| 前缀格式未来变更导致解析失效 | 低 | 前缀格式在 [context_intervention.go:214](agent/context_intervention.go#L214) 单点定义；两处共享同一个 agent 包，变更加单元测试覆盖 |
 | key 解析失败静默返回 0 | 低 | 返回 0 被 `if key > 0` 过滤，效果等同于当前行为（key 缺失），不会引入新错误 |
 | 非事件消息意外匹配前缀 | 极低 | LLM 生成的消息不会包含 `[evt_<数字>\|` 格式，除非引用事件 key（这正是我们想要的行为） |

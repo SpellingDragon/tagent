@@ -25,22 +25,15 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// ---------------------------------------------------------------------------
-// compress.TokenCounter
-// ---------------------------------------------------------------------------
-
-// ContextManager
-// ---------------------------------------------------------------------------
-
 // ContextManager is the unified component for message building, compression
 // orchestration, and framework Flow execution. It replaces Preprocessor and
 // FrameworkFlowAdapter.
 //
 // Prototype mapping:
-//   - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
-//   - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
+// - OnEvents (append inputs + call model) → BuildInvocation + RunFlow
+// - Compact (clean projection) → compress.ContextCompressor in BeforeModel callback
 type ContextManager struct {
-	// turnEcho (§4.4, design 决策4): the batch echo spec runEventLoop installs
+	// turnEcho: the batch echo spec runEventLoop installs
 	// before the model runs, ONLY when this turn's durable input facts are already
 	// committed. RunFlow stamps a FRESH per-attempt plugin.EchoCredential from it
 	// (unique request token per runner attempt; no whole-turn / "first envelope"
@@ -48,11 +41,11 @@ type ContextManager struct {
 	turnEcho   *echoSpec
 	attemptSeq atomic.Int64
 	// lastEchoCred is the credential RunFlow minted for the most recent attempt; the
-	// event loop consults it after RunFlow to fail-closed (§4.5) when a durable turn's
+	// event loop consults it after RunFlow to fail-closed when a durable turn's
 	// echo was never verified at the model entry.
 	lastEchoCred *plugin.EchoCredential
 
-	// recovery* (resident-readiness-plan 3.8): cold-start rebuild outcome and
+	// recoveryMu recovery*: cold-start rebuild outcome and
 	// the one-shot model-facing notice; written once at rebuild, read-only after.
 	recoveryMu     sync.Mutex
 	recovery       *RecoveryResult
@@ -60,30 +53,21 @@ type ContextManager struct {
 
 	contextCompressor *compress.ContextCompressor
 
-	// hotswap-fix 5.7 / introduce-durable-workflow-engine §2.1：executor 装配所需
-	// 的状态面引用与**已发布执行面快照**。NewContextManager 从 cfg 快照；每次
-	// PublishExecutor 更新为该代真实执行面——快照即「当前生效绑定」，供诊断与
-	// 「原样重发同一执行面」使用，不再是候选构造的隐式回落源（旧 RebuildExecutor
-	// 的零值合并会把清空字段退回上一份，属主换代后旧绑定残留）。
+	// memPlugin 是 executor 装配所需的状态面引用与**已发布执行面快照**。
+	// NewContextManager 从 cfg 取快照；每次 PublishExecutor 更新为该代真实执行面——
+	// 快照即「当前生效绑定」，供诊断与「原样重发同一执行面」使用。候选构造不得把它
+	// 当隐式回落源：回落会把已清空的字段退回上一份，属主换代后留下旧绑定。
 	memPlugin    *plugin.MemoryPlugin
 	sessionSvc   session.Service
-	execCfg      ContextManagerConfig // 已发布执行面快照（含全部字段）
+	execCfg      ContextManagerConfig
 	tokenCounter compress.TokenCounter
 	memStore     memory.MemoryStore
-	// Neither maxTokens nor thresholdPct is stored on ContextManager: the real
-	// consumer is compress.ContextCompressor, which resolves both at every
-	// Compress/BudgetLine boundary via liveNums — the hot SOURCE (this manager's
-	// owner record view) wins and the atomics answer only as the construction
-	// fallback (§6.4 pull; the ApplyHotParams push and its hot-update path are
-	// gone). Earlier construction-only mirror fields were never read (maxTokens)
-	// or were a background-write vs read race once hot-apply moved to the rebuild
-	// goroutine (thresholdPct) — both removed under §2.4/D4 M-3 「修到实际消费者」.
 
-	// Framework integration
+	// runner Framework integration
 	runner     runner.Runner
-	executorMu sync.RWMutex // R4（resident-continuity-r2-r4 3.3）：runner 可换缝守护——发布（写：PublishExecutor / ActivateExecutor）vs RunFlow per-turn RLock（读）
+	executorMu sync.RWMutex
 
-	// Per-generation execution leases (§3.2/§4.1, design D6). `active` is the
+	// active Per-generation execution leases. `active` is the
 	// binding of the runner currently in force; every retired binding that still
 	// has references stays in retiredBindings until its OWN count drops (never a
 	// shared aggregate gate). Guarded by executorMu, except each binding's own
@@ -92,10 +76,10 @@ type ContextManager struct {
 	retiredMu       sync.Mutex
 	retiredBindings map[*execBinding]struct{}
 	bindingSeq      atomic.Int64
-	// retirementPoke is the §4.3 drain-forward notification armed by the
+	// retirementPoke is the  drain-forward notification armed by the
 	// composition root (see SetRetirementPoke); nil = standalone agent.
 	retirementPoke atomic.Pointer[func()]
-	// drainedHook/drainedOnce carry §4.1's deferred final exit: armed by an
+	// drainedHook/drainedOnce carry 's deferred final exit: armed by an
 	// owner whose bounded Close could not finish because an execution never
 	// confirmed a stop, fired at most once when the last held generation is
 	// reclaimed with nothing referencing it (see armFullyDrained).
@@ -105,7 +89,7 @@ type ContextManager struct {
 	userID      string
 	sessionID   string
 
-	// Event routing
+	// outputCh Event routing
 	outputCh   chan *event.Event
 	bus        *EventBus
 	projection *compress.SessionProjection
@@ -122,7 +106,7 @@ type ContextManager struct {
 	// Must be cheap when nothing changed (single stat) and never fail the
 	// LLM call (log-and-degrade inside the closure).
 	//
-	// D3 (§2.3 调度裁决): in production this is the NON-BLOCKING business-turn
+	// D3: in production this is the NON-BLOCKING business-turn
 	// trigger — it only merges/schedules a background rebuild and returns; it
 	// MUST NOT run the long build/Close on the turn's thread. Ops who need the
 	// result synchronously call orgReloadSync (see CheckOrgReload).
@@ -138,7 +122,7 @@ type ContextManager struct {
 
 	// bundleIDFn returns the currently active evolution bundle id (empty when
 	// evolution is disabled or no bundle is active). Both persistence paths
-	// stamp it into FullEvent.Metadata (bundle_id, D1-B design-report-closeout)
+	// stamp it into FullEvent.Metadata
 	// so guardrail/feedback aggregation can join events to bundle versions
 	// precisely. nil-safe.
 	bundleIDFn func() string
@@ -167,7 +151,7 @@ type ContextManager struct {
 	// only on the loop goroutine that drives RunFlow.
 	turnProductive bool
 
-	// lastTurnOutcome is the §5.1 reduced terminal state of the most recent
+	// lastTurnOutcome is the  reduced terminal state of the most recent
 	// RunFlow attempt (completed / failed / cancelled), observed from BOTH the
 	// transport return AND the event stream (a Response.Error event, a mid-drain
 	// ctx cancellation). The old loop trusted only the nil transport return and
@@ -176,9 +160,9 @@ type ContextManager struct {
 	// retry budget into batchOutcome.
 	lastTurnOutcome turnOutcome
 
-	// lastBatchOutcome holds the §5.1 loop-level reduction of the retry attempts
+	// lastBatchOutcome holds the  loop-level reduction of the retry attempts
 	// for the most recent turn (completed or failed; a cancellation returns before
-	// it is ever set). §5.2/§5.3 freeze the completion from this value; set on the
+	// it is ever set). / freeze the completion from this value; set on the
 	// loop goroutine only.
 	lastBatchOutcome turnOutcome
 
@@ -197,9 +181,9 @@ type ContextManager struct {
 	systemPromptSource prompt.Getter
 }
 
-// SetTriggerSource sets the trigger source for the next RunFlow call.
+// OrgHotParams SetTriggerSource sets the trigger source for the next RunFlow call.
 // OrgHotParams is the hot-applicable numeric bundle (full-hot-config Phase 1,
-// 2026-09-16): zero/negative fields keep current settings. Structural wiring
+// ): zero/negative fields keep current settings. Structural wiring
 // (memStore/bus/projection/runner) is NOT in this bundle — that follows the
 // shell-rebuild path.
 type OrgHotParams struct {
@@ -207,20 +191,12 @@ type OrgHotParams struct {
 	MaxTokens       int
 	KeepRecentTasks int
 	TaskTerminalTTL time.Duration
-	TaskDefaultTTL  time.Duration // >0 set unified-reaper fallback lifetime / 0 keep (no disable)
+	TaskDefaultTTL  time.Duration
 }
-
-// ApplyOrgParams / ApplyOrgHotParams are GONE (§6.4 pull, S-E). They were the
-// push entries that hot-swapped the org numeric bundle into this manager's
-// compressor. Their successor is the compressor's own hot source
-// (ContextManagerConfig.HotNumbersSource, wired to the owner's live view), read
-// at every consumption boundary — so a manager needs no write at all to stay
-// current, and a manager constructed mid-flight cannot fall behind a generation.
-// OrgBudgetLine / OrgKeepRecent below stay as the read face.
 
 // OrgBudgetLine returns this manager's compressor effective trigger line
 // (maxTokens × threshold) — valid for BOTH the resident manager and an
-// invocation-private one (§6.4 acceptance reads live calls through it).
+// invocation-private one.
 // 0 when no compressor is wired.
 func (cm *ContextManager) OrgBudgetLine() int {
 	if cm == nil || cm.contextCompressor == nil {
@@ -229,7 +205,7 @@ func (cm *ContextManager) OrgBudgetLine() int {
 	return cm.contextCompressor.BudgetLine()
 }
 
-// OrgKeepRecent returns this manager's live keepRecent value (§6.4, same
+// OrgKeepRecent returns this manager's live keepRecent value (, same
 // rationale as OrgBudgetLine).
 func (cm *ContextManager) OrgKeepRecent() int {
 	if cm == nil || cm.contextCompressor == nil {
@@ -241,7 +217,7 @@ func (cm *ContextManager) OrgKeepRecent() int {
 // CheckOrgReload runs the org-config hot-reload check and WAITS for its result
 // (ops/test entry point). It drives the synchronous reload path (orgReloadSync)
 // when armed, so the caller observes the build/reject outcome on return; business
-// turns instead use the non-blocking lazy trigger via BeginTurn (D3 §2.3). There
+// turns instead use the non-blocking lazy trigger via BeginTurn. There
 // is no second route by which a configuration becomes effective — both reach the
 // same reload/coordinator. Falls back to the lazy trigger when no sync variant
 // is armed (tests that only set SetOrgReloader keep their synchronous behavior).
@@ -255,11 +231,12 @@ func (cm *ContextManager) CheckOrgReload() {
 	}
 }
 
+// SetOrgReloader 装上属主 org 配置的重挂入口，使重挂能按同一身份重建参数源。
 func (cm *ContextManager) SetOrgReloader(fn func()) {
 	cm.orgReloader = fn
 }
 
-// SetOrgReloadSyncCheck arms the synchronous ops reload entry (D3 §2.3). The
+// SetOrgReloadSyncCheck arms the synchronous ops reload entry. The
 // tagent layer wires it to the same reload the background builder runs, so ops
 // blocks for its result while turns stay non-blocking.
 func (cm *ContextManager) SetOrgReloadSyncCheck(fn func()) {
@@ -267,8 +244,7 @@ func (cm *ContextManager) SetOrgReloadSyncCheck(fn func()) {
 }
 
 // BeginTurn is the ONE place a business turn takes its organization execution
-// binding (introduce-durable-workflow-engine §3.1/§3.2, spec
-// swappable-executor「触发时机与观测」): the armed org-config check runs first
+// binding: the armed org-config check runs first
 // (same entry the ops hook CheckOrgReload uses — one publish path, no second
 // effective route), then the executor in force is handed to the turn to pin.
 //
@@ -280,12 +256,12 @@ func (cm *ContextManager) SetOrgReloadSyncCheck(fn func()) {
 // the generation that published them.
 //
 // The returned release MUST run when the turn ends (the loop folds it into its
-// per-turn cleanup alongside endTurnSpan). §2.3「acquire 后立即登记」: the
+// per-turn cleanup alongside endTurnSpan). 「acquire 后立即登记」: the
 // in-flight reference is registered BEFORE the executor is handed out, so a
 // publish and its retire-sweep landing in the gap between handing out the
 // executor and entering the run body cannot close the very runner this turn is
-// about to run. §4.1 removed the second, aggregate counter RunFlow used to keep:
-// a business turn is now registered EXACTLY ONCE, on its own generation.
+// about to run. 一个业务 turn 只登记 EXACTLY ONCE 次，且登记在它自己的代际上：
+// 计数由各代的 in-flight 引用持有，不存在第二份聚合计数。
 func (cm *ContextManager) BeginTurn() (runner.Runner, func()) {
 	lease := cm.BeginTurnLease()
 	return lease.Runner(), lease.Release
@@ -295,25 +271,16 @@ func (cm *ContextManager) BeginTurn() (runner.Runner, func()) {
 // publish its lease into the call-chain context and every derived execution
 // (nested delegation, transport retry, post-ACK background run) adds its own
 // reference on the SAME generation instead of re-reading whatever is published
-// later (§3.2「子 Run 与重试继承」, D5).
+// later.
 func (cm *ContextManager) BeginTurnLease() *ExecLease {
-	// D3 (§2.3): the business turn fires the NON-BLOCKING lazy trigger only. It
-	// merges/schedules a background rebuild and returns immediately; this turn
-	// then pins whatever generation is already published. A long parse/build/Close
-	// therefore never runs on the turn's thread, and a turn that merely witnessed a
-	// config edit keeps serving on the old effective until a LATER turn starts
-	// after the publish (spec swappable-executor「懒检测不等待候选构建」).
 	if cm.orgReloader != nil {
 		cm.orgReloader()
 	}
-	// §2.3「acquire 后立即登记」: the reference is taken on the generation BEFORE it
-	// is handed to the caller, so a publish plus its reclaim landing in the gap
-	// cannot close the runner this turn is about to run.
 	return cm.AcquireLease(LeaseTurn)
 }
 
 // AcquireLease pins the generation NEW work starts on. The pin is retried when the
-// generation read here turns out to be retired (§4.2 re-entry with no initiating
+// generation read here turns out to be retired ( re-entry with no initiating
 // call, and every business turn, both arrive through here): reading the active
 // binding and taking the reference cannot be one atomic step, because
 // PublishExecutor retires the superseded generation after releasing executorMu.
@@ -333,11 +300,6 @@ func (cm *ContextManager) AcquireLease(kind LeaseKind) *ExecLease {
 		}
 		next := cm.activeBinding()
 		if next == b {
-			// No successor. While a terminal close is still draining, the reference IS
-			// registered so that close surfaces ErrExecUnconverged rather than reporting a
-			// clean shutdown it did not achieve. Once it has CONVERGED there is nothing left
-			// to wait for: registering would re-open an obligation nobody holds and hand the
-			// caller a closed runner, so new work is refused (§3.2).
 			if b.isClosed() {
 				return &ExecLease{b: b, kind: leaseKindNoop, refused: ErrExecClosed}
 			}
@@ -347,6 +309,8 @@ func (cm *ContextManager) AcquireLease(kind LeaseKind) *ExecLease {
 	}
 }
 
+// SetTriggerSource 记下本回合的触发源（user、meditation、task 等），供归因与投递门判定；它是
+// 回合本地状态，必须由每个回合自己盖章，不从上一回合继承。
 func (cm *ContextManager) SetTriggerSource(source string) {
 	cm.triggerSource = source
 }
@@ -389,7 +353,7 @@ type ContextManagerConfig struct {
 	// When set, the system message is re-read from disk before each LLM call.
 	SystemPromptSource prompt.Getter
 
-	// Thinking/reasoning controls
+	// ThinkingEnabled Thinking/reasoning controls
 	ThinkingEnabled      *bool
 	ThinkingTokens       *int
 	ReasoningEffort      *string
@@ -401,7 +365,7 @@ type ContextManagerConfig struct {
 	ThresholdPct float64
 	MemStore     memory.MemoryStore
 
-	// HotNumbersSource is the §6.4 pull contract: when set, the compressor reads
+	// HotNumbersSource is the  pull contract: when set, the compressor reads
 	// the owner's live hot view at every consumption boundary (BudgetLine/
 	// Compress) instead of relying on pushed construction values. MaxTokens/
 	// ThresholdPct above stay as the construction fallback (no-source path).
@@ -414,7 +378,7 @@ type ContextManagerConfig struct {
 	RecentFullCount   int
 	CardMaxChars      int
 
-	// Unified Runner: plugins + session service registered on the same Runner
+	// MemPlugin Unified Runner: plugins + session service registered on the same Runner
 	MemPlugin  *plugin.MemoryPlugin
 	SessionSvc session.Service
 
@@ -442,7 +406,6 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		systemPromptSource: cfg.SystemPromptSource,
 	}
 
-	// Build compress.ContextCompressor from compress.SmartCompressor.
 	if cfg.Compressor != nil {
 		keepRecent := cfg.Compressor.KeepRecentTasks
 		cm.contextCompressor = compress.NewContextCompressor(
@@ -459,21 +422,11 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 		)
 	}
 
-	// NOTE: the LLMAgent construction lives ONLY in buildExecutor/buildLLMAgent
-	// below — the sole fwAgent path, gated by the execution model (§4.5). An
-	// earlier inline option block here was dead residue of the hotswap-fix 5.7
-	// extraction and misleading (it built a NON-gated option list that no
-	// consumer ever used). §7.5: assembly must mirror the executed surface.
-	// hotswap-fix 5.7：快照完整 cfg（执行面+状态面）。introduce-durable-workflow-engine
-	// §2.1：冷启动与热更换装共用 buildExecutor 这唯一一条装配路径。
 	cm.execCfg = cfg
 	cm.memPlugin = cfg.MemPlugin
 	cm.sessionSvc = cfg.SessionSvc
 
 	cm.runner = cm.buildExecutor(cfg)
-	// §3.2: the cold-start executor IS generation 1 — a business turn must be able
-	// to hold a reference on it from the first request, so the binding exists at
-	// construction rather than being invented lazily on the first swap.
 	cm.active = cm.newBinding(cm.runner)
 
 	return cm
@@ -484,27 +437,17 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 // （buildExecutor）共用，保证换装后 BeforeModel 闭包仍指向常驻状态面
 // （修复空投影装配事故）。
 func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callbacks {
-	// Build BeforeModel callback chain.
 	cb := model.NewCallbacks()
 
-	// Callback -1: System prompt hot-reload.
-	// When SystemPromptSource is configured, re-reads system prompt files
-	// before each LLM call and replaces the system message.
-	// This enables prompt tuning without restarting the agent process.
-	// hardening-review-batch2 6.2（执行代快照）：捕获**本代配置**的 source，
-	// 而非 cm 的可变字段——热更换 prompt source 后，旧代 in-flight runner 的
-	// 回调仍读旧 source（不受扰），新代读新 source。
 	if source != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 			freshPrompt, err := source.Get()
 			if err != nil || freshPrompt == "" {
-				return nil, nil // Graceful: keep existing system prompt
+				return nil, nil
 			}
-			// Replace or insert system message at position 0
 			if len(args.Request.Messages) > 0 && args.Request.Messages[0].Role == model.RoleSystem {
 				args.Request.Messages[0].Content = freshPrompt
 			} else {
-				// Prepend system message
 				args.Request.Messages = append(
 					[]model.Message{model.NewSystemMessage(freshPrompt)},
 					args.Request.Messages...,
@@ -514,25 +457,12 @@ func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callb
 		})
 	}
 
-	// Unified BeforeModel callback: projection-sole-source assembly
-	// (unified-event-projection D2). See assembleRequest: drains mid-turn bus
-	// events into the projection, compresses, and rebuilds the request as
-	// [system] + render(projection). Nothing is read back from the framework's
-	// message tail — every event reaches the projection via the event-plugin
-	// pipeline or persistBusEvent, so the boundary is strictly one-way.
 	if cm.contextCompressor != nil && cm.projection != nil {
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
-			// introduce-durable-workflow-engine §3.1: the org-config check used to run
-			// HERE — i.e. before EVERY LLM iteration — so a config edit could change the
-			// executor in the middle of a turn (multi-iteration ReAct loops crossed
-			// generations). The check now belongs to the turn boundary (BeginTurn),
-			// outside the transport-retry loop; a turn never re-reads the active version.
 			cm.assembleRequest(ctx, args)
 			return nil, nil
 		})
 	} else if cm.bus != nil {
-		// Fallback: if no compressor configured, still inject bus events
-		// (append directly to messages, legacy behavior for tests without projection).
 		cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 			events := cm.bus.TryPull()
 			for _, evt := range events {
@@ -550,20 +480,11 @@ func (cm *ContextManager) buildModelCallbacks(source prompt.Getter) *model.Callb
 		})
 	}
 
-	// Callback 0.4: live task board (D6). Renders currently-active async tasks
-	// fresh from the registry and injects them just before the current input —
-	// a recency anchor of async state that never enters projection/history, so
-	// it does NOT participate in compression. Skipped when no tasks are active.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		cm.injectLiveTaskBoard(args)
 		return nil, nil
 	})
 
-	// Callback 0.45 removed (unified-event-projection D6): tool-pairing repair
-	// is unnecessary under pairing-free rendering — rendered history contains
-	// no role=tool messages, so no pairing constraint can be violated.
-
-	// Callback 0.5: BeforeLLM diagnostic log — print messages after compression.
 	cb.RegisterBeforeModel(func(ctx context.Context, args *model.BeforeModelArgs) (*model.BeforeModelResult, error) {
 		log.Debugf("[BeforeLLM] messages:\n%s", formatMessages(args.Request.Messages))
 		return nil, nil
@@ -581,10 +502,6 @@ func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMA
 	if maxIters <= 0 {
 		maxIters = DefaultMaxToolIterations
 	}
-	// §4.5: wrap the model with the execution-credential gate (block the real model call
-	// when a durable turn's echo credential is unverified) + recovery-notice deferral to
-	// actual invocation. buildLLMAgent is the sole fwAgent construction → covers cold start
-	// and the hot candidate path. nil-safe (some constructions carry no model).
 	gatedModel := cfg.Model
 	if gatedModel != nil {
 		gatedModel = newExecutionGateModel(cfg.Model, cm)
@@ -628,7 +545,6 @@ func (cm *ContextManager) buildLLMAgent(cfg ContextManagerConfig) *llmagent.LLMA
 // buildRunner（R4 3.3/3.5 抽取）：fwAgent+runner 装配为纯函数段（依赖仅
 // cfg）——冷启动与热重建共用同一装配路径（行为学一致）。
 func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Runner {
-	// Create unified Runner: LLMAgent + MemoryPlugin + SummaryPlugin + SessionService.
 	runnerOpts := []runner.Option{}
 	if cfg.MemPlugin != nil {
 		runnerOpts = append(runnerOpts, runner.WithPlugins(
@@ -641,16 +557,6 @@ func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Ru
 	}
 	return runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
 }
-
-// SwapExecutor was withdrawn with introduce-durable-workflow-engine §5.1: it
-// installed a runner WITHOUT recording the face that runner was built from, so a
-// published generation could end up executing one runner while resolving re-entry,
-// compressor configuration and tool declarations from another (§2.1/§3.2 leave
-// exactly one linearization point per owner: PublishExecutor for a single owner,
-// StageExecutor→ActivateExecutor for an org, and both assign runner and face under
-// the same executorMu write section). It had no production caller when removed;
-// the turn-level drain-free, concurrent-read and resident-invariant semantics it
-// pinned are re-pointed at PublishExecutor in agent/executor_publish_seam_test.go.
 
 // publishActiveLocked is the ONE linearization body of an executor switch. It
 // records `face` as the published execution configuration, then installs the
@@ -669,27 +575,19 @@ func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Ru
 // on the same face, a caller re-submitting the current candidate) must not create a
 // second identity for it. The recorded face still advances — the binding keeps the
 // face it was BUILT from, so advancing what is *recorded* never rewrites what this
-// generation actually routes. (§5.3 merged the org activation path onto this same
-// body, removing the second copy that used to skip the face advance.)
+// generation actually routes. ( merged the org activation path onto this same
+// body, so no copy can skip the face advance.)
 func (cm *ContextManager) publishActiveLocked(face ContextManagerConfig, r runner.Runner, prepared *execBinding) *execBinding {
-	cm.execCfg = face.isolatedCopy() // R06: never alias the caller's or the staged face
+	cm.execCfg = face.isolatedCopy()
 	if cm.active != nil && cm.active.run == r {
 		return nil
 	}
 	if cm.active == nil && cm.runner == r {
-		// The runner set at construction is being published for the first time:
-		// adopting it IS installing it. Minting a second binding for the same object
-		// would hand that same runner to retireBinding — closing the executor the
-		// next turn is about to run — so no predecessor may be produced here.
-		// (§5.3 handed this corner to §5.4 to guard explicitly rather than leave it
-		// to callers avoiding the shape.)
 		cm.active = cm.newBinding(r)
 		return nil
 	}
 	prev := cm.active
 	if prev == nil && cm.runner != nil {
-		// Adopt a runner that was set directly on the struct (hand-built cm, test
-		// shell) as generation 1, so its in-flight users can still be counted.
 		prev = cm.newBinding(cm.runner)
 	}
 	next := prepared
@@ -735,7 +633,7 @@ func (c ContextManagerConfig) isolatedCopy() ContextManagerConfig {
 // ExecutorConfig returns the published execution-face snapshot (model/tools/
 // prompt/genConfig actually in force). Read under the executor lock: a
 // candidate being built elsewhere cannot be observed as "current". The returned
-// face is a private copy (R06): mutating its Tools container or deref-writing
+// face is a private copy : mutating its Tools container or deref-writing
 // its value pointers must not write through to the online executor.
 func (cm *ContextManager) ExecutorConfig() ContextManagerConfig {
 	if cm == nil {
@@ -747,7 +645,7 @@ func (cm *ContextManager) ExecutorConfig() ContextManagerConfig {
 }
 
 // SubagentWrapper resolves a delegation target **against the effective executor
-// face** (§4.2, task-registry-rebuild「恢复与显式重投按当前编排绑定」) — the very
+// face** — the very
 // same version source that serves ordinary delegation, so there is no second
 // routing truth. A name a later generation removed is gone from the face and the
 // caller gets nil, which is how an explicit relaunch refuses to revive a retired
@@ -764,7 +662,7 @@ func (cm *ContextManager) SubagentWrapper(name string) *AgentToolWrapper {
 // subagentWrapperIn is the ONE delegation-target scan: the effective face and a
 // pinned generation's face are both a tool list, and both go through here. A
 // second lookup (a name→wrapper registry, or a closure-captured wrapper) would be
-// a routing truth that outlives the version it came from — §4.2 (R03) is exactly
+// a routing truth that outlives the version it came from — is exactly
 // the failure that produces.
 func subagentWrapperIn(tools []trpctool.Tool, name string) *AgentToolWrapper {
 	if name == "" {
@@ -782,7 +680,7 @@ func subagentWrapperIn(tools []trpctool.Tool, name string) *AgentToolWrapper {
 // OutputLimitTool, which agent.New applies to every tool) to reach the
 // delegation AgentToolWrapper underneath. It returns nil if no AgentToolWrapper
 // lies in the chain, so non-delegation tools simply don't match. The published
-// face stays the SINGLE routing truth (§4.2): the peeled wrapper is the very
+// face stays the SINGLE routing truth: the peeled wrapper is the very
 // instance ordinary delegation runs on this generation, because the runner is
 // built from these same face tools. A parallel name→wrapper registry would be a
 // second source with a lazy cache — explicitly rejected here.
@@ -800,23 +698,12 @@ func unwrapAgentToolWrapper(t trpctool.Tool) *AgentToolWrapper {
 	return nil
 }
 
-// buildExecutor is the SINGLE executor assembly path (cold start + hot candidate).
-// The execution face comes from exec ONLY — no fallback to the previously
-// published snapshot, so a field the new config clears really disappears
-// (introduce-durable-workflow-engine D3/§2.1: 「不以非零 merge 保留旧绑定」).
-// The state face (memory plugin, session service, projection the sub-agent
-// wrappers auto-inject from) is always taken from this cm: swapping executors
-// never moves shared state (hotswap-fix 5.7: the 2026-09-13 n=1-system-only
-// incident came from a shell's own empty projection being carried in).
-// hardening-review-batch2 6.1 wired candidate wrappers here — §6.5/D2 removed
-// that rebinding: delegation wrappers live in the owner's config.Tools and are
-// therefore SHARED by the resident cm, every candidate cm and every
-// invocation-private cm. Writing this cm's projection into them was a
-// construction-time side effect on published objects (design D5 forbids
-// rebinding a published wrapper) and let concurrent calls of one agent read
-// each other's projection. The projection is call-scoped data now and reaches
-// tools through the flow context (withCallProjection); the only publish of a
-// wrapper binding is the cold-start SetToolParentProjection.
+// buildExecutor is the single executor assembly path, used by both cold start and
+// hot candidate construction. Inputs split into the execution face (taken from
+// exec) and the state face (taken from this cm); the no-fallback rule and the
+// constraints on writing call-scoped data into already-published delegation
+// wrappers during construction are specified in the document below.
+// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
 func (cm *ContextManager) buildExecutor(exec ContextManagerConfig) runner.Runner {
 	exec.MemPlugin = cm.memPlugin
 	exec.SessionSvc = cm.sessionSvc
@@ -824,7 +711,7 @@ func (cm *ContextManager) buildExecutor(exec ContextManagerConfig) runner.Runner
 }
 
 // NewExecutorCandidate constructs the next generation's executor WITHOUT
-// touching the live one (introduce-durable-workflow-engine §2.1): no swap, no
+// touching the live one: no swap, no
 // snapshot update, no state-face change — the caller may still abandon it.
 // Construction is side-effect free on the resident cm beyond reading it; the
 // only mutation is on the candidate's own tool wrappers.
@@ -832,7 +719,6 @@ func (cm *ContextManager) NewExecutorCandidate(exec ContextManagerConfig) runner
 	if cm == nil {
 		return nil
 	}
-	// 执行面完全由 exec 决定（零值即「本代就是空/默认」）；状态面恒取 cm。
 	return cm.buildExecutor(exec)
 }
 
@@ -840,15 +726,12 @@ func (cm *ContextManager) NewExecutorCandidate(exec ContextManagerConfig) runner
 // switch: install the candidate, record it as the published execution face,
 // then retire the superseded runner. Drain-free at turn granularity — an
 // in-flight turn keeps the old runner reference and finishes on it; the next
-// turn picks up the new one (spec swappable-executor「整份编排执行绑定发布」).
+// turn picks up the new one.
 // Returns the runner now in force.
 func (cm *ContextManager) PublishExecutor(candidate runner.Runner, exec ContextManagerConfig) runner.Runner {
 	if cm == nil || candidate == nil {
 		return cm.currentRunner()
 	}
-	// The binding is created inside the shared body from the face recorded in that
-	// same critical section, so a reader can never observe a runner without its
-	// face (§4.2 re-entry resolution depends on it).
 	cm.executorMu.Lock()
 	prev := cm.publishActiveLocked(exec, candidate, nil)
 	cm.executorMu.Unlock()
@@ -856,18 +739,11 @@ func (cm *ContextManager) PublishExecutor(candidate runner.Runner, exec ContextM
 	return cm.currentRunner()
 }
 
-// RebuildExecutor was withdrawn with introduce-durable-workflow-engine §2.1:
-// it fused construction and swap, and merged the caller's zero fields onto the
-// previous face (a cleared binding survived). Its two halves live on as
-// NewExecutorCandidate (abandonable) and PublishExecutor (the one linearization
-// point); agent/executor_publish_test.go pins both, plus the "cleared tool
-// really disappears" contract that the merge used to violate.
-
 // StagedGeneration is a prepared-but-not-installed execution generation (3.2
 // trunk). Staging exists so a MULTI-OWNER publish can wire the generation-level
 // declaration holds (and stamp each face's wrappers with their declared target
 // bindings) BEFORE any owner's generation becomes visible — the same
-// build-then-publish discipline the entry used to have alone, extended to every
+// build-then-publish discipline applies uniformly to every
 // routable owner. A staged generation nobody activates is not reachable by any
 // execution path; Discard closes its candidate and releases the holds it
 // recorded, so a failed candidate leaves nothing behind.
@@ -916,10 +792,6 @@ func (cm *ContextManager) ActivateExecutor(s *StagedGeneration) runner.Runner {
 		return cm.currentRunner()
 	}
 	cm.executorMu.Lock()
-	// §5.3: the SAME body a single-owner publish uses, with the already-wired
-	// staged binding installed instead of a fresh snapshot. The same-runner case
-	// advances the recorded face and creates no second generation, identically to
-	// PublishExecutor — previously the two paths diverged on exactly that point.
 	prev := cm.publishActiveLocked(s.face, s.candidate, s.binding)
 	cm.executorMu.Unlock()
 	cm.retireBinding(prev)
@@ -967,14 +839,14 @@ func (cm *ContextManager) activeBinding() *execBinding {
 // newBinding opens a generation record (caller holds executorMu when it wants a
 // deterministic id order; the lazy path above does). The generation snapshots the
 // face currently in force — PublishExecutor assigns the new face BEFORE installing
-// the binding, so the snapshot is the face THIS runner was built from (§4.2).
+// the binding, so the snapshot is the face THIS runner was built from.
 func (cm *ContextManager) newBinding(r runner.Runner) *execBinding {
 	return newExecBinding(cm, cm.bindingSeq.Add(1), r, cm.execCfg)
 }
 
 // retireBinding marks `b` superseded and keeps it on the unconverged list until
 // its own reference count drops. Close happens in ExecLease.Release, per
-// generation — an unrelated in-flight turn cannot hold it open (§4.1).
+// generation — an unrelated in-flight turn cannot hold it open.
 func (cm *ContextManager) retireBinding(b *execBinding) {
 	if cm == nil || b == nil {
 		return
@@ -986,13 +858,11 @@ func (cm *ContextManager) retireBinding(b *execBinding) {
 	}
 	cm.retiredBindings[b] = struct{}{}
 	cm.retiredMu.Unlock()
-	// No reference may exist yet (a publish with nobody pinned on the old
-	// generation is the common case), so try the reclaim right away.
 	b.release(leaseKindNoop)
 }
 
 // forgetBinding drops a closed generation from the unconverged list so the
-// bookkeeping stays bounded across endless hot swaps (§5.3「资源量按当前路由和真实
+// bookkeeping stays bounded across endless hot swaps (「资源量按当前路由和真实
 // 活引用计，不按历史发布次数计」).
 func (cm *ContextManager) forgetBinding(b *execBinding) {
 	if cm == nil || b == nil {
@@ -1001,14 +871,12 @@ func (cm *ContextManager) forgetBinding(b *execBinding) {
 	cm.retiredMu.Lock()
 	delete(cm.retiredBindings, b)
 	cm.retiredMu.Unlock()
-	// A reclaim is the event §4.1's deferred tail waits on: it means one more
-	// execution actually stopped, so the owner's final exit may now be complete.
 	cm.fireFullyDrainedIfQuiet()
 }
 
 // armFullyDrained registers a one-shot continuation run when the last held
 // generation has been reclaimed and nothing references any generation anymore —
-// §4.1's「同一尾部保有责任并等真实停止后继续」. The notification comes from the
+// 's「同一尾部保有责任并等真实停止后继续」. The notification comes from the
 // reclaim path itself (a producer finally stopping), so it adds no timer, no
 // polling loop and no second lifecycle framework. If the manager is ALREADY
 // quiet, the continuation runs before this call returns: arming can never strand
@@ -1041,7 +909,7 @@ func (cm *ContextManager) fireFullyDrainedIfQuiet() {
 }
 
 // pokeRetirementDrain carries a pending retirement forward after the event that
-// unblocked it (§4.3: 「释放使用权/任务收尾经原生命周期轻量通知继续退役，不必须再来
+// unblocked it (: 「释放使用权/任务收尾经原生命周期轻量通知继续退役，不必须再来
 // 一个业务 turn」). It only invokes the composition root's lazy check — the same
 // single-flight, non-blocking path a business turn rides — so it adds no timer and
 // never runs a drain inline under the caller's locks. Nil for a standalone agent.
@@ -1054,7 +922,7 @@ func (cm *ContextManager) pokeRetirementDrain() {
 	}
 }
 
-// SetRetirementPoke arms the composition root's lazy drain check (§4.3) on this
+// SetRetirementPoke arms the composition root's lazy drain check on this
 // manager. It is called once per owner at assembly time, is nil for a standalone
 // agent (no org, nothing to retire), and is only ever invoked from a generation's
 // own release path — it schedules work and must not run the drain inline.
@@ -1066,19 +934,21 @@ func (cm *ContextManager) SetRetirementPoke(fn func()) {
 }
 
 // ExecutorRefs 是执行器引用面的诊断快照（D9：退役引用与未收敛 owner 可见；
-// §5.1：业务 turn／子调用／后台执行分报，不再是一个模糊总数）。
+// ：业务 turn／子调用／后台执行分报，不是一个模糊总数）。
 // 只读：无任何执行路径据它分支（回收时机由各代自己的引用数决定），因此它不会
 // 成为第二真源。
 type ExecutorRefs struct {
-	InFlightTurns   int64            `json:"inFlightTurns"`   // 业务 turn 引用（LeaseTurn）
-	SubCalls        int              `json:"subCalls"`        // 继承的在途子调用引用
-	BackgroundRuns  int              `json:"backgroundRuns"`  // ACK 后后台执行引用
-	PendingRetirees int              `json:"pendingRetirees"` // 已退役但尚未 Close 的代（未收敛）
-	OldestPending   time.Duration    `json:"oldestPending"`   // 等最久的退役代年龄
-	LeakThreshold   time.Duration    `json:"leakThreshold"`   // 超过该年龄会开告警
-	Generations     []GenerationRefs `json:"generations"`     // 逐代引用（含当前代）
+	InFlightTurns   int64            `json:"inFlightTurns"`
+	SubCalls        int              `json:"subCalls"`
+	BackgroundRuns  int              `json:"backgroundRuns"`
+	PendingRetirees int              `json:"pendingRetirees"`
+	OldestPending   time.Duration    `json:"oldestPending"`
+	LeakThreshold   time.Duration    `json:"leakThreshold"`
+	Generations     []GenerationRefs `json:"generations"`
 }
 
+// ExecutorRefs 交出执行器引用面的诊断快照（退役引用、未收敛属主等），供运维判断回收是否收敛；
+// 管理器为 nil 时返回零值快照。
 func (cm *ContextManager) ExecutorRefs() ExecutorRefs {
 	if cm == nil {
 		return ExecutorRefs{}
@@ -1119,7 +989,7 @@ func (cm *ContextManager) ExecutorRefs() ExecutorRefs {
 }
 
 // UnconvergedRefs lists the retired generations still held by a live reference
-// (§4.1: a bounded Close must be able to say WHO is still running instead of
+// (: a bounded Close must be able to say WHO is still running instead of
 // force-closing to satisfy a count). The active generation is never listed.
 func (cm *ContextManager) UnconvergedRefs() []UnconvergedRef {
 	if cm == nil {
@@ -1150,7 +1020,7 @@ func (cm *ContextManager) noteUnconverged() {
 		if u.HeldFor > retiredLeakAfter {
 			log.Warnf("[ContextManager] generation %d of owner %q retired >%s ago but still holds %v references — investigate the execution that never stopped",
 				u.Generation, u.Owner, retiredLeakAfter, u.Refs)
-			return // one alarm per call
+			return
 		}
 	}
 }
@@ -1174,8 +1044,6 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 		if evt.Message.Content != "" {
 			contents = append(contents, evt.Message.Content)
 		}
-		// §4.3: a valid non-text (image/file) payload has empty Content but must still
-		// reach the request — collect its parts so an image-only input is never dropped.
 		parts = append(parts, evt.Message.ContentParts...)
 	}
 	if len(contents) == 0 && len(parts) == 0 {
@@ -1195,38 +1063,23 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 //
 //	[system] + render(projection) (+ live task board, injected by a later callback)
 //
-// The projection is the SOLE assembly source (unified-event-projection D2).
+// The projection is the SOLE assembly source.
 // Nothing is read back from the framework's message tail — every event
 // (user input, tool calls, tool results, finals, bus injections) reaches the
 // projection through the event-plugin pipeline or persistBusEvent, so the
 // data flow across the framework boundary is strictly one-way.
 func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.BeforeModelArgs) {
-	// F5 (D1 design): BeforeModel SHALL NOT claim bus events mid-turn.
-	// The persistent event loop is the sole bus consumer; new arrivals wait
-	// for the next Pull at the turn boundary. The previous TryPull block here
-	// caused claimed durable envelopes to bypass the turn-completion protocol
-	// (F5: inputs claimed here never reached finishDurableBatch).
 
-	// Resolve projection → (possibly compressed) historical messages.
 	refs := cm.projection.GetAll()
 	result := cm.contextCompressor.Compress(ctx, refs)
 	cm.projection.Replace(result.RetainedRefs)
-	// event-sourced-projection D2：折叠本身是事实链的一条 compaction 事件（仅真折叠时发射，
-	// 先 Replace 后写事件；失败留痕不阻断）。投影恒为事实链的旁路产物。
-	// Compressed 门控（review 🟠1）：under-budget 轮 RetainedRefs 原样返回，首位仍是
-	// 上次折叠遗留的综述负 key ref——仪靠 BuildCompactionPayload 的首位判定拦不住
-	// 「已折叠后的 under-budget 轮」，会每轮误发（写放大+违反 spec「未折叠不写」）。
 	if result.Compressed {
 		if notice := cm.emitCompactionEvent(result.RetainedRefs); notice != nil {
-			// 降级留痕：Notices 承载契约字面；Messages 是既有消费路径
-			// （[context_compress_error] 先例），双写保证可感知。
 			result.Notices = append(result.Notices, *notice)
 			result.Messages = append(result.Messages, *notice)
 		}
 	}
 
-	// Rebuild: [system] + render(projection). The system message is the only
-	// part of args.Request.Messages that is read.
 	systemMsg, _ := compress.SplitSystemMessage(args.Request.Messages)
 	rebuilt := make([]model.Message, 0, len(result.Messages)+1)
 	if systemMsg != nil {
@@ -1234,11 +1087,6 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	}
 	rebuilt = append(rebuilt, result.Messages...)
 
-	// hotswap-fix 5.7 健康探针：装配产物只有 system（n<=1）说明投影/会话
-	// 状态面异常（如换装事故中的空投影装配）。此时不打到 provider 吃 400，
-	// 而是注入降级 user 消息：请求形态合法（LLM 可应答），同时 ERROR 日志
-	// 带投影计数与重建模式，一击定位。user 消息本身会经事件管线回流，
-	// 下个 turn 投影非空即自然恢复。
 	if len(rebuilt) <= 1 {
 		log.Errorf("[assemble-health] request has only %d message(s) (system-only); "+
 			"projection len=%d — injecting degradation notice (hotswap empty-projection guard)",
@@ -1247,37 +1095,31 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 			"[context-guard] 会话状态异常（上下文为空）。请向用户如实说明当前对话上下文不可用，请其重发上一条消息。"))
 	}
 
-	// F9 (D6) recovery notice is NO LONGER consumed here: §4.5C moved it to the
-	// execution gate (executionGateModel), injected at the ACTUAL model invocation so a
-	// created-but-never-iterated lazy iterator does not consume the one-shot notice. The
-	// gate runs after this rebuild and appends the notice at the same request tail (still
-	// never persisted), preserving D6.
 	args.Request.Messages = rebuilt
 }
 
-// emitCompactionEvent（event-sourced-projection D1/D4/D6）：真折叠后把折叠产物作为
-// 一等 compaction 事件落事实链——context_compress_summary 正 key 事件，Content/EventSummary
-// = 综述正文（可召回正文即叙事本身），Metadata[compaction_payload] 载重建载荷（综述 ref +
-// 有序 retained 列表：正 key 只存 key、tool_chain 合成 ref 全身份逐字节 + fullBoundary）。
-// 滚动 supersede：写前查 prior（限定 compaction=v1 代际标记，legacy 固化物不删不选）、
-// 写后 DeleteEvent(prior)。事件自身 Timestamp=写入时刻（非综述 minTs，D4）。仅真折叠发射
-// （under-budget 轮 BuildCompactionPayload 返回 ok=false）。StoreEvent 失败 ERROR 留痕并
-// 返回通知（不阻断当轮装配）；supersede 失败仅 ERROR（下轮再补）。返回 nil = 成功/跳过。
+// emitCompactionEvent 在真折叠后把折叠产物作为一等 compaction 事件落到事实链——
+// context_compress_summary 正 key 事件，Content/EventSummary 即综述正文（可召回正文就是叙事本身），
+// Metadata[compaction_payload] 载重建载荷（综述 ref ＋ 有序 retained 列表：正 key 只存 key、
+// tool_chain 合成 ref 全身份逐字节 ＋ fullBoundary）。
+// 滚动 supersede：写前查 prior（限定 compaction=v1 代际标记；无标记的既有固化数据不删不选），
+// 写后 DeleteEvent(prior)。事件自身 Timestamp 取写入时刻（不是综述的 minTs）。
+// 仅真折叠发射（未超预算的轮次 BuildCompactionPayload 返回 ok=false）。
+// StoreEvent 失败以 ERROR 留痕并返回通知（不阻断当轮装配）；supersede 失败仅 ERROR（下轮再补）。
+// 返回 nil 表示成功或跳过。
 func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) *model.Message {
 	if cm.memStore == nil || cm.contextCompressor == nil {
 		return nil
 	}
 	payload, ok := compress.BuildCompactionPayload(retained, cm.contextCompressor.FullBoundary())
 	if !ok {
-		return nil // no real fold this round (under-budget / no new summary ref)
+		return nil
 	}
 	raw, err := payload.MarshalPayload()
 	if err != nil {
 		log.Errorf("[emitCompactionEvent] payload marshal failed: %v", err)
 		return nil
 	}
-	// Supersede order (D4): query prior BEFORE writing — after the write a
-	// timestamp_desc query would find the just-written event and delete it.
 	priorKey := cm.latestCompactionKey()
 	eventKey := memory.NewSnowflakeEventKey(cm.partitionID, 0)
 	md := map[string]string{
@@ -1293,7 +1135,7 @@ func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) 
 		PartitionID:  cm.partitionID,
 		EventType:    tagentevent.TypeContextCompressSummary,
 		EventSummary: payload.SummaryRef.EventSummary,
-		Timestamp:    time.Now().UnixMilli(), // write time (D4), never the summary minTs
+		Timestamp:    time.Now().UnixMilli(),
 		Content:      payload.SummaryRef.EventSummary,
 		Metadata:     md,
 	}
@@ -1314,11 +1156,9 @@ func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) 
 	return nil
 }
 
-// latestCompactionKey returns the newest marker-tagged compaction event key
-// (0 = none). QueryEvents cannot filter on Metadata, so this walks a short
-// timestamp_desc window and checks the generation marker via GetEvent —
-// legacy 固化物 (same type, no marker, TTL-immortal) is never selected and
-// therefore never superseded/deleted (fresh-eyes D).
+// latestCompactionKey 返回带代际标记的最新 compaction 事件键（0 表示没有）。QueryEvents 无法按
+// Metadata 过滤，故此处走一小段 timestamp_desc 窗口并用 GetEvent 校验代际标记——
+// 无标记的既有固化数据（同类型、TTL 永久）永不被选中，因而也不会被 supersede/删除。
 func (cm *ContextManager) latestCompactionKey() int64 {
 	if cm.memStore == nil {
 		return 0
@@ -1337,10 +1177,6 @@ func (cm *ContextManager) latestCompactionKey() int64 {
 		if err != nil || evt == nil {
 			continue
 		}
-		// Agent identity check (review 🟠2): PartitionIDFromName is a 10-bit
-		// FNV hash (collisions expected at ~38 agents) — without this check a
-		// colliding agent's latest compaction event would be supersede-deleted
-		// cross-agent, silently dropping that agent's rebuild snapshot.
 		if evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 &&
 			evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name {
 			return r.EventKey
@@ -1349,7 +1185,7 @@ func (cm *ContextManager) latestCompactionKey() int64 {
 	return 0
 }
 
-// persistTaskRecord（R2，resident-continuity-r2-r4 1.6）：记录-only 持久化——只写
+// persistTaskRecord：记录-only 持久化——只写
 // 事实链，不发 bus（不唤醒）、不进投影（task_spawned/inline settle 记录均非投影
 // ref：看板由 registry 每轮渲染；inline 结果已作为工具结果在投影内）。best-effort。
 func (cm *ContextManager) persistTaskRecord(fullEvent memory.FullEvent) {
@@ -1370,17 +1206,12 @@ func (cm *ContextManager) persistTaskRecord(fullEvent memory.FullEvent) {
 // projection ref, never bus-published.
 func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
 	if cm == nil || tk == nil || tk.Spec.Declarative == nil {
-		return // no declarative → not replayable, no record (best-effort)
+		return
 	}
 	decl := *tk.Spec.Declarative
 	if decl.StartedAtMilli == 0 {
 		decl.StartedAtMilli = tk.StartedAt.UnixMilli()
 	}
-	// hardening-review-batch2 1.1（世系跨重启保真）：Declarative 构造点
-	// （tool_agent / SpecFromDeclarative）不携带运行态 Spec.Origin——框架
-	// OriginSpawner 在 Spawn 入口 stamp 到 spec 上，此处（OnSpawn hook，晚于
-	// stamp）单点补填，保证 task_spawned 持久化记录携带 routing baggage。
-	// 声明式字段已填 Origin 时以声明式为准（不覆盖）。
 	if len(decl.Origin) == 0 && len(tk.Spec.Origin) > 0 {
 		cp := make(map[string]string, len(tk.Spec.Origin))
 		for k, v := range tk.Spec.Origin {
@@ -1388,8 +1219,6 @@ func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
 		}
 		decl.Origin = cp
 	}
-	// hardening-review-batch2 2.4：lifetime 类持久化——恢复侧据它还原同一
-	// 生命周期分类（job 受 stale/deadline 治理；service 永不因年龄终止）。
 	if decl.Lifetime == "" {
 		decl.Lifetime = task.LifetimeOf(tk.Spec)
 	}
@@ -1414,7 +1243,7 @@ func (cm *ContextManager) EmitTaskSpawnedRecord(tk *task.Task) {
 	})
 }
 
-// EmitTaskCancelledRecord（R2，review 终审🔴）：Cancel 终态的事实链记录
+// EmitTaskCancelledRecord：Cancel 终态的事实链记录
 // （registry-only；形态与 inline settle 同款）。不写则重启回放以 suspect 复活
 // （看板幽灵 + subagent 同 Key dedup 永久锁死）。
 func (cm *ContextManager) EmitTaskCancelledRecord(tk *task.Task) {
@@ -1452,10 +1281,6 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 	if tk.Status() != "" {
 		status = string(tk.Status())
 	}
-	// R4 review 🟡10：与 background 路径词汇归一——SettleStable 在 background
-	// 侧记 "alive-detached"（detached 转换发生在 emitBackground），inline 侧
-	// tk.Status() 仍是 running/stable；归一后恢复时 aliveDetached 抑制标志
-	// 语义一致（避免恢复后多发一次 ready 通知）。
 	if sig.Kind == task.SettleStable {
 		status = "alive-detached"
 	}
@@ -1485,9 +1310,6 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 // the volatile/claim-less commit path call it, so a durable fact's canonical
 // form is decided ONCE and never re-derived on replay.
 func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
-	// Defense-in-depth for §3.1: the receive boundary rejects an external_input with a
-	// nil Message, so a nil here means a non-input or a caller bug. Returning a zero
-	// fact (EventKey==0) lets the §3.5 completeness gate drop it rather than panic.
 	if evt == nil || evt.Message == nil {
 		return memory.FullEvent{}
 	}
@@ -1505,30 +1327,14 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 		EventSummary: eventSummary,
 		Timestamp:    evt.Timestamp.UnixMilli(),
 		Content:      msg.Content,
-		// §4.3 / §3.4-deferred: freeze multimodal parts so an image-only (empty-text)
-		// input is retained losslessly in the fact chain and re-rendered to the request.
 		ContentParts: msg.ContentParts,
-		// §3.4: freeze the message's tool fields onto the canonical fact via the
-		// existing FullEvent payload fields — previously only Content was kept, so
-		// a tool-bearing input fact lost its calls and could not be rebuilt.
-		ToolCalls: msg.ToolCalls,
-		ToolID:    msg.ToolID,
+		ToolCalls:    msg.ToolCalls,
+		ToolID:       msg.ToolID,
 	}
-	// 归因盖章（TC0，路径2/2）：与插件管线 onEvent 同盖，避免归因盲区（报告 R5）。
-	// 基线盖 agent_name + trigger_source + rollout_id（sessionID）；bundle_id 属会话级
-	// 版本上下文（非 turn 锚），D1-B（design-report-closeout）起双路径同盖。
-	// M9（§8.4）设计边界（非缺陷）：persistBusEvent 处理 bus 回流的**系统注入消息**（如
-	// action_tool_result，见上 RoleSystem→RoleUser 转换），非 RunFlow 的 LLM 调用产出——不属
-	// 单一 turn span，故**不注入** turn trace 锚（trace_id/span_id 是 RunFlow 主路径经
-	// Attribution 的职责）。其溯源经 rollout_id(sessionID) + trigger_source 达成（关联到会话与
-	// 触发源，足够审计）；强加 turn span 锚反而会错误归属到无关 turn。
 	fullEvent.Metadata = map[string]string{
 		tagentevent.MetaKeyAgentName:     cm.name,
 		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
 	}
-	// R2（resident-continuity-r2-r4 1.5）：task 来源事件的结构化 settle 键拷入
-	// FullEvent.Metadata——事实链 settle 记录可被 RebuildTaskRegistry 机器辨读
-	// （task_id/settle_status；task_inline_record 标记内联终态记录，event 包非投影判定排除）。
 	if evt.Source == SourceTask {
 		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord} {
 			if v, ok := evt.Metadata[k]; ok {
@@ -1544,15 +1350,6 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 			fullEvent.Metadata[tagentevent.MetaKeyBundleID] = bid
 		}
 	}
-	// Durable-input identity (fix-resident-reliability-boundaries D2 L67, task 4.0a):
-	// a claim-bearing event freezes its batch identity onto the canonical fact so
-	// the fact chain is SELF-identifying. buildBusFact is called by both the write-
-	// before prepare barrier (prepareBatchFacts freezes this as prepared_fact)
-	// and the volatile path; the claim is only set on the durable path, so these
-	// keys land on the frozen fact and survive a restart. This is the prerequisite
-	// for 4.6's startup reconcile to check a fact directly by receipt_key without
-	// a projection/tail scan. The slot index is never compacted (F4), so (request
-	// id, slot) uniquely names one input fact.
 	if evt.claim != nil {
 		fullEvent.Metadata[tagentevent.MetaKeyInboxRequestID] = evt.claim.RequestID
 		fullEvent.Metadata[tagentevent.MetaKeyInboxSlot] = fmt.Sprintf("%d", evt.claim.Slot)
@@ -1560,11 +1357,6 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 			fullEvent.Metadata[tagentevent.MetaKeySourceEventID] = evt.ID
 		}
 	}
-	// §3.4: freeze the ORIGINAL source and the complete business Metadata as an
-	// exact JSON snapshot under one reserved control key (event.MetaKeySourceSnapshot).
-	// This preserves the input's provenance back to its host (chat_id, task
-	// genealogy, ...) across a restart WITHOUT spreading arbitrary business keys
-	// across the trusted control namespace — they live wholly inside this snapshot.
 	if snap, err := tagentevent.EncodeSourceSnapshot(evt.Source, evt.Metadata); err != nil {
 		log.Warnf("[buildBusFact] source snapshot encode failed src=%s: %v", evt.Source, err)
 	} else if snap != "" {
@@ -1574,7 +1366,7 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 }
 
 // isCompletePreparedFact checks the one invariant that unambiguously separates a
-// genuinely-prepared canonical fact from corrupt/truncated material (§3.5, design
+// genuinely-prepared canonical fact from corrupt/truncated material (, design
 // 决策2「完整准备校验」): a fixed non-zero Snowflake identity key. buildBusFact
 // always stamps a real key and never 0, so a decoded fact with EventKey == 0 is
 // not a real prepared fact and persistBusEvent gates the store rather than minting
@@ -1591,14 +1383,14 @@ func isCompletePreparedFact(f *memory.FullEvent) bool {
 // "visible but not projected" state that caused ordering bugs.
 //
 // The event is stored as a FullEvent with:
-//   - EventKey: Snowflake-generated (using ContextManager's partitionID)
-//   - EventType: inferred from message role
-//   - Content/EventSummary: from the AgentEvent's Message payload
+// - EventKey: Snowflake-generated (using ContextManager's partitionID)
+// - EventType: inferred from message role
+// - Content/EventSummary: from the AgentEvent's Message payload
 //
 // F2 fix: returns true when the fact is stored OR was already stored (replay
 // dedup path). Returns false only when StoreEvent failed and projection append
-// was gated. The §4.2 submit gate maps a false to submitTransient (no model, claims
-// requeued), so §4.4's cm.turnEcho — and thus the MemoryPlugin echo skip — is installed
+// was gated. The  submit gate maps a false to submitTransient (no model, claims
+// requeued), so 's cm.turnEcho — and thus the MemoryPlugin echo skip — is installed
 // ONLY once every selected fact is committed; otherwise the plugin would skip an input
 // that was never durably stored and the input would be lost.
 func (cm *ContextManager) persistBusEvent(evt *AgentEvent) bool {
@@ -1611,7 +1403,7 @@ func (cm *ContextManager) persistBusEvent(evt *AgentEvent) bool {
 // different-content collision or a forgotten tomb — which the commit protocol
 // must ISOLATE rather than retry: a frozen key that collides with different
 // content (cross-process snowflake collision included) conflicts on EVERY
-// replay, so retrying it forever is a livelock. §8.5's 30-restart cadence
+// replay, so retrying it forever is a livelock. 's 30-restart cadence
 // proved the surface real; the leaf comment 「dispositioning is layered on by
 // the commit protocol» is layered on HERE.
 func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, deterministic bool) {
@@ -1620,29 +1412,27 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 	}
 
 	msg := *evt.Message
-	// Convert RoleSystem → RoleUser: system-injected messages (e.g.,
-	// [action_tool_result]) should be treated as external input by the LLM.
 	if msg.Role == model.RoleSystem {
 		msg.Role = model.RoleUser
 	}
 
 	// Resolve the canonical fact for this event (fix-resident-reliability-
 	// boundaries D2/D3 + task 3.5):
-	//   - Durable claim WITH a frozen prepared_fact (normal reliable path):
-	//     reuse it VERBATIM. Its EventKey, summary and attribution were frozen
-	//     by the write-before prepare barrier on the first claim, so a replay
-	//     never re-stamps time/rollout/bundle or double-writes the fact (F1/F4).
-	//     If those bytes are undecodable OR incomplete it is current-format
-	//     corruption: the store is GATED (return false) and surfaces — the
-	//     regenerate-key weak fallback is DELETED (§3.5「删除重新生成 key 的
-	//     恢复分支」); minting a fresh key would silently double-write the input
-	//     under a new identity. The claim stays and replays.
-	//   - Durable claim but NO prepared_fact: the barrier did not succeed for
-	//     this envelope, so per D2「准备失败不调用 StoreEvent」we write NOTHING and
-	//     return false — the claim stays and replays; a half-prepared input
-	//     never silently enters the fact chain.
-	//   - No claim (volatile path / direct test call): build a fresh canonical
-	//     fact, exactly as before.
+	// - Durable claim WITH a frozen prepared_fact (normal reliable path):
+	// reuse it VERBATIM. Its EventKey, summary and attribution were frozen
+	// by the write-before prepare barrier on the first claim, so a replay
+	// never re-stamps time/rollout/bundle or double-writes the fact (F1/F4).
+	// If those bytes are undecodable OR incomplete it is current-format
+	// corruption: the store is GATED (return false) and surfaces — the
+	// regenerate-key weak fallback is DELETED (「删除重新生成 key 的
+	// 恢复分支」); minting a fresh key would silently double-write the input
+	// under a new identity. The claim stays and replays.
+	// - Durable claim but NO prepared_fact: the barrier did not succeed for
+	// this envelope, so per D2「准备失败不调用 StoreEvent」we write NOTHING and
+	// return false — the claim stays and replays; a half-prepared input
+	// never silently enters the fact chain.
+	// - No claim (volatile path / direct test call): build a fresh canonical
+	// fact, exactly as before.
 	var fullEvent memory.FullEvent
 	switch {
 	case evt.claim != nil && len(evt.claim.PreparedFact) > 0:
@@ -1665,38 +1455,13 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 	}
 	eventKey := fullEvent.EventKey
 	eventType := fullEvent.EventType
-	// §4.6 (event-sourced-projection L7): the projection ref is built from the CANONICAL
-	// fact the store holds/returned — never the current event's time, a re-derived summary,
-	// or the original call object. Default to the freshly built fullEvent (volatile path);
-	// the durable branch overwrites it with the canonical ReplayEvent returned.
 	refCanonical := fullEvent
 
-	// Stored-gate (event-sourced-projection D2, fresh-eyes E①): a failed
-	// StoreEvent must NOT append to the projection — otherwise the projection
-	// holds a ref the fact chain lacks and the rebuild invariant (projection =
-	// fold of the fact chain) breaks. The spill path (ErrorTrackingStore →
-	// ReplaySpilled dual-write) re-stores AND re-appends this event on
-	// recovery, restoring the same-point semantics. nil store (test/bypass
-	// scenarios) keeps the previous always-append behavior.
-	stored = true /* named returns */
-	// replayed marks a durable claim whose frozen canonical fact is ALREADY fully
-	// committed on the chain (the pre-crash pass stored it, or the startup rebuild
-	// restored it). Such a claim is a no-op: neither re-store NOR re-append NOR
-	// re-feedback — otherwise the projection would hold a ref the fact chain counts
-	// once and drift from it (F4「投影=事实链折叠」invariant) and the settle feedback
-	// would duplicate (D3 step3). It is classified from the ReplayResult, NOT a
-	// GetEvent probe: D4 forbids the weak "GetEvent success ⇒ done" degradation,
-	// and the 3.5 gate guarantees a durable store is an EventReplayer.
-	// A fresh volatile key is unique, so replayed stays false on the volatile path.
+	stored = true
 	replayed := false
 	switch {
 	case cm.memStore == nil:
-		// Test/bypass scenario (nil store): keep the historical always-append behavior.
 	case evt.claim != nil:
-		// Durable commit path (fix-resident-reliability-boundaries D3 step1 / D4):
-		// go through the internal replay interface, which content-checks the frozen
-		// fact and distinguishes fresh commit / half-orphan repair / idempotent
-		// already-committed / typed same-key-different-content conflict.
 		replayer, ok := cm.memStore.(memory.EventReplayer)
 		if !ok {
 			stored = false
@@ -1706,47 +1471,33 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		}
 		result, canonicalOut, err := replayer.ReplayEvent(eventKey, fullEvent)
 		if err == nil {
-			// Authoritative stored bytes (fresh OR already-committed): the projection-ref source.
 			refCanonical = canonicalOut
 		}
 		switch {
 		case err == nil && result == memory.ReplayAlreadyCommitted:
 			replayed = true
 		case err == nil:
-			// ReplayNew / ReplayRepaired: fact now durable under the frozen key.
 		case memory.IsDuplicateEventKey(err):
-			// Typed conflict — same key, DIFFERENT content. Never swallow it as a
-			// replay (D2 L68): hold the claim, do not ack, surface it. Dispositioning
-			// (isolate / completion=failed) is layered on by the commit protocol.
 			stored = false
 			deterministic = true
 			log.Errorf("[persistBusEvent] CONFLICT rid=%s slot=%d key=%d (same key, different content) — claim held, envelope not acked: %v",
 				evt.claim.RequestID, evt.claim.Slot, eventKey, err)
 		case memory.IsEventForgotten(err):
-			// 2.4: the fact is legally tombstoned — a replay MUST NOT resurrect it.
-			// Hold the claim (never ack, never re-project) and surface it, exactly like a
-			// conflict; the commit protocol dispositions it (isolate / completion=failed).
 			stored = false
 			deterministic = true
 			log.Errorf("[persistBusEvent] FORGOTTEN rid=%s slot=%d key=%d (legally tombstoned) — claim held, not re-projected: %v",
 				evt.claim.RequestID, evt.claim.Slot, eventKey, err)
 		default:
-			// Transient I/O / barrier failure: fact NOT durable this turn.
 			stored = false
 			log.Errorf("[persistBusEvent] ReplayEvent failed key=%d (append gated, replay will retry): %v", eventKey, err)
 		}
 	default:
-		// Volatile path (no claim): unchanged — a fresh snowflake key is unique.
 		if err := cm.memStore.StoreEvent(eventKey, fullEvent); err != nil {
 			stored = false
 			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
 		}
 	}
 
-	// §4.6: the projection ref comes from the returned/written canonical — role derived
-	// from the canonical EventType via the SAME fold rule the cold-start rebuild uses
-	// (removing the old runtime-vs-rebuild role deviation), time from the frozen canonical,
-	// never the current event's arrival time or the original message object.
 	ref := memory.EventReference{
 		EventKey:     eventKey,
 		PartitionID:  cm.partitionID,
@@ -1755,18 +1506,6 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		Timestamp:    refCanonical.Timestamp,
 		Role:         string(tagentevent.EventTypeRole(refCanonical.EventType)),
 	}
-	// R3（backlog-final-closeout）：projection nil 防御——测试/旁路场景（溢出登记）构造
-	// 裸 cm 时不崩溃（零值鲁棒性；主路径恒有投影，行为不变）。
-	// §4.6 (scenario「已有事实不等于当前请求已包含」): a SELECTED outstanding input whose
-	// frozen fact is already committed (replayed) STILL must be present in the projection
-	// before execution — the cold-start snapshot/tail scan may not have restored its older
-	// key. SessionProjection.Append is EventKey-idempotent, so re-asserting a rebuild-restored
-	// ref is a no-op while a missing one is backfilled; scoping to this function's callers
-	// (the selected batch only) keeps it from re-appending unrelated historical keys. The
-	// never-store-fails-append invariant holds: a store failure (stored=false, !replayed) skips.
-	// §5.5: the same event-package predicate the spill-replay and cold-start paths use
-	// guards the normal commit append — an internal record (receipt/registry/inline
-	// settle/compaction body) must never occupy the projection even if it reaches here.
 	if cm.projection != nil && (stored || replayed) && !tagentevent.IsNonProjectionRecord(refCanonical.EventType, refCanonical.Metadata) {
 		cm.projection.Append(ref)
 	}
@@ -1776,24 +1515,17 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		return true, false
 	}
 
-	// 2.3（design-report-closeout）：OnSettle 自动反馈——task_settled 事件落库后，
-	// 确定性 settle 裁决自动绑定 feedback（parent=task_settled 事件自身：结算记录
-	// 即任务产出，bundle_id 章使其可归因到 active bundle；suspect/stable 不写）。
-	// KNOWN WINDOW（review 🟡3）：StoreEvent 失败时 writeSettleFeedback 的
-	// BindFeedback 会因 parent 未落库而丢弃该次裁决（spill 恢复只补事件本体，
-	// 不补 feedback）——与改动前行为一致，非回归；如需消除可将本分支纳入
-	// stored 门控（spill 恢复时补裁决），另立小变更。
 	if evt.Source == SourceTask {
 		cm.writeSettleFeedback(eventKey, evt.Metadata)
 	}
 
 	log.Infof("[persistBusEvent] persisted bus event key=%d type=%s source=%s content=%s",
 		eventKey, eventType, evt.Source, truncateForLog(msg.Content, 80))
-	return stored, deterministic // F2: caller gates the submit outcome (no §4.4 echo credential on failure)
+	return stored, deterministic
 }
 
 // commitReceiptFact durably submits a frozen inbox-receipt fact under its RESERVED
-// key (§5.3, design 决策5 L63/L122). Unlike the old persistInboxReceipt — which
+// key. Unlike the old persistInboxReceipt — which
 // minted a FRESH snowflake key and stamped time.Now() on every call, so a retry or
 // restart produced a DIFFERENT, non-idempotent receipt — this commits the exact
 // frozen bytes the completion carries through the explicit replay interface, so a
@@ -1801,8 +1533,8 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 // (never a second receipt event) and a same-key/different-content collision
 // surfaces as an error. The receipt is an internal processing record: it is
 // deliberately NOT appended to the projection (it never feeds model context),
-// matching the old receipt path and §5.5's non-projection classification.
-// §5.7: it returns the TYPED error (nil = committed OR already-committed, both
+// matching the old receipt path and 's non-projection classification.
+// : it returns the TYPED error (nil = committed OR already-committed, both
 // verify) so the startup reconcile can discriminate a deterministic contradiction
 // (same-key-different-content, legally-forgotten receipt) — quarantine material —
 // from transient I/O, which must block conservatively instead.
@@ -1820,14 +1552,15 @@ func (cm *ContextManager) commitReceiptFact(receipt memory.FullEvent) error {
 	return nil
 }
 
-// writeSettleFeedback（2.3 design-report-closeout）把确定性任务裁决写为 feedback
+// writeSettleFeedback把确定性任务裁决写为 feedback
 // 事件（因果边指向 task_settled 事件）。completed→positive / failed→negative；
 // suspect/alive-detached/未知状态不写（只记确定性裁决，防噪声污染 guardrail）。
 // 失败仅记日志（反馈是旁路产物，不阻塞主链路）。
 //
-// §2.7④ 不变量：feedback **不是** durable 提交/ack 凭据。本函数仅在 `stored` 已为 true
+//	不变量：feedback **不是** durable 提交/ack 凭据。本函数仅在 `stored` 已为 true
+//
 // （事实链已 durable）且投影已 append 之后运行，位于 ack 下游；BindFeedback 失败不撤销
-// 提交、不影响 `stored` 返回值（F2：caller 据此决定 ack / §4.4 echo 凭据安装），也不影响可靠
+// 提交、不影响 `stored` 返回值，也不影响可靠
 // inbox 的 durable 判定（其凭据是 PublishReceipt.Durable，与 feedback 无关）。guardrail 的
 // negative_feedback_rate 只作行为信号，绝不作输入确认/重放凭据。
 func (cm *ContextManager) writeSettleFeedback(settledKey int64, md map[string]any) {
@@ -1842,7 +1575,7 @@ func (cm *ContextManager) writeSettleFeedback(settledKey int64, md map[string]an
 	case "failed":
 		verdict = "negative"
 	default:
-		return // suspect / alive-detached / unknown: no deterministic verdict
+		return
 	}
 	if _, err := memory.BindFeedback(cm.memStore, settledKey, memory.FeedbackPayload{
 		Verdict: verdict, Source: "task_settle",
@@ -1865,8 +1598,8 @@ func truncateForLog(s string, maxLen int) string {
 // "meditation") MUST persist into agent_output Metadata — projection
 // rebuild re-marks meditation keys from the fact chain, and without this
 // stamp the reseed condition Metadata[trigger_source]==meditation can
-// never fire (event-sourced-projection D3; previously it only lived on
-// the in-memory StateDelta).
+// never fire unless stamped: this signal must live on the fact chain, not
+// only in the in-memory StateDelta.
 func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attribution {
 	attr := plugin.Attribution{}
 	if cm.sessionID != "" {
@@ -1876,8 +1609,6 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 		attr[tagentevent.MetaKeyTraceID] = traceID
 		attr[tagentevent.MetaKeySpanID] = spanID
 	}
-	// D1-B (design-report-closeout): stamp the active bundle id so every
-	// produced event attributes to the exact prompt/config version.
 	if cm.bundleIDFn != nil {
 		if bid := cm.bundleIDFn(); bid != "" {
 			attr[tagentevent.MetaKeyBundleID] = bid
@@ -1889,11 +1620,11 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 	return attr
 }
 
-// RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
+// echoSpec RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
 // echoSpec is the turn-level, immutable template runEventLoop installs when this
-// turn's durable input facts are already committed (§4.4). RunFlow clones it into a
+// turn's durable input facts are already committed. RunFlow clones it into a
 // fresh per-attempt plugin.EchoCredential (unique token), so there is no shared mutable
 // whole-turn state — the derived credential owns its own bind state. No mutex here.
 type echoSpec struct {
@@ -1904,7 +1635,7 @@ type echoSpec struct {
 }
 
 // newAttemptEchoCredential stamps a unique per-runner-attempt credential from the
-// turn's echo spec (§4.4). A retry of the same business turn calls this again → a new
+// turn's echo spec. A retry of the same business turn calls this again → a new
 // AttemptToken reusing the same committed facts; the prior attempt's credential is
 // released as its ctx ends.
 func (cm *ContextManager) newAttemptEchoCredential() *plugin.EchoCredential {
@@ -1917,7 +1648,7 @@ func (cm *ContextManager) newAttemptEchoCredential() *plugin.EchoCredential {
 	}
 }
 
-// turnEchoVerified reports the §4.5 execution-credential outcome of the most recent
+// turnEchoVerified reports the  execution-credential outcome of the most recent
 // attempt as (installed, verified). installed=true means this turn had durable committed
 // inputs expecting an echo; verified=false while installed means the model ran (or was
 // gated) on UNverified input — the echo was never bound or a plugin error downgraded it,
@@ -1930,31 +1661,19 @@ func (cm *ContextManager) turnEchoVerified() (installed, verified bool) {
 	return true, cm.lastEchoCred != nil && cm.lastEchoCred.Verified()
 }
 
+// RunFlow 在"当前生效"的执行面上跑一个业务回合。需要在回合边界钉住特定执行器（如热更新与
+// 发布交错的场景）时改用 RunFlowWithExecutor。
 func (cm *ContextManager) RunFlow(ctx context.Context, msg model.Message) error {
 	return cm.RunFlowWithExecutor(ctx, msg, nil)
 }
 
 // RunFlowWithExecutor runs one business turn on the executor pinned at the turn
-// boundary (§3.2). pinned MUST come from BeginTurn of the same turn; when it is
+// boundary. pinned MUST come from BeginTurn of the same turn; when it is
 // nil the executor is resolved here instead — the correct behavior for paths
 // that have no turn boundary of their own (one-shot/sub-agent invocations, whose
 // TagentAgent instance and executor were already constructed inside one
 // generation and are never republished in place).
 func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Message, pinned runner.Runner) error {
-	// §3.2/§4.1: a turn runs under EXACTLY ONE reference on ONE generation. Three
-	// shapes decide who holds it:
-	//  1. the context already carries a lease — the persistent loop's BeginTurn
-	//     lease, or an ancestor invocation's inherited one → join it. Taking a
-	//     second count here is the historical BeginTurn+RunFlow double registration
-	//     that made one business turn look multiplied (§5.1);
-	//  2. no lease, but the caller pinned an executor → the reference belongs to
-	//     whoever holds the pin (contract below: it came from BeginTurn of this
-	//     turn). Acquiring here would count the generation active NOW, which is not
-	//     the one being run — a multiplied count AND a misreported one;
-	//  3. neither → standalone flow: resolve the current generation, hold its own
-	//     reference and release it when the turn's tail is done, which — thanks to
-	//     the §6.3 producer-done credential — means the framework producer exited,
-	//     not merely that the processed stream closed.
 	lease, inherited := execLeaseFromContext(ctx)
 	if !inherited && pinned == nil {
 		lease = cm.AcquireLease(LeaseTurn)
@@ -1963,65 +1682,27 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 		pinned = lease.Runner()
 	}
 	if err := lease.Err(); err != nil {
-		// The turn's own reference was declined — either taken here against a converged
-		// generation or inherited from an ancestor whose lease the gate refused. Either
-		// way: do not start, and never run on a closed executor.
 		return fmt.Errorf("%w: agent %q turn", err, cm.name)
 	}
-	// Bind this invocation's projection as the pipeline projection sink:
-	// MemoryPlugin projects each stored event at the same synchronous point
-	// (write unification, unified-event-projection D1).
 	if cm.turnEcho != nil {
-		// §4.4: mint a fresh per-attempt echo credential (unique request token) so the
-		// MemoryPlugin identifies THIS attempt's input echo precisely — root invocation,
-		// author=user, and the exact committed merged message — instead of skipping every
-		// user event in a whole-turn "first envelope" mode. Released when this ctx ends.
-		// §4.5: also retained on cm so the loop can fail-closed if the model-entry gate
-		// never saw a verified echo (framework fed a non-matching/absent input, or a
-		// swallowed plugin error downgraded it).
 		cred := cm.newAttemptEchoCredential()
 		cm.lastEchoCred = cred
 		ctx = plugin.WithEchoCredential(ctx, cred)
 	}
 	if cm.projection != nil {
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
-		// §6.5/D2: this call's projection also rides the context as the auto-inject
-		// source for any delegation invoked by the flow. Delegation wrappers are
-		// shared published objects (they live in the owner's config.Tools), so the
-		// per-call value must never be written into them — see withCallProjection.
 		ctx = withCallProjection(ctx, cm.projection)
-		// 归因章注入（TC0 路径1/2 + T-B trace 关联）：rollout_id + turn span 的 trace_id/span_id
-		// → 事件 Metadata 携带 trace 锚，使事件溯源 / trajectory / OTel span 三投影由同一 id
-		// 双向互链（指令2「一套数据模式、多场景投影、保一致性」）。空归因不注入。
 		ctx = plugin.WithAttribution(ctx, cm.buildTurnAttribution(ctx))
 	}
-	// Inject the task spawner so tools can delegate long-running work to the
-	// task layer (sync-wait window → inline or ack). Absent → synchronous.
 	if cm.taskController != nil {
 		// Wrap the spawner to snapshot the originating turn's invocation
 		// metadata (chat_id, ...) as opaque origin baggage on each spawned
 		// task, so a background settle can be routed back to the originating
-		// session. The task layer never interprets it. (async-result-delivery.)
+		// session. The task layer never interprets it.
 		var spawner task.TaskSpawner = cm.taskController
-		// Origin baggage = invocation metadata (chat_id, ...) + T-B turn trace 锚点
-		// (trace_id/span_id)。后者使异步 task_settled 事件经 Origin→Metadata 管道携带触发
-		// 它的 turn 的 trace 锚点——指令2「一套数据模式多场景保一致性」延伸到异步任务链路：
-		// task settle 回流的新 turn 可关联回原 trace（异步链路可追溯），复用现有 Origin 管道
-		// 零新结构、零 task 包侵入。
 		md := cm.GetInvocationMetadata()
 		traceID, spanID := spanTraceIDs(ctx)
-		// meditation-leak-r2 (2026-09-15): lineage WRITE side. The turn's resolved
-		// trigger source rides the Origin baggage, so the async task_settled event
-		// (event_bus.go copies Origin -> Metadata) re-arms extractTriggerSource's
-		// lineage branch in the reclaim turn. Without this capture the read side
-		// (e2195fc) never fires: meditation-spawned tasks settle as bare "task"
-		// triggers and their outputs leak to lastActiveChat.
 		ts := cm.triggerSource
-		// S2m (introduce-durable-workflow-engine): the delegation's correlation handle
-		// rides the same Origin→Metadata courier, so a越窗 task_settled carries the
-		// invocation id S3m routes the late result back by. invocation_id is a CONTROL
-		// key, so the reclaim turn's extractRootMetadata filters it from meta_*/model —
-		// routing data the framework reads, never model-visible (D4).
 		invID, _ := invocationIDFromContext(ctx)
 		if len(md) > 0 || traceID != "" || ts != "" || invID != "" {
 			cp := make(map[string]string, len(md)+4)
@@ -2039,9 +1720,6 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 				cp[metaKeyInvocationID] = invID
 			}
 			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
-			// S3m-b: on a sub-call turn (invID present + owner sinks wired), book
-			// background spawns into the delivery-accounting barrier so the M2 loop
-			// knows when every越窗 task this call started has settled+been delivered.
 			if invID != "" && cm.settleSinks != nil {
 				spawner = &countingSpawner{inner: spawner, sinks: cm.settleSinks, id: invID}
 			}
@@ -2054,16 +1732,13 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 	}
 	eventCh, err := exec.Run(ctx, cm.userID, cm.sessionID, msg)
 	if err != nil {
-		// §5.1: a runner start/transport error is a definite failure of THIS
-		// attempt. Record it so the loop can tell a real failure from a nil return
-		// even on the last retry, rather than falling through to "completed".
 		startErr := fmt.Errorf("runner.Run: %w", err)
 		cm.lastTurnOutcome = reduceTurnOutcome(startErr, "", false)
 		return startErr
 	}
 
 	cm.turnProductive = false
-	// §5.1: response-internal error captured from the stream. The framework
+	// : response-internal error captured from the stream. The framework
 	// surfaces a model/API failure as an event carrying Response.Error (it does
 	// NOT make RunFlow return an error), so the old code — which never inspected
 	// Response.Error — mistook such a turn for success and ACKed its durable
@@ -2073,30 +1748,16 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 		if fwEvt == nil {
 			continue
 		}
-		// Clone before any tagent-side mutation: the framework retains the
-		// original event for its own post-processing reads (e.g. content
-		// snapshot cloning on the runner goroutine), so writing StateDelta on
-		// the shared object would be a data race. All tagent-side metadata
-		// (trigger_source, meta_*) goes onto this private copy, which is what
-		// onEvent and outputCh consumers observe.
 		evt := cloneEventForDelivery(fwEvt)
 		if cm.triggerSource != "" {
-			// Attach trigger source to the event for deterministic
-			// consumer-side dispatch (meditation vs task vs user).
 			evt.StateDelta[tagentevent.MetaKeyTriggerSource] = []byte(cm.triggerSource)
 		}
-		// Track turn productivity: a turn that never calls a tool and ends in
-		// an empty final produced nothing (occasional model hiccup) — the
-		// persistent loop retries such a turn once (see runEventLoop).
 		if evt.Response != nil && len(evt.Response.Choices) > 0 {
 			m := evt.Response.Choices[len(evt.Response.Choices)-1].Message
 			if len(m.ToolCalls) > 0 || (isFinalResponse(evt) && strings.TrimSpace(m.Content) != "") {
 				cm.turnProductive = true
 			}
 		}
-		// §5.1: a response-internal model/framework error arrives with a nil
-		// transport return; capture it once (bounded) so the turn reduces to
-		// failed rather than being mistaken for completion.
 		if evt.Response != nil && evt.Response.Error != nil && respErr == "" {
 			respErr = fmt.Sprintf("%s: %s", evt.Response.Error.Type, evt.Response.Error.Message)
 		}
@@ -2104,14 +1765,7 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 			cm.onEvent(evt)
 		}
 		if cm.outputCh != nil {
-			// F2 (design-report-closeout): 2s grace → persist + ticket, never
-			// block the loop on a stalled consumer.
 			if !cm.deliverEvent(ctx, evt) && ctx.Err() != nil {
-				// §5.1: a mid-drain shutdown cancellation previously returned nil,
-				// which the loop read as "completed" and then ACKed — dropping the
-				// claims of a turn that reached no terminal state. Classify it as
-				// cancelled (spec L90/L130: no completion, claim retained) and
-				// surface the ctx error so the loop stops rather than acking.
 				cm.lastTurnOutcome = reduceTurnOutcome(ctx.Err(), respErr, true)
 				return ctx.Err()
 			}
@@ -2121,15 +1775,15 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 	return nil
 }
 
-// LastTurnOutcome returns the §5.1 reduced terminal state of the most recent
+// LastTurnOutcome returns the reduced terminal state of the most recent
 // RunFlow attempt. The persistent loop uses it to distinguish a genuinely
 // completed turn from a response-error failure or a shutdown cancellation that
-// the nil transport return used to hide.
+// a nil transport return would otherwise hide.
 func (cm *ContextManager) LastTurnOutcome() turnOutcome {
 	return cm.lastTurnOutcome
 }
 
-// setLastBatchOutcome records the loop's §5.1 reduced terminal state for the
+// setLastBatchOutcome records the loop's  reduced terminal state for the
 // most recent turn (called only on the loop goroutine after the retry budget).
 func (cm *ContextManager) setLastBatchOutcome(o turnOutcome) { cm.lastBatchOutcome = o }
 
@@ -2155,14 +1809,13 @@ func cloneEventForDelivery(evt *event.Event) *event.Event {
 
 // injectLiveTaskBoard renders the current active-task board and appends it at
 // the TAIL of the message list (after the current input / pending tool
-// results) — the board bytes change every call (task ages), so only the
-// tail position keeps the prompt-cache prefix intact. The taskController
-// nil-check is at CALL time, not registration time: taskController is wired
-// AFTER ContextManager construction (agent.go), so a registration-time guard
-// would permanently skip the board. The board is ephemeral (request-only,
-// never projected/compressed).
-// (async-result-delivery: task-board-injection-order fix; 2026-08-27 tail
-// reposition for prefix-cache stability.)
+// results): the board bytes change every call (task ages), so only the tail
+// position keeps the prompt-cache prefix intact. The taskController nil-check
+// is at CALL time, not registration time — taskController is wired after
+// ContextManager construction, so a registration-time guard would permanently
+// skip the board. The board is ephemeral: request-only, never projected or
+// compressed.
+// 契约: docs/wiki/agent/task-lifecycle.md#board-rendering
 func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	if cm.taskController == nil {
 		return
@@ -2196,13 +1849,13 @@ func (cm *ContextManager) allBindings() []*execBinding {
 }
 
 // OutstandingRefs reports how many execution references this manager's generations
-// currently hold. Owner-level decisions above the agent layer (§4.3 retirement) ask
+// currently hold. Owner-level decisions above the agent layer ask
 // "is any execution still in flight" through this, so they read the SAME accounting
 // the reclaim path acts on instead of maintaining a parallel notion of busy.
 func (cm *ContextManager) OutstandingRefs() int { return cm.totalRefs() }
 
 // totalRefs is the sum of outstanding references over all generations of this
-// manager — the quantity a bounded drain waits for (§4.1: it covers background
+// manager — the quantity a bounded drain waits for (: it covers background
 // executions and inherited sub-calls, not just business turns).
 func (cm *ContextManager) totalRefs() int {
 	total := 0
@@ -2255,9 +1908,9 @@ func (cm *ContextManager) Close() error {
 // WaitForInFlight blocks until every outstanding execution reference (resident
 // loop turns, one-shot/sub-call turns AND post-ACK background runs — all of them
 // registered on their generation) has drained, or the timeout passes; false means
-// work was still active, and the caller can name it with UnconvergedRefs. The §6.2
+// work was still active, and the caller can name it with UnconvergedRefs. The
 // close sequence uses it so the output channel is never settled while a turn may
-// still send to it (review M-1).
+// still send to it.
 func (cm *ContextManager) WaitForInFlight(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for cm.totalRefs() > 0 {
@@ -2270,19 +1923,11 @@ func (cm *ContextManager) WaitForInFlight(timeout time.Duration) bool {
 	return true
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 func isFinalResponse(evt *event.Event) bool {
 	if evt == nil || evt.Response == nil || len(evt.Response.Choices) == 0 {
 		return false
 	}
 	choice := evt.Response.Choices[len(evt.Response.Choices)-1]
-	// Only an assistant message without tool_calls is a final response.
-	// A tool RESULT (Role=tool) also has no tool_calls but must NOT be
-	// treated as final — that would cause premature turn termination in
-	// the sub-agent path.
 	return choice.Message.Role == model.RoleAssistant && len(choice.Message.ToolCalls) == 0
 }
 

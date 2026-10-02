@@ -8,21 +8,25 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// ==================== TombstoneSet ====================
+// TombstoneSet 记录已被合法删除（遗忘）的事件键：内存驻留并持久化到 KV，以便崩溃后重建，
+// 且保证回放不会复活被遗忘的事实。删除时的级联父引用修复顺序是承重的，详见文档。
 //
-// TombstoneSet manages tombstoned EventKeys.
-// Tombstones are memory-resident (map[int64]bool) and persisted
-// to RustViking KV for crash recovery.
+// 契约: docs/wiki/memory/memory-architecture.md#tombstone
 type TombstoneSet struct {
-	mu    sync.RWMutex
-	keys  map[int64]bool // EventKey → tombstoned
-	rel   RelationStore  // For cascading parent repair
-	kv    KVStore        // For persistence
-	pid   int            // Partition ID for persistence keys
-	dirty bool           // Whether persistence is needed
+	mu sync.RWMutex
+	// keys 是已墓碑化的事件键集合。
+	keys map[int64]bool
+	// rel 用于级联修复子事件的父引用。
+	rel RelationStore
+	// kv 为 nil 时仅内存生效（合法的内存模式）。
+	kv KVStore
+	// pid 决定墓碑键的持久化命名空间。
+	pid int
+	// dirty 表示未落盘变更。
+	dirty bool
 }
 
-// NewTombstoneSet creates a TombstoneSet.
+// NewTombstoneSet 构造墓碑集；kv 可为 nil（仅内存），rel 必须可用以做级联修复。
 func NewTombstoneSet(rel RelationStore, kv KVStore, pid int) *TombstoneSet {
 	return &TombstoneSet{
 		keys: make(map[int64]bool),
@@ -32,27 +36,24 @@ func NewTombstoneSet(rel RelationStore, kv KVStore, pid int) *TombstoneSet {
 	}
 }
 
-// MarkTombstone marks an event as tombstoned.
-// Before marking, it triggers cascading parent repair for the event's children.
+// MarkTombstone 标记事件为已遗忘，回放据此必须拒绝复活它。
+// 承重约束：子事件的父引用级联必须发生在墓碑落账之后，反序会让级联把正在被删的键误当作
+// 存活祖先；关系操作的局部失败只记日志、不回滚遗忘——遗忘本身必须生效。
 func (ts *TombstoneSet) MarkTombstone(key int64) error {
 	if key == 0 {
 		return fmt.Errorf("event key cannot be zero")
 	}
 
-	// 1. Mark as tombstoned FIRST so findAliveAncestor skips this key
 	ts.mu.Lock()
 	ts.keys[key] = true
 	ts.dirty = true
 	ts.mu.Unlock()
-
-	// 2. Repair children's parent references
 	children, err := ts.rel.GetChildren(key)
 	if err != nil {
 		log.Errorf("[Tombstone] GetChildren failed key=%d: %v", key, err)
 	}
 
 	if len(children) > 0 {
-		// Find the nearest alive ancestor for this key
 		ancestor := ts.findAliveAncestor(key)
 		for _, child := range children {
 			if ancestor != 0 {
@@ -60,31 +61,26 @@ func (ts *TombstoneSet) MarkTombstone(key int64) error {
 					log.Errorf("[Tombstone] SetParent failed child=%d ancestor=%d: %v", child, ancestor, err)
 				}
 			} else {
-				// No alive ancestor found, child becomes root
 				if err := ts.rel.SetParent(child, 0); err != nil {
 					log.Errorf("[Tombstone] SetParent root failed child=%d: %v", child, err)
 				}
 			}
 		}
 	}
-
-	// 3. Remove own relations
 	if err := ts.rel.RemoveRelations(key); err != nil {
 		log.Errorf("[Tombstone] RemoveRelations failed key=%d: %v", key, err)
 	}
-
-	// 4. Persist to KV store
 	return ts.persistKey(key)
 }
 
-// IsTombstone checks if an event key is tombstoned.
+// IsTombstone 报告键是否已被合法遗忘（回放据此拒绝复活）。
 func (ts *TombstoneSet) IsTombstone(key int64) bool {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return ts.keys[key]
 }
 
-// RemoveTombstones removes tombstone entries after compaction.
+// RemoveTombstones 在压实吸收墓碑后成批移除内存与 KV 键，避免墓碑只增不减。
 func (ts *TombstoneSet) RemoveTombstones(keys []int64) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -106,7 +102,7 @@ func (ts *TombstoneSet) RemoveTombstones(keys []int64) error {
 	return nil
 }
 
-// AllTombstones returns all tombstoned keys.
+// AllTombstones 返回全部墓碑键（顺序无关）。
 func (ts *TombstoneSet) AllTombstones() []int64 {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
@@ -117,14 +113,14 @@ func (ts *TombstoneSet) AllTombstones() []int64 {
 	return keys
 }
 
-// Count returns the number of tombstoned keys.
+// Count 返回墓碑键数量。
 func (ts *TombstoneSet) Count() int {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return len(ts.keys)
 }
 
-// Snapshot returns a serializable snapshot of the tombstone set.
+// Snapshot 返回可序列化的墓碑键副本（不暴露内部映射）。
 func (ts *TombstoneSet) Snapshot() (map[int64]bool, error) {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
@@ -135,7 +131,7 @@ func (ts *TombstoneSet) Snapshot() (map[int64]bool, error) {
 	return snap, nil
 }
 
-// LoadSnapshot restores the tombstone set from a snapshot.
+// LoadSnapshot 从快照恢复并清除脏标记。
 func (ts *TombstoneSet) LoadSnapshot(data map[int64]bool) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -147,7 +143,7 @@ func (ts *TombstoneSet) LoadSnapshot(data map[int64]bool) error {
 	return nil
 }
 
-// RecoverFromKV restores tombstone state from KV store on startup.
+// RecoverFromKV 启动时按 tomb 前缀扫描重建墓碑集合，忽略非本类型键与零键。
 func (ts *TombstoneSet) RecoverFromKV() error {
 	if ts.kv == nil {
 		return nil
@@ -175,17 +171,14 @@ func (ts *TombstoneSet) RecoverFromKV() error {
 	return nil
 }
 
-// IsDirty returns whether the tombstone set has unpersisted changes.
+// IsDirty 报告是否存在未落盘的墓碑变更。
 func (ts *TombstoneSet) IsDirty() bool {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	return ts.dirty
 }
 
-// ==================== Internal ====================
-
-// persistKey writes a single tombstone key to KV store.
-// If KV store is nil, skip persistence (in-memory only mode).
+// persistKey 落盘单个墓碑键；kv 为 nil 时跳过（仅内存模式）。
 func (ts *TombstoneSet) persistKey(key int64) error {
 	if ts.kv == nil {
 		return nil
@@ -194,7 +187,7 @@ func (ts *TombstoneSet) persistKey(key int64) error {
 	return ts.kv.KVPut(tombKVKey, "1")
 }
 
-// findAliveAncestor walks the parent chain to find the nearest alive (non-tombstoned) ancestor.
+// findAliveAncestor 沿父链找最近的存活（未墓碑化）祖先；带访问集合，父链成环也不会死循环。
 func (ts *TombstoneSet) findAliveAncestor(key int64) int64 {
 	visited := make(map[int64]bool)
 	current := key
@@ -212,14 +205,12 @@ func (ts *TombstoneSet) findAliveAncestor(key int64) int64 {
 	return 0
 }
 
-// ==================== JSON Serialization ====================
-
-// TombstoneSnapshot is the JSON-serializable snapshot format.
+// TombstoneSnapshot 是墓碑集的持久化快照形态。
 type TombstoneSnapshot struct {
 	Keys []int64 `json:"keys"`
 }
 
-// MarshalJSON serializes the tombstone set.
+// MarshalJSON 序列化当前墓碑键集合。
 func (ts *TombstoneSet) MarshalJSON() ([]byte, error) {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
@@ -232,7 +223,7 @@ func (ts *TombstoneSet) MarshalJSON() ([]byte, error) {
 	return json.Marshal(snap)
 }
 
-// UnmarshalJSON deserializes the tombstone set.
+// UnmarshalJSON 从快照恢复墓碑键集合（覆盖现有内容）。
 func (ts *TombstoneSet) UnmarshalJSON(data []byte) error {
 	var snap TombstoneSnapshot
 	if err := json.Unmarshal(data, &snap); err != nil {

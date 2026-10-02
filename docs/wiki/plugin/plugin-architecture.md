@@ -1,5 +1,6 @@
 # tagent/plugin 模块架构文档
 
+<a id="overview"></a>
 ## 一、模块定位
 
 `tagent/plugin` 是 tagent 为 trpc-agent-go Runner 提供的一组**事件钩子插件**。
@@ -143,6 +144,7 @@ func (m *Manager) OnEvent(ctx context.Context, invocation *agent.Invocation, e *
 
 ---
 
+<a id="memory-plugin"></a>
 ## 五、MemoryPlugin — 事件持久化
 
 ### 5.1 数据结构
@@ -246,6 +248,7 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 }
 ```
 
+<a id="causal-mech"></a>
 ### 5.3 因果链机制
 
 每个事件通过 `RelationStore.SetParent(childKey, parentKey)` 维护因果关系，构成一条有向事件链：
@@ -283,6 +286,7 @@ func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
 
 ---
 
+<a id="summary-plugin"></a>
 ## 六、SummaryPlugin — Tag 与元数据标注（退位后职责）
 
 ### 6.1 职责定位
@@ -965,6 +969,56 @@ Session 已有的 `Session.Events`（完整 event.Event）和框架的 Summaries
 
 
 ---
+
+## 十五、存储管线的契约：跳过集、精确回显与因果链边界
+
+<a id="skip-set"></a>
+### 哪些事件不入存储也不进投影
+
+`MemoryPlugin.onEvent` 在分配任何 key、做任何写入**之前**先过四道闸，顺序即语义：
+
+| 闸 | 条件 | 为什么必须跳 |
+|---|---|---|
+| 无载荷 | `evt == nil`，或 `Response == nil`、`Choices` 为空 | runner/flow 会发同步用的屏障事件；若入库会被推断成空内容的 external_input，在投影里变成误导性的 user 占位，挤掉真实上下文 |
+| 流式分片 | `Response.IsPartial` | 只有聚合后的事件才入库/进投影；中间 delta 内容为空、tool_calls 未聚合 |
+| 退化空终态 | 推断为 `agent_output` 且 `Content` 为空 | 不带任何信息；入库会在投影与历史里留一条空 assistant 消息。工具调用轮（有 tool_calls）与非空终态不受影响 |
+| 精确回显 | 见下 | 事件循环已把该输入作为事实提交，重复入库即双写 |
+
+**跳过与持久化/投影是同一同步点**：存储成功之后才在相同位置调用 `ProjectionSink.Append`，因此"投影完成于 `BeforeModel`"由构造保证而非时序巧合；投影自身按 EventKey 幂等，重投递无害。存储标识（EventKey/PartitionID/EventType/EventSummary）随后写回 `Event.StateDelta`，键名由 `tagent/event` 一处定义。
+
+<a id="echo-credential"></a>
+### 精确回显凭据 `EchoCredential`
+
+事件循环在调模型前提交本批的逐消息事实，框架随后把**合并后的输入**经插件管线回显。只有这一次回显应当跳过入库，因此按**每次 runner 尝试**新造一枚凭据（不再有"整回合/首个信封/任意 user"这类粗粒度状态）：
+
+- 字段：`AttemptToken`（重试即新造，事实复用）、`Agent`、`Session`、`MergedMessage`（循环构造的规范合并输入，作为规范化比较目标）、`CommittedKeys`（本批已持久化的事实键）。
+- `isExpectedInputEcho` 要求同时满足：**根调用**（无父调用，只有根会回显回合输入）、`Author == "user"`、消息角色为 user、内容与 `MergedMessage` 在去空白规范化后相等。子调用、assistant、tool 及其他 user 消息一律走正常存储路径。
+- 有意的取舍：仅图无文的 durable 输入其 `Content` 为空，上述内容相等也会匹配到"空的 user 事件"。这是**可接受且必要**的——不跳会把循环已提交的合并图像输入回显重复写入；被多跳掉的只是不含信息的空事件。非文本回显的 parts 级精确性由端到端测验证，不在此猜测（未经验证的 parts 匹配会带来"少跳"→双写风险）。
+- `Bind` 记录首次匹配所在的**根调用 id**（幂等，后续匹配不覆盖）。框架的 `event.Event` 不携带逐事件 id（内嵌 `*model.Response` 与 `InvocationID`），因此"本次尝试的输入回显"的精确稳定身份只能是根调用 id；验证必须落在这一粒度而非逐事件粒度。
+- `Verified()` 为真要求"已绑定且未被拒绝"。**门禁语义**：本回合装入了凭据但 `Verified()` 为假时，模型入口被挡住——已提交的输入从未被确认就是框架实际运行的那份。`MarkRejected(reason)` 把已装好的凭据降级为不可验证（粘滞，首个原因胜出）：框架对插件错误只记日志并继续，所以被吞掉的存储失败必须让本回合**过不了提交门**（fail-closed）。`nil` store 的旁路场景不算错误，不触发降级。
+
+<a id="attribution-carrier"></a>
+### 归因章与其载体
+
+`Attribution` 是回合级键值对，写入 `FullEvent.Metadata`，使任意产出事件可回溯到产生它的版本上下文（`bundle_id`/`rollout_id`/`agent`）。它填补了"`FullEvent.Metadata` 在生产代码中从未被填充"这一事实缺口，是"可归因/可回滚"的自我改进与事件维度可观测的共同地基。
+
+- 载体模式与 `ProjectionSink` 相同：`RunFlow` 每回合绑定，插件在存储同步点读取并写入；**两条持久化路径**（插件管线 `onEvent` 与 `persistBusEvent`）都必须盖章，否则出现归因盲区。
+- 基线章为 `agent_name`（来自 invocation，立即可用）；ctx 归因叠加其上。未注入归因时只盖基线，行为向后兼容；空归因不写入 ctx（省一次分配）。
+- 子 ctx 的归因不污染父 ctx：每次调用的绑定由各自 call-chain ctx 隔离。
+
+<a id="causal-chain"></a>
+### 因果链是**按 (partition, session) 独立且必须有界**
+
+`lastEventKeys` 以 `"partitionID:sessionID"` 为键维护各自的因果链，避免子 agent 与跨会话事件互相破坏父子关系。父关系不放在事件字段里，而经 `RelationStore.SetParent` 写入（内容关系与因果关系统一由关系存储承载）。
+
+该 map **必须有上界**（`maxLastEventKeys` = 4096）：长寿命 agent 会不断累积会话键，无上界即泄漏。溢出时按事件 key 淘汰**最小值**者——分区内 int64 事件 key 随时间单调，最小 key 即最久未更新的因果链，最不可能再成为后续事件的父。淘汰后旧会话再写入时重新起链（父为 0），保留项的父值必须始终等于该键最后一次写入值。
+
+这条查找语义是整个因果存储的承重契约：**查找一个因果键，只能返回该键最后一次写入的 key，或者 0（不存在）——绝不返回别的会话的 key**。淘汰只允许把一条链降级为「无父的新链」，绝不允许把它悄悄接到某个不相关的前驱上；否则投影与召回会拿着错父链去回溯，破坏的是链式结构本身。因此"被驱逐后再复活"的会话必须从 0 起链。
+
+### 助手内容的存储边界
+
+模型会在输出里**编造** `[evt_...]` 前缀（模仿投影呈现格式）。这类伪造前缀若被存下，会在后续压缩/召回里被当作真实引用参与解析。故在存储边界统一剥离伪造前缀（只作用于 assistant 正文，其他角色逐字保留），并记 warn 以便发现提示词被模仿的情况。
+
 
 ## 已知缺口与演进方向
 

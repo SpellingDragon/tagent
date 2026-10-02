@@ -1,9 +1,5 @@
 package memory_test
 
-// ErrorTrackingStore 的可选能力透传测试（MemoryEngineProvider/Close）需构造
-// memory/engine 的 engineBridge——以黑盒形式引用（白盒文件 import 子包会构成
-// 测试 import 环：memory[test] → engine → memory）。
-
 import (
 	"testing"
 
@@ -12,9 +8,10 @@ import (
 	"github.com/SpellingDragon/tagent/memory/engine"
 )
 
+// TestErrorTrackingStore_OptionalInterfacePassthrough 本文件是记忆存储行为的测试执行体。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#error-tracking
 func TestErrorTrackingStore_OptionalInterfacePassthrough(t *testing.T) {
-	// 包裹 engineBridge（有 MemoryEngine）→ ErrorTrackingStore 必须透传 MemoryEngineProvider，
-	// 否则 recall hybrid 断言 memStore.(MemoryEngineProvider) 失效（能力丢失）。
 	inner := memory.NewInMemoryStore()
 	eng := engine.NewInMemoryEngine(inner, membed.NewMockEmbedder(16), engine.EngineConfig{})
 	defer eng.Close()
@@ -26,7 +23,6 @@ func TestErrorTrackingStore_OptionalInterfacePassthrough(t *testing.T) {
 	if !ok || ep.MemoryEngine() == nil {
 		t.Fatal("ErrorTrackingStore 应透传 MemoryEngineProvider（否则 recall hybrid 失效）")
 	}
-	// Close 透传（agent 引擎回收依赖）。
 	c, ok := ms.(interface{ Close() error })
 	if !ok {
 		t.Fatal("ErrorTrackingStore 应透传 Close（agent.Closer 引擎回收）")

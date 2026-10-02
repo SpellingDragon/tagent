@@ -1,6 +1,6 @@
 package compress
 
-// Compression defaults (single source; the agent package re-exports aliases).
+// DefaultMaxTokens Compression defaults (single source; the agent package re-exports aliases).
 const (
 	DefaultMaxTokens         = 8000
 	DefaultCompressThreshold = 0.8
@@ -19,7 +19,7 @@ const (
 	// (external_input + thinking_plan + action_command + agent_output) used
 	// to derive the recentFullCount default: keepRecent × DefaultRefsPerTurn,
 	// so the most recent keepRecent turns resolve with full content as a
-	// whole (task-skeleton-compression D6). An explicit WithRecentFullCount /
+	// whole. An explicit WithRecentFullCount /
 	// recent_full_count setting overrides the derived value.
 	DefaultRefsPerTurn = 4
 	// DefaultCardMaxChars caps the index-card section of the rolling summary;

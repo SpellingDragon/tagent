@@ -7,6 +7,9 @@ import (
 )
 
 // BenchmarkSegmentStore_GetEvent benchmarks GetEvent with LRU caching.
+// 本文件是记忆存储行为的测试执行体。
+//
+// 契约: docs/wiki/memory/memory-architecture.md#tombstone
 func BenchmarkSegmentStore_GetEvent(b *testing.B) {
 	mockKV := newMockKV()
 	store, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
@@ -14,7 +17,6 @@ func BenchmarkSegmentStore_GetEvent(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	// Pre-populate N events
 	n := 1000
 	keys := make([]int64, n)
 	baseTS := int64(1710678000000)
@@ -50,7 +52,6 @@ func BenchmarkSegmentStore_GetEvent_Cold(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	// Pre-populate events but use a store with no cache for cold reads
 	n := 100
 	keys := make([]int64, n)
 	baseTS := int64(1710678000000)
@@ -68,7 +69,6 @@ func BenchmarkSegmentStore_GetEvent_Cold(b *testing.B) {
 		}
 	}
 
-	// Use a separate store (cold cache) for GetEvent
 	coldStore, err := NewFileSegmentStore(mockKV, nil, ":memory:", 1000)
 	if err != nil {
 		b.Fatal(err)
@@ -92,9 +92,8 @@ func BenchmarkSegmentStore_QueryEvents(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	// Pre-populate events across multiple time windows
 	n := 500
-	baseTS := int64(1710604800000) // Start of day
+	baseTS := int64(1710604800000)
 	for i := 0; i < n; i++ {
 		key := NewSnowflakeEventKey(1, baseTS+int64(i)*int64(rand.Int31n(3600000)))
 		_ = store.StoreEvent(key, FullEvent{
@@ -105,7 +104,6 @@ func BenchmarkSegmentStore_QueryEvents(b *testing.B) {
 		})
 	}
 
-	// Seal current window
 	_ = store.SealCurrent(1)
 
 	b.ResetTimer()

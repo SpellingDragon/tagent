@@ -1,7 +1,7 @@
 # config-hot-reload Specification
 
 ## Purpose
-TBD - created by archiving change hardening-review-batch2. Update Purpose after archive.
+配置热重载的统一应用模型：全部热参数与结构候选在同一次混合事务中准备就绪才提交，结构发布不跳过数值应用、数值应用不落在无人服务的对象上，杜绝半应用代。
 ## Requirements
 ### Requirement: 配置热更统一应用模型
 
