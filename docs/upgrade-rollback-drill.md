@@ -62,7 +62,7 @@
   2. **逐跳 CheckRedirect**：`rl.EndpointRedirectPolicy(allowedHosts)` 装进 LLM client，**30x 每一跳目标 host 必 ∈ allowlist**，越界报 `endpoint redirect policy: hop %d target host %q not in endpoint allowlist (initial URL %q)`。
 - **配置面**：`TAGENT_RL_ALLOW_LLM_REDIRECT`（`1` 才允许动态重定向，默认禁用）、`TAGENT_RL_ENDPOINT_ALLOWLIST`（逗号分隔 host）。**未启用重定向时任何 30x 跳转全拒**。
 - **升级/回滚注意**：新增逐跳 CheckRedirect 收紧了行为——若既有部署曾依赖「allowlist 端点二次跳转到非 allowlist host」，升级后会被拒（fail-closed，符合 Major 5 消除文档化降级的目标）；回滚则失去逐跳防护，仅初跳受约。allowlist 变更走配置，非数据迁移。
-- **佐证**：`rl/http_api_closeout_test.go`（HopSemantics / EmptyAllowlist / AllowlistedHopChain / HopCap / NormalizeRedirectHost）。
+- **佐证**：`rl/http_api_test.go`（HopSemantics / EmptyAllowlist / AllowlistedHopChain / HopCap / NormalizeRedirectHost）。
 
 ## 7. 一页式升级检查清单
 
