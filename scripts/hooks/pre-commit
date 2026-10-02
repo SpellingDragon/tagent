@@ -4,8 +4,9 @@
 # Opt-in (not auto-installed; hooks under .git/ are not version-controlled):
 #   git config core.hooksPath scripts/hooks
 #
-# It enforces the same gates CI runs: OpenSpec spec hygiene, and — when Go sources are
-# staged — the comment-policy ratchet via scripts/lint.sh.
+# It enforces the same gates CI runs: OpenSpec spec hygiene, the lossless
+# verifier for test-family consolidations (staged rename table), and — when Go
+# sources are staged — the comment-policy ratchet via scripts/lint.sh.
 #
 # Only runs when the commit touches openspec/specs/ or openspec/changes/,
 # so it stays out of the way for unrelated commits.
@@ -17,6 +18,28 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR || true)"
 if printf '%s\n' "$staged" | grep -qE '^openspec/(specs|changes)/'; then
   echo "[pre-commit] openspec change detected — running spec-hygiene gate..."
   "$repo_root/scripts/check-openspec.sh"
+fi
+
+# Test-family consolidation gate: when a commit moves or renames test files, a
+# rename table (*.map, co-located with the package it governs — one table per
+# package) must ride in the same commit, and the lossless verifier runs against
+# HEAD: production code untouched, every test/bench function preserved with an
+# identical body, assertion count not lowered. No table staged means no
+# consolidation claimed, so unrelated commits are untouched.
+maps="$(printf '%s\n' "$staged" | grep -E '\.map$' || true)"
+tests="$(printf '%s\n' "$staged" | grep -E '_test\.go$' || true)"
+if [ -n "$maps" ] && [ -n "$tests" ]; then
+  while IFS= read -r map; do
+    [ -z "$map" ] && continue
+    dir="$(dirname "$map")"
+    tables="$(printf '%s\n' "$maps" | sed 's|/[^/]*$||' | grep -Fx "$dir" | wc -l | tr -d ' ')"
+    if [ "$tables" -gt 1 ]; then
+      echo "[pre-commit] $dir stages $tables rename tables — check_test_merge.sh takes exactly one table per package" >&2
+      exit 1
+    fi
+    echo "[pre-commit] test-family consolidation detected ($dir) — running lossless merge check..."
+    "$repo_root/scripts/check_test_merge.sh" HEAD "$dir" --map "$map"
+  done <<< "$maps"
 fi
 
 # Code-lint gate: the same ratchet CI enforces. Runs only when the commit stages
