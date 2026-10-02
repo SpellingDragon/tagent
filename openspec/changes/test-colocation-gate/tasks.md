@@ -36,7 +36,7 @@
 - [x] 3.13 memory 批之七:裁决①并入——4 测试皆 TestLocalFileKV_* 分片快照工况,并入镜像 local_file_kv_test,基线 13→12;memory 域清零
 - [x] 3.14 agent 批之一:session_refusal 单例并入 exec_lease_test(镜像同锚 #lease-holds-reference),基线 12→11
 - [x] 3.15 agent 批之二:quarantine_barrier 并入 inbox_test(镜像同锚 #envelope-states),基线 11→10
-- [ ] 3.16 agent 批之三(②+①组合):`compress/session_projection_test.go` →②改名对齐 `projection.go`,随后 `fold_run_exemption_test.go` →①并入改名后文件;N=2
+- [x] 3.16 agent 批之三:session_projection 改名 projection_test 对齐镜像(②)+fold_run_exemption 四例并入(①),基线 10→8
 - [ ] 3.17 agent 批之四(裁决型):`agent/batch_retire_split_test.go`+`lineage_signal_test.go`——先核对 `agent/` 生产面裁定①落点或③锚点收敛,裁决记录写入本任务提交信息;N=2
 - [ ] 3.18 agent 批之五(热区,B 型):前置 `git status` 确认 `agent/task/` 干净;`task/batch_retire_split_test.go`+`retire_lineage_test.go` →①并入 `task_manager_test.go` 子测试 + ③ `#finalize-lineage` 族锚上收;N=2
 - [ ] 3.19 tests 批之一(C 型):`async_result_test.go`+`async_task_e2e_test.go` →①合并为单一文件,锚点取其一;N=2
