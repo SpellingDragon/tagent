@@ -349,6 +349,9 @@ graph TB
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
 | 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
 | 设计规格（OpenSpec） | [openspec/specs/](openspec/specs/) |
+| 原型骨架（六件套与生产映射） | [docs/wiki/agent/prototype-skeleton.md](docs/wiki/agent/prototype-skeleton.md) |
+| wechat-bot 运行面（去重 / 窄接口 / 投递目标 / 真链路验收） | [docs/wiki/examples/wechat-bot-runtime.md](docs/wiki/examples/wechat-bot-runtime.md) |
+| 注释与文档门禁的工具面 | [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md) |
 | 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
 | 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | 真实 LLM 契约守护矩阵（模型↔框架文本接缝） | [tests/README.md](tests/README.md) |
@@ -365,6 +368,19 @@ go test ./evals/                       # 组件级行为评估（票据可召回
 bash scripts/race_check.sh             # race 门禁（本地全量）
 cd examples/wechat-bot && go run .     # 运行示例
 ```
+
+### 注释与文档契约（`comment_policy`，CI 零容忍）
+
+机制判据的家在 `docs/wiki/**`：源码注释只写契约，加一行索引（`契约:` 或 `规格:`）指向它。一条机制写进注释之前，先确认它有一个文档小节可归属。
+
+| 约束 | 形状 | 为何这样定 |
+|------|------|-----------|
+| 每个生产文件声明职责 | 文件内任意注释槽含一行 `契约: docs/…#anchor` | 读代码的人先问到哪儿找判据；测试文件同样适用 |
+| doc 注释只写契约 | 叙述散文不超两段，要点列表与索引不限长度 | 长契约注释合法，短设计叙述不合法——裁判是内容形态不是行数 |
+| 索引必须可解 | 目标路径存在、锚点在文档里真实存在、大文档必须带锚 | 指向不存在的小节比没有指向更坏 |
+| 不以过程文档为真源 | 注释不得引用变更单号、轮次、审阅记录 | 过程文档会先于代码腐烂 |
+
+棘轮的基线 `scripts/comment_policy/baseline.json` 现为**空 counts**，即以上规则全部零容忍：新增违规直接红，无预算可用。日常只跑 `bash scripts/lint.sh`（含 gofmt/vet/comment_policy/文档引用/`gen_godoc --check`）；`gen_godoc.sh` 会过滤掉索引行，`go doc` 产物里不出现导航指针。改动注释后用 `bash scripts/check_comment_only.sh <基线ref>` 证明「只改了注释」，测试文件并档用 `scripts/check_test_merge.sh` 证明无损。约定细则见 [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md)。
 
 ### RL 部署环境变量（examples/wechat-bot）
 
