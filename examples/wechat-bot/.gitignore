@@ -60,6 +60,7 @@ resources/prompts/USER.md
 # Re-ignore everything under skills that's runtime
 skills/*/
 !skills/url-fetcher/
+!skills/agent-mail-send/
 skills/url-fetcher/node_modules/
 
 # Re-ignore all dotfiles and dot-directories (runtime data)
