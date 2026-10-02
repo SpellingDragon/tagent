@@ -5,11 +5,11 @@
 
 ## 2. P1 门禁上线(规则按语义分四个独立单元,各有单测)
 
-- [ ] 2.1 事实收集:`comment_policy` 主遍历扩展,收集每个 `_test.go` 的 (目录, `//go:build` 表达式集, `契约:` 锚点, `func Test` 计数)。验证:新增单测断言 testdata 样本的四元组事实正确(含无 build 行→空集、多 `契约:` 行取首个)
-- [ ] 2.2 分组与违规判定:包级聚合 pass,键=(目录, build-tag 集, 锚点);参与者=Test>0;镜像=同目录存在去 `_test` 后缀同名 `.go`,变体后缀仅 `_real` 宽容;组内参与者≥2 时每个无镜像文件出一条 finding。验证:单测覆盖六工况——全镜像组零 finding、tag 异组分键、Test=0 出局、真碎片计 finding、`_real` 宽容、前缀相似不宽容(`action_test` 对 `action_tool.go` 判不中)
-- [ ] 2.3 finding 文案:`responsibility-fragmentation` 消息并列三出口(并入镜像文件/改名对齐镜像/文档侧锚点收敛),附同键镜像落点与锚点。验证:单测断言文案含三出口关键词与落点路径
-- [ ] 2.4 权威计数与基线落定:全仓运行规则,记录权威文件数与逐文件清单(预期≈25;对勘 shell 预演 26 的差异须可解释,如 `_real` 宽容),经 `bash scripts/lint.sh --update-baseline` 写槽,与规则实现同批提交。验证:`bash scripts/lint.sh` 全绿且 `-v` 输出清单已存档到本 change 目录(`baseline-files.txt`,冻结为 P2 对账锚)
-- [ ] 2.5 负路径验证:临时新增一个同锚点无镜像测试文件 → `lint.sh` 必红(REGRESSION `responsibility-fragmentation +1`)→ 删除恢复绿。验证:两次运行的退出码与输出留痕(change 目录 `negative-path.log`)
+- [x] 2.1 事实收集:`comment_policy` 主遍历扩展,收集每个 `_test.go` 的 (目录, `//go:build` 表达式集, `契约:` 锚点, `func Test` 计数)。验证:新增单测断言 testdata 样本的四元组事实正确(含无 build 行→空集、多 `契约:` 行取首个)
+- [x] 2.2 分组与违规判定:包级聚合 pass,键=(目录, build-tag 集, 锚点);参与者=Test>0;镜像=同目录存在去 `_test` 后缀同名 `.go`,变体后缀仅 `_real` 宽容;组内参与者≥2 时每个无镜像文件出一条 finding。验证:单测覆盖六工况——全镜像组零 finding、tag 异组分键、Test=0 出局、真碎片计 finding、`_real` 宽容、前缀相似不宽容(`action_test` 对 `action_tool.go` 判不中)
+- [x] 2.3 finding 文案:`responsibility-fragmentation` 消息并列三出口(并入镜像文件/改名对齐镜像/文档侧锚点收敛),附同键镜像落点与锚点。验证:单测断言文案含三出口关键词与落点路径
+- [x] 2.4 权威计数与基线落定:全仓运行规则,记录权威文件数与逐文件清单(预期≈25;对勘 shell 预演 26 的差异须可解释,如 `_real` 宽容),经 `bash scripts/lint.sh --update-baseline` 写槽,与规则实现同批提交。验证:`bash scripts/lint.sh` 全绿且 `-v` 输出清单已存档到本 change 目录(`baseline-files.txt`,冻结为 P2 对账锚)
+- [x] 2.5 负路径验证:临时新增一个同锚点无镜像测试文件 → `lint.sh` 必红(REGRESSION `responsibility-fragmentation +1`)→ 删除恢复绿。验证:两次运行的退出码与输出留痕(change 目录 `negative-path.log`)
 
 ## 3. P2 分域收敛(防跑偏协议见下;每任务一个独立提交)
 
@@ -20,7 +20,7 @@
 ④测试:`go test <涉及包> -count=1` 与 `go test -race <涉及包>` 全绿,若动 wiki 则 `gen_godoc.sh --check` 绿;
 ⑤对账提交:`lint.sh --update-baseline` 降幅必须恰等于该任务销号数(N),不符即停并回查;独立提交,提交信息含 `[colocation]` 与销号文件名。
 
-- [ ] 3.1 冻结对账锚:以 2.4 存档清单为准,把 3.2-3.20 各任务与在册文件一一绑定;发现清单与下述枚举有出入(多出/缺失文件)时,先回填 design 判例表再开工。验证:本 tasks 内每个收敛任务都能在清单中找到全部对象文件
+- [x] 3.1 冻结对账锚:以 2.4 存档清单为准,把 3.2-3.20 各任务与在册文件一一绑定;发现清单与下述枚举有出入(多出/缺失文件)时,先回填 design 判例表再开工。验证:本 tasks 内每个收敛任务都能在清单中找到全部对象文件
 - [ ] 3.2 evolution 试点(规程走通):`switch_combo_test.go` 工况→①并入 `judge_test.go` 子测试;N=1
 - [ ] 3.3 agent 试点(发起判例,小步验证 agent 包流程):`meditation_audit_test.go` →①并入 `telemetry_audit_test.go`;N=1
 - [ ] 3.4 tool/action 改名批:`action_test.go` →②改名 `action_tool_test.go`(映射表登记旧→新,同步脚本/文档引用);`tui_integration_test.go` 属 tag 异组、预期不在册,核对后记入对账说明;N=1
