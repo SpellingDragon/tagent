@@ -194,27 +194,16 @@ func TagentAgentsConstructed() int64
     share the process.
 
 func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*StagedGeneration)
-    WireOrgGeneration performs the generation-level wiring of ONE org publish
-    (3.2 trunk, D8 as precision-approved round 90). It must run after every
-    owner of the publish has STAGED its next generation and before ANY of them
-    is activated, so no execution path can observe a half-wired generation:
+    WireOrgGeneration performs the generation-level wiring of ONE org publish.
+    It must run after every owner of the publish has STAGED its next generation
+    and before ANY of them is activated, so no execution path can observe a
+    half-wired generation.
 
-    - INCOMING: each staged face's wrappers are stamped with the STAGED child
-    binding they declare, and the declaring generation records a hold on it. A
-    call through that wrapper therefore resolves the child through the declaring
-    generation's own execution view — never the child's "current" face, never a
-    captured instance.
-
-    - OUTGOING (retroactive): the previous generations' faces were wired when
-    THEY were staged — except a cold-start owner whose binding was created
-    lazily and never wired. Those wrappers are stamped against the still-active
-    child bindings now, with the same holds, so an in-flight caller on the
-    outgoing generation keeps reaching ITS generation's targets after this
-    publish retires them. Stamps are idempotent: a wrapper already wired by an
-    earlier publish keeps its (still correct) target.
-
-    The holds never enter the obligation axes (J7/J8); they only gate the
-    binding-level reclaim (retired ∧ refs==0 ∧ heldBy==0).
+    - Incoming: each staged face wrapper is stamped with the staged child
+    binding it declares, and the declaring generation records a hold
+    on it, so a call through that wrapper resolves the child from the
+    declaring generation own execution view. - Outgoing (retroactive):
+    a cold-start owner whose binding was created lazily and never wired
 
 TYPES
 
@@ -427,24 +416,13 @@ func (cm *ContextManager) ActivateExecutor(s *StagedGeneration) runner.Runner
 
 func (cm *ContextManager) BeginTurn() (runner.Runner, func())
     BeginTurn is the ONE place a business turn takes its organization execution
-    binding: the armed org-config check runs first (same entry the ops hook
-    CheckOrgReload uses — one publish path, no second effective route), then the
-    executor in force is handed to the turn to pin.
+    binding: it pins the executor in force and returns the release that must run
+    when the turn ends.
 
-    Call it after the input batch is frozen and OUTSIDE the transport-retry
-    loop: every attempt, model iteration and tool round of that turn then runs
-    on the returned runner (RunFlowWithExecutor), so a publication happening
-    mid-turn cannot split the turn across generations. Sub-agent invocations
-    do not call this: their instances, executor and delegation tree were
-    constructed inside the generation that published them.
-
-    The returned release MUST run when the turn ends (the loop folds it
-    into its per-turn cleanup alongside endTurnSpan). 「acquire 后立即登记」:
-    the in-flight reference is registered BEFORE the executor is handed out,
-    so a publish and its retire-sweep landing in the gap between handing out the
-    executor and entering the run body cannot close the very runner this turn
-    is about to run. 一个业务 turn 只登记 EXACTLY ONCE 次，且登记在它自己的代际上： 计数由各代的 in-flight
-    引用持有，不存在第二份聚合计数。
+    - Call it after the input batch is frozen and OUTSIDE the transport-retry
+    loop; the whole turn, every attempt, model iteration and tool round,
+    then runs on the returned runner via RunFlowWithExecutor. - Sub-agent
+    invocations do not call this: their instances, executor and delegation
 
 func (cm *ContextManager) BeginTurnLease() *ExecLease
     BeginTurnLease is BeginTurn with the reference handle exposed, so the
@@ -702,25 +680,14 @@ type EventBus struct {
 }
     EventBus is a per-agent ordered event queue.
 
-    Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent
-    callbacks, and the AgentLoop itself) call Publish to enqueue events.
-
-    The AgentLoop is the sole consumer: it calls Pull to block until at least
-    one event arrives, then non-blocking drains all remaining pending events.
-
-    Design rationale: a single consumer (AgentLoop) means no fan-out races,
-    no ordering guarantees across consumers, and simple backpressure (channel
-    fills up → Publish blocks).
-
-    Durable mode (lossless under D2): with an Inbox configured,
-    ALL inbound events are persisted to inbox-v2 BEFORE the durable
-    receipt — the channel carries only wake-ups, never the durable truth.
-    Each message slot keeps a lossless JSON snapshot of the original AgentEvent
-    (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
-    restores everything inbox-v1 dropped . Durable envelopes are consumed
-    strictly in enqueue order (zero-padded seq); volatile channel events are
-    best-effort by definition. Receipted items replaying after a crash are
-    Ack-skipped without re-execution.
+    - Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent
+    callbacks, the AgentLoop itself) call Publish to enqueue. - The AgentLoop is
+    the sole consumer: Pull blocks until at least one event arrives, then drains
+    all remaining pending ones non-blocking. A single consumer means no fan-out
+    races and simple backpressure. - Durable mode: with an Inbox configured,
+    all inbound events are persisted to inbox-v2 before the durable receipt,
+    and each slot keeps a lossless JSON snapshot of the original AgentEvent,
+    so the channel carries only wake-ups and never the durable truth.
 
 func NewEventBus() *EventBus
     NewEventBus creates an EventBus backed by a buffered channel (cap=256,
@@ -1611,20 +1578,8 @@ func (ta *TagentAgent) SetStoreOwnerSnapshot(fn func() map[string]bool)
     Startup-injected once (like SetOrgDiagnostics); runtime read-only.
 
 func (ta *TagentAgent) SetToolParentProjection()
-    SetToolParentProjection wires the agent's compress.SessionProjection to all
-    AgentToolWrapper instances in the tool list. This enables auto-inject of
-    event_keys when LLM does not pass them. Must be called after NewTagentAgent
-    (which creates the projection).
-
-    /W-1: the list holds OutputLimitTool(*AgentToolWrapper) after agent.New has
-    wrapped every tool, so the wiring pierces the transparent decorator chain
-    (collectAgentToolWrappers) instead of asserting the bare type — otherwise
-    the projection never reaches the sub-agent wrappers and auto-inject is dead.
-
-    This is the ONLY production publish of that binding, and it runs while
-    the agent is still being constructed (not yet serving). /D2 removed the
-    per-ContextManager rebinding: a live invocation publishes nothing into
-    shared tools and carries its own projection through the context instead.
+    SetToolParentProjection wires the agent compress.SessionProjection to
+    every AgentToolWrapper in the tool list so event_keys are auto-injected
 
 func (ta *TagentAgent) SetTrajectoryRecorder(tr *rl.TrajectoryRecorder)
     SetTrajectoryRecorder sets the trajectory recorder for this agent. When set,

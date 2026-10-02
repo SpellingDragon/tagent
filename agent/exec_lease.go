@@ -388,28 +388,13 @@ func BindingHolders(owner string, agents []*TagentAgent) int {
 	return holders
 }
 
-// WireOrgGeneration performs the generation-level wiring of ONE org publish
-// (3.2 trunk, D8 as precision-approved round 90). It must run after every owner
-// of the publish has STAGED its next generation and before ANY of them is
-// activated, so no execution path can observe a half-wired generation:
+// WireOrgGeneration performs the generation-level wiring of ONE org publish. It must
+// run after every owner of the publish has STAGED its next generation and before ANY
+// of them is activated, so no execution path can observe a half-wired generation.
 //
-// - INCOMING: each staged face's wrappers are stamped with the STAGED child
-// binding they declare, and the declaring generation records a hold on it.
-// A call through that wrapper therefore resolves the child through the
-// declaring generation's own execution view — never the child's "current"
-// face, never a captured instance.
-//
-// - OUTGOING (retroactive): the previous generations' faces were wired when
-// THEY were staged — except a cold-start owner whose binding was created
-// lazily and never wired. Those wrappers are stamped against the
-// still-active child bindings now, with the same holds, so an in-flight
-// caller on the outgoing generation keeps reaching ITS generation's
-// targets after this publish retires them. Stamps are idempotent: a
-// wrapper already wired by an earlier publish keeps its (still correct)
-// target.
-//
-// The holds never enter the obligation axes (J7/J8); they only gate the
-// binding-level reclaim (retired ∧ refs==0 ∧ heldBy==0).
+// - Incoming: each staged face wrapper is stamped with the staged child binding it declares, and the declaring generation records a hold on it, so a call through that wrapper resolves the child from the declaring generation own execution view.
+// - Outgoing (retroactive): a cold-start owner whose binding was created lazily and never wired gets its wrappers stamped against the still-active child bindings.
+// 契约: docs/wiki/agent/execution-generations.md#generation-wiring-window
 func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*StagedGeneration) {
 	for name, s := range staged {
 		if s == nil {

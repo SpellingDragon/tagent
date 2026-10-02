@@ -361,6 +361,8 @@ TagentAgent.runEventLoop:
 <a id="framework-boundary"></a>
 ## 五、tagent 与 trpc-agent-go 的边界
 
+跨这条边界的数据流是**严格单向**的：送给模型的最终消息列表只由投影装配（`[system] + render(projection)`，任务面板由后续回调注入），绝不从框架的 message 尾部读回任何东西。每一个事件（用户输入、工具调用、工具结果、终局、总线注入）都经事件插件管线或 `persistBusEvent` 进入投影，因此"模型可见"与"已被投影"是同一件事——曾经存在过的"可见但未投影"状态就是顺序缺陷的根源。
+
 **tagent 独有**：
 - `EventBus` + `runEventLoop`：持久事件循环 + 异步事件注入
 - `SessionProjection` + `Compactor`：有界投影 + 投影清理

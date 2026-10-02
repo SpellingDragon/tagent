@@ -115,32 +115,13 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 	ta.runAgentLoop(ctx, bus, cm, loopSpec{})
 }
 
-// processTurn runs ONE batch through the agent's turn pipeline — freeze/drop →
-// durable submit gate → BuildInvocation (message assembly) → projection / trigger
-// source / metadata binding → turn lease → RunFlow (bounded retry) → outcome
-// reduce → durable finish/receipt/ack → idle anchor.
+// processTurn runs ONE batch through the agent turn pipeline and is the single turn
+// primitive: the persistent loop calls it once per pulled batch, a sub-agent Run calls
+// it once for its invocation, so both hit the same assembly, projection and execution stage.
 //
-// It is the single turn primitive: the persistent loop calls it once per
-// pulled batch and a sub-agent Run calls it once for its invocation, so "直连宿主"
-// and "作为被调方" hit the SAME assembly/projection/execution stage. The durable
-// steps are self-classifying — a batch whose events carry no claim commits and
-// acks nothing, which is exactly the derived sub-call case under design
-// interpretation A (transient delegation never enters the durable envelope).
-//
-// The turn's generation binding always comes from cm.BeginTurnLease(): for the
-// persistent loop that is the owner CM's current face; for a sub-call whose cm is
-// the PRIVATE invocation CM it is that CM's own construction-time binding (and a
-// private CM has no org-reloader, so none fires) — the same executor RunFlow used
-// before this unification. The caller's lifetime reference is held separately
-// by the sub-call path (Run's own invLease defer), not through this function.
-//
-// The retry budget is UNIFIED (S3m-c): both the persistent loop and a derived
-// sub-call run this body with persistentTurnRetryBudget, so the turn stage has no
-// entry-kind divergence. A synchronous sub-call's caller still blocks on the FIRST
-// answer (the two-stage protocol lives in Run's channel close, not here); the only
-// change is that a hiccup self-heals in the callee rather than being re-issued by
-// the caller. The shared assembly / projection / execution stage is identical
-// either way.
+// - The durable steps are self-classifying: a batch whose events carry no claim commits and acks nothing, which is the derived sub-call case because a transient delegation never enters the durable envelope.
+// - The turn generation binding always comes from cm.BeginTurnLease().
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, events []*AgentEvent) turnDisposition {
 	retryDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
 	maxRetries := persistentTurnRetryBudget

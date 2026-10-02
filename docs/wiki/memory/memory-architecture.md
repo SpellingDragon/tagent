@@ -1592,6 +1592,10 @@ spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `Event
 - 压实后必须成批移除被吸收的墓碑（内存与 KV 两侧），否则墓碑只增不减。
 
 <a id="feedback-bind"></a>
+
+确定性任务裁决由 `writeSettleFeedback` 写为 feedback 事件，因果边指向对应的 `task_settled` 事件：`completed` 记 positive、`failed` 记 negative；`suspect`、`alive-detached` 与未知状态一律不写——只记确定性裁决，防止噪声污染 guardrail。写失败仅记日志，反馈是旁路产物，不阻塞主链路。
+
+反馈**不是** durable 提交或 ack 的凭据。它只在事实链已 durable、投影已 append 之后运行，位于 ack 下游；`BindFeedback` 失败既不撤销提交、也不改变 `stored` 的返回，更不影响可靠 inbox 的 durable 判定（那里的凭据是 `PublishReceipt.Durable`）。guardrail 的 `negative_feedback_rate` 只作行为信号，绝不作输入确认或重放凭据。
 ## 二十七、反馈绑定的可区分失败与归因窗口
 
 反馈（外部评价）绑定到产出它的那条事件，两类失败**必须可区分**：父事件不存在（应回 404，客户端可纠正后重试）与"已落库但因果边写入失败"（应回已创建的告警语义，客户端**不得**盲目重试，否则重复反馈）。
