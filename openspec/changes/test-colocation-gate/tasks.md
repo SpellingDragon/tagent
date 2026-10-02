@@ -37,7 +37,7 @@
 - [x] 3.14 agent 批之一:session_refusal 单例并入 exec_lease_test(镜像同锚 #lease-holds-reference),基线 12→11
 - [x] 3.15 agent 批之二:quarantine_barrier 并入 inbox_test(镜像同锚 #envelope-states),基线 11→10
 - [x] 3.16 agent 批之三:session_projection 改名 projection_test 对齐镜像(②)+fold_run_exemption 四例并入(①),基线 10→8
-- [ ] 3.17 agent 批之四(裁决型):`agent/batch_retire_split_test.go`+`lineage_signal_test.go`——先核对 `agent/` 生产面裁定①落点或③锚点收敛,裁决记录写入本任务提交信息;N=2
+- [x] 3.17 agent 批之四:裁决①互并为新名 finalize_lineage_test.go(两测试各半语义,新名诚实覆盖),基线 8→6
 - [ ] 3.18 agent 批之五(热区,B 型):前置 `git status` 确认 `agent/task/` 干净;`task/batch_retire_split_test.go`+`retire_lineage_test.go` →①并入 `task_manager_test.go` 子测试 + ③ `#finalize-lineage` 族锚上收;N=2
 - [ ] 3.19 tests 批之一(C 型):`async_result_test.go`+`async_task_e2e_test.go` →①合并为单一文件,锚点取其一;N=2
 - [ ] 3.20 tests 批之二(C 型,含文档侧):`compression_test.go`/`integration_test.go` →③重挂 e2e 级锚(落点语义写入提交信息;若评审判两文件确属同工况则辅①);N=2(实测 25 清单与 3.2-3.20 销号数逐一对账吻合)
