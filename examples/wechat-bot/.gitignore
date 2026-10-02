@@ -62,6 +62,10 @@ skills/*/
 !skills/url-fetcher/
 !skills/agent-mail-send/
 !skills/audio-separation-pipeline/
+!skills/gopls-code-nav/
+!skills/go-service-ops/
+!skills/interview/
+!skills/ima/
 skills/url-fetcher/node_modules/
 
 # Re-ignore all dotfiles and dot-directories (runtime data)
