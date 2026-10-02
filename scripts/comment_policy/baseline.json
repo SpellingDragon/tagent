@@ -3,6 +3,8 @@
   "_regenerate": "bash scripts/lint.sh --update-baseline",
   "dirs": [".","examples/wechat-bot"],
   "counts": {
+    "doc-not-brief": 99,
+    "missing-file-responsibility": 113,
     "missing-test-responsibility": 9
   }
 }

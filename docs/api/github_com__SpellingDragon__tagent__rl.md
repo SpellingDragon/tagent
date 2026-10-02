@@ -2,8 +2,6 @@ package rl // import "github.com/SpellingDragon/tagent/rl"
 
 Package rl provides reinforcement learning utilities for tagent agents.
 
-契约: docs/wiki/rl/rl-architecture.md
-
 This package contains components for: - Recording agent trajectories for offline
 training - Swapping model instances at runtime - HTTP API for external RL
 systems (AReaL)
@@ -24,8 +22,6 @@ func EndpointRedirectPolicy(allowedHosts []string) func(*http.Request, []*http.R
     maxRedirectHops）与主机名归一，均以文档为唯一真源。判定留在 rl 包内、不引入 provider SDK
     依赖，宿主经传输层注入口装上守卫。
 
-    契约: docs/wiki/rl/rl-architecture.md#redirect-policy
-
 func NewEndpointGuardedClient(allowedHosts []string) *http.Client
     NewEndpointGuardedClient 返回可直接用作 openai 式 SDK 传输层的 http.Client：默认代理 传输 ＋
     按跳的allowlist 守卫。allowlist 为空时得到"拒绝所有重定向"的客户端。
@@ -42,7 +38,6 @@ func ValidateListenAddr(addr, token string) error
     via llm_base_url (full prompt exfiltration). Hosts MUST call this before
     ListenAndServe; a non-loopback address without a token returns an error
     listing the three ways out. With a token set, any address is allowed.
-
 
 TYPES
 
@@ -61,8 +56,6 @@ type HTTPAPI struct {
 }
     HTTPAPI 经 HTTP 暴露常驻事件循环，使外部调用方（如 AReaL 的 Python 适配器）可提交任务。 它是可选组件，且构成一张能操纵
     agent 的攻击面 —— 鉴权、loopback 守卫、单点上限与端点 策略四道防线都是结构性的，详见文档。
-
-    契约: docs/wiki/rl/rl-architecture.md#http-api
 
 func NewHTTPAPI(agent AgentLoop) *HTTPAPI
     NewHTTPAPI creates a new HTTPAPI for the given agent.
@@ -159,8 +152,6 @@ type SwappableModel struct {
     Runner，也不改事件机制（常驻循环、消息注入、输出通道都不动），只换最 底下的模型实例；所有 GenerateContent /
     GenerateContentIter / Info 都委托当前内层。
 
-    契约: docs/wiki/rl/rl-architecture.md#swappable-model
-
 func NewSwappableModel(m model.Model) *SwappableModel
     NewSwappableModel creates a SwappableModel wrapping the given model.
 
@@ -213,8 +204,6 @@ type TrajectoryRecorder struct {
 	// Has unexported fields.
 }
     TrajectoryRecorder 包装 model.Model，把每次 LLM 调用异步落成 JSONL 记录。
-
-    契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 
 func NewTrajectoryRecorder(inner model.Model, trajectoryDir, modelEndpoint string) (*TrajectoryRecorder, error)
     NewTrajectoryRecorder creates a TrajectoryRecorder wrapping the given model.
@@ -272,4 +261,3 @@ func (w *TrajectoryRecorderModelWrapper) GenerateContentIter(ctx context.Context
 
 func (w *TrajectoryRecorderModelWrapper) Info() model.Info
     Info 委托内层模型。
-

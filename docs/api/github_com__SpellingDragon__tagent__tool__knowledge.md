@@ -5,8 +5,6 @@ Package knowledge 提供知识获取子 agent 及其子工具：技能检索与�
 web_search 走结构化搜索 API：返回标题/链接/摘要/媒体/发布日期，而抓取引擎 HTML 会 因对端改版而无声失效，故 API
 是主用且更可靠的后端。API key 取自环境变量（变量名由 工具 api_key_env 属性配置）。降级与失败回报语义见文档。
 
-契约: docs/wiki/tool/tool-architecture.md#websearch-backend
-
 FUNCTIONS
 
 func BuildSubTools(cfg Config) []tool.Tool
@@ -78,7 +76,6 @@ func RegisterSubTools()
     discover available MCP tools - web_search: HTML scraping for general
     web content - duckduckgo_search: Instant Answer API for factual info -
     memory_query: query historical knowledge from memory
-
 
 TYPES
 
@@ -194,4 +191,3 @@ func DefaultWebSearchConfig() WebSearchConfig
     DefaultWebSearchConfig returns the default configuration, using the public
     Zhipu Web Search endpoint and the ZAI_API_KEY env var shared with the zhipu
     model provider.
-

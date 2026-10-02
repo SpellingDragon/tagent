@@ -28,7 +28,6 @@ const LineageRetired = "task-retired"
     LineageRetired is the settle-signal lineage stamped by TTL/liveness
     retirement onto the resulting settlement event's trigger_source.
 
-
 FUNCTIONS
 
 func DetachAfter(d time.Duration, stop <-chan struct{}) <-chan struct{}
@@ -84,7 +83,6 @@ func WithTaskSpawner(ctx context.Context, s TaskSpawner) context.Context
     retrieve it during Call via TaskSpawnerFromContext. Context values propagate
     through the framework flow down to tool.Call (the same path that carries the
     invocation).
-
 
 TYPES
 
@@ -643,4 +641,3 @@ func (s TaskStatus) Live() bool
     question can be asked from outside this package with the same answer the
     board's own dedup gives (isActive below), rather than each caller re-listing
     the states from memory.
-

@@ -15,7 +15,6 @@ func Call(ctx context.Context, m model.Model, req *model.Request) (string, error
     model returns empty Content but non-empty ReasoningContent, the reasoning
     text is used instead of failing (first generalized from the summary site).
 
-
 TYPES
 
 type Knobs struct {
@@ -29,4 +28,3 @@ type Knobs struct {
     Knobs carries the generation settings a direct call site may override.
     Nil fields stay untouched so per-site defaults (e.g. summaryMaxTokens)
     remain authoritative when the ModelRef omits them.
-

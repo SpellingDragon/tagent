@@ -21,4 +21,3 @@ func NewHealthTool(engine memory.MemoryEngine, store memory.MemoryStore) tool.To
 
 func RegisterSubTools()
     RegisterSubTools 注册记忆策展工具到全局注册表（memory_consolidate/memory_health）。
-

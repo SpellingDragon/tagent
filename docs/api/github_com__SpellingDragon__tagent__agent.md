@@ -100,7 +100,6 @@ const SourceTask = "task"
     SourceTask identifies task_settled events on the bus (a settled background
     task reclaimed into a new turn).
 
-
 VARIABLES
 
 var (
@@ -143,7 +142,6 @@ var ErrLoopTerminated = errors.New("agent: persistent loop already terminated �
     ErrLoopTerminated is returned by InjectMessageContext after StopLoop:
     the instance's output channel is closed (terminal lifecycle, V15) — a silent
     acceptance here would strand the input forever (3.1).
-
 
 FUNCTIONS
 
@@ -246,7 +244,6 @@ func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*Sta
     The holds never enter the obligation axes (J7/J8); they only gate the
     binding-level reclaim (retired ∧ refs==0 ∧ heldBy==0).
 
-
 TYPES
 
 type AgentEvent struct {
@@ -281,7 +278,6 @@ type AgentEvent struct {
 
     Scope: the bus coordinates turns. The tool loop inside a turn remains the
     upstream synchronous ReAct (runner.Run), so no tool-use event is ever a bus
-    trigger. 契约: docs/wiki/agent/event-flow.md#event-stream-overview
 
 func NewExternalInputEvent(source string, msg model.Message) *AgentEvent
     NewExternalInputEvent creates an external_input event with the given source
@@ -1148,8 +1144,6 @@ func (t *OutputLimitTool) Unwrap() trpctool.Tool
     wrappers — in an OutputLimitTool, so a published execution face
     holds OutputLimitTool(*AgentToolWrapper), never the bare wrapper.
     Because OutputLimitTool preserves the inner declaration unchanged,
-    peeling it never changes which target a name resolves to. 契约:
-    docs/wiki/agent/agent-architecture.md#subagent-loop
 
 type PlainToolFactory func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, error)
     PlainToolFactory creates a plain tool (implements tool.CallableTool) from
@@ -1506,7 +1500,6 @@ func (ta *TagentAgent) OrgBudgetLine() int
     (maxTokens times the current threshold) — the real sub-model budget
     consumer, not the resident config field, so hot-param and rollback
     assertions read what the compressor actually uses. 0 when no compressor is
-    wired. 契约: docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 
 func (ta *TagentAgent) OrgDiagnostics() map[string]any
     OrgDiagnostics returns the current orchestration-generation diagnostic
@@ -1892,4 +1885,3 @@ type UnconvergedRef struct {
     UnconvergedRef names a generation that is still held when a bounded close
     gives up. It is a report, not a force-close: the resources stay held until
     their producer confirms the stop.
-

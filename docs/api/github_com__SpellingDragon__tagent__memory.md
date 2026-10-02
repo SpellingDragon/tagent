@@ -4,8 +4,6 @@ Package memory 是 tagent 的事实存储层：以 FullEvent 为唯一记录形�
 隔离、以键格式为单点约定，并在此之上提供检索（关键词／语义）、分层与压实、TTL 与 物理遗忘。后端抽象（KV
 底座、检索引擎、嵌入器）都遵循"契约居核心包、实现居子包"。 事件类型常量的单点定义在事件包（event.Type*），本包不重复登记。
 
-契约: docs/wiki/memory/memory-architecture.md#overview
-
 CONSTANTS
 
 const (
@@ -54,8 +52,6 @@ var (
     ErrKeyNotFound 等类型化存储契约错误：调用方必须能区分"键确实不存在"与"存储 I/O 失败"。把两者塌缩成一个，
     等于把一次故障伪装成空召回、把一次恢复失败伪装成"这条链本来就没有"——它们静默产生错答案 而不是响亮报错。四类错误各自的处理义务见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#typed-errors
-
 var ErrFeedbackEdgePartial = errors.New("feedback-edge-partial")
     ErrFeedbackEdgePartial 标记「事件已落库但因果边失败」：反馈本体成功，
     调用方应返回成功+warning（201），不得按失败重试（会写重复 feedback）。
@@ -72,7 +68,6 @@ var LowValueEventTypes = event.LowValueTypes()
     LowValueEventTypes are event types whose Content/ToolCalls can be
     discarded in L3. Derived from the event registry (single source of truth):
     thinking_plan, context_compress.
-
 
 FUNCTIONS
 
@@ -138,8 +133,6 @@ func PartitionIDFromEventKey(key int64) int
 func PartitionIDFromName(name string) int
     PartitionIDFromName 由名字确定性地推导分区号（同名恒同值，0-1023）。允许碰撞——分区用于 因果链隔离，不用于唯一性标识。
 
-    契约: docs/wiki/memory/memory-architecture.md#event-key
-
 func PartitionPrefix(pid int) string
     PartitionPrefix returns the prefix for all keys in a partition.
 
@@ -173,7 +166,6 @@ func WindowTimestamp(tsSec int64, windowSize int64) int64
 func WindowTimestampFromEventKey(eventKey int64, windowSize int64) int64
     WindowTimestampFromEventKey computes the window timestamp from an EventKey's
     embedded timestamp.
-
 
 TYPES
 
@@ -247,15 +239,11 @@ type Embedder interface {
     批量语义要求返回与输入等长、顺序对应；未配置时返回 error 由调用方按"功能关闭"降级。 接入新供应商的步骤与一条已裁决事项（嵌入走 tagent
     侧 HTTP 供应商而非 rustviking CLI）见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#embedder
-
 type ErrorTrackingStore struct {
 	// Has unexported fields.
 }
     ErrorTrackingStore 是存储装饰链的最外层：把失败按特征归因到依赖并旁路上报，构成降级状态机 的唯一错误输入源；非侵入透传 inner
     全部方法（含可选接口）。归因矩阵、三类"不算故障"的情况与 恢复证明规则见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#error-tracking
 
 func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTrackingStore
     NewErrorTrackingStore 包裹 inner 做错误追踪；sink 为 nil 即纯透传、不上报。
@@ -348,8 +336,6 @@ type EventReference struct {
 }
     EventReference 是指向已存事件的轻量引用（键、类型、摘要、时间、角色）。会话侧只持有引用 列表，全文按需用
     GetEvent/GetEvents 水合。字段单位与取值属契约，见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#event-shape
 
 type EventReplayer interface {
 	// ReplayEvent 走内部回放路径提交 canonicalFact，返回发生了什么、以及**实际存储的**事实
@@ -590,8 +576,6 @@ type FullEvent struct {
 
     字段语义与单位取值、两条时间轴的分工、因果父引用的存放位置，均以文档为唯一真源。
 
-    契约: docs/wiki/memory/memory-architecture.md#event-shape
-
 type InMemRelationStore struct {
 	// Has unexported fields.
 }
@@ -780,8 +764,6 @@ type KVStore interface {
     KVStore 抽象底层 KV 操作，是 FileSegmentStore 的持久化底座。契约与数据类型居核心包、 实现居子包 memory/kv（与
     MemoryEngine、Embedder 同一切分原则）。语义约束：键为字符串 （键格式由 memory/key_schema.go
     单点定义）；Scan/Range 按字典序返回；limit<=0 不限制。 接入新后端的路径与接线点见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#extension-paths
 
 type LifecycleConfig struct {
 	// GlobalTTLDays is the default TTL for all events (default: 7).
@@ -1208,15 +1190,11 @@ type StoreStats struct {
 }
     StoreStats 是存储统计。
 
-    契约: docs/wiki/memory/memory-architecture.md#counts-known
-
 type TombstoneSet struct {
 	// Has unexported fields.
 }
     TombstoneSet 记录已被合法删除（遗忘）的事件键：内存驻留并持久化到 KV，以便崩溃后重建，
     且保证回放不会复活被遗忘的事实。删除时的级联父引用修复顺序是承重的，详见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#tombstone
 
 func NewTombstoneSet(rel RelationStore, kv KVStore, pid int) *TombstoneSet
     NewTombstoneSet 构造墓碑集；kv 可为 nil（仅内存），rel 必须可用以做级联修复。
@@ -1266,4 +1244,3 @@ type VectorRemover interface {
 }
     VectorRemover 由持有向量索引的组件实现；FileSegmentStore 在 TTL/容量遗忘**物理删除**
     事件时（Compactor.finalizeTombstones）回调，使引擎同步移除向量（内存索引 + KV 持久键）， 防死键堆积与重启复活。
-

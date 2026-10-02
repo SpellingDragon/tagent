@@ -27,7 +27,6 @@ func RegisterTool()
     name/path - work_dir: working directory containing openspec/ (default:
     process cwd)
 
-
 TYPES
 
 type Backend interface {
@@ -94,4 +93,3 @@ type Result struct {
 	Hint     string `json:"hint,omitempty"`
 }
     Result is the outcome of a spec operation.
-

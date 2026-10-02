@@ -24,4 +24,3 @@ func RegisterTools()
     RegisterTools registers all built-in file operation tools as plain tools.
     Should be called once during tagent's built-in tool registration. Uses
     sync.Once for idempotency — safe to call multiple times.
-

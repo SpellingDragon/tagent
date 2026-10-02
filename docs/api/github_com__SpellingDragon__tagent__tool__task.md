@@ -19,7 +19,6 @@ func RegisterSubTools()
     The tools are stateless; they resolve the TaskController from the invocation
     context at Call time, so a single registration works for any agent.
 
-
 TYPES
 
 type CancelTaskTool struct{}
@@ -71,4 +70,3 @@ func (t *ResumeTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 
 func (t *ResumeTaskTool) Declaration() *tool.Declaration
     Declaration implements tool.CallableTool.
-

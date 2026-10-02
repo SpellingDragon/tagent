@@ -84,6 +84,31 @@ var changeArtifactRef = regexp.MustCompile(`openspec/changes/`)
 // indexLine is the only accepted form of a documentation pointer.
 var indexLine = regexp.MustCompile(`^\s*(契约|规格):\s+\S+\s*$`)
 
+// briefProseParagraphs is the doc-shape budget: a responsibility statement may run two
+// prose paragraphs; anything deeper is documentation, not a godoc stub.
+const briefProseParagraphs = 2
+
+// countBriefProseParagraphs counts narrative paragraphs of a doc group: runs of
+// non-blank lines that are neither bullets nor index lines. Physical line wraps are not
+// depth — Go authors hard-wrap sentences — while a third paragraph is a narrative the
+// mechanism documentation section should own. Blank lines carry no content, and "- " bullets are
+// scannable by construction.
+func countBriefProseParagraphs(text string) int {
+	n, in := 0, false
+	for _, raw := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(raw)
+		if t == "" || strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
+			in = false
+			continue
+		}
+		if !in {
+			n++
+			in = true
+		}
+	}
+	return n
+}
+
 // indexTargetRoots are the roots a documentation index may point at. The requirement
 // tree is not a legal target: a code comment indexes the mechanism documentation that
 // explains the code, and that single source is the wiki tree. A module README outside
@@ -497,7 +522,36 @@ func checkFile(path string) ([]finding, error) {
 	}
 	out = append(out, checkCoverage(fset, file, path, isTest)...)
 	out = append(out, checkDocForm(fset, file, path, isTest)...)
+	out = append(out, checkFileResponsibility(fset, file, path)...)
 	return out, nil
+}
+
+// exemptFromResponsibility reports whether a path is outside the file-level
+// responsibility index duty: test files belong to the test-side declaration rule,
+// and the gate's own tooling under scripts/ has no wiki home of its own — the same
+// exemption check_test_merge.sh grants it. Real scans always pass repository-relative
+// paths, so the prefix test runs on the cleaned relative form.
+func exemptFromResponsibility(path string) bool {
+	slash := filepath.ToSlash(filepath.Clean(path))
+	return strings.HasSuffix(slash, "_test.go") || strings.HasPrefix(slash, "scripts/")
+}
+
+// checkFileResponsibility requires every production file to declare the documentation
+// section it implements. The index may sit in any documentation slot of the file — the
+// detection mirrors the test-side declaration — because the natural host differs by file
+// shape (package doc for a family file, primary type doc for a single-concept file).
+// A missing index is the opening of the forcing loop: the section must be found or
+// written first, since index-target and anchor gates reject a pointer to thin air.
+func checkFileResponsibility(fset *token.FileSet, file *ast.File, path string) []finding {
+	if exemptFromResponsibility(path) {
+		return nil
+	}
+	for _, g := range file.Comments {
+		if strings.TrimSpace(indexLineText(g)) != "" {
+			return nil
+		}
+	}
+	return []finding{{Path: path, Line: fset.Position(file.Package).Line, Rule: "missing-file-responsibility", Note: "production file declares no 契约:/规格: index; find or write the docs/wiki section first, then add one index line", Text: "package " + file.Name.Name}}
 }
 
 // fileFact is one test file's participation in the responsibility co-location rule:
@@ -964,6 +1018,9 @@ func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text s
 	}
 	if coord := externalCoordRef(nonIndexProse(text)); coord != "" {
 		add("external-coord-ref", fmt.Sprintf("comment cites a planning coordinate or a change name: %q", coord))
+	}
+	if n := countBriefProseParagraphs(nonIndexProse(text)); n > briefProseParagraphs {
+		add("doc-not-brief", fmt.Sprintf("doc carries %d prose paragraphs beyond the %d-paragraph responsibility statement; move the detail into the docs/wiki section and keep bullets and the index", n, briefProseParagraphs))
 	}
 	for _, raw := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(raw)

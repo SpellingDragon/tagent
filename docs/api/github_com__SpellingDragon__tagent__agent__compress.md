@@ -69,7 +69,6 @@ const (
     TelemActive Telemetry disposition values for settle-notice refs (keyed by
     EventKey).
 
-
 FUNCTIONS
 
 func EventTypeToRole(eventType string) model.Role
@@ -109,7 +108,6 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
     window. A candidate whose event carries no settle_notice mark (forged body,
     or an event written before the mark existed) is never fold-eligible and
     stays verbatim.
-
 
 TYPES
 
@@ -325,8 +323,6 @@ type HotNumbers struct {
     boundaries. It must be taken with a single read (why a
     per-field read is unsafe is specified in the document below);
     zero or invalid fields fall back to the construction values,
-    so an owner without any record yet still computes a sane budget. 契约:
-    docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 
 type RetainedEntry struct {
 	Key int64 `json:"key"`
@@ -463,4 +459,3 @@ type TokenCounter interface {
 	Estimate(messages []model.Message) int
 }
     TokenCounter estimates token count for message lists.
-

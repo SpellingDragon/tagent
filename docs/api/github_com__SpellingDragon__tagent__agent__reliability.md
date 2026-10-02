@@ -424,4 +424,3 @@ func MaterialOf(env *Envelope) UnackedMaterial
     (hex, returned verbatim — the reliability leaf does not parse it). Used by
     both the startup lease rebuild and the per-ack release so protect/release
     derive the SAME key set. A nil env yields the zero material.
-

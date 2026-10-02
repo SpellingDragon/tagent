@@ -1,10 +1,10 @@
 ## 1. P1 门禁上线（规则按语义两单元 + 基线落定）
 
-- [ ] 1.1 `missing-file-responsibility` 规则：非测试 `.go`（`scripts/` 豁免、嵌套模块按 POLICY_DIRS）无任何 `契约:/规格:` 索引行 → 一条 finding，消息含「先补文档再落索引」。验证：单测覆盖——无索引生产文件计 finding、有索引零 finding、`_test.go` 与 `scripts/` 不计、多索引行取存在性判定的口径
-- [ ] 1.2 `doc-not-brief` 形态规则：声明 doc 职责句两行之后出现非 bullet、非索引散文行 → 一条 finding，消息含「迁文优先」。验证：单测覆盖——2 行职责句合规、3 行段落违规、bullet/索引行不计厚、非导出声明同权、package doc 同形态
-- [ ] 1.3 `gen_godoc` 共存定案：实测文件级索引行进生产 doc 后 `docs/api` 生成物的表现，裁决过滤或链接化并落地（改 `gen_godoc.sh` 或渲染器），`--check` 绿。验证：一个样本文件加索引行后跑 `gen_godoc.sh --check` 通过且产物符合裁决
-- [ ] 1.4 脚手架基线落定：全仓实测两规则计数（预演 112 / 上界 200，以实测落定），`lint.sh --update-baseline` 写双槽并提交；CI 即刻挡增量。验证：故意造一无索引新文件与一 3 行段落 doc → `lint.sh` 双 REGRESSION 红 → 移除恢复绿，留痕 `scaffold-probe.log`
-- [ ] 1.5 提交 P1（`scripts/comment_policy/` + `docs/api` 若再生），独立 revert 面
+- [x] 1.1 `missing-file-responsibility` 规则：非测试 `.go`（`scripts/` 豁免、嵌套模块按 POLICY_DIRS）无任何 `契约:/规格:` 索引行 → 一条 finding，消息含「先补文档再落索引」；放置位=任一文档槽位（OQ2 结案，镜像测试侧）。验证：单测覆盖——无索引生产文件计 finding、有索引零 finding、`_test.go` 与 `scripts/` 不计（谓词表+豁免实测）
+- [x] 1.2 `doc-not-brief` 形态规则：声明 doc 含三个及以上散文段落（叙述段落计数，物理 wrap 不计；bullet/索引行不计）→ 一条 finding，消息含「迁文优先」。验证：单测覆盖——单句跨行 wrap 合规、两段合规、三段违规、bullet/索引不计厚、非导出声明同权、package doc 同形态（fixture 头部两段为合规活证）
+- [x] 1.3 `gen_godoc` 共存定案：实测确认 `go doc -all` 把多文件 file.Doc 索引拼成概览 run-on blob → 裁决生成侧过滤（删 marker 行与裸 docs/ 碎片行），重生成后 residue 0、`--check` 绿、docs/api 纯减 194 行。已落地
+- [x] 1.4 脚手架基线落定：权威实测 =113 / `doc-not-brief` =99（段落语义），`lint.sh --update-baseline` 写双槽；CI 即刻挡增量。验证：故意造一无索引新文件与一三段 doc → `lint.sh` 双 REGRESSION 红 → 移除恢复绿，留痕 `scaffold-probe.log`。自纠注：首次 update-baseline 曾为裸引 docs/wiki 路径的门禁自注释静默开通 `unindexed-path-ref:1` 新槽（棘轮旁路同型复发），已改措辞撤槽
+- [x] 1.5 提交 P1（`scripts/comment_policy/` + `docs/api` 若再生），独立 revert 面
 
 ## 2. P2 权威测量与双对账锚冻结
 

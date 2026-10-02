@@ -40,8 +40,6 @@ func NewMemoryRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionI
     NewMemoryRecallTool 构造协议级召回工具（纯函数，无子 agent 绕行）：items 票据形态优先于 query 形态。
     检索分层、降级与诚实回报的契约见文档。
 
-    契约: docs/wiki/tool/tool-architecture.md#recall-contract
-
 func NewMemoryTurnTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool
     NewMemoryTurnTool reconstructs a task turn's execution process (compress-
     digest-reconnect). Given a boundary event key (usually an agent_output
@@ -74,8 +72,6 @@ func NewRecallTool(accessor tagenttool.MemoryStoreAccessor, readPartitionIDs []i
     NewRecallTool 构造统一召回入口：确定性形态是纯函数，orchestrate 是显式的 LLM 编排 opt-in。 未接线的
     orchestrate 必须显式回报并给出确定性迭代路径，不得静默降级，见文档。
 
-    契约: docs/wiki/tool/tool-architecture.md#recall-contract
-
 func NewRecallTraceTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool
     NewRecallTraceTool creates a tool that traces the causal chain
     backward from an event. Traverses ParentKey links by repeatedly calling
@@ -103,7 +99,6 @@ func RegisterSubTools()
     (stable-context- compaction D7) - recall_query / recall_get / recall_recent
     / recall_trace: RecallAgent orchestration sub-tools (internal to the
     orchestrate branch; not for direct top-level assembly)
-
 
 TYPES
 
@@ -155,4 +150,3 @@ type Config struct {
 type PromptConfig = prompt.CompositeConfig
     PromptConfig describes how to load a system prompt (bootstrap style).
     Re-exported from prompt package for use by sub-packages.
-

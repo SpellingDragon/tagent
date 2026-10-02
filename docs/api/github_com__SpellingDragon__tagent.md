@@ -74,7 +74,6 @@ const DefaultPromptsPrefix = "resources/prompts"
     DefaultPromptsPrefix is the path prefix under which the embedded defaults
     live.
 
-
 VARIABLES
 
 var (
@@ -133,17 +132,6 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
       - Registers the entry agent's closers in the order retirement demands:
         reload stopper, then owner retirement, then the shared MCP registry last
 
-    契约: docs/wiki/platform/org-hot-reload.md#overview 契约:
-    docs/wiki/platform/org-hot-reload.md#trigger-timing 契约:
-    docs/wiki/platform/org-hot-reload.md#apply-record 契约:
-    docs/wiki/platform/org-hot-reload.md#owner-retirement 契约:
-    docs/wiki/platform/org-hot-reload.md#memory-preflight 契约:
-    docs/wiki/platform/org-hot-reload.md#close-drain 契约:
-    docs/wiki/tool/tool-architecture.md#mcp-live-registry 契约:
-    docs/wiki/tool/tool-architecture.md#declaration-stability 契约:
-    docs/wiki/platform/platform-subsystems.md#governance-gate 契约:
-    docs/wiki/platform/platform-subsystems.md#evolution-wiring
-
 func RegisterBuiltinTools() error
     RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
     Called once in tagent.New() before config validation. Uses sync.Once for
@@ -176,7 +164,6 @@ func TestingBuildAgent(
 ) (*agent.TagentAgent, error)
     TestingBuildAgent creates a TagentAgent using the internal build pipeline.
     Test-only — do NOT use in production code.
-
 
 TYPES
 
@@ -807,8 +794,6 @@ type OrgAgentApply struct {
 
     回执的保留轮数与限界见文档。
 
-    契约: docs/wiki/platform/org-hot-reload.md#diagnostics
-
 type OrgCloseState struct {
 	Initiated       bool `json:"initiated"`
 	ResourcesExited bool `json:"resourcesExited"`
@@ -1075,4 +1060,3 @@ func (r *ToolRegistry) ValidateToolAccess(cfg *Config) error
     Agent-kind tools (kind: agent) are not checked here — they reference
     other agents in the Config.Agents map, which is validated separately in
     Config.Validate().
-

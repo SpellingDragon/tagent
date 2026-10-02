@@ -3,14 +3,11 @@ package engine // import "github.com/SpellingDragon/tagent/memory/engine"
 Package engine 提供记忆引擎的两种实现与其接线方式：进程内混合检索引擎（关键词 ∪ 向量，向量另存持久 KV 并在启动时异步重建）、store
 装饰器 engineBridge（一处包裹覆盖 全部写入路径），以及读实时状态而非平行计数器的健康度诊断。
 
-契约: docs/wiki/memory/memory-architecture.md#engine-overview
-
 FUNCTIONS
 
 func NewEngineBridge(inner memory.MemoryStore, engine memory.MemoryEngine) memory.MemoryStore
     NewEngineBridge 用引擎包裹 store。engine 的关键词路应指向 inner（构造引擎时传入）， 使 hybrid
     的关键词分支复用既有 QueryEvents。
-
 
 TYPES
 
@@ -148,4 +145,3 @@ type StatsProvider interface {
 }
     StatsProvider 是可选能力接口：引擎暴露内部计数供诊断读取（与 memory.RawVectorSearcher 并列的 具名可选契约，非
     C6 必需）。
-

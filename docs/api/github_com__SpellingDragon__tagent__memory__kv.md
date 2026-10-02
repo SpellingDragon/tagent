@@ -4,8 +4,6 @@ Package kv 提供 memory.KVStore 的可选后端：LocalFileKV（内存 map ＋ 
 fsync、不保证掉电安全）、RustVikingClient（封装 rustviking CLI 的 JSON 契约，range 由公共前缀扫描模拟）与
 MockRustVikingClient（测试替身，扫描同样 按字典序）。
 
-契约: docs/wiki/memory/memory-architecture.md#local-file-kv
-
 TYPES
 
 type CLIResponse struct {
@@ -176,8 +174,6 @@ func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8
     序列化＋启动重建，而原生 index 是进程内易失索引，两条路线互斥。level 的语义未经真实 二进制验证，且显式传 0 会偏离 rustviking
     默认 level=1；接线前须先实测 0/1 的索引结构差异 再定传参。完整约束见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#rv-vector-cmds
-
 func (c *RustVikingClient) VectorSearch(query []float32, k int) ([]VectorResult, error)
     VectorSearch 向量检索（index search），返回按相似度排序的命中（含 score）。
 
@@ -187,4 +183,3 @@ type VectorResult struct {
 	Level uint8   `json:"level"`
 }
     VectorResult 是向量检索的单条命中：rustviking 返回的 id、相似度分与索引层级。
-

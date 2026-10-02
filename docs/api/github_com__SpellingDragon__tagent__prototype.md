@@ -140,4 +140,3 @@ type ToolCall struct {
 	Finished bool
 }
     ToolCall describes a single tool invocation in the mock model output.
-

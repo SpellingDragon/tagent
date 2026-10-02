@@ -23,12 +23,10 @@ const (
     event 包（C3/C4：evolution.StoreEvidenceSource 也引用
     event.Subtype*，消除跨包字面量复制的静默漂移）。此处别名保持 governance 内部引用不变。
 
-
 VARIABLES
 
 var ErrBudgetExhausted = budgetExhaustedError{}
     ErrBudgetExhausted 表示窗口内该风险级别预算耗尽。
-
 
 FUNCTIONS
 
@@ -52,7 +50,6 @@ func WithTriggerSource(ctx context.Context, source string) context.Context
     WithTriggerSource 把触发源（user/meditation/task/tmux/subagent/inject）存入 ctx。
     event loop 每回合盖章，GovernanceTool 读取用于 goal-required 判定（meditation/task 须挂
     goal）。
-
 
 TYPES
 
@@ -392,4 +389,3 @@ type Rule struct {
 func DefaultRules() []Rule
     DefaultRules 返回 tagent 工具集的默认风险规则表（数据驱动，按序匹配，危急优先）。
     设计：exec（shell）是主风险面，按命令内容分级；文件写/删中危；只读工具低危。
-

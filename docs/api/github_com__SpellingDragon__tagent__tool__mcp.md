@@ -18,7 +18,6 @@ CONSTANTS
 const CallToolName = "mcp_call"
     CallToolName is the registry ID of the mcp_call gateway tool.
 
-
 FUNCTIONS
 
 func NormalizeTransport(t string) string
@@ -30,7 +29,6 @@ func RegisterTool()
     tagent.RegisterBuiltinTools(). The factory succeeds even without a wired
     registry (mirroring mcp_discover's empty-stub behavior) so YAML references
     never fail at build time.
-
 
 TYPES
 
@@ -149,4 +147,3 @@ type ServerConfig struct {
 func (c ServerConfig) Validate(name string) error
     Validate checks the declaration after transport normalization:
     sse/streamable require url, stdio requires command.
-

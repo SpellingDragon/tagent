@@ -3,8 +3,6 @@ package event // import "github.com/SpellingDragon/tagent/event"
 Package event 定义 tagent 的统一事件类型、事件元数据契约与时间线前缀契约：
 类型注册表是事件类型静态属性的唯一权威源，投影/召回/嵌入/TTL 均由它派生。
 
-契约: docs/wiki/event/event-architecture.md#overview
-
 谱系投递策略的单一真源：宿主投递门与折叠外显判定同源消费此白名单。
 
 CONSTANTS
@@ -52,8 +50,6 @@ const (
 )
     MetaKeyEventKey StateDelta 与 FullEvent.Metadata 的键常量：每个键在此定义一次，注入点引用常量， 消费方经
     ParseEventMeta 解析。谁写谁读见文档的键归属表。
-
-    契约: docs/wiki/event/event-architecture.md#metadata-keys
 
 const (
 	TypeExternalInput = "external_input"
@@ -111,8 +107,6 @@ const (
     doc）。引擎已撤回，此处注册的唯一作用是让历史 wf.* 记录继续被投影、召回与嵌入 排除，因此注册时 **TTLDays 必须保持 0** ——
     任何正值都会静默缩短既有记录的保留期。 事实链语义与由它折叠出的各视图以文档为唯一真源。
 
-    契约: docs/wiki/event/event-architecture.md#internal-retention
-
 const (
 	MetaKeyWFLineage = "wf_lineage"
 	MetaKeyWFNode    = "wf_node"
@@ -134,9 +128,6 @@ const LineageMeditation = "meditation"
 const TypeInboxReceipt = "inbox_receipt"
     TypeInboxReceipt 标记「一个输入信封已被确认消费」的记账事实：其真源是事实链而非 inbox 文件。它的 TTL 就是
     request-id 的 30 天去重窗口，过期后同一 request-id 重投 不保证幂等。注册为非投影、非嵌入、非召回。
-
-    契约: docs/wiki/event/event-architecture.md#internal-retention
-
 
 FUNCTIONS
 
@@ -178,8 +169,6 @@ func FormatEventKey(key int64) string
 func FormatEventPrefix(key int64, eventType string) string
     FormatEventPrefix 渲染时间线行的规范前缀 `[evt_<KEY>|<type>] `，KEY 用十六进制。 写入端与本文件的读取端
     ParseEventKeyAndType 同处一包，渲染与解析不会各自演化。
-
-    契约: docs/wiki/event/event-architecture.md#timeline-prefix
 
 func GenerateEventSummary(msg model.Message, eventType string, opts EventSummaryOptions) string
     GenerateEventSummary 生成事件的 event_summary 元数据视图：多数类型是原文逐字视图， action_command
@@ -245,7 +234,6 @@ func WFExcludedTypes() []string
     WFExcludedTypes 返回全部 wf.* 类型名，供诊断与守卫断言使用；投影/召回/嵌入的排除 判定不依赖此列表，而统一走
     IsNonProjectionRecord 与注册表。
 
-
 TYPES
 
 type EventMeta struct {
@@ -299,8 +287,6 @@ type EventTypeSpec struct {
     EventTypeSpec 声明一个事件类型的全链路静态属性：角色、是否原文优先、摘要形态、 是否压缩骨架、是否低价值、类型级
     TTL、是否合成投影引用、是否可嵌入、是否可召回、 是否永不进投影。未注册类型回退 defaultSpec，与引入注册表前对未知类型的处理一致。
 
-    契约: docs/wiki/event/event-architecture.md#registry-authority
-
 func LookupEventType(name string) (EventTypeSpec, bool)
     LookupEventType 返回类型 spec 及是否已注册。
 
@@ -313,4 +299,3 @@ type SourceSnapshot struct {
 
 func DecodeSourceSnapshot(raw string) (SourceSnapshot, error)
     DecodeSourceSnapshot 解析快照 JSON；空串得到零值。
-

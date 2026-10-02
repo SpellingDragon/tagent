@@ -31,4 +31,3 @@ type TaskItem struct {
 	Done  bool
 }
     TaskItem represents a single task parsed from tasks.md.
-

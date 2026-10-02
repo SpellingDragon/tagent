@@ -1,5 +1,4 @@
 
-
 FUNCTIONS
 
 func ComposeMediaInject(outcome IntakeOutcome, userText, workspaceDir, chatID string, now time.Time) string
@@ -28,7 +27,6 @@ func ExtractFilePaths(text, workspaceDir string) []string
     （workspaceDir 为空则跳过相对路径）。
      5. 硬性排除可执行文件（具有任意可执行权限位或扩展名在拒绝列表中）。
      6. 结果去重并保持首次出现顺序。
-
 
 TYPES
 
@@ -132,4 +130,3 @@ func (c *WechatAppConfig) EnsureDirs() error
 func (c WechatAppConfig) IsApprover(userID string) bool
     IsApprover reports whether the user id may approve via the message channel
     (8.2: empty whitelist denies everyone — approval goes via CLI).
-

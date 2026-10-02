@@ -10,4 +10,3 @@ FUNCTIONS
 func NewGoalTools(gate *governance.GovernanceGate) []tool.Tool
     NewGoalTools builds the five governance face tools bound to the shared gate
     (Goals/Ledger/Approval accessors). Entry-only wiring lives in tagent.go.
-

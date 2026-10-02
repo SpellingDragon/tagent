@@ -22,7 +22,6 @@ const (
 )
     ToolOutputDir 是根目录下存放超大工具输出的子目录名。
 
-
 FUNCTIONS
 
 func Root(root string) string
@@ -30,7 +29,6 @@ func Root(root string) string
 
 func ToolOutputPath(root string) string
     ToolOutputPath 返回超大工具输出的目录。
-
 
 TYPES
 
@@ -54,4 +52,3 @@ func (c *Cleaner) RunOnce()
 
 func (c *Cleaner) Start(ctx context.Context)
     Start 在自己的 goroutine 里按 ticker 清理，直到 ctx 取消；需要观察协程退出的调用方用 Run。
-

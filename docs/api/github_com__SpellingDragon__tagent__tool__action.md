@@ -4,9 +4,6 @@ Package action 提供 exec 类动作工具及其 tmux 会话承载：动作的�
 判定、完成裁决（settle）、状态跃迁通知、轮询调度、跨重启的常驻恢复，以及供跨重启 重建闭包的 Declarative
 投影。长期行为判据不在此复述，见下列契约。
 
-契约: docs/wiki/tool/tool-architecture.md#action-tool 契约:
-docs/wiki/tool/tmux-action.md#liveness-first
-
 FUNCTIONS
 
 func DeclarativeFromArgs(args ActionArgs, sessionID string) *task.Declarative
@@ -45,7 +42,6 @@ func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName,
     SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
     Relaunch✅ via redispatch through the resident agents map; Resume❌ — the
     rounds chain has no event source, cross-restart resume returns guidance).
-
 
 TYPES
 
@@ -358,10 +354,8 @@ const (
 	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
 	SessionError SessionStatus = "error"
 	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
-	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 	SessionFakeDead SessionStatus = "fake_dead"
 	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
-	// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 	SessionFakeAlive SessionStatus = "fake_alive"
 	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
 	SessionTimedOut SessionStatus = "timed_out"
@@ -405,8 +399,6 @@ func (te *TmuxExecutor) CleanupOrphanSessions() int
 func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOptions) (*TmuxSession, error)
     CreateSession creates a new tmux session with the command
 
-    契约: docs/wiki/tool/tmux-action.md#named-session-singleton
-
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error)
     GetSessionOutput 返回该会话当前可见的输出：优先读流式记录文件（pipe），文件缺失或 为空时回落到 capture-pane 的最近
     1000 行，该回落调用带 3s 超时。
@@ -419,8 +411,6 @@ func (te *TmuxExecutor) IsPaneDead(sessionID string) bool
 
 func (te *TmuxExecutor) KillSession(sessionID string) error
     KillSession kills a tmux session
-
-    契约: docs/wiki/tool/tmux-action.md#pipe-log
 
 func (te *TmuxExecutor) ListSessions() ([]*TmuxSession, error)
     ListSessions lists all tmux sessions with our prefix
@@ -435,8 +425,6 @@ func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool)
         never as success. Framework-created sessions run with remain-on-exit,
         so a dead pane is retained and its status remains readable at detection
         time.
-
-    契约: docs/wiki/tool/tmux-action.md#failure-polarity
 
 func (te *TmuxExecutor) PipeFileFor(sessionID string) string
     PipeFileFor exposes the streaming-log path for a session.
@@ -486,8 +474,6 @@ type TmuxMonitor struct {
 	// Has unexported fields.
 }
     TmuxMonitor monitors tmux sessions and detects state changes.
-
-    契约: docs/wiki/tool/tmux-action.md#notify-gates
 
 func NewTmuxMonitor(opts ...TmuxMonitorOption) *TmuxMonitor
     NewTmuxMonitor creates a new tmux monitor
@@ -676,4 +662,3 @@ func (d *TmuxSettleDetector) Stopped() <-chan struct{}
     tracking) and then closes this channel; a terminal status closes it after
     the last settle was emitted. Either way nothing behind the detector can
     still touch shared state once it fires.
-

@@ -1,6 +1,6 @@
 ## Context
 
-用户指令确立终态哲学：注释薄、文档厚、注释核心是文档引用、go doc 仅简要职责。实测基线：174 非测试源文件（`scripts/` 除外）中 112 无 `契约:/规格:` 索引；591 导出声明全有 doc，但散文 ≥3 行者上界约 200（含 bullet 计入的保守口径；形态规则精确值待 P2 冻结），最厚 `Config` 41 行。既有规则（mechanism-narrative/rationale/audit-marker/free-standing）只打击特定形态，不约束总形态与文件归属；`missing-test-responsibility` 只覆盖测试侧声明义务。`comment_policy` 已具备：索引行语法与目标校验（`index-root`/`index-target-missing`/`index-anchor-*` 零容忍硬门）、按规则总量棘轮、`<a id>` 显式锚惯例、pre-commit 收敛批触发。test-colocation-gate 战役（25→0 切硬）刚验证了"脚手架棘轮 + 分域批 + 对账锚 + pathspec 提交"的完整打法。
+用户指令确立终态哲学：注释薄、文档厚、注释核心是文档引用、go doc 仅简要职责。实测基线：174 非测试源文件（`scripts/` 除外）中 113 无 `契约:/规格:` 索引；591 导出声明全有 doc，但含三个及以上散文段落者 99（权威实测，最厚 `Config` 41 行）。既有规则（mechanism-narrative/rationale/audit-marker/free-standing）只打击特定形态，不约束叙述深度与文件归属；`missing-test-responsibility` 只覆盖测试侧声明义务。`comment_policy` 已具备：索引行语法与目标校验（`index-root`/`index-target-missing`/`index-anchor-*` 零容忍硬门）、按规则总量棘轮、`<a id>` 显式锚惯例、pre-commit 收敛批触发。test-colocation-gate 战役（25→0 切硬）刚验证了"脚手架棘轮 + 分域批 + 对账锚 + pathspec 提交"的完整打法。
 
 ## Goals / Non-Goals
 
@@ -18,13 +18,13 @@
 
 ## Decisions
 
-### D1 形态规则取代行数预算
+### D1 形态规则取代行数预算（度量单位：叙述段落）
 
-行数预算治标（5 行段落照样厚）；形态规则（首 1–2 行职责句 + 其后仅 `- ` 要点/索引行）是"仅简要解释职责"的机检等价物，且与测试侧既有形态立法对称。上界约 200 声明需削薄，bullet 不计入散文（可扫读不算厚）。备选否决：行数预算（>5 行=63 起步）——拦不住 4 行段落式叙述，且与"简要"无同构性。
+形态规则（至多两段职责散文 + 穿插 bullet/索引行）是"仅简要解释职责"的机检等价物，且与测试侧既有形态立法对称。**实施实测修正**：初版以物理散文行为单位，全仓命中 1451——其中 534 例恰为 3 行，实为 Go 硬换行的单句 wrap，度量把排版换行误计为叙述深度。改为**叙述段落计数**（连续非空非 bullet 行为一段）后收敛到 99，命中的是真-三段式叙述。备选否决：行数预算（拦不住 4 行段落式叙述）；物理行规则（误伤 wrap，战役成本虚高 14 倍）。package doc 同形态约束，不放宽（OQ1 结案：clean.go fixture 头部两段即为合规样板）。
 
 ### D2 指针粒度：文件级强制，声明级可选
 
-"每段注释核心=引用"若按声明级铺设=557 锚点噪声。文件级指针（112 缺）同时是 colocation 镜像闭环的另一半：测试文件镜像生产文件，生产文件镜像 wiki 小节。豁免：`scripts/`（沿 `check_test_merge.sh` 的 `^scripts/` 先例——门禁自用工具无 wiki 家园）、测试文件（已有 `missing-test-responsibility`）、`_test.go` 之外的全部 `.go`。
+"每段注释核心=引用"若按声明级铺设=557 锚点噪声。文件级指针（113 缺）同时是 colocation 镜像闭环的另一半：测试文件镜像生产文件，生产文件镜像 wiki 小节。**放置位（OQ2 结案）**：任一文档槽位即可，镜像测试侧同构检测——生产文件的自然落点因文件形态而异（家族文件居包 doc，单概念文件居主类型 doc）；强制 package 子句之前会把既有合规摆放重判违规。豁免：`scripts/`（沿 `check_test_merge.sh` 的 `^scripts/` 先例——门禁自用工具无 wiki 家园）、测试文件（已有 `missing-test-responsibility`）。
 
 ### D3 脚手架棘轮：本变更内出生、归档前死亡
 
@@ -34,9 +34,9 @@
 
 每域一批：先写/扩 wiki 小节（承接被削薄的散文，含 `<a id>` 锚），再削声明 doc 至形态，再补文件指针，再验证（`go test <pkg>` + `-race` + `gen_godoc --check`），`--update-baseline` 降幅恰等于该批 N，pathspec 提交。域序：小域先行（evolution/tool/spec 级 3–5 文件）练流程，`agent`(20) 拆 2–3 批，`examples/wechat-bot`(5) 独立批，热区压后。对账锚双冻结：`pointer-map.txt`（文件→目标小节裁决表）+ `beyond-brief.txt`（削薄对象清单），偏差即停。
 
-### D5 gen_godoc 共存于 P1 定案
+### D5 gen_godoc 共存：生成侧过滤（P1 已定案落地）
 
-文件级索引行进入生产文件 doc 区后，`docs/api` 生成物是否渲染该行：过滤（保持 API 文档纯净）或链接化（docs/api 直达 wiki）。P1 实测定案并同批落地，不留给战役期。
+实测：`go doc -all` 原样渲染 doc 注释，且多文件 file.Doc 索引被拼接进包概览成 run-on blob（根包页 10 条连排，不可点又污染概览）。裁决=生成器过滤：`gen_godoc.sh` 删除含 `契约:/规格:` marker 的行与独立成行的裸 `docs/` 路径碎片（散文行不含 marker，零误删），重新生成后 residue 0、`--check` 绿、docs/api 纯减 194 行。指针是源码侧导航件，API 文档留 API 散文。
 
 ## Risks / Trade-offs
 
@@ -63,5 +63,4 @@ P4 归零切硬:双槽删除+missing-test-responsibility:9 清理→counts 归�
 
 ## Open Questions
 
-1. `doc-not-brief` 的职责句上限 2 行是否对 package doc（`doc.go`）放宽至 4 行——倾向不放宽（包概述同样该进 wiki），战役中若出现强例再裁决。
-2. 文件级索引行的放置位（package 子句前的文件 doc 区 vs 文件内任一 doc 槽）——倾向前者（与测试侧同构、读者第一眼），P1 单测钉死。
+（均已在 P1 实施中结案，见 D1/D2/D5；无遗留。）
