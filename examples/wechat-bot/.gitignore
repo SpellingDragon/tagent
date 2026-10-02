@@ -19,6 +19,7 @@
 !scripts/verify_large_file.go
 !scripts/loggrep.py
 !scripts/doc_snapshot.py
+!scripts/trajectory-pack.sh
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml
