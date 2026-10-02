@@ -21,7 +21,8 @@
 - [x] 3.5 根包批二:并入 3.4 单批完成(Properties 字段例迁 #config-surface),域内双锚清零
 - [x] 3.6 agent/governance 批:9 指针(五域回退行改配 governance-enforcement 专节锚,tool.go 归 #governance-gate)+包注 9→7 要点化,基线 56→47/65→64;第三次 bullet 漏 // 前缀自纠
 - [x] 3.7 agent/compress 批:8 指针(裸路径行改配 compression-and-telemetry 专节,64 行文档免锚要求)+6 例续行折要点,基线 47→39/64→58;两次自纠:bullet 漏 // 前缀、折行令 先…再… 首次命中 mechanism-narrative(跨行时逃过正则)——改述不开槽
-- [ ] 3.8 agent 批一（约 10 文件，批前工作树检查）
+- [x] 3.8 agent 批一:10 指针(execution-generations/event-flow/compression 专节锚,map 里不存在的 inject-runtime 与 session-model 已按真实锚图改配)+4 例削薄(agent.go 头注 20→7、NewTagentAgent、Run 20、ObligationReport 21),基线 39→29/58→54;两次脚本自伤(撇号未闭合、相邻字符串漏 
+)均在 build 前拦截
 - [ ] 3.9 agent 批二（约 10 文件）
 - [ ] 3.10 其余小域归拢批（engine/reliability/task/tool/action 等残余）
 - [ ] 3.11 examples/wechat-bot 批（5 文件，第二模块独立验证三连）

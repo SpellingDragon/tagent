@@ -1,23 +1,10 @@
 // Package agent provides tagent's core agent mechanism coordination.
 //
-// TagentAgent wires together:
-// - EventBus + AgentLoop (event-driven execution engine)
-// - Runner (framework orchestration with plugins, retained for session/plugin lifecycle)
-// - MemoryPlugin (OnEvent: event persistence + causal chain)
-// - Preprocessor (event filtering, token budget, SmartCompress)
+// - TagentAgent 是顶层装配点：EventBus + AgentLoop 提供事件驱动执行引擎，Runner 保留给 session/plugin 生命周期，MemoryPlugin 负责事件持久化与因果链，Preprocessor 负责事件过滤、token 预算与 SmartCompress。
+// - 核心不变量：AgentLoop 是纯事件驱动引擎、无业务语义；事件过滤、shouldCallModel、压缩等全部领域裁决在 Preprocessor。
+// - TagentAgent 实现 agent.Agent，因此可被包装为 agent.Tool。
 //
-// Core principle: AgentLoop is a pure event-driven engine with no business semantics.
-// All domain decisions (event filtering, shouldCallModel, compression) live in Preprocessor.
-//
-// TagentAgent implements agent.Agent, so it can be wrapped as agent.Tool
-// for tool-agent composition.
-//
-// Top-level usage: StartLoop / InjectMessage / StopLoop (persistent event loop only).
-// Sub-agent usage: agent.Run() via AgentToolWrapper.Call() (invoked by parent LLM).
-//
-// NOTE: This package does NOT depend on tagent/tool.
-// Application-level wiring (KnowledgeAgent assembly, WireActionTool, etc.)
-// lives in the root tagent package.
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 package agent
 
 import (
@@ -366,29 +353,16 @@ type CompressConfig struct {
 // reads it.
 var constructedTagents atomic.Int64
 
-// TagentAgentsConstructed reports the process-wide count of TagentAgent
-// constructions (see constructedTagents). Callers assert DELTAS around an
-// operation, never absolute values (tests share the process).
+// TagentAgentsConstructed reports the process-wide count of TagentAgent constructions.
+//
+// - Callers assert DELTAS around an operation, never absolute values: tests share the process.
 func TagentAgentsConstructed() int64 { return constructedTagents.Load() }
 
-// NewTagentAgent creates a new TagentAgent with the given configuration.
+// NewTagentAgent creates a TagentAgent with the given configuration.
 //
-// In the event-driven architecture, NewTagentAgent:
-// - Creates MemoryStore + MemoryPlugin + compress.SmartCompressor
-// - Creates Preprocessor (replacing ContextIntervention.BeforeModel)
-// - Creates EventBus + AgentLoop
-// - Creates SessionService + Runner (as shell for session/plugin management)
-//
-// The Runner is retained for session management and plugin lifecycle
-// (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
-// AgentLoop, not the Runner.
-//
-// Construction fails closed: with a durable inbox the MemoryStore must
-// implement memory.EventReplayer — the bus handle was already opened and
-// nobody else holds it, so the refusal path closes it before returning the
-// construction error (the primary). The audit digest line is reflection
-// feedback and wires after the meditation manager exists, so every meditation
-// message carries it (wiring before construction was a silent no-op).
+// - Builds MemoryStore + MemoryPlugin + compress.SmartCompressor, then the Preprocessor that replaces ContextIntervention.BeforeModel.
+// - Builds EventBus + AgentLoop, plus SessionService + Runner as the shell for session and plugin management (MemoryPlugin.OnEvent, SummaryPlugin).
+// - Actual execution is driven by AgentLoop, not the Runner.
 func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")

@@ -1,28 +1,16 @@
+// 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 package agent
 
 import "fmt"
 
-// ObligationReport answers /D7's question for one resident owner: is anything
-// still depending on it that would be broken by retiring it? The three axes are
-// disjoint by construction and each is read from the accounting that OWNS it, so
-// retirement never invents a parallel notion of "busy":
+// ObligationReport answers /D7's question for one resident owner: is anything still
+// depending on it that would be broken by retiring it?
 //
-// - Executions: references held by this owner's own execution generations — the
-// resident turns, inherited sub-calls and post-ACK background runs tracked by
-// the same lease accounting that gates per-generation reclaim.
-// - Invocations: invocation-private contexts currently running on this owner. A
-// delegation into a sub-agent builds its own context rather than opening a
-// turn on the sub-agent's resident generations, so this axis is what keeps a
-// removed owner from being retired underneath a call it is still serving.
-// - LiveTasks: entries still in a live state on this owner's task board, i.e.
-// accepted inputs whose work has not settled (running, stable service
-// sessions, suspect, alive-detached). A board entry in a live state is an
-// obligation even when nothing is executing right now — resume/relaunch and
-// the recovery reconciliation still route through this owner.
-//
-// Terminal board entries are deliberately NOT obligations:  forbids using
-// retained DATA (history, rollback config, a name that once existed) as a reason
-// to keep a running INSTANCE alive.
+// - The three axes are disjoint by construction, each read from the accounting that owns it, so retirement never invents a parallel notion of "busy".
+// - Executions: references held by this owner's own execution generations (resident turns, inherited sub-calls, post-ACK background runs) — the same lease accounting that gates per-generation reclaim.
+// - Invocations: invocation-private contexts currently running on this owner; a delegation builds its own context instead of opening a turn on the sub-agent's resident generations, so this axis is what keeps a removed owner from being retired underneath a call it is still serving.
+// - LiveTasks: entries still in a live state on this owner's task board (running, stable service sessions, suspect, alive-detached). A live board entry is an obligation even with nothing executing, because resume/relaunch and recovery reconciliation still route through this owner.
+// - Terminal board entries are deliberately not obligations: retained data (history, rollback config, a name that once existed) is never a reason to keep a running instance alive.
 type ObligationReport struct {
 	Executions  int
 	Invocations int

@@ -18,26 +18,13 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// Run 实现 agent.Agent 接口。
+// Run 实现 agent.Agent 接口：这是子 agent 调用路径（本地由 AgentToolWrapper、远程由 A2A 使用），
+// 顶层使用必须走 StartLoop/InjectMessage/StopLoop。
 //
-// 在事件驱动架构下，Run 是子 agent 调用路径（本地子调用由 AgentToolWrapper 使用，
-// 远程调用由 A2A 使用）；顶层使用必须走 StartLoop/InjectMessage/StopLoop。
-//
-// Run 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，并返回
-// AgentLoop 的 outputCh；调用方持续读事件直到通道关闭（上下文取消，或产出 agent_output）。
-//
-// 上下文可经两条入口到达，且都在本次调用本地装配，绝不经过共享的 `ta` 状态——隐式的
-// activeBus/pendingExternalEvents 传递已取消，因此并发 Run 无法互相注入：
-//  1. RuntimeState 路径（远端/包装器，即 A2A 兼容那条）：
-//     inv.RunOptions.RuntimeState["external_context"] 内是序列化的 ExternalContextEntry JSON；
-//  2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用，
-//     保持单槽交收语义。
-//
-// 生命周期不变量：
-//   - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理
-//     goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
-//   - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内
-//     落地的 settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
+// - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回 AgentLoop 的 outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。
+// - 上下文只在本次调用本地装配，绝不经过共享的 ta 状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的 ExternalContextEntry JSON，或 direct 兼容入口经 IngestExternalEvents 在 Run 进入时原子排空以保持单槽交收语义。
+// - 租约拒绝发生在本调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
+// - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把 loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)

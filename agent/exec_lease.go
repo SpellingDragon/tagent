@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/execution-generations.md#lease-holds-reference
 package agent
 
 import (

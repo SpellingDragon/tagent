@@ -26,4 +26,5 @@
 //
 // 子域独立成包:task/(任务生命周期)、compress/(压缩域)、governance/(治理闸)、
 // reliability/(退化追踪)——各自有独立 wiki 篇。
+// 契约: docs/wiki/agent/agent-architecture.md#module-position
 package agent

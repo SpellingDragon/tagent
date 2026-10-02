@@ -2,25 +2,10 @@ package agent // import "github.com/SpellingDragon/tagent/agent"
 
 Package agent provides tagent's core agent mechanism coordination.
 
-TagentAgent wires together: - EventBus + AgentLoop (event-driven execution
-engine) - Runner (framework orchestration with plugins, retained for
-session/plugin lifecycle) - MemoryPlugin (OnEvent: event persistence + causal
-chain) - Preprocessor (event filtering, token budget, SmartCompress)
-
-Core principle: AgentLoop is a pure event-driven engine with no business
-semantics. All domain decisions (event filtering, shouldCallModel, compression)
-live in Preprocessor.
-
-TagentAgent implements agent.Agent, so it can be wrapped as agent.Tool for
-tool-agent composition.
-
-Top-level usage: StartLoop / InjectMessage / StopLoop (persistent event loop
-only). Sub-agent usage: agent.Run() via AgentToolWrapper.Call() (invoked by
-parent LLM).
-
-NOTE: This package does NOT depend on tagent/tool. Application-level wiring
-(KnowledgeAgent assembly, WireActionTool, etc.) lives in the root tagent
-package.
+- TagentAgent 是顶层装配点：EventBus + AgentLoop 提供事件驱动执行引擎，Runner 保留给 session/plugin
+生命周期，MemoryPlugin 负责事件持久化与因果链，Preprocessor 负责事件过滤、token 预算与 SmartCompress。 -
+核心不变量：AgentLoop 是纯事件驱动引擎、无业务语义；事件过滤、shouldCallModel、压缩等全部领域裁决在 Preprocessor。 -
+TagentAgent 实现 agent.Agent，因此可被包装为 agent.Tool。
 
 Package agent 是 tagent 的事件驱动引擎核心。50 个文件按职责分五组：
 
@@ -48,7 +33,6 @@ outputCh 宽限+溢出票据;helpers.go/lifecycle.go: 辅助与生命周期
 - degradation.go/reliability 注入;governance 经 govGate;evolution 经 root
 
 子域独立成包:task/(任务生命周期)、compress/(压缩域)、governance/(治理闸)、 reliability/(退化追踪)——各自有独立
-wiki 篇。
 
 Package agent provides tool agent registration for extensible agent composition.
 
@@ -218,8 +202,10 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 
 func TagentAgentsConstructed() int64
     TagentAgentsConstructed reports the process-wide count of TagentAgent
-    constructions (see constructedTagents). Callers assert DELTAS around an
-    operation, never absolute values (tests share the process).
+    constructions.
+
+    - Callers assert DELTAS around an operation, never absolute values: tests
+    share the process.
 
 func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*StagedGeneration)
     WireOrgGeneration performs the generation-level wiring of ONE org publish
@@ -1071,26 +1057,23 @@ type ObligationReport struct {
 	LiveTasks   int
 }
     ObligationReport answers /D7's question for one resident owner: is anything
-    still depending on it that would be broken by retiring it? The three axes
-    are disjoint by construction and each is read from the accounting that OWNS
-    it, so retirement never invents a parallel notion of "busy":
+    still depending on it that would be broken by retiring it?
 
+    - The three axes are disjoint by construction, each read from the accounting
+    that owns it, so retirement never invents a parallel notion of "busy".
     - Executions: references held by this owner's own execution generations
-    — the resident turns, inherited sub-calls and post-ACK background runs
-    tracked by the same lease accounting that gates per-generation reclaim.
-    - Invocations: invocation-private contexts currently running on this owner.
-    A delegation into a sub-agent builds its own context rather than opening a
-    turn on the sub-agent's resident generations, so this axis is what keeps
-    a removed owner from being retired underneath a call it is still serving.
-    - LiveTasks: entries still in a live state on this owner's task board,
-    i.e. accepted inputs whose work has not settled (running, stable service
-    sessions, suspect, alive-detached). A board entry in a live state is an
-    obligation even when nothing is executing right now — resume/relaunch and
-    the recovery reconciliation still route through this owner.
-
-    Terminal board entries are deliberately NOT obligations: forbids using
-    retained DATA (history, rollback config, a name that once existed) as a
-    reason to keep a running INSTANCE alive.
+    (resident turns, inherited sub-calls, post-ACK background runs) — the
+    same lease accounting that gates per-generation reclaim. - Invocations:
+    invocation-private contexts currently running on this owner; a delegation
+    builds its own context instead of opening a turn on the sub-agent's resident
+    generations, so this axis is what keeps a removed owner from being retired
+    underneath a call it is still serving. - LiveTasks: entries still in a
+    live state on this owner's task board (running, stable service sessions,
+    suspect, alive-detached). A live board entry is an obligation even with
+    nothing executing, because resume/relaunch and recovery reconciliation
+    still route through this owner. - Terminal board entries are deliberately
+    not obligations: retained data (history, rollback config, a name that once
+    existed) is never a reason to keep a running instance alive.
 
 func (o ObligationReport) Idle() bool
     Idle reports whether nothing depends on the owner any more.
@@ -1336,23 +1319,13 @@ type TagentAgent struct {
     Preprocessor, and dispatches tool_use events asynchronously.
 
 func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error)
-    NewTagentAgent creates a new TagentAgent with the given configuration.
+    NewTagentAgent creates a TagentAgent with the given configuration.
 
-    In the event-driven architecture, NewTagentAgent: - Creates MemoryStore +
-    MemoryPlugin + compress.SmartCompressor - Creates Preprocessor (replacing
-    ContextIntervention.BeforeModel) - Creates EventBus + AgentLoop - Creates
-    SessionService + Runner (as shell for session/plugin management)
-
-    The Runner is retained for session management and plugin lifecycle
-    (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
-    AgentLoop, not the Runner.
-
-    Construction fails closed: with a durable inbox the MemoryStore must
-    implement memory.EventReplayer — the bus handle was already opened and
-    nobody else holds it, so the refusal path closes it before returning the
-    construction error (the primary). The audit digest line is reflection
-    feedback and wires after the meditation manager exists, so every meditation
-    message carries it (wiring before construction was a silent no-op).
+    - Builds MemoryStore + MemoryPlugin + compress.SmartCompressor,
+    then the Preprocessor that replaces ContextIntervention.BeforeModel.
+    - Builds EventBus + AgentLoop, plus SessionService + Runner as the shell
+    for session and plugin management (MemoryPlugin.OnEvent, SummaryPlugin).
+    - Actual execution is driven by AgentLoop, not the Runner.
 
 func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference)
     AppendProjectionRef appends an EventReference to this agent's session
@@ -1563,26 +1536,16 @@ func (ta *TagentAgent) Rollback()
     Rollback triggers the wired rollback hook (R4 3.8；no-op if unset)。
 
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error)
-    Run 实现 agent.Agent 接口。
+    Run 实现 agent.Agent 接口：这是子 agent 调用路径（本地由 AgentToolWrapper、远程由 A2A 使用），
+    顶层使用必须走 StartLoop/InjectMessage/StopLoop。
 
-    在事件驱动架构下，Run 是子 agent 调用路径（本地子调用由 AgentToolWrapper 使用， 远程调用由 A2A 使用）；顶层使用必须走
-    StartLoop/InjectMessage/StopLoop。
-
-    Run 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，并返回 AgentLoop 的
-    outputCh；调用方持续读事件直到通道关闭（上下文取消，或产出 agent_output）。
-
-    上下文可经两条入口到达，且都在本次调用本地装配，绝不经过共享的 `ta` 状态——隐式的 activeBus/pendingExternalEvents
-    传递已取消，因此并发 Run 无法互相注入：
-     1. RuntimeState 路径（远端/包装器，即 A2A 兼容那条）：
-        inv.RunOptions.RuntimeState["external_context"] 内是序列化的
-        ExternalContextEntry JSON；
-     2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用， 保持单槽交收语义。
-
-    生命周期不变量：
-      - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine
-        永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
-      - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内 落地的
-        settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
+    - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回 AgentLoop 的
+    outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。 - 上下文只在本次调用本地装配，绝不经过共享的 ta
+    状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的 ExternalContextEntry JSON，或
+    direct 兼容入口经 IngestExternalEvents 在 Run 进入时原子排空以保持单槽交收语义。 - 租约拒绝发生在本调用计为
+    live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner
+    Obligations 到不了零、退役排空挂死。 - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把
+    loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 
 func (ta *TagentAgent) Runner() runner.Runner
     Runner returns the underlying Runner from ContextManager.
