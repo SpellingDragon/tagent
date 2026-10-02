@@ -1377,23 +1377,10 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		msg.Role = model.RoleUser
 	}
 
-	// Resolve the canonical fact for this event (fix-resident-reliability-
-	// boundaries D2/D3 + task 3.5):
-	// - Durable claim WITH a frozen prepared_fact (normal reliable path):
-	// reuse it VERBATIM. Its EventKey, summary and attribution were frozen
-	// by the write-before prepare barrier on the first claim, so a replay
-	// never re-stamps time/rollout/bundle or double-writes the fact (F1/F4).
-	// If those bytes are undecodable OR incomplete it is current-format
-	// corruption: the store is GATED (return false) and surfaces — the
-	// regenerate-key weak fallback is DELETED (「删除重新生成 key 的
-	// 恢复分支」); minting a fresh key would silently double-write the input
-	// under a new identity. The claim stays and replays.
-	// - Durable claim but NO prepared_fact: the barrier did not succeed for
-	// this envelope, so per D2「准备失败不调用 StoreEvent」we write NOTHING and
-	// return false — the claim stays and replays; a half-prepared input
-	// never silently enters the fact chain.
-	// - No claim (volatile path / direct test call): build a fresh canonical
-	// fact, exactly as before.
+	// Resolve the canonical fact for this event: reuse the frozen prepared fact
+	// verbatim on a durable claim, gate the store when the claim carries no usable fact,
+	// and build a fresh one only on the volatile path.
+	// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 	var fullEvent memory.FullEvent
 	switch {
 	case evt.claim != nil && len(evt.claim.PreparedFact) > 0:

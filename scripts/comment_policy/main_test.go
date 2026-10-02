@@ -1,3 +1,4 @@
+// 契约: docs/comment-gate-tooling.md#ratchet-scope
 package main
 
 import (

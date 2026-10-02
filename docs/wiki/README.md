@@ -15,6 +15,7 @@
 | 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层+跨重启连续）、召回体系、任务工具族、EventKeys 传递 |
 | tmux 动作会话存活判定 | [tool/tmux-action.md](tool/tmux-action.md) |
 | 持久投递与依赖退化 | [reliability/durable-delivery.md](reliability/durable-delivery.md) |
+| wechat-bot 运行面 | [examples/wechat-bot-runtime.md](examples/wechat-bot-runtime.md) | 入站去重与文件收发窄接口、投递目标回退、大文件真链路验收 |
 | 上下文压缩与自身遥测 | [agent/compression-and-telemetry.md](agent/compression-and-telemetry.md) |
 | 治理分级处置与批准通道 | [agent/governance-enforcement.md](agent/governance-enforcement.md) |
 | 任务层生命周期与回收 | [agent/task-lifecycle.md](agent/task-lifecycle.md) |
