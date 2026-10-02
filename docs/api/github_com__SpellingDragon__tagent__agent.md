@@ -34,22 +34,11 @@ outputCh 宽限+溢出票据;helpers.go/lifecycle.go: 辅助与生命周期
 
 子域独立成包:task/(任务生命周期)、compress/(压缩域)、governance/(治理闸)、 reliability/(退化追踪)——各自有独立
 
-Package agent provides tool agent registration for extensible agent composition.
+Package agent provides tool agent registration and the AgentToolWrapper that
+turns a TagentAgent into a CallableTool for extensible agent composition.
 
-Tool agents are TagentAgent instances wrapped as CallableTool via
-AgentToolWrapper. This file provides the registration mechanism and the wrapper
-implementation.
-
-Registration flow:
-
- 1. Built-in factories are registered in tagent/builtin.go init()
- 2. Custom factories can be registered via RegisterToolAgent()
- 3. tagent.New() resolves ToolRef entries by building referenced agents
-
-AgentToolWrapper replaces the previous agenttool.NewTool() approach. It handles:
-- Declaring event_key parameter in InputSchema (when EventParams includes it) -
-Resolving event_key → fetching full event from parent MemStore - Passing event
-data as external context to the sub-agent
+- 注册三阶段：内置工厂在 tagent/builtin.go 的 init 注册，自定义工厂经 RegisterToolAgent 注册，tagent.New
+解析 ToolRef 构建被引用的 agent。 - AgentToolWrapper 在 InputSchema 声明 event_key 参数（当
 
 CONSTANTS
 
@@ -175,12 +164,9 @@ func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent)
     inbox_receipt，把内部回执注进投影，破坏 「投影＝事实链可回放折叠」这条不变量。本路径只做同点补投影，绝不在活投影上整表 Replace。
 
 func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error)
-    ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的 子调用租约：
-      - 上下文里有发起方租约时，按其**同一代**解析——目标不在该代的编排里就直接报错，绝不 悄悄改投到当前生效代（重入必须留在自己那一代的语义里）；
-      - 无租约时退回属主常驻面，在其当前生效代上取租约；若该代已收敛关闭则拒绝；
-      - 解析不到目标时释放刚取的租约再报错，不留悬挂引用。
+    ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的子调用租约。
 
-    调用方拿到的租约必须由它负责释放。
+    - 上下文有发起方租约时按其同一代解析；目标不在该代的编排里就直接报错，绝不悄悄改投当前生效代。 -
 
 func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string) (task.SpawnResult, error)
     SubagentRedispatcher：跨重启 subagent Relaunch 的重投递器——镜像 subagentRelaunch
@@ -1759,27 +1745,12 @@ type TagentConfig struct {
     TagentConfig holds configuration for creating a TagentAgent.
 
 type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
-    ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from
-    the given inputs. It must NOT construct the agent itself: the org owns the
-    single birth path (wireAgent assembles every real owner — store-lease slot,
-    drain wiring, task-domain recovery included), and the single publish
-    path (stageOrgGenerations advances one face per owner per generation). A
-    factory that returned a finished *TagentAgent would be a second owner-birth
-    mechanism outside both: it could never advance through the face path, so
-    every publish had to rebuild the whole agent (an orphan nobody closed) and
-    every pinned delegation kept reading the stale construction config (design
-    D1「避免用返回 完整临时 agent 的方式隐式制造第二 owner」; contract migrated round 91 with user
-    approval — evidence ).
+    ToolAgentFactory assembles a tool agent execution configuration from the
+    given inputs. It must NOT construct the agent itself.
 
-    The returned *TagentConfig is adopted verbatim where it is meaningful:
-    - Name: the factory's choice is respected (the old contract's「产物整只
-    使用」promise); empty falls back to the registered id. - MemoryStore:
-    the org's store borrowed for this name fills a nil — a factory that opens
-    its OWN store must not also be handed the org lease. - MemStoreRelease:
-    always the org's, filled by the assembly after this call returns — a factory
-    neither keeps nor invents a release for it. The assembly re-invokes the
-    factory for each generation it builds and hands it that generation's values,
-    so a declaration derived from them moves with the config.
+    - org 拥有唯一的出生路径与唯一的发布路径；返回成品 agent 会造出面路径之外的第二种 owner
+    出生，每次发布都得重建整个 agent 并留下无人关闭的孤儿。 - 返回的 TagentConfig 逐字采纳有意义字段：Name
+    为空回退注册 id，MemoryStore 填充该 name 借用的 org store，MemStoreRelease
 
 func GetToolAgentFactory(id string) (ToolAgentFactory, bool)
     GetToolAgentFactory returns the factory for the given ID.

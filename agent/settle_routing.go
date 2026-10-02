@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/event-flow.md#event-pipeline-atomic
 package agent
 
 import (

@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 package agent
 
 import (

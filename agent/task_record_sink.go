@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package agent
 
 import (

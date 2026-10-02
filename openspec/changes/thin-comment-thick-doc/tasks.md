@@ -23,7 +23,8 @@
 - [x] 3.7 agent/compress 批:8 指针(裸路径行改配 compression-and-telemetry 专节,64 行文档免锚要求)+6 例续行折要点,基线 47→39/64→58;两次自纠:bullet 漏 // 前缀、折行令 先…再… 首次命中 mechanism-narrative(跨行时逃过正则)——改述不开槽
 - [x] 3.8 agent 批一:10 指针(execution-generations/event-flow/compression 专节锚,map 里不存在的 inject-runtime 与 session-model 已按真实锚图改配)+4 例削薄(agent.go 头注 20→7、NewTagentAgent、Run 20、ObligationReport 21),基线 39→29/58→54;两次脚本自伤(撇号未闭合、相邻字符串漏 
 )均在 build 前拦截
-- [ ] 3.9 agent 批二（约 10 文件）
+- [x] 3.9 agent 批二:9 指针(task_record_sink 的 #task-record-contract 不存在,改配实有节 #restore-rebuild)+tool_agent 六例削薄(90→33 行),新建 wiki 两节 #delegation-retry 与 #tool-agent-factory 承接取消归属/重试形状/工厂只装配配置,基线 29→20/54→48
+- [x] 3.9a 规程增补:**每次 --update-baseline 之后必须比对 counts 的键集合**,新出现的键一律视为本批自伤(本轮第三次踩同型旁路:tool_agent 自引 docs 路径成 unindexed-path-ref、"先释放…再报错"成 mechanism-narrative、map 陈旧锚成 index-anchor-unknown),必须改内容而非留槽（约 10 文件）
 - [ ] 3.10 其余小域归拢批（engine/reliability/task/tool/action 等残余）
 - [ ] 3.11 examples/wechat-bot 批（5 文件，第二模块独立验证三连）
 

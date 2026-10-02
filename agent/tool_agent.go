@@ -1,19 +1,9 @@
-// Package agent provides tool agent registration for extensible agent composition.
+// Package agent provides tool agent registration and the AgentToolWrapper that
+// turns a TagentAgent into a CallableTool for extensible agent composition.
 //
-// Tool agents are TagentAgent instances wrapped as CallableTool via AgentToolWrapper.
-// This file provides the registration mechanism and the wrapper implementation.
-//
-// Registration flow:
-//
-//  1. Built-in factories are registered in tagent/builtin.go init()
-//  2. Custom factories can be registered via RegisterToolAgent()
-//  3. tagent.New() resolves ToolRef entries by building referenced agents
-//
-// AgentToolWrapper replaces the previous agenttool.NewTool() approach.
-// It handles:
-// - Declaring event_key parameter in InputSchema (when EventParams includes it)
-// - Resolving event_key → fetching full event from parent MemStore
-// - Passing event data as external context to the sub-agent
+// - 注册三阶段：内置工厂在 tagent/builtin.go 的 init 注册，自定义工厂经 RegisterToolAgent 注册，tagent.New 解析 ToolRef 构建被引用的 agent。
+// - AgentToolWrapper 在 InputSchema 声明 event_key 参数（当 EventParams 含它时），把 event_key 解析为从父 MemStore 取回的完整事件，并将其作为外部上下文交给子 agent。
+// 契约: docs/wiki/agent/agent-architecture.md#core-components
 package agent
 
 import (
@@ -587,20 +577,11 @@ func (w *AgentToolWrapper) DenseDuration() time.Duration {
 // process, and re-running it only hides it.
 const remoteRetryBackoff = 500 * time.Millisecond
 
-// runAndCollect runs one delegation and collects its result, retrying a failed
-// REMOTE attempt exactly once.
+// runAndCollect runs one delegation and collects its result, retrying a failed REMOTE attempt
+// exactly once: the retry wraps the whole attempt, send plus drain, because that is
+// where a transport failure actually surfaces.
 //
-// The retry wraps the WHOLE attempt — send plus drain — because that is where a
-// transport failure actually surfaces: the A2A client reports a failed request as
-// an event carrying Response.Error while Run itself returns a channel and a nil
-// error. The earlier branch inside runWithTimeout, which retried only when Run
-// returned an error, therefore never fired on the shape it was written for (a 503
-// failed the parent call outright) — see a2a_delegation_test.go.
-//
-// Both attempts use the SAME invocation and the SAME wrapper instance, i.e. the
-// target the initiating call was bound to (lease inheritance: a retry rides
-// the initiating call's binding) — no
-// re-resolution against whatever generation is published by then.
+// - Both attempts use the same invocation and the same wrapper instance, i.e. the target the initiating call was bound to: a retry rides the initiating call lease binding, never a re-resolution against whatever generation is published by then.
 func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	out, err := w.collectAttempt(ctx, inv, agentName)
 	if err == nil || !isRemoteAgent(w.agent) {
@@ -743,14 +724,12 @@ func hasInitiator(ctx context.Context) bool {
 	return ok
 }
 
-// ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的
-// 子调用租约：
-//   - 上下文里有发起方租约时，按其**同一代**解析——目标不在该代的编排里就直接报错，绝不
-//     悄悄改投到当前生效代（重入必须留在自己那一代的语义里）；
-//   - 无租约时退回属主常驻面，在其当前生效代上取租约；若该代已收敛关闭则拒绝；
-//   - 解析不到目标时释放刚取的租约再报错，不留悬挂引用。
+// ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的子调用租约。
 //
-// 调用方拿到的租约必须由它负责释放。
+// - 上下文有发起方租约时按其同一代解析；目标不在该代的编排里就直接报错，绝不悄悄改投当前生效代。
+// - 无租约时退回属主常驻面，在其当前生效代上取租约；该代已收敛关闭则拒绝。
+// - 解析失败必须释放刚取的租约，不留悬挂引用；调用方负责释放所得租约。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
 func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error) {
 	if l, ok := execLeaseFromContext(ctx); ok && l != nil {
 		if t := l.SubagentWrapper(agentName); t != nil {
@@ -814,24 +793,11 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 	return append([]subagentRound(nil), r.rounds[len(r.rounds)-n:]...)
 }
 
-// subagentResumeClosure builds the resume (送输入) closure of a subagent task.
-// Like the relaunch closure it captures no executable wrapper: the
-// target and the target's OWN declaration parameters (restoration cap, dense
-// window) come from the generation the re-entry selected, so a stored task cannot
-// keep replaying a retired generation's parameters. The refusal happens BEFORE the
-// round chain is read or written, so a rejected re-entry leaves the chain
-// untouched (「所选代无目标则拒绝且不改任务链」).
+// subagentResumeClosure builds the resume closure of a subagent task.
 //
-// The closure returns a NEW single-turn Run whose external_context carries this
-// task's prior rounds — the last settle result foremost — and nothing from
-// unrelated tasks (context-scoping). No process resurrection: the sub agent stays
-// a single-turn primitive; restoration is the framework's engineering feed, not
-// sub-agent statefulness.
-//
-// NOTE(curation): once settle results carry their archived event key (a
-// resultRef bridge), the restorer can additionally walk RelationStore
-// for curated artifacts on this task's causal chain; the injection slot is
-// already here.
+// - 目标与目标自己的声明参数（restoration cap、dense window）都来自重入所选的那一代，因此存量任务不会重放已退役代的参数；所选代无目标则在读写任务链之前拒绝，被拒的重入不留任务链改动。
+// - 返回的是新的单轮 Run，其 external_context 只携带本任务的历史轮次（最近的结算结果在最前），不含无关任务。
+// - 子 agent 仍是单轮原语，不做进程复活：状态恢复是框架侧的喂入，不是子 agent 的持续性。
 func subagentResumeClosure(owner *ContextManager, agentName string, rounds *subagentRounds) func(context.Context, string) (task.SettleDetector, error) {
 	return func(ctx context.Context, input string) (task.SettleDetector, error) {
 		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
@@ -879,16 +845,8 @@ func subagentResumeClosure(owner *ContextManager, agentName string, rounds *suba
 // runWithTimeout starts ONE sub-agent run under a context timeout and keeps the
 // context alive for the whole consumption of the returned stream.
 //
-// IMPORTANT: agent.Run is async — it returns an event channel immediately and
-// the sub-agent produces events in a background goroutine. The cancel function
-// must NOT be deferred here, because that would cancel the context as soon as
-// this function returns (before the caller finishes consuming the channel).
-// Instead, we wrap the returned channel in a goroutine that calls cancel after
-// the channel is closed.
-//
-// Retry policy lives one level up, in runAndCollect: a remote transport failure
-// normally arrives as an error EVENT (Run returns nil + channel), so an error
-// branch here could never cover the shape it was written for.
+// - agent.Run 是异步的，立即返回 channel；cancel 不得 defer 在本函数，否则会赶在调用方读完 channel 之前取消上下文，因此把 channel 包一层 goroutine，待其关闭后再调用 cancel。
+// - 重试策略在上一层 runAndCollect：远程传输失败通常以 error 事件（Run 返回 nil + channel）到达，本函数内的 error 分支覆盖不到那种形状。
 func (w *AgentToolWrapper) runWithTimeout(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
 	runCtx, cancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
 
@@ -954,27 +912,13 @@ func autoInjectEventKeys(proj *compress.SessionProjection) []int64 {
 	return keys
 }
 
-// ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from the
-// given inputs. It must NOT construct the agent itself: the org owns the single
-// birth path (wireAgent assembles every real owner — store-lease slot, drain
-// wiring, task-domain recovery included), and the single publish path
-// (stageOrgGenerations advances one face per owner per generation). A factory
-// that returned a finished *TagentAgent would be a second owner-birth mechanism
-// outside both: it could never advance through the face path, so every publish
-// had to rebuild the whole agent (an orphan nobody closed) and every pinned
-// delegation kept reading the stale construction config (design D1「避免用返回
-// 完整临时 agent 的方式隐式制造第二 owner」; contract migrated round 91 with
-// user approval — evidence ).
+// ToolAgentFactory assembles a tool agent execution configuration from the given
+// inputs. It must NOT construct the agent itself.
 //
-// The returned *TagentConfig is adopted verbatim where it is meaningful:
-// - Name: the factory's choice is respected (the old contract's「产物整只
-// 使用」promise); empty falls back to the registered id.
-// - MemoryStore: the org's store borrowed for this name fills a nil — a
-// factory that opens its OWN store must not also be handed the org lease.
-// - MemStoreRelease: always the org's, filled by the assembly after this call
-// returns — a factory neither keeps nor invents a release for it.
-// The assembly re-invokes the factory for each generation it builds and hands it that
-// generation's values, so a declaration derived from them moves with the config.
+// - org 拥有唯一的出生路径与唯一的发布路径；返回成品 agent 会造出面路径之外的第二种 owner 出生，每次发布都得重建整个 agent 并留下无人关闭的孤儿。
+// - 返回的 TagentConfig 逐字采纳有意义字段：Name 为空回退注册 id，MemoryStore 填充该 name 借用的 org store，MemStoreRelease 恒由后续装配填 org 的那一个。
+// - 装配为每一代重新调用工厂并交给那一代的值，由这些值推导的声明随配置移动。
+// 契约: docs/wiki/tool/tool-architecture.md#tool-agent-factory
 type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
 
 // ToolAgentFactoryConfig provides everything a factory needs to produce the agent's

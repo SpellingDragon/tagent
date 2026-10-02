@@ -1222,6 +1222,32 @@ recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall`
 配置面（工具 `properties`）识别 `endpoint`、`api_key_env`、`search_engine`、`count` 四个键，未给的一律取默认。
 
 
+<a id="delegation-retry"></a>
+## 十七、委派调用的取消归属与重试形状
+
+`agent.Run` 是异步的：它立即返回事件 channel，子 agent 在后台 goroutine 里产出事件。于是取消的归属必须跟着流的末端走，而不是跟着函数返回走——`cancel` 不得 `defer` 在发起处，那会在调用方读完 channel 之前就把上下文取消掉；正确做法是把返回的 channel 包一层 goroutine，在 channel 关闭之后调用 `cancel`。
+
+重试策略位于上一层 `runAndCollect`，规则是**一次 REMOTE 尝试至多重试一次**，且重试包住整个尝试（发送 + 排空）。理由在于传输失败实际出现的形状：A2A client 把失败的请求上报为一个携带 `Response.Error` 的**事件**，而 `Run` 自身返回 channel 与 nil error。只判断"`Run` 返回错误"的分支永远不会命中它被写出来时想覆盖的那种形状——一次 503 会直接把父调用打死（见 `a2a_delegation_test.go`）。
+
+两次尝试使用**同一个 invocation 与同一个 wrapper 实例**，也就是发起调用当初所绑定的目标：租约继承意味着重试乘在发起调用的绑定上，绝不对"那时已经发布的代"重新解析。
+
+<a id="tool-agent-factory"></a>
+## 十八、ToolAgentFactory 只装配执行配置，不构造 agent
+
+出生与发布各只有一条路：org 拥有唯一的**出生路径**（`wireAgent` 组装每一个真实 owner——store-lease 槽、drain 接线、任务域恢复都在那里接上），以及唯一的**发布路径**（`stageOrgGenerations` 为每个属主、每一代推进一张面）。
+
+工厂若返回成品 `*TagentAgent`，就在这两条路之外造出了第二种 owner 出生。它永远无法经面路径推进，因此每次发布都必须重建整个 agent，留下无人关闭的孤儿；而每一个被钉住的委派会持续读到过期的构造配置。
+
+返回的 `*TagentConfig` 在其有意义之处被逐字采纳：
+
+| 字段 | 规则 |
+|---|---|
+| `Name` | 尊重工厂的选择（这是旧契约"产物整只使用"的承诺）；为空时回退到注册 id |
+| `MemoryStore` | 用该 name 所借用的 org store 填充 nil——自己开 store 的工厂不得同时领到 org 的 lease |
+| `MemStoreRelease` | 恒为 org 的那一个，由本次调用之后的装配填充——工厂既不留存也不自造释放句柄 |
+
+装配为它构造的每一代重新调用工厂，并把那一代的值交进去；因此一份由这些值推导出来的声明会随配置一起移动。
+
 ## 已知缺口与演进方向
 
 > 本章主动声明当前设计尚未闭合的环——供使用者评估适用边界，也供外部分析引用。
