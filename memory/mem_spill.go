@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#error-tracking
 package memory
 
 import (
@@ -100,25 +101,12 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 	return s.ReplayWithNotify(store, nil)
 }
 
-// ReplayWithNotify 是 Replay 的双写形态：每条重放成功
-// （含幂等命中）的事件回调 notify——调用方据此补投影（projection.Append），恢复
-// 「存储⇔投影同点原子」的等价语义。notify 为 nil
-// 或内部失败不影响重放结果（投影可后补，事件不丢优先）。
+// ReplayWithNotify 是 Replay 的双写形态：每条重放成功（含幂等命中）的事件回调
+// notify，调用方据此补投影；notify 为 nil 或内部失败不影响重放结果。
 //
-// canonical replay only: spill replay MUST use the store's EventReplayer contract
-// (ReplayEvent) — it distinguishes new-commit / orphan-repair / already-committed
-// atomically against the durable fact chain. A store that does NOT implement
-// EventReplayer is refused and its spill originals are retained (spec L99: 内层没有显式
-// 恢复能力 → 能力检查失败、原件保留). The former GetEvent+StoreEvent weak fallback was
-// removed: a GetEvent hit only proves a read returns the record, not that the durable
-// commit (barrier + index/meta publication) completed, and public StoreEvent now REFUSES
-// an existing key so it can never complete an orphan anyway.
-//
-// Key releases are booked strictly behind the durable rewrite: the spill list
-// on disk still carries the replayed originals until the rewrite lands, so
-// releasing earlier would make the next round's AlreadyCommitted replay a
-// double release decrementing other holders' leases. On rewrite failure all
-// keys stay held and the retry releases exactly once when removal finally lands.
+// - 只走 canonical replay：MUST 经 store 的 EventReplayer（ReplayEvent），对着耐久事实链原子区分新提交、孤儿修复、已提交。
+// - 未实现 EventReplayer 的 store 被拒绝，spill 原件保留。
+// - key 释放严格排在 durable 重写之后：重写失败则全部保持持有，重试落成才恰好释放一次。
 func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error) {
 	if s == nil || store == nil {
 		return 0, nil

@@ -246,6 +246,7 @@ graph LR
 
 ---
 
+<a id="causal-chain"></a>
 ## 五、因果链机制
 
 ### 5.1 RelationStore 因果链语义
@@ -409,6 +410,7 @@ type StoreStats struct {
 
 ---
 
+<a id="inmemory-store"></a>
 ## 七、InMemoryStore 实现
 
 ### 7.1 数据结构
@@ -462,6 +464,7 @@ InMemoryStore
 
 ---
 
+<a id="file-segment-store"></a>
 ## 八、FileSegmentStore 实现
 
 ### 8.1 数据结构（KV + 分段模型）
@@ -1316,9 +1319,13 @@ stateDiagram-v2
 ## 十八、KV 后端的持久化语义与 rustviking CLI 契约
 
 <a id="local-file-kv"></a>
+
+
 ### `LocalFileKV`：仅够跨进程验证的临时后端
 
-它是**故意简陋**的模型：内存 map ＋ 单个 `kv.json` 全量快照。它不提供生产级的持久性、安全性与长期可维护性保证——那些留给真正的存储引擎后端。
+落盘模型（仅验证级）：写先进内存 map，进程内读恒一致；`Sync()` 是屏障，只序列化自上次屏障以来的脏桶，单次分区提交的写放大被该分区自身键数封顶。每个桶文件以临时写 + POSIX 原子 rename 替换，进程被 KILL 不会留下撕裂快照——重开必见该桶最后一次成功 Sync 的状态。已提交事实对新进程仅在屏障跑过 `Sync()` 后可见，`FileSegmentStore` 正依此排列。
+
+它是**故意简陋**的模型：内存 map ＋ 按命名空间分桶的快照文件。它不提供生产级的持久性、安全性与长期可维护性保证——那些留给真正的存储引擎后端。
 
 | 语义 | 规则 |
 |---|---|
@@ -1522,7 +1529,11 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 两条路径共用同一 10 位分区空间，因此上限一致；键布局与哈希都不得越出该空间。
 
 <a id="error-tracking"></a>
+
+
 ## 二十四、退化检测装饰器：错误如何归因、恢复如何被证明
+
+spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `EventReplayer`（`ReplayEvent`）契约，它对着耐久事实链原子区分「新提交 / 孤儿修复 / 已提交」。未实现 `EventReplayer` 的 store 被拒绝且 spill 原件保留。读侧弱回退（GetEvent+StoreEvent）不成立：GetEvent 命中只证明记录可读，不证明提交屏障与索引/元数据发布完成；公开 `StoreEvent` 又拒绝覆盖已有键，无法补完孤儿。key 释放严格排在 durable 重写之后——磁盘上的 spill 清单在重写落地前仍载有原件，提前释放会让下一轮的 AlreadyCommitted 重放二次递减他人租约。
 
 存储链的**最外层**是错误追踪装饰器。用装饰器而不是在插件里就地处理，是为了**单一挂点**——否则"上报方"与"降级状态机"两处各写一套判定，迟早分裂。它同时把内层全部方法（含可选接口）原样透传，只在出错时按特征归因到依赖并旁路上报。
 

@@ -16,7 +16,7 @@
 
 - [x] 3.1 evolution 批:三指针落位(#git-safety 裁决替兄弟锚 #test-facts,#verdict-states,#refine),0 削薄,基线 113→110
 - [x] 3.2 tool 域指针半:22 文件落位(3 新锚 resident-continuity/recall-agent/tool-accessor=文档加厚;govx 裁决替兄弟锚为 #govx-entry-only;mcp.go 配 #mcp-live-registry),基线 110→88;削薄半(13)拆出为 3.2b
-- [ ] 3.3 memory 批（11 文件，含 `LocalFileKV` 26 行削薄的迁文样本）
+- [x] 3.3 memory 批:16 指针(三新锚 causal-chain/inmemory-store/file-segment-store+engine.go 改配 #engine-contract)+8 削薄(LocalFileKV 29→5;迁文两节 local-file-kv 落盘模型/error-tracking canonical replay,顺带校正陈旧句 kv.json→分桶),基线 mfr 88→72/bnb 86→78
 - [ ] 3.4 根包批一（约 7 文件，含 `config.go:Config` 41 行——最大迁文对象，单独裁决落点）
 - [ ] 3.5 根包批二（约 7 文件，含 `tagent.go:New` 22 行）
 - [ ] 3.6 agent/governance 批（9 文件）

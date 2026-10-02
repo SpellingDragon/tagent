@@ -1,24 +1,16 @@
+// 契约: docs/wiki/memory/memory-architecture.md#ttl-authority
 package memory
 
 import "sync"
 
-// RetentionLease ==================== 有限 key 保留租约====================
+// RetentionLease 保护未确认恢复材料的 durable 原文（未确认 envelope 的 prepared fact key 与 receipt key、待重放 spill key），
+// 使其在恢复 owner 安全释放前不被 TTL 过期、容量淘汰或墓碑清理物理销毁；持有者是共享资源 owner，非任一 agent。
 //
-// RetentionLease 保护「未确认恢复材料」的 durable 原文——未确认 inbox envelope 的
-// prepared fact key 与 receipt key、普通 spill 待重放 key——使其在恢复 owner 能安全
-// 释放之前不被 TTL 过期、容量淘汰、内容降分辨率或墓碑最终清理物理销毁。持有者是共享
-// 资源 owner（FileSegmentStore），非任一 agent。
-//
-// 不变量：
-// - 租约是**内存守护集**，启动时由现有未确认材料（inbox envelope 文件 + spill 文件）
-// 重建，MUST NOT 引入第二持久保留表或全历史去重集合。
-// - 保护期内只拒绝**销毁**；无损搬迁（压实段合并复制原文到高层段）允许。
-// - 显式删除受保护 key 返回 ErrEventProtected（不销毁）。
-// - 释放（ack 目录同步成功 / spill 安全移除）后恢复该 key 原类型的 TTL，按其原有
-// timestamp 参与年龄淘汰，绝不重新盖时间。
-//
-// 引用计数：同一 key 可同时被 envelope owner 与 spill owner 保护，Release 幂等地
-// 递减，归零才真正解除保护。nil-safe（未接线租约的 store 表现为无保护）。
+// - 租约是内存守护集，启动时由现有未确认材料重建；MUST NOT 引入第二持久保留表或全历史去重集合。
+// - 保护期内只拒绝销毁；无损搬迁（压实段合并复制原文到高层段）允许。
+// - 显式删除受保护 key 返回 ErrEventProtected。
+// - 释放后恢复该 key 原类型的 TTL，按其原有 timestamp 参与年龄淘汰，绝不重新盖时间。
+// - 同一 key 可同时被 envelope 与 spill 持有：Release 幂等递减，归零才解除保护；nil-safe（未接线时表现为无保护）。
 type RetentionLease struct {
 	mu   sync.RWMutex
 	refs map[int64]int

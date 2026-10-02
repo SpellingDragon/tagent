@@ -708,13 +708,12 @@ type IndexBuilder interface {
 	// Remove 从索引移除一个事件（TTL/墓碑回收时调用；引擎可惰性处理）。
 	Remove(ctx context.Context, eventKey int64) error
 }
-    IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引。 闭环在引擎内部——tagent 只投递
-    IndexableEvent，不管引擎如何嵌入/存储/分层。
+    IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引，闭环在引擎内部—— tagent 只投递
+    IndexableEvent，不管引擎如何嵌入、存储与分层。
 
-    实现纪律： - Index MUST 异步或快速返回，绝不阻塞事件主链路（不变量：StoreEvent 同步点）。
-    典型实现：非阻塞投递到耐用队列/通道，后台 worker 嵌入 + 写向量索引。 - Index 失败 MUST NOT 传染调用方（记日志 +
-    计数即可；向量是增强索引，丢一条 只影响该条语义可召回性，关键词路径兜底）。 - Remove 用于 TTL/墓碑回收；引擎可惰性处理（水合过滤 +
-    超取 + 阈值重建）。
+    - Index MUST 异步或快速返回，绝不阻塞事件主链路（StoreEvent 同步点不变量）：典型实现是非阻塞投递耐用队列，后台 worker
+    嵌入并写向量索引。 - Index 失败 MUST NOT 传染调用方：记日志加计数即可，向量是增强索引，关键词路径兜底。 - Remove 服务
+    TTL 与墓碑回收，引擎可惰性处理（水合过滤 + 超取 + 阈值重建）。
 
 type IndexableEvent struct {
 	EventKey    int64
@@ -832,26 +831,12 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error)
     inner（绕过 ErrorTrackingStore 防递归）。坏行跳过。
 
 func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error)
-    ReplayWithNotify 是 Replay 的双写形态：每条重放成功 （含幂等命中）的事件回调
-    notify——调用方据此补投影（projection.Append），恢复 「存储⇔投影同点原子」的等价语义。notify 为 nil
-    或内部失败不影响重放结果（投影可后补，事件不丢优先）。
+    ReplayWithNotify 是 Replay 的双写形态：每条重放成功（含幂等命中）的事件回调 notify，调用方据此补投影；notify 为
+    nil 或内部失败不影响重放结果。
 
-    canonical replay only: spill replay MUST use the store's EventReplayer
-    contract (ReplayEvent) — it distinguishes new-commit / orphan-repair
-    / already-committed atomically against the durable fact chain.
-    A store that does NOT implement EventReplayer is refused and its spill
-    originals are retained (spec L99: 内层没有显式 恢复能力 → 能力检查失败、原件保留). The former
-    GetEvent+StoreEvent weak fallback was removed: a GetEvent hit only proves a
-    read returns the record, not that the durable commit (barrier + index/meta
-    publication) completed, and public StoreEvent now REFUSES an existing key so
-    it can never complete an orphan anyway.
-
-    Key releases are booked strictly behind the durable rewrite: the spill
-    list on disk still carries the replayed originals until the rewrite lands,
-    so releasing earlier would make the next round's AlreadyCommitted replay a
-    double release decrementing other holders' leases. On rewrite failure all
-    keys stay held and the retry releases exactly once when removal finally
-    lands.
+    - 只走 canonical replay：MUST 经 store 的
+    EventReplayer（ReplayEvent），对着耐久事实链原子区分新提交、孤儿修复、已提交。 - 未实现 EventReplayer 的
+    store 被拒绝，spill 原件保留。 - key 释放严格排在 durable 重写之后：重写失败则全部保持持有，重试落成才恰好释放一次。
 
 func (s *MemSpill) SetGuard(g RetentionGuard)
     SetGuard 注入 保留租约守卫（nil = 不保护）。由持有本 spill 的装饰器从其后端取得。
@@ -861,13 +846,11 @@ type MemoryEngine interface {
 	Retriever
 	io.Closer
 }
-    MemoryEngine = 索引构建 + 检索 + 生命周期。这是 tagent 核心依赖的解耦缝。
+    MemoryEngine = 索引构建 + 检索 + 生命周期，tagent 核心依赖的解耦缝。
 
-    实现： - InMemoryEngine（MVP 兜底）：内存向量索引 + 关键词，无外部依赖，供开发/测试/降级。 -
-    RustVikingEngine（适配器，闭环到 rustviking）：tagent 侧 zhipu 嵌入 + rustviking index
-    insert/search/delete 向量后端 + 适配器内 RRF 融合与分区过滤。
-
-    生命周期：随 MemoryStore 启停（Closer 接线，resolveMemoryStore 按配置创建）。
+    - 实现：InMemoryEngine（MVP
+    兜底，内存向量索引加关键词，无外部依赖，供开发/测试/降级）；RustVikingEngine（适配器：tagent 侧嵌入 + rustviking
+    向量后端 + 适配器内 RRF 融合与分区过滤）。 - 生命周期随 MemoryStore 启停（Closer 接线，装配期按配置创建）。
 
 type MemoryEngineProvider interface {
 	MemoryEngine() MemoryEngine
@@ -1050,19 +1033,14 @@ type RetentionHoldable interface {
 type RetentionLease struct {
 	// Has unexported fields.
 }
-    RetentionLease ==================== 有限 key 保留租约====================
+    RetentionLease 保护未确认恢复材料的 durable 原文（未确认 envelope 的 prepared
+    fact key 与 receipt key、待重放 spill key）， 使其在恢复 owner 安全释放前不被 TTL
+    过期、容量淘汰或墓碑清理物理销毁；持有者是共享资源 owner，非任一 agent。
 
-    RetentionLease 保护「未确认恢复材料」的 durable 原文——未确认 inbox envelope 的 prepared
-    fact key 与 receipt key、普通 spill 待重放 key——使其在恢复 owner 能安全 释放之前不被 TTL
-    过期、容量淘汰、内容降分辨率或墓碑最终清理物理销毁。持有者是共享 资源 owner（FileSegmentStore），非任一 agent。
-
-    不变量： - 租约是**内存守护集**，启动时由现有未确认材料（inbox envelope 文件 + spill 文件） 重建，MUST NOT
-    引入第二持久保留表或全历史去重集合。 - 保护期内只拒绝**销毁**；无损搬迁（压实段合并复制原文到高层段）允许。 - 显式删除受保护 key 返回
-    ErrEventProtected（不销毁）。 - 释放（ack 目录同步成功 / spill 安全移除）后恢复该 key 原类型的 TTL，按其原有
-    timestamp 参与年龄淘汰，绝不重新盖时间。
-
-    引用计数：同一 key 可同时被 envelope owner 与 spill owner 保护，Release 幂等地
-    递减，归零才真正解除保护。nil-safe（未接线租约的 store 表现为无保护）。
+    - 租约是内存守护集，启动时由现有未确认材料重建；MUST NOT 引入第二持久保留表或全历史去重集合。 -
+    保护期内只拒绝销毁；无损搬迁（压实段合并复制原文到高层段）允许。 - 显式删除受保护 key 返回 ErrEventProtected。 -
+    释放后恢复该 key 原类型的 TTL，按其原有 timestamp 参与年龄淘汰，绝不重新盖时间。 - 同一 key 可同时被 envelope 与
+    spill 持有：Release 幂等递减，归零才解除保护；nil-safe（未接线时表现为无保护）。
 
 func NewRetentionLease() *RetentionLease
     NewRetentionLease 构造空租约（未就绪：挂上它的 store 会等首次 populate 后才扫描）。

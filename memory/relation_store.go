@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#causal-chain
 package memory
 
 import (
