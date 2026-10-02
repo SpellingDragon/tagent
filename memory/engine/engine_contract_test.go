@@ -46,7 +46,7 @@ var _ memory.MemoryEngine = (*stubEngine)(nil)
 
 // TestMemoryEngineContractDegradation 钉住契约的退化语义：索引未就绪时 Auto/Vector/Hybrid
 //
-// 契约: docs/wiki/memory/memory-architecture.md#inmemory-retrieval
+// 契约: docs/wiki/memory/memory-architecture.md#engine-contract
 func TestMemoryEngineContractDegradation(t *testing.T) {
 	eng := &stubEngine{ready: false, caps: memory.RetrievalCaps{Keyword: true}}
 	for _, mode := range []memory.RetrievalMode{memory.ModeAuto, memory.ModeVector, memory.ModeHybrid} {

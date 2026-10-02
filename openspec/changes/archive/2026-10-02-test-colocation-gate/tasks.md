@@ -28,23 +28,23 @@
 - [x] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.7 memory 批之一:`compaction_safety_test.go` →①并入 `compaction_test.go`;N=1
-- [ ] 3.8 memory 批之二(编译单元修正后重定):`error_tracking_engine_test.go` 与 `mem_spill_notify_test.go` 同属 `package memory_test`/#error-tracking——①互并为一文件，或③锚点名不副实(Notify 语义)重挂/细化锚;两方案等价合法,批内评决定取舍;N=2
+- [x] 3.8 memory 批之二:裁决①互并——MemSpill 系 ErrorTrackingStore 装饰链内含物(wiki 冻结契约 C2),锚点副实;mem_spill_notify 并入 error_tracking_engine,基线 17→15
 - [x] 3.9 memory 批之三(取消):包名入键修正后与 3.8 同键并已合入其动作对象,本项无独立对象文件
 - [x] 3.10 memory 批之四(取消):假阳性消除——`segment_store_barrier_test.go`(memory_test) 与 `segment_store_recovery_test.go`(memory) 属不同编译单元,分键后各自组内参与者不足 2,不再在册
-- [ ] 3.11 memory 批之五:`embedder/contract_test.go` →①并入 `traced_test.go`;N=1
-- [ ] 3.12 memory 批之六:`engine/engine_contract_test.go` →①并入 `engine_inmemory_test.go`;N=1
-- [ ] 3.13 memory 批之七:`kv/partition_snapshot_test.go` →①并入 `local_file_kv_test.go`;N=1
-- [ ] 3.14 agent 批之一:`session_refusal_test.go` →①并入 `exec_lease_test.go`;N=1
-- [ ] 3.15 agent 批之二:`reliability/quarantine_barrier_test.go` →①并入 `inbox_test.go`;N=1
-- [ ] 3.16 agent 批之三(②+①组合):`compress/session_projection_test.go` →②改名对齐 `projection.go`,随后 `fold_run_exemption_test.go` →①并入改名后文件;N=2
-- [ ] 3.17 agent 批之四(裁决型):`agent/batch_retire_split_test.go`+`lineage_signal_test.go`——先核对 `agent/` 生产面裁定①落点或③锚点收敛,裁决记录写入本任务提交信息;N=2
-- [ ] 3.18 agent 批之五(热区,B 型):前置 `git status` 确认 `agent/task/` 干净;`task/batch_retire_split_test.go`+`retire_lineage_test.go` →①并入 `task_manager_test.go` 子测试 + ③ `#finalize-lineage` 族锚上收;N=2
-- [ ] 3.19 tests 批之一(C 型):`async_result_test.go`+`async_task_e2e_test.go` →①合并为单一文件,锚点取其一;N=2
-- [ ] 3.20 tests 批之二(C 型,含文档侧):`compression_test.go`/`integration_test.go` →③重挂 e2e 级锚(落点语义写入提交信息;若评审判两文件确属同工况则辅①);N=2(实测 25 清单与 3.2-3.20 销号数逐一对账吻合)
+- [x] 3.11 memory 批之五:裁决③锚点细化——Embedder 接口契约重挂 #embedder-contract 显式锚(1387 节本就承载契约叙述),contract 测试独处一组,基线 15→14
+- [x] 3.12 memory 批之六:裁决③锚点细化——MemoryEngine 接口契约(C6 冻结契约:Ready 门控退化)重挂 #engine-contract 显式锚(二点五节表格 B 行),基线 14→13
+- [x] 3.13 memory 批之七:裁决①并入——4 测试皆 TestLocalFileKV_* 分片快照工况,并入镜像 local_file_kv_test,基线 13→12;memory 域清零
+- [x] 3.14 agent 批之一:session_refusal 单例并入 exec_lease_test(镜像同锚 #lease-holds-reference),基线 12→11
+- [x] 3.15 agent 批之二:quarantine_barrier 并入 inbox_test(镜像同锚 #envelope-states),基线 11→10
+- [x] 3.16 agent 批之三:session_projection 改名 projection_test 对齐镜像(②)+fold_run_exemption 四例并入(①),基线 10→8
+- [x] 3.17 agent 批之四:裁决①互并为新名 finalize_lineage_test.go(两测试各半语义,新名诚实覆盖),基线 8→6
+- [x] 3.18 agent 批之五:两件并入 task_manager_test 并补第 4 行 #finalize-lineage 声明(多锚先例,索引诚实),基线 6→4;agent 域清零
+- [x] 3.19 tests 批之一:async_result 并入 async_task_e2e_test(#subagent-loop 单文件化),基线 4→2;注:tests 包首跑现既有 tmux flake 一次,复跑×3+race 全绿且 merge-check 零变化
+- [x] 3.20 tests 批之二:integration_test 补文件级 e2e 锚 #e2e-turn-sequence(原锚挂 SmartCompress 单测试 doc、对该测试副实故保留),compression 锚副实不动;P2 全清,基线归零槽位自动移除
 
 ## 4. P3 归零切硬与终验
 
-- [ ] 4.1 归零核对:`baseline-files.txt` 全部在册文件已销号,规则全仓输出 0 finding;从 `baseline.json` 移除槽位。验证:`go run ./scripts/comment_policy -v . examples/wechat-bot` 无该规则输出
-- [ ] 4.2 硬门生效验证:临时造一个同锚点无镜像测试文件 → `lint.sh` 直接红(不再有基线预算);删除恢复绿;两运行留痕
-- [ ] 4.3 归档与 specs 核对:`openspec archive`,delta 并入主 specs 后复验「测试文件族与职责同位」机检条款与 10 个场景完整、`openspec validate --specs --strict` 全绿
-- [ ] 4.4 终验:`bash scripts/lint.sh` + `go build ./...` + `go test ./... -short -count=1` + `examples/wechat-bot` 三连 + `./scripts/race_check.sh`(全包集)全绿;推送后 CI `test`/`race`/`validators`/`openspec` 四 job 绿
+- [x] 4.1 归零核对:`baseline-files.txt` 全部在册文件已销号,规则全仓输出 0 finding;从 `baseline.json` 移除槽位。验证:`go run ./scripts/comment_policy -v . examples/wechat-bot` 无该规则输出
+- [x] 4.2 硬门生效验证:临时造一个同锚点无镜像测试文件 → `lint.sh` 直接红(不再有基线预算);删除恢复绿;两运行留痕
+- [x] 4.3 归档与 specs 核对:`openspec archive`,delta 并入主 specs 后复验「测试文件族与职责同位」机检条款与 10 个场景完整、`openspec validate --specs --strict` 全绿
+- [x] 4.4 终验:`bash scripts/lint.sh` + `go build ./...` + `go test ./... -short -count=1` + `examples/wechat-bot` 三连 + `./scripts/race_check.sh`(全包集)全绿;推送后 CI `test`/`race`/`validators`/`openspec` 四 job 绿。归档时 baseline 仅余 `missing-test-responsibility:9`——该槽清零与 counts 归空(全规则零容忍,即用户指令的“所有规则通过 CI 固化”终态)由后续变更 thin-comment-thick-doc 收口
