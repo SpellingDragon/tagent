@@ -24,8 +24,8 @@
 - [x] 3.2 evolution 试点(规程走通):`switch_combo_test.go` 工况→①并入 `judge_test.go` 子测试;N=1
 - [ ] 3.3 agent 试点(发起判例,小步验证 agent 包流程):`meditation_audit_test.go` →①并入 `telemetry_audit_test.go`;N=1
 - [ ] 3.4 tool/action 改名批:`action_test.go` →②改名 `action_tool_test.go`(映射表登记旧→新,同步脚本/文档引用);`tui_integration_test.go` 属 tag 异组、预期不在册,核对后记入对账说明;N=1
-- [ ] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
-- [ ] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
+- [x] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
+- [x] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [ ] 3.7 memory 批之一:`compaction_safety_test.go` →①并入 `compaction_test.go`;N=1
 - [ ] 3.8 memory 批之二:`error_tracking_engine_test.go` →①并入 `error_tracking_test.go`;N=1
 - [ ] 3.9 memory 批之三:`mem_spill_notify_test.go` →①并入 `mem_spill_test.go`;N=1
