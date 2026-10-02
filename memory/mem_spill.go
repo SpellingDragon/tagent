@@ -113,6 +113,12 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error) {
 // removed: a GetEvent hit only proves a read returns the record, not that the durable
 // commit (barrier + index/meta publication) completed, and public StoreEvent now REFUSES
 // an existing key so it can never complete an orphan anyway.
+//
+// Key releases are booked strictly behind the durable rewrite: the spill list
+// on disk still carries the replayed originals until the rewrite lands, so
+// releasing earlier would make the next round's AlreadyCommitted replay a
+// double release decrementing other holders' leases. On rewrite failure all
+// keys stay held and the retry releases exactly once when removal finally lands.
 func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error) {
 	if s == nil || store == nil {
 		return 0, nil
@@ -153,12 +159,6 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
 		notifySafe(sp.Event)
 	}
 	if rerr := s.rewrite(failed); rerr != nil {
-		// The spill list on disk still carries the replayed originals: releasing
-		// their keys now would make the NEXT round's replay (AlreadyCommitted)
-		// a double release, decrementing other holders' leases (a ref leak).
-		// Book every release behind the durable removal — rewrite failure
-		// returns with all keys still held, and the retry path releases exactly
-		// once when the removal finally lands.
 		return replayed, rerr
 	}
 	if s.guard != nil {

@@ -87,30 +87,28 @@ func TestTelemetryDispositions_LineageViaStore(t *testing.T) {
 	if d[31] != TelemDemote {
 		t.Fatalf("user-lineage consumed notice must demote (externalized), got %d", d[31])
 	}
-	// meditation 是白名单成员（宿主可见）：消费后的通知原文外显过，走降级。
 	med := TelemetryDispositions(context.Background(), store,
 		[]memory.EventReference{settleRef(32, 1), outputRef(42, 2)}, 2)
 	if med[32] != TelemDemote {
 		t.Fatalf("meditation is deliverable (whitelist member): consumed notice must demote, got %d", med[32])
 	}
-	//  负名单漏配的谱系（task-unstamped）与空/缺席谱系一律内部（B-P2-2 修复面）。
 	for _, k := range []int64{33, 34, 35} {
 		solo := []memory.EventReference{settleRef(k, 1), outputRef(k+10, 2)}
 		dk := TelemetryDispositions(context.Background(), store, solo, 2)
 		if dk[k] != TelemInternal {
-			t.Fatalf("internal/unknown lineage notice %d must stay internal, got %d", k, dk[k])
+			t.Fatalf("internal/unknown lineage notice %d (negative-list strays, empty or absent lineage) must stay internal, got %d", k, dk[k])
 		}
 	}
 }
 
-// TestTelemetryDispositions_ForgedBodyWithoutMark 钉住 D10 权威迁移：正文以
-// "[task settled" 起头但存储事件不带 settle_notice 标记的用户消息，不是折叠候选——
-// 前缀只圈候选，资格唯一来源是对库核验的结构化标记。
+// TestTelemetryDispositions_ForgedBodyWithoutMark 钉住 D10 权威迁移的候选侧。
+// - 正文以 "[task settled" 起头但存储事件不带 settle_notice 标记的用户消息，不是折叠候选。
+// - 前缀只圈候选；资格唯一来源是对库核验的结构化标记（覆盖伪造体与标记前的旧事件）。
 func TestTelemetryDispositions_ForgedBodyWithoutMark(t *testing.T) {
 	store := memory.NewInMemoryStore()
 	require.NoError(t, store.StoreEvent(61, memory.FullEvent{
 		EventKey: 61, EventType: tagentevent.TypeExternalInput,
-		Metadata: map[string]string{}, // 无标记：用户伪造体或前标记时代的旧事件
+		Metadata: map[string]string{},
 	}))
 	refs := []memory.EventReference{settleRef(61, 1), outputRef(62, 2)}
 	d := TelemetryDispositions(context.Background(), store, refs, 2)
@@ -145,9 +143,9 @@ func TestFoldSettleRuns_ConsumptionDemotesSingle(t *testing.T) {
 	}
 }
 
-// TestFoldSettleRuns_UnverifiedSetNeverFolds 钉住 D10 权威迁移的折叠侧：没有
-// 标记核验成员集（nil 或空 map）时，≥2 前缀形状 run 也不折叠——折叠资格唯一
-// 来源是对库核验的 settle_notice 标记，正文形状启发式不再授予资格。
+// TestFoldSettleRuns_UnverifiedSetNeverFolds 钉住 D10 权威迁移的折叠侧。
+// - 没有标记核验成员集（nil 或空 map）时，≥2 前缀形状 run 也不折叠。
+// - 折叠资格唯一来源是对库核验的 settle_notice 标记，正文形状不授予资格。
 func TestFoldSettleRuns_UnverifiedSetNeverFolds(t *testing.T) {
 	cc := newFoldCC(2)
 	run2 := []memory.EventReference{settleRef(52, 102), settleRef(53, 103)}

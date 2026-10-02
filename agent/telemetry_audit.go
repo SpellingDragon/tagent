@@ -19,7 +19,7 @@ const (
 // SelfTelemetryAuditor 按滑动窗口样本判定自身遥测的可见性该升到哪一档：窗口时长、
 // 负例占比、最少样本数与每档驻留时间都是命名常量，避免"看一眼就永久外显"或"长期沉默
 // 无人察觉"。它只统计自管谱系（event.SelfManagedLineage：投递门白名单之外 ∧ 冥想）
-// ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，不再有私有清单。
+// ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，没有私有清单。
 type SelfTelemetryAuditor struct {
 	mu       sync.Mutex
 	samples  []auditSample

@@ -1,5 +1,6 @@
-// 本文件钉住退役谱系的信号化：退役只盖在 SettleSignal 上，Spec.Origin 作为 spawn 时
-// 谱系身份保持不可变。
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
+//
+// 退役谱系的信号化：退役只盖在 SettleSignal 上，Spec.Origin 作为 spawn 时谱系身份保持不可变。
 package task
 
 import (
@@ -10,10 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRetireNeverMutatesOrigin 钉住 退役（TTL/僵尸/孤儿）不再改写 Spec.Origin。修前
-// finalizeRetired 持 t.mu 写 Origin["trigger_source"]="task-retired"，而事件构造侧
-// （agent.newTaskSettledEvent）无锁读同一 map——既是数据竞争，又永久污染 resumed
-// 任务后续结算的谱系。修后退役归因只出现在信号的 Lineage 字段上。
+// TestRetireNeverMutatesOrigin 钉住退役（TTL/僵尸/孤儿）不改写 Spec.Origin。
+// - 退役归因只出现在信号的 Lineage 字段；Origin 是 spawn 时谱系身份，保持不可变。
+// - 事件构造侧无锁读 Origin：与退役并发时不得数据竞争（-race），也不得污染 resumed 任务的后续谱系。
 func TestRetireNeverMutatesOrigin(t *testing.T) {
 	var mu sync.Mutex
 	var sigs []SettleSignal
@@ -35,9 +35,6 @@ func TestRetireNeverMutatesOrigin(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// Concurrent unprivileged reader: exactly the shape of the event builder
-	// reading tk.Spec.Origin with no lock. Under -race the old Origin-writing
-	// retirement fails here.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -51,8 +48,6 @@ func TestRetireNeverMutatesOrigin(t *testing.T) {
 		}
 	}()
 
-	// Concurrent watch settles (state-neutral signals, same second stage the
-	// watch loop runs) interleaved with the retirement.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -86,9 +81,10 @@ func TestRetireNeverMutatesOrigin(t *testing.T) {
 	require.Equal(t, SettleFailed, retired.Kind)
 }
 
-// TestReconcileTTL_RestoredTaskWarnsBeforeRetire 钉住 恢复任务（detector 恒 nil）被
-// TTL 退役时，退役结算事件自身必须携带"后台会话可能仍在运行"告警——静默泄漏被堵住：
-// 一个可观测事件承载（不另发旁路通知，批折叠的排他性不被破坏）。
+// TestReconcileTTL_RestoredTaskWarnsBeforeRetire 钉住恢复任务的静默泄漏告警通道。
+// - 恢复任务（detector 恒 nil）被 TTL 退役时，退役结算事件自身携带"后台会话可能仍在运行"告警。
+// - 一个可观测事件承载：不另发旁路通知，批折叠的排他性不被破坏。
+// - 有探测器的任务退役不带恢复告警（Cancel 已接管回收）。
 func TestReconcileTTL_RestoredTaskWarnsBeforeRetire(t *testing.T) {
 	var mu sync.Mutex
 	var sigs []SettleSignal
@@ -116,7 +112,6 @@ func TestReconcileTTL_RestoredTaskWarnsBeforeRetire(t *testing.T) {
 	require.Contains(t, wave1[0].Output, "sess-w", "the warning names the possibly-running backing session")
 	require.Contains(t, wave1[0].Output, "可能仍在运行")
 
-	// 有探测器的任务退役不带恢复告警（Cancel 已接管回收）。
 	det := NewManualDetector()
 	tkLive := &Task{ID: "live-t", Spec: TaskSpec{Desc: "live", TTL: time.Minute}, detector: det}
 	tkLive.status = TaskRunning

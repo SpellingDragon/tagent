@@ -382,6 +382,13 @@ func TagentAgentsConstructed() int64 { return constructedTagents.Load() }
 // The Runner is retained for session management and plugin lifecycle
 // (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
 // AgentLoop, not the Runner.
+//
+// Construction fails closed: with a durable inbox the MemoryStore must
+// implement memory.EventReplayer — the bus handle was already opened and
+// nobody else holds it, so the refusal path closes it before returning the
+// construction error (the primary). The audit digest line is reflection
+// feedback and wires after the meditation manager exists, so every meditation
+// message carries it (wiring before construction was a silent no-op).
 func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -452,8 +459,6 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	}
 	if bus.Durable() {
 		if _, ok := memStore.(memory.EventReplayer); !ok {
-			// The inbox was opened above; on refusal nobody else holds the
-			// handle, so close it here (the construction error is the primary).
 			_ = bus.CloseDurable()
 			return nil, fmt.Errorf("agent %q: durable inbox requires a replay-capable MemoryStore (%T does not implement memory.EventReplayer); refusing to degrade durability", name, memStore)
 		}
@@ -597,9 +602,6 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	if cfg.Meditation.Enabled {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
 		ta.meditationMgr.SetTaskController(taskManager)
-		// The audit digest line is reflection feedback: it must reach the
-		// meditation message whenever meditation runs, so wire it after the
-		// manager exists (wiring it before construction was a silent no-op).
 		ta.meditationMgr.SetAuditLine(selfAudit.DigestLine)
 		if cfg.Meditation.AnchorPath != "" {
 			if as, aerr := reliability.NewAnchorStore(cfg.Meditation.AnchorPath); aerr == nil {

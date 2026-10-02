@@ -410,6 +410,10 @@ func (c *Compactor) filterTombstoned(events []FullEvent) ([]FullEvent, []int64) 
 // their dangling index keys and their tombstone entries (memory + KV).
 // Crash between segment cleanup and this step is benign — stale tombstones
 // are harmless and this finalization is idempotent.
+// When the idx removal batch fails, the tombstone stays: it is both the retry
+// marker and the resurrection guard (ErrEventForgotten). Dropping it over a
+// failed removal loses the evidence AND the guard; keeping it is safe because
+// finalize is idempotent and the next compaction round retries the same keys.
 func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	if len(dead) == 0 {
 		return
@@ -436,11 +440,6 @@ func (c *Compactor) finalizeTombstones(pid int, dead []int64) {
 	}
 	if err := c.kv.KVBatch(batchOps); err != nil {
 		log.Errorf("[Compaction] delete dangling idx failed pid=%d: %v", pid, err)
-		// The tombstone stays when the idx removal did not land: it is both the
-		// retry marker and the resurrection guard (ErrEventForgotten). Dropping
-		// it over a failed removal loses the evidence AND the guard; keeping it
-		// is safe — finalize is idempotent and the next compaction round
-		// retries the same key set.
 		return
 	}
 	if c.tombstone != nil {
@@ -506,6 +505,8 @@ func (c *Compactor) findAliveAncestor(key int64, alive map[int64]bool) int64 {
 }
 
 // deleteSegments deletes all KV keys for the given segments (crash-safe cleanup).
+// A scan failure never silently skips a window: scan errors are collected and
+// surfaced, so the delete act stays honest about what it actually removed.
 func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 	var batchOps []KVOp
 	var scanErrs []error
@@ -514,9 +515,6 @@ func (c *Compactor) deleteSegments(pid int, windowTSs []int64) error {
 		eventPrefix := SegmentEventPrefix(pid, windowTS)
 		pairs, err := c.kv.KVScan(eventPrefix, 0)
 		if err != nil {
-			//  a silent scan-skip leaves the window's rows in the
-			// store while the caller believes the window was deleted. Collect and
-			// surface: the delete act must be honest about what it removed.
 			scanErrs = append(scanErrs, fmt.Errorf("delete-segments scan pid=%d window=%d: %w", pid, windowTS, err))
 			continue
 		}

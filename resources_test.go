@@ -116,9 +116,9 @@ func TestOwnership_ConflictingConfigRejected(t *testing.T) {
 	require.Contains(t, err.Error(), "conflict")
 }
 
-// TestOwnership_EquivalentConfigsShareNotConflict 钉住 行为恒同的配置不进冲突判定，
-// 两份等价装载共享同一个活实例而非被判成假冲突。
-// - 判别是双面的：指纹逐字相等，且第二次装载被接受（不是拒绝）；
+// TestOwnership_EquivalentConfigsShareNotConflict 钉住行为恒同的配置不进冲突判定。
+// - 两份等价装载共享同一个活实例而非被判成假冲突。
+// - 判别是双面的：指纹逐字相等，且第二次装载被接受（不是拒绝）。
 // - 两个句柄的写入互见——同一份 store 在服务，没有重建。
 // 契约: docs/wiki/platform/resource-ownership.md#fingerprint-conflict
 func TestOwnership_EquivalentConfigsShareNotConflict(t *testing.T) {

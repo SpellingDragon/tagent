@@ -680,6 +680,13 @@ func extractToolNameFromSummary(summary string) string {
 // settle_fold ref is not an external_input, so cards are never re-folded; a
 // card adjacent to newly-arrived settles stays a separate card (each fold
 // act is one bounded card — no unbounded card growth across rounds).
+// Exemption is run-level: a run is one batch of adjacent notices, so any
+// Active (unconsumed) member keeps the whole run verbatim — per-entry
+// exemption would truncate an unconsumed notice into a card, breaking the
+// Active-must-not-be-lost channel contract. A single demoted entry folds to
+// its own ticket shaped like buildSettleFoldRef; the synthetic negative key
+// needs a nonzero timestamp (Timestamp==0 falls back to 1) or EventKey=0 is
+// silently dropped by buildRetainedRefs as an invalid key.
 func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispositions map[int64]int8) []memory.EventReference {
 	result := make([]memory.EventReference, 0, len(refs))
 	for i := 0; i < len(refs); {
@@ -698,17 +705,10 @@ func (cc *ContextCompressor) foldSettleRuns(refs []memory.EventReference, dispos
 		run := refs[i:j]
 		switch {
 		case len(run) >= 2 && runHasActiveMember(run, dispositions):
-			// run 级豁免：一个 run 是同一批相邻通知，消费判定按 run 整体成立——
-			// 任一成员尚未被消费（Active，不可丢级），整 run 原样保留。折叠是
-			// run 级动作，豁免也必须是 run 级的：逐条豁免会把未消费的通知截断
-			// 进卡，违背 Active 不可丢的通道层契约。
 			result = append(result, run...)
 		case len(run) >= 2:
 			result = append(result, buildSettleFoldRef(run))
 		case dispositions[run[0].EventKey] == TelemDemote:
-			// 单条降级票据与 buildSettleFoldRef 同形：合成负 key 需要一个非零
-			// 时间戳，Timestamp==0 时回落 1，否则 EventKey=0 会被 buildRetainedRefs
-			// 当无效键静默丢弃（观测丢失）。
 			ts := run[0].Timestamp
 			if ts == 0 {
 				ts = 1

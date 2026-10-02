@@ -301,9 +301,9 @@ func (nilChannelModel) GenerateContent(context.Context, *model.Request) (<-chan 
 	return nil, nil
 }
 
-// TestTrajectoryRecorder_NilChannelDoesNotHangClose 钉住 E-P2-9：inner 返回
-// (nil, nil) 时录制器不得起 range nil-channel 的转发协程——那会让 gcWg 永挂、
-// Close() 死锁。判据三分：调用即返回 nil channel、Close 限时完成、异常落了记录。
+// TestTrajectoryRecorder_NilChannelDoesNotHangClose 钉住 inner 返回 (nil, nil) 时的录制器语义。
+// - 不得起 range nil-channel 的转发协程（那会让 gcWg 永挂、Close() 死锁）。
+// - 判据三分：调用即返回 nil channel、Close 限时完成、异常落了记录。
 func TestTrajectoryRecorder_NilChannelDoesNotHangClose(t *testing.T) {
 	tmpDir := t.TempDir()
 	tr, err := NewTrajectoryRecorder(nilChannelModel{}, tmpDir, "https://x/v1")

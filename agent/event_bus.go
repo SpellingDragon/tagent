@@ -165,6 +165,8 @@ func settleResultSegment(result string, hasErr bool) string {
 // settled lines, collapsing a retirement storm into a single notification.
 // The line format mirrors newTaskSettledEvent header: retire outputs are
 // short machine verdicts, so no spill is needed. An empty batch returns nil.
+// Like newTaskSettledEvent, the notice carries settle_notice metadata: it is
+// the production-side fold authority (D10).
 // 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
 func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	if len(batch) == 0 {
@@ -187,9 +189,6 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	}
 	msg := model.Message{Role: model.RoleUser, Content: b.String()}
 	evt := NewExternalInputEvent("task-batch-retire", msg)
-	// The production-side recognition authority (D10): fold eligibility comes
-	// from this mark verified against the stored event, never from the body
-	// prefix — a user message imitating the notice shape stays unmarked.
 	evt.Metadata["settle_notice"] = "true"
 	return evt
 }
@@ -207,6 +206,13 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 // ticket + tail preview; consumption goes through read_file paging. Write
 // failure degrades to inline full text (availability over bounding).
 // maxChars<=0 or empty outputDir disables spillover (tests / small results).
+// Metadata authority contracts:
+//   - settle_notice marks the event as an authentic notice — fold eligibility
+//     is verified against this stored mark (D10), never the body prefix, so a
+//     user message imitating the notice shape stays unmarked.
+//   - sig.Lineage outranks the spawn-time Spec.Origin: retirement stamps
+//     task-retired on the settle signal only; Origin stays immutable so a
+//     resumed task's later settles keep their original value.
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	marker, statusWord := settleMarkerAndStatus(sig)
 
@@ -256,9 +262,6 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	if len(tk.Spec.Origin) == 0 {
 		evt.Metadata["lineage_absent"] = "true"
 	}
-	// Signal-level lineage outranks the spawn-time Origin: retirement stamps
-	// task-retired on the settle signal, never on Origin itself — Origin stays
-	// immutable so a resumed task's later settles keep their original value.
 	if sig.Lineage != "" {
 		evt.Metadata[tagentevent.MetaKeyTriggerSource] = sig.Lineage
 	}
@@ -269,9 +272,6 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	}
 	evt.Metadata["settle_status"] = statusWord
 	evt.Metadata["task_id"] = tk.ID
-	// The production-side recognition authority (D10): fold eligibility comes
-	// from this mark verified against the stored event, never from the body
-	// prefix — a user message imitating the notice shape stays unmarked.
 	evt.Metadata["settle_notice"] = "true"
 	return evt
 }

@@ -311,11 +311,9 @@ func storageMatrix(t *testing.T) map[string]any {
 					"kv_ranges": writeOps[3], "kv_batches": writeOps[4], "kv_deletes": writeOps[5],
 					"sync_barriers": writeOps[6], "sync_barriers_per_write": round3(float64(writeOps[6]) / float64(writes)),
 					"segments_on_disk": len(segFiles), "dirty_tmp_orphans": len(tmpLeft),
-					//  布局：快照按分区分片，Sync 只重写脏桶——聚合字节仍可比，
-					// per-partition 维度直接呈现"单分区提交成本 ∝ 分区键数、与全库解耦"。
-					"kv_snapshot_bytes":       kvSnapshotTotalBytes(t, dir),
+					"kv_snapshot_bytes":         kvSnapshotTotalBytes(t, dir),
 					"kv_snapshot_per_partition": kvSnapshotBytesByPartition(t, dir),
-					"partitions_discoverable": len(ckv.ListPartitionIDs()),
+					"partitions_discoverable":   len(ckv.ListPartitionIDs()),
 				},
 			}
 
@@ -487,16 +485,14 @@ func tokenEstimatorError(t *testing.T) map[string]any {
 const benchBarrierMarker = "bench-wrapper-barrier-marker"
 
 // TestBenchWrapperBarrierDurableWithoutClose proves the offline benchmark wraps the KV with the SAME event-level durability barrier production uses.
-// - Without Sync on the wrapper, FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion fails and the commit barrier is skipped.
-// - An acknowledged write then stays in LocalFileKV's in-memory pending buffer (KVPut accepts asynchronously) and is lost on an unclean exit.
-// - The child replicates the benchmark wrapping (countingKV over LocalFileKV), stores ONE event, records the syncs delta, exits WITHOUT Close.
-// - The parent asserts the wrapper Sync was reached (delta >= 1: through the wrapper, not around it).
-// - The parent also asserts a fresh independent store over the same directory reads the event back.
-// - Certified: the Sync barrier is a real atomic tmp+rename durable commit, visible after an unclean exit (no Close, no flush tick).
-// - Certified with the actual barrier count and original-text/index evidence.
-// - Not certified: power-loss durability — the minimal backend has no fsync/WAL
-//   machinery; the barrier is the atomic snapshot rename only. That dimension
-//   belongs to the rustviking-backed stage.
+//   - Without Sync on the wrapper, FileSegmentStore's `s.kv.(interface{ Sync() error })` assertion fails and the commit barrier is skipped.
+//   - An acknowledged write then stays in LocalFileKV's in-memory pending buffer (KVPut accepts asynchronously) and is lost on an unclean exit.
+//   - The child replicates the benchmark wrapping (countingKV over LocalFileKV), stores ONE event, records the syncs delta, exits WITHOUT Close.
+//   - The parent asserts the wrapper Sync was reached (delta >= 1: through the wrapper, not around it).
+//   - The parent also asserts a fresh independent store over the same directory reads the event back.
+//   - Certified: the Sync barrier is a real atomic tmp+rename durable commit, visible after an unclean exit (no Close, no flush tick).
+//   - Certified with the actual barrier count and original-text/index evidence.
+//   - Not certified: power-loss durability (no fsync/WAL here; barrier = atomic snapshot rename only) — that dimension belongs to the rustviking-backed stage.
 func TestBenchWrapperBarrierDurableWithoutClose(t *testing.T) {
 	if os.Getenv("TAGENT_BENCH_BARRIER_SUBPROC") == "1" {
 		runBenchBarrierChild()
@@ -606,7 +602,8 @@ func runBenchBarrierChild() {
 }
 
 // kvSnapshotTotalBytes sums every kv-*.json snapshot in the store dir
-//  per-partition layout).
+//
+//	per-partition layout).
 func kvSnapshotTotalBytes(t *testing.T, dir string) int64 {
 	t.Helper()
 	files, _ := filepath.Glob(filepath.Join(dir, "kv-*.json"))

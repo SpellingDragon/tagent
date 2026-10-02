@@ -1,5 +1,6 @@
-// 本文件钉住 有归属退役经 per-task 路由到达绑定总线并递减投递记账——父循环因此
-// 能静止退出，不再依赖调用方的硬超时。
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
+//
+// 有归属退役经 per-task 路由到达绑定总线并递减投递记账，父循环因此能静止退出。
 package agent
 
 import (
@@ -10,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBatchRetire_AttributedSettleQuietsBoundLoop 钉住 分流后的端到端形状：
-// 绑定总线 + 一次 spawn 记账 → 有归属的退役任务被孤儿裁决回收 → 结算走 OnSettle
-// 路由进绑定总线、pending 递减归零（awaiting 判假 = 循环可退出），批汇总零条目。
+// TestBatchRetire_AttributedSettleQuietsBoundLoop 钉住分流后的端到端形状。
+// - 绑定总线 + 一次 spawn 记账：孤儿裁决回收有归属退役后，结算经 OnSettle 路由进绑定总线。
+// - pending 递减归零（awaiting 判假 = 循环可退出），批汇总零条目。
 func TestBatchRetire_AttributedSettleQuietsBoundLoop(t *testing.T) {
 	sinks := newSettleSinkRegistry()
 	fallback := NewEventBus()
@@ -50,7 +51,6 @@ func TestBatchRetire_AttributedSettleQuietsBoundLoop(t *testing.T) {
 	require.Zero(t, batched, "an attributed retire must never reach the batch summary")
 	require.False(t, sinks.awaiting("inv-Q"), "the delivered settle decrements the barrier — the loop can quiesce")
 
-	// 未绑定的归属退役回落共享总线（入口属主形态），事件不丢。
 	sinks.unbind("inv-Q")
 	require.Empty(t, fallback.TryPull(), "nothing hit the fallback while the bus was bound")
 	require.NotNil(t, tm.RestoreTask("q2", task.TaskSpec{

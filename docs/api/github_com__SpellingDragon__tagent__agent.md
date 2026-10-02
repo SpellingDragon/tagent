@@ -1272,7 +1272,7 @@ type SelfTelemetryAuditor struct {
     SelfTelemetryAuditor 按滑动窗口样本判定自身遥测的可见性该升到哪一档：窗口时长、
     负例占比、最少样本数与每档驻留时间都是命名常量，避免"看一眼就永久外显"或"长期沉默
     无人察觉"。它只统计自管谱系（event.SelfManagedLineage：投递门白名单之外 ∧ 冥想）
-    ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，不再有私有清单。
+    ——这些产出不是用户发起的交互，与宿主投递白名单同源派生，没有私有清单。
 
 func NewSelfTelemetryAuditor(onAction func(level int, ratio float64, samples int, frozen bool)) *SelfTelemetryAuditor
     NewSelfTelemetryAuditor creates an auditor; onAction receives every level
@@ -1352,6 +1352,13 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error)
     The Runner is retained for session management and plugin lifecycle
     (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
     AgentLoop, not the Runner.
+
+    Construction fails closed: with a durable inbox the MemoryStore must
+    implement memory.EventReplayer — the bus handle was already opened and
+    nobody else holds it, so the refusal path closes it before returning the
+    construction error (the primary). The audit digest line is reflection
+    feedback and wires after the meditation manager exists, so every meditation
+    message carries it (wiring before construction was a silent no-op).
 
 func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference)
     AppendProjectionRef appends an EventReference to this agent's session
@@ -1577,6 +1584,12 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
         inv.RunOptions.RuntimeState["external_context"] 内是序列化的
         ExternalContextEntry JSON；
      2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用， 保持单槽交收语义。
+
+    生命周期不变量：
+      - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine
+        永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
+      - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内 落地的
+        settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
 
 func (ta *TagentAgent) Runner() runner.Runner
     Runner returns the underlying Runner from ContextManager.

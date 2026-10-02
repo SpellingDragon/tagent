@@ -582,14 +582,13 @@ func (s *FileSegmentStore) ensureWindowMeta(pid int, windowTS int64) (bool, erro
 // copy beside a compacted L2/L3 copy) it returns the HIGHEST-layer slot so the reused
 // idx points at the segment that will survive compaction. A KVScan error fails loud:
 // an incomplete scan cannot prove absence, and treating "unknown" as "not found"
-// would commit a duplicate second copy of the fact.
+// would commit a duplicate second copy of the fact. The segment-list call fails
+// loud for the same reason — trusting the hint window alone can report "not
+// found" for an orphan that lives in another segment.
 func (s *FileSegmentStore) locateOrphanEvtSlot(pid int, hintWindow int64, key int64) (int64, int, bool, error) {
 	candidates := map[int64]bool{hintWindow: true}
 	ws, err := s.ListSegments(pid)
 	if err != nil {
-		// fail-loud, symmetric with the inner KVScan below: silently trusting
-		// the hint window alone can report "not found" for an orphan that lives
-		// in another segment.
 		return 0, 0, false, fmt.Errorf("orphan-evt segment list failed pid=%d: %w", pid, err)
 	}
 	for _, w := range ws {

@@ -207,6 +207,9 @@ func (in *Inbox) ClaimNext() (*Envelope, string, error)
     ClaimNext returns the OLDEST pending envelope (lexicographic seq = enqueue
     order), atomically marking it claimed. The file is NOT deleted: a crash
     after claim replays it. Returns (nil, "", nil) when the inbox is drained.
+    The closed check runs twice, symmetric with Enqueue: Close publishes
+    closed=true inside the same lock the lock-free fast check raced against,
+    so a claim that passed the fast check must still refuse on a closed inbox.
 
 func (in *Inbox) Close() error
     Close refuses further use; on-disk items are intentionally left intact

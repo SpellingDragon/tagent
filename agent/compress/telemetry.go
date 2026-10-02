@@ -37,7 +37,9 @@ const settleNoticeBodyPrefix = "[task settled"
 // disposition map. store may be nil (pure structural mode: the authoritative
 // mark cannot be verified, candidates are treated as notices but externalization
 // is undecidable → internal, conservative per the unknown-withhold
-// philosophy). keepRecent bounds the internal reminder window.
+// philosophy). keepRecent bounds the internal reminder window. A candidate
+// whose event carries no settle_notice mark (forged body, or an event written
+// before the mark existed) is never fold-eligible and stays verbatim.
 func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs []memory.EventReference, keepRecent int) map[int64]int8 {
 	out := map[int64]int8{}
 	for i, ref := range refs {
@@ -46,7 +48,7 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
 		}
 		evt := lookupNoticeEvent(store, ref)
 		if evt != nil && !isMarkedSettleNotice(evt) {
-			continue // no authoritative mark (forged body or pre-mark legacy event): never a fold candidate, kept verbatim
+			continue
 		}
 		consumer := -1
 		outputsAfter := 0

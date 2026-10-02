@@ -106,7 +106,9 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
     authoritative mark cannot be verified, candidates are treated as notices
     but externalization is undecidable → internal, conservative per the
     unknown-withhold philosophy). keepRecent bounds the internal reminder
-    window.
+    window. A candidate whose event carries no settle_notice mark (forged body,
+    or an event written before the mark existed) is never fold-eligible and
+    stays verbatim.
 
 
 TYPES

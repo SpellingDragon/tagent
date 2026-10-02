@@ -11,9 +11,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// Spawn-parameter keys for the declarative round-trip = ActionArgs 的 spawn
-// 字段全集（session-op 字段 Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID 非
-// spawn 参数，排除；Command 单列）。
+// pTimeout et al. are the spawn-parameter keys for the declarative
+// round-trip — the full ActionArgs spawn field set (session-op fields
+// Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID are not spawn parameters and are
+// excluded; Command is handled separately).
 const (
 	pTimeout    = "timeout"
 	pTTL        = "ttl"
@@ -179,10 +180,6 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(co
 			ct.removeResidentMeta(sessionID)
 		})
 		detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
-		// D-P2-4: this round's detector must own the state-change supply —
-		// without the rebind, monitor transitions keep feeding the previous
-		// generation's detector (or nothing) and settle/ExitCode never reach
-		// the detector the task manager polls.
 		ct.tmuxMonitor.RebindCallback(sessionID, func(_ string, _, newStatus SessionStatus, output string) {
 			detector.OnWatchOutput(output)
 			detector.OnStateChange(newStatus, output)

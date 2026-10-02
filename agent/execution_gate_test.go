@@ -118,9 +118,9 @@ func TestExecutionGate_IteratorLazilyConsumesNotice(t *testing.T) {
 	require.Equal(t, "[recovery] lazy one-shot", got[len(got)-1].Content, "notice injected at actual iteration")
 }
 
-// TestExecutionGate_BlocksUnverifiedOnIterator 钉住 (A) for the iterator path: an unverified credential blocks the
-// model call AND surfaces the block as one error response — a silent zero-output stream would
-// be reduced as a completed turn and ack the durable input (see persistent-event-loop 模型入口错误极性).
+// TestExecutionGate_BlocksUnverifiedOnIterator 钉住 iterator 路径的模型入口错误极性。
+// - 未核验凭据既 block 模型调用，又把 block 外显为一个 error response。
+// - 静默零输出流会被当作 completed turn 收敛并 ack 掉持久输入。
 func TestExecutionGate_BlocksUnverifiedOnIterator(t *testing.T) {
 	g, inner, _ := newGate(t)
 	cred := &plugin.EchoCredential{MergedMessage: "hi"}

@@ -64,8 +64,9 @@ type LocalFileKV struct {
 
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error)
     NewLocalFileKV opens (creating if needed) the directory and loads every
-    per-partition snapshot (kv-*.json) found there. The legacy single kv.json is
-    NOT loaded or migrated — cold rebuild is the declared stance.
+    per-partition snapshot (kv-*.json) found there. The single-file kv.json is
+    NOT loaded or migrated — cold rebuild is the declared stance. Interrupted
+    syncs leave *.json.tmp behind; open clears that crash residue.
 
 func (k *LocalFileKV) Close() error
     Close persists any pending changes so every acknowledged write is on disk

@@ -1,5 +1,6 @@
-// 本文件钉住 批量折叠的产生侧分流：有 delegation 归属的退役结算不进批汇总，走 per-task
-// 路由路径；无归属条目折叠行为不变。
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
+//
+// 批量折叠的产生侧分流：有 delegation 归属的退役结算不进批汇总、走 per-task 路由；无归属条目折叠行为不变。
 package task
 
 import (
@@ -10,9 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBatchRetire_AttributedEntryEscapesBatch 钉住 同一波孤儿退役里，带
-// invocation 归属的条目必须绕过批折叠、按 per-task OnSettle 交付（父循环的投递
-// 记账屏障靠它递减），无归属条目才进汇总（汇总只发共享总线，父循环永远等不到）。
+// TestBatchRetire_AttributedEntryEscapesBatch 钉住同波退役按归属分流。
+// - 带 invocation 归属的条目绕过批折叠，按 per-task OnSettle 交付（父循环投递记账屏障靠它递减）。
+// - 无归属条目才进汇总；汇总只发共享总线，父循环等不到。
 func TestBatchRetire_AttributedEntryEscapesBatch(t *testing.T) {
 	var mu sync.Mutex
 	var batch []BatchRetired
@@ -49,8 +50,8 @@ func TestBatchRetire_AttributedEntryEscapesBatch(t *testing.T) {
 	require.Equal(t, LineageRetired, sig.Lineage, "the routed retire settle still carries the retirement lineage")
 }
 
-// TestBatchRetire_UnattributedWaveStillCollapses 钉住 无归属条目行为不变：整波
-// 退役全部进一次批汇总，per-task OnSettle 保持静默。
+// TestBatchRetire_UnattributedWaveStillCollapses 钉住无归属条目行为不变。
+// - 整波退役全部进一次批汇总，per-task OnSettle 保持静默。
 func TestBatchRetire_UnattributedWaveStillCollapses(t *testing.T) {
 	var mu sync.Mutex
 	var batch []BatchRetired

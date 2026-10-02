@@ -58,6 +58,9 @@ func (m *SwappableModel) Swap(inner model.Model) {
 
 // sweepRetired closes retired models when no in-flight lease remains and the
 // model is not the current inner (A→B→A keeps the reselected instance alive).
+// current is read under the write lock: a Swap landing between an early
+// snapshot and this loop could otherwise Close a model that just became the
+// live inner again.
 func (m *SwappableModel) sweepRetired() {
 	if m.inFlight.Load() != 0 {
 		return
@@ -68,9 +71,6 @@ func (m *SwappableModel) sweepRetired() {
 	if m.inFlight.Load() != 0 {
 		return
 	}
-	// current is read UNDER the write lock: a Swap landing between an early
-	// snapshot and this loop could otherwise Close a model that just became
-	// the live inner again (A→B→A).
 	current := m.inner
 	keep := m.retired[:0]
 	for _, old := range m.retired {

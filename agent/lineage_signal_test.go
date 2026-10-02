@@ -1,5 +1,6 @@
-// 本文件钉住 结算事件谱系取值优先级：信号级 Lineage > spawn 时 Origin；Origin 不因
-// 退役被污染，resume 后的结算谱系保持原值。
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
+//
+// 结算事件谱系取值优先级：信号级 Lineage > spawn 时 Origin；Origin 不因退役被改写。
 package agent
 
 import (
@@ -10,10 +11,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestResumeSettleKeepsOriginalLineage 钉住 退役结算只在信号上盖谱系：修前
-// finalizeRetired 把 "task-retired" 写进 Spec.Origin，resume 后同一任务的再次
-// 结算事件继承被污染的谱系且永不恢复。修后 Origin 保持 spawn 原值，事件取值
-// 信号优先、无信号回落 Origin。
+// TestResumeSettleKeepsOriginalLineage 钉住谱系取值优先级与 Origin 不可变性。
+// - 退役结算只在信号上盖谱系；Spec.Origin 保持 spawn 原值，resume 后的结算继承原值。
+// - 事件取值：信号优先，无信号回落 Origin。
 func TestResumeSettleKeepsOriginalLineage(t *testing.T) {
 	tk := &task.Task{Spec: task.TaskSpec{
 		Kind: "command", Desc: "job",

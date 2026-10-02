@@ -82,9 +82,9 @@ func TestDeliverTaskSettledDecision(t *testing.T) {
 	require.NotContains(t, drainIDs(bus), "s1", "routed settle must NOT also hit the shared bus")
 }
 
-// TestDrainSettleBusTo 钉住 循环退出终态排空：unbind 之前窗口内 route() 已发布到调用总线、
-// 却没有消费者剩下的 settle，必须被转发到共享总线而非静默丢弃——registry 注释承诺的
-// "safe drop" 只有在回落总线上真的可见时才成立。nil 任一侧安全、空总线无副作用。
+// TestDrainSettleBusTo 钉住循环退出时的终态排空。
+// - unbind 之前窗口内 route() 已发布到调用总线、却无消费者剩下的 settle，必须转发到共享总线而非静默丢弃。
+// - "safe drop" 只有在回落总线上真的可见时才成立；nil 任一侧安全、空总线无副作用。
 func TestDrainSettleBusTo(t *testing.T) {
 	inv := NewEventBus()
 	shared := NewEventBus()

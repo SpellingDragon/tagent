@@ -133,9 +133,8 @@ func TestLocalFileKV_Persistence(t *testing.T) {
 	require.NoError(t, kv1.Sync())
 	require.NoError(t, kv1.Close())
 
-	//  布局：非分区命名空间的键落 kv-global.json，逐桶一个快照文件。
 	_, snapErr := os.Stat(filepath.Join(dir, "kv-global.json"))
-	require.NoError(t, snapErr, "the global bucket snapshot must exist after Close")
+	require.NoError(t, snapErr, "non-partition namespaces land in kv-global.json, one snapshot file per bucket")
 	_, legacyErr := os.Stat(filepath.Join(dir, "kv.json"))
 	require.True(t, os.IsNotExist(legacyErr), "the legacy single kv.json layout must not reappear")
 

@@ -1033,6 +1033,12 @@ func (tm *TaskManager) Get(id string) (*Task, bool) {
 // lock, then retires the task failed ONCE through finalizeRetired (SettleFailed),
 // so it leaves the board. finalize's terminal fence makes concurrent/repeat
 // reconciliation a no-op — no double settlement.
+// Silent-leak block: a restored task carries no detector, so TTL retirement
+// has no Cancel entry into its backing session (a tmux window keeps running
+// with nobody reaping it). The warning rides the retire settle's OWN output —
+// one observable event per victim, batch collapse stays exclusive (no extra
+// per-task notify through the collect mode), and session-level reclaim itself
+// stays future work.
 func (tm *TaskManager) reconcileTTL() {
 	tm.mu.Lock()
 	var victims []*Task
@@ -1062,13 +1068,6 @@ func (tm *TaskManager) reconcileTTL() {
 		if det := detectors[i]; det != nil {
 			det.Cancel()
 		} else {
-			//  Silent-leak block: a restored (previous-life) task carries no
-			// detector, so TTL retirement has no Cancel entry into its backing
-			// session (a tmux window keeps running with nobody reaping it).
-			// The warning rides the retire settle's OWN output — one observable
-			// event per victim, batch collapse stays exclusive (no extra
-			// per-task notify through the collect mode), and session-level
-			// reclaim itself stays future work.
 			t.mu.Lock()
 			taskID := ""
 			if t.Spec.Declarative != nil {
@@ -1195,10 +1194,11 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 	}
 }
 
+// finalizeRetired settles a retired task. Retirement attributes on the SIGNAL
+// (LineageRetired), never on Spec.Origin: Origin is the spawn-time provenance
+// identity and stays immutable, so a resumed task's later settles keep their
+// original lineage and lock-free readers race with nothing.
 func (tm *TaskManager) finalizeRetired(t *Task, output string, err error) {
-	// Retirement attributes on the SIGNAL, never on Spec.Origin: Origin is the
-	// spawn-time provenance identity; writing it here raced concurrent readers
-	// and permanently poisoned a resumed task's later settles.
 	tm.finalizeWithSignal(t, SettleSignal{Kind: SettleFailed, Output: output, Err: err, Lineage: LineageRetired})
 }
 
@@ -1206,6 +1206,12 @@ func (tm *TaskManager) finalize(t *Task, kind SettleKind, output string, err err
 	tm.finalizeWithSignal(t, SettleSignal{Kind: kind, Output: output, Err: err})
 }
 
+// finalizeWithSignal is the production-side split point: a retire of a task
+// attributed to a delegation invocation must NOT collapse into the batch
+// summary — the summary is published to the shared bus only, so the owning
+// invocation loop would never see its settle and the delivery-accounting
+// barrier could never reach quiescence. Attributed settles keep the per-task
+// onSettle path (which routes onto the bound invocation bus).
 func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 	t.mu.Lock()
 	if isTerminalStatus(t.status) {
@@ -1228,13 +1234,6 @@ func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 		}
 	}
 	t.mu.Unlock()
-	// : production-side split. A retire of a task attributed to a delegation
-	// invocation must NOT be collapsed into the batch summary: the summary is
-	// published to the shared bus only, so the owning invocation loop would
-	// never see its settle and the delivery-accounting barrier could never
-	// reach quiescence. Attributed settles keep the per-task onSettle path
-	// (which routes onto the bound invocation bus). Spec.Origin is immutable
-	// after spawn (), so this lock-free read races with nothing.
 	tm.mu.Lock()
 	if tm.batchCollect != nil && t.Spec.Origin[originKeyInvocationID] == "" {
 		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: sig})

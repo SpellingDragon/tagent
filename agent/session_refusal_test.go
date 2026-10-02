@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/execution-generations.md#lease-holds-reference
 package agent
 
 import (
@@ -9,9 +10,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// TestSubagentRun_RefusalLeaksNoLiveCM 钉住 委托被拒（owner 代已收敛关闭）时，invocation 私有 CM
-// 既不注册也不悬挂：早先版本在租约检查之前就 registerLiveCM，拒绝分支没有配对的清理
-// goroutine，liveCMs 永久残留、owner 义务永不归零、退役排水被卡死且每次拒绝叠加一条。
+// TestSubagentRun_RefusalLeaksNoLiveCM 钉住委托被拒时私有 CM 既不注册也不悬挂。
+// - 拒绝分支直接 Close，不经 registerLiveCM：liveCMs 保持零，owner 义务能归零，退役排水不被卡死。
 func TestSubagentRun_RefusalLeaksNoLiveCM(t *testing.T) {
 	ta, err := NewTagentAgent(&TagentConfig{
 		Model:        newRecordableMockModel(gateOKResp()),
@@ -20,7 +20,6 @@ func TestSubagentRun_RefusalLeaksNoLiveCM(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Terminal owner generation: every new delegation must be refused.
 	require.NoError(t, ta.contextManager.Close())
 
 	inv := trpcagent.NewInvocation(

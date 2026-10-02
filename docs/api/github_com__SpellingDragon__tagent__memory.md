@@ -864,6 +864,13 @@ func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (
     publication) completed, and public StoreEvent now REFUSES an existing key so
     it can never complete an orphan anyway.
 
+    Key releases are booked strictly behind the durable rewrite: the spill
+    list on disk still carries the replayed originals until the rewrite lands,
+    so releasing earlier would make the next round's AlreadyCommitted replay a
+    double release decrementing other holders' leases. On rewrite failure all
+    keys stay held and the retry releases exactly once when removal finally
+    lands.
+
 func (s *MemSpill) SetGuard(g RetentionGuard)
     SetGuard 注入 保留租约守卫（nil = 不保护）。由持有本 spill 的装饰器从其后端取得。
 

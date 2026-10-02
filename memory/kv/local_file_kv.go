@@ -44,9 +44,11 @@ import (
 // migrated: a pre-release library cold-rebuilds (the change's declared
 // stance). A leftover kv.json is ignored and reported once at open.
 type LocalFileKV struct {
-	mu      sync.Mutex
-	parts   map[int]map[string]string // partition buckets keyed by namespace pid
-	global  map[string]string         // non-partition namespaces (`global:*`, …)
+	mu sync.Mutex
+	// parts holds partition buckets keyed by namespace pid; global holds the
+	// non-partition namespaces (`global:*`, …).
+	parts   map[int]map[string]string
+	global  map[string]string
 	dataDir string
 	// dirtyPids holds partition labels with unsynced changes; the ok-valued
 	// map distinguishes "touched" from "empty after deletes" (delete file).
@@ -78,8 +80,9 @@ const (
 func kvFileName(label string) string { return kvFilePrefix + label + kvFileSuffix }
 
 // NewLocalFileKV opens (creating if needed) the directory and loads every
-// per-partition snapshot (kv-*.json) found there. The legacy single kv.json is
-// NOT loaded or migrated — cold rebuild is the declared stance.
+// per-partition snapshot (kv-*.json) found there. The single-file kv.json is
+// NOT loaded or migrated — cold rebuild is the declared stance. Interrupted
+// syncs leave *.json.tmp behind; open clears that crash residue.
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create kv data dir %s: %w", dataDir, err)
@@ -90,7 +93,6 @@ func NewLocalFileKV(dataDir string) (*LocalFileKV, error) {
 		dataDir:   dataDir,
 		dirtyPids: make(map[string]bool),
 	}
-	// Clear crash residue: interrupted syncs leave *.json.tmp behind.
 	tmps, err := filepath.Glob(filepath.Join(dataDir, kvFilePrefix+"*"+kvTmpSuffix))
 	if err != nil {
 		return nil, fmt.Errorf("scan kv tmp files: %w", err)
@@ -166,7 +168,10 @@ func (k *LocalFileKV) Close() error {
 // for the buckets that landed. A failed bucket keeps its dirty flag so the
 // next barrier retries it (per-bucket isolation of the write amplification is
 // the point of the partition layout — a failure in one partition's snapshot
-// must not re-commit, or drop, another partition's pending state).
+// must not re-commit, or drop, another partition's pending state). A partition
+// ceases to exist once its last key is deleted AND the removal landed: the
+// empty in-memory bucket is dropped too, so ListPartitionIDs and the on-disk
+// layout agree.
 func (k *LocalFileKV) flushLocked() error {
 	if len(k.dirtyPids) == 0 {
 		return nil
@@ -182,9 +187,6 @@ func (k *LocalFileKV) flushLocked() error {
 				}
 				continue
 			}
-			// The partition no longer exists at all once its last key is
-			// deleted AND the removal landed: drop the empty in-memory bucket
-			// too, so ListPartitionIDs and the on-disk layout agree.
 			k.dropEmptyBucket(label)
 			delete(k.dirtyPids, label)
 			continue

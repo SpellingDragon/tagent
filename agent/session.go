@@ -32,6 +32,12 @@ import (
 //     inv.RunOptions.RuntimeState["external_context"] 内是序列化的 ExternalContextEntry JSON；
 //  2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用，
 //     保持单槽交收语义。
+//
+// 生命周期不变量：
+//   - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理
+//     goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
+//   - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内
+//     落地的 settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)
@@ -116,11 +122,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invLease = ta.contextManager.AcquireLease(LeaseSubCall)
 	}
 	if err := invLease.Err(); err != nil {
-		// Refusal happens before this invocation ever counts as live: close the
-		// private CM and leave it unregistered. Registering it here (as an
-		// earlier revision did) leaked the entry permanently — the cleanup
-		// goroutine below never runs, so LiveCMCount stayed non-zero, owner
-		// Obligations never reached zero and retirement drain hung.
 		invCM.Close()
 		return nil, fmt.Errorf("subagent %q invocation refused: %w", ta.name, err)
 	}
@@ -137,9 +138,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			invID = inv.InvocationID
 		}
 		ta.bindSettleBus(invID, invBus)
-		// Deferred BEFORE unbind (runs AFTER it under LIFO): the terminal drain
-		// forwards settles that landed during the loop-exit-to-unbind window to
-		// the shared bus, closing the window route()'s comment promises.
 		defer drainSettleBusTo(invBus, ta.persistentBus)
 		defer ta.unbindSettleBus(invID)
 		firstCtx := withInvocationID(ctx, invID)

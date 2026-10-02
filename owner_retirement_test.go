@@ -1025,7 +1025,7 @@ func (m *drillModel) Info() model.Info { return model.Info{Name: "drill-model"} 
 // ledger matches the post-removal disk, which is the point of a unit reset.
 //
 // Removal covers the exact managed layout only: the per-partition kv-*.json
-// snapshots ( + legacy kv.json shapes) and their tmp residue
+// snapshots (plus the single-file kv.json shape) and their tmp residue
 // for the store unit; envelope-style tmps live under the inbox unit and are matched
 // there by pattern.
 func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, confirm bool) ([]string, error) {
@@ -1218,7 +1218,7 @@ func TestDrill_ManagedRootResetBootChild(t *testing.T) {
 }
 
 // kvSnapshotsIn lists the KV store unit's snapshot files (partition layout:
-// kv-<label>.json; legacy single kv.json counted for the ZERO-change proof).
+// kv-<label>.json; the single-file kv.json is counted for the ZERO-change proof).
 func kvSnapshotsIn(storeDir string) []string {
 	partitions, _ := filepath.Glob(filepath.Join(storeDir, "kv-*.json"))
 	legacy, _ := filepath.Glob(filepath.Join(storeDir, "kv.json"))

@@ -462,6 +462,9 @@ func (in *Inbox) Enqueue(env *Envelope) (int64, error) {
 // ClaimNext returns the OLDEST pending envelope (lexicographic seq = enqueue
 // order), atomically marking it claimed. The file is NOT deleted: a crash
 // after claim replays it. Returns (nil, "", nil) when the inbox is drained.
+// The closed check runs twice, symmetric with Enqueue: Close publishes
+// closed=true inside the same lock the lock-free fast check raced against, so
+// a claim that passed the fast check must still refuse on a closed inbox.
 func (in *Inbox) ClaimNext() (*Envelope, string, error) {
 	select {
 	case <-in.dead:
@@ -470,10 +473,6 @@ func (in *Inbox) ClaimNext() (*Envelope, string, error) {
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	// Re-check under the lock, symmetric with Enqueue: Close publishes
-	// closed=true inside the same lock the fast check raced against, so a
-	// claim that passed the lock-free check must still refuse to hand out a
-	// new claim on a closed inbox.
 	if in.closed {
 		return nil, "", fmt.Errorf("reliability: inbox closed")
 	}
