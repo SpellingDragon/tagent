@@ -26,7 +26,7 @@
 - [x] 3.4 tool/action 改名批:`action_test.go` →②改名 `action_tool_test.go`(映射表登记旧→新,同步脚本/文档引用);`tui_integration_test.go` 属 tag 异组、预期不在册,核对后记入对账说明;N=1
 - [x] 3.5 rl 批之一:`auth_test.go` 工况→①并入 `http_api_test.go`;N=1
 - [x] 3.6 rl 批之二:`http_api_closeout_test.go` 工况→①并入 `http_api_test.go`;N=1
-- [ ] 3.7 memory 批之一:`compaction_safety_test.go` →①并入 `compaction_test.go`;N=1
+- [x] 3.7 memory 批之一:`compaction_safety_test.go` →①并入 `compaction_test.go`;N=1
 - [ ] 3.8 memory 批之二:`error_tracking_engine_test.go` →①并入 `error_tracking_test.go`;N=1
 - [ ] 3.9 memory 批之三:`mem_spill_notify_test.go` →①并入 `mem_spill_test.go`;N=1
 - [ ] 3.10 memory 批之四(B 型,含文档侧):`segment_store_barrier_test.go`+`segment_store_recovery_test.go` →①并入 `segment_store_test.go` 子测试,同批③ `#tombstone` 锚上收族锚(wiki 小节调整或工况并入族锚);`gen_godoc.sh --check` 同批绿;N=2
