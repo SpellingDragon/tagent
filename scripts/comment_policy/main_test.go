@@ -825,7 +825,7 @@ func TestCoLocationIgnoresUndeclaredAnchors(t *testing.T) {
 	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)))
 }
 
-// TestCoLocationSeparatesCompilationUnits pins that the internal and the external test package of one directory never share a group: a body cannot cross them without requalification.
+// TestCoLocationSeparatesCompilationUnits pins that the internal and external test package of one directory never share a group.
 func TestCoLocationSeparatesCompilationUnits(t *testing.T) {
 	dir := t.TempDir()
 	colocWrite(t, dir, "internal_test.go", "// Package p.\n// 契约: docs/wiki/x.md#y\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n")

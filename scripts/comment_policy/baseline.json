@@ -4,7 +4,6 @@
   "dirs": [".","examples/wechat-bot"],
   "counts": {
     "missing-test-responsibility": 9,
-    "responsibility-fragmentation": 17,
-    "test-doc-line-too-long": 1
+    "responsibility-fragmentation": 17
   }
 }
