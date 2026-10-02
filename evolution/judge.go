@@ -1,3 +1,5 @@
+// 本文件承载评估结论四态与 LLM 评审的保守原则。
+// 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states
 package evolution
 
 import (

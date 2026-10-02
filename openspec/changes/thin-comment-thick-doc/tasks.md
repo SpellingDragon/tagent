@@ -14,7 +14,7 @@
 
 ## 3. P3 分域战役（每批独立提交；域序：小域练流程，热区压后）
 
-- [ ] 3.1 evolution 批（3 文件）：迁文→削薄→补指针；N=域内两规则 finding 消除数之和
+- [x] 3.1 evolution 批:三指针落位(#git-safety 裁决替兄弟锚 #test-facts,#verdict-states,#refine),0 削薄,基线 113→110
 - [ ] 3.2 tool 小域批（tool/spec 等约 6 文件）
 - [ ] 3.3 memory 批（11 文件，含 `LocalFileKV` 26 行削薄的迁文样本）
 - [ ] 3.4 根包批一（约 7 文件，含 `config.go:Config` 41 行——最大迁文对象，单独裁决落点）
