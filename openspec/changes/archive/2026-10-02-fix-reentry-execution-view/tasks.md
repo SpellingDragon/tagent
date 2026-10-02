@@ -15,4 +15,4 @@
 
 - [x] 3.1 红(20.03s) → 绿(0.42s)，反证被等待事件从不依赖任何 tick/TTL；根包 plain 58.3s / race 74.6s、`./agent/` plain 44.5s / race 83.7s、`./tests/` 全绿；lint ok（含 doc-refs/gen_godoc --check/proc-refs，注释门禁四度逮住本变更自写的 sloppy：`不再` audit-marker、doc-not-name-prefixed、free-standing、gofmt 规范化导致的 wrapped bullet 触发 doc-not-brief）
 - [ ] 3.2 **未达成，另案**：`GOMAXPROCS=1` 下 `TestRollbackOfHotAddNumericWithInFlightTurn` 仍烧满 20s（回滚 × 在途门控 × 通知轮，属另一条链路，修复前即如此，CI 的 2 核今日不复现）。不混改本变更，单独立项
-- [ ] 3.3 lint + gen_godoc --check + openspec strict 全绿；推送并确认 CI 四 job 绿
+- [x] 3.3 lint ok + `gen_godoc --check` 匹配 + `openspec validate --strict` valid + fail-before/fail-after 成对留痕 `fail-before.log`；tip `ba0ea82` CI 四 job 全绿（test/race/validators/openspec）
