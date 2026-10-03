@@ -118,7 +118,7 @@ func TestQuietTimeout_DefaultEquivalence(t *testing.T) {
 // TestQuietTimeout_NegativeRejectedByCall 钉住 调用入口必须在选择窗口之下（含负值）拒绝该参数，且发生在创建会话之前。
 // - 校验先于任何 tmux 交互，因此未注入执行器与监视器也能走这条负值分支。
 func TestQuietTimeout_NegativeRejectedByCall(t *testing.T) {
-	ct := &ActionTool{}
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 	if _, err := ct.Call(t.Context(), []byte(`{"command":"true","quiet_timeout":-5}`)); err == nil {
 		t.Fatalf("negative quiet_timeout accepted; want rejection")
 	}

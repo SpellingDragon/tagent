@@ -135,7 +135,7 @@ func TestCommandParsing(t *testing.T) {
 // TestBuildAckResult_NoPollingNudge 钉住 后台确认不得怂恿模型去轮询状态——那会诱发睡眠式空等。
 // - 必须保住"结果稍后写回"的诚实，并说明结束回合才是合法的等待方式。
 func TestBuildAckResult_NoPollingNudge(t *testing.T) {
-	ct := &ActionTool{}
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 
 	cases := []struct {
 		name string

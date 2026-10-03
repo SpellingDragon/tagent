@@ -12,7 +12,7 @@ import (
 // - Without a lifetime a restored long-running service would sit on the board forever, which is the behaviour this test guards.
 // - Records written before the ttl key existed fall back to the 10m floor rather than becoming immortal.
 func TestSpecFromDeclarativeRestoresTTL(t *testing.T) {
-	ct := &ActionTool{}
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 
 	t.Run("explicit ttl round-trips through the declarative projection", func(t *testing.T) {
 		decl := DeclarativeFromArgs(ActionArgs{Command: "sleep 999", TTL: 45}, "sess-1")

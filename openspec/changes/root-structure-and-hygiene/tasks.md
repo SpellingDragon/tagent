@@ -131,7 +131,10 @@
 
 ## 6. 执行期新增（本变更内发现，未在原计划）
 
-- [ ] 6.1 并行负载敏感测试族定性
+- [x] 6.1 负载敏感测试族定性并结案（根因见 D15）
+  - 定性：**测试编排缺陷**（跨包共享可写状态），非环境敏感、非产品缺陷。判据是失败时长稳定 32.1x s = 30s 轮询常量 + boot，饥饿会抖动
+  - 修复：`tool/action` 10 处测试私有目录化 + 删除整目录 `RemoveAll`；静态不变量 `TestResidentMetaDirHygiene`；wiki `#restart-takeover` 补共享状态判据
+  - 前后测量：完整 `go test ./... -short -count=1` 修复前 **3/5 红**（同一枚）、修复后 **5/5 绿**；`tool/action` 与根包单跑持续绿
   - 对象：`TestLiveSessionStaysWatchedAcrossToolGeneration`（全量并行 32.19s 超时 / 单包 12.8s 通过）与 `TestBuildFailure_UnconfirmedReclaimSealsWriter`（0.01s 断言红，见于无 C1 基线）
   - 做法：各以 `go test ./... -short -count=1` 累计 ≥10 轮采集出现率与首次失败包；对超时那枚定位其等待的谓词与并发争用点（同法：worktree 基线对照 + 变异/锚定检验）
   - 完成：每枚给出"产品缺陷 / 测试归因 / 环境敏感"三选一定性与证据，按结论决定修或另立案
