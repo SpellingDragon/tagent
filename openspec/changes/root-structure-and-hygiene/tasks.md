@@ -97,7 +97,7 @@
 
 ## 4. P4 巨型测试按域拆分
 
-- [ ] 4.1 按域锚切出可独立成域的块（recipe 依 D14 修正：同锚多文件必须各有精确生产镜像，故一域一文件、域锚全局唯一）
+- [~] 4.1 按域锚切出可独立成域的块（org_hotreload 族已完成，余两文件按 D14 表继续）（recipe 依 D14 修正：同锚多文件必须各有精确生产镜像，故一域一文件、域锚全局唯一）
   - 做法（org_hotreload_test.go 优先，其余两文件按 D14 表执行）：
     1. 新文件 `org_hotreload_fingerprint_test.go`：承载 8 个指纹域 test（`TestOrgFingerprint_*` 4 枚 + `TestMemoryFingerprint_*` + `TestModelRefAliasesFoldToStableFingerprint` + `TestFingerprintFold*` 2 枚）与专属 helper（`cfgFor`、`ownerYAMLWithModel`、`writeBumped`、`aliasYAML`、`writeCfg`），文件头**首行**即 `// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint`
     2. 新文件 `org_hotreload_timing_test.go`：`#trigger-timing` 域 4 枚 test + `buildPark`/`newBuildPark`/`waitEntered`/`letGo`/`disarm`/`acquireWithin`/`genOf` helper，头锚 `#trigger-timing`
@@ -106,6 +106,7 @@
   - 完成：`go test . -list ".*" -count=1 | wc -l` 前后**相等**（测试与 Benchmark 一个不少）；`go test . -count=1 -short` 绿；`bash scripts/lint.sh` 零 finding（含同位门）；主文件行数下降至 ~1100–1200
   - 边界：整函数搬运，**禁止**改动任何断言/预算/谓词/helper 实现（改动即越界，需 fail-before 另案）；新文件首个声明之前只允许 包注释+锚+`package`，避免更早的索引行被门的"首条锚"规则误读；不引入镜像改命名制（D14 裁决项）
   - 其余两文件：`org_candidate_test.go`、`cross_generation_test.go` 依 D14 表只做不冲突锚的切分（`#published-wrapper-immutable`、`#lease-holds-reference`、`#hot-source-pull-authority`、`#close-drain`、`#identical-apply`、`#config-clone`），同锚块留原位
+  - **org_hotreload 族已完成**（实测）：1716 → 主 883 + timing 180 + lockfree 112 + closed 62 + support 538；`#fingerprint` 域**放弃外迁**（该锚被无镜像的 org_candidate_test 占用，拆即撞门——被门挡住的拆分不是好拆分）；判据三条全中：`-list` 211→211 守恒、根包 short 57.3s 绿、lint ok 含同位门零 finding；`check_test_merge.sh HEAD .` ⇒ **1 package(s) intact**
 
 - [ ] 4.2 无损证明 + 同位门核对（前置：4.1）
   - 做法：对三个源文件分别跑 `bash scripts/check_test_merge.sh <拆分前基线ref> <源文件路径>`（基线 ref 用 C3 的提交号）；`bash scripts/lint.sh` 确认 responsibility-fragmentation 零 finding
