@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SpellingDragon/tagent/config"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -60,7 +61,7 @@ func populatedAgentConfig() AgentConfig {
 // Each entry states WHY; a new field is only acceptable here if it is
 // hot-applicable through its own contract or needs a restart.
 var fingerprintExcludedFields = map[string]string{
-	"memory":             "storage paths/backends cannot migrate at runtime — restart (pinned by the reloader's changedMemoryAgents/residentMemFP pre-check)",
+	"memory":             "storage paths/backends cannot migrate at runtime — restart (pinned by the reloader's config.ChangedMemoryAgents/residentMemFP pre-check)",
 	"max_tokens":         "hot-applicable via ApplyOrgHotParams (compressor budget)",
 	"compress_threshold": "hot-applicable via ApplyOrgHotParams (compressor threshold)",
 	"keep_recent_tasks":  "hot-applicable via ApplyOrgHotParams",
@@ -182,7 +183,7 @@ func TestConfigClone_IsPrivateAndFingerprintNeutral(t *testing.T) {
 	fp, err := computeOrgFingerprint(&cfg)
 	require.NoError(t, err)
 	mc := cfg.Agents["main"]
-	mfp := agentMemoryFingerprint(&mc)
+	mfp := config.AgentMemoryFingerprint(&mc)
 
 	clone, err := cfg.Clone()
 	require.NoError(t, err)
@@ -192,7 +193,7 @@ func TestConfigClone_IsPrivateAndFingerprintNeutral(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fp, clonedFP, "clone must be fingerprint-neutral")
 	cmc := clone.Agents["main"]
-	clonedMemFP := agentMemoryFingerprint(&cmc)
+	clonedMemFP := config.AgentMemoryFingerprint(&cmc)
 	require.Equal(t, mfp, clonedMemFP, "clone must be memory-fingerprint-neutral")
 	require.Equal(t, cfg.ConfigPath, clone.ConfigPath, "json:\"-\" field must survive the clone")
 

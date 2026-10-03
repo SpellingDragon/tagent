@@ -56,19 +56,22 @@
 
 ### C2 纯查询随迁 + 分层立法修订
 
-- [ ] 3.4 partition_collision 四查询迁 config 包
+- [x] 3.4 四查询迁 `config/queries.go` 并导出（`AgentMemoryFingerprint`/`ChangedMemoryAgents`/`ReachableAgents`/`RemoteDeclarationOnly`，doc 内 `ToolRef.isRemoteRef` 措辞同步为 `IsRemoteRef`）；`partition_collision.go` 收缩为注册表文件（连带去掉失去理由的 `var _ = agent.TagentAgent{}` 与 agent import、四个失效 import）；根侧 6+2 处调用点与 2 个测试文件限定化；**判据达成**：`grep` 旧名零命中、`go test ./config/ .` 绿
   - 对象：`partition_collision.go` 中四个以 `*Config`/`*AgentConfig` 为参的纯函数：`agentMemoryFingerprint`、`changedMemoryAgents`、`reachableAgents`、`remoteDeclarationOnly`
   - 做法：`git mv` 不可用（同文件拆分）——剪切四函数（连同各自 doc）入新文件 `config/queries.go`（文件头加 `契约: docs/wiki/platform/platform-subsystems.md#config-surface`），导出为首字母大写（`AgentMemoryFingerprint` 等）；根包调用点（`org_hotreload.go`、`org_candidate_overlay.go`、`build_agent.go` 中 grep 四个旧名可得全部位置）改为 `config.` 前缀；`partition_collision.go` 只剩注册表三方法与 `var _ = agent.TagentAgent{}`——若该哑变量失去存在理由一并清理
   - 完成：`go build ./...` + `go vet ./...` + `go test ./config/ . -count=1 -short` 全绿；`grep -rn "agentMemoryFingerprint\|changedMemoryAgents\|reachableAgents\|remoteDeclarationOnly" *.go` 零命中（根包无残留旧名）
   - 边界：函数体逻辑零改动（纯移动+改名）；`runtimeConfig` 的三个注册表方法不动（它们属 C3 的接口化，不属本任务）
 
-- [ ] 3.5 分层断言扩集 + 两法条措辞落位
+- [x] 3.5 `TestArch_LayeredDependencyDirection` 加两条（config 不回指 root；agent 主体不依赖 config）+ wiki §三 新增「顶层模块层与归属」表（根=config 的消费者+发布权所在；agent/org 行为**预告**，C3 落地后生效）
+  - 负路径自证的**任务假设被证伪并改法**：方向违规在 Go 里必成 import 循环 ⇒ 编译失败而非测试红，故无法用「临时加 import」构造违例。改证断言装置本身有效：把禁项临时改为 config 真实依赖的 `agent` ⇒ **FAIL(0.40s)**，恢复 ⇒ **PASS(1.02s)**，净差 7 行撤净
+  - 附带学到并记入 D13：`free-standing` 是**函数体内一律不留注释**（第 8 次同类，一行说明也被拦），解释文字的家是声明位 doc/断言消息/wiki
   - 对象：`guardrails_test.go` 的 `TestArch_LayeredDependencyDirection`；`openspec/changes/root-structure-and-hygiene/specs/architecture-guardrails/spec.md`（MODIFIED 两条已写好，无需再改）；`docs/wiki/agent/agent-architecture.md` 的 `#package-layout` 表
   - 做法：断言测试按其既有模式加两条——①config 及其子包 MUST NOT import 根包；②`agent/`（不含子包）MUST NOT import config，`agent/org`（C3 产物，尚不存在时先留 TODO 注释）例外。wiki package-layout 表补 `config/` 行与根包"发布权所在"注记
   - 完成：`go test . -run TestArch_LayeredDependencyDirection -count=1 -v` PASS 且新断言真实生效（临时在 config/config.go 加 `"github.com/SpellingDragon/tagent"` import 应使测试红——验完撤掉，输出留注记）
   - 边界：方向规则只增不减；负路径验证的临时 import 必须撤净（`git diff config/` 为空）
 
-- [ ] 3.6 C2 提交（前置：3.4、3.5）
+- [x] 3.6 C2 提交（显式 pathspec；验证墙：31 包 short 全 ok、`-race` 72.5s、`GOMAXPROCS=1` 59.4s、gen_godoc --check 38 包匹配、lint ok、openspec strict valid）
+  - 6.1 累计数据：完整 `./...` 并发下当前树 **2/4 红**（同一枚 32.17/32.19s），基线 `1478cb1` **0/3**；定向争用（`. ./tests ./agent` 三包并发）两侧 3+3 **全绿** ⇒ 复现需完整并发集，仍不下归因结论
   - 做法：与 3.3 同一面验证墙（含 `GOMAXPROCS=1` 与 `-race`），提交范围：`config/queries.go`、`partition_collision.go`、根包调用点、`guardrails_test.go`、wiki、docs/api
   - 完成：提交落库、工作树净
   - 边界：不混入 C3 改动

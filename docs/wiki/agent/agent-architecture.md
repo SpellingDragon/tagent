@@ -329,6 +329,17 @@ agent 包内 50 个文件按职责分五组，子域已独立成包（`task/` �
 | 冥想 | `meditation.go` 门控触发（novelty + idle）；`meditation_digest.go` digest 组装 |
 | 可选注入（经 TagentAgent setter） | 退化与可靠性注入经 `agent/reliability`；治理经 `govGate`；自进化经根包 |
 
+顶层模块的层与归属（大扫除第二阶段后）：
+
+| 模块 | 职责 | 依赖方向 |
+|---|---|---|
+| 根包 `tagent`（组合根） | 装配（build_agent/wiring/builtin/registry/resources/modelref/prompts）+ **编排发布权**（`org_hotreload.go` 的 orgCoordinator：换入/发布/告警）+ 面向消费者的入口 | root → config, agent, tool, … |
+| `config/`（配置模型层） | 编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影、纯查询（记忆段指纹、可达拓扑、仅远端声明判定）；根包以**别名再导出**保持 `tagent.*` 公共 API 源码级不变 | config → agent, prompt, tool, workspace；**MUST NOT 回指 root** |
+| `agent/`（引擎本体） | 事件循环、上下文管理、子 Agent 封装、冥想；主体不依赖 config（模型经 root 的别名与注入面进入装配） | agent → plugin → memory；不 import config |
+| `agent/org`（世代机制，第二阶段拆分包） | 退役账本、候选事务簿记、换壳 overlay——机制在此；**发布动作留根包**，两侧只经注入契约（壳构造回调、注册表接口、resident 句柄）协作 | agent/org → config, agent；MUST NOT import root |
+
+方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作为何必须留在根包：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——把 orgCoordinator 下放即违反该条，故世代**机制**可迁、**特权**留根。
+
 <a id="data-flow"></a>
 ## 四、数据流
 

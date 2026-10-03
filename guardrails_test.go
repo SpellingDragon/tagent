@@ -106,6 +106,9 @@ func TestArch_LayeredDependencyDirection(t *testing.T) {
 	delete(deps, "memory")
 	assertNoDeps(t, mod+"/plugin", deps, "agent", "tool", "rl", "evolution")
 
+	assertNoDeps(t, mod+"/config", internalDeps(t, mod+"/config"), ".")
+	assertNoDeps(t, mod+"/agent", internalDeps(t, mod+"/agent"), "config")
+
 	for _, pkg := range []string{mod + "/agent", mod + "/agent/task", mod + "/agent/compress", mod + "/agent/governance", mod + "/agent/reliability"} {
 		deps := internalDeps(t, pkg)
 		delete(deps, "event")

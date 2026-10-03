@@ -19,6 +19,47 @@ const (
 
 FUNCTIONS
 
+func AgentMemoryFingerprint(acfg *AgentConfig) string
+    AgentMemoryFingerprint hashes ONE agent's memory section (D7). The reloader
+    compares it across generations to decide whether a re-added name keeps
+    its original storage owner (same path/backend → reuse) or would open a
+    second writer on the same partition (changed → refuse the candidate).
+    Unmarshal-free by design: only the memory subtree participates. A marshal
+    failure returns the sentinel "unmarshal-error", which cannot equal any real
+    fingerprint, so a failure never silently matches another agent’s stored
+    value.
+
+func ChangedMemoryAgents(fresh *Config, ownerFP map[string]string, routable map[string]bool) []string
+    ChangedMemoryAgents returns the sorted names whose memory section differs
+    from the one their existing storage owner was built with.
+
+    - Judgment domain: existing owner intersect what the new generation will
+    actually route to; only those can migrate a live store. - Names absent
+    from fresh.Agents are excluded: route and definition are gone together,
+    no definition to compare. - Names defined but unreachable this generation
+    are excluded: refusing the whole reload over them would freeze orchestration
+    hot-reload for an object the new generation never constructs.
+
+func ReachableAgents(cfg *Config, entry string) map[string]bool
+    ReachableAgents: the set of agent names the entry actually pulls in via
+    tools references (transitively) — the true built topology, not the whole
+    Agents map (which may carry unreferenced definitions).
+
+func RemoteDeclarationOnly(next *Config, name string) bool
+    RemoteDeclarationOnly reports whether `name` is pulled in by `next` SOLELY
+    as a remote agent reference and has no local definition. Such a name's
+    declaration IS its definition: config validation accepts it through
+    ToolRef.IsRemoteRef (the single shared predicate — validation and build
+    domains read the same fact), and build_agent resolves its wrapper as a
+    remote target and builds NO executor for it. It therefore has no resident
+    owner to construct and no generation to publish, so the owner-building loops
+    must skip it rather than fail the whole publication closed.
+
+    Mixed reachability is deliberately refused: if any non-remote reference
+    also points at the name, that reference needs a real local owner, and a name
+    defined nowhere must still fail closed — the gate's original purpose stays
+    intact.
+
 func ResolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig
     ResolveLifecycleConfig merges the optional YAML lifecycle declaration over
     the built-in defaults. Nil or partially-set fields keep defaults; a negative

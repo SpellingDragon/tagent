@@ -9,6 +9,7 @@ package tagent
 import (
 	"errors"
 	"fmt"
+	"github.com/SpellingDragon/tagent/config"
 	"os"
 	"sort"
 	"sync"
@@ -314,7 +315,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	rc.residentMemFP = make(map[string]string, len(agentCache))
 	for n := range agentCache {
 		mc := cfg.Agents[n]
-		rc.residentMemFP[n] = agentMemoryFingerprint(&mc)
+		rc.residentMemFP[n] = config.AgentMemoryFingerprint(&mc)
 	}
 	for _, a := range agentCache {
 		a.SetResidentTable(rc.resident)
@@ -344,7 +345,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			publishedReach map[string]bool
 		)
 		coord := newOrgCoordinator()
-		publishedReach = reachableAgents(&cfg, cfg.Entry)
+		publishedReach = config.ReachableAgents(&cfg, cfg.Entry)
 		entryAgent.SetOrgDiagnostics(func() map[string]any {
 			st := coord.status()
 			payload := map[string]any{
@@ -435,7 +436,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		var appliedFromLastApply []appliedAgent
 		applyHotAll := func(freshCfg *Config) {
-			routable := reachableAgents(freshCfg, cfg.Entry)
+			routable := config.ReachableAgents(freshCfg, cfg.Entry)
 			receipts := make([]OrgAgentApply, 0, len(rc.resident.Names()))
 			appliedRecord := make([]appliedAgent, 0, len(rc.resident.Names()))
 			for aname, a := range rc.resident.Snapshot() {
@@ -507,7 +508,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				log.Warnf("[org-hotreload] rollback: previous generation is identical to current on both axes (fp %s.. + hot params) — nothing to restore", short(rbp))
 				return
 			}
-			rbReach := reachableAgents(rollbackC, cfg.Entry)
+			rbReach := config.ReachableAgents(rollbackC, cfg.Entry)
 			if blocked := retiring.closingIn(rbReach); len(blocked) > 0 {
 				log.Errorf("[org-hotreload] rollback re-routes %v while their retiring owner is already closing — RESTART required (rejected before any candidate build)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚将重路由 %v，但其退役中 owner 已开始关闭，须重启生效（本次未回滚）", blocked))
@@ -591,8 +592,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("entry identity changed %q -> %q: resident entry is not hot-migratable, restart required", cfg.Entry, fresh.Entry))
 				return
 			}
-			freshReach := reachableAgents(fresh, cfg.Entry)
-			if changed := changedMemoryAgents(fresh, rc.residentMemFP, freshReach); len(changed) > 0 {
+			freshReach := config.ReachableAgents(fresh, cfg.Entry)
+			if changed := config.ChangedMemoryAgents(fresh, rc.residentMemFP, freshReach); len(changed) > 0 {
 				log.Errorf("[org-hotreload] agents.*.memory CHANGED for owner-held agent(s) %v — runtime storage migration is not supported; RESTART required to apply", changed)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: agent %v 的 memory 段变更需重启迁移，本次未热更（须重启生效）", changed))
 				coord.recordFailure(fmt.Errorf("memory section changed for %v: restart required", changed))
@@ -774,7 +775,7 @@ func stageOrgGenerations(
 
 	owned := names[:0]
 	for _, n := range names {
-		if !remoteDeclarationOnly(next, n) {
+		if !config.RemoteDeclarationOnly(next, n) {
 			owned = append(owned, n)
 		}
 	}

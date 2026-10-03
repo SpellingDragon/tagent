@@ -2,6 +2,7 @@ package tagent
 
 import (
 	"fmt"
+	"github.com/SpellingDragon/tagent/config"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -95,27 +96,27 @@ func TestRemoteDeclarationOnlyKeepsTheGate(t *testing.T) {
 	onlyRemote := &Config{Entry: "a", Agents: map[string]AgentConfig{
 		"a": {Tools: []ToolRef{remoteRef}},
 	}}
-	require.True(t, remoteDeclarationOnly(onlyRemote, "ghost"),
+	require.True(t, config.RemoteDeclarationOnly(onlyRemote, "ghost"),
 		"a name reached solely as a remote reference has no owner to build")
 
 	mixed := &Config{Entry: "a", Agents: map[string]AgentConfig{
 		"a": {Tools: []ToolRef{remoteRef}},
 		"b": {Tools: []ToolRef{localRef}},
 	}}
-	require.False(t, remoteDeclarationOnly(mixed, "ghost"),
+	require.False(t, config.RemoteDeclarationOnly(mixed, "ghost"),
 		"a non-remote reference to the same name needs a real owner: the gate must still fail closed")
 
 	defined := &Config{Entry: "a", Agents: map[string]AgentConfig{
 		"a":     {Tools: []ToolRef{remoteRef}},
 		"ghost": {},
 	}}
-	require.False(t, remoteDeclarationOnly(defined, "ghost"),
+	require.False(t, config.RemoteDeclarationOnly(defined, "ghost"),
 		"a locally defined agent is never treated as declaration-only")
 
 	blankURL := &Config{Entry: "a", Agents: map[string]AgentConfig{
 		"a": {Tools: []ToolRef{{Kind: ToolKindAgent, AgentID: "ghost", Remote: &RemoteConfig{}}}},
 	}}
-	require.False(t, remoteDeclarationOnly(blankURL, "ghost"),
+	require.False(t, config.RemoteDeclarationOnly(blankURL, "ghost"),
 		"a remote block without a URL is the mismatch §5.44 refuses at validation — it must not be skipped here either")
 }
 

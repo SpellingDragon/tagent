@@ -3,6 +3,7 @@ package tagent
 
 import (
 	"fmt"
+	"github.com/SpellingDragon/tagent/config"
 	"sort"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -54,7 +55,7 @@ func buildCandidateOwners(
 	sort.Strings(newNames)
 
 	for _, aname := range newNames {
-		if remoteDeclarationOnly(next, aname) {
+		if config.RemoteDeclarationOnly(next, aname) {
 			continue
 		}
 		acfg, defined := next.Agents[aname]
@@ -75,7 +76,7 @@ func buildCandidateOwners(
 			ov.addedNames = append(ov.addedNames, n)
 			ov.txn.acquire(n, a)
 			mc := next.Agents[n]
-			rc.residentMemFP[n] = agentMemoryFingerprint(&mc)
+			rc.residentMemFP[n] = config.AgentMemoryFingerprint(&mc)
 		}
 		if berr != nil {
 			ov.txn.acquire(aname, nil)
