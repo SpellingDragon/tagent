@@ -703,6 +703,7 @@ agents:
 // - 断言只读该 agent 自己的真实消费者与宿主可见答复，不读指纹；
 // - 回滚环里的来源值必须回来，且它自始至终只有一个属主；
 // - 已在途的那次调用不得被回滚重发布拆掉。
+// - 在途窗口以 gate 的 park 观测直接钉住（告警轮可多枚且可合批，排空计数不可锚定）；
 // 契约: docs/wiki/platform/org-hot-reload.md#rollback
 func TestRollbackOfHotAddNumericWithInFlightTurn(t *testing.T) {
 	dir := t.TempDir()
@@ -743,19 +744,14 @@ func TestRollbackOfHotAddNumericWithInFlightTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "B parked mid-call", func() bool {
-		for _, s := range m.snapshot() {
-			if s.System == "SUB-B" {
-				return true
-			}
-		}
-		return false
+		return m.parkedNow("SUB-B") >= 1
 	})
 
 	entry.Rollback()
-	servedBefore := countServed(m.snapshot(), "SUB-B")
+	completedBase := countMainCompletedByB(m.snapshot())
 	disarmGate(bGate)
 	waitFor(t, "the in-flight B call completed", func() bool {
-		return countServed(m.snapshot(), "SUB-B") > servedBefore
+		return countMainCompletedByB(m.snapshot()) > completedBase
 	})
 
 	require.Equal(t, 2, ownerB.OrgKeepRecent(), "§2.4(b)：回滚把 B 自身的 keepRecent 恢复到环源值")
@@ -763,12 +759,31 @@ func TestRollbackOfHotAddNumericWithInFlightTurn(t *testing.T) {
 	require.Same(t, ownerB, residentCacheForTest(entry)[g24B],
 		"§2.4(b)：回滚推进执行面，不另造第二个 B owner（单一 owner＝实例与 store 身份不动）")
 
+	servedNow := countServed(m.snapshot(), "SUB-B")
 	if _, err := entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("after")); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "a post-rollback call is served", func() bool {
-		return countServed(m.snapshot(), "SUB-B") > servedBefore+1
+		return countServed(m.snapshot(), "SUB-B") > servedNow
 	})
+}
+
+// countMainCompletedByB counts MAIN records whose ToolResults already carry
+// B's answer — the host-visible completion edge of a MAIN→B delegation turn.
+func countMainCompletedByB(snaps []delegServed) int {
+	n := 0
+	for _, s := range snaps {
+		if s.System != "MAIN" {
+			continue
+		}
+		for _, r := range s.ToolResults {
+			if strings.Contains(r, "served:SUB-B") {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // diamondYAML routes main→{p1,p2} (or only p2), both to the SAME shared child

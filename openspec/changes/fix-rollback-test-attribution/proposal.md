@@ -8,10 +8,10 @@
 
 ## What Changes
 
-- 仅改该用例的编排与断言锚定（约 10 行）：armGate 前**排空告警轮**（等 MAIN 计数 +2）；`"parked"` 谓词与两处断言改为**锚定基线计数**；断言①改锚「第二条 MAIN record 且 `ToolResults` 含 `served:SUB-B`」——由**完成**而非**进入**满足，保持「回滚若拆掉在途调用即红」的敏感度。
+- 仅改该用例的编排与断言锚定，及 delegModel 的 park 观测（测试基建，产品零改动）：`"parked"` 谓词改为 delegModel 的 **park 直接观测**（`parkedNow("SUB-B") >= 1`——armGate 后被消费的任何轮的 B 调用必然 park，谓词必可达且零时序推理；弃排空与基线计数，两者均被实现期证伪，见 design D1/D1'）；断言①改锚 **MAIN 完成事件增量**（`ToolResults` 含 `served:SUB-B`，串行 loop 保证归属被 park 的 turn）——由**完成**而非**进入**满足，保持「回滚若拆掉在途调用即红」的敏感度；断言②维持计数增量（活性语义）。
 - `config-hot-reload` 的回滚需求补一个 scenario：回滚在途验收 MUST NOT 被告警轮劫持或替达标。
 
 ## Impact
 
 - Affected specs: `config-hot-reload`（MODIFIED：数值与结构共享完整有效配置回滚记录，+1 scenario）
-- Affected code: `org_candidate_test.go` 单文件；产品零改动
+- Affected code: `org_candidate_test.go`（用例编排）+ `delegation_test.go`（delegModel 附加 park 观测，约 15 行）；产品零改动

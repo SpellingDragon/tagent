@@ -64,6 +64,10 @@ type delegModel struct {
 	// gates parks a labeled agent's call until the test closes the channel — the
 	// handle on 「这个委派还在途」 that the cross-publication assertions need.
 	gates map[string]chan struct{}
+	// parked counts, per label, calls currently blocked on a gate — the direct
+	// "in flight right now" edge; records land before the gate check, so record
+	// counts cannot prove a call is parked.
+	parked map[string]int
 }
 
 type delegServed struct {
@@ -80,6 +84,32 @@ func (m *delegModel) gateFor(label string) chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.gates[label]
+}
+
+// parkEnter records that a call of `label` is now blocked on its gate.
+func (m *delegModel) parkEnter(label string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parked == nil {
+		m.parked = map[string]int{}
+	}
+	m.parked[label]++
+}
+
+// parkExit records that a parked call of `label` left its gate (released or
+// context-cancelled).
+func (m *delegModel) parkExit(label string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.parked[label]--
+}
+
+// parkedNow reports how many calls of `label` are blocked on gates at this
+// instant — the direct witness that an in-flight window is open.
+func (m *delegModel) parkedNow(label string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parked[label]
 }
 
 func (m *delegModel) recordLocked(s delegServed) {
@@ -155,9 +185,12 @@ func (m *delegModel) GenerateContent(ctx context.Context, req *model.Request) (<
 	m.mu.Unlock()
 
 	if g := m.gateFor(label); g != nil {
+		m.parkEnter(label)
 		select {
 		case <-g:
+			m.parkExit(label)
 		case <-ctx.Done():
+			m.parkExit(label)
 			return nil, ctx.Err()
 		}
 	}
