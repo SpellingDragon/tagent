@@ -1,6 +1,29 @@
 package org // import "github.com/SpellingDragon/tagent/agent/org"
 
+FUNCTIONS
+
+func LastDiscardOrder() ([]string, bool)
+    LastDiscardOrder returns the order a previous Discard unwound, or false when
+    nothing has been discarded yet. It exists because the cleanup contract is
+    otherwise unobservable; no production path reads it.
+
 TYPES
+
+type Deps struct {
+	// Resident is the published owner table the candidate reads and must not
+	// touch until its single commit point.
+	Resident *agent.ResidentTopology
+	// Builder constructs owners (assembly mode fixed by the root's closure).
+	Builder ShellBuilder
+	// SetFP records a name's memory-section fingerprint; DropFP resets one the
+	// candidate never published.
+	SetFP  func(name, fingerprint string)
+	DropFP func(name string)
+	// UnregisterOwner revokes a store-owner registration taken during a build.
+	UnregisterOwner func(name string)
+}
+    Deps is the injection surface of a candidate build: everything the mechanism
+    needs from the composition root, and nothing else.
 
 type Ledger struct {
 	// Has unexported fields.
@@ -91,6 +114,45 @@ func (l *Ledger) Track(name string, owner *agent.TagentAgent)
 func (l *Ledger) UsageHolders(name string) int
     UsageHolders answers the usage axis for one name, tolerating its absence.
 
+type Overlay struct {
+	// Has unexported fields.
+}
+    Overlay is the private construction domain of ONE candidate — the shape
+    reload established and rollback is required to share.
+
+    - Owners the online table lacks are built into the overlay cache, never into
+    the resident table, so no concurrent reader sees a not-yet-published owner.
+    - Each build or registration enters the ordered responsibility table
+    immediately, recorded before the error is checked, so a failed parent is
+    unwindable. - Commit merges at the caller's single commit point; Abandon
+    unwinds in reverse acquisition order whenever the candidate never publishes.
+
+func BuildOwners(d Deps, next *config.Config, reach map[string]bool, fail func(site string, err error)) (*Overlay, bool)
+    BuildOwners constructs every owner `reach` needs that is not resident yet
+    (hot-add for reload, re-acquisition of a retired owner for rollback — the
+    same operation on both entries). Fail-closed: on ok=false nothing was
+    published and everything acquired has already been unwound; the caller still
+    defers Abandon to cover its own later failures.
+
+func (o *Overlay) Abandon()
+    Abandon unwinds every responsibility the overlay took on, in reverse
+    acquisition order, and is idempotent. After Commit it is a no-op:
+    the published candidate owns those resources now, and tearing them down here
+    would pull them out from under live work.
+
+func (o *Overlay) Commit()
+    Commit merges the overlay into the resident table — the single point where a
+    new owner becomes visible to concurrent readers, which the caller performs
+    inside its own commit critical section.
+
+func (o *Overlay) PendingNames() []string
+    PendingNames reports the owners awaiting the commit point (logging only).
+
+func (o *Overlay) Resolve() map[string]*agent.TagentAgent
+    Resolve is this candidate's face-build domain: resident owners ∪ its own
+    new owners. Wrappers resolve through it, which is what keeps hot-adds
+    publishable and unchanged owners zero-construction.
+
 type RetireDecision struct {
 	Name    string
 	Retired bool
@@ -99,3 +161,44 @@ type RetireDecision struct {
 }
     RetireDecision is one sweep step's outcome for one name, returned for
     logging by the caller (which owns the reload's log prefix).
+
+type ShellBuilder func(name string, acfg config.AgentConfig, cfg config.Config, cache map[string]*agent.TagentAgent) (*agent.TagentAgent, error)
+    ShellBuilder constructs one resident owner on a candidate configuration.
+    The composition root supplies it as a closure that already knows its runtime
+    state and build mode, so the mechanism here never reaches into assembly
+    internals.
+
+type Txn struct {
+	// Has unexported fields.
+}
+    Txn is the ordered responsibility table of ONE candidate (S-B/2.3「事务」):
+    every resource acquisition, owner registration and agent construction is
+    recorded IMMEDIATELY — before the error is checked, so a failed parent
+    is still unwindable — and earlier than the next fallible action. Discard
+    unwinds in REVERSE acquisition order (partial registration revoked → built
+    agent Closed → fingerprint reset), and that order comes from the recorded
+    evidence rather than any difference over owned names or map iteration order.
+    Reload and rollback share this structure.
+
+func NewTxn(dropFP func(name string), unregisterOwner func(name string)) *Txn
+    NewTxn builds an empty responsibility table. dropFP resets a name's memory
+    fingerprint and unregisterOwner revokes its store-owner registration;
+    both are supplied by the composition root, which owns the books they touch.
+
+func (tx *Txn) Acquire(name string, a *agent.TagentAgent)
+    Acquire records a responsibility the candidate has taken on: a fully built
+    agent (a != nil) or a partial owner registration whose build failed midway
+    (a == nil — its store lease was already released by the builder's own
+    cleanup, so discard only revokes the registration). Idempotent per name:
+    a dependency acquired by an earlier top is not re-recorded.
+
+func (tx *Txn) Discard() []string
+    Discard unwinds every responsibility in REVERSE acquisition order and
+    returns that order (also recorded into the discard-order witness). Per item:
+    the store-owner registration is revoked, the memory fingerprint is reset,
+    and a built agent is Closed (its own Close releases the store lease;
+    a partial registration has no lease left to release). Each entry revokes
+    its registration whether or not an agent was built — a leftover entry
+    could later refuse an unrelated agent that recycled the same heap address,
+    reported as a partition collision. The published online face is never
+    touched: discard only ever runs before the single commit point.

@@ -1,6 +1,8 @@
 package tagent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/org"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -547,7 +549,7 @@ func TestTxn_RefusedCandidateLeavesNoOwnerOrTableResidue(t *testing.T) {
 // orgLastDiscardOrder returns the most recent candidate-discard order (TEST
 // introspection only; nil before the first discard).
 func orgLastDiscardOrder() []string {
-	if v, ok := lastDiscardOrder.Load().([]string); ok {
+	if v, ok := org.LastDiscardOrder(); ok {
 		return v
 	}
 	return nil

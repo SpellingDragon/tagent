@@ -78,9 +78,10 @@
 
 ### C3 世代机制外迁 agent/org
 
-- [~] 3.7 三件迁移 + 注入契约落地（**拆两步提交**，降单批风险）
+- [x] 3.7 三件迁移 + 注入契约落地（**拆两步提交**，降单批风险）
   - [x] 步骤 1 · `owner_retirement.go` → `agent/org/retirement.go`：`Ledger`/`NewLedger`/`RetireDecision` + 11 方法导出；根侧 9 个调用点限定化，旧名零残留。前提被实测坐实：`owner_retirement_test.go`(1219 行) 对 ledger **零直接构造**（全黑盒经装配 API），故测试一行未动；导出化连带要求 doc 首词与标识符一致（11 处改名 + NewLedger 补 doc）
-  - [ ] 步骤 2 · `org_candidate_txn.go` + `org_candidate_overlay.go` → `agent/org/`：注入面按事实收窄——`rc.resident` 本就是 **`*agent.ResidentTopology`**（同层类型，直接作参数，无需接口）；`residentMemFP` 与 `unRegisterStoreOwner` 以函数注入（`SetFP/DropFP/UnregisterOwner`）；`buildAgent` 经 `ShellBuilder` 闭包（buildMode 封在根侧闭包内）
+  - [x] 步骤 2 · 两件已入 `agent/org/candidate_txn.go` + `agent/org/overlay.go`：注入面按事实收窄——`rc.resident` 用同层真实类型 `*agent.ResidentTopology`（原设接口是多余的）；`SetFP/DropFP/UnregisterOwner` 三函数注入；`buildAgent` 经 `ShellBuilder` 闭包（buildMode 与 loader 封在根侧闭包，org 不见 prompt）。根侧唯一接缝 `runtimeConfig.orgDeps(loader)`；discard 探针导出为 `org.LastDiscardOrder()`（根测试唯一读取点）**因函数体内注释被门禁**，探针文档写明"无生产路径读取"
+  - 判据达成：`grep -rn "runtimeConfig\|buildAgent(" agent/org/` 零命中（spec 新 scenario 的机器判据）；旧根文件已删、旧名零残留；`go build`/`go vet` 全清；config/agent/根包 short 全绿（2007 行候选拒绝套件经新包跑通）；分层断言（非 short）PASS；`-race` 72.7s；`GOMAXPROCS=1` 57.4s；lint ok
   - 对象与逐件处置：
     1. `owner_retirement.go` 整文件 → `agent/org/retirement.go`：`retirementLedger`→`Ledger`、`newRetirementLedger`→`NewLedger`、`retireDecision`→`RetireDecision`（其余方法名不变）；零根包依赖，预期只需改包名与文件头索引（`契约:` 指向 wiki 世代页）
     2. `org_candidate_txn.go` 整文件 → `agent/org/candidate_txn.go`：`candidateTxn`→`Txn`；其 `rc *runtimeConfig` 字段改为注入结构 `deps{ UnregisterStoreOwner func(name string) }`；`recordDiscardOrder`/`lastDiscardOrder` 随迁，根侧若有测试读它则经新导出名
@@ -89,7 +90,7 @@
   - 完成：`go build ./...`、`go vet ./...`、`go test ./agent/... . -count=1 -short` 全绿；`grep -rn "runtimeConfig" agent/org/` 零命中（机制不见装配态——这正是 spec 新 scenario 的机器判据）
   - 边界：`owner_retirement_test.go` 等**测试文件不动**（D3：装配级测试留根）；若改造中发现第四个根包依赖点 ⇒ 停，先回 design 补 D8' 再继续；`agent/org` 不得 import 根包（编译器与 3.5 断言双保险）
 
-- [ ] 3.8 C3 提交（前置：3.7）
+- [x] 3.8 C3 提交（显式 pathspec；验证墙另加 `go test ./agent/org/ -race`——包内暂无测试，随 4.x 补）
   - 做法：验证墙同 3.3，另加 `go test ./agent/org/ -count=1 -race`；`bash scripts/gen_godoc.sh` 重生成（新包进 docs/api）；提交
   - 完成：提交落库、工作树净、`docs/api` 含 agent/org 页
   - 边界：不混入 P4

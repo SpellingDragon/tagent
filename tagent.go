@@ -126,6 +126,22 @@ type runtimeConfig struct {
 	storeBarriersMu sync.Mutex
 }
 
+// orgDeps hands the generation mechanism in agent/org exactly what it needs from
+// assembly: the published owner table, a builder closure that fixes the resident
+// build mode and the current loader, and the two fingerprint/registry books it may
+// reset on a refused candidate. Nothing else about runtime state is reachable.
+func (rc *runtimeConfig) orgDeps(loader *prompt.Loader) org.Deps {
+	return org.Deps{
+		Resident: rc.resident,
+		Builder: func(name string, acfg config.AgentConfig, cfg config.Config, cache map[string]*agent.TagentAgent) (*agent.TagentAgent, error) {
+			return buildAgent(name, acfg, cfg, rc, loader, cache, buildModeResident)
+		},
+		SetFP:           func(name, fp string) { rc.residentMemFP[name] = fp },
+		DropFP:          func(name string) { delete(rc.residentMemFP, name) },
+		UnregisterOwner: rc.unRegisterStoreOwner,
+	}
+}
+
 // raiseStoreBarrier 对带保留租约的共享 store 抬起登记屏障：同一 build 内多次登记
 // 同一 store 只抬一层。没有租约的 store（纯内存、无破坏性扫描）无屏障可抬，静默跳过。
 // 契约: docs/wiki/platform/resource-ownership.md#composition-barrier
@@ -529,17 +545,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					coord.recordFailure(fmt.Errorf("rollback %s", site))
 				}
 			}
-			rbOv, rbOvOK := buildCandidateOwners(rc, loader, rollbackC, rbReach, failRB)
+			rbOv, rbOvOK := org.BuildOwners(rc.orgDeps(loader), rollbackC, rbReach, failRB)
 			if !rbOvOK {
 				return
 			}
-			defer rbOv.abandon()
-			rbNames, rbStaged, rbParts, rbOK := stageOrgGenerations(rc, loader, rollbackC, rbReach, rbOv.resolve(), failRB)
+			defer rbOv.Abandon()
+			rbNames, rbStaged, rbParts, rbOK := stageOrgGenerations(rc, loader, rollbackC, rbReach, rbOv.Resolve(), failRB)
 			if !rbOK {
 				return
 			}
-			rbOv.commit()
-			activateOwnerGenerations(rbOv.resolve(), rbNames, rbStaged, rbParts)
+			rbOv.Commit()
+			activateOwnerGenerations(rbOv.Resolve(), rbNames, rbStaged, rbParts)
 			applyHotAll(rollbackC)
 			rgen := coord.recordRollback(rbp, rollbackC, appliedFromLastApply)
 			publishedReach = rbReach
@@ -638,15 +654,15 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					coord.recordFailure(fmt.Errorf("%s", site))
 				}
 			}
-			ov, ovOK := buildCandidateOwners(rc, loader, fresh, freshReach, failCand)
+			ov, ovOK := org.BuildOwners(rc.orgDeps(loader), fresh, freshReach, failCand)
 			if !ovOK {
 				return
 			}
-			defer ov.abandon()
-			if len(ov.pendingNames()) > 0 {
-				log.Infof("[org-hotreload] hot-added %d agent(s) %v — staged in the private candidate overlay (published only at the single commit point)", len(ov.pendingNames()), ov.pendingNames())
+			defer ov.Abandon()
+			if len(ov.PendingNames()) > 0 {
+				log.Infof("[org-hotreload] hot-added %d agent(s) %v — staged in the private candidate overlay (published only at the single commit point)", len(ov.PendingNames()), ov.PendingNames())
 			}
-			candCache := ov.resolve()
+			candCache := ov.Resolve()
 			snapshot, snapErr := fresh.Clone()
 			if snapErr != nil {
 				log.Errorf("[org-hotreload] candidate snapshot clone FAILED — serving previous (fail-closed): %v", snapErr)
@@ -674,7 +690,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			if h := orgCommitBarrier.Swap(nil); h != nil {
 				(*h)()
 			}
-			ov.commit()
+			ov.Commit()
 			applyHotAll(snapshot)
 			activateOwnerGenerations(resolve, genNames, staged, genParts)
 			oldFP, gen := coord.swap(fp, snapshot, appliedFromLastApply)
