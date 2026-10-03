@@ -120,3 +120,23 @@ D9 的出路 2 并入本变更，与 D8 三件注入合并为终版。层与归�
 
 判据澄清（第 8 次同类后被门教清）：`free-standing` 不是"注释别写长"，而是**函数体内一律不留注释**——连一行说明也不行。理由的家只有三处：声明位 doc、断言消息、docs/wiki。据此后续批次的写法固定为：断言行自解释（`assertNoDeps(pkg, deps, "config")` 已足够达意），解释文字进 wiki。
 
+## D14 P4 的硬约束（原目标文件名不成立，按此重定 recipe）
+
+读门实现得三条事实，它们共同否决了 4.1 原先拟的名字（core/rollback/gates、txn/overlay/store、publish/reentry/delegation）：
+
+1. **锚的取法**：`responsibilityAnchor` 取文件里**第一条** `契约:`/`规格:` 索引行 ⇒ 文件级头注释在前，则整个文件的域锚就是它，与内部各测试的锚无关。
+2. **同锚即须有镜像**：同 (dir,pkg,tag,锚) 出现 ≥2 个测试文件时，凡**没有**同名 `<stem>.go` 生产文件者判碎片（镜像比对是精确拼写，仅 `_real` 后缀被豁免）。`org_hotreload_rollback_test.go` 之类没有镜像，**拆分本身制造违规**。
+3. **纯 helper 文件可豁免**：无任何顶层 `Test*` 的文件不参与计数 ⇒ 共享 fixture 可另立无测试文件（其域锚与主文件同锚也安全）。
+
+于是只有两条合法形状：**(i) 一个域一个文件**（域锚全局唯一）；**(ii) 子文件按 `<生产文件 stem>_test.go` 精确镜像命名**——而根包的测试从来不是镜像命名制（`partition_collision_test.go` 有镜像是巧合，`org_hotreload_test.go` 覆盖 org_hotreload+owner_retirement+tagent 三文件），强行转制会把 P4 变成改名工程，故弃。
+
+**按 (i) 的真实账**（逐声明盘点 + 现有域锚占用：`#owner-retirement`→org_hotreload_test、`#turn-local-execution-face`→cross_generation_test、`#reentry-resolution`→org_candidate_test）：
+
+| 源文件 | 可分出的新域 | 受镜像规则约束的部分 |
+|---|---|---|
+| `org_hotreload_test.go`(1716) | `#fingerprint`(8 test/164行)、`#trigger-timing`(4/171)、`#lockfree-read`(2/94)、`#closed-owner-refusal`(1/61)、`#memory-preflight`(1/57)、`#generations`(1/38) ⇒ 主文件余 ~1131 行（e2e + `#apply-record` + `#candidate-refusal` 三块） | 同锚的 apply-record×5、candidate-refusal×2 拆不开（org_hotreload.go 镜像已被主文件占用） |
+| `org_candidate_test.go`(2011) | 现占 `#reentry-resolution`；`#rollback`(4/191) 可迁往 owner-retirement 缺位者或**改占新锚** | 主文件已占三锚，其余同锚测试留主文件 |
+| `cross_generation_test.go`(1970) | 现占 `#turn-local-execution-face`；`#published-wrapper-immutable`(2/59)、`#lease-holds-reference`(1/57)、`#hot-source-pull-authority`(1/32) 可成独立文件 | `#reentry-resolution` 的 10 个测试与 org_candidate 同锚冲突 ⇒ 只能留在一处（**收敛锚**是更正确的动作，属 D14 例外） |
+
+**净判断**：P4 按合法形状只能做到 ~4 次安全拆分（org_hotreload 的 2 个域文件），其余受同锚测试与镜像规则牵制；把三个巨型文件降到 ≤600 行的目标**不可达**。因此 4.1 从"拆到 ≤600 行"改为"按域锚切出可独立成域的块，目标 1700 → 1100~1200 行"，并把"根包测试是否转镜像命名制"作为独立裁决项交你定（那是更大的一致性工程，不该塞进大扫除尾巴）。
+

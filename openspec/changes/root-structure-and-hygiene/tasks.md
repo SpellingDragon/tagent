@@ -97,14 +97,15 @@
 
 ## 4. P4 巨型测试按域拆分
 
-- [ ] 4.1 三文件按域拆分（前置：C3 完成后做，避免与生产迁移互相踩）
-  - 对象与目标（源文件 → 目标文件名，全部留根包，每文件 ≤600 行）：
-    - `org_candidate_test.go`(2007 行) → `org_candidate_txn_test.go`（候选事务/回滚族）+ `org_candidate_overlay_test.go`（换壳/采纳族）+ `org_candidate_store_test.go`（存储共享/碰撞族）
-    - `cross_generation_test.go`(1969 行) → `cross_generation_publish_test.go`（发布/排队输入族）+ `cross_generation_reentry_test.go`（重入族，含 walReentry 常量块）+ `cross_generation_delegation_test.go`（委派/嵌套跳族）
-    - `org_hotreload_test.go`(1715 行) → `org_hotreload_core_test.go`（发布/回滚主链）+ `org_hotreload_rollback_test.go`（回滚族）+ `org_hotreload_gates_test.go`（闸门/守卫族）
-  - 做法：按**整测试函数**为单位移动（函数体零改动）；共享 helper（waitFor/countServed/chainYAML 等）留在原文件或移入被最多目标引用的那份；每个新文件头加 `契约:` 索引（沿用源文件的锚）；`delegation_test.go` 的 delegModel/park 族 helper 不动
-  - 完成：三个源文件删除或缩至纯 helper；`go test . -count=1 -short` 全绿且测试总数与拆分前一致（`go test . -list '.*' -short | wc -l` 前后相等）
-  - 边界：禁止借拆分改任何断言/预算/谓词——那是行为变更，需另立 fail-before；行数是目标不是硬门，某域不足 600 行不强行再拆
+- [ ] 4.1 按域锚切出可独立成域的块（recipe 依 D14 修正：同锚多文件必须各有精确生产镜像，故一域一文件、域锚全局唯一）
+  - 做法（org_hotreload_test.go 优先，其余两文件按 D14 表执行）：
+    1. 新文件 `org_hotreload_fingerprint_test.go`：承载 8 个指纹域 test（`TestOrgFingerprint_*` 4 枚 + `TestMemoryFingerprint_*` + `TestModelRefAliasesFoldToStableFingerprint` + `TestFingerprintFold*` 2 枚）与专属 helper（`cfgFor`、`ownerYAMLWithModel`、`writeBumped`、`aliasYAML`、`writeCfg`），文件头**首行**即 `// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint`
+    2. 新文件 `org_hotreload_timing_test.go`：`#trigger-timing` 域 4 枚 test + `buildPark`/`newBuildPark`/`waitEntered`/`letGo`/`disarm`/`acquireWithin`/`genOf` helper，头锚 `#trigger-timing`
+    3. 无 `Test*` 的共享 fixture（`e2eYAML`/`hotYAML*`/`prodShapeYAML`/`dropAgentYAML`/`scHot*`/`snapshotRotationYAML`/`seSpawnerTTLYAML`/`LoadConfigForTest`/`residentCacheForTest`/`keepRecentOf`/`seActionToolOf`/`_` 与 3 个 Benchmark）移入 `org_hotreload_fixtures_test.go`（零 Test 函数 ⇒ 不参与同锚计数）
+    4. 其余测试按原锚留在 `org_hotreload_test.go`（同锚的 apply-record/candidate-refusal 拆不开，见 D14）
+  - 完成：`go test . -list ".*" -count=1 | wc -l` 前后**相等**（测试与 Benchmark 一个不少）；`go test . -count=1 -short` 绿；`bash scripts/lint.sh` 零 finding（含同位门）；主文件行数下降至 ~1100–1200
+  - 边界：整函数搬运，**禁止**改动任何断言/预算/谓词/helper 实现（改动即越界，需 fail-before 另案）；新文件首个声明之前只允许 包注释+锚+`package`，避免更早的索引行被门的"首条锚"规则误读；不引入镜像改命名制（D14 裁决项）
+  - 其余两文件：`org_candidate_test.go`、`cross_generation_test.go` 依 D14 表只做不冲突锚的切分（`#published-wrapper-immutable`、`#lease-holds-reference`、`#hot-source-pull-authority`、`#close-drain`、`#identical-apply`、`#config-clone`），同锚块留原位
 
 - [ ] 4.2 无损证明 + 同位门核对（前置：4.1）
   - 做法：对三个源文件分别跑 `bash scripts/check_test_merge.sh <拆分前基线ref> <源文件路径>`（基线 ref 用 C3 的提交号）；`bash scripts/lint.sh` 确认 responsibility-fragmentation 零 finding
