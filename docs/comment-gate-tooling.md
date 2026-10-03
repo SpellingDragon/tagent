@@ -80,6 +80,7 @@
 | `empty-tracked-file` | 零字节文件被提交 |
 | `tracked-path-missing` | 索引里有、工作树里没有 |
 | `unregistered-top-level` | 出现未登记的顶层目录 |
+| `tracked-and-ignored` | 文件被索引却同时被 ignore 规则排除：它是"追踪但隐形"，`git add <path>` 要 `-f`、新姊妹文件永不入库。判据必须问 `git ls-files -ci --exclude-standard`，**不能**把路径喂给 `git check-ignore`——后者连否定规则（`!README.md`）也算命中，白名单式 .gitignore 会被整片误报 |
 
 一条路径命中多条规则时逐条都报（残骸目录同时是产物与未登记目录）。顶层目录集合以代码里的显式白名单为准，新增目录必须**同时**登记 README 布局说明：布局给人读，白名单给机器执行，二者必须同批变更。白名单初值由当时的索引快照生成——手打过一次，漏了两个目录，门第一天就红给自己看。
 
