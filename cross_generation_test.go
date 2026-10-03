@@ -1673,6 +1673,8 @@ func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
 // - 补齐别的锚到不了的这一面：稳定态各层见自身声明、单跳发起者持自身代都已证，唯独 B 停在途中、G2 换掉 C 后 B 向下到 C 没证；
 // - 第三条回合必须跑新 C，使本锚自判别——发布从未落地时第一条断言会因错误理由通过。
 // - 见证按序号取而非取最新：只有本次委派自身的 settle 能产出下一条记录，而它不可能早于该跳生产者返回——两跳落在两次轮询之间时见证才不会漂。
+// - 归属按"答案里的旧代标记"锚定，不按发布后答案的到达顺序：通知回合合法地在新代面执行，断言"没有新代答案"会在正确实现上失败。
+// - 在途窗口以 gate 的 park 直接观测钉住（record 计数可被前一回合的同类记录满足）。
 // 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T) {
 	dir := t.TempDir()
@@ -1714,42 +1716,33 @@ func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T)
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
 	require.NoError(t, err)
 	waitFor(t, "B parked mid-call", func() bool {
-		for _, s := range m.snapshot() {
-			if strings.HasPrefix(s.System, "SUB-B-PROMPT") && len(s.Tools) > 0 {
-				return true
+		return m.parkedNow("SUB-B-PROMPT") >= 1
+	})
+
+	g1AnswersAtB := func() int {
+		n := 0
+		for _, sv := range m.snapshot() {
+			if sv.System == "SUB-B-PROMPT" && len(sv.ToolResults) > 0 &&
+				strings.Contains(strings.Join(sv.ToolResults, "\n"), `"served:SUB-C-PROMPT"`) {
+				n++
 			}
 		}
-		return false
-	})
+		return n
+	}
+	entriesBefore := countServed(m.snapshot(), "SUB-C-PROMPT")
+	g2Before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
+	g1AnswersBefore := g1AnswersAtB()
 
 	write(chainYAML("SUB-C-PROMPT-G2"))
 	entry.CheckOrgReload()
 
-	entriesBefore := countServed(m.snapshot(), "SUB-C-PROMPT")
-	g2Before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
 	disarmGate(bGate)
 
-	bHopAnswers := func() []string {
-		var out []string
-		for _, s := range m.snapshot() {
-			if s.System == "SUB-B-PROMPT" && len(s.ToolResults) > 0 {
-				out = append(out, strings.Join(s.ToolResults, "\n"))
-			}
-		}
-		return out
-	}
-	hopsBefore := len(bHopAnswers())
-	waitFor(t, "the pinned G1 hop returned its answer to B", func() bool {
-		return len(bHopAnswers()) > hopsBefore
+	waitFor(t, "the pinned G1 hop returned its old-C answer to B", func() bool {
+		return g1AnswersAtB() > g1AnswersBefore
 	})
-	answers := bHopAnswers()
-	pinned := answers[hopsBefore]
-	require.Contains(t, pinned, `"served:SUB-C-PROMPT"`,
-		"被钉跳的回执必须是 G1 之 C 的回答（派生前继承发起调用租约）")
-	require.NotContains(t, pinned, `"served:SUB-C-PROMPT-G2"`,
-		"§3.2：B 的 G1 代执行不得因为 G2 换了 C 就被改道到新目标——被钉跳的回执不能来自新代目标")
 	require.Greater(t, countServed(m.snapshot(), "SUB-C-PROMPT"), entriesBefore,
-		"the pinned hop really executed on the old C (its answer came from somewhere)")
+		"§3.2：被钉跳须在 G1 之 C 上执行（派生前继承发起调用租约）；若被改道到新目标，这条新增的 G1 serve 永不出现")
 
 	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("third request"))
 	require.NoError(t, err)
