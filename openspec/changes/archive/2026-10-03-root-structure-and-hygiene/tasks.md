@@ -124,7 +124,7 @@
   - 完成：`bash scripts/lint.sh`（doc-refs/gen_godoc --check）绿；`grep -rn "train/" README.md docs/wiki` 零活引用
   - 边界：只补布局事实，不重写文档
 
-- [ ] 5.2 终验与归档（前置：5.1）
+- [x] 5.2 终验与归档：tip 934498e CI 四 job 全绿（test/race/validators/openspec）；归档后 specs strict 全通过
   - 做法：`git push` 后盯 CI 至四 job 绿（test/race/validators/openspec）；`openspec archive root-structure-and-hygiene -y`；`openspec validate --specs --strict`
   - 完成：归档目录出现 `2026-10-XX-root-structure-and-hygiene`，spec 合并计数 +2 ADDED +2 MODIFIED
   - 边界：CI 任一 job 红 ⇒ 停在归档前，先诊断（禁止带着红归档）
