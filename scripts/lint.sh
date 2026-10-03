@@ -100,4 +100,10 @@ if ! go run ./scripts/codetools dotted-refs; then
   exit 1
 fi
 
+# docs 标题的提交不得夹带代码路径（git mv 即时入索引，无 pathspec 的提交会把它扫进来）
+if ! go run ./scripts/codetools commit-scope; then
+  echo "lint: a docs-titled commit carried code paths — split it"
+  exit 1
+fi
+
 echo "lint: ok"

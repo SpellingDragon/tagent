@@ -119,7 +119,7 @@
 
 ## 5. 收口
 
-- [ ] 5.1 文档面同步（前置：P4）
+- [x] 5.1 文档面同步：wiki `#package-layout` 的 agent/org 行由预告改为既成（列出 Ledger/Txn/Overlay/BuildOwners/ShellBuilder/Deps 与唯一接缝 orgDeps）；工具页新增 §七「测试文件的域锚切分」（三条事实 + “被门挡住的拆分不是好拆分” + 无损判据）与 §八「提交范围一致性门」；`grep -rn "train/" README.md docs/wiki` 零活引用（P2 时已清）
   - 对象：README 模块表（若 C2/C3 后有出入）、`docs/wiki/agent/agent-architecture.md#package-layout` 五组职责表（补 config 与 agent/org 两行、根包行改为"装配+发布权"）、`docs/wiki/README.md` 索引
   - 完成：`bash scripts/lint.sh`（doc-refs/gen_godoc --check）绿；`grep -rn "train/" README.md docs/wiki` 零活引用
   - 边界：只补布局事实，不重写文档
@@ -137,7 +137,10 @@
   - 完成：每枚给出"产品缺陷 / 测试归因 / 环境敏感"三选一定性与证据，按结论决定修或另立案
   - 边界：禁止用调大预算或加跳过让 CI 变绿；CI 亦跑 `./... -short`（2 核），故此族是真实 CI 风险，不是本地噪声
 
-- [ ] 6.2 提交范围与提交信息一致性门
+- [x] 6.2 提交范围一致性门 `codetools commit-scope`（已接入 lint.sh）
+  - 判据：标题 `docs(`/`docs:` 的提交遇代码路径（`*.go/.sh/.yml/.yaml/.py`，`docs/`、`openspec/`、`*.md` 除外）即具名拒绝
+  - **真实历史双验**：`commit-scope 643f56b`（我那个标称 docs 实带半套迁移的提交）⇒ 抓出 3 条代码路径 exit 1；`commit-scope d52a771`（诚实的 docs 提交）⇒ exit 0
+  - 门自身立刻反噬我一次：新写的单测夹具里用了 `openspec/changes/x/tasks.md`，被 `proc-refs` 当场判 PROCESS-ARTIFACT-CITE ⇒ 换夹具路径。工具的规矩对写工具的人同样生效
   - 对象：本变更暴露的失误形态——标称 `docs(openspec)` 的提交夹带代码重命名（`git mv` 即时入索引 + `git commit` 无 pathspec）
   - 做法：加一条机械检查（`codetools` 子命令或 git 钩子二选一，倾向前者以复用 CI 同命令）：当提交信息前缀为 `docs(` 且 diff 含 `*.go`/`*.sh`/`ci.yml` 变更时非零退出，负路径探针留痕
   - 完成：探针双红 + 正常 docs 提交不误红；接入 `scripts/lint.sh` 或 validators job
