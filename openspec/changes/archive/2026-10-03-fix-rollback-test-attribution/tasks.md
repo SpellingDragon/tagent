@@ -15,4 +15,5 @@
 
 - [x] 3.1 `GOMAXPROCS=1 -count=8` 8/8 PASS；`GOMAXPROCS=2` PASS；`go test . -short`、`-race`（根包）绿
       —— P=1 三批 ×8 = 24/24 PASS（每批 ≈1.0–1.1s，无预算停滞）；P=2 ×4 PASS；`-short` ok 57.4s；`-race` ok 74.0s
-- [ ] 3.2 lint/openspec strict 绿；push 并确认 CI 四 job 绿
+- [x] 3.2 lint/openspec strict 绿；push 并确认 CI 四 job 绿
+      —— `d6b32c4` 自身 run success（validators/race/test/openspec 四 job 全绿，soak 按 workflow_dispatch skip）；tip `fb5619f` 含祖先关系已核亦绿。本地 lint ok、`openspec validate --strict` valid 同过
