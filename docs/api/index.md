@@ -8,6 +8,7 @@
 | `github.com/SpellingDragon/tagent/agent` | [github_com__SpellingDragon__tagent__agent.md](github_com__SpellingDragon__tagent__agent.md) |
 | `github.com/SpellingDragon/tagent/agent/compress` | [github_com__SpellingDragon__tagent__agent__compress.md](github_com__SpellingDragon__tagent__agent__compress.md) |
 | `github.com/SpellingDragon/tagent/agent/governance` | [github_com__SpellingDragon__tagent__agent__governance.md](github_com__SpellingDragon__tagent__agent__governance.md) |
+| `github.com/SpellingDragon/tagent/agent/org` | [github_com__SpellingDragon__tagent__agent__org.md](github_com__SpellingDragon__tagent__agent__org.md) |
 | `github.com/SpellingDragon/tagent/agent/reliability` | [github_com__SpellingDragon__tagent__agent__reliability.md](github_com__SpellingDragon__tagent__agent__reliability.md) |
 | `github.com/SpellingDragon/tagent/agent/task` | [github_com__SpellingDragon__tagent__agent__task.md](github_com__SpellingDragon__tagent__agent__task.md) |
 | `github.com/SpellingDragon/tagent/config` | [github_com__SpellingDragon__tagent__config.md](github_com__SpellingDragon__tagent__config.md) |
@@ -43,4 +44,4 @@
 | `github.com/SpellingDragon/tagent/workspace` | [github_com__SpellingDragon__tagent__workspace.md](github_com__SpellingDragon__tagent__workspace.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：38。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：39。文档覆盖由 scripts/comment_policy 单点判定。

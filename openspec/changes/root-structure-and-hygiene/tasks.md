@@ -78,7 +78,9 @@
 
 ### C3 世代机制外迁 agent/org
 
-- [ ] 3.7 三件迁移 + 注入契约落地
+- [~] 3.7 三件迁移 + 注入契约落地（**拆两步提交**，降单批风险）
+  - [x] 步骤 1 · `owner_retirement.go` → `agent/org/retirement.go`：`Ledger`/`NewLedger`/`RetireDecision` + 11 方法导出；根侧 9 个调用点限定化，旧名零残留。前提被实测坐实：`owner_retirement_test.go`(1219 行) 对 ledger **零直接构造**（全黑盒经装配 API），故测试一行未动；导出化连带要求 doc 首词与标识符一致（11 处改名 + NewLedger 补 doc）
+  - [ ] 步骤 2 · `org_candidate_txn.go` + `org_candidate_overlay.go` → `agent/org/`：注入面按事实收窄——`rc.resident` 本就是 **`*agent.ResidentTopology`**（同层类型，直接作参数，无需接口）；`residentMemFP` 与 `unRegisterStoreOwner` 以函数注入（`SetFP/DropFP/UnregisterOwner`）；`buildAgent` 经 `ShellBuilder` 闭包（buildMode 封在根侧闭包内）
   - 对象与逐件处置：
     1. `owner_retirement.go` 整文件 → `agent/org/retirement.go`：`retirementLedger`→`Ledger`、`newRetirementLedger`→`NewLedger`、`retireDecision`→`RetireDecision`（其余方法名不变）；零根包依赖，预期只需改包名与文件头索引（`契约:` 指向 wiki 世代页）
     2. `org_candidate_txn.go` 整文件 → `agent/org/candidate_txn.go`：`candidateTxn`→`Txn`；其 `rc *runtimeConfig` 字段改为注入结构 `deps{ UnregisterStoreOwner func(name string) }`；`recordDiscardOrder`/`lastDiscardOrder` 随迁，根侧若有测试读它则经新导出名

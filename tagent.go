@@ -19,6 +19,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/org"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -333,7 +334,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			mu            sync.Mutex
 			building      atomic.Bool
 			stopped       atomic.Bool
-			retiring      = newRetirementLedger(func(name string) int {
+			retiring      = org.NewLedger(func(name string) int {
 				roster := make([]*agent.TagentAgent, 0, len(rc.resident.Snapshot()))
 				for _, a := range rc.resident.Snapshot() {
 					if a != nil {
@@ -358,7 +359,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				"liveDebt": OrgLiveDebt{
 					CapturedAt:         time.Now(),
 					Executors:          entryAgent.ContextManager().ExecutorRefs(),
-					PendingRetirements: retiring.diagnostics(),
+					PendingRetirements: retiring.Diagnostics(),
 				},
 				"close": OrgCloseState{
 					Initiated:       entryAgent.CloseStarted(),
@@ -415,14 +416,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					continue
 				}
 				if publishedReach[name] {
-					retiring.release(name)
+					retiring.Release(name)
 					continue
 				}
-				retiring.track(name, owner)
+				retiring.Track(name, owner)
 			}
 		}
 		sweepRetirements := func() {
-			for _, d := range retiring.sweep(publishedReach) {
+			for _, d := range retiring.Sweep(publishedReach) {
 				switch {
 				case d.Retired:
 					rc.resident.Unpublish([]string{d.Name})
@@ -509,7 +510,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			rbReach := config.ReachableAgents(rollbackC, cfg.Entry)
-			if blocked := retiring.closingIn(rbReach); len(blocked) > 0 {
+			if blocked := retiring.ClosingIn(rbReach); len(blocked) > 0 {
 				log.Errorf("[org-hotreload] rollback re-routes %v while their retiring owner is already closing — RESTART required (rejected before any candidate build)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚将重路由 %v，但其退役中 owner 已开始关闭，须重启生效（本次未回滚）", blocked))
 				coord.recordFailure(fmt.Errorf("rollback re-routes closing owner(s) %v: retirement already began", blocked))
@@ -599,7 +600,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("memory section changed for %v: restart required", changed))
 				return
 			}
-			if blocked := retiring.closingIn(freshReach); len(blocked) > 0 {
+			if blocked := retiring.ClosingIn(freshReach); len(blocked) > 0 {
 				log.Errorf("[org-hotreload] agent(s) %v re-enter while their retiring owner is already closing — RESTART required (rejected before any candidate build; no second writer opened)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: agent %v 正在退役关闭中，同名重入须重启生效（本次未热更，未建第二 writer）", blocked))
 				coord.recordFailure(fmt.Errorf("re-entry into closing owner %v: retirement already began, restart required", blocked))
@@ -694,7 +695,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			changed := info.ModTime().UnixNano() != atomic.LoadInt64(&lastSeenMtime)
-			if !changed && !retiring.hasPending() {
+			if !changed && !retiring.HasPending() {
 				return
 			}
 			if !building.CompareAndSwap(false, true) {
@@ -715,7 +716,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 						return
 					}
 					sweepRetirements()
-					recheck = retiring.retireablePending(publishedReach)
+					recheck = retiring.RetireablePending(publishedReach)
 				}()
 				if recheck {
 					requestCheck()

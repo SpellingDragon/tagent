@@ -1,5 +1,5 @@
 // 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
-package tagent
+package org
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 )
 
-// retirementLedger is the assembly's list of owners whose name left the routable
+// Ledger is the assembly's list of owners whose name left the routable
 // set (design D7, R02). Removal itself is atomic and already done by
 // the publish: the new generation simply does not route the name. What the
 // publish must NOT do is close the owner — its executions, background work and
@@ -20,7 +20,7 @@ import (
 // leaves as soon as the owner is retired, and re-enters nothing when a name is
 // re-routed before its drain finished (that owner is simply reused, which is also
 // why a re-add can never produce a second writer for a live store).
-type retirementLedger struct {
+type Ledger struct {
 	mu sync.Mutex
 	// pending maps a retired name to the owner still awaiting quiescence.
 	pending map[string]*agent.TagentAgent
@@ -35,22 +35,24 @@ type retirementLedger struct {
 	usageOf func(name string) int
 }
 
-func newRetirementLedger(usageOf func(name string) int) *retirementLedger {
-	return &retirementLedger{pending: map[string]*agent.TagentAgent{}, held: map[string]error{}, usageOf: usageOf}
+// NewLedger builds an empty retirement ledger. usageOf supplies how many live holders
+// a name still has, which is the usage axis of the three-way retirement judgement.
+func NewLedger(usageOf func(name string) int) *Ledger {
+	return &Ledger{pending: map[string]*agent.TagentAgent{}, held: map[string]error{}, usageOf: usageOf}
 }
 
-// usageHolders answers the usage axis for one name, tolerating its absence.
-func (l *retirementLedger) usageHolders(name string) int {
+// UsageHolders answers the usage axis for one name, tolerating its absence.
+func (l *Ledger) UsageHolders(name string) int {
 	if l.usageOf == nil {
 		return 0
 	}
 	return l.usageOf(name)
 }
 
-// track puts a removed name on the list. Idempotent: re-tracking a name that is
+// Track puts a removed name on the list. Idempotent: re-tracking a name that is
 // already pending (e.g. two publishes in a row without a drain) keeps the FIRST
 // instance, which is the one still holding the store.
-func (l *retirementLedger) track(name string, owner *agent.TagentAgent) {
+func (l *Ledger) Track(name string, owner *agent.TagentAgent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if _, seen := l.pending[name]; !seen {
@@ -58,36 +60,36 @@ func (l *retirementLedger) track(name string, owner *agent.TagentAgent) {
 	}
 }
 
-// release drops a name that became routable again before it drained. The owner
+// Release drops a name that became routable again before it drained. The owner
 // instance stays resident and serving; nothing was closed, so there is nothing to
 // restore.
-func (l *retirementLedger) release(name string) {
+func (l *Ledger) Release(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.pending, name)
 	delete(l.held, name)
 }
 
-// drop removes a name whose retirement completed.
-func (l *retirementLedger) drop(name string) {
+// Drop removes a name whose retirement completed.
+func (l *Ledger) Drop(name string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.pending, name)
 	delete(l.held, name)
 }
 
-// noteKeep records WHY the owner stays listed after a close attempt (an execution
+// NoteKeep records WHY the owner stays listed after a close attempt (an execution
 // that never confirmed a stop is held, not force-closed — a guarantee
 // inherited here rather than flattened).
-func (l *retirementLedger) noteKeep(name string, err error) {
+func (l *Ledger) NoteKeep(name string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.held[name] = err
 }
 
-// snapshot copies the pending set so a sweep can iterate without holding the
+// Snapshot copies the pending set so a sweep can iterate without holding the
 // ledger's lock across each owner's close sequence.
-func (l *retirementLedger) snapshot() map[string]*agent.TagentAgent {
+func (l *Ledger) Snapshot() map[string]*agent.TagentAgent {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make(map[string]*agent.TagentAgent, len(l.pending))
@@ -97,23 +99,23 @@ func (l *retirementLedger) snapshot() map[string]*agent.TagentAgent {
 	return out
 }
 
-// hasPending reports whether any owner is still draining. The turn-boundary check
+// HasPending reports whether any owner is still draining. The turn-boundary check
 // uses it to decide whether a background sweep is worth scheduling at all when the
 // config file itself did not change — so an owner whose work just settled is
 // retired at the next activity without a dedicated timer goroutine.
-func (l *retirementLedger) hasPending() bool {
+func (l *Ledger) HasPending() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.pending) > 0
 }
 
-// closingIn answers D7's refusal question BEFORE any candidate resource is built:
+// ClosingIn answers D7's refusal question BEFORE any candidate resource is built:
 // a name the new generation wants is on the retirement list and its owner has
 // already begun closing (or its close was refused by an unconverged execution), so
 // reusing it is impossible and admitting a fresh one would be a second writer for
 // the same storage identity. Returns the blocked names, sorted for deterministic
 // refusal text.
-func (l *retirementLedger) closingIn(reach map[string]bool) []string {
+func (l *Ledger) ClosingIn(reach map[string]bool) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []string
@@ -129,12 +131,12 @@ func (l *retirementLedger) closingIn(reach map[string]bool) []string {
 	return out
 }
 
-// diagnostics reports what is still held and why — pending retirement is a real
+// Diagnostics reports what is still held and why — pending retirement is a real
 // state the host must be able to see (an owner kept alive by its own unfinished
 // work is legitimate; an owner kept alive invisibly is not). The usage axis is
 // derived by walking live bindings, so it is read only after the ledger lock is
 // released: a diagnostics path must never invert the ledger → agent lock order.
-func (l *retirementLedger) diagnostics() []map[string]any {
+func (l *Ledger) Diagnostics() []map[string]any {
 	l.mu.Lock()
 	if len(l.pending) == 0 {
 		l.mu.Unlock()
@@ -166,7 +168,7 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 		if r.heldSince != "" {
 			entry["heldSince"] = r.heldSince
 		}
-		if holders := l.usageHolders(r.name); holders > 0 {
+		if holders := l.UsageHolders(r.name); holders > 0 {
 			entry["usageHeldBy"] = holders
 		}
 		out = append(out, entry)
@@ -174,7 +176,7 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 	return out
 }
 
-// retireablePending reports whether any pending name is CURRENTLY unblocked — the
+// RetireablePending reports whether any pending name is CURRENTLY unblocked — the
 // same predicate a sweep acts on (unrouted, no usage right left, no obligation of
 // its own), evaluated without changing anything. The drain tail asks it once after
 // a pass because a release that landed DURING that pass was merged away by the
@@ -184,12 +186,12 @@ func (l *retirementLedger) diagnostics() []map[string]any {
 // actually retire something, and every retirement shrinks the pending set.
 //
 // Called with the reload's `mu` held (publishedReach is `mu`'s state).
-func (l *retirementLedger) retireablePending(reach map[string]bool) bool {
-	for name, owner := range l.snapshot() {
+func (l *Ledger) RetireablePending(reach map[string]bool) bool {
+	for name, owner := range l.Snapshot() {
 		if owner == nil || reach[name] {
 			continue
 		}
-		if l.usageHolders(name) > 0 {
+		if l.UsageHolders(name) > 0 {
 			continue
 		}
 		if !owner.Obligations().Idle() {
@@ -200,49 +202,49 @@ func (l *retirementLedger) retireablePending(reach map[string]bool) bool {
 	return false
 }
 
-// retireDecision is one sweep step's outcome for one name, returned for logging
+// RetireDecision is one sweep step's outcome for one name, returned for logging
 // by the caller (which owns the reload's log prefix).
-type retireDecision struct {
+type RetireDecision struct {
 	Name    string
 	Retired bool
 	Held    bool
 	Why     string
 }
 
-// sweep evaluates every pending owner once: still routable (release), still
+// Sweep evaluates every pending owner once: still routable (release), still
 // obliged (keep), or idle (close, then retire). Called with the reload's `mu`
 // held, so it can never race a publish's track/release for the same name. An owner is held either by its own unfinished work or by another
 // generation’s still-valid usage right (deferred delegation); that second term
 // is derived from live bindings, so a holder cannot slip through the way a
 // hand-maintained registration would let one slip.
-func (l *retirementLedger) sweep(reach map[string]bool) []retireDecision {
-	var decisions []retireDecision
-	for name, owner := range l.snapshot() {
+func (l *Ledger) Sweep(reach map[string]bool) []RetireDecision {
+	var decisions []RetireDecision
+	for name, owner := range l.Snapshot() {
 		if owner == nil {
-			l.drop(name)
+			l.Drop(name)
 			continue
 		}
 		if reach[name] {
-			l.release(name)
-			decisions = append(decisions, retireDecision{Name: name, Why: "re-routed before drain finished — original owner reused"})
+			l.Release(name)
+			decisions = append(decisions, RetireDecision{Name: name, Why: "re-routed before drain finished — original owner reused"})
 			continue
 		}
-		holders := l.usageHolders(name)
+		holders := l.UsageHolders(name)
 		if ob := owner.Obligations(); !ob.Idle() || holders > 0 {
 			why := "obligations remain: " + ob.String()
 			if holders > 0 {
 				why += fmt.Sprintf("; usage rights held by %d live generation(s)", holders)
 			}
-			decisions = append(decisions, retireDecision{Name: name, Why: why})
+			decisions = append(decisions, RetireDecision{Name: name, Why: why})
 			continue
 		}
 		if err := owner.Close(); err != nil {
-			l.noteKeep(name, err)
-			decisions = append(decisions, retireDecision{Name: name, Held: true, Why: "close left it unconverged: " + err.Error()})
+			l.NoteKeep(name, err)
+			decisions = append(decisions, RetireDecision{Name: name, Held: true, Why: "close left it unconverged: " + err.Error()})
 			continue
 		}
-		l.drop(name)
-		decisions = append(decisions, retireDecision{Name: name, Retired: true, Why: "obligations converged; exclusive components closed, lease released, registrations revoked"})
+		l.Drop(name)
+		decisions = append(decisions, RetireDecision{Name: name, Retired: true, Why: "obligations converged; exclusive components closed, lease released, registrations revoked"})
 	}
 	return decisions
 }
