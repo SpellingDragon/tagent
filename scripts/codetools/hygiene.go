@@ -90,6 +90,25 @@ func topDirOf(clean string) (string, bool) {
 	return clean[:i], true
 }
 
+// checkTrackedAndIgnored reports paths that are BOTH in the index and excluded by an
+// ignore rule. Such a file is tracked-but-invisible: adding a sibling never stages it and
+// `git add <path>` needs -f, so edits and new neighbours silently drift out. A whitelist
+// mode .gitignore must name every tracked file it means to keep.
+//
+// The ignored list must come from `git ls-files -ci --exclude-standard`; feeding paths to
+// `git check-ignore` instead is wrong because it also matches NEGATION patterns, which a
+// whitelist .gitignore is made of.
+func checkTrackedAndIgnored(ignored []string) []trackedHygieneFinding {
+	var out []trackedHygieneFinding
+	for _, p := range ignored {
+		if p == "" {
+			continue
+		}
+		out = append(out, trackedHygieneFinding{filepath.ToSlash(p), "tracked-and-ignored", "drop the ignore rule or untrack the file; a whitelist .gitignore must name tracked files"})
+	}
+	return out
+}
+
 func runTrackedHygiene([]string) int {
 	out, err := exec.Command("git", "ls-files", "-z").Output()
 	if err != nil {
@@ -102,6 +121,17 @@ func runTrackedHygiene([]string) int {
 			files = append(files, p)
 		}
 	}
+	ign, err := exec.Command("git", "ls-files", "-ci", "--exclude-standard").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tracked-hygiene: git ls-files -ci failed:", err)
+		return 1
+	}
+	var ignored []string
+	for _, p := range strings.Split(string(ign), "\n") {
+		if p != "" {
+			ignored = append(ignored, p)
+		}
+	}
 	findings := checkTrackedHygiene(files, func(p string) (int64, error) {
 		st, err := os.Stat(p)
 		if err != nil {
@@ -109,6 +139,7 @@ func runTrackedHygiene([]string) int {
 		}
 		return st.Size(), nil
 	})
+	findings = append(findings, checkTrackedAndIgnored(ignored)...)
 	for _, f := range findings {
 		fmt.Println("tracked-hygiene:", f)
 	}
