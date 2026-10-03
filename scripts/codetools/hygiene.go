@@ -27,7 +27,7 @@ var registeredTopDirs = map[string]bool{
 	"memory": true, "modelutil": true, "openspec": true, "plugin": true,
 	"prompt": true, "prototype": true, "resources": true, "rl": true,
 	"scripts": true, "tests": true, "testutil": true, "tool": true,
-	"train": true, "workspace": true,
+	"workspace": true,
 }
 
 // trackedHygieneFinding is one violation: the path plus the rule that rejected it.

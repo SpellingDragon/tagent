@@ -94,4 +94,10 @@ if ! go run ./scripts/codetools tracked-hygiene; then
   exit 1
 fi
 
+# 机器消费的点号模块引用必须可解析或显式登记（specs/architecture-guardrails：机器消费的点号模块引用必须可解析）
+if ! go run ./scripts/codetools dotted-refs; then
+  echo "lint: a dotted module reference resolves nowhere and carries no allowlist entry"
+  exit 1
+fi
+
 echo "lint: ok"

@@ -19,7 +19,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs|tracked-hygiene> ...")
+		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs|tracked-hygiene|dotted-refs> ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -37,6 +37,8 @@ func main() {
 		os.Exit(runProcRefs(os.Args[2:]))
 	case "tracked-hygiene":
 		os.Exit(runTrackedHygiene(os.Args[2:]))
+	case "dotted-refs":
+		os.Exit(runDottedRefs(os.Args[2:]))
 	}
 	var fail int
 	switch os.Args[1] {

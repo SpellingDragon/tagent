@@ -85,3 +85,12 @@
 
 判定逻辑是对文件列表的**纯函数**（尺寸由注入的 `sizeOf` 提供），单测因此不需要 git 仓库；live 命令只是把 `git ls-files` 的结果喂进去。接入点是 `scripts/lint.sh`，本地与 CI 同一条命令。
 
+<a id="dotted-refs"></a>
+## 六、点号引用门
+
+`codetools dotted-refs` 查的是**运行时会真去 import 的位置**：shell 里 `python -m <模块>` 的后续 token、yaml 里 `workflow:` 的值。判定：点号换斜杠后在仓库内存在对应 `.py`（或包的 `__init__.py`）即通过；否则必须命中显式外部允许表 `externalModuleAllowlist`（前缀匹配，每条须附用途说明，**空表才是健康态**）。
+
+不做全文件点号扫描是有意的：`scheduler.type=local` 这类配置覆盖语法、文档行文里的包名都会被误伤。门的强度来自位置精确，不来自范围贪大。扫描面是 git 索引里的 `*.sh`/`*.yaml`/`*.yml`，排除 `openspec/`（规格会原文引用已退役路径作为记录）与 `archive/`、`_tmp_report`。
+
+本门的出生背景：AReaL 在线训练桥退役时发现，`train_rl_config.yaml` 里的 `workflow: train.rl.tagent_adapter.*` 指向 AReaL 改名前的包布局——这类"看着对"的死配置，此前没有任何机器门能看见。
+

@@ -25,3 +25,18 @@ validators job 新增检查：① `git ls-files` 全集必须非空文件；② 
 ## D5 阶段顺序与每步可回滚
 
 P1 卫生（无行为）→ P2 train/ 挪移（纯路径）→ P3 拆包（接口化，最大的一步）→ P4 测试拆分（文本重组）。每阶段独立提交、独立全绿（`go build ./...`、根包与 agent 包 plain+race、`GOMAXPROCS=1` 根包、lint、`gen_godoc --check` 重生成后匹配）。P3 若发现 runtimeConfig 的字段子集难以快照化（候选事务写回运行态），停下上报而非放宽分层断言——那是设计层冲突，按规矩裁决。
+
+## D6 实现期证伪：train/ 不是"误导性目录"，是一条陈旧训练桥（用户裁决：最彻底路线）
+
+原 P2 前提（"纯路径移动 + 引用同步"）被三层证据推翻：① `train_tagent.py:34` 的 `sys.path` 把点号模块名当目录段（`/ "train.rl"`），指向不存在的路径；② 该脚本与 `train_rl_config.yaml` 的 `from train.rl import PPOTrainer`、`python3 -m train.rl.infra.rpc.rpc_server`、`workflow: train.rl.tagent_adapter.*` 全部指向 AReaL **改名前**的顶层包 `train`（现行为 `areal/`，`PPOTrainer` 在 `areal/trainer/rl_trainer.py`）；③ `run.sh` areal 命令族的默认配置 `areal_config.yaml` 不存在，CI 零 Python 覆盖。
+
+**裁决（退役而非修补）**：三者无任何 openspec 规格承诺（`trajectory-recording` 只点名离线转换器；`rl-feedback`/`example-rl-visibility` 只承诺 Go 侧 HTTP 面），修补需要 AReaL 多卡环境才能验证，属"看着对"的提交。退役边界：
+
+- 删除：`train/rl/tagent_adapter.py`、`examples/wechat-bot/train_tagent.py`、`examples/wechat-bot/train_rl_config.yaml`、`run.sh` 的 areal 命令族与 AREAL_* 变量、README 相关行；
+- 保留并迁移：`convert_trajectories.py`（纯 stdlib、离线、被 `trajectory-recording` 点名）→ `scripts/convert_trajectories.py`，wiki 同步；
+- 保留：`rl/` Go 包（轨迹记录、可换模型、HTTP API）、`tagent.rl.yaml` 运行时配置、bot README 的 RL 运行时环境变量表——它们是活面且各有规格；
+- wiki `rl-architecture` 记录退役事实与重接条件（按现行 `areal.*` 布局重写，经 dotted-refs 门）。
+
+## D7 dotted-refs 门的最小形状
+
+只查**机器会真去 import 的位置**：shell 中 `python -m`/`python3 -m` 的后续 token、yaml 中 `workflow:` 的值。解析规则：点号换斜杠后在仓库内存在对应 `.py` 即通过；否则必须命中显式外部允许表（初值为空）。不做全文件点号 token 扫描——`scheduler.type=local` 这类配置覆盖语法会被误伤，门的强度来自位置精确而非范围贪大。

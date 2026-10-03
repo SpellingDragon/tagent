@@ -88,7 +88,7 @@ provider 返回 200 却**零 choices**（实测发生过，深度思考＋长上
 <a id="http-api"></a>
 ## 四、RL HTTP 接口的安全面与受理契约
 
-`HTTPAPI` 把常驻事件循环暴露给外部（AReaL 适配器等）。它是**可选**组件，一旦开启就是一张能操纵 agent 的攻击面，因此以下防线都是结构性的，不是可关掉的选项。
+`HTTPAPI` 把常驻事件循环暴露给外部训练环（任何按其契约行事的消费者）。它是**可选**组件，一旦开启就是一张能操纵 agent 的攻击面，因此以下防线都是结构性的，不是可关掉的选项。
 
 ### 四条安全防线
 
@@ -127,3 +127,19 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 - 守卫拒绝缺可枚举输出：只返回理由文本，"哪条票据丢了"要人读日志（见 [compression-and-telemetry](../agent/compression-and-telemetry.md)）；
 - 投影键集有界依赖整表重算，重建成本随活跃引用数线性，尚无实测上限；
 - 遥测阶梯的占比与驻留参数缺跨场景标定（高频短回合与长驻留任务的节奏差别很大）。
+
+<a id="offline-converter"></a>
+## 七、离线轨迹转换器
+
+`scripts/convert_trajectories.py` 是规格点名的离线工具（`openspec/specs/trajectory-recording`）：读取 `TrajectoryRecorder` 落盘的 JSONL，产出 HuggingFace 数据集——SFT 模式为 `{input_ids, loss_mask}`（prompt 位 0、completion 位 1），RL 模式为 prompt-only 的 `{messages}`。它只用标准库，不依赖任何训练框架的存在，转换在训练环境之外即可完成与校验。
+
+```bash
+# SFT
+python3 scripts/convert_trajectories.py --input data/trajectories/ --output data/sft/   --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft
+# RL prompt-only
+python3 scripts/convert_trajectories.py --input data/trajectories/ --output data/rl/ --mode rl
+```
+
+### 退役记录：AReaL 在线训练桥（2026-10）
+
+桥侧三件（`tagent_adapter.py`、`train_tagent.py`、`train_rl_config.yaml`，原址分别在 `train/rl/` 与示例目录）已退役删除：它们面向 **AReaL 改名前**的 `train.*` 包布局（现行 AReaL 顶层包为 `areal/`），`train_tagent.py` 的 `sys.path` 存在把点号模块名当目录段的字面 bug，且 `run.sh` 引用的 `areal_config.yaml` 从不存在、CI 无 Python 覆盖——无规格承诺、无法验证的陈旧面。保留的是活面：本 `rl/` Go 包（轨迹录制、可换模型、HTTPAPI）、`tagent.rl.yaml` 运行时配置、上述离线转换器。重新接训练环的条件：按现行 `areal.*` 布局重写适配器，且其点号模块引用须经 `codetools dotted-refs` 门（仓库内可解析或显式登记外部包）。

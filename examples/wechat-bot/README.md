@@ -71,7 +71,7 @@ graph LR
 | `main.go` | 消息链路装配：配置加载 → `tagent.New` → `StartLoop` → HTTPAPI → 微信 bot 事件绑定 |
 | `file_intake.go` / `file_delivery.go` | 入站接收层 / 出站投递层（各配 `_test.go`） |
 | `tagent.yaml` | 主配置（五 agent + 四子系统 + `mcp_servers` + `app.wechat`） |
-| `tagent.rl.yaml` / `train_rl_config.yaml` / `train_tagent.py` | RL 训练模式配置与脚本 |
+| `tagent.rl.yaml` | RL 运行时模式配置（端点重定向与认证；AReaL 在线训练桥已退役，见 docs/wiki/rl/rl-architecture.md 的退役记录） |
 | `wizard.sh` / `run.sh` / `.env.example` | 部署向导 / 运行入口 / 环境变量模板 |
 | `resources/prompts/` | 系统提示词（`AGENTS.md`/`SOUL.md`/`USER.md`/`TOOLS.md`/`meditation.md`/`plan_*`） |
 | `deploy/` | systemd 单元模板 + 部署指南 |
@@ -95,7 +95,7 @@ graph LR
 ## RL 训练模式
 
 `./run.sh rl` 以 `tagent.rl.yaml` 启动 rollout worker（HTTPAPI + SwappableModel + TrajectoryRecorder），
-另一终端 `./run.sh areal` 起 AReaL 侧；`train_tagent.py` + `train_rl_config.yaml` 为训练入口与配置。
+`./run.sh rl` 以 RL 运行时模式启动（固定 user/session 身份）；在线训练环需按现行 AReaL `areal.*` 布局重接（见 wiki rl-architecture 退役记录与重接条件）。
 轨迹 JSONL 落 `data/trajectories/`，含 `trace_id`/`span_id` 可回跳 OTel trace。
 
 ### HTTPAPI 认证与监听（实施加固 3.x，必读）
