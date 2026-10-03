@@ -20,31 +20,36 @@
 - [~] 3.2 config.go → config/ 包（代码已完成，工作树未提交；背景见 design D12）
   - [x] config/ 五文件成形（config/modelref/clone/lifecycle/config_test）+ 根包 config_alias.go（20 类型别名 + 2 常量 + 2 函数包装）+ IsRemoteRef 导出化 + 4 个注册表系测试并回 registry_test.go + build/vet/config 测试/根包全量 short 57.9s/gen_godoc/hygiene 白名单 全过
 
-  - [ ] 3.2a 清 org_hotreload 最后一条 lint finding
+  - [x] 3.2a 清 org_hotreload 最后一条 lint finding（孤儿行已删；clone.go 的 Clone doc 归一，期间自查出两处自伤：续行漏 `// ` 前缀、doc 与函数间多空行 ⇒ free-standing；最终 comment_policy 0 finding）
     - 对象：`org_hotreload.go` 约 440 行、`orgSubset` 类型 doc 上方的孤儿行，原文恰为：`// Clone returns a private deep copy of the configuration: a published generation`
     - 做法：删除该行；把"私有深拷贝、发布代各自持有快照"这层意思并入 `config/clone.go` 的 `Clone` doc（现 doc 已含 round-trip/ConfigPath/omitempty 三点，补上第一句语义即可）
     - 完成：`go run ./scripts/comment_policy -v . examples/wechat-bot` 输出中 `org_hotreload.go` 零 finding
     - 边界：不许动 orgSubset 自身 doc 与类型体；不许为清 finding 调 `--update-baseline`
 
-  - [ ] 3.2b README 布局表登记 config/ 层
+  - [x] 3.2b README 布局表登记 config/ 层（插在 `agent/` 行之前，合分层顺序；doc-refs 绿）
     - 对象：README.md 的模块表（`| \`agent/\` |` 行起，约 232 行）
     - 做法：在 `agent/` 行**之前**插入一行 `| \`config/\` | 配置模型层：编排声明的类型实体（Config/AgentConfig/ToolRef 族）与 LoadConfig/严格校验/生命周期投影；根包以别名再导出保持 tagent.* API 不变 |`——位置在 agent 之前是分层顺序（root → config → agent）
     - 完成：肉眼核对表行对齐；`bash scripts/lint.sh` 的 doc-refs 段仍绿
     - 边界：只加一行，不重排现有行
 
-  - [ ] 3.2c TestArch_LayeredDependencyDirection 预跑（防 C1 提交即红）
+  - [x] 3.2c TestArch_LayeredDependencyDirection 预跑：PASS(0.73s) 无需最小修正——新 config 包不在既有枚举集合内故不触断言；C2 的 3.5 正式扩集
     - 对象：`guardrails_test.go:90` 的既有分层断言测试
     - 做法：`go test . -run '^TestArch_LayeredDependencyDirection$' -count=1 -v` 直接跑；若因新增 `config` 包而红，**只允许**把 config 加进该测试枚举的包集合（这正是 C2/3.5 的正式扩集的前置信号，先做最小修正让 C1 可提交），并把红的原因记进 3.5 的执行注记
     - 完成：该测试 PASS
     - 边界：不许删除断言、不许放宽既有方向规则；若红因与 config 无关 ⇒ 停，按熔断上报
 
-  - [ ] 3.2d TestLiveSession 并发红定性
+  - [ ] 3.2d TestLiveSession 并发红定性 —— **A/B 后判为"证据不足"，转 6.1 家族任务**
+    - 数据：C1 工作树下 `go test ./... -short -count=1` ×3 → 第2遍红 `TestLiveSessionStaysWatchedAcrossToolGeneration (32.19s)`，两次绿；单包跑 PASS(12.8s)
+    - A/B：worktree 检出无 C1 的 `1478cb1` 同条件 ×3 → 该测试未红，但第3遍红在另一枚 `TestBuildFailure_UnconfirmedReclaimSealsWriter (0.01s)`
+    - 判读：两枚都是全量并行下的间歇；家族先于 C1 存在。1/3 vs 0/3 的样本量既不能归因 C1 也不能排除，**不下结论**
+    - 处置：不在 C1 内修（无判据支撑任何改动）；登记 6.1 采集足够样本后定性
     - 对象：`cross_generation_test.go` 的 `TestLiveSessionStaysWatchedAcrossToolGeneration`（曾于全量 `./...` 并发跑红一次 32.19s；单包复跑绿 12.8s）
     - 做法：连跑三次 `go test ./... -short -count=1`，记录该测试每次结果
     - 完成（二选一，各自闭环）：①三次全绿 ⇒ 在本任务后追加注记"不可复现，三连绿放行"并勾掉；②任一次复现 ⇒ **不在本变更修**，将复现命令与输出追加到 design D12，立新档处理（同族先例：fix-nested-hop-alert-attribution）
     - 边界：禁止用调大 waitFor 预算的方式"处理"；禁止跳过该测试
 
-- [ ] 3.3 C1 提交（前置：3.2a–3.2d 全勾）
+- [x] 3.3 C1 提交 `201da9c`（显式 pathspec；验证墙全绿：build/vet/config+根包 short 57.3s/-race 72.2s/GOMAXPROCS=1 57.2s/lint ok/gen_godoc 39 文件；全新检出 worktree 复核 build+根包测试通过）
+  - 附带更正：前序 `643f56b`（标称 docs）因 `git mv` 立即入索引 + `git commit` 未带 pathspec 而夹带三处零内容重命名，致该 tip 全新检出不可编译；`201da9c` 已使其复健。防复发见 6.2
   - 做法：`gofmt -l .` 为空 → `go build ./...` → `go test ./config/ . -count=1 -short` → `go test . -count=1 -race -short` → `GOMAXPROCS=1 go test . -short -count=1` → `bash scripts/gen_godoc.sh && bash scripts/gen_godoc.sh --check` → `bash scripts/lint.sh` → `openspec validate root-structure-and-hygiene --strict`，全绿后 `git add` 全部 C1 路径（config/、config_alias.go、wiring.go、build_agent.go、org_hotreload.go、partition_collision.go、registry_test.go、scripts/codetools/hygiene.go、docs/api/）提交
   - 完成：提交落库，`git status --short` 为空；tasks 3.2 主项改 [x]
   - 边界：提交信息写明"行为零变更：模型外迁 + 别名层"；不许把 C2 的任何改动混进本提交
@@ -115,3 +120,17 @@
   - 做法：`git push` 后盯 CI 至四 job 绿（test/race/validators/openspec）；`openspec archive root-structure-and-hygiene -y`；`openspec validate --specs --strict`
   - 完成：归档目录出现 `2026-10-XX-root-structure-and-hygiene`，spec 合并计数 +2 ADDED +2 MODIFIED
   - 边界：CI 任一 job 红 ⇒ 停在归档前，先诊断（禁止带着红归档）
+
+## 6. 执行期新增（本变更内发现，未在原计划）
+
+- [ ] 6.1 并行负载敏感测试族定性
+  - 对象：`TestLiveSessionStaysWatchedAcrossToolGeneration`（全量并行 32.19s 超时 / 单包 12.8s 通过）与 `TestBuildFailure_UnconfirmedReclaimSealsWriter`（0.01s 断言红，见于无 C1 基线）
+  - 做法：各以 `go test ./... -short -count=1` 累计 ≥10 轮采集出现率与首次失败包；对超时那枚定位其等待的谓词与并发争用点（同法：worktree 基线对照 + 变异/锚定检验）
+  - 完成：每枚给出"产品缺陷 / 测试归因 / 环境敏感"三选一定性与证据，按结论决定修或另立案
+  - 边界：禁止用调大预算或加跳过让 CI 变绿；CI 亦跑 `./... -short`（2 核），故此族是真实 CI 风险，不是本地噪声
+
+- [ ] 6.2 提交范围与提交信息一致性门
+  - 对象：本变更暴露的失误形态——标称 `docs(openspec)` 的提交夹带代码重命名（`git mv` 即时入索引 + `git commit` 无 pathspec）
+  - 做法：加一条机械检查（`codetools` 子命令或 git 钩子二选一，倾向前者以复用 CI 同命令）：当提交信息前缀为 `docs(` 且 diff 含 `*.go`/`*.sh`/`ci.yml` 变更时非零退出，负路径探针留痕
+  - 完成：探针双红 + 正常 docs 提交不误红；接入 `scripts/lint.sh` 或 validators job
+  - 边界：不许把该门做成"要求所有提交带 pathspec"这类无法机械判定的形式
