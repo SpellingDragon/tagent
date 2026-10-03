@@ -97,7 +97,7 @@
 
 ## 4. P4 巨型测试按域拆分
 
-- [~] 4.1 按域锚切出可独立成域的块（org_hotreload 族已完成，余两文件按 D14 表继续）（recipe 依 D14 修正：同锚多文件必须各有精确生产镜像，故一域一文件、域锚全局唯一）
+- [x] 4.1 按域锚切出可独立成域的块（三文件全完成，实测账见下）（recipe 依 D14 修正：同锚多文件必须各有精确生产镜像，故一域一文件、域锚全局唯一）
   - 做法（org_hotreload_test.go 优先，其余两文件按 D14 表执行）：
     1. 新文件 `org_hotreload_fingerprint_test.go`：承载 8 个指纹域 test（`TestOrgFingerprint_*` 4 枚 + `TestMemoryFingerprint_*` + `TestModelRefAliasesFoldToStableFingerprint` + `TestFingerprintFold*` 2 枚）与专属 helper（`cfgFor`、`ownerYAMLWithModel`、`writeBumped`、`aliasYAML`、`writeCfg`），文件头**首行**即 `// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint`
     2. 新文件 `org_hotreload_timing_test.go`：`#trigger-timing` 域 4 枚 test + `buildPark`/`newBuildPark`/`waitEntered`/`letGo`/`disarm`/`acquireWithin`/`genOf` helper，头锚 `#trigger-timing`
