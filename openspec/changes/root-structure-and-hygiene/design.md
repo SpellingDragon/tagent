@@ -40,3 +40,14 @@ P1 卫生（无行为）→ P2 train/ 挪移（纯路径）→ P3 拆包（接�
 ## D7 dotted-refs 门的最小形状
 
 只查**机器会真去 import 的位置**：shell 中 `python -m`/`python3 -m` 的后续 token、yaml 中 `workflow:` 的值。解析规则：点号换斜杠后在仓库内存在对应 `.py` 即通过；否则必须命中显式外部允许表（初值为空）。不做全文件点号 token 扫描——`scheduler.type=local` 这类配置覆盖语法会被误伤，门的强度来自位置精确而非范围贪大。
+
+## D8 P3 前置盘点结论（3.1 落档）：三个依赖点，全部可切
+
+对五文件与根包的耦合逐点核实（非猜测，逐行）：
+
+1. **store-owner 注册表自包含**：`storeOwners/storeOwnersMu` 字段只在 `partition_collision.go` 内部出现，三个方法（register/unRegister/ownedAgentNames）的全部外呼只有 `build_agent.go` 两处（构建期注册、`SetStoreOwnerRevoker` 闭包）与 `org_candidate_txn.go` 一处——可作为独立类型整体移入 `agent/org`，根包持引用并调用（方向 root→agent 合规）。
+2. **resident 缓存已是封装类型**：`rc.resident` 的使用全部经其自身 API（Snapshot/Get/Add/Unpublish），overlay 不碰内部；`residentMemFP` 的唯一写者就是 overlay 自己，属组织族自管状态，随族迁移。
+3. **buildAgent 可闭包化**：`org_candidate_overlay.go:66` 把 rc 整个传给 buildAgent——改为根包构造 `ShellBuilder` 闭包（捕获 rc+loader），`agent/org` 只见回调签名。
+
+据此 `agent/org` 的注入契约定格为三件：`ShellBuilder`（重建执行壳）、resident 缓存句柄、store-owner 注册表。`runtimeConfig` 本体不动、不留反向 import；D5 的熔断条件（写回运行态无法快照化）**未触发**——`residentMemFP` 是可随族迁移的族内状态，不是装配运行态。
+

@@ -15,7 +15,7 @@
 
 ## 3. P3 世代族拆包 agent/org
 
-- [ ] 3.1 前置：枚举五文件对 runtimeConfig 的 7 处读写语义，定 `ShellRuntime` 快照与 `ShellBuilder` 契约（若发现写回运行态等无法快照化的用法，停下上报）
+- [x] 3.1 契约定格为三件注入（ShellBuilder 闭包 / resident 句柄 / store-owner 注册表整体迁移），熔断未触发；逐行证据见 design D8
 - [ ] 3.2 `agent/org` 建包：`git mv` org_hotreload/org_candidate_txn/org_candidate_overlay/owner_retirement/partition_collision；asset_drift 留根包
 - [ ] 3.3 根包注入点装配 + `Org*` 类型别名 + TagentAgent 薄委托；`go build ./...`、分层机械断言测试绿
 - [ ] 3.4 `gen_godoc` 重生成；根包/agent plain+race、`GOMAXPROCS=1` 根包、lint、openspec strict 全绿；提交
