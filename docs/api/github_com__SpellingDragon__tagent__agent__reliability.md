@@ -58,6 +58,11 @@ var (
 	// pre-lock fast-check raced a completed Close cannot register afterwards.
 	ErrInboxClosed = errors.New("reliability: inbox closed")
 )
+var ErrInboxOwned = errors.New("reliability: inbox directory already owned by a live instance")
+    ErrInboxOwned reports that the inbox directory already has a live owner.
+    Ownership is one instance per directory: opening performs recovery writes
+    and each instance derives its own sequence start, so two owners would
+    requeue each other's items and allocate the same final path.
 
 TYPES
 
@@ -179,11 +184,14 @@ type Inbox struct {
 }
     Inbox is the durable input mailbox (concurrency-safe).
 
-func NewInbox(dir string, maxPending int) (*Inbox, error)
+func NewInbox(dir string, maxPending int) (opened *Inbox, retErr error)
     NewInbox opens (or creates) an inbox-v2 at dir. On reopen: claimed items
     WITHOUT a receipt go back to pending (the crash may have happened anywhere
     between claim and receipt — replay is the safe default); receipted items
     stay receipted so the consumer Ack-skips them without re-executing.
+    Opening claims directory ownership for the returned instance. A failure
+    after the claim gives it back, so a refused open never wedges the directory,
+    and Close hands ownership over to the next process.
 
 func (in *Inbox) Ack(path string) error
     Ack removes a confirmed envelope. Idempotent: a repeated Ack (or a lost

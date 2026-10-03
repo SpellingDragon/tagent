@@ -2,7 +2,8 @@
 
 ## 1. fail-before 留痕
 
-- [ ] 1.1 `GOMAXPROCS=1 go test . -run '^TestRollbackOfHotAddNumericWithInFlightTurn$' -count=8` 记录当前失败率（诊断实测 5/8）与「空转通过」结论（gate 从未拦截）入 change 目录
+- [x] 1.1 `GOMAXPROCS=1 go test . -run '^TestRollbackOfHotAddNumericWithInFlightTurn$' -count=8` 记录当前失败率（诊断实测 5/8）与「空转通过」结论（gate 从未拦截）入 change 目录
+      —— 实测 3/24（batch0 1/8、batch1 0/8、batch2 2/8），见 `fail-before.log`；该任务顺带证伪了本任务的排空前提：告警轮实为 2 枚且可合批，绝对计数阈值不成立（结论 3），待裁决后改写 2.1
 
 ## 2. 编排与断言修复（仅 org_candidate_test.go）
 

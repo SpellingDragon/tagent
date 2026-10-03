@@ -330,6 +330,16 @@ func (b *EventBus) CloseDurable() error {
 	return b.inbox.Close()
 }
 
+// durableInbox returns THIS bus's own inbox owner handle, nil in volatile mode.
+// A caller that needs inbox operations while the bus is live uses the owner here
+// instead of opening a second instance over the same directory.
+func (b *EventBus) durableInbox() *reliability.Inbox {
+	if b == nil {
+		return nil
+	}
+	return b.inbox
+}
+
 // DurablePending returns the unconfirmed durable envelope count (diagnostics).
 func (b *EventBus) DurablePending() int64 {
 	if b == nil || b.inbox == nil {

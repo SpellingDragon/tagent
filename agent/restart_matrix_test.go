@@ -139,9 +139,9 @@ func restartChildRound(round int, root string) {
 		creds[path] = cred
 	}
 	if target == "post-receipted" {
-		in2, err := reliability.NewInbox(filepath.Join(root, "inbox"), 0)
-		if err != nil {
-			childFatal("leaf: " + err.Error())
+		in2 := ta.contextManager.bus.durableInbox()
+		if in2 == nil {
+			childFatal("durable inbox unavailable")
 		}
 		for _, path := range paths {
 			if err := in2.RecordReceipt(path, creds[path]); err != nil {
@@ -178,7 +178,7 @@ func TestDeterministicIndependentRestarts(t *testing.T) {
 		require.NoError(t, err, "round %d (%s/%s) child:\n%s", round, mode, target, out)
 		require.Contains(t, string(out), fmt.Sprintf("RECON r=%d", round), "every round must start with a real reconcile pass")
 
-		store, _, _ := r30Stack(root)
+		store, bus, _ := r30Stack(root)
 		refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{1}, Limit: 1000})
 		require.NoError(t, err)
 		seen := map[int64]bool{}
@@ -214,6 +214,7 @@ func TestDeterministicIndependentRestarts(t *testing.T) {
 		} else if len(envs) == 0 {
 			t.Logf("round %d post-ack: inbox drained — no envelope identity claim made this round", round)
 		}
+		require.NoError(t, bus.CloseDurable())
 		require.NoError(t, store.Close())
 	}
 

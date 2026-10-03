@@ -16,9 +16,19 @@
 - 实现：`//go:build unix` 文件承载 `syscall.Flock`；其余平台提供语义为「恒成功」的 no-op 并在 Godoc 标注——锁是防事故的栏杆，不是可移植性承诺的 hostage。
 - 被否方案：锁文件 `O_CREATE|O_EXCL` + 心跳/陈旧判定——引入超时语义与孤儿锁回收问题，复杂度远超收益；flock 由内核在进程死亡时自动释放，正是这里的正确工具。
 
-## D3 测试探针不得带写副作用
+## D3 活跃目录上的访问一律经唯一属主
 
-`resident_e2e` 原本在同目录开第二个 `Inbox` 读 `Outstanding()`，但 `NewInbox` 的打开即执行 claimed→pending 的 requeue 写。改为消费总线已有的 `DurablePending()`（`agent/event_bus.go:334`）——诊断走只读面，属主语义不被探针破坏。若该面缺少 e2e 所需的字段，在总线上补只读导出，而不是回去开第二个实例。
+`resident_e2e` 原本在同目录开第二个 `Inbox` 读 `Outstanding()`，但 `NewInbox` 的打开即执行 claimed→pending 的 requeue 写——探针带着写副作用，还正是 CI 上撞名的两个写入者之一。flock 落地后这类用法一律改造，**不新增导出 API**：
+
+- 只证"ack 后无残留"的探针：移到 `ta.Close()` 之后再打开（`Inbox.Close` 明确不动盘上未确认项，语义保真），此时它是唯一属主；
+- 需要属主写面（写收据）的崩溃重启模拟：同样先释放前一属主再打开，落盘状态由前一段生命周期写好，被测语义不变；
+- 中途观测计数：走总线已有的只读面 `DurablePending()`。
+
+被否方案：把活跃 inbox 的句柄导出（`EventBus.DurableInbox()`）——那等于把属主写权发给任意调用方，与本变更要立的"一目录一属主"直接对冲。
+
+## D6 实现期发现的迁移面（比立法时预估大）
+
+立法只点到 `resident_e2e` 一处。落地前普查 `NewInbox` 全部调用点（25 处），确认生产侧本就单属主：`build_agent.go` 只在 `!mode.isExecutorShell()` 时下发 `BusSpillDir`，热更壳不领目录，故 flock 不改变生产行为。测试侧需要改造的是四处"在同目录上开第二个实例"的用法：`inbox_test` 两处 reopen（未 Close 就重开）、`restart_matrix:141` 与 `execution_gate:841`（借第二个实例写收据）、`resident_e2e:372`（探针）。另确认 `org_candidate.seedUnackedEnvelope` 播种时目录无活属主，不动。
 
 ## D4 fail-before 的构造
 

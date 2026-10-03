@@ -3,6 +3,7 @@ package reliability
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,25 @@ var syncDirFunc = syncDir
 // way to interleave a completed Close with an in-flight Enqueue and prove the two
 // are coordinated under one lock. Always nil in production.
 var testGateHook func()
+
+// ErrInboxOwned reports that the inbox directory already has a live owner.
+// Ownership is one instance per directory: opening performs recovery writes and
+// each instance derives its own sequence start, so two owners would requeue each
+// other's items and allocate the same final path.
+var ErrInboxOwned = errors.New("reliability: inbox directory already owned by a live instance")
+
+// errLocked is the platform layer's signal that the directory lock is held.
+var errLocked = errors.New("reliability: inbox directory lock held")
+
+// newWriterID mints this instance's identity for temp-file names: pid plus a
+// random tag, so no other instance in the same process computes the same name.
+func newWriterID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d-x", os.Getpid())
+	}
+	return fmt.Sprintf("%d-%x", os.Getpid(), b)
+}
 
 // testWriteStageHook, when non-nil (TEST ONLY), is called by writeEnvelopeFile
 // right AFTER the tmp file is written+fsynced+closed (stage "tmp") and right
@@ -196,8 +216,16 @@ type ReceiptCredential struct {
 
 // Inbox is the durable input mailbox (concurrency-safe).
 type Inbox struct {
-	dir       string
-	max       int
+	dir string
+	max int
+
+	// writerID identifies THIS owner in temp-file names. Pid alone is not enough:
+	// two instances in one process compute the same name, then wedge each other and
+	// delete each other's in-flight temp file on their own error paths.
+	writerID string
+	tmpSeq   atomic.Uint64
+	// lock is the directory ownership claim taken at open and dropped at Close.
+	lock      *dirLock
 	mu        sync.Mutex
 	seq       atomic.Int64
 	pending   atomic.Int64
@@ -231,7 +259,10 @@ type owedCleanup struct {
 // WITHOUT a receipt go back to pending (the crash may have happened anywhere
 // between claim and receipt — replay is the safe default); receipted items
 // stay receipted so the consumer Ack-skips them without re-executing.
-func NewInbox(dir string, maxPending int) (*Inbox, error) {
+// Opening claims directory ownership for the returned instance. A failure after the
+// claim gives it back, so a refused open never wedges the directory, and Close hands
+// ownership over to the next process.
+func NewInbox(dir string, maxPending int) (opened *Inbox, retErr error) {
 	if dir == "" {
 		return nil, fmt.Errorf("reliability: inbox requires non-empty dir")
 	}
@@ -248,11 +279,23 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 	if err := syncDirFunc(envDir); err != nil {
 		return nil, fmt.Errorf("reliability: inbox dir sync at open: %w", err)
 	}
+	lock, holder, lockErr := acquireDirLock(envDir)
+	if lockErr != nil {
+		if lockErr == errLocked {
+			return nil, fmt.Errorf("reliability: inbox %s is already owned by a live instance (holder %s): %w", envDir, holder, ErrInboxOwned)
+		}
+		return nil, fmt.Errorf("reliability: claim inbox dir ownership: %w", lockErr)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = lock.release()
+		}
+	}()
 	if err := checkQuarantineDispositioned(filepath.Join(envDir, inboxQuarantine)); err != nil {
 		return nil, err
 	}
 	transitional := classifyTransitional(filepath.Dir(envDir))
-	in := &Inbox{dir: envDir, max: maxPending, dead: make(chan struct{}), cleanupOwed: map[string]owedCleanup{}, transitional: transitional}
+	in := &Inbox{dir: envDir, max: maxPending, dead: make(chan struct{}), cleanupOwed: map[string]owedCleanup{}, transitional: transitional, writerID: newWriterID(), lock: lock}
 
 	entries, err := os.ReadDir(envDir)
 	if err != nil {
@@ -286,7 +329,7 @@ func NewInbox(dir string, maxPending int) (*Inbox, error) {
 		case InboxStateClaimed:
 			env.State = InboxStatePending
 			env.Attempts++
-			if _, werr := writeEnvelopeFile(filepath.Join(envDir, name), env); werr != nil {
+			if _, werr := in.writeEnvelopeFile(filepath.Join(envDir, name), env); werr != nil {
 				return nil, fmt.Errorf("reliability: requeue claimed %s: %w", name, werr)
 			}
 			unconfirmed++
@@ -440,7 +483,7 @@ func (in *Inbox) Enqueue(env *Envelope) (int64, error) {
 		env.Messages[i].Slot = i
 	}
 	path := in.seqPath(n)
-	oc, werr := writeEnvelopeFile(path, env)
+	oc, werr := in.writeEnvelopeFile(path, env)
 	if oc == outcomePublishUncertain {
 		in.pending.Add(1)
 		return 0, fmt.Errorf("%w: sequence %d retained: %v", ErrReceiveUncertain, n, werr)
@@ -478,7 +521,7 @@ func (in *Inbox) ClaimNext() (*Envelope, string, error) {
 	}
 	env.State = InboxStateClaimed
 	env.Attempts++
-	if _, werr := writeEnvelopeFile(path, env); werr != nil {
+	if _, werr := in.writeEnvelopeFile(path, env); werr != nil {
 		return nil, "", fmt.Errorf("reliability: claim rewrite: %w", werr)
 	}
 	return env, path, nil
@@ -520,7 +563,7 @@ func (in *Inbox) PrepareFacts(path, receiptKey string, facts []json.RawMessage) 
 		env.Messages[i].PreparedVersion = PreparedVersionCurrent
 	}
 	env.ReceiptKey = receiptKey
-	if _, werr := writeEnvelopeFile(path, env); werr != nil {
+	if _, werr := in.writeEnvelopeFile(path, env); werr != nil {
 		return fmt.Errorf("reliability: prepare write: %w", werr)
 	}
 	return nil
@@ -574,7 +617,7 @@ func (in *Inbox) ReleaseClaim(path string) error {
 		return nil
 	}
 	env.State = InboxStatePending
-	if _, werr := writeEnvelopeFile(path, env); werr != nil {
+	if _, werr := in.writeEnvelopeFile(path, env); werr != nil {
 		return fmt.Errorf("reliability: release claim write: %w", werr)
 	}
 	return nil
@@ -596,7 +639,7 @@ func (in *Inbox) RecordCompletion(path string, completion json.RawMessage) error
 		return fmt.Errorf("%w: %s", ErrCompletionConflict, path)
 	}
 	env.Completion = completion
-	if _, werr := writeEnvelopeFile(path, env); werr != nil {
+	if _, werr := in.writeEnvelopeFile(path, env); werr != nil {
 		return fmt.Errorf("reliability: completion write: %w", werr)
 	}
 	return nil
@@ -631,7 +674,7 @@ func (in *Inbox) RecordReceipt(path string, cred ReceiptCredential) error {
 		return fmt.Errorf("reliability: receipt refused — envelope %s credential key %q does not match reserved receipt key (unverified receipt)", path, cred.ReceiptKey)
 	}
 	env.State = InboxStateReceipted
-	if _, werr := writeEnvelopeFile(path, env); werr != nil {
+	if _, werr := in.writeEnvelopeFile(path, env); werr != nil {
 		return fmt.Errorf("reliability: receipt write: %w", werr)
 	}
 	return nil
@@ -870,6 +913,10 @@ func (in *Inbox) Close() error {
 	in.closed = true
 	in.mu.Unlock()
 	in.closeOnce.Do(func() { close(in.dead) })
+	if err := in.lock.release(); err != nil {
+		return fmt.Errorf("reliability: release inbox dir ownership: %w", err)
+	}
+	in.lock = nil
 	return nil
 }
 
@@ -1028,12 +1075,12 @@ func readEnvelope(path string) (*Envelope, error) {
 	return &env, nil
 }
 
-func writeEnvelopeFile(path string, env *Envelope) (writeOutcome, error) {
+func (in *Inbox) writeEnvelopeFile(path string, env *Envelope) (writeOutcome, error) {
 	raw, err := json.Marshal(env)
 	if err != nil {
 		return outcomeNotPublished, fmt.Errorf("marshal envelope: %w", err)
 	}
-	tmp := path + fmt.Sprintf(".%d.tmp", os.Getpid())
+	tmp := path + fmt.Sprintf(".%s.%d.tmp", in.writerID, in.tmpSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return outcomeNotPublished, fmt.Errorf("create inbox tmp: %w", err)

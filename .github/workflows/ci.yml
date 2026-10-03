@@ -93,8 +93,8 @@ jobs:
       # command (compile error / bad package / timeout) can never be reported
       # as success. Package set widened to the memory SUBpackages, plugin, and
       # rl (was: top-level memory only, no plugin/rl).
-      - name: Race (memory subpkgs + agent + evolution + event + tools + plugin + rl)
-        run: ./scripts/race_check.sh ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
+      - name: Race (root + memory subpkgs + agent + evolution + event + tools + plugin + rl)
+        run: ./scripts/race_check.sh . ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
