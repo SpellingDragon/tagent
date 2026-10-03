@@ -88,4 +88,10 @@ if ! go run ./scripts/codetools proc-refs scripts .github/workflows; then
   exit 1
 fi
 
+# 索引内容必须非空、不是运行期产物、顶层目录已登记（specs/architecture-guardrails：组合根物理边界与追踪卫生）
+if ! go run ./scripts/codetools tracked-hygiene; then
+  echo "lint: tracked content violates the repository hygiene rules listed above"
+  exit 1
+fi
+
 echo "lint: ok"
