@@ -17,3 +17,8 @@
 
 - [x] 4.1 验证墙：codetools 单测 ok、tracked-hygiene exit 0、lint ok、bot 模块 build+test ok、根包 short 58.3s ok、全量 33 包零 FAIL。门在本次落地过程中两次自证有效：抓到 check-ignore 陷阱之外的真债（13 个 tracked∧ignored），又抓到我用 rm -rf 撤旧 delta 造成的 tracked-path-missing（索引未清），故改判为正规 git rm `openspec validate --strict`、`go build ./...`（应无影响）；push 并确认 CI 四 job 绿
 - [x] 4.2 范围外声明保持（`.pre-isolation-backup/`、`.tagent-workspace/`、`.agents/`、`.qoder-handover.log` 不属追踪卫生判断面） 范围外声明已在 proposal 落档（`.pre-isolation-backup` 等不动）
+
+## 5. 本档暴露的门自身缺陷（追加）
+
+- [x] 5.1 `commit-scope` 在 CI 浅克隆下误判全树为代码路径 → 无父提交时弃权 + test job `fetch-depth: 2`；复现与验证都在 `file://` 深度 1/2 克隆中完成（见 D5）
+- [ ] 5.2 push 后确认 CI 四 job 绿，再归档本档

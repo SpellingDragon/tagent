@@ -72,10 +72,23 @@ func commitSubject(ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// hasParent reports whether ref has a reachable parent commit. A shallow CI
+// checkout (actions/checkout defaults to fetch-depth 1) grafts HEAD into a
+// parentless commit, where `git show --name-only` lists the WHOLE tree and every
+// commit would look like it carries every code path. Without a parent there is no
+// diff to judge, so the gate abstains rather than inventing findings.
+func hasParent(ref string) bool {
+	return exec.Command("git", "rev-parse", "--verify", "-q", ref+"^").Run() == nil
+}
+
 func runCommitScope(args []string) int {
 	ref := "HEAD"
 	if len(args) > 0 && args[0] != "" {
 		ref = args[0]
+	}
+	if !hasParent(ref) {
+		fmt.Printf("commit-scope: %s has no reachable parent (shallow checkout or root commit) — abstaining\n", ref)
+		return 0
 	}
 	subject, err := commitSubject(ref)
 	if err != nil {

@@ -15,3 +15,10 @@
 ## D4 判据落点与防回归
 
 判定函数 `checkTrackedAndIgnored(ignored []string)` 是纯函数（列表由 live 命令喂入），单测覆盖逐路径具名拒绝与空集干净；负样本用 `git add -f probe_tracked.log` 现场验证 exit 1、撤除后 exit 0。规格侧并入既有条文（MODIFIED），不新开 capability，避免同一规则两处真相。
+
+## D5 本档暴露的门自身缺陷：CI 浅克隆下 HEAD 像根提交（修复必须在 CI 环境里证）
+
+`commit-scope`（上一档新增）在 CI 上把 HEAD 判成"带 1397 个代码路径"：`actions/checkout` 默认 `fetch-depth: 1`，浅克隆**嫁接** HEAD ⇒ `HEAD^` 不可解析、`git show --name-only` 退化为全树列举。两处修：① 无可达父提交时**弃权并说明原因**（根提交合法携带代码，门不能凭空造 finding）；② test job 的 checkout 设 `fetch-depth: 2`，让门在 CI 上真能比对差异。
+
+方法论记账：我先前"本地 exit 0"的证明无效——**本地路径式 `git clone --depth 1` 共享对象库，不发生嫁接**，所以复现不出来。有效复现必须用 `file://` 传输（实测 `HEAD^` 解析失败 + 1397 文件），修复的验证也在同一环境做完（depth1 弃权 exit 0；depth2 差异 1 文件 exit 0）。规则：**门要在它真正运行的环境里证**。
+

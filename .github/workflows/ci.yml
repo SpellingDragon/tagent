@@ -19,7 +19,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 2 gives the commit-scope lint stage a parent to diff against:
+      # the default shallow checkout grafts HEAD into a parentless commit, where
+      # `git show --name-only` lists the whole tree.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-go@v5
         with:
