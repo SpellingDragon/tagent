@@ -51,3 +51,23 @@ P1 卫生（无行为）→ P2 train/ 挪移（纯路径）→ P3 拆包（接�
 
 据此 `agent/org` 的注入契约定格为三件：`ShellBuilder`（重建执行壳）、resident 缓存句柄、store-owner 注册表。`runtimeConfig` 本体不动、不留反向 import；D5 的熔断条件（写回运行态无法快照化）**未触发**——`residentMemFP` 是可随族迁移的族内状态，不是装配运行态。
 
+## D9 熔断触发（3.2 第一步）：原 P3 计划与既有立法「组合根独占编排发布权」相撞
+
+逐行核对五文件对根包配置模型的依赖后发现，切割可行性差异极大：
+
+| 文件 | 对 `Config`/`AgentConfig` 的依赖 | 对 runtimeConfig/buildAgent 的依赖 | 可否今日迁出根包 |
+|---|---|---|---|
+| `owner_retirement.go` | **0** | **0** | **可**（纯机制：ledger + 注入回调） |
+| `org_candidate_txn.go` | 0 | 3 | 可（D8 的三件注入即可） |
+| `org_candidate_overlay.go` | 1 | 4 | 勉强（含 buildModeResident 语义） |
+| `org_hotreload.go` | **12** | 1 | 不可（整个类型在 Config 模型上） |
+| `partition_collision.go` | 混合（fingerprint/changed/reachable/remote 全以 `*Config` 为入参） | 注册表方法挂在 runtimeConfig | 一半可 |
+
+真正的拦路不是耦合量，而是**立法冲突**：`architecture-guardrails` 的「唯一编排发布权与中性契约」明文规定——组合根 SHALL 独占编排执行绑定的构造与发布，内部包 MUST NOT 依赖根包或编排内部状态。`org_hotreload.go` 的 `orgCoordinator`（swap/publish/generation）**就是那个发布权本身**：把它移进 `agent/org` 等于把组合根的特权下放给内部包，与既有裁决直接相反；而它一旦留在根包，其类型就必须能引用根包 `Config`。
+
+因此按 D5 停下，不自作主张改立法。三条出路（详见会话记录）：
+
+1. **保守切**：只把 `owner_retirement.go`（零依赖）与 `org_candidate_txn.go`（三件注入）移出，`org_hotreload.go`+overlay+collision 留根包并在 wiki 标注"物理上即发布权所在"。收益：根包 −334 行；语义：机制与特权分离，合法。
+2. **先抽配置模型再切**：`config.go`(+builtin/registry) 移入新包 `config`，根包保留 `type Config = config.Config` 等别名与 `LoadConfig` 包装（源码级兼容）。之后 Config 依赖不再是留守理由，`org_hotreload` 的**机制部分**（代数、指纹、可达集）可迁 `agent/org`，只留发布动作在根。收益最大，改动面与验证成本也最大。
+3. **判定现布局合法**：接受"根包=装配+发布+世代机制"，只做文件分组与职责索引（已由 `契约:` 行完成），不再移动代码。收益最小但零风险。
+

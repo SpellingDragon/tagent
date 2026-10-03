@@ -16,7 +16,7 @@
 ## 3. P3 世代族拆包 agent/org
 
 - [x] 3.1 契约定格为三件注入（ShellBuilder 闭包 / resident 句柄 / store-owner 注册表整体迁移），熔断未触发；逐行证据见 design D8
-- [ ] 3.2 `agent/org` 建包：`git mv` org_hotreload/org_candidate_txn/org_candidate_overlay/owner_retirement/partition_collision；asset_drift 留根包
+- [ ] 3.2 **暂停，待裁决（D9）**：原计划把五件全迁 `agent/org`，与既有立法「唯一编排发布权」相撞（org_hotreload 的 orgCoordinator 就是发布权本身，且 12 处类型在根包 Config 上）。出路 1/2/3 见 D9
 - [ ] 3.3 根包注入点装配 + `Org*` 类型别名 + TagentAgent 薄委托；`go build ./...`、分层机械断言测试绿
 - [ ] 3.4 `gen_godoc` 重生成；根包/agent plain+race、`GOMAXPROCS=1` 根包、lint、openspec strict 全绿；提交
 
