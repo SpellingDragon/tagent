@@ -21,4 +21,4 @@
 ## 5. 本档暴露的门自身缺陷（追加）
 
 - [x] 5.1 `commit-scope` 在 CI 浅克隆下误判全树为代码路径 → 无父提交时弃权 + test job `fetch-depth: 2`；复现与验证都在 `file://` 深度 1/2 克隆中完成（见 D5）
-- [ ] 5.2 push 后确认 CI 四 job 绿，再归档本档
+- [x] 5.2 tip 46829c1 CI 四 job 全绿；日志中 abstaining 出现 0 次 ⇒ 门在 CI 上真判定并通过。已归档
