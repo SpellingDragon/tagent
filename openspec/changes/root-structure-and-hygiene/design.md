@@ -90,3 +90,26 @@ D9 的出路 2 并入本变更，与 D8 三件注入合并为终版。层与归�
 3. **C3 org 机制外迁**：三文件 `git mv` 入 `agent/org`；`StoreOwnerRegistry` 接口 + `ShellBuilder` 闭包接线；根包调用点改造；`docs/api` 重生成。
 4. **C4 验证墙**：`go build ./...`、根包+agent+config plain/race、`GOMAXPROCS=1` 根包、bot 模块、lint 全家（两道新门+doc-refs+gen_godoc --check）、openspec strict；每步一提交。
 
+## D12 C1 执行实录（进行中，2026-10-04；本轮暂停于"只差机械收尾"）
+
+**已完成（工作树持有，未提交）**：
+
+- `config/` 包成形：`config.go`（模型+LoadConfig）、`modelref.go`（整文件随迁）、`clone.go`（`Clone` 从 org_hotreload 摘出）、`lifecycle.go`（`ResolveLifecycleConfig` 从 wiring 摘出并导出）、`config_test.go`（随包迁移）。
+- 根包 `config_alias.go`：20 个类型别名 + 2 常量 + 2 函数包装，公共 API 源码级不变；`IsRemoteRef` 由未导出方法导出化（根侧 2 处调用点同步）。
+- `config_test.go` 里 4 个注册表系测试（DefaultConfigBuildable/ToolRegistry×2/RegisterBuiltinTools_Idempotent）并回根侧 `registry_test.go`——它们测装配动作而非模型，colocation 门的判定与设计一致。
+- 验证已过：`go build ./...`、`go vet`、`go test ./config/`、**根包全量 short 57.9s 绿**、`gen_godoc` 重生成（39 文件）、hygiene 门（config 已登记白名单）。
+
+**计划外的发现（D10 未预见，逐条入档）**：
+
+1. `Config` 的方法散布三处而非一处：`modelref.go` 整文件、`org_hotreload.go` 的 `Clone`、`wiring.go` 的 `resolveLifecycleConfig`——Go 不允许跨包给别名定义方法，三处都必须随模型迁移。教训：**外迁一个类型前先 grep 它的全部方法定义点**，文件名不等于类型边界。
+2. 别名层不是"零文档"层：comment_policy 对每个再导出符号都要求 doc（24 条 missing-symbol-doc 教训），别名也要逐符号写明"别名：实体在 config 包"。
+3. 测试随包迁移有连锁账单：fixture 相对路径（`examples/…` → `../examples/…`）、文件头职责索引重立、原文件的孤儿 doc 注释要跟着测试走（我摘函数体时把 doc 留在原地，制造了 free-standing）。
+
+**剩余收尾清单（恢复执行时从这继续）**：
+
+1. 清最后 1 条 finding：`org_hotreload.go:444` orgSubset 上方还挂着 Clone doc 的残行（第二次犯同类错——摘方法时 doc 没跟走），把残行并入 `config/clone.go` 的 Clone doc。
+2. `TestLiveSessionStaysWatchedAcrossToolGeneration` 在全量 `./...` 并发跑时红过一次（32.19s），单包复跑绿（12.8s）——**未定性**。C1 提交前必须全量复跑定性：若可复现则按既有家族（调度敏感）立案，不可复现则三连绿后放行并留痕。
+3. `guardrails_test.go` 的 `TestArch_LayeredDependencyDirection` 扩集（config 层 + agent 主体不 import config）——属 C2（task 3.5），但 C1 提交时该测试现状仍是旧方向集，需确认其不会因新包出现而误红（预跑一次）。
+4. README 布局表补 `config/` 一行（与白名单登记同批的纪律，白名单已登记、README 未写）。
+5. 全量 short + lint + `GOMAXPROCS=1` 根包 + openspec strict 全绿后，C1 提交（task 3.2/3.3 落勾）。
+

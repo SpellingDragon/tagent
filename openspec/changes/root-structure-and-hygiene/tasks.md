@@ -17,7 +17,14 @@
 
 ### C1 配置模型外迁 config 包
 
-- [ ] 3.2 config.go → config/ 包（类型模型 + LoadConfig；builtin.go/registry.go 留根）；根包别名层 `config_alias.go` 恢复全部导出面（盘点 25 个符号逐一核对）；编译驱动修完根内引用
+- [~] 3.2 config.go → config/ 包 —— **代码已完成，工作树未提交**（详见 design D12 实录：三处散布方法已随迁、别名层已建、config+根包测试绿；剩 1 条 orgSubset doc 残行、README 布局行、分层断言预跑）
+  - [x] config/ 五文件成形（config/modelref/clone/lifecycle/config_test）
+  - [x] config_alias.go 别名层（20 类型 + 2 常量 + 2 函数）+ IsRemoteRef 导出化
+  - [x] 4 个注册表系测试并回 registry_test.go（colocation 判定与设计一致）
+  - [x] build/vet/config 测试/根包全量 short 57.9s/gen_godoc/hygiene 白名单 全过
+  - [ ] 清 org_hotreload.go:444 orgSubset doc 残行（Clone doc 第二次没跟走）
+  - [ ] README 布局表补 config/ 行；TestArch_LayeredDependencyDirection 预跑确认不误红
+  - [ ] TestLiveSession 全量并发红（32.19s，单跑绿）定性后处置
 - [ ] 3.3 C1 全绿提交（build/vet/根包 short/别名面抽样测试）
 
 ### C2 纯查询随迁 + 分层立法修订
