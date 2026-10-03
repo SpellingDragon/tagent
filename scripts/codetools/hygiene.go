@@ -22,7 +22,7 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 // and loose root files are outside this rule: the former are tool and runtime
 // space, the latter are the composition-root package's own sources.
 var registeredTopDirs = map[string]bool{
-	".github": true, "agent": true, "docs": true, "evals": true,
+	".github": true, "agent": true, "config": true, "docs": true, "evals": true,
 	"event": true, "evolution": true, "examples": true, "internal": true,
 	"memory": true, "modelutil": true, "openspec": true, "plugin": true,
 	"prompt": true, "prototype": true, "resources": true, "rl": true,

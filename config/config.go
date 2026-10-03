@@ -1,5 +1,5 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#config-surface
-package tagent
+package config
 
 import (
 	"fmt"
@@ -581,15 +581,15 @@ type RemoteConfig struct {
 	URL string `json:"url" yaml:"url"`
 }
 
-// isRemoteRef reports whether this reference resolves OUTSIDE the local agents
-// map — i.e. whether the construction domain (buildAgentToolRef) takes its A2A
-// branch.「校验域与构建域一致，远端引用不误要求本地定义」: this is the ONE
-// predicate both domains use. Two separate spellings of "is this remote" is
-// exactly how validation came to demand a local definition that construction
-// never asks for — rejecting a deployment whose sub-agent lives in another
-// service — while a Remote block with a blank URL sailed through validation and
-// was then quietly built as a LOCAL agent, contrary to what it declared.
-func (tr ToolRef) isRemoteRef() bool {
+// IsRemoteRef reports whether this ToolRef declares a remote A2A target: the
+// decision demands a non-blank Remote URL. The bar is deliberate: this is the ONE
+// predicate both the validation domain and the construction domain
+// (buildAgentToolRef's A2A branch) use — two separate spellings of "is this
+// remote" is exactly how validation came to demand a local definition that
+// construction never asks for, while a Remote block with a blank URL sailed
+// through validation and was then quietly built as a LOCAL agent, contrary to
+// what it declared.
+func (tr ToolRef) IsRemoteRef() bool {
 	return tr.Remote != nil && strings.TrimSpace(tr.Remote.URL) != ""
 }
 
@@ -792,7 +792,7 @@ func (c *Config) Validate() error {
 
 	for name, ac := range c.Agents {
 		for i, tr := range ac.Tools {
-			if tr.Kind == ToolKindAgent && tr.AgentID != "" && !tr.isRemoteRef() {
+			if tr.Kind == ToolKindAgent && tr.AgentID != "" && !tr.IsRemoteRef() {
 				if _, ok := c.Agents[tr.AgentID]; !ok {
 					return fmt.Errorf("tagent config: agent %q tool[%d] references unknown agent %q",
 						name, i, tr.AgentID)
@@ -818,7 +818,7 @@ func (ac *AgentConfig) validate(name string) error {
 			if tr.AgentID == "" {
 				return fmt.Errorf("agent %q: tools[%d] agent kind requires agent id", name, i)
 			}
-			if tr.Remote != nil && !tr.isRemoteRef() {
+			if tr.Remote != nil && !tr.IsRemoteRef() {
 				return fmt.Errorf("agent %q: tool agent %q declares remote but requires a url", name, tr.AgentID)
 			}
 			if tr.Description == "" && tr.DescriptionFile == "" {

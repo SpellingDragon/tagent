@@ -724,7 +724,7 @@ func buildAgentToolRef(
 	stack map[string]bool,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
-	if tr.isRemoteRef() {
+	if tr.IsRemoteRef() {
 		a2aAgent, err := a2aagent.New(
 			a2aagent.WithName(tr.AgentID),
 			a2aagent.WithDescription(desc),

@@ -282,3 +282,118 @@ func TestBuildAgent_AllowsCustomAgentFactory(t *testing.T) {
 	require.NotNil(t, ta)
 	assert.Equal(t, "factory-built", ta.Info().Name, "custom agent should use ToolAgentFactory")
 }
+
+// TestDefaultConfigBuildable 永久看住「配置-注册表漂移」类缺陷：DefaultConfig 必须通过 ApplyDefaults + Validate + ValidateToolAccess 全链路，即 New(DefaultConfig()) 可构建。
+// - 锁死的形状：DefaultConfig 引用 id:"action" 而注册表注册为 "exec"（registry.go），此时 ValidateToolAccess 必然失败。
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
+func TestDefaultConfigBuildable(t *testing.T) {
+	require.NoError(t, RegisterBuiltinTools())
+
+	cfg := DefaultConfig()
+	cfg.ApplyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("DefaultConfig Validate 失败: %v", err)
+	}
+	if err := GetRegistry().ValidateToolAccess(&cfg); err != nil {
+		t.Fatalf("DefaultConfig 工具引用与注册表漂移（id:\"action\" vs \"exec\" 类 BUG）: %v", err)
+	}
+}
+
+func TestToolRegistry_RegisterAndQuery(t *testing.T) {
+	registry := GetRegistry()
+	require.NotNil(t, registry)
+
+	err := RegisterBuiltinTools()
+	require.NoError(t, err)
+
+	plainTools := []string{
+		"exec",
+		"read_file", "save_file", "list_file", "search_file",
+		"search_content", "read_multiple_files", "replace_content",
+		"skill_search", "skill_load", "mcp_discover",
+		"web_search", "duckduckgo_search", "memory_query",
+		"recall_query", "recall_get", "recall_recent", "recall_trace",
+	}
+
+	for _, id := range plainTools {
+		factory, ok := registry.GetPlainToolFactory(id)
+		assert.True(t, ok, "plain tool %q should be registered", id)
+		assert.NotNil(t, factory, "factory for %q should not be nil", id)
+	}
+}
+
+func TestToolRegistry_ValidateToolAccess(t *testing.T) {
+	RegisterBuiltinTools()
+
+	registry := GetRegistry()
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{
+			name: "valid tool references",
+			cfg: Config{
+				Agents: map[string]AgentConfig{
+					"test": {
+						Tools: []ToolRef{
+							{Kind: ToolKindTool, ID: "exec"},
+							{Kind: ToolKindTool, ID: "skill_search"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "unregistered tool",
+			cfg: Config{
+				Agents: map[string]AgentConfig{
+					"test": {
+						Tools: []ToolRef{
+							{Kind: ToolKindTool, ID: "nonexistent_tool"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "agent kind tools skip registry check",
+			cfg: Config{
+				Agents: map[string]AgentConfig{
+					"test": {
+						Tools: []ToolRef{
+							{Kind: ToolKindAgent, AgentID: "some_agent"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := registry.ValidateToolAccess(&tt.cfg)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestRegisterBuiltinTools_Idempotent(t *testing.T) {
+	err := RegisterBuiltinTools()
+	require.NoError(t, err)
+
+	err = RegisterBuiltinTools()
+	require.NoError(t, err)
+
+	registry := GetRegistry()
+	_, ok := registry.GetPlainToolFactory("exec")
+	assert.True(t, ok, "exec should still be registered after idempotent call")
+}

@@ -1,5 +1,5 @@
 // 契约: docs/wiki/agent/agent-architecture.md#core-components
-package tagent
+package config
 
 import (
 	"trpc.group/trpc-go/trpc-agent-go/log"

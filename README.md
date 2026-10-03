@@ -229,6 +229,7 @@ graph TB
 
 | 模块 | 职责 |
 |------|------|
+| `config/` | 配置模型层：编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影；组合根以别名再导出，`tagent.*` 公共 API 源码级不变 |
 | `agent/` | 事件驱动引擎：EventBus、统一事件管线（入口循环与被调方调用环共用同一壳与 turn 原语）、ContextManager（粘合层 + 执行代构造/纳管/发布）、冥想、子 Agent 封装 |
 | `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
 | `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |

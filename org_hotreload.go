@@ -436,28 +436,6 @@ func hotSignature(cfg *Config) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Clone returns a private deep copy of the configuration: a published generation
-// owns its config snapshot, so the rollback ring never aliases the live map.
-//
-// - It round-trips through JSON because Config is pure data with symmetric tags; a future nested field is copied automatically.
-// - ConfigPath is excluded from the snapshot and re-attached by hand.
-// - An empty-but-non-nil slice or map with omitempty comes back nil.
-func (c *Config) Clone() (*Config, error) {
-	if c == nil {
-		return nil, nil
-	}
-	b, err := json.Marshal(c)
-	if err != nil {
-		return nil, fmt.Errorf("config clone: marshal: %w", err)
-	}
-	out := &Config{}
-	if err := json.Unmarshal(b, out); err != nil {
-		return nil, fmt.Errorf("config clone: unmarshal: %w", err)
-	}
-	out.ConfigPath = c.ConfigPath
-	return out, nil
-}
-
 // orgSubset is the canonical in-memory representation of the fingerprinted
 // configuration subset (D3 whitelist). Field order below is significant: it
 // defines the JSON key order of the canonical form, so it is stable across

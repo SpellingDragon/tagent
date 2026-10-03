@@ -191,7 +191,7 @@ func remoteDeclarationOnly(next *Config, name string) bool {
 			if !(tr.Kind == ToolKindAgent || (tr.Kind == "" && tr.AgentID != "")) || tr.AgentID != name {
 				continue
 			}
-			if tr.isRemoteRef() {
+			if tr.IsRemoteRef() {
 				remote = true
 			} else {
 				local = true
