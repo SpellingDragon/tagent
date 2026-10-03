@@ -39,3 +39,12 @@
 ## D5 race 门先本地证明、再上 CI
 
 加根包 `.` 前必须本地跑通 `./scripts/race_check.sh .`（exit-code fidelity 是合同）。若根包出现**上游签名**的 race，走既有 waiver 机制（`raceEnabled` build-tag 逐测排除 + 登记台账），不得因加包而放水；出现第一方 race 则先修后上。CI 的 race job 与本地命令必须同参。
+
+## D7 落地时暴露的门结构缺陷：race 门并发跑邻居包会互相收割 tmux 会话
+
+把根包加入 race 门后 CI 红了，但红的不是新覆盖的包——根包 `-race` 干净（72s ok），红的是 `./tool/action` 的 `TestActionTool_TmuxExitCode`：会话凭空消失（`kill session: exit status 1`、`status="error"`、`output=""`），无 DATA RACE。机制是既有的：`race_check.sh` 下发 `go test -race -count=1 <pkgs>`，多包的测试二进制**并发**运行并共用机器上默认的 tmux 服务器，装配期 `CleanupOrphanSessions` 会收割非 `n-*` 会话，于是邻包互相收割活会话；新增包带来的 CPU 压力只是把这一竞态推过临界。
+
+修法采仓库自己已写下的判据：**包级串行 `-p 1`**。它能消除跨包收割，却不掩盖数据竞争——包内测试仍并发跑在同一二进制里，而包之间从不共享进程。
+
+顺带纠一处文档失真：README 原写"这类抖动只污染本地全量跑，不进 CI"，实则 `-short` 守卫只挡住了 test job，**race 门不带 `-short`**，该族一直在 CI 里真跑。已按事实改写。
+

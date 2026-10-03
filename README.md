@@ -391,7 +391,7 @@ cd examples/wechat-bot && go run .     # 运行示例
 
 ### 真机 tmux 测的本地跑法
 
-`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。这类抖动只污染本地全量跑，不进 CI：该族被两道闸门挡在门外——会话型测各自带 `testing.Short()` 守卫，重测族整文件挂 `//go:build integration`（实测 CI 的 `-short` 里剩下的只有两个 `exec.LookPath` 探针）。
+`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。会话型测各自带 `testing.Short()` 守卫、重测族整文件挂 `//go:build integration`，因此 `-short` 的 test job 里剩下的只有两个 `exec.LookPath` 探针；但 **race 门不带 `-short`**，该族在 race job 里是真跑的——所以 race 脚本以 `-p 1` 串行执行包，避免邻包在同一 tmux 服务器上互相收割（失败形如会话凭空消失：`kill` 报 exit status 1、status "error"、output 空，而非超时）。
 
 ```bash
 go test -p 1 ./tool/action                        # 串行，避开互相收割
