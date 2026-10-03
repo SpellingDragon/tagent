@@ -24,4 +24,4 @@
 - [x] 4.2（ci.yml race job 包集合加入 `.`；lint ok（门禁期间修掉自己写的 8 处游离注释与 1 处测试 doc 形状，未放宽规则）；`gen_godoc --check` 匹配） `.github/workflows/ci.yml` race job 包集合加 `.`，命令与本地同参；lint/openspec strict 全绿
 - [x] 4.2a 门结构修正：`race_check.sh` 加 `-p 1`（跨包并发在同一 tmux 服务器上互相收割活会话，见 D7）；`scripts/test_race_check.sh` ALL PASS；CI 同参本地全量 `race_check: OK`
 - [x] 4.2b 纠正 README 的失真判据（"会话型 tmux 测不进 CI"只对 test job 成立，race 门不带 `-short`）
-- [ ] 4.3 push 并确认 CI 四 job 绿
+- [x] 4.3 tip 0e4fb95 CI 四 job 全绿（test/validators/race/openspec），race job 首次覆盖根包并在 -p 1 下稳定
