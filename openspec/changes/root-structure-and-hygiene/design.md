@@ -71,3 +71,22 @@ P1 卫生（无行为）→ P2 train/ 挪移（纯路径）→ P3 拆包（接�
 2. **先抽配置模型再切**：`config.go`(+builtin/registry) 移入新包 `config`，根包保留 `type Config = config.Config` 等别名与 `LoadConfig` 包装（源码级兼容）。之后 Config 依赖不再是留守理由，`org_hotreload` 的**机制部分**（代数、指纹、可达集）可迁 `agent/org`，只留发布动作在根。收益最大，改动面与验证成本也最大。
 3. **判定现布局合法**：接受"根包=装配+发布+世代机制"，只做文件分组与职责索引（已由 `契约:` 行完成），不再移动代码。收益最小但零风险。
 
+## D10 终版切割设计（用户裁决：不起新档，一步到位）
+
+D9 的出路 2 并入本变更，与 D8 三件注入合并为终版。层与归属一次定死：
+
+**新层 `config`（配置模型）**：`config.go` 的类型模型 + `LoadConfig` 迁入。它**不是叶子**——盘点实据：import 了 agent/prompt/tool 八件/workspace/internal/strictyaml，因此它坐在 root 与 agent/tool **之间**：`root → config → {agent, prompt, tool/*, workspace}`。`builtin.go`/`registry.go` 是装配动作（把工具注册进模型槽位），**留根**。`partition_collision.go` 的纯查询（`agentMemoryFingerprint/changedMemoryAgents/reachableAgents/remoteDeclarationOnly`）是配置模型的查询面，**随迁 config 包**——由此 `agent/org` 对 config 的需求只剩 overlay 的一处类型引用。
+
+**`agent/org`（世代机制）**：迁 `owner_retirement.go`（零依赖）、`org_candidate_txn.go`、`org_candidate_overlay.go`；注册表改为注入接口（`StoreOwnerRegistry`，实现留在 runtimeConfig——注册发生在构建期属装配，注销被 txn 调用属机制，接口两边都够用）；`buildAgent` 经 `ShellBuilder` 闭包注入（buildMode 语义封进闭包，org 不见装配模式）。导出必要性：跨包引用即必要性，Ledger/CandidateTxn/Overlay 为包内 API，不进根公共面（根只留编排调用）。
+
+**根包（组合根）终形**：装配（tagent/build_agent/wiring/builtin/registry/resources/modelref/prompts）+ **发布权**（org_hotreload 的 orgCoordinator 整文件留根——D9 已论证这是立法要求的物理位置）+ Org* 公共类型原位不动（无需别名）。根包生产代码预计 18.2k → 约 15.5k 行，三职责中的两职（配置模型、世代机制）物理出根。
+
+**分层条文修订口径**：方向集由「root → agent → plugin → memory；event 叶子」扩为「root → config → {agent, tool/*, prompt, workspace}；root → agent → plugin → memory；event 叶子」；新增断言：config MUST NOT import 根包；agent 主体不 import config（仅其 org 子包按需）。机械断言测试 `TestArch_LayeredDependencyDirection` 同步扩集。「唯一编排发布权」条文补一句澄清：世代**机制**在 agent 域子包，**发布动作**与 orgCoordinator 留组合根，经注入契约协作——立法与实践互证。
+
+## D11 执行序与检查点（每步独立绿）
+
+1. **C1 配置模型外迁**：`git mv config.go config/`；包内 import 修正；根包建 `config_alias.go` 放全部别名/包装（类型用 `type X = config.X`，函数用薄包装，变量用 `var X = config.X`）；根内引用经别名同名继续工作；`config` 包补文件职责索引行。
+2. **C2 纯查询随迁**：partition_collision 的四个查询函数入 config 包（导出，含单测随迁如有）；`guardrails_test.go` 分层断言扩 config；spec delta MODIFIED 落地。
+3. **C3 org 机制外迁**：三文件 `git mv` 入 `agent/org`；`StoreOwnerRegistry` 接口 + `ShellBuilder` 闭包接线；根包调用点改造；`docs/api` 重生成。
+4. **C4 验证墙**：`go build ./...`、根包+agent+config plain/race、`GOMAXPROCS=1` 根包、bot 模块、lint 全家（两道新门+doc-refs+gen_godoc --check）、openspec strict；每步一提交。
+

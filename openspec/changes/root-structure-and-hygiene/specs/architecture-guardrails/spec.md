@@ -1,3 +1,37 @@
+## MODIFIED Requirements
+
+### Requirement: 分层依赖方向可机械断言
+
+宣称的依赖方向（root → config → {agent, tool/*, prompt, workspace}；root → agent → plugin → memory；event 为纯叶子）SHALL 以自动化测试固化：测试 SHALL 枚举内部包的传递依赖并断言——memory/plugin 及其子包 MUST NOT import agent、config 或根包；event MUST NOT import 任何其他内部包；agent 及其子包 MUST NOT import 根包，且 agent 主体 MUST NOT import config（其 org 子包按注入契约需要时例外）；config MUST NOT import 根包。现状核验全绿，断言为固化；未来违例 SHALL 使测试即刻失败。
+
+#### Scenario: 新代码从 memory 反向引用 agent
+
+- **WHEN** 某次变更在 memory 包引入对 agent 包（或根包、config 包）的 import
+- **THEN** 分层断言测试失败并指明违规包与被引包，该变更无法通过 CI
+
+### Requirement: 唯一编排发布权与中性契约
+
+组合根 SHALL 独占编排执行绑定的构造与发布；agent/task/memory/reliability 等内部包 MUST NOT 依赖根包或任何编排内部状态取得版本。版本引用 SHALL 经 agent 层定义的最小执行绑定/租约契约（由组合根注入、经 context 或显式调用参数传递）传达，MUST NOT 将指针写入 inbox/task 持久格式。原 agent→plugin→memory 与 event 纯叶子边界保持并以机械断言固化。
+
+世代治理的**机制**（退役账本、候选事务簿记、换壳 overlay）SHALL 位于 agent 域子包并经注入契约（壳构造回调、注册表接口、resident 句柄）与组合根协作；**发布动作**（orgCoordinator 的换入/发布/告警）SHALL 留在组合根——机制与特权物理分离，两者协作只经注入面。
+
+系统 MUST NOT 复活内部 durable engine/saver/facts、workflow 灰度分派或第二套编排调度；已撤回的独立图 DSL 不得以新名称重新引入。既有绑定内的 owner 执行视图 SHALL 仅用于定位该版配置；可调用目标仍由该 owner 的原 Tools 集合决定，不新增独立维护的平行路由表。
+
+#### Scenario: 内部包反向依赖被阻断
+
+- **WHEN** 某变更在 agent/task/memory 内引入对根包或编排发布器的 import
+- **THEN** 分层断言测试失败并指明违规，变更无法通过 CI
+
+#### Scenario: 世代机制绕过注入面取装配态
+
+- **WHEN** agent 域子包里的世代机制直接引用组合根的 runtimeConfig 或 buildAgent
+- **THEN** 编译即失败（无 import 路径可达），机制只能经注入契约协作
+
+#### Scenario: 持久格式不含版本指针
+
+- **WHEN** 审查 inbox envelope 与 task 记录的持久字段
+- **THEN** 不存在进程内指针或闭包序列化；版本选择只发生在执行入口
+
 ## ADDED Requirements
 
 ### Requirement: 组合根物理边界与追踪卫生

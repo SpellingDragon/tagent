@@ -13,12 +13,23 @@
 - [x] 2.3 （codetools dotted-refs：位置精确提取 + 纯函数判定 + 2 组单测；接入 lint.sh；探针红/复原绿留痕 dotted-refs-probe.log；期间 doc-refs 连锁抓到退役记录的悬空引用并已改写）新增 `codetools dotted-refs`（位置精确：`python -m` 后续 token 与 yaml `workflow:` 值；仓库内解析或显式外部允许表）+ 单测 + 接入 lint.sh；负路径探针（造一条指向已删布局的 workflow 引用必红）留痕
 - [x] 2.4 （`go test ./... -short` 31 包零 FAIL；bot 模块三连绿 final rc=0——首跑曾见一次无法复现的 exit status 1，如实记档交 CI 裁决；lint ok 含两道新门）全量 short + lint（含两新门）绿；提交
 
-## 3. P3 世代族拆包 agent/org
+## 3. P3 结构一步到位（D10/D11）
 
-- [x] 3.1 契约定格为三件注入（ShellBuilder 闭包 / resident 句柄 / store-owner 注册表整体迁移），熔断未触发；逐行证据见 design D8
-- [ ] 3.2 **暂停，待裁决（D9）**：原计划把五件全迁 `agent/org`，与既有立法「唯一编排发布权」相撞（org_hotreload 的 orgCoordinator 就是发布权本身，且 12 处类型在根包 Config 上）。出路 1/2/3 见 D9
-- [ ] 3.3 根包注入点装配 + `Org*` 类型别名 + TagentAgent 薄委托；`go build ./...`、分层机械断言测试绿
-- [ ] 3.4 `gen_godoc` 重生成；根包/agent plain+race、`GOMAXPROCS=1` 根包、lint、openspec strict 全绿；提交
+### C1 配置模型外迁 config 包
+
+- [ ] 3.2 config.go → config/ 包（类型模型 + LoadConfig；builtin.go/registry.go 留根）；根包别名层 `config_alias.go` 恢复全部导出面（盘点 25 个符号逐一核对）；编译驱动修完根内引用
+- [ ] 3.3 C1 全绿提交（build/vet/根包 short/别名面抽样测试）
+
+### C2 纯查询随迁 + 分层立法修订
+
+- [ ] 3.4 partition_collision 四查询（agentMemoryFingerprint/changedMemoryAgents/reachableAgents/remoteDeclarationOnly）迁 config 包并导出；根包调用点改引；partition_collision.go 收缩为注册表文件
+- [ ] 3.5 `TestArch_LayeredDependencyDirection` 扩集（config 层 + agent 主体不 import config 断言）；spec delta MODIFIED 两条法条落措辞；wiki agent-architecture #package-layout 表更新
+- [ ] 3.6 C2 全绿提交
+
+### C3 世代机制外迁 agent/org
+
+- [ ] 3.7 owner_retirement/org_candidate_txn/org_candidate_overlay 三件 git mv 入 agent/org；`StoreOwnerRegistry` 注入接口 + `ShellBuilder` 闭包；导出面最小化（Ledger/CandidateTxn/buildOverlay 仅包间必需）；org_hotreload 整文件留根（发布权物理位置，wiki 标注）
+- [ ] 3.8 根包接线与调用点改造；docs/api 重生成；C3 全绿提交（含 -race 与 GOMAXPROCS=1）
 
 ## 4. P4 巨型测试按域拆分
 
