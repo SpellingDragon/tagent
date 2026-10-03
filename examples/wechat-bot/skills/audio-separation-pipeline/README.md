@@ -7,11 +7,12 @@
 1. **音源获取**：网易 `http://music.163.com/song/media/outer/url?id=<id>`（可试播曲目直链 128k）；QQ MV/YouTube/VIP 曲目六通道全堵（详见会话终账），直接请用户发文件/cookie，不重复探测
 2. **身份门**：元信息 API 三重对齐（歌名/歌手/时长）+ `ffprobe` 实测时长/bitrate，防错包（《植物》曾错发第一首）
 3. **转 WAV**：`ffmpeg -i src.mp3 -ar 44100 -ac 2 input.wav`（karaoke_sep.py 读死 `/tmp/umx/input.wav`）
-4. **点火（三选一，禁止裸 tmux 无监视）**：
+4. **点火（三选一；10-03 事故增量：裸 nohup 点火→实体完成零事件、监视器盯漏写标记空转、5min 静默清死，三连失败靠用户催问才暴露。点火前逐字执行本步）**：
    - a. 托管直跑 + `ttl=14400`（首选；若框架 reconcile 误杀静默推理则转 b）
-   - b. tmux 实体 + **必配** watch 监视器（resident + `tail -f log` + watch `EXIT_CODE`）
+   - b. tmux 实体 + **必配** watch 监视器（resident + `tail -f log` + watch `DONE|EXIT_CODE`）
    - c. tmux 实体 + 单次完成探针（ETA 兜底）
    - 命令尾必须 `echo EXIT_CODE=$? >> log`
+   - **禁止 nohup/& 裸点火**（框架判"后台化走私"：无结算通知/无 TTL/失败静默——10-03 实测）；监视器自身防静默清死：quiet_timeout 必须 > 完成等待上限，零输出轮询环会被提前清死（10-03：300s 阈值 5min 即亡，早于 DONE）
 5. **完成判定**：日志尾 `DONE` + `EXIT_CODE=0` + CHUNK 推进（0 CHUNK + RSS 停在 ~400MB = 内存窒息，清场后重点火）
 6. **转码**：产物 `karaoke_vocal.wav` / `karaoke_accomp.wav`（单数名，别猜）→ ffmpeg 320k → 交付目录 `bin_*/plant_*` 风格命名
 7. **交付**：时长硬门（与源 ±0.5s）+ 成色预告（电子编曲残影风险如实说）
