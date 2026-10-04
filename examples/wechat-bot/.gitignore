@@ -58,14 +58,8 @@ resources/prompts/USER.md
 !skills/README.md
 
 # Re-ignore everything under skills that's runtime
-skills/*/
-!skills/url-fetcher/
-!skills/agent-mail-send/
-!skills/audio-separation-pipeline/
-!skills/gopls-code-nav/
-!skills/go-service-ops/
-!skills/interview/
-!skills/ima/
+skills/*/*
+!skills/*/**
 # 10-04: 目录级否定救不回内部文件（gitignore 语义：父目录被排除则文件不可再包含），
 # 全量否定让 skills 普通入库/refine 登记（内部裸 git add）可用；node_modules 保持排除
 !skills/*/**
