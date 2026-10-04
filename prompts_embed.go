@@ -1,3 +1,4 @@
+// 契约: docs/wiki/prompt/prompt-architecture.md#file-layout
 package tagent
 
 import "embed"

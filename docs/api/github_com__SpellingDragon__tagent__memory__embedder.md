@@ -4,8 +4,6 @@ Package embedder 承载 Embedder 契约的实现（mock／zhipu HTTP 供应商�
 memory.Embedder 一致：本包只依赖核心 memory 包的接口与数据类型， 消费方无需认识具体供应商；新增供应商的接线点在组合根。已裁决：嵌入走
 tagent 侧 HTTP 供应商， 不用 rustviking CLI（其向量索引为进程内易失）。
 
-契约: docs/wiki/memory/memory-architecture.md#embedder
-
 TYPES
 
 type MockEmbedder struct {
@@ -14,8 +12,6 @@ type MockEmbedder struct {
     MockEmbedder 用文本哈希把内容映射到固定维度的确定性伪向量，实现 memory.Embedder。
     相同文本必得相同向量，共享词元越多余弦越高；仅用于验证机制（融合、过滤、降级），
     不承诺真实语义质量——以它通过的测试不能推断线上召回效果。零值实例仍可用。
-
-    契约: docs/wiki/memory/memory-architecture.md#embedder
 
 func NewMockEmbedder(dim int) *MockEmbedder
     NewMockEmbedder 创建确定性 mock 嵌入器（dim<=0 时取 64）。
@@ -38,8 +34,6 @@ type TracedEmbedder struct {
     零触碰（否则每次加可观测都会扰动模型可见声明、破坏 prefix-cache 稳定性）；未配置导出时全局 provider 为
     noop，本装饰器仅透传、行为逐字不变。属性只带元数据，嵌入内容不入 span。
 
-    契约: docs/wiki/memory/memory-architecture.md#embedder
-
 func NewTracedEmbedder(inner memory.Embedder) *TracedEmbedder
     NewTracedEmbedder 包裹 inner 加向量链路可观测。inner 为 nil 返回 nil。metric 创建失败 用 noop
     计数（otel 保证返回可用零值，不阻断）。
@@ -58,8 +52,6 @@ type ZhipuEmbedder struct {
 }
     ZhipuEmbedder 经 openai 兼容的 /embeddings 端点生成向量，实现 memory.Embedder（密钥默认 复用
     ZAI_API_KEY）。分批、重试分类与 index 还原契约见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#embedder
 
 func NewZhipuEmbedder(cfg ZhipuEmbedderConfig) (*ZhipuEmbedder, error)
     NewZhipuEmbedder 构建嵌入器。apiKey 为空时从 cfg.APIKeyEnv（默认 ZAI_API_KEY）
@@ -91,4 +83,3 @@ type ZhipuEmbedderConfig struct {
 	MaxBatch int
 }
     ZhipuEmbedderConfig 配置 zhipu 兼容嵌入端点。
-

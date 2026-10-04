@@ -218,8 +218,7 @@ func TestCrossRestartResume_RealProvisioning(t *testing.T) {
 
 // TestSaveResidentMeta D1: saveResidentMeta persists parameters for named resident sessions only.
 func TestSaveResidentMeta(t *testing.T) {
-	ct := &ActionTool{}
-	defer os.RemoveAll(ct.metaDir())
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 
 	resident := ActionArgs{Name: "dev-server", Mode: "resident", Watch: "ERROR", Probe: "curl -sf :1", ProbeIntervalSec: 30, ProbeFailures: 3}
 	ct.saveResidentMeta("n-dev-server", resident)
@@ -244,9 +243,7 @@ func TestSaveResidentMeta(t *testing.T) {
 
 // TestSweepStaleResidents 钉住 D2: SweepStaleResidents kills sessions past TTL (and drops their records)
 func TestSweepStaleResidents(t *testing.T) {
-	ct := &ActionTool{}
-	defer os.RemoveAll(ct.metaDir())
-	_ = os.MkdirAll(ct.metaDir(), 0o755)
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 
 	old := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 	fresh := time.Now().Format(time.RFC3339)
@@ -269,7 +266,7 @@ func TestCanSpawnResident(t *testing.T) {
 	maxResidentSessions = 1
 	defer func() { maxResidentSessions = old }()
 
-	ct := &ActionTool{}
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 	ct.tmuxMonitor = NewTmuxMonitor(WithMonitorExecutor(nil))
 	ct.tmuxMonitor.AddSession(&TmuxSession{ID: "n-a", Mode: ModeResident})
 	if ct.CanSpawnResident() {
@@ -283,9 +280,7 @@ func TestCanSpawnResident(t *testing.T) {
 
 // TestReattachResidentSessions_Defensive D1: reattach skips oneshot metadata and corrupt files without dying.
 func TestReattachResidentSessions_Defensive(t *testing.T) {
-	ct := &ActionTool{}
-	defer os.RemoveAll(ct.metaDir())
-	_ = os.MkdirAll(ct.metaDir(), 0o755)
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 	os.WriteFile(filepath.Join(ct.metaDir(), "sess-n-corrupt.json"), []byte("{not json"), 0o600)
 	os.WriteFile(filepath.Join(ct.metaDir(), "bogus.txt"), []byte("x"), 0o600)
 
@@ -299,9 +294,7 @@ func TestReattachResidentSessions_Defensive(t *testing.T) {
 // - 清扫只收割无人收养且已超时的孤儿，新鲜度自收养时刻起算；缺该记录时回退到派生时刻；
 // - 派生时刻的年龄本身不构成孤儿证据。
 func TestSweepStaleResidents_AdoptedLongRunnerSurvives(t *testing.T) {
-	ct := &ActionTool{}
-	defer os.RemoveAll(ct.metaDir())
-	_ = os.MkdirAll(ct.metaDir(), 0o755)
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 
 	oldSpawn := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 	recentAdopt := time.Now().Add(-time.Hour).Format(time.RFC3339)
@@ -325,9 +318,7 @@ func TestSweepStaleResidents_AdoptedLongRunnerSurvives(t *testing.T) {
 
 // TestTouchAdopted_StampsLastAdoptedAt 收养路径刷新 LastAdoptedAt：reattachOne + touchAdopted 后 meta 落盘。
 func TestTouchAdopted_StampsLastAdoptedAt(t *testing.T) {
-	ct := &ActionTool{}
-	defer os.RemoveAll(ct.metaDir())
-	_ = os.MkdirAll(ct.metaDir(), 0o755)
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 	os.WriteFile(ct.metaPath("n-x"), []byte(`{"name":"x","mode":"resident","spawned_at":"2026-01-01T00:00:00Z"}`), 0o600)
 
 	ct.touchAdopted("n-x")

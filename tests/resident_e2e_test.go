@@ -369,6 +369,8 @@ func TestResidentDurableE2E_FiveSurfaceReconciliation(t *testing.T) {
 	}
 	require.Equal(t, 2, receiptCount(), "exactly one receipt per business turn — no per-envelope double receipt")
 
+	require.NoError(t, ta.Close())
+
 	inbox, err := reliability.NewInbox(filepath.Join(spillDir, "tagent"), 0)
 	require.NoError(t, err)
 	var outstanding []reliability.OutstandingEnvelope
@@ -386,7 +388,5 @@ func TestResidentDurableE2E_FiveSurfaceReconciliation(t *testing.T) {
 		}
 	}
 	require.Equal(t, 0, envLeft, "no envelope residue in the inbox directory")
-
-	require.NoError(t, ta.Close())
 	<-done
 }

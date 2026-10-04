@@ -1,19 +1,10 @@
 //go:build ignore
 
-// verify_large_file.go — SDK 大文件真链路一次性人工验收。
+// verify_large_file.go — SDK 大文件真链路的一次性人工验收：流式与全量两条下载路径对比
+// 耗时与内存峰值、字节数与 md5 校验、反向回传验证出站。
 //
-// 用途：wechat-robot-go 的 CDN 下载/上传路径对大文件（数十 MB）未经实际验证，
-// 该风险无法用 mock 覆盖。本脚本复用 .weixin-token.json 登录态做真链路验收：
-//
-//  1. 运行: go run scripts/verify_large_file.go （在 examples/wechat-bot 目录下）
-//  2. 用微信向 bot 发送一个大文件（建议 ~40MB）
-//  3. 脚本先用新流式 API（DownloadFileFromItemTo）落盘，再用旧 []byte API 下载，
-//
-// 对比两者的耗时与内存增量（验证流式路径内存峰值显著低于全量路径）
-//  4. 校验字节数 + md5（与 FileItem 元数据比对）
-//  5. 反向 SendFileFromPath 回传同一文件，验证出站链路
-//
-// 本脚本不进入常规构建（go:build ignore）与 CI，仅作上线前验收与 SDK 升级回归。
+// - 复用 .weixin-token.json 登录态；本脚本经 go:build ignore 排除在常规构建与 CI 之外。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#large-file-acceptance
 package main
 
 import (

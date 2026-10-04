@@ -4,7 +4,6 @@
 #
 # 功能：
 # 1. 前台/后台运行（微信模式）
-# 2. AReaL 训练启动/停止（areal / areal-stop / areal-log）
 # 3. 支持优雅关闭
 # 4. 日志查看
 # 5. 启动时旧日志自动归档清空（logs/archive/，保留最近 N 份）
@@ -18,14 +17,9 @@
 #   ./run.sh log                查看 tagent 日志
 #   ./run.sh rl                 前台运行（RL 训练模式，自动使用 tagent.rl.yaml）
 #   ./run.sh rl-start           后台启动（RL 训练模式）
-#   ./run.sh areal              前台启动 AReaL 训练
-#   ./run.sh areal-start        后台启动 AReaL 训练
-#   ./run.sh areal-stop         停止 AReaL 训练
-#   ./run.sh areal-log          查看 AReaL 训练日志
 #
 # RL 训练完整流程:
 #   Terminal 1: ./run.sh rl        (启动 tagent RL 模式)
-#   Terminal 2: ./run.sh areal     (启动 AReaL 训练)
 #   （rl 命令自动设置 TAGENT_CONFIG=tagent.rl.yaml + RL session 参数）
 
 # 获取脚本所在目录
@@ -53,15 +47,6 @@ LOG_FILE="${LOG_DIR}/wechat-bot-${INSTANCE_NAME}.log"
 LOG_ARCHIVE_DIR="${LOG_ARCHIVE_DIR:-${LOG_DIR}/archive}"
 LOG_ARCHIVE_KEEP="${LOG_ARCHIVE_KEEP:-50}"
 
-# AReaL 配置
-AREAL_PID_FILE="${LOG_DIR}/.pid-areal"
-AREAL_LOG_FILE="${LOG_DIR}/areal-training.log"
-AREAL_CONFIG="${AREAL_CONFIG:-${SCRIPT_DIR}/areal_config.yaml}"
-AREAL_DIR="${AREAL_DIR:-$(dirname "$SCRIPT_DIR")/AReaL}"
-AREAL_N_GPUS="${AREAL_N_GPUS:-8}"
-AREAL_TRAIN_SCRIPT="${SCRIPT_DIR}/train_tagent.py"
-AREAL_PYTHON="${AREAL_PYTHON:-python3}"
-AREAL_USE_TORCHRUN="${AREAL_USE_TORCHRUN:-true}"
 
 # 可观测默认值（用户可通过环境变量覆盖）
 export TAGENT_HTTP_PORT="${TAGENT_HTTP_PORT:-8089}"
@@ -88,10 +73,6 @@ show_help() {
     rl-start        后台启动 (RL 训练模式)
     rl-stop         停止 RL 模式机器人 (同 stop)
 
-    areal           前台启动 AReaL 训练
-    areal-start     后台启动 AReaL 训练
-    areal-stop      停止 AReaL 训练
-    areal-log       查看 AReaL 训练日志
 
 选项:
     -n, --name NAME     实例名称 (默认: default)
@@ -109,28 +90,16 @@ show_help() {
     TAGENT_USER_ID           持久事件循环用户 ID (默认: wechat-user)
     TAGENT_SESSION_ID        持久事件循环会话 ID (默认: wechat-session)
     OTEL_EXPORTER_OTLP_ENDPOINT  OTLP gRPC 端点 (可选)
-    AREAL_DIR                AReaL 安装路径 (默认: ../AReaL)
-    AREAL_CONFIG             AReaL 训练配置 (默认: areal_config.yaml)
-    AREAL_N_GPUS             AReaL 训练 GPU 数量 (默认: 8)
-    AREAL_PYTHON             Python 解释器 (默认: python3)
-    AREAL_USE_TORCHRUN       是否使用 torchrun (默认: true, 设为 false 则直接 python)
-    AREAL_EXTRA_ARGS         AReaL 训练额外参数 (如 scheduler.type=local)
     LOG_ARCHIVE_DIR          日志归档目录 (默认: logs/archive/)
     LOG_ARCHIVE_KEEP         归档保留份数 (默认: 50)
 
 典型 RL 训练流程:
-    # 0. 安装 AReaL (首次)
-    cd ../AReaL && pip install -e . && cd -
 
     # Terminal 1: 启动 tagent (RL 模式, 自动使用 tagent.rl.yaml)
     AREAL_API_KEY=your-key ./run.sh rl
 
-    # Terminal 2: 启动 AReaL 训练
-    ./run.sh areal
 
     # 本地调试 (单 GPU, 无 torchrun):
-    AREAL_USE_TORCHRUN=false AREAL_N_GPUS=1 \
-    AREAL_EXTRA_ARGS="scheduler.type=local" ./run.sh areal
 EOF
 }
 
@@ -171,11 +140,6 @@ get_pid() {
     fi
 }
 
-get_areal_pid() {
-    if [[ -f "$AREAL_PID_FILE" ]]; then
-        cat "$AREAL_PID_FILE"
-    fi
-}
 
 # ============================================================================
 # 检查进程是否运行
@@ -188,13 +152,6 @@ is_running() {
     return 1
 }
 
-is_areal_running() {
-    local pid=$(get_areal_pid)
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        return 0
-    fi
-    return 1
-}
 
 # ============================================================================
 # 检查 API Key
@@ -315,7 +272,7 @@ setup_rl_env() {
     # 使用 RL 配置文件（除非用户已显式指定其他配置）
     export TAGENT_CONFIG="${TAGENT_CONFIG:-tagent.rl.yaml}"
 
-    # RL 模式使用固定的 user/session ID（与 areal_config.yaml 中的 adapter 参数一致）
+    # RL 模式使用固定的 user/session ID
     export TAGENT_USER_ID="${TAGENT_USER_ID:-rl-user}"
     export TAGENT_SESSION_ID="${TAGENT_SESSION_ID:-rl-session}"
 
@@ -328,7 +285,6 @@ setup_rl_env() {
     echo "  HTTPAPI:   http://localhost:${TAGENT_HTTP_PORT}"
     echo "=============================================="
     echo
-    echo "  提示: 在另一个终端运行 ./run.sh areal 启动训练"
     echo
 }
 
@@ -465,16 +421,6 @@ do_status() {
     fi
     echo
 
-    # AReaL 状态
-    if is_areal_running; then
-        local areal_pid=$(get_areal_pid)
-        echo "AReaL:   ✓ 运行中 (PID: $areal_pid)"
-        if [[ -f "$AREAL_LOG_FILE" ]]; then
-            echo "  日志:  $AREAL_LOG_FILE"
-        fi
-    else
-        echo "AReaL:   ✗ 未运行"
-    fi
 }
 
 # ============================================================================
@@ -508,206 +454,16 @@ do_restart() {
 }
 
 # ============================================================================
-# 检查 AReaL 环境
-# ============================================================================
-check_areal_env() {
-    if [[ ! -d "$AREAL_DIR" ]]; then
-        echo "错误: AReaL 目录不存在: $AREAL_DIR"
-        echo
-        echo "请设置 AREAL_DIR 环境变量指向 AReaL 安装路径:"
-        echo "  export AREAL_DIR=/path/to/AReaL"
-        exit 1
-    fi
-
-    if [[ ! -f "$AREAL_CONFIG" ]]; then
-        echo "错误: AReaL 配置文件不存在: $AREAL_CONFIG"
-        echo
-        echo "请设置 AREAL_CONFIG 环境变量或创建配置文件"
-        exit 1
-    fi
-
-    if [[ ! -f "$AREAL_TRAIN_SCRIPT" ]]; then
-        echo "错误: 训练脚本不存在: $AREAL_TRAIN_SCRIPT"
-        exit 1
-    fi
-
-    # 检查 AReaL Python 包是否可导入
-    if ! "$AREAL_PYTHON" -c "import areal" 2>/dev/null; then
-        echo "错误: 无法导入 areal Python 包"
-        echo
-        echo "请先安装 AReaL:"
-        echo "  cd $AREAL_DIR && pip install -e ."
-        exit 1
-    fi
-}
 
 # ============================================================================
-# 构建 AReaL 训练命令
-# ============================================================================
-build_areal_cmd() {
-    local cmd
-
-    if [[ "$AREAL_USE_TORCHRUN" == "true" ]]; then
-        cmd="torchrun --nproc_per_node=$AREAL_N_GPUS $AREAL_TRAIN_SCRIPT"
-    else
-        cmd="$AREAL_PYTHON $AREAL_TRAIN_SCRIPT"
-    fi
-
-    cmd="$cmd --config $AREAL_CONFIG"
-
-    # 附加额外参数
-    if [[ -n "${AREAL_EXTRA_ARGS}" ]]; then
-        cmd="$cmd ${AREAL_EXTRA_ARGS}"
-    fi
-
-    echo "$cmd"
-}
 
 # ============================================================================
-# AReaL 训练 — 前台
-# ============================================================================
-run_areal_foreground() {
-    check_areal_env
-
-    echo "=============================================="
-    echo "  AReaL RL 训练 [前台模式]"
-    echo "=============================================="
-    echo "  训练脚本:  $AREAL_TRAIN_SCRIPT"
-    echo "  配置:      $AREAL_CONFIG"
-    echo "  AReaL:     $AREAL_DIR"
-    echo "  GPU 数:    $AREAL_N_GPUS"
-    echo "  torchrun:  $AREAL_USE_TORCHRUN"
-    echo "  tagent:    http://localhost:${TAGENT_HTTP_PORT}"
-    echo "=============================================="
-    echo
-
-    # 环境变量传递给 adapter
-    export TAGENT_URL="${TAGENT_URL:-http://localhost:${TAGENT_HTTP_PORT}}"
-    export TAGENT_USER_ID="${TAGENT_USER_ID:-rl-user}"
-    export TAGENT_SESSION_ID="${TAGENT_SESSION_ID:-rl-session}"
-
-    mkdir -p "$LOG_DIR"
-    archive_log "$AREAL_LOG_FILE"
-
-    local cmd
-    cmd=$(build_areal_cmd)
-
-    echo "执行: $cmd"
-    echo
-
-    exec bash -c "cd '$AREAL_DIR' && $cmd" 2>&1 | tee "$AREAL_LOG_FILE"
-}
 
 # ============================================================================
-# AReaL 训练 — 后台
-# ============================================================================
-do_areal_start() {
-    check_areal_env
-
-    echo "=============================================="
-    echo "  AReaL RL 训练 [后台模式]"
-    echo "=============================================="
-    echo
-
-    if is_areal_running; then
-        local pid=$(get_areal_pid)
-        echo "错误: AReaL 训练已在运行 (PID: $pid)"
-        exit 1
-    fi
-
-    mkdir -p "$LOG_DIR"
-    archive_log "$AREAL_LOG_FILE"
-
-    export TAGENT_URL="${TAGENT_URL:-http://localhost:${TAGENT_HTTP_PORT}}"
-    export TAGENT_USER_ID="${TAGENT_USER_ID:-rl-user}"
-    export TAGENT_SESSION_ID="${TAGENT_SESSION_ID:-rl-session}"
-
-    local cmd
-    cmd=$(build_areal_cmd)
-
-    echo "启动 AReaL 训练 (后台)..."
-    echo "日志文件: $AREAL_LOG_FILE"
-    echo "执行: $cmd"
-    echo
-
-    nohup bash -c "cd '$AREAL_DIR' && $cmd" >> "$AREAL_LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$AREAL_PID_FILE"
-
-    sleep 2
-    if is_areal_running; then
-        echo "✓ AReaL 训练已启动 (PID: $pid)"
-        echo "  查看日志: ./run.sh areal-log"
-    else
-        echo "✗ 启动失败，请查看日志: $AREAL_LOG_FILE"
-        rm -f "$AREAL_PID_FILE"
-        exit 1
-    fi
-}
 
 # ============================================================================
-# 停止 AReaL 训练
-# ============================================================================
-do_areal_stop() {
-    echo "=============================================="
-    echo "  AReaL RL 训练 [停止]"
-    echo "=============================================="
-    echo
-
-    if ! is_areal_running; then
-        echo "AReaL 训练未在运行"
-        rm -f "$AREAL_PID_FILE"
-        exit 0
-    fi
-
-    local pid=$(get_areal_pid)
-    echo "正在停止 AReaL 训练 (PID: $pid)..."
-
-    # 先尝试优雅停止整个进程组
-    kill -TERM "$pid" 2>/dev/null
-
-    local count=0
-    while is_areal_running && [[ $count -lt 15 ]]; do
-        sleep 1
-        ((count++))
-        echo -n "."
-    done
-    echo
-
-    if is_areal_running; then
-        echo "进程未响应，强制关闭..."
-        kill -9 "$pid" 2>/dev/null
-        sleep 1
-    fi
-
-    rm -f "$AREAL_PID_FILE"
-
-    if ! is_areal_running; then
-        echo "✓ AReaL 训练已停止"
-    else
-        echo "✗ 停止失败"
-        exit 1
-    fi
-}
 
 # ============================================================================
-# 查看 AReaL 日志
-# ============================================================================
-do_areal_log() {
-    if [[ ! -f "$AREAL_LOG_FILE" ]]; then
-        echo "未找到日志文件: $AREAL_LOG_FILE"
-        echo "提示: AReaL 训练可能尚未启动"
-        exit 1
-    fi
-
-    echo "=============================================="
-    echo "  AReaL 训练日志: $AREAL_LOG_FILE"
-    echo "=============================================="
-    echo "按 Ctrl+C 退出"
-    echo
-
-    tail -f "$AREAL_LOG_FILE"
-}
 
 # ============================================================================
 # 解析参数
@@ -733,22 +489,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         rl-stop)
             COMMAND="stop"
-            shift
-            ;;
-        areal)
-            COMMAND="areal-fg"
-            shift
-            ;;
-        areal-start)
-            COMMAND="areal-start"
-            shift
-            ;;
-        areal-stop)
-            COMMAND="areal-stop"
-            shift
-            ;;
-        areal-log)
-            COMMAND="areal-log"
             shift
             ;;
         -n|--name)
@@ -791,9 +531,5 @@ case "$COMMAND" in
     log)          do_log          ;;
     rl-fg)        setup_rl_env; run_foreground ;;
     rl-start)     setup_rl_env; do_start       ;;
-    areal-fg)     run_areal_foreground ;;
-    areal-start)  do_areal_start  ;;
-    areal-stop)   do_areal_stop   ;;
-    areal-log)    do_areal_log    ;;
     *)            run_foreground  ;;
 esac

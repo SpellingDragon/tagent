@@ -45,21 +45,13 @@ type messageInjector interface {
 	InjectMessageWithSource(source string, msg model.Message)
 }
 
-// MeditationManager periodically injects "meditation" external_input events
-// into the event loop when the agent has been idle for at least MinGap AND
-// there has been new user input since the last meditation.
+// MeditationManager periodically injects "meditation" external_input events into the event
+// loop when the agent has been idle for at least MinGap AND there has been new user input
+// since the last meditation.
 //
-// Gating is split across two independent anchors:
-// the idle gate is lineage-AGNOSTIC (any turn end counts as busy), while the
-// novelty gate is INPUT-side anchored (only source=="user" injections arm it).
-// This split makes output-side lineage tracking unnecessary: activity derived
-// from a meditation turn (e.g. a spawned task settling as Source="task") can
-// only DELAY the next meditation via the idle gate, never re-arm the novelty
-// gate — which kills the self-feeding perpetual-motion loop.
-//
-// The meditation event triggers the LLM to perform context cleanup, deep
-// analysis of recent memories, and skill accumulation — all guided by the
-// meditation prompt.
+// - The idle gate is lineage-agnostic (any turn end counts as busy); the novelty gate is anchored on the input side (only source=="user" injections arm it).
+// - Meditation-derived activity can therefore only delay the next meditation, never re-arm the novelty gate: the self-feeding perpetual-motion loop of "nothing happened" summaries is structurally impossible.
+// - The event triggers the LLM to perform context cleanup and deep consolidation over the session.
 type MeditationManager struct {
 	cfg      MeditationConfig
 	injector messageInjector
@@ -217,22 +209,11 @@ func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
 	m.anchorMu.Unlock()
 }
 
-// checkAndMeditate evaluates whether a meditation should fire.
-// Two independent gates must both pass:
-//  1. novelty gate (input-side): there has been user input SINCE the last
+// checkAndMeditate evaluates whether a meditation should fire: both gates must pass.
 //
-// meditation. Injection-point source is ground truth, so activity
-// laundered through the task layer (Source="task" settles of
-// meditation-spawned work) can never re-arm this gate — this alone kills
-// the perpetual-motion loop of "nothing happened" summaries.
-//  2. idle gate (lineage-agnostic): gap since the last turn end >= MinGap.
-//
-// ANY turn counts as busy — meditation-derived turns merely delay the
-// next meditation, which is harmless (and desirable while background
-// work is still churning).
-//
-// No fire-time anchor reset is needed: storing lastMeditation locks the
-// novelty gate (lastUserInput <= lastMeditation) until real user input.
+// - Novelty gate (input-side): user input since the last meditation, with the injection-point source as ground truth.
+// - Idle gate (lineage-agnostic): gap since the last turn end >= MinGap. Any turn counts as busy, so meditation-derived turns merely delay, which is harmless and desirable while background work is churning.
+// - No fire-time anchor reset is needed: storing lastMeditation locks the novelty gate.
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
 

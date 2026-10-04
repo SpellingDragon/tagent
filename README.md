@@ -229,6 +229,7 @@ graph TB
 
 | 模块 | 职责 |
 |------|------|
+| `config/` | 配置模型层：编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影；组合根以别名再导出，`tagent.*` 公共 API 源码级不变 |
 | `agent/` | 事件驱动引擎：EventBus、统一事件管线（入口循环与被调方调用环共用同一壳与 turn 原语）、ContextManager（粘合层 + 执行代构造/纳管/发布）、冥想、子 Agent 封装 |
 | `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
 | `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |
@@ -242,7 +243,9 @@ graph TB
 | `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
 | `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
 | `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
-| `tagent.go` + `build_agent.go` + `wiring.go` + `config.go` + `org_hotreload.go` + `org_candidate_{overlay,txn}.go` + `owner_retirement.go` | 组合根（类型/Option/New · agent 装配族 · resolve+wire 族）、声明式配置，与组织编排热更（候选事务、唯一已提交应用记录、owner 义务与退役账） |
+| `agent/org/` | 世代治理机制（agent 域）：候选事务、热更执行、属主退役账、世代簿记（指纹/子集规范化）与状态类型；组合根经 `org.Deps` 注入壳构造，发布动作（orgCoordinator）留组合根 |
+| `agent/resources/` | 资源租约治理（agent 域）：共享存储/引擎的最后引用清理、目录写锁、毒化封闭；组合根 wiring 经 `resources.DefaultResources.Acquire` 接线 |
+| `tagent.go` + `build_agent.go` + `wiring.go` + `builtin.go` + `registry.go` + `org_hotreload.go` + `partition_collision.go` + `config_alias.go` + `org_alias.go` | 组合根终形（11 文件）：类型/Option/New · agent 装配族 · resolve+wire 族 · 发布权（orgCoordinator 换入/发布/告警）· 注册表 · 别名再导出（config 与 org 实体在域包） |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
 
@@ -349,10 +352,13 @@ graph TB
 | Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
 | 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
 | 设计规格（OpenSpec） | [openspec/specs/](openspec/specs/) |
+| 原型骨架（六件套与生产映射） | [docs/wiki/agent/prototype-skeleton.md](docs/wiki/agent/prototype-skeleton.md) |
+| wechat-bot 运行面（去重 / 窄接口 / 投递目标 / 真链路验收） | [docs/wiki/examples/wechat-bot-runtime.md](docs/wiki/examples/wechat-bot-runtime.md) |
+| 注释与文档门禁的工具面 | [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md) |
 | 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
 | 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | 真实 LLM 契约守护矩阵（模型↔框架文本接缝） | [tests/README.md](tests/README.md) |
-| Provider 协议契约矩阵（文本/usage/流式/原生 tool_calls/工具结果回环/reasoning 透传） | 根包 `modelref_test.go`（`resolveAgentModel` 走真实 openai-兼容适配器；`DEEPSEEK_API_KEY` 未设整组自动跳过，不阻塞 CI） |
+| Provider 协议契约矩阵（文本/usage/流式/原生 tool_calls/工具结果回环/reasoning 透传） | 根包 `agent_architecture_test.go`（`resolveAgentModel` 走真实 openai-兼容适配器；`DEEPSEEK_API_KEY` 未设整组自动跳过，不阻塞 CI） |
 | 常驻可靠性 / 资源所有权 / 控制面规格（durable inbox-v1、租约化 store、HTTP limits、endpoint 策略） | [openspec/specs/](openspec/specs/)（persistent-event-loop / runtime-resource-ownership / resident-release-evidence） |
 | RL 集成 / trajectory 分析（`rl/trajectory_analyze.py`：压缩回收率、大消息 TOP-N、chars/token 偏差） | [rl/](rl/) |
 
@@ -366,6 +372,19 @@ bash scripts/race_check.sh             # race 门禁（本地全量）
 cd examples/wechat-bot && go run .     # 运行示例
 ```
 
+### 注释与文档契约（`comment_policy`，CI 零容忍）
+
+机制判据的家在 `docs/wiki/**`：源码注释只写契约，加一行索引（`契约:` 或 `规格:`）指向它。一条机制写进注释之前，先确认它有一个文档小节可归属。
+
+| 约束 | 形状 | 为何这样定 |
+|------|------|-----------|
+| 每个生产文件声明职责 | 文件内任意注释槽含一行 `契约: docs/…#anchor` | 读代码的人先问到哪儿找判据；测试文件同样适用 |
+| doc 注释只写契约 | 叙述散文不超两段，要点列表与索引不限长度 | 长契约注释合法，短设计叙述不合法——裁判是内容形态不是行数 |
+| 索引必须可解 | 目标路径存在、锚点在文档里真实存在、大文档必须带锚 | 指向不存在的小节比没有指向更坏 |
+| 不以过程文档为真源 | 注释不得引用变更单号、轮次、审阅记录 | 过程文档会先于代码腐烂 |
+
+棘轮的基线 `scripts/comment_policy/baseline.json` 现为**空 counts**，即以上规则全部零容忍：新增违规直接红，无预算可用。日常只跑 `bash scripts/lint.sh`（含 gofmt/vet/comment_policy/文档引用/`gen_godoc --check`）；`gen_godoc.sh` 会过滤掉索引行，`go doc` 产物里不出现导航指针。改动注释后用 `bash scripts/check_comment_only.sh <基线ref>` 证明「只改了注释」，测试文件并档用 `scripts/check_test_merge.sh` 证明无损。约定细则见 [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md)。
+
 ### RL 部署环境变量（examples/wechat-bot）
 
 | 变量 | 说明 |
@@ -375,7 +394,7 @@ cd examples/wechat-bot && go run .     # 运行示例
 
 ### 真机 tmux 测的本地跑法
 
-`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。这类抖动只污染本地全量跑，不进 CI：该族被两道闸门挡在门外——会话型测各自带 `testing.Short()` 守卫，重测族整文件挂 `//go:build integration`（实测 CI 的 `-short` 里剩下的只有两个 `exec.LookPath` 探针）。
+`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。会话型测各自带 `testing.Short()` 守卫、重测族整文件挂 `//go:build integration`，因此 `-short` 的 test job 里剩下的只有两个 `exec.LookPath` 探针；但 **race 门不带 `-short`**，该族在 race job 里是真跑的——所以 race 脚本以 `-p 1` 串行执行包，避免邻包在同一 tmux 服务器上互相收割（失败形如会话凭空消失：`kill` 报 exit status 1、status "error"、output 空，而非超时）。
 
 ```bash
 go test -p 1 ./tool/action                        # 串行，避开互相收割
@@ -384,7 +403,7 @@ go test -p 1 -tags integration ./tool/action      # 含 Scenario/TUI 重测族
 
 判读规则：报 `server exited unexpectedly` 先按跑序问题处理，串行重跑；只有稳定复现的超时或断言不符才按缺陷追。跑该族前确认没有别处（含自己的 tmux 会话、其他 agent 进程）在同一默认服务器上建会话。
 
-CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `modelref_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
+CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `agent_architecture_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
 
 ## License
 

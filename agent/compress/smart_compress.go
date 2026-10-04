@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/compression-and-telemetry.md#condensed-card-guard
 package compress
 
 import (
@@ -14,18 +15,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// SmartCompressor performs deterministic context compression.
+// SmartCompressor performs deterministic context compression over task-boundary segments.
 //
-// Pipeline (skeleton model):
-//  1. Segment messages into task turns bounded by agent_output.
-//  2. Deterministic level per segment age (pure function).
-//  3. Per-segment drop: L0 (keep) / L1 (drop tool) / L2 (skeleton only) /
-//
-// L3 (multi-segment compaction — whole segment leaves the timeline).
-//  4. Assemble chronologically; kept messages keep their event key prefixes.
-//
-// This is a "view transformation" — it modifies the messages sent to the LLM,
-// but does NOT modify the Session or Projection.
+// - 1. Segment messages into task turns bounded by agent_output.
+// - 2. Deterministic level per segment age (pure function).
+// - 3. Per-segment drop: L0 keep, L1 drop tool, L2 skeleton only, L3 multi-segment compaction where the whole segment leaves the timeline.
+// - 4. Assemble chronologically; kept messages keep their event key prefixes.
 type SmartCompressor struct {
 	// paramMu guarded the runtime-swapped numeric bundle (cold-eyes P2-2, when
 	// ApplyParams wrote from the reloader goroutine).  removed every runtime

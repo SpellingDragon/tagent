@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 package task
 
 import (

@@ -1,9 +1,15 @@
+// cross_generation_test 覆盖跨代发布主链：排队输入取执行时代、被钉跳、重入解析与在途属主退役。
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 package tagent
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/task"
+	tasktool "github.com/SpellingDragon/tagent/tool/task"
+	"github.com/stretchr/testify/require"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,43 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/agent/task"
-	tasktool "github.com/SpellingDragon/tagent/tool/task"
-	"github.com/stretchr/testify/require"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
-
-// entryGeneration returns the entry cm's ACTIVE (non-retired) generation id, or -1.
-func entryGeneration(t *testing.T, entry *agent.TagentAgent) int64 {
-	t.Helper()
-	for _, g := range entry.ContextManager().ExecutorRefs().Generations {
-		if !g.Retired {
-			return g.Generation
-		}
-	}
-	return -1
-}
-
-// hasGeneration reports whether a generation row with this id is still on the books
-// (a retired generation disappears once its own reference count reaches zero — the
-// reclaim gate reads exactly this accounting).
-func hasGeneration(entry *agent.TagentAgent, id int64) bool {
-	for _, g := range entry.ContextManager().ExecutorRefs().Generations {
-		if g.Generation == id {
-			return true
-		}
-	}
-	return false
-}
-
-func crossWrite(t *testing.T, path, content string, tick *time.Time) {
-	t.Helper()
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
-	*tick = tick.Add(2 * time.Second)
-	require.NoError(t, os.Chtimes(path, *tick, *tick))
-}
 
 // TestOrgCrossPublish_BackgroundExecutionKeepsTargetAcrossPublish 钉住 后台生产者的委派跨发布仍跑它开始的那一代。
 // - 被任务层收养的异步委派停在途中时发布新一代，新代目标不得在这次在途调用里被偷走；
@@ -222,56 +193,6 @@ func TestOrgCrossPublish_QueuedInputTakesNewGenerationAtExecution(t *testing.T) 
 		"the queued input must run AFTER the in-flight turn landed, on C (B returned at %d, first C at %d)", bReturned, cRan)
 }
 
-// noToolModel answers every request with a final text message and NEVER issues a tool
-// call, regardless of what tools it is offered. It records HOW MANY times each caller
-// (by system label) reached the model — which is how the negative control observes that
-// a delegation target never actually ran (a sub-agent only reaches the model when its
-// delegation is invoked).
-type noToolModel struct {
-	mu      sync.Mutex
-	calls   map[string]int
-	offered map[string][]string
-}
-
-func (m *noToolModel) record(label string, tools []string) {
-	m.mu.Lock()
-	if m.calls == nil {
-		m.calls = map[string]int{}
-	}
-	if m.offered == nil {
-		m.offered = map[string][]string{}
-	}
-	m.calls[label]++
-	if _, ok := m.offered[label]; !ok {
-		m.offered[label] = tools
-	}
-	m.mu.Unlock()
-}
-
-func (m *noToolModel) count(label string) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls[label]
-}
-
-func (m *noToolModel) offeredTools(label string) []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.offered[label]
-}
-
-func (m *noToolModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
-	label := delegLabel(delegSystemOf(req))
-	m.record(label, delegToolNames(req))
-	ch := make(chan *model.Response, 1)
-	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{
-		Role: model.RoleAssistant, Content: "final answer, no tool"}}}}
-	close(ch)
-	return ch, nil
-}
-
-func (m *noToolModel) Info() model.Info { return model.Info{Name: "no-tool-model"} }
-
 // TestOrgCrossPublish_NoToolCallRunsNeitherTarget 钉住 未调用工具时被 Offer 与未被 Offer 的目标都不执行。
 // - 前置必须证明确实 Offer 过、且请求确实到达模型，否则"从未运行"是空洞通过；
 // - 热路径不得因某个执行器已被路由就抢先执行它——路由声明的是可用性，不是执行。
@@ -306,83 +227,6 @@ func TestOrgCrossPublish_NoToolCallRunsNeitherTarget(t *testing.T) {
 
 	require.Zero(t, m.count("SUB-B-PROMPT"), "an offered-but-not-called target must not run")
 	require.Zero(t, m.count("SUB-C-PROMPT"), "a target not even offered must not run")
-}
-
-// ackSettleModel is the witness that the hardest cross-generation row needs and
-// the shared mock cannot provide: a detached run's result comes back as a
-// USER-role `[task settled] … 结果: …` notification (measured — not as a tool
-// result, so `delegServed.ToolResults` is blind to it). This model records, per
-// ENTRY call, which tools that call was offered and whether its request carried
-// the settle notification, so the row can be attributed by causality: the turn
-// that holds the background answer is the settle-driven turn, and the tool set
-// offered to IT is the generation that turn runs on.
-type ackSettleModel struct {
-	mu      sync.Mutex
-	calls   []ackEntryCall
-	subRuns int
-	gate    chan struct{}
-}
-
-type ackEntryCall struct {
-	tools   []string
-	settled bool
-}
-
-func (m *ackSettleModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
-	label := delegLabel(delegSystemOf(req))
-	tools := delegToolNames(req)
-	joined := strings.Builder{}
-	for _, mm := range req.Messages {
-		joined.WriteString(string(mm.Role))
-		joined.WriteByte(' ')
-		joined.WriteString(mm.Content)
-		joined.WriteByte('\n')
-	}
-	text := joined.String()
-
-	m.mu.Lock()
-	if label == "SUB-B-PROMPT" {
-		m.subRuns++
-	}
-	settled := strings.Contains(text, "[task settled]") && strings.Contains(text, "served:SUB-B-PROMPT")
-	offer := ""
-	if label == "ENTRY-A-PROMPT" {
-		if len(m.calls)%2 == 0 && len(tools) > 0 {
-			offer = tools[0]
-		}
-		m.calls = append(m.calls, ackEntryCall{tools: tools, settled: settled})
-	}
-	g := m.gate
-	m.mu.Unlock()
-
-	if label == "SUB-B-PROMPT" && g != nil {
-		select {
-		case <-g:
-		case <-time.After(30 * time.Second):
-		}
-	}
-
-	ch := make(chan *model.Response, 1)
-	if offer != "" {
-		ch <- &model.Response{Choices: []model.Choice{{Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{Type: "function", ID: "call-" + offer,
-				Function: model.FunctionDefinitionParam{Name: offer, Arguments: []byte(`{"request":"work"}`)}}},
-		}}}}
-	} else {
-		ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{
-			Role: model.RoleAssistant, Content: "served:" + label}}}}
-	}
-	close(ch)
-	return ch, nil
-}
-
-func (m *ackSettleModel) Info() model.Info { return model.Info{Name: "ack-settle-model"} }
-
-func (m *ackSettleModel) snapshot() ([]ackEntryCall, int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]ackEntryCall(nil), m.calls...), m.subRuns
 }
 
 // TestOrgCrossPublish_SettleTurnRunsOnTheNewGeneration 钉住 回执已交、父回合已结束之后再发布：后台仍用旧代，结算回合用新代。
@@ -465,62 +309,6 @@ func TestOrgCrossPublish_SettleTurnRunsOnTheNewGeneration(t *testing.T) {
 	_, runs := m.snapshot()
 	require.Equal(t, 1, runs,
 		"the in-flight G1 run was neither re-run nor replaced by the publication")
-}
-
-// plainTextPullModel answers every request with plain text: the tests below hold a call
-// open with a real LEASE, so nothing depends on model latency.
-type plainTextPullModel struct{}
-
-func (m *plainTextPullModel) GenerateContent(_ context.Context, _ *model.Request) (<-chan *model.Response, error) {
-	ch := make(chan *model.Response, 1)
-	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.NewAssistantMessage("ok")}}}
-	close(ch)
-	return ch, nil
-}
-
-func (m *plainTextPullModel) Info() model.Info { return model.Info{Name: "d52-pull"} }
-
-// aliasSpellingYAML renders entry "main" routing sub1 (and optionally sub2 with its own
-// numbers) using the requested tool-ref spelling: "explicit" writes `kind: agent`,
-// "omitted" leaves the kind out — the same orchestration, spelled differently.
-func aliasSpellingYAML(spelling string, keepMain int, withSub2 bool, keepSub2, maxSub2 int) string {
-	ref := "      - kind: agent\n        agent: sub1\n        description: \"delegate-sub1\"\n"
-	if spelling == "omitted" {
-		ref = "      - agent: sub1\n        description: \"delegate-sub1\"\n"
-	}
-	sub2Ref := ""
-	if withSub2 {
-		sub2Ref = "      - kind: agent\n        agent: sub2\n        description: \"delegate-sub2\"\n"
-	}
-	sub2Def := ""
-	if withSub2 {
-		sub2Def = fmt.Sprintf("  sub2:\n    system_prompt:\n      inline: \"SUB2-D52\"\n    keep_recent_tasks: %d\n    max_tokens: %d\n    compress_threshold: 0.5\n    memory:\n      type: memory\n", keepSub2, maxSub2)
-	}
-	return "entry: main\nagents:\n  main:\n" +
-		"    system_prompt:\n      inline: \"MAIN-D52\"\n" +
-		fmt.Sprintf("    keep_recent_tasks: %d\n", keepMain) +
-		"    memory:\n      type: memory\n" +
-		"    tools:\n" + ref + sub2Ref +
-		"  sub1:\n    system_prompt:\n      inline: \"SUB1-D52\"\n    memory:\n      type: memory\n" +
-		sub2Def
-}
-
-// remoteSpellingYAML is a remote-only reference — legal with no local definition
-// at all — written with or without the explicit kind.
-func remoteSpellingYAML(spelling, endpoint string) string {
-	ref := "      - kind: agent\n        agent: knowledge\n        description: delegate-knowledge\n        async: false\n"
-	if spelling == "omitted" {
-		ref = "      - agent: knowledge\n        description: delegate-knowledge\n        async: false\n"
-	}
-	return "entry: a\nagents:\n  a:\n    system_prompt:\n      inline: \"ENTRY-A\"\n    max_tool_iterations: 2\n    memory:\n      type: memory\n    tools:\n" + ref +
-		fmt.Sprintf("        remote:\n          url: %q\n", endpoint)
-}
-
-func writeAliasConfig(t *testing.T, path, content string, tick *time.Time) {
-	t.Helper()
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
-	*tick = tick.Add(2 * time.Second)
-	require.NoError(t, os.Chtimes(path, *tick, *tick))
 }
 
 // TestRuntimeObjectAliasIsNotAStructuralChange 钉住 同一编排换书写形不算结构变更。
@@ -767,6 +555,626 @@ func TestCrossConfig_RefusedLaterAddRollsBackEarlierAdd(t *testing.T) {
 	require.Contains(t, entryToolNames(entry), "a2okagent", "and is routable")
 }
 
+// TestWithinLoopInitiatorResolvesOnBsOwnFace 钉住 有在途发起调用时，它发起的重入按发起者声明的那一代解析。
+// - 途中发布停止路由 c 才使本测非空洞：无换代时两条解析分支同答，证不了读的是哪张面；
+// - 仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定，合法绑定能存活正因声明保持让被钉代的子仍可达；
+// - 退回 effective 面或入口工具表都会拒绝，规格要求 G1 绑定存活并在 b 的被钉面上服务重入。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestWithinLoopInitiatorResolvesOnBsOwnFace(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
+
+	entry, b, taskID, m := startReentryChain(t, yamlPath)
+	defer func() { _ = entry.Close() }()
+
+	before := countServed(m.snapshot(), "SUB-C")
+	lease := b.ContextManager().AcquireLease(agent.LeaseSubCall)
+	defer lease.Release()
+
+	writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", true), tick)
+	entry.CheckOrgReload()
+	require.Nil(t, b.ContextManager().SubagentWrapper("c"),
+		"precondition: the EFFECTIVE face no longer routes c, so only a declared-generation read can work")
+	require.Equal(t, before, countServed(m.snapshot(), "SUB-C"), "no new serve happened on its own")
+
+	ctx := lease.WithContext(task.WithTaskSpawner(context.Background(), b.TaskManager()))
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
+	require.NoError(t, err)
+	require.NotContains(t, res.(string), "失败",
+		"①有发起者的重入须按发起代解析，不因新代删除目标而丢失合法绑定：%v", res)
+	waitFor(t, "the re-entered nested delegation ran on b's pinned face", func() bool {
+		return countServed(m.snapshot(), "SUB-C") > before
+	})
+}
+
+// TestPostSilenceRelaunchUsesResidentOwnerFace 钉住 属主环路静默且无发起调用时，重入从该属主的常驻 owner 面解析。
+// - 实例常驻且未关闭，解析面是 b 自己的 owner 面，绝不从入口的面。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestPostSilenceRelaunchUsesResidentOwnerFace(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
+
+	entry, b, taskID, m := startReentryChain(t, yamlPath)
+	defer func() { _ = entry.Close() }()
+
+	before := countServed(m.snapshot(), "SUB-C")
+	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
+
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
+	require.NoError(t, err)
+	require.NotContains(t, res.(string), "失败", "②b 环静默后重入必须从其常驻 owner 面解析：%v", res)
+	waitFor(t, "the re-entry served through b's owner face", func() bool {
+		return countServed(m.snapshot(), "SUB-C") > before
+	})
+}
+
+// TestGenerationThatRemovedTargetRefusesWithoutRerouting 钉住 新一代停止路由目标后，存量任务的重入被具名拒绝并附版本理由。
+// - 既不重跑被移除目标，也不静默改道替身；
+// - 拒绝作为答案返回（宿主看见哪个动作失败、理由是版本选择而非缺记录），不是传输错误。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestGenerationThatRemovedTargetRefusesWithoutRerouting(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
+
+	entry, b, taskID, m := startReentryChain(t, yamlPath)
+	defer func() { _ = entry.Close() }()
+
+	tick = writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", true), tick)
+	entry.CheckOrgReload()
+	require.Nil(t, b.ContextManager().SubagentWrapper("c"),
+		"precondition: the published generation really stopped routing c on b's face")
+
+	runsBefore := countServed(m.snapshot(), "SUB-C")
+	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
+	require.NoError(t, err, "a refusal is reported as an answer, not a transport error")
+	text, ok := res.(string)
+	require.True(t, ok)
+	require.Contains(t, text, "重跑任务", "宿主须看见是哪个动作失败：%s", text)
+	require.Contains(t, text, "EFFECTIVE orchestration generation",
+		"并看见拒绝理由是版本选择而非缺记录：%s", text)
+	require.Equal(t, runsBefore, countServed(m.snapshot(), "SUB-C"),
+		"§4.2：被拒重入不得把已移除目标再跑一次，也不得静默改道新目标")
+}
+
+// TestChangedTargetResolvesOnTheNewGeneration 钉住 改了目标的新一代是无发起者重入所达的那张面。
+//   - b 自身声明未变，故这正是"未变父也随发布推进执行视图"在深度二上的落地；
+//   - 仍被路由的目标须经新面重入，到达的是新 c；
+//   - 归因由 noDelegation 守住：setup 之后模型不发起任何委派，告警轮到不了 c，SUB-C-G2 只能来自这次重入。
+//
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
+
+	entry, b, taskID, m := startReentryChain(t, yamlPath)
+	defer func() { _ = entry.Close() }()
+
+	tick = writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C-G2", false), tick)
+	entry.CheckOrgReload()
+	require.NotNil(t, b.ContextManager().SubagentWrapper("c"), "c is still routed after the publish")
+
+	m.noDelegation()
+	newBefore := countServed(m.snapshot(), "SUB-C-G2")
+	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
+	require.NoError(t, err)
+	require.NotContains(t, res.(string), "失败", "仍被路由的目标须经新面重入：%v", res)
+
+	waitFor(t, "the re-entry itself served the NEW c (b's face advanced with the publish)", func() bool {
+		return countServed(m.snapshot(), "SUB-C-G2") > newBefore
+	})
+}
+
+// TestRelaunchAfterRestartResolvesOnTheCurrentFace 钉住 跨进程重启后，重入在当前面解析。
+// - 每段 boot 交给它自己的进程、只在其间编排持久状态——一次 boot 只有真实进程启动才算证据；
+// - 正负两腿各用独立持久根：负腿从崩溃状态本身重启，而非已被正腿结算过的 board。
+// - 崩溃形状＝任务落在 b 自己的 board 上、只有 task_spawned 而无终态 settle 时进程结束（靠不调 Close 直接退出得到，而非手搓一条记录）；
+// - 重启后从 b 的重建 board 重放 relaunch_task：摘掉目标 c 的负腿必须按名拒绝，不得被旧代绑定静默复活。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
+	if phase := os.Getenv(walReentryPhaseEnv); phase != "" {
+		walReentryChild(t, phase)
+		return
+	}
+
+	runScenario := func(dropOnRestart bool) {
+		dir := t.TempDir()
+		yamlPath := filepath.Join(dir, "tagent.yaml")
+		env := append(os.Environ(), walReentryYamlEnv+"="+yamlPath)
+
+		runBootChild(t, env, walReentryPhaseEnv+"=spawn", walReentryFilter)
+
+		if dropOnRestart {
+			require.NoError(t, os.WriteFile(yamlPath, []byte(walReentryYAML(dir, true)), 0o644))
+			runBootChild(t, env, walReentryPhaseEnv+"=restart_drop_c", walReentryFilter)
+			return
+		}
+		runBootChild(t, env, walReentryPhaseEnv+"=restart", walReentryFilter)
+	}
+	runScenario(false)
+	runScenario(true)
+}
+
+// TestLiveSessionStaysWatchedAcrossToolGeneration 钉住 工具换代后仍存活的真实会话必须继续被当前代跟踪。
+// - 三条 boot 各用独立持久根：热更窗口那条全程发生在单进程内（spawn → publish → re-attempt），复用前一根会拿到会话早已死亡的遗留任务（实测）。
+// - 以重启为锚而非热更窗口：热更后要进入裁决区需一次真实静默，其下限被钉在稳定窗（非 TUI 60s／TUI 90s），钉成常驻锚只会变成负载敏感的偶发红灯；
+// - 重启入口有确定裁决：RestoreTask 把 running 降级 suspect，TaskID 桥先裁孤儿、再把被当前 monitor 跟踪的任务提升回 running；
+// - 一条存活会话被判「未跟踪」，等价于监视信号在某一代工具手里丢失——该链与热更窗口检验的是同一处 seam。
+func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
+	if phase := os.Getenv(sessionWatchPhaseEnv); phase != "" {
+		sessionWatchChild(t, phase)
+		return
+	}
+	root := t.TempDir()
+	yamlPath := filepath.Join(root, "tagent.yaml")
+	env := append(os.Environ(), sessionWatchYamlEnv+"="+yamlPath)
+
+	runBootChild(t, env, sessionWatchPhaseEnv+"=spawn", sessionWatchFilter)
+
+	runBootChild(t, env, sessionWatchPhaseEnv+"=restart", sessionWatchFilter)
+
+	hotRoot := t.TempDir()
+	hotYaml := filepath.Join(hotRoot, "tagent.yaml")
+	runBootChild(t, append(os.Environ(), sessionWatchYamlEnv+"="+hotYaml), sessionWatchPhaseEnv+"=hotreload", sessionWatchFilter)
+}
+
+// TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf 钉住 每一层都改变时，结构发布必须在每个深度确定性地交付新声明。
+// - 非法形状是按 map 序走变更集，父壳早于子壳装配、DFS 命中旧常驻子而把旧目标烙进新面，使结果逐次翻覆；
+// - 一代生效后的下一回合必须在每个深度都跑它自己的新声明，面只来自被发布的那一代、不回落进旧快照。
+// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
+func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(chainYAML("SUB-C-PROMPT"))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	m := &delegModel{}
+	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	out, err := entry.StartLoop("u", "all-levels-session")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range out {
+		}
+	}()
+	t.Cleanup(func() { <-done })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("warm"))
+	require.NoError(t, err)
+	waitFor(t, "the chain ran on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
+
+	write(allLevelsChangedYAML())
+	entry.CheckOrgReload()
+
+	before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("after"))
+	require.NoError(t, err)
+	waitFor(t, "the next turn reaches the new leaf at depth 3", func() bool {
+		return countServed(m.snapshot(), "SUB-C-PROMPT-G2") > before
+	})
+}
+
+// TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget 钉住 跨发布时，停在途的 B 向下委派到 C 仍跑它被钉那一代声明的 C。
+// - 补齐别的锚到不了的这一面：稳定态各层见自身声明、单跳发起者持自身代都已证，唯独 B 停在途中、G2 换掉 C 后 B 向下到 C 没证；
+// - 第三条回合必须跑新 C，使本锚自判别——发布从未落地时第一条断言会因错误理由通过。
+// - 见证按序号取而非取最新：只有本次委派自身的 settle 能产出下一条记录，而它不可能早于该跳生产者返回——两跳落在两次轮询之间时见证才不会漂。
+// - 归属按"答案里的旧代标记"锚定，不按发布后答案的到达顺序：通知回合合法地在新代面执行，断言"没有新代答案"会在正确实现上失败。
+// - 在途窗口以 gate 的 park 直接观测钉住（record 计数可被前一回合的同类记录满足）。
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
+func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(chainYAML("SUB-C-PROMPT"))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	m := &delegModel{}
+	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	out, err := entry.StartLoop("u", "nested-hop-session")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range out {
+		}
+	}()
+	t.Cleanup(func() { <-done })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
+	require.NoError(t, err)
+	waitFor(t, "the leaf served on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
+
+	bGate := make(chan struct{})
+	m.armGate("SUB-B-PROMPT", bGate)
+	t.Cleanup(func() { disarmGate(bGate) })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
+	require.NoError(t, err)
+	waitFor(t, "B parked mid-call", func() bool {
+		return m.parkedNow("SUB-B-PROMPT") >= 1
+	})
+
+	g1AnswersAtB := func() int {
+		n := 0
+		for _, sv := range m.snapshot() {
+			if sv.System == "SUB-B-PROMPT" && len(sv.ToolResults) > 0 &&
+				strings.Contains(strings.Join(sv.ToolResults, "\n"), `"served:SUB-C-PROMPT"`) {
+				n++
+			}
+		}
+		return n
+	}
+	entriesBefore := countServed(m.snapshot(), "SUB-C-PROMPT")
+	g2Before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
+	g1AnswersBefore := g1AnswersAtB()
+
+	write(chainYAML("SUB-C-PROMPT-G2"))
+	entry.CheckOrgReload()
+
+	disarmGate(bGate)
+
+	waitFor(t, "the pinned G1 hop returned its old-C answer to B", func() bool {
+		return g1AnswersAtB() > g1AnswersBefore
+	})
+	require.Greater(t, countServed(m.snapshot(), "SUB-C-PROMPT"), entriesBefore,
+		"§3.2：被钉跳须在 G1 之 C 上执行（派生前继承发起调用租约）；若被改道到新目标，这条新增的 G1 serve 永不出现")
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("third request"))
+	require.NoError(t, err)
+	waitFor(t, "a fresh turn serves the new C", func() bool {
+		return countServed(m.snapshot(), "SUB-C-PROMPT-G2") > g2Before
+	})
+}
+
+// TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration 钉住 生产入口上被发布移除目标的重放被版本拒绝且不新建执行。
+// - 入口被 Offer 的是它自己的委派加两个生产任务工具（relaunch/resume），board 项是生产 spawn 身份；
+// - 换代把 a 改路由 c、b 从有效面消失（其常驻 owner 仍在，正是复活风险面）；
+// - 被拒重入不得重跑那个目标，也不得静默改用替身跑新目标。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	writeReentryYAML(t, yamlPath, reentryYAML("b", 2))
+
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	m := &namedDelegModel{pick: "b"}
+	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	out, err := entry.StartLoop("u", "reentry-session")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range out {
+		}
+	}()
+	t.Cleanup(func() { <-done })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
+	require.NoError(t, err)
+	waitFor(t, "b served the delegation", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") > 0 })
+	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
+
+	decls := entryDeclarations(m.snapshot())
+	require.NotEmpty(t, decls)
+	require.ElementsMatch(t, []string{"b", "relaunch_task", "resume_task"}, decls[0],
+		"the entry is offered its delegation AND the production task-action tools")
+
+	tk := subagentTask(t, entry.TaskManager())
+	require.Equal(t, "b:work", tk.Spec.Key, "the board entry is the production spawn identity")
+
+	writeReentryYAML(t, yamlPath, reentryYAML("c", 2))
+	entry.CheckOrgReload()
+	require.Nil(t, entry.ContextManager().SubagentWrapper("b"),
+		"precondition: the published generation really stopped routing b")
+
+	runsBefore := countServed(m.snapshot(), "SUB-B-PROMPT")
+	ctxWithTM := task.WithTaskSpawner(context.Background(), entry.TaskManager())
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctxWithTM, relaunchArgs(t, tk.ID))
+	require.NoError(t, err, "the tool reports a refusal as an answer, not a transport error")
+	text, ok := res.(string)
+	require.True(t, ok)
+	require.Contains(t, text, "重跑任务", "the host sees WHICH action failed: %s", text)
+	require.Contains(t, text, "EFFECTIVE orchestration generation",
+		"and WHY: version selection refused it, not a missing file: %s", text)
+
+	require.Equal(t, runsBefore, countServed(m.snapshot(), "SUB-B-PROMPT"),
+		"a refused relaunch must not run the removed target — not once")
+	require.Equal(t, 0, countServed(m.snapshot(), "SUB-C-PROMPT"),
+		"and it must not silently substitute the new target either")
+}
+
+// TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget 钉住 目标经结构发布仍被路由时，无发起调用重入经新发布面运行它。
+// - 一次保持 a→b 的结构编辑（max_tool_iterations 进指纹）确实发布新一代并重建 wrapper；
+// - 缺常驻 owner 接线的候选会在此 fail-closed（"no resident owner"），正是本测要证伪的接线。
+// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
+func TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	writeReentryYAML(t, yamlPath, reentryYAML("b", 2))
+
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	m := &namedDelegModel{pick: "b"}
+	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	out, err := entry.StartLoop("u", "reentry-live-session")
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range out {
+		}
+	}()
+	t.Cleanup(func() { <-done })
+
+	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
+	require.NoError(t, err)
+	waitFor(t, "the first delegation settled", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") > 0 })
+	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
+	tk := subagentTask(t, entry.TaskManager())
+
+	before := countServed(m.snapshot(), "SUB-B-PROMPT")
+	writeReentryYAML(t, yamlPath, reentryYAML("b", 3))
+	entry.CheckOrgReload()
+	require.NotNil(t, entry.ContextManager().SubagentWrapper("b"), "the new generation still routes b")
+
+	ctxWithTM := task.WithTaskSpawner(context.Background(), entry.TaskManager())
+	res, err := tasktool.NewRelaunchTaskTool().Call(ctxWithTM, relaunchArgs(t, tk.ID))
+	require.NoError(t, err)
+	text, ok := res.(string)
+	require.True(t, ok)
+	require.NotContains(t, text, "失败", "a still-routed target must relaunch through the published face: %s", text)
+
+	waitFor(t, "the re-entered delegation ran on the current generation", func() bool {
+		return countServed(m.snapshot(), "SUB-B-PROMPT") > before
+	})
+}
+
+func entryGeneration(t *testing.T, entry *agent.TagentAgent) int64 {
+	t.Helper()
+	for _, g := range entry.ContextManager().ExecutorRefs().Generations {
+		if !g.Retired {
+			return g.Generation
+		}
+	}
+	return -1
+}
+
+// hasGeneration reports whether a generation row with this id is still on the books
+// (a retired generation disappears once its own reference count reaches zero — the
+// reclaim gate reads exactly this accounting).
+func hasGeneration(entry *agent.TagentAgent, id int64) bool {
+	for _, g := range entry.ContextManager().ExecutorRefs().Generations {
+		if g.Generation == id {
+			return true
+		}
+	}
+	return false
+}
+
+func crossWrite(t *testing.T, path, content string, tick *time.Time) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	*tick = tick.Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(path, *tick, *tick))
+}
+
+// noToolModel answers every request with a final text message and NEVER issues a tool
+// call, regardless of what tools it is offered. It records HOW MANY times each caller
+// (by system label) reached the model — which is how the negative control observes that
+// a delegation target never actually ran (a sub-agent only reaches the model when its
+// delegation is invoked).
+type noToolModel struct {
+	mu      sync.Mutex
+	calls   map[string]int
+	offered map[string][]string
+}
+
+func (m *noToolModel) record(label string, tools []string) {
+	m.mu.Lock()
+	if m.calls == nil {
+		m.calls = map[string]int{}
+	}
+	if m.offered == nil {
+		m.offered = map[string][]string{}
+	}
+	m.calls[label]++
+	if _, ok := m.offered[label]; !ok {
+		m.offered[label] = tools
+	}
+	m.mu.Unlock()
+}
+
+func (m *noToolModel) count(label string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls[label]
+}
+
+func (m *noToolModel) offeredTools(label string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.offered[label]
+}
+
+func (m *noToolModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
+	label := delegLabel(delegSystemOf(req))
+	m.record(label, delegToolNames(req))
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{
+		Role: model.RoleAssistant, Content: "final answer, no tool"}}}}
+	close(ch)
+	return ch, nil
+}
+
+func (m *noToolModel) Info() model.Info { return model.Info{Name: "no-tool-model"} }
+
+// ackSettleModel is the witness that the hardest cross-generation row needs and
+// the shared mock cannot provide: a detached run's result comes back as a
+// USER-role `[task settled] … 结果: …` notification (measured — not as a tool
+// result, so `delegServed.ToolResults` is blind to it). This model records, per
+// ENTRY call, which tools that call was offered and whether its request carried
+// the settle notification, so the row can be attributed by causality: the turn
+// that holds the background answer is the settle-driven turn, and the tool set
+// offered to IT is the generation that turn runs on.
+type ackSettleModel struct {
+	mu      sync.Mutex
+	calls   []ackEntryCall
+	subRuns int
+	gate    chan struct{}
+}
+
+type ackEntryCall struct {
+	tools   []string
+	settled bool
+}
+
+func (m *ackSettleModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
+	label := delegLabel(delegSystemOf(req))
+	tools := delegToolNames(req)
+	joined := strings.Builder{}
+	for _, mm := range req.Messages {
+		joined.WriteString(string(mm.Role))
+		joined.WriteByte(' ')
+		joined.WriteString(mm.Content)
+		joined.WriteByte('\n')
+	}
+	text := joined.String()
+
+	m.mu.Lock()
+	if label == "SUB-B-PROMPT" {
+		m.subRuns++
+	}
+	settled := strings.Contains(text, "[task settled]") && strings.Contains(text, "served:SUB-B-PROMPT")
+	offer := ""
+	if label == "ENTRY-A-PROMPT" {
+		if len(m.calls)%2 == 0 && len(tools) > 0 {
+			offer = tools[0]
+		}
+		m.calls = append(m.calls, ackEntryCall{tools: tools, settled: settled})
+	}
+	g := m.gate
+	m.mu.Unlock()
+
+	if label == "SUB-B-PROMPT" && g != nil {
+		select {
+		case <-g:
+		case <-time.After(30 * time.Second):
+		}
+	}
+
+	ch := make(chan *model.Response, 1)
+	if offer != "" {
+		ch <- &model.Response{Choices: []model.Choice{{Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{Type: "function", ID: "call-" + offer,
+				Function: model.FunctionDefinitionParam{Name: offer, Arguments: []byte(`{"request":"work"}`)}}},
+		}}}}
+	} else {
+		ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.Message{
+			Role: model.RoleAssistant, Content: "served:" + label}}}}
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (m *ackSettleModel) Info() model.Info { return model.Info{Name: "ack-settle-model"} }
+
+func (m *ackSettleModel) snapshot() ([]ackEntryCall, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]ackEntryCall(nil), m.calls...), m.subRuns
+}
+
+// plainTextPullModel answers every request with plain text: the tests below hold a call
+// open with a real LEASE, so nothing depends on model latency.
+type plainTextPullModel struct{}
+
+func (m *plainTextPullModel) GenerateContent(_ context.Context, _ *model.Request) (<-chan *model.Response, error) {
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Done: true, Choices: []model.Choice{{Message: model.NewAssistantMessage("ok")}}}
+	close(ch)
+	return ch, nil
+}
+
+func (m *plainTextPullModel) Info() model.Info { return model.Info{Name: "d52-pull"} }
+
+// aliasSpellingYAML renders entry "main" routing sub1 (and optionally sub2 with its own
+// numbers) using the requested tool-ref spelling: "explicit" writes `kind: agent`,
+// "omitted" leaves the kind out — the same orchestration, spelled differently.
+func aliasSpellingYAML(spelling string, keepMain int, withSub2 bool, keepSub2, maxSub2 int) string {
+	ref := "      - kind: agent\n        agent: sub1\n        description: \"delegate-sub1\"\n"
+	if spelling == "omitted" {
+		ref = "      - agent: sub1\n        description: \"delegate-sub1\"\n"
+	}
+	sub2Ref := ""
+	if withSub2 {
+		sub2Ref = "      - kind: agent\n        agent: sub2\n        description: \"delegate-sub2\"\n"
+	}
+	sub2Def := ""
+	if withSub2 {
+		sub2Def = fmt.Sprintf("  sub2:\n    system_prompt:\n      inline: \"SUB2-D52\"\n    keep_recent_tasks: %d\n    max_tokens: %d\n    compress_threshold: 0.5\n    memory:\n      type: memory\n", keepSub2, maxSub2)
+	}
+	return "entry: main\nagents:\n  main:\n" +
+		"    system_prompt:\n      inline: \"MAIN-D52\"\n" +
+		fmt.Sprintf("    keep_recent_tasks: %d\n", keepMain) +
+		"    memory:\n      type: memory\n" +
+		"    tools:\n" + ref + sub2Ref +
+		"  sub1:\n    system_prompt:\n      inline: \"SUB1-D52\"\n    memory:\n      type: memory\n" +
+		sub2Def
+}
+
+// remoteSpellingYAML is a remote-only reference — legal with no local definition
+// at all — written with or without the explicit kind.
+func remoteSpellingYAML(spelling, endpoint string) string {
+	ref := "      - kind: agent\n        agent: knowledge\n        description: delegate-knowledge\n        async: false\n"
+	if spelling == "omitted" {
+		ref = "      - agent: knowledge\n        description: delegate-knowledge\n        async: false\n"
+	}
+	return "entry: a\nagents:\n  a:\n    system_prompt:\n      inline: \"ENTRY-A\"\n    max_tool_iterations: 2\n    memory:\n      type: memory\n    tools:\n" + ref +
+		fmt.Sprintf("        remote:\n          url: %q\n", endpoint)
+}
+
+func writeAliasConfig(t *testing.T, path, content string, tick *time.Time) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	*tick = tick.Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(path, *tick, *tick))
+}
+
 // addTwoYAML renders entry delegating to `base` plus two new agents. The second one
 // ("zzbadagent") has an un-creatable localfile store path, so its RESIDENT build fails
 // mid-candidate — after the first add has been built and merged.
@@ -950,116 +1358,11 @@ func startReentryChain(t *testing.T, yamlPath string) (entry *agent.TagentAgent,
 	return entry, b, found.ID, m
 }
 
-// TestWithinLoopInitiatorResolvesOnBsOwnFace 钉住 有在途发起调用时，它发起的重入按发起者声明的那一代解析。
-// - 途中发布停止路由 c 才使本测非空洞：无换代时两条解析分支同答，证不了读的是哪张面；
-// - 仍持 G1 租约的发起者不因 G2 删除目标而丢失其合法 G1 绑定，合法绑定能存活正因声明保持让被钉代的子仍可达；
-// - 退回 effective 面或入口工具表都会拒绝，规格要求 G1 绑定存活并在 b 的被钉面上服务重入。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestWithinLoopInitiatorResolvesOnBsOwnFace(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
-
-	entry, b, taskID, m := startReentryChain(t, yamlPath)
-	defer func() { _ = entry.Close() }()
-
-	before := countServed(m.snapshot(), "SUB-C")
-	lease := b.ContextManager().AcquireLease(agent.LeaseSubCall)
-	defer lease.Release()
-
-	writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", true), tick)
-	entry.CheckOrgReload()
-	require.Nil(t, b.ContextManager().SubagentWrapper("c"),
-		"precondition: the EFFECTIVE face no longer routes c, so only a declared-generation read can work")
-	require.Equal(t, before, countServed(m.snapshot(), "SUB-C"), "no new serve happened on its own")
-
-	ctx := lease.WithContext(task.WithTaskSpawner(context.Background(), b.TaskManager()))
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
-	require.NoError(t, err)
-	require.NotContains(t, res.(string), "失败",
-		"①有发起者的重入须按发起代解析，不因新代删除目标而丢失合法绑定：%v", res)
-	waitFor(t, "the re-entered nested delegation ran on b's pinned face", func() bool {
-		return countServed(m.snapshot(), "SUB-C") > before
-	})
-}
-
-// TestPostSilenceRelaunchUsesResidentOwnerFace 钉住 属主环路静默且无发起调用时，重入从该属主的常驻 owner 面解析。
-// - 实例常驻且未关闭，解析面是 b 自己的 owner 面，绝不从入口的面。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestPostSilenceRelaunchUsesResidentOwnerFace(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
-
-	entry, b, taskID, m := startReentryChain(t, yamlPath)
-	defer func() { _ = entry.Close() }()
-
-	before := countServed(m.snapshot(), "SUB-C")
-	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
-
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
-	require.NoError(t, err)
-	require.NotContains(t, res.(string), "失败", "②b 环静默后重入必须从其常驻 owner 面解析：%v", res)
-	waitFor(t, "the re-entry served through b's owner face", func() bool {
-		return countServed(m.snapshot(), "SUB-C") > before
-	})
-}
-
-// TestGenerationThatRemovedTargetRefusesWithoutRerouting 钉住 新一代停止路由目标后，存量任务的重入被具名拒绝并附版本理由。
-// - 既不重跑被移除目标，也不静默改道替身；
-// - 拒绝作为答案返回（宿主看见哪个动作失败、理由是版本选择而非缺记录），不是传输错误。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestGenerationThatRemovedTargetRefusesWithoutRerouting(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
-
-	entry, b, taskID, m := startReentryChain(t, yamlPath)
-	defer func() { _ = entry.Close() }()
-
-	tick = writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", true), tick)
-	entry.CheckOrgReload()
-	require.Nil(t, b.ContextManager().SubagentWrapper("c"),
-		"precondition: the published generation really stopped routing c on b's face")
-
-	runsBefore := countServed(m.snapshot(), "SUB-C")
-	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
-	require.NoError(t, err, "a refusal is reported as an answer, not a transport error")
-	text, ok := res.(string)
-	require.True(t, ok)
-	require.Contains(t, text, "重跑任务", "宿主须看见是哪个动作失败：%s", text)
-	require.Contains(t, text, "EFFECTIVE orchestration generation",
-		"并看见拒绝理由是版本选择而非缺记录：%s", text)
-	require.Equal(t, runsBefore, countServed(m.snapshot(), "SUB-C"),
-		"§4.2：被拒重入不得把已移除目标再跑一次，也不得静默改道新目标")
-}
-
-// TestChangedTargetResolvesOnTheNewGeneration 钉住 改了目标的新一代是无发起者重入所达的那张面。
-// - b 自身声明未变，故这正是"未变父也随发布推进执行视图"在深度二上的落地；
-// - 仍被路由的目标须经新面重入，到达的是新 c。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestChangedTargetResolvesOnTheNewGeneration(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	tick := writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C", false), time.Now())
-
-	entry, b, taskID, m := startReentryChain(t, yamlPath)
-	defer func() { _ = entry.Close() }()
-
-	tick = writeReentryChain(t, yamlPath, reentryChainYAML("SUB-C-G2", false), tick)
-	entry.CheckOrgReload()
-	require.NotNil(t, b.ContextManager().SubagentWrapper("c"), "c is still routed after the publish")
-
-	ctx := task.WithTaskSpawner(context.Background(), b.TaskManager())
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctx, relaunchArgs(t, taskID))
-	require.NoError(t, err)
-	require.NotContains(t, res.(string), "失败", "仍被路由的目标须经新面重入：%v", res)
-
-	newBefore := countServed(m.snapshot(), "SUB-C-G2")
-	waitFor(t, "the re-entry served the NEW c (b's face advanced with the publish)", func() bool {
-		return countServed(m.snapshot(), "SUB-C-G2") > newBefore
-	})
+// noDelegation 关掉本模型的一切委派，使断言只能被被测动作满足，不被无关轮次顺带达标。
+func (m *chainDelegModel) noDelegation() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.prefer = nil
 }
 
 const (
@@ -1182,36 +1485,6 @@ func walReentryBoot(t *testing.T, yamlPath string, m *walReentryModel) *agent.Ta
 	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
 	require.NoError(t, err)
 	return entry
-}
-
-// TestRelaunchAfterRestartResolvesOnTheCurrentFace 钉住 跨进程重启后，重入在当前面解析。
-// - 每段 boot 交给它自己的进程、只在其间编排持久状态——一次 boot 只有真实进程启动才算证据；
-// - 正负两腿各用独立持久根：负腿从崩溃状态本身重启，而非已被正腿结算过的 board。
-// - 崩溃形状＝任务落在 b 自己的 board 上、只有 task_spawned 而无终态 settle 时进程结束（靠不调 Close 直接退出得到，而非手搓一条记录）；
-// - 重启后从 b 的重建 board 重放 relaunch_task：摘掉目标 c 的负腿必须按名拒绝，不得被旧代绑定静默复活。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
-	if phase := os.Getenv(walReentryPhaseEnv); phase != "" {
-		walReentryChild(t, phase)
-		return
-	}
-
-	runScenario := func(dropOnRestart bool) {
-		dir := t.TempDir()
-		yamlPath := filepath.Join(dir, "tagent.yaml")
-		env := append(os.Environ(), walReentryYamlEnv+"="+yamlPath)
-
-		runBootChild(t, env, walReentryPhaseEnv+"=spawn", walReentryFilter)
-
-		if dropOnRestart {
-			require.NoError(t, os.WriteFile(yamlPath, []byte(walReentryYAML(dir, true)), 0o644))
-			runBootChild(t, env, walReentryPhaseEnv+"=restart_drop_c", walReentryFilter)
-			return
-		}
-		runBootChild(t, env, walReentryPhaseEnv+"=restart", walReentryFilter)
-	}
-	runScenario(false)
-	runScenario(true)
 }
 
 // walReentryChild runs one boot of the WAL-reentry scenario as its own process.
@@ -1432,29 +1705,6 @@ func killOwnSession(t *testing.T, session string) {
 	}
 }
 
-// TestLiveSessionStaysWatchedAcrossToolGeneration 钉住 工具换代后仍存活的真实会话必须继续被当前代跟踪。
-// - 三条 boot 各用独立持久根：热更窗口那条全程发生在单进程内（spawn → publish → re-attempt），复用前一根会拿到会话早已死亡的遗留任务（实测）。
-// - 以重启为锚而非热更窗口：热更后要进入裁决区需一次真实静默，其下限被钉在稳定窗（非 TUI 60s／TUI 90s），钉成常驻锚只会变成负载敏感的偶发红灯；
-// - 重启入口有确定裁决：RestoreTask 把 running 降级 suspect，TaskID 桥先裁孤儿、再把被当前 monitor 跟踪的任务提升回 running；
-// - 一条存活会话被判「未跟踪」，等价于监视信号在某一代工具手里丢失——该链与热更窗口检验的是同一处 seam。
-func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
-	if phase := os.Getenv(sessionWatchPhaseEnv); phase != "" {
-		sessionWatchChild(t, phase)
-		return
-	}
-	root := t.TempDir()
-	yamlPath := filepath.Join(root, "tagent.yaml")
-	env := append(os.Environ(), sessionWatchYamlEnv+"="+yamlPath)
-
-	runBootChild(t, env, sessionWatchPhaseEnv+"=spawn", sessionWatchFilter)
-
-	runBootChild(t, env, sessionWatchPhaseEnv+"=restart", sessionWatchFilter)
-
-	hotRoot := t.TempDir()
-	hotYaml := filepath.Join(hotRoot, "tagent.yaml")
-	runBootChild(t, append(os.Environ(), sessionWatchYamlEnv+"="+hotYaml), sessionWatchPhaseEnv+"=hotreload", sessionWatchFilter)
-}
-
 func sessionWatchBoot(t *testing.T, yamlPath string) (*agent.TagentAgent, *sessionWatchModel) {
 	t.Helper()
 	cfg, err := LoadConfig(yamlPath)
@@ -1467,23 +1717,9 @@ func sessionWatchBoot(t *testing.T, yamlPath string) (*agent.TagentAgent, *sessi
 
 // sessionWatchChild runs one boot of the live-session anchor as its own process.
 //
-// The spawn phase owns one fixed session name so phase logs stay attributable, and
-// kills any session of that name first: a named session survives a CRASHED earlier run
-// of this test the same way it survives a restart, while the tool refuses a duplicate
-// name — without that preflight the anchor stops being re-runnable after a failed run.
-// It then lets the record reach the durable path and leaves WITHOUT Close, so nothing
-// reaps the session and the task never settles.
-//
-// The publish phase writes a NEW generation, which re-assembles the owner's ActionTool.
-// The current generation must still own the live session: asking for the same logical
-// name has to be refused as a duplicate, not answered by a second session nobody was
-// tracking.
-//
-// The final wait is bounded because a full test run hosts every package binary at once
-// and the boot's first tmux verification can miss the window. List() re-runs
-// reconcileDetached, so re-fetching exercises the designed re-adjudication path rather
-// than mere patience: alone or whole-package the promotion lands before the first
-// fetch, and a session that never promotes still fails with the same message.
+// - Spawn phase owns one fixed session name and kills any session of that name first: a named session survives a crashed earlier run while the tool refuses a duplicate name, so the anchor stays re-runnable.
+// - It lets the record reach the durable path and leaves without Close, so nothing reaps the session and the task never settles.
+// - Publish phase writes a new generation that re-assembles the owner ActionTool; the current generation must still own the live session, and the same logical name is refused as a duplicate.
 func sessionWatchChild(t *testing.T, phase string) {
 	yamlPath := os.Getenv(sessionWatchYamlEnv)
 	require.NotEmpty(t, yamlPath)
@@ -1625,143 +1861,6 @@ func allLevelsChangedYAML() string {
 	).Replace(nestedYAML())
 }
 
-// TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf 钉住 每一层都改变时，结构发布必须在每个深度确定性地交付新声明。
-// - 非法形状是按 map 序走变更集，父壳早于子壳装配、DFS 命中旧常驻子而把旧目标烙进新面，使结果逐次翻覆；
-// - 一代生效后的下一回合必须在每个深度都跑它自己的新声明，面只来自被发布的那一代、不回落进旧快照。
-// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
-func TestOrgDelegation_AllLevelsRepublishedReachTheNewLeaf(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	tick := time.Now()
-	write := func(content string) {
-		t.Helper()
-		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
-		tick = tick.Add(2 * time.Second)
-		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
-	}
-
-	write(chainYAML("SUB-C-PROMPT"))
-	cfg, err := LoadConfig(yamlPath)
-	require.NoError(t, err)
-	m := &delegModel{}
-	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
-	require.NoError(t, err)
-	defer func() { _ = entry.Close() }()
-
-	out, err := entry.StartLoop("u", "all-levels-session")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range out {
-		}
-	}()
-	t.Cleanup(func() { <-done })
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("warm"))
-	require.NoError(t, err)
-	waitFor(t, "the chain ran on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
-
-	write(allLevelsChangedYAML())
-	entry.CheckOrgReload()
-
-	before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("after"))
-	require.NoError(t, err)
-	waitFor(t, "the next turn reaches the new leaf at depth 3", func() bool {
-		return countServed(m.snapshot(), "SUB-C-PROMPT-G2") > before
-	})
-}
-
-// TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget 钉住 跨发布时，停在途的 B 向下委派到 C 仍跑它被钉那一代声明的 C。
-// - 补齐别的锚到不了的这一面：稳定态各层见自身声明、单跳发起者持自身代都已证，唯独 B 停在途中、G2 换掉 C 后 B 向下到 C 没证；
-// - 第三条回合必须跑新 C，使本锚自判别——发布从未落地时第一条断言会因错误理由通过。
-// - 见证按序号取而非取最新：只有本次委派自身的 settle 能产出下一条记录，而它不可能早于该跳生产者返回——两跳落在两次轮询之间时见证才不会漂。
-// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
-func TestOrgDelegation_NestedHopKeepsTheInitiatingGenerationTarget(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	tick := time.Now()
-	write := func(content string) {
-		t.Helper()
-		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
-		tick = tick.Add(2 * time.Second)
-		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
-	}
-
-	write(chainYAML("SUB-C-PROMPT"))
-	cfg, err := LoadConfig(yamlPath)
-	require.NoError(t, err)
-	m := &delegModel{}
-	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
-	require.NoError(t, err)
-	defer func() { _ = entry.Close() }()
-
-	out, err := entry.StartLoop("u", "nested-hop-session")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range out {
-		}
-	}()
-	t.Cleanup(func() { <-done })
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
-	require.NoError(t, err)
-	waitFor(t, "the leaf served on G1", func() bool { return countServed(m.snapshot(), "SUB-C-PROMPT") >= 1 })
-
-	bGate := make(chan struct{})
-	m.armGate("SUB-B-PROMPT", bGate)
-	t.Cleanup(func() { disarmGate(bGate) })
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("second request"))
-	require.NoError(t, err)
-	waitFor(t, "B parked mid-call", func() bool {
-		for _, s := range m.snapshot() {
-			if strings.HasPrefix(s.System, "SUB-B-PROMPT") && len(s.Tools) > 0 {
-				return true
-			}
-		}
-		return false
-	})
-
-	write(chainYAML("SUB-C-PROMPT-G2"))
-	entry.CheckOrgReload()
-
-	entriesBefore := countServed(m.snapshot(), "SUB-C-PROMPT")
-	g2Before := countServed(m.snapshot(), "SUB-C-PROMPT-G2")
-	disarmGate(bGate)
-
-	bHopAnswers := func() []string {
-		var out []string
-		for _, s := range m.snapshot() {
-			if s.System == "SUB-B-PROMPT" && len(s.ToolResults) > 0 {
-				out = append(out, strings.Join(s.ToolResults, "\n"))
-			}
-		}
-		return out
-	}
-	hopsBefore := len(bHopAnswers())
-	waitFor(t, "the pinned G1 hop returned its answer to B", func() bool {
-		return len(bHopAnswers()) > hopsBefore
-	})
-	answers := bHopAnswers()
-	pinned := answers[hopsBefore]
-	require.Contains(t, pinned, `"served:SUB-C-PROMPT"`,
-		"被钉跳的回执必须是 G1 之 C 的回答（派生前继承发起调用租约）")
-	require.NotContains(t, pinned, `"served:SUB-C-PROMPT-G2"`,
-		"§3.2：B 的 G1 代执行不得因为 G2 换了 C 就被改道到新目标——被钉跳的回执不能来自新代目标")
-	require.Greater(t, countServed(m.snapshot(), "SUB-C-PROMPT"), entriesBefore,
-		"the pinned hop really executed on the old C (its answer came from somewhere)")
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("third request"))
-	require.NoError(t, err)
-	waitFor(t, "a fresh turn serves the new C", func() bool {
-		return countServed(m.snapshot(), "SUB-C-PROMPT-G2") > g2Before
-	})
-}
-
 // reentryYAML renders entry "a" delegating to `target` with relaunch_task and
 // resume_task on the same face. `maxIters` is a fingerprint field, so changing it
 // is what makes an edit publish a NEW generation while the routing shape holds.
@@ -1867,114 +1966,4 @@ func relaunchArgs(t *testing.T, id string) []byte {
 	b, err := json.Marshal(map[string]string{"task_id": id})
 	require.NoError(t, err)
 	return b
-}
-
-// TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration 钉住 生产入口上被发布移除目标的重放被版本拒绝且不新建执行。
-// - 入口被 Offer 的是它自己的委派加两个生产任务工具（relaunch/resume），board 项是生产 spawn 身份；
-// - 换代把 a 改路由 c、b 从有效面消失（其常驻 owner 仍在，正是复活风险面）；
-// - 被拒重入不得重跑那个目标，也不得静默改用替身跑新目标。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestOrgReentry_RelaunchActionRefusesTargetRemovedByPublishedGeneration(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	writeReentryYAML(t, yamlPath, reentryYAML("b", 2))
-
-	cfg, err := LoadConfig(yamlPath)
-	require.NoError(t, err)
-	m := &namedDelegModel{pick: "b"}
-	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
-	require.NoError(t, err)
-	defer func() { _ = entry.Close() }()
-
-	out, err := entry.StartLoop("u", "reentry-session")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range out {
-		}
-	}()
-	t.Cleanup(func() { <-done })
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
-	require.NoError(t, err)
-	waitFor(t, "b served the delegation", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") > 0 })
-	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
-
-	decls := entryDeclarations(m.snapshot())
-	require.NotEmpty(t, decls)
-	require.ElementsMatch(t, []string{"b", "relaunch_task", "resume_task"}, decls[0],
-		"the entry is offered its delegation AND the production task-action tools")
-
-	tk := subagentTask(t, entry.TaskManager())
-	require.Equal(t, "b:work", tk.Spec.Key, "the board entry is the production spawn identity")
-
-	writeReentryYAML(t, yamlPath, reentryYAML("c", 2))
-	entry.CheckOrgReload()
-	require.Nil(t, entry.ContextManager().SubagentWrapper("b"),
-		"precondition: the published generation really stopped routing b")
-
-	runsBefore := countServed(m.snapshot(), "SUB-B-PROMPT")
-	ctxWithTM := task.WithTaskSpawner(context.Background(), entry.TaskManager())
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctxWithTM, relaunchArgs(t, tk.ID))
-	require.NoError(t, err, "the tool reports a refusal as an answer, not a transport error")
-	text, ok := res.(string)
-	require.True(t, ok)
-	require.Contains(t, text, "重跑任务", "the host sees WHICH action failed: %s", text)
-	require.Contains(t, text, "EFFECTIVE orchestration generation",
-		"and WHY: version selection refused it, not a missing file: %s", text)
-
-	require.Equal(t, runsBefore, countServed(m.snapshot(), "SUB-B-PROMPT"),
-		"a refused relaunch must not run the removed target — not once")
-	require.Equal(t, 0, countServed(m.snapshot(), "SUB-C-PROMPT"),
-		"and it must not silently substitute the new target either")
-}
-
-// TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget 钉住 目标经结构发布仍被路由时，无发起调用重入经新发布面运行它。
-// - 一次保持 a→b 的结构编辑（max_tool_iterations 进指纹）确实发布新一代并重建 wrapper；
-// - 缺常驻 owner 接线的候选会在此 fail-closed（"no resident owner"），正是本测要证伪的接线。
-// 契约: docs/wiki/agent/execution-generations.md#reentry-resolution
-func TestOrgReentry_RelaunchActionAfterPublishRunsCurrentGenerationTarget(t *testing.T) {
-	dir := t.TempDir()
-	yamlPath := filepath.Join(dir, "tagent.yaml")
-	writeReentryYAML(t, yamlPath, reentryYAML("b", 2))
-
-	cfg, err := LoadConfig(yamlPath)
-	require.NoError(t, err)
-	m := &namedDelegModel{pick: "b"}
-	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
-	require.NoError(t, err)
-	defer func() { _ = entry.Close() }()
-
-	out, err := entry.StartLoop("u", "reentry-live-session")
-	require.NoError(t, err)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range out {
-		}
-	}()
-	t.Cleanup(func() { <-done })
-
-	_, err = entry.InjectMessageContext(context.Background(), "user", model.NewUserMessage("first request"))
-	require.NoError(t, err)
-	waitFor(t, "the first delegation settled", func() bool { return countServed(m.snapshot(), "SUB-B-PROMPT") > 0 })
-	waitFor(t, "the entry turn closed", func() bool { return countServed(m.snapshot(), "ENTRY-A-PROMPT") >= 2 })
-	tk := subagentTask(t, entry.TaskManager())
-
-	before := countServed(m.snapshot(), "SUB-B-PROMPT")
-	writeReentryYAML(t, yamlPath, reentryYAML("b", 3))
-	entry.CheckOrgReload()
-	require.NotNil(t, entry.ContextManager().SubagentWrapper("b"), "the new generation still routes b")
-
-	ctxWithTM := task.WithTaskSpawner(context.Background(), entry.TaskManager())
-	res, err := tasktool.NewRelaunchTaskTool().Call(ctxWithTM, relaunchArgs(t, tk.ID))
-	require.NoError(t, err)
-	text, ok := res.(string)
-	require.True(t, ok)
-	require.NotContains(t, text, "失败", "a still-routed target must relaunch through the published face: %s", text)
-
-	waitFor(t, "the re-entered delegation ran on the current generation", func() bool {
-		return countServed(m.snapshot(), "SUB-B-PROMPT") > before
-	})
 }

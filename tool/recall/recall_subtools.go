@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
 package recall
 
 import (
@@ -514,17 +515,10 @@ func buildRecallSubTools(accessor tagenttool.MemoryStoreAccessor, readPartitionI
 	return tools
 }
 
-// RegisterSubTools registers all recall sub-tools as plain tools in the
-// global tool registry. Called by tagent.RegisterBuiltinTools().
+// RegisterSubTools registers all recall sub-tools as plain tools in the global registry.
 //
-// Registered tools:
-// - recall: the UNIFIED recall entry (items tickets / turn_key causal chain /
-// query semantic search / orchestrate reserved form) — supersedes the
-// retired memory_recall and memory_turn tool names (stable-context-
-// compaction D7)
-// - recall_query / recall_get / recall_recent / recall_trace: RecallAgent
-// orchestration sub-tools (internal to the orchestrate branch; not for
-// direct top-level assembly)
+// - recall is the unified entry for the deterministic route; memory_recall and memory_turn are retired names outside the registry.
+// - recall_query / recall_get / recall_recent / recall_trace serve the RecallAgent orchestration branch only.
 func RegisterSubTools() {
 	agent.RegisterPlainTool("recall_query", recallQueryFactory)
 	agent.RegisterPlainTool("recall_get", recallGetFactory)

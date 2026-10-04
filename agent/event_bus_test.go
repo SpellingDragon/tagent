@@ -282,6 +282,9 @@ func TestReliableEventBus_RecoverAfterReopen(t *testing.T) {
 	if bus1.DurablePending() != 3 {
 		t.Fatalf("应 3 pending, got %d", bus1.DurablePending())
 	}
+	if err := bus1.CloseDurable(); err != nil {
+		t.Fatalf("close1: %v", err)
+	}
 	bus2, err := NewReliableEventBus(dir)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)

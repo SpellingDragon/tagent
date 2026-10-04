@@ -2,6 +2,7 @@
 // 可靠投递、冥想锚点持久化。核心理念（报告 D3）：at-least-once 而非 exactly-once；
 // 每个外部依赖失效有明确定义的「检测→降级→恢复」三段式路径，无静默丢失、无 panic、
 // 无死循环；失败是一等资产（退化状态可查询、可观测、入 governance 事件）。
+// 契约: docs/wiki/reliability/durable-delivery.md#degradation-ladder
 package reliability
 
 import (

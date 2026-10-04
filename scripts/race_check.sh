@@ -113,7 +113,15 @@ if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then
 	exit $?
 fi
 
-out=$(go test -race -count=1 "${pkgs[@]}" 2>&1)
+# -p 1 keeps PACKAGE binaries from running at the same time: the tmux-backed
+# suites share the machine's default tmux server, and their setup harvests orphan
+# sessions, so concurrent packages destroy each other's live sessions. The failure
+# shape is a vanished session (kill reports exit status 1, status "error", empty
+# output) rather than a timeout, and CPU pressure alone can push a run over the
+# edge. Package-level serialisation is the documented discipline for this family and
+# cannot hide a data race: each package's own tests still run concurrently inside
+# one binary, and packages never share a process.
+out=$(go test -race -count=1 -p 1 "${pkgs[@]}" 2>&1)
 rc=$?
 printf '%s\n' "$out" | race_check_classify "$rc"
 exit $?

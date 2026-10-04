@@ -2,14 +2,9 @@ package rl // import "github.com/SpellingDragon/tagent/rl"
 
 Package rl provides reinforcement learning utilities for tagent agents.
 
-契约: docs/wiki/rl/rl-architecture.md
-
-This package contains components for: - Recording agent trajectories for offline
-training - Swapping model instances at runtime - HTTP API for external RL
-systems (AReaL)
-
-The AgentLoop interface decouples rl/ from agent/, allowing HTTPAPI to interact
-with TagentAgent without importing the agent package.
+- Components: trajectory recording for offline training, runtime model
+swapping, and the HTTP API for external RL systems such as AReaL.
+- The AgentLoop interface decouples rl from agent so the HTTP API
 
 FUNCTIONS
 
@@ -23,8 +18,6 @@ func EndpointRedirectPolicy(allowedHosts []string) func(*http.Request, []*http.R
     链按跳校验目标 host 是否在 allowlist 内。匹配粒度、空 allowlist 的部署语义、跳数上界（见
     maxRedirectHops）与主机名归一，均以文档为唯一真源。判定留在 rl 包内、不引入 provider SDK
     依赖，宿主经传输层注入口装上守卫。
-
-    契约: docs/wiki/rl/rl-architecture.md#redirect-policy
 
 func NewEndpointGuardedClient(allowedHosts []string) *http.Client
     NewEndpointGuardedClient 返回可直接用作 openai 式 SDK 传输层的 http.Client：默认代理 传输 ＋
@@ -43,7 +36,6 @@ func ValidateListenAddr(addr, token string) error
     ListenAndServe; a non-loopback address without a token returns an error
     listing the three ways out. With a token set, any address is allowed.
 
-
 TYPES
 
 type AgentLoop interface {
@@ -61,8 +53,6 @@ type HTTPAPI struct {
 }
     HTTPAPI 经 HTTP 暴露常驻事件循环，使外部调用方（如 AReaL 的 Python 适配器）可提交任务。 它是可选组件，且构成一张能操纵
     agent 的攻击面 —— 鉴权、loopback 守卫、单点上限与端点 策略四道防线都是结构性的，详见文档。
-
-    契约: docs/wiki/rl/rl-architecture.md#http-api
 
 func NewHTTPAPI(agent AgentLoop) *HTTPAPI
     NewHTTPAPI creates a new HTTPAPI for the given agent.
@@ -159,8 +149,6 @@ type SwappableModel struct {
     Runner，也不改事件机制（常驻循环、消息注入、输出通道都不动），只换最 底下的模型实例；所有 GenerateContent /
     GenerateContentIter / Info 都委托当前内层。
 
-    契约: docs/wiki/rl/rl-architecture.md#swappable-model
-
 func NewSwappableModel(m model.Model) *SwappableModel
     NewSwappableModel creates a SwappableModel wrapping the given model.
 
@@ -174,14 +162,10 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
     resource).
 
 func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error)
-    GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来：只实现 GenerateContent
-    的装饰器会把具备迭代能力的底层模型**静默降级**成"通道＋协程"路径。
+    GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来。
 
-      - 惰性：构造返回的 Seq 不算调用——在调用方真正开始迭代前不加租约、不碰内层、不起协程。
-      - 内层是 IterModel 时直接委托其迭代入口（真快路径，不做通道桥接）；否则才桥接。
-      - 租约覆盖整个迭代（与 GenerateContent 同构），换出的模型不会在流中被关；提前停止或 ctx
-        取消时排空上游，生产方不被卡住、租约最终必被释放。
-      - 迭代路径不得把错误咽成"空迭代器的成功"：通道形态会把该错误返回给调用方，桥接侧 至少必须记录，否则同一模型走两条路径会有一条静默失败。
+    - 构造返回的 Seq 不算调用：调用方真正开始迭代之前不加租约、不碰内层、不起协程。 - 内层是
+    IterModel 时直接委托其迭代入口，否则才做通道桥接；租约覆盖整个迭代，换出的模型不会在流中被关。
 
 func (m *SwappableModel) Info() model.Info
     Info delegates to the current inner model.
@@ -213,8 +197,6 @@ type TrajectoryRecorder struct {
 	// Has unexported fields.
 }
     TrajectoryRecorder 包装 model.Model，把每次 LLM 调用异步落成 JSONL 记录。
-
-    契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 
 func NewTrajectoryRecorder(inner model.Model, trajectoryDir, modelEndpoint string) (*TrajectoryRecorder, error)
     NewTrajectoryRecorder creates a TrajectoryRecorder wrapping the given model.
@@ -272,4 +254,3 @@ func (w *TrajectoryRecorderModelWrapper) GenerateContentIter(ctx context.Context
 
 func (w *TrajectoryRecorderModelWrapper) Info() model.Info
     Info 委托内层模型。
-

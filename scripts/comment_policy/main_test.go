@@ -1,3 +1,4 @@
+// 契约: docs/comment-gate-tooling.md#ratchet-scope
 package main
 
 import (
@@ -831,4 +832,54 @@ func TestCoLocationSeparatesCompilationUnits(t *testing.T) {
 	colocWrite(t, dir, "internal_test.go", "// Package p.\n// 契约: docs/wiki/x.md#y\npackage p\n\nimport \"testing\"\n\nfunc TestOne(t *testing.T) {}\n")
 	colocWrite(t, dir, "external_test.go", "// Package p.\n// 契约: docs/wiki/x.md#y\npackage p_test\n\nimport (\n\t\"testing\"\n\n\t\"x.example/mod/p\"\n)\n\nfunc TestTwo(t *testing.T) { _ = p.Q }\n")
 	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)))
+}
+
+// TestMissingFileResponsibility pins the production file-level index duty.
+// - A production file without any 契约:/规格: index fires the rule exactly once.
+// - An index in any documentation slot satisfies it, mirroring the test-side detection.
+func TestMissingFileResponsibility(t *testing.T) {
+	chdirToRepoRoot(t)
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.go")
+	require.NoError(t, os.WriteFile(bare, []byte("package p\n\n// Foo does things.\nfunc Foo() {}\n"), 0o644))
+	require.Equal(t, 1, rulesIn(t, bare)["missing-file-responsibility"])
+	indexed := filepath.Join(dir, "indexed.go")
+	require.NoError(t, os.WriteFile(indexed, []byte("package p\n\n// Foo does things.\n//\n// 契约: docs/wiki/x.md\nfunc Foo() {}\n"), 0o644))
+	require.Zero(t, rulesIn(t, indexed)["missing-file-responsibility"])
+}
+
+// TestResponsibilityExemptions pins who stays outside the file-level duty.
+// - Test files belong to the test-side declaration rule, never to this one.
+// - The gate's own tooling under scripts/ has no wiki home, on relative paths only.
+func TestResponsibilityExemptions(t *testing.T) {
+	chdirToRepoRoot(t)
+	dir := t.TempDir()
+	tf := filepath.Join(dir, "p_test.go")
+	require.NoError(t, os.WriteFile(tf, []byte("package p\n\nimport \"testing\"\n\n// TestFoo verifies one contract.\nfunc TestFoo(t *testing.T) {}\n"), 0o644))
+	require.Zero(t, rulesIn(t, tf)["missing-file-responsibility"])
+	require.True(t, exemptFromResponsibility("scripts/tool/main.go"))
+	require.True(t, exemptFromResponsibility("./scripts/tool/main.go"))
+	require.True(t, exemptFromResponsibility("agent/x_test.go"))
+	require.False(t, exemptFromResponsibility("agent/x.go"))
+	require.False(t, exemptFromResponsibility("examples/wechat-bot/main.go"))
+}
+
+// TestDocNotBriefBudget pins the doc-shape rule for declaration documentation.
+// - A wrapped two-line sentence and a second short paragraph stay within budget.
+// - A third prose paragraph is narrative depth; bullets and index lines never count.
+func TestDocNotBriefBudget(t *testing.T) {
+	chdirToRepoRoot(t)
+	dir := t.TempDir()
+	thin := filepath.Join(dir, "thin.go")
+	require.NoError(t, os.WriteFile(thin, []byte("package p\n\n// Foo does things.\n// It also refuses nil input.\nfunc Foo() {}\n"), 0o644))
+	require.Zero(t, rulesIn(t, thin)["doc-not-brief"])
+	twopara := filepath.Join(dir, "twopara.go")
+	require.NoError(t, os.WriteFile(twopara, []byte("package p\n\n// Foo does things.\n//\n// It also refuses nil input.\nfunc Foo() {}\n"), 0o644))
+	require.Zero(t, rulesIn(t, twopara)["doc-not-brief"])
+	thick := filepath.Join(dir, "thick.go")
+	require.NoError(t, os.WriteFile(thick, []byte("package p\n\n// Foo does things.\n//\n// It also refuses nil input.\n//\n// And it retries once on transport errors.\nfunc Foo() {}\n"), 0o644))
+	require.Equal(t, 1, rulesIn(t, thick)["doc-not-brief"])
+	bulleted := filepath.Join(dir, "bullets.go")
+	require.NoError(t, os.WriteFile(bulleted, []byte("package p\n\n// Foo does things.\n// - first point\n// - second point\n// - third point\n//\n// 契约: docs/wiki/x.md\nfunc Foo() {}\n"), 0o644))
+	require.Zero(t, rulesIn(t, bulleted)["doc-not-brief"])
 }

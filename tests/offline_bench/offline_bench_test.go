@@ -1,14 +1,8 @@
 // Package offline_bench holds the offline performance baseline for the resident
-// hardening program: event scale 1k/10k/100k (single Sync-barrier setting — the
-// minimal localfile backend has no fsync axis, so a second "fsync" column would
-// measure the same bytes twice) × probe concurrency 1/10/100, recording p50/p95,
-// allocs, RSS, KV scan volume and the chars/token estimator error against the
-// pinned offline tokenizer fixture. It is NOT part of CI: run explicitly with
+// hardening program. It is NOT part of CI.
 //
-//	RUN_OFFLINE_BENCH=1 go test ./tests/offline_bench/ -run TestOfflineBenchmark -v -timeout 60m
-//
-// and point BENCH_REPORT=<path> to persist the JSON report for regression
-// comparison.
+// - Run explicitly with RUN_OFFLINE_BENCH=1 and point BENCH_REPORT at a path to persist the JSON report.
+// 规格: docs/wiki/platform/evaluation-suites.md#offline-bench
 package offline_bench
 
 import (

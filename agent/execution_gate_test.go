@@ -838,9 +838,9 @@ func childFinishCrash(root, spec string) {
 	if err != nil {
 		childFatal("verify credential: " + err.Error())
 	}
-	in2, err := reliability.NewInbox(filepath.Join(root, "inbox"), 0)
-	if err != nil {
-		childFatal("second leaf: " + err.Error())
+	in2 := cm.bus.durableInbox()
+	if in2 == nil {
+		childFatal("durable inbox unavailable")
 	}
 	if err := in2.RecordReceipt(path, cred); err != nil {
 		childFatal("record receipt: " + err.Error())

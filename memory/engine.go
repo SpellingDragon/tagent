@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#engine-contract
 package memory
 
 import (
@@ -55,15 +56,12 @@ type RetrievalCaps struct {
 	Hybrid  bool
 }
 
-// IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引。
-// 闭环在引擎内部——tagent 只投递 IndexableEvent，不管引擎如何嵌入/存储/分层。
+// IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引，闭环在引擎内部——
+// tagent 只投递 IndexableEvent，不管引擎如何嵌入、存储与分层。
 //
-// 实现纪律：
-// - Index MUST 异步或快速返回，绝不阻塞事件主链路（不变量：StoreEvent 同步点）。
-// 典型实现：非阻塞投递到耐用队列/通道，后台 worker 嵌入 + 写向量索引。
-// - Index 失败 MUST NOT 传染调用方（记日志 + 计数即可；向量是增强索引，丢一条
-// 只影响该条语义可召回性，关键词路径兜底）。
-// - Remove 用于 TTL/墓碑回收；引擎可惰性处理（水合过滤 + 超取 + 阈值重建）。
+// - Index MUST 异步或快速返回，绝不阻塞事件主链路（StoreEvent 同步点不变量）：典型实现是非阻塞投递耐用队列，后台 worker 嵌入并写向量索引。
+// - Index 失败 MUST NOT 传染调用方：记日志加计数即可，向量是增强索引，关键词路径兜底。
+// - Remove 服务 TTL 与墓碑回收，引擎可惰性处理（水合过滤 + 超取 + 阈值重建）。
 type IndexBuilder interface {
 	// Index 将一个事件纳入索引（引擎内部决定嵌入/向量存储/分层/选择性）。
 	Index(ctx context.Context, evt IndexableEvent) error
@@ -83,14 +81,10 @@ type Retriever interface {
 	Ready() bool
 }
 
-// MemoryEngine = 索引构建 + 检索 + 生命周期。这是 tagent 核心依赖的解耦缝。
+// MemoryEngine = 索引构建 + 检索 + 生命周期，tagent 核心依赖的解耦缝。
 //
-// 实现：
-// - InMemoryEngine（MVP 兜底）：内存向量索引 + 关键词，无外部依赖，供开发/测试/降级。
-// - RustVikingEngine（适配器，闭环到 rustviking）：tagent 侧 zhipu 嵌入 +
-// rustviking index insert/search/delete 向量后端 + 适配器内 RRF 融合与分区过滤。
-//
-// 生命周期：随 MemoryStore 启停（Closer 接线，resolveMemoryStore 按配置创建）。
+// - 实现：InMemoryEngine（MVP 兜底，内存向量索引加关键词，无外部依赖，供开发/测试/降级）；RustVikingEngine（适配器：tagent 侧嵌入 + rustviking 向量后端 + 适配器内 RRF 融合与分区过滤）。
+// - 生命周期随 MemoryStore 启停（Closer 接线，装配期按配置创建）。
 type MemoryEngine interface {
 	IndexBuilder
 	Retriever

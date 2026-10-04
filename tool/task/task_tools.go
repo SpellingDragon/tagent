@@ -6,6 +6,7 @@
 // NOT fetched by a tool here: task_settled events carry the full body in the
 // event store and are recallable by event-key ticket (stable-context-
 // compaction D6).
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 package task
 
 import (

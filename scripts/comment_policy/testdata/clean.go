@@ -4,8 +4,8 @@ package clean
 
 // Widget renders one widget.
 //
-// The zero value is not usable; call New before Use. Use is safe for
-// concurrent callers and returns ErrClosed after Close has been called.
+// - The zero value is not usable; call New before Use.
+// - Use is safe for concurrent callers and returns ErrClosed after Close has been called.
 //
 // 契约: docs/wiki/README.md
 type Widget struct {

@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#vector-persist
 package engine
 
 import (

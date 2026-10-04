@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#knowledge-agent
 package knowledge
 
 import (
@@ -89,13 +90,8 @@ func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool {
 
 // NewSkillLoadTool creates a tool that loads skill content as a structured summary.
 //
-// Progressive disclosure design (following trpc-agent-go pattern):
-// - Level 1 (skill_search): name + description from YAML front matter
-// - Level 2 (skill_load): name + description + usage summary (up to ~2500 chars)
-// - Level 3 (command): read full skill file when deeper detail is needed
-//
-// The tool returns a compact, structured output suitable for the knowledge agent
-// to read and synthesize, avoiding the context explosion of dumping the full body.
+// - Levels: skill_search (front matter), skill_load (summary up to ~2500 chars), command (full file).
+// - Output stays compact and synthesizable; the full body is never dumped.
 func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool {
 	const maxBodyChars = 2500
 

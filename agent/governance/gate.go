@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/governance-enforcement.md#enforcement-modes
 package governance
 
 import (

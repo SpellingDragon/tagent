@@ -1,16 +1,7 @@
-// memory_recall: the recall PROTOCOL implementation,
-// now internal — the model-facing entry is the unified `recall` tool
-// (recall.go) which routes items/query through
-// recallByItems/recallByQuery below.
+// memory_recall: the recall protocol implementation, internal to the unified recall entry.
 //
-// Index cards are recall tickets. PURE FUNCTION paths — no LLM in the
-// deterministic route. Input-shape dispatch (items take precedence):
-//
-// items: [{key, hint?}]  → engineering recall: batch GetEvent, original
-// order, zero hallucination, misses reported
-// query + filters → semantic recall: QueryOptions keyword search
-// (the retrieval layer may evolve independently —
-// keyword → vector — the entry protocol stays)
+// - Pure deterministic paths with no LLM in the route; items take precedence over query.
+// - Items resolve by batch GetEvent in original order; misses are reported, never hallucinated.
 package recall
 
 import (

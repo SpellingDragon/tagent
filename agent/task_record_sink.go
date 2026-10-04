@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package agent
 
 import (
@@ -135,7 +136,7 @@ func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail strin
 	})
 }
 
-// CognitiveAssetChange 是漂移审计事件载荷的最小契约（与根包 tagent.AssetChange
+// CognitiveAssetChange 是漂移审计事件载荷的最小契约（与 evolution.AssetChange
 // 字段对齐；agent 包不反向依赖根包，以本类型解耦）。
 type CognitiveAssetChange struct {
 	File      string

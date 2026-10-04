@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
 package action
 
 import "time"

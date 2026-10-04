@@ -1,20 +1,10 @@
 // check.go implements the two comparison modes the repository gates need:
+// comment-check proves a file changed only in comments; merge-check proves a
+// consolidation batch is lossless (body identical plus assertion count not lowered).
 //
-//	codetools comment-check --base-root DIR --head-root DIR <file>...
-//	codetools merge-check   --base-root DIR --head-root DIR [--map FILE] [--explain FILE] <dir>...
-//
-// Paths are module-relative and must exist under both roots (comment-check) or in
-// the head root (merge-check); the shell wrappers materialize the baseline with
-// git archive. Both exit non-zero when a violation is printed.
-//
-// --map and --explain each hold ONE file, for the package being checked: repeating
-// either flag is a usage error, an --explain entry that exempts no declaration in
-// the run is rejected, and a table file that cannot be read fails the call instead of
-// loading as empty. A shadowed table, a waiver that applies to nothing, and a silently
-// empty table all let a reading pass that the gate never actually earned. Tables are
-// per-package by construction (a cross-package table applies one domain's normalization
-// to another's baseline text and manufactures violations), so a multi-package run
-// invokes merge-check once per package with its own pair.
+// - Paths are module-relative and must exist under both roots (comment-check) or in the head root (merge-check); the shell wrappers materialize the baseline with git archive.
+// - Both exit non-zero when a violation is printed.
+// 规格: docs/comment-gate-tooling.md#table-discipline
 package main
 
 import (
@@ -375,16 +365,11 @@ func outsideLiterals(text string, fn func(string) string) string {
 	return b.String()
 }
 
-// qualifierBlind replaces every package qualifier prefix with a fixed marker.
+// qualifierBlind replaces every package qualifier prefix with a fixed marker, keeping
+// every selector name comparable while making alias choice irrelevant to the witness.
 //
-// A consolidation batch may unify one import path's alias per merged file, which is
-// a per-FILE decision; a package-wide textual map cannot express it and instead
-// rewrites the same spelling two different ways, manufacturing false differences.
-// Blinding the qualifier keeps every selector name (and therefore the semantics of
-// each call) comparable while making alias choice irrelevant to the witness.
-//
-// Blinding is a code-level concern and stops at a literal's edge: a dotted path
-// inside a fixture is data, and blinding it would erase a real key change.
+// - Blinding is a code-level concern and stops at a literal edge.
+// 规格: docs/comment-gate-tooling.md#equality-witness
 func qualifierBlind(text string) string {
 	return outsideLiterals(text, func(s string) string {
 		return qualifierRE.ReplaceAllString(s, "Q.")

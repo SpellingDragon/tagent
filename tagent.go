@@ -1,29 +1,9 @@
-// Package tagent provides the top-level composition root for tagent applications.
+// Package tagent provides the top-level composition root: it encapsulates agent
+// instantiation, assembles a TagentAgent from declarative Config and injects runtime
+// dependencies via Options.
 //
-// The root package encapsulates the agent instantiation process, assembling
-// a TagentAgent with configured tools and wiring cross-boundary dependencies.
-//
-// Dependency direction (all one-way, no cycles):
-//
-//	tagent (root) → agent → plugin → memory
-//	tagent (root) → tool/action → memory
-//	tagent (root) → tool/recall → memory
-//	tagent (root) → tool/knowledge → memory
-//	tagent (root) → tool/mcp → tool (MCPRegistry interface)
-//	tagent (root) → prompt
-//
-// Tool Registration:
-//
-// tagent uses a ToolRegistry to manage available tools. Built-in tools are
-// registered via RegisterBuiltinTools(). External tools can be registered via
-// RegisterPlainTool() and RegisterToolAgent(). Only tools that are both
-// registered and configured for an agent can be used by that agent.
-//
-// Usage:
-//
-//	ta, err := tagent.New(tagent.DefaultConfig(),
-//	    tagent.WithModel(modelInstance),
-//	)
+// - Dependency direction is one-way and cycle-free; the root points at agent, tool/action, tool/recall, tool/knowledge and tool/mcp.
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 package tagent
 
 import (
@@ -35,9 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SpellingDragon/tagent/config"
+
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/org"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
@@ -144,6 +127,22 @@ type runtimeConfig struct {
 	storeBarriersMu sync.Mutex
 }
 
+// orgDeps hands the generation mechanism in agent/org exactly what it needs from
+// assembly: the published owner table, a builder closure that fixes the resident
+// build mode and the current loader, and the two fingerprint/registry books it may
+// reset on a refused candidate. Nothing else about runtime state is reachable.
+func (rc *runtimeConfig) orgDeps(loader *prompt.Loader) org.Deps {
+	return org.Deps{
+		Resident: rc.resident,
+		Builder: func(name string, acfg config.AgentConfig, cfg config.Config, cache map[string]*agent.TagentAgent) (*agent.TagentAgent, error) {
+			return buildAgent(name, acfg, cfg, rc, loader, cache, buildModeResident)
+		},
+		SetFP:           func(name, fp string) { rc.residentMemFP[name] = fp },
+		DropFP:          func(name string) { delete(rc.residentMemFP, name) },
+		UnregisterOwner: rc.unRegisterStoreOwner,
+	}
+}
+
 // raiseStoreBarrier 对带保留租约的共享 store 抬起登记屏障：同一 build 内多次登记
 // 同一 store 只抬一层。没有租约的 store（纯内存、无破坏性扫描）无屏障可抬，静默跳过。
 // 契约: docs/wiki/platform/resource-ownership.md#composition-barrier
@@ -240,41 +239,10 @@ func closeResourcesExited(ta *agent.TagentAgent) bool {
 	return done
 }
 
-// New creates a fully-wired TagentAgent from declarative Config + runtime Options.
+// New creates a fully-wired TagentAgent from declarative Config plus runtime Options.
 //
-// Config is declarative and serializable (loadable from YAML/JSON via LoadConfig).
-// Options inject runtime-only dependencies (model instances, etc.).
-//
-// New handles all cross-boundary wiring internally:
-//   - Registers built-in tools (knowledge, recall, exec)
-//   - Validates that all configured tools are registered
-//   - Resolves the entry agent from Config.Agents map
-//   - Creates a MemoryStore per agent (isolated, from MemoryConfig)
-//   - Builds tools by resolving ToolRef entries (agent refs → sub-agents)
-//   - For agent-kind tools: creates the referenced agent and wraps it via AgentToolWrapper
-//     which handles event_key → external context resolution
-//   - For tool-kind tools: delegates to registered plain tool factories
-//   - Seeds the process-level MCP tool registry from the configured servers
-//   - Constructs the governance gate when governance is enabled
-//   - Constructs the git-native evolution unit when evolution is enabled
-//   - Constructs the org coordinator, which owns the published generation, the
-//     per-agent apply record and the rollback ring
-//   - Wires the mtime-driven lazy reload check with single-flight coalescing
-//   - Refuses hot application of entry-identity and storage-section changes on
-//     owner-held agents before any candidate build (they require a restart)
-//   - Registers the entry agent's closers in the order retirement demands: reload
-//     stopper, then owner retirement, then the shared MCP registry last
-//
-// 契约: docs/wiki/platform/org-hot-reload.md#overview
-// 契约: docs/wiki/platform/org-hot-reload.md#trigger-timing
-// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
-// 契约: docs/wiki/platform/org-hot-reload.md#owner-retirement
-// 契约: docs/wiki/platform/org-hot-reload.md#memory-preflight
-// 契约: docs/wiki/platform/org-hot-reload.md#close-drain
-// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
-// 契约: docs/wiki/tool/tool-architecture.md#declaration-stability
-// 契约: docs/wiki/platform/platform-subsystems.md#governance-gate
-// 契约: docs/wiki/platform/platform-subsystems.md#evolution-wiring
+// - It handles every cross-boundary wiring internally: builtin tool registration, validation that configured tools are registered, entry-agent resolution, per-agent MemoryStore creation, per-agent buildAgent assembly, and the org-level task registry plus hot-parameter source.
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	if err := RegisterBuiltinTools(); err != nil {
 		return nil, fmt.Errorf("tagent: register builtin tools: %w", err)
@@ -365,7 +333,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	rc.residentMemFP = make(map[string]string, len(agentCache))
 	for n := range agentCache {
 		mc := cfg.Agents[n]
-		rc.residentMemFP[n] = agentMemoryFingerprint(&mc)
+		rc.residentMemFP[n] = config.AgentMemoryFingerprint(&mc)
 	}
 	for _, a := range agentCache {
 		a.SetResidentTable(rc.resident)
@@ -383,7 +351,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			mu            sync.Mutex
 			building      atomic.Bool
 			stopped       atomic.Bool
-			retiring      = newRetirementLedger(func(name string) int {
+			retiring      = org.NewLedger(func(name string) int {
 				roster := make([]*agent.TagentAgent, 0, len(rc.resident.Snapshot()))
 				for _, a := range rc.resident.Snapshot() {
 					if a != nil {
@@ -395,7 +363,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			publishedReach map[string]bool
 		)
 		coord := newOrgCoordinator()
-		publishedReach = reachableAgents(&cfg, cfg.Entry)
+		publishedReach = config.ReachableAgents(&cfg, cfg.Entry)
 		entryAgent.SetOrgDiagnostics(func() map[string]any {
 			st := coord.status()
 			payload := map[string]any{
@@ -408,7 +376,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				"liveDebt": OrgLiveDebt{
 					CapturedAt:         time.Now(),
 					Executors:          entryAgent.ContextManager().ExecutorRefs(),
-					PendingRetirements: retiring.diagnostics(),
+					PendingRetirements: retiring.Diagnostics(),
 				},
 				"close": OrgCloseState{
 					Initiated:       entryAgent.CloseStarted(),
@@ -465,14 +433,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					continue
 				}
 				if publishedReach[name] {
-					retiring.release(name)
+					retiring.Release(name)
 					continue
 				}
-				retiring.track(name, owner)
+				retiring.Track(name, owner)
 			}
 		}
 		sweepRetirements := func() {
-			for _, d := range retiring.sweep(publishedReach) {
+			for _, d := range retiring.Sweep(publishedReach) {
 				switch {
 				case d.Retired:
 					rc.resident.Unpublish([]string{d.Name})
@@ -486,7 +454,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		var appliedFromLastApply []appliedAgent
 		applyHotAll := func(freshCfg *Config) {
-			routable := reachableAgents(freshCfg, cfg.Entry)
+			routable := config.ReachableAgents(freshCfg, cfg.Entry)
 			receipts := make([]OrgAgentApply, 0, len(rc.resident.Names()))
 			appliedRecord := make([]appliedAgent, 0, len(rc.resident.Names()))
 			for aname, a := range rc.resident.Snapshot() {
@@ -519,7 +487,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			coord.recordApply(receipts)
 			appliedFromLastApply = appliedRecord
 		}
-		if fp, err := computeOrgFingerprint(&cfg); err == nil {
+		if fp, err := org.ComputeOrgFingerprint(&cfg); err == nil {
 			if snap, cerr := cfg.Clone(); cerr == nil {
 				coord.init(fp, snap)
 			} else {
@@ -547,7 +515,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("rollback snapshot clone: %w", rbErr))
 				return
 			}
-			rbp, rerr0 := computeOrgFingerprint(rollbackC)
+			rbp, rerr0 := org.ComputeOrgFingerprint(rollbackC)
 			if rerr0 != nil {
 				log.Errorf("[org-hotreload] rollback fingerprint FAILED: %v", rerr0)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚指纹计算失败: %v", rerr0))
@@ -558,8 +526,8 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				log.Warnf("[org-hotreload] rollback: previous generation is identical to current on both axes (fp %s.. + hot params) — nothing to restore", short(rbp))
 				return
 			}
-			rbReach := reachableAgents(rollbackC, cfg.Entry)
-			if blocked := retiring.closingIn(rbReach); len(blocked) > 0 {
+			rbReach := config.ReachableAgents(rollbackC, cfg.Entry)
+			if blocked := retiring.ClosingIn(rbReach); len(blocked) > 0 {
 				log.Errorf("[org-hotreload] rollback re-routes %v while their retiring owner is already closing — RESTART required (rejected before any candidate build)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚将重路由 %v，但其退役中 owner 已开始关闭，须重启生效（本次未回滚）", blocked))
 				coord.recordFailure(fmt.Errorf("rollback re-routes closing owner(s) %v: retirement already began", blocked))
@@ -578,17 +546,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					coord.recordFailure(fmt.Errorf("rollback %s", site))
 				}
 			}
-			rbOv, rbOvOK := buildCandidateOwners(rc, loader, rollbackC, rbReach, failRB)
+			rbOv, rbOvOK := org.BuildOwners(rc.orgDeps(loader), rollbackC, rbReach, failRB)
 			if !rbOvOK {
 				return
 			}
-			defer rbOv.abandon()
-			rbNames, rbStaged, rbParts, rbOK := stageOrgGenerations(rc, loader, rollbackC, rbReach, rbOv.resolve(), failRB)
+			defer rbOv.Abandon()
+			rbNames, rbStaged, rbParts, rbOK := stageOrgGenerations(rc, loader, rollbackC, rbReach, rbOv.Resolve(), failRB)
 			if !rbOK {
 				return
 			}
-			rbOv.commit()
-			activateOwnerGenerations(rbOv.resolve(), rbNames, rbStaged, rbParts)
+			rbOv.Commit()
+			activateOwnerGenerations(rbOv.Resolve(), rbNames, rbStaged, rbParts)
 			applyHotAll(rollbackC)
 			rgen := coord.recordRollback(rbp, rollbackC, appliedFromLastApply)
 			publishedReach = rbReach
@@ -628,7 +596,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("config parse: %w", err))
 				return
 			}
-			fp, err := computeOrgFingerprint(fresh)
+			fp, err := org.ComputeOrgFingerprint(fresh)
 			if err != nil {
 				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 指纹计算失败，沿用旧配置: %v", err))
@@ -642,14 +610,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("entry identity changed %q -> %q: resident entry is not hot-migratable, restart required", cfg.Entry, fresh.Entry))
 				return
 			}
-			freshReach := reachableAgents(fresh, cfg.Entry)
-			if changed := changedMemoryAgents(fresh, rc.residentMemFP, freshReach); len(changed) > 0 {
+			freshReach := config.ReachableAgents(fresh, cfg.Entry)
+			if changed := config.ChangedMemoryAgents(fresh, rc.residentMemFP, freshReach); len(changed) > 0 {
 				log.Errorf("[org-hotreload] agents.*.memory CHANGED for owner-held agent(s) %v — runtime storage migration is not supported; RESTART required to apply", changed)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: agent %v 的 memory 段变更需重启迁移，本次未热更（须重启生效）", changed))
 				coord.recordFailure(fmt.Errorf("memory section changed for %v: restart required", changed))
 				return
 			}
-			if blocked := retiring.closingIn(freshReach); len(blocked) > 0 {
+			if blocked := retiring.ClosingIn(freshReach); len(blocked) > 0 {
 				log.Errorf("[org-hotreload] agent(s) %v re-enter while their retiring owner is already closing — RESTART required (rejected before any candidate build; no second writer opened)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: agent %v 正在退役关闭中，同名重入须重启生效（本次未热更，未建第二 writer）", blocked))
 				coord.recordFailure(fmt.Errorf("re-entry into closing owner %v: retirement already began, restart required", blocked))
@@ -687,15 +655,15 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					coord.recordFailure(fmt.Errorf("%s", site))
 				}
 			}
-			ov, ovOK := buildCandidateOwners(rc, loader, fresh, freshReach, failCand)
+			ov, ovOK := org.BuildOwners(rc.orgDeps(loader), fresh, freshReach, failCand)
 			if !ovOK {
 				return
 			}
-			defer ov.abandon()
-			if len(ov.pendingNames()) > 0 {
-				log.Infof("[org-hotreload] hot-added %d agent(s) %v — staged in the private candidate overlay (published only at the single commit point)", len(ov.pendingNames()), ov.pendingNames())
+			defer ov.Abandon()
+			if len(ov.PendingNames()) > 0 {
+				log.Infof("[org-hotreload] hot-added %d agent(s) %v — staged in the private candidate overlay (published only at the single commit point)", len(ov.PendingNames()), ov.PendingNames())
 			}
-			candCache := ov.resolve()
+			candCache := ov.Resolve()
 			snapshot, snapErr := fresh.Clone()
 			if snapErr != nil {
 				log.Errorf("[org-hotreload] candidate snapshot clone FAILED — serving previous (fail-closed): %v", snapErr)
@@ -723,7 +691,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			if h := orgCommitBarrier.Swap(nil); h != nil {
 				(*h)()
 			}
-			ov.commit()
+			ov.Commit()
 			applyHotAll(snapshot)
 			activateOwnerGenerations(resolve, genNames, staged, genParts)
 			oldFP, gen := coord.swap(fp, snapshot, appliedFromLastApply)
@@ -744,7 +712,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			changed := info.ModTime().UnixNano() != atomic.LoadInt64(&lastSeenMtime)
-			if !changed && !retiring.hasPending() {
+			if !changed && !retiring.HasPending() {
 				return
 			}
 			if !building.CompareAndSwap(false, true) {
@@ -765,7 +733,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 						return
 					}
 					sweepRetirements()
-					recheck = retiring.retireablePending(publishedReach)
+					recheck = retiring.RetireablePending(publishedReach)
 				}()
 				if recheck {
 					requestCheck()
@@ -825,7 +793,7 @@ func stageOrgGenerations(
 
 	owned := names[:0]
 	for _, n := range names {
-		if !remoteDeclarationOnly(next, n) {
+		if !config.RemoteDeclarationOnly(next, n) {
 			owned = append(owned, n)
 		}
 	}

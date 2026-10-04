@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
 package memory
 
 import (
@@ -484,20 +485,12 @@ func (s *FileSegmentStore) ReplayEvent(key int64, canonicalFact FullEvent) (Repl
 	return ReplayNew, canonicalFact, nil
 }
 
-// completeOrphanCommit finishes an UNCOMMITTED write found under the same
-// EventKey . Two sub-cases are handled:
+// completeOrphanCommit finishes an UNCOMMITTED write found under the same EventKey.
 //
-// 1. evt slot MISSING while idx exists (half-orphan): write the actual event
-// before running the commit barrier. Without this , the retry reports
-// success but the fact remains unreadable after cache eviction.
-// 2. evt slot EXISTS with byte-identical content: the record was already durable.
-// The live count is NOT decided from the cache (2.4: the cache is disqualified as a
-// commit oracle) — after re-running the barrier the partition's count is recomputed
-// from the fact chain, idempotent for an already-counted event (net +0) and picking
-// up a durable-but-never-counted C′. Returns already-committed when nothing had to
-// be written, repaired otherwise.
-//
-// Different content under the same identity remains a refused collision .
+// - evt slot missing while idx exists (half-orphan): write the event before running the commit barrier, else retry reports success over an unreadable fact.
+// - evt slot exists byte-identical: the record is durable; the live count is recomputed from the fact chain after the barrier (cache is disqualified as a commit oracle), idempotent net +0 or picking up a durable-but-never-counted record.
+// - Returns already-committed when nothing had to be written, repaired otherwise.
+// - Different content under the same identity remains a refused collision.
 func (s *FileSegmentStore) completeOrphanCommit(
 	pid int, key int64, idxKVKey string, event FullEvent, eventJSON []byte,
 ) (ReplayResult, error) {
@@ -692,16 +685,12 @@ func (s *FileSegmentStore) maybeDemoteSealedWindow(pid int, windowTS int64) {
 	}
 }
 
-// recoverWindowSeqLocked returns the next free seq for a window by scanning
-// its existing event keys. It returns 0 for an empty window and max(seq)+1
-// otherwise. seq keys are zero-padded-free strings (0,1,10,2…) so the max
-// must be computed numerically, not taken from scan order.
+// recoverWindowSeqLocked returns the next free seq for a window by scanning its
+// existing event keys: 0 for an empty window, max(seq)+1 otherwise.
 //
-// A scan failure is an ERROR, not a silent 0: falling back to 0 would
-// overwrite existing slots , so the
-// caller fails the StoreEvent instead .
-//
-// Caller holds the partition state lock.
+// - Seq keys are unpadded strings (0,1,10,2...), so the max is numeric, never scan order.
+// - A scan failure is an error, not a silent 0: falling back to 0 would overwrite existing slots, so the caller fails the StoreEvent.
+// - Caller holds the partition state lock.
 func (s *FileSegmentStore) recoverWindowSeqLocked(pid int, windowTS int64) (int, error) {
 	pairs, err := s.kv.KVScan(SegmentEventPrefix(pid, windowTS), 0)
 	if err != nil {
@@ -872,18 +861,12 @@ func sortRefsByTotalOrder(refs []EventReference, orderBy string) {
 // noUpperBoundMs marks a segment whose time upper bound cannot be proven.
 const noUpperBoundMs int64 = math.MaxInt64
 
-// segmentBounds derives the segment's TRUTHFUL event-time envelope for query
-// pruning and early-stop (LSM key-range
-// metadata):
+// segmentBounds derives the segment truthful event-time envelope for query pruning
+// and early stop.
 //
-// - Sealed with MinTime/MaxTime → those bounds (event time, stable once
-// the segment is immutable). WindowTS remains a valid lower bound when
-// MinTime is absent.
-// - Unsealed (active memtable) OR sealed-but-boundless (段无包络) →
-// unprovable: provable=false, meaning NEVER prune, NEVER skip.
-//
-// The nominal window name/layer is NOT consulted for time reasoning — it
-// encodes write recency and compaction generation, not event-time coverage.
+// - Sealed with MinTime/MaxTime: those bounds, stable once immutable; WindowTS stays a valid lower bound when MinTime is absent.
+// - Unsealed (active memtable) or sealed-but-boundless: provable=false - never prune, never skip.
+// - The nominal window name and layer are not consulted: they encode write recency and compaction generation, not event-time coverage.
 func segmentBounds(windowTS int64, meta SegmentMeta) (lowerMs, upperMs int64, provable bool) {
 	if !meta.Sealed || meta.MaxTime <= 0 {
 		return 0, noUpperBoundMs, false

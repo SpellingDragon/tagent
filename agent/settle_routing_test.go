@@ -1004,6 +1004,7 @@ func durableAgent(t *testing.T, dir string) *TagentAgent {
 // projection; reusing the envelope's frozen prepared_fact must not.
 func durableAgentReopen(t *testing.T, dir string, cm *ContextManager) *TagentAgent {
 	t.Helper()
+	require.NoError(t, cm.bus.CloseDurable())
 	bus, err := NewReliableEventBus(dir)
 	require.NoError(t, err)
 	cm.bus = bus
@@ -1174,6 +1175,7 @@ func TestDurableReceipt_MultiEnvelopeBatchReplay(t *testing.T) {
 	require.Len(t, keysA, 1)
 	require.Equal(t, int64(1), bus.DurablePending())
 
+	require.NoError(t, ta.persistentBus.CloseDurable())
 	ta2 := durableAgent(t, dir)
 	bus2 := ta2.persistentBus
 	recB, err := bus2.PublishEnvelopeContext(context.Background(), "user",
