@@ -11,7 +11,7 @@
 ## 2. 收口
 
 - [x] 2.1 README modelref→agent_architecture、upgrade-rollback-drill 的 owner_retirement/partition_collision→org_hotreload、TestWriterLock→agent/resources/entry（修上档遗留失准） 中"测试位于某文件"表述同步（grep `owner_retirement_test\|org_candidate_test\|partition_collision_test`）
-- [ ] 2.2 归档变更
+- [x] 2.2 归档变更（tip ba2271e CI 四 job 全绿）
 
 ## 边界
 
