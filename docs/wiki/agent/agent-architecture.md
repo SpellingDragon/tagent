@@ -333,12 +333,13 @@ agent 包内 50 个文件按职责分五组，子域已独立成包（`task/` �
 
 | 模块 | 职责 | 依赖方向 |
 |---|---|---|
-| 根包 `tagent`（组合根） | 装配（build_agent/wiring/builtin/registry/resources/modelref/prompts）+ **编排发布权**（`org_hotreload.go` 的 orgCoordinator：换入/发布/告警）+ 面向消费者的入口 | root → config, agent, tool, … |
+| 根包 `tagent`（组合根，11 文件终形） | 装配（build_agent/wiring/builtin/registry/partition_collision 注册表 + config_alias/org_alias 别名层 + prompts_embed/testing）+ **编排发布权**（`org_hotreload.go` 的 orgCoordinator：换入/发布/告警）+ 面向消费者的入口 | root → config, agent, tool, … |
 | `config/`（配置模型层） | 编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影、纯查询（记忆段指纹、可达拓扑、仅远端声明判定）；根包以**别名再导出**保持 `tagent.*` 公共 API 源码级不变 | config → agent, prompt, tool, workspace；**MUST NOT 回指 root** |
 | `agent/`（引擎本体） | 事件循环、上下文管理、子 Agent 封装、冥想；主体不依赖 config（模型经 root 的别名与注入面进入装配） | agent → plugin → memory；不 import config |
 | `agent/org`（世代机制，已落地） | 退役账本、候选事务簿记、换壳 overlay——机制在此；**发布动作留根包**，两侧只经注入契约（壳构造回调、注册表接口、resident 句柄）协作 | agent/org → config, agent；MUST NOT import root |
+| `agent/resources`（资源租约治理） | 共享存储/引擎的最后引用清理、目录写锁（flock）、毒化封闭与重开判定；组合根 wiring 经 `resources.DefaultResources.Acquire` 接线，装配级测试留根包、深白盒用例随包 | agent/resources → config, memory；MUST NOT import root/agent |
 
-已迁出的机制件为 `Ledger`（退役账本）、`Txn`（候选责任表）、`Overlay`+`BuildOwners`+`ShellBuilder`+`Deps`（私有构造域），根侧唯一接缝 `runtimeConfig.orgDeps(loader)`。方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作为何必须留在根包：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——把 orgCoordinator 下放即违反该条，故世代**机制**可迁、**特权**留根。
+已迁出的机制件为 `Ledger`（退役账本）、`Txn`（候选责任表）、`Overlay`+`BuildOwners`+`ShellBuilder`+`Deps`（私有构造域）、`ComputeOrgFingerprint`/`ExtractOrgSubset`/`CanonicalAgentSubset`（世代簿记，agent/org/fingerprint.go）、`OrgStatus` 等 5 状态类型（agent/org/status.go，根以 org_alias.go 同名再导出），根侧唯一接缝 `runtimeConfig.orgDeps(loader)`。漂移审计器（evolution/asset_drift.go）与整理提示（memory/consolidation_hint.go）同期归域。方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作为何必须留在根包：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——把 orgCoordinator 下放即违反该条，故世代**机制**可迁、**特权**留根。
 
 <a id="data-flow"></a>
 ## 四、数据流

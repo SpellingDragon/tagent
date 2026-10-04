@@ -2,8 +2,9 @@ package tagent
 
 import (
 	"fmt"
-	"github.com/SpellingDragon/tagent/config"
 	"testing"
+
+	"github.com/SpellingDragon/tagent/config"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/memory"

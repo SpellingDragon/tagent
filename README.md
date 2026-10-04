@@ -243,7 +243,9 @@ graph TB
 | `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
 | `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
 | `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
-| `tagent.go` + `build_agent.go` + `wiring.go` + `config.go` + `org_hotreload.go` + `org_candidate_{overlay,txn}.go` + `owner_retirement.go` | 组合根（类型/Option/New · agent 装配族 · resolve+wire 族）、声明式配置，与组织编排热更（候选事务、唯一已提交应用记录、owner 义务与退役账） |
+| `agent/org/` | 世代治理机制（agent 域）：候选事务、热更执行、属主退役账、世代簿记（指纹/子集规范化）与状态类型；组合根经 `org.Deps` 注入壳构造，发布动作（orgCoordinator）留组合根 |
+| `agent/resources/` | 资源租约治理（agent 域）：共享存储/引擎的最后引用清理、目录写锁、毒化封闭；组合根 wiring 经 `resources.DefaultResources.Acquire` 接线 |
+| `tagent.go` + `build_agent.go` + `wiring.go` + `builtin.go` + `registry.go` + `org_hotreload.go` + `partition_collision.go` + `config_alias.go` + `org_alias.go` | 组合根终形（11 文件）：类型/Option/New · agent 装配族 · resolve+wire 族 · 发布权（orgCoordinator 换入/发布/告警）· 注册表 · 别名再导出（config 与 org 实体在域包） |
 
 依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
 
