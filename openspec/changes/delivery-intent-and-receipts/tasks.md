@@ -27,5 +27,6 @@
 
 - [x] 4.1 全量：`go test ./... -short -count=1`；`-race`（根+agent+rl 包）；`bash scripts/lint.sh`；`openspec validate --strict`
       —— SHORT=0 / RACE=0 / LINT=0（gofmt 一处 + `MetaKeySettleTriggerSource` 导出后 gen_godoc 重同步）/ strict valid；poller py_compile 通过
-- [ ] 4.2 push 并确认 CI 四 job 绿；回信彼方（裁决案 2：P1 形态 + "http" 硬编码定谳 + B 的 WARN 部分并入 K2 + 换装邀请）
+- [x] 4.2 push 并确认 CI 四 job 绿；回信彼方（裁决案 2：P1 形态 + "http" 硬编码定谳 + B 的 WARN 部分并入 K2 + 换装邀请）
+      —— `ce6f3d2` push CI test/openspec/race/validators 全绿；裁决回信已投（含 K3 取证陷阱勘误），存 `.git/review-notes/12-mail-ruling-p1k2.md`
 - [ ] 4.3 彼方换装后以邮件轮真跑声明路径（dogfood S2），回执观察入档
