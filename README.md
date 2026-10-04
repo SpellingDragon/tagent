@@ -358,7 +358,7 @@ graph TB
 | 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
 | 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
 | 真实 LLM 契约守护矩阵（模型↔框架文本接缝） | [tests/README.md](tests/README.md) |
-| Provider 协议契约矩阵（文本/usage/流式/原生 tool_calls/工具结果回环/reasoning 透传） | 根包 `modelref_test.go`（`resolveAgentModel` 走真实 openai-兼容适配器；`DEEPSEEK_API_KEY` 未设整组自动跳过，不阻塞 CI） |
+| Provider 协议契约矩阵（文本/usage/流式/原生 tool_calls/工具结果回环/reasoning 透传） | 根包 `agent_architecture_test.go`（`resolveAgentModel` 走真实 openai-兼容适配器；`DEEPSEEK_API_KEY` 未设整组自动跳过，不阻塞 CI） |
 | 常驻可靠性 / 资源所有权 / 控制面规格（durable inbox-v1、租约化 store、HTTP limits、endpoint 策略） | [openspec/specs/](openspec/specs/)（persistent-event-loop / runtime-resource-ownership / resident-release-evidence） |
 | RL 集成 / trajectory 分析（`rl/trajectory_analyze.py`：压缩回收率、大消息 TOP-N、chars/token 偏差） | [rl/](rl/) |
 
@@ -403,7 +403,7 @@ go test -p 1 -tags integration ./tool/action      # 含 Scenario/TUI 重测族
 
 判读规则：报 `server exited unexpectedly` 先按跑序问题处理，串行重跑；只有稳定复现的超时或断言不符才按缺陷追。跑该族前确认没有别处（含自己的 tmux 会话、其他 agent 进程）在同一默认服务器上建会话。
 
-CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `modelref_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
+CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `agent_architecture_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
 
 ## License
 
