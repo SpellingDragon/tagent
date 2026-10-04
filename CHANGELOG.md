@@ -16,9 +16,13 @@
 ### Added
 
 - 测试面 47 个新用例：worktree 隔离的门禁矩阵、活 tmux 全路径 rebind、分区快照脏桶隔离/跨进程读回/旧格式忽略、回收竞态终局语义、nil-channel 三分判据等。
+- **入站意图声明**（`POST /task`，openspec: delivery-intent-and-receipts P1）：请求体可选 `trigger_source`，受信集成（如 mail-poller 代表人类通信者）声明 `user` 血统；值域仅 `user`、无 auth 拒 `declaration_requires_auth`、缺信封能力 501 拒收，一律 fail-closed；声明入事件 Metadata 而 `Source` 保留通道标签，投递白名单语义不变。缺省行为逐位同于改前。
+- **投递终态统一回执**（wechat-bot 分发层，K2）：已送达不回执；send 失败 ERROR；未知/未声明血统消化、冥想血统含交付特征扣留、error、无目标四类 WARN 回执；冥想纯叙事维持契约内静默。回执以 `delivery_receipt` 血统入持久总线（转生后仍在账、自身输出静默、不武装冥想新颖门、与用户消息同批可被当场补投、不递归）——两起“感知成功/发送未发生”事故的宿主面闭环。
+- **结算血统一级键**（`settle_trigger_source`，K3）：事实链持久化时把结算事件自带的派生血统提升为一级可读键（`source_snapshot` 无损快照保留），与回合级 `trigger_source` 并存可对账，投递争议不再依赖解码知识取证。
 
 ### Fixed
 
+- **空回合血统写入空串一级键**（`buildBusFact`，openspec: delivery-intent-and-receipts K3②）：`trigger_source` 原无条件写 `cm.triggerSource`，回合血统为空时事实链留下“键存在但为空”的一级键，被读方误判为“未盖章”（email-inbound 事故当时取证失败的现场形态）；现为空则不写，与 `buildEventAttributes` 既有保护同形。
 - **压实跨折叠覆盖丢历史**（memory，收口阶段 soak 回归暴露，基线同形红）：同日第二次 L1→L2（或同周 L2→L3）把选定窗从 seq=0 写入取整目标窗时不检查目标窗既存段，逐键覆盖前一批历史（盘上字节消失、meta 计数失真、idx 悬空指向他人内容）；fresh 进程重启召回为空即此断裂（soak 连续性 promise 自入档以来从未真通过）。现将既存目标窗并入 merge 读取源，merge 按 EventKey 去重封死 crash-retry 交叠；回归测例入 CI（非 soak tag），soak 30×30 全绿。
 - **agent 核心运行时**（A 组 7 项）：构造失败路径的 durable inbox 句柄关闭；租约拒绝先于 live 注册（私有 CM 不悬挂、owner 义务可归零）；终态 drain 的 defer 序关住 loop-exit 到 unbind 的窗口；事件总线投递与退役路由的静默面清零。
 - **谱系与结算链路**（B/C 组 9 项）：退役归因盖在信号 Lineage 上、Spec.Origin 保持 spawn 时不可变（消除与无锁读者的数据竞争与 resumed 任务谱系永久污染）；有归属退役绕开批折叠走 per-task 路由，父循环投递记账屏障可达静默退出；run 级折叠豁免（任一 Active 成员整 run 保留）。

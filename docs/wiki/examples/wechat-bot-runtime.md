@@ -11,6 +11,7 @@
 | `dedup.go` | 消息级幂等（`SeenStore` + `DedupKey`），跨重启生效 |
 | `file_intake.go` | 入站分类与落盘：`MediaDownloader` 窄接口、`ClassifyInbound`、文件名清洗 |
 | `file_delivery.go` | 出站文件投递：`FileSender` 窄接口、路径识别、按扩展名选发送接口 |
+| `delivery_receipt.go` | 投递终态回执：分级判据（纯函数）与内部事件回流（`receiptInjector` 窄接口） |
 | `system_alert.go` | 一次性启动钩子：消费重启失败告警 |
 | `examples/wechat-bot/scripts/verify_large_file.go` | 大文件真链路人工验收脚本（`go:build ignore`，不进 CI） |
 
@@ -69,8 +70,27 @@
 
 `endpointPolicyFromEnv` 读取动态端点重定向策略：一个开关加一份**精确主机名**允许列表（不限制端口）。同一份解析同时供 HTTPAPI 的端点策略与 LLM 客户端的逐跳 `CheckRedirect` 守卫使用，因此这两处**永远不会漂移**——策略分叉会让一处放行另一处拒绝。
 
+<a id="delivery-receipts"></a>
+## 六、投递终态回执：预期外静默必回流 agent
+
+分发层对最终响应的处置有七个终态。已送达是 agent 自证可观察的，不需回执；其余**预期外静默**必须以内部事件回流 agent 语境——两起事故（冥想血统扣留交付结算、未声明 http 血统消化）的共同根因正是投递结局对 agent 不可见。
+
+| 终态 | 处置 |
+|---|---|
+| 已送达（文本+文件均成功） | 不回执 |
+| 发送失败 | ERROR 回执（用户在场却没收到） |
+| 未知/未声明血统消化 | WARN 回执（集成缺陷信号） |
+| 冥想扣留·内容含交付特征 | WARN 回执 |
+| 冥想扣留·纯叙事 | 契约内静默，不回执 |
+| error 血统扣留 | WARN 回执 |
+| 无投递目标 | WARN 回执 |
+
+回执以 `InjectMessageWithSource("delivery_receipt", …)` 注入持久总线：该血统不在投递白名单，回执轮自身输出静默、不武装冥想新颖门；与用户消息同批时被 user 一票否决，agent 可在活跃用户轮当场补投。**回执不递归**：`delivery_receipt` 血统自身的消化不再产回执（防自激）。交付特征检测（`[task settled]` 前缀、`delivery/` 路径）只参与回执分级，永不参与投递裁决。
+
+核心交易：**声明过的，完成即达；未声明的，等用户在场**。系统保证意图可声明、结局可见、账本可查，不接管“此刻该不该说”。
+
 <a id="large-file-acceptance"></a>
-## 六、大文件真链路验收（不进 CI）
+## 七、大文件真链路验收（不进 CI）
 
 `wechat-robot-go` 的 CDN 下载/上传路径在数十 MB 量级上未经真实验证，而这一风险无法用 mock 覆盖——mock 只能证明我们自己写的分支，证明不了 SDK 与 CDN 之间的字节完整性。上表末行的验收脚本复用 `.weixin-token.json` 登录态做真链路验收，用 `//go:build ignore` 排除在常规构建与 CI 之外，仅用于上线前验收与 SDK 升级回归。
 

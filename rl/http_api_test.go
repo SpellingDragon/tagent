@@ -357,6 +357,8 @@ func TestFeedbackBridge_PostWakesWait(t *testing.T) {
 type envelopeInjectingLoop struct {
 	mu          sync.Mutex
 	envelopes   [][]model.Message
+	lastSource  string
+	lastAttrs   []map[string]any
 	injectErr   error
 	injectCalls int
 	active      bool
@@ -370,7 +372,7 @@ func (l *envelopeInjectingLoop) StartLoop(string, string) (<-chan *trpcEvent.Eve
 func (l *envelopeInjectingLoop) StopLoop()          {}
 func (l *envelopeInjectingLoop) IsLoopActive() bool { return l.active }
 
-func (l *envelopeInjectingLoop) InjectEnvelope(_ context.Context, _ string, msgs []model.Message) (string, bool, error) {
+func (l *envelopeInjectingLoop) InjectEnvelope(_ context.Context, source string, msgs []model.Message, attrs ...map[string]any) (string, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.injectCalls++
@@ -378,7 +380,22 @@ func (l *envelopeInjectingLoop) InjectEnvelope(_ context.Context, _ string, msgs
 		return "", false, l.injectErr
 	}
 	l.envelopes = append(l.envelopes, msgs)
+	l.lastSource = source
+	l.lastAttrs = attrs
 	return "req-wp4-1", true, nil
+}
+
+// declaredLineage returns the trigger_source the HTTP layer passed down as an
+// envelope attr ("" when none was stamped).
+func (l *envelopeInjectingLoop) declaredLineage() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, a := range l.lastAttrs {
+		if v, ok := a["trigger_source"].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 func postEnvelopeBody(t *testing.T, h *HTTPAPI, body string) *httptest.ResponseRecorder {
@@ -387,6 +404,66 @@ func postEnvelopeBody(t *testing.T, h *HTTPAPI, body string) *httptest.ResponseR
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// TestTask_TriggerSourceDeclaration 钉住 /task 意图声明的受理与盖章形态。
+// - 声明 user 经认证端点受理：血统作为信封 attr 下传，机械通道标签 Source 仍为 "http"；
+// - 缺省不声明：不盖章，行为与声明能力引入前同形；
+// - 非 "user" 值与未认证声明分别 400，被拒声明不得注入。
+// 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
+func TestTask_TriggerSourceDeclaration(t *testing.T) {
+	t.Run("accepted and stamped", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		h.SetAuthToken("tok")
+		req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}],"trigger_source":"user"}`))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		require.Equal(t, "user", l.declaredLineage(), "declared intent must reach the envelope attrs")
+		require.Equal(t, "http", l.lastSource, "the mechanical channel label must survive")
+	})
+	t.Run("absent means no stamp", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		rec := postEnvelopeBody(t, h, `{"messages":[{"role":"user","content":"hello"}]}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		require.Equal(t, "", l.declaredLineage())
+	})
+	t.Run("non-user value rejected", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		h.SetAuthToken("tok")
+		req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"trigger_source":"meditation"}`))
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, 0, l.injectCalls, "a rejected declaration must not inject")
+	})
+	t.Run("declaration without auth rejected", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		rec := postEnvelopeBody(t, h, `{"messages":[{"role":"user","content":"hi"}],"trigger_source":"user"}`)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "declaration_requires_auth")
+		require.Equal(t, 0, l.injectCalls)
+	})
+}
+
+// TestTask_DeclarationUnsupportedBuildRejects 钉住 缺信封能力的 agent 构建下声明被拒而非静默丢弃。
+// 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
+func TestTask_DeclarationUnsupportedBuildRejects(t *testing.T) {
+	h := NewHTTPAPI(&fakeLoop{})
+	h.SetAuthToken("tok")
+	req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"trigger_source":"user"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotImplemented, rec.Code)
+	require.Contains(t, rec.Body.String(), "declaration_unsupported")
 }
 
 // TestTask_Limits_SingleValidationPoint 钉住：请求上限集中一处校验，负值配置被拒绝。

@@ -452,6 +452,50 @@ func TestBuildBusFact_FreezesFullMessageAndNamespacedSourceSnapshot(t *testing.T
 	require.Equal(t, model.RoleSystem, evt.Message.Role, "buildBusFact must not mutate the source message's role")
 }
 
+// TestBuildBusFact_PromotesSettleLineageToFirstClassKey 钉住 结算事件自带的派生血统提升为事实链一级可读键。
+// - 提升不替代无损快照：source_snapshot 原样保留；
+// - 消费回合血统与事件派生血统两键并存，可直接对账。
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestBuildBusFact_PromotesSettleLineageToFirstClassKey(t *testing.T) {
+	cm := newTestContextManager("settle-lineage", &loopMockModel{}, nil, nil, nil)
+	cm.triggerSource = "meditation"
+	evt := &AgentEvent{
+		ID:        "settle-1",
+		Type:      tagentevent.TypeExternalInput,
+		Source:    SourceTask,
+		Timestamp: time.Now(),
+		Message:   &model.Message{Role: model.RoleUser, Content: "[task settled] job"},
+		Metadata:  map[string]any{tagentevent.MetaKeyTriggerSource: "user", "task_id": "t-9"},
+	}
+
+	fact := cm.buildBusFact(evt)
+
+	require.Equal(t, "user", fact.Metadata[tagentevent.MetaKeySettleTriggerSource],
+		"the settle's spawn-time lineage must be readable without decoding the snapshot")
+	require.Equal(t, "meditation", fact.Metadata[tagentevent.MetaKeyTriggerSource],
+		"the consuming turn's lineage keeps its own key")
+	snap, err := tagentevent.DecodeSourceSnapshot(fact.Metadata[tagentevent.MetaKeySourceSnapshot])
+	require.NoError(t, err)
+	require.Equal(t, "user", snap.Metadata[tagentevent.MetaKeyTriggerSource],
+		"promotion must not replace the lossless snapshot")
+}
+
+// TestBuildBusFact_OmitsEmptyTurnLineageKey 钉住 回合级血统为空时一级键缺席而非空串。
+// - 键存在但为空不得冒充已盖章：读方以缺席判定无回合级盖章。
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+func TestBuildBusFact_OmitsEmptyTurnLineageKey(t *testing.T) {
+	cm := newTestContextManager("no-lineage", &loopMockModel{}, nil, nil, nil)
+	evt := &AgentEvent{
+		ID: "plain-1", Type: tagentevent.TypeExternalInput, Source: "user",
+		Timestamp: time.Now(), Message: &model.Message{Role: model.RoleUser, Content: "hi"},
+	}
+
+	fact := cm.buildBusFact(evt)
+
+	_, present := fact.Metadata[tagentevent.MetaKeyTriggerSource]
+	require.False(t, present, "an empty turn lineage must not persist as an empty-string first-class key")
+}
+
 func TestInjectMessageWithMetadata(t *testing.T) {
 	bus := NewEventBus()
 	ta := &TagentAgent{

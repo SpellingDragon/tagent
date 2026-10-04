@@ -16,6 +16,11 @@ const (
 	// IsNonProjectionRecord 消费。
 	MetaKeyTaskInlineRecord = "task_inline_record"
 
+	// MetaKeySettleTriggerSource 结算血统章：持久化 SourceTask 事件时把事件自带的
+	// 派生血统（由 SettleSignal.Lineage 盖入）提升为事实链一级键，与消费回合的
+	// MetaKeyTriggerSource 并存可对账；source_snapshot 的无损快照不因提升而移除。
+	MetaKeySettleTriggerSource = "settle_trigger_source"
+
 	// MetaKeyAgentName 归因章键：写入 FullEvent.Metadata，使产出事件可回溯到生效的 agent、bundle 与回合。
 	MetaKeyAgentName = "agent_name"
 	MetaKeyBundleID  = "bundle_id"
