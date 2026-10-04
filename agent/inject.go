@@ -45,7 +45,9 @@ func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, 
 // InjectEnvelope accepts a WHOLE batch as one acceptance unit (5.2): durable
 // mode persists a single multi-message envelope; the returned requestID is
 // the batch's stable identity (202 semantics belong to the HTTP layer).
-func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (requestID string, durable bool, err error) {
+// Declared attrs (e.g. an inbound integration's intent lineage) are stamped
+// into every event of the envelope without altering the mechanical source.
+func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (requestID string, durable bool, err error) {
 	if ta == nil {
 		return "", false, ErrNilEvent
 	}
@@ -62,7 +64,7 @@ func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs [
 	if bus == nil {
 		return "", false, ErrBusClosed
 	}
-	rec, err := bus.PublishEnvelopeContext(ctx, source, msgs)
+	rec, err := bus.PublishEnvelopeContext(ctx, source, msgs, attrs...)
 	return rec.RequestID, rec.Durable, err
 }
 

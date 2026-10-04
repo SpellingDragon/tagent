@@ -2,9 +2,10 @@
 
 ## 1. K3 结算血统落盘（框架，最小先行）
 
-- [ ] 1.1 fail-before：结算一个已知血统的任务，断言事实链 `settle_trigger_source`——现码无该键必红（fresh 与 prepared-fact 两条路径各一条测例）
-- [ ] 1.2 `MetaKeySettleTriggerSource` 常量入 `event/metadata.go` 单点定义；`persistBusEventCommitted` 的 `SourceTask` 分支补拷事件自带 `trigger_source` → `settle_trigger_source`（不覆写回合级键）；核 prepared-fact 构造点同盖
-- [ ] 1.3 测例转绿；`go test ./agent/... ./event/... ./memory/... -count=1` 全绿
+- [x] 1.1 fail-before 双红：① `buildBusFact` 对 SourceTask+自带血统的产出断言一级 `settle_trigger_source`（现码无该键，红）；② 空 `cm.triggerSource` 时断言一级 `trigger_source` absent（现码落空串，红）；快照保留断言防回归（探针实测已入 fail-before.log）
+      —— 双红实测在案（PromotesSettleLineage: Not equal；OmitsEmptyTurnLineage: Should be false）
+- [x] 1.2 `MetaKeySettleTriggerSource` 常量入 `event/metadata.go` 单点定义；`buildBusFact`：SourceTask 分支补拷一级键（快照不动）；回合级 `trigger_source` 空则不写（同 `buildEventAttributes` 保护形态）
+- [x] 1.3 测例转绿；`go test ./agent/... ./event/... ./memory/... -count=1` 全绿
 
 ## 2. P1 注入声明（框架 + poller）
 

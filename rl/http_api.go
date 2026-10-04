@@ -381,6 +381,11 @@ type taskRequest struct {
 	Messages  []taskMessage `json:"messages"`
 	UserID    string        `json:"user_id"`
 	SessionID string        `json:"session_id"`
+	// TriggerSource is an inbound integration's declared intent lineage (e.g. a
+	// mail poller asserting a human correspondent). Only "user" is accepted, and
+	// only while the endpoint is authenticated. Absent means the mechanical
+	// channel label stands and delivery stays fail-closed.
+	TriggerSource string `json:"trigger_source,omitempty"`
 	// LLMBaseURL AReaL proxy URL (dynamic port)
 	LLMBaseURL string `json:"llm_base_url,omitempty"`
 }
@@ -475,6 +480,16 @@ func (h *HTTPAPI) validateTaskRequest(r *http.Request) (*taskRequest, int, strin
 				fmt.Sprintf("message %d content exceeds %d bytes", i, h.limits.MaxContentBytes)
 		}
 	}
+	if req.TriggerSource != "" {
+		if req.TriggerSource != "user" {
+			return nil, http.StatusBadRequest,
+				fmt.Sprintf("trigger_source %q not accepted (only \"user\" may be declared)", req.TriggerSource)
+		}
+		if h.authToken == "" {
+			return nil, http.StatusBadRequest,
+				"declaration_requires_auth: trigger_source may be declared only on an authenticated endpoint"
+		}
+	}
 	return &req, 0, ""
 }
 
@@ -515,9 +530,14 @@ func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	injector, ok := h.agent.(interface {
-		InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (string, bool, error)
+		InjectEnvelope(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (string, bool, error)
 	})
 	if !ok {
+		if req.TriggerSource != "" {
+			writeJSONError(w, http.StatusNotImplemented, "declaration_unsupported",
+				"this agent build cannot carry envelope attrs; rejecting instead of dropping the declared trigger_source")
+			return
+		}
 		for _, m := range req.Messages {
 			role := model.Role(m.Role)
 			if role == "" {
@@ -536,7 +556,11 @@ func (h *HTTPAPI) handlePostTask(w http.ResponseWriter, r *http.Request) {
 		}
 		msgs = append(msgs, model.Message{Role: role, Content: m.Content})
 	}
-	requestID, durable, err := injector.InjectEnvelope(r.Context(), "http", msgs)
+	var attrs []map[string]any
+	if req.TriggerSource != "" {
+		attrs = append(attrs, map[string]any{tagentevent.MetaKeyTriggerSource: req.TriggerSource})
+	}
+	requestID, durable, err := injector.InjectEnvelope(r.Context(), "http", msgs, attrs...)
 	if err != nil {
 		log.Errorf("[HTTPAPI] batch rejected: %v", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "enqueue_rejected", err.Error())

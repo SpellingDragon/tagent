@@ -532,11 +532,23 @@ func wakeEvent() *AgentEvent {
 
 func isInboxWake(e *AgentEvent) bool { return e != nil && e.Type == inboxWakeType }
 
+// applyEnvelopeAttrs stamps declared envelope attributes onto each event of the
+// envelope. Callers pass the attribute maps they own; values are copied key by
+// key so a later mutation of the caller's map never reaches the published event.
+func applyEnvelopeAttrs(evt *AgentEvent, attrs []map[string]any) {
+	for _, a := range attrs {
+		for k, v := range a {
+			evt.Metadata[k] = v
+		}
+	}
+}
+
 // PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope
 // : every message keeps its own identity in
 // the envelope, and the batch is durable (or rejected) as a unit — never
 // partially accepted. Volatile mode falls back to per-message PublishContext.
-func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message) (PublishReceipt, error) {
+// Declared attrs, when given, are stamped into every event of the envelope.
+func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (PublishReceipt, error) {
 	if len(msgs) == 0 {
 		return PublishReceipt{}, ErrNilEvent
 	}
@@ -547,6 +559,7 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 		env := reliability.Envelope{RequestID: requestID, Source: source}
 		for _, m := range msgs {
 			evt := NewExternalInputEvent(source, m)
+			applyEnvelopeAttrs(evt, attrs)
 			src, merr := json.Marshal(evt)
 			if merr != nil {
 				return receipt, fmt.Errorf("eventbus: message not JSON-encodable, durable acceptance refused: %w", merr)
@@ -565,6 +578,7 @@ func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, ms
 	}
 	for _, m := range msgs {
 		evt := NewExternalInputEvent(source, m)
+		applyEnvelopeAttrs(evt, attrs)
 		select {
 		case b.ch <- evt:
 		default:

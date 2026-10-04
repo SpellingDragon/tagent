@@ -735,11 +735,12 @@ func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (Publi
 func (b *EventBus) PublishDropped() int64
     PublishDropped 统计经由 void 兼容入口发生的拒绝。
 
-func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message) (PublishReceipt, error)
-    PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope : every
-    message keeps its own identity in the envelope, and the batch is durable (or
-    rejected) as a unit — never partially accepted. Volatile mode falls back to
-    per-message PublishContext.
+func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (PublishReceipt, error)
+    PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope :
+    every message keeps its own identity in the envelope, and the batch is
+    durable (or rejected) as a unit — never partially accepted. Volatile mode
+    falls back to per-message PublishContext. Declared attrs, when given,
+    are stamped into every event of the envelope.
 
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error)
     Pull blocks until at least one event arrives or ctx is cancelled. Then
@@ -1338,10 +1339,12 @@ func (ta *TagentAgent) IngestExternalEvents(events []memory.FullEvent)
     它是单槽交收而非历史缓冲，并有守卫使并发 Run 的取走与本次写入互不撕裂。 主委托路径经调用的 RuntimeState
     传递上下文，从不碰这个共享槽。
 
-func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (requestID string, durable bool, err error)
+func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (requestID string, durable bool, err error)
     InjectEnvelope accepts a WHOLE batch as one acceptance unit (5.2): durable
     mode persists a single multi-message envelope; the returned requestID is the
-    batch's stable identity (202 semantics belong to the HTTP layer).
+    batch's stable identity (202 semantics belong to the HTTP layer). Declared
+    attrs (e.g. an inbound integration's intent lineage) are stamped into every
+    event of the envelope without altering the mechanical source.
 
 func (ta *TagentAgent) InjectMessage(msg model.Message)
     InjectMessage injects a user message into the agent's event bus. The message

@@ -1303,14 +1303,19 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 		ToolID:       msg.ToolID,
 	}
 	fullEvent.Metadata = map[string]string{
-		tagentevent.MetaKeyAgentName:     cm.name,
-		tagentevent.MetaKeyTriggerSource: cm.triggerSource,
+		tagentevent.MetaKeyAgentName: cm.name,
+	}
+	if cm.triggerSource != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
 	}
 	if evt.Source == SourceTask {
 		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
+		}
+		if v, ok := evt.Metadata[tagentevent.MetaKeyTriggerSource].(string); ok && v != "" {
+			fullEvent.Metadata[tagentevent.MetaKeySettleTriggerSource] = v
 		}
 	}
 	if cm.sessionID != "" {

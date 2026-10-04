@@ -45,15 +45,17 @@
 - **回执通道**：宿主调 `InjectMessageWithSource("delivery_receipt", …)` 走持久总线——转生后仍在账上；`delivery_receipt` 非白名单 ⇒ 回执轮自身输出静默（自言自语不外发）、不武装冥想新颖门（meditation.go:194 非用户源不武装）；与用户消息混批时 user 一票否决 ⇒ 该轮可投递（agent 可当场补投，S9 特性）。回执正文含：终态原因、血统、内容截断、目标（chat_id 或 lastActive 兜底）。
 - **防自激红线**：lineage 为 `delivery_receipt` 的最终输出被消化时**不再产回执**（分发层显式豁免分支）。
 
-## D4 K3 事件级血统落盘
+## D4 K3 结算血统一级化（前提经探针修正，见 fail-before.log）
 
-- `persistBusEventCommitted` `SourceTask` 分支补拷：`evt.Metadata[trigger_source]`（settle 事件自带，`event_bus.go:250` 由 SettleSignal.Lineage 盖）→ `fullEvent.Metadata["settle_trigger_source"]`。独立键名，不与 L1307 的回合级 `trigger_source` 冲突——两者并存即"回合血统 vs 事件血统"可对账（例如用户血统结算件被冥想回合消费的形态将可直接度量）。
-- **两条路径皆盖**：fresh 构造路径（L1309 分支）与 durable prepared-fact 路径（claim 冻结时构造）——fail-before 测试须各钉一条。
+探针实测：`buildBusFact` 的 `source_snapshot` 已全量无损保存事件元数据（含结算血统），fresh 与 prepared-fact 两路径共享同一构造点（claim 期序列化的也是 buildBusFact）——故 K3 不是“补落盘”，是**提升一级可读性 + 修空串陷阱**：
+
+- ① `SourceTask` 分支补拷：`evt.Metadata[trigger_source]`（settle 事件自带，`event_bus.go:250` 由 SettleSignal.Lineage 盖）→ 顶层 `settle_trigger_source`（独立键，快照原样保留）。两键并存使“回合血统 vs 事件血统”免解码直接对账（用户血统结算件被冥想回合消费的形态将可度量）。
+- ② 空串陷阱：现码无条件写 `fullEvent.Metadata[trigger_source] = cm.triggerSource`，回合血统为空时一级键落空串——“键存在但为空”被误读为“未盖章”（事故取证失败的现场形态）。改为空则不写，与同函数族 `buildEventAttributes` 的既有 `!= ""` 保护同形。
 - 读方：`QueryEvents` 返回的 FullEvent.Metadata 直接可读；不新增 API。
 
 ## D5 验证口径（fail-before）
 
 - P1：现注入无声明 ⇒ `extractTriggerSource` 判 `http`（红：期望 user 的断言失败）→ 加声明后判 `user` 且 `Source=http`；无 auth 时声明 400；非法值 400。
 - K2：七终态 × 断言回执有/无与级别（构造各血统+特征形态的最终事件过分发层）；回执轮二次输出零回执；`[user, receipt]` 混批一票否决。
-- K3：结算已知血统任务 ⇒ 事实链读出 `settle_trigger_source`（两条路径各一条）。
+- K3：① 一级键 `settle_trigger_source` 免解码可读（现码无该键，必红）；② 回合血统为空时一级 `trigger_source` absent（现码落空串，必红）；快照保留断言防回归。
 - 全量：`go test ./... -short -count=1`、`-race`（根+agent+rl 包）、`bash scripts/lint.sh`、`openspec validate --strict`、CI 四 job；换装后由彼方邮件轮真跑 S2（dogfood）。
