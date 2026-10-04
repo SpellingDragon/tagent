@@ -22,6 +22,8 @@ go.work.sum
 # openspec/
 
 # Node.js (example skills with npm dependencies)
+!examples/wechat-bot/skills/
+!examples/wechat-bot/skills/**
 node_modules/
 
 # Log directories
