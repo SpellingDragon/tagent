@@ -73,3 +73,8 @@
   - 出根件：resources(412)、asset_drift(322)、consolidation_hint(132)、世代簿记(139)、Org* 类型(71) 合计 **1,076 行归域**，各得其所（agent/resources、evolution、memory、agent/org）
   - 测试归位判定：0/24 可零改写搬、0/24 可机械前缀搬——根包测试群是真实灰盒面（判定表入档）
   - 行为零变更：全程 build/vet/lint ok，-race 与 GOMAXPROCS=1 每组提交后全绿，CI 三笔提交（580ecbc/d7904b3/00f1270）+ 本笔四 job 绿
+
+## 5. 执行期自曝（追加）
+
+- [x] 5.1 9718855（docs 归档前提交）被 git add -A 扫进 goimports 误碰的 partition_collision_test.go 1 行 ⇒ commit-scope 门在 CI 定罪（本地复核 exit 1 确认）；1073069 立即撤销该误携，tip 四 job 绿。教训：**严禁 git add -A，一律显式 pathspec**——本档两次栽在同一处
+- [x] 5.2 判定协议陷阱：首轮探针 _probe_test.go 下划线开头被 Go 工具链忽略，24/24 全 PASS 假阳性；真判定后 0/24。教训：判定装置自身要先被证伪一次
