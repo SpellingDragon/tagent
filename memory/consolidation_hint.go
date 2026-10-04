@@ -1,5 +1,5 @@
 // 契约: docs/wiki/memory/memory-architecture.md#curation
-package tagent
+package memory
 
 import (
 	"fmt"

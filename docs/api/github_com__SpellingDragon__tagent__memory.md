@@ -219,6 +219,43 @@ func (c *Compactor) Start()
 func (c *Compactor) Stop()
     Stop stops the compaction scheduler gracefully.
 
+type ConsolidationHintTracker struct {
+	// Has unexported fields.
+}
+    ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。 消费 engineBridge
+    的写入旁路计数（CapacityHookProvider）： 每分区的**边界事件**（external_input /
+    agent_output，即任务回合的意图与产出）计数 超过 capacity_threshold 时，经 onHint 发一条
+    consolidation_hint 渗透消息——建议式， 执行权仍在 LLM + memory_consolidate 工具。snooze
+    窗内不重复打扰 （内存态；重启后重新积累——最多多提示一次，可接受）。
+
+    不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示， MUST NOT
+    驱动容量淘汰——淘汰执行权的唯一真源是 store 的绝对 per-partition eventCount（`recomputePartition`
+    由完整记录链得出，unknown 分区不淘汰，见 memory/lifecycle.go::checkCapacity）。因此本 delta
+    重启归零、巩固后随提示复位（Track 触发 onHint 即将 counts[pid]=0），与绝对真源分叉不构成淘汰误删风险（既有
+    TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；锁定淘汰读绝对）。 repaired/already
+    重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过 capacityHook（见
+    engine_bridge_idempotency_test.go）。
+
+func NewConsolidationHintTracker(threshold int, snooze time.Duration) *ConsolidationHintTracker
+    NewConsolidationHintTracker 构造触发器。threshold<=0 返回 nil（关闭，零行为变化）。 onHint
+    可后设（SetOnHint）——装配期 agent 尚未构造。
+
+func (t *ConsolidationHintTracker) CandidatesText(partitionID int) string
+    CandidatesText渲染该分区的可巩固候选段（冥想 digest 附加）。无候选返回空串（digest 不变）。建议式：仅列 key
+    与计数，执行权在 LLM。
+
+func (t *ConsolidationHintTracker) SetOnHint(fn func(partitionID, count int))
+    SetOnHint 回填提示回调（装配期，NewTagentAgent 之后）。
+
+func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventType string)
+    Track 是写入旁路计数入口（engineBridge capacityHook 签名）。仅边界事件计数； 非阻塞、永不失败（旁路产物）。
+    Within the snooze window the count is kept, so the next boundary event
+    after the window expires hints again. While onHint is unset (the assembly
+    window between construction and SetOnHint) nothing is reset and no snooze
+    is recorded: the count survives, and the first boundary event after wiring
+    emits the delayed hint. On a hint, counts and recent reset together so the
+    candidate list stays aligned.
+
 type DegradationSink interface {
 	// ReportFailure 上报某依赖的一次失败及原始错误。
 	ReportFailure(dep string, err error)

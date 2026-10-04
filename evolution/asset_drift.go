@@ -1,5 +1,5 @@
 // 契约: docs/wiki/platform/cognitive-asset-guard.md
-package tagent
+package evolution
 
 import (
 	"crypto/sha256"
@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/SpellingDragon/tagent/evolution"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -65,7 +64,7 @@ type AssetAuditor struct {
 }
 
 // NewAssetAuditor 构造审计器。wd 为空回退进程 cwd；patterns 为受控清单
-// （evolution.DefaultProtectedPaths 同源传入）；extraFiles 是清单外补充文件
+// （DefaultProtectedPaths 同源传入）；extraFiles 是清单外补充文件
 // （主配置 ConfigPath，可空）。interval<=0 时使用 assetAuditInterval。
 func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]AssetChange)) *AssetAuditor {
 	if wd == "" {
@@ -318,5 +317,5 @@ func (a *AssetAuditor) saveSnapshot(files map[string]FileEntry) {
 
 // DefaultAssetPatterns 返回漂移审计的受控清单（同源真源转发，wiring 唯一入口）。
 func DefaultAssetPatterns() []string {
-	return evolution.DefaultProtectedPaths
+	return DefaultProtectedPaths
 }

@@ -108,7 +108,7 @@ func buildAgentDFS(
 	}
 
 	var memStore memory.MemoryStore
-	var hintTracker *ConsolidationHintTracker
+	var hintTracker *memory.ConsolidationHintTracker
 	var err error
 	var memStoreRelease func() error
 	if mode.isExecutorShell() {
@@ -229,7 +229,7 @@ func assembleAgentConfig(
 	loader *prompt.Loader,
 	memStore memory.MemoryStore,
 	degradationMgr *reliability.DegradationManager,
-	hintTracker *ConsolidationHintTracker,
+	hintTracker *memory.ConsolidationHintTracker,
 	cache map[string]*agent.TagentAgent,
 	mode buildMode,
 	stack map[string]bool,
@@ -501,7 +501,7 @@ func wireAgent(
 	memStore memory.MemoryStore,
 	memStoreRelease func() error,
 	etsHolder *memory.ErrorTrackingStore,
-	hintTracker *ConsolidationHintTracker,
+	hintTracker *memory.ConsolidationHintTracker,
 	mode buildMode,
 	cache map[string]*agent.TagentAgent,
 ) (*agent.TagentAgent, error) {
@@ -532,8 +532,8 @@ func wireAgent(
 	}
 
 	if cfg.WorkingDir != "" && name == cfg.Entry && mode.bindsProcessShared() {
-		auditor := NewAssetAuditor(cfg.WorkingDir, DefaultAssetPatterns(),
-			[]string{cfg.ConfigPath}, func(changes []AssetChange) {
+		auditor := evolution.NewAssetAuditor(cfg.WorkingDir, evolution.DefaultAssetPatterns(),
+			[]string{cfg.ConfigPath}, func(changes []evolution.AssetChange) {
 				cs := make([]agent.CognitiveAssetChange, 0, len(changes))
 				for _, c := range changes {
 					cs = append(cs, agent.CognitiveAssetChange(c))

@@ -1,4 +1,4 @@
-package tagent
+package memory
 
 import (
 	"strings"

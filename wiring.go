@@ -606,7 +606,7 @@ func consolidationMinSources(acfg AgentConfig) int {
 
 // newConsolidationHintTracker从 agent 配置构造容量
 // 触发器；配置缺失/非法/threshold<=0 返回 nil（关闭，零行为变化）。
-func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
+func newConsolidationHintTracker(acfg AgentConfig) *memory.ConsolidationHintTracker {
 	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
 		return nil
 	}
@@ -621,7 +621,7 @@ func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
 			snooze = d
 		}
 	}
-	return NewConsolidationHintTracker(c.CapacityThreshold, snooze)
+	return memory.NewConsolidationHintTracker(c.CapacityThreshold, snooze)
 }
 
 // approvalInjectChannel把 pending 审批请求渗透为

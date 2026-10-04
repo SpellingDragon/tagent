@@ -332,7 +332,7 @@ type CognitiveAssetChange struct {
 	Size      int64
 	Timestamp int64
 }
-    CognitiveAssetChange 是漂移审计事件载荷的最小契约（与根包 tagent.AssetChange 字段对齐；agent
+    CognitiveAssetChange 是漂移审计事件载荷的最小契约（与 evolution.AssetChange 字段对齐；agent
     包不反向依赖根包，以本类型解耦）。
 
 type CompressConfig struct {
