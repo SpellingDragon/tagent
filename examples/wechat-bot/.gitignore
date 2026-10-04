@@ -82,7 +82,6 @@ wechat-bot
 logs/
 *.log
 wechat-bot
-skills/
 data/
 openspec/
 !dedup.go
