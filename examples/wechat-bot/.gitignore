@@ -55,6 +55,7 @@ resources/prompts/USER.md
 
 # Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded
 !skills/
+!skills/*/**
 skills/*/node_modules/
 
 # Re-ignore all dotfiles and dot-directories (runtime data)
