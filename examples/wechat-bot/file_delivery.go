@@ -90,6 +90,9 @@ func ExtractFilePaths(text, workspaceDir string) []string {
 }
 
 // isExecutable 判断文件是否为可执行文件：具有任意可执行权限位，或扩展名在拒绝列表中。
+// voiceMaxBytes 上限 5MB：超过此值的音频按文件消息发送，不走语音通道。
+const voiceMaxBytes = 5 << 20
+
 func isExecutable(info os.FileInfo, path string) bool {
 	if info.Mode()&0111 != 0 {
 		return true
@@ -114,6 +117,10 @@ func selectSendFn(ext string) fileSendFn {
 		}
 	case ".mp3", ".wav", ".amr", ".m4a":
 		return func(s FileSender, ctx context.Context, toUserID, path string) error {
+			// voice CDN rejects long audio; fall back to file message when oversized
+			if info, err := os.Stat(path); err == nil && info.Size() > voiceMaxBytes {
+				return s.SendFileFromPath(ctx, toUserID, path)
+			}
 			return s.SendVoiceFromPath(ctx, toUserID, path, 0)
 		}
 	case ".mp4", ".mov", ".avi", ".webm", ".mkv":
