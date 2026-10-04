@@ -111,7 +111,7 @@ agents:
     max_tokens: 512000
     temperature: 0.7
     thinking_enabled: true
-    compress_threshold: 0.8
+    compress_threshold: 0.45
     keep_recent_tasks: 1
     task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
     task_default_ttl: "8h"               # 统一 TTL reaper 对无 `ttl` 入参任务的兜底绝对寿命(缺省 10min):到期经 owner Cancel → failed 终态 → 移出看板。无禁用哨兵、无按 mode 豁免——常驻/长任务须显式加大命令 ttl 或经 op=send/resume 续命(合并并删除旧 task_stale_after 观测态与 task_job_deadline 双墙)
@@ -151,7 +151,7 @@ agents:
       #   remote: { url: "http://knowledge-service:8088" }
     meditation:                          # 定时心跳(仅 entry):空闲触发上下文清理/深度分析/skill 积累
       enabled: true
-      interval: "30m"
+      interval: "10m"
       min_gap: "1h"
       prompt_file: "meditation.md"
 
