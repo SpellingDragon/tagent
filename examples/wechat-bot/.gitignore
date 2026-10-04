@@ -98,6 +98,8 @@ openspec/
 !skills/url-fetcher/
 !reincarnation_notice.go
 !reincarnation_notice_test.go
+!delivery_receipt.go
+!delivery_receipt_test.go
 !skills/README.md
 !skills/url-fetcher/README.md
 !skills/url-fetcher/TESTING.md
