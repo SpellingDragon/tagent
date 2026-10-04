@@ -645,6 +645,7 @@ func TestRetention_ArmFromInboxAndReleaseOnAck(t *testing.T) {
 	require.NoError(t, in.PrepareFacts(path, tagentevent.FormatEventKey(receiptKey),
 		[]json.RawMessage{json.RawMessage(`{"event_key":` + itoa(factKey) + `}`)}))
 
+	require.NoError(t, in.Close())
 	bus, err := NewReliableEventBus(inboxDir)
 	require.NoError(t, err)
 	bus.SetRetentionGuard(store)

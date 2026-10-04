@@ -5,8 +5,6 @@ Package knowledge 提供知识获取子 agent 及其子工具：技能检索与�
 web_search 走结构化搜索 API：返回标题/链接/摘要/媒体/发布日期，而抓取引擎 HTML 会 因对端改版而无声失效，故 API
 是主用且更可靠的后端。API key 取自环境变量（变量名由 工具 api_key_env 属性配置）。降级与失败回报语义见文档。
 
-契约: docs/wiki/tool/tool-architecture.md#websearch-backend
-
 FUNCTIONS
 
 func BuildSubTools(cfg Config) []tool.Tool
@@ -39,29 +37,21 @@ func NewSkillLoadTool(repo tagenttool.SkillRepository) tool.Tool
     NewSkillLoadTool creates a tool that loads skill content as a structured
     summary.
 
-    Progressive disclosure design (following trpc-agent-go pattern): - Level
-    1 (skill_search): name + description from YAML front matter - Level 2
-    (skill_load): name + description + usage summary (up to ~2500 chars) - Level
-    3 (command): read full skill file when deeper detail is needed
-
-    The tool returns a compact, structured output suitable for the knowledge
-    agent to read and synthesize, avoiding the context explosion of dumping the
-    full body.
+    - Levels: skill_search (front matter), skill_load (summary up to ~2500
+    chars), command (full file). - Output stays compact and synthesizable;
+    the full body is never dumped.
 
 func NewSkillSearchTool(repo tagenttool.SkillRepository) tool.Tool
     NewSkillSearchTool creates a tool that searches the skill repository.
 
 func NewTool(cfg Config) (tagenttool.Tool, error)
     NewTool is a convenience function that creates a KnowledgeAgent and wraps it
-    as a CallableTool ready for registration.
+    as a CallableTool.
 
-    If cfg.Description is empty and cfg.DescriptionFile is set, the description
-    is loaded from the file (relative to cfg.PromptDir). If both are empty,
-    a hardcoded default is used for backward compatibility.
-
-    Note: This wraps with a simple AgentToolWrapper without event_key
-    resolution. For full event_key support, use tagent.New() which builds agents
-    from Config.
+    - An empty Description with DescriptionFile set loads the text relative to
+    PromptDir; both empty falls back to a built-in default. - The wrapper is a
+    plain AgentToolWrapper without event_key resolution; full support comes from
+    the root-package constructor.
 
 func NewWebSearchTool() tool.CallableTool
     NewWebSearchTool creates a web_search tool with the default configuration.
@@ -78,7 +68,6 @@ func RegisterSubTools()
     discover available MCP tools - web_search: HTML scraping for general
     web content - duckduckgo_search: Instant Answer API for factual info -
     memory_query: query historical knowledge from memory
-
 
 TYPES
 
@@ -194,4 +183,3 @@ func DefaultWebSearchConfig() WebSearchConfig
     DefaultWebSearchConfig returns the default configuration, using the public
     Zhipu Web Search endpoint and the ZAI_API_KEY env var shared with the zhipu
     model provider.
-

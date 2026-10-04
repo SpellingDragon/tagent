@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
 package tagent
 
 import (
@@ -7,12 +8,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/SpellingDragon/tagent/config"
+
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/provider"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/resources"
 	"github.com/SpellingDragon/tagent/memory"
 	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
@@ -21,22 +25,12 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 )
 
-// resolveAgentModel returns the model instance one agent’s LLM calls use and
-// caches it per provider+model pair. Resolution order: a per-name instance from
-// rc.modelOverrides; otherwise the agent’s own model, looked up under the
-// agent's provider or, when the agent names none, under the global cfg.Provider;
-// otherwise the global default model; and finally the WithModel-injected rc.model.
+// resolveAgentModel returns the model instance one agent LLM calls use and caches it
+// per provider plus model pair.
 //
-// A TrajectoryRecorder, when enabled, wraps every instance it returns,
-// including override hits: the wrapper sits outside the SwappableModel so the
-// recorder observes post-swap traffic, and it is built per buildAgent call, so
-// repeated resolves never stack wrappers on one instance.
-//
-// The global default is resolved through the provider registry, so a yaml-only
-// change to the global provider or model takes effect in a hot-reload rebuild;
-// the injected rc.model is fixed at boot and is returned only when the config
-// names no resolvable global provider. The protocol implementation may differ
-// from the registry key — see ProviderConfig.Provider.
+// - Resolution order: per-name override, then the agent own model, then the global default model, then the WithModel-injected instance.
+// - A TrajectoryRecorder, when enabled, wraps every returned instance including override hits, outside the SwappableModel so it observes post-swap traffic.
+// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
 func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Config) model.Model {
 	if rc.modelOverrides != nil {
 		if m, ok := rc.modelOverrides[name]; ok {
@@ -229,84 +223,33 @@ func (rc *runtimeConfig) judgeModel(name string, cfg Config) model.Model {
 	return rc.model
 }
 
-// resolveLifecycleConfig merges the optional YAML lifecycle declaration over
-// the built-in defaults. Nil or partially-set fields keep defaults; a
-// negative GlobalTTLDays disables TTL-based forgetting entirely.
-func resolveLifecycleConfig(c *LifecycleConfig) memory.LifecycleConfig {
-	cfg := memory.DefaultLifecycleConfig()
-	if c == nil {
-		return cfg
-	}
-	if c.GlobalTTLDays != nil {
-		cfg.GlobalTTLDays = *c.GlobalTTLDays
-	}
-	if len(c.TypeTTL) > 0 {
-		if cfg.TypeTTL == nil {
-			cfg.TypeTTL = make(map[string]int, len(c.TypeTTL))
-		}
-		for k, v := range c.TypeTTL {
-			cfg.TypeTTL[k] = v
-		}
-	}
-	if c.CheckInterval != "" {
-		if d, err := time.ParseDuration(c.CheckInterval); err == nil && d > 0 {
-			cfg.CheckInterval = d
-		} else {
-			log.Warnf("[tagent] invalid lifecycle check_interval %q, keeping default", c.CheckInterval)
-		}
-	}
-	if c.MaxEventsPerPartition != nil {
-		cfg.MaxEventsPerPartition = *c.MaxEventsPerPartition
-	}
-	return cfg
-}
-
 // resolveMemoryStore creates a MemoryStore from MemoryConfig.
 //
-// For type: file, creates a FileSegmentStore backed by RustViking CLI
-// and InMemRelationStore (WAL + snapshot persistence).
-//
-// For type: localfile, creates a FileSegmentStore backed by LocalFileKV
-// (JSON file persistence, no external binary dependency) and InMemRelationStore.
-//
-// Shared-path stores go through the RuntimeResources registry (4.2): same
-// path + same fingerprint → same instance + one lease per consumer; the LAST
-// release closes the store AND its entry-owned engine and frees the directory
-// writer-lock (4.3), and an incompatible fingerprint is REJECTED (4.1 T3).
-// Empty path = isolated store owned exclusively by that agent (engine wired
-// per-agent by wireMemoryEngine, not returned here).
-//
-// resolveMemoryStore returns the shared backend store, the entry-owned engine
-// (nil for isolated or degraded), and the release func. The engine is built
-// inside the acquire open closure so it shares the store's generation: a
-// reopen always gets a fresh engine bound to a fresh backend, never a stale
-// engine bound to an already-closed one.
-//
-// The returned release func is bound to the acquiring agent's lifecycle
-// (executed from TagentAgent.Close); executor shells do NOT acquire (they
-// borrow the resident entry's store).
-func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
+// - type file backs FileSegmentStore with the RustViking CLI; type localfile backs it with LocalFileKV, which has no external binary dependency; both pair with InMemRelationStore.
+// - Shared paths go through the RuntimeResources registry: same path plus same fingerprint yields the same instance with one lease per consumer.
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func resolveMemoryStore(mc config.MemoryConfig) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
 	switch mc.Type {
 	case "memory", "":
 		if mc.Path == "" {
 			return memory.NewInMemoryStore(), nil, nil, nil
 		}
-		return defaultResources.acquire("mem", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("mem", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			store := memory.NewInMemoryStore()
-			return openedResource{store: store, engine: buildSharedEngine(store, mc)}, nil
+			return resources.OpenedResource{Store: store, Engine: buildSharedEngine(store, mc)}, nil
 		})
 	case "file":
 		if mc.Path == "" {
 			return nil, nil, nil, fmt.Errorf("file memory store requires path")
 		}
-		return defaultResources.acquire("rv", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("rv", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			return openRVStore(mc)
 		})
 	case "localfile":
 		if mc.Path == "" {
 			return nil, nil, nil, fmt.Errorf("localfile memory store requires path")
 		}
-		return defaultResources.acquire("localfile", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("localfile", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			return openLocalFileStore(mc)
 		})
 	default:
@@ -319,23 +262,23 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 // (rel+kv+store); a backend step that fails releases the relation store AND
 // the KV opened by prior steps, so a half-built store never leaks a writer
 // lock or a journal fd behind it.
-func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
+func openLocalFileStore(mc config.MemoryConfig) (resources.OpenedResource, error) {
 	rel, err := memory.NewInMemRelationStore(mc.Path)
 	if err != nil {
-		return openedResource{}, fmt.Errorf("create relation store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create relation store: %w", err)
 	}
 	kvStore, err := kv.NewLocalFileKV(mc.Path)
 	if err != nil {
 		releaseRelOnFailure(rel)
-		return openedResource{}, fmt.Errorf("create local file kv: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create local file kv: %w", err)
 	}
 	store, err := memory.NewFileSegmentStore(kvStore, rel, mc.Path, 1000)
 	if err != nil {
 		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvStore); cerr != nil {
-			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
+			return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", resources.ErrReclaimUnconfirmed, cerr))
 		}
-		return openedResource{}, fmt.Errorf("create file segment store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w", err)
 	}
 	return buildSharedResource(store, kvStore, rel, mc), nil
 }
@@ -343,24 +286,24 @@ func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 // openRVStore builds a rustviking-backed shared resource in the
 // construction order (see buildSharedResource), with the same KV-leak guard as
 // openLocalFileStore on a mid-build failure.
-func openRVStore(mc MemoryConfig) (openedResource, error) {
+func openRVStore(mc config.MemoryConfig) (resources.OpenedResource, error) {
 	rel, err := memory.NewInMemRelationStore(mc.Path)
 	if err != nil {
-		return openedResource{}, fmt.Errorf("create relation store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create relation store: %w", err)
 	}
 	configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
 	if err != nil {
 		releaseRelOnFailure(rel)
-		return openedResource{}, fmt.Errorf("create rustviking config: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create rustviking config: %w", err)
 	}
 	kvClient := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
 	store, err := memory.NewFileSegmentStore(kvClient, rel, mc.Path, 1000)
 	if err != nil {
 		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvClient); cerr != nil {
-			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
+			return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", resources.ErrReclaimUnconfirmed, cerr))
 		}
-		return openedResource{}, fmt.Errorf("create file segment store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w", err)
 	}
 	return buildSharedResource(store, kvClient, rel, mc), nil
 }
@@ -416,15 +359,15 @@ func tombstoneOf(store *memory.FileSegmentStore, rel memory.RelationStore, kvSto
 // durable recovery owner (the agent's reliable inbox / mem_spill) arms it at agent-open
 // after rebuilding from on-disk unacked material; a startup grace (memory.lifecycle armGrace)
 // backstops a durable backend that never registers a recovery owner so it cannot starve.
-func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, mc MemoryConfig) openedResource {
+func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, mc config.MemoryConfig) resources.OpenedResource {
 	tombstone := tombstoneOf(store, rel, kvStore, 0)
 	if err := store.RebuildLiveCounts(); err != nil {
 		log.Warnf("[tagent] live-count rebuild failed — capacity eviction paused (counts unknown): %v", err)
 	}
 	eng := buildSharedEngine(store, mc)
 	store.SetRetentionLease(memory.NewRetentionLease())
-	startStoreProducers(store, kvStore, rel, tombstone, resolveLifecycleConfig(mc.Lifecycle))
-	return openedResource{store: store, engine: eng}
+	startStoreProducers(store, kvStore, rel, tombstone, config.ResolveLifecycleConfig(mc.Lifecycle))
+	return resources.OpenedResource{Store: store, Engine: eng}
 }
 
 // startStoreProducers starts the lifecycle scanner and compactor. It MUST run
@@ -663,7 +606,7 @@ func consolidationMinSources(acfg AgentConfig) int {
 
 // newConsolidationHintTracker从 agent 配置构造容量
 // 触发器；配置缺失/非法/threshold<=0 返回 nil（关闭，零行为变化）。
-func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
+func newConsolidationHintTracker(acfg AgentConfig) *memory.ConsolidationHintTracker {
 	if acfg.Memory.Engine == nil || acfg.Memory.Engine.Consolidation == nil {
 		return nil
 	}
@@ -678,7 +621,7 @@ func newConsolidationHintTracker(acfg AgentConfig) *ConsolidationHintTracker {
 			snooze = d
 		}
 	}
-	return NewConsolidationHintTracker(c.CapacityThreshold, snooze)
+	return memory.NewConsolidationHintTracker(c.CapacityThreshold, snooze)
 }
 
 // approvalInjectChannel把 pending 审批请求渗透为

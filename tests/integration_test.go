@@ -1,3 +1,5 @@
+// 本文件承载跨面集成与真实 LLM 端到端工况的整链验证。
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 package tagent_test
 
 import (

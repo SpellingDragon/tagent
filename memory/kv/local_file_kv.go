@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
 package kv
 
 import (
@@ -15,34 +16,11 @@ import (
 )
 
 // LocalFileKV is a MINIMAL file-backed memory.KVStore, used ONLY as the MVP
-// cross-process verification backend for the resident reliability protocol. It
-// is a deliberately temporary model: in-memory maps persisted as per-partition
-// JSON snapshots. It provides NO production durability, security, or long-term
-// availability/maintainability guarantees — those are deferred to a dedicated
-// storage engine (e.g. rustviking) wired in a later phase.
+// cross-process verification backend for the resident reliability protocol.
 //
-// Layout ( ): one snapshot file per key namespace —
-// kv-<pid>.json for a partition's `{pid}:evt|idx|meta|tomb:…` keys and
-// kv-global.json for every non-partition namespace. A Sync serializes ONLY the
-// buckets touched since the last barrier (a dirty set), so one partition
-// commit's write amplification is bounded by that partition's own key count —
-// decoupled from the whole-library size, which is the growth ceiling the old
-// single kv.json snapshot carried.
-//
-// Durability model (verification-grade only): writes update the in-memory maps
-// immediately, so in-process reads are always consistent; Sync() is the barrier
-// that persists the dirty buckets. A committed fact becomes visible to a fresh
-// process only after its commit barrier ran Sync() — which is exactly what
-// FileSegmentStore does. Each bucket file is replaced by an atomic POSIX
-// rename of its tmp write, so a process KILL can never leave a torn snapshot:
-// a reopen always sees the last successfully Synced state per bucket. There is
-// intentionally NO fsync: this backend survives a process restart / reopen (the
-// guarantee actually verified), NOT an OS power loss. A write that was never
-// Synced is lost on restart (honest "flush-only" semantics).
-//
-// The old single kv.json snapshot is a DIFFERENT format and is deliberately NOT
-// migrated: a pre-release library cold-rebuilds (the change's declared
-// stance). A leftover kv.json is ignored and reported once at open.
+// - Layout: one snapshot file per namespace - kv-<pid>.json per partition, kv-global.json for the rest.
+// - Sync serializes only dirty buckets, bounding write amplification to the partition own key count.
+// - No production durability, security or maintainability guarantees; those defer to a dedicated storage engine.
 type LocalFileKV struct {
 	mu sync.Mutex
 	// parts holds partition buckets keyed by namespace pid; global holds the

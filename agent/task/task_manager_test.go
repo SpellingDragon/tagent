@@ -3,6 +3,7 @@
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 // 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 // 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
+// 契约: docs/wiki/agent/task-lifecycle.md#finalize-lineage
 package task
 
 import (
@@ -1808,4 +1809,192 @@ func TestEmitBackground_ServiceStableNotifies(t *testing.T) {
 		t.Fatalf("service stable should transition to alive_detached, got %s", got)
 	}
 	d.Done()
+}
+
+// TestBatchRetire_AttributedEntryEscapesBatch 钉住同波退役按归属分流。
+// - 带 invocation 归属的条目绕过批折叠，按 per-task OnSettle 交付（父循环投递记账屏障靠它递减）。
+// - 无归属条目才进汇总；汇总只发共享总线，父循环等不到。
+func TestBatchRetire_AttributedEntryEscapesBatch(t *testing.T) {
+	var mu sync.Mutex
+	var batch []BatchRetired
+	perSettle := map[string]SettleSignal{}
+	tm := NewTaskManager(TaskManagerConfig{
+		TerminalTTL: time.Minute,
+		OnSettle: func(tk *Task, sig SettleSignal) {
+			mu.Lock()
+			perSettle[tk.ID] = sig
+			mu.Unlock()
+		},
+		OnBatchRetire: func(b []BatchRetired) {
+			mu.Lock()
+			batch = append(batch, b...)
+			mu.Unlock()
+		},
+	})
+	base := time.Now()
+	attributed := orphanSpec("k-attr", "sess-attr")
+	attributed.Origin = map[string]string{originKeyInvocationID: "inv-A"}
+	require.NotNil(t, tm.RestoreTask("attr", attributed, base.Add(-2*time.Hour), TaskSuspect))
+	require.NotNil(t, tm.RestoreTask("plain", orphanSpec("k-plain", "sess-plain"), base.Add(-2*time.Hour), TaskSuspect))
+	tm.now = func() time.Time { return base }
+
+	require.Equal(t, 2, tm.RetireOrphans(func(string) bool { return false }))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, batch, 1, "only the unattributed retire may collapse into the batch")
+	require.Equal(t, "plain", batch[0].Task.ID)
+	sig, ok := perSettle["attr"]
+	require.True(t, ok, "the attributed retire must keep the per-task settle path")
+	require.Equal(t, SettleFailed, sig.Kind)
+	require.Equal(t, LineageRetired, sig.Lineage, "the routed retire settle still carries the retirement lineage")
+}
+
+// TestBatchRetire_UnattributedWaveStillCollapses 钉住无归属条目行为不变。
+// - 整波退役全部进一次批汇总，per-task OnSettle 保持静默。
+func TestBatchRetire_UnattributedWaveStillCollapses(t *testing.T) {
+	var mu sync.Mutex
+	var batch []BatchRetired
+	perSettle := 0
+	tm := NewTaskManager(TaskManagerConfig{
+		TerminalTTL: time.Minute,
+		OnSettle: func(_ *Task, _ SettleSignal) {
+			mu.Lock()
+			perSettle++
+			mu.Unlock()
+		},
+		OnBatchRetire: func(b []BatchRetired) {
+			mu.Lock()
+			batch = append(batch, b...)
+			mu.Unlock()
+		},
+	})
+	base := time.Now()
+	for i := 0; i < 3; i++ {
+		require.NotNil(t, tm.RestoreTask(
+			"p"+string(rune('0'+i)), orphanSpec("k", "sess-"+string(rune('0'+i))), base.Add(-2*time.Hour), TaskSuspect))
+	}
+	tm.now = func() time.Time { return base }
+
+	require.Equal(t, 3, tm.RetireOrphans(func(string) bool { return false }))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, batch, 3, "an unattributed wave still collapses into ONE OnBatchRetire")
+	require.Zero(t, perSettle, "per-task OnSettle must stay suppressed for unattributed batch entries")
+}
+
+// TestRetireNeverMutatesOrigin 钉住退役（TTL/僵尸/孤儿）不改写 Spec.Origin。
+// - 退役归因只出现在信号的 Lineage 字段；Origin 是 spawn 时谱系身份，保持不可变。
+// - 事件构造侧无锁读 Origin：与退役并发时不得数据竞争（-race），也不得污染 resumed 任务的后续谱系。
+func TestRetireNeverMutatesOrigin(t *testing.T) {
+	var mu sync.Mutex
+	var sigs []SettleSignal
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(tk *Task, sig SettleSignal) {
+			mu.Lock()
+			sigs = append(sigs, sig)
+			mu.Unlock()
+		},
+	})
+	d := NewManualDetectorDetach(10 * time.Millisecond)
+	res := tm.Spawn(
+		TaskSpec{Kind: "command", Desc: "watched job", Origin: map[string]string{"trigger_source": "host-user"}},
+		d,
+	)
+	require.False(t, res.Settled, "expected a background (detached) spawn")
+	tk := res.Task
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = tk.Spec.Origin["trigger_source"]
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				tm.emitBackground(tk, SettleSignal{Kind: SettleWatch, Output: "peek"})
+			}
+		}
+	}()
+
+	tm.finalizeRetired(tk, "(ttl-expired: retired)", nil)
+	close(stop)
+	wg.Wait()
+	d.Done()
+
+	require.Equal(t, "host-user", tk.Spec.Origin["trigger_source"],
+		"retirement must not rewrite spawn-time provenance")
+
+	mu.Lock()
+	defer mu.Unlock()
+	var retired *SettleSignal
+	for i := range sigs {
+		if sigs[i].Lineage == LineageRetired {
+			retired = &sigs[i]
+		}
+	}
+	require.NotNil(t, retired, "the retirement settle carries its lineage on the signal")
+	require.Equal(t, SettleFailed, retired.Kind)
+}
+
+// TestReconcileTTL_RestoredTaskWarnsBeforeRetire 钉住恢复任务的静默泄漏告警通道。
+// - 恢复任务（detector 恒 nil）被 TTL 退役时，退役结算事件自身携带"后台会话可能仍在运行"告警。
+// - 一个可观测事件承载：不另发旁路通知，批折叠的排他性不被破坏。
+// - 有探测器的任务退役不带恢复告警（Cancel 已接管回收）。
+func TestReconcileTTL_RestoredTaskWarnsBeforeRetire(t *testing.T) {
+	var mu sync.Mutex
+	var sigs []SettleSignal
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(tk *Task, sig SettleSignal) {
+			mu.Lock()
+			sigs = append(sigs, sig)
+			mu.Unlock()
+		},
+	})
+	base := time.Now()
+	spec := orphanSpec("kw", "sess-w")
+	spec.TTL = time.Minute
+	require.NotNil(t, tm.RestoreTask("w1", spec, base.Add(-2*time.Hour), TaskRunning))
+	tm.now = func() time.Time { return base }
+
+	tm.reconcileTTL()
+
+	mu.Lock()
+	wave1 := append([]SettleSignal(nil), sigs...)
+	sigs = nil
+	mu.Unlock()
+	require.Len(t, wave1, 1, "the retire produces exactly one settle event (warning rides along)")
+	require.Equal(t, LineageRetired, wave1[0].Lineage)
+	require.Contains(t, wave1[0].Output, "sess-w", "the warning names the possibly-running backing session")
+	require.Contains(t, wave1[0].Output, "可能仍在运行")
+
+	det := NewManualDetector()
+	tkLive := &Task{ID: "live-t", Spec: TaskSpec{Desc: "live", TTL: time.Minute}, detector: det}
+	tkLive.status = TaskRunning
+	tkLive.StartedAt = base.Add(-2 * time.Hour)
+	tm.tasks["live-t"] = tkLive
+	tm.reconcileTTL()
+
+	mu.Lock()
+	wave2 := append([]SettleSignal(nil), sigs...)
+	mu.Unlock()
+	require.Len(t, wave2, 1)
+	require.NotContains(t, wave2[0].Output, "可能仍在运行", "a detector-carrying retire cancels instead of warning")
 }

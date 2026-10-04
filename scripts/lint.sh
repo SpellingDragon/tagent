@@ -88,4 +88,22 @@ if ! go run ./scripts/codetools proc-refs scripts .github/workflows; then
   exit 1
 fi
 
+# 索引内容必须非空、不是运行期产物、顶层目录已登记（specs/architecture-guardrails：组合根物理边界与追踪卫生）
+if ! go run ./scripts/codetools tracked-hygiene; then
+  echo "lint: tracked content violates the repository hygiene rules listed above"
+  exit 1
+fi
+
+# 机器消费的点号模块引用必须可解析或显式登记（specs/architecture-guardrails：机器消费的点号模块引用必须可解析）
+if ! go run ./scripts/codetools dotted-refs; then
+  echo "lint: a dotted module reference resolves nowhere and carries no allowlist entry"
+  exit 1
+fi
+
+# docs 标题的提交不得夹带代码路径（git mv 即时入索引，无 pathspec 的提交会把它扫进来）
+if ! go run ./scripts/codetools commit-scope; then
+  echo "lint: a docs-titled commit carried code paths — split it"
+  exit 1
+fi
+
 echo "lint: ok"

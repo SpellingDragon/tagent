@@ -836,16 +836,14 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 	}
 }
 
-// emitBackground invokes the OnSettle hook for a settle that occurred after the
-// sync-wait window closed (a background/reclaim settle), applying alive-detached
-// semantics for service-type tasks :
-// - first stable → transition to alive-detached and emit the one-time "ready"
-// notification;
-// - once detached, subsequent stable/suspect signals (e.g. output changes, a
-// quiet service) are suppressed to avoid reclaim spam / permanent board churn;
-// - completion/failure (process death) always emits and ends the task.
-// emitBackground 处理中间态结算信号：仅 service 型任务在首个 stable 转 alive-detached
-// 并发一次性就绪通知；job 型的静默 stable/suspect 既不转移也不通知（面板态由 applyStatus 管辖）。
+// emitBackground invokes the OnSettle hook for a settle that occurred after the sync-wait
+// window closed (a background or reclaim settle), applying alive-detached semantics for
+// service-type tasks.
+//
+// - First stable transitions to alive-detached and emits the one-time ready notification; later stable or suspect signals are suppressed so a quiet service cannot churn the board or spam the reaper.
+// - Completion or failure (process death) always emits and ends the task.
+// - Job-type silent stable/suspect signals neither transition nor notify: the board state is owned by applyStatus.
+// 契约: docs/wiki/agent/task-lifecycle.md#detach-suppression
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
 	switch sig.Kind {
@@ -952,15 +950,13 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	return nil
 }
 
-// RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与
-// 状态；状态为 alive_detached 时同时标记已脱离，使其继续享受"脱离后信号抑制"的语义。
+// RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与状态；
+// 状态为 alive_detached 时同时标记已脱离，使其继续享受脱离后信号抑制的语义。
 //
-// 三点关键行为：
-//   - 窗口标记为已关闭：重建出的任务不重启观察，因而不会因"重启后没人在看"被误判为静默或
-//     僵尸；终态判定与 TTL 回收照常生效；
-//   - 幂等且不覆盖：同一 id 已在表内时直接返回既有任务——在途的真实状态不被重建值改写；
-//     spec.Key 同样只在无人占用时登记；
-//   - 管理器为 nil 或 id 为空时返回 nil；startedAt 为零值时取当前时刻。
+// - 结算窗口标记为已关闭：重建出的任务不重启观察，因而不会因"重启后没人在看"被误判为静默或僵尸；终态判定与 TTL 回收照常生效。
+// - 幂等且不覆盖：同一 id 已在表内时直接返回既有任务，在途的真实状态不被重建值改写；spec.Key 同样只在无人占用时登记。
+// - 管理器为 nil 或 id 为空时返回 nil；startedAt 为零值时取当前时刻。
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task {
 	if tm == nil || id == "" {
 		return nil
@@ -1492,24 +1488,12 @@ func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, er
 	return t.Spec.Relaunch(ctx)
 }
 
-// Resume feeds new input into a task and re-enters the standard
-// dense→ACK→settle lifecycle under the SAME task id.
+// Resume feeds new input into a task and re-enters the standard dense, ACK and settle
+// lifecycle under the SAME task id.
 //
-// Legal source states:
-// - alive_detached / stable — the session is alive; tmux resume feeds
-// SendKeys into it (service/repl reentry).
-// - completed / failed — the previous round ended; for executor kinds that
-// are round-based (subagent: new Run + task-chain restorer), resume is the
-// natural continuation. tmux resume on a dead session fails cleanly at
-// SendKeys with an actionable error.
-//
-// Illegal source states: running / suspect (a round is in flight — wait and
-// retry) and cancelled (session killed — relaunch or start fresh). Concurrency:
-// the claim transitions to running under task.mu BEFORE ResumeFn runs, so
-// parallel resumes (parallel tool execution is enabled) single-win; the loser
-// is told the task is running. ctx is the INITIATING call's context, forwarded to
-// ResumeFn so the resumed round can resolve its target on the version that call
-// holds; a refusal there rolls the claim back unchanged.
+// - Legal source states are alive-detached, stable, completed and failed; running and suspect mean a round is in flight, cancelled means the session is dead.
+// - The claim turns to running under task.mu before ResumeFn runs, so parallel resumes single-win; ctx is the initiating call context, forwarded so the resumed round resolves its target on the version that call holds.
+// 契约: docs/wiki/agent/task-lifecycle.md#resume-states
 func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (SpawnResult, error) {
 	tm.mu.Lock()
 	task, ok := tm.tasks[id]

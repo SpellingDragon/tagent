@@ -1,3 +1,4 @@
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#inbound-dedup
 package main
 
 import (
@@ -17,15 +18,9 @@ import (
 
 // SeenStore provides message-level idempotency across restarts.
 //
-// Dedup key layering (design D3; assumption A1 — the gateway message model
-// carries no msg_id; if one appears upstream, prefer it as the primary key):
-//  1. ClientID when non-empty (client-generated idempotency key),
-//  2. fallback: "uid:" + FromUserID + "#" + first 16 hex chars of sha256(text).
-//
-// Persistence: seen.json next to the bot config; loaded on start (restart
-// recovery), pruned by TTL and capacity on every save, written atomically
-// (tmp+rename). A corrupted file degrades to an empty set with a warning —
-// dedup never blocks the message pipeline on its own failure.
+// - Dedup key layering: ClientID when non-empty, otherwise uid plus a text hash prefix.
+// - seen.json sits next to the bot config, loads at start, prunes by TTL and capacity, writes atomically; a corrupted file degrades to an empty set so dedup never blocks the pipeline.
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#inbound-dedup
 type SeenStore struct {
 	path     string
 	ttl      time.Duration

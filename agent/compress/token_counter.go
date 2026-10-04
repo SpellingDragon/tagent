@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/compression-and-telemetry.md
 package compress
 
 import (
@@ -49,16 +50,13 @@ func truncateString(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// EventTypeToRole maps an event type to its pairing-free timeline role
-// :
+// EventTypeToRole maps an event type to its pairing-free timeline role.
 //
-//	external_input → user
-//	agent_output → assistant
-//	action_command → user (tool results are input events, never role=tool)
-//	thinking_plan  → assistant
-//	(default) → user (safe degradation)
-//
-// 角色映射的唯一权威源是 event 包的注册表，本函数只委托。
+// - external_input → user.
+// - agent_output → assistant.
+// - action_command → user: tool results are input events, never role=tool.
+// - thinking_plan → assistant.
+// - default → user as the safe degradation.
 func EventTypeToRole(eventType string) model.Role {
 	return tagentevent.EventTypeRole(eventType)
 }

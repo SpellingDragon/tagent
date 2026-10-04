@@ -4,8 +4,6 @@ Package memory 是 tagent 的事实存储层：以 FullEvent 为唯一记录形�
 隔离、以键格式为单点约定，并在此之上提供检索（关键词／语义）、分层与压实、TTL 与 物理遗忘。后端抽象（KV
 底座、检索引擎、嵌入器）都遵循"契约居核心包、实现居子包"。 事件类型常量的单点定义在事件包（event.Type*），本包不重复登记。
 
-契约: docs/wiki/memory/memory-architecture.md#overview
-
 CONSTANTS
 
 const (
@@ -54,8 +52,6 @@ var (
     ErrKeyNotFound 等类型化存储契约错误：调用方必须能区分"键确实不存在"与"存储 I/O 失败"。把两者塌缩成一个，
     等于把一次故障伪装成空召回、把一次恢复失败伪装成"这条链本来就没有"——它们静默产生错答案 而不是响亮报错。四类错误各自的处理义务见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#typed-errors
-
 var ErrFeedbackEdgePartial = errors.New("feedback-edge-partial")
     ErrFeedbackEdgePartial 标记「事件已落库但因果边失败」：反馈本体成功，
     调用方应返回成功+warning（201），不得按失败重试（会写重复 feedback）。
@@ -72,7 +68,6 @@ var LowValueEventTypes = event.LowValueTypes()
     LowValueEventTypes are event types whose Content/ToolCalls can be
     discarded in L3. Derived from the event registry (single source of truth):
     thinking_plan, context_compress.
-
 
 FUNCTIONS
 
@@ -138,8 +133,6 @@ func PartitionIDFromEventKey(key int64) int
 func PartitionIDFromName(name string) int
     PartitionIDFromName 由名字确定性地推导分区号（同名恒同值，0-1023）。允许碰撞——分区用于 因果链隔离，不用于唯一性标识。
 
-    契约: docs/wiki/memory/memory-architecture.md#event-key
-
 func PartitionPrefix(pid int) string
     PartitionPrefix returns the prefix for all keys in a partition.
 
@@ -173,7 +166,6 @@ func WindowTimestamp(tsSec int64, windowSize int64) int64
 func WindowTimestampFromEventKey(eventKey int64, windowSize int64) int64
     WindowTimestampFromEventKey computes the window timestamp from an EventKey's
     embedded timestamp.
-
 
 TYPES
 
@@ -227,6 +219,43 @@ func (c *Compactor) Start()
 func (c *Compactor) Stop()
     Stop stops the compaction scheduler gracefully.
 
+type ConsolidationHintTracker struct {
+	// Has unexported fields.
+}
+    ConsolidationHintTracker 是 per-agent 的巩固容量触发器（并发安全）。 消费 engineBridge
+    的写入旁路计数（CapacityHookProvider）： 每分区的**边界事件**（external_input /
+    agent_output，即任务回合的意图与产出）计数 超过 capacity_threshold 时，经 onHint 发一条
+    consolidation_hint 渗透消息——建议式， 执行权仍在 LLM + memory_consolidate 工具。snooze
+    窗内不重复打扰 （内存态；重启后重新积累——最多多提示一次，可接受）。
+
+    不变量（容量观察真源）：本 tracker 的 counts 是**建议式 delta**，仅供 LLM 提示， MUST NOT
+    驱动容量淘汰——淘汰执行权的唯一真源是 store 的绝对 per-partition eventCount（`recomputePartition`
+    由完整记录链得出，unknown 分区不淘汰，见 memory/lifecycle.go::checkCapacity）。因此本 delta
+    重启归零、巩固后随提示复位（Track 触发 onHint 即将 counts[pid]=0），与绝对真源分叉不构成淘汰误删风险（既有
+    TestCapacityHint_TriggerAndSnooze 锁定提示即复位、非边界不计数；锁定淘汰读绝对）。 repaired/already
+    重放也不经此处二次增量——engineBridge.ReplayEvent 对 Already 跳过 capacityHook（见
+    engine_bridge_idempotency_test.go）。
+
+func NewConsolidationHintTracker(threshold int, snooze time.Duration) *ConsolidationHintTracker
+    NewConsolidationHintTracker 构造触发器。threshold<=0 返回 nil（关闭，零行为变化）。 onHint
+    可后设（SetOnHint）——装配期 agent 尚未构造。
+
+func (t *ConsolidationHintTracker) CandidatesText(partitionID int) string
+    CandidatesText渲染该分区的可巩固候选段（冥想 digest 附加）。无候选返回空串（digest 不变）。建议式：仅列 key
+    与计数，执行权在 LLM。
+
+func (t *ConsolidationHintTracker) SetOnHint(fn func(partitionID, count int))
+    SetOnHint 回填提示回调（装配期，NewTagentAgent 之后）。
+
+func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventType string)
+    Track 是写入旁路计数入口（engineBridge capacityHook 签名）。仅边界事件计数； 非阻塞、永不失败（旁路产物）。
+    Within the snooze window the count is kept, so the next boundary event
+    after the window expires hints again. While onHint is unset (the assembly
+    window between construction and SetOnHint) nothing is reset and no snooze
+    is recorded: the count survives, and the first boundary event after wiring
+    emits the delayed hint. On a hint, counts and recent reset together so the
+    candidate list stays aligned.
+
 type DegradationSink interface {
 	// ReportFailure 上报某依赖的一次失败及原始错误。
 	ReportFailure(dep string, err error)
@@ -247,15 +276,11 @@ type Embedder interface {
     批量语义要求返回与输入等长、顺序对应；未配置时返回 error 由调用方按"功能关闭"降级。 接入新供应商的步骤与一条已裁决事项（嵌入走 tagent
     侧 HTTP 供应商而非 rustviking CLI）见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#embedder
-
 type ErrorTrackingStore struct {
 	// Has unexported fields.
 }
     ErrorTrackingStore 是存储装饰链的最外层：把失败按特征归因到依赖并旁路上报，构成降级状态机 的唯一错误输入源；非侵入透传 inner
     全部方法（含可选接口）。归因矩阵、三类"不算故障"的情况与 恢复证明规则见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#error-tracking
 
 func NewErrorTrackingStore(inner MemoryStore, sink DegradationSink) *ErrorTrackingStore
     NewErrorTrackingStore 包裹 inner 做错误追踪；sink 为 nil 即纯透传、不上报。
@@ -348,8 +373,6 @@ type EventReference struct {
 }
     EventReference 是指向已存事件的轻量引用（键、类型、摘要、时间、角色）。会话侧只持有引用 列表，全文按需用
     GetEvent/GetEvents 水合。字段单位与取值属契约，见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#event-shape
 
 type EventReplayer interface {
 	// ReplayEvent 走内部回放路径提交 canonicalFact，返回发生了什么、以及**实际存储的**事实
@@ -590,8 +613,6 @@ type FullEvent struct {
 
     字段语义与单位取值、两条时间轴的分工、因果父引用的存放位置，均以文档为唯一真源。
 
-    契约: docs/wiki/memory/memory-architecture.md#event-shape
-
 type InMemRelationStore struct {
 	// Has unexported fields.
 }
@@ -724,13 +745,12 @@ type IndexBuilder interface {
 	// Remove 从索引移除一个事件（TTL/墓碑回收时调用；引擎可惰性处理）。
 	Remove(ctx context.Context, eventKey int64) error
 }
-    IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引。 闭环在引擎内部——tagent 只投递
-    IndexableEvent，不管引擎如何嵌入/存储/分层。
+    IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引，闭环在引擎内部—— tagent 只投递
+    IndexableEvent，不管引擎如何嵌入、存储与分层。
 
-    实现纪律： - Index MUST 异步或快速返回，绝不阻塞事件主链路（不变量：StoreEvent 同步点）。
-    典型实现：非阻塞投递到耐用队列/通道，后台 worker 嵌入 + 写向量索引。 - Index 失败 MUST NOT 传染调用方（记日志 +
-    计数即可；向量是增强索引，丢一条 只影响该条语义可召回性，关键词路径兜底）。 - Remove 用于 TTL/墓碑回收；引擎可惰性处理（水合过滤 +
-    超取 + 阈值重建）。
+    - Index MUST 异步或快速返回，绝不阻塞事件主链路（StoreEvent 同步点不变量）：典型实现是非阻塞投递耐用队列，后台 worker
+    嵌入并写向量索引。 - Index 失败 MUST NOT 传染调用方：记日志加计数即可，向量是增强索引，关键词路径兜底。 - Remove 服务
+    TTL 与墓碑回收，引擎可惰性处理（水合过滤 + 超取 + 阈值重建）。
 
 type IndexableEvent struct {
 	EventKey    int64
@@ -780,8 +800,6 @@ type KVStore interface {
     KVStore 抽象底层 KV 操作，是 FileSegmentStore 的持久化底座。契约与数据类型居核心包、 实现居子包 memory/kv（与
     MemoryEngine、Embedder 同一切分原则）。语义约束：键为字符串 （键格式由 memory/key_schema.go
     单点定义）；Scan/Range 按字典序返回；limit<=0 不限制。 接入新后端的路径与接线点见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#extension-paths
 
 type LifecycleConfig struct {
 	// GlobalTTLDays is the default TTL for all events (default: 7).
@@ -850,26 +868,12 @@ func (s *MemSpill) Replay(store MemoryStore) (int, error)
     inner（绕过 ErrorTrackingStore 防递归）。坏行跳过。
 
 func (s *MemSpill) ReplayWithNotify(store MemoryStore, notify func(FullEvent)) (int, error)
-    ReplayWithNotify 是 Replay 的双写形态：每条重放成功 （含幂等命中）的事件回调
-    notify——调用方据此补投影（projection.Append），恢复 「存储⇔投影同点原子」的等价语义。notify 为 nil
-    或内部失败不影响重放结果（投影可后补，事件不丢优先）。
+    ReplayWithNotify 是 Replay 的双写形态：每条重放成功（含幂等命中）的事件回调 notify，调用方据此补投影；notify 为
+    nil 或内部失败不影响重放结果。
 
-    canonical replay only: spill replay MUST use the store's EventReplayer
-    contract (ReplayEvent) — it distinguishes new-commit / orphan-repair
-    / already-committed atomically against the durable fact chain.
-    A store that does NOT implement EventReplayer is refused and its spill
-    originals are retained (spec L99: 内层没有显式 恢复能力 → 能力检查失败、原件保留). The former
-    GetEvent+StoreEvent weak fallback was removed: a GetEvent hit only proves a
-    read returns the record, not that the durable commit (barrier + index/meta
-    publication) completed, and public StoreEvent now REFUSES an existing key so
-    it can never complete an orphan anyway.
-
-    Key releases are booked strictly behind the durable rewrite: the spill
-    list on disk still carries the replayed originals until the rewrite lands,
-    so releasing earlier would make the next round's AlreadyCommitted replay a
-    double release decrementing other holders' leases. On rewrite failure all
-    keys stay held and the retry releases exactly once when removal finally
-    lands.
+    - 只走 canonical replay：MUST 经 store 的
+    EventReplayer（ReplayEvent），对着耐久事实链原子区分新提交、孤儿修复、已提交。 - 未实现 EventReplayer 的
+    store 被拒绝，spill 原件保留。 - key 释放严格排在 durable 重写之后：重写失败则全部保持持有，重试落成才恰好释放一次。
 
 func (s *MemSpill) SetGuard(g RetentionGuard)
     SetGuard 注入 保留租约守卫（nil = 不保护）。由持有本 spill 的装饰器从其后端取得。
@@ -879,13 +883,11 @@ type MemoryEngine interface {
 	Retriever
 	io.Closer
 }
-    MemoryEngine = 索引构建 + 检索 + 生命周期。这是 tagent 核心依赖的解耦缝。
+    MemoryEngine = 索引构建 + 检索 + 生命周期，tagent 核心依赖的解耦缝。
 
-    实现： - InMemoryEngine（MVP 兜底）：内存向量索引 + 关键词，无外部依赖，供开发/测试/降级。 -
-    RustVikingEngine（适配器，闭环到 rustviking）：tagent 侧 zhipu 嵌入 + rustviking index
-    insert/search/delete 向量后端 + 适配器内 RRF 融合与分区过滤。
-
-    生命周期：随 MemoryStore 启停（Closer 接线，resolveMemoryStore 按配置创建）。
+    - 实现：InMemoryEngine（MVP
+    兜底，内存向量索引加关键词，无外部依赖，供开发/测试/降级）；RustVikingEngine（适配器：tagent 侧嵌入 + rustviking
+    向量后端 + 适配器内 RRF 融合与分区过滤）。 - 生命周期随 MemoryStore 启停（Closer 接线，装配期按配置创建）。
 
 type MemoryEngineProvider interface {
 	MemoryEngine() MemoryEngine
@@ -1068,19 +1070,14 @@ type RetentionHoldable interface {
 type RetentionLease struct {
 	// Has unexported fields.
 }
-    RetentionLease ==================== 有限 key 保留租约====================
+    RetentionLease 保护未确认恢复材料的 durable 原文（未确认 envelope 的 prepared
+    fact key 与 receipt key、待重放 spill key）， 使其在恢复 owner 安全释放前不被 TTL
+    过期、容量淘汰或墓碑清理物理销毁；持有者是共享资源 owner，非任一 agent。
 
-    RetentionLease 保护「未确认恢复材料」的 durable 原文——未确认 inbox envelope 的 prepared
-    fact key 与 receipt key、普通 spill 待重放 key——使其在恢复 owner 能安全 释放之前不被 TTL
-    过期、容量淘汰、内容降分辨率或墓碑最终清理物理销毁。持有者是共享 资源 owner（FileSegmentStore），非任一 agent。
-
-    不变量： - 租约是**内存守护集**，启动时由现有未确认材料（inbox envelope 文件 + spill 文件） 重建，MUST NOT
-    引入第二持久保留表或全历史去重集合。 - 保护期内只拒绝**销毁**；无损搬迁（压实段合并复制原文到高层段）允许。 - 显式删除受保护 key 返回
-    ErrEventProtected（不销毁）。 - 释放（ack 目录同步成功 / spill 安全移除）后恢复该 key 原类型的 TTL，按其原有
-    timestamp 参与年龄淘汰，绝不重新盖时间。
-
-    引用计数：同一 key 可同时被 envelope owner 与 spill owner 保护，Release 幂等地
-    递减，归零才真正解除保护。nil-safe（未接线租约的 store 表现为无保护）。
+    - 租约是内存守护集，启动时由现有未确认材料重建；MUST NOT 引入第二持久保留表或全历史去重集合。 -
+    保护期内只拒绝销毁；无损搬迁（压实段合并复制原文到高层段）允许。 - 显式删除受保护 key 返回 ErrEventProtected。 -
+    释放后恢复该 key 原类型的 TTL，按其原有 timestamp 参与年龄淘汰，绝不重新盖时间。 - 同一 key 可同时被 envelope 与
+    spill 持有：Release 幂等递减，归零才解除保护；nil-safe（未接线时表现为无保护）。
 
 func NewRetentionLease() *RetentionLease
     NewRetentionLease 构造空租约（未就绪：挂上它的 store 会等首次 populate 后才扫描）。
@@ -1208,15 +1205,11 @@ type StoreStats struct {
 }
     StoreStats 是存储统计。
 
-    契约: docs/wiki/memory/memory-architecture.md#counts-known
-
 type TombstoneSet struct {
 	// Has unexported fields.
 }
     TombstoneSet 记录已被合法删除（遗忘）的事件键：内存驻留并持久化到 KV，以便崩溃后重建，
     且保证回放不会复活被遗忘的事实。删除时的级联父引用修复顺序是承重的，详见文档。
-
-    契约: docs/wiki/memory/memory-architecture.md#tombstone
 
 func NewTombstoneSet(rel RelationStore, kv KVStore, pid int) *TombstoneSet
     NewTombstoneSet 构造墓碑集；kv 可为 nil（仅内存），rel 必须可用以做级联修复。
@@ -1266,4 +1259,3 @@ type VectorRemover interface {
 }
     VectorRemover 由持有向量索引的组件实现；FileSegmentStore 在 TTL/容量遗忘**物理删除**
     事件时（Compactor.finalizeTombstones）回调，使引擎同步移除向量（内存索引 + KV 持久键）， 防死键堆积与重启复活。
-

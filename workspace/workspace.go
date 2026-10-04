@@ -1,15 +1,9 @@
-// Package workspace centralizes tagent's on-disk scratch space (oversized
-// tool outputs) under one root, and provides a periodic cleaner that bounds
-// the accumulated files (by age and count).
+// Package workspace centralizes tagent on-disk scratch space (oversized tool outputs)
+// under one root and provides a periodic cleaner bounding accumulation by age and count.
 //
-// Layout (under Root):
-//
-//	<root>/tool-output/   oversized tool outputs (OutputLimitTool, ActionTool)
-//
-// Command working directories are NOT part of the scratch space: exec
-// inherits the process working directory so its relative paths stay
-// consistent with the file tools' base directory (one coherent filesystem
-// view for the model).
+// - Layout under Root: tool-output/ holds oversized outputs of OutputLimitTool and ActionTool.
+// - Command working directories are NOT scratch space: exec inherits the process working directory so its relative paths stay consistent with the file tools base directory.
+// 契约: docs/wiki/platform/platform-subsystems.md#workspace-scratch
 package workspace
 
 import (

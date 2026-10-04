@@ -4,9 +4,8 @@ Package task provides LLM-facing tools for managing async background tasks
 tracked by the agent's TaskManager: listing, cancelling, and relaunching.
 The tools are stateless — they retrieve the TaskController from the invocation
 context (injected by the agent before each turn), so they work with whatever
-TaskManager the running agent owns. Full settled results are NOT fetched by a
-tool here: task_settled events carry the full body in the event store and are
-recallable by event-key ticket (stable-context- compaction D6).
+TaskManager the running agent owns. Full settled results are NOT fetched
+by a tool here: task_settled events carry the full body in the event store
 
 FUNCTIONS
 
@@ -18,7 +17,6 @@ func RegisterSubTools()
 
     The tools are stateless; they resolve the TaskController from the invocation
     context at Call time, so a single registration works for any agent.
-
 
 TYPES
 
@@ -71,4 +69,3 @@ func (t *ResumeTaskTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 
 func (t *ResumeTaskTool) Declaration() *tool.Declaration
     Declaration implements tool.CallableTool.
-

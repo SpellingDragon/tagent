@@ -89,3 +89,21 @@ openspec/
 !docs/
 !docs/notes/
 !docs/notes/mail-poller-notes.md
+# Tracked source that the whitelist must name explicitly (tracked ⇒ must not be ignored).
+!skills/
+!skills/url-fetcher/
+!reincarnation_notice.go
+!reincarnation_notice_test.go
+!delivery_receipt.go
+!delivery_receipt_test.go
+!skills/README.md
+!skills/url-fetcher/README.md
+!skills/url-fetcher/TESTING.md
+!skills/url-fetcher/UPGRADE.md
+!skills/url-fetcher/extract_content.js
+!skills/url-fetcher/fetch_wechat.js
+!skills/url-fetcher/package-lock.json
+!skills/url-fetcher/package.json
+!skills/url-fetcher/skill.md
+!skills/url-fetcher/smart_fetcher.js
+!skills/url-fetcher/url_fetcher.js

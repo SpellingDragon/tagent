@@ -1,19 +1,9 @@
-// Command codetools emits the mechanical facts the repository's comment and
-// test-file policies are checked against.
+// Command codetools emits the mechanical facts the repository comment and test-file
+// policies are checked against: strip prints a file with comments removed in canonical
+// go/printer form, decls prints one JSON object per top-level declaration.
 //
-// Usage:
-//
-//	codetools strip <file>...           print each file with comments removed
-//	codetools decls <file>...           print one JSON object per top-level declaration
-//
-// strip output is canonical (go/printer), so it can be diffed across revisions
-// to prove that only comments changed. decls reports, per declaration, whether it
-// is a test or benchmark, the comment-stripped hash of its body, the number of
-// assertion calls it contains and the number of t.Parallel calls; both gates
-// consume it as JSON lines.
-//
-// Both subcommands exit non-zero on unreadable or unparsable input so that a
-// silent skip cannot masquerade as a pass.
+// - Both subcommands exit non-zero on unreadable or unparsable input so a silent skip cannot masquerade as a pass.
+// 规格: docs/comment-gate-tooling.md#usage
 package main
 
 import (
@@ -29,7 +19,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs> ...")
+		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs|tracked-hygiene|dotted-refs|commit-scope> ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -45,6 +35,12 @@ func main() {
 		os.Exit(runDocRefs(os.Args[2:]))
 	case "proc-refs":
 		os.Exit(runProcRefs(os.Args[2:]))
+	case "tracked-hygiene":
+		os.Exit(runTrackedHygiene(os.Args[2:]))
+	case "dotted-refs":
+		os.Exit(runDottedRefs(os.Args[2:]))
+	case "commit-scope":
+		os.Exit(runCommitScope(os.Args[2:]))
 	}
 	var fail int
 	switch os.Args[1] {
@@ -116,17 +112,11 @@ func printNoComments(fset *token.FileSet, file *ast.File) (string, error) {
 	return dropBlankLines(b.String()), nil
 }
 
-// dropBlankLines removes lines that hold nothing but whitespace, and trailing
-// whitespace on the lines that remain.
+// dropBlankLines removes lines that hold nothing but whitespace, and trailing whitespace
+// on the lines that remain.
 //
-// Blank lines are dropped: removing a comment legitimately leaves the gap it
-// occupied, and that gap is formatting, not code. gofmt cleanliness is checked
-// by its own gate, so this output is an equality witness for "only comments
-// changed", not a formatting witness.
-//
-// Lines carrying string-literal content are exempt, including the empty lines a raw
-// string holds: those lines are data, so trimming them would let an edited fixture
-// pass as an untouched one.
+// - Lines carrying string-literal content are exempt, including the empty lines a raw string holds.
+// 规格: docs/comment-gate-tooling.md#equality-witness
 func dropBlankLines(s string) string {
 	flags := literalFlags(s)
 	var out []string
@@ -168,18 +158,11 @@ func literalFlags(text string) []bool {
 	return flags
 }
 
-// clearComments drops documentation comments while KEEPING compiler and tool
-// directives, so printing yields code whose semantics are unchanged.
+// clearComments drops documentation comments while KEEPING compiler and tool directives,
+// so printing yields code whose semantics are unchanged.
 //
-// Directives (//go:build, //go:embed, //go:noinline, //export, //line, cgo
-// preprocessor lines) are not documentation: adding or dropping one changes what
-// the build does, so a gate that claims "only comments changed" must keep them in
-// the compared text. Only File.Comments is consulted because it holds every
-// comment group in the file, including those attached to declarations.
-//
-// Every comment slot the tree can hold must be cleared here, trailing slots
-// included: a slot left intact makes a comment edit read as a code change, and the
-// batch author then faces a witness that cannot be trusted in either direction.
+// - Only File.Comments is consulted because it holds every comment group in the file.
+// 规格: docs/comment-gate-tooling.md#equality-witness
 func clearComments(file *ast.File) {
 	var keep []*ast.CommentGroup
 	for _, g := range file.Comments {

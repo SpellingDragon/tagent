@@ -1,23 +1,16 @@
 package mcp // import "github.com/SpellingDragon/tagent/tool/mcp"
 
-Package mcp provides the MCP server registry and the mcp_call gateway tool
-implementing tagent's discovery-execution loop for MCP :
+Package mcp provides the MCP server registry and the mcp_call gateway tool.
 
-- Registry: a concurrency-safe name → ToolSet table, declared via the top-level
-YAML mcp_servers section and mutable at runtime (Go API + config-file mtime
-hot-sync). Registry mutations never touch any agent's tool declaration set,
-so the prompt prefix (tools region) stays byte-stable and prefix caches are
-never invalidated by MCP changes. - mcp_call: a fixed-declaration gateway tool
-(server/tool/args) that resolves the target through the registry at call time.
-
-Discovery (mcp_discover, in tool/knowledge) reads the same registry,
-so runtime-registered servers become discoverable and callable immediately.
+- Registry: a concurrency-safe name → ToolSet table; mutations never touch
+tool declarations, so the prompt prefix stays byte-stable. - mcp_call: a fixed
+declaration (server/tool/args) resolved through the registry at call time.
+- mcp_discover reads the same registry, so runtime registrations are immediately
 
 CONSTANTS
 
 const CallToolName = "mcp_call"
     CallToolName is the registry ID of the mcp_call gateway tool.
-
 
 FUNCTIONS
 
@@ -30,7 +23,6 @@ func RegisterTool()
     tagent.RegisterBuiltinTools(). The factory succeeds even without a wired
     registry (mirroring mcp_discover's empty-stub behavior) so YAML references
     never fail at build time.
-
 
 TYPES
 
@@ -149,4 +141,3 @@ type ServerConfig struct {
 func (c ServerConfig) Validate(name string) error
     Validate checks the declaration after transport normalization:
     sse/streamable require url, stdio requires command.
-

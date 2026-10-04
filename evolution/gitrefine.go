@@ -1,3 +1,5 @@
+// 本文件承载 git 原语层的四条安全约束。
+// 契约: docs/wiki/evolution/evolution-architecture.md#git-safety
 package evolution
 
 import (

@@ -1,5 +1,4 @@
 
-
 FUNCTIONS
 
 func ComposeMediaInject(outcome IntakeOutcome, userText, workspaceDir, chatID string, now time.Time) string
@@ -17,18 +16,7 @@ func DeliverFiles(sender FileSender, ctx context.Context, chatID, content, works
     逻辑不被破坏（SendLongText 为包级函数，无法纳入 FileSender 接口）。 任一文件发送失败仅记录日志并继续，不阻断其余文件。
 
 func ExtractFilePaths(text, workspaceDir string) []string
-    ExtractFilePaths 从 agent 回复文本中解析本地文件路径。
-
-    识别规则：
-     1. 匹配绝对路径（以 '/' 起头）或相对路径（含 '/' 或以 './'、'../' 起头）。
-     2. 排除以 '://' 开头的 URL（http/https/ftp 等）。
-     3. 候选必须以文件扩展名结尾（正则已保证）。
-     4. 必须通过 os.Stat 确认存在且为普通文件；相对路径先按 workspaceDir 解析为绝对路径
-
-    （workspaceDir 为空则跳过相对路径）。
-     5. 硬性排除可执行文件（具有任意可执行权限位或扩展名在拒绝列表中）。
-     6. 结果去重并保持首次出现顺序。
-
+    ExtractFilePaths 从 agent 回复文本中解析本地文件路径：六条识别规则（本地路径形态、
 
 TYPES
 
@@ -95,16 +83,9 @@ type SeenStore struct {
 }
     SeenStore provides message-level idempotency across restarts.
 
-    Dedup key layering (design D3; assumption A1 — the gateway message model
-    carries no msg_id; if one appears upstream, prefer it as the primary key):
-     1. ClientID when non-empty (client-generated idempotency key),
-     2. fallback: "uid:" + FromUserID + "#" + first 16 hex chars of
-        sha256(text).
-
-    Persistence: seen.json next to the bot config; loaded on start (restart
-    recovery), pruned by TTL and capacity on every save, written atomically
-    (tmp+rename). A corrupted file degrades to an empty set with a warning —
-    dedup never blocks the message pipeline on its own failure.
+    - Dedup key layering: ClientID when non-empty, otherwise uid plus a text
+    hash prefix. - seen.json sits next to the bot config, loads at start,
+    prunes by TTL and capacity, writes atomically; a corrupted file
 
 func NewSeenStore(dir string, logger *slog.Logger) *SeenStore
     NewSeenStore loads (or initializes) the seen set from dir/seen.json.
@@ -132,4 +113,3 @@ func (c *WechatAppConfig) EnsureDirs() error
 func (c WechatAppConfig) IsApprover(userID string) bool
     IsApprover reports whether the user id may approve via the message channel
     (8.2: empty whitelist denies everyone — approval goes via CLI).
-

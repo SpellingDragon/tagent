@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 package agent
 
 import (

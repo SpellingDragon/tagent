@@ -44,6 +44,7 @@
 
 ---
 
+<a id="engine-contract"></a>
 ## 二点五、拓展：接入新的记忆引擎
 
 记忆有三类可替换面，契约全部居核心包 `memory`（`kv.go` 顶部附同样的指南），实现各居专属子包——**新后端永远不需要修改核心存储/压缩/事件代码**：
@@ -245,6 +246,7 @@ graph LR
 
 ---
 
+<a id="causal-chain"></a>
 ## 五、因果链机制
 
 ### 5.1 RelationStore 因果链语义
@@ -408,6 +410,7 @@ type StoreStats struct {
 
 ---
 
+<a id="inmemory-store"></a>
 ## 七、InMemoryStore 实现
 
 ### 7.1 数据结构
@@ -461,6 +464,7 @@ InMemoryStore
 
 ---
 
+<a id="file-segment-store"></a>
 ## 八、FileSegmentStore 实现
 
 ### 8.1 数据结构（KV + 分段模型）
@@ -1315,9 +1319,13 @@ stateDiagram-v2
 ## 十八、KV 后端的持久化语义与 rustviking CLI 契约
 
 <a id="local-file-kv"></a>
+
+
 ### `LocalFileKV`：仅够跨进程验证的临时后端
 
-它是**故意简陋**的模型：内存 map ＋ 单个 `kv.json` 全量快照。它不提供生产级的持久性、安全性与长期可维护性保证——那些留给真正的存储引擎后端。
+落盘模型（仅验证级）：写先进内存 map，进程内读恒一致；`Sync()` 是屏障，只序列化自上次屏障以来的脏桶，单次分区提交的写放大被该分区自身键数封顶。每个桶文件以临时写 + POSIX 原子 rename 替换，进程被 KILL 不会留下撕裂快照——重开必见该桶最后一次成功 Sync 的状态。已提交事实对新进程仅在屏障跑过 `Sync()` 后可见，`FileSegmentStore` 正依此排列。
+
+它是**故意简陋**的模型：内存 map ＋ 按命名空间分桶的快照文件。它不提供生产级的持久性、安全性与长期可维护性保证——那些留给真正的存储引擎后端。
 
 | 语义 | 规则 |
 |---|---|
@@ -1384,6 +1392,7 @@ tagent 记忆有两条相互独立的拓展路径，按需选一条或两条。�
 `KVStore`／`MemoryEngine`／`Embedder` 三个契约都定义在核心 `memory` 包，实现居子包（`memory/kv/`、`memory/engine/`、`memory/embedder/`）。理由：契约的两侧（消费方与实现方）都只依赖核心包，避免子包反向依赖导致成环；新增实现不需要改契约。
 
 <a id="embedder"></a>
+<a id="embedder-contract"></a>
 ### Embedder 接入与一条已裁决事项
 
 `Embedder` 是文本→向量抽象，三条约束：`Embed` 返回与输入**等长且顺序对应**的切片；`Dimension` 为 0 表示尚未探测；`ModelID` 用于索引指纹比对，以防换模型后新旧向量混用（见十七节跳旧机制）。实现必须尊重 ctx 取消/超时——排空与回收路径依赖它。未配置 key 时返回 error，调用方按"功能关闭"优雅降级为关键词检索。
@@ -1520,7 +1529,11 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 两条路径共用同一 10 位分区空间，因此上限一致；键布局与哈希都不得越出该空间。
 
 <a id="error-tracking"></a>
+
+
 ## 二十四、退化检测装饰器：错误如何归因、恢复如何被证明
+
+spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `EventReplayer`（`ReplayEvent`）契约，它对着耐久事实链原子区分「新提交 / 孤儿修复 / 已提交」。未实现 `EventReplayer` 的 store 被拒绝且 spill 原件保留。读侧弱回退（GetEvent+StoreEvent）不成立：GetEvent 命中只证明记录可读，不证明提交屏障与索引/元数据发布完成；公开 `StoreEvent` 又拒绝覆盖已有键，无法补完孤儿。key 释放严格排在 durable 重写之后——磁盘上的 spill 清单在重写落地前仍载有原件，提前释放会让下一轮的 AlreadyCommitted 重放二次递减他人租约。
 
 存储链的**最外层**是错误追踪装饰器。用装饰器而不是在插件里就地处理，是为了**单一挂点**——否则"上报方"与"降级状态机"两处各写一套判定，迟早分裂。它同时把内层全部方法（含可选接口）原样透传，只在出错时按特征归因到依赖并旁路上报。
 
@@ -1579,6 +1592,10 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 - 压实后必须成批移除被吸收的墓碑（内存与 KV 两侧），否则墓碑只增不减。
 
 <a id="feedback-bind"></a>
+
+确定性任务裁决由 `writeSettleFeedback` 写为 feedback 事件，因果边指向对应的 `task_settled` 事件：`completed` 记 positive、`failed` 记 negative；`suspect`、`alive-detached` 与未知状态一律不写——只记确定性裁决，防止噪声污染 guardrail。写失败仅记日志，反馈是旁路产物，不阻塞主链路。
+
+反馈**不是** durable 提交或 ack 的凭据。它只在事实链已 durable、投影已 append 之后运行，位于 ack 下游；`BindFeedback` 失败既不撤销提交、也不改变 `stored` 的返回，更不影响可靠 inbox 的 durable 判定（那里的凭据是 `PublishReceipt.Durable`）。guardrail 的 `negative_feedback_rate` 只作行为信号，绝不作输入确认或重放凭据。
 ## 二十七、反馈绑定的可区分失败与归因窗口
 
 反馈（外部评价）绑定到产出它的那条事件，两类失败**必须可区分**：父事件不存在（应回 404，客户端可纠正后重试）与"已落库但因果边写入失败"（应回已创建的告警语义，客户端**不得**盲目重试，否则重复反馈）。

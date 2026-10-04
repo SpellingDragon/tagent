@@ -29,16 +29,10 @@ import (
 // Verify ActionTool implements tool.CallableTool at compile time.
 var _ tool.CallableTool = (*ActionTool)(nil)
 
-// ActionTool is a shell command execution tool.
+// ActionTool is a shell command execution tool: every command runs in a tmux session
+// and Call blocks until the TmuxMonitor reports a settle state.
 //
-// Every command runs in a tmux session and Call() blocks until the session
-// reaches a stable state (Stable/Completed/Error/TimedOut) as detected by
-// TmuxMonitor. The final tool result carries the command, session ID, final
-// status and captured output — so the framework records it as a proper
-// role=tool message.
-//
-// Tool name is "action" — it represents performing behavioral actions on
-// real-world resources triggered by natural language descriptions.
+// - Tool name is action; the result carries command, session ID, final status and captured output.
 type ActionTool struct {
 	// reattachMu reattachedDetectors caches detectors built during startup reattach so
 	// the build path can BindDetector them to restored tasks AFTER the

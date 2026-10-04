@@ -1,18 +1,13 @@
 package task // import "github.com/SpellingDragon/tagent/agent/task"
 
-Package task 提供"把一次工作交给后台去跑"的任务层，管的对象是任务本身，而不是 它跑在哪个执行面上：
+Package task 提供"把一次工作交给后台去跑"的任务层，管的对象是任务本身，而不是它跑在哪个执行面上。
 
-  - TaskManager：登记任务、跟踪终态、按 TTL 统一回收（生命周期锚点是派生时刻， 重入发送或 resume
-    会刷新它），并把状态变化作为事实通知出去；
-  - task_board：渲染在途面板，供模型在同一回合里判断"该等还是该再派"；
-  - 结算检测器（NewFuncSettleDetector／NewManualDetector／NewManualDetectorDetach）：
-    由宿主决定一次后台工作何时算完成，框架不猜；
-  - DetachAfter／LifetimeOf：把"多久可脱离前台""还能活多久"这类策略交给声明方；
-  - TaskControllerFromContext／TaskSpawnerFromContext：工具在调用上下文里取回本轮
-    可用的委派入口，取不到就退化为同步执行。
-
-三条边界：本包不决定是否投影到会话（在 memory 与 agent/compress），不决定进程如何 启动与回收（在
-tool/action），也不为省事而把完成通知在入口拦掉——拦截会误杀合法的 完成信号。任何"已执行但未纳入任务层管理"的情形都必须向调用方如实说明。
+- TaskManager：登记任务、跟踪终态、按 TTL 统一回收（生命周期锚点是派生时刻，重入发送或 resume
+会刷新它），并把状态变化作为事实通知出去。 - task_board：渲染在途面板，供模型在同一回合里判断"该等还是该再派"。 -
+结算检测器（NewFuncSettleDetector／NewManualDetector／NewManualDetectorDetach）：由宿主决定一次后台工作何时算完成，框架不猜。
+- DetachAfter／LifetimeOf：把"多久可脱离前台""还能活多久"这类策略交给声明方。 -
+TaskControllerFromContext／TaskSpawnerFromContext：工具在调用上下文里取回本轮可用的委派入口，取不到就退化为同步执行。
+- 三条边界：不决定是否投影到会话（在 memory 与 agent/compress），不决定进程如何启动与回收（在
 
 CONSTANTS
 
@@ -27,7 +22,6 @@ const (
 const LineageRetired = "task-retired"
     LineageRetired is the settle-signal lineage stamped by TTL/liveness
     retirement onto the resulting settlement event's trigger_source.
-
 
 FUNCTIONS
 
@@ -58,22 +52,10 @@ func LifetimeOf(spec TaskSpec) string
 
 func RenderBoard(tasks []*Task, defaultTTL time.Duration) string
     RenderBoard renders a compact, LLM-friendly snapshot of currently ACTIVE
-    tasks (running/stable/alive-detached/suspect) from the registry. Terminal
-    tasks (completed/failed/cancelled/dead) are aged out — they were already
-    surfaced once via task_settled events, so keeping them on the board would be
-    stale noise.
+    tasks (running/stable/alive-detached/suspect) from the registry.
 
-    The board is regenerated fresh each turn at BeforeModel time and never
-    persisted, so it does NOT participate in context compression : it is a live
-    recency anchor of current async state. Returns "" when no active tasks exist
-    (the caller then injects nothing).
-
-    Each row renders the task's effective REMAINING lifetime to the unified
-    reaper (async-task-lifetime 10.6) — the same value reconcileTTL honors —
-    so the model can decide once from a single read: every task is bounded and
-    self-reclaiming, so a quiet/suspect task needs no per-turn re-arbitration.
-    defaultTTL is the manager's reaper floor (TaskManager.DefaultTTL), used for
-    tasks with no explicit spec.TTL.
+    - Terminal tasks are aged out; the board is a live recency anchor that
+    is never persisted and takes no part in compression. - Returns ""
 
 func ShortID(id string) string
     ShortID returns a short, human-friendly prefix of a task id for display.
@@ -84,7 +66,6 @@ func WithTaskSpawner(ctx context.Context, s TaskSpawner) context.Context
     retrieve it during Call via TaskSpawnerFromContext. Context values propagate
     through the framework flow down to tool.Call (the same path that carries the
     invocation).
-
 
 TYPES
 
@@ -403,31 +384,20 @@ func (tm *TaskManager) RenewTTLBySession(sessionID string) bool
     false.
 
 func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task
-    RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与 状态；状态为 alive_detached
-    时同时标记已脱离，使其继续享受"脱离后信号抑制"的语义。
+    RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与状态； 状态为 alive_detached
+    时同时标记已脱离，使其继续享受脱离后信号抑制的语义。
 
-    三点关键行为：
-      - 窗口标记为已关闭：重建出的任务不重启观察，因而不会因"重启后没人在看"被误判为静默或 僵尸；终态判定与 TTL 回收照常生效；
-      - 幂等且不覆盖：同一 id 已在表内时直接返回既有任务——在途的真实状态不被重建值改写； spec.Key 同样只在无人占用时登记；
-      - 管理器为 nil 或 id 为空时返回 nil；startedAt 为零值时取当前时刻。
+    - 结算窗口标记为已关闭：重建出的任务不重启观察，因而不会因"重启后没人在看"被误判为静默或僵尸；终态判定与 TTL
+    回收照常生效。 - 幂等且不覆盖：同一 id 已在表内时直接返回既有任务，在途的真实状态不被重建值改写；spec.Key
 
 func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (SpawnResult, error)
-    Resume feeds new input into a task and re-enters the standard
-    dense→ACK→settle lifecycle under the SAME task id.
+    Resume feeds new input into a task and re-enters the standard dense, ACK and
+    settle lifecycle under the SAME task id.
 
-    Legal source states: - alive_detached / stable — the session is alive; tmux
-    resume feeds SendKeys into it (service/repl reentry). - completed / failed —
-    the previous round ended; for executor kinds that are round-based (subagent:
-    new Run + task-chain restorer), resume is the natural continuation. tmux
-    resume on a dead session fails cleanly at SendKeys with an actionable error.
-
-    Illegal source states: running / suspect (a round is in flight — wait
-    and retry) and cancelled (session killed — relaunch or start fresh).
-    Concurrency: the claim transitions to running under task.mu BEFORE ResumeFn
-    runs, so parallel resumes (parallel tool execution is enabled) single-win;
-    the loser is told the task is running. ctx is the INITIATING call's context,
-    forwarded to ResumeFn so the resumed round can resolve its target on the
-    version that call holds; a refusal there rolls the claim back unchanged.
+    - Legal source states are alive-detached, stable, completed and failed;
+    running and suspect mean a round is in flight, cancelled means the session
+    is dead. - The claim turns to running under task.mu before ResumeFn runs, so
+    parallel resumes single-win; ctx is the initiating call context, forwarded
 
 func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int
     RetireOrphans adjudicates reincarnation-orphan suspect tasks:
@@ -643,4 +613,3 @@ func (s TaskStatus) Live() bool
     question can be asked from outside this package with the same answer the
     board's own dedup gives (isActive below), rather than each caller re-listing
     the states from memory.
-

@@ -3,6 +3,7 @@
 // gate usable from the conversation. Entry-only (wired in tagent.go alongside
 // refine); all tools are advisory/record-keeping — the gate itself stays in
 // agent/governance.
+// 契约: docs/wiki/tool/tool-architecture.md#govx-entry-only
 package govx
 
 import (

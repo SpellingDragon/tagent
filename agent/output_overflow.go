@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/compression-and-telemetry.md#output-overflow
 package agent
 
 import (

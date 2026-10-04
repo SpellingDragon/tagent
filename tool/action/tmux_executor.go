@@ -67,12 +67,8 @@ func NewTmuxExecutor(opts ...TmuxExecutorOption) *TmuxExecutor {
 }
 
 // buildTmuxCommand constructs a tmux command with optional sudo wrapping.
-// When runAsUser is set, all tmux commands are wrapped with:
 //
-//	sudo -n -u <user> [-g <group>] tmux <args...>
-//
-// This ensures the tmux server and all sessions run as the restricted user,
-// providing OS-level user isolation instead of sandboxing.
+// - With runAsUser set, every tmux command goes through sudo -n -u <user> [-g <group>] tmux <args...>.
 func (te *TmuxExecutor) buildTmuxCommand(args []string) (string, []string) {
 	if te.runAsUser != "" {
 		sudoArgs := []string{"-n", "-u", te.runAsUser}

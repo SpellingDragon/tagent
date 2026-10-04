@@ -1,3 +1,4 @@
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
 package main
 
 import (
@@ -402,14 +403,17 @@ func main() {
 
 				if !deliverable {
 					log.Infof("[Agent][gate] 未盖章输出，内部消化 (source=%s): %s", triggerSource, truncateLog(content))
+					reportWithheld(ta, triggerSource, false, "", content)
 					continue
 				}
 
 				switch triggerSource {
 				case "meditation":
 					log.Infof("[Agent][meditation] 冥想输出: %s", truncateLog(content))
+					reportWithheld(ta, triggerSource, true, "", content)
 				case "error":
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
+					reportWithheld(ta, triggerSource, true, "", content)
 				case "user", "task", "reincarnation", "system_alert":
 					if chatID == "" {
 						raw, _ := lastActiveChat.Load("latest")
@@ -417,6 +421,7 @@ func main() {
 						target, hasTarget := resolveDeliveryTarget(chatID, lastActive)
 						if !hasTarget {
 							log.Warnf("[Agent][%s] 无 meta_chat_id，无可回退会话，扣留: %s", triggerSource, truncateLog(content))
+							emitReceipt(ta, "no-target", "WARN", triggerSource, "", content)
 							continue
 						}
 						log.Infof("[Agent][%s] 无 meta_chat_id，回退最近活跃会话 %s", triggerSource, target)
@@ -453,6 +458,7 @@ func main() {
 					if !textSent {
 						if err := bot.SendTextToUser(ctx, chatID, content); err != nil {
 							log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
+							emitReceipt(ta, "send-failed", "ERROR", triggerSource, chatID, content)
 						}
 					}
 

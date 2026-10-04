@@ -319,6 +319,28 @@ graph TB
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖，新代码直接 import 子包。
 
+agent 包内 50 个文件按职责分五组，子域已独立成包（`task/` 任务生命周期、`compress/` 压缩域、`governance/` 治理闸、`reliability/` 退化追踪，各有独立篇）：
+
+| 组 | 文件与职责 |
+|---|---|
+| 事件循环（引擎主干） | `agent.go` 聚合根与 AgentConfig；`event_loop.go` runEventLoop 主循环（Pull 批处理、退避重试、降级 backoff）；`event_bus.go` EventBus + AgentEvent + ReliableBus 磁盘溢出；`inject.go` InjectMessageWithSource 渗透入口；`trace.go` turn span |
+| 上下文管理（LLM 视图） | `context_manager.go` 粘合层（投影/持久化/settle 反馈/bundle 章盖章）；`output_overflow.go` outputCh 宽限与溢出票据；`helpers.go`、`lifecycle.go` 辅助与生命周期；`session.go` 子 agent 调用路径 |
+| 子 Agent | `tool_agent.go`（最大文件）AgentToolWrapper：本地与 A2A 统一封装、重入、交接；`a2a.go` 远程协议 |
+| 冥想 | `meditation.go` 门控触发（novelty + idle）；`meditation_digest.go` digest 组装 |
+| 可选注入（经 TagentAgent setter） | 退化与可靠性注入经 `agent/reliability`；治理经 `govGate`；自进化经根包 |
+
+顶层模块的层与归属（大扫除第二阶段后）：
+
+| 模块 | 职责 | 依赖方向 |
+|---|---|---|
+| 根包 `tagent`（组合根，11 文件终形） | 装配（build_agent/wiring/builtin/registry/partition_collision 注册表 + config_alias/org_alias 别名层 + prompts_embed/testing）+ **编排发布权**（`org_hotreload.go` 的 orgCoordinator：换入/发布/告警）+ 面向消费者的入口 | root → config, agent, tool, … |
+| `config/`（配置模型层） | 编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影、纯查询（记忆段指纹、可达拓扑、仅远端声明判定）；根包以**别名再导出**保持 `tagent.*` 公共 API 源码级不变 | config → agent, prompt, tool, workspace；**MUST NOT 回指 root** |
+| `agent/`（引擎本体） | 事件循环、上下文管理、子 Agent 封装、冥想；主体不依赖 config（模型经 root 的别名与注入面进入装配） | agent → plugin → memory；不 import config |
+| `agent/org`（世代机制，已落地） | 退役账本、候选事务簿记、换壳 overlay——机制在此；**发布动作留根包**，两侧只经注入契约（壳构造回调、注册表接口、resident 句柄）协作 | agent/org → config, agent；MUST NOT import root |
+| `agent/resources`（资源租约治理） | 共享存储/引擎的最后引用清理、目录写锁（flock）、毒化封闭与重开判定；组合根 wiring 经 `resources.DefaultResources.Acquire` 接线，装配级测试留根包、深白盒用例随包 | agent/resources → config, memory；MUST NOT import root/agent |
+
+已迁出的机制件为 `Ledger`（退役账本）、`Txn`（候选责任表）、`Overlay`+`BuildOwners`+`ShellBuilder`+`Deps`（私有构造域）、`ComputeOrgFingerprint`/`ExtractOrgSubset`/`CanonicalAgentSubset`（世代簿记，agent/org/fingerprint.go）、`OrgStatus` 等 5 状态类型（agent/org/status.go，根以 org_alias.go 同名再导出），根侧唯一接缝 `runtimeConfig.orgDeps(loader)`。漂移审计器（evolution/asset_drift.go）与整理提示（memory/consolidation_hint.go）同期归域。方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作为何必须留在根包：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——把 orgCoordinator 下放即违反该条，故世代**机制**可迁、**特权**留根。
+
 <a id="data-flow"></a>
 ## 四、数据流
 
@@ -360,6 +382,8 @@ TagentAgent.runEventLoop:
 
 <a id="framework-boundary"></a>
 ## 五、tagent 与 trpc-agent-go 的边界
+
+跨这条边界的数据流是**严格单向**的：送给模型的最终消息列表只由投影装配（`[system] + render(projection)`，任务面板由后续回调注入），绝不从框架的 message 尾部读回任何东西。每一个事件（用户输入、工具调用、工具结果、终局、总线注入）都经事件插件管线或 `persistBusEvent` 进入投影，因此"模型可见"与"已被投影"是同一件事——曾经存在过的"可见但未投影"状态就是顺序缺陷的根源。
 
 **tagent 独有**：
 - `EventBus` + `runEventLoop`：持久事件循环 + 异步事件注入
@@ -475,6 +499,12 @@ tools:
 ## 八、测试替身住在包内的非 _test 文件里
 
 包内测试共享的替身与构造器集中在 `agent/testsupport.go`（不是 `_test.go`）。原因是一条构建事实：内部测试（`package agent`）无法导入一个反向依赖 `agent` 的支撑包——Go 明确禁止测试里的导入环；而把那些内部测试改成外部测试包，又会牵出大量包内私有引用，属更大范围的重构。
+
+关于真实框架行为的判据（例如 MemoryPlugin 的用户回声 `OnEvent` 是否**早于**进入模型、基座模型实现 `model.IterModel` 时框架是否真的走 `GenerateContentIter` 而非 channel 回退）一律不许猜：两者都决定执行凭据校验门能否安全地放在真实模型入口，猜错就是每回合误阻断。这类问题由一次性的真机探针harness取证，结论落进测试注释与本页，而不是靠推测写断言。
+
+单元测试的 memory store 根必须**显式挪出仓库工作树**，并按单个测试用例隔离。原因是一条分派顺序事实：`resources.acquire` 在按 memory type 分派**之前**就无条件 `os.MkdirAll(path)` 并取目录写锁（写 `.tagent-writer.lock`），`type: localfile` 还会另建 `relations.journal`——所以"用 `type: memory` 配一个逻辑路径"并不等于不落盘，相对路径会在仓库根造出目录（历史提交里被跟踪的 lock 与 journal 即明证）。
+
+根目录由 `t.TempDir()`／`b.TempDir()` 按用例唯一：同一用例内同名 store 返回同一绝对路径（热更多代"存储段字节不变"与重启模拟所依赖的身份前提由此成立）；不同用例（含 `-count` 重复，每次是全新 `*testing.T`）落在不同根，互不串存储；根不得跨用例共享，否则两个用例的存储接在同一条链上。
 
 因此这些替身以非 `_test` 文件形态存在：文件名不受"测试文件须声明职责"这条判据约束，替身本身仍保持包内私有、只被测试引用。代价是它们会随库一起编译（不参与运行时行为）；若要消掉这一点，就得承担外部化改造的规模。
 

@@ -2,70 +2,21 @@ package agent // import "github.com/SpellingDragon/tagent/agent"
 
 Package agent provides tagent's core agent mechanism coordination.
 
-TagentAgent wires together: - EventBus + AgentLoop (event-driven execution
-engine) - Runner (framework orchestration with plugins, retained for
-session/plugin lifecycle) - MemoryPlugin (OnEvent: event persistence + causal
-chain) - Preprocessor (event filtering, token budget, SmartCompress)
+- TagentAgent 是顶层装配点：EventBus + AgentLoop 提供事件驱动执行引擎，Runner 保留给 session/plugin
+生命周期，MemoryPlugin 负责事件持久化与因果链，Preprocessor 负责事件过滤、token 预算与 SmartCompress。 -
+核心不变量：AgentLoop 是纯事件驱动引擎、无业务语义；事件过滤、shouldCallModel、压缩等全部领域裁决在 Preprocessor。 -
+TagentAgent 实现 agent.Agent，因此可被包装为 agent.Tool。
 
-Core principle: AgentLoop is a pure event-driven engine with no business
-semantics. All domain decisions (event filtering, shouldCallModel, compression)
-live in Preprocessor.
+Package agent 是 tagent 的事件驱动引擎核心：50 个文件按职责分五组（事件循环、上下文管理、 子
+Agent、冥想、可选注入），子域已独立成包。
 
-TagentAgent implements agent.Agent, so it can be wrapped as agent.Tool for
-tool-agent composition.
+- 子包各有独立篇：task/ 任务生命周期、compress/ 压缩域、governance/
 
-Top-level usage: StartLoop / InjectMessage / StopLoop (persistent event loop
-only). Sub-agent usage: agent.Run() via AgentToolWrapper.Call() (invoked by
-parent LLM).
+Package agent provides tool agent registration and the AgentToolWrapper that
+turns a TagentAgent into a CallableTool for extensible agent composition.
 
-NOTE: This package does NOT depend on tagent/tool. Application-level wiring
-(KnowledgeAgent assembly, WireActionTool, etc.) lives in the root tagent
-package.
-
-Package agent 是 tagent 的事件驱动引擎核心。50 个文件按职责分五组：
-
-# 事件循环组(引擎主干)
-
-- agent.go: TagentAgent 聚合根与 AgentConfig;event_loop.go: runEventLoop 主循环
-(Pull 批处理/退避重试/降级 backoff);event_bus.go: EventBus+AgentEvent+ReliableBus
-磁盘溢出;inject.go: InjectMessageWithSource 渗透入口
-
-# 上下文管理组(LLM 视图)
-
-- context_manager.go: 粘合层(投影/持久化/settle 反馈/bundle 章盖章); output_overflow.go:
-outputCh 宽限+溢出票据;helpers.go/lifecycle.go: 辅助与生命周期
-
-# 子 Agent 组
-
-- tool_agent.go(950L 最大): AgentToolWrapper(本地/A2A 统一封装/重入/交接); a2a.go: 远程协议
-
-# 冥想组
-
-- meditation.go: 门控触发(novelty+idle);meditation_digest.go: digest 组装
-
-# 可选注入组(经 TagentAgent setter)
-
-- degradation.go/reliability 注入;governance 经 govGate;evolution 经 root
-
-子域独立成包:task/(任务生命周期)、compress/(压缩域)、governance/(治理闸)、 reliability/(退化追踪)——各自有独立
-wiki 篇。
-
-Package agent provides tool agent registration for extensible agent composition.
-
-Tool agents are TagentAgent instances wrapped as CallableTool via
-AgentToolWrapper. This file provides the registration mechanism and the wrapper
-implementation.
-
-Registration flow:
-
- 1. Built-in factories are registered in tagent/builtin.go init()
- 2. Custom factories can be registered via RegisterToolAgent()
- 3. tagent.New() resolves ToolRef entries by building referenced agents
-
-AgentToolWrapper replaces the previous agenttool.NewTool() approach. It handles:
-- Declaring event_key parameter in InputSchema (when EventParams includes it) -
-Resolving event_key → fetching full event from parent MemStore - Passing event
-data as external context to the sub-agent
+- 注册三阶段：内置工厂在 tagent/builtin.go 的 init 注册，自定义工厂经 RegisterToolAgent 注册，tagent.New
+解析 ToolRef 构建被引用的 agent。 - AgentToolWrapper 在 InputSchema 声明 event_key 参数（当
 
 CONSTANTS
 
@@ -99,7 +50,6 @@ const ExternalContextKey = "external_context"
 const SourceTask = "task"
     SourceTask identifies task_settled events on the bus (a settled background
     task reclaimed into a new turn).
-
 
 VARIABLES
 
@@ -143,7 +93,6 @@ var ErrLoopTerminated = errors.New("agent: persistent loop already terminated �
     ErrLoopTerminated is returned by InjectMessageContext after StopLoop:
     the instance's output channel is closed (terminal lifecycle, V15) — a silent
     acceptance here would strand the input forever (3.1).
-
 
 FUNCTIONS
 
@@ -193,12 +142,9 @@ func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent)
     inbox_receipt，把内部回执注进投影，破坏 「投影＝事实链可回放折叠」这条不变量。本路径只做同点补投影，绝不在活投影上整表 Replace。
 
 func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error)
-    ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的 子调用租约：
-      - 上下文里有发起方租约时，按其**同一代**解析——目标不在该代的编排里就直接报错，绝不 悄悄改投到当前生效代（重入必须留在自己那一代的语义里）；
-      - 无租约时退回属主常驻面，在其当前生效代上取租约；若该代已收敛关闭则拒绝；
-      - 解析不到目标时释放刚取的租约再报错，不留悬挂引用。
+    ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的子调用租约。
 
-    调用方拿到的租约必须由它负责释放。
+    - 上下文有发起方租约时按其同一代解析；目标不在该代的编排里就直接报错，绝不悄悄改投当前生效代。 -
 
 func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string) (task.SpawnResult, error)
     SubagentRedispatcher：跨重启 subagent Relaunch 的重投递器——镜像 subagentRelaunch
@@ -220,32 +166,22 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 
 func TagentAgentsConstructed() int64
     TagentAgentsConstructed reports the process-wide count of TagentAgent
-    constructions (see constructedTagents). Callers assert DELTAS around an
-    operation, never absolute values (tests share the process).
+    constructions.
+
+    - Callers assert DELTAS around an operation, never absolute values: tests
+    share the process.
 
 func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*StagedGeneration)
-    WireOrgGeneration performs the generation-level wiring of ONE org publish
-    (3.2 trunk, D8 as precision-approved round 90). It must run after every
-    owner of the publish has STAGED its next generation and before ANY of them
-    is activated, so no execution path can observe a half-wired generation:
+    WireOrgGeneration performs the generation-level wiring of ONE org publish.
+    It must run after every owner of the publish has STAGED its next generation
+    and before ANY of them is activated, so no execution path can observe a
+    half-wired generation.
 
-    - INCOMING: each staged face's wrappers are stamped with the STAGED child
-    binding they declare, and the declaring generation records a hold on it. A
-    call through that wrapper therefore resolves the child through the declaring
-    generation's own execution view — never the child's "current" face, never a
-    captured instance.
-
-    - OUTGOING (retroactive): the previous generations' faces were wired when
-    THEY were staged — except a cold-start owner whose binding was created
-    lazily and never wired. Those wrappers are stamped against the still-active
-    child bindings now, with the same holds, so an in-flight caller on the
-    outgoing generation keeps reaching ITS generation's targets after this
-    publish retires them. Stamps are idempotent: a wrapper already wired by an
-    earlier publish keeps its (still correct) target.
-
-    The holds never enter the obligation axes (J7/J8); they only gate the
-    binding-level reclaim (retired ∧ refs==0 ∧ heldBy==0).
-
+    - Incoming: each staged face wrapper is stamped with the staged child
+    binding it declares, and the declaring generation records a hold
+    on it, so a call through that wrapper resolves the child from the
+    declaring generation own execution view. - Outgoing (retroactive):
+    a cold-start owner whose binding was created lazily and never wired
 
 TYPES
 
@@ -281,7 +217,6 @@ type AgentEvent struct {
 
     Scope: the bus coordinates turns. The tool loop inside a turn remains the
     upstream synchronous ReAct (runner.Run), so no tool-use event is ever a bus
-    trigger. 契约: docs/wiki/agent/event-flow.md#event-stream-overview
 
 func NewExternalInputEvent(source string, msg model.Message) *AgentEvent
     NewExternalInputEvent creates an external_input event with the given source
@@ -397,7 +332,7 @@ type CognitiveAssetChange struct {
 	Size      int64
 	Timestamp int64
 }
-    CognitiveAssetChange 是漂移审计事件载荷的最小契约（与根包 tagent.AssetChange 字段对齐；agent
+    CognitiveAssetChange 是漂移审计事件载荷的最小契约（与 evolution.AssetChange 字段对齐；agent
     包不反向依赖根包，以本类型解耦）。
 
 type CompressConfig struct {
@@ -459,24 +394,13 @@ func (cm *ContextManager) ActivateExecutor(s *StagedGeneration) runner.Runner
 
 func (cm *ContextManager) BeginTurn() (runner.Runner, func())
     BeginTurn is the ONE place a business turn takes its organization execution
-    binding: the armed org-config check runs first (same entry the ops hook
-    CheckOrgReload uses — one publish path, no second effective route), then the
-    executor in force is handed to the turn to pin.
+    binding: it pins the executor in force and returns the release that must run
+    when the turn ends.
 
-    Call it after the input batch is frozen and OUTSIDE the transport-retry
-    loop: every attempt, model iteration and tool round of that turn then runs
-    on the returned runner (RunFlowWithExecutor), so a publication happening
-    mid-turn cannot split the turn across generations. Sub-agent invocations
-    do not call this: their instances, executor and delegation tree were
-    constructed inside the generation that published them.
-
-    The returned release MUST run when the turn ends (the loop folds it
-    into its per-turn cleanup alongside endTurnSpan). 「acquire 后立即登记」:
-    the in-flight reference is registered BEFORE the executor is handed out,
-    so a publish and its retire-sweep landing in the gap between handing out the
-    executor and entering the run body cannot close the very runner this turn
-    is about to run. 一个业务 turn 只登记 EXACTLY ONCE 次，且登记在它自己的代际上： 计数由各代的 in-flight
-    引用持有，不存在第二份聚合计数。
+    - Call it after the input batch is frozen and OUTSIDE the transport-retry
+    loop; the whole turn, every attempt, model iteration and tool round,
+    then runs on the returned runner via RunFlowWithExecutor. - Sub-agent
+    invocations do not call this: their instances, executor and delegation
 
 func (cm *ContextManager) BeginTurnLease() *ExecLease
     BeginTurnLease is BeginTurn with the reference handle exposed, so the
@@ -734,25 +658,14 @@ type EventBus struct {
 }
     EventBus is a per-agent ordered event queue.
 
-    Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent
-    callbacks, and the AgentLoop itself) call Publish to enqueue events.
-
-    The AgentLoop is the sole consumer: it calls Pull to block until at least
-    one event arrives, then non-blocking drains all remaining pending events.
-
-    Design rationale: a single consumer (AgentLoop) means no fan-out races,
-    no ordering guarantees across consumers, and simple backpressure (channel
-    fills up → Publish blocks).
-
-    Durable mode (lossless under D2): with an Inbox configured,
-    ALL inbound events are persisted to inbox-v2 BEFORE the durable
-    receipt — the channel carries only wake-ups, never the durable truth.
-    Each message slot keeps a lossless JSON snapshot of the original AgentEvent
-    (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
-    restores everything inbox-v1 dropped . Durable envelopes are consumed
-    strictly in enqueue order (zero-padded seq); volatile channel events are
-    best-effort by definition. Receipted items replaying after a crash are
-    Ack-skipped without re-execution.
+    - Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent
+    callbacks, the AgentLoop itself) call Publish to enqueue. - The AgentLoop is
+    the sole consumer: Pull blocks until at least one event arrives, then drains
+    all remaining pending ones non-blocking. A single consumer means no fan-out
+    races and simple backpressure. - Durable mode: with an Inbox configured,
+    all inbound events are persisted to inbox-v2 before the durable receipt,
+    and each slot keeps a lossless JSON snapshot of the original AgentEvent,
+    so the channel carries only wake-ups and never the durable truth.
 
 func NewEventBus() *EventBus
     NewEventBus creates an EventBus backed by a buffered channel (cap=256,
@@ -822,11 +735,12 @@ func (b *EventBus) PublishContext(ctx context.Context, event *AgentEvent) (Publi
 func (b *EventBus) PublishDropped() int64
     PublishDropped 统计经由 void 兼容入口发生的拒绝。
 
-func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message) (PublishReceipt, error)
-    PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope : every
-    message keeps its own identity in the envelope, and the batch is durable (or
-    rejected) as a unit — never partially accepted. Volatile mode falls back to
-    per-message PublishContext.
+func (b *EventBus) PublishEnvelopeContext(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (PublishReceipt, error)
+    PublishEnvelopeContext accepts a WHOLE batch as ONE durable envelope :
+    every message keeps its own identity in the envelope, and the batch is
+    durable (or rejected) as a unit — never partially accepted. Volatile mode
+    falls back to per-message PublishContext. Declared attrs, when given,
+    are stamped into every event of the envelope.
 
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error)
     Pull blocks until at least one event arrives or ctx is cancelled. Then
@@ -1022,17 +936,13 @@ type MeditationManager struct {
     into the event loop when the agent has been idle for at least MinGap AND
     there has been new user input since the last meditation.
 
-    Gating is split across two independent anchors: the idle gate is
-    lineage-AGNOSTIC (any turn end counts as busy), while the novelty gate is
-    INPUT-side anchored (only source=="user" injections arm it). This split
-    makes output-side lineage tracking unnecessary: activity derived from a
-    meditation turn (e.g. a spawned task settling as Source="task") can only
-    DELAY the next meditation via the idle gate, never re-arm the novelty gate —
-    which kills the self-feeding perpetual-motion loop.
-
-    The meditation event triggers the LLM to perform context cleanup,
-    deep analysis of recent memories, and skill accumulation — all guided by the
-    meditation prompt.
+    - The idle gate is lineage-agnostic (any turn end counts as busy); the
+    novelty gate is anchored on the input side (only source=="user" injections
+    arm it). - Meditation-derived activity can therefore only delay the next
+    meditation, never re-arm the novelty gate: the self-feeding perpetual-motion
+    loop of "nothing happened" summaries is structurally impossible. - The event
+    triggers the LLM to perform context cleanup and deep consolidation over the
+    session.
 
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager
     NewMeditationManager creates a MeditationManager. The injector is typically
@@ -1075,26 +985,23 @@ type ObligationReport struct {
 	LiveTasks   int
 }
     ObligationReport answers /D7's question for one resident owner: is anything
-    still depending on it that would be broken by retiring it? The three axes
-    are disjoint by construction and each is read from the accounting that OWNS
-    it, so retirement never invents a parallel notion of "busy":
+    still depending on it that would be broken by retiring it?
 
+    - The three axes are disjoint by construction, each read from the accounting
+    that owns it, so retirement never invents a parallel notion of "busy".
     - Executions: references held by this owner's own execution generations
-    — the resident turns, inherited sub-calls and post-ACK background runs
-    tracked by the same lease accounting that gates per-generation reclaim.
-    - Invocations: invocation-private contexts currently running on this owner.
-    A delegation into a sub-agent builds its own context rather than opening a
-    turn on the sub-agent's resident generations, so this axis is what keeps
-    a removed owner from being retired underneath a call it is still serving.
-    - LiveTasks: entries still in a live state on this owner's task board,
-    i.e. accepted inputs whose work has not settled (running, stable service
-    sessions, suspect, alive-detached). A board entry in a live state is an
-    obligation even when nothing is executing right now — resume/relaunch and
-    the recovery reconciliation still route through this owner.
-
-    Terminal board entries are deliberately NOT obligations: forbids using
-    retained DATA (history, rollback config, a name that once existed) as a
-    reason to keep a running INSTANCE alive.
+    (resident turns, inherited sub-calls, post-ACK background runs) — the
+    same lease accounting that gates per-generation reclaim. - Invocations:
+    invocation-private contexts currently running on this owner; a delegation
+    builds its own context instead of opening a turn on the sub-agent's resident
+    generations, so this axis is what keeps a removed owner from being retired
+    underneath a call it is still serving. - LiveTasks: entries still in a
+    live state on this owner's task board (running, stable service sessions,
+    suspect, alive-detached). A live board entry is an obligation even with
+    nothing executing, because resume/relaunch and recovery reconciliation
+    still route through this owner. - Terminal board entries are deliberately
+    not obligations: retained data (history, rollback config, a name that once
+    existed) is never a reason to keep a running instance alive.
 
 func (o ObligationReport) Idle() bool
     Idle reports whether nothing depends on the owner any more.
@@ -1148,8 +1055,6 @@ func (t *OutputLimitTool) Unwrap() trpctool.Tool
     wrappers — in an OutputLimitTool, so a published execution face
     holds OutputLimitTool(*AgentToolWrapper), never the bare wrapper.
     Because OutputLimitTool preserves the inner declaration unchanged,
-    peeling it never changes which target a name resolves to. 契约:
-    docs/wiki/agent/agent-architecture.md#subagent-loop
 
 type PlainToolFactory func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, error)
     PlainToolFactory creates a plain tool (implements tool.CallableTool) from
@@ -1342,23 +1247,13 @@ type TagentAgent struct {
     Preprocessor, and dispatches tool_use events asynchronously.
 
 func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error)
-    NewTagentAgent creates a new TagentAgent with the given configuration.
+    NewTagentAgent creates a TagentAgent with the given configuration.
 
-    In the event-driven architecture, NewTagentAgent: - Creates MemoryStore +
-    MemoryPlugin + compress.SmartCompressor - Creates Preprocessor (replacing
-    ContextIntervention.BeforeModel) - Creates EventBus + AgentLoop - Creates
-    SessionService + Runner (as shell for session/plugin management)
-
-    The Runner is retained for session management and plugin lifecycle
-    (MemoryPlugin.OnEvent, SummaryPlugin). Actual execution is driven by
-    AgentLoop, not the Runner.
-
-    Construction fails closed: with a durable inbox the MemoryStore must
-    implement memory.EventReplayer — the bus handle was already opened and
-    nobody else holds it, so the refusal path closes it before returning the
-    construction error (the primary). The audit digest line is reflection
-    feedback and wires after the meditation manager exists, so every meditation
-    message carries it (wiring before construction was a silent no-op).
+    - Builds MemoryStore + MemoryPlugin + compress.SmartCompressor,
+    then the Preprocessor that replaces ContextIntervention.BeforeModel.
+    - Builds EventBus + AgentLoop, plus SessionService + Runner as the shell
+    for session and plugin management (MemoryPlugin.OnEvent, SummaryPlugin).
+    - Actual execution is driven by AgentLoop, not the Runner.
 
 func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference)
     AppendProjectionRef appends an EventReference to this agent's session
@@ -1444,10 +1339,12 @@ func (ta *TagentAgent) IngestExternalEvents(events []memory.FullEvent)
     它是单槽交收而非历史缓冲，并有守卫使并发 Run 的取走与本次写入互不撕裂。 主委托路径经调用的 RuntimeState
     传递上下文，从不碰这个共享槽。
 
-func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message) (requestID string, durable bool, err error)
+func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs []model.Message, attrs ...map[string]any) (requestID string, durable bool, err error)
     InjectEnvelope accepts a WHOLE batch as one acceptance unit (5.2): durable
     mode persists a single multi-message envelope; the returned requestID is the
-    batch's stable identity (202 semantics belong to the HTTP layer).
+    batch's stable identity (202 semantics belong to the HTTP layer). Declared
+    attrs (e.g. an inbound integration's intent lineage) are stamped into every
+    event of the envelope without altering the mechanical source.
 
 func (ta *TagentAgent) InjectMessage(msg model.Message)
     InjectMessage injects a user message into the agent's event bus. The message
@@ -1506,7 +1403,6 @@ func (ta *TagentAgent) OrgBudgetLine() int
     (maxTokens times the current threshold) — the real sub-model budget
     consumer, not the resident config field, so hot-param and rollback
     assertions read what the compressor actually uses. 0 when no compressor is
-    wired. 契约: docs/wiki/agent/compression-and-telemetry.md#hot-bundle-atomicity
 
 func (ta *TagentAgent) OrgDiagnostics() map[string]any
     OrgDiagnostics returns the current orchestration-generation diagnostic
@@ -1525,13 +1421,10 @@ func (ta *TagentAgent) OrgThreshold() float64
 
 func (ta *TagentAgent) RebuildProjectionFromWAL()
     RebuildProjectionFromWAL rebuilds the projection from the fact chain at cold
-    start (build_agent wiring; runs BEFORE spill replay is armed). Startup-only,
-    once, into an EMPTY projection. No marker-tagged compaction event in the
-    chain → D1 fallback full replay (rebuildProjectionFallback;
+    start (build_agent wiring), startup-only, once, into an EMPTY projection.
 
-        spec change: WAL is the durable record — context must be
-
-    recoverable even without compaction; supersedes the old no-op).
+    - It runs BEFORE spill replay is armed. - Without a marker-tagged compaction
+    event in the chain it falls back to full replay: the WAL is the durable
 
 func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	rebuildClosures func(decl task.Declarative) task.TaskSpec) int
@@ -1570,26 +1463,16 @@ func (ta *TagentAgent) Rollback()
     Rollback triggers the wired rollback hook (R4 3.8；no-op if unset)。
 
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error)
-    Run 实现 agent.Agent 接口。
+    Run 实现 agent.Agent 接口：这是子 agent 调用路径（本地由 AgentToolWrapper、远程由 A2A 使用），
+    顶层使用必须走 StartLoop/InjectMessage/StopLoop。
 
-    在事件驱动架构下，Run 是子 agent 调用路径（本地子调用由 AgentToolWrapper 使用， 远程调用由 A2A 使用）；顶层使用必须走
-    StartLoop/InjectMessage/StopLoop。
-
-    Run 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，并返回 AgentLoop 的
-    outputCh；调用方持续读事件直到通道关闭（上下文取消，或产出 agent_output）。
-
-    上下文可经两条入口到达，且都在本次调用本地装配，绝不经过共享的 `ta` 状态——隐式的 activeBus/pendingExternalEvents
-    传递已取消，因此并发 Run 无法互相注入：
-     1. RuntimeState 路径（远端/包装器，即 A2A 兼容那条）：
-        inv.RunOptions.RuntimeState["external_context"] 内是序列化的
-        ExternalContextEntry JSON；
-     2. direct 兼容入口：事件先交给 IngestExternalEvents，在 Run 进入时原子排空进本次调用， 保持单槽交收语义。
-
-    生命周期不变量：
-      - 租约拒绝发生在本次调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine
-        永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
-      - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑）：把 loop-exit 到 unbind 窗口内 落地的
-        settle 转发到共享总线，关闭 route() 注释承诺的那扇窗口。
+    - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回 AgentLoop 的
+    outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。 - 上下文只在本次调用本地装配，绝不经过共享的 ta
+    状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的 ExternalContextEntry JSON，或
+    direct 兼容入口经 IngestExternalEvents 在 Run 进入时原子排空以保持单槽交收语义。 - 租约拒绝发生在本调用计为
+    live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner
+    Obligations 到不了零、退役排空挂死。 - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把
+    loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 
 func (ta *TagentAgent) Runner() runner.Runner
     Runner returns the underlying Runner from ContextManager.
@@ -1669,20 +1552,8 @@ func (ta *TagentAgent) SetStoreOwnerSnapshot(fn func() map[string]bool)
     Startup-injected once (like SetOrgDiagnostics); runtime read-only.
 
 func (ta *TagentAgent) SetToolParentProjection()
-    SetToolParentProjection wires the agent's compress.SessionProjection to all
-    AgentToolWrapper instances in the tool list. This enables auto-inject of
-    event_keys when LLM does not pass them. Must be called after NewTagentAgent
-    (which creates the projection).
-
-    /W-1: the list holds OutputLimitTool(*AgentToolWrapper) after agent.New has
-    wrapped every tool, so the wiring pierces the transparent decorator chain
-    (collectAgentToolWrappers) instead of asserting the bare type — otherwise
-    the projection never reaches the sub-agent wrappers and auto-inject is dead.
-
-    This is the ONLY production publish of that binding, and it runs while
-    the agent is still being constructed (not yet serving). /D2 removed the
-    per-ContextManager rebinding: a live invocation publishes nothing into
-    shared tools and carries its own projection through the context instead.
+    SetToolParentProjection wires the agent compress.SessionProjection to
+    every AgentToolWrapper in the tool list so event_keys are auto-injected
 
 func (ta *TagentAgent) SetTrajectoryRecorder(tr *rl.TrajectoryRecorder)
     SetTrajectoryRecorder sets the trajectory recorder for this agent. When set,
@@ -1803,27 +1674,12 @@ type TagentConfig struct {
     TagentConfig holds configuration for creating a TagentAgent.
 
 type ToolAgentFactory func(cfg ToolAgentFactoryConfig) (*TagentConfig, error)
-    ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from
-    the given inputs. It must NOT construct the agent itself: the org owns the
-    single birth path (wireAgent assembles every real owner — store-lease slot,
-    drain wiring, task-domain recovery included), and the single publish
-    path (stageOrgGenerations advances one face per owner per generation). A
-    factory that returned a finished *TagentAgent would be a second owner-birth
-    mechanism outside both: it could never advance through the face path, so
-    every publish had to rebuild the whole agent (an orphan nobody closed) and
-    every pinned delegation kept reading the stale construction config (design
-    D1「避免用返回 完整临时 agent 的方式隐式制造第二 owner」; contract migrated round 91 with user
-    approval — evidence ).
+    ToolAgentFactory assembles a tool agent execution configuration from the
+    given inputs. It must NOT construct the agent itself.
 
-    The returned *TagentConfig is adopted verbatim where it is meaningful:
-    - Name: the factory's choice is respected (the old contract's「产物整只
-    使用」promise); empty falls back to the registered id. - MemoryStore:
-    the org's store borrowed for this name fills a nil — a factory that opens
-    its OWN store must not also be handed the org lease. - MemStoreRelease:
-    always the org's, filled by the assembly after this call returns — a factory
-    neither keeps nor invents a release for it. The assembly re-invokes the
-    factory for each generation it builds and hands it that generation's values,
-    so a declaration derived from them moves with the config.
+    - org 拥有唯一的出生路径与唯一的发布路径；返回成品 agent 会造出面路径之外的第二种 owner
+    出生，每次发布都得重建整个 agent 并留下无人关闭的孤儿。 - 返回的 TagentConfig 逐字采纳有意义字段：Name
+    为空回退注册 id，MemoryStore 填充该 name 借用的 org store，MemStoreRelease
 
 func GetToolAgentFactory(id string) (ToolAgentFactory, bool)
     GetToolAgentFactory returns the factory for the given ID.
@@ -1892,4 +1748,3 @@ type UnconvergedRef struct {
     UnconvergedRef names a generation that is still held when a bounded close
     gives up. It is a report, not a force-close: the resources stay held until
     their producer confirms the stop.
-

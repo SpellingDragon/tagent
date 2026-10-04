@@ -1,3 +1,4 @@
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#outbound-delivery
 package main
 
 import (
@@ -40,17 +41,9 @@ var executableExts = map[string]bool{
 // 因不含 '/' 也不视为路径。'-' 置于字符类末尾以避免被当作范围操作符。
 var pathCandidateRE = regexp.MustCompile(`[\p{L}\p{N}_./-]+\.[\p{L}\p{N}-]{1,10}`)
 
-// ExtractFilePaths 从 agent 回复文本中解析本地文件路径。
-//
-// 识别规则：
-//  1. 匹配绝对路径（以 '/' 起头）或相对路径（含 '/' 或以 './'、'../' 起头）。
-//  2. 排除以 '://' 开头的 URL（http/https/ftp 等）。
-//  3. 候选必须以文件扩展名结尾（正则已保证）。
-//  4. 必须通过 os.Stat 确认存在且为普通文件；相对路径先按 workspaceDir 解析为绝对路径
-//
-// （workspaceDir 为空则跳过相对路径）。
-//  5. 硬性排除可执行文件（具有任意可执行权限位或扩展名在拒绝列表中）。
-//  6. 结果去重并保持首次出现顺序。
+// ExtractFilePaths 从 agent 回复文本中解析本地文件路径：六条识别规则（本地路径形态、
+// 排除 URL、必须带扩展名、必须存在且为普通文件、拒绝可执行、去重保序）全部成立才算。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#outbound-delivery
 func ExtractFilePaths(text, workspaceDir string) []string {
 	seen := make(map[string]bool)
 	var result []string

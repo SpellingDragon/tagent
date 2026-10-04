@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 package agent
 
 // turnStatus is the reduced terminal state of a single RunFlow turn, observed

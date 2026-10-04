@@ -145,15 +145,12 @@ func (m *SwappableModel) GenerateContent(ctx context.Context, request *model.Req
 	return out, nil
 }
 
-// GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来：只实现
-// GenerateContent 的装饰器会把具备迭代能力的底层模型**静默降级**成"通道＋协程"路径。
+// GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来。
 //
-//   - 惰性：构造返回的 Seq 不算调用——在调用方真正开始迭代前不加租约、不碰内层、不起协程。
-//   - 内层是 IterModel 时直接委托其迭代入口（真快路径，不做通道桥接）；否则才桥接。
-//   - 租约覆盖整个迭代（与 GenerateContent 同构），换出的模型不会在流中被关；提前停止或
-//     ctx 取消时排空上游，生产方不被卡住、租约最终必被释放。
-//   - 迭代路径不得把错误咽成"空迭代器的成功"：通道形态会把该错误返回给调用方，桥接侧
-//     至少必须记录，否则同一模型走两条路径会有一条静默失败。
+// - 构造返回的 Seq 不算调用：调用方真正开始迭代之前不加租约、不碰内层、不起协程。
+// - 内层是 IterModel 时直接委托其迭代入口，否则才做通道桥接；租约覆盖整个迭代，换出的模型不会在流中被关。
+// - 提前停止或 ctx 取消时排空上游；错误不得被咽成"空迭代器的成功"。
+// 契约: docs/wiki/rl/rl-architecture.md#swappable-model
 func (m *SwappableModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error) {
 	return func(yield func(*model.Response) bool) {
 		m.inFlight.Add(1)

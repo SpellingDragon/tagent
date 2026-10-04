@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
 package action
 
 import (
@@ -26,15 +27,8 @@ func trimToLineOffset(s string, n int) string {
 
 // StatusToSettle maps a tmux SessionStatus to a task-layer settle kind.
 //
-// It returns (kind, true) when the status is a settle point, or ("", false) for
-// intermediate/suppressed states (Running, FakeDead, FakeAlive) that are NOT
-// settles. The detector only makes the deterministic classification here; the
-// LLM interprets ambiguous kinds (stable vs suspect) downstream.
-//
-//	completed → SettleCompleted (process exited — definitely done)
-//	error → SettleCompleted (settled with failure; caller attaches Err)
-//	stable → SettleStable (output stable, process alive — usable/waiting)
-//	timed_out → SettleSuspect (quiet beyond fake-dead threshold — likely hung)
+// - (kind, true) is returned only at settle points; Running, FakeDead and FakeAlive are not.
+// - Ambiguous kinds (stable vs suspect) are interpreted downstream.
 func StatusToSettle(s SessionStatus) (task.SettleKind, bool) {
 	switch s {
 	case SessionCompleted, SessionError:

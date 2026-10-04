@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/governance-enforcement.md#denial-ledger
 package governance
 
 import (

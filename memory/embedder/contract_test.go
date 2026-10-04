@@ -10,7 +10,7 @@ import (
 
 // TestContract_AllImplementations 钉住三实现均满足 Embedder 批量语义（等长、顺序对应、非空、确定性）；新增供应商进 providers 表即自动受守护。
 //
-// 契约: docs/wiki/memory/memory-architecture.md#embedder
+// 契约: docs/wiki/memory/memory-architecture.md#embedder-contract
 func TestContract_AllImplementations(t *testing.T) {
 	texts := []string{"部署完成", "deploy finished", "用户偏好：简洁回复"}
 	providers := map[string]memory.Embedder{

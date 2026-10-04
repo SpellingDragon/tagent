@@ -164,9 +164,15 @@ def rl_token() -> str:
     return os.environ.get("TAGENT_RL_AUTH_TOKEN", "")
 
 def inject(url: str, content: str, timeout: float = 10.0) -> bool:
-    payload = json.dumps({"messages": [{"role": "user", "content": content}]}).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    body = {"messages": [{"role": "user", "content": content}]}
     tok = rl_token()
+    if tok:
+        # 入站邮件代表一位人类通信者的意图，声明血统使其轮次产出可向用户同步。
+        # 仅在携凭（端点已鉴权）时声明，与 Go 侧 declaration_requires_auth 同规则：
+        # 无 token 时声明会被 400，而注入重试循环永不收敛。
+        body["trigger_source"] = "user"
+    payload = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")

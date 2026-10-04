@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/compression-and-telemetry.md
 package compress
 
 // DefaultMaxTokens Compression defaults (single source; the agent package re-exports aliases).

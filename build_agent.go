@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#generations
 package tagent
 
 import (
@@ -107,7 +108,7 @@ func buildAgentDFS(
 	}
 
 	var memStore memory.MemoryStore
-	var hintTracker *ConsolidationHintTracker
+	var hintTracker *memory.ConsolidationHintTracker
 	var err error
 	var memStoreRelease func() error
 	if mode.isExecutorShell() {
@@ -228,7 +229,7 @@ func assembleAgentConfig(
 	loader *prompt.Loader,
 	memStore memory.MemoryStore,
 	degradationMgr *reliability.DegradationManager,
-	hintTracker *ConsolidationHintTracker,
+	hintTracker *memory.ConsolidationHintTracker,
 	cache map[string]*agent.TagentAgent,
 	mode buildMode,
 	stack map[string]bool,
@@ -500,7 +501,7 @@ func wireAgent(
 	memStore memory.MemoryStore,
 	memStoreRelease func() error,
 	etsHolder *memory.ErrorTrackingStore,
-	hintTracker *ConsolidationHintTracker,
+	hintTracker *memory.ConsolidationHintTracker,
 	mode buildMode,
 	cache map[string]*agent.TagentAgent,
 ) (*agent.TagentAgent, error) {
@@ -531,8 +532,8 @@ func wireAgent(
 	}
 
 	if cfg.WorkingDir != "" && name == cfg.Entry && mode.bindsProcessShared() {
-		auditor := NewAssetAuditor(cfg.WorkingDir, DefaultAssetPatterns(),
-			[]string{cfg.ConfigPath}, func(changes []AssetChange) {
+		auditor := evolution.NewAssetAuditor(cfg.WorkingDir, evolution.DefaultAssetPatterns(),
+			[]string{cfg.ConfigPath}, func(changes []evolution.AssetChange) {
 				cs := make([]agent.CognitiveAssetChange, 0, len(changes))
 				for _, c := range changes {
 					cs = append(cs, agent.CognitiveAssetChange(c))
@@ -646,24 +647,10 @@ func wireAgent(
 	return ta, nil
 }
 
-// buildAgentFace assembles an EXISTING agent's next-generation execution face
-// WITHOUT constructing a TagentAgent（热更换代不复制 agent 状态）:
-// shell-semantics store borrowing + the SAME assembleAgentConfig middle, then
-// agent.BuildExecutionFace. Refs resolve from cache — the caller supplies the
-// candidate domain (resident snapshot ∪ this round's hot-adds), so EVERY
-// owner — changed or not, factory-
-// declared or config-driven — contributes ZERO constructions; only a genuine
-// cache miss recurses into buildAgentDFS (via buildToolFromRef).
+// buildAgentFace assembles an EXISTING agent next-generation execution face
+// without constructing a TagentAgent: shell-semantics store borrowing plus the same assembly middle, then agent.BuildExecutionFace.
 //
-// Deliberately NOT built here (a face-only build has no consumer for them): the
-// degradation manager — the face has no Degradation field, and event-loop
-// degradation reporting reads the RESIDENT ta; hint tracker/ETS spill wiring —
-// face-owned tools get the raw borrowed store (no generation-local retention
-// leases on a shared store).
-//
-// A ToolAgentFactory owner takes this SAME path: the factory
-// returns a declaration, BuildExecutionFace derives its face, and the assembled
-// config rides the staged generation as runCfg — no second owner-birth shape.
+// - Refs resolve from cache; the caller supplies the candidate domain (resident snapshot plus this round hot-adds), so every owner contributes zero constructions and only a genuine cache miss recurses.
 func buildAgentFace(
 	name string,
 	acfg AgentConfig,
@@ -737,7 +724,7 @@ func buildAgentToolRef(
 	stack map[string]bool,
 	subagentCollectors ...func(name string, w *agent.AgentToolWrapper),
 ) (trpctool.Tool, bool, error) {
-	if tr.isRemoteRef() {
+	if tr.IsRemoteRef() {
 		a2aAgent, err := a2aagent.New(
 			a2aagent.WithName(tr.AgentID),
 			a2aagent.WithDescription(desc),
