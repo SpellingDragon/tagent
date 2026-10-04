@@ -12,19 +12,19 @@
   - 完成：`go build ./...` + `go vet ./...` + `go test ./agent/resources/ . -count=1 -short` 绿；分层断言 `TestArch_LayeredDependencyDirection` PASS（agent/resources 不得 import 根包）
   - 边界：函数体零改动；根包 API `tagent.RuntimeResources` 若被外部用则保留别名，否则直接限定名（grep 全仓定）
   - 前置：无
-- [ ] 1.2 `asset_drift.go` → `evolution/asset_drift.go`
+- [x] 1.2 完成：`git mv` 双文件入 evolution 包；`build_agent.go` 调用点限定（`evolution.NewAssetAuditor/DefaultAssetPatterns/AssetChange`）；`task_record_sink.go` 注释指向改 `evolution.AssetChange`；**坑：迁入后残留自引用 import 报 import cycle**（Go 视同包自 import 为环，移除即愈）；`DefaultAssetPatterns` 内的 `evolution.` 限定同除
   - 对象：整文件 322 行（`FileEntry`/`AssetChange`/`AssetAuditor`/`NewAssetAuditor`/`DiffAssetSnapshots`/`DefaultAssetPatterns`）；单测 `asset_drift_test.go`(197 行)
   - 做法：`git mv` 进 evolution 包；根包调用点（grep 六个导出符号名）改限定；`agent/task_record_sink.go` 的 `CognitiveAssetChange` 是独立类型**不动**，其注释"与根包 tagent.AssetChange 对应"改指 `evolution.AssetChange`
   - 完成：同 1.1 验证墙；`agent/task_record_sink.go` 注释引用不悬空（doc-refs 门）
   - 边界：函数体零改动；evolution 包不得因收留它而新增对根包的 import
   - 前置：无
-- [ ] 1.3 `consolidation_hint.go` → `memory/consolidation_hint.go`
+- [x] 1.3 完成：`git mv` 双文件入 memory 包；**实况修正**：`build_agent.go` 的 `newConsolidationHintTracker(acfg)` 是 wiring.go 里的根包私有包装（与 memory.NewConsolidationHintTracker(threshold, snooze) 签名不同），调用点保持走根包装、仅 wiring 内部限定 `memory.`——比计划少改一处、导出面零扩大
   - 对象：整文件 132 行（`ConsolidationHintTracker` 及方法）；单测 `consolidation_hint_test.go`(110 行)
   - 做法：`git mv` 进 memory 包；`build_agent.go` 4 处调用点（:111/:140/:232/:504）改 `memory.` 限定（该文件已 import memory ✓）
   - 完成：同 1.1 验证墙 + `go test ./memory/ -count=1 -short` 绿
   - 边界：函数体零改动；memory 包新增 import 仅限 event（已是其合法叶子）
   - 前置：无
-- [ ] 1.4 A 组提交（前置 1.1–1.3）
+- [x] 1.4 完成：分两笔独立提交（`580ecbc` resources、`d7904b3` drift+hint），各自 CI 四 job 绿；验证墙全过（-race 72.4s / GOMAXPROCS=1 56.8s / lint ok / godoc 再生成）
   - 做法：显式 pathspec（三对新路径 + 三对旧路径 + 调用点文件 + docs/api 再生成）
   - 完成：验证墙全套（build/vet/根包+受影响包 short/`-race` 根包/`GOMAXPROCS=1` 根包/lint 含六门/openspec strict）；CI 四 job 绿后勾
   - 边界：不混入 B 组
