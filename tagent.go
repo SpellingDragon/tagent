@@ -9,12 +9,13 @@ package tagent
 import (
 	"errors"
 	"fmt"
-	"github.com/SpellingDragon/tagent/config"
 	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/SpellingDragon/tagent/config"
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -486,7 +487,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			coord.recordApply(receipts)
 			appliedFromLastApply = appliedRecord
 		}
-		if fp, err := computeOrgFingerprint(&cfg); err == nil {
+		if fp, err := org.ComputeOrgFingerprint(&cfg); err == nil {
 			if snap, cerr := cfg.Clone(); cerr == nil {
 				coord.init(fp, snap)
 			} else {
@@ -514,7 +515,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("rollback snapshot clone: %w", rbErr))
 				return
 			}
-			rbp, rerr0 := computeOrgFingerprint(rollbackC)
+			rbp, rerr0 := org.ComputeOrgFingerprint(rollbackC)
 			if rerr0 != nil {
 				log.Errorf("[org-hotreload] rollback fingerprint FAILED: %v", rerr0)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 回滚指纹计算失败: %v", rerr0))
@@ -595,7 +596,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				coord.recordFailure(fmt.Errorf("config parse: %w", err))
 				return
 			}
-			fp, err := computeOrgFingerprint(fresh)
+			fp, err := org.ComputeOrgFingerprint(fresh)
 			if err != nil {
 				log.Errorf("[org-hotreload] fingerprint FAILED — serving previous: %v", err)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 指纹计算失败，沿用旧配置: %v", err))

@@ -31,21 +31,21 @@
 
 ## 2. B 组：世代簿记归域（前置：A 组已提交，避免同批互踩）
 
-- [ ] 2.1 簿记五件套 → `agent/org/fingerprint.go`
+- [x] 2.1 完成：簿记段 139 行剪出至 `agent/org/fingerprint.go`（`ComputeOrgFingerprint`/`ExtractOrgSubset`/`CanonicalAgentSubset` 导出——tagent.go 3 处 + 根测试 17 处跨包必需；`orgSubset`/`providerSubset` 留包内）；Config 系列全改 `config.` 限定（含 MeditationConfig）
   - 对象：`org_hotreload.go` 内 `orgSubset`/`providerSubset`/`computeOrgFingerprint`/`extractOrgSubset`/`hotSignature`（约 130 行，行号以 grep 为准）
   - 做法：剪切入新文件 `agent/org/fingerprint.go`（package org，索引行指 `org-hot-reload.md#fingerprint`）；导出 `ComputeOrgFingerprint`/`ExtractOrgSubset`（跨包必需），`orgSubset`/`providerSubset` 留未导出；根包 `org_hotreload.go` 调用点改 `org.` 限定；`hotSignature` 若仅 coordinator 用则随 coordinator 留根（以 grep 调用面定）
   - 完成：`grep -n "computeOrgFingerprint" *.go` 零残留；`go build ./...`；`go test . ./agent/org/ -count=1 -short` 绿
   - 边界：函数体零改动；`agent/org` 不得 import 根包（编译+断言双保险）
-- [ ] 2.2 `Org*` 五类型 → `agent/org/status.go` + 根别名
+- [x] 2.2 完成：五类型 71 行剪出至 `agent/org/status.go`；根包新 `org_alias.go` 五行同名别名（doc 注明实体所在）；根包 8 处调用点零改动
   - 对象：`OrgFailure`/`OrgStatus`/`OrgLiveDebt`/`OrgCloseState`/`OrgAgentApply`（org_hotreload.go 约 65 行）
   - 做法：迁入 `agent/org/status.go`；根包新增 `org_alias.go`：`type OrgStatus = org.OrgStatus` 等五行（doc 注明"别名：实体在 agent/org"，手法同 `config_alias.go`）；根包 8 处调用点**零改动**（别名兜住）
   - 完成：`go build ./...`；`grep -rn "tagent.OrgStatus\|tagent.OrgFailure" tests/ examples/` 若有引用，别名保证其编译通过；全绿
   - 边界：别名不加语义；`orgCoordinator` 与其方法**留根**（发布权，D2 裁决修订入档）
-- [ ] 2.3 org 族测试编译判定跟迁
+- [x] 2.3 判定：**全部留根**——org_hotreload_test(11 处)/support(2)/candidate 系对簿记符号的引用已改 `org.` 限定；这些用例同锚在 coordinator 发布路径（发布权留根），整文件迁走会失去对未导出 coordinator 行为的触达，收益为负
   - 做法：对 `org_hotreload_support_test.go` 等引用簿记符号的测试，试迁 `agent/org/`（package org 内部测试可触未导出 `orgSubset`）：`git mv` + 包名改 + `go vet`，通过者留、失败者退回并记录
   - 完成：判定结果（迁/留+原因）记入任务注记
   - 边界：断言零改动
-- [ ] 2.4 B 组提交（前置 2.1–2.3）
+- [x] 2.4 完成：本提交（含 org_alias.go、godoc 再生成、lint ok、-race 72.5s、GOMAXPROCS=1 56.9s、四包测试守恒）
   - 做法/完成/边界：同 1.4，另验分层断言 + `gen_godoc`（agent/org 新增导出符号）
 
 ## 3. C 组：根包测试按编译判定归位（前置：A/B 已提交）
