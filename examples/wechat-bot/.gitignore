@@ -53,9 +53,23 @@
 !resources/prompts/*.md
 resources/prompts/USER.md
 
-# Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded
+# Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded.
+# NOTE: gitignore semantics — a negation cannot resurrect files under a directory
+# that was already excluded, so every tracked skill dir must be named explicitly
+# (see tracked-hygiene lint); !skills/*/** alone does NOT cover second-level dirs.
 !skills/
-!skills/*/**
+!skills/agent-mail-send/
+!skills/agent-mail-send/**
+!skills/audio-separation-pipeline/
+!skills/audio-separation-pipeline/**
+!skills/go-service-ops/
+!skills/go-service-ops/**
+!skills/gopls-code-nav/
+!skills/gopls-code-nav/**
+!skills/ima/
+!skills/ima/**
+!skills/interview/
+!skills/interview/**
 skills/*/node_modules/
 
 # Re-ignore all dotfiles and dot-directories (runtime data)
