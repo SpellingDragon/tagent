@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/agent/org"
 	"github.com/SpellingDragon/tagent/agent/task"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/stretchr/testify/require"
 )
 
 func TestOrgFingerprint_StableAcrossEmptyChanges(t *testing.T) {
-	a, err := computeOrgFingerprint(cfgFor())
+	a, err := org.ComputeOrgFingerprint(cfgFor())
 	if err != nil {
 		t.Fatalf("fingerprint: %v", err)
 	}
@@ -33,7 +34,7 @@ func TestOrgFingerprint_StableAcrossEmptyChanges(t *testing.T) {
 	act.Agents["main"] = AgentConfig{Model: "gpt-x", CompressThreshold: 0.5, Tools: []ToolRef{{Kind: "tool", ID: "recall"}}}
 
 	for name, mod := range map[string]*Config{"gov": b, "mem": am, "api": c, "ct": act} {
-		fp, err := computeOrgFingerprint(mod)
+		fp, err := org.ComputeOrgFingerprint(mod)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -44,7 +45,7 @@ func TestOrgFingerprint_StableAcrossEmptyChanges(t *testing.T) {
 }
 
 func TestOrgFingerprint_ChangesOnOrgFields(t *testing.T) {
-	base, err := computeOrgFingerprint(cfgFor())
+	base, err := org.ComputeOrgFingerprint(cfgFor())
 	if err != nil {
 		t.Fatalf("fingerprint: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestOrgFingerprint_ChangesOnOrgFields(t *testing.T) {
 	for _, m := range mut {
 		c := cfgFor()
 		m.mod(c)
-		fp, err := computeOrgFingerprint(c)
+		fp, err := org.ComputeOrgFingerprint(c)
 		if err != nil {
 			t.Fatalf("%s: %v", m.name, err)
 		}
@@ -83,11 +84,11 @@ func TestOrgFingerprint_ChangesOnOrgFields(t *testing.T) {
 
 func TestOrgFingerprint_CanonicalStable(t *testing.T) {
 	c1, c2 := cfgFor(), cfgFor()
-	f1, err := computeOrgFingerprint(c1)
+	f1, err := org.ComputeOrgFingerprint(c1)
 	if err != nil {
 		t.Fatalf("fingerprint: %v", err)
 	}
-	f2, err := computeOrgFingerprint(c2)
+	f2, err := org.ComputeOrgFingerprint(c2)
 	if err != nil {
 		t.Fatalf("fingerprint: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestOrgFingerprint_CanonicalStable(t *testing.T) {
 // - 二者驱动子 agent 实例的解析；只改 yaml 时若不进指纹，这次翻转对热更完全隐身。
 func TestOrgFingerprint_ChangesOnGlobalModelDefaults(t *testing.T) {
 	base := &Config{Entry: "main", Provider: "zhipu", Model: "glm-5.3-flash"}
-	fp0, err := computeOrgFingerprint(base)
+	fp0, err := org.ComputeOrgFingerprint(base)
 	if err != nil {
 		t.Fatalf("baseline fingerprint: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestOrgFingerprint_ChangesOnGlobalModelDefaults(t *testing.T) {
 	} {
 		c := *base
 		mut.mut(&c)
-		fp, err := computeOrgFingerprint(&c)
+		fp, err := org.ComputeOrgFingerprint(&c)
 		if err != nil {
 			t.Fatalf("%s: fingerprint: %v", mut.name, err)
 		}
@@ -128,7 +129,7 @@ func TestOrgFingerprint_ChangesOnGlobalModelDefaults(t *testing.T) {
 // - 否则懒检查会静默走数值分支——变更不生效，也不告警。
 func TestMemoryFingerprint_DetectsMemoryOnlyChanges(t *testing.T) {
 	base := cfgFor()
-	orgFP, err := computeOrgFingerprint(base)
+	orgFP, err := org.ComputeOrgFingerprint(base)
 	if err != nil {
 		t.Fatalf("org fp: %v", err)
 	}
@@ -137,7 +138,7 @@ func TestMemoryFingerprint_DetectsMemoryOnlyChanges(t *testing.T) {
 		Model: "gpt-x", Tools: []ToolRef{{Kind: "tool", ID: "recall"}},
 		Memory: MemoryConfig{Type: "file", Path: "data/mem2"},
 	}
-	orgFP2, err := computeOrgFingerprint(mod)
+	orgFP2, err := org.ComputeOrgFingerprint(mod)
 	if err != nil {
 		t.Fatalf("org fp2: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestMemoryFingerprint_DetectsMemoryOnlyChanges(t *testing.T) {
 	a := orgMod.Agents["main"]
 	a.Model = "gpt-z"
 	orgMod.Agents["main"] = a
-	if ofp, err := computeOrgFingerprint(orgMod); err != nil || ofp == orgFP {
+	if ofp, err := org.ComputeOrgFingerprint(orgMod); err != nil || ofp == orgFP {
 		t.Errorf("non-memory change must alter the org fingerprint (err=%v)", err)
 	}
 }

@@ -3,6 +3,7 @@
 package tagent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/org"
 	"github.com/SpellingDragon/tagent/agent/resources"
 
 	"context"
@@ -30,7 +31,7 @@ import (
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
 func TestOrgFingerprint_AuditsEveryAgentConfigField(t *testing.T) {
 	ac := populatedAgentConfig()
-	raw, err := canonicalAgentSubset(&ac)
+	raw, err := org.CanonicalAgentSubset(&ac)
 	require.NoError(t, err)
 	inSubset := map[string]json.RawMessage{}
 	require.NoError(t, json.Unmarshal(raw, &inSubset))
@@ -81,7 +82,7 @@ func TestOrgFingerprint_CoversFullToolRef(t *testing.T) {
 	base := Config{Entry: "main", Agents: map[string]AgentConfig{
 		"main": {Model: "m", Tools: []ToolRef{{Kind: ToolKindTool, ID: "exec", Properties: map[string]interface{}{"workspace": "/a"}}}},
 	}}
-	baseFP, err := computeOrgFingerprint(&base)
+	baseFP, err := org.ComputeOrgFingerprint(&base)
 	require.NoError(t, err)
 
 	editMain := func(c *Config, mutate func(*AgentConfig)) {
@@ -108,7 +109,7 @@ func TestOrgFingerprint_CoversFullToolRef(t *testing.T) {
 		c2, cerr := base.Clone()
 		require.NoError(t, cerr)
 		editMain(c2, m.mutate)
-		fp2, err := computeOrgFingerprint(c2)
+		fp2, err := org.ComputeOrgFingerprint(c2)
 		require.NoErrorf(t, err, "mutation %q", m.name)
 		require.NotEqualf(t, baseFP, fp2,
 			"mutation %q did not change the org fingerprint — the change would not force a new generation", m.name)
@@ -127,7 +128,7 @@ func TestConfigClone_IsPrivateAndFingerprintNeutral(t *testing.T) {
 		Agents:    map[string]AgentConfig{"main": orig, "sub": {Model: "m2"}},
 		Providers: map[string]ProviderConfig{"p1": {Provider: "openai", APIEndpoint: "https://a"}},
 	}
-	fp, err := computeOrgFingerprint(&cfg)
+	fp, err := org.ComputeOrgFingerprint(&cfg)
 	require.NoError(t, err)
 	mc := cfg.Agents["main"]
 	mfp := config.AgentMemoryFingerprint(&mc)
@@ -136,7 +137,7 @@ func TestConfigClone_IsPrivateAndFingerprintNeutral(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, clone)
 
-	clonedFP, err := computeOrgFingerprint(clone)
+	clonedFP, err := org.ComputeOrgFingerprint(clone)
 	require.NoError(t, err)
 	require.Equal(t, fp, clonedFP, "clone must be fingerprint-neutral")
 	cmc := clone.Agents["main"]

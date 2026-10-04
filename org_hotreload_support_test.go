@@ -332,7 +332,7 @@ func aliasYAML(compressBlock string) string {
 
 // writeCfg writes content and returns the config loaded through the REAL parse path
 // (LoadConfig runs ApplyDefaults → FoldModelRefAliases), which is exactly what the
-// reloader feeds to computeOrgFingerprint on a fresh check (tagent.go:693).
+// reloader feeds to org.ComputeOrgFingerprint on a fresh check (tagent.go:693).
 func writeCfg(t *testing.T, dir, name, content string) *Config {
 	t.Helper()
 	p := filepath.Join(dir, name)

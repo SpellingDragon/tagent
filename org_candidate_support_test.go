@@ -84,7 +84,7 @@ func jsonFieldName(f reflect.StructField) string {
 
 func mustFP(t *testing.T, c *Config) string {
 	t.Helper()
-	fp, err := computeOrgFingerprint(c)
+	fp, err := org.ComputeOrgFingerprint(c)
 	require.NoError(t, err)
 	return fp
 }
