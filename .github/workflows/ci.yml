@@ -19,7 +19,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth 2 gives the commit-scope lint stage a parent to diff against:
+      # the default shallow checkout grafts HEAD into a parentless commit, where
+      # `git show --name-only` lists the whole tree.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-go@v5
         with:
@@ -62,6 +67,14 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
+      # Root package at the scheduling floor: with one P, a witness cannot be
+      # satisfied by whichever round happens to arrive first, so the attribution
+      # discipline of the in-flight/pinned-hop assertions is actually exercised.
+      # Admitted after three consecutive green local runs plus 75 targeted runs
+      # under GOMAXPROCS=1.
+      - name: Test (root package at the scheduling floor)
+        run: GOMAXPROCS=1 go test . -short -count=1
+
       # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
       # totals in scripts/comment_policy/baseline.json but never raise one. Slots are
       # keyed by rule alone, not by (file, rule), so moving comment text between files
@@ -93,8 +106,8 @@ jobs:
       # command (compile error / bad package / timeout) can never be reported
       # as success. Package set widened to the memory SUBpackages, plugin, and
       # rl (was: top-level memory only, no plugin/rl).
-      - name: Race (memory subpkgs + agent + evolution + event + tools + plugin + rl)
-        run: ./scripts/race_check.sh ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
+      - name: Race (root + memory subpkgs + agent + evolution + event + tools + plugin + rl)
+        run: ./scripts/race_check.sh . ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the

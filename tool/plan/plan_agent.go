@@ -5,6 +5,7 @@
 // PlanAgent embeds *tagentagent.TagentAgent and overrides Run to intercept
 // action=progress requests, handling them via direct file I/O
 // instead of the full ReAct loop.
+// 契约: docs/wiki/tool/tool-architecture.md#extra-params
 package plan
 
 import (

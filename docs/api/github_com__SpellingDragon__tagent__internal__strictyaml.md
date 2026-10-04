@@ -3,8 +3,6 @@ package strictyaml // import "github.com/SpellingDragon/tagent/internal/strictya
 Package strictyaml 是所有配置入口共用的**唯一**严格解码实现：未知字段一律让加载明确
 失败，而不是静默忽略一个拼错的关键字。一处实现、多处调用——新增配置入口必须走本包， 不得另立第二套严格度。
 
-契约: docs/wiki/platform/platform-subsystems.md#strict-decode
-
 FUNCTIONS
 
 func DecodeByExt(path string, data []byte, out any) error
@@ -15,4 +13,3 @@ func DecodeJSON(data []byte, out any) error
 
 func DecodeYAML(data []byte, out any) error
     DecodeYAML 严格解析 YAML：拒绝未知字段，并拒绝首个文档之后的任何尾随文档——静默忽略 第二个文档会让用户以为其中的配置已经生效。
-

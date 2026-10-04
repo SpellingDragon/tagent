@@ -52,7 +52,7 @@ func TestActionTool_CloseIdempotent(t *testing.T) {
 }
 
 func TestActionTool_CloseWithoutMonitor(t *testing.T) {
-	ct := &ActionTool{}
+	ct := &ActionTool{residentMetaDirOverride: t.TempDir()}
 	if err := ct.Close(); err != nil {
 		t.Fatalf("Close() returned error: %v", err)
 	}

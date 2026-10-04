@@ -243,25 +243,12 @@ func (cm *ContextManager) SetOrgReloadSyncCheck(fn func()) {
 	cm.orgReloadSync = fn
 }
 
-// BeginTurn is the ONE place a business turn takes its organization execution
-// binding: the armed org-config check runs first
-// (same entry the ops hook CheckOrgReload uses — one publish path, no second
-// effective route), then the executor in force is handed to the turn to pin.
+// BeginTurn is the ONE place a business turn takes its organization execution binding:
+// it pins the executor in force and returns the release that must run when the turn ends.
 //
-// Call it after the input batch is frozen and OUTSIDE the transport-retry loop:
-// every attempt, model iteration and tool round of that turn then runs on the
-// returned runner (RunFlowWithExecutor), so a publication happening mid-turn
-// cannot split the turn across generations. Sub-agent invocations do not call
-// this: their instances, executor and delegation tree were constructed inside
-// the generation that published them.
-//
-// The returned release MUST run when the turn ends (the loop folds it into its
-// per-turn cleanup alongside endTurnSpan). 「acquire 后立即登记」: the
-// in-flight reference is registered BEFORE the executor is handed out, so a
-// publish and its retire-sweep landing in the gap between handing out the
-// executor and entering the run body cannot close the very runner this turn is
-// about to run. 一个业务 turn 只登记 EXACTLY ONCE 次，且登记在它自己的代际上：
-// 计数由各代的 in-flight 引用持有，不存在第二份聚合计数。
+// - Call it after the input batch is frozen and OUTSIDE the transport-retry loop; the whole turn, every attempt, model iteration and tool round, then runs on the returned runner via RunFlowWithExecutor.
+// - Sub-agent invocations do not call this: their instances, executor and delegation tree were constructed inside the generation that published them.
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 func (cm *ContextManager) BeginTurn() (runner.Runner, func()) {
 	lease := cm.BeginTurnLease()
 	return lease.Runner(), lease.Release
@@ -558,25 +545,13 @@ func buildRunner(cfg ContextManagerConfig, fwAgent *llmagent.LLMAgent) runner.Ru
 	return runner.NewRunner(cfg.Name, fwAgent, runnerOpts...)
 }
 
-// publishActiveLocked is the ONE linearization body of an executor switch. It
-// records `face` as the published execution configuration, then installs the
-// generation running `r` as the active one, and returns the binding that becomes
-// retired — which the caller MUST retire once it has dropped executorMu, so a slow
-// runner Close never happens under the executor lock.
+// publishActiveLocked is the ONE linearization body of an executor switch: it records
+// the published face, installs the generation running the new runner as active, and
+// returns the binding the caller must retire once executorMu has been dropped.
 //
-// `prepared` is the binding a staged generation already wired (declaration holds,
-// face snapshot). It is non-nil only on the org path, where the binding had to
-// exist and be wired BEFORE any owner made it visible; a single-owner publish has
-// no such pre-condition and passes nil, so the binding is snapshotted here from
-// the face just recorded.
-//
-// Re-publishing the same executor object is deliberately NOT a new generation: one
-// runner object gets exactly one close, so a redundant publish (a rollback landing
-// on the same face, a caller re-submitting the current candidate) must not create a
-// second identity for it. The recorded face still advances — the binding keeps the
-// face it was BUILT from, so advancing what is *recorded* never rewrites what this
-// generation actually routes. ( merged the org activation path onto this same
-// body, so no copy can skip the face advance.)
+// - prepared is the binding a staged generation already wired; non-nil only on the org path, where the binding had to exist and be wired before any owner made it visible. A single-owner publish passes nil and snapshots the binding from the face recorded here.
+// - Re-publishing the same executor object is not a new generation: one runner object gets exactly one close, while the recorded face still advances without rewriting what this generation routes.
+// 契约: docs/wiki/agent/execution-generations.md#single-linearization-body
 func (cm *ContextManager) publishActiveLocked(face ContextManagerConfig, r runner.Runner, prepared *execBinding) *execBinding {
 	cm.execCfg = face.isolatedCopy()
 	if cm.active != nil && cm.active.run == r {
@@ -1060,14 +1035,10 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 }
 
 // assembleRequest builds the final message list sent to the model:
+// [system] + render(projection) (+ live task board, injected by a later callback).
 //
-//	[system] + render(projection) (+ live task board, injected by a later callback)
-//
-// The projection is the SOLE assembly source.
-// Nothing is read back from the framework's message tail — every event
-// (user input, tool calls, tool results, finals, bus injections) reaches the
-// projection through the event-plugin pipeline or persistBusEvent, so the
-// data flow across the framework boundary is strictly one-way.
+// - The projection is the SOLE assembly source; nothing is read back from the framework message tail.
+// 契约: docs/wiki/agent/agent-architecture.md#framework-boundary
 func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.BeforeModelArgs) {
 
 	refs := cm.projection.GetAll()
@@ -1377,22 +1348,12 @@ func isCompletePreparedFact(f *memory.FullEvent) bool {
 	return f != nil && f.EventKey != 0
 }
 
-// persistBusEvent persists an EventBus event to MemoryStore and appends it
-// to the compress.SessionProjection immediately. This ensures that all messages
-// visible to the LLM are also tracked in the projection — eliminating the
-// "visible but not projected" state that caused ordering bugs.
+// persistBusEvent persists an EventBus event to MemoryStore and appends it to the
+// compress.SessionProjection at the same point, so everything visible to the LLM is
+// also tracked in the projection.
 //
-// The event is stored as a FullEvent with:
-// - EventKey: Snowflake-generated (using ContextManager's partitionID)
-// - EventType: inferred from message role
-// - Content/EventSummary: from the AgentEvent's Message payload
-//
-// F2 fix: returns true when the fact is stored OR was already stored (replay
-// dedup path). Returns false only when StoreEvent failed and projection append
-// was gated. The  submit gate maps a false to submitTransient (no model, claims
-// requeued), so 's cm.turnEcho — and thus the MemoryPlugin echo skip — is installed
-// ONLY once every selected fact is committed; otherwise the plugin would skip an input
-// that was never durably stored and the input would be lost.
+// - Returns true when the fact is stored or was already stored (replay dedup); false only when StoreEvent failed and the projection append was gated, which the submit gate maps to a transient submit.
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func (cm *ContextManager) persistBusEvent(evt *AgentEvent) bool {
 	ok, _ := cm.persistBusEventCommitted(evt)
 	return ok
@@ -1416,23 +1377,10 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		msg.Role = model.RoleUser
 	}
 
-	// Resolve the canonical fact for this event (fix-resident-reliability-
-	// boundaries D2/D3 + task 3.5):
-	// - Durable claim WITH a frozen prepared_fact (normal reliable path):
-	// reuse it VERBATIM. Its EventKey, summary and attribution were frozen
-	// by the write-before prepare barrier on the first claim, so a replay
-	// never re-stamps time/rollout/bundle or double-writes the fact (F1/F4).
-	// If those bytes are undecodable OR incomplete it is current-format
-	// corruption: the store is GATED (return false) and surfaces — the
-	// regenerate-key weak fallback is DELETED (「删除重新生成 key 的
-	// 恢复分支」); minting a fresh key would silently double-write the input
-	// under a new identity. The claim stays and replays.
-	// - Durable claim but NO prepared_fact: the barrier did not succeed for
-	// this envelope, so per D2「准备失败不调用 StoreEvent」we write NOTHING and
-	// return false — the claim stays and replays; a half-prepared input
-	// never silently enters the fact chain.
-	// - No claim (volatile path / direct test call): build a fresh canonical
-	// fact, exactly as before.
+	// Resolve the canonical fact for this event: reuse the frozen prepared fact
+	// verbatim on a durable claim, gate the store when the claim carries no usable fact,
+	// and build a fresh one only on the volatile path.
+	// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
 	var fullEvent memory.FullEvent
 	switch {
 	case evt.claim != nil && len(evt.claim.PreparedFact) > 0:
@@ -1552,17 +1500,11 @@ func (cm *ContextManager) commitReceiptFact(receipt memory.FullEvent) error {
 	return nil
 }
 
-// writeSettleFeedback把确定性任务裁决写为 feedback
-// 事件（因果边指向 task_settled 事件）。completed→positive / failed→negative；
-// suspect/alive-detached/未知状态不写（只记确定性裁决，防噪声污染 guardrail）。
-// 失败仅记日志（反馈是旁路产物，不阻塞主链路）。
+// writeSettleFeedback 把确定性任务裁决写为 feedback 事件，因果边指向 task_settled 事件。
 //
-//	不变量：feedback **不是** durable 提交/ack 凭据。本函数仅在 `stored` 已为 true
-//
-// （事实链已 durable）且投影已 append 之后运行，位于 ack 下游；BindFeedback 失败不撤销
-// 提交、不影响 `stored` 返回值，也不影响可靠
-// inbox 的 durable 判定（其凭据是 PublishReceipt.Durable，与 feedback 无关）。guardrail 的
-// negative_feedback_rate 只作行为信号，绝不作输入确认/重放凭据。
+// - completed 记 positive、failed 记 negative；suspect、alive-detached 与未知状态不写，防噪声污染 guardrail；写失败仅记日志。
+// - 反馈不是 durable 提交或 ack 的凭据，只在事实链 durable 且投影 append 之后运行。
+// 契约: docs/wiki/memory/memory-architecture.md#feedback-bind
 func (cm *ContextManager) writeSettleFeedback(settledKey int64, md map[string]any) {
 	if cm.memStore == nil || md == nil {
 		return

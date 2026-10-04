@@ -1,3 +1,4 @@
+// 契约: docs/wiki/reliability/durable-delivery.md#degradation-ladder
 package reliability
 
 // MemorySink 把 DegradationManager 适配为 memory.DegradationSink（string 依赖名 → typed Dependency）。

@@ -48,10 +48,19 @@ while IFS= read -r pkg; do
     bot:*) mod="examples/wechat-bot"; pkg="${pkg#bot:}" ;;
   esac
   name="$(slug "$pkg")"
+  # Index lines (契约:/规格:) are source-side navigation pointers, not API prose: go doc
+  # concatenates every file-level index of a package into a run-on blob in the overview.
+  # The pointer duty is enforced by scripts/comment_policy, so the generated page drops
+  # lines that start with an index marker.
   if [ -n "$mod" ]; then
-    (cd "$mod" && go doc -all "$pkg") > "$gen_root/$name.md" 2>/dev/null || echo "no documentation" > "$gen_root/$name.md"
+    body="$(cd "$mod" && go doc -all "$pkg" 2>/dev/null)" || body=""
   else
-    go doc -all "$pkg" > "$gen_root/$name.md" 2>/dev/null || echo "no documentation" > "$gen_root/$name.md"
+    body="$(go doc -all "$pkg" 2>/dev/null)" || body=""
+  fi
+  if [ -z "$body" ]; then
+    echo "no documentation" > "$gen_root/$name.md"
+  else
+    printf '%s\n' "$body" | sed -E -e '/(契约|规格):/d' -e 's#^[[:space:]]*docs/[^[:space:]]+$##' | cat -s > "$gen_root/$name.md"
   fi
   count=$((count + 1))
   printf '| `%s` | [%s.md](%s.md) |\n' "$pkg" "$name" "$name" >> "$index"

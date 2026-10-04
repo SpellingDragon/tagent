@@ -1,0 +1,122 @@
+[
+ {
+  "file": "build_cycle_test.go",
+  "verdict": "GREY",
+  "first": "Config"
+ },
+ {
+  "file": "cross_generation_support_test.go",
+  "verdict": "GREY",
+  "first": "delegServed"
+ },
+ {
+  "file": "cross_generation_test.go",
+  "verdict": "GREY",
+  "first": "delegYAML"
+ },
+ {
+  "file": "delegation_test.go",
+  "verdict": "GREY",
+  "first": "LoadConfig"
+ },
+ {
+  "file": "guardrails_test.go",
+  "verdict": "GREY",
+  "first": "drillModel"
+ },
+ {
+  "file": "modelref_test.go",
+  "verdict": "GREY",
+  "first": "# github.com/SpellingDragon/tagent/tests_test"
+ },
+ {
+  "file": "org_candidate_close_drain_test.go",
+  "verdict": "GREY",
+  "first": "sdCloseYAML"
+ },
+ {
+  "file": "org_candidate_rollback_test.go",
+  "verdict": "GREY",
+  "first": "writeGateConfig"
+ },
+ {
+  "file": "org_candidate_support_test.go",
+  "verdict": "GREY",
+  "first": "AgentConfig"
+ },
+ {
+  "file": "org_candidate_test.go",
+  "verdict": "GREY",
+  "first": "populatedAgentConfig"
+ },
+ {
+  "file": "org_diagnostics_test.go",
+  "verdict": "GREY",
+  "first": "OrgAgentApply"
+ },
+ {
+  "file": "org_hotreload_closed_owner_test.go",
+  "verdict": "GREY",
+  "first": "ownerWriter"
+ },
+ {
+  "file": "org_hotreload_lockfree_read_test.go",
+  "verdict": "GREY",
+  "first": "scHotAddNumericYAML"
+ },
+ {
+  "file": "org_hotreload_support_test.go",
+  "verdict": "GREY",
+  "first": "Config"
+ },
+ {
+  "file": "org_hotreload_test.go",
+  "verdict": "GREY",
+  "first": "cfgFor"
+ },
+ {
+  "file": "org_hotreload_timing_test.go",
+  "verdict": "GREY",
+  "first": "writeBumped"
+ },
+ {
+  "file": "owner_retirement_test.go",
+  "verdict": "GREY",
+  "first": "testStore"
+ },
+ {
+  "file": "partition_collision_test.go",
+  "verdict": "GREY",
+  "first": "stubModel"
+ },
+ {
+  "file": "prompts_test.go",
+  "verdict": "GREY",
+  "first": "defaultPromptsFS"
+ },
+ {
+  "file": "registry_test.go",
+  "verdict": "GREY",
+  "first": "runtimeConfig"
+ },
+ {
+  "file": "resources_stubs_test.go",
+  "verdict": "GREY",
+  "first": "# github.com/SpellingDragon/tagent/tests_test"
+ },
+ {
+  "file": "resources_test.go",
+  "verdict": "GREY",
+  "first": "Config"
+ },
+ {
+  "file": "tagent_test.go",
+  "verdict": "GREY",
+  "first": "Config"
+ },
+ {
+  "file": "test_stores_test.go",
+  "verdict": "GREY",
+  "first": "# github.com/SpellingDragon/tagent/tests_test"
+ }
+]

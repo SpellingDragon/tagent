@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/cognitive-asset-guard.md
 package action
 
 import "regexp"

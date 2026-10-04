@@ -194,25 +194,10 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 }
 
 // newTaskSettledEvent builds a self-contained external_input event describing a
-// background task that has settled, so the persistent loop reclaims it into a
-// new turn. The event body is a COMPACT SINGLE-LINE trajectory form
-// : `[task settled] <marker> <desc>
-// (id=<short>) <status> → 结果: <inline|spill>` — dense, append-only friendly,
-// and information-lossless (task_id / desc / status / error / result-or-spill
-// ticket all present; only layout redundancy is dropped). Result bounding keeps
-// the event body BOUNDED so recalling it can never re-inject an oversized
-// result: results over maxChars spill to a file under outputDir
-// (workspace.Cleaner bounds the directory) and the Content carries the path
-// ticket + tail preview; consumption goes through read_file paging. Write
-// failure degrades to inline full text (availability over bounding).
-// maxChars<=0 or empty outputDir disables spillover (tests / small results).
-// Metadata authority contracts:
-//   - settle_notice marks the event as an authentic notice — fold eligibility
-//     is verified against this stored mark (D10), never the body prefix, so a
-//     user message imitating the notice shape stays unmarked.
-//   - sig.Lineage outranks the spawn-time Spec.Origin: retirement stamps
-//     task-retired on the settle signal only; Origin stays immutable so a
-//     resumed task's later settles keep their original value.
+// background task that has settled, so the persistent loop reclaims it into a new turn.
+//
+// - Body is a compact single-line trajectory form: dense, append-only friendly and information-lossless (task_id, desc, status, error and the result-or-spill ticket are all present; only layout redundancy is dropped).
+// - Results over maxChars spill to a file under outputDir, bounded by workspace.Cleaner, and the content carries the path ticket plus a tail preview; consumption goes through read_file paging. Write failure degrades to inline full text: availability over bounding.
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	marker, statusWord := settleMarkerAndStatus(sig)
 
@@ -278,25 +263,9 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 
 // EventBus is a per-agent ordered event queue.
 //
-// Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent callbacks,
-// and the AgentLoop itself) call Publish to enqueue events.
-//
-// The AgentLoop is the sole consumer: it calls Pull to block until at least one
-// event arrives, then non-blocking drains all remaining pending events.
-//
-// Design rationale: a single consumer (AgentLoop) means no fan-out races,
-// no ordering guarantees across consumers, and simple backpressure (channel
-// fills up → Publish blocks).
-//
-// Durable mode (lossless under D2): with an Inbox
-// configured, ALL inbound events are persisted to inbox-v2 BEFORE the durable
-// receipt — the channel carries only wake-ups, never the durable truth. Each
-// message slot keeps a lossless JSON snapshot of the original AgentEvent
-// (ID/Type/Source/Timestamp/full Message/business Metadata), so a restart
-// restores everything inbox-v1 dropped . Durable envelopes are consumed
-// strictly in enqueue order (zero-padded seq); volatile channel events are
-// best-effort by definition. Receipted items replaying after a crash are
-// Ack-skipped without re-execution.
+// - Producers (InjectMessage, TmuxMonitor, MeditationManager, sub-agent callbacks, the AgentLoop itself) call Publish to enqueue.
+// - The AgentLoop is the sole consumer: Pull blocks until at least one event arrives, then drains all remaining pending ones non-blocking. A single consumer means no fan-out races and simple backpressure.
+// - Durable mode: with an Inbox configured, all inbound events are persisted to inbox-v2 before the durable receipt, and each slot keeps a lossless JSON snapshot of the original AgentEvent, so the channel carries only wake-ups and never the durable truth.
 type EventBus struct {
 	ch chan *AgentEvent
 
@@ -359,6 +328,16 @@ func (b *EventBus) CloseDurable() error {
 		return nil
 	}
 	return b.inbox.Close()
+}
+
+// durableInbox returns THIS bus's own inbox owner handle, nil in volatile mode.
+// A caller that needs inbox operations while the bus is live uses the owner here
+// instead of opening a second instance over the same directory.
+func (b *EventBus) durableInbox() *reliability.Inbox {
+	if b == nil {
+		return nil
+	}
+	return b.inbox
 }
 
 // DurablePending returns the unconfirmed durable envelope count (diagnostics).

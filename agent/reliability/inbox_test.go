@@ -165,6 +165,7 @@ func TestInbox_CorruptItemQuarantined(t *testing.T) {
 	corrupt := filepath.Join(in.Dir(), "00000000000000000002.json")
 	require.NoError(t, os.WriteFile(corrupt, []byte("{not json"), 0o644))
 
+	require.NoError(t, in.Close())
 	in2, err := NewInbox(dir, 10)
 	require.NoError(t, err)
 	e, _, err := in2.ClaimNext()
@@ -184,6 +185,7 @@ func TestInbox_UnknownVersionQuarantined(t *testing.T) {
 	require.NoError(t, os.WriteFile(v1,
 		[]byte(`{"request_id":"old","source":"user","state":"pending","messages":[{"role":"user","content":"x"}]}`), 0o644))
 
+	require.NoError(t, in.Close())
 	in2, err := NewInbox(dir, 10)
 	require.NoError(t, err)
 	e, _, err := in2.ClaimNext()
@@ -385,7 +387,7 @@ func TestInbox_ReceiptAndAckRequireDurableCompletion(t *testing.T) {
 	bad, rerr := readEnvelope(p2)
 	require.NoError(t, rerr)
 	bad.Completion = nil
-	_, werr := writeEnvelopeFile(p2, bad)
+	_, werr := in.writeEnvelopeFile(p2, bad)
 	require.NoError(t, werr)
 	require.ErrorContains(t, in.Ack(p2), "without a durable completion")
 	require.FileExists(t, p2, "a contradictory receipted item is kept for inspection, never deleted per status string")

@@ -511,6 +511,11 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
 
+### 工具自访问的抽象接口面（accessor）
+
+`tool/accessor.go` 定义 `MemoryStoreAccessor` 与 `SkillRepository`：工具经最小接口自访问记忆与技能，不耦合具体存储实现——这是“工具自访问”设计原则的落点，引擎能力位判定见 6.0 节。
+
+<a id="tool-accessor"></a>
 <a id="declaration-stability"></a>
 ### 声明区与向量能力隔离（前缀缓存稳定性）
 
@@ -520,6 +525,7 @@ recall 一族工具对模型呈现的 `Declaration` 里**没有任何向量或�
 
 声明文本还不得出现 `embedding`／向量存储／索引结构／融合算法一类实现字样。理由：声明是模型侧请求前缀的一部分，一旦随部署配置漂移，整段前缀缓存失效，且模型在两次会话里看到的是同一个工具的两种签名。
 
+<a id="recall-agent"></a>
 ### 6.1 RecallAgent — orchestrate 分支的内部编排引擎（定位收窄）
 
 RecallAgent 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答——适用于多跳因果追溯（trace）、跨轮收窄等复杂场景；作为统一 `recall` 工具 `orchestrate` 分支的编排引擎（接线后），其子工具不再对主 agent 直接暴露；确定性召回经参数形态直达，不绕行编排。
@@ -639,6 +645,8 @@ System prompt 存储在 `resources/prompts/knowledge_agent.md`：
 ### 8.1 执行模型（tmux + 任务层）
 
 ActionTool 是**无状态执行器**：`Call` 创建 tmux 会话与会话绑定的 `TmuxSettleDetector`，经调用上下文注入的 `TaskSpawner` spawn 为任务——dense 窗口内结算则内联返回，越窗返回 ACK（含 task id），后台结算经 `task_settled` 事件回收 turn。
+
+结算结果携带命令、会话 ID、终态与捕获输出，由框架记录为 `role=tool` 消息——执行痕迹进事实链，不留在工具返回值里。
 
 | 路径 | 条件 | 行为 |
 |------|------|------|
@@ -782,6 +790,7 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 ---
 
+<a id="resident-continuity"></a>
 ## 九·A、跨重启连续（R2/R3，resident-continuity）— ActionTool 的声明式投影与重挂
 
 任务与常驻会话的跨重启语义在本模块落地（事实链 fold 的数据源与闭包工厂均在 `tool/action`）：
@@ -807,6 +816,8 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 冷启动/rebuild 壳显式重入（幂等，已跟踪会话跳过）：以 **tmux list 为 liveness 真源**对账 ResidentMeta 目录，逐会话 `reattachOne`（新 detector 入 monitor 回调链）→ 任务板 suspect 任务经 **TaskID 桥**（`IsTrackedSession`）确定性提升回 running。`CleanupOrphanSessions` 的 orphan 语义重定义：**仅无主生成名会话**——`n-` named 会话排除（否则 cleanup 先于 reattach 屠杀常驻）。
 
 ## 十、TmuxExecutor — Tmux Session 管理
+
+配置 `run_as_user` 时，全部 tmux 命令经 `sudo -n -u <user> [-g <group>] tmux` 包装：tmux server 与所有会话都跑在受限账号下，这是 OS 级用户隔离，不是沙箱。
 
 ### 10.1 核心操作
 
@@ -1210,6 +1221,32 @@ recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall`
 
 配置面（工具 `properties`）识别 `endpoint`、`api_key_env`、`search_engine`、`count` 四个键，未给的一律取默认。
 
+
+<a id="delegation-retry"></a>
+## 十七、委派调用的取消归属与重试形状
+
+`agent.Run` 是异步的：它立即返回事件 channel，子 agent 在后台 goroutine 里产出事件。于是取消的归属必须跟着流的末端走，而不是跟着函数返回走——`cancel` 不得 `defer` 在发起处，那会在调用方读完 channel 之前就把上下文取消掉；正确做法是把返回的 channel 包一层 goroutine，在 channel 关闭之后调用 `cancel`。
+
+重试策略位于上一层 `runAndCollect`，规则是**一次 REMOTE 尝试至多重试一次**，且重试包住整个尝试（发送 + 排空）。理由在于传输失败实际出现的形状：A2A client 把失败的请求上报为一个携带 `Response.Error` 的**事件**，而 `Run` 自身返回 channel 与 nil error。只判断"`Run` 返回错误"的分支永远不会命中它被写出来时想覆盖的那种形状——一次 503 会直接把父调用打死（见 `a2a_delegation_test.go`）。
+
+两次尝试使用**同一个 invocation 与同一个 wrapper 实例**，也就是发起调用当初所绑定的目标：租约继承意味着重试乘在发起调用的绑定上，绝不对"那时已经发布的代"重新解析。
+
+<a id="tool-agent-factory"></a>
+## 十八、ToolAgentFactory 只装配执行配置，不构造 agent
+
+出生与发布各只有一条路：org 拥有唯一的**出生路径**（`wireAgent` 组装每一个真实 owner——store-lease 槽、drain 接线、任务域恢复都在那里接上），以及唯一的**发布路径**（`stageOrgGenerations` 为每个属主、每一代推进一张面）。
+
+工厂若返回成品 `*TagentAgent`，就在这两条路之外造出了第二种 owner 出生。它永远无法经面路径推进，因此每次发布都必须重建整个 agent，留下无人关闭的孤儿；而每一个被钉住的委派会持续读到过期的构造配置。
+
+返回的 `*TagentConfig` 在其有意义之处被逐字采纳：
+
+| 字段 | 规则 |
+|---|---|
+| `Name` | 尊重工厂的选择（这是旧契约"产物整只使用"的承诺）；为空时回退到注册 id |
+| `MemoryStore` | 用该 name 所借用的 org store 填充 nil——自己开 store 的工厂不得同时领到 org 的 lease |
+| `MemStoreRelease` | 恒为 org 的那一个，由本次调用之后的装配填充——工厂既不留存也不自造释放句柄 |
+
+装配为它构造的每一代重新调用工厂，并把那一代的值交进去；因此一份由这些值推导出来的声明会随配置一起移动。
 
 ## 已知缺口与演进方向
 

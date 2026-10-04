@@ -41,6 +41,70 @@ graph TB
     MREG --> MCALL["mcp_call / mcp_discover"]
 ```
 
+<a id="composition-root"></a>
+### 顶层装配根（package tagent）
+
+根包是 tagent 应用的装配组合根：封装 agent 实例化过程，按配置组装 `TagentAgent` 并接线跨边界依赖（模型解析见[模型解析与轨迹包裹](#model-wiring)）。内建工具经 `RegisterBuiltinTools()` 一次性注册（`registry.go`），外部工具经 `RegisterPlainTool()` 与 `RegisterToolAgent()` 注册；只有**既注册、又在该 agent 配置中声明**的工具才可用。`builtin.go` 承载内建 plain 工具的工厂函数。
+
+<a id="config-surface"></a>
+### 顶层配置面（Config）
+
+`Config` 声明式且可序列化（YAML/JSON）；运行时依赖（模型实例、记忆存储等）经 Option 函数注入。设计以 agent 为中心：每个 agent 描述自己的设置（model、memory、tools）与通信意图（调用哪些 agent），顶层持有按 agent 名索引的配置表。
+
+```yaml
+agents:
+  tagent:
+    model: glm-4-flash
+    prompt_dir: resources/prompts
+    system_prompt:
+      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
+    memory:
+      type: file
+      path: /data/tagent/events
+    tools:
+      - agent: knowledge
+        description_file: knowledge_tool_desc.md
+        event_params: [event_key]
+      - agent: recall
+        description_file: recall_tool_desc.md
+        event_params: [event_key]
+      - kind: tool
+        id: exec
+        description_file: action_tool_desc.md
+  knowledge:
+    model: glm-4-flash
+    prompt:
+      files: [knowledge_agent.md]
+    memory:
+      type: memory
+    max_tool_iterations: 5
+    max_tokens: 4096
+  recall:
+    model: glm-4-flash
+    prompt:
+      files: [recall_agent.md]
+    memory:
+      type: memory
+    max_tool_iterations: 5
+```
+
+工具私有配置走 `ToolRef.properties`（map[string]any），由各工具工厂反序列化为自己的 typed struct——共享结构不被工具私有字段污染。如 exec 工具在其中声明 `workspace`、`run_as_user`、`run_as_group`。
+
+<a id="testing-helpers"></a>
+### 导出测试辅助面
+
+`testing.go` 为 `tests/` 的集成测试暴露内部 API，属测试支撑面：生产代码不得依赖，其签名可无预警变更。
+
+<a id="model-wiring"></a>
+### 模型解析与轨迹包裹
+
+`wiring.go` 的 `resolveAgentModel` 返回单个 agent 的 LLM 调用所用模型实例，按 provider+model 对缓存。解析顺序：`rc.modelOverrides` 的按名实例 → agent 自己的模型（按其 provider 查找，未声明时落全局 `cfg.Provider`）→ 全局默认模型 → `WithModel` 注入的 `rc.model`。启用时 `TrajectoryRecorder` 包裹每个返回实例（含 override 命中）：包裹位于 `SwappableModel` 之外，因此记录器观察换后流量；包裹按 `buildAgent` 调用构造，重复解析不会在同一实例上叠层。全局默认经 provider 注册表解析，纯 yaml 声明的模型同样可用。
+
+<a id="workspace-scratch"></a>
+### 工作区暂存与清理
+
+`workspace` 包集中管理磁盘暂存：`Root` 归一暂存根，`ToolOutputPath` 给出超限工具输出的落盘位置（`<root>/tool-output/`，服务 OutputLimitTool 与 ActionTool）。`Cleaner` 周期回收按年龄与文件数双重上界封顶累积。命令工作目录不属于暂存面：exec 继承进程工作目录，其相对路径语义与暂存根无关。
+
 <a id="governance-gate"></a>
 ## 四、治理闸（governance）
 

@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#knowledge-agent
 package knowledge
 
 import (
@@ -118,15 +119,10 @@ func NewAgent(cfg Config) (*agent.TagentAgent, error) {
 	return ta, nil
 }
 
-// NewTool is a convenience function that creates a KnowledgeAgent
-// and wraps it as a CallableTool ready for registration.
+// NewTool is a convenience function that creates a KnowledgeAgent and wraps it as a CallableTool.
 //
-// If cfg.Description is empty and cfg.DescriptionFile is set, the description
-// is loaded from the file (relative to cfg.PromptDir).
-// If both are empty, a hardcoded default is used for backward compatibility.
-//
-// Note: This wraps with a simple AgentToolWrapper without event_key resolution.
-// For full event_key support, use tagent.New() which builds agents from Config.
+// - An empty Description with DescriptionFile set loads the text relative to PromptDir; both empty falls back to a built-in default.
+// - The wrapper is a plain AgentToolWrapper without event_key resolution; full support comes from the root-package constructor.
 func NewTool(cfg Config) (tagenttool.Tool, error) {
 	knowledgeAgent, err := NewAgent(cfg)
 	if err != nil {

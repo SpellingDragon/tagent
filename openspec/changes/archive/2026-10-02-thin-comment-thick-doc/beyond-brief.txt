@@ -1,0 +1,100 @@
+# file	line	declaration
+agent/agent.go	1	Package agent provides tagent's core agent mechanism coordination.
+agent/agent.go	374	NewTagentAgent creates a new TagentAgent with the given configuration.
+agent/compress/context_compressor.go	350	Compress resolves all projection refs into messages, checks token budget,
+agent/compress/context_compressor.go	40	ContextCompressor is the projection-only compression engine.
+agent/compress/context_compressor.go	881	renderTimelineMessage renders one event in NATIVE protocol form (D3 v2):
+agent/compress/doc.go	1	Package compress 负责回合上下文的装配与压缩，是"预算怎么用"这一侧的全部机制：
+agent/compress/smart_compress.go	17	SmartCompressor performs deterministic context compression.
+agent/compress/token_counter.go	52	EventTypeToRole maps an event type to its pairing-free timeline role
+agent/context_manager.go	1062	assembleRequest builds the final message list sent to the model:
+agent/context_manager.go	1380	persistBusEvent persists an EventBus event to MemoryStore and appends it
+agent/context_manager.go	1419	Resolve the canonical fact for this event (fix-resident-reliability-
+agent/context_manager.go	1555	writeSettleFeedback把确定性任务裁决写为 feedback
+agent/context_manager.go	246	BeginTurn is the ONE place a business turn takes its organization execution
+agent/context_manager.go	561	publishActiveLocked is the ONE linearization body of an executor switch. It
+agent/doc.go	1	Package agent 是 tagent 的事件驱动引擎核心。50 个文件按职责分五组：
+agent/event_bus.go	196	newTaskSettledEvent builds a self-contained external_input event describing a
+agent/event_bus.go	279	EventBus is a per-agent ordered event queue.
+agent/event_loop.go	117	processTurn runs ONE batch through the agent's turn pipeline — freeze/drop →
+agent/exec_lease.go	390	WireOrgGeneration performs the generation-level wiring of ONE org publish
+agent/governance/classifier.go	1	Package governance 承载 tagent 的有界自治与审计（T-G 常驻可靠性+治理）。
+agent/helpers.go	84	SetToolParentProjection wires the agent's compress.SessionProjection to all
+agent/lifecycle.go	515	submitDurableBatch is the  durable submit gate. It first runs the write-before
+agent/meditation.go	220	checkAndMeditate evaluates whether a meditation should fire.
+agent/meditation.go	48	MeditationManager periodically injects "meditation" external_input events
+agent/owner_obligation.go	5	ObligationReport answers /D7's question for one resident owner: is anything
+agent/projection_rebuild.go	57	RebuildProjectionFromWAL rebuilds the projection from the fact chain at
+agent/reliability/inbox.go	359	ResetTransitional 是对前代格式数据的**一次性受管重置**，也是本可靠性叶子内唯一具破坏性的路径。
+agent/reliability/inbox.go	612	RecordReceipt durably marks a claimed envelope as processed (claimed →
+agent/reliability/inbox.go	944	quarantineFile moves one inbox item into the quarantine dir. It reports
+agent/session.go	21	Run 实现 agent.Agent 接口。
+agent/session_test.go	1969	callLog GROUNDING (test-only, zero product risk).  adds an execution-credential
+agent/settle_routing.go	11	settleSinkRegistry is the S3m-c routing table for the M2 per-invocation loop.
+agent/task/doc.go	1	Package task 提供"把一次工作交给后台去跑"的任务层，管的对象是任务本身，而不是
+agent/task/task_board.go	15	RenderBoard renders a compact, LLM-friendly snapshot of currently ACTIVE
+agent/task/task_manager.go	1495	Resume feeds new input into a task and re-enters the standard
+agent/task/task_manager.go	839	emitBackground invokes the OnSettle hook for a settle that occurred after the
+agent/task/task_manager.go	955	RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与
+agent/tool_agent.go	1	Package agent provides tool agent registration for extensible agent composition.
+agent/tool_agent.go	590	runAndCollect runs one delegation and collects its result, retrying a failed
+agent/tool_agent.go	746	ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的
+agent/tool_agent.go	817	subagentResumeClosure builds the resume (送输入) closure of a subagent task.
+agent/tool_agent.go	879	runWithTimeout starts ONE sub-agent run under a context timeout and keeps the
+agent/tool_agent.go	957	ToolAgentFactory assembles a tool agent's EXECUTION CONFIGURATION from the
+build_agent.go	649	buildAgentFace assembles an EXISTING agent's next-generation execution face
+builtin.go	1	Package tagent provides the top-level composition root for tagent applications.
+config.go	16	Config is the top-level tagent configuration.
+config.go	593	Properties holds tool-specific configuration that each tool factory
+cross_generation_test.go	1468	sessionWatchChild runs one boot of the live-session anchor as its own process.
+examples/wechat-bot/dedup.go	18	SeenStore provides message-level idempotency across restarts.
+examples/wechat-bot/file_delivery.go	43	ExtractFilePaths 从 agent 回复文本中解析本地文件路径。
+examples/wechat-bot/scripts/verify_large_file.go	3	verify_large_file.go — SDK 大文件真链路一次性人工验收。
+guardrails_test.go	237	triRaceOnlyFramework CLASSIFIES a child failure whose EVERY DATA RACE block
+memory/engine.go	58	IndexBuilder 索引构建面：记忆引擎据此把事件纳入索引。
+memory/engine.go	86	MemoryEngine = 索引构建 + 检索 + 生命周期。这是 tagent 核心依赖的解耦缝。
+memory/kv/local_file_kv.go	17	LocalFileKV is a MINIMAL file-backed memory.KVStore, used ONLY as the MVP
+memory/mem_spill.go	103	ReplayWithNotify 是 Replay 的双写形态：每条重放成功
+memory/retention_lease.go	5	RetentionLease ==================== 有限 key 保留租约====================
+memory/segment_store.go	487	completeOrphanCommit finishes an UNCOMMITTED write found under the same
+memory/segment_store.go	695	recoverWindowSeqLocked returns the next free seq for a window by scanning
+memory/segment_store.go	875	segmentBounds derives the segment's TRUTHFUL event-time envelope for query
+org_candidate_overlay.go	13	candidateOverlay is the private construction domain of ONE candidate — the
+org_hotreload.go	152	OrgAgentApply 是一个 agent 在本轮数值热更中的回执。Outcome 只有两种真实结果：
+org_hotreload.go	442	Clone returns a private deep copy of the configuration. A published
+owner_retirement_test.go	1018	drillResetManagedUnits is the operator-side orchestration: probe every gate
+partition_collision.go	119	changedMemoryAgents returns the sorted names whose memory section differs from
+partition_collision.go	92	ownedAgentNames returns the set of agent names that currently hold a store-owner
+prototype/agent.go	1	Package prototype contains the original 126-line tagent skeleton.
+prototype/agent.go	47	BaseTAgent is the prototype agent.
+registry.go	59	RegisterBuiltinTools registers all built-in tools into the ToolRegistry.
+rl/agent_loop.go	1	Package rl provides reinforcement learning utilities for tagent agents.
+rl/swappable_model.go	148	GenerateContentIter 保真内层真实的 IterModel 能力，而非把它藏起来：只实现
+scripts/codetools/check.go	1	check.go implements the two comparison modes the repository gates need:
+scripts/codetools/check.go	378	qualifierBlind replaces every package qualifier prefix with a fixed marker.
+scripts/codetools/main.go	1	Command codetools emits the mechanical facts the repository's comment and
+scripts/codetools/main.go	119	dropBlankLines removes lines that hold nothing but whitespace, and trailing
+scripts/codetools/main.go	171	clearComments drops documentation comments while KEEPING compiler and tool
+scripts/comment_policy/main.go	1	Command comment_policy checks Go sources against the repository's comment
+scripts/comment_policy/main.go	926	ignoredGoFiles reports the Go sources under root that git treats as ignored, keyed by
+tagent.go	1	Package tagent provides the top-level composition root for tagent applications.
+tagent.go	243	New creates a fully-wired TagentAgent from declarative Config + runtime Options.
+test_stores_test.go	15	testStore 把单元测试的 memory store 路径挪出仓库工作树，并按**测试用例**隔离。
+tests/async_task_e2e_test.go	136	newSlowBackgroundTool returns a tool that delegates to the task layer: it
+tests/offline_bench/offline_bench_test.go	1	Package offline_bench holds the offline performance baseline for the resident
+tool/action/action_tool.go	32	ActionTool is a shell command execution tool.
+tool/action/settle.go	27	StatusToSettle maps a tmux SessionStatus to a task-layer settle kind.
+tool/action/tmux_executor.go	69	buildTmuxCommand constructs a tmux command with optional sudo wrapping.
+tool/file/file.go	1	Package file wraps trpc-agent-go's built-in file operation tools for tagent.
+tool/knowledge/knowledge_agent.go	121	NewTool is a convenience function that creates a KnowledgeAgent
+tool/knowledge/knowledge_subtools.go	90	NewSkillLoadTool creates a tool that loads skill content as a structured summary.
+tool/mcp/mcp.go	1	Package mcp provides the MCP server registry and the mcp_call gateway
+tool/recall/memory_recall.go	1	memory_recall: the recall PROTOCOL implementation,
+tool/recall/recall.go	1	recall: the UNIFIED recall entry.
+tool/recall/recall_agent.go	126	NewTool is a convenience function that creates a RecallAgent
+tool/recall/recall_agent.go	18	Config holds configuration for creating the Recall Agent.
+tool/recall/recall_subtools.go	517	RegisterSubTools registers all recall sub-tools as plain tools in the
+tool/spec/spec.go	1	Package spec provides an LLM-facing tool for managing specification-driven
+wiring.go	24	resolveAgentModel returns the model instance one agent’s LLM calls use and
+wiring.go	264	resolveMemoryStore creates a MemoryStore from MemoryConfig.
+workspace/workspace.go	1	Package workspace centralizes tagent's on-disk scratch space (oversized

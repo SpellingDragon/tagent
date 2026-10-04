@@ -1,3 +1,4 @@
+// 契约: docs/wiki/memory/memory-architecture.md#diagnostics-realtime
 package engine
 
 import "github.com/SpellingDragon/tagent/memory"

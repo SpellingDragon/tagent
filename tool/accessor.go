@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tool-architecture.md#tool-accessor
 package tool
 
 import (

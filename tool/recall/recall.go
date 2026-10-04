@@ -1,23 +1,9 @@
-// recall: the UNIFIED recall entry.
+// recall: the unified recall entry — parameters are the router.
 //
-// One tool — parameters ARE the router. Deterministic shapes never touch an
-// LLM:
-//
-// orchestrate: true → explicit opt-in for the RecallAgent LLM
-// orchestration engine (checked first); when the
-// engine is not wired it returns explicit guidance,
-// never silently falling back to a deterministic path
-// items: [{key, hint?}] → engineering recall: batch GetEvent, original
-// order, zero hallucination, misses reported
-// turn_key → causal-chain turn reconstruction: walk back to
-// the turn's external_input (recovers HOW a past
-// task was executed, incl. compressed tool steps)
-// query + filters → retrieval-layer recall: QueryOptions keyword
-// search (may evolve to vector; protocol unchanged)
-//
-// Supersedes the retired memory_recall / memory_turn tool names — the model
-// side sees one tool; the output protocol ({key, type, summary, content,
-// time} entries) is unchanged across shapes.
+// - orchestrate: true opts into the RecallAgent engine explicitly; an unwired engine returns guidance instead of a silent deterministic fallback.
+// - items: batch GetEvent in original order, zero hallucination.
+// - turn_key: causal-chain walk back to the turn's external_input.
+// - query with filters: retrieval-layer search; the entry protocol stays when the layer evolves.
 package recall
 
 import (

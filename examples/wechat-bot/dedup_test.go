@@ -1,3 +1,4 @@
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#inbound-dedup
 package main
 
 import (

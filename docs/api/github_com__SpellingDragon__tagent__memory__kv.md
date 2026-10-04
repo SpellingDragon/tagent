@@ -4,8 +4,6 @@ Package kv 提供 memory.KVStore 的可选后端：LocalFileKV（内存 map ＋ 
 fsync、不保证掉电安全）、RustVikingClient（封装 rustviking CLI 的 JSON 契约，range 由公共前缀扫描模拟）与
 MockRustVikingClient（测试替身，扫描同样 按字典序）。
 
-契约: docs/wiki/memory/memory-architecture.md#local-file-kv
-
 TYPES
 
 type CLIResponse struct {
@@ -33,34 +31,13 @@ type LocalFileKV struct {
 	// Has unexported fields.
 }
     LocalFileKV is a MINIMAL file-backed memory.KVStore, used ONLY as the MVP
-    cross-process verification backend for the resident reliability protocol. It
-    is a deliberately temporary model: in-memory maps persisted as per-partition
-    JSON snapshots. It provides NO production durability, security, or long-term
-    availability/maintainability guarantees — those are deferred to a dedicated
-    storage engine (e.g. rustviking) wired in a later phase.
+    cross-process verification backend for the resident reliability protocol.
 
-    Layout ( ): one snapshot file per key namespace — kv-<pid>.json for a
-    partition's `{pid}:evt|idx|meta|tomb:…` keys and kv-global.json for every
-    non-partition namespace. A Sync serializes ONLY the buckets touched
-    since the last barrier (a dirty set), so one partition commit's write
-    amplification is bounded by that partition's own key count — decoupled from
-    the whole-library size, which is the growth ceiling the old single kv.json
-    snapshot carried.
-
-    Durability model (verification-grade only): writes update the in-memory
-    maps immediately, so in-process reads are always consistent; Sync() is the
-    barrier that persists the dirty buckets. A committed fact becomes visible to
-    a fresh process only after its commit barrier ran Sync() — which is exactly
-    what FileSegmentStore does. Each bucket file is replaced by an atomic POSIX
-    rename of its tmp write, so a process KILL can never leave a torn snapshot:
-    a reopen always sees the last successfully Synced state per bucket. There
-    is intentionally NO fsync: this backend survives a process restart / reopen
-    (the guarantee actually verified), NOT an OS power loss. A write that was
-    never Synced is lost on restart (honest "flush-only" semantics).
-
-    The old single kv.json snapshot is a DIFFERENT format and is deliberately
-    NOT migrated: a pre-release library cold-rebuilds (the change's declared
-    stance). A leftover kv.json is ignored and reported once at open.
+    - Layout: one snapshot file per namespace - kv-<pid>.json per partition,
+    kv-global.json for the rest. - Sync serializes only dirty buckets,
+    bounding write amplification to the partition own key count. - No production
+    durability, security or maintainability guarantees; those defer to a
+    dedicated storage engine.
 
 func NewLocalFileKV(dataDir string) (*LocalFileKV, error)
     NewLocalFileKV opens (creating if needed) the directory and loads every
@@ -176,8 +153,6 @@ func (c *RustVikingClient) VectorInsert(id uint64, vector []float32, level uint8
     序列化＋启动重建，而原生 index 是进程内易失索引，两条路线互斥。level 的语义未经真实 二进制验证，且显式传 0 会偏离 rustviking
     默认 level=1；接线前须先实测 0/1 的索引结构差异 再定传参。完整约束见文档。
 
-    契约: docs/wiki/memory/memory-architecture.md#rv-vector-cmds
-
 func (c *RustVikingClient) VectorSearch(query []float32, k int) ([]VectorResult, error)
     VectorSearch 向量检索（index search），返回按相似度排序的命中（含 score）。
 
@@ -187,4 +162,3 @@ type VectorResult struct {
 	Level uint8   `json:"level"`
 }
     VectorResult 是向量检索的单条命中：rustviking 返回的 id、相似度分与索引层级。
-

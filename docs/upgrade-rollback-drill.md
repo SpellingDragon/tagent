@@ -22,7 +22,7 @@
 - **机制**：`reliability.NewInbox` 打开时只装载当前格式（`inbox-v2/`）；前一格式遗留（`*.spill`、`inbox-v1/`）**不再阻断启动**，被分类为**惰性 transitional 数据**——绝不重解释、绝不当作 v2 输入吸收（不计入 `Pending()`）。旧的「用前一二进制排空方可升级」前置门与 `ErrLegacySpillNotDrained` 已删除（§3.7，design 决策10）。
 - **运维观测**：`Inbox.TransitionalData()` 只读列出被识别的遗留文件路径；这些文件不参与消费，仅供处置决策。
 - **纠正**：确需清除时，走**运维显式确认的托管复位** `Inbox.ResetTransitional(true)`——仅删除已枚举的 transitional 文件并返回删除计数，当前格式数据不受影响。不再有「旧二进制排空」步骤；处置前勿手工删除在册遗留。
-- **佐证**：夹具 §0 第 1 段 + `tests/upgrade_rollback_drill_test.go:TestDrill_UpgradeTreatsLegacySpillAsInertThenResets`（受控复位全序列另见 `owner_retirement_test.go`）。
+- **佐证**：夹具 §0 第 1 段 + `tests/upgrade_rollback_drill_test.go:TestDrill_UpgradeTreatsLegacySpillAsInertThenResets`（受控复位全序列另见 `org_hotreload_test.go`）。
 
 ## 2. inbox-v1 回滚条件（降级门）
 
@@ -38,7 +38,7 @@
 - **运维观测**：`ErrStoreLocked`——`store is locked by another process (single-writer): <path>: ...`。同 store 路径多实例并发启动时第二个失败。
 - **边界**：flock 是**本地盘契约**；NFS 上不可靠（advisory）。`RuntimeResources` 假设 store 目录位于本地卷——跨机共享盘部署不满足单写者前提。
 - **升级注意**：滚动升级须确保**旧实例已完全退出**（释放 flock）再起新实例，否则新实例 `ErrStoreLocked` 拒起（fail-closed，正确行为）。
-- **佐证**：`resources_test.go:TestWriterLock_ExclusiveAcrossHandles`（第二 fd/进程非阻塞抢锁必失败，释放后可重取）。
+- **佐证**：`agent/resources/entry_test.go:TestWriterLock_ExclusiveAcrossHandles`（第二 fd/进程非阻塞抢锁必失败，释放后可重取）。
 
 ## 4. 配置冲突（同路径不兼容指纹）
 

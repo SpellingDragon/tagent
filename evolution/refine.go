@@ -1,3 +1,5 @@
+// 本文件承载 refine 工具的三个操作。
+// 契约: docs/wiki/evolution/evolution-architecture.md#refine
 package evolution
 
 import (

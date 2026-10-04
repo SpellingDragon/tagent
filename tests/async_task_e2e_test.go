@@ -133,16 +133,12 @@ type slowOpResult struct {
 	Status string `json:"status"`
 }
 
-// newSlowBackgroundTool returns a tool that delegates to the task layer: it
-// spawns a generic task that runs past the dense phase (so it detaches to the
-// background), then settles with a unique marker. This exercises the full
-// path WITHOUT tmux:
+// newSlowBackgroundTool returns a tool that delegates to the task layer: it spawns a
+// generic task that runs past the dense phase, so it detaches to the background, then
+// settles with a unique marker.
 //
-//	tool call → spawn (background) → ack → settle → task_settled event → the
-//	persistent loop reclaims it into a new turn → the LLM reports the result.
-//
-// It mirrors ActionTool's async pattern but with a deterministic timer instead
-// of a tmux command, so it runs anywhere a real LLM is reachable.
+// - Exercises the full path without tmux: tool call, spawn, ack, settle, task_settled event, reclaim into a new turn, and the LLM reporting the result.
+// - Mirrors the ActionTool async pattern with a deterministic timer, so it runs wherever a real LLM is reachable.
 func newSlowBackgroundTool(marker string) tool.Tool {
 	return function.NewFunctionTool(
 		func(ctx context.Context, args slowOpArgs) (slowOpResult, error) {

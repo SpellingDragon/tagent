@@ -1,3 +1,4 @@
+// 契约: docs/wiki/event/event-architecture.md#overview
 package event
 
 import (

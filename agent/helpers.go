@@ -81,20 +81,10 @@ func (ta *TagentAgent) SessionSvc() session.Service {
 	return ta.sessionSvc
 }
 
-// SetToolParentProjection wires the agent's compress.SessionProjection to all
-// AgentToolWrapper instances in the tool list. This enables auto-inject
-// of event_keys when LLM does not pass them.
-// Must be called after NewTagentAgent (which creates the projection).
-//
-// /W-1: the list holds OutputLimitTool(*AgentToolWrapper) after agent.New
-// has wrapped every tool, so the wiring pierces the transparent decorator chain
-// (collectAgentToolWrappers) instead of asserting the bare type — otherwise the
-// projection never reaches the sub-agent wrappers and auto-inject is dead.
-//
-// This is the ONLY production publish of that binding, and it runs while the
-// agent is still being constructed (not yet serving). /D2 removed the
-// per-ContextManager rebinding: a live invocation publishes nothing into shared
-// tools and carries its own projection through the context instead.
+// SetToolParentProjection wires the agent compress.SessionProjection to every
+// AgentToolWrapper in the tool list so event_keys are auto-injected when the LLM
+// does not pass them. Must be called after NewTagentAgent.
+// 契约: docs/wiki/agent/execution-generations.md#published-wrapper-immutable
 func (ta *TagentAgent) SetToolParentProjection() {
 	if ta.projection == nil || ta.config == nil {
 		return

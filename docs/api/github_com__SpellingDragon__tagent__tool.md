@@ -1,6 +1,5 @@
 package tool // import "github.com/SpellingDragon/tagent/tool"
 
-
 TYPES
 
 type MCPRegistry interface {
@@ -37,4 +36,3 @@ type SkillRepository interface {
 }
     SkillRepository provides access to skill summaries and content. This
     abstracts the skill source from the concrete file system implementation.
-

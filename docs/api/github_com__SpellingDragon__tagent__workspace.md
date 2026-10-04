@@ -1,16 +1,12 @@
 package workspace // import "github.com/SpellingDragon/tagent/workspace"
 
-Package workspace centralizes tagent's on-disk scratch space (oversized tool
-outputs) under one root, and provides a periodic cleaner that bounds the
-accumulated files (by age and count).
+Package workspace centralizes tagent on-disk scratch space (oversized tool
+outputs) under one root and provides a periodic cleaner bounding accumulation by
+age and count.
 
-Layout (under Root):
-
-    <root>/tool-output/   oversized tool outputs (OutputLimitTool, ActionTool)
-
-Command working directories are NOT part of the scratch space: exec inherits the
-process working directory so its relative paths stay consistent with the file
-tools' base directory (one coherent filesystem view for the model).
+- Layout under Root: tool-output/ holds oversized outputs of
+OutputLimitTool and ActionTool. - Command working directories are
+NOT scratch space: exec inherits the process working directory so its
 
 CONSTANTS
 
@@ -22,7 +18,6 @@ const (
 )
     ToolOutputDir 是根目录下存放超大工具输出的子目录名。
 
-
 FUNCTIONS
 
 func Root(root string) string
@@ -30,7 +25,6 @@ func Root(root string) string
 
 func ToolOutputPath(root string) string
     ToolOutputPath 返回超大工具输出的目录。
-
 
 TYPES
 
@@ -54,4 +48,3 @@ func (c *Cleaner) RunOnce()
 
 func (c *Cleaner) Start(ctx context.Context)
     Start 在自己的 goroutine 里按 ticker 清理，直到 ctx 取消；需要观察协程退出的调用方用 Run。
-

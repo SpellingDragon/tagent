@@ -100,6 +100,8 @@ graph TD
 
 > 投影写入位于插件管线（而非消费 goroutine）：框架对工具结果事件的 completion-wait 覆盖插件处理，使“BeforeModel 时投影完整”成为构造保证。RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，主循环与子 agent 天然隔离。
 
+事实写入与投影追加发生在同一个点：`persistBusEvent` 把总线事件存为 FullEvent（`EventKey` 由 ContextManager 的 partitionID 以 Snowflake 生成、`EventType` 从消息角色推断、正文与摘要取自 AgentEvent 的 Message 载荷）并立刻追加进投影。返回值的语义是提交事实：事实已存或本来已存（重放去重路径）都为 true，只有 StoreEvent 失败且投影追加被门住才为 false。下游的 submit 门把 false 映射为 transient 提交——不启动模型、认领重新入队；回合回声（`turnEcho`）以及随之而来的 MemoryPlugin 回声跳过，只在**所选事实全部提交之后**才安装。
+
 <a id="projection-lifecycle"></a>
 ## 五、SessionProjection 生命周期
 
@@ -156,6 +158,8 @@ graph TD
 
 L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件（`external_input`/`agent_output`）生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，不随时间线单调膨胀。
 
+`processTurn` 是唯一的回合原语：冻结/丢弃 → durable submit 门 → BuildInvocation（消息装配）→ 投影、触发源与元数据绑定 → 回合租约 → RunFlow（有界重试）→ 结果归约 → durable finish/回执/ack → 空闲锚。持久循环对每次拉到的批次调用一次，子 agent 的 Run 为它自己的调用调用一次，因此"直连宿主"与"作为被调方"命中同一套装配/投影/执行阶段。durable 步骤自分类：不携带认领的事件的批次既提交不了也 ack 不了，这正是派生子调用的情形（瞬态委派从不进入 durable 信封）。回合的代际绑定恒由 `cm.BeginTurnLease()` 取得——持久循环拿到属主 CM 的当前面，子调用拿到发起代的面。
+
 <a id="e2e-turn-sequence"></a>
 ## 七、一次完整请求的端到端时序
 
@@ -211,6 +215,15 @@ sequenceDiagram
 ## 九、trace 锚点：span 与轨迹两条投影必须互链，且不得造假
 
 事件携带 trace 锚点，使读者能从一条事实跳到对应 span。三条底线：noop span（没有真实 SpanContext）一律**降级为空值**而不是伪造 ID；无效 SpanContext 不得产出可用 ID；link 为空就**不建 link**——用假链掩盖断链，比断链本身更难查。
+
+<a id="multi-user-isolation"></a>
+## 十、多用户并发派发：每条产出只许带发起者的会话标识
+
+一个常驻 loop 会同时收到多个用户的输入（`InjectMessageWithMetadata` 携带各自的 `chat_id`）。判据是：**产出的事件必须携带发起它的那条输入的会话标识**，事件经 `StateDelta` 的 `meta_chat_id` 外显这一标识。按该键分桶之后，每个桶里只应该出现属于该用户的内容——一个都不许落到别人的桶里。
+
+这条与"一次完整请求的端到端时序"是两回事：后者断言单条输入走完一轮的每个阶段，本条断言**并发输入之间的隔离**。它的症状决定了它必须单独存在——投递目标在宿主侧按 `meta_chat_id` 回退选择会话，一旦派发串了用户，后果是"给 A 的回信送进 B 的会话"：不报错、不可撤销，事后也无法从日志里还原哪条输入被谁消费。
+
+因此它钉的是装配侧的一条不变量：调用元数据只能随自己的输入流动，不得暂存在共享的实例状态上（同一条理由也决定了 `Run` 的逐调用本地装配）。
 
 ## 已知缺口
 

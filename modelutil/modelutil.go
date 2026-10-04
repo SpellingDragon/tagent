@@ -1,6 +1,7 @@
 // Package modelutil hosts the shared assembly for direct (non-agent) model call
 // sites — summary compression and the evolution judge — so both speak the same
 // ModelRef vocabulary as agents.
+// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
 package modelutil
 
 import (

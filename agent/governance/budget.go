@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/governance-enforcement.md#budget-epoch
 package governance
 
 import (

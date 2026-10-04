@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/event-flow.md#trace-anchor
 package agent
 
 import (

@@ -1,3 +1,4 @@
+// 契约: docs/wiki/platform/platform-subsystems.md#testing-helpers
 package testutil
 
 import (

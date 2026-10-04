@@ -1,8 +1,7 @@
 package modelutil // import "github.com/SpellingDragon/tagent/modelutil"
 
-Package modelutil hosts the shared assembly for direct (non-agent) model call
-sites — summary compression and the evolution judge — so both speak the same
-ModelRef vocabulary as agents.
+Package modelutil hosts the shared assembly for direct (non-agent)
+model call sites — summary compression and the evolution judge
 
 FUNCTIONS
 
@@ -14,7 +13,6 @@ func Call(ctx context.Context, m model.Model, req *model.Request) (string, error
     reasoning-fallback drain shared by summary/judge sites: when a reasoning
     model returns empty Content but non-empty ReasoningContent, the reasoning
     text is used instead of failing (first generalized from the summary site).
-
 
 TYPES
 
@@ -29,4 +27,3 @@ type Knobs struct {
     Knobs carries the generation settings a direct call site may override.
     Nil fields stay untouched so per-site defaults (e.g. summaryMaxTokens)
     remain authoritative when the ModelRef omits them.
-
