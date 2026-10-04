@@ -1,6 +1,8 @@
 package tagent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/resources"
+
 	"context"
 	"fmt"
 	"os"
@@ -440,30 +442,30 @@ func TestRetire_DiamondSharedDependencyWaitsForAllBorrowers(t *testing.T) {
 // unconfirmed-reclaim rule, so a live single-writer flock genuinely sits on the path and
 // any later opener of it collides with a possibly-half-live backend instead of succeeding.
 // 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
-func sealThePath(t *testing.T, rr *RuntimeResources, path string) {
+func sealThePath(t *testing.T, rr *resources.RuntimeResources, path string) {
 	t.Helper()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
-	_, _, _, err := rr.acquire("localfile", path, fp, func() (openedResource, error) {
-		return openedResource{}, fmt.Errorf("%w: kv close hung", ErrReclaimUnconfirmed)
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
+	_, _, _, err := rr.Acquire("localfile", path, fp, func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{}, fmt.Errorf("%w: kv close hung", resources.ErrReclaimUnconfirmed)
 	})
-	require.ErrorIs(t, err, ErrReclaimUnconfirmed, "precondition: the seal must come from the real reclaim rule")
+	require.ErrorIs(t, err, resources.ErrReclaimUnconfirmed, "precondition: the seal must come from the real reclaim rule")
 }
 
 // assertPathStillSealed checks the seal WITHOUT touching the writer lock: an
 // flock probe in the same process would take/convert the lock and release it on
 // close (macOS flock semantics — measured: a second `-count` iteration then found
 // the path free), so the seal is verified through the registry's own rule instead:
-// a re-acquire on a sealed path must be refused with ErrResourcePoisoned without
+// a re-acquire on a sealed path must be refused with resources.ErrResourcePoisoned without
 // ever running open(). A second writer therefore cannot exist, because the single
 // writer slot was never handed out.
-func assertPathStillSealed(t *testing.T, rr *RuntimeResources, path string) {
+func assertPathStillSealed(t *testing.T, rr *resources.RuntimeResources, path string) {
 	t.Helper()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
-	_, _, _, err := rr.acquire("localfile", path, fp, func() (openedResource, error) {
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
+	_, _, _, err := rr.Acquire("localfile", path, fp, func() (resources.OpenedResource, error) {
 		t.Error("open must NOT run again on a sealed path")
-		return openedResource{}, nil
+		return resources.OpenedResource{}, nil
 	})
-	require.ErrorIs(t, err, ErrResourcePoisoned, "seal must persist — poisoned paths are never auto-unsealed")
+	require.ErrorIs(t, err, resources.ErrResourcePoisoned, "seal must persist — poisoned paths are never auto-unsealed")
 }
 
 func sdPoisonYAML(t testing.TB, routed []string, sealed string) string {
@@ -496,7 +498,7 @@ func TestRetire_RealPoisonedAcquireRefusesHotAddAndKeepsServing(t *testing.T) {
 		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
 	}
 
-	sealer := NewRuntimeResources()
+	sealer := resources.NewRuntimeResources()
 	sealThePath(t, sealer, sealed)
 	t.Cleanup(func() { assertPathStillSealed(t, sealer, sealed) })
 
@@ -653,13 +655,13 @@ func TestOrgClose_SharedStoreWaitsForEveryBorrower(t *testing.T) {
 		"§4.3/D8：共享 store 必须等所有借用者退出——关闭序列中任一 owner 报错都说明后端被提前拆走")
 	require.True(t, s1.CloseStarted() && s2.CloseStarted(), "both borrowers must have gone down")
 
-	fresh := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
-	_, _, rel, err := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
-		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
+	fresh := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
+	_, _, rel, err := fresh.Acquire("localfile", shared, fp, func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{Store: noopStoreForTakeover{}}, nil
 	})
 	require.NoError(t, err,
-		"关闭后共享路径必须能被新世代干净接手（被持有＝租约泄漏；ErrResourcePoisoned＝提前或重复释放被封路）")
+		"关闭后共享路径必须能被新世代干净接手（被持有＝租约泄漏；resources.ErrResourcePoisoned＝提前或重复释放被封路）")
 	require.NoError(t, rel())
 }
 
@@ -685,19 +687,19 @@ func TestRetire_SharedComponentWaitsForEveryBorrower(t *testing.T) {
 	require.True(t, s2.CloseStarted(), "precondition: s2 retired")
 	require.False(t, s1.CloseStarted(), "and s1 still borrows it")
 
-	fresh := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
-	_, _, _, err := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
+	fresh := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: shared})
+	_, _, _, err := fresh.Acquire("localfile", shared, fp, func() (resources.OpenedResource, error) {
 		t.Error("a second writer must not be opened while a borrower is alive")
-		return openedResource{}, nil
+		return resources.OpenedResource{}, nil
 	})
-	require.ErrorIs(t, err, ErrStoreLocked,
+	require.ErrorIs(t, err, resources.ErrStoreLocked,
 		"§4.3/D8：仍有借用者时共享后端不得拆除（写锁必须还被存活者持有）")
-	require.NotErrorIs(t, err, ErrResourcePoisoned, "「仍被持有」不同于「回收未确认被封路」")
+	require.NotErrorIs(t, err, resources.ErrResourcePoisoned, "「仍被持有」不同于「回收未确认被封路」")
 
 	require.NoError(t, entry.Close())
-	_, _, rel, err2 := fresh.acquire("localfile", shared, fp, func() (openedResource, error) {
-		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
+	_, _, rel, err2 := fresh.Acquire("localfile", shared, fp, func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{Store: noopStoreForTakeover{}}, nil
 	})
 	require.NoError(t, err2, "最后借用者退出后路径必须干净交接")
 	require.NoError(t, rel())
@@ -1025,11 +1027,11 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 	if !confirm {
 		return nil, fmt.Errorf("drill reset: requires explicit confirmation (destructive operator act)")
 	}
-	lockF, err := acquireDirLock(storeDir)
+	lockF, err := resources.AcquireDirLock(storeDir)
 	if err != nil {
 		return nil, fmt.Errorf("drill reset: live writer on %s: %w", storeDir, err)
 	}
-	defer func() { _ = unlockDirLock(lockF) }()
+	defer func() { _ = resources.UnlockDirLock(lockF) }()
 
 	kvStore, err := kv.NewLocalFileKV(storeDir)
 	if err != nil {
@@ -1083,7 +1085,7 @@ func drillResetManagedUnits(storeDir, spillParent, anchorDir, agentName string, 
 }
 
 // TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals 钉住 托管根单元复位：任一 gate 不过就零改动拒绝，只清托管布局。
-// - 拒绝即零改动：quarantine 未处置与活写者持锁（ErrStoreLocked）都不得留下部分清理；非托管内容与软链的外部目标永不被删。
+// - 拒绝即零改动：quarantine 未处置与活写者持锁（resources.ErrStoreLocked）都不得留下部分清理；非托管内容与软链的外部目标永不被删。
 // - 复位后的启动相由独立进程完成（一次 boot 只有真实进程启动才算证据），该子进程不设任何竞态豁免：出现竞态或非零退出即硬失败并附全日志。
 func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 	root := t.TempDir()
@@ -1135,12 +1137,12 @@ func TestDrill_ManagedRootReset_ConsistentUnitAndAllRefusals(t *testing.T) {
 
 	require.NoError(t, os.Rename(evidence, filepath.Join(root, "dispositioned-1.json")))
 
-	held, err := acquireDirLock(storeDir)
+	held, err := resources.AcquireDirLock(storeDir)
 	require.NoError(t, err)
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", true)
-	require.ErrorIs(t, err, ErrStoreLocked, "a live writer must be refused")
+	require.ErrorIs(t, err, resources.ErrStoreLocked, "a live writer must be refused")
 	require.FileExists(t, legacyV1)
-	require.NoError(t, unlockDirLock(held))
+	require.NoError(t, resources.UnlockDirLock(held))
 
 	_, err = drillResetManagedUnits(storeDir, spillDir, anchorDir, "tagent", true)
 	require.NoError(t, err)

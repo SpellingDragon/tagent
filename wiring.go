@@ -4,10 +4,11 @@ package tagent
 import (
 	"context"
 	"fmt"
-	"github.com/SpellingDragon/tagent/config"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/SpellingDragon/tagent/config"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/governance"
+	"github.com/SpellingDragon/tagent/agent/resources"
 	"github.com/SpellingDragon/tagent/memory"
 	membed "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/engine"
@@ -226,28 +228,28 @@ func (rc *runtimeConfig) judgeModel(name string, cfg Config) model.Model {
 // - type file backs FileSegmentStore with the RustViking CLI; type localfile backs it with LocalFileKV, which has no external binary dependency; both pair with InMemRelationStore.
 // - Shared paths go through the RuntimeResources registry: same path plus same fingerprint yields the same instance with one lease per consumer.
 // 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
-func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
+func resolveMemoryStore(mc config.MemoryConfig) (memory.MemoryStore, memory.MemoryEngine, func() error, error) {
 	switch mc.Type {
 	case "memory", "":
 		if mc.Path == "" {
 			return memory.NewInMemoryStore(), nil, nil, nil
 		}
-		return defaultResources.acquire("mem", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("mem", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			store := memory.NewInMemoryStore()
-			return openedResource{store: store, engine: buildSharedEngine(store, mc)}, nil
+			return resources.OpenedResource{Store: store, Engine: buildSharedEngine(store, mc)}, nil
 		})
 	case "file":
 		if mc.Path == "" {
 			return nil, nil, nil, fmt.Errorf("file memory store requires path")
 		}
-		return defaultResources.acquire("rv", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("rv", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			return openRVStore(mc)
 		})
 	case "localfile":
 		if mc.Path == "" {
 			return nil, nil, nil, fmt.Errorf("localfile memory store requires path")
 		}
-		return defaultResources.acquire("localfile", mc.Path, fingerprintMemory(mc), func() (openedResource, error) {
+		return resources.DefaultResources.Acquire("localfile", mc.Path, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 			return openLocalFileStore(mc)
 		})
 	default:
@@ -260,23 +262,23 @@ func resolveMemoryStore(mc MemoryConfig) (memory.MemoryStore, memory.MemoryEngin
 // (rel+kv+store); a backend step that fails releases the relation store AND
 // the KV opened by prior steps, so a half-built store never leaks a writer
 // lock or a journal fd behind it.
-func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
+func openLocalFileStore(mc config.MemoryConfig) (resources.OpenedResource, error) {
 	rel, err := memory.NewInMemRelationStore(mc.Path)
 	if err != nil {
-		return openedResource{}, fmt.Errorf("create relation store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create relation store: %w", err)
 	}
 	kvStore, err := kv.NewLocalFileKV(mc.Path)
 	if err != nil {
 		releaseRelOnFailure(rel)
-		return openedResource{}, fmt.Errorf("create local file kv: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create local file kv: %w", err)
 	}
 	store, err := memory.NewFileSegmentStore(kvStore, rel, mc.Path, 1000)
 	if err != nil {
 		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvStore); cerr != nil {
-			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
+			return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", resources.ErrReclaimUnconfirmed, cerr))
 		}
-		return openedResource{}, fmt.Errorf("create file segment store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w", err)
 	}
 	return buildSharedResource(store, kvStore, rel, mc), nil
 }
@@ -284,24 +286,24 @@ func openLocalFileStore(mc MemoryConfig) (openedResource, error) {
 // openRVStore builds a rustviking-backed shared resource in the
 // construction order (see buildSharedResource), with the same KV-leak guard as
 // openLocalFileStore on a mid-build failure.
-func openRVStore(mc MemoryConfig) (openedResource, error) {
+func openRVStore(mc config.MemoryConfig) (resources.OpenedResource, error) {
 	rel, err := memory.NewInMemRelationStore(mc.Path)
 	if err != nil {
-		return openedResource{}, fmt.Errorf("create relation store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create relation store: %w", err)
 	}
 	configPath, err := ensureRustVikingConfig(mc.RustVikingBinary, mc.Path)
 	if err != nil {
 		releaseRelOnFailure(rel)
-		return openedResource{}, fmt.Errorf("create rustviking config: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create rustviking config: %w", err)
 	}
 	kvClient := kv.NewRustVikingClient(mc.RustVikingBinary, configPath)
 	store, err := memory.NewFileSegmentStore(kvClient, rel, mc.Path, 1000)
 	if err != nil {
 		releaseRelOnFailure(rel)
 		if cerr := closeKV(kvClient); cerr != nil {
-			return openedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, cerr))
+			return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w; %w", err, fmt.Errorf("%w: kv close: %v", resources.ErrReclaimUnconfirmed, cerr))
 		}
-		return openedResource{}, fmt.Errorf("create file segment store: %w", err)
+		return resources.OpenedResource{}, fmt.Errorf("create file segment store: %w", err)
 	}
 	return buildSharedResource(store, kvClient, rel, mc), nil
 }
@@ -357,7 +359,7 @@ func tombstoneOf(store *memory.FileSegmentStore, rel memory.RelationStore, kvSto
 // durable recovery owner (the agent's reliable inbox / mem_spill) arms it at agent-open
 // after rebuilding from on-disk unacked material; a startup grace (memory.lifecycle armGrace)
 // backstops a durable backend that never registers a recovery owner so it cannot starve.
-func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, mc MemoryConfig) openedResource {
+func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore, rel memory.RelationStore, mc config.MemoryConfig) resources.OpenedResource {
 	tombstone := tombstoneOf(store, rel, kvStore, 0)
 	if err := store.RebuildLiveCounts(); err != nil {
 		log.Warnf("[tagent] live-count rebuild failed — capacity eviction paused (counts unknown): %v", err)
@@ -365,7 +367,7 @@ func buildSharedResource(store *memory.FileSegmentStore, kvStore memory.KVStore,
 	eng := buildSharedEngine(store, mc)
 	store.SetRetentionLease(memory.NewRetentionLease())
 	startStoreProducers(store, kvStore, rel, tombstone, config.ResolveLifecycleConfig(mc.Lifecycle))
-	return openedResource{store: store, engine: eng}
+	return resources.OpenedResource{Store: store, Engine: eng}
 }
 
 // startStoreProducers starts the lifecycle scanner and compactor. It MUST run

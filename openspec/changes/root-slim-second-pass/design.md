@@ -25,3 +25,10 @@ D9 当时的否决理由（12 处依赖根包 Config）随 C1 消失。D10 原�
 - 不合并同位门要求分域的测试文件（合规形状不是乱）；
 - 不为搬测试而扩公共 API——`testing.go` 导出面是否扩是逐条过 AGENTS.md 导出必要性判据的裁决项，默认不动；
 - 不动组合根四件套（tagent/build_agent/wiring/builtin+registry）与 `partition_collision.go`（runtimeConfig 注册表）、`config_alias.go`（API 面）。
+
+## D5 1.1 执行实录：测试形态决定归属，机械替换须词级
+
+- **测试切分**（计划只写了"以编译为准"）：实况是 `resources_test.go` 混装两种形态——12 个 `TestOwnership_*` 经 `New()` 构造完整实例（装配级黑盒，留根包，D3 同裁决）；4 个 `TestBuildFailure_*/TestWriterLock/TestPoisoned_*` 直接构造 `resourceKey`（深白盒，随迁 `agent/resources/entry_test.go`）。桩类型双侧各持一份（根侧 `resources_stubs_test.go`），不去共享——跨包共享测试桩会把测试包耦合进生产包的导出面。
+- **机械替换的坑**（连环三次）：`store:/engine:` 字面量替换同时命中 `resourceEntry` 同名字段；`NewRuntimeResources` 被前缀替换劈成 `Newresources.RuntimeResources`；`Config` 词在测试里既有根包别名又有局部变量。收敛手法：`git checkout` 回原始 + 词级 `(?<![\w.])` 正则 + 每步 `go vet` 即时反馈。
+- **门的两度自证**：`tracked-path-missing` 抓到 `rm` 旧文件未清索引；`doc-not-name-prefixed` 抓到三次 doc 首词。
+

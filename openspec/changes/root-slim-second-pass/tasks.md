@@ -2,7 +2,11 @@
 
 ## 1. A 组：三件零依赖外迁
 
-- [ ] 1.1 `resources.go` → `agent/resources/resources.go`
+- [x] 1.1 完成（比计划多两层实况）：
+  - `resources.go` → `agent/resources/resources.go`（导出面：`RuntimeResources/Acquire/OpenedResource{Store,Engine}/FingerprintMemory/Canonicalize/OnceRelease/各锁函数/三 Err 哨兵/DefaultResources`；`MemoryConfig`→`config.MemoryConfig`）
+  - **测试切分为二**（计划预估的"编译为准"落地）：`TestOwnership_*` 等 12 用例经 `New()` 装配 ⇒ **留根包**（D3 同款裁决），词级限定 `resources.`；`TestBuildFailure_*/TestWriterLock/TestPoisoned_*` 4 用例直接构造 `resourceKey` ⇒ 深白盒**随迁** `agent/resources/entry_test.go`；桩 `seqStore/seqEngine/blockCloseStore` 双侧各持一份（根侧新 `resources_stubs_test.go`）
+  - 判据全中：build/vet/根包+agent/resources short 绿、`-race` 73.7s、`GOMAXPROCS=1` 57.2s、lint ok、**测试守恒 207+4=211**、卫生门抓到一次我 `rm` 未清索引（tracked-path-missing→git rm --cached）
+  - 自曝：机械替换在 `OpenedResource{store:/engine:}` 字面量上连环误伤（resourceEntry 同名字段、`NewRuntimeResources` 被劈成 `Newresources.`），改用词级正则 + `git checkout` 重做才收敛——教训入 D5
   - 对象：整文件 412 行（`RuntimeResources`/`NewRuntimeResources` 及其方法）；单测 `resources_test.go`(683 行)
   - 做法：`mkdir agent/resources && git mv`；包名 `resources`；文件头索引行随迁（锚不变，`resolveIndexTarget` 按 repoRoot 解析 ✓）；根包调用点（grep `NewRuntimeResources|RuntimeResources|\.resources` 得全集）改 `agent/resources.` 限定或加根别名；`resources_test.go` 同迁试编译，失败处即记录（该测试引用 `acquireDirLock` 等未导出符号时，测试**留在根包**或把被引用符号随迁——以编译为准）
   - 完成：`go build ./...` + `go vet ./...` + `go test ./agent/resources/ . -count=1 -short` 绿；分层断言 `TestArch_LayeredDependencyDirection` PASS（agent/resources 不得 import 根包）

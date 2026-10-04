@@ -2,14 +2,11 @@ package tagent
 
 import (
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/agent/resources"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/kv"
 	"github.com/stretchr/testify/require"
@@ -130,8 +127,8 @@ func TestOwnership_EquivalentConfigsShareNotConflict(t *testing.T) {
 
 	other := ownershipCfg(dir)
 	require.Equal(t,
-		fingerprintMemory(base.Agents["tagent"].Memory),
-		fingerprintMemory(other.Agents["tagent"].Memory),
+		resources.FingerprintMemory(base.Agents["tagent"].Memory),
+		resources.FingerprintMemory(other.Agents["tagent"].Memory),
 		"behaviorally identical configs must produce identical fingerprints")
 
 	ta2, err := New(other, WithModel(&stubModel{name: "m"}))
@@ -170,7 +167,7 @@ func TestOwnership_MidBuildFailureReleasesLease(t *testing.T) {
 // 契约: docs/wiki/platform/resource-ownership.md#per-key-coordination
 func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 	dir := t.TempDir()
-	rr := NewRuntimeResources()
+	rr := resources.NewRuntimeResources()
 
 	const n = 8
 	stores := make([]memory.MemoryStore, n)
@@ -183,8 +180,8 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 		doneWG.Add(1)
 		go func(i int) {
 			defer doneWG.Done()
-			store, _, release, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (openedResource, error) {
-				return openedResource{store: memory.NewInMemoryStore()}, nil
+			store, _, release, err := rr.Acquire("localfile", dir, resources.FingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (resources.OpenedResource, error) {
+				return resources.OpenedResource{Store: memory.NewInMemoryStore()}, nil
 			})
 			if err != nil {
 				t.Errorf("acquire %d: %v", i, err)
@@ -207,8 +204,8 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 	for i := 0; i < n; i++ {
 		releases[i]()
 	}
-	store2, _, release2, err := rr.acquire("localfile", dir, fingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (openedResource, error) {
-		return openedResource{store: memory.NewInMemoryStore()}, nil
+	store2, _, release2, err := rr.Acquire("localfile", dir, resources.FingerprintMemory(MemoryConfig{Type: "inmemory", Path: dir}), func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{Store: memory.NewInMemoryStore()}, nil
 	})
 	if err != nil {
 		t.Fatalf("reopen after concurrent release: %v", err)
@@ -223,19 +220,19 @@ func TestOwnership_ConcurrentAcquireSamePath(t *testing.T) {
 // 契约: docs/wiki/platform/resource-ownership.md#release-generation
 func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 	dir := t.TempDir()
-	rr := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-	openFn := func() (openedResource, error) {
+	rr := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+	openFn := func() (resources.OpenedResource, error) {
 		k, err := kv.NewLocalFileKV(dir)
 		if err != nil {
-			return openedResource{}, err
+			return resources.OpenedResource{}, err
 		}
 		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
-		return openedResource{store: s}, err
+		return resources.OpenedResource{Store: s}, err
 	}
-	storeA, _, releaseA, err := rr.acquire("localfile", dir, fp, openFn)
+	storeA, _, releaseA, err := rr.Acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
-	storeB, _, releaseB, err := rr.acquire("localfile", dir, fp, openFn)
+	storeB, _, releaseB, err := rr.Acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 	require.Same(t, storeA, storeB, "same path must share one instance")
 
@@ -257,21 +254,21 @@ func TestLeaseRelease_IdempotentDoesNotHarmSurvivor(t *testing.T) {
 // 契约: docs/wiki/platform/resource-ownership.md#release-generation
 func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 	dir := t.TempDir()
-	rr := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-	openFn := func() (openedResource, error) {
+	rr := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+	openFn := func() (resources.OpenedResource, error) {
 		k, err := kv.NewLocalFileKV(dir)
 		if err != nil {
-			return openedResource{}, err
+			return resources.OpenedResource{}, err
 		}
 		s, err := memory.NewFileSegmentStore(k, nil, dir, 100)
-		return openedResource{store: s}, err
+		return resources.OpenedResource{Store: s}, err
 	}
-	_, _, staleRelease, err := rr.acquire("localfile", dir, fp, openFn)
+	_, _, staleRelease, err := rr.Acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 	staleRelease()
 
-	newStore, _, newRelease, err := rr.acquire("localfile", dir, fp, openFn)
+	newStore, _, newRelease, err := rr.Acquire("localfile", dir, fp, openFn)
 	require.NoError(t, err)
 
 	staleRelease()
@@ -294,23 +291,23 @@ func TestLeaseRelease_StaleDoesNotAffectNewGeneration(t *testing.T) {
 // 契约: docs/wiki/platform/resource-ownership.md#engine-generation
 func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 	dir := t.TempDir()
-	rr := NewRuntimeResources()
+	rr := resources.NewRuntimeResources()
 	mc := MemoryConfig{
 		Type: "memory", Path: dir,
 		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 32}},
 	}
-	fp := fingerprintMemory(mc)
-	openFn := func() (openedResource, error) {
+	fp := resources.FingerprintMemory(mc)
+	openFn := func() (resources.OpenedResource, error) {
 		s := memory.NewInMemoryStore()
-		return openedResource{store: s, engine: buildSharedEngine(s, mc)}, nil
+		return resources.OpenedResource{Store: s, Engine: buildSharedEngine(s, mc)}, nil
 	}
 
-	store1, eng1, rel1, err := rr.acquire("mem", dir, fp, openFn)
+	store1, eng1, rel1, err := rr.Acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.NotNil(t, eng1, "engine-configured shared path must have an entry-owned engine")
 	require.True(t, eng1.Ready(), "freshly built engine must be live")
 
-	_, eng2, rel2, err := rr.acquire("mem", dir, fp, openFn)
+	_, eng2, rel2, err := rr.Acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.Same(t, eng1, eng2, "one generation shares exactly one engine instance")
 
@@ -324,40 +321,12 @@ func TestEngineOwnership_SharedReopenGetsFreshEngine(t *testing.T) {
 	rel2()
 	require.False(t, eng1.Ready(), "last lease release must close the shared engine")
 
-	_, eng3, rel3, err := rr.acquire("mem", dir, fp, openFn)
+	_, eng3, rel3, err := rr.Acquire("mem", dir, fp, openFn)
 	require.NoError(t, err)
 	require.NotNil(t, eng3)
 	require.NotSame(t, eng1, eng3, "reopen must get a fresh engine bound to a fresh backend")
 	require.True(t, eng3.Ready())
 	rel3()
-}
-
-// seqStore wraps a memory.MemoryStore, records the teardown sequence, lets the
-// test force Close to fail, and exposes StopProducers so closeResource stops
-// the forgetting producers BEFORE the engine worker.
-type seqStore struct {
-	memory.MemoryStore
-	seq *[]string
-	err error
-}
-
-func (s *seqStore) StopProducers() { *s.seq = append(*s.seq, "producers") }
-func (s *seqStore) Close() error {
-	*s.seq = append(*s.seq, "store")
-	return s.err
-}
-
-// seqEngine wraps a memory.MemoryEngine; Close records the step and can fail.
-// Only Close is exercised (closeResource never calls the promoted methods).
-type seqEngine struct {
-	memory.MemoryEngine
-	seq *[]string
-	err error
-}
-
-func (e *seqEngine) Close() error {
-	*e.seq = append(*e.seq, "engine")
-	return e.err
 }
 
 // TestCloseOrder_ProducersEngineBackendAndErrorReach 钉住 最终释放按依赖序拆除，且关闭错误必须回到释放的调用方。
@@ -368,63 +337,46 @@ func (e *seqEngine) Close() error {
 func TestCloseOrder_ProducersEngineBackendAndErrorReach(t *testing.T) {
 	t.Run("engine error reaches release and holds lock", func(t *testing.T) {
 		dir := t.TempDir()
-		rr := NewRuntimeResources()
+		rr := resources.NewRuntimeResources()
 		var seq []string
 		engErr := errors.New("engine worker stuck")
-		fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-		openFn := func() (openedResource, error) {
+		fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+		openFn := func() (resources.OpenedResource, error) {
 			s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq}
 			e := &seqEngine{seq: &seq, err: engErr}
-			return openedResource{store: s, engine: e}, nil
+			return resources.OpenedResource{Store: s, Engine: e}, nil
 		}
-		_, _, rel, err := rr.acquire("localfile", dir, fp, openFn)
+		_, _, rel, err := rr.Acquire("localfile", dir, fp, openFn)
 		require.NoError(t, err)
 		rerr := rel()
 		require.ErrorIs(t, rerr, engErr, "engine close error must reach the release caller")
 		require.Equal(t, []string{"producers", "engine"}, seq,
 			"backend must NOT be flushed after an unconfirmed engine stop (stale worker may still write)")
-		_, _, _, err2 := rr.acquire("localfile", dir, fp, openFn)
-		require.ErrorIs(t, err2, ErrResourcePoisoned, "unconfirmed worker stop must SEAL the path via an explicit poisoned entry (§6.4), not a silent fd leak")
+		_, _, _, err2 := rr.Acquire("localfile", dir, fp, openFn)
+		require.ErrorIs(t, err2, resources.ErrResourcePoisoned, "unconfirmed worker stop must SEAL the path via an explicit poisoned entry (§6.4), not a silent fd leak")
 	})
 
 	t.Run("store error reaches release and frees lock", func(t *testing.T) {
 		dir := t.TempDir()
-		rr := NewRuntimeResources()
+		rr := resources.NewRuntimeResources()
 		var seq []string
 		storeErr := errors.New("backend flush failed")
-		fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-		openFn := func() (openedResource, error) {
+		fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+		openFn := func() (resources.OpenedResource, error) {
 			s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq, err: storeErr}
 			e := &seqEngine{seq: &seq}
-			return openedResource{store: s, engine: e}, nil
+			return resources.OpenedResource{Store: s, Engine: e}, nil
 		}
-		_, _, rel, err := rr.acquire("localfile", dir, fp, openFn)
+		_, _, rel, err := rr.Acquire("localfile", dir, fp, openFn)
 		require.NoError(t, err)
 		rerr := rel()
 		require.ErrorIs(t, rerr, storeErr, "store close error must reach the release caller")
 		require.Equal(t, []string{"producers", "engine", "store"}, seq,
 			"close order: producers → engine → backend flush")
-		_, _, rel2, err2 := rr.acquire("localfile", dir, fp, openFn)
+		_, _, rel2, err2 := rr.Acquire("localfile", dir, fp, openFn)
 		require.NoError(t, err2, "confirmed stop must release the writer lock for reopen")
 		_ = rel2()
 	})
-}
-
-// blockCloseStore wraps a memory.MemoryStore whose Close blocks until unblocked,
-// simulating a slow backend flush so the test can observe whether a same-path
-// reopen wrongly races ahead of (or deadlocks against) the in-progress close.
-type blockCloseStore struct {
-	memory.MemoryStore
-	// entered receives exactly once when a Close begins.
-	entered chan struct{}
-	// unblock releases Close: the call returns only after it is signalled.
-	unblock chan struct{}
-}
-
-func (s *blockCloseStore) Close() error {
-	s.entered <- struct{}{}
-	<-s.unblock
-	return nil
 }
 
 // TestReleaseCoordination_SamePathReopenWaitsForClose 钉住 同路径重开必须等上一代关完，不得撞上「登记已没了、写锁还在」的误报。
@@ -434,14 +386,14 @@ func (s *blockCloseStore) Close() error {
 func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 	dir := t.TempDir()
 	other := t.TempDir()
-	rr := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
+	rr := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
 
 	entered := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	bs := &blockCloseStore{MemoryStore: memory.NewInMemoryStore(), entered: entered, unblock: unblock}
-	_, _, rel, err := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-		return openedResource{store: bs}, nil
+	_, _, rel, err := rr.Acquire("localfile", dir, fp, func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{Store: bs}, nil
 	})
 	require.NoError(t, err)
 
@@ -456,17 +408,17 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 	}
 	reopen := make(chan outcome, 1)
 	go func() {
-		s, _, r2, e := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-			return openedResource{store: memory.NewInMemoryStore()}, nil
+		s, _, r2, e := rr.Acquire("localfile", dir, fp, func() (resources.OpenedResource, error) {
+			return resources.OpenedResource{Store: memory.NewInMemoryStore()}, nil
 		})
 		reopen <- outcome{store: s, rel: r2, err: e}
 	}()
 
-	dfp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
+	dfp := resources.FingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
 	otherDone := make(chan error, 1)
 	go func() {
-		_, _, r3, e := rr.acquire("localfile", other, dfp, func() (openedResource, error) {
-			return openedResource{store: memory.NewInMemoryStore()}, nil
+		_, _, r3, e := rr.Acquire("localfile", other, dfp, func() (resources.OpenedResource, error) {
+			return resources.OpenedResource{Store: memory.NewInMemoryStore()}, nil
 		})
 		if e == nil {
 			_ = r3()
@@ -491,7 +443,7 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 
 	select {
 	case got := <-reopen:
-		require.NoError(t, got.err, "reopen after the old generation closed must succeed, not ErrStoreLocked")
+		require.NoError(t, got.err, "reopen after the old generation closed must succeed, not resources.ErrStoreLocked")
 		require.NotNil(t, got.store)
 		_ = got.rel()
 	case <-time.After(3 * time.Second):
@@ -506,16 +458,16 @@ func TestReleaseCoordination_SamePathReopenWaitsForClose(t *testing.T) {
 // 契约: docs/wiki/platform/resource-ownership.md#engine-generation
 func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) {
 	dir := t.TempDir()
-	rr := NewRuntimeResources()
+	rr := resources.NewRuntimeResources()
 	bad := MemoryConfig{
 		Type: "memory", Path: dir,
 		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "no-such-provider", Dimensions: 8}},
 	}
-	openBad := func() (openedResource, error) {
+	openBad := func() (resources.OpenedResource, error) {
 		s := memory.NewInMemoryStore()
-		return openedResource{store: s, engine: buildSharedEngine(s, bad)}, nil
+		return resources.OpenedResource{Store: s, Engine: buildSharedEngine(s, bad)}, nil
 	}
-	store1, eng1, rel1, err := rr.acquire("mem", dir, fingerprintMemory(bad), openBad)
+	store1, eng1, rel1, err := rr.Acquire("mem", dir, resources.FingerprintMemory(bad), openBad)
 	require.NoError(t, err)
 	require.Nil(t, eng1, "failing embedding provider must degrade the entry engine to nil (no dangling engine)")
 
@@ -536,147 +488,13 @@ func TestEngineOwnership_SharedBuildFailureDegradesToCapacityOnly(t *testing.T) 
 		Type: "memory", Path: dir,
 		Engine: &MemoryEngineConfig{Embedding: &EmbeddingConfig{Provider: "mock", Dimensions: 8}},
 	}
-	store2, eng2, rel2, err := rr.acquire("mem", dir, fingerprintMemory(good), func() (openedResource, error) {
+	store2, eng2, rel2, err := rr.Acquire("mem", dir, resources.FingerprintMemory(good), func() (resources.OpenedResource, error) {
 		s := memory.NewInMemoryStore()
-		return openedResource{store: s, engine: buildSharedEngine(s, good)}, nil
+		return resources.OpenedResource{Store: s, Engine: buildSharedEngine(s, good)}, nil
 	})
 	require.NoError(t, err)
 	require.NotSame(t, store1, store2, "reopen must get a fresh backend store (old generation isolated)")
 	require.NotNil(t, eng2, "reopen with a valid provider must build a real engine")
 	require.True(t, eng2.Ready())
 	require.NoError(t, rel2())
-}
-
-// TestBuildFailure_CleanReclaimStaysRetryable 钉住 构建失败而回收已确认时，写权必须交还，同路径下一次获取能干净重开。
-// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
-func TestBuildFailure_CleanReclaimStaysRetryable(t *testing.T) {
-	dir := t.TempDir()
-	rr := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-	buildErr := errors.New("kv died at startup")
-
-	_, _, _, err := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-		return openedResource{}, buildErr
-	})
-	require.ErrorIs(t, err, buildErr)
-
-	_, _, rel, err2 := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
-	})
-	require.NoError(t, err2, "a cleanly reclaimed failed build must not seal the path")
-	require.NoError(t, rel())
-}
-
-// TestBuildFailure_UnconfirmedReclaimSealsWriter 钉住 回收无法确认的构建失败必须保持写权并封住路径，绝不与半活后端并写。
-// - 原始失败原因仍要回到调用方，封路另用具名错误表达；
-// - 封住是显式条目在册，不止账面记录：探测同一路径撞上「已被占用」。
-// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
-func TestBuildFailure_UnconfirmedReclaimSealsWriter(t *testing.T) {
-	dir := t.TempDir()
-	rr := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-	buildErr := errors.New("segment store init failed")
-	closeErr := errors.New("kv close hung")
-
-	_, _, _, err := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-		return openedResource{}, fmt.Errorf("%w; %w", buildErr,
-			fmt.Errorf("%w: kv close: %v", ErrReclaimUnconfirmed, closeErr))
-	})
-	require.ErrorIs(t, err, ErrReclaimUnconfirmed, "the original build error still reaches the caller")
-
-	key := resourceKey{kind: "localfile", path: canonicalize(dir)}
-	rr.mu.Lock()
-	e := rr.entries[key]
-	rr.mu.Unlock()
-	require.NotNil(t, e, "unconfirmed reclaim must seal via an explicit poisoned entry")
-	require.True(t, e.poisoned)
-
-	_, _, _, err2 := rr.acquire("localfile", dir, fp, func() (openedResource, error) {
-		t.Fatal("open must NOT run again on a sealed path")
-		return openedResource{}, nil
-	})
-	require.ErrorIs(t, err2, ErrResourcePoisoned)
-
-	probe, perr := os.OpenFile(filepath.Join(canonicalize(dir), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	require.NoError(t, perr)
-	defer probe.Close()
-	require.Error(t, flockExclusive(probe), "an unconfirmed reclaim must keep holding the writer lock")
-}
-
-// TestWriterLock_ExclusiveAcrossHandles 钉住 一个物理目录同时只允许一个写者，第二个持有者非阻塞抢锁必须失败。
-// - 交还后可重新取得；
-// - 进程崩溃由 OS 交还锁，不存在遗留标记把目录永久锁死。
-// 契约: docs/wiki/platform/resource-ownership.md#single-writer
-func TestWriterLock_ExclusiveAcrossHandles(t *testing.T) {
-	dir := t.TempDir()
-
-	f1, err := acquireDirLock(dir)
-	require.NoError(t, err)
-
-	_, err = acquireDirLock(dir)
-	require.True(t, errors.Is(err, ErrStoreLocked), "second writer must be rejected, got: %v", err)
-
-	require.NoError(t, unlockDirLock(f1))
-
-	f2, err := acquireDirLock(dir)
-	require.NoError(t, err, "after release the lock is re-acquirable")
-	require.NoError(t, unlockDirLock(f2))
-}
-
-// TestPoisoned_ExplicitEntrySealsPathAcrossGC 钉住 未确认停止的路径由显式条目封住，强引用与失败原因都在册，主动 GC 削弱不了它。
-// - 同路径获取一律具名失败，并带上记录的那次失败；
-// - 封路优先于冲突记账：换另一份指纹报的仍是「被封住」；
-// - 无关路径不受影响，封的是一条路径而非整张登记簿。
-// 契约: docs/wiki/platform/resource-ownership.md#poisoned-seal
-func TestPoisoned_ExplicitEntrySealsPathAcrossGC(t *testing.T) {
-	dir := t.TempDir()
-	rr := NewRuntimeResources()
-	var seq []string
-	engErr := errors.New("engine worker stuck")
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: dir})
-
-	var sealed *seqStore
-	openFn := func() (openedResource, error) {
-		s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq}
-		sealed = s
-		return openedResource{store: s, engine: &seqEngine{seq: &seq, err: engErr}}, nil
-	}
-	_, _, rel, err := rr.acquire("localfile", dir, fp, openFn)
-	require.NoError(t, err)
-
-	require.ErrorIs(t, rel(), engErr, "the close failure must reach the releasing caller")
-
-	key := resourceKey{kind: "localfile", path: canonicalize(dir)}
-	rr.mu.Lock()
-	e := rr.entries[key]
-	rr.mu.Unlock()
-	require.NotNil(t, e, "§6.4: the poisoned entry must be RETAINED, not detached + silently leaked")
-	require.True(t, e.poisoned)
-	require.Same(t, memory.MemoryStore(sealed), e.store, "entry keeps the strong store reference")
-	require.NotNil(t, e.lockFile, "entry keeps the lockfile reference")
-	require.ErrorIs(t, e.closeErr, engErr)
-
-	runtime.GC()
-	runtime.GC()
-
-	_, _, _, err2 := rr.acquire("localfile", dir, fp, openFn)
-	require.ErrorIs(t, err2, ErrResourcePoisoned, "same-path acquire must fail EXPLICITLY (poisoned), not via a flock race or a resurrected generation")
-	require.ErrorContains(t, err2, engErr.Error(), "the sealing error carries the recorded failure to the caller")
-
-	_, _, _, err3 := rr.acquire("localfile", dir, "v1|other|fp", openFn)
-	require.ErrorIs(t, err3, ErrResourcePoisoned)
-
-	other := t.TempDir()
-	fpOther := fingerprintMemory(MemoryConfig{Type: "localfile", Path: other})
-	_, _, relOther, err4 := rr.acquire("localfile", other, fpOther, func() (openedResource, error) {
-		s := &seqStore{MemoryStore: memory.NewInMemoryStore(), seq: &seq}
-		return openedResource{store: s}, nil
-	})
-	require.NoError(t, err4, "poisoning one path must not seal the registry")
-	require.NoError(t, relOther())
-
-	probe, perr := os.OpenFile(filepath.Join(canonicalize(dir), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	require.NoError(t, perr)
-	defer probe.Close()
-	require.Error(t, flockExclusive(probe), "the poisoned entry must still hold the writer lock after GC")
 }

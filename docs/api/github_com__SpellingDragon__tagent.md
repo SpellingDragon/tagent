@@ -34,27 +34,6 @@ const ToolKindAgent = config.ToolKindAgent
 const ToolKindTool = config.ToolKindTool
     ToolKindTool 常量别名：直接实现 CallableTool 的工具引用种类。
 
-VARIABLES
-
-var (
-	// ErrResourceConflict reports the same path already open with an incompatible fingerprint.
-	ErrResourceConflict = errors.New("resource conflict: path already open with an incompatible config")
-	// ErrStoreLocked reports another process holding the directory's single-writer lock.
-	ErrStoreLocked = errors.New("store is locked by another process (single-writer)")
-	// ErrResourcePoisoned reports that a generation at this path did not confirm
-	// its stop (or did not confirm its lock release), so the registry keeps a
-	// poisoned entry sealing the path. The
-	// seal is an explicit entry — holding the store/engine/lockfile strong
-	// references and the failure result — never the accidental leak of a handle
-	// nobody can observe.
-	ErrResourcePoisoned = errors.New("resource poisoned: previous generation on this path did not confirm a safe stop; path sealed against new generations")
-	// ErrReclaimUnconfirmed reports that construction released a
-	// partially-built resource WITHOUT a confirmed reclaim. The open closure
-	// wraps it so acquire must NOT free the writer lock — an unconfirmed
-	// reclaim seals the path exactly like an unconfirmed worker stop.
-	ErrReclaimUnconfirmed = errors.New("reclaim of partially built resource unconfirmed")
-)
-
 FUNCTIONS
 
 func DefaultAssetPatterns() []string
@@ -335,22 +314,6 @@ type ReliabilityConfig = config.ReliabilityConfig
 
 type RemoteConfig = config.RemoteConfig
     RemoteConfig 别名：A2A 远端连接声明。
-
-type RuntimeResources struct {
-	// Has unexported fields.
-}
-    RuntimeResources is the owner registry for shared persistent stores
-    (concurrency-safe). One entry per (kind, canonical path); every consumer
-    acquires a lease, and the LAST lease release closes the store and frees
-    the directory lock, so the next New gets a genuinely reopened instance.
-    Incompatible fingerprints on the same path are rejected — never a second
-    writer, never silent first-config-wins. A cross-process flock on a lockfile
-    inside the directory enforces single-writer. Isolated stores (empty path)
-    bypass the registry entirely: each New owns its instance exclusively.
-
-func NewRuntimeResources() *RuntimeResources
-    NewRuntimeResources creates an empty registry. The process-wide default is
-    defaultResources; tests may inject isolated registries.
 
 type ToolKind = config.ToolKind
     ToolKind 别名：工具引用的种类。

@@ -3,6 +3,9 @@
 package tagent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/resources"
+	"github.com/SpellingDragon/tagent/config"
+
 	"github.com/SpellingDragon/tagent/agent/org"
 
 	"context"
@@ -416,10 +419,10 @@ func sdCloseYAML(t testing.TB, routed []string, storeOf func(name string) string
 // is still held means either a leak or a live writer, so the exit is checked here.
 func assertStoreWriterFree(t *testing.T, path string) {
 	t.Helper()
-	probe, err := os.OpenFile(filepath.Join(canonicalize(path), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	probe, err := os.OpenFile(filepath.Join(resources.Canonicalize(path), ".tagent-writer.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	require.NoError(t, err)
 	defer probe.Close()
-	require.NoError(t, flockExclusive(probe),
+	require.NoError(t, resources.FlockExclusive(probe),
 		"关闭后 %s 的写锁必须已归还（恰一次释放，不待下一个用户请求）", path)
 }
 
@@ -693,15 +696,18 @@ agents:
 `, leafName, leafName, storePath)
 }
 
-// takeOverStore asks a FRESH registry to open the path: success proves the previous holder
-// handed the writer slot back exactly once; ErrStoreLocked means a lease leaked, and
-// ErrResourcePoisoned means it was released uncleanly.
+// noopStoreForTakeover embeds a nil MemoryStore: Acquire only needs a non-nil store
+// value, which this zero-cost stub provides.
+type noopStoreForTakeover struct{ memory.MemoryStore }
+
+// takeOverStore asks a FRESH registry to open the path: success proves the
+// previous holder handed the writer slot back exactly once.
 func takeOverStore(t *testing.T, path string) error {
 	t.Helper()
-	fresh := NewRuntimeResources()
-	fp := fingerprintMemory(MemoryConfig{Type: "localfile", Path: path})
-	_, _, rel, err := fresh.acquire("localfile", path, fp, func() (openedResource, error) {
-		return openedResource{store: &seqStore{MemoryStore: nil, seq: new([]string)}}, nil
+	fresh := resources.NewRuntimeResources()
+	fp := resources.FingerprintMemory(config.MemoryConfig{Type: "localfile", Path: path})
+	_, _, rel, err := fresh.Acquire("localfile", path, fp, func() (resources.OpenedResource, error) {
+		return resources.OpenedResource{Store: noopStoreForTakeover{}}, nil
 	})
 	if err == nil {
 		require.NoError(t, rel())

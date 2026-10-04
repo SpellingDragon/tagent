@@ -3,6 +3,8 @@
 package tagent
 
 import (
+	"github.com/SpellingDragon/tagent/agent/resources"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -963,7 +965,7 @@ func TestResidentShellBuild_DoesNotDoubleArmSharedLease(t *testing.T) {
 	spillRoot := filepath.Join(root, "spill")
 
 	mc := MemoryConfig{Type: "localfile", Path: storeDir}
-	rawStore, _, preRelease, err := defaultResources.acquire("localfile", storeDir, fingerprintMemory(mc), func() (openedResource, error) {
+	rawStore, _, preRelease, err := resources.DefaultResources.Acquire("localfile", storeDir, resources.FingerprintMemory(mc), func() (resources.OpenedResource, error) {
 		return openLocalFileStore(mc)
 	})
 	require.NoError(t, err)
