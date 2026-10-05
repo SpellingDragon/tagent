@@ -66,18 +66,21 @@ func TestAgentToolWrapper_Declaration_WithoutEventKeys(t *testing.T) {
 	assert.Contains(t, decl.InputSchema.Required, "request")
 }
 
-// TestAgentToolWrapper_Declaration_NoExtraParams 钉住 声明里不得出现工具调用参数或其他无关参数。
+// TestAgentToolWrapper_Declaration_NoExtraParams 钉住 委派工具的声明面是显式白名单。
+// - 允许集=request/event_keys/ttl+四个 per-call 覆盖参数，不得出现工具调用参数等无关项；
+// 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
 func TestAgentToolWrapper_Declaration_NoExtraParams(t *testing.T) {
 	subAgent := &TagentAgent{name: "test-tool"}
 	wrapper := NewAgentToolWrapper(subAgent, "test tool", []string{"event_key"}, nil)
 
 	decl := wrapper.Declaration()
 
-	assert.Len(t, decl.InputSchema.Properties, 3,
-		"should declare request, event_keys and ttl parameters only")
-	assert.Contains(t, decl.InputSchema.Properties, "request")
-	assert.Contains(t, decl.InputSchema.Properties, "event_keys")
-	assert.Contains(t, decl.InputSchema.Properties, "ttl")
+	assert.Len(t, decl.InputSchema.Properties, 7,
+		"should declare request, event_keys, ttl and the four per-call override parameters only")
+	for _, want := range []string{"request", "event_keys", "ttl",
+		"system_prompt_override", "model_override", "tools_subset", "context_refs"} {
+		assert.Contains(t, decl.InputSchema.Properties, want)
+	}
 	assert.NotContains(t, decl.InputSchema.Properties, "tool_calls")
 }
 

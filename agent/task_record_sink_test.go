@@ -130,7 +130,7 @@ func TestRebuildTaskRegistry_SubagentResumeGuidance(t *testing.T) {
 	}, now-60_000)
 
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
-	redispatch := func(_ context.Context, agentName, body string) (task.SpawnResult, error) {
+	redispatch := func(_ context.Context, agentName, body string, _ *task.Overrides) (task.SpawnResult, error) {
 		t.Logf("redispatch %s", agentName)
 		return task.SpawnResult{}, nil
 	}

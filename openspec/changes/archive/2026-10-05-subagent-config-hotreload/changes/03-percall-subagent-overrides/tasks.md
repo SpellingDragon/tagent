@@ -1,0 +1,21 @@
+# Tasks: 03 per-call 子 agent 覆盖层
+
+- [x] 3.1 fail-before 双红：① 连续两次调用空白 agent，第二次不带覆盖——断言第二次视图=generation 默认（若现状共享态污染即红）；② 越域 tools_subset 断言结构化错误（现状无校验即红） —— 验证：`go test ./agent/ -run 'Override' -count=1` 两测红（红证据入档后转绿）
+    - 红证据（基线 68eb8bc，`agent/percall_override_test.go`，两测均**行为红**非编译红；`go vet ./agent/` 净）：
+      - ①`TestPerCallOverride_SecondCallWithoutOverrideUsesGenerationDefault` → `percall_override_test.go:275: "BASE-SHELL-PROMPT\n\n[Tool Prompt] ..." does not contain "OVERRIDE-PROMPT-1"`，即现状参数被静默忽略；日志显示两次委派走完整真实路径（`tool_agent.go:459 tool_enter agent=percall-blank-default` ×2 → `tool_agent.go:667 tool_exit`），断言面读的是子 agent 实际收到的 `model.Request`。
+      - ②`TestPerCallOverride_ToolsSubsetBeyondDomainIsRefused` → `percall_override_test.go:307: An error is expected but got nil`，且被调方照常运行（现状无任何 max_tools 域校验）。
+    - 转绿证据：同命令 → `7 PASS / 0 FAIL`，`ok github.com/SpellingDragon/tagent/agent 0.435s`。
+- [x] 3.2 参数面与校验：委派工具 schema 四新字段（system_prompt_override/model_override/tools_subset/**context_refs**——上下文引用暴露，经既有 RuntimeState/ExternalContextEntry 通道注入，不自建传递面）；tools ⊆ max_tools fail-closed 校验；模型引用存在性校验 —— 验证：`go build ./... && go vet ./agent/` exit 0；覆盖测试经真实委派调用路径（非 mock 工具直调）
+    - 凭据：`go build ./... && go vet ./agent/ ./agent/task/` 无输出 exit 0。四字段入 schema 由 `TestPerCallOverride_DeclarationAdmitsTheFourArguments` 钉住（PASS）。
+    - 真实路径：`newPercallBlank`（真 `NewTagentAgent`）+ `startPercallHost`（真 `StartLoop`）+ `injectPercallHost`（真 `InjectMessageContext`）→ 宿主回合发起 tool_call → 框架派发 → `AgentToolWrapper.Call` → 被调方 `Run` 装配；断言读被调方实际收到的 `model.Request`（`viewRecorderModel` 录制），无一处 mock 工具直调。
+    - 校验点：`parsePerCallOverrides` 在 `Call` 参数解析处 fail-closed——越域 `tools_subset` 聚合 offenders 一次性具名拒绝（`TestPerCallOverride_ToolsSubsetBeyondDomainIsRefused`：`OverrideField()=="tools_subset"`、错误串含 `mcp_call`、`childView.calls()==0` 证拒绝先于执行）；未注册 `model_override` 具名拒绝（`TestPerCallOverride_ModelOverrideServesRegisteredReference` 后半段）；`context_refs` 非数组具名拒绝。
+    - `context_refs` 复用既有 `ExternalContextKey`/`ExternalContextEntry` 序列化通路（并入既有 `keys` 集合），未新建任何传递面（`TestPerCallOverride_ContextRefsTravelTheExistingChannel` PASS）。
+- [x] 3.3 覆盖栈接线：invocation 携带 overrides → `Run` 装配期读取（prompt/model/tools = overrides ?? generation 定义）；invocation 消亡即弹出（结构性作用域） —— 验证：`go test ./agent/ -run 'Override' -count=1` exit 0（3.1 双测转绿）
+    - 凭据：上述命令 → `7 PASS / 0 FAIL`，`ok ... 0.435s`。
+    - 形态：载荷经 `agent.PerCallOverridesKey` 挂 `inv.RunOptions.RuntimeState`（与外部上下文同族）；`session.go` 在 generation 视图定稿之后、`newContextManagerFromConfig` 之前对 **本次调用的配置副本 `invCfg`** 压入一次（装配期一次解析，视图钉定含覆盖）；无 owner/进程级可写槽位 ⇒ 防泄漏是结构性的，紧随的无覆盖调用必然回到本代定义（`..._SecondCallWithoutOverrideUsesGenerationDefault` PASS）。
+    - 提示词通路细节：带 prompt 覆盖时该调用 `SystemPromptSource=nil`——文件源会逐轮重写 `messages[0]`，不关源则"替换"被下一次回调冲掉；常驻定义不受影响。
+    - 未触发"据实回退分支"：`Run` 装配面无侵入即可挂 overrides（`RunOptions.RuntimeState` 携 `json.RawMessage`），未改 session.go 结构。
+- [x] 3.4 `Declarative.Overrides` 序列化 + relaunch 重放还原 + 跨重启 `RebuildTaskRegistry` 重放测 —— 验证：`go test ./agent/task/ -count=1` exit 0（编排者复跑凭据：`agent/task/percall_declarative_test.go` 两测在册：`TestDeclarative_OverridesArePartOfTheSerializableProjection`、`TestDeclarative_RelaunchReplaysTheFoldedOverrides`）
+- [x] 3.5 代际交互（在途视图不漂 + 后续无覆盖调用用新代） —— 验证：`TestPerCallOverride_InFlightCallSurvivesGenerationReload` 在册并于 `go test ./agent/ -run 'Override' -count=1` 中 PASS
+- [x] 3.6 样例/wiki/spec delta + 全量回归：yaml 样例内嵌域 design 与 wiki `#percall-overrides` 小节；全包 `-short` 净（编排者集成复跑：35 包 ok，INTEG=0）
+- [x] 3.7 【R8/R9 情报回写·编排者越域实施】跨重启重投递透传覆盖：`RedispatchAsync` 增 overrides 形参、三覆盖序列化回**同一参数键**经 `Call` 单一解析点（不建第二通道）；`SubagentRedispatcher` 闭包携带 overrides 且重投递任务**再冻结**同一覆盖（二级 relaunch 不降级）；`SubagentSpecFromDeclarative` 传 `decl.Overrides`。回归 `TestPerCallOverride_RelaunchCarriesTheFrozenOverrides` —— 验证：`go test ./agent/ -run 'Override|SubagentRedispatcher|Rebuild' -count=1` ok

@@ -200,7 +200,9 @@ func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(co
 // SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
 // Relaunch✅ via redispatch through the resident agents map; Resume❌ — the
 // rounds chain has no event source, cross-restart resume returns guidance).
-func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec {
+// The overrides frozen at spawn ride the re-dispatch, so the rebuilt task
+// runs on the same view the original call assembled.
+func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec {
 	spec := task.TaskSpec{
 		Kind:        "subagent",
 		Desc:        decl.Desc,
@@ -215,7 +217,7 @@ func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName,
 	if redispatch != nil && decl.AgentName != "" {
 		body := decl.MessageBody
 		spec.Relaunch = func(ctx context.Context) (task.SpawnResult, error) {
-			return redispatch(ctx, decl.AgentName, body)
+			return redispatch(ctx, decl.AgentName, body, decl.Overrides)
 		}
 	}
 	spec.ResumeFn = func(_ context.Context, _ string) (task.SettleDetector, error) {

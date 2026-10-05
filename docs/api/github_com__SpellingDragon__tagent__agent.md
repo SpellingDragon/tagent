@@ -47,6 +47,13 @@ const ExternalContextKey = "external_context"
     through the Invocation → A2A metadata → Invocation chain. Exported so that
     tagent.go can use it with a2aagent.WithTransferStateKey.
 
+const PerCallOverridesKey = "percall_overrides"
+    PerCallOverridesKey is the RuntimeState key under which one delegation
+    carries its per-call execution-view overrides to the delegate's
+    assembly point. It belongs to the same invocation-scoped input family as
+    ExternalContextKey: the payload rides the Invocation, dies with the call,
+    and is held on neither the agent instance nor any shared generation face.
+
 const SourceTask = "task"
     SourceTask identifies task_settled events on the bus (a settled background
     task reclaimed into a new turn).
@@ -111,6 +118,11 @@ func BindingHolders(owner string, agents []*TagentAgent) int
     generation lives. It grants no execution right of its own — holding a usage
     right does not create work in B, and it is not a second task domain (J7).
 
+func LookupModelReference(ref string) (model.Model, bool)
+    LookupModelReference resolves a per-call model_override reference to the
+    instance registered under it. An unresolvable reference is refused by the
+    caller, never served by a fallback model.
+
 func NewA2AServer(ta *TagentAgent, host string) (*a2ago.A2AServer, error)
     NewA2AServer creates an A2A server that exposes the given TagentAgent.
 
@@ -122,6 +134,12 @@ func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
     终态（completed/failed/cancelled/dead，含 inline settle 记录）不重建。 rebuildClosures
     由 tool/action 提供（承诺表：command 全/subagent Relaunch/generic ❌）。
     best-effort：单条记录损坏跳过 + WARN，不阻断重建。
+
+func RegisterModelReference(ref string, m model.Model)
+    RegisterModelReference publishes a model instance under a reference name,
+    the target form a per-call model_override addresses. Re-registering a name
+    replaces its instance: a reload re-points a reference, and a lookup returns
+    either the previous or the new instance, never a torn one.
 
 func RegisterPlainTool(id string, factory PlainToolFactory)
     RegisterPlainTool registers a factory for creating plain tools by ID.
@@ -146,7 +164,7 @@ func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentN
 
     - 上下文有发起方租约时按其同一代解析；目标不在该代的编排里就直接报错，绝不悄悄改投当前生效代。 -
 
-func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string) (task.SpawnResult, error)
+func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error)
     SubagentRedispatcher：跨重启 subagent Relaunch 的重投递器——镜像 subagentRelaunch
     的 detector 形状 （RedispatchAsync 同步跑在 detector 的 watch goroutine 内，Spawn
     的 sync-wait 窗口语义保持；spawnKey=agentName+":"+body 与无 extraName 的原 spawn
@@ -254,8 +272,15 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
      5. For remote A2A agents, retries once on failure with 500ms backoff
      6. Collects the sub-agent's final output from the event stream
 
+    context_refs resolves through the same retrieval channel and merges into the
+    keys above, so override-supplied context travels the existing path.
+
 func (w *AgentToolWrapper) Declaration() *trpctool.Declaration
     Declaration implements trpctool.Tool.
+
+    The per-call execution-view arguments are declared on every delegation
+    target: the override layer is a property of the call, not of one agent
+    definition, and each argument takes effect for that call alone.
 
 func (w *AgentToolWrapper) DeclaredAgentName() string
     DeclaredAgentName reports the wrapped sub-agent's name. It is the SAME
@@ -269,14 +294,18 @@ func (w *AgentToolWrapper) DenseDuration() time.Duration
     DenseDuration exposes the async dense-window length (R2 redispatch detector
     shape parity with subagentRelaunch).
 
-func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string) (any, error)
+func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string, overrides *task.Overrides) (any, error)
     RedispatchAsync runAndCollect runs the sub-agent for the given invocation
     and collects its final output from the event stream. Shared by the
     synchronous path and the async task detector. Isolation is preserved
     by Run (fresh bus/CM/projection per invocation), so this is safe to run
     concurrently / in a background task. RedispatchAsync：跨重启 subagent relaunch
     的重投递入口——以原 request 重新走 Call 的完整 spawn 路径（声明了 extra params 时按无参调用降级：plan-name
-    等 extra 参数不跨重启保留，已知边界）。
+    等 extra 参数不跨重启保留，已知边界）。 RedispatchAsync re-enters the delegate with the
+    stored body AND the overrides frozen on the task: the same argument keys a
+    live caller would send, so parsePerCallOverrides validates and applies them
+    through the single parse point — a rebuilt-then-relaunched task runs on the
+    same view the original call assembled, never a silently de-overrideed one.
 
 func (w *AgentToolWrapper) SetAsyncDenseDuration(d time.Duration)
     SetAsyncDenseDuration overrides the dense phase for sub-agent async spawning
@@ -1056,6 +1085,25 @@ func (t *OutputLimitTool) Unwrap() trpctool.Tool
     holds OutputLimitTool(*AgentToolWrapper), never the bare wrapper.
     Because OutputLimitTool preserves the inner declaration unchanged,
 
+type PerCallOverrideError struct {
+	// Field is the rejected argument name (e.g. "tools_subset").
+	Field string
+	// Offenders names the rejected entries within Field.
+	Offenders []string
+	// Reason states the rule the request violated.
+	Reason string
+}
+    PerCallOverrideError is the structured refusal of a per-call override
+    argument: it names the rejected field and, where relevant, the offending
+    entries, so the caller learns what was refused and against which bound,
+    instead of meeting a silently narrowed or silently accepted call.
+
+func (e PerCallOverrideError) Error() string
+    Error implements error.
+
+func (e PerCallOverrideError) OverrideField() string
+    OverrideField names the argument this refusal rejected.
+
 type PlainToolFactory func(cfg PlainToolFactoryConfig) (trpctool.CallableTool, error)
     PlainToolFactory creates a plain tool (implements tool.CallableTool) from
     the given config.
@@ -1466,13 +1514,15 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
     Run 实现 agent.Agent 接口：这是子 agent 调用路径（本地由 AgentToolWrapper、远程由 A2A 使用），
     顶层使用必须走 StartLoop/InjectMessage/StopLoop。
 
-    - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回 AgentLoop 的
-    outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。 - 上下文只在本次调用本地装配，绝不经过共享的 ta
-    状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的 ExternalContextEntry JSON，或
-    direct 兼容入口经 IngestExternalEvents 在 Run 进入时原子排空以保持单槽交收语义。 - 租约拒绝发生在本调用计为
-    live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner
-    Obligations 到不了零、退役排空挂死。 - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把
-    loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
+    - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回
+    AgentLoop 的 outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。 -
+    上下文只在本次调用本地装配，绝不经过共享的 ta 状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的
+    ExternalContextEntry JSON，或 direct 兼容入口经 IngestExternalEvents 在 Run
+    进入时原子排空以保持单槽交收语义。 - per-call 视图覆盖同属这一族调用期输入：经 RuntimeState 随 invocation
+    到达，只在装配期改写本次调用的提示词/模型/工具面，随调用结束而失效，不写回常驻定义也不落任何共享代际面。 - 租约拒绝发生在本调用计为 live
+    之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner Obligations
+    到不了零、退役排空挂死。 - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把 loop-exit 到 unbind
+    窗口内落地的 settle 转发到共享总线。
 
 func (ta *TagentAgent) Runner() runner.Runner
     Runner returns the underlying Runner from ContextManager.
