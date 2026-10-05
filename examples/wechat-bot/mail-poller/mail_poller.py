@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -163,13 +164,24 @@ def rl_token() -> str:
     """hardening-review-batch2 4.5：与 Go 侧 rl.AuthTokenFromEnv 同源。"""
     return os.environ.get("TAGENT_RL_AUTH_TOKEN", "")
 
+def _is_loopback_target(url: str) -> bool:
+    """目标 URL 主机是否回环——与服务端 requestFromLoopback 同一信任判据。"""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.strip("[]").lower()
+    return host in {"127.0.0.1", "localhost", "::1"} or host.startswith("127.")
+
+
 def inject(url: str, content: str, timeout: float = 10.0) -> bool:
     body = {"messages": [{"role": "user", "content": content}]}
     tok = rl_token()
-    if tok:
+    if tok or _is_loopback_target(url):
         # 入站邮件代表一位人类通信者的意图，声明血统使其轮次产出可向用户同步。
-        # 仅在携凭（端点已鉴权）时声明，与 Go 侧 declaration_requires_auth 同规则：
-        # 无 token 时声明会被 400，而注入重试循环永不收敛。
+        # 受理前提与 Go 侧 declaration_requires_auth 同形：携凭（端点已鉴权）或
+        # 目标是回环地址（同机部署，源地址即本机进程）。跨机地址无凭时不声明——
+        # 声明会被 400，而注入重试循环永不收敛。
         body["trigger_source"] = "user"
     payload = json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json"}
