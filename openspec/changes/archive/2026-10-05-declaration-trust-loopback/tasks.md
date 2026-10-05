@@ -14,4 +14,4 @@
 
 - [ ] 3.1 全量：根包 `-short`、`-race` 根+rl、`bash scripts/lint.sh`、`openspec validate --strict`；push 并确认 CI 四 job 绿 —— 验证：各 exit 0
 - [ ] 3.2 回件远端：根因图、两条部署路径（配 token 或默认回环零配置）、其凭据强度提醒（注释级探针≠值变更消费，附改值探针法）、回执噪声预期归零 —— 验证：sent 目录反查 msg_id
-- [ ] 3.3 `openspec archive`（delta 并入主 specs） —— 验证：`openspec list --json` 无该 change
+- [x] 3.3 `openspec archive`（delta 已并入主 specs：inbound-intent-declaration 受理需求修订 ~1，`openspec validate --specs --strict` 106/106，lint ok）（delta 并入主 specs） —— 验证：`openspec list --json` 无该 change
