@@ -111,7 +111,7 @@ agents:
     max_tokens: 512000
     temperature: 0.7
     thinking_enabled: true
-    compress_threshold: 0.45
+    compress_threshold: 0.85
     keep_recent_tasks: 1
     task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
     task_default_ttl: "8h"               # 统一 TTL reaper 对无 `ttl` 入参任务的兜底绝对寿命(缺省 10min):到期经 owner Cancel → failed 终态 → 移出看板。无禁用哨兵、无按 mode 豁免——常驻/长任务须显式加大命令 ttl 或经 op=send/resume 续命(合并并删除旧 task_stale_after 观测态与 task_job_deadline 双墙)
@@ -168,7 +168,8 @@ agents:
       read_namespaces: [tagent]          # 授权读主 agent 时间线(自身命名空间恒可读)
       engine: *shared_engine
     max_tool_iterations: 30
-    max_tokens: 128000
+    max_tokens: 256000
+    compress_threshold: 1
     temperature: 0.3
     thinking_enabled: true
     tools:
@@ -190,7 +191,8 @@ agents:
       read_namespaces: [tagent]
       engine: *shared_engine             # recall_query 走 hybrid 融合(向量∪关键词 RRF)
     max_tool_iterations: 5
-    max_tokens: 128000
+    max_tokens: 256000
+    compress_threshold: 1
     reasoning_effort: "low"              # 检索/拼装类任务,低思考档
     tools:
       - { kind: tool, id: recall_query }
@@ -205,7 +207,8 @@ agents:
     memory:
       type: memory
     max_tool_iterations: 50
-    max_tokens: 128000
+    max_tokens: 256000
+    compress_threshold: 1
     temperature: 0.3
     thinking_enabled: true
     reasoning_effort: "low"
@@ -235,6 +238,7 @@ agents:
       type: memory
     max_tool_iterations: 50
     max_tokens: 256000
+    compress_threshold: 1
     temperature: 0.3
     tools:
       - kind: tool                       # spec:类型化计划管理(后端 openspec CLI,argv 直调,无 shell)
