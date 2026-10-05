@@ -51,6 +51,10 @@ agents:
       - {kind: tool, id: save_file}
 ```
 
+## 已知缺口（收口时定谳，未在本变更内消除）
+
+`model_override` 的引用空间由进程级登记表 `RegisterModelReference/LookupModelReference` 提供，但**生产侧无注册调用方**（现仅测试自注册）：宿主若要用该参数，须自行在 build 期注册模型引用，否则一律按"未注册"具名拒绝（fail-closed，行为安全但能力半通）。补齐需先裁一件事：引用空间取 `WithModelOverrides` 的 per-agent 注入表、还是 org 全 agents 的有效模型——后者涉及跨 `TagentAgent` 实例共享进程级表的语义，不宜在收口时抢做。登记出处：W0 四查·遗漏检测追记（2026-10-05，编排者）。
+
 ## 风险与回退
 
 - 风险①：覆盖×代际热更交互——调用中文件热更发布新代：在途调用钉定其装配视图（含覆盖），与既有代际钉定语义一致，无需特判。
