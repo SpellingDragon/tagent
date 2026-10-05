@@ -740,3 +740,45 @@ func TestNormalizeRedirectHost(t *testing.T) {
 		}
 	}
 }
+
+// postTaskFrom 以指定源地址 POST /task，验证声明受理前提与连接来源的绑定。
+func postTaskFrom(t *testing.T, h *HTTPAPI, body, remoteAddr string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestDeclarationTrustLoopback 钉住 意图声明的受理前提是「已鉴权 或 请求源为回环」，二者皆无则拒。
+// - 无 token + 回环源：受理且信封携声明血统（同机默认部署零配置即通）；
+// - 无 token + 非回环源：仍 400 declaration_requires_auth，且不得注入；
+// - 回环只放宽受理前提，不放宽值域：非法值仍 400。
+// 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
+func TestDeclarationTrustLoopback(t *testing.T) {
+	const declared = `{"messages":[{"role":"user","content":"mail"}],"trigger_source":"user"}`
+
+	t.Run("loopback_without_auth_admitted", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		rec := postTaskFrom(t, h, declared, "127.0.0.1:5555")
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		require.Equal(t, "user", l.declaredLineage())
+	})
+	t.Run("external_without_auth_still_refused", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		rec := postTaskFrom(t, h, declared, "10.0.0.5:5555")
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Contains(t, rec.Body.String(), "declaration_requires_auth")
+		require.Equal(t, 0, l.injectCalls, "a refused declaration must not inject")
+	})
+	t.Run("loopback_does_not_widen_value_domain", func(t *testing.T) {
+		l := &envelopeInjectingLoop{active: true}
+		h := NewHTTPAPI(l)
+		rec := postTaskFrom(t, h, `{"messages":[{"role":"user","content":"x"}],"trigger_source":"meditation"}`, "[::1]:5555")
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, 0, l.injectCalls)
+	})
+}

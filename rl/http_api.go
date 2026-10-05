@@ -207,11 +207,33 @@ func ValidateListenAddr(addr, token string) error {
 	return fmt.Errorf("RL HTTP API refuses to listen on %q without authentication: it can inject messages into the agent and redirect the LLM endpoint (prompt exfiltration). Fix one of three ways: (1) set TAGENT_RL_AUTH_TOKEN and call SetAuthToken; (2) listen on loopback (127.0.0.1); (3) if you fully accept the risk, bind via your own http.ListenAndServe bypassing this guard", addr)
 }
 
+// requestFromLoopback reports whether the connection's SOURCE address is a
+// loopback one (127.0.0.0/8, ::1). The source address is a TCP-layer fact: a
+// remote host cannot present one, because loopback-routed packets never leave
+// an interface. So "loopback source" means "a process on this machine" — the
+// same trust boundary a local mail poller already sits inside. An
+// unparseable address counts as NOT loopback (fail closed). A declaration
+// admitted this way without a token logs its remote address, so exemption is
+// attributable and abuse stays discoverable rather than silent.
+func requestFromLoopback(r *http.Request) bool {
+	if r == nil || r.RemoteAddr == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // authorized reports whether the request carries the configured bearer token
 // (constant-time compare; scheme matched case-insensitively per RFC 9110).
 // An empty configured token disables auth entirely at this layer — the
 // security loop for that case is ValidateListenAddr's loopback guard on the
-// host side (the single enforcement point for the no-token deployment shape).
+// host side (the single enforcement point for the no-token deployment shape):
+// a listener with no token cannot bind off-loopback, so a loopback source is
+// exactly the trust boundary that guard already drew.
 func (h *HTTPAPI) authorized(r *http.Request) bool {
 	if h.authToken == "" {
 		return false
@@ -486,8 +508,11 @@ func (h *HTTPAPI) validateTaskRequest(r *http.Request) (*taskRequest, int, strin
 				fmt.Sprintf("trigger_source %q not accepted (only \"user\" may be declared)", req.TriggerSource)
 		}
 		if h.authToken == "" {
-			return nil, http.StatusBadRequest,
-				"declaration_requires_auth: trigger_source may be declared only on an authenticated endpoint"
+			if !requestFromLoopback(r) {
+				return nil, http.StatusBadRequest,
+					"declaration_requires_auth: trigger_source may be declared only on an authenticated endpoint or a loopback-sourced request"
+			}
+			log.Infof("[HTTPAPI] intent declaration admitted via loopback source (no auth token configured): remote=%s", r.RemoteAddr)
 		}
 	}
 	return &req, 0, ""
