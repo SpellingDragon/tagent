@@ -1,5 +1,7 @@
 # Proposal: 02 摘要策略热参补维（summary-knobs-hotparams）
 
+> **【裁决：本域收口，未实施】** 域 01 实证摘要 knob 在 FP 代际面（`agentSubset.Compress` 入指纹，六 knob 各一针 `TestFingerprintSummaryKnobsMoveFingerprint`）＝配置变更下回合生效已满足热更目标。用户 2026-10-05 裁决：不做粒度下移（挪源面需扩压缩器公共契约且须处置 C2 `recent_full_count` 构造期派生边界，收益不抵成本）。本四件套保留为裁决记录，接口常数备查于 `../01-hotupdate-matrix-audit/matrix.md` 摘要行；后人如需重启，以新变更提案并先复核矩阵。
+
 ## Why
 
 域 01 审计若定谳摘要策略 knob"两不沾"（既不在 fp 子集、也不在 OrgHotParams 源），则摘要设置是用户清单中唯一的源面真缺口——热变更今日不生效。按归一机制，补法唯一：**源加字段+消费点读**，一处接线，零新机制。
