@@ -72,6 +72,16 @@ TV/设备扫码登录通用流程：`gen`（拿 URL+authCode → 渲染二维码
 - 文件含密钥时**不整读进上下文**：用 python yaml 只做非空校验，输出 `SET/EMPTY + 长度`
 - 警惕代码把 DSN/密码打进日志（会被日志轮转备份扩散）
 
+## 模式五：配置热加载边界（org-hotreload）
+
+tagent.yaml 改动自动热加载，但**生效范围有边界**（2026-10-05 实证）：
+
+- **热应用通道**：常驻拓扑 agent（entry + 声明式子 agent，如 wechat-bot 的 tagent/knowledge/plan）的数值参数——`max_tokens`、`compress_threshold`、`keep_recent_tasks`、`task_terminal_ttl`、`task_default_ttl`。文件保存后秒级生效，日志 `[org-hotreload] agent "X" hot params applied: threshold=… maxTokens=…` 为准。
+- **不在通道内**：内建工具型 agent（recall/action，由 `tool/*_agent.go` factory 构造）——参数构建时定型，热应用不覆盖，**需换装重启生效**。
+- **必须重启的变更**：memory 段、entry 身份、模型/provider、system_prompt、tools 清单（指纹内的结构性字段，命中即拒热更并提示 RESTART required）。
+- **验证姿势**：改完等 ~40s，`grep 'hot params applied' logs/*.log | tail`；数值变更还会记入回滚环（`numeric-only full apply recorded`），改坏可还原。
+- **坑**：factory 构造不透传 `compress_threshold`（ToolAgentFactoryConfig 无此字段），即便重启，recall/action 的阈值也是框架默认——改它无效，属已知边界非配置错误。
+
 ## 故障速查（跨项目）
 
 | 症状 | 根因 |
