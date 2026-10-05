@@ -2,7 +2,7 @@
 
 ### Requirement: 调用时覆盖子 agent 视图
 
-空白委派 agent 的调用参数 SHALL 支持三覆盖：`system_prompt_override`、`model_override`（已注册模型引用）、`tools_subset`。覆盖 SHALL 仅存在于 invocation 作用域（装配期解析、随调用消亡），SHALL NOT 泄漏到后续调用；无覆盖的调用 SHALL 使用 generation 定义视图。
+空白委派 agent 的调用参数 SHALL 支持三覆盖：`system_prompt_override`、`model_override`（已注册模型引用）、`tools_subset`。覆盖 SHALL 仅存在于 invocation 作用域（装配期解析、随调用消亡），SHALL NOT 泄漏到后续调用；无覆盖的调用 SHALL 使用 generation 定义视图。调用参数 SHALL 另暴露 `context_refs`（调用期上下文输入），并 SHALL 经既有 `RuntimeState`/ExternalContextEntry 通道注入，SHALL NOT 新建传递面。
 
 #### Scenario: 覆盖生效与不泄漏
 
@@ -25,7 +25,7 @@
 
 ### Requirement: 覆盖冻结与重放
 
-调用覆盖 SHALL 序列化入 `Declarative.Overrides`；relaunch 与跨重启 `RebuildTaskRegistry` 重放 SHALL 还原同样的覆盖（重放一致）；覆盖支持内联与引用两种形态，重放时同源解析。
+调用覆盖 SHALL 序列化入 `Declarative.Overrides`（与承载标量 knob 的 `Declarative.Params` 分工不混）；relaunch 与跨重启 `RebuildTaskRegistry` 重放 SHALL 以该记录为唯一视图来源还原同样的覆盖（重放一致）；覆盖支持内联与引用两种形态，重放时同源解析。
 
 #### Scenario: 跨重启重放一致
 

@@ -32,10 +32,12 @@ func StatusToSettle(s SessionStatus) (task.SettleKind, bool)
     FakeAlive are not. - Ambiguous kinds (stable vs suspect) are interpreted
     downstream.
 
-func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec
+func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec
     SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
     Relaunch✅ via redispatch through the resident agents map; Resume❌ — the
     rounds chain has no event source, cross-restart resume returns guidance).
+    The overrides frozen at spawn ride the re-dispatch, so the rebuilt task runs
+    on the same view the original call assembled.
 
 TYPES
 

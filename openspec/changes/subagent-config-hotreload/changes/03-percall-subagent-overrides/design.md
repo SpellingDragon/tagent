@@ -36,11 +36,27 @@
 - 空白 agent 的 org 定义声明 `max_tools`（显式清单）；调用 `tools_subset` 校验 ⊆ max_tools，越域返回结构化错误（fail-closed，不静默截断）。
 - prompt 覆盖无内容审查（与文件 prompt 同信任级——调用方已是 agent 自身）；模型覆盖限定为已注册 provider/model 引用（不存在则错误）。
 
+### 空白 agent 的 org 条目（配置样例）
+
+`max_tools` 不是新字段：空白 agent 的 `tools` 清单（条目引用全局注册表）就是它的最大工具域，`tools_subset` 的上界即此清单。样例同步发布于 wiki 的 per-call 覆盖层一节。
+
+```yaml
+agents:
+  - name: temporary-worker
+    description: 空白委派 agent：定义在文件里，动态性在调用参数上
+    system_prompt:
+      files: [prompts/shell.md]
+    tools:
+      - {kind: tool, id: read_file}
+      - {kind: tool, id: save_file}
+```
+
 ## 风险与回退
 
 - 风险①：覆盖×代际热更交互——调用中文件热更发布新代：在途调用钉定其装配视图（含覆盖），与既有代际钉定语义一致，无需特判。
 - 风险②：Declarative 膨胀（prompt 全文入账本）——允许引用式（文件路径/prompt_dir 引用）与内联两种，重放时同源解析。
 - 回退：空白 agent 是新增 org 条目+新增参数，revert 即全撤，无存量迁移。
+- 缺口回写（实施期发现）：跨重启重投的覆盖消费者不在本域写入白名单内。`RebuildTaskRegistry` 折叠已能逐字段还原 `Declarative.Overrides`（有测），但重投递链路 `SubagentRedispatcher`→`AgentToolWrapper.RedispatchAsync(ctx, body)`→`Call({"request": body})` 只携带正文，覆盖无处回注；补齐需改 `agent/task_record_sink.go` 与 `tool/action` 的闭包工厂签名（均白名单外）。进程内 relaunch/resume 已按覆盖重放（invocation 捕获/显式传入）。
 
 ## 文件清单（预期）
 

@@ -17,9 +17,14 @@ flowchart LR
 
 ## 二级子变更清单
 
-- [ ] **01 hotupdate-matrix-audit**（W0，关键路径）：维度×通道×消费点×证据矩阵；假热更红线契约测；摘要 knob 归属实证 → 见 `changes/01-hotupdate-matrix-audit/tasks.md`
-- [ ] **02 summary-knobs-hotparams**（W1，启动门=01 结论入 main）：OrgHotParams 扩摘要 knob + SmartCompressor 契约扩 + 消费点契约测 → 见 `changes/02-summary-knobs-hotparams/tasks.md`
-- [ ] **03 percall-subagent-overrides**（W0 可并行）：三层解析覆盖栈 + 最大工具域 + Declarative 冻结 + 防泄漏 → 见 `changes/03-percall-subagent-overrides/tasks.md`
+- [x] **01 hotupdate-matrix-audit**（W0，关键路径）：6/6 完成 —— 矩阵 62 行（`changes/01-.../matrix.md`，每行带行号/测试名）；FP 面 9 顶层+30 子测、SRC 面 keepRecent 行为针补齐；**摘要改判 FP 面已热**（情报 C3 采纳，见一级 design D1b）；跨域情报 C1（FILE 第三通道）已回写 spec
+- [ ] **02 summary-knobs-hotparams**（性质已变，**待用户裁决去留**）：域 01 实证摘要 knob 在 FP 面＝**已热（代际粒度）**，本域从"补真缺口"降级为"粒度下移可选增强"（下一次摘要动作即生效）；接口常数已备（矩阵：`SummaryMaxTokens`/`tagent.go:397-429`/`HotNumbers`+`liveNums`/消费点 `effectiveSummaryMaxTokens:408`，另须处置 C2 `recent_full_count`）→ 见 `changes/02-summary-knobs-hotparams/tasks.md`
+- [x] **03 percall-subagent-overrides**（W0）：3.1–3.7 完成 —— fail-before 双红（行为红非编译红）转绿 8 测；四参数经真实委派路径；覆盖挂 invocation 结构性防泄漏；`Declarative.Overrides` 冻结+重放；3.7 系 R8/R9 情报回写（跨重启重投递透传，编排者越域修 `RedispatchAsync`/`SubagentRedispatcher`/`SubagentSpecFromDeclarative`）。注：域内 tasks 尾部曾被 IDE 写入缺陷截断，已按编排者复验证据重建
+
+## 波次执行注记（W0）
+
+- 并发纪律生效：两 agent 白名单零交集、git 权限归编排者；四查抓出域 03 tasks 尾部丢失与域 01 快照期 policy 快照失真（03 后续自修），编排者复跑定谳。
+- 环境级发现（如实入档）：本工作区 IDE 写入工具对多个文件出现"保存失败实为已写入"/"延迟回写覆盖后改内容"，致体内注释复活与文件尾残段；全部以锚点计数复核 + `gofmt -e` 语法核查 + 全量复跑收敛。**教训：本仓并发期以磁盘真相为准，凡改必复核。**
 
 ## F 收尾（一级直管）
 

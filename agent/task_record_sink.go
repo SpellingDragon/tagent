@@ -62,9 +62,9 @@ func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 // would let a target a later generation removed be silently revived by a stored
 // task, which is precisely what task-registry-rebuild「不复活已退役执行器或静默改投」
 // and forbid.
-func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string) (task.SpawnResult, error) {
-	var redispatch func(ctx context.Context, agentName, body string) (task.SpawnResult, error)
-	redispatch = func(ctx context.Context, agentName, body string) (task.SpawnResult, error) {
+func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
+	var redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error)
+	redispatch = func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
 		var w *AgentToolWrapper
 		var lease *ExecLease
 		if resolve != nil {
@@ -87,7 +87,7 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 		}
 		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
 			defer lease.Release()
-			out, err := w.RedispatchAsync(lease.WithContext(runCtx), body)
+			out, err := w.RedispatchAsync(lease.WithContext(runCtx), body, overrides)
 			if err != nil {
 				return "", err
 			}
@@ -101,8 +101,11 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 			Declarative: &task.Declarative{
 				Kind: "subagent", Desc: desc, Key: agentName + ":" + body,
 				AgentName: agentName, MessageBody: body,
+				Overrides: overrides,
 			},
-			Relaunch: func(ctx context.Context) (task.SpawnResult, error) { return redispatch(ctx, agentName, body) },
+			Relaunch: func(ctx context.Context) (task.SpawnResult, error) {
+				return redispatch(ctx, agentName, body, overrides)
+			},
 		}, detector)
 		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
 			waitForUnadoptedStop(ctx, detector)
