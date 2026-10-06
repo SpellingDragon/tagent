@@ -24,6 +24,7 @@ import (
 //
 // - 为本次调用新建 EventBus + AgentLoop，把初始消息作为 external_input 发布，返回 AgentLoop 的 outputCh；调用方读事件直到通道关闭（上下文取消或产出 agent_output）。
 // - 上下文只在本次调用本地装配，绝不经过共享的 ta 状态，因此并发 Run 无法互相注入；入口有二：RuntimeState 携带序列化的 ExternalContextEntry JSON，或 direct 兼容入口经 IngestExternalEvents 在 Run 进入时原子排空以保持单槽交收语义。
+// - per-call 视图覆盖同属这一族调用期输入：经 RuntimeState 随 invocation 到达，只在装配期改写本次调用的提示词/模型/工具面，随调用结束而失效，不写回常驻定义也不落任何共享代际面。
 // - 租约拒绝发生在本调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
 // - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把 loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
@@ -93,6 +94,15 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 	invCfg.MaxToolIterations = maxToolIters
 	if invCfg.Name == "" {
 		invCfg.Name = ta.name
+	}
+	overrides, ovErr := perCallOverridesFromInvocation(inv)
+	if ovErr != nil {
+		return nil, fmt.Errorf("agent %q: %w", ta.name, ovErr)
+	}
+	if overrides != nil {
+		if err := applyPerCallOverrides(&invCfg, overrides); err != nil {
+			return nil, fmt.Errorf("agent %q: per-call override refused at assembly: %w", ta.name, err)
+		}
 	}
 	invCM := newContextManagerFromConfig(&invCfg, ta, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
 	invCM.SetUserIDSessionID(userID, sessionID)

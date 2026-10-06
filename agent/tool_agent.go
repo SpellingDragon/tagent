@@ -45,6 +45,239 @@ type ExternalContextEntry struct {
 // Exported so that tagent.go can use it with a2aagent.WithTransferStateKey.
 const ExternalContextKey = "external_context"
 
+// PerCallOverridesKey is the RuntimeState key under which one delegation carries
+// its per-call execution-view overrides to the delegate's assembly point. It
+// belongs to the same invocation-scoped input family as ExternalContextKey: the
+// payload rides the Invocation, dies with the call, and is held on neither the
+// agent instance nor any shared generation face.
+const PerCallOverridesKey = "percall_overrides"
+
+// PerCallOverrideError is the structured refusal of a per-call override
+// argument: it names the rejected field and, where relevant, the offending
+// entries, so the caller learns what was refused and against which bound,
+// instead of meeting a silently narrowed or silently accepted call.
+type PerCallOverrideError struct {
+	// Field is the rejected argument name (e.g. "tools_subset").
+	Field string
+	// Offenders names the rejected entries within Field.
+	Offenders []string
+	// Reason states the rule the request violated.
+	Reason string
+}
+
+// Error implements error.
+func (e PerCallOverrideError) Error() string {
+	if len(e.Offenders) > 0 {
+		return fmt.Sprintf("per-call override refused: %s: %s [%s]", e.Field, e.Reason, strings.Join(e.Offenders, ", "))
+	}
+	return fmt.Sprintf("per-call override refused: %s: %s", e.Field, e.Reason)
+}
+
+// OverrideField names the argument this refusal rejected.
+func (e PerCallOverrideError) OverrideField() string { return e.Field }
+
+// parsePerCallOverrides reads the per-call override arguments of one delegation
+// and validates them against the delegate's declared maximum tool domain and the
+// model-reference registry. Every refusal is returned at the argument-checking
+// point, before the delegate runs. A nil result means the call carries no
+// override, so assembly uses the generation's own view.
+func (w *AgentToolWrapper) parsePerCallOverrides(ctx context.Context, args map[string]any) (*task.Overrides, error) {
+	ov := &task.Overrides{}
+	declared := false
+
+	if raw, ok := args["system_prompt_override"]; ok && raw != nil {
+		s, isStr := raw.(string)
+		if !isStr {
+			return nil, PerCallOverrideError{Field: "system_prompt_override", Reason: "must be a string"}
+		}
+		ov.SystemPrompt = s
+		declared = true
+	}
+
+	if raw, ok := args["model_override"]; ok && raw != nil {
+		ref, isStr := raw.(string)
+		if !isStr {
+			return nil, PerCallOverrideError{Field: "model_override", Reason: "must be a model reference name"}
+		}
+		if _, found := LookupModelReference(ref); !found {
+			return nil, PerCallOverrideError{Field: "model_override", Offenders: []string{ref},
+				Reason: "not a registered model reference"}
+		}
+		ov.ModelRef = ref
+		declared = true
+	}
+
+	if raw, ok := args["tools_subset"]; ok && raw != nil {
+		items, isArr := raw.([]interface{})
+		if !isArr {
+			return nil, PerCallOverrideError{Field: "tools_subset", Reason: "must be an array of tool names"}
+		}
+		if len(items) == 0 {
+			return nil, PerCallOverrideError{Field: "tools_subset",
+				Reason: "must name at least one tool; omit the argument to keep the declared surface"}
+		}
+		domain := w.maxToolDomain(ctx)
+		allowed := make(map[string]bool, len(domain))
+		for _, name := range domain {
+			allowed[name] = true
+		}
+		subset := make([]string, 0, len(items))
+		var offenders []string
+		for _, item := range items {
+			name, isStr := item.(string)
+			if !isStr {
+				return nil, PerCallOverrideError{Field: "tools_subset", Reason: "every entry must be a tool name"}
+			}
+			if !allowed[name] {
+				offenders = append(offenders, name)
+				continue
+			}
+			subset = append(subset, name)
+		}
+		if len(offenders) > 0 {
+			return nil, PerCallOverrideError{Field: "tools_subset", Offenders: offenders,
+				Reason: "outside the delegate's maximum tool domain " + formatToolDomain(domain)}
+		}
+		ov.ToolsSubset = subset
+		declared = true
+	}
+
+	if !declared || ov.IsEmpty() {
+		return nil, nil
+	}
+	return ov, nil
+}
+
+// maxToolDomain lists the tool names of the view this call would assemble with:
+// the generation this wrapper's face declared when it carries one, the delegate's
+// own declared surface otherwise. That list IS the delegate's maximum tool
+// domain — the hard upper bound a per-call tools_subset must fit inside, so the
+// check and the assembled view always read one source.
+func (w *AgentToolWrapper) maxToolDomain(ctx context.Context) []string {
+	if cl, ok := execLeaseFromContext(ctx); ok && cl != nil {
+		if child, isLocal := w.agent.(*TagentAgent); isLocal && cl.belongsToOwnerOf(child.contextManager) {
+			if gen := cl.declaredRunConfig(); gen != nil {
+				return toolNamesOf(gen.Tools)
+			}
+		}
+	}
+	return toolNamesOf(w.agent.Tools())
+}
+
+// toolNamesOf lists the declaration names of a tool surface.
+func toolNamesOf(tools []trpctool.Tool) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		if d := t.Declaration(); d != nil && d.Name != "" {
+			names = append(names, d.Name)
+		}
+	}
+	return names
+}
+
+// formatToolDomain renders a maximum tool domain for a refusal message.
+func formatToolDomain(names []string) string {
+	if len(names) == 0 {
+		return "(the delegate declares no tool at all)"
+	}
+	return "[" + strings.Join(names, ", ") + "]"
+}
+
+// perCallOverridesFromInvocation reads the per-call override payload this
+// invocation carries. It returns nil when the call carries none, and an error
+// when a payload is present but unreadable — a call must never assemble a
+// partial view off a corrupt override.
+func perCallOverridesFromInvocation(inv *agent.Invocation) (*task.Overrides, error) {
+	if inv == nil || inv.RunOptions.RuntimeState == nil {
+		return nil, nil
+	}
+	raw, ok := inv.RunOptions.RuntimeState[PerCallOverridesKey]
+	if !ok {
+		return nil, nil
+	}
+	var data []byte
+	switch v := raw.(type) {
+	case json.RawMessage:
+		data = v
+	case []byte:
+		data = v
+	case string:
+		data = []byte(v)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var ov task.Overrides
+	if err := json.Unmarshal(data, &ov); err != nil {
+		return nil, fmt.Errorf("per-call overrides unreadable: %w", err)
+	}
+	if ov.IsEmpty() {
+		return nil, nil
+	}
+	return &ov, nil
+}
+
+// applyPerCallOverrides presses one invocation's overrides into the config its
+// execution view is assembled from. Each present field replaces that view face
+// for THIS call; absent fields keep the generation's value. cfg is the
+// per-invocation copy, so neither the resident definition nor a shared
+// generation face is written.
+//
+// A call that owns its prompt also owns the prompt channel: a file-backed source
+// rewrites the system message on every round of the view it belongs to, so the
+// assembled view carries no source, while the resident definition keeps its own.
+func applyPerCallOverrides(cfg *TagentConfig, ov *task.Overrides) error {
+	if ov.SystemPrompt != "" {
+		cfg.SystemPrompt = ov.SystemPrompt
+		cfg.SystemPromptSource = nil
+	}
+	if ov.ModelRef != "" {
+		m, found := LookupModelReference(ov.ModelRef)
+		if !found {
+			return PerCallOverrideError{Field: "model_override", Offenders: []string{ov.ModelRef},
+				Reason: "reference is not registered in this process"}
+		}
+		cfg.Model = m
+	}
+	if ov.ToolsSubset != nil {
+		declared := make(map[string]bool, len(cfg.Tools))
+		for _, t := range cfg.Tools {
+			if t == nil {
+				continue
+			}
+			if d := t.Declaration(); d != nil {
+				declared[d.Name] = true
+			}
+		}
+		kept := make([]trpctool.Tool, 0, len(ov.ToolsSubset))
+		var missing []string
+		for _, name := range ov.ToolsSubset {
+			if !declared[name] {
+				missing = append(missing, name)
+				continue
+			}
+			for _, t := range cfg.Tools {
+				if t == nil {
+					continue
+				}
+				if d := t.Declaration(); d != nil && d.Name == name {
+					kept = append(kept, t)
+					break
+				}
+			}
+		}
+		if len(missing) > 0 {
+			return PerCallOverrideError{Field: "tools_subset", Offenders: missing,
+				Reason: "not declared by the effective generation: " + formatToolDomain(toolNamesOf(cfg.Tools))}
+		}
+		cfg.Tools = kept
+	}
+	return nil
+}
+
 // serializeExternalContext converts FullEvents into compact JSON entries
 // suitable for RuntimeState transport. Only EventKey/EventType/EventSummary
 // are included — Content is intentionally excluded to keep the payload small.
@@ -265,6 +498,10 @@ func (w *AgentToolWrapper) SetDescriptionSource(src *prompt.Source) {
 }
 
 // Declaration implements trpctool.Tool.
+//
+// The per-call execution-view arguments are declared on every delegation target:
+// the override layer is a property of the call, not of one agent definition, and
+// each argument takes effect for that call alone.
 func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	desc := w.desc
 	if w.descSource != nil {
@@ -318,6 +555,25 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 		}
 	}
 
+	decl.InputSchema.Properties["system_prompt_override"] = &trpctool.Schema{
+		Type:        "string",
+		Description: "Optional. System prompt replacing the delegate's own for THIS call only. It is not written onto the delegate: a later call without it is served the configured prompt.",
+	}
+	decl.InputSchema.Properties["model_override"] = &trpctool.Schema{
+		Type:        "string",
+		Description: "Optional. Registered model reference replacing the delegate's model for THIS call only. An unregistered reference is refused.",
+	}
+	decl.InputSchema.Properties["tools_subset"] = &trpctool.Schema{
+		Type:        "array",
+		Items:       &trpctool.Schema{Type: "string"},
+		Description: "Optional. Tool names the delegate may use for THIS call only. Every entry must be one the delegate declares; an out-of-domain entry is refused, never dropped silently.",
+	}
+	decl.InputSchema.Properties["context_refs"] = &trpctool.Schema{
+		Type:        "array",
+		Items:       &trpctool.Schema{Type: "string"},
+		Description: "Optional. Event keys whose archived content is handed to the delegate as external context for THIS call, beside event_keys.",
+	}
+
 	decl.InputSchema.Properties["ttl"] = &trpctool.Schema{
 		Type:        "integer",
 		Description: "ABSOLUTE lifetime of this sub-agent run in seconds. The unified reaper retires the task this long after spawn (fresh sub-agent runs are not reentrant, so this is not refreshed by later turns). 0 or omitted = configured default (10 minutes if unset); there is no way to disable the reaper. Raise it alongside the model's own pacing for long delegations.",
@@ -348,6 +604,9 @@ func isRemoteAgent(ag agent.Agent) bool {
 //  4. Constructs an Invocation and calls agent.Run with timeout — unified for local and remote
 //  5. For remote A2A agents, retries once on failure with 500ms backoff
 //  6. Collects the sub-agent's final output from the event stream
+//
+// context_refs resolves through the same retrieval channel and merges into the
+// keys above, so override-supplied context travels the existing path.
 func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	agentName := w.agent.Info().Name
 
@@ -396,6 +655,11 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		ttlSeconds = v
 	}
 
+	overrides, ovErr := w.parsePerCallOverrides(ctx, args)
+	if ovErr != nil {
+		return nil, ovErr
+	}
+
 	messageBody := request
 	extraName := ""
 	if len(w.extraParams) > 0 {
@@ -439,6 +703,28 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			}
 		}
 
+		if refsRaw, ok := args["context_refs"]; ok && refsRaw != nil {
+			items, isArr := refsRaw.([]interface{})
+			if !isArr {
+				return nil, PerCallOverrideError{Field: "context_refs", Reason: "must be an array of event keys"}
+			}
+			seen := make(map[int64]bool, len(keys))
+			for _, k := range keys {
+				seen[k] = true
+			}
+			for _, item := range items {
+				key := toInt64Key(item)
+				if key == 0 {
+					log.Warnf("[AgentToolWrapper] agent %q: context_refs entry %v is not a resolvable event key", agentName, item)
+					continue
+				}
+				if !seen[key] {
+					seen[key] = true
+					keys = append(keys, key)
+				}
+			}
+		}
+
 		if len(keys) == 0 && w.hasEventKeysParam() {
 			if proj := w.projectionForCall(ctx); proj != nil {
 				keys = autoInjectEventKeys(proj)
@@ -469,6 +755,18 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			runOpts.RuntimeState = map[string]any{}
 		}
 		runOpts.RuntimeState[ExternalContextKey] = json.RawMessage(serialized)
+	}
+	if overrides != nil {
+		data, err := json.Marshal(overrides)
+		if err != nil {
+			return nil, fmt.Errorf("agent tool %q: serialize per-call overrides: %w", agentName, err)
+		}
+		if len(data) > 0 {
+			if runOpts.RuntimeState == nil {
+				runOpts.RuntimeState = map[string]any{}
+			}
+			runOpts.RuntimeState[PerCallOverridesKey] = json.RawMessage(data)
+		}
 	}
 
 	inv := agent.NewInvocation(
@@ -514,9 +812,10 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				AgentName:   agentName,
 				MessageBody: request,
 				Params:      declParams,
+				Overrides:   overrides,
 			},
-			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds),
-			ResumeFn: subagentResumeClosure(w.parentCM, agentName, rounds),
+			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
+			ResumeFn: subagentResumeClosureWithOverrides(w.parentCM, agentName, rounds, overrides),
 		}, detector)
 		if res.Blocked != "" {
 			waitForUnadoptedStop(ctx, detector)
@@ -569,12 +868,29 @@ func waitForUnadoptedStop(ctx context.Context, d task.SettleDetector) {
 // RedispatchAsync：跨重启 subagent relaunch
 // 的重投递入口——以原 request 重新走 Call 的完整 spawn 路径（声明了 extra
 // params 时按无参调用降级：plan-name 等 extra 参数不跨重启保留，已知边界）。
-func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string) (any, error) {
-	args, err := json.Marshal(map[string]any{"request": request})
+// RedispatchAsync re-enters the delegate with the stored body AND the overrides
+// frozen on the task: the same argument keys a live caller would send, so
+// parsePerCallOverrides validates and applies them through the single parse
+// point — a rebuilt-then-relaunched task runs on the same view the original
+// call assembled, never a silently de-overrideed one.
+func (w *AgentToolWrapper) RedispatchAsync(ctx context.Context, request string, overrides *task.Overrides) (any, error) {
+	args := map[string]any{"request": request}
+	if overrides != nil {
+		if overrides.SystemPrompt != "" {
+			args["system_prompt_override"] = overrides.SystemPrompt
+		}
+		if overrides.ModelRef != "" {
+			args["model_override"] = overrides.ModelRef
+		}
+		if overrides.ToolsSubset != nil {
+			args["tools_subset"] = overrides.ToolsSubset
+		}
+	}
+	b, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
 	}
-	return w.Call(ctx, args)
+	return w.Call(ctx, b)
 }
 
 // DeclaredAgentName reports the wrapped sub-agent's name. It is the SAME string
@@ -691,7 +1007,7 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 // covers relaunch rounds too, not just the first spawn).
 //
 //   - The owner-face lease accounts for the re-entry while armDeclaredCall selects the execution view it runs on, so a stored task cannot silently serve a retired generation's prompts, model or tools.
-func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64) func(context.Context) (task.SpawnResult, error) {
+func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64, overrides *task.Overrides) func(context.Context) (task.SpawnResult, error) {
 	return func(ctx context.Context) (task.SpawnResult, error) {
 		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
 		if err != nil {
@@ -724,8 +1040,9 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 				AgentName:   agentName,
 				MessageBody: request,
 				Params:      declParams,
+				Overrides:   overrides,
 			},
-			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds),
+			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
 		}, detector)
 		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
 			waitForUnadoptedStop(ctx, detector)
@@ -827,6 +1144,14 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 // - 返回的是新的单轮 Run，其 external_context 只携带本任务的历史轮次（最近的结算结果在最前），不含无关任务。
 // - 子 agent 仍是单轮原语，不做进程复活：状态恢复是框架侧的喂入，不是子 agent 的持续性。
 func subagentResumeClosure(owner *ContextManager, agentName string, rounds *subagentRounds) func(context.Context, string) (task.SettleDetector, error) {
+	return subagentResumeClosureWithOverrides(owner, agentName, rounds, nil)
+}
+
+// subagentResumeClosureWithOverrides builds the resume closure of a subagent
+// task, replaying the per-call overrides the original delegation carried. A
+// resumed round runs on the same view as the round it continues — the overrides
+// are part of that task's identity, not of the generation it happens to land on.
+func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string, rounds *subagentRounds, overrides *task.Overrides) func(context.Context, string) (task.SettleDetector, error) {
 	return func(ctx context.Context, input string) (task.SettleDetector, error) {
 		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
 		if err != nil {
@@ -855,6 +1180,11 @@ func subagentResumeClosure(owner *ContextManager, agentName string, rounds *suba
 		runOpts := agent.RunOptions{RuntimeState: map[string]any{
 			ExternalContextKey: json.RawMessage(serialized),
 		}}
+		if overrides != nil {
+			if data, err := json.Marshal(overrides); err == nil && len(data) > 0 {
+				runOpts.RuntimeState[PerCallOverridesKey] = json.RawMessage(data)
+			}
+		}
 		inv := agent.NewInvocation(
 			agent.WithInvocationMessage(model.NewUserMessage(input)),
 			agent.WithInvocationRunOptions(runOpts),
@@ -1104,6 +1434,35 @@ func GetPlainToolFactory(id string) (PlainToolFactory, bool) {
 
 	f, ok := plainToolFactories[id]
 	return f, ok
+}
+
+var (
+	modelReferences   = map[string]model.Model{}
+	modelReferencesMu sync.RWMutex
+)
+
+// RegisterModelReference publishes a model instance under a reference name, the
+// target form a per-call model_override addresses. Re-registering a name
+// replaces its instance: a reload re-points a reference, and a lookup returns
+// either the previous or the new instance, never a torn one.
+func RegisterModelReference(ref string, m model.Model) {
+	if ref == "" || m == nil {
+		return
+	}
+	modelReferencesMu.Lock()
+	defer modelReferencesMu.Unlock()
+	modelReferences[ref] = m
+}
+
+// LookupModelReference resolves a per-call model_override reference to the
+// instance registered under it. An unresolvable reference is refused by the
+// caller, never served by a fallback model.
+func LookupModelReference(ref string) (model.Model, bool) {
+	modelReferencesMu.RLock()
+	defer modelReferencesMu.RUnlock()
+
+	m, ok := modelReferences[ref]
+	return m, ok
 }
 
 // toInt64Key converts a JSON-parsed value to an int64 event key.

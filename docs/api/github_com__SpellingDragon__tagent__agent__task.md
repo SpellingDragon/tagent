@@ -118,8 +118,15 @@ type Declarative struct {
 	// Params carries the ActionArgs spawn fields (WorkDir/Env/Mode/Name/IsTUI/
 	// Watch/Probe/ProbeIntervalSec/ProbeFailures/QuietTimeout/Timeout — encoded
 	// as strings; session-op fields excluded; conversion lives in tool/action).
-	Params         map[string]string `json:"params,omitempty"`
-	StartedAtMilli int64             `json:"started_at_ms"`
+	Params map[string]string `json:"params,omitempty"`
+	// Overrides carries the per-call execution-view overrides of a subagent
+	// delegation (system prompt / model reference / tools subset). Division of
+	// labor with Params: Params holds scalar knobs (ttl and friends), Overrides
+	// holds the view the call assembled with; the two are never mixed.
+	// Persisted so a relaunch replays the SAME view the original call ran on.
+	Overrides *Overrides `json:"overrides,omitempty"`
+
+	StartedAtMilli int64 `json:"started_at_ms"`
 }
     Declarative is the serializable projection of a TaskSpec — everything needed
     to rebuild the closure trio (Relaunch/ResumeFn/Alive) cross-restart via the
@@ -187,6 +194,30 @@ type OriginSpawner struct {
 func (o *OriginSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
     Spawn 在 spec 未自带 Origin 时，把本包装器携带的 origin 逐键复制一份填进去（复制而非共享： 调用方随后改写自己的 map
     不会串到任务上），再委托给内层控制器。
+
+type Overrides struct {
+	// SystemPrompt replaces the delegate's system prompt for this call.
+	SystemPrompt string `json:"system_prompt,omitempty"`
+	// ModelRef names a registered model reference, resolved at assembly time.
+	ModelRef string `json:"model_ref,omitempty"`
+	// ToolsSubset narrows the delegate's tool surface for this call. A nil
+	// slice means no narrowing; an empty one runs with no tools.
+	ToolsSubset []string `json:"tools_subset,omitempty"`
+}
+    Overrides is the per-call view-override payload of one subagent delegation:
+    the three execution-view items a caller may replace for a single call.
+    It lives on the invocation and on the task's Declarative only — there is
+    no owner-level or process-wide store for it — so a call that carries no
+    Overrides assembles the generation's own view.
+
+      - Empty field = that view face is not overridden; every face resolves
+        independently.
+      - Validation happens where the arguments are read: a tools entry outside
+        the delegate's declared maximum domain, or a model reference that is not
+        registered, is a refusal, never a silent narrowing.
+
+func (o *Overrides) IsEmpty() bool
+    IsEmpty reports whether no view face is overridden.
 
 type SettleDetector interface {
 	// Settled returns a channel delivering settle signals, closed when done.

@@ -1453,20 +1453,20 @@ func TestSubagentRedispatcher_RefusesTargetNotInEffectiveGeneration(t *testing.T
 		return routed[name], nil, nil
 	}, tm)
 
-	res, err := redispatch(context.Background(), "retired", "resume work")
+	res, err := redispatch(context.Background(), "retired", "resume work", nil)
 	require.Error(t, err, "a target absent from the effective generation must be refused")
 	require.Contains(t, err.Error(), "EFFECTIVE orchestration generation",
 		"and the message must say WHY (version selection), not just 'not found'")
 	require.Contains(t, err.Error(), "retired", "naming the target so the operator can act")
 	require.Nil(t, res.Task, "no execution may be created for a refused relaunch (task board untouched)")
 
-	res2, err2 := redispatch(context.Background(), "live", "resume work")
+	res2, err2 := redispatch(context.Background(), "live", "resume work", nil)
 	require.NoError(t, err2, "a still-routed target must relaunch normally")
 	require.NotNil(t, res2.Task, "a still-routed target really gets a task")
 	require.Equal(t, "live:resume work", res2.Task.Spec.Key, "spawned under the current binding")
 
 	delete(routed, "live")
-	_, err3 := redispatch(context.Background(), "live", "resume work again")
+	_, err3 := redispatch(context.Background(), "live", "resume work again", nil)
 	require.Error(t, err3, "removal from the effective face, not the record, decides the outcome")
 }
 

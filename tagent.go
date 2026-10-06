@@ -566,14 +566,6 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		entryAgent.SetRollbackFn(doRollback)
 		reload := func() {
-			info, err := os.Stat(cfgPath)
-			if err != nil {
-				return
-			}
-			mt := info.ModTime().UnixNano()
-			if mt == atomic.LoadInt64(&lastSeenMtime) {
-				return
-			}
 			mu.Lock()
 			defer mu.Unlock()
 			if stopped.Load() {
