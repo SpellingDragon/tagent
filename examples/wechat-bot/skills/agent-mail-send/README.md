@@ -29,6 +29,7 @@ EOF
 1. 子命令是 `message +send`，裸 `+send` 不存在；`--from` 参数不存在
 2. `--body-file` 只收相对路径（base 目录下），绝对路径报 invalid path
 3. `--body-file` 还要求**真 Markdown 结构**（标题/列表/表格/围栏码任一），纯文本段报 "does not contain recognizable Markdown structure"——正文至少带一个 `##` 标题或两个列表项；或改用 `--body-format plain`
+5. **验证载荷纪律（2026-10-06 教训）**：验证「入站注入链路」时，出站邮件（我发给对方的）不经过被测路径——真正的测试载荷是**对方的回信**（poller 拉取后才走 POST /task 注入）。别把"我发出去了"当"入站链路已验证"，两者之间隔着对方的回复行为。
 4. confirmation_token 从首发返回的 `tip: review summary, then re-run with --confirmation-token <ctk_...>` 行提取（grep -oP 'confirmation-token \K\S+'）；JSON 体里也可能出现 confirmation_token 字段，两处取一即可
 3. **两段式确认**：首发只返回 `confirmation-token` 不入队，必须带 `--confirmation-token` 重跑才真正 `queued:true`——漏这步 = 静默未发
 6. AG 二进制不在 PATH，按上面 nvm 全路径；丢了用 `find /home/lighthouse/.local/lib -name agently-cli -path "*bin*"` 重新定位
