@@ -52,6 +52,6 @@
 ## 3. 收口
 
 - [x] 3.1 全量本地：根包 `-short`、`-race . ./agent ./rl`、`./scripts/race_check.sh`（CI 同形）、`bash scripts/lint.sh`、`openspec validate --strict` —— 验证：各 exit 0
-- [ ] 3.2 push 并确认 dev CI 四 job 全绿（race job 不再偶发红即为收口证据）；随后开 PR 并 main —— 验证：`gh run list --branch dev --limit 1` conclusion=success
-- [ ] 3.3 知会远端：此前告知「拉 dev 换装」的指引仍有效，但需补一句 race 门修复已并入、their 自检四连的 `race_check.sh` 应绿 —— 验证：sent 反查 msg_id
-- [ ] 3.4 `openspec archive` —— 验证：`openspec list --json` 无该 change
+- [x] 3.2 push 并确认 dev CI 四 job 全绿（`1cc4967`：race/test/validators/openspec 全 success，soak 按 workflow_dispatch skip）；随后开 PR 并 main —— 待用户令（race job 不再偶发红即为收口证据）；随后开 PR 并 main —— 验证：`gh run list --branch dev --limit 1` conclusion=success
+- [ ] 3.3 知会远端（待发用户令）：此前告知「拉 dev 换装」的指引仍有效，但需补一句 race 门修复已并入、their 自检四连的 `race_check.sh` 应绿 —— 验证：sent 反查 msg_id
+- [x] 3.4 `openspec archive`（见下条命令记录；fail-before.log 依本仓 `*.log` 惯例留在本地不入库，前例同） —— 验证：`openspec list --json` 无该 change
