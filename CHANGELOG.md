@@ -19,9 +19,12 @@
 - **入站意图声明**（`POST /task`，openspec: delivery-intent-and-receipts P1）：请求体可选 `trigger_source`，受信集成（如 mail-poller 代表人类通信者）声明 `user` 血统；值域仅 `user`、无 auth 拒 `declaration_requires_auth`、缺信封能力 501 拒收，一律 fail-closed；声明入事件 Metadata 而 `Source` 保留通道标签，投递白名单语义不变。缺省行为逐位同于改前。
 - **投递终态统一回执**（wechat-bot 分发层，K2）：已送达不回执；send 失败 ERROR；未知/未声明血统消化、冥想血统含交付特征扣留、error、无目标四类 WARN 回执；冥想纯叙事维持契约内静默。回执以 `delivery_receipt` 血统入持久总线（转生后仍在账、自身输出静默、不武装冥想新颖门、与用户消息同批可被当场补投、不递归）——两起“感知成功/发送未发生”事故的宿主面闭环。
 - **结算血统一级键**（`settle_trigger_source`，K3）：事实链持久化时把结算事件自带的派生血统提升为一级可读键（`source_snapshot` 无损快照保留），与回合级 `trigger_source` 并存可对账，投递争议不再依赖解码知识取证。
+- **per-call 子 agent 覆盖层**（openspec: subagent-config-hotreload 域 03）：org 定义空白委派 agent，委派调用可选带 `system_prompt_override`/`model_override`/`tools_subset`/`context_refs` 四项覆盖；覆盖只存在于 invocation 作用域并随调用消亡（不写回常驻定义），`tools_subset` 越出该 agent 声明的最大工具域即具名拒绝且零执行，`context_refs` 复用既有外部上下文通道不新建传递面；覆盖随 `Declarative.Overrides` 冻结，relaunch 与跨重启重投递还原同一视图。**调用方面注意**：每个委派工具的声明参数由 3 项增至 7 项，锁参数总数的断言需同步。
+- **回环源受理入站意图声明**（openspec: declaration-trust-loopback）：`POST /task` 的 `trigger_source` 受理前提由「端点已鉴权」扩为「已鉴权 或 请求源为回环地址」。无 token 且只绑 127.0.0.1 的默认部署不再把合法邮件轮扣成永久不可达（原症状：邮件轮产出无法投递且每轮触发投递回执）。判据取 TCP 源地址（外部不可伪造回环源）；值域不因源放宽；经豁免受理记含 remote 的日志使滥用可见。mail-poller 声明条件同步为「携凭或目标为回环」。
 
 ### Fixed
 
+- **热更同步入口可空退（记为 applied 但消费读旧值）**（`tagent.go` `reload()`）：提交完成前就把 `lastSeenMtime` 当完成标志落下，且在锁外按戳早退——轮询协程认领某 mtime 后仍在构建/发布期间，同步入口 `CheckOrgReload`（契约明言等待整次构建与发布完成）见戳已等即返回，调用方读到旧值（约 5%/轮，~1ms 后自愈），CI race 门与单进程重复执行皆复现，违反 §十四「处理完成的标志是记下的 mtime」。现判定只在锁内，后进者经互斥锁加入在飞那一次；永久回归门以 test-only 提交屏障结构性停驻提交点，断言「提交点记为 applied ⇒ 消费侧读到该值」。
 - **空回合血统写入空串一级键**（`buildBusFact`，openspec: delivery-intent-and-receipts K3②）：`trigger_source` 原无条件写 `cm.triggerSource`，回合血统为空时事实链留下“键存在但为空”的一级键，被读方误判为“未盖章”（email-inbound 事故当时取证失败的现场形态）；现为空则不写，与 `buildEventAttributes` 既有保护同形。
 - **压实跨折叠覆盖丢历史**（memory，收口阶段 soak 回归暴露，基线同形红）：同日第二次 L1→L2（或同周 L2→L3）把选定窗从 seq=0 写入取整目标窗时不检查目标窗既存段，逐键覆盖前一批历史（盘上字节消失、meta 计数失真、idx 悬空指向他人内容）；fresh 进程重启召回为空即此断裂（soak 连续性 promise 自入档以来从未真通过）。现将既存目标窗并入 merge 读取源，merge 按 EventKey 去重封死 crash-retry 交叠；回归测例入 CI（非 soak tag），soak 30×30 全绿。
 - **agent 核心运行时**（A 组 7 项）：构造失败路径的 durable inbox 句柄关闭；租约拒绝先于 live 注册（私有 CM 不悬挂、owner 义务可归零）；终态 drain 的 defer 序关住 loop-exit 到 unbind 的窗口；事件总线投递与退役路由的静默面清零。
