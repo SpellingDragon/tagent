@@ -28,8 +28,10 @@ EOF
 ## 坑清单（每条都真踩过）
 1. 子命令是 `message +send`，裸 `+send` 不存在；`--from` 参数不存在
 2. `--body-file` 只收相对路径（base 目录下），绝对路径报 invalid path
+3. `--body-file` 还要求**真 Markdown 结构**（标题/列表/表格/围栏码任一），纯文本段报 "does not contain recognizable Markdown structure"——正文至少带一个 `##` 标题或两个列表项；或改用 `--body-format plain`
+4. confirmation_token 从首发返回的 `tip: review summary, then re-run with --confirmation-token <ctk_...>` 行提取（grep -oP 'confirmation-token \K\S+'）；JSON 体里也可能出现 confirmation_token 字段，两处取一即可
 3. **两段式确认**：首发只返回 `confirmation-token` 不入队，必须带 `--confirmation-token` 重跑才真正 `queued:true`——漏这步 = 静默未发
-4. AG 二进制不在 PATH，按上面 nvm 全路径；丢了用 `find /home/lighthouse/.local/lib -name agently-cli -path "*bin*"` 重新定位
+6. AG 二进制不在 PATH，按上面 nvm 全路径；丢了用 `find /home/lighthouse/.local/lib -name agently-cli -path "*bin*"` 重新定位
 5. 语法不确定时 `"$AG" --help` 是权威源（examples 段含全部子命令）
 6. `message +list` 的目录旗标是 `--dir`（inbox/sent/trash/spam），`--folder` 不存在（2026-10-02 实踩）
 

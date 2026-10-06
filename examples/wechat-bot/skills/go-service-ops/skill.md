@@ -80,6 +80,8 @@ tagent.yaml 改动自动热加载，但**生效范围有边界**（2026-10-05 �
 - **不在通道内**：内建工具型 agent（recall/action，由 `tool/*_agent.go` factory 构造）——参数构建时定型，热应用不覆盖，**需换装重启生效**。
 - **必须重启的变更**：memory 段、entry 身份、模型/provider、system_prompt、tools 清单（指纹内的结构性字段，命中即拒热更并提示 RESTART required）。
 - **验证姿势**：改完等 ~40s，`grep 'hot params applied' logs/*.log | tail`；数值变更还会记入回滚环（`numeric-only full apply recorded`），改坏可还原。
+- **凭据强度（2026-10-06 外部评审教训）**：注释级探针（改注释让 mtime 变）只触发"同值重应用"——`hot params applied` 里的值与旧值相同，证明管道在跑但**不证明变更值被消费**。值级验证必须真改数值（如 keep_recent_tasks 1→5），以日志出现新值（keepRecent=5）为凭据。
+- **探针闭环**：验证用临时值**用完即还原**（改回原值 + git status 干净），配置面不留探针残留——曾因忘还原被用户抓到。
 - **坑**：factory 构造不透传 `compress_threshold`（ToolAgentFactoryConfig 无此字段），即便重启，recall/action 的阈值也是框架默认——改它无效，属已知边界非配置错误。
 
 ## 故障速查（跨项目）
