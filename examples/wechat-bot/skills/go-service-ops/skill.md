@@ -81,6 +81,8 @@ tagent.yaml 改动自动热加载，但**生效范围有边界**（2026-10-05 �
 - **必须重启的变更**：memory 段、entry 身份、模型/provider、system_prompt、tools 清单（指纹内的结构性字段，命中即拒热更并提示 RESTART required）。
 - **验证姿势**：改完等 ~40s，`grep 'hot params applied' logs/*.log | tail`；数值变更还会记入回滚环（`numeric-only full apply recorded`），改坏可还原。
 - **凭据强度（2026-10-06 外部评审教训）**：注释级探针（改注释让 mtime 变）只触发"同值重应用"——`hot params applied` 里的值与旧值相同，证明管道在跑但**不证明变更值被消费**。值级验证必须真改数值（如 keep_recent_tasks 1→5），以日志出现新值（keepRecent=5）为凭据。
+- **验证走被测路径（总原则，吸收多案例）**：旁路信号不算凭据——注释探针（未走"值变更"路径）、同值重放（未走"新值消费"路径）、出站邮件误当入站测试（环路声明验证必须等真实入站邮件走 poller→POST 全链，自己发出的信不构成测试载荷）。三条同族：验证的作用点必须在被测路径上，旁路证据只证明管道活着，不证明语义生效。
+
 - **探针闭环**：验证用临时值**用完即还原**（改回原值 + git status 干净），配置面不留探针残留——曾因忘还原被用户抓到。
 - **坑**：factory 构造不透传 `compress_threshold`（ToolAgentFactoryConfig 无此字段），即便重启，recall/action 的阈值也是框架默认——改它无效，属已知边界非配置错误。
 
