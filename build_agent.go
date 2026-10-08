@@ -414,6 +414,9 @@ func assembleAgentConfig(
 			SummaryMaxTokens:  acfg.Compress.SummaryMaxTokens,
 		},
 		WorkspaceRoot: acfg.WorkspaceRoot,
+
+		SummaryTimeoutSeconds: acfg.Compress.SummaryTimeoutSeconds,
+		CaptureEnabled:        rc.captureEnabled,
 	}
 	if cfg.Reliability.BusSpillDir != "" && !mode.isExecutorShell() {
 		agentCfg.BusSpillDir = filepath.Join(cfg.Reliability.BusSpillDir, name)

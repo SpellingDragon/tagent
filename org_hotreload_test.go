@@ -5574,3 +5574,237 @@ func TestBuildAgent_ReadPartitionsIncludeOwnNamespace(t *testing.T) {
 		})
 	}
 }
+
+// restartYAML renders the l3 shape plus the restart-only declaration blocks, so a
+// mixed edit (hot-applicable numeric + a field with no runtime consumer) can be
+// written without touching any fingerprinted field.
+func restartYAML(keep int, govEnabled bool, extra string) string {
+	body := l3YAML("A", keep, 5000, 0.6, "2m")
+	if govEnabled {
+		body += "governance:\n  enabled: true\n"
+	}
+	return body + extra
+}
+
+// TestOrgReload_UnsupportedConfig 钉住 热更维度分类里没有第三种读数「静默 applied」。
+// - 既不进结构指纹也不进热参数摘要的字段（governance.*／reliability.*／trajectory_capture.*）只能重启生效。
+// - 与可热字段混在一起时整批拒绝：数值也不得悄悄应用，成功的 revision 不推进。
+// - 拒绝理由点名本轮 diff 的字段路径，下一轮重新清点。
+// - 结构改动与不可热字段混合同样整批拒：代不前进，旧面继续服务。
+// - 只改可热维度时照常应用：拒绝针对的是字段而不是热更本身。
+// 契约: docs/wiki/platform/org-hot-reload.md#restart-required-dimensions
+func TestOrgReload_UnsupportedConfig(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(restartYAML(3, false, ""))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	base := entry.OrgDiagnostics()
+	gen0, rev0 := diagInt64(t, base, "generation"), diagInt64(t, base, "revision")
+	_, appliedAtStartup := diagTime(t, base, "lastAppliedAt")
+	require.Equal(t, 3, entry.OrgKeepRecent(), "precondition: the startup value is what is in force")
+
+	write(restartYAML(6, true, ""))
+	entry.CheckOrgReload()
+	d := entry.OrgDiagnostics()
+	require.Equal(t, 3, entry.OrgKeepRecent(), "a rejected batch must leave even the hot-applicable part untouched (no silent apply)")
+	require.EqualValues(t, gen0, diagInt64(t, d, "generation"), "a restart-required edit must not advance the generation")
+	require.EqualValues(t, rev0, diagInt64(t, d, "revision"), "a restart-required edit must not advance the successful-apply revision")
+	_, appliedNow := diagTime(t, d, "lastAppliedAt")
+	require.Equal(t, appliedAtStartup, appliedNow, "a rejection must neither create nor move the apply record")
+
+	fail, ok := d["lastFailure"].(*OrgFailure)
+	require.True(t, ok, "the refusal must be diagnosable")
+	require.Contains(t, fail.Error, "restart_required", "the reason is the restart dimension, not a build failure")
+	require.Contains(t, fail.Error, "governance.enabled", "the refusal names the offending field path")
+	rr, ok := d["restartRequired"].([]string)
+	require.True(t, ok, "the desired/effective receipt carries this round's restart-only field paths")
+	require.Contains(t, rr, "governance.enabled")
+
+	write(restartYAML(3, true, "reliability:\n  bus_spill_dir: "+filepath.Join(dir, "bus")+"\ntrajectory_capture:\n  max_record_bytes: 4096\n"))
+	entry.CheckOrgReload()
+	d = entry.OrgDiagnostics()
+	require.EqualValues(t, rev0, diagInt64(t, d, "revision"), "a restart-only edit is not an apply")
+	fail, ok = d["lastFailure"].(*OrgFailure)
+	require.True(t, ok)
+	rr, ok = d["restartRequired"].([]string)
+	require.True(t, ok, "the receipt still reports the refusal of this round")
+	require.Contains(t, rr, "governance.enabled", "a field still differing from the effective config stays named")
+	require.Contains(t, rr, "reliability.bus_spill_dir")
+	require.Contains(t, rr, "trajectory_capture.max_record_bytes")
+
+	write(restartYAML(9, false, ""))
+	entry.CheckOrgReload()
+	d = entry.OrgDiagnostics()
+	require.Equal(t, 9, entry.OrgKeepRecent(), "the hot parameters apply once no restart-only field differs")
+	require.EqualValues(t, rev0+1, diagInt64(t, d, "revision"), "a real apply advances the revision again")
+	require.NotContains(t, d, "restartRequired", "a successful round clears the restart receipt — it reports THIS round's diff")
+
+	write(restartYAML(9, true, ""))
+	withPrompt := strings.Replace(readFile(t, yamlPath), `inline: "A"`, `inline: "B"`, 1)
+	require.NotContains(t, withPrompt, `inline: "A"`, "precondition: the prompt edit changes the structural fingerprint, so the refusal must precede any candidate build")
+	write(withPrompt)
+	entry.CheckOrgReload()
+	d = entry.OrgDiagnostics()
+	require.EqualValues(t, gen0, diagInt64(t, d, "generation"), "a structural edit bundled with a restart-only field is refused as a whole batch")
+	require.EqualValues(t, rev0+1, diagInt64(t, d, "revision"), "and the revision does not advance on the refused batch")
+	fail, ok = d["lastFailure"].(*OrgFailure)
+	require.True(t, ok)
+	require.Contains(t, fail.Error, "governance.enabled")
+}
+
+// TestOrgReload_ModelReferenceContinuity 钉住 每个发布的代带着自己冻结的模型引用快照。
+// - 发布后新选中的代解析引用得到注册表当前的实例，配置模型以自己的保留名在同一视图内可达。
+// - 在途的视图钉在发起代：注册表此后换了实例也不跟着走。
+// - 候选的保留名被别的实例占住时具名拒绝：整批不发布，进程全局注册表原样不动（不重指也不删）。
+// - 保留名由 agent 名导出，所以用例用一个唯一的 agent 名，不踩包里其他用例的引用表。
+// - 把保留名交还给该代实际解析出的实例后，发布重新可用。
+// 契约: docs/wiki/agent/execution-generations.md#model-reference-pinning
+func TestOrgReload_ModelReferenceContinuity(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	contYAML := func(prompt string) string {
+		return strings.ReplaceAll(l3YAML(prompt, 3, 5000, 0.6, "2m"), "main", "contmain")
+	}
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(contYAML("A"))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	probeA := &stubModel{name: "cont-a"}
+	agent.RegisterModelReference("cont-ref", probeA)
+
+	write(contYAML("B"))
+	entry.CheckOrgReload()
+	require.EqualValues(t, 1, diagInt64(t, entry.OrgDiagnostics(), "generation"), "precondition: the prompt edit published a new generation")
+
+	lease1 := entry.ContextManager().AcquireLease(agent.LeaseSubCall)
+	require.NotNil(t, lease1)
+	defer lease1.Release()
+	refs1 := lease1.ModelReferences()
+	require.NotNil(t, refs1, "a published generation carries the frozen reference snapshot of its own view")
+	reserved := agent.ReservedModelRef("contmain")
+	own, ok := refs1.Resolve(reserved)
+	require.True(t, ok, "the config-driven instance is addressable under its reserved name inside its own view")
+	gotA, ok := refs1.Resolve("cont-ref")
+	require.True(t, ok, "the snapshot carries the references the registry published at that instant")
+	require.True(t, gotA == model.Model(probeA), "and froze them: resolution inside one view never goes back to the mutable registry")
+
+	probeB := &stubModel{name: "cont-b"}
+	agent.RegisterModelReference("cont-ref", probeB)
+	write(contYAML("C"))
+	entry.CheckOrgReload()
+	require.EqualValues(t, 2, diagInt64(t, entry.OrgDiagnostics(), "generation"), "precondition: the second generation published")
+
+	lease2 := entry.ContextManager().AcquireLease(agent.LeaseSubCall)
+	require.NotNil(t, lease2)
+	defer lease2.Release()
+	gotB, ok := lease2.ModelReferences().Resolve("cont-ref")
+	require.True(t, ok)
+	require.True(t, gotB == model.Model(probeB), "a newly selected generation reads the reference as the registry now holds it")
+	stillA, ok := lease1.ModelReferences().Resolve("cont-ref")
+	require.True(t, ok)
+	require.True(t, stillA == model.Model(probeA), "an in-flight view keeps the instance its generation froze")
+
+	squatter := &stubModel{name: "squatter"}
+	agent.RegisterModelReference(reserved, squatter)
+	write(contYAML("D"))
+	entry.CheckOrgReload()
+	d := entry.OrgDiagnostics()
+	require.EqualValues(t, 2, diagInt64(t, d, "generation"), "a candidate whose reserved name conflicts must not publish")
+	fail, ok := d["lastFailure"].(*OrgFailure)
+	require.True(t, ok, "the conflict is refused by name and the name is diagnosable")
+	require.Contains(t, fail.Error, reserved)
+	held, ok := agent.LookupModelReference(reserved)
+	require.True(t, ok)
+	require.True(t, held == model.Model(squatter), "a refusal leaves the process registry exactly as it was — no re-point, no drop")
+
+	agent.RegisterModelReference(reserved, own)
+	write(contYAML("E"))
+	entry.CheckOrgReload()
+	require.EqualValues(t, 3, diagInt64(t, entry.OrgDiagnostics(), "generation"), "publishing resumes once the reserved name matches the instance the view runs")
+	refs3 := entry.ContextManager().AcquireLease(agent.LeaseSubCall)
+	require.NotNil(t, refs3)
+	defer refs3.Release()
+	own3, ok := refs3.ModelReferences().Resolve(reserved)
+	require.True(t, ok)
+	require.True(t, own3 == model.Model(own), "the reserved name resolves to the very instance the generation runs")
+}
+
+// TestOrgReload_RestartOnlyTopLevelSwitch 钉住 顶层布尔开关也落在须重启那一类里：
+// - trajectory_dump 与 trajectory_dir 同批可热数值一起出现时整批拒绝，代与 revision 都不推进；
+// - 拒绝回执逐条点名这两条字段路径，理由带 restart_required 而不是构建失败；
+// - 交回原声明后热参数照常应用，证明拒绝针对的是字段而不是热更本身。
+// 契约: docs/wiki/platform/org-hot-reload.md#restart-required-dimensions
+func TestOrgReload_RestartOnlyTopLevelSwitch(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o644))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(restartYAML(3, false, "trajectory_dump: false\n"))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	base := entry.OrgDiagnostics()
+	gen0, rev0 := diagInt64(t, base, "generation"), diagInt64(t, base, "revision")
+	require.Equal(t, 3, entry.OrgKeepRecent(), "precondition: the startup value is what is in force")
+	appliedAtStartup, hasStartupApply := diagTime(t, base, "lastAppliedAt")
+
+	write(restartYAML(6, false, "trajectory_dump: true\ntrajectory_dir: "+strconv.Quote(filepath.Join(dir, "traj"))+"\n"))
+	entry.CheckOrgReload()
+	d := entry.OrgDiagnostics()
+	require.Equal(t, 3, entry.OrgKeepRecent(), "a refused batch leaves even the hot-applicable number untouched")
+	require.EqualValues(t, gen0, diagInt64(t, d, "generation"), "a top-level restart-only switch must not spin a generation")
+	require.EqualValues(t, rev0, diagInt64(t, d, "revision"), "a restart-only edit is not an apply")
+	appliedNow, hasApplied := diagTime(t, d, "lastAppliedAt")
+	require.Equal(t, hasStartupApply, hasApplied, "a refused batch must not create the apply record")
+	if hasApplied {
+		require.Truef(t, appliedNow.Equal(appliedAtStartup), "a refused batch must not move the apply record: %v vs %v", appliedNow, appliedAtStartup)
+	}
+
+	fail, ok := d["lastFailure"].(*OrgFailure)
+	require.True(t, ok, "the refusal must be diagnosable")
+	require.Contains(t, fail.Error, "restart_required", "the reason is the restart dimension, not a build failure")
+	rr, ok := d["restartRequired"].([]string)
+	require.True(t, ok, "the receipt names this round's restart-only field paths")
+	require.Contains(t, rr, "trajectory_dump", "a top-level boolean switch is named by its YAML spelling")
+	require.Contains(t, rr, "trajectory_dir")
+
+	write(restartYAML(9, false, "trajectory_dump: false\n"))
+	entry.CheckOrgReload()
+	d = entry.OrgDiagnostics()
+	require.Equal(t, 9, entry.OrgKeepRecent(), "the hot parameter applies once no restart-only field differs")
+	require.EqualValues(t, rev0+1, diagInt64(t, d, "revision"), "a real apply advances the revision again")
+	require.NotContains(t, d, "restartRequired", "the receipt reports THIS round's diff, not a stale refusal")
+}

@@ -246,6 +246,23 @@ type TagentConfig struct {
 	KeepRecentTasks    int
 	Compress           CompressConfig
 
+	// SummaryTimeoutSeconds bounds ONE real fold's synchronous summary calls
+	// (O3.5). The config layer speaks seconds, the compressor speaks a Duration;
+	// non-positive keeps the compress package default in force (0 does not mean
+	// "no deadline").
+	SummaryTimeoutSeconds int
+
+	// CaptureEnabled installs the optional per-attempt association scope
+	// (trajectory_capture, D14-S2/S3) on every runner attempt this agent drives.
+	// Default false = nothing is installed on ctx and nothing is allocated.
+	CaptureEnabled bool
+
+	// CallIDResolver is the exact-key seam MemoryPlugin uses to stamp
+	// tagentevent.MetaKeyCallID onto a committed fact. nil (default) answers from
+	// the association scope installed on the model-call ctx: no scope, no entry →
+	// false → the key is not stamped. It is never filled with the nearest call.
+	CallIDResolver plugin.CallIDResolver
+
 	// TaskTerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained before pruning. It bounds the resume_task
 	// window for terminal subagent tasks (task-chain restorer). Non-positive
@@ -403,7 +420,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		memStore = memory.NewInMemoryStore()
 	}
 
-	memPlugin := plugin.NewMemoryPlugin(memStore)
+	memPlugin := plugin.NewMemoryPlugin(memStore, plugin.WithCallIDResolver(callIDResolverFor(cfg)))
 
 	if cfg.Name == "" {
 		cfg.Name = DefaultAgentName
@@ -567,7 +584,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	ta.contextManager = cm
 	ta.liveCMs = make(map[*ContextManager]struct{})
 	ta.SetHotSource(staticHotSource(initialHotParams(cfg)))
-	cm.contextCompressor.SetHotSource(ta.liveHotNumbers)
+	cm.SetHotSource(ta.liveHotNumbers)
 	ta.taskManager = taskManager
 	ta.selfAudit = selfAudit
 	taskManager.SetTTLSource(ta.taskTTLs)
@@ -652,6 +669,17 @@ func initialHotParams(cfg *TagentConfig) OrgHotParams {
 	}
 }
 
+// callIDResolverFor picks the seam a committed fact's call_id is resolved through:
+// an explicit config resolver wins; otherwise the scope carried by the model-call
+// ctx answers for itself (rl.CallIDForResponse — exact key, false when unbound).
+// No resolver, no scope, no hit: the key simply is not written.
+func callIDResolverFor(cfg *TagentConfig) plugin.CallIDResolver {
+	if cfg != nil && cfg.CallIDResolver != nil {
+		return cfg.CallIDResolver
+	}
+	return rl.CallIDForResponse
+}
+
 // newContextManagerFromConfig creates a ContextManager from TagentConfig.
 // Shared by NewTagentAgent and Run(). owner is non-nil only for
 // invocation-private CMs built inside sub-agent Run(): the CM is seeded from
@@ -668,32 +696,34 @@ func newContextManagerFromConfig(cfg *TagentConfig, owner *TagentAgent, memPlugi
 	systemPrompt := cfg.SystemPrompt
 
 	cm := NewContextManager(ContextManagerConfig{
-		Name:                 eff.Name,
-		Model:                eff.Model,
-		Tools:                eff.Tools,
-		SystemPrompt:         systemPrompt,
-		SystemPromptSource:   eff.SystemPromptSource,
-		Temperature:          eff.Temperature,
-		MaxToolIters:         eff.MaxToolIterations,
-		ThinkingEnabled:      eff.ThinkingEnabled,
-		ThinkingTokens:       eff.ThinkingTokens,
-		ReasoningEffort:      eff.ReasoningEffort,
-		ReasoningContentMode: eff.ReasoningContentMode,
-		Compressor:           compressor,
-		TokenCounter:         compress.NewDefaultTokenCounter(),
-		MaxTokens:            eff.MaxTokens,
-		ThresholdPct:         eff.CompressThreshold,
-		HotNumbersSource:     ownerHotNumbersSource(owner),
-		CompactKeysListed:    eff.Compress.CompactKeysListed,
-		RecentFullCount:      eff.Compress.RecentFullCount,
-		CardMaxChars:         eff.Compress.CardMaxChars,
-		MemStore:             eff.MemoryStore,
-		MemPlugin:            memPlugin,
-		SessionSvc:           sessionSvc,
-		OutputCh:             outputCh,
-		Bus:                  bus,
-		Projection:           projection,
-		OnEvent:              onEvent,
+		Name:                  eff.Name,
+		Model:                 eff.Model,
+		Tools:                 eff.Tools,
+		SystemPrompt:          systemPrompt,
+		SystemPromptSource:    eff.SystemPromptSource,
+		Temperature:           eff.Temperature,
+		MaxToolIters:          eff.MaxToolIterations,
+		ThinkingEnabled:       eff.ThinkingEnabled,
+		ThinkingTokens:        eff.ThinkingTokens,
+		ReasoningEffort:       eff.ReasoningEffort,
+		ReasoningContentMode:  eff.ReasoningContentMode,
+		Compressor:            compressor,
+		TokenCounter:          compress.NewDefaultTokenCounter(),
+		MaxTokens:             eff.MaxTokens,
+		ThresholdPct:          eff.CompressThreshold,
+		HotNumbersSource:      ownerHotNumbersSource(owner),
+		SummaryTimeoutSeconds: eff.SummaryTimeoutSeconds,
+		CaptureEnabled:        eff.CaptureEnabled,
+		CompactKeysListed:     eff.Compress.CompactKeysListed,
+		RecentFullCount:       eff.Compress.RecentFullCount,
+		CardMaxChars:          eff.Compress.CardMaxChars,
+		MemStore:              eff.MemoryStore,
+		MemPlugin:             memPlugin,
+		SessionSvc:            sessionSvc,
+		OutputCh:              outputCh,
+		Bus:                   bus,
+		Projection:            projection,
+		OnEvent:               onEvent,
 	})
 	cm.overflowDir = filepath.Join(workspace.ToolOutputPath(cfg.WorkspaceRoot), "output-overflow")
 	return cm

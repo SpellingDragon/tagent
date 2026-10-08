@@ -2,7 +2,6 @@
 package memory
 
 import (
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -179,17 +178,8 @@ func (lm *LifecycleManager) checkTTL() {
 			}
 
 			for _, pair := range pairs {
-				// The EventKey lives in the event's JSON VALUE, not in the KV key
-				// (whose format {pid}:evt:{window}:{seq} carries no event key —
-				// ParseKey leaves EventKey zero for evt keys, which silently
-				// disabled TTL for months: `EventKey == 0 → continue` swallowed
-				// every event).
-				var evt struct {
-					EventKey  int64  `json:"event_key"`
-					Timestamp int64  `json:"timestamp"`
-					Type      string `json:"event_type"`
-				}
-				if err := json.Unmarshal([]byte(pair.Value), &evt); err != nil || evt.EventKey == 0 {
+				evt, ok := decodeEventHeader(pair.Value)
+				if !ok || evt.EventKey == 0 {
 					continue
 				}
 
@@ -201,7 +191,7 @@ func (lm *LifecycleManager) checkTTL() {
 					continue
 				}
 
-				ttlDays, err := lm.getEffectiveTTL(evt.Type)
+				ttlDays, err := lm.getEffectiveTTL(evt.EventType)
 				if err != nil || ttlDays <= 0 {
 					continue
 				}
@@ -278,13 +268,8 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 			if evicted >= count {
 				break
 			}
-			// EventKey from the JSON value, not the KV key (same fix as
-			// checkTTL — the KV key format carries no event key).
-			var evt struct {
-				EventKey int64  `json:"event_key"`
-				Type     string `json:"event_type"`
-			}
-			if err := json.Unmarshal([]byte(pair.Value), &evt); err != nil || evt.EventKey == 0 {
+			evt, ok := decodeEventHeader(pair.Value)
+			if !ok || evt.EventKey == 0 {
 				continue
 			}
 			if lm.tombstone.IsTombstone(evt.EventKey) {
@@ -293,7 +278,7 @@ func (lm *LifecycleManager) evictOldest(pid int, count int) {
 			if lm.store.IsKeyProtected(evt.EventKey) {
 				continue
 			}
-			if evt.Type == event.TypeContextCompressSummary {
+			if evt.EventType == event.TypeContextCompressSummary {
 				continue
 			}
 

@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,6 +89,16 @@ type execBinding struct {
 	// 声明式调用经自己的租约读它——它是逐代的执行描述，取代属主构造期的配置。
 	// 惰性物化的代际（冷启动、手搭的测试 cm）没有它：此时沿用构造期配置源。
 	runCfg *TagentConfig
+
+	// modelRefs 是本代在装配期冻结的只读模型引用快照（进程注册表 ∪ 保留名
+	// agent:<name> → 本代实际模型）。与 runCfg 同一纪律：STAGING 期写入、代际激活后不可变，
+	// 并随本代一同消亡——一次覆盖的解析结果因此与它所属的执行代同生命周期：在途调用读
+	// 自己那一份，新独立调用读新代那一份：解析只读这一份快照，不回查可变的全局表，
+	// 也不把模型指针留在代外。
+	// 未经装配期物化的代际（冷启动、手搭的测试 cm）没有它：此时在调用入口现取一份快照。
+	// 引用只提供模型选择，不授予任何调用路由——工具上界仍由属主自己的声明决定。
+	// 契约: docs/wiki/agent/execution-generations.md#lease-holds-reference
+	modelRefs *ModelRefSnapshot
 
 	mu        sync.Mutex
 	refs      map[LeaseKind]int
@@ -510,6 +521,66 @@ func (l *ExecLease) declaredRunConfig() *TagentConfig {
 		return nil
 	}
 	return l.b.runCfg
+}
+
+// pinnedBinding is the generation this lease pins. It is the handle a per-call
+// override reads its SELECTED execution view from (the tool domain and the model
+// references come from the same object), and it stays unexported on purpose: a
+// lease is the only way to reach a generation, so nothing can step around the
+// reference counting that keeps the view alive while somebody is resolving it.
+func (l *ExecLease) pinnedBinding() *execBinding {
+	if l == nil {
+		return nil
+	}
+	return l.b
+}
+
+// ModelReferences returns the frozen model-reference snapshot of the generation
+// this lease pins, or nil when that generation was published without one. An
+// in-flight caller uses it to keep resolving against the version it started on; a
+// new independent call pins the newer generation and reads THAT snapshot, which is
+// how a later re-registration becomes visible to later calls without ever
+// re-routing a call already running.
+func (l *ExecLease) ModelReferences() *ModelRefSnapshot {
+	if l == nil || l.b == nil {
+		return nil
+	}
+	return l.b.modelRefs
+}
+
+// PinModelReferences freezes the model-reference snapshot of ONE staged generation.
+// It belongs to the staging window alongside the assembled run config, before any
+// owner of the publish is activated: a generation already installed keeps the
+// snapshot it was published with (publish a new generation instead), and a
+// discarded candidate is refused outright, so nothing is written into an execution
+// view that has been thrown away.
+//
+// refs must be the snapshot built from THIS generation's own registry read plus its
+// actual model (NewModelRefSnapshot at candidate construction). A nil snapshot is
+// refused rather than silently falling back to "resolve against whatever is
+// registered at call time" — that second lookup is exactly the defect this pin
+// removes. Registering the snapshot changes no global table, starts no scheduler
+// and keeps the standalone Register/Lookup pair as the only process-wide store.
+func PinModelReferences(s *StagedGeneration, refs *ModelRefSnapshot) error {
+	if s == nil || s.binding == nil {
+		return errors.New("model references need a staged generation: nothing to pin them on")
+	}
+	if refs == nil {
+		return fmt.Errorf("staged generation of %q: a nil reference snapshot would leave resolution on the live registry", s.binding.owner)
+	}
+	if s.discarded {
+		return fmt.Errorf("staged generation of %q was already discarded: its model references cannot be pinned", s.binding.owner)
+	}
+	if s.cm != nil {
+		s.cm.executorMu.RLock()
+		installed := s.cm.active == s.binding
+		s.cm.executorMu.RUnlock()
+		if installed {
+			return fmt.Errorf("generation %d of %q is already installed: a published execution view's model references stay frozen — publish a new generation instead", s.binding.id, s.binding.owner)
+		}
+	}
+	s.binding.modelRefs = refs
+	return nil
 }
 
 // Kind is what this reference stands for (turn / subcall / background).

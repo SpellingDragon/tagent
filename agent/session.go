@@ -86,10 +86,15 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		maxToolIters = DefaultSubAgentMaxToolIterations
 	}
 	invCfg := *ta.config
+	// O2a 变参接缝：模型引用必须解析在「本次调用被选中时的那一代」冻结的快照上，而不是
+	// 此刻恰好更新的活注册表。没有租约/不属主/该代未发布快照时保持 nil，语义与两参调用
+	// 逐字节相同（回落到此处正在装配的视图）。
+	var pinnedRefs *ModelRefSnapshot
 	if cl, hasLease := execLeaseFromContext(ctx); hasLease && cl != nil && cl.belongsToOwnerOf(ta.contextManager) {
 		if gen := cl.declaredRunConfig(); gen != nil {
 			invCfg = *gen
 		}
+		pinnedRefs = cl.ModelReferences()
 	}
 	invCfg.MaxToolIterations = maxToolIters
 	if invCfg.Name == "" {
@@ -100,7 +105,7 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		return nil, fmt.Errorf("agent %q: %w", ta.name, ovErr)
 	}
 	if overrides != nil {
-		if err := applyPerCallOverrides(&invCfg, overrides); err != nil {
+		if err := applyPerCallOverrides(&invCfg, overrides, pinnedRefs); err != nil {
 			return nil, fmt.Errorf("agent %q: per-call override refused at assembly: %w", ta.name, err)
 		}
 	}

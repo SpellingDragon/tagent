@@ -340,3 +340,202 @@ agents:
 	require.NotNil(t, lc.MaxEventsPerPartition)
 	assert.Equal(t, 50000, *lc.MaxEventsPerPartition)
 }
+
+// captureTestConfig builds a minimal loadable Config carrying one capture block,
+// with defaults already applied — the shape Validate() sees at startup.
+func captureTestConfig(dump bool, block CaptureBlock) *Config {
+	cfg := &Config{
+		Entry:             "tagent",
+		Agents:            map[string]AgentConfig{"tagent": {}},
+		TrajectoryDump:    dump,
+		TrajectoryCapture: block,
+	}
+	cfg.ApplyDefaults()
+	return cfg
+}
+
+// TestValidate_CompressSummaryTimeout pins the startup contract of compress.summary_timeout_seconds.
+//   - 0 keeps the compress package default; a positive value travels verbatim
+//   - a negative value fails the load with a named error instead of "no limit"
+func TestValidate_CompressSummaryTimeout(t *testing.T) {
+	compressTestConfig := func(timeout int) *Config {
+		cfg := &Config{
+			Entry:  "tagent",
+			Agents: map[string]AgentConfig{"tagent": {Compress: CompressConfig{SummaryTimeoutSeconds: timeout}}},
+		}
+		cfg.ApplyDefaults()
+		return cfg
+	}
+
+	require.NoError(t, compressTestConfig(0).Validate(), "0 must keep the compress default rather than declare a limit")
+	require.NoError(t, compressTestConfig(1).Validate())
+	require.NoError(t, compressTestConfig(120).Validate())
+	require.ErrorIs(t, compressTestConfig(121).Validate(), ErrSummaryTimeoutTooLarge,
+		"above the ceiling must be a named refusal, never a silent clamp")
+
+	err := compressTestConfig(-1).Validate()
+	require.Error(t, err, "a negative summary timeout must be rejected, not silently accepted")
+	assert.ErrorIs(t, err, ErrSummaryTimeoutNegative)
+	assert.Contains(t, err.Error(), "summary_timeout_seconds")
+	assert.Contains(t, err.Error(), "tagent", "the failing agent must be named")
+
+	neg := compressTestConfig(-5)
+	assert.ErrorIs(t, neg.Validate(), ErrSummaryTimeoutNegative)
+	assert.Equal(t, -5, neg.Agents["tagent"].Compress.SummaryTimeoutSeconds,
+		"rejection must not rewrite the declared value")
+}
+
+// TestApplyDefaults_TrajectoryCaptureKeepsDeclaredValues pins that config is not the source of the capture limits.
+//   - unset limits stay zero, so the capture layer's own normalize supplies them
+//   - declared values survive ApplyDefaults untouched
+func TestApplyDefaults_TrajectoryCaptureKeepsDeclaredValues(t *testing.T) {
+	enabled := captureTestConfig(true, CaptureBlock{Enabled: true})
+	assert.Equal(t, CaptureBlock{Enabled: true}, enabled.TrajectoryCapture,
+		"unset limits must stay zero; copying defaults here would create a second source of truth")
+	require.NoError(t, enabled.Validate())
+
+	declared := captureTestConfig(true, CaptureBlock{
+		Enabled:         true,
+		MaxRecordBytes:  1 << 20,
+		MaxPendingBytes: 2 << 20,
+		MaxRunBytes:     3 << 20,
+		MaxOpenFiles:    4,
+	})
+	assert.Equal(t, CaptureBlock{
+		Enabled:         true,
+		MaxRecordBytes:  1 << 20,
+		MaxPendingBytes: 2 << 20,
+		MaxRunBytes:     3 << 20,
+		MaxOpenFiles:    4,
+	}, declared.TrajectoryCapture)
+	require.NoError(t, declared.Validate())
+}
+
+// TestValidate_TrajectoryCaptureRequiresDump pins that the capture layer only exists on top of a trajectory dump.
+//   - enabled without trajectory_dump is a named refusal at Validate
+//   - enabled with trajectory_dump validates clean
+func TestValidate_TrajectoryCaptureRequiresDump(t *testing.T) {
+	err := captureTestConfig(false, CaptureBlock{Enabled: true}).Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCaptureRequiresDump)
+	assert.Contains(t, err.Error(), "trajectory_dump")
+
+	require.NoError(t, captureTestConfig(true, CaptureBlock{Enabled: true}).Validate())
+	require.NoError(t, captureTestConfig(false, CaptureBlock{}).Validate(),
+		"a disabled capture block needs no trajectory_dump")
+	require.NoError(t, captureTestConfig(false, CaptureBlock{MaxRecordBytes: 1024}).Validate(),
+		"declared-but-unused limits stay acceptable while capture is off")
+}
+
+// TestValidate_TrajectoryCaptureNegativeLimits pins that a negative bound is a named startup failure per field.
+//   - a negative limit is never reinterpreted as "unlimited"
+//   - it is refused even while the block is off, so a typo is never ignored
+func TestValidate_TrajectoryCaptureNegativeLimits(t *testing.T) {
+	cases := []struct {
+		name      string
+		block     CaptureBlock
+		wantField string
+	}{
+		{"max_record_bytes", CaptureBlock{Enabled: true, MaxRecordBytes: -1}, "max_record_bytes"},
+		{"max_pending_bytes", CaptureBlock{Enabled: true, MaxPendingBytes: -1}, "max_pending_bytes"},
+		{"max_run_bytes", CaptureBlock{Enabled: true, MaxRunBytes: -1}, "max_run_bytes"},
+		{"max_open_files", CaptureBlock{Enabled: true, MaxOpenFiles: -1}, "max_open_files"},
+		{"negative while capture is off", CaptureBlock{MaxPendingBytes: -1}, "max_pending_bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := captureTestConfig(true, tc.block).Validate()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrCaptureNegativeLimit)
+			assert.Contains(t, err.Error(), tc.wantField)
+			assert.Contains(t, err.Error(), "-1", "the offending value must be reported")
+		})
+	}
+}
+
+// TestValidate_TrajectoryCaptureOpenFilesCeiling pins that the assembly surface rejects an above-ceiling bound.
+//   - above the ceiling is a startup error, not a silent clamp; the library's clamp only covers in-library use
+//   - within the ceiling it validates clean
+func TestValidate_TrajectoryCaptureOpenFilesCeiling(t *testing.T) {
+	require.NoError(t, captureTestConfig(true, CaptureBlock{Enabled: true, MaxOpenFiles: 1}).Validate())
+	require.NoError(t, captureTestConfig(true, CaptureBlock{Enabled: true, MaxOpenFiles: MaxCaptureOpenFiles}).Validate())
+
+	cfg := captureTestConfig(true, CaptureBlock{Enabled: true, MaxOpenFiles: MaxCaptureOpenFiles + 1})
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCaptureOpenFilesExceeded)
+	assert.Contains(t, err.Error(), "max_open_files")
+	assert.Equal(t, MaxCaptureOpenFiles+1, cfg.TrajectoryCapture.MaxOpenFiles,
+		"an above-ceiling declaration must stay visible, never be silently clamped")
+}
+
+// TestLoadConfig_NewKeys pins that both new keys load from YAML into their declared homes.
+//   - the summary timeout stays inside the per-agent structural fingerprint
+//   - the hot-reload snapshot round-trips them
+//   - a misspelled new key fails the load instead of being ignored
+func TestLoadConfig_NewKeys(t *testing.T) {
+	const yamlSrc = `
+entry: a
+model: m
+trajectory_dump: true
+trajectory_capture:
+  enabled: true
+  max_record_bytes: 1048576
+  max_pending_bytes: 8388608
+  max_run_bytes: 33554432
+  max_open_files: 8
+agents:
+  a:
+    compress:
+      summary_timeout_seconds: 8
+`
+	const typoSrc = `
+entry: a
+model: m
+trajectory_dump: true
+trajectory_capture:
+  enabled: true
+  max_rekord_bytes: 1048576
+agents:
+  a: {}
+`
+	const typoTopSrc = `
+entry: a
+model: m
+trajectory_captur:
+  enabled: true
+agents:
+  a: {}
+`
+	tmp := t.TempDir()
+	write := func(name, src string) string {
+		p := tmp + "/" + name
+		require.NoError(t, os.WriteFile(p, []byte(src), 0o644))
+		return p
+	}
+
+	cfg, err := LoadConfig(write("good.yaml", yamlSrc))
+	require.NoError(t, err)
+	assert.Equal(t, CaptureBlock{
+		Enabled:         true,
+		MaxRecordBytes:  1 << 20,
+		MaxPendingBytes: 8 << 20,
+		MaxRunBytes:     32 << 20,
+		MaxOpenFiles:    8,
+	}, cfg.TrajectoryCapture)
+	assert.Equal(t, 8, cfg.Agents["a"].Compress.SummaryTimeoutSeconds)
+
+	clone, err := cfg.Clone()
+	require.NoError(t, err)
+	assert.Equal(t, cfg.TrajectoryCapture, clone.TrajectoryCapture,
+		"json/yaml tags must stay symmetric for the hot-reload snapshot")
+	assert.Equal(t, 8, clone.Agents["a"].Compress.SummaryTimeoutSeconds)
+
+	_, err = LoadConfig(write("typo.yaml", typoSrc))
+	require.Error(t, err, "a misspelled key inside trajectory_capture must fail the load")
+	assert.Contains(t, err.Error(), "max_rekord_bytes")
+
+	_, err = LoadConfig(write("typo_top.yaml", typoTopSrc))
+	require.Error(t, err, "a misspelled trajectory_capture block name must fail the load")
+	assert.Contains(t, err.Error(), "trajectory_captur")
+}

@@ -22,6 +22,14 @@ type Attribution map[string]string
 func AttributionFrom(ctx context.Context) (Attribution, bool)
     AttributionFrom 从 ctx 取回归因章；无有效归因时返回 (nil, false)。
 
+type CallIDResolver func(ctx context.Context, responseID string) (string, bool)
+    CallIDResolver resolves one model-call identity (the SDK response id carried
+    by the event) to the call_id captured for it. Hit or no hit is decided by
+    the installer's scope lookup: false means "unbound", and the writer must
+    then stamp nothing. Taking the nearest call would attach feedback to a call
+    that never produced it. The composition root injects this (agent bridges
+    rl.CallIDForResponse) so rl stays a leaf and never imports plugin.
+
 type EchoCredential struct {
 	AttemptToken  string
 	Agent         string
@@ -54,12 +62,13 @@ type MemoryPlugin struct {
 	// Has unexported fields.
 }
     MemoryPlugin 把框架事件管线的输出同步写入 MemoryStore，并在同一同步点投影到本调用的
-    ProjectionSink。它按顺序跳过无载荷屏障事件、流式分片、退化空终态与本次尝试的精确输入回显； 因果父子关系按 (partition,
-    session) 独立维护并有上界，经 RelationStore 承载。 存储标识与归因随事件写回 StateDelta 与
-    FullEvent.Metadata。
+    ProjectionSink。它按顺序跳过无载荷屏障事件、流式分片、退化空终态与本次尝试的精确输入回显； 因果父子关系按
+    (partition, session) 独立维护并有上界，经 RelationStore 承载，同一因果键的 「读父 → 分配
+    → 提交 → 关系 → 游标」在同一条键锁段内串行，不同因果键互不阻塞。 存储标识与归因随事件写回 StateDelta 与
+    FullEvent.Metadata：票据、投影与因果游标只在 StoreEvent 成功之后发布，写失败或未接存储都不向下游提供取不回的持久票据。
 
-func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin
-    NewMemoryPlugin 创建一个把事件写入 store 并同步投影的插件；因果链状态初始为空。
+func NewMemoryPlugin(store memory.MemoryStore, opts ...MemoryPluginOption) *MemoryPlugin
+    NewMemoryPlugin 创建一个把事件写入 store 并同步投影的插件；因果链状态初始为空。 选项是变参的：不传即维持接线前的形态。
 
 func (p *MemoryPlugin) Name() string
     Name 返回插件名 memory。
@@ -73,6 +82,15 @@ func (p *MemoryPlugin) OnEvent(
 
 func (p *MemoryPlugin) Register(r *plugin.Registry)
     Register 把本插件挂到框架的 OnEvent 钩子。
+
+type MemoryPluginOption func(*MemoryPlugin)
+    MemoryPluginOption configures an optional seam of NewMemoryPlugin.
+    Without options the constructor keeps its pre-seam shape: variadic, so every
+    existing call site compiles and behaves exactly as before.
+
+func WithCallIDResolver(r CallIDResolver) MemoryPluginOption
+    WithCallIDResolver installs the exact-key lookup that stamps
+    tagentevent.MetaKeyCallID onto a committed fact. A nil resolver means off.
 
 type ProjectionSink interface {
 	Append(ref memory.EventReference)

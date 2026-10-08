@@ -384,8 +384,8 @@ type EventReplayer interface {
     逐字节相同，才补写半写孤儿并重跑提交屏障；同键不同内容判为冲突且**绝不覆盖既有事实**。 返回的 ReplayResult
     让调用方把计数与副作用精确加一次。
 
-    可靠收件箱与内存溢出落盘的恢复路径**必须**走本接口而非公开 StoreEvent，以显式区分"新提交" 与"回放"；不持有类型化断言的调用方继续用
-    StoreEvent。实现：文件段存储与内存存储，装饰链 （引擎桥、错误统计存储）透明透传。
+    可靠收件箱（durable inbox）重放的恢复路径**必须**走本接口而非公开 StoreEvent，以显式区分"新提交"
+    与"回放"；不持有类型化断言的调用方继续用 StoreEvent。实现：文件段存储与内存存储，装饰链 （引擎桥、错误统计存储）透明透传。
 
 type FeedbackPayload struct {
 	Verdict   string  `json:"verdict"`

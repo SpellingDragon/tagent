@@ -6,6 +6,8 @@ package modelutil
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -49,29 +51,49 @@ func BuildRequest(msgs []model.Message, k Knobs) *model.Request {
 // reasoning-fallback drain shared by summary/judge sites: when a reasoning
 // model returns empty Content but non-empty ReasoningContent, the reasoning
 // text is used instead of failing (first generalized from the summary site).
+//
+// The drain is bounded by the caller's context (O3.4): every iteration selects
+// on ctx.Done, so a provider that stops delivering can neither outlive the
+// summary deadline nor ignore a parent cancellation — Call returns the context
+// error and DROPS the stream, which is exactly the "no late rewrite" property the
+// synchronous summary round needs (there is no background reader that could hand
+// a belated answer back to the caller). Providers keep owning their send side
+// and are bound by the same ctx they were handed here; nothing is retried.
 func Call(ctx context.Context, m model.Model, req *model.Request) (string, error) {
 	ch, err := m.GenerateContent(ctx, req)
 	if err != nil {
 		return "", err
 	}
+	if ch == nil {
+		return "", fmt.Errorf("modelutil.Call: %w", ErrNilStream)
+	}
 	var streamed strings.Builder
 	var lastFull, lastReasoning string
-	for resp := range ch {
-		if resp == nil {
-			continue
-		}
-		if resp.Error != nil {
-			return "", errDirect{msg: resp.Error.Message}
-		}
-		for _, c := range resp.Choices {
-			if c.Delta.Content != "" {
-				streamed.WriteString(c.Delta.Content)
+Collect:
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case resp, ok := <-ch:
+			if !ok {
+				break Collect
 			}
-			if c.Message.Content != "" {
-				lastFull = c.Message.Content
+			if resp == nil {
+				continue
 			}
-			if c.Message.ReasoningContent != "" {
-				lastReasoning = c.Message.ReasoningContent
+			if resp.Error != nil {
+				return "", errDirect{msg: resp.Error.Message}
+			}
+			for _, c := range resp.Choices {
+				if c.Delta.Content != "" {
+					streamed.WriteString(c.Delta.Content)
+				}
+				if c.Message.Content != "" {
+					lastFull = c.Message.Content
+				}
+				if c.Message.ReasoningContent != "" {
+					lastReasoning = c.Message.ReasoningContent
+				}
 			}
 		}
 	}
@@ -87,6 +109,12 @@ func Call(ctx context.Context, m model.Model, req *model.Request) (string, error
 	}
 	return "", nil
 }
+
+// ErrNilStream names the determinable failure of a provider that returned a nil
+// response channel without an error. Ranging over a nil channel blocks forever,
+// so the bounded synchronous summary call must treat it as a failure instead of
+// hanging the BeforeModel round.
+var ErrNilStream = errors.New("modelutil: provider returned a nil response stream")
 
 type errDirect struct{ msg string }
 

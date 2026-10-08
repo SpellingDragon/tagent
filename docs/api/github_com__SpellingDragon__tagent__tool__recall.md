@@ -9,11 +9,13 @@ never hallucinated.
 
 recall: the unified recall entry — parameters are the router.
 
-- orchestrate: true opts into the RecallAgent engine explicitly; an unwired
-engine returns guidance instead of a silent deterministic fallback. - items:
-batch GetEvent in original order, zero hallucination. - turn_key: causal-chain
-walk back to the turn's external_input. - query with filters: retrieval-layer
-search; the entry protocol stays when the layer evolves.
+  - orchestrate: true opts into the RecallAgent engine explicitly; an unwired
+    engine returns guidance instead of a silent deterministic fallback.
+  - items: batch GetEvent in original order, zero hallucination.
+  - turn_key: causal-chain walk back to the turn's external_input; an incomplete
+    walk reports what it did read plus the named reason it stopped for.
+  - query with filters: retrieval-layer search; the entry protocol stays when
+    the layer evolves.
 
 FUNCTIONS
 

@@ -15,6 +15,7 @@ import (
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/modelutil"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
@@ -35,6 +36,30 @@ type CompressResult struct {
 	// degraded paths — only true results carry a persisted snapshot (D2,
 	// tagent-compress-event-sourcing).
 	Compressed bool
+
+	// FixedOverhead is the request-fixed cost folded into the trigger line for
+	// THIS call (assembled system prompt + frozen tool declarations + live
+	// notices + envelope), in tokens. Zero when no RequestBudgetContext was
+	// supplied — the caller then knows nothing about the fixed part.
+	FixedOverhead int
+	// ContentBudget is the compressible-history budget actually used: the
+	// trigger line minus FixedOverhead, floored at 0. It travels to the inner
+	// compressor as an EXPLICIT value whenever a budget context was given, so a
+	// zero budget is never mistaken for "unset" and never falls back to the
+	// construction maxTokens.
+	ContentBudget int
+	// Budget is the fixed-side breakdown (nil when no context was supplied).
+	// Its Unknown list reports what could not be sized; when non-empty, Total
+	// (and therefore FixedOverhead) is a FLOOR, not an exact count.
+	Budget *modelutil.RequestBudget
+	// BudgetExceeded names the refusal state: the ESTIMABLE fixed part alone
+	// already exceeds the input limit, so no history fold can pay for it. The
+	// caller's gate must not send; this round returns the timeline untouched
+	// (never a silent system/tool-declaration drop, never a second compressor).
+	BudgetExceeded bool
+	// BudgetReason is the machine-checkable reason when BudgetExceeded is set
+	// (BudgetExceededReason); empty otherwise.
+	BudgetReason string
 }
 
 // ContextCompressor is the projection-only compression engine: it reads EventReferences
@@ -93,6 +118,13 @@ type ContextCompressor struct {
 	// legitimate compression, but never silent).
 	condensedTicketsLost atomic.Int64
 
+	// summaryTimeout bounds ONE real-fold round's synchronous summary work: the
+	// card condensation and the rolling narrative share a SINGLE sub-context
+	// deadline (O3.4). <= 0 means "not injected" → DefaultSummaryTimeout; an
+	// illegal negative value is rejected on the config side, this side simply
+	// never reads "no limit" out of it.
+	summaryTimeout time.Duration
+
 	// listedKeysCap bounds the keys listed in the rolling compaction summary
 	// (default DefaultCompactKeysListed; see WithCompactKeysListed).
 	listedKeysCap int
@@ -141,6 +173,43 @@ func WithCardMaxChars(n int) ContextCompressorOption {
 			cc.cardMaxChars = n
 		}
 	}
+}
+
+// WithSummaryTimeout bounds the shared deadline of one real fold's summary calls
+// (default DefaultSummaryTimeout). Only a positive duration is accepted here;
+// 0/negative keeps the default, because "no limit" must never be spelled as zero
+// on a call that sits on the BeforeModel critical path.
+func WithSummaryTimeout(d time.Duration) ContextCompressorOption {
+	return func(cc *ContextCompressor) {
+		if d > 0 {
+			cc.summaryTimeout = d
+		}
+	}
+}
+
+// SetSummaryTimeout injects the summary deadline after construction (same reason
+// as SetHotSource: the owner's config view only exists once the agent wiring is
+// complete). A non-positive value restores the package default.
+func (cc *ContextCompressor) SetSummaryTimeout(d time.Duration) {
+	if d > 0 {
+		cc.summaryTimeout = d
+		return
+	}
+	cc.summaryTimeout = 0
+}
+
+// SummaryTimeout reports the effective shared summary deadline for this
+// compressor (introspection for wiring and tests).
+func (cc *ContextCompressor) SummaryTimeout() time.Duration {
+	return cc.effectiveSummaryTimeout()
+}
+
+// effectiveSummaryTimeout resolves the injected value, defaulting when unset.
+func (cc *ContextCompressor) effectiveSummaryTimeout() time.Duration {
+	if cc.summaryTimeout > 0 {
+		return cc.summaryTimeout
+	}
+	return DefaultSummaryTimeout
 }
 
 // HotNumbers is the full numeric hot bundle consumed at compression boundaries.
@@ -339,35 +408,83 @@ func NewContextCompressor(
 }
 
 // Compress resolves all projection refs into messages, checks the token budget and
-// compresses when over threshold.
+// compresses when over threshold. It is the ONLY compression entry point; the
+// caller's final gate validates, it does not fold again.
 //
-// - Input: ctx for LLM calls used by SmartCompressor, and refs from SessionProjection.
-// - Output: resolved or compressed messages, retained refs replacing the projection, and error or degradation notices.
+//   - Input: ctx for this fold's LLM calls, projection refs, optional fixed overhead.
+//     Only the first budget element is read; extras are ignored, not double-counted.
+//   - Trigger: history plus fixed overhead against the hot group's trigger line.
+//   - Refusal: BudgetExceededReason, the timeline handed back untouched.
+//   - Output: messages, retained refs, notices, and the budget numbers reported.
 func (cc *ContextCompressor) Compress(
 	ctx context.Context,
 	refs []memory.EventReference,
+	budget ...RequestBudgetContext,
 ) CompressResult {
 	startTime := time.Now()
 
+	thr, maxTokens, keepRecent := cc.liveNums()
+	threshold := int(float64(maxTokens) * thr)
+
+	// Fixed overhead of THIS request. An absent context folds nothing in; a
+	// supplied one is authoritative down to real zeros.
+	var (
+		bc        *RequestBudgetContext
+		fixed     int
+		breakdown *modelutil.RequestBudget
+	)
+	if len(budget) > 0 {
+		bc = &budget[0]
+		b, f := bc.FixedOverhead()
+		fixed = f
+		breakdown = &b
+	}
+	contentBudget := threshold - fixed
+	if contentBudget < 0 {
+		contentBudget = 0
+	}
+
+	if bc != nil && fixed >= maxTokens {
+		log.Warnf("[ContextCompressor] budget_exceeded: fixed overhead %d >= input limit %d (trigger %d); history/system/declarations left untouched",
+			fixed, maxTokens, threshold)
+		var over []model.Message
+		if len(refs) > 0 {
+			over = cc.resolveRefs(ctx, refs)
+		}
+		return CompressResult{
+			Messages:       over,
+			RetainedRefs:   refs,
+			FixedOverhead:  fixed,
+			ContentBudget:  contentBudget,
+			Budget:         breakdown,
+			BudgetExceeded: true,
+			BudgetReason:   BudgetExceededReason,
+		}
+	}
+
 	if len(refs) == 0 {
 		return CompressResult{
-			Messages:     nil,
-			RetainedRefs: nil,
+			Messages:      nil,
+			RetainedRefs:  nil,
+			FixedOverhead: fixed,
+			ContentBudget: contentBudget,
+			Budget:        breakdown,
 		}
 	}
 
 	resolved := cc.resolveRefs(ctx, refs)
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
-	thr, maxTokens, keepRecent := cc.liveNums()
-	threshold := int(float64(maxTokens) * thr)
 
-	if usedTokens <= threshold {
-		log.Infof("[ContextCompressor] under budget (%d <= %d), %d refs, %d messages",
-			usedTokens, threshold, len(refs), len(resolved))
+	if usedTokens+fixed <= threshold {
+		log.Infof("[ContextCompressor] under budget (%d hist + %d fixed <= %d), %d refs, %d messages",
+			usedTokens, fixed, threshold, len(refs), len(resolved))
 		return CompressResult{
-			Messages:     resolved,
-			RetainedRefs: refs,
+			Messages:      resolved,
+			RetainedRefs:  refs,
+			FixedOverhead: fixed,
+			ContentBudget: contentBudget,
+			Budget:        breakdown,
 		}
 	}
 
@@ -383,12 +500,15 @@ func (cc *ContextCompressor) Compress(
 		KeepRecentTasks: keepRecent,
 		MaxTokens:       maxTokens,
 		TriggerBudget:   threshold,
+		ContentBudget:   contentBudgetPtr(bc, contentBudget),
 	})
 	newTokens := cc.tokenCounter.Estimate(compressedMsgs)
-	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d)",
-		usedTokens, newTokens, threshold)
+	log.Infof("[ContextCompressor] SmartCompress: %d -> %d tokens (threshold=%d, fixed=%d, content target=%d)",
+		usedTokens, newTokens, threshold, fixed, contentBudget)
 
-	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, ctx, dispositions)
+	summaryCtx, cancelSummary := context.WithTimeout(ctx, cc.effectiveSummaryTimeout())
+	defer cancelSummary()
+	retainedRefs := cc.buildRetainedRefs(refs, compressedMsgs, summaryCtx, dispositions)
 
 	cc.fullBoundary = anchorFullBoundary(retainedRefs, cc.recentFullCount)
 
@@ -404,11 +524,27 @@ func (cc *ContextCompressor) Compress(
 		len(refs), len(retainedRefs), len(compressedMsgs), time.Since(startTime).Milliseconds())
 
 	return CompressResult{
-		Messages:     compressedMsgs,
-		RetainedRefs: retainedRefs,
-		Notices:      notices,
-		Compressed:   true,
+		Messages:      compressedMsgs,
+		RetainedRefs:  retainedRefs,
+		Notices:       notices,
+		Compressed:    true,
+		FixedOverhead: fixed,
+		ContentBudget: contentBudget,
+		Budget:        breakdown,
 	}
+}
+
+// contentBudgetPtr hands the compressible-history target to the inner compressor
+// ONLY when the caller declared the fixed part. A *int instead of an int is the
+// whole point: an explicit zero must reach the pipeline as "zero", while nil
+// means "the caller knows nothing about the fixed part, keep the configured
+// trigger/window pair".
+func contentBudgetPtr(bc *RequestBudgetContext, value int) *int {
+	if bc == nil {
+		return nil
+	}
+	v := value
+	return &v
 }
 
 // FullBoundary returns the current full-render window anchor . Zero

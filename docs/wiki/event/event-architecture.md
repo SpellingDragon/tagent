@@ -533,8 +533,9 @@ RunFlow:
 | 存储标识 | `event_key`（`MetaKeyEventKey`）、`partition_id`（`MetaKeyPartitionID`）、`event_type`（`MetaKeyEventType`）、`event_summary`（`MetaKeyEventSummary`） | 事件持久化插件在落库时写 |
 | 分发锚点 | `trigger_source` | 每回合由运行流程设在所有转发事件上，供消费方确定性分派 |
 | 透传业务 | `meta_` 前缀（如 `meta_chat_id`） | 从 invocation 根元数据传播到投递出的事件 |
+| 调用关联 | `call_id`（`MetaKeyCallID`） | **写 = `MemoryPlugin`**（经组合根注入的 `CallIDResolver`，按事件自带的 SDK 响应 ID 精确命中才盖；未命中／空串／未装配一律不写，绝不取"最近一次调用"）；**读 = 离线训练导出**（从 `FullEvent.Metadata` 原样取用）。只进 `Metadata`，不进 `StateDelta`、不带 `meta_` 前缀，因此事件解析面不消费它 |
 
-归因与可观测键（`agent_name`、`bundle_id`、`rollout_id`、`trace_id`、`span_id`）写在 `FullEvent.Metadata` 上，使产出事件可回溯到生效版本并与 trace 双向互链；`trace_id`/`span_id` 与 turn span 同源，故事件溯源、轨迹记录与遥测三个投影共用一个锚点。
+归因与可观测键（`agent_name`、`bundle_id`、`rollout_id`、`trace_id`、`span_id`）写在 `FullEvent.Metadata` 上，使产出事件可回溯到生效版本。`trace_id`/`span_id` 与 turn span 同源，**但"三个投影共用一个锚点"只在配了 OTLP 端点时成立**：默认 noop provider 下这两个字段为空串，事件存储也没有按 metadata 过滤的查询面——跨投影的关联主路是 `parent_key`/`call_id` 的离线 join，不是 trace。条件与代价见 [RL 架构](../rl/rl-architecture.md)。
 
 治理子类型键 `subtype`（`denial`/`goal`/`approval`/`degraded`/`audit`）的权威定义也在本包：治理账本写、进化取证读同一常量。**跨包复制字面量会静默漂移**，一旦漂移取证侧的拒绝计数归零，快道回滚防线随之失效——这类漂移没有编译期信号，只能靠"单一声明处"避免。
 
@@ -553,6 +554,7 @@ RunFlow:
 | `governance` | 治理记录采用**单类型＋`subtype`** 而非五个类型：注册有成本，而审计查询天然按单类型过滤 |
 | `feedback` | 反馈/评分/任务成败经因果边绑定到具体产出事件，**零新索引**；`subtype` 区分来源 |
 | `inbox_receipt`、`wf.*` | 见 12.4：为被动排除与记账而注册 |
+| `cognitive_asset_changed` | 认知资产漂移的**批次证据记录**：一次扫描把若干文件变更压成一条（摘要给数量与文件列表，正文逐行给旧新指纹/size/mtime），因此不能借用任何单事件类型——它的粒度是"一批"。注册为 skeleton＋可嵌入＋可召回、TTL 30 天：漂移必须**能被事后问出来**（"这段提示词什么时候变的"），只发日志就等于没记账；写侧经任务记录沉入事实链而不进投影，避免每轮装配都被审计噪声污染 |
 
 <a id="summary-naming"></a>
 ### 12.8 摘要与命名的两处澄清

@@ -265,7 +265,33 @@ agents:
 
 `tools_subset` 越出清单（例如请求 `mcp_call`）得到的是具名拒绝，而不是"悄悄少给几个工具"；模型引用没注册同样具名拒绝。省略全部覆盖即等于使用当前生效代的定义。
 
+<a id="restart-required-dimensions"></a>
+## 十八、维度分类的第三条出口：既不可热也不进指纹的块必须被点名
+
+配置改动只有三种合法读数：**热参数应用**、**结构换代应用**、**具名拒绝（须重启）**。第四种读数「静默 applied」——改了、回执成功、实际没生效——是这一节要消灭的唯一形态。
+
+| 维度 | 消费点 | 生效路径 | 佐证 |
+|---|---|---|---|
+| 五个数值热参（压缩阈值／预算／保留数／任务 TTL 两值） | 消费边界现读 | 热参数摘要轮转，不重建执行面 | `agent.OrgHotParams`、`hotSignature` |
+| 结构白名单（entry/model/provider/prompt_dir/`providers.{provider,api_endpoint}`/per-agent 子集） | 候选构造 | 换代重建 | `org.ComputeOrgFingerprint`、`org.ExtractOrgSubset` |
+| `agents.*.memory`（已有 owner） | 存储实例 | 由 `ChangedMemoryAgents` **单独具名拒绝**（同样是 restart，但点名的是 owner 与存储迁移，不由拒表重复宣告） | 第十六节 |
+| `mcp_servers`、prompt 文件 | 运行中按文件懒读（mtime） | **FILE 热同步**，不在拒表 | [MCP 闭环](./platform-subsystems.md)、[prompt 架构](../prompt/prompt-architecture.md) |
+| `evolution.*` | 文件即真源 | 热面，不在拒表 | [evolution](../evolution/evolution-architecture.md) |
+| `governance.*`、`reliability.*`、`trajectory_capture.*`、`trajectory_dump`、`trajectory_dir` | **一次性构造期**（store／总线／录制器一经构造不换），运行中没有任何接线去读新值 | **拒表**：具名拒绝，须重启 | `org_hotreload.go:restartOnlyConfigBlocks` |
+| `providers.*` | **解析期**（每次候选构造都读 `cfg.Providers` 并按身份键取实例），且协议与端点已在结构白名单里 | 走结构换代，因此**不入拒表** | `wiring.go:resolveAgentModel`、`org.providerSubset` |
+
+**判据是消费点的位置，不是字段的敏感程度**。这条判据两面都要守住：把"看着敏感"的字段塞进拒表，会让真正有重建通路的维度（如 `providers`）被误拒成"必须重启"；把"只在构造期读一次"的字段留在表外，它改了就是纯 no-op——运维读到"热更成功"而新值从未被任何代码读过。
+
+三条实现约束：
+
+- **检查挂在任何候选构建与任何数值下发之前**：因此一次"混合修改"（同时含可热数值与须重启字段）是**整批拒绝**——可热的那部分也不会悄悄应用，revision 不推进。半应用是最难复现的形态：数值看起来变了，结构却没换。
+- **路径按 YAML 拼写并排序**（`trajectory_capture.max_record_bytes`），因为回执要写运维能在配置文件里搜到的名字，而不是 Go 的导出标识符；两侧必须是各自**完整有效**的配置（`ApplyDefaults` 已跑过）才可比，任一侧为 nil 时返回空而不猜测。`restartRequiredChanges`、`configFieldName`
+- **拒绝必须可观察**：`recordFailure("restart_required: <paths>")` 记账，`noteRestartRequired` 记下本轮维度，诊断面在 `restartRequired` 键上给出（**空 = 不放键**）。读者据此区分"没改"与"改了但须重启"，不必重读磁盘上的 desired 自己 diff。`OrgDiagnostics`
+
+只改可热维度时照常应用——这条正腿是必需的：它证明拒绝针对的是**字段**而不是热更机制本身，否则"整批拒绝"会被实现成"整批卡死"。
+
 ## 已知缺口与演进方向
+- `providers.*.api_key_env` 不在结构指纹白名单里（`agent/org.providerSubset` 只取协议与 `api_endpoint`）：只改这一项时既不触发换代、也不进须重启拒表。凭据的**值**在解析时经环境变量读取，所以轮换密钥不需要这条通道；缺的是「改了 env **名**」这一格——它应当要么进白名单，要么进拒表，而不是留在没有读数的位置。
 - 短锁合同已有结构性证明载体：`buildPark` 把候选构建停在持有重载互斥量的位置上，业务获取照常通过才判绿；耗时样本仅作观测。
 - 结构代与完整应用计数并存，但只有前者参与语义；后者若被任何路由读取即违反本文第八节，尚无静态检查阻止这种读取。
 - "未设置 vs 显式默认值"会触发一次冗余轮转（第七节），未做规范化以消除该噪声。

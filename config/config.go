@@ -2,6 +2,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/internal/strictyaml"
 	"github.com/SpellingDragon/tagent/prompt"
+	"github.com/SpellingDragon/tagent/rl"
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
@@ -95,6 +97,16 @@ type Config struct {
 	// Default: "data/trajectories". Each session gets its own file: {dir}/{session_id}.jsonl
 	TrajectoryDir string `json:"trajectory_dir,omitempty" yaml:"trajectory_dir,omitempty"`
 
+	// TrajectoryCapture 是 v2 SDK 请求采集块（trajectory_capture）的声明面。
+	// 默认零值 = 关闭（旧录制路径逐字节现状不变）；enabled=true 时要求
+	// trajectory_dump=true —— v2 层只长在会写轨迹的 recorder 之上（Validate 拒绝矛盾）。
+	// 限额数值一律不在 config 复制：零值原样留给 rl 侧取默认（构造入口
+	// rl.NewTrajectoryRecorderWithOptions + rl.WithCapture(cfg)，其内部 normalize 填默认；
+	// 真源：rl.DefaultCaptureMaxRecordBytes、DefaultCaptureMaxPendingBytes、
+	// DefaultCaptureMaxRunBytes、MaxCaptureOpenFiles，队列深度保持 256 不进配置面）。
+	// 构造期配置，不假称热更。
+	TrajectoryCapture CaptureBlock `json:"trajectory_capture,omitempty" yaml:"trajectory_capture,omitempty"`
+
 	// WorkingDir 是 agent 的统一工作根目录 —— file tools 的 base_dir 与 exec 命令的 cwd 的共同基准。
 	// 空(默认)= 继承进程工作目录(现状逐字节不变);非空则 file/exec 的相对路径均以此为根,且二者
 	// 始终一致(保持模型"单一文件系统视图",见 workspace.go / action_tool.go 设计约定:分裂 base 会致
@@ -167,11 +179,12 @@ type EvolutionConfig struct {
 	JudgeTimeoutSeconds  int     `json:"judge_timeout_seconds,omitempty" yaml:"judge_timeout_seconds,omitempty"`
 }
 
-// ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的磁盘溢出）。
+// ReliabilityConfig 是 T-G 常驻可靠性配置（映射到 agent EventBus 的耐久受理层）。
 type ReliabilityConfig struct {
-	// BusSpillDir 是事件总线磁盘溢出根目录（非空启用 ReliableBus：channel 满则事件溢出落盘
-	// 而非丢弃，at-least-once，常驻不丢事件，重启可回收）。空 = 纯 channel（现状）。
-	// 每 agent 用其下子目录（<BusSpillDir>/<agentName>）隔离。建议置于 workspace 下。
+	// BusSpillDir 是事件总线 durable inbox 的根目录。非空即启用 ReliableBus：每次 Publish
+	// 在返回回执之前先落 inbox（全量持久受理，与队列忙闲无关），at-least-once，常驻不丢
+	// 事件，重启可回收。空 = 纯 volatile 内存 channel，队列满不得冒充 accepted。每 agent
+	// 用其下子目录（<BusSpillDir>/<agentName>）隔离。建议置于 workspace 下。
 	BusSpillDir string `json:"bus_spill_dir,omitempty" yaml:"bus_spill_dir,omitempty"`
 
 	// MeditationAnchorDir 是冥想门控锚点持久化根目录（非空启用 AnchorStore：跨重启保留
@@ -203,6 +216,47 @@ type ReliabilityConfig struct {
 	// at-least-once 延伸到存储层）。空 = 仅退化状态标记、不落盘兜底。建议置于 workspace 下。
 	MemSpillDir string `json:"mem_spill_dir,omitempty" yaml:"mem_spill_dir,omitempty"`
 }
+
+// CaptureBlock 是 trajectory_capture 的声明块。字段面与 rl.CaptureConfig 同名同形，
+// 但刻意不做类型别名：别名会把 queue_size 一并放进配置文件，而 S3 定的是「队列继续
+// 256」——采集队列不是配置项。config 只声明与校验语义非法值，默认值的真源在 rl。
+type CaptureBlock struct {
+	// Enabled 打开 v2 SDK 请求采集；true 要求 trajectory_dump=true。
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// MaxRecordBytes 限定单条序列化记录上界；0 = rl 默认。
+	MaxRecordBytes int64 `json:"max_record_bytes,omitempty" yaml:"max_record_bytes,omitempty"`
+	// MaxPendingBytes 限定采集拥有的在途总额（在途副本+响应累积+排队记录+序列化缓冲）；0 = rl 默认。
+	MaxPendingBytes int64 `json:"max_pending_bytes,omitempty" yaml:"max_pending_bytes,omitempty"`
+	// MaxRunBytes 限定单次 capture 的落盘总量；0 = rl 默认。
+	MaxRunBytes int64 `json:"max_run_bytes,omitempty" yaml:"max_run_bytes,omitempty"`
+	// MaxOpenFiles 限定同时打开的采集文件数；0 = rl 默认。
+	// 装配面显式拒绝 > MaxCaptureOpenFiles 的声明（不静默夹紧）：rl.normalize 的夹紧只兜
+	// 「库内直用」，配置里写了更大的数必须启动即错，否则用户会以为拿到了更大的限额。
+	MaxOpenFiles int `json:"max_open_files,omitempty" yaml:"max_open_files,omitempty"`
+}
+
+// MaxCaptureOpenFiles 是声明面接受的同时打开采集文件数上限。引用 rl 的常数而非另写
+// 一个数字——上限的真源仍只有一处。
+const MaxCaptureOpenFiles = rl.MaxCaptureOpenFiles
+
+// ErrCaptureRequiresDump and its siblings are the config surface's named refusal
+// sentinels: an illegal value under a new key fails startup outright, the message
+// names the yaml path and the actual value, and callers can errors.Is the sentinel.
+var (
+	// ErrCaptureRequiresDump: trajectory_capture.enabled 却没有 trajectory_dump。
+	ErrCaptureRequiresDump = errors.New("trajectory_capture.enabled requires trajectory_dump=true")
+	// ErrCaptureNegativeLimit: 任一采集限额为负——负数从不被解释成「不限」。
+	ErrCaptureNegativeLimit = errors.New("trajectory_capture limit must not be negative")
+	// ErrCaptureOpenFilesExceeded: max_open_files 超过上限——显式拒绝，不夹紧。
+	ErrCaptureOpenFilesExceeded = errors.New("trajectory_capture.max_open_files exceeds the supported ceiling; rejected, not clamped")
+	// ErrSummaryTimeoutNegative: compress.summary_timeout_seconds 为负——它不等于「无时限」。
+	ErrSummaryTimeoutNegative = errors.New("compress.summary_timeout_seconds must not be negative")
+	// ErrSummaryTimeoutTooLarge: 超上限（含 0 以外的正值域）显式拒绝不夹紧——上限存在的
+	// 理由是约束模型路径内最坏等待，静默夹紧会让越界拼写看起来像生效配置。
+	ErrSummaryTimeoutTooLarge = errors.New("compress.summary_timeout_seconds exceeds the supported ceiling")
+	// MaxSummaryTimeoutSeconds 是同步摘要时限的配置上限（D14：正值 ≤120）。
+	MaxSummaryTimeoutSeconds = 120
+)
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).
 // Alias of tool/mcp.ServerConfig so the MCP registry's config hot-sync
@@ -347,6 +401,16 @@ type CompressConfig struct {
 	// Content and degrades compression. The per-call budget scales up with the
 	// summary size but never below this floor.
 	SummaryMaxTokens int `json:"summary_max_tokens,omitempty" yaml:"summary_max_tokens,omitempty"`
+
+	// SummaryTimeoutSeconds bounds ONE real fold's synchronous summary calls
+	// (index-card condensation and the rolling narrative share a single
+	// sub-context deadline, so a stalled summary can never cost the round twice
+	// its budget). 0 = the compress package default (compress.DefaultSummaryTimeout,
+	// 5s) — the number is deliberately not duplicated here. Negative is a named
+	// validation error, never "no deadline". It joins the summary family inside the
+	// per-agent structural fingerprint (org.agentSubset.Compress), i.e. a
+	// rebuild-bound construction value, not a fourth hot channel.
+	SummaryTimeoutSeconds int `json:"summary_timeout_seconds,omitempty" yaml:"summary_timeout_seconds,omitempty"`
 
 	// SummaryEffort is the flat alias for summary.reasoning_effort
 	// (deprecated — folded by FoldModelRefAliases). The field must exist for
@@ -807,11 +871,64 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.TrajectoryCapture.validate(c.TrajectoryDump); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validate checks the capture block the way the composition root must: a negative
+// bound is never re-read as "unlimited", an above-ceiling handle count is rejected
+// instead of clamped (rl's clamp only covers direct in-library use), and enabling
+// v2 capture on top of nothing is a contradiction. The limits are checked even when
+// the block is off, so a typo can never hide inside a disabled block.
+func (b CaptureBlock) validate(trajectoryDump bool) error {
+	limits := []struct {
+		name string
+		v    int64
+	}{
+		{"max_record_bytes", b.MaxRecordBytes},
+		{"max_pending_bytes", b.MaxPendingBytes},
+		{"max_run_bytes", b.MaxRunBytes},
+		{"max_open_files", int64(b.MaxOpenFiles)},
+	}
+	for _, l := range limits {
+		if l.v < 0 {
+			return fmt.Errorf("tagent config: %w: %s = %d", ErrCaptureNegativeLimit, l.name, l.v)
+		}
+	}
+	if b.MaxOpenFiles > MaxCaptureOpenFiles {
+		return fmt.Errorf("tagent config: %w: max_open_files = %d, ceiling %d",
+			ErrCaptureOpenFilesExceeded, b.MaxOpenFiles, MaxCaptureOpenFiles)
+	}
+	if b.Enabled && !trajectoryDump {
+		return fmt.Errorf("tagent config: %w", ErrCaptureRequiresDump)
+	}
+	return nil
+}
+
+// validate bounds the synchronous summary deadline: negative fails startup (it is
+// not "no deadline"); values above 120s are rejected outright rather than clamped —
+// the ceiling exists to bound a worst-case wait inside the model path, and a silent
+// clamp would make a typo look like a working configuration.
+func (c CompressConfig) validate(agentName string) error {
+	if c.SummaryTimeoutSeconds < 0 {
+		return fmt.Errorf("tagent config: agent %q: %w: summary_timeout_seconds = %d",
+			agentName, ErrSummaryTimeoutNegative, c.SummaryTimeoutSeconds)
+	}
+	if c.SummaryTimeoutSeconds > MaxSummaryTimeoutSeconds {
+		return fmt.Errorf("tagent config: agent %q: %w: summary_timeout_seconds = %d, ceiling %d",
+			agentName, ErrSummaryTimeoutTooLarge, c.SummaryTimeoutSeconds, MaxSummaryTimeoutSeconds)
+	}
 	return nil
 }
 
 // validate checks an AgentConfig for errors.
 func (ac *AgentConfig) validate(name string) error {
+	if err := ac.Compress.validate(name); err != nil {
+		return err
+	}
 	seenIDs := make(map[string]bool)
 	for i, tr := range ac.Tools {
 		if tr.Kind == ToolKindAgent {

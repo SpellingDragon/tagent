@@ -1,78 +1,115 @@
 # tagent
 
-**记忆驱动的长期运行 Agent 框架** —— 基于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go)，用事件驱动引擎替代同步 ReAct 循环：事件不可变入库（默认按类型 TTL 遗忘曲线，可配置永久）、上下文按需压缩、历史随时召回，让 Agent 可以**连续运行数天而不失忆、不失控**。
+**面向长期运行的记忆驱动 Agent 框架** —— 基于 [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go)，用事件驱动引擎替代同步 ReAct 循环：发生过的事以不可变事件入库（默认按类型 TTL 遗忘，可配永久），发给模型的工作内存始终有预算上限，被压缩的内容留票据按需精确回补。目标是让 Agent 在**长时间、多轮、带工具的协作**中行为可解释、失败可判定、数据可追溯。
 
 [English](README_EN.md) | 中文
 
+> 本 README 描述当前真实能力与边界，不夸大。凡"验证档位"未过的项（如真实 tokenizer 的消费验收）明确标注为待办，不当作已完成。
+
 ---
 
-## ✨ 四个场景，看常驻 Agent 如何工作
+## 能力与边界（先说清楚）
 
-以下均为真实行为流：引用块里是 Agent 的行动与产出，**粗体**是背后的机制。
+| 能力 | 已建立的部分 | 边界（不声称的部分） |
+|---|---|---|
+| 长期记忆 | 事实链不可变入库；压缩只改视图不改事实；投影是事实链的回放映射，冷启动可重建 | 原文可回补受**保留策略与存储后端**约束；部分退化恢复路径为最终一致，非逐字节；回补正确 ≠ 模型理解正确 |
+| 上下文有界 | 全输入（系统提示/工具声明/参数/推理/通知）统一计价；固定开销超限时具名拒发；同步摘要有时限，超时降级留痕 | 计价是**保守估算**（字符比例 + 固定开销），不声称 provider 窗口绝对安全；不承诺任务成功率提升 |
+| 运行时可调整 | 结构换代 / 数值热参 / 文件懒读三通道分工；不可在线生效的字段**具名拒绝并列须重启路径**，绝不"静默 applied" | 不是"DAG/工作流引擎"；在途调用持旧执行代，但文件与数值各有读取边界，不承诺完整环境确定性重放 |
+| 决策采集 | opt-in v2 采集：SDK 边界快照、调用精确关联、丢失/超限具名计数、封账 manifest 自证完整性；**关闭态与旧实现逐字节同** | 观测边界是 `sdk_request`，**不冒充 wire**；采集旁路观测，不改变调用语义 |
+| 离线训练数据 | 授权只读导出（分区允许表 + 二次核验 + 逐列缺失/歧义）；双流 strict 转换（capture 主源、facts 索引），按会话分组切 train/test 防泄漏，拒绝清单逐行可核 | **在线训练桥已退役**；真实 tokenizer 的消费验收待资产；不声称权重训练收益——交付的是"可核对的样本准备"，非"已验证的学习效果" |
 
-### 场景一：部署并盯三天
+**存储后端诚实说明**：默认 `localfile`（`LocalFileKV`）是跨进程验证用的最小后端，逐桶直接序列化、读写同锁，**不提供生产级持久性/并发保证**；生产持久化应使用 `rustviking` 等专用后端。
 
-> 用户：「部署 v2.3 并盯着。」
->
-> 我：脚本要跑十分钟，不该让人干等——转入 tmux 后台，先回「已开始，完成后通知你」**（异步任务层）**。半小时后结果回写唤醒我，我检查日志、主动汇报 **（task_settled 回收 turn）**。
->
-> 之后三天对话不断，上下文超预算时我把最旧的部署段折叠成一行卡片：`[evt_1a2b] v2.3 部署成功` **（有界投影 + 卡片序列）**。周五用户问「当时那个报错细节」，我凭 1a2b 取回原文，一字不差 **（票据召回）**；换个说法的关键词也找得到 **（语义召回）**。
+---
 
-### 场景二：凌晨崩溃，原地复活
+## 🧠 心智模型
 
-> 周三 03:00 宿主机重启，我的进程没了。
->
-> 03:01 新进程拉起：我从事件事实链复原上下文——逐字节一致，已缓存的前缀继续命中，不花二次 token **（重启连续）**。任务板上昨晚的巡检任务显示 suspect；探测发现 tmux 会话还活着，我重新接管，任务回到 running **（会话重挂 + TaskID 桥）**。
->
-> 用户早上只看到一条消息：「夜间重启已完成，巡检继续，无异常。」
+### 三层数据表示
 
-### 场景三：无人值守的一夜
-
-> 23:40 模型 API 开始限流：我记录退化、拉长重试间隔，不硬打 **（退化追踪）**。期间要执行一个高危清理命令，我先停下——审批请求直接送达用户，我先去干别的 **（治理闸：critical 异步审批）**。
->
-> 02:00 空闲且这两天有新东西：我反思本周踩的坑，沉淀一条部署经验卡片，给反复失败的策略记了负反馈 **（冥想心跳 + 回执-反馈闭环）**。
->
-> 08:00 用户看到：一条经验沉淀、一份待审批、零静默失败。
-
-### 场景四：换大脑，不停车
-
-> 用户改了配置：模型从 A 换成 B，另加一个 MCP 工具。
->
-> 下一个回合起我已用新模型、新工具工作——保存时校验通过才切换，失败则旧执行器原样服务；我进行中的回合用旧模型跑完，可回滚；连子 Agent 的增减也不重启——新增的那位按原恢复协议建起来、自己持有存储，随同一候选一起生效；被撤掉的那位只是不再被路由，它的存储留给还在跑的老回合收尾 **（非重启热更）**。大任务我拆给本地或远程（A2A）子 Agent 并行——它们与我**同构**：各有事件总线与自己的任务域，能再委派自己的子任务，差别只是输出交回给谁；晚到的子任务结算经绑定路由回发起调用，续写同一轮 **（子 Agent 同构协作）**。我的每次 LLM 调用都被记录为轨迹，可直连 AReaL 训练 **（RL 集成）**。
-
-## 🎬 一个长期运行的日常
+| 层 | 位置 | 职责 | 生命周期 |
+|-----|------|------|----------|
+| **EventBus AgentEvent** | Agent 内存 | 事件触发队列 | Publish → Pull 后丢弃 |
+| **SessionProjection EventReference[]** | Agent 内存 | 投影（有界工作内存，只存轻量引用） | 可被 Compactor 清理 |
+| **MemoryStore FullEvent** | 内存/文件/DB | 不可变完整事件链（唯一全文真源） | 按类型 TTL（可配永久 `-1`） |
 
 ```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant T as tagent
-    participant X as tmux 任务层
-    participant M as MemoryStore
-
-    U->>T: "部署服务并盯着"
-    T->>X: spawn(deploy.sh)
-    Note over X: dense 窗口密集探测（~10s）
-    X-->>T: 未结算 → ACK「后台运行 task-42」
-    T-->>U: 已开始部署，完成后通知你
-    Note over T: 期间正常处理其他消息
-    X->>T: task_settled(task-42, 部署成功)
-    T-->>U: 🔔 部署完成（通知回写，非阻塞）
-    Note over T,M: 上下文超预算 → 压缩：旧事件归档，<br/>历史浓缩为卡片行 [evt_1a2b] 部署成功…
-    U->>T: （次日）"昨天部署时的报错细节是什么？"
-    T->>M: recall(items=[{key: 1a2b}])
-    M-->>T: 精确回补原文（零幻觉）
-    T-->>U: 完整细节
+graph TB
+    EB["EventBus: AgentEvent"]
+    SP["SessionProjection: EventReference[]"]
+    MS["MemoryStore: FullEvent（唯一全文真源）"]
+    LLM["[]model.Message 发给 LLM 的有界上下文"]
+    TOOL["recall 工具"]
+    EB -->|驱动 turn: Pull → RunFlow| SP
+    EB -->|插件管线: 事件入库| MS
+    MS -.同步追加轻量引用（仅提交成功）.-> SP
+    SP -->|assembleRequest 唯一装配源| LLM
+    MS -->|按 event_key 取回原文| TOOL
 ```
+
+**关键约束**：投影只存轻量引用；MemoryStore 是唯一完整事件链；压缩只改 LLM 视图与投影，永不动存储；**存储成功才发布引用**——失败路径不留"账本有编号、库内无记录"的错位。
+
+### 有界上下文与精确回补
+
+发给模型的上下文始终有预算上限；超限的旧段折叠为卡片行 `[evt_key] 任务骨架`。折叠不删原文，凭 `[evt_key]` 可回补逐字节原文。这条链路的可靠性取决于：① 原文仍在保留策略内；② 模型选对了票据；③ 存储读路径健康。三者任一不满足都会体现为"取不到/取错"，框架会具名报告而非静默。
+
+---
+
+## 🏗 架构与模块
+
+```mermaid
+graph TB
+    ROOT["tagent.New() 组合根"]
+    TA["TagentAgent"]
+    EB["EventBus"]
+    CM["ContextManager（执行代构造/纳管/发布）"]
+    SC["压缩域 SmartCompressor/Compactor"]
+    MP["MemoryPlugin（持久化+因果链）"]
+    MS["MemoryStore"]
+    RS["RelationStore"]
+    ATW["AgentToolWrapper（子 Agent 同构委派）"]
+    ROOT --> TA --> EB -->|Pull| TA
+    TA -->|BuildInvocation + RunFlow| CM --> SC
+    TA -->|runner.Run OnEvent| MP --> MS --> RS
+    ATW -->|委派调用| TA
+```
+
+| 模块 | 职责 |
+|------|------|
+| `config/` | 配置模型层：`Config`/`AgentConfig`/`ToolRef` 族、严格装载与校验、生命周期投影；组合根以别名再导出，`tagent.*` 源码级 API 不变 |
+| `agent/` | 事件驱动引擎：EventBus、统一事件管线（入口与被调方共用同一 turn 原语）、ContextManager、冥想、子 Agent 封装；`agent/compress/` 压缩与预算、`agent/org/` 世代治理机制、`agent/resources/` 资源租约、`agent/reliability/` 常驻可靠性、`agent/governance/` 治理闸 |
+| `memory/` | 不可变事件存储：`FullEvent`/`MemoryStore`/`FileSegmentStore`/`RelationStore`/生命周期；语义引擎与嵌入/后端适配器各居子包 |
+| `plugin/` | 框架插件：MemoryPlugin（提交闸 + 因果链 + call_id 精确归因）、SummaryPlugin |
+| `tool/` | 工具：exec（tmux 异步任务层）、recall/knowledge、任务工具族、文件工具、MCP 网关 |
+| `event/` | 事件类型系统与元数据契约（`FormatEventKey`/`ParseEventKey`/`MetaKeyCallID` 单源）；EventTypeSpec 注册表 |
+| `prompt/` | Loader 与热重载 Source（文件即真源，mtime 懒读） |
+| `rl/` | RL/训练面：TrajectoryRecorder、opt-in capture v2、授权只读导出、SwappableModel、HTTPAPI（安全边界） |
+| `evolution/` | git 原生自进化（默认关）：登记/评估/安全回滚，框架只出建议不动手 |
+
+**依赖方向**（可机械断言，反向即 CI 红）：`tagent → agent → plugin → memory`，`tool/* → memory`，`event` 为纯叶子；`modelutil` 为只依赖框架 model/tool 的叶子。
+
+**同构协作**：入口与被调方是同一种 tagent——一个 turn 原语、一条事件管线、一份已提交记录、一个（每 agent 自有）任务域；"入口/子"只是连接关系，不是两种类型。一次输入进入某 loop 起，其结算与输出目的地即已确定，运行期只查绑定不猜。
+
+**唯一编排发布权**：组合根独占执行绑定的构造与发布；内部包不依赖根包取版本。世代治理的**机制**在 agent 域子包，**发布动作**留组合根——机制与特权物理分离。
+
+## 📐 设计承诺
+
+1. **事件不可变**：入库即不可改；压缩、遗忘只作用于视图，不作用于事实。
+2. **上下文有界**：工作内存恒有预算上限，靠分层记忆而非无限窗口。
+3. **召回可核对**：折叠内容留票据可按 key 回补原文；框架不制造"看起来成功"的空引用。
+4. **异步不失联**：长任务先应答、完成后通知；通知自带上下文。
+5. **默认零变化**：治理/自进化/可靠性/采集全部默认关，关闭态与关闭前逐字节同；每个可选能力可单点拆除。
+
+---
 
 ## 📦 环境依赖
 
 | 依赖 | 要求 | 用途 |
 |---|---|---|
 | Go | ≥ 1.24 | 构建 |
-| tmux | 任意近期版本 | exec 命令执行 + 异步任务层 |
-| rustviking | 可选 | 仅 `memory.type: file` 持久后端；缺省用 localfile（零外部依赖） |
-| ZAI_API_KEY / TENCENT_HY_API_KEY | 按需 | 模型 API key（examples 默认 GLM 系）；**全部单测使用 mock，无需任何 key** |
-| OTLP endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出；未设 noop |
+| tmux | 近期版本 | exec 命令执行 + 异步任务层 |
+| rustviking | 可选 | 仅 `memory.type: file` 生产持久后端；缺省 localfile（最小验证后端，见上） |
+| ZAI_API_KEY / 相应 provider key | 按需 | 模型 API key；**全部单测使用 mock，无需任何 key** |
+| OTel endpoint | 可选 | 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 启用 trace 导出；未设 noop，`trace_id` 字段留空不影响 key/call_id 关联 |
 
 ## 🚀 快速开始
 
@@ -95,27 +132,17 @@ agents:
       type: localfile
       path: /data/tagent/events
     tools:
-      - kind: tool
-        id: recall               # 统一召回入口：票据/因果链/关键词检索（参数即路由）
-      - kind: tool
-        id: exec                 # tmux 命令执行（异步任务层）
-        description_file: action_tool_desc.md
-
-  recall:
-    system_prompt:
-      files: [recall_agent.md]
-    memory:
-      type: memory
-    max_tool_iterations: 10
+      - {kind: tool, id: recall}          # 统一召回：票据/因果链/关键词
+      - {kind: tool, id: exec}            # tmux 命令执行（异步任务层）
 ```
 
-**2. 三行进入持久循环（Go）**
+**2. 进入持久循环（Go）**
 
 ```go
 ta, _ := tagent.New(cfg, tagent.WithModel(model))
 defer ta.Close()
 
-outputCh, _ := ta.StartLoop("userID", "sessionID")
+outputCh, _ := ta.StartLoop("userID", "sessionID") // StopLoop 为终结态，重启需新实例并从事实链恢复
 ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "帮我执行一个命令"})
 
 for evt := range outputCh {
@@ -127,283 +154,89 @@ for evt := range outputCh {
 
 **3. 跑通完整示例（WeChat Bot）**
 
-**本地裸机部署（推荐，个人助手场景）**——交互式向导一步到位：
-
 ```bash
 cd examples/wechat-bot
-./wizard.sh    # 7 步向导：① 检查依赖(go≥1.24/tmux 硬性;node/openspec/rustviking 软性)
-               # ② 引导填 ZAI_API_KEY(不回显、不入 history) ③ 设 agent 工作根(TAGENT_WORKING_DIR)
-               # ④ 生成 .env(chmod 600) ⑤ 工作区 ACL 权限初始化 ⑥ 验证连通性(embedding 端点,
-               # 不耗 chat 额度) ⑦ 下一步指引
-./run.sh       # 前台启动（./run.sh start 后台；./run.sh --help 看全部命令；./run.sh setup 亦触发向导）
+./wizard.sh    # 依赖检查 / 引导填 key（不回显）/ 工作根 / .env(chmod 600) / 权限 / 连通性
+./run.sh       # 前台启动（./run.sh start 后台；--help 看全部）
 ```
 
-密钥写入 `.env`（已被 `examples/wechat-bot/.gitignore` 白名单模式天然忽略，绝不入库）；`run.sh`
-启动时自动加载 `.env`，**已导出的环境变量优先**（支持 `ZAI_API_KEY=x ./run.sh` 临时覆盖）。
-子命令：`wizard.sh --check` 仅查依赖、`--verify` 仅验连通、`--perms` 仅重做工作区权限。
+密钥写 `.env`（已被白名单式 `.gitignore` 忽略，绝不入库）。systemd/容器/A2A 部署见 [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) 与 [docs/wiki/](docs/wiki/)。
 
-**远端常驻部署（裸机 systemd）**——`./run.sh build` 构建纯静态二进制（`CGO_ENABLED=0`，无需 gcc）→
-安装 `deploy/tagent-wechat.service`（非 root / `ProtectSystem=strict` + `ReadWritePaths` 白名单 /
-`Restart=always` 崩溃自愈 / SIGTERM 优雅关闭 / 资源上限）→ `systemctl enable --now`。
-完整步骤、数据目录与备份、工作根 ACL 两道放行、运维与故障排查见
-[examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md)（或 `./run.sh systemd` 打印指引）。
-
-或直接 `go run`（需已 `export ZAI_API_KEY`）：
-
-```bash
-cd examples/wechat-bot && go run .    # 微信机器人：持久循环+全部机制实战
-```
-
-其他运行模式：容器部署（`examples/wechat-bot/Dockerfile` + `docker-compose.yml`，podman/docker 兼容，密钥经 env 注入）、A2A 服务端（`agent.NewA2AServer`）、RL rollout worker（`agent.NewHTTPAPI` 对接 AReaL，`./run.sh rl`；HTTPAPI 默认 fail-closed——设 `TAGENT_RL_AUTH_TOKEN` 走 Bearer 认证可外露，未设仅绑 127.0.0.1）——见 [docs/wiki/](docs/wiki/)。
-
-## 🧠 心智模型
-
-### 三层数据表示
-
-| 层 | 位置 | 职责 | 生命周期 |
-|-----|------|------|----------|
-| **EventBus AgentEvent** | Agent 内存 | 事件触发队列 | Publish → Pull 后丢弃 |
-| **SessionProjection EventReference[]** | Agent 内存 | 投影（有界工作内存） | 可被 Compactor 清理 |
-| **MemoryStore FullEvent** | 内存/文件/DB | 不可变存储 | 按类型 TTL（3-30 天，可配永久 `-1`） |
-
-```mermaid
-graph TB
-    EB["EventBus: AgentEvent"]
-    SP["SessionProjection: EventReference[]"]
-    MS["MemoryStore: FullEvent"]
-    LLM["[]model.Message<br/>发给 LLM 的上下文"]
-    TOOL["Tool"]
-
-    EB -->|驱动 turn: Pull → RunFlow| SP
-    EB -->|插件管线: 事件入库| MS
-    MS -.同步追加轻量引用.-> SP
-    SP -->|assembleRequest 原生渲染| LLM
-    MS -->|recall 工具| TOOL
-```
-
-**关键约束**：投影只存轻量引用（key+type+summary）；MemoryStore 是唯一完整事件链；压缩只改 LLM 视图与投影，永不动存储。
-
-### 记忆三原语与压缩级联
-
-```mermaid
-graph LR
-    A["事件原文<br/>(唯一全文接触点)"] -->|"L3 整段折叠：票据层(工程) + 综述层(LLM,可选)"| C["卡片行<br/>[evt_key] 任务骨架"]
-    C -->|超限,卡片浓缩 condenseCardLines| D["浓缩卡片<br/>(保骨架+key引用)"]
-```
-
-- **双层折叠**：L3 离场时工程票据层（卡片行 + `[evt_key]` 召回票据）恒在；配置 `summary_model` 时叠加单行 `〔历史综述〕` LLM 滚动综述，失败降级纯工程
-- **卡片序列**：压缩后的历史保持为可读卡片行，冥想沉淀带 ★ 高亮；`[hex]` key 随时用 `recall` 取回原文（零幻觉）
-- **成本可控**：骨架定级与票据层纯工程零 LLM；LLM 仅两处低频叠加（L3 综述 / 卡片浓缩）
-
-存储按 **LSM 树**组织（L0 活跃→L1 封口→L2→L3 压实），遗忘由压实、TTL、容量三层各自负责；事件不可变、重复写入被拒；压缩丢旧留新、召回新先于旧——截断永不丢最新记忆。完整数据流、隐式连接与硬契约见 [wiki/memory](docs/wiki/memory/memory-architecture.md)。
-
-## 🏗 架构
-
-```mermaid
-graph TB
-    ROOT["tagent.New() 组合根"]
-    TA["TagentAgent"]
-    EB["EventBus"]
-    CM["ContextManager"]
-    SC["SmartCompressor"]
-    CP["Compactor"]
-    MM["MeditationManager"]
-    MP["MemoryPlugin"]
-    MS["MemoryStore"]
-    RS["RelationStore"]
-    ATW["AgentToolWrapper"]
-
-    ROOT --> TA
-    TA --> EB
-    EB -->|Pull| TA
-    TA -->|BuildInvocation + RunFlow| CM
-    CM --> SC
-    CM --> CP
-    CM -->|runner.Run| LLMAGENT["框架 LLMAgent/Runner"]
-    LLMAGENT -->|OnEvent| MP
-    MP --> MS
-    MS --> RS
-    ATW -->|调用| TA
-    TA --> MM
-```
-
-| 模块 | 职责 |
-|------|------|
-| `config/` | 配置模型层：编排声明的类型实体（`Config`/`AgentConfig`/`ToolRef` 族）与 `LoadConfig`、严格校验、生命周期投影；组合根以别名再导出，`tagent.*` 公共 API 源码级不变 |
-| `agent/` | 事件驱动引擎：EventBus、统一事件管线（入口循环与被调方调用环共用同一壳与 turn 原语）、ContextManager（粘合层 + 执行代构造/纳管/发布）、冥想、子 Agent 封装 |
-| `agent/task/` | 任务生命周期：TaskManager、完成探测、任务看板、重入 |
-| `agent/compress/` | 压缩域：上下文压缩、卡片序列、投影、token 计量 |
-| `memory/` + `memory/engine/` + `memory/embedder/` + `memory/kv/` | 结构化事件存储：InMemoryStore、FileSegmentStore、RelationStore、生命周期；C6/KVStore/Embedder 契约居核心，语义引擎适配器（bridge/hybrid RRF/诊断）、嵌入供应商（zhipu/mock/traced）、KV 存储后端（localfile/rustviking）各居独立子包——新增引擎/嵌入供应商/后端只进对应子包，接入指南见 `memory/kv.go` 与 `memory/embedder.go` |
-| `plugin/` | 框架插件：MemoryPlugin（持久化+因果链）、SummaryPlugin（元数据标注） |
-| `tool/` | 工具：ActionTool（tmux）、recall/knowledge 子工具、任务工具族、文件工具 |
-| `event/` | 事件类型系统与元数据契约（`FormatEventKey`/`ParseEventMeta`）；EventTypeSpec 注册表（类型元数据单点声明） |
-| `rl/` | RL 集成：TrajectoryRecorder（含 trace 关联字段）、SwappableModel、HTTPAPI |
-| `tool/mcp/` | MCP server 注册表（YAML 声明 + 热同步）+ `mcp_call` 网关（声明恒定） |
-| `tool/memoryx/` | 记忆策展工具：memory_consolidate（服务端指纹防伪造）、memory_health（维度诊断） |
-| `agent/governance/` | 治理闸（默认关）：RiskClassifier、Budget/Approval/DenialLedger/Goal、GovernanceTool 装饰器 |
-| `agent/reliability/` | 常驻可靠性（默认关）：DegradationManager、ReliableBus 磁盘溢出、AnchorStore、mem_spill |
-| `evolution/` | git 原生自进化（默认关）：GitEvolution 装配单元、gitrefine 纯函数、refine 工具、judge/guardrail |
-| `agent/org/` | 世代治理机制（agent 域）：候选事务、热更执行、属主退役账、世代簿记（指纹/子集规范化）与状态类型；组合根经 `org.Deps` 注入壳构造，发布动作（orgCoordinator）留组合根 |
-| `agent/resources/` | 资源租约治理（agent 域）：共享存储/引擎的最后引用清理、目录写锁、毒化封闭；组合根 wiring 经 `resources.DefaultResources.Acquire` 接线 |
-| `tagent.go` + `build_agent.go` + `wiring.go` + `builtin.go` + `registry.go` + `org_hotreload.go` + `partition_collision.go` + `config_alias.go` + `org_alias.go` | 组合根终形（11 文件）：类型/Option/New · agent 装配族 · resolve+wire 族 · 发布权（orgCoordinator 换入/发布/告警）· 注册表 · 别名再导出（config 与 org 实体在域包） |
-
-依赖全部单向无循环：`root → agent → plugin → memory`，`tool/* → memory`。
-
-**同构协作**：入口与被调方是同一种 tagent——一个 turn 原语、一条事件管线、一份已提交应用记录、一个（每 agent 自有的）任务域；「入口／子」只是连接关系，不是两种 agent 类型。一次输入进入某 loop 起，其衍生任务结算与输出的目的地即已确定（调用绑定表），运行期只查绑定、不猜；取消一路委派不关闭被调 agent、不影响其无关任务。
-
-## 📐 设计哲学
-
-四条承诺，贯穿所有机制：
-
-1. **事件不可变**：发生过的事入库即不可修改——压缩、遗忘都只作用于"视图"，不作用于事实；遗忘按类型 TTL 曲线（3-30 天，可配永久），非无限保留
-2. **上下文有界**：发给 LLM 的工作内存永远有预算上限，超限自动压缩——不靠无限窗口，靠分层记忆
-3. **召回精确**：压缩掉的内容都留有票据（事件 key），按票取回原文，零幻觉
-4. **异步不失联**：长任务先应答、完成后通知；通知自带完整上下文，压缩或乱序都不会产生"断线"的任务
-
-自进化子系统另有四原则（默认 agent 自迭代 / 文件即真源 / 版本管理复用 git / 信号建议式——框架永不动手），见 [wiki/platform](docs/wiki/platform/platform-subsystems.md)。
-
-更完整的设计论证（不变量、时间线渲染规则、元数据契约）见 [docs/wiki/](docs/wiki/) 与 [openspec/specs/](openspec/specs/)。
+---
 
 ## 🔧 配置参考
 
-> 配置键**严格解析**：未知字段启动即报错并列名（拼写错误不再静默漂移）；结构变更走弃用流程（旧别名有重叠期）。
+> 配置键**严格解析**：未知字段启动即报错列名；结构变更走弃用流程。
 
 ### 全局选项
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `entry` | `tagent` | 入口 Agent 名称 |
-| `prompt_dir` | `resources/prompts` | 全局 prompt 目录 |
-| `model` | （必填） | 默认模型名称 |
-| `provider` | `openai` | 默认 provider |
-| `providers` | `{}` | provider 连接信息 |
-| `log_level` | `info` | 日志级别 |
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `entry` / `model` / `provider` / `providers` | tagent / 必填 / openai / `{}` | 入口与模型、provider 连接信息 |
+| `prompt_dir` | `resources/prompts` | 提示词目录 |
 | `request_timeout_seconds` | `3600` | 请求超时 |
-| `trajectory_dump` | `false` | 启用轨迹记录 |
-| `trajectory_dir` | `data/trajectories` | 轨迹文件目录 |
-| `working_dir` | `""` | **agent 统一工作根**——file 工具与 exec 命令的共同路径基准；空 = 继承进程 cwd。可经 `TAGENT_WORKING_DIR` 覆盖 |
-| `api_key_env` | `ZAI_API_KEY` | 全局 API key 环境变量名 |
-| `mcp_servers` | `{}` | MCP server 声明式注册表；增删保存即热生效，经 `mcp_discover`/`mcp_call` 使用 |
+| `working_dir` | `""` | **agent 统一工作根**（file 工具与 exec 的共同基准）；空=继承进程 cwd；可经 `TAGENT_WORKING_DIR` 覆盖 |
+| `trajectory_dump` / `trajectory_dir` | `false` / `data/trajectories` | v1 轨迹录制 |
+| `trajectory_capture` | （关闭） | **opt-in v2 采集**：`enabled`（须 `trajectory_dump: true`，否则具名启动错）/ `max_record_bytes`（单记录 8MiB）/ `max_pending_bytes`（在途含副本 64MiB）/ `max_run_bytes`（单次落盘 512MiB）/ `max_open_files`（≤16）。`0`=取 rl 默认（真源在 `rl`）；**负值一律拒绝**，不解释为"不限"；超上限**拒绝而非夹紧**。全为构造期读取，不承诺热更。见 [决策采集](docs/wiki/rl/rl-architecture.md#trajectory-capture) |
 
-### Agent 级选项
+### Agent 级要点
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `model` / `provider` | （继承全局） | LLM 模型与 provider |
-| `system_prompt.files` | `[]` | 加载的 prompt 文件 |
-| `memory.type` | `memory` | `memory`（进程内）/`file`（rustviking CLI 持久）/`localfile`（JSON 文件 KV 持久，零外部依赖） |
-| `memory.path` | `""` | 存储路径/标识；`memory` 型下同 path 的 agent 共享同一实例，空 = 隔离存储 |
-| `memory.read_namespaces` | `[]` | 可读取的其他 agent 分区（跨 agent 记忆访问须显式授权） |
-| `memory.lifecycle` | 内置默认 | 遗忘策略：`global_ttl_days`（默认 7，负值=关闭）/`type_ttl`/`check_interval`/`max_events_per_partition` |
-| `memory.engine` | （关闭） | 语义检索引擎：`embedding`（provider/model/dimensions，开启后 recall 升级向量∪关键词 RRF 融合，缺 key 优雅降级）/`consolidation`（巩固建议式触发：`capacity_threshold`/`min_source_events`/`snooze`——触发只是建议，执行权在 LLM+工具） |
-| `workspace_root` | `.tagent-workspace` | **scratch 根**（非工作根）：超大工具输出与 tmux 命令目录的落点 |
-| `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 · 子 10/4096/0.3 | ReAct 迭代 / token 预算 / 温度（只在被引用 agent 自身定义处配置） |
-| `compress_threshold` | `0.8` | 整理（compaction）的唯一触发条件；整理间前缀字节稳定以利缓存复用 |
-| `keep_recent_tasks` | `2` | 整理后保留的最近任务数（不参与触发） |
-| `task_terminal_ttl` | `"2m"` | 终态任务回收保留期（也是 resume_task 重入窗口） |
-| `resume_context_rounds` | `3` | 子 Agent 重入还原的前序轮次数 |
-| `meditation.enabled` | `false` | 启用冥想（`interval`/`min_gap`/`prompt_file`） |
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | 进程内 / 文件持久 / 跨分区读取须显式授权 |
+| `memory.lifecycle` | 内置默认 | 遗忘：`global_ttl_days`（默认 7，负=关）/`type_ttl`/`max_events_per_partition` |
+| `memory.engine` | （关） | 语义检索与巩固建议（触发只是建议，执行权在 LLM+工具） |
+| `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | 整理触发阈值 / 整理后保留最近数 |
+| `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 · 子 10/4096/0.3 | 在被引用 agent 自身定义处配置 |
+| `meditation.enabled` | `false` | 空闲期反思沉淀 |
 
-### compress 块（压缩家族）
+### compress 块
 
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `summary_model` / `summary_provider` | （继承 agent） | 压缩摘要专用模型（可用廉价模型） |
-| `card_max_chars` / `compact_keys_listed` / `summary_max_tokens` | `6000` / `32` / `8192` | 卡片序列上限 / recent keys 上限 / 摘要输出预算下限 |
-| `recent_full_count` | `keep_recent_tasks × 4` | 全文解析窗口；整理轮锚定、整理间冻结（前缀字节稳定） |
+| 选项 | 默认 | 说明 |
+|------|------|------|
+| `summary_model` / `summary_provider` | 继承 agent | 摘要专用模型（可用廉价模型） |
+| `card_max_chars` / `summary_max_tokens` | `6000` / `8192` | 卡片上限 / 摘要预算下限 |
+| `summary_timeout_seconds` | `0`（=包默认 5s） | 一轮真折叠内所有同步摘要共用时限。`0`=用包默认非关掉；**负值是校验错**（不等于无时限）；超上限 `120` **拒绝而非夹紧**。属构造期数值，走换代，不是第四条热参通道。见 [摘要时限](docs/wiki/agent/compression-and-telemetry.md#summary-deadline) |
 
-### 工具引用（ToolRef）
+### 平台子系统（默认全关 = 零行为变化）
 
-| 字段 | 说明 |
-|------|------|
-| `kind` | `agent`（默认）或 `tool` |
-| `agent` / `id` | 子 Agent 名称 / 工具 ID |
-| `description` / `description_file` | 工具描述：内联文本 / prompt 文件；`kind: agent` 必须二者其一 |
-| `event_params` | 事件参数，如 `[event_keys]` |
-| `extra_params` | 附加路由参数声明；调用时随 `request` 打包为 JSON 消息体透传子 Agent |
-| `async` | 子 Agent 是否走异步任务层（默认 true） |
-| `remote.url` | 远程 A2A Agent URL |
-| `properties` | 工具专属配置：exec 的 `workspace`/`run_as_user`/`monitor`；file 工具族的 `base_dir`；缺省回退全局 `working_dir` |
-| `factory` | 自定义工厂路径（非内置工具/agent 的扩展点） |
+| 配置块 | 说明 |
+|--------|------|
+| `governance:` | 治理闸：leaf 工具过风险分级 + 预算滑窗 + critical 异步审批；拒绝以工具结果回给模型（非 Go error）。`enforcement: warn|strict` |
+| `evolution:` | git 原生自进化：登记 + 后验评估（劣化只出建议）+ 安全回滚。⚠ 生产=独立部署仓 |
+| `reliability:` | 常驻可靠性：durable inbox（全量持久受理，at-least-once，**不保证外部工具恰好一次**）、依赖退化阶梯、mem_spill 兜底、冥想锚点 |
 
-> agent 运行参数**只在被引用 agent 自身的 `agents.<name>` 定义处配置**——ToolRef 只声明引用关系。
+> **改了配置什么时候必须重启**：热更只有三种合法读数——① 五个数值热参即时应用；② 结构白名单（entry/model/provider/prompt_dir、`providers.{provider,api_endpoint}`、per-agent 子集）换代生效；③ 其余**具名拒绝**并回执 `restartRequired`（`governance`/`reliability`/`trajectory_capture`/`trajectory_dump`/`trajectory_dir`）。同时含两类的修改**整批拒绝**（可热那半也不悄悄应用）。判据是**消费点位置**，非字段敏感度。见 [维度分类](docs/wiki/platform/org-hot-reload.md#restart-required-dimensions)。
 
-### 平台子系统（默认全部关闭 = 零行为变化；按需开启）
+## 🤖 RL / 训练面
 
-| 配置块 | 关键字段 | 说明 |
-|--------|---------|------|
-| `governance:` | `enabled` / `enforcement`（warn\|strict）/ `dir` / 预算窗口与阈值 / `goal_required_for` | 治理闸：全部 leaf 工具过风险分级 + 预算滑窗 + critical 异步审批（审批请求渗透为消息，人工回复即生效）；DenialLedger 审计；goal 五工具 |
-| `evolution:` | `enabled` / `protected_paths` / judge 四参数 | git 原生自进化：refine 登记 + 后验评估（劣化只出建议）；rollback 安全 revert。⚠ 生产=独立部署仓 |
-| `reliability:` | `degradation_enabled` / `bus_spill_dir` / `mem_spill_dir` / `meditation_anchor_dir` / 降级行为三项 | 常驻可靠性：五依赖退化追踪独立开关，与 governance 无耦合；降级行为是「闸不是墙」 |
-
-完整字段与行为矩阵见 [docs/wiki/platform/](docs/wiki/platform/platform-subsystems.md)。
-
-> **例外——认知资产防线（cognitive-asset-guard）**：漂移审计（D1）与走私引导（D4）**默认开启、零必填配置**（纯附加行为：事件+日志+提示行，无拦截、无网络上报）；**D1 漂移审计例外——需显式 `working_dir`，未设时跳过审计**；资产写审批规则（D2）随 governance `DefaultRules` 存在，仅 governance enabled 时被评估。终态方向为**权限域分离**（D3：资产目录对 exec 物理只读，实现属独立运维变更）。见 [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md)。
+- **录制**：`rl.TrajectoryRecorder`（v1）+ opt-in capture v2；子 agent 经模型包装共享同一写入流。
+- **授权导出**：`rl.ExportTrainingFacts` 只读窄面（分区允许表、逐条二次核验、missing/forbidden/ambiguous 分列，不自动折算 reward）。
+- **离线转换**：`scripts/convert_trajectories.py --strict` 双流（capture 主源 + facts 关联索引 + 封账证明），产出 SFT/RL 样本；`scripts/verify_runtime_acceptance.py` 是**核账器**（缺证据即 FAIL 非 SKIP）。
+- **退役记录**：AReaL 在线训练桥（改名前 `train.*` 布局）已删除，重接条件见 [RL 架构](docs/wiki/rl/rl-architecture.md)。
 
 ## 📚 深入阅读
 
 | 主题 | 文档 |
 |------|------|
-| 记忆架构 / 策展 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
-| 平台子系统（治理 / 自进化 / 可靠性 / 可观测 / 记忆引擎 / MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
-| 认知资产防线（漂移审计 · 写审批 · 走私引导 · 权限域分离） | [docs/wiki/platform/cognitive-asset-guard.md](docs/wiki/platform/cognitive-asset-guard.md) |
-| 启用子系统后 agent 在各复杂场景的行为反应 | [docs/wiki/platform/agent-behavior-matrix.md](docs/wiki/platform/agent-behavior-matrix.md) |
-| 工具架构 / 任务重入 / 会话回收 | [docs/wiki/tool/tool-architecture.md](docs/wiki/tool/tool-architecture.md) |
-| Agent 架构 / 事件流 | [docs/wiki/agent/](docs/wiki/agent/) |
-| 事件系统 / 插件 / Prompt | [docs/wiki/](docs/wiki/) |
+| 记忆架构 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
+| Agent 架构 / 执行代 / 压缩与遥测 | [docs/wiki/agent/](docs/wiki/agent/) |
+| 平台子系统（治理/自进化/可靠性/热更/可观测/MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
+| RL / 采集 / 授权导出 / 双流转换 | [docs/wiki/rl/rl-architecture.md](docs/wiki/rl/rl-architecture.md) |
 | 设计规格（OpenSpec） | [openspec/specs/](openspec/specs/) |
-| 原型骨架（六件套与生产映射） | [docs/wiki/agent/prototype-skeleton.md](docs/wiki/agent/prototype-skeleton.md) |
-| wechat-bot 运行面（去重 / 窄接口 / 投递目标 / 真链路验收） | [docs/wiki/examples/wechat-bot-runtime.md](docs/wiki/examples/wechat-bot-runtime.md) |
-| 注释与文档门禁的工具面 | [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md) |
-| 完整示例（WeChat Bot：五 agent 编排 / 消息链路 / RL 模式） | [examples/wechat-bot/README.md](examples/wechat-bot/README.md) |
-| 裸机 systemd 部署（含可观测后端 Jaeger） | [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) |
-| 真实 LLM 契约守护矩阵（模型↔框架文本接缝） | [tests/README.md](tests/README.md) |
-| Provider 协议契约矩阵（文本/usage/流式/原生 tool_calls/工具结果回环/reasoning 透传） | 根包 `agent_architecture_test.go`（`resolveAgentModel` 走真实 openai-兼容适配器；`DEEPSEEK_API_KEY` 未设整组自动跳过，不阻塞 CI） |
-| 常驻可靠性 / 资源所有权 / 控制面规格（durable inbox-v1、租约化 store、HTTP limits、endpoint 策略） | [openspec/specs/](openspec/specs/)（persistent-event-loop / runtime-resource-ownership / resident-release-evidence） |
-| RL 集成 / trajectory 分析（`rl/trajectory_analyze.py`：压缩回收率、大消息 TOP-N、chars/token 偏差） | [rl/](rl/) |
+| 真实 LLM 契约守护矩阵 | [tests/README.md](tests/README.md) |
 
 ## 开发
 
 ```bash
-go build ./... && go vet ./...         # 构建 + 静态检查
-go test ./... -short                   # 测试（CI 同款：short + 新子系统 -race，见 .github/workflows/ci.yml）
-go test ./evals/                       # 组件级行为评估（票据可召回率/工具选择/Bad Case 资产）
-bash scripts/race_check.sh             # race 门禁（本地全量）
-cd examples/wechat-bot && go run .     # 运行示例
+go build ./... && go vet ./...
+go test ./... -short                    # CI 同款
+go test ./evals/                        # 组件级行为评估
+bash scripts/race_check.sh              # race 门禁
+bash scripts/lint.sh && bash scripts/check-openspec.sh
 ```
 
-### 注释与文档契约（`comment_policy`，CI 零容忍）
-
-机制判据的家在 `docs/wiki/**`：源码注释只写契约，加一行索引（`契约:` 或 `规格:`）指向它。一条机制写进注释之前，先确认它有一个文档小节可归属。
-
-| 约束 | 形状 | 为何这样定 |
-|------|------|-----------|
-| 每个生产文件声明职责 | 文件内任意注释槽含一行 `契约: docs/…#anchor` | 读代码的人先问到哪儿找判据；测试文件同样适用 |
-| doc 注释只写契约 | 叙述散文不超两段，要点列表与索引不限长度 | 长契约注释合法，短设计叙述不合法——裁判是内容形态不是行数 |
-| 索引必须可解 | 目标路径存在、锚点在文档里真实存在、大文档必须带锚 | 指向不存在的小节比没有指向更坏 |
-| 不以过程文档为真源 | 注释不得引用变更单号、轮次、审阅记录 | 过程文档会先于代码腐烂 |
-
-棘轮的基线 `scripts/comment_policy/baseline.json` 现为**空 counts**，即以上规则全部零容忍：新增违规直接红，无预算可用。日常只跑 `bash scripts/lint.sh`（含 gofmt/vet/comment_policy/文档引用/`gen_godoc --check`）；`gen_godoc.sh` 会过滤掉索引行，`go doc` 产物里不出现导航指针。改动注释后用 `bash scripts/check_comment_only.sh <基线ref>` 证明「只改了注释」，测试文件并档用 `scripts/check_test_merge.sh` 证明无损。约定细则见 [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md)。
-
-### RL 部署环境变量（examples/wechat-bot）
-
-| 变量 | 说明 |
-|------|------|
-| `TAGENT_RL_ALLOW_LLM_REDIRECT` | `1` 才允许 `/task` 携带 `llm_base_url` 动态重定向（默认禁用；LLM client 逐跳 CheckRedirect：30x 每一跳目标 host 必须 ∈ allowlist，未启用时任何跳转全拒） |
-| `TAGENT_RL_ENDPOINT_ALLOWLIST` | 逗号分隔 host allowlist（精确 host、任意端口），如 `proxy.example.com,proxy2.internal` |
-
-### 真机 tmux 测的本地跑法
-
-`tool/action` 的会话型 tmux 测（`TestActionTool_Tmux*`，以及 `-tags integration` 的 `TestScenario*`／`TestTUI_*`）共用机器上**默认的 tmux 服务器**——执行器没有为测试另开 socket。装配期会调用 `CleanupOrphanSessions`，它收割除 `n-*` 之外的全部列举会话：于是两个并发跑该族的进程（或上一轮残留会话）会互相收割对面的活会话，失败形态是 `server exited unexpectedly` 而非超时，受害者随跑序轮换。会话型测各自带 `testing.Short()` 守卫、重测族整文件挂 `//go:build integration`，因此 `-short` 的 test job 里剩下的只有两个 `exec.LookPath` 探针；但 **race 门不带 `-short`**，该族在 race job 里是真跑的——所以 race 脚本以 `-p 1` 串行执行包，避免邻包在同一 tmux 服务器上互相收割（失败形如会话凭空消失：`kill` 报 exit status 1、status "error"、output 空，而非超时）。
-
-```bash
-go test -p 1 ./tool/action                        # 串行，避开互相收割
-go test -p 1 -tags integration ./tool/action      # 含 Scenario/TUI 重测族
-```
-
-判读规则：报 `server exited unexpectedly` 先按跑序问题处理，串行重跑；只有稳定复现的超时或断言不符才按缺陷追。跑该族前确认没有别处（含自己的 tmux 会话、其他 agent 进程）在同一默认服务器上建会话。
-
-CI（GitHub Actions）在 push（main 与开发分支 dev）与 PR 触发：build + vet + 全量 short 测试 + 新子系统（memory/governance/reliability/evolution/event/tool 等）`-race`；tests/ 下真实 LLM 契约测试无 key 自动跳过，不阻塞 CI；根包 `agent_architecture_test.go`（provider 协议矩阵）无 `DEEPSEEK_API_KEY` 同样跳过。dev 直推不过 PR 门，因此与 main 同跑同一套作业——否则不可编译的提交可以静默入库，后续一切对账读的都是未验证基线。
+CI 在 push（main/dev）与 PR 触发：build + vet + 全量 short + 新子系统 `-race`；真实 LLM 契约测试无 key 自动跳过、不阻塞。tmux 会话型测试须 `-p 1` 串行（共用默认 tmux 服务器会互相收割，判读见 [docs/wiki/tool](docs/wiki/tool/tool-architecture.md)）。
 
 ## License
 

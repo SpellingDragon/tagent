@@ -303,6 +303,25 @@ RecallAgent 可沿因果链回溯原始事件
 
 **关键**：压缩只修改发给 LLM 的消息视图，不修改 MemoryStore 和 RelationStore。因果关系在整个生命周期中保持不变。
 
+### 5.4 因果不完整的六种具名读数
+
+回溯侧（`memory_turn` 与统一 `recall` 的 `turn_key` 形态）沿 `GetParent` 回走时，走不到回合起点必须**具名说出它观察到了什么**，而不是把它当成"没有历史"。六个读数都是观察陈述，不推断原因——TTL、驱逐、权限都不是存储层报出来的，替它猜一个就是把不确定转成错误结论：
+
+| `reason` | 停在哪 | 读者该怎么办 |
+|---|---|---|
+| `missing_ancestor` | 记着的父边指向一个存储取不回的事件 | 链断在一条**不存在的事实**上；更早的内容不可达，不等于"没有更早" |
+| `relation_error` | 读父边本身失败 | 存储侧故障，可按错误重试 |
+| `relation_unavailable` | 后端完全没有关系能力 | 这份存储不可能有因果回溯——别把空结果当证据 |
+| `cycle` | 走到了已经走过的事件 | 关系数据被写坏（某键成为自身祖先） |
+| `limit` | 步数预算先用完 | 提高 `max_steps` 再走一次 |
+| `no_parent_edge` | 停在一条没有父边的记录上 | 段起点：重启后或游标被回收后的新段首，**没有猜父** |
+
+三字段与判读规则：`complete=true` 时 `reason` 必为空；`capped` 显式区分"预算用完"这一种不完整。三个字段都是**加法**——读方在缺失时按"不完整"处理，绝不当作空历史。
+
+写侧的两条对应规则决定了这些读数为什么必然出现而非偶发：`parentKey==0` 时新段就地起链（不猜父），以及因果游标超上界（`maxLastEventKeys`）时回收最久未更新的键（正在提交的键被引用计数保护，不会被抽掉锚）。被回收的域下一次提交就会以 `no_parent_edge` 开头。
+
+佐证：`tool/recall/recall_subtools.go` 的六个常量与 `turnWalk`；`plugin` 的写侧规则见[MemoryPlugin](../plugin/plugin-architecture.md#memory-plugin)。
+
 ---
 
 ## 六、MemoryStore 接口
@@ -385,6 +404,8 @@ type QueryOptions struct {
 ```
 
 **注意**：`QueryEvents` 始终返回 `[]EventReference`（轻量），不返回完整 `FullEvent`，避免大量 IO 开销。
+
+**扫描侧的省 IO 判据**：窗内遍历时**先只解事件的轻量头部**（键、类型、时间等路由/去重/过滤所需字段），只有关键词过滤确实需要正文时才物化可能很大的 `Content`。因此「取最近 N 条／按类型／按时间」这类查询不会重解整窗事件体；解不出头部的那条按**与全文解码失败同样的方式**跳过，不改变声明式结果。
 
 **查询语义契约**（segment-query-recency）——两个 store 实现（`InMemoryStore` / `FileSegmentStore`）对同一 `QueryOptions` 返回一致结果：
 
@@ -624,6 +645,8 @@ if p.memStore != nil {
     }
 }
 ```
+
+写入方对存储的两条承诺都发生在这一层：**只有 `StoreEvent` 成功才发布票据与投影**（写失败时连同名 `StateDelta` 字段一并撤回，因果游标也不推进），以及**同一因果键的提交段串行**（不同键互不阻塞）。二者见[MemoryPlugin](../plugin/plugin-architecture.md#memory-plugin)。
 
 ### 11.3 MemoryStore 的多方读取模式
 
@@ -1163,6 +1186,8 @@ stateDiagram-v2
 | 向量索引 | `tagent:vec:*`（引擎 KV） | 启动异步重建（Ready 门控；窗口期退化关键词，不阻塞启动） |
 | StoreEvent 失败兜底 | `<MemSpillDir>/<agent>.jsonl` | memory 恢复（onChange）触发 ReplaySpilled——重放前 `GetEvent` 预检幂等（防 already-exists 撞墙），重放走 inner 绕过 ErrorTrackingStore 防递归 |
 
+**因果链自身的持久化顺序**：`SetParent`／解除父子关系都**先追加 `relations.journal`、后改内存邻接表**，且两步落在同一把锁里。这样一条失败的日志追加之后，读侧看到的仍是改动前的关系——调用方拿到错误、可原样重试，而内存里绝不会挂上一条校日志无法重放的边（那会在下次恢复时凭空造出或抹掉因果关系）。同一判据也约束删除侧：journal 未落盘就不撤内存边。
+
 ### 16.7 压缩触发与执行过程召回（compress-digest-reconnect）
 
 **触发器多维化**（⚠️ 已被 §16.10 取代：触发收敛为容量单维，轮数维度退役）。`ContextCompressor.Compress` 的历史触发条件是 `usedTokens > threshold || completeTurns > keepRecent`。第二维（完整任务段超龄）曾是解除“压缩从未运行”的关键：`resolveRef` 把老 ref 渲染成短占位符（~20 字符）会把 `usedTokens` 压到阈值以下，纯 token 门永不触发→骨架压缩/滚动摘要从未形成。但稳态下轮数维度每轮触发整理路径（折叠/窗口滑动每轮改写投影），与 LLM 前缀缓存复用冲突，故退役（见 16.10）；占位符低估问题已被工具调用摘要/工具链折叠根治，token 随 L2 骨架驻留累积终将触达阈值，整理不会饿死。
@@ -1336,6 +1361,10 @@ stateDiagram-v2
 | 空脏检查 | 无变更时 `Sync`/`Close` 不重写快照；`Close` 幂等并把未落盘变更 flush 完 |
 | 遗留 tmp | 打开时清掉上次被杀在 rename 中途留下的 tmp |
 
+**快照编码的派生缓存（`bucketCodec`）只加速，不是第二真源**：每桶驻留已转义的 `"key":"value"` 片段与一份可复用输出缓冲；值变更即失效重编码，键不在该桶时片段同刻剔除；单个键值对合计达到 64 KiB 就不驻留（照常正确编码，只是永不保留）；全部桶的驻留总量以 8 MiB 为界，越界整片重置再生长。这份缓存永不落盘，也不重排屏障顺序——`Sync()` 仍是 encode → tmp → rename → 清脏；键序每次从活 map 重算，因此输出字节与完全不使用缓存时逐字相同（`TestLocalFileKV_SnapshotEncodingEquivalence` 钉的就是这条等价性）。
+
+**扫描限定到单桶的判据**：前缀扫描只有在前缀含冒号时才敢限定单桶——同偏移处的首个冒号使命中键必属该桶；不含冒号的模糊前缀可能跨桶，退回全量扫描。以冒号开头（`":…"`）或首段不是数字（`"global:…"`）的前缀按 `bucketLabelOf` 归入常驻 global 桶。区间扫描把 `[start, end)` 限定到某分区，要求整段落在该分区的规范键区 `[pid:, pid;…)` 之内，否则全量扫描；空区间匹配零条。
+
 <a id="kv-partition-discovery"></a>
 ### 分区发现依赖键命名空间这一事实
 
@@ -1474,7 +1503,7 @@ mock 嵌入器用文本哈希把内容映射到固定维度的**确定性伪向�
 | `Role` / `Content` | 原始消息角色与正文 | 角色取 user/assistant/tool/system |
 | `ContentParts` | 多模态部件 | 见下节 |
 | `ToolCalls` / `ToolID` / `ToolResults` | 工具面 | `ToolID` 记录工具结果对应哪次调用，保证跨存储→解析不丢配对 |
-| `Metadata` | 附加元数据 | — |
+| `Metadata` | 附加元数据 | 键的声明与归属单源在事件包（见[元数据键的归属](../event/event-architecture.md#metadata-keys)）。`call_id` 即在此：写入方 = `MemoryPlugin`（经注入的解析器**按精确响应 ID 命中才盖**，未命中一律不写），读取方 = 离线训练导出（从 `FullEvent.Metadata` 原样取用）；它不进 `StateDelta`，也不带 `meta_` 透传前缀 |
 | `Response` | LLM 响应快照 | 可选；按契约视为只读，故不做深拷贝 |
 
 ### 两条时间轴：只做一次语义判断
@@ -1608,6 +1637,7 @@ spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `Event
 - 类型化 TTL **派生自事件类型注册表**（唯一权威源）；记忆层不得另存一份 TTL 表——两处表迟早漂移，而漂移的表现是某些事件被提前或永不遗忘。
 - **计数未知时整体暂停容量淘汰**，且未知绝不参与判定（见「计数未知不等于零」）。
 - 淘汰每轮只把**存活**事件标墓碑：已墓碑化的键必须被跳过，否则会击穿计数并对已死事件重复递减。
+- **事件键在 value 里，不在 KV 键里**：`{pid}:evt:{窗}:{seq}` 槽位键不含 EventKey（`ParseKey` 对 evt 键留零），因此按类型曲线判龄的扫描必须解码事件的**共享头部**（`event_key`/`timestamp`/`event_type`）取键；从槽位键猜 EventKey 会让所有事件的键读成 0，淘汰判定整体静默失效。同一理由，读侧一律复用共享事件头而不是另写一份解码——两份解码迟早漂移。
 
 
 ## 已知缺口与演进方向

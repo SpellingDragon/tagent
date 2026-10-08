@@ -50,6 +50,13 @@ const (
 	MetaKeySourceEventID  = "source_event_id"
 
 	MetaKeySourceSnapshot = "source_snapshot"
+
+	// MetaKeyCallID 调用关联键：把一条已提交事实对到产生它的那一次模型调用。
+	// 键归属——写入方 = MemoryPlugin（经装配根注入的 CallIDResolver，按精确响应 ID
+	// 命中才盖；未命中一律不盖，绝不取「最近一次调用」）；读取方 = 离线训练导出，
+	// 从 FullEvent.Metadata（rawMetadata）按字面量取用。它不是 StateDelta 投递契约键，
+	// 也不带 meta_ 透传前缀，因此事件解析面不消费它。
+	MetaKeyCallID = "call_id"
 )
     MetaKeyEventKey StateDelta 与 FullEvent.Metadata 的键常量：每个键在此定义一次，注入点引用常量， 消费方经
     ParseEventMeta 解析。谁写谁读见文档的键归属表。

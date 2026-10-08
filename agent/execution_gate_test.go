@@ -1132,3 +1132,162 @@ func openEnvelopesForTest(dir string) ([]string, error) {
 	}
 	return entries, nil
 }
+
+// finalBudgetCM 给出一个把输入上限压到 100 token 的 CM：热参源装上后 liveNums 逐字段以源为准
+// （MaxTokens=100、ThresholdPct=0.8 → 触发线 80），于是数百字符的 system 就足以越门，
+// 拒发判定完全由压缩器做出——本层只消费它给出的具名结果。
+func finalBudgetCM(t *testing.T) *ContextManager {
+	t.Helper()
+	cm := newTestContextManager("o3-final-gate", &loopMockModel{}, nil, nil, nil)
+	cm.memStore = memory.NewInMemoryStore()
+	cm.SetHotSource(func() compress.HotNumbers {
+		return compress.HotNumbers{ThresholdPct: 0.8, MaxTokens: 100, KeepRecent: 1}
+	})
+	return cm
+}
+
+// finalBudgetOverArgs：200 个 rune 的 system 正文就已 ≥100 token（外加每条消息结构余量与请求
+// 信封），固定部分超过输入上限 100，历史怎么折叠都付不起。
+func finalBudgetOverArgs() *model.BeforeModelArgs {
+	return &model.BeforeModelArgs{Request: &model.Request{Messages: []model.Message{
+		{Role: model.RoleSystem, Content: repeatBudgetRunes('s', 200)},
+		{Role: model.RoleUser, Content: "hello"},
+	}}}
+}
+
+// finalBudgetUnderArgs：短 system + 无历史 → 固定部分远低于上限，走原路径。
+func finalBudgetUnderArgs() *model.BeforeModelArgs {
+	return &model.BeforeModelArgs{Request: &model.Request{Messages: []model.Message{
+		{Role: model.RoleSystem, Content: "sys"},
+		{Role: model.RoleUser, Content: "hello"},
+	}}}
+}
+
+// repeatBudgetRunes 是本节自带的定长文本构造器（本文件未导入 strings，包内仅此一份）。
+func repeatBudgetRunes(r rune, n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = r
+	}
+	return string(b)
+}
+
+func setPendingNotice(cm *ContextManager, text string) {
+	cm.recoveryMu.Lock()
+	cm.recoveryNotice = text
+	cm.recoveryMu.Unlock()
+}
+
+func pendingNotice(cm *ContextManager) string {
+	cm.recoveryMu.Lock()
+	defer cm.recoveryMu.Unlock()
+	return cm.recoveryNotice
+}
+
+// TestExecutionGate_FinalBudget pins the named refusal of a request whose fixed overhead alone already owns the input limit.
+//   - both paths, channel and iterator, refuse the send; nothing reaches the provider
+//   - the full timeline is handed back: no system deletion, no second compression
+//   - a one-shot recovery notice survives the refusal unspent
+//
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
+func TestExecutionGate_FinalBudget(t *testing.T) {
+	const notice = "[recovery] pending one-shot notice"
+
+	t.Run("channel path refuses the send", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetOverArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.Error(t, err, "a request whose fixed overhead already owns the input limit must not be sent")
+		require.Contains(t, err.Error(), "budget_exceeded",
+			"the refusal must be the machine-checkable named reason, got %v", err)
+		require.Contains(t, err.Error(), "fixed overhead", "and it must name the number that overflowed")
+		require.Zero(t, inner.requestCount(), "the refused round never reaches the provider")
+	})
+
+	t.Run("iterator path refuses the same way", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetOverArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		seq, err := g.GenerateContentIter(context.Background(), args.Request)
+		require.NoError(t, err, "creation itself stays lazy")
+		var got []*model.Response
+		seq(func(r *model.Response) bool { got = append(got, r); return true })
+		require.Len(t, got, 1, "a refused iterator surfaces exactly one error response, never silence")
+		require.NotNil(t, got[0].Error, "and the turn must reduce to failed, not to an empty completion")
+		require.Contains(t, got[0].Error.Message, "budget_exceeded")
+		require.Zero(t, inner.requestCount(), "a refused iterator never calls the model")
+	})
+
+	t.Run("refusal keeps the full timeline", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		factRef := seedProjectionWithFact(cm, "a fact the projection still carries")
+
+		args := finalBudgetOverArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		msgs := args.Request.Messages
+		require.NotEmpty(t, msgs, "the assembled request is handed back intact for the gate to reject")
+		require.Equal(t, model.RoleSystem, msgs[0].Role,
+			"the system prompt is never dropped to squeeze a round through the gate")
+		require.Equal(t, repeatBudgetRunes('s', 200), msgs[0].Content)
+		require.NotContains(t, msgs[0].Content, "budget_exceeded",
+			"the refusal is a gate decision, not a prompt rewrite")
+		refs := cm.projection.GetAll()
+		require.Len(t, refs, 1, "and the projection is not folded on a refused round")
+		require.Equal(t, factRef.EventKey, refs[0].EventKey)
+	})
+
+	t.Run("refusal never consumes the recovery notice", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		setPendingNotice(cm, notice)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetOverArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.Error(t, err, "channel path refuses")
+		require.Equal(t, notice, pendingNotice(cm),
+			"O3: a refused send must not eat the one-shot notice — the next real call still owes it")
+
+		args2 := finalBudgetOverArgs()
+		cm.assembleRequest(context.Background(), args2)
+		seq, gerr := g.GenerateContentIter(context.Background(), args2.Request)
+		require.NoError(t, gerr)
+		seq(func(*model.Response) bool { return true })
+		require.Equal(t, notice, pendingNotice(cm),
+			"and the iterator path refuses without consuming it either")
+		require.Zero(t, inner.requestCount())
+
+		require.Equal(t, notice, cm.TakeRecoveryNotice(),
+			"5.2 semantics hold: the notice is still takeable byte for byte after two refusals")
+	})
+
+	t.Run("under-budget round still sends and consumes once", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		setPendingNotice(cm, notice)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetUnderArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.NoError(t, err, "a round the fixed part fits must pass untouched")
+		require.Equal(t, 1, inner.requestCount())
+		reqs := inner.snapshotRequests()
+		got := reqs[len(reqs)-1].Messages
+		require.Equal(t, notice, got[len(got)-1].Content, "the notice rides the ACTUAL call, exactly as before")
+		require.Empty(t, cm.TakeRecoveryNotice(), "and it is consumed exactly once")
+	})
+}
