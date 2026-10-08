@@ -3,6 +3,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -538,4 +539,33 @@ agents:
 	_, err = LoadConfig(write("typo_top.yaml", typoTopSrc))
 	require.Error(t, err, "a misspelled trajectory_capture block name must fail the load")
 	assert.Contains(t, err.Error(), "trajectory_captur")
+}
+
+// TestMeditationConfig_ExtFields 钉住冥想扩字段的 YAML/JSON 装载面。
+func TestMeditationConfig_ExtFields(t *testing.T) {
+	var zero MeditationConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: true\n"), &zero))
+	assert.Empty(t, zero.ObservedNamespaces, "observed_namespaces must default empty")
+	assert.Empty(t, zero.DeliverTo, "deliver_to must default empty (fail-closed)")
+
+	var mc MeditationConfig
+	require.NoError(t, yaml.Unmarshal([]byte(
+		"observed_namespaces:\n  - recall\n  - \"session:42\"\ndeliver_to:\n  - entry\n"), &mc))
+	assert.Equal(t, []string{"recall", "session:42"}, mc.ObservedNamespaces,
+		"explicit observed_namespaces parses into the slice")
+	assert.Equal(t, []string{"entry"}, mc.DeliverTo,
+		"explicit deliver_to parses into the slice")
+
+	var jm MeditationConfig
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"observed_namespaces":["a"],"deliver_to":["b","c"]}`), &jm))
+	assert.Equal(t, []string{"a"}, jm.ObservedNamespaces,
+		"JSON face reads the same keys (omitempty only affects marshalling)")
+	assert.Equal(t, []string{"b", "c"}, jm.DeliverTo)
+
+	b, err := json.Marshal(MeditationConfig{Enabled: true})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "observed_namespaces",
+		"unset fields are omitted so the off state carries no noise keys")
+	assert.NotContains(t, string(b), "deliver_to")
 }

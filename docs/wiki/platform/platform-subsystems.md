@@ -12,7 +12,7 @@
 | `tool/govx/` | 治理面工具五件套（goal_declare/goal_list/goal_resolve/denial_query/approval_list）——**entry only**（与 refine 同槽位，先于治理包裹追加）；只登记/查询，批准权始终在人 |
 | `agent/reliability/` | DegradationManager（五依赖退化状态机）、Inbox（durable inbox-v2，受理前落盘）、AnchorStore（冥想锚点跨重启） |
 | `evolution/` | GitEvolution 装配单元（NewGitEvolution+BindRuntime 延迟绑定）、gitrefine 纯函数集（git exec+段匹配）、refine 工具（register/status/rollback）、improvement/evaluation 事件、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估，劣化只出建议） |
-| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南；**LocalFileKV 最小化裁决**（无 WAL/fsync 机——`Sync()`=按分区桶的增量快照 atomic tmp+rename（仅脏桶落盘），屏障成功后新进程可读回；掉电耐久不宣称，生产耐久档推迟 rustviking））、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单，snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
+| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南；**LocalFileKV 最小化裁决**（无 WAL/fsync 机——`Sync()`=按分区桶的增量快照 atomic tmp+rename（仅脏桶落盘），屏障成功后新进程可读回；掉电耐久不宣称，生产耐久档推迟 rustviking））、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单；`consolidation_hint` 谱系在 `event` 包**显式登记为自管且不可投递**（不靠"未登记即扣留"的隐式默认，见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)），snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
 | `tool/mcp/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报） |
 | `tool/memoryx/` | memory_consolidate、memory_health |
 | `event/`（增量） | EventTypeSpec 注册表（类型元数据单点） |
@@ -44,7 +44,7 @@ graph TB
 <a id="composition-root"></a>
 ### 顶层装配根（package tagent）
 
-根包是 tagent 应用的装配组合根：封装 agent 实例化过程，按配置组装 `TagentAgent` 并接线跨边界依赖（模型解析见[模型解析与轨迹包裹](#model-wiring)）。内建工具经 `RegisterBuiltinTools()` 一次性注册（`registry.go`），外部工具经 `RegisterPlainTool()` 与 `RegisterToolAgent()` 注册；只有**既注册、又在该 agent 配置中声明**的工具才可用。`builtin.go` 承载内建 plain 工具的工厂函数。
+根包是 tagent 应用的装配组合根：封装 agent 实例化过程，按配置组装 `TagentAgent` 并接线跨边界依赖（模型解析见[模型解析与轨迹包裹](#model-wiring)）。内建工具经 `RegisterBuiltinTools()` 一次性注册（`registry.go`），外部工具经 `RegisterPlainTool()` 与 `RegisterToolAgent()` 注册；只有**既注册、又在该 agent 配置中声明**的工具才可用。`builtin.go` 承载内建 plain 工具的工厂函数。根包还承载两样**跨 agent 的授权面**：冥想观察面与投递白名单的装配期校验（`build_agent.go`，越界与盲投都具名拒启），以及进程内投递 API `DeliverToAgent`（`delivery.go`）——裁决表与语义见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。
 
 <a id="config-surface"></a>
 ### 顶层配置面（Config）
@@ -134,7 +134,7 @@ agents:
 
 启用后这个单元挂在 entry 身上的三处：`refine` 工具（每次 entry 构建都追加）、bundle id 提供者（取最近一次改进 commit）、Stop closer（agent 关停时回收自进化的后台工作）。后两者属**进程级 once 绑定**——热重建壳不重复绑，与 ReliableBus 的"壳不重复登记"同一门（见[资源所有权](./resource-ownership.md)）。
 
-自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。
+自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。冥想有两种形态——入口 agent 的**自体维护**与同构 agent 的**外部策展**，同一引擎、判据按形态分面，见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)。
 refine 三 op：**register**（产物落盘后登记：`[self-improve]` 标记 commit（仅 add 显式受控路径，
 默认 `resources/prompts/**`,`skills/**`,`scripts/**`）+ improvement 事件即评估窗口锚）/
 **status**（git log 过滤 + 窗口结论四态 join + 未登记产物提醒）/ **rollback**（安全 revert：
@@ -154,7 +154,7 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 - **ReliableBus**（开关 `bus_spill_dir` 非空）：**全量持久受理**，不是「满则溢出」——`PublishContext` 在返回回执**之前**把每个输入写进 durable inbox（`agent/reliability/inbox.go`，v2），channel 只承载唤醒脉冲，因此队列忙闲与是否落盘无关；at-least-once，重启后未 ack 的信封按严格序号重投；存在 `*.spill` 残留或未排空的 v1 树时**拒绝升级**（fail-loud，由前一个二进制排空，v2 从不猜测式迁移）；每个 agent 只用自己的子目录 `<bus_spill_dir>/<agent>`（防多 agent 事件串流），该目录**在构建期就存在**；开关为空则回退纯 channel（易失，行为与旧 channel 逐字节一致）。四态边界与三段状态机见 [持久投递与依赖退化](../reliability/durable-delivery.md)；
 - **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
-- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
+- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点按 agent 名分文件持久化（`<dir>/<agent>.json`），重启不误触发；外部形态的新鲜度水位复用同一份 last-meditation 锚，锚点与形态的关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)。
 
 ### 六.1 投递四态边界（volatile → durable → processed → delivered）
 

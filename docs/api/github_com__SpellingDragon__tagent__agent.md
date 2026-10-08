@@ -1021,24 +1021,43 @@ type MeditationConfig struct {
 	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
 	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
+
+	// ObservedNamespaces 是外部观察形态冥想的观察面（memory namespace 名），非空即切换形态：
+	// novelty 判据改读这些分区事实链上的非自管谱系新事件（经 NoveltyReader）。
+	// 组合根给定最终集合——缺省回落 read_namespaces 与 observed ⊆ read 的授权校验都发生在装配期，
+	// 本层只消费给定的集合。
+	//
+	// novelty 判据按形态并存两套，不是冗余：同 agent 的注入锚是输入侧最便宜且不可被任务层
+	// 洗白的真源，跨分区则只有事实链上入库时盖章的归因可读。清空本字段即回切输入侧锚。
+	ObservedNamespaces []string
+
+	// DeliverTo 声明冥想产出可投递的目标 agent 白名单：缺省空 = 拒绝一切投递（fail-closed）。
+	// 消费点在组合根的投递面，本 manager 只承载配置形态。
+	DeliverTo []string
 }
     MeditationConfig is the runtime configuration for the meditation manager.
-    Converted from config.MeditationConfig (string durations) by tagent.go.
+    Converted from config.MeditationConfig (string durations) by tagent.go; the
+    observation surface reaches this layer already resolved by the composition
+    root.
 
 type MeditationManager struct {
 	// Has unexported fields.
 }
     MeditationManager periodically injects "meditation" external_input events
-    into the event loop when the agent has been idle for at least MinGap AND
-    there has been new user input since the last meditation.
+    into the event loop when the agent has been idle for at least MinGap AND the
+    novelty gate says the world moved on since the last meditation.
 
-    - The idle gate is lineage-agnostic (any turn end counts as busy); the
-    novelty gate is anchored on the input side (only source=="user" injections
-    arm it). - Meditation-derived activity can therefore only delay the next
-    meditation, never re-arm the novelty gate: the self-feeding perpetual-motion
-    loop of "nothing happened" summaries is structurally impossible. - The event
-    triggers the LLM to perform context cleanup and deep consolidation over the
-    session.
+    - Two forms share this manager, chosen by one switch with no middle state:
+    in-loop (empty observation surface) is the host agent's own maintainer;
+    external observation (non-empty ObservedNamespaces) is a cross-domain
+    curator over other agents' partitions. - The idle gate is lineage-agnostic
+    (any turn end counts as busy); the novelty gate has one data face per
+    form — the input-side anchor in-loop, the observed partitions' persisted
+    attribution via NoveltyReader in the external form. - Meditation-derived
+    activity can therefore only delay the next meditation, never re-arm the
+    novelty gate: the self-feeding perpetual-motion loop of "nothing happened"
+    summaries is structurally impossible. - The event triggers the LLM to
+    perform context cleanup and deep consolidation over the session.
 
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager
     NewMeditationManager creates a MeditationManager. The injector is typically
@@ -1052,6 +1071,13 @@ func (m *MeditationManager) SetAuditLine(fn func() string)
     SetAuditLine wires the behavior-audit digest generator (see auditLine).
     Safe to leave unset; set at assembly before the loop starts, same discipline
     as SetTaskController.
+
+func (m *MeditationManager) SetNoveltyReader(r NoveltyReader)
+    SetNoveltyReader wires the read-only fact-chain face behind the external
+    form's novelty gate. Safe to leave unset: with an empty observation surface
+    it is never consulted; with a non-empty one the novelty gate stays closed
+    (fail-closed) instead of silently reading the input-side anchor. Set at
+    assembly before Start, same discipline as SetTaskController.
 
 func (m *MeditationManager) SetTaskController(tc task.TaskController)
     SetTaskController wires an optional read-only task controller used to render
@@ -1074,6 +1100,10 @@ func (m *MeditationManager) UpdateLastUserInput(t time.Time)
     UpdateLastUserInput records a source=="user" injection timestamp — the
     novelty-gate anchor. Called from the injection points only (inject.go);
     non-user sources (meditation/task/tmux) must never arm this gate.
+
+      - Both forms run this update: the in-loop form decides on it, the external
+        form does not read it yet keeps the history continuous for a switch
+        back.
 
 type ModelRefSnapshot struct {
 	// Has unexported fields.
@@ -1104,6 +1134,15 @@ func (s *ModelRefSnapshot) Resolve(ref string) (model.Model, bool)
     Resolve reports the instance a reference names inside THIS frozen view.
     A name the view does not carry is a miss, never a fallback to some other
     model.
+
+type NoveltyReader interface {
+	QueryEvents(query memory.QueryOptions) ([]memory.EventReference, error)
+	GetEvent(key int64) (*memory.FullEvent, error)
+}
+    NoveltyReader 是外部观察形态 novelty 判据的只读事实链缝，由组合根注入（通常是共享的 memory store），agent
+    侧不经此缝触任何写面。
+
+      - QueryEvents 只回答轻量引用：EventReference 不带 Metadata，谱系只能靠 GetEvent 水合后读。
 
 type ObligationReport struct {
 	Executions  int

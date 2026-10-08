@@ -249,12 +249,12 @@ func (t *ConsolidationHintTracker) SetOnHint(fn func(partitionID, count int))
 
 func (t *ConsolidationHintTracker) Track(eventKey int64, partitionID int, eventType string)
     Track 是写入旁路计数入口（engineBridge capacityHook 签名）。仅边界事件计数； 非阻塞、永不失败（旁路产物）。
-    Within the snooze window the count is kept, so the next boundary event
-    after the window expires hints again. While onHint is unset (the assembly
-    window between construction and SetOnHint) nothing is reset and no snooze
-    is recorded: the count survives, and the first boundary event after wiring
+    Within the snooze window the count is kept, so the next boundary event after
+    the window expires hints again. While no hint callback is set (the assembly
+    window between construction and wiring) nothing is reset and no snooze is
+    recorded: the count survives, and the first boundary event after wiring
     emits the delayed hint. On a hint, counts and recent reset together so the
-    candidate list stays aligned.
+    candidate list stays aligned with the push hint path.
 
 type DegradationSink interface {
 	// ReportFailure 上报某依赖的一次失败及原始错误。

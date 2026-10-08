@@ -74,7 +74,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
     retryDelays := []time.Duration{100ms, 200ms, 400ms}
 
     for {
-        events, err := bus.Pull(ctx)          // ① 拉取事件（批量；混合批先丢弃冥想事件）
+        events, err := bus.Pull(ctx)          // ① 拉取事件（批量；混合批先丢弃冥想谱系事件，投递同谱系故同受此条）
         msg := cm.BuildInvocation(events)     // ② 合并为一条 user message
         if msg.Content == "" { continue }
 
@@ -265,6 +265,27 @@ ContextManager 的 runner 是**可换代缝**，换代由「构造 → 纳管 �
 - **热参数读取**：五个数值热参（压缩阈值/预算/保留数/任务 TTL 两值）不随换代推送——各 owner 从唯一已提交应用记录在**消费边界现读**（压缩器经注入的热参源拉取、任务 spawn 经 TTL 源读取），结构代与数值轴分离，无第二份可独立修改的真值。
 - **懒检查**：`SetOrgReloader` 闭包在业务 turn 起点触发（单次 stat，未变更零成本）；结构变更经指纹对比触发 candidate-then-publish（fail-closed + 双槽回滚环）。详见 [platform 篇 §六·A](../platform/platform-subsystems.md)。
 
+<a id="meditation-two-forms"></a>
+### 2.14 冥想的两种形态：自体维护者与外部观察者
+
+同一个 `MeditationManager` 承载两种形态，**由一个开关选定、没有中间态**：观察面（`meditation.observed_namespaces`）为空即 **in-loop 自体维护者**——入口 agent 在自己的空闲期回看自己，清理自己的投影、巩固自己的分区；非空即 **外部观察者**——`agents:` 下的一个同构 agent（无新 agent 类型、无新运行时机制，先例是 recall agent）策展别人的分区。两种形态**共存而非替代**：外部观察者做不了目标的上下文清理，压缩权按单压缩权不变量不可转移。
+
+空闲闸门与形态无关（任意来源的 turn 结束都算忙）；新颖性闸门**一份形态一个数据面**，两套并存不是冗余，也不许"合并成一套"：
+
+| 形态 | 新颖性判据 | 为什么只有这一个面 |
+|---|---|---|
+| in-loop | 注入锚：`lastUserInput > lastMeditation`（只有 `source=="user"` 的注入写该锚） | 同一个 agent 的输入侧注入是最便宜、且不会被任务层洗白的真源；绕道事实链只会更贵更晚 |
+| 外部观察 | 被观察分区内存在 `Timestamp > lastMeditation` 且**非自管谱系**的事件（经 `NoveltyReader` 读事实链入库时盖章的持久归因 `Metadata[trigger_source]`） | 跨分区时注入锚只覆盖观察者自己，事实链上的持久归因是唯一可用面 |
+
+判据的取向决定它结构上无法自持：**自管与否一律经 `event.SelfManagedLineage` 单源派生**（判据处零清单副本，冥想产出与巩固建议因此天然不计入新鲜度）；**未盖章 `trigger_source` 的存量事件按未知谱系处理、不计入**（宁可少反思，不可误判新鲜，判定过程落 debug 日志）；**查询失败时门保持关闭**（读不通的事实链既不是"没新东西"也不是"有新东西"，猜哪一头都是在对着故障动手）。跨分区的 `task`/`system_alert` 计入新鲜度是**有意为之**：那是被观察 agent 的真实后台活动，正是跨域理解的素材；观察者自己的产出只落自身分区（见下），喂不到自己。
+
+- **水位锚**：外部判据复用 `lastMeditation` 锚作时间水位，不新增锚字段（AnchorStore 三锚结构不变），触发即推进沿用既有自锁语义。
+- **早停水合**：`EventReference` 不带 Metadata，所以判据先把降序引用页（上界 `noveltyScanPageLimit`）按分区计数，再逐条 `GetEvent` 水合读谱系，**命中即停**；一次判据只扫一遍，digest 复用同一份证据。
+- **回切连续**：`lastUserInput` 在外部形态下按同一条注入规则继续更新却不参与判定，保留理由（移除观察面回 in-loop 时输入侧语义不需要任何迁移）固化在注释里——这条注释是防"被当死代码删除"的护栏。
+- **产出落自身分区**：外部形态的经验卡片/综述是写进**自己**分区事实链的普通事件，不写 compaction 事件、不改任何被观察分区的状态；它对目标上下文的影响只经"目标自然折叠吸收共享事实链里的新事件"间接发生。
+- **取数面与授权**：观察面缺省回落 `memory.read_namespaces`，装配期校验 `observed ⊆ read`，未授权分区**具名拒绝启动**（查询层 default-nothing，越界只能靠装配强制，见 [记忆篇 13.1](../memory/memory-architecture.md#read-paths)）。
+- **投递缝与热更归属**：产出回流别起第二通道，裁决表见 [持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility) 内的投递缝一节；`observed_namespaces`/`deliver_to` 在构造期读取，随 meditation 块整体参与组织指纹，改即**换代**，见 [组织热更](../platform/org-hot-reload.md#fingerprint)。
+
 <a id="package-layout"></a>
 ## 三、包与文件结构（分包后）
 
@@ -310,7 +331,7 @@ graph TB
 | `trace.go` | turn root span（`tagent.turn`）开/关与属性（trigger_source/chat_id/event_sources）；task_settled span link | 无（生产扩展） |
 | `context_manager.go` | 粘合层：消息构建 + 压缩编排 + Flow 执行 + 统一 Runner + Attribution/OriginSpawner 绑定 | `OnEvents` + `ModelCompletion` |
 | `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
-| `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest（PromptSource 为 prompt.Getter） | 无（生产扩展） |
+| `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest（PromptSource 为 prompt.Getter）；两形态共用一个 manager，观察面是否非空是唯一形态开关（§2.14） | 无（生产扩展） |
 | `governance/` | GovernanceGate 决策管线（classify→critical 批准→goal→budget→记账）、GovernanceTool leaf 装饰器、BudgetManager、ApprovalManager、DenialLedger、RiskClassifier | 无（生产扩展，默认关） |
 | `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、Inbox（durable inbox-v2，受理前落盘；前代 SpillStore 已停用，仅余格式识别与受管重置）、AnchorStore（冥想锚点跨重启） | 无（生产扩展，默认关） |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
@@ -326,7 +347,7 @@ agent 包内 50 个文件按职责分五组，子域已独立成包（`task/` �
 | 事件循环（引擎主干） | `agent.go` 聚合根与 AgentConfig；`event_loop.go` runEventLoop 主循环（Pull 批处理、退避重试、降级 backoff）；`event_bus.go` EventBus + AgentEvent + durable inbox 受理；`inject.go` InjectMessageWithSource 渗透入口；`trace.go` turn span |
 | 上下文管理（LLM 视图） | `context_manager.go` 粘合层（投影/持久化/settle 反馈/bundle 章盖章）；`output_overflow.go` outputCh 宽限与溢出票据；`helpers.go`、`lifecycle.go` 辅助与生命周期；`session.go` 子 agent 调用路径 |
 | 子 Agent | `tool_agent.go`（最大文件）AgentToolWrapper：本地与 A2A 统一封装、重入、交接；`a2a.go` 远程协议 |
-| 冥想 | `meditation.go` 门控触发（novelty + idle）；`meditation_digest.go` digest 组装 |
+| 冥想 | `meditation.go` 门控触发（空闲闸门 + 按形态分叉的新颖性闸门）与外部形态的跨分区判据扫描；`meditation_digest.go` digest 组装（in-loop 任务板／外部观察分区概况）——机制判据见 §2.14 |
 | 可选注入（经 TagentAgent setter） | 退化与可靠性注入经 `agent/reliability`；治理经 `govGate`；自进化经根包 |
 
 顶层模块的层与归属（大扫除第二阶段后）：
@@ -390,7 +411,8 @@ TagentAgent.runEventLoop:
 - `SessionProjection` + `Compactor`：有界投影 + 投影清理
 - `SmartCompressor`：两阶段上下文压缩
 - `MemoryStore` + `MemoryPlugin`：结构化事件存储 + 因果链
-- `MeditationManager`：冥想心跳（双闸门触发：血统无关的空闲闸门 `lastTurnEnd` + 输入侧锚定的新颖性闸门 `lastUserInput`）
+- `MeditationManager`：冥想心跳（双闸门触发：血统无关的空闲闸门 `lastTurnEnd` + 新颖性闸门，后者按形态分两个数据面——in-loop 读输入侧锚 `lastUserInput`，外部观察读被观察分区的持久谱系归因；见 §2.14）
+- `DeliverToAgent`（根包 `delivery.go`）：进程内跨 agent 投递缝——白名单+盲投+未知目标+未运行四道具名拒绝，收口在目标既有的 `InjectMessageWithSource` 入口
 - `TrajectoryRecorder`：LLM 调用轨迹记录
 
 **框架已有（tagent 复用）**：
@@ -542,4 +564,4 @@ tools:
 | **子 Agent handoff 无结构化 schema** | 跨 Agent 传递依赖 `request` 自然语言 + `event_keys` 票据（票据本身是结构化 hex 契约，有真实 LLM 契约测试守护）；但"意图/约束/权限/未决决策"没有结构化载体 | 定义 handoff envelope（intent/constraints/grants 字段）随 external_context 传递 |
 | **迭代上限无收尾轮** | 撞 `max_tool_iterations` 时进行中的工具调用直接丢弃（实机：plan 子 Agent 3m52s 的文档工作被掐断，靠模型自恢复换路完成） | 预算剩 1 轮时注入收尾提示，让模型保存半成品再终止 |
 | **runEventLoop 单 session** | 一个 TagentAgent 实例绑定一个 (user, session) 循环；多会话需多实例 | 会话路由层（多循环共享引擎与存储） |
-| **冥想无内容价值判据** | 双闸门（meditation-idle-gating）已解决自触发永动机：触发需 `now - lastTurnEnd ≥ MinGap`（任意 turn 结束算忙）**且** `lastUserInput > lastMeditation`（上次冥想后有新用户输入）。但新颖性仅看“有无新用户输入”，不看内容价值——用户发一句无关闲聊也会解锁下一轮冥想 | 未消化事件量/★ 卡片密度作为内容价值第三判据 |
+| **冥想无内容价值判据** | 双闸门已解决自触发永动机：触发需 `now - lastTurnEnd ≥ MinGap`（任意 turn 结束算忙）**且**新颖性门打开。两形态的新颖性门都只回答"有没有新东西"，不回答"新东西值不值得反思"——in-loop 看"上次冥想后有无新用户输入"，外部观察看"水位后有无非自管新事件"，一句无关闲聊或一条低价值任务事件同样解锁下一轮 | 未消化事件量/★ 卡片密度作为内容价值第三判据（两形态共用同一取数面才不再分叉） |

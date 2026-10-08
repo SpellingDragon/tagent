@@ -7,6 +7,8 @@ it encapsulates agent instantiation and wires cross-boundary dependencies.
 
 本文件是组合根对配置模型的再导出面：模型实体在 config 包，此处别名与薄包装 保持既有的
 
+delivery.go 是组合根的跨 agent 投递面：外部化冥想的产出经授权、寻址与具名拒绝，
+
 Package tagent — ToolRegistry wraps the global tool registration maps from
 agent/tool_agent.go and provides a unified interface for:
   - Registering built-in tools (exec + knowledge/recall sub-tools)
@@ -34,11 +36,35 @@ const ToolKindAgent = config.ToolKindAgent
 const ToolKindTool = config.ToolKindTool
     ToolKindTool 常量别名：直接实现 CallableTool 的工具引用种类。
 
+VARIABLES
+
+var ErrDeliveryBlindTarget = errors.New("tagent: delivery target partition is outside the sender's observation surface")
+    ErrDeliveryBlindTarget 表示白名单目标的分区落在投递方观察面之外：投递方没观察过它。
+
+var ErrDeliveryNotAllowed = errors.New("tagent: delivery is not authorized by the sender's deliver_to allowlist")
+    ErrDeliveryNotAllowed 表示投递未获授权：目标名不在投递方的 deliver_to 白名单内，空白名单拒绝一切。
+
+var ErrDeliveryTargetNotRunning = errors.New("tagent: delivery target's persistent loop is not running")
+    ErrDeliveryTargetNotRunning 表示目标常驻但其持久循环未运行，错误携带目标名与循环状态。
+
+var ErrUnknownDeliveryTarget = errors.New("tagent: delivery target is not in the process resident table")
+    ErrUnknownDeliveryTarget 表示目标名不在本进程常驻表：寻址面只覆盖同进程装配出的 agent。
+
 FUNCTIONS
 
 func DefaultPromptsFS() embed.FS
     DefaultPromptsFS returns the embedded framework default prompts. The tree is
     rooted at DefaultPromptsPrefix (a prompt file is e.g. recall_tool_desc.md).
+
+func DeliverToAgent(from *agent.TagentAgent, targetAgent, sessionID string, msg model.Message) error
+    DeliverToAgent 把一条产出从投递方 agent 送进目标 agent 的 mailbox，谱系固定为 meditation。
+
+      - 目标名必须属于投递方的 deliver_to 白名单；白名单缺省为空，拒绝一切投递。
+      - 白名单目标的分区必须属于投递方观察面，盲投具名拒绝。
+      - 寻址只走同进程常驻表：未知目标具名拒绝，不发生任何网络调用。
+      - 目标循环未运行只返回错误：不起新 Run、不落盘等待、不静默丢弃。
+      - 成功语义是已进入 mailbox；与用户输入同批时被移除是合法结局，不构成投递失败。
+      - 消息自带来源头（来源 agent 与目标会话），目标无需回查即可理解来源。
 
 func New(cfg Config, opts ...Option) (*agent.TagentAgent, error)
     New creates a fully-wired TagentAgent from declarative Config plus runtime

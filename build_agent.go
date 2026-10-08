@@ -467,13 +467,36 @@ func assembleAgentConfig(
 		if cfg.Reliability.MeditationAnchorDir != "" {
 			meditationAnchorPath = filepath.Join(cfg.Reliability.MeditationAnchorDir, name+".json")
 		}
+		observed := acfg.Meditation.ObservedNamespaces
+		if len(observed) == 0 {
+			observed = acfg.Memory.ReadNamespaces
+		}
+		authorized := make(map[int]bool, len(acfg.Memory.ReadNamespaces))
+		for _, ns := range acfg.Memory.ReadNamespaces {
+			authorized[memory.PartitionIDFromName(ns)] = true
+		}
+		for _, ns := range observed {
+			if ns == "" {
+				continue
+			}
+			if !authorized[memory.PartitionIDFromName(ns)] {
+				return nil, fmt.Errorf(
+					"agent %q: meditation.observed_namespaces %q is not authorized by memory.read_namespaces",
+					name, ns)
+			}
+		}
+		if err := validateDeliverySurface(name, observed, acfg.Meditation.DeliverTo); err != nil {
+			return nil, err
+		}
 		agentCfg.Meditation = agent.MeditationConfig{
-			Enabled:      true,
-			Interval:     interval,
-			MinGap:       minGap,
-			PromptText:   promptText,
-			PromptSource: meditationPromptSource,
-			AnchorPath:   meditationAnchorPath,
+			Enabled:            true,
+			Interval:           interval,
+			MinGap:             minGap,
+			PromptText:         promptText,
+			PromptSource:       meditationPromptSource,
+			AnchorPath:         meditationAnchorPath,
+			ObservedNamespaces: observed,
+			DeliverTo:          acfg.Meditation.DeliverTo,
 		}
 		if hintTracker != nil {
 			tracker := hintTracker
@@ -514,6 +537,10 @@ func wireAgent(
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: create tagent agent: %w", name, err)
+	}
+
+	if agentCfg.Meditation.Enabled {
+		registerDeliveryAuthority(ta, agentCfg.Meditation)
 	}
 
 	if actionTool != nil {
@@ -559,7 +586,7 @@ func wireAgent(
 
 	if hintTracker != nil {
 		hintTracker.SetOnHint(func(pid, count int) {
-			ta.InjectMessageWithSource("consolidation_hint", model.Message{
+			ta.InjectMessageWithSource(tagentevent.LineageConsolidationHint, model.Message{
 				Role: model.RoleUser,
 				Content: fmt.Sprintf("[consolidation_hint] 本分区已累计 %d 个边界事件（用户意图/任务产出）未做巩固。"+
 					"若其中有值得沉淀的经验、约束或事实，可用 memory_consolidate 巩固（源事件 key 见近期时间线卡片，"+

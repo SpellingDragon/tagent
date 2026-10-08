@@ -6,8 +6,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +47,33 @@ func TestNewMeditationManager(t *testing.T) {
 	require.NotNil(t, mgr)
 	assert.Equal(t, cfg, mgr.cfg)
 	assert.Equal(t, inj, mgr.injector)
+}
+
+// TestMeditationManager_ExternalFormReaderWiredAtConstruction 钉住生产装配接线：
+//   - 外部形态（观察面非空）构造期注入事实链读缝，否则 novelty 门 fail-closed 恒关；
+//   - in-loop 形态（观察面为空）不接 reader，行为与接线引入前一致。
+func TestMeditationManager_ExternalFormReaderWiredAtConstruction(t *testing.T) {
+	mm := newRecordableMockModel(&model.Response{ID: "r", Done: true,
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "ok"}}}})
+
+	ext, err := NewTagentAgent(&TagentConfig{
+		Model: mm, SystemPrompt: "x",
+		Meditation: MeditationConfig{Enabled: true, Interval: time.Hour, MinGap: time.Hour,
+			ObservedNamespaces: []string{"someone"}},
+	})
+	require.NoError(t, err)
+	defer ext.Close()
+	assert.NotNil(t, ext.meditationMgr.noveltyReader,
+		"external form must carry the fact-chain reader from construction; a nil reader keeps the gate closed forever")
+
+	loop, err := NewTagentAgent(&TagentConfig{
+		Model: mm, SystemPrompt: "x",
+		Meditation: MeditationConfig{Enabled: true, Interval: time.Hour, MinGap: time.Hour},
+	})
+	require.NoError(t, err)
+	defer loop.Close()
+	assert.Nil(t, loop.meditationMgr.noveltyReader,
+		"in-loop form must not touch the fact chain: default-off stays byte-identical")
 }
 
 func TestMeditationManager_UpdateAnchors(t *testing.T) {
@@ -349,7 +379,7 @@ func TestMeditationManager_buildMeditationMessage(t *testing.T) {
 	mgr := NewMeditationManager(cfg, inj)
 
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	msg := mgr.buildMeditationMessage(now, time.Hour)
+	msg := mgr.buildMeditationMessage(now, time.Hour, nil)
 
 	assert.Equal(t, model.RoleUser, msg.Role)
 	assert.Contains(t, msg.Content, "[meditation]")
@@ -367,7 +397,7 @@ func TestMeditationManager_buildMeditationMessage_WithLastMeditation(t *testing.
 	mgr.lastMeditation.Store(lastMed.UnixMilli())
 
 	now := time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC)
-	msg := mgr.buildMeditationMessage(now, time.Hour)
+	msg := mgr.buildMeditationMessage(now, time.Hour, nil)
 
 	assert.Contains(t, msg.Content, lastMed.Format("2006-01-02 15:04:05"))
 	assert.NotContains(t, msg.Content, "首次冥想")
@@ -779,4 +809,557 @@ func TestRetention_ReceiptedSweepReleasesLease(t *testing.T) {
 	require.Empty(t, got, "a receipted envelope must be Ack-skipped, never re-executed")
 	require.False(t, store.IsKeyProtected(factKey), "receipted sweep MUST release the fact original (§2.8, no lease leak)")
 	require.False(t, store.IsKeyProtected(receiptKey), "receipted sweep MUST release the receipt original")
+}
+
+// fakeNoveltyReader is the external form's fact-chain double. It answers the way the
+// stores do: partition filter, inclusive StartTime lower bound, timestamp ordering,
+// and a Limit that truncates the page. References never carry metadata, so lineage
+// only becomes visible after GetEvent.
+type fakeNoveltyReader struct {
+	mu sync.Mutex
+	// events holds the fact chain in insertion order.
+	events []*memory.FullEvent
+	// queries records every QueryOptions the gate issued, in order.
+	queries []memory.QueryOptions
+	// hydrated counts GetEvent calls, the cost the early stop bounds.
+	hydrated int
+	// looseStartTime drops the StartTime bound, the shape of a store that answers
+	// the whole window and leaves the watermark to the decision side.
+	looseStartTime bool
+	// drift rewires a hydrated event's partition while its reference keeps the
+	// declared one, the shape of a store whose two faces disagree.
+	drift map[int64]int
+	// queryErr fails the read face.
+	queryErr error
+}
+
+func (f *fakeNoveltyReader) add(namespace string, at time.Time, lineage, summary string) *memory.FullEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pid := memory.PartitionIDFromName(namespace)
+	ts := at.UnixMilli()
+	fe := &memory.FullEvent{
+		EventKey:     memory.NewSnowflakeEventKey(pid, ts),
+		PartitionID:  pid,
+		EventType:    tagentevent.TypeExternalInput,
+		EventSummary: summary,
+		Timestamp:    ts,
+		Metadata:     map[string]string{},
+	}
+	if lineage != "" {
+		fe.Metadata[tagentevent.MetaKeyTriggerSource] = lineage
+	}
+	f.events = append(f.events, fe)
+	return fe
+}
+
+func (f *fakeNoveltyReader) QueryEvents(q memory.QueryOptions) ([]memory.EventReference, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queries = append(f.queries, q)
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	asked := map[int]bool{}
+	for _, id := range q.PartitionIDs {
+		asked[id] = true
+	}
+	var refs []memory.EventReference
+	for _, fe := range f.events {
+		if len(asked) > 0 && !asked[fe.PartitionID] {
+			continue
+		}
+		if !f.looseStartTime && q.StartTime > 0 && fe.Timestamp < q.StartTime {
+			continue
+		}
+		refs = append(refs, memory.EventReference{
+			EventKey: fe.EventKey, PartitionID: fe.PartitionID, EventType: fe.EventType,
+			EventSummary: fe.EventSummary, Timestamp: fe.Timestamp,
+		})
+	}
+	newestFirst := q.OrderBy == "timestamp_desc"
+	sort.SliceStable(refs, func(i, j int) bool {
+		if newestFirst {
+			return refs[i].Timestamp > refs[j].Timestamp
+		}
+		return refs[i].Timestamp < refs[j].Timestamp
+	})
+	if q.Limit > 0 && len(refs) > q.Limit {
+		refs = refs[:q.Limit]
+	}
+	return refs, nil
+}
+
+func (f *fakeNoveltyReader) GetEvent(key int64) (*memory.FullEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hydrated++
+	for _, fe := range f.events {
+		if fe.EventKey == key {
+			if to, ok := f.drift[key]; ok {
+				shifted := *fe
+				shifted.PartitionID = to
+				return &shifted, nil
+			}
+			return fe, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeNoveltyReader) counts() (queries, hydrated int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.queries), f.hydrated
+}
+
+func (f *fakeNoveltyReader) queryAt(i int) (memory.QueryOptions, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i >= len(f.queries) {
+		return memory.QueryOptions{}, false
+	}
+	return f.queries[i], true
+}
+
+// newNoveltyManager builds a manager over the given observation surface, already idle
+// past MinGap so only the novelty gate can stop a fire.
+func newNoveltyManager(reader NoveltyReader, namespaces ...string) (*MeditationManager, *mockMessageInjector) {
+	inj := &mockMessageInjector{}
+	mgr := NewMeditationManager(MeditationConfig{
+		MinGap:             time.Millisecond,
+		PromptText:         "reflect",
+		ObservedNamespaces: namespaces,
+	}, inj)
+	if reader != nil {
+		mgr.SetNoveltyReader(reader)
+	}
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	return mgr, inj
+}
+
+// TestMeditationManager_CrossPartitionNoveltyGate 钉住 外部形态的新鲜度门只读被观察分区的事实链。
+// - 观察面外的分区永不参与；引用页无谱系，判定必须等水合。
+// - 命中即早停，读取失败或没接事实链则门保持关闭，绝不回落到注入锚。
+func TestMeditationManager_CrossPartitionNoveltyGate(t *testing.T) {
+	t.Run("observed partition opens the gate", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "用户追问了召回结果")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		require.Len(t, inj.messages, 1, "a non-self-managed event in an observed partition is novelty")
+		assert.Contains(t, inj.messages[0].Content, "观察分区概况")
+		assert.Contains(t, inj.messages[0].Content, "用户追问了召回结果")
+
+		q, ok := reader.queryAt(0)
+		require.True(t, ok, "the gate must read the fact chain")
+		assert.Zero(t, q.StartTime, "without a watermark the first pass asks for everything since epoch")
+		assert.Equal(t, []int{memory.PartitionIDFromName("recall")}, q.PartitionIDs)
+		assert.Equal(t, noveltyScanPageLimit, q.Limit, "an explicit page bound keeps hydration cost bounded")
+	})
+
+	t.Run("unobserved partition never opens the gate", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("others", time.Now().Add(-time.Minute), "user", "未被授权的分区")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		assert.Empty(t, inj.messages, "the query filter is what keeps an unauthorized partition out of the decision")
+		queries, hydrated := reader.counts()
+		assert.Equal(t, 1, queries)
+		assert.Zero(t, hydrated, "nothing outside the surface is ever hydrated")
+	})
+
+	t.Run("hydrated partition outside the surface is not counted", func(t *testing.T) {
+		reader := &fakeNoveltyReader{drift: map[int64]int{}}
+		late := reader.add("recall", time.Now().Add(-time.Minute), "user", "引用与实体分区不一致")
+		reader.drift[late.EventKey] = memory.PartitionIDFromName("others")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		assert.Empty(t, inj.messages, "a record landing off the observation surface never counts as novelty")
+	})
+
+	t.Run("first hit stops the pass", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		now := time.Now()
+		reader.add("recall", now.Add(-3*time.Minute), "user", "更早的一条")
+		reader.add("recall", now.Add(-2*time.Minute), "user", "再早的一条")
+		reader.add("recall", now.Add(-time.Minute), "task", "最新的一条")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		require.Len(t, inj.messages, 1)
+		_, hydrated := reader.counts()
+		assert.Equal(t, 1, hydrated, "newest-first means one hydration settles the gate")
+		assert.Contains(t, inj.messages[0].Content, "最新的一条")
+	})
+
+	t.Run("observation surface without a reader keeps the gate closed", func(t *testing.T) {
+		mgr, inj := newNoveltyManager(nil, "recall")
+
+		for i := 0; i < 3; i++ {
+			mgr.checkAndMeditate()
+		}
+		assert.Empty(t, inj.messages, "an unreadable fact chain never falls back to the injection anchor")
+	})
+
+	t.Run("read failure keeps the gate closed", func(t *testing.T) {
+		reader := &fakeNoveltyReader{queryErr: errors.New("segment unreadable")}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "本来该触发")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		assert.Empty(t, inj.messages, "a failed read is neither「没有新事」nor「有新事」, so reflection must not act on it")
+	})
+}
+
+// TestMeditationManager_SelfManagedOutputIsNotNovelty 钉住 自管谱系的产出永不重新武装新鲜度门。
+// - 冥想的产出若算新事，静默期里自我供给会烧成永动。
+// - 谱系清单只在 event 包一处，判定处零副本。
+func TestMeditationManager_SelfManagedOutputIsNotNovelty(t *testing.T) {
+	cases := []struct{ name, lineage string }{
+		{"meditation output", tagentevent.LineageMeditation},
+		{"consolidation hint output", tagentevent.LineageConsolidationHint},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &fakeNoveltyReader{}
+			reader.add("recall", time.Now().Add(-time.Minute), tc.lineage, "自管产出")
+			mgr, inj := newNoveltyManager(reader, "recall")
+
+			for i := 0; i < 3; i++ {
+				mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+				mgr.checkAndMeditate()
+			}
+			require.Empty(t, inj.messages, "%s output must not count as novelty", tc.lineage)
+
+			reader.add("recall", time.Now(), "user", "外部真事")
+			mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+			mgr.checkAndMeditate()
+			assert.Len(t, inj.messages, 1, "the gate opens as soon as a non-self-managed event lands")
+		})
+	}
+
+	t.Run("non-self-managed lineage in another observed partition counts", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "task", "另一个分区的工作事件")
+		mgr, inj := newNoveltyManager(reader, "recall", "planner")
+
+		mgr.checkAndMeditate()
+
+		assert.Len(t, inj.messages, 1, "the curator reads other agents' activity, not only human turns")
+	})
+}
+
+// TestMeditationManager_UnknownLineageNotCounted 钉住 trigger_source 缺失或未知按未知谱系处理，不计入新鲜度。
+// - 未知不截断扫描：它之后的候选仍要被水合判定。
+func TestMeditationManager_UnknownLineageNotCounted(t *testing.T) {
+	t.Run("absent key never counts", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "", "入库时没盖章的事件")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		assert.Empty(t, inj.messages, "unattributed events must not drive a cross-domain curator")
+	})
+
+	t.Run("empty value never counts", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		now := time.Now()
+		blank := reader.add("recall", now.Add(-time.Minute), "user", "值被写成空串")
+		blank.Metadata[tagentevent.MetaKeyTriggerSource] = ""
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		assert.Empty(t, inj.messages, `trigger_source="" is unknown lineage, not "user"`)
+	})
+
+	t.Run("unknown does not truncate the scan", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		now := time.Now()
+		reader.add("recall", now.Add(-2*time.Minute), "user", "较早的真事")
+		reader.add("recall", now.Add(-time.Minute), "totally-unknown-source", "最新的未识字谱")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		require.Len(t, inj.messages, 1, "the pass keeps walking past unknown lineage")
+		assert.Contains(t, inj.messages[0].Content, "较早的真事", "the hit is the older genuine one")
+		_, hydrated := reader.counts()
+		assert.Equal(t, 2, hydrated, "both candidates were hydrated")
+	})
+}
+
+// TestMeditationManager_LineageGateIgnoresInjectionAnchor 钉住 外部形态的新鲜度判据只读事实链，注入锚只更新不解锁。
+// - 两条数据面互不越界：用户注入解不开外部门，事实链也不需要注入帮忙。
+// - 事件回调既不写锚点，也不构成判据路径的一部分。
+func TestMeditationManager_LineageGateIgnoresInjectionAnchor(t *testing.T) {
+	t.Run("user injection updates the anchor but never unlocks the external gate", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.UpdateLastUserInput(time.Now())
+		mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+		mgr.checkAndMeditate()
+
+		assert.Greater(t, mgr.lastUserInput.Load(), int64(0), "the injection rule keeps updating the anchor in both forms")
+		assert.Empty(t, inj.messages, "without an observed partition's non-self-managed event the external gate stays closed")
+	})
+
+	t.Run("the fact chain opens the gate with no injection at all", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "被观察分区里的人类输入")
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.checkAndMeditate()
+
+		require.Len(t, inj.messages, 1)
+		assert.Zero(t, mgr.lastUserInput.Load(), "the curator's own agent never received a user turn")
+	})
+
+	t.Run("event callback writes no anchor and issues no fact-chain read", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		mgr := NewMeditationManager(MeditationConfig{
+			MinGap:             time.Millisecond,
+			PromptText:         "reflect",
+			ObservedNamespaces: []string{"recall"},
+		}, &mockMessageInjector{})
+		mgr.SetNoveltyReader(reader)
+		callback := (&TagentAgent{name: "t", meditationMgr: mgr}).makeOnEventCallback()
+
+		for _, source := range []string{"user", "task", tagentevent.LineageMeditation} {
+			evt := trpcEvent.New("inv", "t")
+			evt.Response = &model.Response{Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "out"}}}}
+			evt.StateDelta = map[string][]byte{tagentevent.MetaKeyTriggerSource: []byte(source)}
+			callback(evt)
+		}
+
+		assert.Zero(t, mgr.lastUserInput.Load(), "callback must not arm the novelty gate")
+		assert.Zero(t, mgr.lastTurnEnd.Load(), "callback must not move the idle anchor")
+		assert.Zero(t, mgr.lastMeditation.Load(), "callback must not move the watermark")
+		queries, hydrated := reader.counts()
+		assert.Zero(t, queries, "the decision path holds no callback-side read of lineage")
+		assert.Zero(t, hydrated)
+	})
+
+	t.Run("non-user injection still never arms the anchor in the external form", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		mgr, inj := newNoveltyManager(reader, "recall")
+
+		mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+		for i := 0; i < 3; i++ {
+			mgr.checkAndMeditate()
+		}
+
+		assert.Empty(t, inj.messages)
+		assert.Zero(t, mgr.lastUserInput.Load())
+	})
+}
+
+// TestMeditationManager_WatermarkAdvancesOnFire 钉住 外部形态以 lastMeditation 为 novelty 水位，触发即推进，不另立新锚。
+// - 同一事件不会被计两次；水位之后的新事件重新开门。
+// - 存储侧的下界是包含式，判据侧仍自己再核一遍严格大于。
+func TestMeditationManager_WatermarkAdvancesOnFire(t *testing.T) {
+	reader := &fakeNoveltyReader{}
+	reader.add("recall", time.Now().Add(-time.Minute), "user", "水位之前的真事")
+	mgr, inj := newNoveltyManager(reader, "recall")
+
+	mgr.checkAndMeditate()
+	require.Len(t, inj.messages, 1, "first pass reads from epoch and fires")
+	watermark := mgr.lastMeditation.Load()
+	require.Greater(t, watermark, int64(0))
+
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	assert.Len(t, inj.messages, 1, "a spent event must not stay novelty after the watermark moved")
+
+	second, ok := reader.queryAt(1)
+	require.True(t, ok)
+	assert.Equal(t, watermark+1, second.StartTime, "the strictly-greater watermark is encoded on an inclusive lower bound")
+	assert.Contains(t, inj.messages[0].Content, "首次冥想", "the first fire had no watermark")
+
+	time.Sleep(2 * time.Millisecond)
+	reader.add("recall", time.Now(), "user", "水位之后的新事")
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	require.Len(t, inj.messages, 2, "the gate re-opens on activity past the watermark")
+
+	third, ok := reader.queryAt(2)
+	require.True(t, ok)
+	assert.Equal(t, watermark+1, third.StartTime, "a check reads the window the last fire left behind")
+	assert.Contains(t, inj.messages[1].Content, "水位之后的新事")
+
+	advanced := mgr.lastMeditation.Load()
+	require.Greater(t, advanced, watermark, "the fire moved the watermark")
+	time.Sleep(2 * time.Millisecond)
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+	assert.Len(t, inj.messages, 2, "nothing is new past the moved watermark")
+
+	fourth, ok := reader.queryAt(3)
+	require.True(t, ok)
+	assert.Equal(t, advanced+1, fourth.StartTime, "the next pass starts right after the new watermark")
+
+	t.Run("a store that ignores the bound cannot resurrect a spent event", func(t *testing.T) {
+		stale := &fakeNoveltyReader{}
+		stale.add("recall", time.Now().Add(-time.Hour), "user", "很久以前的一条")
+		m, in := newNoveltyManager(stale, "recall")
+		m.checkAndMeditate()
+		require.Len(t, in.messages, 1)
+
+		stale.looseStartTime = true
+		before, _ := stale.counts()
+		m.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+		m.checkAndMeditate()
+
+		assert.Len(t, in.messages, 1, "the watermark check is the decision's own, not the store's favor")
+		_, hydrated := stale.counts()
+		assert.Equal(t, before+1, hydrated, "the stale reference was re-read and rejected on its timestamp")
+	})
+}
+
+// TestMeditationManager_SwitchbackToInLoopKeepsAnchorSemantics 钉住 清空观察面即回切 in-loop 判据，锚点历史无需迁移。
+// - 回切后判据读注入锚：水位之前的用户输入不构成新颖性。
+// - in-loop 判据从不读事实链。
+func TestMeditationManager_SwitchbackToInLoopKeepsAnchorSemantics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "anchors.json")
+	externalStore, err := reliability.NewAnchorStore(path)
+	require.NoError(t, err)
+
+	reader := &fakeNoveltyReader{}
+	reader.add("recall", time.Now().Add(-time.Minute), "user", "外部事实上的一刻")
+	ext, extInj := newNoveltyManager(reader, "recall")
+	ext.SetAnchorStore(externalStore)
+	ext.UpdateLastUserInput(time.Now().Add(-30 * time.Second))
+	ext.checkAndMeditate()
+
+	require.Len(t, extInj.messages, 1, "the external form fired on the fact chain")
+	require.Greater(t, ext.lastUserInput.Load(), int64(0), "the injection rule kept running under the external form")
+	externalQueries, _ := reader.counts()
+	require.Greater(t, externalQueries, 0)
+
+	restoredStore, err := reliability.NewAnchorStore(path)
+	require.NoError(t, err)
+	inj := &sourceInjector{}
+	loop := NewMeditationManager(MeditationConfig{MinGap: time.Millisecond, PromptText: "reflect"}, inj)
+	loop.SetAnchorStore(restoredStore)
+	loop.SetNoveltyReader(reader)
+
+	loop.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	loop.checkAndMeditate()
+	assert.Empty(t, inj.entries, "back in-loop, the pre-watermark user input read by the anchor gate must not re-fire")
+
+	time.Sleep(2 * time.Millisecond)
+	loop.UpdateLastUserInput(time.Now())
+	loop.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	loop.checkAndMeditate()
+
+	require.Len(t, inj.entries, 1, "a user turn newer than the restored watermark arms the in-loop gate again")
+	assert.Equal(t, "meditation", inj.entries[0].source)
+	loopQueries, _ := reader.counts()
+	assert.Equal(t, externalQueries, loopQueries, "the in-loop form never touches the fact chain")
+	assert.NotContains(t, inj.entries[0].msg.Content, "观察分区概况")
+}
+
+// TestMeditationManager_ObservationSurfaceResolution 钉住 观察面按分区身份去重、按声明顺序保留，空串与重复不构成形态切换。
+// - DeliverTo 在本层只承载不消费，投递门的语义属装配层。
+func TestMeditationManager_ObservationSurfaceResolution(t *testing.T) {
+	cases := []struct {
+		name       string
+		observed   []string
+		deliverTo  []string
+		wantNames  []string
+		wantObserv bool
+	}{
+		{"unset stays in-loop", nil, nil, nil, false},
+		{"empty entries resolve to nothing", []string{"", ""}, nil, nil, false},
+		{"duplicate namespace collapses", []string{"recall", "recall"}, nil, []string{"recall"}, true},
+		{"declared order survives", []string{"recall", "planner"}, []string{"worker"}, []string{"recall", "planner"}, true},
+		{"deliver list alone does not switch form", nil, []string{"worker"}, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewMeditationManager(MeditationConfig{
+				ObservedNamespaces: tc.observed,
+				DeliverTo:          tc.deliverTo,
+			}, &mockMessageInjector{})
+
+			var got []string
+			for _, p := range mgr.observed {
+				assert.Equal(t, memory.PartitionIDFromName(p.name), p.id, "identity maps to partition through the single derivation axis")
+				got = append(got, p.name)
+			}
+			assert.Equal(t, tc.wantNames, got)
+			assert.Equal(t, tc.wantObserv, mgr.observing())
+			assert.Equal(t, tc.deliverTo, mgr.cfg.DeliverTo, "the manager carries the delivery whitelist as configured")
+		})
+	}
+}
+
+// TestMeditationManager_InLoopFormNeverReadsTheFactChain 钉住 观察面为空时 in-loop 判据与摘要逐字保持既有形态。
+// - 事实链双件已接入也不被查询、不被水合。
+func TestMeditationManager_InLoopFormNeverReadsTheFactChain(t *testing.T) {
+	reader := &fakeNoveltyReader{}
+	reader.add("recall", time.Now().Add(-time.Minute), "user", "隔壁分区的事")
+	mgr, inj := newNoveltyManager(reader)
+
+	mgr.UpdateLastUserInput(time.Now().Add(-2 * time.Second))
+	mgr.UpdateLastTurnEnd(time.Now().Add(-time.Second))
+	mgr.checkAndMeditate()
+
+	require.Len(t, inj.messages, 1)
+	queries, hydrated := reader.counts()
+	assert.Zero(t, queries, "an empty observation surface selects the anchor face, not both")
+	assert.Zero(t, hydrated)
+	assert.NotContains(t, inj.messages[0].Content, "观察分区概况")
+}
+
+// TestMeditationManager_ExternalScanConcurrentWithAnchorUpdates 钉住 外部判据的读取与三锚点更新可并发，-race 下无撕裂。
+// - 锚点锁仍序列化「更新 + 持久化快照」。
+func TestMeditationManager_ExternalScanConcurrentWithAnchorUpdates(t *testing.T) {
+	reader := &fakeNoveltyReader{}
+	reader.add("recall", time.Now().Add(-time.Minute), "user", "并发窗口里的一条真事")
+	mgr, inj := newNoveltyManager(reader, "recall")
+	mgr.SetTaskController(&fakeTaskController{})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if i%2 == 0 {
+					mgr.UpdateLastUserInput(time.Now())
+				} else {
+					mgr.UpdateLastTurnEnd(time.Now())
+				}
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 20; j++ {
+			mgr.checkAndMeditate()
+		}
+	}()
+	wg.Wait()
+
+	assert.Greater(t, mgr.lastUserInput.Load(), int64(0))
+	assert.Greater(t, mgr.lastTurnEnd.Load(), int64(0))
+	queries, hydrated := reader.counts()
+	assert.Greater(t, queries, 0, "the external form kept reading the fact chain throughout")
+	assert.GreaterOrEqual(t, hydrated, 0)
+	for _, msg := range inj.messages {
+		assert.True(t, strings.HasPrefix(msg.Content, "[meditation]"), "every fire stayed a well-formed meditation")
+	}
 }
