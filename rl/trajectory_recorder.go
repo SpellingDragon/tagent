@@ -75,6 +75,10 @@ type TrajectoryRecorder struct {
 	batchIndex int
 	endpoint   string
 
+	// capture 是可选的 v2 决策采集层（D14-S3）：nil ⇒ 完全走 v1 通路，队列、写协程
+	// 与落盘字节都和未引入采集时一致。它只在构造期装配，不做热更。
+	capture *capturePipeline
+
 	recordCh chan *TrajectoryRecord
 	// wg 等后台写协程退出。
 	wg sync.WaitGroup
@@ -87,26 +91,18 @@ type TrajectoryRecorder struct {
 // channelBufferSize controls how many records can be buffered before dropping.
 const channelBufferSize = 256
 
-// NewTrajectoryRecorder creates a TrajectoryRecorder wrapping the given model.
-// The trajectoryDir will be created if it does not exist.
-func NewTrajectoryRecorder(inner model.Model, trajectoryDir, modelEndpoint string) (*TrajectoryRecorder, error) {
-	if err := os.MkdirAll(trajectoryDir, 0o755); err != nil {
-		return nil, err
-	}
-
-	tr := &TrajectoryRecorder{
-		inner:    inner,
-		dir:      trajectoryDir,
-		endpoint: modelEndpoint,
-		recordCh: make(chan *TrajectoryRecord, channelBufferSize),
-	}
-
+// logTrajectoryInit 打印 v1 的初始化日志行。它留在这个文件里，是为了让关闭采集时日志的
+// 源文件位置仍是 trajectory_recorder.go：采集层不得挪动 v1 的可观测面。
+func logTrajectoryInit(trajectoryDir, modelEndpoint string) {
 	log.Infof("[TrajectoryRecorder] initialized: dir=%s endpoint=%s", trajectoryDir, modelEndpoint)
+}
 
-	tr.wg.Add(1)
-	go tr.writeLoop()
-
-	return tr, nil
+// NewTrajectoryRecorder creates a TrajectoryRecorder wrapping the given model.
+// The trajectoryDir will be created if it does not exist. It is the v1 entry
+// point: no optional layer is installed, so the behaviour is what it was before
+// the capture layer existed.
+func NewTrajectoryRecorder(inner model.Model, trajectoryDir, modelEndpoint string) (*TrajectoryRecorder, error) {
+	return NewTrajectoryRecorderWithOptions(inner, trajectoryDir, modelEndpoint)
 }
 
 // SetSessionInfo updates the current session context for trajectory recording.
@@ -177,6 +173,9 @@ func (tr *TrajectoryRecorder) Close() error {
 	close(tr.recordCh)
 	tr.closeMu.Unlock()
 	tr.wg.Wait()
+	if tr.capture != nil {
+		tr.capture.close()
+	}
 	return nil
 }
 
@@ -233,6 +232,11 @@ func (tr *TrajectoryRecorder) recordGenerateContent(ctx context.Context, inner m
 
 	modelName := inner.Info().Name
 	traceID, spanID := traceIDsFromCtx(ctx)
+
+	if tr.capture != nil {
+		return tr.captureGenerateContent(ctx, inner, request, userID, sessionID, batchIdx,
+			endpoint, modelName, traceID, spanID, start)
+	}
 
 	respCh, err := inner.GenerateContent(ctx, request)
 	// A nil channel with a nil error is a legal upstream shape (the trpc

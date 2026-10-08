@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/config"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
@@ -2205,4 +2207,251 @@ func TestTestStore_IsolatesPerCase(t *testing.T) {
 		_, err := os.Stat(filepath.Join(bPath, "marker"))
 		require.Error(t, err, "case B must not observe case A's bytes")
 	})
+}
+
+// TestModelResolution_EndpointIdentity 钉住 模型解析缓存键必须含实例的实际身份。
+// - 别名换了 api_endpoint、或别名背后的实际协议换了：必须解析出新实例，命中旧缓存就是拿旧端点服务新配置。
+// - 身份未变仍复用同一实例：加宽键不等于把缓存打碎。
+// - 凭据的值不参与身份：换 env 内容命中同一实例，键里绝不落凭据原文。
+// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
+func TestModelResolution_EndpointIdentity(t *testing.T) {
+	t.Setenv("TAGENT_IDENTITY_TEST_KEY", "key-one")
+
+	rc := &runtimeConfig{model: &stubModel{name: "parent"}}
+	cfgFor := func(protocol, endpoint string) Config {
+		return Config{
+			Provider: "p1",
+			Providers: map[string]ProviderConfig{
+				"p1": {Provider: protocol, APIEndpoint: endpoint, APIKeyEnv: "TAGENT_IDENTITY_TEST_KEY"},
+			},
+			Agents: map[string]AgentConfig{"a": {Model: "gpt-4", Provider: "p1"}},
+		}
+	}
+
+	one := cfgFor("openai", "https://api-one.example.com/v1")
+	first := rc.resolveAgentModel("a", one.Agents["a"], one)
+	require.NotEqual(t, "parent", first.Info().Name, "precondition: the registry instance is used, not the injected fallback")
+
+	two := cfgFor("openai", "https://api-two.example.com/v1")
+	second := rc.resolveAgentModel("a", two.Agents["a"], two)
+	require.NotSame(t, first, second, "a same-name provider whose api_endpoint changed must not be served the cached old instance")
+
+	three := cfgFor("anthropic", "https://api-one.example.com/v1")
+	third := rc.resolveAgentModel("a", three.Agents["a"], three)
+	require.NotSame(t, first, third, "the actual protocol is part of the identity, not only the alias spelling")
+	require.NotSame(t, second, third)
+
+	require.Same(t, first, rc.resolveAgentModel("a", one.Agents["a"], one),
+		"the same identity still resolves to one instance — a wider key must not fragment the cache")
+
+	t.Setenv("TAGENT_IDENTITY_TEST_KEY", "key-two")
+	require.Same(t, first, rc.resolveAgentModel("a", one.Agents["a"], one),
+		"rotating the credential VALUE must not re-resolve: the key carries the env NAME, never its content")
+}
+
+// captureTestConfig assembles a single-agent config that dumps trajectories to dir.
+func captureTestConfig(dir string, cap config.CaptureBlock) Config {
+	return Config{
+		Entry: "main",
+		Agents: map[string]AgentConfig{"main": {
+			SystemPrompt: PromptConfig{Inline: "capture"},
+			Memory:       MemoryConfig{Type: "memory"},
+			Compress:     CompressConfig{SummaryTimeoutSeconds: 7},
+		}},
+		TrajectoryDump:    true,
+		TrajectoryDir:     dir,
+		TrajectoryCapture: cap,
+	}
+}
+
+// firstJSONLLine returns the first record line the recorder wrote under dir.
+func firstJSONLLine(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+		require.NoError(t, rerr)
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.TrimSpace(line) != "" {
+				return line
+			}
+		}
+	}
+	require.FailNowf(t, "no trajectory record written", "no .jsonl record found under %s", dir)
+	return ""
+}
+
+// captureFileMode returns the permission bits of the first record file under dir.
+func captureFileMode(t *testing.T, dir string) os.FileMode {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		fi, serr := os.Stat(filepath.Join(dir, e.Name()))
+		require.NoError(t, serr)
+		return fi.Mode().Perm()
+	}
+	require.FailNowf(t, "no trajectory file", "no .jsonl file under %s", dir)
+	return 0
+}
+
+// TestTrajectoryCapture_Configuration 钉住 trajectory_capture 的声明在组合根真正装到采集层上。
+// - enabled 装出 v2 层：记录形状、owner 归因桥、私有权限面都跟着变。
+// - 不声明时 v1 路径逐字节不变：无 v2 字段、v1 权限面。
+// - 限额由采集层执行：max_record_bytes 越小，越界被点名，而不是静默收下。
+// - owner 桥只交归因里真有的键；capture_namespace 是装配期分区，组合根不伪造。
+// - compress.summary_timeout_seconds 与 capture 开关透传到执行配置面。
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
+func TestTrajectoryCapture_Configuration(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture")
+	entry, err := New(captureTestConfig(dir, config.CaptureBlock{Enabled: true, MaxRecordBytes: 1 << 20}),
+		WithModel(&factoryMockModel{}))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	tr := entry.TrajectoryRecorder()
+	require.NotNil(t, tr, "trajectory_dump installs the recorder")
+	require.True(t, tr.CaptureEnabled(), "trajectory_capture.enabled must install the v2 layer")
+	require.NotEmpty(t, tr.CaptureRunID(), "the capture run identity exists from construction, not lazily")
+	ec := entry.ExecutorConfig()
+	require.True(t, ec.CaptureEnabled, "the capture switch reaches the execution face (the agent only installs an association scope when it is on)")
+	require.Equal(t, 7, ec.SummaryTimeoutSeconds, "compress.summary_timeout_seconds reaches the execution face")
+
+	ctx := plugin.WithAttribution(context.Background(), plugin.Attribution{
+		tagentevent.MetaKeyRolloutID:     "rollout-1",
+		tagentevent.MetaKeyBundleID:      "bundle-1",
+		tagentevent.MetaKeyTriggerSource: "cron",
+	})
+	ch, cerr := tr.GenerateContent(ctx, &model.Request{Messages: []model.Message{model.NewUserMessage("hello capture")}})
+	require.NoError(t, cerr)
+	for range ch {
+	}
+	require.NoError(t, tr.Close())
+
+	rec := map[string]any{}
+	require.NoError(t, json.Unmarshal([]byte(firstJSONLLine(t, dir)), &rec))
+	require.EqualValues(t, 2, rec["schema_version"], "the enabled layer writes the v2 record shape")
+	require.Equal(t, "sdk_request", rec["capture_scope"])
+	owner, isMap := rec["owner"].(map[string]any)
+	require.True(t, isMap, "a v2 record carries an owner block")
+	require.Equal(t, "rollout-1", owner["root_session_id"], "the owner bridge hands attribution rollout_id in as the root session")
+	require.Equal(t, "rollout-1", owner["session_id"], "and as this call's session, exactly as the agent-side owner attrs spell it")
+	require.Equal(t, "bundle-1", owner["bundle_id"])
+	require.Equal(t, "cron", owner["trigger_source"])
+	require.Empty(t, owner["capture_namespace"], "capture_namespace is an assembly-time partition: the root bridge never fabricates it")
+
+	require.Equal(t, os.FileMode(0o700), mustMode(t, dir), "the capture directory is private from creation")
+	require.Equal(t, os.FileMode(0o600), captureFileMode(t, dir), "capture files are private from creation")
+
+	dirOff := filepath.Join(t.TempDir(), "v1")
+	entryOff, oerr := New(captureTestConfig(dirOff, config.CaptureBlock{}), WithModel(&factoryMockModel{}))
+	require.NoError(t, oerr)
+	defer func() { _ = entryOff.Close() }()
+	trOff := entryOff.TrajectoryRecorder()
+	require.NotNil(t, trOff)
+	require.False(t, trOff.CaptureEnabled(), "an absent trajectory_capture block stays on the v1 path")
+	require.False(t, entryOff.ExecutorConfig().CaptureEnabled)
+
+	chOff, oerr2 := trOff.GenerateContent(context.Background(), &model.Request{Messages: []model.Message{model.NewUserMessage("hello v1")}})
+	require.NoError(t, oerr2)
+	for range chOff {
+	}
+	require.NoError(t, trOff.Close())
+	lineOff := firstJSONLLine(t, dirOff)
+	require.NotContains(t, lineOff, "schema_version", "capture off must not introduce any v2 field")
+	require.NotContains(t, lineOff, "capture_scope")
+	require.Equal(t, os.FileMode(0o755), mustMode(t, dirOff), "the v1 directory mode is untouched")
+	require.Equal(t, os.FileMode(0o644), captureFileMode(t, dirOff), "the v1 file mode is untouched")
+
+	dirCap := filepath.Join(t.TempDir(), "capped")
+	entryCap, cerr3 := New(captureTestConfig(dirCap, config.CaptureBlock{Enabled: true, MaxRecordBytes: 2048}),
+		WithModel(&factoryMockModel{}))
+	require.NoError(t, cerr3)
+	defer func() { _ = entryCap.Close() }()
+	trCap := entryCap.TrajectoryRecorder()
+	require.True(t, trCap.CaptureEnabled())
+	chCap, cerr4 := trCap.GenerateContent(context.Background(), &model.Request{
+		Messages: []model.Message{model.NewUserMessage(strings.Repeat("bulk payload ", 2000))},
+	})
+	require.NoError(t, cerr4)
+	for range chCap {
+	}
+	require.NoError(t, trCap.Close())
+	require.GreaterOrEqual(t, trCap.CaptureStats().Oversized, int64(1),
+		"max_record_bytes must bound the serialised record — a declared limit that nothing enforces is a silent no-op")
+	capped := firstJSONLLine(t, dirCap)
+	require.Contains(t, capped, "record.truncated_max_bytes",
+		"the response-side loss is named in the record instead of silently swallowed")
+	require.Contains(t, capped, "record.request_stubbed_after_oversize",
+		"the cap is per SERIALIZED record: a request-side payload alone over the cap must be stubbed too, not written whole past the limit")
+	require.Empty(t, trCap.CaptureStats().OversizedDropped, "the stubbed skeleton fits the cap, so it lands rather than being dropped")
+}
+
+// mustMode returns the permission bits of path.
+func mustMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	return fi.Mode().Perm()
+}
+
+// faceCarryYAML renders a single-agent org with the v2 capture block and a synchronous
+// summary timeout installed, so a structural publish can be observed against the face.
+func faceCarryYAML(dir, prompt string) string {
+	return "entry: main\n" +
+		"agents:\n" +
+		"  main:\n" +
+		"    system_prompt:\n      inline: " + fmt.Sprintf("%q", prompt) + "\n" +
+		"    compress:\n      summary_timeout_seconds: 7\n" +
+		"    memory:\n      type: memory\n" +
+		"trajectory_dump: true\n" +
+		"trajectory_dir: " + fmt.Sprintf("%q", dir) + "\n" +
+		"trajectory_capture:\n  enabled: true\n  max_record_bytes: 1048576\n"
+}
+
+// TestFaceCarryForward_AfterStructuralPublish 钉住 结构发布重建出来的执行面仍带着实际安装值：
+// - 换代后的面继续报告非零 summary_timeout_seconds 与 capture_enabled，不回落成零值；
+// - 面上的采集开关与 recorder 实际装上的状态同读一致，不存在两份真相。
+// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
+func TestFaceCarryForward_AfterStructuralPublish(t *testing.T) {
+	dir := t.TempDir()
+	recDir := filepath.Join(dir, "capture")
+	yamlPath := filepath.Join(dir, "tagent.yaml")
+	tick := time.Now()
+	write := func(content string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(yamlPath, []byte(content), 0o600))
+		tick = tick.Add(2 * time.Second)
+		require.NoError(t, os.Chtimes(yamlPath, tick, tick))
+	}
+
+	write(faceCarryYAML(recDir, "capture A"))
+	cfg, err := LoadConfig(yamlPath)
+	require.NoError(t, err)
+	entry, err := New(*cfg, WithModel(&factoryMockModel{}), WithConfigPath(yamlPath))
+	require.NoError(t, err)
+	defer func() { _ = entry.Close() }()
+
+	tr := entry.TrajectoryRecorder()
+	require.NotNil(t, tr, "trajectory_dump installs the recorder")
+	require.True(t, tr.CaptureEnabled(), "precondition: the declared capture block is installed")
+	require.True(t, entry.ExecutorConfig().CaptureEnabled, "precondition: the startup face carries it")
+	require.Equal(t, 7, entry.ExecutorConfig().SummaryTimeoutSeconds, "precondition: the startup face carries the timeout")
+
+	write(faceCarryYAML(recDir, "capture B"))
+	entry.CheckOrgReload()
+	require.EqualValues(t, 1, diagInt64(t, entry.OrgDiagnostics(), "generation"),
+		"precondition: the prompt edit published a new generation")
+
+	face := entry.ExecutorConfig()
+	require.Truef(t, face.CaptureEnabled, "a regenerated face must still carry the installed capture state: %+v", face)
+	require.Equalf(t, 7, face.SummaryTimeoutSeconds, "a regenerated face must still carry the summary timeout: %+v", face)
+	require.Equal(t, tr.CaptureEnabled(), face.CaptureEnabled, "the face and the recorder are one reading, not two truths")
 }

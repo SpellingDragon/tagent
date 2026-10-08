@@ -11,6 +11,8 @@
 | 建议式而非动手 | 评估出劣化只**产出建议**（写 evaluation 事件、进反思 digest），框架不自动回滚 | 自动回滚会在证据不足时错杀低风险改动 |
 | 分层红线 | `evolution` **不 import** `governance`，治理类事件直写存储（与 `DiffLaneRouter` 同一取向） | 反向依赖会让评估器无法独立测试与复用 |
 
+<a id="refine"></a>
+
 ## 二、`refine` 工具的三个操作
 
 - `register`：产物落盘后登记留痕（`paths` ＋ `note`，note 要求写"痛点 → 产物 → 预期收益"）→ 生成改进 commit → 写 improvement 事件 → **开评估窗口**。未登记的改进既无评估保护也无法安全回滚。

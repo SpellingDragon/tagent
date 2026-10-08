@@ -4,7 +4,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -30,6 +32,25 @@ type executionGateModel struct {
 func newExecutionGateModel(inner model.Model, cm *ContextManager) *executionGateModel {
 	return &executionGateModel{inner: inner, cm: cm}
 }
+
+// ErrBudgetExceeded anchors the fixed-overhead refusal at the LAST gate before
+// the provider: the assembled request's estimable fixed part already owns the
+// input limit, so folding history cannot pay for it. The name is the compressor's
+// own (compress.BudgetExceededReason) — the gate does not invent a second verdict,
+// it only carries this one out before the send.
+var ErrBudgetExceeded = errors.New(compress.BudgetExceededReason)
+
+// err renders the refusal with the two numbers the assembly actually carried: the
+// fixed overhead the compressor priced, and the input limit it priced against. The
+// reason name travels as a wrapped sentinel so a consumer can errors.Is it instead
+// of parsing text.
+func (r budgetRefusal) err() error {
+	return fmt.Errorf("%w: fixed overhead %d exceeds input limit %d", ErrBudgetExceeded, r.fixed, r.limit)
+}
+
+// message is the same reason as text: both outbound paths (channel error, iterator
+// error response) must surface byte-identical wording, one gate two paths.
+func (r budgetRefusal) message() string { return r.err().Error() }
 
 // verify returns ErrExecutionCredentialUnverified if the ctx carries a credential that
 // is not Verified(). No credential (volatile / sub-agent) → pass.
@@ -60,6 +81,10 @@ func (g *executionGateModel) GenerateContent(ctx context.Context, request *model
 		log.Errorf("[executionGate:%s] §4.5 BLOCKING model call — execution credential unverified at model entry", g.cm.name)
 		return nil, err
 	}
+	if r, refused := g.cm.takeBudgetRefusal(); refused {
+		log.Errorf("[executionGate:%s] BLOCKING model call — %s", g.cm.name, r.message())
+		return nil, r.err()
+	}
 	return g.inner.GenerateContent(ctx, g.withRecoveryNotice(request))
 }
 
@@ -78,6 +103,11 @@ func (g *executionGateModel) GenerateContentIter(ctx context.Context, request *m
 		if err := g.verify(ctx); err != nil {
 			log.Errorf("[executionGate:%s] §4.5 BLOCKING model iterator — execution credential unverified", g.cm.name)
 			yield(gateFailureResponse(err.Error()))
+			return
+		}
+		if r, refused := g.cm.takeBudgetRefusal(); refused {
+			log.Errorf("[executionGate:%s] BLOCKING model iterator — %s", g.cm.name, r.message())
+			yield(gateFailureResponse(r.message()))
 			return
 		}
 		req := g.withRecoveryNotice(request)

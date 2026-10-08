@@ -3,8 +3,11 @@ package kv
 import (
 	"github.com/SpellingDragon/tagent/memory"
 
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,4 +316,185 @@ func TestLocalFileKV_LegacySingleSnapshotIgnored(t *testing.T) {
 	require.Empty(t, kv.ListPartitionIDs(), "the legacy kv.json must not load as partitions")
 	_, err = kv.KVGet("7:evt:old")
 	require.Error(t, err, "legacy keys are gone by design (no migration)")
+}
+
+// refScan reproduces the pre-optimisation full-library prefix semantics: flatten
+// every bucket, filter by HasPrefix, lexicographic sort, then truncate to limit.
+// It is the oracle the partition-local KVScan must match bit-for-bit.
+func refScan(k *LocalFileKV, prefix string, limit int) []memory.KVPair {
+	var all []memory.KVPair
+	for _, m := range k.parts {
+		for key, val := range m {
+			all = append(all, memory.KVPair{Key: key, Value: val})
+		}
+	}
+	for key, val := range k.global {
+		all = append(all, memory.KVPair{Key: key, Value: val})
+	}
+	var out []memory.KVPair
+	for _, p := range all {
+		if strings.HasPrefix(p.Key, prefix) {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// refRange is the full-library oracle for KVRange over [start, end).
+func refRange(k *LocalFileKV, start, end string, limit int) []memory.KVPair {
+	var all []memory.KVPair
+	for _, m := range k.parts {
+		for key, val := range m {
+			all = append(all, memory.KVPair{Key: key, Value: val})
+		}
+	}
+	for key, val := range k.global {
+		all = append(all, memory.KVPair{Key: key, Value: val})
+	}
+	var out []memory.KVPair
+	for _, p := range all {
+		if p.Key >= start && p.Key < end {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func eqPairs(a, b []memory.KVPair) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestLocalFileKV_PartitionScanEquivalence 钉住分区定向 Scan/Range 与原全库扫描参照逐位一致。
+//   - 词典序一致、limit 在排序后截断；可证明属单命名空间的查询只访问一个桶
+//   - 宇宙含多分区、前导零键、无冒号键、非法整数头（落 global）与真 global 键，足以绊倒草率的收窄
+//   - 随机跨桶前缀/范围再以固定 seed 复核一遍
+func TestLocalFileKV_PartitionScanEquivalence(t *testing.T) {
+	dir := t.TempDir()
+	k, err := NewLocalFileKV(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = k.Close() })
+
+	universe := map[string]string{
+		"1:a": "1a", "1:b": "1b", "1:evt:100:0": "e", "1:evt:100:1": "f", "1:evt:200:0": "g",
+		"2:a": "2a", "2:meta:100": "m", "2:evt:100:0": "h",
+		"10:x": "10x", "10:evt:50:3": "j",
+		"42:evt:0:0": "k", "42:idx:999": "l",
+		"01:weird":     "leading-zero",
+		"1":            "colonless",
+		"1;semi":       "global-semi",
+		"global:evt:1": "g1", "global:z": "gz",
+		"abc:x": "global-abc", "-1:neg": "neg",
+		"": "emptykey",
+	}
+	for key, val := range universe {
+		require.NoError(t, k.KVPut(key, val))
+	}
+
+	limits := []int{0, 1, 2, 3, 100}
+	prefixCases := []struct {
+		name       string
+		prefix     string
+		wantSingle bool
+	}{
+		{"full pid 1", "1:", true},
+		{"full pid 2", "2:", true},
+		{"full pid 10", "10:", true},
+		{"full pid 42", "42:", true},
+		{"segment prefix", "1:evt:100:", true},
+		{"global namespace", "global:", true},
+		{"leading-zero pid", "01:", true},
+		{"non-numeric head", "abc:", true},
+		{"leading colon", ":", true},
+		{"fuzzy digit 1", "1", false},
+		{"empty prefix", "", false},
+	}
+	for _, tc := range prefixCases {
+		for _, limit := range limits {
+			got, gerr := k.KVScan(tc.prefix, limit)
+			require.NoError(t, gerr)
+			want := refScan(k, tc.prefix, limit)
+			require.True(t, eqPairs(got, want),
+				"KVScan(%q,%d): got=%v want=%v", tc.prefix, limit, got, want)
+			if tc.wantSingle {
+				assert.Equal(t, 1, k.bucketsTouched,
+					"KVScan(%q) must touch exactly one bucket (case %q)", tc.prefix, tc.name)
+			} else {
+				assert.Greater(t, k.bucketsTouched, 1,
+					"KVScan(%q) must use the conservative fallback (case %q)", tc.prefix, tc.name)
+			}
+		}
+	}
+
+	rangeCases := []struct {
+		name       string
+		start, end string
+		wantSingle bool
+	}{
+		{"inside pid 1", "1:", "1;", true},
+		{"inside pid1 subrange", "1:a", "1:c", true},
+		{"inside pid 2", "2:", "2;", true},
+		{"inside pid 10", "10:", "10;", true},
+		{"empty interval", "5:", "5:", true},
+		{"cross bucket 1 to 2", "1:", "2;", false},
+		{"fuzzy straddle", "1", "2", false},
+		{"global region", "global:", "global~", false},
+		{"whole store", "", "\xff\xff\xff", false},
+	}
+	for _, tc := range rangeCases {
+		for _, limit := range limits {
+			got, gerr := k.KVRange(tc.start, tc.end, limit)
+			require.NoError(t, gerr)
+			want := refRange(k, tc.start, tc.end, limit)
+			require.True(t, eqPairs(got, want),
+				"KVRange(%q,%q,%d): got=%v want=%v", tc.start, tc.end, limit, got, want)
+			if tc.wantSingle {
+				assert.Equal(t, 1, k.bucketsTouched,
+					"KVRange(%q,%q) must touch one bucket (case %q)", tc.start, tc.end, tc.name)
+			}
+		}
+	}
+
+	rng := rand.New(rand.NewSource(20261007))
+	keys := make([]string, 0, len(universe))
+	for key := range universe {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for i := 0; i < 400; i++ {
+		a := keys[rng.Intn(len(keys))]
+		cut := rng.Intn(len(a) + 1)
+		prefix := a[:cut]
+		plim := rng.Intn(4)
+		got, gerr := k.KVScan(prefix, plim)
+		require.NoError(t, gerr)
+		require.True(t, eqPairs(got, refScan(k, prefix, plim)),
+			"random KVScan(%q,%d)", prefix, plim)
+
+		lo := a
+		hi := keys[rng.Intn(len(keys))]
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		rlim := rng.Intn(4)
+		rg, rerr := k.KVRange(lo, hi, rlim)
+		require.NoError(t, rerr)
+		require.True(t, eqPairs(rg, refRange(k, lo, hi, rlim)),
+			"random KVRange(%q,%q,%d)", lo, hi, rlim)
+	}
 }

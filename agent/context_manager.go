@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,8 +15,10 @@ import (
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/modelutil"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/prompt"
+	"github.com/SpellingDragon/tagent/rl"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -126,6 +129,34 @@ type ContextManager struct {
 	// so guardrail/feedback aggregation can join events to bundle versions
 	// precisely. nil-safe.
 	bundleIDFn func() string
+
+	// lastBudgetRefusal is the named fixed-overhead refusal the compressor handed
+	// back for the MOST RECENT assembly of this manager (nil = no refusal). The
+	// assembly records it, the final model gate consumes it — see
+	// setBudgetRefusal/takeBudgetRefusal. budgetMu guards it because the gate may
+	// run on a different goroutine than the one that assembled (retries).
+	lastBudgetRefusal *budgetRefusal
+	budgetMu          sync.Mutex
+
+	// boardReq/boardText is the ONE live-board render made for the budget of the
+	// request identified by boardReq, handed to the tail injection so the bytes
+	// priced are the bytes sent (the board moves with task ages, so a second
+	// render would inject what the budget never paid for). Single slot, consumed
+	// on match; a non-matching request simply renders as before.
+	boardReq  *model.Request
+	boardText string
+	boardMu   sync.Mutex
+
+	// hotView is the owner's live hot-param pull source, kept on the manager so the
+	// assembly can name the SAME input limit the compressor priced against
+	// (SetHotSource installs it alongside the compressor; cfg.HotNumbersSource
+	// seeds it). nil → the construction MaxTokens is the limit.
+	hotView func() compress.HotNumbers
+
+	// captureEnabled installs the per-attempt association scope of
+	// D14-S2/S3 on the RunFlow ctx. false (default) → nothing is installed,
+	// nothing is allocated, no cost on the hot path.
+	captureEnabled bool
 
 	// taskController, when set, is injected into the RunFlow ctx (as a
 	// task.TaskSpawner) so tools can hand long-running work to the task layer, and
@@ -358,6 +389,16 @@ type ContextManagerConfig struct {
 	// ThresholdPct above stay as the construction fallback (no-source path).
 	HotNumbersSource func() compress.HotNumbers
 
+	// SummaryTimeoutSeconds bounds ONE real fold's synchronous summary calls
+	// (O3.5: the config layer speaks seconds, the compressor speaks a Duration).
+	// Non-positive leaves the compress package default in force — 0 does NOT mean
+	// "no deadline".
+	SummaryTimeoutSeconds int
+
+	// CaptureEnabled turns on the optional per-attempt association scope
+	// (trajectory_capture, D14-S2/S3). Default false = today's behavior.
+	CaptureEnabled bool
+
 	// CompactKeysListed / RecentFullCount configure compress.ContextCompressor
 	// constraints (0 = package defaults; RecentFullCount derives from
 	// keepRecent × compress.DefaultRefsPerTurn when unset, D6).
@@ -395,6 +436,15 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 
 	if cfg.Compressor != nil {
 		keepRecent := cfg.Compressor.KeepRecentTasks
+		copts := []compress.ContextCompressorOption{
+			compress.WithCompactKeysListed(cfg.CompactKeysListed),
+			compress.WithRecentFullCount(cfg.RecentFullCount),
+			compress.WithCardMaxChars(cfg.CardMaxChars),
+			compress.WithHotSource(cfg.HotNumbersSource),
+		}
+		if cfg.SummaryTimeoutSeconds > 0 {
+			copts = append(copts, compress.WithSummaryTimeout(time.Duration(cfg.SummaryTimeoutSeconds)*time.Second))
+		}
 		cm.contextCompressor = compress.NewContextCompressor(
 			cfg.Compressor,
 			cfg.MemStore,
@@ -402,14 +452,13 @@ func NewContextManager(cfg ContextManagerConfig) *ContextManager {
 			cfg.MaxTokens,
 			cfg.ThresholdPct,
 			keepRecent,
-			compress.WithCompactKeysListed(cfg.CompactKeysListed),
-			compress.WithRecentFullCount(cfg.RecentFullCount),
-			compress.WithCardMaxChars(cfg.CardMaxChars),
-			compress.WithHotSource(cfg.HotNumbersSource),
+			copts...,
 		)
 	}
 
 	cm.execCfg = cfg
+	cm.captureEnabled = cfg.CaptureEnabled
+	cm.hotView = cfg.HotNumbersSource
 	cm.memPlugin = cfg.MemPlugin
 	cm.sessionSvc = cfg.SessionSvc
 
@@ -1041,8 +1090,21 @@ func (cm *ContextManager) BuildInvocation(batch []*AgentEvent) model.Message {
 // 契约: docs/wiki/agent/agent-architecture.md#framework-boundary
 func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.BeforeModelArgs) {
 
+	systemMsg, _ := compress.SplitSystemMessage(args.Request.Messages)
+	var systemText string
+	if systemMsg != nil {
+		systemText = systemMsg.Content
+	}
+
+	budget := compress.RequestBudgetContext{
+		SystemText:  systemText,
+		NoticesText: cm.turnOverheadText(args),
+		Tools:       modelutil.NewRequestSnapshot(nil, args.Request.Tools).Tools,
+	}
+
 	refs := cm.projection.GetAll()
-	result := cm.contextCompressor.Compress(ctx, refs)
+	result := cm.contextCompressor.Compress(ctx, refs, budget)
+	cm.setBudgetRefusal(result)
 	cm.projection.Replace(result.RetainedRefs)
 	if result.Compressed {
 		if notice := cm.emitCompactionEvent(result.RetainedRefs); notice != nil {
@@ -1051,7 +1113,6 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 		}
 	}
 
-	systemMsg, _ := compress.SplitSystemMessage(args.Request.Messages)
 	rebuilt := make([]model.Message, 0, len(result.Messages)+1)
 	if systemMsg != nil {
 		rebuilt = append(rebuilt, *systemMsg)
@@ -1067,6 +1128,124 @@ func (cm *ContextManager) assembleRequest(ctx context.Context, args *model.Befor
 	}
 
 	args.Request.Messages = rebuilt
+}
+
+// budgetRefusal is one named fixed-overhead refusal the compressor returned for the
+// most recent assembly. reason is the compressor's own machine-checkable name, fixed
+// is res.FixedOverhead, and limit is the input limit it priced against.
+type budgetRefusal struct {
+	reason string
+	fixed  int
+	limit  int
+}
+
+// setBudgetRefusal records (or clears) the refusal for the request that was just
+// assembled. It is called on EVERY assembly, so a refusal can never outlive the
+// round that produced it: the next assembly either re-prices and overwrites or
+// explicitly clears.
+func (cm *ContextManager) setBudgetRefusal(res compress.CompressResult) {
+	cm.budgetMu.Lock()
+	defer cm.budgetMu.Unlock()
+	if !res.BudgetExceeded {
+		cm.lastBudgetRefusal = nil
+		return
+	}
+	limit, known := cm.liveInputLimit()
+	if !known {
+		limit = cm.contextCompressor.BudgetLine()
+	}
+	cm.lastBudgetRefusal = &budgetRefusal{reason: res.BudgetReason, fixed: res.FixedOverhead, limit: limit}
+	log.Warnf("[ContextManager:%s] %s: fixed overhead %d tokens >= input limit %d — the send must be refused, timeline kept",
+		cm.name, res.BudgetReason, res.FixedOverhead, limit)
+}
+
+// takeBudgetRefusal returns the refusal recorded for the most recent assembly, if
+// the gate has not taken it yet. Taking is the gate's decision point: the record
+// stays until taken so both outbound paths (channel and iterator) see the same
+// verdict, and the one-shot recovery notice is never spent by a refused send.
+func (cm *ContextManager) takeBudgetRefusal() (budgetRefusal, bool) {
+	cm.budgetMu.Lock()
+	defer cm.budgetMu.Unlock()
+	if cm.lastBudgetRefusal == nil {
+		return budgetRefusal{}, false
+	}
+	r := *cm.lastBudgetRefusal
+	cm.lastBudgetRefusal = nil
+	return r, true
+}
+
+// liveInputLimit reports the input limit the compressor prices against, read from
+// the SAME hot source the compressor resolves its numbers from (so the number the
+// gate names is the number the compressor used, not a mirrored guess). The
+// construction value is the fallback when no source is installed.
+//
+// CALLER HOLDS budgetMu (setBudgetRefusal); the write side of hotView takes the
+// same lock.
+func (cm *ContextManager) liveInputLimit() (int, bool) {
+	if cm.hotView != nil {
+		if n := cm.hotView(); n.MaxTokens > 0 {
+			return n.MaxTokens, true
+		}
+	}
+	if cm.execCfg.MaxTokens > 0 {
+		return cm.execCfg.MaxTokens, true
+	}
+	return 0, false
+}
+
+// SetHotSource installs the owner's live hot-param source on BOTH sides at once:
+// the compressor (per-boundary numbers) and the manager (the limit named in a
+// refusal). The resident ContextManager is built before the agent's own hot view
+// exists, so this is the wiring-time seam; an existing compressor is required.
+func (cm *ContextManager) SetHotSource(src func() compress.HotNumbers) {
+	if src == nil {
+		return
+	}
+	cm.budgetMu.Lock()
+	cm.hotView = src
+	cm.budgetMu.Unlock()
+	if cm.contextCompressor != nil {
+		cm.contextCompressor.SetHotSource(src)
+	}
+}
+
+// turnOverheadText renders the text this turn injects OUTSIDE the frozen history —
+// the live task board and the pending recovery notice — so the fixed overhead is
+// priced with what will actually be sent. Both are PEEKED, never consumed: the
+// board render is handed to the tail injection (its bytes move with task ages, and
+// a second render would inject what the budget never priced), and the notice stays
+// pending until a send actually goes out. Missing parts contribute nothing — the
+// budget never invents text for surfaces this turn does not carry.
+func (cm *ContextManager) turnOverheadText(args *model.BeforeModelArgs) string {
+	var parts []string
+	if cm.taskController != nil {
+		board := task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+		cm.boardMu.Lock()
+		cm.boardReq, cm.boardText = args.Request, board
+		cm.boardMu.Unlock()
+		if board != "" {
+			parts = append(parts, board)
+		}
+	}
+	if notice := cm.peekRecoveryNotice(); notice != "" {
+		parts = append(parts, notice)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// takeTurnBoard returns the board render the assembly made for THIS request, if
+// there is one, and clears the handoff so it can be used exactly once. No match
+// (no assembly ran for this request, or a different request took it) → the caller
+// renders as it always did.
+func (cm *ContextManager) takeTurnBoard(args *model.BeforeModelArgs) (string, bool) {
+	cm.boardMu.Lock()
+	defer cm.boardMu.Unlock()
+	if cm.boardReq == nil || args == nil || cm.boardReq != args.Request {
+		return "", false
+	}
+	text := cm.boardText
+	cm.boardReq, cm.boardText = nil, ""
+	return text, true
 }
 
 // emitCompactionEvent 在真折叠后把折叠产物作为一等 compaction 事件落到事实链——
@@ -1567,6 +1746,37 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 	return attr
 }
 
+// captureOwnerAttrs assembles the attribution the INSTALLER already resolved for
+// this attempt, so the capture never re-derives it (rl stays a leaf). Keys follow
+// the owner block spelling the capture reads; a part this manager does not know is
+// simply absent — no empty-value key, no substitute taken from another turn.
+func (cm *ContextManager) captureOwnerAttrs(ctx context.Context, invID string) rl.OwnerAttrs {
+	attrs := rl.OwnerAttrs{}
+	put := func(key, value string) {
+		if value != "" {
+			attrs[key] = value
+		}
+	}
+	put("capture_namespace", strconv.Itoa(cm.partitionID))
+	put("agent_name", cm.name)
+	put("root_session_id", cm.sessionID)
+	put("session_id", cm.sessionID)
+	put("user_id", cm.userID)
+	put("invocation_id", invID)
+	put("trigger_source", cm.triggerSource)
+	if cm.turnEcho != nil && len(cm.turnEcho.committedKeys) > 0 {
+		keys := make([]string, 0, len(cm.turnEcho.committedKeys))
+		for _, k := range cm.turnEcho.committedKeys {
+			keys = append(keys, strconv.FormatInt(k, 10))
+		}
+		put("input_event_keys", strings.Join(keys, ","))
+	}
+	for k, v := range cm.buildTurnAttribution(ctx) {
+		put(k, v)
+	}
+	return attrs
+}
+
 // echoSpec RunFlow calls runner.Run and forwards events to outputCh. Delivery only:
 // projection writes happen in the event-plugin pipeline (ProjectionSink), and
 // the loop waits for the next turn via bus.Pull — there is no bus echo.
@@ -1640,6 +1850,13 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 		ctx = plugin.WithProjectionSink(ctx, cm.projection)
 		ctx = withCallProjection(ctx, cm.projection)
 		ctx = plugin.WithAttribution(ctx, cm.buildTurnAttribution(ctx))
+	}
+	if cm.captureEnabled {
+		invID, _ := invocationIDFromContext(ctx)
+		scope := rl.NewCaptureScope(invID)
+		scope.Owner = cm.captureOwnerAttrs(ctx, invID)
+		ctx = rl.WithCaptureScope(ctx, scope)
+		defer scope.Release()
 	}
 	if cm.taskController != nil {
 		// Wrap the spawner to snapshot the originating turn's invocation
@@ -1767,9 +1984,23 @@ func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	if cm.taskController == nil {
 		return
 	}
-	if board := task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL()); board != "" {
+	board, reused := cm.takeTurnBoard(args)
+	if !reused {
+		board = task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+	}
+	if board != "" {
 		args.Request.Messages = task.InjectBoard(args.Request.Messages, board)
 	}
+}
+
+// peekRecoveryNotice reads the pending cold-start notice WITHOUT consuming it.
+// The assembly must price what this turn will inject; the one-shot spend stays
+// exactly where it always was — at the actual outbound call, inside the gate.
+// TakeRecoveryNotice remains the only consumer.
+func (cm *ContextManager) peekRecoveryNotice() string {
+	cm.recoveryMu.Lock()
+	defer cm.recoveryMu.Unlock()
+	return cm.recoveryNotice
 }
 
 // SetUserIDSessionID updates the user/session context for runner.Run.

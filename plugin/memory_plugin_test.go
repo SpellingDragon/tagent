@@ -493,3 +493,614 @@ func TestLastEventKeys_BoundedFuzz(t *testing.T) {
 		}
 	}
 }
+
+// commitRecord 是一次因果提交：child 键与它当时认定的 parent 键（parent 为 0 表示无父）。
+type commitRecord struct {
+	child  int64
+	parent int64
+}
+
+// spyCommitStore 记录真实提交顺序与 SetParent 尝试（失败尝试同样留痕），并按注入的
+// 写失败/关系失败/阻塞门行事。记录走带缓冲 channel，替身自身不引入额外锁，
+// 因此可安全用于并发与 -race。failOn/calls 只服务单线程子测（第 N 次 StoreEvent 失败）。
+type spyCommitStore struct {
+	*memory.InMemoryStore
+	edges     chan commitRecord
+	committed chan int64
+	failOn    int
+	calls     int
+	relErr    error
+	blockOn   string
+	entered   chan struct{}
+	release   chan struct{}
+}
+
+func newSpyStore() *spyCommitStore {
+	return &spyCommitStore{
+		InMemoryStore: memory.NewInMemoryStore(),
+		edges:         make(chan commitRecord, 512),
+		committed:     make(chan int64, 512),
+		entered:       make(chan struct{}, 8),
+		release:       make(chan struct{}),
+	}
+}
+
+// StoreEvent 按注入门决定失败/阻塞，成功后才把键交给 committed 记录。
+func (s *spyCommitStore) StoreEvent(key int64, evt memory.FullEvent) error {
+	if s.failOn > 0 {
+		s.calls++
+		if s.calls == s.failOn {
+			return errors.New("segment write rejected")
+		}
+	}
+	if s.blockOn != "" && evt.Content == s.blockOn {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	if err := s.InMemoryStore.StoreEvent(key, evt); err != nil {
+		return err
+	}
+	s.committed <- key
+	return nil
+}
+
+// RelationStore 返回记录 SetParent 尝试的替身；其余关系操作透传内层存储。
+func (s *spyCommitStore) RelationStore() memory.RelationStore {
+	return edgeSpyRelation{RelationStore: s.InMemoryStore.RelationStore(), owner: s}
+}
+
+type edgeSpyRelation struct {
+	memory.RelationStore
+	owner *spyCommitStore
+}
+
+func (r edgeSpyRelation) SetParent(childKey, parentKey int64) error {
+	if r.owner.relErr != nil {
+		r.owner.edges <- commitRecord{child: childKey, parent: parentKey}
+		return r.owner.relErr
+	}
+	if err := r.RelationStore.SetParent(childKey, parentKey); err != nil {
+		return err
+	}
+	r.owner.edges <- commitRecord{child: childKey, parent: parentKey}
+	return nil
+}
+
+// drainCommitted 取出全部已排队提交键（OnEvent 返回时记录必已入 channel）。
+func (s *spyCommitStore) drainCommitted() []int64 {
+	out := make([]int64, 0, len(s.committed))
+	for {
+		select {
+		case k := <-s.committed:
+			out = append(out, k)
+		default:
+			return out
+		}
+	}
+}
+
+// drainEdges 取出全部 SetParent 尝试记录。
+func (s *spyCommitStore) drainEdges() []commitRecord {
+	out := make([]commitRecord, 0, len(s.edges))
+	for {
+		select {
+		case e := <-s.edges:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// ticketKey 取回事件 StateDelta 中的持久票据并解析成键；插件未发布票据时返回 (0,false)。
+func ticketKey(t *testing.T, evt *trpcEvent.Event) (int64, bool) {
+	t.Helper()
+	raw, ok := evt.StateDelta[tagentevent.MetaKeyEventKey]
+	if !ok {
+		return 0, false
+	}
+	key, err := tagentevent.ParseEventKey(string(raw))
+	require.NoError(t, err, "已发布的票据必须是可解析的 hex 事件键")
+	return key, true
+}
+
+// causalKeyOf 复刻插件的因果域标识：partition 由 agent 名推导，session 为空（替身不挂会话）。
+func causalKeyOf(agentName string) string {
+	return fmt.Sprintf("%d:%s", memory.PartitionIDFromName(agentName), "")
+}
+
+// TestMemoryPlugin_CommitVisibility 钉住「提交成功才发布可召回票据」。
+//   - 写失败或未接存储：下游拿不到取不回的 event_key/partition_id，失败键不进因果游标
+//   - 内容已提交而关系失败：事实、票据与游标照常有效，只有因果完整性退让
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#memory-plugin
+func TestMemoryPlugin_CommitVisibility(t *testing.T) {
+	assistant := func(content string) *trpcEvent.Event {
+		return newResponseEvent(model.RoleAssistant, content, nil)
+	}
+
+	t.Run("store failure publishes no ticket and no cursor advance", func(t *testing.T) {
+		spy := newSpyStore()
+		spy.failOn = 2
+		sink := &recordingSink{}
+		ctx := WithProjectionSink(context.Background(), sink)
+		p := NewMemoryPlugin(spy)
+		inv := &agent.Invocation{AgentName: "resident"}
+
+		res1, err := p.OnEvent(ctx, inv, assistant("first"))
+		require.NoError(t, err)
+		key1, ok := ticketKey(t, res1)
+		require.True(t, ok, "成功提交必须发布票据")
+
+		res2, err := p.OnEvent(ctx, inv, assistant("second"))
+		require.NoError(t, err, "被吞掉的存储错误不得改写成插件错误上抛")
+		assert.NotContains(t, res2.StateDelta, tagentevent.MetaKeyEventKey,
+			"写失败不得向下游提供取不回的持久票据")
+		assert.NotContains(t, res2.StateDelta, tagentevent.MetaKeyPartitionID,
+			"写失败不得伪造分区归属")
+		assert.NotEmpty(t, res2.StateDelta[tagentevent.MetaKeyEventType],
+			"分类不主张持久性，必须继续返回")
+		assert.Equal(t, "second", res2.Response.Choices[0].Message.Content, "正文必须原样透传")
+		assert.Equal(t, key1, parentOf(p, causalKeyOf("resident")), "写失败不得推进因果游标")
+
+		res3, err := p.OnEvent(ctx, inv, assistant("third"))
+		require.NoError(t, err)
+		key3, ok := ticketKey(t, res3)
+		require.True(t, ok, "写失败之后的成功提交仍要发布票据")
+
+		parent, gerr := spy.GetParent(key3)
+		require.NoError(t, gerr)
+		assert.Equal(t, key1, parent, "失败键绝不能成为下一条的父键")
+		assert.Equal(t, key3, parentOf(p, causalKeyOf("resident")), "游标只推进到最后已存键")
+
+		refs := make([]int64, 0, len(sink.refs))
+		for _, r := range sink.refs {
+			refs = append(refs, r.EventKey)
+		}
+		assert.Equal(t, []int64{key1, key3}, refs, "失败键不得进入投影")
+
+		fe, err := spy.GetEvent(key3)
+		require.NoError(t, err, "成功票据必须可 GetEvent 取回")
+		assert.Equal(t, "third", fe.Content)
+	})
+
+	t.Run("nil store publishes no pseudo-persistent ticket", func(t *testing.T) {
+		sink := &recordingSink{}
+		ctx := WithProjectionSink(context.Background(), sink)
+		p := NewMemoryPlugin(nil)
+
+		res, err := p.OnEvent(ctx, &agent.Invocation{AgentName: "resident"}, assistant("hello"))
+		require.NoError(t, err)
+		assert.NotContains(t, res.StateDelta, tagentevent.MetaKeyEventKey,
+			"未接存储时发布的票据是伪持久票据，下游按它召回必然落空")
+		assert.NotContains(t, res.StateDelta, tagentevent.MetaKeyPartitionID)
+		assert.NotEmpty(t, res.StateDelta[tagentevent.MetaKeyEventType], "分类仍可返回")
+		assert.Equal(t, "hello", res.Response.Choices[0].Message.Content, "正文仍可返回")
+		assert.Empty(t, sink.refs, "未接存储不得投影")
+		assert.Empty(t, p.lastEventKeys, "未接存储不得推进因果游标")
+	})
+
+	t.Run("relation failure keeps fact ticket and cursor", func(t *testing.T) {
+		spy := newSpyStore()
+		spy.relErr = errors.New("relation journal busy")
+		sink := &recordingSink{}
+		ctx := WithProjectionSink(context.Background(), sink)
+		cred := &EchoCredential{AttemptToken: "resident#attempt-1", Agent: "resident", Session: "sess-1", MergedMessage: mergedInput}
+		ctx = WithEchoCredential(ctx, cred)
+		p := NewMemoryPlugin(spy)
+		inv := &agent.Invocation{AgentName: "resident"}
+
+		res1, err := p.OnEvent(ctx, inv, assistant("first"))
+		require.NoError(t, err)
+		key1, ok := ticketKey(t, res1)
+		require.True(t, ok)
+
+		res2, err := p.OnEvent(ctx, inv, assistant("second"))
+		require.NoError(t, err)
+		key2, ok := ticketKey(t, res2)
+		require.True(t, ok, "内容已提交而关系失败时，事实与票据必须保持有效")
+
+		res3, err := p.OnEvent(ctx, inv, assistant("third"))
+		require.NoError(t, err)
+		key3, ok := ticketKey(t, res3)
+		require.True(t, ok)
+
+		edges := spy.drainEdges()
+		require.Len(t, edges, 2, "关系失败的尝试必须留痕，供回溯报 partial")
+		assert.Equal(t, commitRecord{child: key2, parent: key1}, edges[0])
+		assert.Equal(t, commitRecord{child: key3, parent: key2}, edges[1],
+			"下一条仍接最后已存键，不得因关系失败而回滚内容")
+
+		assert.Len(t, sink.refs, 3, "内容已提交即应投影")
+		assert.Equal(t, key3, parentOf(p, causalKeyOf("resident")), "游标推进只取决于内容提交")
+		assert.False(t, cred.rejected, "内容已提交不是凭据降级；关系失败另有 partial 表达")
+	})
+}
+
+// jitterSpyStore 在存储内停留，把「读父 → 提交 → 推进游标」之间的交错窗口放大到毫秒级；
+// 未线性化的实现必然在多条并发提交里造出同父/断链。
+type jitterSpyStore struct{ *spyCommitStore }
+
+func (s jitterSpyStore) StoreEvent(key int64, evt memory.FullEvent) error {
+	time.Sleep(2 * time.Millisecond)
+	return s.spyCommitStore.StoreEvent(key, evt)
+}
+
+// TestMemoryPlugin_CausalOrdering 钉住同一因果域的提交段是一条线性化顺序。
+//   - 读父、分配键、StoreEvent、关系、游标推进之间不容同域并发插队
+//   - 不同因果域必须并行推进；在途或排队的键锁记录不得被游标上界淘汰
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#causal-chain
+func TestMemoryPlugin_CausalOrdering(t *testing.T) {
+	t.Run("same causal key commits form one linear chain", func(t *testing.T) {
+		spy := newSpyStore()
+		p := NewMemoryPlugin(jitterSpyStore{spy})
+		inv := &agent.Invocation{AgentName: "resident"}
+
+		const n = 24
+		done := make(chan error, n)
+		for i := 0; i < n; i++ {
+			go func(i int) {
+				_, err := p.OnEvent(context.Background(), inv,
+					newResponseEvent(model.RoleAssistant, fmt.Sprintf("concurrent-%d", i), nil))
+				done <- err
+			}(i)
+		}
+		for i := 0; i < n; i++ {
+			require.NoError(t, <-done)
+		}
+
+		commits := spy.drainCommitted()
+		require.Len(t, commits, n, "每个事件都必须真实提交一次，不多不少")
+
+		edges := spy.drainEdges()
+		byChild := make(map[int64]int64, len(edges))
+		children := make(map[int64]int, len(edges))
+		for _, e := range edges {
+			if prev, dup := byChild[e.child]; dup {
+				t.Fatalf("子键 %d 被挂了两个父键（%d 与 %d）：同域提交互相覆盖", e.child, prev, e.parent)
+			}
+			byChild[e.child] = e.parent
+			children[e.parent]++
+		}
+		for parent, cnt := range children {
+			assert.Equal(t, 1, cnt, "父键 %d 挂了 %d 个子键：同域并发读到了同一个游标（分叉）", parent, cnt)
+		}
+
+		for i, k := range commits {
+			if i == 0 {
+				_, hasParent := byChild[k]
+				assert.False(t, hasParent, "段起点没有可信锚时必须具名断点，不得猜父")
+				continue
+			}
+			parent, hasParent := byChild[k]
+			require.True(t, hasParent, "提交 %d 没有挂父键，因果链在此分叉", i)
+			assert.Equal(t, commits[i-1], parent,
+				"第 %d 条提交的父必须是它前面一条已提交键（同因果键的提交段未串行）", i)
+			_, err := spy.GetEvent(parent)
+			require.NoError(t, err, "父键 %d 必须是已落库的事实，不能指向虚事件", parent)
+		}
+
+		assert.Equal(t, commits[n-1], parentOf(p, causalKeyOf("resident")), "游标停在最后一次提交上")
+	})
+
+	t.Run("different causal keys are not serialized", func(t *testing.T) {
+		blockedName, otherName := "resident", "worker"
+		require.NotEqual(t, memory.PartitionIDFromName(blockedName), memory.PartitionIDFromName(otherName),
+			"两个 agent 必须落在不同 partition，才能代表两个因果域")
+
+		spy := newSpyStore()
+		spy.blockOn = "blocked"
+		p := NewMemoryPlugin(spy)
+
+		blockedDone := make(chan error, 1)
+		go func() {
+			_, err := p.OnEvent(context.Background(), &agent.Invocation{AgentName: blockedName},
+				newResponseEvent(model.RoleAssistant, "blocked", nil))
+			blockedDone <- err
+		}()
+		select {
+		case <-spy.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("阻塞写入从未进入 StoreEvent，用例前提不成立")
+		}
+
+		otherDone := make(chan error, 1)
+		go func() {
+			_, err := p.OnEvent(context.Background(), &agent.Invocation{AgentName: otherName},
+				newResponseEvent(model.RoleAssistant, "other", nil))
+			otherDone <- err
+		}()
+		select {
+		case err := <-otherDone:
+			require.NoError(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("另一因果域被同一个存储写入阻塞：提交段不得共用全局锁")
+		}
+
+		close(spy.release)
+		require.NoError(t, <-blockedDone)
+		assert.Len(t, spy.drainCommitted(), 2, "两个域各自完成提交")
+	})
+
+	t.Run("active causal lock survives the cursor cap", func(t *testing.T) {
+		p := NewMemoryPlugin(nil)
+		active := causalKeyOf("resident")
+		fill := func() {
+			for i := 0; i < maxLastEventKeys+9; i++ {
+				p.lastEventKeys[fmt.Sprintf("9:s%d", i)] = int64(1000 + i)
+			}
+		}
+
+		p.mu.Lock()
+		p.lastEventKeys[active] = 1
+		fill()
+		p.evictOldestLastEventKeysLocked()
+		_, idleGone := p.lastEventKeys[active]
+		p.mu.Unlock()
+		require.False(t, idleGone, "对照：无活跃引用时它作为最旧键照常被淘汰")
+
+		guard := p.acquireCausal(active)
+		p.mu.Lock()
+		p.lastEventKeys[active] = 1
+		fill()
+		p.evictOldestLastEventKeysLocked()
+		_, held := p.lastEventKeys[active]
+		p.mu.Unlock()
+		require.True(t, held, "正在提交或排队等待的因果键不得被游标上界淘汰：那等于抽掉在途链的锚")
+
+		p.releaseCausal(guard)
+		p.mu.Lock()
+		p.lastEventKeys["9:extra"] = 2
+		p.evictOldestLastEventKeysLocked()
+		_, released := p.lastEventKeys[active]
+		assert.False(t, released, "引用归零后回到正常回收")
+		assert.Len(t, p.lastEventKeys, maxLastEventKeys)
+		p.mu.Unlock()
+	})
+}
+
+// TestMemoryPlugin_RecoveryBoundary 钉住跳过闸的位置与因果锚缺口后的语义。
+//   - 屏障、流式、退化空终态、本次输入回显都在任何键分配与写入之前返回
+//   - 游标缺口之后新段起点一律不猜父：事实仍可召回，因果链具名断开并由回溯端报 partial
+//
+// 契约: docs/wiki/plugin/plugin-architecture.md#skip-set
+func TestMemoryPlugin_RecoveryBoundary(t *testing.T) {
+	inv := &agent.Invocation{AgentName: "resident"}
+
+	skippedClean := func(t *testing.T, spy *spyCommitStore, p *MemoryPlugin, ctx context.Context, evt *trpcEvent.Event) {
+		t.Helper()
+		res, err := p.OnEvent(ctx, inv, evt)
+		require.NoError(t, err)
+		assert.Empty(t, spy.drainCommitted(), "被跳过的事件不得入库")
+		assert.Nil(t, res.StateDelta, "被跳过的事件不得拿到任何 StateDelta 票据")
+		assert.Empty(t, p.lastEventKeys, "被跳过的事件不得推进因果游标")
+	}
+
+	t.Run("all four skip gates stay ahead of allocation", func(t *testing.T) {
+		spy := newSpyStore()
+		p := NewMemoryPlugin(spy)
+
+		barrier := newResponseEvent(model.RoleAssistant, "sync barrier", nil)
+		barrier.Response = nil
+		skippedClean(t, spy, p, context.Background(), barrier)
+
+		streaming := newResponseEvent(model.RoleAssistant, "partial chunk", nil)
+		streaming.Response.IsPartial = true
+		skippedClean(t, spy, p, context.Background(), streaming)
+
+		emptyFinal := newResponseEvent(model.RoleAssistant, "", nil)
+		skippedClean(t, spy, p, context.Background(), emptyFinal)
+
+		cred := &EchoCredential{AttemptToken: "resident#attempt-1", Agent: "resident", Session: "sess-1", MergedMessage: mergedInput}
+		skippedClean(t, spy, p, WithEchoCredential(context.Background(), cred), userEvent("user", mergedInput))
+		assert.True(t, cred.boundSet, "回显仍由本插件绑定：跳过不等于降级")
+	})
+
+	t.Run("no trusted anchor after restart starts a named break", func(t *testing.T) {
+		spy := newSpyStore()
+		ctx := context.Background()
+
+		before, err := NewMemoryPlugin(spy).OnEvent(ctx, inv, newResponseEvent(model.RoleAssistant, "before restart", nil))
+		require.NoError(t, err)
+		key1, ok := ticketKey(t, before)
+		require.True(t, ok)
+		require.Empty(t, spy.drainEdges(), "第一条本就无父")
+
+		_, err = spy.GetEvent(key1)
+		require.NoError(t, err, "重启前的键仍在库里——正因如此，不猜父才是有代价的选择")
+
+		restarted := NewMemoryPlugin(spy)
+		after, err := restarted.OnEvent(ctx, inv, newResponseEvent(model.RoleAssistant, "after restart", nil))
+		require.NoError(t, err)
+		key2, ok := ticketKey(t, after)
+		require.True(t, ok, "接不上父链不改变它是一条已提交事实")
+
+		_, err = spy.GetEvent(key2)
+		require.NoError(t, err, "新段起点必须可按票据取回")
+		assert.Empty(t, spy.drainEdges(), "无可信锚时不得建立任何父子边")
+
+		parent, gerr := spy.GetParent(key2)
+		require.NoError(t, gerr)
+		assert.Zero(t, parent, "新段起点停在断点上，不得接回重启前的键")
+	})
+
+	t.Run("evicted cursor starts a named break", func(t *testing.T) {
+		spy := newSpyStore()
+		p := NewMemoryPlugin(spy)
+		ctx := context.Background()
+
+		res1, err := p.OnEvent(ctx, inv, newResponseEvent(model.RoleAssistant, "first", nil))
+		require.NoError(t, err)
+		key1, ok := ticketKey(t, res1)
+		require.True(t, ok)
+
+		res2, err := p.OnEvent(ctx, inv, newResponseEvent(model.RoleAssistant, "second", nil))
+		require.NoError(t, err)
+		key2, ok := ticketKey(t, res2)
+		require.True(t, ok)
+		edges := spy.drainEdges()
+		require.Len(t, edges, 1, "有锚时第二条必须挂上第一条")
+		assert.Equal(t, commitRecord{child: key2, parent: key1}, edges[0])
+
+		p.mu.Lock()
+		delete(p.lastEventKeys, causalKeyOf("resident"))
+		p.mu.Unlock()
+
+		res3, err := p.OnEvent(ctx, inv, newResponseEvent(model.RoleAssistant, "third", nil))
+		require.NoError(t, err)
+		key3, ok := ticketKey(t, res3)
+		require.True(t, ok, "游标淘汰只降级为无父，不撤销已提交事实")
+
+		assert.Empty(t, spy.drainEdges(), "被淘汰后不得猜父：新段起点是具名断点")
+		parent, gerr := spy.GetParent(key3)
+		require.NoError(t, gerr)
+		assert.Zero(t, parent)
+		assert.Equal(t, key3, parentOf(p, causalKeyOf("resident")), "新段起点成为新的游标，后续继续接链")
+	})
+}
+
+// typeCtxKey 用来证明解析器拿到的是事件自己那条 ctx（scope 就挂在那里），不是新建的空白 ctx。
+type typeCtxKey struct{}
+
+func callIDAssistantEvt(id string) *trpcEvent.Event {
+	return &trpcEvent.Event{
+		InvocationID: "inv-callid",
+		Author:       "tagent",
+		Response: &model.Response{
+			ID:      id,
+			Done:    true,
+			Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "answer"}}},
+		},
+	}
+}
+
+// storedEvents reads back what actually landed in the fact chain.
+func storedEvents(t *testing.T, store *memory.InMemoryStore) []memory.FullEvent {
+	t.Helper()
+	return store.AllEvents()
+}
+
+func TestMemoryPlugin_CallID(t *testing.T) {
+	t.Run("exact hit stamps the key on the committed fact", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		var gotID string
+		var gotCtx context.Context
+		p := NewMemoryPlugin(store, WithCallIDResolver(func(ctx context.Context, responseID string) (string, bool) {
+			gotCtx, gotID = ctx, responseID
+			return "call-7", responseID == "resp-42"
+		}))
+
+		ctx := context.WithValue(context.Background(), typeCtxKey{}, "carried")
+		evt, err := p.OnEvent(ctx, rootInv(), callIDAssistantEvt("resp-42"))
+		require.NoError(t, err)
+		require.NotNil(t, evt)
+
+		require.Equal(t, "resp-42", gotID, "查询键就是响应自己的 ID，不是别的")
+		require.NotNil(t, gotCtx)
+		require.Equal(t, "carried", gotCtx.Value(typeCtxKey{}), "解析器必须看见事件自己的 ctx（scope 挂在上面）")
+
+		all := storedEvents(t, store)
+		require.Len(t, all, 1)
+		require.Equal(t, "call-7", all[0].Metadata[tagentevent.MetaKeyCallID],
+			"命中的关联键随事实落库，导出侧才有 rawMetadata 可读")
+		require.NotContains(t, evt.StateDelta, tagentevent.MetaKeyCallID,
+			"它不是运行票据：只进事实元数据，不进 StateDelta 票据面")
+	})
+
+	t.Run("a miss stamps nothing (no nearest-call guess)", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		calls := 0
+		p := NewMemoryPlugin(store, WithCallIDResolver(func(ctx context.Context, responseID string) (string, bool) {
+			calls++
+			return "", false
+		}))
+
+		_, err := p.OnEvent(context.Background(), rootInv(), callIDAssistantEvt("resp-unbound"))
+		require.NoError(t, err)
+
+		require.Equal(t, 1, calls, "解析器被问过，且只问过那一个精确键")
+		all := storedEvents(t, store)
+		require.Len(t, all, 1, "未命中照常提交事实（关联是可选增益，不是提交前置）")
+		require.NotContains(t, all[0].Metadata, tagentevent.MetaKeyCallID,
+			"S2: 未命中必须具名 unbound，绝不拿「最近调用」凑一个")
+		require.NotEmpty(t, all[0].Metadata[tagentevent.MetaKeyAgentName], "既有归因不受影响")
+	})
+
+	t.Run("no response id never asks the resolver", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		asked := 0
+		p := NewMemoryPlugin(store, WithCallIDResolver(func(ctx context.Context, responseID string) (string, bool) {
+			asked++
+			return "should-not-be-used", true
+		}))
+
+		_, err := p.OnEvent(context.Background(), rootInv(), callIDAssistantEvt(""))
+		require.NoError(t, err)
+		require.Zero(t, asked, "没有身份就不查询：一次空 ID 的查询本身就是一种猜测")
+		all := storedEvents(t, store)
+		require.Len(t, all, 1)
+		require.NotContains(t, all[0].Metadata, tagentevent.MetaKeyCallID)
+	})
+
+	t.Run("no resolver installed is byte-identical to the wiring before it", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		p := NewMemoryPlugin(store)
+		_, err := p.OnEvent(context.Background(), rootInv(), callIDAssistantEvt("resp-1"))
+		require.NoError(t, err)
+		all := storedEvents(t, store)
+		require.Len(t, all, 1)
+		require.NotContains(t, all[0].Metadata, tagentevent.MetaKeyCallID)
+	})
+
+	t.Run("a fact that did not commit publishes no attribution either", func(t *testing.T) {
+		store := &storeErrStore{InMemoryStore: memory.NewInMemoryStore()}
+		p := NewMemoryPlugin(store, WithCallIDResolver(func(context.Context, string) (string, bool) {
+			return "call-x", true
+		}))
+		evt, err := p.OnEvent(context.Background(), rootInv(), callIDAssistantEvt("resp-9"))
+		require.NoError(t, err)
+		require.NotContains(t, evt.StateDelta, tagentevent.MetaKeyCallID,
+			"提交闸：写失败不发布任何可按它取回的标识")
+		require.NotEmpty(t, evt.StateDelta[tagentevent.MetaKeyEventType], "分类照旧发布")
+	})
+
+	t.Run("the four skip gates stay in front of the stamp", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		asked := 0
+		p := NewMemoryPlugin(store, WithCallIDResolver(func(context.Context, string) (string, bool) {
+			asked++
+			return "call-y", true
+		}))
+
+		_, err := p.OnEvent(context.Background(), rootInv(), &trpcEvent.Event{
+			InvocationID: "inv-x", Author: "tagent",
+			Response: &model.Response{ID: "r-partial", IsPartial: true,
+				Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "chunk"}}}},
+		})
+		require.NoError(t, err)
+		require.Zero(t, asked, "流式分片在任何写入/查询之前就被跳过")
+
+		_, err = p.OnEvent(context.Background(), rootInv(), &trpcEvent.Event{InvocationID: "inv-y"})
+		require.NoError(t, err)
+		require.Zero(t, asked, "无 choices 的屏障事件同样先被跳过")
+
+		require.Empty(t, store.GetStats().TotalEvents, "被跳过的事件一条都不落库")
+	})
+}
+
+// TestMemoryPlugin_ConstructorStaysBackwardCompatible 钉住 变参构造：单参调用仍是合法形态。
+func TestMemoryPlugin_ConstructorStaysBackwardCompatible(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	p := NewMemoryPlugin(store)
+	require.NotNil(t, p)
+	require.Equal(t, "memory", p.Name())
+
+	p2 := NewMemoryPlugin(store, WithCallIDResolver(nil))
+	require.NotNil(t, p2)
+	_, err := p2.OnEvent(context.Background(), rootInv(), callIDAssistantEvt("resp-bc"))
+	require.NoError(t, err)
+}

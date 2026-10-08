@@ -930,3 +930,84 @@ func TestStoreEvent_WindowSwitchScanIsWindowBounded(t *testing.T) {
 	require.LessOrEqual(t, scanOps, 1,
 		"a fresh-window write must scan at most its own single window, got %d scan ops", scanOps)
 }
+
+// TestSegmentQuery_HeaderParity 钉住 QueryEvents 窗口扫描的轻量 header 解码与原全解码过滤逐位一致。
+//   - header 能决定的绝不因少解码而误纳或误拒
+//   - 只能靠正文判定的 keyword（摘要未命中）回退整事件解码
+//   - 坏值、空值、null 与原路径同进退
+//   - 端到端：仅正文命中的召回仍返回，引用字段由 header 构造
+func TestSegmentQuery_HeaderParity(t *testing.T) {
+	mk := func(e FullEvent) string { b, _ := json.Marshal(e); return string(b) }
+	corpus := []struct {
+		name string
+		js   string
+	}{
+		{"valid", mk(FullEvent{EventKey: 11, PartitionID: qrPID, EventType: "agent_output", EventSummary: "hello world", Content: "body text", Timestamp: 1000})},
+		{"content-keyword", mk(FullEvent{EventKey: 12, PartitionID: qrPID, EventType: "tool_result", EventSummary: "no match here", Content: "needle in body", Timestamp: 2000})},
+		{"summary-keyword", mk(FullEvent{EventKey: 13, PartitionID: qrPID, EventType: "agent_output", EventSummary: "needle summary", Content: "", Timestamp: 1500})},
+		{"other-type", mk(FullEvent{EventKey: 14, PartitionID: qrPID, EventType: "user_input", EventSummary: "needle again", Content: "x", Timestamp: 3000})},
+		{"bad-json", `{not valid json`},
+		{"empty", ``},
+		{"null", `null`},
+	}
+	queries := []QueryOptions{
+		{},
+		{Keyword: "needle"},
+		{Keyword: "hello"},
+		{EventTypes: []string{"agent_output"}},
+		{EventTypes: []string{"tool_result"}, Keyword: "needle"},
+		{StartTime: 1500},
+		{EndTime: 1500},
+		{StartTime: 1500, EndTime: 2500},
+		{MinEventKey: 12},
+		{Keyword: "zzz-miss"},
+		{EventTypes: []string{"nope"}},
+		{Keyword: "needle body"},
+	}
+
+	for _, v := range corpus {
+		for _, q := range queries {
+			// OLD oracle: full decode then the authoritative predicate.
+			var ev FullEvent
+			oldAccept := json.Unmarshal([]byte(v.js), &ev) == nil && matchesQueryFilters(ev, q)
+
+			// NEW: exactly the header split scanPartition now performs.
+			var newAccept bool
+			if hdr, ok := decodeEventHeader(v.js); ok {
+				switch filterEventHeader(hdr, q) {
+				case filterReject:
+					newAccept = false
+				case filterAccept:
+					newAccept = true
+				case filterNeedBody:
+					var full FullEvent
+					if json.Unmarshal([]byte(v.js), &full) == nil {
+						newAccept = matchesQueryFilters(full, q)
+					}
+				}
+			}
+			assert.Equal(t, oldAccept, newAccept, "corpus=%s query=%+v", v.name, q)
+		}
+	}
+
+	store := newTestSegmentStore(t)
+	contentKey := NewSnowflakeEventKey(qrPID, 1785000000000)
+	require.NoError(t, store.StoreEvent(contentKey, FullEvent{
+		EventKey:     contentKey,
+		PartitionID:  qrPID,
+		EventType:    "agent_output",
+		EventSummary: "unrelated summary",
+		Content:      "MAGIC_TOKEN inside body",
+		Timestamp:    1785000000000,
+	}))
+	refs, err := store.QueryEvents(QueryOptions{PartitionIDs: []int{qrPID}, Keyword: "MAGIC_TOKEN"})
+	require.NoError(t, err)
+	require.Len(t, refs, 1, "content-only keyword must be recalled through the split path")
+	assert.Equal(t, contentKey, refs[0].EventKey)
+	assert.Equal(t, "unrelated summary", refs[0].EventSummary)
+	assert.Equal(t, "agent_output", refs[0].EventType)
+
+	none, err := store.QueryEvents(QueryOptions{PartitionIDs: []int{qrPID}, Keyword: "does-not-exist-anywhere"})
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

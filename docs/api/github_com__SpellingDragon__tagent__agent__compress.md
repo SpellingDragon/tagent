@@ -44,6 +44,13 @@ const (
 	// DefaultCardMaxChars caps the index-card section of the rolling summary;
 	// beyond it old card lines are LLM-condensed (or sink, without a model).
 	DefaultCardMaxChars = 6000
+
+	// DefaultSummaryTimeout is the shared deadline for ONE real fold's
+	// synchronous summary calls (index-card condensation + rolling narrative).
+	// They share a single sub-context, so a stalled summary can never cost the
+	// round twice its budget. config compress.summary_timeout_seconds overrides
+	// it (0 → this default, negative → rejected by config validation).
+	DefaultSummaryTimeout = 5 * time.Second
 )
     DefaultMaxTokens Compression defaults (single source; the agent package
     re-exports aliases).
@@ -65,6 +72,14 @@ const (
 )
     TelemActive Telemetry disposition values for settle-notice refs (keyed by
     EventKey).
+
+const BudgetExceededReason = "budget_exceeded"
+    BudgetExceededReason is the machine-checkable name of the fixed-overhead
+    refusal. A request whose ESTIMABLE fixed part already exceeds the input
+    limit must be refused by the caller's gate under this name; the compressor
+    never deletes the system prompt or the tool declarations to squeeze through,
+    and it never runs a second compression to "make room" — ContextCompressor
+    stays the single compression authority.
 
 FUNCTIONS
 
@@ -153,6 +168,14 @@ type CompressOptions struct {
 	// inner aging target from one source read). <=0 → configured fallback.
 	MaxTokens     int
 	TriggerBudget int
+	// ContentBudget is the compressible-history budget for THIS call when the
+	// caller folded the request's fixed overhead into the trigger line. It is a
+	// POINTER on purpose: an explicit ZERO means "the fixed part already owns the
+	// whole line, squeeze the history to the bone", which the zero value of a
+	// plain int cannot express — a nil-vs-set read is what stops a zero budget
+	// from silently reverting to maxTokens/triggerBudget.
+	// nil → the configured pair above, the path of a caller that declares nothing.
+	ContentBudget *int
 }
     CompressOptions carries per-call overrides. Zero-value fields fall back to
     the compressor's configured defaults.
@@ -172,6 +195,30 @@ type CompressResult struct {
 	// degraded paths — only true results carry a persisted snapshot (D2,
 	// tagent-compress-event-sourcing).
 	Compressed bool
+
+	// FixedOverhead is the request-fixed cost folded into the trigger line for
+	// THIS call (assembled system prompt + frozen tool declarations + live
+	// notices + envelope), in tokens. Zero when no RequestBudgetContext was
+	// supplied — the caller then knows nothing about the fixed part.
+	FixedOverhead int
+	// ContentBudget is the compressible-history budget actually used: the
+	// trigger line minus FixedOverhead, floored at 0. It travels to the inner
+	// compressor as an EXPLICIT value whenever a budget context was given, so a
+	// zero budget is never mistaken for "unset" and never falls back to the
+	// construction maxTokens.
+	ContentBudget int
+	// Budget is the fixed-side breakdown (nil when no context was supplied).
+	// Its Unknown list reports what could not be sized; when non-empty, Total
+	// (and therefore FixedOverhead) is a FLOOR, not an exact count.
+	Budget *modelutil.RequestBudget
+	// BudgetExceeded names the refusal state: the ESTIMABLE fixed part alone
+	// already exceeds the input limit, so no history fold can pay for it. The
+	// caller's gate must not send; this round returns the timeline untouched
+	// (never a silent system/tool-declaration drop, never a second compressor).
+	BudgetExceeded bool
+	// BudgetReason is the machine-checkable reason when BudgetExceeded is set
+	// (BudgetExceededReason); empty otherwise.
+	BudgetReason string
 }
     CompressResult is the output of ContextCompressor.Compress.
 
@@ -213,13 +260,20 @@ func (cc *ContextCompressor) BudgetUnrepresentable() int64
 func (cc *ContextCompressor) Compress(
 	ctx context.Context,
 	refs []memory.EventReference,
+	budget ...RequestBudgetContext,
 ) CompressResult
     Compress resolves all projection refs into messages, checks the token budget
-    and compresses when over threshold.
+    and compresses when over threshold. It is the ONLY compression entry point;
+    the caller's final gate validates, it does not fold again.
 
-    - Input: ctx for LLM calls used by SmartCompressor, and refs from
-    SessionProjection. - Output: resolved or compressed messages, retained refs
-    replacing the projection, and error or degradation notices.
+      - Input: ctx for this fold's LLM calls, projection refs, optional fixed
+        overhead. Only the first budget element is read; extras are ignored,
+        not double-counted.
+      - Trigger: history plus fixed overhead against the hot group's trigger
+        line.
+      - Refusal: BudgetExceededReason, the timeline handed back untouched.
+      - Output: messages, retained refs, notices, and the budget numbers
+        reported.
 
 func (cc *ContextCompressor) CondensedTicketsLost() int64
     CondensedTicketsLost returns the cumulative count of recall tickets folded
@@ -256,6 +310,15 @@ func (cc *ContextCompressor) SetHotSource(src func() HotNumbers)
     owner's hot view is only reachable once the agent wiring exists (resident CM
     is built before its TagentAgent fields finish wiring, ).
 
+func (cc *ContextCompressor) SetSummaryTimeout(d time.Duration)
+    SetSummaryTimeout injects the summary deadline after construction (same
+    reason as SetHotSource: the owner's config view only exists once the agent
+    wiring is complete). A non-positive value restores the package default.
+
+func (cc *ContextCompressor) SummaryTimeout() time.Duration
+    SummaryTimeout reports the effective shared summary deadline for this
+    compressor (introspection for wiring and tests).
+
 func (cc *ContextCompressor) Threshold() float64
     Threshold reports the live compression threshold (the authoritative consumer
     value) for introspection/ops callers. OrgThreshold reads through here so
@@ -283,13 +346,22 @@ func WithRecentFullCount(n int) ContextCompressorOption
     WithRecentFullCount sets the full-window size anchored at compaction rounds,
     overriding the derived default (keepRecent × DefaultRefsPerTurn, see D6).
 
+func WithSummaryTimeout(d time.Duration) ContextCompressorOption
+    WithSummaryTimeout bounds the shared deadline of one real fold's summary
+    calls (default DefaultSummaryTimeout). Only a positive duration is accepted
+    here; 0/negative keeps the default, because "no limit" must never be spelled
+    as zero on a call that sits on the BeforeModel critical path.
+
 type DefaultTokenCounter struct {
 	CharsPerToken float64
 }
     DefaultTokenCounter estimates tokens using a character-based heuristic.
 
 func NewDefaultTokenCounter() *DefaultTokenCounter
-    NewDefaultTokenCounter 构造默认计量器，字符/token 比值取 2.0（中英混排的保守近似）。
+    NewDefaultTokenCounter 构造默认计量器，字符/token 比值取中英混排的保守近似。
+
+    常数单源：2.0 / 10 / 20 取自 modelutil 的导出常数，本包不复写—— modelutil.RequestBudget
+    与压缩器计数逐位同源，否则触发线与预算会各自漂移。
 
 func (c *DefaultTokenCounter) Estimate(messages []model.Message) int
     Estimate 按"字符数/比值 ＋ 每条固定开销"累加估算 token 用量。空消息集返回 0，**不计**任何
@@ -304,6 +376,45 @@ type HotNumbers struct {
     boundaries. It must be taken with a single read (why a
     per-field read is unsafe is specified in the document below);
     zero or invalid fields fall back to the construction values,
+
+type RequestBudgetContext struct {
+	// SystemText is the assembled system prompt for this request ("" = none).
+	SystemText string
+	// NoticesText is the dynamic task-board / recovery-prompt text injected
+	// outside the frozen history messages ("" = none).
+	NoticesText string
+	// Tools is the frozen S1 declaration view for this request (nil/empty = none).
+	Tools []modelutil.ToolDeclarationSnapshot
+	// ExtraUnknown declares components the caller could not size (e.g. media
+	// without usable metadata). They are REPORTED, never priced: the estimate
+	// stays honest about its own coverage instead of claiming an exact total.
+	ExtraUnknown []string
+}
+    RequestBudgetContext is the OPTIONAL fixed-overhead half of one assembled
+    request handed to Compress, as a value snapshot rather than a live view:
+    the caller passes what THIS request carries (the same frozen declarations
+    the outbound SDK request uses), so a concurrent schema hot-change cannot
+    move the goalposts mid-call. ContextCompressor prices the resolved history
+    with its own TokenCounter; everything the history fold CANNOT pay for — the
+    assembled system prompt, the frozen tool declarations, the live task board
+    and recovery notices, and the request envelope — arrives here.
+
+    Absent and present-with-zero-fields are DIFFERENT statements: absent means
+    the caller knows nothing about the fixed part and the hot group's numbers
+    stand; present means the fixed part is AUTHORITATIVE, genuine zeros included
+    (an empty system prompt and no tools really cost nothing), and the derived
+    compressible-content budget then travels to the compressor as an explicit
+    value.
+
+func (b RequestBudgetContext) FixedOverhead() (modelutil.RequestBudget, int)
+    FixedOverhead prices the non-compressible part of the request with the SAME
+    estimator the outbound request budget uses (modelutil.RequestSnapshot.
+    EstimateBudget), so the compressor and the budget can never drift.
+    The returned RequestBudget carries only the fixed-side buckets; the history
+    is priced by the compressor's own counter and lands in a separate bucket.
+
+    The int is the quantified total (a FLOOR whenever Unknown is non-empty — an
+    unknown is never counted as zero and never claimed as measured).
 
 type RetainedEntry struct {
 	Key int64 `json:"key"`

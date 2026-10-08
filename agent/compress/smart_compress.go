@@ -138,12 +138,26 @@ type CompressOptions struct {
 	// inner aging target from one source read). <=0 → configured fallback.
 	MaxTokens     int
 	TriggerBudget int
+	// ContentBudget is the compressible-history budget for THIS call when the
+	// caller folded the request's fixed overhead into the trigger line. It is a
+	// POINTER on purpose: an explicit ZERO means "the fixed part already owns the
+	// whole line, squeeze the history to the bone", which the zero value of a
+	// plain int cannot express — a nil-vs-set read is what stops a zero budget
+	// from silently reverting to maxTokens/triggerBudget.
+	// nil → the configured pair above, the path of a caller that declares nothing.
+	ContentBudget *int
 }
 
 // budget resolves the effective post-compression target for THIS call: the
 // per-call pair when present (same rule as SmartCompressor.budget — a positive
 // trigger below the window wins), else the construction fields.
 func (o CompressOptions) budget(sc *SmartCompressor) int {
+	if o.ContentBudget != nil {
+		if *o.ContentBudget > 0 {
+			return *o.ContentBudget
+		}
+		return 0
+	}
 	if o.TriggerBudget > 0 && (o.MaxTokens <= 0 || o.TriggerBudget < o.MaxTokens) {
 		return o.TriggerBudget
 	}

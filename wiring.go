@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/config"
@@ -25,8 +26,21 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 )
 
+// modelCacheKey 是解析缓存的身份键（O2 2.4）。三档解析路径共用这一份拼写，所以
+// 「同一实例」的判据在每条路上都一样，不存在 agent 路已按身份区分而 global/direct 路
+// 还按别名复用的分裂。键含：用途（agent/global/direct，避免跨用途串味）、provider 别名、
+// **实际协议**、model、**实际端点** 与 **凭据来源的 env 名**；分隔符用 0x1f（不会出现在
+// 这些值里的单位分隔符），免得 "a:b"+"c" 与 "a"+":"b:c" 撞成同一个键。
+//
+// 凭据的**值**绝不进键：进键就是把秘密抄进可诊断的字符串，而且换 key 本不该造第二个
+// 实例（身份没变）。端点与协议必须进——它们是「这个实例连的是哪台服务」的一部分，
+// 缺了就等于同名换端点后继续用旧端点服务新配置。
+func modelCacheKey(use, alias, protocol, modelName, endpoint, keyEnv string) string {
+	return strings.Join([]string{use, alias, protocol, modelName, endpoint, keyEnv}, "\x1f")
+}
+
 // resolveAgentModel returns the model instance one agent LLM calls use and caches it
-// per provider plus model pair.
+// per resolved instance identity (modelCacheKey).
 //
 // - Resolution order: per-name override, then the agent own model, then the global default model, then the WithModel-injected instance.
 // - A TrajectoryRecorder, when enabled, wraps every returned instance including override hits, outside the SwappableModel so it observes post-swap traffic.
@@ -52,25 +66,30 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 	if providerName == "" {
 		providerName = cfg.Provider
 	}
-	cacheKey := providerName + ":" + acfg.Model
-	if m, ok := rc.resolvedModels[cacheKey]; ok {
-		return m
-	}
 
+	// 身份先于键：实际协议、端点与凭据来源名都是这个实例的一部分，所以它们必须在
+	// 查缓存之前就知道——否则换了端点的第二次解析会命中别名键上的旧实例。
 	var opts []provider.Option
 	protocolName := providerName
+	endpoint, keyEnv := "", ""
 	if pcfg, ok := cfg.Providers[providerName]; ok {
 		if pcfg.Provider != "" {
 			protocolName = pcfg.Provider
 		}
 		if pcfg.APIEndpoint != "" {
+			endpoint = pcfg.APIEndpoint
 			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
 		}
 		if pcfg.APIKeyEnv != "" {
+			keyEnv = pcfg.APIKeyEnv
 			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
 				opts = append(opts, provider.WithAPIKey(key))
 			}
 		}
+	}
+	cacheKey := modelCacheKey("agent", providerName, protocolName, acfg.Model, endpoint, keyEnv)
+	if m, ok := rc.resolvedModels[cacheKey]; ok {
+		return m
 	}
 
 	m, err := provider.Model(protocolName, acfg.Model, opts...)
@@ -99,16 +118,17 @@ func (rc *runtimeConfig) resolveAgentModel(name string, acfg AgentConfig, cfg Co
 // provider/model to resolve — the caller then falls back to the injected
 // rc.model, which keeps minimal configs and tests working. A resolve failure
 // returns nil WITHOUT caching so a later hot-reload rebuild can retry
-// (for example once the API-key environment variable appears). The cache key
-// includes the resolved endpoint, so changing api_endpoint for a same-name
-// provider cannot hit a stale cached instance.
+// (for example once the API-key environment variable appears).
+//
+// 与 agent 路同一份身份键拼写（modelCacheKey），只有用途位不同：两路的语义统一在
+// 「连的是哪个协议、哪台端点、读哪个 env」上，别名相同而端点不同不构成复用理由。
 func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
 	if cfg.Model == "" || cfg.Provider == "" {
 		return nil
 	}
 	var opts []provider.Option
 	protocolName := cfg.Provider
-	endpoint := ""
+	endpoint, keyEnv := "", ""
 	if pcfg, ok := cfg.Providers[cfg.Provider]; ok {
 		if pcfg.Provider != "" {
 			protocolName = pcfg.Provider
@@ -118,12 +138,13 @@ func (rc *runtimeConfig) resolveGlobalDefaultModel(cfg Config) model.Model {
 			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
 		}
 		if pcfg.APIKeyEnv != "" {
+			keyEnv = pcfg.APIKeyEnv
 			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
 				opts = append(opts, provider.WithAPIKey(key))
 			}
 		}
 	}
-	cacheKey := "@@global:" + cfg.Provider + ":" + cfg.Model + ":" + endpoint
+	cacheKey := modelCacheKey("global", cfg.Provider, protocolName, cfg.Model, endpoint, keyEnv)
 	if m, ok := rc.resolvedModels[cacheKey]; ok {
 		return m
 	}
@@ -174,26 +195,31 @@ func (rc *runtimeConfig) resolveModelRef(ref ModelRef, name string, acfg AgentCo
 		return nil
 	}
 
-	cacheKey := "direct:" + providerName + ":" + modelName
-	if m, ok := rc.resolvedModels[cacheKey]; ok {
-		out.model = m
-		return out
-	}
-
+	// 直调路（摘要/进化 judge）与前两路共用身份判据：它拿到的同样是「别名+端点+协议」
+	// 决定的实例，缺维度就会在换端点后的新一代里继续连旧端点。设计决策 5 说的是
+	// 「统一」，不是只修其中两条。
 	var opts []provider.Option
 	protocolName := providerName
+	endpoint, keyEnv := "", ""
 	if pcfg, ok := cfg.Providers[providerName]; ok {
 		if pcfg.Provider != "" {
 			protocolName = pcfg.Provider
 		}
 		if pcfg.APIEndpoint != "" {
+			endpoint = pcfg.APIEndpoint
 			opts = append(opts, provider.WithBaseURL(pcfg.APIEndpoint))
 		}
 		if pcfg.APIKeyEnv != "" {
+			keyEnv = pcfg.APIKeyEnv
 			if key := os.Getenv(pcfg.APIKeyEnv); key != "" {
 				opts = append(opts, provider.WithAPIKey(key))
 			}
 		}
+	}
+	cacheKey := modelCacheKey("direct", providerName, protocolName, modelName, endpoint, keyEnv)
+	if m, ok := rc.resolvedModels[cacheKey]; ok {
+		out.model = m
+		return out
 	}
 
 	m, err := provider.Model(protocolName, modelName, opts...)

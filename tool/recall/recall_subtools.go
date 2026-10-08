@@ -322,6 +322,10 @@ type memoryTurnResult struct {
 	Complete bool `json:"complete"`
 	// Capped is true when MaxSteps was hit before reaching external_input.
 	Capped bool `json:"capped"`
+	// Reason names where the backward walk stopped when it did not reach the
+	// turn's external_input (see the partial* constants). Empty when Complete.
+	// Additive: Complete/Capped keep their meanings.
+	Reason string `json:"reason,omitempty"`
 }
 
 // memoryTurnItem is one event in a reconstructed turn. Content carries the
@@ -416,6 +420,42 @@ func truncateTurnContent(content string) string {
 	return string(r[:maxRunes]) + "…(截断)"
 }
 
+// partialMissingAncestor and its siblings are the named reasons for an
+// incomplete backward walk over the causal chain. Each one states what the walk
+// OBSERVED at the point it stopped; none infers a cause (TTL, eviction,
+// permissions) that the storage layer never reported.
+const (
+	// partialMissingAncestor: a recorded parent edge points at an event the
+	// store cannot return — the chain breaks at a fact that is not there.
+	partialMissingAncestor = "missing_ancestor"
+	// partialRelationError: reading the parent edge itself failed.
+	partialRelationError = "relation_error"
+	// partialRelationUnavailable: the backend exposes no relation capability
+	// at all, so the chain cannot advance — reported as such, never as an
+	// empty history.
+	partialRelationUnavailable = "relation_unavailable"
+	// partialCycle: the chain led back to an event already walked.
+	partialCycle = "cycle"
+	// partialLimit: the step budget ran out before the turn's external_input.
+	partialLimit = "limit"
+	// partialNoParentEdge: the walk stopped on an event carrying no recorded
+	// parent edge — a segment start (after a restart or a cursor eviction).
+	// The walker does not guess an ancestor for it.
+	partialNoParentEdge = "no_parent_edge"
+)
+
+// turnWalk is the outcome of one backward walk over the causal chain.
+type turnWalk struct {
+	// Chain holds the events actually read, oldest → newest.
+	Chain []memoryTurnItem
+	// Complete is true when the walk reached the turn's external_input.
+	Complete bool
+	// Capped is true when the step budget ran out before that happened.
+	Capped bool
+	// Reason names where the walk stopped; empty when Complete.
+	Reason string
+}
+
 // NewMemoryTurnTool reconstructs a task turn's execution process (compress-
 // digest-reconnect). Given a boundary event key (usually an agent_output
 // card), it walks the causal chain backward via GetParent until the turn's
@@ -442,15 +482,16 @@ func NewMemoryTurnTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 				return memoryTurnResult{}, fmt.Errorf("event key is required (hex string)")
 			}
 
-			chain, complete, capped, werr := walkTurnChain(accessor, startKey, maxSteps)
+			walk, werr := walkTurnChain(accessor, startKey, maxSteps)
 			if werr != nil {
 				return memoryTurnResult{}, werr
 			}
 			return memoryTurnResult{
-				Events:   chain,
-				Count:    len(chain),
-				Complete: complete,
-				Capped:   capped,
+				Events:   walk.Chain,
+				Count:    len(walk.Chain),
+				Complete: walk.Complete,
+				Capped:   walk.Capped,
+				Reason:   walk.Reason,
 			}, nil
 		},
 		function.WithName("memory_turn"),
@@ -461,19 +502,31 @@ func NewMemoryTurnTool(accessor tagenttool.MemoryStoreAccessor) tool.Tool {
 // walkTurnChain walks the causal chain backward from startKey until the
 // turn's external_input (inclusive) and returns the events oldest → newest.
 // Shared by memory_turn and the unified recall tool's turn_key form
-// .
-func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxSteps int) (chain []memoryTurnItem, complete, capped bool, err error) {
+// . When the walk cannot reach the turn start it reports the part it did
+// read plus the named reason it stopped for, instead of passing it off as
+// "no history" .
+func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxSteps int) (turnWalk, error) {
+	out := turnWalk{}
+	rsp, hasRelations := accessor.(memory.RelationStoreProvider)
+	seen := make(map[int64]bool, maxSteps)
+
 	currentKey := startKey
 	reachedInput := false
 	for step := 0; step < maxSteps && currentKey != 0; step++ {
 		evt, gerr := accessor.GetEvent(currentKey)
 		if gerr != nil {
 			if step == 0 {
-				return nil, false, false, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
+				return turnWalk{}, fmt.Errorf("event not found: %s", tagentevent.FormatEventKey(currentKey))
 			}
+			out.Reason = partialMissingAncestor
 			break
 		}
-		chain = append(chain, memoryTurnItem{
+		if seen[evt.EventKey] {
+			out.Reason = partialCycle
+			break
+		}
+		seen[evt.EventKey] = true
+		out.Chain = append(out.Chain, memoryTurnItem{
 			Key:     tagentevent.FormatEventKey(evt.EventKey),
 			Type:    evt.EventType,
 			Summary: truncateTurnContent(evt.EventSummary),
@@ -484,22 +537,35 @@ func walkTurnChain(accessor tagenttool.MemoryStoreAccessor, startKey int64, maxS
 			reachedInput = true
 			break
 		}
-		// Walk backward via the causal chain.
-		var parentKey int64
-		if rsp, ok := accessor.(memory.RelationStoreProvider); ok {
-			pk, perr := rsp.RelationStore().GetParent(evt.EventKey)
-			if perr != nil {
-				log.Errorf("[Recall] walkTurnChain GetParent failed key=%d: %v", evt.EventKey, perr)
-			}
-			parentKey = pk
+		if !hasRelations {
+			out.Reason = partialRelationUnavailable
+			break
+		}
+		parentKey, perr := rsp.RelationStore().GetParent(evt.EventKey)
+		if perr != nil {
+			log.Errorf("[Recall] walkTurnChain GetParent failed key=%d: %v", evt.EventKey, perr)
+			out.Reason = partialRelationError
+			break
 		}
 		currentKey = parentKey
 	}
 
-	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
-		chain[i], chain[j] = chain[j], chain[i]
+	out.Complete = reachedInput
+	out.Capped = len(out.Chain) >= maxSteps && !out.Complete
+	if out.Complete {
+		out.Reason = ""
+	} else if out.Reason == "" {
+		if out.Capped {
+			out.Reason = partialLimit
+		} else {
+			out.Reason = partialNoParentEdge
+		}
 	}
-	return chain, reachedInput, len(chain) >= maxSteps && !reachedInput, nil
+
+	for i, j := 0, len(out.Chain)-1; i < j; i, j = i+1, j-1 {
+		out.Chain[i], out.Chain[j] = out.Chain[j], out.Chain[i]
+	}
+	return out, nil
 }
 
 // buildRecallSubTools assembles the sub-tools for RecallAgent.

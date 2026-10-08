@@ -64,6 +64,11 @@ type memoryRecallResult struct {
 	// Message carries the honest-truncation hint for query mode (empty when
 	// results did not hit the limit).
 	Message string `json:"message,omitempty"`
+	// Complete/Capped/Reason describe the turn_key causal walk only; they
+	// stay absent in the other modes. Additive: no field changes meaning.
+	Complete bool   `json:"complete,omitempty"`
+	Capped   bool   `json:"capped,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // NewMemoryRecallTool 构造协议级召回工具（纯函数，无子 agent 绕行）：items 票据形态优先于 query 形态。

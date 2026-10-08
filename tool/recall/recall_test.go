@@ -377,3 +377,221 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// noRelationAccessor 只暴露内容读取：用来钉住"后端没有关系能力"必须具名报出，
+// 而不是被当成一条空历史。
+type noRelationAccessor struct{ memory.MemoryStore }
+
+// brokenRelationStore 让 GetParent 一律失败（父键无法确认）。
+type brokenRelationStore struct {
+	memory.RelationStore
+	err error
+}
+
+func (r brokenRelationStore) GetParent(int64) (int64, error) { return 0, r.err }
+
+// failingRelationAccessor 保留关系存储接口本身，只让父键读取报错。
+type failingRelationAccessor struct {
+	*memory.InMemoryStore
+	err error
+}
+
+func (a failingRelationAccessor) RelationStore() memory.RelationStore {
+	return brokenRelationStore{RelationStore: a.InMemoryStore.RelationStore(), err: a.err}
+}
+
+// callTurnShape 调用工具并把结果读成线上 JSON 视图：断言按契约字段做，因此"字段还没实现"
+// 与"字段值不对"都能被测出来，不需要测试代码预先了解内部结构体。
+func callTurnShape(t *testing.T, tl tool.Tool, argsJSON string) (map[string]any, error) {
+	t.Helper()
+	out, err := tl.(tool.CallableTool).Call(context.Background(), []byte(argsJSON))
+	if err != nil {
+		return nil, err
+	}
+	raw, merr := json.Marshal(out)
+	require.NoError(t, merr)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	return m, nil
+}
+
+func shapeString(m map[string]any, field string) string {
+	s, _ := m[field].(string)
+	return s
+}
+
+func shapeBool(m map[string]any, field string) bool {
+	b, _ := m[field].(bool)
+	return b
+}
+
+func shapeCount(m map[string]any) int {
+	f, _ := m["count"].(float64)
+	return int(f)
+}
+
+func seedTurnEvent(t *testing.T, store *memory.InMemoryStore, key int64, eventType string) {
+	t.Helper()
+	require.NoError(t, store.StoreEvent(key, memory.FullEvent{
+		EventKey: key, EventType: eventType, EventSummary: eventType, Content: "body",
+		Timestamp: 1710000000000 + key,
+	}))
+}
+
+// TestRecallTurn_PartialReason 钉住回溯不完整时按实际检出原因具名报出。
+//   - 缺祖先、关系错误、无关系能力、环、上限与段起点断点各是各的 reason
+//   - 不得被统一伪装成"没有历史"
+//   - Complete/Capped 语义不变，reason 只是附加说明
+//   - 起始键取不回仍是错误，不是空结果
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
+func TestRecallTurn_PartialReason(t *testing.T) {
+	unified := func(t *testing.T, accessor memory.MemoryStore, turnKey string) map[string]any {
+		t.Helper()
+		tl := NewRecallTool(accessor, nil)
+		m, err := callTurnShape(t, tl, `{"turn_key":"`+turnKey+`"}`)
+		require.NoError(t, err)
+		return m
+	}
+
+	t.Run("complete turn carries no reason", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		aoKey := buildChainedTurn(t, store)
+		args := `{"key":"` + tagentevent.FormatEventKey(aoKey) + `"}`
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(store), args)
+		require.NoError(t, err)
+		assert.Equal(t, 4, shapeCount(sub))
+		assert.True(t, shapeBool(sub, "complete"), "走到 external_input 才是 complete")
+		assert.Empty(t, shapeString(sub, "reason"), "完整回溯不该带原因")
+
+		entry := unified(t, store, tagentevent.FormatEventKey(aoKey))
+		assert.Equal(t, "turn", shapeString(entry, "mode"))
+		assert.Equal(t, 4, shapeCount(entry))
+		assert.True(t, shapeBool(entry, "complete"))
+		assert.Empty(t, shapeString(entry, "reason"))
+	})
+
+	t.Run("missing ancestor is named", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 400, tagentevent.TypeAgentOutput)
+		require.NoError(t, store.RelationStore().SetParent(400, 200))
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(store), `{"key":"`+tagentevent.FormatEventKey(400)+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialMissingAncestor, shapeString(sub, "reason"))
+		assert.Equal(t, 1, shapeCount(sub), "已读到的部分照常交回")
+		assert.False(t, shapeBool(sub, "complete"))
+		assert.False(t, shapeBool(sub, "capped"), "断链不是上限截断")
+
+		entry := unified(t, store, tagentevent.FormatEventKey(400))
+		assert.Equal(t, partialMissingAncestor, shapeString(entry, "reason"))
+		assert.Contains(t, shapeString(entry, "message"), partialMissingAncestor,
+			"模型可读的 message 也要带上具名原因")
+	})
+
+	t.Run("relation error is named", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 400, tagentevent.TypeAgentOutput)
+		require.NoError(t, store.RelationStore().SetParent(400, 100))
+		seedTurnEvent(t, store, 100, tagentevent.TypeExternalInput)
+		acc := failingRelationAccessor{InMemoryStore: store, err: fmt.Errorf("relation journal unreadable")}
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(acc), `{"key":"`+tagentevent.FormatEventKey(400)+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialRelationError, shapeString(sub, "reason"))
+		assert.Equal(t, 1, shapeCount(sub))
+		assert.False(t, shapeBool(sub, "complete"))
+
+		entry := unified(t, acc, tagentevent.FormatEventKey(400))
+		assert.Equal(t, partialRelationError, shapeString(entry, "reason"))
+	})
+
+	t.Run("no relation capability is named, not an empty history", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 400, tagentevent.TypeAgentOutput)
+		seedTurnEvent(t, store, 300, tagentevent.TypeThinkingPlan)
+		acc := noRelationAccessor{MemoryStore: store}
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(acc), `{"key":"`+tagentevent.FormatEventKey(400)+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialRelationUnavailable, shapeString(sub, "reason"))
+		assert.Equal(t, 1, shapeCount(sub), "无关系能力只限制链的推进，不得抹掉已读到的事件")
+		assert.False(t, shapeBool(sub, "complete"))
+
+		entry := unified(t, acc, tagentevent.FormatEventKey(400))
+		assert.Equal(t, partialRelationUnavailable, shapeString(entry, "reason"))
+	})
+
+	t.Run("cycle is named and bounded", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 100, tagentevent.TypeAgentOutput)
+		seedTurnEvent(t, store, 200, tagentevent.TypeThinkingPlan)
+		require.NoError(t, store.RelationStore().SetParent(100, 200))
+		require.NoError(t, store.RelationStore().SetParent(200, 100))
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(store), `{"key":"`+tagentevent.FormatEventKey(100)+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialCycle, shapeString(sub, "reason"))
+		assert.Equal(t, 2, shapeCount(sub), "检出环必须立即停住，不得把两个事件反复计入")
+		assert.False(t, shapeBool(sub, "complete"))
+		assert.False(t, shapeBool(sub, "capped"))
+
+		entry := unified(t, store, tagentevent.FormatEventKey(100))
+		assert.Equal(t, partialCycle, shapeString(entry, "reason"))
+	})
+
+	t.Run("limit is named beside capped", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		aoKey := buildChainedTurn(t, store)
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(store),
+			`{"key":"`+tagentevent.FormatEventKey(aoKey)+`","max_steps":1}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialLimit, shapeString(sub, "reason"))
+		assert.True(t, shapeBool(sub, "capped"), "既有 Capped 字段语义保持")
+		assert.False(t, shapeBool(sub, "complete"))
+
+		entry := unifiedCapped(t, store, tagentevent.FormatEventKey(aoKey))
+		assert.True(t, shapeBool(entry, "capped"), "统一入口的 Capped 语义保持")
+		assert.Equal(t, partialLimit, shapeString(entry, "reason"))
+	})
+
+	t.Run("segment start without a parent is a named break", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 400, tagentevent.TypeAgentOutput)
+
+		sub, err := callTurnShape(t, NewMemoryTurnTool(store), `{"key":"`+tagentevent.FormatEventKey(400)+`"}`)
+		require.NoError(t, err)
+		assert.Equal(t, partialNoParentEdge, shapeString(sub, "reason"))
+		assert.Equal(t, 1, shapeCount(sub))
+		assert.False(t, shapeBool(sub, "complete"))
+		assert.False(t, shapeBool(sub, "capped"))
+
+		entry := unified(t, store, tagentevent.FormatEventKey(400))
+		assert.Equal(t, partialNoParentEdge, shapeString(entry, "reason"))
+	})
+
+	t.Run("first key miss stays an error", func(t *testing.T) {
+		store := memory.NewInMemoryStore()
+		seedTurnEvent(t, store, 400, tagentevent.TypeAgentOutput)
+
+		_, err := callTurnShape(t, NewMemoryTurnTool(store), `{"key":"`+tagentevent.FormatEventKey(999)+`"}`)
+		require.Error(t, err, "首键缺失不得降级为 partial 结果")
+		assert.Contains(t, err.Error(), "event not found")
+
+		tl := NewRecallTool(store, nil).(tool.CallableTool)
+		_, err = tl.Call(context.Background(), []byte(`{"turn_key":"`+tagentevent.FormatEventKey(999)+`"}`))
+		require.Error(t, err, "统一入口同样不得把缺失首键说成空历史")
+	})
+}
+
+// unifiedCapped 以 max_steps=1 走统一入口的 turn_key 形态：上限截断必须在子工具与
+// 统一入口两条路径上同时表现为 capped + limit，不得只在其中一条成立。
+func unifiedCapped(t *testing.T, accessor memory.MemoryStore, turnKey string) map[string]any {
+	t.Helper()
+	m, err := callTurnShape(t, NewRecallTool(accessor, nil),
+		`{"turn_key":"`+turnKey+`","max_steps":1}`)
+	require.NoError(t, err)
+	return m
+}

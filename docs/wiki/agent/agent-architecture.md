@@ -182,7 +182,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
 **文件**：`event_bus.go`
 **原型对应**：`eventBus chan Event`
 
-per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。构造经 `NewReliableEventBus(spillDir)`（T-G ReliableBus）：配置 `reliability.bus_spill_dir` 时 channel 满则事件溢出落盘而非丢弃（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复，at-least-once），空则回退纯 channel（默认，零行为变化）。文件亦含 task_settled 事件构建（自包含 + Origin trace 锚回填）。
+per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。构造经 `NewReliableEventBus(spillDir)`：配置 `reliability.bus_spill_dir` 时启用 **durable inbox（v2）**——每个输入在回执之前先落盘，channel 只承载唤醒脉冲（不是「满才溢」的二级路径），at-least-once；空则回退纯 channel（默认，零行为变化）。存在 `*.spill` 残留或未排空的 v1 树时**拒绝升级**并给出迁移指引。语义详见 [持久投递与依赖退化](../reliability/durable-delivery.md)。文件亦含 task_settled 事件构建（自包含 + Origin trace 锚回填）。
 
 ### 2.9 AgentToolWrapper
 
@@ -312,7 +312,7 @@ graph TB
 | `tool_agent.go` | AgentToolWrapper + 任务链还原器 + 工具注册接口 | `tools map` + `RegisterTool` |
 | `meditation.go` / `meditation_digest.go` | 冥想心跳 + 自我状态 digest（PromptSource 为 prompt.Getter） | 无（生产扩展） |
 | `governance/` | GovernanceGate 决策管线（classify→critical 批准→goal→budget→记账）、GovernanceTool leaf 装饰器、BudgetManager、ApprovalManager、DenialLedger、RiskClassifier | 无（生产扩展，默认关） |
-| `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、SpillStore（ReliableBus 磁盘溢出）、AnchorStore（冥想锚点跨重启） | 无（生产扩展，默认关） |
+| `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖退化-恢复）、Inbox（durable inbox-v2，受理前落盘；前代 SpillStore 已停用，仅余格式识别与受管重置）、AnchorStore（冥想锚点跨重启） | 无（生产扩展，默认关） |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go）；Origin 携带 trace 锚 | 无（生产扩展） |
 | `rl/`（独立顶级包） | TrajectoryRecorder（含 trace 关联字段）+ HTTPAPI（**token 认证 + loopback fail-closed**：`TAGENT_RL_AUTH_TOKEN`/`ValidateListenAddr`，实施加固 3.x）+ SwappableModel（retired model 延迟回收，5.2） | 无（生产扩展） |
@@ -323,7 +323,7 @@ agent 包内 50 个文件按职责分五组，子域已独立成包（`task/` �
 
 | 组 | 文件与职责 |
 |---|---|
-| 事件循环（引擎主干） | `agent.go` 聚合根与 AgentConfig；`event_loop.go` runEventLoop 主循环（Pull 批处理、退避重试、降级 backoff）；`event_bus.go` EventBus + AgentEvent + ReliableBus 磁盘溢出；`inject.go` InjectMessageWithSource 渗透入口；`trace.go` turn span |
+| 事件循环（引擎主干） | `agent.go` 聚合根与 AgentConfig；`event_loop.go` runEventLoop 主循环（Pull 批处理、退避重试、降级 backoff）；`event_bus.go` EventBus + AgentEvent + durable inbox 受理；`inject.go` InjectMessageWithSource 渗透入口；`trace.go` turn span |
 | 上下文管理（LLM 视图） | `context_manager.go` 粘合层（投影/持久化/settle 反馈/bundle 章盖章）；`output_overflow.go` outputCh 宽限与溢出票据；`helpers.go`、`lifecycle.go` 辅助与生命周期；`session.go` 子 agent 调用路径 |
 | 子 Agent | `tool_agent.go`（最大文件）AgentToolWrapper：本地与 A2A 统一封装、重入、交接；`a2a.go` 远程协议 |
 | 冥想 | `meditation.go` 门控触发（novelty + idle）；`meditation_digest.go` digest 组装 |
@@ -402,6 +402,31 @@ TagentAgent.runEventLoop:
 - `model.Model`：LLM 调用
 - `event.Event`：事件结构
 - `tool.Tool` / `CallableTool`：工具接口
+
+<a id="request-budget"></a>
+### 5.1 完整请求预算：固定的一半由装配面交进去
+
+历史折叠只能付得起"可压内容"那一半。一次装配的**固定开销**——装配好的 system、本回合将注入的动态看板与恢复通告、冻结的工具声明、协议信封——由装配面（`agent/context_manager.go:assembleRequest`）打包成 `compress.RequestBudgetContext` 交给压缩器，因此"能不能发"这件事只有一个裁决者。
+
+| 判据 | 内容 | 佐证 |
+|---|---|---|
+| 单一估源 | 固定侧用**发出请求时同一把尺**定价（`modelutil.RequestSnapshot.EstimateBudget`），压缩器与预算永不可能各算各的 | `RequestBudgetContext.FixedOverhead` |
+| 常数单源 | 估算用的三个数（每字符比、每条消息余量、每次工具调用余量）只在 `modelutil` 定义一次，压缩器的默认计数器**引用同一组常数**，因此两侧不可能各抄一份而漂移 | `modelutil.CharsPerToken`、`agent/compress/token_counter.go` |
+| 快照是深拷贝 | S1 声明快照与请求快照由**纯函数**产出冻结值：不持生命周期、存储或调度器引用，拷贝辅助全为非导出，公开面只有快照本身 | `copyMessages`、`ToolDeclarationSnapshot` |
+| 声明序全序 | 快照里的工具声明按 `RegistryKey` 排序——每个 map 键唯一，因此它是**全序**；`Name` 只作防御性决胜，结果与 map 迭代序无关 | `sort.Slice`（`request_snapshot.go`） |
+| 参数全量计量 | 工具调用的原始 JSON 参数字节**全量计入、绝不截断**：截断会让预算低估真实出站体积 | `EstimateBudget` |
+| 空请求零信封 | 没有消息、没有工具、也没有结构化输出 schema 时**不加信封余量**，与计数器对空输入返回 0 同调——预算绝不把空快照误读成"有内容" | `protocolOverhead` |
+| fixed 输入集 | system ＋ notices ＋ 冻结声明 ＋ 信封余量四类进固定侧；历史由压缩器自己的计数器定价，落在另一个桶 | `FixedOverhead` |
+| Unknown 申报 | 调用方量不出的部件（如无可用元数据的媒体）进 `ExtraUnknown`：**只申报、不估价**，因此量化总额是**下界**而不是"精确总数"。未知既不当 0 也不冒充测得 | `RequestBudgetContext.ExtraUnknown` |
+| 缺省 ≠ 真零 | 不传参数＝"调用方对固定部分一无所知"，触发线与内层目标照旧取热组值；传了但字段全空＝**权威零**（空 system、无工具真的不花钱），可压内容预算作为显式值下发，于是一个零预算不会被降级回默认值 | `RequestBudgetContext` 文档 |
+| 值快照 | 传的是**这一次请求携带的东西**（与出站 SDK 请求同一份冻结声明），并发的 schema 热更换不掉球门 | `assembleRequest` |
+| 看板只渲染一次 | 装配面为定价固定开销而渲染本回合看板，并把**同一份文本**贴进真正出站的消息尾部：看板字节随任务年龄变化，二次渲染会发出预算从未计过账的内容；本轮没有交接时才走原本那次渲染 | `assembleRequest` `RequestBudgetContext.NoticesText` |
+| 先切 system 再定价 | system 的切分发生在定价之前，因此固定侧量的就是这一回合即将发出去的那段文本，而不是配置里的陈旧副本 | `assembleRequest` |
+| 具名拒发 | 固定部分已 ≥ 输入上限时，压缩器返回 `budget_exceeded`（`compress.BudgetExceededReason`）并**原样交回完整时间线**：不删 system、不删工具声明、不做第二次压缩"腾地方"——`ContextCompressor` 始终是唯一的压缩权威 | `context_compressor.go` `BudgetExceededReason` |
+| 门禁只搬运 | 最终门禁（`executionGateModel`）**不发明第二种裁决**，只把压缩器的裁决转成发送前的一次拒绝（`agent.ErrBudgetExceeded` 包装同一常数） | `execution_gate_model.go:ErrBudgetExceeded` |
+| 拒发先于消费 | 拒绝发生在**一次性恢复通告附着之前**：这一轮一个字节都没发出去，所以通告仍然欠着（它只在真正发起调用时消费），时间线原样保留 | `GenerateContent` `withRecoveryNotice` |
+| 两条出路同一个判决 | 记录在**每次装配**时设置或清除，因此一次拒发不会活过产生它的那一轮；通道与迭代两条出路读到同一份裁决。迭代路径必须以**带 Error 的 Response** 呈现，绝不返回空流——零输出流会被归约成"回合完成"，从而把已认领的耐久输入 ack 掉 | `setBudgetRefusal` `takeBudgetRefusal` `GenerateContentIter` |
+| 数字同源 | 拒绝里报出的上限从**压缩器取数用的同一个热参数源**读出（`liveInputLimit`），无源时回落构造期值／预算线：门禁报的数就是压缩器用过的数，不是镜像猜测 | `liveInputLimit` |
 
 <a id="context-management"></a>
 ## 六、上下文管理

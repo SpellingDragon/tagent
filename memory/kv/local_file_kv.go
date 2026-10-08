@@ -32,6 +32,13 @@ type LocalFileKV struct {
 	// map distinguishes "touched" from "empty after deletes" (delete file).
 	dirtyPids map[string]bool
 	closed    bool
+
+	// bucketsTouched records how many buckets the most recent KVScan/KVRange
+	// iterated, as an in-test observability probe for partition-local access
+	// (a provable single-namespace query must report 1, not the whole store).
+	// Guarded by mu (set only inside locked scans); diagnostic only, no impact
+	// on results.
+	bucketsTouched int
 }
 
 // bucketLabelOf maps a key to its snapshot bucket label: the numeric pid for
@@ -282,55 +289,121 @@ func (k *LocalFileKV) KVDelete(key string) error {
 	return nil
 }
 
-// allEntries flattens every bucket for scans (the maps are small per bucket;
-// scans still bound results via limit after the global sort).
-func (k *LocalFileKV) allEntries() []memory.KVPair {
-	var results []memory.KVPair
+// appendAllMatches is the conservative full-library fallback: it iterates every
+// bucket directly (no intermediate all-buckets slice) and appends the entries
+// whose key satisfies pred. Used only when a query's owning bucket cannot be
+// proven. It records the touched-bucket count for the access probe.
+func (k *LocalFileKV) appendAllMatches(results []memory.KVPair, pred func(string) bool) []memory.KVPair {
+	k.bucketsTouched = len(k.parts) + 1
 	for _, m := range k.parts {
 		for key, val := range m {
-			results = append(results, memory.KVPair{Key: key, Value: val})
+			if pred(key) {
+				results = append(results, memory.KVPair{Key: key, Value: val})
+			}
 		}
 	}
 	for key, val := range k.global {
-		results = append(results, memory.KVPair{Key: key, Value: val})
+		if pred(key) {
+			results = append(results, memory.KVPair{Key: key, Value: val})
+		}
+	}
+	return results
+}
+
+// bucketForPrefixScan reports the single bucket a prefix scan is provably
+// confined to. A prefix containing a colon anchors the namespace: any key with
+// that prefix has its FIRST colon at the same offset, so bucketLabelOf maps every
+// match to the same bucket. ok=false (full scan) is returned only for a
+// colon-less, fuzzy prefix (e.g. "1") that can straddle several buckets.
+func (k *LocalFileKV) bucketForPrefixScan(prefix string) (map[string]string, bool) {
+	sep := strings.IndexByte(prefix, ':')
+	if sep < 0 {
+		return nil, false
+	}
+	if sep > 0 {
+		if pid, err := strconv.Atoi(prefix[:sep]); err == nil {
+			return k.parts[pid], true
+		}
+	}
+	return k.global, true
+}
+
+// bucketForRangeScan confines [start,end) to a single partition bucket when the
+// whole half-open interval is provably inside that bucket's canonical "pid:" key
+// region [low, high), where high is "pid" with ':' bumped to ';'. [low,high) is
+// exactly the set of keys carrying prefix "pid:", and every such key routes to
+// parts[pid]. A start that is not a canonical pid key, or an end reaching past the
+// region, could admit global-namespace keys or a neighbouring partition, so the
+// range is not provable and must fall back to the full scan.
+func (k *LocalFileKV) bucketForRangeScan(start, end string) (map[string]string, bool) {
+	if start >= end {
+		return nil, true
+	}
+	sep := strings.IndexByte(start, ':')
+	if sep <= 0 {
+		return nil, false
+	}
+	pid, err := strconv.Atoi(start[:sep])
+	if err != nil {
+		return nil, false
+	}
+	low := strconv.Itoa(pid) + ":"
+	high := strconv.Itoa(pid) + ";"
+	if !strings.HasPrefix(start, low) || end > high {
+		return nil, false
+	}
+	return k.parts[pid], true
+}
+
+// finalizeSorted applies the shared post-processing: lexicographic sort by key,
+// then limit truncation (limit<=0 unbounded). Because the matched key SET is the
+// same as the historical all-buckets path, order and truncation are identical.
+func finalizeSorted(results []memory.KVPair, limit int) []memory.KVPair {
+	sort.Slice(results, func(i, j int) bool { return results[i].Key < results[j].Key })
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
 	}
 	return results
 }
 
 // KVScan returns all key-value pairs whose keys start with the given prefix,
 // sorted lexicographically by key. If limit > 0, at most limit pairs are returned.
+// A prefix provably belonging to one namespace reads only that bucket.
 func (k *LocalFileKV) KVScan(prefix string, limit int) ([]memory.KVPair, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var results []memory.KVPair
-	for _, pair := range k.allEntries() {
-		if strings.HasPrefix(pair.Key, prefix) {
-			results = append(results, pair)
+	if m, single := k.bucketForPrefixScan(prefix); single {
+		k.bucketsTouched = 1
+		for key, val := range m {
+			if strings.HasPrefix(key, prefix) {
+				results = append(results, memory.KVPair{Key: key, Value: val})
+			}
 		}
+	} else {
+		results = k.appendAllMatches(results, func(key string) bool { return strings.HasPrefix(key, prefix) })
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Key < results[j].Key })
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-	return results, nil
+	return finalizeSorted(results, limit), nil
 }
 
 // KVRange returns all key-value pairs whose keys fall in [start, end), sorted
-// lexicographically by key. If limit > 0, at most limit pairs are returned.
+// lexicographically by key. If limit > 0, at most limit pairs are returned. A
+// range provably inside one partition bucket reads only that bucket.
 func (k *LocalFileKV) KVRange(start, end string, limit int) ([]memory.KVPair, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var results []memory.KVPair
-	for _, pair := range k.allEntries() {
-		if pair.Key >= start && pair.Key < end {
-			results = append(results, pair)
+	if m, single := k.bucketForRangeScan(start, end); single {
+		k.bucketsTouched = 1
+		for key, val := range m {
+			if key >= start && key < end {
+				results = append(results, memory.KVPair{Key: key, Value: val})
+			}
 		}
+	} else {
+		results = k.appendAllMatches(results, func(key string) bool { return key >= start && key < end })
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Key < results[j].Key })
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-	return results, nil
+	return finalizeSorted(results, limit), nil
 }
 
 // KVBatch applies a batch of put/delete operations to the in-memory buckets

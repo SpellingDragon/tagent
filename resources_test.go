@@ -1041,8 +1041,8 @@ func TestNew_GovernanceDisabled_Default(t *testing.T) {
 	require.NotNil(t, a)
 }
 
-// TestNew_ReliableBusSpillDir 钉住 配了总线溢出根目录后，entry 得到属于自己的溢出目录。
-// - 目录形如 `<溢出根>/<entry>`，装配完成时已存在，不必等第一次溢出。
+// TestNew_ReliableBusSpillDir 钉住 配了总线 durable inbox 根目录后，entry 得到属于自己的收件箱子目录。
+// - 目录形如 `<inbox 根>/<entry>`，装配完成时已存在，不必等第一次落盘。
 // 契约: docs/wiki/platform/platform-subsystems.md#reliability-switches
 func TestNew_ReliableBusSpillDir(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
@@ -1058,7 +1058,7 @@ func TestNew_ReliableBusSpillDir(t *testing.T) {
 	require.NoError(t, statErr, "per-agent 溢出子目录 <BusSpillDir>/<entry> 应被创建")
 }
 
-// TestNew_ReliableBusDisabledDefault 验证配置门控：默认 BusSpillDir 空 → 不创建溢出目录（现状）。
+// TestNew_ReliableBusDisabledDefault 验证配置门控：默认 BusSpillDir 空 → 不建收件箱，总线保持纯 volatile。
 func TestNew_ReliableBusDisabledDefault(t *testing.T) {
 	require.NoError(t, RegisterBuiltinTools())
 	cfg := minimalConfig(filepath.Join(t.TempDir(), "evo"), false)

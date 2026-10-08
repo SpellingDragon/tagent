@@ -592,3 +592,439 @@ func TestPerCallOverride_RelaunchCarriesTheFrozenOverrides(t *testing.T) {
 	require.Equal(t, "work", gotBody)
 	require.Equal(t, frozen, got, "the relaunch must hand the frozen overrides to the re-dispatcher")
 }
+
+// TestModelOverride_ReferenceResolution 钉住四种引用形态都从「已选执行视图」解析，而不是从可变的全局表反复查证：
+//   - 已注册引用：由那台实例服务，被调方自有模型一次都不出场；
+//   - 配置模型（保留名 agent:<agent>）：解析为该执行视图里的实际 agent 模型，无需任何注册动作；
+//   - 自定义注册占用保留名：与本代实际模型不是同一实例即冲突，具名拒绝、不产生任何执行，且这次失败的候选不改写进程全局注册表（既不覆盖也不删除）；
+//   - 未注册引用：具名拒绝，两个模型都不出场。
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
+func TestModelOverride_ReferenceResolution(t *testing.T) {
+	t.Run("registered reference serves that instance", func(t *testing.T) {
+		registered := &viewRecorderModel{label: "o2a-registered", resp: percallFinalResp("REGISTERED-ANSWER")}
+		RegisterModelReference("o2a-ref-registered", registered)
+		own := &viewRecorderModel{label: "o2a-own-registered", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-ref-agent-registered", own,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+		w := NewAgentToolWrapper(blank, "delegate", nil, nil)
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work under a registered reference",
+			"model_override": "o2a-ref-registered",
+		}))
+		require.NoError(t, err, "a registered reference must resolve for this call")
+		require.Contains(t, out, "REGISTERED-ANSWER")
+		require.GreaterOrEqual(t, registered.calls(), 1,
+			"the instance the reference names must serve the call")
+		require.Zero(t, own.calls(),
+			"an overridden model replaces the delegate's own instance for this call")
+	})
+
+	t.Run("reserved name resolves the view's own model", func(t *testing.T) {
+		own := &viewRecorderModel{label: "o2a-config-model", resp: percallFinalResp("CONFIG-MODEL-ANSWER")}
+		blank := newPercallBlank(t, "o2a-ref-agent-config", own,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+		w := NewAgentToolWrapper(blank, "delegate", nil, nil)
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work addressed at the config-driven model itself",
+			"model_override": "agent:o2a-ref-agent-config",
+		}))
+		require.NoError(t, err,
+			"a config-driven instance's own model is addressable under the reserved name, "+
+				"without anybody having registered it: %v", err)
+		require.Contains(t, out, "CONFIG-MODEL-ANSWER")
+		require.GreaterOrEqual(t, own.calls(), 1,
+			"the reserved name must be served by the actual model of the selected execution view")
+	})
+
+	t.Run("custom registration occupying the reserved name is refused by name", func(t *testing.T) {
+		foreign := &viewRecorderModel{label: "o2a-foreign", resp: percallFinalResp("FOREIGN-ANSWER")}
+		RegisterModelReference("agent:o2a-ref-agent-conflict", foreign)
+		own := &viewRecorderModel{label: "o2a-own-conflict", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-ref-agent-conflict", own,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+		w := NewAgentToolWrapper(blank, "delegate", nil, nil)
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work under a name the view also owns",
+			"model_override": "agent:o2a-ref-agent-conflict",
+		}))
+		require.Error(t, err,
+			"a custom registration that conflicts with the reserved name of a config-driven "+
+				"model is refused, never silently served by either side")
+		var shaped overrideRejectError
+		require.True(t, errors.As(err, &shaped), "and the refusal must be structured, got %v", err)
+		require.Equal(t, "model_override", shaped.OverrideField())
+		require.Contains(t, err.Error(), "agent:o2a-ref-agent-conflict",
+			"the refusal must name the conflicting reference")
+		require.Nil(t, out, "a refused call produces no result")
+		require.Zero(t, foreign.calls(), "the registered instance must not serve a refused call")
+		require.Zero(t, own.calls(), "nor may the call fall back to the delegate's own model")
+
+		still, ok := LookupModelReference("agent:o2a-ref-agent-conflict")
+		require.True(t, ok, "a refused reference must still be readable from the registry")
+		require.Same(t, foreign, still,
+			"a failed candidate must not rewrite or drop the process-wide registry entry")
+	})
+
+	t.Run("unknown reference is refused without running", func(t *testing.T) {
+		own := &viewRecorderModel{label: "o2a-own-unknown", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-ref-agent-unknown", own,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+		w := NewAgentToolWrapper(blank, "delegate", nil, nil)
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work under nobody's reference",
+			"model_override": "o2a-ref-never-registered",
+		}))
+		require.Error(t, err, "an unregistered reference must be refused")
+		var shaped overrideRejectError
+		require.True(t, errors.As(err, &shaped), "and the refusal must be structured, got %v", err)
+		require.Equal(t, "model_override", shaped.OverrideField())
+		require.Contains(t, err.Error(), "o2a-ref-never-registered",
+			"the refusal must name the offending reference")
+		require.Nil(t, out)
+		require.Zero(t, own.calls(),
+			"an unresolvable reference never falls back to the delegate's own model")
+	})
+}
+
+// TestModelOverride_GenerationBinding 钉住「一次覆盖只解析一次，且解析结果属于它那一代」：
+//   - 保留名 agent:<agent> 解析的是**已选执行视图里的实际模型**：在途调用钉在发起代，随后的发布既不改写它这一代的模型，也不把它引到新代模型上；新的独立调用才读新面。
+//   - 校验与装配共用同一份冻结引用集：同名引用在两阶段之间被重新注册时，装配仍跑在校验答出的那台实例上，被改指的实例一次都不出场。
+//
+// 契约: docs/wiki/agent/execution-generations.md#generation-wiring-window
+func TestModelOverride_GenerationBinding(t *testing.T) {
+	t.Run("in-flight call keeps the generation it resolved", func(t *testing.T) {
+		birth := &viewRecorderModel{label: "o2a-birth", resp: percallFinalResp("BIRTH-ANSWER")}
+		g1 := &viewRecorderModel{label: "o2a-g1", resp: percallFinalResp("G1-ANSWER")}
+		gate := g1.armGate()
+		release := func() {
+			select {
+			case <-gate:
+			default:
+				close(gate)
+			}
+		}
+		t.Cleanup(release)
+
+		all := []trpctool.Tool{percallLeafTool{"read_file"}, percallLeafTool{"save_file"}}
+		blank := newPercallBlank(t, "o2a-bind-blank", birth, all)
+		w1 := stageGeneration(t, blank, "o2a-bind-gen1", "GEN1-PROMPT", g1,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+
+		type callOutcome struct {
+			out any
+			err error
+		}
+		done := make(chan callOutcome, 1)
+		go func() {
+			out, err := w1.Call(context.Background(), percallArgs(t, map[string]any{
+				"request":        "work addressed at this generation's own model",
+				"model_override": "agent:o2a-bind-blank",
+			}))
+			done <- callOutcome{out, err}
+		}()
+
+		require.Eventually(t, func() bool { return g1.calls() >= 1 }, 10*time.Second, 20*time.Millisecond,
+			"the reserved name must resolve to the model of the generation this call was selected on")
+		require.Zero(t, birth.calls(),
+			"the reserved name is the view's model, not the construction-time definition's")
+		require.Contains(t, g1.systemText(0), "GEN1-PROMPT",
+			"and the call really is running on generation 1's own view")
+
+		g2 := &viewRecorderModel{label: "o2a-g2", resp: percallFinalResp("G2-ANSWER")}
+		w2 := stageGeneration(t, blank, "o2a-bind-gen2", "GEN2-PROMPT", g2, all)
+
+		release()
+		res := <-done
+		require.NoError(t, res.err, "the in-flight call must finish on the view it started on")
+		require.Contains(t, res.out, "G1-ANSWER")
+		require.Equal(t, 1, g1.calls(), "a publish adds no round to the pinned generation")
+		require.Zero(t, g2.calls(),
+			"the later publish cannot reach into a call that already resolved its reference")
+
+		out2, err := w2.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "a later independent call",
+			"model_override": "agent:o2a-bind-blank",
+		}))
+		require.NoError(t, err)
+		require.Contains(t, out2, "G2-ANSWER",
+			"a new independent call reads the new face's own model under the same name")
+		require.Equal(t, 1, g1.calls(), "and it never re-enters the retired generation")
+	})
+
+	t.Run("validation and assembly share one resolution", func(t *testing.T) {
+		first := &viewRecorderModel{label: "o2a-two-stage-first", resp: percallFinalResp("FIRST-ANSWER")}
+		later := &viewRecorderModel{label: "o2a-two-stage-later", resp: percallFinalResp("LATER-ANSWER")}
+		RegisterModelReference("o2a-ref-two-stage", first)
+
+		own := &viewRecorderModel{label: "o2a-two-stage-own", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-blank-two-stage", own,
+			[]trpctool.Tool{percallLeafTool{"read_file"}})
+		w := NewAgentToolWrapper(blank, "delegate", nil, nil)
+
+		ov, err := w.parsePerCallOverrides(context.Background(), map[string]any{
+			"request":        "work under a registered reference",
+			"model_override": "o2a-ref-two-stage",
+		})
+		require.NoError(t, err, "the reference the view carries must validate")
+		require.NotNil(t, ov)
+
+		view, err := NewModelRefSnapshot("o2a-blank-two-stage", own)
+		require.NoError(t, err)
+		validated, err := resolveModelReference(ov.ModelRef, view)
+		require.NoError(t, err)
+		require.Same(t, first, validated)
+
+		RegisterModelReference("o2a-ref-two-stage", later)
+
+		cfg := *blank.config
+		require.NoError(t, applyPerCallOverrides(&cfg, ov, view))
+		require.Same(t, first, cfg.Model,
+			"assembly must run on the instance the single resolution produced, not on whatever "+
+				"the mutable table holds by then")
+		require.NotSame(t, later, cfg.Model, "a re-pointed name cannot slip into a running call")
+		require.Zero(t, later.calls(), "and the re-pointed instance never enters this call")
+		require.Same(t, own, blank.config.Model,
+			"the resolution is written into this call's copy of the view only")
+	})
+}
+
+// stageGenerationPinned publishes one generation the way the org wiring does for a
+// config-driven instance: its read-only model-reference snapshot is frozen in the
+// staging window (before activation) and pinned to that generation. The wrapper
+// returned is declared on THAT generation, so every call it takes resolves
+// references off the snapshot that was published with it.
+func stageGenerationPinned(tb testing.TB, blank *TagentAgent, label, promptText string,
+	m model.Model, tools []trpctool.Tool) (*AgentToolWrapper, *ModelRefSnapshot) {
+	tb.Helper()
+	cm := blank.contextManager
+	face := cm.ExecutorConfig()
+	face.Model = m
+	face.Tools = tools
+	face.SystemPrompt = promptText
+	runCfg := *blank.config
+	runCfg.Model = m
+	runCfg.Tools = tools
+	runCfg.SystemPrompt = promptText
+	runCfg.SystemPromptSource = nil
+	staged := cm.StageExecutor(cm.NewExecutorCandidate(face), face, &runCfg)
+	require.NotNil(tb, staged, "generation %s must stage a candidate", label)
+	refs, err := NewModelRefSnapshot(runCfg.Name, runCfg.Model)
+	require.NoError(tb, err, "generation %s must freeze the references of its own view", label)
+	require.NoError(tb, PinModelReferences(staged, refs), "and pin them before activation")
+	require.NotNil(tb, cm.ActivateExecutor(staged), "generation %s must activate", label)
+
+	w := NewAgentToolWrapper(blank, "delegate to the blank agent", nil, nil)
+	w.setDeclared(staged.binding)
+	require.True(tb, w.declaredSet(), "the wrapper must route through generation %s", label)
+	return w, refs
+}
+
+// TestModelOverride_ReentryIsolation 钉住默认/覆盖/重入矩阵：覆盖层不得改变任何既有上界，也不得跨调用存活。
+//   - 无覆盖：调用落在本代视图上，常驻定义逐字不变（模型、提示词、工具面都是本代自己的）；
+//   - 引用只给模型选择、不给调用路由：换掉模型的调用，工具面仍是属主声明的那份上界，越域条目在参数校验点具名拒绝，两台实例一次都不出场；
+//   - 覆盖随调用消亡：下一次无覆盖调用回到本代自有实例与本代视图，且解析结果从不写回进程全局注册表；
+//   - 重入读自己那代的冻结快照：本代快照不含的引用被具名拒绝，既不回落本代模型也不借新代放行，新独立代才看得见新注册的名字；两次调用之后执行引用归零，没有悬挂。
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
+func TestModelOverride_ReentryIsolation(t *testing.T) {
+	read := percallLeafTool{"read_file"}
+	save := percallLeafTool{"save_file"}
+
+	t.Run("a call carrying no override keeps the generation view", func(t *testing.T) {
+		own := &viewRecorderModel{label: "o2a-m-plain-own", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-m-plain", own, []trpctool.Tool{read, save})
+		gen := &viewRecorderModel{label: "o2a-m-plain-gen", resp: percallFinalResp("PLAIN-GEN-ANSWER")}
+		w, _ := stageGenerationPinned(t, blank, "o2a-m-plain-gen1", "PLAIN-GEN-PROMPT", gen,
+			[]trpctool.Tool{read})
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request": "ordinary work, no override",
+		}))
+		require.NoError(t, err)
+		require.Contains(t, out, "PLAIN-GEN-ANSWER")
+		require.Contains(t, gen.systemText(0), "PLAIN-GEN-PROMPT")
+		require.Equal(t, []string{"read_file"}, gen.toolNames(0),
+			"the undeclared call sees the generation's own tool surface")
+		require.Zero(t, own.calls(),
+			"a generation without an override never reaches the construction-time model")
+		require.Same(t, own, blank.config.Model, "and the resident definition is untouched")
+		require.Len(t, blank.Tools(), 2, "nor is the resident tool declaration narrowed")
+	})
+
+	t.Run("a model reference grants no tool routing", func(t *testing.T) {
+		registered := &viewRecorderModel{label: "o2a-m-rt", resp: percallFinalResp("ROUTING-ANSWER")}
+		RegisterModelReference("o2a-ref-routing", registered)
+
+		own := &viewRecorderModel{label: "o2a-m-rt-own", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-m-routing", own, []trpctool.Tool{read, save})
+		gen := &viewRecorderModel{label: "o2a-m-rt-gen", resp: percallFinalResp("GEN-ANSWER")}
+		w, _ := stageGenerationPinned(t, blank, "o2a-m-rt-gen1", "ROUTING-GEN-PROMPT", gen,
+			[]trpctool.Tool{read, save})
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":                "work under another model",
+			"model_override":         "o2a-ref-routing",
+			"system_prompt_override": "ROUTING-PROMPT",
+			"tools_subset":           []string{"read_file"},
+		}))
+		require.NoError(t, err)
+		require.Contains(t, out, "ROUTING-ANSWER")
+		require.Equal(t, []string{"read_file"}, registered.toolNames(0),
+			"the tool surface stays the owner's declared upper bound — a model reference buys no route")
+		require.NotContains(t, registered.toolNames(0), "save_file")
+		require.Contains(t, registered.systemText(0), "ROUTING-PROMPT")
+
+		before := registered.calls()
+		out2, err2 := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work under another model, tools nobody declared",
+			"model_override": "o2a-ref-routing",
+			"tools_subset":   []string{"read_file", "mcp_call"},
+		}))
+		require.Error(t, err2, "the maximum tool domain stays a hard bound beside a model override")
+		var shaped overrideRejectError
+		require.True(t, errors.As(err2, &shaped), "and the refusal names the field, got %v", err2)
+		require.Equal(t, "tools_subset", shaped.OverrideField())
+		require.Contains(t, err2.Error(), "mcp_call")
+		require.Nil(t, out2)
+		require.Equal(t, before, registered.calls(), "a refused call runs nothing")
+		require.Zero(t, gen.calls(), "not even on the generation's own model")
+		require.Zero(t, own.calls())
+	})
+
+	t.Run("an override dies with its call", func(t *testing.T) {
+		registered := &viewRecorderModel{label: "o2a-m-leak-ref", resp: percallFinalResp("OVERRIDDEN-ANSWER")}
+		RegisterModelReference("o2a-ref-leak", registered)
+
+		own := &viewRecorderModel{label: "o2a-m-leak-own", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-m-leak", own, []trpctool.Tool{read, save})
+		gen := &viewRecorderModel{label: "o2a-m-leak-gen", resp: percallFinalResp("GEN-ANSWER")}
+		w, _ := stageGenerationPinned(t, blank, "o2a-m-leak-gen1", "LEAK-GEN-PROMPT", gen,
+			[]trpctool.Tool{read, save})
+
+		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":                "overridden work",
+			"model_override":         "o2a-ref-leak",
+			"system_prompt_override": "LEAK-PROMPT",
+			"tools_subset":           []string{"read_file"},
+		}))
+		require.NoError(t, err)
+		require.Contains(t, out, "OVERRIDDEN-ANSWER")
+		require.Equal(t, 1, registered.calls())
+
+		out2, err2 := w.Call(context.Background(), percallArgs(t, map[string]any{
+			"request": "the next call carries nothing",
+		}))
+		require.NoError(t, err2)
+		require.Contains(t, out2, "GEN-ANSWER",
+			"the following call is served the generation's own model again")
+		require.Contains(t, gen.systemText(0), "LEAK-GEN-PROMPT")
+		require.NotContains(t, gen.systemText(0), "LEAK-PROMPT", "and the previous prompt override is gone")
+		require.Len(t, gen.toolNames(0), 2, "and the previous tool narrowing is gone")
+		require.Equal(t, 1, registered.calls(), "the overridden instance is not reached again")
+
+		_, claimed := LookupModelReference(ReservedModelRef("o2a-m-leak"))
+		require.False(t, claimed,
+			"resolving a view's own model is a read of that view, never a write into the process registry")
+		require.Same(t, own, blank.config.Model, "nor is the resident definition rewritten")
+		require.Equal(t, "BASE-SHELL-PROMPT", blank.config.SystemPrompt)
+	})
+
+	t.Run("a reference the pinned view does not carry is refused, not served by a fallback", func(t *testing.T) {
+		late := &viewRecorderModel{label: "o2a-m-late-ref", resp: percallFinalResp("LATE-ANSWER")}
+
+		own := &viewRecorderModel{label: "o2a-m-late-own", resp: percallFinalResp("OWN-ANSWER")}
+		blank := newPercallBlank(t, "o2a-m-late", own, []trpctool.Tool{read})
+		gen1 := &viewRecorderModel{label: "o2a-m-late-gen1", resp: percallFinalResp("GEN1-ANSWER")}
+		w1, snap1 := stageGenerationPinned(t, blank, "o2a-m-late-a", "LATE-GEN1-PROMPT", gen1,
+			[]trpctool.Tool{read})
+
+		RegisterModelReference("o2a-ref-late", late)
+
+		_, frozen := snap1.Resolve("o2a-ref-late")
+		require.False(t, frozen, "a published generation's snapshot stays frozen at what it was built with")
+
+		out, err := w1.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "work addressed at a name this view never carried",
+			"model_override": "o2a-ref-late",
+		}))
+		require.Error(t, err, "a call resolves against ITS generation, not against the live registry")
+		var shaped overrideRejectError
+		require.True(t, errors.As(err, &shaped), "and the refusal is structured, got %v", err)
+		require.Equal(t, "model_override", shaped.OverrideField())
+		require.Contains(t, err.Error(), "o2a-ref-late")
+		require.Nil(t, out)
+		require.Zero(t, late.calls(), "a refused reference is never served")
+		require.Zero(t, gen1.calls(), "and it never falls back to the generation's own model")
+
+		gen2 := &viewRecorderModel{label: "o2a-m-late-gen2", resp: percallFinalResp("GEN2-ANSWER")}
+		w2, snap2 := stageGenerationPinned(t, blank, "o2a-m-late-b", "LATE-GEN2-PROMPT", gen2,
+			[]trpctool.Tool{read})
+		_, visible := snap2.Resolve("o2a-ref-late")
+		require.True(t, visible, "a NEW independent generation reads the registry as it is now")
+
+		out2, err2 := w2.Call(context.Background(), percallArgs(t, map[string]any{
+			"request":        "the same work on the new face",
+			"model_override": "o2a-ref-late",
+		}))
+		require.NoError(t, err2)
+		require.Contains(t, out2, "LATE-ANSWER")
+		require.Zero(t, gen2.calls(),
+			"the new generation's own model stays out too: the reference it resolved is what served the call")
+		require.Zero(t, gen1.calls(), "and the refused generation never ran at all")
+
+		require.Zero(t, blank.contextManager.OutstandingRefs(),
+			"both calls released their execution references: a frozen view is held by nobody afterwards")
+	})
+}
+
+// TestModelOverride_AssemblyReadsThePinnedGeneration 钉住变参接缝的真实消费者：
+//   - 装配点解析 model_override 读的是本次调用所在代际发布时冻结的那份引用快照，与参数校验点同一次解析；
+//   - 两参调用会把解析退回可变的进程表，于是校验答复 first、装配却服务 later。
+func TestModelOverride_AssemblyReadsThePinnedGeneration(t *testing.T) {
+	read := percallLeafTool{"read_file"}
+
+	first := &viewRecorderModel{label: "o2a-pin-first", resp: percallFinalResp("FIRST-ANSWER")}
+	RegisterModelReference("o2a-ref-pin", first)
+
+	own := &viewRecorderModel{label: "o2a-pin-own", resp: percallFinalResp("OWN-ANSWER")}
+	blank := newPercallBlank(t, "o2a-pin", own, []trpctool.Tool{read})
+	gen := &viewRecorderModel{label: "o2a-pin-gen", resp: percallFinalResp("GEN-ANSWER")}
+	w, snap := stageGenerationPinned(t, blank, "o2a-pin-gen1", "PIN-GEN-PROMPT", gen, []trpctool.Tool{read})
+
+	_, held := snap.Resolve("o2a-ref-pin")
+	require.True(t, held, "这一代发布时该名指向 FIRST")
+
+	later := &viewRecorderModel{label: "o2a-pin-later", resp: percallFinalResp("LATER-ANSWER")}
+	RegisterModelReference("o2a-ref-pin", later)
+
+	out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
+		"request":        "work addressed at the pinned name",
+		"model_override": "o2a-ref-pin",
+	}))
+	require.NoError(t, err, "调用在校验点命中的引用，装配不得改口拒绝")
+	require.Contains(t, out, "FIRST-ANSWER",
+		"装配必须落在校验答复的那一实例：调用作用域属于代际快照，不属于可变的进程表")
+	require.Zero(t, later.calls(), "重新指向的实例不进入已选定在旧代上的调用")
+	require.Zero(t, gen.calls(), "覆盖生效时连本代自身模型也不出场")
+	require.Same(t, own, blank.config.Model, "常驻定义逐字不变")
+
+	gen2 := &viewRecorderModel{label: "o2a-pin-gen2", resp: percallFinalResp("GEN2-ANSWER")}
+	w2, snap2 := stageGenerationPinned(t, blank, "o2a-pin-gen2", "PIN-GEN2-PROMPT", gen2, []trpctool.Tool{read})
+	_, nowVisible := snap2.Resolve("o2a-ref-pin")
+	require.True(t, nowVisible, "新独立代读到此刻的注册表")
+
+	out2, err2 := w2.Call(context.Background(), percallArgs(t, map[string]any{
+		"request":        "the same work on the new face",
+		"model_override": "o2a-ref-pin",
+	}))
+	require.NoError(t, err2)
+	require.Contains(t, out2, "LATER-ANSWER", "新代际的服务实例随发布更新")
+	require.Equal(t, 1, first.calls(), "旧实例只服务它自己那一次调用，不多不少")
+	require.Zero(t, gen2.calls(), "新代自身模型同样不出场：引用解析到什么就是什么")
+	require.Zero(t, blank.contextManager.OutstandingRefs(), "两次调用的执行引用都已释放")
+}

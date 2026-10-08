@@ -20,22 +20,64 @@ import (
 
 // MemoryPlugin 把框架事件管线的输出同步写入 MemoryStore，并在同一同步点投影到本调用的
 // ProjectionSink。它按顺序跳过无载荷屏障事件、流式分片、退化空终态与本次尝试的精确输入回显；
-// 因果父子关系按 (partition, session) 独立维护并有上界，经 RelationStore 承载。
-// 存储标识与归因随事件写回 StateDelta 与 FullEvent.Metadata。
+// 因果父子关系按 (partition, session) 独立维护并有上界，经 RelationStore 承载，同一因果键的
+// 「读父 → 分配 → 提交 → 关系 → 游标」在同一条键锁段内串行，不同因果键互不阻塞。
+// 存储标识与归因随事件写回 StateDelta 与 FullEvent.Metadata：票据、投影与因果游标只在
+// StoreEvent 成功之后发布，写失败或未接存储都不向下游提供取不回的持久票据。
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#memory-plugin
 type MemoryPlugin struct {
 	memStore      memory.MemoryStore
 	mu            sync.Mutex
 	lastEventKeys map[string]int64
+	causalGuards  map[string]*causalGuard
+	// callIDResolver is the optional exact-key seam of D14-S2; nil means the
+	// feature is off and the plugin behaves byte-for-byte as before it existed.
+	callIDResolver CallIDResolver
+}
+
+// CallIDResolver resolves one model-call identity (the SDK response id carried
+// by the event) to the call_id captured for it. Hit or no hit is decided by the
+// installer's scope lookup: false means "unbound", and the writer must then
+// stamp nothing. Taking the nearest call would attach feedback to a call that
+// never produced it. The composition root injects this (agent bridges
+// rl.CallIDForResponse) so rl stays a leaf and never imports plugin.
+type CallIDResolver func(ctx context.Context, responseID string) (string, bool)
+
+// MemoryPluginOption configures an optional seam of NewMemoryPlugin. Without
+// options the constructor keeps its pre-seam shape: variadic, so every existing
+// call site compiles and behaves exactly as before.
+type MemoryPluginOption func(*MemoryPlugin)
+
+// WithCallIDResolver installs the exact-key lookup that stamps
+// tagentevent.MetaKeyCallID onto a committed fact. A nil resolver means off.
+func WithCallIDResolver(r CallIDResolver) MemoryPluginOption {
+	return func(p *MemoryPlugin) {
+		p.callIDResolver = r
+	}
+}
+
+// causalGuard 把一个 (partition,session) 因果域的提交段串行化。refs 是「正在提交或排队等待」
+// 的活跃引用计数，由 p.mu 保护：活跃键因此不会被因果游标的上界回收淘汰掉它唯一的锚。
+type causalGuard struct {
+	key  string
+	mu   sync.Mutex
+	refs int
 }
 
 // NewMemoryPlugin 创建一个把事件写入 store 并同步投影的插件；因果链状态初始为空。
-func NewMemoryPlugin(store memory.MemoryStore) *MemoryPlugin {
-	return &MemoryPlugin{
+// 选项是变参的：不传即维持接线前的形态。
+func NewMemoryPlugin(store memory.MemoryStore, opts ...MemoryPluginOption) *MemoryPlugin {
+	p := &MemoryPlugin{
 		memStore:      store,
 		lastEventKeys: make(map[string]int64),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	return p
 }
 
 // Name 返回插件名 memory。
@@ -58,7 +100,7 @@ func (p *MemoryPlugin) OnEvent(
 }
 
 // onEvent 执行「筛选 → 分配 → 构造 → 持久化 → 投影 → 回写标识 → 更新因果链」的完整顺序；
-// 四道跳过闸在任何 key 分配与写入之前完成。
+// 四道跳过闸在任何 key 分配与写入之前完成，分配之后的整段在同因果键的锁内串行。
 func (p *MemoryPlugin) onEvent(
 	ctx context.Context,
 	inv *agent.Invocation,
@@ -91,8 +133,6 @@ func (p *MemoryPlugin) onEvent(
 	agentName := p.extractAgentName(inv)
 	partitionID := memory.PartitionIDFromName(agentName)
 
-	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
-
 	eventType, eventSummary := p.inferEventInfo(evt)
 
 	sessionID := ""
@@ -101,9 +141,11 @@ func (p *MemoryPlugin) onEvent(
 	}
 	causalKey := fmt.Sprintf("%d:%s", partitionID, sessionID)
 
-	p.mu.Lock()
-	parentKey := p.lastEventKeys[causalKey]
-	p.mu.Unlock()
+	guard := p.acquireCausal(causalKey)
+	defer p.releaseCausal(guard)
+
+	parentKey := p.parentOfCausal(causalKey)
+	eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
 
 	timestamp := extractTimestamp(evt)
 
@@ -131,6 +173,12 @@ func (p *MemoryPlugin) onEvent(
 		fullEvent.ToolCalls = msg.ToolCalls
 		fullEvent.ToolID = msg.ToolID
 		fullEvent.Response = evt.Response
+	}
+
+	if p.callIDResolver != nil && evt.Response != nil && evt.Response.ID != "" {
+		if callID, ok := p.callIDResolver(ctx, evt.Response.ID); ok && callID != "" {
+			fullEvent.Metadata[tagentevent.MetaKeyCallID] = callID
+		}
 	}
 
 	stored := false
@@ -171,32 +219,88 @@ func (p *MemoryPlugin) onEvent(
 	if evt.StateDelta == nil {
 		evt.StateDelta = make(map[string][]byte)
 	}
-	evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey))
-	evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
+	if stored {
+		evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey))
+		evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
+	} else {
+		delete(evt.StateDelta, tagentevent.MetaKeyEventKey)
+		delete(evt.StateDelta, tagentevent.MetaKeyPartitionID)
+		log.Debugf("[Memory] no persistent ticket published (event not committed) partition=%d type=%s",
+			partitionID, eventType)
+	}
 	evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
 	evt.StateDelta[tagentevent.MetaKeyEventSummary] = []byte(eventSummary)
 
+	if stored {
+		p.advanceCausal(causalKey, eventKey)
+	}
+
+	return evt, nil
+}
+
+// acquireCausal 取回该因果域的串行锁。锁序固定为「短 map 锁登记引用 → 放 map 锁 → 取键锁」，
+// 反向（持 p.mu 去等键锁）禁止，因此 p.mu 是叶锁，绝不横跨存储 I/O。
+func (p *MemoryPlugin) acquireCausal(causalKey string) *causalGuard {
 	p.mu.Lock()
+	if p.causalGuards == nil {
+		p.causalGuards = make(map[string]*causalGuard)
+	}
+	g := p.causalGuards[causalKey]
+	if g == nil {
+		g = &causalGuard{key: causalKey}
+		p.causalGuards[causalKey] = g
+	}
+	g.refs++
+	p.mu.Unlock()
+
+	g.mu.Lock()
+	return g
+}
+
+// releaseCausal 交还键锁并撤掉活跃引用；引用归零即删除记录，长寿命 agent 不会累积因果键。
+func (p *MemoryPlugin) releaseCausal(g *causalGuard) {
+	g.mu.Unlock()
+
+	p.mu.Lock()
+	g.refs--
+	if g.refs == 0 && p.causalGuards[g.key] == g {
+		delete(p.causalGuards, g.key)
+	}
+	p.mu.Unlock()
+}
+
+// parentOfCausal 读该因果域最后已提交的键；键不存在（首次、重启或已淘汰）返回 0 表示无可信锚。
+func (p *MemoryPlugin) parentOfCausal(causalKey string) int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastEventKeys[causalKey]
+}
+
+// advanceCausal 把游标推进到刚提交成功的键，并在超出上界时回收最久未更新的因果链。
+func (p *MemoryPlugin) advanceCausal(causalKey string, eventKey int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.lastEventKeys[causalKey] = eventKey
 	if len(p.lastEventKeys) > maxLastEventKeys {
 		p.evictOldestLastEventKeysLocked()
 	}
-	p.mu.Unlock()
-
-	return evt, nil
 }
 
 // maxLastEventKeys 是因果链 map 的上界：长寿命 agent 会持续累积 partition:session 键。
 const maxLastEventKeys = 4096
 
 // evictOldestLastEventKeysLocked 淘汰事件 key 最小（即最久未更新）的因果链直到回到上界；
-// 调用方必须持有 p.mu。每次溢出为 O(n)，n 不超过上界。
+// 调用方必须持有 p.mu。正在提交或排队等待的因果键被跳过——淘汰它等于抽掉一条在途链的锚。
+// 每次都溢出为 O(n)，n 不超过上界。
 func (p *MemoryPlugin) evictOldestLastEventKeysLocked() {
 	for len(p.lastEventKeys) > maxLastEventKeys {
 		oldestKey := ""
 		var oldestVal int64
 		first := true
 		for k, v := range p.lastEventKeys {
+			if g, ok := p.causalGuards[k]; ok && g.refs > 0 {
+				continue
+			}
 			if first || v < oldestVal {
 				oldestKey, oldestVal, first = k, v, false
 			}

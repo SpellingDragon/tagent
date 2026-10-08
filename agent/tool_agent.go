@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,9 +79,10 @@ func (e PerCallOverrideError) OverrideField() string { return e.Field }
 
 // parsePerCallOverrides reads the per-call override arguments of one delegation
 // and validates them against the delegate's declared maximum tool domain and the
-// model-reference registry. Every refusal is returned at the argument-checking
-// point, before the delegate runs. A nil result means the call carries no
-// override, so assembly uses the generation's own view.
+// model references of the execution view this call will assemble on. Every
+// refusal is returned at the argument-checking point, before the delegate runs.
+// A nil result means the call carries no override, so assembly uses the
+// generation's own view.
 func (w *AgentToolWrapper) parsePerCallOverrides(ctx context.Context, args map[string]any) (*task.Overrides, error) {
 	ov := &task.Overrides{}
 	declared := false
@@ -99,9 +101,12 @@ func (w *AgentToolWrapper) parsePerCallOverrides(ctx context.Context, args map[s
 		if !isStr {
 			return nil, PerCallOverrideError{Field: "model_override", Reason: "must be a model reference name"}
 		}
-		if _, found := LookupModelReference(ref); !found {
-			return nil, PerCallOverrideError{Field: "model_override", Offenders: []string{ref},
-				Reason: "not a registered model reference"}
+		view, viewErr := w.callModelRefs(ctx)
+		if viewErr != nil {
+			return nil, viewErr
+		}
+		if _, err := resolveModelReference(ref, view); err != nil {
+			return nil, err
 		}
 		ov.ModelRef = ref
 		declared = true
@@ -154,14 +159,92 @@ func (w *AgentToolWrapper) parsePerCallOverrides(ctx context.Context, args map[s
 // domain — the hard upper bound a per-call tools_subset must fit inside, so the
 // check and the assembled view always read one source.
 func (w *AgentToolWrapper) maxToolDomain(ctx context.Context) []string {
-	if cl, ok := execLeaseFromContext(ctx); ok && cl != nil {
-		if child, isLocal := w.agent.(*TagentAgent); isLocal && cl.belongsToOwnerOf(child.contextManager) {
-			if gen := cl.declaredRunConfig(); gen != nil {
-				return toolNamesOf(gen.Tools)
-			}
-		}
+	if b := w.selectedCallGeneration(ctx); b != nil && b.runCfg != nil {
+		return toolNamesOf(b.runCfg.Tools)
 	}
 	return toolNamesOf(w.agent.Tools())
+}
+
+// selectedCallGeneration returns the execution generation THIS call assembles on:
+// the lease the call carries, but only when that lease pins a generation OF THE
+// DELEGATE'S OWN context manager — armDeclaredCall's declared-generation lease, or
+// a re-entry riding its initiator. That is exactly the condition under which
+// agent/session.go copies the generation's assembled config into the per-call view
+// instead of using the resident definition, so validation cannot answer "which
+// generation am I running on" differently from assembly. nil means there is no
+// generation to read: the call assembles on the resident definition, or the target
+// is not a local agent at all.
+//
+// Both per-call override bounds resolve through here — the tool domain above and
+// the model references below — because one selected view is one truth; two
+// predicates would let a call be validated against a generation it does not run on.
+func (w *AgentToolWrapper) selectedCallGeneration(ctx context.Context) *execBinding {
+	child, isLocal := w.agent.(*TagentAgent)
+	if !isLocal || child == nil || child.contextManager == nil {
+		return nil
+	}
+	cl, ok := execLeaseFromContext(ctx)
+	if !ok || cl == nil || !cl.belongsToOwnerOf(child.contextManager) {
+		return nil
+	}
+	return cl.pinnedBinding()
+}
+
+// callModelRefs returns the FROZEN model-reference set of the execution view this
+// call resolves against — the one read of that view a per-call model override gets.
+//
+//   - A generation published with a reference snapshot hands out exactly that snapshot.
+//   - A generation without one, and a call with no generation at all, read the registry once here.
+//
+// The process registry is only ever READ on this path, so a refused candidate
+// (reserved-name conflict) cannot re-point or drop a reference another view serves.
+func (w *AgentToolWrapper) callModelRefs(ctx context.Context) (*ModelRefSnapshot, error) {
+	if b := w.selectedCallGeneration(ctx); b != nil {
+		if b.modelRefs != nil {
+			return b.modelRefs, nil
+		}
+		name, m := generationViewModel(b)
+		return NewModelRefSnapshot(name, m)
+	}
+	name, m := w.residentViewModel()
+	return NewModelRefSnapshot(name, m)
+}
+
+// generationViewModel is one generation's model identity: the assembled
+// per-generation config first (the very object agent/session.go copies into the
+// per-call view), else the published face that generation was built from. A lazily
+// materialized generation has no assembled config, which is why the face is the
+// second source and never the first.
+func generationViewModel(b *execBinding) (string, model.Model) {
+	if b == nil {
+		return "", nil
+	}
+	if b.runCfg != nil {
+		name := b.runCfg.Name
+		if name == "" {
+			name = b.face.Name
+		}
+		return name, b.runCfg.Model
+	}
+	return b.face.Name, b.face.Model
+}
+
+// residentViewModel is the delegate's own construction-time definition — the view
+// an un-leased call assembles on. A remote target's model lives in another process,
+// so it claims no reserved name here and only registry references resolve.
+func (w *AgentToolWrapper) residentViewModel() (string, model.Model) {
+	child, isLocal := w.agent.(*TagentAgent)
+	if !isLocal || child == nil {
+		return "", nil
+	}
+	if child.config != nil {
+		name := child.config.Name
+		if name == "" {
+			name = child.name
+		}
+		return name, child.config.Model
+	}
+	return child.name, nil
 }
 
 // toolNamesOf lists the declaration names of a tool surface.
@@ -229,16 +312,26 @@ func perCallOverridesFromInvocation(inv *agent.Invocation) (*task.Overrides, err
 // A call that owns its prompt also owns the prompt channel: a file-backed source
 // rewrites the system message on every round of the view it belongs to, so the
 // assembled view carries no source, while the resident definition keeps its own.
-func applyPerCallOverrides(cfg *TagentConfig, ov *task.Overrides) error {
+// pinned is the reference snapshot of the execution generation this call was
+// selected on. It is variadic on purpose: an assembly site that has the pinned
+// generation at hand passes it and resolves against THAT frozen set, while a site
+// that does not yet hand one over keeps compiling and resolves against the view
+// assembled here (its own model under the reserved name, plus the names currently
+// registered). The org wiring passes the generation's snapshot so validation and
+// assembly read one object; nothing else about the assembled view changes.
+func applyPerCallOverrides(cfg *TagentConfig, ov *task.Overrides, pinned ...*ModelRefSnapshot) error {
 	if ov.SystemPrompt != "" {
 		cfg.SystemPrompt = ov.SystemPrompt
 		cfg.SystemPromptSource = nil
 	}
 	if ov.ModelRef != "" {
-		m, found := LookupModelReference(ov.ModelRef)
-		if !found {
-			return PerCallOverrideError{Field: "model_override", Offenders: []string{ov.ModelRef},
-				Reason: "reference is not registered in this process"}
+		view, err := modelRefsOfView(cfg, pinned)
+		if err != nil {
+			return err
+		}
+		m, err := resolveModelReference(ov.ModelRef, view)
+		if err != nil {
+			return err
 		}
 		cfg.Model = m
 	}
@@ -1441,10 +1534,136 @@ var (
 	modelReferencesMu sync.RWMutex
 )
 
+// ReservedModelRefPrefix marks the reference name under which a config-driven
+// instance's ACTUAL model is addressable inside its own execution view.
+const ReservedModelRefPrefix = "agent:"
+
+// ReservedModelRef is the reference name of the model a config-driven instance was
+// assembled with: `agent:<name>`. It belongs to the execution view rather than to
+// the process registry — nobody has to publish it, and it resolves to whatever
+// model the selected generation actually runs. A candidate whose registry already
+// claims that name for a DIFFERENT instance is refused by name instead of silently
+// being served either side. An empty agent name has no reserved name.
+func ReservedModelRef(agentName string) string {
+	if agentName == "" {
+		return ""
+	}
+	return ReservedModelRefPrefix + agentName
+}
+
+// ModelRefSnapshot is the read-only model-reference set of ONE execution view: the
+// names currently published in the process registry plus that view's own model
+// under ReservedModelRef. It is built when the view is selected (a candidate's
+// construction, or once at the entry of a standalone call that was never staged),
+// is never written afterwards, and dies with the generation holding it — so
+// resolving one name twice inside one call cannot return two instances, and no
+// model pointer outlives its generation or reaches any durable record.
+type ModelRefSnapshot struct {
+	refs map[string]model.Model
+}
+
+// NewModelRefSnapshot freezes the reference set of the view whose model is m under
+// agent identity agentName: every name the registry publishes now, plus
+// `agent:<agentName>` → m.
+//
+// A registry entry already occupying the reserved name with a different instance is
+// a conflict, refused BY NAME. Because this constructor only ever reads the
+// registry, a candidate that fails here leaves the process-wide table exactly as it
+// was — it neither re-points nor drops the entry it refused to adopt. agentName ==
+// "" or m == nil means the view has no model of its own to claim (a remote target,
+// a face assembled without a model), so no reserved name is added and registry
+// names resolve as usual.
+func NewModelRefSnapshot(agentName string, m model.Model) (*ModelRefSnapshot, error) {
+	modelReferencesMu.RLock()
+	refs := make(map[string]model.Model, len(modelReferences)+1)
+	for k, v := range modelReferences {
+		refs[k] = v
+	}
+	modelReferencesMu.RUnlock()
+
+	reserved := ReservedModelRef(agentName)
+	if reserved == "" || m == nil {
+		return &ModelRefSnapshot{refs: refs}, nil
+	}
+	if claimed, ok := refs[reserved]; ok && !sameModelHandle(claimed, m) {
+		return nil, PerCallOverrideError{Field: "model_override", Offenders: []string{reserved},
+			Reason: "the reserved name of a config-driven model is already claimed by a different registered instance"}
+	}
+	refs[reserved] = m
+	return &ModelRefSnapshot{refs: refs}, nil
+}
+
+// Resolve reports the instance a reference names inside THIS frozen view. A name
+// the view does not carry is a miss, never a fallback to some other model.
+func (s *ModelRefSnapshot) Resolve(ref string) (model.Model, bool) {
+	if s == nil || ref == "" {
+		return nil, false
+	}
+	m, ok := s.refs[ref]
+	return m, ok
+}
+
+// modelRefsOfView is the reference set an assembly resolves against: the pinned
+// snapshot of the generation the call was selected on when one is handed over,
+// otherwise the snapshot of the very view being assembled here.
+func modelRefsOfView(cfg *TagentConfig, pinned []*ModelRefSnapshot) (*ModelRefSnapshot, error) {
+	for _, p := range pinned {
+		if p != nil {
+			return p, nil
+		}
+	}
+	if cfg == nil {
+		return NewModelRefSnapshot("", nil)
+	}
+	return NewModelRefSnapshot(cfg.Name, cfg.Model)
+}
+
+// resolveModelReference is the ONE place a per-call model reference becomes a model
+// instance. It reads only the frozen view it was handed and never goes back to the
+// mutable registry, so a call that resolved its reference at the argument-checking
+// point and assembles off the same view runs on the instance validation answered
+// with — and a name that view does not carry is refused at both points alike.
+func resolveModelReference(ref string, view *ModelRefSnapshot) (model.Model, error) {
+	m, ok := view.Resolve(ref)
+	if !ok {
+		return nil, PerCallOverrideError{Field: "model_override", Offenders: []string{ref},
+			Reason: "not a model reference of the selected execution view"}
+	}
+	return m, nil
+}
+
+// sameModelHandle compares two model handles by IDENTITY, not by value: two
+// instances built from the same provider configuration are deliberately not the
+// same model. A handle that is neither comparable nor a pointer cannot prove
+// identity, so it is reported as different — the safe reading of a reserved-name
+// claim, which then refuses instead of pretending the two are interchangeable.
+func sameModelHandle(a, b model.Model) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb {
+		return false
+	}
+	if ta.Comparable() {
+		return a == b
+	}
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() == reflect.Pointer && vb.Kind() == reflect.Pointer {
+		return va.Pointer() == vb.Pointer()
+	}
+	return false
+}
+
 // RegisterModelReference publishes a model instance under a reference name, the
 // target form a per-call model_override addresses. Re-registering a name
 // replaces its instance: a reload re-points a reference, and a lookup returns
 // either the previous or the new instance, never a torn one.
+//
+// This standalone publish/lookup pair stays exactly as it is: an execution view
+// DERIVES a read-only snapshot from it (NewModelRefSnapshot) instead of keeping a
+// second table, and a config-driven instance's own model needs no registration at
+// all — inside its own view it is addressable as ReservedModelRef(name).
 func RegisterModelReference(ref string, m model.Model) {
 	if ref == "" || m == nil {
 		return
