@@ -594,6 +594,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		ta.meditationMgr = NewMeditationManager(cfg.Meditation, ta)
 		ta.meditationMgr.SetTaskController(taskManager)
 		ta.meditationMgr.SetAuditLine(selfAudit.DigestLine)
+		if len(cfg.Meditation.ObservedNamespaces) > 0 && ta.memStore != nil {
+			ta.meditationMgr.SetNoveltyReader(ta.memStore)
+		}
 		if cfg.Meditation.AnchorPath != "" {
 			if as, aerr := reliability.NewAnchorStore(cfg.Meditation.AnchorPath); aerr == nil {
 				ta.meditationMgr.SetAnchorStore(as)

@@ -933,6 +933,8 @@ case "localfile":
 
 所以"能看见谁的分区"完全由注入的 `ReadPartitionIDs` 决定：`buildAgent` 恒以自身分区起步、`read_namespaces` 只做追加，缺省态是「只看得见自己」——这是隔离的默认值而非漏洞。运维风险的方向与直觉相反：**新增挂载 recall 类工具的 Agent 时漏配 `read_namespaces`，表现是跨命名空间召回静默为空（"像是没有历史"），而不是越权扫全库**。诊断此类失忆，第一步核对该 Agent 的工具工厂是否把 `ReadPartitionIDs` 传进了构造函数。
 
+**第三条消费：外部冥想把这两条读路径串起来用**。外部观察形态的新鲜度判据要的是"被观察分区里、水位之后、非自管谱系"的事件，而 `EventReference` 不带 Metadata——于是查询与直读各有半件事：**按条件查询**给出降序引用页，分区集合由调用方显式给定，正是 default-nothing 起作用的地方（未授权分区连引用都进不来，水合后再次核对分区，防链上归属与声明漂移）；**按 Key 直读**逐条把候选水合成 `FullEvent` 以读持久归因 `Metadata[trigger_source]`，**命中即停**。分页上界就是水合量的上界，所以这条路径的成本受 `Limit` 约束而不受历史总量约束。**盖章发生在入库**：`trigger_source` 由写入旁路从归因面抄进 `FullEvent` 元数据（`agent/context_manager.go`），判据侧只读不写；缺该键的存量事件按未知谱系处理、不计入新鲜度。判据语义与形态归属见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)。
+
 ---
 
 ## 十四、关键设计决策

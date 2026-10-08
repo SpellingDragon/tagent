@@ -505,6 +505,15 @@ type MeditationConfig struct {
 
 	// PromptFile is the meditation prompt file (relative to prompt_dir). Default: "meditation.md".
 	PromptFile string `json:"prompt_file,omitempty" yaml:"prompt_file,omitempty"`
+
+	// ObservedNamespaces 声明外部观察形态冥想的跨分区观察面；缺省空=in-loop 自体维护
+	// （observed 回落 read_namespaces 及 observed 越界授权的校验由组合根装配期承担，
+	// 本处仅承载声明与解析）。构造期读取，走结构换代、不静默热生效。
+	ObservedNamespaces []string `json:"observed_namespaces,omitempty" yaml:"observed_namespaces,omitempty"`
+
+	// DeliverTo 声明冥想产出可投递的目标 agent 白名单；缺省空=拒绝一切投递（fail-closed）。
+	// 构造期读取走换代；deliver_to 白名单/越界校验落在投递 API 与组合根，本处仅承载声明与解析。
+	DeliverTo []string `json:"deliver_to,omitempty" yaml:"deliver_to,omitempty"`
 }
     MeditationConfig configures the periodic meditation/heartbeat mechanism.
     Uses string durations (e.g., "30m", "2h") for YAML/JSON serialization.

@@ -88,9 +88,9 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 
 > 自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。
 
-`refine` 工具(**仅 entry agent**)三 op(`evolution/refine.go`);冥想产物落盘后经 register 登记
+`refine` 工具三 op(`evolution/refine.go`)——只装配给 entry agent;冥想产物落盘后经它的 register 登记
 
-冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒。三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。开评估保护。
+冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒。三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。开评估保护。这三份在**两种形态下都是同一段**:外部策展形态只是把它排在被观察分区概况之后(形态判据与 digest 覆盖面见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms))。
 
 ### 2.1 refine 三 op 行为
 
@@ -173,7 +173,7 @@ stateDiagram-v2
 
 | 重启后恢复项 | 来源 | 效果 |
 |-------------|------|------|
-| 冥想三锚点(novelty/idle/last-meditation) | `data/reliability/anchors/<agent>.json` | **不立即误触发冥想**(纯内存则重启即忘、马上冥想) |
+| 冥想三锚点(novelty/idle/last-meditation) | `data/reliability/anchors/<agent>.json`(按 agent 名分文件) | **不立即误触发冥想**(纯内存则重启即忘、马上冥想);外部策展形态下 last-meditation 兼作新鲜度水位,重启后判据窗口连续 |
 | 治理预算窗口 | `data/governance/budget/<agent>` | 预算计数跨重启延续(不清零) |
 | 待批审批 | `data/governance/approvals/` | pending 请求跨重启可见 |
 | 未消费事件/记忆兜底 | bus/mem spill | 重启后回灌/重放,不丢 |
@@ -266,6 +266,13 @@ stateDiagram-v2
 3. 网络恢复 → 探测成功 → `recovering` → `normal`;spill 事件回灌/重放。
 4. 若进程被 OOM/崩溃 → systemd `Restart=always` 重启 → 恢复冥想锚点(不误触发)、预算窗口、发布历史、未消费事件。
 5. 语义引擎重启后异步重建向量索引,重建窗口内 recall 退化纯关键词,重建完成恢复语义召回。
+
+**场景 D:外部策展 agent 观察别的分区(meditation 外部形态)**
+1. 一个同构 agent 配 `meditation.observed_namespaces`(未配则回落 `memory.read_namespaces`)→ 形态切到外部观察者:新鲜度只看被观察分区在水位之后的**非自管谱系**事件。
+2. 被观察 agent 写入用户事实 → 空闲窗口到期后策展人触发一轮,经验卡片落**自己**的分区;被观察分区零写入(压缩权不可转移,外部形态不写 compaction 事件)。
+3. 卡片经 `DeliverToAgent` 投给目标 → 目标 mailbox 收到一条 meditation 谱系输入并自带 `[delivery]` 来源头;与用户输入同批到达时**让位、不补偿**。
+4. 此后只有自管产出在循环(卡片再投、consolidation_hint 唤醒)→ 两个 agent 的冥想门都不再打开:反思链路在结构上无法自持。
+5. `deliver_to` 未配置=空白名单**拒绝一切投递**;目标 loop 未运行只返回具名错误,不起新 Run、不落盘等待、不静默丢。
 
 ---
 

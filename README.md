@@ -17,8 +17,11 @@
 | 运行时可调整 | 结构换代 / 数值热参 / 文件懒读三通道分工；不可在线生效的字段**具名拒绝并列须重启路径**，绝不"静默 applied" | 不是"DAG/工作流引擎"；在途调用持旧执行代，但文件与数值各有读取边界，不承诺完整环境确定性重放 |
 | 决策采集 | opt-in v2 采集：SDK 边界快照、调用精确关联、丢失/超限具名计数、封账 manifest 自证完整性；**关闭态与旧实现逐字节同** | 观测边界是 `sdk_request`，**不冒充 wire**；采集旁路观测，不改变调用语义 |
 | 离线训练数据 | 授权只读导出（分区允许表 + 二次核验 + 逐列缺失/歧义）；双流 strict 转换（capture 主源、facts 索引），按会话分组切 train/test 防泄漏，拒绝清单逐行可核 | **在线训练桥已退役**；真实 tokenizer 的消费验收待资产；不声称权重训练收益——交付的是"可核对的样本准备"，非"已验证的学习效果" |
+| 自维护与外部策展（冥想两形态） | 同一引擎、一个开关选定形态：观察面为空＝入口 agent 的**自体维护**（in-loop，回看自己）；非空＝同构 agent 的**外部策展**（跨分区读事实链）。跨分区新鲜度只认被观察分区在水位之后的**非自管谱系**事件；未知谱系、未授权分区、读失败一律不计入（fail-closed）。产出经进程内 `DeliverToAgent` 白名单回流，未授权／盲投／未知目标／未运行四道**具名拒绝**，无一静默丢 | `meditation.enabled` **默认关**；外部策展**不改被观察分区**（压缩权不可转移，卡片只落自己分区）；回流范围**仅同进程**，跨进程仍由既有 HTTPAPI 面承担；真实模型端到端场景（目标真回合→跨分区门开→策展卡片→投递回流）已在本机以 `TAGENT_REQUIRE_REAL_MODEL` 三态门+非空转探针跑通一次（预算 ≤3 次调用入账）；单次证据不构成常态回归，CI 无 key 时合法 SKIP |
 
 **存储后端诚实说明**：默认 `localfile`（`LocalFileKV`）是跨进程验证用的最小后端，逐桶直接序列化、读写同锁，**不提供生产级持久性/并发保证**；生产持久化应使用 `rustviking` 等专用后端。
+
+**外部化冥想诚实说明**：这是**默认关闭**的可选能力，开启后也只在两层授权内活动——观察面 `meditation.observed_namespaces` 须落在 `memory.read_namespaces` 之内（未授权分区连引用都进不来），投递白名单 `meditation.deliver_to` 缺省为空即**拒绝一切投递**；越界与盲投都在装配期**具名拒绝启动**，不静默降级。判据取向同样是 fail-closed：宁可少反思，不可误判新鲜（读不通的事实链既不算"有新东西"也不算"没有"）。形态判据、水位锚与回切语义见 [agent 引擎篇 §2.14](docs/wiki/agent/agent-architecture.md#meditation-two-forms)，投递缝的裁决表见 [持久投递·谱系可见性](docs/wiki/reliability/durable-delivery.md#lineage-visibility)。真实模型端到端场景（`TAGENT_REQUIRE_REAL_MODEL` 三态门）已在本机跑通一次并落核账样本；该证据是单次真跑，不声称已在 CI 常态覆盖。
 
 ---
 
@@ -189,6 +192,8 @@ cd examples/wechat-bot
 | `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | 整理触发阈值 / 整理后保留最近数 |
 | `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 · 子 10/4096/0.3 | 在被引用 agent 自身定义处配置 |
 | `meditation.enabled` | `false` | 空闲期反思沉淀 |
+| `meditation.observed_namespaces` | `[]`（空＝回落 `memory.read_namespaces`） | **形态开关**：空＝in-loop 自体维护；非空＝外部策展，新鲜度只看这些分区水位之后的非自管谱系事件。越出 `read_namespaces` 授权**具名拒启**。构造期读取，随 meditation 块整体参与结构指纹——**改即换代**，不在 `restartRequired` 拒表里 |
+| `meditation.deliver_to` | `[]`（空＝**拒绝一切投递**） | 冥想产出可回流的目标 agent 白名单（同进程寻址，不走网络）。白名单目标的分区不在投递方观察面内＝盲投，**装配期具名拒启**。同属换代归属 |
 
 ### compress 块
 

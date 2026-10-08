@@ -80,7 +80,8 @@ agents:
         max_tokens: 4096
         temperature: 0.3
 
-    # Meditation (定时心跳)
+    # Meditation (空闲心跳)。两形态由 observed_namespaces 选定:空=本 agent 自体维护(in-loop),
+    # 非空=外部策展(读这些分区的非自管新事件),任何 agent 皆可声明、不限入口。
     meditation:
       enabled: true
       interval: "30m"

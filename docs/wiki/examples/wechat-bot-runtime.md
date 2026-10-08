@@ -89,6 +89,8 @@
 
 核心交易：**声明过的，完成即达；未声明的，等用户在场**。系统保证意图可声明、结局可见、账本可查，不接管“此刻该不该说”。
 
+**别把两种“投递”混成一个**：本节说的是示例侧把最终响应送回 IM 宿主；框架另有一条**进程内跨 agent 投递缝**（`DeliverToAgent`，把外部策展 agent 的产出投给同进程另一个 agent 的 mailbox），两者共用同一份谱系白名单却方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例随附配置只给入口 agent 开了 in-loop 冥想；观察面与投递白名单同样可声明给任意 agent，形态判据见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)。
+
 <a id="large-file-acceptance"></a>
 ## 七、大文件真链路验收（不进 CI）
 

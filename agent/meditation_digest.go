@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 )
 
 // digestMaxAttentionDetail bounds how many attention tasks are listed per line;
@@ -96,4 +97,57 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// digestMaxObservedPartitions bounds how many observed partitions a digest names
+// per line; the rest are summarized as a count, the same bounded-render discipline
+// as the task-layer attention detail.
+const digestMaxObservedPartitions = 8
+
+// renderObservedScanDigest renders the external observation form's digest: per
+// partition event counts split by lineage, plus the newest non-self-managed
+// activity. It is a pure function over the novelty pass's collected evidence — no
+// LLM, no I/O — deterministic and bounded, and it never re-reads the fact chain.
+// 契约: docs/wiki/agent/compression-and-telemetry.md#self-state-digest
+func renderObservedScanDigest(s *observedScan, idle time.Duration) string {
+	if s == nil || len(s.partitions) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## 观察分区概况（跨域策展）\n\n")
+	b.WriteString(fmt.Sprintf("- 空闲时长：%s\n", idle.Round(time.Second)))
+	window := "首次冥想，自 epoch 起"
+	if s.watermarkMs > 0 {
+		window = "自 " + time.UnixMilli(s.watermarkMs).UTC().Format("2006-01-02 15:04:05") + " 起"
+	}
+	b.WriteString(fmt.Sprintf("- 判据窗口：%s；引用页 %d 条，本次水合 %d 条（命中即停）\n",
+		window, s.referenceTotal, s.hydratedTotal))
+
+	shown := s.partitions
+	if len(shown) > digestMaxObservedPartitions {
+		shown = shown[:digestMaxObservedPartitions]
+	}
+	for _, p := range shown {
+		b.WriteString(fmt.Sprintf("- 分区 %s（id=%d）：引用 %d；水合样本 非自管=%d 自管/未知=%d\n",
+			p.name, p.id, p.references, p.externalHits, p.selfManaged))
+	}
+	if rest := len(s.partitions) - len(shown); rest > 0 {
+		b.WriteString(fmt.Sprintf("- …另有 %d 个观察分区未列出\n", rest))
+	}
+	if s.unknownLineage > 0 {
+		b.WriteString(fmt.Sprintf("- 谱系未知（无持久 trigger_source）：%d 条，不计入新鲜度\n", s.unknownLineage))
+	}
+	if s.foreignPartition > 0 {
+		b.WriteString(fmt.Sprintf("- 观察面外分区：%d 条，未计入\n", s.foreignPartition))
+	}
+	if s.recent != nil {
+		b.WriteString(fmt.Sprintf("- 最近非自管活动：[%s] %s / %s @ %s（trigger_source=%s）：%s\n",
+			tagentevent.FormatEventKey(s.recent.eventKey),
+			s.recent.partition, s.recent.eventType,
+			time.UnixMilli(s.recent.timestampMs).UTC().Format("2006-01-02 15:04:05"),
+			s.recent.lineage, truncateRunes(s.recent.summary, digestDescMax)))
+	}
+
+	return b.String()
 }
