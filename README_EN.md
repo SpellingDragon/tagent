@@ -1,120 +1,45 @@
 # tagent
 
-**A memory-driven framework for long-running agents** — built on [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go), replacing the synchronous ReAct loop with an event-driven engine: what happens is stored as immutable events (forgotten on a per-type TTL by default, configurable as permanent), the working memory sent to the model always has a budget cap, and compacted content keeps tickets for exact on-demand recall. The goal is an agent that, over **long, multi-turn, tool-using collaboration**, is explainable in behavior, decidable in failure, and traceable in data.
+**An agent framework built to run for a long time** — on top of [trpc-agent-go](https://github.com/trpc-group/trpc-agent-go). It addresses a simple problem: **letting an assistant work for days or weeks instead of starting from scratch every conversation**. Everything that happens is stored as immutable events, the context sent to the model always has a budget, compacted content can be retrieved exactly, a crashed process rebuilds its working set from the fact chain, and daily runtime experience can be turned into data usable for model training.
 
-[English](README_EN.md) | [中文](README.md)
+English | [中文](README.md)
 
-> This README states current real capabilities and boundaries without exaggeration. Anything whose verification gate has not passed (e.g. the real-tokenizer consumption acceptance) is marked as pending, not claimed done.
+Good fit: persistent personal assistants, ops/on-call agents, long-task orchestration — and as a runtime foundation for "learning from your own traffic" (offline SFT data pipeline).
 
----
+## See it work
 
-## Capabilities and boundaries (stated plainly)
+**Deploy and watch for three days** — You say "deploy v2.3 and keep an eye on it." It moves the ten-minute script into a tmux background task, replies "started" right away, and wakes itself up when the result lands to check logs and report. Three days later, when you ask "what was that error detail?", it retrieves the exact original text using the ticket left behind at compaction time.
 
-| Capability | What is established | Boundary (what is NOT claimed) |
-|---|---|---|
-| Long-term memory | Immutable event log; compaction only changes the view, never the facts; the projection is a replay of the fact chain and rebuilds on cold start | Original text recall is bounded by **retention policy and storage backend**; some degraded-recovery paths are eventually consistent, not byte-identical; "recalled correctly" ≠ "understood correctly by the model" |
-| Bounded context | Whole input (system prompt / tool declarations / arguments / reasoning / notices) is priced under one scheme; over-budget fixed parts are refused by name; synchronous summary has a deadline with named degradation | Pricing is a **conservative estimate** (char ratio + fixed overhead); it does not claim provider-window safety, nor any task-success-rate gain |
-| Runtime adjustability | Three channels — structural generation / hot numeric params / lazy file reads; fields that cannot apply online are **refused by name** with `restartRequired` paths, never a "silent applied" | This is **not a DAG/workflow engine**; in-flight calls hold the old execution generation, files and numerics have their own read boundaries — no claim of deterministic whole-environment replay |
-| Decision capture | Opt-in v2 capture: SDK-boundary snapshot, exact call attribution, named drop/oversize counters, a self-proving seal manifest; **when off it is byte-identical to before** | Observation scope is `sdk_request`, **never impersonating wire**; capture is a side observer and does not change call semantics |
-| Offline training data | Authorized read-only export (partition allowlist + per-row re-check + separate missing/ambiguous columns); strict dual-stream conversion (capture primary, facts as association index), train/test split grouped by session to prevent leakage, line-by-line rejection ledger | **The online training bridge is retired**; the real-tokenizer consumption acceptance is pending an asset; **no claim of weight-training gain** — what ships is auditable sample preparation, not a validated learning effect |
-| Self-maintenance and external curation (the two meditation forms) | One engine, one switch selects the form: an empty observation surface means the entry agent **maintains itself** (in-loop, looking back at its own partitions); a non-empty one means a homogeneous agent **curates other partitions** by reading their fact chains. Cross-partition freshness counts only **non-self-managed lineage** events after the observed watermark; unknown lineage, unauthorized partitions and read failures are never counted (fail-closed). Output flows back through the in-process `DeliverToAgent` allowlist with four **named refusals** (not authorized / blind target / unknown target / not running), none silently dropped | `meditation.enabled` is **off by default**; external curation **does not touch the observed partitions** (compaction authority cannot transfer — cards land in the curator's own partition); the delivery scope is **same-process only**, cross-process stays on the existing HTTP API surface; the real-model end-to-end scenario (target turn → cross-partition gate opens → curation card → delivery) has passed once locally behind the `TAGENT_REQUIRE_REAL_MODEL` three-state gate with a non-idling probe (≤3 calls budgeted); a single-run record is not standing regression — CI without a key SKIPs legitimately |
+**Crash at 3 a.m., resume in place** — A new process comes up, rebuilds context byte-for-byte from the event chain (no second token bill for history), probes yesterday's unfinished tasks and takes the live ones back over. All you see in the morning: "restarted overnight, inspection continues, nothing abnormal."
 
-**Storage backend, honestly**: the default `localfile` (`LocalFileKV`) is a minimal cross-process verification backend — per-bucket direct serialization, reads and writes share one lock, and it **provides no production-grade durability/concurrency guarantees**; use `rustviking` or another dedicated backend for production persistence.
+**One unattended night** — When the model API starts throttling, it backs off instead of hammering; a dangerous command goes to human approval first while it works on something else; in idle hours it reviews the past two days and distills an experience card. By morning: one lesson saved, one approval waiting, zero silent failures.
 
-**Externalized meditation, honestly**: an **opt-in** capability, off by default, and even when on it acts only inside two authorization layers — the observation surface `meditation.observed_namespaces` must fall within `memory.read_namespaces` (an unauthorized partition cannot even contribute references), and the delivery allowlist `meditation.deliver_to` defaults to empty, which means **all delivery is refused**. Overreach and blind targeting are **refused by name at assembly time**, never degraded quietly. The freshness predicate is fail-closed too: under-reflecting beats mis-judging novelty (a fact chain that cannot be read is neither "nothing new" nor "something new"). Form predicate, watermark anchor and switchback semantics: [agent engine §2.14](docs/wiki/agent/agent-architecture.md#meditation-two-forms); the delivery-seam decision table: [durable delivery · lineage visibility](docs/wiki/reliability/durable-delivery.md#lineage-visibility).The real-model end-to-end scenario (`TAGENT_REQUIRE_REAL_MODEL` three-state gate) has passed once locally with audited samples on disk; that evidence is a single real run, not a claim of standing CI coverage.
+**Swap the brain without stopping** — Change the model from A to B in config, add an MCP tool; it takes effect from the next turn, in-flight turns finish on the old generation, and anything that genuinely cannot apply online is **refused by name** with the exact YAML paths that need a restart — never a fake "success".
 
----
+## Core capabilities
 
-## 🧠 Mental model
+### Long-term memory, not an infinite context
+Every message, tool call, and result is stored as an immutable event (per-type TTL forgetting; permanent is configurable). When context exceeds budget, old stretches fold into one-line cards `[evt_1a2b] deploy succeeded`, and `[evt_1a2b]` retrieves the exact original. Storage is append-only; compression changes only what the model sees — never what happened.
 
-### Three-layer data representation
+### Crash recovery
+The projection (current context) is a replay of the fact chain, with no floating checkpoints — after restart it rebuilds as "latest compaction snapshot + tail events", and reusable prefixes keep hitting provider caches.
 
-| Layer | Location | Role | Lifetime |
-|-----|------|------|----------|
-| **EventBus AgentEvent** | Agent memory | Event trigger queue | Publish → dropped after Pull |
-| **SessionProjection EventReference[]** | Agent memory | Projection (bounded working memory, lightweight refs only) | Clearable by Compactor |
-| **MemoryStore FullEvent** | memory/file/DB | Immutable full-event chain (single source of full text) | Per-type TTL (`-1` = permanent) |
+### Async tasks never lose the thread
+Long tasks answer first and notify on completion; notifications carry their own context; unacknowledged inputs can be durably accepted in full (at-least-once) and replayed in strict order after restart.
 
-```mermaid
-graph TB
-    EB["EventBus: AgentEvent"]
-    SP["SessionProjection: EventReference[]"]
-    MS["MemoryStore: FullEvent (single full-text source)"]
-    LLM["[]model.Message bounded context to LLM"]
-    TOOL["recall tool"]
-    EB -->|drive turn: Pull → RunFlow| SP
-    EB -->|plugin pipeline: store event| MS
-    MS -.append lightweight ref (only on commit success).-> SP
-    SP -->|assembleRequest: single assembly source| LLM
-    MS -->|fetch original text by event_key| TOOL
-```
+### Adjustable at runtime — and honest about it
+Five parameter groups apply instantly, structural changes apply via a generation swap (in-flight turns unaffected, rollback available), everything else is **refused by name** with the restart list. "Changed, acknowledged, silently ineffective" does not exist.
 
-**Key constraints**: the projection holds only lightweight refs; MemoryStore is the sole full-event chain; compaction changes only the LLM view and projection, never storage; **references are published only on successful commit** — the failure path leaves no "ticket in the log, record missing from the store" mismatch.
+### Homogeneous multi-agent collaboration
+An entry agent and the agents it delegates to are the same thing: each has its own event bus, task domain, and memory partition, and can recursively delegate. A delegation binds where its settlement returns — late results flow back to the caller and continue the same turn. A single call can temporarily override prompt/model/tool scope (expires with the call, never leaks across calls).
 
-### Bounded context and exact recall
+### Self-review and cross-domain curation (new)
+In idle periods the agent reviews itself: tidies context, distills experience cards, records negative feedback on repeatedly failing strategies. Optionally you can configure a dedicated **curator agent** that — once authorized — reads other agents' memories across partitions, spots cross-task patterns ("three sessions are all waiting on the same approval"), produces experience cards and delivers them back into the relevant agents' conversations. Deliberately conservative: a curator only writes ordinary events into its own partition and never rewrites anyone else's context; both reading scope and delivery targets require explicit allowlists.
 
-Context sent to the model is always budget-capped; the oldest overflowing segment is folded into a card line `[evt_key] task skeleton`. Folding never deletes the original — `[evt_key]` recovers it byte-for-byte. Whether this holds depends on: ① the original is still within retention; ② the model picks the right ticket; ③ the read path is healthy. If any fails, the framework reports it by name instead of staying silent.
+### Runtime data → training data
+Optional decision capture records every model call completely (input snapshot, response fragments, terminal state, loss counters); afterwards each decision's "what it saw → what it did → what happened → how a human rated it" is joined into samples, split train/test grouped by session, and exported as an SFT dataset — every step reconcilable against manifests; missing pieces are named, never silently patched together.
 
----
-
-## 🏗 Architecture and modules
-
-```mermaid
-graph TB
-    ROOT["tagent.New() composition root"]
-    TA["TagentAgent"]
-    EB["EventBus"]
-    CM["ContextManager (executor generation build/adopt/publish)"]
-    SC["Compression SmartCompressor/Compactor"]
-    MP["MemoryPlugin (persistence + causal chain)"]
-    MS["MemoryStore"]
-    RS["RelationStore"]
-    ATW["AgentToolWrapper (homogeneous delegation)"]
-    ROOT --> TA --> EB -->|Pull| TA
-    TA -->|BuildInvocation + RunFlow| CM --> SC
-    TA -->|runner.Run OnEvent| MP --> MS --> RS
-    ATW -->|delegate| TA
-```
-
-| Module | Responsibility |
-|------|------|
-| `config/` | Config model layer: `Config`/`AgentConfig`/`ToolRef`, strict loading and validation, lifecycle projection; re-exported by the composition root via aliases, `tagent.*` source API unchanged |
-| `agent/` | Event-driven engine: EventBus, one unified event pipeline (entry and callee share the same turn primitive), ContextManager, meditation, sub-agent wrapping; `agent/compress/` compression & budget, `agent/org/` generation governance, `agent/resources/` resource leases, `agent/reliability/` resident reliability, `agent/governance/` approval gate |
-| `memory/` | Immutable event store: `FullEvent`/`MemoryStore`/`FileSegmentStore`/`RelationStore`/lifecycle; semantic-engine, embedder and backend adapters each live in sub-packages |
-| `plugin/` | Framework plugins: MemoryPlugin (commit gate + causal chain + exact call_id attribution), SummaryPlugin |
-| `tool/` | Tools: exec (tmux async task layer), recall/knowledge, task tool family, file tools, MCP gateway |
-| `event/` | Event type system and metadata contract (`FormatEventKey`/`ParseEventKey`/`MetaKeyCallID`, single source); EventTypeSpec registry |
-| `prompt/` | Loader and hot-reload Source (file is the source of truth, lazy mtime read) |
-| `rl/` | RL/training surface: TrajectoryRecorder, opt-in capture v2, authorized read-only export, SwappableModel, HTTPAPI (security boundary) |
-| `evolution/` | git-native self-evolution (off by default): register/evaluate/safe rollback; the framework only advises, never acts |
-
-**Dependency direction** (mechanically asserted; a reversal fails CI): `tagent → agent → plugin → memory`, `tool/* → memory`, `event` is a pure leaf; `modelutil` is a leaf depending only on framework model/tool.
-
-**Homogeneous collaboration**: the entry and the callee are the same kind of tagent — one turn primitive, one event pipeline, one committed record, one (per-agent) task domain; "entry/sub" is only a connection relation, not two types. Once an input enters a loop, the destination of its settlements and outputs is fixed and looked up, never guessed at runtime.
-
-**Single orchestration-publish authority**: the composition root exclusively builds and publishes executor bindings; internal packages never reach versions through the root. The **mechanism** of generation governance lives in agent sub-packages; the **publish action** stays in the composition root — mechanism and privilege physically separated.
-
-## 📐 Design commitments
-
-1. **Immutable events**: once stored, never modified; compaction and forgetting act on the view, not on facts.
-2. **Bounded context**: the working memory always has a budget cap — via layered memory, not an unbounded window.
-3. **Auditable recall**: compacted content keeps tickets recoverable by key; the framework never fabricates a "looks-successful" empty reference.
-4. **Async without losing the thread**: long tasks answer first and notify on completion; notifications carry their own context.
-5. **Zero change by default**: governance / evolution / reliability / capture are all off by default; the off state is byte-identical to before; each optional capability can be removed at a single point.
-
----
-
-## 📦 Environment
-
-| Dependency | Requirement | Use |
-|---|---|---|
-| Go | ≥ 1.24 | build |
-| tmux | recent | exec command execution + async task layer |
-| rustviking | optional | only for `memory.type: file` production backend; default localfile (minimal verification backend, see above) |
-| ZAI_API_KEY / provider key | as needed | model API key; **all unit tests use mocks, no key required** |
-| OTel endpoint | optional | set `OTEL_EXPORTER_OTLP_ENDPOINT` to export traces; unset = noop, empty `trace_id` does not affect key/call_id correlation |
-
-## 🚀 Quick start
+## Quick start in three minutes
 
 **1. Declarative config (YAML)**
 
@@ -135,7 +60,7 @@ agents:
       type: localfile
       path: /data/tagent/events
     tools:
-      - {kind: tool, id: recall}          # unified recall: ticket/causal/keyword
+      - {kind: tool, id: recall}          # tickets / causal chain / keyword
       - {kind: tool, id: exec}            # tmux execution (async task layer)
 ```
 
@@ -145,7 +70,7 @@ agents:
 ta, _ := tagent.New(cfg, tagent.WithModel(model))
 defer ta.Close()
 
-outputCh, _ := ta.StartLoop("userID", "sessionID") // StopLoop is terminal: restart needs a new instance, recovered from the fact chain
+outputCh, _ := ta.StartLoop("userID", "sessionID") // StopLoop is terminal: restart with a new instance, recovered from the fact chain
 ta.InjectMessage(model.Message{Role: model.RoleUser, Content: "run a command for me"})
 
 for evt := range outputCh {
@@ -155,80 +80,135 @@ for evt := range outputCh {
 }
 ```
 
-**3. Full example (WeChat Bot)**
+**3. Full example (WeChat Bot — five cooperating agents in practice)**
 
 ```bash
 cd examples/wechat-bot
 ./wizard.sh    # deps check / guided key input (no echo) / working root / .env(chmod 600) / perms / connectivity
-./run.sh       # foreground (./run.sh start background; --help for all)
+./run.sh       # foreground (./run.sh start for background)
 ```
 
-Keys go into `.env` (ignored by the allowlist-style `.gitignore`, never committed). systemd/container/A2A deployment see [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md) and [docs/wiki/](docs/wiki/).
+Keys live only in `.env` (allowlist `.gitignore`, never committed). systemd / container / A2A deployment: see [examples/wechat-bot/deploy/README.md](examples/wechat-bot/deploy/README.md).
 
----
+## Mental model
+
+### Three layers of data
+
+| Layer | Where | Role | Lifetime |
+|-----|------|------|----------|
+| **EventBus AgentEvent** | agent memory | trigger queue | Publish → dropped after Pull |
+| **SessionProjection EventReference[]** | agent memory | projection (bounded working memory, light refs only) | clearable by Compactor |
+| **MemoryStore FullEvent** | memory/file/DB | immutable full-event chain (single full-text source) | per-type TTL (`-1` = permanent) |
+
+```mermaid
+graph TB
+    EB["EventBus: AgentEvent"]
+    SP["SessionProjection: EventReference[]"]
+    MS["MemoryStore: FullEvent (single full-text source)"]
+    LLM["[]model.Message bounded context to LLM"]
+    TOOL["recall tool"]
+    EB -->|drive turn: Pull → RunFlow| SP
+    EB -->|plugin pipeline: store event| MS
+    MS -.append light ref (only on commit success).-> SP
+    SP -->|assembleRequest: single assembly source| LLM
+    MS -->|fetch original by event_key| TOOL
+```
+
+**One request, end to end**: user message enters the bus → the loop batches, persisting each input before projecting → assembles the request (the only assembly source; over-budget is compressed or refused right there) → the framework runs the ReAct turn (LLM ↔ tools) → every output is committed via plugins → the final response goes back to the host. Every failure has a named outcome; "ticket in the log, record missing from the store" cannot happen.
+
+## Architecture and modules
+
+```mermaid
+graph TB
+    ROOT["tagent.New() composition root"] --> TA["TagentAgent"]
+    TA --> EB["EventBus"] --> TA
+    TA -->|BuildInvocation + RunFlow| CM["ContextManager (generation build/publish)"] --> SC["compression & budget"]
+    TA -->|runner.Run OnEvent| MP["MemoryPlugin (commit gate + causal chain)"] --> MS["MemoryStore"] --> RS["RelationStore"]
+    ATW["AgentToolWrapper (homogeneous delegation)"] --> TA
+```
+
+| Module | Responsibility |
+|------|------|
+| `config/` | config model, strict loading/validation, lifecycle projection; `tagent.*` public API stable at source level |
+| `agent/` | event-driven engine: EventBus, unified pipeline, ContextManager, meditation, sub-agent wrapping; sub-packages `compress/`, `org/` (generation governance), `task/`, `reliability/`, `governance/`, `resources/` |
+| `memory/` | immutable event store: segment files + relation edges + lifecycle; swappable engine/embedder/KV sub-packages |
+| `plugin/` | MemoryPlugin (persistence + causal chain + call attribution), SummaryPlugin |
+| `tool/` | exec (tmux async tasks), recall/knowledge, task tools, file tools, MCP gateway |
+| `event/` | event types and metadata contract; the single-source lineage whitelist |
+| `prompt/` | prompt loading and hot reload (file is the source of truth) |
+| `rl/` | decision capture, authorized export, swappable model handle, HTTPAPI (RL-facing surface) |
+| `evolution/` | git-native self-evolution (off by default): register / evaluate / safe rollback |
+
+**Dependency direction** (mechanically asserted in CI): `tagent → agent → plugin → memory`, `tool/* → memory`, `event` is a pure leaf; `modelutil` depends only on framework types. **Single orchestration-publish authority**: only the composition root publishes configuration generations; the mechanism lives in `agent/org`, the privilege in the root — physically separated.
+
+## 📐 Design commitments
+
+1. **Immutable events**: once stored, facts are never rewritten; compaction and forgetting act on views.
+2. **Bounded context**: working memory always has a budget — via layered memory, not an unbounded window.
+3. **Auditable recall**: compaction leaves tickets; failures get named outcomes; the framework never manufactures "looks successful".
+4. **Async without losing the thread**: long tasks answer first, notify with full context.
+5. **Zero change by default**: governance / evolution / reliability / capture / curation are opt-in; the off state is byte-identical to before, each removable at a single point.
 
 ## 🔧 Configuration reference
 
-> Config keys are **strictly parsed**: an unknown field fails startup and names it; structural changes follow a deprecation flow.
+> Keys are **strictly parsed**: unknown fields fail startup by name; typos never drift silently.
 
-### Global options
+### Global
 
 | Option | Default | Notes |
 |------|------|------|
-| `entry` / `model` / `provider` / `providers` | tagent / required / openai / `{}` | entry, model, provider connection info |
+| `entry` / `model` / `provider` / `providers` | tagent / required / openai / `{}` | entry and model wiring |
 | `prompt_dir` | `resources/prompts` | prompt directory |
 | `request_timeout_seconds` | `3600` | request timeout |
-| `working_dir` | `""` | **unified agent working root** (base for file tools and exec); empty = inherit process cwd; overridable via `TAGENT_WORKING_DIR` |
-| `trajectory_dump` / `trajectory_dir` | `false` / `data/trajectories` | v1 trajectory recording |
-| `trajectory_capture` | (off) | **opt-in v2 capture**: `enabled` (requires `trajectory_dump: true`, else a named startup error) / `max_record_bytes` (8MiB per record) / `max_pending_bytes` (64MiB in-flight incl. copies) / `max_run_bytes` (512MiB per run) / `max_open_files` (≤16). `0` = rl default (source of truth in `rl`); **negative is refused**, not read as "unlimited"; exceeding caps is **refused, not clamped**. All read at construction time, not hot-reloadable. See [decision capture](docs/wiki/rl/rl-architecture.md#trajectory-capture) |
+| `working_dir` | `""` | **unified agent working root** for file tools and exec; overridable via `TAGENT_WORKING_DIR` |
+| `trajectory_dump` / `trajectory_dir` | `false` / `data/trajectories` | trajectory recording (v1) |
+| `trajectory_capture` | (off) | **v2 decision capture**: `enabled` (requires `trajectory_dump: true`) + four resource caps (per-record / in-flight / per-run / open files); negative values refuse startup (never read as "unlimited"); all construction-time. See [decision capture](docs/wiki/rl/rl-architecture.md#trajectory-capture) |
 
-### Per-agent highlights
+### Per agent
 
 | Option | Default | Notes |
 |------|------|------|
-| `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | in-process / file persistent / cross-partition reads require explicit authorization |
-| `memory.lifecycle` | built-in | forgetting: `global_ttl_days` (default 7, negative = off) / `type_ttl` / `max_events_per_partition` |
-| `memory.engine` | (off) | semantic retrieval and consolidation-as-suggestion (a trigger is only a suggestion; execution stays with LLM + tools) |
-| `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | compaction trigger / recent count kept after compaction |
-| `max_tool_iterations` / `max_tokens` / `temperature` | entry 50/8000/0.7 · sub 10/4096/0.3 | configured only at the referenced agent's own definition |
-| `meditation.enabled` | `false` | idle-period reflection |
-| `meditation.observed_namespaces` | `[]` (empty = falls back to `memory.read_namespaces`) | **Form switch**: empty = in-loop self-maintenance; non-empty = external curation, freshness reads only non-self-managed lineage events past the watermark of these partitions. Outside `read_namespaces` authorization → **refused by name at startup**. Read at construction time and serialized into the organizational fingerprint as part of the meditation block — **a change means a new generation**, it is not on the `restartRequired` refusal list |
-| `meditation.deliver_to` | `[]` (empty = **all delivery refused**) | Allowlist of target agents that meditation output may flow back to (same-process addressing, no network). A whitelisted target whose partition is outside the sender's observation surface is a blind target → **refused by name at assembly time**. Same generation-change attribution |
+| `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | in-process / file persistent; reading another agent's memory requires explicit grant |
+| `memory.lifecycle` | built-in | forgetting: global/per-type TTL, capacity caps |
+| `memory.engine` | (off) | semantic retrieval (vector ∪ keyword RRF) and consolidation hints (a trigger is only a suggestion; execution stays with LLM + tools) |
+| `meditation.enabled` + `interval`/`min_gap`/`prompt_file` | `false` | idle self-review; add `observed_namespaces`/`deliver_to` to upgrade it into a cross-domain curator agent (see curation notes and "Current state & limits") |
+| `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | compaction trigger / recent tasks kept |
+| `max_tool_iterations` / `max_tokens` / `temperature` | entry 50/8000/0.7 | configure only at the referenced agent's own definition |
 
 ### compress block
 
 | Option | Default | Notes |
 |------|------|------|
-| `summary_model` / `summary_provider` | inherit agent | dedicated summary model (a cheaper one is fine) |
-| `card_max_chars` / `summary_max_tokens` | `6000` / `8192` | card cap / summary budget floor |
-| `summary_timeout_seconds` | `0` (= package default 5s) | shared deadline for all synchronous summaries in one real fold. `0` = use package default, not off; **negative is a validation error** (not "no limit"); above `120` **refused, not clamped**. A construction-time value — changing it goes through a generation, not a fourth hot channel. See [summary deadline](docs/wiki/agent/compression-and-telemetry.md#summary-deadline) |
+| `summary_model` / `summary_provider` | inherit agent | a cheaper model is fine for summaries |
+| `card_max_chars` / `summary_max_tokens` | `6000` / `8192` | card cap / summary budget |
+| `summary_timeout_seconds` | `0` (=5s) | one deadline shared by all synchronous summaries in a fold; above the `120` cap it is refused, not clamped; changing it goes through a generation |
 
 ### Platform subsystems (all off by default = zero behavior change)
 
-| Block | Notes |
-|--------|------|
-| `governance:` | approval gate: leaf tools through risk classification + budget window + critical async approval; refusals return to the model as tool results (not Go errors). `enforcement: warn|strict` |
-| `evolution:` | git-native self-evolution: register + post-evaluation (degradation only advises) + safe rollback. ⚠ production = separate deployment repo |
-| `reliability:` | resident reliability: durable inbox (full durable admission, at-least-once, **does not guarantee external tools run exactly once**), dependency-degradation ladder, mem_spill fallback, meditation anchors |
+| Block | One-liner |
+|---|---|
+| `governance:` | tool risk classification + budget windows + critical async approvals (refusals return to the model as tool results so it can self-correct) |
+| `evolution:` | git-native self-evolution: prompt/skill edits take effect from the file; this package registers, evaluates post-hoc (degradation only advises), and rolls back safely |
+| `reliability:` | durable input acceptance (at-least-once), five-dependency degradation ladder, storage fallback, meditation anchors |
 
-> **When a config change requires a restart**: hot reload has only three legal readings — ① five numeric hot params apply immediately; ② a structural allowlist (entry/model/provider/prompt_dir, `providers.{provider,api_endpoint}`, per-agent subset) applies via a generation change; ③ everything else is **refused by name** with `restartRequired` (`governance`/`reliability`/`trajectory_capture`/`trajectory_dump`/`trajectory_dir`). A change touching both is **refused as a whole** (the hot half does not silently apply). The criterion is the **consumer's position**, not how sensitive a field looks. See [dimension classification](docs/wiki/platform/org-hot-reload.md#restart-required-dimensions).
+> **When a config change needs a restart**: five numeric groups apply instantly; the structural allowlist (entry/model/provider/prompt files/subsets) applies via a generation on save; everything else (governance, reliability, trajectory settings, the curator's observation and delivery lists, …) is **refused by name** with exact YAML paths. A change mixing both kinds is refused as a whole — the hot half never sneaks through. The criterion is where the value is consumed, not how sensitive it looks. Details: [hot-reload dimensions](docs/wiki/platform/org-hot-reload.md#restart-required-dimensions).
 
 ## 🤖 RL / training surface
 
-- **Recording**: `rl.TrajectoryRecorder` (v1) + opt-in capture v2; sub-agents share one write stream via the model wrapper.
-- **Authorized export**: `rl.ExportTrainingFacts` read-only narrow surface (partition allowlist, per-row re-check, missing/forbidden/ambiguous in separate columns, no automatic reward folding).
-- **Offline conversion**: `scripts/convert_trajectories.py --strict` dual-stream (capture primary + facts index + seal proof) yields SFT/RL samples; `scripts/verify_runtime_acceptance.py` is a **reconciler** (missing evidence = FAIL, not SKIP).
-- **Retirement note**: the AReaL online training bridge (pre-rename `train.*` layout) has been removed; reconnection conditions in [RL architecture](docs/wiki/rl/rl-architecture.md).
+- **Recording**: v1 trajectories + optional v2 decision capture (SDK-boundary snapshots, exact call linking, seals that prove their own completeness; off by default and byte-identical when off).
+- **Authorized export**: `rl.ExportTrainingFacts` read-only snapshots (partition allowlist + per-row re-verification; missing/ambiguous reported as separate columns, never guessed).
+- **Offline conversion**: `scripts/convert_trajectories.py --strict` produces SFT samples from dual streams; `scripts/verify_runtime_acceptance.py` reconciles evidence (missing evidence = FAIL, not SKIP).
+- The online RL bridge (AReaL) is retired; reconnection conditions in [RL architecture](docs/wiki/rl/rl-architecture.md).
 
 ## 📚 Further reading
 
 | Topic | Doc |
-|------|------|
+|---|---|
 | Memory architecture / recall protocol | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
-| Agent architecture / executions / compression & telemetry | [docs/wiki/agent/](docs/wiki/agent/) |
+| Agent engine / generations / compression & telemetry / the two meditation forms | [docs/wiki/agent/](docs/wiki/agent/) |
 | Platform subsystems (governance/evolution/reliability/hot-reload/observability/MCP) | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
 | RL / capture / authorized export / dual-stream conversion | [docs/wiki/rl/rl-architecture.md](docs/wiki/rl/rl-architecture.md) |
-| Design specs (OpenSpec) | [openspec/specs/](openspec/specs/) |
+| Design specs (OpenSpec, 114 items) | [openspec/specs/](openspec/specs/) |
 | Real-LLM contract guard matrix | [tests/README.md](tests/README.md) |
 
 ## Development
@@ -241,7 +221,19 @@ bash scripts/race_check.sh              # race gate
 bash scripts/lint.sh && bash scripts/check-openspec.sh
 ```
 
-CI runs on push (main/dev) and PR: build + vet + full short + new subsystems `-race`; real-LLM contract tests auto-skip without a key and do not block. tmux session tests must run `-p 1` serially (they share the default tmux server and would reap each other; see [docs/wiki/tool](docs/wiki/tool/tool-architecture.md)).
+CI (push to main/dev and PRs): build + vet + full short + new subsystems `-race`; real-LLM contract tests auto-skip without a key and never block. Comments are contracts: every production file carries a `契约:` index line pointing at its wiki judgment, enforced zero-tolerance in CI (see [docs/comment-gate-tooling.md](docs/comment-gate-tooling.md)). tmux session tests run `-p 1` serially (interpretation guide: [tool architecture](docs/wiki/tool/tool-architecture.md)).
+
+## Current state & limits (read this honestly)
+
+For first-time readers — so the project is neither over- nor under-estimated:
+
+- **Storage backend**: the default `localfile` is a minimal verification backend (per-bucket serialization, one lock) with **no production durability claims**; configure `rustviking` or another dedicated backend for production persistence.
+- **Exact retrieval has preconditions**: the original must still be within TTL, the model must pick the right ticket, and the read path must be healthy. A few degraded recovery paths are eventually consistent, not byte-exact. "Recalled correctly" ≠ "understood correctly".
+- **Budgeting is estimation**: char-ratio + fixed overhead — one consistent scheme that no longer misses tool declarations or long arguments, but it does not claim provider-window safety or any task-success-rate gain.
+- **Training-data chain**: the recording → authorized export → strict conversion **sample-preparation loop** works and reconciles; the end-to-end "real tokenizer produces trainable batches" leg awaits a local template asset; no weight-training gains are claimed; the online RL bridge is retired.
+- **Cross-domain curation (external meditation)**: off by default; enabling needs two explicit grants (`observed_namespaces` ⊆ `memory.read_namespaces`, plus a `deliver_to` allowlist — violations and blind targets refuse at assembly). Its novelty judgment is fail-closed (unreadable fact chain or unknown lineage never counts). Curators only write ordinary events to their own partition and never rewrite another agent's context. Delivery is same-process; cross-process goes through the existing HTTPAPI. The real-model end-to-end scenario passed once locally behind the three-state gate with a non-idling probe (≤3 calls budgeted) — a single-run record; CI without a key SKIPs legitimately.
+- **Hot reload is not magic**: not every setting changes online; the rest are refused with a restart list. Side-channel capabilities (delivery, capture) never alter call semantics.
+- **External tool side effects are at-least-once**: durable acceptance prevents loss, not repetition — make side-effecting tools idempotent with your own keys.
 
 ## License
 
