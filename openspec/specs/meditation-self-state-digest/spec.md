@@ -21,18 +21,22 @@
 
 ### Requirement: digest 覆盖任务层健康与空闲时长
 
-digest SHALL 至少包含：(a) 任务层按状态计数（running/stable/alive-detached/suspect/dead/failed 等）；(b) 需关注任务（`suspect`/`dead`/`failed`）的简摘（描述 + 状态 + 年龄）；(c) 距最近一次 agent 输出的空闲时长。任务数据 SHALL 只读获取（`TaskController.List()`），SHALL NOT 修改任务层。
+digest 的覆盖面按形态区分：**in-loop 形态**（未配置观察面）SHALL 沿用既有覆盖——(a) 任务层按状态计数；(b) 需关注任务（`suspect`/`dead`/`failed`）简摘；(c) 距最近一次 agent 输出的空闲时长。**外部观察形态**（观察面非空）digest SHALL 以**被观察分区概况**为主：各观察分区自上次冥想以来的事件计数（分谱系汇总：非自管/自管）、最近非自管活动摘要；自身任务板明细 SHALL 可省略（外部观察者自身任务层通常为空，沿用"无任务层优雅降级"）。两形态的 digest 均 SHALL 确定性生成、零 LLM、不阻塞、有界渲染。
 
-#### Scenario: 存在卡死/死亡任务时列出简摘
+#### Scenario: in-loop 形态覆盖任务层健康
 
-- **WHEN** 任务层存在处于 `suspect` 或 `dead` 的任务
-- **THEN** digest SHALL 列出这些任务的描述、状态与年龄
-- **AND** SHALL 给出各状态的计数
+- **WHEN** in-loop 形态冥想触发且已接入任务层
+- **THEN** digest 含任务状态计数与需关注任务简摘（既有语义不变）
 
-#### Scenario: 空闲时长基于 agent 输出锚定
+#### Scenario: 外部形态覆盖分区概况
 
-- **WHEN** 渲染 digest
-- **THEN** 空闲时长 SHALL 以距最近一次 agent 输出（final response）的间隔计算
+- **WHEN** 外部观察形态冥想触发
+- **THEN** digest 含各观察分区自上次冥想以来的分谱系事件计数与最近活动摘要
+
+#### Scenario: 外部形态自身无任务不报错
+
+- **WHEN** 外部观察形态下冥想 agent 自身任务层为空
+- **THEN** digest 省略自身任务段，分区概况照常渲染（优雅降级沿用）
 
 ### Requirement: digest 有界渲染
 
@@ -54,7 +58,6 @@ digest SHALL 有界：逐条列出的任务明细 SHALL 有上限，超出部分
 - **THEN** 冥想消息 SHALL 不含任务明细段
 - **AND** 其触发条件与 prompt 注入 SHALL 与现状等价
 
-
 ### Requirement: 冥想总结以高亮卡片行沉淀
 
 冥想 turn 的总结 SHALL 在固化时以高亮卡片行（★ 前缀）写入卡片序列（零 LLM 成本）,使周期性回顾沉淀为长期记忆;超限整理时其要点 SHALL 被浓缩保留。
@@ -63,3 +66,4 @@ digest SHALL 有界：逐条列出的任务明细 SHALL 有上限，超出部分
 
 - **WHEN** 冥想总结产出后发生 Compact
 - **THEN** 卡片序列 SHALL 含该冥想的高亮行;原冥想事件仍照常存储/投影（不改变现有事件流）
+

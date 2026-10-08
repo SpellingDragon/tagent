@@ -129,6 +129,15 @@ const (
     MetaKeyWFLineage wf_* 是 workflow 运行时溯源在事实链上的唯一权威身份键，写入 FullEvent.Metadata；
     消费方只经这些常量解析，不得使用字面量。
 
+const LineageConsolidationHint = "consolidation_hint"
+    LineageConsolidationHint is the pre-existing consolidation-triggers
+    capacity-path trigger source, registered explicitly (never left to the
+    unknown fail-closed default) with a meaning asymmetric to LineageMeditation:
+
+      - self-managed: an internal tidy-up wake-up, never re-arming novelty
+        (including the cross-partition novelty of an external meditation agent).
+      - NOT deliverable: its payload is a candidate list, not a host artifact.
+
 const LineageMeditation = "meditation"
     LineageMeditation is the self-initiated reflection turn trigger source.
 
@@ -150,8 +159,10 @@ func DeliverableLineage(ts string) bool
     i.e. a reclaim carrying it was or can be delivered to the host, so its
     verbatim notice may age out.
 
-    - Anything outside this whitelist is internal and fail-closed
-    withheld: unknown values are never delivered. - Adding an
+    - Anything outside this whitelist is internal and fail-closed withheld:
+    unknown values are never delivered. - consolidation_hint is
+    deliberately absent: adding it here would silently break the novelty
+    exclusion its explicit self-managed registration guards. - Adding an
     externally-visible lineage means adding it here and nowhere else;
 
 func EncodeSourceSnapshot(source string, metadata map[string]any) (string, error)
@@ -229,9 +240,14 @@ func RegisteredEventTypes() []string
 
 func SelfManagedLineage(ts string) bool
     SelfManagedLineage reports the telemetry-audit sense: traffic the agent
-    initiated for itself rather than a user-awaited interaction. It is derived
-    from the same whitelist — withheld lineages are self-managed by definition,
-    and meditation keeps its second layer (host-visible yet self-initiated).
+    initiated for itself rather than a user-awaited interaction. Explicitly
+    self-managed lineages stay self-managed regardless of the deliverable
+    whitelist, which is what pins their novelty exclusion; everything else
+    derives from the same whitelist, withheld lineages being self-managed by
+    definition.
+
+      - meditation: host-visible yet self-initiated (its second layer).
+      - consolidation: pure internal wake signal, self-managed on purpose.
 
 func StripEventKeyPrefix(content string) string
     StripEventKeyPrefix removes a leading [evt_KEY|type] prefix from content.

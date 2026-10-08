@@ -5808,3 +5808,42 @@ func TestOrgReload_RestartOnlyTopLevelSwitch(t *testing.T) {
 	require.EqualValues(t, rev0+1, diagInt64(t, d, "revision"), "a real apply advances the revision again")
 	require.NotContains(t, d, "restartRequired", "the receipt reports THIS round's diff, not a stale refusal")
 }
+
+// TestOrgFingerprint_MeditationExtFieldsMoveFingerprint 钉住 冥想观察面扩字段参与结构指纹换代。
+// - observed_namespaces 与 deliver_to 的增改都移动组织指纹，热更因此走换代重建而非静默生效；
+// - 相同声明的两次装配指纹中性，换代只由真实差异触发。
+// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
+func TestOrgFingerprint_MeditationExtFieldsMoveFingerprint(t *testing.T) {
+	withMed := func(med MeditationConfig) *Config {
+		c := cfgFor()
+		ac := c.Agents["main"]
+		ac.Meditation = med
+		c.Agents["main"] = ac
+		return c
+	}
+	base, err := org.ComputeOrgFingerprint(withMed(MeditationConfig{Enabled: true}))
+	require.NoError(t, err)
+
+	muts := []struct {
+		name string
+		med  MeditationConfig
+	}{
+		{"observed_added", MeditationConfig{Enabled: true, ObservedNamespaces: []string{"recall"}}},
+		{"observed_changed", MeditationConfig{Enabled: true, ObservedNamespaces: []string{"session"}}},
+		{"deliver_to_added", MeditationConfig{Enabled: true, DeliverTo: []string{"entry"}}},
+		{"deliver_to_changed", MeditationConfig{Enabled: true, DeliverTo: []string{"recall"}}},
+	}
+	for _, m := range muts {
+		fp, err := org.ComputeOrgFingerprint(withMed(m.med))
+		require.NoErrorf(t, err, "mutation %q", m.name)
+		require.NotEqualf(t, base, fp,
+			"mutation %q did not move the org fingerprint — a meditation ext-field change would not force a new generation", m.name)
+	}
+
+	decl := MeditationConfig{Enabled: true, ObservedNamespaces: []string{"recall"}, DeliverTo: []string{"entry"}}
+	fpA, err := org.ComputeOrgFingerprint(withMed(decl))
+	require.NoError(t, err)
+	fpB, err := org.ComputeOrgFingerprint(withMed(decl))
+	require.NoError(t, err)
+	require.Equal(t, fpA, fpB, "an identical meditation declaration must be fingerprint-neutral")
+}

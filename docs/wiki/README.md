@@ -6,7 +6,7 @@
 
 | 模块 | 文档 | 一句话 |
 |------|------|--------|
-| agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想 / 子 Agent 封装 |
+| agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想（自体维护与外部策展两形态）/ 子 Agent 封装 |
 | 事件流 | [agent/event-flow.md](agent/event-flow.md) | 一条消息从注入到回复的完整旅程 |
 | 原型骨架 | [agent/prototype-skeleton.md](agent/prototype-skeleton.md) | 126 行六件套、到生产原语的映射、被继承的三条不变量 |
 | 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |
@@ -14,7 +14,7 @@
 | 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | MemoryPlugin（持久化+因果+同点投影）、SummaryPlugin（元数据标注） |
 | 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层+跨重启连续）、召回体系、任务工具族、EventKeys 传递 |
 | tmux 动作会话存活判定 | [tool/tmux-action.md](tool/tmux-action.md) |
-| 持久投递与依赖退化 | [reliability/durable-delivery.md](reliability/durable-delivery.md) |
+| 持久投递与依赖退化 | [reliability/durable-delivery.md](reliability/durable-delivery.md) | 信封三段状态、依赖退化阶梯、谱系投递白名单的两层语义与进程内跨 agent 投递缝 |
 | wechat-bot 运行面 | [examples/wechat-bot-runtime.md](examples/wechat-bot-runtime.md) | 入站去重与文件收发窄接口、投递目标回退、大文件真链路验收 |
 | 上下文压缩与自身遥测 | [agent/compression-and-telemetry.md](agent/compression-and-telemetry.md) |
 | 治理分级处置与批准通道 | [agent/governance-enforcement.md](agent/governance-enforcement.md) |

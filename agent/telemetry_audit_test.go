@@ -169,6 +169,6 @@ func TestMeditationMessageCarriesAuditLine(t *testing.T) {
 	}, inj)
 	mgr.SetAuditLine(func() string { return "[self-telemetry-audit] 空转审计级别 L1" })
 
-	msg := mgr.buildMeditationMessage(time.Now(), time.Hour)
+	msg := mgr.buildMeditationMessage(time.Now(), time.Hour, nil)
 	assert.Contains(t, msg.Content, "[self-telemetry-audit] 空转审计级别 L1")
 }

@@ -149,7 +149,10 @@ agents:
       #   description_file: knowledge_tool_desc.md
       #   event_params: [event_keys]
       #   remote: { url: "http://knowledge-service:8088" }
-    meditation:                          # 定时心跳(仅 entry):空闲触发上下文清理/深度分析/skill 积累
+    # 空闲心跳:上下文清理/深度分析/skill 积累。两种形态由一个开关选定 —— observed_namespaces
+    # 缺省为空即本 agent 自体维护(in-loop,只回看自己);非空即外部策展(只读这些分区水位之后的
+    # 非自管新事件)。任何 agent 都可声明,不限入口;两个扩字段都在构造期读取,改动走配置换代。
+    meditation:
       enabled: true
       interval: "30m"
       min_gap: "1h"
