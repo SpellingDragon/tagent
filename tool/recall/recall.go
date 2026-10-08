@@ -1,9 +1,11 @@
 // recall: the unified recall entry — parameters are the router.
 //
-// - orchestrate: true opts into the RecallAgent engine explicitly; an unwired engine returns guidance instead of a silent deterministic fallback.
-// - items: batch GetEvent in original order, zero hallucination.
-// - turn_key: causal-chain walk back to the turn's external_input.
-// - query with filters: retrieval-layer search; the entry protocol stays when the layer evolves.
+//   - orchestrate: true opts into the RecallAgent engine explicitly; an unwired engine returns guidance instead of a silent deterministic fallback.
+//   - items: batch GetEvent in original order, zero hallucination.
+//   - turn_key: causal-chain walk back to the turn's external_input; an
+//     incomplete walk reports what it did read plus the named reason it stopped
+//     for.
+//   - query with filters: retrieval-layer search; the entry protocol stays when the layer evolves.
 package recall
 
 import (
@@ -92,12 +94,17 @@ func recallByTurn(accessor tagenttool.MemoryStoreAccessor, args recallArgs) (mem
 	if err != nil || startKey == 0 {
 		return memoryRecallResult{}, fmt.Errorf("turn_key must be a valid hex event key")
 	}
-	chain, complete, capped, werr := walkTurnChain(accessor, startKey, maxSteps)
+	walk, werr := walkTurnChain(accessor, startKey, maxSteps)
 	if werr != nil {
 		return memoryRecallResult{}, werr
 	}
-	res := memoryRecallResult{Mode: "turn"}
-	for _, it := range chain {
+	res := memoryRecallResult{
+		Mode:     "turn",
+		Complete: walk.Complete,
+		Capped:   walk.Capped,
+		Reason:   walk.Reason,
+	}
+	for _, it := range walk.Chain {
 		res.Entries = append(res.Entries, memoryRecallEntry{
 			Key:     it.Key,
 			Type:    it.Type,
@@ -107,11 +114,21 @@ func recallByTurn(accessor tagenttool.MemoryStoreAccessor, args recallArgs) (mem
 		})
 	}
 	res.Count = len(res.Entries)
-	if !complete {
-		if capped {
-			res.Message = "causal chain capped at max_steps before reaching external_input; retry with a larger max_steps"
-		} else {
-			res.Message = "causal chain incomplete (broke before reaching the turn's external_input)"
+	if !walk.Complete {
+		res.Message = "causal chain incomplete: " + walk.Reason
+		switch walk.Reason {
+		case partialLimit:
+			res.Message += " — max_steps reached before external_input; retry with a larger max_steps"
+		case partialMissingAncestor:
+			res.Message += " — an ancestor event is not retrievable from the store"
+		case partialRelationError:
+			res.Message += " — the parent edge could not be read"
+		case partialRelationUnavailable:
+			res.Message += " — this storage backend exposes no causal relation capability"
+		case partialCycle:
+			res.Message += " — the chain led back to an event already walked"
+		case partialNoParentEdge:
+			res.Message += " — stopped at a segment start with no recorded parent (nothing was guessed)"
 		}
 	}
 	return res, nil

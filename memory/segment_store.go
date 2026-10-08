@@ -964,48 +964,66 @@ func (s *FileSegmentStore) scanPartition(pid int, query QueryOptions, budget int
 		}
 
 		for _, ep := range eventPairs {
-			evtPK, err := ParseKey(ep.Key)
-			if err != nil || evtPK.KeyType != "evt" {
+			if evtPK, perr := ParseKey(ep.Key); perr != nil || evtPK.KeyType != "evt" {
 				continue
 			}
 
-			// Parse the value (JSON FullEvent) to extract reference fields
-			var event FullEvent
-			if err := json.Unmarshal([]byte(ep.Value), &event); err != nil {
+			hdr, ok := decodeEventHeader(ep.Value)
+			if !ok {
 				continue
 			}
 
-			if s.tombstones != nil && s.tombstones.IsTombstone(event.EventKey) {
+			if s.tombstones != nil && s.tombstones.IsTombstone(hdr.EventKey) {
 				continue
 			}
 
-			if !matchesQueryFilters(event, query) {
+			var ref EventReference
+			switch filterEventHeader(hdr, query) {
+			case filterReject:
 				continue
+			case filterNeedBody:
+				// Summary missed the keyword; only Content can still match. Decode the
+				// full record and defer to the authoritative predicate.
+				var event FullEvent
+				if err := json.Unmarshal([]byte(ep.Value), &event); err != nil {
+					continue
+				}
+				if !matchesQueryFilters(event, query) {
+					continue
+				}
+				ref = EventReference{
+					EventKey:     event.EventKey,
+					PartitionID:  event.PartitionID,
+					EventType:    event.EventType,
+					EventSummary: event.EventSummary,
+					Timestamp:    event.Timestamp,
+				}
+			default:
+				ref = EventReference{
+					EventKey:     hdr.EventKey,
+					PartitionID:  hdr.PartitionID,
+					EventType:    hdr.EventType,
+					EventSummary: hdr.EventSummary,
+					Timestamp:    hdr.Timestamp,
+				}
 			}
 
-			ref := EventReference{
-				EventKey:     event.EventKey,
-				PartitionID:  event.PartitionID,
-				EventType:    event.EventType,
-				EventSummary: event.EventSummary,
-				Timestamp:    event.Timestamp,
-			}
-			if idx, dup := seenIdx[event.EventKey]; dup {
-				if wLayer > seenLayer[event.EventKey] {
+			if idx, dup := seenIdx[ref.EventKey]; dup {
+				if wLayer > seenLayer[ref.EventKey] {
 					matched[idx] = ref
-					seenLayer[event.EventKey] = wLayer
+					seenLayer[ref.EventKey] = wLayer
 				}
 				continue
 			}
-			seenIdx[event.EventKey] = len(matched)
-			seenLayer[event.EventKey] = wLayer
+			seenIdx[ref.EventKey] = len(matched)
+			seenLayer[ref.EventKey] = wLayer
 			matched = append(matched, ref)
 
-			if !collectedAny || event.Timestamp < minCollectedTs {
-				minCollectedTs = event.Timestamp
+			if !collectedAny || ref.Timestamp < minCollectedTs {
+				minCollectedTs = ref.Timestamp
 			}
-			if !collectedAny || event.Timestamp > maxCollectedTs {
-				maxCollectedTs = event.Timestamp
+			if !collectedAny || ref.Timestamp > maxCollectedTs {
+				maxCollectedTs = ref.Timestamp
 			}
 			collectedAny = true
 		}
@@ -1023,6 +1041,84 @@ func (s *FileSegmentStore) resolvePartitions(query QueryOptions) []int {
 		return []int{query.PartitionID}
 	}
 	return nil
+}
+
+// eventHeader is the lightweight projection of a stored FullEvent carrying only
+// the fields a scan needs for routing, dedup and filtering. Decoding it skips the
+// (potentially large) Content body; only a keyword query whose summary does not
+// already match decodes the full event to inspect Content. The JSON tags MUST stay
+// aligned with FullEvent — a mismatch would silently drop matches.
+//
+// Field provenance: the write path (StoreEvent/ReplayEvent) marshals a whole
+// FullEvent, so any value readable as an eventHeader decodes identically when the
+// full struct is later required; the split never reinterprets a field.
+type eventHeader struct {
+	EventKey     int64  `json:"event_key"`
+	PartitionID  int    `json:"partition_id"`
+	EventType    string `json:"event_type"`
+	EventSummary string `json:"event_summary"`
+	Timestamp    int64  `json:"timestamp"`
+}
+
+// decodeEventHeader parses only the routing/filter fields of a stored event's JSON
+// value. ok=false means the value is unreadable as an event, so the caller skips
+// the entry — the same per-entry outcome as a failed full decode, but without
+// materialising Content.
+func decodeEventHeader(value string) (eventHeader, bool) {
+	var h eventHeader
+	if err := json.Unmarshal([]byte(value), &h); err != nil {
+		return eventHeader{}, false
+	}
+	return h, true
+}
+
+// headerFilterOutcome is the three-way result of filtering on the lightweight
+// header, so a scan can avoid decoding the body whenever the header already
+// decides the match.
+type headerFilterOutcome int
+
+const (
+	// filterReject: a non-Content filter (type/time/key floor) already excludes
+	// the event — decisive, no body needed.
+	filterReject headerFilterOutcome = iota
+	// filterAccept: every filter the header can see passes (including the keyword
+	// matching the summary) — a match without touching the body.
+	filterAccept
+	// filterNeedBody: a keyword is set but the summary does not cover it, so only
+	// Content can still make it match; the caller must decode the full event and
+	// re-run matchesQueryFilters.
+	filterNeedBody
+)
+
+// filterEventHeader mirrors the header-visible part of matchesQueryFilters. It MUST
+// never reject an event that matchesQueryFilters would keep; the only case it cannot
+// settle alone is the keyword, which it defers to the body via filterNeedBody.
+func filterEventHeader(hdr eventHeader, query QueryOptions) headerFilterOutcome {
+	if len(query.EventTypes) > 0 {
+		found := false
+		for _, et := range query.EventTypes {
+			if hdr.EventType == et {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return filterReject
+		}
+	}
+	if query.StartTime > 0 && hdr.Timestamp < query.StartTime {
+		return filterReject
+	}
+	if query.EndTime > 0 && hdr.Timestamp > query.EndTime {
+		return filterReject
+	}
+	if query.MinEventKey != 0 && hdr.EventKey <= query.MinEventKey {
+		return filterReject
+	}
+	if query.Keyword != "" && !matchesKeyword(hdr.EventSummary, query.Keyword) {
+		return filterNeedBody
+	}
+	return filterAccept
 }
 
 // matchesQueryFilters checks if an event matches the query filters.

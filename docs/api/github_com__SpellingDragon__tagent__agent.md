@@ -54,6 +54,10 @@ const PerCallOverridesKey = "percall_overrides"
     ExternalContextKey: the payload rides the Invocation, dies with the call,
     and is held on neither the agent instance nor any shared generation face.
 
+const ReservedModelRefPrefix = "agent:"
+    ReservedModelRefPrefix marks the reference name under which a config-driven
+    instance's ACTUAL model is addressable inside its own execution view.
+
 const SourceTask = "task"
     SourceTask identifies task_settled events on the bus (a settled background
     task reclaimed into a new turn).
@@ -67,6 +71,13 @@ var (
 )
     ErrPublishTimeout Publish errors — callers of PublishContext can branch on
     these; the void Publish only logs and counts them.
+
+var ErrBudgetExceeded = errors.New(compress.BudgetExceededReason)
+    ErrBudgetExceeded anchors the fixed-overhead refusal at the LAST gate
+    before the provider: the assembled request's estimable fixed part already
+    owns the input limit, so folding history cannot pay for it. The name is the
+    compressor's own (compress.BudgetExceededReason) — the gate does not invent
+    a second verdict, it only carries this one out before the send.
 
 var ErrExecClosed = errors.New("execution generation already closed: new work refused")
     ErrExecClosed is what the execution gate returns for NEW work arriving on
@@ -126,6 +137,22 @@ func LookupModelReference(ref string) (model.Model, bool)
 func NewA2AServer(ta *TagentAgent, host string) (*a2ago.A2AServer, error)
     NewA2AServer creates an A2A server that exposes the given TagentAgent.
 
+func PinModelReferences(s *StagedGeneration, refs *ModelRefSnapshot) error
+    PinModelReferences freezes the model-reference snapshot of ONE staged
+    generation. It belongs to the staging window alongside the assembled run
+    config, before any owner of the publish is activated: a generation already
+    installed keeps the snapshot it was published with (publish a new generation
+    instead), and a discarded candidate is refused outright, so nothing is
+    written into an execution view that has been thrown away.
+
+    refs must be the snapshot built from THIS generation's own registry read
+    plus its actual model (NewModelRefSnapshot at candidate construction). A nil
+    snapshot is refused rather than silently falling back to "resolve against
+    whatever is registered at call time" — that second lookup is exactly the
+    defect this pin removes. Registering the snapshot changes no global table,
+    starts no scheduler and keeps the standalone Register/Lookup pair as the
+    only process-wide store.
+
 func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.TaskManager,
 	rebuildClosures func(decl task.Declarative) task.TaskSpec) (restored int)
     RebuildTaskRegistry：冷启动从事实链 纯全量回放重建 active 任务集（registry=fold：task_spawned
@@ -140,6 +167,12 @@ func RegisterModelReference(ref string, m model.Model)
     the target form a per-call model_override addresses. Re-registering a name
     replaces its instance: a reload re-points a reference, and a lookup returns
     either the previous or the new instance, never a torn one.
+
+    This standalone publish/lookup pair stays exactly as it is: an execution
+    view DERIVES a read-only snapshot from it (NewModelRefSnapshot) instead
+    of keeping a second table, and a config-driven instance's own model
+    needs no registration at all — inside its own view it is addressable as
+    ReservedModelRef(name).
 
 func RegisterPlainTool(id string, factory PlainToolFactory)
     RegisterPlainTool registers a factory for creating plain tools by ID.
@@ -158,6 +191,15 @@ func ReplayProjectionHandler(ta *TagentAgent) func(memory.FullEvent)
     agent_output 先派生 Mark）；非投影记录 → 跳过。排除判定的唯一来源是 event 包的 谓词
     IsNonProjectionRecord，与正常提交（persistBusEvent）、冷启动重建共用同一处—— 若在此自带类型枚举，就会漏排
     inbox_receipt，把内部回执注进投影，破坏 「投影＝事实链可回放折叠」这条不变量。本路径只做同点补投影，绝不在活投影上整表 Replace。
+
+func ReservedModelRef(agentName string) string
+    ReservedModelRef is the reference name of the model a config-driven instance
+    was assembled with: `agent:<name>`. It belongs to the execution view rather
+    than to the process registry — nobody has to publish it, and it resolves
+    to whatever model the selected generation actually runs. A candidate whose
+    registry already claims that name for a DIFFERENT instance is refused by
+    name instead of silently being served either side. An empty agent name has
+    no reserved name.
 
 func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentName string) (*AgentToolWrapper, *ExecLease, error)
     ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的子调用租约。
@@ -551,6 +593,13 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
     whose TagentAgent instance and executor were already constructed inside one
     generation and are never republished in place).
 
+func (cm *ContextManager) SetHotSource(src func() compress.HotNumbers)
+    SetHotSource installs the owner's live hot-param source on BOTH sides at
+    once: the compressor (per-boundary numbers) and the manager (the limit named
+    in a refusal). The resident ContextManager is built before the agent's own
+    hot view exists, so this is the wiring-time seam; an existing compressor is
+    required.
+
 func (cm *ContextManager) SetInvocationMetadata(md map[string]string)
     SetInvocationMetadata sets the metadata for the current RunFlow. These
     metadata are propagated to all events derived from the source event via
@@ -639,6 +688,16 @@ type ContextManagerConfig struct {
 	// Compress) instead of relying on pushed construction values. MaxTokens/
 	// ThresholdPct above stay as the construction fallback (no-source path).
 	HotNumbersSource func() compress.HotNumbers
+
+	// SummaryTimeoutSeconds bounds ONE real fold's synchronous summary calls
+	// (O3.5: the config layer speaks seconds, the compressor speaks a Duration).
+	// Non-positive leaves the compress package default in force — 0 does NOT mean
+	// "no deadline".
+	SummaryTimeoutSeconds int
+
+	// CaptureEnabled turns on the optional per-attempt association scope
+	// (trajectory_capture, D14-S2/S3). Default false = today's behavior.
+	CaptureEnabled bool
 
 	// CompactKeysListed / RecentFullCount configure compress.ContextCompressor
 	// constraints (0 = package defaults; RecentFullCount derives from
@@ -854,6 +913,14 @@ func (l *ExecLease) Generation() int64
 func (l *ExecLease) Kind() LeaseKind
     Kind is what this reference stands for (turn / subcall / background).
 
+func (l *ExecLease) ModelReferences() *ModelRefSnapshot
+    ModelReferences returns the frozen model-reference snapshot of the
+    generation this lease pins, or nil when that generation was published
+    without one. An in-flight caller uses it to keep resolving against the
+    version it started on; a new independent call pins the newer generation and
+    reads THAT snapshot, which is how a later re-registration becomes visible to
+    later calls without ever re-routing a call already running.
+
 func (l *ExecLease) Release()
     Release drops the reference. Idempotent: the first call wins, so a turn
     that both returns normally and hits a cleanup defer cannot double-count (
@@ -1007,6 +1074,36 @@ func (m *MeditationManager) UpdateLastUserInput(t time.Time)
     UpdateLastUserInput records a source=="user" injection timestamp — the
     novelty-gate anchor. Called from the injection points only (inject.go);
     non-user sources (meditation/task/tmux) must never arm this gate.
+
+type ModelRefSnapshot struct {
+	// Has unexported fields.
+}
+    ModelRefSnapshot is the read-only model-reference set of ONE execution view:
+    the names currently published in the process registry plus that view's
+    own model under ReservedModelRef. It is built when the view is selected (a
+    candidate's construction, or once at the entry of a standalone call that was
+    never staged), is never written afterwards, and dies with the generation
+    holding it — so resolving one name twice inside one call cannot return
+    two instances, and no model pointer outlives its generation or reaches any
+    durable record.
+
+func NewModelRefSnapshot(agentName string, m model.Model) (*ModelRefSnapshot, error)
+    NewModelRefSnapshot freezes the reference set of the view whose model is
+    m under agent identity agentName: every name the registry publishes now,
+    plus `agent:<agentName>` → m.
+
+    A registry entry already occupying the reserved name with a different
+    instance is a conflict, refused BY NAME. Because this constructor only ever
+    reads the registry, a candidate that fails here leaves the process-wide
+    table exactly as it was — it neither re-points nor drops the entry it
+    refused to adopt. agentName == "" or m == nil means the view has no model
+    of its own to claim (a remote target, a face assembled without a model),
+    so no reserved name is added and registry names resolve as usual.
+
+func (s *ModelRefSnapshot) Resolve(ref string) (model.Model, bool)
+    Resolve reports the instance a reference names inside THIS frozen view.
+    A name the view does not carry is a miss, never a fallback to some other
+    model.
 
 type ObligationReport struct {
 	Executions  int
@@ -1672,6 +1769,23 @@ type TagentConfig struct {
 	Temperature        float64
 	KeepRecentTasks    int
 	Compress           CompressConfig
+
+	// SummaryTimeoutSeconds bounds ONE real fold's synchronous summary calls
+	// (O3.5). The config layer speaks seconds, the compressor speaks a Duration;
+	// non-positive keeps the compress package default in force (0 does not mean
+	// "no deadline").
+	SummaryTimeoutSeconds int
+
+	// CaptureEnabled installs the optional per-attempt association scope
+	// (trajectory_capture, D14-S2/S3) on every runner attempt this agent drives.
+	// Default false = nothing is installed on ctx and nothing is allocated.
+	CaptureEnabled bool
+
+	// CallIDResolver is the exact-key seam MemoryPlugin uses to stamp
+	// tagentevent.MetaKeyCallID onto a committed fact. nil (default) answers from
+	// the association scope installed on the model-call ctx: no scope, no entry →
+	// false → the key is not stamped. It is never filled with the nearest call.
+	CallIDResolver plugin.CallIDResolver
 
 	// TaskTerminalTTL is the grace period an exited task (completed/failed/
 	// cancelled/dead) is retained before pruning. It bounds the resume_task

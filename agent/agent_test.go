@@ -156,7 +156,7 @@ func TestTagentAgent_CompressionModifiesRequest(t *testing.T) {
 	ta, err := NewTagentAgent(&TagentConfig{
 		Model:             mockModel,
 		SystemPrompt:      "You are a test assistant.",
-		MaxTokens:         20,
+		MaxTokens:         100,
 		CompressThreshold: 0.5,
 	})
 	require.NoError(t, err)

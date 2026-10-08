@@ -7,7 +7,7 @@
 **核心职责**：
 - **KnowledgeAgent**：知识获取与翻译 — 发现/理解/翻译能力（Skill/MCP）为可执行计划，实现为 config-driven TagentAgent + AgentToolWrapper 包装
 - **RecallAgent**：智能记忆召回 — 使用内部 LLM React 循环理解查询意图，综合历史事件为连贯回答
-- **ActionTool**：命令执行（注册 ID `exec`，声明名 `action`，统一走 tmux + 任务层；tmux 不可用时同步降级），纯执行器，不关心命令来源
+- **ActionTool**：命令执行（注册 ID `exec`，声明名 `action`，统一走 tmux + 任务层），纯执行器，不关心命令来源。**tmux 是硬依赖**：executor/monitor 没起来时 `Call` 直接返回硬错误 `action: tmux not available (install: brew install tmux)`——曾存在的"同步降级直跑"路径**已移除**，不存在无任务层语义的受限执行形态（依赖清单见 [README](../../README.md)）
 - **TmuxMonitor**：自适应轮询 tmux session（dense→几何退避），状态变更经按会话回调驱动 `TmuxSettleDetector` → 任务层 settle
 - **File Tools**：封装 trpc-agent-go 内置文件操作工具（read_file、save_file 等）
 - **recall**：统一召回入口（纯函数参数路由：items 票据/turn_key 因果链/query 检索/orchestrate 保留形态，见 §六）；**任务工具族**（tool/task/）：list/cancel/relaunch/resume（结果消费不走专用工具：小结果随 settle 内联，大结果转储文件经 read_file 分页）
@@ -505,11 +505,29 @@ classifier 规则 `govface.readonly` 将五工具判 **low**（登记/查询无�
 | 参数形态 | 路径 | 特性 |
 |---|---|---|
 | `items=[{key,hint?}]` | 批量 `GetEvent` 精确回补（原序） | 零幻觉；未命中显式 `miss`；hint 回显对账；确定性优先级最高 |
-| `turn_key`(+max_steps) | 因果链回走（walkTurnChain，至 external_input 停） | 重建整轮执行过程（含被压缩丢弃的工具步骤），时间序 |
+| `turn_key`(+max_steps) | 因果链回走（walkTurnChain，至 external_input 停） | 重建整轮执行过程（含被压缩丢弃的工具步骤），时间序；输出带 `complete`/`capped`/`reason` 三字段说明走没走完（见本节末） |
 | `query`(+since/until/event_types) | 引擎就绪时 hybrid（关键词∪向量 RRF，引擎内融合），否则纯关键词 | 入口协议与 Declaration 恒定（prefix-cache 不变）；逐跳降级保底关键词 |
 | `orchestrate: true` | LLM 多跳编排保留形态 | 未接线时返回明确指引，不静默降级；确定性形态永不进 LLM 路径 |
 
 输出协议统一：条目 `{key(hex), type, summary, content, time}`；优先级 orchestrate > items > turn_key > query。收敛自 `memory_recall`+`memory_turn`+recall 子 agent 三张脸（注册名已退役，内部实现保留为路由目标）；超大内容防复发由事件本体有界保证（见 memory 架构 §16.10 转储）。
+
+### `turn_key` 形态的完整性三字段
+
+`turn_key` 走的是因果链回走，它**可能走不到起点**（链断、后端没有关系能力、预算用完）。因此除条目外还输出三个字段，且三字段只描述这一次回走：
+
+| 字段 | 类型 | 契约 |
+|---|---|---|
+| `complete` | bool | 只有真正回走到该回合的 `external_input`（含该条）才为 `true`；此时 `reason` 必为空 |
+| `capped` | bool | `max_steps` 先用完；`max_steps` 缺省 20、上限 50（超出按 50 取，不报错也不夹紧提示） |
+| `reason` | string | 六个具名读数之一：`missing_ancestor`／`relation_error`／`relation_unavailable`／`cycle`／`limit`／`no_parent_edge` |
+
+三条硬规则：
+
+- **不完整不等于空**：走不完时仍返回**确实读到的那一段**加具名 `reason`，绝不返回空条目冒充"这个回合没有过程"。读方拿到空历史与拿到断链，是完全不同的两个结论。
+- **不推断原因**：`reason` 说的是"回走到这里读不到了"，不是"这条记录被 TTL 删了"。六个读数的语义清单与读者处置归[记忆架构](../memory/memory-architecture.md#causal-chain)，本处不复述枚举内容——复制一份枚举必然随码面增删而失真。
+- **字段是加法**：`reason` 恒为 `omitempty`（完整时干脆不出现）。`complete`/`capped` 在 `memory_turn` 子工具里始终输出；统一 `recall` 入口的三个字段整体 `omitempty`，因此 `items`／`query`／`orchestrate` 形态里不出现——老读方遇到缺失按"不完整"处理即可，不会把缺失读成"完整"。`recall` 的 `Message` 在 `!complete` 时带上 `causal chain incomplete: <reason>` 再加一句可自助的处置建议（例如 `limit` 建议加大 `max_steps`），使模型侧不必解析结构体也知道该重试什么。
+
+`memory_turn` 子工具与 `recall` 的 `turn_key` 形态共用同一个回走函数（`walkTurnChain`），因此两处判定不会各说各话：同一个断点、同一个 `reason`。
 
 ### 工具自访问的抽象接口面（accessor）
 
@@ -1256,6 +1274,6 @@ recall agent 内部用四个子工具做读回，它们与顶层 `memory_recall`
 |------|-----------|---------|
 | **action 成功空输出无明确文案** | exit 0 且无输出时返回内容不明确，模型可能误判失败而重发（实机：探测命令 15 连发撞迭代上限） | 返回"命令成功，无输出"显式文案（一行改动，待做） |
 | **长文档任务迭代预算** | PlanAgent 等写作型任务轮次消耗大，撞上限时无收尾机会（见 agent 篇收尾轮缺口） | 收尾轮机制 / 写作型任务独立预算 |
-| **tmux 不可用时的同步兜底无任务层语义** | 降级路径可执行命令但无 resume/看板/后台通知 | 明确文档化为受限模式（已声明）；不投入补齐 |
+| ~~tmux 不可用时的同步兜底无任务层语义~~ **已撤销**：降级路径连同这一格一起消失——`Call` 在无 executor 时返回硬错误，缺依赖是启动期就该看见的事，不是运行期悄悄换语义的事。真实缺口只剩**无 spawner** 的独立使用形态（同步等待首个 settle，无 resume/看板；见 §8.1 路径表） | 无 spawner 时行为已在 §8.1 声明；不再投入补降级 |
 | **websearch 可靠性** | duckduckgo 无鉴权接口，限流/结构变化敏感 | 多 provider 回退链 |
 | **路径沙箱只覆盖 file 工具族** | file 工具 `base_dir` 是真沙箱（上游 ToolSet 拒绝 `../` 与绝对路径，已实证）。**plan 已结构性闭合**：移除 exec，计划管理走 `spec` 类型化工具（`tool/spec`，op 白名单 + exec.Command 直调 argv，无 shell 逃逸面）+ file 沙箱，"仅限 openspec/" 为结构事实（C9 真实 LLM 契约守护）。**action 等仍需通用 shell 的 agent**：exec 依旧 shell 全权，目录级禁写依赖 prompt + 容器只读根兜底 | 通用 exec 的可选 allowlist 包装（受限模式）；可按需为其他 agent 做专用工具收口 |

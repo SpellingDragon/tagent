@@ -6,18 +6,22 @@ package agent
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
+	"github.com/SpellingDragon/tagent/agent/task"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/stretchr/testify/require"
 	upagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -445,4 +449,232 @@ func TestBackgroundHotApplyConcurrentWithCompressNoRace(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+// TestAssembleRequest_PeeksDynamicOverhead 钉住装配期只读不消费本回合将注入的动态开销。
+//   - pending recovery notice 只 peek，真正发起调用时才由门禁消费
+//   - 看板每请求只渲染一次：预算与注入共用同一份文本，不会出现两次渲染漂移
+func TestAssembleRequest_PeeksDynamicOverhead(t *testing.T) {
+	t.Run("the pending notice can be what overflows the limit", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		long := "[recovery] " + repeatBudgetRunes('n', 300)
+		setPendingNotice(cm, long)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetUnderArgs()
+		cm.assembleRequest(context.Background(), args)
+
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.Error(t, err, "本回合要注入的恢复通告是真实成本，不得当零")
+		require.Contains(t, err.Error(), "budget_exceeded", "超限即具名拒发，got %v", err)
+
+		require.Equal(t, long, pendingNotice(cm), "peek 不消费：拒发前通告仍在原位")
+		require.Zero(t, inner.requestCount())
+		require.Equal(t, long, cm.TakeRecoveryNotice(), "同一次调用真正发起时，通告仍可用")
+	})
+
+	t.Run("the live board is real overhead and renders exactly once", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		board := &countingBoardController{fakeTaskController: &fakeTaskController{
+			tasks: []*task.Task{mkDigestTask("boardaaa11", repeatBudgetRunes('务', 200), task.TaskRunning, time.Minute)},
+		}}
+		cm.taskController = board
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+
+		args := finalBudgetUnderArgs()
+		cm.assembleRequest(context.Background(), args)
+		cm.injectLiveTaskBoard(args)
+
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.Error(t, err, "看板随任务年龄每回合变化，是本回合的真实固定开销，不得当零")
+		require.Contains(t, err.Error(), "budget_exceeded", "超限即具名拒发，got %v", err)
+		require.Zero(t, inner.requestCount(), "拒发不落 provider")
+
+		require.EqualValues(t, 1, board.listCalls.Load(),
+			"预算读一次、尾部注入一次 = 同一份渲染；看板字节随任务年龄变化，禁止二次渲染")
+		var last string
+		for _, m := range args.Request.Messages {
+			last = m.Content
+		}
+		require.Contains(t, last, "[后台任务看板]", "注入位置与内容不变（尾部）")
+	})
+
+	t.Run("no board, no notice: nothing is invented for the budget", func(t *testing.T) {
+		cm := finalBudgetCM(t)
+		inner := &requestCapturingModel{resp: gateOKResp()}
+		g := newExecutionGateModel(inner, cm)
+		args := finalBudgetUnderArgs()
+		cm.assembleRequest(context.Background(), args)
+		_, err := g.GenerateContent(context.Background(), args.Request)
+		require.NoError(t, err, "缺项不造：没有动态开销时不该凭空拒发")
+		require.Equal(t, 1, inner.requestCount())
+	})
+}
+
+// countingBoardController 记录 List() 次数，从而能观察「每请求渲染几次」这一事实。
+type countingBoardController struct {
+	*fakeTaskController
+	listCalls atomic.Int64
+}
+
+func (c *countingBoardController) List() []*task.Task {
+	c.listCalls.Add(1)
+	return c.fakeTaskController.List()
+}
+
+// capTestCM 直接经 NewContextManager 构造，使 ContextManagerConfig 的新字段（摘要时限秒数、
+// 采集开关）走的就是生产那条构造路径。
+func capTestCM(t *testing.T, name string, summarySeconds int, capture bool) *ContextManager {
+	t.Helper()
+	sc := compress.NewSmartCompressor(compress.WithMaxTokens(8000), compress.WithTokenCounter(&mockTokenCounter{tokens: 100}))
+	store := memory.NewInMemoryStore()
+	return NewContextManager(ContextManagerConfig{
+		Name:                  name,
+		UserID:                "test-user",
+		SessionID:             "test-session",
+		Model:                 &loopMockModel{},
+		MaxToolIters:          10,
+		Compressor:            sc,
+		TokenCounter:          &mockTokenCounter{tokens: 100},
+		MaxTokens:             8000,
+		ThresholdPct:          0.8,
+		MemStore:              store,
+		SessionSvc:            sessioninmemory.NewSessionService(),
+		Projection:            compress.NewSessionProjection(),
+		SummaryTimeoutSeconds: summarySeconds,
+		CaptureEnabled:        capture,
+	})
+}
+
+// TestNewContextManager_SummaryTimeout 钉住配置以「秒」进入装配、以 Duration 落到压缩器。
+//   - ≤0 一律走 compress 包默认：0 不等于「无时限」
+func TestNewContextManager_SummaryTimeout(t *testing.T) {
+	t.Run("positive seconds become a duration", func(t *testing.T) {
+		cm := capTestCM(t, "sum-7s", 7, false)
+		require.Equal(t, 7*time.Second, cm.contextCompressor.SummaryTimeout())
+	})
+	t.Run("zero keeps the package default", func(t *testing.T) {
+		cm := capTestCM(t, "sum-0", 0, false)
+		require.Equal(t, compress.DefaultSummaryTimeout, cm.contextCompressor.SummaryTimeout())
+	})
+	t.Run("negative keeps the package default (validation is the config layer's job)", func(t *testing.T) {
+		cm := capTestCM(t, "sum-neg", -3, false)
+		require.Equal(t, compress.DefaultSummaryTimeout, cm.contextCompressor.SummaryTimeout())
+	})
+}
+
+// ctxCapturingRunner 记下它被调用时收到的 ctx，用于观察一次尝试实际携带的采集 scope。
+type ctxCapturingRunner struct {
+	mu   sync.Mutex
+	seen context.Context
+}
+
+func (r *ctxCapturingRunner) Run(ctx context.Context, _, _ string, _ model.Message, _ ...upagent.RunOption) (<-chan *event.Event, error) {
+	r.mu.Lock()
+	r.seen = ctx
+	r.mu.Unlock()
+	ch := make(chan *event.Event)
+	close(ch)
+	return ch, nil
+}
+
+func (r *ctxCapturingRunner) Close() error { return nil }
+
+func (r *ctxCapturingRunner) ctx() context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seen
+}
+
+// TestRunFlow_CaptureScope 钉住采集 scope 是「每尝试一个有界关联对象」的运行时装配。
+//   - 关闭时 ctx 上什么都不装（零开销）；开启时装上本次 invocation 的 scope
+//   - 归属来自 cm 现值与本回合归因，缺项不造；尝试结束即释放——它不是第二套持久化系统
+func TestRunFlow_CaptureScope(t *testing.T) {
+	t.Run("disabled installs nothing", func(t *testing.T) {
+		cm := capTestCM(t, "cap-off", 0, false)
+		r := &ctxCapturingRunner{}
+		ctx := withInvocationID(context.Background(), "inv-off")
+		require.NoError(t, cm.RunFlowWithExecutor(ctx, model.NewUserMessage("hi"), r))
+		_, ok := rl.CaptureScopeFrom(r.ctx())
+		require.False(t, ok, "trajectory_capture 关闭时不得在 ctx 上装任何东西")
+	})
+
+	t.Run("enabled installs the attempt scope and releases it", func(t *testing.T) {
+		cm := capTestCM(t, "cap-on", 0, true)
+		cm.SetTriggerSource("user")
+		cm.turnEcho = &echoSpec{
+			agent: "cap-on", session: "test-session", mergedMessage: "hi",
+			committedKeys: []int64{111, 222},
+		}
+		r := &ctxCapturingRunner{}
+		ctx := withInvocationID(context.Background(), "inv-42")
+		require.NoError(t, cm.RunFlowWithExecutor(ctx, model.NewUserMessage("hi"), r))
+
+		scope, ok := rl.CaptureScopeFrom(r.ctx())
+		require.True(t, ok, "the model call chain must carry the scope")
+		require.Equal(t, "inv-42", scope.InvocationID)
+
+		wantNS := strconv.Itoa(memory.PartitionIDFromName("cap-on"))
+		require.Equal(t, wantNS, scope.Owner["capture_namespace"], "分区数字串即采集命名空间")
+		require.Equal(t, "cap-on", scope.Owner["agent_name"])
+		require.Equal(t, "test-session", scope.Owner["root_session_id"])
+		require.Equal(t, "test-session", scope.Owner["session_id"])
+		require.Equal(t, "test-user", scope.Owner["user_id"])
+		require.Equal(t, "inv-42", scope.Owner["invocation_id"])
+		require.Equal(t, "user", scope.Owner["trigger_source"])
+		require.Equal(t, "111,222", scope.Owner["input_event_keys"], "本批 committed keys 原样带上，不猜不补")
+		require.NotContains(t, scope.Owner, "bundle_id", "缺项不造：没有身份就不写这个键")
+
+		require.True(t, scope.Stats().Released, "attempt 结束即释放 scope（不是回合级、不是全局）")
+	})
+
+	t.Run("a turn without a delegation id still gets its own scope", func(t *testing.T) {
+		cm := capTestCM(t, "cap-noid", 0, true)
+		r := &ctxCapturingRunner{}
+		require.NoError(t, cm.RunFlowWithExecutor(context.Background(), model.NewUserMessage("hi"), r))
+		scope, ok := rl.CaptureScopeFrom(r.ctx())
+		require.True(t, ok)
+		require.Empty(t, scope.InvocationID, "没有委派身份就不造一个，关联侧自行具名 unbound")
+		require.NotContains(t, scope.Owner, "invocation_id")
+		require.NotContains(t, scope.Owner, "input_event_keys", "无 durable 输入即无 keys，不写空串键")
+	})
+}
+
+// TestCallIDResolverBridge 钉住装配根的默认解析桥只答本次调用 ctx 上所装 scope 的精确键。
+//   - 采集关闭（ctx 上没有 scope）或该响应身份没有条目时一律 false
+//   - 写入方因此不盖 call_id，绝不拿「最近一次调用」凑一个；显式注入的解析器优先
+func TestCallIDResolverBridge(t *testing.T) {
+	ctx := context.Background()
+
+	called := 0
+	own := func(context.Context, string) (string, bool) {
+		called++
+		return "explicit", true
+	}
+	id, ok := callIDResolverFor(&TagentConfig{CallIDResolver: own})(ctx, "resp-1")
+	require.True(t, ok, "配置显式给出的解析器优先于默认桥")
+	require.Equal(t, "explicit", id)
+	require.Equal(t, 1, called)
+
+	id, ok = callIDResolverFor(nil)(ctx, "resp-1")
+	require.False(t, ok, "trajectory_capture 关闭时 ctx 上没有 scope，解析器必须答否")
+	require.Empty(t, id)
+	id, ok = callIDResolverFor(&TagentConfig{})(ctx, "")
+	require.False(t, ok, "空身份连查询都不该有结果")
+	require.Empty(t, id)
+
+	scope := rl.NewCaptureScope("inv-bridge")
+	_, res := scope.Link(rl.ResponseKey("resp-1"), "call-9")
+	require.Equal(t, rl.LinkStored, res, "首次落表不回显 call_id（回显属重放/冲突路径），命中判定看精确查找")
+
+	scoped := rl.WithCaptureScope(ctx, scope)
+	id, ok = callIDResolverFor(nil)(scoped, "resp-1")
+	require.True(t, ok, "本次调用的响应身份在 scope 里有精确条目")
+	require.Equal(t, "call-9", id)
+
+	id, ok = callIDResolverFor(nil)(scoped, "resp-unbound")
+	require.False(t, ok, "S2: 未命中必须具名 unbound，绝不取最近的 call_id")
+	require.Empty(t, id)
 }

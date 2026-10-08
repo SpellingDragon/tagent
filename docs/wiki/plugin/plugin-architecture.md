@@ -158,95 +158,24 @@ type MemoryPlugin struct {
 }
 ```
 
-### 5.2 OnEvent 钩子 — 10 步详解
+### 5.2 提交序列 — 四道跳过闸在任何分配之前
 
-源码位置：`memory_plugin.go`（入口三重早退守卫：无 Response/Choices、`IsPartial` 流式增量、退化空 agent_output 终答——均直接 return，不落库不投影）
+入口顺序做完四道跳过判定，全部发生在**分配 EventKey 之前**：无 `Response`/无 `Choices`、`IsPartial` 流式分片、退化空 `agent_output` 终答（无正文也无工具调用）、以及本次尝试期望的输入回显（`EchoCredential` 命中即绑定 invocationID 并认领）。任何一道命中就直接返回原事件——不落库、不投影、不发票据。回显因此不会被双写成两条事实，半条事件也不会占据因果链的一格。
 
-```go
-func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *event.Event) (*event.Event, error) {
-    if evt == nil {
-        return nil, nil
-    }
+分配之后的整段落在**同一条因果键的锁段内**串行：
 
-    // Step 1: 从 AgentName 派生 PartitionID（框架概念 → 存储概念）
-    agentName := p.extractAgentName(inv)
-    partitionID := memory.PartitionIDFromName(agentName)
+| 序 | 动作 | 失败/缺失时的行为 |
+|---|---|---|
+| 1 | 读该因果域最后已提交的键作父（无记录返回 0） | 0＝首次／重启后／游标被淘汰：**不猜父**，缺口由回溯端具名报出 |
+| 2 | 分配 Snowflake EventKey，构造 `FullEvent`（assistant 正文经 `sanitizeAssistantContent` 剥模型伪造的 `[evt_...]` 前缀，其余角色逐字存） | — |
+| 3 | 盖归因章：先 `agent_name`，再叠加 `AttributionFrom(ctx)` 的 rollout_id/trace_id/span_id/bundle_id；装了 call_id 解析器且命中时追加（见 5.6） | 归因缺失不阻断提交 |
+| 4 | `StoreEvent` | 失败即 `stored=false`：ERROR 留痕；带凭据的回合 `MarkRejected`（让调用方知道这一轮没有持久事实） |
+| 5 | 仅 `stored`：`RelationStore.SetParent` | 关系失败**不回滚内容**（见 5.3） |
+| 6 | 仅 `stored`：向本调用的 `ProjectionSink` `Append` EventReference | 未接 sink 时跳过——投影与存储同点，绝不先投影后存储 |
+| 7 | 提交闸：按 `stored` 发布或撤回持久票据（见 5.5） | — |
+| 8 | 仅 `stored`：推进因果游标 | 失败键永不成为下一条的父 |
 
-    // Step 2: 生成 Snowflake EventKey（int64，编码 PartitionID）
-    eventKey := memory.NewSnowflakeEventKey(partitionID, 0)
-
-    // Step 3: 使用 tagent/event 包统一推断事件类型并生成 event_summary 视图
-    eventType, eventSummary := p.inferEventInfo(evt)
-
-    // Step 4: 从分区+会话级因果链获取前驱 Key
-    sessionID := ""
-    if inv != nil && inv.Session != nil {
-        sessionID = inv.Session.ID
-    }
-    causalKey := fmt.Sprintf("%d:%s", partitionID, sessionID)
-    p.mu.Lock()
-    parentKey := p.lastEventKeys[causalKey]
-    p.mu.Unlock()
-
-    // Step 5: 提取时间戳
-    timestamp := extractTimestamp(evt)
-
-    // Step 6: 构建 FullEvent 基础字段（Content 经 sanitizeAssistantContent 清洗伪造 [evt_...] 前缀，填 ToolID）
-
-    // Step 6.5: 归因盖章（构造期，先于 StoreEvent）—— Metadata 基线写 agent_name，
-    // 再经 AttributionFrom(ctx) 叠加 RunFlow 注入的 rollout_id/trace_id/span_id/bundle_id；
-    // persistBusEvent 路径同序盖章但刻意不注 turn trace 锚（设计边界，见 M9 注释）
-    fullEvent := memory.FullEvent{
-        EventKey:     eventKey,
-        PartitionID:  partitionID,
-        EventType:    eventType,
-        EventSummary: eventSummary,
-        Timestamp:    timestamp,
-    }
-
-    // Step 7: 条件性填充 Response 相关字段
-    if evt.Response != nil && len(evt.Response.Choices) > 0 {
-        msg := evt.Response.Choices[0].Message
-        fullEvent.Content = msg.Content
-        fullEvent.ToolCalls = msg.ToolCalls
-        fullEvent.Response = evt.Response
-    }
-
-    // Step 8: 持久化到 MemoryStore，并在存储成功后**同点投影**（D1：
-    // 存储 ⇔ 投影恰好一次）——ctx 携带当前 invocation 的 ProjectionSink，
-    // Append(EventReference) 与 StoreEvent 在同一点完成
-    if p.memStore != nil {
-        if err := p.memStore.StoreEvent(eventKey, fullEvent); err != nil {
-            log.Errorf("[Memory] store failed key=%d partition=%d: %v", eventKey, partitionID, err)
-        } else {
-            if sink, ok := ProjectionSinkFrom(ctx); ok {
-                sink.Append(ref) // 同点投影
-            }
-        }
-    }
-
-    // Step 9: 写回 StateDelta（event_key 转为字符串后写入，确保框架持久化）
-    if evt.StateDelta == nil {
-        evt.StateDelta = make(map[string][]byte)
-    }
-    evt.StateDelta[tagentevent.MetaKeyEventKey] = []byte(tagentevent.FormatEventKey(eventKey)) // hex 契约
-    evt.StateDelta[tagentevent.MetaKeyPartitionID] = []byte(strconv.Itoa(partitionID))
-    evt.StateDelta[tagentevent.MetaKeyEventType] = []byte(eventType)
-
-    // Step 10: 更新会话级因果链 map（SetParent 已移入 StoreEvent 成功分支内执行，失败仅记日志）
-    p.mu.Lock()
-    p.lastEventKeys[causalKey] = eventKey
-    p.mu.Unlock()
-    if parentKey > 0 {
-        // 通过 RelationStoreProvider type assertion 访问因果关系
-        if rsp, ok := p.memStore.(memory.RelationStoreProvider); ok {
-            rsp.RelationStore().SetParent(eventKey, parentKey)
-        }
-    }
-
-    return evt, nil
-}
-```
+四道跳过闸的判定条件都经真实框架回显验证：少跳会双写，多跳会丢真事实，因此 `isExpectedInputEcho` 要求根调用、`Author=="user"`、消息角色为 user 且去空白后与凭据里的合并输入逐字相等——子调用与助手/工具事件一律不满足，走正常存储路径。
 
 <a id="causal-mech"></a>
 ### 5.3 因果链机制
@@ -269,7 +198,9 @@ func (p *MemoryPlugin) onEvent(ctx context.Context, inv *agent.Invocation, evt *
 - 为 RecallTool 提供结构化检索能力
 - 压缩通知中可引用被丢弃的因果链
 
-**并发安全**：`p.mu` 保护 `lastEventKeys map[int]int64` 的读写（按 PartitionID 独立跟踪，互不影响）。
+**同因果键线性化与锁序**：父键读取、事件键分配、落库、关系写入、游标推进必须落在同一条顺序里——两条并发提交若各读各的父，会造出分叉链或指向虚事件的父引用。串行单元是 `causalGuard`（每个 `<partition>:<session>` 一条），**不同因果键互不阻塞**。锁序固定为「持 `p.mu` 只登记引用计数 → 放 `p.mu` → 取键锁」，反向禁止：`p.mu` 是叶锁，绝不横跨存储 I/O。`refs` 同时是淘汰保护的凭据——游标 map 超上界（`maxLastEventKeys`）回收最久未更新的键时跳过 `refs>0` 的因果键，淘汰一条在途链的锚等于让它失去父。
+
+**关系写失败不回滚内容**：`SetParent` 失败时事实与票据照常有效（内容已提交这件事为真），只缺一条因果边；把它说成"提交失败"要撤回一条真实存在的事实。回溯端读到断边时以具名 partial 报出（见[记忆架构](../memory/memory-architecture.md#causal-chain)）。
 
 ### 5.4 StateDelta 写回
 
@@ -285,6 +216,34 @@ func (r *runner) shouldPersistEvent(agentEvent *event.Event) bool {
 只要 `StateDelta` 非空，即使 `Response` 为空或 partial，事件也会被持久化到 Session。
 
 ---
+
+<a id="commit-gate"></a>
+### 5.5 提交闸：票据、投影与游标只在提交成功之后发布
+
+`event_key` 与 `partition_id` 写在 `StateDelta` 里是**持久票据**——下游拿它去 `GetEvent` 取原文、拿它作"这条历史可以回补"的承诺。所以它们只能随成功的提交发布：
+
+| 发布物 | `stored=true` | `stored=false`（写失败或未接存储） |
+|---|---|---|
+| `StateDelta[event_key]`、`StateDelta[partition_id]` | 写入（hex 契约） | **连本插件此前可能写入的同名字段一并 delete**，只 Debugf 留痕 |
+| 本调用投影 `sink.Append` | 追加 | 不追加（投影里永不出现取不回的事实） |
+| 因果游标 `lastEventKeys` | 推进到本键 | 不推进（失败键从未落库，作父即断链） |
+| `event_type` / `event_summary` | 写入 | **照常写入** |
+| `call_id`（若命中） | 随 FullEvent 本体一次落库 | 从未产生记录，自然不存在 |
+
+难点全在最后两行的分界：票据与分类同处一个 map、同一次落库调用，很容易一并发布或一并撤回。判据不是"哪个字段重要"，而是**该字段是否主张"已持久"**——主张的走闸，只作分类的照旧返回。若把分类也一并撤掉，读者会把"存储故障"误读成"这条事件没有类型"，反而更难诊断。
+
+写失败也不回滚已成功的部分：内容提交成功而关系失败时（第 5 步），事实与票据仍然成立，只有因果边缺失。把它表达成"提交失败"要撤回一条真实存在的事实，代价更大。
+
+### 5.6 call_id：可选注入面，命中才盖
+
+`CallIDResolver` 是 `NewMemoryPlugin` 的变参选项（`WithCallIDResolver`）：不传选项即维持接线前形态，所有老调用点逐字节同旧。它把**事件自带的 SDK 响应 ID** 对到采集器为那一次调用记下的 `call_id`。
+
+- **只在解析器已装、且 `evt.Response.ID` 非空时问一次**。返回 false（作用域里没有绑定）、返回空串、未装配——三种情况一律**不写这个键**。取"最近一次调用"会把反馈挂到一次从未产生它的调用上；关联因此只能是精确键命中，不能是邻近猜测。
+- 写在 `FullEvent.Metadata` 上，**不进 `StateDelta`**：它是已提交事实的附加归因，不是投递给下游的契约键；也不带 `meta_` 透传前缀，所以事件解析面不消费它。
+- 盖章发生在提交闸**之前**（构造 FullEvent 时），所以 `call_id` 随事实本体一次落库，不是事后补写——补写等于修改已存记录，而正 key 事实永不被修改。
+- 由组合根注入（`tagent.go`／`agent/testsupport.go` 桥到 `rl.CallIDForResponse`），使 `rl` 保持叶子包、不 import `plugin`。
+
+键归属与读侧见[元数据键的归属](../event/event-architecture.md#metadata-keys)；把关联用于离线训练事实导出的契约见 [RL 授权导出](../rl/rl-architecture.md#training-export)。
 
 <a id="summary-plugin"></a>
 ## 六、SummaryPlugin — Tag 与元数据标注（退位后职责）

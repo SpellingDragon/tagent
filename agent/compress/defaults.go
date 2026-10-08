@@ -1,6 +1,8 @@
 // 契约: docs/wiki/agent/compression-and-telemetry.md
 package compress
 
+import "time"
+
 // DefaultMaxTokens Compression defaults (single source; the agent package re-exports aliases).
 const (
 	DefaultMaxTokens         = 8000
@@ -26,4 +28,11 @@ const (
 	// DefaultCardMaxChars caps the index-card section of the rolling summary;
 	// beyond it old card lines are LLM-condensed (or sink, without a model).
 	DefaultCardMaxChars = 6000
+
+	// DefaultSummaryTimeout is the shared deadline for ONE real fold's
+	// synchronous summary calls (index-card condensation + rolling narrative).
+	// They share a single sub-context, so a stalled summary can never cost the
+	// round twice its budget. config compress.summary_timeout_seconds overrides
+	// it (0 → this default, negative → rejected by config validation).
+	DefaultSummaryTimeout = 5 * time.Second
 )

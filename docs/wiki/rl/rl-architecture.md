@@ -69,8 +69,14 @@ allowlist 判定留在 `rl` 包内，**不引入任何 provider SDK 依赖**：�
 
 `Flush` 幂等，可反复调用；它与 `record` 一样持有同一把关闭锁，避免与 `Close` 竞态。
 
-### 与遥测的同一锚点
-记录携带 `trace_id`/`span_id`（取自 ctx 的 span，未启用导出时为空），字段 `omitempty` ⇒ **旧 RL 消费者向后兼容**。于是同一份事实有三种投影共用一个锚点：事件溯源、OTel span 树、RL 训练轨迹，可双向互链。
+### 与遥测的锚点关系：条件成立，不是默认成立
+记录携带 `trace_id`/`span_id`（`TrajectoryRecorder` 从 ctx 的 span 取，字段 `omitempty` ⇒ 旧 RL 消费者向后兼容）。**同一份事实的三种投影确实可以互链，但这条互链是有前提的**：
+
+- `trace_id`/`span_id` 只在**装了真实 tracer provider** 时非空。默认的 OTel noop provider 下 span context 无效（`agent/trace.go:spanTraceIDs` 对 `IsValid()==false` 返回空串），事件与轨迹两侧的这两个字段**都是空的**——空字段省写，因此"有锚点"这件事本身要按部署核对，不能默认假定；
+- 事件库**没有 metadata 查询面**（`memory.QueryOptions` 不含 metadata 过滤字段），因此拿一个 `trace_id` 反查事件需要遍历，trace 锚点不适合当在线检索入口；
+- 反馈与父事件的连接主路**不是** trace，而是 `parent_key` 的离线 join（见「六、授权离线导出」）：因果父指针由存储给出，与 tracing 是否开启无关。
+
+于是准确的表述是：OTel 导出启用时，事件溯源、OTel span 树、RL 训练轨迹三者按 `trace_id` 互链；导出未启用时，事件与轨迹仍按 `event_key`/`call_id` 互链，trace 维度**缺席**。把"双向互链"当无条件成立会让离线消费者把一份空锚点表当成"没有关联"。
 
 ### 空 choices 的守卫（不做重试）
 provider 返回 200 却**零 choices**（实测发生过，深度思考＋长上下文场景）：既无错误也无内容，静默落盘会让下游把"空响应"当成正常样本。因此显式在可观测层报 `EMPTY-CHOICES`。但**重试语义属于 agent loop**，不在录制层做——录制器只负责如实记录，不参与决策。
@@ -128,10 +134,77 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 - 投影键集有界依赖整表重算，重建成本随活跃引用数线性，尚无实测上限；
 - 遥测阶梯的占比与驻留参数缺跨场景标定（高频短回合与长驻留任务的节奏差别很大）。
 
+<a id="trajectory-capture"></a>
+## 五、决策采集（capture v2）
+
+采集层（`rl/trajectory_capture.go`）挂在 `TrajectoryRecorder` 之上，由 `NewTrajectoryRecorderWithOptions` + `WithCapture` 装配，**默认关闭**：关闭时 v1 录制路径逐字节不变，包括"队列满可丢、永不阻塞模型调用"。开启后它只承诺模型 SDK 边界**能证明**的那些事。
+
+| 承诺面 | 规则 | 佐证 |
+|---|---|---|
+| 观测边界 | `capture_scope = sdk_request`，**从不**自称 wire：本层看得见的是 `model.Model` 的一次调用，看不见 provider 的字节 | `CaptureScopeSDKRequest` |
+| 记录形态 | 一次调用一行 JSONL，`schema_version` 恒为 2，离线转换器对任何别的值直接拒收 | `CaptureSchemaVersion`、`CaptureRecord` |
+| 归属来源 | owner 属性由组合根注入的 `OwnerResolver` 从 ctx 读出，采集层不自行推导、不猜"最近的一次调用"；解不出就落进 `missing_reasons` 具名枚举 | `OwnerResolver`、`buildOwner`、`Missing*` |
+| 关联方式 | 每次尝试一个 `CaptureScope`（有界 4096 条），键是 `resp:<response_id>` / `toolcall:<tool_call_id>` 的**精确身份**；`Link` 绝不覆盖活映射——第二次声明报 `LinkConflict`，消费端看到 `ambiguous` 而不是一个猜测 | `CaptureScope.Link`、`ResponseKey`、`ToolCallKey` |
+| 终局诚实 | 六种具名终局 `done`／`response_error`／`cancelled`／`closed_without_terminal`／`call_error`／`nil_channel`；流只走到 partial 就关闭时**不把 delta 拼成答案**，只置 `response_incomplete` | `TerminalDone` 等常数 |
+| 不拖累对话 | 记录非阻塞且字节有界：单记录／在途总量／单次运行落盘三个构造期上界之一命中就停止接收新数据，但**绝不删除或轮转已有历史**；模型调用永不等待训练磁盘 | `CaptureConfig`、`DefaultCapture*` |
+| 凭据 | 端点经清洗只留 scheme+host，凭据与带凭据的 URL 不入记录 | `sanitizeCaptureEndpoint` |
+| trace 关系 | `trace_id`／`span_id` 只是可选观察标签，缺失**不影响** `call_id` 与绑定 | `CaptureLLMCall.TraceID` |
+
+**这条 ctx 桥刻意搬运哪些键**：组合根的 `captureOwnerFromAttribution` 只把归因载体里已有的 `rollout_id`／`trace_id`／`span_id`／`bundle_id` 交出去，键名与 agent 侧的 owner attrs 对齐（`rollout_id` 既是本回合 session 身份也是根 session）。`capture_namespace` 不在桥上——它是装配期分区，组合根若在此伪造就等于给同一事实造第二个真源；otel 的 trace/span 由 rl 自己从 ctx 读，也不归这条桥管。`rl` 因此**不反向依赖** `plugin`。
+
+**丢失账本不从数据队列取**：`CaptureStats` 全部读自原子计数器，因此队列堵死时账本仍然可读——而那正是消费者最需要它的时刻。
+
+**封账（seal）**：`FlushAndWait` 把 flush 条目排进同一条队列，等写协程确认落盘后返回 `CaptureManifest`。`Complete` 要求四件事同时成立——账本静默（`Quiesced`：在途与积压归零、丢弃／超限／序列化／写／sync 计数全零）＋ 已同步 ＋ 未被运行预算拦停 ＋ 来自真实写者确认。运行关闭后再取返回**已封存的那一份**（`sealedManifest`），不二次封账；拿不到证据就是 `unknown`，绝不把"没证据"写成"完整"。
+
+manifest 的 JSON 是**平铺计数**（`MarshalCaptureManifest` → `{"runs": {run_id: {...}}}`）：离线读者按顶层键直接取值，嵌套的 `counts` 对象会被读成 0，而 0 会被当成"什么都没丢"——一次未封账的运行就此伪装成完整数据集。capture 封账与下节的事实导出封账遵循同一条规则。
+
+**配置面**（`trajectory_capture` 块 → `CaptureConfig`）：`enabled` 以 `trajectory_dump=true` 为前提，否则 `ErrCaptureRequiresDump`；任何负数上界一律 `ErrCaptureNegativeLimit` 拒绝，**不解释成"不限量"**，且即使该层关闭也照样校验——配置文件里的笔误不该被静默忽略。`max_open_files` 超过硬上限 16 被夹住而非服从。全部数值都在构造期读取一次，本页不承诺其可热更（热更维度判据见 [org-hot-reload](../platform/org-hot-reload.md)）。
+
+组合根搬运给运行面的是**实际安装值**而不是配置意图：`enabled` 被前置条件拒掉时搬运的就是 `false`，端到端保持关闭，不存在「配置说要开、运行时默默没开」的分裂读数。
+
+<a id="training-export"></a>
+## 六、授权离线导出（训练事实）
+
+`ExportTrainingFacts`（`rl/training_export.go`）是训练事实的**只读消费入口**：把已授权分区里的事件与绑定其上的反馈逐行导成快照，并附一份说明"这份快照含什么、读得有多完整"的 manifest。
+
+| 契约 | 规则 | 佐证 |
+|---|---|---|
+| 授权先于读取 | `PartitionIDs` 必须非空：空表是**一次拒绝**，绝不退化成全库扫描；每个授权分区单独分页，一个分区不会把读取面放宽到邻居 | `ExportOptions`、`ErrExportAuthorization` |
+| 逐条二次核验 | 每次写出行之前按授权表复查事件体：在授权分页轮里冒出来、但自身分区与事件键不一致或属外来的 body，计入 `Forbidden` 且**一行都不写** | `ExportManifest.Forbidden` |
+| 行形态 | 每行是 `memory.FullEvent` 的**完整内嵌拷贝**加 `parent_key`；`FullEvent` 本身不带父指针，无据可查时为 `""` 并计入 `ParentKeyMissing`，**从不发明**。因果边存储是 `MemoryStore` 的**可选面**：接不到时仍只读事件自带的父指针，取不到就如实报「无父」而不是失败 | `ExportedFact`、`memory.RelationStoreProvider` |
+| 反馈连接 | `feedback` 的 `parent_key` → 父事件 `Metadata["call_id"]`（键名单源自 `event.MetaKeyCallID`）；`missing`／`expired_or_missing`／`forbidden_parent`／`ambiguous` 是**分开的列**，不折进数值奖励、不猜父事件为何不在、不静默跳过 | `ExportManifest.Join*`、`joinOutcome` |
+| 结构上不可写 | 导出器只握 `factReader`（`QueryEvents` + `GetEvent`）这一个读缝，写侧方法不可达：不改 TTL、不打 tombstone、不申请保留租约、不重编码 | `factReader` |
+| 分页轴 | 用 `Offset` 而非事件键游标：库按语义 `Timestamp` 排序，`MinEventKey` 约束的是写序轴，按键轴切会**悄悄丢掉键小于游标的异步回写事件**。宁可自报不完整，也不静默丢事实 | `walkPartition` |
+| 页面大小 | 0 取默认 200；落在 1..1000 之外**拒绝**而非夹取 | `exportDefaultPageLimit`、`ErrExportPageLimitExceeded` |
+| 分页必须前进 | 一整页里**没有任何新增键**＝读取没在推进：具名报 `repeated page` 并停在那个分区，既不死循环，也不假装分区余下的内容不存在 | `ExportTrainingFacts` 分页循环 |
+| call_id 过滤 | `CallIDs` 非空时按 metadata `call_id` 保留；**没有 metadata 索引**，因此这是授权分区内的"读后过滤"，被滤掉的计入 `Filtered` 而非报为"不存在" | `ExportOptions.CallIDs` |
+| 时间界 | `Since`／`Until` 用 Unix **毫秒**，与 `FullEvent.Timestamp`、`QueryOptions.StartTime/EndTime` 同单位；0 表示开放 | `ExportOptions.Since` |
+| 可核对 | `SourceSHA256` 覆盖**实际写出的字节**，`Cutoff` 记录实际生效的时间上界，`Complete` 只在没有任何分页读／事件读／写失败时为真；部分成功**同时**返回 manifest 与非 nil error | `ExportManifest` |
+
+**快照的用途边界**：这是离线工件，**不是**生产重放源，不得用来重建在线状态。
+
+<a id="dual-stream-cli"></a>
+### 双流消费与运行时核账器
+
+`scripts/convert_trajectories.py --strict` 读**两条流**：`--input` 是 capture 流（主事实源，一次模型调用一行 `CaptureRecord`），`--events` 是授权导出的 `ExportedFact` 流且**只作关联索引**（提供事件键、因果父键与绑定的反馈），`--manifest` 是证明主流完整的 capture 封账。主流不完整时，索引再全也补不出事实。
+
+`scripts/verify_runtime_acceptance.py` 是这套闭环的**核账器**，不是执行器：它不跑 `go test`、不生成任何数据，只核对已跑完的真实产物之间是否互相自洽（22 个具名检查，覆盖 go test 结果、capture 封账、事实导出、数据集形状、分组不相交、拒绝清单、转换账本七类证据）。任何一项拿不到证据就是 FAIL 而非 SKIP——缺失的输入不能被当作通过的检查。
+
+| 证据输入 | 参数 | 检查面 |
+|---|---|---|
+| `go test -json` 输出 | `--gojson` | 必需用例真的 pass（不是 skip、不是缺失）、真实模型面干净、各包通过 |
+| capture 落盘目录 | `--capture-dir` | 封账可读且已 seal、账本声明与落盘记录数对得上、目录里确有记录 |
+| 事实快照两份 | `--facts` `--facts-manifest` | 快照存在、manifest 完整、计数与快照行数对得上、`source_sha256` 与快照字节对得上 |
+| 数据集目录 | `--dataset-dir` | 样本非空、抽样 `labels`/`loss_mask` 形状一致、train ∩ test = ∅（按 `capture_namespace` + `root_session_id` 分组不跨侧） |
+| 拒绝清单 | 数据集目录内 `rejected.jsonl` | 存在且逐行含 `reason` |
+| 点名用例 | `--expect-tests` | 必须通过的用例清单（真实模型场景等） |
+
+`--report` 写机器可读结果；退出码 0 表示全部必需检查通过。
+
 <a id="offline-converter"></a>
 ## 七、离线轨迹转换器
 
-`scripts/convert_trajectories.py` 是规格点名的离线工具（`openspec/specs/trajectory-recording`）：读取 `TrajectoryRecorder` 落盘的 JSONL，产出 HuggingFace 数据集——SFT 模式为 `{input_ids, loss_mask}`（prompt 位 0、completion 位 1），RL 模式为 prompt-only 的 `{messages}`。它只用标准库，不依赖任何训练框架的存在，转换在训练环境之外即可完成与校验。
+`scripts/convert_trajectories.py` 是规格点名的离线工具（`openspec/specs/trajectory-recording`）：读取 `TrajectoryRecorder` 落盘的 JSONL，产出 HuggingFace 数据集——SFT 模式为 `{input_ids, loss_mask}`（prompt 位 0、completion 位 1），RL 模式为 prompt-only 的 `{messages}`。它只用标准库，不依赖任何训练框架的存在，转换在训练环境之外即可完成与校验。`--strict` 形态读的是「五、决策采集」与「六、授权离线导出」两节定义的双流输入（capture 主流 ＋ facts 关联索引 ＋ 封账证明），见 [双流消费](#dual-stream-cli)。
 
 ```bash
 # SFT

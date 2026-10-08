@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,11 @@ type orgCoordinator struct {
 	lastApply []OrgAgentApply
 	// candFP 本轮检查看到的 desired 指纹（解析/指纹失败时为空）
 	candFP string
+	// restartRequired 是**本轮**被拒候选里点名「须重启」的字段路径（O2 2.5 的
+	// desired/effective 回执扩展）。它随 noteDesired 每轮清点一次：成功轮为空，
+	// 被拒轮留下确切路径——读者因此能区分「没改」「改了但没生效」与「改了但须重启」，
+	// 无需自己 diff 磁盘与内存。
+	restartRequired []string
 	// seq 结构代（generation）——仅结构发布/回滚前进
 	seq int
 	// revision 完整应用计数（含 numeric-only），仅观测/提交，不作第二路由源
@@ -264,6 +270,43 @@ func (c *orgCoordinator) noteDesired(fp string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.candFP = fp
+	c.restartRequired = nil
+}
+
+// noteRestartRequired 记下本轮被拒的可热维度之外的差异（调用方紧接着 recordFailure
+// 点名原因）。nil/空等价于「本轮没有须重启的字段」。存的是副本：调用方的切片属于
+// 那一轮的检查，不该被诊断读面牵住。
+func (c *orgCoordinator) noteRestartRequired(fields []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(fields) == 0 {
+		c.restartRequired = nil
+		return
+	}
+	c.restartRequired = append([]string(nil), fields...)
+}
+
+// lastRestartRequired 读出本轮的须重启字段路径（nil = 本轮没有）。
+func (c *orgCoordinator) lastRestartRequired() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.restartRequired) == 0 {
+		return nil
+	}
+	return append([]string(nil), c.restartRequired...)
+}
+
+// effectiveConfig 是「当前有效的那份完整配置」（diff 的 baseline 侧）。它随三次提交点
+// （结构发布、数值热应用、回滚）一起轮转，所以它说的就是运行中真正生效的内容，而不是
+// 启动时读到的那一份。无 current 时返回 nil（启动快照失败的历史分支），调用方回退到
+// 自己那份启动配置。
+func (c *orgCoordinator) effectiveConfig() *Config {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.current == nil {
+		return nil
+	}
+	return c.current.cfg
 }
 
 // recordApply 保存最近一轮的逐 agent 应用回执（D9）。它不改变任何版本语义：
@@ -360,4 +403,83 @@ func hotSignature(cfg *Config) string {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
+}
+
+// restartOnlyConfigBlocks 是「既不进结构指纹、也不进热参数摘要」的顶层声明块（O2 2.5
+// 维度分类里的 RESTART 一类）。判据是消费点的位置，不是字段的敏感程度：治理闸、退化
+// 状态机与采集流水线都在构造期装配（store/总线/recorder 一经构造不换），运行中没有
+// 任何接线去读它们的新值。
+//
+// 不在其列的族各有自己的通道，别误并进来：mcp_servers 由 MCP 注册表按配置文件懒读热
+// 同步（FILE），prompt 文件同理；agents.*.memory 由 ChangedMemoryAgents 预检单独具名
+// 拒绝（同样 restart，但那条已经点名的是 owner 与存储迁移，不由这里重复宣告）；
+// evolution.* 是「文件即真源」的热面。
+var restartOnlyConfigBlocks = map[string]bool{
+	"governance":         true,
+	"reliability":        true,
+	"trajectory_capture": true,
+	"trajectory_dump":    true,
+	"trajectory_dir":     true,
+}
+
+// restartRequiredChanges 比对两份**完整有效配置**（都是各自那一侧的完整声明，
+// ApplyDefaults 已在装载/启动时跑过，因此两侧可比），返回落在须重启块里的字段路径。
+// 路径按 YAML 声明拼写（trajectory_capture.max_record_bytes），排序后返回，便于回执
+// 稳定可读。任一侧为 nil 时不猜测——返回空，由调用方按既有语义处理。
+func restartRequiredChanges(prev, next *Config) []string {
+	if prev == nil || next == nil {
+		return nil
+	}
+	pv, nv := reflect.ValueOf(*prev), reflect.ValueOf(*next)
+	pt := pv.Type()
+	var out []string
+	for i := 0; i < pt.NumField(); i++ {
+		f := pt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name := configFieldName(f)
+		if !restartOnlyConfigBlocks[name] {
+			continue
+		}
+		out = append(out, changedFieldPaths(name, pv.Field(i), nv.Field(i))...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// changedFieldPaths 递归点名一个块里所有值变了的叶字段。整体 DeepEqual 相等时直接
+// 返回（绝大多数轮次走这一条）；结构体不等但没有任何可见子字段差异时点名整块，
+// 宁可多写一条路径，也不把一次真实变更报成「无差异」。
+func changedFieldPaths(path string, pv, nv reflect.Value) []string {
+	if !pv.CanInterface() || reflect.DeepEqual(pv.Interface(), nv.Interface()) {
+		return nil
+	}
+	if pv.Kind() == reflect.Struct && pv.NumField() > 0 {
+		var out []string
+		t := pv.Type()
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			out = append(out, changedFieldPaths(path+"."+configFieldName(f), pv.Field(i), nv.Field(i))...)
+		}
+		if len(out) > 0 {
+			return out
+		}
+		return []string{path}
+	}
+	return []string{path}
+}
+
+// configFieldName 是字段在配置文件里的拼写（yaml tag 优先，其次 json tag，最后字段名）。
+// 回执要写运维能在 YAML 里搜到的名字，而不是 Go 的导出标识符。
+func configFieldName(f reflect.StructField) string {
+	for _, tag := range []string{"yaml", "json"} {
+		if v := strings.Split(f.Tag.Get(tag), ",")[0]; v != "" && v != "-" {
+			return v
+		}
+	}
+	return f.Name
 }

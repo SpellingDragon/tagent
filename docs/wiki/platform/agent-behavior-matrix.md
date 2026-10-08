@@ -132,13 +132,13 @@ flowchart TD
 
 面向远端长期运行:不丢事件、退化可观测、重启稳定。全部 per-agent 隔离。
 
-### 3.1 事件总线溢出(ReliableBus · `bus_spill_dir`)
+### 3.1 事件总线耐久受理(ReliableBus · `bus_spill_dir`)
 
 | 情况 | 行为 |
 |------|------|
-| 高峰期事件 channel 满 | 事件**溢出落盘** `data/reliability/bus/<agent>`(而非丢弃),channel 恒早于磁盘的全序 |
-| channel 恢复空闲 | 溢出事件按序回灌,at-least-once 不丢 |
-| 进程重启 | 启动扫描 spill 目录恢复未消费事件 |
+| 任何一次 Publish（不分忙闲） | 输入**先落 inbox 再回执** `data/reliability/bus/<agent>`(v2 全量持久受理，不是「满才溢」；channel 只送唤醒脉冲) |
+| 领取批次 | Pull 先排空 channel 的非唤醒事件，再按严格序号 claim inbox 信封；未 ack 的认领退回 pending 重投,at-least-once 不丢 |
+| 进程重启 | 启动盘点未收口信封并按**该信封自己的回执**对账(只有 prepared／只有 completion／两者一致／矛盾→隔离／I/O 失败→阻塞启动) |
 
 ### 3.2 memory 写失败兜底(mem_spill · `mem_spill_dir`)
 
@@ -216,7 +216,7 @@ stateDiagram-v2
 | 配置 | 行为 |
 |------|------|
 | 未设 `OTEL_EXPORTER_OTLP_ENDPOINT`(默认) | 全部 span/metric **noop**:零导出、零开销,事件循环/工具/轨迹行为与无观测时**逐字节一致** |
-| 设 OTLP 端点 | 每 turn 开 `tagent.turn` root span(含 EventKey/trigger_source/agent 属性),框架 span 挂为子树;轨迹记录携 trace_id/span_id(可双向跳转);异步任务 spawn↔settle 建 span link |
+| 设 OTLP 端点 | 每 turn 开 `tagent.turn` root span(含 EventKey/trigger_source/agent 属性),框架 span 挂为子树;轨迹与事件 metadata 携 trace_id/span_id,两侧**此时才**可双向跳转;异步任务 spawn↔settle 建 span link。**这一行是有前提的**：默认 noop 下两侧字段为空,事件库也没有 metadata 查询面,跨投影的关联主路是 `parent_key`/`call_id` 离线 join,不是 trace(见 [RL 侧接口](../rl/rl-architecture.md)) |
 | 声明区 | span/metric 全在 Engine 侧,**不触碰任何工具 Declaration**(prefix-cache 稳定) |
 
 ---
@@ -262,7 +262,7 @@ stateDiagram-v2
 
 **场景 C:远端服务器网络抖动 + 重启**
 1. model 调用失败累积 → DegradationManager 标 `degraded`,写 governance degraded 事件。
-2. 期间事件 channel 满 → ReliableBus 溢出落盘;StoreEvent 失败 → mem_spill 兜底。
+2. 期间事件照常进 ReliableBus 的 durable inbox(与队列忙闲无关);StoreEvent 失败 → mem_spill 兜底。
 3. 网络恢复 → 探测成功 → `recovering` → `normal`;spill 事件回灌/重放。
 4. 若进程被 OOM/崩溃 → systemd `Restart=always` 重启 → 恢复冥想锚点(不误触发)、预算窗口、发布历史、未消费事件。
 5. 语义引擎重启后异步重建向量索引,重建窗口内 recall 退化纯关键词,重建完成恢复语义召回。

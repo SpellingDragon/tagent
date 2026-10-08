@@ -330,3 +330,61 @@ func TestParseJournalLine(t *testing.T) {
 		t.Errorf("parseJournalLine result = %+v, want Op=-1 EventKey=200", entry)
 	}
 }
+
+// TestRelationStore_FailedAppend 钉住"journal append 成功才发布内存变更"这条契约。
+//   - SetParent 与 RemoveRelations 两侧同判据
+//   - 故障注入：直接关掉 journal 的底层 *os.File，让随后的追加返回 I/O 错误
+//   - 失败时读侧保持此前的关系，既不发布新边，也不删除旧边
+func TestRelationStore_FailedAppend(t *testing.T) {
+	rs := newTestRelationStore(t)
+
+	if err := rs.SetParent(200, 100); err != nil {
+		t.Fatalf("setup SetParent(200,100) failed: %v", err)
+	}
+
+	if err := rs.journal.Close(); err != nil {
+		t.Fatalf("close journal for fault injection failed: %v", err)
+	}
+
+	if err := rs.SetParent(200, 999); err == nil {
+		t.Fatal("SetParent(200,999) must fail when journal append fails")
+	}
+	if p, _ := rs.GetParent(200); p != 100 {
+		t.Errorf("GetParent(200) after failed append = %d, want prior 100 (failed write must not publish new edge)", p)
+	}
+	if children, _ := rs.GetChildren(100); !containsInt64(children, 200) {
+		t.Errorf("GetChildren(100) after failed append = %v, want still containing 200", children)
+	}
+	if children, _ := rs.GetChildren(999); containsInt64(children, 200) {
+		t.Errorf("GetChildren(999) after failed append must NOT contain 200, got %v", children)
+	}
+
+	if err := rs.SetParent(500, 600); err == nil {
+		t.Fatal("SetParent(500,600) must fail when journal append fails")
+	}
+	if p, _ := rs.GetParent(500); p != 0 {
+		t.Errorf("GetParent(500) after failed append = %d, want 0 (no edge published on failure)", p)
+	}
+	if children, _ := rs.GetChildren(600); containsInt64(children, 500) {
+		t.Errorf("GetChildren(600) after failed append must NOT contain 500, got %v", children)
+	}
+
+	if err := rs.RemoveRelations(200); err == nil {
+		t.Fatal("RemoveRelations(200) must fail when journal append fails")
+	}
+	if p, _ := rs.GetParent(200); p != 100 {
+		t.Errorf("GetParent(200) after failed removal = %d, want prior 100 (failed WAL must not delete the edge)", p)
+	}
+	if children, _ := rs.GetChildren(100); !containsInt64(children, 200) {
+		t.Errorf("GetChildren(100) after failed removal = %v, want still containing 200", children)
+	}
+}
+
+func containsInt64(xs []int64, want int64) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}

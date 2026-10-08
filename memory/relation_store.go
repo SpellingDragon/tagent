@@ -167,6 +167,10 @@ func (rs *InMemRelationStore) SetParent(childKey, parentKey int64) error {
 		return nil
 	}
 
+	if err := rs.appendJournal(fmt.Sprintf("+1:%d:%d\n", childKey, parentKey)); err != nil {
+		return err
+	}
+
 	if hadOld {
 		rs.removeFromChildren(oldParent, childKey)
 	}
@@ -174,10 +178,6 @@ func (rs *InMemRelationStore) SetParent(childKey, parentKey int64) error {
 	rs.childToParent[childKey] = parentKey
 
 	rs.parentToChildren[parentKey] = append(rs.parentToChildren[parentKey], childKey)
-
-	if err := rs.appendJournal(fmt.Sprintf("+1:%d:%d\n", childKey, parentKey)); err != nil {
-		return err
-	}
 
 	return nil
 }
@@ -230,6 +230,10 @@ func (rs *InMemRelationStore) RemoveRelations(key int64) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
+	if err := rs.appendJournal(fmt.Sprintf("-1:%d\n", key)); err != nil {
+		return err
+	}
+
 	if parentKey, ok := rs.childToParent[key]; ok {
 		rs.removeFromChildren(parentKey, key)
 	}
@@ -237,10 +241,6 @@ func (rs *InMemRelationStore) RemoveRelations(key int64) error {
 	delete(rs.childToParent, key)
 
 	delete(rs.parentToChildren, key)
-
-	if err := rs.appendJournal(fmt.Sprintf("-1:%d\n", key)); err != nil {
-		return err
-	}
 
 	return nil
 }

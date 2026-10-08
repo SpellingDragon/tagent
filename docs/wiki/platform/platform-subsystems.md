@@ -10,7 +10,7 @@
 |----|------|
 | `agent/governance/` | RiskClassifier（C5 纯函数四级分级）、BudgetManager（滑窗+epoch 持久化）、ApprovalManager（digest 绑定+目录重扫+**ApprovalChannel 送达抽象**：Deliver 失败不阻塞门）、DenialLedger（BindStore 延迟绑定持久审计）、GoalRegistry（**BindStore 事件持久化+重启回放重建**）、GovernanceGate 决策管线、GovernanceTool leaf 装饰器；审批人工回应纯函数 RespondFile（digest 前缀匹配+幂等）/ParseApprovalReply（approve/reject 含中文动词） |
 | `tool/govx/` | 治理面工具五件套（goal_declare/goal_list/goal_resolve/denial_query/approval_list）——**entry only**（与 refine 同槽位，先于治理包裹追加）；只登记/查询，批准权始终在人 |
-| `agent/reliability/` | DegradationManager（五依赖退化状态机）、SpillStore/ReliableBus（磁盘溢出全序）、AnchorStore（冥想锚点跨重启） |
+| `agent/reliability/` | DegradationManager（五依赖退化状态机）、Inbox（durable inbox-v2，受理前落盘）、AnchorStore（冥想锚点跨重启） |
 | `evolution/` | GitEvolution 装配单元（NewGitEvolution+BindRuntime 延迟绑定）、gitrefine 纯函数集（git exec+段匹配）、refine 工具（register/status/rollback）、improvement/evaluation 事件、Evidence/MetricGuardrail/LLMJudgeEvaluator（后验评估，劣化只出建议） |
 | `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge 装饰器、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 存储后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go` 并附接入指南；**LocalFileKV 最小化裁决**（无 WAL/fsync 机——`Sync()`=按分区桶的增量快照 atomic tmp+rename（仅脏桶落盘），屏障成功后新进程可读回；掉电耐久不宣称，生产耐久档推迟 rustviking））、mem_spill（重放双写投影）、error_tracking、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数→consolidation_hint 渗透+冥想 digest 候选清单，snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）；feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
 | `tool/mcp/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报） |
@@ -98,7 +98,14 @@ agents:
 <a id="model-wiring"></a>
 ### 模型解析与轨迹包裹
 
-`wiring.go` 的 `resolveAgentModel` 返回单个 agent 的 LLM 调用所用模型实例，按 provider+model 对缓存。解析顺序：`rc.modelOverrides` 的按名实例 → agent 自己的模型（按其 provider 查找，未声明时落全局 `cfg.Provider`）→ 全局默认模型 → `WithModel` 注入的 `rc.model`。启用时 `TrajectoryRecorder` 包裹每个返回实例（含 override 命中）：包裹位于 `SwappableModel` 之外，因此记录器观察换后流量；包裹按 `buildAgent` 调用构造，重复解析不会在同一实例上叠层。全局默认经 provider 注册表解析，纯 yaml 声明的模型同样可用。
+`wiring.go` 的 `resolveAgentModel` 返回单个 agent 的 LLM 调用所用模型实例。解析顺序：`rc.modelOverrides` 的按名实例 → agent 自己的模型（按其 provider 查找，未声明时落全局 `cfg.Provider`）→ 全局默认模型 → `WithModel` 注入的 `rc.model`。启用时 `TrajectoryRecorder` 包裹每个返回实例（含 override 命中）：包裹位于 `SwappableModel` 之外，因此记录器观察换后流量；包裹按 `buildAgent` 调用构造，重复解析不会在同一实例上叠层。全局默认经 provider 注册表解析，纯 yaml 声明的模型同样可用。
+
+**缓存键是实例身份，不是别名**（`modelCacheKey`）：三档解析路径（agent／global／direct）共用同一份拼写，键含**用途**、provider 别名、**实际协议**、model 名、**实际端点**与**凭据来源的 env 名**，以 `0x1f` 分隔（该字符不会出现在这些值里，因此别名与端点的拼接不会撞成同一个键）。两条取舍各有代价：
+
+- **身份先于键**：协议、端点与凭据来源名必须在查缓存**之前**确定，否则换了端点的第二次解析会命中别名键上的旧实例——同名换端点后仍用旧端点服务新配置，是不报错的错法；
+- **凭据的值绝不进键**：进键等于把秘密抄进一份可诊断的字符串；而换 key 本不该造第二个实例（身份没变）。密钥值在解析时经 `os.Getenv` 读取，因此轮换密钥不需要任何重建通道。
+
+`providers` 在热更维度表里因此走**结构换代**而**不进须重启拒表**：它的消费点在解析期，每次候选构造都会重读 `cfg.Providers`（判据见 [维度分类](./org-hot-reload.md#restart-required-dimensions)）。
 
 <a id="workspace-scratch"></a>
 ### 工作区暂存与清理
@@ -144,7 +151,7 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 
 四项各自独立的开关（全部空/false = 现状零行为变化）：
 
-- **ReliableBus**（开关 `bus_spill_dir` 非空）：channel 满则事件溢出落盘（channel 恒早于磁盘的全序 + pending 背压上限 + 重启恢复），at-least-once 不丢事件；每个 agent 只用自己的子目录 `<bus_spill_dir>/<agent>`（防多 agent 事件串流），该目录**在构建期就存在**，不必等第一次溢出；开关为空则回退纯 channel；
+- **ReliableBus**（开关 `bus_spill_dir` 非空）：**全量持久受理**，不是「满则溢出」——`PublishContext` 在返回回执**之前**把每个输入写进 durable inbox（`agent/reliability/inbox.go`，v2），channel 只承载唤醒脉冲，因此队列忙闲与是否落盘无关；at-least-once，重启后未 ack 的信封按严格序号重投；存在 `*.spill` 残留或未排空的 v1 树时**拒绝升级**（fail-loud，由前一个二进制排空，v2 从不猜测式迁移）；每个 agent 只用自己的子目录 `<bus_spill_dir>/<agent>`（防多 agent 事件串流），该目录**在构建期就存在**；开关为空则回退纯 channel（易失，行为与旧 channel 逐字节一致）。四态边界与三段状态机见 [持久投递与依赖退化](../reliability/durable-delivery.md)；
 - **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
 - **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想三锚点持久化，重启不误触发。
@@ -176,6 +183,9 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 5. **结构变更 → 候选事务**：候选解析域＝在线 owner 快照＋本候选新增者（remote-only 引用不创建本地 owner，混合可达仍显式失败）。remote-only 这一格必须让发布循环也认：可达性判据在校验与构造器处都已遵守，唯独发布循环不认时，一份冷启动能正常加载的配置会在**第一次热更被永久封死**——每次检查都拒绝它，而它本来从未出过问题→ 已存在 agent 只换执行面（`NewExecutorCandidate` 装配 → `StageExecutor` 纳管声明持有与工具接线），热新增 agent 完整常驻构造（自有 store/owner 登记/投影与 registry 重建）→ 单闸门提交：换 runner、发布执行面、轮转应用记录、激活各 owner 代并重接任务监视（tracker 重挂与激活同一时机）→ 失败逆序回收。drain-free：进行中 turn 持旧代跑完；
 6. **移除≠退役**：摘除只去掉新代可路由集合与工具声明；原 owner 保留至其义务（在途引用、自有任务、结果回流）清零后由排空面退役，存储身份基准不因实例退役丢弃（同名重入按基准拒绝换存储）；换代装配产生的**声明持有**（`heldBy`）不属于这三项义务，不计入义务轴——它只是代际引用的登记，单独存在时不构成阻断退役的理由。
 7. **代际诊断与回滚**：`orgCoordinator` 是版本簿记单一真源——`OrgStatus{generation, fingerprint, desired, lastAppliedAt, lastFailure, agents[]}`、实时引用债（在途执行器引用/待退役列表）与关闭相位（已发起/资源已退出）经 `OrgDiagnostics` 分组呈现，均只读、执行路径不依赖；`Rollback()` 取回滚环（双槽）里的上一份完整有效配置，走同一候选事务发布为新序号（仅影响之后开始的调用）。
+
+
+热更维度的完整分类（哪些走热参、哪些走换代、哪些**具名拒绝并须重启**，以及为什么 `providers` 不在拒表里）见[维度分类](./org-hot-reload.md#restart-required-dimensions)。`model_override` 是这一表里最容易归错的一格：它**不是配置维度也不是热参**，而是**每次调用携带的引用名**——引用必须在被选中的那一代执行面上解析，因此它的生效窗口属代际而非热更：[模型引用快照钉定](../agent/execution-generations.md#model-reference-pinning)。
 
 边界：数值热更 ⊂ 结构变更换代 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝。序号/指纹为不透明诊断标签；无界历史被禁（常驻表/回执随拓扑定形，回滚环仅双槽）。
 

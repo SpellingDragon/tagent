@@ -7,10 +7,12 @@
 package tagent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +23,10 @@ import (
 	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/agent/governance"
 	"github.com/SpellingDragon/tagent/agent/org"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
@@ -52,8 +56,13 @@ type runtimeConfig struct {
 	// buildPlainToolRef 据此注入 MCPProbeEvery（降级行为配置，per-agent 工具共用）。
 	reliability ReliabilityConfig
 
-	// resolvedModels caches model.Model instances keyed by "provider:model" string.
-	// Agents sharing the same provider+model reuse the same instance.
+	// resolvedModels caches model.Model instances keyed by the resolved instance's
+	// actual identity (modelCacheKey: the use, the provider alias, the real
+	// protocol, the model, the endpoint and the credential ENV NAME — never its
+	// value). Agents sharing one identity reuse the same instance; a same-name
+	// provider whose endpoint or protocol changed IS a different identity and
+	// re-resolves instead of serving the old endpoint under a new config.
+	// 契约: docs/wiki/platform/platform-subsystems.md#model-wiring
 	resolvedModels map[string]model.Model
 
 	// modelOverrides injects pre-resolved model instances for specific agents.
@@ -76,6 +85,12 @@ type runtimeConfig struct {
 	// trajectoryRecorder is set when cfg.TrajectoryDump is true.
 	// It wraps rc.model, and is registered as a Closer on the entry agent.
 	trajectoryRecorder *rl.TrajectoryRecorder
+
+	// captureEnabled 是采集层「是否真的装上了」——读自 recorder 的实际状态而非声明的
+	// 副本：buildAgent 据此给执行面下发 CaptureEnabled，agent 只在它为真时装配逐尝试
+	// 的关联作用域。装配线只有一处写（New 构造 recorder 之后），消费面因此不会看到
+	// 「声明开了而执行面按关闭组装」的半接线。
+	captureEnabled bool
 
 	// evoGit 是 git 原生自进化的装配单元（配置门控，默认关）：文件即真源（热重载直接
 	// 生效），git 承载版本层（commit/revert/log），评估只建议不动手——judge/guardrail
@@ -239,6 +254,63 @@ func closeResourcesExited(ta *agent.TagentAgent) bool {
 	return done
 }
 
+// captureConfigFrom 把声明块逐字段搬到采集层的配置面。零值保持零：默认值的真源在 rl
+// （normalize 填 8MiB/64MiB/512MiB/16/256），组合根既不复制数字也不夹紧。queue_size
+// 不在声明面里（S3 定的是采集队列仍 256），所以这里没有那个字段可搬。
+func captureConfigFrom(b config.CaptureBlock) rl.CaptureConfig {
+	return rl.CaptureConfig{
+		Enabled:         b.Enabled,
+		MaxRecordBytes:  b.MaxRecordBytes,
+		MaxPendingBytes: b.MaxPendingBytes,
+		MaxRunBytes:     b.MaxRunBytes,
+		MaxOpenFiles:    b.MaxOpenFiles,
+	}
+}
+
+// captureOwnerFromAttribution 是采集层 owner 的 ctx 读缝：组合根从自己的归因载体
+// （plugin.Attribution，RunFlow 每回合绑定）取键，rl 因此不必反向依赖 plugin。
+//
+// 哪些键上桥、哪些键刻意不上桥，由索引节给出。
+//
+// 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
+func captureOwnerFromAttribution(ctx context.Context) rl.OwnerAttrs {
+	attr, ok := plugin.AttributionFrom(ctx)
+	if !ok {
+		return nil
+	}
+	attrs := rl.OwnerAttrs{}
+	put := func(key, value string) {
+		if value != "" {
+			attrs[key] = value
+		}
+	}
+	if root := attr[tagentevent.MetaKeyRolloutID]; root != "" {
+		put("root_session_id", root)
+		put("session_id", root)
+	}
+	put("bundle_id", attr[tagentevent.MetaKeyBundleID])
+	put("trigger_source", attr[tagentevent.MetaKeyTriggerSource])
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrs
+}
+
+// newTrajectoryRecorder assembles the recorder with the declared capture layer
+// installed at construction time（v2 层从不懒装：装不上的配置在构造期就失败，而不是
+// 之后悄悄降级）。CaptureConfig.Validate 是兜底的第二道：LoadConfig 的第一道已经让
+// 非法声明启动即错，这一道拦的是调用方直接构造 Config 绕过校验那条路。
+func newTrajectoryRecorder(inner model.Model, cfg Config) (*rl.TrajectoryRecorder, error) {
+	capture := captureConfigFrom(cfg.TrajectoryCapture)
+	if err := capture.Validate(cfg.TrajectoryDump); err != nil {
+		return nil, err
+	}
+	return rl.NewTrajectoryRecorderWithOptions(inner, cfg.TrajectoryDir, cfg.APIEndpoint,
+		rl.WithCapture(capture),
+		rl.WithCaptureOwnerResolver(captureOwnerFromAttribution),
+	)
+}
+
 // New creates a fully-wired TagentAgent from declarative Config plus runtime Options.
 //
 // - It handles every cross-boundary wiring internally: builtin tool registration, validation that configured tools are registered, entry-agent resolution, per-agent MemoryStore creation, per-agent buildAgent assembly, and the org-level task registry plus hot-parameter source.
@@ -278,13 +350,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	}
 
 	if cfg.TrajectoryDump {
-		tr, err := rl.NewTrajectoryRecorder(rc.model, cfg.TrajectoryDir, cfg.APIEndpoint)
+		tr, err := newTrajectoryRecorder(rc.model, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("tagent: create trajectory recorder: %w", err)
 		}
 		rc.trajectoryRecorder = tr
+		rc.captureEnabled = tr.CaptureEnabled()
 		rc.model = tr
-		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s", cfg.TrajectoryDir)
+		log.Infof("[tagent] TrajectoryRecorder wrapping model, dir=%s capture=%v", cfg.TrajectoryDir, rc.captureEnabled)
 	}
 
 	if cfg.Evolution.Enabled {
@@ -391,6 +464,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			}
 			if st.LastFailure != nil {
 				payload["lastFailure"] = st.LastFailure
+			}
+			if restart := coord.lastRestartRequired(); len(restart) > 0 {
+				payload["restartRequired"] = restart
 			}
 			return payload
 		})
@@ -566,14 +642,6 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		}
 		entryAgent.SetRollbackFn(doRollback)
 		reload := func() {
-			info, err := os.Stat(cfgPath)
-			if err != nil {
-				return
-			}
-			mt := info.ModTime().UnixNano()
-			if mt == atomic.LoadInt64(&lastSeenMtime) {
-				return
-			}
 			mu.Lock()
 			defer mu.Unlock()
 			if stopped.Load() {
@@ -621,6 +689,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				log.Errorf("[org-hotreload] agent(s) %v re-enter while their retiring owner is already closing — RESTART required (rejected before any candidate build; no second writer opened)", blocked)
 				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: agent %v 正在退役关闭中，同名重入须重启生效（本次未热更，未建第二 writer）", blocked))
 				coord.recordFailure(fmt.Errorf("re-entry into closing owner %v: retirement already began, restart required", blocked))
+				return
+			}
+			baseline := coord.effectiveConfig()
+			if baseline == nil {
+				baseline = &cfg
+			}
+			if restart := restartRequiredChanges(baseline, fresh); len(restart) > 0 {
+				log.Errorf("[org-hotreload] %v changed but has no runtime consumer — RESTART required to apply; the whole batch is refused (nothing half-applied, revision not advanced)", restart)
+				entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 字段 %s 须重启生效（不可热迁），本次整批未应用（含同批的可热改动）", strings.Join(restart, ", ")))
+				coord.noteRestartRequired(restart)
+				coord.recordFailure(fmt.Errorf("restart_required: %s", strings.Join(restart, ", ")))
 				return
 			}
 			if coord.sameAsCurrent(fp) {
@@ -842,7 +921,32 @@ func stageOrgGenerations(
 			}
 			return nil, nil, nil, false
 		}
-		staged[name] = cm.StageExecutor(cand, face, parts.cfg)
+		st := cm.StageExecutor(cand, face, parts.cfg)
+		if st == nil {
+			fail(fmt.Sprintf("agent %q staging produced no generation", name), nil)
+			for _, s := range staged {
+				s.Discard()
+			}
+			return nil, nil, nil, false
+		}
+		refs, refErr := agent.NewModelRefSnapshot(parts.cfg.Name, parts.cfg.Model)
+		if refErr != nil {
+			fail(fmt.Sprintf("agent %q model reference snapshot", name), refErr)
+			for _, s := range staged {
+				s.Discard()
+			}
+			st.Discard()
+			return nil, nil, nil, false
+		}
+		if pinErr := agent.PinModelReferences(st, refs); pinErr != nil {
+			fail(fmt.Sprintf("agent %q model reference snapshot pinning", name), pinErr)
+			for _, s := range staged {
+				s.Discard()
+			}
+			st.Discard()
+			return nil, nil, nil, false
+		}
+		staged[name] = st
 	}
 
 	ownerCMs := make(map[string]*agent.ContextManager, len(resolve))

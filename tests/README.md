@@ -36,3 +36,24 @@ go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -args -rounds=3
 ```
 
 CI 经 workflow_dispatch 手动触发（ci.yml soak job）。默认套件不含（build tag 隔离）。
+
+## 框架侧契约守护（真源锚点 + 运行门）
+
+上表守的是「模型↔框架」的文本接缝；下面几条守的是**框架自身**的接缝——不需要模型参与也能判对错，因此放在同一目录但单列一表。下表的守护测试名以 `tests/` 内的真实函数名为准（并发落名波已到位，逐行对过）。
+
+| 契约 | 真源锚点 | 守护测试 | 运行门 |
+|---|---|---|---|
+| 提交闸端到端（票据／投影／因果游标只在 `StoreEvent` 成功后发布，写失败一并撤回） | [MemoryPlugin 提交闸](../docs/wiki/plugin/plugin-architecture.md#commit-gate) | `TestCommittedFacts_ProjectionAndRecall` | `go test ./tests/` |
+| 决策采集 v2（SDK 请求保真、字节上界、丢失账本、封账四条件） | [决策采集](../docs/wiki/rl/rl-architecture.md#trajectory-capture) | `TestDecisionCapture_EndToEnd`（归因跨 runner 另见 `TestDecisionCapture_FrameworkAttribution`） | `go test ./tests/` |
+| 训练事实授权导出（授权先于读取、逐条二次核验、manifest/SHA 可对账） | [授权导出](../docs/wiki/rl/rl-architecture.md#training-export) | `TestTrainingCapture_OfflineDataset` | `go test ./tests/` |
+| 真实模型四场景（运行时热参／完整请求预算／决策采集／离线 SFT） | [完整请求预算](../docs/wiki/agent/agent-architecture.md)、[维度分类](../docs/wiki/platform/org-hot-reload.md#restart-required-dimensions) | `TestRealModel_RuntimeOverrides` / `_RequestBudget` / `_DecisionCapture` / `_OfflineSFT` | **必须** `TAGENT_REQUIRE_REAL_MODEL=1`：未设门时该族整批 SKIP 且**不计入通过**（缺样本、零调用、SKIP 都不算数） |
+
+真实模型门与验收器（把上面四场景的 `-json` 输出与采集目录、导出事实、数据集产物一次核账）：
+
+```bash
+TAGENT_REQUIRE_REAL_MODEL=1 go test ./tests -count=1 -json   -run '^TestRealModel_(RuntimeOverrides|RequestBudget|DecisionCapture|OfflineSFT)$'   > "$TAGENT_ACCEPTANCE_DIR/go-test.json"
+
+python3 scripts/verify_runtime_acceptance.py   --gojson "$TAGENT_ACCEPTANCE_DIR/go-test.json"   --capture-dir "$TAGENT_ACCEPTANCE_DIR/capture"   --facts "$TAGENT_ACCEPTANCE_DIR/facts.jsonl"   --manifest "$TAGENT_ACCEPTANCE_DIR/facts_manifest.json"   --dataset-dir "$TAGENT_ACCEPTANCE_DIR/dataset"   --expect-tests 'TestRealModel_(RuntimeOverrides|RequestBudget|DecisionCapture|OfflineSFT)'   --report "$TAGENT_ACCEPTANCE_DIR/acceptance.json"
+```
+
+可选参数：`--facts-manifest`（导出快照的独立 manifest）、`--samples`（默认 8）、`--seed`（默认 0）。核账器输出**具名检查**清单（条数随输入形态在 20 上下浮动，确切数由报告里的 `counts.checks` 给出，不在文档里硬编码：gojson 解析／必需测试存在-未跳-通过／真实模型面洁净／采集目录与 manifest 封账／账本认领／事实快照与 manifest 摘要对账／转换账本与产物一致／数据集非空／样本形状一致／分组划分互斥／拒绝账本存在且逐行有理由）。**它只核"已经发生过的运行"，不代跑任何场景**。

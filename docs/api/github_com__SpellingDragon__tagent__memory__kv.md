@@ -70,11 +70,13 @@ func (k *LocalFileKV) KVPut(key, value string) error
 func (k *LocalFileKV) KVRange(start, end string, limit int) ([]memory.KVPair, error)
     KVRange returns all key-value pairs whose keys fall in [start, end), sorted
     lexicographically by key. If limit > 0, at most limit pairs are returned.
+    A range provably inside one partition bucket reads only that bucket.
 
 func (k *LocalFileKV) KVScan(prefix string, limit int) ([]memory.KVPair, error)
     KVScan returns all key-value pairs whose keys start with the given prefix,
     sorted lexicographically by key. If limit > 0, at most limit pairs are
-    returned.
+    returned. A prefix provably belonging to one namespace reads only that
+    bucket.
 
 func (k *LocalFileKV) ListPartitionIDs() []int
     ListPartitionIDs enumerates partition IDs known to the store: every bucket
