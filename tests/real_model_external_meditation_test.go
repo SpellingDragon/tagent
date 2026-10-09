@@ -1,6 +1,6 @@
 // real_model_external_meditation_test 钉住 外部化冥想在真实 provider 上的整条跨域策展链：真实模型写下的用户事实带着持久归因进共享事实链，
 // 外部形态的 novelty 判据在同一条链上开门，策展回合的卡片落在冥想 agent 自身分区，再经组合根投递面进入目标的下一个真实回合。
-// 契约: docs/wiki/agent/agent-architecture.md#meditation-two-forms
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 package tagent_test
 
 import (

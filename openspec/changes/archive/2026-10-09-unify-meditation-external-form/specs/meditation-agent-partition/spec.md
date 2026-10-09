@@ -1,8 +1,7 @@
-# meditation-agent-partition Specification
+# meditation-agent-partition Specification（delta）
 
-## Purpose
-TBD - created by archiving change externalize-meditation-session. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: 冥想 agent 经配置声明并以授权分区为观察面
 
 冥想 SHALL 可配置于 `agents:` 下的任何 agent（无新 agent 类型/运行时机制）。观察面解析：`observed_namespaces` 显式声明时 SHALL ⊆ `read_namespaces` ∪ {自身分区}（自身恒合法，他人须授权，越界具名拒绝启动）；**缺省（未声明）＝[自身分区]**——入口 agent 配冥想即自察反思，独立策展 agent 显式列他人分区即跨域策展，同一机制。观察面变更走结构换代。
@@ -21,6 +20,20 @@ TBD - created by archiving change externalize-meditation-session. Update Purpose
 
 - **WHEN** 观察面含未授权的他人分区
 - **THEN** 装配期具名拒绝启动（不静默剔除）
+
+### Requirement: 门控与锚点沿用既有语义
+
+门控三件 SHALL 为唯一形态定义：触发节奏 interval、自身空闲锚 `lastTurnEnd`（任意谱系回合结束即更新，失败回合同样计忙）、novelty 水位锚 `lastMeditation`（有效触发时推进并自锁，无需额外重置）。锚点持久化 SHALL 用 AnchorStore **两锚结构**（lastTurnEnd/lastMeditation）；历史三锚文件中的多余键 SHALL 被忽略（自然兼容，无需迁移）。
+
+#### Scenario: 锚点跨重启
+
+- **WHEN** agent 重启且旧三锚文件在位
+- **THEN** 两锚正常恢复、多余 `last_user_input` 键忽略；不立即误触发
+
+#### Scenario: 触发后自锁
+
+- **WHEN** 有效反思触发且此后观察面无新非自管事件
+- **THEN** 无论经过多少 interval 窗口均不再触发
 
 ### Requirement: novelty 判据为跨分区非自管谱系新事件
 
@@ -41,28 +54,14 @@ novelty SHALL 定义为：观察面（缺省自身分区）内存在 `Timestamp 
 - **WHEN** QueryEvents/GetEvent 返回错误
 - **THEN** 本轮不触发、门保持关闭并具名 debug；不回落任何备用判据
 
-### Requirement: 门控与锚点沿用既有语义
+## REMOVED Requirements
 
-门控三件 SHALL 为唯一形态定义：触发节奏 interval、自身空闲锚 `lastTurnEnd`（任意谱系回合结束即更新，失败回合同样计忙）、novelty 水位锚 `lastMeditation`（有效触发时推进并自锁，无需额外重置）。锚点持久化 SHALL 用 AnchorStore **两锚结构**（lastTurnEnd/lastMeditation）；历史三锚文件中的多余键 SHALL 被忽略（自然兼容，无需迁移）。
+### Requirement: 外部判据水位与锚点复用
 
-#### Scenario: 锚点跨重启
+**Reason**: "外部"作为独立形态退役——水位判据即唯一判据（见「novelty 判据为跨分区非自管谱系新事件」与「门控与锚点沿用既有语义」）；`lastUserInput` 保留理由（回切连续性）随第二判据消失而无意义。
+**Migration**: 注入侧锚符号整体删除（编译期自证无残留）。
 
-- **WHEN** agent 重启且旧三锚文件在位
-- **THEN** 两锚正常恢复、多余 `last_user_input` 键忽略；不立即误触发
-
-#### Scenario: 触发后自锁
-
-- **WHEN** 有效反思触发且此后观察面无新非自管事件
-- **THEN** 无论经过多少 interval 窗口均不再触发
-
-### Requirement: 冥想 agent 的产出为普通事件
-
-外部化冥想的产出（经验卡片/综述）SHALL 以普通事件写入**自身分区**的事实链；MUST NOT 写 compaction 事件（单压缩权不可转移）、MUST NOT 直接修改任何被观察分区的状态。对目标上下文的影响 SHALL 只经"目标自然折叠吸收共享事实链中的新事件"间接发生。
-
-#### Scenario: 产出落自身分区
-
-- **WHEN** 冥想 agent 完成一轮跨域巩固产出卡片
-- **THEN** 卡片事件在冥想 agent 自己的分区；目标分区零写入
+## ADDED Requirements
 
 ### Requirement: 反思事件注入本 agent 的循环 session
 
@@ -77,4 +76,3 @@ novelty SHALL 定义为：观察面（缺省自身分区）内存在 `Timestamp 
 
 - **WHEN** 策展 agent 多次反思
 - **THEN** 反思均发生在同一保留 session（如 `curation`），跨重启经投影重建延续
-

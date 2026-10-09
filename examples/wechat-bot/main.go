@@ -30,6 +30,17 @@ import (
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
+// curationAgentName is the curator's key in the resident table, matching its
+// agents declaration in the config: assembly puts an agent in that table only
+// when the entry reaches it through the tool graph, so a missing key means
+// this process declares no curation line.
+const curationAgentName = "curator"
+
+// curationSession is the reserved session name of the curation line: 策展线固定单 session,
+// 上下文增长由 curator 自身的 compress_threshold 在同一 session 内折叠,不参与宿主的会话
+// 路由。业务线与入口自察共用 StartLoop 的那条 session(TAGENT_SESSION_ID,缺省 wechat-session)。
+const curationSession = "curation"
+
 // endpointPolicyFromEnv reads the dynamic-endpoint redirect policy from the
 // environment: enable flag plus the
 // exact-host allowlist (any port). Shared by the HTTPAPI endpoint policy and
@@ -235,6 +246,37 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Start loop failed: %v\n", err)
 		os.Exit(1)
+	}
+
+	// 策展人（curator）是常驻表里的第二个反思主体,自己的循环跑在保留 session 上
+	// (curationSession)。它的输出只落日志:反思文本是 agent 的内部叙述,转给微信使用者等于
+	// 泄漏推理过程;要回流业务 agent 的结论走组合根投递面,由 deliver_to 白名单授权。常驻表
+	// 没有 curator 或未起循环都只降级为日志,业务线不受影响;curationStop 在入口 Close
+	// （级联关闭其余常驻 owner）之前调用,策展回合的在途 drain 不被入口收尾抢跑。
+	var curationStop = func() {}
+	if curator := ta.ResidentTable()[curationAgentName]; curator != nil {
+		curatorOut, curatorErr := curator.StartLoop(loopUser, curationSession)
+		if curatorErr != nil {
+			log.Warnf("[curation] 策展循环未起 session=%s: %v", curationSession, curatorErr)
+		} else {
+			curationStop = curator.StopLoop
+			go func() {
+				for evt := range curatorOut {
+					if evt == nil || !evt.IsFinalResponse() || evt.Response == nil || len(evt.Response.Choices) == 0 {
+						continue
+					}
+					content := evt.Response.Choices[len(evt.Response.Choices)-1].Message.Content
+					if content == "" {
+						continue
+					}
+					log.Infof("[curation] 策展卡片(仅日志,不回灌业务线): %s", truncateLogN(content, 400))
+				}
+				log.Info("[curation] 策展输出流已关闭")
+			}()
+			log.Infof("[curation] 策展循环已起 user=%s session=%s", loopUser, curationSession)
+		}
+	} else {
+		log.Infof("[curation] 常驻表无 %q,本进程不起策展线", curationAgentName)
 	}
 
 	go maybeInjectReincarnationNotice(ta, tagentCfg.Entry, filepath.Join("run"), noticeWaitMax)
@@ -580,10 +622,12 @@ func main() {
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)
+		curationStop()
 		close(stopHTTP)
 		_ = srv.Shutdown(context.Background())
 		os.Exit(1)
 	}
+	curationStop()
 	close(stopHTTP)
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()

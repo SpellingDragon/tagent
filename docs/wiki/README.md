@@ -6,7 +6,7 @@
 
 | 模块 | 文档 | 一句话 |
 |------|------|--------|
-| agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想（自体维护与外部策展两形态）/ 子 Agent 封装 |
+| agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想（单机制：缺省自察＝自体维护，显式列他人＝策展）/ 子 Agent 封装 |
 | 事件流 | [agent/event-flow.md](agent/event-flow.md) | 一条消息从注入到回复的完整旅程 |
 | 原型骨架 | [agent/prototype-skeleton.md](agent/prototype-skeleton.md) | 126 行六件套、到生产原语的映射、被继承的三条不变量 |
 | 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |

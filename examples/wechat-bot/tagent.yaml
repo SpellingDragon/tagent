@@ -85,7 +85,7 @@ x-anchors:
     vector_top_k: 20
     keyword_top_k: 20
     rrf_k: 60
-  # exec 工具的 tmux 监控参数(tagent/action 共享)。
+  # exec 工具的 tmux 监控参数(tagent/action/curator 共享)。
   exec_monitor: &exec_monitor
     interval: 3s
     stable_duration: 30s
@@ -131,6 +131,12 @@ agents:
         extra_params:
           - { name: action, enum: [create, update, archive, progress], description: "操作类型" }
           - { name: name, description: "计划名(kebab-case)；update/progress/archive 必填" }
+      # 策展人常驻本进程的前提:装配只构造 entry 经工具图可达的 agent(常驻表 = 可达闭包)。
+      # 声明成 entry 的一个工具即入常驻表,后台反思循环由宿主 StartLoop 起;async: false 关掉
+      # 异步任务层,这条委派面只是寻址用途 —— 反思自己会触发,不需要 entry 主动调用它。
+      - agent: curator                   # 跨域策展人:后台反思 agent,自触发,不要在这里调用它
+        description: "跨域策展人(后台反思循环自触发;本工具仅为其常驻寻址,正常对话无需调用)"
+        async: false
       # File Tools(相对路径基准 = 进程 cwd,与 exec 一致 → 模型看到单一文件系统视图)
       - { kind: tool, id: read_file }
       - { kind: tool, id: list_file }
@@ -149,46 +155,17 @@ agents:
       #   description_file: knowledge_tool_desc.md
       #   event_params: [event_keys]
       #   remote: { url: "http://knowledge-service:8088" }
-    # 空闲心跳:上下文清理/深度分析/skill 积累。两种形态由一个开关选定 —— observed_namespaces
-    # 缺省为空即本 agent 自体维护(in-loop,只回看自己);非空即外部策展(只读这些分区水位之后的
-    # 非自管新事件)。任何 agent 都可声明,不限入口;两个扩字段都在构造期读取,改动走配置换代。
-    # 冥想已外部化: 由独立 meditator agent 跨分区策展 (见 agents.meditator),
-    # 本入口不再 in-loop 自体维护 (observed_namespaces 空且 enabled:false = 双保险)。
+
+    # 反思默认形态 = 独立策展线:业务 agent 不直接开冥想,反思由下方 curator agent 承担
+    # (独立循环、保留 session curation,不占业务上下文、内部叙述不进会话历史)。
+    # 这里保留键但关闭;确有"反思方需要直接看到业务当前上下文"的需求再把 enabled 打开
+    # (不写 observed_namespaces 即观察自身分区、反思落进业务 session)——同一机制的进阶用法。
     meditation:
       enabled: false
-      interval: "10m"
+      interval: "30m"
+
       min_gap: "1h"
       prompt_file: "meditation.md"
-
-  # ---- Meditator:外部策展冥想 Agent (6377d3b externalize-meditation) ----
-  # 观察主 agent (tagent) 分区水位之后的非自管新事件, 产出经白名单投递回 tagent。
-  # 结构指纹字段 (observed_namespaces/deliver_to/memory) 改动走配置换代 (需换装)。
-  meditator:
-    provider: deepseek
-    model: deepseek-flash
-    system_prompt:
-      files: [meditation.md]              # 复用既有冥想提示词 (策展方法论同源)
-    memory:
-      type: localfile
-      path: .wechat-config/data
-      read_namespaces: [tagent]           # 授权读主 agent 时间线 (observed 的授权前提)
-      engine: *shared_engine
-    meditation:
-      enabled: true
-      interval: "10m"
-      min_gap: "1h"
-      observed_namespaces: [tagent]       # 外部观察形态开关: 非空即外部策展
-      deliver_to: [tagent]                # 产出投递白名单: 只投回主 agent
-    max_tool_iterations: 30
-    max_tokens: 256000
-    compress_threshold: 1
-    temperature: 0.3
-    thinking_enabled: true
-    tools:
-      - { kind: tool, id: skill_search }
-      - { kind: tool, id: skill_load }
-      - { kind: tool, id: read_file }
-      - { kind: tool, id: memory_query }
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
@@ -292,6 +269,50 @@ agents:
       - kind: tool
         id: replace_content
         properties: { base_dir: openspec }
+
+  # ---- Curator:跨域策展人(独立反思主体,常驻第二条循环)----
+  # 与入口 tagent 的自察反思是同一条机制的两个观察面:这里显式观察业务分区,反思注入策展人
+  # 自己的循环 session(宿主以保留名 "curation" 起线,固定单线 —— 思路跨重启连续,增长由下方
+  # compress_threshold 折叠)。卡片落在策展人自己的分区;回流经 deliver_to 白名单由宿主触发,
+  # 本示例只把产出记进日志,不灌回微信(内部叙述不外泄)。
+  curator:
+    system_prompt:
+      files: [curator_agent.md]
+    memory:
+      type: localfile
+      path: .wechat-config/data          # 与 entry 同 type+path+指纹 = 同一 FileSegmentStore 实例;换 type 就是另一个 store,观察面读不到业务事实
+      read_namespaces: [tagent]          # 授权读业务分区(observed 里他人分区的前置授权)
+      engine: *shared_engine             # 与 entry/knowledge/recall 同一 cacheKey,共享同一引擎实例
+    max_tool_iterations: 30
+    max_tokens: 128000
+    temperature: 0.3
+    compress_threshold: 0.8              # 策展线唯一增长阀:反思不换 session,长到阈值自行折叠(单压缩权自管)
+    tools:
+      # 取证面:观察到的事件键要能回查原文(digest 给 [hex] 事件键,recall 走共享事实链 + 授权分区)
+      - kind: tool
+        id: recall
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: read_multiple_files }
+      # 产物面:脚本/skill/prompt 三类改进落盘(文件即真源,热重载直生效)。登记动作(refine)按
+      # 装配面只随入口 agent 挂入,策展人写下的产物由入口自察反思线或人登记 —— 不是缺工具。
+      - { kind: tool, id: save_file }
+      - { kind: tool, id: replace_content }
+      - kind: tool
+        id: exec
+        description_file: exec_tool_desc.md
+        properties:
+          monitor: *exec_monitor
+    # 跨域策展:观察面显式声明(须 ⊆ read_namespaces ∪ {自身}),水位后的非自管事件才开门
+    meditation:
+      enabled: true
+      interval: "1h"
+      min_gap: "2h"
+      prompt_file: "curator.md"
+      observed_namespaces: [tagent]
+      deliver_to: [tagent]               # 回流白名单;空白名单拒绝一切投递,投递动作只走组合根投递面
 
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:
