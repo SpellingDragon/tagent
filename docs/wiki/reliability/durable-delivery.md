@@ -79,7 +79,7 @@ stateDiagram-v2
 <a id="anchor-persistence"></a>
 ## 五、门控锚点必须跨重启持久
 
-冥想一类的时间性门控依赖"上一次用户输入／回合结束／上次冥想"三枚锚点（外部观察形态下判据只读 last-meditation 水位，另两锚仍照常更新——形态与锚点关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)）。锚点跨重启持久，缺失一律按 0 处理：**不持久化的后果是双向的**——空闲时长可能被算成从 epoch 起而立即误触发，也可能因看起来"刚刚有输入"而被长期压制。静默（长期活着但没写入）同样要保持活性，否则重启后无法区分它和真正的空闲。
+冥想一类的时间性门控依赖"回合结束／上次冥想"两枚锚点（判据只读 last-meditation 水位——观察面缺省即自身分区，水位之后的非自管事件才算新鲜——锚点与判据的关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)）。锚点跨重启持久，缺失一律按 0 处理：**不持久化的后果是双向的**——空闲时长可能被算成从 epoch 起而立即误触发，也可能因看起来"刚刚有输入"而被长期压制。静默（长期活着但没写入）同样要保持活性，否则重启后无法区分它和真正的空闲。
 
 <a id="lineage-visibility"></a>
 ## 六、谱系投递白名单：宿主可见与自管理是两层语义
@@ -93,7 +93,7 @@ stateDiagram-v2
 
 ### 投递缝：进程内跨 agent 的窄投递面
 
-外部化冥想（见 [agent 引擎篇](../agent/agent-architecture.md#meditation-two-forms)）的产出要回到别的 agent，走的仍是这条谱系语义，不新开通道：`DeliverToAgent(from, targetAgent, sessionID, msg)`（`delivery.go`）把消息经目标的 `InjectMessageWithSource(event.LineageMeditation, …)` 送进它的 mailbox——目标侧零新代码。四道前置裁决按序生效，任一失败都返回**具名错误**（一律 `%w` 包裹，`errors.Is` 可判别），无一静默丢：
+策展线冥想（见 [agent 引擎篇](../agent/agent-architecture.md#meditation-curator)）的产出要回到别的 agent，走的仍是这条谱系语义，不新开通道：`DeliverToAgent(from, targetAgent, sessionID, msg)`（`delivery.go`）把消息经目标的 `InjectMessageWithSource(event.LineageMeditation, …)` 送进它的 mailbox——目标侧零新代码。四道前置裁决按序生效，任一失败都返回**具名错误**（一律 `%w` 包裹，`errors.Is` 可判别），无一静默丢：
 
 | 拒绝 | 错误 | 判据 |
 |---|---|---|

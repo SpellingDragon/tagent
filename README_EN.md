@@ -33,8 +33,8 @@ Five parameter groups apply instantly, structural changes apply via a generation
 ### Homogeneous multi-agent collaboration
 An entry agent and the agents it delegates to are the same thing: each has its own event bus, task domain, and memory partition, and can recursively delegate. A delegation binds where its settlement returns — late results flow back to the caller and continue the same turn. A single call can temporarily override prompt/model/tool scope (expires with the call, never leaks across calls).
 
-### Self-review and cross-domain curation (new)
-In idle periods the agent reviews itself: tidies context, distills experience cards, records negative feedback on repeatedly failing strategies. Optionally you can configure a dedicated **curator agent** that — once authorized — reads other agents' memories across partitions, spots cross-task patterns ("three sessions are all waiting on the same approval"), produces experience cards and delivers them back into the relevant agents' conversations. Deliberately conservative: a curator only writes ordinary events into its own partition and never rewrites anyone else's context; both reading scope and delivery targets require explicit allowlists.
+### Self-review and cross-domain curation (one mechanism, self-observation by default)
+In idle periods the agent reviews itself: tidies context, distills experience cards, records negative feedback on repeatedly failing strategies. **Enabling `meditation` alone is already self-observation** — with no `observed_namespaces` the observation surface defaults to **[its own partition]**, and the reflection event is injected into the very loop session this agent is running, sharing context with the business turns (zero config, zero migration). The same mechanism with an explicitly listed peer partition (must sit inside `memory.read_namespaces`) is a **curator agent**: it reads other agents' memories across partitions, spots cross-task patterns ("three sessions are all waiting on the same approval"), produces experience cards and delivers them back into the relevant agents' conversations; mixing self and peers is equally legal — one scan, one predicate. Deliberately conservative: reflection only writes ordinary events into its own partition and never rewrites anyone else's context; both reading scope and delivery targets require explicit allowlists. Where the reflection lands: self-review stays on the business session, a dedicated curator keeps one reserved session (the wechat-bot example names it `curation`).
 
 ### Runtime data → training data
 Optional decision capture records every model call completely (input snapshot, response fragments, terminal state, loss counters); afterwards each decision's "what it saw → what it did → what happened → how a human rated it" is joined into samples, split train/test grouped by session, and exported as an SFT dataset — every step reconcilable against manifests; missing pieces are named, never silently patched together.
@@ -80,7 +80,7 @@ for evt := range outputCh {
 }
 ```
 
-**3. Full example (WeChat Bot — five cooperating agents in practice)**
+**3. Full example (WeChat Bot — six cooperating agents in practice: entry + four sub-agents + a curator `curator` whose reflection always runs in the reserved `curation` session)**
 
 ```bash
 cd examples/wechat-bot
@@ -171,7 +171,7 @@ graph TB
 | `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | in-process / file persistent; reading another agent's memory requires explicit grant |
 | `memory.lifecycle` | built-in | forgetting: global/per-type TTL, capacity caps |
 | `memory.engine` | (off) | semantic retrieval (vector ∪ keyword RRF) and consolidation hints (a trigger is only a suggestion; execution stays with LLM + tools) |
-| `meditation.enabled` + `interval`/`min_gap`/`prompt_file` | `false` | idle self-review; add `observed_namespaces`/`deliver_to` to upgrade it into a cross-domain curator agent (see curation notes and "Current state & limits") |
+| `meditation.enabled` + `interval`/`min_gap`/`prompt_file` (extensions `observed_namespaces`/`deliver_to`) | `false`; **`observed_namespaces` defaults to `[own partition]`** | idle review: leave `observed_namespaces` unset and it observes itself (reflection lands in its own loop session); list a peer partition (must be ⊆ `memory.read_namespaces`) and the same mechanism becomes a cross-domain curator agent, with `deliver_to` bounding where cards flow back (see the feature note above and "Current state & limits") |
 | `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | compaction trigger / recent tasks kept |
 | `max_tool_iterations` / `max_tokens` / `temperature` | entry 50/8000/0.7 | configure only at the referenced agent's own definition |
 
@@ -205,7 +205,7 @@ graph TB
 | Topic | Doc |
 |---|---|
 | Memory architecture / recall protocol | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
-| Agent engine / generations / compression & telemetry / the two meditation forms | [docs/wiki/agent/](docs/wiki/agent/) |
+| Agent engine / generations / compression & telemetry / meditation (one mechanism: self-review by default, curation when an observation surface is listed) | [docs/wiki/agent/](docs/wiki/agent/) |
 | Platform subsystems (governance/evolution/reliability/hot-reload/observability/MCP) | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
 | RL / capture / authorized export / dual-stream conversion | [docs/wiki/rl/rl-architecture.md](docs/wiki/rl/rl-architecture.md) |
 | Design specs (OpenSpec, 114 items) | [openspec/specs/](openspec/specs/) |
@@ -231,7 +231,7 @@ For first-time readers — so the project is neither over- nor under-estimated:
 - **Exact retrieval has preconditions**: the original must still be within TTL, the model must pick the right ticket, and the read path must be healthy. A few degraded recovery paths are eventually consistent, not byte-exact. "Recalled correctly" ≠ "understood correctly".
 - **Budgeting is estimation**: char-ratio + fixed overhead — one consistent scheme that no longer misses tool declarations or long arguments, but it does not claim provider-window safety or any task-success-rate gain.
 - **Training-data chain**: the recording → authorized export → strict conversion **sample-preparation loop** works and reconciles; the end-to-end "real tokenizer produces trainable batches" leg awaits a local template asset; no weight-training gains are claimed; the online RL bridge is retired.
-- **Cross-domain curation (external meditation)**: off by default; enabling needs two explicit grants (`observed_namespaces` ⊆ `memory.read_namespaces`, plus a `deliver_to` allowlist — violations and blind targets refuse at assembly). Its novelty judgment is fail-closed (unreadable fact chain or unknown lineage never counts). Curators only write ordinary events to their own partition and never rewrite another agent's context. Delivery is same-process; cross-process goes through the existing HTTPAPI. The real-model end-to-end scenario passed once locally behind the three-state gate with a non-idling probe (≤3 calls budgeted) — a single-run record; CI without a key SKIPs legitimately.
+- **Cross-domain curation (meditation with an explicit observation surface)**: there is only one mechanism — crossing domains is an observation-surface choice, not a second switch. With no `observed_namespaces` meditation only observes its own partition (self-review, the default); going cross-domain requires listing peer partitions explicitly, under two grants (`observed_namespaces` ⊆ `memory.read_namespaces`, plus a `deliver_to` allowlist — violations and blind targets refuse at assembly). Its novelty judgment is fail-closed (unreadable fact chain or unknown lineage never counts). A curator only writes ordinary events to its own partition and never rewrites another agent's context. Delivery is same-process; cross-process goes through the existing HTTPAPI. The real-model end-to-end scenario passed once locally behind the three-state gate with a non-idling probe (≤3 calls budgeted) — a single-run record; CI without a key SKIPs legitimately.
 - **Hot reload is not magic**: not every setting changes online; the rest are refused with a restart list. Side-channel capabilities (delivery, capture) never alter call semantics.
 - **External tool side effects are at-least-once**: durable acceptance prevents loss, not repetition — make side-effecting tools idempotent with your own keys.
 
