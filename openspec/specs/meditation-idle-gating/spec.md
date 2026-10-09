@@ -6,22 +6,22 @@
 ## Requirements
 ### Requirement: 冥想触发采用双闸门判定
 
-冥想触发 SHALL 同时满足两道独立闸门：(a) **空闲闸门**——距最近一次 turn 结束（`lastTurnEnd`）的间隔 ≥ `MinGap`；(b) **新颖性闸门**——最近一次用户输入时间（`lastUserInput`）晚于最近一次冥想时间（`lastMeditation`）。任一闸门不满足 SHALL 跳过本次检查。`lastUserInput` 为零值（从未有用户输入）时 SHALL 不触发冥想。
+触发一次反思 SHALL 同时满足：① interval 自查节奏到期；② 自身空闲门：距本 agent 最近一次回合结束（**任何谱系**，含投递触发的回合与失败回合）≥ min_gap；③ novelty 门：观察面内存在水位之后的**非自管谱系**事件。观察面缺省为**[自身分区]**（不配置 `observed_namespaces` 时，任何配了 `meditation.enabled` 的 agent 反思自己的分区——与旧 in-loop 行为等效且零迁移）；显式声明可含自身与他人（他人须 ⊆ `read_namespaces` 授权）。任一门不过 SHALL 以 debug 级具名记录。反思动作恒为向**本 agent 循环的 session** 注入冥想输入事件——形态差异只是"哪个 agent 的 session、观察谁"。
 
-#### Scenario: 双闸门同时满足才触发
+#### Scenario: 三门齐备触发
 
-- **WHEN** 距最近 turn 结束已超过 `MinGap`，且上次冥想之后有过用户输入
-- **THEN** 冥想 SHALL 触发，注入 `source="meditation"` 的 external_input 事件
+- **WHEN** interval 到期、本 agent 空闲 ≥ min_gap、观察面水位后有非自管事件
+- **THEN** 注入 `source="meditation"` 反思输入到本 agent 的 session 并推进水位
 
-#### Scenario: 空闲不足时跳过
+#### Scenario: 缺省观察面等效 in-loop
 
-- **WHEN** 距最近 turn 结束的间隔小于 `MinGap`
-- **THEN** 本次检查 SHALL 跳过，不注入冥想事件
+- **WHEN** 入口 agent 仅配 `meditation.enabled`（无 observed_namespaces），其业务 session 收到用户消息并入库
+- **THEN** 下一个空闲窗口 novelty 门开、反思注入业务 session（共享会话上下文，自体维护）
 
-#### Scenario: 无新用户输入时跳过
+#### Scenario: 投递风暴期只推迟
 
-- **WHEN** 上次冥想之后没有新的用户输入（`lastUserInput <= lastMeditation`）
-- **THEN** 本次检查 SHALL 跳过，即使空闲时长已远超 `MinGap`
+- **WHEN** 大量投递使本 agent 持续繁忙且观察面无新非自管事件
+- **THEN** 空闲门与 novelty 门均不过，至多推迟反思
 
 ### Requirement: 空闲锚点血统无关
 
@@ -38,38 +38,19 @@
 - **WHEN** 一个 turn 以 RunFlow 错误（含重试耗尽）结束
 - **THEN** `lastTurnEnd` SHALL 更新为该 turn 结束时刻
 
-### Requirement: 新颖性锚点锚定输入侧
-
-`lastUserInput` SHALL 仅在消息注入点（`InjectMessageWithSource` / `InjectMessageWithMetadata`）且 `source == "user"` 时更新——该更新规则在两种形态下不变。判据取用分两形态：**in-loop 形态**（未配置观察面）novelty 判定 SHALL 沿用 `lastUserInput > lastMeditation`；**外部观察形态**（`meditation.observed_namespaces` 非空）novelty 判定 SHALL 切换为跨分区谱系判据（定义见 meditation-agent-partition），`lastUserInput` 锚 SHALL NOT 参与该形态的判定，但仍按本条规则持续更新（保留理由：移除观察面回切 in-loop 形态时输入侧语义连续；该理由 SHALL 以代码注释固化，防后人当死代码删除）。两形态均 SHALL NOT 依据任何输出侧事件更新新颖性锚点。
-
-#### Scenario: 用户注入更新新颖性锚点
-
-- **WHEN** 以 `source="user"` 注入消息
-- **THEN** `lastUserInput` SHALL 更新为注入时刻（两形态同）
-
-#### Scenario: 非用户 source 注入不更新
-
-- **WHEN** 以 `source="meditation"` 或 `source="task"` 注入消息
-- **THEN** `lastUserInput` SHALL 保持不变（两形态同）
-
-#### Scenario: 外部形态判据不读注入锚
-
-- **WHEN** 已配置观察面，且仅有本 agent 的用户注入而无被观察分区的非自管新事件
-- **THEN** novelty 门保持关闭——外部形态下用户注入本身不再解锁冥想
-
 ### Requirement: 门控不依赖输出侧血统追踪
 
-冥想门控 SHALL NOT 依赖输出事件、任务层 `Origin` 行李或 task_settled 事件的血统标记；事件回调（`makeOnEventCallback`）SHALL NOT 包含冥想锚点更新逻辑；`checkAndMeditate` SHALL NOT 在触发时重置空闲锚点。**唯一例外**：外部观察形态的谱系判据 SHALL 读事实链的**持久化归因**（`FullEvent.Metadata[trigger_source]`，入库时由装配路径盖章——既有事实的一部分，非输出侧追踪）；该判据 SHALL NOT 引入任何回调侧读取或新的输出侧血统标注。
+冥想门控 SHALL NOT 依赖输出事件、任务层 `Origin` 行李或 task_settled 的血统标记；事件回调（`makeOnEventCallback`）SHALL NOT 更新冥想锚点。novelty 判据读取的 `trigger_source` 是**提交时盖章在事实链上的持久归因**（入库路径的既有部分），属"输入侧事实"而非输出侧追踪；除此之外门控不引入任何输出侧读取。
 
-#### Scenario: 事件回调与冥想状态解耦
+#### Scenario: 事件回调与锚点解耦
 
 - **WHEN** 任意 trigger_source 的 final response 经过事件回调
-- **THEN** 冥想管理器的任何锚点 SHALL NOT 因该回调而变化（两形态同）
+- **THEN** 冥想锚点不因该回调而变化
 
-#### Scenario: 外部判据读持久归因非回调
+#### Scenario: 唯一 novelty 读径是事实链
 
-- **WHEN** 外部观察形态执行 novelty 判定
-- **THEN** 判定路径只含事实链查询与元数据过滤，不含事件回调或输出侧状态的读取
+- **WHEN** 审查 novelty 判定路径
+- **THEN** 其数据来源仅 QueryEvents/GetEvent 的持久归因，无输出事件或回调读取
 
 ### Requirement: 混合批次中丢弃冥想事件
 
