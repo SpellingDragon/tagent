@@ -254,8 +254,9 @@ var (
 	// ErrSummaryTimeoutTooLarge: 超上限（含 0 以外的正值域）显式拒绝不夹紧——上限存在的
 	// 理由是约束模型路径内最坏等待，静默夹紧会让越界拼写看起来像生效配置。
 	ErrSummaryTimeoutTooLarge = errors.New("compress.summary_timeout_seconds exceeds the supported ceiling")
-	// MaxSummaryTimeoutSeconds 是同步摘要时限的配置上限（D14：正值 ≤120）。
-	MaxSummaryTimeoutSeconds = 120
+	// MaxSummaryTimeoutSeconds 是同步摘要时限的配置上限（D14 原值 120；2026-10-09 用户拍板放宽至 600
+	// ——40 万 token 级输入的 glm-5.3-flash 综述实测 5s/120s 均不够，见 11:15/23:44/23:49 三次 deadline exceeded）。
+	MaxSummaryTimeoutSeconds = 600
 )
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).

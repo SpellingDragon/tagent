@@ -120,6 +120,7 @@ agents:
       summary_provider: zhipu
       summary_effort: "low"              # 摘要调用透传 reasoning_effort(压缩成本低优先级,框架 smart_compress 支持)
       summary_max_tokens: 8192           # 摘要输出预算下限(推理模型耗思考链,不足会空 Content 塌缩)
+      summary_timeout_seconds: 600       # 2026-10-09: 40万token级综述 5s/120s 均三次 deadline exceeded, 放宽至 10min(ceiling 同步 120→600)
     tools:
       - agent: knowledge                 # 知识获取/翻译;event_keys 由 wrapper 从父 memStore 还原完整事件
         description_file: knowledge_tool_desc.md
