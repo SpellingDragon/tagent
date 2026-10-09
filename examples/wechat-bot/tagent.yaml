@@ -152,11 +152,43 @@ agents:
     # 空闲心跳:上下文清理/深度分析/skill 积累。两种形态由一个开关选定 —— observed_namespaces
     # 缺省为空即本 agent 自体维护(in-loop,只回看自己);非空即外部策展(只读这些分区水位之后的
     # 非自管新事件)。任何 agent 都可声明,不限入口;两个扩字段都在构造期读取,改动走配置换代。
+    # 冥想已外部化: 由独立 meditator agent 跨分区策展 (见 agents.meditator),
+    # 本入口不再 in-loop 自体维护 (observed_namespaces 空且 enabled:false = 双保险)。
+    meditation:
+      enabled: false
+      interval: "10m"
+      min_gap: "1h"
+      prompt_file: "meditation.md"
+
+  # ---- Meditator:外部策展冥想 Agent (6377d3b externalize-meditation) ----
+  # 观察主 agent (tagent) 分区水位之后的非自管新事件, 产出经白名单投递回 tagent。
+  # 结构指纹字段 (observed_namespaces/deliver_to/memory) 改动走配置换代 (需换装)。
+  meditator:
+    provider: deepseek
+    model: deepseek-flash
+    system_prompt:
+      files: [meditation.md]              # 复用既有冥想提示词 (策展方法论同源)
+    memory:
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces: [tagent]           # 授权读主 agent 时间线 (observed 的授权前提)
+      engine: *shared_engine
     meditation:
       enabled: true
       interval: "10m"
       min_gap: "1h"
-      prompt_file: "meditation.md"
+      observed_namespaces: [tagent]       # 外部观察形态开关: 非空即外部策展
+      deliver_to: [tagent]                # 产出投递白名单: 只投回主 agent
+    max_tool_iterations: 30
+    max_tokens: 256000
+    compress_threshold: 1
+    temperature: 0.3
+    thinking_enabled: true
+    tools:
+      - { kind: tool, id: skill_search }
+      - { kind: tool, id: skill_load }
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: memory_query }
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
