@@ -19,6 +19,17 @@
 
 ## 冥想流程
 
+### 0. 运行时异常信号扫描（冥想开场强制项，先于事件回顾）
+
+冥想不能只做"流程复盘"——大量运行时故障（超时、静默失败、门控扣留）不会出现在对话事件流里，只躺在日志与看板中。每次冥想先用一次 action 扫描以下信号面（一次命令扫完，避免多轮探针）：
+
+1. **wecha-bot 日志异常**：`grep -aE 'ERROR|WARN|deadline|exceeded|FAILED|failed|panic' examples/wechat-bot/logs/wechat-bot-default.log | tail -50`——重点：summary 模型超时（compress 路径）、delivery-receipt 扣留统计、工具执行失败；
+2. **后台任务失败记账**：看板 failed/ttl-expired 任务是否有"本体实际成功但包装被回收"的误读风险（用 cron.log/healthz 交叉验证）；
+3. **配置解析警报**：`grep -a 'config 解析失败\|parse config' examples/wechat-bot/logs/wechat-bot-default.log | tail -10`——区分合并中间态噪声 vs 真语法错误；
+4. **指标异常**：上下文水位逼近阈值（>95%）、task 稳定/失败计数异常。
+
+扫描到异常 → 列入"模式发现"并归因；扫描干净 → 在总结中显式声明"异常信号面干净"。**不做这一步的冥想视为未完成**——这正是"时间戳泄漏、摘要三次超时全靠用户人肉抓"的教训反推。
+
 ### 1. 回顾近期事件
 
 使用 recall 工具回顾自上次冥想以来的事件。传入描述性请求，例如：
