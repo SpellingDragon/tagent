@@ -1680,3 +1680,24 @@ func TestSubagentRun_RefusalLeaksNoLiveCM(t *testing.T) {
 	rep := ta.Obligations()
 	require.Zero(t, rep.Invocations, "refusal must not inflate owner obligations")
 }
+
+// TestExecLease_DeclaredHoldCascadePokesRetirementDrain 钉住仅经级联回收的一代也必须当场敲醒属主 org 的排空检查。
+//
+// - 使用权账本被抹掉的瞬间就是排空等待方需要的唤醒事件：级联回收路不会再经过 release 的敲点，缺此敲则排空停滞到无关流量到达。
+// 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
+func TestExecLease_DeclaredHoldCascadePokesRetirementDrain(t *testing.T) {
+	cm := newRecycleManager()
+	var pokes atomic.Int32
+	cm.SetRetirementPoke(func() { pokes.Add(1) })
+
+	b := cm.activeBinding()
+	b.retired = true
+	b.heldBy = 1
+	require.Zero(t, pokes.Load(), "precondition: staging the pin must not poke")
+
+	b.dropDeclaredHold()
+
+	require.True(t, b.closed, "precondition: the last drop reclaimed the generation")
+	require.Equal(t, int32(1), pokes.Load(),
+		"a cascade-reclaimed generation moved the usage ledger out of sight of the org drain — the reclaim path itself must wake it")
+}

@@ -215,6 +215,11 @@ func (b *execBinding) reclaimableLocked() bool {
 // the bookkeeping tracks live debt, and release every declaration hold
 // it recorded — a hold dies with its declarer, cascading the same check down
 // the call graph (acyclic by construction: the DFS refuses declaration cycles).
+// It ends by waking the org drain itself: release() pokes only its own drained
+// exit, while a CHILD generation reclaimed solely through the declared-hold
+// cascade never re-enters release — its ledger move would otherwise wait for
+// unrelated traffic, which the retirement protocol forbids (the sweep must
+// converge inside the same drain, not on a new turn).
 func (b *execBinding) finishReclaim() {
 	if b.run != nil {
 		_ = b.run.Close()
@@ -223,6 +228,7 @@ func (b *execBinding) finishReclaim() {
 	for _, child := range b.heldBindings() {
 		child.dropDeclaredHold()
 	}
+	b.cm.pokeRetirementDrain()
 }
 
 // heldBindings snapshots the declaration holds this generation recorded. The
