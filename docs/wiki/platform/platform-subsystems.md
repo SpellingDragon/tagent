@@ -134,7 +134,7 @@ agents:
 
 启用后这个单元挂在 entry 身上的三处：`refine` 工具（每次 entry 构建都追加）、bundle id 提供者（取最近一次改进 commit）、Stop closer（agent 关停时回收自进化的后台工作）。后两者属**进程级 once 绑定**——热重建壳不重复绑，与 ReliableBus 的"壳不重复登记"同一门（见[资源所有权](./resource-ownership.md)）。
 
-自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。冥想是一个机制——判据与动作唯一，观察面缺省＝自身分区（入口 agent 的**自体维护**＝自察），显式列出他人分区即同构 agent 的**外部策展**，同一引擎同一判据不分面，见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
+自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。冥想是一个机制——判据与动作唯一，观察面缺省＝自身分区（入口 agent 的**自体维护**＝自察），显式列出他人分区即同构 agent 的**旁路冥想**，同一引擎同一判据不分面，见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
 refine 三 op：**register**（产物落盘后登记：`[self-improve]` 标记 commit（仅 add 显式受控路径，
 默认 `resources/prompts/**`,`skills/**`,`scripts/**`）+ improvement 事件即评估窗口锚）/
 **status**（git log 过滤 + 窗口结论四态 join + 未登记产物提醒）/ **rollback**（安全 revert：
