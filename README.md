@@ -33,8 +33,8 @@
 ### 多 Agent 同构协作
 入口和被它委派出去的 agent 是同一种东西：各自有事件总线、自己的任务域、自己的记忆分区，可以递归再委派。一次委派绑定输出目的地，晚到的结算接回发起方续写同一轮；单次调用还可临时换提示词/模型/工具面（用完即弃，不跨调用泄漏）。
 
-### 自我复盘与经验策展（一个机制，反思默认在独立 session）
-空闲期自动"复盘"：整理上下文、沉淀经验卡片、给反复失败的策略记负反馈。机制只有一个：门控到点后，向某条循环 session 注入一个冥想输入事件，由该 agent 的一个正常回合完成反思。**默认推荐形态是把反思放在独立的策展 session**——声明一个策展 agent，固定跑在保留名线（wechat-bot 示例即 `curation`）上：它不占业务 session 的上下文预算，反思的内部叙述也不混进与用户的对话历史；观察面配置决定它看谁的分区——`observed_namespaces`（须在 `memory.read_namespaces` 授权内）列他人即跨域策展（"这三个会话都在等同一个审批"这类模式），列自身或不列即回看自己，混着列一趟扫描同一条判据；经验卡片经 `deliver_to` 白名单回流业务对话。把 `meditation.enabled` 直接配在业务 agent 上也合法（缺省观察面=[自身分区]，反思与业务回合共享上下文）——那是"复盘方需要当面看到当前业务"的进阶形态，代价是反思输入输出占用业务线预算、内部叙述留痕在业务线。写得很克制：反思只写自己分区的普通记忆，绝不改动别人的上下文；看谁的记忆、投给谁都要显式授权。
+### 自我复盘与旁路冥想（一个机制，反思默认在独立 session）
+空闲期自动"复盘"：整理上下文、沉淀经验卡片、给反复失败的策略记负反馈。机制只有一个：门控到点后，向某条循环 session 注入一个冥想输入事件，由该 agent 的一个正常回合完成反思。**默认推荐形态是把反思放在独立的旁路冥想线上**——声明一个冥想 agent，固定跑在保留 session（wechat-bot 示例即 `meditation`）上：它不占业务 session 的上下文预算，反思的内部叙述也不混进与用户的对话历史；观察面配置决定它看谁的分区——`observed_namespaces`（须在 `memory.read_namespaces` 授权内）列他人即旁路冥想（"这三个会话都在等同一个审批"这类模式），列自身或不列即回看自己，混着列一趟扫描同一条判据；经验卡片经 `deliver_to` 白名单回流业务对话。把 `meditation.enabled` 直接配在业务 agent 上也合法（缺省观察面=[自身分区]，反思与业务回合共享上下文）——那是"复盘方需要当面看到当前业务"的进阶形态，代价是反思输入输出占用业务线预算、内部叙述留痕在业务线。写得很克制：反思只写自己分区的普通记忆，绝不改动别人的上下文；看谁的记忆、投给谁都要显式授权。
 
 ### 运行数据 → 训练数据
 可选的决策采集把每次模型调用完整记录（输入快照、响应分片、终态、丢失统计），事后把"当时看到什么→做了什么→结果如何→人怎么评价"关联成一条条样本，按会话分组切分 train/test，导出为 SFT 数据集——每一步有清单可对账，缺什么明说，不静默拼凑。
@@ -80,7 +80,7 @@ for evt := range outputCh {
 }
 ```
 
-**3. 完整示例（WeChat Bot，六个 agent 协作的实战形态：入口 + 四个子 agent + 策展人 `curator`，后者的反思固定跑在保留 session `curation`）**
+**3. 完整示例（WeChat Bot，六个 agent 协作的实战形态：入口 + 四个子 agent + 冥想线 `meditator`，后者的反思固定跑在保留 session `meditation`）**
 
 ```bash
 cd examples/wechat-bot
@@ -147,7 +147,7 @@ graph TB
 2. **上下文有界**：工作内存恒有预算上限——靠分层记忆，不靠无限窗口。
 3. **召回可核对**：压缩留票据、失败有具名结局，框架不制造"看起来成功"。
 4. **异步不失联**：长任务先应答后通知，通知自带上下文。
-5. **默认零变化**：治理/自进化/可靠性/采集/跨域策展全部 opt-in，关闭态与旧版逐字节一致，可单点拆除。
+5. **默认零变化**：治理/自进化/可靠性/采集/旁路冥想全部 opt-in，关闭态与旧版逐字节一致，可单点拆除。
 
 ## 🔧 配置参考
 
@@ -171,7 +171,7 @@ graph TB
 | `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | 进程内/文件持久；读其他 agent 记忆须显式授权 |
 | `memory.lifecycle` | 内置默认 | 遗忘：全局/分类型 TTL、容量上界 |
 | `memory.engine` | （关） | 语义检索（向量∪关键词 RRF）与巩固建议（触发只是建议，执行权在 LLM+工具） |
-| `meditation.enabled` + `interval`/`min_gap`/`prompt_file`（扩字段 `observed_namespaces`/`deliver_to`） | `false`；**`observed_namespaces` 缺省＝`[自身分区]`** | 空闲复盘：默认推荐声明独立策展 agent（反思落保留 session 如 `curation`，不混业务线）；`observed_namespaces` 列他人（须 ⊆ `memory.read_namespaces`）即跨域、不列即回看自身，`deliver_to` 决定卡片回流向；直接配在业务 agent 上则反思落进其业务 session（进阶形态，见上方策展说明） |
+| `meditation.enabled` + `interval`/`min_gap`/`prompt_file`（扩字段 `observed_namespaces`/`deliver_to`） | `false`；**`observed_namespaces` 缺省＝`[自身分区]`** | 空闲复盘：默认推荐声明独立冥想 agent（反思落保留 session 如 `meditation`，不混业务线）；`observed_namespaces` 列他人（须 ⊆ `memory.read_namespaces`）即跨域、不列即回看自身，`deliver_to` 决定卡片回流向；直接配在业务 agent 上则反思落进其业务 session（进阶形态，见上方冥想说明） |
 | `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | 压缩触发 / 整理后保留最近任务数 |
 | `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 | 只在被引用 agent 自身定义处配置 |
 
@@ -205,7 +205,7 @@ graph TB
 | 主题 | 文档 |
 |---|---|
 | 记忆架构 / recall 协议 | [docs/wiki/memory/memory-architecture.md](docs/wiki/memory/memory-architecture.md) |
-| Agent 引擎 / 执行代 / 压缩与遥测 / 冥想（单机制：反思默认独立策展线） | [docs/wiki/agent/](docs/wiki/agent/) |
+| Agent 引擎 / 执行代 / 压缩与遥测 / 冥想（单机制：反思默认旁路冥想线） | [docs/wiki/agent/](docs/wiki/agent/) |
 | 平台子系统（治理/自进化/可靠性/热更/可观测/MCP） | [docs/wiki/platform/platform-subsystems.md](docs/wiki/platform/platform-subsystems.md) |
 | RL / 采集 / 授权导出 / 双流转换 | [docs/wiki/rl/rl-architecture.md](docs/wiki/rl/rl-architecture.md) |
 | 设计规格（OpenSpec，114 项） | [openspec/specs/](openspec/specs/) |
@@ -231,7 +231,7 @@ CI（push main/dev 与 PR）：build + vet + 全量 short + 新子系统 `-race`
 - **"精确回补"的前提**：原文仍在 TTL 内、模型选对票据、存储可读；个别退化恢复路径只承诺最终一致而非逐字节。回补正确 ≠ 模型理解正确。
 - **预算计价是估算**：字符比例 + 固定开销，统一口径且不再漏计工具声明/长参数，但不承诺 provider 窗口绝对安全，也不承诺任务成功率提升。
 - **训练数据链**：录制→授权导出→strict 转换的**样本准备闭环**成立且可对账；端到端"真实 tokenizer 出可训 batch"尚待本地模板资产；本项目不声称任何权重训练收益；在线 RL 桥已退役。
-- **策展冥想**：机制只有一个，跨域不是开关而是观察面配置——默认使用形态是独立策展线（专用反思 session，wechat-bot 示例即如此，业务 agent 的 meditation 块关闭）；把冥想配在业务 agent 上是合法进阶形态（不配 `observed_namespaces` 即观察自身分区、反思落进业务 session）；要跨域须显式列出他人分区，且需两层显式授权（`observed_namespaces` ⊆ `memory.read_namespaces`、`deliver_to` 白名单，越界与盲投在装配期拒绝启动）；判据 fail-closed（读不到/不认识谱系一律不算新鲜，宁少思不瞎思）；产出只落自己分区、不改动他人上下文；投递仅同进程，跨进程走既有 HTTPAPI。真实模型端到端场景已在本机跑通一次（三态门+非空转探针，预算 3 次调用入账）——单次证据，CI 无 key 时合法 SKIP。
+- **旁路冥想**：机制只有一个，跨域不是开关而是观察面配置——默认使用形态是旁路冥想线（专用反思 session，wechat-bot 示例即如此，业务 agent 的 meditation 块关闭）；把冥想配在业务 agent 上是合法进阶形态（不配 `observed_namespaces` 即观察自身分区、反思落进业务 session）；要跨域须显式列出他人分区，且需两层显式授权（`observed_namespaces` ⊆ `memory.read_namespaces`、`deliver_to` 白名单，越界与盲投在装配期拒绝启动）；判据 fail-closed（读不到/不认识谱系一律不算新鲜，宁少思不瞎思）；产出只落自己分区、不改动他人上下文；投递仅同进程，跨进程走既有 HTTPAPI。真实模型端到端场景已在本机跑通一次（三态门+非空转探针，预算 3 次调用入账）——单次证据，CI 无 key 时合法 SKIP。
 - **热更不是万能**：不承诺"所有配置在线可改"；不可热改的会拒绝并给出重启清单。投递/采集等旁路能力不改变调用语义。
 - **外部工具副作用是至少一次语义**：可靠受理防丢，不防重；有副作用的工具请自带幂等键。
 

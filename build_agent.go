@@ -24,6 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/tool/action"
 	"github.com/SpellingDragon/tagent/tool/govx"
+	meditationtool "github.com/SpellingDragon/tagent/tool/meditation"
 	"github.com/SpellingDragon/tagent/tool/plan"
 )
 
@@ -207,13 +208,19 @@ func buildAgentDFS(
 	return ta, nil
 }
 
+// meditationLoopSession 是冥想线的保留 session 名：反思线固定单线，永不与宿主路由
+// session 撞名；与谱系常量 event.LineageMeditation 分属不同命名空间（session 是循环
+// 身份、trigger_source 是事件属性），亲和而非冲突。
+const meditationLoopSession = "meditation"
+
 // assembledAgent 是 buildAgentDFS 中段的产物：装配完成的
 // TagentConfig＋其 ActionTool 句柄。ToolAgentFactory 分支同样只产配置，
 // face/runCfg 与构造路径和 config-driven 完全同轨——不存在「无法去壳」的
 // 第二 owner 形态。
 type assembledAgent struct {
-	cfg        *agent.TagentConfig
-	actionTool *action.ActionTool
+	cfg         *agent.TagentConfig
+	actionTool  *action.ActionTool
+	deliverTool *meditationtool.DeliverTool
 }
 
 // meditationObservationSurface 解析装配期的观察面并守住它的授权边界。
@@ -356,6 +363,7 @@ func assembleAgentConfig(
 
 	var tools []trpctool.Tool
 	var actionTool *action.ActionTool
+	var deliverTool *meditationtool.DeliverTool
 	for _, tr := range acfg.Tools {
 		t, isAction, err := buildToolFromRef(tr, cfg, acfg.WorkspaceRoot, rc, loader, cache, memStore, readPartitionIDs, degradationMgr, consolidationMinSources(acfg), mode, stack, subagentCollectors...)
 		if err != nil {
@@ -527,9 +535,13 @@ func assembleAgentConfig(
 				return tracker.CandidatesText(pid) + evoDigest
 			}
 		}
+		if len(agentCfg.Meditation.DeliverTo) > 0 {
+			deliverTool = meditationtool.New(agentCfg.Meditation.DeliverTo, nil)
+			agentCfg.Tools = append(agentCfg.Tools, deliverTool)
+		}
 	}
 
-	return &assembledAgent{cfg: agentCfg, actionTool: actionTool}, nil
+	return &assembledAgent{cfg: agentCfg, actionTool: actionTool, deliverTool: deliverTool}, nil
 }
 
 // wireAgent is buildAgentDFS 的尾段：NewTagentAgent＋全部
@@ -559,6 +571,11 @@ func wireAgent(
 
 	if agentCfg.Meditation.Enabled {
 		registerDeliveryAuthority(ta, agentCfg.Meditation)
+	}
+	if dt := assembled.deliverTool; dt != nil {
+		dt.SetDeliver(func(ctx context.Context, target string, msg model.Message) error {
+			return DeliverToAgent(ta, target, meditationLoopSession, msg)
+		})
 	}
 
 	if actionTool != nil {

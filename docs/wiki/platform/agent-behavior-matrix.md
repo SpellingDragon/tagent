@@ -90,7 +90,7 @@ critical 未批准 / 预算耗尽两处硬约束。升级到 `strict` 主要影�
 
 `refine` 工具三 op(`evolution/refine.go`)——只装配给 entry agent;冥想产物落盘后经它的 register 登记
 
-冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒。三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。开评估保护。这三份在**任何观察面下都是同一段**:策展线(观察面含他人分区)只是把它排在观察面概况之后(机制与 digest 覆盖面见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator))。
+冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒。三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。开评估保护。这三份在**任何观察面下都是同一段**:冥想线(观察面含他人分区)只是把它排在观察面概况之后(机制与 digest 覆盖面见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator))。
 
 ### 2.1 refine 三 op 行为
 
@@ -267,9 +267,9 @@ stateDiagram-v2
 4. 若进程被 OOM/崩溃 → systemd `Restart=always` 重启 → 恢复冥想锚点(不误触发)、预算窗口、发布历史、未消费事件。
 5. 语义引擎重启后异步重建向量索引,重建窗口内 recall 退化纯关键词,重建完成恢复语义召回。
 
-**场景 D:策展 agent 显式声明观察别人的分区(meditation 的策展线)**
-1. 一个同构 agent 显式配 `meditation.observed_namespaces`(须 ⊆ `memory.read_namespaces` ∪ {自身};不配则缺省＝自身分区自察,同一条判据)→ 策展线:新鲜度只看被观察分区在水位之后的**非自管谱系**事件。
-2. 被观察 agent 写入用户事实 → 空闲窗口到期后策展人触发一轮,经验卡片落**自己**的分区;被观察分区零写入(压缩权不可转移,策展线不写 compaction 事件)。
+**场景 D:冥想 agent 显式声明观察别人的分区(meditation 的旁路冥想线)**
+1. 一个同构 agent 显式配 `meditation.observed_namespaces`(须 ⊆ `memory.read_namespaces` ∪ {自身};不配则缺省＝自身分区自察,同一条判据)→ 冥想线:新鲜度只看被观察分区在水位之后的**非自管谱系**事件。
+2. 被观察 agent 写入用户事实 → 空闲窗口到期后冥想线触发一轮,经验卡片落**自己**的分区;被观察分区零写入(压缩权不可转移,冥想线不写 compaction 事件)。
 3. 卡片经 `DeliverToAgent` 投给目标 → 目标 mailbox 收到一条 meditation 谱系输入并自带 `[delivery]` 来源头;与用户输入同批到达时**让位、不补偿**。
 4. 此后只有自管产出在循环(卡片再投、consolidation_hint 唤醒)→ 两个 agent 的冥想门都不再打开:反思链路在结构上无法自持。
 5. `deliver_to` 未配置=空白名单**拒绝一切投递**;目标 loop 未运行只返回具名错误,不起新 Run、不落盘等待、不静默丢。

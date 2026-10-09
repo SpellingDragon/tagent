@@ -963,7 +963,7 @@ case "localfile":
 
 **EventKey 自寻址**：雪花键内含 PartitionID+Timestamp，可直接定位分区与时间窗，无需全局索引。
 
-<a id="curation"></a>
+<a id="curation"></a><!-- 历史上曾称：记忆策展固化机制章节锚点，保留以维持代码契约引用（memory/consolidation_hint.go 等） -->
 ## 十五、记忆策展
 
 ### 三原语与固化级联
