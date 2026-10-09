@@ -162,5 +162,5 @@
 | 二·代码探索 | 6 域核验报告（20261007-code-exploration-*） | 11 项一审结论被代码实证推翻/修正；哲学复核撤回"无索引即断链/默认 noop 缺陷/随机性=不可训"三判据 |
 | 三·实施 | O1–O6 六域：提交闸+因果键线性化+partial reason、model_override 引用快照+restart_required 分类、完整请求预算+具名拒发+摘要 5s 时限、分区定向扫描（+76~94%）+编码缓存**撤回**（负结果在案）、opt-in v2 采集（字节/句柄/磁盘三重上界+封账）、授权导出+双流 strict CLI+核账器（20 检查） | 全部门禁绿：short/race(0 豁免)/lint/openspec-strict/bot 模块；真实模型四场景单轮全 PASS（核账器 14 绿、3 项 dataset 具名待 tokenizer 资产）；R17 变体回写（编译闭包波次纪律） |
 
-**待授权**：F14（六域产品 delta 无损提升为独立 change 后正常 archive）、真实 tokenizer 资产的 6.7 终链、commit（工作树 52 文件未提交，git 面零操作）。
+**授权执行注记（2026-10-09 收口）**：F14 已获批执行——O1–O6 无损提升为六个独立 change 并正常 archive（delta sync 主 specs，orchestration 过程能力未投产品），父过程 change 保审计记录归档；commit/push 已完成并经 PR #10–#14 squash 入 main（六域优化、README 重构、冥想三步：externalize→unify→complete）。仍开放：**真实 tokenizer 资产的 6.7/F11 终链**（核账器具名红留痕，未伪勾）。
 **遗留观察**：factory 分支不下发采集/摘要字段、BudgetLine 不含 fixed、历史媒体计价、_normalise_partition 宽容度待真实流复核。（BenchmarkRequestAssembly 已于 2026-10-08 补测闭合：+12.8µs/请求、38KB 瞬态，接受。）

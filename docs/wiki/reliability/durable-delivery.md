@@ -93,7 +93,7 @@ stateDiagram-v2
 
 ### 投递缝：进程内跨 agent 的窄投递面
 
-策展线冥想（见 [agent 引擎篇](../agent/agent-architecture.md#meditation-curator)）的产出要回到别的 agent，走的仍是这条谱系语义，不新开通道：`DeliverToAgent(from, targetAgent, sessionID, msg)`（`delivery.go`）把消息经目标的 `InjectMessageWithSource(event.LineageMeditation, …)` 送进它的 mailbox——目标侧零新代码。四道前置裁决按序生效，任一失败都返回**具名错误**（一律 `%w` 包裹，`errors.Is` 可判别），无一静默丢：
+旁路冥想（见 [agent 引擎篇](../agent/agent-architecture.md#meditation-curator)）的产出要回到别的 agent，走的仍是这条谱系语义，不新开通道：`DeliverToAgent(from, targetAgent, sessionID, msg)`（`delivery.go`）把消息经目标的 `InjectMessageWithSource(event.LineageMeditation, …)` 送进它的 mailbox——目标侧零新代码。四道前置裁决按序生效，任一失败都返回**具名错误**（一律 `%w` 包裹，`errors.Is` 可判别），无一静默丢：
 
 | 拒绝 | 错误 | 判据 |
 |---|---|---|

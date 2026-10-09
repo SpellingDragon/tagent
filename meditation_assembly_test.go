@@ -1,4 +1,4 @@
-// meditation_assembly_test 覆盖组合根对冥想观察面的装配：缺省即自身分区、授权边界具名拒绝、声明搬运，以及反思产出的分区隔离。
+// meditation_assembly_test 覆盖组合根对冥想观察面的装配与投递工具面的授予：缺省即自身分区、授权边界具名拒绝、声明搬运、反思产出的分区隔离，以及 deliver 能力面的挂摘判据。
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 package tagent
@@ -11,6 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/stretchr/testify/require"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // assembleTestAgent 以给定 store 装配单个 agent 并返回其运行时配置，供观察面与分区隔离断言复用。
@@ -149,4 +150,60 @@ func TestMeditationExternalFormOwnPartition(t *testing.T) {
 	ownEvents, err := shared.QueryEvents(memory.QueryOptions{PartitionIDs: []int{meditatorPID}, Limit: 100})
 	require.NoError(t, err)
 	require.Len(t, ownEvents, 2, "冥想产出落在自身分区")
+}
+
+// medToolDeclNames 列出模型可见声明面上的工具名。
+func medToolDeclNames(tools []trpctool.Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, tl := range tools {
+		if d := tl.Declaration(); d != nil {
+			out = append(out, d.Name)
+		}
+	}
+	return out
+}
+
+// TestMeditationDeliverToolAssemblyGrant 钉住 能力面在装配期的授予判据：deliver 工具随冥想开关与白名单同时齐备才挂出。
+// - enabled 且 deliver_to 非空：声明面含 deliver；
+// - 配了冥想但未配白名单：模型根本看不到该工具；
+// - 配了白名单但冥想未开：同样不进工具面。
+func TestMeditationDeliverToolAssemblyGrant(t *testing.T) {
+	granted, err := assembleTestAgent(t, "meditator", AgentConfig{
+		SystemPrompt: PromptConfig{Inline: "p"},
+		Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
+		Meditation:   MeditationConfig{Enabled: true, ObservedNamespaces: []string{"target"}, DeliverTo: []string{"target"}},
+	}, Config{Entry: "meditator"}, memory.NewInMemoryStore())
+	require.NoError(t, err)
+	require.Contains(t, medToolDeclNames(granted.Tools), "deliver")
+
+	silent, err := assembleTestAgent(t, "meditator", AgentConfig{
+		SystemPrompt: PromptConfig{Inline: "p"},
+		Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
+		Meditation:   MeditationConfig{Enabled: true, ObservedNamespaces: []string{"target"}},
+	}, Config{Entry: "meditator"}, memory.NewInMemoryStore())
+	require.NoError(t, err)
+	require.NotContains(t, medToolDeclNames(silent.Tools), "deliver", "未配 deliver_to 即不授予回流能力")
+
+	off, err := assembleTestAgent(t, "meditator", AgentConfig{
+		SystemPrompt: PromptConfig{Inline: "p"},
+		Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
+		Meditation:   MeditationConfig{DeliverTo: []string{"target"}},
+	}, Config{Entry: "meditator"}, memory.NewInMemoryStore())
+	require.NoError(t, err)
+	require.NotContains(t, medToolDeclNames(off.Tools), "deliver", "冥想未开时白名单不授予工具面")
+}
+
+// TestMeditationDeliverToolCapabilitySurface 钉住 在线执行面声明列表与装配授予一致。
+// - 配了白名单的冥想实例，ExecutorConfig 的声明面把 deliver 交给模型；
+// - 入口与未配 deliver_to 的实例都看不到该工具。
+func TestMeditationDeliverToolCapabilitySurface(t *testing.T) {
+	granted := newDeliveryRig(t, deliveryRigSpec{read: []string{"target"}, observed: []string{"target"}, deliverTo: []string{"target"}})
+	require.Contains(t, medToolDeclNames(granted.meditator.ExecutorConfig().Tools), "deliver",
+		"配了白名单的冥想实例，工具面须把 deliver 交给模型")
+	require.NotContains(t, medToolDeclNames(granted.target.ExecutorConfig().Tools), "deliver",
+		"未授予回流能力的 agent 不得见到他方的工具")
+
+	silent := newDeliveryRig(t, deliveryRigSpec{read: []string{"target"}, observed: []string{"target"}})
+	require.NotContains(t, medToolDeclNames(silent.meditator.ExecutorConfig().Tools), "deliver",
+		"未配 deliver_to 的冥想实例，请求的工具声明列表不含 deliver")
 }
