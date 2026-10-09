@@ -89,7 +89,7 @@
 
 核心交易：**声明过的，完成即达；未声明的，等用户在场**。系统保证意图可声明、结局可见、账本可查，不接管“此刻该不该说”。
 
-**别把两种“投递”混成一个**：本节说的是示例侧把最终响应送回 IM 宿主；框架另有一条**进程内跨 agent 投递缝**（`DeliverToAgent`，把策展 agent 的产出投给同进程另一个 agent 的 mailbox），两者共用同一份谱系白名单却方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例随附配置里入口 agent 的 meditation 块**不写** `observed_namespaces`——缺省即自察：反思事件注入入口自己正在跑的业务 session（与业务回合共享上下文）；另配了一个 `curator` agent，显式声明 `observed_namespaces: [tagent]` 与 `deliver_to: [tagent]`，自己的循环跑在保留 session `curation` 上做跨域策展——同一机制，差别只在观察谁。观察面与投递白名单同样可声明给任意 agent，机制判据见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
+**别把两种“投递”混成一个**：本节说的是示例侧把最终响应送回 IM 宿主；框架另有一条**进程内跨 agent 投递缝**（`DeliverToAgent`，把策展 agent 的产出投给同进程另一个 agent 的 mailbox），两者共用同一份谱系白名单却方向不同，判据见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。本示例随附配置采用默认形态：反思统一交给 `curator` agent——`observed_namespaces: [tagent]` 回看业务线事实链、`deliver_to: [tagent]` 回流卡片，循环跑在保留 session `curation` 上，不占业务上下文、内部叙述不进微信对话；入口 agent 的 meditation 块**保留键但关闭**（打开即进阶形态：反思落进业务 session、与回合共享上下文）。同一机制，差别只在配给谁、观察谁。观察面与投递白名单同样可声明给任意 agent，机制判据见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
 
 <a id="large-file-acceptance"></a>
 ## 七、大文件真链路验收（不进 CI）

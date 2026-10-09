@@ -155,12 +155,12 @@ agents:
       #   description_file: knowledge_tool_desc.md
       #   event_params: [event_keys]
       #   remote: { url: "http://knowledge-service:8088" }
-    # 空闲心跳:上下文清理/深度分析/skill 积累。观察面缺省=本 agent 自身分区(自察):只回看自己的
-    # 事实链,反思事件注入自己正在跑的那条循环 session,与业务回合共享会话上下文 —— 不写
-    # observed_namespaces 就是这条缺省,跨域策展见 curator agent(同一机制,差别只在观察谁)。
-    # 任何 agent 都可声明,不限入口;两个扩字段都在构造期读取,改动走配置换代。
+    # 反思默认形态 = 独立策展线:业务 agent 不直接开冥想,反思由下方 curator agent 承担
+    # (独立循环、保留 session curation,不占业务上下文、内部叙述不进会话历史)。
+    # 这里保留键但关闭;确有"反思方需要直接看到业务当前上下文"的需求再把 enabled 打开
+    # (不写 observed_namespaces 即观察自身分区、反思落进业务 session)——同一机制的进阶用法。
     meditation:
-      enabled: true
+      enabled: false
       interval: "30m"
       min_gap: "1h"
       prompt_file: "meditation.md"
