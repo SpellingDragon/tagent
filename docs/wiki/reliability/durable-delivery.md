@@ -97,6 +97,8 @@ stateDiagram-v2
 
 | 拒绝 | 错误 | 判据 |
 |---|---|---|
+- **血统是 per-回合一次盖章，不是 per-逻辑处理**：`cm.triggerSource` 在每次 RunFlow 开始前定死、回合进行中不可改写——模型的"一次延续思考"跨到 housekeeping 触发回合（如 `task-batch-retire` 批量回收摘要，设计性不可投递：逐任务结果通报已在 settle 血统给过，retire 只是清扫账）时，其输出被扣留属门控按设计工作，**非血统劫持**。用户可见补报的正解是既有闭环：扣留回执+全文入事实链 → 下一用户回合 recall 补投；不引入按时间邻近推断"未完成请求"的延续规则（与 call 归因拒绝"猜最近"同源），也不为此扩白名单（2026-10-09 宿主案例裁决）。
+
 | 未获授权 | `ErrDeliveryNotAllowed` | 目标名 ∈ 投递方 `meditation.deliver_to`；白名单缺省为空，空＝装配期未登记＝**拒绝一切投递**（fail-closed） |
 | 盲投 | `ErrDeliveryBlindTarget` | 白名单目标的分区必须落在投递方观察面内；装配期同规则校验，声明盲投即具名拒启 |
 | 未知目标 | `ErrUnknownDeliveryTarget` | 寻址只走同进程常驻表，报错带常驻表实况；不发生任何网络调用 |
