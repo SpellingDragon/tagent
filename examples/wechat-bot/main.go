@@ -91,6 +91,144 @@ func resolveDeliveryTarget(metaChatID, lastActive string) (target string, ok boo
 	return "", false
 }
 
+// wechatOutbound 是宿主发送通路对通道实例的窄依赖面：文本、媒体、typing 与 context-token。
+// *wechat.Bot 天然满足该接口，测试以替身顶上（与 FileSender 同一纪律：不在测试里构造真实通道）。
+type wechatOutbound interface {
+	FileSender
+	StopTyping(ctx context.Context, toUserID string) error
+	GetContextToken(userID string) (string, error)
+}
+
+// 编译期断言：*wechat.Bot 满足发送面（无需运行真实微信即可验证）。
+var _ wechatOutbound = (*wechat.Bot)(nil)
+
+// longTextFunc 是超长正文（>2000 字）的分片投递动作，真机一侧经 context-token 走微信长文接口。
+type longTextFunc func(ctx context.Context, chatID, content, token string) error
+
+// longTextViaContextToken 是真机一侧的长文投递实现。
+func longTextViaContextToken(bot *wechat.Bot) longTextFunc {
+	return func(ctx context.Context, chatID, content, token string) error {
+		_, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token)
+		return err
+	}
+}
+
+// sendToolLineage 是主动通道回执的血统标注：与投递终态回执同族，落在门内——只留痕，不自达。
+const sendToolLineage = "send-tool"
+
+// errNoSendTarget 点名"目标三级解析全部落空"：发送缝据此回模型具名拒绝，扣留而非猜测。
+var errNoSendTarget = errors.New("无可解析的送达目标（本会话盖章与最近活跃会话均为空）")
+
+// sendRequest 描述一次送达意图：正文加通路侧固定的定位料。
+//   - chatIDHint 是被动通道携带的事件盖章（meta chat_id）；主动通道不给，目标自最近活跃会话起解析；
+//   - triggerSource 是日志与回执的血统标注；userName 只参与目标标签渲染。
+type sendRequest struct {
+	chatIDHint    string
+	userName      string
+	triggerSource string
+	content       string
+}
+
+// hostSender 承载宿主唯一的出网发送通路：被动通道（输出循环的 deliverable 分支）与主动通道
+// （send 工具）汇合于 sendToUser，typing 清理、长文分片、附件投递、失败回执一条不漏。
+type hostSender struct {
+	bot            wechatOutbound
+	longText       longTextFunc
+	typingActive   *sync.Map
+	lastActiveChat *sync.Map
+	inj            receiptInjector
+	workspaceDir   string
+	sends          atomic.Uint64
+}
+
+// sendCalls 报告 sendToUser 被到访几次（目标落空的拒绝也算一次）：两路共用同一实现的可执行断言位。
+func (h *hostSender) sendCalls() uint64 { return h.sends.Load() }
+
+// sendToUser 把一次送达意图落成实际投递，返回实际送达目标的标签。
+//   - 目标按三级规则解析：调用方给的盖章 > 最近活跃会话 > 具名拒绝（不广播、不猜测）；
+//   - 文本发送失败记 send-failed 回执并把原因随 error 回调用方，附件投递照常发生。
+func (h *hostSender) sendToUser(ctx context.Context, req sendRequest) (string, error) {
+	h.sends.Add(1)
+
+	chatID := req.chatIDHint
+	if chatID == "" {
+		raw, _ := h.lastActiveChat.Load("latest")
+		lastActive, _ := raw.(string)
+		target, hasTarget := resolveDeliveryTarget(chatID, lastActive)
+		if !hasTarget {
+			log.Warnf("[Agent][%s] 无 meta_chat_id，无可回退会话，扣留: %s", req.triggerSource, truncateLog(req.content))
+			emitReceipt(h.inj, "no-target", "WARN", req.triggerSource, "", req.content)
+			return "", errNoSendTarget
+		}
+		log.Infof("[Agent][%s] 无 meta_chat_id，回退最近活跃会话 %s", req.triggerSource, target)
+		chatID = target
+	}
+	if startTime, ok := h.typingActive.Load(chatID); ok {
+		if t, ok := startTime.(time.Time); ok && time.Since(t) < 60*time.Second {
+			_ = h.bot.StopTyping(ctx, chatID)
+		}
+		h.typingActive.Delete(chatID)
+	}
+
+	userLabel := chatID
+	if req.userName != "" {
+		userLabel = fmt.Sprintf("%s(%s)", req.userName, chatID)
+	}
+	log.Infof("[Agent][%s->%s] %s", req.triggerSource, userLabel, truncateLog(req.content))
+
+	originalContent := req.content
+	content := req.content
+	textSent := false
+	if len(content) > 2000 {
+		token, _ := h.bot.GetContextToken(chatID)
+		if token != "" {
+			if err := h.longText(ctx, chatID, content, token); err == nil {
+				textSent = true
+			} else {
+				content = content[:2000] + "\n\n[Message truncated]"
+			}
+		} else {
+			content = content[:2000] + "\n\n[Message truncated]"
+		}
+	}
+	var sendErr error
+	if !textSent {
+		if err := h.bot.SendTextToUser(ctx, chatID, content); err != nil {
+			log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
+			emitReceipt(h.inj, "send-failed", "ERROR", req.triggerSource, chatID, content)
+			sendErr = err
+		}
+	}
+
+	DeliverFiles(h.bot, ctx, chatID, originalContent, h.workspaceDir)
+	return userLabel, sendErr
+}
+
+// hostSendSeam 是主动通道的晚绑定发送缝：工具实例先于 bot 产出，绑定完成后调用直达 hostSender。
+// 构造时序 ta 先于 bot，与 wechatApprovalChannel 同一条晚绑定纪律。
+type hostSendSeam struct {
+	mu     sync.RWMutex
+	sender *hostSender
+}
+
+// bind 登记发送通路实例：主动通道的通道身份与目标定位料由此固定，不经参数出入。
+func (s *hostSendSeam) bind(h *hostSender) {
+	s.mu.Lock()
+	s.sender = h
+	s.mu.Unlock()
+}
+
+// send 是 SendFunc 的宿主一侧：没有事件盖章可用，目标自最近活跃会话起解析。
+func (s *hostSendSeam) send(ctx context.Context, content string) (string, error) {
+	s.mu.RLock()
+	h := s.sender
+	s.mu.RUnlock()
+	if h == nil {
+		return "", errors.New("宿主发送通路尚未就绪（bot 未完成装配），本次发送无法执行")
+	}
+	return h.sendToUser(ctx, sendRequest{triggerSource: sendToolLineage, content: content})
+}
+
 func main() {
 	configPath := "tagent.yaml"
 	if envPath := os.Getenv("TAGENT_CONFIG"); envPath != "" {
@@ -205,6 +343,9 @@ func main() {
 			fmt.Printf("  Skill indexed: %s (%s/SKILL.md) - %s\n", s.Name, dir, s.Description)
 		}
 	}
+
+	sendSeam := &hostSendSeam{}
+	tagent.GetRegistry().RegisterPlainTool(sendToolID, sendToolFactory(sendSeam))
 
 	// 4. Configure tagent options.
 	// - WithModel: global fallback for agents without their own model declaration.
@@ -402,6 +543,17 @@ func main() {
 	typingActive := sync.Map{}
 	lastActiveChat := sync.Map{}
 	seedLastActiveChat(&lastActiveChat, runDir())
+
+	sender := &hostSender{
+		bot:            bot,
+		longText:       longTextViaContextToken(bot),
+		typingActive:   &typingActive,
+		lastActiveChat: &lastActiveChat,
+		inj:            ta,
+		workspaceDir:   wechatCfg.WorkspaceDir,
+	}
+	sendSeam.bind(sender)
+
 	go func() {
 		for evt := range outputCh {
 			if evt == nil {
@@ -457,54 +609,12 @@ func main() {
 					log.Infof("[Agent][error] 错误输出: %s", truncateLog(content))
 					reportWithheld(ta, triggerSource, true, "", content)
 				case "user", "task", "reincarnation", "system_alert":
-					if chatID == "" {
-						raw, _ := lastActiveChat.Load("latest")
-						lastActive, _ := raw.(string)
-						target, hasTarget := resolveDeliveryTarget(chatID, lastActive)
-						if !hasTarget {
-							log.Warnf("[Agent][%s] 无 meta_chat_id，无可回退会话，扣留: %s", triggerSource, truncateLog(content))
-							emitReceipt(ta, "no-target", "WARN", triggerSource, "", content)
-							continue
-						}
-						log.Infof("[Agent][%s] 无 meta_chat_id，回退最近活跃会话 %s", triggerSource, target)
-						chatID = target
-					}
-					if startTime, ok := typingActive.Load(chatID); ok {
-						if t, ok := startTime.(time.Time); ok && time.Since(t) < 60*time.Second {
-							_ = bot.StopTyping(ctx, chatID)
-						}
-						typingActive.Delete(chatID)
-					}
-
-					userLabel := chatID
-					if userName != "" {
-						userLabel = fmt.Sprintf("%s(%s)", userName, chatID)
-					}
-					log.Infof("[Agent][%s->%s] %s", triggerSource, userLabel, truncateLog(content))
-
-					originalContent := content
-
-					textSent := false
-					if len(content) > 2000 {
-						token, _ := bot.GetContextToken(chatID)
-						if token != "" {
-							if _, err := wechat.SendLongText(ctx, bot.Client(), bot.Media(), chatID, content, token); err == nil {
-								textSent = true
-							} else {
-								content = content[:2000] + "\n\n[Message truncated]"
-							}
-						} else {
-							content = content[:2000] + "\n\n[Message truncated]"
-						}
-					}
-					if !textSent {
-						if err := bot.SendTextToUser(ctx, chatID, content); err != nil {
-							log.Errorf("SendTextToUser failed for %s: %v", chatID, err)
-							emitReceipt(ta, "send-failed", "ERROR", triggerSource, chatID, content)
-						}
-					}
-
-					DeliverFiles(bot, ctx, chatID, originalContent, wechatCfg.WorkspaceDir)
+					_, _ = sender.sendToUser(ctx, sendRequest{
+						chatIDHint:    chatID,
+						userName:      userName,
+						triggerSource: triggerSource,
+						content:       content,
+					})
 				default:
 					log.Warnf("[Agent][%s] 未知触发源，输出: %s", triggerSource, truncateLog(content))
 				}

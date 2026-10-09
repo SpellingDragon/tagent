@@ -1,4 +1,6 @@
 
+send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进可解析的会话， 通道与目标在装配期由闭包固定，模型只给正文。投递本体由
+
 FUNCTIONS
 
 func ComposeMediaInject(outcome IntakeOutcome, userText, workspaceDir, chatID string, now time.Time) string
@@ -94,6 +96,32 @@ func (s *SeenStore) CheckAndMark(key string) bool
     CheckAndMark returns true if the key was new (message should be processed),
     false if it was already seen (duplicate — drop). Marking is persisted
     immediately (atomic write) so a crash right after cannot replay the message.
+
+type SendFunc func(ctx context.Context, content string) (targetLabel string, err error)
+    SendFunc 是组合根注入的发送缝：把一条正文送进宿主唯一的发送通路， 返回实际送达目标的标签；error
+    携带具名拒绝原因，由工具层转写为结果文本。
+
+type SendTool struct {
+	// Has unexported fields.
+}
+    SendTool 是模型可见的主动送达面。
+
+      - send 是装配完成后绑定的发送缝；未绑定时的调用得到具名拒绝。
+
+func NewSendTool(send SendFunc) *SendTool
+    NewSendTool 构造送达面：send 传 nil 表示延后绑定，装配尾段经 SetSend 补上。
+
+func (t *SendTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
+    Call implements tool.CallableTool.
+
+      - 一切拒绝与发送失败都作为结果文本返回给模型（回合继续），目标规则随文案点名；
+      - err 只留给解不出参数形态的协议错，此时回合交由框架处置。
+
+func (t *SendTool) Declaration() *tool.Declaration
+    Declaration implements tool.CallableTool.
+
+func (t *SendTool) SetSend(send SendFunc)
+    SetSend 绑定发送缝：通道与目标定位由装配闭包固定，不经参数出入。
 
 type WechatAppConfig struct {
 	ConfigDir       string `json:"config_dir"`

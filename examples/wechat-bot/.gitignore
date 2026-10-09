@@ -111,3 +111,7 @@ openspec/
 !skills/url-fetcher/skill.md
 !skills/url-fetcher/smart_fetcher.js
 !skills/url-fetcher/url_fetcher.js
+
+# 主动送达面（send 工具）源码与测试：白名单制必须点名，否则新文件永远不进版本控制。
+!send_tool.go
+!send_tool_test.go

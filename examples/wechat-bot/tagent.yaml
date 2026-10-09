@@ -150,6 +150,10 @@ agents:
         description_file: exec_tool_desc.md
         properties:
           monitor: *exec_monitor
+      # 主动送达面：非用户回合产出的用户向内容不会被自动送达，想说的话经 send 显式投递。
+      # 声明即授权（不声明的 agent 看不见它）；发送通路与会话解析复用宿主唯一实现。
+      - { kind: tool, id: send }
+
       # 远程 A2A 子 agent 示例:声明 remote.url 即可,tagent.go 自动建 A2AAgent + TransferStateKey
       # - agent: remote-knowledge
       #   description_file: knowledge_tool_desc.md
@@ -299,6 +303,9 @@ agents:
         description_file: exec_tool_desc.md
         properties:
           monitor: *exec_monitor
+      # 主动送达面：反思结论里用户该知道的部分，经 send 显式投递（不配则模型不可见）。
+      - { kind: tool, id: send }
+
     # 旁路冥想:观察面显式声明(须 ⊆ read_namespaces ∪ {自身}),水位后的非自管事件才开门
     meditation:
       enabled: true
