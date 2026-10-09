@@ -216,6 +216,38 @@ type assembledAgent struct {
 	actionTool *action.ActionTool
 }
 
+// meditationObservationSurface 解析装配期的观察面并守住它的授权边界。
+//
+//   - 未声明即 [name]（自察）：授权面不等于观察面，缺省不回落 read_namespaces；
+//   - 自身分区恒合法、无需读授权：豁免按分区号判定——读面本身就以分区号为边界，
+//     推出自身分区的声明要读的就是自己那份事实；
+//   - 指向他人分区的声明必须落在 readNamespaces 内，否则具名返回错误（装配期拒启）。
+func meditationObservationSurface(name string, declared, readNamespaces []string) ([]string, error) {
+	observed := declared
+	if len(observed) == 0 {
+		observed = []string{name}
+	}
+	authorized := make(map[int]bool, len(readNamespaces))
+	for _, ns := range readNamespaces {
+		authorized[memory.PartitionIDFromName(ns)] = true
+	}
+	own := memory.PartitionIDFromName(name)
+	for _, ns := range observed {
+		if ns == "" {
+			continue
+		}
+		if memory.PartitionIDFromName(ns) == own {
+			continue
+		}
+		if !authorized[memory.PartitionIDFromName(ns)] {
+			return nil, fmt.Errorf(
+				"agent %q: meditation.observed_namespaces %q is not authorized by memory.read_namespaces",
+				name, ns)
+		}
+	}
+	return observed, nil
+}
+
 // assembleAgentConfig is buildAgentDFS 的中段：system
 // prompt/model/tools/decorators/治理包裹/meditation/TTL 解析 → TagentConfig。
 // 相对 agent 构造纯净——buildAgentFace 复用它为已存在 agent 装配换代 face
@@ -467,23 +499,9 @@ func assembleAgentConfig(
 		if cfg.Reliability.MeditationAnchorDir != "" {
 			meditationAnchorPath = filepath.Join(cfg.Reliability.MeditationAnchorDir, name+".json")
 		}
-		observed := acfg.Meditation.ObservedNamespaces
-		if len(observed) == 0 {
-			observed = acfg.Memory.ReadNamespaces
-		}
-		authorized := make(map[int]bool, len(acfg.Memory.ReadNamespaces))
-		for _, ns := range acfg.Memory.ReadNamespaces {
-			authorized[memory.PartitionIDFromName(ns)] = true
-		}
-		for _, ns := range observed {
-			if ns == "" {
-				continue
-			}
-			if !authorized[memory.PartitionIDFromName(ns)] {
-				return nil, fmt.Errorf(
-					"agent %q: meditation.observed_namespaces %q is not authorized by memory.read_namespaces",
-					name, ns)
-			}
+		observed, err := meditationObservationSurface(name, acfg.Meditation.ObservedNamespaces, acfg.Memory.ReadNamespaces)
+		if err != nil {
+			return nil, err
 		}
 		if err := validateDeliverySurface(name, observed, acfg.Meditation.DeliverTo); err != nil {
 			return nil, err

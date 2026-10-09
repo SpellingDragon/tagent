@@ -23,7 +23,7 @@
 - **不参与**：持久化路径类字段（治理、可靠性、各 agent 的记忆配置、MCP 服务器、进程级杂项，以及顶层 API 端点）。它们在运行时**无法迁移已有资源**，改了必须走重启——把它们放进指纹会造出"看起来热更成功、实际旧资源还在用"的假象。
 - **不参与**：五个数值热参（压缩阈值、最大令牌、保留最近任务数、任务默认与终态 TTL）。它们已被改造成**消费方在安全边界读单条已提交记录**，因此改变它们不需要重建，由"指纹未变"分支走数值热应用。
 
-**"要不要单独点名"不是判据，"在哪一刻被读"才是**。冥想扩字段既不进 `restartRequired` 拒表，也不需要白名单里逐个点名：整个 meditation 块嵌在组织指纹的 agent 子集里（`agent/org/fingerprint.go` 的 `agentSubset.Meditation`），扩字段带结构标签随全字段序列化自动参与——字段一变即移动指纹，走**换代**重建冥想管理器（观察面与投递授权都在构造期读取，不存在"半新半旧"的中间态）。反向的 neutrality 同样必须成立：同一份声明的两次装配指纹不变，否则热更会被无差异重建打断。两个方向由 `TestOrgFingerprint_MeditationExtFieldsMoveFingerprint` 钉住；"新增字段忘了进指纹"这一侧由穷举审计 `TestOrgFingerprint_AuditsEveryAgentConfigField` 守住（每个配置字段要么折进子集，要么在排除表里点名并写明理由）。机制归属见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)。
+**"要不要单独点名"不是判据，"在哪一刻被读"才是**。冥想扩字段既不进 `restartRequired` 拒表，也不需要白名单里逐个点名：整个 meditation 块嵌在组织指纹的 agent 子集里（`agent/org/fingerprint.go` 的 `agentSubset.Meditation`），扩字段带结构标签随全字段序列化自动参与——字段一变即移动指纹，走**换代**重建冥想管理器（观察面与投递授权都在构造期读取，不存在"半新半旧"的中间态）。反向的 neutrality 同样必须成立：同一份声明的两次装配指纹不变，否则热更会被无差异重建打断。两个方向由 `TestOrgFingerprint_MeditationExtFieldsMoveFingerprint` 钉住；"新增字段忘了进指纹"这一侧由穷举审计 `TestOrgFingerprint_AuditsEveryAgentConfigField` 守住（每个配置字段要么折进子集，要么在排除表里点名并写明理由）。机制归属见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
 
 规范化要求（否则指纹不可比较）：字段顺序固定（决定 JSON 键序）、map 按名排序、逐 agent 单独规范化 ⇒ 同一份语义配置在任何 YAML 迭代顺序下得到**逐字节相同**的输入。
 

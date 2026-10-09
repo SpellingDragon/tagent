@@ -1018,17 +1018,17 @@ type MeditationConfig struct {
 	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
 	DigestExtra func() string
 
-	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
-	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
+	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留门控锚点
+	// （lastTurnEnd/lastMeditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
 
-	// ObservedNamespaces 是外部观察形态冥想的观察面（memory namespace 名），非空即切换形态：
-	// novelty 判据改读这些分区事实链上的非自管谱系新事件（经 NoveltyReader）。
-	// 组合根给定最终集合——缺省回落 read_namespaces 与 observed ⊆ read 的授权校验都发生在装配期，
-	// 本层只消费给定的集合。
+	// ObservedNamespaces 是 novelty 判据的观察面（memory namespace 名）：判据读这些分区
+	// 事实链上晚于水位（lastMeditation）的非自管谱系事件（经 NoveltyReader）。
+	// 组合根给定最终集合——缺省（未声明）解析为 [agent 自身分区]（自察），显式声明可含
+	// 自身与他人；本层只消费给定的集合。
 	//
-	// novelty 判据按形态并存两套，不是冗余：同 agent 的注入锚是输入侧最便宜且不可被任务层
-	// 洗白的真源，跨分区则只有事实链上入库时盖章的归因可读。清空本字段即回切输入侧锚。
+	// 判据只有一个：观察谁，就读谁水位后的非自管事件。反思动作恒为向本 agent 循环的
+	// session 注入冥想输入事件，观察面配置不改变动作本身。
 	ObservedNamespaces []string
 
 	// DeliverTo 声明冥想产出可投递的目标 agent 白名单：缺省空 = 拒绝一切投递（fail-closed）。
@@ -1047,24 +1047,24 @@ type MeditationManager struct {
     into the event loop when the agent has been idle for at least MinGap AND the
     novelty gate says the world moved on since the last meditation.
 
-    - Two forms share this manager, chosen by one switch with no middle state:
-    in-loop (empty observation surface) is the host agent's own maintainer;
-    external observation (non-empty ObservedNamespaces) is a cross-domain
-    curator over other agents' partitions. - The idle gate is lineage-agnostic
-    (any turn end counts as busy); the novelty gate has one data face per
-    form — the input-side anchor in-loop, the observed partitions' persisted
-    attribution via NoveltyReader in the external form. - Meditation-derived
-    activity can therefore only delay the next meditation, never re-arm the
-    novelty gate: the self-feeding perpetual-motion loop of "nothing happened"
-    summaries is structurally impossible. - The event triggers the LLM to
-    perform context cleanup and deep consolidation over the session.
+    - One mechanism over any observation surface: the novelty gate reads the
+    observed partitions' fact chains for non-self-managed lineage events
+    past the watermark, and a fire injects the reflection input into THIS
+    agent's own loop session. Observing one's own partition (the default) is
+    self-maintenance; observing others' is curation — only the configuration
+    differs, never the mechanism. - The idle gate is lineage-agnostic: any
+    turn end counts as busy. - Meditation-derived activity can therefore only
+    delay the next meditation, never re-arm the novelty gate: the self-feeding
+    perpetual-motion loop of "nothing happened" summaries is structurally
+    impossible. - The event triggers the LLM to perform context cleanup and deep
+    consolidation over the session.
 
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager
     NewMeditationManager creates a MeditationManager. The injector is typically
     the *TagentAgent that owns this manager.
 
 func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore)
-    SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复三锚点——跨重启保留冥想
+    SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复门控锚点——跨重启保留冥想
     门控连续性（重启后不立即误触发冥想、正确计算 novelty）。Load 失败保守用当前值（不阻断启动）。
 
 func (m *MeditationManager) SetAuditLine(fn func() string)
@@ -1073,11 +1073,12 @@ func (m *MeditationManager) SetAuditLine(fn func() string)
     as SetTaskController.
 
 func (m *MeditationManager) SetNoveltyReader(r NoveltyReader)
-    SetNoveltyReader wires the read-only fact-chain face behind the external
-    form's novelty gate. Safe to leave unset: with an empty observation surface
-    it is never consulted; with a non-empty one the novelty gate stays closed
-    (fail-closed) instead of silently reading the input-side anchor. Set at
-    assembly before Start, same discipline as SetTaskController.
+    SetNoveltyReader wires the read-only fact-chain face behind the novelty
+    gate. A configured meditation always gets a store behind it: the fact
+    chain is the gate's only data face, the default self-observation surface
+    included. Safe to leave unset: the gate then stays closed (fail-closed)
+    instead of guessing. Set at assembly before Start, same discipline as
+    SetTaskController.
 
 func (m *MeditationManager) SetTaskController(tc task.TaskController)
     SetTaskController wires an optional read-only task controller used to render
@@ -1095,15 +1096,6 @@ func (m *MeditationManager) UpdateLastTurnEnd(t time.Time)
     UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
     Called unconditionally by runEventLoop after every RunFlow, regardless of
     trigger source or success.
-
-func (m *MeditationManager) UpdateLastUserInput(t time.Time)
-    UpdateLastUserInput records a source=="user" injection timestamp — the
-    novelty-gate anchor. Called from the injection points only (inject.go);
-    non-user sources (meditation/task/tmux) must never arm this gate.
-
-      - Both forms run this update: the in-loop form decides on it, the external
-        form does not read it yet keeps the history continuous for a switch
-        back.
 
 type ModelRefSnapshot struct {
 	// Has unexported fields.
@@ -1139,7 +1131,7 @@ type NoveltyReader interface {
 	QueryEvents(query memory.QueryOptions) ([]memory.EventReference, error)
 	GetEvent(key int64) (*memory.FullEvent, error)
 }
-    NoveltyReader 是外部观察形态 novelty 判据的只读事实链缝，由组合根注入（通常是共享的 memory store），agent
+    NoveltyReader 是 novelty 判据的只读事实链缝，由组合根注入（通常是共享的 memory store），agent
     侧不经此缝触任何写面。
 
       - QueryEvents 只回答轻量引用：EventReference 不带 Metadata，谱系只能靠 GetEvent 水合后读。

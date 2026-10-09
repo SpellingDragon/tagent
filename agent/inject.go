@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -27,7 +26,6 @@ func (ta *TagentAgent) InjectMessageContext(ctx context.Context, source string, 
 	if ta.loopTerminatedNow() {
 		return PublishReceipt{}, ErrLoopTerminated
 	}
-	ta.armMeditationNoveltyGate(source)
 	ta.selfAudit.ObserveInputFor(source)
 	bus := ta.persistentBus
 	if bus == nil {
@@ -54,7 +52,6 @@ func (ta *TagentAgent) InjectEnvelope(ctx context.Context, source string, msgs [
 	if ta.loopTerminatedNow() {
 		return "", false, ErrLoopTerminated
 	}
-	ta.armMeditationNoveltyGate(source)
 	bus := ta.persistentBus
 	if bus == nil {
 		ta.activeBusMu.Lock()
@@ -86,7 +83,6 @@ func (ta *TagentAgent) InjectMessage(msg model.Message) {
 // on the persistent ContextManager will TryPull these messages and inject them
 // into the next ReAct iteration.
 func (ta *TagentAgent) InjectMessageWithSource(source string, msg model.Message) {
-	ta.armMeditationNoveltyGate(source)
 	if ta.persistentBus != nil {
 		ta.persistentBus.Publish(NewExternalInputEvent(source, msg))
 		return
@@ -144,7 +140,6 @@ func (ta *TagentAgent) EmitSystemAlert(alert string) {
 // - "user_name": human-readable user identifier for logs
 // - "channel": communication channel (wechat, discord, etc.)
 func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Message, metadata map[string]string) {
-	ta.armMeditationNoveltyGate(source)
 	evt := NewExternalInputEvent(source, msg)
 	if evt.Metadata == nil {
 		evt.Metadata = make(map[string]any)
@@ -167,15 +162,6 @@ func (ta *TagentAgent) InjectMessageWithMetadata(source string, msg model.Messag
 		return
 	}
 	log.Warnf("[InjectMessageWithMetadata] agent %q has no bus, message dropped", ta.name)
-}
-
-// armMeditationNoveltyGate updates the meditation novelty-gate anchor for
-// source=="user" injections. No-op when meditation is disabled or the source
-// is not user.
-func (ta *TagentAgent) armMeditationNoveltyGate(source string) {
-	if source == "user" && ta.meditationMgr != nil {
-		ta.meditationMgr.UpdateLastUserInput(time.Now())
-	}
 }
 
 // IngestExternalEvents 把外部事件暂存，供本 agent 的下一次 Run 摄入（direct 兼容入口）。

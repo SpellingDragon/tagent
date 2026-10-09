@@ -1,4 +1,5 @@
-// meditation_assembly_test 覆盖组合根对冥想观察面的装配：缺省回落授权集、越界具名拒绝、形态搬运，以及外部形态产出的分区隔离。
+// meditation_assembly_test 覆盖组合根对冥想观察面的装配：缺省即自身分区、授权边界具名拒绝、声明搬运，以及反思产出的分区隔离。
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 package tagent
 
@@ -25,14 +26,14 @@ func assembleTestAgent(t *testing.T, name string, acfg AgentConfig, cfg Config, 
 	return assembled.cfg, err
 }
 
-// TestMeditationAssemblyObservationSurface 钉住 观察面在装配期回落授权集、越界具名拒绝启动、显式声明搬运进运行时配置。
-// - 缺省回落：未声明 observed 时取 read_namespaces 派生的最终集合；
-// - 越界拒绝：显式 observed 落在 read_namespaces 授权集之外即拒绝启动并点名越界项；
-// - 形态搬运：显式 observed 与 deliver_to 原样进入运行时冥想配置；
-// - 未配置即 in-loop：既无 observed 又无 read 时观察面为空，形态与行为不变。
+// TestMeditationAssemblyObservationSurface 钉住 观察面在装配期缺省为自身分区、授权内原样搬运、越界具名拒绝启动。
+// - 缺省自察：未声明 observed 时取 [自身]，与 read_namespaces 无涉（自身恒合法，无需授权）；
+// - 混合合法：observed 同含自身与授权内的他人分区，装配通过且原样搬运；
+// - 越界拒绝：他人分区落在 read_namespaces 之外即拒绝启动并点名越界项；
+// - 声明搬运：显式 observed 与 deliver_to 原样进入运行时冥想配置。
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func TestMeditationAssemblyObservationSurface(t *testing.T) {
-	t.Run("缺省回落 read_namespaces", func(t *testing.T) {
+	t.Run("缺省观察面即自身分区", func(t *testing.T) {
 		ac := AgentConfig{
 			SystemPrompt: PromptConfig{Inline: "p"},
 			Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
@@ -40,18 +41,42 @@ func TestMeditationAssemblyObservationSurface(t *testing.T) {
 		}
 		got, err := assembleTestAgent(t, "meditator", ac, Config{Entry: "meditator"}, memory.NewInMemoryStore())
 		require.NoError(t, err)
-		require.Equal(t, []string{"target"}, got.Meditation.ObservedNamespaces, "未声明观察面必须回落 read_namespaces")
+		require.Equal(t, []string{"meditator"}, got.Meditation.ObservedNamespaces,
+			"未声明观察面即自身分区，授权面不等于观察面")
+	})
+
+	t.Run("无任何读授权仍缺省自察", func(t *testing.T) {
+		ac := AgentConfig{
+			SystemPrompt: PromptConfig{Inline: "p"},
+			Memory:       MemoryConfig{Type: "memory"},
+			Meditation:   MeditationConfig{Enabled: true},
+		}
+		got, err := assembleTestAgent(t, "meditator", ac, Config{Entry: "meditator"}, memory.NewInMemoryStore())
+		require.NoError(t, err)
+		require.Equal(t, []string{"meditator"}, got.Meditation.ObservedNamespaces, "自身分区恒合法，无需读授权")
+	})
+
+	t.Run("自身与授权他人混合合法", func(t *testing.T) {
+		ac := AgentConfig{
+			SystemPrompt: PromptConfig{Inline: "p"},
+			Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
+			Meditation:   MeditationConfig{Enabled: true, ObservedNamespaces: []string{"meditator", "target"}},
+		}
+		got, err := assembleTestAgent(t, "meditator", ac, Config{Entry: "meditator"}, memory.NewInMemoryStore())
+		require.NoError(t, err)
+		require.Equal(t, []string{"meditator", "target"}, got.Meditation.ObservedNamespaces,
+			"read_namespaces ∪ {自身} 之内的声明原样搬运，自身那一项不占授权")
 	})
 
 	t.Run("越界具名拒绝启动", func(t *testing.T) {
 		ac := AgentConfig{
 			SystemPrompt: PromptConfig{Inline: "p"},
 			Memory:       MemoryConfig{Type: "memory", ReadNamespaces: []string{"target"}},
-			Meditation:   MeditationConfig{Enabled: true, ObservedNamespaces: []string{"ghost"}},
+			Meditation:   MeditationConfig{Enabled: true, ObservedNamespaces: []string{"planner"}},
 		}
 		_, err := assembleTestAgent(t, "meditator", ac, Config{Entry: "meditator"}, memory.NewInMemoryStore())
 		require.Error(t, err, "未授权分区必须拒绝启动而非静默进入判据")
-		require.Contains(t, err.Error(), "ghost", "拒绝须点名越界的分区")
+		require.Contains(t, err.Error(), "planner", "拒绝须点名越界的分区")
 		require.Contains(t, err.Error(), "not authorized", "拒绝须说明越界理由")
 	})
 
@@ -66,20 +91,9 @@ func TestMeditationAssemblyObservationSurface(t *testing.T) {
 		require.Equal(t, []string{"target", "recall"}, got.Meditation.ObservedNamespaces, "授权内的显式观察面须原样搬运")
 		require.Equal(t, []string{"recall"}, got.Meditation.DeliverTo, "deliver_to 声明须搬运进运行时配置")
 	})
-
-	t.Run("未配置即 in-loop", func(t *testing.T) {
-		ac := AgentConfig{
-			SystemPrompt: PromptConfig{Inline: "p"},
-			Memory:       MemoryConfig{Type: "memory"},
-			Meditation:   MeditationConfig{Enabled: true},
-		}
-		got, err := assembleTestAgent(t, "meditator", ac, Config{Entry: "meditator"}, memory.NewInMemoryStore())
-		require.NoError(t, err)
-		require.Empty(t, got.Meditation.ObservedNamespaces, "无观察面与读授权即 in-loop 自体维护形态")
-	})
 }
 
-// TestMeditationExternalFormOwnPartition 钉住 外部形态冥想的产出只落自身分区，被观察分区零写入且不新增压缩摘要事件。
+// TestMeditationExternalFormOwnPartition 钉住 观察他人分区的冥想产出只落自身分区，被观察分区零写入且不新增压缩摘要事件。
 // - 双 agent 共享同一事实链，观察面授权解析为被观察分区；
 // - 按框架分区盖章写进自身分区的普通产出对目标分区不可见，目标分区事件数不因产出而增；
 // - 目标分区既有的压缩摘要锚点不因冥想产出而新增。
@@ -102,7 +116,7 @@ func TestMeditationExternalFormOwnPartition(t *testing.T) {
 	require.NoError(t, err)
 	_, err = assembleTestAgent(t, "target", targetAgentCfg, Config{Entry: "meditator"}, shared)
 	require.NoError(t, err)
-	require.Equal(t, []string{"target"}, meditatorRuntime.Meditation.ObservedNamespaces, "外部形态观察面须解析为被授权的目标分区")
+	require.Equal(t, []string{"target"}, meditatorRuntime.Meditation.ObservedNamespaces, "显式观察面须解析为被授权的目标分区")
 
 	seed := func(pid int, key int64, eventType string, ts int64) {
 		require.NoError(t, shared.StoreEvent(key, memory.FullEvent{

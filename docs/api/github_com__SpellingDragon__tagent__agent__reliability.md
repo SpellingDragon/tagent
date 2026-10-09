@@ -317,13 +317,12 @@ func (in *Inbox) UnackedMaterial() ([]UnackedMaterial, error)
     conservative (do not open forgetting on an incomplete view).
 
 type MeditationAnchors struct {
-	LastUserInput  int64 `json:"last_user_input"`
 	LastTurnEnd    int64 `json:"last_turn_end"`
 	LastMeditation int64 `json:"last_meditation"`
 }
     MeditationAnchors 是冥想门控锚点的持久化快照（Unix ms）。
 
-    锚点跨重启持久；缺失即视为 0。
+    锚点跨重启持久；缺失即视为 0；历史文件中的多余键在 Load 时被忽略（自然兼容，无迁移）。
 
 type MemorySink struct {
 	Mgr *DegradationManager

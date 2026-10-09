@@ -531,7 +531,7 @@ RunFlow:
 | 类别 | 键 | 写入方 |
 |---|---|---|
 | 存储标识 | `event_key`（`MetaKeyEventKey`）、`partition_id`（`MetaKeyPartitionID`）、`event_type`（`MetaKeyEventType`）、`event_summary`（`MetaKeyEventSummary`） | 事件持久化插件在落库时写 |
-| 分发锚点 | `trigger_source` | 每回合由运行流程设在所有转发事件上，供消费方确定性分派；入库时另抄进 `FullEvent.Metadata`（`agent/context_manager.go`），于是它成为**跨重启、跨分区仍可读**的持久归因——宿主投递门与新鲜度判据都经 `event` 包的谓词从它派生，不自建清单（判据之家见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-two-forms)、白名单见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)） |
+| 分发锚点 | `trigger_source` | 每回合由运行流程设在所有转发事件上，供消费方确定性分派；入库时另抄进 `FullEvent.Metadata`（`agent/context_manager.go`），于是它成为**跨重启、跨分区仍可读**的持久归因——宿主投递门与新鲜度判据都经 `event` 包的谓词从它派生，不自建清单（判据之家见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)、白名单见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)） |
 | 透传业务 | `meta_` 前缀（如 `meta_chat_id`） | 从 invocation 根元数据传播到投递出的事件 |
 | 调用关联 | `call_id`（`MetaKeyCallID`） | **写 = `MemoryPlugin`**（经组合根注入的 `CallIDResolver`，按事件自带的 SDK 响应 ID 精确命中才盖；未命中／空串／未装配一律不写，绝不取"最近一次调用"）；**读 = 离线训练导出**（从 `FullEvent.Metadata` 原样取用）。只进 `Metadata`，不进 `StateDelta`、不带 `meta_` 前缀，因此事件解析面不消费它 |
 
