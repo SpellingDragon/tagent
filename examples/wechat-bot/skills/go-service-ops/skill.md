@@ -94,7 +94,8 @@ tagent.yaml 改动自动热加载，但**生效范围有边界**（2026-10-05 �
   `python3 -c "from datetime import datetime,timezone,timedelta; print(datetime.fromisoformat('2026-10-08T06:54:28Z'.replace('Z','+00:00')).astimezone(timezone(timedelta(hours=8))))"`
 - **服务器本地时间**：`date '+%F %T %z'`（拿权威"现在"，再对齐事件时间戳定"昨晚/今晚"）。
 - **日志时间戳**：robot.log/restart.log 等本地时间直读即可，但**叙述时**必须先 `date` 确认当前时刻，不凭体感定早晚（10-06 把"70 分钟前"说成"17 小时前"）。
-- 口诀：**Z 即 UTC 必换算；叙述早晚先 date；数字复制不核义，三次翻车同一坑**。
+- **系统自身事件也不裸信**（10-09 第四例）：meditation 消息头自带"当前时间"字段与本地 date 差 16 小时——任何来源的时间字段（邮件/看板/系统消息）一律经 `date` 对齐后才可引用。
+- 口诀：**Z 即 UTC 必换算；叙述早晚先 date；数字复制不核义，四次翻车同一坑（含系统自身字段）**。
 
 ## 故障速查（跨项目）
 
