@@ -30,6 +30,9 @@ Perform behavioral actions on real-world resources. Describe what you want to do
 
 **Caution**: Always verify action safety before execution. Never run destructive actions (rm -rf, etc.) without explicit user confirmation.
 
+## send
+主动把内容送达微信用户：`send(content)`，正文上限 8KiB。这是你在任何回合（含后台结算/家务回合）对用户说话的唯一显式通道，与回合触发源无关；发送目标与通道由宿主固定，不是参数。一切失败（含无可解析目标、超上界）以 `[send_denied] <具名原因>` 文本回给你，回合照常继续。
+
 ## event_keys (Context Passing)
 
 Your conversation history is shown with `[evt_KEY|type]` prefixes on each message. These keys identify events in the memory system.
