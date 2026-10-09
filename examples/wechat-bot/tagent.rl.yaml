@@ -79,10 +79,10 @@ agents:
         async: false
 
     # Meditation (空闲心跳)。观察面缺省=本 agent 自身分区(自察):不写 observed_namespaces 即回看
-    # 反思默认走独立策展线(curator agent,curation session);业务 agent 直配 meditation 为进阶
-    # 形态(反思将落进业务 session,共享其上下文)。
+    # 自己的事实链,反思注入本循环 session;跨域策展见下方 curator agent,同一机制。任何 agent 皆可
+    # 声明、不限入口。
     meditation:
-      enabled: false
+      enabled: true
       interval: "30m"
       min_gap: "2h"
       prompt_file: "meditation.md"
