@@ -37,17 +37,17 @@ type MeditationConfig struct {
 	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
 	DigestExtra func() string
 
-	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留三锚点
-	// （novelty/idle/last-meditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
+	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留门控锚点
+	// （lastTurnEnd/lastMeditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
 
-	// ObservedNamespaces 是外部观察形态冥想的观察面（memory namespace 名），非空即切换形态：
-	// novelty 判据改读这些分区事实链上的非自管谱系新事件（经 NoveltyReader）。
-	// 组合根给定最终集合——缺省回落 read_namespaces 与 observed ⊆ read 的授权校验都发生在装配期，
-	// 本层只消费给定的集合。
+	// ObservedNamespaces 是 novelty 判据的观察面（memory namespace 名）：判据读这些分区
+	// 事实链上晚于水位（lastMeditation）的非自管谱系事件（经 NoveltyReader）。
+	// 组合根给定最终集合——缺省（未声明）解析为 [agent 自身分区]（自察），显式声明可含
+	// 自身与他人；本层只消费给定的集合。
 	//
-	// novelty 判据按形态并存两套，不是冗余：同 agent 的注入锚是输入侧最便宜且不可被任务层
-	// 洗白的真源，跨分区则只有事实链上入库时盖章的归因可读。清空本字段即回切输入侧锚。
+	// 判据只有一个：观察谁，就读谁水位后的非自管事件。反思动作恒为向本 agent 循环的
+	// session 注入冥想输入事件，观察面配置不改变动作本身。
 	// 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
 	ObservedNamespaces []string
 
@@ -56,8 +56,8 @@ type MeditationConfig struct {
 	DeliverTo []string
 }
 
-// NoveltyReader 是外部观察形态 novelty 判据的只读事实链缝，由组合根注入（通常是共享的
-// memory store），agent 侧不经此缝触任何写面。
+// NoveltyReader 是 novelty 判据的只读事实链缝，由组合根注入（通常是共享的 memory
+// store），agent 侧不经此缝触任何写面。
 //
 //   - QueryEvents 只回答轻量引用：EventReference 不带 Metadata，谱系只能靠 GetEvent 水合后读。
 //   - 水合量由调用方的分页上界约束，命中即停。
@@ -75,7 +75,8 @@ type observedPartition struct {
 
 // resolveObserved 把声明的 namespace 名映射到存储分区（身份→分区的唯一推导轴是
 // memory.PartitionIDFromName，与插件与装配面同轴，不另立第二套映射），并去掉落在同一分区
-// 的重复声明（展示名取首个）。
+// 的重复声明（展示名取首个）。观察面的缺省解析（未声明＝自身分区）在上游装配期完成，
+// 本函数只映射与去重给定的名字。
 func resolveObserved(names []string) []observedPartition {
 	out := make([]observedPartition, 0, len(names))
 	seen := make(map[int]bool, len(names))
@@ -93,10 +94,19 @@ func resolveObserved(names []string) []observedPartition {
 	return out
 }
 
-// noveltyScanPageLimit bounds one external-form novelty pass: QueryEvents answers
-// nothing without an explicit Limit, and the page size is the ceiling on hydrations
-// (the pass stops at the first novelty hit; the worst case — a window holding only
-// self-managed output — hydrates one page, negligible at a meditation-scale interval).
+// defaultObservedSurface 补齐观察面的缺省解析：已声明即原样返回，未声明即 [ownName]（自察）。
+// 授权面不等于观察面，缺省不回落 read_namespaces；组合根之外的直接构造点与组合根共用这一条规则。
+func defaultObservedSurface(ownName string, declared []string) []string {
+	if len(declared) == 0 {
+		return []string{ownName}
+	}
+	return declared
+}
+
+// noveltyScanPageLimit bounds one novelty pass: QueryEvents answers nothing without
+// an explicit Limit, and the page size is the ceiling on hydrations (the pass stops
+// at the first novelty hit; the worst case — a window holding only self-managed
+// output — hydrates one page, negligible at a meditation-scale interval).
 const noveltyScanPageLimit = 1000
 
 // messageInjector is the interface for injecting messages into the event loop.
@@ -109,8 +119,8 @@ type messageInjector interface {
 // loop when the agent has been idle for at least MinGap AND the novelty gate says the world
 // moved on since the last meditation.
 //
-// - Two forms share this manager, chosen by one switch with no middle state: in-loop (empty observation surface) is the host agent's own maintainer; external observation (non-empty ObservedNamespaces) is a cross-domain curator over other agents' partitions.
-// - The idle gate is lineage-agnostic (any turn end counts as busy); the novelty gate has one data face per form — the input-side anchor in-loop, the observed partitions' persisted attribution via NoveltyReader in the external form.
+// - One mechanism over any observation surface: the novelty gate reads the observed partitions' fact chains for non-self-managed lineage events past the watermark, and a fire injects the reflection input into THIS agent's own loop session. Observing one's own partition (the default) is self-maintenance; observing others' is curation — only the configuration differs, never the mechanism.
+// - The idle gate is lineage-agnostic: any turn end counts as busy.
 // - Meditation-derived activity can therefore only delay the next meditation, never re-arm the novelty gate: the self-feeding perpetual-motion loop of "nothing happened" summaries is structurally impossible.
 // - The event triggers the LLM to perform context cleanup and deep consolidation over the session.
 type MeditationManager struct {
@@ -128,42 +138,35 @@ type MeditationManager struct {
 	// 契约: docs/wiki/agent/compression-and-telemetry.md#self-state-digest
 	auditLine func() string
 
-	// noveltyReader is the injected fact-chain face behind the external form's
-	// novelty gate (see NoveltyReader). Set at assembly before Start, same
-	// discipline as SetTaskController. An observation surface without a reader
-	// keeps the gate closed — it never falls back to the input-side anchor.
+	// noveltyReader is the injected fact-chain face behind the novelty gate (see
+	// NoveltyReader). Set at assembly before Start, same discipline as
+	// SetTaskController. Without a reader the gate stays closed (fail-closed) —
+	// the fact chain is the novelty gate's only data face.
 	noveltyReader NoveltyReader
 
 	// observed is the resolved observation surface derived from cfg at
-	// construction; empty selects the in-loop form, whose gates read the anchors
-	// only and never touch the fact chain.
+	// construction; the novelty gate reads its partitions' fact chains. An empty
+	// surface (only reachable via direct construction, the composition root
+	// always resolves one) keeps the gate closed.
 	observed []observedPartition
-
-	// lastUserInput is the novelty-gate anchor (Unix ms): the most recent
-	// injection with source == "user". Updated only at the injection points
-	// (inject.go) — input-side source is ground truth and cannot be laundered
-	// by the task layer.
-	//
-	// - The external form reads the fact chain instead of this anchor, yet the injection rule keeps updating it: dropping the observation surface returns the gate to this anchor with its history intact, so a form switch needs no migration.
-	lastUserInput atomic.Int64
 
 	// lastTurnEnd is the idle-gate anchor (Unix ms): when the most recent turn
 	// ended — any trigger source, including failed turns. Updated
 	// unconditionally by runEventLoop after each RunFlow.
 	lastTurnEnd atomic.Int64
 
-	// lastMeditation tracks the most recent valid meditation timestamp. In the
-	// external form it doubles as the novelty watermark: the gate asks the fact
-	// chain for events strictly newer than it, so a fire advances the window.
+	// lastMeditation tracks the most recent valid meditation timestamp and
+	// doubles as the novelty watermark: the gate asks the fact chain for events
+	// strictly newer than it, so a fire advances the window and locks itself.
 	lastMeditation atomic.Int64
 
-	// anchorStore 可选：持久化三锚点（T-G AnchorStore），跨重启保留冥想门控连续性。
+	// anchorStore 可选：持久化门控锚点（T-G AnchorStore），跨重启保留冥想门控连续性。
 	// nil = 纯内存（现状，重启失忆）。经 SetAnchorStore 注入。
 	anchorStore *reliability.AnchorStore
 
-	// anchorMu 序列化「锚点更新 + persistAnchors 快照」——三锚点分属不同 goroutine 更新
-	// （user input 注入 / turn end 事件循环 / meditation ticker），无锁则 persistAnchors 对三
-	// atomic 分别 Load 可能持久化「回退」的旧快照（Suggestion：并发交错覆盖）。
+	// anchorMu 序列化「锚点更新 + persistAnchors 快照」——锚点分属不同 goroutine 更新
+	// （turn end 事件循环 / meditation ticker），无锁则 persistAnchors 对各自 atomic
+	// 分别 Load 可能持久化「回退」的旧快照（Suggestion：并发交错覆盖）。
 	anchorMu sync.Mutex
 
 	ctx    context.Context
@@ -195,16 +198,16 @@ func (m *MeditationManager) SetAuditLine(fn func() string) {
 	m.auditLine = fn
 }
 
-// SetNoveltyReader wires the read-only fact-chain face behind the external form's
-// novelty gate. Safe to leave unset: with an empty observation surface it is never
-// consulted; with a non-empty one the novelty gate stays closed (fail-closed)
-// instead of silently reading the input-side anchor. Set at assembly before Start,
-// same discipline as SetTaskController.
+// SetNoveltyReader wires the read-only fact-chain face behind the novelty gate.
+// A configured meditation always gets a store behind it: the fact chain is the
+// gate's only data face, the default self-observation surface included.
+// Safe to leave unset: the gate then stays closed (fail-closed) instead of
+// guessing. Set at assembly before Start, same discipline as SetTaskController.
 func (m *MeditationManager) SetNoveltyReader(r NoveltyReader) {
 	m.noveltyReader = r
 }
 
-// SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复三锚点——跨重启保留冥想
+// SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复门控锚点——跨重启保留冥想
 // 门控连续性（重启后不立即误触发冥想、正确计算 novelty）。Load 失败保守用当前值（不阻断启动）。
 func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore) {
 	m.anchorStore = s
@@ -216,27 +219,23 @@ func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore) {
 		log.Warnf("[Meditation] anchor load failed (%v), starting fresh", err)
 		return
 	}
-	if a.LastUserInput > 0 {
-		m.lastUserInput.Store(a.LastUserInput)
-	}
 	if a.LastTurnEnd > 0 {
 		m.lastTurnEnd.Store(a.LastTurnEnd)
 	}
 	if a.LastMeditation > 0 {
 		m.lastMeditation.Store(a.LastMeditation)
 	}
-	log.Infof("[Meditation] anchors restored across restart: lastUserInput=%d lastTurnEnd=%d lastMeditation=%d",
-		a.LastUserInput, a.LastTurnEnd, a.LastMeditation)
+	log.Infof("[Meditation] anchors restored across restart: lastTurnEnd=%d lastMeditation=%d",
+		a.LastTurnEnd, a.LastMeditation)
 }
 
-// persistAnchors 保存当前三锚点到 anchorStore（若配置）。写失败仅告警（冥想门控降级为内存态，
-// 不阻断主流程）。锚点更新（turn end / user input / meditation fire）时调用。
+// persistAnchors 保存当前门控锚点到 anchorStore（若配置）。写失败仅告警（冥想门控降级为内存态，
+// 不阻断主流程）。锚点更新（turn end / meditation fire）时调用。
 func (m *MeditationManager) persistAnchors() {
 	if m.anchorStore == nil {
 		return
 	}
 	a := reliability.MeditationAnchors{
-		LastUserInput:  m.lastUserInput.Load(),
 		LastTurnEnd:    m.lastTurnEnd.Load(),
 		LastMeditation: m.lastMeditation.Load(),
 	}
@@ -276,19 +275,6 @@ func (m *MeditationManager) Stop() {
 	log.Info("[Meditation] manager stopped")
 }
 
-// UpdateLastUserInput records a source=="user" injection timestamp — the
-// novelty-gate anchor. Called from the injection points only (inject.go);
-// non-user sources (meditation/task/tmux) must never arm this gate.
-//
-//   - Both forms run this update: the in-loop form decides on it, the external form
-//     does not read it yet keeps the history continuous for a switch back.
-func (m *MeditationManager) UpdateLastUserInput(t time.Time) {
-	m.anchorMu.Lock()
-	m.lastUserInput.Store(t.UnixMilli())
-	m.persistAnchors()
-	m.anchorMu.Unlock()
-}
-
 // UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
 // Called unconditionally by runEventLoop after every RunFlow, regardless of
 // trigger source or success.
@@ -297,12 +283,6 @@ func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
 	m.lastTurnEnd.Store(t.UnixMilli())
 	m.persistAnchors()
 	m.anchorMu.Unlock()
-}
-
-// observing reports the external observation form: the observation surface is the
-// single switch between the two novelty data faces, with no intermediate state.
-func (m *MeditationManager) observing() bool {
-	return len(m.observed) > 0
 }
 
 // partitionCounts is one observed partition's tally in a novelty pass: how much of
@@ -323,7 +303,7 @@ type partitionCounts struct {
 }
 
 // recentActivity is the newest non-self-managed event a novelty pass found: the
-// external form's "what moved out there" line.
+// digest's "what moved" line.
 type recentActivity struct {
 	eventKey    int64
 	partition   string
@@ -333,9 +313,9 @@ type recentActivity struct {
 	timestampMs int64
 }
 
-// observedScan is one external-form novelty pass: the bounded evidence the decision
-// was made on, kept so the digest renders from the same pass rather than scanning
-// the fact chain a second time.
+// observedScan is one novelty pass: the bounded evidence the decision was made on,
+// kept so the digest renders from the same pass rather than scanning the fact
+// chain a second time.
 type observedScan struct {
 	watermarkMs      int64
 	partitions       []partitionCounts
@@ -394,16 +374,20 @@ func scanStartAfter(watermarkMs int64) int64 {
 	return watermarkMs + 1
 }
 
-// scanObservedNovelty answers the external form's novelty gate from the fact chain:
-// novelty is an event in an observed partition, strictly newer than the
-// lastMeditation watermark, whose lineage is not self-managed.
+// scanObservedNovelty answers the novelty gate from the fact chain: novelty is an
+// event in an observed partition, strictly newer than the lastMeditation watermark,
+// whose lineage is not self-managed.
 //
 //   - Lineage sense is derived by the event package's single source (SelfManagedLineage); this file holds no copy of any lineage list, and an event with no persisted trigger_source derives to unknown lineage, which never counts as novelty.
 //   - References carry no metadata, so candidates are hydrated one by one and the pass stops at the first hit, newest first.
-//   - A read failure keeps the gate closed: an unreadable fact chain is neither "nothing new" nor "something new", and guessing either would act on the failure rather than on the facts.
+//   - An empty observation surface, a missing reader and a read failure all keep the gate closed: none of them is ever allowed to be reinterpreted as "nothing new" or "something new" — guessing would act on the guess rather than on the facts, and there is no alternate data face to fall back to.
 func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
+	if len(m.observed) == 0 {
+		log.Debugf("[Meditation] novelty gate closed: empty observation surface")
+		return nil, false
+	}
 	if m.noveltyReader == nil {
-		log.Debugf("[Meditation] external novelty gate closed: observation surface set, no NoveltyReader wired")
+		log.Debugf("[Meditation] novelty gate closed: observation surface set, no NoveltyReader wired")
 		return nil, false
 	}
 	watermark := m.lastMeditation.Load()
@@ -416,7 +400,7 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 		Limit:        noveltyScanPageLimit,
 	})
 	if err != nil {
-		log.Warnf("[Meditation] external novelty query failed, gate stays closed: %v", err)
+		log.Warnf("[Meditation] novelty query failed, gate stays closed: %v", err)
 		return nil, false
 	}
 	scan.referenceTotal = len(refs)
@@ -427,7 +411,7 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 	for _, ref := range refs {
 		fe, herr := m.noveltyReader.GetEvent(ref.EventKey)
 		if herr != nil || fe == nil {
-			log.Debugf("[Meditation] external novelty: event %s unreadable (%v), skipped",
+			log.Debugf("[Meditation] novelty pass: event %s unreadable (%v), skipped",
 				tagentevent.FormatEventKey(ref.EventKey), herr)
 			continue
 		}
@@ -437,7 +421,7 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 		at, known := scan.indexOf(fe.PartitionID)
 		if !known {
 			scan.foreignPartition++
-			log.Debugf("[Meditation] external novelty: event %s lands on partition %d outside the observation surface, not counted",
+			log.Debugf("[Meditation] novelty pass: event %s lands on partition %d outside the observation surface, not counted",
 				tagentevent.FormatEventKey(ref.EventKey), fe.PartitionID)
 			continue
 		}
@@ -447,7 +431,7 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 			scan.partitions[at].selfManaged++
 			if lineage == "" {
 				scan.unknownLineage++
-				log.Debugf("[Meditation] external novelty: event %s carries no persisted trigger_source, unknown lineage never counts",
+				log.Debugf("[Meditation] novelty pass: event %s carries no persisted trigger_source, unknown lineage never counts",
 					tagentevent.FormatEventKey(ref.EventKey))
 			}
 			continue
@@ -468,30 +452,15 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 
 // checkAndMeditate evaluates whether a meditation should fire: both gates must pass.
 //
-// - Novelty gate, one data face per form: the in-loop form reads the injection anchor (input-side source is ground truth for the same agent); the external form reads the observed partitions' persisted attribution through NoveltyReader, because across partitions the fact chain is the only lineage face available. The form is decided by the observation surface, one switch, no middle state.
+// - Novelty gate (the single criterion): an event in an observed partition, strictly newer than the lastMeditation watermark, whose lineage is not self-managed — the fact chain is the gate's only data face, for every observation surface including the default self-observation one.
 // - Idle gate (lineage-agnostic): gap since the last turn end >= MinGap. Any turn counts as busy, so meditation-derived turns merely delay, which is harmless and desirable while background work is churning.
-// - No fire-time anchor reset is needed: storing lastMeditation locks the novelty gate in both forms — against the input anchor in-loop, against the watermark in the external form.
+// - No fire-time anchor reset is needed: storing lastMeditation advances the watermark and locks the novelty gate until the observed surface moves again.
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
 
-	// scan is the external form's collected evidence for this fire; nil in the
-	// in-loop form, whose digest stays exactly as it has always been.
-	var scan *observedScan
-	if m.observing() {
-		var novel bool
-		if scan, novel = m.scanObservedNovelty(); !novel {
-			return
-		}
-	} else {
-		lastUserMs := m.lastUserInput.Load()
-		if lastUserMs == 0 {
-			return
-		}
-
-		if lm := m.lastMeditation.Load(); lm > 0 && lastUserMs <= lm {
-			log.Debugf("[Meditation] skipping: no new user input since last meditation")
-			return
-		}
+	scan, novel := m.scanObservedNovelty()
+	if !novel {
+		return
 	}
 
 	lastTurnMs := m.lastTurnEnd.Load()
@@ -517,9 +486,8 @@ func (m *MeditationManager) checkAndMeditate() {
 // buildMeditationMessage constructs the meditation external_input message.
 // The message includes a [meditation] marker, timestamps, and the prompt text.
 // If PromptSource is configured, the prompt is re-read from disk (hot-reload).
-// The digest forks by form: a nil scan (in-loop) keeps the task-layer digest, a
-// non-nil scan (external observation) leads with the observed partitions' overview
-// rendered from that same pass.
+// The digest leads with the observed-surface overview rendered from that same
+// novelty pass, followed by the optional own-task and behavior-audit sections.
 func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Duration, scan *observedScan) model.Message {
 	var lastMed string
 	if lm := m.lastMeditation.Load(); lm > 0 {
@@ -535,10 +503,10 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 		}
 	}
 
-	// Self-state digest (task-layer health + idle, or the observed-partition
-	// overview in the external form) — prepended BEFORE the prompt so the LLM
-	// reflects on real runtime state first. An empty section is skipped, keeping
-	// behavior identical to a run with nothing to report.
+	// Digest: observed-surface overview (rendered from the triggering pass — the
+	// fact chain is never scanned twice), then the own task-layer section and the
+	// audit line as independent optional sections. An empty section is skipped,
+	// keeping behavior identical to a run with nothing to report.
 	var digest string
 	if scan != nil {
 		digest = renderObservedScanDigest(scan, idle)

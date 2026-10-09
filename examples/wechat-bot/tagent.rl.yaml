@@ -63,25 +63,24 @@ agents:
       - agent: knowledge
         description_file: knowledge_tool_desc.md
         event_params: [event_keys]
-        max_tool_iterations: 5
-        max_tokens: 4096
-        temperature: 0.3
 
       - agent: recall
         description_file: recall_tool_desc.md
         event_params: [event_keys]
-        max_tool_iterations: 5
-        max_tokens: 4096
 
       # Action Agent: 执行中枢
       - agent: action
         description_file: action_tool_desc.md
-        max_tool_iterations: 5
-        max_tokens: 4096
-        temperature: 0.3
 
-    # Meditation (空闲心跳)。两形态由 observed_namespaces 选定:空=本 agent 自体维护(in-loop),
-    # 非空=外部策展(读这些分区的非自管新事件),任何 agent 皆可声明、不限入口。
+      # 策展人常驻本进程的前提:装配只构造 entry 经工具图可达的 agent(常驻表 = 可达闭包)。
+      # 声明成 entry 的一个工具即入常驻表,后台反思循环由宿主 StartLoop 起。
+      - agent: curator
+        description: "跨域策展人(后台反思循环自触发;本工具仅为其常驻寻址,正常对话无需调用)"
+        async: false
+
+    # Meditation (空闲心跳)。观察面缺省=本 agent 自身分区(自察):不写 observed_namespaces 即回看
+    # 自己的事实链,反思注入本循环 session;跨域策展见下方 curator agent,同一机制。任何 agent 皆可
+    # 声明、不限入口。
     meditation:
       enabled: true
       interval: "30m"
@@ -170,15 +169,9 @@ agents:
 
       - agent: speak
         description_file: speak_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
       - agent: draw
         description_file: draw_tool_desc.md
-        max_tool_iterations: 3
-        max_tokens: 1024
-        temperature: 0.3
 
       - kind: tool
         id: exec
@@ -209,6 +202,53 @@ agents:
     max_tool_iterations: 3
     max_tokens: 1024
     temperature: 0.3
+
+  # ========================================================================
+  # Curator Agent: 跨域策展人(独立反思主体,常驻第二条循环)
+  # 与入口 tagent 的自察反思是同一条机制的两个观察面:这里显式观察业务分区,
+  # 反思注入策展人自己的循环 session(宿主以保留名 "curation" 起线,固定单线)。
+  # ========================================================================
+  curator:
+    system_prompt:
+      files: [curator_agent.md]
+    memory:
+      type: localfile
+      path: .wechat-config/data          # 与 entry 同 type+path+指纹 = 同一 FileSegmentStore 实例
+      read_namespaces:
+        - tagent                         # 授权读业务分区(observed 里他人分区的前置授权)
+    max_tool_iterations: 30
+    max_tokens: 4096
+    temperature: 0.3
+    compress_threshold: 0.8              # 策展线唯一增长阀:反思不换 session,长到阈值自行折叠
+    tools:
+      - kind: tool
+        id: recall
+      - kind: tool
+        id: read_file
+      - kind: tool
+        id: list_file
+      - kind: tool
+        id: search_file
+      - kind: tool
+        id: search_content
+      - kind: tool
+        id: read_multiple_files
+      - kind: tool
+        id: save_file
+      - kind: tool
+        id: replace_content
+      - kind: tool
+        id: exec
+        description_file: exec_tool_desc.md
+    meditation:
+      enabled: true
+      interval: "1h"
+      min_gap: "2h"
+      prompt_file: "curator.md"
+      observed_namespaces:
+        - tagent                         # 跨域策展:须 ⊆ read_namespaces ∪ {自身}
+      deliver_to:
+        - tagent                         # 回流白名单;空白名单拒绝一切投递
 
 # ===== 应用专属配置 =====
 app:

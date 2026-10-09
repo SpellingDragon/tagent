@@ -123,7 +123,7 @@ func TestMeditation_NoDigestWhenNoController(t *testing.T) {
 	}
 }
 
-// observedScanWith builds one external form's collected evidence for the renderer tests.
+// observedScanWith builds one novelty pass's collected evidence for the renderer tests.
 func observedScanWith(watermarkMs int64, page, hydrated int, parts ...partitionCounts) *observedScan {
 	return &observedScan{
 		watermarkMs:    watermarkMs,
@@ -228,7 +228,7 @@ func TestMeditation_DigestObservedScan_EmptySurfaceDegrades(t *testing.T) {
 	}
 }
 
-// TestMeditation_DigestFromLiveExternalScan 钉住 外部形态的分区概况由判据那一次扫描渲染，不重复扫事实链。
+// TestMeditation_DigestFromLiveExternalScan 钉住 分区概况由判据那一次扫描渲染，不重复扫事实链。
 // - 谱系计数只有水合后才分得开，早停之后未及水合的引用照常计入分区引用数。
 func TestMeditation_DigestFromLiveExternalScan(t *testing.T) {
 	reader := &fakeNoveltyReader{}
@@ -263,7 +263,7 @@ func TestMeditation_DigestFromLiveExternalScan(t *testing.T) {
 	}
 }
 
-// TestMeditation_ExternalDigestWithoutOwnTaskLayer 钉住 外部形态下自身任务层为空只省略任务段，分区概况照常渲染。
+// TestMeditation_ExternalDigestWithoutOwnTaskLayer 钉住 自身任务层为空只省略任务段，分区概况照常渲染。
 func TestMeditation_ExternalDigestWithoutOwnTaskLayer(t *testing.T) {
 	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
 	scan := observedScanWith(0, 2, 1, partitionCounts{name: "recall", id: 7, references: 2, externalHits: 1})
@@ -276,7 +276,7 @@ func TestMeditation_ExternalDigestWithoutOwnTaskLayer(t *testing.T) {
 	}
 }
 
-// TestMeditation_ExternalDigestKeepsOwnTaskSectionWhenPresent 钉住 外部形态自身有任务时两段并存，分区概况在前。
+// TestMeditation_ExternalDigestKeepsOwnTaskSectionWhenPresent 钉住 自身有任务时两段并存，分区概况在前。
 func TestMeditation_ExternalDigestKeepsOwnTaskSectionWhenPresent(t *testing.T) {
 	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
 	mgr.SetTaskController(&fakeTaskController{tasks: []*task.Task{
@@ -290,19 +290,4 @@ func TestMeditation_ExternalDigestKeepsOwnTaskSectionWhenPresent(t *testing.T) {
 	if strings.Index(msg.Content, "观察分区概况") > strings.Index(msg.Content, "自我状态快照") {
 		t.Errorf("the observed surface must lead the digest:\n%s", msg.Content)
 	}
-}
-
-// TestMeditation_DigestInLoopFormHasNoObservedSection 钉住 in-loop 形态的摘要不出现分区概况，覆盖面与既有完全一致。
-func TestMeditation_DigestInLoopFormHasNoObservedSection(t *testing.T) {
-	mgr := NewMeditationManager(MeditationConfig{PromptText: "REFLECT_NOW"}, &mockMessageInjector{})
-	mgr.SetTaskController(&fakeTaskController{tasks: []*task.Task{
-		mkDigestTask("id1", "stuck task", task.TaskSuspect, time.Minute),
-	}})
-
-	msg := mgr.buildMeditationMessage(time.Now(), time.Hour, nil)
-
-	if strings.Contains(msg.Content, "观察分区概况") {
-		t.Errorf("the in-loop form must not render an observed-partition section:\n%s", msg.Content)
-	}
-	requireDigestLines(t, msg.Content, "自我状态快照", "stuck task")
 }

@@ -114,7 +114,7 @@ type deliveryRig struct {
 	triggers  *triggerLog
 }
 
-// deliveryRigSpec 声明投递方的读授权、观察面与投递白名单，以及入口自身是否挂 in-loop 冥想。
+// deliveryRigSpec 声明投递方的读授权、观察面与投递白名单，以及入口自身是否挂冥想（不配观察面＝缺省自察）。
 type deliveryRigSpec struct {
 	read             []string
 	observed         []string
@@ -136,7 +136,7 @@ func deliveryConfig(spec deliveryRigSpec) Config {
 				Memory:       MemoryConfig{Type: "memory"},
 				Meditation:   targetMeditation,
 				Tools: []ToolRef{
-					{Kind: "agent", AgentID: "meditator", Description: "外部观察冥想"},
+					{Kind: "agent", AgentID: "meditator", Description: "跨域策展冥想"},
 					{Kind: "agent", AgentID: "peer", Description: "同进程常驻伙伴"},
 				},
 			},
@@ -344,7 +344,7 @@ func TestDeliverToAgent_LineageMeditationSelfTelemetry(t *testing.T) {
 }
 
 // TestDeliverToAgent_NoveltyNotRearmedByDelivery 钉住 目标消费投递不重开自身的冥想 novelty 门：投递是供给，不是刺激。
-// - 入口挂着 in-loop 冥想（间隔 50ms、min_gap 1ms），两条投递被真实消费后跨若干个间隔仍不触发一次冥想。
+// - 入口挂着冥想（缺省自察观察面；间隔 50ms、min_gap 1ms），两条投递被真实消费后跨若干个间隔仍不触发一次冥想。
 // - 同一装配下注入一条真实用户输入，冥想随即触发，证明上一条否定断言不是门本来就该关着。
 // 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
 func TestDeliverToAgent_NoveltyNotRearmedByDelivery(t *testing.T) {

@@ -566,9 +566,10 @@ type MeditationConfig struct {
 	// PromptFile is the meditation prompt file (relative to prompt_dir). Default: "meditation.md".
 	PromptFile string `json:"prompt_file,omitempty" yaml:"prompt_file,omitempty"`
 
-	// ObservedNamespaces 声明外部观察形态冥想的跨分区观察面；缺省空=in-loop 自体维护
-	// （observed 回落 read_namespaces 及 observed 越界授权的校验由组合根装配期承担，
-	// 本处仅承载声明与解析）。构造期读取，走结构换代、不静默热生效。
+	// ObservedNamespaces 声明冥想 novelty 判据的观察面（memory namespace 名）。
+	// 缺省（未声明）＝[自身分区]——配了冥想即至少反思自己；显式声明可含自身与他人，
+	// 他人分区须 ⊆ read_namespaces 授权（自身恒合法），越界由组合根装配期具名拒绝启动。
+	// 构造期读取，走结构换代、不静默热生效。
 	ObservedNamespaces []string `json:"observed_namespaces,omitempty" yaml:"observed_namespaces,omitempty"`
 
 	// DeliverTo 声明冥想产出可投递的目标 agent 白名单；缺省空=拒绝一切投递（fail-closed）。
