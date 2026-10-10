@@ -102,4 +102,8 @@ require (
 // R1 (design D6): the producer-done fix is pinned to the published fork tag
 // (v1.11.2 + the 4 stream-close-contract commits), so nothing here depends on an
 // out-of-tree local checkout any more. Upstream PR #2637 carries the same commits.
+// TODO(upstream): remove this replace once trpc-group/trpc-agent-go#2637
+// (close event streams only after the producer is done) is merged and tagged.
+// Then switch to the official release, run the full gate suite (short/race/
+// lint(Go1.24)/check-openspec/bot), and note the removal in CHANGELOG.
 replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1
