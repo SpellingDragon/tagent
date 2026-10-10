@@ -600,3 +600,125 @@ func TestMeditationE2E_PendingLongHoldNeverStorms(t *testing.T) {
 	require.Equal(t, "首次冥想", lastMeditationIn(t, cards.latestText(t)),
 		"未决不烧水位：窗口仍然无损")
 }
+
+// TestMeditationE2E_GapYieldCarriesDebtLine 钉住 自察形态的间隙让位账目：让位窗口里一次执行都没发生，欠账却随下一张卡片可见，用户离开后的执行仍写着首次冥想。
+// - 反思在闸门后与用户输入同批到达：注入时刻让位，那一轮没有任何冥想内容。
+// - 用户离开后的下一个 tick 纯冥想批执行：那一张带着「自上次执行以来让位 1 次」的欠账行，水位仍写首次冥想——让位不烧窗口。
+// - 执行那一张的同一请求背后就是窗口最新事实：覆盖整个间隙的反思没有错过任何一条排队输入。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestMeditationE2E_GapYieldCarriesDebtLine(t *testing.T) {
+	rig := newMeditationRig(t, true)
+	gate := rig.model.armNext()
+
+	_, err := rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户输入：闸门里的 turn 一"))
+	require.NoError(t, err)
+	medEventually(t, "target is parked inside turn one", func() bool {
+		return rig.model.contains(targetLabel, "闸门里的 turn 一")
+	})
+	require.Equal(t, 1, rig.model.count(targetLabel), "precondition: only turn one has run")
+
+	time.Sleep(200 * time.Millisecond)
+
+	_, err = rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("间隙窗口最新事实：与冥想同批到达"))
+	require.NoError(t, err)
+	close(gate)
+
+	medEventually(t, "the gap fact got served", func() bool {
+		return rig.model.contains(targetLabel, "与冥想同批到达")
+	})
+	require.False(t, rig.model.contains(targetLabel, meditationFireMarker),
+		"让位窗口里反思一次都没被执行")
+
+	medEventually(t, "the pure batch runs once the user leaves, debt line on card", func() bool {
+		return rig.model.servedTogether(targetLabel, meditationFireMarker, "自上次执行以来让位 1 次（最近 ")
+	})
+	require.True(t, rig.model.servedTogether(targetLabel, meditationFireMarker, "上次有效冥想时间：首次冥想"),
+		"连续让位不烧窗口：执行它那一张仍写着首次冥想")
+	require.True(t, rig.model.servedTogether(targetLabel, meditationFireMarker, "间隙窗口最新事实"),
+		"执行轮的上下文里就是让位窗口的全部事实")
+}
+
+// TestMeditationE2E_CuratorFormUnbowedByBusinessLoad 钉住 外部策展形态的反误伤：业务线密集积压时，策展线照常执行。
+// - 业务 agent 停在闸门、六条用户事件排队；同一时刻策展 agent 的冥想门冷启动通读观察分区并执行自己的卡片。
+// - 策展总线与业务总线按 agent 隔离，在场复查对策展者恒为 false：它的任何一张卡片里都不会出现让位欠账行。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestMeditationE2E_CuratorFormUnbowedByBusinessLoad(t *testing.T) {
+	const (
+		bizBusyLabel     = "E2E-BIZ-PROMPT"
+		curatorBusyLabel = "E2E-CURATOR-PROMPT"
+	)
+	dir := t.TempDir()
+	m := &meditationModel{}
+
+	bizCfg := tagent.Config{
+		Entry: "biz",
+		Agents: map[string]tagent.AgentConfig{
+			"biz": {
+				SystemPrompt: tagent.PromptConfig{Inline: bizBusyLabel},
+				Memory:       tagent.MemoryConfig{Type: "memory", Path: dir},
+			},
+		},
+	}
+	biz, err := tagent.New(bizCfg, tagent.WithModel(m))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = biz.Close() })
+	bizOut, err := biz.StartLoop("e2e-biz-user", "e2e-biz-session")
+	require.NoError(t, err)
+	go func() {
+		for evt := range bizOut {
+			_ = evt
+		}
+	}()
+
+	gate := m.armNext()
+	for i := 0; i < 6; i++ {
+		_, err = biz.InjectMessageContext(context.Background(), "user",
+			model.NewUserMessage("业务密集事件：交付窗口必须周五关闭"))
+		require.NoError(t, err)
+	}
+
+	curCfg := tagent.Config{
+		Entry: "curator",
+		Agents: map[string]tagent.AgentConfig{
+			"curator": {
+				SystemPrompt: tagent.PromptConfig{Inline: curatorBusyLabel},
+				Memory:       tagent.MemoryConfig{Type: "memory", Path: dir, ReadNamespaces: []string{"biz"}},
+				Meditation: tagent.MeditationConfig{
+					Enabled:            true,
+					Interval:           "50ms",
+					MinGap:             "1ms",
+					ObservedNamespaces: []string{"biz"},
+				},
+			},
+		},
+	}
+	curator, err := tagent.New(curCfg, tagent.WithModel(m))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = curator.Close() })
+	curOut, err := curator.StartLoop("e2e-curator-user", "e2e-curator-session")
+	require.NoError(t, err)
+	go func() {
+		for evt := range curOut {
+			_ = evt
+		}
+	}()
+
+	medEventually(t, "the curator executes while the business line is parked mid-burst", func() bool {
+		return m.servedTogether(curatorBusyLabel, meditationFireMarker, "分区 biz") && m.count(bizBusyLabel) == 1
+	})
+	require.False(t, m.contains(curatorBusyLabel, "自上次执行以来让位"),
+		"隔离的策展总线对用户事件的积压从不显示在场：外部形态不因业务密度让位")
+
+	close(gate)
+	medEventually(t, "the business line served the whole burst in one batch", func() bool {
+		return m.contains(bizBusyLabel, "交付窗口必须周五关闭")
+	})
+	_, err = biz.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("闸门放行后的新业务线索：队列已恢复"))
+	require.NoError(t, err)
+	medEventually(t, "the business line resumes right after the gate", func() bool {
+		return m.contains(bizBusyLabel, "队列已恢复")
+	})
+}

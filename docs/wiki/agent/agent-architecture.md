@@ -116,7 +116,7 @@ func (ta *TagentAgent) runEventLoop(ctx context.Context, bus *EventBus, cm *Cont
         }
         endTurnSpan(turnSpan, retriedDegenerate) // 退化重试记为属性，同一 turn 不另开 root span
         if ta.meditationMgr != nil && batchCarriesMeditation(events) {
-            ta.meditationMgr.NoteMeditationBatchOutcome(true) // 冥想批结果通知：纯冥想批被消费才推进执行水位（混合批让位在批次选取处另报 deferred）
+            ta.meditationMgr.NoteMeditationBatchOutcome(true) // 冥想批结果通知：纯冥想批被消费才推进执行水位（两个让位时刻同报 deferred：混合批在选取处丢弃、纯冥想批在消费前复查处让位）
         }
     }
 }
@@ -276,9 +276,10 @@ ContextManager 的 runner 是**可换代缝**，换代由「构造 → 纳管 �
 - **门控判定（五不变量，唯一形态定义）**：触发 = novelty ∧ 节奏 ∧ pending 防重入三门齐，水位与让位走执行语义——
   1. **有新话才说**：novelty 门——观察面内存在 `Timestamp > 水位` 且**非自管谱系**的事件（经 `NoveltyReader` 读事实链入库时盖章的持久归因 `Metadata[trigger_source]`）。判据原样不动；
   2. **执行了才算说过**：fire 只注入；冥想 turn 被**消费**时水位才推进到**注入时刻**，由此覆盖让位窗口的整段事实面；
-  3. **忙时让路、闲时补位**：让路由注入时刻的批次合并规则回答（混合批丢弃冥想事件），让位=推迟——水位不动、pending 清零、下个 tick 对同一事实面重评（事件对象级的空试成本）；MUST NOT 以任意回合的时间门槛预猜忙闲；
+  3. **忙时让路、闲时补位**：让位发生在**两个时刻**，判据同为**结构性事件在场、零时间参数**——**注入时刻**由批次合并规则回答（混合批丢弃冥想事件）；**消费时刻**在纯冥想批启动回合前复查总线在场（`PendingCount` 非破坏窥视：不认领、不排空、不重排），有未拉取的真实事件在场即整批让位——真实事件留队与下批合并，让位本身不注入任何东西。让位=推迟——水位不动、pending 清零、下个 tick 对同一事实面重评（事件对象级的空试成本）；MUST NOT 以任意回合的时间门槛预猜忙闲；
   4. **节奏有下限**：节奏门 `now - lastMeditation >= min_gap`，锚=上一次**冥想执行**的执行水位（不是任意回合结束）；首次（零水位/锚缺失）直通——没有“上一次执行”就无间隔可言，外部策展线那唯一取自冥想自身的回合来源也不再死锁（宿主侧 18h 零触发案已翻转，冷启动用例钉死）；
   5. **冷启动直通**：曾用的构造时刻空闲下界（`startedAt` 过渡补丁）随新语义退役，不再有独立冷启动规则。
+- **让位的形态边界**：消费时刻的复查发生在**回合启动前**——turn 开始后的用户到达不受覆盖，这是回合原子性的设计文档化残余而非缺陷；此处所见在场必然非冥想（管理器持有唯一 pending 槽直到结果回报，窗口内排不进第二个冥想事件）。外部策展线总线与业务线隔离，在场复查**恒无在场**——业务密度不让位，该形态照常执行、行为零变化（远端部署据此确认策展线不被业务高频挤停）；自察线极端高频下持续让位恰是期望取向（用户在场优先），min_gap 节奏与欠账计数使其可见，事件流终有间隙，无饥饿死锁。
 - **pending 状态机（防重入）**：同一时刻至多一个在途冥想批，pending 期间不再注入第二个；长期未决（超 `3×interval`）**只出 WARN 观察线，不自动复位**——真实模型回合时长无上界，按时间阈值的复位会把长回合误判为注入丢失酿成重投踩踏（F3 真实模型复跑实测：40s 回合被复位机制放大成 71 卡一批），兜底取向 fail-safe：停摆可诊断、风暴不可挽回。全机三态：
 
 ```mermaid
@@ -291,16 +292,17 @@ stateDiagram-v2
     tick --> fired: novelty 开 且 节奏开 且 无 pending
     fired --> consumed: 纯冥想批被消费
     fired --> deferred: 混合批让位丢弃
+    fired --> deferred: 消费前在场复查让位
     fired --> fired: 超 3×interval 未决(仅 WARN 单例保持)
     consumed --> tick: 等水位后的新事实
     deferred --> tick: 下 tick 重试同一事实面
 ```
 
 - **单锚（锚收敛）**：管理器只剩一枚锚——`lastMeditation` 执行水位（节奏门量它、novelty 判据窗口以它为头）。曾有的第二枚空闲锚 `lastTurnEnd`（任意谱系回合结束都算忙）已退役：回合结束不再更新任何锚，家务/回执等自管谱系因此不进任何锚、也不点亮 novelty——忙/新判定谱系对称，无需白名单过滤。锚持久化只写这一枚（pending 有意不持久化：fire 而未执行时重启，代价是同窗事实多被反思一次——水位在消费时才推进，未执行则未烧，重投属正常节律而非风暴）；历史两锚/三锚格式文件的多余键由 Load 的未知键忽略机制消化（自然兼容，无迁移）。两形态统一验收矩阵——外部策展冷启动／自察+用户高频／家务流常驻／pending 防重入／连续让位窗口无损／重启锚恢复与缺失／长期未决单例，七场景——由 naturalize-meditation-gating 设计 D4 及其钉住的门控用例表承载。
-- **观测（三态 INFO + 防御 WARN，运维检索关键字）**：`[Meditation] fired (pending)`（注入时刻/min_gap/距上次执行）；`[Meditation] executed — watermark advanced to`（消费推进水位）；`[Meditation] deferred (batch yield) — retry next tick`（混合批让位）；`[Meditation] pending stale`（3×interval 防御复位）。让位期每 tick 的节律由这四行串成完整可观测的自然节奏链。
+- **观测（三态 INFO + 防御 WARN，运维检索关键字）**：`[Meditation] fired (pending)`（注入时刻/min_gap/距上次执行）；`[Meditation] executed — watermark advanced to`（消费推进水位）；`[Meditation] deferred (batch yield) — retry next tick`（两个让位时刻同汇此计数）；`[Meditation] pending stale`（3×interval 防御复位）；消费时刻让位另有循环侧 INFO `[runEventLoop:*] consumption re-check: … pending event(s) behind a pure meditation batch — yielding`（带在场数）。让位期每 tick 的节律由这几行串成完整可观测的自然节奏链。
 - **判据唯一，且结构上无法自持**：自管与否一律经 `event.SelfManagedLineage` 单源派生（判据处零清单副本，冥想产出与巩固建议天然不计入新鲜度）；未盖章 `trigger_source` 的事件按未知谱系处理、不计入（宁可少反思，不可误判新鲜，判定过程落 debug 日志）；查询失败或没接上读缝时**门保持关闭**（fail-closed：读不通的事实链既不是"没新东西"也不是"有新东西"，也没有任何备用判据可回落）。`task`/`system_alert` 等非自管输入计入新鲜度是**有意为之**：观察他人时那是被观察 agent 的真实后台活动，正是跨域理解的素材；观察自己时它就是"自己的新输入"。反思主体自己的产出只落自身分区，喂不到自己。
 - **早停水合**：`EventReference` 不带 Metadata，所以判据先把降序引用页（上界 `noveltyScanPageLimit`）按分区计数，再逐条 `GetEvent` 水合读谱系，**命中即停**；一次判据只扫一遍，digest 复用同一份证据。
-- **digest 单一覆盖面**：以**观察面概况**为主——各观察分区自水位以来的分谱系计数（非自管／自管与未知）、引用页数与水合样本数、最近一条非自管活动（带可解析事件键 `[hex]` 与 `trigger_source`）；观察面只有自身时，这份概况就是"自体近况"。**自身任务层降为可选段**（挂有任务层才渲染，没有则省略、不产空壳），距上次执行时长恒含（判据窗口以执行水位为头）。
+- **digest 单一覆盖面**：以**观察面概况**为主——各观察分区自水位以来的分谱系计数（非自管／自管与未知）、引用页数与水合样本数、最近一条非自管活动（带可解析事件键 `[hex]` 与 `trigger_source`）；观察面只有自身时，这份概况就是"自体近况"。**自身任务层降为可选段**（挂有任务层才渲染，没有则省略、不产空壳），距上次执行时长恒含（判据窗口以执行水位为头）。让位欠账独立成行——`- 自上次执行以来让位 N 次（最近 <时刻>）`：两个让位时刻同记此账，冥想执行（consumed）即清零，N=0 不渲染（无欠账时卡片零扰动）；进程内会话语义、重启归零，不引入新持久化——模型据此在卡片中交代未兑现的反思及其成因。
 - **session 安排**：注入目标恒为本 agent `StartLoop` 起的那条循环 session——所以"反思落在哪"完全由"冥想配在哪个 agent"决定。业务线沿用宿主路由（wechat-bot：`TAGENT_SESSION_ID`，缺省 `wechat-session`）；反思线的默认形态是独立冥想 agent + **保留名**（推荐 `meditation`）、固定单 session，与业务线物理同 store、逻辑隔线——每次换新 session 等于冷启动重建投影并丢掉反思连续性，而它的增长由该 agent 自己的 `compress_threshold` 在同一 session 内折叠（单压缩权自管），永不与用户路由撞名。
 - **产出落反思主体自己的分区**：经验卡片/综述是写进**自己**分区事实链的普通事件，不写 compaction 事件、不改任何被观察分区的状态；冥想卡片要回到业务线只经 `deliver_to` 白名单回流，目标侧的上下文瘦身仍由它自己的阈值折叠承担——压缩权不可转移。三类产物（脚本/skill/prompt）与 `refine register` 登记义务对任何反思主体同样适用，不论它在观察谁。
 - **投递缝与热更归属**：产出回流别起第二通道，裁决表见 [持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility) 内的投递缝一节；`observed_namespaces`/`deliver_to` 在构造期读取，随 meditation 块整体参与组织指纹，改即**换代**，见 [组织热更](../platform/org-hot-reload.md#fingerprint)。
