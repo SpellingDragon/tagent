@@ -72,7 +72,7 @@
 | 迟到即丢 | 超时后晚到的模型文本**丢弃**，绝不回写投影——晚到的综述会让"已折叠"这件事在事后被改写 | 摘要结果只在 `summaryCtx` 有效时被采纳 |
 | 不重试、不异步 | 摘要失败就是降级，不是重试的理由，也不是交给后台补写的理由 | `buildRetainedRefs` |
 
-配置面 `summary_timeout_seconds`（`config.AgentConfig`）的三条边界与包内语义同源：`0` 表示"用包默认"而不是"关掉"，负值是具名校验错误（`ErrSummaryTimeoutNegative`），超过上限 `MaxSummaryTimeoutSeconds`（120）**拒绝而非夹紧**。
+配置面 `summary_timeout_seconds`（`config.AgentConfig`）的边界与包内语义同源：`0` 表示"用包默认"而不是"关掉"，负值是具名校验错误（`ErrSummaryTimeoutNegative`）。正值**不设配置上限**（曾有 120s 上限，2026-10-10 部署侧大输入综述三连超时实证后移除：小窗口对 40 万 token 级输入根本不可完成，时限沦为永久降级开关；上限拦住的不是风险而是合法显式选择）——真实兜底双重存在：时限一到即走机械折叠兜底、回合照常推进，provider 的 `request_timeout_seconds` 才是硬终态。
 
 它与本页第六节的五个热参**不是一组**：这项时限进的是 per-agent **结构指纹**里的压缩族（`org.agentSubset.Compress`），属于"重建才生效"的构造期数值，不是第四条热通道。把它塞进热组会让一次不重建执行面的数值轮转悄悄改掉一个构造期就装死的 deadline——那正是第六节要防的跨代撕裂的反面：**同一族数值必须走同一条生效路径**。
 

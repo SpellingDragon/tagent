@@ -913,10 +913,13 @@ func (b CaptureBlock) validate(trajectoryDump bool) error {
 	return nil
 }
 
-// validate bounds the synchronous summary deadline: negative fails startup (it is
-// not "no deadline"); values above 120s are rejected outright rather than clamped —
-// the ceiling exists to bound a worst-case wait inside the model path, and a silent
-// validate enforces the negative-value rejection; positive values are free -
+// validate bounds the synchronous summary deadline: negative fails startup (it
+// is not "no deadline"); positive values carry no configured ceiling. A small
+// window cannot complete a large-context fold, so a ceiling would reject
+// legitimate explicit choices rather than risk — the bound that matters exists
+// twice over already: the deadline itself falls back to the mechanical fold
+// (the round advances regardless), and the provider's request_timeout_seconds
+// is the real hard terminal. A typo stays a named refusal: never clamped.
 func (c CompressConfig) validate(agentName string) error {
 	if c.SummaryTimeoutSeconds < 0 {
 		return fmt.Errorf("tagent config: agent %q: %w: summary_timeout_seconds = %d",

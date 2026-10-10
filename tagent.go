@@ -781,7 +781,14 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				gen.seq, short(oldFP), short(fp), len(rc.resident.Names()))
 			entryAgent.EmitSystemAlert(fmt.Sprintf("org-hotreload: 热更新已生效（generation %d，fp %s.. → %s..，下回合起用新配置）", gen.seq, short(oldFP), short(fp)))
 		}
+		// requestCheck coalesces wakes: a poke arriving while a pass is in
+		// flight sets wakePending instead of being dropped — recheck only
+		// answers the state sampled at its instant, and a holder exiting
+		// between that sample and the building release would otherwise find
+		// its wake lost until unrelated traffic. Single-flight with event
+		// carry-over: never a lost wake, never a per-event goroutine.
 		var requestCheck func()
+		var wakePending atomic.Bool
 		requestCheck = func() {
 			if stopped.Load() {
 				return
@@ -795,11 +802,17 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 				return
 			}
 			if !building.CompareAndSwap(false, true) {
+				wakePending.Store(true)
 				return
 			}
 			go func() {
 				if changed {
-					defer building.Store(false)
+					defer func() {
+						building.Store(false)
+						if wakePending.Swap(false) {
+							requestCheck()
+						}
+					}()
 					reload()
 					return
 				}
@@ -814,7 +827,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					sweepRetirements()
 					recheck = retiring.RetireablePending(publishedReach)
 				}()
-				if recheck {
+				if recheck || wakePending.Swap(false) {
 					requestCheck()
 				}
 			}()

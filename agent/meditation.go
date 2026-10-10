@@ -152,8 +152,16 @@ type MeditationManager struct {
 
 	// lastTurnEnd is the idle-gate anchor (Unix ms): when the most recent turn
 	// ended — any trigger source, including failed turns. Updated
-	// unconditionally by runEventLoop after each RunFlow.
+	// unconditionally by runEventLoop after each RunFlow. Zero means no turn has
+	// EVER run; the gate then measures idle from startedAt instead of closing
+	// forever — an external curator's only turn source is its own fire, so a
+	// zero-value reading would demand a first turn before the first step.
 	lastTurnEnd atomic.Int64
+
+	// startedAt is the busy-bound fallback for a manager that has never run a
+	// turn (Unix ms, set at construction): cold start counts as just-active, so
+	// the first fire still waits out min_gap instead of storming on backlog.
+	startedAt int64
 
 	// lastMeditation tracks the most recent valid meditation timestamp and
 	// doubles as the novelty watermark: the gate asks the fact chain for events
@@ -178,9 +186,10 @@ type MeditationManager struct {
 // The injector is typically the *TagentAgent that owns this manager.
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager {
 	return &MeditationManager{
-		cfg:      cfg,
-		injector: injector,
-		observed: resolveObserved(cfg.ObservedNamespaces),
+		cfg:       cfg,
+		injector:  injector,
+		observed:  resolveObserved(cfg.ObservedNamespaces),
+		startedAt: time.Now().UnixMilli(),
 	}
 }
 
@@ -453,7 +462,7 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 // checkAndMeditate evaluates whether a meditation should fire: both gates must pass.
 //
 // - Novelty gate (the single criterion): an event in an observed partition, strictly newer than the lastMeditation watermark, whose lineage is not self-managed — the fact chain is the gate's only data face, for every observation surface including the default self-observation one.
-// - Idle gate (lineage-agnostic): gap since the last turn end >= MinGap. Any turn counts as busy, so meditation-derived turns merely delay, which is harmless and desirable while background work is churning.
+// - Idle gate (lineage-agnostic): gap since the last turn end >= MinGap. Any turn counts as busy, so meditation-derived turns merely delay, which is harmless and desirable while background work is churning. With no turn ever recorded, idle measures from the manager's construction — the cold-start bound keeps the first fire waiting out min_gap (no backlog storm) while staying reachable for a curator whose only turns are its own fires.
 // - No fire-time anchor reset is needed: storing lastMeditation advances the watermark and locks the novelty gate until the observed surface moves again.
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
@@ -463,13 +472,14 @@ func (m *MeditationManager) checkAndMeditate() {
 		return
 	}
 
-	lastTurnMs := m.lastTurnEnd.Load()
-	if lastTurnMs == 0 {
-		return
+	anchorMs := m.lastTurnEnd.Load()
+	anchorSince := "last turn end"
+	if anchorMs == 0 {
+		anchorMs, anchorSince = m.startedAt, "manager start (no turn yet)"
 	}
-	idle := now.Sub(time.UnixMilli(lastTurnMs))
+	idle := now.Sub(time.UnixMilli(anchorMs))
 	if idle < m.cfg.MinGap {
-		log.Debugf("[Meditation] skipping: idle=%s < min_gap=%s", idle, m.cfg.MinGap)
+		log.Infof("[Meditation] idle gate: idle=%s since %s < min_gap=%s", idle, anchorSince, m.cfg.MinGap)
 		return
 	}
 

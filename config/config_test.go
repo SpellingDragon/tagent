@@ -371,8 +371,8 @@ func TestValidate_CompressSummaryTimeout(t *testing.T) {
 	require.NoError(t, compressTestConfig(0).Validate(), "0 must keep the compress default rather than declare a limit")
 	require.NoError(t, compressTestConfig(1).Validate())
 	require.NoError(t, compressTestConfig(120).Validate())
-	require.NoError(t, compressTestConfig(121).Validate())
-	require.NoError(t, compressTestConfig(600).Validate())
+	require.NoError(t, compressTestConfig(121).Validate(), "no positive ceiling: a large-context fold may legitimately bound at minutes")
+	require.NoError(t, compressTestConfig(600).Validate(), "deployment-scale deadlines are explicit choices, not refusals")
 
 	err := compressTestConfig(-1).Validate()
 	require.Error(t, err, "a negative summary timeout must be rejected, not silently accepted")

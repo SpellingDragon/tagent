@@ -31,11 +31,6 @@ var (
 	ErrCaptureOpenFilesExceeded = errors.New("trajectory_capture.max_open_files exceeds the supported ceiling; rejected, not clamped")
 	// ErrSummaryTimeoutNegative: compress.summary_timeout_seconds 为负——它不等于「无时限」。
 	ErrSummaryTimeoutNegative = errors.New("compress.summary_timeout_seconds must not be negative")
-	// ErrSummaryTimeoutTooLarge: 超上限（含 0 以外的正值域）显式拒绝不夹紧——上限存在的
-	// 理由是约束模型路径内最坏等待，静默夹紧会让越界拼写看起来像生效配置。
-	ErrSummaryTimeoutTooLarge = errors.New("compress.summary_timeout_seconds exceeds the supported ceiling")
-	// MaxSummaryTimeoutSeconds 是同步摘要时限的配置上限（D14：正值 ≤120）。
-	MaxSummaryTimeoutSeconds = 120
 )
     ErrCaptureRequiresDump and its siblings are the config surface's named
     refusal sentinels: an illegal value under a new key fails startup outright,
