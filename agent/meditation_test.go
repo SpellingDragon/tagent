@@ -1656,3 +1656,179 @@ func TestMeditationDefault_ObservesOwnPartition(t *testing.T) {
 	ta.StopLoop()
 	<-drained
 }
+
+// TestOnEventLoop_ConsumptionTimeRecheckYieldsToArrivals 钉住 消费时刻在场复查：纯冥想批在 RunFlow 启动前遇总线有待拉在场即让位。
+// - 在场让位与注入时刻让位同构：不 RunFlow、不消费、水位不动、pending 清零、deferred 计数进同一汇点；真实事件留在队里待下一批自然合并。
+// - 无在场时纯冥想批照常执行并报 consumed，复查对其只是恒 false 的读。
+// - 判据结构性、零时间参数；外部策展形态的总线与业务线隔离，业务积压再厚也进不了策展总线的眼，执行不受扰动。
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func TestOnEventLoop_ConsumptionTimeRecheckYieldsToArrivals(t *testing.T) {
+	okResp := &model.Response{ID: "ok", Done: true,
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "reply"}}}}
+
+	t.Run("presence at consumption yields the pure meditation batch", func(t *testing.T) {
+		capture := &requestCapturingModel{resp: okResp}
+		bus, err := NewReliableEventBus(t.TempDir())
+		require.NoError(t, err)
+		ta := newTestTagentAgent("med-recheck", capture, nil, make(chan *trpcEvent.Event, 10), bus)
+
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "消费时刻在场复查要护住的事实")
+		mgr, inj := newNoveltyManager(reader, "recall")
+		ta.meditationMgr = mgr
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 1, "precondition: the manager holds one pending injection")
+		require.True(t, mgr.pending)
+
+		bus.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"}))
+		received, err := bus.Pull(context.Background())
+		require.NoError(t, err)
+		require.Len(t, received, 1, "precondition: a pure meditation batch")
+		require.True(t, batchCarriesMeditation(received))
+
+		bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "gap arrival"}))
+		ta.processTurn(context.Background(), ta.contextManager, received)
+
+		assert.Zero(t, capture.requestCount(), "a yielded batch NEVER reaches RunFlow")
+		assert.Zero(t, mgr.lastMeditation.Load(), "consumption-time yield keeps the watermark where it is")
+		assert.False(t, mgr.pending, "deferred clears the re-entry guard for the next tick")
+		assert.EqualValues(t, 1, mgr.deferredCount.Load(), "the second yield point feeds the same deferral tally")
+		assert.Eventually(t, func() bool { return bus.DurablePending() == 1 }, 3*time.Second, 10*time.Millisecond,
+			"the yielded meditation envelope is receipted, only the real event's envelope stays unconfirmed — no zombie")
+
+		rest := bus.TryPull()
+		require.Len(t, rest, 1, "the real event stayed queued, untouched by the peek")
+		assert.Equal(t, "user", rest[0].Source)
+	})
+
+	t.Run("no presence consumes the batch as usual", func(t *testing.T) {
+		capture := &requestCapturingModel{resp: okResp}
+		bus := NewEventBus()
+		ta := newTestTagentAgent("med-normal", capture, nil, make(chan *trpcEvent.Event, 10), bus)
+
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "无人打扰的事实")
+		mgr, inj := newNoveltyManager(reader, "recall")
+		ta.meditationMgr = mgr
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 1)
+		injectAt := mgr.pendingSince
+
+		bus.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"}))
+		received, err := bus.Pull(context.Background())
+		require.NoError(t, err)
+		ta.processTurn(context.Background(), ta.contextManager, received)
+
+		assert.Equal(t, 1, capture.requestCount(), "empty presence check passes the batch straight to RunFlow")
+		assert.Equal(t, injectAt, mgr.lastMeditation.Load(), "consumed advances the watermark to the injection moment")
+		assert.Zero(t, mgr.deferredCount.Load(), "a clean execution leaves no deferral tally")
+	})
+
+	t.Run("isolated curator bus never sees the business backlog", func(t *testing.T) {
+		bizModel := &requestCapturingModel{resp: okResp}
+		curModel := &requestCapturingModel{resp: okResp}
+		busBiz := NewEventBus()
+		busCur := NewEventBus()
+		newTestTagentAgent("biz", bizModel, nil, make(chan *trpcEvent.Event, 10), busBiz)
+		taCur := newTestTagentAgent("curator", curModel, nil, make(chan *trpcEvent.Event, 10), busCur)
+
+		for i := 0; i < 8; i++ {
+			busBiz.Publish(NewExternalInputEvent("user",
+				model.Message{Role: model.RoleUser, Content: "业务密集事件，全部留在业务线"}))
+		}
+		require.Equal(t, 8, busBiz.PendingCount(), "precondition: the business bus is heaped — on its own bus")
+
+		reader := &fakeNoveltyReader{}
+		reader.add("target", time.Now().Add(-time.Minute), "user", "策展者观察到的用户事实")
+		mgr, inj := newNoveltyManager(reader, "target")
+		taCur.meditationMgr = mgr
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 1)
+		injectAt := mgr.pendingSince
+
+		busCur.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] curate"}))
+		received, err := busCur.Pull(context.Background())
+		require.NoError(t, err)
+		taCur.processTurn(context.Background(), taCur.contextManager, received)
+
+		assert.Zero(t, busCur.PendingCount(), "the curator's own bus answers presence for its own arrivals only")
+		assert.Equal(t, 1, curModel.requestCount(), "the external form executes while the business line is dense")
+		assert.Equal(t, injectAt, mgr.lastMeditation.Load(), "the curator's execution is consumed, not yielded")
+		assert.Zero(t, bizModel.requestCount(), "the business backlog is not this loop's to touch")
+	})
+}
+
+// TestMeditationDigest_DeferredDebtLine 钉住 digest 让位欠账行：deferred 计数渲染、consumed 清零、两让位时刻同汇点计数。
+// - 欠账非零时卡片带一行「自上次执行以来让位 N 次（最近 …）」，样式随现有冒号句；执行结清后该行消失。
+// - 注入时刻的混合批让位与消费时刻的在场复查让位都经 NoteMeditationBatchOutcome(false) 进同一计数，不各记各的账。
+// - 计数为进程内会话语义：不落 anchorStore，重启归零。
+// 契约: docs/wiki/agent/compression-and-telemetry.md#self-state-digest
+func TestMeditationDigest_DeferredDebtLine(t *testing.T) {
+	okResp := &model.Response{ID: "ok", Done: true,
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: "reply"}}}}
+
+	t.Run("the tally renders while owed and vanishes once paid", func(t *testing.T) {
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "等着被反思的事实")
+		mgr, _ := newNoveltyManager(reader, "recall")
+
+		mgr.NoteMeditationBatchOutcome(false)
+		mgr.NoteMeditationBatchOutcome(false)
+		msg := mgr.buildMeditationMessage(time.Now(), 0, nil)
+		assert.Contains(t, msg.Content, "- 自上次执行以来让位 2 次（最近 ",
+			"two deferrals since the last execution must be visible to the model")
+		assert.Positive(t, mgr.lastDeferredAt.Load(), "the most recent yield moment is remembered")
+
+		mgr.NoteMeditationBatchOutcome(true)
+		msg = mgr.buildMeditationMessage(time.Now(), 0, nil)
+		assert.NotContains(t, msg.Content, "自上次执行以来让位", "a consumed batch pays the debt off")
+		assert.Zero(t, mgr.deferredCount.Load())
+	})
+
+	t.Run("both yield points feed one tally and one run clears it", func(t *testing.T) {
+		capture := &requestCapturingModel{resp: okResp}
+		bus := NewEventBus()
+		ta := newTestTagentAgent("med-both", capture, nil, make(chan *trpcEvent.Event, 10), bus)
+
+		reader := &fakeNoveltyReader{}
+		reader.add("recall", time.Now().Add(-time.Minute), "user", "两个时刻都让过位的窗口事实")
+		mgr, inj := newNoveltyManager(reader, "recall")
+		ta.meditationMgr = mgr
+
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 1)
+		bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "同批的真实输入"}))
+		bus.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"}))
+		received, err := bus.Pull(context.Background())
+		require.NoError(t, err)
+		require.Len(t, received, 2)
+		ta.processTurn(context.Background(), ta.contextManager, received)
+		require.EqualValues(t, 1, mgr.deferredCount.Load(), "the injection-time drop counts once")
+
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 2)
+		bus.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"}))
+		received, err = bus.Pull(context.Background())
+		require.NoError(t, err)
+		require.Len(t, received, 1, "precondition: a pure meditation batch")
+		bus.Publish(NewExternalInputEvent("user", model.Message{Role: model.RoleUser, Content: "消费时刻的在场者"}))
+		ta.processTurn(context.Background(), ta.contextManager, received)
+		require.EqualValues(t, 2, mgr.deferredCount.Load(), "the consumption-time yield feeds the SAME tally")
+
+		msg := mgr.buildMeditationMessage(time.Now(), 0, nil)
+		assert.Contains(t, msg.Content, "- 自上次执行以来让位 2 次（最近 ",
+			"the next card owes the model both yields")
+
+		drained := bus.TryPull()
+		require.Len(t, drained, 1, "precondition: the yield left exactly the real event queued")
+		mgr.checkAndMeditate()
+		require.Len(t, inj.messages, 3)
+		bus.Publish(NewExternalInputEvent("meditation", model.Message{Role: model.RoleUser, Content: "[meditation] reflect"}))
+		received, err = bus.Pull(context.Background())
+		require.NoError(t, err)
+		require.Len(t, received, 1, "precondition: a pure batch with nothing behind it")
+		ta.processTurn(context.Background(), ta.contextManager, received)
+		assert.Zero(t, mgr.deferredCount.Load(), "consumed resets the tally to zero")
+		assert.Positive(t, mgr.lastMeditation.Load(), "and the run itself is on record")
+	})
+}

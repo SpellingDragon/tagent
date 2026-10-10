@@ -826,13 +826,6 @@ func stageGenerationPinned(tb testing.TB, blank *TagentAgent, label, promptText 
 	return w, refs
 }
 
-// TestModelOverride_ReentryIsolation 钉住默认/覆盖/重入矩阵：覆盖层不得改变任何既有上界，也不得跨调用存活。
-//   - 无覆盖：调用落在本代视图上，常驻定义逐字不变（模型、提示词、工具面都是本代自己的）；
-//   - 引用只给模型选择、不给调用路由：换掉模型的调用，工具面仍是属主声明的那份上界，越域条目在参数校验点具名拒绝，两台实例一次都不出场；
-//   - 覆盖随调用消亡：下一次无覆盖调用回到本代自有实例与本代视图，且解析结果从不写回进程全局注册表；
-//   - 重入读自己那代的冻结快照：本代快照不含的引用被具名拒绝，既不回落本代模型也不借新代放行，新独立代才看得见新注册的名字；两次调用之后执行引用归零，没有悬挂。
-//
-// 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
 // percallRefSeq makes model-reference names unique across -count reruns: the
 // registry is package-global and outlives one round, so a fixed name would
 // leak the previous round's registration into this round's frozen-snapshot
@@ -843,6 +836,13 @@ func percallRefName(base string) string {
 	return fmt.Sprintf("%s-%d", base, percallRefSeq.Add(1))
 }
 
+// TestModelOverride_ReentryIsolation 钉住默认/覆盖/重入矩阵：覆盖层不得改变任何既有上界，也不得跨调用存活。
+//   - 无覆盖：调用落在本代视图上，常驻定义逐字不变（模型、提示词、工具面都是本代自己的）；
+//   - 引用只给模型选择、不给调用路由：换掉模型的调用，工具面仍是属主声明的那份上界，越域条目在参数校验点具名拒绝，两台实例一次都不出场；
+//   - 覆盖随调用消亡：下一次无覆盖调用回到本代自有实例与本代视图，且解析结果从不写回进程全局注册表；
+//   - 重入读自己那代的冻结快照：本代快照不含的引用被具名拒绝，既不回落本代模型也不借新代放行，新独立代才看得见新注册的名字；两次调用之后执行引用归零，没有悬挂。
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
 func TestModelOverride_ReentryIsolation(t *testing.T) {
 	read := percallLeafTool{"read_file"}
 	save := percallLeafTool{"save_file"}

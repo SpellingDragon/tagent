@@ -171,6 +171,13 @@ type MeditationManager struct {
 	pending      bool
 	pendingSince int64
 
+	// deferredCount 与 lastDeferredAt（Unix ms）承载让位欠账：进程内会话语义——两个让位
+	// 时刻（注入时刻混合批让位、消费时刻在场复查让位）都经 NoteMeditationBatchOutcome(false)
+	// 同一汇点计数，consumed 清零，重启归零，不做持久化：欠账是卡片要向他者交代的事，
+	// 不是账本。
+	deferredCount  atomic.Int64
+	lastDeferredAt atomic.Int64
+
 	// anchorStore 可选：持久化执行水位（T-G AnchorStore），跨重启保留冥想节奏门连续性。
 	// nil = 纯内存（现状，重启失忆）。经 SetAnchorStore 注入。
 	anchorStore *reliability.AnchorStore
@@ -284,17 +291,20 @@ func (m *MeditationManager) Stop() {
 // NoteMeditationBatchOutcome is the meditation batch's outcome report from the event
 // loop — the single cross-module callback saying what became of the injected batch.
 //
-//   - consumed=true: the batch came back as a turn, and a failed turn counts too, since a broken model must not storm re-injections. The watermark advances to the injection moment (pendingSince), so every fact inside any yield window is covered and the novelty gate self-locks until the observed surface moves again.
-//   - consumed=false: the batch yielded to real input at the mixed-batch drop. Yielding is postponing: the watermark stays put, pending clears, and the next interval tick re-evaluates the very same facts at event-object cost.
+//   - consumed=true: the batch came back as a turn, and a failed turn counts too, since a broken model must not storm re-injections. The watermark advances to the injection moment (pendingSince), so every fact inside any yield window is covered and the novelty gate self-locks until the observed surface moves again. The deferral tally resets with it — the debt the cards have been carrying is paid.
+//   - consumed=false: the batch yielded to real input, at either yield point (the injection-time mixed-batch drop or the consumption-time presence re-check). Yielding is postponing: the watermark stays put, pending clears, the deferral tally grows, and the next interval tick re-evaluates the very same facts at event-object cost.
 func (m *MeditationManager) NoteMeditationBatchOutcome(consumed bool) {
 	m.anchorMu.Lock()
 	defer m.anchorMu.Unlock()
 	if !consumed {
 		m.pending = false
+		m.deferredCount.Add(1)
+		m.lastDeferredAt.Store(time.Now().UnixMilli())
 		log.Infof("[Meditation] deferred (batch yield) — retry next tick")
 		return
 	}
 	m.pending = false
+	m.deferredCount.Store(0)
 	injectAt := m.pendingSince
 	if injectAt == 0 || injectAt <= m.lastMeditation.Load() {
 		log.Debugf("[Meditation] executed — no fresher injection on record, watermark unchanged")
@@ -551,6 +561,14 @@ func (m *MeditationManager) buildMeditationMessage(now time.Time, idle time.Dura
 	var digest string
 	if scan != nil {
 		digest = renderObservedScanDigest(scan, idle)
+	}
+	if n := m.deferredCount.Load(); n > 0 {
+		line := fmt.Sprintf("- 自上次执行以来让位 %d 次（最近 %s）\n",
+			n, time.UnixMilli(m.lastDeferredAt.Load()).UTC().Format("2006-01-02 15:04:05"))
+		if digest != "" {
+			digest += "\n"
+		}
+		digest += line
 	}
 	if m.taskController != nil {
 		self := renderSelfStateDigest(m.taskController.List(), idle)

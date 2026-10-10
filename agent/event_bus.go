@@ -348,6 +348,23 @@ func (b *EventBus) DurablePending() int64 {
 	return b.inbox.Pending()
 }
 
+// PendingCount is the non-destructive presence peek: how many inbound items sit
+// in front of Pull right now, without claiming, draining or reordering
+// anything.
+//
+//   - Volatile mode counts the queued events; durable mode counts wake sentinels, paired with every accepted envelope at acceptance.
+//   - The answer is presence, not identity: source attribution would require consumption, so callers pair this peek with their own structural invariants.
+//   - The inbox backlog counter stays out of this peek: unconfirmed also holds the claim the calling consumer itself carries, which would make a batch count its own arrival as someone else waiting.
+//   - The sole-consumer mailbox design (see type EventBus) keeps the peek order-neutral; this method adds no new exposure.
+//
+// 契约: docs/wiki/agent/event-flow.md#event-stream-overview
+func (b *EventBus) PendingCount() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.ch)
+}
+
 // Durable reports whether the bus was configured with a durable inbox. The
 // agent constructor uses this to enforce that reliable mode never runs against
 // a store lacking explicit replay capability (task 3.5): a durable inbox whose
