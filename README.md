@@ -34,7 +34,7 @@
 入口和被它委派出去的 agent 是同一种东西：各自有事件总线、自己的任务域、自己的记忆分区，可以递归再委派。一次委派绑定输出目的地，晚到的结算接回发起方续写同一轮；单次调用还可临时换提示词/模型/工具面（用完即弃，不跨调用泄漏）。
 
 ### 自我复盘与旁路冥想（一个机制，反思默认在独立 session）
-空闲期自动"复盘"：整理上下文、沉淀经验卡片、给反复失败的策略记负反馈。机制只有一个：门控到点后，向某条循环 session 注入一个冥想输入事件，由该 agent 的一个正常回合完成反思。**默认推荐形态是把反思放在独立的旁路冥想线上**——声明一个冥想 agent，固定跑在保留 session（wechat-bot 示例即 `meditation`）上：它不占业务 session 的上下文预算，反思的内部叙述也不混进与用户的对话历史；观察面配置决定它看谁的分区——`observed_namespaces`（须在 `memory.read_namespaces` 授权内）列他人即旁路冥想（"这三个会话都在等同一个审批"这类模式），列自身或不列即回看自己，混着列一趟扫描同一条判据；经验卡片经 `deliver_to` 白名单回流业务对话。把 `meditation.enabled` 直接配在业务 agent 上也合法（缺省观察面=[自身分区]，反思与业务回合共享上下文）——那是"复盘方需要当面看到当前业务"的进阶形态，代价是反思输入输出占用业务线预算、内部叙述留痕在业务线。写得很克制：反思只写自己分区的普通记忆，绝不改动别人的上下文；看谁的记忆、投给谁都要显式授权。
+空闲期自动"复盘"：整理上下文、沉淀经验卡片、给反复失败的策略记负反馈。机制只有一个：三道门齐——观察面水位之上有非自管新事实可反思（novelty）、距上次冥想**执行**到下限（节奏门：min_gap 是两次执行之间的下限，不再被日常回合拉长；首次无上次执行直通）、没有在途冥想批（防重入）——后，向某条循环 session 注入一个冥想输入事件，由该 agent 的一个正常回合完成反思；反思水位只在这一回合真被执行时推进，与用户输入同批则让位——让位是推迟不是放弃（下个检查周期对同一事实面重试，反思窗口不烧）。**默认推荐形态是把反思放在独立的旁路冥想线上**——声明一个冥想 agent，固定跑在保留 session（wechat-bot 示例即 `meditation`）上：它不占业务 session 的上下文预算，反思的内部叙述也不混进与用户的对话历史；观察面配置决定它看谁的分区——`observed_namespaces`（须在 `memory.read_namespaces` 授权内）列他人即旁路冥想（"这三个会话都在等同一个审批"这类模式），列自身或不列即回看自己，混着列一趟扫描同一条判据；经验卡片经 `deliver_to` 白名单回流业务对话。把 `meditation.enabled` 直接配在业务 agent 上也合法（缺省观察面=[自身分区]，反思与业务回合共享上下文）——那是"复盘方需要当面看到当前业务"的进阶形态，代价是反思输入输出占用业务线预算、内部叙述留痕在业务线。写得很克制：反思只写自己分区的普通记忆，绝不改动别人的上下文；看谁的记忆、投给谁都要显式授权。
 
 ### 运行数据 → 训练数据
 可选的决策采集把每次模型调用完整记录（输入快照、响应分片、终态、丢失统计），事后把"当时看到什么→做了什么→结果如何→人怎么评价"关联成一条条样本，按会话分组切分 train/test，导出为 SFT 数据集——每一步有清单可对账，缺什么明说，不静默拼凑。
@@ -171,7 +171,7 @@ graph TB
 | `memory.type` / `path` / `read_namespaces` | `memory`/`""`/`[]` | 进程内/文件持久；读其他 agent 记忆须显式授权 |
 | `memory.lifecycle` | 内置默认 | 遗忘：全局/分类型 TTL、容量上界 |
 | `memory.engine` | （关） | 语义检索（向量∪关键词 RRF）与巩固建议（触发只是建议，执行权在 LLM+工具） |
-| `meditation.enabled` + `interval`/`min_gap`/`prompt_file`（扩字段 `observed_namespaces`/`deliver_to`） | `false`；**`observed_namespaces` 缺省＝`[自身分区]`** | 空闲复盘：默认推荐声明独立冥想 agent（反思落保留 session 如 `meditation`，不混业务线）；`observed_namespaces` 列他人（须 ⊆ `memory.read_namespaces`）即跨域、不列即回看自身，`deliver_to` 决定卡片回流向；直接配在业务 agent 上则反思落进其业务 session（进阶形态，见上方冥想说明） |
+| `meditation.enabled` + `interval`/`min_gap`/`prompt_file`（扩字段 `observed_namespaces`/`deliver_to`） | `false`；**`observed_namespaces` 缺省＝`[自身分区]`** | 空闲复盘：`min_gap` 是两次冥想**执行**之间的下限，不再被日常回合拉长，首次无上次执行直通；默认推荐声明独立冥想 agent（反思落保留 session 如 `meditation`，不混业务线）；`observed_namespaces` 列他人（须 ⊆ `memory.read_namespaces`）即跨域、不列即回看自身，`deliver_to` 决定卡片回流向；直接配在业务 agent 上则反思落进其业务 session（进阶形态，见上方冥想说明） |
 | `compress_threshold` / `keep_recent_tasks` | `0.8` / `2` | 压缩触发 / 整理后保留最近任务数 |
 | `max_tool_iterations` / `max_tokens` / `temperature` | 入口 50/8000/0.7 | 只在被引用 agent 自身定义处配置 |
 

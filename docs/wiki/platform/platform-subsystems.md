@@ -154,7 +154,7 @@ git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制
 - **ReliableBus**（开关 `bus_spill_dir` 非空）：**全量持久受理**，不是「满则溢出」——`PublishContext` 在返回回执**之前**把每个输入写进 durable inbox（`agent/reliability/inbox.go`，v2），channel 只承载唤醒脉冲，因此队列忙闲与是否落盘无关；at-least-once，重启后未 ack 的信封按严格序号重投；存在 `*.spill` 残留或未排空的 v1 树时**拒绝升级**（fail-loud，由前一个二进制排空，v2 从不猜测式迁移）；每个 agent 只用自己的子目录 `<bus_spill_dir>/<agent>`（防多 agent 事件串流），该目录**在构建期就存在**；开关为空则回退纯 channel（易失，行为与旧 channel 逐字节一致）。四态边界与三段状态机见 [持久投递与依赖退化](../reliability/durable-delivery.md)；
 - **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
 - **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
-- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想两锚点（idle 与水位）按 agent 名分文件持久化（`<dir>/<agent>.json`），重启不误触发；新鲜度水位复用同一份 last-meditation 锚（观察面缺省即自身分区），锚点与判据的关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
+- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想单锚 last-meditation（执行水位：节奏门量它判两次执行的下限、新鲜度判据窗口以它为头；观察面缺省即自身分区）按 agent 名分文件持久化（`<dir>/<agent>.json`），重启后按上次执行正常间隔判定——锚缺失＝冷启动直通一次（读尽存量后自锁，幂等安全）；pending 有意不持久化；历史锚文件里的旧空闲锚键 Load 即忽略，无迁移。锚点与判据的关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
 
 ### 六.1 投递四态边界（volatile → durable → processed → delivered）
 

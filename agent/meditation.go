@@ -37,8 +37,8 @@ type MeditationConfig struct {
 	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
 	DigestExtra func() string
 
-	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留门控锚点
-	// （lastTurnEnd/lastMeditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
+	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留执行水位
+	// （lastMeditation），重启后按节奏门正常间隔判定；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
 
 	// ObservedNamespaces 是 novelty 判据的观察面（memory namespace 名）：判据读这些分区
@@ -116,11 +116,14 @@ type messageInjector interface {
 }
 
 // MeditationManager periodically injects "meditation" external_input events into the event
-// loop when the agent has been idle for at least MinGap AND the novelty gate says the world
-// moved on since the last meditation.
+// loop when the novelty gate says the observed world moved on AND the rhythm gate allows
+// another execution. A fire only injects; the watermark of the last EXECUTED meditation
+// advances when the injected batch comes back consumed (NoteMeditationBatchOutcome).
 //
 // - One mechanism over any observation surface: the novelty gate reads the observed partitions' fact chains for non-self-managed lineage events past the watermark, and a fire injects the reflection input into THIS agent's own loop session. Observing one's own partition (the default) is self-maintenance; observing others' is curation — only the configuration differs, never the mechanism.
-// - The idle gate is lineage-agnostic: any turn end counts as busy.
+// - The rhythm gate measures execution to execution: MinGap is the floor between two executed meditations, held by lastMeditation alone. Nothing any other turn does can move it, so self-managed housework can never postpone a reflection that has fresh facts to chew on.
+// - A never-executed manager (watermark zero, missing anchor file included) passes the rhythm gate straight through: without a previous execution there is no interval to speak of, which is the only reachable first step for a curator whose only turns are its own fires.
+// - Yielding to real input is postponing, not abandoning: a mixed batch drops the meditation event, the watermark stays put and the next tick re-evaluates the very same facts, so a yielded reflection never leaves facts older than the watermark.
 // - Meditation-derived activity can therefore only delay the next meditation, never re-arm the novelty gate: the self-feeding perpetual-motion loop of "nothing happened" summaries is structurally impossible.
 // - The event triggers the LLM to perform context cleanup and deep consolidation over the session.
 type MeditationManager struct {
@@ -150,23 +153,30 @@ type MeditationManager struct {
 	// always resolves one) keeps the gate closed.
 	observed []observedPartition
 
-	// lastTurnEnd is the idle-gate anchor (Unix ms): when the most recent turn
-	// ended — any trigger source, including failed turns. Updated
-	// unconditionally by runEventLoop after each RunFlow.
-	lastTurnEnd atomic.Int64
-
-	// lastMeditation tracks the most recent valid meditation timestamp and
-	// doubles as the novelty watermark: the gate asks the fact chain for events
-	// strictly newer than it, so a fire advances the window and locks itself.
+	// lastMeditation is the execution watermark (Unix ms): when the most recent
+	// meditation was EXECUTED (its injected batch came back consumed), never
+	// when it was merely fired. The rhythm gate measures from it, the novelty
+	// gate reads the fact chain strictly past it, and a zero value lets the
+	// first pass through.
 	lastMeditation atomic.Int64
 
-	// anchorStore 可选：持久化门控锚点（T-G AnchorStore），跨重启保留冥想门控连续性。
+	// pending marks an injected meditation batch awaiting its outcome report:
+	// while set no second batch is injected (re-entry guard). pendingSince is
+	// that injection's timestamp (Unix ms) — the watermark candidate on
+	// consumption, since the advance value is the moment of injection and that
+	// is exactly what covers every fact accumulated through a yield window.
+	// Neither is persisted: a restart's worst cost is one duplicate injection
+	// for a fire that never executed, which is idempotent. Both live under
+	// anchorMu (the ticker and the event loop race on them).
+	pending      bool
+	pendingSince int64
+
+	// anchorStore 可选：持久化执行水位（T-G AnchorStore），跨重启保留冥想节奏门连续性。
 	// nil = 纯内存（现状，重启失忆）。经 SetAnchorStore 注入。
 	anchorStore *reliability.AnchorStore
 
-	// anchorMu 序列化「锚点更新 + persistAnchors 快照」——锚点分属不同 goroutine 更新
-	// （turn end 事件循环 / meditation ticker），无锁则 persistAnchors 对各自 atomic
-	// 分别 Load 可能持久化「回退」的旧快照（Suggestion：并发交错覆盖）。
+	// anchorMu 序列化「pending 迁移 + 水位更新 + persistAnchors 快照」——ticker 与事件
+	// 循环两侧并发触碰这些状态，无锁则 persistAnchors 可能持久化「回退」的旧快照。
 	anchorMu sync.Mutex
 
 	ctx    context.Context
@@ -207,8 +217,9 @@ func (m *MeditationManager) SetNoveltyReader(r NoveltyReader) {
 	m.noveltyReader = r
 }
 
-// SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复门控锚点——跨重启保留冥想
-// 门控连续性（重启后不立即误触发冥想、正确计算 novelty）。Load 失败保守用当前值（不阻断启动）。
+// SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复执行水位——跨重启保留
+// 节奏门连续性。历史锚文件里的多余键（含旧空闲锚）由 Load 的自然忽略机制消化，消费侧只读
+// lastMeditation，无迁移。Load 失败保守用当前值（不阻断启动）。
 func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore) {
 	m.anchorStore = s
 	if s == nil {
@@ -219,24 +230,19 @@ func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore) {
 		log.Warnf("[Meditation] anchor load failed (%v), starting fresh", err)
 		return
 	}
-	if a.LastTurnEnd > 0 {
-		m.lastTurnEnd.Store(a.LastTurnEnd)
-	}
 	if a.LastMeditation > 0 {
 		m.lastMeditation.Store(a.LastMeditation)
 	}
-	log.Infof("[Meditation] anchors restored across restart: lastTurnEnd=%d lastMeditation=%d",
-		a.LastTurnEnd, a.LastMeditation)
+	log.Infof("[Meditation] anchor restored across restart: lastMeditation=%d", a.LastMeditation)
 }
 
-// persistAnchors 保存当前门控锚点到 anchorStore（若配置）。写失败仅告警（冥想门控降级为内存态，
-// 不阻断主流程）。锚点更新（turn end / meditation fire）时调用。
+// persistAnchors 保存执行水位到 anchorStore（若配置）。写失败仅告警（冥想门控降级为内存态，
+// 不阻断主流程）。水位推进（批次消费）时调用；调用方持 anchorMu。
 func (m *MeditationManager) persistAnchors() {
 	if m.anchorStore == nil {
 		return
 	}
 	a := reliability.MeditationAnchors{
-		LastTurnEnd:    m.lastTurnEnd.Load(),
 		LastMeditation: m.lastMeditation.Load(),
 	}
 	if err := m.anchorStore.Save(a); err != nil {
@@ -275,14 +281,29 @@ func (m *MeditationManager) Stop() {
 	log.Info("[Meditation] manager stopped")
 }
 
-// UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
-// Called unconditionally by runEventLoop after every RunFlow, regardless of
-// trigger source or success.
-func (m *MeditationManager) UpdateLastTurnEnd(t time.Time) {
+// NoteMeditationBatchOutcome is the meditation batch's outcome report from the event
+// loop — the single cross-module callback saying what became of the injected batch.
+//
+//   - consumed=true: the batch came back as a turn, and a failed turn counts too, since a broken model must not storm re-injections. The watermark advances to the injection moment (pendingSince), so every fact inside any yield window is covered and the novelty gate self-locks until the observed surface moves again.
+//   - consumed=false: the batch yielded to real input at the mixed-batch drop. Yielding is postponing: the watermark stays put, pending clears, and the next interval tick re-evaluates the very same facts at event-object cost.
+func (m *MeditationManager) NoteMeditationBatchOutcome(consumed bool) {
 	m.anchorMu.Lock()
-	m.lastTurnEnd.Store(t.UnixMilli())
+	defer m.anchorMu.Unlock()
+	if !consumed {
+		m.pending = false
+		log.Infof("[Meditation] deferred (batch yield) — retry next tick")
+		return
+	}
+	m.pending = false
+	injectAt := m.pendingSince
+	if injectAt == 0 || injectAt <= m.lastMeditation.Load() {
+		log.Debugf("[Meditation] executed — no fresher injection on record, watermark unchanged")
+		return
+	}
+	m.lastMeditation.Store(injectAt)
 	m.persistAnchors()
-	m.anchorMu.Unlock()
+	log.Infof("[Meditation] executed — watermark advanced to %s",
+		time.UnixMilli(injectAt).UTC().Format(time.RFC3339Nano))
 }
 
 // partitionCounts is one observed partition's tally in a novelty pass: how much of
@@ -450,37 +471,57 @@ func (m *MeditationManager) scanObservedNovelty() (*observedScan, bool) {
 	return scan, false
 }
 
-// checkAndMeditate evaluates whether a meditation should fire: both gates must pass.
+// checkAndMeditate runs one tick of the gate: a stale guard, then the two gates, then
+// the fire.
 //
+// - Stale guard: a pending older than 3×interval is an injection that never came back (dropped on a dead bus, a stopped loop, a crash window). Reset it with a WARN and leave the watermark where it is; re-arming the fire is the whole point of the defense.
 // - Novelty gate (the single criterion): an event in an observed partition, strictly newer than the lastMeditation watermark, whose lineage is not self-managed — the fact chain is the gate's only data face, for every observation surface including the default self-observation one.
-// - Idle gate (lineage-agnostic): gap since the last turn end >= MinGap. Any turn counts as busy, so meditation-derived turns merely delay, which is harmless and desirable while background work is churning.
-// - No fire-time anchor reset is needed: storing lastMeditation advances the watermark and locks the novelty gate until the observed surface moves again.
+// - Rhythm gate: now - lastMeditation >= MinGap. The floor sits between EXECUTIONS, so nothing but a consumed meditation batch moves it, and a zero watermark passes straight through — the cold start's first step needs no prior turn, and a housework stream can never postpone a re-evaluation.
+// - Re-entry guard: while pending, the injected batch is still in flight; no second injection, no second fact-chain action.
+// - The fire only injects and remembers the injection moment: the watermark advances when the batch comes back consumed, never here.
 func (m *MeditationManager) checkAndMeditate() {
 	now := time.Now()
+	nowMs := now.UnixMilli()
+
+	m.anchorMu.Lock()
+	if m.pending && m.cfg.Interval > 0 &&
+		nowMs-m.pendingSince > 3*m.cfg.Interval.Milliseconds() {
+		log.Warnf("[Meditation] pending long-held: injected %dms ago exceeds 3×interval=%s — the turn may legitimately still be running; no re-fire",
+			nowMs-m.pendingSince, m.cfg.Interval)
+	}
+	pending := m.pending
+	m.anchorMu.Unlock()
+	if pending {
+		return
+	}
 
 	scan, novel := m.scanObservedNovelty()
 	if !novel {
 		return
 	}
 
-	lastTurnMs := m.lastTurnEnd.Load()
-	if lastTurnMs == 0 {
-		return
-	}
-	idle := now.Sub(time.UnixMilli(lastTurnMs))
-	if idle < m.cfg.MinGap {
-		log.Debugf("[Meditation] skipping: idle=%s < min_gap=%s", idle, m.cfg.MinGap)
+	lastExec := m.lastMeditation.Load()
+	if lastExec != 0 && now.Sub(time.UnixMilli(lastExec)) < m.cfg.MinGap {
 		return
 	}
 
-	msg := m.buildMeditationMessage(now, idle, scan)
-	m.injector.InjectMessageWithSource("meditation", msg)
 	m.anchorMu.Lock()
-	m.lastMeditation.Store(now.UnixMilli())
-	m.persistAnchors()
+	if m.pending {
+		m.anchorMu.Unlock()
+		return
+	}
+	m.pending = true
+	m.pendingSince = nowMs
 	m.anchorMu.Unlock()
 
-	log.Infof("[Meditation] triggered: idle=%s since last turn end", idle)
+	sinceExec := time.Duration(0)
+	if lastExec != 0 {
+		sinceExec = now.Sub(time.UnixMilli(lastExec))
+	}
+	msg := m.buildMeditationMessage(now, sinceExec, scan)
+	m.injector.InjectMessageWithSource("meditation", msg)
+	log.Infof("[Meditation] fired (pending): inject_at=%s min_gap=%s since_last_execution=%s",
+		now.UTC().Format(time.RFC3339Nano), m.cfg.MinGap, sinceExec)
 }
 
 // buildMeditationMessage constructs the meditation external_input message.

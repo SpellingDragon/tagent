@@ -173,7 +173,7 @@ stateDiagram-v2
 
 | 重启后恢复项 | 来源 | 效果 |
 |-------------|------|------|
-| 冥想两锚点(idle/last-meditation 水位) | `data/reliability/anchors/<agent>.json`(按 agent 名分文件) | **不立即误触发冥想**(纯内存则重启即忘、马上冥想);last-meditation 兼作观察面新鲜度水位(缺省即自身分区),重启后判据窗口连续 |
+| 冥想单锚(last-meditation 执行水位;旧空闲锚已退役,历史锚文件旧键 Load 忽略、无迁移) | `data/reliability/anchors/<agent>.json`(按 agent 名分文件) | 重启后节奏门按上次执行正常间隔判定(纯内存则锚缺失=冷启动直通一次,读尽存量后水位自锁,幂等安全);同一锚兼作观察面新鲜度水位(缺省即自身分区),重启后判据窗口连续 |
 | 治理预算窗口 | `data/governance/budget/<agent>` | 预算计数跨重启延续(不清零) |
 | 待批审批 | `data/governance/approvals/` | pending 请求跨重启可见 |
 | 未消费事件/记忆兜底 | bus/mem spill | 重启后回灌/重放,不丢 |
@@ -269,7 +269,7 @@ stateDiagram-v2
 
 **场景 D:冥想 agent 显式声明观察别人的分区(meditation 的旁路冥想线)**
 1. 一个同构 agent 显式配 `meditation.observed_namespaces`(须 ⊆ `memory.read_namespaces` ∪ {自身};不配则缺省＝自身分区自察,同一条判据)→ 冥想线:新鲜度只看被观察分区在水位之后的**非自管谱系**事件。
-2. 被观察 agent 写入用户事实 → 空闲窗口到期后冥想线触发一轮,经验卡片落**自己**的分区;被观察分区零写入(压缩权不可转移,冥想线不写 compaction 事件)。
+2. 被观察 agent 写入用户事实 → 节奏门到点且新颖门开时(冷启动首次直通)冥想线触发一轮,经验卡片落**自己**的分区;被观察分区零写入(压缩权不可转移,冥想线不写 compaction 事件)。
 3. 卡片经 `DeliverToAgent` 投给目标 → 目标 mailbox 收到一条 meditation 谱系输入并自带 `[delivery]` 来源头;与用户输入同批到达时**让位、不补偿**。
 4. 此后只有自管产出在循环(卡片再投、consolidation_hint 唤醒)→ 两个 agent 的冥想门都不再打开:反思链路在结构上无法自持。
 5. `deliver_to` 未配置=空白名单**拒绝一切投递**;目标 loop 未运行只返回具名错误,不起新 Run、不落盘等待、不静默丢。
