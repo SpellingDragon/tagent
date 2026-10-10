@@ -308,8 +308,8 @@ func extMedCurationPrompt() string {
 	}, "\n")
 }
 
-// newExtMedScenario 装配两条常驻循环中的入口一条，并把策展 agent 的空闲锚按生产耐久面预置：
-// 门控的其余部分（novelty 判据、卡片、水位、投递）全部由生产代码现场决定。
+// newExtMedScenario 装配两条常驻循环中的入口一条，锚目录按生产耐久面建好但不预置任何水位：
+// 门控的判据、卡片、执行水位、投递全部由生产代码现场决定，零水位的节奏门直通就是验收要观察的起点。
 func newExtMedScenario(t *testing.T, creds realAcceptCredentials, root string) *extMedScenario {
 	t.Helper()
 	promptDir := filepath.Join(root, "prompts")
@@ -322,11 +322,9 @@ func newExtMedScenario(t *testing.T, creds realAcceptCredentials, root string) *
 		[]byte(extMedCurationPrompt()), 0o600))
 
 	anchorPath := filepath.Join(anchorDir, extMedCurationAgent+".json")
-	anchors, err := reliability.NewAnchorStore(anchorPath)
-	require.NoError(t, err)
-	require.NoErrorf(t, anchors.Save(reliability.MeditationAnchors{
-		LastTurnEnd: time.Now().Add(-time.Second).UnixMilli(),
-	}), "空闲锚必须按生产耐久面预置 %s", anchorPath)
+	if _, err := reliability.NewAnchorStore(anchorPath); err != nil {
+		require.NoErrorf(t, err, "锚耐久面必须可按生产路径建好 %s", anchorPath)
+	}
 
 	ledger := &realAcceptLedger{}
 	router := &extMedRouter{
