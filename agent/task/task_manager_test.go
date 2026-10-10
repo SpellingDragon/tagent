@@ -1998,3 +1998,67 @@ func TestReconcileTTL_RestoredTaskWarnsBeforeRetire(t *testing.T) {
 	require.Len(t, wave2, 1)
 	require.NotContains(t, wave2[0].Output, "可能仍在运行", "a detector-carrying retire cancels instead of warning")
 }
+
+// TestReconcileRetireNotify_BackstopResendsUnconfirmedTerminal 钉住看板周期对终局通知的兜底语义。
+// - 未确认（分发回调在途中断/进程替换后标志为零）且过宽限的终局任务，恰补发一次，第二次周期不重复。
+// - 已确认（onSettle 或批交付返回后置位）与尚在宽限内的任务绝不进入补发。
+// - 重新装配的信号按终态还原 Kind（completed→SettleCompleted，failed→SettleFailed）。
+func TestReconcileRetireNotify_BackstopResendsUnconfirmedTerminal(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Hour})
+	base := time.Now()
+	var resent []BatchRetired
+	tm.onRetireResend = func(batch []BatchRetired) { resent = append(resent, batch...) }
+
+	tm.tasks["done-unconfirmed"] = terminalTask("done-unconfirmed", TaskCompleted, base.Add(-time.Minute), NewManualDetector())
+	confirmed := terminalTask("done-confirmed", TaskCompleted, base.Add(-time.Minute), NewManualDetector())
+	confirmed.retireNotified = true
+	tm.tasks["done-confirmed"] = confirmed
+	tm.tasks["done-fresh"] = terminalTask("done-fresh", TaskCompleted, base.Add(-time.Millisecond), NewManualDetector())
+	tm.tasks["failed-unconfirmed"] = terminalTask("failed-unconfirmed", TaskFailed, base.Add(-time.Minute), NewManualDetector())
+
+	tm.now = func() time.Time { return base }
+	tm.reconcileRetireNotify()
+
+	if len(resent) != 2 {
+		t.Fatalf("exactly the two unconfirmed-past-grace terminals resend, got %d", len(resent))
+	}
+	byID := map[string]BatchRetired{}
+	for _, r := range resent {
+		byID[r.Task.ID] = r
+	}
+	if byID["done-unconfirmed"].Sig.Kind != SettleCompleted || byID["failed-unconfirmed"].Sig.Kind != SettleFailed {
+		t.Error("resend signal kinds must mirror the terminal statuses")
+	}
+	if !tm.tasks["done-unconfirmed"].retireNotified || !tm.tasks["failed-unconfirmed"].retireNotified {
+		t.Error("marking happens after the callback returns")
+	}
+
+	tm.reconcileRetireNotify()
+	if len(resent) != 2 {
+		t.Fatalf("a second board cycle must not resend, got %d", len(resent))
+	}
+}
+
+// TestReconcileRetireNotify_FinalizeMarksConfirmed 钉住正常分发路径的确认置位：onSettle 返回后任务即已确认，看板周期对其零补发。
+func TestReconcileRetireNotify_FinalizeMarksConfirmed(t *testing.T) {
+	var settled []*Task
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettle: func(tk *Task, sig SettleSignal) { settled = append(settled, tk) },
+	})
+	base := time.Now()
+	tm.now = func() time.Time { return base }
+	tk := terminalTask("inline", TaskRunning, time.Time{}, NewManualDetector())
+	tm.tasks["inline"] = tk
+
+	tm.finalize(tk, SettleCompleted, "out", nil)
+
+	if len(settled) != 1 {
+		t.Fatalf("onSettle fired once, got %d", len(settled))
+	}
+	if !tk.retireNotified {
+		t.Error("a returned onSettle dispatch confirms the notification")
+	}
+	tm.onRetireResend = func(batch []BatchRetired) { t.Error("confirmed terminal must not be resent") }
+	tm.now = func() time.Time { return base.Add(time.Minute) }
+	tm.reconcileRetireNotify()
+}

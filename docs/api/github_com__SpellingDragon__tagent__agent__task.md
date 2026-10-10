@@ -323,6 +323,11 @@ func (t *Task) SetDetachedAtMilli(ms int64)
     SetDetachedAtMilli is the exported restore-side hook (agent package owns the
     replay; runtime transitions must use emitBackground instead).
 
+func (t *Task) SettledAtUnixNano() int64
+    SettledAtUnixNano reads the terminal-moment stamp under the task lock —
+    stable resend ids derive from it so board cycles and restarts collapse to
+    one durable delivery.
+
 func (t *Task) Status() TaskStatus
     Status returns the task's current status (thread-safe snapshot).
 
@@ -479,6 +484,12 @@ type TaskManagerConfig struct {
 	// OnBatchRetire 是可选的批量退役汇聚点：reconcile/孤儿退役走它——逐条的状态迁移与记账仍按
 	// 单任务进行，但 bus 侧通知折叠为一条汇总事件。未注册时按逐条 OnSettle 通知。
 	OnBatchRetire func(batch []BatchRetired)
+	// OnRetireResend receives terminal tasks whose notification was never
+	// confirmed handed off (callback interrupted, process replaced mid-flight).
+	// The board reconcile pass calls it before prune; nil disables the pass.
+	// Resend ids are stable per task+terminal-moment, so repeats across board
+	// cycles and restarts collapse to one durable delivery.
+	OnRetireResend func(batch []BatchRetired)
 	// OnSpawn: invoked after a task registers
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
