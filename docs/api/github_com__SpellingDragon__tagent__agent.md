@@ -802,6 +802,22 @@ func (b *EventBus) DurableProvenance(events []*AgentEvent) [][2]string
     DurableProvenance returns deduplicated (path, requestID) pairs for every
     durable envelope consumed by a finished turn, read from the typed claim.
 
+func (b *EventBus) PendingCount() int
+    PendingCount is the non-destructive presence peek: how many inbound items
+    sit in front of Pull right now, without claiming, draining or reordering
+    anything.
+
+      - Volatile mode counts the queued events; durable mode counts wake
+        sentinels, paired with every accepted envelope at acceptance.
+      - The answer is presence, not identity: source attribution would require
+        consumption, so callers pair this peek with their own structural
+        invariants.
+      - The inbox backlog counter stays out of this peek: unconfirmed also holds
+        the claim the calling consumer itself carries, which would make a batch
+        count its own arrival as someone else waiting.
+      - The sole-consumer mailbox design (see type EventBus) keeps the peek
+        order-neutral; this method adds no new exposure.
+
 func (b *EventBus) PrepareEnvelope(path, receiptKey string, facts []json.RawMessage) error
     PrepareEnvelope durably freezes the per-slot prepared facts and a reserved
     receipt_key onto the claimed envelope at path, BEFORE the caller writes
@@ -1084,11 +1100,13 @@ func (m *MeditationManager) NoteMeditationBatchOutcome(consumed bool)
         too, since a broken model must not storm re-injections. The watermark
         advances to the injection moment (pendingSince), so every fact inside
         any yield window is covered and the novelty gate self-locks until the
-        observed surface moves again.
-      - consumed=false: the batch yielded to real input at the mixed-batch drop.
-        Yielding is postponing: the watermark stays put, pending clears, and
-        the next interval tick re-evaluates the very same facts at event-object
-        cost.
+        observed surface moves again. The deferral tally resets with it — the
+        debt the cards have been carrying is paid.
+      - consumed=false: the batch yielded to real input, at either yield
+        point (the injection-time mixed-batch drop or the consumption-time
+        presence re-check). Yielding is postponing: the watermark stays put,
+        pending clears, the deferral tally grows, and the next interval tick
+        re-evaluates the very same facts at event-object cost.
 
 func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore)
     SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复执行水位——跨重启保留

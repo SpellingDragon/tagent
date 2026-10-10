@@ -142,6 +142,10 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		ta.finishDurableBatch(ctx, received, nil, completedOutcome())
 		return turnContinue
 	}
+
+	if batchCarriesMeditation(events) && ta.persistentBus.PendingCount() > 0 {
+		return ta.yieldMeditationOnPresence(ctx, cm, received)
+	}
 	log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
 		ta.name, len(events), summarizeEvents(events))
 
@@ -304,6 +308,44 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	if ta.meditationMgr != nil && batchCarriesMeditation(events) {
 		ta.meditationMgr.NoteMeditationBatchOutcome(true)
 	}
+	return turnContinue
+}
+
+// yieldMeditationOnPresence disposes the consumption-time yield — the second
+// yield point, isomorphic to the injection-time drop: the pure-meditation batch
+// gives up the turn with no RunFlow, no consumption, watermark unmoved and the
+// re-entry guard cleared.
+//
+//   - Presence is structural (PendingCount on this bus at the moment of consumption), with no time parameter; arrivals after RunFlow started belong to turn atomicity and are deliberately not covered here.
+//   - Presence seen here is necessarily non-meditation: the manager holds its single pending slot until the outcome report, so no second meditation event can queue inside this window.
+//   - The real events stay queued and merge with the next batch; the yield itself injects nothing.
+//   - A completion freezes only over the receipt key reserved by the write-before prepare gate, so the yield runs that gate over the whole received set with an empty selected set: nothing is persisted as an input fact, the model is not called, and every envelope still ends receipted and acked — the injection-time drop's end state.
+//   - Transient gate failures requeue the claims with nothing acked; a deterministic conflict isolates and stops auto-consumption, as every other submit verdict does.
+//   - An isolated curator bus (the external form) never shows presence, so that form keeps executing without a behavioral delta.
+//
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func (ta *TagentAgent) yieldMeditationOnPresence(ctx context.Context, cm *ContextManager, received []*AgentEvent) turnDisposition {
+	log.Infof("[runEventLoop:%s] consumption re-check: %d pending event(s) behind a pure meditation batch — yielding",
+		ta.name, ta.persistentBus.PendingCount())
+	cm.turnEcho = nil
+	if ta.meditationMgr != nil {
+		ta.meditationMgr.NoteMeditationBatchOutcome(false)
+	}
+	switch gate := ta.submitDurableBatchWithBackoff(ctx, received, nil); gate.status {
+	case submitCancelled:
+		log.Infof("[runEventLoop:%s] yield prepare cancelled mid-batch — claims retained, exiting", ta.name)
+		return turnStop
+	case submitConflict:
+		log.Errorf("[runEventLoop:%s] deterministic submit conflict on %s during yield prepare — isolated; STOPPING auto-consumption (fail-closed, §4.2)",
+			ta.name, gate.conflict)
+		return turnStop
+	case submitTransient:
+		ta.releaseBatchClaims(received)
+		log.Warnf("[runEventLoop:%s] transient submit failure during yield prepare — claims requeued, nothing acked", ta.name)
+		return turnContinue
+	case submitOK:
+	}
+	ta.finishDurableBatch(ctx, received, nil, completedOutcome())
 	return turnContinue
 }
 
