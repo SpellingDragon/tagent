@@ -251,11 +251,6 @@ var (
 	ErrCaptureOpenFilesExceeded = errors.New("trajectory_capture.max_open_files exceeds the supported ceiling; rejected, not clamped")
 	// ErrSummaryTimeoutNegative: compress.summary_timeout_seconds 为负——它不等于「无时限」。
 	ErrSummaryTimeoutNegative = errors.New("compress.summary_timeout_seconds must not be negative")
-	// ErrSummaryTimeoutTooLarge: 超上限（含 0 以外的正值域）显式拒绝不夹紧——上限存在的
-	// 理由是约束模型路径内最坏等待，静默夹紧会让越界拼写看起来像生效配置。
-	ErrSummaryTimeoutTooLarge = errors.New("compress.summary_timeout_seconds exceeds the supported ceiling")
-	// MaxSummaryTimeoutSeconds 是同步摘要时限的配置上限（D14：正值 ≤120）。
-	MaxSummaryTimeoutSeconds = 120
 )
 
 // MCPServerConfig declares one MCP server connection (top-level mcp_servers).
@@ -918,18 +913,17 @@ func (b CaptureBlock) validate(trajectoryDump bool) error {
 	return nil
 }
 
-// validate bounds the synchronous summary deadline: negative fails startup (it is
-// not "no deadline"); values above 120s are rejected outright rather than clamped —
-// the ceiling exists to bound a worst-case wait inside the model path, and a silent
-// clamp would make a typo look like a working configuration.
+// validate bounds the synchronous summary deadline: negative fails startup (it
+// is not "no deadline"); positive values carry no configured ceiling. A small
+// window cannot complete a large-context fold, so a ceiling would reject
+// legitimate explicit choices rather than risk — the bound that matters exists
+// twice over already: the deadline itself falls back to the mechanical fold
+// (the round advances regardless), and the provider's request_timeout_seconds
+// is the real hard terminal. A typo stays a named refusal: never clamped.
 func (c CompressConfig) validate(agentName string) error {
 	if c.SummaryTimeoutSeconds < 0 {
 		return fmt.Errorf("tagent config: agent %q: %w: summary_timeout_seconds = %d",
 			agentName, ErrSummaryTimeoutNegative, c.SummaryTimeoutSeconds)
-	}
-	if c.SummaryTimeoutSeconds > MaxSummaryTimeoutSeconds {
-		return fmt.Errorf("tagent config: agent %q: %w: summary_timeout_seconds = %d, ceiling %d",
-			agentName, ErrSummaryTimeoutTooLarge, c.SummaryTimeoutSeconds, MaxSummaryTimeoutSeconds)
 	}
 	return nil
 }
