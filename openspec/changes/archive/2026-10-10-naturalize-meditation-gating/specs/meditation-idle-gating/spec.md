@@ -46,7 +46,7 @@
 
 ### Requirement: 水位执行语义与让位补位
 
-冥想水位 SHALL 在冥想 turn 被消费时推进（注入时刻为水位值），MUST NOT 在注入时推进；混合批让位 SHALL 记为推迟（水位不动、pending 清零、下个 interval 重试）；pending SHALL 防重入并在超 3×interval 未决时 WARN 复位；lastMeditation 为零（首次/锚缺失）时节奏门 SHALL 直通。
+冥想水位 SHALL 在冥想 turn 被消费时推进（注入时刻为水位值），MUST NOT 在注入时推进；混合批让位 SHALL 记为推迟（水位不动、pending 清零、下个 interval 重试）；pending SHALL 防重入，长期未决（超 3×interval）只 SHALL 出 WARN 观察线而 MUST NOT 自动复位重投（回合时长无上界，时间复位=重投踩踏；兜底取向 fail-safe 停摆）；lastMeditation 为零（首次/锚缺失）时节奏门 SHALL 直通。
 
 #### Scenario: 让位不烧窗口
 

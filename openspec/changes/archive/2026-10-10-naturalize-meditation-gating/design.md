@@ -6,7 +6,7 @@
 - `fire`：检查（novelty ✓ ∧ 节奏 ✓ ∧ !pending）→ `pending=true` → 注入；
 - `consumed`（纯冥想批被 event_loop 消费）：`pending=false`，水位推进到**注入时刻**（覆盖让位窗口期事实）→ 自锁；
 - `deferred`（混合批让位丢弃）：`pending=false`，水位**不动** → 下个 tick 重试（tick=interval 天然限频，空试成本=事件对象级）；
-- 防卡死：pending 超 `3×interval` 未决自动清零（注入丢失的防御性复位，日志 WARN）。
+- 长期未决：仅 WARN 观察线（`pending long-held`），**不自动复位**——真实模型回合时长无上界（F3 复跑实测：时间阈值复位把 40s 长回合误判为注入丢失，重投踩踏出 71 卡一批）；通知缺位的兜底取向 fail-safe：停摆可诊断，风暴不可挽回。恢复只依赖 consumed/deferred 通知，其路径已由用例全覆盖。
 - 通知机制：event_loop 的 `UpdateLastTurnEnd` 回调点改造为 `NoteMeditationBatchOutcome(consumed bool)`——跨模块回调点数量不变（1 个），语义从"任意回合"收窄为"冥想批结果"。
 - 持久化：只持久化 `lastMeditation`（执行语义）；pending 不持久化——重启复位的最大代价是 fire-未执行窗口的重复注入一次，水位已推进则 novelty 自锁，幂等安全。
 
@@ -25,7 +25,7 @@
 | 冥想 turn 进行中 tick | pending 防重入 |
 | 让位后用户又来 | 连续让位，水位始终不动——窗口无损 |
 | 重启（锚恢复/锚缺失） | 恢复→正常节奏；缺失→直通一次 |
-| pending 卡死防御 | 3×interval 复位 + WARN |
+| pending 长期未决 | 仅 WARN 观察线，单例保持，不重投 |
 
 ## D5 spec 与测试
 - 主 spec idle-gating 三处条款变更（REMOVED/MODIFIED×2）+ADDED 执行语义条款，标题与主 spec 逐字对齐；
