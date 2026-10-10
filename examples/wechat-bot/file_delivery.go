@@ -82,6 +82,10 @@ func ExtractFilePaths(text, workspaceDir string) []string {
 	return result
 }
 
+// voiceMaxBytes is the 5MB cap for audio sent over the voice channel:
+// audio larger than this falls back to a plain file message (voice CDN rejects long audio).
+const voiceMaxBytes = 5 << 20
+
 // isExecutable 判断文件是否为可执行文件：具有任意可执行权限位，或扩展名在拒绝列表中。
 func isExecutable(info os.FileInfo, path string) bool {
 	if info.Mode()&0111 != 0 {
@@ -107,6 +111,9 @@ func selectSendFn(ext string) fileSendFn {
 		}
 	case ".mp3", ".wav", ".amr", ".m4a":
 		return func(s FileSender, ctx context.Context, toUserID, path string) error {
+			if info, err := os.Stat(path); err == nil && info.Size() > voiceMaxBytes {
+				return s.SendFileFromPath(ctx, toUserID, path)
+			}
 			return s.SendVoiceFromPath(ctx, toUserID, path, 0)
 		}
 	case ".mp4", ".mov", ".avi", ".webm", ".mkv":

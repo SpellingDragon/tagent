@@ -19,6 +19,7 @@
 !scripts/verify_large_file.go
 !scripts/loggrep.py
 !scripts/doc_snapshot.py
+!scripts/trajectory-pack.sh
 !run.sh
 !tagent.yaml
 !tagent.rl.yaml
@@ -52,14 +53,24 @@
 !resources/prompts/*.md
 resources/prompts/USER.md
 
-# Allow skills (only README and source, not node_modules)
+# Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded.
+# NOTE: gitignore semantics — a negation cannot resurrect files under a directory
+# that was already excluded, so every tracked skill dir must be named explicitly
+# (see tracked-hygiene lint); !skills/*/** alone does NOT cover second-level dirs.
 !skills/
-!skills/README.md
-
-# Re-ignore everything under skills that's runtime
-skills/*/
-!skills/url-fetcher/
-skills/url-fetcher/node_modules/
+!skills/agent-mail-send/
+!skills/agent-mail-send/**
+!skills/audio-separation-pipeline/
+!skills/audio-separation-pipeline/**
+!skills/go-service-ops/
+!skills/go-service-ops/**
+!skills/gopls-code-nav/
+!skills/gopls-code-nav/**
+!skills/ima/
+!skills/ima/**
+!skills/interview/
+!skills/interview/**
+skills/*/node_modules/
 
 # Re-ignore all dotfiles and dot-directories (runtime data)
 .wechat-config/
@@ -77,7 +88,6 @@ wechat-bot
 logs/
 *.log
 wechat-bot
-skills/
 data/
 openspec/
 !dedup.go
@@ -111,6 +121,7 @@ openspec/
 !skills/url-fetcher/skill.md
 !skills/url-fetcher/smart_fetcher.js
 !skills/url-fetcher/url_fetcher.js
+!scripts/ima-note-upload.sh
 
 # 主动送达面（send 工具）源码与测试：白名单制必须点名，否则新文件永远不进版本控制。
 !send_tool.go

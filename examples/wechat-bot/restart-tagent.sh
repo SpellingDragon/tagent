@@ -63,6 +63,7 @@ chmod 600 "$SNAP"
 # breaking-change env (RL endpoint policy, required since 0a31e46 2026-09-27)
 grep -q '^TAGENT_RL_ALLOW_LLM_REDIRECT=' "$SNAP" || echo 'TAGENT_RL_ALLOW_LLM_REDIRECT=1' >> "$SNAP"
 grep -q '^TAGENT_RL_ENDPOINT_ALLOWLIST=' "$SNAP" || echo 'TAGENT_RL_ENDPOINT_ALLOWLIST=open.bigmodel.cn,api.deepseek.com,api.moonshot.cn,api.lkeap.cloud.tencent.com,tokenhub.tencentmaas.com' >> "$SNAP"
+export GOMEMLIMIT="${GOMEMLIMIT:-1800MiB}"  # heap 软顶：防运行时水位爬上 2G+（2026-09-30 审计后加）
 OLD_TRAJ_BYTES="$(stat -c %s data/trajectories/wechat-session.jsonl 2>/dev/null || echo 0)"
 log "env snapshot: $(wc -l < "$SNAP") vars"
 
