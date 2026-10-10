@@ -142,6 +142,12 @@ type SettleDetector interface {
 	Stopped() <-chan struct{}
 }
 
+// retireNotifyGrace is how long a terminal task waits after settledAt before
+// the board's re-notify pass may pick it up — long enough for the synchronous
+// finalize dispatch (both paths mark on callback return) to finish, so only
+// genuinely unconfirmed terminals are resent.
+const retireNotifyGrace = 2 * time.Second
+
 // defaultDenseDuration is the default dense-phase length (≈ the retired
 // sync_wait): how long a detector blocks before signalling detach.
 const defaultDenseDuration = 10 * time.Second
@@ -304,6 +310,13 @@ type Task struct {
 	result    string
 	err       error
 	settledAt time.Time
+
+	// retireNotified marks that the terminal notification for this task was
+	// HANDED to a dispatcher callback that RETURNED (the in-flight kill window
+	// inside a callback leaves it false, so the board's reconcile re-notify
+	// pass resends after a restart). Zero on restore: a process replacement
+	// re-notifies restored terminal tasks once via the stable request id.
+	retireNotified bool
 
 	detector      SettleDetector
 	firstSettle   chan SettleSignal
@@ -528,6 +541,12 @@ type TaskManagerConfig struct {
 	// OnBatchRetire 是可选的批量退役汇聚点：reconcile/孤儿退役走它——逐条的状态迁移与记账仍按
 	// 单任务进行，但 bus 侧通知折叠为一条汇总事件。未注册时按逐条 OnSettle 通知。
 	OnBatchRetire func(batch []BatchRetired)
+	// OnRetireResend receives terminal tasks whose notification was never
+	// confirmed handed off (callback interrupted, process replaced mid-flight).
+	// The board reconcile pass calls it before prune; nil disables the pass.
+	// Resend ids are stable per task+terminal-moment, so repeats across board
+	// cycles and restarts collapse to one durable delivery.
+	OnRetireResend func(batch []BatchRetired)
 	// OnSpawn: invoked after a task registers
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
@@ -613,6 +632,7 @@ type TaskManager struct {
 	byKey            map[string]string
 	onSettle         func(task *Task, sig SettleSignal)
 	onBatchRetire    func(batch []BatchRetired)
+	onRetireResend   func(batch []BatchRetired)
 	batchCollect     *[]BatchRetired
 	onSpawn          func(task *Task)
 	onInlineSettle   func(task *Task, sig SettleSignal)
@@ -702,6 +722,7 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		byKey:            make(map[string]string),
 		onSettle:         cfg.OnSettle,
 		onBatchRetire:    cfg.OnBatchRetire,
+		onRetireResend:   cfg.OnRetireResend,
 		onSpawn:          cfg.OnSpawn,
 		onInlineSettle:   cfg.OnInlineSettle,
 		onCancel:         cfg.OnCancel,
@@ -1156,6 +1177,45 @@ func (tm *TaskManager) reconcileDetached() {
 			t.mu.Unlock()
 		}
 	}
+	tm.reconcileRetireNotify()
+}
+
+// reconcileRetireNotify is the board's terminal-notification backstop: every
+// board cycle it hands terminal tasks whose notification was never confirmed
+// handed off to OnRetireResend, then marks them. The grace window lets the
+// synchronous finalize dispatch run to completion first (both dispatch paths
+// set retireNotified when their callback RETURNS), so the pass only sees
+// genuinely unconfirmed terminals — an in-flight kill inside a callback, or a
+// process replacement that restored a terminal task with the flag at zero.
+// Marking happens AFTER the callback returns, for the same reason as finalize.
+func (tm *TaskManager) reconcileRetireNotify() {
+	if tm == nil || tm.onRetireResend == nil {
+		return
+	}
+	now := tm.now()
+	tm.mu.Lock()
+	var batch []BatchRetired
+	for _, t := range tm.tasks {
+		t.mu.Lock()
+		if isTerminalStatus(t.status) && !t.retireNotified && now.Sub(t.settledAt) > retireNotifyGrace {
+			kind := SettleFailed
+			if t.status == TaskCompleted {
+				kind = SettleCompleted
+			}
+			batch = append(batch, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: t.result, Err: t.err}})
+		}
+		t.mu.Unlock()
+	}
+	tm.mu.Unlock()
+	if len(batch) == 0 {
+		return
+	}
+	tm.onRetireResend(batch)
+	for _, r := range batch {
+		r.Task.mu.Lock()
+		r.Task.retireNotified = true
+		r.Task.mu.Unlock()
+	}
 }
 
 // SetSessionTracker wires the live-session tracking signal post-construction
@@ -1219,6 +1279,11 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 		if tm.onBatchRetire != nil && len(batch) > 0 {
 			tm.onBatchRetire(batch)
 		}
+		for _, r := range batch {
+			r.Task.mu.Lock()
+			r.Task.retireNotified = true
+			r.Task.mu.Unlock()
+		}
 	}
 }
 
@@ -1272,6 +1337,9 @@ func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 	if tm.onSettle != nil {
 		tm.onSettle(t, sig)
 	}
+	t.mu.Lock()
+	t.retireNotified = true
+	t.mu.Unlock()
 }
 
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
@@ -1433,6 +1501,15 @@ func (tm *TaskManager) pruneTerminal() {
 			detector.Cancel()
 		}
 	}
+}
+
+// SettledAtUnixNano reads the terminal-moment stamp under the task lock —
+// stable resend ids derive from it so board cycles and restarts collapse to
+// one durable delivery.
+func (t *Task) SettledAtUnixNano() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.settledAt.UnixNano()
 }
 
 // List returns a snapshot of all tracked tasks.

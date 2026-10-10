@@ -498,6 +498,16 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 				bus.Publish(evt)
 			}
 		},
+		OnRetireResend: func(batch []task.BatchRetired) {
+			for _, r := range batch {
+				evt := newTaskSettledEvent(r.Task, r.Sig, settleInlineCapChars, outputWorkspace)
+				if evt == nil {
+					continue
+				}
+				evt.ID = fmt.Sprintf("retire-notify-%s-%d", task.ShortID(r.Task.ID), r.Task.SettledAtUnixNano())
+				deliverTaskSettled(sinkReg, bus, r.Task, evt)
+			}
+		},
 		TerminalTTL: cfg.TaskTerminalTTL,
 		DefaultTTL:  cfg.TaskDefaultTTL,
 		SpawnGate:   buildSpawnGate(cfg),
