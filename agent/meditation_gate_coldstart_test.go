@@ -24,13 +24,12 @@ func TestMeditationColdStart_FirstFireWithoutAnyTurn(t *testing.T) {
 	}, inj)
 	mgr.SetNoveltyReader(reader)
 
-	// 真实的外部策展冷启动：不播任何回合锚，回合的唯一来源是冥想自身。
 	mgr.Start()
 	time.Sleep(80 * time.Millisecond)
 	mgr.Stop()
 
 	assert.GreaterOrEqual(t, len(inj.messages), 1,
-		"a zero-value anchor on a manager that has never run a turn must fall back to the start-time bound, not close the idle gate forever")
+		"真实的外部策展冷启动（不播回合锚，回合唯一来源是冥想自身）：零值锚须回退启动时刻下界，不得永久关门")
 }
 
 func TestMeditationColdStart_StillWaitsMinGap(t *testing.T) {
