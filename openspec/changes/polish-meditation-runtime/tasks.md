@@ -1,8 +1,10 @@
 # Tasks: polish-meditation-runtime
 
+> 任务 0.1 完成注记（2026-10-10）：跨轮唯一名修复含 4 处残渣一并清（两处 snap.Resolve + 一处标准间距 model_override 字面量——首轮替换漏网致新失败形态，复跑暴露后补全）。三连验证全绿：ReentryIsolation race count=5 ok、Percall|Override count=3 ok、全量 agent race count=2 ok 159s。
+
 > 只编排说明：0 为前置清账（独立于本 change 域，先清再进）；1–2 两域可并发（文件面不相交：1 在 event_loop/manager 判定路径，2 在 manager 计数与 digest 渲染——**同文件 meditation.go 不同函数**，按 R21 判定需串行或契约冻结，见 D4/D2 契约：deferred 通知签名与计数归属）。
 
-- [ ] 0.1 #17 清账：验证工作树修复（`go test ./agent -race -run '^TestModelOverride_ReentryIsolation$' -count=5` + `Percall|Override count=3` + 全量 `race -count=2`）→ 全绿则 commit+关 #17；任一红则回滚该修复、#17 改派 —— 验证：三连输出附 run 证据。
+- [x] 0.1 #17 清账：验证工作树修复（`go test ./agent -race -run '^TestModelOverride_ReentryIsolation$' -count=5` + `Percall|Override count=3` + 全量 `race -count=2`）→ 全绿则 commit+关 #17；任一红则回滚该修复、#17 改派 —— 验证：三连输出附 run 证据。
 - [ ] 1.1 总线在场复查选型：按 event_bus 现有 API 定窥视形态（无则按 D6 加非破坏性 API，契约冻结单写）—— 验证：选型注记 + `go build ./agent`。
 - [ ] 1.2 执行时刻让位实现：纯冥想批消费前复查→在场则丢弃+deferred 通知 —— 验证：`go test ./agent -run '^TestMeditation|^TestOnEvent' -count=1` 含新用例三态（让位/照常/外部恒执行）。
 - [ ] 2.1 欠账计数+digest 渲染：deferredCount/lastDeferredAt + buildMeditationMessage 计数行 —— 验证：`go test ./agent -run 'Digest|Deferred' -count=1`；consumed 清零断言。

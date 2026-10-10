@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -831,6 +833,16 @@ func stageGenerationPinned(tb testing.TB, blank *TagentAgent, label, promptText 
 //   - 重入读自己那代的冻结快照：本代快照不含的引用被具名拒绝，既不回落本代模型也不借新代放行，新独立代才看得见新注册的名字；两次调用之后执行引用归零，没有悬挂。
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#percall-overrides
+// percallRefSeq makes model-reference names unique across -count reruns: the
+// registry is package-global and outlives one round, so a fixed name would
+// leak the previous round's registration into this round's frozen-snapshot
+// assertions.
+var percallRefSeq atomic.Uint64
+
+func percallRefName(base string) string {
+	return fmt.Sprintf("%s-%d", base, percallRefSeq.Add(1))
+}
+
 func TestModelOverride_ReentryIsolation(t *testing.T) {
 	read := percallLeafTool{"read_file"}
 	save := percallLeafTool{"save_file"}
@@ -857,8 +869,9 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 	})
 
 	t.Run("a model reference grants no tool routing", func(t *testing.T) {
+		routingRef := percallRefName("o2a-ref-routing")
 		registered := &viewRecorderModel{label: "o2a-m-rt", resp: percallFinalResp("ROUTING-ANSWER")}
-		RegisterModelReference("o2a-ref-routing", registered)
+		RegisterModelReference(routingRef, registered)
 
 		own := &viewRecorderModel{label: "o2a-m-rt-own", resp: percallFinalResp("OWN-ANSWER")}
 		blank := newPercallBlank(t, "o2a-m-routing", own, []trpctool.Tool{read, save})
@@ -868,7 +881,7 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 
 		out, err := w.Call(context.Background(), percallArgs(t, map[string]any{
 			"request":                "work under another model",
-			"model_override":         "o2a-ref-routing",
+			"model_override":         routingRef,
 			"system_prompt_override": "ROUTING-PROMPT",
 			"tools_subset":           []string{"read_file"},
 		}))
@@ -882,7 +895,7 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 		before := registered.calls()
 		out2, err2 := w.Call(context.Background(), percallArgs(t, map[string]any{
 			"request":        "work under another model, tools nobody declared",
-			"model_override": "o2a-ref-routing",
+			"model_override": routingRef,
 			"tools_subset":   []string{"read_file", "mcp_call"},
 		}))
 		require.Error(t, err2, "the maximum tool domain stays a hard bound beside a model override")
@@ -935,6 +948,7 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 	})
 
 	t.Run("a reference the pinned view does not carry is refused, not served by a fallback", func(t *testing.T) {
+		lateRef := percallRefName("o2a-ref-late")
 		late := &viewRecorderModel{label: "o2a-m-late-ref", resp: percallFinalResp("LATE-ANSWER")}
 
 		own := &viewRecorderModel{label: "o2a-m-late-own", resp: percallFinalResp("OWN-ANSWER")}
@@ -943,20 +957,20 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 		w1, snap1 := stageGenerationPinned(t, blank, "o2a-m-late-a", "LATE-GEN1-PROMPT", gen1,
 			[]trpctool.Tool{read})
 
-		RegisterModelReference("o2a-ref-late", late)
+		RegisterModelReference(lateRef, late)
 
-		_, frozen := snap1.Resolve("o2a-ref-late")
+		_, frozen := snap1.Resolve(lateRef)
 		require.False(t, frozen, "a published generation's snapshot stays frozen at what it was built with")
 
 		out, err := w1.Call(context.Background(), percallArgs(t, map[string]any{
 			"request":        "work addressed at a name this view never carried",
-			"model_override": "o2a-ref-late",
+			"model_override": lateRef,
 		}))
 		require.Error(t, err, "a call resolves against ITS generation, not against the live registry")
 		var shaped overrideRejectError
 		require.True(t, errors.As(err, &shaped), "and the refusal is structured, got %v", err)
 		require.Equal(t, "model_override", shaped.OverrideField())
-		require.Contains(t, err.Error(), "o2a-ref-late")
+		require.Contains(t, err.Error(), lateRef)
 		require.Nil(t, out)
 		require.Zero(t, late.calls(), "a refused reference is never served")
 		require.Zero(t, gen1.calls(), "and it never falls back to the generation's own model")
@@ -964,12 +978,12 @@ func TestModelOverride_ReentryIsolation(t *testing.T) {
 		gen2 := &viewRecorderModel{label: "o2a-m-late-gen2", resp: percallFinalResp("GEN2-ANSWER")}
 		w2, snap2 := stageGenerationPinned(t, blank, "o2a-m-late-b", "LATE-GEN2-PROMPT", gen2,
 			[]trpctool.Tool{read})
-		_, visible := snap2.Resolve("o2a-ref-late")
+		_, visible := snap2.Resolve(lateRef)
 		require.True(t, visible, "a NEW independent generation reads the registry as it is now")
 
 		out2, err2 := w2.Call(context.Background(), percallArgs(t, map[string]any{
 			"request":        "the same work on the new face",
-			"model_override": "o2a-ref-late",
+			"model_override": lateRef,
 		}))
 		require.NoError(t, err2)
 		require.Contains(t, out2, "LATE-ANSWER")
