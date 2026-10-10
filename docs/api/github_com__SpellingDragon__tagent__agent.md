@@ -1018,8 +1018,8 @@ type MeditationConfig struct {
 	// 由装配层注入（根包 tracker），保持 agent 包对巩固机制零依赖。
 	DigestExtra func() string
 
-	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留门控锚点
-	// （lastTurnEnd/lastMeditation），重启后不立即误触发冥想；空 = 纯内存（现状，重启失忆）。
+	// AnchorPath 是冥想门控锚点持久化路径（T-G AnchorStore）。非空则跨重启保留执行水位
+	// （lastMeditation），重启后按节奏门正常间隔判定；空 = 纯内存（现状，重启失忆）。
 	AnchorPath string
 
 	// ObservedNamespaces 是 novelty 判据的观察面（memory namespace 名）：判据读这些分区
@@ -1044,28 +1044,56 @@ type MeditationManager struct {
 	// Has unexported fields.
 }
     MeditationManager periodically injects "meditation" external_input events
-    into the event loop when the agent has been idle for at least MinGap AND the
-    novelty gate says the world moved on since the last meditation.
+    into the event loop when the novelty gate says the observed world moved
+    on AND the rhythm gate allows another execution. A fire only injects;
+    the watermark of the last EXECUTED meditation advances when the injected
+    batch comes back consumed (NoteMeditationBatchOutcome).
 
     - One mechanism over any observation surface: the novelty gate reads the
     observed partitions' fact chains for non-self-managed lineage events
     past the watermark, and a fire injects the reflection input into THIS
     agent's own loop session. Observing one's own partition (the default) is
     self-maintenance; observing others' is curation — only the configuration
-    differs, never the mechanism. - The idle gate is lineage-agnostic: any
-    turn end counts as busy. - Meditation-derived activity can therefore only
-    delay the next meditation, never re-arm the novelty gate: the self-feeding
-    perpetual-motion loop of "nothing happened" summaries is structurally
-    impossible. - The event triggers the LLM to perform context cleanup and deep
-    consolidation over the session.
+    differs, never the mechanism. - The rhythm gate measures execution
+    to execution: MinGap is the floor between two executed meditations,
+    held by lastMeditation alone. Nothing any other turn does can move it,
+    so self-managed housework can never postpone a reflection that has fresh
+    facts to chew on. - A never-executed manager (watermark zero, missing anchor
+    file included) passes the rhythm gate straight through: without a previous
+    execution there is no interval to speak of, which is the only reachable
+    first step for a curator whose only turns are its own fires. - Yielding to
+    real input is postponing, not abandoning: a mixed batch drops the meditation
+    event, the watermark stays put and the next tick re-evaluates the very same
+    facts, so a yielded reflection never leaves facts older than the watermark.
+    - Meditation-derived activity can therefore only delay the next meditation,
+    never re-arm the novelty gate: the self-feeding perpetual-motion loop
+    of "nothing happened" summaries is structurally impossible. - The event
+    triggers the LLM to perform context cleanup and deep consolidation over the
+    session.
 
 func NewMeditationManager(cfg MeditationConfig, injector messageInjector) *MeditationManager
     NewMeditationManager creates a MeditationManager. The injector is typically
     the *TagentAgent that owns this manager.
 
+func (m *MeditationManager) NoteMeditationBatchOutcome(consumed bool)
+    NoteMeditationBatchOutcome is the meditation batch's outcome report from
+    the event loop — the single cross-module callback saying what became of the
+    injected batch.
+
+      - consumed=true: the batch came back as a turn, and a failed turn counts
+        too, since a broken model must not storm re-injections. The watermark
+        advances to the injection moment (pendingSince), so every fact inside
+        any yield window is covered and the novelty gate self-locks until the
+        observed surface moves again.
+      - consumed=false: the batch yielded to real input at the mixed-batch drop.
+        Yielding is postponing: the watermark stays put, pending clears, and
+        the next interval tick re-evaluates the very same facts at event-object
+        cost.
+
 func (m *MeditationManager) SetAnchorStore(s *reliability.AnchorStore)
-    SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复门控锚点——跨重启保留冥想
-    门控连续性（重启后不立即误触发冥想、正确计算 novelty）。Load 失败保守用当前值（不阻断启动）。
+    SetAnchorStore 注入锚点持久化存储（T-G AnchorStore），并 Load 恢复执行水位——跨重启保留
+    节奏门连续性。历史锚文件里的多余键（含旧空闲锚）由 Load 的自然忽略机制消化，消费侧只读 lastMeditation，无迁移。Load
+    失败保守用当前值（不阻断启动）。
 
 func (m *MeditationManager) SetAuditLine(fn func() string)
     SetAuditLine wires the behavior-audit digest generator (see auditLine).
@@ -1091,11 +1119,6 @@ func (m *MeditationManager) Start()
 
 func (m *MeditationManager) Stop()
     Stop signals the meditation goroutine to stop and waits for it.
-
-func (m *MeditationManager) UpdateLastTurnEnd(t time.Time)
-    UpdateLastTurnEnd records a turn-end timestamp — the idle-gate anchor.
-    Called unconditionally by runEventLoop after every RunFlow, regardless of
-    trigger source or success.
 
 type ModelRefSnapshot struct {
 	// Has unexported fields.

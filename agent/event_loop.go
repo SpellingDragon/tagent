@@ -132,7 +132,11 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	}
 
 	received := events
-	events = dropMeditationFromMixedBatch(events, ta.name)
+	selected := dropMeditationFromMixedBatch(events, ta.name)
+	if len(selected) != len(events) && ta.meditationMgr != nil {
+		ta.meditationMgr.NoteMeditationBatchOutcome(false)
+	}
+	events = selected
 	if len(events) == 0 {
 		cm.turnEcho = nil
 		ta.finishDurableBatch(ctx, received, nil, completedOutcome())
@@ -297,17 +301,35 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	cm.turnEcho = nil
 	ta.finishDurableBatch(spanCtx, received, events, batchOutcome)
 
-	if ta.meditationMgr != nil {
-		ta.meditationMgr.UpdateLastTurnEnd(time.Now())
+	if ta.meditationMgr != nil && batchCarriesMeditation(events) {
+		ta.meditationMgr.NoteMeditationBatchOutcome(true)
 	}
 	return turnContinue
 }
 
+// batchCarriesMeditation reports whether the selected batch still holds a meditation
+// external_input event at turn end — the turn being reduced executed the injected
+// meditation, so the manager owes an outcome report. A mixed batch's meditation event
+// was already dropped at the yield point, so only pure-meditation batches reach this
+// true; a failed turn counts as executed too, which is what keeps a broken model from
+// storming re-injections.
+func batchCarriesMeditation(events []*AgentEvent) bool {
+	for _, evt := range events {
+		if evt != nil && evt.Type == tagentevent.TypeExternalInput && evt.Source == "meditation" {
+			return true
+		}
+	}
+	return false
+}
+
 // dropMeditationFromMixedBatch removes meditation events from a batch that
 // also contains any non-meditation event.
-// The dropped meditation is NOT re-injected: lastMeditation already advanced
-// at fire time, and the novelty gate re-evaluates naturally at the next real
-// idle window. Pure-meditation batches pass through unchanged.
+// Yielding is postponing, not abandoning: the filter itself changes nothing else —
+// the watermark stays put at the drop (it advances only on consumption), so the facts
+// a yielded reflection was meant to chew on stay novel and the next tick re-evaluates
+// the very same window. The manager-side accounting of that outcome report lives at
+// the call site (NoteMeditationBatchOutcome). Pure-meditation batches pass through
+// unchanged.
 func dropMeditationFromMixedBatch(events []*AgentEvent, agentName string) []*AgentEvent {
 	hasMeditation, hasOther := false, false
 	for _, evt := range events {
@@ -330,7 +352,7 @@ func dropMeditationFromMixedBatch(events []*AgentEvent, agentName string) []*Age
 		}
 		filtered = append(filtered, evt)
 	}
-	log.Infof("[runEventLoop:%s] mixed batch: dropped %d meditation event(s) — agent not idle",
+	log.Infof("[runEventLoop:%s] mixed batch: dropped %d meditation event(s) — yielding to real input",
 		agentName, len(events)-len(filtered))
 	return filtered
 }

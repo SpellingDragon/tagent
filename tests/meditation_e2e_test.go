@@ -1,10 +1,12 @@
 // meditation_e2e_test 钉住 外部化冥想在单进程双 agent 组织里的端到端链条：真实 novelty 判据产出的卡片经组合根投递面进入目标 turn，
-// 自管产出不让两台门自激，投递与用户输入同批时让位。
+// 自管产出不让两台门自激，投递与用户输入同批时让位。门控两形态的剧本也在此取证：冷启动直通、执行间下限、
+// 让位窗口被一次执行整窗覆盖、注入丢失后的在途复位。
 // 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
 package tagent_test
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +101,18 @@ func (m *meditationModel) contains(label, sub string) bool {
 	return false
 }
 
+// servedTogether 报告同一轮模型请求里是否同时带着两段文本：让位窗口的结论必须成对取证。
+func (m *meditationModel) servedTogether(label, a, b string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.calls {
+		if c.label == label && strings.Contains(c.text, a) && strings.Contains(c.text, b) {
+			return true
+		}
+	}
+	return false
+}
+
 func medSystemOf(req *model.Request) string {
 	for _, msg := range req.Messages {
 		if msg.Role == model.RoleSystem {
@@ -150,15 +164,41 @@ func (l *medLineageLog) contains(v string) bool {
 }
 
 // cardCollector 是冥想 manager 的注入面替身：一次触发产出的卡片在此可见，随后交给组合根投递。
+// onCard 非空时把"卡片已被消费"上报给 manager，替真实事件循环结这笔账（投递即消费的装配形态）。
 type cardCollector struct {
-	mu    sync.Mutex
-	cards []model.Message
+	mu     sync.Mutex
+	cards  []model.Message
+	at     []time.Time
+	onCard func()
 }
 
 func (c *cardCollector) InjectMessageWithSource(_ string, msg model.Message) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.cards = append(c.cards, msg)
+	c.at = append(c.at, time.Now())
+	hook := c.onCard
+	c.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+// fireAt 给出第 i 次触发的注入时刻：节奏门必须由观测到的注入间隔来量，而不是由测试代设的锚点来量。
+func (c *cardCollector) fireAt(t *testing.T, i int) time.Time {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.Greater(t, len(c.at), i, "冥想 manager 还没有第 %d 次触发", i+1)
+	return c.at[i]
+}
+
+// latestText 给出最近一次触发产出的卡片正文。
+func (c *cardCollector) latestText(t *testing.T) string {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	require.NotEmpty(t, c.cards, "冥想 manager 还没有产出过卡片")
+	return c.cards[len(c.cards)-1].Content
 }
 
 func (c *cardCollector) count() int {
@@ -241,17 +281,19 @@ func newMeditationRig(t *testing.T, targetMeditation bool) *meditationRig {
 }
 
 // startExternalMeditation 让生产 MeditationManager 以外部观察形态跑起来：novelty 判据、观察摘要与卡片文案全部出自生产代码。
-func startExternalMeditation(t *testing.T, reader memory.MemoryStore, cards *cardCollector) *agent.MeditationManager {
+// 假注入面即投递面：卡片一被收集就上报 consumed，由测试替事件循环结这笔账，节奏门因此量的是执行间。
+func startExternalMeditation(t *testing.T, reader memory.MemoryStore, cards *cardCollector,
+	minGap time.Duration) *agent.MeditationManager {
 	t.Helper()
 	mgr := agent.NewMeditationManager(agent.MeditationConfig{
 		Enabled:            true,
 		Interval:           50 * time.Millisecond,
-		MinGap:             time.Millisecond,
+		MinGap:             minGap,
 		PromptText:         meditationCardText,
 		ObservedNamespaces: []string{"target"},
 	}, cards)
 	mgr.SetNoveltyReader(reader)
-	mgr.UpdateLastTurnEnd(time.Now())
+	cards.onCard = func() { mgr.NoteMeditationBatchOutcome(true) }
 	mgr.Start()
 	t.Cleanup(mgr.Stop)
 	return mgr
@@ -265,7 +307,7 @@ func startExternalMeditation(t *testing.T, reader memory.MemoryStore, cards *car
 func TestExternalMeditationEndToEnd(t *testing.T) {
 	rig := newMeditationRig(t, false)
 	cards := &cardCollector{}
-	startExternalMeditation(t, rig.store, cards)
+	startExternalMeditation(t, rig.store, cards, time.Millisecond)
 
 	_, err := rig.target.InjectMessageContext(context.Background(), "user",
 		model.NewUserMessage("用户事实：交付窗口必须周五关闭"))
@@ -331,7 +373,7 @@ func TestExternalMeditation_NoPerpetualMotion(t *testing.T) {
 		return rig.model.contains(targetLabel, meditationFireMarker)
 	})
 
-	startExternalMeditation(t, rig.store, cards)
+	startExternalMeditation(t, rig.store, cards, time.Millisecond)
 	medEventually(t, "the external form fires once on the same user fact", func() bool {
 		return cards.count() >= 1
 	})
@@ -401,4 +443,160 @@ func TestExternalMeditation_YieldToUser(t *testing.T) {
 		return rig.model.count(targetLabel) >= 3
 	})
 	require.False(t, rig.model.contains(targetLabel, "应与用户输入同批让位"), "同批让位的投递不得被重新排队补投")
+}
+
+// lastMeditationField 取出卡片头里的执行水位字段：首次冥想=从未执行过。
+var lastMeditationField = regexp.MustCompile(`上次有效冥想时间：([^\n]+)`)
+
+func lastMeditationIn(t *testing.T, card string) string {
+	t.Helper()
+	m := lastMeditationField.FindStringSubmatch(card)
+	require.Len(t, m, 2, "卡片头必须自带上次有效冥想时间")
+	return strings.TrimSpace(m[1])
+}
+
+// TestExternalMeditation_ColdStartFlipsBacklog 钉住 远端积压剧本的翻转：装配后首 tick 即通读存量。
+// - min_gap 一小时也拦不住第一次触发：没有前一次执行就没有区间可量。
+// - 存量通读这一次执行完就自锁：再喂新事实也不会在这一次的下限内重开。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestExternalMeditation_ColdStartFlipsBacklog(t *testing.T) {
+	rig := newMeditationRig(t, false)
+	cards := &cardCollector{}
+	startExternalMeditation(t, rig.store, cards, time.Hour)
+
+	_, err := rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户事实：积压在远端的一手线索"))
+	require.NoError(t, err)
+	medEventually(t, "target served the backlog fact", func() bool {
+		return rig.model.contains(targetLabel, "积压在远端的一手线索")
+	})
+
+	medEventually(t, "a cold start fires without waiting out min_gap", func() bool {
+		return cards.count() >= 1
+	})
+	card := cards.latestText(t)
+	require.Contains(t, card, meditationFireMarker, "产出必须是真实冥想卡片")
+	require.Equal(t, "首次冥想", lastMeditationIn(t, card), "冷启动的执行水位为零")
+
+	_, err = rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户事实：通读之后又来的一条"))
+	require.NoError(t, err)
+	require.Never(t, func() bool { return cards.count() > 1 },
+		300*time.Millisecond, 20*time.Millisecond,
+		"新事实点亮新鲜度，但两次执行之间不足 min_gap：不得重开")
+}
+
+// TestExternalMeditation_MinGapResumesAfterFloor 钉住 执行间下限过去后的第二次触发：间隔就是 min_gap。
+// - 第一张卡片仍是首次冥想；第二张必须带着第一次执行的水位。
+// - 第二次通读的判据窗口从第一次的执行水位起算，卡片头带着那个时刻。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestExternalMeditation_MinGapResumesAfterFloor(t *testing.T) {
+	const minGap = 300 * time.Millisecond
+	rig := newMeditationRig(t, false)
+	cards := &cardCollector{}
+	startExternalMeditation(t, rig.store, cards, minGap)
+
+	_, err := rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户事实：第一轮线索"))
+	require.NoError(t, err)
+	medEventually(t, "the first execution lands", func() bool { return cards.count() >= 1 })
+
+	first := cards.fireAt(t, 0)
+	require.Equal(t, "首次冥想", lastMeditationIn(t, cards.latestText(t)))
+
+	_, err = rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户事实：水位之后的第二轮线索"))
+	require.NoError(t, err)
+	medEventually(t, "the second execution arrives once min_gap has passed", func() bool {
+		return cards.count() >= 2
+	})
+	second := cards.latestText(t)
+	require.Contains(t, second, "判据窗口：自 ", "第二次通读读的是水位之后的窗口，不是 epoch 全量")
+	require.NotContains(t, second, "判据窗口：首次冥想", "第一次执行之后不存在 epoch 窗口")
+
+	require.GreaterOrEqual(t, cards.fireAt(t, 1).Sub(first), minGap-50*time.Millisecond,
+		"两次触发的间隔由 min_gap 决定（余量只来自毫秒截断与轮询粒度）")
+
+	watermark := lastMeditationIn(t, second)
+	require.NotEqual(t, "首次冥想", watermark, "第一次的执行水位已写进第二次")
+	require.Regexp(t, `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`, watermark,
+		"卡片头的水位是可解析的执行时刻")
+}
+
+// TestMeditationE2E_SelfObservingYieldCoversWindow 钉住 自察形态的用户高频让位：让位=推迟，走后即思。
+// - 反思与用户输入同批时被移除，那一轮里没有任何冥想卡片：让位窗口内从未执行。
+// - 用户离开后的下一 tick 执行，卡片仍写着首次冥想：整窗水位一动没动。
+// - 被执行的那一张点名窗口里最新的一条事实，此后模型调用数停在执行那一轮。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestMeditationE2E_SelfObservingYieldCoversWindow(t *testing.T) {
+	rig := newMeditationRig(t, true)
+	gate := rig.model.armNext()
+
+	_, err := rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户输入：turn 一的驱动消息"))
+	require.NoError(t, err)
+	medEventually(t, "target is parked inside turn one", func() bool {
+		return rig.model.contains(targetLabel, "turn 一的驱动消息")
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	_, err = rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("让位窗口最新事实：与冥想同批的用户输入"))
+	require.NoError(t, err)
+	close(gate)
+
+	medEventually(t, "the user input sharing the batch got served", func() bool {
+		return rig.model.contains(targetLabel, "与冥想同批的用户输入")
+	})
+	require.False(t, rig.model.contains(targetLabel, meditationFireMarker),
+		"让位窗口里反思一次都没被执行")
+
+	medEventually(t, "the reflection runs on the next tick after the user leaves", func() bool {
+		return rig.model.servedTogether(targetLabel, meditationFireMarker, "让位窗口最新事实")
+	})
+	require.True(t, rig.model.servedTogether(targetLabel, meditationFireMarker, "上次有效冥想时间：首次冥想"),
+		"连续让位不烧窗口：执行它那一张仍写着首次冥想")
+
+	calls := rig.model.count(targetLabel)
+	require.Never(t, func() bool { return rig.model.count(targetLabel) > calls },
+		400*time.Millisecond, 40*time.Millisecond,
+		"执行后自锁：水位之后没有非自管新事，反思产物永不重新武装")
+}
+
+// TestMeditationE2E_PendingLongHoldNeverStorms 钉住在途批长期未决不重投：无通知则单例保持，水位无损。
+// - 在途期内不得二投：一次未决注入就是全部结论。
+// - 复位后同一份新鲜度立刻重投，说明关门的是在途闸门而不是判据本身。
+// - 复位与重投都不烧水位：两张卡片都写着首次冥想。
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestMeditationE2E_PendingLongHoldNeverStorms(t *testing.T) {
+	rig := newMeditationRig(t, false)
+	cards := &cardCollector{}
+	mgr := agent.NewMeditationManager(agent.MeditationConfig{
+		Enabled:            true,
+		Interval:           50 * time.Millisecond,
+		MinGap:             time.Hour,
+		PromptText:         meditationCardText,
+		ObservedNamespaces: []string{"target"},
+	}, cards)
+	mgr.SetNoveltyReader(rig.store)
+	mgr.Start()
+	t.Cleanup(mgr.Stop)
+
+	_, err := rig.target.InjectMessageContext(context.Background(), "user",
+		model.NewUserMessage("用户事实：一条永远不会被消费的注入"))
+	require.NoError(t, err)
+	medEventually(t, "the first injection lands in the fake injector", func() bool {
+		return cards.count() >= 1
+	})
+
+	require.Never(t, func() bool { return cards.count() > 1 },
+		80*time.Millisecond, 20*time.Millisecond,
+		"未超 3×interval 的 tick 只防重入，绝不误伤在途批")
+
+	require.Never(t, func() bool { return cards.count() > 1 },
+		200*time.Millisecond, 25*time.Millisecond,
+		"长期未决只出观察线不重投：宁可停摆不可风暴")
+	require.Equal(t, "首次冥想", lastMeditationIn(t, cards.latestText(t)),
+		"未决不烧水位：窗口仍然无损")
 }
