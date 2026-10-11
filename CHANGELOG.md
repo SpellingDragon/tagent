@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+（当前无未发布变更。)
+
+## [v0.3.0] - 2026-10-11
+
 ### Breaking Changes（merge-review-remediation：dev→main 合并前评审修订，45 项发现全量落地；pre-release 姿态，无迁移承诺）
 
 - **谱系投递白名单改正向集合**（event.DeliverableLineage）：宿主可投递谱系（user/task/reincarnation/system_alert/meditation）之外一律 fail-closed 扣留，负名单时代漏配谱系（task-unstamped）与未知未来值不再可能被投递；旧前缀启发式退役。
