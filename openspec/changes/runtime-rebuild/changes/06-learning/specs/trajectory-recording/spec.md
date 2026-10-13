@@ -11,7 +11,7 @@
 
 ### Requirement: JSONL trajectory format
 
-The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/{session_id}.jsonl`. Each line SHALL be a JSON object containing the following fields: `timestamp`, `session_id`, `user_id`, `batch_index`, `llm_call.request.messages`, `llm_call.request.model`, `llm_call.request.generation_config`, `llm_call.response.choices`, `llm_call.response.usage`, `llm_call.response.finish_reason`, `llm_call.response.error`, `metadata.duration_ms`, `metadata.model_endpoint`. **本波新增**：每条记录 SHALL 携带**显式 schema 版本号**；episode/decision/attempt 及其字段解释 SHALL 在**实际生产点**确定（02.5 装配 / 02.4 模型终局），MUST NOT 由采集侧临时推断；未知谱系 MUST 显式标注，MUST NOT 静默归类。
+The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/{session_id}.jsonl`. Each line SHALL be a JSON object containing the following fields: `timestamp`, `session_id`, `user_id`, `batch_index`, `llm_call.request.messages`, `llm_call.request.model`, `llm_call.request.generation_config`, `llm_call.response.choices`, `llm_call.response.usage`, `llm_call.response.finish_reason`, `llm_call.response.error`, `metadata.duration_ms`, `metadata.model_endpoint`. **本波新增**：每条记录 SHALL 携带**显式 schema 版本号**；episode/decision/attempt 及其字段解释 SHALL 在**实际生产点**确定（02.5 装配 / 02.4 模型终局），MUST NOT 由采集侧临时推断；未知谱系 MUST 显式标注，MUST NOT 静默归类。**兼容范围界定**：上述 `{trajectory_dir}/{session_id}.jsonl` 路径与字段清单**只界定旧格式兼容范围**，MUST NOT 被当作新格式的硬约束；**新记录 schema 由 00.3 审定**，其**最小真实生产字段**（请求/响应/usage/工具调用/时间等）MUST NOT 因「不硬套旧结构」而丢失。
 
 #### Scenario: Single LLM call produces one JSONL line
 
@@ -34,13 +34,22 @@ The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/
 
 ### Requirement: Conversion to AReaL SFT dataset
 
-The system SHALL provide a `convert_trajectories.py` script that reads tagent JSONL files and produces a HuggingFace Dataset compatible with AReaL's `SFTTrainer`. The SFT dataset SHALL contain `input_ids` and `loss_mask` fields, where prompt tokens have `loss_mask=0` and completion tokens have `loss_mask=1`. **本波范围修正**：本次只做**数据闭环＋SFT 消费**，源 `--mode rl`（AReaL `PPOTrainer` prompt dataset 路径）**不在本次范围**——重构 MUST NOT 新增真实 on-policy 消费者，MUST NOT 把 PPO/GRPO/RL prompt dataset 兼容当作本次交付或验收项；既有转换器 `v2` 结构仍**只读导入**（见上文「旧格式只读导入」），不改其 v2 含义。
+> 标题沿用旧名（delta 寻址）：语义已改为**中性 SFT 消费合同**。
+
+系统 SHALL 提供一条将 tagent JSONL 轨迹转换为**可被某个 SFT 消费者读取**的数据集（含 `input_ids` 与 `loss_mask`，prompt 置 `loss_mask=0`、completion 置 `loss_mask=1`）的路径。**具体 tokenizer / chat template / 制品 MUST NOT 由本 spec 指定**：MUST NOT 默认 AReaL 或固定模型（如 `Qwen/Qwen2.5-1.5B-Instruct`），MUST NOT 作本次默认新依赖；真实 SFT consumer 与制品 SHALL 在 **06.6 前具名核准授权**（维持 `design-blocked` 待核），MUST NOT 自动选择/安装模型。
+
+**本波范围修正**：本次只做**数据闭环＋SFT 消费**，源 `--mode rl`（AReaL `PPOTrainer` prompt dataset 路径）**不在本次范围**——重构 MUST NOT 新增真实 on-policy 消费者，MUST NOT 把 PPO/GRPO/RL prompt dataset 兼容当作本次交付或验收项。既有转换器 `v2` 结构**只读导入**（见「旧格式只读导入」）——旧 AReaL 兼容**仅是 v2 只读导入说明**，不改其 v2 含义。
 
 #### Scenario: Convert JSONL to SFT dataset
 
-- **WHEN** `convert_trajectories.py` is run with `--input data/trajectories/ --output data/sft/ --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft`
-- **THEN** a HuggingFace Dataset SHALL be created at the output path
+- **WHEN** 转换以某个**已具名核准**的 tokenizer/模板运行（具体制品不在本 spec 指定，由 06.6 授权）
+- **THEN** a dataset SHALL be created at the output path
 - **AND** each sample SHALL have `input_ids` (tokenized prompt + completion) and `loss_mask` (0 for prompt, 1 for completion)
+
+#### Scenario: 不指定固定制品且不默认新依赖（失败，本波新增）
+
+- **WHEN** 审查本能力是否把某 tokenizer/模型（如 Qwen）或 AReaL 设为本次默认依赖/指定制品
+- **THEN** MUST NOT 指定：真实 consumer/制品由 06.6 具名核准，未核准时维持 `design-blocked`，MUST NOT 自动安装/选型
 
 #### Scenario: on-policy/PPO 路径不在本次范围（失败，本波新增）
 
@@ -50,15 +59,15 @@ The system SHALL provide a `convert_trajectories.py` script that reads tagent JS
 ## ADDED Requirements
 
 ### Requirement: 版本化记录与生产点
-训练记录 SHALL 显式版本化；episode/decision/attempt 的**生产点** MUST 前移到装配与模型终局处（02.5/02.4），字段解释在 **00.3 审定**后由本域落实。**episode ≠ session**：episode SHALL 表示业务过程（含子调用、Handoff、共享历史的保存数据依赖），MUST NOT 简单等同于 session。
+训练记录 SHALL 显式版本化；episode/decision/attempt 的**生产点** MUST 前移到装配与模型终局处（02.5/02.4），字段解释在 **00.3 审定**后由本域落实。**episode ≠ session（非强制等同，也非强制拆分）**：episode SHALL 表示业务过程（含子调用、Handoff、共享历史的保存数据依赖）；应用 MAY 选择令某 episode 与某 session 重合，但 MUST NOT 强制 episode 等同 session，MUST NOT 强制把每个 session 拆成多 episode。
 
 #### Scenario: 装配点决定字段（正常）
 - **WHEN** 一次请求经装配层并发起
 - **THEN** decision/attempt 标识 MUST 在装配/终局点生成并向后传递，采集侧只消费不重写。
 
-#### Scenario: episode 与 session 不等同（失败）
+#### Scenario: episode 边界由业务依赖决定（非强制）
 - **WHEN** 同一 session 内发生子调用、Handoff 或共享历史
-- **THEN** 记录 MUST 按业务依赖划分 episode 边界，MUST NOT 把整个 session 视作单一 episode。
+- **THEN** 记录 SHALL 按业务依赖划分 episode 边界；应用亦 MAY 选择令 episode 与 session 重合——MUST NOT 强制等同，MUST NOT 强制把每个 session 拆成多 episode。
 
 #### Scenario: 并发子调用各自 attempt（并发）
 - **WHEN** 两个子调用并发发起

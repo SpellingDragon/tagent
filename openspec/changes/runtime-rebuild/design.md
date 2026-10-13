@@ -1,6 +1,6 @@
 ## Context
 
-本变更从清理后的现场重新规划，不沿用旧 `rebuild-formal-runtime` 的完成状态。HEAD 为 `56c58eb`，现存残件及保护面见 `baseline.md`。本轮用户授权为 OpenSpec 规划产物及检查器；产品代码、产品测试、依赖、主规格和残件不修改。
+本变更从清理后的现场重新规划，不沿用旧 `rebuild-formal-runtime` 的完成状态。**清理前历史** HEAD `56c58eb`（其残留的 `model/`/`state/`/`tagent/`/`tests/` 与旧 change 残件已于 2026-10-13 用户授权批次整目录删除）；**当前新基线** HEAD `a9381ce`（`chore(plan): land runtime-rebuild planning baseline and contract checkers; remove stale wave remnants`）。清理前盘点与保护面**保留于 `baseline.md`（历史记录，附处置更新，不逐行改写）**。本轮用户授权为 OpenSpec 规划产物及检查器；产品代码、产品测试、依赖、主规格不修改。
 
 ## Goals / Non-Goals
 
@@ -41,7 +41,7 @@
 | 08-host | 根公共API/CLI、微信独立module、文件/诊断 | 02–07实际装配；真实发送另授权 |
 | 09-acceptance | 场景观测、迁移回退、全量门禁、正式档/规范闭合 | 全部被验收任务；归档另授权 |
 
-主规格120条能力的责任映射见 `coverage.md`，这是能力盘点，不是601个Requirement均已语义认证的声明。新增 `runtime-inspection` 用于跨对象统一查询，不替代任务看板或观测导出。每个能力只有一个delta写者；跨域通过任务前置协作，不复制同名规范。
+主规格120条能力的责任映射见 `coverage.md`，这是能力盘点，不是601个Requirement均已语义认证的声明。新增 `runtime-inspection` 用于跨对象统一查询，不替代任务看板或观测导出。每个能力只有一个delta写者；跨域通过任务前置协作，不复制同名规范。目标—KR（架构成功判据）见 [expectations.md](expectations.md)；锁定框架的原生复用依据集中于 [trpc-reuse.md](trpc-reuse.md)，由 00.3 接入 G1 审定。
 
 ### D3 生命周期合同与设计闸
 

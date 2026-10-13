@@ -4,7 +4,7 @@
 
 ## Context
 
-- 现场：`model/`、`state/`、`tagent/` 仅少量残件；`tool`/`governance`/`memory`/`mcp`/`a2a` 包不存在。`go.mod` 锁定 core fork `v1.11.2-tagent.1`、provider `v1.10.0`（`go.sum` 齐全）。HEAD `56c58eb`。
+- 现场：清理前残留的 `model/`、`state/`、`tagent/` 已随 2026-10-13 用户授权清理批次删除；`tool`/`governance`/`memory`/`mcp`/`a2a` 包不存在。`go.mod` 锁定 core fork `v1.11.2-tagent.1`、provider `v1.10.0`（`go.sum` 齐全）。**清理前历史 HEAD `56c58eb`，当前新基线 HEAD `a9381ce`**。
 - 权威设计闸：G0（现场/保护面/档位/资源）、G1（共享责任签名 + 生产消费者）、G2（正常/失败/并发/重启纵向推演）、G3（逐文件白名单/前置/读写冲突/命令/预算）。**本域实施单的共同前置是 G0–G3 通过**。
 - 本域不承担 `state`/`agent`/`task` 核心装配（属 01/02）；本域**消费**其冻结接口。
 
@@ -53,7 +53,7 @@
 ## 并发 / 取消 / 生命周期 / 错误 / 配置（本域切片）
 
 - **并发**：注册表/MCP 注册表需并发安全（`Get/List/Names/Add/Remove`）；发现按实时注册表读；工具执行前策略恰一次（per-request 一次性，不跨并发共享可变状态）。
-- **取消**：后台任务取消不连坐（02 域语义）；MCP 调用取消需响应；exec/tmux 取消须有**停止凭证**，`unknown≠dead`。
+- **取消**：后台任务取消不连坐（02 域语义）；MCP 调用取消需响应；exec/tmux 取消须有**停止凭证**，`unknown≠dead`；**连续 `unknown` 只升级诊断或显式停止处理，MUST NOT 作为判死/退出依据，未止义务与资源租约保留且可解释**。
 - **生命周期**：exec/tmux 会话 TTL/续行/重挂；MCP 关停统一释放（幂等）；进程关闭时按依赖序。
 - **错误**：MCP 失败以**结果（nil error）**返回自纠材料；治理拒绝产生具名原生结果；审批通道投递失败**不阻塞审批门（闸不是墙）**。
 - **配置**：`mcp_servers`/`api_key_env`/`embedding`/`trajectory` 等按计划 §4.4/§4.5；embedding 未配置时**零行为变化**。

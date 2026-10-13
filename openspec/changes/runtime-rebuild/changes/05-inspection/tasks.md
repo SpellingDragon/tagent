@@ -26,7 +26,7 @@
 
 - [ ] 05.3 提交后插件接 **OTel/审计**，SDK 尝试观察分层；**关闭 OTel 不影响 Query** —— 状态：planned —— 前置：02.6、05.2 —— 候选文件：`telemetry/otel.go`、`plugin/observe.go`、`tests/integration/inspection/observation_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json` —— **资源门（09.5 消费，归属本任务 05.3）**：真实 collector 接收 span/metric 由**点名用例** `TestRealCollectorDelivery`（同包 `tests/integration/inspection`，05.3 实现 + `09.5` 验收）在启用门+授权+`-count=1` 单次运行；确定性 `TestObservationDoesNotOwnState`（关闭 OTel 仍 Query 可用）不以真实 collector 为前提。**资源归属 05.3**——MUST NOT 以 `06.3` 的 RL 队列封账 `TestCaptureAdmissionAndSeal` 冒充 collector 接收。
 
-- [ ] 05.4 在**重启/取消/退役/存储失败**下解释每条**阻塞及下一推进者** —— 状态：planned —— 前置：03.3、04.2、05.3 —— 候选文件：`query/explain.go`、`tests/integration/inspection/blocker_explain_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json`
+- [ ] 05.4 在**重启/取消/退役/存储失败**下解释每条**阻塞及下一推进者**（含连续 `unknown` 仅升级诊断/显式停止处理、不作判死退出依据；未止义务/租约保留且可解释） —— 状态：planned —— 前置：03.3、04.2、05.3 —— 候选文件：`query/explain.go`、`tests/integration/inspection/blocker_explain_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json`
 
 ## 缺口修复
 

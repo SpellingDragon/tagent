@@ -15,8 +15,9 @@
 ## 0、结论（先行）
 
 - **抵达 DoD 的唯一路径**：G0 现场/资源盘点 → G1 共享签名与原生接口探针 → G2 正常/失败/并发/重启纵向推演 → G3 逐单精确文件授权 → 按**就绪叶任务集合**派发产品实现（W 两两不相交且 W 交对方 R 为空）→ 每个域全场景 + 跨域接线 → 09.1 正式入口真实观测对 golden → 09.3 两 module 全量门禁 → 09.5 真实资源逐项 → 09.6 闭合。任一环缺凭据即不勾选。
-- **本轮最大风险/瓶颈**：G1 尚未有最小编译探针（无产品实施授权），G2 产品观测未产生；因此**产品完成度=0，65 叶任务全部 planned**。第二大风险是「规划格式全绿」被误读为「产品通过」——本文件的每处完成声明都必须能落到**可复跑命令 + 原始退出码**。
+- **本轮最大风险/瓶颈**：G1 尚未有最小编译探针（无产品实施授权），G2 **设计推演尚未落书面结论**（G2 = 实施前正常/失败/并发/重启桌面推演，**非**产品观测；产品观测属 09，另行说明）；因此**产品完成度=0，65 叶任务全部 planned**。第二大风险是「规划格式全绿」被误读为「产品通过」——本文件的每处完成声明都必须能落到**可复跑命令 + 原始退出码**。
 - **本轮实际完成的只是规划与检查工装**，且**规划/检查工装完成记录与产品完成记录严格分开**：检查器自测通过只证明检查器，不证明产品、不勾选任何叶任务。
+- **对照索引**：目标—KR 见 [expectations.md](expectations.md)；锁定框架原生复用依据见 [trpc-reuse.md](trpc-reuse.md)（单点，不互抄）；二者随 00.3 审定接入 G1。
 
 ## 1、编排四问
 
@@ -32,7 +33,7 @@
   - **交付/宿主链**：`02.9→04.4`、`03.8→04.4`；`02.9→08.1`、`05.2→08.1`；`08.2←08.1/04.4/04.5`；`08.3←08.2/03.8`；`08.4←06.8/07.1/07.3/07.4/08.3`。
   - **收尾链**：`09.1`（← 01.1–08.4 共 50 项确定性叶）`→09.3→09.6`；`09.5←03.2/04.3/04.4/04.9/05.3/06.6/08.5`。
   - **叶级前置一律以 `task-graph.json` 为准**；`tasks.md` 的 mermaid 只画汇合（其 `01.4→01.5` 等**节点摘要不作派发图**，`01.4` 就绪即可派发，`01.5` 不构成 `01.4` 前置）。
-- **本轮做不了什么**：任何产品叶任务（无 G3 写权限、无产品 build/test 授权、无外部资源）；G1 签名探针与 G2 纵向产品取证；残件清理与主 spec 变更；提交/归档。
+- **本轮做不了什么**：任何产品叶任务（无 G3 写权限、无产品 build/test 授权、无外部资源）；G1 签名探针与 G2 设计推演签证；残件清理与主 spec 变更；提交/归档。
 
 ### 授权（每单白名单精确到文件 / 共享面归属 / 预授权与上报边界）
 
@@ -78,7 +79,7 @@
 
 #### 2.1 已执行 B 批次登记写集（精确文件清单，替代原通配授权）
 
-> 本仓 `openspec/changes/runtime-rebuild/**`、`golden/`、`scripts/check_runtime_*.py` 等均为**未纳入 git 的规划资产（`git status` 显示 `??`）**，无历史可比对；下列清单按台账描述**收敛为文件级**作为该批次登记写集。批次 2/3 在 `task-graph.json`、`09-acceptance/*` 等文件上有**串行重叠**（属收尾），不表示并发；如需 git 级精确写集，须待资产入库后以 diff 回填。
+> 本仓 `openspec/changes/runtime-rebuild/**`、`golden/`、`scripts/check_runtime_*.py` 等在**批次 1–3 当时**为未纳入 git 的规划资产（`git status` 显示 `??`，无历史可比对）——此为**批次 1–3 历史语境**；当前基线 `a9381ce` 已将该规划基线与检查工装入库，可 diff。下列清单按台账描述**收敛为文件级**作为该批次登记写集。批次 2/3 在 `task-graph.json`、`09-acceptance/*` 等文件上有**串行重叠**（属收尾），不表示并发；如需 git 级精确写集，须待资产入库后以 diff 回填。
 
 **B1（顶层四件套 + 00 四件套 + 顶层编排 spec + task-graph）**
 - `openspec/changes/runtime-rebuild/proposal.md`
@@ -355,7 +356,38 @@
 > 提交为**本地单一提交**（无 push/force、未改 config、未跳钩子）；message 见上行。
 > 本批**无产品验证**：无 Go build/test/vet、无 `go list`、无安装/下载/付费/微信、无归档。
 
+### 批次 6（本代理，CodeReview 7 项确认问题修复 + 预期档/复用导航 + golden 关联 + HEAD 基线表述；只写规划 md/json 与 `golden/runtime/scenarios.json`）
+
+> 用户授权：本轮为**规划补充批次**（**非产品 apply**）；**唯一可写** = `openspec/changes/runtime-rebuild/**` 现有/新增规划 md/json + `golden/runtime/scenarios.json`；不碰产品/测试/主 spec/历史 wiki/prototype/旧 CI 与 scripts/go.mod/go.sum/interview skill；外部批准计划**只读**。**不安装/网络/Go build·test·list/提交/推送/归档/清理**；仅跑检查器自测、plan/policy/contract 模式、OpenSpec strict。
+
+| 项 | 定位 | 产物 | 状态 | 凭据 |
+|---|---|---|---|---|
+| Q1 Receipt/异步义务 | `02-execution/specs/subagent-turn-execution/spec.md` + 02 proposal/tasks | 成功受理 Receipt **≠** 义务结清（义务保持至结清）；仅未新增义务的 dedup/rejected 撤本次预登记、旧义务不动；统一事件调度（同 invocation 可多 decision）、受理≠运行即成功、无第二循环；不冻结旧类名/500ms | 完成 | `openspec validate` EXIT=0（见下） |
+| Q2 空 Governance 恒真 | `01-state-binding/specs/config-state-twinship/spec.md` + 01 proposal/design/tasks | 缺必需检查**拒绝**、不适用/禁用**显式记录**（非证据通过）；候选拒绝**释放候选独占资源**、旧资源不受影响 | 完成 | 同上 |
+| Q3 Apply prompt 固定 vs 热读 | 同 spec | state 持**结构绑定+文件来源**，请求边界读取并固化**实际内容版本**；历史快照重放不阻新请求文件更新；**文件内容版本 ≠ 结构 generation** | 完成 | 同上 |
+| Q4 07 commit 时刻开窗 | `07-evolution/specs/{git-native-refine,evolution-evaluation}/spec.md` + 07 级联 | 窗口锚改**真实请求消费版本 + 首消费激活证据**；register 补 Git 关联**不重贴**旧请求/反馈；缺关联标 unknown/insufficient；保全 Git 安全/四态；不引入新版本平台 | 完成 | `modified=57`（Q4 为 MODIFIED 替换，未增计数） |
+| Q5 三次 unknown 判死 | `04-capabilities/specs/resident-session-continuity/spec.md` + 04 design/tasks + 05 级联 | 连续 unknown **只升级诊断或显式停止**，**次数阈值不作退出依据**；未止义务/租约保留且可解释 | 完成 | 同上 |
+| Q6 用途矩阵 + 中性 SFT | `06-learning/specs/{offline-training-export,trajectory-recording}/spec.md` + 06 级联 | 补 DPO/采样 RL 用途矩阵（用途/证据/qualified·ineligible·unknown/缺失原因）；中性 SFT 消费合同（旧 AReaL 仅 v2 只读导入）；SFT 资格不推出其它用途；episode≠session 不强制等同/拆分 | 完成 | 同上 |
+| Q7 03.8 外置归 workspace | `03-history/{proposal,design,specs/tool-output-interception/spec.md}` | 不预建未登记根 `tool` 包；输出外置归 `workspace/externalize.go`（原生 wrapper 注入端口）；不放宽 architecture policy | 完成 | `check_runtime_architecture --check-policy` → policy_packages=19/policy_edges=19，EXIT=0 |
+| E1 预期档（新） | `expectations.md`（154 行） | 5 O + 可判定 KR（结果/真实消费者/任务IDs/场景证据/待核）；10 金样逐条表；non-goal 不含真实微信必验；不自报完成率 | 完成 | 链接见 E5；本文件 |
+| E2 复用导航（新） | `trpc-reuse.md`（104 行） | 8 类能力逐行 module/签名/差异/接线/状态；core fork `v1.11.2-tagent.1` / provider `v1.10.0`；evaluator 独立 module 标 **candidate**（不自动升级/安装） | 完成 | §§1–9 |
+| E3 golden 关联 | `golden/runtime/scenarios.json` | S03 call/task/decision + receipt/正文请求索引；S05 drain 两阶段；S07 去重→**引用互不覆盖/内容相等**（不强制优化）；S08 派生数量/归属阻塞；S10 工件链/替换绑定；SFT 非空/形状对齐（不预设批次/制品）；保留 10 ID/scope、S10 资源门 | 完成 | `check_runtime_evidence --check-contract` → scenario_count=10、observation_values=63，EXIT=0 |
+| E4 HEAD 基线表述 | 顶层 `design.md` + `04-capabilities/design.md` + `baseline.md` | 56c58eb 标**清理前历史**、a9381ce 为**当前新基线**；保留 baseline 历史记录只附更新（本单无清理/提交） | 完成 | 见下 |
+| E5 单点链接 | 顶层 `proposal/design/tasks` + 本文件 §0 + `00-foundation/tasks.md` 00.3 + `09-acceptance/tasks.md` 09.6 | 预期档/复用导航单点链接，不全文互抄 | 完成 | 链接可解析 |
+
+#### 批次 6 复跑凭据（原始退出码，非汇总）
+
+| 命令 | 退出码 | 关键输出 |
+|---|---|---|
+| `python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'` | 0 | `Ran 130 tests ... OK` |
+| `python3 scripts/check_runtime_plan.py --json` | 0 | `ok=true`；graph_tasks=65/checkboxes=65/covered_main_capabilities=120/spec_files=62/**scenarios=442/requirements=127/added=70**/modified=57/removed=0/domains_with_spec=10/graph_edges=162/orchestration_layers=4（相对批次 3–5 的 requirements=126→127、scenarios=433→442、added=69→70，系本批 spec 增补，非回归） |
+| `python3 scripts/check_runtime_architecture.py --check-policy --json` | 0 | `ok=true`；policy_packages=19/policy_edges=19 |
+| `python3 scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/runtime-rebuild/task-graph.json --json` | 0 | `ok=true`；scenario_count=10/scenarios_required=10/scope=complete/remaining_required=[]/observation_values=63/evidence_contract_fields=18 |
+| `openspec validate runtime-rebuild --strict --no-interactive` | 0 | `Change 'runtime-rebuild' is valid` |
+
+> 本批**无任何产品验证**：无 Go build/test/vet、无 `go list`、无安装/下载/付费/微信、无提交/推送/归档/清理；65 叶任务**全 planned**、checkbox **全未勾**、DAG 无环（`check_runtime_plan` 含 cycle 检测，`ok=true`）。G1 **未运行**；G2 为**桌面推演**（实施验收是未来 09 证据，两者分别说清）。
+
 ### 明确未完成（不得勾选）
 
-- 65 个叶任务**全部 planned**；G1 签名探针、G2 纵向产品取证**未执行**；无产品 build/test/vet；无 `go list`；无提交/归档。
+- 65 个叶任务**全部 planned**；G1 签名探针、G2 设计推演（正常/失败/并发/重启）**未执行**（产品观测属 09 证据，**不属 G2**）；无产品 build/test/vet；无 `go list`；无提交/归档。
 - 外部计划文件**未改**；主 `openspec/specs/`、prototype、历史 wiki、用户文件**未改**。

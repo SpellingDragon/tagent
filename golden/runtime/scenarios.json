@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "change": "runtime-rebuild",
-  "description": "runtime-rebuild 的 10 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID、时间或 CallID。",
+  "description": "runtime-rebuild 的 10 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列（供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S10 保留 `resource` scope 与真实 SFT 制品门，非空/形状对齐不预设具体批次或制品。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task→decision 一次性 1:1 建立，非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的 capture/seal/export/sample/episode 为规范化工件关系记录并接真实 consumer 输入，labels/mask 以形状非空与值合法性断言（非仅字段存在）。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
   "evidence_contract": {
     "note": "上游 scenario runner 的正式入口产物应满足下列字段；检查器只做明示校验，不把它当作防伪或加密证明——runner/source_fingerprint/execution 均由 runner 自报，不声称来源已认证。本块字段集与 check_runtime_evidence.py 的强制集自洽（声明少于强制即失败）。",
     "required_fields": ["schema_version", "runner", "execution", "source_fingerprint", "test_log_ref", "records"],
@@ -69,7 +69,20 @@
         "receipt_before_terminal": true,
         "background_result_in_next_model_view": true,
         "native_call_id_preserved": true,
-        "model_message_roles": ["user", "assistant", "tool", "assistant"]
+        "model_message_roles": ["user", "assistant", "tool", "assistant"],
+        "requested_calls": ["call-a", "call-b"],
+        "receipts": [
+          {"call": "call-a", "task": "task-a", "decision": "decision-a"},
+          {"call": "call-b", "task": "task-b", "decision": "decision-b"}
+        ],
+        "backgrounds": [
+          {"call": "call-a", "marker": "bg-a"},
+          {"call": "call-b", "marker": "bg-b"}
+        ],
+        "captured_content_markers": {"receipt_message": "receipt-marker-a", "background_original": "background-marker-a"},
+        "links_are_event_derived_one_to_one": true,
+        "multi_tool_call_boundary_preserved": true,
+        "request_standin_strictly_validated": true
       }
     },
     {
@@ -101,7 +114,7 @@
         "started_notice_target_fixed": true,
         "future_notice_target_new_instance": true,
         "old_notice_delivered_to_new_instance": false,
-        "close_reported_drained": false,
+        "drain_phases": {"before_all_stopped": false, "after_all_stopped": true},
         "notice_identity_fields": {"task": true, "round": true, "category": true, "sequence": true}
       }
     },
@@ -125,7 +138,7 @@
     {
       "id": "S07",
       "title": "同正文跨 owner/format、预览恢复、清副本后准确召回",
-      "task_ids": ["03.1", "03.6"],
+      "task_ids": ["03.1", "03.4", "03.6", "03.7", "03.8"],
       "test_package": "tests/integration/acceptance",
       "test_name": "TestScenario07ReplicaAndOwnerIsolation",
       "status": "planned",
@@ -133,7 +146,8 @@
       "anchor_tests": ["tests/integration/history:TestOriginalReferenceIsolation", "tests/integration/history:TestReplicaMaterialization"],
       "observations": {
         "distinct_owner_references": 2,
-        "same_bytes_deduplicated": true,
+        "owner_references_nonoverwriting": true,
+        "same_bytes_content_equal": true,
         "original_bytes_equal_readback": true,
         "replica_materialized_after_cleanup": true,
         "presentation_full_text_iff_decision_full": true
@@ -142,7 +156,7 @@
     {
       "id": "S08",
       "title": "OTel 关闭时 Query 权限、快照、分页、订阅断档与阻塞解释",
-      "task_ids": ["05.2", "05.3"],
+      "task_ids": ["05.1", "05.2", "05.3", "05.4"],
       "test_package": "tests/integration/acceptance",
       "test_name": "TestScenario08QueryWithoutOtel",
       "status": "planned",
@@ -153,7 +167,14 @@
         "cursor_revision_bound": true,
         "expired_window_explained": true,
         "subscription_overflow_reset_explained": true,
-        "statistics_derived_from_detail": true
+        "statistics_derived_from_detail": true,
+        "authorization_filtered_detail_normalized": true,
+        "derived_counts": {"configured": 2, "resident": 2, "busy": 1, "blocked": 1},
+        "blockers_with_next_advancer": 1,
+        "blocker_detail_rows": [
+          {"object": "task-a", "owner": "session-a", "blocker": "storage-degraded", "advancer": "task-a"}
+        ],
+        "blocker_statistic_matches_detail": true
       }
     },
     {
@@ -186,9 +207,22 @@
       "observations": {
         "split_grouped_by_episode": true,
         "shared_ancestor_not_leaked": true,
-        "sft_batch_sizes": [2, 3],
-        "action_observation_mask_present": true,
+        "sft_samples_nonempty": true,
+        "sft_shape_aligned": true,
+        "sft_labels_shape_nonempty": true,
+        "sft_labels_values_well_formed": true,
+        "action_mask_shape_nonempty": true,
+        "action_mask_matches_labels": true,
         "reward_versioned": true,
+        "pipeline_artifact_links": {
+          "capture": "capture-a",
+          "seal": "seal-a",
+          "export": "export-a",
+          "samples": [
+            {"sample": "sample-a", "episode": "episode-a", "capture": "capture-a", "export": "export-a", "consumer_input": "consumer-input-a"}
+          ]
+        },
+        "model_replacement_binding": {"new_request": "new_binding", "inflight_request": "previous_binding"},
         "model_replacement_publishes_on_success_only": true
       }
     }

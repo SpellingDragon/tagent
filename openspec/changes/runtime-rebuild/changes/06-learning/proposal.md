@@ -9,11 +9,11 @@
 
 ## What Changes
 
-- 接通**版本化记录**与 episode/decision/attempt 的**实际生产点**；旧格式**只读导入**，未知谱系**显式**；新格式**明确版本**，不被旧 v2 结构绑架。
+- 接通**版本化记录**与 episode/decision/attempt 的**实际生产点**；旧格式**只读导入**，未知谱系**显式**；新格式**明确版本**，不被旧 v2 结构绑架；**旧 JSONL 路径/字段只界定兼容范围**，**新记录 schema 由 00.3 审定**、**最小真实生产字段**不丢。
 - 请求边界**安全快照**、原生日志/logprobs 保留、统一终局观察；不重跑 provider options 造快照；Headers/URL secrets **不落盘**，Native logprobs **确实返回才 present**、`unsupported` 需支持声明、`unknown≠not_returned`。
 - 有界队列/字节预算/**丢失账**/发送与关闭准入/**writer 封账**；**采集与 model 共享终局**、发送与关闭同一 protocol、**no seal 记 partial**。
 - 授权导出、延迟反馈、**版本化 reward**、逐样本来源 manifest；严格转换、动作/观察 mask、**episode≠session**、基于**因果依赖**的分组防泄漏、**feedback/reward 分开**。
-- **真实 SFT 消费者**读取并 tokenize/collate，检查 labels/mask/非空样本与拒绝账；RL HTTP 鉴权/allowlist/逐跳重定向/大小限制/反馈归属。
+- **真实 SFT 消费者**读取并 tokenize/collate，检查 labels/mask/非空样本与拒绝账（**不指定固定 tokenizer/制品**，真实 consumer/制品 06.6 前具名核准）；**训练用途资格矩阵（DPO / 采样 RL）**（每行：用途/所需证据/结论/缺失原因，不由 SFT 资格外推）；RL HTTP 鉴权/allowlist/逐跳重定向/大小限制/反馈归属。
 - 模型替换**租约**贯穿实际请求与流结束，重建失败不发布错误绑定。
 
 ## Capabilities
@@ -25,8 +25,8 @@
 ### Modified Capabilities
 
 - `decision-capture`：安全快照在请求前、Headers/URL 不落盘、logprobs 三态、no seal partial。
-- `trajectory-recording`：版本化记录 + episode/decision/attempt 生产点；旧 v2 只读导入，新格式明确版本；**源 AReaL `PPOTrainer` RL prompt dataset（`--mode rl`）路径不在本次范围**（SFT-only，不新增真实 on-policy 消费者）。
-- `offline-training-export`：授权导出 + 版本化 reward + 真实 SFT 消费（**真实 tokenizer/collator**）。
+- `trajectory-recording`：版本化记录 + episode/decision/attempt 生产点；旧 v2 只读导入（**旧 AReaL 兼容仅 v2 只读导入说明，不作本次默认新依赖**），新格式明确版本；**中性 SFT 消费合同**（不指定固定 tokenizer/制品、不默认 AReaL 或 Qwen）；**源 AReaL `PPOTrainer` RL prompt dataset（`--mode rl`）路径不在本次范围**（SFT-only，不新增真实 on-policy 消费者）。
+- `offline-training-export`：授权导出 + 版本化 reward + **训练用途资格矩阵（DPO / 采样 RL）** + 真实 SFT 消费（**真实 tokenizer/collator**）。
 - `trajectory-verification`：真实消费验收的可见失败（非空/labels/mask/拒绝账）。
 - `rl-feedback`：RL HTTP 鉴权/allowlist/逐跳重定向/大小限制/反馈归属。
 - `feedback-binding`：**feedback/reward 分开**、版本化与模型替换闭环。

@@ -7,7 +7,7 @@
 
 ### Requirement: 工具输出大小拦截包装器
 
-tagent SHALL 在 `NewTagentAgent` 中为所有工具添加输出大小拦截包装器（`OutputLimitTool`）。包装器 SHALL 拦截工具 `Call()` 方法的返回值，当序列化后的输出字符数超过阈值时，截断输出并附加错误提示信息。
+tagent SHALL 在 `NewTagentAgent` 中为所有工具添加输出大小拦截包装器（`OutputLimitTool`）。包装器 SHALL 拦截工具 `Call()` 方法的返回值，当序列化后的输出字符数超过阈值时，截断输出并附加错误提示信息。该包装器 SHALL 作为 **tagent 面类型经注入端口接入**（实现归 `workspace/externalize.go`，见 03.8），MUST NOT 新建**未登记的根 `tool` 包**（architecture.json 无该包，MUST NOT 放宽 policy 换绿）。
 
 超大结果 SHALL 接入**统一外置路径**：通用工具、任务结果、tmux 输出与 overflow 输出 SHALL 走同一外置逻辑，MUST NOT 各自另造外置/截断路径。首次入模前 SHALL 先保存持久原文，再向模型呈现有界预览与分段入口（凭票据可经分段读取取回全文）；MUST NOT 直接截断而丢弃原文。清副本后原文仍有效时 SHALL 可重物化。
 

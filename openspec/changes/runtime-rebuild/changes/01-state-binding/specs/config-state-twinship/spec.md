@@ -9,7 +9,9 @@
 
 AgentState SHALL 保存 agent 当前生效的 system prompt（由 resolve 在 Apply 时写入，nil resolve 取声明原文），模型请求读取该保存值；JSON 快照保存并恢复该值。
 
-生效 system prompt 是 state 持有的**生效执行绑定**的一员；与之同代的模型、工具、文件版本与插件管线 SHALL 由 state 一并持有并按请求借出（见「候选活绑定准备与同代借用」）。执行器 MUST NOT 自持第二份生效绑定作为真源。
+生效 system prompt 是 state 持有的**生效执行绑定**的一员。state SHALL 持有其**结构绑定与文件来源**（哪些文件、以何顺序组装）并按请求借出；**文件内容 SHALL 在请求边界按来源读取，并固化该次请求实际使用的版本**，MUST NOT 把「结构代」等同于「文件内容版本」。执行器 MUST NOT 自持第二份生效绑定作为真源。
+
+模型、工具与插件管线 SHALL 同代借出；**文件内容 MUST NOT 被无条件限定为与模型/工具/插件同一发布代**——文件可热读更新而不换代，**结构 generation 可保持不变**。历史快照重放 MUST NOT 阻止新请求读到更新后的文件内容。
 
 #### Scenario: 声明变更经 Reload 落入 state
 - **WHEN** 配置含 skill/prompt 且 ReloadConfig 提交
@@ -19,24 +21,43 @@ AgentState SHALL 保存 agent 当前生效的 system prompt（由 resolve 在 Ap
 - **WHEN** 保存快照后另一进程 LoadState
 - **THEN** 恢复的 SystemPrompt 为快照时的生效值，无需 registry 即可读取
 
-#### Scenario: 生效绑定是同一代
+#### Scenario: 文件内容请求边界固化且不换代
 
-- **WHEN** 一次请求在请求边界取得生效绑定
-- **THEN** 其 system prompt、模型、工具、文件版本与插件管线 SHALL 同属一次已发布代，MUST NOT 跨代拼接
+- **WHEN** 一次请求在请求边界按来源读取到某文件内容
+- **THEN** 该请求 SHALL 固化并使用本次读到的实际内容版本；随后的新请求 SHALL 读到更新后的内容，**结构 generation 可不变**
+
+#### Scenario: 历史快照重放不阻文件更新
+
+- **WHEN** 重放一份历史快照后又发起新请求
+- **THEN** 新请求 MUST 按来源读到当前文件内容，MUST NOT 被历史快照的内容版本束缚
+
+#### Scenario: 在途请求模型/工具/插件同代而文件可更新
+
+- **WHEN** 一个请求已取得某代模型/工具/插件管线
+- **THEN** 三者 SHALL 同属一代、MUST NOT 跨代拼接；而文件内容 MUST NOT 被强制钉在该发布代
 
 ### Requirement: config→plan→govern→state 管道
 
-配置变更 SHALL 先构建 StatePlan（声明面 Change、Adds/Updates/Removes、下一版生效 prompt），再依序经 Eval→Benchmark→ApplyGate，全过才提交 state；任一段拒绝则 state 保持旧态。nil 治理段恒真。
+配置变更 SHALL 先构建 StatePlan（声明面 Change、Adds/Updates/Removes、下一版生效 prompt），再依序经 Eval→Benchmark→ApplyGate，全过才提交 state；任一段拒绝则 state 保持旧态。
 
-StatePlan SHALL 携带每 agent 的候选活绑定与候选资源登记（`Leases`）；任一段拒绝或候选构造失败时，state SHALL 保持旧态并按构造逆序释放候选独有资源，共享面（store/session/TaskManager）SHALL NOT 被回收。
+**发布前置契约**（由 00.3 先行审定）SHALL 声明哪些治理检查为**必需**：**必需检查缺失时 MUST 拒绝发布**，MUST NOT 视作恒真通过；**不适用或被显式禁用的检查 SHALL 显式记录豁免理由与范围**，MUST NOT 计入「证据通过」。本管道只判定**能否发布**：发布机制的确定性验证（01.5）可注入**真实政策的确定性替身**做机制测试，MUST NOT 把替身结果当作**正式质量结论**；**正式质量评估归 07.4**（结构评估门），MUST NOT 因此新增 07.4→01.5 的回环。
 
-#### Scenario: 恒真管道
-- **WHEN** 以空 Governance 提交合法变更
-- **THEN** 三段视为通过，state 按计划更新
+StatePlan SHALL 携带每 agent 的候选活绑定与候选资源登记（`Leases`）；任一段拒绝或候选构造失败时，state SHALL 保持**旧态不变**并按构造逆序释放**候选独有**资源；共享面（store/session/TaskManager）与**既有在线生效资源** SHALL NOT 被回收。
+
+#### Scenario: 缺必需检查即拒绝发布
+
+- **WHEN** 以空 Governance（未声明任何必需检查）提交合法变更
+- **THEN** MUST 依发布前置契约**拒绝发布**（缺必需证据），state 保持旧态，MUST NOT 报「三段恒真通过」
+
+#### Scenario: 不适用或禁用检查显式记录
+
+- **WHEN** 某治理检查对本次变更为不适用或被显式禁用
+- **THEN** 该检查 SHALL 显式记录豁免理由与范围，MUST NOT 计入发布判定的「证据通过」
 
 #### Scenario: 任一段拒绝
+
 - **WHEN** Eval/Benchmark/ApplyGate 任一返回错误
-- **THEN** 定义、生效 prompt 与现场不变，回收不发生，错误上抛
+- **THEN** 定义、生效 prompt 与现场不变；**候选独有资源按构造逆序释放**，既有在线资源与共享面不受影响，错误上抛
 
 #### Scenario: 段序与计划内容
 - **WHEN** 注入记录顺序的治理段

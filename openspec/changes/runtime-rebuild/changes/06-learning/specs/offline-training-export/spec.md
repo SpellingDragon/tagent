@@ -5,7 +5,7 @@
 
 ## Purpose
 
-定义授权导出、版本化 reward 派生、逐样本来源 manifest 与**真实 SFT 消费**。本波在既有 strict 转换语义上补充：版本化 reward、真实 tokenizer/chat template/collator 消费（**不以常量替身结项**）、真实资源**待授权**的 `design-blocked` 归属。
+定义授权导出、版本化 reward 派生、逐样本来源 manifest、**训练用途资格矩阵（DPO / 采样 RL）** 与**真实 SFT 消费**。本波在既有 strict 转换语义上补充：版本化 reward、真实 tokenizer/chat template/collator 消费（**不以常量替身结项**）、训练用途资格合同、真实资源**待授权**的 `design-blocked` 归属。
 
 ## MODIFIED Requirements
 
@@ -63,3 +63,23 @@
 #### Scenario: 重启后 manifest 稳定（重启）
 - **WHEN** 导出进程重启后重读 manifest
 - **THEN** 分组与版本 MUST 与写入时一致。
+
+### Requirement: 训练用途资格矩阵（DPO / 采样 RL）
+
+除 SFT 外，导出 SHALL 为每个**训练用途**（至少 **DPO** 与**采样 RL**）给出**可判定资格合同**，每行 SHALL 含：**用途** / 所需**真实证据** / 结论（三态之**恰**一：`unknown` = 真正缺证据；`ineligible` = 已知不满足该用途必要条件；`qualified` = 已确定消费者且条件齐备）/ **缺失原因**。判定 MUST NOT 由 SFT 资格外推：**SFT 合格推不出 DPO 或采样 RL 合格**；本域 MUST NOT 接入训练引擎（PPO/GRPO/DPO 训练器），只产**资格合同**。
+
+**DPO**：资格 SHALL 要求**同输入候选对**（同一 prompt 的多个候选响应）与**偏好依据**（选择依据、偏好标签来源）、其**版本**与**分组**（同根 session/episode 不跨组）；缺候选对/偏好依据/版本时：真正缺证据 SHALL 标 `unknown`，已知不满足该用途必要条件 SHALL 标 `ineligible`，两者均具名缺失；仅当已确定消费者且条件齐备时方 SHALL 标 `qualified`。
+
+**采样 RL**：资格 SHALL 取决于**实际算法与行为策略**及**采样证据**（行为策略标识、采样温度/分布、**必要时**的概率或 logprobs 来源）；MUST NOT 笼统断言「所有采样 RL 算法都必须 logprobs」；无消费者与能力证据时：真正缺证据 SHALL 标 `unknown`，已知不满足该用途必要条件 SHALL 标 `ineligible`，**无实际采样算法消费者时 MUST NOT 标 `qualified`**。
+
+#### Scenario: DPO 缺候选对标 unknown
+- **WHEN** 数据仅含单一响应、无同输入候选对或偏好依据
+- **THEN** DPO 资格：真正缺证据 SHALL 标 `unknown`，已知不满足该用途必要条件 SHALL 标 `ineligible`，具名缺失候选对/偏好依据；MUST NOT 因 SFT 合格而外推为 DPO 合格
+
+#### Scenario: 采样 RL 资格取决于真实算法
+- **WHEN** 评估采样 RL 资格
+- **THEN** SHALL 依据实际算法与行为策略/采样证据判定；算法不需 logprobs 时 MUST NOT 因缺 logprobs 判不合格；无实际采样算法消费者时标 `unknown`（真正缺证据）或 `ineligible`（已知不满足必要条件），MUST NOT 标 `qualified`
+
+#### Scenario: 用途矩阵四要素齐备（正常）
+- **WHEN** 审查用途矩阵
+- **THEN** 每个用途行 SHALL 含 用途/所需真实证据/结论（三态之恰一）/缺失原因，结论为三态之一（`qualified` 仅当已确定消费者且条件齐备），MUST NOT 以数量宣称全用途 `qualified`

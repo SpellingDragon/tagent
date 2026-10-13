@@ -2,7 +2,7 @@
 
 ## Context
 
-清理后的工作树只剩 `config`/`state`/`tagent` 的少量残件（`state/compile.go`、`state/store.go`、`state/reload/publish.go`、`state/state.go`），引用的多个包已不存在，**不是可运行基线**（计划 §1）。旧 `rebuild-formal-runtime` 残件（c05-state-config 等）只作字段线索，其进度与勾选不继承。本设计只写「怎么做」，不改一级 design / 主 spec / 旧 change / 外部计划 / prototype。
+清理前工作树曾有 `config`/`state`/`tagent` 的少量残件（`state/compile.go`、`state/store.go`、`state/reload/publish.go`、`state/state.go`），引用的多个包已不存在，**不是可运行基线**（计划 §1）；这些残件已随 2026-10-13 用户授权清理批次删除（见 `baseline.md` §2.1.1），当前新基线 HEAD `a9381ce`。旧 `rebuild-formal-runtime` 残件（c05-state-config 等）只作字段线索，其进度与勾选不继承。本设计只写「怎么做」，不改一级 design / 主 spec / 旧 change / 外部计划 / prototype。
 
 权威来源：`运行时_重设_实施计划_304e54c3.md` §3（架构与责任）、§4.1–4.2（身份/绑定/插件行为合同）、§6（领域划分与 G0–G3）、§7（01.1–01.6 叶任务与锚点）。三级结构与编排文档由主代理负责（`ORCHESTRATION.md`、`specs/orchestration/spec.md` 仅主代理写）。
 
@@ -11,7 +11,7 @@
 **Goals**
 
 - `config` 成为**叶子**：只解析纯组织声明（yaml/json），不外泄可变容器，不构造活对象。
-- `state` 成为生效绑定的**唯一持有者**：模型/工具/文件版本/插件管线 + agent/session 现场 + mailbox 消费位置；执行器只借用。
+- `state` 成为生效绑定的**唯一持有者**：模型/工具/插件管线 + **文件来源与其固化版本** + agent/session 现场 + mailbox 消费位置；执行器只借用。文件**内容**在请求边界按来源读取固化，MUST NOT 与模型/工具/插件无条件同代。
 - 请求借「同代」绑定：在途请求持开始时的代跑完，新请求读已发布最新代；发布/回收与取用互斥，无「先读后回收」空窗。
 - 组织发布唯一入口，候选记基线、同内容不换代、过期候选不覆盖、失败逆序回收。
 - 文件直接热读与结构变更前置门为**两条独立路径**，不互相绕门；错误原因链保留。
@@ -37,7 +37,7 @@
 
 ## 构造 / 调用 / 关闭时序
 
-1. **构造（候选私有）**：`config.Load`（严格解析 + 默认值 + 规范化）→ `Compile`（产出 `OrgPlan`，纯数据）→ `Prepare`（构造候选 `AgentBinding`，登记 `Leases`）→ 前置检查（治理按 `OrgPlan.Changes`）→ `state.Commit`（一次串行化提交换入 generation + 回滚快照 + 诊断）。
+1. **构造（候选私有）**：`config.Load`（严格解析 + 默认值 + 规范化）→ `Compile`（产出 `OrgPlan`，纯数据）→ `Prepare`（构造候选 `AgentBinding`，登记 `Leases`）→ 前置检查（治理按 `OrgPlan.Changes`；**发布前置契约**：必需检查缺失即拒绝、不适用/禁用检查显式记录豁免不作证据通过）→ `state.Commit`（一次串行化提交换入 generation + 回滚快照 + 诊断）。
 2. **调用（请求边界）**：请求进入 → **短锁**取当前已提交代 → 绑定借出（同代 Model/Tools/Plugins/Prompt 固化）→ 执行；期间发生发布**不影响**本次（持旧代）。
 3. **关闭/退役**：先拒新接纳 → 已接受义务排空或显式取消结算（**未交付**义务保留并由可恢复路径承接，不以 `removed` 丢弃）→ 按 `Leases` 逆序释放候选独有资源 → 共享 store/session/TaskManager **不**在回收权限内。发布与顶层 ACK **不**关闭旧资源。
 
@@ -115,7 +115,7 @@
 ## Open Questions / 设计待核（G0–G3）
 
 - **G0**：`config` 接受的确切源格式（yaml/json/两者）、未知字段策略（warn/strict）、默认值应用点、指纹归一化算法。→ 01.1 前冻结。
-- **G1**：插件相位枚举与回调类型（与 02.6 一致）；`Commit` 端口签名；`acceptSeq` 分配点；`Leases` 与资源租约接口（与 02.9/09 一致）。→ 01.4/01.3 前冻结。
+- **G1**：插件相位枚举与回调类型（与 02.6 一致）；`Commit` 端口签名；`acceptSeq` 分配点；`Leases` 与资源租约接口（与 02.9/09 一致）；**发布前置契约**（何种检查为必需、如何显式记录豁免）先由 00.3 审定；机制测试可注入**确定性真实政策替身**但**非正式质量结论**（正式质量归 07.4，不新增 07.4→01.5 回环）。→ 01.4/01.3/01.5 前冻结。
 - **G2**：四条纵向序列（正常发布 / 候选失败 / 并发发布+在途 / 重启恢复）桌面推演；不得存在「之后再补」才能成立的接口。
 - **G3**：逐 task 文件白名单 + 前置 + 读写冲突（本域与 02 共享 `state`/`config` 的串行化）+ 资源预算（无外部资源）。
 - **跨域签名待核**：`OrgPlan`/`StatePlan`/`LeaseRef` 三对象形态、`generation` 归属、插件绑定归 state 的调用链——需 02.1/02.5/02.6 对齐后冻结；未对齐前相关 task 保持 design-blocked，不填空 struct 冒充冻结。

@@ -9,6 +9,7 @@
 - 仓库：`/Users/pengweiye/Documents/codes/tagent`
 - 分支：`next`（HEAD 游离于常规 main/dev 之外）
 - HEAD：`56c58eb1da22b15ff4ad84cf9421e9cfe680c93a`（2026-10-12，"refactor: prototype rewrite as event-driven agent runtime; remove legacy production tree"）
+- HEAD 更新（2026-10-13 用户授权清理批次后）：`a9381ce9b63d139a97086127b3f644750f53929d`（`chore(plan): land runtime-rebuild planning baseline and contract checkers; remove stale wave remnants`）。**上行为清理前历史记录，保留不改**；残件/旧 change 处置见 §2.1.1/§4.1。
 - 历史生产参照：`50acdfe13ed4c2c178a7909651f0e0bf1b02fc20`（2026-10-11，"chore(sync): 反向同步 main 的 squash 合并点到 dev"）
 - 其它分支：`main`、`dev`、`dev-resident-bugfixes`（+ remote `origin/dev|main|docs/wiki-pages|integration/dev-main`）
 - openspec CLI：本机 `1.2.0`；与 `.github/workflows/ci.yml` 钉定版本一致

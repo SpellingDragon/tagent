@@ -4,9 +4,9 @@
 
 ## Context
 
-- 现现场（实测本仓）：module 根 `github.com/SpellingDragon/tagent`（`go.mod`，go 1.24.1），根目录**无** `.go`；公共 `package tagent` 现落在 `tagent/` 子目录（`tagent/assembly.go`、`tagent/runtime.go`），且 import 已删除包（`tagent/agent`、`tagent/event`、`tagent/memory`…），不可编译。
+- 现现场（实测本仓）：module 根 `github.com/SpellingDragon/tagent`（`go.mod`，go 1.24.1），根目录**无** `.go`。**清理前历史**：公共 `package tagent` 曾落在 `tagent/` 子目录（`tagent/assembly.go`、`tagent/runtime.go`），且 import 已删除包（`tagent/agent`、`tagent/event`、`tagent/memory`…），不可编译；该目录（连同 `model/`、`state/`、`tests/`）已随 **2026-10-13 用户授权清理批次整目录删除**（见 `baseline.md` §2.1.1）。清理前历史 HEAD `56c58eb`，**当前新基线 HEAD `a9381ce`**。
 - 微信独立 module：`examples/wechat-bot/`，module 名 `wechat-bot`，`replace github.com/SpellingDragon/tagent => ../..`；含 `main.go`(944)、`file_delivery.go`、`send_tool.go`、`delivery_receipt.go`、`dedup.go`、`file_intake.go`、`reincarnation_notice.go`、`system_alert.go` 及各自测试。
-- `examples/wechat-bot/main.go` 现 import `github.com/SpellingDragon/tagent`（根包）与 `tagent/agent/governance`、`tagent/event`、`tagent/memory/engine`、`tagent/rl` 等——**均属待迁移**路径，当前不可编译。
+- `examples/wechat-bot/main.go` import `github.com/SpellingDragon/tagent`（根包）与 `tagent/agent/governance`、`tagent/event`、`tagent/memory/engine`、`tagent/rl` 等——**均属待迁移**路径（上述被 import 的包已随清理删除），当前不可编译。
 - `examples/wechat-bot/` 自带 `AGENTS.md`（运行时代理须知：能力发现优先、实证优先「改前 read、改后 read 回读确认」、**路径陷阱**——主树绝对路径与 wechat-bot 副本不是同一份文件、高并发编排纪律）。宿主迁移（08.2/08.3/08.5）SHALL **先读该 `AGENTS.md` 与 `main.go`/`config`/`file_delivery.go` 实际源码**再动手；MUST NOT 凭记忆补全符号/接口名，MUST NOT 靠根 module `./...` 绿灯推断 bot 通过（根 `./...` 不含独立 module）。
 - 上级计划 §3：公共入口放 module 根 `package tagent`，**不再**同时建根门面与 `tagent/` 同名第二层门面。
 

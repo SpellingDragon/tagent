@@ -41,7 +41,7 @@
 
 ## Impact
 
-- 实施候选写面（本轮不写）：`memory/*.go`（含 localfile/file 后端；包划分按 G1，不预建 `memory/kv` 子包）、`workspace/*.go`、`state/*.go`（持久提交接线）、`task/*.go`（恢复/重投）、`tool/*.go`（输出外置）、`tests/integration/history/**`。
+- 实施候选写面（本轮不写）：`memory/*.go`（含 localfile/file 后端；包划分按 G1，不预建 `memory/kv` 子包）、`workspace/*.go`（副本/清理/**统一外置输出**，含原生 wrapper 注入端口）、`state/*.go`（持久提交接线）、`task/*.go`（恢复/重投）、`tests/integration/history/**`。**不预建未登记根 `tool` 包**（输出外置归 `workspace/externalize.go`）。
 - 只读消费：event 身份/原生载荷（02.1）、task 提交消费端口（02.2）、state 同代绑定（01.4）、config 声明档位（01.1）。
 - 对外符号 `package tagent` 位于 **module 根**，不 nested 到 `tagent/tagent`。
 - 组合根、主 spec、旧 change、外部计划、依赖、`scripts/` 均不在本轮写域。

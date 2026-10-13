@@ -32,7 +32,7 @@
 - `unified-task-semantics`：修改「任务统一语义」「演进命名与治理插件分工」。
 - `async-task-execution`：修改「task_settled 为通知类 input 事件」「服务型任务转 alive-detached」（服务运行/就绪/终局按维度保留，就绪非 completed、不按时间推成功；**不设 REMOVED**）。
 - `failure-polarity`：以 ADDED 增单终局规则（原 Requirement 保留继承）。
-- `subagent-turn-execution`：修改「子 agent 调用可作为异步任务执行」（受理一次/后台独立回流/义务结清才 settle）及「Sub-agent 调用执行恰好一个 turn」「Sub-agent 保持并发隔离与调用契约不变」「投递对账屏障的 booking 与投递期望一一配对」（turn 边界 ≠ 义务完成；不建私有可写真源；撤销表单以受理回执为准）。
+- `subagent-turn-execution`：修改「子 agent 调用可作为异步任务执行」（受理一次/后台独立回流/义务结清才 settle）及「Sub-agent 调用执行恰好一个 turn」「Sub-agent 保持并发隔离与调用契约不变」「投递对账屏障的 booking 与投递期望一一配对」（**统一事件调度、同 invocation 可含多 decision**；turn 边界 ≠ 义务完成；**受理 ≠ 运行即成功**；不建私有可写真源；**成功受理保持义务至结清，仅未新增义务的 dedup/被拒撤本次预登记**；不冻结旧类名/方法）。
 - `event-metadata-contract`：以 ADDED 增原生载荷保真。
 - `event-type-unification`：修改「事件类型常量单一来源」（native role 分类）。
 - `thinking-plan-event-classification`：修改「thinking_plan event type classification」（native role 保真）。

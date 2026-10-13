@@ -10,7 +10,7 @@
 - 复核粒度 = **能力级**：逐文件读 `## Purpose` + 全部 `### Requirement:` 标题（并在疑点处下钻正文）。**未**对全部 **601** 条 Requirement 逐条做语义判定（1217 个 Scenario 亦然）；故本表不声称"601 条已审完"。
 - 处理判据只看**新 goal 是否真实消费**该能力，**不因 source 文件存在就复活**其旧机制、旧类名或旧包结构（计划 §2「保留的用户要求 8」「不做」）。
 - **旧 names 不是全部恢复**：新计划的类名/包结构/算法不默认沿用历史；主规格标题命中 ≠ 语义适用。
-- 「行为需修改」若目标域的 delta 尚未由该域写者生成，本表写 **「需对齐 <域> delta」**，不做机械继承改写。
+- 「行为需修改」：10 域 delta 已由串行集成收口（本批），本表按 **「以 <域> delta 为准（已落地）」** 登记；delta 改后条文**完整覆盖**主源语义、**旧条不再并存**——**不误称旧条继承**，也不做机械继承改写。
 - 主表 `新域.task` 列为该能力的**主责任务（消费/验收）**；该能力的**唯一 delta 写者**以各域 `specs/` 实际放置为准。二者不同域时在 §7.1 **单列登记**（主消费任务与唯一 delta 写者分开登记/引用），不混同、不迁文件求表面一致。
 - **不自行写 spec**：新增独立能力 `runtime-inspection` 已由 **05-inspection** 建立（05.1/05.2 只读总图/快照/游标/订阅）；本表只给域位与消费者，不给条款。
 
@@ -25,7 +25,7 @@
 | 代号 | 含义 |
 |---|---|
 | `R` 保留能力待实现 | 能力保留，按新计划从零实现；旧文本仅背景，**非继承契约** |
-| `M` 行为需修改 | 行为须按新 goal 调整；旧文本仅参考，**最终以该域 delta 为准**（未生成则记「需对齐 <域> delta」） |
+| `M` 行为需修改 | 行为须按新 goal 调整；旧文本仅参考，**最终以该域 delta 为准**（已落地；改后条文完整覆盖主源语义、旧条不再并存，**不误称旧条继承**） |
 | `H` 历史参考 | 机制已退役/被替代，仅作设计记录，**不复活** |
 | `D` 设计待核 | 是否保留/语义未定，**保持 design-blocked，不猜** |
 
@@ -64,31 +64,31 @@
 | `committed-event-attribution` | 已提交事实归因 | 02.1 | R | 05.1 | 提交成功才可召回票据；消费方=提交端口与 Query 只读面 |
 | `compaction-scheduler` | 压实调度 | 03.2 | M | 03.5 | 分段压实调度消费方=存储生命周期 |
 | `compress-event-enrichment` | 压缩事件富集 | 03.4 | H | — | 富集注记已被骨架卡片行替代，勿复活；投影为消费方 |
-| `compress-quality-fix` | 压缩质量修复 | 03.4 | M | — | 引用解析/角色填充消费方=投影装配（需对齐 03 delta） |
-| `compression-user-message` | 压缩保留未完成驱动 | 03.4 | M | — | 保留最后 user message 消费方=投影（需对齐 03 delta） |
+| `compress-quality-fix` | 压缩质量修复 | 03.4 | M | — | 引用解析/角色填充消费方=投影装配（以 03 delta 为准，已落地） |
+| `compression-user-message` | 压缩保留未完成驱动 | 03.4 | M | — | 保留最后 user message 消费方=投影（以 03 delta 为准，已落地） |
 | `concurrency-hardening` | 并发加固 | 02.5 | R | 04.2 | 并发安全消费方=agent/exec 状态访问 |
-| `config-hot-reload` | 配置热重载 | 01.5 | M | 02.5 | 热更发布/回滚消费方=state 发布代（需对齐 01 delta） |
+| `config-hot-reload` | 配置热重载 | 01.5 | M | 02.5 | 热更发布/回滚消费方=state 发布代（以 01 delta 为准，已落地） |
 | `config-state-twinship` | 配置-state 孪生 | 01.4 | R | 02.5 | state 持有生效 system prompt；消费方=请求装配 |
 | `consolidation-triggers` | 巩固触发 | 04.8 | R | — | 巩固建议消费方=memory 固化 |
 | `context-scoping` | 上下文还原/范围 | 01.2 | M | 02.5 | resume 上下文还原+因果链挂载；授权范围消费方=state |
 | `conversation-self-heal` | 会话投影自愈 | 03.4 | R | — | 投影按 EventKey 幂等追加，消费方=投影 |
-| `cross-session-delivery` | 跨 session 投递 | 04.4 | M | 07.1 | 投递白名单/寻址消费方=投递器（需对齐 04 delta） |
+| `cross-session-delivery` | 跨 session 投递 | 04.4 | M | 07.1 | 投递白名单/寻址消费方=投递器（以 04 delta 为准，已落地） |
 | `decision-capture` | 决策快照采集 | 06.1 | R | 06.3 | 决策快照=版本化记录生产点 |
 | `degradation-behaviors` | 依赖退化响应 | 04.6 | R | — | 退化响应默认关；消费方=治理/资源恢复 |
 | `delivery-dispatch-receipts` | 投递回执 | 04.4 | R | 05.1 | 投递回执消费方=投递器/Query |
 | `deterministic-compress-level` | 确定性压缩分级 | 03.4 | R | — | 段龄纯函数消费方=压缩管线 |
 | `error-handling-consistency` | 错误处理一致性 | 00.6 | M | — | log 统一/错误必检=CI lint 门消费 |
 | `evals-harness` | 组件级评估 harness | 09.1 | M | 09.5 | 票据可召回/工具选择评估消费方=验收 runner |
-| `event-compaction` | 事件压实 | 03.4 | M | — | 段边界/双路径退役消费方=压缩管线（需对齐 03 delta） |
+| `event-compaction` | 事件压实 | 03.4 | M | — | 段边界/双路径退役消费方=压缩管线（以 03 delta 为准，已落地） |
 | `event-key-visibility` | 事件键可见性 | 02.5 | M | 03.4 | event key 注入消费方=请求装配 |
 | `event-lifecycle` | 事件生命周期 | 03.5 | M | — | TTL/容量淘汰消费方=存储生命周期 |
 | `event-metadata-contract` | 事件元数据契约 | 02.1 | R | 06.1 | MetaKey/EventKey canonical 消费方=事件身份 |
 | `event-relation-store` | 事件关系库 | 03.1 | M | 04.8 | 关系图持久化消费方=recall/Query |
-| `event-segment-store` | 事件分段存储 | 03.2 | M | — | 分段存储消费方=存储后端（需对齐 03 delta） |
+| `event-segment-store` | 事件分段存储 | 03.2 | M | — | 分段存储消费方=存储后端（以 03 delta 为准，已落地） |
 | `event-sourced-projection` | 事件溯源投影 | 03.4 | R | 05.1 | 纯回放一等不变量消费方=投影/冷启重建 |
 | `event-timeline-rendering` | 时间线渲染 | 03.4 | R | 02.5 | 投影为 LLM 输入唯一装配源，消费方=请求装配 |
 | `event-type-unification` | 事件类型单一来源 | 02.1 | R | 03.1 | 常量单一来源消费方=event 包跨包引用 |
-| `evolution-evaluation` | 后验评估 | 07.3 | M | 07.4 | 评估窗口锚消费方=evolution（bundle 体系退役） |
+| `evolution-evaluation` | 后验评估 | 07.3 | M | 07.4 | 评估窗锚=实际请求消费版本的激活证据；GitSHA 仅因果关联、register 追加映射不改已存事实、旧数据无证据标 unknown |
 | `example-file-memory-wiring` | 示例本地持久接线 | 08.2 | M | 08.3 | 微信示例本地持久接线消费方=bot module |
 | `example-local-file-delivery` | 示例本地文件投递 | 08.3 | M | — | 本地文件投递消费方=bot module |
 | `example-rl-visibility` | 示例 RL 可见面 | 06.7 | M | — | RL HTTP API 消费方=AReaL |
@@ -110,13 +110,13 @@
 | `meditation-delivery-tool` | 冥想投递工具 | 07.1 | R | 04.4 | 冥想投递缝消费方=投递器 |
 | `meditation-idle-gating` | 冥想空闲门控 | 07.1 | R | — | 双闸门触发消费方=reflection 调度 |
 | `meditation-self-state-digest` | 冥想自状态 digest | 07.1 | R | — | 自状态 digest 消费方=reflection（与 memory-curation 同标题，见 §6） |
-| `memory-curation` | 记忆策展 | 04.8 | M | 07.1 | 三原语/固化级联消费方=memory（需对齐 04 delta） |
-| `offline-training-export` | 离线训练导出 | 06.4 | M | 06.6 | 授权导出/SFT 边界消费方=SFT 消费者 |
+| `memory-curation` | 记忆策展 | 04.8 | M | 07.1 | 三原语/固化级联消费方=memory（以 04 delta 为准，已落地） |
+| `offline-training-export` | 离线训练导出 | 06.4 | M | 06.6 | 授权导出/SFT 边界消费方=SFT 消费者；用途矩阵三态（unknown/ineligible/qualified） |
 | `ops-deployment-integrity` | 运维部署完整性 | 09.5 | R | 06.7 | 运维探针认证消费方=部署/验收 |
-| `orchestration` | 编排契约 | 00.3 | M | — | 顶层只承载编排契约，消费方=规划/调度（需对齐 00 delta） |
+| `orchestration` | 编排契约 | 00.3 | M | — | 顶层只承载编排契约，消费方=规划/调度（以 00 delta 为准，已落地） |
 | `partition-local-storage-access` | 分区局部访问 | 03.2 | D | — | 性能主张需同条件证据（R13）；局部性语义待设计核 |
-| `per-call-subagent-overrides` | 调用级子 agent 覆盖 | 01.6 | M | 02.7 | 调用覆盖解析消费方=subagent 委派（需对齐 01 delta） |
-| `persistent-event-loop` | 常驻事件循环 | 02.5 | M | — | 常驻循环消费方=agent 调度（需对齐 02 delta） |
+| `per-call-subagent-overrides` | 调用级子 agent 覆盖 | 01.6 | M | 02.7 | 调用覆盖解析消费方=subagent 委派（以 01 delta 为准，已落地） |
+| `persistent-event-loop` | 常驻事件循环 | 02.5 | M | — | 常驻循环消费方=agent 调度（以 02 delta 为准，已落地） |
 | `plan-agent` | plan agent 能力 | 02.5 | D | 00/09 | 新计划未承诺 plan agent；旧双模式 Run 消费者未定，不猜 |
 | `production-wiring-fix` | 生产接线修复 | 08.1 | M | 03.2 | 存储生命周期栈装配消费方=生产入口 |
 | `production-wiring` | 生产接线 | 08.1 | M | 03.2 | 生产装配消费方=生产入口 |
@@ -145,13 +145,13 @@
 | `snowflake-overflow-handling` | 雪花 ID 溢出 | 03.1 | M | — | 事件 ID 生成消费方=event 存储；时钟回拨方案已替代 |
 | `startup-active-partition-bitmap` | 启动活动分区位图 | 03.2 | D | — | 位图/游标未实现、以等价形态达成，需设计核，不猜 |
 | `storage-lifecycle-completion` | 存储生命周期补全 | 03.2 | M | 03.5 | L1→L2→L3 压实消费方=存储生命周期 |
-| `subagent-turn-execution` | 子 agent turn 执行 | 02.7 | M | 02.3 | 一次调用=一 turn 消费方=委派 |
+| `subagent-turn-execution` | 子 agent turn 执行 | 02.7 | M | 02.3 | 统一事件调度（同 invocation 可多 decision）；受理≠结清；原生 CallableTool 兼容 |
 | `summary-memory-rag` | 摘要记忆 RAG | 03.4 | M | 04.7 | 摘要入 MemoryStore/召回消费方=投影 |
 | `swappable-executor` | 可换执行器 | 01.5 | M | 02.5 | 执行器热换消费方=发布代 |
 | `task-reentry` | 任务重入 | 02.7 | M | 02.2 | resume_task 重入消费方=task |
 | `task-registry-and-board` | 任务注册表与看板 | 02.2 | M | 05.1 | 注册表/看板消费方=task |
 | `task-registry-rebuild` | 任务注册表重建 | 02.2 | M | 03.3 | 冷启动重建消费方=task/持久 |
-| `task-skeleton-compression` | 任务骨架压缩 | 03.4 | M | 02.5 | 骨架压缩主机制消费方=投影（需对齐 03 delta） |
+| `task-skeleton-compression` | 任务骨架压缩 | 03.4 | M | 02.5 | 骨架压缩主机制消费方=投影（以 03 delta 为准，已落地） |
 | `telemetry-channel` | 遥测通道 | 05.3 | M | 03.4 | 遥测通道身份消费方=观测/投影 |
 | `thinking-plan-event-classification` | thinking_plan 分类 | 02.1 | R | 03.4 | thinking_plan 分类消费方=事件分类 |
 | `tombstone-partition-isolation` | 墓碑分区隔离 | 03.5 | R | — | per-partition 墓碑消费方=存储生命周期 |
@@ -235,7 +235,7 @@
 ## 8. 勿循旧 policy / 勿越权（本表边界）
 
 1. 新域 00–09 对应**新计划**，**不**沿用旧 `rebuild-formal-runtime` 的 C/E/I/D 域码、W01/W02 Wave 字母、RV 编号与 DEC 表（计划 §8）。
-2. `M` 处一律「**需对齐 <域> delta**」；在目标域写者产出 delta 前，**不做机械继承改写**。
+2. `M` 处一律「**以 <域> delta 为准（已落地）**」；delta 改后条文完整覆盖主源语义、旧条不再并存，**不误称旧条继承**，不做机械继承改写。
 3. **old names 不全部恢复**；标题命中不代表语义适用；不因 source 存在即复活旧类名/包结构/算法。
 4. 本单**不自行写 spec**、不改主规格、不改旧 change、不生成产品。
 5. 可读并行中的其它新域产物，但**不抢占修改**。

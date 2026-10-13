@@ -8,7 +8,7 @@
 
 ### Requirement: 外部执行停止凭证与真实停止确认
 
-exec/tmux 派生的外部执行 SHALL 具备可判定的**停止凭证**（能证明目标进程/会话已真实停止）；SHALL 区分 `alive`/`dead`/`unknown` 三态（`unknown≠dead`），停止未确认时 MUST NOT 把任务标为已收束。
+exec/tmux 派生的外部执行 SHALL 具备可判定的**停止凭证**（能证明目标进程/会话已真实停止）；SHALL 区分 `alive`/`dead`/`unknown` 三态（`unknown≠dead`），停止未确认时 MUST NOT 把任务标为已收束。**连续 `unknown` MUST NOT 作为判死/退出依据**：此时未止义务与**资源租约 SHALL 保留且可解释**（谁推进、缺何证据），系统仅可**升级诊断**或发起**显式停止处理**以取得真实停止凭证；MUST NOT 以次数阈值（如连续 3 次）代真实停止凭证。
 
 #### Scenario: 停止凭证确认
 
@@ -19,8 +19,8 @@ exec/tmux 派生的外部执行 SHALL 具备可判定的**停止凭证**（能�
 #### Scenario: unknown 不屠杀（失败）
 
 - **WHEN** 存活探测命令返回 error（服务抖动）
-- **THEN** 判定为 `unknown`，会话保留并计数
-- **AND** 连续 N 次（默认 3）unknown 才按 `dead` 处理
+- **THEN** 判定为 `unknown`，会话与未止义务/租约保留
+- **AND** 连续多个 `unknown` SHALL 只**升级诊断告警**或触发**显式停止处理**（走可复核停止凭证），MUST NOT 以次数阈值（如 N=3、默认 3）直接判 `dead`，MUST NOT 代真实停止凭证
 
 #### Scenario: 停止未确认不得伪称完成（失败）
 

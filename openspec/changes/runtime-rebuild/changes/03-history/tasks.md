@@ -29,7 +29,7 @@
 
 - [ ] 03.7 实现临时副本启动/周期清理与活跃读写保护（不删用户文件、不跨链接越界）—— 前置：03.6 —— 候选拟写文件（非本轮授权）：`workspace/cleanup.go`（启动/周期清理 + 活跃读写保护）、`tests/integration/history/replica_cleanup_test.go`（`TestReplicaCleanup`）—— 设计闸：G1 = 活跃读写中的副本 MUST NOT 被删；清理 MUST NOT 触碰用户文件、MUST NOT 跨符号链接越界（DESIGN-GATE：与 03.6 副本物化归属与引用稳定）；G2 = 序列「启动清理 / 周期清理 / 活跃读写的副本不删 / 用户文件不动 / 跨链接不越界」；G3 = 白名单 + `workspace` 写面 —— 验证：`go test -race ./tests/integration/history -run '^TestReplicaCleanup$' -count=10 -json`
 
-- [ ] 03.8 实现通用工具/任务结果/tmux/overflow 接入同一外置路径，验证清副本后独立进程恢复 —— 前置：03.7、04.2 —— 候选拟写文件（非本轮授权）：`workspace/externalize.go`（统一外置路径）、`tool/output_limit.go`（`OutputLimitTool` 接入外置，阈值 `MaxTokens/2*4`）、`tests/integration/history/large_result_restart_test.go`（`TestLargeResultRestart`）—— 设计闸：G1 = 通用工具/任务结果/tmux/overflow 走同一外置路径与同一阈值公式；超大结果首次入模前保存原文、给有界预览与分段入口；清副本后独立进程经原文恢复（DESIGN-GATE：与 04.2 资源/外置边界）；G2 = 序列「大结果先存原文再有界预览 / 阈值与 MaxTokens 对齐 / 清副本后独立进程经原文恢复 / nil 结果不拦截」；G3 = 白名单 + 与 04.2 的 `tool`/资源边界 —— 验证：`go test -race ./tests/integration/history -run '^TestLargeResultRestart$' -count=10 -json`
+- [ ] 03.8 实现通用工具/任务结果/tmux/overflow 接入同一外置路径，验证清副本后独立进程恢复 —— 前置：03.7、04.2 —— 候选拟写文件（非本轮授权）：`workspace/externalize.go`（统一外置路径 + **原生 wrapper 注入端口**接入外置，阈值 `MaxTokens/2*4`；**不预建根 `tool` 包**）、`tests/integration/history/large_result_restart_test.go`（`TestLargeResultRestart`）—— 设计闸：G1 = 通用工具/任务结果/tmux/overflow 走同一外置路径与同一阈值公式；超大结果首次入模前保存原文、给有界预览与分段入口；清副本后独立进程经原文恢复（DESIGN-GATE：与 04.2 资源/外置边界）；G2 = 序列「大结果先存原文再有界预览 / 阈值与 MaxTokens 对齐 / 清副本后独立进程经原文恢复 / nil 结果不拦截」；G3 = 白名单 + 与 04.2 的资源/外置边界（**不新建未登记根 `tool` 包、不放宽 architecture.json 换绿**） —— 验证：`go test -race ./tests/integration/history -run '^TestLargeResultRestart$' -count=10 -json`
 
 ## 执行期回写（本轮为空）
 

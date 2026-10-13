@@ -27,12 +27,22 @@ LLMJudge 与 MetricGuardrail 的评估窗口 SHALL 以 improvement 事件的**�
 
 ### Requirement: 改进版本章(feedback join 保持)
 
-persistBusEvent 盖章的版本章来源 SHALL 从 active bundle 迁移为最新 improvement 事件的 sha（事件查询，无独立组件）；该版本章 SHALL 仅作**版本关联**（把 feedback 与因果绑定的子事件归到真实消费版本），MUST NOT 被当作评估窗口的起算时刻（窗口锚为激活证据，见「后验评估锚点」）。feedback 与窗口 SHALL 按**真实消费版本**精确 join；无事件时不盖章（退化为时间窗 join，与现状无 active bundle 一致）。BindFeedback 的章继承机制与键名（MetaKeyBundleID）MUST 保持不变。
+persistBusEvent 盖章的版本章来源 SHALL 以**实际请求消费的改进版本**为准（把 feedback 与因果绑定的子事件归到真实消费版本），MUST NOT 以「最新 improvement 事件的 sha」作为章来源。GitSHA 映射 SHALL 仅作**因果关联**：refine `register` 之后追加的 Git 映射只**补**关联，MUST NOT 改写已存事实（MUST NOT 把已落库的旧版本请求/feedback 重贴到后来登记的版本）。无关联证据的旧数据 SHALL 标 `unknown`/`insufficient` 并具名缺失，MUST NOT 按时间窗 join 或猜想时间归因。该版本章 MUST NOT 被当作评估窗口的起算时刻（窗口锚为激活证据，见「后验评估锚点」）；feedback 与窗口 SHALL 按**真实消费版本**精确 join。BindFeedback 的章继承机制与键名（MetaKeyBundleID）MUST 保持不变。
 
 #### Scenario: feedback 精确 join 改进版本
 
 - **WHEN** 窗口 sha=S 开启后产生任务结算负反馈
 - **THEN** 该 feedback 事件及因果绑定的子事件携带章 bundle_id=S，guardrail 窗口评估沿章与真实消费版本精确归因（章不参与窗口起算）
+
+#### Scenario: 旧版本请求在新版本登记后结算不得重贴
+
+- **WHEN** 某请求在版本 A 下被消费并产生 feedback/结算，其后版本 B 的 refine 才 `register`
+- **THEN** 该 feedback/结算仍归版本 A（真实消费版本）；`register` 追加的 Git 映射只补 B 的关联，MUST NOT 把 A 的旧记录重贴到 B
+
+#### Scenario: 无关联不得时间猜测
+
+- **WHEN** 某 feedback/结算无法确定其真实消费版本（无 Git 关联证据）
+- **THEN** 该记录章标 `unknown`/`insufficient` 并具名缺失；MUST NOT 按时间窗 join 或按 `register` ts 猜想归因
 
 ## ADDED Requirements
 

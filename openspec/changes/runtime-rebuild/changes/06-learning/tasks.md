@@ -20,7 +20,7 @@
 
 ## 任务
 
-- [ ] 06.1 接通**版本化记录**与 episode/decision/attempt **实际生产点**（字段解释由 00.3 审定）；旧格式**只读导入**、未知谱系显式；新格式**明确版本**不被旧 v2 结构绑架 —— 状态：planned —— 前置：02.5 —— 候选文件：`rl/record.go`、`rl/episode.go`、`tests/integration/learning/causal_records_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json`
+- [ ] 06.1 接通**版本化记录**与 episode/decision/attempt **实际生产点**（**新记录 schema 与字段解释由 00.3 审定**，**最小真实生产字段不丢**）；旧格式**只读导入**（**旧 JSONL 路径/字段只界定兼容范围**）、未知谱系显式；新格式**明确版本**不被旧 v2 结构绑架 —— 状态：planned —— 前置：02.5 —— 候选文件：`rl/record.go`、`rl/episode.go`、`tests/integration/learning/causal_records_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json`
 
 - [ ] 06.2 实现**请求边界安全快照**、原生响应/logprobs 保留、统一终局观察；**Headers/URL secrets 不落盘**；logprobs **确实返回才 present**、`unsupported` 需支持声明、`unknown≠not_returned`；不重跑 provider options 造快照 —— 状态：planned —— 前置：02.4、06.1 —— 候选文件：`rl/capture.go`、`rl/record.go`、`tests/integration/learning/capture_fidelity_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json`
 
@@ -28,7 +28,7 @@
 
 - [ ] 06.4 实现授权导出、延迟反馈、**版本化 reward 派生**、逐样本来源 manifest；**feedback/reward 分开** —— 状态：planned —— 前置：03.3、06.3 —— 候选文件：`rl/export.go`、`tests/integration/learning/authorized_export_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json`
 
-- [ ] 06.5 实现严格转换、消息合法性、动作/观察 mask、用途 eligibility、**episode≠session** 及基于**因果依赖**的分组防泄漏；**既有转换器 v2 只读导入** —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/sft.go`、`scripts/train/convert_trajectories.py`（只读导入）、`tests/integration/learning/sft_cleaning_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json`
+- [ ] 06.5 实现严格转换、消息合法性、动作/观察 mask、**训练用途资格矩阵（DPO / 采样 RL：用途/所需证据/结论/缺失原因，不由 SFT 外推）**、**episode≠session（非强制等同，也非强制拆分）** 及基于**因果依赖**的分组防泄漏；**既有转换器 v2 只读导入** —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/sft.go`、`scripts/train/convert_trajectories.py`（只读导入）、`tests/integration/learning/sft_cleaning_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json`
 
 - [ ] 06.6 实现**真实 SFT 消费者**读取与 tokenize/collate，检查 labels/mask/非空样本与拒绝账（**真实 tokenizer/chat template，不以常量替身结项**） —— 状态：**design-blocked**（真实制品/入口待授权） —— 前置：06.5 及授权制品 —— 候选文件：`rl/sft_consumer.go`、`tests/integration/learning/sft_consumer_test.go` —— 验证（真实资源，独立单次门控）：`go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json`（缺凭据/模板不支持/`SKIP` **不能计完成**）
 

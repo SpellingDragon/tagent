@@ -92,7 +92,7 @@
 ## 文件白名单（本域本轮可写，其余不动）
 
 - `openspec/changes/runtime-rebuild/changes/03-history/**`（**仅 md 规划，无 Go/脚本**）。
-- 实施期（本轮**不**写，候选）：`memory/*.go`（含 localfile/file 后端；包划分按 G1，不预建 `memory/kv` 子包）、`workspace/*.go`、`state/*.go`（持久提交接线）、`task/*.go`（恢复/重投）、`tool/*.go`（输出外置）、`tests/integration/history/**`。
+- 实施期（本轮**不**写，候选）：`memory/*.go`（含 localfile/file 后端；包划分按 G1，不预建 `memory/kv` 子包）、`workspace/*.go`（副本/清理/**统一外置输出**，含原生 wrapper 注入端口，输出外置归 `workspace/externalize.go`）、`state/*.go`（持久提交接线）、`task/*.go`（恢复/重投）、`tests/integration/history/**`。**不预建未登记根 `tool` 包**。
 
 ## 验证表（可复跑命令；本轮不跑）
 

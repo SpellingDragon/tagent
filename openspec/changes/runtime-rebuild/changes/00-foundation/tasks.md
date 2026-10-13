@@ -6,7 +6,7 @@
 
 - [ ] 00.1 盘点残件、用户保护面、两module和旧检查器；逐文件登记保留参考/原位重写候选/另需授权清理 —— 前置：无 —— W：`openspec/changes/runtime-rebuild/baseline.md`；R：只读Git状态与被盘点文件，不恢复删除项 —— 验证：`git status --short`、`git ls-files` 与baseline逐项核对，资源只记录存在性。
 - [ ] 00.2 将120主规格按业务能力映射到新任务、消费者与验收，重复/过时条款和待裁项具名 —— 前置：00.1 —— W：`openspec/changes/runtime-rebuild/coverage.md`；R：`openspec/specs/`及各域需求 —— 验证：`python3 scripts/check_runtime_plan.py --json`；另逐条语义核对，集合覆盖不代替601条Requirement审定。
-- [ ] 00.3 审定G1共享合同及tRPC复用矩阵、G2构造/执行/失败/并发/重启链，列生产消费者与最小签名探针 —— 前置：00.2 —— W：`openspec/changes/runtime-rebuild/contracts.md`、`openspec/changes/runtime-rebuild/design.md`；R：锁定框架原生接口及领域设计 —— 验证：`openspec validate runtime-rebuild --strict --no-interactive`，桌面推演及未来授权的最小编译探针逐项留证；没有探针不宣称G1通过。
+- [ ] 00.3 审定G1共享合同及tRPC复用矩阵、G2构造/执行/失败/并发/重启链，列生产消费者与最小签名探针 —— 前置：00.2 —— W：`openspec/changes/runtime-rebuild/contracts.md`、`openspec/changes/runtime-rebuild/design.md`；R：锁定框架原生接口及领域设计 —— 验证：`openspec validate runtime-rebuild --strict --no-interactive`，桌面推演及未来授权的最小编译探针逐项留证；没有探针不宣称G1通过。复用矩阵集中见 `trpc-reuse.md`；目标—KR 见 `expectations.md`。
 
 ## 2. 检查工装与门禁
 

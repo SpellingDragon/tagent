@@ -49,7 +49,7 @@
   - SFT 消费：`go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json`。
   - 微信（真实往返）：`go -C examples/wechat-bot test ./... -run '^TestRealWechat$' -count=1 -json`（**明确发送授权**）。
 
-- [ ] 09.6 闭合：主规格 delta、文档/API 与消费者逐项闭合，提交未决事项与最终证据清单 —— 前置：`09.1`–`09.5`；**存在未裁项则如实保持未完成** —— 复用目标：`scripts/check_runtime_architecture.py`、`check_runtime_structure.py`、`check_runtime_plan.py`、`check-openspec.sh` —— 复用注意点：设计待裁不隐式消失；结构覆盖 strict 全 coverage **不得靠 `tagent: *` 通配通过**；历史 wiki 按固定 SHA 校验、新文档映射新代码；归档**另行授权**，按标准流程同步主 spec—— 验证：
+- [ ] 09.6 闭合：主规格 delta、文档/API 与消费者逐项闭合，提交未决事项与最终证据清单 —— 前置：`09.1`–`09.5`；**存在未裁项则如实保持未完成** —— 复用目标：`scripts/check_runtime_architecture.py`、`check_runtime_structure.py`、`check_runtime_plan.py`、`check-openspec.sh` —— 复用注意点：设计待裁不隐式消失；结构覆盖 strict 全 coverage **不得靠 `tagent: *` 通配通过**；历史 wiki 按固定 SHA 校验、新文档映射新代码；归档**另行授权**，按标准流程同步主 spec；闭合**逐条对照 `expectations.md`（O/KR 预期）与 `trpc-reuse.md`（原生复用依据）**，未裁项如实保留—— 验证：
   ```sh
   python3 scripts/check_runtime_plan.py --change-dir openspec/changes/runtime-rebuild --json
   python3 scripts/check_runtime_evidence.py --check-contract --json

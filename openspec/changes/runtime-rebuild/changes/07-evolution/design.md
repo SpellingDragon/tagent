@@ -4,7 +4,7 @@
 
 ## Context
 
-- 残件现场：`evolution/`、`plugin/`、冥想链路的旧实现已随清理删除；`model/`、`state/`、`tagent/` 仅剩少量残件，不能视为可运行基线。
+- 现场：`evolution/`、`plugin/`、冥想链路的旧实现，以及 `model/`、`state/`、`tagent/`（连同 `tests/`）**均已随 2026-10-13 用户授权清理批次删除**（见 `baseline.md` §2.1.1）；当前新基线 HEAD `a9381ce`，无可运行基线。
 - 历史参照 `50acdfe` 与 `docs/wiki/evolution/evolution-architecture.md`、`docs/wiki/agent/agent-architecture.md` 可读，但**不作恢复清单**（wiki 已声明为已移除实现的历史记录）。
 - 新内核差异（决定本域写法）：① 事件管线插件绑定归 **state**（随代借用），反思/观测是**插件阶段**消费者而非独立总线；② 文件（prompt/skill）**直接热读**，git 只做版本层与后验建议，两者作用范围不得混淆；③ state 持生效定义与运行现场，反思只读事实链、不写他人分区。
 
