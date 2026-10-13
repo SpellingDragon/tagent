@@ -1,0 +1,115 @@
+# runtime-contracts — runtime-rebuild 的检查资产 CI（纯格式/结构检查，不跑产品）。
+#
+# 三类证据严格分开，本 workflow 默认只覆盖前两类：
+#   1) 格式/规范有效：计划、政策表、场景合同可解析且自洽（contracts job，默认）。
+#   2) 结构覆盖有效：仅经 workflow_dispatch 显式选择 run_implementation=true 后运行
+#      architecture --implementation（需要可编译的一方差树；缺包在此为诚实红，不掩盖）。
+#   3) 运行行为有效：仅当 dispatch 显式给出 --evidence/--test-log 时才做对照。
+#
+# real-acceptance job 仅当显式选择（run_implementation=true 或提供 evidence/test_log）时才开；
+# 皆空则根本不跑（不把空 dispatch 冒充空绿）。evidence_json 与 test_log 必须成对提供，
+# 只给一半即失败，不静默跳过。输入经 env 传入，绝不插值进带引号的 shell 参数。
+#
+# 本 workflow 不代表“strict 已通过”，也不代表产品行为通过。不使用 continue-on-error，
+# 不内嵌第二套校验器，不 pip install（只需标准库）。旧的 .github/workflows/ci.yml 不变。
+name: runtime-contracts
+
+on:
+  push:
+    branches: [main, dev, next]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_implementation:
+        description: "Run architecture --implementation coverage (requires a buildable first-party tree)."
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+      evidence_json:
+        description: "Path to a runner evidence JSON (records + source_fingerprint)."
+        type: string
+        default: ""
+      test_log:
+        description: "Path to the matching real go test -json JSONL log."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: format-and-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Schema/format checks are pure Python: no Go toolchain is set up here.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Checker selftests
+        run: "python -m unittest discover -s scripts -p 'test_check_runtime_*.py' -v"
+
+      # Fails honestly while the domain artifacts are still being written; no bypass.
+      - name: Plan contract
+        run: "python scripts/check_runtime_plan.py --change-dir openspec/changes/runtime-rebuild --json"
+
+      - name: Architecture policy
+        run: "python scripts/check_runtime_architecture.py --check-policy --json"
+
+      - name: Scenarios contract
+        run: "python scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/runtime-rebuild/task-graph.json --json"
+
+  real-acceptance:
+    name: explicit-real-acceptance
+    # Dispatch-only and strictly opt-in: with no real input selected the job does
+    # not run at all, so an empty dispatch can never masquerade as a green real
+    # run. Selecting it means exercising real structure (run_implementation) or
+    # real evidence (evidence_json/test_log).
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_implementation == 'true' || inputs.evidence_json != '' || inputs.test_log != '') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Half a real-acceptance input is a parameter error: never fall through to
+      # a silent "nothing to compare" success.
+      - name: Reject partial real-acceptance inputs
+        if: ${{ (inputs.evidence_json != '') != (inputs.test_log != '') }}
+        run: |
+          echo "::error::supply both evidence_json and test_log, or neither"
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-go@v5
+        if: ${{ inputs.run_implementation == 'true' }}
+        with:
+          go-version: ">=1.24.1"
+
+      # Real structural coverage over `go list -deps -json ./...`. Left dispatch-only:
+      # the current tree still lacks deps, so a missing package here is an honest red
+      # (never masked, never continue-on-error) — it is only not run by default, to
+      # keep the default signal about format/contract alone.
+      - name: Architecture implementation coverage
+        if: ${{ inputs.run_implementation == 'true' }}
+        run: "python scripts/check_runtime_architecture.py --implementation --json"
+
+      # Real evidence comparison: both artifacts must be supplied explicitly and
+      # are injected via env (never interpolated into a quoted shell argument), so
+      # a crafted path can neither break out of quoting nor be word-split.
+      - name: Evidence verification
+        if: ${{ inputs.evidence_json != '' && inputs.test_log != '' }}
+        env:
+          EVIDENCE_JSON: ${{ inputs.evidence_json }}
+          TEST_LOG: ${{ inputs.test_log }}
+        run: python scripts/check_runtime_evidence.py --evidence "$EVIDENCE_JSON" --test-log "$TEST_LOG" --json
+
+      - name: Note when no evidence was compared
+        if: ${{ inputs.evidence_json == '' }}
+        run: echo "no evidence/test-log supplied; this run verified structure only, not runtime behaviour"
