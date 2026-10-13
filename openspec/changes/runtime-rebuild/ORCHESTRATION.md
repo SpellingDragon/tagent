@@ -4,12 +4,12 @@
 > 本文件由集成者单写；每次派发前重读对齐，单完/波后回填台账。无凭据摘要不得在台账写「完成」。
 > 本文件**不是** openspec artifact，openspec CLI 不跟踪它；它的存在不改变 CLI 的 4/4 判定。
 
-## 授权边界（本轮，先于一切推断）
+## 授权边界（当前波：阶段一 P0 骨架；2026-10-13 用户 /openspec-apply 授权，取代此前“授权 B 仅规划”口径）
 
-- 本轮用户授权为 **B**：只写 OpenSpec 多级规划产物 + CI/lint/golden 检查器资产；**绝非产品 apply**。
-- 允许写：`openspec/changes/runtime-rebuild/**`（现有 md/json 及缺失的 `ORCHESTRATION.md`）；`golden/runtime/{architecture.json,scenarios.json}`；`scripts/{runtime_checklib.py,check_runtime_plan.py,check_runtime_architecture.py,check_runtime_structure.py,check_runtime_evidence.py,test_check_runtime_*.py}`；`.github/workflows/runtime-contracts.yml`。除此不得写。
-- 禁止：产品源码/产品测试/残件清理/主 `openspec/specs/`/历史 wiki/prototype/用户文件/依赖改动；不跑产品 Go build/test/vet 或实际 `go list`；不安装依赖、不提交/推送/归档、不付费/微信调用。
-- 允许运行：检查器自身自测、契约模式（`--check-contract`/`--check-policy`）、OpenSpec 校验（`validate`）。**允许预制检查工装，但不因此越过 00.3 前置**。
+- 当前授权：**阶段一骨架波产品代码**（24 个 P0：只落数据/接口定义与 CI 合规注释文档，零逻辑，design D9）；及规划产物维护。阶段二 NN.M 实施仍被 00.P0.3 门锁住，未解锁。
+- 允许写：各 P0 单声明的**本包文件组 + skeleton_assert.go**（白名单精确到文件，见各域 tasks）；`openspec/changes/runtime-rebuild/**`（规划维护）；检查器/CI 资产仅随 00.4–00.6 或主编排者裁决动。
+- 持续禁止：主 `openspec/specs/`、历史 wiki、prototype、用户文件（含 interview skill）、依赖改动、付费/微信调用、提交/推送/归档（提交须用户明示）；骨架单不勾自己的任务（勾选权在主编排者，凭四查证据）。
+- 允许运行：`go build/vet/gofmt -l`（骨架验证）、检查器自测/契约模式、OpenSpec 校验。
 - 外部批准计划 `/Users/pengweiye/Library/Application Support/Qoder/SharedClientCache/cache/plans/运行时_重设_实施计划_304e54c3.md` **只读**；外部计划原编号/行为/范围不得改。
 
 ## 0、结论（先行）
@@ -232,6 +232,14 @@
 - 候选写集收敛（01/02/04/05 域 tasks）：已按 architecture policy 收敛为候选文件；**仍无 G3 逐文件授权，相关叶任务为「尚未可派发」**。
 
 ## 3、台账层
+| **骨架层 A（apply 波，2026-10-13）** | 通过（5/5：01.P0.1/02.P0.1/02.P0.3/04.P0.2/09.P0.1，evidence: skeletonA-*） | build/vet=0、gofmt 空、comment_policy 0 findings、plan ok、strict=0（主编排者独立复跑） | ①设计闸 00.1–00.3 闭合（601 条归属核验＋103 空洞三类裁决清零＋G2 五链推演 15 回填 2 待核）；②02.P0.1 曾受阻（contracts 无常量枚举）→ 裁决 §1.1 常量集冻结口径（8 Type+7 MetaKey+meta_ 前缀，值沿用遗留，task_settled 升格）；③comment_policy 索引行补齐（6 文件，锚点 docs/wiki 既有章节）；④hygiene 登记 golden 顶层；⑤tests/acceptance 3 findings 登记 W02.1（锚点不硬凑） | 解锁层 B：02.P0.2/03.P0.1/04.P0.3/05.P0.2 | 00.P0.3 门依赖 21 项，剩 16 |
+| **骨架层 B（apply 波，2026-10-13）** | 通过（5/5：02.P0.2/03.P0.1/04.P0.3/05.P0.2/06.P0.1，evidence: skeletonB-*） | build/vet/gofmt/comment_policy/hygiene/strict 全 0（主编排者独立复跑）；层B 新增 1612 行 | ①并发写竞态 3 起均按 R21 处置（包内隔离取证+终态复验）；②Write 工具尾部 package 注入 4 起（R15 实例，代理均已自修复）；③telemetry 锚点裁决：保留 #telemetry-ladder，语义 Godoc 自述，00.P0.3 评审门复核 | 解锁层 C：01.P0.2/02.P0.4/03.P0.2/04.P0.1/04.P0.4/06.P0.2/07.P0.1 | 门剩 11 |
+| **骨架层 C（apply 波）** | 通过（5/5：01.P0.2/03.P0.2/04.P0.1/04.P0.4/06.P0.2，evidence: skeletonC-*） | 全套验证 0（主编排者独立复跑） | ①C1 受阻（golden 要求人工批准 state→task 边）→ 主编排者裁 (A) 批准并更新 golden（reason 注明批准链）＋NoticePort 不引入接口类型（元规则二）后重派通过；②memory/search 子包登记 golden（packages+edges+根 allow 三处） | 解锁层 D | 门剩 6 |
+| **骨架层 D（apply 波）** | 通过（3/3：02.P0.4/05.P0.1/07.P0.1，evidence: skeletonD-*） | 全套验证 0 | agent/query/evolution 三包 golden 均已预登记无阻塞；query 包无端口接口（纯承载类型，方法形状断言） | 解锁层 E | 门剩 3 |
+| **骨架层 E+F（apply 波）** | 通过（3/3：07.P0.2/08.P0.1/08.P0.2，evidence: skeletonE-*/skeletonF-*） | 全套验证 0；架构 **implementation 模式首次全绿**（violations=0） | ①Deps 5 字段版获主编排者裁定保留（4 跨边界端口=组合根唯一 DI 职责）；②golden 补 memory/search 三处登记 | **00.P0.3 门依赖 21/21 done** | 0 |
+| **00.P0.3 骨架评审门** | 第一道 CodeReview=有条件通过（无 P1、4 P2）；第二道主编排者复核=P2 全处置（P2-1 改锚/P2-2 接线 RecallResult/P2-3 修订 D9 口径/P2-4 contracts §7 留痕），处置后 build/vet/policy/strict 全 0 | 评审记录=skeleton-review.md；风险预告 7 项归档为阶段二定向核对表 | **第三道用户确认待决——确认后勾选 00.P0.3 并解锁阶段二 65 项** | — | — |
+| **风险修复轮（用户裁定"值得都修"）** | 7/7 修复（#1 ctx 全补/#2 plugin 六窄接口+注册单元/#3 Notice.Event/#4 Deps+3/#5 AdmissionKind/#6 BindingHandle/#7 词表）；批1 回传 forward 失败但按 R6 先验工作区确认全部落盘 | build/vet/gofmt/comment_policy 16包/arch impl/plan/strict 全 0（主编排者独立复跑） | contracts §7 销 2 条（plugin 缺口/Borrow 释放面）；skeleton-review.md 记修复轮 | — | — |
+| **00.2 裁决登记 + 骨架符合预期确认** | 裁决登记落盘 adjudications-00.2.md（103 空洞三类裁决/9 张力/17 对位实证，独立存档）；骨架对照 expectations 五 O 载体逐项实证（O1 真别名18处/O2 三对象+BindingHandle+AcceptNotice/O3 AuthorizationScope+Snapshot/O4 logprobs+封账/O5 Deps+Runtime+HostBridge）——**骨架符合预期** | 同上全套 0 | 评审门第三道用户确认仍待决（本行确认=骨架载体符合预期，非门的第三道） | — | — |
 
 > 规则：每行必须有**真实命令与原始退出码**；无凭据摘要不得写「完成」。`productVerified` 恒为 `null`。
 

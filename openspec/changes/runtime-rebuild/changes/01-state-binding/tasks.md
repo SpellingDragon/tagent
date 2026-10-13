@@ -18,9 +18,9 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`config/**`、`state/**`）。
 
-- [ ] 01.P0.1 建立 config 纯声明数据骨架：`Declaration`/`AgentSpec`/文件引用类型，及 `Load` 与规范化指纹的方法签名（无解析/指纹逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`config/config.go`、`config/fingerprint.go`、`config/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l config/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
+- [x] 01.P0.1 建立 config 纯声明数据骨架：`Declaration`/`AgentSpec`/文件引用类型，及 `Load` 与规范化指纹的方法签名（无解析/指纹逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`config/config.go`、`config/fingerprint.go`、`config/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l config/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
 
-- [ ] 01.P0.2 建立 state 数据/接口骨架：`Store`/`Session`/`AgentBinding`/`StatePlan`/`OrgPlan`、发布记录、借用接口与 `NoticePort` 实现签名（无实现逻辑）—— 前置：00.3、00.P0.1、01.P0.1、02.P0.1、02.P0.2、02.P0.3、03.P0.1、04.P0.3 —— 候选拟写文件（非本轮授权）：`state/store.go`、`state/session.go`、`state/binding.go`、`state/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l state/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
+- [x] 01.P0.2 建立 state 数据/接口骨架：`Store`/`Session`/`AgentBinding`/`StatePlan`/`OrgPlan`、发布记录、借用接口与 `NoticePort` 实现签名（无实现逻辑）—— 前置：00.3、00.P0.1、01.P0.1、02.P0.1、02.P0.2、02.P0.3、03.P0.1、04.P0.3 —— 候选拟写文件（非本轮授权）：`state/store.go`、`state/session.go`、`state/binding.go`、`state/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l state/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
 
 ## 任务
 

@@ -23,7 +23,7 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 // space, the latter are the composition-root package's own sources.
 var registeredTopDirs = map[string]bool{
 	".github": true, "agent": true, "config": true, "docs": true, "evals": true,
-	"event": true, "evolution": true, "examples": true, "internal": true,
+	"event": true, "evolution": true, "examples": true, "golden": true, "internal": true,
 	"memory": true, "modelutil": true, "openspec": true, "plugin": true,
 	"prompt": true, "prototype": true, "resources": true, "rl": true,
 	"scripts": true, "tests": true, "testutil": true, "tool": true,

@@ -23,9 +23,9 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`rl/**`）。
 
-- [ ] 06.P0.1 建立 rl 记录骨架：`Episode`/`Decision`/`Attempt` 记录类型、capture 接口（只声明）—— 前置：00.3、00.P0.1、02.P0.1、02.P0.3 —— 候选拟写文件（非本轮授权）：`rl/record.go`、`rl/episode.go`、`rl/capture.go`、`rl/skeleton_assert.go` —— 设计闸：G1=记录类型/capture 接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
+- [x] 06.P0.1 建立 rl 记录骨架：`Episode`/`Decision`/`Attempt` 记录类型、capture 接口（只声明）—— 前置：00.3、00.P0.1、02.P0.1、02.P0.3 —— 候选拟写文件（非本轮授权）：`rl/record.go`、`rl/episode.go`、`rl/capture.go`、`rl/skeleton_assert.go` —— 设计闸：G1=记录类型/capture 接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 06.P0.2 建立 rl 导出/反馈骨架：导出、manifest、reward 版本化、反馈 HTTP 合同类型（只声明）—— 前置：00.3、00.P0.1、06.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`rl/export.go`、`rl/manifest.go`、`rl/reward.go`、`rl/http.go`、`rl/skeleton_assert.go` —— 设计闸：G1=导出/反馈合同类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
+- [x] 06.P0.2 建立 rl 导出/反馈骨架：导出、manifest、reward 版本化、反馈 HTTP 合同类型（只声明）—— 前置：00.3、00.P0.1、06.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`rl/export.go`、`rl/manifest.go`、`rl/reward.go`、`rl/http.go`、`rl/skeleton_assert.go` —— 设计闸：G1=导出/反馈合同类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

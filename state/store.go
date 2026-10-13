@@ -1,0 +1,51 @@
+// 契约: docs/wiki/platform/org-hot-reload.md#apply-record
+//
+// Package state is the runtime's state owner: it establishes the agent and
+// session sites an explicit address names, admits a prepared plan as the next
+// effective binding generation, closes a session's own side, and accepts the
+// notifications a task intends to deliver.
+//
+// The package holds the effective bindings and the session sites, and an
+// executor borrows a binding for one request rather than keeping a second
+// writable source of its own. This is the phase 1 skeleton: it declares shapes
+// and holds no behaviour.
+package state
+
+import (
+	"context"
+
+	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/task"
+)
+
+// Store is the state owner's shared face: the composition root establishes the
+// agent and session sites here, admits one prepared plan as the next effective
+// binding generation, closes a session's own side, and forwards the
+// notifications a task intends to deliver.
+//
+// The shared face is established before any candidate binding is prepared, so it
+// is never part of a candidate's revocable resources.
+type Store interface {
+	// Establish creates the session site for one explicit (agent, session)
+	// address on the given runtime instance and returns it. The address is never
+	// defaulted to a most-recent session, and rebuilding an agent under the same
+	// name yields a different instance.
+	Establish(ctx context.Context, addr event.Address, instance event.InstanceID) (*Session, error)
+
+	// Publish admits a fully prepared plan as the next effective binding
+	// generation and returns the publication record. A plan whose baseline was
+	// already advanced is discarded instead of overwriting the newer
+	// publication, and reloading byte-identical content yields no new
+	// generation.
+	Publish(ctx context.Context, plan StatePlan) (Publication, error)
+
+	// CloseSession closes the session's own side: new input is refused while the
+	// accepted obligations of the site are kept for a recoverable path.
+	CloseSession(ctx context.Context, addr event.Address) error
+
+	// AcceptNotice accepts one notification into the mailbox of the target
+	// session. Acceptance is idempotent by the notification's stable identity,
+	// so a replayed delivery records no second fact, and acceptance never waits
+	// for a slow model decision.
+	AcceptNotice(ctx context.Context, notice task.Notice) error
+}

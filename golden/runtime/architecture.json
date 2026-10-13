@@ -5,50 +5,440 @@
   "root_package": ".",
   "description": "runtime-rebuild 的结构覆盖政策（人工制定，不从当前残件的 imports 自动学习）。只登记计划允许的一方差包与允许的包间边；未登记的包、未允许的边一律失败并等人工批准，不用通配豁免。",
   "scope": {
-    "exclude_dir_names": ["prototype", "scripts", "tests", "examples", "vendor", "node_modules", "docs", "resources", "testdata", ".git", ".github", ".agents", ".tagent-workspace", ".pre-isolation-backup"],
+    "exclude_dir_names": [
+      "prototype",
+      "scripts",
+      "tests",
+      "examples",
+      "vendor",
+      "node_modules",
+      "docs",
+      "resources",
+      "testdata",
+      ".git",
+      ".github",
+      ".agents",
+      ".tagent-workspace",
+      ".pre-isolation-backup"
+    ],
     "reason": "prototype 为历史参照实现、scripts 为仓库工程脚本（含 codetools/comment_policy 的 Go）、tests 为集成测试、examples 为微信独立 module、vendor/node_modules 为第三方；这些都不是根 module 的一方产品包，按域内各自门禁处理。"
   },
   "packages": [
-    {"pattern": ".", "role": "composition", "required": true, "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。"},
-    {"pattern": "event", "role": "leaf-domain", "required": true, "reason": "事件身份与事实载体；纯叶子，原生模型载荷可来自外部框架类型。"},
-    {"pattern": "config", "role": "declaration", "required": true, "reason": "纯组织声明解析与规范化指纹，不依赖运行时包。"},
-    {"pattern": "state", "role": "state-owner", "required": true, "reason": "agent/session、mailbox、执行绑定、消费记录与发布代的持有者。"},
-    {"pattern": "agent", "role": "execution", "required": true, "reason": "事件调度与单次模型决策；借 state 的绑定执行。"},
-    {"pattern": "task", "role": "task-lifecycle", "required": true, "reason": "任务、取消、通知义务与转交，经注入端口提交变化。"},
-    {"pattern": "memory", "role": "durable-facts", "required": true, "reason": "持久原文与可重建投影的领域接口。"},
-    {"pattern": "workspace", "role": "temp-replica", "required": true, "reason": "临时文件副本的建立与清理，不持有事实真源。"},
-    {"pattern": "plugin", "role": "pipeline", "required": true, "reason": "阶段化插件职责；绑定由 state 持有、组合根构造。"},
-    {"pattern": "model", "role": "model-protocol", "required": true, "reason": "锁定 tRPC 模型/provider 的原生接入与单一终局归约。"},
-    {"pattern": "telemetry", "role": "observation", "required": true, "reason": "OTel/审计观测，提交后只读消费，不拥有状态。"},
-    {"pattern": "rl", "role": "training-data", "required": true, "reason": "因果训练记录、导出与 SFT 消费（本次为数据闭环＋SFT 范围）。"},
-    {"pattern": "evolution", "role": "self-improve", "required": true, "reason": "反思与自演进的登记/评估/回滚，不强制反向 governance 依赖。"},
-    {"pattern": "query", "role": "read-projection", "required": false, "reason": "授权过滤的只读运行总图投影（inventory/snapshot/cursor/subscribe/explain）；有真实消费者（模型/SDK/CLI/诊断/看板/训练）；可选包，G1 未冻结不强制目录存在，也不塞回组合根做业务大 Store。只读消费事实，不拥有状态。"},
-    {"pattern": "tool/exec", "role": "adapter", "required": true, "reason": "exec/tmux 执行适配、资源租约与停止凭证。"},
-    {"pattern": "tool/mcp", "role": "adapter", "required": true, "reason": "MCP 连接/发现/固定网关适配（工具适配位于 tool/ 子树，与既有 tool/mcp 路径一致），不重写协议。"},
-    {"pattern": "tool/remote", "role": "adapter", "required": true, "reason": "A2A 与内部显式投递适配（工具适配位于 tool/ 子树）。"},
-    {"pattern": "memory/localfile", "role": "storage-tier", "required": false, "reason": "localfile 存储档适配（memory 的允许实现子包）。存储档不等于包名：是否独立成包待设计核，required=false 允许适配，完整能力由行为 test 证明，不以目录出现当交付。"},
-    {"pattern": "memory/rustviking", "role": "storage-tier", "required": false, "reason": "rustviking(file) 存储档适配（memory 的允许实现子包）。两种存储档不强制等于两个包；required=false 允许适配，完整能力由行为 test 证明。"}
+    {
+      "pattern": ".",
+      "role": "composition",
+      "required": true,
+      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。"
+    },
+    {
+      "pattern": "event",
+      "role": "leaf-domain",
+      "required": true,
+      "reason": "事件身份与事实载体；纯叶子，原生模型载荷可来自外部框架类型。"
+    },
+    {
+      "pattern": "config",
+      "role": "declaration",
+      "required": true,
+      "reason": "纯组织声明解析与规范化指纹，不依赖运行时包。"
+    },
+    {
+      "pattern": "state",
+      "role": "state-owner",
+      "required": true,
+      "reason": "agent/session、mailbox、执行绑定、消费记录与发布代的持有者。"
+    },
+    {
+      "pattern": "agent",
+      "role": "execution",
+      "required": true,
+      "reason": "事件调度与单次模型决策；借 state 的绑定执行。"
+    },
+    {
+      "pattern": "task",
+      "role": "task-lifecycle",
+      "required": true,
+      "reason": "任务、取消、通知义务与转交，经注入端口提交变化。"
+    },
+    {
+      "pattern": "memory",
+      "role": "durable-facts",
+      "required": true,
+      "reason": "持久原文与可重建投影的领域接口。"
+    },
+    {
+      "pattern": "workspace",
+      "role": "temp-replica",
+      "required": true,
+      "reason": "临时文件副本的建立与清理，不持有事实真源。"
+    },
+    {
+      "pattern": "plugin",
+      "role": "pipeline",
+      "required": true,
+      "reason": "阶段化插件职责；绑定由 state 持有、组合根构造。"
+    },
+    {
+      "pattern": "model",
+      "role": "model-protocol",
+      "required": true,
+      "reason": "锁定 tRPC 模型/provider 的原生接入与单一终局归约。"
+    },
+    {
+      "pattern": "telemetry",
+      "role": "observation",
+      "required": true,
+      "reason": "OTel/审计观测，提交后只读消费，不拥有状态。"
+    },
+    {
+      "pattern": "rl",
+      "role": "training-data",
+      "required": true,
+      "reason": "因果训练记录、导出与 SFT 消费（本次为数据闭环＋SFT 范围）。"
+    },
+    {
+      "pattern": "evolution",
+      "role": "self-improve",
+      "required": true,
+      "reason": "反思与自演进的登记/评估/回滚，不强制反向 governance 依赖。"
+    },
+    {
+      "pattern": "query",
+      "role": "read-projection",
+      "required": false,
+      "reason": "授权过滤的只读运行总图投影（inventory/snapshot/cursor/subscribe/explain）；有真实消费者（模型/SDK/CLI/诊断/看板/训练）；可选包，G1 未冻结不强制目录存在，也不塞回组合根做业务大 Store。只读消费事实，不拥有状态。"
+    },
+    {
+      "pattern": "tool/exec",
+      "role": "adapter",
+      "required": true,
+      "reason": "exec/tmux 执行适配、资源租约与停止凭证。"
+    },
+    {
+      "pattern": "tool/mcp",
+      "role": "adapter",
+      "required": true,
+      "reason": "MCP 连接/发现/固定网关适配（工具适配位于 tool/ 子树，与既有 tool/mcp 路径一致），不重写协议。"
+    },
+    {
+      "pattern": "tool/remote",
+      "role": "adapter",
+      "required": true,
+      "reason": "A2A 与内部显式投递适配（工具适配位于 tool/ 子树）。"
+    },
+    {
+      "pattern": "memory/localfile",
+      "role": "storage-tier",
+      "required": false,
+      "reason": "localfile 存储档适配（memory 的允许实现子包）。存储档不等于包名：是否独立成包待设计核，required=false 允许适配，完整能力由行为 test 证明，不以目录出现当交付。"
+    },
+    {
+      "pattern": "memory/rustviking",
+      "role": "storage-tier",
+      "required": false,
+      "reason": "rustviking(file) 存储档适配（memory 的允许实现子包）。两种存储档不强制等于两个包；required=false 允许适配，完整能力由行为 test 证明。"
+    },
+    {
+      "pattern": "memory/search",
+      "role": "impl-subpackage",
+      "required": false,
+      "reason": "memory 实现子包（检索端口/混合融合）：索引非真源，读 memory 原文引用与 event 身份。随 04.P0.4 骨架登记（主编排者，2026-10-13）。"
+    }
   ],
   "edges": [
-    {"from": ".", "allow": ["config", "state", "agent", "task", "memory", "workspace", "plugin", "model", "telemetry", "rl", "evolution", "query", "tool/exec", "tool/mcp", "tool/remote", "memory/localfile", "memory/rustviking", "event"], "forbidden": [], "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核）。"},
-    {"from": "event", "allow": [], "forbidden": ["config", "state", "agent", "task", "memory", "workspace", "plugin", "model", "telemetry", "rl", "evolution"], "reason": "事件是纯叶子：不得 import 任何其他一方包。"},
-    {"from": "config", "allow": [], "forbidden": ["state", "agent", "task", "memory", "plugin", "model"], "reason": "纯声明解析，不触运行时与绑定。"},
-    {"from": "model", "allow": ["event"], "forbidden": ["agent", "state", "task", "memory", "plugin", "rl", "evolution"], "reason": "模型协议只经 event 记录事实；natives 来自外部框架，不自建影子类型。"},
-    {"from": "state", "allow": ["event", "config", "model", "plugin"], "forbidden": ["agent", "rl", "evolution"], "reason": "state 持生效声明与活绑定：需要 config 声明、model/plugin 绑定类型、event 事实。task 边未在此登记（保守足够）；若真实消费者确需 state→task，属新边，须人工批准后加入。"},
-    {"from": "agent", "allow": ["event", "state", "model", "plugin", "task"], "forbidden": ["rl", "evolution"], "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口。"},
-    {"from": "task", "allow": ["event"], "forbidden": ["agent", "state", "memory", "plugin", "rl", "evolution"], "reason": "任务经注入提交端口与事件表达变化，不反向依赖执行器与状态容器。"},
-    {"from": "memory", "allow": ["event"], "forbidden": ["agent", "state", "plugin", "rl", "evolution"], "reason": "持久事实只发事件；不得反向依赖上层的智能与治理。"},
-    {"from": "memory/localfile", "allow": ["memory", "event"], "forbidden": ["agent", "state", "plugin"], "reason": "存储档实现只依赖 memory 领域接口与事件。"},
-    {"from": "memory/rustviking", "allow": ["memory", "event"], "forbidden": ["agent", "state", "plugin"], "reason": "存储档实现只依赖 memory 领域接口与事件。"},
-    {"from": "workspace", "allow": ["memory", "event"], "forbidden": ["agent", "state", "plugin", "rl", "evolution"], "reason": "副本是原文（memory/OriginalStore）的临时物化，必须能读原文重建（副本依赖原文）；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理。"},
-    {"from": "plugin", "allow": ["event"], "forbidden": ["agent", "state", "rl", "evolution"], "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测。"},
-    {"from": "telemetry", "allow": ["event"], "forbidden": ["agent", "state", "task"], "reason": "提交后观测：只读 event，不拥有状态（关闭 OTel 不影响 Query）。"},
-    {"from": "rl", "allow": ["event", "model", "memory"], "forbidden": ["agent", "state", "plugin", "evolution", "."], "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。"},
-    {"from": "evolution", "allow": ["state", "event", "model", "memory"], "forbidden": ["agent", "rl"], "reason": "反思与自演进消费 state/model/memory 事实；不强制反向 governance，也不依赖执行器内部。"},
-    {"from": "query", "allow": ["event", "state", "task", "memory", "plugin"], "forbidden": ["agent", "rl", "evolution"], "reason": "只读投影：读 event 事实与 state/task/memory/plugin 只读端口，不写、不依赖执行器/训练/自演进；定向避免与执行器成环。"},
-    {"from": "tool/exec", "allow": ["event"], "forbidden": ["agent", "state", "memory"], "reason": "执行适配持有资源租约并记事件，不拥有会话状态。"},
-    {"from": "tool/mcp", "allow": ["event"], "forbidden": ["agent", "state"], "reason": "MCP 适配只做连接/发现/网关与事件，不重写协议。"},
-    {"from": "tool/remote", "allow": ["event"], "forbidden": ["agent", "state"], "reason": "远端投递适配经显式目标与事件关联，不藏调度。"}
+    {
+      "from": ".",
+      "allow": [
+        "config",
+        "state",
+        "agent",
+        "task",
+        "memory",
+        "workspace",
+        "plugin",
+        "model",
+        "telemetry",
+        "rl",
+        "evolution",
+        "query",
+        "tool/exec",
+        "tool/mcp",
+        "tool/remote",
+        "memory/localfile",
+        "memory/rustviking",
+        "event",
+        "memory/search"
+      ],
+      "forbidden": [],
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核）。"
+    },
+    {
+      "from": "event",
+      "allow": [],
+      "forbidden": [
+        "config",
+        "state",
+        "agent",
+        "task",
+        "memory",
+        "workspace",
+        "plugin",
+        "model",
+        "telemetry",
+        "rl",
+        "evolution"
+      ],
+      "reason": "事件是纯叶子：不得 import 任何其他一方包。"
+    },
+    {
+      "from": "config",
+      "allow": [],
+      "forbidden": [
+        "state",
+        "agent",
+        "task",
+        "memory",
+        "plugin",
+        "model"
+      ],
+      "reason": "纯声明解析，不触运行时与绑定。"
+    },
+    {
+      "from": "model",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task",
+        "memory",
+        "plugin",
+        "rl",
+        "evolution"
+      ],
+      "reason": "模型协议只经 event 记录事实；natives 来自外部框架，不自建影子类型。"
+    },
+    {
+      "from": "state",
+      "allow": [
+        "event",
+        "config",
+        "model",
+        "plugin",
+        "task"
+      ],
+      "forbidden": [
+        "agent",
+        "rl",
+        "evolution"
+      ],
+      "reason": "state 实现 task 通知出口（contracts §4 mailbox 幂等接纳 + R1 装配序 store→manager）；state→task 边经主编排者批准加入（apply 骨架层 C，2026-10-13）。"
+    },
+    {
+      "from": "agent",
+      "allow": [
+        "event",
+        "state",
+        "model",
+        "plugin",
+        "task"
+      ],
+      "forbidden": [
+        "rl",
+        "evolution"
+      ],
+      "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口。"
+    },
+    {
+      "from": "task",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "memory",
+        "plugin",
+        "rl",
+        "evolution"
+      ],
+      "reason": "任务经注入提交端口与事件表达变化，不反向依赖执行器与状态容器。"
+    },
+    {
+      "from": "memory",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "plugin",
+        "rl",
+        "evolution"
+      ],
+      "reason": "持久事实只发事件；不得反向依赖上层的智能与治理。"
+    },
+    {
+      "from": "memory/localfile",
+      "allow": [
+        "memory",
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "plugin"
+      ],
+      "reason": "存储档实现只依赖 memory 领域接口与事件。"
+    },
+    {
+      "from": "memory/rustviking",
+      "allow": [
+        "memory",
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "plugin"
+      ],
+      "reason": "存储档实现只依赖 memory 领域接口与事件。"
+    },
+    {
+      "from": "workspace",
+      "allow": [
+        "memory",
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "plugin",
+        "rl",
+        "evolution"
+      ],
+      "reason": "副本是原文（memory/OriginalStore）的临时物化，必须能读原文重建（副本依赖原文）；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理。"
+    },
+    {
+      "from": "plugin",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "rl",
+        "evolution"
+      ],
+      "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测。"
+    },
+    {
+      "from": "telemetry",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task"
+      ],
+      "reason": "提交后观测：只读 event，不拥有状态（关闭 OTel 不影响 Query）。"
+    },
+    {
+      "from": "rl",
+      "allow": [
+        "event",
+        "model",
+        "memory"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "plugin",
+        "evolution",
+        "."
+      ],
+      "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。"
+    },
+    {
+      "from": "evolution",
+      "allow": [
+        "state",
+        "event",
+        "model",
+        "memory"
+      ],
+      "forbidden": [
+        "agent",
+        "rl"
+      ],
+      "reason": "反思与自演进消费 state/model/memory 事实；不强制反向 governance，也不依赖执行器内部。"
+    },
+    {
+      "from": "query",
+      "allow": [
+        "event",
+        "state",
+        "task",
+        "memory",
+        "plugin"
+      ],
+      "forbidden": [
+        "agent",
+        "rl",
+        "evolution"
+      ],
+      "reason": "只读投影：读 event 事实与 state/task/memory/plugin 只读端口，不写、不依赖执行器/训练/自演进；定向避免与执行器成环。"
+    },
+    {
+      "from": "tool/exec",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "memory"
+      ],
+      "reason": "执行适配持有资源租约并记事件，不拥有会话状态。"
+    },
+    {
+      "from": "tool/mcp",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state"
+      ],
+      "reason": "MCP 适配只做连接/发现/网关与事件，不重写协议。"
+    },
+    {
+      "from": "tool/remote",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state"
+      ],
+      "reason": "远端投递适配经显式目标与事件关联，不藏调度。"
+    },
+    {
+      "from": "memory/search",
+      "allow": [
+        "memory",
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task",
+        "rl"
+      ],
+      "reason": "memory 实现子包（检索端口/混合融合）：读 memory 原文引用与 event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13）。"
+    }
   ],
   "external": {
     "known_prefixes": [

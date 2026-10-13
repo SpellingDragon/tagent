@@ -15,9 +15,9 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（module 根 `package tagent`）。
 
-- [ ] 08.P0.1 建立 module 根 package tagent 公共 API 骨架：`Runtime`/`Build` 入口签名与公共 API 面（只签名）—— 前置：00.3、00.P0.1、02.P0.4、03.P0.2、05.P0.1、06.P0.1、07.P0.1 —— 候选拟写文件（非本轮授权）：`tagent.go`、`build.go`、`skeleton_assert.go`（module 根 `package tagent`）—— 设计闸：G1=Runtime/Build 入口签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l .`（空输出，module 根）；零逻辑由骨架评审门核
+- [x] 08.P0.1 建立 module 根 package tagent 公共 API 骨架：`Runtime`/`Build` 入口签名与公共 API 面（只签名）—— 前置：00.3、00.P0.1、02.P0.4、03.P0.2、05.P0.1、06.P0.1、07.P0.1 —— 候选拟写文件（非本轮授权）：`tagent.go`、`build.go`、`skeleton_assert.go`（module 根 `package tagent`）—— 设计闸：G1=Runtime/Build 入口签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l .`（空输出，module 根）；零逻辑由骨架评审门核
 
-- [ ] 08.P0.2 建立根 module 内微信宿主桥接口：只建根侧桥类型（wechat module 修复属阶段二 08.2）—— 前置：00.3、00.P0.1、08.P0.1 —— 候选拟写文件（非本轮授权）：`host_bridge.go`（module 根 `package tagent`）、`skeleton_assert.go` —— 设计闸：G1=桥类型与 00.3 合同一致；G3=根 module 内白名单（不动 `examples/wechat-bot/**`）—— 验证：`go build ./...`、`go vet ./...`、`gofmt -l .`（空输出，根侧）；零逻辑由骨架评审门核
+- [x] 08.P0.2 建立根 module 内微信宿主桥接口：只建根侧桥类型（wechat module 修复属阶段二 08.2）—— 前置：00.3、00.P0.1、08.P0.1 —— 候选拟写文件（非本轮授权）：`host_bridge.go`（module 根 `package tagent`）、`skeleton_assert.go` —— 设计闸：G1=桥类型与 00.3 合同一致；G3=根 module 内白名单（不动 `examples/wechat-bot/**`）—— 验证：`go build ./...`、`go vet ./...`、`gofmt -l .`（空输出，根侧）；零逻辑由骨架评审门核
 
 ## 任务
 

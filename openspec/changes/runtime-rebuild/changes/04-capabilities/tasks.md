@@ -24,13 +24,13 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`tool/exec/**`、`tool/mcp/**`、`tool/remote/**`、`plugin/**`、`memory/search/**`）。
 
-- [ ] 04.P0.1 建立 tool/exec 骨架：执行声明/资源标识/停止凭证接口（只声明）—— 前置：00.3、00.P0.1、02.P0.2 —— 候选拟写文件（非本轮授权）：`tool/exec/decl.go`、`tool/exec/stop.go`、`tool/exec/skeleton_assert.go` —— 设计闸：G1=执行声明/资源标识与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/exec/`（空输出）；零逻辑由骨架评审门核
+- [x] 04.P0.1 建立 tool/exec 骨架：执行声明/资源标识/停止凭证接口（只声明）—— 前置：00.3、00.P0.1、02.P0.2 —— 候选拟写文件（非本轮授权）：`tool/exec/decl.go`、`tool/exec/stop.go`、`tool/exec/skeleton_assert.go` —— 设计闸：G1=执行声明/资源标识与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/exec/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 04.P0.2 建立 tool/mcp 与 tool/remote 适配接口声明（复用原生，不重写协议）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tool/mcp/adapter.go`、`tool/remote/adapter.go`、`tool/mcp/skeleton_assert.go`、`tool/remote/skeleton_assert.go` —— 设计闸：G1=适配接口与 00.3 合同一致且复用原生类型；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/mcp/ tool/remote/`（空输出）；零逻辑由骨架评审门核
+- [x] 04.P0.2 建立 tool/mcp 与 tool/remote 适配接口声明（复用原生，不重写协议）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tool/mcp/adapter.go`、`tool/remote/adapter.go`、`tool/mcp/skeleton_assert.go`、`tool/remote/skeleton_assert.go` —— 设计闸：G1=适配接口与 00.3 合同一致且复用原生类型；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/mcp/ tool/remote/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 04.P0.3 建立 plugin 骨架：相位接口、`Before`/`After`、治理声明类型（只声明）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`plugin/phases.go`、`plugin/governance.go`、`plugin/skeleton_assert.go` —— 设计闸：G1=相位枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l plugin/`（空输出）；零逻辑由骨架评审门核
+- [x] 04.P0.3 建立 plugin 骨架：相位接口、`Before`/`After`、治理声明类型（只声明）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`plugin/phases.go`、`plugin/governance.go`、`plugin/skeleton_assert.go` —— 设计闸：G1=相位枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l plugin/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 04.P0.4 建立 memory/search 骨架：检索端口、混合召回接口（只声明）—— 前置：00.3、00.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`memory/search/port.go`、`memory/search/fusion.go`、`memory/search/skeleton_assert.go` —— 设计闸：G1=检索端口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l memory/search/`（空输出）；零逻辑由骨架评审门核
+- [x] 04.P0.4 建立 memory/search 骨架：检索端口、混合召回接口（只声明）—— 前置：00.3、00.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`memory/search/port.go`、`memory/search/fusion.go`、`memory/search/skeleton_assert.go` —— 设计闸：G1=检索端口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l memory/search/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

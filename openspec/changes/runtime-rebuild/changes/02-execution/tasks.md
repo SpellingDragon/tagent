@@ -18,13 +18,13 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`event/**`、`task/**`、`model/**`、`agent/**`）。
 
-- [ ] 02.P0.1 建立 event 身份/载荷骨架：`AgentID`/`SessionID`/`EventID`/`InvocationID`/`TaskID`/`InstanceID`/`EpisodeID`/`DecisionID`/`AttemptID` 类型、`Address`、`Event` 载荷、`Type*` 与 `MetaKey*` 常量（只声明，无解析）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`event/types.go`、`event/meta.go`、`event/skeleton_assert.go` —— 设计闸：G1=身份/常量集与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l event/`（空输出）；零逻辑由骨架评审门核
+- [x] 02.P0.1 建立 event 身份/载荷骨架：`AgentID`/`SessionID`/`EventID`/`InvocationID`/`TaskID`/`InstanceID`/`EpisodeID`/`DecisionID`/`AttemptID` 类型、`Address`、`Event` 载荷、`Type*` 与 `MetaKey*` 常量（只声明，无解析）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`event/types.go`、`event/meta.go`、`event/skeleton_assert.go` —— 设计闸：G1=身份/常量集与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l event/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 02.P0.2 建立 task 骨架：`Spec`/`Status`/`AdmissionReceipt`/`CommitResult` 三层结果/`Notice` 身份/`Registry`/`Manager`/`Commit` 端口签名（只签名）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`task/spec.go`、`task/commit.go`、`task/registry.go`、`task/skeleton_assert.go` —— 设计闸：G1=三层结果与端口签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l task/`（空输出）；零逻辑由骨架评审门核
+- [x] 02.P0.2 建立 task 骨架：`Spec`/`Status`/`AdmissionReceipt`/`CommitResult` 三层结果/`Notice` 身份/`Registry`/`Manager`/`Commit` 端口签名（只签名）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`task/spec.go`、`task/commit.go`、`task/registry.go`、`task/skeleton_assert.go` —— 设计闸：G1=三层结果与端口签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l task/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 02.P0.3 建立 model 骨架：原生类型薄别名、单一终局归约入口签名与 `kind` 枚举（只声明）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`model/aliases.go`、`model/terminal.go`、`model/skeleton_assert.go` —— 设计闸：G1=单一归约入口与 kind 枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l model/`（空输出）；零逻辑由骨架评审门核
+- [x] 02.P0.3 建立 model 骨架：原生类型薄别名、单一终局归约入口签名与 `kind` 枚举（只声明）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`model/aliases.go`、`model/terminal.go`、`model/skeleton_assert.go` —— 设计闸：G1=单一归约入口与 kind 枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l model/`（空输出）；零逻辑由骨架评审门核
 
-- [ ] 02.P0.4 建立 agent 骨架：`Agent` 接口、invocation 调度类型、委派/关闭签名（只声明）—— 前置：00.3、00.P0.1、01.P0.2、02.P0.1、02.P0.2、02.P0.3、04.P0.3 —— 候选拟写文件（非本轮授权）：`agent/agent.go`、`agent/invocation.go`、`agent/delegate.go`、`agent/skeleton_assert.go` —— 设计闸：G1=接口/调度类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l agent/`（空输出）；零逻辑由骨架评审门核
+- [x] 02.P0.4 建立 agent 骨架：`Agent` 接口、invocation 调度类型、委派/关闭签名（只声明）—— 前置：00.3、00.P0.1、01.P0.2、02.P0.1、02.P0.2、02.P0.3、04.P0.3 —— 候选拟写文件（非本轮授权）：`agent/agent.go`、`agent/invocation.go`、`agent/delegate.go`、`agent/skeleton_assert.go` —— 设计闸：G1=接口/调度类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l agent/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

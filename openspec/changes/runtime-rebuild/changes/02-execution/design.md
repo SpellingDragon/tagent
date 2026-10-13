@@ -125,7 +125,7 @@
 
 ## Open Questions / 设计待核（G0–G3）
 
-- **G0**：事件/消息是否直接承载框架原生 `model.Message`（不建影子消息）；`event.Type*` 常量集。
+- **G0**：事件/消息是否直接承载框架原生 `model.Message`（不建影子消息）——仍待核。`event.Type*` 常量集已随 contracts §1.1 骨架裁决冻结（8 Type + 7 MetaKey + meta_ 前缀），此项解除。
 - **G1**：`Commit` 端口签名与幂等键（=`TaskID`+`ExpectedRevision`/`MutationID`，非 `(TaskID, round)`）；受理回执/存储提交/投递接纳**三层导出签名**；`Notice` 稳定 `Kind`+`Seq` 生成点；插件相位枚举与框架 `plugin` 回调映射；`AgentBinding.Plugins` 与 01.4 对齐（DESIGN-GATE，未冻结则相关 task design-blocked，不预写全强制签名）。
 - **G2**：四条纵向序列（正常受理→后台→回收 / 受理失败 / 并发同 session 双 invocation / 关闭中 producer 不合作）。
 - **G3**：逐 task 文件白名单 + 前置 + 与 01 共享 `tagent`/`state` 写面串行 + 与 03 共享 `event`/`memory` 边界的读写冲突登记。

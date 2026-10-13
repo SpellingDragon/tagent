@@ -15,7 +15,7 @@
 
 > 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`tests/`）。
 
-- [ ] 09.P0.1 建立场景 runner 类型骨架：`tests/` 下 observations/断言框架接口（仅类型，无 runner 逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tests/integration/acceptance/runner_types.go`、`tests/integration/acceptance/skeleton_assert.go` —— 设计闸：G1=观测/断言接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tests/`（空输出）；零逻辑由骨架评审门核
+- [x] 09.P0.1 建立场景 runner 类型骨架：`tests/` 下 observations/断言框架接口（仅类型，无 runner 逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tests/integration/acceptance/runner_types.go`、`tests/integration/acceptance/skeleton_assert.go` —— 设计闸：G1=观测/断言接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tests/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

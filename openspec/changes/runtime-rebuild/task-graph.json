@@ -3,104 +3,1883 @@
   "change": "runtime-rebuild",
   "purpose": "机器可读的叶任务依赖索引：只登记 id/域/前置/阶段/状态/验证锚点，不重复各域 tasks.md 的详细需求。两阶段修订后共 89 叶任务＝65 实施（NN.M，阶段二）＋24 骨架（NN.P0.M，阶段一）。",
   "tasks": [
-    {"id": "00.1", "domain": "00-foundation", "depends_on": [], "phase": "design", "status": "planned", "verification": ["逐项对账 git 状态与残件/用户文件清单，输出保留/原位重写/另需授权清理三类；不恢复被删文件（只读判据）"]},
-    {"id": "00.2", "domain": "00-foundation", "depends_on": ["00.1"], "phase": "design", "status": "planned", "verification": ["120 主规格逐条给出新任务锚点与消费者；重复/过时条款与待裁项具名（只读判据，不以标题命中代替语义）"]},
-    {"id": "00.3", "domain": "00-foundation", "depends_on": ["00.2"], "phase": "design", "status": "planned", "verification": ["G1 共享合同（身份、提交、插件阶段、Query、训练记录）构造/执行/失败链桌面推演记录 + 未来实现前最小签名编译探针清单（设计产物，非产品验证）"]},
-    {"id": "00.4", "domain": "00-foundation", "depends_on": ["00.3"], "phase": "tooling", "status": "planned", "verification": ["golden/runtime/architecture.json 与 golden/runtime/scenarios.json 可经检查器解析，断言含具体可比值而非仅键名（只读判据）"]},
-    {"id": "00.5", "domain": "00-foundation", "depends_on": ["00.4"], "phase": "tooling", "status": "planned", "verification": ["python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'"]},
-    {"id": "00.6", "domain": "00-foundation", "depends_on": ["00.5"], "phase": "tooling", "status": "planned", "verification": ["python3 -c \"import yaml;yaml.safe_load(open('.github/workflows/runtime-contracts.yml'))\" 退出 0 且无重复校验实现；规则变更附正反样例（只读判据）"]},
-
-    {"id": "00.P0.1", "domain": "00-foundation", "depends_on": [], "phase": "skeleton", "status": "done", "verification": ["骨架约定（stub/断言/注释/文档/行数）冻结于 design.md D9 且 ORCHESTRATION 登记评审门；plan 检查器与 strict 通过（工装判据，非产品）"], "evidence": {"run_id": "rev2phase-20261013", "commands": ["python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'", "python3 scripts/check_runtime_plan.py --json", "openspec validate runtime-rebuild --strict --no-interactive"], "exit_codes": [0, 0, 0], "artifact_paths": ["openspec/changes/runtime-rebuild/design.md", "openspec/changes/runtime-rebuild/ORCHESTRATION.md"]}},
-    {"id": "00.P0.2", "domain": "00-foundation", "depends_on": ["00.P0.1"], "phase": "tooling", "status": "done", "verification": ["检查器支持 NN.P0.M 编号、skeleton 相位与阶段门硬边；unittest 全绿含新负控"], "evidence": {"run_id": "rev2phase-20261013", "commands": ["python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'", "python3 scripts/check_runtime_plan.py --json", "openspec validate runtime-rebuild --strict --no-interactive"], "exit_codes": [0, 0, 0], "artifact_paths": ["scripts/runtime_checklib.py", "scripts/check_runtime_plan.py", "scripts/test_check_runtime_plan.py", "openspec/changes/runtime-rebuild/task-graph.json"]}},
-    {"id": "00.P0.3", "domain": "00-foundation", "depends_on": ["01.P0.1", "01.P0.2", "02.P0.1", "02.P0.2", "02.P0.3", "02.P0.4", "03.P0.1", "03.P0.2", "04.P0.1", "04.P0.2", "04.P0.3", "04.P0.4", "05.P0.1", "05.P0.2", "06.P0.1", "06.P0.2", "07.P0.1", "07.P0.2", "08.P0.1", "08.P0.2", "09.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["骨架评审门：全部域 P0 done 后执行认真评审（CodeReview 子代理＋主代理亲自复核＋用户确认），产出评审记录后解锁阶段二；未过门派发任何 NN.M 属编排违规"]},
-
-    {"id": "01.1", "domain": "01-state-binding", "depends_on": ["00.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/config -run '^TestConfigurationContract$' -count=10 -json"]},
-    {"id": "01.2", "domain": "01-state-binding", "depends_on": ["02.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/state -run '^TestSessionAuthority$' -count=10 -json"]},
-    {"id": "01.3", "domain": "01-state-binding", "depends_on": ["01.2", "02.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/state -run '^TestMailboxConsumption$' -count=10 -json"]},
-    {"id": "01.4", "domain": "01-state-binding", "depends_on": ["01.1", "02.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/state -run '^TestStateOwnsPipeline$' -count=10 -json"]},
-    {"id": "01.5", "domain": "01-state-binding", "depends_on": ["01.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/state -run '^TestGenerationPublication$' -count=10 -json"]},
-    {"id": "01.6", "domain": "01-state-binding", "depends_on": ["01.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/state -run '^TestFileAndStructuralChange$' -count=10 -json"]},
-    {"id": "01.P0.1", "domain": "01-state-binding", "depends_on": ["00.3", "00.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l config/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "01.P0.2", "domain": "01-state-binding", "depends_on": ["00.3", "00.P0.1", "01.P0.1", "02.P0.1", "02.P0.2", "02.P0.3", "03.P0.1", "04.P0.3"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l state/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "02.1", "domain": "02-execution", "depends_on": ["00.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/execution -run '^TestIdentityAndCommitContract$' -count=10 -json"]},
-    {"id": "02.2", "domain": "02-execution", "depends_on": ["02.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestTaskLifecycle$' -count=10 -json"]},
-    {"id": "02.3", "domain": "02-execution", "depends_on": ["02.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestNativeToolAdmission$' -count=10 -json"]},
-    {"id": "02.4", "domain": "02-execution", "depends_on": ["00.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/execution -run '^TestModelTerminalProtocol$' -count=10 -json"]},
-    {"id": "02.5", "domain": "02-execution", "depends_on": ["01.3", "01.4", "02.3", "02.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestNativeConversationRoundTrip$' -count=10 -json"]},
-    {"id": "02.6", "domain": "02-execution", "depends_on": ["02.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestPluginPhaseOrdering$' -count=10 -json"]},
-    {"id": "02.7", "domain": "02-execution", "depends_on": ["02.6", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestDelegationCompletion$' -count=10 -json"]},
-    {"id": "02.8", "domain": "02-execution", "depends_on": ["02.7", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestHandoffFutureNotifications$' -count=10 -json"]},
-    {"id": "02.9", "domain": "02-execution", "depends_on": ["02.8", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/execution -run '^TestCloseDrainsObligations$' -count=10 -json"]},
-    {"id": "02.P0.1", "domain": "02-execution", "depends_on": ["00.3", "00.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l event/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "02.P0.2", "domain": "02-execution", "depends_on": ["00.3", "00.P0.1", "02.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l task/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "02.P0.3", "domain": "02-execution", "depends_on": ["00.3", "00.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l model/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "02.P0.4", "domain": "02-execution", "depends_on": ["00.3", "00.P0.1", "01.P0.2", "02.P0.1", "02.P0.2", "02.P0.3", "04.P0.3"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l agent/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "03.1", "domain": "03-history", "depends_on": ["02.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/history -run '^TestOriginalReferenceIsolation$' -count=10 -json"]},
-    {"id": "03.2", "domain": "03-history", "depends_on": ["03.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestStorageCapabilities$' -count=10 -json；真实 rustviking 档另列资源门（-count=1）"]},
-    {"id": "03.3", "domain": "03-history", "depends_on": ["02.2", "03.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestDurableTaskRoundTrip$' -count=10 -json"]},
-    {"id": "03.4", "domain": "03-history", "depends_on": ["02.5", "03.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestProjectionReplayAndBudget$' -count=10 -json"]},
-    {"id": "03.5", "domain": "03-history", "depends_on": ["03.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestRecoveryBeforeReclamation$' -count=10 -json"]},
-    {"id": "03.6", "domain": "03-history", "depends_on": ["03.4", "03.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestReplicaMaterialization$' -count=10 -json"]},
-    {"id": "03.7", "domain": "03-history", "depends_on": ["03.6", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestReplicaCleanup$' -count=10 -json"]},
-    {"id": "03.8", "domain": "03-history", "depends_on": ["03.7", "04.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/history -run '^TestLargeResultRestart$' -count=10 -json"]},
-    {"id": "03.P0.1", "domain": "03-history", "depends_on": ["00.3", "00.P0.1", "02.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l memory/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "03.P0.2", "domain": "03-history", "depends_on": ["00.3", "00.P0.1", "03.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l workspace/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "04.1", "domain": "04-capabilities", "depends_on": ["02.6", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestNativeToolsAndSkillState$' -count=10 -json"]},
-    {"id": "04.2", "domain": "04-capabilities", "depends_on": ["02.9", "01.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestExecutionResourceLifecycle$' -count=10 -json"]},
-    {"id": "04.3", "domain": "04-capabilities", "depends_on": ["04.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestMCPProtocolLifecycle$' -count=10 -json；授权真实服务验证另列资源门"]},
-    {"id": "04.4", "domain": "04-capabilities", "depends_on": ["02.9", "03.8", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestAddressedDelivery$' -count=10 -json"]},
-    {"id": "04.5", "domain": "04-capabilities", "depends_on": ["02.6", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestGovernanceBeforeExecution$' -count=10 -json"]},
-    {"id": "04.6", "domain": "04-capabilities", "depends_on": ["04.5", "03.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestGovernanceRecovery$' -count=10 -json"]},
-    {"id": "04.7", "domain": "04-capabilities", "depends_on": ["03.4", "03.5", "04.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestRecallConsumer$' -count=10 -json；真实 embedding 另列资源门"]},
-    {"id": "04.8", "domain": "04-capabilities", "depends_on": ["04.7", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/capabilities -run '^TestMemoryCuration$' -count=10 -json"]},
-    {"id": "04.9", "domain": "04-capabilities", "depends_on": ["04.7", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["go test ./tests/integration/capabilities -run '^TestRecallEvaluation$' -count=1 -json（需授权检索资源与启用门；保留零增益与失败）"]},
-    {"id": "04.P0.1", "domain": "04-capabilities", "depends_on": ["00.3", "00.P0.1", "02.P0.2"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l tool/exec/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "04.P0.2", "domain": "04-capabilities", "depends_on": ["00.3", "00.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l tool/mcp/ tool/remote/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "04.P0.3", "domain": "04-capabilities", "depends_on": ["00.3", "00.P0.1", "02.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l plugin/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "04.P0.4", "domain": "04-capabilities", "depends_on": ["00.3", "00.P0.1", "03.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l memory/search/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "05.1", "domain": "05-inspection", "depends_on": ["01.3", "01.5", "02.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json"]},
-    {"id": "05.2", "domain": "05-inspection", "depends_on": ["05.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json"]},
-    {"id": "05.3", "domain": "05-inspection", "depends_on": ["02.6", "05.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json", "资源门（09.5 消费，归属 05.3）：go test ./tests/integration/inspection -run '^TestRealCollectorDelivery$' -count=1 -json（真实 collector 接收非空 span/metric；启用门+授权，缺门可 Skip、必验项 Skip 不结项；不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收）"]},
-    {"id": "05.4", "domain": "05-inspection", "depends_on": ["03.3", "04.2", "05.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json"]},
-    {"id": "05.P0.1", "domain": "05-inspection", "depends_on": ["00.3", "00.P0.1", "01.P0.2", "02.P0.2"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l query/（空输出，按 contracts 的 Query 承载位置）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "05.P0.2", "domain": "05-inspection", "depends_on": ["00.3", "00.P0.1", "02.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l telemetry/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "06.1", "domain": "06-learning", "depends_on": ["02.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json"]},
-    {"id": "06.2", "domain": "06-learning", "depends_on": ["02.4", "06.1", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json"]},
-    {"id": "06.3", "domain": "06-learning", "depends_on": ["06.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json"]},
-    {"id": "06.4", "domain": "06-learning", "depends_on": ["03.3", "06.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json"]},
-    {"id": "06.5", "domain": "06-learning", "depends_on": ["06.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json"]},
-    {"id": "06.6", "domain": "06-learning", "depends_on": ["06.5", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json（需真实 tokenizer/制品与授权；不以替身结项）"]},
-    {"id": "06.7", "domain": "06-learning", "depends_on": ["06.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestFeedbackHTTPContract$' -count=10 -json"]},
-    {"id": "06.8", "domain": "06-learning", "depends_on": ["01.5", "06.7", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/learning -run '^TestModelReplacementLifecycle$' -count=10 -json"]},
-    {"id": "06.P0.1", "domain": "06-learning", "depends_on": ["00.3", "00.P0.1", "02.P0.1", "02.P0.3"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l rl/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "06.P0.2", "domain": "06-learning", "depends_on": ["00.3", "00.P0.1", "06.P0.1", "03.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l rl/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "07.1", "domain": "07-evolution", "depends_on": ["04.7", "05.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/evolution -run '^TestReflectionScopeAndWatermark$' -count=10 -json"]},
-    {"id": "07.2", "domain": "07-evolution", "depends_on": ["03.3", "01.6", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/evolution -run '^TestGitNativeRefine$' -count=10 -json（临时仓）"]},
-    {"id": "07.3", "domain": "07-evolution", "depends_on": ["07.2", "05.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/evolution -run '^TestPostActivationEvidence$' -count=10 -json"]},
-    {"id": "07.4", "domain": "07-evolution", "depends_on": ["01.5", "02.4", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json；真实模型评估单列门控"]},
-    {"id": "07.P0.1", "domain": "07-evolution", "depends_on": ["00.3", "00.P0.1", "01.P0.2"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l evolution/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "07.P0.2", "domain": "07-evolution", "depends_on": ["00.3", "00.P0.1", "04.P0.4", "05.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l plugin/ evolution/（空输出，反思观察/水位/摘要接口按归属）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "08.1", "domain": "08-host", "depends_on": ["02.9", "05.2", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test ./tests/integration/host -run '^TestPublicRuntimeEntry$' -count=10 -json"]},
-    {"id": "08.2", "domain": "08-host", "depends_on": ["08.1", "04.4", "04.5", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go -C examples/wechat-bot test ./... -run '^TestSessionRouting$' -count=10 -json"]},
-    {"id": "08.3", "domain": "08-host", "depends_on": ["08.2", "03.8", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go -C examples/wechat-bot test ./... -run '^TestFileRoundTrip$' -count=10 -json"]},
-    {"id": "08.4", "domain": "08-host", "depends_on": ["06.8", "07.1", "07.3", "07.4", "08.3", "00.P0.3"], "phase": "implementation", "status": "planned", "verification": ["go test -race ./tests/integration/host -run '^TestRuntimeVisibility$' -count=10 -json"]},
-    {"id": "08.5", "domain": "08-host", "depends_on": ["08.4", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["go -C examples/wechat-bot test ./... -run '^TestRealWechat$' -count=1 -json（需明确发送授权与真实接收者）"]},
-    {"id": "08.P0.1", "domain": "08-host", "depends_on": ["00.3", "00.P0.1", "02.P0.4", "03.P0.2", "05.P0.1", "06.P0.1", "07.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l .（空输出，module 根 package tagent）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-    {"id": "08.P0.2", "domain": "08-host", "depends_on": ["00.3", "00.P0.1", "08.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l .（空输出，根侧微信宿主桥类型）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]},
-
-    {"id": "09.1", "domain": "09-acceptance", "depends_on": ["01.1", "01.2", "01.3", "01.4", "01.5", "01.6", "02.1", "02.2", "02.3", "02.4", "02.5", "02.6", "02.7", "02.8", "02.9", "03.1", "03.2", "03.3", "03.4", "03.5", "03.6", "03.7", "03.8", "04.1", "04.2", "04.3", "04.4", "04.5", "04.6", "04.7", "04.8", "05.1", "05.2", "05.3", "05.4", "06.1", "06.2", "06.3", "06.4", "06.5", "06.7", "06.8", "07.1", "07.2", "07.3", "07.4", "08.1", "08.2", "08.3", "08.4", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["scenario runner 输出真实观测并对照 golden/runtime/scenarios.json（值/消息角色序列/身份关系差异报告）；禁用人工 PASS 汇总；真实资源欠账由 09.5 承载；对照命令：python3 scripts/check_runtime_evidence.py --evidence <RUN-file.json> --test-log <PATH>（成对提供，缺一即失败）", "验收集：默认 --scope complete（全 10 场景严格，缺 S10 即失败）；确定性 runner 用 --scope deterministic 只验合同登记的确定性集（S01–S09）并输出 scope 与 remaining_required（S10 列为显式欠账，不报全通过）；确定性集不要求真实 SFT 批次，也不得合成/替身冒充"]},
-    {"id": "09.2", "domain": "09-acceptance", "depends_on": ["00.1", "03.3", "03.5", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["go test ./tests/integration/acceptance -run '^TestOfflineMigration$' -count=10 -json；源摘要不变，不让旧程序读新格式"]},
-    {"id": "09.3", "domain": "09-acceptance", "depends_on": ["00.6", "08.1", "09.1", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["按 plan §9 完整门禁逐条独立执行并记原始退出码：go mod verify / go build ./... / go vet ./... / go test ./... -short -count=1 -json / GOMAXPROCS=1 go test . -short -count=1 -json / go -C examples/wechat-bot build ./... / go -C examples/wechat-bot vet ./... / go -C examples/wechat-bot test ./... -short -count=1 -json / bash scripts/lint.sh / bash scripts/gen_godoc.sh --check / bash scripts/test_race_check.sh（检查器自测，保持，不等价于产品 race）/ python3 scripts/test_verify_restart_prefix.py / bash scripts/check-openspec.sh / openspec validate --all --strict --no-interactive", "产品 race 入口（两 module 全第一方子包递归，逐条保存原始退出码）：根 module `go test -race ./... -short -count=1 -json`；微信 module `go -C examples/wechat-bot test -race ./... -short -count=1 -json`。第一方新包（config/state/agent/task/memory/workspace/plugin/model/telemetry/rl/evolution/tool/*/query 及其子包）经 `./...` 递归覆盖、MUST NOT 遗漏；真实外部资源启用门 MUST NOT 被隐式打开（`-short` 且不设资源启用变量，资源门用例默认 Skip）；根 `./...` 若连带覆盖 prototype/（历史骨架，同属根 module）属额外只读编译，本轮不执行，作为未来全量 command 允许"]},
-    {"id": "09.4", "domain": "09-acceptance", "depends_on": ["09.1", "09.2", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["go test -race ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -json（新计划正式新路径用例名；如需 soak 构建标签隔离统一加 -tags soak，全处一致；旧 CI 的 30轮×30事件/45m 仅作待核参数参考，不作新验收锚）", "部署环境（macOS/Linux）实跑：常驻 soak + 独立进程崩溃恢复 + 热更回滚 + 权限与资源泄漏仍必验；未到位标 BLOCKED，不以 mock/优雅 Close/同进程 New 顶替，硬件断电不宣称"]},
-    {"id": "09.5", "domain": "09-acceptance", "depends_on": ["03.2", "04.3", "04.4", "04.9", "05.3", "06.6", "08.5", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["逐项在启用门+资源+授权齐备时运行对应真实档用例（存储档/真实模型/MCP/A2A/embedding/collector/SFT/微信），各子场景互不等待、可各自独立 -count=1 运行；depends_on 为所需实现的汇总登记，不表示各资源子项互为前置或全等；未启用可 Skip，但正式必验项不得以 Skip 结项", "collector/OTel 子项归属 05.3：点名用例 TestRealCollectorDelivery（tests/integration/inspection），不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收；S10/真实 SFT 子项归属 06.6"]},
-    {"id": "09.6", "domain": "09-acceptance", "depends_on": ["09.1", "09.2", "09.3", "09.4", "09.5", "00.P0.3"], "phase": "acceptance", "status": "planned", "verification": ["主规格 delta、文档/API 与消费者逐项闭合核对；存在未裁项则如实保持未完成（只读判据）"]},
-    {"id": "09.P0.1", "domain": "09-acceptance", "depends_on": ["00.3", "00.P0.1"], "phase": "skeleton", "status": "planned", "verification": ["go build ./...", "go vet ./...", "gofmt -l tests/（空输出）", "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"]}
+    {
+      "id": "00.1",
+      "domain": "00-foundation",
+      "depends_on": [],
+      "phase": "design",
+      "status": "done",
+      "verification": [
+        "逐项对账 git 状态与残件/用户文件清单，输出保留/原位重写/另需授权清理三类；不恢复被删文件（只读判据）"
+      ],
+      "evidence": {
+        "run_id": "apply-00.1-20261013",
+        "commands": [
+          "git status --short",
+          "git ls-files",
+          "ls model state tagent tests"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/baseline.md"
+        ]
+      }
+    },
+    {
+      "id": "00.2",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.1"
+      ],
+      "phase": "design",
+      "status": "done",
+      "verification": [
+        "120 主规格逐条给出新任务锚点与消费者；重复/过时条款与待裁项具名（只读判据，不以标题命中代替语义）"
+      ],
+      "evidence": {
+        "run_id": "apply-00.2-20261013",
+        "commands": [
+          "python3 scripts/check_runtime_plan.py --json"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/coverage.md"
+        ]
+      }
+    },
+    {
+      "id": "00.3",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.2"
+      ],
+      "phase": "design",
+      "status": "done",
+      "verification": [
+        "G1 共享合同（身份、提交、插件阶段、Query、训练记录）构造/执行/失败链桌面推演记录 + 未来实现前最小签名编译探针清单（设计产物，非产品验证）"
+      ],
+      "evidence": {
+        "run_id": "apply-00.3-20261013",
+        "commands": [
+          "openspec validate runtime-rebuild --strict --no-interactive"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/design.md",
+          "openspec/changes/runtime-rebuild/contracts.md"
+        ]
+      }
+    },
+    {
+      "id": "00.4",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.3"
+      ],
+      "phase": "tooling",
+      "status": "planned",
+      "verification": [
+        "golden/runtime/architecture.json 与 golden/runtime/scenarios.json 可经检查器解析，断言含具体可比值而非仅键名（只读判据）"
+      ]
+    },
+    {
+      "id": "00.5",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.4"
+      ],
+      "phase": "tooling",
+      "status": "planned",
+      "verification": [
+        "python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'"
+      ]
+    },
+    {
+      "id": "00.6",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.5"
+      ],
+      "phase": "tooling",
+      "status": "planned",
+      "verification": [
+        "python3 -c \"import yaml;yaml.safe_load(open('.github/workflows/runtime-contracts.yml'))\" 退出 0 且无重复校验实现；规则变更附正反样例（只读判据）"
+      ]
+    },
+    {
+      "id": "00.P0.1",
+      "domain": "00-foundation",
+      "depends_on": [],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "骨架约定（stub/断言/注释/文档/行数）冻结于 design.md D9 且 ORCHESTRATION 登记评审门；plan 检查器与 strict 通过（工装判据，非产品）"
+      ],
+      "evidence": {
+        "run_id": "rev2phase-20261013",
+        "commands": [
+          "python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'",
+          "python3 scripts/check_runtime_plan.py --json",
+          "openspec validate runtime-rebuild --strict --no-interactive"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/design.md",
+          "openspec/changes/runtime-rebuild/ORCHESTRATION.md"
+        ]
+      }
+    },
+    {
+      "id": "00.P0.2",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.P0.1"
+      ],
+      "phase": "tooling",
+      "status": "done",
+      "verification": [
+        "检查器支持 NN.P0.M 编号、skeleton 相位与阶段门硬边；unittest 全绿含新负控"
+      ],
+      "evidence": {
+        "run_id": "rev2phase-20261013",
+        "commands": [
+          "python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'",
+          "python3 scripts/check_runtime_plan.py --json",
+          "openspec validate runtime-rebuild --strict --no-interactive"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "scripts/runtime_checklib.py",
+          "scripts/check_runtime_plan.py",
+          "scripts/test_check_runtime_plan.py",
+          "openspec/changes/runtime-rebuild/task-graph.json"
+        ]
+      }
+    },
+    {
+      "id": "00.P0.3",
+      "domain": "00-foundation",
+      "depends_on": [
+        "01.P0.1",
+        "01.P0.2",
+        "02.P0.1",
+        "02.P0.2",
+        "02.P0.3",
+        "02.P0.4",
+        "03.P0.1",
+        "03.P0.2",
+        "04.P0.1",
+        "04.P0.2",
+        "04.P0.3",
+        "04.P0.4",
+        "05.P0.1",
+        "05.P0.2",
+        "06.P0.1",
+        "06.P0.2",
+        "07.P0.1",
+        "07.P0.2",
+        "08.P0.1",
+        "08.P0.2",
+        "09.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "planned",
+      "verification": [
+        "骨架评审门：全部域 P0 done 后执行认真评审（CodeReview 子代理＋主代理亲自复核＋用户确认），产出评审记录后解锁阶段二；未过门派发任何 NN.M 属编排违规"
+      ]
+    },
+    {
+      "id": "01.1",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "00.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/config -run '^TestConfigurationContract$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.2",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "02.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/state -run '^TestSessionAuthority$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.3",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "01.2",
+        "02.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/state -run '^TestMailboxConsumption$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.4",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "01.1",
+        "02.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/state -run '^TestStateOwnsPipeline$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.5",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "01.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/state -run '^TestGenerationPublication$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.6",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "01.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/state -run '^TestFileAndStructuralChange$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "01.P0.1",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "00.3",
+        "00.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l config/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonA-01p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkgs> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "config/config.go",
+          "config/fingerprint.go",
+          "config/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "01.P0.2",
+      "domain": "01-state-binding",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "01.P0.1",
+        "02.P0.1",
+        "02.P0.2",
+        "02.P0.3",
+        "03.P0.1",
+        "04.P0.3"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l state/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonC-01p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "state/store.go",
+          "state/session.go",
+          "state/binding.go",
+          "state/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "02.1",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/execution -run '^TestIdentityAndCommitContract$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.2",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestTaskLifecycle$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.3",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestNativeToolAdmission$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.4",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/execution -run '^TestModelTerminalProtocol$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.5",
+      "domain": "02-execution",
+      "depends_on": [
+        "01.3",
+        "01.4",
+        "02.3",
+        "02.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestNativeConversationRoundTrip$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.6",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestPluginPhaseOrdering$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.7",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.6",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestDelegationCompletion$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.8",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.7",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestHandoffFutureNotifications$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.9",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.8",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/execution -run '^TestCloseDrainsObligations$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "02.P0.1",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l event/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonA-02p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkgs> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "event/types.go",
+          "event/meta.go",
+          "event/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "02.P0.2",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l task/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonB-02p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "task/spec.go",
+          "task/commit.go",
+          "task/registry.go",
+          "task/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "02.P0.3",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l model/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonA-02p03",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkgs> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "model/aliases.go",
+          "model/terminal.go",
+          "model/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "02.P0.4",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "01.P0.2",
+        "02.P0.1",
+        "02.P0.2",
+        "02.P0.3",
+        "04.P0.3"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l agent/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonD-02p04",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)",
+          "check_runtime_architecture --check-policy (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/agent.go",
+          "agent/invocation.go",
+          "agent/delegate.go",
+          "agent/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "03.1",
+      "domain": "03-history",
+      "depends_on": [
+        "02.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/history -run '^TestOriginalReferenceIsolation$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.2",
+      "domain": "03-history",
+      "depends_on": [
+        "03.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestStorageCapabilities$' -count=10 -json；真实 rustviking 档另列资源门（-count=1）"
+      ]
+    },
+    {
+      "id": "03.3",
+      "domain": "03-history",
+      "depends_on": [
+        "02.2",
+        "03.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestDurableTaskRoundTrip$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.4",
+      "domain": "03-history",
+      "depends_on": [
+        "02.5",
+        "03.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestProjectionReplayAndBudget$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.5",
+      "domain": "03-history",
+      "depends_on": [
+        "03.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestRecoveryBeforeReclamation$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.6",
+      "domain": "03-history",
+      "depends_on": [
+        "03.4",
+        "03.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestReplicaMaterialization$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.7",
+      "domain": "03-history",
+      "depends_on": [
+        "03.6",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestReplicaCleanup$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.8",
+      "domain": "03-history",
+      "depends_on": [
+        "03.7",
+        "04.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/history -run '^TestLargeResultRestart$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "03.P0.1",
+      "domain": "03-history",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l memory/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonB-03p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/reference.go",
+          "memory/projection.go",
+          "memory/guard.go",
+          "memory/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "03.P0.2",
+      "domain": "03-history",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "03.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l workspace/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonC-03p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "workspace/replica.go",
+          "workspace/externalize.go",
+          "workspace/cleaner.go",
+          "workspace/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "04.1",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "02.6",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestNativeToolsAndSkillState$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.2",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "02.9",
+        "01.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestExecutionResourceLifecycle$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.3",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestMCPProtocolLifecycle$' -count=10 -json；授权真实服务验证另列资源门"
+      ]
+    },
+    {
+      "id": "04.4",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "02.9",
+        "03.8",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestAddressedDelivery$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.5",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "02.6",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestGovernanceBeforeExecution$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.6",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.5",
+        "03.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestGovernanceRecovery$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.7",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "03.4",
+        "03.5",
+        "04.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestRecallConsumer$' -count=10 -json；真实 embedding 另列资源门"
+      ]
+    },
+    {
+      "id": "04.8",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.7",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/capabilities -run '^TestMemoryCuration$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "04.9",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.7",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/capabilities -run '^TestRecallEvaluation$' -count=1 -json（需授权检索资源与启用门；保留零增益与失败）"
+      ]
+    },
+    {
+      "id": "04.P0.1",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.2"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l tool/exec/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonC-04p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tool/exec/decl.go",
+          "tool/exec/stop.go",
+          "tool/exec/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "04.P0.2",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.3",
+        "00.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l tool/mcp/ tool/remote/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonA-04p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkgs> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tool/mcp/adapter.go",
+          "tool/mcp/skeleton_assert.go",
+          "tool/remote/adapter.go",
+          "tool/remote/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "04.P0.3",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l plugin/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonB-04p03",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/phases.go",
+          "plugin/governance.go",
+          "plugin/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "04.P0.4",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "03.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l memory/search/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonC-04p04",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/search/port.go",
+          "memory/search/fusion.go",
+          "memory/search/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "05.1",
+      "domain": "05-inspection",
+      "depends_on": [
+        "01.3",
+        "01.5",
+        "02.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "05.2",
+      "domain": "05-inspection",
+      "depends_on": [
+        "05.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "05.3",
+      "domain": "05-inspection",
+      "depends_on": [
+        "02.6",
+        "05.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json",
+        "资源门（09.5 消费，归属 05.3）：go test ./tests/integration/inspection -run '^TestRealCollectorDelivery$' -count=1 -json（真实 collector 接收非空 span/metric；启用门+授权，缺门可 Skip、必验项 Skip 不结项；不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收）"
+      ]
+    },
+    {
+      "id": "05.4",
+      "domain": "05-inspection",
+      "depends_on": [
+        "03.3",
+        "04.2",
+        "05.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "05.P0.1",
+      "domain": "05-inspection",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "01.P0.2",
+        "02.P0.2"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l query/（空输出，按 contracts 的 Query 承载位置）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonD-05p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)",
+          "check_runtime_architecture --check-policy (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/types.go",
+          "query/snapshot.go",
+          "query/subscribe.go",
+          "query/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "05.P0.2",
+      "domain": "05-inspection",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l telemetry/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonB-05p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "telemetry/port.go",
+          "telemetry/recorder.go",
+          "telemetry/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "06.1",
+      "domain": "06-learning",
+      "depends_on": [
+        "02.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.2",
+      "domain": "06-learning",
+      "depends_on": [
+        "02.4",
+        "06.1",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.3",
+      "domain": "06-learning",
+      "depends_on": [
+        "06.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.4",
+      "domain": "06-learning",
+      "depends_on": [
+        "03.3",
+        "06.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.5",
+      "domain": "06-learning",
+      "depends_on": [
+        "06.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.6",
+      "domain": "06-learning",
+      "depends_on": [
+        "06.5",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json（需真实 tokenizer/制品与授权；不以替身结项）"
+      ]
+    },
+    {
+      "id": "06.7",
+      "domain": "06-learning",
+      "depends_on": [
+        "06.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestFeedbackHTTPContract$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.8",
+      "domain": "06-learning",
+      "depends_on": [
+        "01.5",
+        "06.7",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/learning -run '^TestModelReplacementLifecycle$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "06.P0.1",
+      "domain": "06-learning",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.1",
+        "02.P0.3"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l rl/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonB-06p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/record.go",
+          "rl/episode.go",
+          "rl/capture.go",
+          "rl/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "06.P0.2",
+      "domain": "06-learning",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "06.P0.1",
+        "03.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l rl/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonC-06p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/export.go",
+          "rl/manifest.go",
+          "rl/reward.go",
+          "rl/http.go"
+        ]
+      }
+    },
+    {
+      "id": "07.1",
+      "domain": "07-evolution",
+      "depends_on": [
+        "04.7",
+        "05.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/evolution -run '^TestReflectionScopeAndWatermark$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "07.2",
+      "domain": "07-evolution",
+      "depends_on": [
+        "03.3",
+        "01.6",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/evolution -run '^TestGitNativeRefine$' -count=10 -json（临时仓）"
+      ]
+    },
+    {
+      "id": "07.3",
+      "domain": "07-evolution",
+      "depends_on": [
+        "07.2",
+        "05.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/evolution -run '^TestPostActivationEvidence$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "07.4",
+      "domain": "07-evolution",
+      "depends_on": [
+        "01.5",
+        "02.4",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json；真实模型评估单列门控"
+      ]
+    },
+    {
+      "id": "07.P0.1",
+      "domain": "07-evolution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "01.P0.2"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l evolution/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonD-07p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)",
+          "check_runtime_architecture --check-policy (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "evolution/gate.go",
+          "evolution/refine.go",
+          "evolution/skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "07.P0.2",
+      "domain": "07-evolution",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "04.P0.4",
+        "05.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l plugin/ evolution/（空输出，反思观察/水位/摘要接口按归属）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonE-07p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)",
+          "check_runtime_architecture --check-policy/--implementation (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/observe.go",
+          "evolution/watermark.go",
+          "evolution/digest.go"
+        ]
+      }
+    },
+    {
+      "id": "08.1",
+      "domain": "08-host",
+      "depends_on": [
+        "02.9",
+        "05.2",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/host -run '^TestPublicRuntimeEntry$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "08.2",
+      "domain": "08-host",
+      "depends_on": [
+        "08.1",
+        "04.4",
+        "04.5",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go -C examples/wechat-bot test ./... -run '^TestSessionRouting$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "08.3",
+      "domain": "08-host",
+      "depends_on": [
+        "08.2",
+        "03.8",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go -C examples/wechat-bot test ./... -run '^TestFileRoundTrip$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "08.4",
+      "domain": "08-host",
+      "depends_on": [
+        "06.8",
+        "07.1",
+        "07.3",
+        "07.4",
+        "08.3",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/host -run '^TestRuntimeVisibility$' -count=10 -json"
+      ]
+    },
+    {
+      "id": "08.5",
+      "domain": "08-host",
+      "depends_on": [
+        "08.4",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "go -C examples/wechat-bot test ./... -run '^TestRealWechat$' -count=1 -json（需明确发送授权与真实接收者）"
+      ]
+    },
+    {
+      "id": "08.P0.1",
+      "domain": "08-host",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "02.P0.4",
+        "03.P0.2",
+        "05.P0.1",
+        "06.P0.1",
+        "07.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l .（空输出，module 根 package tagent）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonE-08p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkg> (0 findings)",
+          "check_runtime_architecture --check-policy/--implementation (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tagent.go",
+          "build.go",
+          "skeleton_assert.go"
+        ]
+      }
+    },
+    {
+      "id": "08.P0.2",
+      "domain": "08-host",
+      "depends_on": [
+        "00.3",
+        "00.P0.1",
+        "08.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l .（空输出，根侧微信宿主桥类型）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonF-08p02",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l host_bridge*.go (empty)",
+          "comment_policy -no-baseline <root files> (0 findings)",
+          "check_runtime_architecture --check-policy (ok)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "host_bridge.go"
+        ]
+      }
+    },
+    {
+      "id": "09.1",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "01.1",
+        "01.2",
+        "01.3",
+        "01.4",
+        "01.5",
+        "01.6",
+        "02.1",
+        "02.2",
+        "02.3",
+        "02.4",
+        "02.5",
+        "02.6",
+        "02.7",
+        "02.8",
+        "02.9",
+        "03.1",
+        "03.2",
+        "03.3",
+        "03.4",
+        "03.5",
+        "03.6",
+        "03.7",
+        "03.8",
+        "04.1",
+        "04.2",
+        "04.3",
+        "04.4",
+        "04.5",
+        "04.6",
+        "04.7",
+        "04.8",
+        "05.1",
+        "05.2",
+        "05.3",
+        "05.4",
+        "06.1",
+        "06.2",
+        "06.3",
+        "06.4",
+        "06.5",
+        "06.7",
+        "06.8",
+        "07.1",
+        "07.2",
+        "07.3",
+        "07.4",
+        "08.1",
+        "08.2",
+        "08.3",
+        "08.4",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "scenario runner 输出真实观测并对照 golden/runtime/scenarios.json（值/消息角色序列/身份关系差异报告）；禁用人工 PASS 汇总；真实资源欠账由 09.5 承载；对照命令：python3 scripts/check_runtime_evidence.py --evidence <RUN-file.json> --test-log <PATH>（成对提供，缺一即失败）",
+        "验收集：默认 --scope complete（全 10 场景严格，缺 S10 即失败）；确定性 runner 用 --scope deterministic 只验合同登记的确定性集（S01–S09）并输出 scope 与 remaining_required（S10 列为显式欠账，不报全通过）；确定性集不要求真实 SFT 批次，也不得合成/替身冒充"
+      ]
+    },
+    {
+      "id": "09.2",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "00.1",
+        "03.3",
+        "03.5",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "go test ./tests/integration/acceptance -run '^TestOfflineMigration$' -count=10 -json；源摘要不变，不让旧程序读新格式"
+      ]
+    },
+    {
+      "id": "09.3",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "00.6",
+        "08.1",
+        "09.1",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "按 plan §9 完整门禁逐条独立执行并记原始退出码：go mod verify / go build ./... / go vet ./... / go test ./... -short -count=1 -json / GOMAXPROCS=1 go test . -short -count=1 -json / go -C examples/wechat-bot build ./... / go -C examples/wechat-bot vet ./... / go -C examples/wechat-bot test ./... -short -count=1 -json / bash scripts/lint.sh / bash scripts/gen_godoc.sh --check / bash scripts/test_race_check.sh（检查器自测，保持，不等价于产品 race）/ python3 scripts/test_verify_restart_prefix.py / bash scripts/check-openspec.sh / openspec validate --all --strict --no-interactive",
+        "产品 race 入口（两 module 全第一方子包递归，逐条保存原始退出码）：根 module `go test -race ./... -short -count=1 -json`；微信 module `go -C examples/wechat-bot test -race ./... -short -count=1 -json`。第一方新包（config/state/agent/task/memory/workspace/plugin/model/telemetry/rl/evolution/tool/*/query 及其子包）经 `./...` 递归覆盖、MUST NOT 遗漏；真实外部资源启用门 MUST NOT 被隐式打开（`-short` 且不设资源启用变量，资源门用例默认 Skip）；根 `./...` 若连带覆盖 prototype/（历史骨架，同属根 module）属额外只读编译，本轮不执行，作为未来全量 command 允许"
+      ]
+    },
+    {
+      "id": "09.4",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "09.1",
+        "09.2",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "go test -race ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -json（新计划正式新路径用例名；如需 soak 构建标签隔离统一加 -tags soak，全处一致；旧 CI 的 30轮×30事件/45m 仅作待核参数参考，不作新验收锚）",
+        "部署环境（macOS/Linux）实跑：常驻 soak + 独立进程崩溃恢复 + 热更回滚 + 权限与资源泄漏仍必验；未到位标 BLOCKED，不以 mock/优雅 Close/同进程 New 顶替，硬件断电不宣称"
+      ]
+    },
+    {
+      "id": "09.5",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "03.2",
+        "04.3",
+        "04.4",
+        "04.9",
+        "05.3",
+        "06.6",
+        "08.5",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "逐项在启用门+资源+授权齐备时运行对应真实档用例（存储档/真实模型/MCP/A2A/embedding/collector/SFT/微信），各子场景互不等待、可各自独立 -count=1 运行；depends_on 为所需实现的汇总登记，不表示各资源子项互为前置或全等；未启用可 Skip，但正式必验项不得以 Skip 结项",
+        "collector/OTel 子项归属 05.3：点名用例 TestRealCollectorDelivery（tests/integration/inspection），不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收；S10/真实 SFT 子项归属 06.6"
+      ]
+    },
+    {
+      "id": "09.6",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "09.1",
+        "09.2",
+        "09.3",
+        "09.4",
+        "09.5",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "planned",
+      "verification": [
+        "主规格 delta、文档/API 与消费者逐项闭合核对；存在未裁项则如实保持未完成（只读判据）"
+      ]
+    },
+    {
+      "id": "09.P0.1",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "00.3",
+        "00.P0.1"
+      ],
+      "phase": "skeleton",
+      "status": "done",
+      "verification": [
+        "go build ./...",
+        "go vet ./...",
+        "gofmt -l tests/（空输出）",
+        "真实执行须产品实施授权＋G3 白名单；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）"
+      ],
+      "evidence": {
+        "run_id": "skeletonA-09p01",
+        "commands": [
+          "GOPROXY=off go build ./...",
+          "GOPROXY=off go vet ./...",
+          "gofmt -l <pkg> (empty)",
+          "go run ./scripts/comment_policy -no-baseline <pkgs> (0 findings)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/acceptance/runner_types.go",
+          "tests/integration/acceptance/skeleton_assert.go"
+        ]
+      }
+    }
   ]
 }
