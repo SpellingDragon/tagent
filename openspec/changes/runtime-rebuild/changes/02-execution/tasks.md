@@ -5,6 +5,7 @@
 > 每条格式：`- [ ] <编号> <动词开头产出> + 关键约束 —— 前置 + 候选拟写文件（非本轮授权） + 设计闸(G0–G3) + 验证`。
 > 验证口径：点名用例真实 pass 才算过；选择器零匹配/Skip/未命中不得因退出码 0 记通过（计划 §7）。并发/状态任务加 `-race`。
 > 「前置」含设计/实现依赖，不表示当前授权执行；「候选拟写文件」是未来候选写域，不表示已存在或批准修改。
+> **两阶段**：既有 `02.1–02.9` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
@@ -12,6 +13,18 @@
 - 接口前置：01.4 的 `StatePlan`/`AgentBinding` **签名**（02.5 借绑定用）；00.3 的插件相位/提交/通知签名。
 - 本域与 01 共享 `tagent` 写面、与 03 共享 `event`/`memory` 边界 → G3 登记读写冲突、串行或同一代理。
 - 02.1 是本域**接口与实现提供者**：签名由 00.3 冻结，实现（身份与内存提交载体）随 02.1 落地；01.2/01.3/01.4 的**实施及验收**依赖其**真实集成**，不能只凭签名解除实现前置。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`event/**`、`task/**`、`model/**`、`agent/**`）。
+
+- [ ] 02.P0.1 建立 event 身份/载荷骨架：`AgentID`/`SessionID`/`EventID`/`InvocationID`/`TaskID`/`InstanceID`/`EpisodeID`/`DecisionID`/`AttemptID` 类型、`Address`、`Event` 载荷、`Type*` 与 `MetaKey*` 常量（只声明，无解析）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`event/types.go`、`event/meta.go`、`event/skeleton_assert.go` —— 设计闸：G1=身份/常量集与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l event/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 02.P0.2 建立 task 骨架：`Spec`/`Status`/`AdmissionReceipt`/`CommitResult` 三层结果/`Notice` 身份/`Registry`/`Manager`/`Commit` 端口签名（只签名）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`task/spec.go`、`task/commit.go`、`task/registry.go`、`task/skeleton_assert.go` —— 设计闸：G1=三层结果与端口签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l task/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 02.P0.3 建立 model 骨架：原生类型薄别名、单一终局归约入口签名与 `kind` 枚举（只声明）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`model/aliases.go`、`model/terminal.go`、`model/skeleton_assert.go` —— 设计闸：G1=单一归约入口与 kind 枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l model/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 02.P0.4 建立 agent 骨架：`Agent` 接口、invocation 调度类型、委派/关闭签名（只声明）—— 前置：00.3、00.P0.1、01.P0.2、02.P0.1、02.P0.2、02.P0.3、04.P0.3 —— 候选拟写文件（非本轮授权）：`agent/agent.go`、`agent/invocation.go`、`agent/delegate.go`、`agent/skeleton_assert.go` —— 设计闸：G1=接口/调度类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l agent/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

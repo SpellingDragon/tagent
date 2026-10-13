@@ -25,9 +25,14 @@ import sys
 # here so normalisation cannot drift between checkers.
 MODULE_PATH = "github.com/SpellingDragon/tagent"
 
-PHASES = ("design", "tooling", "implementation", "acceptance")
-TASK_ID_RE = re.compile(r"^\d{2}\.\d+$")
-CHECKBOX_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\d{2}\.\d+)\b")
+# Phases: 'skeleton' is the two-phase revision's stage-one phase (data/interface
+# definitions + CI-compliance doc comments, zero logic), inserted after 'design'
+# and before the stage-two 'implementation'.
+PHASES = ("design", "skeleton", "tooling", "implementation", "acceptance")
+# Leaf-task ids come in two shapes: the 65 stage-two tasks `NN.M` and the 24
+# stage-one skeleton tasks `NN.P0.M` (total 89).
+TASK_ID_RE = re.compile(r"^\d{2}\.(?:P0\.\d+|\d+)$")
+CHECKBOX_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\d{2}\.(?:P0\.\d+|\d+))\b")
 REQUIREMENT_RE = re.compile(r"^###\s+Requirement:\s*(?P<title>.+?)\s*$")
 SCENARIO_RE = re.compile(r"^####\s+Scenario:\s*(?P<title>.+?)\s*$")
 DELTA_KIND_RE = re.compile(

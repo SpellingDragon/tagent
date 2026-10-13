@@ -11,6 +11,7 @@
 >   `go test ./tests/integration/capabilities -run '^<Test名>$' -count=1 -json`（须启用门 + 授权资源齐备）
 > - 判定口径：点名用例真实 `pass`；未匹配/零匹配/`Skip`/包级 `Fail` 均**不算通过**；不用 `grep/head/tail` 退出码替代原命令。
 > - 全部产品实现单的**共同前置 G0–G3**（设计闸）不在此逐行重复；下方"前置"仅列**域内/跨域任务依赖**。
+> **两阶段**：既有 `04.1–04.9` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
@@ -18,6 +19,18 @@
 - **写白名单（未来，本轮不写）**：工具/治理/检索相关产品包与 `tests/integration/capabilities/**`。**本轮只写本目录 md**。
 - **禁止**：`LLMAgent` 第二循环、占位结构、反射 DI、新 registry 框架、未授权真实付费资源。
 - 状态标签：`planned` = 依赖面已清楚，可在设计闸通过后按单实施；`design-blocked` = 关键语义/接口/资源待核，**不得因有空闲代理而强行派发**。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`tool/exec/**`、`tool/mcp/**`、`tool/remote/**`、`plugin/**`、`memory/search/**`）。
+
+- [ ] 04.P0.1 建立 tool/exec 骨架：执行声明/资源标识/停止凭证接口（只声明）—— 前置：00.3、00.P0.1、02.P0.2 —— 候选拟写文件（非本轮授权）：`tool/exec/decl.go`、`tool/exec/stop.go`、`tool/exec/skeleton_assert.go` —— 设计闸：G1=执行声明/资源标识与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/exec/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 04.P0.2 建立 tool/mcp 与 tool/remote 适配接口声明（复用原生，不重写协议）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tool/mcp/adapter.go`、`tool/remote/adapter.go`、`tool/mcp/skeleton_assert.go`、`tool/remote/skeleton_assert.go` —— 设计闸：G1=适配接口与 00.3 合同一致且复用原生类型；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tool/mcp/ tool/remote/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 04.P0.3 建立 plugin 骨架：相位接口、`Before`/`After`、治理声明类型（只声明）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`plugin/phases.go`、`plugin/governance.go`、`plugin/skeleton_assert.go` —— 设计闸：G1=相位枚举与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l plugin/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 04.P0.4 建立 memory/search 骨架：检索端口、混合召回接口（只声明）—— 前置：00.3、00.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`memory/search/port.go`、`memory/search/fusion.go`、`memory/search/skeleton_assert.go` —— 设计闸：G1=检索端口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l memory/search/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

@@ -1,14 +1,21 @@
 # 09-acceptance — 任务清单（三级孙任务）
 
 > 本文件是二级子变更 `09-acceptance` 的任务清单（孙任务级）。编号 `09.1–09.6` 全局唯一，**全部未勾选**（`- [ ]`）。不得导入旧 change 编号或旧完成率。
-> 资产口径：检查脚本（`scripts/check_runtime_*.py`）、自测（`scripts/test_check_runtime_*.py`）、golden（`golden/runtime/{architecture.json,scenarios.json}`）、CI（`.github/workflows/runtime-contracts.yml`）、manifest（`openspec/changes/runtime-rebuild/task-graph.json`，65 task、只 planned、带 dep/schema）**名称固定，由主代理 tooling 单创建**，本域只引用。
+> 资产口径：检查脚本（`scripts/check_runtime_*.py`）、自测（`scripts/test_check_runtime_*.py`）、golden（`golden/runtime/{architecture.json,scenarios.json}`）、CI（`.github/workflows/runtime-contracts.yml`）、manifest（`openspec/changes/runtime-rebuild/task-graph.json`，89 task＝65 实施＋24 骨架、均带 dep/schema，本轮 00.P0.1/00.P0.2 已完成）**名称固定，由主代理 tooling 单创建**，本域只引用。
 > 判定：点名测试不存在/零匹配/子项 Skip 不算通过；命令记录**原始退出码**，不用 `grep/head/tail` 退出码代替原命令。门控：无门=合法 Skip、有门缺凭据=Fatal、必验项 Skip 不 complete。
+> **两阶段**：既有 `09.1–09.6` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
 - 实现前置：`00.1`、`00.6`；`01`–`08` 相关确定性实施项；`03.3`/`03.5`；宿主确定性验收；部署环境（09.4）；授权资源（09.5）。
 - 写白名单（未来实施）：主代理 tooling 单的检查资产与 golden/CI/manifest；`tests/integration/acceptance/**`。**本轮不写产品/测试/脚本/CI/golden**。
 - 禁止：伪 restore 副作用；合成 SFT consumer/mock 冒充真实；靠 `tagent: *` 通配通过结构覆盖；提高空注释 baseline；改产品/主 spec/旧 change；提交归档。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`tests/`）。
+
+- [ ] 09.P0.1 建立场景 runner 类型骨架：`tests/` 下 observations/断言框架接口（仅类型，无 runner 逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`tests/integration/acceptance/runner_types.go`、`tests/integration/acceptance/skeleton_assert.go` —— 设计闸：G1=观测/断言接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l tests/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

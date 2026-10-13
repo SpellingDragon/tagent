@@ -10,6 +10,7 @@
 > - **真实 SFT/反馈资源**：独立门控、单次 `-count=1`；缺凭据/模板不支持/`SKIP` **不能计完成**。
 > - 判定口径：点名用例真实 `pass`；零匹配/`Skip`/包级 `Fail` 不算通过；不用 `grep/head/tail` 退出码替代原命令。
 > - 产品实现单共同前置 G0–G3 不逐行重复。
+> **两阶段**：既有 `06.1–06.8` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
@@ -17,6 +18,14 @@
 - **写白名单（未来，本轮不写）**：`rl/` 采集/导出/消费相关产品包、真实消费脚本与 `tests/integration/learning/**`。**本轮只写本目录 md**。
 - **禁止**：接 PPO/GRPO 引擎；默认 AReaL 新依赖；自造常量消费者结项；把 capture 当恢复真源；secrets 落盘。
 - 状态标签：`planned` / `design-blocked`。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`rl/**`）。
+
+- [ ] 06.P0.1 建立 rl 记录骨架：`Episode`/`Decision`/`Attempt` 记录类型、capture 接口（只声明）—— 前置：00.3、00.P0.1、02.P0.1、02.P0.3 —— 候选拟写文件（非本轮授权）：`rl/record.go`、`rl/episode.go`、`rl/capture.go`、`rl/skeleton_assert.go` —— 设计闸：G1=记录类型/capture 接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 06.P0.2 建立 rl 导出/反馈骨架：导出、manifest、reward 版本化、反馈 HTTP 合同类型（只声明）—— 前置：00.3、00.P0.1、06.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`rl/export.go`、`rl/manifest.go`、`rl/reward.go`、`rl/http.go`、`rl/skeleton_assert.go` —— 设计闸：G1=导出/反馈合同类型与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l rl/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

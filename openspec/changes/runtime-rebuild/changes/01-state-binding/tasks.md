@@ -5,6 +5,7 @@
 > 每条格式：`- [ ] <编号> <动词开头产出> + 关键约束 —— 前置 + 候选拟写文件（非本轮授权） + 设计闸(G0–G3) + 验证`。
 > 验证口径：点名用例真实 pass 才算过；选择器零匹配/Skip/未命中不得因退出码 0 记通过（计划 §7）。并发/状态任务加 `-race`。
 > 「前置」含设计/实现依赖，不表示当前授权执行；「候选拟写文件」是未来候选写域，不表示已存在或批准修改。
+> **两阶段**：既有 `01.1–01.6` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
@@ -12,6 +13,14 @@
 - 接口设计可先消费00.3审定的常量；01.2/01.3/01.4的实施及验收须等待02.1内存载体和身份实现集成，不能只凭签名解除实现前置。
 - 本域与 02 共享 `state`/`config` 写面 → **串行或同一代理**，需在 G3 登记读写冲突；本域不排在顶层 `specs/` 与 `ORCHESTRATION.md` 上。
 - 共同设计闸 G0–G3 见 `design.md` §Open Questions；建立这些闸的规划任务不以自身已完成为前置（计划 §7 首句）。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`config/**`、`state/**`）。
+
+- [ ] 01.P0.1 建立 config 纯声明数据骨架：`Declaration`/`AgentSpec`/文件引用类型，及 `Load` 与规范化指纹的方法签名（无解析/指纹逻辑）—— 前置：00.3、00.P0.1 —— 候选拟写文件（非本轮授权）：`config/config.go`、`config/fingerprint.go`、`config/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l config/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
+
+- [ ] 01.P0.2 建立 state 数据/接口骨架：`Store`/`Session`/`AgentBinding`/`StatePlan`/`OrgPlan`、发布记录、借用接口与 `NoticePort` 实现签名（无实现逻辑）—— 前置：00.3、00.P0.1、01.P0.1、02.P0.1、02.P0.2、02.P0.3、03.P0.1、04.P0.3 —— 候选拟写文件（非本轮授权）：`state/store.go`、`state/session.go`、`state/binding.go`、`state/skeleton_assert.go` —— 设计闸：G1=签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l state/`（空输出）；零逻辑由骨架评审门核（grep 'phase 2: not implemented' 覆盖全部 stub）
 
 ## 任务
 

@@ -5,6 +5,7 @@
 > 每条格式：`- [ ] <编号> <动词开头产出> + 关键约束 —— 前置 + 候选拟写文件（非本轮授权） + 设计闸(G0–G3) + 验证`。
 > 验证口径：点名用例真实 pass 才算过；选择器零匹配/Skip/未命中不得因退出码 0 记通过（计划 §7）。并发/状态任务加 `-race`；真实资源用例独立 `-count=1` 另列资源门。
 > 「前置」含设计/实现依赖，不表示当前授权执行；「候选拟写文件」是未来候选写域，不表示已存在或批准修改。
+> **两阶段**：既有 `03.1–03.8` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
@@ -12,6 +13,14 @@
 - 接口前置：02.1 的事件身份/原生载荷与 task 提交消费端口**签名**；01.4 的 `StatePlan`/`AgentBinding` 签名。
 - 本域与 02 共享 `task`/`state` 写面、与 04 共享 `workspace`/`tool` 边界 → G3 登记读写冲突、串行或同一代理。
 - 计划 §7 注：03.3 与 02.2 的跨包接线由同一集成单或串行实施，不由两个代理各造一个提交协议。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`memory/**`、`workspace/**`）。
+
+- [ ] 03.P0.1 建立 memory 骨架：`OriginalRef`/`OriginalStore` 接口/`Projection`/`Guard` 接口（只声明）—— 前置：00.3、00.P0.1、02.P0.1 —— 候选拟写文件（非本轮授权）：`memory/reference.go`、`memory/projection.go`、`memory/guard.go`、`memory/skeleton_assert.go` —— 设计闸：G1=引用/存储/投影接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l memory/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 03.P0.2 建立 workspace 骨架：`Replica` 引用、`Externalizer` 接口、`Cleaner` 签名（只声明）—— 前置：00.3、00.P0.1、03.P0.1 —— 候选拟写文件（非本轮授权）：`workspace/replica.go`、`workspace/externalize.go`、`workspace/cleaner.go`、`workspace/skeleton_assert.go` —— 设计闸：G1=副本/外置/清理签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l workspace/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

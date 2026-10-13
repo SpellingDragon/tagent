@@ -3,12 +3,21 @@
 > 本文件是二级子变更 `07-evolution` 的任务清单（孙任务级）。编号 `07.1–07.4` 全局唯一，**全部未勾选**（`- [ ]`），实施时逐条勾选。不得导入旧 change 编号或旧完成率。
 > 命令口径（计划 §7）：确定性用例统一展开为 `go test ./tests/integration/<域> -run '^<完整测试名>$' -count=10 -json`；并发/状态任务加 `-race`。真实资源用例独立 `-count=1`，只在启用门 + 授权资源齐备时运行。
 > 判定：点名测试不存在、零匹配、子项 Skip **不算通过**；选择器未匹配任何用例不得因退出码 0 记通过。测试名为**未来将落盘**的正式用例名，不得改名替代。
+> **两阶段**：既有 `07.1–07.4` 属阶段二，统一以骨架评审门 `00.P0.3` 为额外前置（以 `task-graph.json` 为准），不逐行改写各自「前置」文案。
 
 ## 前置与边界
 
 - 实现前置（跨域）：`04.7`（检索读缝）、`05.4`（阻塞解释）、`03.3`、`01.5`、`01.6`、`02.4`、`05.3`。这些是**实现依赖**，与签名级**接口常数依赖**（见 `proposal.md` §边界与依赖）分开对待。
 - 写白名单（未来实施）：`evolution/**`、`plugin/**`（反思/观测接点）、`resources/prompts/**`、`tests/integration/evolution/**`。**本轮不写任何产品/测试文件**。
 - 禁止：新造 bundle 版本库/发布道；把 nil 恒真当真实评估；自动 git 回滚；卷用户 index；新建持久化账本；恢复退役训练桥；改主 spec/旧 change/prototype/wiki。
+
+## P0 骨架任务（阶段一：数据/接口定义，零逻辑）
+
+> 阶段一骨架：只落数据/接口定义与 CI 合规注释文档，**零业务逻辑**；stub 仅 `return <零值>, errors.New("phase 2: not implemented")`、无返回值方法仅 `// TODO(phase2)` 空体、**禁止 panic**；每包 `skeleton_assert.go` 放编译断言；导出符号英文 Godoc＋包注释；文件 ≤500 行。设计闸 G1=签名与 00.3 共享合同一致，G3=每包白名单（`evolution/**`、`plugin/**`）。
+
+- [ ] 07.P0.1 建立 evolution 骨架：`StructuralGate`/声明类型/refine 接口签名（只声明）—— 前置：00.3、00.P0.1、01.P0.2 —— 候选拟写文件（非本轮授权）：`evolution/gate.go`、`evolution/refine.go`、`evolution/skeleton_assert.go` —— 设计闸：G1=StructuralGate/refine 签名与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l evolution/`（空输出）；零逻辑由骨架评审门核
+
+- [ ] 07.P0.2 建立反思观察/水位/摘要接口骨架（按归属，只声明）—— 前置：00.3、00.P0.1、04.P0.4、05.P0.1 —— 候选拟写文件（非本轮授权）：`plugin/observe.go`、`evolution/watermark.go`、`evolution/digest.go`（各包各自 `skeleton_assert.go`） —— 设计闸：G1=观察/水位/摘要接口与 00.3 合同一致；G3=每包白名单 —— 验证：`go build ./...`、`go vet ./...`、`gofmt -l plugin/ evolution/`（空输出）；零逻辑由骨架评审门核
 
 ## 任务
 

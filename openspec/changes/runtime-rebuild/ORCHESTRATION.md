@@ -14,8 +14,8 @@
 
 ## 0、结论（先行）
 
-- **抵达 DoD 的唯一路径**：G0 现场/资源盘点 → G1 共享签名与原生接口探针 → G2 正常/失败/并发/重启纵向推演 → G3 逐单精确文件授权 → 按**就绪叶任务集合**派发产品实现（W 两两不相交且 W 交对方 R 为空）→ 每个域全场景 + 跨域接线 → 09.1 正式入口真实观测对 golden → 09.3 两 module 全量门禁 → 09.5 真实资源逐项 → 09.6 闭合。任一环缺凭据即不勾选。
-- **本轮最大风险/瓶颈**：G1 尚未有最小编译探针（无产品实施授权），G2 **设计推演尚未落书面结论**（G2 = 实施前正常/失败/并发/重启桌面推演，**非**产品观测；产品观测属 09，另行说明）；因此**产品完成度=0，65 叶任务全部 planned**。第二大风险是「规划格式全绿」被误读为「产品通过」——本文件的每处完成声明都必须能落到**可复跑命令 + 原始退出码**。
+- **抵达 DoD 的唯一路径**：G0 现场/资源盘点 → G1 共享签名与原生接口探针 → G2 正常/失败/并发/重启纵向推演 → G3 逐单精确文件授权 → **阶段一 P0 骨架波（24 骨架，零逻辑）→ 00.P0.3 骨架评审门（认真评审＋用户确认）→ 阶段二 65 项 `NN.M` 实施** → 按**就绪叶任务集合**派发产品实现（W 两两不相交且 W 交对方 R 为空）→ 每个域全场景 + 跨域接线 → 09.1 正式入口真实观测对 golden → 09.3 两 module 全量门禁 → 09.5 真实资源逐项 → 09.6 闭合。任一环缺凭据即不勾选。
+- **本轮最大风险/瓶颈**：G1 尚未有最小编译探针（无产品实施授权），G2 **设计推演尚未落书面结论**（G2 = 实施前正常/失败/并发/重启桌面推演，**非**产品观测；产品观测属 09，另行说明）；因此**产品完成度=0**：阶段一 24 个 P0 骨架中仅 00.P0.1/00.P0.2（规划/工装，非产品）随本轮完成（凭据 `rev2phase-20261013`），其余骨架与阶段二 65 项 `NN.M` 均 planned。第二大风险是「规划格式全绿」被误读为「产品通过」——本文件的每处完成声明都必须能落到**可复跑命令 + 原始退出码**。
 - **本轮实际完成的只是规划与检查工装**，且**规划/检查工装完成记录与产品完成记录严格分开**：检查器自测通过只证明检查器，不证明产品、不勾选任何叶任务。
 - **对照索引**：目标—KR 见 [expectations.md](expectations.md)；锁定框架原生复用依据见 [trpc-reuse.md](trpc-reuse.md)（单点，不互抄）；二者随 00.3 审定接入 G1。
 
@@ -25,7 +25,9 @@
 
 - **派发原子 = 就绪叶任务集合**（§design D7 / orchestration spec「隔离并发与新语义优先」）；域只是**边界与账目单位**，不是调度单位，不整域派发。
 - **就绪判据**：该叶任务全部 `depends_on` 已在集成树落地（非「同波」）；设计闸 G1/G2/G3 覆盖该项；本单资源锁未被占用。
-- **本轮（规划波）就绪面**：仅**规划/检查工装单**（批次 1、批次 2），**当前产品单 = 0**。产品首批就绪候选（待 G3）：`01.1`、`02.1`、`02.4`（三者仅依赖 `00.3`）。
+- **本轮（规划波）就绪面**：**规划/检查工装单**（批次 1–7）已完成；**阶段一 P0 骨架波与阶段二产品单均未派发（当前产品单 = 0）**。
+- **阶段一 P0 骨架波就绪队列**：`00.1→00.2→00.3` 设计闸就绪后，**层 A 可并行**：`01.P0.1`、`02.P0.1`、`02.P0.3`、`04.P0.2`、`09.P0.1`（仅依赖 `00.3`/`00.P0.1`）；随后按 **import 方向分层推进**（如 `02.P0.2`/`03.P0.1`/`04.P0.3`/`05.P0.2` → `01.P0.2`/`03.P0.2`/`04.P0.1`/`04.P0.4`/`06.P0.1`/`06.P0.2` → … → **`08.P0.1` 汇合** → `08.P0.2`；具体分层以 `task-graph.json` 依赖为准），全部域 P0 done 后由 `00.P0.3` 骨架评审门解锁阶段二。
+- **阶段二产品首批就绪候选（待 G3，且须 `00.P0.3` 评审门已过）**：`01.1`、`02.1`、`02.4`（三者仅依赖 `00.3`；阶段二一律以 `00.P0.3` 为额外前置）。
 - **关键路径与汇合链（红标；各边均取自 `task-graph.json` 实测边，不暗造整域/波次等待）**：
   - **就绪主干（最长链，20 叶）**：`00.1→00.2→00.3→02.1→01.2→01.3→02.5→02.6→02.7→02.8→02.9`。
   - **持久提交链（可早于 02.9 独立推进）**：`02.1→02.2` 与 `02.1→03.1→03.2` 两条支线在 `03.3` 汇合；`03.3` **只等 `02.2`/`03.2`**（`depends_on=[02.2,03.2]`，**不接 `02.9`**）。旧稿把它写成 `02.9 → 03.3` 的单一链属误写——本仓 JSON 无此边，且外部计划明示「持久提交/恢复不能拖到大部分功能已实现后首次接线」。
@@ -41,6 +43,7 @@
 - **共享面默认集成者单写**：`openspec/changes/runtime-rebuild/` 顶层（`proposal.md`/`design.md`/`contracts.md`/`coverage.md`/`baseline.md`/`tasks.md`/`task-graph.json`/`specs/orchestration/spec.md`/本文件）、`golden/runtime/*`、`scripts/runtime_check*.py`、`.github/workflows/runtime-contracts.yml`。产物级可独立派发时，先把跨包接线契约冻结为**签名级启动常数**再拆（本波不适用）。
 - **预授权（本波内自决）**：批次 1/2 白名单内的规划/检查工装修补、覆盖表与 task-graph 的命令对齐、检查器负控补漏、CI 的 go 版本与 `--plan-graph` 校正。**必须上报待裁**：任何越过白名单文件的改动、任何产品单、任何「为目录绿而预建空壳包」、任何疑似新增重大架构选择。
 - **域 task 候选写集现状（诚实登记）**：部分域候选仍写作**目录或通配**（如 `exec/`、`mcp/`、`state/` 绑定消费点），本波已按 architecture policy 与计划包职责**收敛为候选文件**或显式标「**尚未可派发**」；**不因收敛动作宣称 G3 闭合**（见 §2 明细）。
+- **P0 骨架单白名单（阶段一，未来波；本波不派发）**：每个 P0 单只写**本包文件组 + 该包 `skeleton_assert.go`**（逐包收敛，见各域 `tasks.md`「P0 骨架任务」节）；**不含**任何阶段二 `NN.M` 文件、**不新建未登记包**（O1-4）；P0 文件组仍为**候选拟写文件**，需 G3 逐单授权，本波不据此宣称 G3 闭合。
 
 ### 凭据（四查落点按单核 / 复跑命令 / 必须亲自复验的数字）
 
@@ -133,7 +136,7 @@
 - `scripts/check_runtime_evidence.py`
 - `scripts/test_check_runtime_evidence.py`
 
-#### 2.2 叶任务派发索引（未来 65 叶；全 `planned`、未授权）
+#### 2.2 叶任务派发索引（阶段二 65 叶；全 `planned`、未授权；阶段一 24 个 P0 另见各域 `tasks.md`「P0 骨架任务」节与 `task-graph.json`）
 
 > **本表不是授权**：65 项 `status=planned` 且**无任何产品写权限**；**G3（逐单精确文件 + 实测读闭包）全部未闭合**。W 列**引用各域 tasks.md 的具体编号**（完整候选文件清单在该行）：标「**文件级候选**」= 该域已把 W 收敛为具体文件路径；标「**未收敛**」= 域白名单仍是目录/通配（07/08/09 及 00.6 产品门），**显式 G3 blocked，不得视为精确已齐**。
 > 域引用缩写：`[00]`=`changes/00-foundation/tasks.md` … `[09]`=`changes/09-acceptance/tasks.md`。
@@ -387,7 +390,32 @@
 
 > 本批**无任何产品验证**：无 Go build/test/vet、无 `go list`、无安装/下载/付费/微信、无提交/推送/归档/清理；65 叶任务**全 planned**、checkbox **全未勾**、DAG 无环（`check_runtime_plan` 含 cycle 检测，`ok=true`）。G1 **未运行**；G2 为**桌面推演**（实施验收是未来 09 证据，两者分别说清）。
 
+### 批次 7（本代理，两阶段修订落盘；只写规划与检查器资产，**不写任何产品 Go 代码**）
+
+> 用户授权：本批为**单一批次的两阶段修订**——只改规划 md/json 与检查器脚本（`scripts/runtime_checklib.py`/`check_runtime_plan.py`/`test_check_runtime_plan.py`）；**不写任何产品 Go 代码**；外部批准计划只读；不跑产品 `go build/test/vet`、不安装依赖、不提交/推送/归档、不付费/微信。
+
+| 项 | 定位/内容 | 状态 | 凭据 |
+|---|---|---|---|
+| 阶段一骨架约定冻结 | `design.md` 新增决策 **D9 两阶段交付与骨架先行**（stub 形态/编译断言/英文 Godoc/包注释/≤500 行/同文件内聚；阶段门 `00.P0.3`；被否方案） | 完成 | `openspec validate` EXIT=0（见下） |
+| task-graph 两阶段 | `task-graph.json` 增 24 个 P0 骨架任务（`phase=skeleton`，`00.P0.2=tooling`）；59 个阶段二 `NN.M` 追加阶段门边 `00.P0.3` | 完成 | `check_runtime_plan.py` → graph_tasks=89/checkboxes=89、errors=[]、EXIT=0 |
+| 检查器两阶段 | `runtime_checklib.py`（PHASES 加 `skeleton`、TASK_ID_RE 支持 `NN.P0.M`）；`check_runtime_plan.py`（P0_RANGES＋阶段门/P0 phase 硬校验）；`test_check_runtime_plan.py`（fixture 支持 P0＋4 负控） | 完成 | `python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'` → `Ran 134 tests ... OK`、EXIT=0 |
+| 00.P0.1/00.P0.2 完成 | 骨架约定冻结（D9）＋检查器/自测扩展；**工装判据，非产品** | 完成 | evidence run_id=**rev2phase-20261013**；exit_codes=[0,0,0] |
+| 规划文档两阶段 | `design.md` D9、`proposal.md` What Changes、`expectations.md`（§0 分母→89/§8 G1 实体化）、顶层 `tasks.md`（头部＋0.0 行）、`specs/orchestration/spec.md`（ADDED `两阶段交付与骨架评审门`）、各域 `tasks.md` P0 节 | 完成 | `check_runtime_plan.py` → `orchestration_layers=4`、`ok=true`、EXIT=0 |
+
+#### 批次 7 复跑凭据（原始退出码，非汇总）
+
+| 命令 | 退出码 | 关键输出 |
+|---|---|---|
+| `python3 -B -m unittest discover -s scripts -p 'test_check_runtime_*.py'` | 0 | `Ran 134 tests ... OK`（批次 6 为 130，+4 P0 负控） |
+| `python3 scripts/check_runtime_plan.py --json` | 0 | `ok=true`；graph_tasks=89/checkboxes=89/graph_edges=318/covered_main_capabilities=120/spec_files=62/scenarios=447/requirements=128/added=71/modified=57/removed=0/domains_with_spec=10/orchestration_layers=4 |
+| `python3 scripts/check_runtime_architecture.py --check-policy --json` | 0 | `ok=true`；policy_packages=19/policy_edges=19 |
+| `python3 scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/runtime-rebuild/task-graph.json --json` | 0 | `ok=true`；scenario_count=10/scenarios_required=10/scope=complete（`scenario_count=10` 不变） |
+| `openspec validate runtime-rebuild --strict --no-interactive` | 0 | `Change 'runtime-rebuild' is valid` |
+| `git status --short` | 0 | 仅白名单 20 文件（+ 本轮新改 `ORCHESTRATION.md`）；`?? examples/wechat-bot/skills/interview/agent-interview-helper/`（用户未跟踪，未触碰） |
+
+> **本批无产品验证**：无 Go build/test/vet、无 `go list`、无安装/下载/付费/微信、无提交/推送/归档；**产品完成度仍=0**（阶段一 24 P0 中仅 00.P0.1/00.P0.2 工装完成，阶段二 65 项全 `planned`）。G1 骨架落码级探针**未执行**；G2 为**桌面推演**。
+
 ### 明确未完成（不得勾选）
 
-- 65 个叶任务**全部 planned**；G1 签名探针、G2 设计推演（正常/失败/并发/重启）**未执行**（产品观测属 09 证据，**不属 G2**）；无产品 build/test/vet；无 `go list`；无提交/归档。
+- 阶段二 **65 个 `NN.M` 叶任务全部 `planned`**；阶段一 24 个 P0 骨架中，**仅 00.P0.1/00.P0.2（规划/工装，非产品）随本轮完成**（evidence run_id=`rev2phase-20261013`），其余 22 个 P0 与全部阶段二为 `planned`。G1 骨架落码级探针、G2 设计推演（正常/失败/并发/重启）**未执行**（产品观测属 09 证据，**不属 G2**）；无产品 build/test/vet；无 `go list`；无提交/归档。
 - 外部计划文件**未改**；主 `openspec/specs/`、prototype、历史 wiki、用户文件**未改**。

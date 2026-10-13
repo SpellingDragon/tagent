@@ -48,3 +48,18 @@ ORCHESTRATION.md SHALL 按结论、编排四问、明细、台账四层组织；
 #### Scenario: 收尾仍有真实路径欠账
 - **WHEN** 09.1 确定性场景已通过但 09.5 的必验资源项未完成
 - **THEN** 顶层 DoD 保持未完成，不归档，不称正式版交付；归档须另行授权并标准同步嵌套 delta
+
+### Requirement: 两阶段交付与骨架评审门
+交付 SHALL 分两阶段。阶段一 = 24 个骨架叶任务（编号 `NN.P0.M`）**仅含**数据/接口定义与 CI 合规注释文档，stub 方法体**仅**返回哨兵错误 `errors.New("phase 2: not implemented")`（无返回值方法仅 `// TODO(phase2)` 空体）、**禁止 panic**，**零业务逻辑**；阶段二 = 既有 65 个实施叶任务（`NN.M`）。阶段二 MUST 以骨架评审门 `00.P0.3`（全部域 P0 done 且评审通过）为前置；该前置 MUST 落为 `task-graph.json` 硬边并由规划检查器拒收缺边。
+
+#### Scenario: 骨架含业务逻辑或 panic
+- **WHEN** 某 `NN.P0.M` 任务含业务逻辑、`panic` 占位或非哨兵错误
+- **THEN** 骨架评审门 `00.P0.3` 拒收，阶段二不解锁，该任务退回重写
+
+#### Scenario: 00.P0.3 未 done 即派发 NN.M
+- **WHEN** 骨架评审门 `00.P0.3` 尚未 done 而编排尝试派发任一 `NN.M`
+- **THEN** 判定为编排违规（`task-graph.json` 硬边要求 `NN.M` 含前置 `00.P0.3`，`check_runtime_plan.py` 对缺边拒收并返回非零）
+
+#### Scenario: 域 P0 申报 done
+- **WHEN** 某域 P0 任务申报 `done`
+- **THEN** MUST 附 `go build ./...`、`go vet ./...`、`gofmt -l <包>`（空输出）的**原始退出码**与每包 `skeleton_assert.go` 编译断言证据；无证据不得勾选

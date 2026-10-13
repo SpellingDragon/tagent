@@ -16,17 +16,18 @@ SCRIPTS = Path(__file__).resolve().parent
 CHECKER = SCRIPTS / "check_runtime_plan.py"
 
 DOMAIN_SPEC = (
-    ("00-foundation", 6),
-    ("01-state-binding", 6),
-    ("02-execution", 9),
-    ("03-history", 8),
-    ("04-capabilities", 9),
-    ("05-inspection", 4),
-    ("06-learning", 8),
-    ("07-evolution", 4),
-    ("08-host", 5),
-    ("09-acceptance", 6),
+    ("00-foundation", 6, 3),
+    ("01-state-binding", 6, 2),
+    ("02-execution", 9, 4),
+    ("03-history", 8, 2),
+    ("04-capabilities", 9, 4),
+    ("05-inspection", 4, 2),
+    ("06-learning", 8, 2),
+    ("07-evolution", 4, 2),
+    ("08-host", 5, 2),
+    ("09-acceptance", 6, 1),
 )
+STAGE_GATE_ID = "00.P0.3"
 
 GOOD_SPEC = """## ADDED Requirements
 
@@ -47,24 +48,46 @@ BAD_SPEC = """## ADDED Requirements
 
 def task_ids():
     ids = []
-    for domain, count in DOMAIN_SPEC:
+    for domain, count, p0_count in DOMAIN_SPEC:
         prefix = domain.split("-", 1)[0]
         ids.extend("{}.{}".format(prefix, i) for i in range(1, count + 1))
+        ids.extend("{}.P0.{}".format(prefix, i) for i in range(1, p0_count + 1))
     return ids
 
 
 def graph_tasks():
     tasks = []
-    for domain, count in DOMAIN_SPEC:
+    for domain, count, p0_count in DOMAIN_SPEC:
         prefix = domain.split("-", 1)[0]
         for index in range(1, count + 1):
+            # Hard check (b): every 01–09 non-P0 task carries the stage-gate edge.
+            deps = [STAGE_GATE_ID] if prefix != "00" else []
             tasks.append({
                 "id": "{}.{}".format(prefix, index),
                 "domain": domain,
-                "depends_on": [],
+                "depends_on": deps,
                 "phase": "implementation",
                 "status": "planned",
                 "verification": ["go test ./... -run '^TestThing$' -count=1 -json"],
+            })
+        for index in range(1, p0_count + 1):
+            tid = "{}.P0.{}".format(prefix, index)
+            # Hard check (a): skeleton tasks are 'skeleton' (00.P0.2 is 'tooling');
+            # fixture keeps 00.P0.1/00.P0.2 planned like the rest.
+            phase = "tooling" if tid == "00.P0.2" else "skeleton"
+            if tid == "00.P0.2":
+                deps = ["00.P0.1"]
+            elif tid in ("00.P0.1", "00.P0.3"):
+                deps = []
+            else:
+                deps = ["00.3"]
+            tasks.append({
+                "id": tid,
+                "domain": domain,
+                "depends_on": deps,
+                "phase": phase,
+                "status": "planned",
+                "verification": ["go build ./..."],
             })
     return tasks
 
@@ -81,7 +104,7 @@ class Fixture:
         self.main_specs = self.root / "openspec" / "specs"
 
     def build(self):
-        caps = [domain for domain, _ in DOMAIN_SPEC]
+        caps = [domain for domain, _count, _p0 in DOMAIN_SPEC]
         proposal = ["## Why", "fixture", "", "## Capabilities", "", "### Modified Capabilities", ""]
         proposal += ["- `{}`：测试能力。".format(cap) for cap in caps + ["orchestration"]]
         write(self.change / "proposal.md", "\n".join(proposal) + "\n")
@@ -91,7 +114,7 @@ class Fixture:
         write(self.change / "ORCHESTRATION.md", ORCHESTRATION)
         write(self.change / "specs" / "orchestration" / "spec.md",
               GOOD_SPEC.format(cap="orchestration"))
-        for domain, count in DOMAIN_SPEC:
+        for domain, count, p0_count in DOMAIN_SPEC:
             base = self.change / "changes" / domain
             write(base / "proposal.md", "## 边界\n\n能力 `{}` 已声明。\n".format(domain))
             write(base / "design.md", "## 设计\n\nfixture\n")
@@ -99,6 +122,9 @@ class Fixture:
             lines = ["## 叶任务", ""]
             for index in range(1, count + 1):
                 lines.append("- [ ] {}.{} 占位动作 —— 验证：go test ./... -json".format(prefix, index))
+            lines += ["", "## P0 骨架任务", ""]
+            for index in range(1, p0_count + 1):
+                lines.append("- [ ] {}.P0.{} 骨架占位 —— 验证：go build ./...".format(prefix, index))
             write(base / "tasks.md", "\n".join(lines) + "\n")
             write(base / "specs" / domain / "spec.md", GOOD_SPEC.format(cap=domain))
         write(self.change / "task-graph.json", json.dumps(
@@ -164,8 +190,8 @@ class PlanCheckerTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
         self.assertIsNone(payload["productVerified"])
-        self.assertEqual(payload["counts"]["graph_tasks"], 65)
-        self.assertEqual(payload["counts"]["checkboxes"], 65)
+        self.assertEqual(payload["counts"]["graph_tasks"], 89)
+        self.assertEqual(payload["counts"]["checkboxes"], 89)
         self.assertEqual(payload["counts"]["scenarios"], 11)
 
     def test_missing_task_reported(self):
@@ -328,7 +354,7 @@ class PlanCheckerTest(unittest.TestCase):
         self.fixture.save_graph(graph)
 
     def tick(self, tid):
-        for domain, _count in DOMAIN_SPEC:
+        for domain, _count, _p0 in DOMAIN_SPEC:
             path = self.fixture.change / "changes" / domain / "tasks.md"
             text = path.read_text(encoding="utf-8")
             new = text.replace("- [ ] " + tid, "- [x] " + tid, 1)
@@ -337,9 +363,13 @@ class PlanCheckerTest(unittest.TestCase):
                 return
 
     def test_done_with_evidence_and_ticked_box_is_accepted(self):
+        evidence = {"run_id": "run-1", "commands": ["go test ./..."],
+                    "exit_codes": [0], "artifact_paths": ["out/run-1.json"]}
+        # The stage gate itself must be done before any NN.M task may be done.
+        self.tick(STAGE_GATE_ID)
+        self.set_status(STAGE_GATE_ID, "done", evidence)
         self.tick("02.3")
-        self.set_status("02.3", "done", {"run_id": "run-1", "commands": ["go test ./..."],
-                                           "exit_codes": [0], "artifact_paths": ["out/run-1.json"]})
+        self.set_status("02.3", "done", evidence)
         code, out, err = self.check()
         self.assertEqual(code, 0, out + err)
 
@@ -428,6 +458,46 @@ class PlanCheckerTest(unittest.TestCase):
         code, out, _ = run_checker("--change-dir", str(self.fixture.root / "nope"), "--json")
         self.assertNotEqual(code, 0)
         self.assertIn("change dir not found", out)
+
+    # --- 两阶段修订新增负控（骨架编号 / 缺失 / 阶段门硬边 / phase） ---
+
+    def test_invalid_skeleton_task_id_is_rejected(self):
+        graph = self.fixture.load_graph()
+        for task in graph["tasks"]:
+            if task["id"] == "01.P0.1":
+                task["id"] = "01.P0x"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("invalid id", out)
+
+    def test_missing_skeleton_task_is_rejected(self):
+        graph = self.fixture.load_graph()
+        graph["tasks"] = [t for t in graph["tasks"] if t["id"] != "05.P0.2"]
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("task 05.P0.2 missing from task-graph", out)
+
+    def test_non_p0_task_without_stage_gate_edge_is_rejected(self):
+        graph = self.fixture.load_graph()
+        for task in graph["tasks"]:
+            if task["id"] == "03.1":
+                task["depends_on"] = []
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("阶段门", out)
+
+    def test_skeleton_task_with_wrong_phase_is_rejected(self):
+        graph = self.fixture.load_graph()
+        for task in graph["tasks"]:
+            if task["id"] == "02.P0.1":
+                task["phase"] = "implementation"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("skeleton task so its phase must be", out)
 
 
 if __name__ == "__main__":

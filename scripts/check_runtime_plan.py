@@ -4,14 +4,17 @@
 检查对象：某个 change 目录（默认 openspec/changes/runtime-rebuild）。
 检查内容：
   * task-graph.json 的形状、id 全覆盖、依赖无重复/无未知/无自环/无环；
+  * 两阶段修订硬校验：24 个骨架任务 NN.P0.M 的 phase 必须为 skeleton
+    （00.P0.2 工装单例外 tooling）；01–09 域全部非 P0 实施任务 MUST 以骨架评审门
+    00.P0.3 为额外前置（缺边即报错，文案含「阶段门」）；00.P0.3 必须存在于图。
   * 十个二级域四件套存在（每域至少一份 spec）；
   * 各域 tasks.md 的叶 checkbox 编号与 graph 精确相等（多/少/重复都报）；
   * graph status 词表 planned/blocked/in_progress/done：与叶 checkbox 双向一致——
     勾选但 status 非 done = 无证据的完成；status=done 但未勾选 = 缺勾选凭据。
-    done 必须携带 evidence {run_id,commands,exit_codes,artifact_paths}。本轮 65 图
-    保持全 planned（不继承任何历史 done）；但词表与证据形状已为未来完成预留——
-    完成只能以证据如实表达，绝不把本轮 planned 当成“任务永不完成”的永久锁
-    （否则每个真实完成都会红）。
+    done 必须携带 evidence {run_id,commands,exit_codes,artifact_paths}。本轮 89 图
+    （65 实施＋24 骨架）保持全 planned（不继承任何历史 done）；但词表与证据形状
+    已为未来完成预留——完成只能以证据如实表达，绝不把本轮 planned 当成“任务
+    永不完成”的永久锁（否则每个真实完成都会红）。
   * ORCHESTRATION.md 四层（结论/编排四问/明细/台账）存在且不倒装；
   * spec 按 delta 段分类校验：ADDED/MODIFIED/baseline 的 ### Requirement 须含
     SHALL/MUST 且至少一个 #### Scenario；REMOVED 的要求须含 **Reason** 与
@@ -49,11 +52,23 @@ DOMAINS = (
     "09-acceptance",
 )
 # 每域叶任务编号范围（新计划编号：00.1..6 / 01.1..6 / 02.1..9 / 03.1..8 /
-# 04.1..9 / 05.1..4 / 06.1..8 / 07.1..4 / 08.1..5 / 09.1..6 = 65）。
+# 04.1..9 / 05.1..4 / 06.1..8 / 07.1..4 / 08.1..5 / 09.1..6 = 65 实施叶任务）。
 ID_RANGES = (
     ("00", 6), ("01", 6), ("02", 9), ("03", 8), ("04", 9),
     ("05", 4), ("06", 8), ("07", 4), ("08", 5), ("09", 6),
 )
+# 两阶段修订（阶段一骨架）新增的 24 个 P0 骨架叶任务编号范围：
+# 00.P0.1..3 / 01.P0.1..2 / 02.P0.1..4 / 03.P0.1..2 / 04.P0.1..4 /
+# 05.P0.1..2 / 06.P0.1..2 / 07.P0.1..2 / 08.P0.1..2 / 09.P0.1 = 24。
+# 与 ID_RANGES 共同构成 89 个叶任务（65 实施＋24 骨架）。
+P0_RANGES = (
+    ("00", 3), ("01", 2), ("02", 4), ("03", 2), ("04", 4),
+    ("05", 2), ("06", 2), ("07", 2), ("08", 2), ("09", 1),
+)
+# 阶段门：01–09 域的全部非 P0 实施叶任务 MUST 以 00.P0.3 为额外前置。
+STAGE_GATE_ID = "00.P0.3"
+# 骨架任务的 phase 例外白名单（键=任务 id，值=允许的 phase）。
+P0_PHASE_EXCEPTIONS = {"00.P0.2": "tooling"}
 TOP_LEVEL_FILES = ("proposal.md", "design.md", "tasks.md", "ORCHESTRATION.md")
 ORCH_LAYERS = (
     ("结论", "conclusion"),
@@ -80,9 +95,12 @@ MAIN_TITLE_RE = re.compile(r"^#\s+(?P<cap>.+?)\s+Specification\s*$")
 
 
 def expected_ids():
+    """全部批准叶任务编号：65 实施（NN.M）＋24 骨架（NN.P0.M）= 89。"""
     ids = []
     for prefix, count in ID_RANGES:
         ids.extend("{}.{}".format(prefix, index) for index in range(1, count + 1))
+    for prefix, count in P0_RANGES:
+        ids.extend("{}.P0.{}".format(prefix, index) for index in range(1, count + 1))
     return ids
 
 
@@ -151,6 +169,8 @@ def check_graph_shape(report, graph, change_name):
             report.error("{} has invalid id {!r}".format(where, tid))
             continue
         where = "task {}".format(tid)
+        prefix, _, tail = tid.partition(".")
+        is_p0 = tail.startswith("P0.")
         domain = task.get("domain")
         want_domain = domain_for_prefix(tid.split(".")[0])
         if domain not in DOMAINS:
@@ -164,6 +184,13 @@ def check_graph_shape(report, graph, change_name):
         phase = task.get("phase")
         if phase not in lib.PHASES:
             report.error("{} phase {!r} not in {}".format(where, phase, lib.PHASES))
+        # 两阶段修订硬校验 (a)：24 个骨架任务的 phase 必须是 skeleton，唯一例外
+        # 00.P0.2（工装单）为 tooling；白名单外一律拒收。
+        elif is_p0:
+            expected_phase = P0_PHASE_EXCEPTIONS.get(tid, "skeleton")
+            if phase != expected_phase:
+                report.error("{} is a skeleton task so its phase must be {!r}, got {!r}"
+                             .format(where, expected_phase, phase))
         status = task.get("status")
         if status not in STATUSES:
             report.error("{} status {!r} not in {}".format(where, status, STATUSES))
@@ -173,6 +200,11 @@ def check_graph_shape(report, graph, change_name):
         if (not isinstance(verification, list) or not verification
                 or any(not isinstance(v, str) or not v.strip() for v in verification)):
             report.error("{} verification must be a non-empty list of non-empty strings".format(where))
+        # 两阶段修订硬校验 (b)：01–09 域的全部非 P0 实施叶任务 MUST 以骨架评审门
+        # 00.P0.3 为额外前置（缺失即阶段门未生效）；00 域（含门本身）不适用。
+        if not is_p0 and prefix != "00" and STAGE_GATE_ID not in deps:
+            report.error("{} is an 01–09 non-P0 task but lacks the 阶段门 prerequisite {}"
+                         .format(where, STAGE_GATE_ID))
         cleaned.append({"id": tid, "domain": domain, "depends_on": deps, "status": status})
     return cleaned
 
@@ -214,7 +246,7 @@ def check_dependency_graph(report, tasks):
     for tid in sorted(expected - actual):
         report.error("task {} missing from task-graph".format(tid))
     for tid in sorted(actual - expected):
-        report.error("task {} is not part of the approved 65 leaf tasks".format(tid))
+        report.error("task {} is not part of the approved 89 leaf tasks (65 实施＋24 骨架)".format(tid))
     adjacency = {task["id"]: [] for task in tasks}
     statuses = {task["id"]: task["status"] for task in tasks}
     for task in tasks:
