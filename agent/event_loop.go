@@ -20,18 +20,25 @@ import (
 // It pulls events from the EventBus, builds an invocation, and runs the flow.
 // The loop runs in a dedicated goroutine and exits when ctx is cancelled.
 // durableCommittedKeys collects the distinct fact EventKeys already committed for this
-// batch: each durable claim carries its frozen FullEvent JSON (PreparedFact); the
-// keys seed the echo credential consumed by . Volatile events (no claim) contribute
-// nothing.
+// batch: each durable claim carries its frozen FullEvent JSON (PreparedFact); committed
+// volatile task inputs carry their frozen fact. The
+// keys seed the echo credential so the runner's merged input is not stored twice.
 func durableCommittedKeys(events []*AgentEvent) []int64 {
 	seen := make(map[int64]bool)
 	var keys []int64
 	for _, ev := range events {
-		if ev == nil || ev.claim == nil || len(ev.claim.PreparedFact) == 0 {
+		if ev == nil {
 			continue
 		}
 		var f memory.FullEvent
-		if err := json.Unmarshal(ev.claim.PreparedFact, &f); err != nil || f.EventKey == 0 {
+		if ev.volatileCommitted && ev.volatileFact != nil {
+			f = *ev.volatileFact
+		} else if ev.claim != nil && len(ev.claim.PreparedFact) > 0 {
+			if err := json.Unmarshal(ev.claim.PreparedFact, &f); err != nil {
+				continue
+			}
+		}
+		if f.EventKey == 0 {
 			continue
 		}
 		if !seen[f.EventKey] {
@@ -168,6 +175,12 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		return turnContinue
 	case submitOK:
 	}
+	cm.SetTriggerSource(extractTriggerSource(events))
+	cm.SetInvocationMetadata(extractRootMetadata(events))
+	if !persistVolatileTaskInputs(ctx, cm, events) {
+		cm.turnEcho = nil
+		return turnStop
+	}
 
 	msg := cm.BuildInvocation(events)
 	if msg.Content == "" && len(msg.ContentParts) == 0 {
@@ -185,10 +198,6 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		}
 		defer func() { cm.turnEcho = nil }()
 	}
-
-	cm.SetTriggerSource(extractTriggerSource(events))
-
-	cm.SetInvocationMetadata(extractRootMetadata(events))
 
 	turnMeta := extractRootMetadata(events)
 	spanCtx, turnSpan := startTurnSpan(ctx, turnSpanAttrs{
@@ -309,6 +318,50 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		ta.meditationMgr.NoteMeditationBatchOutcome(true)
 	}
 	return turnContinue
+}
+
+// persistVolatileTaskInputs preserves each notification's task identity before
+// the runner echoes a merged input. Mixed batches commit their other inputs too,
+// so skipping that echo cannot erase a user message. The active CM owns these
+// facts and their projection, including on a delegated invocation.
+func persistVolatileTaskInputs(ctx context.Context, cm *ContextManager, events []*AgentEvent) bool {
+	hasTask := false
+	for _, evt := range events {
+		if evt != nil && evt.Source == SourceTask && evt.claim == nil {
+			hasTask = true
+			break
+		}
+	}
+	if !hasTask {
+		return true
+	}
+	for _, evt := range events {
+		if evt == nil || evt.claim != nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
+			continue
+		}
+		if evt.volatileFact == nil {
+			fact := cm.buildBusFact(evt)
+			evt.volatileFact = &fact
+		}
+		for {
+			if ctx.Err() != nil {
+				return false
+			}
+			if ok, conflict := cm.persistBusEventCommitted(evt); ok {
+				break
+			} else if conflict {
+				log.Errorf("[task-input] conflicting fact — stopping the invocation before model execution")
+				return false
+			}
+			log.Warnf("[task-input] store failed — retaining the current notification batch for retry")
+			select {
+			case <-time.After(400 * time.Millisecond):
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // yieldMeditationOnPresence disposes the consumption-time yield — the second
@@ -463,8 +516,9 @@ const metaKeyInvocationID = "invocation_id"
 
 var controlMetaKeys = map[string]bool{
 	"settle_status": true, "task_id": true, "lineage_absent": true,
-	"detached_at_ms":    true,
-	metaKeyInvocationID: true,
+	"detached_at_ms":               true,
+	tagentevent.MetaKeySettleFinal: true,
+	metaKeyInvocationID:            true,
 }
 
 // extractDelegationInvocationID returns the S1 correlation handle (metaKeyInvocationID)

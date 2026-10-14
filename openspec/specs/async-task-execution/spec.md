@@ -23,7 +23,12 @@ tracked in the background (see also `adaptive-poll-scheduling`).
 
 - **WHEN** 一个 tool 调用对应的 Task 在 dense 阶段内产生 settle 信号
 - **THEN** `Call()` SHALL 返回内联最终结果
-- **AND** 该任务 SHALL NOT 进入后台跟踪、SHALL NOT 触发额外的回收 turn
+- **AND** 若该信号结束本轮，任务 SHALL NOT 触发额外回收 turn；若为 stable/watch 等非终局观察，后续完成信号 SHALL 继续由后台跟踪并触发回收 turn
+
+#### Scenario: 内联观察后紧接完成
+
+- **WHEN** stable/watch 先进入内联窗口，完成信号在窗口交接前到达
+- **THEN** 首条观察 SHALL 内联返回，后续完成 SHALL 完整送到后台通知，MUST NOT 被单格窗口缓冲覆盖或丢弃
 
 #### Scenario: 慢任务越过 dense 阶段转后台
 
@@ -76,16 +81,24 @@ settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)�
 
 ### Requirement: 服务型任务转 alive-detached
 
-**转移条件收紧为仅 service 型**：仅 `LifetimeOf(spec) == service` 的任务在首个输出稳定结算（`SettleStable`）时 SHALL 转入 alive-detached 观测态并发送一次性「就绪」通知；job 型（command/subagent）任务的 `SettleStable`/`SettleSuspect` SHALL NOT 转入 alive-detached、SHALL NOT 注入就绪通知事件（面板状态照常置 stable/suspect，终态结算照常通知）。
-
-> **方向性标注（非本期验收）**：本需求的 alive-detached 转移与 detachedAt 持久化为**过渡态**——终态（信号发射矩阵：oneshot 不发射中间态信号、SettleStable 仅 interactive 消费）下 alive_detached 生产者归零，本需求整体随 `settle-signal-matrix` 拆除变更删除；承接者见 failure-polarity-passthrough/design.md「终态消融覆盖矩阵」。
+仅 `LifetimeOf(spec) == service` 的任务在首个输出稳定结算（`SettleStable`）时 SHALL 转入 alive-detached 观测态并发送一次性「就绪」通知；job 型（command/subagent）任务的 `SettleStable`/`SettleSuspect` SHALL NOT 转入 alive-detached，但 SHALL 以 stable/suspect 观察通知进入 agent 事件管线，由模型决定后续工作；终态结算仍 SHALL 通知。
 
 service 型任务进入 alive-detached 观测语义时，其脱离时间戳（detachedAt）MUST 作为任务生命周期事实持久化（写入 Declarative 并随 task_spawned 链恢复）；恢复后的脱离时间 MUST 沿用原值，MUST NOT 以恢复时间替代。
 
 #### Scenario: job 型静默任务不转就绪
 
 - **WHEN** job 型任务（如 `sleep 180`、包安装命令）输出静默触发 `SettleStable`
-- **THEN** 任务 SHALL NOT 进入 alive-detached，SHALL NOT 产生 `∞` 就绪通知；其终态结算照常通知
+- **THEN** 任务 SHALL 保持 stable，SHALL 产生结构化 stable 观察通知，SHALL NOT 进入 alive-detached 或冒充完成；其后终态仍 SHALL 通知
+
+#### Scenario: 观察通知保留调用消费链
+
+- **WHEN** 委派调用收到 stable/watch 等非终局信号
+- **THEN** 信号 SHALL 经同一调用的总线驱动回合，交付屏障 MUST NOT 扣减，调用 MUST 保持可接收后续完成
+
+#### Scenario: 探测器以可疑结算结束
+
+- **WHEN** TUI 超时等非终态结论是探测器的末条信号
+- **THEN** 信号 SHALL 标记 Final，并经 settle_final 控制元数据终结本轮交付屏障，MUST NOT 无限等待不存在的后续完成
 
 #### Scenario: service 型转移动机不变
 
@@ -100,6 +113,18 @@ service 型任务进入 alive-detached 观测语义时，其脱离时间戳（de
 ### Requirement: task_settled 为通知类 input 事件
 
 后台任务的结算结果（task_settled)SHALL 被视为"通知"类外部输入事件：它 SHALL NOT 被视为对某次"等待中" tool 调用的协议应答（同步应答已在 spawn 的 sync-wait 窗口内以 ack/内联结果完成）；它 SHALL 作为新的驱动事件进入时间线并触发回收 turn。通知内容 SHALL 携带文本级关联标识（task id 与任务简述），使模型能在内容上将通知与先前的调用关联。
+
+该通知在未开启持久信箱时也 MUST 逐条进入事实链与所属调用投影，保留 task_id、settle_status、settle_final 及来源元数据；同批用户输入 MUST 一并保留，Runner 的合并输入回显 MUST NOT 重复写入。存储失败 SHALL 保留当前批重试，并在提交成功前禁止模型执行。
+
+#### Scenario: volatile 任务通知保留结构化身份
+
+- **WHEN** 未开启持久信箱的 agent 消费任务通知，或与用户输入混批消费
+- **THEN** 每条输入 SHALL 保留独立事实身份与正文，结算状态和 task_id SHALL 可结构化查询，回显 SHALL 不产生重复输入事实
+
+#### Scenario: 取消唤醒等待调用
+
+- **WHEN** 已纳管的任务被取消
+- **THEN** 系统 SHALL 一次发布 cancelled 终局通知到原调用，解除交付屏障，重复取消 SHALL 不再次发布
 
 **失败极性表达**：命令非零退出（含信号死）、探测不可辨超限、kill 失败强拆三类路径的结算 SHALL 以失败极性呈现（✗/failed），通知文本 SHALL 携带 `exit_code=N`（判定与透传契约见 failure-polarity 能力规格）；零退出的成功极性（✓/completed）语义不变。
 

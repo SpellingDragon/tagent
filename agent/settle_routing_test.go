@@ -24,6 +24,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	trpcEvent "trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // drainIDs pulls everything currently on the bus and returns the event ids seen.
@@ -184,10 +185,10 @@ func TestSettleAccounting_DeliveryBarrier(t *testing.T) {
 	r.noteSpawn("X")
 	require.False(t, r.quiescent("X"))
 
-	require.True(t, r.route("X", &AgentEvent{ID: "e1"}))
+	require.True(t, r.route("X", &AgentEvent{ID: "e1", Metadata: map[string]any{"settle_status": "completed"}}))
 	require.False(t, r.quiescent("X"), "one delivered, one still expected")
 
-	require.True(t, r.route("X", &AgentEvent{ID: "e2"}))
+	require.True(t, r.route("X", &AgentEvent{ID: "e2", Metadata: map[string]any{"settle_status": "completed"}}))
 	require.True(t, r.quiescent("X"), "spawned == delivered → quiescent")
 
 	require.ElementsMatch(t, []string{"e1", "e2"}, drainIDs(invBus))
@@ -234,7 +235,7 @@ func TestSettleAccounting_UnbindClosesAccounting(t *testing.T) {
 type stubSpawner struct{ settled bool }
 
 func (s *stubSpawner) Spawn(task.TaskSpec, task.SettleDetector) task.SpawnResult {
-	return task.SpawnResult{Settled: s.settled}
+	return task.SpawnResult{Settled: s.settled, Signal: task.SettleSignal{Kind: task.SettleCompleted}}
 }
 
 // TestCountingSpawner_BooksOnlyBackground 钉住 记账装饰器只为后台派生记一笔预期结算，其路由之后再清除。
@@ -247,7 +248,7 @@ func TestCountingSpawner_BooksOnlyBackground(t *testing.T) {
 
 	(&countingSpawner{inner: &stubSpawner{settled: false}, sinks: r, id: "X"}).Spawn(task.TaskSpec{}, nil)
 	require.False(t, r.quiescent("X"), "a background spawn books an expected settle")
-	require.True(t, r.route("X", &AgentEvent{ID: "s"}), "its settle delivers")
+	require.True(t, r.route("X", &AgentEvent{ID: "s", Metadata: map[string]any{"settle_status": "completed"}}), "its settle delivers")
 	require.True(t, r.quiescent("X"), "spawned == delivered → quiescent")
 
 	by := NewEventBus()
@@ -1364,4 +1365,243 @@ func TestToInt64Key_HexContract(t *testing.T) {
 	if got := toInt64Key("not-a-key"); got != 0 {
 		t.Errorf("garbage must yield 0, got %d", got)
 	}
+}
+
+// TestObservationsKeepInvocationAwaitingCompletion verifies observations do not discharge the final-delivery booking.
+func TestObservationsKeepInvocationAwaitingCompletion(t *testing.T) {
+	sinks := newSettleSinkRegistry()
+	bus := NewEventBus()
+	sinks.bind("inv", bus)
+	sinks.noteSpawn("inv")
+	tk := task.NewTaskFixture("job", "long job", task.TaskRunning, time.Now())
+	tk.Spec.Kind = "command"
+	tk.Spec.Origin = map[string]string{metaKeyInvocationID: "inv"}
+	for _, kind := range []task.SettleKind{task.SettleStable, task.SettleWatch, task.SettleSuspect} {
+		evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: kind, Output: string(kind)}, 0, "")
+		deliverTaskSettled(sinks, nil, tk, evt)
+		require.Len(t, bus.TryPull(), 1, "every observation enters the invocation bus")
+		require.True(t, sinks.awaiting("inv"), "an observation must not retire the completion booking")
+		if kind == task.SettleStable {
+			require.Equal(t, "stable", evt.Metadata["settle_status"], "job stability is not service readiness")
+		}
+	}
+	deliverTaskSettled(sinks, nil, tk, newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, ""))
+	require.False(t, sinks.awaiting("inv"))
+	require.Len(t, bus.TryPull(), 1)
+}
+
+// TestCancelledTaskReleasesInvocationBooking verifies cancellation wakes the original invocation exactly once.
+func TestCancelledTaskReleasesInvocationBooking(t *testing.T) {
+	ta, err := NewTagentAgent(&TagentConfig{Name: "cancel-task", Model: &echoModel{}, SystemPrompt: "test"})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ta.Close()) })
+	bus := NewEventBus()
+	ta.settleSinks.bind("inv", bus)
+	ta.settleSinks.noteSpawn("inv")
+	detector := task.NewManualDetector()
+	detector.FireDetach()
+	t.Cleanup(detector.Done)
+	res := ta.taskManager.Spawn(task.TaskSpec{Kind: "command", Origin: map[string]string{metaKeyInvocationID: "inv"}}, detector)
+	require.True(t, ta.taskManager.Cancel(res.Task.ID))
+	require.False(t, ta.taskManager.Cancel(res.Task.ID), "cancellation emits its final notification once")
+	require.False(t, ta.settleSinks.awaiting("inv"))
+	events := bus.TryPull()
+	require.Len(t, events, 1)
+	require.Equal(t, "cancelled", events[0].Metadata["settle_status"])
+}
+
+// TestFinalSuspectReleasesInvocationBooking verifies a detector's final timeout closes the delivery window.
+func TestFinalSuspectReleasesInvocationBooking(t *testing.T) {
+	sinks := newSettleSinkRegistry()
+	bus := NewEventBus()
+	sinks.bind("inv", bus)
+	sinks.noteSpawn("inv")
+	tk := task.NewTaskFixture("tui", "timed out", task.TaskSuspect, time.Now())
+	tk.Spec.Origin = map[string]string{metaKeyInvocationID: "inv"}
+	deliverTaskSettled(sinks, nil, tk, newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleSuspect, Final: true}, 0, ""))
+	require.False(t, sinks.awaiting("inv"), "a detector that ended after timeout has no later completion")
+	require.Len(t, bus.TryPull(), 1)
+}
+
+type commandSettleProbe struct {
+	spawned chan *task.ManualDetector
+	inline  bool
+}
+
+func (p *commandSettleProbe) Declaration() *tool.Declaration {
+	return (&e2eProbeTool{}).Declaration()
+}
+
+func (p *commandSettleProbe) Call(ctx context.Context, _ []byte) (any, error) {
+	spawner, ok := task.TaskSpawnerFromContext(ctx)
+	if !ok {
+		return nil, context.Canceled
+	}
+	d := task.NewManualDetector()
+	if p.inline {
+		d.Emit(task.SettleSignal{Kind: task.SettleStable, Output: "INLINE_READY"})
+	} else {
+		d.FireDetach()
+	}
+	res := spawner.Spawn(task.TaskSpec{Kind: "command", Desc: "long command"}, d)
+	p.spawned <- d
+	if res.Settled {
+		return res.Signal.Output, nil
+	}
+	return "started in background", nil
+}
+
+func nextSettleAnswer(t *testing.T, ch <-chan *trpcEvent.Event, marker string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case evt, ok := <-ch:
+			require.True(t, ok, "the invocation closed before %s", marker)
+			if evt != nil && evt.IsFinalResponse() && strings.Contains(evt.Response.Choices[0].Message.Content, marker) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no continuation consumed %s", marker)
+		}
+	}
+}
+
+// TestCommandSettleContinuesAgentPipeline verifies entry/delegated loops consume and persist observations before completion.
+func TestCommandSettleContinuesAgentPipeline(t *testing.T) {
+	for _, entry := range []bool{false, true} {
+		for _, inline := range []bool{false, true} {
+			name := "delegation"
+			if entry {
+				name = "entry"
+			}
+			if inline {
+				name += "_inline_stable"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := memory.NewInMemoryStore()
+				probe := &commandSettleProbe{spawned: make(chan *task.ManualDetector, 1), inline: inline}
+				ta, err := NewTagentAgent(&TagentConfig{
+					Name: name, Model: &echoModel{}, SystemPrompt: "test", MaxToolIterations: 5,
+					MemoryStore: store, Tools: []tool.Tool{probe},
+				})
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, ta.Close()) })
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				var ch <-chan *trpcEvent.Event
+				if entry {
+					ch, err = ta.StartLoop("user", name)
+					ta.InjectMessage(model.NewUserMessage("run a long command"))
+				} else {
+					ch, err = ta.Run(ctx, &agent.Invocation{InvocationID: name, Message: model.NewUserMessage("run a long command")})
+				}
+				require.NoError(t, err)
+				nextSettleAnswer(t, ch, "answer:")
+				var detector *task.ManualDetector
+				select {
+				case detector = <-probe.spawned:
+				case <-ctx.Done():
+					t.Fatal("the command was never adopted")
+				}
+				t.Cleanup(detector.Done)
+				want := []string{"watch", "completed"}
+				if !inline {
+					detector.Emit(task.SettleSignal{Kind: task.SettleStable, Output: "BACKGROUND_READY"})
+					nextSettleAnswer(t, ch, "BACKGROUND_READY")
+					want = append(want, "stable")
+				}
+				detector.Emit(task.SettleSignal{Kind: task.SettleWatch, Output: "WATCH_PROGRESS"})
+				nextSettleAnswer(t, ch, "WATCH_PROGRESS")
+				detector.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "COMMAND_FINISHED"})
+				nextSettleAnswer(t, ch, "COMMAND_FINISHED")
+				if !entry {
+					for open := true; open; {
+						select {
+						case _, open = <-ch:
+						case <-ctx.Done():
+							t.Fatal("the delegated loop did not quiesce")
+						}
+					}
+					require.Zero(t, ta.contextManager.projection.Len(), "delegated facts belong only to the invocation projection")
+				}
+				refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{ta.partitionID()}, EventTypes: []string{tagentevent.TypeExternalInput}, Limit: 100})
+				require.NoError(t, err)
+				seen := make(map[string]int)
+				for _, ref := range refs {
+					fact, err := store.GetEvent(ref.EventKey)
+					require.NoError(t, err)
+					if fact.Metadata[tagentevent.MetaKeyTaskInlineRecord] == "true" {
+						continue
+					}
+					if status := fact.Metadata["settle_status"]; status != "" {
+						seen[status]++
+						require.Contains(t, fact.Metadata, "task_id")
+					}
+				}
+				for _, status := range want {
+					require.Equal(t, 1, seen[status], "%s should persist once through the event pipeline", status)
+				}
+			})
+		}
+	}
+}
+
+// TestInlineStableKeepsCompletionBooking verifies inline stability still expects a future round ending.
+func TestInlineStableKeepsCompletionBooking(t *testing.T) {
+	sinks := newSettleSinkRegistry()
+	sinks.bind("inv", NewEventBus())
+	spawner := &countingSpawner{
+		inner: &reviewStubSpawner{res: task.SpawnResult{
+			Task:    task.NewTaskFixture("job", "interactive job", task.TaskStable, time.Now()),
+			Settled: true, Signal: task.SettleSignal{Kind: task.SettleStable},
+		}},
+		sinks: sinks, id: "inv",
+	}
+	spawner.Spawn(task.TaskSpec{}, nil)
+	require.True(t, sinks.awaiting("inv"), "inline stability still has a terminal settle to deliver")
+}
+
+type taskInputRetryStore struct {
+	*memory.InMemoryStore
+	attempts []int64
+}
+
+func (s *taskInputRetryStore) StoreEvent(key int64, fact memory.FullEvent) error {
+	s.attempts = append(s.attempts, key)
+	if len(s.attempts) == 2 {
+		return errors.New("temporary write failure")
+	}
+	return s.InMemoryStore.StoreEvent(key, fact)
+}
+
+// TestTaskInputsPreserveMixedBatchAcrossStoreRetry verifies user/task identities survive partial commit without duplication.
+func TestTaskInputsPreserveMixedBatchAcrossStoreRetry(t *testing.T) {
+	store := &taskInputRetryStore{InMemoryStore: memory.NewInMemoryStore()}
+	cm := &ContextManager{name: "task-inputs", partitionID: 7, memStore: store, projection: compress.NewSessionProjection()}
+	tk := task.NewTaskFixture("job", "long command", task.TaskStable, time.Now())
+	tk.Spec.Kind = "command"
+	inputs := []*AgentEvent{
+		NewExternalInputEvent("user", model.NewUserMessage("user followup")),
+		newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleStable, Output: "ready"}, 0, ""),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.True(t, persistVolatileTaskInputs(ctx, cm, inputs))
+	require.Len(t, store.attempts, 3)
+	require.Equal(t, store.attempts[1], store.attempts[2], "the failed task fact retries under the same identity")
+	require.True(t, persistVolatileTaskInputs(ctx, cm, inputs))
+	require.Len(t, store.attempts, 3, "an already committed user/task fact must not be written again")
+	require.Equal(t, 2, cm.projection.Len())
+	refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{7}, EventTypes: []string{tagentevent.TypeExternalInput}})
+	require.NoError(t, err)
+	require.Len(t, refs, 2)
+	keys := durableCommittedKeys(inputs)
+	require.Len(t, keys, 2, "the merged-input echo covers all independently committed facts")
+	fact, err := store.GetEvent(inputs[1].volatileFact.EventKey)
+	require.NoError(t, err)
+	require.Equal(t, "job", fact.Metadata["task_id"])
+	require.Equal(t, "stable", fact.Metadata["settle_status"])
+	require.Equal(t, "false", fact.Metadata[tagentevent.MetaKeySettleFinal])
+	require.NotContains(t, extractRootMetadata(inputs), tagentevent.MetaKeySettleFinal)
 }

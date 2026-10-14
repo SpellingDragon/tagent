@@ -1039,7 +1039,7 @@ func TestSettleSinkRegistry_ConcurrentPerInvocationIsolation(t *testing.T) {
 			var mine []string
 			for k := 0; k < perInvocation; k++ {
 				evtID := fmt.Sprintf("%s#%d", id, k)
-				require.True(t, r.route(id, &AgentEvent{ID: evtID}), "publish to own bound bus")
+				require.True(t, r.route(id, &AgentEvent{ID: evtID, Metadata: map[string]any{"settle_status": "completed"}}), "publish to own bound bus")
 				for _, e := range invBus.TryPull() {
 					mine = append(mine, e.ID)
 				}
@@ -1084,7 +1084,7 @@ func TestSettleSinkRegistry_ConcurrentSameNameDistinctHandles(t *testing.T) {
 				r.noteSpawn(id)
 			}
 			for k := 0; k < 50; k++ {
-				require.True(t, r.route(id, &AgentEvent{ID: id}))
+				require.True(t, r.route(id, &AgentEvent{ID: id, Metadata: map[string]any{"settle_status": "completed"}}))
 			}
 		}(id)
 	}
@@ -1445,10 +1445,10 @@ func TestSettleAccountingSurvivesConvergence(t *testing.T) {
 	sinks.noteSpawn("X")
 	require.False(t, sinks.quiescent("X"))
 
-	require.True(t, sinks.route("X", &AgentEvent{ID: "e1"}))
+	require.True(t, sinks.route("X", &AgentEvent{ID: "e1", Metadata: map[string]any{"settle_status": "completed"}}))
 	require.False(t, sinks.quiescent("X"))
 
-	require.True(t, sinks.route("X", &AgentEvent{ID: "e2"}))
+	require.True(t, sinks.route("X", &AgentEvent{ID: "e2", Metadata: map[string]any{"settle_status": "completed"}}))
 	require.True(t, sinks.quiescent("X"))
 	seen := map[string]bool{}
 	for _, e := range invBus.TryPull() {
@@ -2489,7 +2489,7 @@ func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
 	for k := range evt.Metadata {
-		if k != "settle_status" && k != "task_id" && k != "lineage_absent" && k != "settle_notice" {
+		if k != "settle_status" && k != "task_id" && k != "lineage_absent" && k != "settle_notice" && k != tagentevent.MetaKeySettleFinal {
 			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
 		}
 	}

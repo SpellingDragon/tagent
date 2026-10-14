@@ -256,11 +256,9 @@ type SettleKind string
 const (
 	// SettleCompleted 表示一次工作正常结束；若同时带有错误，按失败处理。
 	SettleCompleted SettleKind = "completed"
-	// SettleStable 是"输出稳定"观测：在任务尚未脱离前台时把它置为 stable，
-	// 已脱离则抑制外发，避免面板反复摆动。
+	// SettleStable 是输出稳定观察；job 通知模型判断，service 首次就绪后抑制重复观察。
 	SettleStable SettleKind = "stable"
-	// SettleSuspect 是"静默到可疑阈值"观测：任务可能还活着，面板改展示剩余寿命
-	// 交给模型判断；已脱离前台时同样抑制。
+	// SettleSuspect 是静默可疑观察；job 通知模型判断，已就绪服务只抑制非终局观察。
 	SettleSuspect SettleKind = "suspect"
 	// SettleWatch 只作观察通知：不改变任务状态，仅把信号交给结算回调与事件总线。
 	SettleWatch SettleKind = "watch"
@@ -272,6 +270,9 @@ type SettleSignal struct {
 	Kind   SettleKind
 	Output string
 	Err    error
+	// Final marks the last signal of a round whose result is non-terminal
+	// (for example a tmux timeout). Completed and failed always end a round.
+	Final bool
 	// ExitCode is the process exit status read at settle time (failure-polarity
 	// passthrough D2): non-zero (or negative for signal death) reports how a dead
 	// process exited. Zero is ambiguous between "clean exit 0" and "not read", so
@@ -288,6 +289,9 @@ type SettleSignal struct {
 }
     SettleSignal is emitted by a SettleDetector when a task reaches a settle
     point.
+
+func (s SettleSignal) EndsRound() bool
+    EndsRound reports whether no further signals are expected for this round.
 
 type SpawnResult struct {
 	Task    *Task
@@ -494,7 +498,7 @@ type TaskManagerConfig struct {
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
 	OnSpawn func(task *Task)
-	// OnInlineSettle : invoked when a task settles INSIDE its sync-wait
+	// OnInlineSettle : invoked when a task settles INSIDE its spawn/resume sync-wait
 	// window (inline). Historically inline settles emitted NO record — the
 	// result returns in-turn via the tool result — leaving fact-chain ghosts
 	// for the registry replay. This hook emits a minimal settle record
@@ -633,8 +637,7 @@ const (
 	TaskRunning TaskStatus = "running"
 	// TaskStable 是一次"输出稳定"观测对应的状态。已脱离前台的任务不回退到此态。
 	TaskStable TaskStatus = "stable"
-	// TaskAliveDetached 表示已脱离前台等待但仍存活：结算与可疑信号在此后
-	// 被抑制，避免面板反复摆动与回收刷屏。
+	// TaskAliveDetached 表示服务已就绪但仍存活：重复稳定/可疑观察被抑制，终局照常通知。
 	TaskAliveDetached TaskStatus = "alive_detached"
 	// TaskCompleted 是正常结束的终态（结算信号不带错误）。
 	TaskCompleted TaskStatus = "completed"

@@ -1428,16 +1428,14 @@ func (cm *ContextManager) EmitTaskInlineSettleRecord(tk *task.Task, sig task.Set
 		return
 	}
 	status := string(sig.Kind)
-	if tk.Status() != "" {
-		status = string(tk.Status())
-	}
-	if sig.Kind == task.SettleStable {
-		status = "alive-detached"
+	if sig.Kind == task.SettleCompleted && sig.Err != nil {
+		status = "failed"
 	}
 	md := map[string]string{
 		tagentevent.MetaKeyAgentName:        cm.name,
 		"task_id":                           tk.ID,
 		"settle_status":                     status,
+		tagentevent.MetaKeySettleFinal:      fmt.Sprint(sig.EndsRound()),
 		tagentevent.MetaKeyTaskInlineRecord: "true",
 	}
 	if cm.sessionID != "" {
@@ -1488,7 +1486,7 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 		fullEvent.Metadata[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
 	}
 	if evt.Source == SourceTask {
-		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord} {
+		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -1582,6 +1580,8 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		log.Warnf("[persistBusEvent] durable fact not prepared (barrier failed) rid=%s slot=%d — store gated, claim will replay",
 			evt.claim.RequestID, evt.claim.Slot)
 		return false, false
+	case evt.volatileFact != nil:
+		fullEvent = *evt.volatileFact
 	default:
 		fullEvent = cm.buildBusFact(evt)
 	}
@@ -1593,6 +1593,8 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 	replayed := false
 	switch {
 	case cm.memStore == nil:
+	case evt.volatileCommitted:
+		replayed = true
 	case evt.claim != nil:
 		replayer, ok := cm.memStore.(memory.EventReplayer)
 		if !ok {
@@ -1629,6 +1631,9 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 			log.Errorf("[persistBusEvent] StoreEvent failed key=%d (append gated, spill recovery will restore): %v", eventKey, err)
 		}
 	}
+	if stored && evt.claim == nil && evt.volatileFact != nil {
+		evt.volatileCommitted = true
+	}
 
 	ref := memory.EventReference{
 		EventKey:     eventKey,
@@ -1642,12 +1647,11 @@ func (cm *ContextManager) persistBusEventCommitted(evt *AgentEvent) (stored, det
 		cm.projection.Append(ref)
 	}
 	if replayed {
-		log.Infof("[persistBusEvent] replay dedup rid=%s slot=%d key=%d already on chain — ref ensured, re-store+feedback skipped",
-			evt.claim.RequestID, evt.claim.Slot, eventKey)
+		log.Infof("[persistBusEvent] key=%d already on chain — ref ensured, re-store+feedback skipped", eventKey)
 		return true, false
 	}
 
-	if evt.Source == SourceTask {
+	if stored && evt.Source == SourceTask {
 		cm.writeSettleFeedback(eventKey, evt.Metadata)
 	}
 

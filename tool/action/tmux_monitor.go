@@ -314,6 +314,8 @@ func (tm *TmuxMonitor) TouchSession(sessionID string) bool {
 	}
 	session.CreatedAt = time.Now()
 	session.Status = SessionRunning
+	session.StableSince = time.Time{}
+	delete(tm.lastNotifiedStatus, sessionID)
 	tm.markDueLocked(session)
 	log.Infof("[TmuxMonitor] touched session %s (resume round)", sessionID)
 	return true
@@ -455,6 +457,7 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 		tm.handleFakeAlive(session)
 	case SessionFakeDead:
 		shouldRemove = tm.handleFakeDead(session)
+		newStatus = session.Status
 	case SessionTimedOut, SessionCompleted, SessionError:
 		shouldRemove = true
 	}
@@ -471,8 +474,7 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	sessCb := tm.sessionCallbacks[sessionID]
 
 	shouldCallback := false
-	if (globalCb != nil || sessCb != nil) &&
-		isMeaningfulState(oldStatus) && isMeaningfulState(newStatus) {
+	if (globalCb != nil || sessCb != nil) && newStatus != oldStatus && isMeaningfulState(newStatus) {
 		lastNotified := tm.lastNotifiedStatus[sessionID]
 		if lastNotified != newStatus {
 			tm.lastNotifiedStatus[sessionID] = newStatus

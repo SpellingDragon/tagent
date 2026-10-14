@@ -63,7 +63,7 @@ func TestCountingSpawnerVoidsBookingOnInlineSettle(t *testing.T) {
 	sinks.bind(id, bus)
 
 	cs := &countingSpawner{
-		inner: &reviewStubSpawner{res: task.SpawnResult{Task: &task.Task{}, Settled: true}},
+		inner: &reviewStubSpawner{res: task.SpawnResult{Task: &task.Task{}, Settled: true, Signal: task.SettleSignal{Kind: task.SettleCompleted}}},
 		sinks: sinks,
 		id:    id,
 	}
@@ -94,7 +94,7 @@ func TestDedupKeepsInvocationLoopQuiescent(t *testing.T) {
 	dup.Spawn(task.TaskSpec{}, nil)
 
 	settled := &task.Task{Spec: task.TaskSpec{Origin: map[string]string{metaKeyInvocationID: id}}}
-	deliverTaskSettled(sinks, nil, settled, &AgentEvent{ID: "settle-real", Source: SourceTask})
+	deliverTaskSettled(sinks, nil, settled, &AgentEvent{ID: "settle-real", Source: SourceTask, Metadata: map[string]any{"settle_status": "completed"}})
 
 	require.False(t, sinks.awaiting(id), "after the last real settle is delivered the loop must be able to quiesce (P2-3 gate)")
 	var sawSettle bool

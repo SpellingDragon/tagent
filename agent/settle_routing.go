@@ -6,13 +6,14 @@ import (
 	"sync"
 
 	"github.com/SpellingDragon/tagent/agent/task"
+	tagentevent "github.com/SpellingDragon/tagent/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // settleSinkRegistry is the routing table for the M2 per-invocation loop. It is
 // deliberately ONLY two things after the pipeline convergence: a binding table from
 // invocation id to that invocation own EventBus, and the delivery-accounting barrier
-// pending = spawned minus delivered per id.
+// pending = spawned minus delivered round endings per id.
 //
 // - A settle destination is looked up, never inferred from the event content.
 // 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
@@ -78,11 +79,8 @@ func (r *settleSinkRegistry) noteSpawn(id string) {
 	}
 }
 
-// voidSpawn undoes one noteSpawn booking for a task that settled INLINE (within
-// the sync-wait window): OnSettle — and therefore route — never fires for an
-// inline settle, so its expectation must be removed here or the barrier would
-// never reach quiescence. Guarded at 0 so it can only cancel a booking this id
-// actually made.
+// voidSpawn removes a booking for an inline round ending or an unadopted task.
+// Inline stable/watch observations keep their booking for the later final signal.
 func (r *settleSinkRegistry) voidSpawn(id string) {
 	if r == nil || id == "" {
 		return
@@ -113,8 +111,8 @@ func (r *settleSinkRegistry) awaiting(id string) bool {
 	return r.pending[id] > 0
 }
 
-// route delivers evt to the bus bound for invocation id by PUBLISHING it there and
-// decrementing the accounting barrier. It returns true when a binding took the
+// route publishes evt to the invocation bus and decrements its barrier only for
+// a round ending. Stable/watch observations leave the loop alive. It returns true when a binding took the
 // event; false only when NO bus is bound (entry owner / post-unbind late settle),
 // in which case the caller falls back to the shared bus.
 //
@@ -132,7 +130,7 @@ func (r *settleSinkRegistry) awaiting(id string) bool {
 // lock (bounded registry stall) and, on rejection, returns false after the
 // decrement — the caller's shared-bus fallback keeps the settle observable.
 func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
-	if r == nil || id == "" {
+	if r == nil || id == "" || evt == nil {
 		return false
 	}
 	r.mu.Lock()
@@ -142,7 +140,10 @@ func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
 		return false
 	}
 	_, perr := bus.PublishContext(context.Background(), evt)
-	if r.pending[id] > 0 {
+	final, _ := evt.Metadata[tagentevent.MetaKeySettleFinal].(string)
+	status, _ := evt.Metadata["settle_status"].(string)
+	endsRound := final == "true" || (final == "" && (status == "completed" || status == "failed" || status == "cancelled" || status == "dead"))
+	if endsRound && r.pending[id] > 0 {
 		r.pending[id]--
 	}
 	if perr != nil {
@@ -213,9 +214,8 @@ func (ta *TagentAgent) unbindSettleBus(id string) {
 // in the BACKGROUND are booked into the delivery-accounting barrier. The booking
 // runs BEFORE the inner spawn, so the expectation is recorded before the task can
 // possibly settle — an early route can never decrement a counter that has not been
-// incremented yet. Three return shapes mean THIS call owns no future settle and
-// the booking is voided immediately: an INLINE settle
-// (OnSettle/route never fires), a DEDUP hit (the matched task settles under its
+// incremented yet. Three return shapes own no future settle and
+// void the booking: an INLINE round ending, a DEDUP hit (the matched task settles under its
 // ORIGINAL invocation's booking), and a gate BLOCK (no task was adopted). Without
 // the dedup/block void the barrier leaks one pending unit per refused call —
 // awaiting() stays true forever and the invocation loop can only exit via the
@@ -235,7 +235,7 @@ type countingSpawner struct {
 func (c *countingSpawner) Spawn(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
 	c.sinks.noteSpawn(c.id)
 	res := c.inner.Spawn(spec, detector)
-	if res.Settled || res.Deduped || res.Blocked != "" {
+	if (res.Settled && res.Signal.EndsRound()) || res.Deduped || res.Blocked != "" {
 		c.sinks.voidSpawn(c.id)
 	}
 	return res

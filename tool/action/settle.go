@@ -69,6 +69,7 @@ type TmuxSettleDetector struct {
 	ch        chan task.SettleSignal
 	cancelFn  func()
 	closeOnce sync.Once
+	signalMu  sync.Mutex
 	reapOnce  sync.Once
 	stop      chan struct{}
 	denseDur  time.Duration
@@ -206,10 +207,7 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 			err = fmt.Errorf("tmux session %s entered error state", d.sessionID)
 		}
 	}
-	select {
-	case d.ch <- task.SettleSignal{Kind: kind, Output: output, Err: err, ExitCode: exitCode}:
-	default:
-	}
+	d.emit(task.SettleSignal{Kind: kind, Output: output, Err: err, ExitCode: exitCode, Final: isTerminalStatus(newStatus)})
 	if isTerminalStatus(newStatus) {
 		d.close()
 		if newStatus == SessionCompleted || newStatus == SessionError {
@@ -221,8 +219,24 @@ func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output strin
 func (d *TmuxSettleDetector) close() {
 	d.closeOnce.Do(func() {
 		close(d.stop)
+		d.signalMu.Lock()
+		defer d.signalMu.Unlock()
 		close(d.ch)
 	})
+}
+
+func (d *TmuxSettleDetector) emit(sig task.SettleSignal) {
+	d.signalMu.Lock()
+	defer d.signalMu.Unlock()
+	select {
+	case <-d.stop:
+		return
+	default:
+	}
+	select {
+	case d.ch <- sig:
+	case <-d.stop:
+	}
 }
 
 // SetWatch attaches a pattern-triggered wakeup to the detector (
@@ -279,14 +293,11 @@ func (d *TmuxSettleDetector) OnWatchOutput(output string) {
 	d.watchLast = now
 	d.watchMu.Unlock()
 
-	select {
-	case d.ch <- task.SettleSignal{
+	d.emit(task.SettleSignal{
 		Kind:   task.SettleWatch,
 		Output: fmt.Sprintf("watch pattern %q hit x%d (cumulative)", re.String(), delta),
 		Err:    fmt.Errorf("%d matches", total),
-	}:
-	default:
-	}
+	})
 }
 
 // EmitProbeResult reports a liveness-probe outcome. A failure
@@ -307,12 +318,9 @@ func (d *TmuxSettleDetector) EmitProbeResult(ok bool, detail string) {
 	d.probeFailed = true
 	d.probeMu.Unlock()
 
-	select {
-	case d.ch <- task.SettleSignal{
+	d.emit(task.SettleSignal{
 		Kind:   task.SettleWatch,
 		Output: "probe FAILED: " + detail,
 		Err:    fmt.Errorf("liveness probe failed: %s", detail),
-	}:
-	default:
-	}
+	})
 }

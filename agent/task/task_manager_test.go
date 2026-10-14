@@ -1750,11 +1750,8 @@ func TestSettleWatch_NoStateChange(t *testing.T) {
 	}
 }
 
-// TestEmitBackground_JobStableNoNotify 钉住 job 型（command/subagent）的中间态信号被分流抑制。
-// - SettleStable/SettleSuspect 不转 alive-detached、零 onSettle 通知；面板状态照常置。
-// - 终态结算（SettleCompleted）照常通知，分流只针对中间态信号。
-// - 终态收敛后 oneshot 不发射中间态信号，本分支随之退化。
-func TestEmitBackground_JobStableNoNotify(t *testing.T) {
+// TestEmitBackground_JobObservationsNotify 钉住 job 稳定/可疑通知进入事件管线，状态仍由探测结论决定。
+func TestEmitBackground_JobObservationsNotify(t *testing.T) {
 	var mu sync.Mutex
 	notified := 0
 	tm := NewTaskManager(TaskManagerConfig{
@@ -1771,9 +1768,9 @@ func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 	})
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
-	if notified != 0 {
+	if notified != 1 {
 		mu.Unlock()
-		t.Fatalf("job stable should NOT notify; got %d", notified)
+		t.Fatalf("job stable should notify once; got %d", notified)
 	}
 	mu.Unlock()
 	if got := res.Task.Status(); got == TaskAliveDetached {
@@ -1783,14 +1780,14 @@ func TestEmitBackground_JobStableNoNotify(t *testing.T) {
 	d.Emit(SettleSignal{Kind: SettleSuspect, Output: "quiet2"})
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()
-	if notified != 0 {
+	if notified != 2 {
 		mu.Unlock()
-		t.Fatalf("job suspect should NOT notify; got %d", notified)
+		t.Fatalf("job suspect should notify once; got %d", notified)
 	}
 	mu.Unlock()
 
 	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "done"})
-	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return notified == 1 })
+	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return notified == 3 })
 	d.Done()
 }
 

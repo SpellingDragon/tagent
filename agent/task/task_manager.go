@@ -19,8 +19,7 @@ const (
 	TaskRunning TaskStatus = "running"
 	// TaskStable 是一次"输出稳定"观测对应的状态。已脱离前台的任务不回退到此态。
 	TaskStable TaskStatus = "stable"
-	// TaskAliveDetached 表示已脱离前台等待但仍存活：结算与可疑信号在此后
-	// 被抑制，避免面板反复摆动与回收刷屏。
+	// TaskAliveDetached 表示服务已就绪但仍存活：重复稳定/可疑观察被抑制，终局照常通知。
 	TaskAliveDetached TaskStatus = "alive_detached"
 	// TaskCompleted 是正常结束的终态（结算信号不带错误）。
 	TaskCompleted TaskStatus = "completed"
@@ -55,11 +54,9 @@ type SettleKind string
 const (
 	// SettleCompleted 表示一次工作正常结束；若同时带有错误，按失败处理。
 	SettleCompleted SettleKind = "completed"
-	// SettleStable 是"输出稳定"观测：在任务尚未脱离前台时把它置为 stable，
-	// 已脱离则抑制外发，避免面板反复摆动。
+	// SettleStable 是输出稳定观察；job 通知模型判断，service 首次就绪后抑制重复观察。
 	SettleStable SettleKind = "stable"
-	// SettleSuspect 是"静默到可疑阈值"观测：任务可能还活着，面板改展示剩余寿命
-	// 交给模型判断；已脱离前台时同样抑制。
+	// SettleSuspect 是静默可疑观察；job 通知模型判断，已就绪服务只抑制非终局观察。
 	SettleSuspect SettleKind = "suspect"
 	// SettleWatch 只作观察通知：不改变任务状态，仅把信号交给结算回调与事件总线。
 	SettleWatch SettleKind = "watch"
@@ -98,6 +95,9 @@ type SettleSignal struct {
 	Kind   SettleKind
 	Output string
 	Err    error
+	// Final marks the last signal of a round whose result is non-terminal
+	// (for example a tmux timeout). Completed and failed always end a round.
+	Final bool
 	// ExitCode is the process exit status read at settle time (failure-polarity
 	// passthrough D2): non-zero (or negative for signal death) reports how a dead
 	// process exited. Zero is ambiguous between "clean exit 0" and "not read", so
@@ -111,6 +111,11 @@ type SettleSignal struct {
 	// persisted, so a restored task re-adjudicates its own lineage rather than
 	// replaying a stale retirement mark.
 	Lineage string
+}
+
+// EndsRound reports whether no further signals are expected for this round.
+func (s SettleSignal) EndsRound() bool {
+	return s.Final || s.Kind == SettleCompleted || s.Kind == SettleFailed
 }
 
 // LineageRetired is the settle-signal lineage stamped by TTL/liveness
@@ -320,7 +325,9 @@ type Task struct {
 
 	detector      SettleDetector
 	firstSettle   chan SettleSignal
+	inlineOffered bool
 	windowClosed  bool
+	windowDone    chan struct{}
 	aliveDetached bool
 	detachedAt    time.Time
 	ttlRenewedAt  time.Time
@@ -551,7 +558,7 @@ type TaskManagerConfig struct {
 	// (best-effort fact-chain task_spawned record; never blocks the spawn
 	// path). May be nil.
 	OnSpawn func(task *Task)
-	// OnInlineSettle : invoked when a task settles INSIDE its sync-wait
+	// OnInlineSettle : invoked when a task settles INSIDE its spawn/resume sync-wait
 	// window (inline). Historically inline settles emitted NO record — the
 	// result returns in-turn via the tool result — leaving fact-chain ghosts
 	// for the registry replay. This hook emits a minimal settle record
@@ -781,6 +788,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		status:      TaskRunning,
 		detector:    detector,
 		firstSettle: make(chan SettleSignal, 1),
+		windowDone:  make(chan struct{}),
 		watchDone:   make(chan struct{}),
 	}
 	tm.tasks[task.ID] = task
@@ -816,6 +824,11 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		if tm.onInlineSettle != nil {
 			tm.onInlineSettle(task, sig)
 		}
+		if sig.EndsRound() {
+			task.mu.Lock()
+			task.retireNotified = true
+			task.mu.Unlock()
+		}
 		return SpawnResult{Task: task, Settled: true, Signal: sig}
 	case <-detachCh:
 		tm.closeWindow(task, true)
@@ -828,6 +841,8 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 // (after). The routing decision is made under task.mu together with the buffered
 // send, so no settle is lost at the window boundary. It exits when the detector's
 // channel closes OR when the watch is retired (resume re-arms a fresh detector).
+// After offering the first signal, the observer waits for the caller's window
+// handoff before consuming further signals, preserving completion after stable/watch.
 func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan struct{}) {
 	if detector == nil {
 		return
@@ -855,11 +870,18 @@ func (tm *TaskManager) watch(task *Task, detector SettleDetector, done <-chan st
 				task.mu.Unlock()
 				tm.emitBackground(task, sig)
 			} else {
+				windowDone := task.windowDone
 				select {
 				case task.firstSettle <- sig:
+					task.inlineOffered = true
 				default:
 				}
 				task.mu.Unlock()
+				select {
+				case <-windowDone:
+				case <-done:
+					return
+				}
 			}
 		}
 	}
@@ -875,6 +897,7 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 		return
 	}
 	task.windowClosed = true
+	windowDone := task.windowDone
 	var pending *SettleSignal
 	if drainToBg {
 		select {
@@ -887,6 +910,9 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 	if pending != nil {
 		tm.emitBackground(task, *pending)
 	}
+	if windowDone != nil {
+		close(windowDone)
+	}
 }
 
 // emitBackground invokes the OnSettle hook for a settle that occurred after the sync-wait
@@ -895,7 +921,7 @@ func (tm *TaskManager) closeWindow(task *Task, drainToBg bool) {
 //
 // - First stable transitions to alive-detached and emits the one-time ready notification; later stable or suspect signals are suppressed so a quiet service cannot churn the board or spam the reaper.
 // - Completion or failure (process death) always emits and ends the task.
-// - Job-type silent stable/suspect signals neither transition nor notify: the board state is owned by applyStatus.
+// - Job observations notify without changing them into service readiness.
 // 契约: docs/wiki/agent/task-lifecycle.md#detach-suppression
 func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 	task.mu.Lock()
@@ -908,10 +934,9 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		return
 	case SettleStable:
 		if LifetimeOf(task.Spec) != LifetimeService {
-			task.mu.Unlock()
-			return
+			break
 		}
-		if task.aliveDetached {
+		if task.aliveDetached && !sig.EndsRound() {
 			task.mu.Unlock()
 			return
 		}
@@ -920,10 +945,9 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 		task.detachedAt = tm.now()
 	case SettleSuspect:
 		if LifetimeOf(task.Spec) != LifetimeService {
-			task.mu.Unlock()
-			return
+			break
 		}
-		if task.aliveDetached {
+		if task.aliveDetached && !sig.EndsRound() {
 			task.mu.Unlock()
 			return
 		}
@@ -932,6 +956,11 @@ func (tm *TaskManager) emitBackground(task *Task, sig SettleSignal) {
 
 	if tm.onSettle != nil {
 		tm.onSettle(task, sig)
+	}
+	if sig.EndsRound() {
+		task.mu.Lock()
+		task.retireNotified = true
+		task.mu.Unlock()
 	}
 }
 
@@ -956,6 +985,8 @@ func (tm *TaskManager) applyStatus(task *Task, sig SettleSignal) {
 		} else {
 			task.status = TaskCompleted
 		}
+	case SettleFailed:
+		task.status = TaskFailed
 	case SettleStable:
 		if task.status != TaskAliveDetached {
 			task.status = TaskStable
@@ -1534,19 +1565,46 @@ func (tm *TaskManager) Cancel(id string) bool {
 		return false
 	}
 	t.mu.Lock()
+	if t.status == TaskCancelled {
+		t.mu.Unlock()
+		return false
+	}
+	wasActive := !isTerminalStatus(t.status)
+	sig := SettleSignal{Kind: SettleFailed, Output: "task cancelled", Final: true, Lineage: LineageRetired}
+	notify := wasActive && t.windowClosed
+	var waitWindow <-chan struct{}
+	if wasActive && !t.windowClosed {
+		if t.inlineOffered {
+			waitWindow = t.windowDone
+		} else {
+			t.firstSettle <- sig
+			t.inlineOffered = true
+		}
+	}
 	detector := t.detector
+	t.status = TaskCancelled
+	t.settledAt = tm.now()
+	if t.watchDone != nil {
+		close(t.watchDone)
+	}
 	t.mu.Unlock()
 	if detector != nil {
 		detector.Cancel()
 	}
-	t.mu.Lock()
-	t.status = TaskCancelled
-	if t.settledAt.IsZero() {
-		t.settledAt = tm.now()
-	}
-	t.mu.Unlock()
 	if tm.onCancel != nil {
 		tm.onCancel(t)
+	}
+	if waitWindow != nil {
+		<-waitWindow
+		notify = true
+	}
+	if notify && tm.onSettle != nil {
+		tm.onSettle(t, sig)
+	}
+	if notify || !wasActive {
+		t.mu.Lock()
+		t.retireNotified = true
+		t.mu.Unlock()
 	}
 	return true
 }
@@ -1648,8 +1706,11 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 		task.detector = detector
 	}
 	task.firstSettle = make(chan SettleSignal, 1)
+	task.inlineOffered = false
 	task.windowClosed = false
+	task.windowDone = make(chan struct{})
 	task.aliveDetached = false
+	task.retireNotified = false
 	task.ttlRenewedAt = tm.now()
 	done := task.watchDone
 	task.mu.Unlock()
@@ -1669,6 +1730,14 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 	select {
 	case sig := <-task.firstSettle:
 		tm.closeWindow(task, false)
+		if tm.onInlineSettle != nil {
+			tm.onInlineSettle(task, sig)
+		}
+		if sig.EndsRound() {
+			task.mu.Lock()
+			task.retireNotified = true
+			task.mu.Unlock()
+		}
 		return SpawnResult{Task: task, Settled: true, Signal: sig}, nil
 	case <-detachCh:
 		tm.closeWindow(task, true)

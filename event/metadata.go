@@ -28,6 +28,10 @@ const (
 	// MetaKeyTriggerSource 并存可对账；source_snapshot 的无损快照不因提升而移除。
 	MetaKeySettleTriggerSource = "settle_trigger_source"
 
+	// MetaKeySettleFinal records whether a settle ends its round. Observation
+	// notifications keep the originating invocation's delivery window open.
+	MetaKeySettleFinal = "settle_final"
+
 	// MetaKeyAgentName 归因章键：写入 FullEvent.Metadata，使产出事件可回溯到生效的 agent、bundle 与回合。
 	MetaKeyAgentName = "agent_name"
 	MetaKeyBundleID  = "bundle_id"

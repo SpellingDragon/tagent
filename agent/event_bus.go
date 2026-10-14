@@ -15,6 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent/task"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/google/uuid"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -58,6 +59,11 @@ type AgentEvent struct {
 	// context, and is set only by claimDurable on the consumer side. Nil for
 	// volatile events and for events not yet claimed.
 	claim *durableClaim
+
+	// volatileFact freezes a task-driven input's identity across store retries.
+	// These consumer-only fields never enter the serialized bus payload.
+	volatileFact      *memory.FullEvent
+	volatileCommitted bool
 }
 
 // durableClaim is the typed, non-JSON provenance of one claimed inbox message
@@ -200,6 +206,12 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 // - Results over maxChars spill to a file under outputDir, bounded by workspace.Cleaner, and the content carries the path ticket plus a tail preview; consumption goes through read_file paging. Write failure degrades to inline full text: availability over bounding.
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
 	marker, statusWord := settleMarkerAndStatus(sig)
+	if sig.Kind == task.SettleStable && sig.Err == nil && task.LifetimeOf(tk.Spec) == task.LifetimeJob {
+		marker, statusWord = "~", "stable"
+	}
+	if tk.Status() == task.TaskCancelled && sig.EndsRound() {
+		marker, statusWord = "✗", "cancelled"
+	}
 
 	result := sig.Output
 	spillPath := ""
@@ -256,6 +268,7 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 		}
 	}
 	evt.Metadata["settle_status"] = statusWord
+	evt.Metadata[tagentevent.MetaKeySettleFinal] = fmt.Sprint(sig.EndsRound())
 	evt.Metadata["task_id"] = tk.ID
 	evt.Metadata["settle_notice"] = "true"
 	return evt
