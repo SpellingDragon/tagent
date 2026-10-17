@@ -8,6 +8,10 @@ func LoadAPIKey() (string, error)
     LoadAPIKey 读取 ZAI_API_KEY：先看进程环境，为空时退回 source shell 配置（~/.zshrc）取值；
     两处都取不到即返回错误，不返回空串冒充"可用"。仅用于测试。
 
+func RequireTmux(t testing.TB)
+    RequireTmux checks real session creation; TAGENT_REQUIRE_TMUX makes
+    unavailability fatal.
+
 func RetryWithBackoff(maxRetries int, delay time.Duration, fn func() error) error
     RetryWithBackoff 以退避方式重试：命中限流（429 或限流文案）时等待时长翻倍，其余错误线性退避；
     重试用尽后包装最后一次的错误返回，而不是只报"失败了"。

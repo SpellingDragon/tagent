@@ -44,6 +44,10 @@ func InjectBoard(msgs []model.Message, board string) []model.Message
     being the last thing the model reads strengthens the anti-spin teaching.
     A non-empty board string is required; callers should skip injection for "".
 
+func InputBatchIDFromContext(ctx context.Context) string
+    InputBatchIDFromContext returns the initiating input batch without
+    interpreting it.
+
 func LifetimeOf(spec TaskSpec) string
     LifetimeOf resolves the effective lifecycle class: an explicit declaration
     wins; otherwise Kind is the proxy (command/subagent behave as jobs — one
@@ -57,8 +61,38 @@ func RenderBoard(tasks []*Task, defaultTTL time.Duration) string
     - Terminal tasks are aged out; the board is a live recency anchor that
     is never persisted and takes no part in compression. - Returns ""
 
+func RoundFromContext(ctx context.Context) uint64
+    RoundFromContext returns the intent assigned before ResumeFn starts.
+
+func RoundOwnerFromContext(ctx context.Context) string
+    RoundOwnerFromContext returns the initiating invocation of a round.
+
+func SatisfiesWait(spec TaskSpec, sig SettleSignal) bool
+    SatisfiesWait evaluates an observation against the requested foreground
+    condition.
+
 func ShortID(id string) string
     ShortID returns a short, human-friendly prefix of a task id for display.
+
+func SignalSourceID(taskID string, roundID, seq uint64) string
+    SignalSourceID identifies one producer observation across retries and
+    restarts.
+
+func TaskIDFromContext(ctx context.Context) string
+    TaskIDFromContext returns the task identity assigned before ResumeFn starts.
+
+func WithCommandRelauncher(ctx context.Context, relaunch CommandRelauncher) context.Context
+    WithCommandRelauncher binds command reentry to the selected execution face.
+
+func WithInputBatchID(ctx context.Context, id string) context.Context
+    WithInputBatchID carries the opaque input batch that initiated a task round.
+
+func WithRoundOwner(ctx context.Context, owner string) context.Context
+    WithRoundOwner binds a resumed intent to its initiating invocation.
+
+func WithRoundStart(ctx context.Context, fn func(*Task)) context.Context
+    WithRoundStart registers bookkeeping before a resumed producer may emit
+    signals.
 
 func WithTaskSpawner(ctx context.Context, s TaskSpawner) context.Context
     WithTaskSpawner returns a context carrying the given TaskSpawner. tagent
@@ -68,6 +102,9 @@ func WithTaskSpawner(ctx context.Context, s TaskSpawner) context.Context
     invocation).
 
 TYPES
+
+type ActivatableDetector interface{ Start() }
+    ActivatableDetector prepares resources before their business work starts.
 
 type BatchRetired struct {
 	Task *Task
@@ -92,14 +129,30 @@ type BatchRetired struct {
     chain entry + registry fold) stays per-task; only the bus-side notification
     is collapsed.
 
+type CommandRelauncher func(context.Context, Declarative) (SpawnResult, error)
+    CommandRelauncher starts a command through the initiating execution face.
+
+func CommandRelauncherFromContext(ctx context.Context) (CommandRelauncher, bool)
+    CommandRelauncherFromContext returns the command reentry authority of this
+    call.
+
 type Declarative struct {
-	Kind    string `json:"kind"`
-	Desc    string `json:"desc"`
-	Key     string `json:"key,omitempty"`
-	Command string `json:"command,omitempty"`
-	// AgentName subagent Kind relaunch inputs (re-dispatch through the resident agents
-	// map). Resume is NOT rebuildable for subagent (rounds has no event source
-	// — the factory returns a relaunch-guidance error, D1.2 promise table).
+	Mode                  string        `json:"mode,omitempty"`
+	WaitFor               WaitCondition `json:"wait_for,omitempty"`
+	InputBatchID          string        `json:"input_batch_id,omitempty"`
+	ProducerInputBatchID  string        `json:"producer_input_batch_id,omitempty"`
+	RoundID               uint64        `json:"round_id,omitempty"`
+	RoundOwner            string        `json:"round_owner,omitempty"`
+	ProducerRound         uint64        `json:"producer_round,omitempty"`
+	ProducerOwner         string        `json:"producer_owner,omitempty"`
+	SignalSeq             uint64        `json:"signal_seq,omitempty"`
+	ProducerWaitSatisfied bool          `json:"producer_wait_satisfied,omitempty"`
+	TTLAnchorMilli        int64         `json:"ttl_anchor_ms,omitempty"`
+	Kind                  string        `json:"kind"`
+	Desc                  string        `json:"desc"`
+	Key                   string        `json:"key,omitempty"`
+	Command               string        `json:"command,omitempty"`
+	// AgentName and MessageBody rebuild subagent delegation; the agent layer restores its round history and reentry closures.
 	AgentName   string            `json:"agent_name,omitempty"`
 	MessageBody string            `json:"message_body,omitempty"`
 	EventKeys   []int64           `json:"event_keys,omitempty"`
@@ -183,7 +236,9 @@ func (m *ManualDetector) TriggerDetach()
 
 type OriginSpawner struct {
 	TaskController
-	Origin map[string]string
+	Origin       map[string]string
+	RoundOwner   string
+	InputBatchID string
 }
     OriginSpawner originSpawner wraps a TaskController to stamp opaque origin
     baggage (the spawning turn's invocation metadata) onto each spawned task's
@@ -218,6 +273,19 @@ type Overrides struct {
 
 func (o *Overrides) IsEmpty() bool
     IsEmpty reports whether no view face is overridden.
+
+type RoutingSnapshot struct {
+	Spec           TaskSpec
+	RoundID        uint64
+	RoundOwner     string
+	ProducerRound  uint64
+	ProducerOwner  string
+	Status         TaskStatus
+	WaitSatisfied  bool
+	PendingSignals []SettleSignal
+}
+    RoutingSnapshot contains one consistent view of intent, producer and pending
+    delivery identities.
 
 type SettleDetector interface {
 	// Settled returns a channel delivering settle signals, closed when done.
@@ -262,14 +330,30 @@ const (
 	SettleSuspect SettleKind = "suspect"
 	// SettleWatch 只作观察通知：不改变任务状态，仅把信号交给结算回调与事件总线。
 	SettleWatch SettleKind = "watch"
+	// SettleReady reports explicit producer readiness.
+	SettleReady SettleKind = "ready"
+	// SettleInput reports that an interactive producer is waiting for input.
+	SettleInput SettleKind = "input"
 	// SettleFailed 是失败结算：由僵尸/孤儿回收或携带错误的路径驱动；finalize 会把
 	// 带错误的完成信号规范化为它，且只结算一次。
 	SettleFailed SettleKind = "failed"
 )
 type SettleSignal struct {
-	Kind   SettleKind
-	Output string
-	Err    error
+	WaitFor       WaitCondition
+	InputBatchID  string
+	Declarative   *Declarative
+	RoundID       uint64
+	ProducerRound uint64
+	RoundOwner    string
+	Seq           uint64
+	ObservedAt    time.Time
+	SourceID      string
+	Ready         bool
+	WaitSatisfied bool
+	Observation   string
+	Kind          SettleKind
+	Output        string
+	Err           error
 	// Final marks the last signal of a round whose result is non-terminal
 	// (for example a tmux timeout). Completed and failed always end a round.
 	Final bool
@@ -292,6 +376,12 @@ type SettleSignal struct {
 
 func (s SettleSignal) EndsRound() bool
     EndsRound reports whether no further signals are expected for this round.
+
+func (s SettleSignal) SatisfiesWait() bool
+    SatisfiesWait reports the persisted wait decision for this signal.
+
+type SignalAcknowledger interface{ AcknowledgeSignal(SettleSignal) }
+    SignalAcknowledger releases producer resources after a signal is accepted.
 
 type SpawnResult struct {
 	Task    *Task
@@ -320,8 +410,36 @@ func (t *Task) DetachedAtMilli() int64
     DetachedAtMilli returns the alive-detached transition time (0 = never
     detached). Thread-safe snapshot for fact-chain persistence.
 
+func (t *Task) HasPendingDelivery() bool
+    HasPendingDelivery reports whether any observation still needs acceptance.
+
+func (t *Task) HasProducer() bool
+    HasProducer reports whether a detector is attached to the task's resource.
+
+func (t *Task) PendingSignals() []SettleSignal
+    PendingSignals returns delivery identities that have not been accepted.
+
+func (t *Task) ProducerOwner() string
+    ProducerOwner returns the invocation that owns the actual backing resource.
+
+func (t *Task) ProducerRound() uint64
+    ProducerRound returns the round that owns the current backing resource.
+
+func (t *Task) RestoreSettlement(output string, err error, settledAt time.Time)
+    RestoreSettlement restores terminal output and its actual settlement time
+    from persisted facts.
+
 func (t *Task) Result() string
     Result returns the latest captured output (thread-safe snapshot).
+
+func (t *Task) RoundID() uint64
+    RoundID returns the latest claimed intent, including an aborted attempt.
+
+func (t *Task) RoundOwner() string
+    RoundOwner returns the invocation that claimed the latest intent.
+
+func (t *Task) RoutingSnapshot() RoutingSnapshot
+    RoutingSnapshot reads every routing identity under one task lock.
 
 func (t *Task) SetDetachedAtMilli(ms int64)
     SetDetachedAtMilli is the exported restore-side hook (agent package owns the
@@ -332,8 +450,24 @@ func (t *Task) SettledAtUnixNano() int64
     stable resend ids derive from it so board cycles and restarts collapse to
     one durable delivery.
 
+func (t *Task) SignalSeq() uint64
+    SignalSeq returns the last observed sequence of the current producer round.
+
+func (t *Task) SpecSnapshot() TaskSpec
+    SpecSnapshot returns an isolated copy of the task declaration and metadata.
+
 func (t *Task) Status() TaskStatus
     Status returns the task's current status (thread-safe snapshot).
+
+func (t *Task) TTLAnchorMilli() int64
+    TTLAnchorMilli returns the actual producer lifetime anchor.
+
+func (t *Task) WaitFor() WaitCondition
+    WaitFor returns the effective foreground waiting condition.
+
+func (t *Task) WaitSatisfiedOfProducer() bool
+    WaitSatisfiedOfProducer reports whether the actual producer met its
+    foreground condition.
 
 type TaskController interface {
 	TaskSpawner
@@ -375,19 +509,20 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager
     在此是"未设置"而非"无限制"——若把它当作无限制， 未配置的调用方会在无人察觉的情况下失去回收能力。
 
 func (tm *TaskManager) BindDetector(id string, d SettleDetector) error
-    BindDetector RestoreTask：冷启动回放重建一个跨重启 存续的任务——注册到 registry（复用原 id/Key
-    去重语义）但不启动 watch goroutine（进程内探测器不可恢复：running 语义降级为 suspect 交 R3 存活探测
-    裁决；alive-detached 原态恢复并置 aliveDetached 使 reconcileDetached 探针 路径可用）。spec
-    的闭包由调用方经工厂重建（承诺表）；未重建则仅展示。 BindDetector wires a detector to an EXISTING
-    (typically restored) task and starts the standard watch consumption — the
-    R3 reattach bridge (hardening- review-batch2 3.1). Restored tasks have no
-    in-process detector; without this binding their watch/probe signals never
-    reach the manager and a "tracked session" silently loses its settle path.
-    A finalized task refuses the bind (fencing). The task's watchDone retires
-    the consumption on resume re-arm, same as Spawn.
+    BindDetector attaches an existing resource to its original producer round.
+    Terminal tasks accept only acknowledgement-capable detectors; their business
+    state is never reopened.
 
 func (tm *TaskManager) Cancel(id string) bool
     Cancel stops a task's underlying work and marks it cancelled.
+
+func (tm *TaskManager) Close(ctx context.Context) error
+    Close stops admission and observation, requests producer cancellation,
+    and bounds the caller's wait.
+
+func (tm *TaskManager) CloseDone() <-chan struct{}
+    CloseDone closes after cancellation, producers, observers, callbacks and
+    workers have all returned.
 
 func (tm *TaskManager) DefaultTTL() time.Duration
     DefaultTTL reports the unified reaper's current fallback lifetime
@@ -404,6 +539,10 @@ func (tm *TaskManager) List() []*Task
 func (tm *TaskManager) MarkTaskRunning(id string) bool
     MarkTaskRunning（R3 2.6，TaskID 桥）：重挂发现会话存活时把重建的 suspect 任务提升回
     running（探测裁决的确定性分支；suspect→running 单向，不动其他态）。
+
+func (tm *TaskManager) RecheckDeadlines()
+    RecheckDeadlines reschedules the nearest deadline against the current TTL
+    source.
 
 func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, error)
     Relaunch re-spawns an equivalent task from the original task's spec.
@@ -423,6 +562,18 @@ func (tm *TaskManager) RenewTTLBySession(sessionID string) bool
     session with no matching active task (already reaped, or untracked) returns
     false.
 
+func (tm *TaskManager) ResolveRestoredDelivery(id, sourceID string) bool
+    ResolveRestoredDelivery releases one frozen receipt after recovery proves
+    its receiver accepted it.
+
+func (tm *TaskManager) RestorePendingDelivery(id string, sig SettleSignal) bool
+    RestorePendingDelivery records a restored receipt without contacting
+    receivers.
+
+func (tm *TaskManager) RestorePendingDeliveryWithMode(id string, sig SettleSignal, inline bool) bool
+    RestorePendingDeliveryWithMode preserves the original inline or background
+    receipt destination.
+
 func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time, status TaskStatus) *Task
     RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与状态； 状态为 alive_detached
     时同时标记已脱离，使其继续享受脱离后信号抑制的语义。
@@ -438,6 +589,14 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
     running and suspect mean a round is in flight, cancelled means the session
     is dead. - The claim turns to running under task.mu before ResumeFn runs, so
     parallel resumes single-win; ctx is the initiating call context, forwarded
+
+func (tm *TaskManager) ResumePendingDeliveries()
+    ResumePendingDeliveries starts retries after every recovery receiver has
+    bound.
+
+func (tm *TaskManager) ResumeRestoredStart(id string) error
+    ResumeRestoredStart prepares an accepted intent that has no bound resource,
+    keeping its original intent identity.
 
 func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int
     RetireOrphans adjudicates reincarnation-orphan suspect tasks:
@@ -472,6 +631,9 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
     Multiple concurrent Spawn calls each wait their own detector's window in
     parallel (blocking ≈ the slowest, not the sum).
 
+func (tm *TaskManager) TasksSnapshot() []*Task
+    TasksSnapshot returns the registry without probing, retirement or pruning.
+
 func (tm *TaskManager) TerminalTTL() time.Duration
     TerminalTTL reports the live terminal grace period (introspection; makes it
     a READ of the same resolution the reaper uses — the owner's record source
@@ -480,6 +642,15 @@ func (tm *TaskManager) TerminalTTL() time.Duration
     sees is what pruneTerminal applied.
 
 type TaskManagerConfig struct {
+	OnBatchRetireAccepted  func([]BatchRetired) bool
+	OnRetireResendAccepted func([]BatchRetired) bool
+	OnSpawnAccepted        func(*Task) bool
+	OnStartAccepted        func(*Task) bool
+	OnRoundAccepted        func(*Task) bool
+	OnRoundAbortedAccepted func(*Task, SettleSignal) bool
+	OnInlineSettleAccepted func(*Task, SettleSignal) bool
+	OnSettleAccepted       func(*Task, SettleSignal) bool
+	EnableDeadlineReaper   bool
 	// OnSettle is invoked when a task settles AFTER its window closed (detach) —
 	// i.e. a background settle that must be written back as a task_settled event.
 	// May be nil.
@@ -569,8 +740,14 @@ func TaskSpawnerFromContext(ctx context.Context) (TaskSpawner, bool)
     synchronous behavior).
 
 type TaskSpec struct {
-	Kind string
-	Desc string
+	Mode         string
+	WaitFor      WaitCondition
+	InputBatchID string
+	RoundOwner   string
+	Start        func(*Task) (TaskSpec, SettleDetector, error)
+	OnRoundStart func(*Task)
+	Kind         string
+	Desc         string
 	// Protected marks a durability/repair-class task (self-telemetry-audit
 	// exemption whitelist): the AUDIT freeze gate passes it through, while the
 	// global disk gate still applies. Set at construction by the owning
@@ -658,3 +835,20 @@ func (s TaskStatus) Live() bool
     question can be asked from outside this package with the same answer the
     board's own dedup gives (isActive below), rather than each caller re-listing
     the states from memory.
+
+type WaitCondition string
+    WaitCondition is the outcome a foreground call is waiting for.
+
+const (
+	// WaitExit waits for producer completion or failure.
+	WaitExit WaitCondition = "exit"
+	// WaitReady waits for explicit producer readiness.
+	WaitReady WaitCondition = "ready"
+	// WaitInput waits for an interactive input prompt.
+	WaitInput WaitCondition = "input"
+	// WaitSignal waits for the producer's declared signal condition.
+	WaitSignal WaitCondition = "signal"
+)
+func WaitForOf(spec TaskSpec) WaitCondition
+    WaitForOf resolves the foreground condition independently from producer
+    lifetime.

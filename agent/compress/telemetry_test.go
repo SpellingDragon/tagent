@@ -357,3 +357,96 @@ func TestDispositionRebuildDeterminism(t *testing.T) {
 	require.Equal(t, TelemDemote, before[72], "meditation is whitelist-deliverable: consumed → externalized → demote")
 	require.Equal(t, TelemActive, before[73], "unconsumed → active (不可丢)")
 }
+
+// TestTelemetryReceiptRequiresExactSource checks formal consumption without output heuristics.
+func TestTelemetryReceiptRequiresExactSource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*memory.FullEvent)
+		want int8
+	}{
+		{name: "verified", want: TelemDemote},
+		{name: "missing", edit: func(r *memory.FullEvent) { r.EventKey = 0 }, want: TelemActive},
+		{name: "foreign source", edit: func(r *memory.FullEvent) { r.Metadata[tagentevent.MetaKeyConsumedEventKey] = "other" }, want: TelemActive},
+		{name: "foreign partition", edit: func(r *memory.FullEvent) { r.PartitionID++ }, want: TelemActive},
+		{name: "wrong type", edit: func(r *memory.FullEvent) { r.EventType = tagentevent.TypeAgentOutput }, want: TelemActive},
+		{name: "invalid disposition", edit: func(r *memory.FullEvent) { r.Metadata[tagentevent.MetaKeyInputDisposition] = "finished" }, want: TelemActive},
+		{name: "decision receipt", edit: func(r *memory.FullEvent) { r.Metadata[tagentevent.MetaKeyInputDisposition] = "processed" }, want: TelemActive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := memory.NewInMemoryStore()
+			key := memory.NewSnowflakeEventKey(7, 0)
+			receiptKey := memory.NewSnowflakeEventKey(7, 0)
+			source := memory.FullEvent{
+				EventKey: key, PartitionID: 7, EventType: tagentevent.TypeExternalInput,
+				Metadata: map[string]string{
+					"settle_notice": "true", tagentevent.MetaKeySettleWake: "observe",
+					tagentevent.MetaKeyObservationReceiptKey: tagentevent.FormatEventKey(receiptKey),
+				},
+			}
+			receipt := memory.FullEvent{
+				EventKey: receiptKey, PartitionID: 7, EventType: tagentevent.TypeInputDisposition,
+				Metadata: map[string]string{
+					tagentevent.MetaKeyConsumedEventKey: tagentevent.FormatEventKey(key),
+					tagentevent.MetaKeyInputDisposition: "observed",
+				},
+			}
+			if tc.edit != nil {
+				tc.edit(&receipt)
+			}
+			require.NoError(t, store.StoreEvent(key, source))
+			if receipt.EventKey != 0 {
+				require.NoError(t, store.StoreEvent(receipt.EventKey, receipt))
+			}
+			refs := []memory.EventReference{settleRef(key, 1), outputRef(memory.NewSnowflakeEventKey(7, 0), 2)}
+			d := TelemetryDispositions(context.Background(), store, refs, 2)
+			require.Equal(t, tc.want, d[key], "unrelated model output cannot replace the receipt")
+		})
+	}
+}
+
+// TestCompressConsumedObservationUnderBudget checks immediate tickets and full recall.
+func TestCompressConsumedObservationUnderBudget(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	key := memory.NewSnowflakeEventKey(7, 0)
+	receiptKey := memory.NewSnowflakeEventKey(7, 0)
+	activeKey := memory.NewSnowflakeEventKey(7, 0)
+	body := "[task settled] ∞ command (id=running) stable → " + strings.Repeat("observation detail ", 300)
+	source := memory.FullEvent{
+		EventKey: key, PartitionID: 7, EventType: tagentevent.TypeExternalInput,
+		Content: body, EventSummary: body, Timestamp: 1,
+		Metadata: map[string]string{
+			"settle_notice": "true", tagentevent.MetaKeySettleWake: "observe",
+			tagentevent.MetaKeyObservationReceiptKey: tagentevent.FormatEventKey(receiptKey),
+		},
+	}
+	require.NoError(t, store.StoreEvent(key, source))
+	require.NoError(t, store.StoreEvent(receiptKey, memory.FullEvent{
+		EventKey: receiptKey, PartitionID: 7, EventType: tagentevent.TypeInputDisposition,
+		Metadata: map[string]string{
+			tagentevent.MetaKeyConsumedEventKey: tagentevent.FormatEventKey(key),
+			tagentevent.MetaKeyInputDisposition: "observed",
+		},
+	}))
+	active := memory.FullEvent{
+		EventKey: activeKey, PartitionID: 7, EventType: tagentevent.TypeExternalInput,
+		Content: "[task settled] ✓ decision awaiting processing", EventSummary: "[task settled] ✓ decision awaiting processing", Timestamp: 2,
+		Metadata: map[string]string{"settle_notice": "true", tagentevent.MetaKeySettleWake: "decision"},
+	}
+	require.NoError(t, store.StoreEvent(activeKey, active))
+	refs := []memory.EventReference{
+		{EventKey: key, PartitionID: 7, EventType: source.EventType, EventSummary: body, Timestamp: 1},
+		{EventKey: activeKey, PartitionID: 7, EventType: active.EventType, EventSummary: active.EventSummary, Timestamp: 2},
+	}
+	cc := NewContextCompressor(NewSmartCompressor(), store, nil, 100000, .8, 2)
+	result := cc.Compress(context.Background(), refs)
+	require.False(t, result.Compressed, "the lightweight observation fold needs no budget compaction")
+	require.Len(t, result.RetainedRefs, 2)
+	require.Equal(t, tagentevent.TypeSettleFold, result.RetainedRefs[0].EventType)
+	require.Contains(t, result.RetainedRefs[0].EventSummary, tagentevent.FormatEventKey(key))
+	require.Equal(t, activeKey, result.RetainedRefs[1].EventKey, "a neighboring unconsumed decision stays intact")
+	recalled, err := store.GetEvent(key)
+	require.NoError(t, err)
+	require.Equal(t, body, recalled.Content)
+	require.Less(t, len(result.Messages[0].Content), len(body)/5)
+}

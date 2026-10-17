@@ -6,11 +6,24 @@ Package event 定义 tagent 的统一事件类型、事件元数据契约与时�
 CONSTANTS
 
 const (
-	MetaKeyEventKey      = "event_key"
-	MetaKeyPartitionID   = "partition_id"
-	MetaKeyEventType     = "event_type"
-	MetaKeyEventSummary  = "event_summary"
-	MetaKeyTriggerSource = "trigger_source"
+	MetaKeyTaskMode              = "task_mode"
+	MetaKeyTaskWaitFor           = "wait_for"
+	MetaKeyTaskRoundID           = "task_round_id"
+	MetaKeyTaskRoundOwner        = "task_round_owner"
+	MetaKeyTaskSignalSeq         = "task_signal_seq"
+	MetaKeyTaskProducerRoundID   = "task_producer_round_id"
+	MetaKeySettleWaitSatisfied   = "settle_wait_satisfied"
+	MetaKeySettleObservation     = "settle_observation"
+	MetaKeySettleWake            = "settle_wake"
+	MetaKeyObservationReceiptKey = "observation_receipt_key"
+	MetaKeyInputDisposition      = "input_disposition"
+	MetaKeyConsumedEventKey      = "consumed_event_key"
+	MetaKeyContinuationID        = "continuation_id"
+	MetaKeyEventKey              = "event_key"
+	MetaKeyPartitionID           = "partition_id"
+	MetaKeyEventType             = "event_type"
+	MetaKeyEventSummary          = "event_summary"
+	MetaKeyTriggerSource         = "trigger_source"
 
 	// MetaKeyTaskInlineRecord 标记回合内已作为 tool result 返回的账目记录，仅经
 	// IsNonProjectionRecord 消费。
@@ -86,7 +99,13 @@ const (
 
 	TypeSettleFold = "settle_fold"
 
-	TypeTaskSpawned = "task_spawned"
+	TypeTaskSpawned       = "task_spawned"
+	TypeTaskSignal        = "task_signal"
+	TypeTaskSignalReceipt = "task_signal_receipt"
+	TypeInputDisposition  = "input_disposition"
+	TypeContinuationState = "continuation_state"
+
+	TypeTaskRound = "task_round"
 
 	TypeResidentSession = "resident_session"
 

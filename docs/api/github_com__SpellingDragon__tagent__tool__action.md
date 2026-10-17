@@ -26,11 +26,7 @@ func NamedSessionName(logical string) string
     this function is the single place that knows the naming convention.
 
 func StatusToSettle(s SessionStatus) (task.SettleKind, bool)
-    StatusToSettle maps a tmux SessionStatus to a task-layer settle kind.
-
-    - (kind, true) is returned only at settle points; Running, FakeDead and
-    FakeAlive are not. - Ambiguous kinds (stable vs suspect) are interpreted
-    downstream.
+    StatusToSettle maps process states to terminal results or observations.
 
 func SubagentSpecFromDeclarative(redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error), decl task.Declarative) task.TaskSpec
     SubagentSpecFromDeclarative rebuilds a subagent TaskSpec (promise table:
@@ -47,10 +43,7 @@ type ActionArgs struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	IsTUI   bool              `json:"is_tui,omitempty"`
-	// QuietTimeout overrides the fake-dead detection threshold for this session
-	// (seconds). Silent-but-legal tasks (long downloads, compiles, inference
-	// waits) produce no output while working; the default 150s threshold kills
-	// them. 0 = use global default. Values < StableDuration are rejected in Call.
+	// QuietTimeout sets the silence observation threshold in seconds; zero uses the configured default.
 	QuietTimeout int `json:"quiet_timeout,omitempty"`
 	// TTL is the requested ABSOLUTE lifetime (seconds) for a spawned session: the
 	// unified reaper terminates its backing process and retires the task this long
@@ -60,13 +53,7 @@ type ActionArgs struct {
 	// pass a large ttl or re-enter to stay alive. Orthogonal to QuietTimeout, which
 	// only detects silence and never bounds total lifetime (async-task-lifetime).
 	TTL int `json:"ttl,omitempty"`
-	// Mode selects session liveness semantics:
-	// "oneshot" (default) — command; settles on real exit; 60s quiet reports
-	// stable (never kills).
-	// "resident" — long-lived service (dev server / tunnel / trainer);
-	// silence is healthy, no auto-kill, only unexpected death settles.
-	// "interactive" — long conversational session (REPL); stable settle +
-	// resume supported.
+	// Mode selects oneshot exit, resident readiness, or interactive input semantics.
 	Mode string `json:"mode,omitempty"`
 	// Name: deterministic logical name for the session
 	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
@@ -82,18 +69,21 @@ type ActionArgs struct {
 	// Op="stop" — graceful stop: SIGTERM the pane process (fallback
 	// kill-session), grace seconds then SIGKILL.
 	// Target: session_id (exact) or name (logical name → n-<name>).
-	Op        string `json:"op,omitempty"`
-	Keys      string `json:"keys,omitempty"`
-	Enter     *bool  `json:"enter,omitempty"`
-	Tail      int    `json:"tail,omitempty"`
-	Ansi      bool   `json:"ansi,omitempty"`
-	GraceSec  int    `json:"grace,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
+	Op         string `json:"op,omitempty"`
+	Keys       string `json:"keys,omitempty"`
+	Enter      *bool  `json:"enter,omitempty"`
+	Tail       int    `json:"tail,omitempty"`
+	Ansi       bool   `json:"ansi,omitempty"`
+	GraceSec   int    `json:"grace,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ResourceID string `json:"resource_id,omitempty"`
 	// Watch: pattern-triggered wakeups. While the session
 	// runs, output matching this regex wakes the agent (merged within a
 	// 5s window; cumulative hit count reported). Primary use: resident
 	// sessions (watch "ERROR|panic|OOM" on a dev server / trainer log).
-	Watch string `json:"watch,omitempty"`
+	Watch        string `json:"watch,omitempty"`
+	ReadyPattern string `json:"ready_pattern,omitempty"`
+	InputPattern string `json:"input_pattern,omitempty"`
 	// Probe: liveness check for resident sessions. A shell
 	// command run every ProbeIntervalSec (default 30); after ProbeFailures
 	// (default 3) consecutive failures the agent is woken once. Example:
@@ -117,23 +107,16 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool
     NewActionTool creates a new ActionTool.
 
 func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
-    Call implements tool.CallableTool.
-
-    Creates a tmux session for the given command and blocks until the session
-    reaches a stable state (Stable/Completed/Error/TimedOut) as observed by
-    TmuxMonitor, at which point the final output is returned as the tool result.
-    If ctx is cancelled first, the session keeps running but Call() returns with
-    the context error.
+    Call executes an admitted command and waits for its declared exit,
+    readiness, or input condition.
 
 func (ct *ActionTool) CanSpawnResident() bool
     CanSpawnResident reports whether a new resident/interactive session is
     allowed under the concurrency cap.
 
 func (ct *ActionTool) Close() error
-    Close stops the TmuxMonitor and reaps all sessions this instance still
-    tracks: on graceful shutdown nothing keeps monitoring them, so leaving them
-    alive would leak orphan sessions (and their ptys) until the next startup's
-    orphan cleanup. Uses sync.Once to ensure idempotent closure.
+    Close stops live producers and preserves natural terminal evidence until
+    acceptance.
 
 func (ct *ActionTool) Declaration() *tool.Declaration
     Declaration implements tool.CallableTool.
@@ -147,6 +130,14 @@ func (ct *ActionTool) ReattachResidentSessions() int
     metadata dir at startup and rebuilds tracking for resident/interactive
     sessions. Returns the number of sessions reattached. Best-effort: failures
     are logged, never fatal — a broken metadata file must not block startup.
+
+func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector
+    RecoverTaskDetector reconstructs declared live and unacknowledged command
+    producers.
+
+func (ct *ActionTool) RelaunchTask(ctx context.Context, decl task.Declarative) (task.SpawnResult, error)
+    RelaunchTask starts a fresh command using this tool and the initiating task
+    spawner.
 
 func (ct *ActionTool) SetDefaultTTLSource(src func() time.Duration)
     SetDefaultTTLSource installs the pull source for the spawn-time default
@@ -164,11 +155,8 @@ func (ct *ActionTool) SetResidentRecordSink(sink func(sessionID, kind, name, det
     the build path obtains the ActionTool after factory creation).
 
 func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.Declarative) task.TaskSpec
-    SpecFromDeclarative rebuilds a command TaskSpec from its declarative
-    projection (promise table: Relaunch✅ via fresh startSession; Alive✅ via the
-    TaskID session check; Resume rebuilt as a monitored-check stub — the live
-    detector binding is re-armed by the R3 reattach; until then the stub returns
-    the same relaunch guidance as an unmonitored session).
+    SpecFromDeclarative rebuilds command intent, resource liveness, and reentry
+    closures.
 
 func (ct *ActionTool) SweepStaleResidents(now time.Time) int
     SweepStaleResidents kills resident sessions nobody has adopted for longer
@@ -211,10 +199,9 @@ func WithDescription(desc string) ActionToolOption
     WithDescription sets the tool description.
 
 func WithOrphanCleanupDisabled() ActionToolOption
-    WithOrphanCleanupDisabled skips the startup orphan-session cleanup.
-    Use it when multiple instances share one tmux server AND one session prefix
-    (the cleanup would reap the other instance's live sessions); prefer distinct
-    prefixes instead.
+    WithOrphanCleanupDisabled skips automatic startup cleanup and session
+    adoption. Task-owned recovery uses RecoverTaskDetector for each declared
+    resource.
 
 func WithResidentMetaDir(dir string) ActionToolOption
     WithResidentMetaDir（R3 2.5）：ResidentMeta 目录覆盖（默认 $TMPDIR；可指向
@@ -226,6 +213,7 @@ func WithResidentRecordSink(sink func(sessionID, kind, name, detail string)) Act
 
 type ActionToolResult struct {
 	SessionID  string `json:"session_id"`
+	ResourceID string `json:"resource_id,omitempty"`
 	Command    string `json:"command"`
 	OldStatus  string `json:"old_status,omitempty"`
 	Status     string `json:"status"`
@@ -289,13 +277,23 @@ func DefaultPollSchedule() PollSchedule
     inline), and backoff caps at a minute for long-lived sessions.
 
 type ResidentMeta struct {
-	Name             string `json:"name"`
-	Mode             string `json:"mode"`
-	Watch            string `json:"watch,omitempty"`
-	Probe            string `json:"probe,omitempty"`
-	ProbeIntervalSec int    `json:"probe_interval,omitempty"`
-	ProbeFailures    int    `json:"probe_failures,omitempty"`
-	SpawnedAt        string `json:"spawned_at"`
+	ResourceID       string            `json:"resource_id,omitempty"`
+	Phase            string            `json:"phase,omitempty"`
+	Placeholder      string            `json:"placeholder,omitempty"`
+	ReadyPattern     string            `json:"ready_pattern,omitempty"`
+	InputPattern     string            `json:"input_pattern,omitempty"`
+	WorkDir          string            `json:"work_dir,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	IsTUI            bool              `json:"is_tui,omitempty"`
+	Baseline         int               `json:"baseline,omitempty"`
+	ProducerRound    uint64            `json:"producer_round,omitempty"`
+	Name             string            `json:"name"`
+	Mode             string            `json:"mode"`
+	Watch            string            `json:"watch,omitempty"`
+	Probe            string            `json:"probe,omitempty"`
+	ProbeIntervalSec int               `json:"probe_interval,omitempty"`
+	ProbeFailures    int               `json:"probe_failures,omitempty"`
+	SpawnedAt        string            `json:"spawned_at"`
 	// LastAdoptedAt is the last time an agent instance adopted (reattached or
 	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
@@ -317,17 +315,11 @@ type SessionMode string
     constant.
 
 const (
-	// ModeOneshot is the default command semantics: settle on exit; a 60s-quiet alive
-	// session reports Stable (never Completed — see detectSessionState), and quiet_timeout
-	// (if set) is a hard kill deadline.
+	// ModeOneshot waits for real exit; silence only produces observations.
 	ModeOneshot SessionMode = "oneshot"
-	// ModeResident is for long-lived services (dev servers, tunnels, training): silence
-	// is HEALTHY — no stable settle, no fake-dead kill, no auto-reap. Only unexpected death
-	// (Completed/Error) settles; pair with watch/probe to hear from it.
+	// ModeResident waits for a successful health probe or declared readiness pattern.
 	ModeResident SessionMode = "resident"
-	// ModeInteractive is for long-running conversational sessions (REPL, coding agents):
-	// stable settle plus resume/send-keys semantics, with heartbeat-based fake-dead
-	// detection.
+	// ModeInteractive waits for a fresh input prompt and supports resumed input.
 	ModeInteractive SessionMode = "interactive"
 )
 type SessionStatus string
@@ -338,17 +330,15 @@ const (
 	SessionRunning SessionStatus = "running"
 	// SessionStable 输出已稳定但进程存活、且未显式声明静默超时的判定；不视为死亡，按调度上限继续轮询。
 	SessionStable SessionStatus = "stable"
-	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
+	// SessionCompleted 表示进程已退出且退出码确认为零。
 	SessionCompleted SessionStatus = "completed"
-	// SessionError 失败极性的终态主载体（D1 透传）：已知非零退出码（含信号死）、
-	// 探测连续失明超限、强拆重试超限、探测器未装配——四类产源都以它把失败送达
-	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
+	// SessionError 表示已确认进程终止，且退出码非零或无法读取。
 	SessionError SessionStatus = "error"
 	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
 	SessionFakeDead SessionStatus = "fake_dead"
 	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
 	SessionFakeAlive SessionStatus = "fake_alive"
-	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
+	// SessionTimedOut 表示静默或探活不可辨观察；进程继续被监控。
 	SessionTimedOut SessionStatus = "timed_out"
 )
 type TmuxCreateOptions struct {
@@ -420,6 +410,9 @@ func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool)
 func (te *TmuxExecutor) PipeFileFor(sessionID string) string
     PipeFileFor exposes the streaming-log path for a session.
 
+func (te *TmuxExecutor) PrepareSession(ctx context.Context, opts TmuxCreateOptions) (*TmuxSession, error)
+    PrepareSession reserves a session without executing the requested command.
+
 func (te *TmuxExecutor) ProcessExists(sessionID string) bool
     ProcessExists checks if the main process of a tmux session is still running
 
@@ -429,7 +422,8 @@ func (te *TmuxExecutor) RestartSession(sessionID string, opts TmuxCreateOptions)
     TmuxMonitor under its original ID — no state chain breakage.
 
 func (te *TmuxExecutor) SendHeartbeat(sessionID string) string
-    SendHeartbeat sends a heartbeat command to detect if session is alive
+    SendHeartbeat checks process liveness without writing to the business input
+    stream.
 
 func (te *TmuxExecutor) SendKeys(sessionID string, keys string) error
     SendKeys sends keys to a tmux session (for interactive commands)
@@ -440,6 +434,9 @@ func (te *TmuxExecutor) SessionAlive3(sessionID string) (alive, known bool)
 
 func (te *TmuxExecutor) SessionExists(sessionID string) bool
     SessionExists checks if a tmux session exists
+
+func (te *TmuxExecutor) SessionResourceID(sessionID string) (string, error)
+    SessionResourceID returns the tmux server and native session identity.
 
 type TmuxExecutorOption func(*TmuxExecutor)
     TmuxExecutorOption configures TmuxExecutor
@@ -479,6 +476,13 @@ func (tm *TmuxMonitor) AddSessionWithCallback(session *TmuxSession, cb func(sess
     Used by callers that want per-session routing (e.g. a per-call settle
     detector) without demultiplexing the global callback.
 
+func (tm *TmuxMonitor) AddSessionWithRoundCallback(session *TmuxSession, cb func(uint64, SessionStatus, string)) bool
+    AddSessionWithRoundCallback binds snapshots to the producer round captured
+    by the monitor.
+
+func (tm *TmuxMonitor) BindProducerRound(sessionID string, round uint64)
+    BindProducerRound sets the round attached to subsequent monitor snapshots.
+
 func (tm *TmuxMonitor) GetSession(sessionID string) (*TmuxSession, bool)
     GetSession gets a session by ID
 
@@ -500,6 +504,10 @@ func (tm *TmuxMonitor) RebindCallback(sessionID string, cb func(sessionID string
     previous generation). Returns false when the session is not monitored —
     rebinding never (re-)adds a session, that stays AddSessionWithCallback's
     contract.
+
+func (tm *TmuxMonitor) RemoveResource(sessionID, resourceID string)
+    RemoveResource removes tracking only if the immutable resource still
+    matches.
 
 func (tm *TmuxMonitor) RemoveSession(sessionID string)
     RemoveSession removes a session from monitoring
@@ -536,6 +544,10 @@ func WithMonitorStateChangeCallback(cb func(sessionID string, oldStatus, newStat
 
 type TmuxSession struct {
 	ID            string
+	ResourceID    string
+	ProducerRound uint64
+	Placeholder   string
+	Phase         string
 	Name          string
 	Command       string
 	WorkDir       string
@@ -574,82 +586,82 @@ type TmuxSession struct {
 type TmuxSettleDetector struct {
 	// Has unexported fields.
 }
-    TmuxSettleDetector adapts a single tmux session's state-change stream into
-    an task.SettleDetector. It is fed monitor transitions via OnStateChange
-    (wired to the monitor callback for this session in the ActionTool
-    integration) and emits task.SettleSignal on its channel, closing it on a
-    terminal status.
-
-    LIFETIME: the detector is bound to the SESSION, not to a round.
-    A resume round does not replace it — Rearm resets the round state (output
-    baseline + a fresh dense→detach timer) on the SAME detector, so the monitor
-    callback wiring and the task-layer watch never change hands (no rebinding,
-    no ordering discipline, no stale-signal cross-round risk).
+    TmuxSettleDetector emits bounded observations and retains terminal receipts.
 
 func NewTmuxSettleDetector(sessionID string, cancelFn func(), denseDuration ...time.Duration) *TmuxSettleDetector
-    NewTmuxSettleDetector creates a detector for the given session. cancelFn,
-    when non-nil, reaps the underlying tmux session (kills it + drops monitor
-    tracking); it runs at most once, on Cancel or on natural process death.
-    An optional denseDuration overrides the default dense phase after which,
-    if the session has not settled, the detector signals detach (→ async ack).
+    NewTmuxSettleDetector constructs a detector with a bounded observation
+    mailbox.
+
+func (d *TmuxSettleDetector) AcknowledgeSignal(sig task.SettleSignal)
+    AcknowledgeSignal releases terminal evidence for the exact accepted receipt.
+
+func (d *TmuxSettleDetector) BeginRound(round uint64)
+    BeginRound fences subsequent producer observations to round.
 
 func (d *TmuxSettleDetector) Cancel()
-    Cancel implements task.SettleDetector: reaps the session and closes the
-    settle stream.
+    Cancel requests termination and records only confirmed producer stoppage.
+
+func (d *TmuxSettleDetector) ConfigureIntent(mode SessionMode, readyPattern, inputPattern string) error
+    ConfigureIntent sets explicit readiness and input evidence requirements.
+
+func (d *TmuxSettleDetector) DeclarativeParams() map[string]string
+    DeclarativeParams returns the durable output boundary for a prepared round.
 
 func (d *TmuxSettleDetector) Detached() <-chan struct{}
-    Detached implements task.SettleDetector: fires at the dense→sparse boundary
-    of the CURRENT round (Rearm re-creates it).
+    Detached implements task.SettleDetector.
 
 func (d *TmuxSettleDetector) Done() <-chan struct{}
-    Done returns a channel closed when the detector closes (terminal status or
-    Cancel). Sidecar loops (probe) select on it to exit.
+    Done closes when the observation stream ends.
 
 func (d *TmuxSettleDetector) EmitProbeResult(ok bool, detail string)
-    EmitProbeResult reports a liveness-probe outcome. A failure emits a
-    watch-kind signal ONCE; repeated failures stay silent until a success resets
-    the latch. This is the resident-session "service died" wakeup: the agent
-    learns within one probe interval, not when a human notices.
+    EmitProbeResult reports failure and recovery edges and evidenced readiness.
 
-func (d *TmuxSettleDetector) OnStateChange(newStatus SessionStatus, output string)
-    OnStateChange feeds a monitor state transition for this session. It emits
-    a settle signal when newStatus is a settle point, and closes the stream on
-    a terminal status. Non-settle transitions (e.g. → Running) are ignored.
-    The output is trimmed to the current round's baseline (Rearm), so resumed
-    rounds settle with their own increment, not the whole scrollback.
+func (d *TmuxSettleDetector) EmitProbeResultRound(round uint64, ok bool, detail string)
+    EmitProbeResultRound rejects probe outcomes from previous producer rounds.
+
+func (d *TmuxSettleDetector) OnObservation(round uint64, status SessionStatus, output string)
+    OnObservation accepts a round-fenced monitor snapshot.
+
+func (d *TmuxSettleDetector) OnStateChange(status SessionStatus, output string)
+    OnStateChange accepts a state observed in the current producer round.
 
 func (d *TmuxSettleDetector) OnWatchOutput(output string)
-    OnWatchOutput feeds the current visible pane buffer through the watch
-    pattern. Called from the monitor's per-session callback on every refresh
-    (including stable refreshes — a resident session's silence must not starve
-    its watch). Snapshot-diff model: count hits in the WHOLE buffer, subtract
-    the previous snapshot's count — no byte offsets, so pane scrollback rotation
-    merely caps delta at 0 instead of mis-slicing content.
+    OnWatchOutput reports new matches without satisfying readiness or input
+    waits.
+
+func (d *TmuxSettleDetector) OnWatchOutputRound(round uint64, output string)
+    OnWatchOutputRound reports matches from a producer-fenced output snapshot.
+
+func (d *TmuxSettleDetector) ProducerID() string
+    ProducerID identifies the immutable external resource.
+
+func (d *TmuxSettleDetector) ProducerRound() uint64
+    ProducerRound returns the producer round used by emitted receipts.
 
 func (d *TmuxSettleDetector) Rearm(baseline int)
-    Rearm resets the detector for a resume round on the SAME session: a new
-    output baseline (settle outputs become this round's increment) and a fresh
-    dense→detach timer (the resumed round gets its own sync-wait window).
+    Rearm establishes a resumed output baseline and dense observation window.
 
-func (d *TmuxSettleDetector) SetPaneStatusReader(fn func() (code int, known bool))
-    SetPaneStatusReader wires the exit-status pull used to enrich a terminal
-    SessionError signal with a concrete exit code. Called once at construction
-    by the ActionTool integration with a closure over the executor + session id.
+func (d *TmuxSettleDetector) RearmOutput(output string)
+    RearmOutput establishes an exact byte baseline for the resumed producer.
+
+func (d *TmuxSettleDetector) RestoreRound(round, seq uint64)
+    RestoreRound initializes restored receipt numbering before monitoring
+    starts.
+
+func (d *TmuxSettleDetector) RoundBaseline() int
+    RoundBaseline returns the output line baseline for the next durable binding.
+
+func (d *TmuxSettleDetector) SetPaneStatusReader(fn func() (int, bool))
+    SetPaneStatusReader sets the exit status reader for confirmed dead panes.
 
 func (d *TmuxSettleDetector) SetWatch(pattern string, window time.Duration) error
-    SetWatch attaches a pattern-triggered wakeup to the detector ( C1).
-    The regex is matched against INCREMENTAL output fed via OnWatchOutput;
-    hits inside window are merged (one pending signal max), with the cumulative
-    hit count in the signal output — a log flood of 50 ERRORs wakes the agent
-    once with "xN", not 50 times.
+    SetWatch configures an output observation pattern.
 
 func (d *TmuxSettleDetector) Settled() <-chan task.SettleSignal
     Settled implements task.SettleDetector.
 
+func (d *TmuxSettleDetector) Start()
+    Start activates a prepared producer after its durable task binding.
+
 func (d *TmuxSettleDetector) Stopped() <-chan struct{}
-    Stopped implements task.SettleDetector. For a tmux-backed run the producer
-    is an external session, so its stop credential is the same event that closes
-    the detector: Cancel reaps the session synchronously (kill + drop monitor
-    tracking) and then closes this channel; a terminal status closes it after
-    the last settle was emitted. Either way nothing behind the detector can
-    still touch shared state once it fires.
+    Stopped closes only after the external producer is confirmed stopped.

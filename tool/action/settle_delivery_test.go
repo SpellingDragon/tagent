@@ -48,37 +48,9 @@ func TestMonitorDeliversSettleAfterIntermediateState(t *testing.T) {
 	}
 }
 
-// TestMonitorDeliversFinalStatusAfterFakeDeadCleanup verifies cleanup delivers its final verdict before removing the session.
+// TestMonitorDeliversFinalStatusAfterFakeDeadCleanup keeps quiet producers alive without writes or restart.
 func TestMonitorDeliversFinalStatusAfterFakeDeadCleanup(t *testing.T) {
-	for _, killFails := range []bool{false, true} {
-		t.Run(fmt.Sprint(killFails), func(t *testing.T) {
-			inspector := &mockInspector{processExists: true, output: "hung output"}
-			want := SessionCompleted
-			if killFails {
-				inspector.killErr = fmt.Errorf("kill failed")
-				want = SessionError
-			}
-			monitor := newTestMonitor(inspector)
-			session := newTestSession("hung", SessionStable, inspector.output)
-			session.StableSince = time.Now().Add(-2 * time.Minute)
-			session.QuietTimeout = time.Minute
-			session.KillRetryCount = 2
-			detector := NewTmuxSettleDetector(session.ID, nil)
-			t.Cleanup(detector.Cancel)
-			monitor.AddSessionWithCallback(session, func(_ string, _, status SessionStatus, output string) {
-				require.Equal(t, want, status)
-				detector.OnStateChange(status, output)
-			})
-			monitor.checkSession(session)
-			select {
-			case sig := <-detector.Settled():
-				require.Equal(t, task.SettleCompleted, sig.Kind)
-				require.Equal(t, killFails, sig.Err != nil)
-			default:
-				t.Fatal("cleanup removed the session without delivering its terminal settle")
-			}
-		})
-	}
+	assertQuietObservation(t, ModeOneshot, false)
 }
 
 // TestMonitorResumeCanNotifyStableAgain verifies an identical prompt can settle a new resumed round once.

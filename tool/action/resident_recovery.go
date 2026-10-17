@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/SpellingDragon/tagent/agent/task"
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -24,13 +27,23 @@ var residentReattachOnce atomic.Bool
 // 同源——重挂时按此与重建 registry 的任务重关联）；Origin 为可选路由 baggage
 // （真相源在 task_spawned 事件，meta 侧预留零值兼容）。旧记录缺新字段：零值容错。
 type ResidentMeta struct {
-	Name             string `json:"name"`
-	Mode             string `json:"mode"`
-	Watch            string `json:"watch,omitempty"`
-	Probe            string `json:"probe,omitempty"`
-	ProbeIntervalSec int    `json:"probe_interval,omitempty"`
-	ProbeFailures    int    `json:"probe_failures,omitempty"`
-	SpawnedAt        string `json:"spawned_at"`
+	ResourceID       string            `json:"resource_id,omitempty"`
+	Phase            string            `json:"phase,omitempty"`
+	Placeholder      string            `json:"placeholder,omitempty"`
+	ReadyPattern     string            `json:"ready_pattern,omitempty"`
+	InputPattern     string            `json:"input_pattern,omitempty"`
+	WorkDir          string            `json:"work_dir,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	IsTUI            bool              `json:"is_tui,omitempty"`
+	Baseline         int               `json:"baseline,omitempty"`
+	ProducerRound    uint64            `json:"producer_round,omitempty"`
+	Name             string            `json:"name"`
+	Mode             string            `json:"mode"`
+	Watch            string            `json:"watch,omitempty"`
+	Probe            string            `json:"probe,omitempty"`
+	ProbeIntervalSec int               `json:"probe_interval,omitempty"`
+	ProbeFailures    int               `json:"probe_failures,omitempty"`
+	SpawnedAt        string            `json:"spawned_at"`
 	// LastAdoptedAt is the last time an agent instance adopted (reattached or
 	// found already-tracked) this session.
 	// Sweep freshness is measured from HERE, never from SpawnedAt: a
@@ -60,24 +73,44 @@ func (ct *ActionTool) saveResidentMeta(sessionID string, args ActionArgs) {
 	if args.Name == "" || args.Mode == string(ModeOneshot) || args.Mode == "" {
 		return
 	}
-	m := ResidentMeta{
-		Name:             args.Name,
-		Mode:             args.Mode,
-		Watch:            args.Watch,
-		Probe:            args.Probe,
-		ProbeIntervalSec: args.ProbeIntervalSec,
-		ProbeFailures:    args.ProbeFailures,
-		SpawnedAt:        time.Now().Format(time.RFC3339),
-		Command:          args.Command,
-		TaskID:           sessionID,
+	resource := ""
+	if ct.tmuxExecutor != nil {
+		resource, _ = ct.tmuxExecutor.SessionResourceID(sessionID)
 	}
+	ct.saveBoundMeta(&TmuxSession{ID: sessionID, ResourceID: resource, Phase: "active", CreatedAt: time.Now()}, args)
+}
+
+func (ct *ActionTool) saveBoundMeta(session *TmuxSession, args ActionArgs) {
+	m := ResidentMeta{Name: args.Name, Mode: args.Mode, Watch: args.Watch, Probe: args.Probe, ProbeIntervalSec: args.ProbeIntervalSec, ProbeFailures: args.ProbeFailures, SpawnedAt: session.CreatedAt.Format(time.RFC3339), Command: args.Command, TaskID: session.ID, ResourceID: session.ResourceID, Phase: session.Phase, Placeholder: session.Placeholder, ReadyPattern: args.ReadyPattern, InputPattern: args.InputPattern, WorkDir: args.WorkDir, Env: args.Env, IsTUI: args.IsTUI, ProducerRound: session.ProducerRound}
+	_ = ct.writeResidentMeta(session.ID, m)
+	ct.emitResidentSessionEvent(session.ID, m, false)
+}
+
+func (ct *ActionTool) writeResidentMeta(sessionID string, m ResidentMeta) error {
 	b, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(ct.metaDir(), 0o755); err != nil {
+		return err
+	}
+	tmp := ct.metaPath(sessionID) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, ct.metaPath(sessionID))
+}
+
+func (ct *ActionTool) removeBoundMeta(sessionID, resourceID string) {
+	b, err := os.ReadFile(ct.metaPath(sessionID))
 	if err != nil {
 		return
 	}
-	_ = os.MkdirAll(ct.metaDir(), 0o755)
-	_ = os.WriteFile(ct.metaPath(sessionID), b, 0o600)
-	ct.emitResidentSessionEvent(sessionID, m, false)
+	var m ResidentMeta
+	if json.Unmarshal(b, &m) != nil || m.ResourceID != resourceID {
+		return
+	}
+	ct.removeResidentMeta(sessionID)
 }
 
 // touchAdopted stamps LastAdoptedAt on the session meta — the freshness
@@ -183,42 +216,133 @@ func (ct *ActionTool) ReattachResidentSessions() int {
 //
 // 契约: docs/wiki/tool/tmux-action.md#restart-takeover
 func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
-	detector := NewTmuxSettleDetector(sessionID, func() {
-		if err := ct.tmuxExecutor.KillSession(sessionID); err != nil {
-			log.Warnf("[ActionTool] recovery kill %s: %v", sessionID, err)
+	resource := m.ResourceID
+	if resource == "" {
+		var err error
+		resource, err = ct.tmuxExecutor.SessionResourceID(sessionID)
+		if err != nil {
+			return
 		}
-		ct.tmuxMonitor.RemoveSession(sessionID)
-		ct.removeResidentMeta(sessionID)
-	})
-	detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
-	if m.Watch != "" {
-		if err := detector.SetWatch(m.Watch, 5*time.Second); err != nil {
-			log.Warnf("[ActionTool] recovery watch %s: %v", sessionID, err)
+		m.ResourceID = resource
+		if err := ct.writeResidentMeta(sessionID, m); err != nil {
+			return
 		}
 	}
-	isTUI := m.Mode == string(ModeInteractive)
-	ct.tmuxMonitor.AddSessionWithCallback(&TmuxSession{
-		ID:        sessionID,
-		Name:      m.Name,
-		Command:   "(recovered)",
-		Status:    SessionRunning,
-		CreatedAt: time.Now(),
-		IsTUI:     isTUI,
-		Mode:      SessionMode(m.Mode),
-	}, func(_ string, _, newStatus SessionStatus, output string) {
-		detector.OnWatchOutput(output)
-		detector.OnStateChange(newStatus, output)
-	})
-	if m.Probe != "" {
-		ct.startProbeLoop(sessionID, ActionArgs{
-			Probe:            m.Probe,
-			ProbeIntervalSec: m.ProbeIntervalSec,
-			ProbeFailures:    m.ProbeFailures,
-		}, detector)
+	args := ActionArgs{Command: m.Command, Mode: m.Mode, Name: m.Name, Watch: m.Watch, Probe: m.Probe, ProbeIntervalSec: m.ProbeIntervalSec, ProbeFailures: m.ProbeFailures, ReadyPattern: m.ReadyPattern, InputPattern: m.InputPattern, WorkDir: m.WorkDir, Env: m.Env, IsTUI: m.IsTUI}
+	session := &TmuxSession{ID: sessionID, ResourceID: resource, Name: m.Name, Command: m.Command, Mode: SessionMode(m.Mode), IsTUI: m.IsTUI, CreatedAt: time.Now(), Phase: m.Phase, Placeholder: m.Placeholder}
+	detector, err := ct.detectorForSession(session, args)
+	if err != nil {
+		return
+	}
+	detector.RestoreRound(m.ProducerRound, 0)
+	detector.Rearm(m.Baseline)
+	detector.startFn = func() error {
+		if m.Phase == "prepared" && m.Placeholder != "" {
+			if err := ct.tmuxExecutor.activateResource(sessionID, resource, m.Placeholder, m.Command); err != nil {
+				return err
+			}
+		}
+		return ct.activateMonitoring(session, args, detector)
 	}
 	ct.rememberReattachedDetector(sessionID, detector)
-	log.Infof("[ActionTool] recovery: %s alive (mode=%s watch=%q probe=%q) — tracking rebuilt; agent notified on next watch/probe hit or peek", sessionID, m.Mode, m.Watch, m.Probe)
 }
+
+// RecoverTaskDetector reconstructs declared live and unacknowledged command producers.
+func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector {
+	if tk == nil || ct.tmuxExecutor == nil || ct.tmuxMonitor == nil {
+		return nil
+	}
+	spec := tk.SpecSnapshot()
+	decl := spec.Declarative
+	if decl == nil || decl.Kind != "command" || decl.TaskID == "" {
+		return nil
+	}
+	args, err := argsFromDeclarative(*decl)
+	if err != nil {
+		return nil
+	}
+	if args.Mode == "" {
+		args.Mode = string(ModeOneshot)
+	}
+	resource := decl.Params[pResourceID]
+	if resource == "" {
+		if b, readErr := os.ReadFile(ct.metaPath(decl.TaskID)); readErr == nil {
+			var meta ResidentMeta
+			if json.Unmarshal(b, &meta) == nil {
+				resource = meta.ResourceID
+			}
+		}
+		if resource == "" {
+			resource, err = ct.tmuxExecutor.SessionResourceID(decl.TaskID)
+			if err != nil {
+				return nil
+			}
+		}
+		if decl.Params == nil {
+			decl.Params = make(map[string]string)
+		}
+		decl.Params[pResourceID] = resource
+	}
+	if cached := ct.TakeReattachedDetector(decl.TaskID); cached != nil {
+		if detector, ok := cached.(*TmuxSettleDetector); ok {
+			detector.close()
+		}
+	}
+	session := &TmuxSession{ID: decl.TaskID, ResourceID: resource, Name: args.Name, Command: args.Command, Mode: SessionMode(args.Mode), WorkDir: args.WorkDir, IsTUI: args.IsTUI, CreatedAt: time.Now(), QuietTimeout: time.Duration(args.QuietTimeout) * time.Second, Phase: decl.Params[pPhase], Placeholder: decl.Params[pPlaceholder]}
+	detector, err := ct.detectorForSession(session, args)
+	if err != nil {
+		return nil
+	}
+	detector.sourceTaskID = tk.ID
+	baseline, _ := strconv.Atoi(decl.Params[pBaseline])
+	round := tk.ProducerRound()
+	if round == 0 {
+		round = tk.RoundID()
+	}
+	detector.RestoreRound(round, tk.SignalSeq())
+	detector.Rearm(baseline)
+	detector.baselineBytes, _ = strconv.Atoi(decl.Params[pBaselineBytes])
+	for _, pending := range tk.PendingSignals() {
+		if pending.ProducerRound == round && (pending.Kind == task.SettleCompleted || pending.Kind == task.SettleFailed) && pending.Observation != "round_aborted" {
+			copy := pending
+			detector.signalMu.Lock()
+			detector.terminal = &copy
+			detector.signalMu.Unlock()
+			if ct.tmuxExecutor.resourceStopped(session.ID, resource) {
+				detector.confirmStopped()
+			}
+			detector.close()
+			if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current == resource {
+				ct.saveBoundMeta(session, args)
+			}
+			spec.ResumeFn = ct.resumeResourceClosure(session.ID, resource, args.IsTUI, detector)
+			spec.Alive = ct.resourceAliveClosure(session.ID, resource)
+			return &recoveredDetector{TmuxSettleDetector: detector, spec: spec}
+		}
+	}
+	detector.startFn = func() error {
+		if session.Phase == "prepared" && session.Placeholder != "" {
+			if err := ct.tmuxExecutor.activateResource(session.ID, resource, session.Placeholder, args.Command); err != nil {
+				return err
+			}
+		}
+		return ct.activateMonitoring(session, args, detector)
+	}
+	if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current == resource {
+		ct.saveBoundMeta(session, args)
+	}
+	spec.ResumeFn = ct.resumeResourceClosure(session.ID, resource, args.IsTUI, detector)
+	spec.Alive = ct.resourceAliveClosure(session.ID, resource)
+	return &recoveredDetector{TmuxSettleDetector: detector, spec: spec}
+}
+
+type recoveredDetector struct {
+	*TmuxSettleDetector
+	spec task.TaskSpec
+}
+
+// RecoveredSpec returns the resource-pinned declaration for durable rebinding.
+func (d *recoveredDetector) RecoveredSpec() task.TaskSpec { return d.spec }
 
 // residentTTL is how long a resident session may go without a recent adoption before
 // the sweep reaps it. Freshness is measured from LastAdoptedAt (fallback SpawnedAt for
@@ -270,11 +394,21 @@ func (ct *ActionTool) SweepStaleResidents(now time.Time) int {
 		}
 		if now.Sub(stamped) > residentTTL {
 			if ct.tmuxExecutor != nil {
-				if err := ct.tmuxExecutor.KillSession(id); err == nil {
-					killed++
+				if ct.tmuxExecutor.IsPaneDead(id) {
+					continue
 				}
+				if m.ResourceID == "" {
+					m.ResourceID, err = ct.tmuxExecutor.SessionResourceID(id)
+					if err != nil || ct.writeResidentMeta(id, m) != nil {
+						continue
+					}
+				}
+				if err := ct.tmuxExecutor.killResource(id, m.ResourceID); err != nil {
+					continue
+				}
+				killed++
 			}
-			ct.removeResidentMeta(id)
+			ct.removeBoundMeta(id, m.ResourceID)
 			log.Warnf("[ActionTool] sweep: killed un-adopted resident %s (last adoption %s, age %s > TTL %s)", id, freshness, now.Sub(stamped).Round(time.Minute), residentTTL)
 		}
 	}
@@ -296,4 +430,18 @@ func (ct *ActionTool) residentCount() int {
 // allowed under the concurrency cap.
 func (ct *ActionTool) CanSpawnResident() bool {
 	return ct.residentCount() < maxResidentSessions
+}
+
+func (ct *ActionTool) terminalOutputPath(sessionID, resourceID string) string {
+	identity := strings.NewReplacer(":", "-", "$", "").Replace(resourceID)
+	return filepath.Join(ct.metaDir(), "output-"+sessionID+"-"+identity+".log")
+}
+
+func (ct *ActionTool) persistTerminalOutput(sessionID, resourceID, output string) {
+	if err := os.MkdirAll(ct.metaDir(), 0o755); err != nil {
+		return
+	}
+	if err := os.WriteFile(ct.terminalOutputPath(sessionID, resourceID), []byte(output), 0o600); err != nil {
+		log.Warnf("[ActionTool] save terminal output %s: %v", sessionID, err)
+	}
 }

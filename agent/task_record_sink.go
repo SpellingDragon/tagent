@@ -13,7 +13,9 @@ import (
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/log"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // TaskManager exposes the org-level resident task registry (R2: rebuilt
@@ -41,27 +43,27 @@ func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	if ta == nil || ta.taskManager == nil || store == nil {
 		return 0
 	}
-	return RebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuildClosures)
+	rebuild := func(decl task.Declarative) task.TaskSpec {
+		spec := restoredTaskSpec(decl, rebuildClosures)
+		if decl.Kind == "subagent" {
+			spec.ResumeFn = subagentResumeClosureWithOverrides(ta.contextManager, decl.AgentName, &subagentRounds{}, decl.Overrides)
+			if decl.RoundID > 0 && decl.ProducerRound == 0 {
+				spec.Start = restoredSubagentStart(ta.contextManager, decl)
+			}
+		}
+		return spec
+	}
+	n, pending := rebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuild)
+	if ta.taskRecords != nil {
+		for _, fact := range pending {
+			ta.taskRecords.restorePendingSignal(fact)
+		}
+	}
+	return n
 }
 
-// SubagentRedispatcher：跨重启
-// subagent Relaunch 的重投递器——镜像 subagentRelaunch 的 detector 形状
-// （RedispatchAsync 同步跑在 detector 的 watch goroutine 内，Spawn 的 sync-wait
-// 窗口语义保持；spawnKey=agentName+":"+body 与无 extraName 的原 spawn 键一致→幂等去重覆盖）。
-//
-// resolve 是**每次重投时**对目标所属调用绑定的一次解析，而不是启动时冻结的
-// wrapper 快照：否则一个被后续代移除的目标仍会在这里被旧代 wrapper 静默复活（跑
-// 的是已退役的声明与目标），而当时的拒绝文案又声称“current org”——两者均与
-// task-registry-rebuild 的「不复活已退役执行器或静默改投」相逆。调用方应传入
-// 「按有效执行面解析」的闭包（见 ContextManager.SubagentWrapper），这就让显式
-// 重投与普通委派共用同一个版本真源。
-// resolve is the SAME version source ordinary delegation and 's re-entry use
-// (see ResolveReentryDelegation): the initiating call's binding when the re-entry
-// rides one, the effective face otherwise. Freezing a wrapper snapshot here — or
-// resolving against the effective face while an initiator holds an older binding —
-// would let a target a later generation removed be silently revived by a stored
-// task, which is precisely what task-registry-rebuild「不复活已退役执行器或静默改投」
-// and forbid.
+// SubagentRedispatcher rebuilds relaunch through the same admission and binding barriers as a fresh delegation.
+// Every re-entry resolves the target on its initiating call's generation or the effective resident face.
 func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
 	var redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error)
 	redispatch = func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
@@ -81,23 +83,27 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 			return task.SpawnResult{}, fmt.Errorf(
 				"subagent %q is not a target of the EFFECTIVE orchestration generation — relaunch refused (a retired binding is not revived, and the task chain context is kept untouched)", agentName)
 		}
+		defer lease.Release()
 		desc := agentName + ": " + body
 		if len(desc) > 72 {
 			desc = desc[:72]
 		}
-		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			defer lease.Release()
-			out, err := w.RedispatchAsync(lease.WithContext(runCtx), body, overrides)
+		opts := agent.RunOptions{}
+		if overrides != nil {
+			raw, err := json.Marshal(overrides)
 			if err != nil {
-				return "", err
+				return task.SpawnResult{}, err
 			}
-			s, _ := out.(string)
-			return s, nil
-		}, w.DenseDuration())
-		res := tm.Spawn(task.TaskSpec{
-			Kind: "subagent",
-			Desc: desc,
-			Key:  agentName + ":" + body,
+			opts.RuntimeState = map[string]any{PerCallOverridesKey: json.RawMessage(raw)}
+		}
+		inv := agent.NewInvocation(agent.WithInvocationMessage(model.NewUserMessage(body)), agent.WithInvocationRunOptions(opts))
+		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
+		roundOwner, _ := invocationIDFromContext(ctx)
+		spec := task.TaskSpec{
+			Kind:       "subagent",
+			Desc:       desc,
+			Key:        agentName + ":" + body,
+			RoundOwner: roundOwner,
 			Declarative: &task.Declarative{
 				Kind: "subagent", Desc: desc, Key: agentName + ":" + body,
 				AgentName: agentName, MessageBody: body,
@@ -106,11 +112,14 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 			Relaunch: func(ctx context.Context) (task.SpawnResult, error) {
 				return redispatch(ctx, agentName, body, overrides)
 			},
-		}, detector)
-		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
-			waitForUnadoptedStop(ctx, detector)
+			ResumeFn: subagentResumeClosureWithOverrides(w.parentCM, agentName, rounds, overrides),
 		}
-		return res, nil
+		spec.Start = w.prepareTaskStart(lease.WithContext(ctx), w.parentCM, rounds, inv)
+		var spawner task.TaskSpawner = tm
+		if current, ok := task.TaskSpawnerFromContext(ctx); ok {
+			spawner = current
+		}
+		return spawner.Spawn(spec, nil), nil
 	}
 	return redispatch
 }
@@ -254,6 +263,9 @@ func (ta *TagentAgent) SetHotSource(src func() (OrgHotParams, bool)) {
 		return
 	}
 	ta.hotSource.Store(&src)
+	if ta.taskManager != nil {
+		ta.taskManager.RecheckDeadlines()
+	}
 }
 
 // HotSnapshot returns the owner's CURRENT effective hot bundle — resolved solely
@@ -314,6 +326,10 @@ func (ta *TagentAgent) unregisterLiveCM(cm *ContextManager) {
 	ta.liveCMsMu.Lock()
 	delete(ta.liveCMs, cm)
 	ta.liveCMsMu.Unlock()
+	ta.tryDeferredFinalExit()
+	if ta.contextManager != nil {
+		ta.contextManager.pokeRetirementDrain()
+	}
 }
 
 // LiveCMCount reports the number of registered in-flight invocation-private
@@ -327,9 +343,7 @@ func (ta *TagentAgent) LiveCMCount() int {
 	return len(ta.liveCMs)
 }
 
-// snapshotLiveCMs returns a snapshot of the registered in-flight invocation-private
-// CMs (test-only introspection for  acceptance: seeded values at
-// construction, hot-applied values mid-call). No execution path reads it.
+// snapshotLiveCMs returns this owner's live private execution faces for shutdown and usage accounting.
 func (ta *TagentAgent) snapshotLiveCMs() []*ContextManager {
 	if ta == nil {
 		return nil
@@ -397,7 +411,9 @@ func (ta *TagentAgent) OrgDiagnostics() map[string]any {
 // （cm 在 taskManager 之后构造——与 onEventRef 同款延迟绑定模式；
 // 绑定前钩子 nil-safe 静默跳过，best-effort 语义不变）。
 type taskRecordSink struct {
-	cm *ContextManager
+	cm       *ContextManager
+	owner    *TagentAgent
+	delivery taskDeliveryJournal
 }
 
 func (s *taskRecordSink) onSpawn(tk *task.Task) {
@@ -421,143 +437,358 @@ func (s *taskRecordSink) onCancel(tk *task.Task) {
 	s.cm.EmitTaskCancelledRecord(tk)
 }
 
-// RebuildTaskRegistry：冷启动从事实链
-// 纯全量回放重建 active 任务集（registry=fold：task_spawned 记录 − 终态 settle）。
-// 无 compaction snapshot（任务无折叠语义）。状态映射：running→suspect（进程内
-// watch goroutine 不可恢复，交 R3 存活探测裁决）；alive-detached/suspect 原态；
-// 终态（completed/failed/cancelled/dead，含 inline settle 记录）不重建。
-// rebuildClosures 由 tool/action 提供（承诺表：command 全/subagent Relaunch/generic ❌）。
-// best-effort：单条记录损坏跳过 + WARN，不阻断重建。
+// RebuildTaskRegistry restores task intentions, producer bindings and unaccepted signals in event-key order.
 func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.TaskManager,
-	rebuildClosures func(decl task.Declarative) task.TaskSpec) (restored int) {
-	if store == nil || tm == nil {
-		return 0
-	}
+	rebuildClosures func(decl task.Declarative) task.TaskSpec) int {
+	n, _ := rebuildTaskRegistry(store, partitionID, tm, rebuildClosures)
+	return n
+}
 
-	// 1) spawned 记录（task_spawned 类型，Content=Declarative JSON）——分页取全
-	//。
-	type spawnRec struct {
-		id   string
-		decl task.Declarative
+type taskRegistryFold struct {
+	id         string
+	decl       task.Declarative
+	status     task.TaskStatus
+	statusKey  int64
+	settledAt  time.Time
+	detachedAt int64
+	result     string
+	err        error
+	bound      bool
+	cancelled  bool
+	raw        []taskRegistrySignal
+}
+
+type taskRegistrySignal struct {
+	fact     memory.FullEvent
+	record   taskSignalRecord
+	accepted bool
+}
+
+func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.TaskManager,
+	rebuildClosures func(decl task.Declarative) task.TaskSpec) (int, []memory.FullEvent) {
+	if store == nil || tm == nil {
+		return 0, nil
 	}
-	var spawns []spawnRec
-	for off := 0; ; off += 500 {
-		batch, err := store.QueryEvents(memory.QueryOptions{
-			PartitionIDs: []int{partitionID},
-			EventTypes:   []string{tagentevent.TypeTaskSpawned},
-			Limit:        500,
-			Offset:       off,
-		})
-		if err != nil {
-			log.Errorf("[rebuild-task-registry] query spawned failed: %v", err)
-			break
-		}
-		keys := make([]int64, 0, len(batch))
-		for _, r := range batch {
-			keys = append(keys, r.EventKey)
-		}
-		evs, gerr := store.GetEvents(keys)
-		if gerr != nil {
+	records, err := queryTaskRecords(store, partitionID, []string{
+		tagentevent.TypeTaskSpawned, tagentevent.TypeExternalInput,
+		tagentevent.TypeTaskSignal, tagentevent.TypeTaskSignalReceipt,
+	})
+	if err != nil {
+		log.Errorf("[rebuild-task-registry] inventory failed: %v", err)
+		return 0, nil
+	}
+	tasks := make(map[string]*taskRegistryFold)
+	receipts := make(map[int64]memory.FullEvent)
+	for _, ev := range records {
+		if ev.EventType == tagentevent.TypeTaskSignalReceipt {
+			receipts[ev.EventKey] = ev
 			continue
 		}
-		for _, ev := range evs {
+		id := ev.Metadata["task_id"]
+		if id == "" {
+			continue
+		}
+		f := tasks[id]
+		if f == nil {
+			f = &taskRegistryFold{id: id, status: task.TaskSuspect}
+			tasks[id] = f
+		}
+		switch ev.EventType {
+		case tagentevent.TypeTaskSpawned:
 			var decl task.Declarative
 			if err := json.Unmarshal([]byte(ev.Content), &decl); err != nil {
-				log.Warnf("[rebuild-task-registry] spawned record %d corrupt, skipping: %v", ev.EventKey, err)
+				log.Warnf("[rebuild-task-registry] invalid declaration %d: %v", ev.EventKey, err)
 				continue
 			}
-			spawns = append(spawns, spawnRec{id: ev.Metadata["task_id"], decl: decl})
-		}
-		if len(batch) < 500 {
-			break
+			foldTaskDeclaration(f, decl, ev)
+		case tagentevent.TypeTaskSignal:
+			var raw taskSignalRecord
+			if err := json.Unmarshal([]byte(ev.Content), &raw); err != nil || raw.TaskID != id || raw.RoundID == 0 || raw.Seq == 0 || raw.Event == nil || raw.ReceiptKey <= 0 || raw.ObservedAt.IsZero() {
+				log.Warnf("[rebuild-task-registry] invalid signal %d", ev.EventKey)
+				continue
+			}
+			f.raw = append(f.raw, taskRegistrySignal{fact: ev, record: raw})
+			foldTaskSignal(f, raw, ev.EventKey)
+		case tagentevent.TypeExternalInput:
+			foldLegacyTaskSettle(f, ev)
 		}
 	}
-	if len(spawns) == 0 {
-		return 0
-	}
-
-	settled := map[string]string{}
-	detachedMs := map[string]int64{}
-	for off := 0; ; off += 500 {
-		batch, err := store.QueryEvents(memory.QueryOptions{
-			PartitionIDs: []int{partitionID},
-			EventTypes:   []string{tagentevent.TypeExternalInput},
-			Limit:        500,
-			Offset:       off,
-		})
-		if err != nil {
-			break
-		}
-		keys := make([]int64, 0, len(batch))
-		for _, r := range batch {
-			keys = append(keys, r.EventKey)
-		}
-		evs, err := store.GetEvents(keys)
-		if err != nil {
+	var restored int
+	var pendingFacts []memory.FullEvent
+	for _, f := range tasks {
+		if f.decl.Kind == "" {
 			continue
 		}
-		for _, ev := range evs {
-			if st, ok := ev.Metadata["settle_status"]; ok && st != "" {
-				if id := ev.Metadata["task_id"]; id != "" {
-					if st == "watch" {
-						if _, exists := settled[id]; !exists {
-							settled[id] = st
-						}
-					} else {
-						settled[id] = st
-					}
-					if msStr := ev.Metadata["detached_at_ms"]; msStr != "" {
-						if ms, perr := strconv.ParseInt(msStr, 10, 64); perr == nil {
-							detachedMs[id] = ms
-						}
-					}
-				}
+		pending := make([]taskRegistrySignal, 0, len(f.raw))
+		var latestAcceptedTerminal *taskRegistrySignal
+		for i := range f.raw {
+			raw := &f.raw[i]
+			raw.accepted = taskSignalReceiptMatches(raw.fact, raw.record, receipts[raw.record.ReceiptKey])
+			if raw.accepted && raw.record.signal().EndsRound() && raw.record.Observation != "round_aborted" && raw.record.Lineage != task.LineageRetired && raw.record.RoundID == f.decl.ProducerRound {
+				latestAcceptedTerminal = raw
+			}
+			if !raw.accepted && raw.record.ErrorKind != "continuation_interrupted" {
+				pending = append(pending, *raw)
 			}
 		}
-		if len(batch) < 500 {
-			break
-		}
-	}
-
-	for _, sp := range spawns {
-		if sp.id == "" {
+		if f.cancelled {
 			continue
 		}
-		switch settled[sp.id] {
-		case "completed", "failed", "cancelled", "dead":
+		terminal := !f.status.Live()
+		keepTerminal := len(pending) > 0
+		if terminal && f.decl.Kind == "subagent" && latestAcceptedTerminal != nil && time.Since(latestAcceptedTerminal.record.ObservedAt) <= tm.TerminalTTL() {
+			keepTerminal = true
+		}
+		if terminal && !keepTerminal {
 			continue
 		}
-		status := task.TaskSuspect
-		if settled[sp.id] == "alive-detached" || settled[sp.id] == "alive_detached" {
-			status = task.TaskAliveDetached
+		spec := restoredTaskSpec(f.decl, rebuildClosures)
+		started := time.UnixMilli(f.decl.StartedAtMilli)
+		if f.decl.StartedAtMilli <= 0 {
+			started = time.Time{}
 		}
-		spec := task.TaskSpec{Kind: sp.decl.Kind, Desc: sp.decl.Desc, Key: sp.decl.Key, Origin: sp.decl.Origin, Lifetime: sp.decl.Lifetime}
-		if rebuildClosures != nil {
-			if rebuilt := rebuildClosures(sp.decl); rebuilt.Desc != "" || rebuilt.Kind != "" {
-				if spec.Origin != nil && rebuilt.Origin == nil {
-					rebuilt.Origin = spec.Origin
-				}
-				if spec.Key != "" && rebuilt.Key == "" {
-					rebuilt.Key = spec.Key
-				}
-				if spec.Lifetime != "" && rebuilt.Lifetime == "" {
-					rebuilt.Lifetime = spec.Lifetime
-				}
-				spec = rebuilt
+		tk := tm.RestoreTask(f.id, spec, started, f.status)
+		if tk == nil {
+			continue
+		}
+		tk.SetDetachedAtMilli(f.detachedAt)
+		if terminal {
+			tk.RestoreSettlement(f.result, f.err, f.settledAt)
+		}
+		for _, raw := range pending {
+			sig := raw.record.signal()
+			if raw.record.Event != nil {
+				sig.SourceID = raw.record.Event.ID
 			}
-		}
-		if spec.Desc == "" {
-			spec.Desc = sp.decl.Desc
-		}
-		started := time.UnixMilli(sp.decl.StartedAtMilli)
-		tk := tm.RestoreTask(sp.id, spec, started, status)
-		if tk != nil && status == task.TaskAliveDetached {
-			tk.SetDetachedAtMilli(detachedMs[sp.id])
+			if tm.RestorePendingDeliveryWithMode(f.id, sig, raw.record.Inline) {
+				pendingFacts = append(pendingFacts, raw.fact)
+			}
 		}
 		restored++
 	}
-	if restored > 0 {
-		log.Infof("[rebuild-task-registry] restored %d active task(s) from fact chain", restored)
+	return restored, pendingFacts
+}
+
+func foldTaskDeclaration(f *taskRegistryFold, decl task.Declarative, ev memory.FullEvent) {
+	if f.cancelled {
+		return
 	}
-	return restored
+	if decl.RoundID == 0 {
+		decl.RoundID = 1
+	}
+	phase := ev.Metadata["admission_phase"]
+	if phase == "cancelled" {
+		if decl.RoundID >= f.decl.RoundID {
+			f.decl, f.status, f.statusKey, f.cancelled = decl, task.TaskCancelled, ev.EventKey, true
+		}
+		return
+	}
+	intent := strings.Contains(phase, "intent") || phase == "spawn" || phase == "accepted" || phase == "round_accepted" || phase == "round_aborted"
+	if decl.StartedAtMilli <= 0 {
+		decl.StartedAtMilli = ev.Timestamp
+	}
+	if decl.RoundID < f.decl.RoundID {
+		return
+	}
+	if intent && f.bound {
+		decl.ProducerRound, decl.ProducerOwner, decl.SignalSeq = f.decl.ProducerRound, f.decl.ProducerOwner, f.decl.SignalSeq
+		decl.TTLAnchorMilli = f.decl.TTLAnchorMilli
+		for _, key := range []string{childInvocationIDParam, localContinuationParam} {
+			if value := f.decl.Params[key]; value != "" {
+				if decl.Params == nil {
+					decl.Params = make(map[string]string)
+				}
+				decl.Params[key] = value
+			}
+		}
+		f.decl = decl
+		return
+	}
+	if !intent && decl.ProducerRound == 0 {
+		decl.ProducerRound = decl.RoundID
+	}
+	if decl.ProducerOwner == "" {
+		decl.ProducerOwner = decl.RoundOwner
+	}
+	newProducer := !f.bound || decl.ProducerRound > f.decl.ProducerRound
+	if decl.ProducerRound < f.decl.ProducerRound {
+		return
+	}
+	f.decl = decl
+	if !intent {
+		f.bound = true
+	}
+	if newProducer {
+		f.status, f.statusKey, f.cancelled = task.TaskSuspect, ev.EventKey, false
+		f.result = ""
+		f.err = nil
+		f.settledAt = time.Time{}
+		f.detachedAt = 0
+	}
+}
+
+func foldTaskSignal(f *taskRegistryFold, raw taskSignalRecord, key int64) {
+	producer := raw.ProducerRound
+	if producer == 0 && raw.Observation != "round_aborted" {
+		producer = raw.RoundID
+	}
+	if raw.RoundID > f.decl.RoundID {
+		f.decl.RoundID = raw.RoundID
+		f.decl.RoundOwner = raw.RoundOwner
+	}
+	if raw.Observation == "round_aborted" {
+		if producer >= f.decl.ProducerRound {
+			f.decl.ProducerRound = producer
+			if raw.ProducerOwner != "" {
+				f.decl.ProducerOwner = raw.ProducerOwner
+			}
+			if raw.ProducerLastSeq > f.decl.SignalSeq {
+				f.decl.SignalSeq = raw.ProducerLastSeq
+			}
+			if raw.ProducerStatus != "" {
+				f.status = raw.ProducerStatus
+			}
+		}
+		return
+	}
+	if raw.RoundID < f.decl.ProducerRound || f.cancelled {
+		return
+	}
+	if raw.RoundID == f.decl.ProducerRound {
+		if owner := f.decl.ProducerOwner; owner != "" && raw.RoundOwner != "" && owner != raw.RoundOwner {
+			return
+		}
+		if invocation := f.decl.Params[childInvocationIDParam]; invocation != "" && raw.ChildInvocationID != "" && invocation != raw.ChildInvocationID {
+			return
+		}
+	}
+	if raw.RoundID > f.decl.ProducerRound {
+		f.decl.ProducerRound = raw.RoundID
+		f.decl.ProducerOwner = raw.RoundOwner
+		f.decl.SignalSeq = 0
+	}
+	if raw.Seq < f.decl.SignalSeq {
+		return
+	}
+	f.decl.SignalSeq = raw.Seq
+	if raw.LifetimeAnchorMilli > 0 {
+		f.decl.TTLAnchorMilli = raw.LifetimeAnchorMilli
+	}
+	if raw.ChildInvocationID != "" {
+		if f.decl.Params == nil {
+			f.decl.Params = make(map[string]string)
+		}
+		f.decl.Params[childInvocationIDParam] = raw.ChildInvocationID
+		f.decl.Params[localContinuationParam] = strconv.FormatBool(raw.ChildContinuation)
+	}
+	if raw.ErrorKind == "continuation_interrupted" {
+		f.status = task.TaskSuspect
+		f.statusKey = key
+		return
+	}
+	sig := raw.signal()
+	f.statusKey = key
+	f.result, f.err, f.settledAt = raw.Output, sig.Err, raw.ObservedAt
+	switch raw.Kind {
+	case task.SettleCompleted:
+		f.status = task.TaskCompleted
+		if sig.Err != nil {
+			f.status = task.TaskFailed
+		}
+	case task.SettleFailed:
+		f.status = task.TaskFailed
+	case task.SettleStable, task.SettleReady:
+		f.status = task.TaskAliveDetached
+	case task.SettleSuspect:
+		f.status = task.TaskSuspect
+	}
+}
+
+func foldLegacyTaskSettle(f *taskRegistryFold, ev memory.FullEvent) {
+	if source := ev.Metadata[tagentevent.MetaKeySourceEventID]; source != "" {
+		for _, raw := range f.raw {
+			if raw.record.Event != nil && raw.record.Event.ID == source {
+				return
+			}
+		}
+	}
+	status := ev.Metadata["settle_status"]
+	if status == "" || status == "watch" || f.cancelled {
+		return
+	}
+	round, _ := strconv.ParseUint(ev.Metadata[tagentevent.MetaKeyTaskRoundID], 10, 64)
+	if round == 0 {
+		round = 1
+		if status == "cancelled" && f.decl.ProducerRound > 0 {
+			round = f.decl.ProducerRound
+		}
+	}
+	if round < f.decl.ProducerRound || ev.EventKey < f.statusKey {
+		return
+	}
+	if ms, err := strconv.ParseInt(ev.Metadata["detached_at_ms"], 10, 64); err == nil && ms > 0 {
+		f.detachedAt = ms
+	}
+	f.statusKey = ev.EventKey
+	f.settledAt = time.UnixMilli(ev.Timestamp)
+	switch status {
+	case "completed":
+		f.status = task.TaskCompleted
+	case "failed":
+		f.status = task.TaskFailed
+	case "cancelled":
+		f.status = task.TaskCancelled
+		f.cancelled = true
+	case "dead":
+		f.status = task.TaskDead
+	case "alive-detached", "alive_detached", "ready":
+		f.status = task.TaskAliveDetached
+	case "suspect":
+		f.status = task.TaskSuspect
+	}
+}
+
+func taskSignalReceiptMatches(fact memory.FullEvent, raw taskSignalRecord, receipt memory.FullEvent) bool {
+	if receipt.EventType != tagentevent.TypeTaskSignalReceipt || receipt.EventKey == 0 || receipt.EventKey != raw.ReceiptKey || receipt.Content != tagentevent.FormatEventKey(fact.EventKey) {
+		return false
+	}
+	if receipt.PartitionID != fact.PartitionID || receipt.Timestamp != fact.Timestamp || receipt.Timestamp != raw.ObservedAt.UnixMilli() {
+		return false
+	}
+	if memory.PartitionIDFromEventKey(fact.EventKey) != fact.PartitionID || memory.PartitionIDFromEventKey(receipt.EventKey) != fact.PartitionID {
+		return false
+	}
+	if receipt.Metadata["task_id"] != raw.TaskID || receipt.Metadata[tagentevent.MetaKeyTaskRoundID] != strconv.FormatUint(raw.RoundID, 10) || receipt.Metadata[tagentevent.MetaKeyTaskSignalSeq] != strconv.FormatUint(raw.Seq, 10) {
+		return false
+	}
+	if raw.Event != nil && receipt.Metadata[tagentevent.MetaKeySourceEventID] != raw.Event.ID {
+		return false
+	}
+	return receipt.Metadata[childInvocationIDParam] == raw.ChildInvocationID && receipt.Metadata[tagentevent.MetaKeyTaskRoundOwner] == fact.Metadata[tagentevent.MetaKeyTaskRoundOwner]
+}
+
+func restoredTaskSpec(decl task.Declarative, rebuild func(task.Declarative) task.TaskSpec) task.TaskSpec {
+	spec := task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, Origin: decl.Origin, Lifetime: decl.Lifetime, Mode: decl.Mode, WaitFor: decl.WaitFor, RoundOwner: decl.RoundOwner, Declarative: &decl}
+	if rebuild != nil {
+		built := rebuild(decl)
+		if built.Kind != "" || built.Desc != "" {
+			if built.Kind == "" {
+				built.Kind = spec.Kind
+			}
+			if built.Desc == "" {
+				built.Desc = spec.Desc
+			}
+			if built.Key == "" {
+				built.Key = spec.Key
+			}
+			built.Origin, built.Lifetime, built.Mode, built.WaitFor, built.RoundOwner, built.Declarative = decl.Origin, decl.Lifetime, decl.Mode, decl.WaitFor, decl.RoundOwner, &decl
+			spec = built
+		}
+	}
+	if spec.TTL <= 0 {
+		if seconds, err := strconv.ParseInt(decl.Params[subagentTTLParam], 10, 64); err == nil && seconds > 0 {
+			spec.TTL = time.Duration(seconds) * time.Second
+		}
+	}
+	return spec
 }

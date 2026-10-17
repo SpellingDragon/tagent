@@ -1004,6 +1004,9 @@ func runResume(t *testing.T, w *AgentToolWrapper, rounds *subagentRounds, input 
 	if err != nil {
 		t.Fatalf("resume must succeed for a task with a settled round: %v", err)
 	}
+	if active, ok := detector.(task.ActivatableDetector); ok {
+		active.Start()
+	}
 	sig := <-detector.Settled()
 	if sig.Err != nil {
 		t.Fatalf("resumed run errored: %v", sig.Err)

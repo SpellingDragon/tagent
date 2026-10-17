@@ -13,11 +13,24 @@ import (
 //
 // 契约: docs/wiki/event/event-architecture.md#metadata-keys
 const (
-	MetaKeyEventKey      = "event_key"
-	MetaKeyPartitionID   = "partition_id"
-	MetaKeyEventType     = "event_type"
-	MetaKeyEventSummary  = "event_summary"
-	MetaKeyTriggerSource = "trigger_source"
+	MetaKeyTaskMode              = "task_mode"
+	MetaKeyTaskWaitFor           = "wait_for"
+	MetaKeyTaskRoundID           = "task_round_id"
+	MetaKeyTaskRoundOwner        = "task_round_owner"
+	MetaKeyTaskSignalSeq         = "task_signal_seq"
+	MetaKeyTaskProducerRoundID   = "task_producer_round_id"
+	MetaKeySettleWaitSatisfied   = "settle_wait_satisfied"
+	MetaKeySettleObservation     = "settle_observation"
+	MetaKeySettleWake            = "settle_wake"
+	MetaKeyObservationReceiptKey = "observation_receipt_key"
+	MetaKeyInputDisposition      = "input_disposition"
+	MetaKeyConsumedEventKey      = "consumed_event_key"
+	MetaKeyContinuationID        = "continuation_id"
+	MetaKeyEventKey              = "event_key"
+	MetaKeyPartitionID           = "partition_id"
+	MetaKeyEventType             = "event_type"
+	MetaKeyEventSummary          = "event_summary"
+	MetaKeyTriggerSource         = "trigger_source"
 
 	// MetaKeyTaskInlineRecord 标记回合内已作为 tool result 返回的账目记录，仅经
 	// IsNonProjectionRecord 消费。

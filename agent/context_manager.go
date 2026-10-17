@@ -60,11 +60,13 @@ type ContextManager struct {
 	// NewContextManager 从 cfg 取快照；每次 PublishExecutor 更新为该代真实执行面——
 	// 快照即「当前生效绑定」，供诊断与「原样重发同一执行面」使用。候选构造不得把它
 	// 当隐式回落源：回落会把已清空的字段退回上一份，属主换代后留下旧绑定。
-	memPlugin    *plugin.MemoryPlugin
-	sessionSvc   session.Service
-	execCfg      ContextManagerConfig
-	tokenCounter compress.TokenCounter
-	memStore     memory.MemoryStore
+	memPlugin               *plugin.MemoryPlugin
+	sessionSvc              session.Service
+	execCfg                 ContextManagerConfig
+	tokenCounter            compress.TokenCounter
+	memStore                memory.MemoryStore
+	taskSignalOwnerResolver func(string) *TagentAgent
+	taskSignalJournal       *taskRecordSink
 
 	// runner Framework integration
 	runner     runner.Runner
@@ -86,11 +88,13 @@ type ContextManager struct {
 	// owner whose bounded Close could not finish because an execution never
 	// confirmed a stop, fired at most once when the last held generation is
 	// reclaimed with nothing referencing it (see armFullyDrained).
-	drainedHook atomic.Pointer[func()]
-	drainedOnce sync.Once
-	name        string
-	userID      string
-	sessionID   string
+	drainedHook         atomic.Pointer[func()]
+	drainedOnce         sync.Once
+	name                string
+	userID              string
+	sessionID           string
+	continuationID      string
+	inlineTaskTurnToken string
 
 	// outputCh Event routing
 	outputCh   chan *event.Event
@@ -880,9 +884,16 @@ func (cm *ContextManager) retireBinding(b *execBinding) {
 	if cm.retiredBindings == nil {
 		cm.retiredBindings = map[*execBinding]struct{}{}
 	}
-	cm.retiredBindings[b] = struct{}{}
+	b.mu.Lock()
+	closed := b.closed
+	if !closed {
+		cm.retiredBindings[b] = struct{}{}
+	}
+	b.mu.Unlock()
 	cm.retiredMu.Unlock()
-	b.release(leaseKindNoop)
+	if !closed {
+		b.release(leaseKindNoop)
+	}
 }
 
 // forgetBinding drops a closed generation from the unconverged list so the
@@ -1024,14 +1035,16 @@ func (cm *ContextManager) UnconvergedRefs() []UnconvergedRef {
 	var out []UnconvergedRef
 	for b := range cm.retiredBindings {
 		g := b.snapshot()
-		if g.Closed || g.Total == 0 {
+		if g.Closed {
 			continue
 		}
 		out = append(out, UnconvergedRef{
-			Generation: g.Generation,
-			Owner:      g.Owner,
-			HeldFor:    time.Since(b.retiredAt),
-			Refs:       g.Refs,
+			Generation:      g.Generation,
+			Owner:           g.Owner,
+			HeldFor:         time.Since(b.retiredAt),
+			Refs:            g.Refs,
+			DeclaredHolders: g.DeclaredHolders,
+			Reclaiming:      g.Reclaiming,
 		})
 	}
 	return out
@@ -1220,6 +1233,7 @@ func (cm *ContextManager) turnOverheadText(args *model.BeforeModelArgs) string {
 	var parts []string
 	if cm.taskController != nil {
 		board := task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+		cm.settleSinks.compact(cm.taskController)
 		cm.boardMu.Lock()
 		cm.boardReq, cm.boardText = args.Request, board
 		cm.boardMu.Unlock()
@@ -1277,6 +1291,9 @@ func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) 
 		compress.CompactionPayloadMetaKey: raw,
 		tagentevent.MetaKeyAgentName:      cm.name,
 	}
+	if cm.continuationID != "" {
+		md[tagentevent.MetaKeyContinuationID] = cm.continuationID
+	}
 	if cm.sessionID != "" {
 		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
 	}
@@ -1313,26 +1330,21 @@ func (cm *ContextManager) latestCompactionKey() int64 {
 	if cm.memStore == nil {
 		return 0
 	}
-	refs, err := cm.memStore.QueryEvents(memory.QueryOptions{
-		PartitionIDs: []int{cm.partitionID},
-		EventTypes:   []string{tagentevent.TypeContextCompressSummary},
-		OrderBy:      "timestamp_desc",
-		Limit:        5,
-	})
-	if err != nil {
-		return 0
-	}
-	for _, r := range refs {
-		evt, err := cm.memStore.GetEvent(r.EventKey)
-		if err != nil || evt == nil {
-			continue
+	for offset := 0; ; offset += 100 {
+		refs, err := cm.memStore.QueryEvents(memory.QueryOptions{PartitionIDs: []int{cm.partitionID}, EventTypes: []string{tagentevent.TypeContextCompressSummary}, OrderBy: "timestamp_desc", Limit: 100, Offset: offset})
+		if err != nil {
+			return 0
 		}
-		if evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 &&
-			evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name {
-			return r.EventKey
+		for _, r := range refs {
+			evt, err := cm.memStore.GetEvent(r.EventKey)
+			if err == nil && evt != nil && evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 && evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name && evt.Metadata[tagentevent.MetaKeyContinuationID] == cm.continuationID {
+				return r.EventKey
+			}
+		}
+		if len(refs) < 100 {
+			return 0
 		}
 	}
-	return 0
 }
 
 // persistTaskRecord：记录-only 持久化——只写
@@ -1482,11 +1494,21 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 	fullEvent.Metadata = map[string]string{
 		tagentevent.MetaKeyAgentName: cm.name,
 	}
+	if cm.continuationID != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyContinuationID] = cm.continuationID
+	}
+	if evt.ID != "" {
+		fullEvent.Metadata[tagentevent.MetaKeySourceEventID] = evt.ID
+	}
+	if evt.observationReceiptKey != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyObservationReceiptKey] = evt.observationReceiptKey
+	}
 	if cm.triggerSource != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
 	}
 	if evt.Source == SourceTask {
-		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal} {
+		for _, k := range []string{"task_id", "settle_status", "settle_notice", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal,
+			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskProducerRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key", "task_signal_owner", taskBatchSignalsKey, "spill_path"} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -1747,6 +1769,9 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 	if cm.triggerSource != "" {
 		attr[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
 	}
+	if cm.continuationID != "" {
+		attr[tagentevent.MetaKeyContinuationID] = cm.continuationID
+	}
 	return attr
 }
 
@@ -1845,6 +1870,7 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 	if err := lease.Err(); err != nil {
 		return fmt.Errorf("%w: agent %q turn", err, cm.name)
 	}
+	ctx = withCommandRelauncherForLease(ctx, lease)
 	if cm.turnEcho != nil {
 		cred := cm.newAttemptEchoCredential()
 		cm.lastEchoCred = cred
@@ -1872,7 +1898,9 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 		traceID, spanID := spanTraceIDs(ctx)
 		ts := cm.triggerSource
 		invID, _ := invocationIDFromContext(ctx)
-		if len(md) > 0 || traceID != "" || ts != "" || invID != "" {
+		ctx = task.WithRoundOwner(ctx, invID)
+		ctx = task.WithInputBatchID(ctx, cm.inlineTaskTurnToken)
+		if len(md) > 0 || traceID != "" || ts != "" || invID != "" || cm.inlineTaskTurnToken != "" {
 			cp := make(map[string]string, len(md)+4)
 			for k, v := range md {
 				cp[k] = v
@@ -1887,7 +1915,10 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 			if invID != "" {
 				cp[metaKeyInvocationID] = invID
 			}
-			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
+			if cm.inlineTaskTurnToken != "" {
+				cp["task_inline_turn"] = cm.inlineTaskTurnToken
+			}
+			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp, RoundOwner: invID, InputBatchID: cm.inlineTaskTurnToken}
 			if invID != "" && cm.settleSinks != nil {
 				spawner = &countingSpawner{inner: spawner, sinks: cm.settleSinks, id: invID}
 			}
@@ -1991,6 +2022,7 @@ func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	board, reused := cm.takeTurnBoard(args)
 	if !reused {
 		board = task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+		cm.settleSinks.compact(cm.taskController)
 	}
 	if board != "" {
 		args.Request.Messages = task.InjectBoard(args.Request.Messages, board)
@@ -2018,13 +2050,16 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 func (cm *ContextManager) allBindings() []*execBinding {
 	var out []*execBinding
 	cm.executorMu.RLock()
-	if cm.active != nil {
-		out = append(out, cm.active)
+	active := cm.active
+	if active != nil {
+		out = append(out, active)
 	}
 	cm.executorMu.RUnlock()
 	cm.retiredMu.Lock()
 	for b := range cm.retiredBindings {
-		out = append(out, b)
+		if b != active {
+			out = append(out, b)
+		}
 	}
 	cm.retiredMu.Unlock()
 	return out
@@ -2073,18 +2108,24 @@ func (cm *ContextManager) retireActiveBinding() {
 // ErrExecUnconverged so no caller can claim a clean close. The holder acts on it
 // by keeping the shared resources they ride on (see agent.Close).
 func (cm *ContextManager) Close() error {
-	cm.retireActiveBinding()
-	cm.WaitForInFlight(execCloseGrace)
-	held := cm.UnconvergedRefs()
-	if len(held) == 0 {
-		cm.retiredMu.Lock()
-		cm.retiredBindings = nil
-		cm.retiredMu.Unlock()
-		return nil
+	cm.retireForOwnerClose()
+	deadline := time.NewTimer(execCloseGrace)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for len(cm.UnconvergedRefs()) > 0 {
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			held := cm.UnconvergedRefs()
+			if len(held) == 0 {
+				return nil
+			}
+			log.Warnf("[ContextManager] bounded close retained %d generation(s): %+v", len(held), held)
+			return fmt.Errorf("%w: %d generation(s) still held: %+v", ErrExecUnconverged, len(held), held)
+		}
 	}
-	log.Warnf("[ContextManager] bounded close left %d unconverged generation(s): %+v — their executors are HELD, not force-closed; investigate the execution that never confirmed a stop",
-		len(held), held)
-	return fmt.Errorf("%w: %d generation(s) still referenced: %+v", ErrExecUnconverged, len(held), held)
+	return nil
 }
 
 // WaitForInFlight blocks until every outstanding execution reference (resident

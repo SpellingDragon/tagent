@@ -1421,7 +1421,9 @@ func TestSettleUnboundFallsBackToBus(t *testing.T) {
 		return &task.Task{Spec: task.TaskSpec{Origin: map[string]string{metaKeyInvocationID: id}}}
 	}
 
-	deliverTaskSettled(sinks, fallback, tk("nobody"), &AgentEvent{ID: "b1", Source: SourceTask})
+	require.False(t, deliverTaskSettled(sinks, fallback, tk("nobody"), &AgentEvent{ID: "private", Source: SourceTask}))
+	require.Empty(t, fallback.TryPull())
+	require.True(t, deliverTaskSettled(sinks, fallback, tk(""), &AgentEvent{ID: "b1", Source: SourceTask}))
 	var onBus bool
 	for _, e := range fallback.TryPull() {
 		if e != nil && e.ID == "b1" {
@@ -1839,14 +1841,14 @@ func TestReentry_InitiatorOnOlderGenerationKeepsItsOwnTarget(t *testing.T) {
 
 	un := h.g1Refs()
 	require.NotNil(t, un, "G1 is retired and still referenced, so it must be on the unconverged list")
-	require.Equal(t, 1, un.Refs[LeaseSubCall.String()],
+	require.Equal(t, 1, un.Refs[LeaseBackground.String()],
 		"the re-entry holds its OWN reference kind on the generation it resolved against")
 	require.Zero(t, h.gen1.closed.Load(), "a running re-entry keeps its generation open")
 
 	close(gate)
 	require.Eventually(t, func() bool {
 		u := h.g1Refs()
-		return u == nil || u.Refs[LeaseSubCall.String()] == 0
+		return u == nil || u.Refs[LeaseBackground.String()] == 0
 	}, 5*time.Second, 10*time.Millisecond, "the reference drops exactly when the re-entered producer stops")
 	require.Zero(t, h.gen1.closed.Load(), "the initiator's own turn reference still holds it")
 
@@ -2392,7 +2394,7 @@ func TestNewTaskSettledEvent_LargeResultSpills(t *testing.T) {
 	if strings.Count(content, "x") >= 5000 {
 		t.Error("event Content must stay bounded (tail only, not the full body)")
 	}
-	matches, _ := filepath.Glob(filepath.Join(dir, "task-t3-large-*.txt"))
+	matches, _ := filepath.Glob(filepath.Join(dir, "task-*.txt"))
 	if len(matches) != 1 {
 		t.Fatalf("expected one spilled file under %s, got %v", dir, matches)
 	}
@@ -2481,17 +2483,17 @@ func TestNewTaskSettledEvent_CarriesOrigin(t *testing.T) {
 	}
 }
 
-// TestNewTaskSettledEvent_NoOriginSafe 钉住 无来源袋的任务所产事件不携带路由元数据，但三个确定性事实必须在场。
-// - 结算裁决供反馈路径读取；任务标识是机器可读的登记键，绝不从内容反解；
-// - 谱系缺失标记让宿主扣住回收产出，而不走机械的 task 兜底投递；三者都不是路由袋。
-// - settle_notice 是产源识别权威标记（折叠资格，D10），同样不属于路由袋。
+// TestNewTaskSettledEvent_NoOriginSafe retains protocol identity without introducing a route for unattributed work.
 func TestNewTaskSettledEvent_NoOriginSafe(t *testing.T) {
 	tk := &task.Task{ID: "t2", Spec: task.TaskSpec{Desc: "x"}}
 	evt := newTaskSettledEvent(tk, task.SettleSignal{Kind: task.SettleCompleted}, 0, "")
-	for k := range evt.Metadata {
-		if k != "settle_status" && k != "task_id" && k != "lineage_absent" && k != "settle_notice" && k != tagentevent.MetaKeySettleFinal {
-			t.Errorf("no-origin task should carry no routing metadata, got key %q in %v", k, evt.Metadata)
+	for _, key := range []string{"chat_id", "user_name", metaKeyInvocationID} {
+		if _, exists := evt.Metadata[key]; exists {
+			t.Errorf("unattributed task unexpectedly gained route %q: %v", key, evt.Metadata)
 		}
+	}
+	if owner := evt.Metadata[tagentevent.MetaKeyTaskRoundOwner]; owner != "" {
+		t.Errorf("unattributed task gained a private owner: %v", owner)
 	}
 	if evt.Metadata["settle_notice"] != "true" {
 		t.Errorf("settle_notice mark must be stamped at the producer (fold authority), got %v", evt.Metadata["settle_notice"])

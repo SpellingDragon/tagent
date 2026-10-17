@@ -472,6 +472,7 @@ func (cc *ContextCompressor) Compress(
 		}
 	}
 
+	refs = cc.FoldConsumedObservations(ctx, refs)
 	resolved := cc.resolveRefs(ctx, refs)
 
 	usedTokens := cc.tokenCounter.Estimate(resolved)
@@ -787,6 +788,30 @@ func extractToolNameFromSummary(summary string) string {
 		return ""
 	}
 	return strings.TrimPrefix(s, "调用 ")
+}
+
+// FoldConsumedObservations replaces formally consumed observations with recall tickets.
+func (cc *ContextCompressor) FoldConsumedObservations(ctx context.Context, refs []memory.EventReference) []memory.EventReference {
+	dispositions := make(map[int64]int8)
+	for _, ref := range refs {
+		if ctx.Err() != nil {
+			return refs
+		}
+		if !isSettleNoticeCandidate(ref) {
+			continue
+		}
+		evt := lookupNoticeEvent(cc.memStore, ref)
+		if evt == nil || !isMarkedSettleNotice(evt) || evt.Metadata[tagentevent.MetaKeySettleWake] != "observe" {
+			continue
+		}
+		if kind := VerifiedInputDisposition(cc.memStore, evt); kind == "observed" || kind == "recovered" {
+			dispositions[ref.EventKey] = TelemDemote
+		}
+	}
+	if len(dispositions) == 0 {
+		return refs
+	}
+	return cc.foldSettleRuns(refs, dispositions)
 }
 
 // foldSettleRuns collapses maximal runs of ≥2 consecutive settle-notification

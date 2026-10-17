@@ -60,32 +60,33 @@
 
 ### Requirement: 启动重挂与任务重关联
 
-冷启动 SHALL 在投影重建（R1）与任务注册表重建（R2）之后调用 `ReattachResidentSessions`：存活 named 会话重建 monitor 跟踪；其关联任务（TaskID 桥）在重建 registry 中仍 active → 会话与任务重关联（探测恢复、watch 续期）；会话已死 → 任务走 settle 补偿。重挂 SHALL best-effort（单个会话失败不阻断启动）。
+冷启动 SHALL 在任务与私有调用登记后重挂native资源，核验TaskID及不可变resource identity，恢复原producer round/seq、输出字节基线和资源phase。恢复旧无identity材料时 SHALL 安全取得并提交identity后启用观察。相同session名的替换资源 MUST NOT 被当作旧任务续行；已消失资源 SHALL 明确结算失败。未资源化intent只经原intentprepare/绑定后激活，已有资源MUST NOT重复执行命令。
 
-#### Scenario: 存活会话+active 任务重关联
+#### Scenario: 名称相同但资源已替换
+- **WHEN** 当前native session名称与历史相同而resource identity不同
+- **THEN** 不发送输入、不采样或kill该替换资源，旧任务明确失败或需对账
 
-- **GIVEN** 重启前任务 T（running）绑定会话 S（n-x，存活）
-- **WHEN** 冷启动：registry 重建（T→suspect）→ 重挂（S 恢复跟踪）
-- **THEN** T 与 S SHALL 重关联，T 经探测裁决恢复 running（或 S 死→T 走 settle 补偿）
-- **AND** 后续 S 的输出/结算继续路由到 T
-
-#### Scenario: 在途交互命令跨重启续用
-
-- **GIVEN** 用户在 interactive 会话中的长任务跨重启存活
-- **WHEN** 重挂完成
-- **THEN** LLM SHALL 可经 resume（R2 声明式 spec）继续向该会话发送输入，SHALL NOT 因重启而失联
+#### Scenario: 原资源仍活
+- **WHEN** 原identity和producer round可核验
+- **THEN** 恢复原基线与seq并真实接通信号链，不从round 1重采样
 
 ### Requirement: 长驻会话无年龄死刑
-resident/interactive 会话 MUST NOT 仅因自最初 spawn 起超过某时长而被清理；清理判定 MUST 以「无人持有」为必要条件：先对全部候选尝试收养（任务引用或 owner 在册即收养并刷新 last_adopted_at），仅对收养后仍无人持有且超过独立 orphan grace（自最后收养时间起算）的会话执行清理。最初 SpawnedAt 仅作展示。
 
-#### Scenario: 运行多日的正常会话重启
-- **WHEN** 一个正常运行超过 24 小时、仍有任务引用的 resident 会话经历进程重启重挂
-- **THEN** 该会话 MUST 被收养继续存活，MUST NOT 被当作孤儿清理
+孤儿清扫 SHALL 先尝试收养，MUST NOT 仅按初次spawn年龄清理仍有owner或任务引用的resident资源；只对仍无人持有且超过orphan grace的资源清理。该孤儿规则 MUST NOT 给受管任务的统一TTL提供豁免：已登记Task仍在自己的绝对TTL到期时由owner取消。
+
+#### Scenario: 老服务被正常收养
+- **WHEN** 原资源仍有合法任务/owner且其Task TTL尚未到期
+- **THEN** 不因出生年龄被孤儿清扫误杀
+
+#### Scenario: 受管服务TTL到期
+- **WHEN** resident Task的统一TTL到期
+- **THEN** 仍由任务owner请求终止，不能用孤儿清扫豁免绕过TTL
 
 ### Requirement: 重挂后信号链真实接通
-重挂恢复的会话 MUST 接通完整信号消费链：重挂路径创建的 detector MUST 绑定到 TaskManager 对应任务并启动 monitor；跨重启 resume 在会话相同时 MUST 复用现有绑定、会话不同时 MUST 原子替换生产端与消费端。「会话存在 / 看板 running / tracked=true」MUST NOT 单独作为恢复成功证据——验收 MUST 观察到真实 watch/settle 信号到达 TaskManager。
 
-#### Scenario: 重挂后后台任务完成
-- **WHEN** 重挂的 resident 会话中恢复的任务随后真实完成并输出
-- **THEN** 完成信号 MUST 经绑定 detector 到达 TaskManager 并结算该任务（看板与事件同步终态）
+恢复 SHALL 绑定原Task producer round并证明真实watch/settle到达；tracked=true、看板running或同名session不足以证明恢复。terminal只能ACK-only绑定原receipt，receiver全部就绪后才放行pending交付。活执行保持原资源；新意图与实际producer换代原子记录，旧捕获不能改新轮。
+
+#### Scenario: 终局待受理恢复
+- **WHEN** 原terminal receipt已保存但receiver尚未受理
+- **THEN** 使用原round/seq/time/body恢复ACK链，不重采样或提前清理证据
 

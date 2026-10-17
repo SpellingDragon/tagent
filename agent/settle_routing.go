@@ -3,38 +3,125 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
 	tagentevent "github.com/SpellingDragon/tagent/event"
-	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// settleSinkRegistry is the routing table for the M2 per-invocation loop. It is
-// deliberately ONLY two things after the pipeline convergence: a binding table from
-// invocation id to that invocation own EventBus, and the delivery-accounting barrier
-// pending = spawned minus delivered round endings per id.
-//
-// - A settle destination is looked up, never inferred from the event content.
-// 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
+type settleAcceptor func(context.Context, *AgentEvent) (PublishReceipt, error)
+
+type settleWaitSnapshot struct {
+	TaskID  string             `json:"task_id"`
+	RoundID uint64             `json:"round_id"`
+	WaitFor task.WaitCondition `json:"wait_for"`
+}
+
+type settleSequenceRange struct {
+	First uint64 `json:"first"`
+	Last  uint64 `json:"last"`
+}
+
+type settleStreamSnapshot struct {
+	TaskID        string                `json:"task_id"`
+	RoundID       uint64                `json:"round_id"`
+	Accepted      []settleSequenceRange `json:"accepted,omitempty"`
+	Owner         string                `json:"owner,omitempty"`
+	Lifetime      string                `json:"lifetime,omitempty"`
+	WaitFor       task.WaitCondition    `json:"wait_for,omitempty"`
+	WaitSatisfied bool                  `json:"wait_satisfied,omitempty"`
+	Terminal      bool                  `json:"terminal,omitempty"`
+}
+
+type settleRoutingSnapshot struct {
+	Waits   []settleWaitSnapshot   `json:"waits,omitempty"`
+	Streams []settleStreamSnapshot `json:"streams,omitempty"`
+}
+
+type settleWaitKey struct {
+	taskID  string
+	roundID uint64
+	waitFor task.WaitCondition
+}
+
+type settleProducerKey struct {
+	taskID  string
+	roundID uint64
+}
+
+type settleDeliveryKey struct {
+	sourceID string
+	taskID   string
+	roundID  uint64
+	seq      uint64
+}
+
+type settleBooking struct {
+	inv    string
+	key    settleWaitKey
+	active bool
+}
+
+type settleStream struct {
+	accepted      []settleSequenceRange
+	owner         string
+	lifetime      string
+	tk            *task.Task
+	waitFor       task.WaitCondition
+	waitSatisfied bool
+	terminal      bool
+}
+
+type settleAttempt struct {
+	done     chan struct{}
+	accepted bool
+}
+
+type settleInvocation struct {
+	changed     chan struct{}
+	idle        chan struct{}
+	destination settleAcceptor
+	sealed      bool
+	pause       *int
+	inFlight    int
+	retired     bool
+	bookings    map[*settleBooking]struct{}
+	waits       map[settleWaitKey]*settleBooking
+	streams     map[settleProducerKey]*settleStream
+}
+
 type settleSinkRegistry struct {
-	mu      sync.Mutex
-	byInv   map[string]*EventBus
-	pending map[string]int
+	mu       sync.Mutex
+	byInv    map[string]*EventBus
+	pending  map[string]int
+	states   map[string]*settleInvocation
+	inFlight map[settleDeliveryKey]*settleAttempt
 }
 
-func newSettleSinkRegistry() *settleSinkRegistry {
-	return &settleSinkRegistry{
-		byInv:   make(map[string]*EventBus),
-		pending: make(map[string]int),
+func newSettleSinkRegistry() *settleSinkRegistry { return &settleSinkRegistry{} }
+
+func (r *settleSinkRegistry) stateLocked(id string) *settleInvocation {
+	if r.states == nil {
+		r.states = make(map[string]*settleInvocation)
 	}
+	s := r.states[id]
+	if s == nil {
+		s = &settleInvocation{changed: make(chan struct{})}
+		r.states[id] = s
+	}
+	return s
 }
 
-// bind opens the delivery window (pending=0) for invocation id and records the
-// bus its loop consumes. The shared shell (runAgentLoop) is that bus's sole
-// consumer, so a settle published by route is pulled by the very loop that owns
-// the id. Empty id or nil bus is a no-op (non-delegation turn, or a loop that
-// binds nothing → keeps the persistentBus fallback).
+func (r *settleSinkRegistry) changedLocked(s *settleInvocation) {
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
 func (r *settleSinkRegistry) bind(id string, bus *EventBus) {
 	if r == nil || id == "" || bus == nil {
 		return
@@ -44,16 +131,12 @@ func (r *settleSinkRegistry) bind(id string, bus *EventBus) {
 	if r.byInv == nil {
 		r.byInv = make(map[string]*EventBus)
 	}
-	if r.pending == nil {
-		r.pending = make(map[string]int)
-	}
+	s := r.stateLocked(id)
+	s.retired = false
 	r.byInv[id] = bus
-	r.pending[id] = 0
+	r.changedLocked(s)
 }
 
-// unbind drops the binding + accounting for id. The owning loop calls it on exit
-// (before its channel closes), so a settle that arrives afterward finds no
-// binding and falls back to the bus — a safe drop, never a send on a dead sink.
 func (r *settleSinkRegistry) unbind(id string) {
 	if r == nil || id == "" {
 		return
@@ -61,129 +144,852 @@ func (r *settleSinkRegistry) unbind(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.byInv, id)
-	delete(r.pending, id)
+	if s := r.states[id]; s != nil {
+		for b := range s.bookings {
+			b.active = false
+		}
+		s.bookings = nil
+		s.waits = nil
+		delete(r.pending, id)
+		r.changedLocked(s)
+	}
+	r.compactLocked()
 }
 
-// noteSpawn records that a task attributed to invocation id was spawned, so its
-// future settle is expected. It only counts while a bus is bound for id — a
-// delegation with no live loop (entry owner) is not accounted and keeps the bus
-// behavior with no bookkeeping.
-func (r *settleSinkRegistry) noteSpawn(id string) {
+func (r *settleSinkRegistry) book(id string, waitFor task.WaitCondition) *settleBooking {
 	if r == nil || id == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[id]
+	if s == nil || (r.byInv[id] == nil && s.destination == nil) || s.retired {
+		return nil
+	}
+	b := &settleBooking{inv: id, key: settleWaitKey{waitFor: waitFor}, active: true}
+	if s.bookings == nil {
+		s.bookings = make(map[*settleBooking]struct{})
+	}
+	s.bookings[b] = struct{}{}
+	if r.pending == nil {
+		r.pending = make(map[string]int)
+	}
+	r.pending[id]++
+	r.changedLocked(s)
+	return b
+}
+
+func (r *settleSinkRegistry) bindBooking(b *settleBooking, tk *task.Task) {
+	if r == nil || b == nil || tk == nil {
+		return
+	}
+	snapshot := tk.RoutingSnapshot()
+	spec := snapshot.Spec
+	key := settleWaitKey{taskID: tk.ID, roundID: snapshot.RoundID, waitFor: task.WaitForOf(spec)}
+	if key.taskID == "" || key.roundID == 0 {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byInv[id]; ok {
-		r.pending[id]++
+	s := r.states[b.inv]
+	if !b.active || s == nil {
+		return
 	}
+	if b.key.taskID != "" {
+		if b.key.taskID == key.taskID && b.key.roundID == key.roundID && b.key.waitFor != key.waitFor {
+			delete(s.waits, b.key)
+			b.key = key
+			s.waits[key] = b
+			stream := r.streamLocked(s, settleProducerKey{taskID: key.taskID, roundID: key.roundID})
+			if stream.waitSatisfied && (stream.waitFor == "" || stream.waitFor == key.waitFor) {
+				r.voidBookingLocked(b, s)
+			}
+			r.changedLocked(s)
+		}
+		return
+	}
+	b.key = key
+	if s.waits == nil {
+		s.waits = make(map[settleWaitKey]*settleBooking)
+	}
+	if prior := s.waits[key]; prior != nil && prior != b {
+		r.voidBookingLocked(b, s)
+		return
+	}
+	s.waits[key] = b
+	stream := r.streamLocked(s, settleProducerKey{taskID: tk.ID, roundID: key.roundID})
+	stream.tk, stream.owner, stream.lifetime = tk, b.inv, task.LifetimeOf(spec)
+	stream.waitFor = key.waitFor
+	r.changedLocked(s)
 }
 
-// voidSpawn removes a booking for an inline round ending or an unadopted task.
-// Inline stable/watch observations keep their booking for the later final signal.
+func (r *settleSinkRegistry) voidBookingLocked(b *settleBooking, s *settleInvocation) {
+	if b == nil || !b.active || s == nil {
+		return
+	}
+	b.active = false
+	delete(s.bookings, b)
+	if s.waits[b.key] == b {
+		delete(s.waits, b.key)
+	}
+	if r.pending[b.inv] > 1 {
+		r.pending[b.inv]--
+	} else {
+		delete(r.pending, b.inv)
+	}
+	r.changedLocked(s)
+}
+
+func (r *settleSinkRegistry) voidBooking(b *settleBooking) {
+	if r == nil || b == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.voidBookingLocked(b, r.states[b.inv])
+}
+
+func (r *settleSinkRegistry) noteSpawn(id string) { r.book(id, task.WaitExit) }
+
 func (r *settleSinkRegistry) voidSpawn(id string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s := r.states[id]; s != nil {
+		for b := range s.bookings {
+			if b.key.taskID == "" {
+				r.voidBookingLocked(b, s)
+				return
+			}
+		}
+	}
+}
+
+func (r *settleSinkRegistry) waitState(id string) (bool, <-chan struct{}) {
+	if r == nil || id == "" {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[id]
+	if s == nil {
+		return false, nil
+	}
+	return len(s.bookings) > 0, s.changed
+}
+
+func (r *settleSinkRegistry) awaiting(id string) bool {
+	awaiting, _ := r.waitState(id)
+	return awaiting
+}
+
+func (r *settleSinkRegistry) setDestination(id string, dst settleAcceptor) {
 	if r == nil || id == "" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byInv[id]; ok && r.pending[id] > 0 {
-		r.pending[id]--
-	}
+	s := r.stateLocked(id)
+	s.destination = dst
+	r.changedLocked(s)
 }
 
-// awaiting reports whether a bound bus for id still has booked-but-undelivered
-// spawns (bound ∧ pending > 0) — i.e. whether a越窗 settle can still arrive on it.
-// This is the shared shell's keep-alive predicate: an unbound id (or nil registry)
-// can receive no routed settle, so the shell drains it and exits rather than
-// blocking forever on Pull. (Its bound-and-drained complement exists as the
-// tests' oracle quiescent, in d7_settle_accounting_test.go; production consults
-// awaiting only.)
-func (r *settleSinkRegistry) awaiting(id string) bool {
+func (r *settleSinkRegistry) pauseDestination(ctx context.Context, id string) (func(settleAcceptor), error) {
 	if r == nil || id == "" {
-		return false
+		return func(settleAcceptor) {}, nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.byInv[id]; !ok {
-		return false
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return r.pending[id] > 0
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var s *settleInvocation
+	var token *int
+	for {
+		r.mu.Lock()
+		s = r.stateLocked(id)
+		if !s.sealed {
+			token = new(int)
+			s.sealed, s.pause = true, token
+			r.changedLocked(s)
+			r.mu.Unlock()
+			break
+		}
+		changed := s.changed
+		r.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	var once sync.Once
+	finish := func(dst settleAcceptor, replace bool) {
+		once.Do(func() {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if current := r.states[id]; current == s && current.pause == token {
+				if replace {
+					current.destination = dst
+				}
+				current.sealed, current.pause = false, nil
+				r.changedLocked(current)
+			}
+		})
+	}
+	release := func(dst settleAcceptor) { finish(dst, true) }
+	for {
+		r.mu.Lock()
+		if s.inFlight == 0 {
+			err := ctx.Err()
+			r.mu.Unlock()
+			if err != nil {
+				finish(nil, false)
+				return nil, err
+			}
+			return release, nil
+		}
+		idle := s.idle
+		r.mu.Unlock()
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			finish(nil, false)
+			return nil, ctx.Err()
+		}
+	}
 }
 
-// route publishes evt to the invocation bus and decrements its barrier only for
-// a round ending. Stable/watch observations leave the loop alive. It returns true when a binding took the
-// event; false only when NO bus is bound (entry owner / post-unbind late settle),
-// in which case the caller falls back to the shared bus.
-//
-// Ordering and atomicity both govern termination. Publish precedes decrement, so
-// when pending reaches 0 every delivered settle is already pullable on the bus —
-// the shared shell's quiescent-then-TryPull drain check depends on this. Both run
-// under ONE lock acquisition because the consuming shell reads awaiting (the pending
-// count) under that same lock before it elects to block on Pull: pending > 0 then
-// always means "some route has yet to publish its settle", so the blocked shell is
-// guaranteed a wake-up. Were the publish to happen outside the lock, a shell could
-// drain a settle, re-read a decrement-not-yet-landed count, block on Pull, and lose
-// its wakeup with nothing left to wake it. The invocation bus is buffered and its
-// sole consumer drains continuously, so the in-lock publish completes without
-// waiting in practice; on a FULL bus it waits up to publishTimeout inside the
-// lock (bounded registry stall) and, on rejection, returns false after the
-// decrement — the caller's shared-bus fallback keeps the settle observable.
-func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
-	if r == nil || id == "" || evt == nil {
+func (r *settleSinkRegistry) streamLocked(s *settleInvocation, key settleProducerKey) *settleStream {
+	if s.streams == nil {
+		s.streams = make(map[settleProducerKey]*settleStream)
+	}
+	stream := s.streams[key]
+	if stream == nil {
+		stream = &settleStream{}
+		s.streams[key] = stream
+	}
+	return stream
+}
+
+func sequenceAccepted(ranges []settleSequenceRange, seq uint64) bool {
+	for _, interval := range ranges {
+		if seq < interval.First {
+			return false
+		}
+		if seq <= interval.Last {
+			return true
+		}
+	}
+	return false
+}
+
+func acceptSequence(ranges []settleSequenceRange, seq uint64) []settleSequenceRange {
+	if sequenceAccepted(ranges, seq) {
+		return ranges
+	}
+	ranges = append(ranges, settleSequenceRange{First: seq, Last: seq})
+	return mergeSequenceRanges(ranges)
+}
+
+func mergeSequenceRanges(ranges []settleSequenceRange) []settleSequenceRange {
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].First < ranges[j].First })
+	out := ranges[:0]
+	for _, interval := range ranges {
+		if interval.First == 0 || interval.Last < interval.First {
+			continue
+		}
+		if len(out) == 0 || (out[len(out)-1].Last != ^uint64(0) && interval.First > out[len(out)-1].Last+1) {
+			out = append(out, interval)
+		} else if interval.Last > out[len(out)-1].Last {
+			out[len(out)-1].Last = interval.Last
+		}
+	}
+	return out
+}
+
+func settleUint(v any) uint64 {
+	switch n := v.(type) {
+	case uint64:
+		return n
+	case uint:
+		return uint64(n)
+	case int:
+		if n > 0 {
+			return uint64(n)
+		}
+	case int64:
+		if n > 0 {
+			return uint64(n)
+		}
+	case float64:
+		if n > 0 {
+			return uint64(n)
+		}
+	case json.Number:
+		v, _ := strconv.ParseUint(string(n), 10, 64)
+		return v
+	case string:
+		v, _ := strconv.ParseUint(n, 10, 64)
+		return v
+	}
+	return 0
+}
+
+func settleBool(v any) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	s, _ := v.(string)
+	return s == "true"
+}
+
+func deliveryKey(evt *AgentEvent) settleDeliveryKey {
+	key := settleDeliveryKey{sourceID: evt.ID}
+	key.taskID, _ = evt.Metadata["task_id"].(string)
+	key.roundID = settleUint(evt.Metadata["task_round_id"])
+	if producer := settleUint(evt.Metadata["task_producer_round_id"]); producer != 0 {
+		key.roundID = producer
+	}
+	key.seq = settleUint(evt.Metadata["task_signal_seq"])
+	return key
+}
+
+func settleEventOwner(evt *AgentEvent) (string, bool) {
+	owner, present := evt.Metadata["task_round_owner"].(string)
+	return owner, present && (owner != "" || settleUint(evt.Metadata["task_round_id"]) != 0)
+}
+
+func canonicalDelivery(key settleDeliveryKey) bool {
+	return key.taskID != "" && key.roundID != 0 && key.seq != 0 && key.sourceID == task.SignalSourceID(key.taskID, key.roundID, key.seq)
+}
+
+func (r *settleSinkRegistry) acceptedLocked(s *settleInvocation, key settleDeliveryKey) bool {
+	if s == nil || !canonicalDelivery(key) {
 		return false
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	bus := r.byInv[id]
-	if bus == nil {
-		return false
+	stream := s.streams[settleProducerKey{taskID: key.taskID, roundID: key.roundID}]
+	return stream != nil && sequenceAccepted(stream.accepted, key.seq)
+}
+
+func settleSatisfied(evt *AgentEvent) bool {
+	if v, ok := evt.Metadata["settle_wait_satisfied"]; ok {
+		return settleBool(v)
 	}
-	_, perr := bus.PublishContext(context.Background(), evt)
-	final, _ := evt.Metadata[tagentevent.MetaKeySettleFinal].(string)
+	if settleBool(evt.Metadata[tagentevent.MetaKeySettleFinal]) {
+		return true
+	}
 	status, _ := evt.Metadata["settle_status"].(string)
-	endsRound := final == "true" || (final == "" && (status == "completed" || status == "failed" || status == "cancelled" || status == "dead"))
-	if endsRound && r.pending[id] > 0 {
-		r.pending[id]--
-	}
-	if perr != nil {
-		log.Warnf("[settle-route] invocation bus rejected the settle (id=%s), falling back to the shared bus: %v", id, perr)
-		return false
-	}
-	return true
+	return status == "completed" || status == "failed" || status == "cancelled" || status == "dead"
 }
 
-// taskInvocationID reads the S2m provenance handle off a settled task, or ""
-// when the task carries no delegation attribution (non-delegation turn).
+func settleTerminal(evt *AgentEvent) bool {
+	status, _ := evt.Metadata["settle_status"].(string)
+	return status == "completed" || status == "failed" || status == "cancelled" || status == "dead"
+}
+
+func (r *settleSinkRegistry) accountAcceptedLocked(id string, s *settleInvocation, evt *AgentEvent) {
+	key := deliveryKey(evt)
+	if canonicalDelivery(key) {
+		producer := settleProducerKey{taskID: key.taskID, roundID: key.roundID}
+		stream := r.streamLocked(s, producer)
+		stream.accepted = acceptSequence(stream.accepted, key.seq)
+		if settleSatisfied(evt) {
+			stream.waitFor, _ = evt.Metadata["wait_for"].(task.WaitCondition)
+			if stream.waitFor == "" {
+				waitFor, _ := evt.Metadata["wait_for"].(string)
+				stream.waitFor = task.WaitCondition(waitFor)
+			}
+			stream.waitSatisfied = true
+		}
+		if settleTerminal(evt) {
+			stream.owner = ""
+			stream.terminal = true
+			if s.retired {
+				delete(s.streams, producer)
+				if len(s.streams) == 0 {
+					s.destination = nil
+				}
+			}
+		}
+	}
+	if !settleSatisfied(evt) {
+		return
+	}
+	waitFor, _ := evt.Metadata["wait_for"].(string)
+	for b := range s.bookings {
+		if b.key.taskID == "" {
+			if key.taskID == "" || len(s.waits) == 0 {
+				r.voidBookingLocked(b, s)
+				return
+			}
+			continue
+		}
+		if b.key.taskID == key.taskID && b.key.roundID == key.roundID && (waitFor == "" || b.key.waitFor == "" || string(b.key.waitFor) == waitFor) {
+			r.voidBookingLocked(b, s)
+		}
+	}
+}
+
+func invokeSettleAcceptor(ctx context.Context, dst settleAcceptor, evt *AgentEvent) (receipt PublishReceipt, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("settle receiver panicked: %v", recovered)
+		}
+	}()
+	return dst(ctx, evt)
+}
+
+func (r *settleSinkRegistry) accept(ctx context.Context, id string, evt *AgentEvent, fallback settleAcceptor, tasks ...*task.Task) bool {
+	if r == nil || evt == nil {
+		return false
+	}
+	if owner, ok := settleEventOwner(evt); ok && owner != id {
+		return false
+	}
+	key := deliveryKey(evt)
+	var tk *task.Task
+	var lifetime string
+	if len(tasks) > 0 && tasks[0] != nil {
+		tk = tasks[0]
+		lifetime = task.LifetimeOf(tk.SpecSnapshot())
+	}
+	for {
+		r.mu.Lock()
+		s := r.states[id]
+		if r.acceptedLocked(s, key) {
+			r.mu.Unlock()
+			return true
+		}
+		if prior := r.inFlight[key]; prior != nil {
+			done := prior.done
+			r.mu.Unlock()
+			select {
+			case <-done:
+				return prior.accepted
+			case <-ctx.Done():
+				return false
+			}
+		}
+		if s != nil && s.sealed {
+			changed := s.changed
+			r.mu.Unlock()
+			select {
+			case <-changed:
+				continue
+			case <-ctx.Done():
+				return false
+			}
+		}
+		var dst settleAcceptor
+		if s != nil {
+			dst = s.destination
+		}
+		if dst == nil && r.byInv[id] != nil {
+			dst = r.byInv[id].PublishContext
+		}
+		if dst == nil && id == "" {
+			dst = fallback
+		}
+		if dst == nil {
+			r.mu.Unlock()
+			return false
+		}
+		if s == nil {
+			s = r.stateLocked(id)
+		}
+		if canonicalDelivery(key) && tk != nil {
+			stream := r.streamLocked(s, settleProducerKey{taskID: key.taskID, roundID: key.roundID})
+			stream.tk, stream.lifetime = tk, lifetime
+			if !stream.terminal {
+				stream.owner = id
+			}
+		}
+		if r.inFlight == nil {
+			r.inFlight = make(map[settleDeliveryKey]*settleAttempt)
+		}
+		attempt := &settleAttempt{done: make(chan struct{})}
+		r.inFlight[key] = attempt
+		if s.inFlight == 0 {
+			s.idle = make(chan struct{})
+		}
+		s.inFlight++
+		r.mu.Unlock()
+
+		_, err := invokeSettleAcceptor(ctx, dst, evt)
+
+		r.mu.Lock()
+		attempt.accepted = err == nil
+		if attempt.accepted {
+			r.accountAcceptedLocked(id, s, evt)
+		}
+		s.inFlight--
+		if s.inFlight == 0 {
+			close(s.idle)
+			s.idle = nil
+		}
+		close(attempt.done)
+		delete(r.inFlight, key)
+		r.changedLocked(s)
+		r.compactLocked()
+		r.mu.Unlock()
+		return attempt.accepted
+	}
+}
+
+func (r *settleSinkRegistry) route(id string, evt *AgentEvent) bool {
+	return r.accept(context.Background(), id, evt, nil)
+}
+
 func taskInvocationID(tk *task.Task) string {
 	if tk == nil {
 		return ""
 	}
-	return tk.Spec.Origin[metaKeyInvocationID]
+	if owner := tk.RoundOwner(); owner != "" {
+		return owner
+	}
+	return tk.SpecSnapshot().Origin[metaKeyInvocationID]
 }
 
-// deliverTaskSettled is the routing decision the agent's OnSettle hook calls:
-// hand a background task_settled to the owning sub-invocation loop's bus (keyed
-// by the task's S2m invocation_id), else fall back to the shared bus. The bus
-// fallback serves the no-binding shape (entry owner + every unbound invocation)
-// AND the full-bus rejection escape: a settle rejected by a stalled invocation
-// bus is re-published to the shared bus, so the event stays observable and the
-// barrier still reaches quiescence.
-func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task, evt *AgentEvent) {
-	if sinks.route(taskInvocationID(tk), evt) {
+func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task, evt *AgentEvent) bool {
+	if evt == nil {
+		return false
+	}
+	id, explicit := settleEventOwner(evt)
+	if !explicit {
+		id = taskInvocationID(tk)
+	}
+	var fallback settleAcceptor
+	if bus != nil {
+		fallback = bus.PublishContext
+	}
+	if sinks != nil {
+		return sinks.accept(context.Background(), id, evt, fallback, tk)
+	}
+	if id == "" && fallback != nil {
+		_, err := fallback(context.Background(), evt)
+		return err == nil
+	}
+	return false
+}
+
+func (r *settleSinkRegistry) snapshotWaits(id string) []settleWaitSnapshot {
+	return r.snapshotRouting(id).Waits
+}
+
+func (r *settleSinkRegistry) snapshotRouting(id string) settleRoutingSnapshot {
+	if r == nil {
+		return settleRoutingSnapshot{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[id]
+	if s == nil {
+		return settleRoutingSnapshot{}
+	}
+	var snapshot settleRoutingSnapshot
+	for key := range s.waits {
+		snapshot.Waits = append(snapshot.Waits, settleWaitSnapshot{TaskID: key.taskID, RoundID: key.roundID, WaitFor: key.waitFor})
+	}
+	for key, stream := range s.streams {
+		snapshot.Streams = append(snapshot.Streams, settleStreamSnapshot{TaskID: key.taskID, RoundID: key.roundID, Accepted: append([]settleSequenceRange(nil), stream.accepted...), Owner: stream.owner, Lifetime: stream.lifetime, WaitFor: stream.waitFor, WaitSatisfied: stream.waitSatisfied, Terminal: stream.terminal})
+	}
+	sort.Slice(snapshot.Waits, func(i, j int) bool {
+		a, b := snapshot.Waits[i], snapshot.Waits[j]
+		if a.TaskID != b.TaskID {
+			return a.TaskID < b.TaskID
+		}
+		if a.RoundID != b.RoundID {
+			return a.RoundID < b.RoundID
+		}
+		return a.WaitFor < b.WaitFor
+	})
+	sort.Slice(snapshot.Streams, func(i, j int) bool {
+		a, b := snapshot.Streams[i], snapshot.Streams[j]
+		if a.TaskID != b.TaskID {
+			return a.TaskID < b.TaskID
+		}
+		return a.RoundID < b.RoundID
+	})
+	return snapshot
+}
+
+func (r *settleSinkRegistry) restoreWaits(id string, waits []settleWaitSnapshot) {
+	r.restoreRouting(id, settleRoutingSnapshot{Waits: waits})
+}
+
+func (r *settleSinkRegistry) restoreRouting(id string, snapshot settleRoutingSnapshot, controllers ...task.TaskController) {
+	if r == nil || id == "" {
 		return
 	}
-	if bus != nil && evt != nil {
-		bus.Publish(evt)
+	r.mu.Lock()
+	s := r.stateLocked(id)
+	for _, wait := range snapshot.Waits {
+		key := settleWaitKey{taskID: wait.TaskID, roundID: wait.RoundID, waitFor: wait.WaitFor}
+		if key.taskID == "" || key.roundID == 0 || s.waits[key] != nil {
+			continue
+		}
+		b := &settleBooking{inv: id, key: key, active: true}
+		if s.bookings == nil {
+			s.bookings = make(map[*settleBooking]struct{})
+		}
+		if s.waits == nil {
+			s.waits = make(map[settleWaitKey]*settleBooking)
+		}
+		s.bookings[b] = struct{}{}
+		s.waits[key] = b
+		if r.pending == nil {
+			r.pending = make(map[string]int)
+		}
+		r.pending[id]++
+	}
+	for _, saved := range snapshot.Streams {
+		if saved.TaskID == "" || saved.RoundID == 0 {
+			continue
+		}
+		stream := r.streamLocked(s, settleProducerKey{taskID: saved.TaskID, roundID: saved.RoundID})
+		stream.terminal = stream.terminal || saved.Terminal
+		if !stream.terminal {
+			stream.owner = saved.Owner
+		}
+		stream.lifetime = saved.Lifetime
+		if !stream.waitSatisfied {
+			stream.waitFor = saved.WaitFor
+		}
+		stream.waitSatisfied = stream.waitSatisfied || saved.WaitSatisfied
+		for _, interval := range saved.Accepted {
+			stream.accepted = append(stream.accepted, interval)
+		}
+		stream.accepted = mergeSequenceRanges(stream.accepted)
+	}
+	for key, b := range s.waits {
+		stream := s.streams[settleProducerKey{taskID: key.taskID, roundID: key.roundID}]
+		if stream != nil && stream.waitSatisfied && (stream.waitFor == "" || stream.waitFor == key.waitFor) {
+			r.voidBookingLocked(b, s)
+		}
+	}
+	r.changedLocked(s)
+	r.mu.Unlock()
+	if len(controllers) > 0 && controllers[0] != nil {
+		r.reconcileTasks(id, controllers[0])
 	}
 }
 
-// drainSettleBusTo forwards every event left on an invocation bus to the shared
-// persistent bus. It runs after unbind at loop exit: between loop exit and the
-// unbind itself the binding is still live, so route() can publish a settle here
-// with no consumer left. Forwarding closes the window the registry comment
-// promises ("a safe drop, never a send on a dead sink" — a drop is only safe
-// when it is actually visible on the fallback bus).
+func (r *settleSinkRegistry) reconcileTasks(id string, controller task.TaskController) {
+	if r == nil || id == "" || controller == nil {
+		return
+	}
+	tasks := controller.List()
+	for _, tk := range tasks {
+		if tk == nil {
+			continue
+		}
+		snapshot := tk.RoutingSnapshot()
+		spec := snapshot.Spec
+		round, owner := snapshot.ProducerRound, snapshot.ProducerOwner
+		if round == 0 {
+			round, owner = snapshot.RoundID, snapshot.RoundOwner
+		}
+		if owner != id || round == 0 {
+			continue
+		}
+		pending, pendingSatisfying := false, false
+		for _, sig := range snapshot.PendingSignals {
+			if sig.RoundID == round && sig.RoundOwner == id {
+				pending = true
+				pendingSatisfying = pendingSatisfying || sig.SatisfiesWait()
+			}
+		}
+		status := snapshot.Status
+		live, producerSatisfied := status.Live(), snapshot.WaitSatisfied
+		r.mu.Lock()
+		s := r.stateLocked(id)
+		stream := r.streamLocked(s, settleProducerKey{taskID: tk.ID, roundID: round})
+		stream.tk, stream.lifetime = tk, task.LifetimeOf(spec)
+		if live && !stream.terminal {
+			stream.owner = id
+		}
+		wait := task.WaitForOf(spec)
+		if !stream.waitSatisfied {
+			stream.waitFor = wait
+		}
+		key := settleWaitKey{taskID: tk.ID, roundID: round, waitFor: wait}
+		satisfied := (stream.waitSatisfied && (stream.waitFor == "" || stream.waitFor == wait)) || (producerSatisfied && !pendingSatisfying)
+		if !pending && status == task.TaskAliveDetached && wait == task.WaitReady {
+			satisfied = true
+		}
+		if (live || pending) && !satisfied && s.waits[key] == nil && !s.retired {
+			b := &settleBooking{inv: id, key: key, active: true}
+			if s.bookings == nil {
+				s.bookings = make(map[*settleBooking]struct{})
+			}
+			if s.waits == nil {
+				s.waits = make(map[settleWaitKey]*settleBooking)
+			}
+			s.bookings[b], s.waits[key] = struct{}{}, b
+			if r.pending == nil {
+				r.pending = make(map[string]int)
+			}
+			r.pending[id]++
+		}
+		if satisfied {
+			r.voidBookingLocked(s.waits[key], s)
+		}
+		r.changedLocked(s)
+		r.mu.Unlock()
+	}
+}
+
+func (r *settleSinkRegistry) reconcileAccepted(id string, events []*AgentEvent) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.stateLocked(id)
+	for _, evt := range events {
+		if evt == nil || evt.Source != SourceTask {
+			continue
+		}
+		if owner, ok := settleEventOwner(evt); ok && owner != id {
+			continue
+		}
+		r.accountAcceptedLocked(id, s, evt)
+	}
+	r.changedLocked(s)
+}
+
+func (r *settleSinkRegistry) abortRound(tk *task.Task, sig task.SettleSignal) {
+	if r == nil || tk == nil || sig.RoundOwner == "" || sig.RoundID == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[sig.RoundOwner]
+	if s == nil {
+		return
+	}
+	producer := settleProducerKey{taskID: tk.ID, roundID: sig.RoundID}
+	stream := r.streamLocked(s, producer)
+	stream.owner, stream.waitSatisfied, stream.terminal = "", true, true
+	if sig.Seq > 0 && sig.SourceID == task.SignalSourceID(tk.ID, sig.RoundID, sig.Seq) {
+		stream.accepted = acceptSequence(stream.accepted, sig.Seq)
+	}
+	for key, b := range s.waits {
+		if key.taskID == tk.ID && key.roundID == sig.RoundID {
+			stream.waitFor = key.waitFor
+			r.voidBookingLocked(b, s)
+		}
+	}
+	if s.retired {
+		delete(s.streams, producer)
+		if len(s.streams) == 0 {
+			s.destination = nil
+		}
+	}
+	r.changedLocked(s)
+	r.compactLocked()
+}
+
+func (r *settleSinkRegistry) retireStateOnly(id string) {
+	r.retire(id)
+}
+
+func (r *settleSinkRegistry) retire(id string) {
+	if r == nil || id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.byInv, id)
+	delete(r.pending, id)
+	if s := r.states[id]; s != nil {
+		for b := range s.bookings {
+			b.active = false
+		}
+		s.bookings, s.waits = nil, nil
+		s.retired = true
+		for key, stream := range s.streams {
+			live := stream.tk == nil
+			if stream.tk != nil {
+				snapshot := stream.tk.RoutingSnapshot()
+				live = snapshot.Status.Live() && snapshot.ProducerRound == key.roundID
+				for _, pending := range snapshot.PendingSignals {
+					if pending.RoundID == key.roundID && pending.RoundOwner == stream.owner {
+						live = true
+						break
+					}
+				}
+			}
+			if s.destination == nil || stream.owner == "" || !live {
+				delete(s.streams, key)
+			}
+		}
+		if len(s.streams) == 0 {
+			s.destination = nil
+		}
+		r.changedLocked(s)
+	}
+	r.compactLocked()
+}
+
+func (r *settleSinkRegistry) compactLocked() {
+	for id, s := range r.states {
+		if !s.sealed && s.inFlight == 0 && len(s.bookings) == 0 && r.byInv[id] == nil && s.destination == nil && (id != "" || len(s.streams) == 0) {
+			r.changedLocked(s)
+			delete(r.states, id)
+		}
+	}
+	if len(r.states) == 0 {
+		r.states = nil
+	}
+	if len(r.byInv) == 0 {
+		r.byInv = nil
+	}
+	if len(r.pending) == 0 {
+		r.pending = nil
+	}
+	if len(r.inFlight) == 0 {
+		r.inFlight = nil
+	}
+}
+
+func (r *settleSinkRegistry) compact(controllers ...task.TaskController) {
+	if r == nil {
+		return
+	}
+	if len(controllers) > 0 && controllers[0] != nil {
+		r.mu.Lock()
+		ids := make(map[string]struct{})
+		for _, s := range r.states {
+			for key := range s.streams {
+				ids[key.taskID] = struct{}{}
+			}
+		}
+		r.mu.Unlock()
+		missing := make(map[string]bool)
+		for id := range ids {
+			_, exists := controllers[0].Get(id)
+			missing[id] = !exists
+		}
+		r.mu.Lock()
+		for _, s := range r.states {
+			for key, stream := range s.streams {
+				if missing[key.taskID] && stream.owner == "" {
+					delete(s.streams, key)
+				}
+			}
+		}
+		r.mu.Unlock()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.compactLocked()
+}
+
 func drainSettleBusTo(inv *EventBus, persistent *EventBus) {
 	if inv == nil || persistent == nil {
 		return
@@ -193,50 +999,112 @@ func drainSettleBusTo(inv *EventBus, persistent *EventBus) {
 	}
 }
 
-// bindSettleBus records the bus a sub-invocation loop consumes, keyed by its
-// delegation invocation_id, so its越窗 settles route back to that bus. Used by
-// S3m-c; nil-safe and empty-id-safe for callers outside a delegation.
 func (ta *TagentAgent) bindSettleBus(id string, bus *EventBus) {
 	if ta != nil {
 		ta.settleSinks.bind(id, bus)
 	}
 }
 
-// unbindSettleBus drops the binding registered for id (the loop's exit; a later
-// settle then falls back to the bus).
 func (ta *TagentAgent) unbindSettleBus(id string) {
 	if ta != nil {
 		ta.settleSinks.unbind(id)
 	}
 }
 
-// countingSpawner wraps a delegation turn's task spawner so tasks that will settle
-// in the BACKGROUND are booked into the delivery-accounting barrier. The booking
-// runs BEFORE the inner spawn, so the expectation is recorded before the task can
-// possibly settle — an early route can never decrement a counter that has not been
-// incremented yet. Three return shapes own no future settle and
-// void the booking: an INLINE round ending, a DEDUP hit (the matched task settles under its
-// ORIGINAL invocation's booking), and a gate BLOCK (no task was adopted). Without
-// the dedup/block void the barrier leaks one pending unit per refused call —
-// awaiting() stays true forever and the invocation loop can only exit via the
-// caller's hard timeout (plan single-flight makes dedup a hot path, not an edge).
-// A background spawn leaves exactly one pending unit that its eventual settle
-// route decrements: the invariant quiescent depends on.
-//
-// It is installed only when the turn carries an invocation_id AND its ContextManager
-// has the owner's settleSinks wired (a sub-call Run). With no bus bound the
-// noteSpawn/voidSpawn are no-ops, so an entry-owner turn is byte-for-byte unchanged.
 type countingSpawner struct {
 	inner task.TaskSpawner
 	sinks *settleSinkRegistry
 	id    string
 }
 
+var _ task.TaskController = (*countingSpawner)(nil)
+
 func (c *countingSpawner) Spawn(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
-	c.sinks.noteSpawn(c.id)
+	b := c.sinks.book(c.id, task.WaitForOf(spec))
+	spec.RoundOwner = c.id
+	original := spec.OnRoundStart
+	spec.OnRoundStart = func(tk *task.Task) {
+		c.sinks.bindBooking(b, tk)
+		if original != nil {
+			original(tk)
+		}
+	}
 	res := c.inner.Spawn(spec, detector)
-	if (res.Settled && res.Signal.EndsRound()) || res.Deduped || res.Blocked != "" {
-		c.sinks.voidSpawn(c.id)
+	if res.Task != nil {
+		c.sinks.bindBooking(b, res.Task)
+	}
+	if (res.Settled && res.Signal.SatisfiesWait()) || res.Deduped || res.Blocked != "" {
+		c.sinks.voidBooking(b)
 	}
 	return res
+}
+
+func (c *countingSpawner) controller() task.TaskController {
+	controller, _ := c.inner.(task.TaskController)
+	return controller
+}
+
+func (c *countingSpawner) List() []*task.Task {
+	if controller := c.controller(); controller != nil {
+		return controller.List()
+	}
+	return nil
+}
+
+func (c *countingSpawner) Get(id string) (*task.Task, bool) {
+	if controller := c.controller(); controller != nil {
+		return controller.Get(id)
+	}
+	return nil, false
+}
+
+func (c *countingSpawner) Cancel(id string) bool {
+	if controller := c.controller(); controller != nil {
+		return controller.Cancel(id)
+	}
+	return false
+}
+
+func (c *countingSpawner) Relaunch(ctx context.Context, id string) (task.SpawnResult, error) {
+	if controller := c.controller(); controller != nil {
+		ctx = task.WithTaskSpawner(task.WithRoundOwner(ctx, c.id), c)
+		return controller.Relaunch(ctx, id)
+	}
+	return task.SpawnResult{}, fmt.Errorf("task spawner does not support relaunch")
+}
+
+func (c *countingSpawner) Resume(ctx context.Context, id string, input string) (task.SpawnResult, error) {
+	controller := c.controller()
+	if controller == nil {
+		return task.SpawnResult{}, fmt.Errorf("task spawner does not support resume")
+	}
+	var waitFor task.WaitCondition
+	if tk, ok := controller.Get(id); ok {
+		waitFor = task.WaitForOf(tk.SpecSnapshot())
+	}
+	b := c.sinks.book(c.id, waitFor)
+	ctx = task.WithRoundOwner(ctx, c.id)
+	ctx = task.WithRoundStart(ctx, func(tk *task.Task) { c.sinks.bindBooking(b, tk) })
+	res, err := controller.Resume(ctx, id, input)
+	if res.Task != nil {
+		c.sinks.bindBooking(b, res.Task)
+	}
+	if err != nil || res.Deduped || res.Blocked != "" || (res.Settled && res.Signal.SatisfiesWait()) {
+		c.sinks.voidBooking(b)
+	}
+	return res, err
+}
+
+func (c *countingSpawner) RenewTTLBySession(id string) bool {
+	if controller := c.controller(); controller != nil {
+		return controller.RenewTTLBySession(id)
+	}
+	return false
+}
+
+func (c *countingSpawner) DefaultTTL() time.Duration {
+	if controller := c.controller(); controller != nil {
+		return controller.DefaultTTL()
+	}
+	return 0
 }

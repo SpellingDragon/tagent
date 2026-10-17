@@ -3,7 +3,6 @@ package action
 import (
 	"crypto/md5"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +40,7 @@ type TmuxMonitor struct {
 	// This lets a caller route a specific session's transitions to a dedicated
 	// consumer (e.g. a per-call settle detector) without global-callback demux.
 	sessionCallbacks map[string]func(sessionID string, oldStatus, newStatus SessionStatus, output string)
+	roundCallbacks   map[string]func(uint64, SessionStatus, string)
 
 	// schedule is the adaptive poll schedule (dense→backoff). Its DenseInterval
 	// is the loop tick; nextPoll tracks each session's next due time so the loop
@@ -328,6 +328,7 @@ func (tm *TmuxMonitor) RemoveSession(sessionID string) {
 
 	delete(tm.sessions, sessionID)
 	delete(tm.sessionCallbacks, sessionID)
+	delete(tm.roundCallbacks, sessionID)
 	delete(tm.nextPoll, sessionID)
 	log.Infof("[TmuxMonitor] removed session %s", sessionID)
 }
@@ -436,66 +437,65 @@ func (tm *TmuxMonitor) rescheduleSession(s *TmuxSession, now time.Time) {
 // lock, fires callback outside lock. Completed/errored sessions are removed.
 func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 	tm.mu.Lock()
-
-	oldStatus := session.Status
-	newStatus := tm.detectSessionState(session)
-
-	if newStatus == oldStatus {
+	if tracked, ok := tm.sessions[session.ID]; !ok || tracked != session {
 		tm.mu.Unlock()
 		return
 	}
-
-	newOutput := session.LastOutput
-	session.Status = newStatus
-
-	log.Infof("[TmuxMonitor] session %s: %s -> %s",
-		session.ID, oldStatus, newStatus)
-
-	shouldRemove := false
-	switch newStatus {
-	case SessionFakeAlive:
-		tm.handleFakeAlive(session)
-	case SessionFakeDead:
-		shouldRemove = tm.handleFakeDead(session)
-		newStatus = session.Status
-	case SessionTimedOut, SessionCompleted, SessionError:
-		shouldRemove = true
+	oldStatus, oldOutput := session.Status, session.LastOutput
+	newStatus := tm.detectSessionState(session)
+	output, round := session.LastOutput, session.ProducerRound
+	if round == 0 {
+		round = 1
 	}
-
-	if shouldRemove {
+	session.Status = newStatus
+	changed := newStatus != oldStatus
+	outputChanged := oldOutput != output
+	globalCb, sessCb, roundCb := tm.StateChangeCallback, tm.sessionCallbacks[session.ID], tm.roundCallbacks[session.ID]
+	terminal := isTerminalStatus(newStatus)
+	if terminal {
 		delete(tm.sessions, session.ID)
 		delete(tm.nextPoll, session.ID)
-		log.Infof("[TmuxMonitor] removed session %s", session.ID)
+		delete(tm.sessionCallbacks, session.ID)
+		delete(tm.roundCallbacks, session.ID)
+		delete(tm.lastNotifiedStatus, session.ID)
 	}
-
-	sessionID := session.ID
-
-	globalCb := tm.StateChangeCallback
-	sessCb := tm.sessionCallbacks[sessionID]
-
-	shouldCallback := false
-	if (globalCb != nil || sessCb != nil) && newStatus != oldStatus && isMeaningfulState(newStatus) {
-		lastNotified := tm.lastNotifiedStatus[sessionID]
-		if lastNotified != newStatus {
-			tm.lastNotifiedStatus[sessionID] = newStatus
-			shouldCallback = true
-		}
-	}
-
-	if shouldRemove {
-		delete(tm.sessionCallbacks, sessionID)
-		delete(tm.lastNotifiedStatus, sessionID)
-	}
-
 	tm.mu.Unlock()
-
-	if shouldCallback {
-		if globalCb != nil {
-			globalCb(sessionID, oldStatus, newStatus, newOutput)
-		}
+	if changed && isMeaningfulState(newStatus) && globalCb != nil {
+		globalCb(session.ID, oldStatus, newStatus, output)
+	}
+	if (changed && isMeaningfulState(newStatus)) || outputChanged {
 		if sessCb != nil {
-			sessCb(sessionID, oldStatus, newStatus, newOutput)
+			sessCb(session.ID, oldStatus, newStatus, output)
 		}
+		if roundCb != nil {
+			roundCb(round, newStatus, output)
+		}
+	}
+}
+
+// AddSessionWithRoundCallback binds snapshots to the producer round captured by the monitor.
+func (tm *TmuxMonitor) AddSessionWithRoundCallback(session *TmuxSession, cb func(uint64, SessionStatus, string)) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if existing := tm.sessions[session.ID]; existing != nil && existing.ResourceID != session.ResourceID {
+		return false
+	}
+	if tm.roundCallbacks == nil {
+		tm.roundCallbacks = make(map[string]func(uint64, SessionStatus, string))
+	}
+	tm.sessions[session.ID], tm.roundCallbacks[session.ID] = session, cb
+	delete(tm.sessionCallbacks, session.ID)
+	delete(tm.lastNotifiedStatus, session.ID)
+	tm.markDueLocked(session)
+	return true
+}
+
+// BindProducerRound sets the round attached to subsequent monitor snapshots.
+func (tm *TmuxMonitor) BindProducerRound(sessionID string, round uint64) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if session := tm.sessions[sessionID]; session != nil {
+		session.ProducerRound = round
 	}
 }
 
@@ -537,243 +537,93 @@ func (tm *TmuxMonitor) fakeDeadThreshold(session *TmuxSession) time.Duration {
 	return tm.fakeDeadDuration
 }
 
-// deathPolarity decides the settle status for a detected process death
-// (failure-polarity passthrough D1): a KNOWN non-zero exit code (including a
-// negative signal death) is reported as SessionError so the failure reaches the
-// notification; a clean exit (0) or an unresolvable status keeps the current
-// completed polarity. Reading the code is the single source of failure truth —
-// the monitor does not guess success.
+// deathPolarity reports completion only for a known zero exit status.
 func (tm *TmuxMonitor) deathPolarity(sessionID string) SessionStatus {
-	if code, known := tm.executor.PaneDeadStatus(sessionID); known && code != 0 {
-		return SessionError
+	if code, known := tm.executor.PaneDeadStatus(sessionID); known && code == 0 {
+		return SessionCompleted
 	}
-	return SessionCompleted
+	return SessionError
 }
 
 // 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	if tm.executor == nil {
-		return SessionError
+		return SessionTimedOut
 	}
-
+	if session.ResourceID != "" {
+		if reader, ok := tm.executor.(interface{ SessionResourceID(string) (string, error) }); ok {
+			if current, err := reader.SessionResourceID(session.ID); err == nil && current != session.ResourceID {
+				return SessionError
+			}
+		}
+	}
 	alive, known := tm.executor.SessionAlive3(session.ID)
 	if !known {
 		session.ProbeUnknownCount++
-		if session.ProbeUnknownCount < tm.probeUnknownLimit() {
-			log.Warnf("[TmuxMonitor] probe UNKNOWN for %s (%d/%d) — keeping session alive",
-				session.ID, session.ProbeUnknownCount, tm.probeUnknownLimit())
-			return SessionRunning
+		if session.ProbeUnknownCount >= tm.probeUnknownLimit() {
+			return SessionTimedOut
 		}
-		log.Errorf("[TmuxMonitor] probe UNKNOWN %d consecutive times for %s — treating as dead",
-			session.ProbeUnknownCount, session.ID)
-		processExists, isPaneDead := false, true
-		currentOutput, err := tm.executor.GetSessionOutput(session.ID)
-		if err != nil {
-			currentOutput = ""
-		}
-		if strings.TrimSpace(currentOutput) != "" {
-			session.LastOutput = currentOutput
-			session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
-		}
-		_ = processExists
-		_ = isPaneDead
-		return SessionError
+		return SessionRunning
 	}
 	session.ProbeUnknownCount = 0
-
-	processExists := tm.executor.ProcessExists(session.ID)
-	if !alive {
-		processExists = false
-	}
-	isPaneDead := tm.executor.IsPaneDead(session.ID)
-
-	currentOutput, err := tm.executor.GetSessionOutput(session.ID)
-	if err != nil {
-		currentOutput = ""
-	}
-
-	currentMD5 := fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
-
-	if processExists && !isPaneDead {
-		if currentMD5 == session.LastOutputMD5 {
-			if session.StableSince.IsZero() {
-				session.StableSince = time.Now()
-			}
-		} else {
-			session.StableSince = time.Time{}
+	paneDead := tm.executor.IsPaneDead(session.ID)
+	readOutput := func() (string, error) {
+		if reader, ok := tm.executor.(interface {
+			resourceOutput(string, string) (string, error)
+		}); ok && session.ResourceID != "" {
+			return reader.resourceOutput(session.ID, session.ResourceID)
 		}
+		return tm.executor.GetSessionOutput(session.ID)
 	}
-
-	if !processExists || isPaneDead {
-		capture := currentOutput
-		lastErr := err
-		for attempt := 0; attempt < 10 && (lastErr != nil || strings.TrimSpace(capture) == ""); attempt++ {
-			time.Sleep(250 * time.Millisecond)
-			if retryOut, retryErr := tm.executor.GetSessionOutput(session.ID); retryErr == nil && strings.TrimSpace(retryOut) != "" {
-				capture = retryOut
-				lastErr = nil
-				break
-			} else if retryErr != nil {
-				lastErr = retryErr
-			}
-		}
-		if lastErr == nil && strings.TrimSpace(capture) != "" {
-			best := capture
-			identical := 0
-			for i := 0; i < 12; i++ {
-				time.Sleep(250 * time.Millisecond)
-				next, nextErr := tm.executor.GetSessionOutput(session.ID)
+	currentOutput, err := readOutput()
+	if err == nil {
+		if paneDead {
+			for i, identical := 0, 0; i < 12 && identical < 2; i++ {
+				time.Sleep(25 * time.Millisecond)
+				next, nextErr := readOutput()
 				if nextErr != nil {
 					break
 				}
-				if next == best {
+				if next == currentOutput {
 					identical++
-					if identical >= 2 {
-						break
-					}
-					continue
-				}
-				identical = 0
-				if len(next) > len(best) {
-					best = next
+				} else {
+					identical = 0
+					currentOutput = next
 				}
 			}
-			capture = best
 		}
-		if lastErr == nil && strings.TrimSpace(capture) != "" {
-			session.LastOutput = capture
-			session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte(capture)))
+		digest := fmt.Sprintf("%x", md5.Sum([]byte(currentOutput)))
+		if digest != session.LastOutputMD5 {
+			session.StableSince = time.Time{}
+		} else if session.StableSince.IsZero() {
+			session.StableSince = time.Now()
 		}
+		session.LastOutput, session.LastOutputMD5 = currentOutput, digest
+	}
+	if paneDead {
 		return tm.deathPolarity(session.ID)
 	}
-
+	if !alive {
+		return tm.deathPolarity(session.ID)
+	}
 	if !session.StableSince.IsZero() {
-		stableDuration := time.Since(session.StableSince)
-
-		if session.Mode == ModeResident {
-			session.LastOutput = currentOutput
-			session.LastOutputMD5 = currentMD5
-			return SessionRunning
+		quiet := time.Since(session.StableSince)
+		if quiet >= tm.fakeDeadThreshold(session) {
+			return SessionTimedOut
 		}
-
-		if stableDuration > tm.fakeDeadThreshold(session) {
-			outputPreview := currentOutput
-			if len(outputPreview) > 200 {
-				outputPreview = outputPreview[:200] + "..."
-			}
-			log.Infof("[TmuxMonitor] session %s entering fake check: stableDuration=%s fakeDeadThreshold=%s command=%q isInteractive=%v isTUI=%v output(len=%d): %q",
-				session.ID, stableDuration, tm.fakeDeadThreshold(session), session.Command, session.IsInteractive, session.IsTUI, len(currentOutput), outputPreview)
-
-			if session.IsTUI {
-				session.LastOutput = currentOutput
-				session.LastOutputMD5 = currentMD5
-				return SessionTimedOut
-			}
-
-			if !session.IsInteractive {
-				if tm.executor.IsPaneDead(session.ID) {
-					session.LastOutput = currentOutput
-					session.LastOutputMD5 = currentMD5
-					return tm.deathPolarity(session.ID)
-				}
-				if session.QuietTimeout > 0 {
-					log.Infof("[TmuxMonitor] session %s quiet beyond declared quiet_timeout=%s, engaging fake-dead kill",
-						session.ID, session.QuietTimeout)
-					return SessionFakeDead
-				}
-				log.Infof("[TmuxMonitor] session %s quiet beyond %s but process alive and no explicit quiet_timeout — keeping stable (no auto-kill)",
-					session.ID, tm.fakeDeadThreshold(session))
-				return SessionStable
-			}
-
-			heartbeatResult := tm.executor.SendHeartbeat(session.ID)
-			afterOutput, _ := tm.executor.GetSessionOutput(session.ID)
-			afterPreview := afterOutput
-			if len(afterPreview) > 200 {
-				afterPreview = afterPreview[:200] + "..."
-			}
-			log.Infof("[TmuxMonitor] session %s heartbeat result=%q (output before len=%d, after len=%d, after preview): %q",
-				session.ID, heartbeatResult, len(currentOutput), len(afterOutput), afterPreview)
-			if heartbeatResult == "ok" {
-				return SessionFakeAlive
-			}
-			if tm.executor.IsPaneDead(session.ID) {
-				session.LastOutput = currentOutput
-				session.LastOutputMD5 = currentMD5
-				return tm.deathPolarity(session.ID)
-			}
-			return SessionFakeDead
-		}
-
-		threshold := tm.getStableDuration(session.IsInteractive)
-		if stableDuration >= threshold {
-			session.LastOutput = currentOutput
-			session.LastOutputMD5 = currentMD5
-			log.Infof("[TmuxMonitor] session %s output stable for %s (process alive) — reporting stable, NOT completed",
-				session.ID, stableDuration)
+		if quiet >= tm.stableWindow(session.IsTUI) {
 			return SessionStable
 		}
 	}
-
-	session.LastOutput = currentOutput
-	session.LastOutputMD5 = currentMD5
-
 	return SessionRunning
 }
 
-// handleFakeAlive attempts to recover a session judged fake-alive; on failure it
-// leaves Status untouched. The recovery strategy — which identity is preserved, how
-// stability metadata is reset, and where the state machine is expected to move
-// afterwards — is specified in the document below.
-//
-// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
-func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) {
-	log.Infof("[TmuxMonitor] session %s is fake alive (command=%q, isInteractive=%v, isTUI=%v), attempting restart",
-		session.ID, session.Command, session.IsInteractive, session.IsTUI)
+// handleFakeAlive preserves a quiet producer as an observation.
+func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) { session.Status = SessionTimedOut }
 
-	opts := TmuxCreateOptions{
-		Command:       session.Command,
-		WorkDir:       session.WorkDir,
-		IsInteractive: session.IsInteractive,
-	}
-
-	err := tm.executor.RestartSession(session.ID, opts)
-	if err != nil {
-		log.Errorf("[TmuxMonitor] failed to restart session %s: %v", session.ID, err)
-		return
-	}
-
-	session.StableSince = time.Time{}
-	session.LastOutput = ""
-	session.LastOutputMD5 = ""
-	session.CreatedAt = time.Now()
-	log.Infof("[TmuxMonitor] session %s restarted successfully", session.ID)
-}
-
-// handleFakeDead handles fake dead state (process exists but unresponsive).
-// Returns true if the session should be removed from monitoring, false if
-// the session should be retained for a retry on the next check cycle.
-// KillSession is retried up to 3 times before force-removing the session.
 func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) bool {
-	log.Infof("[TmuxMonitor] session %s is fake dead, attempting kill (retry=%d)",
-		session.ID, session.KillRetryCount)
-
-	if err := tm.executor.KillSession(session.ID); err != nil {
-		session.KillRetryCount++
-		log.Errorf("[TmuxMonitor] failed to kill session %s (retry=%d): %v",
-			session.ID, session.KillRetryCount, err)
-
-		if session.KillRetryCount < 3 {
-			session.Status = SessionStable
-			return false
-		}
-		log.Warnf("[TmuxMonitor] session %s reached max kill retries, force-removing", session.ID)
-		session.Status = SessionError
-		return true
-	}
-
-	session.Status = SessionCompleted
-	return true
+	session.Status = SessionTimedOut
+	return false
 }
 
 // getStableDuration returns the time-based stability threshold based on session type.
@@ -782,4 +632,16 @@ func (tm *TmuxMonitor) getStableDuration(isInteractive bool) time.Duration {
 		return tm.interactiveStableDuration
 	}
 	return tm.stableDuration
+}
+
+// RemoveResource removes tracking only if the immutable resource still matches.
+func (tm *TmuxMonitor) RemoveResource(sessionID, resourceID string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if session := tm.sessions[sessionID]; session != nil && session.ResourceID == resourceID {
+		delete(tm.sessions, sessionID)
+		delete(tm.sessionCallbacks, sessionID)
+		delete(tm.roundCallbacks, sessionID)
+		delete(tm.nextPoll, sessionID)
+	}
 }

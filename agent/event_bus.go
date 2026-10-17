@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,8 +63,11 @@ type AgentEvent struct {
 
 	// volatileFact freezes a task-driven input's identity across store retries.
 	// These consumer-only fields never enter the serialized bus payload.
-	volatileFact      *memory.FullEvent
-	volatileCommitted bool
+	volatileFact          *memory.FullEvent
+	volatileCommitted     bool
+	observationReceipt    *memory.FullEvent
+	observationReceiptKey string
+	recoveryConsumed      bool
 }
 
 // durableClaim is the typed, non-JSON provenance of one claimed inbox message
@@ -121,6 +125,10 @@ func settleMarkerAndStatus(sig task.SettleSignal) (marker, statusWord string) {
 	switch {
 	case sig.Kind == task.SettleWatch:
 		return "◈", "watch"
+	case sig.Kind == task.SettleReady:
+		return "∞", "ready"
+	case sig.Kind == task.SettleInput:
+		return "⌨", "input"
 	case sig.Kind == task.SettleFailed:
 		return "✗", "failed"
 	case sig.Err != nil:
@@ -180,12 +188,16 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	}
 	var b strings.Builder
 	for i, r := range batch {
+		spec := r.Task.SpecSnapshot()
+		if r.Sig.Declarative != nil {
+			spec.Desc = r.Sig.Declarative.Desc
+		}
 		marker, statusWord := settleMarkerAndStatus(r.Sig)
 		if i > 0 {
 			b.WriteString("\n\n---\n\n")
 		}
 		fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s%s",
-			marker, truncateRunes(r.Task.Spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord, formatExitCode(r.Sig.ExitCode))
+			marker, truncateRunes(spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord, formatExitCode(r.Sig.ExitCode))
 		if r.Sig.Err != nil {
 			fmt.Fprintf(&b, " 错误: %s", truncateRunes(r.Sig.Err.Error(), settleErrMaxChars))
 		}
@@ -205,8 +217,31 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 // - Body is a compact single-line trajectory form: dense, append-only friendly and information-lossless (task_id, desc, status, error and the result-or-spill ticket are all present; only layout redundancy is dropped).
 // - Results over maxChars spill to a file under outputDir, bounded by workspace.Cleaner, and the content carries the path ticket plus a tail preview; consumption goes through read_file paging. Write failure degrades to inline full text: availability over bounding.
 func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, outputDir string) *AgentEvent {
+	if tk == nil {
+		return nil
+	}
+	spec := tk.SpecSnapshot()
+	if frozen := sig.Declarative; frozen != nil {
+		spec.Kind, spec.Desc, spec.Mode, spec.WaitFor = frozen.Kind, frozen.Desc, frozen.Mode, frozen.WaitFor
+		spec.Lifetime, spec.Origin = frozen.Lifetime, frozen.Origin
+	}
+	id := sig.SourceID
+	if id == "" {
+		id = task.SignalSourceID(tk.ID, sig.RoundID, sig.Seq)
+		if sig.Seq == 0 {
+			digest := sha256.Sum256([]byte(fmt.Sprintf("%s\n%s\n%v\n%t\n%d", sig.Kind, sig.Output, sig.Err, sig.Final, sig.ExitCode)))
+			id += fmt.Sprintf("-%x", digest[:8])
+		}
+	}
+	observedAt := sig.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = tk.StartedAt
+		if observedAt.IsZero() {
+			observedAt = time.Unix(0, 0).UTC()
+		}
+	}
 	marker, statusWord := settleMarkerAndStatus(sig)
-	if sig.Kind == task.SettleStable && sig.Err == nil && task.LifetimeOf(tk.Spec) == task.LifetimeJob {
+	if sig.Kind == task.SettleStable && sig.Err == nil && task.LifetimeOf(spec) == task.LifetimeJob {
 		marker, statusWord = "~", "stable"
 	}
 	if tk.Status() == task.TaskCancelled && sig.EndsRound() {
@@ -216,11 +251,8 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	result := sig.Output
 	spillPath := ""
 	if maxChars > 0 && outputDir != "" && len(result) > maxChars {
-		shortID := tk.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
-		path := filepath.Join(outputDir, fmt.Sprintf("task-%s-%d.txt", shortID, time.Now().UnixMilli()))
+		digest := sha256.Sum256([]byte(id))
+		path := filepath.Join(outputDir, fmt.Sprintf("task-%x.txt", digest[:12]))
 		if err := os.MkdirAll(outputDir, 0o755); err == nil {
 			if err := os.WriteFile(path, []byte(result), 0o644); err == nil {
 				log.Infof("[task_settled] result %d chars > %d limit, spilled to %s", len(result), maxChars, path)
@@ -241,7 +273,7 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s%s",
-		marker, truncateRunes(tk.Spec.Desc, settleDescMaxChars), task.ShortID(tk.ID), statusWord, formatExitCode(sig.ExitCode))
+		marker, truncateRunes(spec.Desc, settleDescMaxChars), task.ShortID(tk.ID), statusWord, formatExitCode(sig.ExitCode))
 	if sig.Err != nil {
 		fmt.Fprintf(&b, " 错误: %s", truncateRunes(sig.Err.Error(), settleErrMaxChars))
 	}
@@ -253,10 +285,14 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 		}
 	}
 	evt := NewExternalInputEvent(SourceTask, model.Message{Role: model.RoleUser, Content: b.String()})
-	for k, v := range tk.Spec.Origin {
+	evt.ID, evt.Timestamp = id, observedAt
+	if spillPath != "" {
+		evt.Metadata["spill_path"] = spillPath
+	}
+	for k, v := range spec.Origin {
 		evt.Metadata[k] = v
 	}
-	if len(tk.Spec.Origin) == 0 {
+	if len(spec.Origin) == 0 {
 		evt.Metadata["lineage_absent"] = "true"
 	}
 	if sig.Lineage != "" {
@@ -271,6 +307,27 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 	evt.Metadata[tagentevent.MetaKeySettleFinal] = fmt.Sprint(sig.EndsRound())
 	evt.Metadata["task_id"] = tk.ID
 	evt.Metadata["settle_notice"] = "true"
+	evt.Metadata[tagentevent.MetaKeyTaskRoundID] = fmt.Sprint(sig.RoundID)
+	evt.Metadata[tagentevent.MetaKeyTaskProducerRoundID] = fmt.Sprint(sig.ProducerRound)
+	evt.Metadata[tagentevent.MetaKeyTaskRoundOwner] = sig.RoundOwner
+	evt.Metadata[tagentevent.MetaKeyTaskSignalSeq] = fmt.Sprint(sig.Seq)
+	evt.Metadata[tagentevent.MetaKeyTaskMode] = spec.Mode
+	waitFor := sig.WaitFor
+	if waitFor == "" {
+		waitFor = task.WaitForOf(spec)
+	}
+	evt.Metadata[tagentevent.MetaKeyTaskWaitFor] = string(waitFor)
+	satisfied := sig.SatisfiesWait()
+	if sig.WaitFor == "" {
+		satisfied = satisfied || task.SatisfiesWait(spec, sig)
+	}
+	evt.Metadata[tagentevent.MetaKeySettleWaitSatisfied] = fmt.Sprint(satisfied)
+	evt.Metadata[tagentevent.MetaKeySettleObservation] = sig.Observation
+	evt.Metadata[tagentevent.MetaKeySourceEventID] = id
+	evt.Metadata[tagentevent.MetaKeySettleWake] = "decision"
+	if !satisfied && sig.Err == nil && !sig.Final && (sig.Kind == task.SettleStable || sig.Kind == task.SettleSuspect || (sig.Kind == task.SettleWatch && sig.Observation != "signal" && sig.Observation != "watch")) {
+		evt.Metadata[tagentevent.MetaKeySettleWake] = "observe"
+	}
 	return evt
 }
 
@@ -839,6 +896,11 @@ func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredentia
 // Returns the batch and nil error on success.
 // Returns nil and ctx.Err() when ctx is cancelled before any event arrives.
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
+	return b.PullWithWake(ctx, nil)
+}
+
+// PullWithWake returns an empty batch when this caller's wait ledger changes.
+func (b *EventBus) PullWithWake(ctx context.Context, wake <-chan struct{}) ([]*AgentEvent, error) {
 	for {
 		batch := b.drainChannelNonWake()
 		batch = append(batch, b.claimDurable()...)
@@ -856,6 +918,8 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 				return batch, nil
 			}
 			continue
+		case <-wake:
+			return nil, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -865,7 +929,7 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 // drainChannelNonWake drains volatile events, dropping wake sentinels.
 func (b *EventBus) drainChannelNonWake() []*AgentEvent {
 	var batch []*AgentEvent
-	for {
+	for remaining := len(b.ch); remaining > 0; remaining-- {
 		select {
 		case evt := <-b.ch:
 			if isInboxWake(evt) {
@@ -878,6 +942,7 @@ func (b *EventBus) drainChannelNonWake() []*AgentEvent {
 			return batch
 		}
 	}
+	return batch
 }
 
 // drainChannel 非阻塞排空 channel 现有事件。

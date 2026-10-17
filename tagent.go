@@ -30,6 +30,7 @@ import (
 	"github.com/SpellingDragon/tagent/prompt"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/tool"
+	"github.com/SpellingDragon/tagent/tool/action"
 	toolmcp "github.com/SpellingDragon/tagent/tool/mcp"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -43,9 +44,11 @@ type Option func(*runtimeConfig)
 
 // runtimeConfig holds runtime-only dependencies.
 type runtimeConfig struct {
-	model       model.Model
-	skillRepo   tool.SkillRepository
-	mcpToolSets []trpctool.ToolSet
+	residentMetaDir string
+	actionTools     map[string]*action.ActionTool
+	model           model.Model
+	skillRepo       tool.SkillRepository
+	mcpToolSets     []trpctool.ToolSet
 
 	// mcpRegistry is the process-level MCP server registry (config-declared
 	// servers + WithMCPToolSets merged). Consumed by mcp_discover/mcp_call;
@@ -331,9 +334,11 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	}
 
 	rc := &runtimeConfig{
-		reliability: cfg.Reliability,
-		storeOwners: make(map[string]map[int]string),
+		reliability:     cfg.Reliability,
+		residentMetaDir: cfg.ResidentMetaDir,
+		storeOwners:     make(map[string]map[int]string),
 	}
+	defer rc.releaseStoreBarriers()
 	for _, opt := range opts {
 		opt(rc)
 	}
@@ -394,11 +399,39 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	loader := prompt.NewLoader(cfg.PromptDir, prompt.WithFallback(defaultPromptsFS, DefaultPromptsPrefix))
 
 	agentCache := make(map[string]*agent.TagentAgent)
+	startupComplete := false
+	defer func() {
+		if startupComplete {
+			return
+		}
+		names := recoveryOwnerNames(agentCache)
+		for _, name := range names {
+			if owner := agentCache[name]; owner != nil {
+				owner.BeginClose()
+			}
+		}
+		if owner := agentCache[cfg.Entry]; owner != nil {
+			if err := owner.Close(); err != nil {
+				log.Warnf("[startup] close entry after recovery failure: %v", err)
+			}
+		}
+		for _, name := range names {
+			if name == cfg.Entry || agentCache[name] == nil {
+				continue
+			}
+			if err := agentCache[name].Close(); err != nil {
+				log.Warnf("[startup] close owner %q after recovery failure: %v", name, err)
+			}
+		}
+	}()
 
 	entryCfg := cfg.Agents[cfg.Entry]
-	entryAgent, err := buildAgent(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, buildModeResident)
+	entryAgent, err := buildAgentDFS(cfg.Entry, entryCfg, cfg, rc, loader, agentCache, buildModeResident, map[string]bool{})
 	if err != nil {
 		return nil, fmt.Errorf("tagent: build entry agent %q: %w", cfg.Entry, err)
+	}
+	if err := buildRecoveryOwners(cfg, rc, loader, agentCache); err != nil {
+		return nil, err
 	}
 	rc.entryMemStore = entryAgent.MemStore()
 	rc.entrySessionSvc = entryAgent.SessionSvc()
@@ -410,6 +443,9 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 	}
 	for _, a := range agentCache {
 		a.SetResidentTable(rc.resident)
+	}
+	if err := prepareResidentRecovery(context.Background(), rc); err != nil {
+		return nil, fmt.Errorf("tagent: restore resident execution: %w", err)
 	}
 	entryAgent.SetStoreOwnerSnapshot(func() map[string]bool { return rc.ownedAgentNames() })
 
@@ -635,6 +671,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			activateOwnerGenerations(rbOv.Resolve(), rbNames, rbStaged, rbParts)
 			applyHotAll(rollbackC)
 			rgen := coord.recordRollback(rbp, rollbackC, appliedFromLastApply)
+			recheckResidentDeadlines(rc)
 			publishedReach = rbReach
 			retireUnrouted()
 			sweepRetirements()
@@ -717,6 +754,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 					(*h)()
 				}
 				if coord.recordHotApply(hotSnap, appliedFromLastApply) {
+					recheckResidentDeadlines(rc)
 					log.Infof("[org-hotreload] numeric-only full apply recorded (revision %d, generation unchanged; rollback ring now restores pre-edit values)", coord.status().Revision)
 				}
 				return
@@ -774,6 +812,7 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 			applyHotAll(snapshot)
 			activateOwnerGenerations(resolve, genNames, staged, genParts)
 			oldFP, gen := coord.swap(fp, snapshot, appliedFromLastApply)
+			recheckResidentDeadlines(rc)
 			publishedReach = freshReach
 			retireUnrouted()
 			sweepRetirements()
@@ -845,12 +884,13 @@ func New(cfg Config, opts ...Option) (*agent.TagentAgent, error) {
 		entryAgent.RegisterCloser(orgReloadStopper{stop: &stopped, drain: func() { mu.Lock(); mu.Unlock() }})
 	}
 
-	entryAgent.RegisterCloser(orgOwnerCloser{rc: rc, self: cfg.Entry})
+	entryAgent.RegisterCloser(&orgOwnerCloser{rc: rc, self: cfg.Entry})
 
 	if rc.mcpRegistry != nil {
 		entryAgent.RegisterCloser(rc.mcpRegistry)
 	}
 
+	startupComplete = true
 	return entryAgent, nil
 }
 
@@ -1014,29 +1054,50 @@ func activateOwnerGenerations(
 // still held, and shared state stays protected by the same lease accounting that
 // protects it from any other early close.
 type orgOwnerCloser struct {
-	rc   *runtimeConfig
-	self string
+	rc       *runtimeConfig
+	self     string
+	once     sync.Once
+	doneOnce sync.Once
+	done     chan struct{}
+	owners   map[string]*agent.TagentAgent
+	names    []string
 }
 
-func (c orgOwnerCloser) Close() error {
-	if c.rc == nil || c.rc.resident == nil {
-		return nil
-	}
-	owners := c.rc.resident.Snapshot()
-	names := make([]string, 0, len(owners))
-	for name := range owners {
-		if name != c.self {
-			names = append(names, name)
+func (c *orgOwnerCloser) BeginClose() {
+	c.once.Do(func() {
+		_ = c.CloseDone()
+		done := c.done
+		if c.rc != nil && c.rc.resident != nil {
+			c.owners = c.rc.resident.Snapshot()
 		}
-	}
-	sort.Strings(names)
+		for name, owner := range c.owners {
+			if name != c.self && owner != nil {
+				c.names = append(c.names, name)
+			}
+		}
+		sort.Strings(c.names)
+		for _, name := range c.names {
+			c.owners[name].BeginClose()
+		}
+		go func() {
+			for _, name := range c.names {
+				<-c.owners[name].CloseDone()
+			}
+			close(done)
+		}()
+	})
+}
+
+func (c *orgOwnerCloser) CloseDone() <-chan struct{} {
+	c.doneOnce.Do(func() { c.done = make(chan struct{}) })
+	return c.done
+}
+
+func (c *orgOwnerCloser) Close() error {
+	c.BeginClose()
 	var errs []error
-	for _, name := range names {
-		owner := owners[name]
-		if owner == nil {
-			continue
-		}
-		if err := owner.Close(); err != nil {
+	for _, name := range c.names {
+		if err := c.owners[name].Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close resident owner %q: %w", name, err))
 		}
 	}
@@ -1053,6 +1114,8 @@ type orgReloadStopper struct {
 	stop  *atomic.Bool
 	drain func()
 }
+
+func (s orgReloadStopper) BeginClose() { _ = s.Close() }
 
 func (s orgReloadStopper) Close() error {
 	s.stop.Store(true)

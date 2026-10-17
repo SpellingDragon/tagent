@@ -114,7 +114,7 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	lostKeys := 0
 	for i, k := range posKeys {
 		ev, err := cm.memStore.GetEvent(k)
-		if err != nil || ev == nil {
+		if err != nil || ev == nil || ev.Metadata[tagentevent.MetaKeyContinuationID] != cm.continuationID {
 			lostKeys++
 			result.MissingKeys = append(result.MissingKeys, formatKeys([]int64{k})[0])
 			log.Errorf("[rebuild-projection] retained key %d missing/tombstoned — SLOT LOST (count=%d): %v", k, lostKeys, err)
@@ -146,7 +146,7 @@ func (cm *ContextManager) rebuildProjectionFromWAL() {
 	tail, _ := cm.fetchTailEvents(snapKey, result)
 	result.Scanned += len(tail)
 	for _, ev := range tail {
-		if tagentevent.IsNonProjectionRecord(ev.EventType, ev.Metadata) {
+		if ev.Metadata[tagentevent.MetaKeyContinuationID] != cm.continuationID || tagentevent.IsNonProjectionRecord(ev.EventType, ev.Metadata) {
 			continue
 		}
 		cm.appendProjectionRef(ev)
@@ -188,7 +188,7 @@ func (cm *ContextManager) rebuildProjectionFallback(result *RecoveryResult) {
 	result.Scanned += len(all)
 	valid := make([]memory.FullEvent, 0, len(all))
 	for i := range all {
-		if tagentevent.IsNonProjectionRecord(all[i].EventType, all[i].Metadata) {
+		if all[i].Metadata[tagentevent.MetaKeyContinuationID] != cm.continuationID || tagentevent.IsNonProjectionRecord(all[i].EventType, all[i].Metadata) {
 			continue
 		}
 		valid = append(valid, all[i])

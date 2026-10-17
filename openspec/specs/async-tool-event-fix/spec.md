@@ -2,12 +2,8 @@
 
 ## Purpose
 
-本规范定义 async-tool-event-fix 能力：异步工具事件的两个横切契约——总线注入消息在消费时的角色归一化，与非交互命令的 settle 分类。
-
-> **状态核验（2026-09-09 立，2026-10-01 按码面修订）**：① 角色归一化——名为 `InjectBusInputs` 的函数已不存在（仅日志串与测试名沿用该称谓），但**转换本身并未消失**（消费侧与 canonical 侧各一处"复制 Message 后转 user"，见首条需求的承载坐标）；原记"消息层 Role 转换不再需要"是误判，已更正——不得据函数名消失判定能力消失。② 段边界（user/external_input 开新段）**已被 task-skeleton-compression 推翻**（段边界现为 agent_output 闭合回合，`isMessageTaskBoundary`/`isReferenceTaskBoundary` 符号非注释码面 0 命中）——相应两条需求已于 2026-10-01 移除，现行边界契约见该能力。③ 非交互 stable 即 completed **有效**，由 `tool/action/settle.go` 三档分类实现。④ "压缩产物不含引导消息"的行为由骨架模型保持（卡片行无引导语），但 `findPendingUserMessage` 符号已移除、原需求以死符号立文，已移除；若需成文，归属骨架/压缩能力而非本页。同标题重复的"Non-interactive"需求（历史吸收 append 而非 modify 所致）已收敛为一条。
-
+定义异步输入消费的角色归一化与命令native退出证据边界。输入原件、canonical事实和模型请求分别保持可核对身份；输出稳定、等待条件、进程死亡不再互相替代，防止长任务被提前完成或失去后续结算。
 ## Requirements
-
 ### Requirement: 冻结批次消费时归一化外部消息角色
 
 系统注入的外部输入 SHALL 在下一次有限拉取中被认领（非唤醒式排空＋durable 认领，不阻塞事件循环）。准备 canonical fact 与实际请求消息时 MUST 复制 Message 再把 `model.RoleSystem` 转为 `model.RoleUser`，不得原地改写原件，也不得把系统注入提升为模型系统指令。原始 source_event、Content、完整消息与来源 SHALL 保持不变；本就是 user 的消息语义不变。同步工具结果仍由框架在当前 ReAct 中处理，MUST NOT 因总线的批次边界而延后。
@@ -29,24 +25,14 @@
 - **WHEN** 处理 user 输入，或当前 ReAct 的同步工具结果
 - **THEN** user 语义保持；同步工具结果照常参与当前轮，不受异步总线边界影响
 
-### Requirement: Non-interactive commands complete on stable
+### Requirement: Output stability does not prove process completion
 
-In `detectSessionState`, when `!session.IsInteractive && !session.IsTUI` and the output has been stable for `stableDuration >= threshold`, the session SHALL return `SessionCompleted` immediately, without waiting for `fakeDeadDuration`. This prevents non-interactive commands (e.g., `curl`, `ls`) from being incorrectly classified as `fakeAlive` and restarted.
+For every command mode, the monitor MUST distinguish quiet output from native process death. A live pane reaching its stability threshold SHALL emit an observation and MUST NOT become completed solely because output stopped. Exit polarity SHALL derive from pane_dead and native exit status. Resident readiness and interactive input readiness SHALL require their explicit pattern or successful probe evidence.
 
-#### Scenario: Non-interactive command reaches stable
+#### Scenario: Quiet oneshot remains live
+- **WHEN** a oneshot command is quiet beyond stable_duration while its native pane is alive
+- **THEN** it remains active and its exit wait is not completed by stability
 
-- **WHEN** a non-interactive, non-TUI session's output is stable for >= stable_duration
-- **THEN** detectSessionState SHALL return SessionCompleted
-- **AND** SHALL NOT enter fakeDeadDuration/heartbeat detection
-
-#### Scenario: Interactive command reaches stable
-
-- **WHEN** an interactive session's output is stable for >= stable_duration
-- **THEN** the existing logic SHALL apply (stable → fakeDeadDuration → heartbeat)
-- **AND** SHALL NOT be affected by this change
-
-#### Scenario: TUI command reaches stable
-
-- **WHEN** a TUI session's output is stable for >= stable_duration
-- **THEN** the existing TUI logic SHALL apply (stable → fakeDeadDuration → TimedOut)
-- **AND** SHALL NOT be affected by this change
+#### Scenario: Native exit determines completion
+- **WHEN** the native pane exits with status zero or nonzero
+- **THEN** the result reports completed or failed with the captured native exit evidence

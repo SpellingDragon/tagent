@@ -73,8 +73,10 @@ func TestDeliverTaskSettledDecision(t *testing.T) {
 		return &task.Task{Spec: task.TaskSpec{Origin: map[string]string{metaKeyInvocationID: id}}}
 	}
 
-	deliverTaskSettled(sinks, bus, tk("no-sink"), &AgentEvent{ID: "b1", Source: SourceTask})
-	require.Contains(t, drainIDs(bus), "b1", "unsettled delegation id → routed to persistentBus (unchanged behavior)")
+	require.False(t, deliverTaskSettled(sinks, bus, tk("no-sink"), &AgentEvent{ID: "b1", Source: SourceTask}))
+	require.Empty(t, drainIDs(bus), "a missing private receiver must keep delivery unaccepted")
+	require.True(t, deliverTaskSettled(sinks, bus, tk(""), &AgentEvent{ID: "entry", Source: SourceTask}))
+	require.Contains(t, drainIDs(bus), "entry", "an entry-owned task uses the shared bus")
 
 	invBus := NewEventBus()
 	sinks.bind("X", invBus)
@@ -120,7 +122,7 @@ func TestBackgroundSettleRoutesToBoundBus(t *testing.T) {
 	})
 	d := task.NewManualDetectorDetach(40 * time.Millisecond)
 	res := tm.Spawn(
-		task.TaskSpec{Kind: "command", Desc: "late job", Origin: map[string]string{metaKeyInvocationID: "deleg-x"}},
+		task.TaskSpec{Kind: "command", Desc: "late job", RoundOwner: "deleg-x", Origin: map[string]string{metaKeyInvocationID: "deleg-x"}},
 		d,
 	)
 	require.False(t, res.Settled, "expected background (ack), not inline settle")
@@ -151,7 +153,7 @@ func TestBackgroundSettleFallsBackToBus(t *testing.T) {
 	})
 	d := task.NewManualDetectorDetach(40 * time.Millisecond)
 	res := tm.Spawn(
-		task.TaskSpec{Kind: "command", Desc: "late job", Origin: map[string]string{metaKeyInvocationID: "nobody-listening"}},
+		task.TaskSpec{Kind: "command", Desc: "late job"},
 		d,
 	)
 	require.False(t, res.Settled)
@@ -1401,7 +1403,7 @@ func TestCancelledTaskReleasesInvocationBooking(t *testing.T) {
 	detector := task.NewManualDetector()
 	detector.FireDetach()
 	t.Cleanup(detector.Done)
-	res := ta.taskManager.Spawn(task.TaskSpec{Kind: "command", Origin: map[string]string{metaKeyInvocationID: "inv"}}, detector)
+	res := ta.taskManager.Spawn(task.TaskSpec{Kind: "command", RoundOwner: "inv", Origin: map[string]string{metaKeyInvocationID: "inv"}}, detector)
 	require.True(t, ta.taskManager.Cancel(res.Task.ID))
 	require.False(t, ta.taskManager.Cancel(res.Task.ID), "cancellation emits its final notification once")
 	require.False(t, ta.settleSinks.awaiting("inv"))
@@ -1508,10 +1510,17 @@ func TestCommandSettleContinuesAgentPipeline(t *testing.T) {
 				want := []string{"watch", "completed"}
 				if !inline {
 					detector.Emit(task.SettleSignal{Kind: task.SettleStable, Output: "BACKGROUND_READY"})
-					nextSettleAnswer(t, ch, "BACKGROUND_READY")
+					require.Eventually(t, func() bool {
+						refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{ta.partitionID()}, EventTypes: []string{tagentevent.TypeExternalInput}, Keyword: "BACKGROUND_READY"})
+						if err != nil || len(refs) != 1 {
+							return false
+						}
+						fact, err := store.GetEvent(refs[0].EventKey)
+						return err == nil && fact.Metadata[tagentevent.MetaKeySettleWake] == "observe" && compress.VerifiedInputDisposition(store, fact) == "observed"
+					}, time.Second, time.Millisecond, "quiet output must have a verified observation receipt")
 					want = append(want, "stable")
 				}
-				detector.Emit(task.SettleSignal{Kind: task.SettleWatch, Output: "WATCH_PROGRESS"})
+				detector.Emit(task.SettleSignal{Kind: task.SettleWatch, Observation: "signal", Output: "WATCH_PROGRESS"})
 				nextSettleAnswer(t, ch, "WATCH_PROGRESS")
 				detector.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "COMMAND_FINISHED"})
 				nextSettleAnswer(t, ch, "COMMAND_FINISHED")
@@ -1604,4 +1613,500 @@ func TestTaskInputsPreserveMixedBatchAcrossStoreRetry(t *testing.T) {
 	require.Equal(t, "stable", fact.Metadata["settle_status"])
 	require.Equal(t, "false", fact.Metadata[tagentevent.MetaKeySettleFinal])
 	require.NotContains(t, extractRootMetadata(inputs), tagentevent.MetaKeySettleFinal)
+}
+
+type routingControllerProbe struct{ checked chan bool }
+
+func (p *routingControllerProbe) Declaration() *tool.Declaration {
+	return (&e2eProbeTool{}).Declaration()
+}
+
+func (p *routingControllerProbe) Call(ctx context.Context, _ []byte) (any, error) {
+	controller, ok := task.TaskControllerFromContext(ctx)
+	if !ok {
+		p.checked <- false
+		return nil, errors.New("task controller missing from delegated tool context")
+	}
+	p.checked <- controller.List() != nil && controller.DefaultTTL() > 0
+	_, found := controller.Get("missing")
+	if found || controller.Cancel("missing") || controller.RenewTTLBySession("missing") {
+		return nil, errors.New("task controller did not preserve management behavior")
+	}
+	return "TASK_CONTROLLER_AVAILABLE", nil
+}
+
+func TestCountingSpawnerPublicRunPreservesTaskController(t *testing.T) {
+	probe := &routingControllerProbe{checked: make(chan bool, 1)}
+	ta, err := NewTagentAgent(&TagentConfig{Name: "controller-run", Model: &echoModel{}, SystemPrompt: "test", Tools: []tool.Tool{probe}})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ta.Close()) })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := ta.Run(ctx, &agent.Invocation{InvocationID: "controller-inv", Message: model.NewUserMessage("check task tools")})
+	require.NoError(t, err)
+	nextSettleAnswer(t, output, "TASK_CONTROLLER_AVAILABLE")
+	select {
+	case available := <-probe.checked:
+		require.True(t, available)
+	case <-ctx.Done():
+		t.Fatal("delegated tool was not called")
+	}
+	for range output {
+	}
+}
+
+func routingSettleEvent(taskID, owner string, round, seq uint64, wait task.WaitCondition, status string, satisfied bool) *AgentEvent {
+	return &AgentEvent{ID: task.SignalSourceID(taskID, round, seq), Source: SourceTask, Metadata: map[string]any{
+		"task_id": taskID, "task_round_owner": owner, "task_round_id": round,
+		"task_signal_seq": seq, "wait_for": string(wait), "settle_status": status,
+		"settle_wait_satisfied": satisfied,
+	}}
+}
+
+func TestSettleWaitLedgerMatchesTaskRoundAndCondition(t *testing.T) {
+	r := newSettleSinkRegistry()
+	bus := NewEventBus()
+	r.bind("inv", bus)
+	r.restoreWaits("inv", []settleWaitSnapshot{
+		{TaskID: "task-a", RoundID: 1, WaitFor: task.WaitExit},
+		{TaskID: "task-a", RoundID: 2, WaitFor: task.WaitExit},
+		{TaskID: "task-b", RoundID: 1, WaitFor: task.WaitExit},
+	})
+	require.True(t, r.route("inv", routingSettleEvent("task-a", "inv", 1, 1, task.WaitReady, "ready", true)))
+	require.Len(t, r.snapshotWaits("inv"), 3, "readiness must not satisfy an exit wait")
+	require.True(t, r.route("inv", routingSettleEvent("task-a", "inv", 1, 2, task.WaitExit, "watch", false)))
+	require.Len(t, r.snapshotWaits("inv"), 3, "an observation does not satisfy the wait")
+	require.True(t, r.route("inv", routingSettleEvent("task-a", "inv", 1, 3, task.WaitExit, "completed", true)))
+	require.ElementsMatch(t, []settleWaitSnapshot{
+		{TaskID: "task-a", RoundID: 2, WaitFor: task.WaitExit},
+		{TaskID: "task-b", RoundID: 1, WaitFor: task.WaitExit},
+	}, r.snapshotWaits("inv"), "late results release only their own producer round")
+}
+
+func TestPrivateSettleRejectionKeepsBookingAndNeverFallsBack(t *testing.T) {
+	r := newSettleSinkRegistry()
+	private, shared := NewEventBus(), NewEventBus()
+	r.bind("inv", private)
+	r.restoreWaits("inv", []settleWaitSnapshot{{TaskID: "task", RoundID: 1, WaitFor: task.WaitExit}})
+	r.setDestination("inv", func(context.Context, *AgentEvent) (PublishReceipt, error) { return PublishReceipt{}, ErrBusClosed })
+	evt := routingSettleEvent("task", "inv", 1, 1, task.WaitExit, "completed", true)
+	require.False(t, deliverTaskSettled(r, shared, nil, evt))
+	require.True(t, r.awaiting("inv"))
+	require.Empty(t, private.TryPull())
+	require.Empty(t, shared.TryPull())
+	r.setDestination("inv", private.PublishContext)
+	require.True(t, deliverTaskSettled(r, shared, nil, evt), "a rejected identity can be retried")
+	require.False(t, r.awaiting("inv"))
+	require.Len(t, private.TryPull(), 1)
+}
+
+func TestSettleConcurrentIdentityCoalescesWithoutHoldingRegistryLock(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("inv", NewEventBus())
+	r.bind("other", NewEventBus())
+	r.restoreWaits("inv", []settleWaitSnapshot{{TaskID: "task", RoundID: 1, WaitFor: task.WaitExit}})
+	entered, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	var callsMu sync.Mutex
+	r.setDestination("inv", func(context.Context, *AgentEvent) (PublishReceipt, error) {
+		callsMu.Lock()
+		calls++
+		callsMu.Unlock()
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return PublishReceipt{Durable: true}, nil
+	})
+	evt := routingSettleEvent("task", "inv", 1, 1, task.WaitExit, "completed", true)
+	const concurrent = 16
+	results := make(chan bool, concurrent)
+	for i := 0; i < concurrent; i++ {
+		go func() { results <- r.route("inv", evt) }()
+	}
+	<-entered
+	otherDone := make(chan struct{})
+	go func() { r.noteSpawn("other"); close(otherDone) }()
+	select {
+	case <-otherDone:
+	case <-time.After(time.Second):
+		t.Fatal("destination I/O held the registry mutex")
+	}
+	require.True(t, r.awaiting("inv"), "acceptance has not completed")
+	close(release)
+	for i := 0; i < concurrent; i++ {
+		require.True(t, <-results)
+	}
+	require.False(t, r.awaiting("inv"))
+	require.True(t, r.route("inv", evt), "a later retry reuses the accepted sequence")
+	callsMu.Lock()
+	require.Equal(t, 1, calls)
+	callsMu.Unlock()
+}
+
+func TestSettlePauseSealsBeforeHandoffAndCancelledPauseUnseals(t *testing.T) {
+	r := newSettleSinkRegistry()
+	bus := NewEventBus()
+	r.bind("inv", bus)
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.setDestination("inv", func(context.Context, *AgentEvent) (PublishReceipt, error) {
+		close(entered)
+		<-release
+		return PublishReceipt{}, nil
+	})
+	first := make(chan bool, 1)
+	go func() {
+		first <- r.route("inv", routingSettleEvent("task", "inv", 1, 1, task.WaitExit, "watch", false))
+	}()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	pauseDone := make(chan error, 1)
+	go func() { _, err := r.pauseDestination(ctx, "inv"); pauseDone <- err }()
+	require.Eventually(t, func() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.states["inv"].sealed }, time.Second, time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-pauseDone, context.Canceled)
+	close(release)
+	require.True(t, <-first)
+	releaseDestination, err := r.pauseDestination(context.Background(), "inv")
+	require.NoError(t, err)
+	secondDone := make(chan bool, 1)
+	go func() {
+		secondDone <- r.route("inv", routingSettleEvent("task", "inv", 1, 2, task.WaitExit, "completed", true))
+	}()
+	select {
+	case <-secondDone:
+		t.Fatal("a sealed destination accepted a new delivery")
+	case <-time.After(10 * time.Millisecond):
+	}
+	durable := NewEventBus()
+	releaseDestination(durable.PublishContext)
+	require.True(t, <-secondDone)
+	require.Empty(t, bus.TryPull(), "the explicit handoff has priority over the old live bus")
+	require.Len(t, durable.TryPull(), 1)
+}
+
+func TestSettleWaitStateWakesOnlyItsInvocation(t *testing.T) {
+	var r settleSinkRegistry
+	r.bind("a", NewEventBus())
+	r.bind("b", NewEventBus())
+	_, changedA := r.waitState("a")
+	_, changedB := r.waitState("b")
+	r.noteSpawn("a")
+	select {
+	case <-changedA:
+	default:
+		t.Fatal("a booking did not wake its invocation")
+	}
+	select {
+	case <-changedB:
+		t.Fatal("an unrelated invocation was woken")
+	default:
+	}
+	awaiting, changedA := r.waitState("a")
+	require.True(t, awaiting)
+	r.voidSpawn("a")
+	select {
+	case <-changedA:
+	default:
+		t.Fatal("voiding the final booking did not wake the loop")
+	}
+	require.False(t, r.awaiting("a"))
+}
+
+func TestSettleAcceptedInboxReplayRepairsCheckpointWindow(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("inv", NewEventBus())
+	r.restoreWaits("inv", []settleWaitSnapshot{{TaskID: "task", RoundID: 7, WaitFor: task.WaitExit}})
+	beforeAcceptance := r.snapshotRouting("inv")
+	evt := routingSettleEvent("task", "inv", 7, 1, task.WaitExit, "completed", true)
+	require.True(t, r.route("inv", evt))
+	recovered := newSettleSinkRegistry()
+	recovered.restoreRouting("inv", beforeAcceptance)
+	recovered.reconcileAccepted("inv", []*AgentEvent{evt})
+	require.False(t, recovered.awaiting("inv"), "the durable inbox is evidence of acceptance before checkpoint")
+	accepts := 0
+	recovered.setDestination("inv", func(context.Context, *AgentEvent) (PublishReceipt, error) { accepts++; return PublishReceipt{}, nil })
+	require.True(t, recovered.route("inv", evt))
+	require.Zero(t, accepts, "replay must restore acceptance identity as well as the wait")
+	for seq := uint64(2); seq <= 1000; seq++ {
+		recovered.reconcileAccepted("inv", []*AgentEvent{routingSettleEvent("task", "inv", 7, seq, task.WaitExit, "watch", false)})
+	}
+	snapshot := recovered.snapshotRouting("inv")
+	require.Len(t, snapshot.Streams, 1)
+	require.Equal(t, []settleSequenceRange{{First: 1, Last: 1000}}, snapshot.Streams[0].Accepted, "accepted history is represented by ranges")
+}
+
+func TestSettleRetireCompactsZeroValueRegistry(t *testing.T) {
+	var r settleSinkRegistry
+	r.bind("inv", NewEventBus())
+	r.restoreRouting("inv", settleRoutingSnapshot{Streams: []settleStreamSnapshot{{TaskID: "service", RoundID: 1, Owner: "inv", Lifetime: task.LifetimeService}}})
+	destination := NewEventBus()
+	r.setDestination("inv", destination.PublishContext)
+	r.retire("inv")
+	require.Len(t, r.states, 1, "a handed-off service keeps its private destination")
+	require.True(t, r.route("inv", routingSettleEvent("service", "inv", 1, 1, task.WaitReady, "completed", true)))
+	r.compact()
+	require.Nil(t, r.byInv)
+	require.Nil(t, r.pending)
+	require.Nil(t, r.states)
+	require.Nil(t, r.inFlight)
+}
+
+type routingBeforeReturnController struct {
+	task.TaskController
+	beforeSpawnReturn func(task.SpawnResult)
+}
+
+func (c *routingBeforeReturnController) Spawn(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
+	res := c.TaskController.Spawn(spec, detector)
+	if c.beforeSpawnReturn != nil {
+		c.beforeSpawnReturn(res)
+	}
+	return res
+}
+
+func TestCountingSpawnerReceivesSettleBeforeSpawnReturns(t *testing.T) {
+	r := newSettleSinkRegistry()
+	bus := NewEventBus()
+	r.bind("inv", bus)
+	accepted := make(chan struct{})
+	tm := task.NewTaskManager(task.TaskManagerConfig{OnSettle: func(tk *task.Task, sig task.SettleSignal) {
+		require.True(t, r.awaiting("inv"), "the exact booking exists before the callback")
+		require.True(t, deliverTaskSettled(r, nil, tk, newTaskSettledEvent(tk, sig, 0, "")))
+		close(accepted)
+	}})
+	d := task.NewManualDetector()
+	d.FireDetach()
+	t.Cleanup(d.Done)
+	inner := &routingBeforeReturnController{TaskController: tm, beforeSpawnReturn: func(res task.SpawnResult) {
+		d.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "early completion"})
+		select {
+		case <-accepted:
+		case <-time.After(time.Second):
+			t.Fatal("pre-return settle was not accepted")
+		}
+	}}
+	spawner := &countingSpawner{inner: inner, sinks: r, id: "inv"}
+	res := spawner.Spawn(task.TaskSpec{Kind: "command", WaitFor: task.WaitExit}, d)
+	require.NotNil(t, res.Task)
+	require.False(t, r.awaiting("inv"), "returning from Spawn must not recreate a consumed booking")
+	require.Len(t, bus.TryPull(), 1)
+}
+
+func TestCountingSpawnerResumeBooksNewOwnerAndVoidsFailure(t *testing.T) {
+	r := newSettleSinkRegistry()
+	first, resumed, refused := NewEventBus(), NewEventBus(), NewEventBus()
+	r.bind("original", first)
+	r.bind("resumed", resumed)
+	r.bind("failed", refused)
+	settled := make(chan task.SettleSignal, 4)
+	tm := task.NewTaskManager(task.TaskManagerConfig{OnSettle: func(tk *task.Task, sig task.SettleSignal) {
+		deliverTaskSettled(r, nil, tk, newTaskSettledEvent(tk, sig, 0, ""))
+		settled <- sig
+	}})
+	spawnDetector := task.NewManualDetector()
+	spawnDetector.FireDetach()
+	t.Cleanup(spawnDetector.Done)
+	resumeDetector := task.NewManualDetector()
+	resumeDetector.FireDetach()
+	t.Cleanup(resumeDetector.Done)
+	failResume := false
+	origin := map[string]string{metaKeyInvocationID: "original", "chat_id": "first-chat"}
+	original := &countingSpawner{inner: tm, sinks: r, id: "original"}
+	res := original.Spawn(task.TaskSpec{Kind: "command", WaitFor: task.WaitExit, Origin: origin, ResumeFn: func(ctx context.Context, _ string) (task.SettleDetector, error) {
+		if failResume {
+			return nil, errors.New("producer refused input")
+		}
+		require.Equal(t, "resumed", task.RoundOwnerFromContext(ctx))
+		return resumeDetector, nil
+	}}, spawnDetector)
+	spawnDetector.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "first result"})
+	var old task.SettleSignal
+	select {
+	case old = <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("original round did not settle")
+	}
+	require.False(t, r.awaiting("original"))
+	resumeWrapper := &countingSpawner{inner: tm, sinks: r, id: "resumed"}
+	next, err := resumeWrapper.Resume(context.Background(), res.Task.ID, "continue")
+	require.NoError(t, err)
+	require.False(t, next.Settled)
+	require.True(t, r.awaiting("resumed"))
+	require.Equal(t, origin, res.Task.SpecSnapshot().Origin, "a new round owner must not rewrite spawn provenance")
+	require.True(t, deliverTaskSettled(r, nil, res.Task, newTaskSettledEvent(res.Task, old, 0, "")))
+	require.True(t, r.awaiting("resumed"), "a delayed old-round callback cannot discharge the resumed round")
+	resumeDetector.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "resumed result"})
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("resumed round did not settle")
+	}
+	require.False(t, r.awaiting("resumed"))
+	require.Len(t, resumed.TryPull(), 1)
+	failResume = true
+	failedWrapper := &countingSpawner{inner: tm, sinks: r, id: "failed"}
+	_, err = failedWrapper.Resume(context.Background(), res.Task.ID, "fail")
+	require.Error(t, err)
+	require.False(t, r.awaiting("failed"), "a rejected resume must void its provisional and exact bookings")
+	require.Equal(t, origin, res.Task.SpecSnapshot().Origin)
+}
+
+func TestSettleReconcileTasksRepairsMissingSpawnCheckpoint(t *testing.T) {
+	r := newSettleSinkRegistry()
+	bus := NewEventBus()
+	r.bind("inv", bus)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	d := task.NewManualDetector()
+	d.FireDetach()
+	t.Cleanup(d.Done)
+	res := tm.Spawn(task.TaskSpec{Kind: "command", WaitFor: task.WaitExit, RoundOwner: "inv"}, d)
+	require.Empty(t, r.snapshotWaits("inv"), "the checkpoint happened before OnRoundStart bookkeeping")
+	r.reconcileTasks("inv", tm)
+	require.Equal(t, []settleWaitSnapshot{{TaskID: res.Task.ID, RoundID: res.Task.ProducerRound(), WaitFor: task.WaitExit}}, r.snapshotWaits("inv"))
+	evt := routingSettleEvent(res.Task.ID, "inv", res.Task.ProducerRound(), 1, task.WaitExit, "completed", true)
+	r.reconcileAccepted("inv", []*AgentEvent{evt})
+	r.reconcileTasks("inv", tm)
+	require.False(t, r.awaiting("inv"), "an accepted result must not be booked again during task inventory")
+}
+
+func TestSettleRoutingRestoreMergesRangesWithoutRevivingAcceptedWait(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("inv", NewEventBus())
+	r.reconcileAccepted("inv", []*AgentEvent{routingSettleEvent("task", "inv", 2, 4, task.WaitExit, "completed", true)})
+	r.restoreRouting("inv", settleRoutingSnapshot{
+		Waits: []settleWaitSnapshot{{TaskID: "task", RoundID: 2, WaitFor: task.WaitExit}},
+		Streams: []settleStreamSnapshot{{TaskID: "task", RoundID: 2, Owner: "inv", Lifetime: task.LifetimeService,
+			Accepted: []settleSequenceRange{{First: 1, Last: 3}, {First: 2, Last: 5}, {First: 0, Last: 0}}}},
+	})
+	require.False(t, r.awaiting("inv"), "a stale checkpoint cannot undo an accepted result")
+	snapshot := r.snapshotRouting("inv")
+	require.Len(t, snapshot.Streams, 1)
+	require.Empty(t, snapshot.Streams[0].Owner, "a stale snapshot must not revive a terminal owner")
+	require.Equal(t, []settleSequenceRange{{First: 1, Last: 5}}, snapshot.Streams[0].Accepted)
+}
+
+func TestSettleEntryIdentitySurvivesRetriesAndCompactsAfterTaskPrune(t *testing.T) {
+	r := newSettleSinkRegistry()
+	bus := NewEventBus()
+	evt := routingSettleEvent("task", "", 1, 1, task.WaitExit, "completed", true)
+	require.True(t, deliverTaskSettled(r, bus, nil, evt))
+	require.True(t, deliverTaskSettled(r, bus, nil, evt))
+	require.Len(t, bus.TryPull(), 1)
+	r.compact(task.NewTaskManager(task.TaskManagerConfig{}))
+	require.Nil(t, r.states, "pruned task identities no longer retain entry routing state")
+}
+
+func TestSettleAbortedIntentVoidsOnlyItsOwnBooking(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("old-owner", NewEventBus())
+	r.bind("new-owner", NewEventBus())
+	r.restoreWaits("old-owner", []settleWaitSnapshot{{TaskID: "task", RoundID: 1, WaitFor: task.WaitExit}})
+	r.restoreWaits("new-owner", []settleWaitSnapshot{{TaskID: "task", RoundID: 2, WaitFor: task.WaitExit}, {TaskID: "task", RoundID: 3, WaitFor: task.WaitExit}})
+	tk := &task.Task{ID: "task"}
+	sig := task.SettleSignal{RoundID: 2, ProducerRound: 1, RoundOwner: "new-owner", Seq: 1, SourceID: task.SignalSourceID("task", 2, 1), Observation: "round_aborted"}
+	r.abortRound(tk, sig)
+	r.abortRound(tk, sig)
+	require.Equal(t, []settleWaitSnapshot{{TaskID: "task", RoundID: 1, WaitFor: task.WaitExit}}, r.snapshotWaits("old-owner"))
+	require.Equal(t, []settleWaitSnapshot{{TaskID: "task", RoundID: 3, WaitFor: task.WaitExit}}, r.snapshotWaits("new-owner"))
+	r.restoreWaits("new-owner", []settleWaitSnapshot{{TaskID: "task", RoundID: 2, WaitFor: task.WaitExit}})
+	require.Len(t, r.snapshotWaits("new-owner"), 1, "an accepted abort cannot be reopened from a stale checkpoint")
+	require.Empty(t, r.byInv["old-owner"].TryPull())
+	require.Empty(t, r.byInv["new-owner"].TryPull(), "aborted intents are recorded without a model event")
+}
+
+func TestSettleReceiverPanicLeavesDeliveryRetryableAndPauseUsable(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("inv", NewEventBus())
+	r.restoreWaits("inv", []settleWaitSnapshot{{TaskID: "task", RoundID: 1, WaitFor: task.WaitExit}})
+	r.setDestination("inv", func(context.Context, *AgentEvent) (PublishReceipt, error) { panic("receiver failure") })
+	evt := routingSettleEvent("task", "inv", 1, 1, task.WaitExit, "completed", true)
+	require.False(t, r.route("inv", evt))
+	require.True(t, r.awaiting("inv"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	release, err := r.pauseDestination(ctx, "inv")
+	require.NoError(t, err, "a failed receiver must not strand in-flight accounting")
+	destination := NewEventBus()
+	release(destination.PublishContext)
+	require.True(t, r.route("inv", evt))
+	require.False(t, r.awaiting("inv"))
+	require.Len(t, destination.TryPull(), 1)
+}
+
+func TestSettleRetirePreservesTerminalServiceUntilHandoffReceipt(t *testing.T) {
+	r := newSettleSinkRegistry()
+	private := NewEventBus()
+	r.bind("inv", private)
+	accepted := make(chan task.SettleSignal, 2)
+	tm := task.NewTaskManager(task.TaskManagerConfig{OnSettleAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+		ok := deliverTaskSettled(r, nil, tk, newTaskSettledEvent(tk, sig, 0, ""))
+		if ok {
+			accepted <- sig
+		}
+		return ok
+	}})
+	d := task.NewManualDetector()
+	d.FireDetach()
+	t.Cleanup(d.Done)
+	spawner := &countingSpawner{inner: tm, sinks: r, id: "inv"}
+	res := spawner.Spawn(task.TaskSpec{Kind: "generic", Mode: "service", Lifetime: task.LifetimeService, WaitFor: task.WaitReady}, d)
+	d.Emit(task.SettleSignal{Kind: task.SettleReady, Ready: true})
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("service readiness was not accepted")
+	}
+	require.False(t, r.awaiting("inv"))
+	private.TryPull()
+	release, err := r.pauseDestination(context.Background(), "inv")
+	require.NoError(t, err)
+	d.Emit(task.SettleSignal{Kind: task.SettleCompleted, Output: "service ended"})
+	require.Eventually(t, func() bool { return res.Task.Status() == task.TaskCompleted }, time.Second, time.Millisecond)
+	entered, receipt := make(chan struct{}), make(chan struct{})
+	release(func(context.Context, *AgentEvent) (PublishReceipt, error) {
+		close(entered)
+		<-receipt
+		return PublishReceipt{Durable: true}, nil
+	})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("terminal signal did not reach the handoff receiver")
+	}
+	r.retire("inv")
+	r.mu.Lock()
+	retained := r.states["inv"] != nil && r.states["inv"].destination != nil
+	r.mu.Unlock()
+	require.True(t, retained, "a terminal task still owns an unaccepted delivery obligation")
+	close(receipt)
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("terminal handoff was not accepted")
+	}
+	r.compact()
+	r.mu.Lock()
+	require.Nil(t, r.states)
+	r.mu.Unlock()
+}
+
+func TestSettleStateOnlyRetirementRetainsJobReceiptsWithoutModelWait(t *testing.T) {
+	r := newSettleSinkRegistry()
+	r.bind("inv", NewEventBus())
+	r.restoreRouting("inv", settleRoutingSnapshot{
+		Waits:   []settleWaitSnapshot{{TaskID: "job", RoundID: 1, WaitFor: task.WaitExit}},
+		Streams: []settleStreamSnapshot{{TaskID: "job", RoundID: 1, Owner: "inv", Lifetime: task.LifetimeJob}},
+	})
+	accepted := NewEventBus()
+	r.setDestination("inv", accepted.PublishContext)
+	r.retireStateOnly("inv")
+	require.False(t, r.awaiting("inv"))
+	require.Empty(t, r.byInv)
+	require.True(t, r.route("inv", routingSettleEvent("job", "inv", 1, 1, task.WaitExit, "watch", false)))
+	require.True(t, r.route("inv", routingSettleEvent("job", "inv", 1, 2, task.WaitExit, "completed", true)))
+	require.Len(t, accepted.TryPull(), 2)
+	require.Nil(t, r.states, "the final receipt releases the state-only receiver")
 }

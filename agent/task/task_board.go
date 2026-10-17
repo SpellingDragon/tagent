@@ -41,7 +41,8 @@ func RenderBoard(tasks []*Task, defaultTTL time.Duration) string {
 	fmt.Fprintf(&b, "[后台任务看板] 系统注入的观察快照（非用户发言，不入历史，勿在回复中模仿此格式）：当前 %d 个进行中\n", len(active))
 	for _, t := range active {
 		age := now.Sub(t.StartedAt).Round(time.Second)
-		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v", t.Status(), t.Spec.Desc, ShortID(t.ID), age)
+		snapshot := t.RoutingSnapshot()
+		fmt.Fprintf(&b, "- [%s] %s (id=%s, 已运行 %v", snapshot.Status, snapshot.Spec.Desc, ShortID(t.ID), age)
 		if rem, ok := t.remainingLifetime(now, defaultTTL); ok {
 			if rem <= 0 {
 				b.WriteString(", 即将回收")

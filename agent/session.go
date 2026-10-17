@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/memory"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -28,6 +27,9 @@ import (
 // - 租约拒绝发生在本调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
 // - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把 loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
+	if inv == nil {
+		return nil, fmt.Errorf("agent %q: nil invocation", ta.name)
+	}
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)
 
@@ -76,11 +78,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		return nil, fmt.Errorf("agent %q: config or model is nil", ta.name)
 	}
 
-	invBus := NewEventBus()
-
-	invOutputCh := make(chan *event.Event, 100)
-	invProjection := compress.NewSessionProjection()
-	invOnEvent := ta.makeOnEventCallback()
 	maxToolIters := ta.config.MaxToolIterations
 	if maxToolIters <= 0 {
 		maxToolIters = DefaultSubAgentMaxToolIterations
@@ -109,13 +106,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			return nil, fmt.Errorf("agent %q: per-call override refused at assembly: %w", ta.name, err)
 		}
 	}
-	invCM := newContextManagerFromConfig(&invCfg, ta, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
-	invCM.SetUserIDSessionID(userID, sessionID)
-	if ta.taskManager != nil {
-		invCM.taskController = ta.taskManager
-	}
-	invCM.settleSinks = ta.settleSinks
-
 	callerLease, inherited := execLeaseFromContext(ctx)
 	var invLease *ExecLease
 	switch {
@@ -125,30 +115,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invLease = ta.contextManager.AcquireLease(LeaseSubCall)
 	}
 	if err := invLease.Err(); err != nil {
-		invCM.Close()
 		return nil, fmt.Errorf("subagent %q invocation refused: %w", ta.name, err)
 	}
-	ta.registerLiveCM(invCM)
-
 	inputEvent := newDelegationEvent(inv, message)
-	go func() {
-		defer invLease.Release()
-		defer close(invOutputCh)
-		defer ta.unregisterLiveCM(invCM)
-		defer invCM.Close()
-		invID := ""
-		if inv != nil {
-			invID = inv.InvocationID
-		}
-		ta.bindSettleBus(invID, invBus)
-		defer drainSettleBusTo(invBus, ta.persistentBus)
-		defer ta.unbindSettleBus(invID)
-		firstCtx := withInvocationID(ctx, invID)
-		invBus.Publish(inputEvent)
-		ta.runAgentLoop(firstCtx, invBus, invCM, loopSpec{invocationID: invID})
-	}()
-
-	return invOutputCh, nil
+	return ta.beginContinuation(ctx, inv, inputEvent, invCfg, pinnedRefs, invLease, userID, sessionID)
 }
 
 // newDelegationEvent wraps a request/response sub-call's assembled message as a

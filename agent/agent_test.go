@@ -521,13 +521,9 @@ func TestTagentAgent_Run_InjectMessageRoutesToSubAgentBus(t *testing.T) {
 	noopTool := &loopMockTool{name: "noop", result: "ok"}
 	mockModel := &loopMockModel{responses: []*model.Response{firstResp}}
 
-	persistentBus := NewEventBus()
-	ta := &TagentAgent{
-		name:          "test-inject",
-		persistentBus: persistentBus,
-		activeBus:     persistentBus,
-		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel, Tools: []trpctool.Tool{noopTool}},
-	}
+	ta, err := NewTagentAgent(&TagentConfig{Name: "test-inject", MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel, Tools: []trpctool.Tool{noopTool}})
+	require.NoError(t, err)
+	defer ta.Close()
 
 	ta.InjectMessage(model.Message{Role: model.RoleSystem, Content: "pre-run"})
 
@@ -564,13 +560,9 @@ func TestTagentAgent_Run_EmptyFinalResponseCompletes(t *testing.T) {
 
 	mockModel := &loopMockModel{responses: []*model.Response{emptyResp, emptyResp}}
 
-	persistentBus2 := NewEventBus()
-	ta := &TagentAgent{
-		name:          "test-empty-run",
-		persistentBus: persistentBus2,
-		activeBus:     persistentBus2,
-		config:        &TagentConfig{MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel},
-	}
+	ta, err := NewTagentAgent(&TagentConfig{Name: "test-empty-run", MaxToolIterations: 10, MaxTokens: 8000, Model: mockModel})
+	require.NoError(t, err)
+	defer ta.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1130,9 +1122,12 @@ func TestContextLifecycleSimulation(t *testing.T) {
 	if len(settleRef.EventSummary) > 5000 {
 		t.Fatalf("B: settle event Content must stay bounded (len=%d)", len(settleRef.EventSummary))
 	}
-	matches, _ := filepath.Glob(filepath.Join(spillDir, "task-sim-*.txt"))
-	if len(matches) == 0 {
+	matches, _ := filepath.Glob(filepath.Join(spillDir, "task-*.txt"))
+	if len(matches) != 1 {
 		t.Fatalf("B: spilled file must exist under %s", spillDir)
+	}
+	if !strings.Contains(settleRef.EventSummary, matches[0]) {
+		t.Fatalf("B: spill ticket must identify the exact file: %s", settleRef.EventSummary)
 	}
 	if data, err := os.ReadFile(matches[0]); err != nil || len(data) != len(big) {
 		t.Fatalf("B: spilled file must hold the full body (err=%v len=%d want %d)", err, len(data), len(big))

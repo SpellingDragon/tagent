@@ -18,8 +18,10 @@ import (
 type TmuxExecutor struct {
 	prefix     string
 	workspace  string
+	pipeRoot   string
 	runAsUser  string
 	runAsGroup string
+	run        func(context.Context, []string) (string, error)
 }
 
 // TmuxExecutorOption configures TmuxExecutor
@@ -102,6 +104,10 @@ func (te *TmuxExecutor) setSessionEnv(ctx context.Context, sessionName string, e
 // TmuxSession represents a tmux session
 type TmuxSession struct {
 	ID            string
+	ResourceID    string
+	ProducerRound uint64
+	Placeholder   string
+	Phase         string
 	Name          string
 	Command       string
 	WorkDir       string
@@ -144,11 +150,9 @@ const (
 	SessionRunning SessionStatus = "running"
 	// SessionStable 输出已稳定但进程存活、且未显式声明静默超时的判定；不视为死亡，按调度上限继续轮询。
 	SessionStable SessionStatus = "stable"
-	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
+	// SessionCompleted 表示进程已退出且退出码确认为零。
 	SessionCompleted SessionStatus = "completed"
-	// SessionError 失败极性的终态主载体（D1 透传）：已知非零退出码（含信号死）、
-	// 探测连续失明超限、强拆重试超限、探测器未装配——四类产源都以它把失败送达
-	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
+	// SessionError 表示已确认进程终止，且退出码非零或无法读取。
 	SessionError SessionStatus = "error"
 	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
 	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
@@ -156,7 +160,7 @@ const (
 	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
 	// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 	SessionFakeAlive SessionStatus = "fake_alive"
-	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
+	// SessionTimedOut 表示静默或探活不可辨观察；进程继续被监控。
 	SessionTimedOut SessionStatus = "timed_out"
 )
 
@@ -165,17 +169,11 @@ const (
 type SessionMode string
 
 const (
-	// ModeOneshot is the default command semantics: settle on exit; a 60s-quiet alive
-	// session reports Stable (never Completed — see detectSessionState), and quiet_timeout
-	// (if set) is a hard kill deadline.
+	// ModeOneshot waits for real exit; silence only produces observations.
 	ModeOneshot SessionMode = "oneshot"
-	// ModeResident is for long-lived services (dev servers, tunnels, training): silence
-	// is HEALTHY — no stable settle, no fake-dead kill, no auto-reap. Only unexpected death
-	// (Completed/Error) settles; pair with watch/probe to hear from it.
+	// ModeResident waits for a successful health probe or declared readiness pattern.
 	ModeResident SessionMode = "resident"
-	// ModeInteractive is for long-running conversational sessions (REPL, coding agents):
-	// stable settle plus resume/send-keys semantics, with heartbeat-based fake-dead
-	// detection.
+	// ModeInteractive waits for a fresh input prompt and supports resumed input.
 	ModeInteractive SessionMode = "interactive"
 )
 
@@ -223,6 +221,9 @@ func isTransientTmuxServerFailure(err error, detail string) bool {
 // durable failure (duplicate name, missing binary) returns immediately, never
 // retried.
 func (te *TmuxExecutor) runTmuxCreate(ctx context.Context, cmdName string, cmdArgs []string, sessionName string) (string, error) {
+	if te.run != nil {
+		return te.run(ctx, cmdArgs)
+	}
 	var runErr error
 	var detail string
 	for attempt := 0; ; attempt++ {
@@ -277,6 +278,9 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 		args = append(args, "-c", workDir)
 	}
 
+	for k, v := range opts.Env {
+		args = append(args, "-e", k+"="+v)
+	}
 	args = append(args, opts.Command)
 
 	args = append(args, ";", "set-option", "remain-on-exit", "on")
@@ -313,6 +317,12 @@ func (te *TmuxExecutor) CreateSession(ctx context.Context, opts TmuxCreateOption
 		PipeFile:      pipeFile,
 	}
 
+	session.Mode = opts.Mode
+	session.ResourceID, err = te.SessionResourceID(sessionName)
+	if err != nil {
+		_ = te.KillSession(sessionName)
+		return nil, fmt.Errorf("session identity: %w", err)
+	}
 	return session, nil
 }
 
@@ -323,6 +333,9 @@ func (te *TmuxExecutor) KillSession(sessionID string) error {
 	cmdName, cmdArgs := te.buildTmuxCommand([]string{"kill-session", "-t", sessionID})
 	cmd := exec.Command(cmdName, cmdArgs...)
 	err := cmd.Run()
+	if err != nil {
+		return err
+	}
 	if pf := te.pipeFilePath(sessionID); true {
 		if _, statErr := os.Stat(pf); statErr == nil {
 			dest := filepath.Join(os.TempDir(), "tagent-archived-pipes")
@@ -343,9 +356,8 @@ func (te *TmuxExecutor) KillSession(sessionID string) error {
 
 // SessionExists checks if a tmux session exists
 func (te *TmuxExecutor) SessionExists(sessionID string) bool {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"has-session", "-t", sessionID})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	return cmd.Run() == nil
+	_, err := te.runResourceCommand(context.Background(), []string{"has-session", "-t", "=" + sessionID})
+	return err == nil
 }
 
 // pipeFilePath GetSessionOutput gets the current output of a tmux session
@@ -356,6 +368,12 @@ func (te *TmuxExecutor) pipeFilePath(sessionID string) string {
 
 // PipeFileFor exposes the streaming-log path for a session.
 func (te *TmuxExecutor) PipeFileFor(sessionID string) string {
+	if resource, err := te.SessionResourceID(sessionID); err == nil {
+		path := te.resourcePipePath(sessionID, resource)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
 	return te.pipeFilePath(sessionID)
 }
 
@@ -378,6 +396,9 @@ func NamedSessionName(logical string) string {
 // 为空时回落到 capture-pane 的最近 1000 行，该回落调用带 3s 超时。
 func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
 	pipeFile := te.pipeFilePath(sessionID)
+	if te.run != nil {
+		return te.run(context.Background(), []string{"capture-pane", "-p", "-S", "-1000", "-t", sessionID})
+	}
 	if b, err := os.ReadFile(pipeFile); err == nil && len(b) > 0 {
 		return string(b), nil
 	}
@@ -398,17 +419,8 @@ func (te *TmuxExecutor) GetSessionOutput(sessionID string) (string, error) {
 
 // IsPaneDead checks if the tmux pane is dead
 func (te *TmuxExecutor) IsPaneDead(sessionID string) bool {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_dead}"})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	err := cmd.Run()
-	if err != nil {
-		return false
-	}
-
-	return strings.TrimSpace(stdout.String()) == "1"
+	out, err := te.runResourceCommand(context.Background(), []string{"display-message", "-p", "-t", sessionID, "#{pane_dead}"})
+	return err == nil && strings.TrimSpace(out) == "1"
 }
 
 // PaneDeadStatus reads the exit status of a dead pane via tmux's
@@ -421,37 +433,26 @@ func (te *TmuxExecutor) IsPaneDead(sessionID string) bool {
 //
 // 契约: docs/wiki/tool/tmux-action.md#failure-polarity
 func (te *TmuxExecutor) PaneDeadStatus(sessionID string) (code int, known bool) {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_dead_status}"})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		return 0, false
-	}
-	trimmed := strings.TrimSpace(stdout.String())
-	if trimmed == "" {
-		return 0, false
-	}
-	status, err := strconv.Atoi(trimmed)
+	out, err := te.runResourceCommand(context.Background(), []string{"display-message", "-p", "-t", sessionID, "#{pane_dead_status}"})
 	if err != nil {
 		return 0, false
 	}
-	return status, true
+	code, err = strconv.Atoi(strings.TrimSpace(out))
+	return code, err == nil
 }
 
 // SessionAlive3：三态存活探测——list-sessions
 // 单源（会话在列表=活；不在=确定性死；命令 err=不可辨）。known=false 时调用方
 // （monitor）计入 ProbeUnknownCount 连续加闸，不立即判死。
 func (te *TmuxExecutor) SessionAlive3(sessionID string) (alive, known bool) {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"list-sessions", "-F", "#{session_name}"})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
+	out, err := te.runResourceCommand(context.Background(), []string{"list-sessions", "-F", "#{session_name}"})
+	if err != nil {
+		if strings.Contains(out, "no server running") || strings.Contains(out, "no sessions") || strings.Contains(out, "No such file or directory") {
+			return false, true
+		}
 		return false, false
 	}
-	for _, line := range strings.Split(stdout.String(), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == sessionID {
 			return true, true
 		}
@@ -488,29 +489,19 @@ func (te *TmuxExecutor) ProcessExists(sessionID string) bool {
 
 // SendKeys sends keys to a tmux session (for interactive commands)
 func (te *TmuxExecutor) SendKeys(sessionID string, keys string) error {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"send-keys", "-t", sessionID, keys})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	return cmd.Run()
+	_, err := te.runResourceCommand(context.Background(), []string{"send-keys", "-t", sessionID, "-l", keys})
+	return err
 }
 
-// SendHeartbeat sends a heartbeat command to detect if session is alive
+// SendHeartbeat checks process liveness without writing to the business input stream.
 func (te *TmuxExecutor) SendHeartbeat(sessionID string) string {
-	err := te.SendKeys(sessionID, "echo tmux_heartbeat\n")
-	if err != nil {
+	alive, known := te.SessionAlive3(sessionID)
+	if !known {
 		return "error"
 	}
-
-	time.Sleep(500 * time.Millisecond)
-
-	output, err := te.GetSessionOutput(sessionID)
-	if err != nil {
-		return "error"
-	}
-
-	if strings.Contains(output, "tmux_heartbeat") {
+	if alive && !te.IsPaneDead(sessionID) {
 		return "ok"
 	}
-
 	return "no_response"
 }
 
@@ -579,23 +570,11 @@ func (te *TmuxExecutor) CleanupOrphanSessions() int {
 
 // getSessionPID gets the PID of the tmux session's main process
 func (te *TmuxExecutor) getSessionPID(sessionID string) (int, error) {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"display-message", "-p", "-t", sessionID, "#{pane_pid}"})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-
-	err := cmd.Run()
+	out, err := te.runResourceCommand(context.Background(), []string{"display-message", "-p", "-t", sessionID, "#{pane_pid}"})
 	if err != nil {
 		return 0, err
 	}
-
-	var pid int
-	_, err = fmt.Sscanf(strings.TrimSpace(stdout.String()), "%d", &pid)
-	if err != nil {
-		return 0, err
-	}
-
-	return pid, nil
+	return strconv.Atoi(strings.TrimSpace(out))
 }
 
 // RestartSession attempts to restart a tmux session under the SAME session name.

@@ -78,12 +78,8 @@ type TagentAgent struct {
 	// compressor / taskManager / 私有 CM 全部经它现读——它就是唯一读源，不存在第二份可写缓存。
 	hotSource atomic.Pointer[func() (OrgHotParams, bool)]
 
-	// liveCMsMu liveCMs：随调用生命周期注册/注销的**存活调用私有 CM**集合
-	// （绝非历史对象列表）。提交点从不向它扇出任何值——私有 CM
-	// 的压缩器绑本 agent 的热参源，在下一次压缩/预算读取边界现读记录。本集合目前
-	// **无生产读取方**（只有注册/注销与 LiveCMCount／snapshotLiveCMs 读面，后者已按
-	//  收为包内——向外暴露内部 CM 切片没有生产价值）：其存续理由
-	// 待 S-D 按 D4「若保留只服务取消/完成等待，归唯一 owner」裁定。有界：调用结束即注销。
+	// liveCMsMu guards private execution faces until their producers and references drain.
+	// Lifecycle waits and declaration usage inspect this bounded set.
 	liveCMsMu sync.Mutex
 	liveCMs   map[*ContextManager]struct{}
 
@@ -101,7 +97,9 @@ type TagentAgent struct {
 	// background task_settled to the owning sub-invocation loop's sink when one is
 	// registered; with no sink (entry owner + every pre-S3m-b path) it falls back
 	// to persistentBus, so this is behavior-neutral until S3m-b registers a sink.
-	settleSinks *settleSinkRegistry
+	settleSinks   *settleSinkRegistry
+	continuations *continuationRegistry
+	taskRecords   *taskRecordSink
 
 	// orgRollback：热更回滚钩子（tagent
 	// 包懒检查闭包注入；Rollback() 触发）。它**每次成功发布都被重写**（运行期写），
@@ -178,22 +176,22 @@ type TagentAgent struct {
 	// 首次关闭执行、其余等待同一完成结果（不因标志已翻跳过等待）；在途计数
 	// （loopWg.Add）先于发布 running 登记；输出通道在循环 goroutine 退出（含
 	// panic 路径）时恰好关闭一次，从未启动则由 Close 落定终态（V15 终结语义不变）。
-	outputCh     chan *event.Event
-	loopCtx      context.Context
-	loopCancel   context.CancelFunc
-	loopState    atomic.Int32
-	loopDone     chan struct{}
-	loopWg       sync.WaitGroup
-	outputSettle sync.Once
-	closeMu      sync.Mutex
-	closeStarted bool
-	closeDone    chan struct{}
-	closeErr     error
-	// closeTail terminal tail: a bounded Close that could not honestly finish carries
-	// the remainder (still-used tool closers, recorder, store exit and its owner
-	// registration) in exactly ONE continuation, armed on the manager's own
-	// reclaim event and run when the executions actually stop. Guarded by closeMu;
-	// closeTailOnce makes the exit itself exactly-once.
+	outputCh           chan *event.Event
+	loopCtx            context.Context
+	loopCancel         context.CancelFunc
+	loopState          atomic.Int32
+	loopDone           chan struct{}
+	loopWg             sync.WaitGroup
+	outputSettle       sync.Once
+	closeMu            sync.Mutex
+	closeStarted       bool
+	closeDone          chan struct{}
+	closeErr           error
+	closeProducersDone chan struct{}
+	closeFinalDone     chan struct{}
+	closeFinalOnce     sync.Once
+	// closeTail retains final cleanup until producers, private drivers and execution faces stop.
+	// closeMu guards its result; closeTailOnce owns the final exit.
 	closeTail     func()
 	closeTailOnce sync.Once
 	closeTailDone bool
@@ -221,8 +219,10 @@ type TagentAgent struct {
 
 // TagentConfig holds configuration for creating a TagentAgent.
 type TagentConfig struct {
-	Model       model.Model
-	MemoryStore memory.MemoryStore
+	// ContinuationOwnerResolver resolves persisted result addresses to live owners.
+	ContinuationOwnerResolver func(string) *TagentAgent
+	Model                     model.Model
+	MemoryStore               memory.MemoryStore
 	// MemStoreRelease: lease release for the
 	// provided MemoryStore; executed exactly once from Close. nil = the agent
 	// does not own a registry lease.
@@ -419,6 +419,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	} else {
 		memStore = memory.NewInMemoryStore()
 	}
+	effectiveConfig := *cfg
+	effectiveConfig.MemoryStore = memStore
+	cfg = &effectiveConfig
 
 	memPlugin := plugin.NewMemoryPlugin(memStore, plugin.WithCallIDResolver(callIDResolverFor(cfg)))
 
@@ -481,37 +484,44 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 					"L2 起拒绝自管新任务纳管，L3 冻结非保护类 spawn（保护类豁免）。", level, ratio*100, samples, frozen))))
 		}
 	})
-	taskManager := task.NewTaskManager(task.TaskManagerConfig{
-		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			evt := newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace)
+	acceptSettled := func(tk *task.Task, sig task.SettleSignal) bool {
+		return taskRecords.acceptSignal(tk, sig, outputWorkspace, func(evt *AgentEvent) bool {
 			selfAudit.ObserveSettle(evt.Metadata)
-			deliverTaskSettled(sinkReg, bus, tk, evt)
-		},
-		OnSpawn:        taskRecords.onSpawn,
-		OnInlineSettle: taskRecords.onInlineSettle,
-		OnCancel:       taskRecords.onCancel,
-		OnBatchRetire: func(batch []task.BatchRetired) {
-			for _, r := range batch {
-				taskRecords.onInlineSettle(r.Task, r.Sig)
+			return deliverTaskSettled(sinkReg, bus, tk, evt)
+		})
+	}
+	taskManager := task.NewTaskManager(task.TaskManagerConfig{
+		OnSpawnAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "accepted") },
+		OnStartAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "started") },
+		OnRoundAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "round_accepted") },
+		OnRoundAbortedAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+			if !taskRecords.recordPhase(tk, "round_aborted") || !taskRecords.acceptSignal(tk, sig, outputWorkspace, nil) {
+				return false
 			}
-			if evt := newBatchRetiredSummaryEvent(batch); evt != nil {
-				bus.Publish(evt)
-			}
+			sinkReg.abortRound(tk, sig)
+			return true
 		},
-		OnRetireResend: func(batch []task.BatchRetired) {
+		OnInlineSettleAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+			return taskRecords.acceptSignal(tk, sig, outputWorkspace, nil)
+		},
+		OnSettleAccepted: acceptSettled,
+		OnBatchRetireAccepted: func(batch []task.BatchRetired) bool {
+			return taskRecords.acceptBatch(batch, outputWorkspace, bus)
+		},
+		OnRetireResendAccepted: func(batch []task.BatchRetired) bool {
+			accepted := true
 			for _, r := range batch {
-				evt := newTaskSettledEvent(r.Task, r.Sig, settleInlineCapChars, outputWorkspace)
-				if evt == nil {
-					continue
+				if !acceptSettled(r.Task, r.Sig) {
+					accepted = false
 				}
-				evt.ID = fmt.Sprintf("retire-notify-%s-%d", task.ShortID(r.Task.ID), r.Task.SettledAtUnixNano())
-				deliverTaskSettled(sinkReg, bus, r.Task, evt)
 			}
+			return accepted
 		},
-		TerminalTTL: cfg.TaskTerminalTTL,
-		DefaultTTL:  cfg.TaskDefaultTTL,
-		SpawnGate:   buildSpawnGate(cfg),
-		AuditGate:   selfAudit.GateReason,
+		EnableDeadlineReaper: true,
+		TerminalTTL:          cfg.TaskTerminalTTL,
+		DefaultTTL:           cfg.TaskDefaultTTL,
+		SpawnGate:            buildSpawnGate(cfg),
+		AuditGate:            selfAudit.GateReason,
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
@@ -572,6 +582,8 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		persistentBus:       bus,
 		activeBus:           bus,
 		settleSinks:         sinkReg,
+		continuations:       newContinuationRegistry(),
+		taskRecords:         taskRecords,
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
 		memStoreRelease:     cfg.MemStoreRelease,
@@ -591,6 +603,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	onEventRef = onEvent
 	cm := newContextManagerFromConfig(cfg, nil, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	taskRecords.cm = cm
+	taskRecords.owner = ta
+	cm.taskSignalJournal = taskRecords
+	cm.taskSignalOwnerResolver = ta.resolveContinuationOwner
 	ta.contextManager = cm
 	ta.liveCMs = make(map[*ContextManager]struct{})
 	ta.SetHotSource(staticHotSource(initialHotParams(cfg)))
@@ -599,6 +614,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	ta.selfAudit = selfAudit
 	taskManager.SetTTLSource(ta.taskTTLs)
 	cm.taskController = taskManager
+	cm.settleSinks = sinkReg
 
 	if cfg.Meditation.Enabled {
 		medCfg := cfg.Meditation
@@ -741,6 +757,10 @@ func newContextManagerFromConfig(cfg *TagentConfig, owner *TagentAgent, memPlugi
 		OnEvent:               onEvent,
 	})
 	cm.overflowDir = filepath.Join(workspace.ToolOutputPath(cfg.WorkspaceRoot), "output-overflow")
+	if owner != nil {
+		cm.taskSignalOwnerResolver = owner.resolveContinuationOwner
+		cm.taskSignalJournal = owner.taskRecords
+	}
 	return cm
 }
 
